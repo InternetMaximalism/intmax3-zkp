@@ -4,3 +4,11 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+plonky2 = { git = "https://github.com/InternetMaximalism/polygon-plonky2.git", branch = "wasm", default-features = false }
+plonky2_u32 = { git = "https://github.com/InternetMaximalism/plonky2-u32.git", branch = "wasm", default-features = false }
+plonky2_keccak = { git = "https://github.com/InternetMaximalism/plonky2_keccak", branch = "wasm", default-features = false }
+hex = "0.4.3"
+rand = "0.8.5"
+thiserror = "2.0.17"
+num-bigint = "0.4.6"
+num = "0.4.3"
