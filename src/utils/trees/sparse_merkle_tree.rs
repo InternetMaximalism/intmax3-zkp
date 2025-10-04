@@ -739,18 +739,22 @@ mod tests {
         let leaf_min = Bytes32::rand(&mut rng);
         tree.update(index_min, leaf_min);
         let proof_min = tree.prove(index_min);
-        assert!(proof_min
-            .verify(&leaf_min, index_min, tree.get_root())
-            .is_ok());
+        assert!(
+            proof_min
+                .verify(&leaf_min, index_min, tree.get_root())
+                .is_ok()
+        );
 
         // Test with max index
         let index_max: u64 = (1 << height) - 1;
         let leaf_max = Bytes32::rand(&mut rng);
         tree.update(index_max, leaf_max);
         let proof_max = tree.prove(index_max);
-        assert!(proof_max
-            .verify(&leaf_max, index_max, tree.get_root())
-            .is_ok());
+        assert!(
+            proof_max
+                .verify(&leaf_max, index_max, tree.get_root())
+                .is_ok()
+        );
 
         // Test with sparse indices (large gaps between indices)
         let mut sparse_tree = SparseMerkleTree::<Bytes32>::new(height);

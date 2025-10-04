@@ -5,8 +5,8 @@ use serde::{Deserialize, Serialize};
 
 use super::{
     error::EthereumTypeError,
-    u256::{U256, U256_LEN},
     u32limb_trait::{self, U32LimbTargetTrait, U32LimbTrait},
+    u256::{U256, U256_LEN},
 };
 
 pub const BYTES32_LEN: usize = U256_LEN;

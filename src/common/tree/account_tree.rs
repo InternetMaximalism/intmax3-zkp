@@ -48,7 +48,8 @@ pub struct AccountLeafTarget {
 }
 
 /// AccountTree is a Merkle tree where each leaf is an AccountLeaf.
-/// The position of each leaf is determined by the global user id (concatenation of aggregator id and account id).
+/// The position of each leaf is determined by the global user id (concatenation of aggregator id
+/// and account id).
 pub type AccountTree = SparseMerkleTree<AccountLeaf>;
 pub type AccountMerkleProof = SparseMerkleProof<AccountLeaf>;
 pub type AccountMerkleProofTarget = SparseMerkleProofTarget<AccountLeafTarget>;

@@ -1,7 +1,7 @@
 use crate::{
     ethereum_types::{
-        u256::U256Target,
         u32limb_trait::{U32LimbTargetTrait as _, U32LimbTrait as _},
+        u256::U256Target,
     },
     utils::{
         leafable::LeafableTarget,

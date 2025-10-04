@@ -37,10 +37,10 @@ use plonky2::{
     },
     plonk::config::{GenericConfig, GenericHashOut, Hasher},
 };
-use serde::{de::Visitor, Deserialize, Deserializer, Serialize, Serializer};
+use serde::{Deserialize, Deserializer, Serialize, Serializer, de::Visitor};
 
 use crate::wrapper_config::{
-    poseidon_bn128::{permution, GOLDILOCKS_ELEMENTS, RATE},
+    poseidon_bn128::{GOLDILOCKS_ELEMENTS, RATE, permution},
     utils::{Fr, FrRepr},
 };
 

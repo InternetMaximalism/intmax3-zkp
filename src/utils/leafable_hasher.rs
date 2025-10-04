@@ -8,7 +8,7 @@ use plonky2::{
     },
 };
 use plonky2_keccak::{builder::BuilderKeccak256 as _, utils::solidity_keccak256};
-use serde::{de::DeserializeOwned, Serialize};
+use serde::{Serialize, de::DeserializeOwned};
 
 use super::poseidon_hash_out::{PoseidonHashOut, PoseidonHashOutTarget};
 use crate::ethereum_types::{

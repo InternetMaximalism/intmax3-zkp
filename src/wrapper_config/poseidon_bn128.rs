@@ -137,7 +137,7 @@ mod permutation_tests {
     use anyhow::Ok;
     use ff::{Field, PrimeField};
 
-    use super::{permution, WIDTH};
+    use super::{WIDTH, permution};
     use crate::wrapper_config::utils::Fr;
 
     #[test]

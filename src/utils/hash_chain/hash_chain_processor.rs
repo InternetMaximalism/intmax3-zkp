@@ -17,7 +17,7 @@ use plonky2::{
 use crate::{
     ethereum_types::{
         address::Address,
-        bytes32::{Bytes32, BYTES32_LEN},
+        bytes32::{BYTES32_LEN, Bytes32},
         u32limb_trait::U32LimbTrait as _,
     },
     utils::conversion::ToU64,

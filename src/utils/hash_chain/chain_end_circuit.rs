@@ -17,8 +17,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     ethereum_types::{
-        address::{Address, AddressTarget, ADDRESS_LEN},
-        bytes32::{Bytes32, Bytes32Target, BYTES32_LEN},
+        address::{ADDRESS_LEN, Address, AddressTarget},
+        bytes32::{BYTES32_LEN, Bytes32, Bytes32Target},
         u32limb_trait::{U32LimbTargetTrait as _, U32LimbTrait},
     },
     utils::{conversion::ToU64 as _, recursively_verifiable::add_proof_target_and_verify_cyclic},

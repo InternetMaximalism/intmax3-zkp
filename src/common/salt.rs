@@ -9,7 +9,7 @@ use rand::Rng;
 use serde::{Deserialize, Serialize};
 
 use crate::utils::poseidon_hash_out::{
-    PoseidonHashOut, PoseidonHashOutTarget, POSEIDON_HASH_OUT_LEN,
+    POSEIDON_HASH_OUT_LEN, PoseidonHashOut, PoseidonHashOutTarget,
 };
 
 pub const SALT_LEN: usize = POSEIDON_HASH_OUT_LEN;

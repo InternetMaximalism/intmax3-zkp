@@ -13,7 +13,7 @@ use plonky2::{
         types::{Field, PrimeField64},
     },
     hash::{
-        hash_types::{HashOut, RichField, NUM_HASH_OUT_ELTS},
+        hash_types::{HashOut, NUM_HASH_OUT_ELTS, RichField},
         hashing::PlonkyPermutation as _,
         poseidon::PoseidonHash,
     },
