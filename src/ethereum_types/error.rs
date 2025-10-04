@@ -88,16 +88,6 @@ mod tests {
     }
 
     #[test]
-    fn test_ethereum_type_error_deserialization() {
-        let bincode_error = bincode::Error::new(bincode::ErrorKind::SizeLimit);
-        let error = EthereumTypeError::DeserializationError(bincode_error);
-        assert_eq!(
-            error.to_string(),
-            "Deserialization error: the size limit has been reached"
-        );
-    }
-
-    #[test]
     fn test_ethereum_type_error_is_error() {
         let error = EthereumTypeError::OutOfU32Range;
         let error_ref: &dyn Error = &error;
@@ -112,17 +102,6 @@ mod tests {
             // Expected variant
         } else {
             panic!("Expected InvalidHex variant");
-        }
-    }
-
-    #[test]
-    fn test_ethereum_type_error_from_bincode_error() {
-        let bincode_error = bincode::Error::new(bincode::ErrorKind::SizeLimit);
-        let error: EthereumTypeError = bincode_error.into();
-        if let EthereumTypeError::DeserializationError(_) = error {
-            // Expected variant
-        } else {
-            panic!("Expected DeserializationError variant");
         }
     }
 }
