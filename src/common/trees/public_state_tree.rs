@@ -1,0 +1,135 @@
+use crate::utils::{
+    leafable::{Leafable, LeafableTarget},
+    leafable_hasher::PoseidonLeafableHasher,
+    poseidon_hash_out::{PoseidonHashOut, PoseidonHashOutTarget},
+    trees::incremental_merkle_tree::{
+        IncrementalMerkleProof, IncrementalMerkleProofTarget, IncrementalMerkleTree,
+    },
+};
+use plonky2::{
+    field::{extension::Extendable, types::Field},
+    hash::hash_types::RichField,
+    iop::{target::Target, witness::WitnessWrite},
+    plonk::{
+        circuit_builder::CircuitBuilder,
+        config::{AlgebraicHasher, GenericConfig},
+    },
+};
+use serde::{Deserialize, Serialize};
+
+pub type PublicStateTree = IncrementalMerkleTree<PublicState>;
+pub type PublicStateMerkleProof = IncrementalMerkleProof<PublicState>;
+pub type PublicStateMerkleProofTarget = IncrementalMerkleProofTarget<PublicStateTarget>;
+
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PublicState {
+    pub block_number: u32,
+    pub account_tree_root: PoseidonHashOut,
+    pub deposit_tree_root: PoseidonHashOut,
+    pub prev_public_state_root: PoseidonHashOut,
+}
+
+#[derive(Clone, Debug)]
+pub struct PublicStateTarget {
+    pub block_number: Target,
+    pub account_tree_root: PoseidonHashOutTarget,
+    pub deposit_tree_root: PoseidonHashOutTarget,
+    pub prev_public_state_root: PoseidonHashOutTarget,
+}
+
+impl PublicState {
+    pub fn to_u64_vec(&self) -> Vec<u64> {
+        [
+            vec![self.block_number as u64],
+            self.account_tree_root.to_u64_vec(),
+            self.deposit_tree_root.to_u64_vec(),
+            self.prev_public_state_root.to_u64_vec(),
+        ]
+        .concat()
+    }
+
+    pub fn poseidon_hash(&self) -> PoseidonHashOut {
+        PoseidonHashOut::hash_inputs_u64(&self.to_u64_vec())
+    }
+}
+
+impl Leafable for PublicState {
+    type LeafableHasher = PoseidonLeafableHasher;
+
+    fn empty_leaf() -> Self {
+        Self::default()
+    }
+
+    fn hash(&self) -> PoseidonHashOut {
+        self.poseidon_hash()
+    }
+}
+
+impl PublicStateTarget {
+    pub fn to_vec(&self) -> Vec<Target> {
+        [
+            vec![self.block_number],
+            self.account_tree_root.to_vec(),
+            self.deposit_tree_root.to_vec(),
+            self.prev_public_state_root.to_vec(),
+        ]
+        .concat()
+    }
+
+    pub fn new<F: RichField + Extendable<D>, const D: usize>(
+        builder: &mut CircuitBuilder<F, D>,
+    ) -> Self {
+        Self {
+            block_number: builder.add_virtual_target(),
+            account_tree_root: PoseidonHashOutTarget::new(builder),
+            deposit_tree_root: PoseidonHashOutTarget::new(builder),
+            prev_public_state_root: PoseidonHashOutTarget::new(builder),
+        }
+    }
+
+    pub fn constant<F: RichField + Extendable<D>, const D: usize>(
+        builder: &mut CircuitBuilder<F, D>,
+        value: &PublicState,
+    ) -> Self {
+        Self {
+            block_number: builder.constant(F::from_canonical_u32(value.block_number)),
+            account_tree_root: PoseidonHashOutTarget::constant(builder, value.account_tree_root),
+            deposit_tree_root: PoseidonHashOutTarget::constant(builder, value.deposit_tree_root),
+            prev_public_state_root: PoseidonHashOutTarget::constant(
+                builder,
+                value.prev_public_state_root,
+            ),
+        }
+    }
+
+    pub fn set_witness<F: Field, W: WitnessWrite<F>>(&self, witness: &mut W, value: &PublicState) {
+        witness.set_target(self.block_number, F::from_canonical_u32(value.block_number));
+        self.account_tree_root
+            .set_witness(witness, value.account_tree_root);
+        self.deposit_tree_root
+            .set_witness(witness, value.deposit_tree_root);
+        self.prev_public_state_root
+            .set_witness(witness, value.prev_public_state_root);
+    }
+}
+
+impl LeafableTarget for PublicStateTarget {
+    type Leaf = PublicState;
+
+    fn empty_leaf<F: RichField + Extendable<D>, const D: usize>(
+        builder: &mut CircuitBuilder<F, D>,
+    ) -> Self {
+        Self::constant(builder, &PublicState::default())
+    }
+
+    fn hash<F: RichField + Extendable<D>, C: GenericConfig<D, F = F> + 'static, const D: usize>(
+        &self,
+        builder: &mut CircuitBuilder<F, D>,
+    ) -> PoseidonHashOutTarget
+    where
+        <C as GenericConfig<D>>::Hasher: AlgebraicHasher<F>,
+    {
+        PoseidonHashOutTarget::hash_inputs(builder, &self.to_vec())
+    }
+}
