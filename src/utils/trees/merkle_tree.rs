@@ -37,7 +37,7 @@ pub(crate) struct MerkleTree<V: Leafable> {
 
 impl<V: Leafable> MerkleTree<V> {
     pub(crate) fn new(height: usize) -> Self {
-        // zero_hashes = reverse([H(zero_leaf), H(H(zero_leaf), H(zero_leaf)), ...])
+        // zero_hashes = [H(zero_leaf), H(H(zero_leaf), H(zero_leaf)), ...]
         let mut zero_hashes = vec![];
         let mut h = V::empty_leaf().hash();
         zero_hashes.push(h);
@@ -45,7 +45,6 @@ impl<V: Leafable> MerkleTree<V> {
             h = Hasher::<V>::two_to_one(h, h);
             zero_hashes.push(h);
         }
-        zero_hashes.reverse();
         Self {
             height,
             node_hashes: HashMap::new(),
@@ -60,7 +59,7 @@ impl<V: Leafable> MerkleTree<V> {
     fn get_node_hash(&self, path: BitPath) -> HashOut<V> {
         match self.node_hashes.get(&path) {
             Some(h) => *h,
-            None => self.zero_hashes[path.len() as usize],
+            None => self.zero_hashes[self.height - path.len() as usize],
         }
     }
 
@@ -70,10 +69,9 @@ impl<V: Leafable> MerkleTree<V> {
 
     pub(crate) fn update_leaf(&mut self, index: u64, leaf_hash: HashOut<V>) {
         let mut path = BitPath::new(self.height as u32, index);
-        path.reverse();
         let mut h = leaf_hash;
         self.node_hashes.insert(path, h);
-        while !path.is_empty() {
+        for _ in 0..self.height {
             let sibling = self.get_node_hash(path.sibling());
             h = if path.pop().unwrap() {
                 Hasher::<V>::two_to_one(sibling, h)
@@ -86,9 +84,8 @@ impl<V: Leafable> MerkleTree<V> {
 
     pub(crate) fn prove(&self, index: u64) -> MerkleProof<V> {
         let mut path = BitPath::new(self.height as u32, index);
-        path.reverse();
         let mut siblings = vec![];
-        while !path.is_empty() {
+        for _ in 0..self.height {
             siblings.push(self.get_node_hash(path.sibling()));
             path.pop();
         }
@@ -136,11 +133,11 @@ impl<V: Leafable> MerkleProof<V> {
     pub fn height(&self) -> usize {
         self.siblings.len()
     }
-
     pub fn get_root(&self, leaf_data: &V, index: u64) -> HashOut<V> {
-        let path = BitPath::new(self.height() as u32, index);
+        let mut path = BitPath::new(self.height() as u32, index);
         let mut state = leaf_data.hash();
-        for (&bit, sibling) in path.to_bits_le().iter().zip(self.siblings.iter()) {
+        for sibling in self.siblings.iter() {
+            let bit = path.pop().unwrap();
             state = if bit {
                 Hasher::<V>::two_to_one(*sibling, state)
             } else {
@@ -326,7 +323,7 @@ mod tests {
         let tree = MerkleTree::<Bytes32>::new(height);
 
         // Root of empty tree should match the top zero hash
-        assert_eq!(tree.get_root(), tree.zero_hashes[0]);
+        assert_eq!(tree.get_root(), tree.zero_hashes[height]);
 
         // After updates, root should change
         let mut tree = MerkleTree::<Bytes32>::new(height);
