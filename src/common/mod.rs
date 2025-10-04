@@ -1,7 +1,8 @@
 pub mod deposit;
 pub mod error;
+pub mod private_state;
 pub mod salt;
 pub mod transfer;
-pub mod tree;
+pub mod trees;
 pub mod tx;
 pub mod withdrawal;
