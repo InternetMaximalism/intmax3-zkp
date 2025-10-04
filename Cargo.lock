@@ -381,6 +381,7 @@ name = "intmax3-zkp"
 version = "0.1.0"
 dependencies = [
  "hex",
+ "log",
  "num",
  "num-bigint",
  "plonky2",
