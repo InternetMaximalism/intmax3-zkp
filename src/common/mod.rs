@@ -5,4 +5,5 @@ pub mod salt;
 pub mod transfer;
 pub mod trees;
 pub mod tx;
+pub mod update_public_state;
 pub mod withdrawal;

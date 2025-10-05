@@ -201,6 +201,20 @@ impl PoseidonHashOutTarget {
         }
     }
 
+    pub fn is_equal<F: RichField + Extendable<D>, const D: usize>(
+        &self,
+        builder: &mut CircuitBuilder<F, D>,
+        other: &Self,
+    ) -> BoolTarget {
+        self.elements
+            .iter()
+            .zip(other.elements.iter())
+            .fold(builder._true(), |acc, (lhs, rhs)| {
+                let limb_eq = builder.is_equal(*lhs, *rhs);
+                builder.and(acc, limb_eq)
+            })
+    }
+
     pub fn set_witness<F: Field, W: WitnessWrite<F>>(
         &self,
         witness: &mut W,

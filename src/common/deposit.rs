@@ -7,7 +7,6 @@ use plonky2::{
         config::{AlgebraicHasher, GenericConfig},
     },
 };
-use plonky2_keccak::{builder::BuilderKeccak256 as _, utils::solidity_keccak256};
 use rand::Rng;
 use serde::{Deserialize, Serialize};
 
@@ -20,7 +19,7 @@ use crate::{
     },
     utils::{
         leafable::{Leafable, LeafableTarget},
-        leafable_hasher::KeccakLeafableHasher,
+        leafable_hasher::PoseidonLeafableHasher,
         poseidon_hash_out::{PoseidonHashOut, PoseidonHashOutTarget},
     },
 };
@@ -152,14 +151,14 @@ impl DepositTarget {
 }
 
 impl Leafable for Deposit {
-    type LeafableHasher = KeccakLeafableHasher;
+    type LeafableHasher = PoseidonLeafableHasher;
 
     fn empty_leaf() -> Self {
         Self::default()
     }
 
-    fn hash(&self) -> Bytes32 {
-        Bytes32::from_u32_slice(&solidity_keccak256(&self.to_u32_vec())).unwrap()
+    fn hash(&self) -> PoseidonHashOut {
+        self.poseidon_hash()
     }
 }
 
@@ -175,11 +174,10 @@ impl LeafableTarget for DepositTarget {
     fn hash<F: RichField + Extendable<D>, C: GenericConfig<D, F = F> + 'static, const D: usize>(
         &self,
         builder: &mut CircuitBuilder<F, D>,
-    ) -> Bytes32Target
+    ) -> PoseidonHashOutTarget
     where
         <C as GenericConfig<D>>::Hasher: AlgebraicHasher<F>,
     {
-        let limbs = self.to_vec();
-        Bytes32Target::from_slice(&builder.keccak256::<C>(&limbs))
+        PoseidonHashOutTarget::hash_inputs(builder, &self.to_vec())
     }
 }

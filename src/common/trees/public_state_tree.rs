@@ -9,7 +9,10 @@ use crate::utils::{
 use plonky2::{
     field::{extension::Extendable, types::Field},
     hash::hash_types::RichField,
-    iop::{target::Target, witness::WitnessWrite},
+    iop::{
+        target::{BoolTarget, Target},
+        witness::WitnessWrite,
+    },
     plonk::{
         circuit_builder::CircuitBuilder,
         config::{AlgebraicHasher, GenericConfig},
@@ -111,6 +114,27 @@ impl PublicStateTarget {
             .set_witness(witness, value.deposit_tree_root);
         self.prev_public_state_root
             .set_witness(witness, value.prev_public_state_root);
+    }
+
+    pub fn is_equal<F: RichField + Extendable<D>, const D: usize>(
+        &self,
+        builder: &mut CircuitBuilder<F, D>,
+        other: &Self,
+    ) -> BoolTarget {
+        let block_eq = builder.is_equal(self.block_number, other.block_number);
+        let account_eq = self
+            .account_tree_root
+            .is_equal(builder, &other.account_tree_root);
+        let deposit_eq = self
+            .deposit_tree_root
+            .is_equal(builder, &other.deposit_tree_root);
+        let prev_state_eq = self
+            .prev_public_state_root
+            .is_equal(builder, &other.prev_public_state_root);
+
+        let all = builder.and(block_eq, account_eq);
+        let all = builder.and(all, deposit_eq);
+        builder.and(all, prev_state_eq)
     }
 }
 
