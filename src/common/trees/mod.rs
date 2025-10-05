@@ -4,3 +4,4 @@ pub mod deposit_tree;
 pub mod nullifier_tree;
 pub mod public_state_tree;
 pub mod transfer_tree;
+pub mod tx_tree;

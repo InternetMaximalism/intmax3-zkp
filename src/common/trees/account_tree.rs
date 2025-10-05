@@ -35,8 +35,8 @@ pub type SendMerkleProofTarget = IncrementalMerkleProofTarget<SendLeafTarget>;
 
 #[derive(Clone, Debug, PartialEq, Default, Serialize, Deserialize)]
 pub struct SendLeaf {
-    pub prev: u32,
-    pub cur: u32,
+    pub prev: u64,
+    pub cur: u64,
     pub tx_tree_root: Bytes32,
 }
 
@@ -154,15 +154,15 @@ impl SendLeafTarget {
         value: SendLeaf,
     ) -> Self {
         Self {
-            prev: builder.constant(F::from_canonical_u32(value.prev)),
-            cur: builder.constant(F::from_canonical_u32(value.cur)),
+            prev: builder.constant(F::from_canonical_u64(value.prev)),
+            cur: builder.constant(F::from_canonical_u64(value.cur)),
             tx_tree_root: Bytes32Target::constant(builder, value.tx_tree_root),
         }
     }
 
     pub fn set_witness<F: Field, W: WitnessWrite<F>>(&self, witness: &mut W, value: &SendLeaf) {
-        witness.set_target(self.prev, F::from_canonical_u32(value.prev));
-        witness.set_target(self.cur, F::from_canonical_u32(value.cur));
+        witness.set_target(self.prev, F::from_canonical_u64(value.prev));
+        witness.set_target(self.cur, F::from_canonical_u64(value.cur));
         self.tx_tree_root.set_witness(witness, value.tx_tree_root);
     }
 }
