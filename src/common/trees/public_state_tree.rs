@@ -27,7 +27,7 @@ pub type PublicStateMerkleProofTarget = IncrementalMerkleProofTarget<PublicState
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PublicState {
-    pub block_number: u32,
+    pub block_number: u64,
     pub account_tree_root: PoseidonHashOut,
     pub deposit_tree_root: PoseidonHashOut,
     pub prev_public_state_root: PoseidonHashOut,
@@ -44,7 +44,7 @@ pub struct PublicStateTarget {
 impl PublicState {
     pub fn to_u64_vec(&self) -> Vec<u64> {
         [
-            vec![self.block_number as u64],
+            vec![self.block_number],
             self.account_tree_root.to_u64_vec(),
             self.deposit_tree_root.to_u64_vec(),
             self.prev_public_state_root.to_u64_vec(),
@@ -96,7 +96,7 @@ impl PublicStateTarget {
         value: &PublicState,
     ) -> Self {
         Self {
-            block_number: builder.constant(F::from_canonical_u32(value.block_number)),
+            block_number: builder.constant(F::from_canonical_u64(value.block_number)),
             account_tree_root: PoseidonHashOutTarget::constant(builder, value.account_tree_root),
             deposit_tree_root: PoseidonHashOutTarget::constant(builder, value.deposit_tree_root),
             prev_public_state_root: PoseidonHashOutTarget::constant(
@@ -107,7 +107,7 @@ impl PublicStateTarget {
     }
 
     pub fn set_witness<F: Field, W: WitnessWrite<F>>(&self, witness: &mut W, value: &PublicState) {
-        witness.set_target(self.block_number, F::from_canonical_u32(value.block_number));
+        witness.set_target(self.block_number, F::from_canonical_u64(value.block_number));
         self.account_tree_root
             .set_witness(witness, value.account_tree_root);
         self.deposit_tree_root
