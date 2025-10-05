@@ -38,15 +38,18 @@ impl UpdatePublicState {
     pub fn new(
         new: PublicState,
         old: PublicState,
-        merkle_proof: PublicStateMerkleProof,
+        merkle_proof: Option<PublicStateMerkleProof>,
     ) -> Result<Self, UpdatePublicStateError> {
         if new == old {
             return Ok(Self {
                 new,
                 old,
-                merkle_proof,
+                merkle_proof: PublicStateMerkleProof::dummy(PUBLIC_STATE_TREE_HEIGHT),
             });
         }
+        let merkle_proof = merkle_proof.ok_or(UpdatePublicStateError::InvalidMerkleProof(
+            "Merkle proof is required when states are different".to_string(),
+        ))?;
         let calculated = merkle_proof.get_root(&old, old.block_number as u64);
         if calculated != new.prev_public_state_root {
             return Err(UpdatePublicStateError::InvalidMerkleProof(format!(
