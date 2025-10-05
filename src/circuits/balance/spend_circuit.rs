@@ -49,6 +49,9 @@ pub enum SpendError {
 
     #[error("Failed to prove {0}")]
     FailedToProve(String),
+
+    #[error("Invalid public inputs {0}")]
+    InvalidPublicInputs(String),
 }
 
 #[derive(Clone, Debug)]
@@ -57,6 +60,43 @@ pub struct SpendPublicInputs {
     pub new_private_commitment: PoseidonHashOut,
     pub tx: Tx,
     pub is_valid: bool,
+}
+
+impl SpendPublicInputs {
+    pub fn from_pis_u64(pis: &[u64]) -> Result<Self, SpendError> {
+        if pis.len() < SPEND_PUBLIC_INPUTS_LEN {
+            return Err(SpendError::InvalidPublicInputs(format!(
+                "Expected {} public inputs, got {}",
+                SPEND_PUBLIC_INPUTS_LEN,
+                pis.len()
+            )));
+        }
+        let mut cursor = 0;
+
+        let prev_private_commitment_slice = &pis[cursor..cursor + POSEIDON_HASH_OUT_LEN];
+        let prev_private_commitment =
+            PoseidonHashOut::from_u64_slice(prev_private_commitment_slice)
+                .map_err(|e| SpendError::InvalidPublicInputs(e.to_string()))?;
+        cursor += POSEIDON_HASH_OUT_LEN;
+
+        let new_private_commitment_slice = &pis[cursor..cursor + POSEIDON_HASH_OUT_LEN];
+        let new_private_commitment = PoseidonHashOut::from_u64_slice(new_private_commitment_slice)
+            .map_err(|e| SpendError::InvalidPublicInputs(e.to_string()))?;
+        cursor += POSEIDON_HASH_OUT_LEN;
+
+        let tx_slice = &pis[cursor..cursor + TX_LEN];
+        let tx = Tx::from_u64_slice(tx_slice)
+            .map_err(|e| SpendError::InvalidPublicInputs(e.to_string()))?;
+        cursor += TX_LEN;
+        let is_valid = pis[cursor] != 0;
+
+        Ok(Self {
+            prev_private_commitment,
+            new_private_commitment,
+            tx,
+            is_valid,
+        })
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -144,7 +184,28 @@ impl SpendPublicInputsTarget {
         v.extend(self.new_private_commitment.to_vec());
         v.extend(self.tx.to_vec());
         v.push(self.is_valid.target);
+        assert_eq!(v.len(), SPEND_PUBLIC_INPUTS_LEN);
         v
+    }
+
+    pub fn from_pis(pis: &[Target]) -> Self {
+        assert!(pis.len() >= SPEND_PUBLIC_INPUTS_LEN);
+        let mut cursor = 0;
+        let prev_private_commitment =
+            PoseidonHashOutTarget::from_slice(&pis[cursor..cursor + POSEIDON_HASH_OUT_LEN]);
+        cursor += POSEIDON_HASH_OUT_LEN;
+        let new_private_commitment =
+            PoseidonHashOutTarget::from_slice(&pis[cursor..cursor + POSEIDON_HASH_OUT_LEN]);
+        cursor += POSEIDON_HASH_OUT_LEN;
+        let tx = TxTarget::from_slice(&pis[cursor..cursor + TX_LEN]);
+        cursor += TX_LEN;
+        let is_valid = BoolTarget::new_unsafe(pis[cursor]);
+        Self {
+            prev_private_commitment,
+            new_private_commitment,
+            tx,
+            is_valid,
+        }
     }
 
     pub fn set_witness<F: Field, W: WitnessWrite<F>>(
