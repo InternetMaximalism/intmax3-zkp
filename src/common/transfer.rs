@@ -1,5 +1,4 @@
 use crate::{
-    common::salt::SALT_LEN,
     ethereum_types::{
         bytes32::{BYTES32_LEN, Bytes32, Bytes32Target},
         u32limb_trait::{U32LimbTargetTrait as _, U32LimbTrait as _},
@@ -23,7 +22,7 @@ use plonky2::{
 use rand::Rng;
 use serde::{Deserialize, Serialize};
 
-pub const TRANSFER_LEN: usize = BYTES32_LEN + 1 + U256_LEN + SALT_LEN;
+pub const TRANSFER_LEN: usize = BYTES32_LEN + 1 + U256_LEN + BYTES32_LEN;
 
 /// A transfer of tokens from one account to another
 #[derive(Debug, Clone, Copy, Default, PartialEq, Serialize, Deserialize)]

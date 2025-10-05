@@ -1,9 +1,9 @@
 use plonky2::{
-    field::extension::Extendable,
+    field::{extension::Extendable, types::Field},
     hash::hash_types::RichField,
     iop::{
         target::{BoolTarget, Target},
-        witness::PartialWitness,
+        witness::{PartialWitness, WitnessWrite},
     },
     plonk::{
         circuit_builder::CircuitBuilder,
@@ -20,11 +20,14 @@ use crate::{
         trees::asset_tree::{AssetMerkleProof, AssetMerkleProofTarget},
         tx::{TX_LEN, Tx, TxTarget},
     },
-    constants::{MAX_NUM_TRANSFERS_PER_TX, TRANSFER_TREE_HEIGHT},
-    ethereum_types::u256::{U256, U256Target},
+    constants::{ASSET_TREE_HEIGHT, MAX_NUM_TRANSFERS_PER_TX, TRANSFER_TREE_HEIGHT},
+    ethereum_types::{
+        u32limb_trait::U32LimbTargetTrait as _,
+        u256::{U256, U256Target},
+    },
     utils::{
         poseidon_hash_out::{POSEIDON_HASH_OUT_LEN, PoseidonHashOut, PoseidonHashOutTarget},
-        trees::get_root::get_merkle_root_from_leaves,
+        trees::get_root::{get_merkle_root_from_leaves, get_merkle_root_from_leaves_circuit},
     },
 };
 
@@ -143,6 +146,19 @@ impl SpendPublicInputsTarget {
         v.push(self.is_valid.target);
         v
     }
+
+    pub fn set_witness<F: Field, W: WitnessWrite<F>>(
+        &self,
+        witness: &mut W,
+        value: &SpendPublicInputs,
+    ) {
+        self.prev_private_commitment
+            .set_witness(witness, value.prev_private_commitment);
+        self.new_private_commitment
+            .set_witness(witness, value.new_private_commitment);
+        self.tx.set_witness(witness, value.tx);
+        witness.set_bool_target(self.is_valid, value.is_valid);
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -155,6 +171,79 @@ pub struct SpendTarget {
                                          * MAX_NUM_TRANSFERS_PER_TX */
 }
 
+impl SpendTarget {
+    pub fn new<F: RichField + Extendable<D>, const D: usize>(
+        builder: &mut CircuitBuilder<F, D>,
+    ) -> Self {
+        let tx_nonce = builder.add_virtual_target();
+        builder.range_check(tx_nonce, 32);
+
+        let prev_private_state = PrivateStateTarget::new(builder);
+
+        let transfers = (0..MAX_NUM_TRANSFERS_PER_TX)
+            .map(|_| TransferTarget::new(builder, true))
+            .collect();
+
+        let before_balances = (0..MAX_NUM_TRANSFERS_PER_TX)
+            .map(|_| U256Target::new(builder, true))
+            .collect();
+
+        let asset_merkle_proofs = (0..MAX_NUM_TRANSFERS_PER_TX)
+            .map(|_| AssetMerkleProofTarget::new(builder, ASSET_TREE_HEIGHT))
+            .collect();
+
+        Self {
+            tx_nonce,
+            prev_private_state,
+            transfers,
+            before_balances,
+            asset_merkle_proofs,
+        }
+    }
+
+    pub fn set_witness<F: Field, W: WitnessWrite<F>>(&self, witness: &mut W, value: &SpendWitness) {
+        assert_eq!(
+            value.transfers.len(),
+            MAX_NUM_TRANSFERS_PER_TX,
+            "transfers length mismatch"
+        );
+        assert_eq!(
+            value.before_balances.len(),
+            MAX_NUM_TRANSFERS_PER_TX,
+            "before_balances length mismatch"
+        );
+        assert_eq!(
+            value.asset_merkle_proofs.len(),
+            MAX_NUM_TRANSFERS_PER_TX,
+            "asset_merkle_proofs length mismatch"
+        );
+
+        witness.set_target(self.tx_nonce, F::from_canonical_u32(value.tx_nonce));
+        self.prev_private_state
+            .set_witness(witness, &value.prev_private_state);
+
+        for (target, transfer) in self.transfers.iter().zip(value.transfers.iter()) {
+            target.set_witness(witness, *transfer);
+        }
+
+        for (target, balance) in self
+            .before_balances
+            .iter()
+            .zip(value.before_balances.iter())
+        {
+            target.set_witness(witness, *balance);
+        }
+
+        for (target, proof) in self
+            .asset_merkle_proofs
+            .iter()
+            .zip(value.asset_merkle_proofs.iter())
+        {
+            target.set_witness(witness, proof);
+        }
+    }
+}
+
 #[derive(Debug)]
 pub struct SpendCircuit<F, C, const D: usize>
 where
@@ -163,6 +252,7 @@ where
 {
     pub data: CircuitData<F, C, D>,
     pub target: SpendTarget,
+    pub public_inputs: SpendPublicInputsTarget,
 }
 
 impl<F, C, const D: usize> SpendCircuit<F, C, D>
@@ -174,24 +264,151 @@ where
     pub fn new() -> Self {
         let mut builder =
             CircuitBuilder::<F, D>::new(CircuitConfig::standard_recursion_zk_config());
-        let pis = SpendPublicInputsTarget {
-            prev_private_commitment: todo!(),
-            new_private_commitment: todo!(),
-            tx: todo!(),
-            is_valid: todo!(),
+        let target = SpendTarget::new(&mut builder);
+
+        let mut asset_tree_root = target.prev_private_state.asset_tree_root;
+        for i in 0..MAX_NUM_TRANSFERS_PER_TX {
+            let transfer = &target.transfers[i];
+            let before_balance = &target.before_balances[i];
+            let proof = &target.asset_merkle_proofs[i];
+
+            proof.verify::<F, C, D>(
+                &mut builder,
+                before_balance,
+                transfer.token_index,
+                asset_tree_root,
+            );
+            let new_balance = before_balance.sub(&mut builder, &transfer.amount);
+            asset_tree_root =
+                proof.get_root::<F, C, D>(&mut builder, &new_balance, transfer.token_index);
+        }
+        let prev_private_commitment = target.prev_private_state.commitment(&mut builder);
+        let new_nonce = builder.add_const(target.prev_private_state.nonce, F::ONE);
+        let new_private_state = PrivateStateTarget {
+            asset_tree_root,
+            nullifier_tree_root: target.prev_private_state.nullifier_tree_root,
+            prev_private_commitment,
+            nonce: new_nonce,
+            salt: target.prev_private_state.salt,
         };
-        builder.register_public_inputs(&pis.to_vec());
+        let new_private_commitment = new_private_state.commitment(&mut builder);
+
+        let transfer_tree_root = get_merkle_root_from_leaves_circuit::<F, C, D, TransferTarget>(
+            &mut builder,
+            TRANSFER_TREE_HEIGHT,
+            &target.transfers,
+        );
+        let tx = TxTarget {
+            transfer_tree_root,
+            nonce: target.tx_nonce,
+        };
+
+        let is_valid = builder.is_equal(target.tx_nonce, target.prev_private_state.nonce);
+
+        let public_inputs = SpendPublicInputsTarget {
+            prev_private_commitment,
+            new_private_commitment,
+            tx,
+            is_valid,
+        };
+
+        builder.register_public_inputs(&public_inputs.to_vec());
         let data = builder.build();
-        Self { data, target }
+
+        Self {
+            data,
+            target,
+            public_inputs,
+        }
     }
 
     pub fn prove(&self, w: &SpendWitness) -> Result<ProofWithPublicInputs<F, C, D>, SpendError> {
         let mut pw = PartialWitness::<F>::new();
-        // set witness
-        todo!();
+
+        let public_inputs = w.to_public_inputs()?;
+
+        self.target.set_witness(&mut pw, w);
+        self.public_inputs.set_witness(&mut pw, &public_inputs);
 
         self.data
             .prove(pw)
             .map_err(|e| SpendError::FailedToProve(e.to_string()))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{
+        common::{
+            private_state::FullPrivateState, transfer::Transfer, trees::asset_tree::AssetTree,
+        },
+        constants::ASSET_TREE_HEIGHT,
+        ethereum_types::{bytes32::Bytes32, u256::U256},
+    };
+    use plonky2::{
+        field::goldilocks_field::GoldilocksField, plonk::config::PoseidonGoldilocksConfig,
+    };
+
+    const D: usize = 2;
+    type F = GoldilocksField;
+    type C = PoseidonGoldilocksConfig;
+
+    #[test]
+    fn test_spend_circuit_smoke() {
+        let mut full_state = FullPrivateState::new();
+
+        let mut asset_tree_initial = AssetTree::new(ASSET_TREE_HEIGHT);
+        let mut transfers = Vec::with_capacity(MAX_NUM_TRANSFERS_PER_TX);
+
+        for i in 0..MAX_NUM_TRANSFERS_PER_TX {
+            let amount = U256::from((i + 1) as u32);
+            let base_balance = amount + U256::from(10u32);
+            let transfer = Transfer {
+                recipient: Bytes32::default(),
+                token_index: i as u32,
+                amount,
+                aux_data: Bytes32::default(),
+            };
+            asset_tree_initial.update(i as u64, base_balance);
+            transfers.push(transfer);
+        }
+
+        let mut asset_tree_current = asset_tree_initial.clone();
+        let mut before_balances = Vec::with_capacity(MAX_NUM_TRANSFERS_PER_TX);
+        let mut asset_merkle_proofs = Vec::with_capacity(MAX_NUM_TRANSFERS_PER_TX);
+
+        for transfer in &transfers {
+            let index = transfer.token_index as u64;
+            let balance = asset_tree_current.get_leaf(index);
+            let proof = asset_tree_current.prove(index);
+
+            before_balances.push(balance);
+            asset_merkle_proofs.push(proof);
+
+            let new_balance = balance - transfer.amount;
+            asset_tree_current.update(index, new_balance);
+        }
+
+        full_state.asset_tree = asset_tree_initial;
+        let prev_private_state = full_state.to_private_state();
+
+        let witness = SpendWitness {
+            tx_nonce: prev_private_state.nonce,
+            prev_private_state,
+            transfers,
+            before_balances,
+            asset_merkle_proofs,
+        };
+
+        let circuit = SpendCircuit::<F, C, D>::new();
+        let proof = circuit
+            .prove(&witness)
+            .expect("spend circuit proof should succeed");
+
+        circuit
+            .data
+            .verify(proof)
+            .expect("verification should succeed");
     }
 }
