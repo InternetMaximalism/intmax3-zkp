@@ -4,12 +4,14 @@ use plonky2::{
     iop::{target::Target, witness::WitnessWrite},
     plonk::circuit_builder::CircuitBuilder,
 };
+use serde::{Deserialize, Serialize};
 
 use crate::ethereum_types::{
     u32limb_trait::U32LimbTargetTrait as _,
     u64::{U64, U64Target},
 };
 
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct UserId(pub u64);
 
 impl UserId {

@@ -7,6 +7,7 @@ use plonky2::{
         config::{AlgebraicHasher, GenericConfig},
     },
 };
+use serde::{Deserialize, Serialize};
 
 use crate::{
     ethereum_types::{
@@ -32,7 +33,7 @@ pub type SendTree = IncrementalMerkleTree<SendLeaf>;
 pub type SendMerkleProof = IncrementalMerkleProof<SendLeaf>;
 pub type SendMerkleProofTarget = IncrementalMerkleProofTarget<SendLeafTarget>;
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, PartialEq, Default, Serialize, Deserialize)]
 pub struct SendLeaf {
     pub prev: u32,
     pub cur: u32,
@@ -79,7 +80,7 @@ impl LeafableTarget for SendLeafTarget {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct AccountLeaf {
     pub index: u64,                      // the next index of send leaf
     pub prev: u64,                       // the previous block number
