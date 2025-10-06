@@ -136,6 +136,20 @@ impl PublicStateTarget {
         let tmp = builder.and(tmp, deposit_eq);
         builder.and(tmp, prev_state_eq)
     }
+
+    pub fn connect<F: RichField + Extendable<D>, const D: usize>(
+        &self,
+        builder: &mut CircuitBuilder<F, D>,
+        other: &Self,
+    ) {
+        builder.connect(self.block_number.value, other.block_number.value);
+        self.account_tree_root
+            .connect(builder, other.account_tree_root.clone());
+        self.deposit_tree_root
+            .connect(builder, other.deposit_tree_root.clone());
+        self.prev_public_state_root
+            .connect(builder, other.prev_public_state_root.clone());
+    }
 }
 
 impl LeafableTarget for PublicStateTarget {

@@ -1,5 +1,5 @@
 use plonky2::{
-    field::{extension::Extendable, types::Field},
+    field::extension::Extendable,
     hash::hash_types::RichField,
     iop::witness::{PartialWitness, WitnessWrite},
     plonk::{
@@ -21,11 +21,7 @@ use crate::{
             update_public_state::{UpdatePublicState, UpdatePublicStateTarget},
         },
     },
-    common::{
-        block_number::{BlockNumber, BlockNumberTarget},
-        public_state::PublicStateTarget,
-        user_id::UserIdTarget,
-    },
+    common::block_number::BlockNumber,
     constants::BLOCK_NUMBER_BITS,
     utils::poseidon_hash_out::PoseidonHashOutTarget,
 };
@@ -90,9 +86,7 @@ impl<F: RichField + Extendable<D>, C: GenericConfig<D, F = F>, const D: usize>
                 spend_pis.prev_private_commitment, self.prev_balance_pis.private_commitment
             )));
         }
-        if self.prev_balance_pis.block_r != BlockNumber(0)
-            && self.prev_balance_pis.block_r < self.tx_settlement.send_block_number_before_tx()
-        {
+        if self.prev_balance_pis.block_r < self.tx_settlement.send_block_number_before_tx() {
             return Err(SpendTxError::BlockNumberError(format!(
                 "prev_balance_pis.block_r: {} should be >= tx_settlement.send_block_number_before_tx(): {}",
                 self.prev_balance_pis.block_r.0,
@@ -123,17 +117,6 @@ impl<F: RichField + Extendable<D>, C: GenericConfig<D, F = F>, const D: usize>
     }
 }
 
-fn new_balance_public_inputs_target<F: RichField + Extendable<D>, const D: usize>(
-    builder: &mut CircuitBuilder<F, D>,
-) -> BalancePublicInputsTarget {
-    BalancePublicInputsTarget {
-        user_id: UserIdTarget::new(builder, true),
-        public_state: PublicStateTarget::new(builder, true),
-        block_r: BlockNumberTarget::new(builder, true),
-        private_commitment: PoseidonHashOutTarget::new(builder),
-    }
-}
-
 #[derive(Clone, Debug)]
 pub struct SendTxTarget<const D: usize> {
     pub balance_pis_before_after: BalancePisBeforeAfterTarget,
@@ -151,95 +134,39 @@ impl<const D: usize> SendTxTarget<D> {
         C: GenericConfig<D, F = F> + 'static,
         <C as GenericConfig<D>>::Hasher: AlgebraicHasher<F>,
     {
-        let before = new_balance_public_inputs_target(builder);
-        let after = new_balance_public_inputs_target(builder);
-        let balance_pis_before_after = BalancePisBeforeAfterTarget { before, after };
+        let balance_pis_before_after = BalancePisBeforeAfterTarget {
+            before: BalancePublicInputsTarget::new(builder, true),
+            after: BalancePublicInputsTarget::new(builder, true),
+        };
 
         let update_public_state = UpdatePublicStateTarget::new::<F, C, D>(builder);
         let tx_settlement = TxSettlementTarget::new(builder, spend_vd, true);
 
         // Link user IDs across components.
-        builder.connect(
-            balance_pis_before_after.before.user_id.value,
-            tx_settlement.user_id.value,
-        );
-        builder.connect(
-            balance_pis_before_after.after.user_id.value,
-            balance_pis_before_after.before.user_id.value,
-        );
+        balance_pis_before_after
+            .before
+            .user_id
+            .connect(builder, &tx_settlement.user_id);
+        balance_pis_before_after
+            .after
+            .user_id
+            .connect(builder, &balance_pis_before_after.before.user_id);
 
         // The previous public state must match the updater's old state.
-        builder.connect(
-            balance_pis_before_after
-                .before
-                .public_state
-                .block_number
-                .value,
-            update_public_state.old.block_number.value,
-        );
         balance_pis_before_after
             .before
             .public_state
-            .account_tree_root
-            .connect(builder, update_public_state.old.account_tree_root.clone());
-        balance_pis_before_after
-            .before
-            .public_state
-            .deposit_tree_root
-            .connect(builder, update_public_state.old.deposit_tree_root.clone());
-        balance_pis_before_after
-            .before
-            .public_state
-            .prev_public_state_root
-            .connect(
-                builder,
-                update_public_state.old.prev_public_state_root.clone(),
-            );
+            .connect(builder, &update_public_state.old);
 
         // The new public state must align everywhere.
-        builder.connect(
-            balance_pis_before_after
-                .after
-                .public_state
-                .block_number
-                .value,
-            update_public_state.new.block_number.value,
-        );
         balance_pis_before_after
             .after
             .public_state
-            .account_tree_root
-            .connect(builder, update_public_state.new.account_tree_root.clone());
-        balance_pis_before_after
-            .after
-            .public_state
-            .deposit_tree_root
-            .connect(builder, update_public_state.new.deposit_tree_root.clone());
-        balance_pis_before_after
-            .after
-            .public_state
-            .prev_public_state_root
-            .connect(
-                builder,
-                update_public_state.new.prev_public_state_root.clone(),
-            );
+            .connect(builder, &update_public_state.new);
 
-        builder.connect(
-            tx_settlement.public_state.block_number.value,
-            update_public_state.new.block_number.value,
-        );
         tx_settlement
             .public_state
-            .account_tree_root
-            .connect(builder, update_public_state.new.account_tree_root.clone());
-        tx_settlement
-            .public_state
-            .deposit_tree_root
-            .connect(builder, update_public_state.new.deposit_tree_root.clone());
-        tx_settlement.public_state.prev_public_state_root.connect(
-            builder,
-            update_public_state.new.prev_public_state_root.clone(),
-        );
+            .connect(builder, &update_public_state.new);
 
         // Previous private commitment must coincide with the spend proof.
         let spend_pis = tx_settlement.spend_pis();
@@ -386,7 +313,7 @@ mod tests {
             TX_TREE_HEIGHT,
         },
         ethereum_types::{bytes32::Bytes32, u256::U256},
-        utils::poseidon_hash_out::PoseidonHashOut,
+        utils::{conversion::ToU64 as _, poseidon_hash_out::PoseidonHashOut},
     };
     use plonky2::{
         field::goldilocks_field::GoldilocksField, plonk::config::PoseidonGoldilocksConfig,

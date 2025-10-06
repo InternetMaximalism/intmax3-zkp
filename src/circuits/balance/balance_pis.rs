@@ -127,6 +127,18 @@ pub struct BalancePublicInputsTarget {
 }
 
 impl BalancePublicInputsTarget {
+    pub fn new<F: RichField + Extendable<D>, const D: usize>(
+        builder: &mut CircuitBuilder<F, D>,
+        is_checked: bool,
+    ) -> Self {
+        Self {
+            user_id: UserIdTarget::new(builder, is_checked),
+            public_state: PublicStateTarget::new(builder, is_checked),
+            block_r: BlockNumberTarget::new(builder, is_checked),
+            private_commitment: PoseidonHashOutTarget::new(builder),
+        }
+    }
+
     pub fn to_vec(&self) -> Vec<Target> {
         [
             vec![self.user_id.value],
@@ -196,19 +208,7 @@ impl BalancePublicInputsTarget {
         other: &Self,
     ) {
         builder.connect(self.user_id.value, other.user_id.value);
-        builder.connect(
-            self.public_state.block_number.value,
-            other.public_state.block_number.value,
-        );
-        self.public_state
-            .account_tree_root
-            .connect(builder, other.public_state.account_tree_root);
-        self.public_state
-            .deposit_tree_root
-            .connect(builder, other.public_state.deposit_tree_root);
-        self.public_state
-            .prev_public_state_root
-            .connect(builder, other.public_state.prev_public_state_root);
+        self.public_state.connect(builder, &other.public_state);
         builder.connect(self.block_r.value, other.block_r.value);
         self.private_commitment
             .connect(builder, other.private_commitment);
