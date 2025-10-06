@@ -1,6 +1,7 @@
 use crate::{
-    common::trees::public_state_tree::{
-        PublicState, PublicStateMerkleProof, PublicStateMerkleProofTarget, PublicStateTarget,
+    common::{
+        public_state::{PublicState, PublicStateTarget},
+        trees::public_state_tree::{PublicStateMerkleProof, PublicStateMerkleProofTarget},
     },
     constants::PUBLIC_STATE_TREE_HEIGHT,
 };

@@ -5,10 +5,8 @@ use crate::{
     },
     common::{
         block_number::{BlockNumber, BlockNumberTarget},
-        trees::{
-            public_state_tree::{PublicState, PublicStateTarget},
-            tx_tree::{TxMerkleProof, TxMerkleProofTarget},
-        },
+        public_state::{PublicState, PublicStateTarget},
+        trees::tx_tree::{TxMerkleProof, TxMerkleProofTarget},
         tx::{Tx, TxTarget},
         user_id::{UserId, UserIdTarget},
     },
