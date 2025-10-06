@@ -21,8 +21,7 @@ use crate::{
             update_public_state::{UpdatePublicState, UpdatePublicStateTarget},
         },
     },
-    common::block_number::BlockNumber,
-    constants::BLOCK_NUMBER_BITS,
+    common::block_number::BlockNumberTarget,
     utils::poseidon_hash_out::PoseidonHashOutTarget,
 };
 
@@ -119,9 +118,11 @@ impl<F: RichField + Extendable<D>, C: GenericConfig<D, F = F>, const D: usize>
 
 #[derive(Clone, Debug)]
 pub struct SendTxTarget<const D: usize> {
-    pub balance_pis_before_after: BalancePisBeforeAfterTarget,
+    pub prev_balance_pis: BalancePublicInputsTarget,
     pub update_public_state: UpdatePublicStateTarget,
     pub tx_settlement: TxSettlementTarget<D>,
+
+    pub new_balance_pis: BalancePublicInputsTarget,
 }
 
 impl<const D: usize> SendTxTarget<D> {
@@ -134,73 +135,37 @@ impl<const D: usize> SendTxTarget<D> {
         C: GenericConfig<D, F = F> + 'static,
         <C as GenericConfig<D>>::Hasher: AlgebraicHasher<F>,
     {
-        let balance_pis_before_after = BalancePisBeforeAfterTarget {
-            before: BalancePublicInputsTarget::new(builder, true),
-            after: BalancePublicInputsTarget::new(builder, true),
-        };
+        let prev = BalancePublicInputsTarget::new(builder, true);
 
         let update_public_state = UpdatePublicStateTarget::new::<F, C, D>(builder);
         let tx_settlement = TxSettlementTarget::new(builder, spend_vd, true);
 
-        // Link user IDs across components.
-        balance_pis_before_after
-            .before
-            .user_id
-            .connect(builder, &tx_settlement.user_id);
-        balance_pis_before_after
-            .after
-            .user_id
-            .connect(builder, &balance_pis_before_after.before.user_id);
-
         // The previous public state must match the updater's old state.
-        balance_pis_before_after
-            .before
-            .public_state
-            .connect(builder, &update_public_state.old);
+        prev.public_state.connect(builder, &update_public_state.old);
 
-        // The new public state must align everywhere.
-        balance_pis_before_after
-            .after
-            .public_state
-            .connect(builder, &update_public_state.new);
-
+        // The new public state must match the tx settlement's public state.
         tx_settlement
             .public_state
             .connect(builder, &update_public_state.new);
 
+        // Link user IDs across components.
+        prev.user_id.connect(builder, &tx_settlement.user_id);
+
         // Previous private commitment must coincide with the spend proof.
         let spend_pis = tx_settlement.spend_pis();
-        balance_pis_before_after
-            .before
-            .private_commitment
+        prev.private_commitment
             .connect(builder, spend_pis.prev_private_commitment.clone());
 
-        // Ensure block_r >= send_block_number_before_tx when block_r is not zero.
+        // Ensure block_r >= send_block_number_before_tx
         let send_block_number_before_tx = tx_settlement.send_block_number_before_tx();
-        let zero = builder.zero();
-        let block_r_is_zero = builder.is_equal(balance_pis_before_after.before.block_r.value, zero);
-        let block_r_non_zero = builder.not(block_r_is_zero);
-
-        let block_r_diff = builder.add_virtual_target();
-        builder.range_check(block_r_diff, BLOCK_NUMBER_BITS);
-        let recomposed_block_r = builder.add(send_block_number_before_tx.value, block_r_diff);
-        builder.conditional_assert_eq(
-            block_r_non_zero.target,
-            recomposed_block_r,
-            balance_pis_before_after.before.block_r.value,
-        );
-        builder.conditional_assert_eq(block_r_is_zero.target, block_r_diff, zero);
+        todo!();
 
         // Select the next block reference depending on the spend validity.
         let tx_block_number = tx_settlement.tx_block_number();
         let new_block_r_value = builder.select(
             spend_pis.is_valid,
             tx_block_number.value,
-            balance_pis_before_after.before.block_r.value,
-        );
-        builder.connect(
-            new_block_r_value,
-            balance_pis_before_after.after.block_r.value,
+            prev.block_r.value,
         );
 
         // Select the next private commitment.
@@ -208,15 +173,19 @@ impl<const D: usize> SendTxTarget<D> {
             builder,
             spend_pis.is_valid,
             spend_pis.new_private_commitment.clone(),
-            balance_pis_before_after.before.private_commitment.clone(),
+            prev.private_commitment.clone(),
         );
-        balance_pis_before_after
-            .after
-            .private_commitment
-            .connect(builder, new_private_commitment);
-
+        let new = BalancePublicInputsTarget {
+            user_id: prev.user_id.clone(),
+            public_state: update_public_state.new.clone(),
+            block_r: BlockNumberTarget {
+                value: new_block_r_value,
+            },
+            private_commitment: new_private_commitment,
+        };
         Self {
-            balance_pis_before_after,
+            prev_balance_pis: prev,
+            new_balance_pis: new,
             update_public_state,
             tx_settlement,
         }
@@ -233,8 +202,10 @@ impl<const D: usize> SendTxTarget<D> {
         <C as GenericConfig<D>>::Hasher: AlgebraicHasher<F>,
         W: WitnessWrite<F>,
     {
-        self.balance_pis_before_after
-            .set_witness(witness, balance_pis);
+        self.prev_balance_pis
+            .set_witness(witness, &value.prev_balance_pis);
+        self.new_balance_pis
+            .set_witness(witness, &balance_pis.after);
         self.update_public_state
             .set_witness(witness, &value.update_public_state);
         self.tx_settlement
@@ -262,7 +233,10 @@ where
     pub fn new(spend_vd: &VerifierCircuitData<F, C, D>) -> Self {
         let mut builder = CircuitBuilder::<F, D>::new(CircuitConfig::standard_recursion_config());
         let target = SendTxTarget::new(&mut builder, spend_vd);
-        let public_inputs = target.balance_pis_before_after.clone();
+        let public_inputs = BalancePisBeforeAfterTarget {
+            before: target.prev_balance_pis.clone(),
+            after: target.new_balance_pis.clone(),
+        };
 
         builder.register_public_inputs(&public_inputs.to_vec());
         let data = builder.build();
