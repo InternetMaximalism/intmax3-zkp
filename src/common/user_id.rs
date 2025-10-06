@@ -16,7 +16,7 @@ pub enum UserIdError {
     InvalidLocalId(String),
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct UserId(pub u64);
 
 impl UserId {
@@ -93,5 +93,13 @@ impl UserIdTarget {
     ) -> Target {
         let (lo, _hi) = builder.split_low_high(self.value, LOCAL_ID_BITS, USER_ID_BITS);
         lo
+    }
+
+    pub fn connect<F: RichField + Extendable<D>, const D: usize>(
+        &self,
+        builder: &mut CircuitBuilder<F, D>,
+        other: &Self,
+    ) {
+        builder.connect(self.value, other.value);
     }
 }

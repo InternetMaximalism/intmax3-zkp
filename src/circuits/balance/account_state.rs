@@ -1,7 +1,7 @@
 use plonky2::{
-    field::extension::Extendable,
+    field::{extension::Extendable, types::Field},
     hash::hash_types::RichField,
-    iop::target::Target,
+    iop::{target::Target, witness::WitnessWrite},
     plonk::{
         circuit_builder::CircuitBuilder,
         config::{AlgebraicHasher, GenericConfig},
@@ -139,5 +139,21 @@ impl AccountStateTarget {
             account_leaf,
             account_merkle_proof,
         }
+    }
+
+    pub fn set_witness<F: Field, W: WitnessWrite<F>>(&self, witness: &mut W, value: &AccountState) {
+        self.user_id.set_witness(witness, value.user_id);
+        self.account_tree_root
+            .set_witness(witness, value.account_tree_root);
+        self.send_leaf.set_witness(witness, &value.send_leaf);
+        witness.set_target(
+            self.send_leaf_index,
+            F::from_canonical_u32(value.send_leaf_index),
+        );
+        self.send_merkle_proof
+            .set_witness(witness, &value.send_merkle_proof);
+        self.account_leaf.set_witness(witness, &value.account_leaf);
+        self.account_merkle_proof
+            .set_witness(witness, &value.account_merkle_proof);
     }
 }
