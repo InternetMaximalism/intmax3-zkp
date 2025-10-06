@@ -1,12 +1,3 @@
-use plonky2::{
-    field::extension::Extendable,
-    hash::hash_types::RichField,
-    plonk::{
-        circuit_data::VerifierCircuitData, config::GenericConfig, proof::ProofWithPublicInputs,
-    },
-};
-use serde::{Deserialize, Serialize};
-
 use crate::{
     circuits::balance::spend_circuit::SpendPublicInputs,
     common::{
@@ -20,6 +11,14 @@ use crate::{
     },
     utils::conversion::ToU64,
 };
+use plonky2::{
+    field::extension::Extendable,
+    hash::hash_types::RichField,
+    plonk::{
+        circuit_data::VerifierCircuitData, config::GenericConfig, proof::ProofWithPublicInputs,
+    },
+};
+use serde::{Deserialize, Serialize};
 
 #[derive(Debug, thiserror::Error)]
 pub enum TxSettlementError {
@@ -124,7 +123,13 @@ where
         })
     }
 
+    // return the block number that the tx was included in
     pub fn included_block_number(&self) -> u64 {
         self.send_leaf.cur
+    }
+
+    // return the last block number that the user made a send
+    pub fn last_send_block_number(&self) -> u64 {
+        self.account_leaf.prev
     }
 }
