@@ -106,6 +106,14 @@ impl U32LimbTargetTrait<BYTES32_LEN> for Bytes32Target {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use plonky2::{
+        field::{goldilocks_field::GoldilocksField, types::Field as _},
+        iop::witness::{PartialWitness, WitnessWrite as _},
+        plonk::{
+            circuit_builder::CircuitBuilder, circuit_data::CircuitConfig,
+            config::PoseidonGoldilocksConfig,
+        },
+    };
 
     #[test]
     fn test_bytes32_from_str() {
@@ -246,15 +254,6 @@ mod tests {
 
     #[test]
     fn test_bytes32_target() {
-        use plonky2::{
-            field::goldilocks_field::GoldilocksField,
-            iop::witness::PartialWitness,
-            plonk::{
-                circuit_builder::CircuitBuilder, circuit_data::CircuitConfig,
-                config::PoseidonGoldilocksConfig,
-            },
-        };
-
         type F = GoldilocksField;
         const D: usize = 2;
         type C = PoseidonGoldilocksConfig;
@@ -273,5 +272,30 @@ mod tests {
 
         let circuit = builder.build::<C>();
         circuit.prove(pw).unwrap();
+    }
+
+    #[test]
+    fn test_bytes32_target_to_from_bytes_be() {
+        type F = GoldilocksField;
+        const D: usize = 2;
+        type C = PoseidonGoldilocksConfig;
+
+        let mut rng = rand::thread_rng();
+        let value = Bytes32::rand(&mut rng);
+
+        let mut builder = CircuitBuilder::<F, D>::new(CircuitConfig::default());
+        let bytes32_target = Bytes32Target::new::<F, D>(&mut builder, true);
+        let bytes_target = bytes32_target.to_bytes_be(&mut builder);
+        let reconstructed = Bytes32Target::from_bytes_be::<F, D>(&mut builder, &bytes_target);
+        bytes32_target.connect(&mut builder, reconstructed);
+
+        let circuit = builder.build::<C>();
+        let mut pw = PartialWitness::new();
+        bytes32_target.set_witness(&mut pw, value);
+        for (b_t, b) in bytes_target.iter().zip(value.to_bytes_be()) {
+            pw.set_target(*b_t, F::from_canonical_u8(b));
+        }
+        let proof = circuit.prove(pw).unwrap();
+        circuit.verify(proof).unwrap();
     }
 }

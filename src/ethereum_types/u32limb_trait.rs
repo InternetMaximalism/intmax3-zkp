@@ -214,6 +214,54 @@ pub trait U32LimbTargetTrait<const NUM_LIMBS: usize>: Clone + Copy {
             .collect::<Vec<_>>()
     }
 
+    fn to_bytes_be<F: RichField + Extendable<D>, const D: usize>(
+        &self,
+        builder: &mut CircuitBuilder<F, D>,
+    ) -> Vec<Target> {
+        let mut bytes = Vec::with_capacity(NUM_LIMBS * 4);
+        for limb in self.to_vec().into_iter() {
+            let bits_le = builder.split_le(limb, 32);
+            let byte_chunks = bits_le.chunks(8).collect::<Vec<_>>();
+            for chunk in byte_chunks.iter().rev() {
+                let mut byte = builder.zero();
+                for (bit_idx, bit) in chunk.iter().enumerate() {
+                    byte = builder.mul_const_add(
+                        F::from_canonical_u32(1u32 << bit_idx),
+                        bit.target,
+                        byte,
+                    );
+                }
+                bytes.push(byte);
+            }
+        }
+        bytes
+    }
+
+    fn from_bytes_be<F: RichField + Extendable<D>, const D: usize>(
+        builder: &mut CircuitBuilder<F, D>,
+        bytes: &[Target],
+    ) -> Self {
+        let total_bytes = NUM_LIMBS * 4;
+        assert_eq!(
+            bytes.len(),
+            total_bytes,
+            "Invalid length for U32 limb target bytes"
+        );
+
+        let limbs = bytes
+            .chunks(4)
+            .map(|chunk| {
+                for byte in chunk.iter() {
+                    builder.range_check(*byte, 8);
+                }
+                chunk.iter().fold(builder.zero(), |acc, &byte| {
+                    builder.mul_const_add(F::from_canonical_u32(256), acc, byte)
+                })
+            })
+            .collect::<Vec<_>>();
+        Self::from_slice(&limbs)
+    }
+
     fn from_bits_be<F: RichField + Extendable<D>, const D: usize>(
         builder: &mut CircuitBuilder<F, D>,
         bits: &[BoolTarget],
