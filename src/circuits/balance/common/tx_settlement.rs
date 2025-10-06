@@ -1,6 +1,6 @@
 use crate::{
     circuits::balance::{
-        account_state::{AccountState, AccountStateError, AccountStateTarget},
+        common::account_state::{AccountState, AccountStateError, AccountStateTarget},
         spend_circuit::{SpendPublicInputs, SpendPublicInputsTarget},
     },
     common::{

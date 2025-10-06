@@ -9,7 +9,7 @@ use plonky2::{
 };
 
 use crate::{
-    circuits::balance::recipient::{
+    circuits::balance::common::recipient::{
         calculate_recipient_from_user_id, calculate_recipient_from_user_id_circuit,
     },
     common::{
@@ -19,6 +19,7 @@ use crate::{
         user_id::{UserId, UserIdTarget},
     },
     constants::DEPOSIT_TREE_HEIGHT,
+    ethereum_types::u32limb_trait::U32LimbTargetTrait as _,
     utils::poseidon_hash_out::{PoseidonHashOut, PoseidonHashOutTarget},
 };
 
