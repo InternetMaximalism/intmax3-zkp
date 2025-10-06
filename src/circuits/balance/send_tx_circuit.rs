@@ -156,17 +156,15 @@ impl<const D: usize> SendTxTarget<D> {
         prev.private_commitment
             .connect(builder, spend_pis.prev_private_commitment.clone());
 
-        // Ensure block_r >= send_block_number_before_tx
+        // Ensure block_r >= send_block_number_before_tx.
         let send_block_number_before_tx = tx_settlement.send_block_number_before_tx();
-        todo!();
+        prev.block_r
+            .enforce_ge(builder, &send_block_number_before_tx);
 
         // Select the next block reference depending on the spend validity.
         let tx_block_number = tx_settlement.tx_block_number();
-        let new_block_r_value = builder.select(
-            spend_pis.is_valid,
-            tx_block_number.value,
-            prev.block_r.value,
-        );
+        let new_block_r =
+            BlockNumberTarget::select(builder, spend_pis.is_valid, &tx_block_number, &prev.block_r);
 
         // Select the next private commitment.
         let new_private_commitment = PoseidonHashOutTarget::select(
@@ -178,9 +176,7 @@ impl<const D: usize> SendTxTarget<D> {
         let new = BalancePublicInputsTarget {
             user_id: prev.user_id.clone(),
             public_state: update_public_state.new.clone(),
-            block_r: BlockNumberTarget {
-                value: new_block_r_value,
-            },
+            block_r: new_block_r,
             private_commitment: new_private_commitment,
         };
         Self {
@@ -287,7 +283,7 @@ mod tests {
             TX_TREE_HEIGHT,
         },
         ethereum_types::{bytes32::Bytes32, u256::U256},
-        utils::{conversion::ToU64 as _, poseidon_hash_out::PoseidonHashOut},
+        utils::{conversion::ToField as _, poseidon_hash_out::PoseidonHashOut},
     };
     use plonky2::{
         field::goldilocks_field::GoldilocksField, plonk::config::PoseidonGoldilocksConfig,
@@ -297,6 +293,7 @@ mod tests {
     type F = GoldilocksField;
     type C = PoseidonGoldilocksConfig;
 
+    #[cfg_attr(debug_assertions, ignore = "run with --release")]
     #[test]
     fn test_send_tx_circuit_smoke() {
         // Build a spend witness to reuse its proof inside the send circuit.
@@ -441,14 +438,17 @@ mod tests {
             .verify(proof.clone())
             .expect("send tx verification should succeed");
 
-        let parsed =
-            BalancePisBeforeAfter::from_pis_u64(&proof.public_inputs.to_u64_vec()).unwrap();
+        let expected_pis = witness
+            .to_public_inputs()
+            .expect("expected balance public inputs");
+        let expected_u64 = expected_pis.to_u64_vec();
+        let expected_fields = expected_u64.to_field_vec::<F>();
 
-        assert_eq!(parsed.before.user_id.0, user_id.0);
-        assert_eq!(parsed.after.user_id.0, user_id.0);
-        assert_eq!(parsed.after.block_r, BlockNumber::new(3).unwrap());
+        assert_eq!(proof.public_inputs, expected_fields);
+        assert_eq!(expected_pis.after.user_id.0, user_id.0);
+        assert_eq!(expected_pis.after.block_r, BlockNumber::new(3).unwrap());
         assert_eq!(
-            parsed.after.private_commitment,
+            expected_pis.after.private_commitment,
             spend_pis.new_private_commitment,
         );
     }

@@ -80,6 +80,25 @@ impl BlockNumberTarget {
         builder.is_equal(self.value, other.value)
     }
 
+    pub fn enforce_ge<F: RichField + Extendable<D>, const D: usize>(
+        &self,
+        builder: &mut CircuitBuilder<F, D>,
+        lower_bound: &Self,
+    ) {
+        let diff = builder.sub(self.value, lower_bound.value);
+        builder.range_check(diff, BLOCK_NUMBER_BITS);
+    }
+
+    pub fn select<F: RichField + Extendable<D>, const D: usize>(
+        builder: &mut CircuitBuilder<F, D>,
+        condition: BoolTarget,
+        when_true: &Self,
+        when_false: &Self,
+    ) -> Self {
+        let value = builder.select(condition, when_true.value, when_false.value);
+        Self { value }
+    }
+
     pub fn set_witness<F: Field, W: WitnessWrite<F>>(&self, witness: &mut W, value: BlockNumber) {
         witness.set_target(self.value, F::from_canonical_u64(value.0));
     }
