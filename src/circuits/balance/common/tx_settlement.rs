@@ -16,7 +16,7 @@ use crate::{
 use plonky2::{
     field::extension::Extendable,
     hash::hash_types::RichField,
-    iop::{target::BoolTarget, witness::WitnessWrite},
+    iop::witness::WitnessWrite,
     plonk::{
         circuit_builder::CircuitBuilder,
         circuit_data::VerifierCircuitData,
@@ -128,15 +128,14 @@ where
         self.account_state.send_leaf.prev
     }
 
-    // return true if the tx is valid (i.e., valid nonce)
-    pub fn is_valid(&self) -> Result<bool, TxSettlementError> {
+    pub fn spend_pis(&self) -> Result<SpendPublicInputs, TxSettlementError> {
         let spend_pis = SpendPublicInputs::from_pis_u64(
             &self.spend_proof.public_inputs.to_u64_vec(),
         )
         .map_err(|e| {
             TxSettlementError::InvalidSpendProof(format!("failed to parse public inputs: {}", e))
         })?;
-        Ok(spend_pis.is_valid)
+        Ok(spend_pis)
     }
 }
 
@@ -218,10 +217,8 @@ impl<const D: usize> TxSettlementTarget<D> {
         self.account_state.send_leaf.prev.clone()
     }
 
-    pub fn is_valid(&self) -> BoolTarget {
-        let spend_public_inputs =
-            SpendPublicInputsTarget::from_pis(&self.spend_proof.public_inputs);
-        spend_public_inputs.is_valid
+    pub fn spend_pis(&self) -> SpendPublicInputsTarget {
+        SpendPublicInputsTarget::from_pis(&self.spend_proof.public_inputs)
     }
 }
 

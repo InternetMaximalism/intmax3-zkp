@@ -64,6 +64,22 @@ impl UpdatePublicState {
             merkle_proof,
         })
     }
+
+    pub fn verify(&self) -> Result<(), UpdatePublicStateError> {
+        if self.new == self.old {
+            return Ok(());
+        }
+        let calculated = self
+            .merkle_proof
+            .get_root(&self.old, self.old.block_number.0);
+        if calculated != self.new.prev_public_state_root {
+            return Err(UpdatePublicStateError::InvalidMerkleProof(format!(
+                "calculated: {}, expected: {}",
+                calculated, self.new.prev_public_state_root
+            )));
+        }
+        Ok(())
+    }
 }
 
 impl UpdatePublicStateTarget {

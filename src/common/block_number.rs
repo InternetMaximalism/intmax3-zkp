@@ -18,7 +18,7 @@ pub enum BlockNumberError {
     InvalidBlockNumber(String),
 }
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct BlockNumber(pub u64);
 
 impl BlockNumber {
