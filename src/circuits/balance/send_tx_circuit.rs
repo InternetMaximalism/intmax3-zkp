@@ -92,6 +92,14 @@ impl<F: RichField + Extendable<D>, C: GenericConfig<D, F = F>, const D: usize>
                 self.tx_settlement.send_block_number_before_tx().0
             )));
         }
+        if self.tx_settlement.tx_block_number() < self.prev_balance_pis.block_r {
+            return Err(SpendTxError::BlockNumberError(format!(
+                "tx_settlement.tx_block_number(): {} should be >= prev_balance_pis.block_r: {}",
+                self.tx_settlement.tx_block_number().0,
+                self.prev_balance_pis.block_r.0
+            )));
+        }
+
         let (new_block_r, new_private_commitment) = if spend_pis.is_valid {
             (
                 self.tx_settlement.tx_block_number(),
@@ -157,9 +165,13 @@ impl<const D: usize> SendTxTarget<D> {
             .connect(builder, spend_pis.prev_private_commitment.clone());
 
         // Ensure block_r >= send_block_number_before_tx.
-        let send_block_number_before_tx = tx_settlement.send_block_number_before_tx();
         prev.block_r
-            .enforce_ge(builder, &send_block_number_before_tx);
+            .enforce_ge(builder, &tx_settlement.send_block_number_before_tx());
+
+        // Ensure tx_block_number > block_r.
+        tx_settlement
+            .tx_block_number()
+            .enforce_gt(builder, &prev.block_r);
 
         // Select the next block reference depending on the spend validity.
         let tx_block_number = tx_settlement.tx_block_number();
@@ -421,7 +433,7 @@ mod tests {
         let prev_balance_pis = BalancePublicInputs {
             user_id,
             public_state: public_state.clone(),
-            block_r: BlockNumber::new(5).unwrap(),
+            block_r: BlockNumber::new(2).unwrap(),
             private_commitment: spend_pis.prev_private_commitment,
         };
 

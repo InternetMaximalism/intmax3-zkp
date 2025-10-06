@@ -89,6 +89,21 @@ impl BlockNumberTarget {
         builder.range_check(diff, BLOCK_NUMBER_BITS);
     }
 
+    pub fn enforce_gt<F: RichField + Extendable<D>, const D: usize>(
+        &self,
+        builder: &mut CircuitBuilder<F, D>,
+        lower_bound: &Self,
+    ) {
+        // self > lower_bound  <=>  self >= lower_bound + 1
+        let lower_bound_plus_one = builder.add_const(lower_bound.value, F::ONE);
+        self.enforce_ge(
+            builder,
+            &Self {
+                value: lower_bound_plus_one,
+            },
+        );
+    }
+
     pub fn select<F: RichField + Extendable<D>, const D: usize>(
         builder: &mut CircuitBuilder<F, D>,
         condition: BoolTarget,
