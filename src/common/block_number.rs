@@ -27,7 +27,7 @@ impl BlockNumber {
             return Err(BlockNumberError::InvalidBlockNumber(format!(
                 "{} >= {}",
                 block_number,
-                1 << BLOCK_NUMBER_BITS
+                1u64 << BLOCK_NUMBER_BITS
             )));
         }
         Ok(Self(block_number))
