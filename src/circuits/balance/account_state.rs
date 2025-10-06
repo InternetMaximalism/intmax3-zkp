@@ -52,21 +52,7 @@ impl AccountState {
         account_leaf: AccountLeaf,
         account_merkle_proof: AccountMerkleProof,
     ) -> Result<Self, AccountStateError> {
-        // verify send leaf inclusion
-        send_merkle_proof
-            .verify(
-                &send_leaf,
-                send_leaf_index as u64,
-                account_leaf.send_tree_root,
-            )
-            .map_err(|e| AccountStateError::InvalidSendMerkleProof(e.to_string()))?;
-
-        // verify account leaf inclusion
-        account_merkle_proof
-            .verify(&account_leaf, user_id.0, account_tree_root)
-            .map_err(|e| AccountStateError::InvalidAccountMerkleProof(e.to_string()))?;
-
-        Ok(Self {
+        let state = Self {
             user_id,
             account_tree_root,
             send_leaf,
@@ -74,7 +60,26 @@ impl AccountState {
             send_merkle_proof,
             account_leaf,
             account_merkle_proof,
-        })
+        };
+        state.verify()?;
+        Ok(state)
+    }
+
+    pub fn verify(&self) -> Result<(), AccountStateError> {
+        // verify send leaf inclusion
+        self.send_merkle_proof
+            .verify(
+                &self.send_leaf,
+                self.send_leaf_index as u64,
+                self.account_leaf.send_tree_root,
+            )
+            .map_err(|e| AccountStateError::InvalidSendMerkleProof(e.to_string()))?;
+
+        // verify account leaf inclusion
+        self.account_merkle_proof
+            .verify(&self.account_leaf, self.user_id.0, self.account_tree_root)
+            .map_err(|e| AccountStateError::InvalidAccountMerkleProof(e.to_string()))?;
+        Ok(())
     }
 }
 

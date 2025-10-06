@@ -1,11 +1,11 @@
 use crate::{
-    circuits::balance::spend_circuit::SpendPublicInputs,
+    circuits::balance::{
+        account_state::{AccountState, AccountStateError},
+        spend_circuit::SpendPublicInputs,
+    },
     common::{
-        trees::{
-            account_tree::{AccountLeaf, AccountMerkleProof, SendLeaf, SendMerkleProof},
-            public_state_tree::PublicState,
-            tx_tree::TxMerkleProof,
-        },
+        block_number::BlockNumber,
+        trees::{public_state_tree::PublicState, tx_tree::TxMerkleProof},
         tx::Tx,
         user_id::UserId,
     },
@@ -28,11 +28,14 @@ pub enum TxSettlementError {
     #[error("Invalid tx merkle proof: {0}")]
     InvalidTxMerkleProof(String),
 
-    #[error("Invalid send merkle proof: {0}")]
-    InvalidSendMerkleProof(String),
+    #[error("Invalid account state: {0}")]
+    InvalidAccountState(#[from] AccountStateError),
 
-    #[error("Invalid account merkle proof: {0}")]
-    InvalidAccountMerkleProof(String),
+    #[error("Invalid user ID: {0}")]
+    InvalidUserId(String),
+
+    #[error("Invalid public state: {0}")]
+    InvalidPublicState(String),
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -41,13 +44,8 @@ pub struct TxSettlement<F: RichField + Extendable<D>, C: GenericConfig<D, F = F>
     pub user_id: UserId,
     pub tx: Tx,
     pub public_state: PublicState,
-
+    pub account_state: AccountState,
     pub tx_merkle_proof: TxMerkleProof,
-    pub send_leaf: SendLeaf,
-    pub send_leaf_index: u32,
-    pub send_merkle_proof: SendMerkleProof,
-    pub account_leaf: AccountLeaf,
-    pub account_merkle_proof: AccountMerkleProof,
     pub spend_proof: ProofWithPublicInputs<F, C, D>,
 }
 
@@ -62,12 +60,8 @@ where
         tx: Tx,
         public_state: PublicState,
 
+        account_state: AccountState,
         tx_merkle_proof: TxMerkleProof,
-        send_leaf: SendLeaf,
-        send_leaf_index: u32,
-        send_merkle_proof: SendMerkleProof,
-        account_leaf: AccountLeaf,
-        account_merkle_proof: AccountMerkleProof,
         spend_proof: ProofWithPublicInputs<F, C, D>,
     ) -> Result<Self, TxSettlementError> {
         // verify the spend proof
@@ -75,25 +69,24 @@ where
             TxSettlementError::InvalidSpendProof(format!("Spend proof verification failed: {}", e))
         })?;
 
+        // verify account state
+        account_state.verify()?;
+        if account_state.user_id != user_id {
+            return Err(TxSettlementError::InvalidUserId(
+                "user_id does not match".to_string(),
+            ));
+        }
+        if account_state.account_tree_root != public_state.account_tree_root {
+            return Err(TxSettlementError::InvalidPublicState(
+                "account_tree_root does not match".to_string(),
+            ));
+        }
+
         // verify tx inclusion
-        let tx_tree_root = send_leaf.tx_tree_root.reduce_to_hash_out();
+        let tx_tree_root = account_state.send_leaf.tx_tree_root.reduce_to_hash_out();
         tx_merkle_proof
             .verify(&tx, user_id.local_id() as u64, tx_tree_root)
             .map_err(|e| TxSettlementError::InvalidTxMerkleProof(e.to_string()))?;
-
-        // verify send leaf inclusion
-        send_merkle_proof
-            .verify(
-                &send_leaf,
-                send_leaf_index as u64,
-                account_leaf.send_tree_root,
-            )
-            .map_err(|e| TxSettlementError::InvalidTxMerkleProof(e.to_string()))?;
-
-        // verify account leaf inclusion
-        account_merkle_proof
-            .verify(&account_leaf, user_id.0, public_state.account_tree_root)
-            .map_err(|e| TxSettlementError::InvalidAccountMerkleProof(e.to_string()))?;
 
         // verify public inputs
         let spend_pis = SpendPublicInputs::from_pis_u64(&spend_proof.public_inputs.to_u64_vec())
@@ -114,22 +107,29 @@ where
             tx,
             public_state,
             tx_merkle_proof,
-            send_leaf,
-            send_leaf_index,
-            send_merkle_proof,
-            account_leaf,
-            account_merkle_proof,
+            account_state,
             spend_proof,
         })
     }
 
     // return the block number that the tx was included in
-    pub fn included_block_number(&self) -> u64 {
-        self.send_leaf.cur
+    pub fn tx_block_number(&self) -> BlockNumber {
+        self.account_state.send_leaf.cur
     }
 
-    // return the last block number that the user made a send
-    pub fn last_send_block_number(&self) -> u64 {
-        self.account_leaf.prev
+    // return the block number before the tx was included
+    pub fn send_block_number_before_tx(&self) -> BlockNumber {
+        self.account_state.send_leaf.prev
+    }
+
+    // return true if the tx is valid (i.e., valid nonce)
+    pub fn is_valid(&self) -> Result<bool, TxSettlementError> {
+        let spend_pis = SpendPublicInputs::from_pis_u64(
+            &self.spend_proof.public_inputs.to_u64_vec(),
+        )
+        .map_err(|e| {
+            TxSettlementError::InvalidSpendProof(format!("failed to parse public inputs: {}", e))
+        })?;
+        Ok(spend_pis.is_valid)
     }
 }

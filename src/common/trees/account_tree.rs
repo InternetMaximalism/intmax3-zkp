@@ -10,7 +10,8 @@ use plonky2::{
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    constants::{BLOCK_NUMBER_BITS, SEND_TREE_HEIGHT},
+    common::block_number::{BlockNumber, BlockNumberTarget},
+    constants::SEND_TREE_HEIGHT,
     ethereum_types::{
         bytes32::{Bytes32, Bytes32Target},
         u32limb_trait::{U32LimbTargetTrait as _, U32LimbTrait as _},
@@ -36,15 +37,15 @@ pub type SendMerkleProofTarget = IncrementalMerkleProofTarget<SendLeafTarget>;
 
 #[derive(Clone, Debug, PartialEq, Default, Serialize, Deserialize)]
 pub struct SendLeaf {
-    pub prev: u64,
-    pub cur: u64,
+    pub prev: BlockNumber,
+    pub cur: BlockNumber,
     pub tx_tree_root: Bytes32,
 }
 
 #[derive(Clone, Debug)]
 pub struct SendLeafTarget {
-    pub prev: Target,
-    pub cur: Target,
+    pub prev: BlockNumberTarget,
+    pub cur: BlockNumberTarget,
     pub tx_tree_root: Bytes32Target,
 }
 
@@ -84,14 +85,14 @@ impl LeafableTarget for SendLeafTarget {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct AccountLeaf {
     pub index: u64,                      // the next index of send leaf
-    pub prev: u64,                       // the previous block number
+    pub prev: BlockNumber,               // the previous block number
     pub send_tree_root: PoseidonHashOut, // the root of send tree
 }
 
 #[derive(Clone, Debug)]
 pub struct AccountLeafTarget {
     pub index: Target,                         // the next index of send leaf
-    pub prev: Target,                          // the previous block number
+    pub prev: BlockNumberTarget,               // the previous block number
     pub send_tree_root: PoseidonHashOutTarget, // the root of send tree
 }
 
@@ -138,7 +139,8 @@ pub type AccountMerkleProofTarget = SparseMerkleProofTarget<AccountLeafTarget>;
 impl SendLeaf {
     pub fn to_u64_vec(&self) -> Vec<u64> {
         [
-            vec![self.prev as u64, self.cur as u64],
+            self.prev.to_u64_vec(),
+            self.cur.to_u64_vec(),
             self.tx_tree_root.to_u64_vec(),
         ]
         .concat()
@@ -150,12 +152,8 @@ impl SendLeafTarget {
         builder: &mut CircuitBuilder<F, D>,
         is_checked: bool,
     ) -> Self {
-        let prev = builder.add_virtual_target();
-        let cur = builder.add_virtual_target();
-        if is_checked {
-            builder.range_check(prev, BLOCK_NUMBER_BITS);
-            builder.range_check(cur, BLOCK_NUMBER_BITS);
-        }
+        let prev = BlockNumberTarget::new(builder, is_checked);
+        let cur = BlockNumberTarget::new(builder, is_checked);
         let tx_tree_root = Bytes32Target::new(builder, is_checked);
         Self {
             prev,
@@ -165,7 +163,12 @@ impl SendLeafTarget {
     }
 
     pub fn to_vec(&self) -> Vec<Target> {
-        [vec![self.prev, self.cur], self.tx_tree_root.to_vec()].concat()
+        [
+            self.prev.to_vec(),
+            self.cur.to_vec(),
+            self.tx_tree_root.to_vec(),
+        ]
+        .concat()
     }
 
     pub fn constant<F: RichField + Extendable<D>, const D: usize>(
@@ -173,15 +176,15 @@ impl SendLeafTarget {
         value: SendLeaf,
     ) -> Self {
         Self {
-            prev: builder.constant(F::from_canonical_u64(value.prev)),
-            cur: builder.constant(F::from_canonical_u64(value.cur)),
+            prev: BlockNumberTarget::constant(builder, value.prev),
+            cur: BlockNumberTarget::constant(builder, value.cur),
             tx_tree_root: Bytes32Target::constant(builder, value.tx_tree_root),
         }
     }
 
     pub fn set_witness<F: Field, W: WitnessWrite<F>>(&self, witness: &mut W, value: &SendLeaf) {
-        witness.set_target(self.prev, F::from_canonical_u64(value.prev));
-        witness.set_target(self.cur, F::from_canonical_u64(value.cur));
+        self.prev.set_witness(witness, value.prev);
+        self.cur.set_witness(witness, value.cur);
         self.tx_tree_root.set_witness(witness, value.tx_tree_root);
     }
 }
@@ -190,7 +193,7 @@ impl Default for AccountLeaf {
     fn default() -> Self {
         Self {
             index: 0,
-            prev: 0,
+            prev: BlockNumber::default(),
             send_tree_root: PoseidonHashOut { elements: [0; 4] },
         }
     }
@@ -199,7 +202,8 @@ impl Default for AccountLeaf {
 impl AccountLeaf {
     pub fn to_u64_vec(&self) -> Vec<u64> {
         [
-            vec![self.index as u64, self.prev as u64],
+            vec![self.index as u64],
+            self.prev.to_u64_vec(),
             self.send_tree_root.to_u64_vec(),
         ]
         .concat()
@@ -212,11 +216,10 @@ impl AccountLeafTarget {
         is_checked: bool,
     ) -> Self {
         let index = builder.add_virtual_target();
-        let prev = builder.add_virtual_target();
         if is_checked {
             builder.range_check(index, SEND_TREE_HEIGHT);
-            builder.range_check(prev, BLOCK_NUMBER_BITS);
         }
+        let prev = BlockNumberTarget::new(builder, is_checked);
         let send_tree_root = PoseidonHashOutTarget::new(builder);
         Self {
             index,
@@ -226,7 +229,12 @@ impl AccountLeafTarget {
     }
 
     pub fn to_vec(&self) -> Vec<Target> {
-        [vec![self.index, self.prev], self.send_tree_root.to_vec()].concat()
+        [
+            vec![self.index],
+            self.prev.to_vec(),
+            self.send_tree_root.to_vec(),
+        ]
+        .concat()
     }
 
     pub fn constant<F: RichField + Extendable<D>, const D: usize>(
@@ -235,14 +243,14 @@ impl AccountLeafTarget {
     ) -> Self {
         Self {
             index: builder.constant(F::from_canonical_u64(value.index)),
-            prev: builder.constant(F::from_canonical_u64(value.prev)),
+            prev: BlockNumberTarget::constant(builder, value.prev),
             send_tree_root: PoseidonHashOutTarget::constant(builder, value.send_tree_root),
         }
     }
 
     pub fn set_witness<F: Field, W: WitnessWrite<F>>(&self, witness: &mut W, value: &AccountLeaf) {
         witness.set_target(self.index, F::from_canonical_u64(value.index));
-        witness.set_target(self.prev, F::from_canonical_u64(value.prev));
+        self.prev.set_witness(witness, value.prev);
         self.send_tree_root
             .set_witness(witness, value.send_tree_root);
     }
