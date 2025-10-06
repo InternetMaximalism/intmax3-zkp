@@ -1,8 +1,16 @@
+use std::fmt::Debug;
+
 use plonky2::{
-    field::{extension::Extendable, types::Field},
+    field::{extension::Extendable, goldilocks_field::GoldilocksField, types::Field},
     hash::hash_types::RichField,
     iop::{target::Target, witness::WitnessWrite},
-    plonk::circuit_builder::CircuitBuilder,
+    plonk::{
+        circuit_builder::CircuitBuilder,
+        circuit_data::{
+            CircuitConfig, VerifierCircuitData, VerifierCircuitTarget, VerifierOnlyCircuitData,
+        },
+        config::{AlgebraicHasher, GenericConfig},
+    },
 };
 use thiserror::Error;
 
@@ -12,7 +20,11 @@ use crate::{
         public_state::{PUBLIC_STATE_U64_LEN, PublicState, PublicStateTarget},
         user_id::{UserId, UserIdTarget},
     },
-    utils::poseidon_hash_out::{POSEIDON_HASH_OUT_LEN, PoseidonHashOut, PoseidonHashOutTarget},
+    utils::{
+        conversion::{ToField as _, ToU64},
+        cyclic::{vd_from_pis_slice, vd_to_vec, vd_vec_len},
+        poseidon_hash_out::{POSEIDON_HASH_OUT_LEN, PoseidonHashOut, PoseidonHashOutTarget},
+    },
 };
 
 pub const BALANCE_PUBLIC_INPUTS_LEN: usize = 1 + PUBLIC_STATE_U64_LEN + 1 + POSEIDON_HASH_OUT_LEN;
@@ -275,4 +287,55 @@ impl BalancePisBeforeAfterTarget {
         self.before.connect(builder, &other.before);
         self.after.connect(builder, &other.after);
     }
+}
+
+#[derive(Clone, Debug)]
+pub struct BalanceFullPublicInputs<
+    F: RichField + Extendable<D>,
+    C: GenericConfig<D, F = F>,
+    const D: usize,
+> where
+    <C as GenericConfig<D>>::Hasher: AlgebraicHasher<F>,
+{
+    pub pis: BalancePublicInputs,
+    pub vd: VerifierOnlyCircuitData<C, D>,
+}
+
+impl<F: RichField + Extendable<D>, C: GenericConfig<D, F = F>, const D: usize>
+    BalanceFullPublicInputs<F, C, D>
+where
+    <C as GenericConfig<D>>::Hasher: AlgebraicHasher<F>,
+{
+    pub fn to_u64_vec(&self, config: &CircuitConfig) -> Vec<u64> {
+        [
+            self.pis.to_u64_vec(),
+            vd_to_vec(config, &self.vd).to_u64_vec(),
+        ]
+        .concat()
+    }
+
+    pub fn from_u64_vec(
+        inputs: &[u64],
+        config: &CircuitConfig,
+    ) -> Result<Self, BalancePublicInputsError> {
+        let vd_len = vd_vec_len(config);
+        if inputs.len() != BALANCE_PUBLIC_INPUTS_LEN + vd_len {
+            return Err(BalancePublicInputsError::InvalidLength(inputs.len()));
+        }
+        let vd_slice = &inputs[BALANCE_PUBLIC_INPUTS_LEN..BALANCE_PUBLIC_INPUTS_LEN + vd_len];
+        let pis = BalancePublicInputs::from_pis_u64(&inputs[0..BALANCE_PUBLIC_INPUTS_LEN])?;
+        let vd = vd_from_pis_slice(&vd_slice.to_field_vec(), config).map_err(|e| {
+            BalancePublicInputsError::ParseError {
+                field: "verifier data",
+                message: e.to_string(),
+            }
+        })?;
+        Ok(Self { pis, vd })
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct BalanceFullPublicInputsTarget<C: GenericConfig<D>, const D: usize> {
+    pub pis: BalancePublicInputs,
+    pub vd: VerifierOnlyCircuitData<C, D>,
 }

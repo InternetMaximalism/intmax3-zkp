@@ -72,6 +72,8 @@ impl Transfer {
     pub fn nullifier(&self) -> Bytes32 {
         self.poseidon_hash().into()
     }
+
+    // pub fn withdraw_nullifier
 }
 
 impl TransferTarget {

@@ -38,7 +38,11 @@ pub fn vd_to_vec_target(config: &CircuitConfig, vd: &VerifierCircuitTarget) -> V
     vec
 }
 
-pub fn vd_from_pis_slice<F: RichField + Extendable<D>, C: GenericConfig<D, F = F>, const D: usize>(
+pub fn vd_from_pis_slice<
+    F: RichField + Extendable<D>,
+    C: GenericConfig<D, F = F>,
+    const D: usize,
+>(
     slice: &[F],
     config: &CircuitConfig,
 ) -> Result<VerifierOnlyCircuitData<C, D>>
