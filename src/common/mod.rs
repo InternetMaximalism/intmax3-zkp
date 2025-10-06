@@ -1,4 +1,5 @@
 pub mod block;
+pub mod block_number;
 pub mod deposit;
 pub mod error;
 pub mod private_state;

@@ -5,6 +5,8 @@ pub const ASSET_TREE_HEIGHT: usize = 32;
 pub const PUBLIC_STATE_TREE_HEIGHT: usize = 32;
 pub const TRANSFER_TREE_HEIGHT: usize = 5;
 
+pub const BLOCK_NUMBER_BITS: usize = 63;
+
 pub const LOCAL_ID_BITS: usize = 32;
 pub const AGGREGATOR_ID_BITS: usize = 31;
 pub const USER_ID_BITS: usize = AGGREGATOR_ID_BITS + LOCAL_ID_BITS;

@@ -11,6 +11,7 @@ use rand::Rng;
 use serde::{Deserialize, Serialize};
 
 use crate::{
+    common::block_number::{BlockNumber, BlockNumberTarget},
     ethereum_types::{
         address::{Address, AddressTarget},
         bytes32::{Bytes32, Bytes32Target},
@@ -28,11 +29,12 @@ use crate::{
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Deposit {
-    pub depositor: Address, // The address of the depositor
-    pub recipient: Bytes32, // The recipient of the deposit,
-    pub token_index: u32,   // The index of the token
-    pub amount: U256,       // The amount of the token, which is the amount of the deposit
-    pub aux_data: Bytes32,  // Auxiliary data for the deposit, e.g. timestamp, mining info
+    pub depositor: Address,        // The address of the depositor
+    pub recipient: Bytes32,        // The recipient of the deposit,
+    pub token_index: u32,          // The index of the token
+    pub amount: U256,              // The amount of the token, which is the amount of the deposit
+    pub block_number: BlockNumber, // The block number of the deposit
+    pub aux_data: Bytes32,         // Auxiliary data for the deposit, e.g. timestamp, mining info
 }
 
 #[derive(Debug, Clone)]
@@ -41,17 +43,19 @@ pub struct DepositTarget {
     pub recipient: Bytes32Target,
     pub token_index: Target,
     pub amount: U256Target,
+    pub block_number: BlockNumberTarget,
     pub aux_data: Bytes32Target,
 }
 
 impl Deposit {
-    pub fn to_u32_vec(&self) -> Vec<u32> {
+    pub fn to_u64_vec(&self) -> Vec<u64> {
         [
-            self.depositor.to_u32_vec(),
-            self.recipient.to_u32_vec(),
-            vec![self.token_index],
-            self.amount.to_u32_vec(),
-            self.aux_data.to_u32_vec(),
+            self.depositor.to_u64_vec(),
+            self.recipient.to_u64_vec(),
+            vec![self.token_index as u64],
+            self.amount.to_u64_vec(),
+            vec![self.block_number.0],
+            self.aux_data.to_u64_vec(),
         ]
         .concat()
     }
@@ -62,12 +66,13 @@ impl Deposit {
             recipient: Bytes32::rand(rng),
             token_index: rng.next_u32(),
             amount: U256::rand(rng),
+            block_number: BlockNumber::rand(rng),
             aux_data: Bytes32::rand(rng),
         }
     }
 
     pub fn poseidon_hash(&self) -> PoseidonHashOut {
-        PoseidonHashOut::hash_inputs_u32(&self.to_u32_vec())
+        PoseidonHashOut::hash_inputs_u64(&self.to_u64_vec())
     }
 
     pub fn nullifier(&self) -> Bytes32 {
@@ -82,6 +87,7 @@ impl DepositTarget {
             self.recipient.to_vec(),
             vec![self.token_index],
             self.amount.to_vec(),
+            vec![self.block_number.value],
             self.aux_data.to_vec(),
         ]
         .concat()
@@ -98,12 +104,14 @@ impl DepositTarget {
             builder.range_check(token_index, 32);
         }
         let amount = U256Target::new(builder, is_checked);
+        let block_number = BlockNumberTarget::new(builder, is_checked);
         let aux_data = Bytes32Target::new(builder, is_checked);
         Self {
             depositor,
             recipient,
-            amount,
             token_index,
+            amount,
+            block_number,
             aux_data,
         }
     }
@@ -116,12 +124,14 @@ impl DepositTarget {
         let recipient = Bytes32Target::constant(builder, value.recipient);
         let token_index = builder.constant(F::from_canonical_u32(value.token_index));
         let amount = U256Target::constant(builder, value.amount);
+        let block_number = BlockNumberTarget::constant(builder, value.block_number);
         let aux_data = Bytes32Target::constant(builder, value.aux_data);
         Self {
             depositor,
             recipient,
-            amount,
             token_index,
+            amount,
+            block_number,
             aux_data,
         }
     }
@@ -146,6 +156,7 @@ impl DepositTarget {
         self.recipient.set_witness(witness, value.recipient);
         witness.set_target(self.token_index, F::from_canonical_u32(value.token_index));
         self.amount.set_witness(witness, value.amount);
+        self.block_number.set_witness(witness, value.block_number);
         self.aux_data.set_witness(witness, value.aux_data);
     }
 }

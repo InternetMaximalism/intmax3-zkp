@@ -284,7 +284,7 @@ impl SpendTarget {
             .set_witness(witness, &value.prev_private_state);
 
         for (target, transfer) in self.transfers.iter().zip(value.transfers.iter()) {
-            target.set_witness(witness, *transfer);
+            target.set_witness(witness, transfer);
         }
 
         for (target, balance) in self

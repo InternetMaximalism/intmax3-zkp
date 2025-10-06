@@ -25,7 +25,7 @@ use serde::{Deserialize, Serialize};
 pub const TRANSFER_LEN: usize = BYTES32_LEN + 1 + U256_LEN + BYTES32_LEN;
 
 /// A transfer of tokens from one account to another
-#[derive(Debug, Clone, Copy, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Transfer {
     pub recipient: Bytes32,
@@ -123,7 +123,7 @@ impl TransferTarget {
         }
     }
 
-    pub fn set_witness<F: Field, W: WitnessWrite<F>>(&self, witness: &mut W, value: Transfer) {
+    pub fn set_witness<F: Field, W: WitnessWrite<F>>(&self, witness: &mut W, value: &Transfer) {
         self.recipient.set_witness(witness, value.recipient);
         witness.set_target(self.token_index, F::from_canonical_u32(value.token_index));
         self.amount.set_witness(witness, value.amount);

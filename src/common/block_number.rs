@@ -1,0 +1,67 @@
+use plonky2::{
+    field::{extension::Extendable, types::Field},
+    hash::hash_types::RichField,
+    iop::{target::Target, witness::WitnessWrite},
+    plonk::circuit_builder::CircuitBuilder,
+};
+use rand::Rng;
+use serde::{Deserialize, Serialize};
+
+use crate::constants::BLOCK_NUMBER_BITS;
+
+#[derive(Debug, thiserror::Error)]
+pub enum BlockNumberError {
+    #[error("Invalid block number: {0}")]
+    InvalidBlockNumber(String),
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BlockNumber(pub u64);
+
+impl BlockNumber {
+    pub fn new(block_number: u64) -> Result<Self, BlockNumberError> {
+        if block_number >= 1 << BLOCK_NUMBER_BITS {
+            return Err(BlockNumberError::InvalidBlockNumber(format!(
+                "{} >= {}",
+                block_number,
+                1 << BLOCK_NUMBER_BITS
+            )));
+        }
+        Ok(Self(block_number))
+    }
+
+    pub fn rand<R: Rng>(rng: &mut R) -> Self {
+        Self(rng.gen_range(0..(1 << BLOCK_NUMBER_BITS)))
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct BlockNumberTarget {
+    pub value: Target,
+}
+
+impl BlockNumberTarget {
+    pub fn new<F: RichField + Extendable<D>, const D: usize>(
+        builder: &mut CircuitBuilder<F, D>,
+        is_checked: bool,
+    ) -> Self {
+        let value = builder.add_virtual_target();
+        if is_checked {
+            builder.range_check(value, BLOCK_NUMBER_BITS);
+        }
+        Self { value }
+    }
+
+    pub fn constant<F: RichField + Extendable<D>, const D: usize>(
+        builder: &mut CircuitBuilder<F, D>,
+        value: BlockNumber,
+    ) -> Self {
+        Self {
+            value: builder.constant(F::from_canonical_u64(value.0)),
+        }
+    }
+
+    pub fn set_witness<F: Field, W: WitnessWrite<F>>(&self, witness: &mut W, value: BlockNumber) {
+        witness.set_target(self.value, F::from_canonical_u64(value.0));
+    }
+}
