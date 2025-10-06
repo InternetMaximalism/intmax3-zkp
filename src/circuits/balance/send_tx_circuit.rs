@@ -265,10 +265,14 @@ where
 mod tests {
     use super::*;
     use crate::{
-        circuits::balance::spend_circuit::{SpendCircuit, SpendWitness},
+        circuits::balance::{
+            common::account_state::AccountState,
+            spend_circuit::{SpendCircuit, SpendWitness},
+        },
         common::{
             block_number::BlockNumber,
             private_state::FullPrivateState,
+            public_state::PublicState,
             transfer::Transfer,
             trees::{
                 account_tree::{AccountLeaf, AccountTree, SendLeaf, SendTree},
@@ -295,7 +299,7 @@ mod tests {
 
     #[cfg_attr(debug_assertions, ignore = "run with --release")]
     #[test]
-    fn test_send_tx_circuit_smoke() {
+    fn test_send_tx_circuit() {
         // Build a spend witness to reuse its proof inside the send circuit.
         let mut full_state = FullPrivateState::new();
 
@@ -359,12 +363,11 @@ mod tests {
         tx_tree.push(tx);
         let tx_merkle_proof = tx_tree.prove(local_id as u64);
         let tx_tree_root: PoseidonHashOut = tx_tree.get_root();
-        let tx_tree_root_bytes: Bytes32 = tx_tree_root.clone().into();
 
         let send_leaf = SendLeaf {
             prev: BlockNumber::new(2).unwrap(),
             cur: BlockNumber::new(3).unwrap(),
-            tx_tree_root: tx_tree_root_bytes,
+            tx_tree_root: tx_tree_root.into(),
         };
         let mut send_tree = SendTree::new(SEND_TREE_HEIGHT);
         send_tree.push(send_leaf.clone());
@@ -374,7 +377,7 @@ mod tests {
         let mut account_tree = AccountTree::new(ACCOUNT_TREE_HEIGHT);
         let account_leaf = AccountLeaf {
             index: send_tree.len() as u64,
-            prev: BlockNumber::new(1).unwrap(),
+            prev: send_leaf.cur,
             send_tree_root: send_tree.get_root(),
         };
         let user_id = UserId::new(0, local_id).unwrap();
@@ -382,14 +385,14 @@ mod tests {
         let account_merkle_proof = account_tree.prove(user_id.0);
         let account_tree_root = account_tree.get_root();
 
-        let public_state = crate::common::public_state::PublicState {
+        let public_state = PublicState {
             block_number: BlockNumber::new(6).unwrap(),
             account_tree_root,
             deposit_tree_root: PoseidonHashOut::default(),
             prev_public_state_root: PoseidonHashOut::default(),
         };
 
-        let account_state = crate::circuits::balance::common::account_state::AccountState::new(
+        let account_state = AccountState::new(
             user_id,
             public_state.account_tree_root,
             send_leaf,

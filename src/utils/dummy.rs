@@ -26,7 +26,7 @@ where
     C: GenericConfig<D, F = F> + 'static,
     <C as GenericConfig<D>>::Hasher: AlgebraicHasher<F>,
 {
-    pub(crate) fn new(common: &CommonCircuitData<F, D>) -> Self {
+    pub fn new(common: &CommonCircuitData<F, D>) -> Self {
         let data = dummy_circuit::<F, C, D>(common);
         let proof = dummy_proof(&data, vec![].into_iter().enumerate().collect()).unwrap();
         Self { proof }

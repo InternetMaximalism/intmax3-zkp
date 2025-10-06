@@ -17,11 +17,7 @@ pub fn vd_vec_len(config: &CircuitConfig) -> usize {
     4 + 4 * config.fri_config.num_cap_elements()
 }
 
-pub(crate) fn vd_to_vec<
-    F: RichField + Extendable<D>,
-    C: GenericConfig<D, F = F>,
-    const D: usize,
->(
+pub fn vd_to_vec<F: RichField + Extendable<D>, C: GenericConfig<D, F = F>, const D: usize>(
     config: &CircuitConfig,
     vd: &VerifierOnlyCircuitData<C, D>,
 ) -> Vec<F> {
@@ -33,7 +29,7 @@ pub(crate) fn vd_to_vec<
     vec
 }
 
-pub(crate) fn vd_to_vec_target(config: &CircuitConfig, vd: &VerifierCircuitTarget) -> Vec<Target> {
+pub fn vd_to_vec_target(config: &CircuitConfig, vd: &VerifierCircuitTarget) -> Vec<Target> {
     let mut vec = vec![];
     vec.extend_from_slice(&vd.circuit_digest.elements);
     for i in 0..config.fri_config.num_cap_elements() {
@@ -42,11 +38,7 @@ pub(crate) fn vd_to_vec_target(config: &CircuitConfig, vd: &VerifierCircuitTarge
     vec
 }
 
-pub(crate) fn vd_from_pis_slice<
-    F: RichField + Extendable<D>,
-    C: GenericConfig<D, F = F>,
-    const D: usize,
->(
+pub fn vd_from_pis_slice<F: RichField + Extendable<D>, C: GenericConfig<D, F = F>, const D: usize>(
     slice: &[F],
     config: &CircuitConfig,
 ) -> Result<VerifierOnlyCircuitData<C, D>>
@@ -99,7 +91,7 @@ pub fn vd_from_pis_slice_target(
     })
 }
 
-pub(crate) fn conditionally_connect_vd<F: RichField + Extendable<D>, const D: usize>(
+pub fn conditionally_connect_vd<F: RichField + Extendable<D>, const D: usize>(
     builder: &mut CircuitBuilder<F, D>,
     condition: BoolTarget,
     vk0: &VerifierCircuitTarget,
