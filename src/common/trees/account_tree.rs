@@ -10,6 +10,7 @@ use plonky2::{
 use serde::{Deserialize, Serialize};
 
 use crate::{
+    constants::{BLOCK_NUMBER_BITS, SEND_TREE_HEIGHT},
     ethereum_types::{
         bytes32::{Bytes32, Bytes32Target},
         u32limb_trait::{U32LimbTargetTrait as _, U32LimbTrait as _},
@@ -145,6 +146,24 @@ impl SendLeaf {
 }
 
 impl SendLeafTarget {
+    pub fn new<F: RichField + Extendable<D>, const D: usize>(
+        builder: &mut CircuitBuilder<F, D>,
+        is_checked: bool,
+    ) -> Self {
+        let prev = builder.add_virtual_target();
+        let cur = builder.add_virtual_target();
+        if is_checked {
+            builder.range_check(prev, BLOCK_NUMBER_BITS);
+            builder.range_check(cur, BLOCK_NUMBER_BITS);
+        }
+        let tx_tree_root = Bytes32Target::new(builder, is_checked);
+        Self {
+            prev,
+            cur,
+            tx_tree_root,
+        }
+    }
+
     pub fn to_vec(&self) -> Vec<Target> {
         [vec![self.prev, self.cur], self.tx_tree_root.to_vec()].concat()
     }
@@ -188,6 +207,24 @@ impl AccountLeaf {
 }
 
 impl AccountLeafTarget {
+    pub fn new<F: RichField + Extendable<D>, const D: usize>(
+        builder: &mut CircuitBuilder<F, D>,
+        is_checked: bool,
+    ) -> Self {
+        let index = builder.add_virtual_target();
+        let prev = builder.add_virtual_target();
+        if is_checked {
+            builder.range_check(index, SEND_TREE_HEIGHT);
+            builder.range_check(prev, BLOCK_NUMBER_BITS);
+        }
+        let send_tree_root = PoseidonHashOutTarget::new(builder);
+        Self {
+            index,
+            prev,
+            send_tree_root,
+        }
+    }
+
     pub fn to_vec(&self) -> Vec<Target> {
         [vec![self.index, self.prev], self.send_tree_root.to_vec()].concat()
     }

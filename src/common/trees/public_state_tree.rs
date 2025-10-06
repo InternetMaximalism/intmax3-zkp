@@ -1,9 +1,12 @@
-use crate::utils::{
-    leafable::{Leafable, LeafableTarget},
-    leafable_hasher::PoseidonLeafableHasher,
-    poseidon_hash_out::{PoseidonHashOut, PoseidonHashOutTarget},
-    trees::incremental_merkle_tree::{
-        IncrementalMerkleProof, IncrementalMerkleProofTarget, IncrementalMerkleTree,
+use crate::{
+    common::block_number::{BlockNumber, BlockNumberTarget},
+    utils::{
+        leafable::{Leafable, LeafableTarget},
+        leafable_hasher::PoseidonLeafableHasher,
+        poseidon_hash_out::{PoseidonHashOut, PoseidonHashOutTarget},
+        trees::incremental_merkle_tree::{
+            IncrementalMerkleProof, IncrementalMerkleProofTarget, IncrementalMerkleTree,
+        },
     },
 };
 use plonky2::{
@@ -27,7 +30,7 @@ pub type PublicStateMerkleProofTarget = IncrementalMerkleProofTarget<PublicState
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PublicState {
-    pub block_number: u64,
+    pub block_number: BlockNumber,
     pub account_tree_root: PoseidonHashOut,
     pub deposit_tree_root: PoseidonHashOut,
     pub prev_public_state_root: PoseidonHashOut,
@@ -35,7 +38,7 @@ pub struct PublicState {
 
 #[derive(Clone, Debug)]
 pub struct PublicStateTarget {
-    pub block_number: Target,
+    pub block_number: BlockNumberTarget,
     pub account_tree_root: PoseidonHashOutTarget,
     pub deposit_tree_root: PoseidonHashOutTarget,
     pub prev_public_state_root: PoseidonHashOutTarget,
@@ -44,7 +47,7 @@ pub struct PublicStateTarget {
 impl PublicState {
     pub fn to_u64_vec(&self) -> Vec<u64> {
         [
-            vec![self.block_number],
+            self.block_number.to_u64_vec(),
             self.account_tree_root.to_u64_vec(),
             self.deposit_tree_root.to_u64_vec(),
             self.prev_public_state_root.to_u64_vec(),
@@ -72,7 +75,7 @@ impl Leafable for PublicState {
 impl PublicStateTarget {
     pub fn to_vec(&self) -> Vec<Target> {
         [
-            vec![self.block_number],
+            self.block_number.to_vec(),
             self.account_tree_root.to_vec(),
             self.deposit_tree_root.to_vec(),
             self.prev_public_state_root.to_vec(),
@@ -82,9 +85,10 @@ impl PublicStateTarget {
 
     pub fn new<F: RichField + Extendable<D>, const D: usize>(
         builder: &mut CircuitBuilder<F, D>,
+        is_checked: bool,
     ) -> Self {
         Self {
-            block_number: builder.add_virtual_target(),
+            block_number: BlockNumberTarget::new(builder, is_checked),
             account_tree_root: PoseidonHashOutTarget::new(builder),
             deposit_tree_root: PoseidonHashOutTarget::new(builder),
             prev_public_state_root: PoseidonHashOutTarget::new(builder),
@@ -96,7 +100,7 @@ impl PublicStateTarget {
         value: &PublicState,
     ) -> Self {
         Self {
-            block_number: builder.constant(F::from_canonical_u64(value.block_number)),
+            block_number: BlockNumberTarget::constant(builder, value.block_number),
             account_tree_root: PoseidonHashOutTarget::constant(builder, value.account_tree_root),
             deposit_tree_root: PoseidonHashOutTarget::constant(builder, value.deposit_tree_root),
             prev_public_state_root: PoseidonHashOutTarget::constant(
@@ -107,7 +111,7 @@ impl PublicStateTarget {
     }
 
     pub fn set_witness<F: Field, W: WitnessWrite<F>>(&self, witness: &mut W, value: &PublicState) {
-        witness.set_target(self.block_number, F::from_canonical_u64(value.block_number));
+        self.block_number.set_witness(witness, value.block_number);
         self.account_tree_root
             .set_witness(witness, value.account_tree_root);
         self.deposit_tree_root
@@ -121,7 +125,7 @@ impl PublicStateTarget {
         builder: &mut CircuitBuilder<F, D>,
         other: &Self,
     ) -> BoolTarget {
-        let block_eq = builder.is_equal(self.block_number, other.block_number);
+        let block_eq = self.block_number.is_equal(builder, &other.block_number);
         let account_eq = self
             .account_tree_root
             .is_equal(builder, &other.account_tree_root);

@@ -50,7 +50,7 @@ impl UpdatePublicState {
         let merkle_proof = merkle_proof.ok_or(UpdatePublicStateError::InvalidMerkleProof(
             "Merkle proof is required when states are different".to_string(),
         ))?;
-        let calculated = merkle_proof.get_root(&old, old.block_number as u64);
+        let calculated = merkle_proof.get_root(&old, old.block_number.0);
         if calculated != new.prev_public_state_root {
             return Err(UpdatePublicStateError::InvalidMerkleProof(format!(
                 "calculated: {}, expected: {}",
@@ -72,8 +72,8 @@ impl UpdatePublicStateTarget {
     where
         <C as GenericConfig<D>>::Hasher: AlgebraicHasher<F>,
     {
-        let new = PublicStateTarget::new(builder);
-        let old = PublicStateTarget::new(builder);
+        let new = PublicStateTarget::new(builder, false);
+        let old = PublicStateTarget::new(builder, false);
         let merkle_proof = PublicStateMerkleProofTarget::new(builder, PUBLIC_STATE_TREE_HEIGHT);
 
         let states_equal = new.is_equal(builder, &old);
@@ -83,7 +83,7 @@ impl UpdatePublicStateTarget {
             builder,
             should_verify,
             &old,
-            old.block_number,
+            old.block_number.value,
             new.prev_public_state_root,
         );
 

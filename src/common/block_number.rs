@@ -1,7 +1,10 @@
 use plonky2::{
     field::{extension::Extendable, types::Field},
     hash::hash_types::RichField,
-    iop::{target::Target, witness::WitnessWrite},
+    iop::{
+        target::{BoolTarget, Target},
+        witness::WitnessWrite,
+    },
     plonk::circuit_builder::CircuitBuilder,
 };
 use rand::Rng;
@@ -33,6 +36,10 @@ impl BlockNumber {
     pub fn rand<R: Rng>(rng: &mut R) -> Self {
         Self(rng.gen_range(0..(1 << BLOCK_NUMBER_BITS)))
     }
+
+    pub fn to_u64_vec(&self) -> Vec<u64> {
+        vec![self.0]
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -59,6 +66,18 @@ impl BlockNumberTarget {
         Self {
             value: builder.constant(F::from_canonical_u64(value.0)),
         }
+    }
+
+    pub fn to_vec(&self) -> Vec<Target> {
+        vec![self.value]
+    }
+
+    pub fn is_equal<F: RichField + Extendable<D>, const D: usize>(
+        &self,
+        builder: &mut CircuitBuilder<F, D>,
+        other: &Self,
+    ) -> BoolTarget {
+        builder.is_equal(self.value, other.value)
     }
 
     pub fn set_witness<F: Field, W: WitnessWrite<F>>(&self, witness: &mut W, value: BlockNumber) {
