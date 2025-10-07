@@ -356,7 +356,7 @@ Helper methods:
 **Constraints**
 
 1. Let `public_state := public_state_update_witness.new`. Verify `public_state_update_witness.verify()`, `receiver_balance_proof.verify()`, `account_witness.verify(receiver_balance_proof.user_id, public_state.account_tree_root)`, and `deposit_witness.verify(receiver_balance_proof.user_id, public_state.deposit_tree_root)`.
-2. If `account_witness.account_leaf.prev != 0`, assert `account_witness.send_leaf.prev <= receiver_balance_proof.block_r` and `new_block_r < account_witness.send_leaf.cur`.
+3. Check `receiver_balance_proof.block_r <= new_block_r <= public_state.block_number`. Additionally, if `account_witness.account_leaf.prev != 0`, assert `account_witness.send_leaf.prev <= receiver_balance_proof.block_r` and `new_block_r < account_witness.send_leaf.cur`.
 3. Check `deposit_witness.deposit.block_number <= new_block_r`.
 4. Update `receiver_balance_proof.block_r <- new_block_r` and insert the deposit into `receiver_balance_proof.private_state`, updating `asset_root` and `nullifier_root`.
 
