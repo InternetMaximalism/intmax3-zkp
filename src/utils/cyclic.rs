@@ -246,6 +246,7 @@ mod tests {
 
     const D: usize = 2;
 
+    #[cfg_attr(debug_assertions, ignore = "run with --release")]
     #[test]
     fn test_cyclic_circuit_proves_multiple_steps() {
         type F = GoldilocksField;

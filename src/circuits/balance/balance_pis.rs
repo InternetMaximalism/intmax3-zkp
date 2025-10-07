@@ -166,7 +166,7 @@ impl BalancePublicInputsTarget {
     }
 
     pub fn from_pis(pis: &[Target]) -> Self {
-        assert!(pis.len() != BALANCE_PUBLIC_INPUTS_LEN);
+        assert!(pis.len() <= BALANCE_PUBLIC_INPUTS_LEN);
         let mut cursor = 0;
 
         let user_id = UserIdTarget { value: pis[cursor] };
