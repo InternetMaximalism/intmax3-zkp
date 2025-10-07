@@ -495,14 +495,9 @@ mod tests {
             &balance_common_data,
         );
         let balance_vd = balance_circuit.data.verifier_data();
-        let initial_balance_fields = BalanceFullPublicInputs {
-            pis: prev_balance_pis.clone(),
-            vd: balance_vd.verifier_only.clone(),
-        }
-        .to_u64_vec(&balance_vd.common.config)
-        .to_field_vec::<F>();
+        let initial_pis = prev_balance_pis.to_u64_vec().to_field_vec::<F>();
         let prev_balance_proof = balance_circuit
-            .prove(Some(initial_balance_fields.as_slice()), None)
+            .prove(Some(initial_pis.as_slice()), None)
             .expect("balance proof should succeed");
 
         let witness = SpendTxWitness {
