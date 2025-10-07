@@ -72,22 +72,13 @@ where
 {
     pub fn to_public_inputs(
         &self,
-        balance_vd: &VerifierCircuitData<F, C, D>,
+        balance_cd: &CommonCircuitData<F, D>,
     ) -> Result<BalanceFullPublicInputs<F, C, D>, SpendTxError> {
-        // verify the previous balance proof
-        balance_vd
-            .verify(self.prev_balance_proof.clone())
-            .map_err(|e| SpendTxError::InvalidBalanceProof(e.to_string()))?;
-
         let prev_balance_full_pis = BalanceFullPublicInputs::<F, C, D>::from_u64_slice(
             &self.prev_balance_proof.public_inputs.to_u64_vec(),
-            &balance_vd.common.config,
+            &balance_cd.config,
         )?;
-        if prev_balance_full_pis.vd != balance_vd.verifier_only {
-            return Err(SpendTxError::InvalidBalanceVd(
-                "prev_balance_full_pis.vd != balance_vd.verifier_only".to_string(),
-            ));
-        }
+        let balance_vd = prev_balance_full_pis.vd.clone();
         let prev_balance_pis = prev_balance_full_pis.pis;
 
         if prev_balance_pis.public_state != self.update_public_state.old {
@@ -151,7 +142,7 @@ where
         };
         Ok(BalanceFullPublicInputs {
             pis: new_balance_pis,
-            vd: balance_vd.verifier_only.clone(),
+            vd: balance_vd,
         })
     }
 }
@@ -273,7 +264,7 @@ where
     <C as GenericConfig<D>>::Hasher: AlgebraicHasher<F>,
 {
     pub data: CircuitData<F, C, D>,
-    pub balance_vd: VerifierCircuitData<F, C, D>,
+    pub balance_cd: CommonCircuitData<F, D>,
     pub target: SendTxTarget<D>,
     pub public_inputs: BalanceFullPublicInputsTarget,
 }
@@ -285,19 +276,19 @@ where
     <C as GenericConfig<D>>::Hasher: AlgebraicHasher<F>,
 {
     pub fn new(
-        balance_vd: &VerifierCircuitData<F, C, D>,
+        balance_cd: &CommonCircuitData<F, D>,
         spend_vd: &VerifierCircuitData<F, C, D>,
     ) -> Self {
         let mut builder = CircuitBuilder::<F, D>::new(CircuitConfig::standard_recursion_config());
-        let target = SendTxTarget::new(&mut builder, &balance_vd.common, spend_vd);
+        let target = SendTxTarget::new(&mut builder, &balance_cd, spend_vd);
         let public_inputs = target.new_full_pis.clone();
 
-        builder.register_public_inputs(&public_inputs.to_vec(&balance_vd.common.config));
+        builder.register_public_inputs(&public_inputs.to_vec(&balance_cd.config));
         let data = builder.build();
 
         Self {
             data,
-            balance_vd: balance_vd.clone(),
+            balance_cd: balance_cd.clone(),
             target,
             public_inputs,
         }
@@ -307,7 +298,7 @@ where
         &self,
         witness: &SpendTxWitness<F, C, D>,
     ) -> Result<ProofWithPublicInputs<F, C, D>, SpendTxError> {
-        let balance_pis = witness.to_public_inputs(&self.balance_vd)?;
+        let balance_pis = witness.to_public_inputs(&self.balance_cd)?;
         let mut pw = PartialWitness::<F>::new();
 
         self.target
@@ -497,6 +488,8 @@ mod tests {
             &balance_common_data,
         );
         let balance_vd = balance_circuit.data.verifier_data();
+        let balance_cd = balance_circuit.data.common.clone();
+
         let initial_pis = prev_balance_pis.to_u64_vec().to_field_vec::<F>();
         let prev_balance_proof = balance_circuit
             .prove(Some(initial_pis.as_slice()), None)
@@ -508,7 +501,7 @@ mod tests {
             tx_settlement,
         };
 
-        let send_tx_circuit = SendTxCircuit::<F, C, D>::new(&balance_vd, &spend_vd);
+        let send_tx_circuit = SendTxCircuit::<F, C, D>::new(&balance_cd, &spend_vd);
         let proof = send_tx_circuit
             .prove(&witness)
             .expect("send tx proof should succeed");
@@ -519,7 +512,7 @@ mod tests {
             .expect("send tx verification should succeed");
 
         let expected_pis = witness
-            .to_public_inputs(&balance_vd)
+            .to_public_inputs(&balance_cd)
             .expect("expected balance public inputs");
         let expected_u64 = expected_pis.to_u64_vec(&balance_vd.common.config);
         let expected_fields = expected_u64.to_field_vec::<F>();

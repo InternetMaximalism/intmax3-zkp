@@ -95,3 +95,41 @@ where
             .map_err(|e| BalanceCircuitError::FailedToProve(e.to_string()))
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use plonky2::{
+        field::goldilocks_field::GoldilocksField, plonk::config::PoseidonGoldilocksConfig,
+    };
+
+    use crate::circuits::balance::{
+        balance_circuit::BalanceCircuit, receive_deposit_circuit::ReceiveDepositCircuit,
+        receive_transfer_circuit::ReceiveTransferCircuit, send_tx_circuit::SendTxCircuit,
+        spend_circuit::SpendCircuit, switch_board::BalanceSwichBoardCircuit,
+    };
+
+    const D: usize = 2;
+    type F = GoldilocksField;
+    type C = PoseidonGoldilocksConfig;
+
+    #[test]
+    fn test_build_balance_circuit() {
+        let balance_cd = BalanceCircuit::<F, C, D>::generate_cd();
+        let spend_circuit = SpendCircuit::<F, C, D>::new();
+        let spend_vd = spend_circuit.data.verifier_data();
+        let receive_transfer_circuit =
+            ReceiveTransferCircuit::<F, C, D>::new(&balance_cd, &spend_vd);
+        let receive_deposit_circuit = ReceiveDepositCircuit::<F, C, D>::new(&balance_cd);
+        let send_tx_circuit = SendTxCircuit::<F, C, D>::new(&balance_cd, &spend_vd);
+
+        let switch_circuit = BalanceSwichBoardCircuit::new(
+            &balance_cd.config,
+            &receive_transfer_circuit.data.verifier_data(),
+            &receive_deposit_circuit.data.verifier_data(),
+            &send_tx_circuit.data.verifier_data(),
+        );
+
+        // let _balance_circuit =
+        //     BalanceCircuit::<F, C, D>::new(&balance_cd, &switch_circuit.data.verifier_data());
+    }
+}

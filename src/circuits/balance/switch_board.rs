@@ -385,11 +385,9 @@ where
     <C as GenericConfig<D>>::Hasher: AlgebraicHasher<F>,
 {
     pub data: CircuitData<F, C, D>,
-    pub balance_vd: VerifierCircuitData<F, C, D>,
     pub receive_transfer_vd: VerifierCircuitData<F, C, D>,
     pub receive_deposit_vd: VerifierCircuitData<F, C, D>,
     pub send_tx_vd: VerifierCircuitData<F, C, D>,
-    pub balance_config: CircuitConfig,
     pub dummy_proofs: HashMap<usize, ProofWithPublicInputs<F, C, D>>,
     pub target: BalanceSwichBoardTarget<D>,
     pub public_inputs: BalanceFullPublicInputsTarget,
@@ -402,13 +400,12 @@ where
     <C as GenericConfig<D>>::Hasher: AlgebraicHasher<F>,
 {
     pub fn new(
-        balance_vd: &VerifierCircuitData<F, C, D>,
+        balance_config: &CircuitConfig,
         receive_transfer_vd: &VerifierCircuitData<F, C, D>,
         receive_deposit_vd: &VerifierCircuitData<F, C, D>,
         send_tx_vd: &VerifierCircuitData<F, C, D>,
     ) -> Self {
-        let balance_config = balance_vd.common.config.clone();
-        let mut builder = CircuitBuilder::<F, D>::new(balance_config.clone());
+        let mut builder = CircuitBuilder::<F, D>::new(CircuitConfig::default());
         let target = BalanceSwichBoardTarget::new::<F, C>(
             &mut builder,
             &balance_config,
@@ -439,11 +436,9 @@ where
 
         Self {
             data,
-            balance_vd: balance_vd.clone(),
             receive_transfer_vd: receive_transfer_vd.clone(),
             receive_deposit_vd: receive_deposit_vd.clone(),
             send_tx_vd: send_tx_vd.clone(),
-            balance_config,
             dummy_proofs,
             target,
             public_inputs,
@@ -452,10 +447,11 @@ where
 
     pub fn prove(
         &self,
+        balance_vd: &VerifierCircuitData<F, C, D>,
         witness: &BalanceSwichBoard<F, C, D>,
     ) -> Result<ProofWithPublicInputs<F, C, D>, BalanceSwitchBoardError> {
         let new_full_pis = witness.to_public_inputs(
-            &self.balance_vd,
+            balance_vd,
             &self.receive_transfer_vd,
             &self.receive_deposit_vd,
             &self.send_tx_vd,
@@ -465,7 +461,7 @@ where
         self.target.set_witness(
             &mut pw,
             witness,
-            &self.balance_vd,
+            balance_vd,
             &new_full_pis,
             &self.dummy_proofs,
         )?;
@@ -565,6 +561,7 @@ mod tests {
     fn test_balance_switch_board_circuit() {
         let (balance_data, balance_target, balance_config) = build_balance_circuit();
         let balance_vd = balance_data.verifier_data();
+        let balance_cd = balance_data.common.clone();
 
         let initial_user = UserId::new(0, 1).unwrap();
         let initial_salt = Salt::default();
@@ -582,7 +579,7 @@ mod tests {
         let send_tx_vd = balance_vd.clone();
 
         let circuit = BalanceSwichBoardCircuit::new(
-            &balance_vd,
+            &balance_cd.config,
             &receive_transfer_vd,
             &receive_deposit_vd,
             &send_tx_vd,
@@ -596,7 +593,7 @@ mod tests {
             send_tx_proof: None,
         };
 
-        let proof_initial = circuit.prove(&witness_initial).unwrap();
+        let proof_initial = circuit.prove(&balance_vd, &witness_initial).unwrap();
         circuit.data.verify(proof_initial.clone()).unwrap();
         let expected_initial = witness_initial
             .to_public_inputs(
@@ -618,7 +615,9 @@ mod tests {
             receive_deposit_proof: None,
             send_tx_proof: None,
         };
-        let proof_receive_transfer = circuit.prove(&witness_receive_transfer).unwrap();
+        let proof_receive_transfer = circuit
+            .prove(&balance_vd, &witness_receive_transfer)
+            .unwrap();
         circuit.data.verify(proof_receive_transfer.clone()).unwrap();
         let expected_receive_transfer = witness_receive_transfer
             .to_public_inputs(
@@ -643,7 +642,9 @@ mod tests {
             receive_deposit_proof: Some(deposit_proof.clone()),
             send_tx_proof: None,
         };
-        let proof_receive_deposit = circuit.prove(&witness_receive_deposit).unwrap();
+        let proof_receive_deposit = circuit
+            .prove(&balance_vd, &witness_receive_deposit)
+            .unwrap();
         circuit.data.verify(proof_receive_deposit.clone()).unwrap();
         let expected_receive_deposit = witness_receive_deposit
             .to_public_inputs(
@@ -668,7 +669,7 @@ mod tests {
             receive_deposit_proof: None,
             send_tx_proof: Some(send_proof.clone()),
         };
-        let proof_send_tx = circuit.prove(&witness_send_tx).unwrap();
+        let proof_send_tx = circuit.prove(&balance_vd, &witness_send_tx).unwrap();
         circuit.data.verify(proof_send_tx.clone()).unwrap();
         let expected_send_tx = witness_send_tx
             .to_public_inputs(

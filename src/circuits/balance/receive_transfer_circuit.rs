@@ -110,43 +110,26 @@ where
 {
     pub fn to_public_inputs(
         &self,
-        balance_vd: &VerifierCircuitData<F, C, D>,
+        balance_cd: &CommonCircuitData<F, D>,
     ) -> Result<BalanceFullPublicInputs<F, C, D>, ReceiveTransferError> {
-        // verify balance proofs
-        balance_vd
-            .verify(self.prev_balance_proof.clone())
-            .map_err(|e| {
-                ReceiveTransferError::InvalidBalanceProof(format!(
-                    "failed to verify prev_balance_proof: {e}"
-                ))
-            })?;
-        balance_vd
-            .verify(self.sender_balance_proof.clone())
-            .map_err(|e| {
-                ReceiveTransferError::InvalidBalanceProof(format!(
-                    "failed to verify sender_balance_proof: {e}"
-                ))
-            })?;
         // obtain public inputs
         let prev_full_pis = BalanceFullPublicInputs::<F, C, D>::from_u64_slice(
             &self.prev_balance_proof.public_inputs.to_u64_vec(),
-            &balance_vd.common.config,
+            &balance_cd.config,
         )?;
         let sender_full_pis = BalanceFullPublicInputs::<F, C, D>::from_u64_slice(
             &self.sender_balance_proof.public_inputs.to_u64_vec(),
-            &balance_vd.common.config,
+            &balance_cd.config,
         )?;
         // balance vd check
-        if prev_full_pis.vd != balance_vd.verifier_only {
-            return Err(ReceiveTransferError::InvalidBalanceVd(
-                "prev_balance_proof vd mismatch".to_string(),
-            ));
+        if prev_full_pis.vd != sender_full_pis.vd {
+            return Err(ReceiveTransferError::InvalidBalanceVd(format!(
+                "prev_full_pis.vd {:?} != sender_full_pis.vd {:?}",
+                prev_full_pis.vd, sender_full_pis.vd
+            )));
         }
-        if sender_full_pis.vd != balance_vd.verifier_only {
-            return Err(ReceiveTransferError::InvalidBalanceVd(
-                "sender_balance_proof vd mismatch".to_string(),
-            ));
-        }
+        let balance_vd = &prev_full_pis.vd;
+
         let prev_balance_pis = &prev_full_pis.pis;
         let sender_balance_pis = &sender_full_pis.pis;
 
@@ -319,7 +302,7 @@ where
                 block_r: self.new_block_r,
                 private_commitment: new_private_commitment,
             },
-            vd: balance_vd.verifier_only.clone(),
+            vd: balance_vd.clone(),
         };
         Ok(new_full_pis)
     }
@@ -539,7 +522,7 @@ where
     <C as GenericConfig<D>>::Hasher: AlgebraicHasher<F>,
 {
     pub data: CircuitData<F, C, D>,
-    pub balance_vd: VerifierCircuitData<F, C, D>,
+    pub balance_cd: CommonCircuitData<F, D>,
     pub target: ReceiveTransferTarget<D>,
     pub public_inputs: BalanceFullPublicInputsTarget,
 }
@@ -551,18 +534,18 @@ where
     <C as GenericConfig<D>>::Hasher: AlgebraicHasher<F>,
 {
     pub fn new(
-        balance_vd: &VerifierCircuitData<F, C, D>,
+        balance_cd: &CommonCircuitData<F, D>,
         spend_vd: &VerifierCircuitData<F, C, D>,
     ) -> Self {
         let mut builder = CircuitBuilder::<F, D>::new(CircuitConfig::standard_recursion_config());
-        let target = ReceiveTransferTarget::new(&mut builder, &balance_vd.common, spend_vd);
+        let target = ReceiveTransferTarget::new(&mut builder, &balance_cd, spend_vd);
         let public_inputs = target.new_full_pis.clone();
-        builder.register_public_inputs(&public_inputs.to_vec(&balance_vd.common.config));
+        builder.register_public_inputs(&public_inputs.to_vec(&balance_cd.config));
         let data = builder.build();
 
         Self {
             data,
-            balance_vd: balance_vd.clone(),
+            balance_cd: balance_cd.clone(),
             target,
             public_inputs,
         }
@@ -572,7 +555,7 @@ where
         &self,
         witness: &ReceiveTransferWitness<F, C, D>,
     ) -> Result<ProofWithPublicInputs<F, C, D>, ReceiveTransferError> {
-        let new_full_pis = witness.to_public_inputs(&self.balance_vd)?;
+        let new_full_pis = witness.to_public_inputs(&self.balance_cd)?;
         let mut pw = PartialWitness::<F>::new();
         self.target
             .set_witness::<F, C, _>(&mut pw, witness, &new_full_pis);
@@ -856,6 +839,7 @@ mod tests {
         let balance_circuit =
             TestCyclicCircuit::<F, C, D>::new(balance_config, pis_len, &balance_common_data);
         let balance_vd = balance_circuit.data.verifier_data();
+        let balance_cd = balance_vd.common.clone();
 
         let receiver_prev_full_pis = BalanceFullPublicInputs {
             pis: receiver_prev_balance_pis.clone(),
@@ -893,7 +877,7 @@ mod tests {
             update_private_state: update_private_state.clone(),
         };
 
-        let circuit = ReceiveTransferCircuit::<F, C, D>::new(&balance_vd, &spend_vd);
+        let circuit = ReceiveTransferCircuit::<F, C, D>::new(&balance_cd, &spend_vd);
         let proof = circuit
             .prove(&witness)
             .expect("receive transfer proof should succeed");
@@ -904,7 +888,7 @@ mod tests {
             .expect("receive transfer proof verification");
 
         let expected = witness
-            .to_public_inputs(&balance_vd)
+            .to_public_inputs(&balance_cd)
             .expect("expected public inputs");
         let expected_fields = expected
             .to_u64_vec(&balance_vd.common.config)

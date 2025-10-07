@@ -4,7 +4,7 @@ use plonky2::{
     iop::witness::{PartialWitness, WitnessWrite},
     plonk::{
         circuit_builder::CircuitBuilder,
-        circuit_data::{CircuitConfig, CircuitData, CommonCircuitData, VerifierCircuitData},
+        circuit_data::{CircuitConfig, CircuitData, CommonCircuitData},
         config::{AlgebraicHasher, GenericConfig},
         proof::{ProofWithPublicInputs, ProofWithPublicInputsTarget},
     },
@@ -89,26 +89,13 @@ where
 {
     pub fn to_public_inputs(
         &self,
-        balance_vd: &VerifierCircuitData<F, C, D>,
+        balance_cd: &CommonCircuitData<F, D>,
     ) -> Result<BalanceFullPublicInputs<F, C, D>, ReceiveDepositError> {
-        balance_vd
-            .verify(self.prev_balance_proof.clone())
-            .map_err(|e| {
-                ReceiveDepositError::InvalidBalanceProof(format!(
-                    "failed to verify prev_balance_proof: {e}"
-                ))
-            })?;
-
         let prev_full_pis = BalanceFullPublicInputs::<F, C, D>::from_u64_slice(
             &self.prev_balance_proof.public_inputs.to_u64_vec(),
-            &balance_vd.common.config,
+            &balance_cd.config,
         )?;
-
-        if prev_full_pis.vd != balance_vd.verifier_only {
-            return Err(ReceiveDepositError::InvalidBalanceVd(
-                "prev_balance_proof vd mismatch".to_string(),
-            ));
-        }
+        let balance_vd = prev_full_pis.vd.clone();
 
         let prev_balance_pis = prev_full_pis.pis;
         let receiver_user_id = prev_balance_pis.user_id;
@@ -241,7 +228,7 @@ where
                 block_r: self.new_block_r,
                 private_commitment: new_private_commitment,
             },
-            vd: balance_vd.verifier_only.clone(),
+            vd: balance_vd,
         };
 
         Ok(new_balance_pis)
@@ -390,7 +377,7 @@ where
     <C as GenericConfig<D>>::Hasher: AlgebraicHasher<F>,
 {
     pub data: CircuitData<F, C, D>,
-    pub balance_vd: VerifierCircuitData<F, C, D>,
+    pub balance_cd: CommonCircuitData<F, D>,
     pub target: ReceiveDepositTarget<D>,
     pub public_inputs: BalanceFullPublicInputsTarget,
 }
@@ -401,16 +388,16 @@ where
     C: GenericConfig<D, F = F> + 'static,
     <C as GenericConfig<D>>::Hasher: AlgebraicHasher<F>,
 {
-    pub fn new(balance_vd: &VerifierCircuitData<F, C, D>) -> Self {
+    pub fn new(balance_cd: &CommonCircuitData<F, D>) -> Self {
         let mut builder = CircuitBuilder::<F, D>::new(CircuitConfig::standard_recursion_config());
-        let target = ReceiveDepositTarget::new::<F, C>(&mut builder, &balance_vd.common);
+        let target = ReceiveDepositTarget::new::<F, C>(&mut builder, &balance_cd);
         let public_inputs = target.new_full_pis.clone();
-        builder.register_public_inputs(&public_inputs.to_vec(&balance_vd.common.config));
+        builder.register_public_inputs(&public_inputs.to_vec(&balance_cd.config));
         let data = builder.build();
 
         Self {
             data,
-            balance_vd: balance_vd.clone(),
+            balance_cd: balance_cd.clone(),
             target,
             public_inputs,
         }
@@ -420,7 +407,7 @@ where
         &self,
         witness: &ReceiveDepositWitness<F, C, D>,
     ) -> Result<ProofWithPublicInputs<F, C, D>, ReceiveDepositError> {
-        let new_full_pis = witness.to_public_inputs(&self.balance_vd)?;
+        let new_full_pis = witness.to_public_inputs(&self.balance_cd)?;
         let mut pw = PartialWitness::<F>::new();
         self.target
             .set_witness::<F, C, _>(&mut pw, witness, &new_full_pis);
@@ -592,6 +579,7 @@ mod tests {
             &balance_common_data,
         );
         let balance_vd = balance_circuit.data.verifier_data();
+        let balance_cd = balance_vd.common.clone();
 
         let prev_full_pis = BalanceFullPublicInputs {
             pis: prev_balance_pis.clone(),
@@ -613,7 +601,7 @@ mod tests {
             update_private_state,
         };
 
-        let circuit = ReceiveDepositCircuit::<F, C, D>::new(&balance_vd);
+        let circuit = ReceiveDepositCircuit::<F, C, D>::new(&balance_cd);
         let proof = circuit
             .prove(&witness)
             .expect("receive deposit proof should succeed");
@@ -624,11 +612,9 @@ mod tests {
             .expect("receive deposit proof verification");
 
         let expected = witness
-            .to_public_inputs(&balance_vd)
+            .to_public_inputs(&balance_cd)
             .expect("expected public inputs");
-        let expected_fields = expected
-            .to_u64_vec(&balance_vd.common.config)
-            .to_field_vec::<F>();
+        let expected_fields = expected.to_u64_vec(&balance_cd.config).to_field_vec::<F>();
 
         assert_eq!(proof.public_inputs, expected_fields);
         assert_eq!(expected.pis.block_r, new_block_r);
