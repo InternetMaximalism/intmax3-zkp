@@ -87,7 +87,6 @@ impl Deposit {
             self.recipient.to_u32_vec(),
             vec![self.token_index],
             self.amount.to_u32_vec(),
-            self.block_number.to_u32_vec(),
             self.aux_data.to_u32_vec(),
         ]
         .concat();
@@ -192,7 +191,6 @@ impl DepositTarget {
         inputs.extend(self.recipient.to_vec());
         inputs.push(self.token_index);
         inputs.extend(self.amount.to_vec());
-        inputs.extend(self.block_number.to_u32_vec(builder));
         inputs.extend(self.aux_data.to_vec());
         Bytes32Target::from_slice(&builder.keccak256::<C>(&inputs))
     }
