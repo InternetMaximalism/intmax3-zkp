@@ -17,7 +17,7 @@ use serde::{Deserialize, Serialize};
 use crate::{
     common::{
         block::Block,
-        block_number::{self, BlockNumber, BlockNumberTarget},
+        block_number::{BlockNumber, BlockNumberTarget},
         deposit::Deposit,
         trees::{
             account_tree::{AccountLeaf, AccountTree, SendLeaf},

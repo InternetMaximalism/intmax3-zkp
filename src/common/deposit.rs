@@ -7,6 +7,7 @@ use plonky2::{
         config::{AlgebraicHasher, GenericConfig},
     },
 };
+use plonky2_keccak::{builder::BuilderKeccak256 as _, utils::solidity_keccak256};
 use rand::Rng;
 use serde::{Deserialize, Serialize};
 
@@ -78,10 +79,24 @@ impl Deposit {
     pub fn nullifier(&self) -> Bytes32 {
         self.poseidon_hash().into()
     }
+
+    pub fn hash_with_prev_hash(&self, prev_hash: Bytes32) -> Bytes32 {
+        let inputs: Vec<u32> = [
+            prev_hash.to_u32_vec(),
+            self.depositor.to_u32_vec(),
+            self.recipient.to_u32_vec(),
+            vec![self.token_index],
+            self.amount.to_u32_vec(),
+            self.block_number.to_u32_vec(),
+            self.aux_data.to_u32_vec(),
+        ]
+        .concat();
+        Bytes32::from_u32_slice(&solidity_keccak256(&inputs)).expect("hashing result invalid")
+    }
 }
 
 impl DepositTarget {
-    pub fn to_vec(&self) -> Vec<Target> {
+    pub fn to_u64_vec(&self) -> Vec<Target> {
         [
             self.depositor.to_vec(),
             self.recipient.to_vec(),
@@ -140,7 +155,7 @@ impl DepositTarget {
         &self,
         builder: &mut CircuitBuilder<F, D>,
     ) -> PoseidonHashOutTarget {
-        PoseidonHashOutTarget::hash_inputs(builder, &self.to_vec())
+        PoseidonHashOutTarget::hash_inputs(builder, &self.to_u64_vec())
     }
 
     pub fn nullifier<F: RichField + Extendable<D>, const D: usize>(
@@ -158,6 +173,28 @@ impl DepositTarget {
         self.amount.set_witness(witness, value.amount);
         self.block_number.set_witness(witness, value.block_number);
         self.aux_data.set_witness(witness, value.aux_data);
+    }
+
+    pub fn hash_with_prev_hash<
+        F: RichField + Extendable<D>,
+        C: GenericConfig<D, F = F> + 'static,
+        const D: usize,
+    >(
+        &self,
+        builder: &mut CircuitBuilder<F, D>,
+        prev_hash: Bytes32Target,
+    ) -> Bytes32Target
+    where
+        <C as GenericConfig<D>>::Hasher: AlgebraicHasher<F>,
+    {
+        let mut inputs = prev_hash.to_vec();
+        inputs.extend(self.depositor.to_vec());
+        inputs.extend(self.recipient.to_vec());
+        inputs.push(self.token_index);
+        inputs.extend(self.amount.to_vec());
+        inputs.extend(self.block_number.to_u32_vec(builder));
+        inputs.extend(self.aux_data.to_vec());
+        Bytes32Target::from_slice(&builder.keccak256::<C>(&inputs))
     }
 }
 
@@ -189,6 +226,6 @@ impl LeafableTarget for DepositTarget {
     where
         <C as GenericConfig<D>>::Hasher: AlgebraicHasher<F>,
     {
-        PoseidonHashOutTarget::hash_inputs(builder, &self.to_vec())
+        PoseidonHashOutTarget::hash_inputs(builder, &self.to_u64_vec())
     }
 }

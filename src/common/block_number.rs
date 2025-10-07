@@ -40,6 +40,10 @@ impl BlockNumber {
     pub fn to_u64_vec(&self) -> Vec<u64> {
         vec![self.0]
     }
+
+    pub fn to_u32_vec(&self) -> Vec<u32> {
+        vec![(self.0 >> 32) as u32, self.0 as u32]
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -70,6 +74,19 @@ impl BlockNumberTarget {
 
     pub fn to_vec(&self) -> Vec<Target> {
         vec![self.value]
+    }
+
+    pub fn to_u32_vec<F: RichField + Extendable<D>, const D: usize>(
+        &self,
+        builder: &mut CircuitBuilder<F, D>,
+    ) -> Vec<Target> {
+        let bits = builder.split_le(self.value, 64);
+        let (low_bits, high_bits) = bits.split_at(32);
+        let low = builder.le_sum(low_bits.iter());
+        let high = builder.le_sum(high_bits.iter());
+        builder.range_check(low, 32);
+        builder.range_check(high, 32);
+        vec![high, low]
     }
 
     pub fn is_equal<F: RichField + Extendable<D>, const D: usize>(
