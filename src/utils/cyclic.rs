@@ -1,7 +1,4 @@
-use crate::{
-    constants::CYCLIC_CIRCUIT_PADDING_DEGREE,
-    utils::error::{CyclicError, Result, UtilsError},
-};
+use crate::utils::error::{CyclicError, Result, UtilsError};
 use anyhow::Context;
 use plonky2::{
     field::extension::Extendable,
@@ -160,20 +157,29 @@ where
         let prev_proof = builder.add_virtual_proof_with_pis(cd);
 
         // parse public inputs
+        let prev_pis = &prev_proof.public_inputs[..pis_len];
         let vd = vd_from_pis_slice_target(
             &prev_proof.public_inputs[pis_len..pis_len + vd_vec_len(&builder.config)],
             &builder.config,
         )
         .unwrap();
 
+        // register public inputs
+        builder.register_public_inputs(prev_pis);
+        let vd_pis = builder.add_verifier_data_public_inputs();
+        builder.connect_verifier_data(&vd, &vd_pis);
+
         builder
             .conditionally_verify_cyclic_proof_or_dummy::<C>(is_not_first_step, &prev_proof, cd)
             .expect("Failed to conditionally verify cyclic proof or dummy");
 
-        // register public inputs
-        builder.register_public_inputs(&prev_proof.public_inputs);
-
-        let data = builder.build::<C>();
+        let (data, success) = builder.try_build_with_options::<C>(true);
+        assert_eq!(
+            data.common,
+            cd.clone(),
+            "Common data mismatch in balance circuit"
+        );
+        assert!(success, "Failed to build balance circuit");
 
         Self {
             pis_len,
@@ -220,11 +226,65 @@ where
             circuit_digest: builder.add_virtual_hash(),
         };
         builder.verify_proof::<C>(&proof, &verifier_data, &data.common);
-        while builder.num_gates() < 1 << CYCLIC_CIRCUIT_PADDING_DEGREE {
+        // pad degree should be ajusted to fullfill common data equality
+        while builder.num_gates() < 1 << 12 {
             builder.add_gate(NoopGate, vec![]);
         }
         let mut common = builder.build::<C>().common;
         common.num_public_inputs = pis_len + vd_vec_len(&common.config);
         common
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use plonky2::{
+        field::{goldilocks_field::GoldilocksField, types::Field},
+        plonk::{circuit_data::CircuitConfig, config::PoseidonGoldilocksConfig},
+    };
+
+    const D: usize = 2;
+
+    #[test]
+    fn test_cyclic_circuit_proves_multiple_steps() {
+        type F = GoldilocksField;
+        type C = PoseidonGoldilocksConfig;
+
+        let pis_len = 8;
+        let common_data = TestCyclicCircuit::<F, C, D>::generate_cd(pis_len);
+        let config = CircuitConfig::standard_recursion_config();
+        let circuit = TestCyclicCircuit::<F, C, D>::new(config, pis_len, &common_data);
+
+        let total_pi_len = circuit.data.common.num_public_inputs;
+        assert_eq!(
+            total_pi_len,
+            pis_len + vd_vec_len(&circuit.data.common.config)
+        );
+
+        let initial_pis: Vec<F> = (0..total_pi_len)
+            .map(|i| F::from_canonical_usize(i + 1))
+            .collect();
+
+        let first_proof = circuit
+            .prove(Some(&initial_pis), None)
+            .expect("first step proof should succeed");
+        circuit
+            .data
+            .verify(first_proof.clone())
+            .expect("first proof must verify");
+
+        let second_proof = circuit
+            .prove(None, Some(&first_proof))
+            .expect("second step proof should succeed");
+        circuit
+            .data
+            .verify(second_proof.clone())
+            .expect("second proof must verify");
+
+        assert_eq!(
+            &second_proof.public_inputs[..total_pi_len],
+            &first_proof.public_inputs[..total_pi_len]
+        );
     }
 }
