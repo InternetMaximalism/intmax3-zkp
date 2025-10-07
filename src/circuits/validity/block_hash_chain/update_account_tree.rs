@@ -2,9 +2,10 @@ use crate::{
     common::{
         block::Block,
         block_number::BlockNumber,
-        trees::account_tree::{AccountLeaf, SendMerkleProof},
+        trees::account_tree::{AccountLeaf, AccountMerkleProof, SendMerkleProof},
     },
     ethereum_types::bytes32::Bytes32,
+    utils::poseidon_hash_out::PoseidonHashOut,
 };
 
 #[derive(thiserror::Error, Debug)]
@@ -13,36 +14,34 @@ pub enum UpdateAccountTreeError {
     InvalidLength(String),
 }
 
+#[derive(Clone, Debug)]
+pub struct UpdateAccountPublicInputs {
+    pub block_number: BlockNumber,
+    pub prev_block_hash_chain: Bytes32,
+    pub prev_account_tree_root: PoseidonHashOut,
+    pub new_block_hash_chain: Bytes32,
+    pub new_account_tree_root: PoseidonHashOut,
+}
+
+#[derive(Clone, Debug)]
 pub struct UpdateAccountTree {
     pub prev_block_hash_chain: Bytes32,
+    pub prev_account_tree_root: PoseidonHashOut,
 
+    // block number that is being processed
+    pub block_number: BlockNumber,
+
+    // contains num_users, which is circuit constant
     pub block: Block,
 
-    pub block_number: BlockNumber,
-    pub aggregator_id: u32,
-    pub local_ids: Vec<u32>,
-
+    // account/send merkle proofs corresponding to local_ids in the block
     pub prev_account_leaves: Vec<AccountLeaf>,
+    pub account_merkle_proofs: Vec<AccountMerkleProof>,
     pub send_merkle_proofs: Vec<SendMerkleProof>,
 }
 
 impl UpdateAccountTree {
-    pub fn verify(&self) -> Result<(), UpdateAccountTreeError> {
-        // if self.local_ids.len() != MAX_NUM_USERS_PER_BLOCK {
-        //     return Err(UpdateAccountTreeError::InvalidLength(format!(
-        //         "local_ids length is {}, expected {}",
-        //         self.local_ids.len(),
-        //         MAX_NUM_USERS_PER_BLOCK
-        //     )));
-        // }
-        // if self.send_indices.len() != self.send_merkle_proofs.len() {
-        //     return Err(UpdateAccountTreeError::InvalidLength(format!(
-        //         "send_indices length is {}, but send_merkle_proofs length is {}",
-        //         self.send_indices.len(),
-        //         self.send_merkle_proofs.len()
-        //     )));
-        // }
-
-        Ok(())
+    pub fn to_public_inputs(&self) -> Result<UpdateAccountPublicInputs, UpdateAccountTreeError> {
+        todo!()
     }
 }
