@@ -95,27 +95,6 @@ pub struct AccountLeaf {
     pub send_tree_root: PoseidonHashOut, // the root of send tree
 }
 
-impl AccountLeaf {
-    pub fn from_send_leaves(send_leaves: &[SendLeaf]) -> Self {
-        let mut send_tree = SendTree::init();
-        for leaf in send_leaves {
-            send_tree.push(leaf.clone());
-        }
-        let send_tree_root = send_tree.get_root();
-        let index = send_leaves.len() as u64;
-        let prev = if let Some(last) = send_leaves.last() {
-            last.cur
-        } else {
-            BlockNumber(0)
-        };
-        Self {
-            index,
-            prev,
-            send_tree_root,
-        }
-    }
-}
-
 #[derive(Clone, Debug)]
 pub struct AccountLeafTarget {
     pub index: Target,                         // the next index of send leaf

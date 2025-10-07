@@ -20,7 +20,7 @@ use crate::{
         block_number::{BlockNumber, BlockNumberTarget},
         deposit::Deposit,
         trees::{
-            account_tree::{AccountLeaf, AccountTree, SendLeaf},
+            account_tree::{AccountLeaf, AccountTree, SendLeaf, SendTree},
             deposit_tree::DepositTree,
             public_state_tree::PublicStateTree,
         },
@@ -281,9 +281,22 @@ impl FullPublicState {
                 continue;
             }
             let mut send_leaves = self.send_leaves.get(&user_id).cloned().unwrap_or_default();
-            let account_leaf = AccountLeaf::from_send_leaves(&send_leaves);
+            let mut send_tree = SendTree::init();
+            for leaf in &send_leaves {
+                send_tree.push(leaf.clone());
+            }
 
             // sanity check
+            let prev = if let Some(last) = send_leaves.last() {
+                last.cur
+            } else {
+                BlockNumber(0)
+            };
+            let account_leaf = AccountLeaf {
+                index: send_tree.len() as u64,
+                prev,
+                send_tree_root: send_tree.get_root(),
+            };
             let current_account_leaf = self.account_tree.get_leaf(user_id.0);
             assert_eq!(
                 current_account_leaf, account_leaf,
@@ -292,21 +305,22 @@ impl FullPublicState {
             );
 
             // add new send leaf
-            let prev = if let Some(last) = send_leaves.last() {
-                last.cur
-            } else {
-                BlockNumber(0)
-            };
             let new_send_leaf = SendLeaf {
                 cur: BlockNumber(block_number),
                 prev,
                 tx_tree_root,
             };
+            send_tree.push(new_send_leaf.clone());
+
             send_leaves.push(new_send_leaf);
             self.send_leaves.insert(user_id, send_leaves.clone());
 
             // update account tree
-            let new_account_leaf = AccountLeaf::from_send_leaves(&send_leaves);
+            let new_account_leaf = AccountLeaf {
+                index: send_tree.len() as u64,
+                prev: BlockNumber(block_number),
+                send_tree_root: send_tree.get_root(),
+            };
             self.account_tree.update(user_id.0, new_account_leaf);
         }
 
