@@ -1,5 +1,6 @@
 pub mod balance_circuit;
 pub mod balance_pis;
+pub mod balance_processor;
 pub mod common;
 pub mod receive_deposit_circuit;
 pub mod receive_transfer_circuit;
