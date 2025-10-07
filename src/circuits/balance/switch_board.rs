@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use plonky2::{
     field::extension::Extendable,
     hash::hash_types::{HashOutTarget, RichField},
@@ -26,7 +28,7 @@ use crate::{
         user_id::{UserId, UserIdTarget},
     },
     utils::{
-        conversion::ToU64, poseidon_hash_out::PoseidonHashOutTarget,
+        conversion::ToU64, dummy::DummyProof, poseidon_hash_out::PoseidonHashOutTarget,
         recursively_verifiable::add_proof_target_and_conditionally_verify,
     },
 };
@@ -44,6 +46,9 @@ pub enum BalanceSwitchBoardError {
 
     #[error("Invalid input: {0}")]
     InvalidInput(String),
+
+    #[error("Dummy proof not provided for index {0}")]
+    DummyProofNotProvided(usize),
 
     #[error("Failed to prove: {0}")]
     FailedToProve(String),
@@ -296,6 +301,7 @@ impl<const D: usize> BalanceSwichBoardTarget<D> {
         value: &BalanceSwichBoard<F, C, D>,
         balance_vd: &VerifierCircuitData<F, C, D>,
         new_full_pis: &BalanceFullPublicInputs<F, C, D>,
+        dummy_proofs: &HashMap<usize, ProofWithPublicInputs<F, C, D>>,
     ) -> Result<(), BalanceSwitchBoardError>
     where
         F: RichField + Extendable<D>,
@@ -328,14 +334,41 @@ impl<const D: usize> BalanceSwichBoardTarget<D> {
             self.initial_value.1.set_witness(witness, Salt::default());
         }
 
+        fn get_dummy_proof<F, C, const D: usize>(
+            dummy_proofs: &HashMap<usize, ProofWithPublicInputs<F, C, D>>,
+            index: usize,
+        ) -> Result<&ProofWithPublicInputs<F, C, D>, BalanceSwitchBoardError>
+        where
+            F: RichField + Extendable<D>,
+            C: GenericConfig<D, F = F>,
+            <C as GenericConfig<D>>::Hasher: AlgebraicHasher<F>,
+        {
+            dummy_proofs
+                .get(&index)
+                .ok_or_else(|| BalanceSwitchBoardError::DummyProofNotProvided(index))
+        }
+
         if let Some(proof) = &value.receive_transfer_proof {
             witness.set_proof_with_pis_target(&self.receive_transfer_proof, proof);
+        } else {
+            witness.set_proof_with_pis_target(
+                &self.receive_transfer_proof,
+                get_dummy_proof(dummy_proofs, 1)?,
+            );
         }
         if let Some(proof) = &value.receive_deposit_proof {
             witness.set_proof_with_pis_target(&self.receive_deposit_proof, proof);
+        } else {
+            witness.set_proof_with_pis_target(
+                &self.receive_deposit_proof,
+                get_dummy_proof(dummy_proofs, 2)?,
+            );
         }
         if let Some(proof) = &value.send_tx_proof {
             witness.set_proof_with_pis_target(&self.send_tx_proof, proof);
+        } else {
+            witness
+                .set_proof_with_pis_target(&self.send_tx_proof, get_dummy_proof(dummy_proofs, 3)?);
         }
 
         witness.set_verifier_data_target(&self.balance_vd, &balance_vd.verifier_only);
@@ -357,6 +390,7 @@ where
     pub receive_deposit_vd: VerifierCircuitData<F, C, D>,
     pub send_tx_vd: VerifierCircuitData<F, C, D>,
     pub balance_config: CircuitConfig,
+    pub dummy_proofs: HashMap<usize, ProofWithPublicInputs<F, C, D>>,
     pub target: BalanceSwichBoardTarget<D>,
     pub public_inputs: BalanceFullPublicInputsTarget,
 }
@@ -386,6 +420,23 @@ where
         builder.register_public_inputs(&public_inputs.to_vec(&balance_config));
         let data = builder.build::<C>();
 
+        // prepare dummy proofs
+        let mut dummy_proofs = HashMap::new();
+        for (i, vd) in [
+            None,
+            Some(receive_transfer_vd),
+            Some(receive_deposit_vd),
+            Some(send_tx_vd),
+        ]
+        .iter()
+        .enumerate()
+        {
+            if let Some(vd) = vd {
+                let dummy_proof = DummyProof::new(&vd.common);
+                dummy_proofs.insert(i, dummy_proof.proof);
+            }
+        }
+
         Self {
             data,
             balance_vd: balance_vd.clone(),
@@ -393,6 +444,7 @@ where
             receive_deposit_vd: receive_deposit_vd.clone(),
             send_tx_vd: send_tx_vd.clone(),
             balance_config,
+            dummy_proofs,
             target,
             public_inputs,
         }
@@ -410,8 +462,13 @@ where
         )?;
 
         let mut pw = PartialWitness::<F>::new();
-        self.target
-            .set_witness::<F, C, _>(&mut pw, witness, &self.balance_vd, &new_full_pis)?;
+        self.target.set_witness(
+            &mut pw,
+            witness,
+            &self.balance_vd,
+            &new_full_pis,
+            &self.dummy_proofs,
+        )?;
         self.public_inputs.set_witness(&mut pw, &new_full_pis);
 
         self.data
@@ -428,7 +485,7 @@ mod tests {
         common::{
             block_number::BlockNumber, public_state::PublicState, salt::Salt, user_id::UserId,
         },
-        utils::{conversion::ToField, poseidon_hash_out::PoseidonHashOut},
+        utils::{conversion::ToField, cyclic::add_noop_gates, poseidon_hash_out::PoseidonHashOut},
     };
     use plonky2::{
         field::goldilocks_field::GoldilocksField,
@@ -451,6 +508,7 @@ mod tests {
         let mut builder = CircuitBuilder::<F, D>::new(config.clone());
         let target = BalanceFullPublicInputsTarget::new(&mut builder, &config);
         builder.register_public_inputs(&target.to_vec(&config));
+        add_noop_gates(&mut builder, 1 << 10);
         let data = builder.build::<C>();
         (data, target, config)
     }

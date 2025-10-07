@@ -111,6 +111,15 @@ pub fn conditionally_connect_vd<F: RichField + Extendable<D>, const D: usize>(
     builder.connect_verifier_data(&selected_vd, vk1);
 }
 
+pub fn add_noop_gates<F: RichField + Extendable<D>, const D: usize>(
+    builder: &mut CircuitBuilder<F, D>,
+    target_num_gates: u64,
+) {
+    while (builder.num_gates() as u64) < target_num_gates {
+        builder.add_gate(NoopGate, vec![]);
+    }
+}
+
 pub fn simple_recursion_circuit_data<
     F: RichField + Extendable<D>,
     C: GenericConfig<D, F = F>,
