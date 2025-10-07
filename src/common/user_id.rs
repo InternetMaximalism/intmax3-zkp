@@ -16,7 +16,7 @@ pub enum UserIdError {
     InvalidLocalId(String),
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Hash, PartialEq, Eq, Serialize, Deserialize)]
 pub struct UserId(pub u64);
 
 impl UserId {

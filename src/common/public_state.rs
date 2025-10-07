@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use plonky2::{
     field::{extension::Extendable, types::Field},
     hash::hash_types::RichField,
@@ -14,9 +16,17 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     common::{
+        block::Block,
         block_number::{BlockNumber, BlockNumberTarget},
-        trees::{account_tree::AccountTree, deposit_tree::DepositTree},
+        trees::{
+            account_tree::{AccountTree, SendLeaf},
+            deposit_tree::DepositTree,
+            public_state_tree::PublicStateTree,
+        },
+        user_id::{UserId, UserIdError},
     },
+    constants::MAX_NUM_USERS_PER_BLOCK,
+    ethereum_types::{address::Address, bytes32::Bytes32, u256::U256},
     utils::{
         leafable::{Leafable, LeafableTarget},
         leafable_hasher::PoseidonLeafableHasher,
@@ -41,7 +51,7 @@ impl Default for PublicState {
             block_number: BlockNumber(0),
             account_tree_root: AccountTree::init().get_root(),
             deposit_tree_root: DepositTree::init().get_root(),
-            prev_public_state_root: PoseidonHashOut::default(),
+            prev_public_state_root: PublicStateTree::init().get_root(),
         }
     }
 }
@@ -183,5 +193,89 @@ impl LeafableTarget for PublicStateTarget {
         <C as GenericConfig<D>>::Hasher: AlgebraicHasher<F>,
     {
         PoseidonHashOutTarget::hash_inputs(builder, &self.to_vec())
+    }
+}
+
+#[derive(thiserror::Error, Debug)]
+pub enum FullPublicStateError {
+    #[error("Too many local IDs: {0}")]
+    TooManyLocalIds(usize),
+
+    #[error("UserId error: {0}")]
+    UserIdError(#[from] UserIdError),
+}
+
+pub struct FullPublicState {
+    pub block_number: BlockNumber,
+    pub account_tree: AccountTree,
+    pub send_leaves: HashMap<UserId, Vec<SendLeaf>>,
+    pub deposit_tree: DepositTree,
+    pub public_state_tree: PublicStateTree,
+
+    pub block_hash_chain: Bytes32,
+    pub deposit_hash_chain: Bytes32,
+}
+
+impl FullPublicState {
+    pub fn new() -> Self {
+        Self {
+            block_number: BlockNumber(0),
+            account_tree: AccountTree::init(),
+            send_leaves: HashMap::new(),
+            deposit_tree: DepositTree::init(),
+            public_state_tree: PublicStateTree::init(),
+            block_hash_chain: Bytes32::default(),
+            deposit_hash_chain: Bytes32::default(),
+        }
+    }
+
+    pub fn to_public_state(&self) -> PublicState {
+        PublicState {
+            block_number: self.block_number,
+            account_tree_root: self.account_tree.get_root(),
+            deposit_tree_root: self.deposit_tree.get_root(),
+            prev_public_state_root: self.public_state_tree.get_root(),
+        }
+    }
+
+    pub fn add_block(
+        &mut self,
+        aggregator_id: u32,
+        local_ids: &[u32],
+        tx_tree_root: Bytes32,
+    ) -> Result<(), FullPublicStateError> {
+        if local_ids.len() > MAX_NUM_USERS_PER_BLOCK {
+            return Err(FullPublicStateError::TooManyLocalIds(local_ids.len()));
+        }
+        let block_number = self.block_number.0 + 1;
+        let block = Block {
+            aggregator_id,
+            local_ids: local_ids.to_vec(),
+            tx_tree_root,
+            deposit_hash_chain: self.deposit_hash_chain,
+        };
+        let next_block_hash_chain = block
+            .hash_with_prev_hash(self.block_hash_chain)
+            .expect("hashing should not fail");
+
+        // update account tree
+        for &local_id in local_ids {
+            let user_id = UserId::new(aggregator_id, local_id)?;
+            let send_leaves = self.send_leaves.get(&user_id).get_or_insert(&Vec::new());
+
+            // self.account_tree.update(index, leaf);
+        }
+
+        Ok(())
+    }
+
+    pub fn add_deposit(
+        &mut self,
+        depositor: Address,
+        recipient: Bytes32,
+        token_index: u32,
+        amount: U256,
+        aux_data: Bytes32,
+    ) {
     }
 }
