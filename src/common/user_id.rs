@@ -6,7 +6,7 @@ use plonky2::{
 };
 use serde::{Deserialize, Serialize};
 
-use crate::constants::{LOCAL_ID_BITS, MAX_NUM_AGGREGATORS, USER_ID_BITS};
+use crate::constants::{AGGREGATOR_ID_BITS, LOCAL_ID_BITS, MAX_NUM_AGGREGATORS, USER_ID_BITS};
 
 #[derive(Debug, thiserror::Error)]
 pub enum UserIdError {
@@ -73,6 +73,25 @@ impl UserIdTarget {
         Self {
             value: builder.constant(F::from_canonical_u64(value.0)),
         }
+    }
+
+    pub fn from_parts<F: RichField + Extendable<D>, const D: usize>(
+        builder: &mut CircuitBuilder<F, D>,
+        aggregator_id: Target,
+        local_id: Target,
+        is_checked: bool,
+    ) -> Self {
+        if is_checked {
+            builder.range_check(aggregator_id, AGGREGATOR_ID_BITS);
+            builder.range_check(local_id, LOCAL_ID_BITS);
+        }
+        let shift = builder.constant(F::from_canonical_u64(1u64 << 32));
+        let agg_shifted = builder.mul(shift, aggregator_id);
+        let value = builder.add(agg_shifted, local_id);
+        if is_checked {
+            builder.range_check(value, USER_ID_BITS);
+        }
+        Self { value }
     }
 
     pub fn set_witness<F: Field, W: WitnessWrite<F>>(&self, witness: &mut W, value: UserId) {

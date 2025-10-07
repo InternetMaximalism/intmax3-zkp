@@ -76,6 +76,10 @@ impl<V: Leafable> SparseMerkleTree<V> {
 pub struct SparseMerkleProof<V: Leafable>(pub(crate) MerkleProof<V>);
 
 impl<V: Leafable> SparseMerkleProof<V> {
+    pub fn dummy(height: usize) -> Self {
+        Self(MerkleProof::dummy(height))
+    }
+
     pub fn get_root(&self, leaf_data: &V, index: u64) -> HashOut<V> {
         self.0.get_root(leaf_data, index)
     }

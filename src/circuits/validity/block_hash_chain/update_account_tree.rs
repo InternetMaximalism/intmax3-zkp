@@ -6,7 +6,7 @@ use crate::{
             AccountLeaf, AccountLeafTarget, AccountMerkleProof, AccountMerkleProofTarget, SendLeaf,
             SendLeafTarget, SendMerkleProof, SendMerkleProofTarget,
         },
-        user_id::{UserId, UserIdError},
+        user_id::{UserId, UserIdError, UserIdTarget},
     },
     constants::{ACCOUNT_TREE_HEIGHT, SEND_TREE_HEIGHT},
     ethereum_types::{
@@ -251,20 +251,19 @@ impl UpdateAccountTreeTarget {
 
         let empty_send_leaf = SendLeafTarget::constant(builder, SendLeaf::empty_leaf());
         let mut account_tree_root = prev_account_tree_root.clone();
-        let aggregator_id = block.aggregator_id;
-        let shift = F::from_canonical_u64(1u64 << 32);
 
         for i in 0..(num_users as usize) {
             let local_id = block.local_ids[i];
             let prev_account_leaf = &prev_account_leaves[i];
             let account_merkle_proof = &account_merkle_proofs[i];
             let send_merkle_proof = &send_merkle_proofs[i];
+            let user_id =
+                UserIdTarget::from_parts(builder, block.aggregator_id, local_id, true).value;
 
             let zero = builder.zero();
             let is_dummy = builder.is_equal(local_id, zero);
             let should_check_account = builder.not(is_dummy);
 
-            let user_id = builder.mul_const_add(shift, aggregator_id, local_id);
             let current_root = account_tree_root.clone();
             let prev_root =
                 account_merkle_proof.get_root::<F, C, D>(builder, prev_account_leaf, user_id);
@@ -476,8 +475,6 @@ mod tests {
             prev: block_number,
             send_tree_root: send_tree_user2.get_root(),
         };
-        let dummy_user = UserId::new(aggregator_id, 0).unwrap();
-        let dummy_send_tree = SendTree::init();
 
         let mut account_tree = AccountTree::new(ACCOUNT_TREE_HEIGHT);
         account_tree.update(user1.0, prev_account_leaf_user1.clone());
@@ -496,10 +493,10 @@ mod tests {
         )
         .unwrap();
 
-        let dummy_account_leaf = account_tree.get_leaf(dummy_user.0);
         let send_proof_user1 = send_tree_user1.prove(prev_account_leaf_user1.index);
         let send_proof_user2 = send_tree_user2.prove(prev_account_leaf_user2.index);
-        let dummy_send_proof = dummy_send_tree.prove(0);
+        let dummy_account_leaf = AccountLeaf::default();
+        let dummy_send_proof = SendMerkleProof::dummy(SEND_TREE_HEIGHT);
 
         let prev_account_leaves = vec![
             prev_account_leaf_user1.clone(),
@@ -518,7 +515,7 @@ mod tests {
         let mut account_merkle_proofs = Vec::with_capacity(num_users as usize);
         for (i, &local_id) in block.local_ids.iter().enumerate() {
             if local_id == 0 {
-                account_merkle_proofs.push(account_tree_for_proofs.prove(dummy_user.0));
+                account_merkle_proofs.push(AccountMerkleProof::dummy(ACCOUNT_TREE_HEIGHT));
                 continue;
             }
             let user_id = UserId::new(aggregator_id, local_id).unwrap();
