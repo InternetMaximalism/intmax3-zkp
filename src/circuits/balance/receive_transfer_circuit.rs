@@ -1,23 +1,37 @@
 use plonky2::{
     field::extension::Extendable,
     hash::hash_types::RichField,
+    iop::witness::{PartialWitness, WitnessWrite},
     plonk::{
-        circuit_data::VerifierCircuitData,
+        circuit_builder::CircuitBuilder,
+        circuit_data::{CircuitConfig, CircuitData, CommonCircuitData, VerifierCircuitData},
         config::{AlgebraicHasher, GenericConfig},
-        proof::ProofWithPublicInputs,
+        proof::{ProofWithPublicInputs, ProofWithPublicInputsTarget},
     },
 };
 
 use crate::{
     circuits::balance::{
-        balance_pis::{BalanceFullPublicInputs, BalancePublicInputs, BalancePublicInputsError},
+        balance_pis::{
+            BalanceFullPublicInputs, BalanceFullPublicInputsTarget, BalancePublicInputs,
+            BalancePublicInputsError, BalancePublicInputsTarget,
+        },
         common::{
-            account_state::AccountState, recipient::calculate_recipient_from_user_id,
-            transfer_witness::TransferWitness, tx_settlement::TxSettlement,
-            update_private_state::UpdatePrivateState, update_public_state::UpdatePublicState,
+            account_state::{AccountState, AccountStateTarget},
+            recipient::{
+                calculate_recipient_from_user_id, calculate_recipient_from_user_id_circuit,
+            },
+            transfer_witness::{TransferWitness, TransferWitnessTarget},
+            tx_settlement::{TxSettlement, TxSettlementTarget},
+            update_private_state::{UpdatePrivateState, UpdatePrivateStateTarget},
+            update_public_state::{UpdatePublicState, UpdatePublicStateTarget},
         },
     },
-    common::{block_number::BlockNumber, salt::Salt},
+    common::{
+        block_number::{BlockNumber, BlockNumberTarget},
+        salt::{Salt, SaltTarget},
+    },
+    ethereum_types::u32limb_trait::U32LimbTargetTrait,
     utils::conversion::ToU64,
 };
 
@@ -43,6 +57,9 @@ pub enum ReceiveTransferError {
 
     #[error("Spend public inputs error: {0}")]
     SpendPisError(String),
+
+    #[error("Failed to prove: {0}")]
+    FailedToProve(String),
 }
 
 pub struct ReceiveTransferWitness<
@@ -304,5 +321,598 @@ where
             vd: balance_vd.verifier_only.clone(),
         };
         Ok(new_full_pis)
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct ReceiveTransferTarget<const D: usize> {
+    pub prev_balance_proof: ProofWithPublicInputsTarget<D>,
+    pub sender_balance_proof: ProofWithPublicInputsTarget<D>,
+    pub sender_update_public_state: UpdatePublicStateTarget,
+    pub receiver_update_public_state: UpdatePublicStateTarget,
+    pub new_block_r: BlockNumberTarget,
+    pub account_state: AccountStateTarget,
+    pub tx_settlement: TxSettlementTarget<D>,
+    pub transfer_witness: TransferWitnessTarget,
+    pub transfer_salt: SaltTarget,
+    pub update_private_state: UpdatePrivateStateTarget,
+    pub new_full_pis: BalanceFullPublicInputsTarget,
+}
+
+impl<const D: usize> ReceiveTransferTarget<D> {
+    pub fn new<F, C>(
+        builder: &mut CircuitBuilder<F, D>,
+        balance_cd: &CommonCircuitData<F, D>,
+        spend_vd: &VerifierCircuitData<F, C, D>,
+    ) -> Self
+    where
+        F: RichField + Extendable<D>,
+        C: GenericConfig<D, F = F> + 'static,
+        <C as GenericConfig<D>>::Hasher: AlgebraicHasher<F>,
+    {
+        let prev_balance_proof = builder.add_virtual_proof_with_pis(balance_cd);
+        let prev_balance_full_pis = BalanceFullPublicInputsTarget::from_pis(
+            &prev_balance_proof.public_inputs,
+            &balance_cd.config,
+        );
+        let sender_balance_proof = builder.add_virtual_proof_with_pis(balance_cd);
+        let sender_balance_full_pis = BalanceFullPublicInputsTarget::from_pis(
+            &sender_balance_proof.public_inputs,
+            &balance_cd.config,
+        );
+
+        builder.verify_proof::<C>(&prev_balance_proof, &prev_balance_full_pis.vd, balance_cd);
+        builder.verify_proof::<C>(
+            &sender_balance_proof,
+            &sender_balance_full_pis.vd,
+            balance_cd,
+        );
+
+        builder.connect_verifier_data(&prev_balance_full_pis.vd, &sender_balance_full_pis.vd);
+
+        let receiver_prev_pis = prev_balance_full_pis.pis.clone();
+        let sender_prev_pis = sender_balance_full_pis.pis.clone();
+
+        let sender_update_public_state = UpdatePublicStateTarget::new::<F, C, D>(builder);
+        let receiver_update_public_state = UpdatePublicStateTarget::new::<F, C, D>(builder);
+        let new_block_r = BlockNumberTarget::new(builder, true);
+        let account_state = AccountStateTarget::new::<F, C, D>(builder, true);
+        let tx_settlement = TxSettlementTarget::new(builder, spend_vd, true);
+        let transfer_witness = TransferWitnessTarget::new::<F, C, D>(builder, true);
+        let transfer_salt = SaltTarget::new(builder);
+        let update_private_state = UpdatePrivateStateTarget::new::<F, C, D>(builder, true);
+
+        receiver_update_public_state
+            .old
+            .connect(builder, &receiver_prev_pis.public_state);
+        sender_update_public_state
+            .old
+            .connect(builder, &sender_prev_pis.public_state);
+        receiver_update_public_state
+            .new
+            .connect(builder, &sender_update_public_state.new);
+
+        account_state
+            .user_id
+            .connect(builder, &receiver_prev_pis.user_id);
+        account_state.account_tree_root.connect(
+            builder,
+            receiver_update_public_state.new.account_tree_root.clone(),
+        );
+
+        tx_settlement
+            .user_id
+            .connect(builder, &sender_prev_pis.user_id);
+        tx_settlement
+            .public_state
+            .connect(builder, &sender_update_public_state.new);
+        tx_settlement
+            .public_state
+            .connect(builder, &receiver_update_public_state.new);
+
+        transfer_witness
+            .transfer_tree_root
+            .connect(builder, tx_settlement.tx.transfer_tree_root.clone());
+
+        let expected_recipient = calculate_recipient_from_user_id_circuit(
+            builder,
+            &receiver_prev_pis.user_id,
+            &transfer_salt,
+        );
+        transfer_witness
+            .transfer
+            .recipient
+            .connect(builder, expected_recipient);
+
+        builder.connect(
+            transfer_witness.transfer.token_index,
+            update_private_state.token_index,
+        );
+        transfer_witness
+            .transfer
+            .amount
+            .connect(builder, update_private_state.amount.clone());
+
+        let prev_private_commitment = update_private_state.prev_private_state.commitment(builder);
+        prev_private_commitment.connect(builder, receiver_prev_pis.private_commitment.clone());
+
+        let new_private_commitment = update_private_state.new_private_state.commitment(builder);
+
+        let spend_pis = tx_settlement.spend_pis();
+        spend_pis
+            .prev_private_commitment
+            .connect(builder, sender_prev_pis.private_commitment.clone());
+        let true_target = builder._true();
+        builder.connect(spend_pis.is_valid.target, true_target.target);
+
+        let tx_block_number = tx_settlement.tx_block_number();
+        new_block_r.enforce_ge(builder, &tx_block_number);
+
+        receiver_prev_pis
+            .block_r
+            .enforce_ge(builder, &account_state.send_leaf.prev);
+        let zero = builder.zero();
+        let prev_is_zero = builder.is_equal(account_state.send_leaf.prev.value, zero);
+        let has_prev_tx = builder.not(prev_is_zero);
+        let new_block_plus = BlockNumberTarget {
+            value: builder.add(new_block_r.value, has_prev_tx.target),
+        };
+        account_state
+            .send_leaf
+            .cur
+            .enforce_ge(builder, &new_block_plus);
+
+        new_block_r.enforce_ge(builder, &receiver_prev_pis.block_r);
+        receiver_update_public_state
+            .new
+            .block_number
+            .enforce_ge(builder, &new_block_r);
+
+        let transfer_nullifier = transfer_witness.transfer.nullifier(builder);
+        update_private_state
+            .nullifier
+            .connect(builder, transfer_nullifier);
+
+        let new_pis = BalancePublicInputsTarget {
+            user_id: receiver_prev_pis.user_id.clone(),
+            public_state: receiver_update_public_state.new.clone(),
+            block_r: new_block_r.clone(),
+            private_commitment: new_private_commitment.clone(),
+        };
+        let new_full_pis = BalanceFullPublicInputsTarget {
+            pis: new_pis,
+            vd: prev_balance_full_pis.vd.clone(),
+        };
+
+        Self {
+            prev_balance_proof,
+            sender_balance_proof,
+            sender_update_public_state,
+            receiver_update_public_state,
+            new_block_r,
+            account_state,
+            tx_settlement,
+            transfer_witness,
+            transfer_salt,
+            update_private_state,
+            new_full_pis,
+        }
+    }
+
+    pub fn set_witness<F, C, W>(
+        &self,
+        witness: &mut W,
+        value: &ReceiveTransferWitness<F, C, D>,
+        new_full_pis: &BalanceFullPublicInputs<F, C, D>,
+    ) where
+        F: RichField + Extendable<D>,
+        C: GenericConfig<D, F = F>,
+        <C as GenericConfig<D>>::Hasher: AlgebraicHasher<F>,
+        W: WitnessWrite<F>,
+    {
+        witness.set_proof_with_pis_target(&self.prev_balance_proof, &value.prev_balance_proof);
+        witness.set_proof_with_pis_target(&self.sender_balance_proof, &value.sender_balance_proof);
+        self.sender_update_public_state
+            .set_witness(witness, &value.sender_update_public_state);
+        self.receiver_update_public_state
+            .set_witness(witness, &value.receiver_update_public_state);
+        self.new_block_r.set_witness(witness, value.new_block_r);
+        self.account_state
+            .set_witness(witness, &value.account_state);
+        self.tx_settlement
+            .set_witness::<F, C, _>(witness, &value.tx_settlement);
+        self.transfer_witness
+            .set_witness(witness, &value.transfer_witness);
+        self.transfer_salt.set_witness(witness, value.transfer_salt);
+        self.update_private_state
+            .set_witness(witness, &value.update_private_state);
+        self.new_full_pis.set_witness(witness, new_full_pis);
+    }
+}
+
+#[derive(Debug)]
+pub struct ReceiveTransferCircuit<F, C, const D: usize>
+where
+    F: RichField + Extendable<D>,
+    C: GenericConfig<D, F = F>,
+    <C as GenericConfig<D>>::Hasher: AlgebraicHasher<F>,
+{
+    pub data: CircuitData<F, C, D>,
+    pub balance_vd: VerifierCircuitData<F, C, D>,
+    pub target: ReceiveTransferTarget<D>,
+    pub public_inputs: BalanceFullPublicInputsTarget,
+}
+
+impl<F, C, const D: usize> ReceiveTransferCircuit<F, C, D>
+where
+    F: RichField + Extendable<D>,
+    C: GenericConfig<D, F = F> + 'static,
+    <C as GenericConfig<D>>::Hasher: AlgebraicHasher<F>,
+{
+    pub fn new(
+        balance_vd: &VerifierCircuitData<F, C, D>,
+        spend_vd: &VerifierCircuitData<F, C, D>,
+    ) -> Self {
+        let mut builder = CircuitBuilder::<F, D>::new(CircuitConfig::standard_recursion_config());
+        let target = ReceiveTransferTarget::new(&mut builder, &balance_vd.common, spend_vd);
+        let public_inputs = target.new_full_pis.clone();
+        builder.register_public_inputs(&public_inputs.to_vec(&balance_vd.common.config));
+        let data = builder.build();
+
+        Self {
+            data,
+            balance_vd: balance_vd.clone(),
+            target,
+            public_inputs,
+        }
+    }
+
+    pub fn prove(
+        &self,
+        witness: &ReceiveTransferWitness<F, C, D>,
+    ) -> Result<ProofWithPublicInputs<F, C, D>, ReceiveTransferError> {
+        let new_full_pis = witness.to_public_inputs(&self.balance_vd)?;
+        let mut pw = PartialWitness::<F>::new();
+        self.target
+            .set_witness::<F, C, _>(&mut pw, witness, &new_full_pis);
+        self.public_inputs.set_witness(&mut pw, &new_full_pis);
+        self.data
+            .prove(pw)
+            .map_err(|e| ReceiveTransferError::FailedToProve(e.to_string()))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{
+        circuits::balance::{
+            balance_pis::{
+                BALANCE_PUBLIC_INPUTS_LEN, BalanceFullPublicInputs, BalancePublicInputs,
+            },
+            common::{
+                account_state::AccountState, recipient::calculate_recipient_from_user_id,
+                transfer_witness::TransferWitness, update_private_state::UpdatePrivateState,
+                update_public_state::UpdatePublicState,
+            },
+            spend_circuit::{SpendCircuit, SpendWitness},
+        },
+        common::{
+            block_number::BlockNumber,
+            private_state::FullPrivateState,
+            public_state::PublicState,
+            salt::Salt,
+            transfer::Transfer,
+            trees::{
+                account_tree::{AccountLeaf, AccountTree, SendLeaf, SendTree},
+                asset_tree::AssetTree,
+                nullifier_tree::NullifierTree,
+                transfer_tree::TransferTree,
+                tx_tree::TxTree,
+            },
+            tx::Tx,
+            user_id::UserId,
+        },
+        constants::{
+            ACCOUNT_TREE_HEIGHT, ASSET_TREE_HEIGHT, MAX_NUM_TRANSFERS_PER_TX, SEND_TREE_HEIGHT,
+            TRANSFER_TREE_HEIGHT, TX_TREE_HEIGHT,
+        },
+        ethereum_types::{bytes32::Bytes32, u256::U256},
+        utils::{
+            conversion::ToField as _, cyclic::TestCyclicCircuit, poseidon_hash_out::PoseidonHashOut,
+        },
+    };
+    use plonky2::{
+        field::goldilocks_field::GoldilocksField,
+        plonk::{circuit_data::CircuitConfig, config::PoseidonGoldilocksConfig},
+    };
+
+    const D: usize = 2;
+    type F = GoldilocksField;
+    type C = PoseidonGoldilocksConfig;
+
+    #[cfg_attr(debug_assertions, ignore = "run with --release")]
+    #[test]
+    fn test_receive_transfer_circuit() {
+        let mut rng = rand::thread_rng();
+
+        let receiver_user_id = UserId::new(0, 2).unwrap();
+        let transfer_salt = Salt::rand(&mut rng);
+        let recipient = calculate_recipient_from_user_id(receiver_user_id, transfer_salt);
+
+        let mut sender_full_state = FullPrivateState::new();
+        let mut asset_tree_initial = AssetTree::new(ASSET_TREE_HEIGHT);
+        let mut transfers = Vec::with_capacity(MAX_NUM_TRANSFERS_PER_TX);
+        let mut before_balances = Vec::with_capacity(MAX_NUM_TRANSFERS_PER_TX);
+        let mut asset_merkle_proofs = Vec::with_capacity(MAX_NUM_TRANSFERS_PER_TX);
+
+        for i in 0..MAX_NUM_TRANSFERS_PER_TX {
+            let amount = U256::from((i as u32) + 1);
+            let base_balance = amount + U256::from(10u32);
+            let transfer = Transfer {
+                recipient: if i == 0 {
+                    recipient
+                } else {
+                    Bytes32::default()
+                },
+                token_index: i as u32,
+                amount,
+                aux_data: Bytes32::default(),
+            };
+            asset_tree_initial.update(i as u64, base_balance);
+            transfers.push(transfer);
+        }
+
+        let mut asset_tree_current = asset_tree_initial.clone();
+        for transfer in &transfers {
+            let index = transfer.token_index as u64;
+            let balance = asset_tree_current.get_leaf(index);
+            let proof = asset_tree_current.prove(index);
+            before_balances.push(balance);
+            asset_merkle_proofs.push(proof);
+            let new_balance = balance - transfer.amount;
+            asset_tree_current.update(index, new_balance);
+        }
+
+        sender_full_state.asset_tree = asset_tree_initial.clone();
+        let prev_private_state_sender = sender_full_state.to_private_state();
+        let spend_witness = SpendWitness {
+            tx_nonce: prev_private_state_sender.nonce,
+            prev_private_state: prev_private_state_sender.clone(),
+            transfers: transfers.clone(),
+            before_balances: before_balances.clone(),
+            asset_merkle_proofs: asset_merkle_proofs.clone(),
+        };
+
+        let spend_circuit = SpendCircuit::<F, C, D>::new();
+        let spend_vd = spend_circuit.data.verifier_data();
+        let spend_proof = spend_circuit
+            .prove(&spend_witness)
+            .expect("spend proof should succeed");
+        let spend_pis = spend_witness
+            .to_public_inputs()
+            .expect("public inputs from spend witness");
+        let tx = spend_pis.tx.clone();
+
+        let mut tx_tree = TxTree::new(TX_TREE_HEIGHT);
+        tx_tree.push(Tx::default());
+        let local_id = 1u32;
+        tx_tree.push(tx.clone());
+        let tx_merkle_proof = tx_tree.prove(local_id as u64);
+        let tx_tree_root: PoseidonHashOut = tx_tree.get_root();
+
+        let send_leaf_sender = SendLeaf {
+            prev: BlockNumber::new(2).unwrap(),
+            cur: BlockNumber::new(5).unwrap(),
+            tx_tree_root: tx_tree_root.into(),
+        };
+        let mut send_tree_sender = SendTree::new(SEND_TREE_HEIGHT);
+        send_tree_sender.push(send_leaf_sender.clone());
+        let send_leaf_index_sender = 0u32;
+        let send_merkle_proof_sender = send_tree_sender.prove(send_leaf_index_sender as u64);
+
+        let send_leaf_receiver = SendLeaf {
+            prev: BlockNumber::new(0).unwrap(),
+            cur: BlockNumber::new(7).unwrap(),
+            tx_tree_root: tx_tree_root.into(),
+        };
+        let mut send_tree_receiver = SendTree::new(SEND_TREE_HEIGHT);
+        send_tree_receiver.push(send_leaf_receiver.clone());
+        let send_leaf_index_receiver = 0u32;
+        let send_merkle_proof_receiver = send_tree_receiver.prove(send_leaf_index_receiver as u64);
+
+        let sender_user_id = UserId::new(0, local_id).unwrap();
+
+        let account_leaf_sender = AccountLeaf {
+            index: send_tree_sender.len() as u64,
+            prev: send_leaf_sender.cur,
+            send_tree_root: send_tree_sender.get_root(),
+        };
+        let account_leaf_receiver = AccountLeaf {
+            index: send_tree_receiver.len() as u64,
+            prev: send_leaf_receiver.prev,
+            send_tree_root: send_tree_receiver.get_root(),
+        };
+
+        let mut account_tree = AccountTree::new(ACCOUNT_TREE_HEIGHT);
+        account_tree.update(sender_user_id.0, account_leaf_sender.clone());
+        account_tree.update(receiver_user_id.0, account_leaf_receiver.clone());
+        let sender_account_merkle_proof = account_tree.prove(sender_user_id.0);
+        let receiver_account_merkle_proof = account_tree.prove(receiver_user_id.0);
+        let account_tree_root = account_tree.get_root();
+
+        let account_state_sender = AccountState::new(
+            sender_user_id,
+            account_tree_root,
+            send_leaf_sender.clone(),
+            send_leaf_index_sender,
+            send_merkle_proof_sender.clone(),
+            account_leaf_sender.clone(),
+            sender_account_merkle_proof.clone(),
+        )
+        .expect("sender account state should be valid");
+        let account_state_receiver = AccountState::new(
+            receiver_user_id,
+            account_tree_root,
+            send_leaf_receiver.clone(),
+            send_leaf_index_receiver,
+            send_merkle_proof_receiver.clone(),
+            account_leaf_receiver.clone(),
+            receiver_account_merkle_proof.clone(),
+        )
+        .expect("receiver account state should be valid");
+
+        let public_state = PublicState {
+            block_number: BlockNumber::new(6).unwrap(),
+            account_tree_root,
+            deposit_tree_root: PoseidonHashOut::default(),
+            prev_public_state_root: PoseidonHashOut::default(),
+        };
+
+        let sender_update_public_state =
+            UpdatePublicState::new(public_state.clone(), public_state.clone(), None)
+                .expect("sender update public state");
+        let receiver_update_public_state =
+            UpdatePublicState::new(public_state.clone(), public_state.clone(), None)
+                .expect("receiver update public state");
+
+        let tx_settlement = TxSettlement::new(
+            &spend_vd,
+            sender_user_id,
+            tx.clone(),
+            public_state.clone(),
+            account_state_sender.clone(),
+            tx_merkle_proof.clone(),
+            spend_proof.clone(),
+        )
+        .expect("tx settlement");
+
+        let mut transfer_tree = TransferTree::new(TRANSFER_TREE_HEIGHT);
+        for transfer in &transfers {
+            transfer_tree.push(transfer.clone());
+        }
+        let transfer_index = 0u32;
+        let transfer_merkle_proof = transfer_tree.prove(transfer_index as u64);
+        let transfer_tree_root = transfer_tree.get_root();
+        assert_eq!(transfer_tree_root, tx.transfer_tree_root);
+
+        let transfer_witness = TransferWitness::new(
+            transfer_tree_root,
+            transfers[transfer_index as usize].clone(),
+            transfer_index,
+            transfer_merkle_proof,
+        )
+        .expect("transfer witness");
+
+        let mut receiver_full_state = FullPrivateState::new();
+        receiver_full_state.asset_tree = AssetTree::new(ASSET_TREE_HEIGHT);
+        receiver_full_state.asset_tree.update(
+            transfer_witness.transfer.token_index as u64,
+            U256::from(11u32),
+        );
+        receiver_full_state.nullifier_tree = NullifierTree::new();
+        let prev_private_state_receiver = receiver_full_state.to_private_state();
+
+        let receiver_asset_tree = receiver_full_state.asset_tree.clone();
+        let prev_balance_receiver =
+            receiver_asset_tree.get_leaf(transfer_witness.transfer.token_index as u64);
+        let asset_merkle_proof_receiver =
+            receiver_asset_tree.prove(transfer_witness.transfer.token_index as u64);
+
+        let mut receiver_nullifier_tree = receiver_full_state.nullifier_tree.clone();
+        let nullifier = transfer_witness.transfer.nullifier();
+        let nullifier_proof = receiver_nullifier_tree
+            .prove_and_insert(nullifier)
+            .expect("nullifier proof");
+
+        let update_private_state = UpdatePrivateState::new(
+            transfer_witness.transfer.token_index,
+            transfer_witness.transfer.amount,
+            nullifier,
+            &prev_private_state_receiver,
+            &nullifier_proof,
+            prev_balance_receiver,
+            &asset_merkle_proof_receiver,
+        )
+        .expect("update private state");
+
+        let receiver_prev_balance_pis = BalancePublicInputs {
+            user_id: receiver_user_id,
+            public_state: public_state.clone(),
+            block_r: BlockNumber::new(4).unwrap(),
+            private_commitment: prev_private_state_receiver.commitment(),
+        };
+        let sender_prev_balance_pis = BalancePublicInputs {
+            user_id: sender_user_id,
+            public_state: public_state.clone(),
+            block_r: BlockNumber::new(5).unwrap(),
+            private_commitment: spend_pis.prev_private_commitment,
+        };
+
+        let pis_len = BALANCE_PUBLIC_INPUTS_LEN;
+        let balance_common_data = TestCyclicCircuit::<F, C, D>::generate_cd(pis_len);
+        let balance_config = CircuitConfig::standard_recursion_config();
+        let balance_circuit =
+            TestCyclicCircuit::<F, C, D>::new(balance_config, pis_len, &balance_common_data);
+        let balance_vd = balance_circuit.data.verifier_data();
+
+        let receiver_prev_full_pis = BalanceFullPublicInputs {
+            pis: receiver_prev_balance_pis.clone(),
+            vd: balance_vd.verifier_only.clone(),
+        };
+        let sender_prev_full_pis = BalanceFullPublicInputs {
+            pis: sender_prev_balance_pis.clone(),
+            vd: balance_vd.verifier_only.clone(),
+        };
+
+        let receiver_fields = receiver_prev_full_pis
+            .to_u64_vec(&balance_vd.common.config)
+            .to_field_vec::<F>();
+        let receiver_prev_balance_proof = balance_circuit
+            .prove(Some(receiver_fields.as_slice()), None)
+            .expect("receiver balance proof");
+
+        let sender_fields = sender_prev_full_pis
+            .to_u64_vec(&balance_vd.common.config)
+            .to_field_vec::<F>();
+        let sender_balance_proof = balance_circuit
+            .prove(Some(sender_fields.as_slice()), None)
+            .expect("sender balance proof");
+
+        let witness = ReceiveTransferWitness {
+            prev_balance_proof: receiver_prev_balance_proof.clone(),
+            sender_balance_proof: sender_balance_proof.clone(),
+            sender_update_public_state,
+            receiver_update_public_state,
+            new_block_r: BlockNumber::new(6).unwrap(),
+            account_state: account_state_receiver,
+            tx_settlement,
+            transfer_witness,
+            transfer_salt,
+            update_private_state: update_private_state.clone(),
+        };
+
+        let circuit = ReceiveTransferCircuit::<F, C, D>::new(&balance_vd, &spend_vd);
+        let proof = circuit
+            .prove(&witness)
+            .expect("receive transfer proof should succeed");
+
+        circuit
+            .data
+            .verify(proof.clone())
+            .expect("receive transfer proof verification");
+
+        let expected = witness
+            .to_public_inputs(&balance_vd)
+            .expect("expected public inputs");
+        let expected_fields = expected
+            .to_u64_vec(&balance_vd.common.config)
+            .to_field_vec::<F>();
+
+        assert_eq!(proof.public_inputs, expected_fields);
+        assert_eq!(
+            expected.pis.private_commitment,
+            update_private_state.new_private_state.commitment(),
+        );
     }
 }

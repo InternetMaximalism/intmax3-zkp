@@ -8,7 +8,9 @@ use crate::{
     },
     constants::{ASSET_TREE_HEIGHT, TOKEN_INDEX_BITS},
     ethereum_types::{
-        bytes32::{Bytes32, Bytes32Target}, u256::{U256Target, U256}, u32limb_trait::U32LimbTargetTrait as _
+        bytes32::{Bytes32, Bytes32Target},
+        u32limb_trait::U32LimbTargetTrait as _,
+        u256::{U256, U256Target},
     },
 };
 use plonky2::{
