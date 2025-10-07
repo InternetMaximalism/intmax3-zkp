@@ -253,6 +253,7 @@ impl FullPublicState {
         if local_ids.len() > MAX_NUM_USERS_PER_BLOCK {
             return Err(FullPublicStateError::TooManyLocalIds(local_ids.len()));
         }
+
         let block_number = self.block_number.0 + 1;
         let block = Block {
             aggregator_id,
@@ -260,6 +261,10 @@ impl FullPublicState {
             tx_tree_root,
             deposit_hash_chain: self.deposit_hash_chain,
         };
+
+        // update public state tree
+        let prev_public_state = self.to_public_state();
+        self.public_state_tree.push(prev_public_state);
 
         // add block
         self.block_number = BlockNumber(block_number);
