@@ -338,7 +338,7 @@ Helper methods:
 
 1. Let `public_state := sender_public_state_update_witness.new`. Verify `sender_balance_proof.verify()`, `sender_public_state_update_witness.verify()`, `receiver_balance_proof.verify()`, `receiver_public_state_update_witness.verify()`, `account_witness.verify(recipient_user_id, public_state.account_tree_root)`, `tx_settlement_witness.verify()`, and `transfer_witness.verify(recipient_user_id, tx_settlement_witness.tx.transfer_merkle_root)` where `recipient_user_id == receiver_balance_proof.user_id` and `public_state == receiver_public_state_update_witness.new == tx_settlement_witness.public_state`.
 2. Check `sender_balance_proof.public_state == sender_public_state_update_witness.old` and `receiver_balance_proof.public_state == receiver_public_state_update_witness.old`.
-3. If `account_witness.account_leaf.prev != 0`, assert `account_witness.send_leaf.prev <= receiver_balance_proof.block_r` and `new_block_r < account_witness.send_leaf.cur`.
+3. Check `receiver_balance_proof.block_r <= new_block_r <= public_state.block_number`. Additionally, if `account_witness.account_leaf.prev != 0`, assert `account_witness.send_leaf.prev <= receiver_balance_proof.block_r` and `new_block_r < account_witness.send_leaf.cur`.
 4. Check `tx_settlement_witness.tx_block_number() <= new_block_r`.
 5. Assert `tx_settlement_witness.spent_proof.prev_private_state_commitment == sender_balance_proof.private_state_commitment` and `tx_settlement_witness.spent_proof.is_valid == true`.
 6. Update `receiver_balance_proof.block_r <- new_block_r` and incorporate the transfer into `receiver_balance_proof.private_state`, updating `asset_root` and `nullifier_root`.

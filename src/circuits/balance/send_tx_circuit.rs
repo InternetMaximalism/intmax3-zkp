@@ -30,15 +30,6 @@ pub enum SpendTxError {
     #[error("Connection error: {0}")]
     ConnectionError(String),
 
-    #[error("Spend public inputs error: {0}")]
-    SpendPisError(String),
-
-    #[error("Block number error: {0}")]
-    BlockNumberError(String),
-
-    #[error("Failed to prove: {0}")]
-    FailedToProve(String),
-
     #[error("Balance public inputs error: {0}")]
     BalancePublicInputsError(#[from] BalancePublicInputsError),
 
@@ -47,6 +38,15 @@ pub enum SpendTxError {
 
     #[error("Invalid balance verifier data: {0}")]
     InvalidBalanceVd(String),
+
+    #[error("Spend public inputs error: {0}")]
+    SpendPisError(String),
+
+    #[error("Block number error: {0}")]
+    BlockNumberError(String),
+
+    #[error("Failed to prove: {0}")]
+    FailedToProve(String),
 }
 
 pub struct SpendTxWitness<F: RichField + Extendable<D>, C: GenericConfig<D, F = F>, const D: usize>
