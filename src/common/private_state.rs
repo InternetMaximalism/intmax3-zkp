@@ -46,20 +46,14 @@ pub struct FullPrivateState {
     pub salt: Salt,
 }
 
-impl Default for FullPrivateState {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
 impl FullPrivateState {
-    pub fn new() -> Self {
+    pub fn new(salt: Salt) -> Self {
         Self {
-            asset_tree: AssetTree::new(ASSET_TREE_HEIGHT),
-            nullifier_tree: NullifierTree::new(),
+            asset_tree: AssetTree::init(),
+            nullifier_tree: NullifierTree::init(),
             prev_private_commitment: PoseidonHashOut::default(),
             nonce: 0,
-            salt: Salt::default(),
+            salt,
         }
     }
 
@@ -83,23 +77,17 @@ pub struct PrivateStateTarget {
     pub salt: SaltTarget,
 }
 
-impl Default for PrivateState {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
 impl PrivateState {
-    pub fn new() -> Self {
+    pub fn new(salt: Salt) -> Self {
         let asset_tree_root = AssetTree::new(ASSET_TREE_HEIGHT).get_root();
-        let nullifier_tree_root = NullifierTree::new().get_root();
+        let nullifier_tree_root = NullifierTree::init().get_root();
         let prev_private_commitment = PoseidonHashOut::default();
         Self {
             asset_tree_root,
             nullifier_tree_root,
             prev_private_commitment,
             nonce: 0,
-            salt: Salt::default(),
+            salt,
         }
     }
 

@@ -333,6 +333,7 @@ mod tests {
             block_number::BlockNumber,
             private_state::FullPrivateState,
             public_state::PublicState,
+            salt::Salt,
             transfer::Transfer,
             trees::{
                 account_tree::{AccountLeaf, AccountTree, SendLeaf, SendTree},
@@ -363,7 +364,8 @@ mod tests {
     #[test]
     fn test_send_tx_circuit() {
         // Build a spend witness to reuse its proof inside the send circuit.
-        let mut full_state = FullPrivateState::new();
+        let mut rng = rand::thread_rng();
+        let mut full_state = FullPrivateState::new(Salt::rand(&mut rng));
 
         let mut asset_tree_initial = AssetTree::new(ASSET_TREE_HEIGHT);
         let mut transfers = Vec::with_capacity(MAX_NUM_TRANSFERS_PER_TX);

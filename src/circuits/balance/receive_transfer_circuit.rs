@@ -641,7 +641,7 @@ mod tests {
         let transfer_salt = Salt::rand(&mut rng);
         let recipient = calculate_recipient_from_user_id(receiver_user_id, transfer_salt);
 
-        let mut sender_full_state = FullPrivateState::new();
+        let mut sender_full_state = FullPrivateState::new(Salt::rand(&mut rng));
         let mut asset_tree_initial = AssetTree::new(ASSET_TREE_HEIGHT);
         let mut transfers = Vec::with_capacity(MAX_NUM_TRANSFERS_PER_TX);
         let mut before_balances = Vec::with_capacity(MAX_NUM_TRANSFERS_PER_TX);
@@ -805,13 +805,13 @@ mod tests {
         )
         .expect("transfer witness");
 
-        let mut receiver_full_state = FullPrivateState::new();
+        let mut receiver_full_state = FullPrivateState::new(Salt::rand(&mut rng));
         receiver_full_state.asset_tree = AssetTree::new(ASSET_TREE_HEIGHT);
         receiver_full_state.asset_tree.update(
             transfer_witness.transfer.token_index as u64,
             U256::from(11u32),
         );
-        receiver_full_state.nullifier_tree = NullifierTree::new();
+        receiver_full_state.nullifier_tree = NullifierTree::init();
         let prev_private_state_receiver = receiver_full_state.to_private_state();
 
         let receiver_asset_tree = receiver_full_state.asset_tree.clone();

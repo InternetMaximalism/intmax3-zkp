@@ -35,6 +35,12 @@ pub type SendTree = IncrementalMerkleTree<SendLeaf>;
 pub type SendMerkleProof = IncrementalMerkleProof<SendLeaf>;
 pub type SendMerkleProofTarget = IncrementalMerkleProofTarget<SendLeafTarget>;
 
+impl SendTree {
+    pub fn init() -> Self {
+        Self::new(SEND_TREE_HEIGHT)
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Default, Serialize, Deserialize)]
 pub struct SendLeaf {
     pub prev: BlockNumber,
@@ -136,6 +142,12 @@ pub type AccountTree = SparseMerkleTree<AccountLeaf>;
 pub type AccountMerkleProof = SparseMerkleProof<AccountLeaf>;
 pub type AccountMerkleProofTarget = SparseMerkleProofTarget<AccountLeafTarget>;
 
+impl AccountTree {
+    pub fn init() -> Self {
+        Self::new(SEND_TREE_HEIGHT)
+    }
+}
+
 impl SendLeaf {
     pub fn to_u64_vec(&self) -> Vec<u64> {
         [
@@ -193,8 +205,8 @@ impl Default for AccountLeaf {
     fn default() -> Self {
         Self {
             index: 0,
-            prev: BlockNumber::default(),
-            send_tree_root: PoseidonHashOut { elements: [0; 4] },
+            prev: BlockNumber(0),
+            send_tree_root: SendTree::init().get_root(),
         }
     }
 }

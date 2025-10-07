@@ -15,7 +15,9 @@ use thiserror::Error;
 use crate::{
     common::{
         block_number::{BlockNumber, BlockNumberTarget},
+        private_state::PrivateState,
         public_state::{PUBLIC_STATE_U64_LEN, PublicState, PublicStateTarget},
+        salt::Salt,
         user_id::{UserId, UserIdTarget},
     },
     utils::{
@@ -60,6 +62,15 @@ pub struct BalancePublicInputs {
 }
 
 impl BalancePublicInputs {
+    pub fn new(user_id: UserId, salt: Salt) -> Self {
+        Self {
+            user_id,
+            public_state: PublicState::default(),
+            block_r: BlockNumber(0),
+            private_commitment: PrivateState::new(salt).commitment(),
+        }
+    }
+
     pub fn to_u64_vec(&self) -> Vec<u64> {
         [
             vec![self.user_id.0],

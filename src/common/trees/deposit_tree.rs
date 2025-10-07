@@ -11,7 +11,7 @@ pub type DepositMerkleProof = IncrementalMerkleProof<Deposit>;
 pub type DepositMerkleProofTarget = IncrementalMerkleProofTarget<DepositTarget>;
 
 impl DepositTree {
-    pub fn initialize() -> Self {
-        IncrementalMerkleTree::new(DEPOSIT_TREE_HEIGHT)
+    pub fn init() -> Self {
+        Self::new(DEPOSIT_TREE_HEIGHT)
     }
 }

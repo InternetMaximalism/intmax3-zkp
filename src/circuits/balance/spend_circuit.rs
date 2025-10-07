@@ -402,7 +402,8 @@ mod tests {
     use super::*;
     use crate::{
         common::{
-            private_state::FullPrivateState, transfer::Transfer, trees::asset_tree::AssetTree,
+            private_state::FullPrivateState, salt::Salt, transfer::Transfer,
+            trees::asset_tree::AssetTree,
         },
         constants::ASSET_TREE_HEIGHT,
         ethereum_types::{bytes32::Bytes32, u256::U256},
@@ -417,7 +418,8 @@ mod tests {
 
     #[test]
     fn test_spend_circuit_smoke() {
-        let mut full_state = FullPrivateState::new();
+        let mut rng = rand::thread_rng();
+        let mut full_state = FullPrivateState::new(Salt::rand(&mut rng));
 
         let mut asset_tree_initial = AssetTree::new(ASSET_TREE_HEIGHT);
         let mut transfers = Vec::with_capacity(MAX_NUM_TRANSFERS_PER_TX);

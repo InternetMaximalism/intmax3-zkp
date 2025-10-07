@@ -496,7 +496,7 @@ mod tests {
             aux_data: Bytes32::default(),
         };
 
-        let mut deposit_tree = DepositTree::initialize();
+        let mut deposit_tree = DepositTree::init();
         deposit_tree.push(deposit.clone());
         let deposit_index = 0u64;
         let deposit_merkle_proof = deposit_tree.prove(deposit_index);
@@ -545,11 +545,11 @@ mod tests {
         asset_tree.update(token_index as u64, prev_balance);
         let asset_merkle_proof = asset_tree.prove(token_index as u64);
 
-        let mut full_private_state = FullPrivateState::new();
+        let mut full_private_state = FullPrivateState::new(Salt::rand(&mut rng));
         full_private_state.asset_tree = asset_tree.clone();
         let prev_private_state = full_private_state.to_private_state();
 
-        let mut nullifier_tree = NullifierTree::new();
+        let mut nullifier_tree = NullifierTree::init();
         let deposit_nullifier = deposit.nullifier();
         let nullifier_proof = nullifier_tree
             .prove_and_insert(deposit_nullifier)

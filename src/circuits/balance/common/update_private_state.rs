@@ -233,7 +233,7 @@ mod tests {
         let mut rng = rand::thread_rng();
         let transfer = Transfer::rand(&mut rng);
         let mut asset_tree = AssetTree::new(ASSET_TREE_HEIGHT);
-        let mut nullifier_tree = NullifierTree::new();
+        let mut nullifier_tree = NullifierTree::init();
         let prev_private_state = PrivateState {
             asset_tree_root: asset_tree.get_root(),
             nullifier_tree_root: nullifier_tree.get_root(),

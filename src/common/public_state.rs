@@ -13,7 +13,10 @@ use plonky2::{
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    common::block_number::{BlockNumber, BlockNumberTarget},
+    common::{
+        block_number::{BlockNumber, BlockNumberTarget},
+        trees::{account_tree::AccountTree, deposit_tree::DepositTree},
+    },
     utils::{
         leafable::{Leafable, LeafableTarget},
         leafable_hasher::PoseidonLeafableHasher,
@@ -23,13 +26,24 @@ use crate::{
 
 pub const PUBLIC_STATE_U64_LEN: usize = 1 + 3 * POSEIDON_HASH_OUT_LEN;
 
-#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PublicState {
     pub block_number: BlockNumber,
     pub account_tree_root: PoseidonHashOut,
     pub deposit_tree_root: PoseidonHashOut,
     pub prev_public_state_root: PoseidonHashOut,
+}
+
+impl Default for PublicState {
+    fn default() -> Self {
+        Self {
+            block_number: BlockNumber(0),
+            account_tree_root: AccountTree::init().get_root(),
+            deposit_tree_root: DepositTree::init().get_root(),
+            prev_public_state_root: PoseidonHashOut::default(),
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
