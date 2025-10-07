@@ -6,7 +6,7 @@ use plonky2::{
         circuit_builder::CircuitBuilder,
         circuit_data::{CircuitConfig, CircuitData, CommonCircuitData, VerifierCircuitData},
         config::{AlgebraicHasher, GenericConfig},
-        proof::ProofWithPublicInputs,
+        proof::{ProofWithPublicInputs, ProofWithPublicInputsTarget},
     },
 };
 
@@ -158,7 +158,7 @@ where
 
 #[derive(Clone, Debug)]
 pub struct SendTxTarget<const D: usize> {
-    pub prev_balance_pis: BalancePublicInputsTarget,
+    pub prev_balance_proof: ProofWithPublicInputsTarget<D>,
     pub update_public_state: UpdatePublicStateTarget,
     pub tx_settlement: TxSettlementTarget<D>,
 
@@ -238,7 +238,7 @@ impl<const D: usize> SendTxTarget<D> {
             vd: balance_vd,
         };
         Self {
-            prev_balance_pis: prev,
+            prev_balance_proof,
             update_public_state,
             tx_settlement,
             new_full_pis,
@@ -249,21 +249,19 @@ impl<const D: usize> SendTxTarget<D> {
         &self,
         witness: &mut W,
         value: &SpendTxWitness<F, C, D>,
-        balance_pis: &BalancePisBeforeAfter,
+        balance_full_pis: &BalanceFullPublicInputs<F, C, D>,
     ) where
         F: RichField + Extendable<D>,
         C: GenericConfig<D, F = F>,
         <C as GenericConfig<D>>::Hasher: AlgebraicHasher<F>,
         W: WitnessWrite<F>,
     {
-        self.prev_balance_pis
-            .set_witness(witness, &value.prev_balance_pis);
-        self.new_balance_pis
-            .set_witness(witness, &balance_pis.after);
+        witness.set_proof_with_pis_target(&self.prev_balance_proof, &value.prev_balance_proof);
         self.update_public_state
             .set_witness(witness, &value.update_public_state);
         self.tx_settlement
             .set_witness::<F, C, _>(witness, &value.tx_settlement);
+        self.new_full_pis.set_witness(witness, balance_full_pis);
     }
 }
 
@@ -272,10 +270,12 @@ pub struct SendTxCircuit<F, C, const D: usize>
 where
     F: RichField + Extendable<D>,
     C: GenericConfig<D, F = F>,
+    <C as GenericConfig<D>>::Hasher: AlgebraicHasher<F>,
 {
     pub data: CircuitData<F, C, D>,
+    pub balance_vd: VerifierCircuitData<F, C, D>,
     pub target: SendTxTarget<D>,
-    pub public_inputs: BalancePisBeforeAfterTarget,
+    pub public_inputs: BalanceFullPublicInputsTarget,
 }
 
 impl<F, C, const D: usize> SendTxCircuit<F, C, D>
@@ -284,19 +284,20 @@ where
     C: GenericConfig<D, F = F> + 'static,
     <C as GenericConfig<D>>::Hasher: AlgebraicHasher<F>,
 {
-    pub fn new(spend_vd: &VerifierCircuitData<F, C, D>) -> Self {
+    pub fn new(
+        balance_vd: &VerifierCircuitData<F, C, D>,
+        spend_vd: &VerifierCircuitData<F, C, D>,
+    ) -> Self {
         let mut builder = CircuitBuilder::<F, D>::new(CircuitConfig::standard_recursion_config());
-        let target = SendTxTarget::new(&mut builder, spend_vd);
-        let public_inputs = BalancePisBeforeAfterTarget {
-            before: target.prev_balance_pis.clone(),
-            after: target.new_balance_pis.clone(),
-        };
+        let target = SendTxTarget::new(&mut builder, &balance_vd.common, spend_vd);
+        let public_inputs = target.new_full_pis.clone();
 
-        builder.register_public_inputs(&public_inputs.to_vec());
+        builder.register_public_inputs(&public_inputs.to_vec(&balance_vd.common.config));
         let data = builder.build();
 
         Self {
             data,
+            balance_vd: balance_vd.clone(),
             target,
             public_inputs,
         }
@@ -306,7 +307,7 @@ where
         &self,
         witness: &SpendTxWitness<F, C, D>,
     ) -> Result<ProofWithPublicInputs<F, C, D>, SpendTxError> {
-        let balance_pis = witness.to_public_inputs()?;
+        let balance_pis = witness.to_public_inputs(&self.balance_vd)?;
         let mut pw = PartialWitness::<F>::new();
 
         self.target

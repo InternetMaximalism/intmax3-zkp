@@ -274,15 +274,6 @@ impl BalancePublicInputsTarget {
 //         Self { before, after }
 //     }
 
-//     pub fn set_witness<F: Field, W: WitnessWrite<F>>(
-//         &self,
-//         witness: &mut W,
-//         value: &BalancePisBeforeAfter,
-//     ) {
-//         self.before.set_witness(witness, &value.before);
-//         self.after.set_witness(witness, &value.after);
-//     }
-
 //     pub fn connect<F: RichField + Extendable<D>, const D: usize>(
 //         &self,
 //         builder: &mut CircuitBuilder<F, D>,
@@ -361,5 +352,21 @@ impl BalanceFullPublicInputsTarget {
         let vd = vd_from_pis_slice_target(vd_slice, config)
             .expect("vd_from_pis_slice_target should not fail");
         Self { pis, vd }
+    }
+
+    pub fn set_witness<
+        F: RichField + Extendable<D>,
+        C: GenericConfig<D, F = F>,
+        const D: usize,
+        W: WitnessWrite<F>,
+    >(
+        &self,
+        witness: &mut W,
+        value: &BalanceFullPublicInputs<F, C, D>,
+    ) where
+        <C as GenericConfig<D>>::Hasher: AlgebraicHasher<F>,
+    {
+        self.pis.set_witness(witness, &value.pis);
+        witness.set_verifier_data_target(&self.vd, &value.vd);
     }
 }
