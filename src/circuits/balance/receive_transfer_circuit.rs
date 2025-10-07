@@ -361,6 +361,7 @@ impl<const D: usize> ReceiveTransferTarget<D> {
             &balance_cd.config,
         );
 
+        // Check both embedded balance proofs against their verifier data.
         builder.verify_proof::<C>(&prev_balance_proof, &prev_balance_full_pis.vd, balance_cd);
         builder.verify_proof::<C>(
             &sender_balance_proof,
@@ -368,6 +369,7 @@ impl<const D: usize> ReceiveTransferTarget<D> {
             balance_cd,
         );
 
+        // Force a single verifier key shared between receiver and sender states.
         builder.connect_verifier_data(&prev_balance_full_pis.vd, &sender_balance_full_pis.vd);
 
         let receiver_prev_pis = prev_balance_full_pis.pis.clone();
@@ -382,6 +384,7 @@ impl<const D: usize> ReceiveTransferTarget<D> {
         let transfer_salt = SaltTarget::new(builder);
         let update_private_state = UpdatePrivateStateTarget::new::<F, C, D>(builder, true);
 
+        // Receiver previous state matches proof; both sides agree on the updated public state.
         receiver_update_public_state
             .old
             .connect(builder, &receiver_prev_pis.public_state);
@@ -392,6 +395,7 @@ impl<const D: usize> ReceiveTransferTarget<D> {
             .new
             .connect(builder, &sender_update_public_state.new);
 
+        // Receiver account inclusion must match the updated public state roots.
         account_state
             .user_id
             .connect(builder, &receiver_prev_pis.user_id);
@@ -400,6 +404,7 @@ impl<const D: usize> ReceiveTransferTarget<D> {
             receiver_update_public_state.new.account_tree_root.clone(),
         );
 
+        // Sender settlement references the same user/public state as both balance proofs.
         tx_settlement
             .user_id
             .connect(builder, &sender_prev_pis.user_id);
@@ -410,6 +415,7 @@ impl<const D: usize> ReceiveTransferTarget<D> {
             .public_state
             .connect(builder, &receiver_update_public_state.new);
 
+        // Transfer witness must come from the settled transaction.
         transfer_witness
             .transfer_tree_root
             .connect(builder, tx_settlement.tx.transfer_tree_root.clone());
@@ -419,35 +425,13 @@ impl<const D: usize> ReceiveTransferTarget<D> {
             &receiver_prev_pis.user_id,
             &transfer_salt,
         );
+        // Salted recipient commitment points to the receiver's user id.
         transfer_witness
             .transfer
             .recipient
             .connect(builder, expected_recipient);
 
-        builder.connect(
-            transfer_witness.transfer.token_index,
-            update_private_state.token_index,
-        );
-        transfer_witness
-            .transfer
-            .amount
-            .connect(builder, update_private_state.amount.clone());
-
-        let prev_private_commitment = update_private_state.prev_private_state.commitment(builder);
-        prev_private_commitment.connect(builder, receiver_prev_pis.private_commitment.clone());
-
-        let new_private_commitment = update_private_state.new_private_state.commitment(builder);
-
-        let spend_pis = tx_settlement.spend_pis();
-        spend_pis
-            .prev_private_commitment
-            .connect(builder, sender_prev_pis.private_commitment.clone());
-        let true_target = builder._true();
-        builder.connect(spend_pis.is_valid.target, true_target.target);
-
-        let tx_block_number = tx_settlement.tx_block_number();
-        new_block_r.enforce_ge(builder, &tx_block_number);
-
+        // Receiver block range respects past sends and new block reference.
         receiver_prev_pis
             .block_r
             .enforce_ge(builder, &account_state.send_leaf.prev);
@@ -468,6 +452,33 @@ impl<const D: usize> ReceiveTransferTarget<D> {
             .block_number
             .enforce_ge(builder, &new_block_r);
 
+        // tx_block_number <= new_block_r so that the transfer can be received.
+        let tx_block_number = tx_settlement.tx_block_number();
+        new_block_r.enforce_ge(builder, &tx_block_number);
+
+        // Sender commitment matches spend proof and the proof is marked valid.
+        let spend_pis = tx_settlement.spend_pis();
+        spend_pis
+            .prev_private_commitment
+            .connect(builder, sender_prev_pis.private_commitment.clone());
+        builder.assert_one(spend_pis.is_valid.target);
+
+        // Transfer details must drive the private-state update.
+        builder.connect(
+            transfer_witness.transfer.token_index,
+            update_private_state.token_index,
+        );
+        transfer_witness
+            .transfer
+            .amount
+            .connect(builder, update_private_state.amount.clone());
+
+        let prev_private_commitment = update_private_state.prev_private_state.commitment(builder);
+        prev_private_commitment.connect(builder, receiver_prev_pis.private_commitment.clone());
+
+        let new_private_commitment = update_private_state.new_private_state.commitment(builder);
+
+        // Private-state nullifier equals the freshly revealed transfer nullifier.
         let transfer_nullifier = transfer_witness.transfer.nullifier(builder);
         update_private_state
             .nullifier
