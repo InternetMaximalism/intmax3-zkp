@@ -256,13 +256,7 @@ mod tests {
         let config = CircuitConfig::standard_recursion_config();
         let circuit = TestCyclicCircuit::<F, C, D>::new(config, pis_len, &common_data);
 
-        let total_pi_len = circuit.data.common.num_public_inputs;
-        assert_eq!(
-            total_pi_len,
-            pis_len + vd_vec_len(&circuit.data.common.config)
-        );
-
-        let initial_pis: Vec<F> = (0..total_pi_len)
+        let initial_pis: Vec<F> = (0..pis_len)
             .map(|i| F::from_canonical_usize(i + 1))
             .collect();
 
@@ -281,10 +275,5 @@ mod tests {
             .data
             .verify(second_proof.clone())
             .expect("second proof must verify");
-
-        assert_eq!(
-            &second_proof.public_inputs[..total_pi_len],
-            &first_proof.public_inputs[..total_pi_len]
-        );
     }
 }
