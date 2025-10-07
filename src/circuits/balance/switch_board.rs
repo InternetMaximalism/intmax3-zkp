@@ -232,14 +232,12 @@ impl<const D: usize> BalanceSwichBoardTarget<D> {
         };
 
         // Case1: receive transfer proof
-        println!("begin to create receive transfer proof target");
         let receive_transfer_proof =
             add_proof_target_and_conditionally_verify(receive_transfer_vd, builder, one_hot[1]);
         let new_pis1 = BalanceFullPublicInputsTarget::from_pis(
             &receive_transfer_proof.public_inputs,
             balance_config,
         );
-        println!("created receive transfer proof target");
 
         // Case2: receive deposit proof
         let receive_deposit_proof =
@@ -248,14 +246,12 @@ impl<const D: usize> BalanceSwichBoardTarget<D> {
             &receive_deposit_proof.public_inputs,
             balance_config,
         );
-        println!("created receive deposit proof target");
 
         // Case3: send tx proof
         let send_tx_proof =
             add_proof_target_and_conditionally_verify(send_tx_vd, builder, one_hot[3]);
         let new_pis3 =
             BalanceFullPublicInputsTarget::from_pis(&send_tx_proof.public_inputs, balance_config);
-        println!("created send tx proof target");
 
         // Selection
         let candidates = vec![

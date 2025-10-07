@@ -42,7 +42,7 @@ pub enum BalancePublicInputsError {
     },
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct BalancePublicInputs {
     // User ID of the balance owner.
     pub user_id: UserId,

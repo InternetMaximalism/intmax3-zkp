@@ -11,6 +11,7 @@ use plonky2::{
         config::{AlgebraicHasher, GenericConfig},
         proof::{ProofWithPublicInputs, ProofWithPublicInputsTarget},
     },
+    recursion::cyclic_recursion::check_cyclic_proof_verifier_data,
 };
 use thiserror::Error;
 
@@ -26,6 +27,9 @@ use crate::{
 pub enum BalanceCircuitError {
     #[error("Failed to prove: {0}")]
     FailedToProve(String),
+
+    #[error("Failed to verify: {0}")]
+    ProofVerificationError(String),
 }
 
 pub struct BalanceCircuit<F, C, const D: usize>
@@ -94,6 +98,22 @@ where
             .prove(pw)
             .map_err(|e| BalanceCircuitError::FailedToProve(e.to_string()))
     }
+
+    pub fn verify(
+        &self,
+        proof: &ProofWithPublicInputs<F, C, D>,
+    ) -> Result<(), BalanceCircuitError> {
+        check_cyclic_proof_verifier_data(proof, &self.data.verifier_only, &self.data.common)
+            .map_err(|e| {
+                BalanceCircuitError::ProofVerificationError(format!(
+                    "Cyclic proof verifier data check failed: {:?}",
+                    e
+                ))
+            })?;
+        self.data.verify(proof.clone()).map_err(|e| {
+            BalanceCircuitError::ProofVerificationError(format!("Failed to verify proof: {:?}", e))
+        })
+    }
 }
 
 #[cfg(test)]
@@ -102,10 +122,18 @@ mod tests {
         field::goldilocks_field::GoldilocksField, plonk::config::PoseidonGoldilocksConfig,
     };
 
-    use crate::circuits::balance::{
-        balance_circuit::BalanceCircuit, receive_deposit_circuit::ReceiveDepositCircuit,
-        receive_transfer_circuit::ReceiveTransferCircuit, send_tx_circuit::SendTxCircuit,
-        spend_circuit::SpendCircuit, switch_board::BalanceSwichBoardCircuit,
+    use crate::{
+        circuits::balance::{
+            balance_circuit::BalanceCircuit,
+            balance_pis::{BALANCE_PUBLIC_INPUTS_LEN, BalancePublicInputs},
+            receive_deposit_circuit::ReceiveDepositCircuit,
+            receive_transfer_circuit::ReceiveTransferCircuit,
+            send_tx_circuit::SendTxCircuit,
+            spend_circuit::SpendCircuit,
+            switch_board::{BalanceSwichBoard, BalanceSwichBoardCircuit},
+        },
+        common::{salt::Salt, user_id::UserId},
+        utils::conversion::ToU64,
     };
 
     const D: usize = 2;
@@ -113,7 +141,7 @@ mod tests {
     type C = PoseidonGoldilocksConfig;
 
     #[test]
-    fn test_build_balance_circuit() {
+    fn test_balance_circuit() {
         let balance_cd = BalanceCircuit::<F, C, D>::generate_cd();
         let spend_circuit = SpendCircuit::<F, C, D>::new();
         let spend_vd = spend_circuit.data.verifier_data();
@@ -129,7 +157,39 @@ mod tests {
             &send_tx_circuit.data.verifier_data(),
         );
 
-        let _balance_circuit =
+        let balance_circuit =
             BalanceCircuit::<F, C, D>::new(&balance_cd, &switch_circuit.data.verifier_data());
+
+        let balance_vd = balance_circuit.data.verifier_data();
+
+        let mut rng = rand::thread_rng();
+        let user_id = UserId(1);
+        let salt = Salt::rand(&mut rng);
+
+        let switch_board_witness = BalanceSwichBoard::<F, C, D> {
+            initial_value: Some((user_id, salt)),
+            receive_transfer_proof: None,
+            receive_deposit_proof: None,
+            send_tx_proof: None,
+        };
+        let switch_board_proof = switch_circuit
+            .prove(&balance_vd, &switch_board_witness)
+            .expect("Failed to prove switch board");
+
+        let balance_proof = balance_circuit
+            .prove(&switch_board_proof)
+            .expect("Failed to prove balance circuit");
+
+        balance_circuit
+            .verify(&balance_proof)
+            .expect("Failed to verify balance proof");
+
+        let balance_pis = BalancePublicInputs::from_u64(
+            &balance_proof.public_inputs[0..BALANCE_PUBLIC_INPUTS_LEN].to_u64_vec(),
+        )
+        .expect("Failed to parse balance public inputs");
+
+        let expected_pis = BalancePublicInputs::new(user_id, salt);
+        assert_eq!(balance_pis, expected_pis);
     }
 }
