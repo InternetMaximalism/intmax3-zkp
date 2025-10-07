@@ -1,6 +1,7 @@
 use plonky2::{
     field::extension::Extendable,
     hash::hash_types::RichField,
+    iop::witness::{PartialWitness, WitnessWrite as _},
     plonk::{
         circuit_builder::CircuitBuilder,
         circuit_data::{
@@ -8,9 +9,10 @@ use plonky2::{
             VerifierCircuitTarget,
         },
         config::{AlgebraicHasher, GenericConfig},
-        proof::ProofWithPublicInputsTarget,
+        proof::{ProofWithPublicInputs, ProofWithPublicInputsTarget},
     },
 };
+use thiserror::Error;
 
 use crate::{
     circuits::balance::balance_pis::{BALANCE_PUBLIC_INPUTS_LEN, BalanceFullPublicInputsTarget},
@@ -20,6 +22,12 @@ use crate::{
     },
 };
 
+#[derive(Debug, Error)]
+pub enum BalanceCircuitError {
+    #[error("Failed to prove: {0}")]
+    FailedToProve(String),
+}
+
 pub struct BalanceCircuit<F, C, const D: usize>
 where
     F: RichField + Extendable<D>,
@@ -28,7 +36,6 @@ where
 {
     pub data: CircuitData<F, C, D>,
     pub switch_proof: ProofWithPublicInputsTarget<D>,
-    pub balance_vd: VerifierCircuitTarget,
 }
 
 impl<F, C, const D: usize> BalanceCircuit<F, C, D>
@@ -57,11 +64,7 @@ where
         );
         assert!(success, "Failed to build balance circuit");
 
-        Self {
-            data,
-            switch_proof,
-            balance_vd: new_balance_pis.vd,
-        }
+        Self { data, switch_proof }
     }
 
     pub fn generate_cd() -> CommonCircuitData<F, D> {
@@ -78,5 +81,17 @@ where
         let mut common = builder.build::<C>().common;
         common.num_public_inputs = BALANCE_PUBLIC_INPUTS_LEN + vd_vec_len(&common.config);
         common
+    }
+
+    pub fn prove(
+        &self,
+        switch_board_proof: &ProofWithPublicInputs<F, C, D>,
+    ) -> Result<ProofWithPublicInputs<F, C, D>, BalanceCircuitError> {
+        let mut pw = PartialWitness::<F>::new();
+        pw.set_proof_with_pis_target(&self.switch_proof, switch_board_proof);
+
+        self.data
+            .prove(pw)
+            .map_err(|e| BalanceCircuitError::FailedToProve(e.to_string()))
     }
 }
