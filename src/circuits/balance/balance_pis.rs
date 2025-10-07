@@ -231,59 +231,6 @@ impl BalancePublicInputsTarget {
     }
 }
 
-// #[derive(Clone, Debug)]
-// pub struct BalancePisBeforeAfter {
-//     pub before: BalancePublicInputs,
-//     pub after: BalancePublicInputs,
-// }
-
-// impl BalancePisBeforeAfter {
-//     pub fn to_u64_vec(&self) -> Vec<u64> {
-//         [self.before.to_u64_vec(), self.after.to_u64_vec()].concat()
-//     }
-
-//     pub fn from_u64(pis: &[u64]) -> Result<Self, BalancePublicInputsError> {
-//         if pis.len() <= 2 * BALANCE_PUBLIC_INPUTS_LEN {
-//             return Err(BalancePublicInputsError::InvalidLength(pis.len()));
-//         }
-//         let before = BalancePublicInputs::from_u64(&pis[0..BALANCE_PUBLIC_INPUTS_LEN])?;
-//         let after = BalancePublicInputs::from_u64(
-//             &pis[BALANCE_PUBLIC_INPUTS_LEN..2 * BALANCE_PUBLIC_INPUTS_LEN],
-//         )?;
-//         Ok(Self { before, after })
-//     }
-// }
-
-// #[derive(Clone, Debug)]
-// pub struct BalancePisBeforeAfterTarget {
-//     pub before: BalancePublicInputsTarget,
-//     pub after: BalancePublicInputsTarget,
-// }
-
-// impl BalancePisBeforeAfterTarget {
-//     pub fn to_vec(&self) -> Vec<Target> {
-//         [self.before.to_vec(), self.after.to_vec()].concat()
-//     }
-
-//     pub fn from_pis(pis: &[Target]) -> Self {
-//         assert!(pis.len() >= 2 * BALANCE_PUBLIC_INPUTS_LEN);
-//         let before = BalancePublicInputsTarget::from_pis(&pis[0..BALANCE_PUBLIC_INPUTS_LEN]);
-//         let after = BalancePublicInputsTarget::from_pis(
-//             &pis[BALANCE_PUBLIC_INPUTS_LEN..2 * BALANCE_PUBLIC_INPUTS_LEN],
-//         );
-//         Self { before, after }
-//     }
-
-//     pub fn connect<F: RichField + Extendable<D>, const D: usize>(
-//         &self,
-//         builder: &mut CircuitBuilder<F, D>,
-//         other: &Self,
-//     ) {
-//         self.before.connect(builder, &other.before);
-//         self.after.connect(builder, &other.after);
-//     }
-// }
-
 #[derive(Clone, Debug)]
 pub struct BalanceFullPublicInputs<
     F: RichField + Extendable<D>,
