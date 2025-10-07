@@ -281,17 +281,23 @@ impl FullPublicState {
                 continue;
             }
             let mut send_leaves = self.send_leaves.get(&user_id).cloned().unwrap_or_default();
+            let prev = if let Some(last) = send_leaves.last() {
+                last.cur
+            } else {
+                BlockNumber(0)
+            };
+            if prev == BlockNumber(block_number) {
+                // skip if the user already has a tx in this block
+                continue;
+            }
+
+            // reconstruct send tree from send leaves
             let mut send_tree = SendTree::init();
             for leaf in &send_leaves {
                 send_tree.push(leaf.clone());
             }
 
             // sanity check
-            let prev = if let Some(last) = send_leaves.last() {
-                last.cur
-            } else {
-                BlockNumber(0)
-            };
             let account_leaf = AccountLeaf {
                 index: send_tree.len() as u64,
                 prev,
@@ -312,6 +318,7 @@ impl FullPublicState {
             };
             send_tree.push(new_send_leaf.clone());
 
+            // update send leaves
             send_leaves.push(new_send_leaf);
             self.send_leaves.insert(user_id, send_leaves.clone());
 
