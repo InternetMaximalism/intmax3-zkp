@@ -22,7 +22,7 @@ use crate::{
         },
     },
     common::block_number::BlockNumberTarget,
-    utils::{conversion::ToU64, poseidon_hash_out::PoseidonHashOutTarget},
+    utils::{conversion::ToU64, cyclic::add_const_gates, poseidon_hash_out::PoseidonHashOutTarget},
 };
 
 #[derive(thiserror::Error, Debug)]
@@ -284,6 +284,10 @@ where
         let public_inputs = target.new_full_pis.clone();
 
         builder.register_public_inputs(&public_inputs.to_vec(&balance_cd.config));
+
+        // add some constantss gate to enable `conditionally_verify_proof`
+        add_const_gates(&mut builder, 1 << 14);
+
         let data = builder.build();
 
         Self {

@@ -2,7 +2,7 @@ use crate::utils::error::{CyclicError, Result, UtilsError};
 use anyhow::Context;
 use plonky2::{
     field::extension::Extendable,
-    gates::noop::NoopGate,
+    gates::{constant::ConstantGate, noop::NoopGate},
     hash::{
         hash_types::{HashOut, HashOutTarget, MerkleCapTarget, RichField},
         merkle_tree::MerkleCap,
@@ -117,6 +117,15 @@ pub fn add_noop_gates<F: RichField + Extendable<D>, const D: usize>(
 ) {
     while (builder.num_gates() as u64) < target_num_gates {
         builder.add_gate(NoopGate, vec![]);
+    }
+}
+
+pub fn add_const_gates<F: RichField + Extendable<D>, const D: usize>(
+    builder: &mut CircuitBuilder<F, D>,
+    target_num_gates: u64,
+) {
+    while (builder.num_gates() as u64) < target_num_gates {
+        builder.add_gate(ConstantGate::new(2), vec![]);
     }
 }
 

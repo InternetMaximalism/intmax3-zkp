@@ -129,7 +129,7 @@ mod tests {
             &send_tx_circuit.data.verifier_data(),
         );
 
-        // let _balance_circuit =
-        //     BalanceCircuit::<F, C, D>::new(&balance_cd, &switch_circuit.data.verifier_data());
+        let _balance_circuit =
+            BalanceCircuit::<F, C, D>::new(&balance_cd, &switch_circuit.data.verifier_data());
     }
 }

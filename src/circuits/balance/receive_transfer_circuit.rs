@@ -32,7 +32,7 @@ use crate::{
         salt::{Salt, SaltTarget},
     },
     ethereum_types::u32limb_trait::U32LimbTargetTrait,
-    utils::conversion::ToU64,
+    utils::{conversion::ToU64, cyclic::add_const_gates},
 };
 
 #[derive(Debug, thiserror::Error)]
@@ -541,6 +541,9 @@ where
         let target = ReceiveTransferTarget::new(&mut builder, &balance_cd, spend_vd);
         let public_inputs = target.new_full_pis.clone();
         builder.register_public_inputs(&public_inputs.to_vec(&balance_cd.config));
+
+        // add some constantss gate to enable `conditionally_verify_proof`
+        add_const_gates(&mut builder, 1 << 14);
         let data = builder.build();
 
         Self {
