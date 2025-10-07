@@ -1,3 +1,4 @@
+pub mod balance_circuit;
 pub mod balance_pis;
 pub mod common;
 pub mod receive_deposit_circuit;
