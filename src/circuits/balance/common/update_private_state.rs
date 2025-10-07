@@ -6,11 +6,9 @@ use crate::{
             nullifier_tree::{NullifierInsertionProof, NullifierInsertionProofTarget},
         },
     },
-    constants::ASSET_TREE_HEIGHT,
+    constants::{ASSET_TREE_HEIGHT, TOKEN_INDEX_BITS},
     ethereum_types::{
-        bytes32::{Bytes32, Bytes32Target},
-        u32limb_trait::U32LimbTargetTrait as _,
-        u256::{U256, U256Target},
+        bytes32::{Bytes32, Bytes32Target}, u256::{U256Target, U256}, u32limb_trait::U32LimbTargetTrait as _
     },
 };
 use plonky2::{
@@ -124,7 +122,7 @@ impl UpdatePrivateStateTarget {
     {
         let token_index = builder.add_virtual_target();
         if is_checked {
-            builder.range_check(token_index, 32);
+            builder.range_check(token_index, TOKEN_INDEX_BITS);
         }
         let amount = U256Target::new(builder, is_checked);
         let nullifier = Bytes32Target::new(builder, is_checked);
