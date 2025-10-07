@@ -255,7 +255,8 @@ impl FullPublicState {
     ) -> Result<(), FullPublicStateError> {
         let num_users = get_num_users(local_ids.len())
             .ok_or(FullPublicStateError::TooManyLocalIds(local_ids.len()))?;
-        let block_number = self.block_number.0 + 1;
+
+        // create block
         let block = Block::new(
             num_users,
             aggregator_id,
@@ -263,11 +264,13 @@ impl FullPublicState {
             tx_tree_root,
             self.deposit_hash_chain,
         )?;
+
         // update public state tree
         let prev_public_state = self.to_public_state();
         self.public_state_tree.push(prev_public_state);
 
         // add block
+        let block_number = self.block_number.0 + 1;
         self.block_number = BlockNumber(block_number);
         self.blocks.push(block.clone());
         self.block_hash_chain = block
@@ -277,7 +280,7 @@ impl FullPublicState {
         // update account tree
         for &local_id in local_ids {
             if local_id == 0 {
-                // skip dummy local_id
+                // ignore zero local_id (padding or dummy)
                 continue;
             }
             let user_id = UserId::new(aggregator_id, local_id)?;
