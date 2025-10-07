@@ -20,7 +20,6 @@ use plonky2::{
 };
 
 use crate::{
-    constants::CYCLIC_CIRCUIT_PADDING_DEGREE,
     ethereum_types::{
         bytes32::{BYTES32_LEN, Bytes32, Bytes32Target},
         u32limb_trait::U32LimbTargetTrait,
@@ -141,7 +140,7 @@ where
         circuit_digest: builder.add_virtual_hash(),
     };
     builder.verify_proof::<C>(&proof, &verifier_data, &data.common);
-    while builder.num_gates() < 1 << CYCLIC_CIRCUIT_PADDING_DEGREE {
+    while builder.num_gates() < 1 << 13 {
         builder.add_gate(NoopGate, vec![]);
     }
     let mut common = builder.build::<C>().common;

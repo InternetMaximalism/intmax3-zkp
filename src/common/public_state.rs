@@ -16,7 +16,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     common::{
-        block::Block,
+        block::{Block, BlockError},
         block_number::{BlockNumber, BlockNumberTarget},
         deposit::Deposit,
         trees::{
@@ -26,7 +26,7 @@ use crate::{
         },
         user_id::{UserId, UserIdError},
     },
-    constants::MAX_NUM_USERS_PER_BLOCK,
+    constants::get_num_users,
     ethereum_types::{address::Address, bytes32::Bytes32, u256::U256},
     utils::{
         leafable::{Leafable, LeafableTarget},
@@ -204,6 +204,9 @@ pub enum FullPublicStateError {
 
     #[error("UserId error: {0}")]
     UserIdError(#[from] UserIdError),
+
+    #[error("Block error: {0}")]
+    BlockError(#[from] BlockError),
 }
 
 pub struct FullPublicState {
@@ -250,18 +253,16 @@ impl FullPublicState {
         local_ids: &[u32],
         tx_tree_root: Bytes32,
     ) -> Result<(), FullPublicStateError> {
-        if local_ids.len() > MAX_NUM_USERS_PER_BLOCK {
-            return Err(FullPublicStateError::TooManyLocalIds(local_ids.len()));
-        }
-
+        let num_users = get_num_users(local_ids.len())
+            .ok_or(FullPublicStateError::TooManyLocalIds(local_ids.len()))?;
         let block_number = self.block_number.0 + 1;
-        let block = Block {
+        let block = Block::new(
+            num_users,
             aggregator_id,
-            local_ids: local_ids.to_vec(),
+            local_ids,
             tx_tree_root,
-            deposit_hash_chain: self.deposit_hash_chain,
-        };
-
+            self.deposit_hash_chain,
+        )?;
         // update public state tree
         let prev_public_state = self.to_public_state();
         self.public_state_tree.push(prev_public_state);
@@ -275,11 +276,11 @@ impl FullPublicState {
 
         // update account tree
         for &local_id in local_ids {
-            let user_id = UserId::new(aggregator_id, local_id)?;
-            if user_id == UserId::dummy() {
-                // skip dummy user id
+            if local_id == 0 {
+                // skip dummy local_id
                 continue;
             }
+            let user_id = UserId::new(aggregator_id, local_id)?;
             let mut send_leaves = self.send_leaves.get(&user_id).cloned().unwrap_or_default();
             let prev = if let Some(last) = send_leaves.last() {
                 last.cur
