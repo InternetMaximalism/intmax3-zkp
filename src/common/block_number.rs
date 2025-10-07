@@ -80,6 +80,14 @@ impl BlockNumberTarget {
         builder.is_equal(self.value, other.value)
     }
 
+    pub fn is_zero<F: RichField + Extendable<D>, const D: usize>(
+        &self,
+        builder: &mut CircuitBuilder<F, D>,
+    ) -> BoolTarget {
+        let zero = builder.zero();
+        builder.is_equal(self.value, zero)
+    }
+
     pub fn enforce_ge<F: RichField + Extendable<D>, const D: usize>(
         &self,
         builder: &mut CircuitBuilder<F, D>,
@@ -101,6 +109,35 @@ impl BlockNumberTarget {
             &Self {
                 value: lower_bound_plus_one,
             },
+        );
+    }
+
+    pub fn conditional_ge<F: RichField + Extendable<D>, const D: usize>(
+        &self,
+        builder: &mut CircuitBuilder<F, D>,
+        lower_bound: &Self,
+        condition: BoolTarget,
+    ) {
+        let diff = builder.sub(self.value, lower_bound.value);
+        let zero = builder.zero();
+        let diff_when_true = builder.select(condition, diff, zero);
+        builder.range_check(diff_when_true, BLOCK_NUMBER_BITS);
+    }
+
+    pub fn conditional_gt<F: RichField + Extendable<D>, const D: usize>(
+        &self,
+        builder: &mut CircuitBuilder<F, D>,
+        lower_bound: &Self,
+        condition: BoolTarget,
+    ) {
+        // self > lower_bound when condition, otherwise no constraint.
+        let lower_plus_one = builder.add_const(lower_bound.value, F::ONE);
+        self.conditional_ge(
+            builder,
+            &Self {
+                value: lower_plus_one,
+            },
+            condition,
         );
     }
 
