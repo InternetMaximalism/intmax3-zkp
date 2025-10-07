@@ -506,7 +506,7 @@ mod tests {
         let send_merkle_proof = send_tree.prove(send_leaf_index as u64);
 
         let account_leaf = AccountLeaf {
-            index: send_tree.len() as u64,
+            index: send_tree.len() as u32,
             prev: BlockNumber::new(0).unwrap(),
             send_tree_root: send_tree.get_root(),
         };

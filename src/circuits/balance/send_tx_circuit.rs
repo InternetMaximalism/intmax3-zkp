@@ -435,7 +435,7 @@ mod tests {
 
         let mut account_tree = AccountTree::new(ACCOUNT_TREE_HEIGHT);
         let account_leaf = AccountLeaf {
-            index: send_tree.len() as u64,
+            index: send_tree.len() as u32,
             prev: send_leaf.cur,
             send_tree_root: send_tree.get_root(),
         };

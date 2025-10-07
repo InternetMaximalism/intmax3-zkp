@@ -711,12 +711,12 @@ mod tests {
         let sender_user_id = UserId::new(0, local_id).unwrap();
 
         let account_leaf_sender = AccountLeaf {
-            index: send_tree_sender.len() as u64,
+            index: send_tree_sender.len() as u32,
             prev: send_leaf_sender.cur,
             send_tree_root: send_tree_sender.get_root(),
         };
         let account_leaf_receiver = AccountLeaf {
-            index: send_tree_receiver.len() as u64,
+            index: send_tree_receiver.len() as u32,
             prev: send_leaf_receiver.prev,
             send_tree_root: send_tree_receiver.get_root(),
         };

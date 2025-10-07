@@ -90,7 +90,7 @@ impl LeafableTarget for SendLeafTarget {
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct AccountLeaf {
-    pub index: u64,                      // the next index of send leaf
+    pub index: u32,                      // the next index of send leaf
     pub prev: BlockNumber,               // the previous block number
     pub send_tree_root: PoseidonHashOut, // the root of send tree
 }
@@ -254,14 +254,14 @@ impl AccountLeafTarget {
         value: AccountLeaf,
     ) -> Self {
         Self {
-            index: builder.constant(F::from_canonical_u64(value.index)),
+            index: builder.constant(F::from_canonical_u64(value.index.into())),
             prev: BlockNumberTarget::constant(builder, value.prev),
             send_tree_root: PoseidonHashOutTarget::constant(builder, value.send_tree_root),
         }
     }
 
     pub fn set_witness<F: Field, W: WitnessWrite<F>>(&self, witness: &mut W, value: &AccountLeaf) {
-        witness.set_target(self.index, F::from_canonical_u64(value.index));
+        witness.set_target(self.index, F::from_canonical_u64(value.index.into()));
         self.prev.set_witness(witness, value.prev);
         self.send_tree_root
             .set_witness(witness, value.send_tree_root);

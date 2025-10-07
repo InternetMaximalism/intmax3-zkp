@@ -124,7 +124,7 @@ impl UpdateAccountTree {
             send_merkle_proof
                 .verify(
                     &SendLeaf::empty_leaf(),
-                    prev_account_leaf.index,
+                    prev_account_leaf.index.into(),
                     prev_account_leaf.send_tree_root,
                 )
                 .map_err(|e| {
@@ -141,7 +141,7 @@ impl UpdateAccountTree {
                 tx_tree_root: self.block.tx_tree_root,
             };
             let new_send_tree_root =
-                send_merkle_proof.get_root(&new_send_leaf, prev_account_leaf.index);
+                send_merkle_proof.get_root(&new_send_leaf, prev_account_leaf.index.into());
 
             // create new account leaf and compute new account tree root
             let new_account_leaf = AccountLeaf {
@@ -457,7 +457,7 @@ mod tests {
         };
         send_tree_user1.push(send_leaf_user1_prev.clone());
         let prev_account_leaf_user1 = AccountLeaf {
-            index: send_tree_user1.len() as u64,
+            index: send_tree_user1.len() as u32,
             prev: send_leaf_user1_prev.cur,
             send_tree_root: send_tree_user1.get_root(),
         };
@@ -471,7 +471,7 @@ mod tests {
         };
         send_tree_user2.push(send_leaf_user2_prev.clone());
         let prev_account_leaf_user2 = AccountLeaf {
-            index: send_tree_user2.len() as u64,
+            index: send_tree_user2.len() as u32,
             prev: block_number,
             send_tree_root: send_tree_user2.get_root(),
         };
@@ -493,8 +493,8 @@ mod tests {
         )
         .unwrap();
 
-        let send_proof_user1 = send_tree_user1.prove(prev_account_leaf_user1.index);
-        let send_proof_user2 = send_tree_user2.prove(prev_account_leaf_user2.index);
+        let send_proof_user1 = send_tree_user1.prove(prev_account_leaf_user1.index.into());
+        let send_proof_user2 = send_tree_user2.prove(prev_account_leaf_user2.index.into());
         let dummy_account_leaf = AccountLeaf::default();
         let dummy_account_merkle_proof = AccountMerkleProof::dummy(ACCOUNT_TREE_HEIGHT);
         let dummy_send_proof = SendMerkleProof::dummy(SEND_TREE_HEIGHT);
@@ -531,7 +531,7 @@ mod tests {
                     cur: block_number,
                     tx_tree_root,
                 };
-                let new_send_root = send_proof.get_root(&new_send_leaf, prev_leaf.index);
+                let new_send_root = send_proof.get_root(&new_send_leaf, prev_leaf.index.into());
                 let new_account_leaf = AccountLeaf {
                     index: prev_leaf.index + 1,
                     prev: block_number,
@@ -560,7 +560,7 @@ mod tests {
             tx_tree_root,
         };
         let new_send_root_user1 =
-            send_proof_user1.get_root(&new_send_leaf_user1, prev_account_leaf_user1.index);
+            send_proof_user1.get_root(&new_send_leaf_user1, prev_account_leaf_user1.index.into());
         let new_account_leaf_user1 = AccountLeaf {
             index: prev_account_leaf_user1.index + 1,
             prev: block_number,

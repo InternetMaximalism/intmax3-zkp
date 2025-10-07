@@ -303,7 +303,7 @@ impl FullPublicState {
 
             // sanity check
             let account_leaf = AccountLeaf {
-                index: send_tree.len() as u64,
+                index: send_tree.len() as u32,
                 prev,
                 send_tree_root: send_tree.get_root(),
             };
@@ -328,7 +328,7 @@ impl FullPublicState {
 
             // update account tree
             let new_account_leaf = AccountLeaf {
-                index: send_tree.len() as u64,
+                index: send_tree.len() as u32,
                 prev: BlockNumber(block_number),
                 send_tree_root: send_tree.get_root(),
             };
