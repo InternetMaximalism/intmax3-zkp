@@ -1,14 +1,12 @@
 use std::fmt::Debug;
 
 use plonky2::{
-    field::{extension::Extendable, goldilocks_field::GoldilocksField, types::Field},
+    field::{extension::Extendable, types::Field},
     hash::hash_types::RichField,
     iop::{target::Target, witness::WitnessWrite},
     plonk::{
         circuit_builder::CircuitBuilder,
-        circuit_data::{
-            CircuitConfig, VerifierCircuitData, VerifierCircuitTarget, VerifierOnlyCircuitData,
-        },
+        circuit_data::{CircuitConfig, VerifierCircuitTarget, VerifierOnlyCircuitData},
         config::{AlgebraicHasher, GenericConfig},
     },
 };
@@ -22,7 +20,9 @@ use crate::{
     },
     utils::{
         conversion::{ToField as _, ToU64},
-        cyclic::{vd_from_pis_slice, vd_to_vec, vd_vec_len},
+        cyclic::{
+            vd_from_pis_slice, vd_from_pis_slice_target, vd_to_vec, vd_to_vec_target, vd_vec_len,
+        },
         poseidon_hash_out::{POSEIDON_HASH_OUT_LEN, PoseidonHashOut, PoseidonHashOutTarget},
     },
 };
@@ -31,8 +31,8 @@ pub const BALANCE_PUBLIC_INPUTS_LEN: usize = 1 + PUBLIC_STATE_U64_LEN + 1 + POSE
 
 #[derive(Debug, Error)]
 pub enum BalancePublicInputsError {
-    #[error("Invalid public inputs length: got {0}")]
-    InvalidLength(usize),
+    #[error("Invalid public inputs length: {0}")]
+    InvalidLength(String),
     #[error("Failed to parse {field}: {message}")]
     ParseError {
         field: &'static str,
@@ -70,9 +70,13 @@ impl BalancePublicInputs {
         .concat()
     }
 
-    pub fn from_pis_u64(pis: &[u64]) -> Result<Self, BalancePublicInputsError> {
-        if pis.len() <= BALANCE_PUBLIC_INPUTS_LEN {
-            return Err(BalancePublicInputsError::InvalidLength(pis.len()));
+    pub fn from_u64(pis: &[u64]) -> Result<Self, BalancePublicInputsError> {
+        if pis.len() != BALANCE_PUBLIC_INPUTS_LEN {
+            return Err(BalancePublicInputsError::InvalidLength(format!(
+                "Expected {}, got {}",
+                BALANCE_PUBLIC_INPUTS_LEN,
+                pis.len()
+            )));
         }
 
         let mut cursor = 0;
@@ -162,7 +166,7 @@ impl BalancePublicInputsTarget {
     }
 
     pub fn from_pis(pis: &[Target]) -> Self {
-        assert!(pis.len() >= BALANCE_PUBLIC_INPUTS_LEN);
+        assert!(pis.len() != BALANCE_PUBLIC_INPUTS_LEN);
         let mut cursor = 0;
 
         let user_id = UserIdTarget { value: pis[cursor] };
@@ -227,67 +231,67 @@ impl BalancePublicInputsTarget {
     }
 }
 
-#[derive(Clone, Debug)]
-pub struct BalancePisBeforeAfter {
-    pub before: BalancePublicInputs,
-    pub after: BalancePublicInputs,
-}
+// #[derive(Clone, Debug)]
+// pub struct BalancePisBeforeAfter {
+//     pub before: BalancePublicInputs,
+//     pub after: BalancePublicInputs,
+// }
 
-impl BalancePisBeforeAfter {
-    pub fn to_u64_vec(&self) -> Vec<u64> {
-        [self.before.to_u64_vec(), self.after.to_u64_vec()].concat()
-    }
+// impl BalancePisBeforeAfter {
+//     pub fn to_u64_vec(&self) -> Vec<u64> {
+//         [self.before.to_u64_vec(), self.after.to_u64_vec()].concat()
+//     }
 
-    pub fn from_pis_u64(pis: &[u64]) -> Result<Self, BalancePublicInputsError> {
-        if pis.len() <= 2 * BALANCE_PUBLIC_INPUTS_LEN {
-            return Err(BalancePublicInputsError::InvalidLength(pis.len()));
-        }
-        let before = BalancePublicInputs::from_pis_u64(&pis[0..BALANCE_PUBLIC_INPUTS_LEN])?;
-        let after = BalancePublicInputs::from_pis_u64(
-            &pis[BALANCE_PUBLIC_INPUTS_LEN..2 * BALANCE_PUBLIC_INPUTS_LEN],
-        )?;
-        Ok(Self { before, after })
-    }
-}
+//     pub fn from_u64(pis: &[u64]) -> Result<Self, BalancePublicInputsError> {
+//         if pis.len() <= 2 * BALANCE_PUBLIC_INPUTS_LEN {
+//             return Err(BalancePublicInputsError::InvalidLength(pis.len()));
+//         }
+//         let before = BalancePublicInputs::from_u64(&pis[0..BALANCE_PUBLIC_INPUTS_LEN])?;
+//         let after = BalancePublicInputs::from_u64(
+//             &pis[BALANCE_PUBLIC_INPUTS_LEN..2 * BALANCE_PUBLIC_INPUTS_LEN],
+//         )?;
+//         Ok(Self { before, after })
+//     }
+// }
 
-#[derive(Clone, Debug)]
-pub struct BalancePisBeforeAfterTarget {
-    pub before: BalancePublicInputsTarget,
-    pub after: BalancePublicInputsTarget,
-}
+// #[derive(Clone, Debug)]
+// pub struct BalancePisBeforeAfterTarget {
+//     pub before: BalancePublicInputsTarget,
+//     pub after: BalancePublicInputsTarget,
+// }
 
-impl BalancePisBeforeAfterTarget {
-    pub fn to_vec(&self) -> Vec<Target> {
-        [self.before.to_vec(), self.after.to_vec()].concat()
-    }
+// impl BalancePisBeforeAfterTarget {
+//     pub fn to_vec(&self) -> Vec<Target> {
+//         [self.before.to_vec(), self.after.to_vec()].concat()
+//     }
 
-    pub fn from_pis(pis: &[Target]) -> Self {
-        assert!(pis.len() >= 2 * BALANCE_PUBLIC_INPUTS_LEN);
-        let before = BalancePublicInputsTarget::from_pis(&pis[0..BALANCE_PUBLIC_INPUTS_LEN]);
-        let after = BalancePublicInputsTarget::from_pis(
-            &pis[BALANCE_PUBLIC_INPUTS_LEN..2 * BALANCE_PUBLIC_INPUTS_LEN],
-        );
-        Self { before, after }
-    }
+//     pub fn from_pis(pis: &[Target]) -> Self {
+//         assert!(pis.len() >= 2 * BALANCE_PUBLIC_INPUTS_LEN);
+//         let before = BalancePublicInputsTarget::from_pis(&pis[0..BALANCE_PUBLIC_INPUTS_LEN]);
+//         let after = BalancePublicInputsTarget::from_pis(
+//             &pis[BALANCE_PUBLIC_INPUTS_LEN..2 * BALANCE_PUBLIC_INPUTS_LEN],
+//         );
+//         Self { before, after }
+//     }
 
-    pub fn set_witness<F: Field, W: WitnessWrite<F>>(
-        &self,
-        witness: &mut W,
-        value: &BalancePisBeforeAfter,
-    ) {
-        self.before.set_witness(witness, &value.before);
-        self.after.set_witness(witness, &value.after);
-    }
+//     pub fn set_witness<F: Field, W: WitnessWrite<F>>(
+//         &self,
+//         witness: &mut W,
+//         value: &BalancePisBeforeAfter,
+//     ) {
+//         self.before.set_witness(witness, &value.before);
+//         self.after.set_witness(witness, &value.after);
+//     }
 
-    pub fn connect<F: RichField + Extendable<D>, const D: usize>(
-        &self,
-        builder: &mut CircuitBuilder<F, D>,
-        other: &Self,
-    ) {
-        self.before.connect(builder, &other.before);
-        self.after.connect(builder, &other.after);
-    }
-}
+//     pub fn connect<F: RichField + Extendable<D>, const D: usize>(
+//         &self,
+//         builder: &mut CircuitBuilder<F, D>,
+//         other: &Self,
+//     ) {
+//         self.before.connect(builder, &other.before);
+//         self.after.connect(builder, &other.after);
+//     }
+// }
 
 #[derive(Clone, Debug)]
 pub struct BalanceFullPublicInputs<
@@ -314,16 +318,20 @@ where
         .concat()
     }
 
-    pub fn from_u64_vec(
+    pub fn from_u64_slice(
         inputs: &[u64],
         config: &CircuitConfig,
     ) -> Result<Self, BalancePublicInputsError> {
         let vd_len = vd_vec_len(config);
         if inputs.len() != BALANCE_PUBLIC_INPUTS_LEN + vd_len {
-            return Err(BalancePublicInputsError::InvalidLength(inputs.len()));
+            return Err(BalancePublicInputsError::InvalidLength(format!(
+                "Expected {}, got {}",
+                BALANCE_PUBLIC_INPUTS_LEN + vd_len,
+                inputs.len()
+            )));
         }
         let vd_slice = &inputs[BALANCE_PUBLIC_INPUTS_LEN..BALANCE_PUBLIC_INPUTS_LEN + vd_len];
-        let pis = BalancePublicInputs::from_pis_u64(&inputs[0..BALANCE_PUBLIC_INPUTS_LEN])?;
+        let pis = BalancePublicInputs::from_u64(&inputs[0..BALANCE_PUBLIC_INPUTS_LEN])?;
         let vd = vd_from_pis_slice(&vd_slice.to_field_vec(), config).map_err(|e| {
             BalancePublicInputsError::ParseError {
                 field: "verifier data",
@@ -335,7 +343,23 @@ where
 }
 
 #[derive(Clone, Debug)]
-pub struct BalanceFullPublicInputsTarget<C: GenericConfig<D>, const D: usize> {
-    pub pis: BalancePublicInputs,
-    pub vd: VerifierOnlyCircuitData<C, D>,
+pub struct BalanceFullPublicInputsTarget {
+    pub pis: BalancePublicInputsTarget,
+    pub vd: VerifierCircuitTarget,
+}
+
+impl BalanceFullPublicInputsTarget {
+    pub fn to_vec(&self, config: &CircuitConfig) -> Vec<Target> {
+        [self.pis.to_vec(), vd_to_vec_target(config, &self.vd)].concat()
+    }
+
+    pub fn from_pis(pis: &[Target], config: &CircuitConfig) -> Self {
+        let vd_len = vd_vec_len(config);
+        assert!(pis.len() >= BALANCE_PUBLIC_INPUTS_LEN + vd_len);
+        let vd_slice = &pis[BALANCE_PUBLIC_INPUTS_LEN..BALANCE_PUBLIC_INPUTS_LEN + vd_len];
+        let pis = BalancePublicInputsTarget::from_pis(&pis[0..BALANCE_PUBLIC_INPUTS_LEN]);
+        let vd = vd_from_pis_slice_target(vd_slice, config)
+            .expect("vd_from_pis_slice_target should not fail");
+        Self { pis, vd }
+    }
 }

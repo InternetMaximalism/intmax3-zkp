@@ -4,7 +4,7 @@ use plonky2::{
     iop::witness::{PartialWitness, WitnessWrite},
     plonk::{
         circuit_builder::CircuitBuilder,
-        circuit_data::{CircuitConfig, CircuitData, VerifierCircuitData},
+        circuit_data::{CircuitConfig, CircuitData, CommonCircuitData, VerifierCircuitData},
         config::{AlgebraicHasher, GenericConfig},
         proof::ProofWithPublicInputs,
     },
@@ -13,8 +13,8 @@ use plonky2::{
 use crate::{
     circuits::balance::{
         balance_pis::{
-            BalancePisBeforeAfter, BalancePisBeforeAfterTarget, BalancePublicInputs,
-            BalancePublicInputsTarget,
+            BalanceFullPublicInputs, BalanceFullPublicInputsTarget, BalancePublicInputs,
+            BalancePublicInputsError, BalancePublicInputsTarget,
         },
         common::{
             tx_settlement::{TxSettlement, TxSettlementTarget},
@@ -22,7 +22,7 @@ use crate::{
         },
     },
     common::block_number::BlockNumberTarget,
-    utils::poseidon_hash_out::PoseidonHashOutTarget,
+    utils::{conversion::ToU64, poseidon_hash_out::PoseidonHashOutTarget},
 };
 
 #[derive(thiserror::Error, Debug)]
@@ -38,11 +38,23 @@ pub enum SpendTxError {
 
     #[error("Failed to prove: {0}")]
     FailedToProve(String),
+
+    #[error("Balance public inputs error: {0}")]
+    BalancePublicInputsError(#[from] BalancePublicInputsError),
+
+    #[error("Invalid balance proof: {0}")]
+    InvalidBalanceProof(String),
+
+    #[error("Invalid balance verifier data: {0}")]
+    InvalidBalanceVd(String),
 }
 
 pub struct SpendTxWitness<F: RichField + Extendable<D>, C: GenericConfig<D, F = F>, const D: usize>
+where
+    <C as GenericConfig<D>>::Hasher: AlgebraicHasher<F>,
 {
-    pub prev_balance_pis: BalancePublicInputs,
+    // Previous balance proof
+    pub prev_balance_proof: ProofWithPublicInputs<F, C, D>,
 
     /* update_public_state.old ==
      * prev_balance_pis.public_state */
@@ -55,12 +67,33 @@ pub struct SpendTxWitness<F: RichField + Extendable<D>, C: GenericConfig<D, F = 
 
 impl<F: RichField + Extendable<D>, C: GenericConfig<D, F = F>, const D: usize>
     SpendTxWitness<F, C, D>
+where
+    <C as GenericConfig<D>>::Hasher: AlgebraicHasher<F>,
 {
-    pub fn to_public_inputs(&self) -> Result<BalancePisBeforeAfter, SpendTxError> {
-        if self.prev_balance_pis.public_state != self.update_public_state.old {
+    pub fn to_public_inputs(
+        &self,
+        balance_vd: &VerifierCircuitData<F, C, D>,
+    ) -> Result<BalanceFullPublicInputs<F, C, D>, SpendTxError> {
+        // verify the previous balance proof
+        balance_vd
+            .verify(self.prev_balance_proof.clone())
+            .map_err(|e| SpendTxError::InvalidBalanceProof(e.to_string()))?;
+
+        let prev_balance_full_pis = BalanceFullPublicInputs::<F, C, D>::from_u64_slice(
+            &self.prev_balance_proof.public_inputs.to_u64_vec(),
+            &balance_vd.common.config,
+        )?;
+        if prev_balance_full_pis.vd != balance_vd.verifier_only {
+            return Err(SpendTxError::InvalidBalanceVd(
+                "prev_balance_full_pis.vd != balance_vd.verifier_only".to_string(),
+            ));
+        }
+        let prev_balance_pis = prev_balance_full_pis.pis;
+
+        if prev_balance_pis.public_state != self.update_public_state.old {
             return Err(SpendTxError::ConnectionError(format!(
                 "prev_balance_pis.public_state: {:?}, update_public_state.old: {:?}",
-                self.prev_balance_pis.public_state, self.update_public_state.old
+                prev_balance_pis.public_state, self.update_public_state.old
             )));
         }
         if self.update_public_state.new != self.tx_settlement.public_state {
@@ -69,37 +102,36 @@ impl<F: RichField + Extendable<D>, C: GenericConfig<D, F = F>, const D: usize>
                 self.update_public_state.new, self.tx_settlement.public_state
             )));
         }
-        if self.tx_settlement.user_id != self.prev_balance_pis.user_id {
+        if self.tx_settlement.user_id != prev_balance_pis.user_id {
             return Err(SpendTxError::ConnectionError(format!(
                 "tx_settlement.user_id: {}, prev_balance_pis.user_id: {}",
-                self.tx_settlement.user_id.0, self.prev_balance_pis.user_id.0
+                self.tx_settlement.user_id.0, prev_balance_pis.user_id.0
             )));
         }
         let spend_pis = self
             .tx_settlement
             .spend_pis()
             .map_err(|e| SpendTxError::SpendPisError(format!("failed to get spend pis: {}", e)))?;
-        if spend_pis.prev_private_commitment != self.prev_balance_pis.private_commitment {
+        if spend_pis.prev_private_commitment != prev_balance_pis.private_commitment {
             return Err(SpendTxError::ConnectionError(format!(
                 "spend_pis.prev_private_commitment: {}, prev_balance_pis.private_commitment: {}",
-                spend_pis.prev_private_commitment, self.prev_balance_pis.private_commitment
+                spend_pis.prev_private_commitment, prev_balance_pis.private_commitment
             )));
         }
-        if self.prev_balance_pis.block_r < self.tx_settlement.send_block_number_before_tx() {
+        if prev_balance_pis.block_r < self.tx_settlement.send_block_number_before_tx() {
             return Err(SpendTxError::BlockNumberError(format!(
                 "prev_balance_pis.block_r: {} should be >= tx_settlement.send_block_number_before_tx(): {}",
-                self.prev_balance_pis.block_r.0,
+                prev_balance_pis.block_r.0,
                 self.tx_settlement.send_block_number_before_tx().0
             )));
         }
-        if self.tx_settlement.tx_block_number() < self.prev_balance_pis.block_r {
+        if self.tx_settlement.tx_block_number() < prev_balance_pis.block_r {
             return Err(SpendTxError::BlockNumberError(format!(
                 "tx_settlement.tx_block_number(): {} should be >= prev_balance_pis.block_r: {}",
                 self.tx_settlement.tx_block_number().0,
-                self.prev_balance_pis.block_r.0
+                prev_balance_pis.block_r.0
             )));
         }
-
         let (new_block_r, new_private_commitment) = if spend_pis.is_valid {
             (
                 self.tx_settlement.tx_block_number(),
@@ -107,19 +139,19 @@ impl<F: RichField + Extendable<D>, C: GenericConfig<D, F = F>, const D: usize>
             )
         } else {
             (
-                self.prev_balance_pis.block_r,
-                self.prev_balance_pis.private_commitment,
+                prev_balance_pis.block_r,
+                prev_balance_pis.private_commitment,
             )
         };
         let new_balance_pis = BalancePublicInputs {
-            user_id: self.prev_balance_pis.user_id,
+            user_id: prev_balance_pis.user_id,
             public_state: self.update_public_state.new.clone(),
             block_r: new_block_r,
             private_commitment: new_private_commitment,
         };
-        Ok(BalancePisBeforeAfter {
-            before: self.prev_balance_pis.clone(),
-            after: new_balance_pis,
+        Ok(BalanceFullPublicInputs {
+            pis: new_balance_pis,
+            vd: balance_vd.verifier_only.clone(),
         })
     }
 }
@@ -130,12 +162,13 @@ pub struct SendTxTarget<const D: usize> {
     pub update_public_state: UpdatePublicStateTarget,
     pub tx_settlement: TxSettlementTarget<D>,
 
-    pub new_balance_pis: BalancePublicInputsTarget,
+    pub new_full_pis: BalanceFullPublicInputsTarget,
 }
 
 impl<const D: usize> SendTxTarget<D> {
     pub fn new<F, C>(
         builder: &mut CircuitBuilder<F, D>,
+        balance_cd: &CommonCircuitData<F, D>,
         spend_vd: &VerifierCircuitData<F, C, D>,
     ) -> Self
     where
@@ -143,7 +176,16 @@ impl<const D: usize> SendTxTarget<D> {
         C: GenericConfig<D, F = F> + 'static,
         <C as GenericConfig<D>>::Hasher: AlgebraicHasher<F>,
     {
-        let prev = BalancePublicInputsTarget::new(builder, true);
+        let prev_balance_proof = builder.add_virtual_proof_with_pis(balance_cd);
+        let prev_balance_full_pis = BalanceFullPublicInputsTarget::from_pis(
+            &prev_balance_proof.public_inputs,
+            &balance_cd.config,
+        );
+        let balance_vd = prev_balance_full_pis.vd.clone();
+        // Verify the previous balance proof
+        builder.verify_proof::<C>(&prev_balance_proof, &balance_vd, &balance_cd);
+
+        let prev = prev_balance_full_pis.pis;
 
         let update_public_state = UpdatePublicStateTarget::new::<F, C, D>(builder);
         let tx_settlement = TxSettlementTarget::new(builder, spend_vd, true);
@@ -185,17 +227,21 @@ impl<const D: usize> SendTxTarget<D> {
             spend_pis.new_private_commitment.clone(),
             prev.private_commitment.clone(),
         );
-        let new = BalancePublicInputsTarget {
+        let new_pis = BalancePublicInputsTarget {
             user_id: prev.user_id.clone(),
             public_state: update_public_state.new.clone(),
             block_r: new_block_r,
             private_commitment: new_private_commitment,
         };
+        let new_full_pis = BalanceFullPublicInputsTarget {
+            pis: new_pis.clone(),
+            vd: balance_vd,
+        };
         Self {
             prev_balance_pis: prev,
-            new_balance_pis: new,
             update_public_state,
             tx_settlement,
+            new_full_pis,
         }
     }
 
