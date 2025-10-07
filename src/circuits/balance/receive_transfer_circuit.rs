@@ -10,11 +10,11 @@ use plonky2::{
 
 use crate::{
     circuits::balance::{
-        balance_pis::{BalanceFullPublicInputs, BalancePublicInputsError},
+        balance_pis::{BalanceFullPublicInputs, BalancePublicInputs, BalancePublicInputsError},
         common::{
             account_state::AccountState, recipient::calculate_recipient_from_user_id,
             transfer_witness::TransferWitness, tx_settlement::TxSettlement,
-            update_public_state::UpdatePublicState,
+            update_private_state::UpdatePrivateState, update_public_state::UpdatePublicState,
         },
     },
     common::{block_number::BlockNumber, salt::Salt},
@@ -80,6 +80,9 @@ pub struct ReceiveTransferWitness<
 
     // salt for the transfer.recipient
     pub transfer_salt: Salt,
+
+    // private state update
+    pub update_private_state: UpdatePrivateState,
 }
 
 impl<F: RichField + Extendable<D>, C: GenericConfig<D, F = F>, const D: usize>
@@ -260,7 +263,46 @@ where
         }
 
         // private state update
+        let transfer = &self.transfer_witness.transfer;
+        let nullifier = transfer.nullifier();
+        if self.update_private_state.token_index != transfer.token_index {
+            return Err(ReceiveTransferError::ConnectionError(format!(
+                "update_private_state.token_index {:?} != transfer.token_index {:?}",
+                self.update_private_state.token_index, transfer.token_index,
+            )));
+        }
+        if self.update_private_state.amount != transfer.amount {
+            return Err(ReceiveTransferError::ConnectionError(format!(
+                "update_private_state.amount {:?} != transfer.amount {:?}",
+                self.update_private_state.amount, transfer.amount,
+            )));
+        }
+        if self.update_private_state.nullifier != nullifier {
+            return Err(ReceiveTransferError::ConnectionError(format!(
+                "update_private_state.nullifier {:?} != transfer.nullifier {:?}",
+                self.update_private_state.nullifier, nullifier,
+            )));
+        }
+        if self.update_private_state.prev_private_state.commitment()
+            != prev_balance_pis.private_commitment
+        {
+            return Err(ReceiveTransferError::ConnectionError(format!(
+                "update_private_state.prev_private_state.commitment() {:?} != prev_balance_pis.private_commitment {:?}",
+                self.update_private_state.prev_private_state.commitment(),
+                prev_balance_pis.private_commitment,
+            )));
+        }
+        let new_private_commitment = self.update_private_state.new_private_state.commitment();
 
-        todo!()
+        let new_full_pis = BalanceFullPublicInputs {
+            pis: BalancePublicInputs {
+                user_id: receiver_user_id,
+                public_state,
+                block_r: self.new_block_r,
+                private_commitment: new_private_commitment,
+            },
+            vd: balance_vd.verifier_only.clone(),
+        };
+        Ok(new_full_pis)
     }
 }
