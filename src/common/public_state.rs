@@ -17,9 +17,10 @@ use serde::{Deserialize, Serialize};
 use crate::{
     common::{
         block::Block,
-        block_number::{BlockNumber, BlockNumberTarget},
+        block_number::{self, BlockNumber, BlockNumberTarget},
+        deposit::Deposit,
         trees::{
-            account_tree::{AccountTree, SendLeaf},
+            account_tree::{AccountLeaf, AccountTree, SendLeaf},
             deposit_tree::DepositTree,
             public_state_tree::PublicStateTree,
         },
@@ -212,6 +213,8 @@ pub struct FullPublicState {
     pub deposit_tree: DepositTree,
     pub public_state_tree: PublicStateTree,
 
+    pub blocks: Vec<Block>,
+    pub deposits: Vec<Deposit>,
     pub block_hash_chain: Bytes32,
     pub deposit_hash_chain: Bytes32,
 }
@@ -224,6 +227,9 @@ impl FullPublicState {
             send_leaves: HashMap::new(),
             deposit_tree: DepositTree::init(),
             public_state_tree: PublicStateTree::init(),
+
+            blocks: vec![Block::default()], // genesis block
+            deposits: vec![],
             block_hash_chain: Bytes32::default(),
             deposit_hash_chain: Bytes32::default(),
         }
@@ -254,16 +260,49 @@ impl FullPublicState {
             tx_tree_root,
             deposit_hash_chain: self.deposit_hash_chain,
         };
-        let next_block_hash_chain = block
+
+        // add block
+        self.block_number = BlockNumber(block_number);
+        self.blocks.push(block.clone());
+        self.block_hash_chain = block
             .hash_with_prev_hash(self.block_hash_chain)
             .expect("hashing should not fail");
 
         // update account tree
         for &local_id in local_ids {
             let user_id = UserId::new(aggregator_id, local_id)?;
-            let send_leaves = self.send_leaves.get(&user_id).get_or_insert(&Vec::new());
+            if user_id == UserId::dummy() {
+                // skip dummy user id
+                continue;
+            }
+            let mut send_leaves = self.send_leaves.get(&user_id).cloned().unwrap_or_default();
+            let account_leaf = AccountLeaf::from_send_leaves(&send_leaves);
 
-            // self.account_tree.update(index, leaf);
+            // sanity check
+            let current_account_leaf = self.account_tree.get_leaf(user_id.0);
+            assert_eq!(
+                current_account_leaf, account_leaf,
+                "Account leaf mismatch for user_id {:?}: calculated from send leaves {:?}, actual {:?}",
+                user_id, account_leaf, current_account_leaf
+            );
+
+            // add new send leaf
+            let prev = if let Some(last) = send_leaves.last() {
+                last.cur
+            } else {
+                BlockNumber(0)
+            };
+            let new_send_leaf = SendLeaf {
+                cur: BlockNumber(block_number),
+                prev,
+                tx_tree_root,
+            };
+            send_leaves.push(new_send_leaf);
+            self.send_leaves.insert(user_id, send_leaves.clone());
+
+            // update account tree
+            let new_account_leaf = AccountLeaf::from_send_leaves(&send_leaves);
+            self.account_tree.update(user_id.0, new_account_leaf);
         }
 
         Ok(())
@@ -276,6 +315,24 @@ impl FullPublicState {
         token_index: u32,
         amount: U256,
         aux_data: Bytes32,
-    ) {
+    ) -> Result<(), FullPublicStateError> {
+        let block_number = self.block_number.0 + 1;
+        let deposit = Deposit {
+            depositor,
+            recipient,
+            token_index,
+            amount,
+            aux_data,
+            block_number: BlockNumber(block_number),
+        };
+
+        // add deposit
+        self.deposits.push(deposit.clone());
+        self.deposit_tree.push(deposit);
+        // self.deposit_hash_chain = deposit
+        //     .hash_with_prev_hash(self.deposit_hash_chain)
+        //     .expect("hashing should not fail");
+
+        Ok(())
     }
 }
