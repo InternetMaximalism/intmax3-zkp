@@ -248,6 +248,189 @@ where
     }
 }
 
+#[derive(Clone, Debug)]
+pub struct ReceiveDepositTarget<const D: usize> {
+    pub prev_balance_proof: ProofWithPublicInputsTarget<D>,
+    pub update_public_state: UpdatePublicStateTarget,
+    pub new_block_r: BlockNumberTarget,
+    pub account_state: AccountStateTarget,
+    pub deposit_witness: DepositWitnessTarget,
+    pub update_private_state: UpdatePrivateStateTarget,
+    pub new_full_pis: BalanceFullPublicInputsTarget,
+}
+
+impl<const D: usize> ReceiveDepositTarget<D> {
+    pub fn new<F, C>(
+        builder: &mut CircuitBuilder<F, D>,
+        balance_cd: &CommonCircuitData<F, D>,
+    ) -> Self
+    where
+        F: RichField + Extendable<D>,
+        C: GenericConfig<D, F = F> + 'static,
+        <C as GenericConfig<D>>::Hasher: AlgebraicHasher<F>,
+    {
+        let prev_balance_proof = builder.add_virtual_proof_with_pis(balance_cd);
+        let prev_balance_full_pis = BalanceFullPublicInputsTarget::from_pis(
+            &prev_balance_proof.public_inputs,
+            &balance_cd.config,
+        );
+
+        builder.verify_proof::<C>(&prev_balance_proof, &prev_balance_full_pis.vd, balance_cd);
+
+        let prev_balance_pis = prev_balance_full_pis.pis.clone();
+
+        let update_public_state = UpdatePublicStateTarget::new::<F, C, D>(builder);
+        let new_block_r = BlockNumberTarget::new(builder, true);
+        let account_state = AccountStateTarget::new::<F, C, D>(builder, true);
+        let deposit_witness = DepositWitnessTarget::new::<F, C, D>(builder, true);
+        let update_private_state = UpdatePrivateStateTarget::new::<F, C, D>(builder, true);
+
+        update_public_state
+            .old
+            .connect(builder, &prev_balance_pis.public_state);
+        let public_state = &update_public_state.new;
+
+        account_state
+            .user_id
+            .connect(builder, &prev_balance_pis.user_id);
+        account_state
+            .account_tree_root
+            .connect(builder, public_state.account_tree_root.clone());
+
+        deposit_witness
+            .user_id
+            .connect(builder, &prev_balance_pis.user_id);
+        deposit_witness
+            .deposit_tree_root
+            .connect(builder, public_state.deposit_tree_root.clone());
+
+        let prev_block_r = prev_balance_pis.block_r.clone();
+        new_block_r.enforce_ge(builder, &prev_block_r);
+        public_state.block_number.enforce_ge(builder, &new_block_r);
+
+        let prev_is_zero = account_state.account_leaf.prev.is_zero(builder);
+        let has_outgoing = builder.not(prev_is_zero);
+        prev_block_r.conditional_ge(builder, &account_state.send_leaf.prev, has_outgoing);
+        account_state
+            .send_leaf
+            .cur
+            .conditional_gt(builder, &new_block_r, has_outgoing);
+
+        let deposit_block_number = deposit_witness.deposit.block_number.clone();
+        new_block_r.enforce_ge(builder, &deposit_block_number);
+
+        builder.connect(
+            update_private_state.token_index,
+            deposit_witness.deposit.token_index,
+        );
+        update_private_state
+            .amount
+            .connect(builder, deposit_witness.deposit.amount.clone());
+        let deposit_nullifier_target = deposit_witness.deposit.nullifier(builder);
+        update_private_state
+            .nullifier
+            .connect(builder, deposit_nullifier_target);
+
+        let prev_private_commitment = update_private_state.prev_private_state.commitment(builder);
+        prev_private_commitment.connect(builder, prev_balance_pis.private_commitment.clone());
+        let new_private_commitment = update_private_state.new_private_state.commitment(builder);
+
+        let new_pis = BalancePublicInputsTarget {
+            user_id: prev_balance_pis.user_id.clone(),
+            public_state: public_state.clone(),
+            block_r: new_block_r.clone(),
+            private_commitment: new_private_commitment,
+        };
+        let new_full_pis = BalanceFullPublicInputsTarget {
+            pis: new_pis,
+            vd: prev_balance_full_pis.vd.clone(),
+        };
+
+        Self {
+            prev_balance_proof,
+            update_public_state,
+            new_block_r,
+            account_state,
+            deposit_witness,
+            update_private_state,
+            new_full_pis,
+        }
+    }
+
+    pub fn set_witness<F, C, W>(
+        &self,
+        witness: &mut W,
+        value: &ReceiveDepositWitness<F, C, D>,
+        new_full_pis: &BalanceFullPublicInputs<F, C, D>,
+    ) where
+        F: RichField + Extendable<D>,
+        C: GenericConfig<D, F = F>,
+        <C as GenericConfig<D>>::Hasher: AlgebraicHasher<F>,
+        W: WitnessWrite<F>,
+    {
+        witness.set_proof_with_pis_target(&self.prev_balance_proof, &value.prev_balance_proof);
+        self.update_public_state
+            .set_witness(witness, &value.update_public_state);
+        self.new_block_r.set_witness(witness, value.new_block_r);
+        self.account_state
+            .set_witness(witness, &value.account_state);
+        self.deposit_witness
+            .set_witness(witness, &value.deposit_witness);
+        self.update_private_state
+            .set_witness(witness, &value.update_private_state);
+        self.new_full_pis.set_witness(witness, new_full_pis);
+    }
+}
+
+#[derive(Debug)]
+pub struct ReceiveDepositCircuit<F, C, const D: usize>
+where
+    F: RichField + Extendable<D>,
+    C: GenericConfig<D, F = F>,
+    <C as GenericConfig<D>>::Hasher: AlgebraicHasher<F>,
+{
+    pub data: CircuitData<F, C, D>,
+    pub balance_vd: VerifierCircuitData<F, C, D>,
+    pub target: ReceiveDepositTarget<D>,
+    pub public_inputs: BalanceFullPublicInputsTarget,
+}
+
+impl<F, C, const D: usize> ReceiveDepositCircuit<F, C, D>
+where
+    F: RichField + Extendable<D>,
+    C: GenericConfig<D, F = F> + 'static,
+    <C as GenericConfig<D>>::Hasher: AlgebraicHasher<F>,
+{
+    pub fn new(balance_vd: &VerifierCircuitData<F, C, D>) -> Self {
+        let mut builder = CircuitBuilder::<F, D>::new(CircuitConfig::standard_recursion_config());
+        let target = ReceiveDepositTarget::new::<F, C>(&mut builder, &balance_vd.common);
+        let public_inputs = target.new_full_pis.clone();
+        builder.register_public_inputs(&public_inputs.to_vec(&balance_vd.common.config));
+        let data = builder.build();
+
+        Self {
+            data,
+            balance_vd: balance_vd.clone(),
+            target,
+            public_inputs,
+        }
+    }
+
+    pub fn prove(
+        &self,
+        witness: &ReceiveDepositWitness<F, C, D>,
+    ) -> Result<ProofWithPublicInputs<F, C, D>, ReceiveDepositError> {
+        let new_full_pis = witness.to_public_inputs(&self.balance_vd)?;
+        let mut pw = PartialWitness::<F>::new();
+        self.target
+            .set_witness::<F, C, _>(&mut pw, witness, &new_full_pis);
+        self.public_inputs.set_witness(&mut pw, &new_full_pis);
+        self.data
+            .prove(pw)
+            .map_err(|e| ReceiveDepositError::FailedToProve(e.to_string()))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -449,188 +632,5 @@ mod tests {
 
         assert_eq!(proof.public_inputs, expected_fields);
         assert_eq!(expected.pis.block_r, new_block_r);
-    }
-}
-
-#[derive(Clone, Debug)]
-pub struct ReceiveDepositTarget<const D: usize> {
-    pub prev_balance_proof: ProofWithPublicInputsTarget<D>,
-    pub update_public_state: UpdatePublicStateTarget,
-    pub new_block_r: BlockNumberTarget,
-    pub account_state: AccountStateTarget,
-    pub deposit_witness: DepositWitnessTarget,
-    pub update_private_state: UpdatePrivateStateTarget,
-    pub new_full_pis: BalanceFullPublicInputsTarget,
-}
-
-impl<const D: usize> ReceiveDepositTarget<D> {
-    pub fn new<F, C>(
-        builder: &mut CircuitBuilder<F, D>,
-        balance_cd: &CommonCircuitData<F, D>,
-    ) -> Self
-    where
-        F: RichField + Extendable<D>,
-        C: GenericConfig<D, F = F> + 'static,
-        <C as GenericConfig<D>>::Hasher: AlgebraicHasher<F>,
-    {
-        let prev_balance_proof = builder.add_virtual_proof_with_pis(balance_cd);
-        let prev_balance_full_pis = BalanceFullPublicInputsTarget::from_pis(
-            &prev_balance_proof.public_inputs,
-            &balance_cd.config,
-        );
-
-        builder.verify_proof::<C>(&prev_balance_proof, &prev_balance_full_pis.vd, balance_cd);
-
-        let prev_balance_pis = prev_balance_full_pis.pis.clone();
-
-        let update_public_state = UpdatePublicStateTarget::new::<F, C, D>(builder);
-        let new_block_r = BlockNumberTarget::new(builder, true);
-        let account_state = AccountStateTarget::new::<F, C, D>(builder, true);
-        let deposit_witness = DepositWitnessTarget::new::<F, C, D>(builder, true);
-        let update_private_state = UpdatePrivateStateTarget::new::<F, C, D>(builder, true);
-
-        update_public_state
-            .old
-            .connect(builder, &prev_balance_pis.public_state);
-        let public_state = &update_public_state.new;
-
-        account_state
-            .user_id
-            .connect(builder, &prev_balance_pis.user_id);
-        account_state
-            .account_tree_root
-            .connect(builder, public_state.account_tree_root.clone());
-
-        deposit_witness
-            .user_id
-            .connect(builder, &prev_balance_pis.user_id);
-        deposit_witness
-            .deposit_tree_root
-            .connect(builder, public_state.deposit_tree_root.clone());
-
-        let prev_block_r = prev_balance_pis.block_r.clone();
-        new_block_r.enforce_ge(builder, &prev_block_r);
-        public_state.block_number.enforce_ge(builder, &new_block_r);
-
-        let prev_is_zero = account_state.account_leaf.prev.is_zero(builder);
-        let has_outgoing = builder.not(prev_is_zero);
-        prev_block_r.conditional_ge(builder, &account_state.send_leaf.prev, has_outgoing);
-        account_state
-            .send_leaf
-            .cur
-            .conditional_gt(builder, &new_block_r, has_outgoing);
-
-        let deposit_block_number = deposit_witness.deposit.block_number.clone();
-        new_block_r.enforce_ge(builder, &deposit_block_number);
-
-        builder.connect(
-            update_private_state.token_index,
-            deposit_witness.deposit.token_index,
-        );
-        update_private_state
-            .amount
-            .connect(builder, deposit_witness.deposit.amount.clone());
-        let deposit_nullifier_target = deposit_witness.deposit.nullifier(builder);
-        update_private_state
-            .nullifier
-            .connect(builder, deposit_nullifier_target);
-
-        let prev_private_commitment = update_private_state.prev_private_state.commitment(builder);
-        prev_private_commitment.connect(builder, prev_balance_pis.private_commitment.clone());
-        let new_private_commitment = update_private_state.new_private_state.commitment(builder);
-
-        let new_pis = BalancePublicInputsTarget {
-            user_id: prev_balance_pis.user_id.clone(),
-            public_state: public_state.clone(),
-            block_r: new_block_r.clone(),
-            private_commitment: new_private_commitment,
-        };
-        let new_full_pis = BalanceFullPublicInputsTarget {
-            pis: new_pis,
-            vd: prev_balance_full_pis.vd.clone(),
-        };
-
-        Self {
-            prev_balance_proof,
-            update_public_state,
-            new_block_r,
-            account_state,
-            deposit_witness,
-            update_private_state,
-            new_full_pis,
-        }
-    }
-
-    pub fn set_witness<F, C, W>(
-        &self,
-        witness: &mut W,
-        value: &ReceiveDepositWitness<F, C, D>,
-        new_full_pis: &BalanceFullPublicInputs<F, C, D>,
-    ) where
-        F: RichField + Extendable<D>,
-        C: GenericConfig<D, F = F>,
-        <C as GenericConfig<D>>::Hasher: AlgebraicHasher<F>,
-        W: WitnessWrite<F>,
-    {
-        witness.set_proof_with_pis_target(&self.prev_balance_proof, &value.prev_balance_proof);
-        self.update_public_state
-            .set_witness(witness, &value.update_public_state);
-        self.new_block_r.set_witness(witness, value.new_block_r);
-        self.account_state
-            .set_witness(witness, &value.account_state);
-        self.deposit_witness
-            .set_witness(witness, &value.deposit_witness);
-        self.update_private_state
-            .set_witness(witness, &value.update_private_state);
-        self.new_full_pis.set_witness(witness, new_full_pis);
-    }
-}
-
-#[derive(Debug)]
-pub struct ReceiveDepositCircuit<F, C, const D: usize>
-where
-    F: RichField + Extendable<D>,
-    C: GenericConfig<D, F = F>,
-    <C as GenericConfig<D>>::Hasher: AlgebraicHasher<F>,
-{
-    pub data: CircuitData<F, C, D>,
-    pub balance_vd: VerifierCircuitData<F, C, D>,
-    pub target: ReceiveDepositTarget<D>,
-    pub public_inputs: BalanceFullPublicInputsTarget,
-}
-
-impl<F, C, const D: usize> ReceiveDepositCircuit<F, C, D>
-where
-    F: RichField + Extendable<D>,
-    C: GenericConfig<D, F = F> + 'static,
-    <C as GenericConfig<D>>::Hasher: AlgebraicHasher<F>,
-{
-    pub fn new(balance_vd: &VerifierCircuitData<F, C, D>) -> Self {
-        let mut builder = CircuitBuilder::<F, D>::new(CircuitConfig::standard_recursion_config());
-        let target = ReceiveDepositTarget::new::<F, C>(&mut builder, &balance_vd.common);
-        let public_inputs = target.new_full_pis.clone();
-        builder.register_public_inputs(&public_inputs.to_vec(&balance_vd.common.config));
-        let data = builder.build();
-
-        Self {
-            data,
-            balance_vd: balance_vd.clone(),
-            target,
-            public_inputs,
-        }
-    }
-
-    pub fn prove(
-        &self,
-        witness: &ReceiveDepositWitness<F, C, D>,
-    ) -> Result<ProofWithPublicInputs<F, C, D>, ReceiveDepositError> {
-        let new_full_pis = witness.to_public_inputs(&self.balance_vd)?;
-        let mut pw = PartialWitness::<F>::new();
-        self.target
-            .set_witness::<F, C, _>(&mut pw, witness, &new_full_pis);
-        self.public_inputs.set_witness(&mut pw, &new_full_pis);
-        self.data
-            .prove(pw)
-            .map_err(|e| ReceiveDepositError::FailedToProve(e.to_string()))
     }
 }
