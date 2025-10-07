@@ -62,6 +62,7 @@ pub enum ReceiveTransferError {
     FailedToProve(String),
 }
 
+#[derive(Clone, Debug)]
 pub struct ReceiveTransferWitness<
     F: RichField + Extendable<D>,
     C: GenericConfig<D, F = F>,
