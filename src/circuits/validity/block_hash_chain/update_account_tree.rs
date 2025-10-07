@@ -91,6 +91,11 @@ impl UpdateAccountTree {
                     ))
                 })?;
 
+            if prev_account_leaf.prev == self.block_number {
+                // already updated in this block
+                continue;
+            }
+
             // verify the inclusion of empty leaf in the send tree
             send_merkle_proof
                 .verify(
