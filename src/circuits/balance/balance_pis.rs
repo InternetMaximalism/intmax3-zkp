@@ -267,6 +267,11 @@ where
         .concat()
     }
 
+    pub fn commitment(&self, config: &CircuitConfig) -> PoseidonHashOut {
+        let inputs = self.to_u64_vec(config);
+        PoseidonHashOut::hash_inputs_u64(&inputs)
+    }
+
     pub fn from_u64_slice(
         inputs: &[u64],
         config: &CircuitConfig,
@@ -298,8 +303,27 @@ pub struct BalanceFullPublicInputsTarget {
 }
 
 impl BalanceFullPublicInputsTarget {
+    pub fn new<F: RichField + Extendable<D>, const D: usize>(
+        builder: &mut CircuitBuilder<F, D>,
+        config: &CircuitConfig,
+    ) -> Self {
+        Self {
+            pis: BalancePublicInputsTarget::new(builder, true),
+            vd: builder.add_virtual_verifier_data(config.fri_config.cap_height),
+        }
+    }
+
     pub fn to_vec(&self, config: &CircuitConfig) -> Vec<Target> {
         [self.pis.to_vec(), vd_to_vec_target(config, &self.vd)].concat()
+    }
+
+    pub fn commitment<F: RichField + Extendable<D>, const D: usize>(
+        &self,
+        builder: &mut CircuitBuilder<F, D>,
+        config: &CircuitConfig,
+    ) -> PoseidonHashOutTarget {
+        let inputs = self.to_vec(config);
+        PoseidonHashOutTarget::hash_inputs(builder, &inputs)
     }
 
     pub fn from_pis(pis: &[Target], config: &CircuitConfig) -> Self {
