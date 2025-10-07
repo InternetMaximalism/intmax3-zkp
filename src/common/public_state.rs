@@ -333,10 +333,8 @@ impl FullPublicState {
 
         // add deposit
         self.deposits.push(deposit.clone());
-        self.deposit_tree.push(deposit);
-        // self.deposit_hash_chain = deposit
-        //     .hash_with_prev_hash(self.deposit_hash_chain)
-        //     .expect("hashing should not fail");
+        self.deposit_tree.push(deposit.clone());
+        self.deposit_hash_chain = deposit.hash_with_prev_hash(self.deposit_hash_chain);
 
         Ok(())
     }
