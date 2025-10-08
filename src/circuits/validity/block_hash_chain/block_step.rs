@@ -3,26 +3,46 @@ use std::collections::HashMap;
 use plonky2::{
     field::extension::Extendable,
     hash::hash_types::RichField,
+    iop::{
+        target::{BoolTarget, Target},
+        witness::WitnessWrite,
+    },
     plonk::{
-        circuit_data::VerifierCircuitData,
+        circuit_builder::CircuitBuilder,
+        circuit_data::{CommonCircuitData, VerifierCircuitData},
         config::{AlgebraicHasher, GenericConfig},
-        proof::ProofWithPublicInputs,
+        proof::{ProofWithPublicInputs, ProofWithPublicInputsTarget},
     },
 };
 
 use crate::{
     circuits::validity::{
         block_hash_chain::{
-            block_chain_pis::{BlockChainPublicInputs, BlockChainPublicInputsError},
-            ext_public_state::ExtendedPublicState,
-            update_account_tree::UpdateAccountPublicInputs,
+            block_chain_pis::{
+                BlockChainPublicInputs, BlockChainPublicInputsError, BlockChainPublicInputsTarget,
+            },
+            ext_public_state::{ExtendedPublicState, ExtendedPublicStateTarget},
+            update_account_tree::{UpdateAccountPublicInputs, UpdateAccountPublicInputsTarget},
         },
         deposit_hash_chain::deposit_chain_pis::{
-            DepositChainPublicInputs, DepositChainPublicInputsError,
+            DepositChainPublicInputs, DepositChainPublicInputsError, DepositChainPublicInputsTarget,
         },
     },
-    common::{public_state::PublicState, trees::public_state_tree::PublicStateMerkleProof},
-    utils::{conversion::ToU64, leafable::Leafable},
+    common::{
+        public_state::{PublicState, PublicStateTarget},
+        trees::public_state_tree::{PublicStateMerkleProof, PublicStateMerkleProofTarget},
+        u63::U63Target,
+    },
+    constants::PUBLIC_STATE_TREE_HEIGHT,
+    ethereum_types::{bytes32::Bytes32Target, u32limb_trait::U32LimbTargetTrait},
+    utils::{
+        conversion::ToU64,
+        leafable::Leafable,
+        poseidon_hash_out::PoseidonHashOutTarget,
+        recursively_verifiable::{
+            add_proof_target_and_conditionally_verify, add_proof_target_and_verify,
+        },
+    },
 };
 
 #[derive(Debug, thiserror::Error)]
@@ -190,7 +210,7 @@ where
                         .to_string(),
                 ));
             }
-            
+
             // update deposit-related state components
             deposit_hash_chain = deposit_inputs.deposit_hash_chain;
             deposit_tree_root = deposit_inputs.deposit_tree_root;
@@ -230,5 +250,59 @@ where
             ext_public_state: new_public_state_ext,
             vd: prev_inputs.vd,
         })
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct BlockStepTarget<const D: usize> {
+    // one hot encoding of which update account circuit to use
+    // length is number of supported update account circuits
+    pub one_hot: Vec<BoolTarget>,
+
+    pub has_prev_block_proof: BoolTarget,
+    pub has_deposit_proof: BoolTarget,
+    pub initial_public_state: ExtendedPublicStateTarget,
+    pub prev_block_chain_proof: ProofWithPublicInputsTarget<D>,
+    pub deposit_hash_chain_proof: ProofWithPublicInputsTarget<D>,
+
+    // Update account proof different for each number of users
+    pub update_account_proofs: Vec<ProofWithPublicInputsTarget<D>>,
+    pub public_state_merkle_proof: PublicStateMerkleProofTarget,
+
+    pub new_pis: BlockChainPublicInputsTarget,
+}
+
+impl<const D: usize> BlockStepTarget<D> {
+    #[allow(clippy::too_many_arguments)]
+    pub fn new<F, C>(
+        builder: &mut CircuitBuilder<F, D>,
+        block_chain_cd: &CommonCircuitData<F, D>,
+        update_account_vds: &[(u32, VerifierCircuitData<F, C, D>)],
+        deposit_chain_vd: &VerifierCircuitData<F, C, D>,
+    ) -> Self
+    where
+        F: RichField + Extendable<D>,
+        C: GenericConfig<D, F = F> + 'static,
+        <C as GenericConfig<D>>::Hasher: AlgebraicHasher<F>,
+    {
+        todo!()
+    }
+}
+
+fn enforce_conditional_selection<F: RichField + Extendable<D>, const D: usize>(
+    builder: &mut CircuitBuilder<F, D>,
+    condition: BoolTarget,
+    not_condition: BoolTarget,
+    target: &[Target],
+    when_true: &[Target],
+    when_false: &[Target],
+) {
+    debug_assert_eq!(target.len(), when_true.len());
+    debug_assert_eq!(target.len(), when_false.len());
+    for (selected, expected) in target.iter().zip(when_true.iter()) {
+        builder.conditional_assert_eq(condition.target, *selected, *expected);
+    }
+    for (selected, expected) in target.iter().zip(when_false.iter()) {
+        builder.conditional_assert_eq(not_condition.target, *selected, *expected);
     }
 }
