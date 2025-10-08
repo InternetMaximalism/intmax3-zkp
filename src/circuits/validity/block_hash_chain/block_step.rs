@@ -6,7 +6,7 @@ use plonky2::{
     iop::target::BoolTarget,
     plonk::{
         circuit_builder::CircuitBuilder,
-        circuit_data::{CommonCircuitData, VerifierCircuitData},
+        circuit_data::{CommonCircuitData, VerifierCircuitData, VerifierCircuitTarget},
         config::{AlgebraicHasher, GenericConfig},
         proof::{ProofWithPublicInputs, ProofWithPublicInputsTarget},
     },
@@ -33,7 +33,8 @@ use crate::{
     constants::PUBLIC_STATE_TREE_HEIGHT,
     ethereum_types::{bytes32::Bytes32Target, u32limb_trait::U32LimbTargetTrait},
     utils::{
-        conversion::ToU64, leafable::Leafable, poseidon_hash_out::PoseidonHashOutTarget,
+        conversion::ToU64, cyclic::conditionally_connect_vd, dummy::conditionally_verify_proof,
+        leafable::Leafable, poseidon_hash_out::PoseidonHashOutTarget,
         recursively_verifiable::add_proof_target_and_conditionally_verify,
     },
 };
@@ -262,6 +263,8 @@ pub struct BlockStepTarget<const D: usize> {
     pub update_account_proofs: Vec<ProofWithPublicInputsTarget<D>>,
     pub public_state_merkle_proof: PublicStateMerkleProofTarget,
 
+    pub block_chain_vd: VerifierCircuitTarget,
+
     pub new_pis: BlockChainPublicInputsTarget,
 }
 
@@ -284,10 +287,27 @@ impl<const D: usize> BlockStepTarget<D> {
         );
 
         let has_prev_block_proof = builder.add_virtual_bool_target_safe();
+
+        // add previous block chain proof and conditionally verify
+        let block_chain_vd =
+            builder.add_virtual_verifier_data(block_chain_cd.config.fri_config.cap_height);
         let prev_block_chain_proof = builder.add_virtual_proof_with_pis(block_chain_cd);
         let prev_inputs_from_proof = BlockChainPublicInputsTarget::from_pis(
             &prev_block_chain_proof.public_inputs,
             &block_chain_cd.config,
+        );
+        conditionally_verify_proof::<F, C, D>(
+            builder,
+            has_prev_block_proof,
+            &prev_block_chain_proof,
+            &block_chain_vd,
+            &block_chain_cd,
+        );
+        conditionally_connect_vd(
+            builder,
+            has_prev_block_proof,
+            &prev_inputs_from_proof.vd,
+            &block_chain_vd,
         );
 
         let initial_public_state = ExtendedPublicStateTarget::new(builder, true);
@@ -302,14 +322,6 @@ impl<const D: usize> BlockStepTarget<D> {
             has_prev_block_proof,
             &prev_inputs_from_proof.ext_public_state,
             &initial_public_state,
-        );
-
-        let default_prev_vd =
-            builder.add_virtual_verifier_data(block_chain_cd.config.fri_config.cap_height);
-        let selected_prev_vd = builder.select_verifier_data(
-            has_prev_block_proof,
-            &prev_inputs_from_proof.vd,
-            &default_prev_vd,
         );
 
         let mut one_hot = Vec::with_capacity(update_account_vds.len());
@@ -352,8 +364,6 @@ impl<const D: usize> BlockStepTarget<D> {
             &deposit_hash_chain_proof.public_inputs,
             &deposit_chain_vd.common.config,
         );
-        let deposit_vd_target = builder.constant_verifier_data(&deposit_chain_vd.verifier_only);
-        builder.connect_verifier_data(&deposit_inputs.vd, &deposit_vd_target);
 
         let prev_public_state_ext = selected_prev_state.clone();
         let prev_public_state = prev_public_state_ext.inner.clone();
@@ -426,6 +436,8 @@ impl<const D: usize> BlockStepTarget<D> {
 
         let public_state_merkle_proof =
             PublicStateMerkleProofTarget::new(builder, PUBLIC_STATE_TREE_HEIGHT);
+
+        // update public state tree
         let empty_public_state_target =
             PublicStateTarget::constant(builder, &PublicState::empty_leaf());
         public_state_merkle_proof.verify::<F, C, D>(
@@ -440,40 +452,20 @@ impl<const D: usize> BlockStepTarget<D> {
             prev_public_state.block_number.value,
         );
 
-        let new_pis = BlockChainPublicInputsTarget::new(builder, &block_chain_cd.config);
-        new_pis
-            .initial_ext_public_state
-            .connect(builder, &selected_initial_state);
-        builder.connect_verifier_data(&new_pis.vd, &selected_prev_vd);
-
-        new_pis
-            .ext_public_state
-            .inner
-            .block_number
-            .connect(builder, &next_block_number);
-        new_pis
-            .ext_public_state
-            .inner
-            .account_tree_root
-            .connect(builder, account_tree_root);
-        new_pis
-            .ext_public_state
-            .inner
-            .deposit_tree_root
-            .connect(builder, selected_deposit_tree_root);
-        new_pis
-            .ext_public_state
-            .inner
-            .prev_public_state_root
-            .connect(builder, prev_public_state_root);
-        new_pis
-            .ext_public_state
-            .deposit_hash_chain
-            .connect(builder, selected_deposit_hash_chain);
-        new_pis
-            .ext_public_state
-            .deposit_count
-            .connect(builder, &selected_deposit_count);
+        let new_pis = BlockChainPublicInputsTarget {
+            initial_ext_public_state: selected_initial_state,
+            ext_public_state: ExtendedPublicStateTarget {
+                inner: PublicStateTarget {
+                    block_number: next_block_number,
+                    account_tree_root,
+                    deposit_tree_root: selected_deposit_tree_root,
+                    prev_public_state_root,
+                },
+                deposit_hash_chain: selected_deposit_hash_chain,
+                deposit_count: selected_deposit_count,
+            },
+            vd: block_chain_vd.clone(),
+        };
 
         Self {
             one_hot,
@@ -484,6 +476,7 @@ impl<const D: usize> BlockStepTarget<D> {
             deposit_hash_chain_proof,
             update_account_proofs,
             public_state_merkle_proof,
+            block_chain_vd,
             new_pis,
         }
     }
