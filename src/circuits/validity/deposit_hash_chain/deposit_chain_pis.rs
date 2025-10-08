@@ -7,7 +7,9 @@ use plonky2::{
     },
 };
 
-use crate::{ethereum_types::bytes32::Bytes32, utils::poseidon_hash_out::PoseidonHashOut};
+use crate::{
+    common::u63::U63, ethereum_types::bytes32::Bytes32, utils::poseidon_hash_out::PoseidonHashOut,
+};
 
 pub struct DepositChainPublicInputs<
     F: RichField + Extendable<D>,
@@ -18,9 +20,9 @@ pub struct DepositChainPublicInputs<
 {
     pub initial_deposit_hash_chain: Bytes32,
     pub initial_deposit_tree_root: PoseidonHashOut,
-    pub initial_deposit_count: u64,
+    pub initial_deposit_count: U63,
     pub deposit_hash_chain: Bytes32,
     pub deposit_tree_root: Bytes32,
-    pub deposit_count: u64,
+    pub deposit_count: U63,
     pub vd: VerifierOnlyCircuitData<C, D>,
 }
