@@ -21,11 +21,8 @@ use crate::{
             DepositChainPublicInputs, DepositChainPublicInputsError,
         },
     },
-    common::{
-        public_state::PublicState, trees::public_state_tree::PublicStateMerkleProof, u63::U63,
-    },
-    ethereum_types::bytes32::Bytes32,
-    utils::conversion::ToU64,
+    common::{public_state::PublicState, trees::public_state_tree::PublicStateMerkleProof},
+    utils::{conversion::ToU64, leafable::Leafable},
 };
 
 #[derive(Debug, thiserror::Error)]
@@ -59,7 +56,7 @@ pub struct BlockStepWitness<
 > where
     <C as GenericConfig<D>>::Hasher: AlgebraicHasher<F>,
 {
-    pub initial_public_state: Option<PublicState>,
+    pub initial_public_state: Option<ExtendedPublicState>,
 
     // Previous block hash chain proof if not the first block
     pub prev_block_chain_proof: Option<ProofWithPublicInputs<F, C, D>>,
@@ -97,14 +94,15 @@ where
                 &block_chain_vd.common.config,
             )?
         } else {
-            let default_state = ExtendedPublicState::new(
-                PublicState::default(),
-                Bytes32::default(),
-                U63::default(),
-            );
+            let initial_state = self.initial_public_state.clone().ok_or_else(|| {
+                BlockStepError::InvalidInput(
+                    "initial_public_state must be provided when previous block proof is absent"
+                        .to_string(),
+                )
+            })?;
             BlockChainPublicInputs {
-                initial_ext_public_state: default_state.clone(),
-                ext_public_state: default_state,
+                initial_ext_public_state: initial_state.clone(),
+                ext_public_state: initial_state,
                 vd: block_chain_vd.verifier_only.clone(),
             }
         };
@@ -112,120 +110,110 @@ where
         let prev_public_state_ext = prev_inputs.ext_public_state.clone();
         let prev_public_state = prev_public_state_ext.inner.clone();
 
-        // Validate deposit hash chain proof if provided.
-        let deposit_chain_inputs: Option<DepositChainPublicInputs<F, C, D>> =
-            if let Some(deposit_proof) = &self.deposit_hash_chain_proof {
-                deposit_chain_vd
-                    .verify(deposit_proof.clone())
-                    .map_err(|e| {
-                        BlockStepError::InvalidProof(format!(
-                            "deposit hash chain proof invalid: {e}"
-                        ))
-                    })?;
-                let deposit_inputs = DepositChainPublicInputs::from_u64_slice(
-                    &deposit_proof.public_inputs.to_u64_vec(),
-                    &deposit_chain_vd.common.config,
-                )?;
-
-                if deposit_inputs.initial_deposit_hash_chain
-                    != prev_public_state_ext.deposit_hash_chain
-                {
-                    return Err(BlockStepError::InvalidInput(
-                        "deposit proof initial deposit hash chain mismatch".to_string(),
-                    ));
-                }
-                if deposit_inputs.initial_deposit_tree_root != prev_public_state.deposit_tree_root {
-                    return Err(BlockStepError::InvalidInput(
-                        "deposit proof initial deposit tree root mismatch".to_string(),
-                    ));
-                }
-                if deposit_inputs.initial_deposit_count != prev_public_state_ext.deposit_count {
-                    return Err(BlockStepError::InvalidInput(
-                        "deposit proof initial deposit count mismatch".to_string(),
-                    ));
-                }
-                Some(deposit_inputs)
-            } else {
-                None
-            };
-
-        if self.num_users == 0 {
-            return Err(BlockStepError::InvalidInput(
-                "num_users must be greater than zero".to_string(),
-            ));
-        }
-
+        // verify update account proof and extract public inputs
         let update_vd_map: HashMap<u32, &VerifierCircuitData<F, C, D>> =
             update_account_vds.iter().map(|(n, vd)| (*n, vd)).collect();
-
         let update_vd = update_vd_map.get(&self.num_users).copied().ok_or(
             BlockStepError::MissingUpdateAccountVerifierData(self.num_users),
         )?;
-
         update_vd
             .verify(self.update_account_proof.clone())
             .map_err(|e| {
                 BlockStepError::InvalidProof(format!("update account proof invalid: {e}"))
             })?;
+        let update_account_inputs = UpdateAccountPublicInputs::from_u64_slice(
+            &self.update_account_proof.public_inputs.to_u64_vec(),
+        )
+        .map_err(|e| BlockStepError::UpdateAccountPublicInputs(e.to_string()))?;
 
-        let update_inputs_u64 = self.update_account_proof.public_inputs.to_u64_vec();
-        let update_account_inputs =
-            UpdateAccountPublicInputs::from_u64_slice(&update_inputs_u64)
-                .map_err(|e| BlockStepError::UpdateAccountPublicInputs(e.to_string()))?;
-
-        if let Some(deposit_inputs) = deposit_chain_inputs.as_ref() {
-            if update_account_inputs.deposit_hash_chain != deposit_inputs.deposit_hash_chain {
-                return Err(BlockStepError::InvalidInput(
-                    "deposit hash chain mismatch between update account and deposit proofs"
-                        .to_string(),
-                ));
-            }
+        // validate consistency between update account proof and previous public state
+        let block_number = prev_public_state.block_number.add(1).map_err(|_e| {
+            BlockStepError::InvalidInput("previous block number is at max value".to_string())
+        })?;
+        if update_account_inputs.block_number != block_number {
+            return Err(BlockStepError::InvalidInput(
+                "update account proof block number must be previous block number + 1".to_string(),
+            ));
         }
-
-        // Verify previous public state membership and derive the root prior to this update.
-        let merkle_index = prev_public_state.block_number.as_u64();
-        self.public_state_merkle_proof
-            .verify(
-                &prev_public_state,
-                merkle_index,
-                prev_public_state.prev_public_state_root,
-            )
-            .map_err(|e| {
-                BlockStepError::PublicStateMerkleProof(format!(
-                    "failed to verify previous public state: {e}"
-                ))
-            })?;
-        let prev_public_state_root = self
-            .public_state_merkle_proof
-            .get_root(&prev_public_state, merkle_index);
-
-        // Determine new state components.
         if update_account_inputs.prev_account_tree_root != prev_public_state.account_tree_root {
             return Err(BlockStepError::InvalidInput(
                 "update account proof initial account tree root mismatch".to_string(),
             ));
         }
-        let block_number = update_account_inputs.block_number;
         let account_tree_root = update_account_inputs.new_account_tree_root;
 
-        let (deposit_tree_root, deposit_count) = if let Some(deposit_inputs) = &deposit_chain_inputs
+        let mut deposit_hash_chain = prev_public_state_ext.deposit_hash_chain;
+        let mut deposit_tree_root = prev_public_state.deposit_tree_root;
+        let mut deposit_count = prev_public_state_ext.deposit_count;
+        // if there is update in deposit hash chain, the deposit proof must be provided
+        if prev_inputs.ext_public_state.deposit_hash_chain
+            != update_account_inputs.deposit_hash_chain
         {
-            (
-                deposit_inputs.deposit_tree_root,
-                deposit_inputs.deposit_count,
-            )
-        } else {
-            (
-                prev_public_state.deposit_tree_root,
-                prev_public_state_ext.deposit_count,
-            )
-        };
+            let deposit_proof = self.deposit_hash_chain_proof.as_ref().ok_or_else(|| {
+                BlockStepError::InvalidInput(
+                    "deposit_hash_chain_proof must be provided when deposit hash chain is updated"
+                        .to_string(),
+                )
+            })?;
 
-        let deposit_hash_chain = if let Some(deposit_inputs) = &deposit_chain_inputs {
-            deposit_inputs.deposit_hash_chain
-        } else {
-            prev_public_state_ext.deposit_hash_chain
-        };
+            // verify deposit hash chain proof and extract public inputs
+            deposit_chain_vd
+                .verify(deposit_proof.clone())
+                .map_err(|e| {
+                    BlockStepError::InvalidProof(format!("deposit hash chain proof invalid: {e}"))
+                })?;
+            let deposit_inputs = DepositChainPublicInputs::<F, C, D>::from_u64_slice(
+                &deposit_proof.public_inputs.to_u64_vec(),
+                &deposit_chain_vd.common.config,
+            )?;
+
+            // validate consistency between deposit proof and previous public state
+            if deposit_inputs.initial_deposit_hash_chain != prev_public_state_ext.deposit_hash_chain
+            {
+                return Err(BlockStepError::InvalidInput(
+                    "deposit proof initial deposit hash chain mismatch".to_string(),
+                ));
+            }
+            if deposit_inputs.initial_deposit_tree_root != prev_public_state.deposit_tree_root {
+                return Err(BlockStepError::InvalidInput(
+                    "deposit proof initial deposit tree root mismatch".to_string(),
+                ));
+            }
+            if deposit_inputs.initial_deposit_count != prev_public_state_ext.deposit_count {
+                return Err(BlockStepError::InvalidInput(
+                    "deposit proof initial deposit count mismatch".to_string(),
+                ));
+            }
+            if deposit_inputs.deposit_hash_chain != update_account_inputs.deposit_hash_chain {
+                return Err(BlockStepError::InvalidInput(
+                    "deposit proof resulting deposit hash chain must match update account input"
+                        .to_string(),
+                ));
+            }
+            
+            // update deposit-related state components
+            deposit_hash_chain = deposit_inputs.deposit_hash_chain;
+            deposit_tree_root = deposit_inputs.deposit_tree_root;
+            deposit_count = deposit_inputs.deposit_count;
+        }
+
+        // Verify previous public state membership and derive the root prior to this update.
+        let empty_public_state = PublicState::empty_leaf();
+        self.public_state_merkle_proof
+            .verify(
+                &empty_public_state,
+                prev_public_state.block_number.as_u64(),
+                prev_public_state.prev_public_state_root,
+            )
+            .map_err(|e| {
+                BlockStepError::PublicStateMerkleProof(format!(
+                    "failed to verify empty public state membership: {e}"
+                ))
+            })?;
+        // update prev_public_state_root
+        let prev_public_state_root = self
+            .public_state_merkle_proof
+            .get_root(&prev_public_state, prev_public_state.block_number.as_u64());
 
         let new_public_state = PublicState {
             block_number,
