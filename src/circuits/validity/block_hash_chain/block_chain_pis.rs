@@ -11,8 +11,9 @@ use plonky2::{
 use thiserror::Error;
 
 use crate::{
-    common::public_state::{
-        PUBLIC_STATE_U64_LEN, PublicState, PublicStateError, PublicStateTarget,
+    circuits::validity::block_hash_chain::ext_public_state::{
+        EXTENDED_PUBLIC_STATE_U64_LEN, ExtendedPublicState, ExtendedPublicStateError,
+        ExtendedPublicStateTarget,
     },
     utils::{
         conversion::{ToField as _, ToU64},
@@ -22,7 +23,7 @@ use crate::{
     },
 };
 
-pub const BLOCK_CHAIN_PUBLIC_INPUTS_LEN: usize = 2 * PUBLIC_STATE_U64_LEN;
+pub const BLOCK_CHAIN_PUBLIC_INPUTS_LEN: usize = 2 * EXTENDED_PUBLIC_STATE_U64_LEN;
 
 #[derive(Debug, Error)]
 pub enum BlockChainPublicInputsError {
@@ -43,8 +44,8 @@ pub struct BlockChainPublicInputs<
 > where
     <C as GenericConfig<D>>::Hasher: AlgebraicHasher<F>,
 {
-    pub initial_public_state: PublicState,
-    pub public_state: PublicState,
+    pub initial_ext_public_state: ExtendedPublicState,
+    pub ext_public_state: ExtendedPublicState,
     pub vd: VerifierOnlyCircuitData<C, D>,
 }
 
@@ -55,8 +56,8 @@ where
 {
     pub fn to_u64_vec(&self, config: &CircuitConfig) -> Vec<u64> {
         [
-            self.initial_public_state.to_u64_vec(),
-            self.public_state.to_u64_vec(),
+            self.initial_ext_public_state.to_u64_vec(),
+            self.ext_public_state.to_u64_vec(),
             vd_to_vec(config, &self.vd).to_u64_vec(),
         ]
         .concat()
@@ -77,23 +78,27 @@ where
 
         let mut cursor = 0;
 
-        let initial_public_state =
-            PublicState::from_u64_slice(&inputs[cursor..cursor + PUBLIC_STATE_U64_LEN]).map_err(
-                |e: PublicStateError| BlockChainPublicInputsError::ParseError {
-                    field: "initial_public_state",
-                    message: e.to_string(),
-                },
-            )?;
-        cursor += PUBLIC_STATE_U64_LEN;
+        let initial_ext_public_state = ExtendedPublicState::from_u64_slice(
+            &inputs[cursor..cursor + EXTENDED_PUBLIC_STATE_U64_LEN],
+        )
+        .map_err(|e: ExtendedPublicStateError| {
+            BlockChainPublicInputsError::ParseError {
+                field: "initial_public_state",
+                message: e.to_string(),
+            }
+        })?;
+        cursor += EXTENDED_PUBLIC_STATE_U64_LEN;
 
-        let public_state =
-            PublicState::from_u64_slice(&inputs[cursor..cursor + PUBLIC_STATE_U64_LEN]).map_err(
-                |e: PublicStateError| BlockChainPublicInputsError::ParseError {
-                    field: "public_state",
-                    message: e.to_string(),
-                },
-            )?;
-        cursor += PUBLIC_STATE_U64_LEN;
+        let ext_public_state = ExtendedPublicState::from_u64_slice(
+            &inputs[cursor..cursor + EXTENDED_PUBLIC_STATE_U64_LEN],
+        )
+        .map_err(|e: ExtendedPublicStateError| {
+            BlockChainPublicInputsError::ParseError {
+                field: "public_state",
+                message: e.to_string(),
+            }
+        })?;
+        cursor += EXTENDED_PUBLIC_STATE_U64_LEN;
 
         let vd_slice = &inputs[cursor..cursor + vd_len];
         let vd = vd_from_pis_slice::<F, C, D>(&vd_slice.to_field_vec(), config).map_err(|e| {
@@ -104,8 +109,8 @@ where
         })?;
 
         Ok(Self {
-            initial_public_state,
-            public_state,
+            initial_ext_public_state,
+            ext_public_state,
             vd,
         })
     }
@@ -113,8 +118,8 @@ where
 
 #[derive(Clone, Debug)]
 pub struct BlockChainPublicInputsTarget {
-    pub initial_public_state: PublicStateTarget,
-    pub public_state: PublicStateTarget,
+    pub initial_ext_public_state: ExtendedPublicStateTarget,
+    pub ext_public_state: ExtendedPublicStateTarget,
     pub vd: VerifierCircuitTarget,
 }
 
@@ -124,16 +129,16 @@ impl BlockChainPublicInputsTarget {
         config: &CircuitConfig,
     ) -> Self {
         Self {
-            initial_public_state: PublicStateTarget::new(builder, true),
-            public_state: PublicStateTarget::new(builder, true),
+            initial_ext_public_state: ExtendedPublicStateTarget::new(builder, true),
+            ext_public_state: ExtendedPublicStateTarget::new(builder, true),
             vd: builder.add_virtual_verifier_data(config.fri_config.cap_height),
         }
     }
 
     pub fn to_vec(&self, config: &CircuitConfig) -> Vec<Target> {
         [
-            self.initial_public_state.to_vec(),
-            self.public_state.to_vec(),
+            self.initial_ext_public_state.to_vec(),
+            self.ext_public_state.to_vec(),
             vd_to_vec_target(config, &self.vd),
         ]
         .concat()
@@ -145,21 +150,23 @@ impl BlockChainPublicInputsTarget {
 
         let mut cursor = 0;
 
-        let initial_public_state =
-            PublicStateTarget::from_slice(&pis[cursor..cursor + PUBLIC_STATE_U64_LEN]);
-        cursor += PUBLIC_STATE_U64_LEN;
+        let initial_public_state = ExtendedPublicStateTarget::from_slice(
+            &pis[cursor..cursor + EXTENDED_PUBLIC_STATE_U64_LEN],
+        );
+        cursor += EXTENDED_PUBLIC_STATE_U64_LEN;
 
-        let public_state =
-            PublicStateTarget::from_slice(&pis[cursor..cursor + PUBLIC_STATE_U64_LEN]);
-        cursor += PUBLIC_STATE_U64_LEN;
+        let public_state = ExtendedPublicStateTarget::from_slice(
+            &pis[cursor..cursor + EXTENDED_PUBLIC_STATE_U64_LEN],
+        );
+        cursor += EXTENDED_PUBLIC_STATE_U64_LEN;
 
         let vd_slice = &pis[cursor..cursor + vd_len];
         let vd = vd_from_pis_slice_target(vd_slice, config)
             .expect("vd_from_pis_slice_target should not fail");
 
         Self {
-            initial_public_state,
-            public_state,
+            initial_ext_public_state: initial_public_state,
+            ext_public_state: public_state,
             vd,
         }
     }
@@ -176,9 +183,10 @@ impl BlockChainPublicInputsTarget {
     ) where
         <C as GenericConfig<D>>::Hasher: AlgebraicHasher<F>,
     {
-        self.initial_public_state
-            .set_witness(witness, &value.initial_public_state);
-        self.public_state.set_witness(witness, &value.public_state);
+        self.initial_ext_public_state
+            .set_witness(witness, &value.initial_ext_public_state);
+        self.ext_public_state
+            .set_witness(witness, &value.ext_public_state);
         witness.set_verifier_data_target(&self.vd, &value.vd);
     }
 
@@ -187,9 +195,10 @@ impl BlockChainPublicInputsTarget {
         builder: &mut CircuitBuilder<F, D>,
         other: &Self,
     ) {
-        self.initial_public_state
-            .connect(builder, &other.initial_public_state);
-        self.public_state.connect(builder, &other.public_state);
+        self.initial_ext_public_state
+            .connect(builder, &other.initial_ext_public_state);
+        self.ext_public_state
+            .connect(builder, &other.ext_public_state);
         builder.connect_verifier_data(&self.vd, &other.vd);
     }
 }

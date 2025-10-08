@@ -39,6 +39,14 @@ pub struct ExtendedPublicState {
 }
 
 impl ExtendedPublicState {
+    pub fn new(inner: PublicState, deposit_hash_chain: Bytes32, deposit_count: U63) -> Self {
+        Self {
+            inner,
+            deposit_hash_chain,
+            deposit_count,
+        }
+    }
+
     pub fn to_u64_vec(&self) -> Vec<u64> {
         [
             self.inner.to_u64_vec(),

@@ -14,13 +14,17 @@ use crate::{
     circuits::validity::{
         block_hash_chain::{
             block_chain_pis::{BlockChainPublicInputs, BlockChainPublicInputsError},
+            ext_public_state::ExtendedPublicState,
             update_account_tree::UpdateAccountPublicInputs,
         },
         deposit_hash_chain::deposit_chain_pis::{
             DepositChainPublicInputs, DepositChainPublicInputsError,
         },
     },
-    common::{public_state::PublicState, trees::public_state_tree::PublicStateMerkleProof},
+    common::{
+        public_state::PublicState, trees::public_state_tree::PublicStateMerkleProof, u63::U63,
+    },
+    ethereum_types::bytes32::Bytes32,
     utils::conversion::ToU64,
 };
 
@@ -93,14 +97,20 @@ where
                 &block_chain_vd.common.config,
             )?
         } else {
+            let default_state = ExtendedPublicState::new(
+                PublicState::default(),
+                Bytes32::default(),
+                U63::default(),
+            );
             BlockChainPublicInputs {
-                initial_public_state: PublicState::default(),
-                public_state: PublicState::default(),
+                initial_ext_public_state: default_state.clone(),
+                ext_public_state: default_state,
                 vd: block_chain_vd.verifier_only.clone(),
             }
         };
 
-        let prev_public_state = prev_inputs.public_state.clone();
+        let prev_public_state_ext = prev_inputs.ext_public_state.clone();
+        let prev_public_state = prev_public_state_ext.inner.clone();
 
         // Validate deposit hash chain proof if provided.
         let deposit_chain_inputs: Option<DepositChainPublicInputs<F, C, D>> =
@@ -117,12 +127,19 @@ where
                     &deposit_chain_vd.common.config,
                 )?;
 
+                if deposit_inputs.initial_deposit_hash_chain
+                    != prev_public_state_ext.deposit_hash_chain
+                {
+                    return Err(BlockStepError::InvalidInput(
+                        "deposit proof initial deposit hash chain mismatch".to_string(),
+                    ));
+                }
                 if deposit_inputs.initial_deposit_tree_root != prev_public_state.deposit_tree_root {
                     return Err(BlockStepError::InvalidInput(
                         "deposit proof initial deposit tree root mismatch".to_string(),
                     ));
                 }
-                if deposit_inputs.initial_deposit_count != prev_public_state.deposit_count {
+                if deposit_inputs.initial_deposit_count != prev_public_state_ext.deposit_count {
                     return Err(BlockStepError::InvalidInput(
                         "deposit proof initial deposit count mismatch".to_string(),
                     ));
@@ -131,6 +148,12 @@ where
             } else {
                 None
             };
+
+        if self.num_users == 0 {
+            return Err(BlockStepError::InvalidInput(
+                "num_users must be greater than zero".to_string(),
+            ));
+        }
 
         let update_vd_map: HashMap<u32, &VerifierCircuitData<F, C, D>> =
             update_account_vds.iter().map(|(n, vd)| (*n, vd)).collect();
@@ -194,8 +217,14 @@ where
         } else {
             (
                 prev_public_state.deposit_tree_root,
-                prev_public_state.deposit_count,
+                prev_public_state_ext.deposit_count,
             )
+        };
+
+        let deposit_hash_chain = if let Some(deposit_inputs) = &deposit_chain_inputs {
+            deposit_inputs.deposit_hash_chain
+        } else {
+            prev_public_state_ext.deposit_hash_chain
         };
 
         let new_public_state = PublicState {
@@ -206,9 +235,12 @@ where
             prev_public_state_root,
         };
 
+        let new_public_state_ext =
+            ExtendedPublicState::new(new_public_state, deposit_hash_chain, deposit_count);
+
         Ok(BlockChainPublicInputs {
-            initial_public_state: prev_inputs.initial_public_state,
-            public_state: new_public_state,
+            initial_ext_public_state: prev_inputs.initial_ext_public_state,
+            ext_public_state: new_public_state_ext,
             vd: prev_inputs.vd,
         })
     }
