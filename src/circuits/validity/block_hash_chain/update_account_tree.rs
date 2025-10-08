@@ -376,6 +376,7 @@ where
     C: GenericConfig<D, F = F>,
     <C as GenericConfig<D>>::Hasher: AlgebraicHasher<F>,
 {
+    pub num_users: u32,
     pub data: CircuitData<F, C, D>,
     pub target: UpdateAccountTreeTarget,
     pub public_inputs: UpdateAccountPublicInputsTarget,
@@ -395,6 +396,7 @@ where
         let data = builder.build();
 
         Self {
+            num_users,
             data,
             target,
             public_inputs,
