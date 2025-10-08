@@ -10,12 +10,12 @@ use crate::{
     },
     constants::{ACCOUNT_TREE_HEIGHT, SEND_TREE_HEIGHT},
     ethereum_types::{
-        bytes32::{Bytes32, Bytes32Target},
-        u32limb_trait::{U32LimbTargetTrait as _, U32LimbTrait},
+        bytes32::{BYTES32_LEN, Bytes32, Bytes32Target},
+        u32limb_trait::{U32LimbTargetTrait as _, U32LimbTrait as _},
     },
     utils::{
         leafable::Leafable as _,
-        poseidon_hash_out::{PoseidonHashOut, PoseidonHashOutTarget},
+        poseidon_hash_out::{POSEIDON_HASH_OUT_LEN, PoseidonHashOut, PoseidonHashOutTarget},
     },
 };
 use plonky2::{
@@ -162,6 +162,8 @@ impl UpdateAccountTree {
     }
 }
 
+const UPDATE_ACCOUNT_PUBLIC_INPUTS_LEN: usize = 1 + 2 * BYTES32_LEN + 2 * POSEIDON_HASH_OUT_LEN;
+
 impl UpdateAccountPublicInputs {
     pub fn to_u64_vec(&self) -> Vec<u64> {
         let mut result = vec![self.block_number.as_u64()];
@@ -170,6 +172,48 @@ impl UpdateAccountPublicInputs {
         result.extend(self.new_block_hash_chain.to_u64_vec());
         result.extend(self.new_account_tree_root.to_u64_vec());
         result
+    }
+
+    pub fn from_u64_slice(values: &[u64]) -> Result<Self, UpdateAccountTreeError> {
+        if values.len() != UPDATE_ACCOUNT_PUBLIC_INPUTS_LEN {
+            return Err(UpdateAccountTreeError::InvalidLength(format!(
+                "invalid update-account public inputs length: expected {UPDATE_ACCOUNT_PUBLIC_INPUTS_LEN}, got {}",
+                values.len()
+            )));
+        }
+
+        let mut cursor = 0;
+
+        let block_number = BlockNumber::new(values[cursor]).map_err(|e| {
+            UpdateAccountTreeError::InvalidLength(format!("invalid block number: {e}"))
+        })?;
+        cursor += 1;
+
+        let prev_block_hash_chain = Bytes32::from_u64_slice(&values[cursor..cursor + BYTES32_LEN])
+            .map_err(|e| UpdateAccountTreeError::InvalidLength(e.to_string()))?;
+        cursor += BYTES32_LEN;
+
+        let prev_account_tree_root =
+            PoseidonHashOut::from_u64_slice(&values[cursor..cursor + POSEIDON_HASH_OUT_LEN])
+                .map_err(|e| UpdateAccountTreeError::MerkleProofError(e.to_string()))?;
+        cursor += POSEIDON_HASH_OUT_LEN;
+
+        let new_block_hash_chain =
+            Bytes32::from_u64_slice(&values[cursor..cursor + BYTES32_LEN])
+                .map_err(|e| UpdateAccountTreeError::InvalidLength(e.to_string()))?;
+        cursor += BYTES32_LEN;
+
+        let new_account_tree_root =
+            PoseidonHashOut::from_u64_slice(&values[cursor..cursor + POSEIDON_HASH_OUT_LEN])
+                .map_err(|e| UpdateAccountTreeError::MerkleProofError(e.to_string()))?;
+
+        Ok(Self {
+            block_number,
+            prev_block_hash_chain,
+            prev_account_tree_root,
+            new_block_hash_chain,
+            new_account_tree_root,
+        })
     }
 }
 
@@ -192,6 +236,41 @@ impl UpdateAccountPublicInputsTarget {
             self.new_account_tree_root.to_vec(),
         ]
         .concat()
+    }
+
+    pub fn from_slice(values: &[Target]) -> Self {
+        assert_eq!(
+            values.len(),
+            UPDATE_ACCOUNT_PUBLIC_INPUTS_LEN,
+            "UpdateAccountPublicInputsTarget::from_slice length mismatch",
+        );
+
+        let mut cursor = 0;
+
+        let block_number = BlockNumberTarget::from_slice(&values[cursor..cursor + 1]);
+        cursor += 1;
+
+        let prev_block_hash_chain =
+            Bytes32Target::from_slice(&values[cursor..cursor + BYTES32_LEN]);
+        cursor += BYTES32_LEN;
+
+        let prev_account_tree_root =
+            PoseidonHashOutTarget::from_slice(&values[cursor..cursor + POSEIDON_HASH_OUT_LEN]);
+        cursor += POSEIDON_HASH_OUT_LEN;
+
+        let new_block_hash_chain = Bytes32Target::from_slice(&values[cursor..cursor + BYTES32_LEN]);
+        cursor += BYTES32_LEN;
+
+        let new_account_tree_root =
+            PoseidonHashOutTarget::from_slice(&values[cursor..cursor + POSEIDON_HASH_OUT_LEN]);
+
+        Self {
+            block_number,
+            prev_block_hash_chain,
+            prev_account_tree_root,
+            new_block_hash_chain,
+            new_account_tree_root,
+        }
     }
 
     pub fn set_witness<F: Field, W: WitnessWrite<F>>(
