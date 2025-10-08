@@ -251,6 +251,7 @@ mod tests {
     type TestConfig = PoseidonGoldilocksConfig;
     const D: usize = 2;
 
+    #[cfg_attr(debug_assertions, ignore = "run with --release")]
     #[test]
     fn tx_settlement_target_proves() {
         let mut spend_builder =

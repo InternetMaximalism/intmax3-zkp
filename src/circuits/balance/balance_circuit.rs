@@ -140,6 +140,7 @@ mod tests {
     type F = GoldilocksField;
     type C = PoseidonGoldilocksConfig;
 
+    #[cfg_attr(debug_assertions, ignore = "run with --release")]
     #[test]
     fn test_balance_circuit() {
         let balance_cd = BalanceCircuit::<F, C, D>::generate_cd();

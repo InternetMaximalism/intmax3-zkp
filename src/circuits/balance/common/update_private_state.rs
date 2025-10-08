@@ -228,6 +228,7 @@ mod tests {
     type C = PoseidonGoldilocksConfig;
     const D: usize = 2;
 
+    #[cfg_attr(debug_assertions, ignore = "run with --release")]
     #[test]
     fn test_update_private_state_circuit() {
         let mut rng = rand::thread_rng();

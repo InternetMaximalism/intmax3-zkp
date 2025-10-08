@@ -416,6 +416,7 @@ mod tests {
     type F = GoldilocksField;
     type C = PoseidonGoldilocksConfig;
 
+    #[cfg_attr(debug_assertions, ignore = "run with --release")]
     #[test]
     fn test_spend_circuit() {
         let mut rng = rand::thread_rng();

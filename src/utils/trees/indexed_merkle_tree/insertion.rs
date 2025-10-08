@@ -412,8 +412,9 @@ mod tests {
     const D: usize = 2;
     type C = PoseidonGoldilocksConfig;
 
+    #[cfg_attr(debug_assertions, ignore = "run with --release")]
     #[test]
-    fn indexed_merkle_tree_insertion() {
+    fn test_indexed_merkle_tree_insertion() {
         let height = 40;
         let mut tree = IndexedMerkleTree::new(height);
         let rng = &mut rand::thread_rng();

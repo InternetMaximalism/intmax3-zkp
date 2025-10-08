@@ -436,6 +436,7 @@ mod tests {
     type F = GoldilocksField;
     type C = PoseidonGoldilocksConfig;
 
+    #[cfg_attr(debug_assertions, ignore = "run with --release")]
     #[test]
     fn test_update_account_tree_circuit() {
         let block_number = BlockNumber::new(20).unwrap();
