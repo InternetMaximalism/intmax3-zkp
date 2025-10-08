@@ -55,6 +55,7 @@ pub struct UpdateAccountPublicInputs {
     pub prev_account_tree_root: PoseidonHashOut,
     pub new_block_hash_chain: Bytes32,
     pub new_account_tree_root: PoseidonHashOut,
+    pub deposit_hash_chain: Bytes32,
 }
 
 #[derive(Clone, Debug)]
@@ -158,11 +159,12 @@ impl UpdateAccountTree {
             prev_account_tree_root: self.prev_account_tree_root,
             new_block_hash_chain,
             new_account_tree_root: account_tree_root,
+            deposit_hash_chain: self.block.deposit_hash_chain,
         })
     }
 }
 
-const UPDATE_ACCOUNT_PUBLIC_INPUTS_LEN: usize = 1 + 2 * BYTES32_LEN + 2 * POSEIDON_HASH_OUT_LEN;
+const UPDATE_ACCOUNT_PUBLIC_INPUTS_LEN: usize = 1 + 3 * BYTES32_LEN + 2 * POSEIDON_HASH_OUT_LEN;
 
 impl UpdateAccountPublicInputs {
     pub fn to_u64_vec(&self) -> Vec<u64> {
@@ -171,6 +173,7 @@ impl UpdateAccountPublicInputs {
         result.extend(self.prev_account_tree_root.to_u64_vec());
         result.extend(self.new_block_hash_chain.to_u64_vec());
         result.extend(self.new_account_tree_root.to_u64_vec());
+        result.extend(self.deposit_hash_chain.to_u64_vec());
         result
     }
 
@@ -206,6 +209,10 @@ impl UpdateAccountPublicInputs {
         let new_account_tree_root =
             PoseidonHashOut::from_u64_slice(&values[cursor..cursor + POSEIDON_HASH_OUT_LEN])
                 .map_err(|e| UpdateAccountTreeError::MerkleProofError(e.to_string()))?;
+        cursor += POSEIDON_HASH_OUT_LEN;
+
+        let deposit_hash_chain = Bytes32::from_u64_slice(&values[cursor..cursor + BYTES32_LEN])
+            .map_err(|e| UpdateAccountTreeError::InvalidLength(e.to_string()))?;
 
         Ok(Self {
             block_number,
@@ -213,6 +220,7 @@ impl UpdateAccountPublicInputs {
             prev_account_tree_root,
             new_block_hash_chain,
             new_account_tree_root,
+            deposit_hash_chain,
         })
     }
 }
@@ -224,6 +232,7 @@ pub struct UpdateAccountPublicInputsTarget {
     pub prev_account_tree_root: PoseidonHashOutTarget,
     pub new_block_hash_chain: Bytes32Target,
     pub new_account_tree_root: PoseidonHashOutTarget,
+    pub deposit_hash_chain: Bytes32Target,
 }
 
 impl UpdateAccountPublicInputsTarget {
@@ -234,6 +243,7 @@ impl UpdateAccountPublicInputsTarget {
             self.prev_account_tree_root.to_vec(),
             self.new_block_hash_chain.to_vec(),
             self.new_account_tree_root.to_vec(),
+            self.deposit_hash_chain.to_vec(),
         ]
         .concat()
     }
@@ -263,6 +273,9 @@ impl UpdateAccountPublicInputsTarget {
 
         let new_account_tree_root =
             PoseidonHashOutTarget::from_slice(&values[cursor..cursor + POSEIDON_HASH_OUT_LEN]);
+        cursor += POSEIDON_HASH_OUT_LEN;
+
+        let deposit_hash_chain = Bytes32Target::from_slice(&values[cursor..cursor + BYTES32_LEN]);
 
         Self {
             block_number,
@@ -270,6 +283,7 @@ impl UpdateAccountPublicInputsTarget {
             prev_account_tree_root,
             new_block_hash_chain,
             new_account_tree_root,
+            deposit_hash_chain,
         }
     }
 
@@ -287,6 +301,8 @@ impl UpdateAccountPublicInputsTarget {
             .set_witness(witness, value.new_block_hash_chain);
         self.new_account_tree_root
             .set_witness(witness, value.new_account_tree_root);
+        self.deposit_hash_chain
+            .set_witness(witness, value.deposit_hash_chain);
     }
 }
 
@@ -391,6 +407,7 @@ impl UpdateAccountTreeTarget {
             prev_account_tree_root: prev_account_tree_root.clone(),
             new_block_hash_chain,
             new_account_tree_root: account_tree_root.clone(),
+            deposit_hash_chain: block.deposit_hash_chain.clone(),
         };
 
         Self {
@@ -661,6 +678,7 @@ mod tests {
             public_inputs.new_block_hash_chain,
             block.hash_with_prev_hash(prev_block_hash_chain).unwrap()
         );
+        assert_eq!(public_inputs.deposit_hash_chain, block.deposit_hash_chain);
 
         let circuit = UpdateAccountCircuit::<F, C, D>::new(num_users);
         let proof = circuit.prove(&update_account_tree).unwrap();

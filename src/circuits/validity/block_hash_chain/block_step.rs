@@ -89,9 +89,8 @@ where
             block_chain_vd.verify(prev_proof.clone()).map_err(|e| {
                 BlockStepError::InvalidProof(format!("previous block chain proof invalid: {e}"))
             })?;
-            let prev_inputs_u64 = prev_proof.public_inputs.to_u64_vec();
             BlockChainPublicInputs::<F, C, D>::from_u64_slice(
-                &prev_inputs_u64,
+                &prev_proof.public_inputs.to_u64_vec(),
                 &block_chain_vd.common.config,
             )?
         } else {
@@ -114,11 +113,10 @@ where
                             "deposit hash chain proof invalid: {e}"
                         ))
                     })?;
-                let deposit_inputs: DepositChainPublicInputs<F, C, D> =
-                    DepositChainPublicInputs::from_u64_slice(
-                        &deposit_proof.public_inputs.to_u64_vec(),
-                        &deposit_chain_vd.common.config,
-                    )?;
+                let deposit_inputs = DepositChainPublicInputs::from_u64_slice(
+                    &deposit_proof.public_inputs.to_u64_vec(),
+                    &deposit_chain_vd.common.config,
+                )?;
 
                 if deposit_inputs.initial_deposit_tree_root != prev_public_state.deposit_tree_root {
                     return Err(BlockStepError::InvalidInput(
@@ -158,6 +156,18 @@ where
             }
             None
         };
+
+        if let (Some(update_inputs), Some(deposit_inputs)) = (
+            update_account_inputs.as_ref(),
+            deposit_chain_inputs.as_ref(),
+        ) {
+            if update_inputs.deposit_hash_chain != deposit_inputs.deposit_hash_chain {
+                return Err(BlockStepError::InvalidInput(
+                    "deposit hash chain mismatch between update account and deposit proofs"
+                        .to_string(),
+                ));
+            }
+        }
 
         // Verify previous public state membership and derive the root prior to this update.
         let merkle_index = prev_public_state.block_number.as_u64();
