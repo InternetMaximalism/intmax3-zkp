@@ -41,10 +41,13 @@ use crate::{
     utils::{
         conversion::ToU64,
         cyclic::conditionally_connect_vd,
-        dummy::{conditionally_verify_proof, DummyProof},
+        dummy::{DummyProof, conditionally_verify_proof},
         leafable::Leafable,
         poseidon_hash_out::PoseidonHashOutTarget,
-        recursively_verifiable::{add_proof_target_and_conditionally_verify, add_proof_target_and_conditionally_verify_cyclic},
+        recursively_verifiable::{
+            add_proof_target_and_conditionally_verify,
+            add_proof_target_and_conditionally_verify_cyclic,
+        },
     },
 };
 
