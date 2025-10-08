@@ -20,7 +20,7 @@ use crate::{
         DEPOSIT_CHAIN_PUBLIC_INPUTS_LEN, DepositChainPublicInputsTarget,
     },
     utils::{
-        cyclic::{add_const_gates, add_noop_gates, simple_recursion_circuit_data, vd_vec_len},
+        cyclic::{add_noop_gates, simple_recursion_circuit_data, vd_vec_len},
         recursively_verifiable::add_proof_target_and_verify,
     },
 };

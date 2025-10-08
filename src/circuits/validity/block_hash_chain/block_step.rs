@@ -736,10 +736,7 @@ mod tests {
             deposit::Deposit,
             public_state::PublicState,
             trees::{
-                account_tree::{
-                    AccountLeaf, AccountMerkleProof, AccountTree, SendLeaf, SendMerkleProof,
-                    SendTree,
-                },
+                account_tree::{AccountLeaf, AccountTree, SendLeaf, SendMerkleProof, SendTree},
                 deposit_tree::DepositTree,
                 public_state_tree::PublicStateTree,
             },
@@ -774,9 +771,10 @@ mod tests {
         let block_chain_cd = TestCyclicCircuit::<F, C, D>::generate_cd(block_chain_pis_len);
         let block_chain_circuit = TestCyclicCircuit::<F, C, D>::new(
             block_chain_config.clone(),
-            BLOCK_CHAIN_PUBLIC_INPUTS_LEN,
+            block_chain_pis_len,
             &block_chain_cd,
         );
+        let block_chain_common = block_chain_circuit.data.common.clone();
         let block_chain_vd = block_chain_circuit.data.verifier_data();
 
         let deposit_chain_pis_len = DEPOSIT_CHAIN_PUBLIC_INPUTS_LEN;
@@ -795,7 +793,7 @@ mod tests {
         let update_account_vds = vec![(num_users, update_account_vd.clone())];
 
         let block_step_circuit = BlockStepCircuit::<F, C, D>::new(
-            &block_chain_cd,
+            &block_chain_common,
             &update_account_vds,
             &deposit_chain_vd,
         );
@@ -804,6 +802,16 @@ mod tests {
         let aggregator_id = 5u32;
 
         let mut public_state_tree = PublicStateTree::init();
+        let set_public_state = |tree: &mut PublicStateTree, index: u64, state: PublicState| {
+            while tree.len() < index as usize {
+                tree.push(PublicState::empty_leaf());
+            }
+            if tree.len() == index as usize {
+                tree.push(state);
+            } else {
+                tree.update(index, state);
+            }
+        };
         let initial_public_state_root = public_state_tree.get_root();
 
         let deposit_tree = DepositTree::init();
@@ -913,12 +921,31 @@ mod tests {
             send_proof_user1_first.clone(),
             send_proof_user2_first.clone(),
         ];
-        let account_tree_for_proofs_first = account_tree.clone();
+        let mut account_tree_for_proofs_first = account_tree.clone();
         let mut account_merkle_proofs_first = Vec::with_capacity(num_users as usize);
-        for &local_id in block_first.local_ids.iter() {
+        for (i, &local_id) in block_first.local_ids.iter().enumerate() {
             let user_id = UserId::new(aggregator_id, local_id).unwrap();
             let proof = account_tree_for_proofs_first.prove(user_id.as_u64());
             account_merkle_proofs_first.push(proof);
+
+            let prev_leaf = &prev_account_leaves_first[i];
+            if prev_leaf.prev == block_number_first {
+                continue;
+            }
+
+            let send_proof = &send_merkle_proofs_first[i];
+            let new_send_leaf = SendLeaf {
+                prev: prev_leaf.prev,
+                cur: block_number_first,
+                tx_tree_root: tx_tree_root_first,
+            };
+            let new_send_root = send_proof.get_root(&new_send_leaf, prev_leaf.index.into());
+            let new_account_leaf = AccountLeaf {
+                index: prev_leaf.index + 1,
+                prev: block_number_first,
+                send_tree_root: new_send_root,
+            };
+            account_tree_for_proofs_first.update(user_id.as_u64(), new_account_leaf);
         }
 
         let update_account_tree_first = UpdateAccountTree {
@@ -1000,7 +1027,8 @@ mod tests {
         );
 
         let mut block_chain_state_root_after_first = public_state_tree.clone();
-        block_chain_state_root_after_first.update(
+        set_public_state(
+            &mut block_chain_state_root_after_first,
             initial_public_state.block_number.as_u64(),
             initial_public_state.clone(),
         );
@@ -1024,7 +1052,7 @@ mod tests {
             .verify(block_step_proof_first.clone())
             .expect("first block step verification");
         let expected_block_inputs_first_fields = expected_block_inputs_first
-            .to_u64_vec(&block_chain_cd.config)
+            .to_u64_vec(&block_chain_common.config)
             .to_field_vec::<F>();
         assert_eq!(
             expected_block_inputs_first_fields.len(),
@@ -1039,10 +1067,12 @@ mod tests {
             .prove(Some(expected_block_inputs_first_fields.as_slice()), None)
             .expect("first block chain proof");
 
-        public_state_tree.update(
-            initial_public_state.block_number.as_u64(),
+        set_public_state(
+            &mut public_state_tree,
+            block_number_prev.as_u64(),
             initial_public_state.clone(),
         );
+
         let mut current_account_leaf_user1 = new_account_leaf_user1_first.clone();
         let current_account_leaf_user2 = prev_account_leaf_user2.clone();
 
@@ -1057,16 +1087,6 @@ mod tests {
         )
         .unwrap();
 
-        let account_tree_for_proofs_second = account_tree.clone();
-        let account_merkle_proofs_second: Vec<AccountMerkleProof> = block_second
-            .local_ids
-            .iter()
-            .map(|&local_id| {
-                let user_id = UserId::new(aggregator_id, local_id).unwrap();
-                account_tree_for_proofs_second.prove(user_id.as_u64())
-            })
-            .collect();
-
         let send_proof_user1_second =
             send_tree_user1.prove(current_account_leaf_user1.index.into());
         let send_proof_user2_second =
@@ -1080,6 +1100,33 @@ mod tests {
             send_proof_user1_second.clone(),
             send_proof_user2_second.clone(),
         ];
+
+        let mut account_tree_for_proofs_second = account_tree.clone();
+        let mut account_merkle_proofs_second = Vec::with_capacity(num_users as usize);
+        for (i, &local_id) in block_second.local_ids.iter().enumerate() {
+            let user_id = UserId::new(aggregator_id, local_id).unwrap();
+            let proof = account_tree_for_proofs_second.prove(user_id.as_u64());
+            account_merkle_proofs_second.push(proof);
+
+            let prev_leaf = &prev_account_leaves_second[i];
+            if prev_leaf.prev == block_number_second {
+                continue;
+            }
+
+            let send_proof = &send_merkle_proofs_second[i];
+            let new_send_leaf = SendLeaf {
+                prev: prev_leaf.prev,
+                cur: block_number_second,
+                tx_tree_root: tx_tree_root_second,
+            };
+            let new_send_root = send_proof.get_root(&new_send_leaf, prev_leaf.index.into());
+            let new_account_leaf = AccountLeaf {
+                index: prev_leaf.index + 1,
+                prev: block_number_second,
+                send_tree_root: new_send_root,
+            };
+            account_tree_for_proofs_second.update(user_id.as_u64(), new_account_leaf);
+        }
 
         let update_account_tree_second = UpdateAccountTree {
             prev_block_hash_chain: update_account_inputs_first.new_block_hash_chain,
@@ -1148,6 +1195,13 @@ mod tests {
                 .ext_public_state
                 .inner
                 .deposit_tree_root,
+            expected_deposit_tree_root
+        );
+        assert_eq!(
+            expected_block_inputs_second
+                .ext_public_state
+                .inner
+                .account_tree_root,
             update_account_inputs_second.new_account_tree_root
         );
 
@@ -1163,7 +1217,7 @@ mod tests {
             .verify(block_step_proof_second.clone())
             .expect("second block step verification");
         let expected_block_inputs_second_fields = expected_block_inputs_second
-            .to_u64_vec(&block_chain_cd.config)
+            .to_u64_vec(&block_chain_common.config)
             .to_field_vec::<F>();
         assert_eq!(
             expected_block_inputs_second_fields.len(),
