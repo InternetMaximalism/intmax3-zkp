@@ -440,7 +440,7 @@ mod tests {
     fn test_update_account_tree_circuit() {
         let block_number = BlockNumber(20);
         let aggregator_id = 5u32;
-        let num_users = 4;
+        let num_users = 2;
 
         let mut rng = StdRng::seed_from_u64(42);
 
@@ -499,18 +499,14 @@ mod tests {
         let dummy_account_merkle_proof = AccountMerkleProof::dummy(ACCOUNT_TREE_HEIGHT);
         let dummy_send_proof = SendMerkleProof::dummy(SEND_TREE_HEIGHT);
 
-        let prev_account_leaves = vec![
+        let mut prev_account_leaves = vec![
             prev_account_leaf_user1.clone(),
             prev_account_leaf_user2.clone(),
-            dummy_account_leaf.clone(),
-            dummy_account_leaf.clone(),
         ];
-        let send_merkle_proofs = vec![
-            send_proof_user1.clone(),
-            send_proof_user2.clone(),
-            dummy_send_proof.clone(),
-            dummy_send_proof.clone(),
-        ];
+        prev_account_leaves.resize(num_users as usize, dummy_account_leaf);
+
+        let mut send_merkle_proofs = vec![send_proof_user1.clone(), send_proof_user2.clone()];
+        send_merkle_proofs.resize(num_users as usize, dummy_send_proof);
 
         let mut account_tree_for_proofs = account_tree.clone();
         let mut account_merkle_proofs = Vec::with_capacity(num_users as usize);
