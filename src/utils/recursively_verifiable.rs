@@ -10,6 +10,8 @@ use plonky2::{
     },
 };
 
+use crate::utils::cyclic::conditionally_connect_vd;
+
 use super::{cyclic::vd_from_pis_slice_target, dummy::conditionally_verify_proof};
 
 pub fn add_proof_target_and_verify<F, C, const D: usize>(
@@ -62,5 +64,24 @@ where
         &inner_vd_target.constants_sigmas_cap,
     );
     builder.verify_proof::<C>(&proof, &vd_target, &verifier_data.common);
+    proof
+}
+
+pub fn add_proof_target_and_conditionally_verify_cyclic<F, C, const D: usize>(
+    verifier_data: &VerifierCircuitData<F, C, D>,
+    builder: &mut CircuitBuilder<F, D>,
+    condition: BoolTarget,
+) -> ProofWithPublicInputsTarget<D>
+where
+    F: RichField + Extendable<D>,
+    C: GenericConfig<D, F = F> + 'static,
+    <C as GenericConfig<D>>::Hasher: AlgebraicHasher<F>,
+{
+    let proof = builder.add_virtual_proof_with_pis(&verifier_data.common);
+    let vd = builder.constant_verifier_data(&verifier_data.verifier_only);
+    conditionally_verify_proof::<F, C, D>(builder, condition, &proof, &vd, &verifier_data.common);
+    let proof_vd_target =
+        vd_from_pis_slice_target(&proof.public_inputs, &verifier_data.common.config).unwrap();
+    conditionally_connect_vd(builder, condition, &vd, &proof_vd_target);
     proof
 }

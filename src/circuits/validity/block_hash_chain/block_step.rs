@@ -41,10 +41,10 @@ use crate::{
     utils::{
         conversion::ToU64,
         cyclic::conditionally_connect_vd,
-        dummy::{DummyProof, conditionally_verify_proof},
+        dummy::{conditionally_verify_proof, DummyProof},
         leafable::Leafable,
         poseidon_hash_out::PoseidonHashOutTarget,
-        recursively_verifiable::add_proof_target_and_conditionally_verify,
+        recursively_verifiable::{add_proof_target_and_conditionally_verify, add_proof_target_and_conditionally_verify_cyclic},
     },
 };
 
@@ -373,8 +373,11 @@ impl<const D: usize> BlockStepTarget<D> {
 
         println!("add deposit hash chain proof");
         let has_deposit_proof = builder.add_virtual_bool_target_safe();
-        let deposit_hash_chain_proof =
-            add_proof_target_and_conditionally_verify(deposit_chain_vd, builder, has_deposit_proof);
+        let deposit_hash_chain_proof = add_proof_target_and_conditionally_verify_cyclic(
+            deposit_chain_vd,
+            builder,
+            has_deposit_proof,
+        );
         let deposit_inputs = DepositChainPublicInputsTarget::from_pis(
             &deposit_hash_chain_proof.public_inputs,
             &deposit_chain_vd.common.config,
