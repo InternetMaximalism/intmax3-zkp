@@ -14,6 +14,7 @@ use crate::{
         u32limb_trait::{U32LimbTargetTrait as _, U32LimbTrait as _},
     },
     utils::{
+        cyclic::add_const_gates,
         leafable::Leafable as _,
         poseidon_hash_out::{POSEIDON_HASH_OUT_LEN, PoseidonHashOut, PoseidonHashOutTarget},
     },
@@ -547,6 +548,10 @@ where
         let target = UpdateAccountTreeTarget::new::<F, C, D>(&mut builder, num_users);
         let public_inputs = target.public_inputs.clone();
         builder.register_public_inputs(&public_inputs.to_vec());
+
+        // add constant gates to enable conditional verification
+        add_const_gates(&mut builder, 1 << 12);
+
         let data = builder.build();
 
         Self {
