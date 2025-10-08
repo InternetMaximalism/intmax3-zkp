@@ -489,6 +489,9 @@ mod tests {
         let deposit_merkle_proof = deposit_tree.prove(deposit_index);
         let deposit_tree_root = deposit_tree.get_root();
 
+        let deposit_count =
+            u64::try_from(deposit_tree.len()).expect("deposit tree length should fit in u64");
+
         let deposit_witness = DepositWitness::new(
             receiver_user_id,
             deposit_tree_root,
@@ -557,6 +560,7 @@ mod tests {
             block_number: BlockNumber::new(8).unwrap(),
             account_tree_root,
             deposit_tree_root,
+            deposit_count,
             prev_public_state_root: PoseidonHashOut::default(),
         };
 

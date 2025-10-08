@@ -526,6 +526,7 @@ mod tests {
             block_number: BlockNumber::new(block).unwrap(),
             account_tree_root: root,
             deposit_tree_root: root,
+            deposit_count: block,
             prev_public_state_root: root,
         }
     }

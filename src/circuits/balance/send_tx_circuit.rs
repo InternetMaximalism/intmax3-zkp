@@ -448,6 +448,7 @@ mod tests {
             block_number: BlockNumber::new(6).unwrap(),
             account_tree_root,
             deposit_tree_root: PoseidonHashOut::default(),
+            deposit_count: 0,
             prev_public_state_root: PoseidonHashOut::default(),
         };
 

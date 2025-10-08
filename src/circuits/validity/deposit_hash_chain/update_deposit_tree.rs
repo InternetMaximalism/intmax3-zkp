@@ -4,10 +4,7 @@ use plonky2::{
     plonk::{config::GenericConfig, proof::ProofWithPublicInputs},
 };
 
-use crate::{
-    common::{deposit::Deposit, trees::deposit_tree::DepositMerkleProof},
-    utils::leafable::Leafable as _,
-};
+use crate::common::{deposit::Deposit, trees::deposit_tree::DepositMerkleProof};
 
 #[derive(Debug, thiserror::Error)]
 pub enum UpdateDepositTreeError {

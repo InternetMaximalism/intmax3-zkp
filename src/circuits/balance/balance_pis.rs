@@ -95,34 +95,12 @@ impl BalancePublicInputs {
         let user_id = UserId(pis[cursor]);
         cursor += 1;
 
-        let ps_block_number_u64 = pis[cursor];
-        let ps_block_number = BlockNumber::new(ps_block_number_u64).map_err(|e| {
-            BalancePublicInputsError::ParseError {
-                field: "public_state.block_number",
+        let public_state = PublicState::from_u64_slice(&pis[cursor..cursor + PUBLIC_STATE_U64_LEN])
+            .map_err(|e| BalancePublicInputsError::ParseError {
+                field: "public_state",
                 message: e.to_string(),
-            }
-        })?;
-        cursor += 1;
-
-        let account_tree_root =
-            PoseidonHashOut::from_u64_slice(&pis[cursor..cursor + POSEIDON_HASH_OUT_LEN])
-                .expect("public_state.account_tree_root must deserialize");
-        cursor += POSEIDON_HASH_OUT_LEN;
-        let deposit_tree_root =
-            PoseidonHashOut::from_u64_slice(&pis[cursor..cursor + POSEIDON_HASH_OUT_LEN])
-                .expect("public_state.deposit_tree_root must deserialize");
-        cursor += POSEIDON_HASH_OUT_LEN;
-        let prev_public_state_root =
-            PoseidonHashOut::from_u64_slice(&pis[cursor..cursor + POSEIDON_HASH_OUT_LEN])
-                .expect("public_state.prev_public_state_root must deserialize");
-        cursor += POSEIDON_HASH_OUT_LEN;
-
-        let public_state = PublicState {
-            block_number: ps_block_number,
-            account_tree_root,
-            deposit_tree_root,
-            prev_public_state_root,
-        };
+            })?;
+        cursor += PUBLIC_STATE_U64_LEN;
 
         let block_r_u64 = pis[cursor];
         let block_r =
@@ -177,31 +155,15 @@ impl BalancePublicInputsTarget {
     }
 
     pub fn from_pis(pis: &[Target]) -> Self {
-        assert!(pis.len() <= BALANCE_PUBLIC_INPUTS_LEN);
+        assert!(pis.len() >= BALANCE_PUBLIC_INPUTS_LEN);
         let mut cursor = 0;
 
         let user_id = UserIdTarget { value: pis[cursor] };
         cursor += 1;
 
-        let ps_block_number = BlockNumberTarget { value: pis[cursor] };
-        cursor += 1;
-
-        let account_tree_root =
-            PoseidonHashOutTarget::from_slice(&pis[cursor..cursor + POSEIDON_HASH_OUT_LEN]);
-        cursor += POSEIDON_HASH_OUT_LEN;
-        let deposit_tree_root =
-            PoseidonHashOutTarget::from_slice(&pis[cursor..cursor + POSEIDON_HASH_OUT_LEN]);
-        cursor += POSEIDON_HASH_OUT_LEN;
-        let prev_public_state_root =
-            PoseidonHashOutTarget::from_slice(&pis[cursor..cursor + POSEIDON_HASH_OUT_LEN]);
-        cursor += POSEIDON_HASH_OUT_LEN;
-
-        let public_state = PublicStateTarget {
-            block_number: ps_block_number,
-            account_tree_root,
-            deposit_tree_root,
-            prev_public_state_root,
-        };
+        let public_state =
+            PublicStateTarget::from_slice(&pis[cursor..cursor + PUBLIC_STATE_U64_LEN]);
+        cursor += PUBLIC_STATE_U64_LEN;
 
         let block_r = BlockNumberTarget { value: pis[cursor] };
         cursor += 1;

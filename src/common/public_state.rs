@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::{collections::HashMap, convert::TryFrom};
 
 use plonky2::{
     field::{extension::Extendable, types::Field},
@@ -17,7 +17,7 @@ use serde::{Deserialize, Serialize};
 use crate::{
     common::{
         block::{Block, BlockError},
-        block_number::{BlockNumber, BlockNumberTarget},
+        block_number::{BlockNumber, BlockNumberError, BlockNumberTarget},
         deposit::Deposit,
         trees::{
             account_tree::{AccountLeaf, AccountTree, SendLeaf, SendTree},
@@ -29,13 +29,30 @@ use crate::{
     constants::get_num_users,
     ethereum_types::{address::Address, bytes32::Bytes32, u256::U256},
     utils::{
+        error::PoseidonHashOutError,
         leafable::{Leafable, LeafableTarget},
         leafable_hasher::PoseidonLeafableHasher,
         poseidon_hash_out::{POSEIDON_HASH_OUT_LEN, PoseidonHashOut, PoseidonHashOutTarget},
     },
 };
 
-pub const PUBLIC_STATE_U64_LEN: usize = 1 + 3 * POSEIDON_HASH_OUT_LEN;
+pub const PUBLIC_STATE_U64_LEN: usize = 2 + 3 * POSEIDON_HASH_OUT_LEN;
+
+#[derive(thiserror::Error, Debug)]
+pub enum PublicStateError {
+    #[error("Invalid public state length: expected {expected}, got {actual}")]
+    InvalidLength { expected: usize, actual: usize },
+
+    #[error("Block number error: {0}")]
+    BlockNumber(#[from] BlockNumberError),
+
+    #[error("Failed to parse {field}: {source}")]
+    PoseidonHash {
+        field: &'static str,
+        #[source]
+        source: PoseidonHashOutError,
+    },
+}
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -43,6 +60,7 @@ pub struct PublicState {
     pub block_number: BlockNumber,
     pub account_tree_root: PoseidonHashOut,
     pub deposit_tree_root: PoseidonHashOut,
+    pub deposit_count: u64,
     pub prev_public_state_root: PoseidonHashOut,
 }
 
@@ -52,6 +70,7 @@ impl Default for PublicState {
             block_number: BlockNumber(0),
             account_tree_root: AccountTree::init().get_root(),
             deposit_tree_root: DepositTree::init().get_root(),
+            deposit_count: 0,
             prev_public_state_root: PublicStateTree::init().get_root(),
         }
     }
@@ -62,6 +81,7 @@ pub struct PublicStateTarget {
     pub block_number: BlockNumberTarget,
     pub account_tree_root: PoseidonHashOutTarget,
     pub deposit_tree_root: PoseidonHashOutTarget,
+    pub deposit_count: Target,
     pub prev_public_state_root: PoseidonHashOutTarget,
 }
 
@@ -71,9 +91,58 @@ impl PublicState {
             self.block_number.to_u64_vec(),
             self.account_tree_root.to_u64_vec(),
             self.deposit_tree_root.to_u64_vec(),
+            vec![self.deposit_count],
             self.prev_public_state_root.to_u64_vec(),
         ]
         .concat()
+    }
+
+    pub fn from_u64_slice(values: &[u64]) -> Result<Self, PublicStateError> {
+        if values.len() != PUBLIC_STATE_U64_LEN {
+            return Err(PublicStateError::InvalidLength {
+                expected: PUBLIC_STATE_U64_LEN,
+                actual: values.len(),
+            });
+        }
+
+        let mut cursor = 0;
+
+        let block_number = BlockNumber::new(values[cursor])?;
+        cursor += 1;
+
+        let account_tree_root =
+            PoseidonHashOut::from_u64_slice(&values[cursor..cursor + POSEIDON_HASH_OUT_LEN])
+                .map_err(|source| PublicStateError::PoseidonHash {
+                    field: "account_tree_root",
+                    source,
+                })?;
+        cursor += POSEIDON_HASH_OUT_LEN;
+
+        let deposit_tree_root =
+            PoseidonHashOut::from_u64_slice(&values[cursor..cursor + POSEIDON_HASH_OUT_LEN])
+                .map_err(|source| PublicStateError::PoseidonHash {
+                    field: "deposit_tree_root",
+                    source,
+                })?;
+        cursor += POSEIDON_HASH_OUT_LEN;
+
+        let deposit_count = values[cursor];
+        cursor += 1;
+
+        let prev_public_state_root =
+            PoseidonHashOut::from_u64_slice(&values[cursor..cursor + POSEIDON_HASH_OUT_LEN])
+                .map_err(|source| PublicStateError::PoseidonHash {
+                    field: "prev_public_state_root",
+                    source,
+                })?;
+
+        Ok(Self {
+            block_number,
+            account_tree_root,
+            deposit_tree_root,
+            deposit_count,
+            prev_public_state_root,
+        })
     }
 
     pub fn poseidon_hash(&self) -> PoseidonHashOut {
@@ -99,9 +168,43 @@ impl PublicStateTarget {
             self.block_number.to_vec(),
             self.account_tree_root.to_vec(),
             self.deposit_tree_root.to_vec(),
+            vec![self.deposit_count],
             self.prev_public_state_root.to_vec(),
         ]
         .concat()
+    }
+
+    pub fn from_slice(values: &[Target]) -> Self {
+        assert_eq!(values.len(), PUBLIC_STATE_U64_LEN);
+
+        let mut cursor = 0;
+
+        let block_number = BlockNumberTarget {
+            value: values[cursor],
+        };
+        cursor += 1;
+
+        let account_tree_root =
+            PoseidonHashOutTarget::from_slice(&values[cursor..cursor + POSEIDON_HASH_OUT_LEN]);
+        cursor += POSEIDON_HASH_OUT_LEN;
+
+        let deposit_tree_root =
+            PoseidonHashOutTarget::from_slice(&values[cursor..cursor + POSEIDON_HASH_OUT_LEN]);
+        cursor += POSEIDON_HASH_OUT_LEN;
+
+        let deposit_count = values[cursor];
+        cursor += 1;
+
+        let prev_public_state_root =
+            PoseidonHashOutTarget::from_slice(&values[cursor..cursor + POSEIDON_HASH_OUT_LEN]);
+
+        Self {
+            block_number,
+            account_tree_root,
+            deposit_tree_root,
+            deposit_count,
+            prev_public_state_root,
+        }
     }
 
     pub fn new<F: RichField + Extendable<D>, const D: usize>(
@@ -112,6 +215,13 @@ impl PublicStateTarget {
             block_number: BlockNumberTarget::new(builder, is_checked),
             account_tree_root: PoseidonHashOutTarget::new(builder),
             deposit_tree_root: PoseidonHashOutTarget::new(builder),
+            deposit_count: {
+                let target = builder.add_virtual_target();
+                if is_checked {
+                    builder.range_check(target, 64);
+                }
+                target
+            },
             prev_public_state_root: PoseidonHashOutTarget::new(builder),
         }
     }
@@ -124,6 +234,7 @@ impl PublicStateTarget {
             block_number: BlockNumberTarget::constant(builder, value.block_number),
             account_tree_root: PoseidonHashOutTarget::constant(builder, value.account_tree_root),
             deposit_tree_root: PoseidonHashOutTarget::constant(builder, value.deposit_tree_root),
+            deposit_count: builder.constant(F::from_canonical_u64(value.deposit_count)),
             prev_public_state_root: PoseidonHashOutTarget::constant(
                 builder,
                 value.prev_public_state_root,
@@ -137,6 +248,10 @@ impl PublicStateTarget {
             .set_witness(witness, value.account_tree_root);
         self.deposit_tree_root
             .set_witness(witness, value.deposit_tree_root);
+        witness.set_target(
+            self.deposit_count,
+            F::from_canonical_u64(value.deposit_count),
+        );
         self.prev_public_state_root
             .set_witness(witness, value.prev_public_state_root);
     }
@@ -153,12 +268,14 @@ impl PublicStateTarget {
         let deposit_eq = self
             .deposit_tree_root
             .is_equal(builder, &other.deposit_tree_root);
+        let deposit_count_eq = builder.is_equal(self.deposit_count, other.deposit_count);
         let prev_state_eq = self
             .prev_public_state_root
             .is_equal(builder, &other.prev_public_state_root);
 
         let tmp = builder.and(block_eq, account_eq);
         let tmp = builder.and(tmp, deposit_eq);
+        let tmp = builder.and(tmp, deposit_count_eq);
         builder.and(tmp, prev_state_eq)
     }
 
@@ -172,6 +289,7 @@ impl PublicStateTarget {
             .connect(builder, other.account_tree_root.clone());
         self.deposit_tree_root
             .connect(builder, other.deposit_tree_root.clone());
+        builder.connect(self.deposit_count, other.deposit_count);
         self.prev_public_state_root
             .connect(builder, other.prev_public_state_root.clone());
     }
@@ -243,6 +361,8 @@ impl FullPublicState {
             block_number: self.block_number,
             account_tree_root: self.account_tree.get_root(),
             deposit_tree_root: self.deposit_tree.get_root(),
+            deposit_count: u64::try_from(self.deposit_tree.len())
+                .expect("deposit_tree length should fit in u64"),
             prev_public_state_root: self.public_state_tree.get_root(),
         }
     }
