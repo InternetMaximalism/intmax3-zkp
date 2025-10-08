@@ -417,7 +417,7 @@ mod tests {
     type C = PoseidonGoldilocksConfig;
 
     #[test]
-    fn test_spend_circuit_smoke() {
+    fn test_spend_circuit() {
         let mut rng = rand::thread_rng();
         let mut full_state = FullPrivateState::new(Salt::rand(&mut rng));
 
