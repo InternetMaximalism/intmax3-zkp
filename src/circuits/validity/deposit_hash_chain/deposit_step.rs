@@ -399,7 +399,7 @@ mod tests {
         circuits::validity::deposit_hash_chain::deposit_chain_pis::DEPOSIT_CHAIN_PUBLIC_INPUTS_LEN,
         common::{deposit::Deposit, trees::deposit_tree::DepositTree, u63::U63},
         ethereum_types::{address::Address, bytes32::Bytes32, u256::U256},
-        utils::cyclic::{TestCyclicCircuit, vd_vec_len},
+        utils::{conversion::ToField as _, cyclic::TestCyclicCircuit},
     };
     use plonky2::{
         field::goldilocks_field::GoldilocksField, plonk::config::PoseidonGoldilocksConfig,
@@ -414,7 +414,7 @@ mod tests {
     fn test_deposit_step_circuit() {
         // build dummy circuits
         let deposit_chain_config = CircuitConfig::standard_recursion_config();
-        let pis_len = DEPOSIT_CHAIN_PUBLIC_INPUTS_LEN + vd_vec_len(&deposit_chain_config);
+        let pis_len = DEPOSIT_CHAIN_PUBLIC_INPUTS_LEN;
         let deposit_chain_cd = TestCyclicCircuit::<F, C, D>::generate_cd(pis_len);
         let deposit_chain_circuit =
             TestCyclicCircuit::<F, C, D>::new(deposit_chain_config, pis_len, &deposit_chain_cd);
@@ -439,9 +439,9 @@ mod tests {
         };
 
         // Expected new state after the deposit.
-        let mut deposit_tree_after = deposit_tree.clone();
-        deposit_tree_after.push(deposit.clone());
-        let expected_deposit_tree_root = deposit_tree_after.get_root();
+        let mut deposit_tree_after_first = deposit_tree.clone();
+        deposit_tree_after_first.push(deposit.clone());
+        let expected_deposit_tree_root = deposit_tree_after_first.get_root();
         let expected_deposit_hash_chain = deposit.hash_with_prev_hash(initial_deposit_hash_chain);
 
         let witness = DepositStepWitness::<F, C, D> {
@@ -469,9 +469,61 @@ mod tests {
         );
 
         let circuit = DepositStepCircuit::<F, C, D>::new(&deposit_chain_cd);
-        let proof = circuit
+        let first_step_proof = circuit
             .prove(&deposit_chain_vd, &witness)
             .expect("deposit step proof should succeed");
-        circuit.verify(proof).expect("proof verifies");
+        circuit
+            .verify(first_step_proof.clone())
+            .expect("first proof verifies");
+
+        let first_public_inputs_fields = expected_public_inputs
+            .to_u64_vec(&deposit_chain_cd.config)
+            .to_field_vec::<F>();
+        let first_deposit_chain_proof = deposit_chain_circuit
+            .prove(Some(first_public_inputs_fields.as_slice()), None)
+            .expect("first deposit chain proof");
+
+        // Second deposit step using the proof from the first step.
+        let second_deposit = Deposit {
+            depositor: Address::default(),
+            recipient: Bytes32::default(),
+            token_index: 1,
+            amount: U256::from(7u32),
+            block_number: U63::new(1).expect("valid block number"),
+            aux_data: Bytes32::default(),
+        };
+        let second_deposit_index = 1u64;
+        let second_deposit_merkle_proof = deposit_tree_after_first.prove(second_deposit_index);
+
+        let expected_deposit_hash_chain_second =
+            second_deposit.hash_with_prev_hash(expected_deposit_hash_chain);
+        let mut deposit_tree_after_second = deposit_tree_after_first.clone();
+        deposit_tree_after_second.push(second_deposit.clone());
+        let expected_deposit_tree_root_second = deposit_tree_after_second.get_root();
+
+        let second_witness = DepositStepWitness::<F, C, D> {
+            initial_value: None,
+            prev_deposit_chain_proof: Some(first_deposit_chain_proof.clone()),
+            deposit: second_deposit.clone(),
+            deposit_merkle_proof: second_deposit_merkle_proof,
+        };
+
+        let second_expected_public_inputs = second_witness
+            .to_public_inputs(&deposit_chain_vd)
+            .expect("second public inputs");
+        assert_eq!(second_expected_public_inputs.deposit_count.as_u64(), 2);
+        assert_eq!(
+            second_expected_public_inputs.deposit_tree_root,
+            expected_deposit_tree_root_second
+        );
+        assert_eq!(
+            second_expected_public_inputs.deposit_hash_chain,
+            expected_deposit_hash_chain_second
+        );
+
+        let second_proof = circuit
+            .prove(&deposit_chain_vd, &second_witness)
+            .expect("second deposit step proof should succeed");
+        circuit.verify(second_proof).expect("second proof verifies");
     }
 }
