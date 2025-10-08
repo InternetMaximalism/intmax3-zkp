@@ -85,7 +85,12 @@ impl Leafable for PublicState {
     type LeafableHasher = PoseidonLeafableHasher;
 
     fn empty_leaf() -> Self {
-        Self::default()
+        Self {
+            block_number: Default::default(),
+            account_tree_root: Default::default(),
+            deposit_tree_root: Default::default(),
+            prev_public_state_root: Default::default(),
+        }
     }
 
     fn hash(&self) -> PoseidonHashOut {
