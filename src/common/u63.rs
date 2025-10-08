@@ -93,6 +93,14 @@ impl U63 {
         }
         Self::new(slice[0])
     }
+
+    pub fn add(&self, x: u64) -> Result<Self, U63Error> {
+        Self::new(
+            self.0
+                .checked_add(x)
+                .ok_or(U63Error::ValueOverflow(self.0))?,
+        )
+    }
 }
 
 pub type BlockNumber = U63;

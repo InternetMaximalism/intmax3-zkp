@@ -25,7 +25,7 @@ use crate::{
     },
 };
 
-pub const DEPOSIT_CHAIN_PUBLIC_INPUTS_LEN: usize = 3 * BYTES32_LEN + POSEIDON_HASH_OUT_LEN + 2;
+pub const DEPOSIT_CHAIN_PUBLIC_INPUTS_LEN: usize = 2 * BYTES32_LEN + 2 * POSEIDON_HASH_OUT_LEN + 2;
 
 #[derive(Debug, Error)]
 pub enum DepositChainPublicInputsError {
@@ -49,7 +49,7 @@ pub struct DepositChainPublicInputs<
     pub initial_deposit_tree_root: PoseidonHashOut,
     pub initial_deposit_count: U63,
     pub deposit_hash_chain: Bytes32,
-    pub deposit_tree_root: Bytes32,
+    pub deposit_tree_root: PoseidonHashOut,
     pub deposit_count: U63,
     pub vd: VerifierOnlyCircuitData<C, D>,
 }
@@ -70,10 +70,6 @@ where
             vd_to_vec(config, &self.vd).to_u64_vec(),
         ]
         .concat()
-    }
-
-    pub fn commitment(&self, config: &CircuitConfig) -> PoseidonHashOut {
-        PoseidonHashOut::hash_inputs_u64(&self.to_u64_vec(config))
     }
 
     pub fn from_u64_slice(
@@ -122,12 +118,13 @@ where
             })?;
         cursor += BYTES32_LEN;
 
-        let deposit_tree_root = Bytes32::from_u64_slice(&inputs[cursor..cursor + BYTES32_LEN])
-            .map_err(|e| DepositChainPublicInputsError::ParseError {
-                field: "deposit_tree_root",
-                message: e.to_string(),
-            })?;
-        cursor += BYTES32_LEN;
+        let deposit_tree_root =
+            PoseidonHashOut::from_u64_slice(&inputs[cursor..cursor + POSEIDON_HASH_OUT_LEN])
+                .map_err(|e| DepositChainPublicInputsError::ParseError {
+                    field: "deposit_tree_root",
+                    message: e.to_string(),
+                })?;
+        cursor += POSEIDON_HASH_OUT_LEN;
 
         let deposit_count =
             U63::new(inputs[cursor]).map_err(|e| DepositChainPublicInputsError::ParseError {
@@ -162,7 +159,7 @@ pub struct DepositChainPublicInputsTarget {
     pub initial_deposit_tree_root: PoseidonHashOutTarget,
     pub initial_deposit_count: U63Target,
     pub deposit_hash_chain: Bytes32Target,
-    pub deposit_tree_root: Bytes32Target,
+    pub deposit_tree_root: PoseidonHashOutTarget,
     pub deposit_count: U63Target,
     pub vd: VerifierCircuitTarget,
 }
@@ -177,7 +174,7 @@ impl DepositChainPublicInputsTarget {
             initial_deposit_tree_root: PoseidonHashOutTarget::new(builder),
             initial_deposit_count: U63Target::new(builder, true),
             deposit_hash_chain: Bytes32Target::new(builder, true),
-            deposit_tree_root: Bytes32Target::new(builder, true),
+            deposit_tree_root: PoseidonHashOutTarget::new(builder),
             deposit_count: U63Target::new(builder, true),
             vd: builder.add_virtual_verifier_data(config.fri_config.cap_height),
         }
@@ -194,14 +191,6 @@ impl DepositChainPublicInputsTarget {
             vd_to_vec_target(config, &self.vd),
         ]
         .concat()
-    }
-
-    pub fn commitment<F: RichField + Extendable<D>, const D: usize>(
-        &self,
-        builder: &mut CircuitBuilder<F, D>,
-        config: &CircuitConfig,
-    ) -> PoseidonHashOutTarget {
-        PoseidonHashOutTarget::hash_inputs(builder, &self.to_vec(config))
     }
 
     pub fn from_pis(pis: &[Target], config: &CircuitConfig) -> Self {
@@ -223,8 +212,9 @@ impl DepositChainPublicInputsTarget {
         let deposit_hash_chain = Bytes32Target::from_slice(&pis[cursor..cursor + BYTES32_LEN]);
         cursor += BYTES32_LEN;
 
-        let deposit_tree_root = Bytes32Target::from_slice(&pis[cursor..cursor + BYTES32_LEN]);
-        cursor += BYTES32_LEN;
+        let deposit_tree_root =
+            PoseidonHashOutTarget::from_slice(&pis[cursor..cursor + POSEIDON_HASH_OUT_LEN]);
+        cursor += POSEIDON_HASH_OUT_LEN;
 
         let deposit_count = U63Target::from_slice(&pis[cursor..cursor + 1]);
         cursor += 1;
