@@ -1,20 +1,38 @@
 use plonky2::{
     field::extension::Extendable,
     hash::hash_types::RichField,
+    iop::{
+        target::BoolTarget,
+        witness::{PartialWitness, WitnessWrite},
+    },
     plonk::{
-        circuit_data::VerifierCircuitData,
+        circuit_builder::CircuitBuilder,
+        circuit_data::{CircuitConfig, CircuitData, VerifierCircuitData},
         config::{AlgebraicHasher, GenericConfig},
-        proof::ProofWithPublicInputs,
+        proof::{ProofWithPublicInputs, ProofWithPublicInputsTarget},
     },
 };
 
 use crate::{
     circuits::validity::deposit_hash_chain::deposit_chain_pis::{
-        DepositChainPublicInputs, DepositChainPublicInputsError,
+        DepositChainPublicInputs, DepositChainPublicInputsError, DepositChainPublicInputsTarget,
     },
-    common::{deposit::Deposit, trees::deposit_tree::DepositMerkleProof, u63::U63},
-    ethereum_types::bytes32::Bytes32,
-    utils::{conversion::ToU64, leafable::Leafable as _, poseidon_hash_out::PoseidonHashOut},
+    common::{
+        deposit::{Deposit, DepositTarget},
+        trees::deposit_tree::{DepositMerkleProof, DepositMerkleProofTarget},
+        u63::{U63, U63Target},
+    },
+    constants::DEPOSIT_TREE_HEIGHT,
+    ethereum_types::{
+        bytes32::{Bytes32, Bytes32Target},
+        u32limb_trait::U32LimbTargetTrait as _,
+    },
+    utils::{
+        conversion::ToU64,
+        leafable::Leafable as _,
+        poseidon_hash_out::{PoseidonHashOut, PoseidonHashOutTarget},
+        recursively_verifiable::add_proof_target_and_conditionally_verify,
+    },
 };
 
 #[derive(Debug, thiserror::Error)]
@@ -127,5 +145,336 @@ where
             deposit_count: new_deposit_count,
             vd: prev_pis.vd,
         })
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct DepositStepTarget<const D: usize> {
+    pub is_initial: BoolTarget,
+    pub initial_deposit_hash_chain: Bytes32Target,
+    pub initial_deposit_tree_root: PoseidonHashOutTarget,
+    pub initial_deposit_count: U63Target,
+    pub prev_deposit_chain_proof: ProofWithPublicInputsTarget<D>,
+    pub deposit_chain_public_inputs: DepositChainPublicInputsTarget,
+    pub deposit: DepositTarget,
+    pub deposit_merkle_proof: DepositMerkleProofTarget,
+}
+
+impl<const D: usize> DepositStepTarget<D> {
+    #[allow(clippy::too_many_arguments)]
+    pub fn new<F, C>(
+        builder: &mut CircuitBuilder<F, D>,
+        deposit_chain_vd: &VerifierCircuitData<F, C, D>,
+    ) -> Self
+    where
+        F: RichField + Extendable<D>,
+        C: GenericConfig<D, F = F> + 'static,
+        <C as GenericConfig<D>>::Hasher: AlgebraicHasher<F>,
+    {
+        let is_initial = builder.add_virtual_bool_target_safe();
+        let not_initial = builder.not(is_initial);
+
+        let initial_deposit_hash_chain = Bytes32Target::new::<F, D>(builder, true);
+        let initial_deposit_tree_root = PoseidonHashOutTarget::new(builder);
+        let initial_deposit_count = U63Target::new(builder, true);
+
+        let prev_deposit_chain_proof = add_proof_target_and_conditionally_verify::<F, C, D>(
+            deposit_chain_vd,
+            builder,
+            not_initial,
+        );
+        let prev_deposit_chain_pis = DepositChainPublicInputsTarget::from_pis(
+            &prev_deposit_chain_proof.public_inputs,
+            &deposit_chain_vd.common.config,
+        );
+
+        let deposit_chain_public_inputs =
+            DepositChainPublicInputsTarget::new(builder, &deposit_chain_vd.common.config);
+        let deposit = DepositTarget::new(builder, true);
+        let deposit_merkle_proof = DepositMerkleProofTarget::new(builder, DEPOSIT_TREE_HEIGHT);
+
+        // Select previous state depending on whether this is the initial step.
+        let prev_deposit_hash_chain = Bytes32Target::select(
+            builder,
+            is_initial,
+            initial_deposit_hash_chain.clone(),
+            prev_deposit_chain_pis.deposit_hash_chain.clone(),
+        );
+        let prev_deposit_tree_root = PoseidonHashOutTarget::select(
+            builder,
+            is_initial,
+            initial_deposit_tree_root.clone(),
+            prev_deposit_chain_pis.deposit_tree_root.clone(),
+        );
+        let prev_deposit_count = U63Target::select(
+            builder,
+            is_initial,
+            &initial_deposit_count,
+            &prev_deposit_chain_pis.deposit_count,
+        );
+
+        let expected_initial_hash_chain = Bytes32Target::select(
+            builder,
+            is_initial,
+            initial_deposit_hash_chain.clone(),
+            prev_deposit_chain_pis.initial_deposit_hash_chain.clone(),
+        );
+        deposit_chain_public_inputs
+            .initial_deposit_hash_chain
+            .connect(builder, expected_initial_hash_chain);
+
+        let expected_initial_tree_root = PoseidonHashOutTarget::select(
+            builder,
+            is_initial,
+            initial_deposit_tree_root.clone(),
+            prev_deposit_chain_pis.initial_deposit_tree_root.clone(),
+        );
+        deposit_chain_public_inputs
+            .initial_deposit_tree_root
+            .connect(builder, expected_initial_tree_root);
+
+        let expected_initial_count = U63Target::select(
+            builder,
+            is_initial,
+            &initial_deposit_count,
+            &prev_deposit_chain_pis.initial_deposit_count,
+        );
+        deposit_chain_public_inputs
+            .initial_deposit_count
+            .connect(builder, &expected_initial_count);
+
+        // Verify the Merkle proof for the empty leaf and compute the updated root.
+        let empty_deposit_target = DepositTarget::constant(builder, &Deposit::default());
+        deposit_merkle_proof.verify::<F, C, D>(
+            builder,
+            &empty_deposit_target,
+            prev_deposit_count.value,
+            prev_deposit_tree_root.clone(),
+        );
+        let new_deposit_tree_root =
+            deposit_merkle_proof.get_root::<F, C, D>(builder, &deposit, prev_deposit_count.value);
+        deposit_chain_public_inputs
+            .deposit_tree_root
+            .connect(builder, new_deposit_tree_root);
+
+        // Enforce deposit count increment.
+        let incremented_count = builder.add_const(prev_deposit_count.value, F::ONE);
+        builder.range_check(incremented_count, 63);
+        let expected_deposit_count = U63Target {
+            value: incremented_count,
+        };
+        deposit_chain_public_inputs
+            .deposit_count
+            .connect(builder, &expected_deposit_count);
+
+        // Compute the new deposit hash chain.
+        let new_deposit_hash_chain =
+            deposit.hash_with_prev_hash::<F, C, D>(builder, prev_deposit_hash_chain.clone());
+        deposit_chain_public_inputs
+            .deposit_hash_chain
+            .connect(builder, new_deposit_hash_chain);
+
+        Self {
+            is_initial,
+            initial_deposit_hash_chain,
+            initial_deposit_tree_root,
+            initial_deposit_count,
+            prev_deposit_chain_proof,
+            deposit_chain_public_inputs,
+            deposit,
+            deposit_merkle_proof,
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn set_witness<F, C, W>(
+        &self,
+        witness: &mut W,
+        value: &DepositStepWitness<F, C, D>,
+        new_pis: &DepositChainPublicInputs<F, C, D>,
+        dummy_proof: &ProofWithPublicInputs<F, C, D>,
+    ) where
+        F: RichField + Extendable<D>,
+        C: GenericConfig<D, F = F>,
+        <C as GenericConfig<D>>::Hasher: AlgebraicHasher<F>,
+        W: WitnessWrite<F>,
+    {
+        let is_initial = value.initial_value.is_some();
+        witness.set_bool_target(self.is_initial, is_initial);
+
+        if let Some((hash_chain, tree_root, count)) = value.initial_value {
+            self.initial_deposit_hash_chain
+                .set_witness(witness, hash_chain);
+            self.initial_deposit_tree_root
+                .set_witness(witness, tree_root);
+            self.initial_deposit_count.set_witness(witness, count);
+        } else {
+            self.initial_deposit_hash_chain
+                .set_witness(witness, Bytes32::default());
+            self.initial_deposit_tree_root
+                .set_witness(witness, PoseidonHashOut::default());
+            self.initial_deposit_count
+                .set_witness(witness, U63::default());
+        }
+
+        if let Some(proof) = &value.prev_deposit_chain_proof {
+            witness.set_proof_with_pis_target(&self.prev_deposit_chain_proof, proof);
+        } else {
+            witness.set_proof_with_pis_target(&self.prev_deposit_chain_proof, &dummy_proof.proof);
+        }
+
+        self.deposit_chain_public_inputs
+            .set_witness::<F, C, D, _>(witness, new_pis);
+        self.deposit.set_witness(witness, &value.deposit);
+        self.deposit_merkle_proof
+            .set_witness(witness, &value.deposit_merkle_proof);
+    }
+}
+
+#[derive(Debug)]
+pub struct DepositStepCircuit<F, C, const D: usize>
+where
+    F: RichField + Extendable<D>,
+    C: GenericConfig<D, F = F>,
+    <C as GenericConfig<D>>::Hasher: AlgebraicHasher<F>,
+{
+    pub data: CircuitData<F, C, D>,
+    pub deposit_chain_vd: VerifierCircuitData<F, C, D>,
+    pub target: DepositStepTarget<D>,
+    pub public_inputs: DepositChainPublicInputsTarget,
+    pub dummy_prev_proof: ProofWithPublicInputs<F, C, D>,
+}
+
+impl<F, C, const D: usize> DepositStepCircuit<F, C, D>
+where
+    F: RichField + Extendable<D>,
+    C: GenericConfig<D, F = F> + 'static,
+    <C as GenericConfig<D>>::Hasher: AlgebraicHasher<F>,
+{
+    pub fn new(
+        deposit_chain_vd: &VerifierCircuitData<F, C, D>,
+        dummy_prev_proof: ProofWithPublicInputs<F, C, D>,
+    ) -> Self {
+        let mut builder = CircuitBuilder::<F, D>::new(CircuitConfig::standard_recursion_config());
+        let target = DepositStepTarget::new::<F, C>(&mut builder, deposit_chain_vd);
+        let public_inputs = target.deposit_chain_public_inputs.clone();
+        builder.register_public_inputs(&public_inputs.to_vec(&deposit_chain_vd.common.config));
+        let data = builder.build::<C>();
+
+        Self {
+            data,
+            deposit_chain_vd: deposit_chain_vd.clone(),
+            target,
+            public_inputs,
+            dummy_prev_proof,
+        }
+    }
+
+    pub fn prove(
+        &self,
+        witness: &DepositStepWitness<F, C, D>,
+    ) -> Result<ProofWithPublicInputs<F, C, D>, UpdateDepositTreeError> {
+        let new_pis = witness.to_public_inputs(&self.deposit_chain_vd)?;
+        let mut pw = PartialWitness::<F>::new();
+        self.target
+            .set_witness(&mut pw, witness, &new_pis, &self.dummy_prev_proof);
+        self.public_inputs
+            .set_witness::<F, C, D, _>(&mut pw, &new_pis);
+        self.data
+            .prove(pw)
+            .map_err(|e| UpdateDepositTreeError::InvalidProof(e.to_string()))
+    }
+
+    pub fn verify(
+        &self,
+        proof: ProofWithPublicInputs<F, C, D>,
+    ) -> Result<(), UpdateDepositTreeError> {
+        self.data
+            .verify(proof)
+            .map_err(|e| UpdateDepositTreeError::InvalidProof(e.to_string()))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{
+        common::{deposit::Deposit, trees::deposit_tree::DepositTree, u63::U63},
+        ethereum_types::{address::Address, bytes32::Bytes32, u256::U256},
+        utils::cyclic::simple_recursion_circuit_data,
+    };
+    use plonky2::{
+        field::goldilocks_field::GoldilocksField, plonk::config::PoseidonGoldilocksConfig,
+        recursion::dummy_circuit::dummy_circuit,
+    };
+
+    const D: usize = 2;
+    type F = GoldilocksField;
+    type C = PoseidonGoldilocksConfig;
+
+    #[test]
+    fn test_deposit_step_circuit_initial() {
+        // Initial deposit chain state.
+        let initial_deposit_hash_chain = Bytes32::default();
+        let deposit_tree = DepositTree::init();
+        let initial_deposit_tree_root = deposit_tree.get_root();
+        let initial_deposit_count = U63::default();
+        let deposit_index = 0u64;
+        let deposit_merkle_proof = deposit_tree.prove(deposit_index);
+
+        // Deposit to be appended.
+        let deposit = Deposit {
+            depositor: Address::default(),
+            recipient: Bytes32::default(),
+            token_index: 0,
+            amount: U256::from(5u32),
+            block_number: U63::default(),
+            aux_data: Bytes32::default(),
+        };
+
+        // Expected new state after the deposit.
+        let mut deposit_tree_after = deposit_tree.clone();
+        deposit_tree_after.push(deposit.clone());
+        let expected_deposit_tree_root = deposit_tree_after.get_root();
+        let expected_deposit_hash_chain = deposit.hash_with_prev_hash(initial_deposit_hash_chain);
+
+        // Build verifying data for the previous deposit chain circuit.
+        let deposit_chain_base = simple_recursion_circuit_data::<F, C, D>();
+        let dummy_chain = dummy_circuit::<F, C, D>(&deposit_chain_base.common);
+        let deposit_chain_vd = dummy_chain.verifier_data();
+        let dummy_prev_proof = dummy_chain
+            .prove(PartialWitness::new())
+            .expect("dummy deposit proof");
+
+        let witness = DepositStepWitness::<F, C, D> {
+            initial_value: Some((
+                initial_deposit_hash_chain,
+                initial_deposit_tree_root,
+                initial_deposit_count,
+            )),
+            prev_deposit_chain_proof: None,
+            deposit: deposit.clone(),
+            deposit_merkle_proof: deposit_merkle_proof.clone(),
+        };
+
+        let expected_public_inputs = witness
+            .to_public_inputs(&deposit_chain_vd)
+            .expect("public inputs");
+        assert_eq!(expected_public_inputs.deposit_count.as_u64(), 1);
+        assert_eq!(
+            expected_public_inputs.deposit_tree_root,
+            expected_deposit_tree_root
+        );
+        assert_eq!(
+            expected_public_inputs.deposit_hash_chain,
+            expected_deposit_hash_chain
+        );
+
+        let circuit =
+            DepositStepCircuit::<F, C, D>::new(&deposit_chain_vd, dummy_prev_proof.clone());
+        let proof = circuit
+            .prove(&witness)
+            .expect("deposit step proof should succeed");
+        circuit.verify(proof).expect("proof verifies");
     }
 }
