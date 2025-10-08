@@ -29,6 +29,7 @@ use crate::{
     },
     utils::{
         conversion::ToU64,
+        cyclic::conditionally_connect_vd,
         dummy::{DummyProof, conditionally_verify_proof},
         leafable::Leafable as _,
         poseidon_hash_out::{PoseidonHashOut, PoseidonHashOutTarget},
@@ -196,6 +197,14 @@ impl<const D: usize> DepositStepTarget<D> {
             &prev_deposit_chain_pis.vd,
             &deposit_chain_cd,
         );
+        let deposit_chain_vd =
+            builder.add_virtual_verifier_data(deposit_chain_cd.config.fri_config.cap_height);
+        conditionally_connect_vd(
+            builder,
+            not_initial,
+            &prev_deposit_chain_pis.vd,
+            &deposit_chain_vd,
+        );
 
         // Select previous state depending on whether this is the initial step.
         let prev_deposit_hash_chain = Bytes32Target::select(
@@ -266,7 +275,7 @@ impl<const D: usize> DepositStepTarget<D> {
             deposit_hash_chain: new_deposit_hash_chain,
             deposit_tree_root: new_deposit_tree_root,
             deposit_count: new_deposit_count,
-            vd: prev_deposit_chain_pis.vd.clone(),
+            vd: deposit_chain_vd,
         };
 
         Self {
@@ -402,7 +411,7 @@ mod tests {
 
     #[cfg_attr(debug_assertions, ignore = "run with --release")]
     #[test]
-    fn test_deposit_step_circuit_initial() {
+    fn test_deposit_step_circuit() {
         // build dummy circuits
         let deposit_chain_config = CircuitConfig::standard_recursion_config();
         let pis_len = DEPOSIT_CHAIN_PUBLIC_INPUTS_LEN + vd_vec_len(&deposit_chain_config);
@@ -463,6 +472,6 @@ mod tests {
         let proof = circuit
             .prove(&deposit_chain_vd, &witness)
             .expect("deposit step proof should succeed");
-        // circuit.verify(proof).expect("proof verifies");
+        circuit.verify(proof).expect("proof verifies");
     }
 }
