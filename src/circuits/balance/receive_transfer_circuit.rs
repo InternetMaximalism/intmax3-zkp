@@ -597,7 +597,7 @@ mod tests {
                 tx_tree::TxTree,
             },
             tx::Tx,
-            u63::BlockNumber,
+            u63::{BlockNumber, U63},
             user_id::UserId,
         },
         constants::{
@@ -753,7 +753,7 @@ mod tests {
             block_number: BlockNumber::new(6).unwrap(),
             account_tree_root,
             deposit_tree_root: PoseidonHashOut::default(),
-            deposit_count: 0,
+            deposit_count: U63::default(),
             prev_public_state_root: PoseidonHashOut::default(),
         };
 

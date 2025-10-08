@@ -164,7 +164,7 @@ impl UpdateAccountTree {
 
 impl UpdateAccountPublicInputs {
     pub fn to_u64_vec(&self) -> Vec<u64> {
-        let mut result = vec![self.block_number.0];
+        let mut result = vec![self.block_number.as_u64()];
         result.extend(self.prev_block_hash_chain.to_u64_vec());
         result.extend(self.prev_account_tree_root.to_u64_vec());
         result.extend(self.new_block_hash_chain.to_u64_vec());

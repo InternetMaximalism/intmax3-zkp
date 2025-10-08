@@ -49,7 +49,7 @@ impl UserId {
     }
 
     pub fn dummy() -> Self {
-        Self(U63(0))
+        Self(U63::default())
     }
 
     pub fn aggregator_id(&self) -> u32 {
@@ -65,7 +65,7 @@ impl UserId {
     }
 
     pub fn as_u64(&self) -> u64 {
-        self.0.value()
+        self.0.as_u64()
     }
 
     pub fn to_u32_vec(&self) -> Vec<u32> {

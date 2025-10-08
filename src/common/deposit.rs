@@ -55,7 +55,7 @@ impl Deposit {
             self.recipient.to_u64_vec(),
             vec![self.token_index as u64],
             self.amount.to_u64_vec(),
-            vec![self.block_number.0],
+            vec![self.block_number.as_u64()],
             self.aux_data.to_u64_vec(),
         ]
         .concat()

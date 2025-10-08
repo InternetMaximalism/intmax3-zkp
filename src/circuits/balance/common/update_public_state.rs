@@ -51,7 +51,7 @@ impl UpdatePublicState {
         let merkle_proof = merkle_proof.ok_or(UpdatePublicStateError::InvalidMerkleProof(
             "Merkle proof is required when states are different".to_string(),
         ))?;
-        let calculated = merkle_proof.get_root(&old, old.block_number.0);
+        let calculated = merkle_proof.get_root(&old, old.block_number.as_u64());
         if calculated != new.prev_public_state_root {
             return Err(UpdatePublicStateError::InvalidMerkleProof(format!(
                 "calculated: {}, expected: {}",
@@ -71,7 +71,7 @@ impl UpdatePublicState {
         }
         let calculated = self
             .merkle_proof
-            .get_root(&self.old, self.old.block_number.0);
+            .get_root(&self.old, self.old.block_number.as_u64());
         if calculated != self.new.prev_public_state_root {
             return Err(UpdatePublicStateError::InvalidMerkleProof(format!(
                 "calculated: {}, expected: {}",

@@ -32,7 +32,7 @@ pub enum U63Error {
 #[derive(
     Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize,
 )]
-pub struct U63(pub u64);
+pub struct U63(u64);
 
 impl U63 {
     pub fn new(value: u64) -> Result<Self, U63Error> {
@@ -55,7 +55,7 @@ impl U63 {
         Self(value)
     }
 
-    pub fn value(&self) -> u64 {
+    pub fn as_u64(&self) -> u64 {
         self.0
     }
 
@@ -121,7 +121,7 @@ impl U63Target {
         value: U63,
     ) -> Self {
         Self {
-            value: builder.constant(F::from_canonical_u64(value.0)),
+            value: builder.constant(F::from_canonical_u64(value.as_u64())),
         }
     }
 
@@ -276,6 +276,6 @@ impl U63Target {
     }
 
     pub fn set_witness<F: Field, W: WitnessWrite<F>>(&self, witness: &mut W, value: U63) {
-        witness.set_target(self.value, F::from_canonical_u64(value.0));
+        witness.set_target(self.value, F::from_canonical_u64(value.as_u64()));
     }
 }

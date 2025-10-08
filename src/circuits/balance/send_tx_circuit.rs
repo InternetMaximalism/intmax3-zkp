@@ -113,15 +113,15 @@ where
         if prev_balance_pis.block_r < self.tx_settlement.send_block_number_before_tx() {
             return Err(SpendTxError::BlockNumberError(format!(
                 "prev_balance_pis.block_r: {} should be >= tx_settlement.send_block_number_before_tx(): {}",
-                prev_balance_pis.block_r.0,
-                self.tx_settlement.send_block_number_before_tx().0
+                prev_balance_pis.block_r.as_u64(),
+                self.tx_settlement.send_block_number_before_tx().as_u64()
             )));
         }
         if self.tx_settlement.tx_block_number() < prev_balance_pis.block_r {
             return Err(SpendTxError::BlockNumberError(format!(
                 "tx_settlement.tx_block_number(): {} should be >= prev_balance_pis.block_r: {}",
-                self.tx_settlement.tx_block_number().0,
-                prev_balance_pis.block_r.0
+                self.tx_settlement.tx_block_number().as_u64(),
+                prev_balance_pis.block_r.as_u64()
             )));
         }
         let (new_block_r, new_private_commitment) = if spend_pis.is_valid {
@@ -336,7 +336,7 @@ mod tests {
                 tx_tree::TxTree,
             },
             tx::Tx,
-            u63::BlockNumber,
+            u63::{BlockNumber, U63},
             user_id::UserId,
         },
         constants::{
@@ -449,7 +449,7 @@ mod tests {
             block_number: BlockNumber::new(6).unwrap(),
             account_tree_root,
             deposit_tree_root: PoseidonHashOut::default(),
-            deposit_count: 0,
+            deposit_count: U63::default(),
             prev_public_state_root: PoseidonHashOut::default(),
         };
 
