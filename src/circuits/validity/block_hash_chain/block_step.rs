@@ -169,7 +169,13 @@ where
                 "update account proof initial account tree root mismatch".to_string(),
             ));
         }
+        if update_account_inputs.prev_block_hash_chain != prev_public_state_ext.block_hash_chain {
+            return Err(BlockStepError::InvalidInput(
+                "update account proof initial block hash chain mismatch".to_string(),
+            ));
+        }
         let account_tree_root = update_account_inputs.new_account_tree_root;
+        let block_hash_chain = update_account_inputs.new_block_hash_chain;
 
         let mut deposit_hash_chain = prev_public_state_ext.deposit_hash_chain;
         let mut deposit_tree_root = prev_public_state.deposit_tree_root;
@@ -251,8 +257,12 @@ where
             prev_public_state_root,
         };
 
-        let new_public_state_ext =
-            ExtendedPublicState::new(new_public_state, deposit_hash_chain, deposit_count);
+        let new_public_state_ext = ExtendedPublicState::new(
+            new_public_state,
+            block_hash_chain,
+            deposit_hash_chain,
+            deposit_count,
+        );
 
         Ok(BlockChainPublicInputs {
             initial_ext_public_state: prev_inputs.initial_ext_public_state,
@@ -405,6 +415,11 @@ impl<const D: usize> BlockStepTarget<D> {
             .connect(builder, prev_public_state.account_tree_root.clone());
         let account_tree_root = selected_update_inputs.new_account_tree_root.clone();
 
+        selected_update_inputs
+            .prev_block_hash_chain
+            .connect(builder, prev_public_state_ext.block_hash_chain.clone());
+        let block_hash_chain = selected_update_inputs.new_block_hash_chain.clone();
+
         let deposit_hash_eq = prev_public_state_ext
             .deposit_hash_chain
             .is_equal(builder, &selected_update_inputs.deposit_hash_chain);
@@ -482,6 +497,7 @@ impl<const D: usize> BlockStepTarget<D> {
                     deposit_tree_root: selected_deposit_tree_root,
                     prev_public_state_root,
                 },
+                block_hash_chain,
                 deposit_hash_chain: selected_deposit_hash_chain,
                 deposit_count: selected_deposit_count,
             },
@@ -1029,6 +1045,7 @@ mod tests {
         };
         let initial_ext_public_state = ExtendedPublicState::new(
             initial_public_state.clone(),
+            prev_block_hash_chain,
             initial_deposit_hash_chain,
             initial_deposit_count,
         );
@@ -1051,6 +1068,12 @@ mod tests {
                 .inner
                 .block_number,
             block_number_first
+        );
+        assert_eq!(
+            expected_block_inputs_first
+                .ext_public_state
+                .block_hash_chain,
+            update_account_inputs_first.new_block_hash_chain
         );
         assert_eq!(
             expected_block_inputs_first
@@ -1157,6 +1180,12 @@ mod tests {
                 .inner
                 .block_number,
             block_number_second
+        );
+        assert_eq!(
+            expected_block_inputs_second
+                .ext_public_state
+                .block_hash_chain,
+            update_account_inputs_second.new_block_hash_chain
         );
         assert_eq!(
             expected_block_inputs_second

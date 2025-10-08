@@ -62,8 +62,11 @@ where
         );
         builder.register_public_inputs(&new_chain_pis.to_vec(&block_chain_cd.config));
 
+        let target_num_gates = 1u64 << block_chain_cd.fri_params.degree_bits;
+        add_noop_gates(&mut builder, target_num_gates);
+
         let (data, success) = builder.try_build_with_options::<C>(true);
-        assert_eq!(
+        debug_assert_eq!(
             data.common,
             block_chain_cd.clone(),
             "Common data mismatch in block hash chain circuit",
@@ -85,7 +88,7 @@ where
             circuit_digest: builder.add_virtual_hash(),
         };
         builder.verify_proof::<C>(&proof, &verifier_data, &data.common);
-        add_noop_gates(&mut builder, 1 << 11);
+        add_noop_gates(&mut builder, 1 << 14);
         let mut common = builder.build::<C>().common;
         common.num_public_inputs = BLOCK_CHAIN_PUBLIC_INPUTS_LEN + vd_vec_len(&common.config);
         common

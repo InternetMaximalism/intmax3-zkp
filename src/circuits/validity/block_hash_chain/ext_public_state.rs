@@ -20,7 +20,7 @@ use crate::{
     },
 };
 
-pub const EXTENDED_PUBLIC_STATE_U64_LEN: usize = PUBLIC_STATE_U64_LEN + BYTES32_LEN + 1;
+pub const EXTENDED_PUBLIC_STATE_U64_LEN: usize = PUBLIC_STATE_U64_LEN + 2 * BYTES32_LEN + 1;
 
 #[derive(Debug, Error)]
 pub enum ExtendedPublicStateError {
@@ -37,14 +37,21 @@ pub enum ExtendedPublicStateError {
 #[derive(Clone, Debug, Default)]
 pub struct ExtendedPublicState {
     pub inner: PublicState,
+    pub block_hash_chain: Bytes32,
     pub deposit_hash_chain: Bytes32,
     pub deposit_count: U63,
 }
 
 impl ExtendedPublicState {
-    pub fn new(inner: PublicState, deposit_hash_chain: Bytes32, deposit_count: U63) -> Self {
+    pub fn new(
+        inner: PublicState,
+        block_hash_chain: Bytes32,
+        deposit_hash_chain: Bytes32,
+        deposit_count: U63,
+    ) -> Self {
         Self {
             inner,
+            block_hash_chain,
             deposit_hash_chain,
             deposit_count,
         }
@@ -53,6 +60,7 @@ impl ExtendedPublicState {
     pub fn to_u64_vec(&self) -> Vec<u64> {
         [
             self.inner.to_u64_vec(),
+            self.block_hash_chain.to_u64_vec(),
             self.deposit_hash_chain.to_u64_vec(),
             self.deposit_count.to_u64_vec(),
         ]
@@ -72,6 +80,10 @@ impl ExtendedPublicState {
         let inner = PublicState::from_u64_slice(&values[cursor..cursor + PUBLIC_STATE_U64_LEN])?;
         cursor += PUBLIC_STATE_U64_LEN;
 
+        let block_hash_chain = Bytes32::from_u64_slice(&values[cursor..cursor + BYTES32_LEN])
+            .map_err(|e| ExtendedPublicStateError::Bytes32(e.to_string()))?;
+        cursor += BYTES32_LEN;
+
         let deposit_hash_chain = Bytes32::from_u64_slice(&values[cursor..cursor + BYTES32_LEN])
             .map_err(|e| ExtendedPublicStateError::Bytes32(e.to_string()))?;
         cursor += BYTES32_LEN;
@@ -82,6 +94,7 @@ impl ExtendedPublicState {
 
         Ok(Self {
             inner,
+            block_hash_chain,
             deposit_hash_chain,
             deposit_count,
         })
@@ -91,6 +104,7 @@ impl ExtendedPublicState {
 #[derive(Clone, Debug)]
 pub struct ExtendedPublicStateTarget {
     pub inner: PublicStateTarget,
+    pub block_hash_chain: Bytes32Target,
     pub deposit_hash_chain: Bytes32Target,
     pub deposit_count: U63Target,
 }
@@ -102,6 +116,7 @@ impl ExtendedPublicStateTarget {
     ) -> Self {
         Self {
             inner: PublicStateTarget::new(builder, is_checked),
+            block_hash_chain: Bytes32Target::new::<F, D>(builder, is_checked),
             deposit_hash_chain: Bytes32Target::new::<F, D>(builder, is_checked),
             deposit_count: U63Target::new(builder, is_checked),
         }
@@ -113,6 +128,10 @@ impl ExtendedPublicStateTarget {
     ) -> Self {
         Self {
             inner: PublicStateTarget::constant(builder, &value.inner),
+            block_hash_chain: Bytes32Target::constant::<F, D, Bytes32>(
+                builder,
+                value.block_hash_chain,
+            ),
             deposit_hash_chain: Bytes32Target::constant::<F, D, Bytes32>(
                 builder,
                 value.deposit_hash_chain,
@@ -127,6 +146,8 @@ impl ExtendedPublicStateTarget {
         value: &ExtendedPublicState,
     ) {
         self.inner.set_witness(witness, &value.inner);
+        self.block_hash_chain
+            .set_witness(witness, value.block_hash_chain);
         self.deposit_hash_chain
             .set_witness(witness, value.deposit_hash_chain);
         self.deposit_count.set_witness(witness, value.deposit_count);
@@ -138,6 +159,8 @@ impl ExtendedPublicStateTarget {
         other: &Self,
     ) {
         self.inner.connect(builder, &other.inner);
+        self.block_hash_chain
+            .connect(builder, other.block_hash_chain);
         self.deposit_hash_chain
             .connect(builder, other.deposit_hash_chain);
         self.deposit_count.connect(builder, &other.deposit_count);
@@ -155,6 +178,12 @@ impl ExtendedPublicStateTarget {
                 condition,
                 &when_true.inner,
                 &when_false.inner,
+            ),
+            block_hash_chain: Bytes32Target::select(
+                builder,
+                condition,
+                when_true.block_hash_chain.clone(),
+                when_false.block_hash_chain.clone(),
             ),
             deposit_hash_chain: Bytes32Target::select(
                 builder,
@@ -174,6 +203,7 @@ impl ExtendedPublicStateTarget {
     pub fn to_vec(&self) -> Vec<Target> {
         [
             self.inner.to_vec(),
+            self.block_hash_chain.to_vec(),
             self.deposit_hash_chain.to_vec(),
             self.deposit_count.to_vec(),
         ]
@@ -191,6 +221,9 @@ impl ExtendedPublicStateTarget {
         let inner = PublicStateTarget::from_slice(&values[cursor..cursor + PUBLIC_STATE_U64_LEN]);
         cursor += PUBLIC_STATE_U64_LEN;
 
+        let block_hash_chain = Bytes32Target::from_slice(&values[cursor..cursor + BYTES32_LEN]);
+        cursor += BYTES32_LEN;
+
         let deposit_hash_chain = Bytes32Target::from_slice(&values[cursor..cursor + BYTES32_LEN]);
         cursor += BYTES32_LEN;
 
@@ -198,6 +231,7 @@ impl ExtendedPublicStateTarget {
 
         Self {
             inner,
+            block_hash_chain,
             deposit_hash_chain,
             deposit_count,
         }
