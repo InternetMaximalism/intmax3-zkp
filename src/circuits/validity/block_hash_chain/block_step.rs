@@ -231,7 +231,6 @@ where
             block_number,
             account_tree_root,
             deposit_tree_root,
-            deposit_count,
             prev_public_state_root,
         };
 

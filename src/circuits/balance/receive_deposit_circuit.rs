@@ -443,7 +443,7 @@ mod tests {
                 deposit_tree::DepositTree,
                 nullifier_tree::NullifierTree,
             },
-            u63::{BlockNumber, U63},
+            u63::BlockNumber,
             user_id::UserId,
         },
         constants::{ACCOUNT_TREE_HEIGHT, ASSET_TREE_HEIGHT, SEND_TREE_HEIGHT},
@@ -488,11 +488,6 @@ mod tests {
         let deposit_index = 0u64;
         let deposit_merkle_proof = deposit_tree.prove(deposit_index);
         let deposit_tree_root = deposit_tree.get_root();
-
-        let deposit_count = U63::new(
-            u64::try_from(deposit_tree.len()).expect("deposit tree length should fit in u64"),
-        )
-        .expect("deposit tree length within 63 bits");
 
         let deposit_witness = DepositWitness::new(
             receiver_user_id,
@@ -562,7 +557,6 @@ mod tests {
             block_number: BlockNumber::new(8).unwrap(),
             account_tree_root,
             deposit_tree_root,
-            deposit_count,
             prev_public_state_root: PoseidonHashOut::default(),
         };
 

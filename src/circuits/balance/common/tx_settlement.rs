@@ -227,12 +227,9 @@ mod tests {
     use super::*;
     use crate::{
         circuits::balance::spend_circuit::SPEND_PUBLIC_INPUTS_LEN,
-        common::{
-            trees::{
-                account_tree::{AccountLeaf, AccountTree, SendLeaf, SendTree},
-                tx_tree::TxTree,
-            },
-            u63::U63,
+        common::trees::{
+            account_tree::{AccountLeaf, AccountTree, SendLeaf, SendTree},
+            tx_tree::TxTree,
         },
         constants::{ACCOUNT_TREE_HEIGHT, SEND_TREE_HEIGHT, TX_TREE_HEIGHT},
         ethereum_types::bytes32::Bytes32,
@@ -303,7 +300,6 @@ mod tests {
             block_number: BlockNumber::default(),
             account_tree_root,
             deposit_tree_root: PoseidonHashOut::default(),
-            deposit_count: U63::default(),
             prev_public_state_root: PoseidonHashOut::default(),
         };
 

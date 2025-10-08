@@ -478,12 +478,7 @@ mod tests {
     use super::*;
     use crate::{
         circuits::balance::balance_pis::BalanceFullPublicInputs,
-        common::{
-            public_state::PublicState,
-            salt::Salt,
-            u63::{BlockNumber, U63},
-            user_id::UserId,
-        },
+        common::{public_state::PublicState, salt::Salt, u63::BlockNumber, user_id::UserId},
         utils::{conversion::ToField, cyclic::add_noop_gates, poseidon_hash_out::PoseidonHashOut},
     };
     use plonky2::{
@@ -529,7 +524,6 @@ mod tests {
             block_number: BlockNumber::new(block).unwrap(),
             account_tree_root: root,
             deposit_tree_root: root,
-            deposit_count: U63::new(block).unwrap(),
             prev_public_state_root: root,
         }
     }
