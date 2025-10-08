@@ -8,5 +8,6 @@ pub mod salt;
 pub mod transfer;
 pub mod trees;
 pub mod tx;
+pub mod u63;
 pub mod user_id;
 pub mod withdrawal;
