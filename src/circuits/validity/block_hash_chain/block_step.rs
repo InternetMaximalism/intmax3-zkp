@@ -736,14 +736,17 @@ mod tests {
             deposit::Deposit,
             public_state::PublicState,
             trees::{
-                account_tree::{AccountLeaf, AccountTree, SendLeaf, SendMerkleProof, SendTree},
+                account_tree::{
+                    AccountLeaf, AccountMerkleProof, AccountTree, SendLeaf, SendMerkleProof,
+                    SendTree,
+                },
                 deposit_tree::DepositTree,
                 public_state_tree::PublicStateTree,
             },
             u63::{BlockNumber, U63},
             user_id::UserId,
         },
-        constants::ACCOUNT_TREE_HEIGHT,
+        constants::{ACCOUNT_TREE_HEIGHT, SEND_TREE_HEIGHT},
         ethereum_types::{bytes32::Bytes32, u32limb_trait::U32LimbTrait, u256::U256},
         utils::{
             conversion::ToField as _,
@@ -759,6 +762,91 @@ mod tests {
     const D: usize = 2;
     type F = GoldilocksField;
     type C = PoseidonGoldilocksConfig;
+
+    fn prove_update_account_block(
+        block_number: BlockNumber,
+        prev_block_hash_chain: Bytes32,
+        block: &Block,
+        account_tree: &mut AccountTree,
+        send_trees: &mut [SendTree],
+        account_leaves: &mut [AccountLeaf],
+        update_account_circuit: &UpdateAccountCircuit<F, C, D>,
+    ) -> (
+        UpdateAccountTree,
+        UpdateAccountPublicInputs,
+        ProofWithPublicInputs<F, C, D>,
+    ) {
+        let prev_account_tree_root = account_tree.get_root();
+        let mut account_tree_for_proofs = account_tree.clone();
+
+        let dummy_account_proof = AccountMerkleProof::dummy(ACCOUNT_TREE_HEIGHT);
+        let dummy_send_proof = SendMerkleProof::dummy(SEND_TREE_HEIGHT);
+
+        let mut prev_account_leaves_vec = Vec::with_capacity(block.num_users as usize);
+        let mut account_merkle_proofs = Vec::with_capacity(block.num_users as usize);
+        let mut send_merkle_proofs = Vec::with_capacity(block.num_users as usize);
+
+        for (i, &local_id) in block.local_ids.iter().enumerate() {
+            let prev_leaf = account_leaves[i].clone();
+            prev_account_leaves_vec.push(prev_leaf.clone());
+
+            if local_id == 0 {
+                account_merkle_proofs.push(dummy_account_proof.clone());
+                send_merkle_proofs.push(dummy_send_proof.clone());
+                continue;
+            }
+
+            let send_tree = &mut send_trees[i];
+            let send_proof = send_tree.prove(prev_leaf.index.into());
+            send_merkle_proofs.push(send_proof.clone());
+
+            let user_id = UserId::new(block.aggregator_id, local_id).unwrap();
+            let account_proof = account_tree_for_proofs.prove(user_id.as_u64());
+            account_merkle_proofs.push(account_proof);
+
+            if prev_leaf.prev != block_number {
+                let new_send_leaf = SendLeaf {
+                    prev: prev_leaf.prev,
+                    cur: block_number,
+                    tx_tree_root: block.tx_tree_root,
+                };
+                let new_send_root = send_proof.get_root(&new_send_leaf, prev_leaf.index.into());
+                send_tree.push(new_send_leaf);
+
+                let new_account_leaf = AccountLeaf {
+                    index: prev_leaf.index + 1,
+                    prev: block_number,
+                    send_tree_root: new_send_root,
+                };
+                account_tree_for_proofs.update(user_id.as_u64(), new_account_leaf.clone());
+                account_tree.update(user_id.as_u64(), new_account_leaf.clone());
+                account_leaves[i] = new_account_leaf;
+            }
+        }
+
+        let update_account_tree = UpdateAccountTree {
+            prev_block_hash_chain,
+            prev_account_tree_root,
+            block_number,
+            block: block.clone(),
+            prev_account_leaves: prev_account_leaves_vec,
+            account_merkle_proofs,
+            send_merkle_proofs,
+        };
+
+        let update_account_inputs = update_account_tree
+            .to_public_inputs()
+            .expect("update account inputs");
+        let update_account_proof = update_account_circuit
+            .prove(&update_account_tree)
+            .expect("update account proof");
+
+        (
+            update_account_tree,
+            update_account_inputs,
+            update_account_proof,
+        )
+    }
 
     #[cfg_attr(debug_assertions, ignore = "run with --release")]
     #[test]
@@ -910,76 +998,22 @@ mod tests {
         )
         .unwrap();
 
-        let send_proof_user1_first = send_tree_user1.prove(prev_account_leaf_user1.index.into());
-        let send_proof_user2_first = send_tree_user2.prove(prev_account_leaf_user2.index.into());
-
-        let prev_account_leaves_first = vec![
+        let mut send_trees = vec![send_tree_user1, send_tree_user2];
+        let mut account_leaves = vec![
             prev_account_leaf_user1.clone(),
             prev_account_leaf_user2.clone(),
         ];
-        let send_merkle_proofs_first: Vec<SendMerkleProof> = vec![
-            send_proof_user1_first.clone(),
-            send_proof_user2_first.clone(),
-        ];
-        let mut account_tree_for_proofs_first = account_tree.clone();
-        let mut account_merkle_proofs_first = Vec::with_capacity(num_users as usize);
-        for (i, &local_id) in block_first.local_ids.iter().enumerate() {
-            let user_id = UserId::new(aggregator_id, local_id).unwrap();
-            let proof = account_tree_for_proofs_first.prove(user_id.as_u64());
-            account_merkle_proofs_first.push(proof);
 
-            let prev_leaf = &prev_account_leaves_first[i];
-            if prev_leaf.prev == block_number_first {
-                continue;
-            }
-
-            let send_proof = &send_merkle_proofs_first[i];
-            let new_send_leaf = SendLeaf {
-                prev: prev_leaf.prev,
-                cur: block_number_first,
-                tx_tree_root: tx_tree_root_first,
-            };
-            let new_send_root = send_proof.get_root(&new_send_leaf, prev_leaf.index.into());
-            let new_account_leaf = AccountLeaf {
-                index: prev_leaf.index + 1,
-                prev: block_number_first,
-                send_tree_root: new_send_root,
-            };
-            account_tree_for_proofs_first.update(user_id.as_u64(), new_account_leaf);
-        }
-
-        let update_account_tree_first = UpdateAccountTree {
-            prev_block_hash_chain,
-            prev_account_tree_root,
-            block_number: block_number_first,
-            block: block_first.clone(),
-            prev_account_leaves: prev_account_leaves_first.clone(),
-            account_merkle_proofs: account_merkle_proofs_first.clone(),
-            send_merkle_proofs: send_merkle_proofs_first.clone(),
-        };
-        let update_account_inputs_first = update_account_tree_first
-            .to_public_inputs()
-            .expect("update account inputs");
-        let update_account_proof_first = update_account_circuit
-            .prove(&update_account_tree_first)
-            .expect("update account proof");
-
-        let new_send_leaf_user1_first = SendLeaf {
-            prev: prev_account_leaf_user1.prev,
-            cur: block_number_first,
-            tx_tree_root: tx_tree_root_first,
-        };
-        let new_send_root_user1_first = send_proof_user1_first.get_root(
-            &new_send_leaf_user1_first,
-            prev_account_leaf_user1.index.into(),
-        );
-        send_tree_user1.push(new_send_leaf_user1_first.clone());
-        let new_account_leaf_user1_first = AccountLeaf {
-            index: prev_account_leaf_user1.index + 1,
-            prev: block_number_first,
-            send_tree_root: new_send_root_user1_first,
-        };
-        account_tree.update(user1.as_u64(), new_account_leaf_user1_first.clone());
+        let (_, update_account_inputs_first, update_account_proof_first) =
+            prove_update_account_block(
+                block_number_first,
+                prev_block_hash_chain,
+                &block_first,
+                &mut account_tree,
+                &mut send_trees,
+                &mut account_leaves,
+                &update_account_circuit,
+            );
 
         let initial_public_state = PublicState {
             block_number: block_number_prev,
@@ -1073,9 +1107,6 @@ mod tests {
             initial_public_state.clone(),
         );
 
-        let mut current_account_leaf_user1 = new_account_leaf_user1_first.clone();
-        let current_account_leaf_user2 = prev_account_leaf_user2.clone();
-
         let block_number_second = BlockNumber::new(block_number_first.as_u64() + 1).unwrap();
         let tx_tree_root_second = Bytes32::rand(&mut rng);
         let block_second = Block::new(
@@ -1087,79 +1118,16 @@ mod tests {
         )
         .unwrap();
 
-        let send_proof_user1_second =
-            send_tree_user1.prove(current_account_leaf_user1.index.into());
-        let send_proof_user2_second =
-            send_tree_user2.prove(current_account_leaf_user2.index.into());
-
-        let prev_account_leaves_second = vec![
-            current_account_leaf_user1.clone(),
-            current_account_leaf_user2.clone(),
-        ];
-        let send_merkle_proofs_second: Vec<SendMerkleProof> = vec![
-            send_proof_user1_second.clone(),
-            send_proof_user2_second.clone(),
-        ];
-
-        let mut account_tree_for_proofs_second = account_tree.clone();
-        let mut account_merkle_proofs_second = Vec::with_capacity(num_users as usize);
-        for (i, &local_id) in block_second.local_ids.iter().enumerate() {
-            let user_id = UserId::new(aggregator_id, local_id).unwrap();
-            let proof = account_tree_for_proofs_second.prove(user_id.as_u64());
-            account_merkle_proofs_second.push(proof);
-
-            let prev_leaf = &prev_account_leaves_second[i];
-            if prev_leaf.prev == block_number_second {
-                continue;
-            }
-
-            let send_proof = &send_merkle_proofs_second[i];
-            let new_send_leaf = SendLeaf {
-                prev: prev_leaf.prev,
-                cur: block_number_second,
-                tx_tree_root: tx_tree_root_second,
-            };
-            let new_send_root = send_proof.get_root(&new_send_leaf, prev_leaf.index.into());
-            let new_account_leaf = AccountLeaf {
-                index: prev_leaf.index + 1,
-                prev: block_number_second,
-                send_tree_root: new_send_root,
-            };
-            account_tree_for_proofs_second.update(user_id.as_u64(), new_account_leaf);
-        }
-
-        let update_account_tree_second = UpdateAccountTree {
-            prev_block_hash_chain: update_account_inputs_first.new_block_hash_chain,
-            prev_account_tree_root: account_tree.get_root(),
-            block_number: block_number_second,
-            block: block_second.clone(),
-            prev_account_leaves: prev_account_leaves_second.clone(),
-            account_merkle_proofs: account_merkle_proofs_second.clone(),
-            send_merkle_proofs: send_merkle_proofs_second.clone(),
-        };
-        let update_account_inputs_second = update_account_tree_second
-            .to_public_inputs()
-            .expect("second update account inputs");
-        let update_account_proof_second = update_account_circuit
-            .prove(&update_account_tree_second)
-            .expect("second update account proof");
-
-        let new_send_leaf_user1_second = SendLeaf {
-            prev: current_account_leaf_user1.prev,
-            cur: block_number_second,
-            tx_tree_root: tx_tree_root_second,
-        };
-        let new_send_root_user1_second = send_proof_user1_second.get_root(
-            &new_send_leaf_user1_second,
-            current_account_leaf_user1.index.into(),
-        );
-        send_tree_user1.push(new_send_leaf_user1_second.clone());
-        current_account_leaf_user1 = AccountLeaf {
-            index: current_account_leaf_user1.index + 1,
-            prev: block_number_second,
-            send_tree_root: new_send_root_user1_second,
-        };
-        account_tree.update(user1.as_u64(), current_account_leaf_user1.clone());
+        let (_, update_account_inputs_second, update_account_proof_second) =
+            prove_update_account_block(
+                block_number_second,
+                update_account_inputs_first.new_block_hash_chain,
+                &block_second,
+                &mut account_tree,
+                &mut send_trees,
+                &mut account_leaves,
+                &update_account_circuit,
+            );
 
         let prev_ext_public_state_second = expected_block_inputs_first.ext_public_state.clone();
         let prev_public_state_second = prev_ext_public_state_second.inner.clone();
