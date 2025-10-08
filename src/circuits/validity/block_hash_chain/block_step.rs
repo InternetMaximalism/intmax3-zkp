@@ -32,9 +32,6 @@ pub enum BlockStepError {
     #[error("Invalid proof: {0}")]
     InvalidProof(String),
 
-    #[error("Missing update account proof for num_users {0}")]
-    MissingUpdateAccountProof(u32),
-
     #[error("Missing update account verifier data for num_users {0}")]
     MissingUpdateAccountVerifierData(u32),
 
@@ -58,17 +55,19 @@ pub struct BlockStepWitness<
 > where
     <C as GenericConfig<D>>::Hasher: AlgebraicHasher<F>,
 {
+    pub initial_public_state: Option<PublicState>,
+
     // Previous block hash chain proof if not the first block
     pub prev_block_chain_proof: Option<ProofWithPublicInputs<F, C, D>>,
 
     // Deposit hash chain proof if there is a deposit in this block
     pub deposit_hash_chain_proof: Option<ProofWithPublicInputs<F, C, D>>,
 
-    // paddind number of users in this block
+    // paddind number of users in this block (must be > 0)
     pub num_users: u32,
 
-    // Update account proof if not num_users == 0
-    pub update_account_proof: Option<ProofWithPublicInputs<F, C, D>>,
+    // Update account proof corresponding to this block
+    pub update_account_proof: ProofWithPublicInputs<F, C, D>,
 
     // Merkle proof to update public state tree
     pub public_state_merkle_proof: PublicStateMerkleProof,
@@ -136,32 +135,23 @@ where
         let update_vd_map: HashMap<u32, &VerifierCircuitData<F, C, D>> =
             update_account_vds.iter().map(|(n, vd)| (*n, vd)).collect();
 
-        let update_account_inputs = if let Some(update_proof) = &self.update_account_proof {
-            let update_vd = update_vd_map.get(&self.num_users).copied().ok_or(
-                BlockStepError::MissingUpdateAccountVerifierData(self.num_users),
-            )?;
+        let update_vd = update_vd_map.get(&self.num_users).copied().ok_or(
+            BlockStepError::MissingUpdateAccountVerifierData(self.num_users),
+        )?;
 
-            update_vd.verify(update_proof.clone()).map_err(|e| {
+        update_vd
+            .verify(self.update_account_proof.clone())
+            .map_err(|e| {
                 BlockStepError::InvalidProof(format!("update account proof invalid: {e}"))
             })?;
 
-            let update_inputs_u64 = update_proof.public_inputs.to_u64_vec();
-            Some(
-                UpdateAccountPublicInputs::from_u64_slice(&update_inputs_u64)
-                    .map_err(|e| BlockStepError::UpdateAccountPublicInputs(e.to_string()))?,
-            )
-        } else {
-            if self.num_users != 0 {
-                return Err(BlockStepError::MissingUpdateAccountProof(self.num_users));
-            }
-            None
-        };
+        let update_inputs_u64 = self.update_account_proof.public_inputs.to_u64_vec();
+        let update_account_inputs =
+            UpdateAccountPublicInputs::from_u64_slice(&update_inputs_u64)
+                .map_err(|e| BlockStepError::UpdateAccountPublicInputs(e.to_string()))?;
 
-        if let (Some(update_inputs), Some(deposit_inputs)) = (
-            update_account_inputs.as_ref(),
-            deposit_chain_inputs.as_ref(),
-        ) {
-            if update_inputs.deposit_hash_chain != deposit_inputs.deposit_hash_chain {
+        if let Some(deposit_inputs) = deposit_chain_inputs.as_ref() {
+            if update_account_inputs.deposit_hash_chain != deposit_inputs.deposit_hash_chain {
                 return Err(BlockStepError::InvalidInput(
                     "deposit hash chain mismatch between update account and deposit proofs"
                         .to_string(),
@@ -187,23 +177,13 @@ where
             .get_root(&prev_public_state, merkle_index);
 
         // Determine new state components.
-        let (block_number, account_tree_root) = if let Some(update_inputs) = &update_account_inputs
-        {
-            if update_inputs.prev_account_tree_root != prev_public_state.account_tree_root {
-                return Err(BlockStepError::InvalidInput(
-                    "update account proof initial account tree root mismatch".to_string(),
-                ));
-            }
-            (
-                update_inputs.block_number,
-                update_inputs.new_account_tree_root,
-            )
-        } else {
-            (
-                prev_public_state.block_number,
-                prev_public_state.account_tree_root,
-            )
-        };
+        if update_account_inputs.prev_account_tree_root != prev_public_state.account_tree_root {
+            return Err(BlockStepError::InvalidInput(
+                "update account proof initial account tree root mismatch".to_string(),
+            ));
+        }
+        let block_number = update_account_inputs.block_number;
+        let account_tree_root = update_account_inputs.new_account_tree_root;
 
         let (deposit_tree_root, deposit_count) = if let Some(deposit_inputs) = &deposit_chain_inputs
         {
