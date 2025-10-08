@@ -1,7 +1,10 @@
 use plonky2::{
     field::extension::Extendable,
     hash::hash_types::RichField,
-    iop::{target::Target, witness::WitnessWrite},
+    iop::{
+        target::{BoolTarget, Target},
+        witness::WitnessWrite,
+    },
     plonk::circuit_builder::CircuitBuilder,
 };
 use thiserror::Error;
@@ -138,6 +141,34 @@ impl ExtendedPublicStateTarget {
         self.deposit_hash_chain
             .connect(builder, other.deposit_hash_chain);
         self.deposit_count.connect(builder, &other.deposit_count);
+    }
+
+    pub fn select<F: RichField + Extendable<D>, const D: usize>(
+        builder: &mut CircuitBuilder<F, D>,
+        condition: BoolTarget,
+        when_true: &Self,
+        when_false: &Self,
+    ) -> Self {
+        Self {
+            inner: PublicStateTarget::select(
+                builder,
+                condition,
+                &when_true.inner,
+                &when_false.inner,
+            ),
+            deposit_hash_chain: Bytes32Target::select(
+                builder,
+                condition,
+                when_true.deposit_hash_chain.clone(),
+                when_false.deposit_hash_chain.clone(),
+            ),
+            deposit_count: U63Target::select(
+                builder,
+                condition,
+                &when_true.deposit_count,
+                &when_false.deposit_count,
+            ),
+        }
     }
 
     pub fn to_vec(&self) -> Vec<Target> {

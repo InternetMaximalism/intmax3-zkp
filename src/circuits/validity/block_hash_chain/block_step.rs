@@ -3,10 +3,7 @@ use std::collections::HashMap;
 use plonky2::{
     field::extension::Extendable,
     hash::hash_types::RichField,
-    iop::{
-        target::{BoolTarget, Target},
-        witness::WitnessWrite,
-    },
+    iop::target::BoolTarget,
     plonk::{
         circuit_builder::CircuitBuilder,
         circuit_data::{CommonCircuitData, VerifierCircuitData},
@@ -36,12 +33,8 @@ use crate::{
     constants::PUBLIC_STATE_TREE_HEIGHT,
     ethereum_types::{bytes32::Bytes32Target, u32limb_trait::U32LimbTargetTrait},
     utils::{
-        conversion::ToU64,
-        leafable::Leafable,
-        poseidon_hash_out::PoseidonHashOutTarget,
-        recursively_verifiable::{
-            add_proof_target_and_conditionally_verify, add_proof_target_and_verify,
-        },
+        conversion::ToU64, leafable::Leafable, poseidon_hash_out::PoseidonHashOutTarget,
+        recursively_verifiable::add_proof_target_and_conditionally_verify,
     },
 };
 
@@ -285,24 +278,213 @@ impl<const D: usize> BlockStepTarget<D> {
         C: GenericConfig<D, F = F> + 'static,
         <C as GenericConfig<D>>::Hasher: AlgebraicHasher<F>,
     {
-        todo!()
-    }
-}
+        assert!(
+            !update_account_vds.is_empty(),
+            "at least one update account verifier must be provided",
+        );
 
-fn enforce_conditional_selection<F: RichField + Extendable<D>, const D: usize>(
-    builder: &mut CircuitBuilder<F, D>,
-    condition: BoolTarget,
-    not_condition: BoolTarget,
-    target: &[Target],
-    when_true: &[Target],
-    when_false: &[Target],
-) {
-    debug_assert_eq!(target.len(), when_true.len());
-    debug_assert_eq!(target.len(), when_false.len());
-    for (selected, expected) in target.iter().zip(when_true.iter()) {
-        builder.conditional_assert_eq(condition.target, *selected, *expected);
-    }
-    for (selected, expected) in target.iter().zip(when_false.iter()) {
-        builder.conditional_assert_eq(not_condition.target, *selected, *expected);
+        let has_prev_block_proof = builder.add_virtual_bool_target_safe();
+        let prev_block_chain_proof = builder.add_virtual_proof_with_pis(block_chain_cd);
+        let prev_inputs_from_proof = BlockChainPublicInputsTarget::from_pis(
+            &prev_block_chain_proof.public_inputs,
+            &block_chain_cd.config,
+        );
+
+        let initial_public_state = ExtendedPublicStateTarget::new(builder, true);
+        let selected_initial_state = ExtendedPublicStateTarget::select(
+            builder,
+            has_prev_block_proof,
+            &prev_inputs_from_proof.initial_ext_public_state,
+            &initial_public_state,
+        );
+        let selected_prev_state = ExtendedPublicStateTarget::select(
+            builder,
+            has_prev_block_proof,
+            &prev_inputs_from_proof.ext_public_state,
+            &initial_public_state,
+        );
+
+        let default_prev_vd =
+            builder.add_virtual_verifier_data(block_chain_cd.config.fri_config.cap_height);
+        let selected_prev_vd = builder.select_verifier_data(
+            has_prev_block_proof,
+            &prev_inputs_from_proof.vd,
+            &default_prev_vd,
+        );
+
+        let mut one_hot = Vec::with_capacity(update_account_vds.len());
+        for _ in update_account_vds {
+            one_hot.push(builder.add_virtual_bool_target_safe());
+        }
+        let hot_sum = one_hot
+            .iter()
+            .fold(builder.zero(), |acc, flag| builder.add(acc, flag.target));
+        builder.assert_one(hot_sum);
+
+        let mut update_account_proofs = Vec::with_capacity(update_account_vds.len());
+        let mut update_account_inputs = Vec::with_capacity(update_account_vds.len());
+        for (flag, (_num_users, vd)) in one_hot.iter().zip(update_account_vds.iter()) {
+            let proof = add_proof_target_and_conditionally_verify(vd, builder, *flag);
+            let inputs = UpdateAccountPublicInputsTarget::from_slice(&proof.public_inputs);
+            update_account_proofs.push(proof);
+            update_account_inputs.push(inputs);
+        }
+
+        let mut selected_update_inputs = update_account_inputs[0].clone();
+        for (flag, inputs) in one_hot
+            .iter()
+            .copied()
+            .zip(update_account_inputs.iter())
+            .skip(1)
+        {
+            selected_update_inputs = UpdateAccountPublicInputsTarget::select(
+                builder,
+                flag,
+                inputs,
+                &selected_update_inputs,
+            );
+        }
+
+        let has_deposit_proof = builder.add_virtual_bool_target_safe();
+        let deposit_hash_chain_proof =
+            add_proof_target_and_conditionally_verify(deposit_chain_vd, builder, has_deposit_proof);
+        let deposit_inputs = DepositChainPublicInputsTarget::from_pis(
+            &deposit_hash_chain_proof.public_inputs,
+            &deposit_chain_vd.common.config,
+        );
+        let deposit_vd_target = builder.constant_verifier_data(&deposit_chain_vd.verifier_only);
+        builder.connect_verifier_data(&deposit_inputs.vd, &deposit_vd_target);
+
+        let prev_public_state_ext = selected_prev_state.clone();
+        let prev_public_state = prev_public_state_ext.inner.clone();
+
+        let next_block_number_value =
+            builder.add_const(prev_public_state.block_number.value, F::ONE);
+        builder.range_check(next_block_number_value, 63);
+        builder.connect(
+            selected_update_inputs.block_number.value,
+            next_block_number_value,
+        );
+        let next_block_number = U63Target {
+            value: next_block_number_value,
+        };
+
+        selected_update_inputs
+            .prev_account_tree_root
+            .connect(builder, prev_public_state.account_tree_root.clone());
+        let account_tree_root = selected_update_inputs.new_account_tree_root.clone();
+
+        let deposit_hash_eq = prev_public_state_ext
+            .deposit_hash_chain
+            .is_equal(builder, &selected_update_inputs.deposit_hash_chain);
+        let deposit_hash_changed = builder.not(deposit_hash_eq);
+        builder.connect(has_deposit_proof.target, deposit_hash_changed.target);
+
+        deposit_inputs
+            .initial_deposit_hash_chain
+            .conditional_assert_eq(
+                builder,
+                prev_public_state_ext.deposit_hash_chain.clone(),
+                has_deposit_proof,
+            );
+        deposit_inputs
+            .initial_deposit_tree_root
+            .conditional_assert_eq(
+                builder,
+                prev_public_state.deposit_tree_root.clone(),
+                has_deposit_proof,
+            );
+        builder.conditional_assert_eq(
+            has_deposit_proof.target,
+            deposit_inputs.initial_deposit_count.value,
+            prev_public_state_ext.deposit_count.value,
+        );
+        deposit_inputs.deposit_hash_chain.conditional_assert_eq(
+            builder,
+            selected_update_inputs.deposit_hash_chain.clone(),
+            has_deposit_proof,
+        );
+
+        let selected_deposit_hash_chain = Bytes32Target::select(
+            builder,
+            has_deposit_proof,
+            deposit_inputs.deposit_hash_chain.clone(),
+            prev_public_state_ext.deposit_hash_chain.clone(),
+        );
+        let selected_deposit_tree_root = PoseidonHashOutTarget::select(
+            builder,
+            has_deposit_proof,
+            deposit_inputs.deposit_tree_root.clone(),
+            prev_public_state.deposit_tree_root.clone(),
+        );
+        let selected_deposit_count = U63Target::select(
+            builder,
+            has_deposit_proof,
+            &deposit_inputs.deposit_count,
+            &prev_public_state_ext.deposit_count,
+        );
+
+        let public_state_merkle_proof =
+            PublicStateMerkleProofTarget::new(builder, PUBLIC_STATE_TREE_HEIGHT);
+        let empty_public_state_target =
+            PublicStateTarget::constant(builder, &PublicState::empty_leaf());
+        public_state_merkle_proof.verify::<F, C, D>(
+            builder,
+            &empty_public_state_target,
+            prev_public_state.block_number.value,
+            prev_public_state.prev_public_state_root.clone(),
+        );
+        let prev_public_state_root = public_state_merkle_proof.get_root::<F, C, D>(
+            builder,
+            &prev_public_state,
+            prev_public_state.block_number.value,
+        );
+
+        let new_pis = BlockChainPublicInputsTarget::new(builder, &block_chain_cd.config);
+        new_pis
+            .initial_ext_public_state
+            .connect(builder, &selected_initial_state);
+        builder.connect_verifier_data(&new_pis.vd, &selected_prev_vd);
+
+        new_pis
+            .ext_public_state
+            .inner
+            .block_number
+            .connect(builder, &next_block_number);
+        new_pis
+            .ext_public_state
+            .inner
+            .account_tree_root
+            .connect(builder, account_tree_root);
+        new_pis
+            .ext_public_state
+            .inner
+            .deposit_tree_root
+            .connect(builder, selected_deposit_tree_root);
+        new_pis
+            .ext_public_state
+            .inner
+            .prev_public_state_root
+            .connect(builder, prev_public_state_root);
+        new_pis
+            .ext_public_state
+            .deposit_hash_chain
+            .connect(builder, selected_deposit_hash_chain);
+        new_pis
+            .ext_public_state
+            .deposit_count
+            .connect(builder, &selected_deposit_count);
+
+        Self {
+            one_hot,
+            has_prev_block_proof,
+            has_deposit_proof,
+            initial_public_state,
+            prev_block_chain_proof,
+            deposit_hash_chain_proof,
+            update_account_proofs,
+            public_state_merkle_proof,
+            new_pis,
+        }
     }
 }

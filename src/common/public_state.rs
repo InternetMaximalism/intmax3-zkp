@@ -23,7 +23,7 @@ use crate::{
             deposit_tree::DepositTree,
             public_state_tree::PublicStateTree,
         },
-        u63::{BlockNumber, BlockNumberError, BlockNumberTarget},
+        u63::{BlockNumber, BlockNumberError, BlockNumberTarget, U63Target},
         user_id::{UserId, UserIdError},
     },
     constants::get_num_users,
@@ -220,6 +220,40 @@ impl PublicStateTarget {
             prev_public_state_root: PoseidonHashOutTarget::constant(
                 builder,
                 value.prev_public_state_root,
+            ),
+        }
+    }
+
+    pub fn select<F: RichField + Extendable<D>, const D: usize>(
+        builder: &mut CircuitBuilder<F, D>,
+        condition: BoolTarget,
+        when_true: &Self,
+        when_false: &Self,
+    ) -> Self {
+        Self {
+            block_number: U63Target::select(
+                builder,
+                condition,
+                &when_true.block_number,
+                &when_false.block_number,
+            ),
+            account_tree_root: PoseidonHashOutTarget::select(
+                builder,
+                condition,
+                when_true.account_tree_root.clone(),
+                when_false.account_tree_root.clone(),
+            ),
+            deposit_tree_root: PoseidonHashOutTarget::select(
+                builder,
+                condition,
+                when_true.deposit_tree_root.clone(),
+                when_false.deposit_tree_root.clone(),
+            ),
+            prev_public_state_root: PoseidonHashOutTarget::select(
+                builder,
+                condition,
+                when_true.prev_public_state_root.clone(),
+                when_false.prev_public_state_root.clone(),
             ),
         }
     }

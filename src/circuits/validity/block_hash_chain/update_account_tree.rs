@@ -5,7 +5,7 @@ use crate::{
             AccountLeaf, AccountLeafTarget, AccountMerkleProof, AccountMerkleProofTarget, SendLeaf,
             SendLeafTarget, SendMerkleProof, SendMerkleProofTarget,
         },
-        u63::{BlockNumber, BlockNumberTarget},
+        u63::{BlockNumber, BlockNumberTarget, U63Target},
         user_id::{UserId, UserIdError, UserIdTarget},
     },
     constants::{ACCOUNT_TREE_HEIGHT, SEND_TREE_HEIGHT},
@@ -22,7 +22,7 @@ use plonky2::{
     field::{extension::Extendable, types::Field},
     hash::hash_types::RichField,
     iop::{
-        target::Target,
+        target::{BoolTarget, Target},
         witness::{PartialWitness, WitnessWrite},
     },
     plonk::{
@@ -303,6 +303,52 @@ impl UpdateAccountPublicInputsTarget {
             .set_witness(witness, value.new_account_tree_root);
         self.deposit_hash_chain
             .set_witness(witness, value.deposit_hash_chain);
+    }
+
+    pub fn select<F: RichField + Extendable<D>, const D: usize>(
+        builder: &mut CircuitBuilder<F, D>,
+        condition: BoolTarget,
+        when_true: &Self,
+        when_false: &Self,
+    ) -> Self {
+        Self {
+            block_number: U63Target::select(
+                builder,
+                condition,
+                &when_true.block_number,
+                &when_false.block_number,
+            ),
+            prev_block_hash_chain: Bytes32Target::select(
+                builder,
+                condition,
+                when_true.prev_block_hash_chain.clone(),
+                when_false.prev_block_hash_chain.clone(),
+            ),
+            prev_account_tree_root: PoseidonHashOutTarget::select(
+                builder,
+                condition,
+                when_true.prev_account_tree_root.clone(),
+                when_false.prev_account_tree_root.clone(),
+            ),
+            new_block_hash_chain: Bytes32Target::select(
+                builder,
+                condition,
+                when_true.new_block_hash_chain.clone(),
+                when_false.new_block_hash_chain.clone(),
+            ),
+            new_account_tree_root: PoseidonHashOutTarget::select(
+                builder,
+                condition,
+                when_true.new_account_tree_root.clone(),
+                when_false.new_account_tree_root.clone(),
+            ),
+            deposit_hash_chain: Bytes32Target::select(
+                builder,
+                condition,
+                when_true.deposit_hash_chain.clone(),
+                when_false.deposit_hash_chain.clone(),
+            ),
+        }
     }
 }
 
