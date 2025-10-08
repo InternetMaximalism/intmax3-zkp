@@ -158,6 +158,7 @@ impl Leafable for PublicState {
             block_number: Default::default(),
             account_tree_root: Default::default(),
             deposit_tree_root: Default::default(),
+            deposit_count: 0,
             prev_public_state_root: Default::default(),
         }
     }
