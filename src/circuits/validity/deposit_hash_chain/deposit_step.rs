@@ -387,87 +387,86 @@ where
     }
 }
 
-// #[cfg(test)]
-// mod tests {
-//     use super::*;
-//     use crate::{
-//         common::{deposit::Deposit, trees::deposit_tree::DepositTree, u63::U63},
-//         ethereum_types::{address::Address, bytes32::Bytes32, u256::U256},
-//         utils::cyclic::simple_recursion_circuit_data,
-//     };
-//     use plonky2::{
-//         field::goldilocks_field::GoldilocksField, plonk::config::PoseidonGoldilocksConfig,
-//         recursion::dummy_circuit::dummy_circuit,
-//     };
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{
+        circuits::validity::deposit_hash_chain::deposit_chain_pis::DEPOSIT_CHAIN_PUBLIC_INPUTS_LEN,
+        common::{deposit::Deposit, trees::deposit_tree::DepositTree, u63::U63},
+        ethereum_types::{address::Address, bytes32::Bytes32, u256::U256},
+        utils::cyclic::{TestCyclicCircuit, vd_vec_len},
+    };
+    use plonky2::{
+        field::goldilocks_field::GoldilocksField, plonk::config::PoseidonGoldilocksConfig,
+    };
 
-//     const D: usize = 2;
-//     type F = GoldilocksField;
-//     type C = PoseidonGoldilocksConfig;
+    const D: usize = 2;
+    type F = GoldilocksField;
+    type C = PoseidonGoldilocksConfig;
 
-//     #[test]
-//     fn test_deposit_step_circuit_initial() {
-//         // Initial deposit chain state.
-//         let initial_deposit_hash_chain = Bytes32::default();
-//         let deposit_tree = DepositTree::init();
-//         let initial_deposit_tree_root = deposit_tree.get_root();
-//         let initial_deposit_count = U63::default();
-//         let deposit_index = 0u64;
-//         let deposit_merkle_proof = deposit_tree.prove(deposit_index);
+    #[cfg_attr(debug_assertions, ignore = "run with --release")]
+    #[test]
+    fn test_deposit_step_circuit_initial() {
+        // build dummy circuits
+        let deposit_chain_config = CircuitConfig::standard_recursion_config();
+        let pis_len = DEPOSIT_CHAIN_PUBLIC_INPUTS_LEN + vd_vec_len(&deposit_chain_config);
+        let deposit_chain_cd = TestCyclicCircuit::<F, C, D>::generate_cd(pis_len);
+        let deposit_chain_circuit =
+            TestCyclicCircuit::<F, C, D>::new(deposit_chain_config, pis_len, &deposit_chain_cd);
+        let deposit_chain_vd = deposit_chain_circuit.data.verifier_data();
 
-//         // Deposit to be appended.
-//         let deposit = Deposit {
-//             depositor: Address::default(),
-//             recipient: Bytes32::default(),
-//             token_index: 0,
-//             amount: U256::from(5u32),
-//             block_number: U63::default(),
-//             aux_data: Bytes32::default(),
-//         };
+        // Initial deposit chain state.
+        let initial_deposit_hash_chain = Bytes32::default();
+        let deposit_tree = DepositTree::init();
+        let initial_deposit_tree_root = deposit_tree.get_root();
+        let initial_deposit_count = U63::default();
+        let deposit_index = 0u64;
+        let deposit_merkle_proof = deposit_tree.prove(deposit_index);
 
-//         // Expected new state after the deposit.
-//         let mut deposit_tree_after = deposit_tree.clone();
-//         deposit_tree_after.push(deposit.clone());
-//         let expected_deposit_tree_root = deposit_tree_after.get_root();
-//         let expected_deposit_hash_chain =
-// deposit.hash_with_prev_hash(initial_deposit_hash_chain);
+        // Deposit to be appended.
+        let deposit = Deposit {
+            depositor: Address::default(),
+            recipient: Bytes32::default(),
+            token_index: 0,
+            amount: U256::from(5u32),
+            block_number: U63::default(),
+            aux_data: Bytes32::default(),
+        };
 
-//         // Build verifying data for the previous deposit chain circuit.
-//         let deposit_chain_base = simple_recursion_circuit_data::<F, C, D>();
-//         let dummy_chain = dummy_circuit::<F, C, D>(&deposit_chain_base.common);
-//         let deposit_chain_vd = dummy_chain.verifier_data();
-//         let dummy_prev_proof = dummy_chain
-//             .prove(PartialWitness::new())
-//             .expect("dummy deposit proof");
+        // Expected new state after the deposit.
+        let mut deposit_tree_after = deposit_tree.clone();
+        deposit_tree_after.push(deposit.clone());
+        let expected_deposit_tree_root = deposit_tree_after.get_root();
+        let expected_deposit_hash_chain = deposit.hash_with_prev_hash(initial_deposit_hash_chain);
 
-//         let witness = DepositStepWitness::<F, C, D> {
-//             initial_value: Some((
-//                 initial_deposit_hash_chain,
-//                 initial_deposit_tree_root,
-//                 initial_deposit_count,
-//             )),
-//             prev_deposit_chain_proof: None,
-//             deposit: deposit.clone(),
-//             deposit_merkle_proof: deposit_merkle_proof.clone(),
-//         };
+        let witness = DepositStepWitness::<F, C, D> {
+            initial_value: Some((
+                initial_deposit_hash_chain,
+                initial_deposit_tree_root,
+                initial_deposit_count,
+            )),
+            prev_deposit_chain_proof: None,
+            deposit: deposit.clone(),
+            deposit_merkle_proof: deposit_merkle_proof.clone(),
+        };
 
-//         let expected_public_inputs = witness
-//             .to_public_inputs(&deposit_chain_vd)
-//             .expect("public inputs");
-//         assert_eq!(expected_public_inputs.deposit_count.as_u64(), 1);
-//         assert_eq!(
-//             expected_public_inputs.deposit_tree_root,
-//             expected_deposit_tree_root
-//         );
-//         assert_eq!(
-//             expected_public_inputs.deposit_hash_chain,
-//             expected_deposit_hash_chain
-//         );
+        let expected_public_inputs = witness
+            .to_public_inputs(&deposit_chain_vd)
+            .expect("public inputs");
+        assert_eq!(expected_public_inputs.deposit_count.as_u64(), 1);
+        assert_eq!(
+            expected_public_inputs.deposit_tree_root,
+            expected_deposit_tree_root
+        );
+        assert_eq!(
+            expected_public_inputs.deposit_hash_chain,
+            expected_deposit_hash_chain
+        );
 
-//         let circuit =
-//             DepositStepCircuit::<F, C, D>::new(&deposit_chain_vd, dummy_prev_proof.clone());
-//         let proof = circuit
-//             .prove(&witness)
-//             .expect("deposit step proof should succeed");
-//         circuit.verify(proof).expect("proof verifies");
-//     }
-// }
+        let circuit = DepositStepCircuit::<F, C, D>::new(&deposit_chain_cd);
+        let proof = circuit
+            .prove(&deposit_chain_vd, &witness)
+            .expect("deposit step proof should succeed");
+        circuit.verify(proof).expect("proof verifies");
+    }
+}
