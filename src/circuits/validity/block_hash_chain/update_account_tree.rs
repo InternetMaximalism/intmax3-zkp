@@ -177,6 +177,10 @@ impl UpdateAccountPublicInputs {
         result
     }
 
+    pub fn commitment(&self) -> PoseidonHashOut {
+        PoseidonHashOut::hash_inputs_u64(&self.to_u64_vec())
+    }
+
     pub fn from_u64_slice(values: &[u64]) -> Result<Self, UpdateAccountTreeError> {
         if values.len() != UPDATE_ACCOUNT_PUBLIC_INPUTS_LEN {
             return Err(UpdateAccountTreeError::InvalidLength(format!(
@@ -246,6 +250,14 @@ impl UpdateAccountPublicInputsTarget {
             self.deposit_hash_chain.to_vec(),
         ]
         .concat()
+    }
+
+    pub fn commitment<F: RichField + Extendable<D>, const D: usize>(
+        &self,
+        builder: &mut CircuitBuilder<F, D>,
+    ) -> PoseidonHashOutTarget {
+        let inputs = self.to_vec();
+        PoseidonHashOutTarget::hash_inputs(builder, &inputs)
     }
 
     pub fn from_slice(values: &[Target]) -> Self {

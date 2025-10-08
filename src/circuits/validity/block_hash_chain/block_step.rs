@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use plonky2::{
     field::extension::Extendable,
     hash::hash_types::RichField,
-    iop::target::BoolTarget,
+    iop::{target::BoolTarget, witness::WitnessWrite},
     plonk::{
         circuit_builder::CircuitBuilder,
         circuit_data::{CommonCircuitData, VerifierCircuitData, VerifierCircuitTarget},
@@ -70,6 +70,9 @@ pub struct BlockStepWitness<
 > where
     <C as GenericConfig<D>>::Hasher: AlgebraicHasher<F>,
 {
+    // paddind number of users in this block (must be > 0)
+    pub num_users: u32,
+
     pub initial_public_state: Option<ExtendedPublicState>,
 
     // Previous block hash chain proof if not the first block
@@ -77,9 +80,6 @@ pub struct BlockStepWitness<
 
     // Deposit hash chain proof if there is a deposit in this block
     pub deposit_hash_chain_proof: Option<ProofWithPublicInputs<F, C, D>>,
-
-    // paddind number of users in this block (must be > 0)
-    pub num_users: u32,
 
     // Update account proof corresponding to this block
     pub update_account_proof: ProofWithPublicInputs<F, C, D>,
@@ -261,8 +261,8 @@ pub struct BlockStepTarget<const D: usize> {
 
     // Update account proof different for each number of users
     pub update_account_proofs: Vec<ProofWithPublicInputsTarget<D>>,
-    pub public_state_merkle_proof: PublicStateMerkleProofTarget,
 
+    pub public_state_merkle_proof: PublicStateMerkleProofTarget,
     pub block_chain_vd: VerifierCircuitTarget,
 
     pub new_pis: BlockChainPublicInputsTarget,
@@ -479,5 +479,93 @@ impl<const D: usize> BlockStepTarget<D> {
             block_chain_vd,
             new_pis,
         }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn set_witness<F, C, W>(
+        &self,
+        witness: &mut W,
+        value: &BlockStepWitness<F, C, D>,
+        block_chain_vd: &VerifierCircuitData<F, C, D>,
+        update_account_vds: &[(u32, VerifierCircuitData<F, C, D>)],
+        new_public_inputs: &BlockChainPublicInputs<F, C, D>,
+        dummy_prev_block_proof: &ProofWithPublicInputs<F, C, D>,
+        dummy_deposit_proof: &ProofWithPublicInputs<F, C, D>,
+        dummy_update_proofs: &HashMap<u32, ProofWithPublicInputs<F, C, D>>,
+    ) -> Result<(), BlockStepError>
+    where
+        F: RichField + Extendable<D>,
+        C: GenericConfig<D, F = F>,
+        <C as GenericConfig<D>>::Hasher: AlgebraicHasher<F>,
+        W: WitnessWrite<F>,
+    {
+        let has_prev_block = value.prev_block_chain_proof.is_some();
+        witness.set_bool_target(self.has_prev_block_proof, has_prev_block);
+        if let Some(proof) = &value.prev_block_chain_proof {
+            witness.set_proof_with_pis_target(&self.prev_block_chain_proof, proof);
+        } else {
+            witness.set_proof_with_pis_target(&self.prev_block_chain_proof, dummy_prev_block_proof);
+        }
+
+        if !has_prev_block && value.initial_public_state.is_none() {
+            return Err(BlockStepError::InvalidInput(
+                "initial_public_state must be provided when previous block proof is absent"
+                    .to_string(),
+            ));
+        }
+
+        if let Some(initial_state) = &value.initial_public_state {
+            self.initial_public_state
+                .set_witness(witness, initial_state);
+        } else {
+            self.initial_public_state
+                .set_witness(witness, &ExtendedPublicState::default());
+        }
+
+        let has_deposit_proof = value.deposit_hash_chain_proof.is_some();
+        witness.set_bool_target(self.has_deposit_proof, has_deposit_proof);
+        if let Some(proof) = &value.deposit_hash_chain_proof {
+            witness.set_proof_with_pis_target(&self.deposit_hash_chain_proof, proof);
+        } else {
+            witness.set_proof_with_pis_target(&self.deposit_hash_chain_proof, dummy_deposit_proof);
+        }
+
+        let mut matched_update_proof = false;
+        for ((flag_target, proof_target), (num_users, _vd)) in self
+            .one_hot
+            .iter()
+            .zip(self.update_account_proofs.iter())
+            .zip(update_account_vds.iter())
+        {
+            let is_selected = value.num_users == *num_users;
+            witness.set_bool_target(*flag_target, is_selected);
+            if is_selected {
+                matched_update_proof = true;
+                witness.set_proof_with_pis_target(proof_target, &value.update_account_proof);
+            } else {
+                let dummy_proof = dummy_update_proofs.get(num_users).ok_or_else(|| {
+                    BlockStepError::InvalidInput(format!(
+                        "dummy update-account proof missing for num_users {}",
+                        num_users
+                    ))
+                })?;
+                witness.set_proof_with_pis_target(proof_target, dummy_proof);
+            }
+        }
+
+        if !matched_update_proof {
+            return Err(BlockStepError::MissingUpdateAccountVerifierData(
+                value.num_users,
+            ));
+        }
+
+        self.public_state_merkle_proof
+            .set_witness(witness, &value.public_state_merkle_proof);
+
+        witness.set_verifier_data_target(&self.block_chain_vd, &block_chain_vd.verifier_only);
+        self.new_pis
+            .set_witness::<F, C, D, _>(witness, new_public_inputs);
+
+        Ok(())
     }
 }
