@@ -23,7 +23,7 @@ use crate::{
             update_public_state::{UpdatePublicState, UpdatePublicStateTarget},
         },
     },
-    common::block_number::{BlockNumber, BlockNumberTarget},
+    common::u63::{BlockNumber, BlockNumberTarget},
     ethereum_types::u32limb_trait::U32LimbTargetTrait as _,
     utils::conversion::ToU64,
 };
@@ -167,7 +167,7 @@ where
             )));
         }
 
-        if self.account_state.account_leaf.prev != BlockNumber(0) {
+        if self.account_state.account_leaf.prev != BlockNumber::default() {
             if self.account_state.send_leaf.prev > prev_block_r {
                 return Err(ReceiveDepositError::BlockNumberError(format!(
                     "Not account_state.send_leaf.prev <= prev_balance_pis.block_r: {:?} <= {:?}",
@@ -433,7 +433,6 @@ mod tests {
             },
         },
         common::{
-            block_number::BlockNumber,
             deposit::Deposit,
             private_state::FullPrivateState,
             public_state::PublicState,
@@ -444,6 +443,7 @@ mod tests {
                 deposit_tree::DepositTree,
                 nullifier_tree::NullifierTree,
             },
+            u63::BlockNumber,
             user_id::UserId,
         },
         constants::{ACCOUNT_TREE_HEIGHT, ASSET_TREE_HEIGHT, SEND_TREE_HEIGHT},
@@ -515,8 +515,8 @@ mod tests {
         };
 
         let mut account_tree = AccountTree::new(ACCOUNT_TREE_HEIGHT);
-        account_tree.update(receiver_user_id.0, account_leaf.clone());
-        let account_merkle_proof = account_tree.prove(receiver_user_id.0);
+        account_tree.update(receiver_user_id.as_u64(), account_leaf.clone());
+        let account_merkle_proof = account_tree.prove(receiver_user_id.as_u64());
         let account_tree_root = account_tree.get_root();
 
         let account_state = AccountState::new(

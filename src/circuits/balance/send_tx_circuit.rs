@@ -21,7 +21,7 @@ use crate::{
             update_public_state::{UpdatePublicState, UpdatePublicStateTarget},
         },
     },
-    common::block_number::BlockNumberTarget,
+    common::u63::BlockNumberTarget,
     utils::{conversion::ToU64, cyclic::add_const_gates, poseidon_hash_out::PoseidonHashOutTarget},
 };
 
@@ -96,7 +96,8 @@ where
         if self.tx_settlement.user_id != prev_balance_pis.user_id {
             return Err(SpendTxError::ConnectionError(format!(
                 "tx_settlement.user_id: {}, prev_balance_pis.user_id: {}",
-                self.tx_settlement.user_id.0, prev_balance_pis.user_id.0
+                self.tx_settlement.user_id.as_u64(),
+                prev_balance_pis.user_id.as_u64()
             )));
         }
         let spend_pis = self
@@ -325,7 +326,6 @@ mod tests {
             spend_circuit::{SpendCircuit, SpendWitness},
         },
         common::{
-            block_number::BlockNumber,
             private_state::FullPrivateState,
             public_state::PublicState,
             salt::Salt,
@@ -336,6 +336,7 @@ mod tests {
                 tx_tree::TxTree,
             },
             tx::Tx,
+            u63::BlockNumber,
             user_id::UserId,
         },
         constants::{
@@ -440,8 +441,8 @@ mod tests {
             send_tree_root: send_tree.get_root(),
         };
         let user_id = UserId::new(0, local_id).unwrap();
-        account_tree.update(user_id.0, account_leaf.clone());
-        let account_merkle_proof = account_tree.prove(user_id.0);
+        account_tree.update(user_id.as_u64(), account_leaf.clone());
+        let account_merkle_proof = account_tree.prove(user_id.as_u64());
         let account_tree_root = account_tree.get_root();
 
         let public_state = PublicState {
@@ -523,7 +524,7 @@ mod tests {
         let expected_fields = expected_u64.to_field_vec::<F>();
 
         assert_eq!(proof.public_inputs, expected_fields);
-        assert_eq!(expected_pis.pis.user_id.0, user_id.0);
+        assert_eq!(expected_pis.pis.user_id.as_u64(), user_id.as_u64());
         assert_eq!(expected_pis.pis.block_r, BlockNumber::new(3).unwrap());
         assert_eq!(
             expected_pis.pis.private_commitment,

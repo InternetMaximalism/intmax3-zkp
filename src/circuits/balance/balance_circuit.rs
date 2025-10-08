@@ -163,7 +163,7 @@ mod tests {
         let balance_vd = balance_circuit.data.verifier_data();
 
         let mut rng = rand::thread_rng();
-        let user_id = UserId(1);
+        let user_id = UserId::new(0, 1).unwrap();
         let salt = Salt::rand(&mut rng);
 
         let switch_board_witness = BalanceSwichBoard::<F, C, D> {

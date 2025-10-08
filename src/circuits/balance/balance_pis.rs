@@ -14,10 +14,10 @@ use thiserror::Error;
 
 use crate::{
     common::{
-        block_number::{BlockNumber, BlockNumberTarget},
         private_state::PrivateState,
         public_state::{PUBLIC_STATE_U64_LEN, PublicState, PublicStateTarget},
         salt::Salt,
+        u63::{BlockNumber, BlockNumberTarget},
         user_id::{UserId, UserIdTarget},
     },
     utils::{
@@ -66,14 +66,14 @@ impl BalancePublicInputs {
         Self {
             user_id,
             public_state: PublicState::default(),
-            block_r: BlockNumber(0),
+            block_r: BlockNumber::default(),
             private_commitment: PrivateState::new(salt).commitment(),
         }
     }
 
     pub fn to_u64_vec(&self) -> Vec<u64> {
         [
-            vec![self.user_id.0],
+            vec![self.user_id.as_u64()],
             self.public_state.to_u64_vec(),
             self.block_r.to_u64_vec(),
             self.private_commitment.to_u64_vec(),
@@ -92,7 +92,11 @@ impl BalancePublicInputs {
 
         let mut cursor = 0;
 
-        let user_id = UserId(pis[cursor]);
+        let user_id =
+            UserId::try_from(pis[cursor]).map_err(|e| BalancePublicInputsError::ParseError {
+                field: "user_id",
+                message: e.to_string(),
+            })?;
         cursor += 1;
 
         let public_state = PublicState::from_u64_slice(&pis[cursor..cursor + PUBLIC_STATE_U64_LEN])

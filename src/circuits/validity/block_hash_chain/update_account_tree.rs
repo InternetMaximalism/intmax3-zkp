@@ -1,11 +1,11 @@
 use crate::{
     common::{
         block::{Block, BlockError, BlockTarget},
-        block_number::{BlockNumber, BlockNumberTarget},
         trees::account_tree::{
             AccountLeaf, AccountLeafTarget, AccountMerkleProof, AccountMerkleProofTarget, SendLeaf,
             SendLeafTarget, SendMerkleProof, SendMerkleProofTarget,
         },
+        u63::{BlockNumber, BlockNumberTarget},
         user_id::{UserId, UserIdError, UserIdTarget},
     },
     constants::{ACCOUNT_TREE_HEIGHT, SEND_TREE_HEIGHT},
@@ -107,7 +107,7 @@ impl UpdateAccountTree {
 
             // verify the inclusion of prev_account_leaf in the account tree
             account_merkle_proof
-                .verify(&prev_account_leaf, user_id.0, account_tree_root)
+                .verify(&prev_account_leaf, user_id.as_u64(), account_tree_root)
                 .map_err(|e| {
                     UpdateAccountTreeError::MerkleProofError(format!(
                         "failed to verify account merkle proof for i {}: {}",
@@ -149,7 +149,7 @@ impl UpdateAccountTree {
                 prev: self.block_number,
                 send_tree_root: new_send_tree_root,
             };
-            account_tree_root = account_merkle_proof.get_root(&new_account_leaf, user_id.0);
+            account_tree_root = account_merkle_proof.get_root(&new_account_leaf, user_id.as_u64());
         }
 
         Ok(UpdateAccountPublicInputs {
@@ -421,8 +421,8 @@ mod tests {
     use crate::{
         common::{
             block::Block,
-            block_number::BlockNumber,
             trees::account_tree::{AccountLeaf, AccountTree, SendLeaf, SendTree},
+            u63::BlockNumber,
             user_id::UserId,
         },
         ethereum_types::bytes32::Bytes32,
@@ -438,7 +438,7 @@ mod tests {
 
     #[test]
     fn test_update_account_tree_circuit() {
-        let block_number = BlockNumber(20);
+        let block_number = BlockNumber::new(20).unwrap();
         let aggregator_id = 5u32;
         let num_users = 2;
 
@@ -451,8 +451,8 @@ mod tests {
         let user1 = UserId::new(aggregator_id, 1).unwrap();
         let mut send_tree_user1 = SendTree::init();
         let send_leaf_user1_prev = SendLeaf {
-            prev: BlockNumber(0),
-            cur: BlockNumber(10),
+            prev: BlockNumber::default(),
+            cur: BlockNumber::new(10).unwrap(),
             tx_tree_root: Bytes32::rand(&mut rng),
         };
         send_tree_user1.push(send_leaf_user1_prev.clone());
@@ -465,7 +465,7 @@ mod tests {
         let user2 = UserId::new(aggregator_id, 2).unwrap();
         let mut send_tree_user2 = SendTree::init();
         let send_leaf_user2_prev = SendLeaf {
-            prev: BlockNumber(7),
+            prev: BlockNumber::new(7).unwrap(),
             cur: block_number,
             tx_tree_root: Bytes32::rand(&mut rng),
         };
@@ -477,12 +477,18 @@ mod tests {
         };
 
         let mut account_tree = AccountTree::new(ACCOUNT_TREE_HEIGHT);
-        account_tree.update(user1.0, prev_account_leaf_user1.clone());
-        account_tree.update(user2.0, prev_account_leaf_user2.clone());
+        account_tree.update(user1.as_u64(), prev_account_leaf_user1.clone());
+        account_tree.update(user2.as_u64(), prev_account_leaf_user2.clone());
 
         let prev_account_tree_root = account_tree.get_root();
-        assert_eq!(account_tree.get_leaf(user1.0), prev_account_leaf_user1);
-        assert_eq!(account_tree.get_leaf(user2.0), prev_account_leaf_user2);
+        assert_eq!(
+            account_tree.get_leaf(user1.as_u64()),
+            prev_account_leaf_user1
+        );
+        assert_eq!(
+            account_tree.get_leaf(user2.as_u64()),
+            prev_account_leaf_user2
+        );
 
         let block = Block::new(
             num_users,
@@ -516,7 +522,7 @@ mod tests {
                 continue;
             }
             let user_id = UserId::new(aggregator_id, local_id).unwrap();
-            let proof = account_tree_for_proofs.prove(user_id.0);
+            let proof = account_tree_for_proofs.prove(user_id.as_u64());
             account_merkle_proofs.push(proof);
 
             let prev_leaf = &prev_account_leaves[i];
@@ -533,7 +539,7 @@ mod tests {
                     prev: block_number,
                     send_tree_root: new_send_root,
                 };
-                account_tree_for_proofs.update(user_id.0, new_account_leaf);
+                account_tree_for_proofs.update(user_id.as_u64(), new_account_leaf);
             }
         }
 
@@ -562,7 +568,7 @@ mod tests {
             prev: block_number,
             send_tree_root: new_send_root_user1,
         };
-        expected_tree.update(user1.0, new_account_leaf_user1);
+        expected_tree.update(user1.as_u64(), new_account_leaf_user1);
 
         assert_eq!(public_inputs.prev_account_tree_root, prev_account_tree_root);
         assert_eq!(

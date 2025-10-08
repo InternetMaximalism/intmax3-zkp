@@ -21,10 +21,10 @@ use crate::{
         BalancePublicInputsError, BalancePublicInputsTarget,
     },
     common::{
-        block_number::BlockNumberTarget,
         private_state::{PrivateState, PrivateStateTarget},
         public_state::PublicStateTarget,
         salt::{Salt, SaltTarget},
+        u63::BlockNumberTarget,
         user_id::{UserId, UserIdTarget},
     },
     utils::{
@@ -219,7 +219,7 @@ impl<const D: usize> BalanceSwichBoardTarget<D> {
             salt: initial_salt,
         };
         let initial_private_commitment = initial_private_state.commitment(builder);
-        let default_pis = BalancePublicInputs::new(UserId(0), Salt::default());
+        let default_pis = BalancePublicInputs::new(UserId::dummy(), Salt::default());
         let initial_pis = BalancePublicInputsTarget {
             user_id: initial_user_id.clone(),
             public_state: PublicStateTarget::constant(builder, &default_pis.public_state),
@@ -330,7 +330,7 @@ impl<const D: usize> BalanceSwichBoardTarget<D> {
             self.initial_value.0.set_witness(witness, user_id);
             self.initial_value.1.set_witness(witness, salt);
         } else {
-            self.initial_value.0.set_witness(witness, UserId(0));
+            self.initial_value.0.set_witness(witness, UserId::dummy());
             self.initial_value.1.set_witness(witness, Salt::default());
         }
 
@@ -478,9 +478,7 @@ mod tests {
     use super::*;
     use crate::{
         circuits::balance::balance_pis::BalanceFullPublicInputs,
-        common::{
-            block_number::BlockNumber, public_state::PublicState, salt::Salt, user_id::UserId,
-        },
+        common::{public_state::PublicState, salt::Salt, u63::BlockNumber, user_id::UserId},
         utils::{conversion::ToField, cyclic::add_noop_gates, poseidon_hash_out::PoseidonHashOut},
     };
     use plonky2::{

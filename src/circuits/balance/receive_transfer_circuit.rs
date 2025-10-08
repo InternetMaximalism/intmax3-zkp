@@ -28,8 +28,8 @@ use crate::{
         },
     },
     common::{
-        block_number::{BlockNumber, BlockNumberTarget},
         salt::{Salt, SaltTarget},
+        u63::{BlockNumber, BlockNumberTarget},
     },
     ethereum_types::u32limb_trait::U32LimbTargetTrait,
     utils::{conversion::ToU64, cyclic::add_const_gates},
@@ -216,7 +216,7 @@ where
         }
 
         // if there is a previous outgoing tx check additional conditions
-        if self.account_state.account_leaf.prev != BlockNumber(0) {
+        if self.account_state.account_leaf.prev != BlockNumber::default() {
             // account_witness.send_leaf.prev <= receiver_balance_proof.block_r
             if self.account_state.send_leaf.prev > prev_block_r {
                 return Err(ReceiveTransferError::BlockNumberError(format!(
@@ -585,7 +585,6 @@ mod tests {
             spend_circuit::{SpendCircuit, SpendWitness},
         },
         common::{
-            block_number::BlockNumber,
             private_state::FullPrivateState,
             public_state::PublicState,
             salt::Salt,
@@ -598,6 +597,7 @@ mod tests {
                 tx_tree::TxTree,
             },
             tx::Tx,
+            u63::BlockNumber,
             user_id::UserId,
         },
         constants::{
@@ -722,10 +722,10 @@ mod tests {
         };
 
         let mut account_tree = AccountTree::new(ACCOUNT_TREE_HEIGHT);
-        account_tree.update(sender_user_id.0, account_leaf_sender.clone());
-        account_tree.update(receiver_user_id.0, account_leaf_receiver.clone());
-        let sender_account_merkle_proof = account_tree.prove(sender_user_id.0);
-        let receiver_account_merkle_proof = account_tree.prove(receiver_user_id.0);
+        account_tree.update(sender_user_id.as_u64(), account_leaf_sender.clone());
+        account_tree.update(receiver_user_id.as_u64(), account_leaf_receiver.clone());
+        let sender_account_merkle_proof = account_tree.prove(sender_user_id.as_u64());
+        let receiver_account_merkle_proof = account_tree.prove(receiver_user_id.as_u64());
         let account_tree_root = account_tree.get_root();
 
         let account_state_sender = AccountState::new(

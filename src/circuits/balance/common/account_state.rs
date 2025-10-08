@@ -77,7 +77,11 @@ impl AccountState {
 
         // verify account leaf inclusion
         self.account_merkle_proof
-            .verify(&self.account_leaf, self.user_id.0, self.account_tree_root)
+            .verify(
+                &self.account_leaf,
+                self.user_id.as_u64(),
+                self.account_tree_root,
+            )
             .map_err(|e| AccountStateError::InvalidAccountMerkleProof(e.to_string()))?;
         Ok(())
     }

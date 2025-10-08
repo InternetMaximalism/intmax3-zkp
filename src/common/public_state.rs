@@ -17,13 +17,13 @@ use serde::{Deserialize, Serialize};
 use crate::{
     common::{
         block::{Block, BlockError},
-        block_number::{BlockNumber, BlockNumberError, BlockNumberTarget},
         deposit::Deposit,
         trees::{
             account_tree::{AccountLeaf, AccountTree, SendLeaf, SendTree},
             deposit_tree::DepositTree,
             public_state_tree::PublicStateTree,
         },
+        u63::{BlockNumber, BlockNumberError, BlockNumberTarget},
         user_id::{UserId, UserIdError},
     },
     constants::get_num_users,
@@ -67,7 +67,7 @@ pub struct PublicState {
 impl Default for PublicState {
     fn default() -> Self {
         Self {
-            block_number: BlockNumber(0),
+            block_number: BlockNumber::default(),
             account_tree_root: AccountTree::init().get_root(),
             deposit_tree_root: DepositTree::init().get_root(),
             deposit_count: 0,
@@ -185,9 +185,7 @@ impl PublicStateTarget {
 
         let mut cursor = 0;
 
-        let block_number = BlockNumberTarget {
-            value: values[cursor],
-        };
+        let block_number = BlockNumberTarget::from_slice(&values[cursor..cursor + 1]);
         cursor += 1;
 
         let account_tree_root =
@@ -349,7 +347,7 @@ pub struct FullPublicState {
 impl FullPublicState {
     pub fn new() -> Self {
         Self {
-            block_number: BlockNumber(0),
+            block_number: BlockNumber::default(),
             account_tree: AccountTree::init(),
             send_leaves: HashMap::new(),
             deposit_tree: DepositTree::init(),
@@ -397,7 +395,8 @@ impl FullPublicState {
 
         // add block
         let block_number = self.block_number.0 + 1;
-        self.block_number = BlockNumber(block_number);
+        self.block_number =
+            BlockNumber::new(block_number).expect("block number should fit within 63 bits");
         self.blocks.push(block.clone());
         self.block_hash_chain = block
             .hash_with_prev_hash(self.block_hash_chain)
@@ -414,9 +413,11 @@ impl FullPublicState {
             let prev = if let Some(last) = send_leaves.last() {
                 last.cur
             } else {
-                BlockNumber(0)
+                BlockNumber::default()
             };
-            if prev == BlockNumber(block_number) {
+            let current_block =
+                BlockNumber::new(block_number).expect("block number should fit within 63 bits");
+            if prev == current_block {
                 // skip if the user already has a tx in this block
                 continue;
             }
@@ -433,7 +434,7 @@ impl FullPublicState {
                 prev,
                 send_tree_root: send_tree.get_root(),
             };
-            let current_account_leaf = self.account_tree.get_leaf(user_id.0);
+            let current_account_leaf = self.account_tree.get_leaf(user_id.as_u64());
             assert_eq!(
                 current_account_leaf, account_leaf,
                 "Account leaf mismatch for user_id {:?}: calculated from send leaves {:?}, actual {:?}",
@@ -442,7 +443,7 @@ impl FullPublicState {
 
             // add new send leaf
             let new_send_leaf = SendLeaf {
-                cur: BlockNumber(block_number),
+                cur: current_block,
                 prev,
                 tx_tree_root,
             };
@@ -455,10 +456,10 @@ impl FullPublicState {
             // update account tree
             let new_account_leaf = AccountLeaf {
                 index: send_tree.len() as u32,
-                prev: BlockNumber(block_number),
+                prev: current_block,
                 send_tree_root: send_tree.get_root(),
             };
-            self.account_tree.update(user_id.0, new_account_leaf);
+            self.account_tree.update(user_id.as_u64(), new_account_leaf);
         }
 
         Ok(())
@@ -479,7 +480,8 @@ impl FullPublicState {
             token_index,
             amount,
             aux_data,
-            block_number: BlockNumber(block_number),
+            block_number: BlockNumber::new(block_number)
+                .expect("block number should fit within 63 bits"),
         };
 
         // add deposit

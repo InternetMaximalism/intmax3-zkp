@@ -4,10 +4,10 @@ use crate::{
         spend_circuit::{SpendPublicInputs, SpendPublicInputsTarget},
     },
     common::{
-        block_number::{BlockNumber, BlockNumberTarget},
         public_state::{PublicState, PublicStateTarget},
         trees::tx_tree::{TxMerkleProof, TxMerkleProofTarget},
         tx::{Tx, TxTarget},
+        u63::{BlockNumber, BlockNumberTarget},
         user_id::{UserId, UserIdTarget},
     },
     constants::TX_TREE_HEIGHT,
@@ -291,8 +291,8 @@ mod tests {
             send_tree_root: send_tree.get_root(),
         };
         let user_id = UserId::new(0, local_id).expect("user id");
-        account_tree.update(user_id.0, account_leaf.clone());
-        let account_merkle_proof = account_tree.prove(user_id.0);
+        account_tree.update(user_id.as_u64(), account_leaf.clone());
+        let account_merkle_proof = account_tree.prove(user_id.as_u64());
         let account_tree_root = account_tree.get_root();
 
         let public_state = PublicState {

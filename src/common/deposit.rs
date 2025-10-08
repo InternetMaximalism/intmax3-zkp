@@ -12,7 +12,7 @@ use rand::Rng;
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    common::block_number::{BlockNumber, BlockNumberTarget},
+    common::u63::{BlockNumber, BlockNumberTarget},
     ethereum_types::{
         address::{Address, AddressTarget},
         bytes32::{Bytes32, Bytes32Target},

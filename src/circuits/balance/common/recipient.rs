@@ -27,7 +27,7 @@ pub enum RecipientError {
 }
 
 pub fn calculate_recipient_from_user_id(user_id: UserId, salt: Salt) -> Bytes32 {
-    let inputs = vec![vec![USER_ID_DOMAIN, user_id.0], salt.to_u64_vec()].concat();
+    let inputs = vec![vec![USER_ID_DOMAIN, user_id.as_u64()], salt.to_u64_vec()].concat();
     let hash: Bytes32 = PoseidonHashOut::hash_inputs_u64(&inputs).into();
 
     // replace the first byte with the tag

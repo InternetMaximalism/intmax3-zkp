@@ -7,6 +7,8 @@ use plonky2::{
     },
     plonk::circuit_builder::CircuitBuilder,
 };
+use rand::Rng;
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 const U63_BITS: usize = 63;
@@ -27,7 +29,9 @@ pub enum U63Error {
     InvalidU64SliceLength(usize, usize),
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(
+    Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize,
+)]
 pub struct U63(pub u64);
 
 impl U63 {
@@ -44,6 +48,11 @@ impl U63 {
         }
         let value = ((high as u64) << U63_LOW_BITS) | low as u64;
         Self::new(value)
+    }
+
+    pub fn rand<R: Rng>(rng: &mut R) -> Self {
+        let value = rng.gen_range(0..=U63_MAX_VALUE);
+        Self(value)
     }
 
     pub fn value(&self) -> u64 {
@@ -85,6 +94,10 @@ impl U63 {
         Self::new(slice[0])
     }
 }
+
+pub type BlockNumber = U63;
+pub type BlockNumberTarget = U63Target;
+pub type BlockNumberError = U63Error;
 
 #[derive(Clone, Debug)]
 pub struct U63Target {

@@ -10,7 +10,7 @@ use plonky2::{
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    common::block_number::{BlockNumber, BlockNumberTarget},
+    common::u63::{BlockNumber, BlockNumberTarget},
     constants::SEND_TREE_HEIGHT,
     ethereum_types::{
         bytes32::{Bytes32, Bytes32Target},
@@ -205,7 +205,7 @@ impl Default for AccountLeaf {
     fn default() -> Self {
         Self {
             index: 0,
-            prev: BlockNumber(0),
+            prev: BlockNumber::default(),
             send_tree_root: SendTree::init().get_root(),
         }
     }
