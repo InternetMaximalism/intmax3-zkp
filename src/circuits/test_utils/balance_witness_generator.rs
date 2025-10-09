@@ -10,7 +10,7 @@ use crate::{
                 transfer_witness::{TransferWitness, TransferWitnessError},
                 tx_settlement::{TxSettlement, TxSettlementError},
                 update_private_state::{UpdatePrivateState, UpdatePrivateStateError},
-                update_public_state::{UpdatePublicState, UpdatePublicStateError},
+                update_public_state::UpdatePublicStateError,
             },
             receive_deposit_circuit::ReceiveDepositWitness,
             receive_transfer_circuit::ReceiveTransferWitness,
@@ -22,7 +22,6 @@ use crate::{
     common::{
         error::CommonError,
         private_state::FullPrivateState,
-        public_state::PublicState,
         salt::Salt,
         transfer::Transfer,
         trees::{transfer_tree::TransferMerkleProof, tx_tree::TxMerkleProof},
@@ -96,13 +95,6 @@ where
     C: GenericConfig<D, F = F> + 'static,
     <C as GenericConfig<D>>::Hasher: AlgebraicHasher<F>,
 {
-    fn identity_update_public_state(
-        state: &PublicState,
-    ) -> Result<UpdatePublicState, BalanceWitnessGeneratorError> {
-        UpdatePublicState::new(state.clone(), state.clone(), None)
-            .map_err(BalanceWitnessGeneratorError::from)
-    }
-
     pub fn new(
         user_id: UserId,
         salt: Salt,
@@ -133,10 +125,8 @@ where
     ) -> Result<SpendWitness, BalanceWitnessGeneratorError> {
         let prev_private_state = self.full_private_state.to_private_state();
 
-        let mut padded_transfers = vec![Transfer::default(); MAX_NUM_TRANSFERS_PER_TX];
-        for (dst, src) in padded_transfers.iter_mut().zip(transfers.iter()) {
-            *dst = src.clone();
-        }
+        let mut padded_transfers = transfers.to_vec();
+        padded_transfers.resize(MAX_NUM_TRANSFERS_PER_TX, Transfer::default());
 
         let mut asset_tree = self.full_private_state.asset_tree.clone();
         let mut before_balances = Vec::with_capacity(MAX_NUM_TRANSFERS_PER_TX);
@@ -177,19 +167,35 @@ where
         .map_err(BalanceWitnessGeneratorError::from)?;
 
         assert_eq!(data.to, self.user_id);
+        let sender_update_public_state = self
+            .block_witness_generator
+            .get_update_public_state_witness(sender_balance_pis.public_state.block_number)?;
+        let receiver_update_public_state = self
+            .block_witness_generator
+            .get_update_public_state_witness(prev_balance_pis.public_state.block_number)?;
+
         assert_eq!(
-            sender_balance_pis.public_state, prev_balance_pis.public_state,
-            "sender and receiver public states must match",
+            sender_update_public_state.old, sender_balance_pis.public_state,
+            "sender old public state mismatch",
+        );
+        assert_eq!(
+            receiver_update_public_state.old, prev_balance_pis.public_state,
+            "receiver old public state mismatch",
+        );
+        let new_public_state = receiver_update_public_state.new.clone();
+        assert_eq!(
+            sender_update_public_state.new, new_public_state,
+            "sender and receiver must agree on new public state",
         );
 
-        let public_state = prev_balance_pis.public_state.clone();
-        let sender_update_public_state = Self::identity_update_public_state(&public_state)?;
-        let receiver_update_public_state = Self::identity_update_public_state(&public_state)?;
-
-        let new_block_r = self.block_witness_generator.block_number;
+        let new_block_r = new_public_state.block_number;
         let (_, account_state_receiver) = self
             .block_witness_generator
             .get_account_state(self.user_id, new_block_r)?;
+        assert_eq!(
+            account_state_receiver.account_tree_root, new_public_state.account_tree_root,
+            "receiver account state root mismatch",
+        );
 
         let (tx_block_number, account_state_sender) = self
             .block_witness_generator
@@ -204,7 +210,7 @@ where
         let tx_settlement = TxSettlement {
             user_id: sender_balance_pis.user_id,
             tx: data.tx,
-            public_state: public_state.clone(),
+            public_state: sender_update_public_state.new.clone(),
             account_state: account_state_sender,
             tx_merkle_proof,
             spend_proof: data.spend_proof.clone(),
@@ -290,13 +296,23 @@ where
         let prev_balance_proof = self.balance_proof.clone();
         let prev_balance_pis = self.get_public_inputs()?;
 
-        let public_state = prev_balance_pis.public_state.clone();
-        let update_public_state = Self::identity_update_public_state(&public_state)?;
-        let new_block_r = self.block_witness_generator.block_number;
+        let update_public_state = self
+            .block_witness_generator
+            .get_update_public_state_witness(prev_balance_pis.public_state.block_number)?;
+        assert_eq!(
+            update_public_state.old, prev_balance_pis.public_state,
+            "update_public_state old mismatch for deposit",
+        );
+        let new_public_state = update_public_state.new.clone();
+        let new_block_r = new_public_state.block_number;
 
         let (_, account_state) = self
             .block_witness_generator
             .get_account_state(self.user_id, new_block_r)?;
+        assert_eq!(
+            account_state.account_tree_root, new_public_state.account_tree_root,
+            "account state root mismatch for deposit",
+        );
 
         let deposit = &data.deposit;
 
@@ -369,19 +385,29 @@ where
         let prev_balance_proof = self.balance_proof.clone();
         let prev_balance_pis = self.get_public_inputs()?;
 
-        let public_state = prev_balance_pis.public_state.clone();
-        let update_public_state = Self::identity_update_public_state(&public_state)?;
+        let update_public_state = self
+            .block_witness_generator
+            .get_update_public_state_witness(prev_balance_pis.public_state.block_number)?;
+        assert_eq!(
+            update_public_state.old, prev_balance_pis.public_state,
+            "update_public_state old mismatch for send_tx",
+        );
+        let new_public_state = update_public_state.new.clone();
 
         let account_state = self
             .block_witness_generator
             .get_account_state_for_tx(self.user_id, data.tx_tree_root)?
             .1;
+        assert_eq!(
+            account_state.account_tree_root, new_public_state.account_tree_root,
+            "account state root mismatch for send_tx",
+        );
 
         let tx_merkle_proof = data.tx_merkle_proof.clone();
         let tx_settlement = TxSettlement {
             user_id: self.user_id,
             tx: data.tx,
-            public_state: public_state.clone(),
+            public_state: new_public_state,
             account_state,
             tx_merkle_proof,
             spend_proof: data.spend_proof.clone(),

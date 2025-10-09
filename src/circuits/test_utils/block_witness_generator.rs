@@ -252,6 +252,36 @@ impl BlockWitnessGenerator {
         Ok(())
     }
 
+    pub fn get_send_status(
+        &self,
+        user_id: UserId,
+        at_block: BlockNumber,
+    ) -> Result<SendStatus, BlockWitnessGeneratorError> {
+        let send_leaves = self.send_leaves.get(&user_id).cloned().unwrap_or_default();
+        if send_leaves.is_empty() {
+            return Ok(SendStatus {
+                last_send_block: BlockNumber::default(),
+                next_send_block: None,
+            });
+        }
+        if let Some(send_leaf) = send_leaves
+            .iter()
+            .find(|leaf| leaf.prev <= at_block && at_block < leaf.cur)
+        {
+            // at_block is in the range of this send leaf
+            Ok(SendStatus {
+                last_send_block: send_leaf.prev,
+                next_send_block: Some(send_leaf.cur),
+            })
+        } else {
+            // at_block is greater than or equal to the last send leaf's cur
+            Ok(SendStatus {
+                last_send_block: send_leaves.last().unwrap().cur,
+                next_send_block: None,
+            })
+        }
+    }
+
     pub fn get_account_state(
         &self,
         user_id: UserId,
@@ -380,4 +410,13 @@ impl BlockWitnessGenerator {
         let block_number = self.block_number;
         Ok((block_number, self.deposit_tree.prove(deposit_index)))
     }
+}
+
+#[derive(Debug, Clone)]
+pub struct SendStatus {
+    // the block number of the last send tx. If there is no send tx, it is 0.
+    pub last_send_block: BlockNumber,
+
+    // the block number of the next send tx. If there is no next send tx, it is None.
+    pub next_send_block: Option<BlockNumber>,
 }
