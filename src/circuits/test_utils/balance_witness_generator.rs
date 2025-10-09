@@ -1,32 +1,37 @@
 use crate::{
     circuits::{
         balance::{
-            balance_pis::{BALANCE_PUBLIC_INPUTS_LEN, BalancePublicInputs},
+            balance_pis::{
+                BALANCE_PUBLIC_INPUTS_LEN, BalancePublicInputs, BalancePublicInputsError,
+            },
+            balance_processor::{BalanceProcessor, BalanceProcessorError},
             common::{
-                deposit_witness::DepositWitness, transfer_witness::TransferWitness,
-                tx_settlement::TxSettlement, update_private_state::UpdatePrivateState,
-                update_public_state::UpdatePublicState,
+                deposit_witness::DepositWitness,
+                transfer_witness::{TransferWitness, TransferWitnessError},
+                tx_settlement::{TxSettlement, TxSettlementError},
+                update_private_state::{UpdatePrivateState, UpdatePrivateStateError},
+                update_public_state::{UpdatePublicState, UpdatePublicStateError},
             },
             receive_deposit_circuit::ReceiveDepositWitness,
             receive_transfer_circuit::ReceiveTransferWitness,
             send_tx_circuit::SendTxWitness,
             spend_circuit::SpendWitness,
         },
-        test_utils::block_witness_generator::BlockWitnessGenerator,
+        test_utils::block_witness_generator::{BlockWitnessGenerator, BlockWitnessGeneratorError},
     },
     common::{
+        error::CommonError,
         private_state::FullPrivateState,
         public_state::PublicState,
         salt::Salt,
         transfer::Transfer,
         trees::{transfer_tree::TransferMerkleProof, tx_tree::TxMerkleProof},
         tx::Tx,
-        u63::BlockNumber,
         user_id::UserId,
     },
     constants::MAX_NUM_TRANSFERS_PER_TX,
     ethereum_types::bytes32::Bytes32,
-    utils::{conversion::ToU64, poseidon_hash_out::PoseidonHashOut},
+    utils::conversion::ToU64,
 };
 use plonky2::{
     field::extension::Extendable,
@@ -37,9 +42,37 @@ use plonky2::{
     },
 };
 use std::sync::Arc;
+use thiserror::Error;
 
-#[derive(Debug, Clone)]
-pub enum BalanceWitnessGeneratorError {}
+#[derive(Debug, Error)]
+pub enum BalanceWitnessGeneratorError {
+    #[error("failed to parse balance public inputs: {0}")]
+    BalancePublicInputs(#[from] BalancePublicInputsError),
+
+    #[error("update public state error: {0}")]
+    UpdatePublicState(#[from] UpdatePublicStateError),
+
+    #[error("block witness error: {0}")]
+    BlockWitness(#[from] BlockWitnessGeneratorError),
+
+    #[error("transfer witness error: {0}")]
+    TransferWitness(#[from] TransferWitnessError),
+
+    #[error("nullifier tree error: {0}")]
+    Nullifier(#[from] CommonError),
+
+    #[error("private state update error: {0}")]
+    UpdatePrivateState(#[from] UpdatePrivateStateError),
+
+    #[error("tx settlement error: {0}")]
+    TxSettlement(#[from] TxSettlementError),
+
+    #[error("spend proof public inputs error: {0}")]
+    SpendPis(String),
+
+    #[error("initial balance proof error: {0}")]
+    InitialProof(#[from] BalanceProcessorError),
+}
 
 // generate witness for balance processor
 #[derive(Clone, Debug)]
@@ -51,12 +84,10 @@ where
 {
     pub user_id: UserId,
     pub salt: Salt,
-    pub balance_proof: Option<ProofWithPublicInputs<F, C, D>>,
+    pub balance_proof: ProofWithPublicInputs<F, C, D>,
     pub full_private_state: FullPrivateState,
-    pub current_block_r: BlockNumber,
 
     pub block_witness_generator: Arc<BlockWitnessGenerator>,
-    pending_spend_witness: Option<SpendWitness>,
 }
 
 impl<F, C, const D: usize> BalanceWitnessGenerator<F, C, D>
@@ -65,44 +96,39 @@ where
     C: GenericConfig<D, F = F> + 'static,
     <C as GenericConfig<D>>::Hasher: AlgebraicHasher<F>,
 {
-    fn balance_pis_from_proof(proof: &ProofWithPublicInputs<F, C, D>) -> BalancePublicInputs {
-        let pis_u64 = proof.public_inputs.to_u64_vec();
-        BalancePublicInputs::from_u64(&pis_u64[..BALANCE_PUBLIC_INPUTS_LEN])
-            .expect("balance proof public inputs must be well-formed")
-    }
-
-    fn identity_update_public_state(state: &PublicState) -> UpdatePublicState {
+    fn identity_update_public_state(
+        state: &PublicState,
+    ) -> Result<UpdatePublicState, BalanceWitnessGeneratorError> {
         UpdatePublicState::new(state.clone(), state.clone(), None)
-            .expect("identical public states never require a proof")
+            .map_err(BalanceWitnessGeneratorError::from)
     }
 
     pub fn new(
         user_id: UserId,
         salt: Salt,
         block_witness_generator: Arc<BlockWitnessGenerator>,
-    ) -> Self {
-        Self {
+        balance_processor: &BalanceProcessor<F, C, D>,
+    ) -> Result<Self, BalanceWitnessGeneratorError> {
+        let balance_proof = balance_processor.prove_initial(user_id, salt)?;
+
+        Ok(Self {
             user_id,
             salt,
-            balance_proof: None,
+            balance_proof,
             full_private_state: FullPrivateState::new(salt),
-            current_block_r: BlockNumber::default(),
             block_witness_generator,
-            pending_spend_witness: None,
-        }
+        })
     }
 
     // get balance public inputs from the witness generator
     pub fn get_public_inputs(&self) -> Result<BalancePublicInputs, BalanceWitnessGeneratorError> {
-        if let Some(proof) = &self.balance_proof {
-            Ok(Self::balance_pis_from_proof(proof))
-        } else {
-            Ok(BalancePublicInputs::new(self.user_id, self.salt))
-        }
+        let pis_u64 = self.balance_proof.public_inputs.to_u64_vec();
+        BalancePublicInputs::from_u64(&pis_u64[..BALANCE_PUBLIC_INPUTS_LEN])
+            .map_err(BalanceWitnessGeneratorError::from)
     }
 
     pub fn spend_witness(
-        &mut self,
+        &self,
         transfers: &[Transfer],
     ) -> Result<SpendWitness, BalanceWitnessGeneratorError> {
         let prev_private_state = self.full_private_state.to_private_state();
@@ -135,7 +161,6 @@ where
             asset_merkle_proofs,
         };
 
-        self.pending_spend_witness = Some(witness.clone());
         Ok(witness)
     }
 
@@ -143,35 +168,37 @@ where
         &self,
         data: &ReceiveTransferData<F, C, D>,
     ) -> Result<ReceiveTransferWitness<F, C, D>, BalanceWitnessGeneratorError> {
-        let prev_balance_proof = self
-            .balance_proof
-            .as_ref()
-            .expect("receiver balance proof must be available")
-            .clone();
-        let prev_balance_pis = Self::balance_pis_from_proof(&prev_balance_proof);
+        let prev_balance_proof = self.balance_proof.clone();
+        let prev_balance_pis = self.get_public_inputs()?;
 
-        let sender_balance_pis = Self::balance_pis_from_proof(&data.sender_proof);
+        let sender_balance_pis = BalancePublicInputs::from_u64(
+            &data.sender_proof.public_inputs.to_u64_vec()[..BALANCE_PUBLIC_INPUTS_LEN],
+        )
+        .map_err(BalanceWitnessGeneratorError::from)?;
 
-        debug_assert_eq!(data.to, self.user_id);
-        debug_assert_eq!(
+        assert_eq!(data.to, self.user_id);
+        assert_eq!(
             sender_balance_pis.public_state, prev_balance_pis.public_state,
             "sender and receiver public states must match",
         );
 
         let public_state = prev_balance_pis.public_state.clone();
-        let sender_update_public_state = Self::identity_update_public_state(&public_state);
-        let receiver_update_public_state = Self::identity_update_public_state(&public_state);
+        let sender_update_public_state = Self::identity_update_public_state(&public_state)?;
+        let receiver_update_public_state = Self::identity_update_public_state(&public_state)?;
 
         let new_block_r = self.block_witness_generator.block_number;
         let (_, account_state_receiver) = self
             .block_witness_generator
-            .get_account_state(self.user_id, new_block_r)
-            .expect("receiver account state should exist");
+            .get_account_state(self.user_id, new_block_r)?;
 
         let (tx_block_number, account_state_sender) = self
             .block_witness_generator
-            .get_account_state_for_tx(sender_balance_pis.user_id, data.tx_tree_root)
-            .expect("sender account state should exist for tx");
+            .get_account_state_for_tx(sender_balance_pis.user_id, data.tx_tree_root)?;
+
+        assert!(
+            tx_block_number.as_u64() <= new_block_r.as_u64(),
+            "tx block number must not exceed receiver block_r"
+        );
 
         let tx_merkle_proof = data.tx_merkle_proof.clone();
         let tx_settlement = TxSettlement {
@@ -183,21 +210,16 @@ where
             spend_proof: data.spend_proof.clone(),
         };
 
-        debug_assert!(tx_block_number.as_u64() <= new_block_r.as_u64());
-
         let transfer_witness = TransferWitness::new(
             data.tx.transfer_tree_root,
             data.transfer.clone(),
             data.transfer_index,
             data.transfer_merkle_proof.clone(),
-        )
-        .expect("transfer witness must verify");
+        )?;
 
         let nullifier = transfer_witness.transfer.nullifier();
         let mut nullifier_tree = self.full_private_state.nullifier_tree.clone();
-        let nullifier_proof = nullifier_tree
-            .prove_and_insert(nullifier)
-            .expect("nullifier insertion proof");
+        let nullifier_proof = nullifier_tree.prove_and_insert(nullifier)?;
 
         let asset_tree = self.full_private_state.asset_tree.clone();
         let token_index = transfer_witness.transfer.token_index as u64;
@@ -213,8 +235,7 @@ where
             &nullifier_proof,
             prev_balance,
             &asset_merkle_proof,
-        )
-        .expect("update private state must be consistent");
+        )?;
 
         Ok(ReceiveTransferWitness {
             prev_balance_proof,
@@ -235,21 +256,20 @@ where
         new_balance_proof: &ProofWithPublicInputs<F, C, D>,
         witness: &ReceiveTransferWitness<F, C, D>,
     ) -> Result<(), BalanceWitnessGeneratorError> {
-        self.balance_proof = Some(new_balance_proof.clone());
-        self.current_block_r = witness.new_block_r;
+        self.balance_proof = new_balance_proof.clone();
 
         let token_index = witness.update_private_state.token_index as u64;
         let prev_balance = self.full_private_state.asset_tree.get_leaf(token_index);
-        debug_assert_eq!(prev_balance, witness.update_private_state.prev_balance);
+        assert_eq!(prev_balance, witness.update_private_state.prev_balance);
         let new_balance = prev_balance + witness.update_private_state.amount;
         self.full_private_state
             .asset_tree
             .update(token_index, new_balance);
 
-        self.full_private_state
+        let _ = self
+            .full_private_state
             .nullifier_tree
-            .prove_and_insert(witness.update_private_state.nullifier)
-            .expect("nullifier should insert once");
+            .prove_and_insert(witness.update_private_state.nullifier)?;
 
         self.full_private_state.prev_private_commitment =
             witness.update_private_state.prev_private_state.commitment();
@@ -258,7 +278,7 @@ where
 
         let expected_commitment = witness.update_private_state.new_private_state.commitment();
         let actual_commitment = self.full_private_state.to_private_state().commitment();
-        debug_assert_eq!(expected_commitment, actual_commitment);
+        assert_eq!(expected_commitment, actual_commitment);
 
         Ok(())
     }
@@ -267,29 +287,22 @@ where
         &self,
         data: &ReceiveDepositData,
     ) -> Result<ReceiveDepositWitness<F, C, D>, BalanceWitnessGeneratorError> {
-        let prev_balance_proof = self
-            .balance_proof
-            .as_ref()
-            .expect("balance proof must exist")
-            .clone();
-        let prev_balance_pis = Self::balance_pis_from_proof(&prev_balance_proof);
+        let prev_balance_proof = self.balance_proof.clone();
+        let prev_balance_pis = self.get_public_inputs()?;
 
         let public_state = prev_balance_pis.public_state.clone();
-        let update_public_state = Self::identity_update_public_state(&public_state);
+        let update_public_state = Self::identity_update_public_state(&public_state)?;
         let new_block_r = self.block_witness_generator.block_number;
 
         let (_, account_state) = self
             .block_witness_generator
-            .get_account_state(self.user_id, new_block_r)
-            .expect("account state must exist");
+            .get_account_state(self.user_id, new_block_r)?;
 
         let deposit = &data.deposit;
 
         let mut nullifier_tree = self.full_private_state.nullifier_tree.clone();
         let deposit_nullifier = deposit.nullifier();
-        let nullifier_proof = nullifier_tree
-            .prove_and_insert(deposit_nullifier)
-            .expect("nullifier insertion proof");
+        let nullifier_proof = nullifier_tree.prove_and_insert(deposit_nullifier)?;
 
         let asset_tree = self.full_private_state.asset_tree.clone();
         let token_index = deposit.token_index as u64;
@@ -305,8 +318,7 @@ where
             &nullifier_proof,
             prev_balance,
             &asset_merkle_proof,
-        )
-        .expect("update private state must be consistent");
+        )?;
 
         Ok(ReceiveDepositWitness {
             prev_balance_proof,
@@ -323,21 +335,20 @@ where
         new_balance_proof: &ProofWithPublicInputs<F, C, D>,
         witness: &ReceiveDepositWitness<F, C, D>,
     ) -> Result<(), BalanceWitnessGeneratorError> {
-        self.balance_proof = Some(new_balance_proof.clone());
-        self.current_block_r = witness.new_block_r;
+        self.balance_proof = new_balance_proof.clone();
 
         let token_index = witness.deposit_witness.deposit.token_index as u64;
         let prev_balance = self.full_private_state.asset_tree.get_leaf(token_index);
-        debug_assert_eq!(prev_balance, witness.update_private_state.prev_balance);
+        assert_eq!(prev_balance, witness.update_private_state.prev_balance);
         let new_balance = prev_balance + witness.update_private_state.amount;
         self.full_private_state
             .asset_tree
             .update(token_index, new_balance);
 
-        self.full_private_state
+        let _ = self
+            .full_private_state
             .nullifier_tree
-            .prove_and_insert(witness.update_private_state.nullifier)
-            .expect("nullifier should insert once");
+            .prove_and_insert(witness.update_private_state.nullifier)?;
 
         self.full_private_state.prev_private_commitment =
             witness.update_private_state.prev_private_state.commitment();
@@ -346,7 +357,7 @@ where
 
         let expected_commitment = witness.update_private_state.new_private_state.commitment();
         let actual_commitment = self.full_private_state.to_private_state().commitment();
-        debug_assert_eq!(expected_commitment, actual_commitment);
+        assert_eq!(expected_commitment, actual_commitment);
 
         Ok(())
     }
@@ -355,20 +366,15 @@ where
         &self,
         data: &SendTxData<F, C, D>,
     ) -> Result<SendTxWitness<F, C, D>, BalanceWitnessGeneratorError> {
-        let prev_balance_proof = self
-            .balance_proof
-            .as_ref()
-            .expect("balance proof must exist")
-            .clone();
-        let prev_balance_pis = Self::balance_pis_from_proof(&prev_balance_proof);
+        let prev_balance_proof = self.balance_proof.clone();
+        let prev_balance_pis = self.get_public_inputs()?;
 
         let public_state = prev_balance_pis.public_state.clone();
-        let update_public_state = Self::identity_update_public_state(&public_state);
+        let update_public_state = Self::identity_update_public_state(&public_state)?;
 
         let account_state = self
             .block_witness_generator
-            .get_account_state_for_tx(self.user_id, data.tx_tree_root)
-            .expect("account state for tx must exist")
+            .get_account_state_for_tx(self.user_id, data.tx_tree_root)?
             .1;
 
         let tx_merkle_proof = data.tx_merkle_proof.clone();
@@ -392,21 +398,17 @@ where
         &mut self,
         new_balance_proof: &ProofWithPublicInputs<F, C, D>,
         witness: &SendTxWitness<F, C, D>,
+        spend_witness: &SpendWitness,
     ) -> Result<(), BalanceWitnessGeneratorError> {
-        self.balance_proof = Some(new_balance_proof.clone());
+        self.balance_proof = new_balance_proof.clone();
 
         let spend_pis = witness
             .tx_settlement
             .spend_pis()
-            .expect("spend proof public inputs must decode");
+            .map_err(|e| BalanceWitnessGeneratorError::SpendPis(e.to_string()))?;
 
         if spend_pis.is_valid {
-            let spend_witness = self
-                .pending_spend_witness
-                .take()
-                .expect("spend witness must be recorded before committing send");
-
-            debug_assert_eq!(
+            assert_eq!(
                 spend_witness.prev_private_state.commitment(),
                 spend_pis.prev_private_commitment,
             );
@@ -429,11 +431,7 @@ where
             self.full_private_state.nonce = spend_witness.prev_private_state.nonce + 1;
 
             let actual_commitment = self.full_private_state.to_private_state().commitment();
-            debug_assert_eq!(actual_commitment, spend_pis.new_private_commitment);
-
-            self.current_block_r = witness.tx_settlement.tx_block_number();
-        } else {
-            self.pending_spend_witness = None;
+            assert_eq!(actual_commitment, spend_pis.new_private_commitment);
         }
 
         Ok(())
