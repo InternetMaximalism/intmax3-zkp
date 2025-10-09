@@ -504,5 +504,5 @@ pub fn get_num_users(length: usize, supported_user_counts: &[u32]) -> Option<u32
     supported_user_counts
         .into_iter()
         .cloned()
-        .find(|&x| x == length as u32)
+        .find(|&num_users| length as u32 <= num_users)
 }
