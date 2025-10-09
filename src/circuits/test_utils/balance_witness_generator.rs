@@ -26,6 +26,7 @@ use crate::{
         transfer::Transfer,
         trees::{transfer_tree::TransferMerkleProof, tx_tree::TxMerkleProof},
         tx::Tx,
+        u63::BlockNumber,
         user_id::UserId,
     },
     constants::MAX_NUM_TRANSFERS_PER_TX,
@@ -71,6 +72,9 @@ pub enum BalanceWitnessGeneratorError {
 
     #[error("initial balance proof error: {0}")]
     InitialProof(#[from] BalanceProcessorError),
+
+    #[error("invalid block selection: {0}")]
+    InvalidBlock(String),
 }
 
 // generate witness for balance processor
@@ -188,22 +192,41 @@ where
             "sender and receiver must agree on new public state",
         );
 
-        let new_block_r = new_public_state.block_number;
+        let send_status = self
+            .block_witness_generator
+            .get_send_status(self.user_id, prev_balance_pis.block_r)?;
+        let new_block_r = match send_status.next_send_block {
+            Some(next_block) => BlockNumber::new(next_block.as_u64() - 1)
+                .map_err(|e| BalanceWitnessGeneratorError::InvalidBlock(e.to_string()))?,
+            None => self.block_witness_generator.block_number,
+        };
+        if new_block_r.as_u64() < prev_balance_pis.block_r.as_u64() {
+            return Err(BalanceWitnessGeneratorError::InvalidBlock(format!(
+                "new_block_r {} is smaller than previous block_r {}",
+                new_block_r.as_u64(),
+                prev_balance_pis.block_r.as_u64()
+            )));
+        }
+
+        let account_state_sender = self
+            .block_witness_generator
+            .get_account_state_for_tx(sender_balance_pis.user_id, data.tx_tree_root)?
+            .1;
+        let tx_block_number = account_state_sender.send_leaf.cur;
+        if tx_block_number.as_u64() > new_block_r.as_u64() {
+            return Err(BalanceWitnessGeneratorError::InvalidBlock(format!(
+                "tx block number {} exceeds receiver new_block_r {}",
+                tx_block_number.as_u64(),
+                new_block_r.as_u64()
+            )));
+        }
+
         let (_, account_state_receiver) = self
             .block_witness_generator
-            .get_account_state(self.user_id, new_block_r)?;
+            .get_account_state(self.user_id, prev_balance_pis.block_r)?;
         assert_eq!(
             account_state_receiver.account_tree_root, new_public_state.account_tree_root,
             "receiver account state root mismatch",
-        );
-
-        let (tx_block_number, account_state_sender) = self
-            .block_witness_generator
-            .get_account_state_for_tx(sender_balance_pis.user_id, data.tx_tree_root)?;
-
-        assert!(
-            tx_block_number.as_u64() <= new_block_r.as_u64(),
-            "tx block number must not exceed receiver block_r"
         );
 
         let tx_merkle_proof = data.tx_merkle_proof.clone();
@@ -304,17 +327,39 @@ where
             "update_public_state old mismatch for deposit",
         );
         let new_public_state = update_public_state.new.clone();
-        let new_block_r = new_public_state.block_number;
+
+        let send_status = self
+            .block_witness_generator
+            .get_send_status(self.user_id, prev_balance_pis.block_r)?;
+        let new_block_r = match send_status.next_send_block {
+            Some(next_block) => BlockNumber::new(next_block.as_u64() - 1)
+                .map_err(|e| BalanceWitnessGeneratorError::InvalidBlock(e.to_string()))?,
+            None => self.block_witness_generator.block_number,
+        };
+        if new_block_r.as_u64() < prev_balance_pis.block_r.as_u64() {
+            return Err(BalanceWitnessGeneratorError::InvalidBlock(format!(
+                "new_block_r {} is smaller than previous block_r {}",
+                new_block_r.as_u64(),
+                prev_balance_pis.block_r.as_u64()
+            )));
+        }
 
         let (_, account_state) = self
             .block_witness_generator
-            .get_account_state(self.user_id, new_block_r)?;
+            .get_account_state(self.user_id, prev_balance_pis.block_r)?;
         assert_eq!(
             account_state.account_tree_root, new_public_state.account_tree_root,
             "account state root mismatch for deposit",
         );
 
         let deposit = &data.deposit;
+        if deposit.block_number.as_u64() > new_block_r.as_u64() {
+            return Err(BalanceWitnessGeneratorError::InvalidBlock(format!(
+                "deposit block number {} exceeds receiver new_block_r {}",
+                deposit.block_number.as_u64(),
+                new_block_r.as_u64()
+            )));
+        }
 
         let mut nullifier_tree = self.full_private_state.nullifier_tree.clone();
         let deposit_nullifier = deposit.nullifier();
