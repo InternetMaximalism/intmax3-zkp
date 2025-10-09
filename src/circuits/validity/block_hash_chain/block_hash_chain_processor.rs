@@ -256,7 +256,7 @@ mod tests {
 
     use super::*;
     use crate::{
-        circuits::test_utils::witness_generator::BlockWitnessGenerator,
+        circuits::test_utils::block_witness_generator::BlockWitnessGenerator,
         common::u63::U63,
         ethereum_types::{
             address::Address, bytes32::Bytes32, u32limb_trait::U32LimbTrait, u256::U256,
