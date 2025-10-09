@@ -132,7 +132,6 @@ impl UpdatePrivateStateTarget {
         let nullifier_proof = NullifierInsertionProofTarget::new(builder, is_checked);
         let prev_balance = U256Target::new(builder, is_checked);
         let asset_merkle_proof = AssetMerkleProofTarget::new(builder, ASSET_TREE_HEIGHT);
-        let new_private_state = PrivateStateTarget::new(builder);
 
         let prev_private_commitment = prev_private_state.commitment(builder);
         let new_nullifier_tree_root = nullifier_proof.get_new_root::<F, C, D>(
@@ -152,19 +151,14 @@ impl UpdatePrivateStateTarget {
         let new_asset_tree_root =
             asset_merkle_proof.get_root::<F, C, D>(builder, &new_asset_leaf, token_index);
 
-        new_private_state
-            .asset_tree_root
-            .connect(builder, new_asset_tree_root);
-        new_private_state
-            .nullifier_tree_root
-            .connect(builder, new_nullifier_tree_root);
-        new_private_state
-            .prev_private_commitment
-            .connect(builder, prev_private_commitment);
-        builder.connect(new_private_state.nonce, prev_private_state.nonce);
-        new_private_state
-            .salt
-            .connect(builder, prev_private_state.salt);
+        let new_private_state = PrivateStateTarget {
+            asset_tree_root: new_asset_tree_root,
+            nullifier_tree_root: new_nullifier_tree_root,
+            sent_tx_tree_root: prev_private_state.sent_tx_tree_root,
+            prev_private_commitment,
+            nonce: prev_private_state.nonce,
+            salt: prev_private_state.salt,
+        };
 
         Self {
             token_index,
