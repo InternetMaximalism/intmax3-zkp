@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     common::u63::{BlockNumber, BlockNumberTarget},
-    constants::SEND_TREE_HEIGHT,
+    constants::{ACCOUNT_TREE_HEIGHT, SEND_TREE_HEIGHT},
     ethereum_types::{
         bytes32::{Bytes32, Bytes32Target},
         u32limb_trait::{U32LimbTargetTrait as _, U32LimbTrait as _},
@@ -144,7 +144,7 @@ pub type AccountMerkleProofTarget = SparseMerkleProofTarget<AccountLeafTarget>;
 
 impl AccountTree {
     pub fn init() -> Self {
-        Self::new(SEND_TREE_HEIGHT)
+        Self::new(ACCOUNT_TREE_HEIGHT)
     }
 }
 
