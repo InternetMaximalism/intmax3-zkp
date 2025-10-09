@@ -398,17 +398,19 @@ impl BlockWitnessGenerator {
 
     pub fn get_deposit_merkle_proof(
         &self,
-        deposit_index: u64,
-    ) -> Result<(BlockNumber, DepositMerkleProof), BlockWitnessGeneratorError> {
-        if deposit_index >= self.deposit_tree.len() as u64 {
-            return Err(BlockWitnessGeneratorError::InvalidRequest(format!(
-                "Requested deposit index {} is out of range (0..{})",
-                deposit_index,
-                self.deposit_tree.len()
-            )));
-        }
-        let block_number = self.block_number;
-        Ok((block_number, self.deposit_tree.prove(deposit_index)))
+        receiver: Bytes32,
+    ) -> Result<(Deposit, u64, DepositMerkleProof), BlockWitnessGeneratorError> {
+        let deposits = self.deposit_tree.leaves();
+        let deposit_index = deposits
+            .iter()
+            .position(|d| d.recipient == receiver)
+            .ok_or(BlockWitnessGeneratorError::InvalidRequest(format!(
+                "No deposit found for receiver {:?}",
+                receiver
+            )))? as u64;
+        let deposit = deposits[deposit_index as usize].clone();
+        let deposit_merkle_proof = self.deposit_tree.prove(deposit_index);
+        Ok((deposit, deposit_index, deposit_merkle_proof))
     }
 }
 

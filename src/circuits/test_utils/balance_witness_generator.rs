@@ -6,7 +6,7 @@ use crate::{
             },
             balance_processor::{BalanceProcessor, BalanceProcessorError},
             common::{
-                deposit_witness::DepositWitness,
+                deposit_witness::{DepositWitness, DepositWitnessError},
                 transfer_witness::{TransferWitness, TransferWitnessError},
                 tx_settlement::{TxSettlement, TxSettlementError},
                 update_private_state::{UpdatePrivateState, UpdatePrivateStateError},
@@ -72,6 +72,9 @@ pub enum BalanceWitnessGeneratorError {
 
     #[error("initial balance proof error: {0}")]
     InitialProof(#[from] BalanceProcessorError),
+
+    #[error("deposit witness error: {0}")]
+    DepositWitness(#[from] DepositWitnessError),
 
     #[error("invalid block selection: {0}")]
     InvalidBlock(String),
@@ -220,6 +223,11 @@ where
                 new_block_r.as_u64()
             )));
         }
+        assert_eq!(
+            account_state_sender.account_tree_root,
+            sender_update_public_state.new.account_tree_root,
+            "sender account state root mismatch",
+        );
 
         let (_, account_state_receiver) = self
             .block_witness_generator
@@ -352,7 +360,9 @@ where
             "account state root mismatch for deposit",
         );
 
-        let deposit = &data.deposit;
+        let (deposit, deposit_index, deposit_merkle_proof) = self
+            .block_witness_generator
+            .get_deposit_merkle_proof(data.receiver)?;
         if deposit.block_number.as_u64() > new_block_r.as_u64() {
             return Err(BalanceWitnessGeneratorError::InvalidBlock(format!(
                 "deposit block number {} exceeds receiver new_block_r {}",
@@ -381,12 +391,21 @@ where
             &asset_merkle_proof,
         )?;
 
+        let deposit_witness = DepositWitness::new(
+            self.user_id,
+            new_public_state.deposit_tree_root,
+            data.deposit_salt,
+            deposit.clone(),
+            deposit_index,
+            deposit_merkle_proof,
+        )?;
+
         Ok(ReceiveDepositWitness {
             prev_balance_proof,
             update_public_state,
             new_block_r,
             account_state,
-            deposit_witness: data.clone(),
+            deposit_witness,
             update_private_state,
         })
     }
@@ -529,7 +548,11 @@ where
     pub transfer_salt: Salt,
 }
 
-pub type ReceiveDepositData = DepositWitness;
+#[derive(Debug, Clone)]
+pub struct ReceiveDepositData {
+    pub receiver: Bytes32,
+    pub deposit_salt: Salt,
+}
 
 #[derive(Debug, Clone)]
 pub struct SendTxData<F, C, const D: usize>
