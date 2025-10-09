@@ -1,8 +1,9 @@
-use std::collections::HashMap;
-
 use crate::{
     circuits::{
-        balance::common::account_state::AccountState,
+        balance::common::{
+            account_state::AccountState,
+            update_public_state::{UpdatePublicState, UpdatePublicStateError},
+        },
         validity::block_hash_chain::{
             block_hash_chain_processor::BlockHashChainProcessorWitness,
             ext_public_state::ExtendedPublicState,
@@ -16,7 +17,7 @@ use crate::{
             account_tree::{
                 AccountLeaf, AccountMerkleProof, AccountTree, SendLeaf, SendMerkleProof, SendTree,
             },
-            deposit_tree::DepositTree,
+            deposit_tree::{DepositMerkleProof, DepositTree},
             public_state_tree::{PublicStateMerkleProof, PublicStateTree},
         },
         u63::{BlockNumber, BlockNumberError, U63},
@@ -25,6 +26,7 @@ use crate::{
     constants::{ACCOUNT_TREE_HEIGHT, SEND_TREE_HEIGHT},
     ethereum_types::{address::Address, bytes32::Bytes32, u256::U256},
 };
+use std::collections::HashMap;
 
 #[derive(thiserror::Error, Debug)]
 pub enum BlockWitnessGeneratorError {
@@ -39,6 +41,9 @@ pub enum BlockWitnessGeneratorError {
 
     #[error("Block number error: {0}")]
     BlockNumber(#[from] BlockNumberError),
+
+    #[error("Update public state error: {0}")]
+    UpdatePublicState(#[from] UpdatePublicStateError),
 
     #[error("Invalid request: {0}")]
     InvalidRequest(String),
@@ -337,5 +342,42 @@ impl BlockWitnessGenerator {
                 account_merkle_proof,
             },
         ))
+    }
+
+    pub fn get_update_public_state_witness(
+        &self,
+        block_number: BlockNumber,
+    ) -> Result<UpdatePublicState, BlockWitnessGeneratorError> {
+        let current_block_number = self.block_number;
+        if block_number > current_block_number {
+            return Err(BlockWitnessGeneratorError::InvalidRequest(format!(
+                "Requested block number {} is greater than current block number {}",
+                block_number.as_u64(),
+                current_block_number.as_u64()
+            )));
+        }
+
+        let new = self.current_public_state();
+        if block_number == current_block_number {
+            return Ok(UpdatePublicState::new(new.clone(), new.clone(), None)?);
+        }
+        let merkle_proof = self.public_state_tree.prove(block_number.as_u64());
+        let old = self.public_state_tree.get_leaf(block_number.as_u64());
+        Ok(UpdatePublicState::new(new, old, Some(merkle_proof))?)
+    }
+
+    pub fn get_deposit_merkle_proof(
+        &self,
+        deposit_index: u64,
+    ) -> Result<(BlockNumber, DepositMerkleProof), BlockWitnessGeneratorError> {
+        if deposit_index >= self.deposit_tree.len() as u64 {
+            return Err(BlockWitnessGeneratorError::InvalidRequest(format!(
+                "Requested deposit index {} is out of range (0..{})",
+                deposit_index,
+                self.deposit_tree.len()
+            )));
+        }
+        let block_number = self.block_number;
+        Ok((block_number, self.deposit_tree.prove(deposit_index)))
     }
 }
