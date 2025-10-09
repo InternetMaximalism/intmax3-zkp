@@ -212,6 +212,10 @@ impl<const D: usize> BalanceSwichBoardTarget<D> {
                 builder,
                 default_private_state.nullifier_tree_root,
             ),
+            sent_tx_tree_root: PoseidonHashOutTarget::constant(
+                builder,
+                default_private_state.sent_tx_tree_root,
+            ),
             prev_private_commitment: PoseidonHashOutTarget::constant(
                 builder,
                 default_private_state.prev_private_commitment,

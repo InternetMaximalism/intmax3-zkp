@@ -15,6 +15,7 @@ pub const MAX_NUM_AGGREGATORS: usize = 1 << AGGREGATOR_ID_BITS;
 // Private State
 pub const ASSET_TREE_HEIGHT: usize = TOKEN_INDEX_BITS;
 pub const NULLIFIER_TREE_HEIGHT: usize = 32;
+pub const SENT_TX_TREE_HEIGHT: usize = 32;
 
 // Transactions
 pub const TRANSFER_TREE_HEIGHT: usize = 6;

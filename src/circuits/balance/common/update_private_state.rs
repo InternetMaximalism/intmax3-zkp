@@ -215,7 +215,9 @@ mod tests {
             private_state::PrivateState,
             salt::Salt,
             transfer::Transfer,
-            trees::{asset_tree::AssetTree, nullifier_tree::NullifierTree},
+            trees::{
+                asset_tree::AssetTree, nullifier_tree::NullifierTree, sent_tx_tree::SentTxTree,
+            },
         },
         constants::ASSET_TREE_HEIGHT,
         ethereum_types::bytes32::Bytes32,
@@ -235,9 +237,11 @@ mod tests {
         let transfer = Transfer::rand(&mut rng);
         let mut asset_tree = AssetTree::new(ASSET_TREE_HEIGHT);
         let mut nullifier_tree = NullifierTree::init();
+        let sent_tx_tree = SentTxTree::init();
         let prev_private_state = PrivateState {
             asset_tree_root: asset_tree.get_root(),
             nullifier_tree_root: nullifier_tree.get_root(),
+            sent_tx_tree_root: sent_tx_tree.get_root(),
             prev_private_commitment: PoseidonHashOut::default(),
             nonce: rng.r#gen(),
             salt: Salt::rand(&mut rng),

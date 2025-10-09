@@ -596,6 +596,7 @@ mod tests {
                 transfer_tree::TransferTree,
                 tx_tree::TxTree,
             },
+            tx::Tx,
             u63::BlockNumber,
             user_id::UserId,
         },
@@ -605,7 +606,8 @@ mod tests {
         },
         ethereum_types::{bytes32::Bytes32, u256::U256},
         utils::{
-            conversion::ToField as _, cyclic::TestCyclicCircuit, poseidon_hash_out::PoseidonHashOut,
+            conversion::ToField as _, cyclic::TestCyclicCircuit,
+            poseidon_hash_out::PoseidonHashOut, trees::get_root::get_merkle_root_from_leaves,
         },
     };
     use plonky2::{
@@ -659,7 +661,13 @@ mod tests {
             let new_balance = balance - transfer.amount;
             asset_tree_current.update(index, new_balance);
         }
-
+        let tx = Tx {
+            transfer_tree_root: get_merkle_root_from_leaves(TRANSFER_TREE_HEIGHT, &transfers)
+                .unwrap(),
+            nonce: sender_full_state.nonce,
+        };
+        let sent_tx_merkle_proof = sender_full_state.sent_tx_tree.prove(tx.nonce as u64);
+  
         sender_full_state.asset_tree = asset_tree_initial.clone();
         let prev_private_state_sender = sender_full_state.to_private_state();
         let spend_witness = SpendWitness {
@@ -668,6 +676,7 @@ mod tests {
             transfers: transfers.clone(),
             before_balances: before_balances.clone(),
             asset_merkle_proofs: asset_merkle_proofs.clone(),
+            sent_tx_merkle_proof,
         };
 
         let spend_circuit = SpendCircuit::<F, C, D>::new();

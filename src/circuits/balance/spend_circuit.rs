@@ -17,15 +17,21 @@ use crate::{
     common::{
         private_state::{PrivateState, PrivateStateTarget},
         transfer::{Transfer, TransferTarget},
-        trees::asset_tree::{AssetMerkleProof, AssetMerkleProofTarget},
+        trees::{
+            asset_tree::{AssetMerkleProof, AssetMerkleProofTarget},
+            sent_tx_tree::{SentTxMerkleProof, SentTxMerkleProofTarget},
+        },
         tx::{TX_LEN, Tx, TxTarget},
     },
-    constants::{ASSET_TREE_HEIGHT, MAX_NUM_TRANSFERS_PER_TX, TRANSFER_TREE_HEIGHT},
+    constants::{
+        ASSET_TREE_HEIGHT, MAX_NUM_TRANSFERS_PER_TX, SENT_TX_TREE_HEIGHT, TRANSFER_TREE_HEIGHT,
+    },
     ethereum_types::{
         u32limb_trait::U32LimbTargetTrait as _,
         u256::{U256, U256Target},
     },
     utils::{
+        leafable::{Leafable, LeafableTarget as _},
         poseidon_hash_out::{POSEIDON_HASH_OUT_LEN, PoseidonHashOut, PoseidonHashOutTarget},
         trees::get_root::{get_merkle_root_from_leaves, get_merkle_root_from_leaves_circuit},
     },
@@ -107,6 +113,7 @@ pub struct SpendWitness {
     pub before_balances: Vec<U256>, // the length must be equal to MAX_NUM_TRANSFERS_PER_TX
     pub asset_merkle_proofs: Vec<AssetMerkleProof>, /* the length must be equal to
                                    * MAX_NUM_TRANSFERS_PER_TX */
+    pub sent_tx_merkle_proof: SentTxMerkleProof,
 }
 
 impl SpendWitness {
@@ -139,13 +146,6 @@ impl SpendWitness {
             asset_tree_root =
                 self.asset_merkle_proofs[i].get_root(&new_balance, transfer.token_index as u64);
         }
-        let new_private_state = PrivateState {
-            asset_tree_root,
-            nullifier_tree_root: self.prev_private_state.nullifier_tree_root,
-            prev_private_commitment: self.prev_private_state.commitment(),
-            nonce: self.prev_private_state.nonce + 1,
-            salt: self.prev_private_state.salt,
-        };
 
         // construct tx
         let transfer_tree_root = get_merkle_root_from_leaves(TRANSFER_TREE_HEIGHT, &self.transfers)
@@ -156,6 +156,28 @@ impl SpendWitness {
             transfer_tree_root,
             nonce: self.tx_nonce,
         };
+
+        // update sent tx tree
+        let mut sent_tx_tree_root = self.prev_private_state.sent_tx_tree_root;
+        let empty_tx = Tx::empty_leaf();
+        self.sent_tx_merkle_proof
+            .verify(&empty_tx, self.tx_nonce as u64, sent_tx_tree_root)
+            .map_err(|e| {
+                SpendError::InvalidMerkleProof(format!("Invalid sent tx merkle proof: {}", e))
+            })?;
+        sent_tx_tree_root = self
+            .sent_tx_merkle_proof
+            .get_root(&tx, self.tx_nonce as u64);
+
+        let new_private_state = PrivateState {
+            asset_tree_root,
+            nullifier_tree_root: self.prev_private_state.nullifier_tree_root,
+            sent_tx_tree_root,
+            prev_private_commitment: self.prev_private_state.commitment(),
+            nonce: self.prev_private_state.nonce + 1,
+            salt: self.prev_private_state.salt,
+        };
+
         let is_valid = self.tx_nonce == self.prev_private_state.nonce;
         let prev_private_commitment = self.prev_private_state.commitment();
         let new_private_commitment = new_private_state.commitment();
@@ -230,6 +252,7 @@ pub struct SpendTarget {
     pub before_balances: Vec<U256Target>, // the length must be equal to MAX_NUM_TRANSFERS_PER_TX
     pub asset_merkle_proofs: Vec<AssetMerkleProofTarget>, /* the length must be equal to
                                          * MAX_NUM_TRANSFERS_PER_TX */
+    pub sent_tx_merkle_proof: SentTxMerkleProofTarget,
 }
 
 impl SpendTarget {
@@ -253,12 +276,15 @@ impl SpendTarget {
             .map(|_| AssetMerkleProofTarget::new(builder, ASSET_TREE_HEIGHT))
             .collect();
 
+        let sent_tx_merkle_proof = SentTxMerkleProofTarget::new(builder, SENT_TX_TREE_HEIGHT);
+
         Self {
             tx_nonce,
             prev_private_state,
             transfers,
             before_balances,
             asset_merkle_proofs,
+            sent_tx_merkle_proof,
         }
     }
 
@@ -302,6 +328,9 @@ impl SpendTarget {
         {
             target.set_witness(witness, proof);
         }
+
+        self.sent_tx_merkle_proof
+            .set_witness(witness, &value.sent_tx_merkle_proof);
     }
 }
 
@@ -343,17 +372,6 @@ where
             asset_tree_root =
                 proof.get_root::<F, C, D>(&mut builder, &new_balance, transfer.token_index);
         }
-        let prev_private_commitment = target.prev_private_state.commitment(&mut builder);
-        let new_nonce = builder.add_const(target.prev_private_state.nonce, F::ONE);
-        let new_private_state = PrivateStateTarget {
-            asset_tree_root,
-            nullifier_tree_root: target.prev_private_state.nullifier_tree_root,
-            prev_private_commitment,
-            nonce: new_nonce,
-            salt: target.prev_private_state.salt,
-        };
-        let new_private_commitment = new_private_state.commitment(&mut builder);
-
         let transfer_tree_root = get_merkle_root_from_leaves_circuit::<F, C, D, TransferTarget>(
             &mut builder,
             TRANSFER_TREE_HEIGHT,
@@ -363,6 +381,32 @@ where
             transfer_tree_root,
             nonce: target.tx_nonce,
         };
+
+        // update sent tx tree
+        let mut sent_tx_tree_root = target.prev_private_state.sent_tx_tree_root;
+        let empty_tx = TxTarget::empty_leaf(&mut builder);
+        target.sent_tx_merkle_proof.verify::<F, C, D>(
+            &mut builder,
+            &empty_tx,
+            target.tx_nonce,
+            sent_tx_tree_root,
+        );
+        sent_tx_tree_root =
+            target
+                .sent_tx_merkle_proof
+                .get_root::<F, C, D>(&mut builder, &tx, target.tx_nonce);
+
+        let prev_private_commitment = target.prev_private_state.commitment(&mut builder);
+        let new_nonce = builder.add_const(target.prev_private_state.nonce, F::ONE);
+        let new_private_state = PrivateStateTarget {
+            asset_tree_root,
+            nullifier_tree_root: target.prev_private_state.nullifier_tree_root,
+            sent_tx_tree_root,
+            prev_private_commitment,
+            nonce: new_nonce,
+            salt: target.prev_private_state.salt,
+        };
+        let new_private_commitment = new_private_state.commitment(&mut builder);
 
         let is_valid = builder.is_equal(target.tx_nonce, target.prev_private_state.nonce);
 
@@ -453,6 +497,7 @@ mod tests {
             let new_balance = balance - transfer.amount;
             asset_tree_current.update(index, new_balance);
         }
+        let sent_tx_merkle_proof = full_state.sent_tx_tree.prove(full_state.nonce as u64);
 
         full_state.asset_tree = asset_tree_initial;
         let prev_private_state = full_state.to_private_state();
@@ -463,6 +508,7 @@ mod tests {
             transfers,
             before_balances,
             asset_merkle_proofs,
+            sent_tx_merkle_proof,
         };
 
         let circuit = SpendCircuit::<F, C, D>::new();

@@ -149,6 +149,10 @@ where
             let new_balance = prev_balance - transfer.amount;
             asset_tree.update(index, new_balance);
         }
+        let sent_tx_merkle_proof = self
+            .full_private_state
+            .sent_tx_tree
+            .prove(self.full_private_state.nonce as u64);
 
         let witness = SpendWitness {
             tx_nonce: prev_private_state.nonce,
@@ -156,6 +160,7 @@ where
             transfers: padded_transfers,
             before_balances,
             asset_merkle_proofs,
+            sent_tx_merkle_proof,
         };
 
         Ok(witness)
@@ -541,6 +546,14 @@ where
                     .update(index, new_balance);
             }
 
+            self.full_private_state
+                .sent_tx_tree
+                .push(witness.tx_settlement.tx.clone());
+            assert_eq!(
+                self.full_private_state.sent_tx_tree.len() as u32,
+                witness.tx_settlement.tx.nonce + 1,
+            );
+
             self.full_private_state.prev_private_commitment =
                 spend_witness.prev_private_state.commitment();
             self.full_private_state.nonce = spend_witness.prev_private_state.nonce + 1;
@@ -628,9 +641,10 @@ mod tests {
     type F = GoldilocksField;
     type C = PoseidonGoldilocksConfig;
 
+    #[cfg_attr(debug_assertions, ignore = "run with --release")]
     #[test]
     fn test_balance_witness_generator() {
-        let supported_user_counts = vec![2];
+        let supported_user_counts = vec![1, 4, 512];
 
         let spend_circuit = SpendCircuit::<F, C, D>::new();
         let balance_processor =
