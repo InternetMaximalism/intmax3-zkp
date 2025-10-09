@@ -20,12 +20,3 @@ pub const NULLIFIER_TREE_HEIGHT: usize = 32;
 pub const TRANSFER_TREE_HEIGHT: usize = 6;
 pub const MAX_NUM_TRANSFERS_PER_TX: usize = 1 << TRANSFER_TREE_HEIGHT;
 pub const TX_TREE_HEIGHT: usize = LOCAL_ID_BITS;
-
-// Blocks
-pub const NUM_USERS_BITS: [usize; 3] = [0, 2, 8]; // 1, 4, 256
-
-pub fn get_num_users(len: usize) -> Option<u32> {
-    let len_log2 = (len as f32).log2().ceil() as usize;
-    let next_in_list = NUM_USERS_BITS.iter().cloned().find(|&x| x >= len_log2);
-    next_in_list.map(|x| (1 << x) as u32)
-}

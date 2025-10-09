@@ -8,7 +8,7 @@ use crate::{
     common::{
         block::{Block, BlockError},
         deposit::Deposit,
-        public_state::PublicState,
+        public_state::{get_num_users, PublicState},
         trees::{
             account_tree::{
                 AccountLeaf, AccountMerkleProof, AccountTree, SendLeaf, SendMerkleProof, SendTree,
@@ -19,7 +19,7 @@ use crate::{
         u63::{BlockNumber, BlockNumberError, U63},
         user_id::{UserId, UserIdError},
     },
-    constants::{ACCOUNT_TREE_HEIGHT, SEND_TREE_HEIGHT, get_num_users},
+    constants::{ACCOUNT_TREE_HEIGHT, SEND_TREE_HEIGHT},
     ethereum_types::{address::Address, bytes32::Bytes32, u256::U256},
 };
 
@@ -39,6 +39,8 @@ pub enum BlockWitnessGeneratorError {
 }
 
 pub struct BlockWitnessGenerator {
+    pub supported_user_counts: Vec<u32>,
+
     pub block_number: BlockNumber,
     pub account_tree: AccountTree,
     pub send_leaves: HashMap<UserId, Vec<SendLeaf>>,
@@ -54,8 +56,9 @@ pub struct BlockWitnessGenerator {
 }
 
 impl BlockWitnessGenerator {
-    pub fn new() -> Self {
+    pub fn new(supported_user_counts: &[u32]) -> Self {
         Self {
+            supported_user_counts: supported_user_counts.to_vec(),
             block_number: BlockNumber::default(),
             account_tree: AccountTree::init(),
             send_leaves: HashMap::new(),
@@ -123,7 +126,7 @@ impl BlockWitnessGenerator {
         local_ids: &[u32],
         tx_tree_root: Bytes32,
     ) -> Result<(), BlockWitnessGeneratorError> {
-        let num_users = get_num_users(local_ids.len())
+        let num_users = get_num_users(local_ids.len(), &self.supported_user_counts)
             .ok_or(BlockWitnessGeneratorError::TooManyLocalIds(local_ids.len()))?;
 
         let new_block_number = self

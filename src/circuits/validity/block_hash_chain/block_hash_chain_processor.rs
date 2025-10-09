@@ -273,9 +273,11 @@ mod tests {
     #[cfg_attr(debug_assertions, ignore = "run with --release")]
     #[test]
     fn test_block_chain_proof_from_generator() {
-        let processor = BlockHashChainProcessor::<F, C, D>::new(&[4]);
+        let supported_user_counts = vec![2];
 
-        let mut generator = BlockWitnessGenerator::new();
+        let processor = BlockHashChainProcessor::<F, C, D>::new(&supported_user_counts);
+
+        let mut generator = BlockWitnessGenerator::new(&supported_user_counts);
         let mut rng = StdRng::seed_from_u64(42);
 
         generator
@@ -301,7 +303,7 @@ mod tests {
 
         let block_witness = generator
             .block_chain_witness
-            .remove(&block_number)
+            .get(&block_number)
             .expect("block witness stored");
 
         let block_proof = processor
