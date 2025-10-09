@@ -252,11 +252,19 @@ where
 
 #[cfg(test)]
 mod tests {
+    use rand::{SeedableRng, rngs::StdRng};
+
+    use super::*;
+    use crate::{
+        circuits::test_utils::witness_generator::BlockWitnessGenerator,
+        common::u63::U63,
+        ethereum_types::{
+            address::Address, bytes32::Bytes32, u32limb_trait::U32LimbTrait, u256::U256,
+        },
+    };
     use plonky2::{
         field::goldilocks_field::GoldilocksField, plonk::config::PoseidonGoldilocksConfig,
     };
-
-    use super::*;
 
     const D: usize = 2;
     type F = GoldilocksField;
@@ -264,8 +272,44 @@ mod tests {
 
     #[cfg_attr(debug_assertions, ignore = "run with --release")]
     #[test]
-    fn test_block_hash_chain_processor() {
-        let supported_user_counts = [2];
-        let _processor = BlockHashChainProcessor::<F, C, D>::new(&supported_user_counts);
+    fn test_block_chain_proof_from_generator() {
+        let processor = BlockHashChainProcessor::<F, C, D>::new(&[4]);
+
+        let mut generator = BlockWitnessGenerator::new();
+        let mut rng = StdRng::seed_from_u64(42);
+
+        generator
+            .add_deposit(
+                Address::default(),
+                Bytes32::rand(&mut rng),
+                0,
+                U256::from(10u32),
+                Bytes32::rand(&mut rng),
+            )
+            .expect("add deposit");
+
+        let initial_ext_state = generator.current_extended_public_state();
+        assert_eq!(initial_ext_state.deposit_count, U63::default());
+
+        let tx_tree_root = Bytes32::rand(&mut rng);
+        generator
+            .add_block(1, &[1, 2], tx_tree_root)
+            .expect("add block");
+
+        let block_number = generator.block_number;
+        assert_eq!(block_number.as_u64(), 1);
+
+        let block_witness = generator
+            .block_chain_witness
+            .remove(&block_number)
+            .expect("block witness stored");
+
+        let block_proof = processor
+            .prove_block(Some(initial_ext_state), None, &block_witness)
+            .expect("block chain proof");
+
+        processor
+            .verify(&block_proof)
+            .expect("block chain proof verifies");
     }
 }
