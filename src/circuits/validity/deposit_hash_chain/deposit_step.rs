@@ -99,6 +99,7 @@ where
                 deposit_hash_chain: *initial_deposit_hash_chain,
                 deposit_tree_root: *initial_deposit_tree_root,
                 deposit_count: *initial_deposit_count,
+                block_number: self.deposit.block_number,
                 vd: deposit_chain_vd.verifier_only.clone(),
             }
         } else {
@@ -106,10 +107,19 @@ where
                 .prev_deposit_chain_proof
                 .clone()
                 .expect("Checked above");
-            DepositChainPublicInputs::<F, C, D>::from_u64_slice(
+            let prev_pis = DepositChainPublicInputs::<F, C, D>::from_u64_slice(
                 &prev_proof.public_inputs.to_u64_vec(),
                 &deposit_chain_vd.common.config,
-            )?
+            )?;
+            // validate block number consistency
+            if prev_pis.block_number != self.deposit.block_number {
+                return Err(UpdateDepositTreeError::InvaldInput(format!(
+                    "Block number mismatch: prev {}, current {}",
+                    prev_pis.block_number.as_u64(),
+                    self.deposit.block_number.as_u64()
+                )));
+            }
+            prev_pis
         };
 
         // Validate empty deposit merkle proof
@@ -147,6 +157,7 @@ where
             deposit_hash_chain: new_deposit_hash_chain,
             deposit_tree_root: new_deposit_tree_root,
             deposit_count: new_deposit_count,
+            block_number: self.deposit.block_number,
             vd: prev_pis.vd,
         })
     }
@@ -225,6 +236,12 @@ impl<const D: usize> DepositStepTarget<D> {
             &initial_deposit_count,
             &prev_deposit_chain_pis.deposit_count,
         );
+        // connect block number for prev deposit chain proof
+        builder.conditional_assert_eq(
+            not_initial.target,
+            prev_deposit_chain_pis.block_number.value,
+            deposit.block_number.value,
+        );
 
         // Select initial state depending on whether this is the initial step.
         let selected_initial_hash_chain = Bytes32Target::select(
@@ -275,6 +292,7 @@ impl<const D: usize> DepositStepTarget<D> {
             deposit_hash_chain: new_deposit_hash_chain,
             deposit_tree_root: new_deposit_tree_root,
             deposit_count: new_deposit_count,
+            block_number: deposit.block_number.clone(),
             vd: deposit_chain_vd,
         };
 
@@ -459,6 +477,7 @@ mod tests {
             .to_public_inputs(&deposit_chain_vd)
             .expect("public inputs");
         assert_eq!(expected_public_inputs.deposit_count.as_u64(), 1);
+        assert_eq!(expected_public_inputs.block_number, deposit.block_number);
         assert_eq!(
             expected_public_inputs.deposit_tree_root,
             expected_deposit_tree_root
@@ -489,7 +508,7 @@ mod tests {
             recipient: Bytes32::default(),
             token_index: 1,
             amount: U256::from(7u32),
-            block_number: U63::new(1).expect("valid block number"),
+            block_number: U63::default(),
             aux_data: Bytes32::default(),
         };
         let second_deposit_index = 1u64;
@@ -512,6 +531,10 @@ mod tests {
             .to_public_inputs(&deposit_chain_vd)
             .expect("second public inputs");
         assert_eq!(second_expected_public_inputs.deposit_count.as_u64(), 2);
+        assert_eq!(
+            second_expected_public_inputs.block_number,
+            second_deposit.block_number
+        );
         assert_eq!(
             second_expected_public_inputs.deposit_tree_root,
             expected_deposit_tree_root_second

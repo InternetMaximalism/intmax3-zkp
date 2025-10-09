@@ -11,7 +11,7 @@ use plonky2::{
 use thiserror::Error;
 
 use crate::{
-    common::u63::{U63, U63Target},
+    common::u63::{BlockNumber, BlockNumberTarget, U63, U63Target},
     ethereum_types::{
         bytes32::{BYTES32_LEN, Bytes32, Bytes32Target},
         u32limb_trait::{U32LimbTargetTrait as _, U32LimbTrait as _},
@@ -25,7 +25,7 @@ use crate::{
     },
 };
 
-pub const DEPOSIT_CHAIN_PUBLIC_INPUTS_LEN: usize = 2 * BYTES32_LEN + 2 * POSEIDON_HASH_OUT_LEN + 2;
+pub const DEPOSIT_CHAIN_PUBLIC_INPUTS_LEN: usize = 2 * BYTES32_LEN + 2 * POSEIDON_HASH_OUT_LEN + 3;
 
 #[derive(Debug, Error)]
 pub enum DepositChainPublicInputsError {
@@ -51,6 +51,7 @@ pub struct DepositChainPublicInputs<
     pub deposit_hash_chain: Bytes32,
     pub deposit_tree_root: PoseidonHashOut,
     pub deposit_count: U63,
+    pub block_number: BlockNumber,
     pub vd: VerifierOnlyCircuitData<C, D>,
 }
 
@@ -67,6 +68,7 @@ where
             self.deposit_hash_chain.to_u64_vec(),
             self.deposit_tree_root.to_u64_vec(),
             self.deposit_count.to_u64_vec(),
+            self.block_number.to_u64_vec(),
             vd_to_vec(config, &self.vd).to_u64_vec(),
         ]
         .concat()
@@ -133,6 +135,14 @@ where
             })?;
         cursor += 1;
 
+        let block_number = BlockNumber::new(inputs[cursor]).map_err(|e| {
+            DepositChainPublicInputsError::ParseError {
+                field: "block_number",
+                message: e.to_string(),
+            }
+        })?;
+        cursor += 1;
+
         let vd_slice = &inputs[cursor..cursor + vd_len];
         let vd = vd_from_pis_slice::<F, C, D>(&vd_slice.to_field_vec(), config).map_err(|e| {
             DepositChainPublicInputsError::ParseError {
@@ -148,6 +158,7 @@ where
             deposit_hash_chain,
             deposit_tree_root,
             deposit_count,
+            block_number,
             vd,
         })
     }
@@ -161,6 +172,7 @@ pub struct DepositChainPublicInputsTarget {
     pub deposit_hash_chain: Bytes32Target,
     pub deposit_tree_root: PoseidonHashOutTarget,
     pub deposit_count: U63Target,
+    pub block_number: BlockNumberTarget,
     pub vd: VerifierCircuitTarget,
 }
 
@@ -176,6 +188,7 @@ impl DepositChainPublicInputsTarget {
             deposit_hash_chain: Bytes32Target::new(builder, true),
             deposit_tree_root: PoseidonHashOutTarget::new(builder),
             deposit_count: U63Target::new(builder, true),
+            block_number: BlockNumberTarget::new(builder, true),
             vd: builder.add_virtual_verifier_data(config.fri_config.cap_height),
         }
     }
@@ -188,6 +201,7 @@ impl DepositChainPublicInputsTarget {
             self.deposit_hash_chain.to_vec(),
             self.deposit_tree_root.to_vec(),
             self.deposit_count.to_vec(),
+            self.block_number.to_vec(),
             vd_to_vec_target(config, &self.vd),
         ]
         .concat()
@@ -219,6 +233,9 @@ impl DepositChainPublicInputsTarget {
         let deposit_count = U63Target::from_slice(&pis[cursor..cursor + 1]);
         cursor += 1;
 
+        let block_number = BlockNumberTarget::from_slice(&pis[cursor..cursor + 1]);
+        cursor += 1;
+
         let vd_slice = &pis[cursor..cursor + vd_len];
         let vd = vd_from_pis_slice_target(vd_slice, config)
             .expect("vd_from_pis_slice_target should not fail");
@@ -230,6 +247,7 @@ impl DepositChainPublicInputsTarget {
             deposit_hash_chain,
             deposit_tree_root,
             deposit_count,
+            block_number,
             vd,
         }
     }
@@ -257,6 +275,7 @@ impl DepositChainPublicInputsTarget {
         self.deposit_tree_root
             .set_witness(witness, value.deposit_tree_root);
         self.deposit_count.set_witness(witness, value.deposit_count);
+        self.block_number.set_witness(witness, value.block_number);
         witness.set_verifier_data_target(&self.vd, &value.vd);
     }
 
@@ -276,6 +295,7 @@ impl DepositChainPublicInputsTarget {
         self.deposit_tree_root
             .connect(builder, other.deposit_tree_root);
         self.deposit_count.connect(builder, &other.deposit_count);
+        self.block_number.connect(builder, &other.block_number);
         builder.connect_verifier_data(&self.vd, &other.vd);
     }
 }

@@ -151,6 +151,7 @@ mod tests {
             first_public_inputs.deposit_hash_chain,
             expected_deposit_hash_chain_first
         );
+        assert_eq!(first_public_inputs.block_number, deposit.block_number);
 
         // Second deposit step using the first proof.
         let second_deposit = Deposit {
@@ -158,7 +159,7 @@ mod tests {
             recipient: Bytes32::default(),
             token_index: 1,
             amount: U256::from(7u32),
-            block_number: U63::new(1).expect("valid block number"),
+            block_number: U63::default(),
             aux_data: Bytes32::default(),
         };
         let second_deposit_merkle_proof = deposit_tree_after_first.prove(1);
@@ -200,5 +201,9 @@ mod tests {
             expected_deposit_hash_chain_second
         );
         assert_eq!(second_public_inputs.deposit_count.as_u64(), 2);
+        assert_eq!(
+            second_public_inputs.block_number,
+            second_deposit.block_number
+        );
     }
 }

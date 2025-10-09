@@ -225,6 +225,11 @@ where
                         .to_string(),
                 ));
             }
+            if deposit_inputs.block_number != block_number {
+                return Err(BlockStepError::InvalidInput(
+                    "deposit proof block number mismatch".to_string(),
+                ));
+            }
 
             // update deposit-related state components
             deposit_hash_chain = deposit_inputs.deposit_hash_chain;
@@ -449,6 +454,11 @@ impl<const D: usize> BlockStepTarget<D> {
             builder,
             selected_update_inputs.deposit_hash_chain.clone(),
             has_deposit_proof,
+        );
+        builder.conditional_assert_eq(
+            has_deposit_proof.target,
+            deposit_inputs.block_number.value,
+            next_block_number.value,
         );
 
         let selected_deposit_hash_chain = Bytes32Target::select(
@@ -934,7 +944,7 @@ mod tests {
             recipient: Bytes32::rand(&mut rng),
             token_index: 0,
             amount: U256::from(10u32),
-            block_number: BlockNumber::default(),
+            block_number: BlockNumber::new(1).unwrap(),
             aux_data: Bytes32::rand(&mut rng),
         };
         let deposit_index = 0u64;
@@ -964,6 +974,10 @@ mod tests {
         assert_eq!(
             deposit_chain_public_inputs_first.deposit_hash_chain,
             expected_deposit_hash_chain
+        );
+        assert_eq!(
+            deposit_chain_public_inputs_first.block_number,
+            deposit.block_number
         );
         let deposit_chain_pis_first_fields = deposit_chain_public_inputs_first
             .to_u64_vec(&deposit_chain_cd.config)

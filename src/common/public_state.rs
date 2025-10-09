@@ -476,15 +476,15 @@ impl FullPublicState {
         amount: U256,
         aux_data: Bytes32,
     ) -> Result<(), FullPublicStateError> {
-        let block_number = self.block_number.as_u64() + 1;
+        // the block number of the deposit is the next block number
+        let block_number = self.block_number.add(1).expect("should not overflow");
         let deposit = Deposit {
             depositor,
             recipient,
             token_index,
             amount,
             aux_data,
-            block_number: BlockNumber::new(block_number)
-                .expect("block number should fit within 63 bits"),
+            block_number,
         };
 
         // add deposit
