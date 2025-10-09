@@ -62,8 +62,6 @@ where
         );
         builder.register_public_inputs(&new_chain_pis.to_vec(&block_chain_cd.config));
 
-        add_noop_gates(&mut builder, 1 << 12);
-
         let (data, success) = builder.try_build_with_options::<C>(true);
         assert_eq!(
             data.common,
