@@ -57,16 +57,7 @@ pub enum BlockHashChainProcessorError {
     BlockHashChain(#[from] BlockHashChainCircuitError),
 }
 
-pub struct BlockHashChainProcessorWitness<
-    F: RichField + Extendable<D>,
-    C: GenericConfig<D, F = F>,
-    const D: usize,
-> where
-    <C as GenericConfig<D>>::Hasher: AlgebraicHasher<F>,
-{
-    pub initial_public_state: Option<ExtendedPublicState>,
-    pub prev_block_chain_proof: Option<ProofWithPublicInputs<F, C, D>>,
-
+pub struct BlockHashChainProcessorWitness {
     pub deposit_step_witness: Vec<(Deposit, DepositMerkleProof)>,
     pub block: Block,
     pub prev_account_leaves: Vec<AccountLeaf>,
@@ -146,7 +137,9 @@ where
 
     pub fn prove_block(
         &self,
-        witness: &BlockHashChainProcessorWitness<F, C, D>,
+        initial_public_state: Option<ExtendedPublicState>,
+        prev_block_chain_proof: Option<ProofWithPublicInputs<F, C, D>>,
+        witness: &BlockHashChainProcessorWitness,
     ) -> Result<ProofWithPublicInputs<F, C, D>, BlockHashChainProcessorError> {
         // get corresponding update account circuit
         let num_users = witness.block.num_users;
@@ -155,16 +148,17 @@ where
         )?;
 
         // require initial state or previous proof
-        if witness.initial_public_state.is_some() as u8
-            + witness.prev_block_chain_proof.is_some() as u8
-            != 1
-        {
+        if initial_public_state.is_some() as u8 + prev_block_chain_proof.is_some() as u8 != 1 {
             return Err(BlockHashChainProcessorError::InvalidInput(
                 "either initial public state or previous block chain proof must be provided"
                     .to_string(),
             ));
         }
-        let prev_ext_public_state = if let Some(ref proof) = witness.prev_block_chain_proof {
+        let prev_ext_public_state = if let Some(ref proof) = prev_block_chain_proof {
+            self.block_hash_chain_circuit
+                .verify(proof)
+                .map_err(BlockHashChainProcessorError::BlockHashChain)?;
+
             let prev_pis = BlockChainPublicInputs::<F, C, D>::from_u64_slice(
                 &proof.public_inputs.to_u64_vec(),
                 &self.block_hash_chain_circuit.data.common.config,
@@ -177,11 +171,11 @@ where
             })?;
             prev_pis.ext_public_state.clone()
         } else {
-            witness.initial_public_state.clone().ok_or(
-                BlockHashChainProcessorError::InvalidInput(
+            initial_public_state
+                .clone()
+                .ok_or(BlockHashChainProcessorError::InvalidInput(
                     "initial public state must be provided".to_string(),
-                ),
-            )?
+                ))?
         };
 
         // generate deposit chain proof
@@ -208,7 +202,15 @@ where
             deposit_chain_proof = Some(proof);
         }
 
-        let block_number = prev_ext_public_state.inner.block_number.add(1).unwrap();
+        let block_number = prev_ext_public_state
+            .inner
+            .block_number
+            .add(1)
+            .map_err(|_e| {
+                BlockHashChainProcessorError::InvalidInput(
+                    "previous block number is at max value".to_string(),
+                )
+            })?;
         let update_account_tree = UpdateAccountTree {
             prev_block_hash_chain: prev_ext_public_state.block_hash_chain,
             prev_account_tree_root: prev_ext_public_state.inner.account_tree_root,
@@ -222,8 +224,8 @@ where
 
         let block_step_witness = BlockStepWitness::<F, C, D> {
             num_users,
-            initial_public_state: witness.initial_public_state.clone(),
-            prev_block_chain_proof: witness.prev_block_chain_proof.clone(),
+            initial_public_state: initial_public_state.clone(),
+            prev_block_chain_proof: prev_block_chain_proof.clone(),
             deposit_hash_chain_proof: deposit_chain_proof.clone(),
             update_account_proof: update_account_proof.clone(),
             public_state_merkle_proof: witness.public_state_merkle_proof.clone(),
