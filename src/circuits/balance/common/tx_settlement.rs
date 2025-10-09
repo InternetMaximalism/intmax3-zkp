@@ -231,7 +231,7 @@ mod tests {
             account_tree::{AccountLeaf, AccountTree, SendLeaf, SendTree},
             tx_tree::TxTree,
         },
-        constants::{ACCOUNT_TREE_HEIGHT, SEND_TREE_HEIGHT, TX_TREE_HEIGHT},
+        constants::{ACCOUNT_TREE_HEIGHT, SEND_TREE_HEIGHT},
         ethereum_types::bytes32::Bytes32,
         utils::poseidon_hash_out::PoseidonHashOut,
     };
@@ -266,11 +266,10 @@ mod tests {
             .prove(PartialWitness::<F>::new())
             .expect("spend circuit proof");
 
-        let mut tx_tree = TxTree::new(TX_TREE_HEIGHT);
-        tx_tree.push(Tx::default());
+        let mut tx_tree = TxTree::init();
         let tx = Tx::default();
         let local_id = 1u32;
-        tx_tree.push(tx);
+        tx_tree.update(local_id as u64, tx);
         let tx_merkle_proof = tx_tree.prove(local_id as u64);
         let tx_tree_root: PoseidonHashOut = tx_tree.get_root();
         let tx_tree_root_bytes: Bytes32 = tx_tree_root.clone().into();

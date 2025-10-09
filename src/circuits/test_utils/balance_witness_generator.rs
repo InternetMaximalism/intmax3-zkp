@@ -593,12 +593,11 @@ where
 
 #[cfg(test)]
 mod tests {
-    use std::sync::{Arc, RwLock};
-
     use plonky2::{
         field::goldilocks_field::GoldilocksField, plonk::config::PoseidonGoldilocksConfig,
     };
     use rand::{SeedableRng as _, rngs::StdRng};
+    use std::sync::{Arc, RwLock};
 
     use crate::{
         circuits::{
@@ -607,11 +606,19 @@ mod tests {
                 common::recipient::calculate_recipient_from_user_id, spend_circuit::SpendCircuit,
             },
             test_utils::{
-                balance_witness_generator::{BalanceWitnessGenerator, ReceiveDepositData},
+                balance_witness_generator::{
+                    BalanceWitnessGenerator, ReceiveDepositData, ReceiveTransferData, SendTxData,
+                },
                 block_witness_generator::BlockWitnessGenerator,
             },
         },
-        common::{salt::Salt, user_id::UserId},
+        common::{
+            salt::Salt,
+            transfer::Transfer,
+            trees::{transfer_tree::TransferTree, tx_tree::TxTree},
+            tx::Tx,
+            user_id::UserId,
+        },
         ethereum_types::{
             address::Address, bytes32::Bytes32, u32limb_trait::U32LimbTrait, u256::U256,
         },
@@ -635,7 +642,7 @@ mod tests {
         let mut rng = StdRng::seed_from_u64(42);
         let user_id = UserId::new(0, 1).unwrap();
         let salt = Salt::rand(&mut rng);
-        let balance_witness_generator = BalanceWitnessGenerator::new(
+        let mut balance_witness_generator = BalanceWitnessGenerator::new(
             user_id,
             salt,
             block_witness_generator.clone(),
@@ -653,7 +660,7 @@ mod tests {
                 Address::rand(&mut rng),
                 recipient,
                 0,
-                U256::from(1),
+                U256::from(10),
                 Bytes32::rand(&mut rng),
             )
             .unwrap();
@@ -671,6 +678,106 @@ mod tests {
 
         let receive_deposit_witness = balance_witness_generator
             .receive_deposit_witness(&deposit_data)
+            .unwrap();
+
+        let new_balance_proof = balance_processor
+            .prove_receive_deposit(&receive_deposit_witness)
+            .unwrap();
+
+        balance_witness_generator
+            .commit_receive_deposit(&new_balance_proof, &receive_deposit_witness)
+            .unwrap();
+
+        // another user
+        let user_id2 = UserId::new(1, 1).unwrap();
+        let salt2 = Salt::rand(&mut rng);
+        let mut balance_witness_generator2 = BalanceWitnessGenerator::new(
+            user_id2,
+            salt2,
+            block_witness_generator.clone(),
+            &balance_processor,
+        )
+        .unwrap();
+
+        // transfer from user 1 to user 2
+        let transfer_salt = Salt::rand(&mut rng);
+        let transfer = Transfer {
+            token_index: 0,
+            amount: U256::from(3),
+            recipient: calculate_recipient_from_user_id(user_id2, transfer_salt),
+            aux_data: Bytes32::default(),
+        };
+        let sender_proof = balance_witness_generator.balance_proof.clone();
+        let spend_witness = balance_witness_generator
+            .spend_witness(&[transfer.clone()])
+            .unwrap();
+        let spend_proof = spend_circuit.prove(&spend_witness).unwrap();
+
+        // construct transfer tree
+        let mut transfer_tree = TransferTree::init();
+        transfer_tree.push(transfer.clone());
+        let transfer_index = 0u32;
+        let transfer_tree_root = transfer_tree.get_root();
+        let transfer_merkle_proof = transfer_tree.prove(transfer_index as u64);
+        let tx = Tx {
+            transfer_tree_root,
+            nonce: balance_witness_generator.full_private_state.nonce,
+        };
+
+        // generate tx tree
+        let mut tx_tree = TxTree::init();
+        tx_tree.update(user_id.local_id() as u64, tx.clone());
+        let tx_tree_root = tx_tree.get_root();
+        let tx_merkle_proof = tx_tree.prove(user_id.local_id() as u64);
+
+        // add block
+        block_witness_generator
+            .write()
+            .unwrap()
+            .add_block(
+                user_id.aggregator_id(),
+                &[user_id.local_id()],
+                tx_tree_root.into(),
+            )
+            .unwrap();
+
+        let send_tx_data = SendTxData {
+            spend_proof: spend_proof.clone(),
+            tx_tree_root: tx_tree_root.into(),
+            tx,
+            tx_merkle_proof: tx_merkle_proof.clone(),
+        };
+        let receive_transfer_data = ReceiveTransferData {
+            to: user_id2,
+            transfer,
+            sender_proof,
+            spend_proof,
+            tx_tree_root: tx_tree_root.into(),
+            tx,
+            tx_merkle_proof,
+            transfer_index,
+            transfer_merkle_proof,
+            transfer_salt,
+        };
+
+        // update the balance proof of user 1
+        let send_tx_witness = balance_witness_generator
+            .send_tx_witness(&send_tx_data)
+            .unwrap();
+        let new_balance_proof = balance_processor.prove_send_tx(&send_tx_witness).unwrap();
+        balance_witness_generator
+            .commit_send_tx(&new_balance_proof, &send_tx_witness, &spend_witness)
+            .unwrap();
+
+        // user 2 receives the transfer
+        let receive_transfer_witness = balance_witness_generator2
+            .receive_transfer_witness(&receive_transfer_data)
+            .unwrap();
+        let new_balance_proof = balance_processor
+            .prove_receive_transfer(&receive_transfer_witness)
+            .unwrap();
+        balance_witness_generator2
+            .commit_receive_transfer(&new_balance_proof, &receive_transfer_witness)
             .unwrap();
     }
 }

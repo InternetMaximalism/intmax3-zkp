@@ -335,13 +335,11 @@ mod tests {
                 asset_tree::AssetTree,
                 tx_tree::TxTree,
             },
-            tx::Tx,
             u63::BlockNumber,
             user_id::UserId,
         },
         constants::{
             ACCOUNT_TREE_HEIGHT, ASSET_TREE_HEIGHT, MAX_NUM_TRANSFERS_PER_TX, SEND_TREE_HEIGHT,
-            TX_TREE_HEIGHT,
         },
         ethereum_types::{bytes32::Bytes32, u256::U256},
         utils::{
@@ -417,10 +415,9 @@ mod tests {
             .expect("public inputs from spend witness");
 
         let tx = spend_pis.tx;
-        let mut tx_tree = TxTree::new(TX_TREE_HEIGHT);
-        tx_tree.push(Tx::default());
+        let mut tx_tree = TxTree::init();
         let local_id = 1u32;
-        tx_tree.push(tx);
+        tx_tree.update(local_id as u64, tx.clone());
         let tx_merkle_proof = tx_tree.prove(local_id as u64);
         let tx_tree_root: PoseidonHashOut = tx_tree.get_root();
 
