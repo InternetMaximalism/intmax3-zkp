@@ -1,14 +1,17 @@
 use std::collections::HashMap;
 
 use crate::{
-    circuits::validity::block_hash_chain::{
-        block_hash_chain_processor::BlockHashChainProcessorWitness,
-        ext_public_state::ExtendedPublicState,
+    circuits::{
+        balance::common::account_state::AccountState,
+        validity::block_hash_chain::{
+            block_hash_chain_processor::BlockHashChainProcessorWitness,
+            ext_public_state::ExtendedPublicState,
+        },
     },
     common::{
         block::{Block, BlockError},
         deposit::Deposit,
-        public_state::{get_num_users, PublicState},
+        public_state::{PublicState, get_num_users},
         trees::{
             account_tree::{
                 AccountLeaf, AccountMerkleProof, AccountTree, SendLeaf, SendMerkleProof, SendTree,
@@ -36,6 +39,9 @@ pub enum BlockWitnessGeneratorError {
 
     #[error("Block number error: {0}")]
     BlockNumber(#[from] BlockNumberError),
+
+    #[error("Invalid request: {0}")]
+    InvalidRequest(String),
 }
 
 pub struct BlockWitnessGenerator {
@@ -238,5 +244,97 @@ impl BlockWitnessGenerator {
         self.block_number = new_block_number;
 
         Ok(())
+    }
+
+    pub fn get_account_state(
+        &self,
+        user_id: UserId,
+        block_number: BlockNumber,
+    ) -> Result<(BlockNumber, AccountState), BlockWitnessGeneratorError> {
+        let current_block_number = self.block_number;
+        if block_number > current_block_number {
+            return Err(BlockWitnessGeneratorError::InvalidRequest(format!(
+                "Requested block number {} is greater than current block number {}",
+                block_number.as_u64(),
+                current_block_number.as_u64()
+            )));
+        }
+
+        // find send tree for the user
+        let send_leaves = self.send_leaves.get(&user_id).cloned().unwrap_or_default();
+        let mut send_tree = SendTree::init();
+        for leaf in send_leaves.iter() {
+            send_tree.push(leaf.clone());
+        }
+
+        // find send leaves that send_leaf.prev <= block_number < send_leaf.cur if any, 0 otherwise
+        let send_leaf_index = match send_leaves
+            .iter()
+            .position(|leaf| leaf.prev <= block_number && block_number < leaf.cur)
+        {
+            Some(index) => index as u32,
+            None => 0, // use default
+        };
+        let send_leaf = send_tree.get_leaf(send_leaf_index as u64);
+        let send_merkle_proof = send_tree.prove(send_leaf_index as u64);
+
+        let account_tree_root = self.account_tree.get_root();
+        let account_leaf = self.account_tree.get_leaf(user_id.as_u64());
+        let account_merkle_proof = self.account_tree.prove(user_id.as_u64());
+
+        Ok((
+            current_block_number,
+            AccountState {
+                user_id,
+                account_tree_root,
+                send_leaf,
+                send_leaf_index,
+                send_merkle_proof,
+                account_leaf,
+                account_merkle_proof,
+            },
+        ))
+    }
+
+    pub fn get_account_state_for_tx(
+        &self,
+        user_id: UserId,
+        tx_tree_root: Bytes32,
+    ) -> Result<(BlockNumber, AccountState), BlockWitnessGeneratorError> {
+        let current_block_number = self.block_number;
+
+        // find send tree for the user
+        let send_leaves = self.send_leaves.get(&user_id).cloned().unwrap_or_default();
+        let send_leaf_index = send_leaves
+            .iter()
+            .position(|leaf| leaf.tx_tree_root == tx_tree_root)
+            .ok_or(BlockWitnessGeneratorError::InvalidRequest(format!(
+                "No send leaf found for user {:?} with tx_tree_root {:?}",
+                user_id, tx_tree_root
+            )))? as u32;
+
+        let mut send_tree = SendTree::init();
+        for leaf in send_leaves.iter() {
+            send_tree.push(leaf.clone());
+        }
+        let send_leaf = send_tree.get_leaf(send_leaf_index as u64);
+        let send_merkle_proof = send_tree.prove(send_leaf_index as u64);
+
+        let account_tree_root = self.account_tree.get_root();
+        let account_leaf = self.account_tree.get_leaf(user_id.as_u64());
+        let account_merkle_proof = self.account_tree.prove(user_id.as_u64());
+
+        Ok((
+            current_block_number,
+            AccountState {
+                user_id,
+                account_tree_root,
+                send_leaf,
+                send_leaf_index,
+                send_merkle_proof,
+                account_leaf,
+                account_merkle_proof,
+            },
+        ))
     }
 }
