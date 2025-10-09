@@ -17,7 +17,7 @@ use crate::{
         receive_transfer_circuit::{
             ReceiveTransferCircuit, ReceiveTransferError, ReceiveTransferWitness,
         },
-        send_tx_circuit::{SendTxCircuit, SpendTxError, SpendTxWitness},
+        send_tx_circuit::{SendTxCircuit, SendTxError, SendTxWitness},
         switch_board::{BalanceSwichBoard, BalanceSwichBoardCircuit, BalanceSwitchBoardError},
     },
     common::{salt::Salt, user_id::UserId},
@@ -32,7 +32,7 @@ pub enum BalanceProcessorError {
     ReceiveDepositCircuitError(#[from] ReceiveDepositError),
 
     #[error("Send tx circuit error: {0}")]
-    SendTxCircuitError(#[from] SpendTxError),
+    SendTxCircuitError(#[from] SendTxError),
 
     #[error("Switch board circuit error: {0}")]
     SwitchBoardCircuitError(#[from] BalanceSwitchBoardError),
@@ -42,6 +42,7 @@ pub enum BalanceProcessorError {
 }
 
 /// A processor that holds all the balance-related circuits and can be used to create proofs.
+#[derive(Debug)]
 pub struct BalanceProcessor<F, C, const D: usize>
 where
     F: RichField + Extendable<D>,
@@ -170,7 +171,7 @@ where
 
     pub fn prove_send_tx(
         &self,
-        witness: &SpendTxWitness<F, C, D>,
+        witness: &SendTxWitness<F, C, D>,
     ) -> Result<ProofWithPublicInputs<F, C, D>, BalanceProcessorError> {
         let send_tx_proof = self
             .send_tx_circuit

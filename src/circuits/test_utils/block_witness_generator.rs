@@ -44,6 +44,7 @@ pub enum BlockWitnessGeneratorError {
     InvalidRequest(String),
 }
 
+#[derive(Debug, Clone)]
 pub struct BlockWitnessGenerator {
     pub supported_user_counts: Vec<u32>,
 

@@ -26,7 +26,7 @@ use crate::{
 };
 
 #[derive(thiserror::Error, Debug)]
-pub enum SpendTxError {
+pub enum SendTxError {
     #[error("Connection error: {0}")]
     ConnectionError(String),
 
@@ -49,7 +49,7 @@ pub enum SpendTxError {
     FailedToProve(String),
 }
 
-pub struct SpendTxWitness<F: RichField + Extendable<D>, C: GenericConfig<D, F = F>, const D: usize>
+pub struct SendTxWitness<F: RichField + Extendable<D>, C: GenericConfig<D, F = F>, const D: usize>
 where
     <C as GenericConfig<D>>::Hasher: AlgebraicHasher<F>,
 {
@@ -66,14 +66,14 @@ where
 }
 
 impl<F: RichField + Extendable<D>, C: GenericConfig<D, F = F>, const D: usize>
-    SpendTxWitness<F, C, D>
+    SendTxWitness<F, C, D>
 where
     <C as GenericConfig<D>>::Hasher: AlgebraicHasher<F>,
 {
     pub fn to_public_inputs(
         &self,
         balance_cd: &CommonCircuitData<F, D>,
-    ) -> Result<BalanceFullPublicInputs<F, C, D>, SpendTxError> {
+    ) -> Result<BalanceFullPublicInputs<F, C, D>, SendTxError> {
         let prev_balance_full_pis = BalanceFullPublicInputs::<F, C, D>::from_u64_slice(
             &self.prev_balance_proof.public_inputs.to_u64_vec(),
             &balance_cd.config,
@@ -82,19 +82,19 @@ where
         let prev_balance_pis = prev_balance_full_pis.pis;
 
         if prev_balance_pis.public_state != self.update_public_state.old {
-            return Err(SpendTxError::ConnectionError(format!(
+            return Err(SendTxError::ConnectionError(format!(
                 "prev_balance_pis.public_state: {:?}, update_public_state.old: {:?}",
                 prev_balance_pis.public_state, self.update_public_state.old
             )));
         }
         if self.update_public_state.new != self.tx_settlement.public_state {
-            return Err(SpendTxError::ConnectionError(format!(
+            return Err(SendTxError::ConnectionError(format!(
                 "update_public_state.new: {:?}, tx_settlement.public_state: {:?}",
                 self.update_public_state.new, self.tx_settlement.public_state
             )));
         }
         if self.tx_settlement.user_id != prev_balance_pis.user_id {
-            return Err(SpendTxError::ConnectionError(format!(
+            return Err(SendTxError::ConnectionError(format!(
                 "tx_settlement.user_id: {}, prev_balance_pis.user_id: {}",
                 self.tx_settlement.user_id.as_u64(),
                 prev_balance_pis.user_id.as_u64()
@@ -103,22 +103,22 @@ where
         let spend_pis = self
             .tx_settlement
             .spend_pis()
-            .map_err(|e| SpendTxError::SpendPisError(format!("failed to get spend pis: {}", e)))?;
+            .map_err(|e| SendTxError::SpendPisError(format!("failed to get spend pis: {}", e)))?;
         if spend_pis.prev_private_commitment != prev_balance_pis.private_commitment {
-            return Err(SpendTxError::ConnectionError(format!(
+            return Err(SendTxError::ConnectionError(format!(
                 "spend_pis.prev_private_commitment: {}, prev_balance_pis.private_commitment: {}",
                 spend_pis.prev_private_commitment, prev_balance_pis.private_commitment
             )));
         }
         if prev_balance_pis.block_r < self.tx_settlement.send_block_number_before_tx() {
-            return Err(SpendTxError::BlockNumberError(format!(
+            return Err(SendTxError::BlockNumberError(format!(
                 "prev_balance_pis.block_r: {} should be >= tx_settlement.send_block_number_before_tx(): {}",
                 prev_balance_pis.block_r.as_u64(),
                 self.tx_settlement.send_block_number_before_tx().as_u64()
             )));
         }
         if self.tx_settlement.tx_block_number() < prev_balance_pis.block_r {
-            return Err(SpendTxError::BlockNumberError(format!(
+            return Err(SendTxError::BlockNumberError(format!(
                 "tx_settlement.tx_block_number(): {} should be >= prev_balance_pis.block_r: {}",
                 self.tx_settlement.tx_block_number().as_u64(),
                 prev_balance_pis.block_r.as_u64()
@@ -240,7 +240,7 @@ impl<const D: usize> SendTxTarget<D> {
     pub fn set_witness<F, C, W>(
         &self,
         witness: &mut W,
-        value: &SpendTxWitness<F, C, D>,
+        value: &SendTxWitness<F, C, D>,
         balance_full_pis: &BalanceFullPublicInputs<F, C, D>,
     ) where
         F: RichField + Extendable<D>,
@@ -301,8 +301,8 @@ where
 
     pub fn prove(
         &self,
-        witness: &SpendTxWitness<F, C, D>,
-    ) -> Result<ProofWithPublicInputs<F, C, D>, SpendTxError> {
+        witness: &SendTxWitness<F, C, D>,
+    ) -> Result<ProofWithPublicInputs<F, C, D>, SendTxError> {
         let balance_pis = witness.to_public_inputs(&self.balance_cd)?;
         let mut pw = PartialWitness::<F>::new();
 
@@ -312,7 +312,7 @@ where
 
         self.data
             .prove(pw)
-            .map_err(|e| SpendTxError::FailedToProve(e.to_string()))
+            .map_err(|e| SendTxError::FailedToProve(e.to_string()))
     }
 }
 
@@ -500,7 +500,7 @@ mod tests {
             .prove(Some(initial_pis.as_slice()), None)
             .expect("balance proof should succeed");
 
-        let witness = SpendTxWitness {
+        let witness = SendTxWitness {
             prev_balance_proof,
             update_public_state,
             tx_settlement,

@@ -57,6 +57,7 @@ pub enum BlockHashChainProcessorError {
     BlockHashChain(#[from] BlockHashChainCircuitError),
 }
 
+#[derive(Debug, Clone)]
 pub struct BlockHashChainProcessorWitness {
     pub deposit_step_witness: Vec<(Deposit, DepositMerkleProof)>,
     pub block: Block,

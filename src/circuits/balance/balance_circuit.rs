@@ -32,6 +32,7 @@ pub enum BalanceCircuitError {
     ProofVerificationError(String),
 }
 
+#[derive(Debug)]
 pub struct BalanceCircuit<F, C, const D: usize>
 where
     F: RichField + Extendable<D>,

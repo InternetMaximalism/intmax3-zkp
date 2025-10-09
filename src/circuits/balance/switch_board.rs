@@ -148,6 +148,7 @@ where
     }
 }
 
+#[derive(Debug, Clone)]
 pub struct BalanceSwichBoardTarget<const D: usize> {
     pub one_hot: [BoolTarget; 4], // initial_value, receive_transfer, receive_deposit, send_tx
 
@@ -378,6 +379,7 @@ impl<const D: usize> BalanceSwichBoardTarget<D> {
     }
 }
 
+#[derive(Debug)]
 pub struct BalanceSwichBoardCircuit<F, C, const D: usize>
 where
     F: RichField + Extendable<D>,
