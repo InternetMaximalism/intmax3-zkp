@@ -1,18 +1,25 @@
 use std::collections::HashMap;
 
 use crate::{
-    circuits::validity::block_hash_chain::block_hash_chain_processor::BlockHashChainProcessorWitness,
+    circuits::validity::block_hash_chain::{
+        block_hash_chain_processor::BlockHashChainProcessorWitness,
+        ext_public_state::ExtendedPublicState,
+    },
     common::{
         block::{Block, BlockError},
         deposit::Deposit,
+        public_state::PublicState,
         trees::{
-            account_tree::{AccountTree, SendLeaf},
-            deposit_tree::DepositTree,
-            public_state_tree::PublicStateTree,
+            account_tree::{
+                AccountLeaf, AccountMerkleProof, AccountTree, SendLeaf, SendMerkleProof, SendTree,
+            },
+            deposit_tree::{DepositMerkleProof, DepositTree},
+            public_state_tree::{PublicStateMerkleProof, PublicStateTree},
         },
-        u63::BlockNumber,
+        u63::{BlockNumber, BlockNumberError, U63},
         user_id::{UserId, UserIdError},
     },
+    constants::{ACCOUNT_TREE_HEIGHT, SEND_TREE_HEIGHT, get_num_users},
     ethereum_types::{address::Address, bytes32::Bytes32, u256::U256},
 };
 
@@ -26,6 +33,9 @@ pub enum BlockWitnessGeneratorError {
 
     #[error("Block error: {0}")]
     BlockError(#[from] BlockError),
+
+    #[error("Block number error: {0}")]
+    BlockNumber(#[from] BlockNumberError),
 }
 
 pub struct BlockWitnessGenerator {
@@ -35,11 +45,12 @@ pub struct BlockWitnessGenerator {
     pub deposit_tree: DepositTree,
     pub public_state_tree: PublicStateTree,
 
-    pub blocks: Vec<Block>,
-    pub deposits: HashMap<BlockNumber, Vec<Deposit>>,
     pub block_hash_chain: Bytes32,
     pub deposit_hash_chain: Bytes32,
 
+    pub blocks: Vec<Block>,
+    pub ext_public_states: Vec<ExtendedPublicState>,
+    pub deposits: HashMap<BlockNumber, Vec<(Deposit, DepositMerkleProof)>>,
     pub block_chain_witness: HashMap<BlockNumber, BlockHashChainProcessorWitness>,
 }
 
@@ -51,13 +62,27 @@ impl BlockWitnessGenerator {
             send_leaves: HashMap::new(),
             deposit_tree: DepositTree::init(),
             public_state_tree: PublicStateTree::init(),
-
-            blocks: vec![Block::default()], // genesis block
-            deposits: HashMap::new(),
             block_hash_chain: Bytes32::default(),
             deposit_hash_chain: Bytes32::default(),
 
+            blocks: vec![Block::default()], // genesis block
+            ext_public_states: vec![ExtendedPublicState::default()],
+            deposits: HashMap::new(),
             block_chain_witness: HashMap::new(), // no witness for genesis block
+        }
+    }
+
+    fn current_ext_public_state(&self) -> ExtendedPublicState {
+        ExtendedPublicState {
+            inner: PublicState {
+                block_number: self.block_number,
+                account_tree_root: self.account_tree.get_root(),
+                deposit_tree_root: self.deposit_tree.get_root(),
+                prev_public_state_root: self.public_state_tree.get_root(),
+            },
+            block_hash_chain: self.block_hash_chain,
+            deposit_hash_chain: self.deposit_hash_chain,
+            deposit_count: U63::new(self.deposit_tree.len() as u64).unwrap(),
         }
     }
 
@@ -67,7 +92,101 @@ impl BlockWitnessGenerator {
         local_ids: &[u32],
         tx_tree_root: Bytes32,
     ) -> Result<(), BlockWitnessGeneratorError> {
-        todo!()
+        let num_users = get_num_users(local_ids.len())
+            .ok_or(BlockWitnessGeneratorError::TooManyLocalIds(local_ids.len()))?;
+
+        let block = Block::new(
+            num_users,
+            aggregator_id,
+            local_ids,
+            tx_tree_root,
+            self.deposit_hash_chain,
+        )?;
+
+        let new_block_number = self
+            .block_number
+            .add(1)
+            .map_err(BlockWitnessGeneratorError::BlockNumber)?;
+
+        let prev_public_state = self.current_ext_public_state().inner;
+        let public_state_index = self.block_number.as_u64();
+        let public_state_merkle_proof: PublicStateMerkleProof =
+            self.public_state_tree.prove(public_state_index);
+        self.public_state_tree.push(prev_public_state.clone());
+
+        let mut prev_account_leaves = Vec::with_capacity(num_users as usize);
+        let mut account_merkle_proofs = Vec::with_capacity(num_users as usize);
+        let mut send_merkle_proofs = Vec::with_capacity(num_users as usize);
+
+        let dummy_account_proof = AccountMerkleProof::dummy(ACCOUNT_TREE_HEIGHT);
+        let dummy_send_proof = SendMerkleProof::dummy(SEND_TREE_HEIGHT);
+
+        for &local_id in block.local_ids.iter() {
+            if local_id == 0 {
+                prev_account_leaves.push(AccountLeaf::default());
+                account_merkle_proofs.push(dummy_account_proof.clone());
+                send_merkle_proofs.push(dummy_send_proof.clone());
+                continue;
+            }
+
+            let user_id = UserId::new(aggregator_id, local_id)?;
+            let send_entries = self.send_leaves.entry(user_id).or_insert_with(Vec::new);
+
+            let mut send_tree = SendTree::init();
+            for leaf in send_entries.iter() {
+                send_tree.push(leaf.clone());
+            }
+
+            let prev_account_leaf = self.account_tree.get_leaf(user_id.as_u64());
+            prev_account_leaves.push(prev_account_leaf.clone());
+
+            let account_proof = self.account_tree.prove(user_id.as_u64());
+            account_merkle_proofs.push(account_proof);
+
+            let send_proof = send_tree.prove(prev_account_leaf.index.into());
+            send_merkle_proofs.push(send_proof.clone());
+
+            if prev_account_leaf.prev != new_block_number {
+                let new_send_leaf = SendLeaf {
+                    prev: prev_account_leaf.prev,
+                    cur: new_block_number,
+                    tx_tree_root,
+                };
+                let new_send_root =
+                    send_proof.get_root(&new_send_leaf, prev_account_leaf.index.into());
+                send_tree.push(new_send_leaf.clone());
+                send_entries.push(new_send_leaf);
+
+                let new_account_leaf = AccountLeaf {
+                    index: prev_account_leaf.index + 1,
+                    prev: new_block_number,
+                    send_tree_root: new_send_root,
+                };
+                self.account_tree.update(user_id.as_u64(), new_account_leaf);
+            }
+        }
+
+        let deposit_step_witness = self.deposits.remove(&new_block_number).unwrap_or_default();
+
+        let block_witness = BlockHashChainProcessorWitness {
+            deposit_step_witness,
+            block: block.clone(),
+            prev_account_leaves,
+            account_merkle_proofs,
+            send_merkle_proofs,
+            public_state_merkle_proof,
+        };
+
+        self.block_chain_witness
+            .insert(new_block_number, block_witness);
+
+        self.block_hash_chain = block.hash_with_prev_hash(self.block_hash_chain)?;
+        self.blocks.push(block);
+        self.block_number = new_block_number;
+
+        self.ext_public_states.push(self.current_ext_public_state());
+
+        Ok(())
     }
 
     pub fn add_deposit(
@@ -78,6 +197,31 @@ impl BlockWitnessGenerator {
         amount: U256,
         aux_data: Bytes32,
     ) -> Result<(), BlockWitnessGeneratorError> {
-        todo!()
+        let next_block_number = self
+            .block_number
+            .add(1)
+            .map_err(BlockWitnessGeneratorError::BlockNumber)?;
+
+        let deposit_index = self.deposit_tree.len() as u64;
+        let deposit_merkle_proof = self.deposit_tree.prove(deposit_index);
+
+        let deposit = Deposit {
+            depositor,
+            recipient,
+            token_index,
+            amount,
+            block_number: next_block_number,
+            aux_data,
+        };
+
+        self.deposit_tree.push(deposit.clone());
+        self.deposit_hash_chain = deposit.hash_with_prev_hash(self.deposit_hash_chain);
+
+        self.deposits
+            .entry(next_block_number)
+            .or_default()
+            .push((deposit, deposit_merkle_proof));
+
+        Ok(())
     }
 }
