@@ -12,14 +12,24 @@ use plonky2::{
 use thiserror::Error;
 
 use crate::{
-    circuits::balance::common::transfer_witness::TransferWitness,
+    circuits::balance::{
+        balance_pis::BalanceFullPublicInputs,
+        common::{
+            account_state::{AccountState, AccountStateError},
+            recipient::extract_address_from_recipient,
+            transfer_witness::{TransferWitness, TransferWitnessError},
+            update_public_state::UpdatePublicState,
+        },
+    },
     common::{
         private_state::PrivateState,
         public_state::{PUBLIC_STATE_U64_LEN, PublicState, PublicStateError, PublicStateTarget},
-        trees::sent_tx_tree::SentTxMerkleProof,
+        transfer::SettledTransfer,
+        trees::{sent_tx_tree::SentTxMerkleProof, tx_tree::TxMerkleProof},
         tx::Tx,
         withdrawal::{WITHDRAWAL_LEN, Withdrawal, WithdrawalTarget},
     },
+    utils::{conversion::ToU64, poseidon_hash_out::PoseidonHashOut},
 };
 
 pub const SINGLE_WITHDRAWAL_PUBLIC_INPUTS_LEN: usize = PUBLIC_STATE_U64_LEN + WITHDRAWAL_LEN;
@@ -107,7 +117,43 @@ impl SingleWithdawalPublicInputsTarget {
 }
 
 #[derive(Debug, Error)]
-pub enum SingleWithdawalWitnessError {}
+pub enum SingleWithdawalWitnessError {
+    #[error("Balance proof verification failed: {0}")]
+    BalanceProofVerification(String),
+
+    #[error("Failed to parse balance public inputs: {0}")]
+    BalancePublicInputs(String),
+
+    #[error("Private state commitment mismatch: expected {expected:?}, got {actual:?}")]
+    PrivateStateCommitmentMismatch {
+        expected: PoseidonHashOut,
+        actual: PoseidonHashOut,
+    },
+
+    #[error("Sent tx merkle proof verification failed: {0}")]
+    SentTxMerkleProof(String),
+
+    #[error("Tx merkle proof verification failed: {0}")]
+    TxMerkleProof(String),
+
+    #[error("Transfer witness verification failed: {0}")]
+    TransferWitness(String),
+
+    #[error("Invalid recipient: {0}")]
+    InvalidRecipient(String),
+
+    #[error("Inconsistent witness data: {0}")]
+    InconsistentWitness(String),
+
+    #[error("Account state verification failed: {0}")]
+    AccountState(String),
+
+    #[error("Public state update verification failed: {0}")]
+    UpdatePublicState(String),
+
+    #[error("Balance public state mismatch after update")]
+    BalancePublicStateMismatch,
+}
 
 pub struct SingleWithdawalWitness<
     F: RichField + Extendable<D>,
@@ -122,6 +168,15 @@ pub struct SingleWithdawalWitness<
 
     // the private state of the balance proof
     pub private_state: PrivateState,
+
+    // the witness to update the public state of the balance proof to the latest
+    pub update_public_state: UpdatePublicState,
+
+    // the account state that proves the block number of the tx.
+    pub account_state: AccountState,
+
+    // the tx merkle proof of the tx that contains the withdrawal
+    pub tx_merkle_proof: TxMerkleProof,
 
     // the tx that contains the withdrawal
     pub tx: Tx,
@@ -142,16 +197,125 @@ where
         &self,
         balance_vd: &VerifierCircuitData<F, C, D>,
     ) -> Result<SingleWithdawalPublicInputs, SingleWithdawalWitnessError> {
-        // verify the balance proof
+        check_cyclic_proof_verifier_data(
+            &self.balance_proof,
+            &balance_vd.verifier_only,
+            &balance_vd.common,
+        )
+        .map_err(|e| {
+            SingleWithdawalWitnessError::BalanceProofVerification(format!(
+                "cyclic verifier data check failed: {e:?}",
+            ))
+        })?;
+        balance_vd.verify(self.balance_proof.clone()).map_err(|e| {
+            SingleWithdawalWitnessError::BalanceProofVerification(format!(
+                "verification failed: {e:?}",
+            ))
+        })?;
 
-        // check the commmitment of the private state
+        let balance_full_pis = BalanceFullPublicInputs::<F, C, D>::from_u64_slice(
+            &self.balance_proof.public_inputs.to_u64_vec(),
+            &balance_vd.common.config,
+        )
+        .map_err(|e| SingleWithdawalWitnessError::BalancePublicInputs(e.to_string()))?;
+        let balance_pis = balance_full_pis.pis;
 
-        // verify the sent tx merkle proof
+        let expected_commitment = balance_pis.private_commitment;
+        let actual_commitment = self.private_state.commitment();
+        if actual_commitment != expected_commitment {
+            return Err(
+                SingleWithdawalWitnessError::PrivateStateCommitmentMismatch {
+                    expected: expected_commitment,
+                    actual: actual_commitment,
+                },
+            );
+        }
 
-        // verify the transfer witness
+        self.update_public_state
+            .verify()
+            .map_err(|e| SingleWithdawalWitnessError::UpdatePublicState(e.to_string()))?;
+        if self.update_public_state.old != balance_pis.public_state {
+            return Err(SingleWithdawalWitnessError::BalancePublicStateMismatch);
+        }
 
-        // convert transfer to withdrawal
+        self.sent_tx_merkle_proof
+            .verify(
+                &self.tx,
+                self.tx.nonce as u64,
+                self.private_state.sent_tx_tree_root,
+            )
+            .map_err(|e| SingleWithdawalWitnessError::TxMerkleProof(e.to_string()))?;
 
-        todo!()
+        if self.transfer_witness.transfer_tree_root != self.tx.transfer_tree_root {
+            return Err(SingleWithdawalWitnessError::InconsistentWitness(format!(
+                "transfer tree root mismatch: expected {:?}, got {:?}",
+                self.tx.transfer_tree_root, self.transfer_witness.transfer_tree_root
+            )));
+        }
+
+        self.account_state
+            .verify()
+            .map_err(|e: AccountStateError| {
+                SingleWithdawalWitnessError::AccountState(e.to_string())
+            })?;
+        if self.account_state.user_id != balance_pis.user_id {
+            return Err(SingleWithdawalWitnessError::InconsistentWitness(format!(
+                "account state user {:?} != balance proof user {:?}",
+                self.account_state.user_id, balance_pis.user_id
+            )));
+        }
+        if self.account_state.account_tree_root != self.update_public_state.new.account_tree_root {
+            return Err(SingleWithdawalWitnessError::InconsistentWitness(format!(
+                "account tree root mismatch: {:?} vs {:?}",
+                self.account_state.account_tree_root,
+                self.update_public_state.new.account_tree_root
+            )));
+        }
+
+        let send_leaf_tx_root = self
+            .account_state
+            .send_leaf
+            .tx_tree_root
+            .reduce_to_hash_out();
+        self.tx_merkle_proof
+            .verify(
+                &self.tx,
+                balance_pis.user_id.local_id() as u64,
+                send_leaf_tx_root,
+            )
+            .map_err(|e| SingleWithdawalWitnessError::SentTxMerkleProof(e.to_string()))?;
+        if self.transfer_witness.transfer_tree_root != self.tx.transfer_tree_root {
+            return Err(SingleWithdawalWitnessError::InconsistentWitness(
+                "transfer witness root mismatch with tx".to_string(),
+            ));
+        }
+        self.transfer_witness
+            .verify()
+            .map_err(|e: TransferWitnessError| {
+                SingleWithdawalWitnessError::TransferWitness(e.to_string())
+            })?;
+
+        let transfer = self.transfer_witness.transfer.clone();
+        let recipient = extract_address_from_recipient(transfer.recipient)
+            .map_err(|e| SingleWithdawalWitnessError::InvalidRecipient(e.to_string()))?;
+
+        let settled_transfer = SettledTransfer::new(
+            transfer.clone(),
+            balance_pis.user_id,
+            self.transfer_witness.transfer_index,
+            self.account_state.send_leaf.cur,
+        );
+        let withdrawal = Withdrawal {
+            recipient,
+            token_index: transfer.token_index,
+            amount: transfer.amount,
+            nullifier: settled_transfer.nullifier(),
+            aux_data: transfer.aux_data,
+        };
+
+        Ok(SingleWithdawalPublicInputs {
+            public_state: self.update_public_state.new.clone(),
+            withdraw: withdrawal,
+        })
     }
 }
