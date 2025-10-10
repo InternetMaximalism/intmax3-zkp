@@ -267,8 +267,12 @@ where
         // private state update
         let tx_block_number = self.tx_settlement.tx_block_number();
         let transfer = &self.transfer_witness.transfer;
-        let settled_transfer =
-            SettledTransfer::new(transfer.clone(), sender_user_id, tx_block_number);
+        let settled_transfer = SettledTransfer::new(
+            transfer.clone(),
+            sender_user_id,
+            self.transfer_witness.transfer_index,
+            tx_block_number,
+        );
         let nullifier = settled_transfer.nullifier();
         if self.update_private_state.token_index != transfer.token_index {
             return Err(ReceiveTransferError::ConnectionError(format!(
@@ -322,7 +326,6 @@ pub struct ReceiveTransferTarget<const D: usize> {
     pub account_state: AccountStateTarget,
     pub tx_settlement: TxSettlementTarget<D>,
     pub transfer_witness: TransferWitnessTarget,
-    pub settled_transfer: SettledTransferTarget,
     pub transfer_salt: SaltTarget,
     pub update_private_state: UpdatePrivateStateTarget,
     pub new_full_pis: BalanceFullPublicInputsTarget,
@@ -447,6 +450,7 @@ impl<const D: usize> ReceiveTransferTarget<D> {
         let settled_transfer = SettledTransferTarget {
             inner: transfer_witness.transfer.clone(),
             from: tx_settlement.user_id.clone(),
+            transfer_index: transfer_witness.transfer_index,
             block_number: tx_block_number.clone(),
         };
         let settled_nullifier = settled_transfer.nullifier(builder);
@@ -487,7 +491,6 @@ impl<const D: usize> ReceiveTransferTarget<D> {
             account_state,
             tx_settlement,
             transfer_witness,
-            settled_transfer,
             transfer_salt,
             update_private_state,
             new_full_pis,
@@ -518,13 +521,6 @@ impl<const D: usize> ReceiveTransferTarget<D> {
             .set_witness::<F, C, _>(witness, &value.tx_settlement);
         self.transfer_witness
             .set_witness(witness, &value.transfer_witness);
-        let settled_transfer = SettledTransfer::new(
-            value.transfer_witness.transfer.clone(),
-            value.tx_settlement.user_id,
-            value.tx_settlement.tx_block_number(),
-        );
-        self.settled_transfer
-            .set_witness(witness, &settled_transfer);
         self.transfer_salt.set_witness(witness, value.transfer_salt);
         self.update_private_state
             .set_witness(witness, &value.update_private_state);
@@ -837,6 +833,7 @@ mod tests {
         let settled_transfer = SettledTransfer::new(
             transfer_witness.transfer.clone(),
             sender_user_id,
+            transfer_witness.transfer_index,
             tx_block_number,
         );
         let nullifier = settled_transfer.nullifier();

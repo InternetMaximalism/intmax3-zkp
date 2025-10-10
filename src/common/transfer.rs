@@ -44,6 +44,7 @@ pub struct Transfer {
 pub struct SettledTransfer {
     pub inner: Transfer,
     pub from: UserId,
+    pub transfer_index: u32,
     pub block_number: BlockNumber,
 }
 
@@ -59,6 +60,7 @@ pub struct TransferTarget {
 pub struct SettledTransferTarget {
     pub inner: TransferTarget,
     pub from: UserIdTarget,
+    pub transfer_index: Target,
     pub block_number: BlockNumberTarget,
 }
 
@@ -91,10 +93,16 @@ impl Transfer {
 }
 
 impl SettledTransfer {
-    pub fn new(inner: Transfer, from: UserId, block_number: BlockNumber) -> Self {
+    pub fn new(
+        inner: Transfer,
+        from: UserId,
+        transfer_index: u32,
+        block_number: BlockNumber,
+    ) -> Self {
         Self {
             inner,
             from,
+            transfer_index,
             block_number,
         }
     }
@@ -103,6 +111,7 @@ impl SettledTransfer {
         [
             self.inner.to_u64_vec(),
             self.from.to_u64_vec(),
+            vec![self.transfer_index as u64],
             self.block_number.to_u64_vec(),
         ]
         .concat()
@@ -189,6 +198,7 @@ impl SettledTransferTarget {
         Self {
             inner: TransferTarget::new(builder, is_checked),
             from: UserIdTarget::new(builder, is_checked),
+            transfer_index: builder.add_virtual_target(),
             block_number: BlockNumberTarget::new(builder, is_checked),
         }
     }
@@ -200,6 +210,7 @@ impl SettledTransferTarget {
         Self {
             inner: TransferTarget::constant(builder, value.inner.clone()),
             from: UserIdTarget::constant(builder, value.from),
+            transfer_index: builder.constant(F::from_canonical_u32(value.transfer_index)),
             block_number: BlockNumberTarget::constant(builder, value.block_number),
         }
     }
@@ -208,6 +219,7 @@ impl SettledTransferTarget {
         [
             self.inner.to_vec(),
             self.from.to_vec(),
+            vec![self.transfer_index],
             self.block_number.to_vec(),
         ]
         .concat()
@@ -228,6 +240,10 @@ impl SettledTransferTarget {
     ) {
         self.inner.set_witness(witness, &value.inner);
         self.from.set_witness(witness, value.from);
+        witness.set_target(
+            self.transfer_index,
+            F::from_canonical_u32(value.transfer_index),
+        );
         self.block_number.set_witness(witness, value.block_number);
     }
 }

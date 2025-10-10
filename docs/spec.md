@@ -35,6 +35,7 @@ struct Transfer {
 
 - `recipient` encodes either a withdrawal address or the hashed receiver identifier.
 - `aux_data` typically commits to a memo; if unused, supply a random nonce-sized value.
+- `transfer_nullifier` = `hash(transfer, from, transfer_index, settled_block_number)` where `from` is the sender's user ID and `transfer_index` is the index of the transfer in the tx tree, and `settled_block_number` is the block number where the tx was included.
 
 ### 1.2 Deposit
 
@@ -67,9 +68,9 @@ struct Tx {
 
 ```rust
 struct Block {
-    aggregator_id: u32,
     timestamp: u64,
-    user_ids: [u32; MAX_USER_IDS],
+    aggregator_id: u32,
+    local_ids: [u32; MAX_USER_IDS],
     tx_tree_root: Bytes32,
     deposit_hash_chain: Bytes32
 }
@@ -77,20 +78,19 @@ struct Block {
 
 On-chain acceptance rules:
 
-- `user_ids` is a fixed-length array.
-- `user_ids` contains no duplicate entries.
+- `local_ids` is a fixed-length array.
 - `aggregator_ids[msg.sender] == aggregator_id`.
 
-### 1.5 History and Deposit hash chains
+### 1.5 Block/Deposit hash chains
 
-History roots update according to:
+Block/Deposit hash chain update according to:
 
 ```
 deposit_hash_chain <- hash(deposit_hash_chain, deposit)
-history_hash_chain <- hash(history_hash_chain, block)
+block_hash_chain <- hash(block_hash_chain, block)
 ```
 
-`deposit_hash_chain` and `history_hash_chain` are tracked on-chain, providing inclusions for deposits and block history.
+`deposit_hash_chain` and `block_hash_chain` are tracked on-chain, providing inclusions for deposits and block history.
 
 ## 2. Public State
 
@@ -167,6 +167,7 @@ struct BalancePublicInputs {
 struct PrivateState {
     asset_tree_root: Bytes32,
     nullifier_tree_root: Bytes32,
+    sent_tx_tree_root: Bytes32,
     nonce: u32,
     salt: Bytes32
 }
@@ -197,7 +198,7 @@ struct SpentPublicInputs {
 2. Commit to `transfers` to compute `transfer_merkle_root`.
 3. Compute `new_asset_root = apply_outgoing_transfers(asset_tree, transfers)` to debit per-token balances.
 4. Set `is_valid := (tx.nonce == private_state.nonce)`. When `is_valid` holds, increment the nonce by one.
-5. Hash `{asset_root = new_asset_root, nonce = incremented, salt = fresh}` to derive `new_private_state_commitment`.
+5. Hash `{asset_root = new_asset_root, sent_tx_tree_root = new_sent_tx_tree_root,  nonce = incremented, salt = fresh}` to derive `new_private_state_commitment`.
 
 ## 5. Witness Objects
 
@@ -247,7 +248,7 @@ struct TransferWitness {
 }
 ```
 
-`w.verify(user_id, transfer_merkle_root) -> bool`:
+`w.verify(transfer_merkle_root) -> bool`:
 
 1. Verify `w.transfer_merkle_proof.verify(w.transfer_index, w.transfer, transfer_merkle_root)`.
 
@@ -338,7 +339,7 @@ Helper methods:
 
 **Constraints**
 
-1. Let `public_state := sender_public_state_update_witness.new`. Verify `sender_balance_proof.verify()`, `sender_public_state_update_witness.verify()`, `receiver_balance_proof.verify()`, `receiver_public_state_update_witness.verify()`, `account_witness.verify(recipient_user_id, public_state.account_tree_root)`, `tx_settlement_witness.verify()`, and `transfer_witness.verify(recipient_user_id, tx_settlement_witness.tx.transfer_merkle_root)` where `recipient_user_id == receiver_balance_proof.user_id` and `public_state == receiver_public_state_update_witness.new == tx_settlement_witness.public_state`.
+1. Let `public_state := sender_public_state_update_witness.new`. Verify `sender_balance_proof.verify()`, `sender_public_state_update_witness.verify()`, `receiver_balance_proof.verify()`, `receiver_public_state_update_witness.verify()`, `account_witness.verify(recipient_user_id, public_state.account_tree_root)`, `tx_settlement_witness.verify()`, and `transfer_witness.verify(tx_settlement_witness.tx.transfer_merkle_root)` where `recipient_user_id == receiver_balance_proof.user_id` and `public_state == receiver_public_state_update_witness.new == tx_settlement_witness.public_state`.
 2. Check `sender_balance_proof.public_state == sender_public_state_update_witness.old` and `receiver_balance_proof.public_state == receiver_public_state_update_witness.old`.
 3. Check `receiver_balance_proof.block_r <= new_block_r <= public_state.block_number`. Additionally, if `account_witness.account_leaf.prev != 0`, assert `account_witness.send_leaf.prev <= receiver_balance_proof.block_r` and `new_block_r < account_witness.send_leaf.cur`.
 4. Check `tx_settlement_witness.tx_block_number() <= new_block_r`.
@@ -358,7 +359,7 @@ Helper methods:
 **Constraints**
 
 1. Let `public_state := public_state_update_witness.new`. Verify `public_state_update_witness.verify()`, `receiver_balance_proof.verify()`, `account_witness.verify(receiver_balance_proof.user_id, public_state.account_tree_root)`, and `deposit_witness.verify(receiver_balance_proof.user_id, public_state.deposit_tree_root)`.
-3. Check `receiver_balance_proof.block_r <= new_block_r <= public_state.block_number`. Additionally, if `account_witness.account_leaf.prev != 0`, assert `account_witness.send_leaf.prev <= receiver_balance_proof.block_r` and `new_block_r < account_witness.send_leaf.cur`.
+2. Check `receiver_balance_proof.block_r <= new_block_r <= public_state.block_number`. Additionally, if `account_witness.account_leaf.prev != 0`, assert `account_witness.send_leaf.prev <= receiver_balance_proof.block_r` and `new_block_r < account_witness.send_leaf.cur`.
 3. Check `deposit_witness.deposit.block_number <= new_block_r`.
 4. Update `receiver_balance_proof.block_r <- new_block_r` and insert the deposit into `receiver_balance_proof.private_state`, updating `asset_root` and `nullifier_root`.
 
@@ -369,9 +370,10 @@ Aggregates multiple withdrawals.
 **Private Inputs**
 
 - Previous `withdrawal_proof`.
-- The sender’s `sender_balance_proof` immediately before sending.
+- The sender’s `sender_balance_proof` after incorporating the sent withdrawal tx.
 - `public_state_update_witness` that updates `sender_balance_proof.public_state` to `withdrawal_proof.public_state`.
-- `tx_settlement_witness`.
+- `tx`
+- `sent_tx_merkle_proof`
 - `transfer_witness`.
 
 **Outputs**
@@ -380,16 +382,15 @@ Aggregates multiple withdrawals.
 
 **Constraints**
 
-1. Verify `sender_balance_proof.verify()`, `public_state_update_witness.verify()`, `tx_settlement_witness.verify()`, and `transfer_witness.verify()`.
-2. Require `tx_settlement_witness.spent_proof.prev_private_state_commitment == sender_balance_proof.private_state_commitment` and `tx_settlement_witness.spent_proof.is_valid == true`.
-3. Derive `withdrawal` from `transfer`:
+1. Verify `sender_balance_proof.verify()`, `public_state_update_witness.verify()`, `transfer_witness.verify(tx.transfer_merkle_root)`, and `sent_tx_merkle_proof.verify(tx.nonce, tx, sender_balance_proof.private_state.sent_tx_tree_root)`.
+2. Derive `withdrawal` from `transfer`:
 
 ```rust
 struct Withdrawal {
     recipient: Address,
     token_index: u32,
     amount: U256,
-    nullifier: Bytes32    // hash(transfer_witness.transfer_salt, transfer)
+    nullifier: Bytes32    // hash(WITHDRAW_TAG, transfer.)
 }
 ```
 

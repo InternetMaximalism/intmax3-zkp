@@ -273,6 +273,7 @@ where
         let nullifier = SettledTransfer::new(
             transfer_witness.transfer.clone(),
             sender_balance_pis.user_id,
+            transfer_witness.transfer_index,
             tx_block_number,
         )
         .nullifier();
