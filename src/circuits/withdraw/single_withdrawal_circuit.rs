@@ -515,7 +515,8 @@ where
     <C as GenericConfig<D>>::Hasher: AlgebraicHasher<F>,
 {
     pub fn new(balance_vd: &VerifierCircuitData<F, C, D>) -> Self {
-        let mut builder = CircuitBuilder::<F, D>::new(CircuitConfig::standard_recursion_config());
+        let mut builder =
+            CircuitBuilder::<F, D>::new(CircuitConfig::standard_recursion_zk_config());
         let target = SingleWithdawalTarget::new(&mut builder, balance_vd);
         let public_inputs = target.public_inputs.clone();
         builder.register_public_inputs(&public_inputs.to_vec());

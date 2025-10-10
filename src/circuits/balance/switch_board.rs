@@ -411,7 +411,8 @@ where
         receive_deposit_vd: &VerifierCircuitData<F, C, D>,
         send_tx_vd: &VerifierCircuitData<F, C, D>,
     ) -> Self {
-        let mut builder = CircuitBuilder::<F, D>::new(CircuitConfig::default());
+        let mut builder =
+            CircuitBuilder::<F, D>::new(CircuitConfig::standard_recursion_zk_config());
         let target = BalanceSwichBoardTarget::new::<F, C>(
             &mut builder,
             &balance_config,
