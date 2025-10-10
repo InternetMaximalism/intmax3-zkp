@@ -122,7 +122,6 @@ where
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use crate::{
         circuits::{
             balance::{
@@ -140,7 +139,9 @@ mod tests {
             },
             withdraw::{
                 single_withdrawal_circuit::SingleWithdawalCircuit,
-                withdrawal_step::{WithdrawalStepCircuit, WithdrawalStepWitness},
+                withdrawal_circuit::WithdrawalProofPublicInputs,
+                withdrawal_processor::WithdrawalProcessor,
+                withdrawal_step::{WithdrawalStepPublicInputs, WithdrawalStepWitness},
             },
         },
         common::{
@@ -154,9 +155,11 @@ mod tests {
         ethereum_types::{
             address::Address, bytes32::Bytes32, u32limb_trait::U32LimbTrait as _, u256::U256,
         },
+        utils::conversion::ToU64 as _,
     };
     use plonky2::{
-        field::goldilocks_field::GoldilocksField, plonk::config::PoseidonGoldilocksConfig,
+        field::{goldilocks_field::GoldilocksField, types::Field as _},
+        plonk::config::PoseidonGoldilocksConfig,
     };
     use rand::{SeedableRng, rngs::StdRng};
     use std::sync::{Arc, RwLock};
@@ -168,7 +171,6 @@ mod tests {
     #[cfg_attr(debug_assertions, ignore = "run with --release")]
     #[test]
     fn test_withdrawal_chain_circuit() {
-        let withdrawal_chain_cd = WithdrawalChainCircuit::<F, C, D>::generate_cd();
         let spend_circuit = SpendCircuit::<F, C, D>::new();
         let balance_processor =
             BalanceProcessor::<F, C, D>::new(&spend_circuit.data.verifier_data());
@@ -301,13 +303,8 @@ mod tests {
             .verify(single_withdrawal_proof.clone())
             .expect("single withdrawal proof verifies");
 
-        let withdrawal_step_circuit =
-            WithdrawalStepCircuit::<F, C, D>::new(&withdrawal_chain_cd, &single_withdrawal_vd);
-        let withdrawal_chain_circuit = WithdrawalChainCircuit::<F, C, D>::new(
-            &withdrawal_chain_cd,
-            &withdrawal_step_circuit.data.verifier_data(),
-        );
-        let withdrawal_chain_vd = withdrawal_chain_circuit.data.verifier_data();
+        let withdrawal_processor = WithdrawalProcessor::<F, C, D>::new(&single_withdrawal_vd);
+        let withdrawal_chain_vd = withdrawal_processor.withdrawal_chain_vd();
 
         let step_witness = WithdrawalStepWitness::<F, C, D> {
             prev_withdrawal_chain_proof: None,
@@ -315,18 +312,38 @@ mod tests {
             update_public_state: withdrawal_witness.update_public_state.clone(),
         };
 
-        let withdrawal_step_proof = withdrawal_step_circuit
-            .prove(&withdrawal_chain_vd, &step_witness)
-            .expect("withdrawal step proof");
-        withdrawal_step_circuit
-            .verify(withdrawal_step_proof.clone())
-            .expect("withdrawal step proof verifies");
-
-        let withdrawal_chain_proof = withdrawal_chain_circuit
-            .prove(&withdrawal_step_proof)
+        let withdrawal_chain_proof = withdrawal_processor
+            .prove_step(&step_witness)
             .expect("withdrawal chain proof");
-        withdrawal_chain_circuit
-            .verify(&withdrawal_chain_proof)
+        withdrawal_chain_vd
+            .verify(withdrawal_chain_proof.clone())
             .expect("withdrawal chain proof verifies");
+
+        let withdrawal_aggregator = Address::rand(&mut rng);
+        let withdrawal_proof = withdrawal_processor
+            .prove_final(&withdrawal_chain_proof, withdrawal_aggregator)
+            .expect("withdrawal proof");
+        withdrawal_processor
+            .withdrawal_vd()
+            .verify(withdrawal_proof.clone())
+            .expect("withdrawal proof verifies");
+
+        let chain_inputs = WithdrawalStepPublicInputs::<F, C, D>::from_u64_slice(
+            &withdrawal_chain_proof.public_inputs.to_u64_vec(),
+            &withdrawal_chain_vd.common.config,
+        )
+        .expect("parse withdrawal chain public inputs");
+        let expected_withdrawal_inputs = WithdrawalProofPublicInputs {
+            withdrawal_hash: chain_inputs.withdrawal_hash_chain,
+            withdrawal_aggregator,
+        };
+        let expected_hash = expected_withdrawal_inputs.hash();
+        let expected_public_inputs: Vec<F> = expected_hash
+            .to_u32_vec()
+            .into_iter()
+            .map(F::from_canonical_u32)
+            .collect();
+
+        assert_eq!(withdrawal_proof.public_inputs, expected_public_inputs);
     }
 }
