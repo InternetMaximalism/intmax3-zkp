@@ -159,14 +159,16 @@ mod tests {
         let initial_deposit_count = U63::default();
 
         let deposit = Deposit {
+            deposit_index: U63::default(),
+            block_number: U63::default(),
             depositor: Default::default(),
             recipient: Bytes32::default(),
             token_index: 0,
             amount: U256::from(5u32),
-            block_number: U63::default(),
+
             aux_data: Bytes32::default(),
         };
-        let deposit_merkle_proof = deposit_tree.prove(0);
+        let deposit_merkle_proof = deposit_tree.prove(deposit.deposit_index.as_u64());
 
         let mut deposit_tree_after = deposit_tree.clone();
         deposit_tree_after.push(deposit.clone());

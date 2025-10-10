@@ -448,11 +448,12 @@ mod tests {
 
         // Deposit to be appended.
         let deposit = Deposit {
+            deposit_index: U63::new(deposit_index).unwrap(),
+            block_number: U63::default(),
             depositor: Address::default(),
             recipient: Bytes32::default(),
             token_index: 0,
             amount: U256::from(5u32),
-            block_number: U63::default(),
             aux_data: Bytes32::default(),
         };
 
@@ -504,14 +505,15 @@ mod tests {
 
         // Second deposit step using the proof from the first step.
         let second_deposit = Deposit {
+            deposit_index: U63::new(1).unwrap(),
+            block_number: U63::default(),
             depositor: Address::default(),
             recipient: Bytes32::default(),
             token_index: 1,
             amount: U256::from(7u32),
-            block_number: U63::default(),
             aux_data: Bytes32::default(),
         };
-        let second_deposit_index = 1u64;
+        let second_deposit_index = second_deposit.deposit_index.as_u64();
         let second_deposit_merkle_proof = deposit_tree_after_first.prove(second_deposit_index);
 
         let expected_deposit_hash_chain_second =

@@ -64,6 +64,7 @@ pub struct BlockWitnessGenerator {
 
     pub blocks: Vec<Block>,
     pub deposits: HashMap<BlockNumber, Vec<Deposit>>,
+    pub deposit_counts: u64,
     pub block_chain_witness: HashMap<BlockNumber, BlockHashChainProcessorWitness>,
 }
 
@@ -80,6 +81,7 @@ impl BlockWitnessGenerator {
             deposit_hash_chain: Bytes32::default(),
             blocks: vec![Block::default()], // genesis block placeholder
             deposits: HashMap::new(),
+            deposit_counts: 0,
             block_chain_witness: HashMap::new(),
         }
     }
@@ -123,6 +125,7 @@ impl BlockWitnessGenerator {
             .map_err(BlockWitnessGeneratorError::BlockNumber)?;
 
         let deposit = Deposit {
+            deposit_index: U63::new(self.deposit_counts).unwrap(),
             depositor,
             recipient,
             token_index,
@@ -135,6 +138,7 @@ impl BlockWitnessGenerator {
             .entry(target_block_number)
             .or_default()
             .push(deposit);
+        self.deposit_counts += 1;
 
         Ok(())
     }

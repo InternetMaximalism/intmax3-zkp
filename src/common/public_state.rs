@@ -23,7 +23,7 @@ use crate::{
             deposit_tree::DepositTree,
             public_state_tree::PublicStateTree,
         },
-        u63::{BlockNumber, BlockNumberError, BlockNumberTarget, U63Target},
+        u63::{BlockNumber, BlockNumberError, BlockNumberTarget, U63, U63Target},
         user_id::{UserId, UserIdError},
     },
     ethereum_types::{
@@ -527,15 +527,17 @@ impl FullPublicState {
     ) -> Result<(), FullPublicStateError> {
         // the block number of the deposit is the next block number
         let block_number = self.block_number.add(1).expect("should not overflow");
+        let deposit_index =
+            U63::new(self.deposits.len() as u64).expect("should fit within 63 bits");
         let deposit = Deposit {
+            deposit_index,
+            block_number,
             depositor,
             recipient,
             token_index,
             amount,
             aux_data,
-            block_number,
         };
-
         // add deposit
         self.deposits.push(deposit.clone());
         self.deposit_tree.push(deposit.clone());

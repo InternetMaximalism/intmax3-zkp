@@ -424,7 +424,7 @@ mod tests {
     use crate::{
         circuits::balance::{
             balance_pis::{
-                BALANCE_PUBLIC_INPUTS_LEN, BalanceFullPublicInputs, BalancePublicInputs,
+                BalanceFullPublicInputs, BalancePublicInputs, BALANCE_PUBLIC_INPUTS_LEN
             },
             common::{
                 account_state::AccountState, deposit_witness::DepositWitness,
@@ -443,7 +443,7 @@ mod tests {
                 deposit_tree::DepositTree,
                 nullifier_tree::NullifierTree,
             },
-            u63::BlockNumber,
+            u63::{BlockNumber, U63},
             user_id::UserId,
         },
         constants::{ACCOUNT_TREE_HEIGHT, ASSET_TREE_HEIGHT, SEND_TREE_HEIGHT},
@@ -475,17 +475,18 @@ mod tests {
         let deposit_recipient = calculate_recipient_from_user_id(receiver_user_id, deposit_salt);
 
         let deposit = Deposit {
+            deposit_index: U63::default(),
+            block_number: new_block_r,
             depositor: Address::default(),
             recipient: deposit_recipient,
             token_index,
             amount: deposit_amount,
-            block_number: new_block_r,
             aux_data: Bytes32::default(),
         };
 
         let mut deposit_tree = DepositTree::init();
         deposit_tree.push(deposit.clone());
-        let deposit_index = 0u64;
+        let deposit_index = deposit.deposit_index.as_u64();
         let deposit_merkle_proof = deposit_tree.prove(deposit_index);
         let deposit_tree_root = deposit_tree.get_root();
 

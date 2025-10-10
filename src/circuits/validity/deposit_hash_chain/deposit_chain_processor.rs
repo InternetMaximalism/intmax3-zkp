@@ -102,14 +102,15 @@ mod tests {
         let initial_deposit_tree_root = deposit_tree.get_root();
         let initial_deposit_count = U63::default();
         let deposit = Deposit {
+            deposit_index: U63::default(),
+            block_number: U63::default(),
             depositor: Default::default(),
             recipient: Bytes32::default(),
             token_index: 0,
             amount: U256::from(5u32),
-            block_number: U63::default(),
             aux_data: Bytes32::default(),
         };
-        let deposit_merkle_proof = deposit_tree.prove(0);
+        let deposit_merkle_proof = deposit_tree.prove(deposit.deposit_index.as_u64());
 
         let mut deposit_tree_after_first = deposit_tree.clone();
         deposit_tree_after_first.push(deposit.clone());
@@ -155,14 +156,16 @@ mod tests {
 
         // Second deposit step using the first proof.
         let second_deposit = Deposit {
+            deposit_index: U63::new(1).unwrap(),
+            block_number: U63::default(),
             depositor: Default::default(),
             recipient: Bytes32::default(),
             token_index: 1,
             amount: U256::from(7u32),
-            block_number: U63::default(),
             aux_data: Bytes32::default(),
         };
-        let second_deposit_merkle_proof = deposit_tree_after_first.prove(1);
+        let second_deposit_merkle_proof =
+            deposit_tree_after_first.prove(second_deposit.deposit_index.as_u64());
 
         let mut deposit_tree_after_second = deposit_tree_after_first.clone();
         deposit_tree_after_second.push(second_deposit.clone());
