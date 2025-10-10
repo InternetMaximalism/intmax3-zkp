@@ -26,7 +26,14 @@ use crate::{
         u63::{BlockNumber, BlockNumberError, BlockNumberTarget, U63Target},
         user_id::{UserId, UserIdError},
     },
-    ethereum_types::{address::Address, bytes32::Bytes32, u256::U256},
+    ethereum_types::{
+        address::Address,
+        bytes32::Bytes32,
+        error::EthereumTypeError,
+        u32limb_trait::{U32LimbTargetTrait as _, U32LimbTrait},
+        u64::{U64, U64_LEN, U64Target},
+        u256::U256,
+    },
     utils::{
         error::PoseidonHashOutError,
         leafable::{Leafable, LeafableTarget},
@@ -35,7 +42,7 @@ use crate::{
     },
 };
 
-pub const PUBLIC_STATE_U64_LEN: usize = 1 + 3 * POSEIDON_HASH_OUT_LEN;
+pub const PUBLIC_STATE_U64_LEN: usize = 1 + U64_LEN + 3 * POSEIDON_HASH_OUT_LEN;
 
 #[derive(thiserror::Error, Debug)]
 pub enum PublicStateError {
@@ -44,6 +51,9 @@ pub enum PublicStateError {
 
     #[error("Block number error: {0}")]
     BlockNumber(#[from] BlockNumberError),
+
+    #[error("Timestamp error: {0}")]
+    Timestamp(#[from] EthereumTypeError),
 
     #[error("Failed to parse {field}: {source}")]
     PoseidonHash {
@@ -57,6 +67,7 @@ pub enum PublicStateError {
 #[serde(rename_all = "camelCase")]
 pub struct PublicState {
     pub block_number: BlockNumber,
+    pub timestamp: u64,
     pub account_tree_root: PoseidonHashOut,
     pub deposit_tree_root: PoseidonHashOut,
     pub prev_public_state_root: PoseidonHashOut,
@@ -66,6 +77,7 @@ impl Default for PublicState {
     fn default() -> Self {
         Self {
             block_number: BlockNumber::default(),
+            timestamp: 0,
             account_tree_root: AccountTree::init().get_root(),
             deposit_tree_root: DepositTree::init().get_root(),
             prev_public_state_root: PublicStateTree::init().get_root(),
@@ -76,6 +88,7 @@ impl Default for PublicState {
 #[derive(Clone, Debug)]
 pub struct PublicStateTarget {
     pub block_number: BlockNumberTarget,
+    pub timestamp: U64Target,
     pub account_tree_root: PoseidonHashOutTarget,
     pub deposit_tree_root: PoseidonHashOutTarget,
     pub prev_public_state_root: PoseidonHashOutTarget,
@@ -85,6 +98,7 @@ impl PublicState {
     pub fn to_u64_vec(&self) -> Vec<u64> {
         [
             self.block_number.to_u64_vec(),
+            U64::from(self.timestamp).to_u64_vec(),
             self.account_tree_root.to_u64_vec(),
             self.deposit_tree_root.to_u64_vec(),
             self.prev_public_state_root.to_u64_vec(),
@@ -104,6 +118,9 @@ impl PublicState {
 
         let block_number = BlockNumber::new(values[cursor])?;
         cursor += 1;
+
+        let timestamp = U64::from_u64_slice(&values[cursor..cursor + U64_LEN])?;
+        cursor += U64_LEN;
 
         let account_tree_root =
             PoseidonHashOut::from_u64_slice(&values[cursor..cursor + POSEIDON_HASH_OUT_LEN])
@@ -130,6 +147,7 @@ impl PublicState {
 
         Ok(Self {
             block_number,
+            timestamp: u64::from(timestamp),
             account_tree_root,
             deposit_tree_root,
             prev_public_state_root,
@@ -147,6 +165,7 @@ impl Leafable for PublicState {
     fn empty_leaf() -> Self {
         Self {
             block_number: Default::default(),
+            timestamp: 0,
             account_tree_root: Default::default(),
             deposit_tree_root: Default::default(),
             prev_public_state_root: Default::default(),
@@ -162,6 +181,7 @@ impl PublicStateTarget {
     pub fn to_vec(&self) -> Vec<Target> {
         [
             self.block_number.to_vec(),
+            self.timestamp.to_vec(),
             self.account_tree_root.to_vec(),
             self.deposit_tree_root.to_vec(),
             self.prev_public_state_root.to_vec(),
@@ -177,6 +197,9 @@ impl PublicStateTarget {
         let block_number = BlockNumberTarget::from_slice(&values[cursor..cursor + 1]);
         cursor += 1;
 
+        let timestamp = U64Target::from_slice(&values[cursor..cursor + U64_LEN]);
+        cursor += U64_LEN;
+
         let account_tree_root =
             PoseidonHashOutTarget::from_slice(&values[cursor..cursor + POSEIDON_HASH_OUT_LEN]);
         cursor += POSEIDON_HASH_OUT_LEN;
@@ -190,6 +213,7 @@ impl PublicStateTarget {
 
         Self {
             block_number,
+            timestamp,
             account_tree_root,
             deposit_tree_root,
             prev_public_state_root,
@@ -202,6 +226,7 @@ impl PublicStateTarget {
     ) -> Self {
         Self {
             block_number: BlockNumberTarget::new(builder, is_checked),
+            timestamp: U64Target::new(builder, is_checked),
             account_tree_root: PoseidonHashOutTarget::new(builder),
             deposit_tree_root: PoseidonHashOutTarget::new(builder),
             prev_public_state_root: PoseidonHashOutTarget::new(builder),
@@ -214,6 +239,7 @@ impl PublicStateTarget {
     ) -> Self {
         Self {
             block_number: BlockNumberTarget::constant(builder, value.block_number),
+            timestamp: U64Target::constant(builder, U64::from(value.timestamp)),
             account_tree_root: PoseidonHashOutTarget::constant(builder, value.account_tree_root),
             deposit_tree_root: PoseidonHashOutTarget::constant(builder, value.deposit_tree_root),
             prev_public_state_root: PoseidonHashOutTarget::constant(
@@ -235,6 +261,12 @@ impl PublicStateTarget {
                 condition,
                 &when_true.block_number,
                 &when_false.block_number,
+            ),
+            timestamp: U64Target::select(
+                builder,
+                condition,
+                when_true.timestamp,
+                when_false.timestamp,
             ),
             account_tree_root: PoseidonHashOutTarget::select(
                 builder,
@@ -259,6 +291,8 @@ impl PublicStateTarget {
 
     pub fn set_witness<F: Field, W: WitnessWrite<F>>(&self, witness: &mut W, value: &PublicState) {
         self.block_number.set_witness(witness, value.block_number);
+        self.timestamp
+            .set_witness(witness, U64::from(value.timestamp));
         self.account_tree_root
             .set_witness(witness, value.account_tree_root);
         self.deposit_tree_root
@@ -273,6 +307,7 @@ impl PublicStateTarget {
         other: &Self,
     ) -> BoolTarget {
         let block_eq = self.block_number.is_equal(builder, &other.block_number);
+        let timestamp_eq = self.timestamp.is_equal(builder, &other.timestamp);
         let account_eq = self
             .account_tree_root
             .is_equal(builder, &other.account_tree_root);
@@ -283,7 +318,8 @@ impl PublicStateTarget {
             .prev_public_state_root
             .is_equal(builder, &other.prev_public_state_root);
 
-        let tmp = builder.and(block_eq, account_eq);
+        let tmp = builder.and(block_eq, timestamp_eq);
+        let tmp = builder.and(tmp, account_eq);
         let tmp = builder.and(tmp, deposit_eq);
         builder.and(tmp, prev_state_eq)
     }
@@ -294,6 +330,7 @@ impl PublicStateTarget {
         other: &Self,
     ) {
         builder.connect(self.block_number.value, other.block_number.value);
+        self.timestamp.connect(builder, other.timestamp);
         self.account_tree_root
             .connect(builder, other.account_tree_root.clone());
         self.deposit_tree_root
@@ -369,8 +406,15 @@ impl FullPublicState {
     }
 
     pub fn to_public_state(&self) -> PublicState {
+        let timestamp = self
+            .blocks
+            .last()
+            .map(|block| block.timestamp)
+            .unwrap_or_default();
+
         PublicState {
             block_number: self.block_number,
+            timestamp,
             account_tree_root: self.account_tree.get_root(),
             deposit_tree_root: self.deposit_tree.get_root(),
             prev_public_state_root: self.public_state_tree.get_root(),

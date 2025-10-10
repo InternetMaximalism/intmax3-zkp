@@ -758,6 +758,7 @@ mod tests {
 
         let public_state = PublicState {
             block_number: BlockNumber::new(6).unwrap(),
+            timestamp: 0,
             account_tree_root,
             deposit_tree_root: PoseidonHashOut::default(),
             prev_public_state_root: PoseidonHashOut::default(),

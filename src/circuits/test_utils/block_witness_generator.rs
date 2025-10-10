@@ -85,8 +85,15 @@ impl BlockWitnessGenerator {
     }
 
     fn current_public_state(&self) -> PublicState {
+        let timestamp = self
+            .blocks
+            .last()
+            .map(|block| block.timestamp)
+            .unwrap_or_default();
+
         PublicState {
             block_number: self.block_number,
+            timestamp,
             account_tree_root: self.account_tree.get_root(),
             deposit_tree_root: self.deposit_tree.get_root(),
             prev_public_state_root: self.public_state_tree.get_root(),

@@ -257,6 +257,7 @@ where
 
         let new_public_state = PublicState {
             block_number,
+            timestamp: update_account_inputs.block_timestamp,
             account_tree_root,
             deposit_tree_root,
             prev_public_state_root,
@@ -503,6 +504,7 @@ impl<const D: usize> BlockStepTarget<D> {
             ext_public_state: ExtendedPublicStateTarget {
                 inner: PublicStateTarget {
                     block_number: next_block_number,
+                    timestamp: selected_update_inputs.block_timestamp.clone(),
                     account_tree_root,
                     deposit_tree_root: selected_deposit_tree_root,
                     prev_public_state_root,
@@ -1055,6 +1057,7 @@ mod tests {
 
         let initial_public_state = PublicState {
             block_number: block_number_prev,
+            timestamp: 0,
             account_tree_root: prev_account_tree_root,
             deposit_tree_root: initial_deposit_tree_root,
             prev_public_state_root: initial_public_state_root,

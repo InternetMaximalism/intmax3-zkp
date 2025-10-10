@@ -528,6 +528,7 @@ mod tests {
             PoseidonHashOut::from_u64_slice(&[block + 1, block + 2, block + 3, block + 4]).unwrap();
         PublicState {
             block_number: BlockNumber::new(block).unwrap(),
+            timestamp: block,
             account_tree_root: root,
             deposit_tree_root: root,
             prev_public_state_root: root,

@@ -133,6 +133,7 @@ struct AccountLeaf {
 ```rust
 struct PublicState {
     block_number: u64,
+    timestamp: u64,
     account_tree_root: Bytes32,
     deposit_tree_root: Bytes32,
     prev_public_state_root: Bytes32

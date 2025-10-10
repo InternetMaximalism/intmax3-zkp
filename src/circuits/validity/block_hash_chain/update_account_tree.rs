@@ -12,6 +12,7 @@ use crate::{
     ethereum_types::{
         bytes32::{BYTES32_LEN, Bytes32, Bytes32Target},
         u32limb_trait::{U32LimbTargetTrait as _, U32LimbTrait as _},
+        u64::{U64, U64_LEN, U64Target},
     },
     utils::{
         cyclic::add_const_gates,
@@ -52,6 +53,7 @@ pub enum UpdateAccountTreeError {
 #[derive(Clone, Debug)]
 pub struct UpdateAccountPublicInputs {
     pub block_number: BlockNumber,
+    pub block_timestamp: u64,
     pub prev_block_hash_chain: Bytes32,
     pub prev_account_tree_root: PoseidonHashOut,
     pub new_block_hash_chain: Bytes32,
@@ -156,6 +158,7 @@ impl UpdateAccountTree {
 
         Ok(UpdateAccountPublicInputs {
             block_number: self.block_number,
+            block_timestamp: self.block.timestamp,
             prev_block_hash_chain: self.prev_block_hash_chain,
             prev_account_tree_root: self.prev_account_tree_root,
             new_block_hash_chain,
@@ -165,11 +168,13 @@ impl UpdateAccountTree {
     }
 }
 
-const UPDATE_ACCOUNT_PUBLIC_INPUTS_LEN: usize = 1 + 3 * BYTES32_LEN + 2 * POSEIDON_HASH_OUT_LEN;
+const UPDATE_ACCOUNT_PUBLIC_INPUTS_LEN: usize =
+    1 + U64_LEN + 3 * BYTES32_LEN + 2 * POSEIDON_HASH_OUT_LEN;
 
 impl UpdateAccountPublicInputs {
     pub fn to_u64_vec(&self) -> Vec<u64> {
         let mut result = vec![self.block_number.as_u64()];
+        result.extend(U64::from(self.block_timestamp).to_u64_vec());
         result.extend(self.prev_block_hash_chain.to_u64_vec());
         result.extend(self.prev_account_tree_root.to_u64_vec());
         result.extend(self.new_block_hash_chain.to_u64_vec());
@@ -197,6 +202,10 @@ impl UpdateAccountPublicInputs {
         })?;
         cursor += 1;
 
+        let block_timestamp = U64::from_u64_slice(&values[cursor..cursor + U64_LEN])
+            .map_err(|e| UpdateAccountTreeError::InvalidLength(e.to_string()))?;
+        cursor += U64_LEN;
+
         let prev_block_hash_chain = Bytes32::from_u64_slice(&values[cursor..cursor + BYTES32_LEN])
             .map_err(|e| UpdateAccountTreeError::InvalidLength(e.to_string()))?;
         cursor += BYTES32_LEN;
@@ -221,6 +230,7 @@ impl UpdateAccountPublicInputs {
 
         Ok(Self {
             block_number,
+            block_timestamp: u64::from(block_timestamp),
             prev_block_hash_chain,
             prev_account_tree_root,
             new_block_hash_chain,
@@ -233,6 +243,7 @@ impl UpdateAccountPublicInputs {
 #[derive(Clone, Debug)]
 pub struct UpdateAccountPublicInputsTarget {
     pub block_number: BlockNumberTarget,
+    pub block_timestamp: U64Target,
     pub prev_block_hash_chain: Bytes32Target,
     pub prev_account_tree_root: PoseidonHashOutTarget,
     pub new_block_hash_chain: Bytes32Target,
@@ -244,6 +255,7 @@ impl UpdateAccountPublicInputsTarget {
     pub fn to_vec(&self) -> Vec<Target> {
         [
             self.block_number.to_vec(),
+            self.block_timestamp.to_vec(),
             self.prev_block_hash_chain.to_vec(),
             self.prev_account_tree_root.to_vec(),
             self.new_block_hash_chain.to_vec(),
@@ -273,6 +285,9 @@ impl UpdateAccountPublicInputsTarget {
         let block_number = BlockNumberTarget::from_slice(&values[cursor..cursor + 1]);
         cursor += 1;
 
+        let block_timestamp = U64Target::from_slice(&values[cursor..cursor + U64_LEN]);
+        cursor += U64_LEN;
+
         let prev_block_hash_chain =
             Bytes32Target::from_slice(&values[cursor..cursor + BYTES32_LEN]);
         cursor += BYTES32_LEN;
@@ -292,6 +307,7 @@ impl UpdateAccountPublicInputsTarget {
 
         Self {
             block_number,
+            block_timestamp,
             prev_block_hash_chain,
             prev_account_tree_root,
             new_block_hash_chain,
@@ -306,6 +322,8 @@ impl UpdateAccountPublicInputsTarget {
         value: &UpdateAccountPublicInputs,
     ) {
         self.block_number.set_witness(witness, value.block_number);
+        self.block_timestamp
+            .set_witness(witness, U64::from(value.block_timestamp));
         self.prev_block_hash_chain
             .set_witness(witness, value.prev_block_hash_chain);
         self.prev_account_tree_root
@@ -330,6 +348,12 @@ impl UpdateAccountPublicInputsTarget {
                 condition,
                 &when_true.block_number,
                 &when_false.block_number,
+            ),
+            block_timestamp: U64Target::select(
+                builder,
+                condition,
+                when_true.block_timestamp,
+                when_false.block_timestamp,
             ),
             prev_block_hash_chain: Bytes32Target::select(
                 builder,
@@ -462,6 +486,7 @@ impl UpdateAccountTreeTarget {
 
         let public_inputs = UpdateAccountPublicInputsTarget {
             block_number: block_number.clone(),
+            block_timestamp: block.timestamp.clone(),
             prev_block_hash_chain: prev_block_hash_chain.clone(),
             prev_account_tree_root: prev_account_tree_root.clone(),
             new_block_hash_chain,
