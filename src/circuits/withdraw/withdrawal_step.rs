@@ -36,6 +36,7 @@ use crate::{
             vd_to_vec_target, vd_vec_len,
         },
         dummy::{DummyProof, conditionally_verify_proof},
+        recursively_verifiable::add_proof_target_and_verify,
     },
 };
 
@@ -240,7 +241,7 @@ where
         self.update_public_state.verify()?;
 
         let mut prev_hash = Bytes32::default();
-        let mut vd = withdrawal_chain_vd.verifier_only.clone();
+        let vd = withdrawal_chain_vd.verifier_only.clone();
 
         single_withdrawal_vd
             .verify(self.single_withdrawal_proof.clone())
@@ -271,7 +272,6 @@ where
             )?;
 
             prev_hash = prev_inputs.withdrawal_hash_chain;
-            vd = prev_inputs.vd;
         }
 
         let withdrawal_hash_chain = single_withdrawal_inputs
@@ -300,7 +300,6 @@ impl<const D: usize> WithdrawalStepTarget<D> {
     pub fn new<F, C>(
         builder: &mut CircuitBuilder<F, D>,
         withdrawal_chain_cd: &CommonCircuitData<F, D>,
-        single_withdrawal_cd: &CommonCircuitData<F, D>,
         single_withdrawal_vd: &VerifierCircuitData<F, C, D>,
     ) -> Self
     where
@@ -334,25 +333,14 @@ impl<const D: usize> WithdrawalStepTarget<D> {
             &withdrawal_chain_vd,
         );
 
-        let single_withdrawal_proof = builder.add_virtual_proof_with_pis(single_withdrawal_cd);
-        let single_withdrawal_pis_slice =
-            &single_withdrawal_proof.public_inputs[..SINGLE_WITHDRAWAL_PUBLIC_INPUTS_LEN];
-        let single_withdrawal_public_inputs =
-            SingleWithdawalPublicInputsTarget::from_vec(single_withdrawal_pis_slice);
-        let always_verify = builder.constant_bool(true);
-        let single_withdrawal_vd_target =
-            builder.constant_verifier_data(&single_withdrawal_vd.verifier_only);
-        conditionally_verify_proof::<F, C, D>(
-            builder,
-            always_verify,
-            &single_withdrawal_proof,
-            &single_withdrawal_vd_target,
-            single_withdrawal_cd,
+        let single_withdrawal_proof = add_proof_target_and_verify(&single_withdrawal_vd, builder);
+        let single_withdrawal_pis = SingleWithdawalPublicInputsTarget::from_vec(
+            &single_withdrawal_proof.public_inputs[..SINGLE_WITHDRAWAL_PUBLIC_INPUTS_LEN],
         );
 
         update_public_state
             .old
-            .connect(builder, &single_withdrawal_public_inputs.public_state);
+            .connect(builder, &single_withdrawal_pis.public_state);
 
         let zero_hash = Bytes32Target::constant::<F, D, Bytes32>(builder, Bytes32::default());
         let prev_withdrawal_hash_chain = Bytes32Target::select(
@@ -362,7 +350,7 @@ impl<const D: usize> WithdrawalStepTarget<D> {
             prev_withdrawal_chain_pis.withdrawal_hash_chain.clone(),
         );
 
-        let withdrawal_hash_chain = single_withdrawal_public_inputs
+        let withdrawal_hash_chain = single_withdrawal_pis
             .withdrawal
             .hash_with_prev_hash::<F, C, D>(builder, prev_withdrawal_hash_chain);
 
@@ -376,7 +364,7 @@ impl<const D: usize> WithdrawalStepTarget<D> {
             is_initial,
             prev_withdrawal_chain_proof,
             single_withdrawal_proof,
-            single_withdrawal_public_inputs,
+            single_withdrawal_public_inputs: single_withdrawal_pis,
             update_public_state,
             new_pis,
         }
@@ -447,7 +435,6 @@ where
         let target = WithdrawalStepTarget::new::<F, C>(
             &mut builder,
             withdrawal_chain_cd,
-            &single_withdrawal_vd.common,
             single_withdrawal_vd,
         );
         let public_inputs = target.new_pis.clone();
