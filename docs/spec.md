@@ -68,6 +68,7 @@ struct Tx {
 ```rust
 struct Block {
     aggregator_id: u32,
+    timestamp: u64,
     user_ids: [u32; MAX_USER_IDS],
     tx_tree_root: Bytes32,
     deposit_hash_chain: Bytes32

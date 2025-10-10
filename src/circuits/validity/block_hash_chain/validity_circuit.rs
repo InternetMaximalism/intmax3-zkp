@@ -8,4 +8,3 @@ pub struct ValidityPublicInputs {
     pub final_block_chain: Bytes32,
     pub final_ext_commitment: Bytes32,
 }
-

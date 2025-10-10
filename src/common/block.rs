@@ -15,6 +15,7 @@ use crate::{
     ethereum_types::{
         bytes32::{Bytes32, Bytes32Target},
         u32limb_trait::{U32LimbTargetTrait as _, U32LimbTrait},
+        u64::{U64, U64Target},
     },
 };
 
@@ -30,6 +31,7 @@ pub struct Block {
     pub num_users: u32,
 
     pub aggregator_id: u32,
+    pub timestamp: u64,
     pub local_ids: Vec<u32>,
     pub tx_tree_root: Bytes32,
     pub deposit_hash_chain: Bytes32,
@@ -41,6 +43,7 @@ pub struct BlockTarget {
     pub num_users: u32,
 
     pub aggregator_id: Target,
+    pub timestamp: U64Target,
     pub local_ids: Vec<Target>,
     pub tx_tree_root: Bytes32Target,
     pub deposit_hash_chain: Bytes32Target,
@@ -51,6 +54,7 @@ impl Block {
         num_users: u32,
         aggregator_id: u32,
         local_ids: &[u32],
+        timestamp: u64,
         tx_tree_root: Bytes32,
         deposit_hash_chain: Bytes32,
     ) -> Result<Self, BlockError> {
@@ -68,6 +72,7 @@ impl Block {
         Ok(Self {
             num_users,
             aggregator_id,
+            timestamp,
             local_ids,
             tx_tree_root,
             deposit_hash_chain,
@@ -86,6 +91,7 @@ impl Block {
         let inputs = [
             prev_hash.to_u32_vec(),
             vec![self.aggregator_id],
+            U64::from(self.timestamp).to_u32_vec(),
             self.local_ids.to_vec(),
             self.tx_tree_root.to_u32_vec(),
             self.deposit_hash_chain.to_u32_vec(),
@@ -106,6 +112,8 @@ impl BlockTarget {
             builder.range_check(aggregator_id, AGGREGATOR_ID_BITS);
         }
 
+        let timestamp = U64Target::new(builder, is_checked);
+
         let local_ids = (0..num_users)
             .map(|_| {
                 let target = builder.add_virtual_target();
@@ -122,6 +130,7 @@ impl BlockTarget {
         Self {
             num_users,
             aggregator_id,
+            timestamp,
             local_ids,
             tx_tree_root,
             deposit_hash_chain,
@@ -136,6 +145,7 @@ impl BlockTarget {
             panic!("user_ids length does not match num_users");
         }
         let aggregator_id = builder.constant(F::from_canonical_u32(value.aggregator_id));
+        let timestamp = U64Target::constant(builder, U64::from(value.timestamp));
         let local_ids = value
             .local_ids
             .iter()
@@ -147,6 +157,7 @@ impl BlockTarget {
         Self {
             num_users: value.num_users,
             aggregator_id,
+            timestamp,
             local_ids,
             tx_tree_root,
             deposit_hash_chain,
@@ -167,6 +178,7 @@ impl BlockTarget {
     {
         let mut inputs = prev_hash.to_vec();
         inputs.push(self.aggregator_id);
+        inputs.extend(self.timestamp.to_vec());
         inputs.extend(self.local_ids.iter().copied());
         inputs.extend(self.tx_tree_root.to_vec());
         inputs.extend(self.deposit_hash_chain.to_vec());
@@ -179,6 +191,8 @@ impl BlockTarget {
             self.aggregator_id,
             F::from_canonical_u32(value.aggregator_id),
         );
+        self.timestamp
+            .set_witness(witness, U64::from(value.timestamp));
         for (target, local_id) in self.local_ids.iter().zip(value.local_ids.iter()) {
             witness.set_target(*target, F::from_canonical_u32(*local_id));
         }

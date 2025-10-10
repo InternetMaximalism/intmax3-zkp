@@ -253,7 +253,7 @@ where
 
 #[cfg(test)]
 mod tests {
-    use rand::{SeedableRng, rngs::StdRng};
+    use rand::{RngCore, SeedableRng, rngs::StdRng};
 
     use super::*;
     use crate::{
@@ -295,8 +295,9 @@ mod tests {
         assert_eq!(initial_ext_state.deposit_count, U63::default());
 
         let tx_tree_root = Bytes32::rand(&mut rng);
+        let timestamp = rng.next_u64();
         generator
-            .add_block(1, &[1, 2], tx_tree_root)
+            .add_block(1, &[1, 2], timestamp, tx_tree_root)
             .expect("add block");
 
         let block_number = generator.block_number;

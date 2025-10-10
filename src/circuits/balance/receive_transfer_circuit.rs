@@ -667,7 +667,7 @@ mod tests {
             nonce: sender_full_state.nonce,
         };
         let sent_tx_merkle_proof = sender_full_state.sent_tx_tree.prove(tx.nonce as u64);
-  
+
         sender_full_state.asset_tree = asset_tree_initial.clone();
         let prev_private_state_sender = sender_full_state.to_private_state();
         let spend_witness = SpendWitness {

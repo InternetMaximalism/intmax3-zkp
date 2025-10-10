@@ -136,6 +136,7 @@ impl BlockWitnessGenerator {
         &mut self,
         aggregator_id: u32,
         local_ids: &[u32],
+        timestamp: u64,
         tx_tree_root: Bytes32,
     ) -> Result<(), BlockWitnessGeneratorError> {
         let num_users = get_num_users(local_ids.len(), &self.supported_user_counts)
@@ -157,6 +158,7 @@ impl BlockWitnessGenerator {
             num_users,
             aggregator_id,
             local_ids,
+            timestamp,
             tx_tree_root,
             projected_deposit_hash_chain,
         )?;

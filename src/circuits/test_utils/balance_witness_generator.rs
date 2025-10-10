@@ -687,7 +687,7 @@ mod tests {
         block_witness_generator
             .write()
             .unwrap()
-            .add_block(0, &[], Bytes32::default())
+            .add_block(0, &[], 0, Bytes32::default())
             .unwrap();
 
         let receive_deposit_witness = balance_witness_generator
@@ -751,6 +751,7 @@ mod tests {
             .add_block(
                 user_id.aggregator_id(),
                 &[user_id.local_id()],
+                0,
                 tx_tree_root.into(),
             )
             .unwrap();

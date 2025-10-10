@@ -381,6 +381,7 @@ impl FullPublicState {
         &mut self,
         aggregator_id: u32,
         local_ids: &[u32],
+        timestamp: u64,
         tx_tree_root: Bytes32,
     ) -> Result<(), FullPublicStateError> {
         let num_users = get_num_users(local_ids.len(), &self.supported_user_counts)
@@ -391,6 +392,7 @@ impl FullPublicState {
             num_users,
             aggregator_id,
             local_ids,
+            timestamp,
             tx_tree_root,
             self.deposit_hash_chain,
         )?;

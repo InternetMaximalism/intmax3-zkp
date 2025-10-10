@@ -591,7 +591,7 @@ mod tests {
     use plonky2::{
         field::goldilocks_field::GoldilocksField, plonk::config::PoseidonGoldilocksConfig,
     };
-    use rand::{SeedableRng, rngs::StdRng};
+    use rand::{RngCore, SeedableRng, rngs::StdRng};
 
     const D: usize = 2;
     type F = GoldilocksField;
@@ -652,10 +652,12 @@ mod tests {
             prev_account_leaf_user2
         );
 
+        let timestamp = rng.next_u64();
         let block = Block::new(
             num_users,
             aggregator_id,
             &[1, 2],
+            timestamp,
             tx_tree_root,
             deposit_hash_chain,
         )

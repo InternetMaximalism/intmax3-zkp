@@ -789,7 +789,7 @@ mod tests {
         field::goldilocks_field::GoldilocksField,
         plonk::{circuit_data::CircuitConfig, config::PoseidonGoldilocksConfig},
     };
-    use rand::{SeedableRng, rngs::StdRng};
+    use rand::{RngCore, SeedableRng, rngs::StdRng};
 
     const D: usize = 2;
     type F = GoldilocksField;
@@ -1025,10 +1025,12 @@ mod tests {
         account_tree.update(user2.as_u64(), prev_account_leaf_user2.clone());
         let prev_account_tree_root = account_tree.get_root();
 
+        let timestamp_first = rng.next_u64();
         let block_first = Block::new(
             num_users,
             aggregator_id,
             &[1, 2],
+            timestamp_first,
             tx_tree_root_first,
             expected_deposit_hash_chain,
         )
@@ -1152,10 +1154,12 @@ mod tests {
 
         let block_number_second = BlockNumber::new(block_number_first.as_u64() + 1).unwrap();
         let tx_tree_root_second = Bytes32::rand(&mut rng);
+        let timestamp_second = rng.next_u64();
         let block_second = Block::new(
             num_users,
             aggregator_id,
             &[1, 2],
+            timestamp_second,
             tx_tree_root_second,
             expected_deposit_hash_chain,
         )
