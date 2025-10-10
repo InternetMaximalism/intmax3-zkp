@@ -390,7 +390,7 @@ where
             "account state root mismatch for deposit",
         );
 
-        let (deposit, deposit_index, deposit_merkle_proof) = self
+        let (deposit, deposit_merkle_proof) = self
             .block_witness_generator
             .read()
             .unwrap()
@@ -428,7 +428,6 @@ where
             new_public_state.deposit_tree_root,
             data.deposit_salt,
             deposit.clone(),
-            deposit_index,
             deposit_merkle_proof,
         )?;
 

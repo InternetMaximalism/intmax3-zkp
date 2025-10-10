@@ -122,6 +122,14 @@ where
             prev_pis
         };
 
+        if self.deposit.deposit_index.as_u64() != prev_pis.deposit_count.as_u64() {
+            return Err(UpdateDepositTreeError::InvaldInput(format!(
+                "Deposit index {} must match deposit count {}",
+                self.deposit.deposit_index.as_u64(),
+                prev_pis.deposit_count.as_u64()
+            )));
+        }
+
         // Validate empty deposit merkle proof
         let empty_deposit = Deposit::empty_leaf();
         self.deposit_merkle_proof
@@ -236,6 +244,7 @@ impl<const D: usize> DepositStepTarget<D> {
             &initial_deposit_count,
             &prev_deposit_chain_pis.deposit_count,
         );
+        builder.connect(deposit.deposit_index.value, prev_deposit_count.value);
         // connect block number for prev deposit chain proof
         builder.conditional_assert_eq(
             not_initial.target,

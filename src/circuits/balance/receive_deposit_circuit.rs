@@ -424,7 +424,7 @@ mod tests {
     use crate::{
         circuits::balance::{
             balance_pis::{
-                BalanceFullPublicInputs, BalancePublicInputs, BALANCE_PUBLIC_INPUTS_LEN
+                BALANCE_PUBLIC_INPUTS_LEN, BalanceFullPublicInputs, BalancePublicInputs,
             },
             common::{
                 account_state::AccountState, deposit_witness::DepositWitness,
@@ -495,7 +495,6 @@ mod tests {
             deposit_tree_root,
             deposit_salt,
             deposit.clone(),
-            deposit_index,
             deposit_merkle_proof,
         )
         .expect("deposit witness should be valid");

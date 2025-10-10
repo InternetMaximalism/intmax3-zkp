@@ -1,7 +1,7 @@
 use plonky2::{
     field::{extension::Extendable, types::Field},
     hash::hash_types::RichField,
-    iop::{target::Target, witness::WitnessWrite},
+    iop::witness::WitnessWrite,
     plonk::{
         circuit_builder::CircuitBuilder,
         config::{AlgebraicHasher, GenericConfig},
@@ -41,7 +41,6 @@ pub struct DepositWitness {
     pub deposit_tree_root: PoseidonHashOut,
     pub deposit_salt: Salt,
     pub deposit: Deposit,
-    pub deposit_index: u64,
     pub deposit_merkle_proof: DepositMerkleProof,
 }
 
@@ -51,7 +50,6 @@ pub struct DepositWitnessTarget {
     pub deposit_tree_root: PoseidonHashOutTarget,
     pub deposit_salt: SaltTarget,
     pub deposit: DepositTarget,
-    pub deposit_index: Target,
     pub deposit_merkle_proof: DepositMerkleProofTarget,
 }
 
@@ -61,7 +59,6 @@ impl DepositWitness {
         deposit_tree_root: PoseidonHashOut,
         deposit_salt: Salt,
         deposit: Deposit,
-        deposit_index: u64,
         deposit_merkle_proof: DepositMerkleProof,
     ) -> Result<Self, DepositWitnessError> {
         let witness = Self {
@@ -69,7 +66,6 @@ impl DepositWitness {
             deposit_tree_root,
             deposit_salt,
             deposit,
-            deposit_index,
             deposit_merkle_proof,
         };
         witness.verify()?;
@@ -77,16 +73,17 @@ impl DepositWitness {
     }
 
     pub fn verify(&self) -> Result<(), DepositWitnessError> {
-        if self.deposit_index >= (1 << crate::constants::DEPOSIT_TREE_HEIGHT) {
+        let deposit_index = self.deposit.deposit_index.as_u64();
+        if deposit_index >= (1 << crate::constants::DEPOSIT_TREE_HEIGHT) {
             return Err(DepositWitnessError::InvalidDepositIndex(format!(
                 "index {} is out of range",
-                self.deposit_index
+                deposit_index
             )));
         }
 
         // verify the Merkle proof.
         self.deposit_merkle_proof
-            .verify(&self.deposit, self.deposit_index, self.deposit_tree_root)
+            .verify(&self.deposit, deposit_index, self.deposit_tree_root)
             .map_err(|e| DepositWitnessError::InvalidDepositMerkleProof(e.to_string()))?;
 
         // verify the deposit's user_id and salt.
@@ -113,13 +110,14 @@ impl DepositWitnessTarget {
         let deposit_tree_root = PoseidonHashOutTarget::new(builder);
         let deposit_salt = SaltTarget::new(builder);
         let deposit = DepositTarget::new(builder, is_checked);
-        let deposit_index = builder.add_virtual_target();
-        if is_checked {
-            builder.range_check(deposit_index, DEPOSIT_TREE_HEIGHT);
-        }
         let deposit_merkle_proof = DepositMerkleProofTarget::new(builder, DEPOSIT_TREE_HEIGHT);
 
-        deposit_merkle_proof.verify::<F, C, D>(builder, &deposit, deposit_index, deposit_tree_root);
+        deposit_merkle_proof.verify::<F, C, D>(
+            builder,
+            &deposit,
+            deposit.deposit_index.value,
+            deposit_tree_root,
+        );
 
         let expected_recipient =
             calculate_recipient_from_user_id_circuit(builder, &user_id, &deposit_salt);
@@ -130,7 +128,6 @@ impl DepositWitnessTarget {
             deposit_tree_root,
             deposit_salt,
             deposit,
-            deposit_index,
             deposit_merkle_proof,
         }
     }
@@ -145,10 +142,6 @@ impl DepositWitnessTarget {
             .set_witness(witness, value.deposit_tree_root);
         self.deposit_salt.set_witness(witness, value.deposit_salt);
         self.deposit.set_witness(witness, &value.deposit);
-        witness.set_target(
-            self.deposit_index,
-            F::from_canonical_u64(value.deposit_index),
-        );
         self.deposit_merkle_proof
             .set_witness(witness, &value.deposit_merkle_proof);
     }

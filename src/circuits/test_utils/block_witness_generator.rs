@@ -412,7 +412,7 @@ impl BlockWitnessGenerator {
     pub fn get_deposit_merkle_proof(
         &self,
         receiver: Bytes32,
-    ) -> Result<(Deposit, u64, DepositMerkleProof), BlockWitnessGeneratorError> {
+    ) -> Result<(Deposit, DepositMerkleProof), BlockWitnessGeneratorError> {
         let deposits = self.deposit_tree.leaves();
         let deposit_index = deposits
             .iter()
@@ -423,7 +423,7 @@ impl BlockWitnessGenerator {
             )))? as u64;
         let deposit = deposits[deposit_index as usize].clone();
         let deposit_merkle_proof = self.deposit_tree.prove(deposit_index);
-        Ok((deposit, deposit_index, deposit_merkle_proof))
+        Ok((deposit, deposit_merkle_proof))
     }
 }
 
