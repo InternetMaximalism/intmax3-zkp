@@ -1,9 +1,25 @@
-use plonky2::iop::target::Target;
+use plonky2::{
+    field::extension::Extendable,
+    hash::hash_types::RichField,
+    iop::target::Target,
+    plonk::{
+        circuit_data::VerifierCircuitData,
+        config::{AlgebraicHasher, GenericConfig},
+        proof::ProofWithPublicInputs,
+    },
+    recursion::cyclic_recursion::check_cyclic_proof_verifier_data,
+};
 use thiserror::Error;
 
-use crate::common::{
-    public_state::{PublicState, PublicStateError, PublicStateTarget, PUBLIC_STATE_U64_LEN},
-    withdrawal::{Withdrawal, WithdrawalTarget, WITHDRAWAL_LEN},
+use crate::{
+    circuits::balance::common::transfer_witness::TransferWitness,
+    common::{
+        private_state::PrivateState,
+        public_state::{PUBLIC_STATE_U64_LEN, PublicState, PublicStateError, PublicStateTarget},
+        trees::sent_tx_tree::SentTxMerkleProof,
+        tx::Tx,
+        withdrawal::{WITHDRAWAL_LEN, Withdrawal, WithdrawalTarget},
+    },
 };
 
 pub const SINGLE_WITHDRAWAL_PUBLIC_INPUTS_LEN: usize = PUBLIC_STATE_U64_LEN + WITHDRAWAL_LEN;
@@ -42,13 +58,13 @@ impl SingleWithdawalPublicInputs {
 
         let mut cursor = 0;
 
-        let public_state = PublicState::from_u64_slice(&values[cursor..cursor + PUBLIC_STATE_U64_LEN])?;
+        let public_state =
+            PublicState::from_u64_slice(&values[cursor..cursor + PUBLIC_STATE_U64_LEN])?;
         cursor += PUBLIC_STATE_U64_LEN;
 
         let withdraw_slice = &values[cursor..cursor + WITHDRAWAL_LEN];
-        let withdraw = Withdrawal::from_u64_slice(withdraw_slice).map_err(|e| {
-            SingleWithdawalPublicInputsError::Withdrawal(e.to_string())
-        })?;
+        let withdraw = Withdrawal::from_u64_slice(withdraw_slice)
+            .map_err(|e| SingleWithdawalPublicInputsError::Withdrawal(e.to_string()))?;
 
         Ok(Self {
             public_state,
@@ -77,7 +93,8 @@ impl SingleWithdawalPublicInputsTarget {
 
         let mut cursor = 0;
 
-        let public_state = PublicStateTarget::from_slice(&values[cursor..cursor + PUBLIC_STATE_U64_LEN]);
+        let public_state =
+            PublicStateTarget::from_slice(&values[cursor..cursor + PUBLIC_STATE_U64_LEN]);
         cursor += PUBLIC_STATE_U64_LEN;
 
         let withdraw = WithdrawalTarget::from_slice(&values[cursor..cursor + WITHDRAWAL_LEN]);
@@ -86,5 +103,55 @@ impl SingleWithdawalPublicInputsTarget {
             public_state,
             withdraw,
         }
+    }
+}
+
+#[derive(Debug, Error)]
+pub enum SingleWithdawalWitnessError {}
+
+pub struct SingleWithdawalWitness<
+    F: RichField + Extendable<D>,
+    C: GenericConfig<D, F = F>,
+    const D: usize,
+> where
+    <C as GenericConfig<D>>::Hasher: AlgebraicHasher<F>,
+{
+    // the balance proof of the user performing the withdrawal
+    // it must contain the withdrawal in its sent tx tree
+    pub balance_proof: ProofWithPublicInputs<F, C, D>,
+
+    // the private state of the balance proof
+    pub private_state: PrivateState,
+
+    // the tx that contains the withdrawal
+    pub tx: Tx,
+
+    // the sent tx merkle proof of the tx
+    pub sent_tx_merkle_proof: SentTxMerkleProof,
+
+    // the transfer witness of the withdrawal
+    pub transfer_witness: TransferWitness,
+}
+
+impl<F: RichField + Extendable<D>, C: GenericConfig<D, F = F>, const D: usize>
+    SingleWithdawalWitness<F, C, D>
+where
+    <C as GenericConfig<D>>::Hasher: AlgebraicHasher<F>,
+{
+    pub fn to_public_inputs(
+        &self,
+        balance_vd: &VerifierCircuitData<F, C, D>,
+    ) -> Result<SingleWithdawalPublicInputs, SingleWithdawalWitnessError> {
+        // verify the balance proof
+
+        // check the commmitment of the private state
+
+        // verify the sent tx merkle proof
+
+        // verify the transfer witness
+
+        // convert transfer to withdrawal
+
+        todo!()
     }
 }
