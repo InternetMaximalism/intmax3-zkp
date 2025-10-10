@@ -124,6 +124,27 @@ impl WithdrawalTarget {
         result
     }
 
+    pub fn new<F: RichField + Extendable<D>, const D: usize>(
+        builder: &mut CircuitBuilder<F, D>,
+        is_checked: bool,
+    ) -> Self {
+        let recipient = AddressTarget::new(builder, is_checked);
+        let token_index = builder.add_virtual_target();
+        if is_checked {
+            builder.range_check(token_index, 32);
+        }
+        let amount = U256Target::new(builder, is_checked);
+        let nullifier = Bytes32Target::new(builder, is_checked);
+        let aux_data = Bytes32Target::new(builder, is_checked);
+        Self {
+            recipient,
+            token_index,
+            amount,
+            nullifier,
+            aux_data,
+        }
+    }
+
     pub fn from_slice(slice: &[Target]) -> Self {
         assert_eq!(slice.len(), WITHDRAWAL_LEN);
         let recipient = AddressTarget::from_slice(&slice[0..ADDRESS_LEN]);
