@@ -18,6 +18,7 @@ use crate::{
         bytes32::{BYTES32_LEN, Bytes32, Bytes32Target},
         u32limb_trait::{U32LimbTargetTrait as _, U32LimbTrait as _},
     },
+    utils::poseidon_hash_out::{PoseidonHashOut, PoseidonHashOutTarget},
 };
 
 pub const EXTENDED_PUBLIC_STATE_U64_LEN: usize = PUBLIC_STATE_U64_LEN + 2 * BYTES32_LEN + 1;
@@ -65,6 +66,10 @@ impl ExtendedPublicState {
             self.deposit_count.to_u64_vec(),
         ]
         .concat()
+    }
+
+    pub fn commitment(&self) -> Bytes32 {
+        PoseidonHashOut::hash_inputs_u64(&self.to_u64_vec()).into()
     }
 
     pub fn from_u64_slice(values: &[u64]) -> Result<Self, ExtendedPublicStateError> {
@@ -208,6 +213,14 @@ impl ExtendedPublicStateTarget {
             self.deposit_count.to_vec(),
         ]
         .concat()
+    }
+
+    pub fn commitment<F: RichField + Extendable<D>, const D: usize>(
+        &self,
+        builder: &mut CircuitBuilder<F, D>,
+    ) -> Bytes32Target {
+        let hash = PoseidonHashOutTarget::hash_inputs(builder, &self.to_vec());
+        Bytes32Target::from_hash_out(builder, hash)
     }
 
     pub fn from_slice(values: &[Target]) -> Self {
