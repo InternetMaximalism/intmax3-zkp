@@ -1,7 +1,7 @@
 use plonky2::{
-    field::extension::Extendable,
+    field::{extension::Extendable, types::Field},
     hash::hash_types::RichField,
-    iop::target::Target,
+    iop::{target::Target, witness::WitnessWrite},
     plonk::{
         circuit_builder::CircuitBuilder,
         config::{AlgebraicHasher, GenericConfig},
@@ -159,5 +159,13 @@ impl WithdrawalTarget {
     {
         let input = [prev_withdrawal_hash.to_vec(), self.to_vec()].concat();
         Bytes32Target::from_slice(&builder.keccak256::<C>(&input))
+    }
+
+    pub fn set_witness<F: Field, W: WitnessWrite<F>>(&self, witness: &mut W, value: &Withdrawal) {
+        self.recipient.set_witness(witness, value.recipient);
+        witness.set_target(self.token_index, F::from_canonical_u32(value.token_index));
+        self.amount.set_witness(witness, value.amount);
+        self.nullifier.set_witness(witness, value.nullifier);
+        self.aux_data.set_witness(witness, value.aux_data);
     }
 }
