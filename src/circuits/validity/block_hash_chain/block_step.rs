@@ -327,7 +327,6 @@ impl<const D: usize> BlockStepTarget<D> {
             &prev_block_chain_proof.public_inputs,
             &block_chain_cd.config,
         );
-        println!("conditionally verify previous block proof");
         conditionally_verify_proof::<F, C, D>(
             builder,
             has_prev_block_proof,
@@ -368,7 +367,6 @@ impl<const D: usize> BlockStepTarget<D> {
         let mut update_account_proofs = Vec::with_capacity(update_account_vds.len());
         let mut update_account_inputs = Vec::with_capacity(update_account_vds.len());
         for (flag, (_num_users, vd)) in one_hot.iter().zip(update_account_vds.iter()) {
-            println!("add update account proof for num_users {}", _num_users);
             let proof = add_proof_target_and_conditionally_verify(vd, builder, *flag);
             let inputs = UpdateAccountPublicInputsTarget::from_slice(&proof.public_inputs);
             update_account_proofs.push(proof);
@@ -390,7 +388,6 @@ impl<const D: usize> BlockStepTarget<D> {
             );
         }
 
-        println!("add deposit hash chain proof");
         let has_deposit_proof = builder.add_virtual_bool_target_safe();
         let deposit_hash_chain_proof = add_proof_target_and_conditionally_verify_cyclic(
             deposit_chain_vd,
