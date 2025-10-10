@@ -36,7 +36,7 @@ pub const SINGLE_WITHDRAWAL_PUBLIC_INPUTS_LEN: usize = PUBLIC_STATE_U64_LEN + WI
 
 pub struct SingleWithdawalPublicInputs {
     pub public_state: PublicState,
-    pub withdraw: Withdrawal,
+    pub withdrawal: Withdrawal,
 }
 
 #[derive(Debug, Error)]
@@ -54,7 +54,7 @@ pub enum SingleWithdawalPublicInputsError {
 impl SingleWithdawalPublicInputs {
     pub fn to_u64_vec(&self) -> Vec<u64> {
         let mut limbs = self.public_state.to_u64_vec();
-        limbs.extend(self.withdraw.to_u32_vec().into_iter().map(|x| x as u64));
+        limbs.extend(self.withdrawal.to_u32_vec().into_iter().map(|x| x as u64));
         limbs
     }
 
@@ -73,12 +73,12 @@ impl SingleWithdawalPublicInputs {
         cursor += PUBLIC_STATE_U64_LEN;
 
         let withdraw_slice = &values[cursor..cursor + WITHDRAWAL_LEN];
-        let withdraw = Withdrawal::from_u64_slice(withdraw_slice)
+        let withdrawal = Withdrawal::from_u64_slice(withdraw_slice)
             .map_err(|e| SingleWithdawalPublicInputsError::Withdrawal(e.to_string()))?;
 
         Ok(Self {
             public_state,
-            withdraw,
+            withdrawal,
         })
     }
 }
@@ -86,12 +86,12 @@ impl SingleWithdawalPublicInputs {
 #[derive(Clone, Debug)]
 pub struct SingleWithdawalPublicInputsTarget {
     pub public_state: PublicStateTarget,
-    pub withdraw: WithdrawalTarget,
+    pub withdrawal: WithdrawalTarget,
 }
 
 impl SingleWithdawalPublicInputsTarget {
     pub fn to_vec(&self) -> Vec<Target> {
-        [self.public_state.to_vec(), self.withdraw.to_vec()].concat()
+        [self.public_state.to_vec(), self.withdrawal.to_vec()].concat()
     }
 
     pub fn from_vec(values: &[Target]) -> Self {
@@ -107,11 +107,11 @@ impl SingleWithdawalPublicInputsTarget {
             PublicStateTarget::from_slice(&values[cursor..cursor + PUBLIC_STATE_U64_LEN]);
         cursor += PUBLIC_STATE_U64_LEN;
 
-        let withdraw = WithdrawalTarget::from_slice(&values[cursor..cursor + WITHDRAWAL_LEN]);
+        let withdrawal = WithdrawalTarget::from_slice(&values[cursor..cursor + WITHDRAWAL_LEN]);
 
         Self {
             public_state,
-            withdraw,
+            withdrawal,
         }
     }
 }
@@ -197,6 +197,7 @@ where
         &self,
         balance_vd: &VerifierCircuitData<F, C, D>,
     ) -> Result<SingleWithdawalPublicInputs, SingleWithdawalWitnessError> {
+        // verify the balance proof
         check_cyclic_proof_verifier_data(
             &self.balance_proof,
             &balance_vd.verifier_only,
@@ -219,25 +220,28 @@ where
         )
         .map_err(|e| SingleWithdawalWitnessError::BalancePublicInputs(e.to_string()))?;
         let balance_pis = balance_full_pis.pis;
+        let user_id = balance_pis.user_id;
 
-        let expected_commitment = balance_pis.private_commitment;
-        let actual_commitment = self.private_state.commitment();
-        if actual_commitment != expected_commitment {
+        // verify the private state by checking the commitment
+        if balance_pis.private_commitment != self.private_state.commitment() {
             return Err(
                 SingleWithdawalWitnessError::PrivateStateCommitmentMismatch {
-                    expected: expected_commitment,
-                    actual: actual_commitment,
+                    expected: balance_pis.private_commitment,
+                    actual: self.private_state.commitment(),
                 },
             );
         }
 
+        // verify the public state update
         self.update_public_state
             .verify()
             .map_err(|e| SingleWithdawalWitnessError::UpdatePublicState(e.to_string()))?;
         if self.update_public_state.old != balance_pis.public_state {
             return Err(SingleWithdawalWitnessError::BalancePublicStateMismatch);
         }
+        let public_state = self.update_public_state.new.clone();
 
+        // verify that the tx is included in the sent tx tree
         self.sent_tx_merkle_proof
             .verify(
                 &self.tx,
@@ -246,48 +250,12 @@ where
             )
             .map_err(|e| SingleWithdawalWitnessError::TxMerkleProof(e.to_string()))?;
 
+        // verify the transfer witness
         if self.transfer_witness.transfer_tree_root != self.tx.transfer_tree_root {
             return Err(SingleWithdawalWitnessError::InconsistentWitness(format!(
                 "transfer tree root mismatch: expected {:?}, got {:?}",
                 self.tx.transfer_tree_root, self.transfer_witness.transfer_tree_root
             )));
-        }
-
-        self.account_state
-            .verify()
-            .map_err(|e: AccountStateError| {
-                SingleWithdawalWitnessError::AccountState(e.to_string())
-            })?;
-        if self.account_state.user_id != balance_pis.user_id {
-            return Err(SingleWithdawalWitnessError::InconsistentWitness(format!(
-                "account state user {:?} != balance proof user {:?}",
-                self.account_state.user_id, balance_pis.user_id
-            )));
-        }
-        if self.account_state.account_tree_root != self.update_public_state.new.account_tree_root {
-            return Err(SingleWithdawalWitnessError::InconsistentWitness(format!(
-                "account tree root mismatch: {:?} vs {:?}",
-                self.account_state.account_tree_root,
-                self.update_public_state.new.account_tree_root
-            )));
-        }
-
-        let send_leaf_tx_root = self
-            .account_state
-            .send_leaf
-            .tx_tree_root
-            .reduce_to_hash_out();
-        self.tx_merkle_proof
-            .verify(
-                &self.tx,
-                balance_pis.user_id.local_id() as u64,
-                send_leaf_tx_root,
-            )
-            .map_err(|e| SingleWithdawalWitnessError::SentTxMerkleProof(e.to_string()))?;
-        if self.transfer_witness.transfer_tree_root != self.tx.transfer_tree_root {
-            return Err(SingleWithdawalWitnessError::InconsistentWitness(
-                "transfer witness root mismatch with tx".to_string(),
-            ));
         }
         self.transfer_witness
             .verify()
@@ -295,16 +263,48 @@ where
                 SingleWithdawalWitnessError::TransferWitness(e.to_string())
             })?;
 
+        // verify the account state
+        if self.account_state.user_id != user_id {
+            return Err(SingleWithdawalWitnessError::InconsistentWitness(format!(
+                "account state user {:?} != balance proof user {:?}",
+                self.account_state.user_id, user_id
+            )));
+        }
+        if self.account_state.account_tree_root != public_state.account_tree_root {
+            return Err(SingleWithdawalWitnessError::InconsistentWitness(format!(
+                "account tree root mismatch: {:?} vs {:?}",
+                self.account_state.account_tree_root, public_state.account_tree_root
+            )));
+        }
+        self.account_state
+            .verify()
+            .map_err(|e: AccountStateError| {
+                SingleWithdawalWitnessError::AccountState(e.to_string())
+            })?;
+        let tx_tree_root = self
+            .account_state
+            .send_leaf
+            .tx_tree_root
+            .reduce_to_hash_out();
+        let tx_block_number = self.account_state.send_leaf.cur;
+
+        // verify that the tx is included in the tx tree root
+        self.tx_merkle_proof
+            .verify(&self.tx, user_id.local_id() as u64, tx_tree_root)
+            .map_err(|e| SingleWithdawalWitnessError::TxMerkleProof(e.to_string()))?;
+
         let transfer = self.transfer_witness.transfer.clone();
         let recipient = extract_address_from_recipient(transfer.recipient)
             .map_err(|e| SingleWithdawalWitnessError::InvalidRecipient(e.to_string()))?;
 
         let settled_transfer = SettledTransfer::new(
             transfer.clone(),
-            balance_pis.user_id,
+            user_id,
             self.transfer_witness.transfer_index,
-            self.account_state.send_leaf.cur,
+            tx_block_number,
         );
+
+        // construct the withdrawal
         let withdrawal = Withdrawal {
             recipient,
             token_index: transfer.token_index,
@@ -315,7 +315,7 @@ where
 
         Ok(SingleWithdawalPublicInputs {
             public_state: self.update_public_state.new.clone(),
-            withdraw: withdrawal,
+            withdrawal,
         })
     }
 }
