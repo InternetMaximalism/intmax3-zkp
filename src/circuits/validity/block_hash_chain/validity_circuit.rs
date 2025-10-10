@@ -21,6 +21,7 @@ use crate::{
     },
     common::u63::{BlockNumber, BlockNumberTarget},
     ethereum_types::{
+        address::{Address, AddressTarget},
         bytes32::{Bytes32, Bytes32Target},
         u32limb_trait::{U32LimbTargetTrait as _, U32LimbTrait},
     },
@@ -34,10 +35,15 @@ pub struct ValidityPublicInputs {
     pub final_block_number: BlockNumber,
     pub final_block_chain: Bytes32,
     pub final_ext_commitment: Bytes32,
+    pub prover: Address,
 }
 
 impl ValidityPublicInputs {
-    pub fn from_states(initial: &ExtendedPublicState, final_state: &ExtendedPublicState) -> Self {
+    pub fn from_states(
+        initial: &ExtendedPublicState,
+        final_state: &ExtendedPublicState,
+        prover: Address,
+    ) -> Self {
         Self {
             initial_block_number: initial.inner.block_number,
             initial_block_chain: initial.block_hash_chain,
@@ -45,6 +51,7 @@ impl ValidityPublicInputs {
             final_block_number: final_state.inner.block_number,
             final_block_chain: final_state.block_hash_chain,
             final_ext_commitment: final_state.commitment(),
+            prover,
         }
     }
 
@@ -56,6 +63,7 @@ impl ValidityPublicInputs {
             self.final_block_number.to_u32_vec(),
             self.final_block_chain.to_u32_vec(),
             self.final_ext_commitment.to_u32_vec(),
+            self.prover.to_u32_vec(),
         ]
         .concat()
     }
@@ -73,6 +81,7 @@ pub struct ValidityPublicInputsTarget {
     pub final_block_number: BlockNumberTarget,
     pub final_block_chain: Bytes32Target,
     pub final_ext_commitment: Bytes32Target,
+    pub prover: AddressTarget,
 }
 
 impl ValidityPublicInputsTarget {
@@ -87,6 +96,7 @@ impl ValidityPublicInputsTarget {
             final_block_number: BlockNumberTarget::new(builder, is_checked),
             final_block_chain: Bytes32Target::new::<F, D>(builder, is_checked),
             final_ext_commitment: Bytes32Target::new::<F, D>(builder, is_checked),
+            prover: AddressTarget::new(builder, is_checked),
         }
     }
 
@@ -107,6 +117,7 @@ impl ValidityPublicInputsTarget {
             .set_witness(witness, value.final_block_chain);
         self.final_ext_commitment
             .set_witness(witness, value.final_ext_commitment);
+        self.prover.set_witness(witness, value.prover);
     }
 
     pub fn to_vec<F: RichField + Extendable<D>, const D: usize>(
@@ -119,6 +130,7 @@ impl ValidityPublicInputsTarget {
         limbs.extend(self.final_block_number.to_u32_vec(builder));
         limbs.extend(self.final_block_chain.to_vec());
         limbs.extend(self.final_ext_commitment.to_vec());
+        limbs.extend(self.prover.to_vec());
         limbs
     }
 
@@ -155,6 +167,7 @@ where
 {
     pub data: CircuitData<F, C, D>,
     pub block_hash_chain_proof: ProofWithPublicInputsTarget<D>,
+    pub prover: AddressTarget,
 }
 
 impl<F, C, const D: usize> ValidityCircuit<F, C, D>
@@ -177,6 +190,7 @@ where
             .initial_ext_public_state
             .commitment(&mut builder);
         let final_commitment = block_chain_pis.ext_public_state.commitment(&mut builder);
+        let prover = AddressTarget::new(&mut builder, true);
         let validity_pis = ValidityPublicInputsTarget {
             initial_block_number: block_chain_pis
                 .initial_ext_public_state
@@ -191,6 +205,7 @@ where
             final_block_number: block_chain_pis.ext_public_state.inner.block_number.clone(),
             final_block_chain: block_chain_pis.ext_public_state.block_hash_chain.clone(),
             final_ext_commitment: final_commitment,
+            prover,
         };
 
         let hash = validity_pis.hash::<F, C, D>(&mut builder);
@@ -201,15 +216,18 @@ where
         Self {
             data,
             block_hash_chain_proof,
+            prover,
         }
     }
 
     pub fn prove(
         &self,
         block_hash_chain_proof: &ProofWithPublicInputs<F, C, D>,
+        prover: Address,
     ) -> Result<ProofWithPublicInputs<F, C, D>, ValidityCircuitError> {
         let mut pw = PartialWitness::<F>::new();
         pw.set_proof_with_pis_target(&self.block_hash_chain_proof, block_hash_chain_proof);
+        self.prover.set_witness(&mut pw, prover);
 
         self.data
             .prove(pw)
@@ -237,7 +255,7 @@ mod tests {
                 block_hash_chain_processor::BlockHashChainProcessor,
             },
         },
-        ethereum_types::bytes32::Bytes32,
+        ethereum_types::{address::Address, bytes32::Bytes32},
         utils::conversion::ToU64,
     };
     use plonky2::{
@@ -277,8 +295,9 @@ mod tests {
         let block_chain_vd = processor.block_chain_vd();
 
         let validity_circuit = ValidityCircuit::<F, C, D>::new(&block_chain_vd);
+        let prover = Address::default();
         let validity_proof = validity_circuit
-            .prove(&block_hash_chain_proof)
+            .prove(&block_hash_chain_proof, prover)
             .expect("validity proof");
         validity_circuit
             .verify(&validity_proof)
@@ -293,6 +312,7 @@ mod tests {
         let validity_inputs = ValidityPublicInputs::from_states(
             &block_chain_inputs.initial_ext_public_state,
             &block_chain_inputs.ext_public_state,
+            prover,
         );
         let expected_hash = validity_inputs.hash();
         let expected_public_inputs: Vec<F> = expected_hash
