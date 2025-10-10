@@ -1,6 +1,9 @@
 use std::{fmt::Debug, str::FromStr};
 
-use plonky2::iop::target::Target;
+use plonky2::{
+    field::extension::Extendable, hash::hash_types::RichField, iop::target::Target,
+    plonk::circuit_builder::CircuitBuilder,
+};
 use serde::{Deserialize, Serialize};
 
 use super::{
@@ -21,6 +24,27 @@ pub struct Bytes32 {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Bytes32Target {
     limbs: [Target; BYTES32_LEN],
+}
+
+impl Bytes32 {
+    pub fn remove_3bits(&self) -> Bytes32 {
+        let mut limbs = self.to_u32_vec();
+        limbs[0] &= (1 << 29) - 1;
+        Bytes32::from_u32_slice(&limbs).unwrap()
+    }
+}
+
+impl Bytes32Target {
+    pub fn remove_3bits<F: RichField + Extendable<D>, const D: usize>(
+        &self,
+        builder: &mut CircuitBuilder<F, D>,
+    ) -> Bytes32Target {
+        let mut limbs = self.to_vec();
+        let highest_limb_bits_le = builder.split_le(limbs[0], 32);
+        let highest_limb = builder.le_sum(highest_limb_bits_le[0..29].into_iter());
+        limbs[0] = highest_limb;
+        Bytes32Target::from_slice(&limbs)
+    }
 }
 
 impl core::fmt::Debug for Bytes32 {
