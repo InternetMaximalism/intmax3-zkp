@@ -755,37 +755,18 @@ where
 mod tests {
     use super::*;
     use crate::{
-        circuits::validity::{
-            block_hash_chain::{
-                block_chain_pis::BLOCK_CHAIN_PUBLIC_INPUTS_LEN,
-                update_account_tree::{UpdateAccountCircuit, UpdateAccountTree},
-            },
-            deposit_hash_chain::{
-                deposit_chain_pis::DEPOSIT_CHAIN_PUBLIC_INPUTS_LEN,
-                deposit_step::DepositStepWitness,
-            },
-        },
-        common::{
-            block::Block,
-            deposit::Deposit,
-            public_state::PublicState,
-            trees::{
-                account_tree::{
-                    AccountLeaf, AccountMerkleProof, AccountTree, SendLeaf, SendMerkleProof,
-                    SendTree,
+        circuits::{
+            test_utils::block_witness_generator::BlockWitnessGenerator,
+            validity::{
+                block_hash_chain::{
+                    block_chain_pis::BLOCK_CHAIN_PUBLIC_INPUTS_LEN,
+                    update_account_tree::{UpdateAccountCircuit, UpdateAccountTree},
                 },
-                deposit_tree::DepositTree,
-                public_state_tree::PublicStateTree,
+                deposit_hash_chain::deposit_chain_pis::DEPOSIT_CHAIN_PUBLIC_INPUTS_LEN,
             },
-            u63::{BlockNumber, U63},
-            user_id::UserId,
         },
-        constants::{ACCOUNT_TREE_HEIGHT, SEND_TREE_HEIGHT},
-        ethereum_types::{bytes32::Bytes32, u32limb_trait::U32LimbTrait, u256::U256},
-        utils::{
-            conversion::ToField as _,
-            cyclic::{TestCyclicCircuit, vd_vec_len},
-        },
+        ethereum_types::{bytes32::Bytes32, u32limb_trait::U32LimbTrait as _},
+        utils::cyclic::TestCyclicCircuit,
     };
     use plonky2::{
         field::goldilocks_field::GoldilocksField,
@@ -797,122 +778,71 @@ mod tests {
     type F = GoldilocksField;
     type C = PoseidonGoldilocksConfig;
 
-    fn prove_update_account_block(
-        block_number: BlockNumber,
-        prev_block_hash_chain: Bytes32,
-        block: &Block,
-        account_tree: &mut AccountTree,
-        send_trees: &mut [SendTree],
-        account_leaves: &mut [AccountLeaf],
-        update_account_circuit: &UpdateAccountCircuit<F, C, D>,
-    ) -> (
-        UpdateAccountTree,
-        UpdateAccountPublicInputs,
-        ProofWithPublicInputs<F, C, D>,
-    ) {
-        let prev_account_tree_root = account_tree.get_root();
-        let mut account_tree_for_proofs = account_tree.clone();
-
-        let dummy_account_proof = AccountMerkleProof::dummy(ACCOUNT_TREE_HEIGHT);
-        let dummy_send_proof = SendMerkleProof::dummy(SEND_TREE_HEIGHT);
-
-        let mut prev_account_leaves_vec = Vec::with_capacity(block.num_users as usize);
-        let mut account_merkle_proofs = Vec::with_capacity(block.num_users as usize);
-        let mut send_merkle_proofs = Vec::with_capacity(block.num_users as usize);
-
-        for (i, &local_id) in block.local_ids.iter().enumerate() {
-            let prev_leaf = account_leaves[i].clone();
-            prev_account_leaves_vec.push(prev_leaf.clone());
-
-            if local_id == 0 {
-                account_merkle_proofs.push(dummy_account_proof.clone());
-                send_merkle_proofs.push(dummy_send_proof.clone());
-                continue;
-            }
-
-            let send_tree = &mut send_trees[i];
-            let send_proof = send_tree.prove(prev_leaf.index.into());
-            send_merkle_proofs.push(send_proof.clone());
-
-            let user_id = UserId::new(block.aggregator_id, local_id).unwrap();
-            let account_proof = account_tree_for_proofs.prove(user_id.as_u64());
-            account_merkle_proofs.push(account_proof);
-
-            if prev_leaf.prev != block_number {
-                let new_send_leaf = SendLeaf {
-                    prev: prev_leaf.prev,
-                    cur: block_number,
-                    tx_tree_root: block.tx_tree_root,
-                };
-                let new_send_root = send_proof.get_root(&new_send_leaf, prev_leaf.index.into());
-                send_tree.push(new_send_leaf);
-
-                let new_account_leaf = AccountLeaf {
-                    index: prev_leaf.index + 1,
-                    prev: block_number,
-                    send_tree_root: new_send_root,
-                };
-                account_tree_for_proofs.update(user_id.as_u64(), new_account_leaf.clone());
-                account_tree.update(user_id.as_u64(), new_account_leaf.clone());
-                account_leaves[i] = new_account_leaf;
-            }
-        }
-
-        let update_account_tree = UpdateAccountTree {
-            prev_block_hash_chain,
-            prev_account_tree_root,
-            block_number,
-            block: block.clone(),
-            prev_account_leaves: prev_account_leaves_vec,
-            account_merkle_proofs,
-            send_merkle_proofs,
-        };
-
-        let update_account_inputs = update_account_tree
-            .to_public_inputs()
-            .expect("update account inputs");
-        let update_account_proof = update_account_circuit
-            .prove(&update_account_tree)
-            .expect("update account proof");
-
-        (
-            update_account_tree,
-            update_account_inputs,
-            update_account_proof,
-        )
-    }
-
     #[cfg_attr(debug_assertions, ignore = "run with --release")]
     #[test]
-    #[allow(clippy::too_many_locals)]
-    fn test_block_step_circuit() {
-        let block_chain_config = CircuitConfig::standard_recursion_config();
-        let block_chain_vd_len = vd_vec_len(&block_chain_config);
-        let block_chain_pis_len = BLOCK_CHAIN_PUBLIC_INPUTS_LEN;
-        let block_chain_total_pis_len = block_chain_pis_len + block_chain_vd_len;
-        let block_chain_cd = TestCyclicCircuit::<F, C, D>::generate_cd(block_chain_pis_len);
+    fn test_block_step_from_generator() {
+        let supported_user_counts = vec![2];
+        let mut rng = StdRng::seed_from_u64(42);
+
+        let mut generator = BlockWitnessGenerator::new(&supported_user_counts);
+        let initial_state = generator.current_extended_public_state();
+
+        let tx_tree_root = Bytes32::rand(&mut rng);
+        let timestamp = rng.next_u64();
+        generator
+            .add_block(1, &[1, 2], timestamp, tx_tree_root)
+            .expect("add block");
+
+        let block_number = generator.block_number;
+        let block_witness = generator
+            .block_chain_witness
+            .get(&block_number)
+            .expect("block witness");
+
+        let update_circuit = UpdateAccountCircuit::<F, C, D>::new(block_witness.block.num_users);
+        let next_block_number = initial_state
+            .inner
+            .block_number
+            .add(1)
+            .expect("increment block number");
+
+        let update_tree = UpdateAccountTree {
+            prev_block_hash_chain: initial_state.block_hash_chain,
+            prev_account_tree_root: initial_state.inner.account_tree_root,
+            block_number: next_block_number,
+            block: block_witness.block.clone(),
+            prev_account_leaves: block_witness.prev_account_leaves.clone(),
+            account_merkle_proofs: block_witness.account_merkle_proofs.clone(),
+            send_merkle_proofs: block_witness.send_merkle_proofs.clone(),
+        };
+        let update_inputs = update_tree.to_public_inputs().expect("update inputs");
+        let update_proof = update_circuit
+            .prove(&update_tree)
+            .expect("update account proof");
+
+        let block_chain_cd =
+            TestCyclicCircuit::<F, C, D>::generate_cd(BLOCK_CHAIN_PUBLIC_INPUTS_LEN);
         let block_chain_circuit = TestCyclicCircuit::<F, C, D>::new(
-            block_chain_config.clone(),
-            block_chain_pis_len,
+            CircuitConfig::standard_recursion_config(),
+            BLOCK_CHAIN_PUBLIC_INPUTS_LEN,
             &block_chain_cd,
         );
         let block_chain_common = block_chain_circuit.data.common.clone();
         let block_chain_vd = block_chain_circuit.data.verifier_data();
 
-        let deposit_chain_pis_len = DEPOSIT_CHAIN_PUBLIC_INPUTS_LEN;
-        let deposit_chain_cd = TestCyclicCircuit::<F, C, D>::generate_cd(deposit_chain_pis_len);
-        let deposit_chain_config = CircuitConfig::standard_recursion_config();
+        let deposit_chain_cd =
+            TestCyclicCircuit::<F, C, D>::generate_cd(DEPOSIT_CHAIN_PUBLIC_INPUTS_LEN);
         let deposit_chain_circuit = TestCyclicCircuit::<F, C, D>::new(
-            deposit_chain_config,
-            deposit_chain_pis_len,
+            CircuitConfig::standard_recursion_config(),
+            DEPOSIT_CHAIN_PUBLIC_INPUTS_LEN,
             &deposit_chain_cd,
         );
         let deposit_chain_vd = deposit_chain_circuit.data.verifier_data();
 
-        let num_users = 2;
-        let update_account_circuit = UpdateAccountCircuit::<F, C, D>::new(num_users);
-        let update_account_vd = update_account_circuit.data.verifier_data();
-        let update_account_vds = vec![(num_users, update_account_vd.clone())];
+        let update_account_vds = vec![(
+            block_witness.block.num_users,
+            update_circuit.data.verifier_data(),
+        )];
 
         let block_step_circuit = BlockStepCircuit::<F, C, D>::new(
             &block_chain_common,
@@ -920,336 +850,35 @@ mod tests {
             &deposit_chain_vd,
         );
 
-        let mut rng = StdRng::seed_from_u64(42);
-        let aggregator_id = 5u32;
-
-        let mut public_state_tree = PublicStateTree::init();
-        let set_public_state = |tree: &mut PublicStateTree, index: u64, state: PublicState| {
-            while tree.len() < index as usize {
-                tree.push(PublicState::empty_leaf());
-            }
-            if tree.len() == index as usize {
-                tree.push(state);
-            } else {
-                tree.update(index, state);
-            }
-        };
-        let initial_public_state_root = public_state_tree.get_root();
-
-        let deposit_tree = DepositTree::init();
-        let initial_deposit_tree_root = deposit_tree.get_root();
-        let initial_deposit_hash_chain = Bytes32::default();
-        let initial_deposit_count = U63::default();
-
-        let deposit = Deposit {
-            depositor: Default::default(),
-            recipient: Bytes32::rand(&mut rng),
-            token_index: 0,
-            amount: U256::from(10u32),
-            block_number: BlockNumber::new(1).unwrap(),
-            aux_data: Bytes32::rand(&mut rng),
-        };
-        let deposit_index = 0u64;
-        let deposit_merkle_proof = deposit_tree.prove(deposit_index);
-        let mut deposit_tree_after_first = deposit_tree.clone();
-        deposit_tree_after_first.push(deposit.clone());
-        let expected_deposit_tree_root = deposit_tree_after_first.get_root();
-        let expected_deposit_hash_chain = deposit.hash_with_prev_hash(initial_deposit_hash_chain);
-
-        let deposit_witness = DepositStepWitness::<F, C, D> {
-            initial_value: Some((
-                initial_deposit_hash_chain,
-                initial_deposit_tree_root,
-                initial_deposit_count,
-            )),
-            prev_deposit_chain_proof: None,
-            deposit: deposit.clone(),
-            deposit_merkle_proof: deposit_merkle_proof.clone(),
-        };
-        let deposit_chain_public_inputs_first = deposit_witness
-            .to_public_inputs(&deposit_chain_vd)
-            .expect("deposit chain public inputs");
-        assert_eq!(
-            deposit_chain_public_inputs_first.deposit_tree_root,
-            expected_deposit_tree_root
-        );
-        assert_eq!(
-            deposit_chain_public_inputs_first.deposit_hash_chain,
-            expected_deposit_hash_chain
-        );
-        assert_eq!(
-            deposit_chain_public_inputs_first.block_number,
-            deposit.block_number
-        );
-        let deposit_chain_pis_first_fields = deposit_chain_public_inputs_first
-            .to_u64_vec(&deposit_chain_cd.config)
-            .to_field_vec::<F>();
-        let deposit_chain_proof_first = deposit_chain_circuit
-            .prove(Some(deposit_chain_pis_first_fields.as_slice()), None)
-            .expect("deposit chain proof");
-
-        let block_number_prev = BlockNumber::default();
-        let block_number_first = BlockNumber::new(1).unwrap();
-        let prev_block_hash_chain = Bytes32::rand(&mut rng);
-        let tx_tree_root_first = Bytes32::rand(&mut rng);
-
-        let user1 = UserId::new(aggregator_id, 1).unwrap();
-        let user2 = UserId::new(aggregator_id, 2).unwrap();
-
-        let mut send_tree_user1 = SendTree::init();
-        let send_leaf_user1_prev = SendLeaf {
-            prev: BlockNumber::default(),
-            cur: BlockNumber::new(10).unwrap(),
-            tx_tree_root: Bytes32::rand(&mut rng),
-        };
-        send_tree_user1.push(send_leaf_user1_prev.clone());
-        let prev_account_leaf_user1 = AccountLeaf {
-            index: send_tree_user1.len() as u32,
-            prev: send_leaf_user1_prev.cur,
-            send_tree_root: send_tree_user1.get_root(),
-        };
-
-        let mut send_tree_user2 = SendTree::init();
-        let send_leaf_user2_prev = SendLeaf {
-            prev: BlockNumber::new(7).unwrap(),
-            cur: block_number_first,
-            tx_tree_root: Bytes32::rand(&mut rng),
-        };
-        send_tree_user2.push(send_leaf_user2_prev.clone());
-        let prev_account_leaf_user2 = AccountLeaf {
-            index: send_tree_user2.len() as u32,
-            prev: block_number_first,
-            send_tree_root: send_tree_user2.get_root(),
-        };
-
-        let mut account_tree = AccountTree::new(ACCOUNT_TREE_HEIGHT);
-        account_tree.update(user1.as_u64(), prev_account_leaf_user1.clone());
-        account_tree.update(user2.as_u64(), prev_account_leaf_user2.clone());
-        let prev_account_tree_root = account_tree.get_root();
-
-        let timestamp_first = rng.next_u64();
-        let block_first = Block::new(
-            num_users,
-            aggregator_id,
-            &[1, 2],
-            timestamp_first,
-            tx_tree_root_first,
-            expected_deposit_hash_chain,
-        )
-        .unwrap();
-
-        let mut send_trees = vec![send_tree_user1, send_tree_user2];
-        let mut account_leaves = vec![
-            prev_account_leaf_user1.clone(),
-            prev_account_leaf_user2.clone(),
-        ];
-
-        let (_, update_account_inputs_first, update_account_proof_first) =
-            prove_update_account_block(
-                block_number_first,
-                prev_block_hash_chain,
-                &block_first,
-                &mut account_tree,
-                &mut send_trees,
-                &mut account_leaves,
-                &update_account_circuit,
-            );
-
-        let initial_public_state = PublicState {
-            block_number: block_number_prev,
-            timestamp: 0,
-            account_tree_root: prev_account_tree_root,
-            deposit_tree_root: initial_deposit_tree_root,
-            prev_public_state_root: initial_public_state_root,
-        };
-        let initial_ext_public_state = ExtendedPublicState::new(
-            initial_public_state.clone(),
-            prev_block_hash_chain,
-            initial_deposit_hash_chain,
-            initial_deposit_count,
-        );
-        let public_state_merkle_proof_first = public_state_tree.prove(block_number_prev.as_u64());
-
-        let witness_first = BlockStepWitness {
-            initial_public_state: Some(initial_ext_public_state.clone()),
+        let witness = BlockStepWitness {
+            initial_public_state: Some(initial_state.clone()),
             prev_block_chain_proof: None,
-            deposit_hash_chain_proof: Some(deposit_chain_proof_first.clone()),
-            num_users,
-            update_account_proof: update_account_proof_first.clone(),
-            public_state_merkle_proof: public_state_merkle_proof_first.clone(),
-        };
-        let expected_block_inputs_first = witness_first
-            .to_public_inputs(&block_chain_vd, &update_account_vds, &deposit_chain_vd)
-            .expect("block chain public inputs");
-        assert_eq!(
-            expected_block_inputs_first
-                .ext_public_state
-                .inner
-                .block_number,
-            block_number_first
-        );
-        assert_eq!(
-            expected_block_inputs_first
-                .ext_public_state
-                .block_hash_chain,
-            update_account_inputs_first.new_block_hash_chain
-        );
-        assert_eq!(
-            expected_block_inputs_first
-                .ext_public_state
-                .deposit_hash_chain,
-            expected_deposit_hash_chain
-        );
-        assert_eq!(
-            expected_block_inputs_first
-                .ext_public_state
-                .inner
-                .deposit_tree_root,
-            expected_deposit_tree_root
-        );
-
-        let mut block_chain_state_root_after_first = public_state_tree.clone();
-        set_public_state(
-            &mut block_chain_state_root_after_first,
-            initial_public_state.block_number.as_u64(),
-            initial_public_state.clone(),
-        );
-        assert_eq!(
-            expected_block_inputs_first
-                .ext_public_state
-                .inner
-                .prev_public_state_root,
-            block_chain_state_root_after_first.get_root()
-        );
-
-        let block_step_proof_first = block_step_circuit
-            .prove(
-                &block_chain_vd,
-                &update_account_vds,
-                &deposit_chain_vd,
-                &witness_first,
-            )
-            .expect("first block step proof");
-        block_step_circuit
-            .verify(block_step_proof_first.clone())
-            .expect("first block step verification");
-        let expected_block_inputs_first_fields = expected_block_inputs_first
-            .to_u64_vec(&block_chain_common.config)
-            .to_field_vec::<F>();
-        assert_eq!(
-            expected_block_inputs_first_fields.len(),
-            block_chain_total_pis_len,
-        );
-        assert_eq!(
-            block_step_proof_first.public_inputs,
-            expected_block_inputs_first_fields
-        );
-
-        let first_block_chain_proof = block_chain_circuit
-            .prove(Some(expected_block_inputs_first_fields.as_slice()), None)
-            .expect("first block chain proof");
-
-        set_public_state(
-            &mut public_state_tree,
-            block_number_prev.as_u64(),
-            initial_public_state.clone(),
-        );
-
-        let block_number_second = BlockNumber::new(block_number_first.as_u64() + 1).unwrap();
-        let tx_tree_root_second = Bytes32::rand(&mut rng);
-        let timestamp_second = rng.next_u64();
-        let block_second = Block::new(
-            num_users,
-            aggregator_id,
-            &[1, 2],
-            timestamp_second,
-            tx_tree_root_second,
-            expected_deposit_hash_chain,
-        )
-        .unwrap();
-
-        let (_, update_account_inputs_second, update_account_proof_second) =
-            prove_update_account_block(
-                block_number_second,
-                update_account_inputs_first.new_block_hash_chain,
-                &block_second,
-                &mut account_tree,
-                &mut send_trees,
-                &mut account_leaves,
-                &update_account_circuit,
-            );
-
-        let prev_ext_public_state_second = expected_block_inputs_first.ext_public_state.clone();
-        let prev_public_state_second = prev_ext_public_state_second.inner.clone();
-        let public_state_merkle_proof_second =
-            public_state_tree.prove(prev_public_state_second.block_number.as_u64());
-
-        let witness_second = BlockStepWitness {
-            initial_public_state: None,
-            prev_block_chain_proof: Some(first_block_chain_proof.clone()),
             deposit_hash_chain_proof: None,
-            num_users,
-            update_account_proof: update_account_proof_second.clone(),
-            public_state_merkle_proof: public_state_merkle_proof_second.clone(),
+            num_users: block_witness.block.num_users,
+            update_account_proof: update_proof,
+            public_state_merkle_proof: block_witness.public_state_merkle_proof.clone(),
         };
-        let expected_block_inputs_second = witness_second
+
+        let public_inputs = witness
             .to_public_inputs(&block_chain_vd, &update_account_vds, &deposit_chain_vd)
-            .expect("second block inputs");
+            .expect("block step public inputs");
         assert_eq!(
-            expected_block_inputs_second
-                .ext_public_state
-                .inner
-                .block_number,
-            block_number_second
+            public_inputs.ext_public_state.inner.block_number,
+            next_block_number
         );
         assert_eq!(
-            expected_block_inputs_second
-                .ext_public_state
-                .block_hash_chain,
-            update_account_inputs_second.new_block_hash_chain
-        );
-        assert_eq!(
-            expected_block_inputs_second
-                .ext_public_state
-                .deposit_hash_chain,
-            expected_deposit_hash_chain
-        );
-        assert_eq!(
-            expected_block_inputs_second
-                .ext_public_state
-                .inner
-                .deposit_tree_root,
-            expected_deposit_tree_root
-        );
-        assert_eq!(
-            expected_block_inputs_second
-                .ext_public_state
-                .inner
-                .account_tree_root,
-            update_account_inputs_second.new_account_tree_root
+            public_inputs.ext_public_state.block_hash_chain,
+            update_inputs.new_block_hash_chain
         );
 
-        let block_step_proof_second = block_step_circuit
+        let proof = block_step_circuit
             .prove(
                 &block_chain_vd,
                 &update_account_vds,
                 &deposit_chain_vd,
-                &witness_second,
+                &witness,
             )
-            .expect("second block step proof");
-        block_step_circuit
-            .verify(block_step_proof_second.clone())
-            .expect("second block step verification");
-        let expected_block_inputs_second_fields = expected_block_inputs_second
-            .to_u64_vec(&block_chain_common.config)
-            .to_field_vec::<F>();
-        assert_eq!(
-            expected_block_inputs_second_fields.len(),
-            block_chain_total_pis_len,
-        );
-        assert_eq!(
-            block_step_proof_second.public_inputs,
-            expected_block_inputs_second_fields
-        );
+            .expect("block step proof");
+        block_step_circuit.verify(proof).expect("block step verify");
     }
 }
