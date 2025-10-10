@@ -29,6 +29,7 @@ use crate::{
     },
     common::{
         salt::{Salt, SaltTarget},
+        transfer::{SettledTransfer, SettledTransferTarget},
         u63::{BlockNumber, BlockNumberTarget},
     },
     ethereum_types::u32limb_trait::U32LimbTargetTrait,
@@ -264,8 +265,11 @@ where
         }
 
         // private state update
+        let tx_block_number = self.tx_settlement.tx_block_number();
         let transfer = &self.transfer_witness.transfer;
-        let nullifier = transfer.nullifier();
+        let settled_transfer =
+            SettledTransfer::new(transfer.clone(), sender_user_id, tx_block_number);
+        let nullifier = settled_transfer.nullifier();
         if self.update_private_state.token_index != transfer.token_index {
             return Err(ReceiveTransferError::ConnectionError(format!(
                 "update_private_state.token_index {:?} != transfer.token_index {:?}",
@@ -280,7 +284,7 @@ where
         }
         if self.update_private_state.nullifier != nullifier {
             return Err(ReceiveTransferError::ConnectionError(format!(
-                "update_private_state.nullifier {:?} != transfer.nullifier {:?}",
+                "update_private_state.nullifier {:?} != settled_transfer.nullifier {:?}",
                 self.update_private_state.nullifier, nullifier,
             )));
         }
@@ -318,6 +322,7 @@ pub struct ReceiveTransferTarget<const D: usize> {
     pub account_state: AccountStateTarget,
     pub tx_settlement: TxSettlementTarget<D>,
     pub transfer_witness: TransferWitnessTarget,
+    pub settled_transfer: SettledTransferTarget,
     pub transfer_salt: SaltTarget,
     pub update_private_state: UpdatePrivateStateTarget,
     pub new_full_pis: BalanceFullPublicInputsTarget,
@@ -439,8 +444,13 @@ impl<const D: usize> ReceiveTransferTarget<D> {
             .connect(builder, sender_prev_pis.private_commitment.clone());
         builder.assert_one(spend_pis.is_valid.target);
 
-        // private state update
-        let transfer_nullifier = transfer_witness.transfer.nullifier(builder);
+        let settled_transfer = SettledTransferTarget {
+            inner: transfer_witness.transfer.clone(),
+            from: tx_settlement.user_id.clone(),
+            block_number: tx_block_number.clone(),
+        };
+        let settled_nullifier = settled_transfer.nullifier(builder);
+
         builder.connect(
             transfer_witness.transfer.token_index,
             update_private_state.token_index,
@@ -451,7 +461,7 @@ impl<const D: usize> ReceiveTransferTarget<D> {
             .connect(builder, update_private_state.amount.clone());
         update_private_state
             .nullifier
-            .connect(builder, transfer_nullifier);
+            .connect(builder, settled_nullifier);
 
         let prev_private_commitment = update_private_state.prev_private_state.commitment(builder);
         prev_private_commitment.connect(builder, receiver_prev_pis.private_commitment);
@@ -477,6 +487,7 @@ impl<const D: usize> ReceiveTransferTarget<D> {
             account_state,
             tx_settlement,
             transfer_witness,
+            settled_transfer,
             transfer_salt,
             update_private_state,
             new_full_pis,
@@ -507,6 +518,13 @@ impl<const D: usize> ReceiveTransferTarget<D> {
             .set_witness::<F, C, _>(witness, &value.tx_settlement);
         self.transfer_witness
             .set_witness(witness, &value.transfer_witness);
+        let settled_transfer = SettledTransfer::new(
+            value.transfer_witness.transfer.clone(),
+            value.tx_settlement.user_id,
+            value.tx_settlement.tx_block_number(),
+        );
+        self.settled_transfer
+            .set_witness(witness, &settled_transfer);
         self.transfer_salt.set_witness(witness, value.transfer_salt);
         self.update_private_state
             .set_witness(witness, &value.update_private_state);
@@ -815,7 +833,13 @@ mod tests {
             receiver_asset_tree.prove(transfer_witness.transfer.token_index as u64);
 
         let mut receiver_nullifier_tree = receiver_full_state.nullifier_tree.clone();
-        let nullifier = transfer_witness.transfer.nullifier();
+        let tx_block_number = tx_settlement.tx_block_number();
+        let settled_transfer = SettledTransfer::new(
+            transfer_witness.transfer.clone(),
+            sender_user_id,
+            tx_block_number,
+        );
+        let nullifier = settled_transfer.nullifier();
         let nullifier_proof = receiver_nullifier_tree
             .prove_and_insert(nullifier)
             .expect("nullifier proof");

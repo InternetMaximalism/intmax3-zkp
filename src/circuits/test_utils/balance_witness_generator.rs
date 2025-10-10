@@ -23,7 +23,7 @@ use crate::{
         error::CommonError,
         private_state::FullPrivateState,
         salt::Salt,
-        transfer::Transfer,
+        transfer::{SettledTransfer, Transfer},
         trees::{transfer_tree::TransferMerkleProof, tx_tree::TxMerkleProof},
         tx::Tx,
         u63::BlockNumber,
@@ -270,7 +270,12 @@ where
             data.transfer_merkle_proof.clone(),
         )?;
 
-        let nullifier = transfer_witness.transfer.nullifier();
+        let nullifier = SettledTransfer::new(
+            transfer_witness.transfer.clone(),
+            sender_balance_pis.user_id,
+            tx_block_number,
+        )
+        .nullifier();
         let mut nullifier_tree = self.full_private_state.nullifier_tree.clone();
         let nullifier_proof = nullifier_tree.prove_and_insert(nullifier)?;
 

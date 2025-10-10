@@ -1,4 +1,8 @@
 use crate::{
+    common::{
+        u63::{BlockNumber, BlockNumberTarget},
+        user_id::{UserId, UserIdTarget},
+    },
     ethereum_types::{
         bytes32::{BYTES32_LEN, Bytes32, Bytes32Target},
         u32limb_trait::{U32LimbTargetTrait as _, U32LimbTrait as _},
@@ -34,12 +38,28 @@ pub struct Transfer {
     pub aux_data: Bytes32,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// Transfer that is already settled in the chain, which is used to derive nullifier
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SettledTransfer {
+    pub inner: Transfer,
+    pub from: UserId,
+    pub block_number: BlockNumber,
+}
+
+#[derive(Debug, Clone)]
 pub struct TransferTarget {
     pub recipient: Bytes32Target,
     pub token_index: Target,
     pub amount: U256Target,
     pub aux_data: Bytes32Target,
+}
+
+#[derive(Debug, Clone)]
+pub struct SettledTransferTarget {
+    pub inner: TransferTarget,
+    pub from: UserIdTarget,
+    pub block_number: BlockNumberTarget,
 }
 
 impl Transfer {
@@ -68,12 +88,33 @@ impl Transfer {
     pub fn poseidon_hash(&self) -> PoseidonHashOut {
         PoseidonHashOut::hash_inputs_u64(&self.to_u64_vec())
     }
+}
+
+impl SettledTransfer {
+    pub fn new(inner: Transfer, from: UserId, block_number: BlockNumber) -> Self {
+        Self {
+            inner,
+            from,
+            block_number,
+        }
+    }
+
+    pub fn to_u64_vec(&self) -> Vec<u64> {
+        [
+            self.inner.to_u64_vec(),
+            self.from.to_u64_vec(),
+            self.block_number.to_u64_vec(),
+        ]
+        .concat()
+    }
+
+    pub fn poseidon_hash(&self) -> PoseidonHashOut {
+        PoseidonHashOut::hash_inputs_u64(&self.to_u64_vec())
+    }
 
     pub fn nullifier(&self) -> Bytes32 {
         self.poseidon_hash().into()
     }
-
-    // pub fn withdraw_nullifier
 }
 
 impl TransferTarget {
@@ -138,13 +179,56 @@ impl TransferTarget {
     ) -> PoseidonHashOutTarget {
         PoseidonHashOutTarget::hash_inputs(builder, &self.to_vec())
     }
+}
+
+impl SettledTransferTarget {
+    pub fn new<F: RichField + Extendable<D>, const D: usize>(
+        builder: &mut CircuitBuilder<F, D>,
+        is_checked: bool,
+    ) -> Self {
+        Self {
+            inner: TransferTarget::new(builder, is_checked),
+            from: UserIdTarget::new(builder, is_checked),
+            block_number: BlockNumberTarget::new(builder, is_checked),
+        }
+    }
+
+    pub fn constant<F: RichField + Extendable<D>, const D: usize>(
+        builder: &mut CircuitBuilder<F, D>,
+        value: &SettledTransfer,
+    ) -> Self {
+        Self {
+            inner: TransferTarget::constant(builder, value.inner.clone()),
+            from: UserIdTarget::constant(builder, value.from),
+            block_number: BlockNumberTarget::constant(builder, value.block_number),
+        }
+    }
+
+    pub fn to_vec(&self) -> Vec<Target> {
+        [
+            self.inner.to_vec(),
+            self.from.to_vec(),
+            self.block_number.to_vec(),
+        ]
+        .concat()
+    }
 
     pub fn nullifier<F: RichField + Extendable<D>, const D: usize>(
         &self,
         builder: &mut CircuitBuilder<F, D>,
     ) -> Bytes32Target {
-        let poseidon_hash = self.poseidon_hash(builder);
-        Bytes32Target::from_hash_out(builder, poseidon_hash)
+        let hash = PoseidonHashOutTarget::hash_inputs(builder, &self.to_vec());
+        Bytes32Target::from_hash_out(builder, hash)
+    }
+
+    pub fn set_witness<F: Field, W: WitnessWrite<F>>(
+        &self,
+        witness: &mut W,
+        value: &SettledTransfer,
+    ) {
+        self.inner.set_witness(witness, &value.inner);
+        self.from.set_witness(witness, value.from);
+        self.block_number.set_witness(witness, value.block_number);
     }
 }
 
