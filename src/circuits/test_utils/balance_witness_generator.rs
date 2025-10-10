@@ -520,49 +520,6 @@ where
         })
     }
 
-    pub fn single_withdrawal_witness(
-        &self,
-        data: &SingleWithdrawalData,
-    ) -> Result<SingleWithdawalWitness<F, C, D>, BalanceWitnessGeneratorError> {
-        let balance_proof = self.balance_proof.clone();
-        let balance_pis = self.get_public_inputs()?;
-
-        let update_public_state = self
-            .block_witness_generator
-            .read()
-            .unwrap()
-            .get_update_public_state_witness(balance_pis.public_state.block_number)?;
-
-        let account_state = self
-            .block_witness_generator
-            .read()
-            .unwrap()
-            .get_account_state_for_tx(self.user_id, data.tx_tree_root)?
-            .1;
-
-        let tx = data.tx.clone();
-        let tx_merkle_proof = data.tx_merkle_proof.clone();
-        let sent_tx_merkle_proof = self.full_private_state.sent_tx_tree.prove(tx.nonce as u64);
-
-        let transfer_witness = TransferWitness::new(
-            tx.transfer_tree_root,
-            data.transfer.clone(),
-            data.transfer_index,
-            data.transfer_merkle_proof.clone(),
-        )?;
-
-        Ok(SingleWithdawalWitness {
-            balance_proof,
-            private_state: self.full_private_state.to_private_state(),
-            update_public_state,
-            account_state,
-            tx_merkle_proof,
-            tx,
-            sent_tx_merkle_proof,
-            transfer_witness,
-        })
-    }
-
     pub fn commit_send_tx(
         &mut self,
         new_balance_proof: &ProofWithPublicInputs<F, C, D>,
@@ -612,6 +569,49 @@ where
         }
 
         Ok(())
+    }
+
+    pub fn single_withdrawal_witness(
+        &self,
+        data: &SingleWithdrawalData,
+    ) -> Result<SingleWithdawalWitness<F, C, D>, BalanceWitnessGeneratorError> {
+        let balance_proof = self.balance_proof.clone();
+        let balance_pis = self.get_public_inputs()?;
+
+        let update_public_state = self
+            .block_witness_generator
+            .read()
+            .unwrap()
+            .get_update_public_state_witness(balance_pis.public_state.block_number)?;
+
+        let account_state = self
+            .block_witness_generator
+            .read()
+            .unwrap()
+            .get_account_state_for_tx(self.user_id, data.tx_tree_root)?
+            .1;
+
+        let tx = data.tx.clone();
+        let tx_merkle_proof = data.tx_merkle_proof.clone();
+        let sent_tx_merkle_proof = self.full_private_state.sent_tx_tree.prove(tx.nonce as u64);
+
+        let transfer_witness = TransferWitness::new(
+            tx.transfer_tree_root,
+            data.transfer.clone(),
+            data.transfer_index,
+            data.transfer_merkle_proof.clone(),
+        )?;
+
+        Ok(SingleWithdawalWitness {
+            balance_proof,
+            private_state: self.full_private_state.to_private_state(),
+            update_public_state,
+            account_state,
+            tx_merkle_proof,
+            tx,
+            sent_tx_merkle_proof,
+            transfer_witness,
+        })
     }
 }
 
