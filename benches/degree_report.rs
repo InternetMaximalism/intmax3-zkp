@@ -29,6 +29,8 @@ type F = GoldilocksField;
 type C = PoseidonGoldilocksConfig;
 
 fn main() {
+    let supported_user_counts = vec![2];
+
     let mut rows: Vec<(String, usize)> = Vec::new();
 
     // Spend circuit
@@ -97,7 +99,6 @@ fn main() {
 
     // Block hash chain circuits
     let block_chain_cd = BlockHashChainCircuit::<F, C, D>::generate_cd();
-    let supported_user_counts = vec![2];
     let update_account_circuits: Vec<UpdateAccountCircuit<F, C, D>> = supported_user_counts
         .iter()
         .map(|&n| UpdateAccountCircuit::<F, C, D>::new(n))

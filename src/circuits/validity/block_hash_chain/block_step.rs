@@ -43,6 +43,7 @@ use crate::{
         cyclic::conditionally_connect_vd,
         dummy::{DummyProof, conditionally_verify_proof},
         leafable::Leafable,
+        logic::BuilderLogic,
         poseidon_hash_out::PoseidonHashOutTarget,
         recursively_verifiable::{
             add_proof_target_and_conditionally_verify,
@@ -292,6 +293,7 @@ pub struct BlockStepTarget<const D: usize> {
 
     // Update account proof different for each number of users
     pub update_account_proofs: Vec<ProofWithPublicInputsTarget<D>>,
+    pub selected_update_inputs: UpdateAccountPublicInputsTarget,
 
     pub public_state_merkle_proof: PublicStateMerkleProofTarget,
     pub block_chain_vd: VerifierCircuitTarget,
@@ -373,20 +375,20 @@ impl<const D: usize> BlockStepTarget<D> {
             update_account_inputs.push(inputs);
         }
 
-        let mut selected_update_inputs = update_account_inputs[0].clone();
-        for (flag, inputs) in one_hot
+        let update_account_inputs_commitments = update_account_inputs
             .iter()
-            .copied()
-            .zip(update_account_inputs.iter())
-            .skip(1)
-        {
-            selected_update_inputs = UpdateAccountPublicInputsTarget::select(
-                builder,
-                flag,
-                inputs,
-                &selected_update_inputs,
-            );
-        }
+            .map(|inputs| inputs.commitment(builder))
+            .collect::<Vec<_>>();
+        let update_commitment_vecs = update_account_inputs_commitments
+            .iter()
+            .map(|inputs| inputs.to_vec())
+            .collect::<Vec<_>>();
+        let selected_commitment_vec = builder.select_vec(&update_commitment_vecs, &one_hot);
+        let selected_update_inputs = UpdateAccountPublicInputsTarget::new(builder, false);
+        selected_update_inputs.commitment(builder).connect(
+            builder,
+            PoseidonHashOutTarget::from_slice(&selected_commitment_vec),
+        );
 
         let has_deposit_proof = builder.add_virtual_bool_target_safe();
         let deposit_hash_chain_proof = add_proof_target_and_conditionally_verify_cyclic(
@@ -521,6 +523,7 @@ impl<const D: usize> BlockStepTarget<D> {
             prev_block_chain_proof,
             deposit_hash_chain_proof,
             update_account_proofs,
+            selected_update_inputs,
             public_state_merkle_proof,
             block_chain_vd,
             new_pis,
@@ -588,6 +591,12 @@ impl<const D: usize> BlockStepTarget<D> {
             if is_selected {
                 matched_update_proof = true;
                 witness.set_proof_with_pis_target(proof_target, &value.update_account_proof);
+                let selected_update_inputs = UpdateAccountPublicInputs::from_u64_slice(
+                    &value.update_account_proof.public_inputs.to_u64_vec(),
+                )
+                .map_err(|e| BlockStepError::UpdateAccountPublicInputs(e.to_string()))?;
+                self.selected_update_inputs
+                    .set_witness(witness, &selected_update_inputs);
             } else {
                 let dummy_proof = dummy_update_proofs.get(num_users).ok_or_else(|| {
                     BlockStepError::InvalidInput(format!(

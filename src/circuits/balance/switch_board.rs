@@ -2,7 +2,7 @@ use std::collections::HashMap;
 
 use plonky2::{
     field::extension::Extendable,
-    hash::hash_types::{HashOutTarget, RichField},
+    hash::hash_types::RichField,
     iop::{
         target::BoolTarget,
         witness::{PartialWitness, WitnessWrite},
@@ -28,7 +28,8 @@ use crate::{
         user_id::{UserId, UserIdTarget},
     },
     utils::{
-        conversion::ToU64, dummy::DummyProof, poseidon_hash_out::PoseidonHashOutTarget,
+        conversion::ToU64, dummy::DummyProof, logic::BuilderLogic,
+        poseidon_hash_out::PoseidonHashOutTarget,
         recursively_verifiable::add_proof_target_and_conditionally_verify,
     },
 };
@@ -190,15 +191,6 @@ impl<const D: usize> BalanceSwichBoardTarget<D> {
             .fold(builder.zero(), |acc, b| builder.add(acc, b.target));
         builder.assert_one(sum);
 
-        let position = one_hot
-            .iter()
-            .enumerate()
-            .fold(builder.zero(), |acc, (i, b)| {
-                let i_const = builder.constant(F::from_canonical_u32(i as u32));
-                let term = builder.mul(b.target, i_const);
-                builder.add(acc, term)
-            });
-
         // Case0: initial value
         let initial_user_id = UserIdTarget::new(builder, true);
         let initial_salt = SaltTarget::new(builder);
@@ -259,35 +251,19 @@ impl<const D: usize> BalanceSwichBoardTarget<D> {
             BalanceFullPublicInputsTarget::from_pis(&send_tx_proof.public_inputs, balance_config);
 
         // Selection
-        let candidates = vec![
-            new_pis0.clone(),
-            new_pis1.clone(),
-            new_pis2.clone(),
-            new_pis3.clone(),
+        let candidate_vecs = vec![
+            new_pis0.to_vec(balance_config),
+            new_pis1.to_vec(balance_config),
+            new_pis2.to_vec(balance_config),
+            new_pis3.to_vec(balance_config),
         ];
 
-        let candidate_commitments = candidates
-            .iter()
-            .map(|pis| pis.commitment(builder, balance_config))
-            .collect::<Vec<_>>();
-
-        let candidate_hash_targets = candidate_commitments
-            .iter()
-            .map(|hash| HashOutTarget {
-                elements: hash.elements,
-            })
-            .collect::<Vec<_>>();
-
-        let selected_commitment = PoseidonHashOutTarget {
-            elements: builder
-                .random_access_hash(position, candidate_hash_targets)
-                .elements,
-        };
+        let selected_vec = builder.select_vec(&candidate_vecs, &one_hot);
         let new_pis = BalanceFullPublicInputsTarget::new(builder, balance_config);
-        let new_pis_commitment = new_pis.commitment(builder, balance_config);
-
-        // enforce equality
-        new_pis_commitment.connect(builder, selected_commitment);
+        let new_pis_vec = new_pis.to_vec(balance_config);
+        for (selected, target) in selected_vec.iter().zip(new_pis_vec.iter()) {
+            builder.connect(*selected, *target);
+        }
 
         Self {
             one_hot,

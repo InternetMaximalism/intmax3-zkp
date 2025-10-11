@@ -1,5 +1,7 @@
 use plonky2::{
-    field::extension::Extendable, hash::hash_types::RichField, iop::target::BoolTarget,
+    field::extension::Extendable,
+    hash::hash_types::RichField,
+    iop::target::{BoolTarget, Target},
     plonk::circuit_builder::CircuitBuilder,
 };
 
@@ -14,6 +16,8 @@ pub trait BuilderLogic<F: RichField + Extendable<D>, const D: usize> {
         x: BoolTarget,
         y: BoolTarget,
     ) -> BoolTarget;
+
+    fn select_vec(&mut self, candidates: &[Vec<Target>], one_hot: &[BoolTarget]) -> Vec<Target>;
 }
 
 impl<F: RichField + Extendable<D>, const D: usize> BuilderLogic<F, D> for CircuitBuilder<F, D> {
@@ -39,12 +43,46 @@ impl<F: RichField + Extendable<D>, const D: usize> BuilderLogic<F, D> for Circui
         let selected = self.select(condition, x_and_y.target, x.target);
         BoolTarget::new_unsafe(selected)
     }
+
+    fn select_vec(&mut self, candidates: &[Vec<Target>], one_hot: &[BoolTarget]) -> Vec<Target> {
+        assert!(
+            !candidates.is_empty(),
+            "at least one candidate must be provided"
+        );
+        assert_eq!(
+            candidates.len(),
+            one_hot.len(),
+            "indicator length must match number of candidates"
+        );
+
+        let width = candidates[0].len();
+        for candidate in candidates.iter().skip(1) {
+            assert_eq!(
+                candidate.len(),
+                width,
+                "all candidates must have the same length"
+            );
+        }
+
+        let zero = self.zero();
+        let mut result = vec![zero; width];
+
+        for (candidate, flag) in candidates.iter().zip(one_hot.iter()) {
+            for (acc, &candidate_target) in result.iter_mut().zip(candidate.iter()) {
+                let product = self.mul(flag.target, candidate_target);
+                *acc = self.add(*acc, product);
+            }
+        }
+
+        result
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use plonky2::{
+        field::types::Field,
         iop::witness::PartialWitness,
         plonk::{circuit_data::CircuitConfig, config::PoseidonGoldilocksConfig},
     };
@@ -224,5 +262,41 @@ mod tests {
             let proof = circuit.prove(pw).unwrap();
             circuit.verify(proof).unwrap();
         }
+    }
+
+    #[test]
+    fn test_select_vec() {
+        let config = CircuitConfig::standard_recursion_config();
+        let mut builder = CircuitBuilder::<F, D>::new(config);
+
+        let candidate0 = vec![
+            builder.constant(F::from_canonical_u32(1)),
+            builder.constant(F::from_canonical_u32(2)),
+        ];
+        let candidate1 = vec![
+            builder.constant(F::from_canonical_u32(3)),
+            builder.constant(F::from_canonical_u32(4)),
+        ];
+        let candidate2 = vec![
+            builder.constant(F::from_canonical_u32(5)),
+            builder.constant(F::from_canonical_u32(6)),
+        ];
+
+        let candidates = vec![candidate0.clone(), candidate1.clone(), candidate2.clone()];
+        let one_hot = vec![
+            builder.constant_bool(false),
+            builder.constant_bool(true),
+            builder.constant_bool(false),
+        ];
+
+        let selected = builder.select_vec(&candidates, &one_hot);
+        for (selected_target, expected_target) in selected.iter().zip(candidate1.iter()) {
+            builder.connect(*selected_target, *expected_target);
+        }
+
+        let circuit = builder.build::<PoseidonGoldilocksConfig>();
+        let pw = PartialWitness::new();
+        let proof = circuit.prove(pw).unwrap();
+        circuit.verify(proof).unwrap();
     }
 }

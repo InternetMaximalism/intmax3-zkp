@@ -252,6 +252,28 @@ pub struct UpdateAccountPublicInputsTarget {
 }
 
 impl UpdateAccountPublicInputsTarget {
+    pub fn new<F: RichField + Extendable<D>, const D: usize>(
+        builder: &mut CircuitBuilder<F, D>,
+        is_checked: bool,
+    ) -> Self {
+        let block_number = BlockNumberTarget::new(builder, is_checked);
+        let block_timestamp = U64Target::new(builder, is_checked);
+        let prev_block_hash_chain = Bytes32Target::new(builder, is_checked);
+        let prev_account_tree_root = PoseidonHashOutTarget::new(builder);
+        let new_block_hash_chain = Bytes32Target::new(builder, is_checked);
+        let new_account_tree_root = PoseidonHashOutTarget::new(builder);
+        let deposit_hash_chain = Bytes32Target::new(builder, is_checked);
+        Self {
+            block_number,
+            block_timestamp,
+            prev_block_hash_chain,
+            prev_account_tree_root,
+            new_block_hash_chain,
+            new_account_tree_root,
+            deposit_hash_chain,
+        }
+    }
+
     pub fn to_vec(&self) -> Vec<Target> {
         [
             self.block_number.to_vec(),
