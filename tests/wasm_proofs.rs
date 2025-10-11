@@ -7,7 +7,6 @@ use intmax3_zkp::{
             common::recipient::{
                 calculate_recipient_from_address, calculate_recipient_from_user_id,
             },
-            send_tx_circuit::SendTxWitness,
             spend_circuit::SpendCircuit,
         },
         test_utils::{
@@ -35,105 +34,45 @@ use intmax3_zkp::{
     },
     ethereum_types::{address::Address, bytes32::Bytes32, u32limb_trait::U32LimbTrait, u256::U256},
 };
-use js_sys::{Object, Reflect, Uint8Array};
 use plonky2::{
     field::goldilocks_field::GoldilocksField,
     plonk::{config::PoseidonGoldilocksConfig, proof::ProofWithPublicInputs},
 };
 use rand::{SeedableRng, rngs::StdRng};
-use wasm_bindgen::prelude::*;
-use wasm_bindgen_test::wasm_bindgen_test;
+use wasm_bindgen_test::{wasm_bindgen_test, wasm_bindgen_test_configure};
 use web_time::Instant;
+
+wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_browser);
 
 const D: usize = 2;
 type F = GoldilocksField;
 type C = PoseidonGoldilocksConfig;
 
-const BALANCE_PROCESSOR_FIXTURE: &str = "balance_processor.bin";
-const SPEND_CIRCUIT_FIXTURE: &str = "spend_circuit.bin";
-const SINGLE_WITHDRAWAL_FIXTURE: &str = "single_withdrawal_circuit.bin";
-
-#[wasm_bindgen(module = "fs")]
-extern "C" {
-    #[wasm_bindgen(js_name = readFileSync)]
-    fn read_file_sync(path: &str) -> Uint8Array;
-
-    #[wasm_bindgen(js_name = writeFileSync)]
-    fn write_file_sync(path: &str, data: &Uint8Array);
-
-    #[wasm_bindgen(js_name = existsSync)]
-    fn exists_sync(path: &str) -> bool;
-
-    #[wasm_bindgen(js_name = mkdirSync)]
-    fn mkdir_sync(path: &str, options: &JsValue);
-}
-
-fn fixture_dir() -> String {
-    use std::path::PathBuf;
-
-    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("tests")
-        .join("fixtures");
-    path.to_string_lossy().into_owned()
-}
-
-fn fixture_path(file: &str) -> String {
-    use std::path::PathBuf;
-
-    PathBuf::from(fixture_dir())
-        .join(file)
-        .to_string_lossy()
-        .into_owned()
-}
-
-fn ensure_fixture_dir() {
-    let dir = fixture_dir();
-    if exists_sync(&dir) {
-        return;
-    }
-    let options = Object::new();
-    Reflect::set(
-        &options,
-        &JsValue::from_str("recursive"),
-        &JsValue::from_bool(true),
-    )
-    .expect("set recursive option");
-    mkdir_sync(&dir, &JsValue::from(options));
-}
-
-fn read_fixture(file: &str) -> Vec<u8> {
-    ensure_fixture_dir();
-    let path = fixture_path(file);
-    if !exists_sync(&path) {
-        panic!(
-            "Fixture {file} missing at {path}. Run `cargo run --bin generate_wasm_fixtures` on \
-             native to create it."
-        );
-    }
-    read_file_sync(&path).to_vec()
-}
-
-#[allow(dead_code)]
-fn write_fixture(file: &str, bytes: &[u8]) {
-    ensure_fixture_dir();
-    let path = fixture_path(file);
-    let wasm_bytes = Uint8Array::from(bytes);
-    write_file_sync(&path, &wasm_bytes);
-}
+const BALANCE_PROCESSOR_BYTES: &[u8] = include_bytes!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/tests/fixtures/balance_processor.bin"
+));
+const SPEND_CIRCUIT_BYTES: &[u8] = include_bytes!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/tests/fixtures/spend_circuit.bin"
+));
+const SINGLE_WITHDRAWAL_BYTES: &[u8] = include_bytes!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/tests/fixtures/single_withdrawal_circuit.bin"
+));
 
 fn load_spend_circuit() -> SpendCircuit<F, C, D> {
-    let bytes = read_fixture(SPEND_CIRCUIT_FIXTURE);
-    SpendCircuit::<F, C, D>::from_bytes(&bytes).expect("load spend circuit from bytes")
+    SpendCircuit::<F, C, D>::from_bytes(SPEND_CIRCUIT_BYTES)
+        .expect("load spend circuit from bytes")
 }
 
 fn load_balance_processor() -> BalanceProcessor<F, C, D> {
-    let bytes = read_fixture(BALANCE_PROCESSOR_FIXTURE);
-    BalanceProcessor::<F, C, D>::from_bytes(&bytes).expect("load balance processor from bytes")
+    BalanceProcessor::<F, C, D>::from_bytes(BALANCE_PROCESSOR_BYTES)
+        .expect("load balance processor from bytes")
 }
 
 fn load_single_withdrawal_circuit() -> SingleWithdawalCircuit<F, C, D> {
-    let bytes = read_fixture(SINGLE_WITHDRAWAL_FIXTURE);
-    SingleWithdawalCircuit::<F, C, D>::from_bytes(&bytes)
+    SingleWithdawalCircuit::<F, C, D>::from_bytes(SINGLE_WITHDRAWAL_BYTES)
         .expect("load single withdrawal circuit from bytes")
 }
 
@@ -151,6 +90,7 @@ struct SendTxOutcome {
     transfer: Transfer,
     transfer_index: u32,
     transfer_merkle_proof: TransferMerkleProof,
+    transfer_salt: Salt,
 }
 
 impl BalanceScenario {
@@ -293,6 +233,7 @@ fn perform_deposit(scenario: &mut BalanceScenario, rng: &mut StdRng) -> SendTxOu
         transfer,
         transfer_index,
         transfer_merkle_proof,
+        transfer_salt: transfer_recipient_salt,
     }
 }
 
@@ -325,6 +266,7 @@ fn wasm_balance_processor_flow() {
         tx_merkle_proof: outcome.send_tx_data.tx_merkle_proof.clone(),
         transfer_index: outcome.transfer_index,
         transfer_merkle_proof: outcome.transfer_merkle_proof.clone(),
+        transfer_salt: outcome.transfer_salt,
     };
 
     let receive_witness = receiver
