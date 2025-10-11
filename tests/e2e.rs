@@ -361,10 +361,18 @@ fn e2e_deposit_validity_withdrawal() {
         .verify(withdrawal_chain_proof.clone())
         .expect("verify withdrawal chain proof");
 
+    let ext_public_state = block_witness_generator
+        .read()
+        .expect("block generator lock")
+        .current_extended_public_state();
     let withdrawal_aggregator = Address::rand(&mut rng);
     let withdrawal_final_timer = Instant::now();
     let withdrawal_proof = withdrawal_processor
-        .prove_final(&withdrawal_chain_proof, withdrawal_aggregator)
+        .prove_final(
+            &withdrawal_chain_proof,
+            withdrawal_aggregator,
+            &ext_public_state,
+        )
         .expect("withdrawal proof");
     println!(
         "withdrawal final proof time: {:?}",

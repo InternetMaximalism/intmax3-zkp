@@ -9,10 +9,13 @@ use plonky2::{
 };
 
 use crate::{
-    circuits::withdraw::{
-        withdrawal_chain_circuit::{WithdrawalChainCircuit, WithdrawalChainCircuitError},
-        withdrawal_circuit::{WithdrawalCircuit, WithdrawalCircuitError},
-        withdrawal_step::{WithdrawalStepCircuit, WithdrawalStepError, WithdrawalStepWitness},
+    circuits::{
+        validity::block_hash_chain::ext_public_state::ExtendedPublicState,
+        withdraw::{
+            withdrawal_chain_circuit::{WithdrawalChainCircuit, WithdrawalChainCircuitError},
+            withdrawal_circuit::{WithdrawalCircuit, WithdrawalCircuitError},
+            withdrawal_step::{WithdrawalStepCircuit, WithdrawalStepError, WithdrawalStepWitness},
+        },
     },
     ethereum_types::address::Address,
 };
@@ -94,10 +97,13 @@ where
         &self,
         withdrawal_chain_proof: &ProofWithPublicInputs<F, C, D>,
         withdrawal_aggregator: Address,
+        ext_public_state: &ExtendedPublicState,
     ) -> Result<ProofWithPublicInputs<F, C, D>, WithdrawalProcessorError> {
-        let withdrawal_proof = self
-            .withdrawal_circuit
-            .prove(withdrawal_chain_proof, withdrawal_aggregator)?;
+        let withdrawal_proof = self.withdrawal_circuit.prove(
+            withdrawal_chain_proof,
+            withdrawal_aggregator,
+            ext_public_state,
+        )?;
         Ok(withdrawal_proof)
     }
 }

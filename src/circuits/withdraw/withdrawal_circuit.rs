@@ -17,6 +17,13 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::{
+    circuits::validity::block_hash_chain::ext_public_state::{
+        ExtendedPublicState, ExtendedPublicStateTarget,
+    },
+    common::{
+        public_state::{PUBLIC_STATE_U64_LEN, PublicStateTarget},
+        u63::{BlockNumber, BlockNumberTarget},
+    },
     ethereum_types::{
         address::{ADDRESS_LEN, Address, AddressTarget},
         bytes32::{BYTES32_LEN, Bytes32, Bytes32Target},
@@ -25,7 +32,9 @@ use crate::{
     utils::{conversion::ToU64 as _, recursively_verifiable::add_proof_target_and_verify_cyclic},
 };
 
-const WITHDRAWAL_PROOF_PUBLIC_INPUTS_LEN: usize = BYTES32_LEN + ADDRESS_LEN;
+const BLOCK_NUMBER_U32_LEN: usize = 2;
+const WITHDRAWAL_PROOF_PUBLIC_INPUTS_LEN: usize =
+    BYTES32_LEN + ADDRESS_LEN + BYTES32_LEN + BLOCK_NUMBER_U32_LEN;
 
 #[derive(Debug, Error)]
 pub enum WithdrawalCircuitError {
@@ -41,6 +50,8 @@ pub enum WithdrawalCircuitError {
 pub struct WithdrawalProofPublicInputs {
     pub withdrawal_hash: Bytes32,
     pub withdrawal_aggregator: Address,
+    pub ext_public_state_commitment: Bytes32,
+    pub block_number: BlockNumber,
 }
 
 impl WithdrawalProofPublicInputs {
@@ -48,6 +59,8 @@ impl WithdrawalProofPublicInputs {
         let vec = [
             self.withdrawal_hash.to_u32_vec(),
             self.withdrawal_aggregator.to_u32_vec(),
+            self.ext_public_state_commitment.to_u32_vec(),
+            self.block_number.to_u32_vec(),
         ]
         .concat();
         assert_eq!(vec.len(), WITHDRAWAL_PROOF_PUBLIC_INPUTS_LEN);
@@ -62,12 +75,24 @@ impl WithdrawalProofPublicInputs {
                 slice.len()
             )));
         }
-        let withdrawal_hash = Bytes32::from_u32_slice(&slice[0..BYTES32_LEN]).unwrap();
+        let mut cursor = 0;
+        let withdrawal_hash =
+            Bytes32::from_u32_slice(&slice[cursor..cursor + BYTES32_LEN]).unwrap();
+        cursor += BYTES32_LEN;
         let withdrawal_aggregator =
-            Address::from_u32_slice(&slice[BYTES32_LEN..BYTES32_LEN + ADDRESS_LEN]).unwrap();
+            Address::from_u32_slice(&slice[cursor..cursor + ADDRESS_LEN]).unwrap();
+        cursor += ADDRESS_LEN;
+        let ext_public_state_commitment =
+            Bytes32::from_u32_slice(&slice[cursor..cursor + BYTES32_LEN]).unwrap();
+        cursor += BYTES32_LEN;
+        let block_number =
+            BlockNumber::from_u32_slice(&slice[cursor..cursor + BLOCK_NUMBER_U32_LEN])
+                .map_err(|e| WithdrawalCircuitError::InvalidPublicInputs(e.to_string()))?;
         Ok(Self {
             withdrawal_hash,
             withdrawal_aggregator,
+            ext_public_state_commitment,
+            block_number,
         })
     }
 
@@ -104,15 +129,22 @@ impl WithdrawalProofPublicInputs {
 struct WithdrawalProofPublicInputsTarget {
     withdrawal_hash: Bytes32Target,
     withdrawal_aggregator: AddressTarget,
+    ext_public_state_commitment: Bytes32Target,
+    block_number: BlockNumberTarget,
 }
 
 impl WithdrawalProofPublicInputsTarget {
-    fn to_vec(&self) -> Vec<Target> {
-        [
-            self.withdrawal_hash.to_vec(),
-            self.withdrawal_aggregator.to_vec(),
-        ]
-        .concat()
+    fn to_vec<F: RichField + Extendable<D>, const D: usize>(
+        &self,
+        builder: &mut CircuitBuilder<F, D>,
+    ) -> Vec<Target> {
+        let mut values =
+            Vec::with_capacity(BYTES32_LEN + ADDRESS_LEN + BYTES32_LEN + BLOCK_NUMBER_U32_LEN);
+        values.extend(self.withdrawal_hash.to_vec());
+        values.extend(self.withdrawal_aggregator.to_vec());
+        values.extend(self.ext_public_state_commitment.to_vec());
+        values.extend(self.block_number.to_u32_vec(builder));
+        values
     }
 
     fn hash<F: RichField + Extendable<D>, C: GenericConfig<D, F = F> + 'static, const D: usize>(
@@ -122,7 +154,9 @@ impl WithdrawalProofPublicInputsTarget {
     where
         <C as GenericConfig<D>>::Hasher: AlgebraicHasher<F>,
     {
-        Bytes32Target::from_slice(&builder.keccak256::<C>(&self.to_vec()))
+        let inputs = self.to_vec(builder);
+        let hash = builder.keccak256::<C>(&inputs);
+        Bytes32Target::from_slice(&hash)
     }
 }
 
@@ -134,6 +168,7 @@ where
 {
     pub data: CircuitData<F, C, D>,
     proof: ProofWithPublicInputsTarget<D>,
+    ext_public_state: ExtendedPublicStateTarget,
     withdrawal_aggregator: AddressTarget,
 }
 
@@ -147,19 +182,35 @@ where
         let mut builder = CircuitBuilder::<F, D>::new(CircuitConfig::default());
         let proof = add_proof_target_and_verify_cyclic(verifier_data, &mut builder);
         let withdrawal_hash = Bytes32Target::from_slice(&proof.public_inputs[0..BYTES32_LEN]);
+        let public_state_start = BYTES32_LEN;
+        let public_state_end = public_state_start + PUBLIC_STATE_U64_LEN;
+        let chain_public_state = PublicStateTarget::from_slice(
+            &proof.public_inputs[public_state_start..public_state_end],
+        );
+        let ext_public_state = ExtendedPublicStateTarget::new(&mut builder, true);
+        ext_public_state
+            .inner
+            .connect(&mut builder, &chain_public_state);
+        let ext_public_state_commitment = ext_public_state.commitment(&mut builder);
+        let block_number = ext_public_state.inner.block_number.clone();
         let withdrawal_aggregator = AddressTarget::new(&mut builder, true);
         let pis = WithdrawalProofPublicInputsTarget {
             withdrawal_hash,
             withdrawal_aggregator,
+            ext_public_state_commitment: ext_public_state_commitment.clone(),
+            block_number: block_number.clone(),
         };
         let pis_hash = pis
             .hash::<F, C, D>(&mut builder)
             .remove_3bits::<F, D>(&mut builder);
         builder.register_public_inputs(&pis_hash.to_vec());
+        builder.register_public_inputs(&ext_public_state_commitment.to_vec());
+        builder.register_public_inputs(&block_number.to_vec());
         let data = builder.build();
         Self {
             data,
             proof,
+            ext_public_state,
             withdrawal_aggregator,
         }
     }
@@ -168,9 +219,11 @@ where
         &self,
         proof: &ProofWithPublicInputs<F, C, D>,
         withdrawal_aggregator: Address,
+        ext_public_state: &ExtendedPublicState,
     ) -> Result<ProofWithPublicInputs<F, C, D>, WithdrawalCircuitError> {
         let mut pw = PartialWitness::<F>::new();
         pw.set_proof_with_pis_target(&self.proof, proof);
+        self.ext_public_state.set_witness(&mut pw, ext_public_state);
         self.withdrawal_aggregator
             .set_witness(&mut pw, withdrawal_aggregator);
         self.data

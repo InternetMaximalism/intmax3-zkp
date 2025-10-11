@@ -30,7 +30,7 @@ pub struct Withdrawal {
     pub aux_data: Bytes32,  // Auxiliary data for the withdrawal, e.g. cross-chain withdrawal
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WithdrawalTarget {
     pub recipient: AddressTarget,
     pub token_index: Target,

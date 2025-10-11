@@ -13,6 +13,7 @@ use plonky2::{
     },
     recursion::cyclic_recursion::check_cyclic_proof_verifier_data,
 };
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::{
@@ -38,8 +39,13 @@ use crate::{
     },
     constants::{SENT_TX_TREE_HEIGHT, TX_TREE_HEIGHT},
     utils::{
-        conversion::ToU64, poseidon_hash_out::PoseidonHashOut,
+        conversion::ToU64,
+        poseidon_hash_out::PoseidonHashOut,
         recursively_verifiable::add_proof_target_and_verify_cyclic,
+        serialize::{
+            AllGateSerializer, AllGeneratorSerializer, CircuitSerializationError,
+            deserialize_verifier_data, serialize_verifier_data,
+        },
     },
 };
 
@@ -94,7 +100,7 @@ impl SingleWithdawalPublicInputs {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SingleWithdawalPublicInputsTarget {
     pub public_state: PublicStateTarget,
     pub withdrawal: WithdrawalTarget,
@@ -340,7 +346,7 @@ where
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SingleWithdawalTarget<const D: usize> {
     pub balance_proof: ProofWithPublicInputsTarget<D>,
     pub private_state: PrivateStateTarget,
@@ -542,6 +548,65 @@ where
             .prove(pw)
             .map_err(|e| SingleWithdawalCircuitError::FailedToProve(e.to_string()))
     }
+
+    pub fn to_bytes(&self) -> Result<Vec<u8>, CircuitSerializationError> {
+        let gate_serializer = AllGateSerializer;
+        let generator_serializer = AllGeneratorSerializer::<C, D>::default();
+        let data_bytes = self
+            .data
+            .to_bytes(&gate_serializer, &generator_serializer)
+            .map_err(|e| {
+                CircuitSerializationError::serialization("single withdrawal circuit data", e)
+            })?;
+        let balance_vd_bytes =
+            serialize_verifier_data::<F, C, D>(&self.balance_vd).map_err(|e| {
+                CircuitSerializationError::serialization("single withdrawal balance vd", e)
+            })?;
+        let payload = SingleWithdawalCircuitBytes::<D> {
+            data: data_bytes,
+            target: self.target.clone(),
+            public_inputs: self.public_inputs.clone(),
+            balance_vd: balance_vd_bytes,
+        };
+        bincode::serde::encode_to_vec(&payload, bincode::config::standard())
+            .map_err(|e| CircuitSerializationError::serialization("single withdrawal circuit", e))
+    }
+
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self, CircuitSerializationError> {
+        let (payload, _) = bincode::serde::decode_from_slice::<SingleWithdawalCircuitBytes<D>, _>(
+            bytes,
+            bincode::config::standard(),
+        )
+        .map_err(|e| CircuitSerializationError::deserialization("single withdrawal circuit", e))?;
+        let gate_serializer = AllGateSerializer;
+        let generator_serializer = AllGeneratorSerializer::<C, D>::default();
+        let data = CircuitData::<F, C, D>::from_bytes(
+            &payload.data,
+            &gate_serializer,
+            &generator_serializer,
+        )
+        .map_err(|e| {
+            CircuitSerializationError::deserialization("single withdrawal circuit data", e)
+        })?;
+        let balance_vd =
+            deserialize_verifier_data::<F, C, D>(&payload.balance_vd).map_err(|e| {
+                CircuitSerializationError::deserialization("single withdrawal balance vd", e)
+            })?;
+        Ok(Self {
+            data,
+            target: payload.target,
+            public_inputs: payload.public_inputs,
+            balance_vd,
+        })
+    }
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct SingleWithdawalCircuitBytes<const D: usize> {
+    data: Vec<u8>,
+    target: SingleWithdawalTarget<D>,
+    public_inputs: SingleWithdawalPublicInputsTarget,
+    balance_vd: Vec<u8>,
 }
 
 #[cfg(test)]
@@ -718,5 +783,27 @@ mod tests {
             .data
             .verify(proof)
             .expect("single withdrawal proof should verify");
+    }
+
+    #[test]
+    fn test_single_withdrawal_circuit_serialization() {
+        let spend_circuit = SpendCircuit::<F, C, D>::new();
+        let balance_processor =
+            BalanceProcessor::<F, C, D>::new(&spend_circuit.data.verifier_data());
+        let balance_vd = balance_processor.balance_vd();
+
+        let circuit = SingleWithdawalCircuit::<F, C, D>::new(&balance_vd);
+
+        let bytes = circuit.to_bytes().expect("circuit to bytes");
+        let deserialized =
+            SingleWithdawalCircuit::<F, C, D>::from_bytes(&bytes).expect("circuit from bytes");
+
+        assert_eq!(circuit.data, deserialized.data);
+        assert_eq!(circuit.balance_vd, deserialized.balance_vd);
+
+        let roundtrip_bytes = deserialized
+            .to_bytes()
+            .expect("circuit to bytes after deserialization");
+        assert_eq!(bytes, roundtrip_bytes);
     }
 }

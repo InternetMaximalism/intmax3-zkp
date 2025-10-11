@@ -320,8 +320,16 @@ mod tests {
             .expect("withdrawal chain proof verifies");
 
         let withdrawal_aggregator = Address::rand(&mut rng);
+        let ext_public_state = block_witness_generator
+            .read()
+            .unwrap()
+            .current_extended_public_state();
         let withdrawal_proof = withdrawal_processor
-            .prove_final(&withdrawal_chain_proof, withdrawal_aggregator)
+            .prove_final(
+                &withdrawal_chain_proof,
+                withdrawal_aggregator,
+                &ext_public_state,
+            )
             .expect("withdrawal proof");
         withdrawal_processor
             .withdrawal_vd()
@@ -333,16 +341,28 @@ mod tests {
             &withdrawal_chain_vd.common.config,
         )
         .expect("parse withdrawal chain public inputs");
+        let ext_public_state_commitment = ext_public_state.commitment();
         let expected_withdrawal_inputs = WithdrawalProofPublicInputs {
             withdrawal_hash: chain_inputs.withdrawal_hash_chain,
             withdrawal_aggregator,
+            ext_public_state_commitment,
+            block_number: ext_public_state.inner.block_number,
         };
         let expected_hash = expected_withdrawal_inputs.hash();
-        let expected_public_inputs: Vec<F> = expected_hash
+        let mut expected_public_inputs: Vec<F> = expected_hash
             .to_u32_vec()
             .into_iter()
             .map(F::from_canonical_u32)
             .collect();
+        expected_public_inputs.extend(
+            ext_public_state_commitment
+                .to_u32_vec()
+                .into_iter()
+                .map(F::from_canonical_u32),
+        );
+        expected_public_inputs.push(F::from_canonical_u64(
+            ext_public_state.inner.block_number.as_u64(),
+        ));
 
         assert_eq!(withdrawal_proof.public_inputs, expected_public_inputs);
     }
