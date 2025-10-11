@@ -352,8 +352,7 @@ where
     C::Hasher: AlgebraicHasher<F>,
 {
     pub fn new() -> Self {
-        let mut builder =
-            CircuitBuilder::<F, D>::new(CircuitConfig::standard_recursion_zk_config());
+        let mut builder = CircuitBuilder::<F, D>::new(CircuitConfig::standard_recursion_config());
         let target = SpendTarget::new(&mut builder);
 
         let mut asset_tree_root = target.prev_private_state.asset_tree_root;
