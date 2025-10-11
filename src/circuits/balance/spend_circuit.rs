@@ -12,6 +12,7 @@ use plonky2::{
         proof::ProofWithPublicInputs,
     },
 };
+use serde::{Deserialize, Serialize};
 
 use crate::{
     common::{
@@ -33,6 +34,7 @@ use crate::{
     utils::{
         leafable::{Leafable, LeafableTarget as _},
         poseidon_hash_out::{POSEIDON_HASH_OUT_LEN, PoseidonHashOut, PoseidonHashOutTarget},
+        serialize::{AllGateSerializer, AllGeneratorSerializer, CircuitSerializationError},
         trees::get_root::{get_merkle_root_from_leaves, get_merkle_root_from_leaves_circuit},
     },
 };
@@ -191,7 +193,7 @@ impl SpendWitness {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SpendPublicInputsTarget {
     pub prev_private_commitment: PoseidonHashOutTarget,
     pub new_private_commitment: PoseidonHashOutTarget,
@@ -244,7 +246,7 @@ impl SpendPublicInputsTarget {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SpendTarget {
     pub tx_nonce: Target,
     pub prev_private_state: PrivateStateTarget,
@@ -438,6 +440,50 @@ where
             .prove(pw)
             .map_err(|e| SpendError::FailedToProve(e.to_string()))
     }
+
+    pub fn to_bytes(&self) -> Result<Vec<u8>, CircuitSerializationError> {
+        let gate_serializer = AllGateSerializer;
+        let generator_serializer = AllGeneratorSerializer::<C, D>::default();
+        let data_bytes = self
+            .data
+            .to_bytes(&gate_serializer, &generator_serializer)
+            .map_err(|e| CircuitSerializationError::serialization("spend circuit data", e))?;
+        let payload: SpendCircuitBytes<D> = SpendCircuitBytes {
+            data: data_bytes,
+            target: self.target.clone(),
+            public_inputs: self.public_inputs.clone(),
+        };
+        bincode::serde::encode_to_vec(&payload, bincode::config::standard())
+            .map_err(|e| CircuitSerializationError::serialization("spend circuit", e))
+    }
+
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self, CircuitSerializationError> {
+        let (payload, _) = bincode::serde::decode_from_slice::<SpendCircuitBytes<D>, _>(
+            bytes,
+            bincode::config::standard(),
+        )
+        .map_err(|e| CircuitSerializationError::deserialization("spend circuit", e))?;
+        let gate_serializer = AllGateSerializer;
+        let generator_serializer = AllGeneratorSerializer::<C, D>::default();
+        let data = CircuitData::<F, C, D>::from_bytes(
+            &payload.data,
+            &gate_serializer,
+            &generator_serializer,
+        )
+        .map_err(|e| CircuitSerializationError::deserialization("spend circuit data", e))?;
+        Ok(Self {
+            data,
+            target: payload.target,
+            public_inputs: payload.public_inputs,
+        })
+    }
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct SpendCircuitBytes<const D: usize> {
+    data: Vec<u8>,
+    target: SpendTarget,
+    public_inputs: SpendPublicInputsTarget,
 }
 
 #[cfg(test)]

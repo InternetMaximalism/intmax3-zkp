@@ -7,6 +7,7 @@ use plonky2::{
         proof::ProofWithPublicInputs,
     },
 };
+use serde::{Deserialize, Serialize};
 
 use crate::{
     circuits::balance::{
@@ -21,6 +22,7 @@ use crate::{
         switch_board::{BalanceSwichBoard, BalanceSwichBoardCircuit, BalanceSwitchBoardError},
     },
     common::{salt::Salt, user_id::UserId},
+    utils::serialize::CircuitSerializationError,
 };
 
 #[derive(Debug, thiserror::Error)]
@@ -197,4 +199,48 @@ where
 
         Ok(balance_proof)
     }
+
+    pub fn to_bytes(&self) -> Result<Vec<u8>, CircuitSerializationError> {
+        let payload = BalanceProcessorBytes {
+            receive_transfer: self.receive_transfer_circuit.to_bytes()?,
+            receive_deposit: self.receive_deposit_circuit.to_bytes()?,
+            send_tx: self.send_tx_circuit.to_bytes()?,
+            switch_board: self.switch_board_circuit.to_bytes()?,
+            balance: self.balance_circuit.to_bytes()?,
+        };
+        bincode::serde::encode_to_vec(&payload, bincode::config::standard())
+            .map_err(|e| CircuitSerializationError::serialization("balance processor", e))
+    }
+
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self, CircuitSerializationError> {
+        let (payload, _) = bincode::serde::decode_from_slice::<BalanceProcessorBytes, _>(
+            bytes,
+            bincode::config::standard(),
+        )
+        .map_err(|e| CircuitSerializationError::deserialization("balance processor", e))?;
+        let receive_transfer_circuit =
+            ReceiveTransferCircuit::<F, C, D>::from_bytes(&payload.receive_transfer)?;
+        let receive_deposit_circuit =
+            ReceiveDepositCircuit::<F, C, D>::from_bytes(&payload.receive_deposit)?;
+        let send_tx_circuit = SendTxCircuit::<F, C, D>::from_bytes(&payload.send_tx)?;
+        let switch_board_circuit =
+            BalanceSwichBoardCircuit::<F, C, D>::from_bytes(&payload.switch_board)?;
+        let balance_circuit = BalanceCircuit::<F, C, D>::from_bytes(&payload.balance)?;
+        Ok(Self {
+            receive_transfer_circuit,
+            receive_deposit_circuit,
+            send_tx_circuit,
+            switch_board_circuit,
+            balance_circuit,
+        })
+    }
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct BalanceProcessorBytes {
+    receive_transfer: Vec<u8>,
+    receive_deposit: Vec<u8>,
+    send_tx: Vec<u8>,
+    switch_board: Vec<u8>,
+    balance: Vec<u8>,
 }

@@ -77,9 +77,17 @@ impl<F: RichField + Extendable<D>, const D: usize> GateSerializer<F, D> for AllG
     }
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct AllGeneratorSerializer<C: GenericConfig<D>, const D: usize> {
     pub _phantom: PhantomData<C>,
+}
+
+impl<C: GenericConfig<D>, const D: usize> Default for AllGeneratorSerializer<C, D> {
+    fn default() -> Self {
+        Self {
+            _phantom: PhantomData,
+        }
+    }
 }
 
 impl<F, C, const D: usize> WitnessGeneratorSerializer<F, D> for AllGeneratorSerializer<C, D>
@@ -149,9 +157,31 @@ where
 
 #[derive(Debug, thiserror::Error)]
 pub enum CircuitSerializationError {
-    #[error("circuit serialization error: {0}")]
-    SerializationError(String),
+    #[error("failed to serialize {context}: {detail}")]
+    Serialization {
+        context: &'static str,
+        detail: String,
+    },
 
-    #[error("circuit deserialization error: {0}")]
-    DeserializationError(String),
+    #[error("failed to deserialize {context}: {detail}")]
+    Deserialization {
+        context: &'static str,
+        detail: String,
+    },
+}
+
+impl CircuitSerializationError {
+    pub fn serialization(context: &'static str, error: impl ToString) -> Self {
+        Self::Serialization {
+            context,
+            detail: error.to_string(),
+        }
+    }
+
+    pub fn deserialization(context: &'static str, error: impl ToString) -> Self {
+        Self::Deserialization {
+            context,
+            detail: error.to_string(),
+        }
+    }
 }

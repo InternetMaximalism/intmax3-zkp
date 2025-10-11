@@ -20,8 +20,10 @@ use crate::{
     utils::{
         cyclic::{add_noop_gates, simple_recursion_circuit_data, vd_vec_len},
         recursively_verifiable::add_proof_target_and_verify,
+        serialize::{AllGateSerializer, AllGeneratorSerializer, CircuitSerializationError},
     },
 };
+use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Error)]
 pub enum BalanceCircuitError {
@@ -115,6 +117,41 @@ where
             BalanceCircuitError::ProofVerificationError(format!("Failed to verify proof: {:?}", e))
         })
     }
+
+    pub fn to_bytes(&self) -> Result<Vec<u8>, CircuitSerializationError> {
+        let gate_serializer = AllGateSerializer;
+        let generator_serializer = AllGeneratorSerializer::<C, D>::default();
+        let data_bytes = self
+            .data
+            .to_bytes(&gate_serializer, &generator_serializer)
+            .map_err(|e| CircuitSerializationError::serialization("balance circuit data", e))?;
+        let payload: BalanceCircuitBytes<D> = BalanceCircuitBytes {
+            data: data_bytes,
+            switch_proof: self.switch_proof.clone(),
+        };
+        bincode::serde::encode_to_vec(&payload, bincode::config::standard())
+            .map_err(|e| CircuitSerializationError::serialization("balance circuit", e))
+    }
+
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self, CircuitSerializationError> {
+        let (payload, _) = bincode::serde::decode_from_slice::<BalanceCircuitBytes<D>, _>(
+            bytes,
+            bincode::config::standard(),
+        )
+        .map_err(|e| CircuitSerializationError::deserialization("balance circuit", e))?;
+        let gate_serializer = AllGateSerializer;
+        let generator_serializer = AllGeneratorSerializer::<C, D>::default();
+        let data = CircuitData::<F, C, D>::from_bytes(
+            &payload.data,
+            &gate_serializer,
+            &generator_serializer,
+        )
+        .map_err(|e| CircuitSerializationError::deserialization("balance circuit data", e))?;
+        Ok(Self {
+            data,
+            switch_proof: payload.switch_proof,
+        })
+    }
 }
 
 #[cfg(test)]
@@ -194,4 +231,10 @@ mod tests {
         let expected_pis = BalancePublicInputs::new(user_id, salt);
         assert_eq!(balance_pis, expected_pis);
     }
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct BalanceCircuitBytes<const D: usize> {
+    data: Vec<u8>,
+    switch_proof: ProofWithPublicInputsTarget<D>,
 }

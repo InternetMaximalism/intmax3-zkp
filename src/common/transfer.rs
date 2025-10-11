@@ -56,7 +56,7 @@ pub struct TransferTarget {
     pub aux_data: Bytes32Target,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SettledTransferTarget {
     pub inner: TransferTarget,
     pub from: UserIdTarget,

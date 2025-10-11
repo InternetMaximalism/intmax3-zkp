@@ -28,11 +28,15 @@ use crate::{
         user_id::{UserId, UserIdTarget},
     },
     utils::{
-        conversion::ToU64, dummy::DummyProof, logic::BuilderLogic,
+        conversion::ToU64,
+        dummy::DummyProof,
+        logic::BuilderLogic,
         poseidon_hash_out::PoseidonHashOutTarget,
         recursively_verifiable::add_proof_target_and_conditionally_verify,
+        serialize::{AllGateSerializer, AllGeneratorSerializer, CircuitSerializationError},
     },
 };
+use serde::{Deserialize, Serialize};
 
 #[derive(thiserror::Error, Debug)]
 pub enum BalanceSwitchBoardError {
@@ -149,7 +153,7 @@ where
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BalanceSwichBoardTarget<const D: usize> {
     pub one_hot: [BoolTarget; 4], // initial_value, receive_transfer, receive_deposit, send_tx
 
@@ -453,6 +457,151 @@ where
             .prove(pw)
             .map_err(|e| BalanceSwitchBoardError::FailedToProve(e.to_string()))
     }
+
+    pub fn to_bytes(&self) -> Result<Vec<u8>, CircuitSerializationError> {
+        let gate_serializer = AllGateSerializer;
+        let generator_serializer = AllGeneratorSerializer::<C, D>::default();
+        let data_bytes = self
+            .data
+            .to_bytes(&gate_serializer, &generator_serializer)
+            .map_err(|e| {
+                CircuitSerializationError::serialization("balance switch board circuit data", e)
+            })?;
+        let receive_transfer_vd = self
+            .receive_transfer_vd
+            .to_bytes(&gate_serializer)
+            .map_err(|e| {
+                CircuitSerializationError::serialization(
+                    "balance switch board receive transfer verifier data",
+                    e,
+                )
+            })?;
+        let receive_deposit_vd =
+            self.receive_deposit_vd
+                .to_bytes(&gate_serializer)
+                .map_err(|e| {
+                    CircuitSerializationError::serialization(
+                        "balance switch board receive deposit verifier data",
+                        e,
+                    )
+                })?;
+        let send_tx_vd = self.send_tx_vd.to_bytes(&gate_serializer).map_err(|e| {
+            CircuitSerializationError::serialization(
+                "balance switch board send tx verifier data",
+                e,
+            )
+        })?;
+        let dummy_proofs = self
+            .dummy_proofs
+            .iter()
+            .map(|(index, proof)| (*index, proof.to_bytes()))
+            .collect::<HashMap<_, _>>();
+        let payload: BalanceSwichBoardCircuitBytes<D> = BalanceSwichBoardCircuitBytes {
+            data: data_bytes,
+            receive_transfer_vd,
+            receive_deposit_vd,
+            send_tx_vd,
+            dummy_proofs,
+            target: self.target.clone(),
+            public_inputs: self.public_inputs.clone(),
+        };
+        bincode::serde::encode_to_vec(&payload, bincode::config::standard()).map_err(|e| {
+            CircuitSerializationError::serialization("balance switch board circuit", e)
+        })
+    }
+
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self, CircuitSerializationError> {
+        let (payload, _) =
+            bincode::serde::decode_from_slice::<BalanceSwichBoardCircuitBytes<D>, _>(
+                bytes,
+                bincode::config::standard(),
+            )
+            .map_err(|e| {
+                CircuitSerializationError::deserialization("balance switch board circuit", e)
+            })?;
+        let gate_serializer = AllGateSerializer;
+        let generator_serializer = AllGeneratorSerializer::<C, D>::default();
+        let data = CircuitData::<F, C, D>::from_bytes(
+            &payload.data,
+            &gate_serializer,
+            &generator_serializer,
+        )
+        .map_err(|e| {
+            CircuitSerializationError::deserialization("balance switch board circuit data", e)
+        })?;
+        let receive_transfer_vd = VerifierCircuitData::<F, C, D>::from_bytes(
+            payload.receive_transfer_vd,
+            &gate_serializer,
+        )
+        .map_err(|e| {
+            CircuitSerializationError::deserialization(
+                "balance switch board receive transfer verifier data",
+                e,
+            )
+        })?;
+        let receive_deposit_vd = VerifierCircuitData::<F, C, D>::from_bytes(
+            payload.receive_deposit_vd,
+            &gate_serializer,
+        )
+        .map_err(|e| {
+            CircuitSerializationError::deserialization(
+                "balance switch board receive deposit verifier data",
+                e,
+            )
+        })?;
+        let send_tx_vd =
+            VerifierCircuitData::<F, C, D>::from_bytes(payload.send_tx_vd, &gate_serializer)
+                .map_err(|e| {
+                    CircuitSerializationError::deserialization(
+                        "balance switch board send tx verifier data",
+                        e,
+                    )
+                })?;
+
+        let mut dummy_proofs = HashMap::new();
+        for (index, proof_bytes) in payload.dummy_proofs {
+            let target_common = match index {
+                1 => &receive_transfer_vd.common,
+                2 => &receive_deposit_vd.common,
+                3 => &send_tx_vd.common,
+                _ => {
+                    return Err(CircuitSerializationError::deserialization(
+                        "balance switch board dummy proof index",
+                        format!("unexpected index {index}"),
+                    ));
+                }
+            };
+            let proof = ProofWithPublicInputs::<F, C, D>::from_bytes(proof_bytes, target_common)
+                .map_err(|e| {
+                    CircuitSerializationError::deserialization(
+                        "balance switch board dummy proof",
+                        e,
+                    )
+                })?;
+            dummy_proofs.insert(index, proof);
+        }
+
+        Ok(Self {
+            data,
+            receive_transfer_vd,
+            receive_deposit_vd,
+            send_tx_vd,
+            dummy_proofs,
+            target: payload.target,
+            public_inputs: payload.public_inputs,
+        })
+    }
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct BalanceSwichBoardCircuitBytes<const D: usize> {
+    data: Vec<u8>,
+    receive_transfer_vd: Vec<u8>,
+    receive_deposit_vd: Vec<u8>,
+    send_tx_vd: Vec<u8>,
+    dummy_proofs: HashMap<usize, Vec<u8>>,
+    target: BalanceSwichBoardTarget<D>,
+    public_inputs: BalanceFullPublicInputsTarget,
 }
 
 #[cfg(test)]

@@ -22,8 +22,14 @@ use crate::{
         },
     },
     common::u63::BlockNumberTarget,
-    utils::{conversion::ToU64, cyclic::add_const_gate, poseidon_hash_out::PoseidonHashOutTarget},
+    utils::{
+        conversion::ToU64,
+        cyclic::add_const_gate,
+        poseidon_hash_out::PoseidonHashOutTarget,
+        serialize::{AllGateSerializer, AllGeneratorSerializer, CircuitSerializationError},
+    },
 };
+use serde::{Deserialize, Serialize};
 
 #[derive(thiserror::Error, Debug)]
 pub enum SendTxError {
@@ -148,7 +154,7 @@ where
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SendTxTarget<const D: usize> {
     pub prev_balance_proof: ProofWithPublicInputsTarget<D>,
     pub update_public_state: UpdatePublicStateTarget,
@@ -314,6 +320,60 @@ where
             .prove(pw)
             .map_err(|e| SendTxError::FailedToProve(e.to_string()))
     }
+
+    pub fn to_bytes(&self) -> Result<Vec<u8>, CircuitSerializationError> {
+        let gate_serializer = AllGateSerializer;
+        let generator_serializer = AllGeneratorSerializer::<C, D>::default();
+        let data_bytes = self
+            .data
+            .to_bytes(&gate_serializer, &generator_serializer)
+            .map_err(|e| CircuitSerializationError::serialization("send tx circuit data", e))?;
+        let balance_cd_bytes = self.balance_cd.to_bytes(&gate_serializer).map_err(|e| {
+            CircuitSerializationError::serialization("send tx common circuit data", e)
+        })?;
+        let payload: SendTxCircuitBytes<D> = SendTxCircuitBytes {
+            data: data_bytes,
+            balance_cd: balance_cd_bytes,
+            target: self.target.clone(),
+            public_inputs: self.public_inputs.clone(),
+        };
+        bincode::serde::encode_to_vec(&payload, bincode::config::standard())
+            .map_err(|e| CircuitSerializationError::serialization("send tx circuit", e))
+    }
+
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self, CircuitSerializationError> {
+        let (payload, _) = bincode::serde::decode_from_slice::<SendTxCircuitBytes<D>, _>(
+            bytes,
+            bincode::config::standard(),
+        )
+        .map_err(|e| CircuitSerializationError::deserialization("send tx circuit", e))?;
+        let gate_serializer = AllGateSerializer;
+        let generator_serializer = AllGeneratorSerializer::<C, D>::default();
+        let data = CircuitData::<F, C, D>::from_bytes(
+            &payload.data,
+            &gate_serializer,
+            &generator_serializer,
+        )
+        .map_err(|e| CircuitSerializationError::deserialization("send tx circuit data", e))?;
+        let balance_cd =
+            CommonCircuitData::<F, D>::from_bytes(payload.balance_cd, &gate_serializer).map_err(
+                |e| CircuitSerializationError::deserialization("send tx common circuit data", e),
+            )?;
+        Ok(Self {
+            data,
+            balance_cd,
+            target: payload.target,
+            public_inputs: payload.public_inputs,
+        })
+    }
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct SendTxCircuitBytes<const D: usize> {
+    data: Vec<u8>,
+    balance_cd: Vec<u8>,
+    target: SendTxTarget<D>,
+    public_inputs: BalanceFullPublicInputsTarget,
 }
 
 #[cfg(test)]

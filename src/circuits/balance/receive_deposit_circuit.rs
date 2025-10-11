@@ -25,8 +25,12 @@ use crate::{
     },
     common::u63::{BlockNumber, BlockNumberTarget},
     ethereum_types::u32limb_trait::U32LimbTargetTrait as _,
-    utils::conversion::ToU64,
+    utils::{
+        conversion::ToU64,
+        serialize::{AllGateSerializer, AllGeneratorSerializer, CircuitSerializationError},
+    },
 };
+use serde::{Deserialize, Serialize};
 
 #[derive(Debug, thiserror::Error)]
 pub enum ReceiveDepositError {
@@ -235,7 +239,7 @@ where
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ReceiveDepositTarget<const D: usize> {
     pub prev_balance_proof: ProofWithPublicInputsTarget<D>,
     pub update_public_state: UpdatePublicStateTarget,
@@ -416,6 +420,67 @@ where
             .prove(pw)
             .map_err(|e| ReceiveDepositError::FailedToProve(e.to_string()))
     }
+
+    pub fn to_bytes(&self) -> Result<Vec<u8>, CircuitSerializationError> {
+        let gate_serializer = AllGateSerializer;
+        let generator_serializer = AllGeneratorSerializer::<C, D>::default();
+        let data_bytes = self
+            .data
+            .to_bytes(&gate_serializer, &generator_serializer)
+            .map_err(|e| {
+                CircuitSerializationError::serialization("receive deposit circuit data", e)
+            })?;
+        let balance_cd_bytes = self.balance_cd.to_bytes(&gate_serializer).map_err(|e| {
+            CircuitSerializationError::serialization("receive deposit common circuit data", e)
+        })?;
+        let payload: ReceiveDepositCircuitBytes<D> = ReceiveDepositCircuitBytes {
+            data: data_bytes,
+            balance_cd: balance_cd_bytes,
+            target: self.target.clone(),
+            public_inputs: self.public_inputs.clone(),
+        };
+        bincode::serde::encode_to_vec(&payload, bincode::config::standard())
+            .map_err(|e| CircuitSerializationError::serialization("receive deposit circuit", e))
+    }
+
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self, CircuitSerializationError> {
+        let (payload, _) = bincode::serde::decode_from_slice::<ReceiveDepositCircuitBytes<D>, _>(
+            bytes,
+            bincode::config::standard(),
+        )
+        .map_err(|e| CircuitSerializationError::deserialization("receive deposit circuit", e))?;
+        let gate_serializer = AllGateSerializer;
+        let generator_serializer = AllGeneratorSerializer::<C, D>::default();
+        let data = CircuitData::<F, C, D>::from_bytes(
+            &payload.data,
+            &gate_serializer,
+            &generator_serializer,
+        )
+        .map_err(|e| {
+            CircuitSerializationError::deserialization("receive deposit circuit data", e)
+        })?;
+        let balance_cd = CommonCircuitData::<F, D>::from_bytes(
+            payload.balance_cd,
+            &gate_serializer,
+        )
+        .map_err(|e| {
+            CircuitSerializationError::deserialization("receive deposit common circuit data", e)
+        })?;
+        Ok(Self {
+            data,
+            balance_cd,
+            target: payload.target,
+            public_inputs: payload.public_inputs,
+        })
+    }
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct ReceiveDepositCircuitBytes<const D: usize> {
+    data: Vec<u8>,
+    balance_cd: Vec<u8>,
+    target: ReceiveDepositTarget<D>,
+    public_inputs: BalanceFullPublicInputsTarget,
 }
 
 #[cfg(test)]

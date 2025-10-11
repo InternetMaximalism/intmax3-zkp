@@ -7,6 +7,7 @@ use plonky2::{
         config::{AlgebraicHasher, GenericConfig},
     },
 };
+use serde::{Deserialize, Serialize};
 
 use crate::{
     circuits::balance::common::recipient::{
@@ -44,7 +45,7 @@ pub struct DepositWitness {
     pub deposit_merkle_proof: DepositMerkleProof,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct DepositWitnessTarget {
     pub user_id: UserIdTarget,
     pub deposit_tree_root: PoseidonHashOutTarget,

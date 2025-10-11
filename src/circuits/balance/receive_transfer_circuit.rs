@@ -579,16 +579,18 @@ where
         let data_bytes = self
             .data
             .to_bytes(&gate_serializer, &generator_serializer)
-            .map_err(|e| CircuitSerializationError::SerializationError(e.to_string()))?;
+            .map_err(|e| CircuitSerializationError::serialization("circuit data", e))?;
         let balance_cd_bytes = self
             .balance_cd
             .to_bytes(&gate_serializer)
-            .map_err(|e| CircuitSerializationError::SerializationError(e.to_string()))?;
+            .map_err(|e| CircuitSerializationError::serialization("common circuit data", e))?;
         let target_bytes = bincode::serde::encode_to_vec(&self.target, bincode::config::standard())
-            .map_err(|e| CircuitSerializationError::SerializationError(e.to_string()))?;
+            .map_err(|e| CircuitSerializationError::serialization("receive transfer target", e))?;
         let public_inputs_bytes =
             bincode::serde::encode_to_vec(&self.public_inputs, bincode::config::standard())
-                .map_err(|e| CircuitSerializationError::SerializationError(e.to_string()))?;
+                .map_err(|e| {
+                    CircuitSerializationError::serialization("balance public inputs target", e)
+                })?;
         let circuit_bytes = ReceiveTransferCircuitBytes {
             data: data_bytes,
             balance_cd: balance_cd_bytes,
@@ -596,7 +598,7 @@ where
             public_inputs: public_inputs_bytes,
         };
         let bytes = bincode::serde::encode_to_vec(&circuit_bytes, bincode::config::standard())
-            .map_err(|e| CircuitSerializationError::SerializationError(e.to_string()))?;
+            .map_err(|e| CircuitSerializationError::serialization("receive transfer circuit", e))?;
         Ok(bytes)
     }
 
@@ -606,7 +608,9 @@ where
                 bytes,
                 bincode::config::standard(),
             )
-            .map_err(|e| CircuitSerializationError::DeserializationError(e.to_string()))?;
+            .map_err(|e| {
+                CircuitSerializationError::deserialization("receive transfer circuit", e)
+            })?;
         let gate_serializer = AllGateSerializer;
         let generator_serializer = AllGeneratorSerializer::<C, D>::default();
         let data = CircuitData::<F, C, D>::from_bytes(
@@ -614,21 +618,23 @@ where
             &gate_serializer,
             &generator_serializer,
         )
-        .map_err(|e| CircuitSerializationError::DeserializationError(e.to_string()))?;
+        .map_err(|e| CircuitSerializationError::deserialization("circuit data", e))?;
         let balance_cd =
             CommonCircuitData::<F, D>::from_bytes(circuit_bytes.balance_cd, &gate_serializer)
-                .map_err(|e| CircuitSerializationError::DeserializationError(e.to_string()))?;
+                .map_err(|e| {
+                    CircuitSerializationError::deserialization("common circuit data", e)
+                })?;
         let target = bincode::serde::decode_from_slice::<ReceiveTransferTarget<D>, _>(
             &circuit_bytes.target,
             bincode::config::standard(),
         )
-        .map_err(|e| CircuitSerializationError::DeserializationError(e.to_string()))?
+        .map_err(|e| CircuitSerializationError::deserialization("receive transfer target", e))?
         .0;
         let public_inputs = bincode::serde::decode_from_slice::<BalanceFullPublicInputsTarget, _>(
             &circuit_bytes.public_inputs,
             bincode::config::standard(),
         )
-        .map_err(|e| CircuitSerializationError::DeserializationError(e.to_string()))?
+        .map_err(|e| CircuitSerializationError::deserialization("balance public inputs target", e))?
         .0;
         Ok(Self {
             data,
