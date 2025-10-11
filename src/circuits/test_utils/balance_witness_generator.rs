@@ -86,7 +86,7 @@ pub enum BalanceWitnessGeneratorError {
 pub struct BalanceWitnessGenerator<F, C, const D: usize>
 where
     F: RichField + Extendable<D>,
-    C: GenericConfig<D, F = F> + 'static,
+    C: GenericConfig<D, F = F> + Default + 'static,
     <C as GenericConfig<D>>::Hasher: AlgebraicHasher<F>,
 {
     pub user_id: UserId,
@@ -100,7 +100,7 @@ where
 impl<F, C, const D: usize> BalanceWitnessGenerator<F, C, D>
 where
     F: RichField + Extendable<D>,
-    C: GenericConfig<D, F = F> + 'static,
+    C: GenericConfig<D, F = F> + Default + 'static,
     <C as GenericConfig<D>>::Hasher: AlgebraicHasher<F>,
 {
     pub fn new(

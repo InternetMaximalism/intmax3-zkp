@@ -22,6 +22,7 @@ use plonky2::{
         config::{AlgebraicHasher, GenericConfig},
     },
 };
+use serde::{Deserialize, Serialize};
 
 #[derive(Debug, thiserror::Error, Clone)]
 pub enum UpdatePrivateStateError {
@@ -94,7 +95,7 @@ impl UpdatePrivateState {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UpdatePrivateStateTarget {
     pub token_index: Target,
     pub amount: U256Target,

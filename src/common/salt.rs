@@ -37,7 +37,7 @@ impl Display for Salt {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub struct SaltTarget(pub PoseidonHashOutTarget);
 
 impl Salt {

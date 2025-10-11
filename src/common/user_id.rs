@@ -136,7 +136,7 @@ impl TryFrom<u64> for UserId {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct UserIdTarget {
     pub value: Target,
 }

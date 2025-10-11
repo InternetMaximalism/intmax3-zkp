@@ -107,7 +107,7 @@ pub type BlockNumber = U63;
 pub type BlockNumberTarget = U63Target;
 pub type BlockNumberError = U63Error;
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct U63Target {
     pub value: Target,
 }

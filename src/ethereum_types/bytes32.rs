@@ -21,7 +21,7 @@ pub struct Bytes32 {
     limbs: [u32; BYTES32_LEN],
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
 pub struct Bytes32Target {
     limbs: [Target; BYTES32_LEN],
 }

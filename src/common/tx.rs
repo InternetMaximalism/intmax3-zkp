@@ -65,7 +65,7 @@ impl Tx {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct TxTarget {
     pub transfer_tree_root: PoseidonHashOutTarget,
     pub nonce: Target,

@@ -16,7 +16,7 @@ pub struct Address {
     limbs: [u32; ADDRESS_LEN],
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
 pub struct AddressTarget {
     limbs: [Target; ADDRESS_LEN],
 }

@@ -29,7 +29,7 @@ use serde::{Deserialize, Serialize};
 pub struct NullifierTree(IndexedMerkleTree);
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NullifierInsertionProof(IndexedInsertionProof);
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NullifierInsertionProofTarget(IndexedInsertionProofTarget);
 
 impl NullifierTree {

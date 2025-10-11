@@ -10,6 +10,7 @@ use plonky2::{
         config::{AlgebraicHasher, GenericConfig},
     },
 };
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::{
@@ -127,7 +128,7 @@ impl BalancePublicInputs {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct BalancePublicInputsTarget {
     pub user_id: UserIdTarget,
     pub public_state: PublicStateTarget,
@@ -262,7 +263,7 @@ where
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct BalanceFullPublicInputsTarget {
     pub pis: BalancePublicInputsTarget,
     pub vd: VerifierCircuitTarget,

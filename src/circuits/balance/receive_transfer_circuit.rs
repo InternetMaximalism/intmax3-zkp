@@ -1,14 +1,19 @@
 use plonky2::{
     field::extension::Extendable,
     hash::hash_types::RichField,
-    iop::witness::{PartialWitness, WitnessWrite},
+    iop::{
+        target::Target,
+        witness::{PartialWitness, WitnessWrite},
+    },
     plonk::{
         circuit_builder::CircuitBuilder,
         circuit_data::{CircuitConfig, CircuitData, CommonCircuitData, VerifierCircuitData},
         config::{AlgebraicHasher, GenericConfig},
         proof::{ProofWithPublicInputs, ProofWithPublicInputsTarget},
     },
+    util::serialization::DefaultGeneratorSerializer,
 };
+use serde::{Deserialize, Serialize};
 
 use crate::{
     circuits::balance::{
@@ -33,7 +38,11 @@ use crate::{
         u63::{BlockNumber, BlockNumberTarget},
     },
     ethereum_types::u32limb_trait::U32LimbTargetTrait,
-    utils::{conversion::ToU64, cyclic::add_const_gate},
+    utils::{
+        conversion::ToU64,
+        cyclic::add_const_gate,
+        serialize::{AllGateSerializer, CircuitSerializationError},
+    },
 };
 
 #[derive(Debug, thiserror::Error)]
@@ -316,7 +325,7 @@ where
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ReceiveTransferTarget<const D: usize> {
     pub prev_balance_proof: ProofWithPublicInputsTarget<D>,
     pub sender_balance_proof: ProofWithPublicInputsTarget<D>,
@@ -544,7 +553,7 @@ where
 impl<F, C, const D: usize> ReceiveTransferCircuit<F, C, D>
 where
     F: RichField + Extendable<D>,
-    C: GenericConfig<D, F = F> + 'static,
+    C: GenericConfig<D, F = F> + 'static + Default,
     <C as GenericConfig<D>>::Hasher: AlgebraicHasher<F>,
 {
     pub fn new(
@@ -566,6 +575,17 @@ where
             target,
             public_inputs,
         }
+    }
+
+    pub fn to_bytes(&self) -> Result<Vec<u8>, CircuitSerializationError> {
+        let gate_serializer = AllGateSerializer;
+        let generator_serializer = DefaultGeneratorSerializer::<C, D>::default();
+        let data_bytes = self
+            .data
+            .to_bytes(&gate_serializer, &generator_serializer)
+            .map_err(|e| CircuitSerializationError::SerializationError(e.to_string()))?;
+
+        todo!()
     }
 
     pub fn prove(

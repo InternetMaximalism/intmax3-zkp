@@ -87,7 +87,7 @@ impl AccountState {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct AccountStateTarget {
     pub user_id: UserIdTarget,
     pub account_tree_root: PoseidonHashOutTarget,

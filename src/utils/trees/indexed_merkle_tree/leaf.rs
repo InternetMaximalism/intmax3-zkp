@@ -55,7 +55,7 @@ impl Leafable for IndexedMerkleLeaf {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct IndexedMerkleLeafTarget {
     pub(crate) next_index: Target,
     pub(crate) key: U256Target,

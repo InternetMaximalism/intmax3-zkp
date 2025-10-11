@@ -41,7 +41,7 @@ impl From<U64> for u64 {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
 pub struct U64Target {
     limbs: [Target; U64_LEN],
 }

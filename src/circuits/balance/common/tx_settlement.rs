@@ -139,7 +139,8 @@ where
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(bound = "")]
 pub struct TxSettlementTarget<const D: usize> {
     pub user_id: UserIdTarget,
     pub tx: TxTarget,

@@ -164,7 +164,8 @@ impl<V: Leafable> MerkleProof<V> {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(bound = "")]
 pub(crate) struct MerkleProofTarget<VT: LeafableTarget> {
     pub siblings: Vec<HashOutTarget<VT>>,
 }

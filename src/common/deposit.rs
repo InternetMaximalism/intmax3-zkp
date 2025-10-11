@@ -42,7 +42,7 @@ pub struct Deposit {
     pub aux_data: Bytes32,  // Auxiliary data for the deposit, e.g. timestamp, mining info
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct DepositTarget {
     pub deposit_index: U63Target,
     pub block_number: BlockNumberTarget,

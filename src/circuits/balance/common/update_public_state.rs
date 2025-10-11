@@ -14,6 +14,7 @@ use plonky2::{
         config::{AlgebraicHasher, GenericConfig},
     },
 };
+use serde::{Deserialize, Serialize};
 
 #[derive(thiserror::Error, Debug)]
 pub enum UpdatePublicStateError {
@@ -28,7 +29,7 @@ pub struct UpdatePublicState {
     pub merkle_proof: PublicStateMerkleProof,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct UpdatePublicStateTarget {
     pub new: PublicStateTarget,
     pub old: PublicStateTarget,

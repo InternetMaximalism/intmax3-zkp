@@ -29,7 +29,7 @@ pub struct U256 {
     limbs: [u32; U256_LEN],
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
 pub struct U256Target {
     limbs: [Target; U256_LEN],
 }

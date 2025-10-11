@@ -75,7 +75,7 @@ impl FullPrivateState {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct PrivateStateTarget {
     pub asset_tree_root: PoseidonHashOutTarget,
     pub nullifier_tree_root: PoseidonHashOutTarget,

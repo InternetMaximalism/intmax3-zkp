@@ -48,7 +48,7 @@ pub struct SettledTransfer {
     pub block_number: BlockNumber,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct TransferTarget {
     pub recipient: Bytes32Target,
     pub token_index: Target,

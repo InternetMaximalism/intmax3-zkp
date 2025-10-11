@@ -42,7 +42,7 @@ pub struct PoseidonHashOut {
     pub elements: [u64; 4],
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub struct PoseidonHashOutTarget {
     pub elements: [Target; 4],
 }

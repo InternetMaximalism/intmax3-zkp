@@ -13,6 +13,7 @@ use plonky2::{
         config::{AlgebraicHasher, GenericConfig},
     },
 };
+use serde::{Deserialize, Serialize};
 
 use super::{
     leafable_hasher::{LeafableHasher, PoseidonLeafableHasher},
@@ -21,7 +22,7 @@ use super::{
 use core::fmt::Debug;
 
 /// Leafable trait is used to define the leaf of a Merkle tree.
-pub trait Leafable: Clone + Debug {
+pub trait Leafable: Clone + Debug + Serialize + for<'de> Deserialize<'de> {
     type LeafableHasher: LeafableHasher;
 
     /// Default hash which indicates empty value.
@@ -31,7 +32,7 @@ pub trait Leafable: Clone + Debug {
     fn hash(&self) -> <Self::LeafableHasher as LeafableHasher>::HashOut;
 }
 
-pub trait LeafableTarget: Clone + Debug {
+pub trait LeafableTarget: Clone + Debug + Serialize + for<'de> Deserialize<'de> {
     type Leaf: Leafable;
 
     fn empty_leaf<F: RichField + Extendable<D>, const D: usize>(

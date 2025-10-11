@@ -7,6 +7,7 @@ use plonky2::{
         config::{AlgebraicHasher, GenericConfig},
     },
 };
+use serde::{Deserialize, Serialize};
 
 use crate::{
     common::{
@@ -60,7 +61,7 @@ impl TransferWitness {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct TransferWitnessTarget {
     pub transfer_tree_root: PoseidonHashOutTarget,
     pub transfer: TransferTarget,

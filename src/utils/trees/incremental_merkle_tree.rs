@@ -81,7 +81,7 @@ impl<V: Leafable> IncrementalMerkleTree<V> {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", bound = "")]
 pub struct IncrementalMerkleProof<V: Leafable>(pub MerkleProof<V>);
 
 impl<V: Leafable> IncrementalMerkleProof<V> {
@@ -107,7 +107,8 @@ impl<V: Leafable> IncrementalMerkleProof<V> {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(bound = "")]
 pub struct IncrementalMerkleProofTarget<VT: LeafableTarget>(pub(crate) MerkleProofTarget<VT>);
 
 impl<VT: LeafableTarget> IncrementalMerkleProofTarget<VT> {
@@ -189,6 +190,7 @@ impl<VT: LeafableTarget> IncrementalMerkleProofTarget<VT> {
 
 // Serialization and Deserialization
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(bound = "")]
 struct IncrementalMerkleTreePacked<V: Leafable> {
     height: usize,
     leaves: Vec<V>,
@@ -220,7 +222,7 @@ impl<V: Leafable + Serialize> Serialize for IncrementalMerkleTree<V> {
     }
 }
 
-impl<'de, V: Leafable + Deserialize<'de>> Deserialize<'de> for IncrementalMerkleTree<V> {
+impl<'de, V: Leafable> Deserialize<'de> for IncrementalMerkleTree<V> {
     fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
     where
         D: Deserializer<'de>,

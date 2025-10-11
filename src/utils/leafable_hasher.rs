@@ -27,7 +27,7 @@ pub trait LeafableHasher: Debug + Clone {
         + Hash
         + Serialize
         + DeserializeOwned;
-    type HashOutTarget: Clone + Debug;
+    type HashOutTarget: Clone + Debug + Serialize + DeserializeOwned;
 
     fn two_to_one(left: Self::HashOut, right: Self::HashOut) -> Self::HashOut;
 

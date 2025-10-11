@@ -48,7 +48,7 @@ pub struct SendLeaf {
     pub tx_tree_root: Bytes32,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SendLeafTarget {
     pub prev: BlockNumberTarget,
     pub cur: BlockNumberTarget,
@@ -95,7 +95,7 @@ pub struct AccountLeaf {
     pub send_tree_root: PoseidonHashOut, // the root of send tree
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct AccountLeafTarget {
     pub index: Target,                         // the next index of send leaf
     pub prev: BlockNumberTarget,               // the previous block number

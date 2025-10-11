@@ -85,7 +85,7 @@ impl Default for PublicState {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct PublicStateTarget {
     pub block_number: BlockNumberTarget,
     pub timestamp: U64Target,

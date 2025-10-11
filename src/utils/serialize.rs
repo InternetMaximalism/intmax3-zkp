@@ -74,3 +74,12 @@ where
         .map_err(|e| SerializeError::DeserializationFailed(e.to_string()))?;
     Ok(circuit_data)
 }
+
+#[derive(Debug, thiserror::Error)]
+pub enum CircuitSerializationError {
+    #[error("circuit serialization error: {0}")]
+    SerializationError(String),
+
+    #[error("circuit deserialization error: {0}")]
+    DeserializationError(String),
+}

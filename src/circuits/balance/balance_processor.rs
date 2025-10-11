@@ -46,7 +46,7 @@ pub enum BalanceProcessorError {
 pub struct BalanceProcessor<F, C, const D: usize>
 where
     F: RichField + Extendable<D>,
-    C: GenericConfig<D, F = F> + 'static,
+    C: GenericConfig<D, F = F> + 'static + Default,
     <C as GenericConfig<D>>::Hasher: AlgebraicHasher<F>,
 {
     receive_transfer_circuit: ReceiveTransferCircuit<F, C, D>,
@@ -59,7 +59,7 @@ where
 impl<F, C, const D: usize> BalanceProcessor<F, C, D>
 where
     F: RichField + Extendable<D>,
-    C: GenericConfig<D, F = F> + 'static,
+    C: GenericConfig<D, F = F> + Default + 'static,
     <C as GenericConfig<D>>::Hasher: AlgebraicHasher<F>,
 {
     pub fn new(spend_vd: &VerifierCircuitData<F, C, D>) -> Self {

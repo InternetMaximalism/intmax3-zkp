@@ -123,7 +123,8 @@ where
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(bound = "")]
 pub struct SparseMerkleProofTarget<VT: LeafableTarget>(pub(crate) MerkleProofTarget<VT>);
 
 impl<VT: LeafableTarget> SparseMerkleProofTarget<VT> {
@@ -187,6 +188,7 @@ impl<VT: LeafableTarget> SparseMerkleProofTarget<VT> {
 
 // serialization
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(bound = "")]
 struct SparseMerkleTreePacked<V: Leafable> {
     height: usize,
     leaves: Vec<(u64, V)>,
@@ -221,10 +223,7 @@ where
     }
 }
 
-impl<'de, V: Leafable> Deserialize<'de> for SparseMerkleTree<V>
-where
-    V: Deserialize<'de>,
-{
+impl<'de, V: Leafable> Deserialize<'de> for SparseMerkleTree<V> {
     fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
     where
         D: Deserializer<'de>,
