@@ -588,6 +588,7 @@ dependencies = [
  "log",
  "num",
  "num-bigint 0.4.6",
+ "once_cell",
  "plonky2",
  "plonky2_bn254",
  "plonky2_keccak",

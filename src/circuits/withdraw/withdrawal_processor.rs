@@ -81,10 +81,12 @@ where
         witness: &WithdrawalStepWitness<F, C, D>,
     ) -> Result<ProofWithPublicInputs<F, C, D>, WithdrawalProcessorError> {
         let withdrawal_chain_vd = self.withdrawal_chain_vd();
-        let withdrawal_step_proof =
-            self.withdrawal_step_circuit.prove(&withdrawal_chain_vd, witness)?;
-        let withdrawal_chain_proof =
-            self.withdrawal_chain_circuit.prove(&withdrawal_step_proof)?;
+        let withdrawal_step_proof = self
+            .withdrawal_step_circuit
+            .prove(&withdrawal_chain_vd, witness)?;
+        let withdrawal_chain_proof = self
+            .withdrawal_chain_circuit
+            .prove(&withdrawal_step_proof)?;
         Ok(withdrawal_chain_proof)
     }
 

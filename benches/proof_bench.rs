@@ -37,6 +37,7 @@ use intmax3_zkp::{
     },
     ethereum_types::{address::Address, bytes32::Bytes32, u32limb_trait::U32LimbTrait, u256::U256},
 };
+use once_cell::sync::Lazy;
 use plonky2::{field::goldilocks_field::GoldilocksField, plonk::config::PoseidonGoldilocksConfig};
 use rand::{SeedableRng, rngs::StdRng};
 use std::sync::{Arc, RwLock};
@@ -45,18 +46,23 @@ const D: usize = 2;
 type F = GoldilocksField;
 type C = PoseidonGoldilocksConfig;
 
-fn build_balance_initial_inputs() -> (BalanceProcessor<F, C, D>, UserId, Salt) {
-    let spend_circuit = SpendCircuit::<F, C, D>::new();
-    let balance_processor = BalanceProcessor::<F, C, D>::new(&spend_circuit.data.verifier_data());
+static SPEND_CIRCUIT: Lazy<SpendCircuit<F, C, D>> = Lazy::new(|| SpendCircuit::<F, C, D>::new());
+static BALANCE_PROCESSOR: Lazy<BalanceProcessor<F, C, D>> =
+    Lazy::new(|| BalanceProcessor::<F, C, D>::new(&SPEND_CIRCUIT.data.verifier_data()));
+
+fn build_balance_initial_inputs() -> (&'static BalanceProcessor<F, C, D>, UserId, Salt) {
+    let balance_processor = &*BALANCE_PROCESSOR;
     let user_id = UserId::new(0, 1).expect("user id");
     let mut rng = StdRng::seed_from_u64(0);
     let salt = Salt::rand(&mut rng);
     (balance_processor, user_id, salt)
 }
 
-fn build_deposit_bench_inputs() -> (BalanceProcessor<F, C, D>, ReceiveDepositWitness<F, C, D>) {
-    let spend_circuit = SpendCircuit::<F, C, D>::new();
-    let balance_processor = BalanceProcessor::<F, C, D>::new(&spend_circuit.data.verifier_data());
+fn build_deposit_bench_inputs() -> (
+    &'static BalanceProcessor<F, C, D>,
+    ReceiveDepositWitness<F, C, D>,
+) {
+    let balance_processor = &*BALANCE_PROCESSOR;
 
     let supported_user_counts = vec![2];
     let block_witness_generator = Arc::new(RwLock::new(BlockWitnessGenerator::new(
@@ -106,9 +112,9 @@ fn build_deposit_bench_inputs() -> (BalanceProcessor<F, C, D>, ReceiveDepositWit
     (balance_processor, deposit_witness)
 }
 
-fn build_send_tx_bench_inputs() -> (BalanceProcessor<F, C, D>, SendTxWitness<F, C, D>) {
-    let spend_circuit = SpendCircuit::<F, C, D>::new();
-    let balance_processor = BalanceProcessor::<F, C, D>::new(&spend_circuit.data.verifier_data());
+fn build_send_tx_bench_inputs() -> (&'static BalanceProcessor<F, C, D>, SendTxWitness<F, C, D>) {
+    let spend_circuit = &*SPEND_CIRCUIT;
+    let balance_processor = &*BALANCE_PROCESSOR;
 
     let supported_user_counts = vec![2];
     let block_witness_generator = Arc::new(RwLock::new(BlockWitnessGenerator::new(
@@ -213,10 +219,12 @@ fn build_send_tx_bench_inputs() -> (BalanceProcessor<F, C, D>, SendTxWitness<F, 
     (balance_processor, send_tx_witness)
 }
 
-fn build_receive_transfer_bench_inputs()
--> (BalanceProcessor<F, C, D>, ReceiveTransferWitness<F, C, D>) {
-    let spend_circuit = SpendCircuit::<F, C, D>::new();
-    let balance_processor = BalanceProcessor::<F, C, D>::new(&spend_circuit.data.verifier_data());
+fn build_receive_transfer_bench_inputs() -> (
+    &'static BalanceProcessor<F, C, D>,
+    ReceiveTransferWitness<F, C, D>,
+) {
+    let spend_circuit = &*SPEND_CIRCUIT;
+    let balance_processor = &*BALANCE_PROCESSOR;
 
     let supported_user_counts = vec![2];
     let block_witness_generator = Arc::new(RwLock::new(BlockWitnessGenerator::new(
