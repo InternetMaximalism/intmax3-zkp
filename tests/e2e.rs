@@ -54,6 +54,14 @@ fn e2e_deposit_validity_withdrawal() {
 
     let spend_circuit = SpendCircuit::<F, C, D>::new();
     let balance_processor = BalanceProcessor::<F, C, D>::new(&spend_circuit.data.verifier_data());
+
+    let processor_bytes = balance_processor.to_bytes().unwrap();
+    println!(
+        "balance processor size: {} MB",
+        processor_bytes.len() / 1_000_000
+    );
+    let balance_processor = BalanceProcessor::<F, C, D>::from_bytes(&processor_bytes).unwrap();
+
     let balance_vd = balance_processor.balance_vd();
     let block_witness_generator = Arc::new(RwLock::new(BlockWitnessGenerator::new(
         &supported_user_counts,
