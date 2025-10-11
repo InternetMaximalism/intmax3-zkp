@@ -9,7 +9,8 @@ use intmax3_zkp::{
         },
         test_utils::{
             balance_witness_generator::{
-                BalanceWitnessGenerator, ReceiveDepositData, SendTxData, SingleWithdrawalData,
+                BalanceWitnessGenerator, ReceiveDepositData, ReceiveTransferData, SendTxData,
+                SingleWithdrawalData,
             },
             block_witness_generator::BlockWitnessGenerator,
         },
@@ -114,37 +115,157 @@ fn e2e_deposit_validity_withdrawal() {
         .commit_receive_deposit(&deposit_balance_proof, &deposit_witness)
         .expect("commit deposit");
 
+    // ----- Internal transfer & receive -----
+    let sender_proof = balance_witness_generator.balance_proof.clone();
+    let transfer_salt = Salt::rand(&mut rng);
+    let user_id2 = UserId::new(1, 1).expect("user id 2");
+    let mut balance_witness_generator2 = BalanceWitnessGenerator::new(
+        user_id2,
+        Salt::rand(&mut rng),
+        block_witness_generator.clone(),
+        &balance_processor,
+    )
+    .expect("balance witness generator 2");
+
+    let internal_transfer = Transfer {
+        recipient: calculate_recipient_from_user_id(user_id2, transfer_salt),
+        token_index: 0,
+        amount: U256::from(3u32),
+        aux_data: Bytes32::default(),
+    };
+    let internal_spend_witness = balance_witness_generator
+        .spend_witness(&[internal_transfer.clone()])
+        .expect("internal spend witness");
+    let internal_spend_timer = Instant::now();
+    let internal_spend_proof = spend_circuit
+        .prove(&internal_spend_witness)
+        .expect("internal spend proof");
+    println!(
+        "internal spend proof time: {:?}",
+        internal_spend_timer.elapsed()
+    );
+
+    let mut internal_transfer_tree = TransferTree::init();
+    internal_transfer_tree.push(internal_transfer.clone());
+    let internal_transfer_index = 0u32;
+    let internal_transfer_merkle_proof =
+        internal_transfer_tree.prove(internal_transfer_index as u64);
+    let internal_transfer_tree_root = internal_transfer_tree.get_root();
+
+    let internal_tx = Tx {
+        transfer_tree_root: internal_transfer_tree_root,
+        nonce: balance_witness_generator.full_private_state.nonce,
+    };
+
+    let mut internal_tx_tree = TxTree::init();
+    internal_tx_tree.update(user_id.local_id() as u64, internal_tx.clone());
+    let internal_tx_tree_root = internal_tx_tree.get_root();
+    let internal_tx_tree_root_bytes: Bytes32 = internal_tx_tree_root.into();
+    let internal_tx_merkle_proof = internal_tx_tree.prove(user_id.local_id() as u64);
+
+    {
+        let mut generator = block_witness_generator
+            .write()
+            .expect("block generator lock");
+        generator
+            .add_block(
+                user_id.aggregator_id(),
+                &[user_id.local_id()],
+                1,
+                internal_tx_tree_root_bytes,
+            )
+            .expect("apply internal transfer block");
+    }
+
+    let internal_send_tx_data = SendTxData {
+        spend_proof: internal_spend_proof.clone(),
+        tx_tree_root: internal_tx_tree_root_bytes,
+        tx: internal_tx.clone(),
+        tx_merkle_proof: internal_tx_merkle_proof.clone(),
+    };
+    let internal_send_tx_witness = balance_witness_generator
+        .send_tx_witness(&internal_send_tx_data)
+        .expect("internal send tx witness");
+    let internal_send_tx_timer = Instant::now();
+    let internal_new_balance_proof = balance_processor
+        .prove_send_tx(&internal_send_tx_witness)
+        .expect("internal send tx proof");
+    println!(
+        "internal send tx proof time: {:?}",
+        internal_send_tx_timer.elapsed()
+    );
+    balance_witness_generator
+        .commit_send_tx(
+            &internal_new_balance_proof,
+            &internal_send_tx_witness,
+            &internal_spend_witness,
+        )
+        .expect("commit internal send tx");
+
+    let receive_transfer_data = ReceiveTransferData {
+        to: user_id2,
+        transfer: internal_transfer.clone(),
+        sender_proof,
+        spend_proof: internal_spend_proof,
+        tx_tree_root: internal_tx_tree_root_bytes,
+        tx: internal_tx,
+        tx_merkle_proof: internal_tx_merkle_proof,
+        transfer_index: internal_transfer_index,
+        transfer_merkle_proof: internal_transfer_merkle_proof,
+        transfer_salt,
+    };
+    let receive_transfer_witness = balance_witness_generator2
+        .receive_transfer_witness(&receive_transfer_data)
+        .expect("receive transfer witness");
+    let receive_transfer_timer = Instant::now();
+    let receive_transfer_proof = balance_processor
+        .prove_receive_transfer(&receive_transfer_witness)
+        .expect("receive transfer proof");
+    println!(
+        "receive transfer proof time: {:?}",
+        receive_transfer_timer.elapsed()
+    );
+    balance_witness_generator2
+        .commit_receive_transfer(&receive_transfer_proof, &receive_transfer_witness)
+        .expect("commit receive transfer");
+
     // ----- Withdrawal transaction setup -----
     let withdrawal_address = Address::rand(&mut rng);
-    let transfer = Transfer {
+    let withdrawal_transfer = Transfer {
         recipient: calculate_recipient_from_address(withdrawal_address),
         token_index: 0,
         amount: U256::from(3u32),
         aux_data: Bytes32::default(),
     };
-    let spend_witness = balance_witness_generator
-        .spend_witness(&[transfer.clone()])
-        .expect("spend witness");
-    let spend_timer = Instant::now();
-    let spend_proof = spend_circuit.prove(&spend_witness).expect("spend proof");
-    println!("spend proof time: {:?}", spend_timer.elapsed());
+    let withdrawal_spend_witness = balance_witness_generator
+        .spend_witness(&[withdrawal_transfer.clone()])
+        .expect("withdrawal spend witness");
+    let withdrawal_spend_timer = Instant::now();
+    let withdrawal_spend_proof = spend_circuit
+        .prove(&withdrawal_spend_witness)
+        .expect("withdrawal spend proof");
+    println!(
+        "withdrawal spend proof time: {:?}",
+        withdrawal_spend_timer.elapsed()
+    );
 
-    let mut transfer_tree = TransferTree::init();
-    transfer_tree.push(transfer.clone());
-    let transfer_index = 0u32;
-    let transfer_merkle_proof = transfer_tree.prove(transfer_index as u64);
-    let transfer_tree_root = transfer_tree.get_root();
+    let mut withdrawal_transfer_tree = TransferTree::init();
+    withdrawal_transfer_tree.push(withdrawal_transfer.clone());
+    let withdrawal_transfer_index = 0u32;
+    let withdrawal_transfer_merkle_proof =
+        withdrawal_transfer_tree.prove(withdrawal_transfer_index as u64);
+    let withdrawal_transfer_tree_root = withdrawal_transfer_tree.get_root();
 
-    let tx = Tx {
-        transfer_tree_root,
+    let withdrawal_tx = Tx {
+        transfer_tree_root: withdrawal_transfer_tree_root,
         nonce: balance_witness_generator.full_private_state.nonce,
     };
 
-    let mut tx_tree = TxTree::init();
-    tx_tree.update(user_id.local_id() as u64, tx.clone());
-    let tx_tree_root = tx_tree.get_root();
-    let tx_tree_root_bytes: Bytes32 = tx_tree_root.into();
-    let tx_merkle_proof = tx_tree.prove(user_id.local_id() as u64);
+    let mut withdrawal_tx_tree = TxTree::init();
+    withdrawal_tx_tree.update(user_id.local_id() as u64, withdrawal_tx.clone());
+    let withdrawal_tx_tree_root = withdrawal_tx_tree.get_root();
+    let withdrawal_tx_tree_root_bytes: Bytes32 = withdrawal_tx_tree_root.into();
+    let withdrawal_tx_merkle_proof = withdrawal_tx_tree.prove(user_id.local_id() as u64);
 
     {
         let mut generator = block_witness_generator
@@ -155,37 +276,44 @@ fn e2e_deposit_validity_withdrawal() {
                 user_id.aggregator_id(),
                 &[user_id.local_id()],
                 2,
-                tx_tree_root_bytes,
+                withdrawal_tx_tree_root_bytes,
             )
             .expect("apply withdrawal tx block");
     }
 
-    let send_tx_data = SendTxData {
-        spend_proof: spend_proof.clone(),
-        tx_tree_root: tx_tree_root_bytes,
-        tx: tx.clone(),
-        tx_merkle_proof: tx_merkle_proof.clone(),
+    let withdrawal_send_tx_data = SendTxData {
+        spend_proof: withdrawal_spend_proof.clone(),
+        tx_tree_root: withdrawal_tx_tree_root_bytes,
+        tx: withdrawal_tx.clone(),
+        tx_merkle_proof: withdrawal_tx_merkle_proof.clone(),
     };
-    let send_tx_witness = balance_witness_generator
-        .send_tx_witness(&send_tx_data)
-        .expect("send tx witness");
-    let send_tx_timer = Instant::now();
-    let new_balance_proof = balance_processor
-        .prove_send_tx(&send_tx_witness)
-        .expect("send tx proof");
-    println!("send tx proof time: {:?}", send_tx_timer.elapsed());
+    let withdrawal_send_tx_witness = balance_witness_generator
+        .send_tx_witness(&withdrawal_send_tx_data)
+        .expect("withdrawal send tx witness");
+    let withdrawal_send_tx_timer = Instant::now();
+    let withdrawal_balance_proof = balance_processor
+        .prove_send_tx(&withdrawal_send_tx_witness)
+        .expect("withdrawal send tx proof");
+    println!(
+        "withdrawal send tx proof time: {:?}",
+        withdrawal_send_tx_timer.elapsed()
+    );
     balance_witness_generator
-        .commit_send_tx(&new_balance_proof, &send_tx_witness, &spend_witness)
+        .commit_send_tx(
+            &withdrawal_balance_proof,
+            &withdrawal_send_tx_witness,
+            &withdrawal_spend_witness,
+        )
         .expect("commit send tx");
 
     // ----- Single withdrawal proof -----
     let single_withdrawal_data = SingleWithdrawalData {
-        tx_tree_root: tx_tree_root_bytes,
-        tx: tx.clone(),
-        tx_merkle_proof: tx_merkle_proof.clone(),
-        transfer: transfer.clone(),
-        transfer_index,
-        transfer_merkle_proof: transfer_merkle_proof.clone(),
+        tx_tree_root: withdrawal_tx_tree_root_bytes,
+        tx: withdrawal_tx.clone(),
+        tx_merkle_proof: withdrawal_tx_merkle_proof.clone(),
+        transfer: withdrawal_transfer.clone(),
+        transfer_index: withdrawal_transfer_index,
+        transfer_merkle_proof: withdrawal_transfer_merkle_proof.clone(),
     };
     let single_withdrawal_witness = balance_witness_generator
         .single_withdrawal_witness(&single_withdrawal_data)
