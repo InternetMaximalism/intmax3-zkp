@@ -1,10 +1,7 @@
 use plonky2::{
     field::extension::Extendable,
     hash::hash_types::RichField,
-    iop::{
-        target::Target,
-        witness::{PartialWitness, WitnessWrite},
-    },
+    iop::witness::{PartialWitness, WitnessWrite},
     plonk::{
         circuit_builder::CircuitBuilder,
         circuit_data::{CircuitConfig, CircuitData, CommonCircuitData, VerifierCircuitData},
@@ -584,8 +581,62 @@ where
             .data
             .to_bytes(&gate_serializer, &generator_serializer)
             .map_err(|e| CircuitSerializationError::SerializationError(e.to_string()))?;
+        let balance_cd_bytes = self
+            .balance_cd
+            .to_bytes(&gate_serializer)
+            .map_err(|e| CircuitSerializationError::SerializationError(e.to_string()))?;
+        let target_bytes = bincode::serde::encode_to_vec(&self.target, bincode::config::standard())
+            .map_err(|e| CircuitSerializationError::SerializationError(e.to_string()))?;
+        let public_inputs_bytes =
+            bincode::serde::encode_to_vec(&self.public_inputs, bincode::config::standard())
+                .map_err(|e| CircuitSerializationError::SerializationError(e.to_string()))?;
+        let circuit_bytes = ReceiveTransferCircuitBytes {
+            data: data_bytes,
+            balance_cd: balance_cd_bytes,
+            target: target_bytes,
+            public_inputs: public_inputs_bytes,
+        };
+        let bytes = bincode::serde::encode_to_vec(&circuit_bytes, bincode::config::standard())
+            .map_err(|e| CircuitSerializationError::SerializationError(e.to_string()))?;
+        Ok(bytes)
+    }
 
-        todo!()
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self, CircuitSerializationError> {
+        let (circuit_bytes, _) =
+            bincode::serde::decode_from_slice::<ReceiveTransferCircuitBytes, _>(
+                bytes,
+                bincode::config::standard(),
+            )
+            .map_err(|e| CircuitSerializationError::DeserializationError(e.to_string()))?;
+        let gate_serializer = AllGateSerializer;
+        let generator_serializer = DefaultGeneratorSerializer::<C, D>::default();
+        let data = CircuitData::<F, C, D>::from_bytes(
+            &circuit_bytes.data,
+            &gate_serializer,
+            &generator_serializer,
+        )
+        .map_err(|e| CircuitSerializationError::DeserializationError(e.to_string()))?;
+        let balance_cd =
+            CommonCircuitData::<F, D>::from_bytes(circuit_bytes.balance_cd, &gate_serializer)
+                .map_err(|e| CircuitSerializationError::DeserializationError(e.to_string()))?;
+        let target = bincode::serde::decode_from_slice::<ReceiveTransferTarget<D>, _>(
+            &circuit_bytes.target,
+            bincode::config::standard(),
+        )
+        .map_err(|e| CircuitSerializationError::DeserializationError(e.to_string()))?
+        .0;
+        let public_inputs = bincode::serde::decode_from_slice::<BalanceFullPublicInputsTarget, _>(
+            &circuit_bytes.public_inputs,
+            bincode::config::standard(),
+        )
+        .map_err(|e| CircuitSerializationError::DeserializationError(e.to_string()))?
+        .0;
+        Ok(Self {
+            data,
+            balance_cd,
+            target,
+            public_inputs,
+        })
     }
 
     pub fn prove(
@@ -601,6 +652,14 @@ where
             .prove(pw)
             .map_err(|e| ReceiveTransferError::FailedToProve(e.to_string()))
     }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReceiveTransferCircuitBytes {
+    pub data: Vec<u8>,
+    pub balance_cd: Vec<u8>,
+    pub target: Vec<u8>,
+    pub public_inputs: Vec<u8>,
 }
 
 #[cfg(test)]
@@ -951,5 +1010,25 @@ mod tests {
             expected.pis.private_commitment,
             update_private_state.new_private_state.commitment(),
         );
+    }
+
+    #[test]
+    fn test_receive_transfer_circuit_serialization() {
+        let pis_len = BALANCE_PUBLIC_INPUTS_LEN;
+        let balance_common_data = TestCyclicCircuit::<F, C, D>::generate_cd(pis_len);
+        let balance_config = CircuitConfig::standard_recursion_config();
+        let balance_circuit =
+            TestCyclicCircuit::<F, C, D>::new(balance_config, pis_len, &balance_common_data);
+        let balance_vd = balance_circuit.data.verifier_data();
+        let balance_cd = balance_vd.common.clone();
+
+        let spend_circuit = SpendCircuit::<F, C, D>::new();
+        let spend_vd = spend_circuit.data.verifier_data();
+        let circuit = ReceiveTransferCircuit::<F, C, D>::new(&balance_cd, &spend_vd);
+
+        let bytes = circuit.to_bytes().expect("circuit to bytes");
+        let deserialized =
+            ReceiveTransferCircuit::<F, C, D>::from_bytes(&bytes).expect("circuit from bytes");
+        assert_eq!(circuit.data, deserialized.data);
     }
 }

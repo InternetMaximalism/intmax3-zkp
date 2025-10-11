@@ -21,6 +21,10 @@ log = "0.4.28"
 ff = { package = "ff", version = "0.13", features = ["derive"] }
 anyhow = "1.0.100"
 lazy_static = "1.5.0"
+bincode = { version = "2.0.1", features = ["serde"] }
+
+[patch."https://github.com/InternetMaximalism/polygon-plonky2.git"]
+plonky2 = { path = "../polygon-plonky2/plonky2" }
 
 [dev-dependencies]
 criterion = "0.5"
