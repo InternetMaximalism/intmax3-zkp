@@ -120,13 +120,10 @@ pub fn add_noop_gates<F: RichField + Extendable<D>, const D: usize>(
     }
 }
 
-pub fn add_const_gates<F: RichField + Extendable<D>, const D: usize>(
+pub fn add_const_gate<F: RichField + Extendable<D>, const D: usize>(
     builder: &mut CircuitBuilder<F, D>,
-    target_num_gates: u64,
 ) {
-    while (builder.num_gates() as u64) < target_num_gates {
-        builder.add_gate(ConstantGate::new(2), vec![]);
-    }
+    builder.add_gate(ConstantGate::new(2), vec![]);
 }
 
 pub fn simple_recursion_circuit_data<

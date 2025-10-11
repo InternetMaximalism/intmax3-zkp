@@ -15,7 +15,7 @@ use crate::{
         u64::{U64, U64_LEN, U64Target},
     },
     utils::{
-        cyclic::add_const_gates,
+        cyclic::add_const_gate,
         leafable::Leafable as _,
         poseidon_hash_out::{POSEIDON_HASH_OUT_LEN, PoseidonHashOut, PoseidonHashOutTarget},
     },
@@ -597,7 +597,7 @@ where
         builder.register_public_inputs(&public_inputs.to_vec());
 
         // add constant gates to enable conditional verification
-        add_const_gates(&mut builder, 1 << 12);
+        add_const_gate(&mut builder);
 
         let data = builder.build();
 

@@ -53,7 +53,7 @@ where
         balance_cd: &CommonCircuitData<F, D>,
         switch_vd: &VerifierCircuitData<F, C, D>,
     ) -> Self {
-        let mut builder = CircuitBuilder::<F, D>::new(CircuitConfig::default());
+        let mut builder = CircuitBuilder::<F, D>::new(CircuitConfig::standard_recursion_config());
         let switch_proof = add_proof_target_and_verify(switch_vd, &mut builder);
         let new_balance_pis = BalanceFullPublicInputsTarget::from_pis(
             &switch_proof.public_inputs,
