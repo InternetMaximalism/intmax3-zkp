@@ -21,3 +21,10 @@ log = "0.4.28"
 ff = { package = "ff", version = "0.13", features = ["derive"] }
 anyhow = "1.0.100"
 lazy_static = "1.5.0"
+
+[dev-dependencies]
+criterion = "0.5"
+
+[[bench]]
+name = "proof_bench"
+harness = false
