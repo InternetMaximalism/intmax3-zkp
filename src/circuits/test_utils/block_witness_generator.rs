@@ -28,6 +28,76 @@ use crate::{
 };
 use std::collections::HashMap;
 
+#[cfg(not(target_arch = "wasm32"))]
+use std::sync::{Arc, RwLock, RwLockReadGuard, RwLockWriteGuard};
+#[cfg(target_arch = "wasm32")]
+use std::{
+    cell::{Ref, RefCell, RefMut},
+    rc::Rc,
+};
+
+/// Shared handle to a [`BlockWitnessGenerator`] that works on native and wasm targets.
+#[derive(Clone, Debug)]
+pub struct BlockWitnessGeneratorHandle {
+    #[cfg(target_arch = "wasm32")]
+    inner: Rc<RefCell<BlockWitnessGenerator>>,
+    #[cfg(not(target_arch = "wasm32"))]
+    inner: Arc<RwLock<BlockWitnessGenerator>>,
+}
+
+#[cfg(target_arch = "wasm32")]
+type BlockWitnessGeneratorReadGuard<'a> = Ref<'a, BlockWitnessGenerator>;
+#[cfg(target_arch = "wasm32")]
+type BlockWitnessGeneratorWriteGuard<'a> = RefMut<'a, BlockWitnessGenerator>;
+
+#[cfg(not(target_arch = "wasm32"))]
+type BlockWitnessGeneratorReadGuard<'a> = RwLockReadGuard<'a, BlockWitnessGenerator>;
+#[cfg(not(target_arch = "wasm32"))]
+type BlockWitnessGeneratorWriteGuard<'a> = RwLockWriteGuard<'a, BlockWitnessGenerator>;
+
+impl BlockWitnessGeneratorHandle {
+    pub fn new(generator: BlockWitnessGenerator) -> Self {
+        #[cfg(target_arch = "wasm32")]
+        {
+            Self {
+                inner: Rc::new(RefCell::new(generator)),
+            }
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            Self {
+                inner: Arc::new(RwLock::new(generator)),
+            }
+        }
+    }
+
+    pub fn borrow(&self) -> BlockWitnessGeneratorReadGuard<'_> {
+        #[cfg(target_arch = "wasm32")]
+        {
+            self.inner.borrow()
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            self.inner
+                .read()
+                .expect("block witness generator read lock")
+        }
+    }
+
+    pub fn borrow_mut(&self) -> BlockWitnessGeneratorWriteGuard<'_> {
+        #[cfg(target_arch = "wasm32")]
+        {
+            self.inner.borrow_mut()
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            self.inner
+                .write()
+                .expect("block witness generator write lock")
+        }
+    }
+}
+
 #[derive(thiserror::Error, Debug)]
 pub enum BlockWitnessGeneratorError {
     #[error("Too many local IDs: {0}")]

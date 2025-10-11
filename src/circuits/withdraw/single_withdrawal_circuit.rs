@@ -625,7 +625,7 @@ mod tests {
                 balance_witness_generator::{
                     BalanceWitnessGenerator, ReceiveDepositData, SendTxData, SingleWithdrawalData,
                 },
-                block_witness_generator::BlockWitnessGenerator,
+                block_witness_generator::{BlockWitnessGenerator, BlockWitnessGeneratorHandle},
             },
         },
         common::{
@@ -644,7 +644,6 @@ mod tests {
         field::goldilocks_field::GoldilocksField, plonk::config::PoseidonGoldilocksConfig,
     };
     use rand::{SeedableRng, rngs::StdRng};
-    use std::sync::{Arc, RwLock};
 
     const D: usize = 2;
     type F = GoldilocksField;
@@ -660,9 +659,8 @@ mod tests {
             BalanceProcessor::<F, C, D>::new(&spend_circuit.data.verifier_data());
         let balance_vd = balance_processor.balance_vd();
 
-        let block_witness_generator = Arc::new(RwLock::new(BlockWitnessGenerator::new(
-            &supported_user_counts,
-        )));
+        let block_witness_generator =
+            BlockWitnessGeneratorHandle::new(BlockWitnessGenerator::new(&supported_user_counts));
 
         let mut rng = StdRng::seed_from_u64(1234);
         let user_id = UserId::new(0, 1).unwrap();
@@ -679,8 +677,7 @@ mod tests {
         let deposit_salt = Salt::rand(&mut rng);
         let deposit_recipient = calculate_recipient_from_user_id(user_id, deposit_salt);
         block_witness_generator
-            .write()
-            .unwrap()
+            .borrow_mut()
             .add_deposit(
                 Address::rand(&mut rng),
                 deposit_recipient,
@@ -690,8 +687,7 @@ mod tests {
             )
             .unwrap();
         block_witness_generator
-            .write()
-            .unwrap()
+            .borrow_mut()
             .add_block(0, &[], 0, Bytes32::default())
             .unwrap();
         let deposit_data = ReceiveDepositData {
@@ -739,8 +735,7 @@ mod tests {
         let tx_merkle_proof = tx_tree.prove(user_id.local_id() as u64);
 
         block_witness_generator
-            .write()
-            .unwrap()
+            .borrow_mut()
             .add_block(
                 user_id.aggregator_id(),
                 &[user_id.local_id()],

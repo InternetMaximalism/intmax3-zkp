@@ -12,7 +12,7 @@ use intmax3_zkp::{
                 BalanceWitnessGenerator, ReceiveDepositData, ReceiveTransferData, SendTxData,
                 SingleWithdrawalData,
             },
-            block_witness_generator::BlockWitnessGenerator,
+            block_witness_generator::{BlockWitnessGenerator, BlockWitnessGeneratorHandle},
         },
         validity::block_hash_chain::{
             block_hash_chain_processor::BlockHashChainProcessor, validity_circuit::ValidityCircuit,
@@ -34,10 +34,7 @@ use intmax3_zkp::{
 };
 use plonky2::{field::goldilocks_field::GoldilocksField, plonk::config::PoseidonGoldilocksConfig};
 use rand::{SeedableRng, rngs::StdRng};
-use std::{
-    sync::{Arc, RwLock},
-    time::Instant,
-};
+use std::time::Instant;
 
 const D: usize = 2;
 type F = GoldilocksField;
@@ -63,9 +60,8 @@ fn e2e_deposit_validity_withdrawal() {
     let balance_processor = BalanceProcessor::<F, C, D>::from_bytes(&processor_bytes).unwrap();
 
     let balance_vd = balance_processor.balance_vd();
-    let block_witness_generator = Arc::new(RwLock::new(BlockWitnessGenerator::new(
-        &supported_user_counts,
-    )));
+    let block_witness_generator =
+        BlockWitnessGeneratorHandle::new(BlockWitnessGenerator::new(&supported_user_counts));
 
     let mut rng = StdRng::seed_from_u64(1);
     let user_id = UserId::new(0, 1).expect("user id");
@@ -79,20 +75,15 @@ fn e2e_deposit_validity_withdrawal() {
     )
     .expect("balance witness generator");
 
-    let initial_ext_state = {
-        let guard = block_witness_generator
-            .read()
-            .expect("block generator lock");
-        guard.current_extended_public_state()
-    };
+    let initial_ext_state = block_witness_generator
+        .borrow()
+        .current_extended_public_state();
 
     // ----- Deposit phase -----
     let deposit_salt = Salt::rand(&mut rng);
     let deposit_recipient = calculate_recipient_from_user_id(user_id, deposit_salt);
     {
-        let mut generator = block_witness_generator
-            .write()
-            .expect("block generator lock");
+        let mut generator = block_witness_generator.borrow_mut();
         generator
             .add_deposit(
                 Address::rand(&mut rng),
@@ -172,9 +163,7 @@ fn e2e_deposit_validity_withdrawal() {
     let internal_tx_merkle_proof = internal_tx_tree.prove(user_id.local_id() as u64);
 
     {
-        let mut generator = block_witness_generator
-            .write()
-            .expect("block generator lock");
+        let mut generator = block_witness_generator.borrow_mut();
         generator
             .add_block(
                 user_id.aggregator_id(),
@@ -276,9 +265,7 @@ fn e2e_deposit_validity_withdrawal() {
     let withdrawal_tx_merkle_proof = withdrawal_tx_tree.prove(user_id.local_id() as u64);
 
     {
-        let mut generator = block_witness_generator
-            .write()
-            .expect("block generator lock");
+        let mut generator = block_witness_generator.borrow_mut();
         generator
             .add_block(
                 user_id.aggregator_id(),
@@ -362,8 +349,7 @@ fn e2e_deposit_validity_withdrawal() {
         .expect("verify withdrawal chain proof");
 
     let ext_public_state = block_witness_generator
-        .read()
-        .expect("block generator lock")
+        .borrow()
         .current_extended_public_state();
     let withdrawal_aggregator = Address::rand(&mut rng);
     let withdrawal_final_timer = Instant::now();
@@ -387,9 +373,7 @@ fn e2e_deposit_validity_withdrawal() {
     let mut prev_block_proof = None;
     let mut last_block_proof = None;
     {
-        let guard = block_witness_generator
-            .read()
-            .expect("block generator lock");
+        let guard = block_witness_generator.borrow();
         let total_blocks = guard.block_number.as_u64();
         for block_idx in 1..=total_blocks {
             let block_number = BlockNumber::new(block_idx).expect("block number");

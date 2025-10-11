@@ -15,7 +15,7 @@ use intmax3_zkp::{
             balance_witness_generator::{
                 BalanceWitnessGenerator, ReceiveDepositData, ReceiveTransferData, SendTxData,
             },
-            block_witness_generator::BlockWitnessGenerator,
+            block_witness_generator::{BlockWitnessGenerator, BlockWitnessGeneratorHandle},
         },
         validity::{
             block_hash_chain::block_hash_chain_processor::{
@@ -40,7 +40,6 @@ use intmax3_zkp::{
 use once_cell::sync::Lazy;
 use plonky2::{field::goldilocks_field::GoldilocksField, plonk::config::PoseidonGoldilocksConfig};
 use rand::{SeedableRng, rngs::StdRng};
-use std::sync::{Arc, RwLock};
 
 const D: usize = 2;
 type F = GoldilocksField;
@@ -65,9 +64,8 @@ fn build_deposit_bench_inputs() -> (
     let balance_processor = &*BALANCE_PROCESSOR;
 
     let supported_user_counts = vec![2];
-    let block_witness_generator = Arc::new(RwLock::new(BlockWitnessGenerator::new(
-        &supported_user_counts,
-    )));
+    let block_witness_generator =
+        BlockWitnessGeneratorHandle::new(BlockWitnessGenerator::new(&supported_user_counts));
 
     let mut rng = StdRng::seed_from_u64(1);
     let user_id = UserId::new(0, 1).expect("user id");
@@ -84,9 +82,7 @@ fn build_deposit_bench_inputs() -> (
     let deposit_salt = Salt::rand(&mut rng);
     let deposit_recipient = calculate_recipient_from_user_id(user_id, deposit_salt);
     {
-        let mut generator = block_witness_generator
-            .write()
-            .expect("block generator lock");
+        let mut generator = block_witness_generator.borrow_mut();
         generator
             .add_deposit(
                 Address::rand(&mut rng),
@@ -117,9 +113,8 @@ fn build_send_tx_bench_inputs() -> (&'static BalanceProcessor<F, C, D>, SendTxWi
     let balance_processor = &*BALANCE_PROCESSOR;
 
     let supported_user_counts = vec![2];
-    let block_witness_generator = Arc::new(RwLock::new(BlockWitnessGenerator::new(
-        &supported_user_counts,
-    )));
+    let block_witness_generator =
+        BlockWitnessGeneratorHandle::new(BlockWitnessGenerator::new(&supported_user_counts));
 
     let mut rng = StdRng::seed_from_u64(2);
     let user_id = UserId::new(0, 1).expect("user id");
@@ -135,9 +130,7 @@ fn build_send_tx_bench_inputs() -> (&'static BalanceProcessor<F, C, D>, SendTxWi
     let deposit_salt = Salt::rand(&mut rng);
     let deposit_recipient = calculate_recipient_from_user_id(user_id, deposit_salt);
     {
-        let mut generator = block_witness_generator
-            .write()
-            .expect("block generator lock");
+        let mut generator = block_witness_generator.borrow_mut();
         generator
             .add_deposit(
                 Address::rand(&mut rng),
@@ -193,9 +186,7 @@ fn build_send_tx_bench_inputs() -> (&'static BalanceProcessor<F, C, D>, SendTxWi
     let tx_tree_root_bytes: Bytes32 = tx_tree_root.into();
 
     {
-        let mut generator = block_witness_generator
-            .write()
-            .expect("block generator lock");
+        let mut generator = block_witness_generator.borrow_mut();
         generator
             .add_block(
                 user_id.aggregator_id(),
@@ -227,9 +218,8 @@ fn build_receive_transfer_bench_inputs() -> (
     let balance_processor = &*BALANCE_PROCESSOR;
 
     let supported_user_counts = vec![2];
-    let block_witness_generator = Arc::new(RwLock::new(BlockWitnessGenerator::new(
-        &supported_user_counts,
-    )));
+    let block_witness_generator =
+        BlockWitnessGeneratorHandle::new(BlockWitnessGenerator::new(&supported_user_counts));
 
     let mut rng = StdRng::seed_from_u64(3);
     let user_id = UserId::new(0, 1).expect("user id");
@@ -245,9 +235,7 @@ fn build_receive_transfer_bench_inputs() -> (
     let deposit_salt = Salt::rand(&mut rng);
     let deposit_recipient = calculate_recipient_from_user_id(user_id, deposit_salt);
     {
-        let mut generator = block_witness_generator
-            .write()
-            .expect("block generator lock");
+        let mut generator = block_witness_generator.borrow_mut();
         generator
             .add_deposit(
                 Address::rand(&mut rng),
@@ -316,9 +304,7 @@ fn build_receive_transfer_bench_inputs() -> (
     let tx_tree_root_bytes: Bytes32 = tx_tree_root.into();
 
     {
-        let mut generator = block_witness_generator
-            .write()
-            .expect("block generator lock");
+        let mut generator = block_witness_generator.borrow_mut();
         generator
             .add_block(
                 user_id.aggregator_id(),

@@ -17,7 +17,9 @@ use crate::{
             send_tx_circuit::SendTxWitness,
             spend_circuit::SpendWitness,
         },
-        test_utils::block_witness_generator::{BlockWitnessGenerator, BlockWitnessGeneratorError},
+        test_utils::block_witness_generator::{
+            BlockWitnessGeneratorError, BlockWitnessGeneratorHandle,
+        },
         withdraw::single_withdrawal_circuit::SingleWithdawalWitness,
     },
     common::{
@@ -42,7 +44,6 @@ use plonky2::{
         proof::ProofWithPublicInputs,
     },
 };
-use std::sync::{Arc, RwLock};
 use thiserror::Error;
 
 #[derive(Debug, Error)]
@@ -94,7 +95,7 @@ where
     pub balance_proof: ProofWithPublicInputs<F, C, D>,
     pub full_private_state: FullPrivateState,
 
-    pub block_witness_generator: Arc<RwLock<BlockWitnessGenerator>>,
+    pub block_witness_generator: BlockWitnessGeneratorHandle,
 }
 
 impl<F, C, const D: usize> BalanceWitnessGenerator<F, C, D>
@@ -106,7 +107,7 @@ where
     pub fn new(
         user_id: UserId,
         salt: Salt,
-        block_witness_generator: Arc<RwLock<BlockWitnessGenerator>>,
+        block_witness_generator: BlockWitnessGeneratorHandle,
         balance_processor: &BalanceProcessor<F, C, D>,
     ) -> Result<Self, BalanceWitnessGeneratorError> {
         let balance_proof = balance_processor.prove_initial(user_id, salt)?;
@@ -173,7 +174,7 @@ where
     ) -> Result<ReceiveTransferWitness<F, C, D>, BalanceWitnessGeneratorError> {
         let prev_balance_proof = self.balance_proof.clone();
         let prev_balance_pis = self.get_public_inputs()?;
-        let current_block_number = self.block_witness_generator.read().unwrap().block_number;
+        let current_block_number = self.block_witness_generator.borrow().block_number;
 
         let sender_balance_pis = BalancePublicInputs::from_u64(
             &data.sender_proof.public_inputs.to_u64_vec()[..BALANCE_PUBLIC_INPUTS_LEN],
@@ -183,13 +184,11 @@ where
         assert_eq!(data.to, self.user_id);
         let sender_update_public_state = self
             .block_witness_generator
-            .read()
-            .unwrap()
+            .borrow()
             .get_update_public_state_witness(sender_balance_pis.public_state.block_number)?;
         let receiver_update_public_state = self
             .block_witness_generator
-            .read()
-            .unwrap()
+            .borrow()
             .get_update_public_state_witness(prev_balance_pis.public_state.block_number)?;
 
         assert_eq!(
@@ -208,8 +207,7 @@ where
 
         let send_status = self
             .block_witness_generator
-            .read()
-            .unwrap()
+            .borrow()
             .get_send_status(self.user_id, prev_balance_pis.block_r)?;
         let new_block_r = match send_status.next_send_block {
             Some(next_block) => BlockNumber::new(next_block.as_u64() - 1)
@@ -226,8 +224,7 @@ where
 
         let account_state_sender = self
             .block_witness_generator
-            .read()
-            .unwrap()
+            .borrow()
             .get_account_state_for_tx(sender_balance_pis.user_id, data.tx_tree_root)?
             .1;
         let tx_block_number = account_state_sender.send_leaf.cur;
@@ -246,8 +243,7 @@ where
 
         let (_, account_state_receiver) = self
             .block_witness_generator
-            .read()
-            .unwrap()
+            .borrow()
             .get_account_state(self.user_id, prev_balance_pis.block_r)?;
         assert_eq!(
             account_state_receiver.account_tree_root, new_public_state.account_tree_root,
@@ -350,12 +346,11 @@ where
         let prev_balance_proof = self.balance_proof.clone();
         let prev_balance_pis = self.get_public_inputs()?;
 
-        let current_block_number = self.block_witness_generator.read().unwrap().block_number;
+        let current_block_number = self.block_witness_generator.borrow().block_number;
 
         let update_public_state = self
             .block_witness_generator
-            .read()
-            .unwrap()
+            .borrow()
             .get_update_public_state_witness(prev_balance_pis.public_state.block_number)?;
         assert_eq!(
             update_public_state.old, prev_balance_pis.public_state,
@@ -365,8 +360,7 @@ where
 
         let send_status = self
             .block_witness_generator
-            .read()
-            .unwrap()
+            .borrow()
             .get_send_status(self.user_id, prev_balance_pis.block_r)?;
         let new_block_r = match send_status.next_send_block {
             Some(next_block) => BlockNumber::new(next_block.as_u64() - 1)
@@ -383,8 +377,7 @@ where
 
         let (_, account_state) = self
             .block_witness_generator
-            .read()
-            .unwrap()
+            .borrow()
             .get_account_state(self.user_id, prev_balance_pis.block_r)?;
         assert_eq!(
             account_state.account_tree_root, new_public_state.account_tree_root,
@@ -393,8 +386,7 @@ where
 
         let (deposit, deposit_merkle_proof) = self
             .block_witness_generator
-            .read()
-            .unwrap()
+            .borrow()
             .get_deposit_merkle_proof(data.receiver)?;
         if deposit.block_number.as_u64() > new_block_r.as_u64() {
             return Err(BalanceWitnessGeneratorError::InvalidBlock(format!(
@@ -483,8 +475,7 @@ where
 
         let update_public_state = self
             .block_witness_generator
-            .read()
-            .unwrap()
+            .borrow()
             .get_update_public_state_witness(prev_balance_pis.public_state.block_number)?;
         assert_eq!(
             update_public_state.old, prev_balance_pis.public_state,
@@ -494,8 +485,7 @@ where
 
         let account_state = self
             .block_witness_generator
-            .read()
-            .unwrap()
+            .borrow()
             .get_account_state_for_tx(self.user_id, data.tx_tree_root)?
             .1;
         assert_eq!(
@@ -580,14 +570,12 @@ where
 
         let update_public_state = self
             .block_witness_generator
-            .read()
-            .unwrap()
+            .borrow()
             .get_update_public_state_witness(balance_pis.public_state.block_number)?;
 
         let account_state = self
             .block_witness_generator
-            .read()
-            .unwrap()
+            .borrow()
             .get_account_state_for_tx(self.user_id, data.tx_tree_root)?
             .1;
 
@@ -665,11 +653,11 @@ pub struct SingleWithdrawalData {
 
 #[cfg(test)]
 mod tests {
+    use super::BlockWitnessGeneratorHandle;
     use plonky2::{
         field::goldilocks_field::GoldilocksField, plonk::config::PoseidonGoldilocksConfig,
     };
     use rand::{SeedableRng as _, rngs::StdRng};
-    use std::sync::{Arc, RwLock};
 
     use crate::{
         circuits::{
@@ -708,9 +696,8 @@ mod tests {
         let spend_circuit = SpendCircuit::<F, C, D>::new();
         let balance_processor =
             BalanceProcessor::<F, C, D>::new(&spend_circuit.data.verifier_data());
-        let block_witness_generator = Arc::new(RwLock::new(BlockWitnessGenerator::new(
-            &supported_user_counts,
-        )));
+        let block_witness_generator =
+            BlockWitnessGeneratorHandle::new(BlockWitnessGenerator::new(&supported_user_counts));
 
         let mut rng = StdRng::seed_from_u64(42);
         let user_id = UserId::new(0, 1).unwrap();
@@ -727,8 +714,7 @@ mod tests {
         let deposit_salt = Salt::rand(&mut rng);
         let recipient = calculate_recipient_from_user_id(user_id, deposit_salt);
         block_witness_generator
-            .write()
-            .unwrap()
+            .borrow_mut()
             .add_deposit(
                 Address::rand(&mut rng),
                 recipient,
@@ -744,8 +730,7 @@ mod tests {
 
         // add block to make the deposit available
         block_witness_generator
-            .write()
-            .unwrap()
+            .borrow_mut()
             .add_block(0, &[], 0, Bytes32::default())
             .unwrap();
 
@@ -805,8 +790,7 @@ mod tests {
 
         // add block
         block_witness_generator
-            .write()
-            .unwrap()
+            .borrow_mut()
             .add_block(
                 user_id.aggregator_id(),
                 &[user_id.local_id()],
