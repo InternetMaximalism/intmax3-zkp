@@ -1,24 +1,53 @@
+use std::marker::PhantomData;
+
 use crate::utils::error::{Result, SerializeError};
 use plonky2::{
     field::extension::Extendable,
-    gates::{
-        arithmetic_base::ArithmeticGate, arithmetic_extension::ArithmeticExtensionGate,
-        base_sum::BaseSumGate, constant::ConstantGate, coset_interpolation::CosetInterpolationGate,
-        exponentiation::ExponentiationGate, lookup::LookupGate, lookup_table::LookupTableGate,
-        multiplication_extension::MulExtensionGate, noop::NoopGate, poseidon::PoseidonGate,
-        poseidon_mds::PoseidonMdsGate, public_input::PublicInputGate,
-        random_access::RandomAccessGate, reducing::ReducingGate,
-        reducing_extension::ReducingExtensionGate,
+    gadgets::{
+        arithmetic::EqualityGenerator,
+        arithmetic_extension::QuotientGeneratorExtension,
+        range_check::LowHighGenerator,
+        split_base::BaseSumGenerator,
+        split_join::{SplitGenerator, WireSplitGenerator},
     },
-    get_gate_tag_impl,
+    gates::{
+        arithmetic_base::{ArithmeticBaseGenerator, ArithmeticGate},
+        arithmetic_extension::{ArithmeticExtensionGate, ArithmeticExtensionGenerator},
+        base_sum::{BaseSplitGenerator, BaseSumGate},
+        constant::ConstantGate,
+        coset_interpolation::{CosetInterpolationGate, InterpolationGenerator},
+        exponentiation::{ExponentiationGate, ExponentiationGenerator},
+        lookup::{LookupGate, LookupGenerator},
+        lookup_table::{LookupTableGate, LookupTableGenerator},
+        multiplication_extension::{MulExtensionGate, MulExtensionGenerator},
+        noop::NoopGate,
+        poseidon::{PoseidonGate, PoseidonGenerator},
+        poseidon_mds::{PoseidonMdsGate, PoseidonMdsGenerator},
+        public_input::PublicInputGate,
+        random_access::{RandomAccessGate, RandomAccessGenerator},
+        reducing::{ReducingGate, ReducingGenerator},
+        reducing_extension::{
+            ReducingExtensionGate, ReducingGenerator as ReducingExtensionGenerator,
+        },
+    },
+    get_gate_tag_impl, get_generator_tag_impl,
     hash::hash_types::RichField,
-    impl_gate_serializer,
-    plonk::{circuit_data::VerifierCircuitData, config::GenericConfig},
-    read_gate_impl,
-    util::serialization::GateSerializer,
+    impl_gate_serializer, impl_generator_serializer,
+    iop::generator::{
+        ConstantGenerator, CopyGenerator, NonzeroTestGenerator, RandomValueGenerator,
+    },
+    plonk::{
+        circuit_data::VerifierCircuitData,
+        config::{AlgebraicHasher, GenericConfig},
+    },
+    read_gate_impl, read_generator_impl,
+    recursion::dummy_circuit::DummyProofGenerator,
+    util::serialization::{GateSerializer, WitnessGeneratorSerializer},
 };
 use plonky2_u32::gates::{
-    add_many_u32::U32AddManyGate, comparison::ComparisonGate, subtraction_u32::U32SubtractionGate,
+    add_many_u32::{U32AddManyGate, U32AddManyGenerator},
+    comparison::{ComparisonGate, ComparisonGenerator},
+    subtraction_u32::{U32SubtractionGate, U32SubtractionGenerator},
 };
 
 #[derive(Debug)]
@@ -45,6 +74,49 @@ impl<F: RichField + Extendable<D>, const D: usize> GateSerializer<F, D> for AllG
         ComparisonGate<F, D>,
         U32AddManyGate<F, D>,
         U32SubtractionGate<F, D>
+    }
+}
+
+#[derive(Debug, Default)]
+pub struct AllGeneratorSerializer<C: GenericConfig<D>, const D: usize> {
+    pub _phantom: PhantomData<C>,
+}
+
+impl<F, C, const D: usize> WitnessGeneratorSerializer<F, D> for AllGeneratorSerializer<C, D>
+where
+    F: RichField + Extendable<D>,
+    C: GenericConfig<D, F = F> + 'static,
+    C::Hasher: AlgebraicHasher<F>,
+{
+    impl_generator_serializer! {
+        DefaultGeneratorSerializer,
+        ArithmeticBaseGenerator<F, D>,
+        ArithmeticExtensionGenerator<F, D>,
+        BaseSplitGenerator<2>,
+        BaseSumGenerator<2>,
+        ConstantGenerator<F>,
+        CopyGenerator,
+        DummyProofGenerator<F, C, D>,
+        EqualityGenerator,
+        ExponentiationGenerator<F, D>,
+        InterpolationGenerator<F, D>,
+        LookupGenerator,
+        LookupTableGenerator,
+        LowHighGenerator,
+        MulExtensionGenerator<F, D>,
+        NonzeroTestGenerator,
+        PoseidonGenerator<F, D>,
+        PoseidonMdsGenerator<D>,
+        QuotientGeneratorExtension<D>,
+        RandomAccessGenerator<F, D>,
+        RandomValueGenerator,
+        ReducingGenerator<D>,
+        ReducingExtensionGenerator<D>,
+        SplitGenerator,
+        WireSplitGenerator,
+        ComparisonGenerator<F, D>,
+        U32AddManyGenerator<F, D>,
+        U32SubtractionGenerator<F, D>
     }
 }
 

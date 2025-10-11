@@ -8,7 +8,6 @@ use plonky2::{
         config::{AlgebraicHasher, GenericConfig},
         proof::{ProofWithPublicInputs, ProofWithPublicInputsTarget},
     },
-    util::serialization::DefaultGeneratorSerializer,
 };
 use serde::{Deserialize, Serialize};
 
@@ -38,7 +37,7 @@ use crate::{
     utils::{
         conversion::ToU64,
         cyclic::add_const_gate,
-        serialize::{AllGateSerializer, CircuitSerializationError},
+        serialize::{AllGateSerializer, AllGeneratorSerializer, CircuitSerializationError},
     },
 };
 
@@ -576,7 +575,7 @@ where
 
     pub fn to_bytes(&self) -> Result<Vec<u8>, CircuitSerializationError> {
         let gate_serializer = AllGateSerializer;
-        let generator_serializer = DefaultGeneratorSerializer::<C, D>::default();
+        let generator_serializer = AllGeneratorSerializer::<C, D>::default();
         let data_bytes = self
             .data
             .to_bytes(&gate_serializer, &generator_serializer)
@@ -609,7 +608,7 @@ where
             )
             .map_err(|e| CircuitSerializationError::DeserializationError(e.to_string()))?;
         let gate_serializer = AllGateSerializer;
-        let generator_serializer = DefaultGeneratorSerializer::<C, D>::default();
+        let generator_serializer = AllGeneratorSerializer::<C, D>::default();
         let data = CircuitData::<F, C, D>::from_bytes(
             &circuit_bytes.data,
             &gate_serializer,
