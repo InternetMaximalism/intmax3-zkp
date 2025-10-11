@@ -54,7 +54,7 @@ where
         block_chain_cd: &CommonCircuitData<F, D>,
         block_step_vd: &VerifierCircuitData<F, C, D>,
     ) -> Self {
-        let mut builder = CircuitBuilder::<F, D>::new(CircuitConfig::default());
+        let mut builder = CircuitBuilder::<F, D>::new(block_chain_cd.config.clone());
         let block_step_proof = add_proof_target_and_verify(block_step_vd, &mut builder);
         let new_chain_pis = BlockChainPublicInputsTarget::from_pis(
             &block_step_proof.public_inputs,

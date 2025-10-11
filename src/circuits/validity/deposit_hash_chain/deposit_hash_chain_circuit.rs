@@ -54,7 +54,7 @@ where
         deposit_chain_cd: &CommonCircuitData<F, D>,
         deposit_step_vd: &VerifierCircuitData<F, C, D>,
     ) -> Self {
-        let mut builder = CircuitBuilder::<F, D>::new(CircuitConfig::default());
+        let mut builder = CircuitBuilder::<F, D>::new(deposit_chain_cd.config.clone());
         let deposit_step_proof = add_proof_target_and_verify(deposit_step_vd, &mut builder);
         let new_chain_pis = DepositChainPublicInputsTarget::from_pis(
             &deposit_step_proof.public_inputs,

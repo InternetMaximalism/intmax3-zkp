@@ -54,7 +54,7 @@ where
         withdrawal_chain_cd: &CommonCircuitData<F, D>,
         withdrawal_step_vd: &VerifierCircuitData<F, C, D>,
     ) -> Self {
-        let mut builder = CircuitBuilder::<F, D>::new(CircuitConfig::default());
+        let mut builder = CircuitBuilder::<F, D>::new(withdrawal_chain_cd.config.clone());
         let withdrawal_step_proof = add_proof_target_and_verify(withdrawal_step_vd, &mut builder);
         let new_chain_pis = WithdrawalStepPublicInputsTarget::from_pis(
             &withdrawal_step_proof.public_inputs,
