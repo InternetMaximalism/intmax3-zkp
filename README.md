@@ -37,7 +37,13 @@ cargo test --release
 
 ### WASM tests
 
-Run tests in a headless Firefox browser:
+First, generate the test fixtures required by the WASM tests:
+
+```bash
+cargo run -r --bin generate_wasm_fixtures
+```
+
+Then run tests in a headless Firefox browser:
 
 ```bash
 wasm-pack test --release --firefox --headless
