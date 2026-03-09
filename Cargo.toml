@@ -23,8 +23,8 @@ anyhow = "1.0.100"
 lazy_static = "1.5.0"
 bincode = { version = "2.0.1", features = ["serde"] }
 
-[patch."https://github.com/InternetMaximalism/polygon-plonky2.git"]
-plonky2 = { path = "../polygon-plonky2/plonky2" }
+# [patch."https://github.com/InternetMaximalism/polygon-plonky2.git"]
+# plonky2 = { path = "../polygon-plonky2/plonky2" }
 
 [dev-dependencies]
 criterion = { version = "0.5", default-features = false }
