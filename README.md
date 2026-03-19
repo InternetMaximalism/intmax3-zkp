@@ -139,6 +139,13 @@ Every value in the validity proof's public inputs is bound to on-chain state:
 │  evaluations[0] = keccak256(ValidityPublicInputs)                        │
 │  (binds WHIR proof to the same plonky2 circuit instance)                 │
 └──────────────────────────────────────────────────────────────────────────┘
+                                 │
+                                 │ must ==
+                                 ▼
+┌─ Groth16 Public Inputs ────────────────────────────────────────────────┐
+│  pubInputs[0] = keccak256(ValidityPublicInputs)                        │
+│  (binds Groth16 proof to the same plonky2 circuit instance)            │
+└────────────────────────────────────────────────────────────────────────┘
 ```
 
 ## L1 Contract Functions
@@ -165,12 +172,13 @@ Every value in the validity proof's public inputs is bound to on-chain state:
 │  ┌─────────────────┐  Anyone can verify and finalize                    │
 │  │  finalize()     │  1. Commitment check                               │
 │  │  ~1.6M gas      │  2. ValidityPIs ↔ on-chain state                  │
-│  │  (mocked WHIR)  │  3. WHIR evaluations[0] == keccak(ValidityPIs)    │
+│  │                 │  3. WHIR evaluations[0] == keccak(ValidityPIs)     │
 │  └─────────────────┘  4. KZG blob binding (EIP-2537)                    │
 │                       5. WHIR proof verification                        │
+│                       6. Groth16 proof verification                     │
 │  ┌─────────────────┐                                                    │
-│  │  verify()       │  Pure WHIR check (no binding, no KZG)              │
-│  │  ~804k gas      │                                                    │
+│  │  verify()       │  WHIR + Groth16 (no binding, no KZG)              │
+│  │  ~842k gas      │                                                    │
 │  └─────────────────┘                                                    │
 │                                                                         │
 │  ┌─────────────────┐                                                    │
@@ -178,8 +186,9 @@ Every value in the validity proof's public inputs is bound to on-chain state:
 │  └─────────────────┘                                                    │
 │                                                                         │
 │  Dependencies:                                                          │
-│  ├── BlobKZGVerifier.sol  (EIP-2537 BLS12-381 multi-point KZG opening)  │
-│  └── sol-whir (WHIR polynomial commitment verification)                 │
+│  ├── BlobKZGVerifier.sol   (EIP-2537 BLS12-381 multi-point KZG opening) │
+│  ├── Groth16Verifier.sol   (BN254 ecPairing-based Groth16 verification) │
+│  └── sol-whir              (WHIR polynomial commitment verification)    │
 └─────────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -281,7 +290,8 @@ intmax3-zkp/
 ├── contracts/                     # Foundry project
 │   ├── src/
 │   │   ├── IntmaxRollup.sol       # Main rollup contract (postBlock, deposit, submit, finalize)
-│   │   └── BlobKZGVerifier.sol    # EIP-2537 KZG multi-point opening
+│   │   ├── BlobKZGVerifier.sol    # EIP-2537 KZG multi-point opening
+│   │   └── Groth16Verifier.sol    # BN254 Groth16 verification (ecAdd/ecMul/ecPairing)
 │   └── test/
 │       └── IntmaxRollup.t.sol     # 16 Foundry tests
 ├── tests/
@@ -349,7 +359,56 @@ forge test -vvv               # 16 tests
 | `deposit()` | ~55k | 1 slot (pendingDepositHashChain) |
 | `submit()` | ~75k | 2 slots (commitment, submitter+finalized) |
 | `finalize()` | ~1.6M | 2 slots (finalized flag, latestFinalizedStateRoot) |
-| `verify()` | ~804k | 0 (view) |
+| `verify()` | ~842k | 0 (view) |
+
+> **Note on gas costs:** WHIR, Groth16, and KZG precompiles are currently mocked in Foundry tests
+> (see "Current Limitations" below). Real gas costs will differ once live proofs are integrated.
+
+## Current Limitations and TODO
+
+### Mocked proof verification in tests
+
+The Foundry tests currently **mock** the following precompile / external calls:
+
+| Component | What is mocked | Why |
+|-----------|---------------|-----|
+| **WHIR** | `WhirVerifierWrapper.verify()` returns `true` | The WHIR proof fixture from sol-whir is a standalone test polynomial, not a wrapped Plonky2 proof. For `finalize()` tests we mock the wrapper so that the patched `statement.evaluations[0]` (which carries the plonky2 public input hash) passes without a real WHIR prover. |
+| **Groth16** | BN254 `ecPairing` precompile (0x08) returns `1` | No Groth16 proving key or wrapper circuit exists yet. The `Groth16Verifier.sol` library is correct (standard 4-pairing check using ecAdd/ecMul/ecPairing), but there is no circuit that wraps Plonky2 verification into an R1CS suitable for Groth16 proving. |
+| **KZG** | BLS12-381 precompiles (0x0b, 0x0d, 0x11) return valid | EIP-2537 precompiles are not available in Foundry's EVM. The `BlobKZGVerifier.sol` library is correct but can only be tested on a live Pectra-enabled chain. |
+
+The `verify()` test for a standalone WHIR proof **does use the real WHIR verifier** (not mocked) and passes against the sol-whir test fixture. Only the `finalize()` / `fraudProof()` pipeline mocks WHIR because the statement must carry the plonky2 public input hash.
+
+### What is needed to remove the mocks
+
+The recursive proof pipeline is being built in [whirtest](https://github.com/leohio/whirtest):
+
+```
+Plonky2 validity proof
+        │
+        ├──▶ WHIR wrapper (polynomial commitment of the Plonky2 proof)
+        │    └── prover: encode proof as polynomial, commit, prove
+        │    └── verifier: sol-whir on-chain (already integrated)
+        │
+        └──▶ Groth16 wrapper (succinct SNARK of the Plonky2 verifier)
+             └── circuit: Plonky2 verifier expressed as R1CS/Circom or Gnark
+             └── setup: Groth16 trusted setup for the wrapper circuit
+             └── prover: generate Groth16 proof with Plonky2 public inputs
+             └── verifier: Groth16Verifier.sol on-chain (already integrated)
+```
+
+Once the whirtest repository produces real WHIR and Groth16 proofs that wrap
+a Plonky2 validity proof:
+
+1. Replace `_mockWhirVerifierTrue()` with the real WHIR proof whose
+   `statement.evaluations[0] == keccak256(ValidityPublicInputs)`.
+2. Replace `_mockGroth16Pairing()` / `_dummyGroth16()` with a real Groth16
+   proof and verifying key whose `pubInputs[0] == keccak256(ValidityPublicInputs)`.
+3. Replace `_mockBLSPrecompiles()` with real KZG opening proofs (requires
+   Pectra-enabled testnet or mainnet fork).
+
+No changes to `IntmaxRollup.sol` are required — the contract already enforces
+the full 6-step verification pipeline. Only the test fixtures need to be
+updated with real proofs.
 
 ## Dependencies
 
