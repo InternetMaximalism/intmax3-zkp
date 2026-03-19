@@ -3,6 +3,7 @@ pragma solidity ^0.8.24;
 
 import {Verifier} from "sol-whir/Whir.sol";
 import {WhirProof, Statement, WhirConfig} from "sol-whir/WhirStructs.sol";
+import {BN254} from "solidity-bn254/BN254.sol";
 import {BlobKZGVerifier, KZGProof} from "./BlobKZGVerifier.sol";
 
 /// @title WhirVerifierWrapper
@@ -21,21 +22,21 @@ contract WhirVerifierWrapper {
 /// @title IntmaxRollup
 /// @notice INTMAX3 validity proof rollup contract.
 ///
-///  Validity proofs (Plonky2) are posted in EIP-4844 blobs. On-chain, only a
-///  compact commitment is stored.  The commitment binds:
-///    - the blob versioned hash (references the blob),
-///    - keccak256 of the raw proof bytes,
-///    - the byte-length of the proof (for deterministic KZG extraction), and
-///    - the state root (final_ext_commitment from the validity circuit).
-///
-///  Anyone can later call `verify()` (pure WHIR check) or `fraudProof()`
-///  (commitment + KZG blob binding + WHIR) to determine proof validity.
-///  `finalize()` marks a submission as finalized if its proof is valid,
-///  updating the on-chain state root.
-///
-///  State root = Poseidon(ExtendedPublicState) where ExtendedPublicState
-///  contains: block_number, timestamp, account_tree_root, deposit_tree_root,
-///  prev_public_state_root, block_hash_chain, deposit_hash_chain, deposit_count.
+///  Architecture:
+///    1. Aggregators call `postBlock()` to post blocks (local_ids in calldata).
+///       The contract computes block_hash_chain on-chain.
+///    2. Anyone calls `deposit()` to queue deposits.
+///       The contract computes deposit_hash_chain on-chain.
+///    3. The sequencer posts a validity proof in an EIP-4844 blob via `submit()`.
+///    4. Anyone can call `finalize()` to verify and accept the proof.
+///       Verification checks:
+///         a) Blob commitment (KZG multi-point opening)
+///         b) WHIR proof verification
+///         c) WHIR statement.evaluations[0] == plonky2 public input hash
+///         d) ValidityPublicInputs match on-chain state:
+///            - initial_ext_commitment == latestFinalizedStateRoot
+///            - initial_block_chain, final_block_chain match on-chain values
+///            - final_ext_commitment == stateRoot being accepted
 contract IntmaxRollup {
     // -----------------------------------------------------------------------
     // Errors
@@ -45,10 +46,31 @@ contract IntmaxRollup {
     error SubmissionNotFound();
     error AlreadyFinalized();
     error ProofVerificationFailed();
+    error InitialStateMismatch();
+    error BlockChainMismatch();
+    error WhirPublicInputMismatch();
 
     // -----------------------------------------------------------------------
     // Events
     // -----------------------------------------------------------------------
+    event BlockPosted(
+        uint64 indexed blockNumber,
+        uint32 aggregatorId,
+        uint32[] localIds,
+        bytes32 txTreeRoot,
+        bytes32 newBlockHashChain
+    );
+
+    event Deposited(
+        uint64 indexed depositIndex,
+        address depositor,
+        bytes32 recipient,
+        uint32  tokenIndex,
+        uint256 amount,
+        bytes32 auxData,
+        bytes32 newDepositHashChain
+    );
+
     event Submitted(
         uint256 indexed id,
         address indexed submitter,
@@ -67,15 +89,26 @@ contract IntmaxRollup {
     // Types
     // -----------------------------------------------------------------------
 
-    /// @dev Packed into a single 256-bit storage slot:
-    ///      commitment (bytes32) occupies slot N,
-    ///      submitter+finalized are packed into slot N+1 (20+1 bytes).
-    ///      stateRoot is NOT stored — it lives inside the commitment and is
-    ///      passed as calldata when needed (finalize / fraudProof).
     struct Submission {
         bytes32 commitment;   // keccak256(blobHash || proofHash || proofLength || stateRoot)
         address submitter;    // packed with `finalized` into one slot
         bool    finalized;
+    }
+
+    /// @notice Mirrors the Rust `ValidityPublicInputs` struct.
+    ///         All fields are u32-packed, matching the Rust keccak256 input layout.
+    ///         initial_block_number (2 u32), initial_block_chain (8 u32),
+    ///         initial_ext_commitment (8 u32), final_block_number (2 u32),
+    ///         final_block_chain (8 u32), final_ext_commitment (8 u32),
+    ///         prover (5 u32) = 41 u32 = 164 bytes.
+    struct ValidityPublicInputs {
+        uint64  initialBlockNumber;
+        bytes32 initialBlockChain;
+        bytes32 initialExtCommitment;
+        uint64  finalBlockNumber;
+        bytes32 finalBlockChain;
+        bytes32 finalExtCommitment;
+        address prover;
     }
 
     // -----------------------------------------------------------------------
@@ -83,10 +116,31 @@ contract IntmaxRollup {
     // -----------------------------------------------------------------------
     WhirVerifierWrapper public immutable whirVerifier;
 
-    mapping(uint256 => Submission) internal _submissions;
-    uint256 public nextId;
+    /// @notice On-chain block hash chain state.
+    ///         Updated by `postBlock()`.
+    ///         block_hash_chain = keccak256(prev || aggregator_id || timestamp || local_ids || tx_tree_root || deposit_hash_chain)
+    bytes32 public blockHashChain;
 
-    /// @notice The latest finalized state root.
+    /// @notice Snapshot of blockHashChain at each block number.
+    mapping(uint64 => bytes32) public blockHashChainAt;
+
+    /// @notice Current block number (incremented by postBlock).
+    uint64 public blockNumber;
+
+    /// @notice On-chain deposit hash chain state.
+    ///         Updated by `deposit()`.
+    bytes32 public depositHashChain;
+
+    /// @notice Total deposit count.
+    uint64 public depositCount;
+
+    /// @notice Pending deposits for the next block (rolled into block's deposit_hash_chain).
+    bytes32 internal _pendingDepositHashChain;
+
+    mapping(uint256 => Submission) internal _submissions;
+    uint256 public nextSubmissionId;
+
+    /// @notice The latest finalized state root (= final_ext_commitment from the last accepted proof).
     bytes32 public latestFinalizedStateRoot;
 
     /// @notice Mask to clear top 3 bits so a 256-bit value fits in the
@@ -98,10 +152,84 @@ contract IntmaxRollup {
     // -----------------------------------------------------------------------
     constructor(WhirVerifierWrapper _whirVerifier) {
         whirVerifier = _whirVerifier;
+        // Genesis: block 0 has default (zero) hash chains
+        blockHashChainAt[0] = bytes32(0);
     }
 
     // -----------------------------------------------------------------------
-    // submit()
+    // postBlock()  —  aggregator posts a block with local_ids in calldata
+    // -----------------------------------------------------------------------
+
+    /// @notice Post a new block.  The local_ids array lives in calldata,
+    ///         binding the ID list to the on-chain block hash chain.
+    /// @param aggregatorId  Aggregator identifier.
+    /// @param localIds      Array of local user IDs (the "ID list").
+    /// @param timestamp     Block timestamp.
+    /// @param txTreeRoot    Root of the transaction Merkle tree.
+    function postBlock(
+        uint32 aggregatorId,
+        uint32[] calldata localIds,
+        uint64 timestamp,
+        bytes32 txTreeRoot
+    ) external {
+        // Fold pending deposits into the deposit hash chain for this block
+        bytes32 blockDepositHashChain = _pendingDepositHashChain;
+        _pendingDepositHashChain = bytes32(0);
+
+        blockNumber++;
+        uint64 newBlockNumber = blockNumber;
+
+        // Compute block hash matching Rust's Block::hash_with_prev_hash:
+        //   keccak256(prev_hash || aggregator_id || timestamp(u64→2×u32) || local_ids || tx_tree_root || deposit_hash_chain)
+        //   All values packed as u32 (little-endian within each u32 word).
+        bytes32 newBlockHash = _computeBlockHash(
+            blockHashChain,
+            aggregatorId,
+            timestamp,
+            localIds,
+            txTreeRoot,
+            blockDepositHashChain
+        );
+
+        blockHashChain = newBlockHash;
+        blockHashChainAt[newBlockNumber] = newBlockHash;
+        depositHashChain = blockDepositHashChain;
+
+        emit BlockPosted(newBlockNumber, aggregatorId, localIds, txTreeRoot, newBlockHash);
+    }
+
+    // -----------------------------------------------------------------------
+    // deposit()  —  queue a deposit
+    // -----------------------------------------------------------------------
+
+    /// @notice Queue a deposit.  The deposit hash chain is updated immediately;
+    ///         the deposit is associated with the next block.
+    function deposit(
+        bytes32 recipient,
+        uint32 tokenIndex,
+        uint256 amount,
+        bytes32 auxData
+    ) external {
+        uint64 idx = depositCount++;
+
+        // Compute deposit hash matching Rust's Deposit::hash_with_prev_hash:
+        //   keccak256(prev_hash || depositor(5×u32) || recipient(8×u32) || token_index(u32) || amount(8×u32) || aux_data(8×u32))
+        //   Note: deposit_index and block_number are NOT included in the hash.
+        bytes32 newHash = _computeDepositHash(
+            _pendingDepositHashChain,
+            msg.sender,
+            recipient,
+            tokenIndex,
+            amount,
+            auxData
+        );
+        _pendingDepositHashChain = newHash;
+
+        emit Deposited(idx, msg.sender, recipient, tokenIndex, amount, auxData, newHash);
+    }
+
+    // -----------------------------------------------------------------------
+    // submit()  —  post validity proof blob
     // -----------------------------------------------------------------------
 
     /// @notice Post a validity proof in an EIP-4844 blob TX.
@@ -120,7 +248,7 @@ contract IntmaxRollup {
         }
         if (blobHash == bytes32(0)) revert NoBlobAttached();
 
-        uint256 id = nextId++;
+        uint256 id = nextSubmissionId++;
         bytes32 commitment = keccak256(
             abi.encodePacked(blobHash, proofHash, proofLength, stateRoot)
         );
@@ -135,12 +263,10 @@ contract IntmaxRollup {
     }
 
     // -----------------------------------------------------------------------
-    // verify()  —  pure WHIR verification (no blob binding)
+    // verify()  —  pure WHIR verification (no binding)
     // -----------------------------------------------------------------------
 
     /// @notice Pure WHIR verification from calldata.
-    ///         No KZG blob binding, no commitment check.
-    ///         Useful for off-chain or quick on-chain checks.
     function verify(
         WhirConfig calldata config,
         Statement calldata statement,
@@ -155,44 +281,18 @@ contract IntmaxRollup {
     }
 
     // -----------------------------------------------------------------------
-    // fraudProof()  —  full verification (commitment + KZG + WHIR)
-    // -----------------------------------------------------------------------
-
-    /// @notice Full fraud-proof verification.
-    ///         1. Checks commitment matches the stored one.
-    ///         2. Verifies KZG blob binding (the blob contains the proof bytes).
-    ///         3. Runs WHIR verification on the proof.
-    /// @return valid True when the proof passes all checks.
-    function fraudProof(
-        uint256 submissionId,
-        bytes32 blobVersionedHash,
-        bytes32 stateRoot,
-        bytes calldata plonky2ProofBytes,
-        WhirConfig calldata config,
-        Statement calldata statement,
-        WhirProof calldata whirProof,
-        bytes calldata transcript,
-        KZGProof calldata kzg
-    ) external view returns (bool valid) {
-        return _fullVerify(
-            submissionId, blobVersionedHash, stateRoot,
-            plonky2ProofBytes, config, statement, whirProof, transcript, kzg
-        );
-    }
-
-    // -----------------------------------------------------------------------
-    // finalize()  —  mark a submission as finalized after proof verification
+    // finalize()  —  full verification + state root acceptance
     // -----------------------------------------------------------------------
 
     /// @notice Verify and finalize a submission.
-    ///         If the proof is valid, mark the submission as finalized and
-    ///         update the on-chain state root.
-    /// @param stateRoot Must match the stateRoot committed at submit time.
+    ///         Checks: commitment, KZG blob binding, WHIR proof, public input
+    ///         binding to on-chain state, WHIR↔plonky2 public input match.
     function finalize(
         uint256 submissionId,
         bytes32 blobVersionedHash,
         bytes32 stateRoot,
         bytes calldata plonky2ProofBytes,
+        ValidityPublicInputs calldata validityPIs,
         WhirConfig calldata config,
         Statement calldata statement,
         WhirProof calldata whirProof,
@@ -203,16 +303,40 @@ contract IntmaxRollup {
         if (sub.commitment == bytes32(0)) revert SubmissionNotFound();
         if (sub.finalized) revert AlreadyFinalized();
 
-        bool valid = _fullVerify(
+        _fullVerify(
             submissionId, blobVersionedHash, stateRoot,
-            plonky2ProofBytes, config, statement, whirProof, transcript, kzg
+            plonky2ProofBytes, validityPIs,
+            config, statement, whirProof, transcript, kzg
         );
-        if (!valid) revert ProofVerificationFailed();
 
         sub.finalized = true;
         latestFinalizedStateRoot = stateRoot;
 
         emit Finalized(submissionId, stateRoot);
+    }
+
+    // -----------------------------------------------------------------------
+    // fraudProof()  —  full verification (returns bool)
+    // -----------------------------------------------------------------------
+
+    function fraudProof(
+        uint256 submissionId,
+        bytes32 blobVersionedHash,
+        bytes32 stateRoot,
+        bytes calldata plonky2ProofBytes,
+        ValidityPublicInputs calldata validityPIs,
+        WhirConfig calldata config,
+        Statement calldata statement,
+        WhirProof calldata whirProof,
+        bytes calldata transcript,
+        KZGProof calldata kzg
+    ) external view returns (bool valid) {
+        _fullVerify(
+            submissionId, blobVersionedHash, stateRoot,
+            plonky2ProofBytes, validityPIs,
+            config, statement, whirProof, transcript, kzg
+        );
+        return true;
     }
 
     // -----------------------------------------------------------------------
@@ -232,44 +356,155 @@ contract IntmaxRollup {
     }
 
     // -----------------------------------------------------------------------
-    // Internal
+    // Internal — Full verification pipeline
     // -----------------------------------------------------------------------
 
-    /// @dev Shared verification: commitment → KZG → WHIR.
+    /// @dev Full verification:
+    ///   1. Commitment check (blobHash + proofHash + proofLength + stateRoot)
+    ///   2. Public input binding to on-chain state
+    ///   3. Plonky2 public input hash == WHIR statement.evaluations[0]
+    ///   4. KZG blob binding
+    ///   5. WHIR proof verification
     function _fullVerify(
         uint256 submissionId,
         bytes32 blobVersionedHash,
         bytes32 stateRoot,
         bytes calldata plonky2ProofBytes,
+        ValidityPublicInputs calldata validityPIs,
         WhirConfig calldata config,
         Statement calldata statement,
         WhirProof calldata whirProof,
         bytes calldata transcript,
         KZGProof calldata kzg
-    ) internal view returns (bool) {
+    ) internal view {
         // 1. Commitment check
-        uint32 proofLength = uint32(plonky2ProofBytes.length);
-        bytes32 proofHash = keccak256(plonky2ProofBytes);
-        bytes32 commitment = keccak256(
-            abi.encodePacked(blobVersionedHash, proofHash, proofLength, stateRoot)
-        );
-        if (commitment != _submissions[submissionId].commitment) {
+        {
+            uint32 proofLength = uint32(plonky2ProofBytes.length);
+            bytes32 proofHash = keccak256(plonky2ProofBytes);
+            bytes32 commitment = keccak256(
+                abi.encodePacked(blobVersionedHash, proofHash, proofLength, stateRoot)
+            );
+            if (commitment != _submissions[submissionId].commitment) {
+                revert CommitmentMismatch();
+            }
+        }
+
+        // 2. Public input binding: ValidityPublicInputs ↔ on-chain state
+        //    - initial_ext_commitment must chain from the last finalized state
+        //    - block hash chains must match on-chain snapshots
+        //    - final_ext_commitment must equal the claimed stateRoot
+        if (validityPIs.initialExtCommitment != latestFinalizedStateRoot) {
+            revert InitialStateMismatch();
+        }
+        if (validityPIs.initialBlockChain != blockHashChainAt[validityPIs.initialBlockNumber]) {
+            revert BlockChainMismatch();
+        }
+        if (validityPIs.finalBlockChain != blockHashChainAt[validityPIs.finalBlockNumber]) {
+            revert BlockChainMismatch();
+        }
+        if (validityPIs.finalExtCommitment != stateRoot) {
             revert CommitmentMismatch();
         }
 
-        // 2. KZG blob binding: prove the blob contains these proof bytes
+        // 3. Plonky2 public input hash must appear in WHIR statement.evaluations[0]
+        //    The plonky2 circuit outputs keccak256(ValidityPublicInputs) as its
+        //    public input.  The WHIR/Groth16 wrapper circuit takes this as its
+        //    public input, which appears in statement.evaluations[0].
+        bytes32 plonky2PublicInput = _computeValidityPIHash(validityPIs);
+        if (statement.evaluations.length == 0 ||
+            bytes32(BN254.ScalarField.unwrap(statement.evaluations[0])) != plonky2PublicInput) {
+            revert WhirPublicInputMismatch();
+        }
+
+        // 4. KZG blob binding
         BlobKZGVerifier.verify(
             blobVersionedHash,
             kzg,
             _toFieldElements(plonky2ProofBytes)
         );
 
-        // 3. WHIR verification
+        // 5. WHIR verification
         try whirVerifier.verify(config, statement, whirProof, transcript) returns (bool valid) {
-            return valid;
+            if (!valid) revert ProofVerificationFailed();
         } catch {
-            return false;
+            revert ProofVerificationFailed();
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // Internal — Hash computation helpers
+    // -----------------------------------------------------------------------
+
+    /// @dev Compute keccak256(ValidityPublicInputs) matching the Rust layout:
+    ///      initial_block_number (2×u32) || initial_block_chain (8×u32) ||
+    ///      initial_ext_commitment (8×u32) || final_block_number (2×u32) ||
+    ///      final_block_chain (8×u32) || final_ext_commitment (8×u32) ||
+    ///      prover (5×u32) = 41 u32 words = 164 bytes.
+    function _computeValidityPIHash(
+        ValidityPublicInputs calldata pis
+    ) internal pure returns (bytes32) {
+        // Pack into the same u32 layout as Rust's to_u32_vec():
+        //   BlockNumber → [lo32, hi32] of the u64
+        //   Bytes32     → 8 × u32 (big-endian byte order within each u32 matches Rust's U32LimbTrait)
+        //   Address     → 5 × u32
+        // All concatenated and passed through solidity keccak256.
+        return keccak256(
+            abi.encodePacked(
+                pis.initialBlockNumber,
+                pis.initialBlockChain,
+                pis.initialExtCommitment,
+                pis.finalBlockNumber,
+                pis.finalBlockChain,
+                pis.finalExtCommitment,
+                pis.prover
+            )
+        );
+    }
+
+    /// @dev Compute block hash matching Rust's Block::hash_with_prev_hash:
+    ///      keccak256(prev_hash || aggregator_id || timestamp || local_ids || tx_tree_root || deposit_hash_chain)
+    ///      All values packed as u32 words.
+    function _computeBlockHash(
+        bytes32 prevHash,
+        uint32 aggregatorId,
+        uint64 timestamp,
+        uint32[] calldata localIds,
+        bytes32 txTreeRoot,
+        bytes32 blockDepositHashChain
+    ) internal pure returns (bytes32) {
+        // Build the u32 array matching Rust's layout
+        bytes memory packed = abi.encodePacked(
+            prevHash,
+            aggregatorId,
+            timestamp,
+            localIds,
+            txTreeRoot,
+            blockDepositHashChain
+        );
+        return keccak256(packed);
+    }
+
+    /// @dev Compute deposit hash matching Rust's Deposit::hash_with_prev_hash:
+    ///      keccak256(prev_hash || depositor || recipient || token_index || amount || aux_data)
+    ///      Note: deposit_index and block_number are NOT included.
+    function _computeDepositHash(
+        bytes32 prevHash,
+        address depositor,
+        bytes32 recipient,
+        uint32 tokenIndex,
+        uint256 amount,
+        bytes32 auxData
+    ) internal pure returns (bytes32) {
+        return keccak256(
+            abi.encodePacked(
+                prevHash,
+                depositor,
+                recipient,
+                tokenIndex,
+                amount,
+                auxData
+            )
+        );
     }
 
     /// @dev Split raw bytes into BLS12-381 field elements (top 3 bits cleared).
