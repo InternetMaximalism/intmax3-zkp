@@ -4,6 +4,7 @@ pragma solidity ^0.8.24;
 import {Test, console} from "forge-std/Test.sol";
 import {IntmaxRollup, WhirVerifierWrapper} from "../src/IntmaxRollup.sol";
 import {KZGProof} from "../src/BlobKZGVerifier.sol";
+import {Groth16Verifier} from "../src/Groth16Verifier.sol";
 import {WhirProof, Statement, WhirConfig} from "sol-whir/WhirStructs.sol";
 import {BN254} from "solidity-bn254/BN254.sol";
 import {JSONWhirProof, JSONUtils} from "sol-whir/utils/WhirJson.sol";
@@ -58,6 +59,42 @@ contract IntmaxRollupTest is Test {
             abi.encodeWithSelector(WhirVerifierWrapper.verify.selector),
             abi.encode(false)
         );
+    }
+
+    /// @dev Mock BN254 ecPairing (0x08) to return 1 (valid Groth16).
+    function _mockGroth16Pairing() internal {
+        vm.mockCall(address(0x08), new bytes(0), abi.encode(uint256(1)));
+    }
+
+    /// @dev Dummy Groth16 verifying key with 1 public input (2 IC points).
+    function _dummyGroth16Vk() internal pure returns (Groth16Verifier.VerifyingKey memory vk) {
+        vk.alpha = [uint256(1), uint256(2)];
+        vk.beta  = [[uint256(1), uint256(2)], [uint256(3), uint256(4)]];
+        vk.gamma = [[uint256(5), uint256(6)], [uint256(7), uint256(8)]];
+        vk.delta = [[uint256(9), uint256(10)], [uint256(11), uint256(12)]];
+        vk.ic = new uint256[2][](2);
+        vk.ic[0] = [uint256(1), uint256(2)];
+        vk.ic[1] = [uint256(1), uint256(2)];
+    }
+
+    function _dummyGroth16Proof() internal pure returns (Groth16Verifier.Proof memory proof) {
+        proof.a = [uint256(1), uint256(2)];
+        proof.b = [[uint256(1), uint256(2)], [uint256(3), uint256(4)]];
+        proof.c = [uint256(1), uint256(2)];
+    }
+
+    function _dummyGroth16PubInputs() internal pure returns (uint256[] memory) {
+        uint256[] memory inputs = new uint256[](1);
+        inputs[0] = 42;
+        return inputs;
+    }
+
+    function _dummyGroth16() internal pure returns (IntmaxRollup.Groth16Params memory) {
+        return IntmaxRollup.Groth16Params({
+            vk: _dummyGroth16Vk(),
+            proof: _dummyGroth16Proof(),
+            pubInputs: _dummyGroth16PubInputs()
+        });
     }
 
     function _dummyKZG(uint256 dataLen) internal view returns (KZGProof memory kzg) {
@@ -235,7 +272,11 @@ contract IntmaxRollupTest is Test {
             bytes memory transcript
         ) = loadProof();
 
-        bool result = rollup.verify(config, statement, whirProof, transcript);
+        _mockGroth16Pairing();
+        bool result = rollup.verify(
+            config, statement, whirProof, transcript,
+            _dummyGroth16()
+        );
         assertTrue(result);
     }
 
@@ -252,7 +293,11 @@ contract IntmaxRollupTest is Test {
             transcript[6] = bytes1(uint8(transcript[6]) ^ 0xFF);
         }
 
-        bool result = rollup.verify(config, statement, whirProof, transcript);
+        _mockGroth16Pairing();
+        bool result = rollup.verify(
+            config, statement, whirProof, transcript,
+            _dummyGroth16()
+        );
         assertFalse(result);
     }
 
@@ -284,13 +329,15 @@ contract IntmaxRollupTest is Test {
 
         _mockBLSPrecompiles();
         _mockWhirVerifierTrue();
+        _mockGroth16Pairing();
 
         rollup.finalize(
             0, _kzgBlobHash, stateRoot,
             plonky2Bytes,
             vpis,
             config, statement, whirProof, transcript,
-            _dummyKZG(plonky2Bytes.length)
+            _dummyKZG(plonky2Bytes.length),
+            _dummyGroth16()
         );
 
         assertTrue(rollup.isFinalized(0));
@@ -319,18 +366,21 @@ contract IntmaxRollupTest is Test {
 
         _mockBLSPrecompiles();
         _mockWhirVerifierTrue();
+        _mockGroth16Pairing();
 
         rollup.finalize(
             0, _kzgBlobHash, stateRoot, plonky2Bytes, vpis,
             config, statement, whirProof, transcript,
-            _dummyKZG(plonky2Bytes.length)
+            _dummyKZG(plonky2Bytes.length),
+            _dummyGroth16()
         );
 
         vm.expectRevert(IntmaxRollup.AlreadyFinalized.selector);
         rollup.finalize(
             0, _kzgBlobHash, stateRoot, plonky2Bytes, vpis,
             config, statement, whirProof, transcript,
-            _dummyKZG(plonky2Bytes.length)
+            _dummyKZG(plonky2Bytes.length),
+            _dummyGroth16()
         );
     }
 
@@ -360,7 +410,8 @@ contract IntmaxRollupTest is Test {
         rollup.finalize(
             0, _kzgBlobHash, stateRoot, plonky2Bytes, vpis,
             config, statement, whirProof, transcript,
-            _dummyKZG(plonky2Bytes.length)
+            _dummyKZG(plonky2Bytes.length),
+            _dummyGroth16()
         );
     }
 
@@ -388,7 +439,8 @@ contract IntmaxRollupTest is Test {
         rollup.finalize(
             0, _kzgBlobHash, stateRoot, plonky2Bytes, vpis,
             config, statement, whirProof, transcript,
-            _dummyKZG(plonky2Bytes.length)
+            _dummyKZG(plonky2Bytes.length),
+            _dummyGroth16()
         );
     }
 
@@ -406,7 +458,8 @@ contract IntmaxRollupTest is Test {
         rollup.finalize(
             999, bytes32(0), bytes32(0), "", vpis,
             config, statement, whirProof, transcript,
-            _dummyKZG(0)
+            _dummyKZG(0),
+            _dummyGroth16()
         );
     }
 
@@ -442,10 +495,15 @@ contract IntmaxRollupTest is Test {
             bytes memory transcript
         ) = loadProof();
 
+        _mockGroth16Pairing();
+
         uint256 gasBefore = gasleft();
-        rollup.verify(config, statement, whirProof, transcript);
+        rollup.verify(
+            config, statement, whirProof, transcript,
+            _dummyGroth16()
+        );
         uint256 gasUsed = gasBefore - gasleft();
-        console.log("verify() gas (pure WHIR):", gasUsed);
+        console.log("verify() gas (WHIR + Groth16):", gasUsed);
     }
 
     function test_gas_finalize() public {
@@ -468,12 +526,14 @@ contract IntmaxRollupTest is Test {
 
         _mockBLSPrecompiles();
         _mockWhirVerifierTrue();
+        _mockGroth16Pairing();
 
         uint256 gasBefore = gasleft();
         rollup.finalize(
             0, _kzgBlobHash, stateRoot, plonky2Bytes, vpis,
             config, statement, whirProof, transcript,
-            _dummyKZG(plonky2Bytes.length)
+            _dummyKZG(plonky2Bytes.length),
+            _dummyGroth16()
         );
         uint256 gasUsed = gasBefore - gasleft();
         console.log("finalize() gas:", gasUsed);

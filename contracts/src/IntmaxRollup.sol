@@ -5,6 +5,7 @@ import {Verifier} from "sol-whir/Whir.sol";
 import {WhirProof, Statement, WhirConfig} from "sol-whir/WhirStructs.sol";
 import {BN254} from "solidity-bn254/BN254.sol";
 import {BlobKZGVerifier, KZGProof} from "./BlobKZGVerifier.sol";
+import {Groth16Verifier} from "./Groth16Verifier.sol";
 
 /// @title WhirVerifierWrapper
 /// @notice External wrapper so IntmaxRollup can try/catch on WHIR verification.
@@ -93,6 +94,13 @@ contract IntmaxRollup {
         bytes32 commitment;   // keccak256(blobHash || proofHash || proofLength || stateRoot)
         address submitter;    // packed with `finalized` into one slot
         bool    finalized;
+    }
+
+    /// @notice Bundles Groth16 verification parameters to avoid stack-too-deep.
+    struct Groth16Params {
+        Groth16Verifier.VerifyingKey vk;
+        Groth16Verifier.Proof proof;
+        uint256[] pubInputs;
     }
 
     /// @notice Mirrors the Rust `ValidityPublicInputs` struct.
@@ -266,18 +274,25 @@ contract IntmaxRollup {
     // verify()  —  pure WHIR verification (no binding)
     // -----------------------------------------------------------------------
 
-    /// @notice Pure WHIR verification from calldata.
+    /// @notice WHIR + Groth16 verification from calldata. No KZG, no blob binding.
+    ///         Both verifiers must pass for the result to be true.
     function verify(
         WhirConfig calldata config,
         Statement calldata statement,
         WhirProof calldata whirProof,
-        bytes calldata transcript
+        bytes calldata transcript,
+        Groth16Params memory groth16
     ) external view returns (bool) {
-        try whirVerifier.verify(config, statement, whirProof, transcript) returns (bool valid) {
-            return valid;
+        bool whirValid;
+        try whirVerifier.verify(config, statement, whirProof, transcript) returns (bool v) {
+            whirValid = v;
         } catch {
-            return false;
+            whirValid = false;
         }
+
+        bool groth16Valid = Groth16Verifier.verify(groth16.vk, groth16.proof, groth16.pubInputs);
+
+        return whirValid && groth16Valid;
     }
 
     // -----------------------------------------------------------------------
@@ -297,7 +312,8 @@ contract IntmaxRollup {
         Statement calldata statement,
         WhirProof calldata whirProof,
         bytes calldata transcript,
-        KZGProof calldata kzg
+        KZGProof calldata kzg,
+        Groth16Params memory groth16
     ) external {
         Submission storage sub = _submissions[submissionId];
         if (sub.commitment == bytes32(0)) revert SubmissionNotFound();
@@ -306,7 +322,7 @@ contract IntmaxRollup {
         _fullVerify(
             submissionId, blobVersionedHash, stateRoot,
             plonky2ProofBytes, validityPIs,
-            config, statement, whirProof, transcript, kzg
+            config, statement, whirProof, transcript, kzg, groth16
         );
 
         sub.finalized = true;
@@ -329,12 +345,13 @@ contract IntmaxRollup {
         Statement calldata statement,
         WhirProof calldata whirProof,
         bytes calldata transcript,
-        KZGProof calldata kzg
+        KZGProof calldata kzg,
+        Groth16Params memory groth16
     ) external view returns (bool valid) {
         _fullVerify(
             submissionId, blobVersionedHash, stateRoot,
             plonky2ProofBytes, validityPIs,
-            config, statement, whirProof, transcript, kzg
+            config, statement, whirProof, transcript, kzg, groth16
         );
         return true;
     }
@@ -375,7 +392,8 @@ contract IntmaxRollup {
         Statement calldata statement,
         WhirProof calldata whirProof,
         bytes calldata transcript,
-        KZGProof calldata kzg
+        KZGProof calldata kzg,
+        Groth16Params memory groth16
     ) internal view {
         // 1. Commitment check
         {
@@ -427,6 +445,11 @@ contract IntmaxRollup {
         try whirVerifier.verify(config, statement, whirProof, transcript) returns (bool valid) {
             if (!valid) revert ProofVerificationFailed();
         } catch {
+            revert ProofVerificationFailed();
+        }
+
+        // 6. Groth16 verification (in parallel with WHIR — both must pass)
+        if (!Groth16Verifier.verify(groth16.vk, groth16.proof, groth16.pubInputs)) {
             revert ProofVerificationFailed();
         }
     }
