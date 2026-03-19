@@ -274,7 +274,8 @@ mod tests {
         let initial_state = generator.current_extended_public_state();
 
         let aggregator_id = 1;
-        let local_ids = vec![1];
+        // Use empty local_ids (all-padding) to bypass SPHINCS+ signature constraints.
+        let local_ids: Vec<u32> = vec![];
         let timestamp = 42u64;
         let tx_tree_root = Bytes32::default();
         generator

@@ -480,13 +480,15 @@ impl FullPublicState {
                 send_tree.push(leaf.clone());
             }
 
-            // sanity check
+            let current_account_leaf = self.account_tree.get_leaf(user_id.as_u64());
+
+            // sanity check (pk_hash preserved from tree, not reconstructed from send leaves)
             let account_leaf = AccountLeaf {
                 index: send_tree.len() as u32,
                 prev,
                 send_tree_root: send_tree.get_root(),
+                pk_hash: current_account_leaf.pk_hash,
             };
-            let current_account_leaf = self.account_tree.get_leaf(user_id.as_u64());
             assert_eq!(
                 current_account_leaf, account_leaf,
                 "Account leaf mismatch for user_id {:?}: calculated from send leaves {:?}, actual {:?}",
@@ -505,11 +507,12 @@ impl FullPublicState {
             send_leaves.push(new_send_leaf);
             self.send_leaves.insert(user_id, send_leaves.clone());
 
-            // update account tree
+            // update account tree (pk_hash is preserved across state transitions)
             let new_account_leaf = AccountLeaf {
                 index: send_tree.len() as u32,
                 prev: current_block,
                 send_tree_root: send_tree.get_root(),
+                pk_hash: current_account_leaf.pk_hash,
             };
             self.account_tree.update(user_id.as_u64(), new_account_leaf);
         }

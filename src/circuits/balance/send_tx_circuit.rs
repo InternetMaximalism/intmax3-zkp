@@ -506,6 +506,7 @@ mod tests {
             index: send_tree.len() as u32,
             prev: send_leaf.cur,
             send_tree_root: send_tree.get_root(),
+            pk_hash: PoseidonHashOut::default(),
         };
         let user_id = UserId::new(0, local_id).unwrap();
         account_tree.update(user_id.as_u64(), account_leaf.clone());

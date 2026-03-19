@@ -93,6 +93,7 @@ pub struct AccountLeaf {
     pub index: u32,                      // the next index of send leaf
     pub prev: BlockNumber,               // the previous block number
     pub send_tree_root: PoseidonHashOut, // the root of send tree
+    pub pk_hash: PoseidonHashOut,        // Poseidon(SPHINCS+ pub_seed || root) as 4 GL elements
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -100,6 +101,7 @@ pub struct AccountLeafTarget {
     pub index: Target,                         // the next index of send leaf
     pub prev: BlockNumberTarget,               // the previous block number
     pub send_tree_root: PoseidonHashOutTarget, // the root of send tree
+    pub pk_hash: PoseidonHashOutTarget,        // Poseidon(SPHINCS+ pub_seed || root)
 }
 
 impl Leafable for AccountLeaf {
@@ -207,6 +209,7 @@ impl Default for AccountLeaf {
             index: 0,
             prev: BlockNumber::default(),
             send_tree_root: SendTree::init().get_root(),
+            pk_hash: PoseidonHashOut::default(),
         }
     }
 }
@@ -217,6 +220,7 @@ impl AccountLeaf {
             vec![self.index as u64],
             self.prev.to_u64_vec(),
             self.send_tree_root.to_u64_vec(),
+            self.pk_hash.to_u64_vec(),
         ]
         .concat()
     }
@@ -233,10 +237,12 @@ impl AccountLeafTarget {
         }
         let prev = BlockNumberTarget::new(builder, is_checked);
         let send_tree_root = PoseidonHashOutTarget::new(builder);
+        let pk_hash = PoseidonHashOutTarget::new(builder);
         Self {
             index,
             prev,
             send_tree_root,
+            pk_hash,
         }
     }
 
@@ -245,6 +251,7 @@ impl AccountLeafTarget {
             vec![self.index],
             self.prev.to_vec(),
             self.send_tree_root.to_vec(),
+            self.pk_hash.to_vec(),
         ]
         .concat()
     }
@@ -257,6 +264,7 @@ impl AccountLeafTarget {
             index: builder.constant(F::from_canonical_u64(value.index.into())),
             prev: BlockNumberTarget::constant(builder, value.prev),
             send_tree_root: PoseidonHashOutTarget::constant(builder, value.send_tree_root),
+            pk_hash: PoseidonHashOutTarget::constant(builder, value.pk_hash),
         }
     }
 
@@ -265,5 +273,6 @@ impl AccountLeafTarget {
         self.prev.set_witness(witness, value.prev);
         self.send_tree_root
             .set_witness(witness, value.send_tree_root);
+        self.pk_hash.set_witness(witness, value.pk_hash);
     }
 }

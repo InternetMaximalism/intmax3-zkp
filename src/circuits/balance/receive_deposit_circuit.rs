@@ -574,6 +574,7 @@ mod tests {
             index: send_tree.len() as u32,
             prev: BlockNumber::new(0).unwrap(),
             send_tree_root: send_tree.get_root(),
+            pk_hash: PoseidonHashOut::default(),
         };
 
         let mut account_tree = AccountTree::new(ACCOUNT_TREE_HEIGHT);

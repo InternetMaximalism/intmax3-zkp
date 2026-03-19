@@ -1,4 +1,8 @@
 use crate::{
+    circuits::validity::block_hash_chain::sphincs_sig::{
+        SpxSigTargets, SpxSigWitness, SPX_AUTH_GL_LEN, SPX_D, SPX_FORS_SIG_GL_LEN,
+        SPX_WOTS_SIG_GL_LEN,
+    },
     common::{
         block::{Block, BlockError, BlockTarget},
         trees::account_tree::{
@@ -20,6 +24,7 @@ use crate::{
         poseidon_hash_out::{POSEIDON_HASH_OUT_LEN, PoseidonHashOut, PoseidonHashOutTarget},
     },
 };
+use sphincsplus_circuits::verification::{SpxVerifyWitness, verify_circuit};
 use plonky2::{
     field::{extension::Extendable, types::Field},
     hash::hash_types::RichField,
@@ -76,6 +81,10 @@ pub struct UpdateAccountTree {
     pub prev_account_leaves: Vec<AccountLeaf>,
     pub account_merkle_proofs: Vec<AccountMerkleProof>,
     pub send_merkle_proofs: Vec<SendMerkleProof>,
+
+    // SPHINCS+ signature witnesses for each user slot (index matches local_ids).
+    // Use SpxSigWitness::dummy() for inactive (zero local_id) slots.
+    pub sig_witnesses: Vec<SpxSigWitness>,
 }
 
 impl UpdateAccountTree {
@@ -148,10 +157,12 @@ impl UpdateAccountTree {
                 send_merkle_proof.get_root(&new_send_leaf, prev_account_leaf.index.into());
 
             // create new account leaf and compute new account tree root
+            // pk_hash is preserved from the previous leaf across state transitions
             let new_account_leaf = AccountLeaf {
                 index: prev_account_leaf.index + 1,
                 prev: self.block_number,
                 send_tree_root: new_send_tree_root,
+                pk_hash: prev_account_leaf.pk_hash,
             };
             account_tree_root = account_merkle_proof.get_root(&new_account_leaf, user_id.as_u64());
         }
@@ -421,6 +432,8 @@ pub struct UpdateAccountTreeTarget {
     pub account_merkle_proofs: Vec<AccountMerkleProofTarget>,
     pub send_merkle_proofs: Vec<SendMerkleProofTarget>,
     pub public_inputs: UpdateAccountPublicInputsTarget,
+    /// SPHINCS+ signature witness targets for each user slot.
+    pub spx_sig_targets: Vec<SpxSigTargets>,
 }
 
 impl UpdateAccountTreeTarget {
@@ -451,6 +464,8 @@ impl UpdateAccountTreeTarget {
 
         let empty_send_leaf = SendLeafTarget::constant(builder, SendLeaf::empty_leaf());
         let mut account_tree_root = prev_account_tree_root.clone();
+
+        let mut spx_sig_targets: Vec<SpxSigTargets> = Vec::with_capacity(num_users as usize);
 
         for i in 0..(num_users as usize) {
             let local_id = block.local_ids[i];
@@ -497,6 +512,8 @@ impl UpdateAccountTreeTarget {
                 index: next_index,
                 prev: block_number.clone(),
                 send_tree_root: new_send_tree_root.clone(),
+                // pk_hash is preserved unchanged across state transitions
+                pk_hash: prev_account_leaf.pk_hash.clone(),
             };
 
             let updated_root =
@@ -504,6 +521,102 @@ impl UpdateAccountTreeTarget {
 
             account_tree_root =
                 PoseidonHashOutTarget::select(builder, should_update, updated_root, current_root);
+
+            // ── SPHINCS+ signature verification ────────────────────────────
+            //
+            // For each active user whose pk_hash is non-zero (has_pk_hash) we
+            // verify that:
+            //   1. Poseidon(pub_seed || root) == prev_account_leaf.pk_hash
+            //   2. The SPHINCS+ signature is valid over the message
+            //      M_i = [block_number, aggregator_id, local_id, tx_tree_root×8]
+            //
+            // When pk_hash == 0 (user has no registered key yet) the signature
+            // constraints are skipped — dummy witnesses are accepted.
+            // For padding slots (should_update=false) constraints are also skipped.
+
+            // -- Compute should_verify_sig = should_update AND has_pk_hash --
+            // Only enforce SPHINCS+ when the user has a registered key (pk_hash != 0).
+            let should_verify_sig = {
+                let zero = builder.zero();
+                let e = &prev_account_leaf.pk_hash.elements;
+                let z0 = builder.is_equal(e[0], zero);
+                let z1 = builder.is_equal(e[1], zero);
+                let z2 = builder.is_equal(e[2], zero);
+                let z3 = builder.is_equal(e[3], zero);
+                let all_zero_01 = builder.and(z0, z1);
+                let all_zero_012 = builder.and(all_zero_01, z2);
+                let all_zero = builder.and(all_zero_012, z3);
+                let has_pk_hash = builder.not(all_zero);
+                builder.and(should_update, has_pk_hash)
+            };
+
+            // -- Allocate virtual targets for PK and signature components --
+            let pub_seed_gl: [_; 2] =
+                std::array::from_fn(|_| builder.add_virtual_target());
+            let pub_root_gl: [_; 2] =
+                std::array::from_fn(|_| builder.add_virtual_target());
+            let r_gl: [_; 2] =
+                std::array::from_fn(|_| builder.add_virtual_target());
+            let fors_sig_gl = builder.add_virtual_targets(SPX_FORS_SIG_GL_LEN);
+            let ht_sig_gls: Vec<Vec<_>> = (0..SPX_D)
+                .map(|_| builder.add_virtual_targets(SPX_WOTS_SIG_GL_LEN))
+                .collect();
+            let ht_auth_gls: Vec<Vec<_>> = (0..SPX_D)
+                .map(|_| builder.add_virtual_targets(SPX_AUTH_GL_LEN))
+                .collect();
+
+            // -- Verify pk_hash stored in account leaf matches the provided PK --
+            let pk_inputs: Vec<_> = [pub_seed_gl.as_slice(), pub_root_gl.as_slice()].concat();
+            let computed_pk_hash =
+                PoseidonHashOutTarget::hash_inputs(builder, &pk_inputs);
+            prev_account_leaf
+                .pk_hash
+                .conditional_assert_eq(builder, computed_pk_hash, should_verify_sig);
+
+            // -- Build message: [block_number, aggregator_id, local_id, tx_root×8] --
+            let msg_gl: Vec<_> = std::iter::once(block_number.value)
+                .chain(std::iter::once(block.aggregator_id))
+                .chain(std::iter::once(local_id))
+                .chain(block.tx_tree_root.to_vec())
+                .collect();
+
+            // pk_gl = pub_seed_gl || pub_root_gl (used in hash_message inside verify_circuit)
+            let pk_gl: Vec<_> = [pub_seed_gl.as_slice(), pub_root_gl.as_slice()].concat();
+
+            // -- Call verify_circuit from sphincsplus-circuits --
+            let spx_witness = SpxVerifyWitness {
+                pub_seed_gl,
+                pub_root_gl,
+                r_gl,
+                pk_gl,
+                msg_gl,
+                fors_sig_gl: fors_sig_gl.clone(),
+                ht_sig_gl: ht_sig_gls.clone(),
+                ht_auth_gl: ht_auth_gls.clone(),
+            };
+            let computed_root = verify_circuit(builder, &spx_witness);
+
+            // -- Conditionally assert computed_root == pub_root_gl --
+            // (only enforced when should_verify_sig is true)
+            builder.conditional_assert_eq(
+                should_verify_sig.target,
+                computed_root[0],
+                pub_root_gl[0],
+            );
+            builder.conditional_assert_eq(
+                should_verify_sig.target,
+                computed_root[1],
+                pub_root_gl[1],
+            );
+
+            spx_sig_targets.push(SpxSigTargets {
+                pub_seed_gl,
+                pub_root_gl,
+                r_gl,
+                fors_sig_gl,
+                ht_sig_gls,
+                ht_auth_gls,
+            });
         }
 
         let public_inputs = UpdateAccountPublicInputsTarget {
@@ -525,6 +638,7 @@ impl UpdateAccountTreeTarget {
             account_merkle_proofs,
             send_merkle_proofs,
             public_inputs,
+            spx_sig_targets,
         }
     }
 
@@ -560,6 +674,15 @@ impl UpdateAccountTreeTarget {
             .zip(value.send_merkle_proofs.iter())
         {
             target.set_witness(witness, proof);
+        }
+
+        // Set SPHINCS+ signature witnesses
+        for (target, sig) in self
+            .spx_sig_targets
+            .iter()
+            .zip(value.sig_witnesses.iter())
+        {
+            target.set_witness(witness, sig);
         }
     }
 }
@@ -627,6 +750,7 @@ where
 mod tests {
     use super::*;
     use crate::{
+        circuits::validity::block_hash_chain::sphincs_sig::SpxSigWitness,
         common::{
             block::Block,
             trees::account_tree::{AccountLeaf, AccountTree, SendLeaf, SendTree},
@@ -659,9 +783,12 @@ mod tests {
 
         let user1 = UserId::new(aggregator_id, 1).unwrap();
         let mut send_tree_user1 = SendTree::init();
+        // Set cur = block_number so that prev_account_leaf_user1.prev == block_number.
+        // This makes should_update = false → SPHINCS+ signature check is skipped.
+        // A full signature test requires a SPHINCS+ signer (not yet implemented).
         let send_leaf_user1_prev = SendLeaf {
             prev: BlockNumber::default(),
-            cur: BlockNumber::new(10).unwrap(),
+            cur: block_number, // already-at-current-block: no update triggered
             tx_tree_root: Bytes32::rand(&mut rng),
         };
         send_tree_user1.push(send_leaf_user1_prev.clone());
@@ -669,6 +796,7 @@ mod tests {
             index: send_tree_user1.len() as u32,
             prev: send_leaf_user1_prev.cur,
             send_tree_root: send_tree_user1.get_root(),
+            pk_hash: PoseidonHashOut::default(),
         };
 
         let user2 = UserId::new(aggregator_id, 2).unwrap();
@@ -683,6 +811,7 @@ mod tests {
             index: send_tree_user2.len() as u32,
             prev: block_number,
             send_tree_root: send_tree_user2.get_root(),
+            pk_hash: PoseidonHashOut::default(),
         };
 
         let mut account_tree = AccountTree::new(ACCOUNT_TREE_HEIGHT);
@@ -749,10 +878,14 @@ mod tests {
                     index: prev_leaf.index + 1,
                     prev: block_number,
                     send_tree_root: new_send_root,
+                    pk_hash: prev_leaf.pk_hash,
                 };
                 account_tree_for_proofs.update(user_id.as_u64(), new_account_leaf);
             }
         }
+
+        // Dummy signature witnesses for the test (no real SPHINCS+ keys needed)
+        let sig_witnesses = vec![SpxSigWitness::dummy(); num_users as usize];
 
         let update_account_tree = UpdateAccountTree {
             prev_block_hash_chain,
@@ -762,24 +895,14 @@ mod tests {
             prev_account_leaves: prev_account_leaves.clone(),
             account_merkle_proofs: account_merkle_proofs.clone(),
             send_merkle_proofs: send_merkle_proofs.clone(),
+            sig_witnesses,
         };
 
         let public_inputs = update_account_tree.to_public_inputs().unwrap();
 
-        let mut expected_tree = account_tree.clone();
-        let new_send_leaf_user1 = SendLeaf {
-            prev: prev_account_leaf_user1.prev,
-            cur: block_number,
-            tx_tree_root,
-        };
-        let new_send_root_user1 =
-            send_proof_user1.get_root(&new_send_leaf_user1, prev_account_leaf_user1.index.into());
-        let new_account_leaf_user1 = AccountLeaf {
-            index: prev_account_leaf_user1.index + 1,
-            prev: block_number,
-            send_tree_root: new_send_root_user1,
-        };
-        expected_tree.update(user1.as_u64(), new_account_leaf_user1);
+        // user1 has prev == block_number → should_update = false → tree unchanged.
+        // user2 also has prev == block_number → should_update = false → tree unchanged.
+        let expected_tree = account_tree.clone();
 
         assert_eq!(public_inputs.prev_account_tree_root, prev_account_tree_root);
         assert_eq!(

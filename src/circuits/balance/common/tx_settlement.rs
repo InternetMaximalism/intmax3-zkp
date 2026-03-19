@@ -290,6 +290,7 @@ mod tests {
             index: send_tree.len() as u32,
             prev: BlockNumber::default(),
             send_tree_root: send_tree.get_root(),
+            pk_hash: PoseidonHashOut::default(),
         };
         let user_id = UserId::new(0, local_id).expect("user id");
         account_tree.update(user_id.as_u64(), account_leaf.clone());

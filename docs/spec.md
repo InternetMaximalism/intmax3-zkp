@@ -122,11 +122,15 @@ The account tree is a Merkle tree whose leaf at index `user_id` stores the root 
 
 ```rust
 struct AccountLeaf {
-    index: u32,         // index of the next empty send leaf
-    prev: u64,          // value of send_leaf.cur for the latest inserted send leaf
-    send_tree_root: Bytes32
+    index: u32,          // index of the next empty send leaf
+    prev: u64,           // value of send_leaf.cur for the latest inserted send leaf
+    send_tree_root: Bytes32,
+    pk_hash: Bytes32     // Poseidon(pub_seed ‖ pub_root) of the user’s SPHINCS+ public key
+                         // Zero (default) means the user has not registered a key yet
 }
 ```
+
+`pk_hash` is computed as `PoseidonHash([pub_seed_gl[0], pub_seed_gl[1], pub_root_gl[0], pub_root_gl[1]])` where each `*_gl` is an 8-byte chunk of the SPHINCS+ public key packed as a little-endian Goldilocks field element.
 
 ### 2.3 Public State Structure
 
@@ -294,9 +298,45 @@ Helper methods:
 - `w.send_block_number_before_tx()` returns `w.account_witness.send_leaf.prev`.
 - `w.tx_block_number()` returns `w.account_witness.send_leaf.cur`.
 
-## 6. Circuits
+## 6. Validity Proof and SPHINCS+ Signature Verification
 
-### 6.1 Send Tx Circuit
+### 6.0 Post-Quantum Account Authentication
+
+The validity circuit enforces **SPHINCS+ (SPX-128s Poseidon)** signatures for each account-tree update. The signature scheme parameters are:
+
+| Parameter | Value |
+|-----------|-------|
+| Hash function | Poseidon over Goldilocks field |
+| `N` (bytes) | 16 |
+| Hypertree depth `D` | 7 |
+| FORS trees `k`, height `a` | 14, 12 |
+| WOTS+ chain length | 35 |
+| Signature size | 7 856 bytes |
+| Public key size | 32 bytes (16-byte `pub_seed` ‖ 16-byte `pub_root`) |
+
+**Signed message** for slot `i` in a block:
+
+```
+M_i = [block_number ‖ aggregator_id ‖ local_id_i ‖ tx_tree_root]
+    = 11 Goldilocks field elements = 88 bytes
+```
+
+**Constraint** (per active user slot in the validity circuit):
+
+```
+if (local_id_i ≠ 0)           // active (non-padding) slot
+   AND (prev ≠ block_number)   // account not yet updated this block
+   AND (pk_hash ≠ 0):          // user has registered a SPHINCS+ key
+then:
+    assert Poseidon(pub_seed ‖ pub_root) == account_leaf.pk_hash
+    assert sphincs_verify(sig_i, M_i, pub_key_i) == true
+```
+
+When `pk_hash == 0` (user has not yet registered a public key), the signature constraint is skipped and the account-tree update proceeds without authentication. Once a user registers their key (sets `pk_hash`), every subsequent block inclusion is authenticated.
+
+## 7. Circuits
+
+### 7.1 Send Tx Circuit
 
 **Inputs**
 
@@ -320,7 +360,7 @@ Helper methods:
    - `tx_settlement_witness.spent_proof.prev_private_state_commitment == sender_balance_proof.private_state_commitment`.
 4. Update `sender_balance_proof.public_state <- public_state_update_witness.new`. When `tx_settlement_witness.spent_proof.is_valid == true`, also set `sender_balance_proof.private_state_commitment <- tx_settlement_witness.spent_proof.new_private_state_commitment` and `sender_balance_proof.block_r <- tx_settlement_witness.tx_block_number()`.
 
-### 6.2 Receive Transfer Circuit
+### 7.2 Receive Transfer Circuit
 
 **Inputs**
 
@@ -346,7 +386,7 @@ Helper methods:
 5. Assert `tx_settlement_witness.spent_proof.prev_private_state_commitment == sender_balance_proof.private_state_commitment` and `tx_settlement_witness.spent_proof.is_valid == true`.
 6. Update `receiver_balance_proof.block_r <- new_block_r` and incorporate the transfer into `receiver_balance_proof.private_state`, updating `asset_root` and `nullifier_root`.
 
-### 6.3 Receive Deposit Circuit
+### 7.3 Receive Deposit Circuit
 
 **Private Inputs**
 
@@ -363,7 +403,7 @@ Helper methods:
 3. Check `deposit_witness.deposit.block_number <= new_block_r`.
 4. Update `receiver_balance_proof.block_r <- new_block_r` and insert the deposit into `receiver_balance_proof.private_state`, updating `asset_root` and `nullifier_root`.
 
-### 6.4 Withdrawal Circuit
+### 7.4 Withdrawal Circuit
 
 Aggregates multiple withdrawals.
 

@@ -10,6 +10,9 @@ plonky2 = { git = "https://github.com/InternetMaximalism/polygon-plonky2.git", b
 plonky2_u32 = { git = "https://github.com/InternetMaximalism/plonky2-u32.git", branch = "wasm", default-features = false }
 plonky2_bn254 = { git = "https://github.com/InternetMaximalism/plonky2_bn254", branch = "wasm", default-features = false }
 plonky2_keccak = { git = "https://github.com/InternetMaximalism/plonky2_keccak", branch = "wasm", default-features = false }
+sphincsplus-circuits = { git = "https://github.com/InternetMaximalism/aggregated_SPHINCS_plus.git" }
+sphincsplus-params = { git = "https://github.com/InternetMaximalism/aggregated_SPHINCS_plus.git" }
+sphincsplus-poseidon = { git = "https://github.com/InternetMaximalism/aggregated_SPHINCS_plus.git" }
 hex = "0.4.3"
 rand = "0.8.5"
 thiserror = "2.0.17"

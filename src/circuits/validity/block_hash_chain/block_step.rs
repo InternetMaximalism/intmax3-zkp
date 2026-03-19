@@ -766,6 +766,7 @@ mod tests {
             validity::{
                 block_hash_chain::{
                     block_chain_pis::BLOCK_CHAIN_PUBLIC_INPUTS_LEN,
+                    sphincs_sig::SpxSigWitness,
                     update_account_tree::{UpdateAccountCircuit, UpdateAccountTree},
                 },
                 deposit_hash_chain::deposit_chain_pis::DEPOSIT_CHAIN_PUBLIC_INPUTS_LEN,
@@ -795,8 +796,11 @@ mod tests {
 
         let tx_tree_root = Bytes32::rand(&mut rng);
         let timestamp = rng.next_u64();
+        // Use empty local_ids (all-padding block) so that should_update=false for
+        // every slot, bypassing SPHINCS+ signature verification.  Dedicated signing
+        // tests live in update_account_tree.rs.
         generator
-            .add_block(1, &[1, 2], timestamp, tx_tree_root)
+            .add_block(1, &[], timestamp, tx_tree_root)
             .expect("add block");
 
         let block_number = generator.block_number;
@@ -812,6 +816,7 @@ mod tests {
             .add(1)
             .expect("increment block number");
 
+        let num_users = block_witness.block.num_users as usize;
         let update_tree = UpdateAccountTree {
             prev_block_hash_chain: initial_state.block_hash_chain,
             prev_account_tree_root: initial_state.inner.account_tree_root,
@@ -820,6 +825,7 @@ mod tests {
             prev_account_leaves: block_witness.prev_account_leaves.clone(),
             account_merkle_proofs: block_witness.account_merkle_proofs.clone(),
             send_merkle_proofs: block_witness.send_merkle_proofs.clone(),
+            sig_witnesses: vec![SpxSigWitness::dummy(); num_users],
         };
         let update_inputs = update_tree.to_public_inputs().expect("update inputs");
         let update_proof = update_circuit

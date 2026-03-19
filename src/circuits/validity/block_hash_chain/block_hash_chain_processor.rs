@@ -18,6 +18,7 @@ use crate::{
             block_hash_chain_circuit::{BlockHashChainCircuit, BlockHashChainCircuitError},
             block_step::{BlockStepCircuit, BlockStepError, BlockStepWitness},
             ext_public_state::ExtendedPublicState,
+            sphincs_sig::SpxSigWitness,
             update_account_tree::{
                 UpdateAccountCircuit, UpdateAccountCircuitError, UpdateAccountTree,
             },
@@ -65,6 +66,10 @@ pub struct BlockHashChainProcessorWitness {
     pub account_merkle_proofs: Vec<AccountMerkleProof>,
     pub send_merkle_proofs: Vec<SendMerkleProof>,
     pub public_state_merkle_proof: PublicStateMerkleProof,
+    /// Optional SPHINCS+ signature witnesses, one per user slot.
+    /// If None, dummy (all-zero) witnesses are used — valid only when the
+    /// signature verification constraints are conditionally disabled (inactive slots).
+    pub sig_witnesses: Option<Vec<SpxSigWitness>>,
 }
 
 pub struct BlockHashChainProcessor<F, C, const D: usize>
@@ -212,6 +217,7 @@ where
                     "previous block number is at max value".to_string(),
                 )
             })?;
+        let num_users = witness.block.num_users;
         let update_account_tree = UpdateAccountTree {
             prev_block_hash_chain: prev_ext_public_state.block_hash_chain,
             prev_account_tree_root: prev_ext_public_state.inner.account_tree_root,
@@ -220,6 +226,12 @@ where
             prev_account_leaves: witness.prev_account_leaves.clone(),
             account_merkle_proofs: witness.account_merkle_proofs.clone(),
             send_merkle_proofs: witness.send_merkle_proofs.clone(),
+            // Use dummy witnesses when real SPHINCS+ keys are not provided.
+            // In production, replace with actual SpxSigWitness::from_bytes calls.
+            sig_witnesses: witness
+                .sig_witnesses
+                .clone()
+                .unwrap_or_else(|| vec![SpxSigWitness::dummy(); num_users as usize]),
         };
         let update_account_proof = update_account_circuit.prove(&update_account_tree)?;
 
@@ -296,8 +308,9 @@ mod tests {
 
         let tx_tree_root = Bytes32::rand(&mut rng);
         let timestamp = rng.next_u64();
+        // Use empty local_ids (all-padding) so should_update=false, bypassing SPHINCS+.
         generator
-            .add_block(1, &[1, 2], timestamp, tx_tree_root)
+            .add_block(1, &[], timestamp, tx_tree_root)
             .expect("add block");
 
         let block_number = generator.block_number;

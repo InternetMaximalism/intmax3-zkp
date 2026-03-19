@@ -295,10 +295,12 @@ impl BlockWitnessGenerator {
                 send_tree.push(new_send_leaf.clone());
                 send_entries.push(new_send_leaf.clone());
 
+                // pk_hash is preserved from the previous leaf
                 let new_account_leaf = AccountLeaf {
                     index: prev_account_leaf.index + 1,
                     prev: new_block_number,
                     send_tree_root: new_send_root,
+                    pk_hash: prev_account_leaf.pk_hash,
                 };
                 account_tree_for_proofs.update(user_id.as_u64(), new_account_leaf.clone());
                 self.account_tree.update(user_id.as_u64(), new_account_leaf);
@@ -323,6 +325,7 @@ impl BlockWitnessGenerator {
             account_merkle_proofs,
             send_merkle_proofs,
             public_state_merkle_proof,
+            sig_witnesses: None, // dummy witnesses used by default in tests
         };
 
         self.block_chain_witness
