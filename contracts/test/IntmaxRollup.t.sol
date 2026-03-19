@@ -115,7 +115,6 @@ contract IntmaxRollupTest is Test {
         assertEq(rollup.nextId(), 1);
 
         IntmaxRollup.Submission memory sub = rollup.getSubmission(0);
-        assertEq(sub.stateRoot, stateRoot);
         assertEq(sub.submitter, submitter);
         assertFalse(sub.finalized);
     }
@@ -139,8 +138,9 @@ contract IntmaxRollupTest is Test {
 
         IntmaxRollup.Submission memory sub0 = rollup.getSubmission(0);
         IntmaxRollup.Submission memory sub1 = rollup.getSubmission(1);
-        assertEq(sub0.stateRoot, keccak256("s1"));
-        assertEq(sub1.stateRoot, keccak256("s2"));
+        assertTrue(sub0.commitment != bytes32(0));
+        assertTrue(sub1.commitment != bytes32(0));
+        assertTrue(sub0.commitment != sub1.commitment);
     }
 
     // -----------------------------------------------------------------------
@@ -294,7 +294,7 @@ contract IntmaxRollupTest is Test {
         _mockBLSPrecompiles();
 
         rollup.finalize(
-            0, _kzgBlobHash,
+            0, _kzgBlobHash, stateRoot,
             plonky2Bytes,
             config, statement, whirProof, transcript,
             _dummyKZG(plonky2Bytes.length)
@@ -324,14 +324,14 @@ contract IntmaxRollupTest is Test {
         _mockBLSPrecompiles();
 
         rollup.finalize(
-            0, _kzgBlobHash, plonky2Bytes,
+            0, _kzgBlobHash, stateRoot, plonky2Bytes,
             config, statement, whirProof, transcript,
             _dummyKZG(plonky2Bytes.length)
         );
 
         vm.expectRevert(IntmaxRollup.AlreadyFinalized.selector);
         rollup.finalize(
-            0, _kzgBlobHash, plonky2Bytes,
+            0, _kzgBlobHash, stateRoot, plonky2Bytes,
             config, statement, whirProof, transcript,
             _dummyKZG(plonky2Bytes.length)
         );
@@ -364,7 +364,7 @@ contract IntmaxRollupTest is Test {
 
         vm.expectRevert(IntmaxRollup.ProofVerificationFailed.selector);
         rollup.finalize(
-            0, _kzgBlobHash, plonky2Bytes,
+            0, _kzgBlobHash, stateRoot, plonky2Bytes,
             config, statement, whirProof, corruptTranscript,
             _dummyKZG(plonky2Bytes.length)
         );
@@ -382,7 +382,7 @@ contract IntmaxRollupTest is Test {
 
         vm.expectRevert(IntmaxRollup.SubmissionNotFound.selector);
         rollup.finalize(
-            999, bytes32(0), "",
+            999, bytes32(0), bytes32(0), "",
             config, statement, whirProof, transcript,
             _dummyKZG(0)
         );
@@ -466,7 +466,7 @@ contract IntmaxRollupTest is Test {
 
         uint256 gasBefore = gasleft();
         rollup.finalize(
-            0, _kzgBlobHash, plonky2Bytes,
+            0, _kzgBlobHash, stateRoot, plonky2Bytes,
             config, statement, whirProof, transcript,
             _dummyKZG(plonky2Bytes.length)
         );

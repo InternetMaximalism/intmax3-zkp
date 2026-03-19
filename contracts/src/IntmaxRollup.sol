@@ -66,11 +66,15 @@ contract IntmaxRollup {
     // -----------------------------------------------------------------------
     // Types
     // -----------------------------------------------------------------------
+
+    /// @dev Packed into a single 256-bit storage slot:
+    ///      commitment (bytes32) occupies slot N,
+    ///      submitter+finalized are packed into slot N+1 (20+1 bytes).
+    ///      stateRoot is NOT stored — it lives inside the commitment and is
+    ///      passed as calldata when needed (finalize / fraudProof).
     struct Submission {
         bytes32 commitment;   // keccak256(blobHash || proofHash || proofLength || stateRoot)
-        bytes32 stateRoot;    // final_ext_commitment from the validity proof
-        address submitter;
-        uint64  l1BlockNumber;
+        address submitter;    // packed with `finalized` into one slot
         bool    finalized;
     }
 
@@ -123,9 +127,7 @@ contract IntmaxRollup {
 
         _submissions[id] = Submission({
             commitment: commitment,
-            stateRoot: stateRoot,
             submitter: msg.sender,
-            l1BlockNumber: uint64(block.number),
             finalized: false
         });
 
@@ -185,9 +187,11 @@ contract IntmaxRollup {
     /// @notice Verify and finalize a submission.
     ///         If the proof is valid, mark the submission as finalized and
     ///         update the on-chain state root.
+    /// @param stateRoot Must match the stateRoot committed at submit time.
     function finalize(
         uint256 submissionId,
         bytes32 blobVersionedHash,
+        bytes32 stateRoot,
         bytes calldata plonky2ProofBytes,
         WhirConfig calldata config,
         Statement calldata statement,
@@ -200,15 +204,15 @@ contract IntmaxRollup {
         if (sub.finalized) revert AlreadyFinalized();
 
         bool valid = _fullVerify(
-            submissionId, blobVersionedHash, sub.stateRoot,
+            submissionId, blobVersionedHash, stateRoot,
             plonky2ProofBytes, config, statement, whirProof, transcript, kzg
         );
         if (!valid) revert ProofVerificationFailed();
 
         sub.finalized = true;
-        latestFinalizedStateRoot = sub.stateRoot;
+        latestFinalizedStateRoot = stateRoot;
 
-        emit Finalized(submissionId, sub.stateRoot);
+        emit Finalized(submissionId, stateRoot);
     }
 
     // -----------------------------------------------------------------------
