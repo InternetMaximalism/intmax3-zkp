@@ -951,7 +951,7 @@ mod tests {
                     update_account_tree::{UpdateAccountCircuit, UpdateAccountTree},
                 },
                 deposit_hash_chain::deposit_chain_pis::DEPOSIT_CHAIN_PUBLIC_INPUTS_LEN,
-                forced_tx_hash_chain::forced_tx_chain_pis::FORCED_TX_CHAIN_PUBLIC_INPUTS_LEN,
+                forced_tx_hash_chain::forced_tx_chain_processor::ForcedTxChainProcessor,
             },
         },
         ethereum_types::{bytes32::Bytes32, u32limb_trait::U32LimbTrait as _},
@@ -1033,14 +1033,8 @@ mod tests {
         );
         let deposit_chain_vd = deposit_chain_circuit.data.verifier_data();
 
-        let forced_tx_chain_cd =
-            TestCyclicCircuit::<F, C, D>::generate_cd(FORCED_TX_CHAIN_PUBLIC_INPUTS_LEN);
-        let forced_tx_chain_circuit = TestCyclicCircuit::<F, C, D>::new(
-            CircuitConfig::standard_recursion_config(),
-            FORCED_TX_CHAIN_PUBLIC_INPUTS_LEN,
-            &forced_tx_chain_cd,
-        );
-        let forced_tx_chain_vd = forced_tx_chain_circuit.data.verifier_data();
+        let forced_tx_chain_processor = ForcedTxChainProcessor::<F, C, D>::new();
+        let forced_tx_chain_vd = forced_tx_chain_processor.forced_tx_chain_vd();
 
         let update_account_vds = vec![(
             block_witness.block.num_users,
