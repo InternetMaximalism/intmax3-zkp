@@ -645,6 +645,44 @@ contract IntmaxRollupTest is Test {
         uint256 gasUsed = gasBefore - gasleft();
         console.log("finalize() gas:", gasUsed);
     }
+
+    function test_gas_registerForcedTxLogic() public {
+        address mockLogic = makeAddr("mockLogic");
+        uint256 gasBefore = gasleft();
+        rollup.registerForcedTxLogic(42, mockLogic);
+        uint256 gasUsed = gasBefore - gasleft();
+        console.log("registerForcedTxLogic() gas:", gasUsed);
+    }
+
+    function test_gas_queueForcedTx() public {
+        MockForcedTxLogic mockLogic = new MockForcedTxLogic(bytes32(uint256(0xdeadbeef)));
+        rollup.registerForcedTxLogic(42, address(mockLogic));
+
+        uint256 gasBefore = gasleft();
+        rollup.queueForcedTx(42);
+        uint256 gasUsed = gasBefore - gasleft();
+        console.log("queueForcedTx() gas:", gasUsed);
+    }
+
+    function test_gas_postBlock_withForcedTx() public {
+        // Queue forced tx, then measure postBlock with maturation logic
+        MockForcedTxLogic mockLogic = new MockForcedTxLogic(bytes32(uint256(0xabc)));
+        rollup.registerForcedTxLogic(42, address(mockLogic));
+        rollup.queueForcedTx(42);
+
+        uint32[] memory ids = new uint32[](2);
+        ids[0] = 1;
+        ids[1] = 2;
+
+        // Post 3 blocks so maturation kicks in on the third
+        rollup.postBlock(1, ids, 100, bytes32(uint256(0x111)));
+        rollup.postBlock(1, ids, 200, bytes32(uint256(0x222)));
+
+        uint256 gasBefore = gasleft();
+        rollup.postBlock(1, ids, 300, bytes32(uint256(0x333)));
+        uint256 gasUsed = gasBefore - gasleft();
+        console.log("postBlock() with mature forced tx gas:", gasUsed);
+    }
 }
 
 /// @dev Mock forced tx logic contract that returns a fixed tx hash.
