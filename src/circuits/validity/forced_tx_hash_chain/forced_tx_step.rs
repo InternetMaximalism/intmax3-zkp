@@ -498,8 +498,8 @@ where
         let mut pw = PartialWitness::<F>::new();
         self.target
             .set_witness(&mut pw, witness, &new_pis, &self.dummy_proof);
-        self.public_inputs
-            .set_witness::<F, C, D, _>(&mut pw, &new_pis);
+        // Note: public_inputs shares targets with target.new_pis (via clone),
+        // so we don't call set_witness again — it's already set above.
         self.data
             .prove(pw)
             .map_err(|e| ForcedTxStepError::FailedToProve(e.to_string()))

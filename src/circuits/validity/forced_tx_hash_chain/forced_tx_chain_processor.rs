@@ -75,3 +75,108 @@ where
         self.forced_tx_hash_chain_circuit.verify(proof)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{
+        common::{
+            forced_tx::ForcedTx,
+            trees::account_tree::{AccountLeaf, AccountTree, SendLeaf, SendTree},
+            u63::{BlockNumber, U63},
+            user_id::UserId,
+        },
+        constants::{ACCOUNT_TREE_HEIGHT, SEND_TREE_HEIGHT},
+        ethereum_types::{bytes32::Bytes32, u32limb_trait::U32LimbTrait},
+    };
+    use plonky2::{
+        field::goldilocks_field::GoldilocksField, plonk::config::PoseidonGoldilocksConfig,
+    };
+    use rand::{SeedableRng, rngs::StdRng};
+
+    use crate::circuits::validity::forced_tx_hash_chain::forced_tx_step::ForcedTxStepWitness;
+    use crate::utils::poseidon_hash_out::PoseidonHashOut;
+
+    const D: usize = 2;
+    type F = GoldilocksField;
+    type C = PoseidonGoldilocksConfig;
+
+    #[cfg_attr(debug_assertions, ignore = "run with --release")]
+    #[test]
+    fn test_forced_tx_chain_processor() {
+        let mut rng = StdRng::seed_from_u64(42);
+
+        let processor = ForcedTxChainProcessor::<F, C, D>::new();
+        let forced_tx_chain_vd = processor.forced_tx_chain_vd();
+
+        let block_number = BlockNumber::new(5).unwrap();
+        let user_id = UserId::new(1, 10).unwrap();
+        let tx_hash = Bytes32::rand(&mut rng);
+
+        // Set up account tree with an existing user
+        let mut send_tree = SendTree::init();
+        let prev_send_leaf = SendLeaf {
+            prev: BlockNumber::new(1).unwrap(),
+            cur: BlockNumber::new(3).unwrap(),
+            tx_tree_root: Bytes32::rand(&mut rng),
+        };
+        send_tree.push(prev_send_leaf);
+        let prev_account_leaf = AccountLeaf {
+            index: send_tree.len() as u32,
+            prev: BlockNumber::new(3).unwrap(),
+            send_tree_root: send_tree.get_root(),
+            pk_hash: PoseidonHashOut::default(), // no registered key
+        };
+
+        let mut account_tree = AccountTree::new(ACCOUNT_TREE_HEIGHT);
+        account_tree.update(user_id.as_u64(), prev_account_leaf.clone());
+
+        let initial_account_tree_root = account_tree.get_root();
+        let initial_forced_tx_hash_chain = Bytes32::default();
+        let initial_forced_tx_count = U63::default();
+
+        let account_merkle_proof = account_tree.prove(user_id.as_u64());
+        let send_merkle_proof = send_tree.prove(prev_account_leaf.index.into());
+
+        let forced_tx = ForcedTx { user_id, tx_hash };
+
+        let first_witness = ForcedTxStepWitness::<F, C, D> {
+            initial_value: Some((
+                initial_forced_tx_hash_chain,
+                initial_account_tree_root,
+                initial_forced_tx_count,
+            )),
+            prev_forced_tx_chain_proof: None,
+            forced_tx: forced_tx.clone(),
+            block_number,
+            prev_account_leaf: prev_account_leaf.clone(),
+            account_merkle_proof,
+            send_merkle_proof,
+        };
+
+        let first_public_inputs = first_witness
+            .to_public_inputs(&forced_tx_chain_vd)
+            .expect("first forced tx public inputs");
+        assert_eq!(first_public_inputs.forced_tx_count.as_u64(), 1);
+        assert_eq!(first_public_inputs.block_number, block_number);
+        assert_ne!(
+            first_public_inputs.account_tree_root,
+            initial_account_tree_root,
+            "account tree root should change after forced tx"
+        );
+
+        let expected_hash_chain =
+            forced_tx.hash_with_prev_hash(initial_forced_tx_hash_chain);
+        assert_eq!(
+            first_public_inputs.forced_tx_hash_chain,
+            expected_hash_chain
+        );
+
+        let first_proof = processor
+            .prove_step(&first_witness)
+            .expect("first forced tx chain proof");
+        processor
+            .verify(&first_proof)
+            .expect("first forced tx chain proof verifies");
+    }
+}

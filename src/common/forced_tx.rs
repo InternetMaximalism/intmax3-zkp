@@ -93,6 +93,7 @@ impl ForcedTxTarget {
     /// Compute keccak hash chain in-circuit: keccak256(prev_hash || user_id || tx_hash)
     ///
     /// Must match the Rust-side ForcedTx::hash_with_prev_hash computation.
+    /// Both use u32-packed layout: prev_hash(8×u32) || user_id(2×u32) || tx_hash(8×u32).
     pub fn hash_with_prev_hash<
         F: RichField + Extendable<D>,
         C: GenericConfig<D, F = F> + 'static,
@@ -106,7 +107,8 @@ impl ForcedTxTarget {
         <C as GenericConfig<D>>::Hasher: AlgebraicHasher<F>,
     {
         let mut inputs: Vec<Target> = prev_hash.to_vec();
-        inputs.extend(self.user_id.to_vec());
+        // Use to_u32_vec to match the Rust-side to_u32_vec() layout (2 u32s: high, low)
+        inputs.extend(self.user_id.to_u32_vec(builder));
         inputs.extend(self.tx_hash.to_vec());
         Bytes32Target::from_slice(&builder.keccak256::<C>(&inputs))
     }
