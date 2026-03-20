@@ -27,6 +27,7 @@ use crate::{
             deposit_chain_processor::{DepositChainProcessor, DepositChainProcessorError},
             deposit_step::DepositStepWitness,
         },
+        forced_tx_hash_chain::forced_tx_hash_chain_circuit::ForcedTxHashChainCircuit,
     },
     common::{
         block::Block,
@@ -81,6 +82,7 @@ where
     block_hash_chain_circuit: BlockHashChainCircuit<F, C, D>,
     block_step_circuit: BlockStepCircuit<F, C, D>,
     deposit_chain_vd: VerifierCircuitData<F, C, D>,
+    forced_tx_chain_vd: VerifierCircuitData<F, C, D>,
     update_account_vds: Vec<(u32, VerifierCircuitData<F, C, D>)>,
     update_account_circuits: HashMap<u32, UpdateAccountCircuit<F, C, D>>,
     deposit_chain_processor: DepositChainProcessor<F, C, D>,
@@ -112,10 +114,29 @@ where
             update_account_circuits.insert(num_users, circuit);
         }
 
+        // Generate forced tx chain common data and create a dummy vd for
+        // the BlockStep circuit.  Full ForcedTxChainProcessor integration
+        // (for actually proving forced txs) can be added later.
+        let forced_tx_chain_cd = ForcedTxHashChainCircuit::<F, C, D>::generate_cd();
+        // We need a verifier data for the forced tx chain.  Create a minimal
+        // circuit matching the common data so we can extract a vd.
+        let forced_tx_chain_vd = {
+            use crate::utils::cyclic::TestCyclicCircuit;
+            use crate::circuits::validity::forced_tx_hash_chain::forced_tx_chain_pis::FORCED_TX_CHAIN_PUBLIC_INPUTS_LEN;
+            use plonky2::plonk::circuit_data::CircuitConfig;
+            let circuit = TestCyclicCircuit::<F, C, D>::new(
+                CircuitConfig::standard_recursion_config(),
+                FORCED_TX_CHAIN_PUBLIC_INPUTS_LEN,
+                &forced_tx_chain_cd,
+            );
+            circuit.data.verifier_data()
+        };
+
         let block_step_circuit = BlockStepCircuit::<F, C, D>::new(
             &block_chain_cd,
             &update_account_vds,
             &deposit_chain_vd,
+            &forced_tx_chain_vd,
         );
 
         let block_hash_chain_circuit = BlockHashChainCircuit::<F, C, D>::new(
@@ -127,6 +148,7 @@ where
             block_hash_chain_circuit,
             block_step_circuit,
             deposit_chain_vd,
+            forced_tx_chain_vd,
             update_account_vds,
             update_account_circuits,
             deposit_chain_processor,
@@ -139,6 +161,10 @@ where
 
     pub fn deposit_chain_vd(&self) -> VerifierCircuitData<F, C, D> {
         self.deposit_chain_vd.clone()
+    }
+
+    pub fn forced_tx_chain_vd(&self) -> VerifierCircuitData<F, C, D> {
+        self.forced_tx_chain_vd.clone()
     }
 
     pub fn prove_block(
@@ -240,6 +266,7 @@ where
             initial_public_state: initial_public_state.clone(),
             prev_block_chain_proof: prev_block_chain_proof.clone(),
             deposit_hash_chain_proof: deposit_chain_proof.clone(),
+            forced_tx_chain_proof: None, // TODO: integrate forced tx proof generation
             update_account_proof: update_account_proof.clone(),
             public_state_merkle_proof: witness.public_state_merkle_proof.clone(),
         };
@@ -247,6 +274,7 @@ where
             &self.block_chain_vd(),
             &self.update_account_vds,
             &self.deposit_chain_vd,
+            &self.forced_tx_chain_vd,
             &block_step_witness,
         )?;
 
