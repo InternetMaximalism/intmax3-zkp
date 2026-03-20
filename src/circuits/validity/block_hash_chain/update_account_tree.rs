@@ -64,6 +64,7 @@ pub struct UpdateAccountPublicInputs {
     pub new_block_hash_chain: Bytes32,
     pub new_account_tree_root: PoseidonHashOut,
     pub deposit_hash_chain: Bytes32,
+    pub forced_tx_hash_chain: Bytes32,
 }
 
 #[derive(Clone, Debug)]
@@ -175,12 +176,13 @@ impl UpdateAccountTree {
             new_block_hash_chain,
             new_account_tree_root: account_tree_root,
             deposit_hash_chain: self.block.deposit_hash_chain,
+            forced_tx_hash_chain: self.block.forced_tx_hash_chain,
         })
     }
 }
 
 const UPDATE_ACCOUNT_PUBLIC_INPUTS_LEN: usize =
-    1 + U64_LEN + 3 * BYTES32_LEN + 2 * POSEIDON_HASH_OUT_LEN;
+    1 + U64_LEN + 4 * BYTES32_LEN + 2 * POSEIDON_HASH_OUT_LEN;
 
 impl UpdateAccountPublicInputs {
     pub fn to_u64_vec(&self) -> Vec<u64> {
@@ -191,6 +193,7 @@ impl UpdateAccountPublicInputs {
         result.extend(self.new_block_hash_chain.to_u64_vec());
         result.extend(self.new_account_tree_root.to_u64_vec());
         result.extend(self.deposit_hash_chain.to_u64_vec());
+        result.extend(self.forced_tx_hash_chain.to_u64_vec());
         result
     }
 
@@ -238,6 +241,10 @@ impl UpdateAccountPublicInputs {
 
         let deposit_hash_chain = Bytes32::from_u64_slice(&values[cursor..cursor + BYTES32_LEN])
             .map_err(|e| UpdateAccountTreeError::InvalidLength(e.to_string()))?;
+        cursor += BYTES32_LEN;
+
+        let forced_tx_hash_chain = Bytes32::from_u64_slice(&values[cursor..cursor + BYTES32_LEN])
+            .map_err(|e| UpdateAccountTreeError::InvalidLength(e.to_string()))?;
 
         Ok(Self {
             block_number,
@@ -247,6 +254,7 @@ impl UpdateAccountPublicInputs {
             new_block_hash_chain,
             new_account_tree_root,
             deposit_hash_chain,
+            forced_tx_hash_chain,
         })
     }
 }
@@ -260,6 +268,7 @@ pub struct UpdateAccountPublicInputsTarget {
     pub new_block_hash_chain: Bytes32Target,
     pub new_account_tree_root: PoseidonHashOutTarget,
     pub deposit_hash_chain: Bytes32Target,
+    pub forced_tx_hash_chain: Bytes32Target,
 }
 
 impl UpdateAccountPublicInputsTarget {
@@ -274,6 +283,7 @@ impl UpdateAccountPublicInputsTarget {
         let new_block_hash_chain = Bytes32Target::new(builder, is_checked);
         let new_account_tree_root = PoseidonHashOutTarget::new(builder);
         let deposit_hash_chain = Bytes32Target::new(builder, is_checked);
+        let forced_tx_hash_chain = Bytes32Target::new(builder, is_checked);
         Self {
             block_number,
             block_timestamp,
@@ -282,6 +292,7 @@ impl UpdateAccountPublicInputsTarget {
             new_block_hash_chain,
             new_account_tree_root,
             deposit_hash_chain,
+            forced_tx_hash_chain,
         }
     }
 
@@ -294,6 +305,7 @@ impl UpdateAccountPublicInputsTarget {
             self.new_block_hash_chain.to_vec(),
             self.new_account_tree_root.to_vec(),
             self.deposit_hash_chain.to_vec(),
+            self.forced_tx_hash_chain.to_vec(),
         ]
         .concat()
     }
@@ -337,6 +349,9 @@ impl UpdateAccountPublicInputsTarget {
         cursor += POSEIDON_HASH_OUT_LEN;
 
         let deposit_hash_chain = Bytes32Target::from_slice(&values[cursor..cursor + BYTES32_LEN]);
+        cursor += BYTES32_LEN;
+
+        let forced_tx_hash_chain = Bytes32Target::from_slice(&values[cursor..cursor + BYTES32_LEN]);
 
         Self {
             block_number,
@@ -346,6 +361,7 @@ impl UpdateAccountPublicInputsTarget {
             new_block_hash_chain,
             new_account_tree_root,
             deposit_hash_chain,
+            forced_tx_hash_chain,
         }
     }
 
@@ -367,6 +383,8 @@ impl UpdateAccountPublicInputsTarget {
             .set_witness(witness, value.new_account_tree_root);
         self.deposit_hash_chain
             .set_witness(witness, value.deposit_hash_chain);
+        self.forced_tx_hash_chain
+            .set_witness(witness, value.forced_tx_hash_chain);
     }
 
     pub fn select<F: RichField + Extendable<D>, const D: usize>(
@@ -417,6 +435,12 @@ impl UpdateAccountPublicInputsTarget {
                 condition,
                 when_true.deposit_hash_chain.clone(),
                 when_false.deposit_hash_chain.clone(),
+            ),
+            forced_tx_hash_chain: Bytes32Target::select(
+                builder,
+                condition,
+                when_true.forced_tx_hash_chain.clone(),
+                when_false.forced_tx_hash_chain.clone(),
             ),
         }
     }
@@ -627,6 +651,7 @@ impl UpdateAccountTreeTarget {
             new_block_hash_chain,
             new_account_tree_root: account_tree_root.clone(),
             deposit_hash_chain: block.deposit_hash_chain.clone(),
+            forced_tx_hash_chain: block.forced_tx_hash_chain.clone(),
         };
 
         Self {
@@ -829,6 +854,7 @@ mod tests {
         );
 
         let timestamp = rng.next_u64();
+        let forced_tx_hash_chain = Bytes32::default();
         let block = Block::new(
             num_users,
             aggregator_id,
@@ -836,6 +862,7 @@ mod tests {
             timestamp,
             tx_tree_root,
             deposit_hash_chain,
+            forced_tx_hash_chain,
         )
         .unwrap();
 

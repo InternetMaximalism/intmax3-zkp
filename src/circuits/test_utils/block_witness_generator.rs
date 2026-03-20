@@ -178,6 +178,8 @@ impl BlockWitnessGenerator {
             self.block_hash_chain,
             self.deposit_hash_chain,
             U63::new(self.deposit_tree.len() as u64).expect("deposit count fits in 63 bits"),
+            Bytes32::default(), // forced_tx_hash_chain
+            U63::default(),     // forced_tx_count
         )
     }
 
@@ -242,6 +244,7 @@ impl BlockWitnessGenerator {
             timestamp,
             tx_tree_root,
             projected_deposit_hash_chain,
+            Bytes32::default(), // forced_tx_hash_chain: TODO integrate forced tx queue
         )?;
 
         let prev_ext_state = self.current_extended_public_state();

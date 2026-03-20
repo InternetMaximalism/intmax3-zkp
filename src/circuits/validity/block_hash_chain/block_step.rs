@@ -269,6 +269,10 @@ where
             block_hash_chain,
             deposit_hash_chain,
             deposit_count,
+            // Forced tx state: pass through from previous state for now.
+            // BlockStep integration (Phase 4) will add forced_tx_chain_proof handling.
+            prev_public_state_ext.forced_tx_hash_chain,
+            prev_public_state_ext.forced_tx_count,
         );
 
         Ok(BlockChainPublicInputs {
@@ -511,6 +515,10 @@ impl<const D: usize> BlockStepTarget<D> {
                 block_hash_chain,
                 deposit_hash_chain: selected_deposit_hash_chain,
                 deposit_count: selected_deposit_count,
+                // Forced tx state: pass through from previous state for now.
+                // Phase 4 will add forced_tx_chain_proof handling here.
+                forced_tx_hash_chain: selected_prev_state.forced_tx_hash_chain.clone(),
+                forced_tx_count: selected_prev_state.forced_tx_count.clone(),
             },
             vd: block_chain_vd.clone(),
         };

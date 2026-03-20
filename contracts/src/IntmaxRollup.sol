@@ -6,6 +6,7 @@ import {WhirProof, Statement, WhirConfig} from "sol-whir/WhirStructs.sol";
 import {BN254} from "solidity-bn254/BN254.sol";
 import {BlobKZGVerifier, KZGProof} from "./BlobKZGVerifier.sol";
 import {Groth16Verifier} from "./Groth16Verifier.sol";
+import {IForcedTxLogic} from "./IForcedTxLogic.sol";
 
 /// @title WhirVerifierWrapper
 /// @notice External wrapper so IntmaxRollup can try/catch on WHIR verification.
@@ -50,6 +51,8 @@ contract IntmaxRollup {
     error InitialStateMismatch();
     error BlockChainMismatch();
     error WhirPublicInputMismatch();
+    error NoForcedTxLogicRegistered();
+    error ForcedTxInsertFailed();
 
     // -----------------------------------------------------------------------
     // Events
@@ -84,6 +87,17 @@ contract IntmaxRollup {
     event Finalized(
         uint256 indexed id,
         bytes32 stateRoot
+    );
+
+    event ForcedTxLogicRegistered(
+        uint64 indexed userId,
+        address logicContract
+    );
+
+    event ForcedTxQueued(
+        uint64 indexed userId,
+        bytes32 txHash,
+        bytes32 newAccumulator
     );
 
     // -----------------------------------------------------------------------
@@ -151,6 +165,29 @@ contract IntmaxRollup {
     /// @notice The latest finalized state root (= final_ext_commitment from the last accepted proof).
     bytes32 public latestFinalizedStateRoot;
 
+    // -----------------------------------------------------------------------
+    // Forced Transaction State
+    // -----------------------------------------------------------------------
+
+    /// @notice Mapping from userId to their forced tx logic contract.
+    ///         Set during user registration via registerForcedTxLogic().
+    mapping(uint64 => address) public forcedTxLogicContracts;
+
+    /// @notice Running keccak hash chain of ALL queued forced txs.
+    ///         Updated by queueForcedTx().
+    bytes32 public forcedTxAccumulator;
+
+    /// @notice Snapshot of forcedTxAccumulator at each block number.
+    ///         Used for slot maturation: forced txs queued at block N
+    ///         become eligible for inclusion at block N+2.
+    mapping(uint64 => bytes32) public forcedTxAccumulatorAt;
+
+    /// @notice Total number of forced txs queued.
+    uint64 public forcedTxCount;
+
+    /// @notice Gas limit for external insertIntmaxTx() calls.
+    uint256 internal constant FORCED_TX_GAS_LIMIT = 100_000;
+
     /// @notice Mask to clear top 3 bits so a 256-bit value fits in the
     ///         BLS12-381 scalar field (used for KZG blob field elements).
     uint256 internal constant FIELD_MASK = type(uint256).max >> 3;
@@ -162,6 +199,54 @@ contract IntmaxRollup {
         whirVerifier = _whirVerifier;
         // Genesis: block 0 has default (zero) hash chains
         blockHashChainAt[0] = bytes32(0);
+    }
+
+    // -----------------------------------------------------------------------
+    // registerForcedTxLogic()  —  register a forced tx logic contract for a userId
+    // -----------------------------------------------------------------------
+
+    /// @notice Register (or update) the forced tx logic contract for a userId.
+    ///         Intended to be called during user ID registration.
+    /// @param userId         The Intmax user ID (aggregator_id << 32 | local_id).
+    /// @param logicContract  Address of the contract implementing IForcedTxLogic.
+    ///                       Use address(0) to unregister.
+    function registerForcedTxLogic(uint64 userId, address logicContract) external {
+        forcedTxLogicContracts[userId] = logicContract;
+        emit ForcedTxLogicRegistered(userId, logicContract);
+    }
+
+    // -----------------------------------------------------------------------
+    // queueForcedTx()  —  queue a forced tx (separate from postBlock)
+    // -----------------------------------------------------------------------
+
+    /// @notice Queue a forced transaction for a userId.
+    ///         Calls the registered logic contract's insertIntmaxTx() with a gas
+    ///         limit.  If a valid tx hash is returned, it is added to the
+    ///         forced tx accumulator hash chain.
+    ///         Callable by anyone — the logic contract controls whether a tx
+    ///         should actually be inserted.
+    /// @param userId  The Intmax user ID to insert a forced tx for.
+    function queueForcedTx(uint64 userId) external {
+        address logicContract = forcedTxLogicContracts[userId];
+        if (logicContract == address(0)) revert NoForcedTxLogicRegistered();
+
+        // Call with gas limit to prevent griefing
+        (bool success, bytes memory returnData) = logicContract.call{gas: FORCED_TX_GAS_LIMIT}(
+            abi.encodeCall(IForcedTxLogic.insertIntmaxTx, ())
+        );
+
+        if (!success || returnData.length < 32) revert ForcedTxInsertFailed();
+        bytes32 txHash = abi.decode(returnData, (bytes32));
+
+        // bytes32(0) signals "no tx to insert"
+        if (txHash == bytes32(0)) revert ForcedTxInsertFailed();
+
+        forcedTxCount++;
+        forcedTxAccumulator = keccak256(
+            abi.encodePacked(forcedTxAccumulator, userId, txHash)
+        );
+
+        emit ForcedTxQueued(userId, txHash, forcedTxAccumulator);
     }
 
     // -----------------------------------------------------------------------
@@ -187,16 +272,26 @@ contract IntmaxRollup {
         blockNumber++;
         uint64 newBlockNumber = blockNumber;
 
+        // Snapshot forced tx accumulator at this block number
+        forcedTxAccumulatorAt[newBlockNumber] = forcedTxAccumulator;
+
+        // Compute mature forced tx hash chain (queued 2+ blocks ago)
+        bytes32 blockForcedTxHashChain = bytes32(0);
+        if (newBlockNumber >= 3) {
+            blockForcedTxHashChain = forcedTxAccumulatorAt[newBlockNumber - 2];
+        }
+
         // Compute block hash matching Rust's Block::hash_with_prev_hash:
-        //   keccak256(prev_hash || aggregator_id || timestamp(u64→2×u32) || local_ids || tx_tree_root || deposit_hash_chain)
-        //   All values packed as u32 (little-endian within each u32 word).
+        //   keccak256(prev_hash || aggregator_id || timestamp || local_ids
+        //             || tx_tree_root || deposit_hash_chain || forced_tx_hash_chain)
         bytes32 newBlockHash = _computeBlockHash(
             blockHashChain,
             aggregatorId,
             timestamp,
             localIds,
             txTreeRoot,
-            blockDepositHashChain
+            blockDepositHashChain,
+            blockForcedTxHashChain
         );
 
         blockHashChain = newBlockHash;
@@ -485,7 +580,8 @@ contract IntmaxRollup {
     }
 
     /// @dev Compute block hash matching Rust's Block::hash_with_prev_hash:
-    ///      keccak256(prev_hash || aggregator_id || timestamp || local_ids || tx_tree_root || deposit_hash_chain)
+    ///      keccak256(prev_hash || aggregator_id || timestamp || local_ids
+    ///               || tx_tree_root || deposit_hash_chain || forced_tx_hash_chain)
     ///      All values packed as u32 words.
     function _computeBlockHash(
         bytes32 prevHash,
@@ -493,7 +589,8 @@ contract IntmaxRollup {
         uint64 timestamp,
         uint32[] calldata localIds,
         bytes32 txTreeRoot,
-        bytes32 blockDepositHashChain
+        bytes32 blockDepositHashChain,
+        bytes32 blockForcedTxHashChain
     ) internal pure returns (bytes32) {
         // Build the u32 array matching Rust's layout
         bytes memory packed = abi.encodePacked(
@@ -502,7 +599,8 @@ contract IntmaxRollup {
             timestamp,
             localIds,
             txTreeRoot,
-            blockDepositHashChain
+            blockDepositHashChain,
+            blockForcedTxHashChain
         );
         return keccak256(packed);
     }
