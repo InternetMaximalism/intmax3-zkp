@@ -3,6 +3,7 @@ pragma solidity ^0.8.24;
 
 import {Test, console} from "forge-std/Test.sol";
 import {IntmaxRollup, WhirVerifierWrapper} from "../src/IntmaxRollup.sol";
+import {IForcedTxLogic} from "../src/IForcedTxLogic.sol";
 import {KZGProof} from "../src/BlobKZGVerifier.sol";
 import {Groth16Verifier} from "../src/Groth16Verifier.sol";
 import {WhirProof, Statement, WhirConfig} from "sol-whir/WhirStructs.sol";
@@ -506,6 +507,112 @@ contract IntmaxRollupTest is Test {
         console.log("verify() gas (WHIR + Groth16):", gasUsed);
     }
 
+    // -----------------------------------------------------------------------
+    // Forced TX tests
+    // -----------------------------------------------------------------------
+
+    function test_registerForcedTxLogic() public {
+        address mockLogic = makeAddr("mockLogic");
+        rollup.registerForcedTxLogic(42, mockLogic);
+        assertEq(rollup.forcedTxLogicContracts(42), mockLogic);
+    }
+
+    function test_registerForcedTxLogic_unregister() public {
+        address mockLogic = makeAddr("mockLogic");
+        rollup.registerForcedTxLogic(42, mockLogic);
+        rollup.registerForcedTxLogic(42, address(0));
+        assertEq(rollup.forcedTxLogicContracts(42), address(0));
+    }
+
+    function test_queueForcedTx_noLogicRegistered() public {
+        vm.expectRevert(IntmaxRollup.NoForcedTxLogicRegistered.selector);
+        rollup.queueForcedTx(999);
+    }
+
+    function test_queueForcedTx_success() public {
+        // Deploy a mock logic contract that returns a valid tx hash
+        MockForcedTxLogic mockLogic = new MockForcedTxLogic(bytes32(uint256(0xdeadbeef)));
+        rollup.registerForcedTxLogic(42, address(mockLogic));
+
+        rollup.queueForcedTx(42);
+
+        assertEq(rollup.forcedTxCount(), 1);
+        assertTrue(rollup.forcedTxAccumulator() != bytes32(0));
+    }
+
+    function test_queueForcedTx_returnsZero_reverts() public {
+        // Deploy a mock that returns bytes32(0) = no tx to insert
+        MockForcedTxLogic mockLogic = new MockForcedTxLogic(bytes32(0));
+        rollup.registerForcedTxLogic(42, address(mockLogic));
+
+        vm.expectRevert(IntmaxRollup.ForcedTxInsertFailed.selector);
+        rollup.queueForcedTx(42);
+    }
+
+    function test_queueForcedTx_revertingLogic() public {
+        // Deploy a mock that reverts
+        RevertingForcedTxLogic mockLogic = new RevertingForcedTxLogic();
+        rollup.registerForcedTxLogic(42, address(mockLogic));
+
+        vm.expectRevert(IntmaxRollup.ForcedTxInsertFailed.selector);
+        rollup.queueForcedTx(42);
+    }
+
+    function test_forcedTx_slotMaturation() public {
+        // Queue a forced tx, then post 3 blocks. The forced tx should
+        // mature (appear in block hash) at block 3 (queued at block 0,
+        // snapshot at block 1, mature at block 3 = snapshot[3-2]=snapshot[1]).
+        MockForcedTxLogic mockLogic = new MockForcedTxLogic(bytes32(uint256(0xabc)));
+        rollup.registerForcedTxLogic(42, address(mockLogic));
+
+        rollup.queueForcedTx(42);
+        bytes32 accumulatorAfterQueue = rollup.forcedTxAccumulator();
+
+        uint32[] memory ids = new uint32[](1);
+        ids[0] = 1;
+
+        // Block 1: snapshot accumulator at block 1
+        rollup.postBlock(1, ids, 100, bytes32(uint256(0x111)));
+        assertEq(rollup.forcedTxAccumulatorAt(1), accumulatorAfterQueue);
+
+        // Block 2
+        rollup.postBlock(1, ids, 200, bytes32(uint256(0x222)));
+
+        // Block 3: mature forced txs = forcedTxAccumulatorAt[3-2] = forcedTxAccumulatorAt[1]
+        rollup.postBlock(1, ids, 300, bytes32(uint256(0x333)));
+
+        // Verify the accumulator was snapshotted correctly
+        assertEq(rollup.forcedTxAccumulatorAt(1), accumulatorAfterQueue);
+    }
+
+    function test_forcedTx_hashChainAccumulation() public {
+        MockForcedTxLogic mock1 = new MockForcedTxLogic(bytes32(uint256(0x111)));
+        MockForcedTxLogic mock2 = new MockForcedTxLogic(bytes32(uint256(0x222)));
+        rollup.registerForcedTxLogic(10, address(mock1));
+        rollup.registerForcedTxLogic(20, address(mock2));
+
+        rollup.queueForcedTx(10);
+        bytes32 afterFirst = rollup.forcedTxAccumulator();
+
+        rollup.queueForcedTx(20);
+        bytes32 afterSecond = rollup.forcedTxAccumulator();
+
+        assertEq(rollup.forcedTxCount(), 2);
+        assertTrue(afterFirst != bytes32(0));
+        assertTrue(afterSecond != afterFirst);
+
+        // Verify the hash chain matches expected computation
+        bytes32 expected1 = keccak256(abi.encodePacked(bytes32(0), uint64(10), bytes32(uint256(0x111))));
+        assertEq(afterFirst, expected1);
+
+        bytes32 expected2 = keccak256(abi.encodePacked(expected1, uint64(20), bytes32(uint256(0x222))));
+        assertEq(afterSecond, expected2);
+    }
+
+    // -----------------------------------------------------------------------
+    // Gas measurement
+    // -----------------------------------------------------------------------
+
     function test_gas_finalize() public {
         (
             WhirConfig memory config,
@@ -537,5 +644,25 @@ contract IntmaxRollupTest is Test {
         );
         uint256 gasUsed = gasBefore - gasleft();
         console.log("finalize() gas:", gasUsed);
+    }
+}
+
+/// @dev Mock forced tx logic contract that returns a fixed tx hash.
+contract MockForcedTxLogic is IForcedTxLogic {
+    bytes32 private _txHash;
+
+    constructor(bytes32 txHash) {
+        _txHash = txHash;
+    }
+
+    function insertIntmaxTx() external override returns (bytes32) {
+        return _txHash;
+    }
+}
+
+/// @dev Mock forced tx logic contract that always reverts.
+contract RevertingForcedTxLogic is IForcedTxLogic {
+    function insertIntmaxTx() external pure override returns (bytes32) {
+        revert("intentional revert");
     }
 }

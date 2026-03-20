@@ -91,6 +91,8 @@ impl ForcedTxTarget {
     }
 
     /// Compute keccak hash chain in-circuit: keccak256(prev_hash || user_id || tx_hash)
+    ///
+    /// Must match the Rust-side ForcedTx::hash_with_prev_hash computation.
     pub fn hash_with_prev_hash<
         F: RichField + Extendable<D>,
         C: GenericConfig<D, F = F> + 'static,
@@ -107,5 +109,80 @@ impl ForcedTxTarget {
         inputs.extend(self.user_id.to_vec());
         inputs.extend(self.tx_hash.to_vec());
         Bytes32Target::from_slice(&builder.keccak256::<C>(&inputs))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{
+        common::user_id::UserId,
+        ethereum_types::{bytes32::Bytes32, u32limb_trait::U32LimbTrait},
+    };
+    use rand::{SeedableRng, rngs::StdRng};
+
+    #[test]
+    fn test_forced_tx_default() {
+        let ftx = ForcedTx::default();
+        assert_eq!(ftx.user_id, UserId::dummy());
+        assert_eq!(ftx.tx_hash, Bytes32::default());
+    }
+
+    #[test]
+    fn test_forced_tx_hash_with_prev_hash_deterministic() {
+        let user_id = UserId::new(1, 42).unwrap();
+        let mut rng = StdRng::seed_from_u64(123);
+        let tx_hash = Bytes32::rand(&mut rng);
+        let prev_hash = Bytes32::default();
+
+        let ftx = ForcedTx { user_id, tx_hash };
+        let h1 = ftx.hash_with_prev_hash(prev_hash);
+        let h2 = ftx.hash_with_prev_hash(prev_hash);
+        assert_eq!(h1, h2, "hash should be deterministic");
+    }
+
+    #[test]
+    fn test_forced_tx_hash_chain() {
+        let mut rng = StdRng::seed_from_u64(456);
+        let ftx1 = ForcedTx {
+            user_id: UserId::new(1, 10).unwrap(),
+            tx_hash: Bytes32::rand(&mut rng),
+        };
+        let ftx2 = ForcedTx {
+            user_id: UserId::new(2, 20).unwrap(),
+            tx_hash: Bytes32::rand(&mut rng),
+        };
+
+        let chain0 = Bytes32::default();
+        let chain1 = ftx1.hash_with_prev_hash(chain0);
+        let chain2 = ftx2.hash_with_prev_hash(chain1);
+
+        // Each step should produce a different hash
+        assert_ne!(chain0, chain1);
+        assert_ne!(chain1, chain2);
+        assert_ne!(chain0, chain2);
+    }
+
+    #[test]
+    fn test_forced_tx_to_u64_vec_length() {
+        let ftx = ForcedTx {
+            user_id: UserId::new(1, 1).unwrap(),
+            tx_hash: Bytes32::default(),
+        };
+        // user_id: 1 element, tx_hash: 8 elements (Bytes32 = 8 u64s)
+        let vec = ftx.to_u64_vec();
+        assert_eq!(vec.len(), 1 + 8);
+    }
+
+    #[test]
+    fn test_forced_tx_serialization_roundtrip() {
+        let mut rng = StdRng::seed_from_u64(789);
+        let ftx = ForcedTx {
+            user_id: UserId::new(5, 100).unwrap(),
+            tx_hash: Bytes32::rand(&mut rng),
+        };
+        let json = serde_json::to_string(&ftx).unwrap();
+        let deserialized: ForcedTx = serde_json::from_str(&json).unwrap();
+        assert_eq!(ftx, deserialized);
     }
 }

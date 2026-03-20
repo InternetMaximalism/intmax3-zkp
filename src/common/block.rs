@@ -213,3 +213,68 @@ impl BlockTarget {
             .set_witness(witness, value.forced_tx_hash_chain);
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ethereum_types::{bytes32::Bytes32, u32limb_trait::U32LimbTrait};
+    use rand::{SeedableRng, rngs::StdRng};
+
+    #[test]
+    fn test_block_new_and_hash() {
+        let mut rng = StdRng::seed_from_u64(42);
+        let tx_tree_root = Bytes32::rand(&mut rng);
+        let deposit_hash_chain = Bytes32::rand(&mut rng);
+        let forced_tx_hash_chain = Bytes32::rand(&mut rng);
+        let prev_hash = Bytes32::rand(&mut rng);
+
+        let block = Block::new(
+            2,
+            1,
+            &[10, 20],
+            1000,
+            tx_tree_root,
+            deposit_hash_chain,
+            forced_tx_hash_chain,
+        )
+        .unwrap();
+
+        let h1 = block.hash_with_prev_hash(prev_hash).unwrap();
+        let h2 = block.hash_with_prev_hash(prev_hash).unwrap();
+        assert_eq!(h1, h2, "block hash should be deterministic");
+    }
+
+    #[test]
+    fn test_block_hash_differs_with_forced_tx_hash_chain() {
+        let mut rng = StdRng::seed_from_u64(99);
+        let tx_tree_root = Bytes32::rand(&mut rng);
+        let deposit_hash_chain = Bytes32::rand(&mut rng);
+        let prev_hash = Bytes32::default();
+
+        let block_no_forced = Block::new(
+            1, 1, &[1], 100, tx_tree_root, deposit_hash_chain, Bytes32::default(),
+        )
+        .unwrap();
+
+        let block_with_forced = Block::new(
+            1, 1, &[1], 100, tx_tree_root, deposit_hash_chain, Bytes32::rand(&mut rng),
+        )
+        .unwrap();
+
+        let h1 = block_no_forced.hash_with_prev_hash(prev_hash).unwrap();
+        let h2 = block_with_forced.hash_with_prev_hash(prev_hash).unwrap();
+        assert_ne!(h1, h2, "different forced_tx_hash_chain should produce different block hashes");
+    }
+
+    #[test]
+    fn test_block_padding() {
+        let block = Block::new(
+            4, 1, &[10, 20], 100,
+            Bytes32::default(), Bytes32::default(), Bytes32::default(),
+        )
+        .unwrap();
+        assert_eq!(block.local_ids.len(), 4);
+        assert_eq!(block.local_ids[2], 0);
+        assert_eq!(block.local_ids[3], 0);
+    }
+}
