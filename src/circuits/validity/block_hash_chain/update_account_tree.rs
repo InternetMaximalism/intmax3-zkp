@@ -64,6 +64,7 @@ pub struct UpdateAccountPublicInputs {
     pub new_block_hash_chain: Bytes32,
     pub new_account_tree_root: PoseidonHashOut,
     pub deposit_hash_chain: Bytes32,
+    pub forced_tx_hash_chain: Bytes32,
 }
 
 #[derive(Clone, Debug)]
@@ -157,12 +158,13 @@ impl UpdateAccountTree {
                 send_merkle_proof.get_root(&new_send_leaf, prev_account_leaf.index.into());
 
             // create new account leaf and compute new account tree root
-            // pk_hash is preserved from the previous leaf across state transitions
+            // pk_set_root and threshold preserved from previous leaf across state transitions
             let new_account_leaf = AccountLeaf {
                 index: prev_account_leaf.index + 1,
                 prev: self.block_number,
                 send_tree_root: new_send_tree_root,
-                pk_hash: prev_account_leaf.pk_hash,
+                pk_set_root: prev_account_leaf.pk_set_root,
+                threshold: prev_account_leaf.threshold,
             };
             account_tree_root = account_merkle_proof.get_root(&new_account_leaf, user_id.as_u64());
         }
@@ -175,12 +177,13 @@ impl UpdateAccountTree {
             new_block_hash_chain,
             new_account_tree_root: account_tree_root,
             deposit_hash_chain: self.block.deposit_hash_chain,
+            forced_tx_hash_chain: self.block.forced_tx_hash_chain,
         })
     }
 }
 
 const UPDATE_ACCOUNT_PUBLIC_INPUTS_LEN: usize =
-    1 + U64_LEN + 3 * BYTES32_LEN + 2 * POSEIDON_HASH_OUT_LEN;
+    1 + U64_LEN + 4 * BYTES32_LEN + 2 * POSEIDON_HASH_OUT_LEN;
 
 impl UpdateAccountPublicInputs {
     pub fn to_u64_vec(&self) -> Vec<u64> {
@@ -191,6 +194,7 @@ impl UpdateAccountPublicInputs {
         result.extend(self.new_block_hash_chain.to_u64_vec());
         result.extend(self.new_account_tree_root.to_u64_vec());
         result.extend(self.deposit_hash_chain.to_u64_vec());
+        result.extend(self.forced_tx_hash_chain.to_u64_vec());
         result
     }
 
@@ -238,6 +242,10 @@ impl UpdateAccountPublicInputs {
 
         let deposit_hash_chain = Bytes32::from_u64_slice(&values[cursor..cursor + BYTES32_LEN])
             .map_err(|e| UpdateAccountTreeError::InvalidLength(e.to_string()))?;
+        cursor += BYTES32_LEN;
+
+        let forced_tx_hash_chain = Bytes32::from_u64_slice(&values[cursor..cursor + BYTES32_LEN])
+            .map_err(|e| UpdateAccountTreeError::InvalidLength(e.to_string()))?;
 
         Ok(Self {
             block_number,
@@ -247,6 +255,7 @@ impl UpdateAccountPublicInputs {
             new_block_hash_chain,
             new_account_tree_root,
             deposit_hash_chain,
+            forced_tx_hash_chain,
         })
     }
 }
@@ -260,6 +269,7 @@ pub struct UpdateAccountPublicInputsTarget {
     pub new_block_hash_chain: Bytes32Target,
     pub new_account_tree_root: PoseidonHashOutTarget,
     pub deposit_hash_chain: Bytes32Target,
+    pub forced_tx_hash_chain: Bytes32Target,
 }
 
 impl UpdateAccountPublicInputsTarget {
@@ -274,6 +284,7 @@ impl UpdateAccountPublicInputsTarget {
         let new_block_hash_chain = Bytes32Target::new(builder, is_checked);
         let new_account_tree_root = PoseidonHashOutTarget::new(builder);
         let deposit_hash_chain = Bytes32Target::new(builder, is_checked);
+        let forced_tx_hash_chain = Bytes32Target::new(builder, is_checked);
         Self {
             block_number,
             block_timestamp,
@@ -282,6 +293,7 @@ impl UpdateAccountPublicInputsTarget {
             new_block_hash_chain,
             new_account_tree_root,
             deposit_hash_chain,
+            forced_tx_hash_chain,
         }
     }
 
@@ -294,6 +306,7 @@ impl UpdateAccountPublicInputsTarget {
             self.new_block_hash_chain.to_vec(),
             self.new_account_tree_root.to_vec(),
             self.deposit_hash_chain.to_vec(),
+            self.forced_tx_hash_chain.to_vec(),
         ]
         .concat()
     }
@@ -337,6 +350,9 @@ impl UpdateAccountPublicInputsTarget {
         cursor += POSEIDON_HASH_OUT_LEN;
 
         let deposit_hash_chain = Bytes32Target::from_slice(&values[cursor..cursor + BYTES32_LEN]);
+        cursor += BYTES32_LEN;
+
+        let forced_tx_hash_chain = Bytes32Target::from_slice(&values[cursor..cursor + BYTES32_LEN]);
 
         Self {
             block_number,
@@ -346,6 +362,7 @@ impl UpdateAccountPublicInputsTarget {
             new_block_hash_chain,
             new_account_tree_root,
             deposit_hash_chain,
+            forced_tx_hash_chain,
         }
     }
 
@@ -367,6 +384,8 @@ impl UpdateAccountPublicInputsTarget {
             .set_witness(witness, value.new_account_tree_root);
         self.deposit_hash_chain
             .set_witness(witness, value.deposit_hash_chain);
+        self.forced_tx_hash_chain
+            .set_witness(witness, value.forced_tx_hash_chain);
     }
 
     pub fn select<F: RichField + Extendable<D>, const D: usize>(
@@ -417,6 +436,12 @@ impl UpdateAccountPublicInputsTarget {
                 condition,
                 when_true.deposit_hash_chain.clone(),
                 when_false.deposit_hash_chain.clone(),
+            ),
+            forced_tx_hash_chain: Bytes32Target::select(
+                builder,
+                condition,
+                when_true.forced_tx_hash_chain.clone(),
+                when_false.forced_tx_hash_chain.clone(),
             ),
         }
     }
@@ -512,8 +537,9 @@ impl UpdateAccountTreeTarget {
                 index: next_index,
                 prev: block_number.clone(),
                 send_tree_root: new_send_tree_root.clone(),
-                // pk_hash is preserved unchanged across state transitions
-                pk_hash: prev_account_leaf.pk_hash.clone(),
+                // pk_set_root and threshold preserved unchanged across state transitions
+                pk_set_root: prev_account_leaf.pk_set_root.clone(),
+                threshold: prev_account_leaf.threshold.clone(),
             };
 
             let updated_root =
@@ -524,21 +550,21 @@ impl UpdateAccountTreeTarget {
 
             // ── SPHINCS+ signature verification ────────────────────────────
             //
-            // For each active user whose pk_hash is non-zero (has_pk_hash) we
-            // verify that:
-            //   1. Poseidon(pub_seed || root) == prev_account_leaf.pk_hash
+            // For each active user whose pk_set_root is non-zero we verify that:
+            //   1. Poseidon(pub_seed || root) == prev_account_leaf.pk_set_root
+            //      (for single-sig compatibility; multi-sig uses signature_aggregation circuit)
             //   2. The SPHINCS+ signature is valid over the message
             //      M_i = [block_number, aggregator_id, local_id, tx_tree_root×8]
             //
-            // When pk_hash == 0 (user has no registered key yet) the signature
-            // constraints are skipped — dummy witnesses are accepted.
+            // When pk_set_root == 0 (user has no registered key set yet) the
+            // signature constraints are skipped — dummy witnesses are accepted.
             // For padding slots (should_update=false) constraints are also skipped.
 
-            // -- Compute should_verify_sig = should_update AND has_pk_hash --
-            // Only enforce SPHINCS+ when the user has a registered key (pk_hash != 0).
+            // -- Compute should_verify_sig = should_update AND has_pk_set --
+            // Only enforce SPHINCS+ when the user has a registered key set.
             let should_verify_sig = {
                 let zero = builder.zero();
-                let e = &prev_account_leaf.pk_hash.elements;
+                let e = &prev_account_leaf.pk_set_root.elements;
                 let z0 = builder.is_equal(e[0], zero);
                 let z1 = builder.is_equal(e[1], zero);
                 let z2 = builder.is_equal(e[2], zero);
@@ -546,8 +572,8 @@ impl UpdateAccountTreeTarget {
                 let all_zero_01 = builder.and(z0, z1);
                 let all_zero_012 = builder.and(all_zero_01, z2);
                 let all_zero = builder.and(all_zero_012, z3);
-                let has_pk_hash = builder.not(all_zero);
-                builder.and(should_update, has_pk_hash)
+                let has_pk_set = builder.not(all_zero);
+                builder.and(should_update, has_pk_set)
             };
 
             // -- Allocate virtual targets for PK and signature components --
@@ -565,12 +591,14 @@ impl UpdateAccountTreeTarget {
                 .map(|_| builder.add_virtual_targets(SPX_AUTH_GL_LEN))
                 .collect();
 
-            // -- Verify pk_hash stored in account leaf matches the provided PK --
+            // -- Verify pk_set_root stored in account leaf matches the provided PK --
+            // NOTE: For single-sig compatibility, pk_set_root == Poseidon(pub_seed || pub_root).
+            // For multi-sig, use the signature_aggregation circuit instead.
             let pk_inputs: Vec<_> = [pub_seed_gl.as_slice(), pub_root_gl.as_slice()].concat();
             let computed_pk_hash =
                 PoseidonHashOutTarget::hash_inputs(builder, &pk_inputs);
             prev_account_leaf
-                .pk_hash
+                .pk_set_root
                 .conditional_assert_eq(builder, computed_pk_hash, should_verify_sig);
 
             // -- Build message: [block_number, aggregator_id, local_id, tx_root×8] --
@@ -627,6 +655,7 @@ impl UpdateAccountTreeTarget {
             new_block_hash_chain,
             new_account_tree_root: account_tree_root.clone(),
             deposit_hash_chain: block.deposit_hash_chain.clone(),
+            forced_tx_hash_chain: block.forced_tx_hash_chain.clone(),
         };
 
         Self {
@@ -796,7 +825,8 @@ mod tests {
             index: send_tree_user1.len() as u32,
             prev: send_leaf_user1_prev.cur,
             send_tree_root: send_tree_user1.get_root(),
-            pk_hash: PoseidonHashOut::default(),
+            pk_set_root: PoseidonHashOut::default(),
+            threshold: 0,
         };
 
         let user2 = UserId::new(aggregator_id, 2).unwrap();
@@ -811,7 +841,8 @@ mod tests {
             index: send_tree_user2.len() as u32,
             prev: block_number,
             send_tree_root: send_tree_user2.get_root(),
-            pk_hash: PoseidonHashOut::default(),
+            pk_set_root: PoseidonHashOut::default(),
+            threshold: 0,
         };
 
         let mut account_tree = AccountTree::new(ACCOUNT_TREE_HEIGHT);
@@ -829,6 +860,7 @@ mod tests {
         );
 
         let timestamp = rng.next_u64();
+        let forced_tx_hash_chain = Bytes32::default();
         let block = Block::new(
             num_users,
             aggregator_id,
@@ -836,6 +868,7 @@ mod tests {
             timestamp,
             tx_tree_root,
             deposit_hash_chain,
+            forced_tx_hash_chain,
         )
         .unwrap();
 
@@ -878,7 +911,8 @@ mod tests {
                     index: prev_leaf.index + 1,
                     prev: block_number,
                     send_tree_root: new_send_root,
-                    pk_hash: prev_leaf.pk_hash,
+                    pk_set_root: prev_leaf.pk_set_root,
+                    threshold: prev_leaf.threshold,
                 };
                 account_tree_for_proofs.update(user_id.as_u64(), new_account_leaf);
             }

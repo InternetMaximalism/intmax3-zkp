@@ -93,7 +93,8 @@ pub struct AccountLeaf {
     pub index: u32,                      // the next index of send leaf
     pub prev: BlockNumber,               // the previous block number
     pub send_tree_root: PoseidonHashOut, // the root of send tree
-    pub pk_hash: PoseidonHashOut,        // Poseidon(SPHINCS+ pub_seed || root) as 4 GL elements
+    pub pk_set_root: PoseidonHashOut,    // Merkle root of the key set tree (multi-sig public keys)
+    pub threshold: u32,                  // minimum number of signatures required
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -101,7 +102,8 @@ pub struct AccountLeafTarget {
     pub index: Target,                         // the next index of send leaf
     pub prev: BlockNumberTarget,               // the previous block number
     pub send_tree_root: PoseidonHashOutTarget, // the root of send tree
-    pub pk_hash: PoseidonHashOutTarget,        // Poseidon(SPHINCS+ pub_seed || root)
+    pub pk_set_root: PoseidonHashOutTarget,    // Merkle root of the key set tree
+    pub threshold: Target,                     // minimum number of signatures required
 }
 
 impl Leafable for AccountLeaf {
@@ -209,7 +211,8 @@ impl Default for AccountLeaf {
             index: 0,
             prev: BlockNumber::default(),
             send_tree_root: SendTree::init().get_root(),
-            pk_hash: PoseidonHashOut::default(),
+            pk_set_root: PoseidonHashOut::default(),
+            threshold: 0,
         }
     }
 }
@@ -220,7 +223,8 @@ impl AccountLeaf {
             vec![self.index as u64],
             self.prev.to_u64_vec(),
             self.send_tree_root.to_u64_vec(),
-            self.pk_hash.to_u64_vec(),
+            self.pk_set_root.to_u64_vec(),
+            vec![self.threshold as u64],
         ]
         .concat()
     }
@@ -237,12 +241,18 @@ impl AccountLeafTarget {
         }
         let prev = BlockNumberTarget::new(builder, is_checked);
         let send_tree_root = PoseidonHashOutTarget::new(builder);
-        let pk_hash = PoseidonHashOutTarget::new(builder);
+        let pk_set_root = PoseidonHashOutTarget::new(builder);
+        let threshold = builder.add_virtual_target();
+        if is_checked {
+            // threshold fits in KEY_SET_TREE_HEIGHT + 1 bits (max 2^KEY_SET_TREE_HEIGHT)
+            builder.range_check(threshold, crate::constants::KEY_SET_TREE_HEIGHT + 1);
+        }
         Self {
             index,
             prev,
             send_tree_root,
-            pk_hash,
+            pk_set_root,
+            threshold,
         }
     }
 
@@ -251,7 +261,8 @@ impl AccountLeafTarget {
             vec![self.index],
             self.prev.to_vec(),
             self.send_tree_root.to_vec(),
-            self.pk_hash.to_vec(),
+            self.pk_set_root.to_vec(),
+            vec![self.threshold],
         ]
         .concat()
     }
@@ -264,7 +275,8 @@ impl AccountLeafTarget {
             index: builder.constant(F::from_canonical_u64(value.index.into())),
             prev: BlockNumberTarget::constant(builder, value.prev),
             send_tree_root: PoseidonHashOutTarget::constant(builder, value.send_tree_root),
-            pk_hash: PoseidonHashOutTarget::constant(builder, value.pk_hash),
+            pk_set_root: PoseidonHashOutTarget::constant(builder, value.pk_set_root),
+            threshold: builder.constant(F::from_canonical_u64(value.threshold.into())),
         }
     }
 
@@ -273,6 +285,10 @@ impl AccountLeafTarget {
         self.prev.set_witness(witness, value.prev);
         self.send_tree_root
             .set_witness(witness, value.send_tree_root);
-        self.pk_hash.set_witness(witness, value.pk_hash);
+        self.pk_set_root.set_witness(witness, value.pk_set_root);
+        witness.set_target(
+            self.threshold,
+            F::from_canonical_u64(value.threshold.into()),
+        );
     }
 }

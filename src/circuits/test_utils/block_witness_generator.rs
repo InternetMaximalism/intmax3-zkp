@@ -178,6 +178,8 @@ impl BlockWitnessGenerator {
             self.block_hash_chain,
             self.deposit_hash_chain,
             U63::new(self.deposit_tree.len() as u64).expect("deposit count fits in 63 bits"),
+            Bytes32::default(), // forced_tx_hash_chain
+            U63::default(),     // forced_tx_count
         )
     }
 
@@ -242,6 +244,7 @@ impl BlockWitnessGenerator {
             timestamp,
             tx_tree_root,
             projected_deposit_hash_chain,
+            Bytes32::default(), // forced_tx_hash_chain: TODO integrate forced tx queue
         )?;
 
         let prev_ext_state = self.current_extended_public_state();
@@ -295,12 +298,13 @@ impl BlockWitnessGenerator {
                 send_tree.push(new_send_leaf.clone());
                 send_entries.push(new_send_leaf.clone());
 
-                // pk_hash is preserved from the previous leaf
+                // pk_set_root and threshold preserved from previous leaf
                 let new_account_leaf = AccountLeaf {
                     index: prev_account_leaf.index + 1,
                     prev: new_block_number,
                     send_tree_root: new_send_root,
-                    pk_hash: prev_account_leaf.pk_hash,
+                    pk_set_root: prev_account_leaf.pk_set_root,
+                    threshold: prev_account_leaf.threshold,
                 };
                 account_tree_for_proofs.update(user_id.as_u64(), new_account_leaf.clone());
                 self.account_tree.update(user_id.as_u64(), new_account_leaf);
