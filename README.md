@@ -410,6 +410,31 @@ No changes to `IntmaxRollup.sol` are required — the contract already enforces
 the full 6-step verification pipeline. Only the test fixtures need to be
 updated with real proofs.
 
+### Parallel signature aggregation orchestrator
+
+The parallel signature aggregation circuits and APIs are implemented
+(`ParallelSigProcessor`, `SigBatch`, `SigMerge`, `AccountApplyBlock`, etc.),
+but the **runtime orchestrator using rayon/thread pool is not yet implemented**.
+Currently, callers must manage parallelism externally (e.g., spawning threads
+and calling `prove_batch_step()` / `prove_apply_block()` concurrently).
+
+TODO:
+- Add rayon dependency and implement `ParallelSigProcessor::process_block()`
+  method that automatically partitions users into batches, proves in parallel,
+  and runs the pipelined merge.
+- Add end-to-end benchmark with 1000 users to validate the ~140s target.
+
+See [docs/signature-aggregation.md](docs/signature-aggregation.md) for the full
+architecture and design rationale.
+
+## Documentation
+
+| Document | Description |
+|----------|-------------|
+| [docs/spec.md](docs/spec.md) | Protocol specification (types, circuits, state) |
+| [docs/forced-tx-queue.md](docs/forced-tx-queue.md) | Forced TX Queue architecture, Solidity interface, ZK circuit pipeline |
+| [docs/signature-aggregation.md](docs/signature-aggregation.md) | Multi-sig accounts, parallel proving architecture, benchmarks |
+
 ## Dependencies
 
 | Crate / Library | Purpose |
