@@ -287,6 +287,11 @@ intmax3-zkp/
 │   │                              # sphincs_sign (native SPHINCS+ for tests)
 │   ├── common/                    # Block, Deposit, Tx, UserId, trees
 │   └── utils/                     # Poseidon, Merkle trees, conversion helpers
+│       ├── whir_wrapper.rs        # WHIR proof wrapping (cargo feature "whir")
+│       └── groth16_wrapper.rs     # Groth16 wrapping via gnark subprocess
+├── gnark/                         # Go gnark-plonky2-verifier wrapper
+│   ├── main.go                    # Plonky2 → Groth16 conversion
+│   └── gnark-wrapper              # Pre-built binary
 ├── contracts/                     # Foundry project
 │   ├── src/
 │   │   ├── IntmaxRollup.sol       # Main rollup contract (postBlock, deposit, submit, finalize)
@@ -312,7 +317,11 @@ intmax3-zkp/
 
 ```bash
 cargo build --release
-cargo test --release          # 140 unit tests + e2e integration test
+cargo test --release              # 165 unit tests + e2e integration test
+
+# With WHIR wrapping support
+cargo build --release --features whir
+cargo test --release --features whir
 ```
 
 ### WASM
@@ -378,33 +387,48 @@ The Foundry tests currently **mock** the following precompile / external calls:
 
 The `verify()` test for a standalone WHIR proof **does use the real WHIR verifier** (not mocked) and passes against the sol-whir test fixture. Only the `finalize()` / `fraudProof()` pipeline mocks WHIR because the statement must carry the plonky2 public input hash.
 
-### What is needed to remove the mocks
+### Proof wrapping pipeline (integrated from whirtest)
 
-The recursive proof pipeline is being built in [whirtest](https://github.com/leohio/whirtest):
+The WHIR and Groth16 wrapping code from [whirtest](https://github.com/leohio/whirtest)
+is now integrated into this repository:
 
 ```
 Plonky2 validity proof
         │
-        ├──▶ WHIR wrapper (polynomial commitment of the Plonky2 proof)
-        │    └── prover: encode proof as polynomial, commit, prove
+        ├──▶ WHIR wrapper (src/utils/whir_wrapper.rs, cargo feature "whir")
+        │    └── proof_to_polynomial(): pack proof bytes → Goldilocks field elements
+        │    └── whir_prove(): commit + sumcheck proof generation
         │    └── verifier: sol-whir on-chain (already integrated)
         │
-        └──▶ Groth16 wrapper (succinct SNARK of the Plonky2 verifier)
-             └── circuit: Plonky2 verifier expressed as R1CS/Circom or Gnark
-             └── setup: Groth16 trusted setup for the wrapper circuit
-             └── prover: generate Groth16 proof with Plonky2 public inputs
+        └──▶ Groth16 wrapper (src/utils/groth16_wrapper.rs + gnark/)
+             └── groth16_wrap(): Plonky2 proof → gnark subprocess → BN254 Groth16 proof
+             └── gnark/main.go: Go binary using gnark-plonky2-verifier
              └── verifier: Groth16Verifier.sol on-chain (already integrated)
 ```
 
-Once the whirtest repository produces real WHIR and Groth16 proofs that wrap
-a Plonky2 validity proof:
+**Usage:**
 
-1. Replace `_mockWhirVerifierTrue()` with the real WHIR proof whose
+```rust
+// WHIR wrapping (requires --features whir)
+use intmax3_zkp::utils::whir_wrapper::{wrap_proof, estimate_gas};
+let result = wrap_proof(&plonky2_proof.to_bytes());
+println!("WHIR proof size: {} bytes, gas: ~{}K", result.proof_size, estimate_gas(&result, "keccak") / 1000);
+
+// Groth16 wrapping (requires gnark-wrapper binary)
+use intmax3_zkp::utils::groth16_wrapper::{groth16_wrap, DEFAULT_GNARK_BIN};
+let result = groth16_wrap(&circuit_data, &proof, Path::new(DEFAULT_GNARK_BIN))?;
+```
+
+### Remaining mocks in Foundry tests
+
+The Foundry tests still mock precompiles because fixture generation from real
+validity proofs has not been automated yet:
+
+1. **WHIR:** `_mockWhirVerifierTrue()` — replace with real WHIR proof whose
    `statement.evaluations[0] == keccak256(ValidityPublicInputs)`.
-2. Replace `_mockGroth16Pairing()` / `_dummyGroth16()` with a real Groth16
-   proof and verifying key whose `pubInputs[0] == keccak256(ValidityPublicInputs)`.
-3. Replace `_mockBLSPrecompiles()` with real KZG opening proofs (requires
-   Pectra-enabled testnet or mainnet fork).
+2. **Groth16:** `_mockGroth16Pairing()` — replace with real Groth16 proof
+   whose `pubInputs[0] == keccak256(ValidityPublicInputs)`.
+3. **KZG:** `_mockBLSPrecompiles()` — requires Pectra-enabled testnet/mainnet.
 
 No changes to `IntmaxRollup.sol` are required — the contract already enforces
 the full 6-step verification pipeline. Only the test fixtures need to be
@@ -442,5 +466,7 @@ architecture and design rationale.
 | [plonky2](https://github.com/0xPolygonZero/plonky2) | ZK proof system (FRI-based STARK) |
 | [sphincsplus-circuits](https://github.com/InternetMaximalism/aggregated_SPHINCS_plus) | In-circuit SPHINCS+ signature verification |
 | [sphincsplus-poseidon](https://github.com/InternetMaximalism/aggregated_SPHINCS_plus) | Native SPHINCS+ hash primitives |
+| [whir](https://github.com/WizardOfMenlo/whir) | Off-chain WHIR polynomial commitment (optional, `--features whir`) |
+| [gnark-plonky2-verifier](https://github.com/succinctlabs/gnark-plonky2-verifier) | Plonky2 → Groth16 conversion (Go, via `gnark/` directory) |
 | [sol-whir](https://github.com/leohio/whirtest) | On-chain WHIR polynomial commitment verification |
 | [forge-std](https://github.com/foundry-rs/forge-std) | Foundry test framework |

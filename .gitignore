@@ -3,3 +3,4 @@ tests/fixtures/*.bin
 
 # codex file
 AGENTS.md
+gnark/gnark-wrapper
