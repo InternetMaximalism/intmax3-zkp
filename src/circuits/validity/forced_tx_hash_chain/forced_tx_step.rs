@@ -183,7 +183,8 @@ where
             index: self.prev_account_leaf.index + 1,
             prev: self.block_number,
             send_tree_root: new_send_tree_root,
-            pk_hash: self.prev_account_leaf.pk_hash,
+            pk_set_root: self.prev_account_leaf.pk_set_root,
+            threshold: self.prev_account_leaf.threshold,
         };
         let new_account_tree_root = self
             .account_merkle_proof
@@ -359,7 +360,8 @@ impl<const D: usize> ForcedTxStepTarget<D> {
             index: next_index,
             prev: block_number.clone(),
             send_tree_root: new_send_tree_root,
-            pk_hash: prev_account_leaf.pk_hash.clone(),
+            pk_set_root: prev_account_leaf.pk_set_root.clone(),
+            threshold: prev_account_leaf.threshold.clone(),
         };
         let new_account_tree_root = account_merkle_proof.get_root::<F, C, D>(
             builder,
