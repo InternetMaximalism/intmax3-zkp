@@ -178,7 +178,14 @@ where
     C: GenericConfig<D, F = F> + 'static,
     <C as GenericConfig<D>>::Hasher: AlgebraicHasher<F>,
 {
-    pub fn new(verifier_data: &VerifierCircuitData<F, C, D>) -> Self {
+    fn setup_builder(
+        verifier_data: &VerifierCircuitData<F, C, D>,
+    ) -> (
+        CircuitBuilder<F, D>,
+        ProofWithPublicInputsTarget<D>,
+        ExtendedPublicStateTarget,
+        AddressTarget,
+    ) {
         let mut builder = CircuitBuilder::<F, D>::new(CircuitConfig::default());
         let proof = add_proof_target_and_verify_cyclic(verifier_data, &mut builder);
         let withdrawal_hash = Bytes32Target::from_slice(&proof.public_inputs[0..BYTES32_LEN]);
@@ -206,13 +213,35 @@ where
         builder.register_public_inputs(&pis_hash.to_vec());
         builder.register_public_inputs(&ext_public_state_commitment.to_vec());
         builder.register_public_inputs(&block_number.to_vec());
+        (builder, proof, ext_public_state, withdrawal_aggregator)
+    }
+
+    pub fn new(verifier_data: &VerifierCircuitData<F, C, D>) -> Self {
+        let (builder, proof, ext_public_state, withdrawal_aggregator) =
+            Self::setup_builder(verifier_data);
         let data = builder.build();
-        Self {
-            data,
-            proof,
-            ext_public_state,
-            withdrawal_aggregator,
-        }
+        Self { data, proof, ext_public_state, withdrawal_aggregator }
+    }
+
+    pub async fn new_async(verifier_data: &VerifierCircuitData<F, C, D>) -> Self {
+        let (builder, proof, ext_public_state, withdrawal_aggregator) =
+            Self::setup_builder(verifier_data);
+        let data = builder.build_async().await;
+        Self { data, proof, ext_public_state, withdrawal_aggregator }
+    }
+
+    fn prepare_witness(
+        &self,
+        proof: &ProofWithPublicInputs<F, C, D>,
+        withdrawal_aggregator: Address,
+        ext_public_state: &ExtendedPublicState,
+    ) -> PartialWitness<F> {
+        let mut pw = PartialWitness::<F>::new();
+        pw.set_proof_with_pis_target(&self.proof, proof);
+        self.ext_public_state.set_witness(&mut pw, ext_public_state);
+        self.withdrawal_aggregator
+            .set_witness(&mut pw, withdrawal_aggregator);
+        pw
     }
 
     pub fn prove(
@@ -221,13 +250,22 @@ where
         withdrawal_aggregator: Address,
         ext_public_state: &ExtendedPublicState,
     ) -> Result<ProofWithPublicInputs<F, C, D>, WithdrawalCircuitError> {
-        let mut pw = PartialWitness::<F>::new();
-        pw.set_proof_with_pis_target(&self.proof, proof);
-        self.ext_public_state.set_witness(&mut pw, ext_public_state);
-        self.withdrawal_aggregator
-            .set_witness(&mut pw, withdrawal_aggregator);
+        let pw = self.prepare_witness(proof, withdrawal_aggregator, ext_public_state);
         self.data
             .prove(pw)
+            .map_err(|e| WithdrawalCircuitError::FailedToProve(e.to_string()))
+    }
+
+    pub async fn prove_async(
+        &self,
+        proof: &ProofWithPublicInputs<F, C, D>,
+        withdrawal_aggregator: Address,
+        ext_public_state: &ExtendedPublicState,
+    ) -> Result<ProofWithPublicInputs<F, C, D>, WithdrawalCircuitError> {
+        let pw = self.prepare_witness(proof, withdrawal_aggregator, ext_public_state);
+        self.data
+            .prove_async(pw)
+            .await
             .map_err(|e| WithdrawalCircuitError::FailedToProve(e.to_string()))
     }
 }
