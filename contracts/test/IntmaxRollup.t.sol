@@ -192,34 +192,98 @@ contract IntmaxRollupTest is Test {
     }
 
     // -----------------------------------------------------------------------
-    // postBlock() tests
+    // Helper: build SubBlock arrays
     // -----------------------------------------------------------------------
 
-    function test_postBlock() public {
+    function _makeSubBlock(
+        uint32 aggId, uint64 ts, bytes32 txRoot, uint32[] memory ids
+    ) internal pure returns (IntmaxRollup.SubBlock memory) {
+        return IntmaxRollup.SubBlock({
+            aggregatorId: aggId,
+            timestamp: ts,
+            txTreeRoot: txRoot,
+            localIds: ids
+        });
+    }
+
+    function _singleBlockBatch(
+        uint32 aggId, uint32[] memory ids, uint64 ts, bytes32 txRoot
+    ) internal pure returns (IntmaxRollup.SubBlock[] memory batch) {
+        batch = new IntmaxRollup.SubBlock[](1);
+        batch[0] = _makeSubBlock(aggId, ts, txRoot, ids);
+    }
+
+    // -----------------------------------------------------------------------
+    // postBlock() tests — batched sub-blocks
+    // -----------------------------------------------------------------------
+
+    function test_postBlock_singleSubBlock() public {
         uint32[] memory localIds = new uint32[](2);
         localIds[0] = 1;
         localIds[1] = 2;
 
         vm.prank(aggregator);
-        rollup.postBlock(5, localIds, uint64(block.timestamp), bytes32(uint256(0xabc)));
+        rollup.postBlock(_singleBlockBatch(5, localIds, uint64(block.timestamp), bytes32(uint256(0xabc))));
 
         assertEq(rollup.blockNumber(), 1);
+        assertEq(rollup.postingRound(), 1);
         assertTrue(rollup.blockHashChain() != bytes32(0));
         assertEq(rollup.blockHashChainAt(1), rollup.blockHashChain());
     }
 
-    function test_postBlock_multipleBlocks() public {
-        uint32[] memory ids1 = new uint32[](1);
-        ids1[0] = 1;
-        uint32[] memory ids2 = new uint32[](2);
-        ids2[0] = 3;
-        ids2[1] = 4;
+    function test_postBlock_batchOf3() public {
+        IntmaxRollup.SubBlock[] memory batch = new IntmaxRollup.SubBlock[](3);
+        for (uint256 i = 0; i < 3; i++) {
+            uint32[] memory ids = new uint32[](1);
+            ids[0] = uint32(i + 1);
+            batch[i] = _makeSubBlock(1, uint64(100 + i * 5), bytes32(uint256(0x100 + i)), ids);
+        }
 
-        rollup.postBlock(1, ids1, 100, bytes32(uint256(0x111)));
-        rollup.postBlock(1, ids2, 200, bytes32(uint256(0x222)));
+        rollup.postBlock(batch);
 
-        assertEq(rollup.blockNumber(), 2);
-        assertTrue(rollup.blockHashChainAt(1) != rollup.blockHashChainAt(2));
+        // 3 sub-blocks → blockNumber = 3
+        assertEq(rollup.blockNumber(), 3);
+        assertEq(rollup.postingRound(), 1);
+        // Only the last block number has a snapshot
+        assertEq(rollup.blockHashChainAt(3), rollup.blockHashChain());
+        // Intermediate block numbers have no snapshot
+        assertEq(rollup.blockHashChainAt(1), bytes32(0));
+        assertEq(rollup.blockHashChainAt(2), bytes32(0));
+    }
+
+    function test_postBlock_twoRounds() public {
+        // Round 1: 2 sub-blocks
+        IntmaxRollup.SubBlock[] memory batch1 = new IntmaxRollup.SubBlock[](2);
+        for (uint256 i = 0; i < 2; i++) {
+            uint32[] memory ids = new uint32[](1);
+            ids[0] = uint32(i + 1);
+            batch1[i] = _makeSubBlock(1, uint64(100 + i), bytes32(uint256(0x10 + i)), ids);
+        }
+        rollup.postBlock(batch1);
+        bytes32 hashAfterRound1 = rollup.blockHashChain();
+
+        // Round 2: 3 sub-blocks
+        IntmaxRollup.SubBlock[] memory batch2 = new IntmaxRollup.SubBlock[](3);
+        for (uint256 i = 0; i < 3; i++) {
+            uint32[] memory ids = new uint32[](2);
+            ids[0] = uint32(10 + i);
+            ids[1] = uint32(20 + i);
+            batch2[i] = _makeSubBlock(2, uint64(200 + i), bytes32(uint256(0x20 + i)), ids);
+        }
+        rollup.postBlock(batch2);
+
+        assertEq(rollup.blockNumber(), 5);
+        assertEq(rollup.postingRound(), 2);
+        // Round 1 snapshot at block 2, round 2 snapshot at block 5
+        assertEq(rollup.blockHashChainAt(2), hashAfterRound1);
+        assertEq(rollup.blockHashChainAt(5), rollup.blockHashChain());
+        assertTrue(rollup.blockHashChainAt(2) != rollup.blockHashChainAt(5));
+    }
+
+    function test_postBlock_emptyBatch_reverts() public {
+        IntmaxRollup.SubBlock[] memory empty = new IntmaxRollup.SubBlock[](0);
+        vm.expectRevert(IntmaxRollup.EmptyBatch.selector);
+        rollup.postBlock(empty);
     }
 
     // -----------------------------------------------------------------------
@@ -477,15 +541,32 @@ contract IntmaxRollupTest is Test {
         console.log("submit() gas:", gasUsed);
     }
 
-    function test_gas_postBlock() public {
+    function test_gas_postBlock_single() public {
         uint32[] memory localIds = new uint32[](2);
         localIds[0] = 1;
         localIds[1] = 2;
 
         uint256 gasBefore = gasleft();
-        rollup.postBlock(5, localIds, uint64(block.timestamp), bytes32(uint256(0xabc)));
+        rollup.postBlock(_singleBlockBatch(5, localIds, uint64(block.timestamp), bytes32(uint256(0xabc))));
         uint256 gasUsed = gasBefore - gasleft();
-        console.log("postBlock() gas:", gasUsed);
+        console.log("postBlock(1 sub-block) gas:", gasUsed);
+    }
+
+    function test_gas_postBlock_batch60() public {
+        IntmaxRollup.SubBlock[] memory batch = new IntmaxRollup.SubBlock[](60);
+        for (uint256 i = 0; i < 60; i++) {
+            uint32[] memory ids = new uint32[](10);
+            for (uint256 j = 0; j < 10; j++) {
+                ids[j] = uint32(i * 10 + j + 1);
+            }
+            batch[i] = _makeSubBlock(1, uint64(100 + i * 5), bytes32(uint256(0x100 + i)), ids);
+        }
+
+        uint256 gasBefore = gasleft();
+        rollup.postBlock(batch);
+        uint256 gasUsed = gasBefore - gasleft();
+        console.log("postBlock(60 sub-blocks, 10 users each) gas:", gasUsed);
+        assertEq(rollup.blockNumber(), 60);
     }
 
     function test_gas_verify() public {
@@ -559,9 +640,9 @@ contract IntmaxRollupTest is Test {
     }
 
     function test_forcedTx_slotMaturation() public {
-        // Queue a forced tx, then post 3 blocks. The forced tx should
-        // mature (appear in block hash) at block 3 (queued at block 0,
-        // snapshot at block 1, mature at block 3 = snapshot[3-2]=snapshot[1]).
+        // Queue a forced tx, then post 3 rounds. The forced tx should
+        // mature at round 3 (queued before round 1, snapshot at round 1,
+        // mature at round 3 = accumulatorAtRound[3-2] = accumulatorAtRound[1]).
         MockForcedTxLogic mockLogic = new MockForcedTxLogic(bytes32(uint256(0xabc)));
         rollup.registerForcedTxLogic(42, address(mockLogic));
 
@@ -571,18 +652,19 @@ contract IntmaxRollupTest is Test {
         uint32[] memory ids = new uint32[](1);
         ids[0] = 1;
 
-        // Block 1: snapshot accumulator at block 1
-        rollup.postBlock(1, ids, 100, bytes32(uint256(0x111)));
-        assertEq(rollup.forcedTxAccumulatorAt(1), accumulatorAfterQueue);
+        // Round 1: snapshot accumulator
+        rollup.postBlock(_singleBlockBatch(1, ids, 100, bytes32(uint256(0x111))));
+        assertEq(rollup.forcedTxAccumulatorAtRound(1), accumulatorAfterQueue);
 
-        // Block 2
-        rollup.postBlock(1, ids, 200, bytes32(uint256(0x222)));
+        // Round 2
+        rollup.postBlock(_singleBlockBatch(1, ids, 200, bytes32(uint256(0x222))));
 
-        // Block 3: mature forced txs = forcedTxAccumulatorAt[3-2] = forcedTxAccumulatorAt[1]
-        rollup.postBlock(1, ids, 300, bytes32(uint256(0x333)));
+        // Round 3: mature forced txs = accumulatorAtRound[3-2] = accumulatorAtRound[1]
+        rollup.postBlock(_singleBlockBatch(1, ids, 300, bytes32(uint256(0x333))));
 
         // Verify the accumulator was snapshotted correctly
-        assertEq(rollup.forcedTxAccumulatorAt(1), accumulatorAfterQueue);
+        assertEq(rollup.forcedTxAccumulatorAtRound(1), accumulatorAfterQueue);
+        assertEq(rollup.postingRound(), 3);
     }
 
     function test_forcedTx_hashChainAccumulation() public {
@@ -674,12 +756,12 @@ contract IntmaxRollupTest is Test {
         ids[0] = 1;
         ids[1] = 2;
 
-        // Post 3 blocks so maturation kicks in on the third
-        rollup.postBlock(1, ids, 100, bytes32(uint256(0x111)));
-        rollup.postBlock(1, ids, 200, bytes32(uint256(0x222)));
+        // Post 3 rounds so maturation kicks in on the third
+        rollup.postBlock(_singleBlockBatch(1, ids, 100, bytes32(uint256(0x111))));
+        rollup.postBlock(_singleBlockBatch(1, ids, 200, bytes32(uint256(0x222))));
 
         uint256 gasBefore = gasleft();
-        rollup.postBlock(1, ids, 300, bytes32(uint256(0x333)));
+        rollup.postBlock(_singleBlockBatch(1, ids, 300, bytes32(uint256(0x333))));
         uint256 gasUsed = gasBefore - gasleft();
         console.log("postBlock() with mature forced tx gas:", gasUsed);
     }

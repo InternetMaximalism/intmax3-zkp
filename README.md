@@ -2,33 +2,37 @@
 
 Zero-knowledge proof circuits and L1 settlement contracts for the INTMAX3 rollup protocol, built with [Plonky2](https://github.com/0xPolygonZero/plonky2) and [Foundry](https://book.getfoundry.sh/).
 
-## System Architecture
+## System Architecture — Three-Layer Block Model
 
 ```
-                         Off-chain (L2)                          │           On-chain (L1)
-                                                                 │
-  ┌──────────┐    ┌──────────┐    ┌──────────┐                   │   ┌──────────────────────────┐
-  │  User A  │───▶│Aggregator│───▶│  Block    │──── postBlock() ─┼──▶│  IntmaxRollup Contract   │
-  │  User B  │    │          │    │ (local_ids│     (calldata)   │   │                          │
-  │  ...     │    └──────────┘    │  tx_root) │                  │   │  blockHashChain          │
-  └──────────┘                    └─────┬─────┘                  │   │  depositHashChain        │
-                                        │                        │   │  latestFinalizedStateRoot│
-  ┌──────────┐                          ▼                        │   │                          │
-  │ Depositor│── deposit() ────────────────────────── deposit()──┼──▶│  blockHashChainAt[n]     │
-  └──────────┘                          │                        │   └────────────┬─────────────┘
-                                        ▼                        │                │
-                                  ┌───────────┐                  │                │ finalize()
-                                  │ Validity  │                  │                │
-                                  │ Proof     │── submit() ──────┼──▶ EIP-4844 blob
-                                  │ (Plonky2) │   (blob TX)      │   + on-chain commitment
-                                  └───────────┘                  │
-                                        │                        │
-                                        ▼                        │
-                                  ┌───────────┐                  │
-                                  │   WHIR    │                  │
-                                  │  wrapper  │── finalize() ────┼──▶ Verify & accept stateRoot
-                                  └───────────┘                  │
+  Layer 0: Fast Blocks (~5s, off-chain)     Layer 1: Posting Rounds (~5min)     Layer 2: Finalization (~6h)
+  ─────────────────────────────────────     ───────────────────────────────     ──────────────────────────
+
+  ┌──────────┐    ┌──────────┐              postBlock(SubBlock[])               finalize()
+  │  User A  │───▶│Aggregator│              │                                   │
+  │  User B  │    │          │              ▼                                   ▼
+  │  ...     │    └────┬─────┘         ┌──────────────────┐              ┌─────────────────┐
+  └──────────┘         │               │  IntmaxRollup    │              │  Verify:        │
+                       ▼               │                  │              │  KZG + WHIR +   │
+                 ┌─────────────┐       │  Iterate ~60     │              │  Groth16 +      │
+                 │ Fast Block  │       │  sub-blocks:     │              │  state binding  │
+                 │ (5s cycle)  │       │  hash chain ×60  │              │                 │
+                 │ - local_ids │       │  deposit (last)  │              │  Accept new     │
+                 │ - tx_root   │       │  forced tx (last)│              │  stateRoot      │
+                 │ - SPHINCS+  │       │                  │              └─────────────────┘
+                 │ - NO deposit│       │  Store snapshot: │                      ▲
+                 │ - NO forced │       │  blockHashChain  │                      │
+                 └─────────────┘       │  At[lastBlockNo] │            ┌─────────────────┐
+                  × ~60 per round      └──────────────────┘            │  Validity Proof │
+                                              ▲                        │  (Plonky2)      │
+                 ┌─────────────┐              │                        │  → WHIR → Groth16│
+                 │  Depositor  │── deposit()──┘                        │  → EIP-4844 blob│
+                 └─────────────┘                                       └─────────────────┘
 ```
+
+**Key invariant:** All three layers share the same `Block` structure and `BlockStep` ZK circuit.
+Fast blocks simply have `deposit_hash_chain = 0` and `forced_tx_hash_chain = 0`.
+The ZK circuit processes every block identically; only the L1 posting frequency differs.
 
 ## Proof Pipeline
 

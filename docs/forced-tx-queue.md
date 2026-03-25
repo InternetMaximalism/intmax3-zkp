@@ -27,8 +27,8 @@ In a rollup, the aggregator controls which transactions are included in blocks. 
                                                                   │ postBlock()
                                                      ┌────────────▼────────────┐
                                                      │  Slot Maturation        │
-                                                     │  Block N: queued        │
-                                                     │  Block N+2: eligible    │
+                                                     │  Round R: queued        │
+                                                     │  Round R+2: eligible    │
                                                      └────────────┬────────────┘
                                                                   │
                                                      ┌────────────▼────────────┐
@@ -75,17 +75,14 @@ interface IForcedTxLogic {
 **State storage:**
 
 ```solidity
-/// Mapping from userId to their forced tx logic contract.
 mapping(uint64 => address) public forcedTxLogicContracts;
-
-/// Running keccak hash chain of ALL queued forced txs.
 bytes32 public forcedTxAccumulator;
 
-/// Snapshot of forcedTxAccumulator at each block number.
-/// Used for slot maturation: forced txs queued at block N
-/// become eligible for inclusion at block N+2.
-mapping(uint64 => bytes32) public forcedTxAccumulatorAt;
+/// Snapshot at each posting round (not per sub-block).
+/// Maturation: 2-round delay (~10 minutes).
+mapping(uint64 => bytes32) public forcedTxAccumulatorAtRound;
 
+uint64 public postingRound;
 uint64 public forcedTxCount;
 uint256 internal constant FORCED_TX_GAS_LIMIT = 100_000;
 ```
@@ -93,27 +90,22 @@ uint256 internal constant FORCED_TX_GAS_LIMIT = 100_000;
 **Key functions:**
 
 ```solidity
-/// Register (or update) the forced tx logic contract for a userId.
 function registerForcedTxLogic(uint64 userId, address logicContract) external;
-
-/// Queue a forced transaction for a userId.
-/// Calls the registered logic contract's insertIntmaxTx() with a gas limit.
-/// If a valid tx hash is returned, it is added to the hash chain:
-///   forcedTxAccumulator = keccak256(forcedTxAccumulator || userId || txHash)
 function queueForcedTx(uint64 userId) external;
 ```
 
-**Slot maturation in postBlock():**
+**Slot maturation in postBlock() (per posting round):**
 
 ```solidity
-// Snapshot accumulator at this block number
-forcedTxAccumulatorAt[newBlockNumber] = forcedTxAccumulator;
+postingRound++;
+forcedTxAccumulatorAtRound[currentRound] = forcedTxAccumulator;
 
-// Mature forced txs: queued at block N available at block N+2
-bytes32 blockForcedTxHashChain = bytes32(0);
-if (newBlockNumber >= 3) {
-    blockForcedTxHashChain = forcedTxAccumulatorAt[newBlockNumber - 2];
+// Mature: queued before round R, eligible at round R+2
+bytes32 batchForcedTxHashChain = bytes32(0);
+if (currentRound >= 3) {
+    batchForcedTxHashChain = forcedTxAccumulatorAtRound[currentRound - 2];
 }
+// Applied to the LAST sub-block in the batch only
 ```
 
 ## ZK Circuit Pipeline
@@ -160,10 +152,11 @@ This ordering ensures forced txs see the latest account state from regular proce
 ## Design Decisions
 
 1. **No SPHINCS+ signature required** — forced txs are authorized by the on-chain logic contract, not by the user's post-quantum key
-2. **2-block maturation delay** — prevents front-running; forced txs queued at block N are eligible at block N+2
+2. **2-round maturation delay** — prevents front-running; forced txs queued before round R are eligible at round R+2 (~10 minutes)
 3. **Separate `queueForcedTx()` from `postBlock()`** — avoids gas griefing where a malicious logic contract could consume excessive gas during block posting
 4. **100k gas limit** on `insertIntmaxTx()` calls — bounds the cost of external contract calls
 5. **Processing order: regular → forced** — forced txs see the updated account tree from regular block processing
+6. **Deposits and forced txs only at posting-round boundaries** — 5-second fast blocks carry only user txs; deposits and forced txs are processed in the last sub-block of each batch
 
 ## Impact on Block Proof Performance
 

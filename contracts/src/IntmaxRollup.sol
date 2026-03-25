@@ -24,21 +24,34 @@ contract WhirVerifierWrapper {
 /// @title IntmaxRollup
 /// @notice INTMAX3 validity proof rollup contract.
 ///
-///  Architecture:
-///    1. Aggregators call `postBlock()` to post blocks (local_ids in calldata).
-///       The contract computes block_hash_chain on-chain.
-///    2. Anyone calls `deposit()` to queue deposits.
-///       The contract computes deposit_hash_chain on-chain.
-///    3. The sequencer posts a validity proof in an EIP-4844 blob via `submit()`.
-///    4. Anyone can call `finalize()` to verify and accept the proof.
-///       Verification checks:
-///         a) Blob commitment (KZG multi-point opening)
-///         b) WHIR proof verification
-///         c) WHIR statement.evaluations[0] == plonky2 public input hash
-///         d) ValidityPublicInputs match on-chain state:
-///            - initial_ext_commitment == latestFinalizedStateRoot
-///            - initial_block_chain, final_block_chain match on-chain values
-///            - final_ext_commitment == stateRoot being accepted
+///  Three-layer block architecture:
+///    Layer 0 — "fast blocks" (~5 seconds, off-chain):
+///       Pure user-tx blocks.  No deposits, no forced txs.
+///       Aggregators collect txs and build blocks off-chain.
+///       Each block still has a block_number and updates the hash chain
+///       inside the ZK circuit, but is NOT individually posted to L1.
+///
+///    Layer 1 — "posting rounds" (~5 minutes, on-chain calldata):
+///       Aggregators call `postBlock(SubBlock[])` to commit a batch of
+///       fast blocks to L1 as calldata.  The contract iterates over the
+///       batch and recomputes the cumulative block_hash_chain.
+///       Deposits and forced txs are processed at this boundary only
+///       (applied to the last sub-block in the batch).
+///       `blockHashChainAt[lastBlockNumber]` is recorded for the batch.
+///
+///    Layer 2 — "finalization" (~6 hours, validity proof):
+///       The sequencer posts a validity proof blob via `submit()`.
+///       Anyone can call `finalize()` to verify the proof against the
+///       on-chain block_hash_chain snapshots and accept the new state root.
+///
+///  Verification checks (finalize):
+///    a) Blob commitment (KZG multi-point opening)
+///    b) WHIR proof verification
+///    c) WHIR statement.evaluations[0] == plonky2 public input hash
+///    d) ValidityPublicInputs match on-chain state:
+///       - initial_ext_commitment == latestFinalizedStateRoot
+///       - initial/final block_chain match on-chain snapshots
+///       - final_ext_commitment == stateRoot being accepted
 contract IntmaxRollup {
     // -----------------------------------------------------------------------
     // Errors
@@ -53,6 +66,7 @@ contract IntmaxRollup {
     error WhirPublicInputMismatch();
     error NoForcedTxLogicRegistered();
     error ForcedTxInsertFailed();
+    error EmptyBatch();
 
     // -----------------------------------------------------------------------
     // Events
@@ -110,6 +124,14 @@ contract IntmaxRollup {
         bool    finalized;
     }
 
+    /// @notice A single fast block (~5 seconds) within a posting-round batch.
+    struct SubBlock {
+        uint32   aggregatorId;
+        uint64   timestamp;
+        bytes32  txTreeRoot;
+        uint32[] localIds;
+    }
+
     /// @notice Bundles Groth16 verification parameters to avoid stack-too-deep.
     struct Groth16Params {
         Groth16Verifier.VerifyingKey vk;
@@ -139,15 +161,20 @@ contract IntmaxRollup {
     WhirVerifierWrapper public immutable whirVerifier;
 
     /// @notice On-chain block hash chain state.
-    ///         Updated by `postBlock()`.
-    ///         block_hash_chain = keccak256(prev || aggregator_id || timestamp || local_ids || tx_tree_root || deposit_hash_chain)
+    ///         Updated by `postBlock()` — iterates over a batch of sub-blocks.
     bytes32 public blockHashChain;
 
-    /// @notice Snapshot of blockHashChain at each block number.
+    /// @notice Snapshot of blockHashChain at posting-round boundaries.
+    ///         Only the last block number of each batch is recorded.
+    ///         finalize() references these snapshots for verification.
     mapping(uint64 => bytes32) public blockHashChainAt;
 
-    /// @notice Current block number (incremented by postBlock).
+    /// @notice Current block number (incremented for every sub-block).
     uint64 public blockNumber;
+
+    /// @notice Posting round counter (incremented once per postBlock call).
+    ///         Used for forced tx slot maturation (2-round delay).
+    uint64 public postingRound;
 
     /// @notice On-chain deposit hash chain state.
     ///         Updated by `deposit()`.
@@ -177,10 +204,10 @@ contract IntmaxRollup {
     ///         Updated by queueForcedTx().
     bytes32 public forcedTxAccumulator;
 
-    /// @notice Snapshot of forcedTxAccumulator at each block number.
-    ///         Used for slot maturation: forced txs queued at block N
-    ///         become eligible for inclusion at block N+2.
-    mapping(uint64 => bytes32) public forcedTxAccumulatorAt;
+    /// @notice Snapshot of forcedTxAccumulator at each posting round.
+    ///         Used for slot maturation: forced txs queued before round R
+    ///         become eligible for inclusion at round R+2.
+    mapping(uint64 => bytes32) public forcedTxAccumulatorAtRound;
 
     /// @notice Total number of forced txs queued.
     uint64 public forcedTxCount;
@@ -250,55 +277,77 @@ contract IntmaxRollup {
     }
 
     // -----------------------------------------------------------------------
-    // postBlock()  —  aggregator posts a block with local_ids in calldata
+    // postBlock()  —  post a batch of fast blocks (one posting round)
     // -----------------------------------------------------------------------
 
-    /// @notice Post a new block.  The local_ids array lives in calldata,
-    ///         binding the ID list to the on-chain block hash chain.
-    /// @param aggregatorId  Aggregator identifier.
-    /// @param localIds      Array of local user IDs (the "ID list").
-    /// @param timestamp     Block timestamp.
-    /// @param txTreeRoot    Root of the transaction Merkle tree.
-    function postBlock(
-        uint32 aggregatorId,
-        uint32[] calldata localIds,
-        uint64 timestamp,
-        bytes32 txTreeRoot
-    ) external {
-        // Fold pending deposits into the deposit hash chain for this block
-        bytes32 blockDepositHashChain = _pendingDepositHashChain;
+    /// @notice Post a batch of fast blocks (~5-second blocks) to L1 as one
+    ///         posting round (~5 minutes).  All sub-blocks' data lives in
+    ///         calldata for data availability.
+    ///
+    ///         Deposits and forced txs are applied to the LAST sub-block in
+    ///         the batch only.  Intermediate sub-blocks have zero deposit and
+    ///         forced tx hash chains.
+    ///
+    ///         `blockHashChainAt` is recorded only for the final block number
+    ///         of the batch (the posting-round boundary).
+    ///
+    /// @param subBlocks  Array of fast blocks to commit.
+    function postBlock(SubBlock[] calldata subBlocks) external {
+        if (subBlocks.length == 0) revert EmptyBatch();
+
+        bytes32 currentHash = blockHashChain;
+        uint64 currentBlockNumber = blockNumber;
+
+        // --- Prepare deposits and forced txs for this posting round ---
+        bytes32 batchDepositHashChain = _pendingDepositHashChain;
         _pendingDepositHashChain = bytes32(0);
 
-        blockNumber++;
-        uint64 newBlockNumber = blockNumber;
+        postingRound++;
+        uint64 currentRound = postingRound;
+        forcedTxAccumulatorAtRound[currentRound] = forcedTxAccumulator;
 
-        // Snapshot forced tx accumulator at this block number
-        forcedTxAccumulatorAt[newBlockNumber] = forcedTxAccumulator;
-
-        // Compute mature forced tx hash chain (queued 2+ blocks ago)
-        bytes32 blockForcedTxHashChain = bytes32(0);
-        if (newBlockNumber >= 3) {
-            blockForcedTxHashChain = forcedTxAccumulatorAt[newBlockNumber - 2];
+        bytes32 batchForcedTxHashChain = bytes32(0);
+        if (currentRound >= 3) {
+            batchForcedTxHashChain = forcedTxAccumulatorAtRound[currentRound - 2];
         }
 
-        // Compute block hash matching Rust's Block::hash_with_prev_hash:
-        //   keccak256(prev_hash || aggregator_id || timestamp || local_ids
-        //             || tx_tree_root || deposit_hash_chain || forced_tx_hash_chain)
-        bytes32 newBlockHash = _computeBlockHash(
-            blockHashChain,
-            aggregatorId,
-            timestamp,
-            localIds,
-            txTreeRoot,
-            blockDepositHashChain,
-            blockForcedTxHashChain
-        );
+        // --- Iterate over sub-blocks ---
+        uint256 lastIdx = subBlocks.length - 1;
+        for (uint256 i = 0; i < subBlocks.length; i++) {
+            currentBlockNumber++;
 
-        blockHashChain = newBlockHash;
-        blockHashChainAt[newBlockNumber] = newBlockHash;
-        depositHashChain = blockDepositHashChain;
+            // Only the last sub-block carries deposits and forced txs
+            bytes32 depositHash = bytes32(0);
+            bytes32 forcedTxHash = bytes32(0);
+            if (i == lastIdx) {
+                depositHash = batchDepositHashChain;
+                forcedTxHash = batchForcedTxHashChain;
+            }
 
-        emit BlockPosted(newBlockNumber, aggregatorId, localIds, txTreeRoot, newBlockHash);
+            currentHash = _computeBlockHash(
+                currentHash,
+                subBlocks[i].aggregatorId,
+                subBlocks[i].timestamp,
+                subBlocks[i].localIds,
+                subBlocks[i].txTreeRoot,
+                depositHash,
+                forcedTxHash
+            );
+
+            emit BlockPosted(
+                currentBlockNumber,
+                subBlocks[i].aggregatorId,
+                subBlocks[i].localIds,
+                subBlocks[i].txTreeRoot,
+                currentHash
+            );
+        }
+
+        // --- Update global state ---
+        blockNumber = currentBlockNumber;
+        blockHashChain = currentHash;
+        blockHashChainAt[currentBlockNumber] = currentHash;
+        depositHashChain = batchDepositHashChain;
     }
 
     // -----------------------------------------------------------------------
