@@ -30,10 +30,6 @@ use crate::{
         deposit_hash_chain::deposit_chain_pis::{
             DepositChainPublicInputs, DepositChainPublicInputsError, DepositChainPublicInputsTarget,
         },
-        forced_tx_hash_chain::forced_tx_chain_pis::{
-            ForcedTxChainPublicInputs, ForcedTxChainPublicInputsError,
-            ForcedTxChainPublicInputsTarget,
-        },
     },
     common::{
         public_state::{PublicState, PublicStateTarget},
@@ -70,9 +66,6 @@ pub enum BlockStepError {
     #[error("Deposit chain public inputs error: {0}")]
     DepositChainPublicInputs(#[from] DepositChainPublicInputsError),
 
-    #[error("Forced tx chain public inputs error: {0}")]
-    ForcedTxChainPublicInputs(#[from] ForcedTxChainPublicInputsError),
-
     #[error("Block chain public inputs error: {0}")]
     BlockChainPublicInputs(#[from] BlockChainPublicInputsError),
 
@@ -104,9 +97,6 @@ pub struct BlockStepWitness<
     // Deposit hash chain proof if there is a deposit in this block
     pub deposit_hash_chain_proof: Option<ProofWithPublicInputs<F, C, D>>,
 
-    // Forced tx hash chain proof if there are forced txs in this block
-    pub forced_tx_chain_proof: Option<ProofWithPublicInputs<F, C, D>>,
-
     // Update account proof corresponding to this block
     pub update_account_proof: ProofWithPublicInputs<F, C, D>,
 
@@ -124,7 +114,6 @@ where
         block_chain_vd: &VerifierCircuitData<F, C, D>,
         update_account_vds: &[(u32, VerifierCircuitData<F, C, D>)],
         deposit_chain_vd: &VerifierCircuitData<F, C, D>,
-        forced_tx_chain_vd: &VerifierCircuitData<F, C, D>,
     ) -> Result<BlockChainPublicInputs<F, C, D>, BlockStepError> {
         let prev_inputs = if let Some(prev_proof) = &self.prev_block_chain_proof {
             block_chain_vd.verify(prev_proof.clone()).map_err(|e| {
@@ -186,7 +175,7 @@ where
                 "update account proof initial block hash chain mismatch".to_string(),
             ));
         }
-        let mut account_tree_root = update_account_inputs.new_account_tree_root;
+        let account_tree_root = update_account_inputs.new_account_tree_root;
         let block_hash_chain = update_account_inputs.new_block_hash_chain;
 
         let mut deposit_hash_chain = prev_public_state_ext.deposit_hash_chain;
@@ -249,68 +238,25 @@ where
             deposit_count = deposit_inputs.deposit_count;
         }
 
-        // -- Process forced tx chain proof if forced_tx_hash_chain changed --
-        let mut forced_tx_hash_chain = prev_public_state_ext.forced_tx_hash_chain;
-        let mut forced_tx_count = prev_public_state_ext.forced_tx_count;
-        if prev_inputs.ext_public_state.forced_tx_hash_chain
-            != update_account_inputs.forced_tx_hash_chain
+        // Forced tx processing is now integrated into UpdateAccountTree.
+        // Verify consistency: prev_forced_tx state matches previous extended public state.
+        if update_account_inputs.prev_forced_tx_hash_chain
+            != prev_public_state_ext.forced_tx_hash_chain
         {
-            let forced_tx_proof = self.forced_tx_chain_proof.as_ref().ok_or_else(|| {
-                BlockStepError::InvalidInput(
-                    "forced_tx_chain_proof must be provided when forced tx hash chain is updated"
-                        .to_string(),
-                )
-            })?;
-
-            forced_tx_chain_vd
-                .verify(forced_tx_proof.clone())
-                .map_err(|e| {
-                    BlockStepError::InvalidProof(format!("forced tx chain proof invalid: {e}"))
-                })?;
-            let forced_tx_inputs = ForcedTxChainPublicInputs::<F, C, D>::from_u64_slice(
-                &forced_tx_proof.public_inputs.to_u64_vec(),
-                &forced_tx_chain_vd.common.config,
-            )?;
-
-            // Validate consistency: initial state must chain from previous state
-            if forced_tx_inputs.initial_forced_tx_hash_chain
-                != prev_public_state_ext.forced_tx_hash_chain
-            {
-                return Err(BlockStepError::InvalidInput(
-                    "forced tx proof initial hash chain mismatch".to_string(),
-                ));
-            }
-            // initial_account_tree_root must match the output of UpdateAccountTree
-            if forced_tx_inputs.initial_account_tree_root != account_tree_root {
-                return Err(BlockStepError::InvalidInput(
-                    "forced tx proof initial account tree root must match UpdateAccountTree output"
-                        .to_string(),
-                ));
-            }
-            if forced_tx_inputs.initial_forced_tx_count != prev_public_state_ext.forced_tx_count {
-                return Err(BlockStepError::InvalidInput(
-                    "forced tx proof initial count mismatch".to_string(),
-                ));
-            }
-            if forced_tx_inputs.forced_tx_hash_chain
-                != update_account_inputs.forced_tx_hash_chain
-            {
-                return Err(BlockStepError::InvalidInput(
-                    "forced tx proof resulting hash chain must match block's forced_tx_hash_chain"
-                        .to_string(),
-                ));
-            }
-            if forced_tx_inputs.block_number != block_number {
-                return Err(BlockStepError::InvalidInput(
-                    "forced tx proof block number mismatch".to_string(),
-                ));
-            }
-
-            // Update state from forced tx proof
-            account_tree_root = forced_tx_inputs.account_tree_root;
-            forced_tx_hash_chain = forced_tx_inputs.forced_tx_hash_chain;
-            forced_tx_count = forced_tx_inputs.forced_tx_count;
+            return Err(BlockStepError::InvalidInput(
+                "update account proof prev_forced_tx_hash_chain mismatch with previous state"
+                    .to_string(),
+            ));
         }
+        if update_account_inputs.prev_forced_tx_count != prev_public_state_ext.forced_tx_count {
+            return Err(BlockStepError::InvalidInput(
+                "update account proof prev_forced_tx_count mismatch with previous state"
+                    .to_string(),
+            ));
+        }
+        // Use the proved forced tx values from UpdateAccountTree
+        let forced_tx_hash_chain = update_account_inputs.forced_tx_hash_chain;
+        let forced_tx_count = update_account_inputs.forced_tx_count;
 
         // Verify previous public state membership and derive the root prior to this update.
         let empty_public_state = PublicState::empty_leaf();
@@ -363,11 +309,9 @@ pub struct BlockStepTarget<const D: usize> {
 
     pub has_prev_block_proof: BoolTarget,
     pub has_deposit_proof: BoolTarget,
-    pub has_forced_tx_proof: BoolTarget,
     pub initial_public_state: ExtendedPublicStateTarget,
     pub prev_block_chain_proof: ProofWithPublicInputsTarget<D>,
     pub deposit_hash_chain_proof: ProofWithPublicInputsTarget<D>,
-    pub forced_tx_chain_proof: ProofWithPublicInputsTarget<D>,
 
     // Update account proof different for each number of users
     pub update_account_proofs: Vec<ProofWithPublicInputsTarget<D>>,
@@ -380,13 +324,11 @@ pub struct BlockStepTarget<const D: usize> {
 }
 
 impl<const D: usize> BlockStepTarget<D> {
-    #[allow(clippy::too_many_arguments)]
     pub fn new<F, C>(
         builder: &mut CircuitBuilder<F, D>,
         block_chain_cd: &CommonCircuitData<F, D>,
         update_account_vds: &[(u32, VerifierCircuitData<F, C, D>)],
         deposit_chain_vd: &VerifierCircuitData<F, C, D>,
-        forced_tx_chain_vd: &VerifierCircuitData<F, C, D>,
     ) -> Self
     where
         F: RichField + Extendable<D>,
@@ -559,76 +501,21 @@ impl<const D: usize> BlockStepTarget<D> {
             &prev_public_state_ext.deposit_count,
         );
 
-        // -- Forced tx chain proof (mirrors deposit pattern) --
-        let has_forced_tx_proof = builder.add_virtual_bool_target_safe();
-        let forced_tx_chain_proof = add_proof_target_and_conditionally_verify_cyclic(
-            forced_tx_chain_vd,
-            builder,
-            has_forced_tx_proof,
-        );
-        let forced_tx_inputs = ForcedTxChainPublicInputsTarget::from_pis(
-            &forced_tx_chain_proof.public_inputs,
-            &forced_tx_chain_vd.common.config,
-        );
-
-        // Detect whether forced tx hash chain changed
-        let forced_tx_hash_eq = prev_public_state_ext
-            .forced_tx_hash_chain
-            .is_equal(builder, &selected_update_inputs.forced_tx_hash_chain);
-        let forced_tx_hash_changed = builder.not(forced_tx_hash_eq);
-        builder.connect(has_forced_tx_proof.target, forced_tx_hash_changed.target);
-
-        // Validate forced tx chain proof initial state
-        forced_tx_inputs
-            .initial_forced_tx_hash_chain
-            .conditional_assert_eq(
-                builder,
-                prev_public_state_ext.forced_tx_hash_chain.clone(),
-                has_forced_tx_proof,
-            );
-        // initial_account_tree_root must match UpdateAccountTree output
-        forced_tx_inputs
-            .initial_account_tree_root
-            .conditional_assert_eq(
-                builder,
-                account_tree_root.clone(),
-                has_forced_tx_proof,
-            );
-        builder.conditional_assert_eq(
-            has_forced_tx_proof.target,
-            forced_tx_inputs.initial_forced_tx_count.value,
+        // Forced tx processing is now integrated into UpdateAccountTree.
+        // Verify consistency: prev_forced_tx state in UpdateAccountTree matches previous state.
+        selected_update_inputs
+            .prev_forced_tx_hash_chain
+            .connect(builder, prev_public_state_ext.forced_tx_hash_chain.clone());
+        builder.connect(
+            selected_update_inputs.prev_forced_tx_count.value,
             prev_public_state_ext.forced_tx_count.value,
         );
-        forced_tx_inputs.forced_tx_hash_chain.conditional_assert_eq(
-            builder,
-            selected_update_inputs.forced_tx_hash_chain.clone(),
-            has_forced_tx_proof,
-        );
-        builder.conditional_assert_eq(
-            has_forced_tx_proof.target,
-            forced_tx_inputs.block_number.value,
-            next_block_number.value,
-        );
 
-        // Select final account_tree_root (may be updated by forced txs)
-        let selected_account_tree_root = PoseidonHashOutTarget::select(
-            builder,
-            has_forced_tx_proof,
-            forced_tx_inputs.account_tree_root.clone(),
-            account_tree_root.clone(),
-        );
-        let selected_forced_tx_hash_chain = Bytes32Target::select(
-            builder,
-            has_forced_tx_proof,
-            forced_tx_inputs.forced_tx_hash_chain.clone(),
-            prev_public_state_ext.forced_tx_hash_chain.clone(),
-        );
-        let selected_forced_tx_count = U63Target::select(
-            builder,
-            has_forced_tx_proof,
-            &forced_tx_inputs.forced_tx_count,
-            &prev_public_state_ext.forced_tx_count,
-        );
+        // account_tree_root now includes forced tx updates from UpdateAccountTree
+        let selected_account_tree_root = account_tree_root;
+        // forced tx values are proved by UpdateAccountTree
+        let selected_forced_tx_hash_chain = selected_update_inputs.forced_tx_hash_chain.clone();
+        let selected_forced_tx_count = selected_update_inputs.forced_tx_count.clone();
 
         let public_state_merkle_proof =
             PublicStateMerkleProofTarget::new(builder, PUBLIC_STATE_TREE_HEIGHT);
@@ -671,11 +558,9 @@ impl<const D: usize> BlockStepTarget<D> {
             one_hot,
             has_prev_block_proof,
             has_deposit_proof,
-            has_forced_tx_proof,
             initial_public_state,
             prev_block_chain_proof,
             deposit_hash_chain_proof,
-            forced_tx_chain_proof,
             update_account_proofs,
             selected_update_inputs,
             public_state_merkle_proof,
@@ -694,7 +579,6 @@ impl<const D: usize> BlockStepTarget<D> {
         new_public_inputs: &BlockChainPublicInputs<F, C, D>,
         dummy_prev_block_proof: &ProofWithPublicInputs<F, C, D>,
         dummy_deposit_proof: &ProofWithPublicInputs<F, C, D>,
-        dummy_forced_tx_proof: &ProofWithPublicInputs<F, C, D>,
         dummy_update_proofs: &HashMap<u32, ProofWithPublicInputs<F, C, D>>,
     ) -> Result<(), BlockStepError>
     where
@@ -732,14 +616,6 @@ impl<const D: usize> BlockStepTarget<D> {
             witness.set_proof_with_pis_target(&self.deposit_hash_chain_proof, proof);
         } else {
             witness.set_proof_with_pis_target(&self.deposit_hash_chain_proof, dummy_deposit_proof);
-        }
-
-        let has_forced_tx = value.forced_tx_chain_proof.is_some();
-        witness.set_bool_target(self.has_forced_tx_proof, has_forced_tx);
-        if let Some(proof) = &value.forced_tx_chain_proof {
-            witness.set_proof_with_pis_target(&self.forced_tx_chain_proof, proof);
-        } else {
-            witness.set_proof_with_pis_target(&self.forced_tx_chain_proof, dummy_forced_tx_proof);
         }
 
         let mut matched_update_proof = false;
@@ -799,11 +675,9 @@ where
     pub public_inputs: BlockChainPublicInputsTarget,
     pub block_chain_cd: CommonCircuitData<F, D>,
     pub deposit_chain_common: CommonCircuitData<F, D>,
-    pub forced_tx_chain_common: CommonCircuitData<F, D>,
     pub supported_user_counts: Vec<u32>,
     pub dummy_prev_block_proof: ProofWithPublicInputs<F, C, D>,
     pub dummy_deposit_proof: ProofWithPublicInputs<F, C, D>,
-    pub dummy_forced_tx_proof: ProofWithPublicInputs<F, C, D>,
     pub dummy_update_proofs: HashMap<u32, ProofWithPublicInputs<F, C, D>>,
 }
 
@@ -817,7 +691,6 @@ where
         block_chain_cd: &CommonCircuitData<F, D>,
         update_account_vds: &[(u32, VerifierCircuitData<F, C, D>)],
         deposit_chain_vd: &VerifierCircuitData<F, C, D>,
-        forced_tx_chain_vd: &VerifierCircuitData<F, C, D>,
     ) -> Self {
         let mut builder = CircuitBuilder::<F, D>::new(CircuitConfig::standard_recursion_config());
         let target = BlockStepTarget::new::<F, C>(
@@ -825,7 +698,6 @@ where
             block_chain_cd,
             update_account_vds,
             deposit_chain_vd,
-            forced_tx_chain_vd,
         );
         let public_inputs = target.new_pis.clone();
         builder.register_public_inputs(&public_inputs.to_vec(&block_chain_cd.config));
@@ -834,7 +706,6 @@ where
 
         let dummy_prev_block_proof = DummyProof::new(block_chain_cd).proof;
         let dummy_deposit_proof = DummyProof::new(&deposit_chain_vd.common).proof;
-        let dummy_forced_tx_proof = DummyProof::new(&forced_tx_chain_vd.common).proof;
         let mut dummy_update_proofs = HashMap::new();
         for (num_users, vd) in update_account_vds.iter() {
             let dummy = DummyProof::new(&vd.common);
@@ -851,22 +722,18 @@ where
             public_inputs,
             block_chain_cd: block_chain_cd.clone(),
             deposit_chain_common: deposit_chain_vd.common.clone(),
-            forced_tx_chain_common: forced_tx_chain_vd.common.clone(),
             supported_user_counts,
             dummy_prev_block_proof,
             dummy_deposit_proof,
-            dummy_forced_tx_proof,
             dummy_update_proofs,
         }
     }
 
-    #[allow(clippy::too_many_arguments)]
     pub fn prove(
         &self,
         block_chain_vd: &VerifierCircuitData<F, C, D>,
         update_account_vds: &[(u32, VerifierCircuitData<F, C, D>)],
         deposit_chain_vd: &VerifierCircuitData<F, C, D>,
-        forced_tx_chain_vd: &VerifierCircuitData<F, C, D>,
         witness: &BlockStepWitness<F, C, D>,
     ) -> Result<ProofWithPublicInputs<F, C, D>, BlockStepError> {
         if block_chain_vd.common != self.block_chain_cd {
@@ -877,11 +744,6 @@ where
         if deposit_chain_vd.common != self.deposit_chain_common {
             return Err(BlockStepError::InvalidInput(
                 "deposit chain verifier common data mismatch".to_string(),
-            ));
-        }
-        if forced_tx_chain_vd.common != self.forced_tx_chain_common {
-            return Err(BlockStepError::InvalidInput(
-                "forced tx chain verifier common data mismatch".to_string(),
             ));
         }
         if update_account_vds.len() != self.supported_user_counts.len() {
@@ -908,7 +770,6 @@ where
             block_chain_vd,
             update_account_vds,
             deposit_chain_vd,
-            forced_tx_chain_vd,
         )?;
 
         let mut pw = PartialWitness::<F>::new();
@@ -920,7 +781,6 @@ where
             &new_public_inputs,
             &self.dummy_prev_block_proof,
             &self.dummy_deposit_proof,
-            &self.dummy_forced_tx_proof,
             &self.dummy_update_proofs,
         )?;
         self.public_inputs
@@ -944,19 +804,17 @@ mod tests {
     use crate::{
         circuits::{
             test_utils::block_witness_generator::BlockWitnessGenerator,
-            validity::{
-                block_hash_chain::{
-                    block_chain_pis::BLOCK_CHAIN_PUBLIC_INPUTS_LEN,
-                    sphincs_sig::SpxSigWitness,
-                    update_account_tree::{UpdateAccountCircuit, UpdateAccountTree},
-                },
-                deposit_hash_chain::deposit_chain_pis::DEPOSIT_CHAIN_PUBLIC_INPUTS_LEN,
-                forced_tx_hash_chain::forced_tx_chain_processor::ForcedTxChainProcessor,
+            validity::block_hash_chain::{
+                block_chain_pis::BLOCK_CHAIN_PUBLIC_INPUTS_LEN,
+                sphincs_sig::SpxSigWitness,
+                update_account_tree::{UpdateAccountCircuit, UpdateAccountTree},
             },
         },
+        common::u63::U63,
         ethereum_types::{bytes32::Bytes32, u32limb_trait::U32LimbTrait as _},
         utils::cyclic::TestCyclicCircuit,
     };
+    use crate::circuits::validity::deposit_hash_chain::deposit_chain_pis::DEPOSIT_CHAIN_PUBLIC_INPUTS_LEN;
     use plonky2::{
         field::goldilocks_field::GoldilocksField,
         plonk::{circuit_data::CircuitConfig, config::PoseidonGoldilocksConfig},
@@ -1008,6 +866,12 @@ mod tests {
             account_merkle_proofs: block_witness.account_merkle_proofs.clone(),
             send_merkle_proofs: block_witness.send_merkle_proofs.clone(),
             sig_witnesses: vec![SpxSigWitness::dummy(); num_users],
+            prev_forced_tx_hash_chain: Bytes32::default(),
+            prev_forced_tx_count: U63::default(),
+            forced_txs: vec![],
+            forced_tx_prev_account_leaves: vec![],
+            forced_tx_account_merkle_proofs: vec![],
+            forced_tx_send_merkle_proofs: vec![],
         };
         let update_inputs = update_tree.to_public_inputs().expect("update inputs");
         let update_proof = update_circuit
@@ -1033,9 +897,6 @@ mod tests {
         );
         let deposit_chain_vd = deposit_chain_circuit.data.verifier_data();
 
-        let forced_tx_chain_processor = ForcedTxChainProcessor::<F, C, D>::new();
-        let forced_tx_chain_vd = forced_tx_chain_processor.forced_tx_chain_vd();
-
         let update_account_vds = vec![(
             block_witness.block.num_users,
             update_circuit.data.verifier_data(),
@@ -1045,14 +906,12 @@ mod tests {
             &block_chain_common,
             &update_account_vds,
             &deposit_chain_vd,
-            &forced_tx_chain_vd,
         );
 
         let witness = BlockStepWitness {
             initial_public_state: Some(initial_state.clone()),
             prev_block_chain_proof: None,
             deposit_hash_chain_proof: None,
-            forced_tx_chain_proof: None,
             num_users: block_witness.block.num_users,
             update_account_proof: update_proof,
             public_state_merkle_proof: block_witness.public_state_merkle_proof.clone(),
@@ -1063,7 +922,6 @@ mod tests {
                 &block_chain_vd,
                 &update_account_vds,
                 &deposit_chain_vd,
-                &forced_tx_chain_vd,
             )
             .expect("block step public inputs");
         assert_eq!(
@@ -1080,7 +938,6 @@ mod tests {
                 &block_chain_vd,
                 &update_account_vds,
                 &deposit_chain_vd,
-                &forced_tx_chain_vd,
                 &witness,
             )
             .expect("block step proof");

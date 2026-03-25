@@ -12,10 +12,6 @@ use intmax3_zkp::circuits::{
         deposit_hash_chain::{
             deposit_hash_chain_circuit::DepositHashChainCircuit, deposit_step::DepositStepCircuit,
         },
-        forced_tx_hash_chain::{
-            forced_tx_hash_chain_circuit::ForcedTxHashChainCircuit,
-            forced_tx_step::ForcedTxStepCircuit,
-        },
         signature_aggregation::{
             sig_agg_circuit::SigAggCircuit, sig_agg_step::SigAggStepCircuit,
         },
@@ -104,23 +100,6 @@ fn main() {
         deposit_hash_chain.data.common.degree_bits(),
     ));
 
-    // Forced tx hash chain circuits
-    let forced_tx_chain_cd = ForcedTxHashChainCircuit::<F, C, D>::generate_cd();
-    let forced_tx_step = ForcedTxStepCircuit::<F, C, D>::new(&forced_tx_chain_cd);
-    rows.push((
-        "validity::ForcedTxStepCircuit".to_string(),
-        forced_tx_step.data.common.degree_bits(),
-    ));
-
-    let forced_tx_hash_chain = ForcedTxHashChainCircuit::<F, C, D>::new(
-        &forced_tx_chain_cd,
-        &forced_tx_step.data.verifier_data(),
-    );
-    rows.push((
-        "validity::ForcedTxHashChainCircuit".to_string(),
-        forced_tx_hash_chain.data.common.degree_bits(),
-    ));
-
     // Signature aggregation circuits
     let sig_agg_cd = SigAggCircuit::<F, C, D>::generate_cd();
     let sig_agg_step = SigAggStepCircuit::<F, C, D>::new(&sig_agg_cd);
@@ -162,7 +141,6 @@ fn main() {
         &block_chain_cd,
         &update_account_vds,
         &deposit_hash_chain.data.verifier_data(),
-        &forced_tx_hash_chain.data.verifier_data(),
     );
     rows.push((
         "validity::BlockStepCircuit".to_string(),

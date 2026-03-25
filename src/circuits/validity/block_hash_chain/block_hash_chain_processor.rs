@@ -27,13 +27,11 @@ use crate::{
             deposit_chain_processor::{DepositChainProcessor, DepositChainProcessorError},
             deposit_step::DepositStepWitness,
         },
-        forced_tx_hash_chain::forced_tx_chain_processor::{
-            ForcedTxChainProcessor, ForcedTxChainProcessorError,
-        },
     },
     common::{
         block::Block,
         deposit::Deposit,
+        forced_tx::ForcedTx,
         trees::{
             account_tree::{AccountLeaf, AccountMerkleProof, SendMerkleProof},
             deposit_tree::DepositMerkleProof,
@@ -53,8 +51,6 @@ pub enum BlockHashChainProcessorError {
 
     #[error("deposit chain processor error: {0}")]
     DepositChainProcessor(#[from] DepositChainProcessorError),
-    #[error("forced tx chain processor error: {0}")]
-    ForcedTxChainProcessor(#[from] ForcedTxChainProcessorError),
     #[error("update account circuit error: {0}")]
     UpdateAccountCircuit(#[from] UpdateAccountCircuitError),
     #[error("block step error: {0}")]
@@ -75,6 +71,11 @@ pub struct BlockHashChainProcessorWitness {
     /// If None, dummy (all-zero) witnesses are used — valid only when the
     /// signature verification constraints are conditionally disabled (inactive slots).
     pub sig_witnesses: Option<Vec<SpxSigWitness>>,
+    /// Forced transaction witnesses for this block.
+    pub forced_txs: Vec<ForcedTx>,
+    pub forced_tx_prev_account_leaves: Vec<AccountLeaf>,
+    pub forced_tx_account_merkle_proofs: Vec<AccountMerkleProof>,
+    pub forced_tx_send_merkle_proofs: Vec<SendMerkleProof>,
 }
 
 pub struct BlockHashChainProcessor<F, C, const D: usize>
@@ -86,11 +87,9 @@ where
     block_hash_chain_circuit: BlockHashChainCircuit<F, C, D>,
     block_step_circuit: BlockStepCircuit<F, C, D>,
     deposit_chain_vd: VerifierCircuitData<F, C, D>,
-    forced_tx_chain_vd: VerifierCircuitData<F, C, D>,
     update_account_vds: Vec<(u32, VerifierCircuitData<F, C, D>)>,
     update_account_circuits: HashMap<u32, UpdateAccountCircuit<F, C, D>>,
     deposit_chain_processor: DepositChainProcessor<F, C, D>,
-    forced_tx_chain_processor: ForcedTxChainProcessor<F, C, D>,
 }
 
 impl<F, C, const D: usize> BlockHashChainProcessor<F, C, D>
@@ -119,14 +118,10 @@ where
             update_account_circuits.insert(num_users, circuit);
         }
 
-        let forced_tx_chain_processor = ForcedTxChainProcessor::<F, C, D>::new();
-        let forced_tx_chain_vd = forced_tx_chain_processor.forced_tx_chain_vd();
-
         let block_step_circuit = BlockStepCircuit::<F, C, D>::new(
             &block_chain_cd,
             &update_account_vds,
             &deposit_chain_vd,
-            &forced_tx_chain_vd,
         );
 
         let block_hash_chain_circuit = BlockHashChainCircuit::<F, C, D>::new(
@@ -138,11 +133,9 @@ where
             block_hash_chain_circuit,
             block_step_circuit,
             deposit_chain_vd,
-            forced_tx_chain_vd,
             update_account_vds,
             update_account_circuits,
             deposit_chain_processor,
-            forced_tx_chain_processor,
         }
     }
 
@@ -152,10 +145,6 @@ where
 
     pub fn deposit_chain_vd(&self) -> VerifierCircuitData<F, C, D> {
         self.deposit_chain_vd.clone()
-    }
-
-    pub fn forced_tx_chain_vd(&self) -> VerifierCircuitData<F, C, D> {
-        self.forced_tx_chain_vd.clone()
     }
 
     pub fn prove_block(
@@ -249,6 +238,12 @@ where
                 .sig_witnesses
                 .clone()
                 .unwrap_or_else(|| vec![SpxSigWitness::dummy(); num_users as usize]),
+            prev_forced_tx_hash_chain: prev_ext_public_state.forced_tx_hash_chain,
+            prev_forced_tx_count: prev_ext_public_state.forced_tx_count,
+            forced_txs: witness.forced_txs.clone(),
+            forced_tx_prev_account_leaves: witness.forced_tx_prev_account_leaves.clone(),
+            forced_tx_account_merkle_proofs: witness.forced_tx_account_merkle_proofs.clone(),
+            forced_tx_send_merkle_proofs: witness.forced_tx_send_merkle_proofs.clone(),
         };
         let update_account_proof = update_account_circuit.prove(&update_account_tree)?;
 
@@ -257,7 +252,6 @@ where
             initial_public_state: initial_public_state.clone(),
             prev_block_chain_proof: prev_block_chain_proof.clone(),
             deposit_hash_chain_proof: deposit_chain_proof.clone(),
-            forced_tx_chain_proof: None, // TODO: integrate forced tx proof generation
             update_account_proof: update_account_proof.clone(),
             public_state_merkle_proof: witness.public_state_merkle_proof.clone(),
         };
@@ -265,7 +259,6 @@ where
             &self.block_chain_vd(),
             &self.update_account_vds,
             &self.deposit_chain_vd,
-            &self.forced_tx_chain_vd,
             &block_step_witness,
         )?;
 
