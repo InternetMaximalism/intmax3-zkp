@@ -25,6 +25,9 @@ anyhow = "1.0.100"
 lazy_static = "1.5.0"
 bincode = { version = "2.0.1", features = ["serde"] }
 
+[features]
+gpu_merkle = ["plonky2/gpu_merkle", "starky/gpu_merkle", "plonky2_keccak/gpu_merkle"]
+
 [patch."https://github.com/InternetMaximalism/polygon-plonky2.git"]
 plonky2 = { git = "https://github.com/InternetMaximalism/Lita-Plonky2.git", branch = "wasm-zkp3" }
 
