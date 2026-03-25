@@ -4,12 +4,11 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-plonky2 = { git = "https://github.com/InternetMaximalism/polygon-plonky2.git", branch = "wasm", default-features = false, features = [
-    "parallel",
-] }
-plonky2_u32 = { git = "https://github.com/InternetMaximalism/plonky2-u32.git", branch = "wasm", default-features = false }
-plonky2_bn254 = { git = "https://github.com/InternetMaximalism/plonky2_bn254", branch = "wasm", default-features = false }
-plonky2_keccak = { git = "https://github.com/InternetMaximalism/plonky2_keccak", branch = "wasm", default-features = false }
+plonky2 = { git = "https://github.com/InternetMaximalism/Lita-Plonky2.git", branch = "wasm-zkp3", default-features = false, features = ["parallel", "std"] }
+starky = { git = "https://github.com/InternetMaximalism/Lita-Plonky2.git", package = "starky", branch = "wasm-zkp3", default-features = false, features = ["parallel", "std"] }
+plonky2_u32 = { git = "https://github.com/lita-xyz/plonky2-u32.git", branch = "wasm", default-features = false }
+plonky2_bn254 = { git = "https://github.com/lita-xyz/plonky2_bn254.git", branch = "wasm", default-features = false }
+plonky2_keccak = { git = "https://github.com/lita-xyz/plonky2_keccak.git", branch = "wasm", default-features = false }
 sphincsplus-circuits = { git = "https://github.com/InternetMaximalism/aggregated_SPHINCS_plus.git" }
 sphincsplus-params = { git = "https://github.com/InternetMaximalism/aggregated_SPHINCS_plus.git" }
 sphincsplus-poseidon = { git = "https://github.com/InternetMaximalism/aggregated_SPHINCS_plus.git" }
@@ -26,8 +25,11 @@ anyhow = "1.0.100"
 lazy_static = "1.5.0"
 bincode = { version = "2.0.1", features = ["serde"] }
 
-# [patch."https://github.com/InternetMaximalism/polygon-plonky2.git"]
-# plonky2 = { path = "../polygon-plonky2/plonky2" }
+[patch."https://github.com/InternetMaximalism/polygon-plonky2.git"]
+plonky2 = { git = "https://github.com/InternetMaximalism/Lita-Plonky2.git", branch = "wasm-zkp3" }
+
+[patch."https://github.com/lita-xyz/Plonky2.git"]
+plonky2 = { git = "https://github.com/InternetMaximalism/Lita-Plonky2.git", branch = "wasm-zkp3" }
 
 [dev-dependencies]
 criterion = { version = "0.5", default-features = false }
