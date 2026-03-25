@@ -5,7 +5,7 @@ Zero-knowledge proof circuits and L1 settlement contracts for the INTMAX3 rollup
 ## System Architecture — Three-Layer Block Model
 
 ```
-  Layer 0: Fast Blocks (~5s, off-chain)     Layer 1: Posting Rounds (~5min)     Layer 2: Finalization (~6h)
+  Off-chain: Fast Blocks (~5s)              Layer 1.1: Posting Rounds (~5min)   Layer 1: Finalization (~6h)
   ─────────────────────────────────────     ───────────────────────────────     ──────────────────────────
 
   ┌──────────┐    ┌──────────┐              postBlock(SubBlock[])               finalize()

@@ -25,13 +25,13 @@ contract WhirVerifierWrapper {
 /// @notice INTMAX3 validity proof rollup contract.
 ///
 ///  Three-layer block architecture:
-///    Layer 0 — "fast blocks" (~5 seconds, off-chain):
+///    Off-chain — "fast blocks" (~5 seconds):
 ///       Pure user-tx blocks.  No deposits, no forced txs.
 ///       Aggregators collect txs and build blocks off-chain.
 ///       Each block still has a block_number and updates the hash chain
 ///       inside the ZK circuit, but is NOT individually posted to L1.
 ///
-///    Layer 1 — "posting rounds" (~5 minutes, on-chain calldata):
+///    Layer 1.1 — "posting rounds" (~5 minutes, on-chain calldata):
 ///       Aggregators call `postBlock(SubBlock[])` to commit a batch of
 ///       fast blocks to L1 as calldata.  The contract iterates over the
 ///       batch and recomputes the cumulative block_hash_chain.
@@ -39,7 +39,7 @@ contract WhirVerifierWrapper {
 ///       (applied to the last sub-block in the batch).
 ///       `blockHashChainAt[lastBlockNumber]` is recorded for the batch.
 ///
-///    Layer 2 — "finalization" (~6 hours, validity proof):
+///    Layer 1 — "finalization" (~6 hours, validity proof):
 ///       The sequencer posts a validity proof blob via `submit()`.
 ///       Anyone can call `finalize()` to verify the proof against the
 ///       on-chain block_hash_chain snapshots and accept the new state root.
