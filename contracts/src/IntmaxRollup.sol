@@ -458,21 +458,23 @@ contract IntmaxRollup {
         bytes calldata transcript,
         KZGProof calldata kzg,
         Groth16Params memory groth16
-    ) external {
+    ) external returns (bool) {
         Submission storage sub = _submissions[submissionId];
-        if (sub.commitment == bytes32(0)) revert SubmissionNotFound();
-        if (sub.finalized) revert AlreadyFinalized();
+        if (sub.commitment == bytes32(0)) return false;
+        if (sub.finalized) return false;
 
-        _fullVerify(
+        bool valid = _fullVerify(
             submissionId, blobVersionedHash, stateRoot,
             plonky2ProofBytes, validityPIs,
             config, statement, whirProof, transcript, kzg, groth16
         );
+        if (!valid) return false;
 
         sub.finalized = true;
         latestFinalizedStateRoot = stateRoot;
 
         emit Finalized(submissionId, stateRoot);
+        return true;
     }
 
     // -----------------------------------------------------------------------
@@ -491,13 +493,12 @@ contract IntmaxRollup {
         bytes calldata transcript,
         KZGProof calldata kzg,
         Groth16Params memory groth16
-    ) external view returns (bool valid) {
-        _fullVerify(
+    ) external view returns (bool) {
+        return _fullVerify(
             submissionId, blobVersionedHash, stateRoot,
             plonky2ProofBytes, validityPIs,
             config, statement, whirProof, transcript, kzg, groth16
         );
-        return true;
     }
 
     // -----------------------------------------------------------------------
@@ -538,7 +539,7 @@ contract IntmaxRollup {
         bytes calldata transcript,
         KZGProof calldata kzg,
         Groth16Params memory groth16
-    ) internal view {
+    ) internal view returns (bool) {
         // 1. Commitment check
         {
             uint32 proofLength = uint32(plonky2ProofBytes.length);
@@ -547,55 +548,63 @@ contract IntmaxRollup {
                 abi.encodePacked(blobVersionedHash, proofHash, proofLength, stateRoot)
             );
             if (commitment != _submissions[submissionId].commitment) {
-                revert CommitmentMismatch();
+                return false;
             }
         }
 
         // 2. Public input binding: ValidityPublicInputs ↔ on-chain state
-        //    - initial_ext_commitment must chain from the last finalized state
-        //    - block hash chains must match on-chain snapshots
-        //    - final_ext_commitment must equal the claimed stateRoot
         if (validityPIs.initialExtCommitment != latestFinalizedStateRoot) {
-            revert InitialStateMismatch();
+            return false;
         }
         if (validityPIs.initialBlockChain != blockHashChainAt[validityPIs.initialBlockNumber]) {
-            revert BlockChainMismatch();
+            return false;
         }
         if (validityPIs.finalBlockChain != blockHashChainAt[validityPIs.finalBlockNumber]) {
-            revert BlockChainMismatch();
+            return false;
         }
         if (validityPIs.finalExtCommitment != stateRoot) {
-            revert CommitmentMismatch();
+            return false;
         }
 
         // 3. Plonky2 public input hash must appear in WHIR statement.evaluations[0]
-        //    The plonky2 circuit outputs keccak256(ValidityPublicInputs) as its
-        //    public input.  The WHIR/Groth16 wrapper circuit takes this as its
-        //    public input, which appears in statement.evaluations[0].
         bytes32 plonky2PublicInput = _computeValidityPIHash(validityPIs);
         if (statement.evaluations.length == 0 ||
             bytes32(BN254.ScalarField.unwrap(statement.evaluations[0])) != plonky2PublicInput) {
-            revert WhirPublicInputMismatch();
+            return false;
         }
 
         // 4. KZG blob binding
+        try this._verifyKZG(blobVersionedHash, kzg, plonky2ProofBytes) {
+        } catch {
+            return false;
+        }
+
+        // 5. WHIR verification
+        try whirVerifier.verify(config, statement, whirProof, transcript) returns (bool valid) {
+            if (!valid) return false;
+        } catch {
+            return false;
+        }
+
+        // 6. Groth16 verification (in parallel with WHIR — both must pass)
+        if (!Groth16Verifier.verify(groth16.vk, groth16.proof, groth16.pubInputs)) {
+            return false;
+        }
+
+        return true;
+    }
+
+    /// @dev External helper so _fullVerify can try/catch on KZG verification.
+    function _verifyKZG(
+        bytes32 blobVersionedHash,
+        KZGProof calldata kzg,
+        bytes calldata plonky2ProofBytes
+    ) external view {
         BlobKZGVerifier.verify(
             blobVersionedHash,
             kzg,
             _toFieldElements(plonky2ProofBytes)
         );
-
-        // 5. WHIR verification
-        try whirVerifier.verify(config, statement, whirProof, transcript) returns (bool valid) {
-            if (!valid) revert ProofVerificationFailed();
-        } catch {
-            revert ProofVerificationFailed();
-        }
-
-        // 6. Groth16 verification (in parallel with WHIR — both must pass)
-        if (!Groth16Verifier.verify(groth16.vk, groth16.proof, groth16.pubInputs)) {
-            revert ProofVerificationFailed();
-        }
     }
 
     // -----------------------------------------------------------------------

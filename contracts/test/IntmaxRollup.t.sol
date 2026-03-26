@@ -396,7 +396,7 @@ contract IntmaxRollupTest is Test {
         _mockWhirVerifierTrue();
         _mockGroth16Pairing();
 
-        rollup.finalize(
+        bool ok = rollup.finalize(
             0, _kzgBlobHash, stateRoot,
             plonky2Bytes,
             vpis,
@@ -405,6 +405,7 @@ contract IntmaxRollupTest is Test {
             _dummyGroth16()
         );
 
+        assertTrue(ok);
         assertTrue(rollup.isFinalized(0));
         assertEq(rollup.latestFinalizedStateRoot(), stateRoot);
     }
@@ -433,20 +434,20 @@ contract IntmaxRollupTest is Test {
         _mockWhirVerifierTrue();
         _mockGroth16Pairing();
 
-        rollup.finalize(
+        assertTrue(rollup.finalize(
             0, _kzgBlobHash, stateRoot, plonky2Bytes, vpis,
             config, statement, whirProof, transcript,
             _dummyKZG(plonky2Bytes.length),
             _dummyGroth16()
-        );
+        ));
 
-        vm.expectRevert(IntmaxRollup.AlreadyFinalized.selector);
-        rollup.finalize(
+        // Second call returns false (already finalized)
+        assertFalse(rollup.finalize(
             0, _kzgBlobHash, stateRoot, plonky2Bytes, vpis,
             config, statement, whirProof, transcript,
             _dummyKZG(plonky2Bytes.length),
             _dummyGroth16()
-        );
+        ));
     }
 
     function test_finalize_initialStateMismatch() public {
@@ -471,13 +472,13 @@ contract IntmaxRollupTest is Test {
 
         _mockBLSPrecompiles();
 
-        vm.expectRevert(IntmaxRollup.InitialStateMismatch.selector);
-        rollup.finalize(
+        // Returns false (initial state mismatch)
+        assertFalse(rollup.finalize(
             0, _kzgBlobHash, stateRoot, plonky2Bytes, vpis,
             config, statement, whirProof, transcript,
             _dummyKZG(plonky2Bytes.length),
             _dummyGroth16()
-        );
+        ));
     }
 
     function test_finalize_whirPIMismatch() public {
@@ -500,13 +501,13 @@ contract IntmaxRollupTest is Test {
 
         _mockBLSPrecompiles();
 
-        vm.expectRevert(IntmaxRollup.WhirPublicInputMismatch.selector);
-        rollup.finalize(
+        // Returns false (PI mismatch)
+        assertFalse(rollup.finalize(
             0, _kzgBlobHash, stateRoot, plonky2Bytes, vpis,
             config, statement, whirProof, transcript,
             _dummyKZG(plonky2Bytes.length),
             _dummyGroth16()
-        );
+        ));
     }
 
     function test_finalize_notFound() public {
@@ -519,13 +520,13 @@ contract IntmaxRollupTest is Test {
 
         IntmaxRollup.ValidityPublicInputs memory vpis;
 
-        vm.expectRevert(IntmaxRollup.SubmissionNotFound.selector);
-        rollup.finalize(
+        // Returns false (submission not found)
+        assertFalse(rollup.finalize(
             999, bytes32(0), bytes32(0), "", vpis,
             config, statement, whirProof, transcript,
             _dummyKZG(0),
             _dummyGroth16()
-        );
+        ));
     }
 
     // -----------------------------------------------------------------------
