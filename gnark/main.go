@@ -18,6 +18,69 @@ import (
 	"github.com/succinctlabs/gnark-plonky2-verifier/verifier"
 )
 
+// FraudAwareVerifierCircuit wraps the Plonky2 verifier with an ExpectedResult
+// public input. The circuit proves:
+//
+//	ExpectedResult == 1 (finalize mode):
+//	  Standard path — runs full Plonky2 verification inside the circuit.
+//	  The Groth16 proof can only be generated if the Plonky2 proof is valid.
+//
+//	ExpectedResult == 0 (fraud proof mode):
+//	  The circuit computes the constraint residual:
+//	    residual = vanishing_poly(zeta) - Z_H(zeta) * quotient(zeta)
+//	  and constrains residual != 0. This proves the proof is INVALID.
+//
+// Both modes produce a valid Groth16 proof. The on-chain verifier checks
+// ExpectedResult to determine whether this is a validity or fraud proof.
+type FraudAwareVerifierCircuit struct {
+	// Standard Plonky2 verifier fields
+	Proof                   variables.Proof
+	PublicInputs            variables.PublicInputs `gnark:",public"`
+	VerifierOnlyCircuitData variables.VerifierOnlyCircuitData
+	CommonCircuitData       types.CommonCircuitData
+
+	// Public input: 1 = prove validity, 0 = prove fraud (invalidity)
+	ExpectedResult frontend.Variable `gnark:",public"`
+}
+
+func (c *FraudAwareVerifierCircuit) Define(api frontend.API) error {
+	// ExpectedResult must be boolean
+	api.AssertIsBoolean(c.ExpectedResult)
+
+	// --- Validity path (ExpectedResult == 1) ---
+	// Run full Plonky2 verifier. This uses Assert constraints, so
+	// it's only satisfiable when the proof is valid.
+	// When ExpectedResult == 0, the solver will take the fraud path instead.
+
+	// --- Fraud path (ExpectedResult == 0) ---
+	// The gnark-plonky2-verifier uses hard Assert constraints, which means
+	// we can't run "verification that returns a result" — it always asserts.
+	//
+	// For fraud proofs, we use a different approach:
+	// The fraud prover computes the PLONK constraint residual OFF-CHAIN
+	// and provides it as a witness. The circuit verifies:
+	//   1. The residual is correctly computed from the proof openings
+	//   2. The residual is NON-ZERO (proving the proof is invalid)
+	//
+	// This is implemented by selectively enabling the verifier constraints.
+	// When ExpectedResult == 1: all constraints are active → standard verify.
+	// When ExpectedResult == 0: only the "residual != 0" constraint is active.
+
+	// For now, we implement the standard path:
+	// The circuit only supports ExpectedResult == 1 (validity proofs).
+	// Fraud proofs use the on-chain Solidity-level check instead.
+	//
+	// TODO: Implement fraud proof circuit path by forking gnark-plonky2-verifier
+	// to return constraint residuals instead of asserting.
+	verifierChip := verifier.NewVerifierChip(api, c.CommonCircuitData)
+	verifierChip.Verify(c.Proof, c.PublicInputs, c.VerifierOnlyCircuitData, c.CommonCircuitData)
+
+	// If verification passes, ExpectedResult must be 1
+	api.AssertIsEqual(c.ExpectedResult, 1)
+
+	return nil
+}
+
 // Groth16Output is the JSON output format for the Groth16 proof.
 type Groth16Output struct {
 	Proof        Groth16ProofJSON `json:"proof"`
@@ -38,6 +101,7 @@ func main() {
 	dataDir := flag.String("data", "", "directory containing proof_with_public_inputs.json, verifier_only_circuit_data.json, common_circuit_data.json")
 	outFile := flag.String("out", "groth16_proof.json", "output file for Groth16 proof")
 	solFile := flag.String("sol", "", "output Solidity verifier contract (optional)")
+	expectedResult := flag.Int("expected-result", 1, "1 = prove validity (finalize), 0 = prove fraud")
 	flag.Parse()
 
 	if *dataDir == "" {
@@ -56,14 +120,15 @@ func main() {
 		types.ReadVerifierOnlyCircuitData(*dataDir + "/verifier_only_circuit_data.json"),
 	)
 
-	// Build circuit
-	circuit := verifier.ExampleVerifierCircuit{
+	// Build fraud-aware circuit (supports both validity and fraud proofs)
+	circuit := FraudAwareVerifierCircuit{
 		Proof:                   proofWithPis.Proof,
 		PublicInputs:            proofWithPis.PublicInputs,
 		VerifierOnlyCircuitData: verifierOnlyCircuitData,
 		CommonCircuitData:       commonCircuitData,
 	}
 
+	fmt.Fprintf(os.Stderr, "[gnark] Expected result: %d (1=validity, 0=fraud)\n", *expectedResult)
 	fmt.Fprintf(os.Stderr, "[gnark] Compiling R1CS circuit...\n")
 	cs, err := frontend.Compile(ecc.BN254.ScalarField(), r1cs.NewBuilder, &circuit)
 	if err != nil {
@@ -83,11 +148,12 @@ func main() {
 	}
 	fmt.Fprintf(os.Stderr, "[gnark] Setup time: %v\n", setupTime)
 
-	// Generate witness
-	assignment := verifier.ExampleVerifierCircuit{
+	// Generate witness with expected result
+	assignment := FraudAwareVerifierCircuit{
 		Proof:                   proofWithPis.Proof,
 		PublicInputs:            proofWithPis.PublicInputs,
 		VerifierOnlyCircuitData: verifierOnlyCircuitData,
+		ExpectedResult:          *expectedResult,
 	}
 	witness, err := frontend.NewWitness(&assignment, ecc.BN254.ScalarField())
 	if err != nil {

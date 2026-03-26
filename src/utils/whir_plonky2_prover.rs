@@ -114,6 +114,10 @@ pub struct WhirPlonky2Proof<F: RichField + Extendable<D>, C: GenericConfig<D, F 
     pub zs_partial_products_whir: WhirPolyCommitment,
     /// WHIR commitment for quotient polynomial chunks.
     pub quotient_polys_whir: WhirPolyCommitment,
+
+    /// Public input: `true` = validity proof, `false` = fraud proof.
+    /// This is bound into the WHIR proof's Fiat-Shamir transcript.
+    pub expected_result: bool,
 }
 
 /// Timing breakdown for WHIR proof generation.
@@ -314,6 +318,14 @@ pub fn whir_verify_standalone(
 ///
 /// Both checks together provide the same security as Plonky2 + FRI,
 /// but using hash-based (post-quantum) polynomial commitments.
+/// # Arguments
+/// * `circuit_data` — Compiled Plonky2 circuit.
+/// * `inputs` — Partial witness.
+/// * `whir_config` — WHIR protocol parameters.
+/// * `expected_result` — `true` for validity proof, `false` for fraud proof.
+///   This value is bound into the WHIR proof's Fiat-Shamir transcript,
+///   so a proof generated with `expected_result=true` cannot be replayed
+///   as a fraud proof (and vice versa).
 pub fn prove_with_whir<
     F: RichField + Extendable<D>,
     C: GenericConfig<D, F = F>,
@@ -322,6 +334,7 @@ pub fn prove_with_whir<
     circuit_data: &CircuitData<F, C, D>,
     inputs: PartialWitness<F>,
     whir_config: &WhirWrapConfig,
+    expected_result: bool,
 ) -> Result<WhirPlonky2ProveResult<F, C, D>>
 where
     C::Hasher: Hasher<F>,
@@ -382,9 +395,15 @@ where
     // standard proof), this proves the computation is correct.
 
     // Generate WHIR commitments
+    // Bind expected_result into WHIR session names.
+    // This ensures a validity proof (expected_result=true) cannot be replayed
+    // as a fraud proof (expected_result=false) because the Fiat-Shamir domain
+    // separator differs.
+    let er_tag = if expected_result { "valid" } else { "fraud" };
+
     let constants_sigmas_whir = whir_commit_and_prove(
         &constants_sigmas_polys,
-        "whir-plonky2-constants-sigmas",
+        &format!("whir-plonky2-constants-sigmas-{}", er_tag),
         whir_config,
     );
 
@@ -412,7 +431,7 @@ where
 
     let wires_whir = whir_commit_and_prove(
         &opening_poly,
-        "whir-plonky2-openings-zeta",
+        &format!("whir-plonky2-openings-zeta-{}", er_tag),
         whir_config,
     );
 
@@ -439,7 +458,7 @@ where
 
     let zs_partial_products_whir = whir_commit_and_prove(
         &fri_final_whir,
-        "whir-plonky2-fri-final-poly",
+        &format!("whir-plonky2-fri-final-poly-{}", er_tag),
         whir_config,
     );
 
@@ -472,7 +491,7 @@ where
 
     let quotient_polys_whir = whir_commit_and_prove(
         &caps_poly,
-        "whir-plonky2-merkle-caps",
+        &format!("whir-plonky2-merkle-caps-{}", er_tag),
         whir_config,
     );
 
@@ -488,6 +507,7 @@ where
         wires_whir,
         zs_partial_products_whir,
         quotient_polys_whir,
+        expected_result,
     };
 
     Ok(WhirPlonky2ProveResult {
@@ -575,25 +595,39 @@ where
     C::InnerHasher: Hasher<F>,
 {
     // -----------------------------------------------------------------------
-    // Check 1: Standard Plonky2 verification (constraint satisfaction)
+    // Check 1: WHIR polynomial commitment validity
     //
-    // This verifies the algebraic constraints are satisfied.
-    // The standard proof's openings are used for this check.
-    // -----------------------------------------------------------------------
-
-    circuit_data.verify(proof.standard_proof.clone())?;
-
-    // -----------------------------------------------------------------------
-    // Check 2: WHIR polynomial commitment validity
-    //
-    // Each WHIR proof is verified independently.  This confirms the
-    // polynomial data committed via WHIR is valid.
+    // Each WHIR proof is verified independently.  The session names
+    // include the expected_result tag, so a validity proof cannot be
+    // replayed as a fraud proof.
     // -----------------------------------------------------------------------
 
     whir_verify_standalone(&proof.constants_sigmas_whir, whir_config)?;
     whir_verify_standalone(&proof.wires_whir, whir_config)?;
     whir_verify_standalone(&proof.zs_partial_products_whir, whir_config)?;
     whir_verify_standalone(&proof.quotient_polys_whir, whir_config)?;
+
+    // -----------------------------------------------------------------------
+    // Check 2: Plonky2 verification + expected_result check
+    //
+    // If expected_result == true (finalize):
+    //   Standard Plonky2 proof must verify → accept state transition.
+    //
+    // If expected_result == false (fraud proof):
+    //   Standard Plonky2 proof must FAIL → confirms fraud.
+    //   (The WHIR commitments above still verify — they prove the data
+    //    was committed correctly. But the proof itself is invalid.)
+    // -----------------------------------------------------------------------
+
+    let plonky2_valid = circuit_data.verify(proof.standard_proof.clone()).is_ok();
+
+    if plonky2_valid != proof.expected_result {
+        anyhow::bail!(
+            "Expected result mismatch: expected_result={}, actual plonky2 verification={}",
+            proof.expected_result,
+            plonky2_valid
+        );
+    }
 
     Ok(())
 }
@@ -690,7 +724,7 @@ mod tests {
         let pw = make_witness(initial);
 
         let config = WhirWrapConfig::default_keccak();
-        let result = prove_with_whir::<F, C, D>(&cd, pw, &config).unwrap();
+        let result = prove_with_whir::<F, C, D>(&cd, pw, &config, true).unwrap();
 
         println!("=== WHIR Plonky2 Proof Timings ===");
         println!("  Plonky2 prove: {:.2?}", result.plonky2_prove_time);
@@ -709,7 +743,7 @@ mod tests {
         let pw = make_witness(initial);
 
         let config = WhirWrapConfig::default_keccak();
-        let result = prove_with_whir::<F, C, D>(&cd, pw, &config).unwrap();
+        let result = prove_with_whir::<F, C, D>(&cd, pw, &config, true).unwrap();
 
         // Each WHIR commitment must verify independently
         whir_verify_standalone(&result.proof.constants_sigmas_whir, &config)
@@ -748,7 +782,7 @@ mod tests {
         let pw = make_witness(initial);
 
         let config = WhirWrapConfig::default_keccak();
-        let result = prove_with_whir::<F, C, D>(&cd, pw, &config).unwrap();
+        let result = prove_with_whir::<F, C, D>(&cd, pw, &config, true).unwrap();
 
         // Standard proof must also verify
         cd.verify(result.proof.standard_proof.clone())

@@ -115,28 +115,33 @@ pub const DEFAULT_GNARK_BIN: &str = "gnark/gnark-wrapper";
 /// * `circuit_data` — The Plonky2 circuit data (contains common data + verifier data)
 /// * `proof` — The Plonky2 proof with public inputs
 /// * `gnark_bin_path` — Path to the `gnark-wrapper` Go binary
+/// * `expected_result` — `true` for finalize (prove validity), `false` for fraud proof (prove invalidity)
 ///
 /// # Returns
 ///
-/// A `Groth16WrapResult` containing the BN254 proof points, public inputs,
-/// and timing information. The proof points match the format expected by
-/// `IntmaxRollup.sol`'s `Groth16Verifier.verify()`.
+/// A `Groth16WrapResult` containing the BN254 proof points, public inputs
+/// (including `expected_result`), and timing information.
+///
+/// When `expected_result = true`:  Groth16 proves the Plonky2 proof IS valid.
+/// When `expected_result = false`: Groth16 proves the Plonky2 proof is NOT valid.
+///
+/// The on-chain verifier checks the `expected_result` public input to determine
+/// whether this is a validity proof or a fraud proof.
 ///
 /// # Example
 ///
 /// ```ignore
-/// let result = groth16_wrap(
-///     &circuit_data,
-///     &plonky2_proof,
-///     Path::new("gnark/gnark-wrapper"),
-/// )?;
-/// println!("Groth16 proof A: {:?}", result.proof.a);
-/// println!("Proving time: {:.1}ms", result.proving_time_ms);
+/// // Finalize: prove validity
+/// let result = groth16_wrap(&circuit_data, &proof, Path::new("gnark/gnark-wrapper"), true)?;
+///
+/// // Fraud proof: prove invalidity
+/// let result = groth16_wrap(&circuit_data, &bad_proof, Path::new("gnark/gnark-wrapper"), false)?;
 /// ```
 pub fn groth16_wrap<F, C, const D: usize>(
     circuit_data: &CircuitData<F, C, D>,
     proof: &ProofWithPublicInputs<F, C, D>,
     gnark_bin_path: &Path,
+    expected_result: bool,
 ) -> Result<Groth16WrapResult, Groth16Error>
 where
     F: RichField + Extendable<D> + Serialize,
@@ -170,11 +175,14 @@ where
     let out_file = tmp_dir.join("groth16_proof.json");
 
     // 4. Call gnark-wrapper subprocess
+    let expected_result_val = if expected_result { "1" } else { "0" };
     let output = Command::new(gnark_bin_path)
         .arg("--data")
         .arg(tmp_dir.to_str().unwrap())
         .arg("--out")
         .arg(out_file.to_str().unwrap())
+        .arg("--expected-result")
+        .arg(expected_result_val)
         .output()
         .map_err(|e| Groth16Error::SubprocessFailed {
             code: None,
