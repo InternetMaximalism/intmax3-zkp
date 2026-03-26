@@ -1,5 +1,13 @@
 /target
 tests/fixtures/*.bin
+self_certs/
+node_modules/
+pkg/
+.DS_Store
 
 # codex file
 AGENTS.md
+
+## AI agents files
+.claude/docs/*
+.claude/plans/*
