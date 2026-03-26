@@ -99,6 +99,7 @@
 
       <div>
         <button id="runProof" disabled>Run Withdrawal Proof</button>
+        <button id="runBalanceProcessorFlow" disabled>Run Balance Processor Flow</button>
         <button id="clearOutput">Clear Output</button>
       </div>
 
@@ -114,6 +115,7 @@
       const statusDiv = document.getElementById('status');
       const outputDiv = document.getElementById('output');
       const runProofBtn = document.getElementById('runProof');
+      const runBalanceProcessorBtn = document.getElementById('runBalanceProcessorFlow');
       const clearOutputBtn = document.getElementById('clearOutput');
       const threadCountInput = document.getElementById('threadCount');
       const applyThreadsBtn = document.getElementById('applyThreads');
@@ -143,6 +145,7 @@
 
       function setButtons(enabled) {
         runProofBtn.disabled = !enabled;
+        runBalanceProcessorBtn.disabled = !enabled;
         applyThreadsBtn.disabled = !enabled;
       }
 
@@ -205,6 +208,12 @@
         addOutput('Running run_single_withdrawal_proof()...');
         worker.postMessage({ action: 'run_single_withdrawal_proof' });
       });
+
+      runBalanceProcessorBtn.addEventListener('click', () => {
+        if (!workerReady) return;
+        addOutput('Running run_balance_processor_flow()...');
+        worker.postMessage({ action: 'run_balance_processor_flow' });
+      })
 
       applyThreadsBtn.addEventListener('click', () => {
         const threadCount = parseInt(threadCountInput.value);

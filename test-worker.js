@@ -143,6 +143,19 @@ self.onmessage = async function(e) {
                 });
                 break;
 
+            case 'run_balance_processor_flow':
+                self.postMessage({ type: 'log', message: 'Starting run_balance_processor_flow()...'});
+                console.time('run_balance_processor_flow');
+                await wasmModule.run_balance_processor_flow();
+                console.timeEnd('run_balance_processor_flow');
+                self.postMessage({
+                    type: 'result',
+                    data: {
+                        function: 'run_balance_processor_flow',
+                        duration: `${(performance.now() - startTime).toFixed(2)}ms`,
+                    }
+                });
+                break;
             default:
                 self.postMessage({
                     type: 'error',
