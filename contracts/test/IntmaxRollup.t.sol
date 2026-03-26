@@ -530,6 +530,107 @@ contract IntmaxRollupTest is Test {
     }
 
     // -----------------------------------------------------------------------
+    // fraudProof() tests — prove a submission is invalid
+    // -----------------------------------------------------------------------
+
+    function test_fraudProof_invalidProof_confirmedFraud() public {
+        (
+            WhirConfig memory config,
+            Statement memory statement,
+            WhirProof memory whirProof,
+            bytes memory transcript
+        ) = loadProof();
+
+        bytes memory plonky2Bytes = abi.encode(config, statement, whirProof, transcript);
+        bytes32 proofHash   = keccak256(plonky2Bytes);
+        uint32  proofLength = uint32(plonky2Bytes.length);
+        bytes32 stateRoot   = keccak256("bad_state");
+
+        IntmaxRollup.ValidityPublicInputs memory vpis = _defaultValidityPIs(stateRoot);
+        // Deliberately do NOT patch statement — evaluations[0] won't match PI hash
+        // This simulates an invalid proof in the blob
+
+        _mockKZGBlob();
+        vm.prank(submitter);
+        rollup.submit(proofHash, proofLength, stateRoot);
+
+        _mockBLSPrecompiles();
+
+        // fraudProof returns true: blob binding OK but proof invalid → fraud confirmed
+        bool fraudConfirmed = rollup.fraudProof(
+            0, _kzgBlobHash, stateRoot, plonky2Bytes, vpis,
+            config, statement, whirProof, transcript,
+            _dummyKZG(plonky2Bytes.length),
+            _dummyGroth16()
+        );
+        assertTrue(fraudConfirmed, "Fraud should be confirmed for invalid proof");
+    }
+
+    function test_fraudProof_validProof_noFraud() public {
+        (
+            WhirConfig memory config,
+            Statement memory statement,
+            WhirProof memory whirProof,
+            bytes memory transcript
+        ) = loadProof();
+
+        bytes memory plonky2Bytes = abi.encode(config, statement, whirProof, transcript);
+        bytes32 proofHash   = keccak256(plonky2Bytes);
+        uint32  proofLength = uint32(plonky2Bytes.length);
+        bytes32 stateRoot   = keccak256("valid_state");
+
+        IntmaxRollup.ValidityPublicInputs memory vpis = _defaultValidityPIs(stateRoot);
+        _patchStatementWithPIHash(statement, vpis);
+
+        _mockKZGBlob();
+        vm.prank(submitter);
+        rollup.submit(proofHash, proofLength, stateRoot);
+
+        _mockBLSPrecompiles();
+        _mockWhirVerifierTrue();
+        _mockGroth16Pairing();
+
+        // fraudProof returns false: proof is actually valid → no fraud
+        bool fraudConfirmed = rollup.fraudProof(
+            0, _kzgBlobHash, stateRoot, plonky2Bytes, vpis,
+            config, statement, whirProof, transcript,
+            _dummyKZG(plonky2Bytes.length),
+            _dummyGroth16()
+        );
+        assertFalse(fraudConfirmed, "No fraud for valid proof");
+    }
+
+    function test_fraudProof_bindingFails_rejected() public {
+        (
+            WhirConfig memory config,
+            Statement memory statement,
+            WhirProof memory whirProof,
+            bytes memory transcript
+        ) = loadProof();
+
+        bytes memory plonky2Bytes = abi.encode(config, statement, whirProof, transcript);
+        bytes32 stateRoot = keccak256("state");
+
+        IntmaxRollup.ValidityPublicInputs memory vpis;
+
+        // Submit with DIFFERENT proof hash — blob binding will fail
+        _mockKZGBlob();
+        vm.prank(submitter);
+        rollup.submit(keccak256("wrong"), uint32(999), stateRoot);
+
+        _mockBLSPrecompiles();
+
+        // fraudProof returns false: binding failed → can't confirm fraud
+        bool fraudConfirmed = rollup.fraudProof(
+            0, _kzgBlobHash, stateRoot, plonky2Bytes, vpis,
+            config, statement, whirProof, transcript,
+            _dummyKZG(plonky2Bytes.length),
+            _dummyGroth16()
+        );
+        assertFalse(fraudConfirmed, "Can't confirm fraud if binding fails");
+    }
+
+    // -----------------------------------------------------------------------
     // Gas measurement
     // -----------------------------------------------------------------------
 

@@ -466,7 +466,8 @@ contract IntmaxRollup {
         bool valid = _fullVerify(
             submissionId, blobVersionedHash, stateRoot,
             plonky2ProofBytes, validityPIs,
-            config, statement, whirProof, transcript, kzg, groth16
+            config, statement, whirProof, transcript, kzg, groth16,
+            true  // expectedResult = true → finalize mode
         );
         if (!valid) return false;
 
@@ -478,9 +479,22 @@ contract IntmaxRollup {
     }
 
     // -----------------------------------------------------------------------
-    // fraudProof()  —  full verification (returns bool)
+    // fraudProof()  —  prove a submission contains an invalid proof
     // -----------------------------------------------------------------------
 
+    /// @notice Prove that a submission's proof is INVALID.
+    ///
+    ///   The fraud prover provides:
+    ///     - The actual proof bytes from the blob (same as finalize)
+    ///     - KZG proof binding the bytes to the blob commitment
+    ///     - WHIR + Groth16 parameters (which will FAIL verification)
+    ///
+    ///   Returns true if fraud is confirmed:
+    ///     1. Blob binding (KZG) PASSES — the bytes really are in the blob
+    ///     2. Commitment check PASSES — the blob was submitted on-chain
+    ///     3. Proof verification FAILS — WHIR or Groth16 rejects the proof
+    ///
+    ///   This means: "the data committed on-chain does NOT contain a valid proof."
     function fraudProof(
         uint256 submissionId,
         bytes32 blobVersionedHash,
@@ -493,11 +507,12 @@ contract IntmaxRollup {
         bytes calldata transcript,
         KZGProof calldata kzg,
         Groth16Params memory groth16
-    ) external view returns (bool) {
+    ) external view returns (bool fraudConfirmed) {
         return _fullVerify(
             submissionId, blobVersionedHash, stateRoot,
             plonky2ProofBytes, validityPIs,
-            config, statement, whirProof, transcript, kzg, groth16
+            config, statement, whirProof, transcript, kzg, groth16,
+            false  // expectedResult = false → fraud proof mode
         );
     }
 
@@ -521,12 +536,25 @@ contract IntmaxRollup {
     // Internal — Full verification pipeline
     // -----------------------------------------------------------------------
 
-    /// @dev Full verification:
-    ///   1. Commitment check (blobHash + proofHash + proofLength + stateRoot)
-    ///   2. Public input binding to on-chain state
-    ///   3. Plonky2 public input hash == WHIR statement.evaluations[0]
-    ///   4. KZG blob binding
-    ///   5. WHIR proof verification
+    /// @dev Full verification pipeline with expected-result mode.
+    ///
+    ///   When `expectedResult = true` (finalize mode):
+    ///     All 6 steps must pass → returns true.
+    ///
+    ///   When `expectedResult = false` (fraud proof mode):
+    ///     Steps 1 + 4 (commitment + KZG blob binding) MUST pass —
+    ///     they prove the data really was submitted on-chain in the blob.
+    ///     Steps 2/3/5/6 (state binding + WHIR + Groth16) must FAIL at least once —
+    ///     this proves the submitted proof is invalid.
+    ///     Returns true if fraud is confirmed (binding OK but proof invalid).
+    ///
+    ///   Steps:
+    ///     1. Commitment check (blobHash + proofHash + proofLength + stateRoot)
+    ///     2. Public input binding to on-chain state
+    ///     3. Plonky2 public input hash == WHIR statement.evaluations[0]
+    ///     4. KZG blob binding
+    ///     5. WHIR proof verification
+    ///     6. Groth16 verification
     function _fullVerify(
         uint256 submissionId,
         bytes32 blobVersionedHash,
@@ -538,9 +566,12 @@ contract IntmaxRollup {
         WhirProof calldata whirProof,
         bytes calldata transcript,
         KZGProof calldata kzg,
-        Groth16Params memory groth16
+        Groth16Params memory groth16,
+        bool expectedResult
     ) internal view returns (bool) {
-        // 1. Commitment check
+        // ── Binding checks (must ALWAYS pass in both modes) ──────────────
+
+        // 1. Commitment check — the calldata matches the on-chain submission
         {
             uint32 proofLength = uint32(plonky2ProofBytes.length);
             bytes32 proofHash = keccak256(plonky2ProofBytes);
@@ -548,50 +579,69 @@ contract IntmaxRollup {
                 abi.encodePacked(blobVersionedHash, proofHash, proofLength, stateRoot)
             );
             if (commitment != _submissions[submissionId].commitment) {
-                return false;
+                return false;  // binding failed → reject in both modes
             }
         }
 
-        // 2. Public input binding: ValidityPublicInputs ↔ on-chain state
-        if (validityPIs.initialExtCommitment != latestFinalizedStateRoot) {
-            return false;
-        }
-        if (validityPIs.initialBlockChain != blockHashChainAt[validityPIs.initialBlockNumber]) {
-            return false;
-        }
-        if (validityPIs.finalBlockChain != blockHashChainAt[validityPIs.finalBlockNumber]) {
-            return false;
-        }
-        if (validityPIs.finalExtCommitment != stateRoot) {
-            return false;
-        }
-
-        // 3. Plonky2 public input hash must appear in WHIR statement.evaluations[0]
-        bytes32 plonky2PublicInput = _computeValidityPIHash(validityPIs);
-        if (statement.evaluations.length == 0 ||
-            bytes32(BN254.ScalarField.unwrap(statement.evaluations[0])) != plonky2PublicInput) {
-            return false;
-        }
-
-        // 4. KZG blob binding
+        // 4. KZG blob binding — the calldata bytes match the blob content
         try this._verifyKZG(blobVersionedHash, kzg, plonky2ProofBytes) {
         } catch {
-            return false;
+            return false;  // blob binding failed → reject in both modes
+        }
+
+        // ── Proof validity checks (expected to pass for finalize, fail for fraud) ──
+
+        bool proofValid = true;
+
+        // 2. Public input binding: ValidityPublicInputs ↔ on-chain state
+        if (validityPIs.initialExtCommitment != latestFinalizedStateRoot) {
+            proofValid = false;
+        }
+        if (proofValid && validityPIs.initialBlockChain != blockHashChainAt[validityPIs.initialBlockNumber]) {
+            proofValid = false;
+        }
+        if (proofValid && validityPIs.finalBlockChain != blockHashChainAt[validityPIs.finalBlockNumber]) {
+            proofValid = false;
+        }
+        if (proofValid && validityPIs.finalExtCommitment != stateRoot) {
+            proofValid = false;
+        }
+
+        // 3. Plonky2 PI hash == WHIR statement.evaluations[0]
+        if (proofValid) {
+            bytes32 plonky2PublicInput = _computeValidityPIHash(validityPIs);
+            if (statement.evaluations.length == 0 ||
+                bytes32(BN254.ScalarField.unwrap(statement.evaluations[0])) != plonky2PublicInput) {
+                proofValid = false;
+            }
         }
 
         // 5. WHIR verification
-        try whirVerifier.verify(config, statement, whirProof, transcript) returns (bool valid) {
-            if (!valid) return false;
-        } catch {
-            return false;
+        if (proofValid) {
+            try whirVerifier.verify(config, statement, whirProof, transcript) returns (bool valid) {
+                if (!valid) proofValid = false;
+            } catch {
+                proofValid = false;
+            }
         }
 
-        // 6. Groth16 verification (in parallel with WHIR — both must pass)
-        if (!Groth16Verifier.verify(groth16.vk, groth16.proof, groth16.pubInputs)) {
-            return false;
+        // 6. Groth16 verification
+        if (proofValid) {
+            if (!Groth16Verifier.verify(groth16.vk, groth16.proof, groth16.pubInputs)) {
+                proofValid = false;
+            }
         }
 
-        return true;
+        // ── Result interpretation ────────────────────────────────────────
+        //
+        //   expectedResult=true  (finalize): return proofValid
+        //     → true  if proof is valid   (accept state transition)
+        //     → false if proof is invalid (reject finalization)
+        //
+        //   expectedResult=false (fraud proof): return !proofValid
+        //     → true  if proof is invalid (fraud confirmed!)
+        //     → false if proof is valid   (no fraud — proof is actually fine)
+        return proofValid == expectedResult;
     }
 
     /// @dev External helper so _fullVerify can try/catch on KZG verification.
