@@ -9,7 +9,7 @@ use plonky2::{
         config::{AlgebraicHasher, GenericConfig},
         proof::{ProofWithPublicInputs, ProofWithPublicInputsTarget},
     },
-    recursion::dummy_circuit::{dummy_circuit, dummy_circuit_async, dummy_proof},
+    recursion::dummy_circuit::{dummy_circuit, dummy_circuit_async, dummy_proof, dummy_proof_async},
 };
 
 #[derive(Debug, Clone)]
@@ -27,17 +27,18 @@ where
     C: GenericConfig<D, F = F> + 'static,
     <C as GenericConfig<D>>::Hasher: AlgebraicHasher<F>,
 {
-    fn from_circuit_data(data: CircuitData<F, C, D>) -> Self {
+    pub fn new(common: &CommonCircuitData<F, D>) -> Self {
+        let data = dummy_circuit::<F, C, D>(common);
         let proof = dummy_proof(&data, vec![].into_iter().enumerate().collect()).unwrap();
         Self { proof }
     }
 
-    pub fn new(common: &CommonCircuitData<F, D>) -> Self {
-        Self::from_circuit_data(dummy_circuit::<F, C, D>(common))
-    }
-
     pub async fn new_async(common: &CommonCircuitData<F, D>) -> Self {
-        Self::from_circuit_data(dummy_circuit_async::<F, C, D>(common).await)
+        let data = dummy_circuit_async::<F, C, D>(common).await;
+        let proof = dummy_proof_async(&data, vec![].into_iter().enumerate().collect())
+            .await
+            .unwrap();
+        Self { proof }
     }
 }
 
