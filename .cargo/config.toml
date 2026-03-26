@@ -1,12 +1,13 @@
 [target.wasm32-unknown-unknown]
 rustflags = [
-    "-C", "target-feature=+atomics,+bulk-memory",
-    "-C", "target-feature=+simd128",
-    "-C", "link-arg=--max-memory=4294967296",
-    "-C", "link-args=-z stack-size=4194304",
-    '--cfg', 'getrandom_backend="wasm_js"'
+    "-C", "target-feature=+atomics,+bulk-memory",  # Required for multi-threading (SharedArrayBuffer)
+    "-C", "target-feature=+simd128",                # SIMD for parallel math on 128-bit vectors
+    "-C", "link-arg=--max-memory=4294967296",        # 4GB max WASM linear memory (wasm32 hard limit)
+    "-C", "link-args=-z stack-size=16777216",         # 16MB stack (default 1MB is too small for deep recursion)
+    '--cfg', 'getrandom_backend="wasm_js"'            # Use JS random source for WASM
 ]
 
 [unstable]
-build-std = ["panic_abort", "std"]
-panic-abort-tests = true
+# Recompile std from source with atomics support (prebuilt std lacks it).
+# "panic_abort" is the crate name, not a setting — actual panic behavior is set in Cargo.toml.
+build-std = ["std", "panic_abort"]

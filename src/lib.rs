@@ -258,11 +258,20 @@ mod wasm_entry {
             WithdrawalProcessor::<F, C, D>::new_async(&single_withdrawal_circuit.data.verifier_data()).await;
         log_duration("Withdrawal processor construction", (js_sys::Date::now() - t) / 1000.0);
 
+        let update_public_state = withdrawal_witness.update_public_state.clone();
+        drop(withdrawal_witness);
+
         let step_witness = WithdrawalStepWitness::<F, C, D> {
             prev_withdrawal_chain_proof: None,
             single_withdrawal_proof: proof,
-            update_public_state: withdrawal_witness.update_public_state.clone(),
+            update_public_state,
         };
+
+        // Drop data no longer needed before proving
+        drop(single_withdrawal_circuit);
+        drop(balance_processor);
+        drop(balance_witness_generator);
+        drop(spend_circuit);
 
         log("Proving withdrawal chain step...");
         let t = js_sys::Date::now();
@@ -270,11 +279,13 @@ mod wasm_entry {
             .prove_step_async(&step_witness)
             .await
             .map_err(|e| JsValue::from_str(&format!("chain step prove: {e}")))?;
+        drop(step_witness);
         log_duration("Withdrawal chain step", (js_sys::Date::now() - t) / 1000.0);
 
         let ext_public_state = block_witness_generator
             .borrow()
             .current_extended_public_state();
+        drop(block_witness_generator);
         let mut final_rng = StdRng::seed_from_u64(999);
 
         log("Proving withdrawal chain final...");
@@ -283,10 +294,12 @@ mod wasm_entry {
             .prove_final_async(&chain_proof, Address::rand(&mut final_rng), &ext_public_state)
             .await
             .map_err(|e| JsValue::from_str(&format!("chain final prove: {e}")))?;
+        drop(chain_proof);
         log_duration("Withdrawal chain final", (js_sys::Date::now() - t) / 1000.0);
 
-        withdrawal_processor
-            .withdrawal_vd()
+        let withdrawal_vd = withdrawal_processor.withdrawal_vd().clone();
+        drop(withdrawal_processor);
+        withdrawal_vd
             .verify(final_proof)
             .map_err(|e| JsValue::from_str(&format!("final verify: {e}")))?;
 

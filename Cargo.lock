@@ -914,7 +914,7 @@ dependencies = [
  "sphincsplus-circuits",
  "sphincsplus-params",
  "sphincsplus-poseidon",
- "starky 0.4.0 (git+https://github.com/InternetMaximalism/Lita-Plonky2.git?branch=wasm-zkp3)",
+ "starky",
  "thiserror",
  "wasm-bindgen",
  "wasm-bindgen-futures",
@@ -1260,7 +1260,7 @@ checksum = "a89322df9ebe1c1578d689c92318e070967d1042b512afbe49518723f4e6d5cd"
 [[package]]
 name = "plonky2"
 version = "0.2.2"
-source = "git+https://github.com/InternetMaximalism/Lita-Plonky2.git?branch=wasm-zkp3#25502809cf203c59b90e2dec03180ac70fb1b597"
+source = "git+https://github.com/InternetMaximalism/Lita-Plonky2.git?branch=wasm-zkp3#1b71318951d426ee357e10c2636b686e8e693ef4"
 dependencies = [
  "ahash",
  "anyhow",
@@ -1280,8 +1280,8 @@ dependencies = [
  "num",
  "once_cell",
  "plonky2_field",
- "plonky2_maybe_rayon 0.2.0 (git+https://github.com/InternetMaximalism/Lita-Plonky2.git?branch=wasm-zkp3)",
- "plonky2_util 0.2.0 (git+https://github.com/InternetMaximalism/Lita-Plonky2.git?branch=wasm-zkp3)",
+ "plonky2_maybe_rayon",
+ "plonky2_util",
  "pollster",
  "rand",
  "serde",
@@ -1313,18 +1313,18 @@ dependencies = [
  "plonky2",
  "plonky2_u32",
  "rand",
- "starky 0.4.0 (git+https://github.com/lita-xyz/Plonky2.git?branch=wasm)",
+ "starky",
 ]
 
 [[package]]
 name = "plonky2_field"
 version = "0.2.2"
-source = "git+https://github.com/InternetMaximalism/Lita-Plonky2.git?branch=wasm-zkp3#25502809cf203c59b90e2dec03180ac70fb1b597"
+source = "git+https://github.com/InternetMaximalism/Lita-Plonky2.git?branch=wasm-zkp3#1b71318951d426ee357e10c2636b686e8e693ef4"
 dependencies = [
  "anyhow",
  "itertools 0.11.0",
  "num",
- "plonky2_util 0.2.0 (git+https://github.com/InternetMaximalism/Lita-Plonky2.git?branch=wasm-zkp3)",
+ "plonky2_util",
  "rand",
  "serde",
  "static_assertions",
@@ -1345,19 +1345,14 @@ dependencies = [
  "log",
  "plonky2",
  "rand",
- "starky 0.4.0 (git+https://github.com/lita-xyz/Plonky2.git?branch=wasm)",
+ "starky",
  "tiny-keccak",
 ]
 
 [[package]]
 name = "plonky2_maybe_rayon"
 version = "0.2.0"
-source = "git+https://github.com/lita-xyz/Plonky2.git?branch=wasm#3aeba02fb948a0adba020dbf128549f893d3935f"
-
-[[package]]
-name = "plonky2_maybe_rayon"
-version = "0.2.0"
-source = "git+https://github.com/InternetMaximalism/Lita-Plonky2.git?branch=wasm-zkp3#25502809cf203c59b90e2dec03180ac70fb1b597"
+source = "git+https://github.com/InternetMaximalism/Lita-Plonky2.git?branch=wasm-zkp3#1b71318951d426ee357e10c2636b686e8e693ef4"
 dependencies = [
  "rayon",
 ]
@@ -1376,12 +1371,7 @@ dependencies = [
 [[package]]
 name = "plonky2_util"
 version = "0.2.0"
-source = "git+https://github.com/lita-xyz/Plonky2.git?branch=wasm#3aeba02fb948a0adba020dbf128549f893d3935f"
-
-[[package]]
-name = "plonky2_util"
-version = "0.2.0"
-source = "git+https://github.com/InternetMaximalism/Lita-Plonky2.git?branch=wasm-zkp3#25502809cf203c59b90e2dec03180ac70fb1b597"
+source = "git+https://github.com/InternetMaximalism/Lita-Plonky2.git?branch=wasm-zkp3#1b71318951d426ee357e10c2636b686e8e693ef4"
 
 [[package]]
 name = "pollster"
@@ -1713,7 +1703,7 @@ dependencies = [
 [[package]]
 name = "starky"
 version = "0.4.0"
-source = "git+https://github.com/lita-xyz/Plonky2.git?branch=wasm#3aeba02fb948a0adba020dbf128549f893d3935f"
+source = "git+https://github.com/InternetMaximalism/Lita-Plonky2.git?branch=wasm-zkp3#1b71318951d426ee357e10c2636b686e8e693ef4"
 dependencies = [
  "ahash",
  "anyhow",
@@ -1722,24 +1712,8 @@ dependencies = [
  "log",
  "num-bigint 0.4.6",
  "plonky2",
- "plonky2_maybe_rayon 0.2.0 (git+https://github.com/lita-xyz/Plonky2.git?branch=wasm)",
- "plonky2_util 0.2.0 (git+https://github.com/lita-xyz/Plonky2.git?branch=wasm)",
-]
-
-[[package]]
-name = "starky"
-version = "0.4.0"
-source = "git+https://github.com/InternetMaximalism/Lita-Plonky2.git?branch=wasm-zkp3#25502809cf203c59b90e2dec03180ac70fb1b597"
-dependencies = [
- "ahash",
- "anyhow",
- "hashbrown 0.14.5",
- "itertools 0.11.0",
- "log",
- "num-bigint 0.4.6",
- "plonky2",
- "plonky2_maybe_rayon 0.2.0 (git+https://github.com/InternetMaximalism/Lita-Plonky2.git?branch=wasm-zkp3)",
- "plonky2_util 0.2.0 (git+https://github.com/InternetMaximalism/Lita-Plonky2.git?branch=wasm-zkp3)",
+ "plonky2_maybe_rayon",
+ "plonky2_util",
 ]
 
 [[package]]
