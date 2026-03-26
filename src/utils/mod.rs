@@ -18,6 +18,12 @@ pub mod wrapper;
 #[cfg(feature = "whir")]
 pub mod whir_wrapper;
 
+/// WHIR-based Plonky2 prover — replaces FRI with WHIR as PCS.
+/// This is the cryptographically correct WHIR verification path.
+/// Requires the `whir` cargo feature.
+#[cfg(feature = "whir")]
+pub mod whir_plonky2_prover;
+
 /// Groth16 wrapper for Plonky2 proofs via gnark subprocess.
 /// Not available on WASM targets.
 #[cfg(not(target_arch = "wasm32"))]
