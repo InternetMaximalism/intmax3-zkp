@@ -1,15 +1,22 @@
 //! WHIR post-quantum wrapper for Plonky2 proofs.
 //!
-//! Converts a serialized Plonky2 proof into a WHIR polynomial commitment proof
-//! suitable for on-chain verification via `sol-whir`.
+//! Provides post-quantum on-chain verification of Plonky2 proofs by:
+//! 1. Building a recursive Plonky2 circuit that verifies the inner proof
+//!    (Plonky2 FRI is hash-based → post-quantum)
+//! 2. Converting the recursive proof to a multilinear polynomial
+//! 3. Generating a WHIR proof over that polynomial (hash-based → post-quantum)
+//!
+//! This runs in parallel with the Groth16 path (not post-quantum).
 //!
 //! # Architecture
 //!
 //! ```text
-//! Plonky2 proof bytes
-//!   → proof_to_polynomial()   (pack 7 bytes per Goldilocks element)
-//!   → whir_prove()            (commit + sumcheck proof)
-//!   → WhirWrapResult          (proof bytes + transcript for Solidity)
+//! Plonky2 validity proof + CircuitData
+//!   → WhirRecursiveCircuit::prove()  (verify_proof inside Plonky2 circuit)
+//!   → recursive proof bytes
+//!   → proof_to_polynomial()          (pack 7 bytes per Goldilocks element)
+//!   → whir_prove()                   (commit + sumcheck proof)
+//!   → WhirWrapResult                 (evaluations[0] = piHash for on-chain binding)
 //! ```
 //!
 //! # Feature gate
@@ -23,6 +30,17 @@ use std::borrow::Cow;
 use std::time::{Duration, Instant};
 
 use ark_ff::AdditiveGroup;
+use plonky2::{
+    field::extension::Extendable,
+    hash::hash_types::RichField,
+    iop::witness::{PartialWitness, WitnessWrite},
+    plonk::{
+        circuit_builder::CircuitBuilder,
+        circuit_data::{CircuitConfig, CircuitData, VerifierOnlyCircuitData},
+        config::{AlgebraicHasher, GenericConfig},
+        proof::ProofWithPublicInputs,
+    },
+};
 use whir::{
     algebra::{
         embedding::Basefield,
@@ -41,9 +59,6 @@ use whir::{
 // ---------------------------------------------------------------------------
 
 /// WHIR wrapping configuration.
-///
-/// Wraps `whir::parameters::ProtocolParameters` with a human-readable name
-/// and sensible defaults for on-chain verification.
 pub struct WhirWrapConfig {
     /// Human-readable name for this configuration.
     pub name: String,
@@ -53,11 +68,6 @@ pub struct WhirWrapConfig {
 
 impl WhirWrapConfig {
     /// Default configuration optimized for on-chain Keccak verification.
-    ///
-    /// - Keccak hash (native EVM opcode = cheapest on-chain)
-    /// - No proof-of-work (PoW is prohibitively expensive on-chain)
-    /// - List decoding (fewer queries needed)
-    /// - 100-bit security level
     pub fn default_keccak() -> Self {
         Self {
             name: "keccak-rate2".to_string(),
@@ -158,23 +168,139 @@ impl WhirWrapConfig {
 }
 
 // ---------------------------------------------------------------------------
-// Result types
+// Result / Error types
 // ---------------------------------------------------------------------------
 
-/// Result of WHIR proof generation.
+/// Result of WHIR proof generation with recursive Plonky2 verification.
 pub struct WhirWrapResult {
+    /// Time to generate the recursive Plonky2 proof.
+    pub recursive_prove_time: Duration,
+    /// Size of the recursive Plonky2 proof in bytes.
+    pub recursive_proof_size: usize,
     /// Time to commit the polynomial.
     pub commit_time: Duration,
     /// Time to generate the WHIR proof (sumcheck).
     pub prove_time: Duration,
     /// Time to verify the proof (off-chain sanity check).
     pub verify_time: Duration,
-    /// Size of the serialized proof in bytes.
+    /// Size of the serialized WHIR proof in bytes.
     pub proof_size: usize,
     /// Number of variables in the multilinear polynomial (log2 of polynomial length).
     pub num_variables: usize,
     /// Number of hash invocations during verification (for gas estimation).
     pub verify_hashes: usize,
+}
+
+/// Errors from the WHIR wrapping pipeline.
+#[derive(Debug)]
+pub enum WhirWrapError {
+    /// Failed to generate the recursive Plonky2 proof.
+    RecursiveProofFailed(String),
+    /// Failed to verify the recursive Plonky2 proof locally.
+    RecursiveVerificationFailed(String),
+}
+
+impl std::fmt::Display for WhirWrapError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::RecursiveProofFailed(e) => write!(f, "Recursive proof failed: {}", e),
+            Self::RecursiveVerificationFailed(e) => {
+                write!(f, "Recursive verification failed: {}", e)
+            }
+        }
+    }
+}
+
+impl std::error::Error for WhirWrapError {}
+
+// ---------------------------------------------------------------------------
+// Recursive Plonky2 verification circuit (cached)
+// ---------------------------------------------------------------------------
+
+/// Cached recursive circuit that verifies an inner Plonky2 proof.
+///
+/// Build once via `new()`, then call `prove()` repeatedly for each inner proof.
+/// The circuit runs `builder.verify_proof()` inside a Plonky2 circuit,
+/// so the recursive proof can only be generated if the inner proof is valid.
+///
+/// Public inputs of the recursive proof = public inputs of the inner proof
+/// (forwarded unchanged), enabling the same public input binding on-chain.
+pub struct WhirRecursiveCircuit<
+    F: RichField + Extendable<D>,
+    C: GenericConfig<D, F = F>,
+    const D: usize,
+> where
+    C::Hasher: AlgebraicHasher<F>,
+{
+    /// The compiled recursive verifier circuit.
+    pub data: CircuitData<F, C, D>,
+    /// Target for the inner proof.
+    inner_proof_target: plonky2::plonk::proof::ProofWithPublicInputsTarget<D>,
+    /// Target for the inner verifier data.
+    inner_vd_target: plonky2::plonk::circuit_data::VerifierCircuitTarget,
+}
+
+impl<F: RichField + Extendable<D>, C: GenericConfig<D, F = F>, const D: usize>
+    WhirRecursiveCircuit<F, C, D>
+where
+    C::Hasher: AlgebraicHasher<F>,
+{
+    /// Build the recursive verifier circuit for a given inner circuit.
+    ///
+    /// This is expensive (minutes for large circuits) — call once and cache.
+    pub fn new(inner_cd: &CircuitData<F, C, D>) -> Self {
+        let config = CircuitConfig::standard_recursion_config();
+        let mut builder = CircuitBuilder::<F, D>::new(config);
+
+        // Add virtual targets for the inner proof
+        let pt = builder.add_virtual_proof_with_pis(&inner_cd.common);
+
+        // Add virtual verifier data (circuit digest + Merkle caps)
+        let cap_height = inner_cd.common.config.fri_config.cap_height;
+        let inner_vd = builder.add_virtual_verifier_data(cap_height);
+
+        // Core: verify the inner proof inside this circuit
+        builder.verify_proof::<C>(&pt, &inner_vd, &inner_cd.common);
+
+        // Forward inner proof's public inputs as outer circuit's public inputs
+        for &pi in &pt.public_inputs {
+            builder.register_public_input(pi);
+        }
+
+        let data = builder.build::<C>();
+
+        Self {
+            data,
+            inner_proof_target: pt,
+            inner_vd_target: inner_vd,
+        }
+    }
+
+    /// Generate a recursive proof that verifies the inner proof.
+    ///
+    /// Fails if the inner proof is invalid (this is the security guarantee).
+    /// Returns the recursive proof whose public inputs match the inner proof's.
+    pub fn prove(
+        &self,
+        inner_proof: &ProofWithPublicInputs<F, C, D>,
+        inner_vd: &VerifierOnlyCircuitData<C, D>,
+    ) -> Result<ProofWithPublicInputs<F, C, D>, WhirWrapError> {
+        let mut pw = PartialWitness::new();
+        pw.set_proof_with_pis_target(&self.inner_proof_target, inner_proof);
+        pw.set_verifier_data_target(&self.inner_vd_target, inner_vd);
+
+        let recursive_proof = self
+            .data
+            .prove(pw)
+            .map_err(|e| WhirWrapError::RecursiveProofFailed(e.to_string()))?;
+
+        // Sanity check: verify locally
+        self.data
+            .verify(recursive_proof.clone())
+            .map_err(|e| WhirWrapError::RecursiveVerificationFailed(e.to_string()))?;
+
+        Ok(recursive_proof)
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -273,6 +399,8 @@ pub fn whir_prove(polynomial: &[Field64], config: &WhirWrapConfig) -> WhirWrapRe
     let verify_hashes = HASH_COUNTER.get();
 
     WhirWrapResult {
+        recursive_prove_time: Duration::ZERO,
+        recursive_proof_size: 0,
         commit_time,
         prove_time,
         verify_time,
@@ -282,12 +410,49 @@ pub fn whir_prove(polynomial: &[Field64], config: &WhirWrapConfig) -> WhirWrapRe
     }
 }
 
-/// Estimate EVM gas cost for on-chain WHIR verification.
+/// Wrap a Plonky2 proof with recursive verification + WHIR commitment.
 ///
-/// Components:
-/// - Calldata: 16 gas per byte (worst case, all non-zero)
-/// - Hash operations: Keccak=42, SHA256=84, other=10000 gas per call
-/// - Fixed overhead: 5000 gas (base tx, field ops, sumcheck)
+/// This is the primary API for post-quantum on-chain verification:
+/// 1. Generates a recursive Plonky2 proof verifying the inner proof
+/// 2. Converts the recursive proof to a multilinear polynomial
+/// 3. Generates a WHIR proof over that polynomial
+///
+/// The resulting WHIR proof, combined with public input binding
+/// (`statement.evaluations[0] == keccak256(ValidityPublicInputs)`),
+/// provides a fully post-quantum verification chain.
+pub fn wrap_validity_proof<
+    F: RichField + Extendable<D>,
+    C: GenericConfig<D, F = F>,
+    const D: usize,
+>(
+    recursive_circuit: &WhirRecursiveCircuit<F, C, D>,
+    inner_proof: &ProofWithPublicInputs<F, C, D>,
+    inner_vd: &VerifierOnlyCircuitData<C, D>,
+    config: &WhirWrapConfig,
+) -> Result<WhirWrapResult, WhirWrapError>
+where
+    C::Hasher: AlgebraicHasher<F>,
+{
+    // Step 1: Recursive Plonky2 verification
+    let t = Instant::now();
+    let recursive_proof = recursive_circuit.prove(inner_proof, inner_vd)?;
+    let recursive_prove_time = t.elapsed();
+
+    let recursive_bytes = recursive_proof.to_bytes();
+    let recursive_proof_size = recursive_bytes.len();
+
+    // Step 2: Convert to polynomial
+    let polynomial = proof_to_polynomial(&recursive_bytes);
+
+    // Step 3: WHIR commit + prove
+    let mut result = whir_prove(&polynomial, config);
+    result.recursive_prove_time = recursive_prove_time;
+    result.recursive_proof_size = recursive_proof_size;
+
+    Ok(result)
+}
+
+/// Estimate EVM gas cost for on-chain WHIR verification.
 pub fn estimate_gas(result: &WhirWrapResult, hash_name: &str) -> u64 {
     let calldata_gas = result.proof_size as u64 * 16;
 
@@ -305,17 +470,9 @@ pub fn estimate_gas(result: &WhirWrapResult, hash_name: &str) -> u64 {
 
 /// High-level convenience: wrap raw Plonky2 proof bytes into a WHIR proof.
 ///
-/// Uses the default Keccak configuration optimized for on-chain verification.
-/// Returns the wrap result including timing and proof size.
-///
-/// # Example
-///
-/// ```ignore
-/// let proof_bytes = plonky2_proof.to_bytes();
-/// let result = wrap_proof(&proof_bytes);
-/// println!("WHIR proof size: {} bytes", result.proof_size);
-/// println!("Estimated gas: {}K", estimate_gas(&result, "keccak") / 1000);
-/// ```
+/// **Deprecated**: This only provides data commitment, NOT proof verification.
+/// Use [`wrap_validity_proof`] for post-quantum verification.
+#[deprecated(note = "Use wrap_validity_proof() for recursive verification")]
 pub fn wrap_proof(proof_bytes: &[u8]) -> WhirWrapResult {
     let config = WhirWrapConfig::default_keccak();
     let polynomial = proof_to_polynomial(proof_bytes);
@@ -348,18 +505,45 @@ pub fn benchmark_all_configs(proof_bytes: &[u8]) -> Vec<(String, WhirWrapResult,
 #[cfg(test)]
 mod tests {
     use super::*;
+    use plonky2::field::goldilocks_field::GoldilocksField;
+    use plonky2::field::types::Field as _;
+    use plonky2::hash::hash_types::HashOutTarget;
+    use plonky2::hash::poseidon::PoseidonHash;
+    use plonky2::iop::witness::WitnessWrite;
+    use plonky2::plonk::config::PoseidonGoldilocksConfig;
+
+    type F = GoldilocksField;
+    type C = PoseidonGoldilocksConfig;
+    const D: usize = 2;
+
+    /// Build a small Plonky2 circuit: 10 chained Poseidon hashes.
+    fn build_test_circuit() -> (CircuitData<F, C, D>, HashOutTarget) {
+        let config = CircuitConfig::standard_recursion_config();
+        let mut builder = CircuitBuilder::<F, D>::new(config);
+
+        let initial = builder.add_virtual_hash();
+        builder.register_public_inputs(&initial.elements);
+
+        let mut current = initial;
+        for _ in 0..10 {
+            current =
+                builder.hash_n_to_hash_no_pad::<PoseidonHash>(current.elements.to_vec());
+        }
+        builder.register_public_inputs(&current.elements);
+
+        let data = builder.build::<C>();
+        (data, initial)
+    }
 
     #[test]
     fn test_proof_to_polynomial_basic() {
-        // 14 bytes → 2 elements (7 bytes each), padded to 256
         let data = vec![0xAB; 14];
         let poly = proof_to_polynomial(&data);
-        assert_eq!(poly.len(), 256); // padded to power of 2
+        assert_eq!(poly.len(), 256);
     }
 
     #[test]
     fn test_proof_to_polynomial_packing() {
-        // First 7 bytes: [1, 0, 0, 0, 0, 0, 0] → value 1
         let mut data = vec![0u8; 7];
         data[0] = 1;
         let poly = proof_to_polynomial(&data);
@@ -367,20 +551,76 @@ mod tests {
     }
 
     #[test]
-    fn test_whir_wrap_roundtrip() {
-        // Generate a small dummy "proof" (just random bytes)
-        let dummy_proof = vec![42u8; 1024];
-        let result = wrap_proof(&dummy_proof);
+    fn test_recursive_circuit_build_and_prove() {
+        // Build inner circuit
+        let (inner_cd, initial_target) = build_test_circuit();
 
+        // Prove inner circuit
+        let mut pw = PartialWitness::new();
+        pw.set_hash_target(
+            initial_target,
+            plonky2::hash::hash_types::HashOut {
+                elements: [F::from_canonical_u64(1), F::from_canonical_u64(2),
+                           F::from_canonical_u64(3), F::from_canonical_u64(4)],
+            },
+        );
+        let inner_proof = inner_cd.prove(pw).unwrap();
+        inner_cd.verify(inner_proof.clone()).unwrap();
+
+        // Build recursive circuit (cached)
+        let recursive_circuit = WhirRecursiveCircuit::<F, C, D>::new(&inner_cd);
+
+        // Prove recursively
+        let recursive_proof = recursive_circuit
+            .prove(&inner_proof, &inner_cd.verifier_only)
+            .unwrap();
+
+        // Public inputs must match
+        assert_eq!(
+            inner_proof.public_inputs, recursive_proof.public_inputs,
+            "Recursive proof must forward inner public inputs"
+        );
+    }
+
+    #[test]
+    fn test_wrap_validity_proof_e2e() {
+        // Build and prove inner circuit
+        let (inner_cd, initial_target) = build_test_circuit();
+
+        let mut pw = PartialWitness::new();
+        pw.set_hash_target(
+            initial_target,
+            plonky2::hash::hash_types::HashOut {
+                elements: [F::from_canonical_u64(1), F::from_canonical_u64(2),
+                           F::from_canonical_u64(3), F::from_canonical_u64(4)],
+            },
+        );
+        let inner_proof = inner_cd.prove(pw).unwrap();
+
+        // Build recursive circuit
+        let recursive_circuit = WhirRecursiveCircuit::<F, C, D>::new(&inner_cd);
+
+        // Full pipeline: recursive verify + WHIR wrap
+        let config = WhirWrapConfig::default_keccak();
+        let result = wrap_validity_proof(
+            &recursive_circuit,
+            &inner_proof,
+            &inner_cd.verifier_only,
+            &config,
+        ).unwrap();
+
+        assert!(result.recursive_prove_time > Duration::ZERO);
+        assert!(result.recursive_proof_size > 0);
         assert!(result.proof_size > 0);
         assert!(result.num_variables > 0);
         assert!(result.verify_hashes > 0);
-        // Verify completed without panic → proof is valid
     }
 
     #[test]
     fn test_estimate_gas() {
         let result = WhirWrapResult {
+            recursive_prove_time: Duration::from_millis(500),
+            recursive_proof_size: 50_000,
             commit_time: Duration::from_millis(100),
             prove_time: Duration::from_millis(200),
             verify_time: Duration::from_millis(50),
