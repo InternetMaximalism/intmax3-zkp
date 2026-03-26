@@ -626,9 +626,21 @@ contract IntmaxRollup {
         }
 
         // 6. Groth16 verification
+        //    The Groth16 circuit has ExpectedResult as a public input.
+        //    Check that it matches the caller's expectedResult to prevent
+        //    reusing a validity proof as a fraud proof or vice versa.
         if (proofValid) {
-            if (!Groth16Verifier.verify(groth16.vk, groth16.proof, groth16.pubInputs)) {
+            // ExpectedResult is the first public input in FraudAwareVerifierCircuit
+            if (groth16.pubInputs.length == 0) {
                 proofValid = false;
+            } else {
+                uint256 groth16ExpectedResult = groth16.pubInputs[0];
+                uint256 callerExpected = expectedResult ? uint256(1) : uint256(0);
+                if (groth16ExpectedResult != callerExpected) {
+                    proofValid = false;  // Groth16 proof was generated for different mode
+                } else if (!Groth16Verifier.verify(groth16.vk, groth16.proof, groth16.pubInputs)) {
+                    proofValid = false;
+                }
             }
         }
 

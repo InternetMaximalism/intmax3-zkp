@@ -18,7 +18,7 @@ require (
 	github.com/pmezard/go-difflib v1.0.0 // indirect
 	github.com/rs/zerolog v1.30.0 // indirect
 	github.com/stretchr/testify v1.8.4 // indirect
-	github.com/succinctlabs/gnark-plonky2-verifier v0.1.0 // indirect
+	github.com/succinctlabs/gnark-plonky2-verifier v0.1.0
 	github.com/x448/float16 v0.8.4 // indirect
 	golang.org/x/crypto v0.12.0 // indirect
 	golang.org/x/exp v0.0.0-20230817173708-d852ddb80c63 // indirect
@@ -27,3 +27,5 @@ require (
 	gopkg.in/yaml.v3 v3.0.1 // indirect
 	rsc.io/tmplfunc v0.0.3 // indirect
 )
+
+replace github.com/succinctlabs/gnark-plonky2-verifier => github.com/InternetMaximalism/gnark-plonky2-verifier-with-fraudproof v0.0.0-20260326133249-97e4e33e7be7

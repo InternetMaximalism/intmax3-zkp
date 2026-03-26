@@ -84,17 +84,21 @@ contract IntmaxRollupTest is Test {
         proof.c = [uint256(1), uint256(2)];
     }
 
-    function _dummyGroth16PubInputs() internal pure returns (uint256[] memory) {
+    function _dummyGroth16PubInputs(uint256 expectedResult) internal pure returns (uint256[] memory) {
         uint256[] memory inputs = new uint256[](1);
-        inputs[0] = 42;
+        inputs[0] = expectedResult;  // 1 = validity, 0 = fraud
         return inputs;
     }
 
     function _dummyGroth16() internal pure returns (IntmaxRollup.Groth16Params memory) {
+        return _dummyGroth16WithExpected(1);  // default: validity mode
+    }
+
+    function _dummyGroth16WithExpected(uint256 expectedResult) internal pure returns (IntmaxRollup.Groth16Params memory) {
         return IntmaxRollup.Groth16Params({
             vk: _dummyGroth16Vk(),
             proof: _dummyGroth16Proof(),
-            pubInputs: _dummyGroth16PubInputs()
+            pubInputs: _dummyGroth16PubInputs(expectedResult)
         });
     }
 
@@ -590,12 +594,15 @@ contract IntmaxRollupTest is Test {
         _mockWhirVerifierTrue();
         _mockGroth16Pairing();
 
-        // fraudProof returns false: proof is actually valid → no fraud
+        // fraudProof with ExpectedResult=0 (fraud mode), but proof is actually valid.
+        // In reality, the Groth16 circuit would be unsatisfiable (result=1 != expected=0),
+        // so no fraud proof could be generated. The mock Groth16 pairing passes anyway,
+        // so proofValid stays true → proofValid(true) != expectedResult(false) → returns false.
         bool fraudConfirmed = rollup.fraudProof(
             0, _kzgBlobHash, stateRoot, plonky2Bytes, vpis,
             config, statement, whirProof, transcript,
             _dummyKZG(plonky2Bytes.length),
-            _dummyGroth16()
+            _dummyGroth16WithExpected(0)
         );
         assertFalse(fraudConfirmed, "No fraud for valid proof");
     }
