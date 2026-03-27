@@ -67,6 +67,8 @@ contract IntmaxRollup {
     error NoForcedTxLogicRegistered();
     error ForcedTxInsertFailed();
     error EmptyBatch();
+    error ForcedTxLogicAlreadyRegistered();
+    error ForcedTxLogicNotAccepted();
 
     // -----------------------------------------------------------------------
     // Events
@@ -232,12 +234,26 @@ contract IntmaxRollup {
     // registerForcedTxLogic()  —  register a forced tx logic contract for a userId
     // -----------------------------------------------------------------------
 
-    /// @notice Register (or update) the forced tx logic contract for a userId.
-    ///         Intended to be called during user ID registration.
+    /// @notice Register the forced tx logic contract for a userId.
+    ///         Can only be set once per userId (immutable after registration).
+    ///         The logic contract must accept the registration by returning the
+    ///         userId when called with acceptRegistration(userId).
     /// @param userId         The Intmax user ID (aggregator_id << 32 | local_id).
     /// @param logicContract  Address of the contract implementing IForcedTxLogic.
-    ///                       Use address(0) to unregister.
     function registerForcedTxLogic(uint64 userId, address logicContract) external {
+        if (forcedTxLogicContracts[userId] != address(0)) {
+            revert ForcedTxLogicAlreadyRegistered();
+        }
+        // The logic contract must confirm it accepts this userId.
+        // This prevents an attacker from registering a malicious contract
+        // for someone else's userId — the logic contract itself must consent.
+        (bool ok, bytes memory ret) = logicContract.call{gas: FORCED_TX_GAS_LIMIT}(
+            abi.encodeWithSignature("acceptRegistration(uint64)", userId)
+        );
+        if (!ok || ret.length < 32 || abi.decode(ret, (uint64)) != userId) {
+            revert ForcedTxLogicNotAccepted();
+        }
+
         forcedTxLogicContracts[userId] = logicContract;
         emit ForcedTxLogicRegistered(userId, logicContract);
     }

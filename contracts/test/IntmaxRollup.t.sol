@@ -702,16 +702,25 @@ contract IntmaxRollupTest is Test {
     // -----------------------------------------------------------------------
 
     function test_registerForcedTxLogic() public {
-        address mockLogic = makeAddr("mockLogic");
-        rollup.registerForcedTxLogic(42, mockLogic);
-        assertEq(rollup.forcedTxLogicContracts(42), mockLogic);
+        MockForcedTxLogic mockLogic = new MockForcedTxLogic(bytes32(uint256(0xaaa)));
+        rollup.registerForcedTxLogic(42, address(mockLogic));
+        assertEq(rollup.forcedTxLogicContracts(42), address(mockLogic));
     }
 
-    function test_registerForcedTxLogic_unregister() public {
-        address mockLogic = makeAddr("mockLogic");
-        rollup.registerForcedTxLogic(42, mockLogic);
-        rollup.registerForcedTxLogic(42, address(0));
-        assertEq(rollup.forcedTxLogicContracts(42), address(0));
+    function test_registerForcedTxLogic_immutable() public {
+        MockForcedTxLogic mock1 = new MockForcedTxLogic(bytes32(uint256(0xaaa)));
+        MockForcedTxLogic mock2 = new MockForcedTxLogic(bytes32(uint256(0xbbb)));
+        rollup.registerForcedTxLogic(42, address(mock1));
+
+        // Second registration for same userId reverts
+        vm.expectRevert(IntmaxRollup.ForcedTxLogicAlreadyRegistered.selector);
+        rollup.registerForcedTxLogic(42, address(mock2));
+    }
+
+    function test_registerForcedTxLogic_rejectingContract() public {
+        RevertingForcedTxLogic revertLogic = new RevertingForcedTxLogic();
+        vm.expectRevert(IntmaxRollup.ForcedTxLogicNotAccepted.selector);
+        rollup.registerForcedTxLogic(42, address(revertLogic));
     }
 
     function test_queueForcedTx_noLogicRegistered() public {
@@ -740,8 +749,8 @@ contract IntmaxRollupTest is Test {
     }
 
     function test_queueForcedTx_revertingLogic() public {
-        // Deploy a mock that reverts
-        RevertingForcedTxLogic mockLogic = new RevertingForcedTxLogic();
+        // Deploy a mock that accepts registration but reverts on insertIntmaxTx
+        RevertOnInsertLogic mockLogic = new RevertOnInsertLogic();
         rollup.registerForcedTxLogic(42, address(mockLogic));
 
         vm.expectRevert(IntmaxRollup.ForcedTxInsertFailed.selector);
@@ -838,9 +847,9 @@ contract IntmaxRollupTest is Test {
     }
 
     function test_gas_registerForcedTxLogic() public {
-        address mockLogic = makeAddr("mockLogic");
+        MockForcedTxLogic mockLogic = new MockForcedTxLogic(bytes32(uint256(0xaaa)));
         uint256 gasBefore = gasleft();
-        rollup.registerForcedTxLogic(42, mockLogic);
+        rollup.registerForcedTxLogic(42, address(mockLogic));
         uint256 gasUsed = gasBefore - gasleft();
         console.log("registerForcedTxLogic() gas:", gasUsed);
     }
@@ -887,11 +896,30 @@ contract MockForcedTxLogic is IForcedTxLogic {
     function insertIntmaxTx() external override returns (bytes32) {
         return _txHash;
     }
+
+    function acceptRegistration(uint64 userId) external pure override returns (uint64) {
+        return userId;
+    }
 }
 
-/// @dev Mock forced tx logic contract that always reverts.
+/// @dev Mock forced tx logic contract that always reverts (including registration).
 contract RevertingForcedTxLogic is IForcedTxLogic {
     function insertIntmaxTx() external pure override returns (bytes32) {
         revert("intentional revert");
+    }
+
+    function acceptRegistration(uint64) external pure override returns (uint64) {
+        revert("intentional revert");
+    }
+}
+
+/// @dev Mock that accepts registration but reverts on insertIntmaxTx.
+contract RevertOnInsertLogic is IForcedTxLogic {
+    function insertIntmaxTx() external pure override returns (bytes32) {
+        revert("intentional revert on insert");
+    }
+
+    function acceptRegistration(uint64 userId) external pure override returns (uint64) {
+        return userId;
     }
 }
