@@ -1,3 +1,9 @@
+// WASM memory constraint: wasm32 has a 4GB hard limit on linear memory.
+// The proof pipeline uses ~4GB at peak. When adding new proof steps or holding
+// additional data, use explicit `drop()` to free circuit data, witnesses, and
+// proofs as soon as they are no longer needed. See `run_single_withdrawal_proof()`
+// and `run_balance_processor_flow()` for examples.
+
 pub mod circuits;
 pub mod common;
 pub mod constants;
