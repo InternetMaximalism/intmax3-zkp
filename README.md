@@ -8,7 +8,7 @@ Zero-knowledge proof circuits and L1 settlement contracts for the INTMAX3 rollup
   Off-chain: Fast Blocks (~5s)              Layer 1.1: Posting Rounds (~5min)   Layer 1: Finalization (~6h)
   ─────────────────────────────────────     ───────────────────────────────     ──────────────────────────
 
-  ┌──────────┐    ┌──────────┐              postBlock(SubBlock[])               finalize()
+  ┌──────────┐    ┌──────────┐      postBlockAndSubmit(SubBlock[] + proof)     finalize()
   │  User A  │───▶│Aggregator│              │                                   │
   │  User B  │    │          │              ▼                                   ▼
   │  ...     │    └────┬─────┘         ┌──────────────────┐              ┌─────────────────┐
@@ -105,7 +105,7 @@ Every value in the validity proof's public inputs is bound to on-chain state:
 ```
 ┌─ On-chain Storage ───────────────────────────────────────────────────────┐
 │                                                                          │
-│  blockHashChainAt[n]  ◄─── postBlock() computes keccak256 of:           │
+│  blockHashChainAt[n]  ◄─── postBlockAndSubmit() computes keccak256 of:  │
 │                              prev_hash ‖ aggregator_id ‖ timestamp ‖     │
 │                              local_ids ‖ tx_tree_root ‖ deposit_chain   │
 │                                                                          │
@@ -113,6 +113,8 @@ Every value in the validity proof's public inputs is bound to on-chain state:
 │                              prev_hash ‖ depositor ‖ recipient ‖         │
 │                              token_index ‖ amount ‖ aux_data             │
 │                                                                          │
+│  blockDepositHash[n]  ◄─── actual deposit_hash_chain used in block n    │
+│  blockForcedTxHash[n] ◄─── matured forcedTxAccumulator snapshot used     │
 │  latestFinalizedStateRoot ◄── finalize() sets to final_ext_commitment   │
 │                                                                          │
 └──────────────────────────────────────────────────────────────────────────┘
@@ -158,19 +160,17 @@ Every value in the validity proof's public inputs is bound to on-chain state:
 ┌─────────────────────────────────────────────────────────────────────────┐
 │                          IntmaxRollup.sol                                │
 │                                                                         │
-│  ┌─────────────────┐  Aggregators post blocks; local_ids in calldata    │
-│  │  postBlock()    │  → updates blockHashChain on-chain                 │
-│  │  ~81k gas       │  → blockHashChainAt[n] snapshot stored             │
-│  └─────────────────┘                                                    │
+│  ┌────────────────────────┐  Aggregators post blocks + proof blobs      │
+│  │  postBlockAndSubmit()  │  → updates blockHashChain on-chain          │
+│  │  ~160k gas             │  → blockHashChainAt[n], blockDepositHash[n] │
+│  │                        │    blockForcedTxHash[n] snapshots stored    │
+│  │                        │  → stores commitment (blobHash‖proof‖SR)    │
+│  │                        │  → locks 1 ETH stake until finalize/fraud   │
+│  └────────────────────────┘                                             │
 │                                                                         │
 │  ┌─────────────────┐  Users queue deposits                              │
 │  │  deposit()      │  → updates depositHashChain on-chain               │
 │  │  ~55k gas       │                                                    │
-│  └─────────────────┘                                                    │
-│                                                                         │
-│  ┌─────────────────┐  Sequencer posts validity proof in EIP-4844 blob   │
-│  │  submit()       │  → stores commitment (2 storage slots)             │
-│  │  ~75k gas       │  → commitment = keccak(blobHash‖proofHash‖len‖SR)  │
 │  └─────────────────┘                                                    │
 │                                                                         │
 │  ┌─────────────────┐  Anyone can verify and finalize                    │
@@ -186,7 +186,9 @@ Every value in the validity proof's public inputs is bound to on-chain state:
 │  └─────────────────┘                                                    │
 │                                                                         │
 │  ┌─────────────────┐                                                    │
-│  │  fraudProof()   │  Same as finalize() but returns bool               │
+│  │  fraudProof()   │  Confirms blob fraud, slashes stake (90/10 split), │
+│  │                 │  clears blockDepositHash / blockForcedTxHash and   │
+│  │                 │  rewinds blockHashChain snapshots + submissions    │
 │  └─────────────────┘                                                    │
 │                                                                         │
 │  Dependencies:                                                          │
@@ -195,6 +197,11 @@ Every value in the validity proof's public inputs is bound to on-chain state:
 │  └── sol-whir              (WHIR polynomial commitment verification)    │
 └─────────────────────────────────────────────────────────────────────────┘
 ```
+
+> **Withdrawals:** `IntmaxRollup.sol` does not expose a `withdraw()` entrypoint. Withdrawals
+> are proven in the recursive circuits and only the resulting `latestFinalizedStateRoot`
+> is accepted via `finalize()`. Any contract that releases L1 funds must read that state root
+> (e.g. via a separate withdrawal bridge) and enforce nullifier checks off-chain.
 
 ## SPHINCS+ Post-Quantum Signature Verification
 
@@ -298,7 +305,7 @@ intmax3-zkp/
 │   └── gnark-wrapper              # Pre-built binary
 ├── contracts/                     # Foundry project
 │   ├── src/
-│   │   ├── IntmaxRollup.sol       # Main rollup contract (postBlock, deposit, submit, finalize)
+│   │   ├── IntmaxRollup.sol       # Main rollup contract (postBlockAndSubmit, deposit, finalize)
 │   │   ├── BlobKZGVerifier.sol    # EIP-2537 KZG multi-point opening
 │   │   └── Groth16Verifier.sol    # BN254 Groth16 verification (ecAdd/ecMul/ecPairing)
 │   └── test/
@@ -368,9 +375,8 @@ forge test -vvv               # 16 tests
 
 | Function | Gas | Storage Writes |
 |----------|-----|---------------|
-| `postBlock()` | ~81k | 2 slots (blockHashChain, blockHashChainAt[n]) |
+| `postBlockAndSubmit()` | ~160k | ≥6 slots (blockHashChain, blockHashChainAt[n], blockDepositHash[n], blockForcedTxHash[n], commitment, submitter+finalized) + locks 1 ETH stake |
 | `deposit()` | ~55k | 1 slot (pendingDepositHashChain) |
-| `submit()` | ~75k | 2 slots (commitment, submitter+finalized) |
 | `finalize()` | ~1.6M | 2 slots (finalized flag, latestFinalizedStateRoot) |
 | `verify()` | ~842k | 0 (view) |
 

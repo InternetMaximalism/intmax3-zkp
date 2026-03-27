@@ -16,8 +16,12 @@ contract IntmaxRollupTest is Test {
 
     address submitter = makeAddr("submitter");
     address aggregator = makeAddr("aggregator");
+    address fraudTreasury = makeAddr("fraudTreasury");
 
     bytes32 constant FAKE_BLOB_HASH = bytes32(uint256(0xdeadbeef));
+    bytes32 constant DEFAULT_PROOF_HASH = keccak256("default_proof");
+    uint32  constant DEFAULT_PROOF_LENGTH = 1024;
+    bytes32 constant DEFAULT_STATE_ROOT = keccak256("default_state");
 
     bytes   internal _kzgCommitment48;
     bytes32 internal _kzgBlobHash;
@@ -96,7 +100,6 @@ contract IntmaxRollupTest is Test {
 
     function _dummyGroth16WithExpected(uint256 expectedResult) internal pure returns (IntmaxRollup.Groth16Params memory) {
         return IntmaxRollup.Groth16Params({
-            vk: _dummyGroth16Vk(),
             proof: _dummyGroth16Proof(),
             pubInputs: _dummyGroth16PubInputs(expectedResult)
         });
@@ -182,10 +185,11 @@ contract IntmaxRollupTest is Test {
 
     function setUp() public {
         verifierWrapper = new WhirVerifierWrapper();
-        rollup = new IntmaxRollup(verifierWrapper);
+        rollup = new IntmaxRollup(verifierWrapper, fraudTreasury, _dummyGroth16Vk());
 
         vm.deal(submitter, 10 ether);
         vm.deal(aggregator, 10 ether);
+        vm.deal(fraudTreasury, 0);
 
         _kzgCommitment48 = new bytes(48);
         (bool ok, bytes memory h) = address(0x02).staticcall(_kzgCommitment48);
@@ -217,6 +221,20 @@ contract IntmaxRollupTest is Test {
         batch[0] = _makeSubBlock(aggId, ts, txRoot, ids);
     }
 
+    function _postAndSubmit(
+        IntmaxRollup.SubBlock[] memory batch,
+        bytes32 proofHash,
+        uint32 proofLength,
+        bytes32 stateRoot
+    ) internal {
+        _mockBlob();
+        rollup.postBlockAndSubmit{value: 1 ether}(batch, proofHash, proofLength, stateRoot);
+    }
+
+    function _postAndSubmitDefault(IntmaxRollup.SubBlock[] memory batch) internal {
+        _postAndSubmit(batch, DEFAULT_PROOF_HASH, DEFAULT_PROOF_LENGTH, DEFAULT_STATE_ROOT);
+    }
+
     // -----------------------------------------------------------------------
     // postBlock() tests — batched sub-blocks
     // -----------------------------------------------------------------------
@@ -227,7 +245,7 @@ contract IntmaxRollupTest is Test {
         localIds[1] = 2;
 
         vm.prank(aggregator);
-        rollup.postBlock(_singleBlockBatch(5, localIds, uint64(block.timestamp), bytes32(uint256(0xabc))));
+        _postAndSubmitDefault(_singleBlockBatch(5, localIds, uint64(block.timestamp), bytes32(uint256(0xabc))));
 
         assertEq(rollup.blockNumber(), 1);
         assertEq(rollup.postingRound(), 1);
@@ -243,7 +261,7 @@ contract IntmaxRollupTest is Test {
             batch[i] = _makeSubBlock(1, uint64(100 + i * 5), bytes32(uint256(0x100 + i)), ids);
         }
 
-        rollup.postBlock(batch);
+        _postAndSubmitDefault(batch);
 
         // 3 sub-blocks → blockNumber = 3
         assertEq(rollup.blockNumber(), 3);
@@ -263,7 +281,7 @@ contract IntmaxRollupTest is Test {
             ids[0] = uint32(i + 1);
             batch1[i] = _makeSubBlock(1, uint64(100 + i), bytes32(uint256(0x10 + i)), ids);
         }
-        rollup.postBlock(batch1);
+        _postAndSubmitDefault(batch1);
         bytes32 hashAfterRound1 = rollup.blockHashChain();
 
         // Round 2: 3 sub-blocks
@@ -274,7 +292,7 @@ contract IntmaxRollupTest is Test {
             ids[1] = uint32(20 + i);
             batch2[i] = _makeSubBlock(2, uint64(200 + i), bytes32(uint256(0x20 + i)), ids);
         }
-        rollup.postBlock(batch2);
+        _postAndSubmitDefault(batch2);
 
         assertEq(rollup.blockNumber(), 5);
         assertEq(rollup.postingRound(), 2);
@@ -287,7 +305,23 @@ contract IntmaxRollupTest is Test {
     function test_postBlock_emptyBatch_reverts() public {
         IntmaxRollup.SubBlock[] memory empty = new IntmaxRollup.SubBlock[](0);
         vm.expectRevert(IntmaxRollup.EmptyBatch.selector);
-        rollup.postBlock(empty);
+        _postAndSubmitDefault(empty);
+    }
+
+    function test_postBlock_requiresStake() public {
+        uint32[] memory ids = new uint32[](1);
+        ids[0] = 42;
+        IntmaxRollup.SubBlock[] memory batch = _singleBlockBatch(
+            5,
+            ids,
+            uint64(block.timestamp),
+            bytes32(uint256(0x1234))
+        );
+
+        _mockBlob();
+        vm.prank(aggregator);
+        vm.expectRevert(IntmaxRollup.InvalidStakeAmount.selector);
+        rollup.postBlockAndSubmit(batch, DEFAULT_PROOF_HASH, DEFAULT_PROOF_LENGTH, DEFAULT_STATE_ROOT);
     }
 
     // -----------------------------------------------------------------------
@@ -300,17 +334,25 @@ contract IntmaxRollupTest is Test {
     }
 
     // -----------------------------------------------------------------------
-    // submit() tests
+    // postBlockAndSubmit() tests
     // -----------------------------------------------------------------------
 
-    function test_submit() public {
+    function test_postBlockAndSubmit() public {
         bytes32 proofHash   = keccak256("plonky2_proof_data");
         uint32  proofLength = 1024;
         bytes32 stateRoot   = keccak256("state_1");
 
-        _mockBlob();
+        uint32[] memory ids = new uint32[](1);
+        ids[0] = 1;
+        IntmaxRollup.SubBlock[] memory batch = _singleBlockBatch(
+            1,
+            ids,
+            uint64(block.timestamp),
+            bytes32(uint256(0xabc))
+        );
+
         vm.prank(submitter);
-        rollup.submit(proofHash, proofLength, stateRoot);
+        _postAndSubmit(batch, proofHash, proofLength, stateRoot);
 
         bytes32 expectedCommitment = keccak256(
             abi.encodePacked(FAKE_BLOB_HASH, proofHash, proofLength, stateRoot)
@@ -323,10 +365,18 @@ contract IntmaxRollupTest is Test {
         assertFalse(sub.finalized);
     }
 
-    function test_submit_revert_noBlob() public {
+    function test_postBlockAndSubmit_revert_noBlob() public {
+        uint32[] memory ids = new uint32[](1);
+        ids[0] = 1;
+        IntmaxRollup.SubBlock[] memory batch = _singleBlockBatch(
+            1,
+            ids,
+            uint64(block.timestamp),
+            bytes32(uint256(0xdef))
+        );
         vm.prank(submitter);
         vm.expectRevert(IntmaxRollup.NoBlobAttached.selector);
-        rollup.submit(bytes32(0), uint32(0), bytes32(0));
+        rollup.postBlockAndSubmit{value: 1 ether}(batch, bytes32(0), uint32(0), bytes32(0));
     }
 
     // -----------------------------------------------------------------------
@@ -387,14 +437,19 @@ contract IntmaxRollupTest is Test {
         uint32  proofLength = uint32(plonky2Bytes.length);
         bytes32 stateRoot   = keccak256("finalized_state");
 
-        // Build ValidityPublicInputs matching on-chain state
-        IntmaxRollup.ValidityPublicInputs memory vpis = _defaultValidityPIs(stateRoot);
-        // Patch WHIR statement.evaluations[0] = keccak256(validityPIs)
-        _patchStatementWithPIHash(statement, vpis);
+        uint32[] memory ids = new uint32[](1);
+        ids[0] = 1;
+        IntmaxRollup.SubBlock[] memory batch = _singleBlockBatch(1, ids, 100, bytes32(uint256(0xabc)));
 
+        uint256 stakeBalanceBefore = submitter.balance;
         _mockKZGBlob();
         vm.prank(submitter);
-        rollup.submit(proofHash, proofLength, stateRoot);
+        rollup.postBlockAndSubmit{value: 1 ether}(batch, proofHash, proofLength, stateRoot);
+        assertEq(submitter.balance, stakeBalanceBefore - 1 ether, "stake should lock 1 ETH");
+
+        // Build ValidityPublicInputs matching the latest on-chain state
+        IntmaxRollup.ValidityPublicInputs memory vpis = _defaultValidityPIs(stateRoot);
+        _patchStatementWithPIHash(statement, vpis);
 
         _mockBLSPrecompiles();
         _mockWhirVerifierTrue();
@@ -412,6 +467,7 @@ contract IntmaxRollupTest is Test {
         assertTrue(ok);
         assertTrue(rollup.isFinalized(0));
         assertEq(rollup.latestFinalizedStateRoot(), stateRoot);
+        assertEq(submitter.balance, stakeBalanceBefore, "stake should be refunded");
     }
 
     function test_finalize_alreadyFinalized() public {
@@ -427,12 +483,16 @@ contract IntmaxRollupTest is Test {
         uint32  proofLength = uint32(plonky2Bytes.length);
         bytes32 stateRoot   = keccak256("s");
 
-        IntmaxRollup.ValidityPublicInputs memory vpis = _defaultValidityPIs(stateRoot);
-        _patchStatementWithPIHash(statement, vpis);
+        uint32[] memory ids = new uint32[](1);
+        ids[0] = 7;
+        IntmaxRollup.SubBlock[] memory batch = _singleBlockBatch(2, ids, 200, bytes32(uint256(0x444)));
 
         _mockKZGBlob();
         vm.prank(submitter);
-        rollup.submit(proofHash, proofLength, stateRoot);
+        rollup.postBlockAndSubmit{value: 1 ether}(batch, proofHash, proofLength, stateRoot);
+
+        IntmaxRollup.ValidityPublicInputs memory vpis = _defaultValidityPIs(stateRoot);
+        _patchStatementWithPIHash(statement, vpis);
 
         _mockBLSPrecompiles();
         _mockWhirVerifierTrue();
@@ -470,9 +530,13 @@ contract IntmaxRollupTest is Test {
         vpis.initialExtCommitment = bytes32(uint256(0xbad));
         _patchStatementWithPIHash(statement, vpis);
 
+        uint32[] memory ids = new uint32[](1);
+        ids[0] = 9;
+        IntmaxRollup.SubBlock[] memory batch = _singleBlockBatch(3, ids, 300, bytes32(uint256(0x555)));
+
         _mockKZGBlob();
         vm.prank(submitter);
-        rollup.submit(keccak256(plonky2Bytes), uint32(plonky2Bytes.length), stateRoot);
+        rollup.postBlockAndSubmit{value: 1 ether}(batch, keccak256(plonky2Bytes), uint32(plonky2Bytes.length), stateRoot);
 
         _mockBLSPrecompiles();
 
@@ -496,12 +560,16 @@ contract IntmaxRollupTest is Test {
         bytes memory plonky2Bytes = abi.encode(config, statement, whirProof, transcript);
         bytes32 stateRoot = keccak256("state_mismatch");
 
-        IntmaxRollup.ValidityPublicInputs memory vpis = _defaultValidityPIs(stateRoot);
-        // Do NOT patch statement — evaluations[0] won't match
+        uint32[] memory ids = new uint32[](1);
+        ids[0] = 11;
+        IntmaxRollup.SubBlock[] memory batch = _singleBlockBatch(4, ids, 400, bytes32(uint256(0x777)));
 
         _mockKZGBlob();
         vm.prank(submitter);
-        rollup.submit(keccak256(plonky2Bytes), uint32(plonky2Bytes.length), stateRoot);
+        rollup.postBlockAndSubmit{value: 1 ether}(batch, keccak256(plonky2Bytes), uint32(plonky2Bytes.length), stateRoot);
+
+        IntmaxRollup.ValidityPublicInputs memory vpis = _defaultValidityPIs(stateRoot);
+        // Do NOT patch statement — evaluations[0] won't match
 
         _mockBLSPrecompiles();
 
@@ -550,13 +618,16 @@ contract IntmaxRollupTest is Test {
         uint32  proofLength = uint32(plonky2Bytes.length);
         bytes32 stateRoot   = keccak256("bad_state");
 
-        IntmaxRollup.ValidityPublicInputs memory vpis = _defaultValidityPIs(stateRoot);
-        // Deliberately do NOT patch statement — evaluations[0] won't match PI hash
-        // This simulates an invalid proof in the blob
+        uint32[] memory ids = new uint32[](1);
+        ids[0] = 21;
+        IntmaxRollup.SubBlock[] memory batch = _singleBlockBatch(5, ids, 500, bytes32(uint256(0x888)));
 
         _mockKZGBlob();
         vm.prank(submitter);
-        rollup.submit(proofHash, proofLength, stateRoot);
+        rollup.postBlockAndSubmit{value: 1 ether}(batch, proofHash, proofLength, stateRoot);
+
+        IntmaxRollup.ValidityPublicInputs memory vpis = _defaultValidityPIs(stateRoot);
+        // Deliberately do NOT patch statement — evaluations[0] won't match PI hash
 
         _mockBLSPrecompiles();
 
@@ -583,12 +654,16 @@ contract IntmaxRollupTest is Test {
         uint32  proofLength = uint32(plonky2Bytes.length);
         bytes32 stateRoot   = keccak256("valid_state");
 
-        IntmaxRollup.ValidityPublicInputs memory vpis = _defaultValidityPIs(stateRoot);
-        _patchStatementWithPIHash(statement, vpis);
+        uint32[] memory ids = new uint32[](1);
+        ids[0] = 31;
+        IntmaxRollup.SubBlock[] memory batch = _singleBlockBatch(6, ids, 600, bytes32(uint256(0x999)));
 
         _mockKZGBlob();
         vm.prank(submitter);
-        rollup.submit(proofHash, proofLength, stateRoot);
+        rollup.postBlockAndSubmit{value: 1 ether}(batch, proofHash, proofLength, stateRoot);
+
+        IntmaxRollup.ValidityPublicInputs memory vpis = _defaultValidityPIs(stateRoot);
+        _patchStatementWithPIHash(statement, vpis);
 
         _mockBLSPrecompiles();
         _mockWhirVerifierTrue();
@@ -621,9 +696,12 @@ contract IntmaxRollupTest is Test {
         IntmaxRollup.ValidityPublicInputs memory vpis;
 
         // Submit with DIFFERENT proof hash — blob binding will fail
+        uint32[] memory ids2 = new uint32[](1);
+        ids2[0] = 32;
+        IntmaxRollup.SubBlock[] memory batch2 = _singleBlockBatch(7, ids2, 610, bytes32(uint256(0xaaa)));
         _mockKZGBlob();
         vm.prank(submitter);
-        rollup.submit(keccak256("wrong"), uint32(999), stateRoot);
+        rollup.postBlockAndSubmit{value: 1 ether}(batch2, keccak256("wrong"), uint32(999), stateRoot);
 
         _mockBLSPrecompiles();
 
@@ -637,31 +715,219 @@ contract IntmaxRollupTest is Test {
         assertFalse(fraudConfirmed, "Can't confirm fraud if binding fails");
     }
 
+    function test_blockDepositAndForcedHash_persistAndRollback() public {
+        // Register forced tx logic and queue a tx so we have a non-zero accumulator.
+        MockForcedTxLogic mockLogic = new MockForcedTxLogic(bytes32(uint256(0xabc)));
+        rollup.registerForcedTxLogic(42, address(mockLogic));
+        rollup.queueForcedTx(42);
+
+        // Warm up two posting rounds so the forced tx matures on round 3.
+        uint32[] memory ids = new uint32[](1);
+        ids[0] = 1;
+        _postAndSubmitDefault(_singleBlockBatch(1, ids, 100, bytes32(uint256(0x101))));
+        bytes32 forcedSnapshotRound1 = rollup.forcedTxAccumulatorAtRound(1);
+        _postAndSubmitDefault(_singleBlockBatch(1, ids, 200, bytes32(uint256(0x202))));
+
+        uint256 badSubmissionId = rollup.nextSubmissionId();
+
+        // Queue a deposit so the target block picks it up.
+        rollup.deposit(bytes32(uint256(0xdeadbeef)), 0, 100, bytes32(uint256(0xbeef)));
+
+        (
+            WhirConfig memory config,
+            Statement memory statement,
+            WhirProof memory whirProof,
+            bytes memory transcript
+        ) = loadProof();
+
+        bytes memory plonky2Bytes = abi.encode(config, statement, whirProof, transcript);
+        bytes32 proofHash = keccak256(plonky2Bytes);
+        uint32 proofLength = uint32(plonky2Bytes.length);
+        bytes32 stateRoot = keccak256("fraud_state_with_inputs");
+
+        uint32[] memory idsBad = new uint32[](1);
+        idsBad[0] = 9;
+        IntmaxRollup.SubBlock[] memory badBatch = _singleBlockBatch(3, idsBad, 300, bytes32(uint256(0x303)));
+
+        _mockKZGBlob();
+        vm.prank(submitter);
+        rollup.postBlockAndSubmit{value: 1 ether}(badBatch, proofHash, proofLength, stateRoot);
+
+        uint64 targetBlock = rollup.blockNumber();
+        bytes32 storedDepositHash = rollup.blockDepositHash(targetBlock);
+        assertTrue(storedDepositHash != bytes32(0), "deposit hash must be recorded");
+        assertEq(
+            rollup.blockForcedTxHash(targetBlock),
+            forcedSnapshotRound1,
+            "forced tx hash should use matured snapshot"
+        );
+
+        IntmaxRollup.ValidityPublicInputs memory vpis = _defaultValidityPIs(stateRoot);
+        // Do NOT patch statement → invalid proof.
+
+        _mockBLSPrecompiles();
+        address reporter = makeAddr("reporter");
+        vm.deal(reporter, 1 ether);
+        vm.prank(reporter);
+        bool fraudConfirmed = rollup.fraudProof(
+            badSubmissionId,
+            _kzgBlobHash,
+            stateRoot,
+            plonky2Bytes,
+            vpis,
+            config,
+            statement,
+            whirProof,
+            transcript,
+            _dummyKZG(plonky2Bytes.length),
+            _dummyGroth16()
+        );
+        assertTrue(fraudConfirmed, "fraud should be confirmed");
+
+        assertEq(rollup.blockDepositHash(targetBlock), bytes32(0), "deposit hash cleared on rollback");
+        assertEq(rollup.blockForcedTxHash(targetBlock), bytes32(0), "forced hash cleared on rollback");
+    }
+
+    function test_fraudProof_slashesCascadeAndRollsBack() public {
+        (
+            WhirConfig memory config,
+            Statement memory statement,
+            WhirProof memory whirProof,
+            bytes memory transcript
+        ) = loadProof();
+
+        bytes memory plonky2Bytes = abi.encode(config, statement, whirProof, transcript);
+        bytes32 proofHash   = keccak256(plonky2Bytes);
+        uint32  proofLength = uint32(plonky2Bytes.length);
+        bytes32 badState    = keccak256("fraud_state");
+
+        uint32[] memory idsBad = new uint32[](1);
+        idsBad[0] = 77;
+        IntmaxRollup.SubBlock[] memory badBatch = _singleBlockBatch(9, idsBad, 800, bytes32(uint256(0x1111)));
+
+        _mockKZGBlob();
+        vm.prank(submitter);
+        rollup.postBlockAndSubmit{value: 1 ether}(badBatch, proofHash, proofLength, badState);
+
+        // Post a second batch so the fraud rollback must invalidate it too.
+        uint32[] memory idsGood = new uint32[](1);
+        idsGood[0] = 88;
+        IntmaxRollup.SubBlock[] memory goodBatch = _singleBlockBatch(10, idsGood, 810, bytes32(uint256(0x2222)));
+        vm.prank(aggregator);
+        _postAndSubmitDefault(goodBatch);
+
+        IntmaxRollup.ValidityPublicInputs memory vpis = _defaultValidityPIs(badState);
+        // Do NOT patch statement — evaluations[0] won't match PI hash (invalid proof)
+
+        _mockBLSPrecompiles();
+
+        address reporter = makeAddr("reporter");
+        vm.deal(reporter, 1 ether);
+        uint256 reporterBefore = reporter.balance;
+        uint256 treasuryBefore = fraudTreasury.balance;
+
+        assertEq(address(rollup).balance, 2 ether, "two stakes should be locked");
+
+        vm.prank(reporter);
+        bool fraudConfirmed = rollup.fraudProof(
+            0, _kzgBlobHash, badState, plonky2Bytes, vpis,
+            config, statement, whirProof, transcript,
+            _dummyKZG(plonky2Bytes.length),
+            _dummyGroth16()
+        );
+        assertTrue(fraudConfirmed, "Fraud should be confirmed");
+
+        uint256 expectedReward = 2 * 0.9 ether;
+        uint256 expectedTreasury = 2 * 0.1 ether;
+        assertEq(reporter.balance, reporterBefore + expectedReward, "Reporter reward mismatch");
+        assertEq(fraudTreasury.balance, treasuryBefore + expectedTreasury, "Treasury share mismatch");
+        assertEq(address(rollup).balance, 0, "Stakes should be slashed");
+        assertEq(rollup.blockNumber(), 0, "Blocks should roll back");
+        assertEq(rollup.nextSubmissionId(), 0, "Submissions truncated");
+        assertEq(rollup.postingRound(), 0, "Posting round reset");
+        assertEq(rollup.blockHashChain(), bytes32(0), "Hash chain reset");
+    }
+
+    function test_fraudProof_revertsWhenFinalized() public {
+        (
+            WhirConfig memory config,
+            Statement memory statement,
+            WhirProof memory whirProof,
+            bytes memory transcript
+        ) = loadProof();
+
+        bytes memory plonky2Bytes = abi.encode(config, statement, whirProof, transcript);
+        bytes32 proofHash   = keccak256(plonky2Bytes);
+        uint32  proofLength = uint32(plonky2Bytes.length);
+        bytes32 stateRoot   = keccak256("final_state_for_fraud");
+
+        uint32[] memory ids = new uint32[](1);
+        ids[0] = 123;
+        IntmaxRollup.SubBlock[] memory batch = _singleBlockBatch(12, ids, 900, bytes32(uint256(0x3434)));
+
+        _mockKZGBlob();
+        vm.prank(submitter);
+        rollup.postBlockAndSubmit{value: 1 ether}(batch, proofHash, proofLength, stateRoot);
+
+        IntmaxRollup.ValidityPublicInputs memory vpis = _defaultValidityPIs(stateRoot);
+        _patchStatementWithPIHash(statement, vpis);
+
+        _mockBLSPrecompiles();
+        _mockWhirVerifierTrue();
+        _mockGroth16Pairing();
+
+        assertTrue(
+            rollup.finalize(
+                0,
+                _kzgBlobHash,
+                stateRoot,
+                plonky2Bytes,
+                vpis,
+                config,
+                statement,
+                whirProof,
+                transcript,
+                _dummyKZG(plonky2Bytes.length),
+                _dummyGroth16()
+            ),
+            "finalize should succeed"
+        );
+
+        address watcher = makeAddr("watcher");
+        vm.deal(watcher, 1 ether);
+        vm.prank(watcher);
+        vm.expectRevert(IntmaxRollup.AlreadyFinalized.selector);
+        rollup.fraudProof(
+            0,
+            _kzgBlobHash,
+            stateRoot,
+            plonky2Bytes,
+            vpis,
+            config,
+            statement,
+            whirProof,
+            transcript,
+            _dummyKZG(plonky2Bytes.length),
+            _dummyGroth16WithExpected(0)
+        );
+    }
+
     // -----------------------------------------------------------------------
     // Gas measurement
     // -----------------------------------------------------------------------
 
-    function test_gas_submit() public {
-        _mockBlob();
-        vm.prank(submitter);
-        uint256 gasBefore = gasleft();
-        rollup.submit(keccak256("proof"), uint32(1024), keccak256("state"));
-        uint256 gasUsed = gasBefore - gasleft();
-        console.log("submit() gas:", gasUsed);
-    }
-
-    function test_gas_postBlock_single() public {
+    function test_gas_postBlockAndSubmit_single() public {
         uint32[] memory localIds = new uint32[](2);
         localIds[0] = 1;
         localIds[1] = 2;
 
         uint256 gasBefore = gasleft();
-        rollup.postBlock(_singleBlockBatch(5, localIds, uint64(block.timestamp), bytes32(uint256(0xabc))));
+        _postAndSubmitDefault(_singleBlockBatch(5, localIds, uint64(block.timestamp), bytes32(uint256(0xabc))));
         uint256 gasUsed = gasBefore - gasleft();
-        console.log("postBlock(1 sub-block) gas:", gasUsed);
+        console.log("postBlockAndSubmit(1 sub-block) gas:", gasUsed);
     }
 
-    function test_gas_postBlock_batch60() public {
+    function test_gas_postBlockAndSubmit_batch60() public {
         IntmaxRollup.SubBlock[] memory batch = new IntmaxRollup.SubBlock[](60);
         for (uint256 i = 0; i < 60; i++) {
             uint32[] memory ids = new uint32[](10);
@@ -672,9 +938,9 @@ contract IntmaxRollupTest is Test {
         }
 
         uint256 gasBefore = gasleft();
-        rollup.postBlock(batch);
+        _postAndSubmitDefault(batch);
         uint256 gasUsed = gasBefore - gasleft();
-        console.log("postBlock(60 sub-blocks, 10 users each) gas:", gasUsed);
+        console.log("postBlockAndSubmit(60 sub-blocks, 10 users each) gas:", gasUsed);
         assertEq(rollup.blockNumber(), 60);
     }
 
@@ -771,14 +1037,14 @@ contract IntmaxRollupTest is Test {
         ids[0] = 1;
 
         // Round 1: snapshot accumulator
-        rollup.postBlock(_singleBlockBatch(1, ids, 100, bytes32(uint256(0x111))));
+        _postAndSubmitDefault(_singleBlockBatch(1, ids, 100, bytes32(uint256(0x111))));
         assertEq(rollup.forcedTxAccumulatorAtRound(1), accumulatorAfterQueue);
 
         // Round 2
-        rollup.postBlock(_singleBlockBatch(1, ids, 200, bytes32(uint256(0x222))));
+        _postAndSubmitDefault(_singleBlockBatch(1, ids, 200, bytes32(uint256(0x222))));
 
         // Round 3: mature forced txs = accumulatorAtRound[3-2] = accumulatorAtRound[1]
-        rollup.postBlock(_singleBlockBatch(1, ids, 300, bytes32(uint256(0x333))));
+        _postAndSubmitDefault(_singleBlockBatch(1, ids, 300, bytes32(uint256(0x333))));
 
         // Verify the accumulator was snapshotted correctly
         assertEq(rollup.forcedTxAccumulatorAtRound(1), accumulatorAfterQueue);
@@ -824,12 +1090,16 @@ contract IntmaxRollupTest is Test {
         bytes memory plonky2Bytes = abi.encode(config, statement, whirProof, transcript);
         bytes32 stateRoot = keccak256("gas_finalize");
 
-        IntmaxRollup.ValidityPublicInputs memory vpis = _defaultValidityPIs(stateRoot);
-        _patchStatementWithPIHash(statement, vpis);
+        uint32[] memory ids = new uint32[](1);
+        ids[0] = 99;
+        IntmaxRollup.SubBlock[] memory batch = _singleBlockBatch(8, ids, 700, bytes32(uint256(0xbbc)));
 
         _mockKZGBlob();
         vm.prank(submitter);
-        rollup.submit(keccak256(plonky2Bytes), uint32(plonky2Bytes.length), stateRoot);
+        rollup.postBlockAndSubmit{value: 1 ether}(batch, keccak256(plonky2Bytes), uint32(plonky2Bytes.length), stateRoot);
+
+        IntmaxRollup.ValidityPublicInputs memory vpis = _defaultValidityPIs(stateRoot);
+        _patchStatementWithPIHash(statement, vpis);
 
         _mockBLSPrecompiles();
         _mockWhirVerifierTrue();
@@ -875,13 +1145,13 @@ contract IntmaxRollupTest is Test {
         ids[1] = 2;
 
         // Post 3 rounds so maturation kicks in on the third
-        rollup.postBlock(_singleBlockBatch(1, ids, 100, bytes32(uint256(0x111))));
-        rollup.postBlock(_singleBlockBatch(1, ids, 200, bytes32(uint256(0x222))));
+        _postAndSubmitDefault(_singleBlockBatch(1, ids, 100, bytes32(uint256(0x111))));
+        _postAndSubmitDefault(_singleBlockBatch(1, ids, 200, bytes32(uint256(0x222))));
 
         uint256 gasBefore = gasleft();
-        rollup.postBlock(_singleBlockBatch(1, ids, 300, bytes32(uint256(0x333))));
+        _postAndSubmitDefault(_singleBlockBatch(1, ids, 300, bytes32(uint256(0x333))));
         uint256 gasUsed = gasBefore - gasleft();
-        console.log("postBlock() with mature forced tx gas:", gasUsed);
+        console.log("postBlockAndSubmit() with mature forced tx gas:", gasUsed);
     }
 }
 

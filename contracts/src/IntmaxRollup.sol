@@ -40,7 +40,7 @@ contract WhirVerifierWrapper {
 ///       `blockHashChainAt[lastBlockNumber]` is recorded for the batch.
 ///
 ///    Layer 1 — "finalization" (~6 hours, validity proof):
-///       The sequencer posts a validity proof blob via `submit()`.
+///       The sequencer posts each validity proof blob via `postBlockAndSubmit()`.
 ///       Anyone can call `finalize()` to verify the proof against the
 ///       on-chain block_hash_chain snapshots and accept the new state root.
 ///
@@ -69,6 +69,7 @@ contract IntmaxRollup {
     error EmptyBatch();
     error ForcedTxLogicAlreadyRegistered();
     error ForcedTxLogicNotAccepted();
+    error InvalidStakeAmount();
 
     // -----------------------------------------------------------------------
     // Events
@@ -105,6 +106,11 @@ contract IntmaxRollup {
         bytes32 stateRoot
     );
 
+    event FraudConfirmed(
+        uint256 indexed id,
+        address indexed prover
+    );
+
     event ForcedTxLogicRegistered(
         uint64 indexed userId,
         address logicContract
@@ -126,6 +132,11 @@ contract IntmaxRollup {
         bool    finalized;
     }
 
+    struct StakeInfo {
+        address submitter;
+        bool spent;
+    }
+
     /// @notice A single fast block (~5 seconds) within a posting-round batch.
     struct SubBlock {
         uint32   aggregatorId;
@@ -134,9 +145,26 @@ contract IntmaxRollup {
         uint32[] localIds;
     }
 
+    struct DepositRecord {
+        address depositor;
+        bytes32 recipient;
+        uint32 tokenIndex;
+        uint256 amount;
+        bytes32 auxData;
+    }
+
+    struct BatchMetadata {
+        uint64 startBlockNumber;
+        uint64 endBlockNumber;
+        bytes32 previousBlockHash;
+        bytes32 previousDepositHashChain;
+        uint64 postingRoundBefore;
+        uint64 postingRoundAfter;
+        uint64 processedDepositCountBefore;
+    }
+
     /// @notice Bundles Groth16 verification parameters to avoid stack-too-deep.
     struct Groth16Params {
-        Groth16Verifier.VerifyingKey vk;
         Groth16Verifier.Proof proof;
         uint256[] pubInputs;
     }
@@ -161,10 +189,13 @@ contract IntmaxRollup {
     // State
     // -----------------------------------------------------------------------
     WhirVerifierWrapper public immutable whirVerifier;
+    Groth16Verifier.VerifyingKey internal groth16Vk;
 
     /// @notice On-chain block hash chain state.
     ///         Updated by `postBlock()` — iterates over a batch of sub-blocks.
     bytes32 public blockHashChain;
+    mapping(uint64 => bytes32) public blockDepositHash;
+    mapping(uint64 => bytes32) public blockForcedTxHash;
 
     /// @notice Snapshot of blockHashChain at posting-round boundaries.
     ///         Only the last block number of each batch is recorded.
@@ -217,6 +248,19 @@ contract IntmaxRollup {
     /// @notice Gas limit for external insertIntmaxTx() calls.
     uint256 internal constant FORCED_TX_GAS_LIMIT = 100_000;
 
+    // -----------------------------------------------------------------------
+    // Fraud/Stake configuration
+    // -----------------------------------------------------------------------
+    uint256 private constant POST_BLOCK_STAKE = 1 ether;
+    uint256 private constant FRAUD_REWARD_PERCENT = 90;
+    uint256 private constant FRAUD_TREASURY_PERCENT = 10;
+    address public immutable fraudTreasury;
+
+    mapping(uint256 => StakeInfo) public stakeInfo;
+    mapping(uint64 => DepositRecord) internal _depositRecords;
+    mapping(uint256 => BatchMetadata) internal _batchMetadata;
+    uint64 public processedDepositCount;
+
     /// @notice Mask to clear top 3 bits so a 256-bit value fits in the
     ///         BLS12-381 scalar field (used for KZG blob field elements).
     uint256 internal constant FIELD_MASK = type(uint256).max >> 3;
@@ -224,8 +268,14 @@ contract IntmaxRollup {
     // -----------------------------------------------------------------------
     // Constructor
     // -----------------------------------------------------------------------
-    constructor(WhirVerifierWrapper _whirVerifier) {
+    constructor(
+        WhirVerifierWrapper _whirVerifier,
+        address _fraudTreasury,
+        Groth16Verifier.VerifyingKey memory verifyingKey
+    ) {
         whirVerifier = _whirVerifier;
+        fraudTreasury = _fraudTreasury;
+        _setGroth16VerifyingKey(verifyingKey);
         // Genesis: block 0 has default (zero) hash chains
         blockHashChainAt[0] = bytes32(0);
     }
@@ -307,17 +357,37 @@ contract IntmaxRollup {
     ///         `blockHashChainAt` is recorded only for the final block number
     ///         of the batch (the posting-round boundary).
     ///
-    /// @param subBlocks  Array of fast blocks to commit.
-    function postBlock(SubBlock[] calldata subBlocks) external {
+    /// @notice Post a batch of fast blocks and submit the proof commitment in
+    ///         a single transaction.
+    function postBlockAndSubmit(
+        SubBlock[] calldata subBlocks,
+        bytes32 proofHash,
+        uint32 proofLength,
+        bytes32 stateRoot
+    ) external payable {
+        if (msg.value != POST_BLOCK_STAKE) revert InvalidStakeAmount();
+        BatchMetadata memory meta = _postBlock(subBlocks);
+        uint256 submissionId = _submit(proofHash, proofLength, stateRoot);
+
+        stakeInfo[submissionId] = StakeInfo({submitter: msg.sender, spent: false});
+        _batchMetadata[submissionId] = meta;
+    }
+
+    function _postBlock(SubBlock[] calldata subBlocks) internal returns (BatchMetadata memory meta) {
         if (subBlocks.length == 0) revert EmptyBatch();
 
-        bytes32 currentHash = blockHashChain;
+        bytes32 previousBlockHash = blockHashChain;
+        bytes32 currentHash = previousBlockHash;
         uint64 currentBlockNumber = blockNumber;
+        uint64 startBlockNumber = currentBlockNumber + 1;
+        bytes32 previousDepositHashChain = depositHashChain;
+        uint64 processedDepositsBefore = processedDepositCount;
 
         // --- Prepare deposits and forced txs for this posting round ---
         bytes32 batchDepositHashChain = _pendingDepositHashChain;
         _pendingDepositHashChain = bytes32(0);
 
+        uint64 previousPostingRound = postingRound;
         postingRound++;
         uint64 currentRound = postingRound;
         forcedTxAccumulatorAtRound[currentRound] = forcedTxAccumulator;
@@ -349,6 +419,8 @@ contract IntmaxRollup {
                 depositHash,
                 forcedTxHash
             );
+            blockDepositHash[currentBlockNumber] = depositHash;
+            blockForcedTxHash[currentBlockNumber] = forcedTxHash;
 
             emit BlockPosted(
                 currentBlockNumber,
@@ -364,6 +436,17 @@ contract IntmaxRollup {
         blockHashChain = currentHash;
         blockHashChainAt[currentBlockNumber] = currentHash;
         depositHashChain = batchDepositHashChain;
+        processedDepositCount = depositCount;
+
+        meta = BatchMetadata({
+            startBlockNumber: startBlockNumber,
+            endBlockNumber: currentBlockNumber,
+            previousBlockHash: previousBlockHash,
+            previousDepositHashChain: previousDepositHashChain,
+            postingRoundBefore: previousPostingRound,
+            postingRoundAfter: currentRound,
+            processedDepositCountBefore: processedDepositsBefore
+        });
     }
 
     // -----------------------------------------------------------------------
@@ -392,42 +475,41 @@ contract IntmaxRollup {
             auxData
         );
         _pendingDepositHashChain = newHash;
+        _depositRecords[idx] = DepositRecord({
+            depositor: msg.sender,
+            recipient: recipient,
+            tokenIndex: tokenIndex,
+            amount: amount,
+            auxData: auxData
+        });
 
         emit Deposited(idx, msg.sender, recipient, tokenIndex, amount, auxData, newHash);
     }
 
     // -----------------------------------------------------------------------
-    // submit()  —  post validity proof blob
-    // -----------------------------------------------------------------------
-
-    /// @notice Post a validity proof in an EIP-4844 blob TX.
-    ///         Stores only the commitment on-chain.
-    /// @param proofHash   keccak256 of the raw Plonky2 proof bytes.
-    /// @param proofLength Byte length of the Plonky2 proof in the blob.
-    /// @param stateRoot   final_ext_commitment proven by the validity circuit.
-    function submit(
+    function _submit(
         bytes32 proofHash,
         uint32 proofLength,
         bytes32 stateRoot
-    ) external {
+    ) internal returns (uint256 submissionId) {
         bytes32 blobHash;
         assembly {
             blobHash := blobhash(0)
         }
         if (blobHash == bytes32(0)) revert NoBlobAttached();
 
-        uint256 id = nextSubmissionId++;
+        submissionId = nextSubmissionId++;
         bytes32 commitment = keccak256(
             abi.encodePacked(blobHash, proofHash, proofLength, stateRoot)
         );
 
-        _submissions[id] = Submission({
+        _submissions[submissionId] = Submission({
             commitment: commitment,
             submitter: msg.sender,
             finalized: false
         });
 
-        emit Submitted(id, msg.sender, blobHash, proofHash, proofLength, stateRoot);
+        emit Submitted(submissionId, msg.sender, blobHash, proofHash, proofLength, stateRoot);
     }
 
     // -----------------------------------------------------------------------
@@ -450,7 +532,7 @@ contract IntmaxRollup {
             whirValid = false;
         }
 
-        bool groth16Valid = Groth16Verifier.verify(groth16.vk, groth16.proof, groth16.pubInputs);
+        bool groth16Valid = Groth16Verifier.verify(groth16Vk, groth16.proof, groth16.pubInputs);
 
         return whirValid && groth16Valid;
     }
@@ -491,6 +573,7 @@ contract IntmaxRollup {
         latestFinalizedStateRoot = stateRoot;
 
         emit Finalized(submissionId, stateRoot);
+        _refundStake(submissionId);
         return true;
     }
 
@@ -523,13 +606,22 @@ contract IntmaxRollup {
         bytes calldata transcript,
         KZGProof calldata kzg,
         Groth16Params memory groth16
-    ) external view returns (bool fraudConfirmed) {
-        return _fullVerify(
+    ) external returns (bool fraudConfirmed) {
+        Submission storage sub = _submissions[submissionId];
+        if (sub.commitment == bytes32(0)) return false;
+        if (sub.finalized) revert AlreadyFinalized();
+
+        bool confirmed = _fullVerify(
             submissionId, blobVersionedHash, stateRoot,
             plonky2ProofBytes, validityPIs,
             config, statement, whirProof, transcript, kzg, groth16,
             false  // expectedResult = false → fraud proof mode
         );
+        if (!confirmed) return false;
+
+        _truncateSubmissions(submissionId, msg.sender);
+        emit FraudConfirmed(submissionId, msg.sender);
+        return true;
     }
 
     // -----------------------------------------------------------------------
@@ -654,7 +746,7 @@ contract IntmaxRollup {
                 uint256 callerExpected = expectedResult ? uint256(1) : uint256(0);
                 if (groth16ExpectedResult != callerExpected) {
                     proofValid = false;  // Groth16 proof was generated for different mode
-                } else if (!Groth16Verifier.verify(groth16.vk, groth16.proof, groth16.pubInputs)) {
+                } else if (!Groth16Verifier.verify(groth16Vk, groth16.proof, groth16.pubInputs)) {
                     proofValid = false;
                 }
             }
@@ -683,6 +775,122 @@ contract IntmaxRollup {
             kzg,
             _toFieldElements(plonky2ProofBytes)
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // Internal — Stake + rollback helpers
+    // -----------------------------------------------------------------------
+
+    function _truncateSubmissions(uint256 targetId, address reporter) internal {
+        uint256 currentId = nextSubmissionId;
+        while (currentId > targetId) {
+            currentId--;
+            Submission storage sub = _submissions[currentId];
+            if (sub.finalized) revert AlreadyFinalized();
+
+            _slashStake(currentId, reporter);
+            _rollbackBatch(currentId);
+
+            delete _submissions[currentId];
+            delete _batchMetadata[currentId];
+        }
+        nextSubmissionId = targetId;
+    }
+
+    function _rollbackBatch(uint256 submissionId) internal {
+        BatchMetadata memory meta = _batchMetadata[submissionId];
+        if (meta.endBlockNumber == 0 && meta.startBlockNumber == 0) {
+            return;
+        }
+
+        blockHashChain = meta.previousBlockHash;
+        if (meta.startBlockNumber == 0) {
+            blockNumber = 0;
+        } else {
+            blockNumber = meta.startBlockNumber - 1;
+        }
+        depositHashChain = meta.previousDepositHashChain;
+        postingRound = meta.postingRoundBefore;
+        delete forcedTxAccumulatorAtRound[meta.postingRoundAfter];
+
+        if (meta.endBlockNumber >= meta.startBlockNumber && meta.endBlockNumber != 0) {
+            for (uint64 bn = meta.startBlockNumber; bn <= meta.endBlockNumber; bn++) {
+                delete blockDepositHash[bn];
+                delete blockForcedTxHash[bn];
+                delete blockHashChainAt[bn];
+                if (bn == meta.endBlockNumber) break;
+            }
+        }
+
+        processedDepositCount = meta.processedDepositCountBefore;
+        _pendingDepositHashChain = _rebuildPendingDeposits(meta.processedDepositCountBefore);
+    }
+
+    function _rebuildPendingDeposits(uint64 startIndex) internal view returns (bytes32 hash) {
+        if (startIndex >= depositCount) {
+            return bytes32(0);
+        }
+        hash = bytes32(0);
+        for (uint64 i = startIndex; i < depositCount; i++) {
+            DepositRecord storage record = _depositRecords[i];
+            hash = _computeDepositHash(
+                hash,
+                record.depositor,
+                record.recipient,
+                record.tokenIndex,
+                record.amount,
+                record.auxData
+            );
+        }
+    }
+
+    function _slashStake(uint256 submissionId, address reporter) internal {
+        StakeInfo storage info = stakeInfo[submissionId];
+        if (info.submitter == address(0) || info.spent) {
+            delete stakeInfo[submissionId];
+            return;
+        }
+
+        info.spent = true;
+        delete stakeInfo[submissionId];
+
+        uint256 reward = (POST_BLOCK_STAKE * FRAUD_REWARD_PERCENT) / 100;
+        uint256 treasuryShare = POST_BLOCK_STAKE - reward;
+
+        (bool rewardOk, ) = reporter.call{value: reward}("");
+        require(rewardOk, "Reward transfer failed");
+
+        (bool treasuryOk, ) = fraudTreasury.call{value: treasuryShare}("");
+        require(treasuryOk, "Treasury transfer failed");
+    }
+
+    function _refundStake(uint256 submissionId) internal {
+        StakeInfo storage info = stakeInfo[submissionId];
+        if (info.submitter == address(0) || info.spent) {
+            delete stakeInfo[submissionId];
+            return;
+        }
+
+        info.spent = true;
+        address recipient = info.submitter;
+        delete stakeInfo[submissionId];
+
+        (bool ok, ) = recipient.call{value: POST_BLOCK_STAKE}("");
+        require(ok, "Stake refund failed");
+    }
+
+    function _setGroth16VerifyingKey(Groth16Verifier.VerifyingKey memory vkInput) internal {
+        groth16Vk.alpha = vkInput.alpha;
+        groth16Vk.beta = vkInput.beta;
+        groth16Vk.gamma = vkInput.gamma;
+        groth16Vk.delta = vkInput.delta;
+
+        uint256 icLength = vkInput.ic.length;
+        delete groth16Vk.ic;
+        groth16Vk.ic = new uint256[2][](icLength);
+        for (uint256 i = 0; i < icLength; i++) {
+            groth16Vk.ic[i] = vkInput.ic[i];
+        }
     }
 
     // -----------------------------------------------------------------------

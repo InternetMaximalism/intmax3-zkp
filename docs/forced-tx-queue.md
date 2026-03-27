@@ -24,7 +24,7 @@ In a rollup, the aggregator controls which transactions are included in blocks. 
                   │IForcedTxLogic│                                │
                   │.insertIntmaxTx()│──▶ txHash                  │
                   └─────────────┘                                 │
-                                                                  │ postBlock()
+                                                                  │ postBlockAndSubmit()
                                                      ┌────────────▼────────────┐
                                                      │  Slot Maturation        │
                                                      │  Round R: queued        │
@@ -94,7 +94,7 @@ function registerForcedTxLogic(uint64 userId, address logicContract) external;
 function queueForcedTx(uint64 userId) external;
 ```
 
-**Slot maturation in postBlock() (per posting round):**
+**Slot maturation in postBlockAndSubmit() (per posting round):**
 
 ```solidity
 postingRound++;
@@ -153,7 +153,7 @@ This ordering ensures forced txs see the latest account state from regular proce
 
 1. **No SPHINCS+ signature required** — forced txs are authorized by the on-chain logic contract, not by the user's post-quantum key
 2. **2-round maturation delay** — prevents front-running; forced txs queued before round R are eligible at round R+2 (~10 minutes)
-3. **Separate `queueForcedTx()` from `postBlock()`** — avoids gas griefing where a malicious logic contract could consume excessive gas during block posting
+3. **Separate `queueForcedTx()` from `postBlockAndSubmit()`** — avoids gas griefing where a malicious logic contract could consume excessive gas during block posting
 4. **100k gas limit** on `insertIntmaxTx()` calls — bounds the cost of external contract calls
 5. **Processing order: regular → forced** — forced txs see the updated account tree from regular block processing
 6. **Deposits and forced txs only at posting-round boundaries** — 5-second fast blocks carry only user txs; deposits and forced txs are processed in the last sub-block of each batch
