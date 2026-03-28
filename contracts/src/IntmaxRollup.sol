@@ -656,17 +656,19 @@ contract IntmaxRollup {
     ///     All 6 steps must pass → returns true.
     ///
     ///   When `expectedResult = false` (fraud proof mode):
-    ///     Steps 1 + 4 (commitment + KZG blob binding) MUST pass —
-    ///     they prove the data really was submitted on-chain in the blob.
-    ///     Steps 2/3/5/6 (state binding + WHIR + Groth16) must FAIL at least once —
+    ///     Steps 1 + 2 + 4 (commitment + PI binding + KZG blob binding) MUST pass —
+    ///     they prove the data really was submitted on-chain in the blob
+    ///     and the supplied validityPIs match on-chain state (preventing
+    ///     false fraud attacks via arbitrary validityPIs).
+    ///     Steps 3/5/6 (PI hash + WHIR + Groth16) must FAIL at least once —
     ///     this proves the submitted proof is invalid.
     ///     Returns true if fraud is confirmed (binding OK but proof invalid).
     ///
     ///   Steps:
-    ///     1. Commitment check (blobHash + proofHash + proofLength + stateRoot)
-    ///     2. Public input binding to on-chain state
+    ///     1. Commitment check (blobHash + proofHash + proofLength + stateRoot) [binding]
+    ///     2. Public input binding to on-chain state [binding]
     ///     3. Plonky2 public input hash == WHIR statement.evaluations[0]
-    ///     4. KZG blob binding
+    ///     4. KZG blob binding [binding]
     ///     5. WHIR proof verification
     ///     6. Groth16 verification
     function _fullVerify(
@@ -703,23 +705,33 @@ contract IntmaxRollup {
             return false;  // blob binding failed → reject in both modes
         }
 
+        // ── Public input binding (must ALWAYS pass in both modes) ────────
+        //
+        // The validityPIs must match on-chain state. In fraud proof mode,
+        // the fraud prover cannot supply arbitrary validityPIs to fake fraud.
+        // This is a binding check, not a proof validity check.
+        {
+            bool pisBound = true;
+            if (validityPIs.initialExtCommitment != latestFinalizedStateRoot) {
+                pisBound = false;
+            }
+            if (pisBound && validityPIs.initialBlockChain != blockHashChainAt[validityPIs.initialBlockNumber]) {
+                pisBound = false;
+            }
+            if (pisBound && validityPIs.finalBlockChain != blockHashChainAt[validityPIs.finalBlockNumber]) {
+                pisBound = false;
+            }
+            if (pisBound && validityPIs.finalExtCommitment != stateRoot) {
+                pisBound = false;
+            }
+            if (!pisBound) {
+                return false;  // PI binding failed → reject in both modes
+            }
+        }
+
         // ── Proof validity checks (expected to pass for finalize, fail for fraud) ──
 
         bool proofValid = true;
-
-        // 2. Public input binding: ValidityPublicInputs ↔ on-chain state
-        if (validityPIs.initialExtCommitment != latestFinalizedStateRoot) {
-            proofValid = false;
-        }
-        if (proofValid && validityPIs.initialBlockChain != blockHashChainAt[validityPIs.initialBlockNumber]) {
-            proofValid = false;
-        }
-        if (proofValid && validityPIs.finalBlockChain != blockHashChainAt[validityPIs.finalBlockNumber]) {
-            proofValid = false;
-        }
-        if (proofValid && validityPIs.finalExtCommitment != stateRoot) {
-            proofValid = false;
-        }
 
         // 3. Plonky2 PI hash == WHIR statement.evaluations[0]
         if (proofValid) {

@@ -48,6 +48,7 @@ func main() {
 	outFile := flag.String("out", "groth16_proof.json", "output file for Groth16 proof")
 	solFile := flag.String("sol", "", "output Solidity verifier contract (optional)")
 	expectedResult := flag.Int("expected-result", 1, "1 = prove validity (finalize), 0 = prove fraud")
+	setupDir := flag.String("setup-dir", "", "directory to save/load trusted setup (pk.bin, vk.bin). If empty, setup is regenerated each time (dev mode)")
 	flag.Parse()
 
 	if *dataDir == "" {
@@ -85,16 +86,65 @@ func main() {
 	}
 	fmt.Fprintf(os.Stderr, "[gnark] Constraints: %d\n", cs.GetNbConstraints())
 
-	// Groth16 setup
-	fmt.Fprintf(os.Stderr, "[gnark] Running Groth16 setup...\n")
-	t := time.Now()
-	pk, vk, err := groth16.Setup(cs)
-	setupTime := time.Since(t)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "[gnark] Setup error: %v\n", err)
-		os.Exit(1)
+	// Groth16 setup — load from disk if available, otherwise generate and save
+	var pk groth16.ProvingKey
+	var vk groth16.VerifyingKey
+	var setupTime time.Duration
+
+	if *setupDir != "" {
+		pkPath := *setupDir + "/pk.bin"
+		vkPath := *setupDir + "/vk.bin"
+
+		if pkData, err := os.ReadFile(pkPath); err == nil {
+			if vkData, err := os.ReadFile(vkPath); err == nil {
+				fmt.Fprintf(os.Stderr, "[gnark] Loading trusted setup from %s...\n", *setupDir)
+				t := time.Now()
+				pk = groth16.NewProvingKey(ecc.BN254)
+				if _, err := pk.ReadFrom(bytes.NewReader(pkData)); err != nil {
+					fmt.Fprintf(os.Stderr, "[gnark] Failed to read PK: %v\n", err)
+					os.Exit(1)
+				}
+				vk = groth16.NewVerifyingKey(ecc.BN254)
+				if _, err := vk.ReadFrom(bytes.NewReader(vkData)); err != nil {
+					fmt.Fprintf(os.Stderr, "[gnark] Failed to read VK: %v\n", err)
+					os.Exit(1)
+				}
+				setupTime = time.Since(t)
+				fmt.Fprintf(os.Stderr, "[gnark] Loaded trusted setup in %v\n", setupTime)
+			}
+		}
 	}
-	fmt.Fprintf(os.Stderr, "[gnark] Setup time: %v\n", setupTime)
+
+	if pk == nil {
+		fmt.Fprintf(os.Stderr, "[gnark] Running Groth16 setup (generating new keys)...\n")
+		t := time.Now()
+		var err error
+		pk, vk, err = groth16.Setup(cs)
+		setupTime = time.Since(t)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "[gnark] Setup error: %v\n", err)
+			os.Exit(1)
+		}
+		fmt.Fprintf(os.Stderr, "[gnark] Setup time: %v\n", setupTime)
+
+		// Save keys to disk if setup-dir is specified
+		if *setupDir != "" {
+			fmt.Fprintf(os.Stderr, "[gnark] Saving trusted setup to %s...\n", *setupDir)
+			os.MkdirAll(*setupDir, 0755)
+
+			var pkBuf, vkBuf bytes.Buffer
+			pk.WriteTo(&pkBuf)
+			vk.WriteTo(&vkBuf)
+
+			if err := os.WriteFile(*setupDir+"/pk.bin", pkBuf.Bytes(), 0644); err != nil {
+				fmt.Fprintf(os.Stderr, "[gnark] Warning: failed to save PK: %v\n", err)
+			}
+			if err := os.WriteFile(*setupDir+"/vk.bin", vkBuf.Bytes(), 0644); err != nil {
+				fmt.Fprintf(os.Stderr, "[gnark] Warning: failed to save VK: %v\n", err)
+			}
+			fmt.Fprintf(os.Stderr, "[gnark] Trusted setup saved\n")
+		}
+	}
 
 	// Generate witness with expected result.
 	// Re-deserialize proof data for the assignment because frontend.Compile()
@@ -116,9 +166,9 @@ func main() {
 
 	// Prove
 	fmt.Fprintf(os.Stderr, "[gnark] Generating Groth16 proof...\n")
-	t = time.Now()
+	tProve := time.Now()
 	proof, err := groth16.Prove(cs, pk, witness)
-	provingTime := time.Since(t)
+	provingTime := time.Since(tProve)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "[gnark] Prove error: %v\n", err)
 		os.Exit(1)
@@ -177,6 +227,58 @@ func main() {
 		}
 	}
 
+	// Extract VK for on-chain deployment
+	var vkBuf bytes.Buffer
+	vk.WriteRawTo(&vkBuf)
+	vkBytes := vkBuf.Bytes()
+
+	// VK raw layout: alpha(2*fpSize) + beta(2*2*fpSize) + gamma(2*2*fpSize) + delta(2*2*fpSize) + ic(n*2*fpSize)
+	vkAlpha := [2]string{
+		new(big.Int).SetBytes(vkBytes[fpSize*0 : fpSize*1]).String(),
+		new(big.Int).SetBytes(vkBytes[fpSize*1 : fpSize*2]).String(),
+	}
+	vkBeta := [2][2]string{
+		{
+			new(big.Int).SetBytes(vkBytes[fpSize*2 : fpSize*3]).String(),
+			new(big.Int).SetBytes(vkBytes[fpSize*3 : fpSize*4]).String(),
+		},
+		{
+			new(big.Int).SetBytes(vkBytes[fpSize*4 : fpSize*5]).String(),
+			new(big.Int).SetBytes(vkBytes[fpSize*5 : fpSize*6]).String(),
+		},
+	}
+	vkGamma := [2][2]string{
+		{
+			new(big.Int).SetBytes(vkBytes[fpSize*6 : fpSize*7]).String(),
+			new(big.Int).SetBytes(vkBytes[fpSize*7 : fpSize*8]).String(),
+		},
+		{
+			new(big.Int).SetBytes(vkBytes[fpSize*8 : fpSize*9]).String(),
+			new(big.Int).SetBytes(vkBytes[fpSize*9 : fpSize*10]).String(),
+		},
+	}
+	vkDelta := [2][2]string{
+		{
+			new(big.Int).SetBytes(vkBytes[fpSize*10 : fpSize*11]).String(),
+			new(big.Int).SetBytes(vkBytes[fpSize*11 : fpSize*12]).String(),
+		},
+		{
+			new(big.Int).SetBytes(vkBytes[fpSize*12 : fpSize*13]).String(),
+			new(big.Int).SetBytes(vkBytes[fpSize*13 : fpSize*14]).String(),
+		},
+	}
+	// IC points: remaining bytes after the fixed VK header
+	icStart := fpSize * 14
+	numIC := (len(vkBytes) - icStart) / (fpSize * 2)
+	var vkIC [][2]string
+	for i := 0; i < numIC; i++ {
+		offset := icStart + i*fpSize*2
+		vkIC = append(vkIC, [2]string{
+			new(big.Int).SetBytes(vkBytes[offset : offset+fpSize]).String(),
+			new(big.Int).SetBytes(vkBytes[offset+fpSize : offset+fpSize*2]).String(),
+		})
+	}
+
 	output := Groth16Output{
 		Proof: Groth16ProofJSON{
 			A: [2]string{a[0].String(), a[1].String()},
@@ -185,6 +287,13 @@ func main() {
 				{b[1][0].String(), b[1][1].String()},
 			},
 			C: [2]string{c[0].String(), c[1].String()},
+		},
+		VerifyingKey: Groth16VerifyingKeyJSON{
+			Alpha: vkAlpha,
+			Beta:  vkBeta,
+			Gamma: vkGamma,
+			Delta: vkDelta,
+			IC:    vkIC,
 		},
 		PublicInputs: pubInputStrs,
 		ProvingTime:  float64(provingTime.Milliseconds()),
