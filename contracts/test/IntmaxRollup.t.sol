@@ -844,6 +844,114 @@ contract IntmaxRollupTest is Test {
         assertEq(rollup.blockHashChain(), bytes32(0), "Hash chain reset");
     }
 
+    /// @notice E2E fraud proof: corrupted WHIR data is rejected by the REAL
+    ///         WhirVerifierWrapper (not mocked). This proves the on-chain fraud
+    ///         detection pipeline works end-to-end for invalid proof data.
+    function test_fraudProof_e2e_realWhir_corruptedData() public {
+        // Load a real WHIR proof (valid data structure)
+        (
+            WhirConfig memory config,
+            Statement memory statement,
+            WhirProof memory whirProof,
+            bytes memory transcript
+        ) = loadProof();
+
+        bytes memory plonky2Bytes = abi.encode(config, statement, whirProof, transcript);
+        bytes32 proofHash   = keccak256(plonky2Bytes);
+        uint32  proofLength = uint32(plonky2Bytes.length);
+        bytes32 stateRoot   = keccak256("e2e_fraud_state");
+
+        uint32[] memory ids = new uint32[](1);
+        ids[0] = 50;
+        IntmaxRollup.SubBlock[] memory batch = _singleBlockBatch(11, ids, 900, bytes32(uint256(0xE2E)));
+
+        _mockKZGBlob();
+        vm.prank(submitter);
+        rollup.postBlockAndSubmit{value: 1 ether}(batch, proofHash, proofLength, stateRoot);
+
+        // Patch PI hash so step 4 (PI hash == evaluations[0]) passes.
+        // This forces the fraud detection to reach step 5 (real WHIR verification).
+        IntmaxRollup.ValidityPublicInputs memory vpis = _defaultValidityPIs(stateRoot);
+        _patchStatementWithPIHash(statement, vpis);
+
+        // Corrupt the WHIR transcript — flip every byte.
+        // The real WhirVerifierWrapper will reject this.
+        bytes memory corruptedTranscript = new bytes(transcript.length);
+        for (uint256 i = 0; i < transcript.length; i++) {
+            corruptedTranscript[i] = bytes1(uint8(transcript[i]) ^ 0xFF);
+        }
+
+        _mockBLSPrecompiles();
+        // NOTE: We do NOT mock the WHIR verifier — it runs for real!
+
+        address reporter = makeAddr("e2e_reporter");
+        vm.deal(reporter, 1 ether);
+        vm.prank(reporter);
+        bool fraudConfirmed = rollup.fraudProof(
+            0, _kzgBlobHash, stateRoot, plonky2Bytes, vpis,
+            config, statement, whirProof, corruptedTranscript,
+            _dummyKZG(plonky2Bytes.length)
+        );
+        assertTrue(fraudConfirmed, "Fraud must be confirmed: real WHIR rejects corrupted transcript");
+
+        // Verify the submission was deleted
+        IntmaxRollup.Submission memory sub = rollup.getSubmission(0);
+        assertEq(sub.commitment, bytes32(0), "Submission must be deleted after fraud");
+    }
+
+    /// @notice E2E fraud proof: completely random bytes as proof data.
+    ///         The real WHIR verifier rejects them and fraud is confirmed.
+    function test_fraudProof_e2e_realWhir_randomBytes() public {
+        // Load real WHIR proof for valid config/statement structure
+        (
+            WhirConfig memory config,
+            Statement memory statement,
+            WhirProof memory whirProof,
+            bytes memory transcript
+        ) = loadProof();
+
+        bytes memory plonky2Bytes = abi.encode(config, statement, whirProof, transcript);
+        bytes32 proofHash   = keccak256(plonky2Bytes);
+        uint32  proofLength = uint32(plonky2Bytes.length);
+        bytes32 stateRoot   = keccak256("random_bytes_fraud");
+
+        uint32[] memory ids = new uint32[](1);
+        ids[0] = 60;
+        IntmaxRollup.SubBlock[] memory batch = _singleBlockBatch(12, ids, 950, bytes32(uint256(0xBAD)));
+
+        _mockKZGBlob();
+        vm.prank(submitter);
+        rollup.postBlockAndSubmit{value: 1 ether}(batch, proofHash, proofLength, stateRoot);
+
+        IntmaxRollup.ValidityPublicInputs memory vpis = _defaultValidityPIs(stateRoot);
+        _patchStatementWithPIHash(statement, vpis);
+
+        // Corrupt the WHIR proof — overwrite answers with random data
+        if (whirProof.answers.length > 0 && whirProof.answers[0].length > 0) {
+            whirProof.answers[0][0] = new bytes32[](1);
+            whirProof.answers[0][0][0] = bytes32(uint256(0xDEADBEEFCAFEBABE));
+        }
+
+        // Random transcript
+        bytes memory randomTranscript = hex"0000111122223333444455556666777788889999AAAABBBBCCCCDDDDEEEEFFFF";
+
+        _mockBLSPrecompiles();
+        // Real WHIR verifier — no mock!
+
+        address reporter = makeAddr("random_reporter");
+        vm.deal(reporter, 1 ether);
+        vm.prank(reporter);
+        bool fraudConfirmed = rollup.fraudProof(
+            0, _kzgBlobHash, stateRoot, plonky2Bytes, vpis,
+            config, statement, whirProof, randomTranscript,
+            _dummyKZG(plonky2Bytes.length)
+        );
+        assertTrue(fraudConfirmed, "Fraud must be confirmed: real WHIR rejects random bytes");
+
+        IntmaxRollup.Submission memory sub = rollup.getSubmission(0);
+        assertEq(sub.commitment, bytes32(0), "Submission must be deleted after fraud");
+    }
+
     function test_fraudProof_revertsWhenFinalized() public {
         (
             WhirConfig memory config,
