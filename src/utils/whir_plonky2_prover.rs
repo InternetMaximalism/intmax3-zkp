@@ -776,6 +776,66 @@ mod tests {
         assert!(whir_poly.len() >= 256);
     }
 
+    /// Test that corrupted WHIR proof data is rejected.
+    /// This is the core fraud proof E2E test: if the Plonky2 proof in the blob
+    /// is invalid, WHIR verification must fail.
+    #[test]
+    fn test_whir_rejects_corrupted_proof_data() {
+        let (cd, initial) = build_test_circuit();
+        let pw = make_witness(initial);
+
+        let config = WhirWrapConfig::default_keccak();
+        let result = prove_with_whir::<F, C, D>(&cd, pw, &config, true).unwrap();
+
+        // Sanity: valid proof verifies
+        verify_whir_plonky2_proof::<F, C, D>(&result.proof, &cd, &config)
+            .expect("Valid proof must verify");
+
+        // --- Case 1: Random bytes as WHIR proof narg ---
+        {
+            let mut corrupted = result.proof.clone();
+            corrupted.constants_sigmas_whir.proof_narg = vec![0xDE; 256];
+            let err = whir_verify_standalone(&corrupted.constants_sigmas_whir, &config);
+            assert!(err.is_err(), "Random bytes in proof_narg must be rejected");
+            eprintln!("Case 1 passed: random bytes rejected. Error: {}", err.unwrap_err());
+        }
+
+        // --- Case 2: Tampered evaluation values ---
+        {
+            let mut corrupted = result.proof.clone();
+            if !corrupted.wires_whir.evaluations.is_empty() {
+                corrupted.wires_whir.evaluations[0] = Field64_3::from(999999u64);
+            }
+            let err = whir_verify_standalone(&corrupted.wires_whir, &config);
+            assert!(err.is_err(), "Tampered evaluations must be rejected");
+            eprintln!("Case 2 passed: tampered evaluations rejected. Error: {}", err.unwrap_err());
+        }
+
+        // --- Case 3: Empty proof data ---
+        {
+            let mut corrupted = result.proof.clone();
+            corrupted.quotient_polys_whir.proof_narg = vec![];
+            corrupted.quotient_polys_whir.proof_hints = vec![];
+            let err = whir_verify_standalone(&corrupted.quotient_polys_whir, &config);
+            assert!(err.is_err(), "Empty proof data must be rejected");
+            eprintln!("Case 3 passed: empty proof rejected. Error: {}", err.unwrap_err());
+        }
+
+        // --- Case 4: Full pipeline with corrupted proof ---
+        {
+            let mut corrupted = result.proof.clone();
+            // Corrupt all 4 WHIR commitments with random data
+            for byte in corrupted.constants_sigmas_whir.proof_narg.iter_mut() {
+                *byte = byte.wrapping_add(1);
+            }
+            let err = verify_whir_plonky2_proof::<F, C, D>(&corrupted, &cd, &config);
+            assert!(err.is_err(), "Full pipeline must reject corrupted WHIR proof");
+            eprintln!("Case 4 passed: full pipeline rejected corrupted proof. Error: {}", err.unwrap_err());
+        }
+
+        eprintln!("All WHIR fraud detection cases passed!");
+    }
+
     #[test]
     fn test_opening_values_match_standard_proof() {
         let (cd, initial) = build_test_circuit();
