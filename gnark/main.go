@@ -66,9 +66,8 @@ func main() {
 		types.ReadVerifierOnlyCircuitData(*dataDir + "/verifier_only_circuit_data.json"),
 	)
 
-	// Use FraudAwareVerifierCircuit from the forked gnark-plonky2-verifier.
-	// This circuit uses VerifyAndReturnResult (soft verification) instead of
-	// Verify (hard assertions), enabling Groth16 proof generation for both
+	// Use FraudAwareVerifierCircuit for soft verification.
+	// This enables Groth16 proof generation for both
 	// valid (ExpectedResult=1) and invalid (ExpectedResult=0) Plonky2 proofs.
 	circuit := verifier.FraudAwareVerifierCircuit{
 		Proof:                   proofWithPis.Proof,
@@ -97,12 +96,16 @@ func main() {
 	}
 	fmt.Fprintf(os.Stderr, "[gnark] Setup time: %v\n", setupTime)
 
-	// Generate witness with expected result
+	// Generate witness with expected result.
+	// Re-deserialize proof data for the assignment because frontend.Compile()
+	// mutates PublicInputs in-place (replacing concrete values with symbolic
+	// expressions), and slices share underlying arrays.
+	assignmentProofWithPis := variables.DeserializeProofWithPublicInputs(
+		types.ReadProofWithPublicInputs(*dataDir + "/proof_with_public_inputs.json"),
+	)
 	assignment := verifier.FraudAwareVerifierCircuit{
-		ExpectedResult:          *expectedResult,
-		Proof:                   proofWithPis.Proof,
-		PublicInputs:            proofWithPis.PublicInputs,
-		VerifierOnlyCircuitData: verifierOnlyCircuitData,
+		ExpectedResult: *expectedResult,
+		PublicInputs:   assignmentProofWithPis.PublicInputs,
 	}
 	witness, err := frontend.NewWitness(&assignment, ecc.BN254.ScalarField())
 	if err != nil {
@@ -150,6 +153,30 @@ func main() {
 	c[0] = new(big.Int).SetBytes(proofBytes[fpSize*6 : fpSize*7])
 	c[1] = new(big.Int).SetBytes(proofBytes[fpSize*7 : fpSize*8])
 
+	// Extract public inputs from the witness
+	pubWitnessSchema, _ := frontend.NewSchema(&assignment)
+	pubWitnessJSON, _ := publicWitness.ToJSON(pubWitnessSchema)
+	var pubWitnessMap map[string]interface{}
+	json.Unmarshal(pubWitnessJSON, &pubWitnessMap)
+
+	var pubInputStrs []string
+	// Add ExpectedResult first
+	if er, ok := pubWitnessMap["ExpectedResult"]; ok {
+		pubInputStrs = append(pubInputStrs, fmt.Sprintf("%v", er))
+	}
+	// Add Plonky2 public inputs
+	if pis, ok := pubWitnessMap["PublicInputs"]; ok {
+		if pisList, ok := pis.([]interface{}); ok {
+			for _, pi := range pisList {
+				if piMap, ok := pi.(map[string]interface{}); ok {
+					if limb, ok := piMap["Limb"]; ok {
+						pubInputStrs = append(pubInputStrs, fmt.Sprintf("%v", limb))
+					}
+				}
+			}
+		}
+	}
+
 	output := Groth16Output{
 		Proof: Groth16ProofJSON{
 			A: [2]string{a[0].String(), a[1].String()},
@@ -159,9 +186,10 @@ func main() {
 			},
 			C: [2]string{c[0].String(), c[1].String()},
 		},
-		ProvingTime: float64(provingTime.Milliseconds()),
-		SetupTime:   float64(setupTime.Milliseconds()),
-		ProofSize:   len(proofBytes),
+		PublicInputs: pubInputStrs,
+		ProvingTime:  float64(provingTime.Milliseconds()),
+		SetupTime:    float64(setupTime.Milliseconds()),
+		ProofSize:    len(proofBytes),
 	}
 
 	// Write JSON output

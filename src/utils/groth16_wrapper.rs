@@ -329,6 +329,8 @@ mod tests {
             },
         },
         ethereum_types::{address::Address, bytes32::Bytes32},
+        utils::wrapper::WrapperCircuit,
+        wrapper_config::plonky2_config::PoseidonBN128GoldilocksConfig,
     };
     use plonky2::{
         field::goldilocks_field::GoldilocksField,
@@ -347,10 +349,15 @@ mod tests {
     use std::{path::Path, time::Instant};
 
     type F = GoldilocksField;
-    type C = PoseidonGoldilocksConfig;
     const D: usize = 2;
 
-    fn build_test_circuit() -> (CircuitData<F, C, D>, HashOutTarget) {
+    // Use PoseidonBN128GoldilocksConfig for Groth16 wrapping.
+    // This config uses BN254 Poseidon for Merkle tree commitments,
+    // which matches what gnark-plonky2-verifier expects.
+    // The circuit's internal hashing (InnerHasher) is still Goldilocks Poseidon.
+    type BN128C = PoseidonBN128GoldilocksConfig;
+
+    fn build_test_circuit() -> (CircuitData<F, BN128C, D>, HashOutTarget) {
         let config = CircuitConfig::standard_recursion_config();
         let mut builder = CircuitBuilder::<F, D>::new(config);
 
@@ -358,14 +365,18 @@ mod tests {
         builder.register_public_inputs(&initial.elements);
 
         let mut current = initial;
-        // Use enough hashes to produce FRI reduction steps (degree_bits >= 12).
-        // With standard_recursion_config, ~200 Poseidon hashes produce degree_bits ~13.
-        for _ in 0..200 {
+        // Use enough hashes to produce degree_bits >= 13.
+        // The gnark-plonky2-verifier's test data uses degree_bits=13.
+        // With standard_recursion_config, ~4000 Poseidon hashes produce degree_bits ~14-15.
+        for _ in 0..4000 {
             current = builder.hash_n_to_hash_no_pad::<PoseidonHash>(current.elements.to_vec());
         }
         builder.register_public_inputs(&current.elements);
 
-        (builder.build::<C>(), initial)
+        let cd = builder.build::<BN128C>();
+        eprintln!("Circuit degree_bits: {}", cd.common.degree_bits());
+        eprintln!("Circuit gates: {:?}", cd.common.gates.iter().map(|g| g.0.id()).collect::<Vec<_>>());
+        (cd, initial)
     }
 
     fn make_witness(target: HashOutTarget) -> PartialWitness<F> {
@@ -398,6 +409,9 @@ mod tests {
         let (cd, initial) = build_test_circuit();
         let pw = make_witness(initial);
         let proof = cd.prove(pw).expect("plonky2 proof");
+
+        // Verify with Plonky2's native verifier first
+        cd.verify(proof.clone()).expect("plonky2 native verification should pass");
 
         let start = Instant::now();
         let wrap = groth16_wrap(&cd, &proof, gnark_bin, true).expect("groth16 wrap");
@@ -448,6 +462,8 @@ mod tests {
         type C = PoseidonGoldilocksConfig;
         const D: usize = 2;
 
+        // Step 1: Generate the validity proof with PoseidonGoldilocksConfig.
+        // This config supports AlgebraicHasher, which is required for recursive verification.
         let processor = BlockHashChainProcessor::<F, C, D>::new(&supported_user_counts);
         let block_hash_chain_proof = processor
             .prove_block(Some(initial_state.clone()), None, &block_witness)
@@ -460,8 +476,38 @@ mod tests {
             .prove(&block_hash_chain_proof, prover)
             .expect("validity proof");
 
+        // Verify with Plonky2's native verifier first.
+        validity_circuit
+            .data
+            .verify(validity_proof.clone())
+            .expect("plonky2 native verification should pass");
+        eprintln!("Plonky2 native verification passed for validity proof");
+
+        // Step 2: Wrap with WrapperCircuit to convert from PoseidonGoldilocksConfig
+        // to PoseidonBN128GoldilocksConfig. This changes the Merkle tree commitment
+        // scheme to BN254 Poseidon, which gnark-plonky2-verifier can verify natively.
+        eprintln!("Building WrapperCircuit (PoseidonGoldilocksConfig -> PoseidonBN128GoldilocksConfig)...");
+        let wrapper = WrapperCircuit::<F, C, BN128C, D>::new(
+            &validity_circuit.data.verifier_data(),
+        );
+        eprintln!("WrapperCircuit built. Generating wrapped proof...");
+
+        let wrapped_proof = wrapper
+            .prove(&validity_proof)
+            .expect("wrapper proof");
+        eprintln!("Wrapped proof generated. Verifying...");
+
+        // Verify the wrapped proof with Plonky2's native verifier.
+        wrapper
+            .data
+            .verify(wrapped_proof.clone())
+            .expect("wrapped proof native verification should pass");
+        eprintln!("Wrapped proof native verification passed");
+
+        // Step 3: Pass the wrapped proof (now PoseidonBN128GoldilocksConfig) to gnark.
+        eprintln!("Starting Groth16 wrapping...");
         let wrap =
-            groth16_wrap(&validity_circuit.data, &validity_proof, gnark_bin, true).expect("wrap");
+            groth16_wrap(&wrapper.data, &wrapped_proof, gnark_bin, true).expect("groth16 wrap");
 
         println!("=== Groth16 Validity Proof ===");
         println!("  Setup: {:.2} ms", wrap.setup_time_ms);
