@@ -136,11 +136,14 @@ pub const DEFAULT_GNARK_BIN: &str = "gnark/gnark-wrapper";
 /// A `Groth16WrapResult` containing the BN254 proof points, public inputs
 /// (including `expected_result`), and timing information.
 ///
-/// When `expected_result = true`:  Groth16 proves the Plonky2 proof IS valid.
-/// When `expected_result = false`: Groth16 proves the Plonky2 proof is NOT valid.
+/// The `expected_result` parameter controls the gnark circuit mode:
+///   `true`  → finalize mode: Groth16 proves the Plonky2 proof IS valid.
+///   `false` → fraud mode: theoretically proves invalidity, but in practice
+///             the gnark circuit's Goldilocks arithmetic has hard constraints
+///             that make it unsatisfiable for corrupted proof data.
 ///
-/// The on-chain verifier checks the `expected_result` public input to determine
-/// whether this is a validity proof or a fraud proof.
+/// On-chain, `finalize()` uses both WHIR + Groth16 (ExpectedResult=1).
+/// `fraudProof()` uses WHIR-only — Groth16 is not needed for fraud detection.
 ///
 /// # Example
 ///

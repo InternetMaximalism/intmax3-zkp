@@ -638,8 +638,7 @@ contract IntmaxRollupTest is Test {
         bool fraudConfirmed = rollup.fraudProof(
             0, _kzgBlobHash, stateRoot, plonky2Bytes, vpis,
             config, statement, whirProof, transcript,
-            _dummyKZG(plonky2Bytes.length),
-            _dummyGroth16()
+            _dummyKZG(plonky2Bytes.length)
         );
         assertTrue(fraudConfirmed, "Fraud should be confirmed for invalid proof");
     }
@@ -670,17 +669,14 @@ contract IntmaxRollupTest is Test {
 
         _mockBLSPrecompiles();
         _mockWhirVerifierTrue();
-        _mockGroth16Pairing();
 
-        // fraudProof with ExpectedResult=0 (fraud mode), but proof is actually valid.
-        // In reality, the Groth16 circuit would be unsatisfiable (result=1 != expected=0),
-        // so no fraud proof could be generated. The mock Groth16 pairing passes anyway,
-        // so proofValid stays true → proofValid(true) != expectedResult(false) → returns false.
+        // fraudProof with WHIR-only: WHIR verification passes (mocked to return true),
+        // PI hash matches (patched above), so whirValid stays true → !whirValid = false
+        // → fraud NOT confirmed. This proves valid proofs cannot be frauded.
         bool fraudConfirmed = rollup.fraudProof(
             0, _kzgBlobHash, stateRoot, plonky2Bytes, vpis,
             config, statement, whirProof, transcript,
-            _dummyKZG(plonky2Bytes.length),
-            _dummyGroth16WithExpected(0)
+            _dummyKZG(plonky2Bytes.length)
         );
         assertFalse(fraudConfirmed, "No fraud for valid proof");
     }
@@ -712,8 +708,7 @@ contract IntmaxRollupTest is Test {
         bool fraudConfirmed = rollup.fraudProof(
             0, _kzgBlobHash, stateRoot, plonky2Bytes, vpis,
             config, statement, whirProof, transcript,
-            _dummyKZG(plonky2Bytes.length),
-            _dummyGroth16()
+            _dummyKZG(plonky2Bytes.length)
         );
         assertFalse(fraudConfirmed, "Can't confirm fraud if binding fails");
     }
@@ -782,8 +777,7 @@ contract IntmaxRollupTest is Test {
             statement,
             whirProof,
             transcript,
-            _dummyKZG(plonky2Bytes.length),
-            _dummyGroth16()
+            _dummyKZG(plonky2Bytes.length)
         );
         assertTrue(fraudConfirmed, "fraud should be confirmed");
 
@@ -835,8 +829,7 @@ contract IntmaxRollupTest is Test {
         bool fraudConfirmed = rollup.fraudProof(
             0, _kzgBlobHash, badState, plonky2Bytes, vpis,
             config, statement, whirProof, transcript,
-            _dummyKZG(plonky2Bytes.length),
-            _dummyGroth16()
+            _dummyKZG(plonky2Bytes.length)
         );
         assertTrue(fraudConfirmed, "Fraud should be confirmed");
 
@@ -910,8 +903,7 @@ contract IntmaxRollupTest is Test {
             statement,
             whirProof,
             transcript,
-            _dummyKZG(plonky2Bytes.length),
-            _dummyGroth16WithExpected(0)
+            _dummyKZG(plonky2Bytes.length)
         );
     }
 
