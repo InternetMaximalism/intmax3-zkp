@@ -202,6 +202,13 @@ contract IntmaxRollup {
     uint256 private constant _ENTERED = 2;
     uint256 private _status = _NOT_ENTERED;
 
+    modifier nonReentrant() {
+        require(_status != _ENTERED, "ReentrancyGuard: reentrant call");
+        _status = _ENTERED;
+        _;
+        _status = _NOT_ENTERED;
+    }
+
     /// @notice On-chain block hash chain state.
     ///         Updated by `postBlock()` — iterates over a batch of sub-blocks.
     bytes32 public blockHashChain;
@@ -370,12 +377,13 @@ contract IntmaxRollup {
     ///
     /// @notice Post a batch of fast blocks and submit the proof commitment in
     ///         a single transaction.
+    // TODO: Add access control (aggregator whitelist) before mainnet.
     function postBlockAndSubmit(
         SubBlock[] calldata subBlocks,
         bytes32 proofHash,
         uint32 proofLength,
         bytes32 stateRoot
-    ) external payable {
+    ) external payable nonReentrant {
         if (msg.value != POST_BLOCK_STAKE) revert InvalidStakeAmount();
         BatchMetadata memory meta = _postBlock(subBlocks);
         uint256 submissionId = _submit(proofHash, proofLength, stateRoot);
@@ -567,7 +575,7 @@ contract IntmaxRollup {
         bytes calldata transcript,
         KZGProof calldata kzg,
         Groth16Params memory groth16
-    ) external returns (bool) {
+    ) external nonReentrant returns (bool) {
         Submission storage sub = _submissions[submissionId];
         if (sub.commitment == bytes32(0)) return false;
         if (sub.finalized) return false;
@@ -622,7 +630,7 @@ contract IntmaxRollup {
         WhirProof calldata whirProof,
         bytes calldata transcript,
         KZGProof calldata kzg
-    ) external returns (bool fraudConfirmed) {
+    ) external nonReentrant returns (bool fraudConfirmed) {
         Submission storage sub = _submissions[submissionId];
         if (sub.commitment == bytes32(0)) return false;
         if (sub.finalized) revert AlreadyFinalized();
