@@ -70,6 +70,9 @@ contract IntmaxRollup {
     error ForcedTxLogicAlreadyRegistered();
     error ForcedTxLogicNotAccepted();
     error InvalidStakeAmount();
+    error RewardTransferFailed();
+    error TreasuryTransferFailed();
+    error StakeRefundFailed();
 
     // -----------------------------------------------------------------------
     // Events
@@ -190,6 +193,9 @@ contract IntmaxRollup {
     // -----------------------------------------------------------------------
     WhirVerifierWrapper public immutable whirVerifier;
     Groth16Verifier.VerifyingKey internal groth16Vk;
+    uint256 private constant _NOT_ENTERED = 1;
+    uint256 private constant _ENTERED = 2;
+    uint256 private _status = _NOT_ENTERED;
 
     /// @notice On-chain block hash chain state.
     ///         Updated by `postBlock()` — iterates over a batch of sub-blocks.
