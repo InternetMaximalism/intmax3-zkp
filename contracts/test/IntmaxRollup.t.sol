@@ -632,6 +632,9 @@ contract IntmaxRollupTest is Test {
         _mockBLSPrecompiles();
 
         // fraudProof returns true: blob binding OK but proof invalid → fraud confirmed
+        address reporter = makeAddr("reporter");
+        vm.deal(reporter, 1 ether);
+        vm.prank(reporter);
         bool fraudConfirmed = rollup.fraudProof(
             0, _kzgBlobHash, stateRoot, plonky2Bytes, vpis,
             config, statement, whirProof, transcript,
