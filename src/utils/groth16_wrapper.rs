@@ -24,6 +24,7 @@
 //!
 //! This module is not available on WASM targets (subprocess calls not supported).
 
+use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -37,6 +38,7 @@ use plonky2::{
     },
 };
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use thiserror::Error;
 
 // ---------------------------------------------------------------------------
@@ -157,14 +159,18 @@ where
     std::fs::create_dir_all(&tmp_dir).map_err(Groth16Error::TempDirError)?;
 
     // 3. Serialize Plonky2 proof data as JSON
+    // Serialize proof as-is. HashOut fields remain as {"elements": [u64;4]}.
+    // The Go deserializer handles both object format and decimal string format.
     let proof_json = serde_json::to_string(proof)
         .map_err(|e| Groth16Error::SerializationError(e.to_string()))?;
-    std::fs::write(tmp_dir.join("proof_with_public_inputs.json"), &proof_json)
+    let proof_path = tmp_dir.join("proof_with_public_inputs.json");
+    fs::write(&proof_path, &proof_json)
         .map_err(|e| Groth16Error::SerializationError(e.to_string()))?;
 
     let vd_json = serde_json::to_string(&circuit_data.verifier_only)
         .map_err(|e| Groth16Error::SerializationError(e.to_string()))?;
-    std::fs::write(tmp_dir.join("verifier_only_circuit_data.json"), &vd_json)
+    let verifier_path = tmp_dir.join("verifier_only_circuit_data.json");
+    fs::write(&verifier_path, &vd_json)
         .map_err(|e| Groth16Error::SerializationError(e.to_string()))?;
 
     let cd_json = serde_json::to_string(&circuit_data.common)
@@ -306,4 +312,162 @@ fn parse_g2_point(
                 .to_string(),
         ],
     ])
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{
+        circuits::{
+            test_utils::block_witness_generator::BlockWitnessGenerator,
+            validity::block_hash_chain::{
+                block_hash_chain_processor::BlockHashChainProcessor, validity_circuit::ValidityCircuit,
+            },
+        },
+        ethereum_types::{address::Address, bytes32::Bytes32},
+    };
+    use plonky2::{
+        field::goldilocks_field::GoldilocksField,
+        field::types::Field,
+        hash::{
+            hash_types::{HashOut, HashOutTarget},
+            poseidon::PoseidonHash,
+        },
+        iop::witness::{PartialWitness, WitnessWrite},
+        plonk::{
+            circuit_builder::CircuitBuilder,
+            circuit_data::{CircuitConfig, CircuitData},
+            config::PoseidonGoldilocksConfig,
+        },
+    };
+    use std::{path::Path, time::Instant};
+
+    type F = GoldilocksField;
+    type C = PoseidonGoldilocksConfig;
+    const D: usize = 2;
+
+    fn build_test_circuit() -> (CircuitData<F, C, D>, HashOutTarget) {
+        let config = CircuitConfig::standard_recursion_config();
+        let mut builder = CircuitBuilder::<F, D>::new(config);
+
+        let initial = builder.add_virtual_hash();
+        builder.register_public_inputs(&initial.elements);
+
+        let mut current = initial;
+        // Use enough hashes to produce FRI reduction steps (degree_bits >= 12).
+        // With standard_recursion_config, ~200 Poseidon hashes produce degree_bits ~13.
+        for _ in 0..200 {
+            current = builder.hash_n_to_hash_no_pad::<PoseidonHash>(current.elements.to_vec());
+        }
+        builder.register_public_inputs(&current.elements);
+
+        (builder.build::<C>(), initial)
+    }
+
+    fn make_witness(target: HashOutTarget) -> PartialWitness<F> {
+        let mut pw = PartialWitness::new();
+        pw.set_hash_target(
+            target,
+            HashOut {
+                elements: [
+                    F::from_canonical_u64(1),
+                    F::from_canonical_u64(2),
+                    F::from_canonical_u64(3),
+                    F::from_canonical_u64(4),
+                ],
+            },
+        );
+        pw
+    }
+
+    #[test]
+    fn test_groth16_wrap_smoke() {
+        let gnark_bin = Path::new(DEFAULT_GNARK_BIN);
+        if !is_gnark_available(gnark_bin) {
+            eprintln!(
+                "skipping groth16_wrap_smoke(): gnark binary missing at {}",
+                gnark_bin.display()
+            );
+            return;
+        }
+
+        let (cd, initial) = build_test_circuit();
+        let pw = make_witness(initial);
+        let proof = cd.prove(pw).expect("plonky2 proof");
+
+        let start = Instant::now();
+        let wrap = groth16_wrap(&cd, &proof, gnark_bin, true).expect("groth16 wrap");
+        let elapsed = start.elapsed();
+
+        println!("=== Groth16 Wrap Timings ===");
+        println!("  Setup:  {:.2} ms", wrap.setup_time_ms);
+        println!("  Prove:  {:.2} ms", wrap.proving_time_ms);
+        println!("  Total:  {:.2?}", elapsed);
+        println!("  Inputs: {:?}", wrap.public_inputs);
+
+        assert_eq!(
+            wrap.public_inputs.first().map(String::as_str),
+            Some("1"),
+            "expected_result public input should be 1 in finalize mode"
+        );
+        assert_eq!(wrap.proof.a.len(), 2);
+        assert_eq!(wrap.proof.b.len(), 2);
+        assert_eq!(wrap.proof.c.len(), 2);
+    }
+
+    #[test]
+    fn test_groth16_wrap_validity_proof() {
+        let gnark_bin = Path::new(DEFAULT_GNARK_BIN);
+        if !is_gnark_available(gnark_bin) {
+            eprintln!(
+                "skipping groth16_wrap_validity_proof(): gnark binary missing at {}",
+                gnark_bin.display()
+            );
+            return;
+        }
+
+        let supported_user_counts = vec![2];
+        let mut generator = BlockWitnessGenerator::new(&supported_user_counts);
+        let initial_state = generator.current_extended_public_state();
+
+        generator
+            .add_block(1, &[], 42, Bytes32::default())
+            .expect("add block");
+        let block_number = generator.block_number;
+        let block_witness = generator
+            .block_chain_witness
+            .get(&block_number)
+            .cloned()
+            .expect("block witness");
+
+        type F = GoldilocksField;
+        type C = PoseidonGoldilocksConfig;
+        const D: usize = 2;
+
+        let processor = BlockHashChainProcessor::<F, C, D>::new(&supported_user_counts);
+        let block_hash_chain_proof = processor
+            .prove_block(Some(initial_state.clone()), None, &block_witness)
+            .expect("block hash chain proof");
+        let block_chain_vd = processor.block_chain_vd();
+
+        let validity_circuit = ValidityCircuit::<F, C, D>::new(&block_chain_vd);
+        let prover = Address::default();
+        let validity_proof = validity_circuit
+            .prove(&block_hash_chain_proof, prover)
+            .expect("validity proof");
+
+        let wrap =
+            groth16_wrap(&validity_circuit.data, &validity_proof, gnark_bin, true).expect("wrap");
+
+        println!("=== Groth16 Validity Proof ===");
+        println!("  Setup: {:.2} ms", wrap.setup_time_ms);
+        println!("  Prove: {:.2} ms", wrap.proving_time_ms);
+        println!("  Proof size: {} bytes", wrap.proof_size);
+
+        assert_eq!(wrap.public_inputs.first().map(String::as_str), Some("1"));
+    }
 }

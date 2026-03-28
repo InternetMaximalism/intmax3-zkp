@@ -1,11 +1,11 @@
-module github.com/leohio/whirtest/gnark
+module github.com/succinctlabs/gnark-plonky2-verifier
 
-go 1.26.1
+go 1.20
 
 require (
 	github.com/consensys/gnark v0.9.1
 	github.com/consensys/gnark-crypto v0.12.2-0.20231013160410-1f65e75b6dfb
-	github.com/succinctlabs/gnark-plonky2-verifier v0.1.0
+	github.com/consensys/gnark-ignition-verifier v0.0.0-20230527014722-10693546ab33
 )
 
 require (
@@ -24,9 +24,8 @@ require (
 	github.com/x448/float16 v0.8.4 // indirect
 	golang.org/x/crypto v0.12.0 // indirect
 	golang.org/x/exp v0.0.0-20230817173708-d852ddb80c63 // indirect
+	golang.org/x/sync v0.3.0 // indirect
 	golang.org/x/sys v0.11.0 // indirect
 	gopkg.in/yaml.v3 v3.0.1 // indirect
 	rsc.io/tmplfunc v0.0.3 // indirect
 )
-
-replace github.com/succinctlabs/gnark-plonky2-verifier => ./gnark-plonky2-verifier

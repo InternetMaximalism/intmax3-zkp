@@ -25,6 +25,7 @@ ff = { package = "ff", version = "0.13", features = ["derive"] }
 anyhow = "1.0.100"
 lazy_static = "1.5.0"
 bincode = { version = "2.0.1", features = ["serde"] }
+clap = { version = "4.5", features = ["derive"] }
 
 # WHIR post-quantum wrapper (optional, native-only)
 whir = { git = "https://github.com/WizardOfMenlo/whir", features = ["parallel"], optional = true }
@@ -37,6 +38,11 @@ whir = ["dep:whir", "dep:ark-ff", "dep:ark-std"]
 
 # [patch."https://github.com/InternetMaximalism/polygon-plonky2.git"]
 # plonky2 = { path = "../polygon-plonky2/plonky2" }
+
+[patch."https://github.com/arkworks-rs/nimue"]
+# WHIR needs the legacy Nimue transcript APIs (plugins, Merlin bindings).
+# We vendor commit c0a1914 locally because upstream renamed the crate.
+nimue = { path = "vendor/nimue" }
 
 [dev-dependencies]
 criterion = { version = "0.5", default-features = false }

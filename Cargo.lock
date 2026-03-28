@@ -974,6 +974,7 @@ dependencies = [
  "ark-ff 0.5.0",
  "ark-std 0.5.0",
  "bincode",
+ "clap",
  "criterion",
  "ff",
  "hex",
@@ -1276,9 +1277,9 @@ checksum = "d6790f58c7ff633d8771f42965289203411a5e5c68388703c06e14f24770b41e"
 
 [[package]]
 name = "ordered-float"
-version = "5.1.0"
+version = "5.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7f4779c6901a562440c3786d08192c6fbda7c1c2060edd10006b05ee35d10f2d"
+checksum = "0218004a4aae742209bee9c3cef05672f6b2708be36a50add8eb613b1f2a4008"
 dependencies = [
  "num-traits",
  "rand 0.8.5",
@@ -2332,7 +2333,7 @@ dependencies = [
 [[package]]
 name = "whir"
 version = "0.1.0"
-source = "git+https://github.com/WizardOfMenlo/whir#716b45738481eef40c988c5b9517a0c89e03fd71"
+source = "git+https://github.com/WizardOfMenlo/whir#790bdf02cc469700fcb227aae48c8fbc25ca9f49"
 dependencies = [
  "ark-ff 0.5.0",
  "ark-serialize 0.5.0",
@@ -2620,3 +2621,7 @@ dependencies = [
  "quote",
  "syn 2.0.106",
 ]
+
+[[patch.unused]]
+name = "nimue"
+version = "0.1.0"

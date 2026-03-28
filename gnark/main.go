@@ -25,6 +25,7 @@ type Groth16Output struct {
 	ProvingTime  float64          `json:"proving_time_ms"`
 	SetupTime    float64          `json:"setup_time_ms"`
 	ProofSize    int              `json:"proof_size_bytes"`
+	VerifyingKey Groth16VerifyingKeyJSON `json:"verifying_key"`
 }
 
 // Groth16ProofJSON represents the Groth16 proof points for Solidity.
@@ -32,6 +33,14 @@ type Groth16ProofJSON struct {
 	A [2]string    `json:"a"`
 	B [2][2]string `json:"b"`
 	C [2]string    `json:"c"`
+}
+
+type Groth16VerifyingKeyJSON struct {
+	Alpha [2]string    `json:"alpha"`
+	Beta  [2][2]string `json:"beta"`
+	Gamma [2][2]string `json:"gamma"`
+	Delta [2][2]string `json:"delta"`
+	IC    [][2]string  `json:"ic"`
 }
 
 func main() {
