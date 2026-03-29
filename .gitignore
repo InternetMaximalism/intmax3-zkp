@@ -5,3 +5,9 @@ tests/fixtures/*.bin
 AGENTS.md
 gnark/gnark-wrapper
 gnark/gnark-plonky2-verifier/testdata/
+
+# macOS
+.DS_Store
+
+# Claude Code internals
+.claude/
