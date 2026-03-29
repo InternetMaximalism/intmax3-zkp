@@ -619,10 +619,11 @@ where
         (arr.get(0).copied().unwrap_or(0), arr.get(1).copied().unwrap_or(0))
     };
 
-    let ext_vec_to_json = |v: &[F::Extension]| -> Vec<serde_json::Value> {
-        v.iter().map(|e| {
+    // Flatten Ext2 elements to interleaved c0, c1 as JSON numbers
+    let ext_vec_to_flat = |v: &[F::Extension]| -> Vec<u64> {
+        v.iter().flat_map(|e| {
             let (c0, c1) = ext_to_pair(e);
-            serde_json::json!({"c0": c0.to_string(), "c1": c1.to_string()})
+            vec![c0, c1]
         }).collect()
     };
 
@@ -668,23 +669,23 @@ where
     }).collect();
 
     // k_is for permutation
-    let k_is: Vec<String> = common.k_is.iter().map(|k| k.to_canonical_u64().to_string()).collect();
+    let k_is: Vec<u64> = common.k_is.iter().map(|k| k.to_canonical_u64()).collect();
 
     serde_json::json!({
         "openings": {
-            "constants": ext_vec_to_json(&openings.constants),
-            "plonkSigmas": ext_vec_to_json(&openings.plonk_sigmas),
-            "wires": ext_vec_to_json(&openings.wires),
-            "plonkZs": ext_vec_to_json(&openings.plonk_zs),
-            "plonkZsNext": ext_vec_to_json(&openings.plonk_zs_next),
-            "partialProducts": ext_vec_to_json(&openings.partial_products),
-            "quotientPolys": ext_vec_to_json(&openings.quotient_polys),
+            "constants": ext_vec_to_flat(&openings.constants),
+            "plonkSigmas": ext_vec_to_flat(&openings.plonk_sigmas),
+            "wires": ext_vec_to_flat(&openings.wires),
+            "plonkZs": ext_vec_to_flat(&openings.plonk_zs),
+            "plonkZsNext": ext_vec_to_flat(&openings.plonk_zs_next),
+            "partialProducts": ext_vec_to_flat(&openings.partial_products),
+            "quotientPolys": ext_vec_to_flat(&openings.quotient_polys),
         },
         "challenges": {
-            "plonkBetas": betas.iter().map(|b| b.to_canonical_u64().to_string()).collect::<Vec<_>>(),
-            "plonkGammas": gammas.iter().map(|g| g.to_canonical_u64().to_string()).collect::<Vec<_>>(),
-            "plonkAlphas": alphas.iter().map(|a| a.to_canonical_u64().to_string()).collect::<Vec<_>>(),
-            "plonkZeta": {"c0": zeta_c0.to_string(), "c1": zeta_c1.to_string()},
+            "plonkBetas": betas.iter().map(|b| b.to_canonical_u64()).collect::<Vec<_>>(),
+            "plonkGammas": gammas.iter().map(|g| g.to_canonical_u64()).collect::<Vec<_>>(),
+            "plonkAlphas": alphas.iter().map(|a| a.to_canonical_u64()).collect::<Vec<_>>(),
+            "plonkZeta": [zeta_c0, zeta_c1],
         },
         "circuitParams": {
             "degreeBits": common.degree_bits(),
@@ -701,7 +702,7 @@ where
             "kIs": k_is,
         },
         "publicInputs": proof.standard_proof.public_inputs.iter()
-            .map(|f| f.to_canonical_u64().to_string())
+            .map(|f| f.to_canonical_u64())
             .collect::<Vec<_>>(),
     })
 }
