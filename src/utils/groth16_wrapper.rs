@@ -154,11 +154,37 @@ pub const DEFAULT_GNARK_BIN: &str = "gnark/gnark-wrapper";
 /// // Fraud proof: prove invalidity
 /// let result = groth16_wrap(&circuit_data, &bad_proof, Path::new("gnark/gnark-wrapper"), false)?;
 /// ```
+/// Wrap a Plonky2 proof into a Groth16 proof via the gnark subprocess.
+///
+/// # Arguments
+///
+/// * `circuit_data` — The Plonky2 circuit data
+/// * `proof` — The Plonky2 proof with public inputs
+/// * `gnark_bin_path` — Path to the `gnark-wrapper` Go binary
+/// * `expected_result` — `true` for validity proof, `false` for fraud proof
+/// * `setup_dir` — Optional persistent directory for trusted setup (PK/VK).
+///   If `None`, uses a temp directory that persists across test runs.
+///   If `Some(path)`, saves/loads PK/VK from that path.
 pub fn groth16_wrap<F, C, const D: usize>(
     circuit_data: &CircuitData<F, C, D>,
     proof: &ProofWithPublicInputs<F, C, D>,
     gnark_bin_path: &Path,
     expected_result: bool,
+) -> Result<Groth16WrapResult, Groth16Error>
+where
+    F: RichField + Extendable<D> + Serialize,
+    C: GenericConfig<D, F = F> + Serialize,
+{
+    groth16_wrap_with_setup(circuit_data, proof, gnark_bin_path, expected_result, None)
+}
+
+/// Like `groth16_wrap` but with explicit setup directory.
+pub fn groth16_wrap_with_setup<F, C, const D: usize>(
+    circuit_data: &CircuitData<F, C, D>,
+    proof: &ProofWithPublicInputs<F, C, D>,
+    gnark_bin_path: &Path,
+    expected_result: bool,
+    setup_dir: Option<&Path>,
 ) -> Result<Groth16WrapResult, Groth16Error>
 where
     F: RichField + Extendable<D> + Serialize,
@@ -194,7 +220,9 @@ where
         .map_err(|e| Groth16Error::SerializationError(e.to_string()))?;
 
     let out_file = tmp_dir.join("groth16_proof.json");
-    let setup_dir = tmp_dir.join("trusted_setup");
+    let effective_setup_dir = setup_dir
+        .map(|p| p.to_path_buf())
+        .unwrap_or_else(|| tmp_dir.join("trusted_setup"));
 
     // 4. Call gnark-wrapper subprocess
     let expected_result_val = if expected_result { "1" } else { "0" };
@@ -206,7 +234,7 @@ where
         .arg("--expected-result")
         .arg(expected_result_val)
         .arg("--setup-dir")
-        .arg(setup_dir.to_str().unwrap())
+        .arg(effective_setup_dir.to_str().unwrap())
         .output()
         .map_err(|e| Groth16Error::SubprocessFailed {
             code: None,
