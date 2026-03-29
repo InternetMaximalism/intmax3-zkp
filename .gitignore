@@ -5,4 +5,3 @@ tests/fixtures/*.bin
 AGENTS.md
 gnark/gnark-wrapper
 gnark/gnark-plonky2-verifier/testdata/
-vendor/nimue/

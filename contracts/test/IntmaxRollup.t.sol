@@ -185,7 +185,12 @@ contract IntmaxRollupTest is Test {
 
     function setUp() public {
         verifierWrapper = new WhirVerifierWrapper();
-        rollup = new IntmaxRollup(verifierWrapper, fraudTreasury, _dummyGroth16Vk());
+
+        // Load WHIR config from test data and compute its hash for the constructor.
+        (WhirConfig memory whirCfg,,,) = loadProof();
+        bytes32 cfgHash = keccak256(abi.encode(whirCfg));
+
+        rollup = new IntmaxRollup(verifierWrapper, fraudTreasury, _dummyGroth16Vk(), cfgHash);
 
         vm.deal(submitter, 10 ether);
         vm.deal(aggregator, 10 ether);

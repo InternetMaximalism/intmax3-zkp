@@ -198,6 +198,14 @@ contract IntmaxRollup {
     // -----------------------------------------------------------------------
     WhirVerifierWrapper public immutable whirVerifier;
     Groth16Verifier.VerifyingKey internal groth16Vk;
+
+    /// @notice Keccak256 hash of the expected WhirConfig.
+    ///         Set at deploy time. All finalize/fraudProof calls must supply
+    ///         a WhirConfig whose abi.encode hash matches this value.
+    ///         This prevents attackers from submitting weak WHIR parameters
+    ///         (e.g. low security_level, few queries) to forge proofs.
+    bytes32 public whirConfigHash;
+
     uint256 private constant _NOT_ENTERED = 1;
     uint256 private constant _ENTERED = 2;
     uint256 private _status = _NOT_ENTERED;
@@ -289,11 +297,13 @@ contract IntmaxRollup {
     constructor(
         WhirVerifierWrapper _whirVerifier,
         address _fraudTreasury,
-        Groth16Verifier.VerifyingKey memory verifyingKey
+        Groth16Verifier.VerifyingKey memory verifyingKey,
+        bytes32 _whirConfigHash
     ) {
         whirVerifier = _whirVerifier;
         fraudTreasury = _fraudTreasury;
         _setGroth16VerifyingKey(verifyingKey);
+        whirConfigHash = _whirConfigHash;
         // Genesis: block 0 has default (zero) hash chains
         blockHashChainAt[0] = bytes32(0);
     }
@@ -544,6 +554,11 @@ contract IntmaxRollup {
         bytes calldata transcript,
         Groth16Params memory groth16
     ) external view returns (bool) {
+        // WhirConfig binding — reject weak/mismatched WHIR parameters
+        if (keccak256(abi.encode(config)) != whirConfigHash) {
+            return false;
+        }
+
         bool whirValid;
         try whirVerifier.verify(config, statement, whirProof, transcript) returns (bool v) {
             whirValid = v;
@@ -694,6 +709,11 @@ contract IntmaxRollup {
     ) internal view returns (bool) {
         // ── Binding checks (must ALWAYS pass in both modes) ──────────────
 
+        // 0. WhirConfig binding — reject weak/mismatched WHIR parameters
+        if (keccak256(abi.encode(config)) != whirConfigHash) {
+            return false;
+        }
+
         // 1. Commitment check — the calldata matches the on-chain submission
         {
             uint32 proofLength = uint32(plonky2ProofBytes.length);
@@ -800,6 +820,11 @@ contract IntmaxRollup {
         KZGProof calldata kzg
     ) internal view returns (bool) {
         // ── Binding checks (must all pass) ───────────────────────────────
+
+        // 0. WhirConfig binding — reject weak/mismatched WHIR parameters
+        if (keccak256(abi.encode(config)) != whirConfigHash) {
+            return false;
+        }
 
         // 1. Commitment check
         {
