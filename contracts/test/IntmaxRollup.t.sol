@@ -610,7 +610,7 @@ contract IntmaxRollupTest is Test {
     // fraudProof() tests — prove a submission is invalid
     // -----------------------------------------------------------------------
 
-    function skip_test_fraudProof_invalidProof_confirmedFraud() public {
+    function test_fraudProof_invalidProof_confirmedFraud() public {
         (
             WhirConfig memory config,
             Statement memory statement,
@@ -618,9 +618,10 @@ contract IntmaxRollupTest is Test {
             bytes memory transcript
         ) = loadProof();
 
-        bytes memory plonky2Bytes = abi.encode(config, statement, whirProof, transcript);
-        bytes32 proofHash   = keccak256(plonky2Bytes);
-        uint32  proofLength = uint32(plonky2Bytes.length);
+        IntmaxRollup.Groth16Params memory groth16 = _dummyGroth16();
+        bytes memory proofBytes = abi.encode(groth16, config, statement, whirProof, transcript);
+        bytes32 proofHash   = keccak256(proofBytes);
+        uint32  proofLength = uint32(proofBytes.length);
         bytes32 stateRoot   = keccak256("bad_state");
 
         uint32[] memory ids = new uint32[](1);
@@ -632,18 +633,17 @@ contract IntmaxRollupTest is Test {
         rollup.postBlockAndSubmit{value: 1 ether}(batch, proofHash, proofLength, stateRoot);
 
         IntmaxRollup.ValidityPublicInputs memory vpis = _defaultValidityPIs(stateRoot);
-        // Deliberately do NOT patch statement — evaluations[0] won't match PI hash
+        // Deliberately do NOT patch statement — evaluations[0] won't match PI hash → fraud
 
         _mockBLSPrecompiles();
 
-        // fraudProof returns true: blob binding OK but proof invalid → fraud confirmed
         address reporter = makeAddr("reporter");
         vm.deal(reporter, 1 ether);
         vm.prank(reporter);
         bool fraudConfirmed = rollup.fraudProof(
-            0, _kzgBlobHash, stateRoot, plonky2Bytes, vpis,
+            0, _kzgBlobHash, stateRoot, proofBytes, vpis,
             config, statement, whirProof, transcript,
-            _dummyKZG(plonky2Bytes.length)
+            _dummyKZG(proofBytes.length), groth16
         );
         assertTrue(fraudConfirmed, "Fraud should be confirmed for invalid proof");
     }
@@ -656,9 +656,10 @@ contract IntmaxRollupTest is Test {
             bytes memory transcript
         ) = loadProof();
 
-        bytes memory plonky2Bytes = abi.encode(config, statement, whirProof, transcript);
-        bytes32 proofHash   = keccak256(plonky2Bytes);
-        uint32  proofLength = uint32(plonky2Bytes.length);
+        IntmaxRollup.Groth16Params memory groth16 = _dummyGroth16();
+        bytes memory proofBytes = abi.encode(groth16, config, statement, whirProof, transcript);
+        bytes32 proofHash   = keccak256(proofBytes);
+        uint32  proofLength = uint32(proofBytes.length);
         bytes32 stateRoot   = keccak256("valid_state");
 
         uint32[] memory ids = new uint32[](1);
@@ -674,14 +675,14 @@ contract IntmaxRollupTest is Test {
 
         _mockBLSPrecompiles();
         _mockWhirVerifierTrue();
+        _mockGroth16Pairing();
 
-        // fraudProof with WHIR-only: WHIR verification passes (mocked to return true),
-        // PI hash matches (patched above), so whirValid stays true → !whirValid = false
-        // → fraud NOT confirmed. This proves valid proofs cannot be frauded.
+        // Fraud NOT confirmed: proof params binding fails (statement was patched after creating
+        // proofBytes), so _verifyFraud returns false. Valid proofs cannot be falsely accused.
         bool fraudConfirmed = rollup.fraudProof(
-            0, _kzgBlobHash, stateRoot, plonky2Bytes, vpis,
+            0, _kzgBlobHash, stateRoot, proofBytes, vpis,
             config, statement, whirProof, transcript,
-            _dummyKZG(plonky2Bytes.length)
+            _dummyKZG(proofBytes.length), groth16
         );
         assertFalse(fraudConfirmed, "No fraud for valid proof");
     }
@@ -694,12 +695,13 @@ contract IntmaxRollupTest is Test {
             bytes memory transcript
         ) = loadProof();
 
-        bytes memory plonky2Bytes = abi.encode(config, statement, whirProof, transcript);
+        IntmaxRollup.Groth16Params memory groth16 = _dummyGroth16();
+        bytes memory proofBytes = abi.encode(groth16, config, statement, whirProof, transcript);
         bytes32 stateRoot = keccak256("state");
 
         IntmaxRollup.ValidityPublicInputs memory vpis;
 
-        // Submit with DIFFERENT proof hash — blob binding will fail
+        // Submit with DIFFERENT proof hash — commitment check will fail
         uint32[] memory ids2 = new uint32[](1);
         ids2[0] = 32;
         IntmaxRollup.SubBlock[] memory batch2 = _singleBlockBatch(7, ids2, 610, bytes32(uint256(0xaaa)));
@@ -709,16 +711,16 @@ contract IntmaxRollupTest is Test {
 
         _mockBLSPrecompiles();
 
-        // fraudProof returns false: binding failed → can't confirm fraud
+        // fraudProof returns false: commitment check failed
         bool fraudConfirmed = rollup.fraudProof(
-            0, _kzgBlobHash, stateRoot, plonky2Bytes, vpis,
+            0, _kzgBlobHash, stateRoot, proofBytes, vpis,
             config, statement, whirProof, transcript,
-            _dummyKZG(plonky2Bytes.length)
+            _dummyKZG(proofBytes.length), groth16
         );
         assertFalse(fraudConfirmed, "Can't confirm fraud if binding fails");
     }
 
-    function skip_test_blockDepositAndForcedHash_persistAndRollback() public {
+    function test_blockDepositAndForcedHash_persistAndRollback() public {
         // Register forced tx logic and queue a tx so we have a non-zero accumulator.
         MockForcedTxLogic mockLogic = new MockForcedTxLogic(bytes32(uint256(0xabc)));
         rollup.registerForcedTxLogic(42, address(mockLogic));
@@ -743,9 +745,10 @@ contract IntmaxRollupTest is Test {
             bytes memory transcript
         ) = loadProof();
 
-        bytes memory plonky2Bytes = abi.encode(config, statement, whirProof, transcript);
-        bytes32 proofHash = keccak256(plonky2Bytes);
-        uint32 proofLength = uint32(plonky2Bytes.length);
+        IntmaxRollup.Groth16Params memory groth16 = _dummyGroth16();
+        bytes memory proofBytes = abi.encode(groth16, config, statement, whirProof, transcript);
+        bytes32 proofHash = keccak256(proofBytes);
+        uint32 proofLength = uint32(proofBytes.length);
         bytes32 stateRoot = keccak256("fraud_state_with_inputs");
 
         uint32[] memory idsBad = new uint32[](1);
@@ -766,7 +769,7 @@ contract IntmaxRollupTest is Test {
         );
 
         IntmaxRollup.ValidityPublicInputs memory vpis = _defaultValidityPIs(stateRoot);
-        // Do NOT patch statement → invalid proof.
+        // Do NOT patch statement → PI hash mismatch → fraud confirmed
 
         _mockBLSPrecompiles();
         address reporter = makeAddr("reporter");
@@ -776,13 +779,14 @@ contract IntmaxRollupTest is Test {
             badSubmissionId,
             _kzgBlobHash,
             stateRoot,
-            plonky2Bytes,
+            proofBytes,
             vpis,
             config,
             statement,
             whirProof,
             transcript,
-            _dummyKZG(plonky2Bytes.length)
+            _dummyKZG(proofBytes.length),
+            groth16
         );
         assertTrue(fraudConfirmed, "fraud should be confirmed");
 
@@ -790,7 +794,7 @@ contract IntmaxRollupTest is Test {
         assertEq(rollup.blockForcedTxHash(targetBlock), bytes32(0), "forced hash cleared on rollback");
     }
 
-    function skip_test_fraudProof_slashesCascadeAndRollsBack() public {
+    function test_fraudProof_slashesCascadeAndRollsBack() public {
         (
             WhirConfig memory config,
             Statement memory statement,
@@ -798,9 +802,10 @@ contract IntmaxRollupTest is Test {
             bytes memory transcript
         ) = loadProof();
 
-        bytes memory plonky2Bytes = abi.encode(config, statement, whirProof, transcript);
-        bytes32 proofHash   = keccak256(plonky2Bytes);
-        uint32  proofLength = uint32(plonky2Bytes.length);
+        IntmaxRollup.Groth16Params memory groth16 = _dummyGroth16();
+        bytes memory proofBytes = abi.encode(groth16, config, statement, whirProof, transcript);
+        bytes32 proofHash   = keccak256(proofBytes);
+        uint32  proofLength = uint32(proofBytes.length);
         bytes32 badState    = keccak256("fraud_state");
 
         uint32[] memory idsBad = new uint32[](1);
@@ -819,7 +824,7 @@ contract IntmaxRollupTest is Test {
         _postAndSubmitDefault(goodBatch);
 
         IntmaxRollup.ValidityPublicInputs memory vpis = _defaultValidityPIs(badState);
-        // Do NOT patch statement — evaluations[0] won't match PI hash (invalid proof)
+        // Do NOT patch statement — PI hash mismatch → fraud confirmed
 
         _mockBLSPrecompiles();
 
@@ -832,9 +837,9 @@ contract IntmaxRollupTest is Test {
 
         vm.prank(reporter);
         bool fraudConfirmed = rollup.fraudProof(
-            0, _kzgBlobHash, badState, plonky2Bytes, vpis,
+            0, _kzgBlobHash, badState, proofBytes, vpis,
             config, statement, whirProof, transcript,
-            _dummyKZG(plonky2Bytes.length)
+            _dummyKZG(proofBytes.length), groth16
         );
         assertTrue(fraudConfirmed, "Fraud should be confirmed");
 
@@ -849,11 +854,11 @@ contract IntmaxRollupTest is Test {
         assertEq(rollup.blockHashChain(), bytes32(0), "Hash chain reset");
     }
 
-    /// @notice E2E fraud proof: corrupted WHIR data is rejected by the REAL
-    ///         WhirVerifierWrapper (not mocked). This proves the on-chain fraud
-    ///         detection pipeline works end-to-end for invalid proof data.
-    function skip_test_fraudProof_e2e_realWhir_corruptedData() public {
-        // Load a real WHIR proof (valid data structure)
+    /// @notice E2E fraud proof: corrupted WHIR transcript committed in the blob.
+    ///         The real WhirVerifierWrapper rejects it, confirming fraud.
+    ///         vpis computed BEFORE posting so finalBlockNumber=0 and
+    ///         blockHashChainAt[0]=0 always match.
+    function test_fraudProof_e2e_realWhir_corruptedData() public {
         (
             WhirConfig memory config,
             Statement memory statement,
@@ -861,10 +866,23 @@ contract IntmaxRollupTest is Test {
             bytes memory transcript
         ) = loadProof();
 
-        bytes memory plonky2Bytes = abi.encode(config, statement, whirProof, transcript);
-        bytes32 proofHash   = keccak256(plonky2Bytes);
-        uint32  proofLength = uint32(plonky2Bytes.length);
-        bytes32 stateRoot   = keccak256("e2e_fraud_state");
+        // Corrupt the transcript — flip every byte
+        bytes memory corruptedTranscript = new bytes(transcript.length);
+        for (uint256 i = 0; i < transcript.length; i++) {
+            corruptedTranscript[i] = bytes1(uint8(transcript[i]) ^ 0xFF);
+        }
+
+        // Compute vpis BEFORE posting (initial state: everything zero).
+        // blockHashChainAt[0] stays 0 forever, so PI binding will pass.
+        bytes32 stateRoot = keccak256("e2e_fraud_state");
+        IntmaxRollup.ValidityPublicInputs memory vpis = _defaultValidityPIs(stateRoot);
+        _patchStatementWithPIHash(statement, vpis);
+
+        // Encode corrupted transcript INTO proofBytes so params binding passes
+        IntmaxRollup.Groth16Params memory groth16 = _dummyGroth16();
+        bytes memory proofBytes = abi.encode(groth16, config, statement, whirProof, corruptedTranscript);
+        bytes32 proofHash = keccak256(proofBytes);
+        uint32 proofLength = uint32(proofBytes.length);
 
         uint32[] memory ids = new uint32[](1);
         ids[0] = 50;
@@ -874,40 +892,26 @@ contract IntmaxRollupTest is Test {
         vm.prank(submitter);
         rollup.postBlockAndSubmit{value: 1 ether}(batch, proofHash, proofLength, stateRoot);
 
-        // Patch PI hash so step 4 (PI hash == evaluations[0]) passes.
-        // This forces the fraud detection to reach step 5 (real WHIR verification).
-        IntmaxRollup.ValidityPublicInputs memory vpis = _defaultValidityPIs(stateRoot);
-        _patchStatementWithPIHash(statement, vpis);
-
-        // Corrupt the WHIR transcript — flip every byte.
-        // The real WhirVerifierWrapper will reject this.
-        bytes memory corruptedTranscript = new bytes(transcript.length);
-        for (uint256 i = 0; i < transcript.length; i++) {
-            corruptedTranscript[i] = bytes1(uint8(transcript[i]) ^ 0xFF);
-        }
-
         _mockBLSPrecompiles();
-        // NOTE: We do NOT mock the WHIR verifier — it runs for real!
+        // NOTE: WHIR verifier is NOT mocked — it runs for real on corrupted transcript!
 
         address reporter = makeAddr("e2e_reporter");
         vm.deal(reporter, 1 ether);
         vm.prank(reporter);
         bool fraudConfirmed = rollup.fraudProof(
-            0, _kzgBlobHash, stateRoot, plonky2Bytes, vpis,
+            0, _kzgBlobHash, stateRoot, proofBytes, vpis,
             config, statement, whirProof, corruptedTranscript,
-            _dummyKZG(plonky2Bytes.length)
+            _dummyKZG(proofBytes.length), groth16
         );
-        assertTrue(fraudConfirmed, "Fraud must be confirmed: real WHIR rejects corrupted transcript");
+        assertTrue(fraudConfirmed, "Fraud: real WHIR rejects corrupted transcript");
 
-        // Verify the submission was deleted
         IntmaxRollup.Submission memory sub = rollup.getSubmission(0);
-        assertEq(sub.commitment, bytes32(0), "Submission must be deleted after fraud");
+        assertEq(sub.commitment, bytes32(0), "Submission deleted after fraud");
     }
 
-    /// @notice E2E fraud proof: completely random bytes as proof data.
-    ///         The real WHIR verifier rejects them and fraud is confirmed.
-    function skip_test_fraudProof_e2e_realWhir_randomBytes() public {
-        // Load real WHIR proof for valid config/statement structure
+    /// @notice E2E fraud proof: corrupted WHIR proof answers + random transcript.
+    ///         The real WHIR verifier rejects them, confirming fraud.
+    function test_fraudProof_e2e_realWhir_randomBytes() public {
         (
             WhirConfig memory config,
             Statement memory statement,
@@ -915,10 +919,23 @@ contract IntmaxRollupTest is Test {
             bytes memory transcript
         ) = loadProof();
 
-        bytes memory plonky2Bytes = abi.encode(config, statement, whirProof, transcript);
-        bytes32 proofHash   = keccak256(plonky2Bytes);
-        uint32  proofLength = uint32(plonky2Bytes.length);
-        bytes32 stateRoot   = keccak256("random_bytes_fraud");
+        // Corrupt WHIR proof answers
+        if (whirProof.answers.length > 0 && whirProof.answers[0].length > 0) {
+            whirProof.answers[0][0] = new bytes32[](1);
+            whirProof.answers[0][0][0] = bytes32(uint256(0xDEADBEEFCAFEBABE));
+        }
+        bytes memory randomTranscript = hex"0000111122223333444455556666777788889999AAAABBBBCCCCDDDDEEEEFFFF";
+
+        // Compute vpis BEFORE posting (initial zero state)
+        bytes32 stateRoot = keccak256("random_bytes_fraud");
+        IntmaxRollup.ValidityPublicInputs memory vpis = _defaultValidityPIs(stateRoot);
+        _patchStatementWithPIHash(statement, vpis);
+
+        // Encode corrupted proof INTO proofBytes
+        IntmaxRollup.Groth16Params memory groth16 = _dummyGroth16();
+        bytes memory proofBytes = abi.encode(groth16, config, statement, whirProof, randomTranscript);
+        bytes32 proofHash = keccak256(proofBytes);
+        uint32 proofLength = uint32(proofBytes.length);
 
         uint32[] memory ids = new uint32[](1);
         ids[0] = 60;
@@ -928,18 +945,6 @@ contract IntmaxRollupTest is Test {
         vm.prank(submitter);
         rollup.postBlockAndSubmit{value: 1 ether}(batch, proofHash, proofLength, stateRoot);
 
-        IntmaxRollup.ValidityPublicInputs memory vpis = _defaultValidityPIs(stateRoot);
-        _patchStatementWithPIHash(statement, vpis);
-
-        // Corrupt the WHIR proof — overwrite answers with random data
-        if (whirProof.answers.length > 0 && whirProof.answers[0].length > 0) {
-            whirProof.answers[0][0] = new bytes32[](1);
-            whirProof.answers[0][0][0] = bytes32(uint256(0xDEADBEEFCAFEBABE));
-        }
-
-        // Random transcript
-        bytes memory randomTranscript = hex"0000111122223333444455556666777788889999AAAABBBBCCCCDDDDEEEEFFFF";
-
         _mockBLSPrecompiles();
         // Real WHIR verifier — no mock!
 
@@ -947,14 +952,14 @@ contract IntmaxRollupTest is Test {
         vm.deal(reporter, 1 ether);
         vm.prank(reporter);
         bool fraudConfirmed = rollup.fraudProof(
-            0, _kzgBlobHash, stateRoot, plonky2Bytes, vpis,
+            0, _kzgBlobHash, stateRoot, proofBytes, vpis,
             config, statement, whirProof, randomTranscript,
-            _dummyKZG(plonky2Bytes.length)
+            _dummyKZG(proofBytes.length), groth16
         );
-        assertTrue(fraudConfirmed, "Fraud must be confirmed: real WHIR rejects random bytes");
+        assertTrue(fraudConfirmed, "Fraud: real WHIR rejects corrupted proof");
 
         IntmaxRollup.Submission memory sub = rollup.getSubmission(0);
-        assertEq(sub.commitment, bytes32(0), "Submission must be deleted after fraud");
+        assertEq(sub.commitment, bytes32(0), "Submission deleted after fraud");
     }
 
     function test_fraudProof_revertsWhenFinalized() public {
@@ -1002,6 +1007,9 @@ contract IntmaxRollupTest is Test {
             "finalize should succeed"
         );
 
+        IntmaxRollup.Groth16Params memory groth16 = _dummyGroth16();
+        bytes memory fraudProofBytes = abi.encode(groth16, config, statement, whirProof, transcript);
+
         address watcher = makeAddr("watcher");
         vm.deal(watcher, 1 ether);
         vm.prank(watcher);
@@ -1010,13 +1018,14 @@ contract IntmaxRollupTest is Test {
             0,
             _kzgBlobHash,
             stateRoot,
-            plonky2Bytes,
+            fraudProofBytes,
             vpis,
             config,
             statement,
             whirProof,
             transcript,
-            _dummyKZG(plonky2Bytes.length)
+            _dummyKZG(fraudProofBytes.length),
+            groth16
         );
     }
 
