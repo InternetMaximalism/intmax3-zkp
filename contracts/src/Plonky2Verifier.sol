@@ -82,13 +82,13 @@ contract Plonky2Verifier {
 
     /// @notice Verify Plonky2 constraint satisfaction at challenge point ζ.
     function verifyConstraints(
-        Openings calldata openings,
-        CircuitParams calldata params,
-        Challenges calldata challenges,
-        PermutationData calldata permData,
-        GateInfo[] calldata gates,
-        uint256[] calldata publicInputs
-    ) external view returns (bool) {
+        Openings memory openings,
+        CircuitParams memory params,
+        Challenges memory challenges,
+        PermutationData memory permData,
+        GateInfo[] memory gates,
+        uint256[] memory publicInputs
+    ) public view returns (bool) {
         // Step 1: Compute Z_H(ζ) = ζ^n - 1
         GoldilocksExt2.Ext2 memory zetaPowN = challenges.plonkZeta.expPowerOf2(params.degreeBits);
         GoldilocksExt2.Ext2 memory zHZeta = zetaPowN.sub(GoldilocksExt2.one());
@@ -125,12 +125,12 @@ contract Plonky2Verifier {
     // -----------------------------------------------------------------------
 
     function _computeAllVanishingTerms(
-        Openings calldata openings,
-        CircuitParams calldata params,
-        Challenges calldata challenges,
-        PermutationData calldata permData,
-        GateInfo[] calldata gates,
-        uint256[] calldata publicInputs
+        Openings memory openings,
+        CircuitParams memory params,
+        Challenges memory challenges,
+        PermutationData memory permData,
+        GateInfo[] memory gates,
+        uint256[] memory publicInputs
     ) internal view returns (GoldilocksExt2.Ext2[] memory) {
         // 1. Boundary: L_0(ζ) · (Z(ζ) - 1)
         GoldilocksExt2.Ext2 memory l0Zeta = GoldilocksExt2.evalL0(
@@ -172,10 +172,10 @@ contract Plonky2Verifier {
     ///
     ///   The filter ensures only the active gate's constraints are nonzero.
     function _evaluateGateConstraints(
-        Openings calldata openings,
-        CircuitParams calldata params,
-        GateInfo[] calldata gates,
-        uint256[] calldata publicInputs
+        Openings memory openings,
+        CircuitParams memory params,
+        GateInfo[] memory gates,
+        uint256[] memory publicInputs
     ) internal pure returns (GoldilocksExt2.Ext2[] memory) {
         GoldilocksExt2.Ext2[] memory constraints = new GoldilocksExt2.Ext2[](params.numGateConstraints);
         for (uint256 i = 0; i < params.numGateConstraints; i++) {
@@ -240,9 +240,9 @@ contract Plonky2Verifier {
     /// @dev Dispatch gate-specific constraint evaluation.
     function _evalGateUnfiltered(
         uint256 gateType,
-        Openings calldata openings,
+        Openings memory openings,
         uint256 constOffset,
-        uint256[] calldata publicInputs
+        uint256[] memory publicInputs
     ) internal pure returns (GoldilocksExt2.Ext2[] memory) {
         if (gateType == 0) {
             // NoopGate: 0 constraints
@@ -269,7 +269,7 @@ contract Plonky2Verifier {
     // -----------------------------------------------------------------------
 
     function _evalConstantGateExt2(
-        Openings calldata openings,
+        Openings memory openings,
         uint256 constOffset
     ) internal pure returns (GoldilocksExt2.Ext2[] memory) {
         // ConstantGate { num_consts: N }: wire[i] - constant[constOffset + i] = 0
@@ -283,8 +283,8 @@ contract Plonky2Verifier {
     }
 
     function _evalPublicInputGateExt2(
-        Openings calldata openings,
-        uint256[] calldata publicInputs
+        Openings memory openings,
+        uint256[] memory publicInputs
     ) internal pure returns (GoldilocksExt2.Ext2[] memory) {
         // PublicInputGate: wire[i] - piHash_element[i] = 0 for i in 0..3
         // piHash is computed off-chain from public inputs
@@ -300,7 +300,7 @@ contract Plonky2Verifier {
     }
 
     function _evalPoseidonGateExt2(
-        Openings calldata openings
+        Openings memory openings
     ) internal pure returns (GoldilocksExt2.Ext2[] memory) {
         // Delegate to PoseidonGateEval library
         // Convert wire Ext2 values to base field (take c0 component)
@@ -322,7 +322,7 @@ contract Plonky2Verifier {
     }
 
     function _evalArithmeticGateExt2(
-        Openings calldata openings,
+        Openings memory openings,
         uint256 constOffset
     ) internal pure returns (GoldilocksExt2.Ext2[] memory) {
         // ArithmeticGate with num_ops operations
@@ -349,12 +349,13 @@ contract Plonky2Verifier {
     // -----------------------------------------------------------------------
 
     function _checkPermutation(
-        Openings calldata openings,
-        CircuitParams calldata params,
-        Challenges calldata challenges,
-        PermutationData calldata permData
+        Openings memory openings,
+        CircuitParams memory params,
+        Challenges memory challenges,
+        PermutationData memory permData
     ) internal pure returns (GoldilocksExt2.Ext2[] memory) {
-        uint256 chunkSize = params.quotientDegreeFactor - 1;
+        // chunk_size = max_degree = quotient_degree_factor (NOT - 1)
+        uint256 chunkSize = params.quotientDegreeFactor;
         uint256 numChunks = (params.numRoutedWires + chunkSize - 1) / chunkSize;
 
         GoldilocksExt2.Ext2[] memory terms = new GoldilocksExt2.Ext2[](
@@ -375,9 +376,9 @@ contract Plonky2Verifier {
     }
 
     function _checkPermutationForChallenge(
-        Openings calldata openings,
-        CircuitParams calldata params,
-        PermutationData calldata permData,
+        Openings memory openings,
+        CircuitParams memory params,
+        PermutationData memory permData,
         uint256 betaBase,
         uint256 gammaBase,
         GoldilocksExt2.Ext2 memory zeta,
@@ -412,8 +413,8 @@ contract Plonky2Verifier {
     }
 
     function _computePermChunkTerm(
-        Openings calldata openings,
-        PermutationData calldata permData,
+        Openings memory openings,
+        PermutationData memory permData,
         GoldilocksExt2.Ext2 memory beta,
         GoldilocksExt2.Ext2 memory gamma,
         GoldilocksExt2.Ext2 memory betaZeta,
@@ -444,7 +445,7 @@ contract Plonky2Verifier {
 
     function _reduceWithAlphas(
         GoldilocksExt2.Ext2[] memory terms,
-        uint256[] calldata alphas,
+        uint256[] memory alphas,
         uint256 numChallenges
     ) internal pure returns (GoldilocksExt2.Ext2[] memory) {
         GoldilocksExt2.Ext2[] memory result = new GoldilocksExt2.Ext2[](numChallenges);
