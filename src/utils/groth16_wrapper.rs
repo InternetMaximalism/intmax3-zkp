@@ -220,9 +220,19 @@ where
         .map_err(|e| Groth16Error::SerializationError(e.to_string()))?;
 
     let out_file = tmp_dir.join("groth16_proof.json");
+
+    // Use circuit-specific setup directory based on common data hash.
+    // Different circuits have different R1CS constraint counts and need separate setups.
+    let circuit_hash = {
+        use std::collections::hash_map::DefaultHasher;
+        use std::hash::{Hash, Hasher};
+        let mut hasher = DefaultHasher::new();
+        cd_json.hash(&mut hasher);
+        format!("{:016x}", hasher.finish())
+    };
     let effective_setup_dir = setup_dir
         .map(|p| p.to_path_buf())
-        .unwrap_or_else(|| tmp_dir.join("trusted_setup"));
+        .unwrap_or_else(|| tmp_dir.join(format!("setup_{}", circuit_hash)));
 
     // 4. Call gnark-wrapper subprocess
     let expected_result_val = if expected_result { "1" } else { "0" };
