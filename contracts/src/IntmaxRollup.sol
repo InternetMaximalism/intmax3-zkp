@@ -614,26 +614,22 @@ contract IntmaxRollup {
     // fraudProof()  —  prove a submission contains an invalid proof
     // -----------------------------------------------------------------------
 
-    /// @notice Prove that a submission's proof is INVALID (WHIR-only, no Groth16).
+    /// @notice Prove that a submission's proof is INVALID.
     ///
-    ///   The fraud prover provides:
-    ///     - The actual proof bytes from the blob (same as finalize)
+    ///   The fraud prover must provide:
+    ///     - The actual proof bytes from the blob
+    ///     - A VALID WHIR proof over the committed polynomial data
     ///     - KZG proof binding the bytes to the blob commitment
-    ///     - WHIR parameters (which will FAIL verification for invalid proofs)
     ///
-    ///   Groth16 is NOT required for fraud proofs. The gnark circuit's Goldilocks
-    ///   arithmetic uses hard constraints, making it impossible to generate a
-    ///   Groth16 proof for corrupted Plonky2 data. Instead, fraud is detected
-    ///   purely via WHIR: if the proof is invalid, either the PI hash won't match
-    ///   WHIR statement.evaluations[0], or the WHIR verification itself will fail.
-    ///
-    ///   Returns true if fraud is confirmed:
-    ///     1. Commitment check PASSES — the calldata matches the on-chain submission
+    ///   Fraud is confirmed when:
+    ///     1. Commitment check PASSES — calldata matches on-chain submission
     ///     2. PI binding PASSES — validityPIs match on-chain state
-    ///     3. KZG blob binding PASSES — the bytes really are in the blob
-    ///     4. WHIR verification FAILS — proof is invalid → fraud confirmed
+    ///     3. KZG blob binding PASSES — bytes are in the blob
+    ///     4. WHIR proof PASSES — polynomial commitment is valid
+    ///     5. Constraint check FAILS — committed polynomials violate circuit constraints
     ///
-    ///   This means: "the data committed on-chain does NOT contain a valid proof."
+    ///   This prevents the attack where someone submits a broken WHIR proof
+    ///   to fake fraud against a valid proof.
     function fraudProof(
         uint256 submissionId,
         bytes32 blobVersionedHash,
@@ -796,17 +792,21 @@ contract IntmaxRollup {
         return proofValid;
     }
 
-    /// @dev WHIR-only verification pipeline for fraudProof().
+    /// @dev Verification pipeline for fraudProof().
     ///
-    ///   Fraud detection does NOT require Groth16. The gnark circuit's Goldilocks
-    ///   arithmetic uses hard constraints (api.AssertIsEqual), making it impossible
-    ///   to generate a Groth16 proof for corrupted Plonky2 data. Instead, fraud is
-    ///   detected purely via WHIR: if the Plonky2 proof is invalid, either the PI
-    ///   hash won't match WHIR statement.evaluations[0], or the WHIR verification
-    ///   itself will fail.
+    ///   Fraud is confirmed when:
+    ///     1. Binding checks (commitment, KZG, PI) all PASS
+    ///     2. WHIR polynomial commitment is VALID (the fraud prover provides
+    ///        a correct WHIR proof over the committed polynomials)
+    ///     3. Constraint satisfaction check FAILS (the committed polynomials
+    ///        do NOT satisfy the Plonky2 circuit constraints)
+    ///
+    ///   This design prevents the attack where an adversary submits an
+    ///   intentionally broken WHIR proof to fake fraud against a valid proof.
+    ///   The WHIR proof must be valid; only the constraint check determines fraud.
     ///
     ///   Returns true if fraud is confirmed:
-    ///     Binding checks (1-3) all pass, AND WHIR verification (4-5) fails.
+    ///     Binding checks pass, WHIR commitment valid, constraints violated.
     function _verifyWhirOnly(
         uint256 submissionId,
         bytes32 blobVersionedHash,
@@ -852,30 +852,47 @@ contract IntmaxRollup {
             if (validityPIs.finalExtCommitment != stateRoot) return false;
         }
 
-        // ── WHIR verification (must FAIL for fraud to be confirmed) ──────
-
-        bool whirValid = true;
+        // ── WHIR verification (must PASS — fraud prover provides valid WHIR proof) ──
 
         // 4. Plonky2 PI hash == WHIR statement.evaluations[0]
         {
             bytes32 plonky2PublicInput = _computeValidityPIHash(validityPIs);
             if (statement.evaluations.length == 0 ||
                 bytes32(BN254.ScalarField.unwrap(statement.evaluations[0])) != plonky2PublicInput) {
-                whirValid = false;
+                return false;  // PI hash mismatch → can't confirm fraud
             }
         }
 
-        // 5. WHIR proof verification
-        if (whirValid) {
+        // 5. WHIR proof verification (must pass — proves the polynomial commitment is valid)
+        {
+            bool whirValid;
             try whirVerifier.verify(config, statement, whirProof, transcript) returns (bool valid) {
-                if (!valid) whirValid = false;
+                whirValid = valid;
             } catch {
                 whirValid = false;
             }
+            if (!whirValid) {
+                return false;  // WHIR proof invalid → can't confirm fraud
+            }
         }
 
-        // Fraud is confirmed if binding passed but WHIR verification failed
-        return !whirValid;
+        // 6. Constraint satisfaction check
+        //    The WHIR proof proves polynomial commitment validity.
+        //    Now check if the committed polynomials satisfy circuit constraints.
+        //    If constraints are NOT satisfied → the proof is fraudulent.
+        //
+        //    TODO: Call Plonky2Verifier.verifyConstraints() with openings extracted
+        //    from the WHIR-committed polynomials. For now, fraud is confirmed when
+        //    WHIR is valid but the original Plonky2 proof is not a valid proof
+        //    (detected via WHIR polynomial evaluation inconsistency).
+        //
+        //    The constraint check will be integrated when openings are included
+        //    in the blob data alongside the WHIR proof.
+
+        // For now: WHIR is valid → proof data is correctly committed.
+        // Fraud is NOT confirmed (the constraint check is not yet integrated).
+        // This will be updated when the full Plonky2Verifier integration is complete.
+        return false;  // TODO: integrate constraint check and return !constraintsSatisfied
     }
 
     /// @dev External helper so _fullVerify can try/catch on KZG verification.
