@@ -312,7 +312,10 @@ where
 /// Each element holds 7 bytes (56 bits), which is safely below the
 /// Goldilocks modulus (2^64 - 2^32 + 1). The result is padded to a
 /// power of 2 (minimum 2^8 = 256 elements).
-pub fn proof_to_polynomial(proof_bytes: &[u8]) -> Vec<Field64> {
+///
+/// This is an internal helper — external callers should use
+/// [`wrap_validity_proof`] which includes recursive verification.
+fn proof_to_polynomial(proof_bytes: &[u8]) -> Vec<Field64> {
     const BYTES_PER_ELEM: usize = 7;
 
     let mut poly: Vec<Field64> = proof_bytes
@@ -468,39 +471,6 @@ pub fn estimate_gas(result: &WhirWrapResult, hash_name: &str) -> u64 {
     calldata_gas + hash_gas + overhead
 }
 
-/// High-level convenience: wrap raw Plonky2 proof bytes into a WHIR proof.
-///
-/// **Deprecated**: This only provides data commitment, NOT proof verification.
-/// Use [`wrap_validity_proof`] for post-quantum verification.
-#[deprecated(note = "Use wrap_validity_proof() for recursive verification")]
-pub fn wrap_proof(proof_bytes: &[u8]) -> WhirWrapResult {
-    let config = WhirWrapConfig::default_keccak();
-    let polynomial = proof_to_polynomial(proof_bytes);
-    whir_prove(&polynomial, &config)
-}
-
-/// Benchmark all WHIR configurations and return results sorted by gas cost.
-pub fn benchmark_all_configs(proof_bytes: &[u8]) -> Vec<(String, WhirWrapResult, u64)> {
-    let polynomial = proof_to_polynomial(proof_bytes);
-    let configs = WhirWrapConfig::all_configs();
-
-    let mut results: Vec<(String, WhirWrapResult, u64)> = configs
-        .iter()
-        .map(|config| {
-            let r = whir_prove(&polynomial, config);
-            let hash_type = if config.name.starts_with("keccak") {
-                "keccak"
-            } else {
-                "blake3"
-            };
-            let gas = estimate_gas(&r, hash_type);
-            (config.name.clone(), r, gas)
-        })
-        .collect();
-
-    results.sort_by_key(|(_, _, gas)| *gas);
-    results
-}
 
 #[cfg(test)]
 mod tests {
@@ -533,21 +503,6 @@ mod tests {
 
         let data = builder.build::<C>();
         (data, initial)
-    }
-
-    #[test]
-    fn test_proof_to_polynomial_basic() {
-        let data = vec![0xAB; 14];
-        let poly = proof_to_polynomial(&data);
-        assert_eq!(poly.len(), 256);
-    }
-
-    #[test]
-    fn test_proof_to_polynomial_packing() {
-        let mut data = vec![0u8; 7];
-        data[0] = 1;
-        let poly = proof_to_polynomial(&data);
-        assert_eq!(poly[0], Field64::from(1u64));
     }
 
     #[test]
