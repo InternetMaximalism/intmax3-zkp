@@ -13,13 +13,10 @@ pub mod serializer;
 pub mod trees;
 pub mod wrapper;
 
-/// WHIR post-quantum wrapper for Plonky2 proofs.
-/// Requires the `whir` cargo feature.
-#[cfg(feature = "whir")]
-pub mod whir_wrapper;
-
 /// WHIR-based Plonky2 prover — replaces FRI with WHIR as PCS.
-/// This is the cryptographically correct WHIR verification path.
+/// This extracts actual polynomial coefficients from Plonky2's prover
+/// and generates WHIR commitments + evaluation proofs over them,
+/// providing cryptographically sound post-quantum verification.
 /// Requires the `whir` cargo feature.
 #[cfg(feature = "whir")]
 pub mod whir_plonky2_prover;

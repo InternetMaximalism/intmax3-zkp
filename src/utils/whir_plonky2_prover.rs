@@ -73,7 +73,38 @@ use whir::{
     transcript::{codecs::Empty, DomainSeparator, ProverState, VerifierState},
 };
 
-use super::whir_wrapper::WhirWrapConfig;
+use whir::hash;
+
+// ---------------------------------------------------------------------------
+// Configuration (moved from whir_wrapper.rs)
+// ---------------------------------------------------------------------------
+
+/// WHIR wrapping configuration.
+pub struct WhirWrapConfig {
+    /// Human-readable name for this configuration.
+    pub name: String,
+    /// WHIR protocol parameters.
+    pub params: ProtocolParameters,
+}
+
+impl WhirWrapConfig {
+    /// Default configuration optimized for on-chain Keccak verification.
+    pub fn default_keccak() -> Self {
+        Self {
+            name: "keccak-rate2".to_string(),
+            params: ProtocolParameters {
+                security_level: 100,
+                pow_bits: 0,
+                initial_folding_factor: 4,
+                folding_factor: 4,
+                unique_decoding: false,
+                starting_log_inv_rate: 2,
+                batch_size: 1,
+                hash_id: hash::KECCAK,
+            },
+        }
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Types
