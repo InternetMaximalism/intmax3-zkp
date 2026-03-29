@@ -29,4 +29,4 @@ require (
 	rsc.io/tmplfunc v0.0.3 // indirect
 )
 
-replace github.com/succinctlabs/gnark-plonky2-verifier => ./gnark-plonky2-verifier
+replace github.com/succinctlabs/gnark-plonky2-verifier => github.com/InternetMaximalism/gnark-plonky2-verifier-with-fraudproof v0.0.0-20260329095815-b177da468a18

@@ -1,3 +1,5 @@
+github.com/InternetMaximalism/gnark-plonky2-verifier-with-fraudproof v0.0.0-20260329095815-b177da468a18 h1:4VJz2eDylsGzLKNl152FDWhvQaaUkXhOywqraNSoDOo=
+github.com/InternetMaximalism/gnark-plonky2-verifier-with-fraudproof v0.0.0-20260329095815-b177da468a18/go.mod h1:c144MdRU1b0w/khA+lTrTFGcRHiKp1obwv8VGv/LQzI=
 github.com/bits-and-blooms/bitset v1.8.0 h1:FD+XqgOZDUxxZ8hzoBFuV9+cGWY9CslN6d5MS5JVb4c=
 github.com/bits-and-blooms/bitset v1.8.0/go.mod h1:7hO7Gc7Pp1vODcmWvKMRA9BNmbv6a/7QIWpPxHddWR8=
 github.com/blang/semver/v4 v4.0.0 h1:1PFHFE6yCCTv8C1TeyNNarDzntLi7wMI5i/pzqYIsAM=
