@@ -36,8 +36,8 @@ ark-std = { version = "0.5", features = ["std"], optional = true }
 default = []
 whir = ["dep:whir", "dep:ark-ff", "dep:ark-std"]
 
-# [patch."https://github.com/InternetMaximalism/polygon-plonky2.git"]
-# plonky2 = { path = "../polygon-plonky2/plonky2" }
+[patch."https://github.com/InternetMaximalism/polygon-plonky2.git"]
+plonky2 = { path = "vendor/polygon-plonky2/plonky2" }
 
 [patch."https://github.com/arkworks-rs/nimue"]
 # WHIR needs the legacy Nimue transcript APIs (plugins, Merlin bindings).

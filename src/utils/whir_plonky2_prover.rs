@@ -48,14 +48,13 @@ use plonky2::{
         polynomial::PolynomialCoeffs,
         types::Field,
     },
-    fri::oracle::PolynomialBatch,
     hash::hash_types::RichField,
     iop::witness::PartialWitness,
     plonk::{
         circuit_data::CircuitData,
         config::{GenericConfig, Hasher},
-        plonk_common::reduce_with_powers,
-        proof::{OpeningSet, ProofWithPublicInputs},
+        proof::ProofWithPublicInputs,
+        prover::{prove_with_polys, ProverPolynomials},
     },
     util::timing::TimingTree,
 };
@@ -383,146 +382,82 @@ where
     // verified via FRI or WHIR — only the commitment scheme differs.
     // -----------------------------------------------------------------------
 
+    // -----------------------------------------------------------------------
+    // Phase 1: Plonky2 proof + polynomial extraction
+    //
+    // Uses the forked Plonky2's prove_with_polys() to get BOTH the standard
+    // proof AND the intermediate polynomial coefficients.
+    //
+    // Previously we could only access constants_sigmas (stored on CircuitData)
+    // and had to commit to opening values / FRI final poly as workarounds.
+    // Now we get the actual wire, Z/partial-product, and quotient polynomials.
+    // -----------------------------------------------------------------------
+
     let plonky2_start = Instant::now();
-    let standard_proof = circuit_data.prove(inputs)?;
+    let mut timing = TimingTree::default();
+    let (standard_proof, polys) = prove_with_polys(
+        &circuit_data.prover_only,
+        &circuit_data.common,
+        inputs,
+        &mut timing,
+    )?;
 
     // Verify locally as sanity check
     circuit_data.verify(standard_proof.clone())?;
     let plonky2_prove_time = plonky2_start.elapsed();
 
     // -----------------------------------------------------------------------
-    // Phase 2: Extract polynomial coefficients from circuit data
+    // Phase 2: WHIR commitments to actual polynomial coefficients
     //
-    // The PolynomialBatch objects store the actual polynomial coefficients.
-    // We convert them to WHIR's Field64 representation and generate WHIR proofs.
+    // We commit to the REAL polynomial coefficients from each batch:
+    //   1. constants_sigmas — fixed per circuit (selector + permutation polys)
+    //   2. wires — witness wire polynomials
+    //   3. zs_partial_products — Z polynomial + partial products (+ lookups)
+    //   4. quotient_chunks — quotient polynomial chunks
     //
-    // We access polynomials via CircuitData's stored commitments:
-    //   - constants_sigmas: prover_data.constants_sigmas_commitment.polynomials
-    //   - wires, Z, quotient: recomputed by proving (stored in PolynomialBatch)
+    // WHIR proves: "I committed to polynomial P, and P evaluates to v at
+    //               the canonical point."
     //
-    // Since PolynomialBatch.polynomials is pub, we can access the coefficients
-    // after the standard prover runs.  However, the wire/Z/quotient batches
-    // are local variables in prove().  To access them, we re-run the
-    // polynomial computation.
-    //
-    // OPTIMIZATION: In production, fork Plonky2 to expose the intermediate
-    // PolynomialBatch objects.  For correctness, we re-derive from witness.
+    // Combined with the on-chain constraint satisfaction check (which uses
+    // the openings — evaluations at ζ — derived from these polynomials),
+    // this provides a complete post-quantum validity proof.
     // -----------------------------------------------------------------------
 
     let whir_start = Instant::now();
 
-    // Constants + sigmas (fixed per circuit — always available)
-    let constants_sigmas_polys =
-        polys_to_whir_field(&circuit_data.prover_only.constants_sigmas_commitment.polynomials);
-
-    // For wires, Z, quotient: we re-run the prover to extract polynomial data.
-    // We use the standard proof's openings directly — they're identical because
-    // the polynomial computation is deterministic given the same witness.
-    //
-    // The WHIR commitment proves: "I committed to a polynomial whose coefficients
-    // hash to this commitment, and it evaluates to X at point Y."
-    //
-    // Combined with the constraint check (which uses the openings from the
-    // standard proof), this proves the computation is correct.
-
-    // Generate WHIR commitments
-    // Bind expected_result into WHIR session names.
-    // This ensures a validity proof (expected_result=true) cannot be replayed
-    // as a fraud proof (expected_result=false) because the Fiat-Shamir domain
-    // separator differs.
+    // Bind expected_result into WHIR session names for domain separation.
     let er_tag = if expected_result { "valid" } else { "fraud" };
 
+    // Batch 1: Constants + sigmas (fixed per circuit)
+    let constants_sigmas_polys =
+        polys_to_whir_field(&circuit_data.prover_only.constants_sigmas_commitment.polynomials);
     let constants_sigmas_whir = whir_commit_and_prove(
         &constants_sigmas_polys,
         &format!("whir-plonky2-constants-sigmas-{}", er_tag),
         whir_config,
     );
 
-    // For the wire/Z/quotient polynomials, we need the actual coefficients.
-    // Since these are internal to prove(), we generate WHIR proofs for
-    // the combined polynomial that the FRI proof operates on.
-    //
-    // The FRI proof proves: "the batched polynomial (linear combination of all
-    // committed polynomials) is low-degree and evaluates correctly at zeta."
-    //
-    // WHIR proves the same claim: the polynomial coefficients hash to the
-    // WHIR commitment, and the polynomial evaluates correctly.
-    //
-    // We extract the combined polynomial from the FRI proof's final polynomial.
-    // This is the "reduced" polynomial after FRI folding rounds.
-    //
-    // Actually, we can do better: commit to the OPENING VALUES directly.
-    // The openings are public (part of the proof). The constraint check
-    // verifies they're consistent. WHIR proves they came from committed
-    // polynomials. Together = full verification.
-
-    // Commit to all opening values as a single polynomial
-    let opening_values = collect_opening_values::<F, D>(&standard_proof.proof.openings);
-    let opening_poly = values_to_whir_field::<F>(&opening_values);
-
+    // Batch 2: Wire polynomials (actual coefficients from prove_with_polys)
+    let wires_poly = polys_to_whir_field(&polys.wires);
     let wires_whir = whir_commit_and_prove(
-        &opening_poly,
-        &format!("whir-plonky2-openings-zeta-{}", er_tag),
+        &wires_poly,
+        &format!("whir-plonky2-wires-{}", er_tag),
         whir_config,
     );
 
-    // Commit to the FRI final polynomial (the reduced polynomial after all folding).
-    // This is the core of what FRI proves — the combined polynomial is low-degree.
-    // WHIR replaces this: if WHIR proves the polynomial commitment is valid,
-    // it certifies the same low-degree property that FRI certifies.
-    let fri_final_coeffs: Vec<F> = standard_proof
-        .proof
-        .opening_proof
-        .final_poly
-        .coeffs
-        .iter()
-        .flat_map(|ext| {
-            let json = serde_json::to_string(ext).unwrap_or_default();
-            serde_json::from_str::<Vec<u64>>(&json)
-                .unwrap_or_default()
-                .into_iter()
-                .map(F::from_canonical_u64)
-                .collect::<Vec<_>>()
-        })
-        .collect();
-    let fri_final_whir = values_to_whir_field::<F>(&fri_final_coeffs);
-
+    // Batch 3: Z + partial products + lookup polynomials
+    let zs_poly = polys_to_whir_field(&polys.zs_partial_products);
     let zs_partial_products_whir = whir_commit_and_prove(
-        &fri_final_whir,
-        &format!("whir-plonky2-fri-final-poly-{}", er_tag),
+        &zs_poly,
+        &format!("whir-plonky2-zs-partial-products-{}", er_tag),
         whir_config,
     );
 
-    // Commit to Merkle caps serialized as bytes → Field64.
-    // This binds the WHIR proof to the specific polynomial commitments.
-    let mut cap_bytes = Vec::new();
-    cap_bytes.extend_from_slice(
-        &serde_json::to_vec(&standard_proof.proof.wires_cap).unwrap_or_default(),
-    );
-    cap_bytes.extend_from_slice(
-        &serde_json::to_vec(&standard_proof.proof.plonk_zs_partial_products_cap)
-            .unwrap_or_default(),
-    );
-    cap_bytes.extend_from_slice(
-        &serde_json::to_vec(&standard_proof.proof.quotient_polys_cap).unwrap_or_default(),
-    );
-    // Pack bytes into Field64 (7 bytes per element)
-    let mut caps_poly: Vec<Field64> = cap_bytes
-        .chunks(7)
-        .map(|chunk| {
-            let mut val = 0u64;
-            for (i, &b) in chunk.iter().enumerate() {
-                val |= (b as u64) << (8 * i);
-            }
-            Field64::from(val)
-        })
-        .collect();
-    let target = caps_poly.len().next_power_of_two().max(256);
-    caps_poly.resize(target, Field64::ZERO);
-
+    // Batch 4: Quotient polynomial chunks
+    let quotient_poly = polys_to_whir_field(&polys.quotient_chunks);
     let quotient_polys_whir = whir_commit_and_prove(
-        &caps_poly,
-        &format!("whir-plonky2-merkle-caps-{}", er_tag),
+        &quotient_poly,
+        &format!("whir-plonky2-quotient-{}", er_tag),
         whir_config,
     );
 
@@ -549,48 +484,6 @@ where
     })
 }
 
-/// Collect all opening values into a flat vector of base field elements.
-fn collect_opening_values<F: RichField + Extendable<D>, const D: usize>(
-    openings: &OpeningSet<F, D>,
-) -> Vec<F> {
-    let mut values = Vec::new();
-    // Flatten extension field elements to base field
-    for ext in openings
-        .constants
-        .iter()
-        .chain(openings.plonk_sigmas.iter())
-        .chain(openings.wires.iter())
-        .chain(openings.plonk_zs.iter())
-        .chain(openings.plonk_zs_next.iter())
-        .chain(openings.partial_products.iter())
-        .chain(openings.quotient_polys.iter())
-        .chain(openings.lookup_zs.iter())
-        .chain(openings.lookup_zs_next.iter())
-    {
-        // Convert extension field element to base field components
-        // Serialize extension element to JSON, extract u64 values
-        // This is portable across all extension degrees (D=1,2,4,5)
-        let json = serde_json::to_string(ext).unwrap_or_default();
-        // Extension elements serialize as [u64, u64, ...] (D elements)
-        if let Ok(arr) = serde_json::from_str::<Vec<u64>>(&json) {
-            for val in arr {
-                values.push(F::from_canonical_u64(val));
-            }
-        }
-    }
-    values
-}
-
-/// Convert Plonky2 field values to WHIR Field64 elements, padded to power of 2.
-fn values_to_whir_field<F: RichField>(values: &[F]) -> Vec<Field64> {
-    let mut poly: Vec<Field64> = values
-        .iter()
-        .map(|v| Field64::from(v.to_canonical_u64()))
-        .collect();
-    let target = poly.len().next_power_of_two().max(256);
-    poly.resize(target, Field64::ZERO);
-    poly
-}
 
 // ---------------------------------------------------------------------------
 // Verifier
@@ -752,6 +645,17 @@ mod tests {
     #[test]
     fn test_whir_plonky2_prove_and_verify() {
         let (cd, initial) = build_test_circuit();
+
+        // Print gate information for Solidity constraint checker
+        println!("=== Circuit Gate Types ===");
+        for (i, gate) in cd.common.gates.iter().enumerate() {
+            println!("  Gate {}: {} (num_constraints={})", i, gate.0.id(), gate.0.num_constraints());
+        }
+        println!("  degree_bits: {}", cd.common.degree_bits());
+        println!("  num_challenges: {}", cd.common.config.num_challenges);
+        println!("  num_routed_wires: {}", cd.common.config.num_routed_wires);
+        println!("  quotient_degree_factor: {}", cd.common.quotient_degree_factor);
+
         let pw = make_witness(initial);
 
         let config = WhirWrapConfig::default_keccak();
