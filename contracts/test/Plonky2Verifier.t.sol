@@ -8,12 +8,7 @@ import "../src/GoldilocksField.sol";
 /// @title Plonky2VerifierTest — E2E test using real Plonky2 proof data
 /// @dev Loads opening values, challenges, and circuit params exported from Rust
 ///      and verifies that the Plonky2 constraint checker accepts a valid proof.
-contract Plonky2VerifierTest is Test {
-    Plonky2Verifier verifier;
-
-    function setUp() public {
-        verifier = new Plonky2Verifier();
-    }
+contract Plonky2VerifierTest is Test, Plonky2Verifier {
 
     /// @dev Load fixture data and call verifyConstraints
     function test_verifyConstraints_validProof() public {
@@ -73,11 +68,8 @@ contract Plonky2VerifierTest is Test {
         emit log_named_uint("numRoutedWires", params.numRoutedWires);
         emit log_named_uint("numPartialProducts", params.numPartialProducts);
 
-        // Call verifyConstraints
-        bool result = verifier.verifyConstraints(
-            openings, params, challenges, permData, gates, publicInputs
-        );
-
+        // Call verifyConstraints as internal (this contract inherits Plonky2Verifier)
+        bool result = verifyConstraints(openings, params, challenges, permData, gates, publicInputs);
         assertTrue(result, "Constraint verification should pass for valid proof");
     }
 

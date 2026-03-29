@@ -302,23 +302,8 @@ contract Plonky2Verifier {
     function _evalPoseidonGateExt2(
         Openings memory openings
     ) internal pure returns (GoldilocksExt2.Ext2[] memory) {
-        // Delegate to PoseidonGateEval library
-        // Convert wire Ext2 values to base field (take c0 component)
-        // PoseidonGate operates in base field
-        uint256 numWires = 135;
-        uint256[] memory baseWires = new uint256[](numWires);
-        for (uint256 i = 0; i < numWires && i < openings.wires.length; i++) {
-            baseWires[i] = openings.wires[i].c0;
-        }
-
-        uint256[] memory baseConstraints = PoseidonGateEval.evaluate(baseWires);
-
-        // Convert back to Ext2
-        GoldilocksExt2.Ext2[] memory c = new GoldilocksExt2.Ext2[](baseConstraints.length);
-        for (uint256 i = 0; i < baseConstraints.length; i++) {
-            c[i] = GoldilocksExt2.fromBase(baseConstraints[i]);
-        }
-        return c;
+        // Delegate to PoseidonGateEval library (Ext2 version)
+        return PoseidonGateEval.evaluateExt2(openings.wires);
     }
 
     function _evalArithmeticGateExt2(
