@@ -47,12 +47,11 @@ func main() {
 	dataDir := flag.String("data", "", "directory containing proof_with_public_inputs.json, verifier_only_circuit_data.json, common_circuit_data.json")
 	outFile := flag.String("out", "groth16_proof.json", "output file for Groth16 proof")
 	solFile := flag.String("sol", "", "output Solidity verifier contract (optional)")
-	expectedResult := flag.Int("expected-result", 1, "1 = prove validity (finalize), 0 = prove fraud")
 	setupDir := flag.String("setup-dir", "", "directory to save/load trusted setup (pk.bin, vk.bin). If empty, setup is regenerated each time (dev mode)")
 	flag.Parse()
 
 	if *dataDir == "" {
-		fmt.Fprintln(os.Stderr, "Usage: gnark-wrapper --data <dir> [--out groth16_proof.json] [--sol Verifier.sol] [--expected-result 0|1]")
+		fmt.Fprintln(os.Stderr, "Usage: gnark-wrapper --data <dir> [--out groth16_proof.json] [--sol Verifier.sol]")
 		os.Exit(1)
 	}
 
@@ -67,17 +66,17 @@ func main() {
 		types.ReadVerifierOnlyCircuitData(*dataDir + "/verifier_only_circuit_data.json"),
 	)
 
-	// Use FraudAwareVerifierCircuit for soft verification.
-	// This enables Groth16 proof generation for both
-	// valid (ExpectedResult=1) and invalid (ExpectedResult=0) Plonky2 proofs.
-	circuit := verifier.FraudAwareVerifierCircuit{
+	// Use ExampleVerifierCircuit: Plonky2 proof is private, only PublicInputs are public.
+	// The Plonky2 validity circuit registers keccak256(ValidityPublicInputs).to_u32_vec()
+	// (8 big-endian u32 limbs) as its public inputs. gnark maps each Goldilocks element
+	// to one BN254 scalar, so groth16.pubInputs will have exactly 8 elements.
+	circuit := verifier.ExampleVerifierCircuit{
 		Proof:                   proofWithPis.Proof,
 		PublicInputs:            proofWithPis.PublicInputs,
 		VerifierOnlyCircuitData: verifierOnlyCircuitData,
 		CommonCircuitData:       commonCircuitData,
 	}
 
-	fmt.Fprintf(os.Stderr, "[gnark] Expected result: %d (1=validity, 0=fraud)\n", *expectedResult)
 	fmt.Fprintf(os.Stderr, "[gnark] Compiling R1CS circuit...\n")
 	cs, err := frontend.Compile(ecc.BN254.ScalarField(), r1cs.NewBuilder, &circuit)
 	if err != nil {
@@ -153,9 +152,8 @@ func main() {
 	assignmentProofWithPis := variables.DeserializeProofWithPublicInputs(
 		types.ReadProofWithPublicInputs(*dataDir + "/proof_with_public_inputs.json"),
 	)
-	assignment := verifier.FraudAwareVerifierCircuit{
-		ExpectedResult: *expectedResult,
-		PublicInputs:   assignmentProofWithPis.PublicInputs,
+	assignment := verifier.ExampleVerifierCircuit{
+		PublicInputs: assignmentProofWithPis.PublicInputs,
 	}
 	witness, err := frontend.NewWitness(&assignment, ecc.BN254.ScalarField())
 	if err != nil {
@@ -210,11 +208,7 @@ func main() {
 	json.Unmarshal(pubWitnessJSON, &pubWitnessMap)
 
 	var pubInputStrs []string
-	// Add ExpectedResult first
-	if er, ok := pubWitnessMap["ExpectedResult"]; ok {
-		pubInputStrs = append(pubInputStrs, fmt.Sprintf("%v", er))
-	}
-	// Add Plonky2 public inputs
+	// Add Plonky2 public inputs (8 Goldilocks elements = 8 u32 limbs of keccak256(ValidityPIs))
 	if pis, ok := pubWitnessMap["PublicInputs"]; ok {
 		if pisList, ok := pis.([]interface{}); ok {
 			for _, pi := range pisList {

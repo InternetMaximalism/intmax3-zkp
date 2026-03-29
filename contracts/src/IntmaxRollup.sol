@@ -51,7 +51,8 @@ contract WhirVerifierWrapper {
 ///    a) Blob commitment (KZG multi-point opening)
 ///    b) ValidityPublicInputs match on-chain state
 ///    c) Proof params binding (blob bytes == abi.encode(groth16, whir))
-///    d) WHIR statement.evaluations[0] == plonky2 public input hash
+///    d) Groth16 pubInputs[0..7] == keccak256(ValidityPublicInputs) as 8 big-endian u32 limbs
+///       (matches the Plonky2 validity circuit's public inputs as exposed by gnark)
 ///    e) WHIR proof verification
 ///    f) Groth16 verification
 ///
@@ -706,19 +707,24 @@ contract IntmaxRollup {
         if (validityPIs.finalBlockChain != blockHashChainAt[validityPIs.finalBlockNumber]) return false;
         if (validityPIs.finalExtCommitment != stateRoot) return false;
 
-        // 4. WhirConfig must match registered config
-        if (keccak256(abi.encode(config)) != whirConfigHash) return false;
-
-        // 5. PI hash must match WHIR statement
-        {
-            bytes32 piHash = _computeValidityPIHash(validityPIs);
-            if (statement.evaluations.length == 0 ||
-                bytes32(BN254.ScalarField.unwrap(statement.evaluations[0])) != piHash) {
-                return false;
-            }
+        // 4. Proof params binding: blob must encode exactly (groth16, config, statement, whirProof, transcript)
+        if (keccak256(abi.encode(groth16, config, statement, whirProof, transcript)) != keccak256(proofBytes)) {
+            return false;
         }
 
-        // 6. WHIR verification
+        // 5. WhirConfig must match registered config
+        if (keccak256(abi.encode(config)) != whirConfigHash) return false;
+
+        // 6. Groth16 pubInputs must encode keccak256(ValidityPublicInputs) as 8 big-endian u32 limbs.
+        //    The gnark ExampleVerifierCircuit exposes the Plonky2 validity circuit's public inputs
+        //    directly: the circuit registers keccak256(ValidityPublicInputs).to_u32_vec() (8 limbs)
+        //    as its public inputs, and gnark maps each Goldilocks element to one BN254 scalar.
+        {
+            bytes32 piHash = _computeValidityPIHash(validityPIs);
+            if (!_groth16PIHashMatches(groth16.pubInputs, piHash)) return false;
+        }
+
+        // 7. WHIR verification
         bool whirValid;
         try whirVerifier.verify(config, statement, whirProof, transcript) returns (bool v) {
             whirValid = v;
@@ -727,7 +733,7 @@ contract IntmaxRollup {
         }
         if (!whirValid) return false;
 
-        // 7. Groth16 verification
+        // 8. Groth16 verification
         if (!Groth16Verifier.verify(groth16Vk, groth16.proof, groth16.pubInputs)) return false;
 
         return true;
@@ -743,7 +749,7 @@ contract IntmaxRollup {
     ///
     ///   Fraud confirmed if any of:
     ///     (a) Wrong WhirConfig in committed blob
-    ///     (b) PI hash mismatch in committed WHIR statement
+    ///     (b) Groth16 pubInputs[0] != keccak256(ValidityPublicInputs) — PI hash mismatch
     ///     (c) WHIR verification fails
     ///     (d) Groth16 verification fails
     function _verifyFraud(
@@ -793,13 +799,10 @@ contract IntmaxRollup {
         // (a) Wrong WhirConfig
         if (keccak256(abi.encode(config)) != whirConfigHash) return true;
 
-        // (b) PI hash mismatch in WHIR statement
+        // (b) Groth16 pubInputs don't encode the correct PI hash as 8 big-endian u32 limbs
         {
             bytes32 piHash = _computeValidityPIHash(validityPIs);
-            if (statement.evaluations.length == 0 ||
-                bytes32(BN254.ScalarField.unwrap(statement.evaluations[0])) != piHash) {
-                return true;
-            }
+            if (!_groth16PIHashMatches(groth16.pubInputs, piHash)) return true;
         }
 
         // (c) WHIR verification fails
@@ -976,6 +979,26 @@ contract IntmaxRollup {
                 pis.prover
             )
         );
+    }
+
+    /// @dev Check that Groth16 pubInputs encode piHash as 8 big-endian u32 limbs.
+    ///
+    /// The Plonky2 validity circuit registers keccak256(ValidityPublicInputs) as its public
+    /// inputs by calling Bytes32::to_u32_vec() — 8 u32 values in big-endian byte order.
+    /// gnark's ExampleVerifierCircuit exposes each Goldilocks element as one BN254 scalar,
+    /// so pubInputs must have exactly 8 elements, each equal to the corresponding u32 limb.
+    function _groth16PIHashMatches(
+        uint256[] memory pubInputs,
+        bytes32 piHash
+    ) internal pure returns (bool) {
+        if (pubInputs.length != 8) return false;
+        uint256 h = uint256(piHash);
+        for (uint256 i = 0; i < 8; i++) {
+            // Extract the i-th big-endian u32 limb: bits [255-i*32 .. 224-i*32]
+            uint256 limb = (h >> (224 - i * 32)) & 0xFFFFFFFF;
+            if (pubInputs[i] != limb) return false;
+        }
+        return true;
     }
 
     /// @dev Compute block hash matching Rust's Block::hash_with_prev_hash:

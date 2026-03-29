@@ -71,15 +71,18 @@ contract IntmaxRollupTest is Test {
         vm.mockCall(address(0x08), new bytes(0), abi.encode(uint256(1)));
     }
 
-    /// @dev Dummy Groth16 verifying key with 1 public input (2 IC points).
+    /// @dev Dummy Groth16 verifying key with 8 public inputs (9 IC points).
+    ///      The gnark ExampleVerifierCircuit exposes 8 Goldilocks elements (u32 limbs of piHash)
+    ///      as public inputs, so the VK needs IC[0..8] = 9 points.
     function _dummyGroth16Vk() internal pure returns (Groth16Verifier.VerifyingKey memory vk) {
         vk.alpha = [uint256(1), uint256(2)];
         vk.beta  = [[uint256(1), uint256(2)], [uint256(3), uint256(4)]];
         vk.gamma = [[uint256(5), uint256(6)], [uint256(7), uint256(8)]];
         vk.delta = [[uint256(9), uint256(10)], [uint256(11), uint256(12)]];
-        vk.ic = new uint256[2][](2);
-        vk.ic[0] = [uint256(1), uint256(2)];
-        vk.ic[1] = [uint256(1), uint256(2)];
+        vk.ic = new uint256[2][](9);  // IC[0] + IC[1..8] for 8 public inputs
+        for (uint256 i = 0; i < 9; i++) {
+            vk.ic[i] = [uint256(1), uint256(2)];
+        }
     }
 
     function _dummyGroth16Proof() internal pure returns (Groth16Verifier.Proof memory proof) {
@@ -88,21 +91,34 @@ contract IntmaxRollupTest is Test {
         proof.c = [uint256(1), uint256(2)];
     }
 
-    function _dummyGroth16PubInputs(uint256 expectedResult) internal pure returns (uint256[] memory) {
-        uint256[] memory inputs = new uint256[](1);
-        inputs[0] = expectedResult;  // 1 = validity, 0 = fraud
-        return inputs;
-    }
-
+    /// @dev Dummy Groth16 with all-zero pubInputs (8 limbs). Use when PI hash check is mocked.
     function _dummyGroth16() internal pure returns (IntmaxRollup.Groth16Params memory) {
-        return _dummyGroth16WithExpected(1);  // default: validity mode
+        uint256[] memory inputs = new uint256[](8);
+        return IntmaxRollup.Groth16Params({proof: _dummyGroth16Proof(), pubInputs: inputs});
     }
 
-    function _dummyGroth16WithExpected(uint256 expectedResult) internal pure returns (IntmaxRollup.Groth16Params memory) {
-        return IntmaxRollup.Groth16Params({
-            proof: _dummyGroth16Proof(),
-            pubInputs: _dummyGroth16PubInputs(expectedResult)
-        });
+    /// @dev Compute keccak256(ValidityPublicInputs) — same layout as the contract's _computeValidityPIHash.
+    function _computePIHash(IntmaxRollup.ValidityPublicInputs memory pis) internal pure returns (bytes32) {
+        return keccak256(abi.encodePacked(
+            pis.initialBlockNumber,
+            pis.initialBlockChain,
+            pis.initialExtCommitment,
+            pis.finalBlockNumber,
+            pis.finalBlockChain,
+            pis.finalExtCommitment,
+            pis.prover
+        ));
+    }
+
+    /// @dev Groth16 params with pubInputs = piHash split into 8 big-endian u32 limbs.
+    ///      Matches the Plonky2 validity circuit's public inputs as exposed by gnark.
+    function _dummyGroth16WithPIHash(bytes32 piHash) internal pure returns (IntmaxRollup.Groth16Params memory) {
+        uint256[] memory inputs = new uint256[](8);
+        uint256 h = uint256(piHash);
+        for (uint256 i = 0; i < 8; i++) {
+            inputs[i] = (h >> (224 - i * 32)) & 0xFFFFFFFF;
+        }
+        return IntmaxRollup.Groth16Params({proof: _dummyGroth16Proof(), pubInputs: inputs});
     }
 
     function _dummyKZG(uint256 dataLen) internal view returns (KZGProof memory kzg) {
@@ -437,10 +453,16 @@ contract IntmaxRollupTest is Test {
             bytes memory transcript
         ) = loadProof();
 
-        bytes memory plonky2Bytes = abi.encode(config, statement, whirProof, transcript);
-        bytes32 proofHash   = keccak256(plonky2Bytes);
-        uint32  proofLength = uint32(plonky2Bytes.length);
-        bytes32 stateRoot   = keccak256("finalized_state");
+        bytes32 stateRoot = keccak256("finalized_state");
+
+        // vpis computed BEFORE posting so blockHashChainAt[0]=0 and finalBlockNumber=0 always match.
+        IntmaxRollup.ValidityPublicInputs memory vpis = _defaultValidityPIs(stateRoot);
+        bytes32 piHash = _computePIHash(vpis);
+        IntmaxRollup.Groth16Params memory groth16 = _dummyGroth16WithPIHash(piHash);
+
+        bytes memory proofBytes = abi.encode(groth16, config, statement, whirProof, transcript);
+        bytes32 proofHash   = keccak256(proofBytes);
+        uint32  proofLength = uint32(proofBytes.length);
 
         uint32[] memory ids = new uint32[](1);
         ids[0] = 1;
@@ -452,21 +474,17 @@ contract IntmaxRollupTest is Test {
         rollup.postBlockAndSubmit{value: 1 ether}(batch, proofHash, proofLength, stateRoot);
         assertEq(submitter.balance, stakeBalanceBefore - 1 ether, "stake should lock 1 ETH");
 
-        // Build ValidityPublicInputs matching the latest on-chain state
-        IntmaxRollup.ValidityPublicInputs memory vpis = _defaultValidityPIs(stateRoot);
-        _patchStatementWithPIHash(statement, vpis);
-
         _mockBLSPrecompiles();
         _mockWhirVerifierTrue();
         _mockGroth16Pairing();
 
         bool ok = rollup.finalize(
             0, _kzgBlobHash, stateRoot,
-            plonky2Bytes,
+            proofBytes,
             vpis,
             config, statement, whirProof, transcript,
-            _dummyKZG(plonky2Bytes.length),
-            _dummyGroth16()
+            _dummyKZG(proofBytes.length),
+            groth16
         );
 
         assertTrue(ok);
@@ -483,10 +501,15 @@ contract IntmaxRollupTest is Test {
             bytes memory transcript
         ) = loadProof();
 
-        bytes memory plonky2Bytes = abi.encode(config, statement, whirProof, transcript);
-        bytes32 proofHash   = keccak256(plonky2Bytes);
-        uint32  proofLength = uint32(plonky2Bytes.length);
-        bytes32 stateRoot   = keccak256("s");
+        bytes32 stateRoot = keccak256("s");
+
+        IntmaxRollup.ValidityPublicInputs memory vpis = _defaultValidityPIs(stateRoot);
+        bytes32 piHash = _computePIHash(vpis);
+        IntmaxRollup.Groth16Params memory groth16 = _dummyGroth16WithPIHash(piHash);
+
+        bytes memory proofBytes = abi.encode(groth16, config, statement, whirProof, transcript);
+        bytes32 proofHash   = keccak256(proofBytes);
+        uint32  proofLength = uint32(proofBytes.length);
 
         uint32[] memory ids = new uint32[](1);
         ids[0] = 7;
@@ -496,26 +519,23 @@ contract IntmaxRollupTest is Test {
         vm.prank(submitter);
         rollup.postBlockAndSubmit{value: 1 ether}(batch, proofHash, proofLength, stateRoot);
 
-        IntmaxRollup.ValidityPublicInputs memory vpis = _defaultValidityPIs(stateRoot);
-        _patchStatementWithPIHash(statement, vpis);
-
         _mockBLSPrecompiles();
         _mockWhirVerifierTrue();
         _mockGroth16Pairing();
 
         assertTrue(rollup.finalize(
-            0, _kzgBlobHash, stateRoot, plonky2Bytes, vpis,
+            0, _kzgBlobHash, stateRoot, proofBytes, vpis,
             config, statement, whirProof, transcript,
-            _dummyKZG(plonky2Bytes.length),
-            _dummyGroth16()
+            _dummyKZG(proofBytes.length),
+            groth16
         ));
 
         // Second call returns false (already finalized)
         assertFalse(rollup.finalize(
-            0, _kzgBlobHash, stateRoot, plonky2Bytes, vpis,
+            0, _kzgBlobHash, stateRoot, proofBytes, vpis,
             config, statement, whirProof, transcript,
-            _dummyKZG(plonky2Bytes.length),
-            _dummyGroth16()
+            _dummyKZG(proofBytes.length),
+            groth16
         ));
     }
 
@@ -527,13 +547,15 @@ contract IntmaxRollupTest is Test {
             bytes memory transcript
         ) = loadProof();
 
-        bytes memory plonky2Bytes = abi.encode(config, statement, whirProof, transcript);
         bytes32 stateRoot = keccak256("state");
 
-        // Build VPIs with wrong initialExtCommitment
+        // Build VPIs with wrong initialExtCommitment (before posting so other fields are correct)
         IntmaxRollup.ValidityPublicInputs memory vpis = _defaultValidityPIs(stateRoot);
         vpis.initialExtCommitment = bytes32(uint256(0xbad));
-        _patchStatementWithPIHash(statement, vpis);
+        bytes32 piHash = _computePIHash(vpis);
+        IntmaxRollup.Groth16Params memory groth16 = _dummyGroth16WithPIHash(piHash);
+
+        bytes memory proofBytes = abi.encode(groth16, config, statement, whirProof, transcript);
 
         uint32[] memory ids = new uint32[](1);
         ids[0] = 9;
@@ -541,20 +563,21 @@ contract IntmaxRollupTest is Test {
 
         _mockKZGBlob();
         vm.prank(submitter);
-        rollup.postBlockAndSubmit{value: 1 ether}(batch, keccak256(plonky2Bytes), uint32(plonky2Bytes.length), stateRoot);
+        rollup.postBlockAndSubmit{value: 1 ether}(batch, keccak256(proofBytes), uint32(proofBytes.length), stateRoot);
 
         _mockBLSPrecompiles();
 
-        // Returns false (initial state mismatch)
+        // Returns false (initial state mismatch — initialExtCommitment = 0xbad ≠ latestFinalizedStateRoot = 0)
         assertFalse(rollup.finalize(
-            0, _kzgBlobHash, stateRoot, plonky2Bytes, vpis,
+            0, _kzgBlobHash, stateRoot, proofBytes, vpis,
             config, statement, whirProof, transcript,
-            _dummyKZG(plonky2Bytes.length),
-            _dummyGroth16()
+            _dummyKZG(proofBytes.length),
+            groth16
         ));
     }
 
-    function test_finalize_whirPIMismatch() public {
+    /// @notice finalize() returns false when groth16.pubInputs[0] != keccak256(ValidityPublicInputs).
+    function test_finalize_wrongGroth16PubInputs() public {
         (
             WhirConfig memory config,
             Statement memory statement,
@@ -562,8 +585,13 @@ contract IntmaxRollupTest is Test {
             bytes memory transcript
         ) = loadProof();
 
-        bytes memory plonky2Bytes = abi.encode(config, statement, whirProof, transcript);
         bytes32 stateRoot = keccak256("state_mismatch");
+
+        IntmaxRollup.ValidityPublicInputs memory vpis = _defaultValidityPIs(stateRoot);
+        // pubInputs[0] = 1, which is != keccak256(vpis) → PI binding check fails
+        IntmaxRollup.Groth16Params memory groth16 = _dummyGroth16(); // pubInputs[0] = 1
+
+        bytes memory proofBytes = abi.encode(groth16, config, statement, whirProof, transcript);
 
         uint32[] memory ids = new uint32[](1);
         ids[0] = 11;
@@ -571,19 +599,16 @@ contract IntmaxRollupTest is Test {
 
         _mockKZGBlob();
         vm.prank(submitter);
-        rollup.postBlockAndSubmit{value: 1 ether}(batch, keccak256(plonky2Bytes), uint32(plonky2Bytes.length), stateRoot);
-
-        IntmaxRollup.ValidityPublicInputs memory vpis = _defaultValidityPIs(stateRoot);
-        // Do NOT patch statement — evaluations[0] won't match
+        rollup.postBlockAndSubmit{value: 1 ether}(batch, keccak256(proofBytes), uint32(proofBytes.length), stateRoot);
 
         _mockBLSPrecompiles();
 
-        // Returns false (PI mismatch)
+        // Returns false: groth16.pubInputs[0] = 1 ≠ keccak256(vpis)
         assertFalse(rollup.finalize(
-            0, _kzgBlobHash, stateRoot, plonky2Bytes, vpis,
+            0, _kzgBlobHash, stateRoot, proofBytes, vpis,
             config, statement, whirProof, transcript,
-            _dummyKZG(plonky2Bytes.length),
-            _dummyGroth16()
+            _dummyKZG(proofBytes.length),
+            groth16
         ));
     }
 
@@ -633,7 +658,7 @@ contract IntmaxRollupTest is Test {
         rollup.postBlockAndSubmit{value: 1 ether}(batch, proofHash, proofLength, stateRoot);
 
         IntmaxRollup.ValidityPublicInputs memory vpis = _defaultValidityPIs(stateRoot);
-        // Deliberately do NOT patch statement — evaluations[0] won't match PI hash → fraud
+        // groth16.pubInputs[0] = 1 ≠ keccak256(vpis) → fraud confirmed via condition (b)
 
         _mockBLSPrecompiles();
 
@@ -769,7 +794,7 @@ contract IntmaxRollupTest is Test {
         );
 
         IntmaxRollup.ValidityPublicInputs memory vpis = _defaultValidityPIs(stateRoot);
-        // Do NOT patch statement → PI hash mismatch → fraud confirmed
+        // groth16.pubInputs[0] = 1 ≠ keccak256(vpis) → fraud confirmed via condition (b)
 
         _mockBLSPrecompiles();
         address reporter = makeAddr("reporter");
@@ -824,7 +849,7 @@ contract IntmaxRollupTest is Test {
         _postAndSubmitDefault(goodBatch);
 
         IntmaxRollup.ValidityPublicInputs memory vpis = _defaultValidityPIs(badState);
-        // Do NOT patch statement — PI hash mismatch → fraud confirmed
+        // groth16.pubInputs[0] = 1 ≠ keccak256(vpis) → fraud confirmed via condition (b)
 
         _mockBLSPrecompiles();
 
@@ -876,10 +901,12 @@ contract IntmaxRollupTest is Test {
         // blockHashChainAt[0] stays 0 forever, so PI binding will pass.
         bytes32 stateRoot = keccak256("e2e_fraud_state");
         IntmaxRollup.ValidityPublicInputs memory vpis = _defaultValidityPIs(stateRoot);
-        _patchStatementWithPIHash(statement, vpis);
+
+        // Use correct piHash so Groth16 pubInputs condition (b) passes — fraud confirmed by WHIR (c).
+        bytes32 piHash = _computePIHash(vpis);
+        IntmaxRollup.Groth16Params memory groth16 = _dummyGroth16WithPIHash(piHash);
 
         // Encode corrupted transcript INTO proofBytes so params binding passes
-        IntmaxRollup.Groth16Params memory groth16 = _dummyGroth16();
         bytes memory proofBytes = abi.encode(groth16, config, statement, whirProof, corruptedTranscript);
         bytes32 proofHash = keccak256(proofBytes);
         uint32 proofLength = uint32(proofBytes.length);
@@ -929,10 +956,12 @@ contract IntmaxRollupTest is Test {
         // Compute vpis BEFORE posting (initial zero state)
         bytes32 stateRoot = keccak256("random_bytes_fraud");
         IntmaxRollup.ValidityPublicInputs memory vpis = _defaultValidityPIs(stateRoot);
-        _patchStatementWithPIHash(statement, vpis);
+
+        // Use correct piHash so condition (b) passes — fraud confirmed by real WHIR (c).
+        bytes32 piHash = _computePIHash(vpis);
+        IntmaxRollup.Groth16Params memory groth16 = _dummyGroth16WithPIHash(piHash);
 
         // Encode corrupted proof INTO proofBytes
-        IntmaxRollup.Groth16Params memory groth16 = _dummyGroth16();
         bytes memory proofBytes = abi.encode(groth16, config, statement, whirProof, randomTranscript);
         bytes32 proofHash = keccak256(proofBytes);
         uint32 proofLength = uint32(proofBytes.length);
@@ -970,10 +999,16 @@ contract IntmaxRollupTest is Test {
             bytes memory transcript
         ) = loadProof();
 
-        bytes memory plonky2Bytes = abi.encode(config, statement, whirProof, transcript);
-        bytes32 proofHash   = keccak256(plonky2Bytes);
-        uint32  proofLength = uint32(plonky2Bytes.length);
-        bytes32 stateRoot   = keccak256("final_state_for_fraud");
+        bytes32 stateRoot = keccak256("final_state_for_fraud");
+
+        // vpis computed BEFORE posting so proof params binding is consistent.
+        IntmaxRollup.ValidityPublicInputs memory vpis = _defaultValidityPIs(stateRoot);
+        bytes32 piHash = _computePIHash(vpis);
+        IntmaxRollup.Groth16Params memory groth16 = _dummyGroth16WithPIHash(piHash);
+
+        bytes memory proofBytes = abi.encode(groth16, config, statement, whirProof, transcript);
+        bytes32 proofHash   = keccak256(proofBytes);
+        uint32  proofLength = uint32(proofBytes.length);
 
         uint32[] memory ids = new uint32[](1);
         ids[0] = 123;
@@ -983,48 +1018,28 @@ contract IntmaxRollupTest is Test {
         vm.prank(submitter);
         rollup.postBlockAndSubmit{value: 1 ether}(batch, proofHash, proofLength, stateRoot);
 
-        IntmaxRollup.ValidityPublicInputs memory vpis = _defaultValidityPIs(stateRoot);
-        _patchStatementWithPIHash(statement, vpis);
-
         _mockBLSPrecompiles();
         _mockWhirVerifierTrue();
         _mockGroth16Pairing();
 
         assertTrue(
             rollup.finalize(
-                0,
-                _kzgBlobHash,
-                stateRoot,
-                plonky2Bytes,
-                vpis,
-                config,
-                statement,
-                whirProof,
-                transcript,
-                _dummyKZG(plonky2Bytes.length),
-                _dummyGroth16()
+                0, _kzgBlobHash, stateRoot, proofBytes, vpis,
+                config, statement, whirProof, transcript,
+                _dummyKZG(proofBytes.length),
+                groth16
             ),
             "finalize should succeed"
         );
-
-        IntmaxRollup.Groth16Params memory groth16 = _dummyGroth16();
-        bytes memory fraudProofBytes = abi.encode(groth16, config, statement, whirProof, transcript);
 
         address watcher = makeAddr("watcher");
         vm.deal(watcher, 1 ether);
         vm.prank(watcher);
         vm.expectRevert(IntmaxRollup.AlreadyFinalized.selector);
         rollup.fraudProof(
-            0,
-            _kzgBlobHash,
-            stateRoot,
-            fraudProofBytes,
-            vpis,
-            config,
-            statement,
-            whirProof,
-            transcript,
-            _dummyKZG(fraudProofBytes.length),
+            0, _kzgBlobHash, stateRoot, proofBytes, vpis,
+            config, statement, whirProof, transcript,
+            _dummyKZG(proofBytes.length),
             groth16
         );
     }
@@ -1204,8 +1219,13 @@ contract IntmaxRollupTest is Test {
             bytes memory transcript
         ) = loadProof();
 
-        bytes memory plonky2Bytes = abi.encode(config, statement, whirProof, transcript);
         bytes32 stateRoot = keccak256("gas_finalize");
+
+        IntmaxRollup.ValidityPublicInputs memory vpis = _defaultValidityPIs(stateRoot);
+        bytes32 piHash = _computePIHash(vpis);
+        IntmaxRollup.Groth16Params memory groth16 = _dummyGroth16WithPIHash(piHash);
+
+        bytes memory proofBytes = abi.encode(groth16, config, statement, whirProof, transcript);
 
         uint32[] memory ids = new uint32[](1);
         ids[0] = 99;
@@ -1213,10 +1233,7 @@ contract IntmaxRollupTest is Test {
 
         _mockKZGBlob();
         vm.prank(submitter);
-        rollup.postBlockAndSubmit{value: 1 ether}(batch, keccak256(plonky2Bytes), uint32(plonky2Bytes.length), stateRoot);
-
-        IntmaxRollup.ValidityPublicInputs memory vpis = _defaultValidityPIs(stateRoot);
-        _patchStatementWithPIHash(statement, vpis);
+        rollup.postBlockAndSubmit{value: 1 ether}(batch, keccak256(proofBytes), uint32(proofBytes.length), stateRoot);
 
         _mockBLSPrecompiles();
         _mockWhirVerifierTrue();
@@ -1224,10 +1241,10 @@ contract IntmaxRollupTest is Test {
 
         uint256 gasBefore = gasleft();
         rollup.finalize(
-            0, _kzgBlobHash, stateRoot, plonky2Bytes, vpis,
+            0, _kzgBlobHash, stateRoot, proofBytes, vpis,
             config, statement, whirProof, transcript,
-            _dummyKZG(plonky2Bytes.length),
-            _dummyGroth16()
+            _dummyKZG(proofBytes.length),
+            groth16
         );
         uint256 gasUsed = gasBefore - gasleft();
         console.log("finalize() gas:", gasUsed);
