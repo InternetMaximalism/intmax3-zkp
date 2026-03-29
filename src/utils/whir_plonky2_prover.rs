@@ -587,6 +587,147 @@ pub fn estimate_whir_verification_gas<
 }
 
 // ---------------------------------------------------------------------------
+// On-chain data export
+// ---------------------------------------------------------------------------
+
+/// Export opening values, challenges, and circuit params for on-chain constraint checking.
+///
+/// Returns a JSON object containing everything Plonky2Verifier.verifyConstraints() needs.
+pub fn export_onchain_data<
+    F: RichField + Extendable<D>,
+    C: GenericConfig<D, F = F>,
+    const D: usize,
+>(
+    proof: &WhirPlonky2Proof<F, C, D>,
+    circuit_data: &CircuitData<F, C, D>,
+) -> serde_json::Value
+where
+    C::Hasher: Hasher<F>,
+    C::InnerHasher: Hasher<F>,
+{
+    use plonky2::field::types::PrimeField64;
+    use plonky2::iop::challenger::Challenger;
+    use plonky2::hash::hash_types::RichField as _;
+
+    let openings = &proof.standard_proof.proof.openings;
+    let common = &circuit_data.common;
+    let prover_data = &circuit_data.prover_only;
+
+    let ext_to_pair = |ext: &F::Extension| -> (u64, u64) {
+        let json = serde_json::to_string(ext).unwrap_or_default();
+        let arr: Vec<u64> = serde_json::from_str(&json).unwrap_or_default();
+        (arr.get(0).copied().unwrap_or(0), arr.get(1).copied().unwrap_or(0))
+    };
+
+    let ext_vec_to_json = |v: &[F::Extension]| -> Vec<serde_json::Value> {
+        v.iter().map(|e| {
+            let (c0, c1) = ext_to_pair(e);
+            serde_json::json!({"c0": c0.to_string(), "c1": c1.to_string()})
+        }).collect()
+    };
+
+    // Re-derive Fiat-Shamir challenges (same as Plonky2's verifier)
+    let num_challenges = common.config.num_challenges;
+    let public_inputs_hash = C::InnerHasher::hash_no_pad(&proof.standard_proof.public_inputs);
+
+    let mut challenger = Challenger::<F, C::Hasher>::new();
+    challenger.observe_hash::<C::Hasher>(prover_data.circuit_digest);
+    challenger.observe_hash::<C::InnerHasher>(public_inputs_hash);
+    challenger.observe_cap::<C::Hasher>(&proof.standard_proof.proof.wires_cap);
+
+    let betas = challenger.get_n_challenges(num_challenges);
+    let gammas = challenger.get_n_challenges(num_challenges);
+
+    // Skip lookup challenges if no lookups
+    if !common.luts.is_empty() {
+        let num_lookup_challenges = 4 * num_challenges; // NUM_COINS_LOOKUP * num_challenges
+        let _deltas = challenger.get_n_challenges(num_lookup_challenges - 2 * num_challenges);
+    }
+
+    challenger.observe_cap::<C::Hasher>(&proof.standard_proof.proof.plonk_zs_partial_products_cap);
+    let alphas = challenger.get_n_challenges(num_challenges);
+    challenger.observe_cap::<C::Hasher>(&proof.standard_proof.proof.quotient_polys_cap);
+    let zeta = challenger.get_extension_challenge::<D>();
+    let (zeta_c0, zeta_c1) = ext_to_pair(&zeta);
+
+    // Circuit params
+    let selectors_info = &common.selectors_info;
+
+    // Gate info
+    let gate_infos: Vec<serde_json::Value> = common.gates.iter().enumerate().map(|(i, gate)| {
+        let sel_idx = selectors_info.selector_indices[i];
+        let group = &selectors_info.groups[sel_idx];
+        serde_json::json!({
+            "gateType": _gate_type_id(&gate.0.id()),
+            "selectorIndex": sel_idx,
+            "groupStart": group.start,
+            "groupEnd": group.end,
+            "rowInGroup": i,
+            "numConstraints": gate.0.num_constraints(),
+        })
+    }).collect();
+
+    // k_is for permutation
+    let k_is: Vec<String> = common.k_is.iter().map(|k| k.to_canonical_u64().to_string()).collect();
+
+    serde_json::json!({
+        "openings": {
+            "constants": ext_vec_to_json(&openings.constants),
+            "plonkSigmas": ext_vec_to_json(&openings.plonk_sigmas),
+            "wires": ext_vec_to_json(&openings.wires),
+            "plonkZs": ext_vec_to_json(&openings.plonk_zs),
+            "plonkZsNext": ext_vec_to_json(&openings.plonk_zs_next),
+            "partialProducts": ext_vec_to_json(&openings.partial_products),
+            "quotientPolys": ext_vec_to_json(&openings.quotient_polys),
+        },
+        "challenges": {
+            "plonkBetas": betas.iter().map(|b| b.to_canonical_u64().to_string()).collect::<Vec<_>>(),
+            "plonkGammas": gammas.iter().map(|g| g.to_canonical_u64().to_string()).collect::<Vec<_>>(),
+            "plonkAlphas": alphas.iter().map(|a| a.to_canonical_u64().to_string()).collect::<Vec<_>>(),
+            "plonkZeta": {"c0": zeta_c0.to_string(), "c1": zeta_c1.to_string()},
+        },
+        "circuitParams": {
+            "degreeBits": common.degree_bits(),
+            "numChallenges": num_challenges,
+            "numRoutedWires": common.config.num_routed_wires,
+            "quotientDegreeFactor": common.quotient_degree_factor,
+            "numPartialProducts": common.num_partial_products,
+            "numGateConstraints": common.num_gate_constraints,
+            "numSelectors": selectors_info.num_selectors(),
+            "numLookupSelectors": common.num_lookup_selectors,
+        },
+        "gates": gate_infos,
+        "permutation": {
+            "kIs": k_is,
+        },
+        "publicInputs": proof.standard_proof.public_inputs.iter()
+            .map(|f| f.to_canonical_u64().to_string())
+            .collect::<Vec<_>>(),
+    })
+}
+
+/// Map Plonky2 gate ID strings to numeric type IDs for Solidity.
+fn _gate_type_id(id: &str) -> u64 {
+    if id.contains("NoopGate") { 0 }
+    else if id.contains("ConstantGate") { 1 }
+    else if id.contains("PublicInputGate") { 2 }
+    else if id.contains("PoseidonGate") { 3 }
+    else if id.contains("ArithmeticGate") { 4 }
+    else if id.contains("BaseSumGate") { 5 }
+    else if id.contains("RandomAccessGate") { 6 }
+    else if id.contains("ReducingExtensionGate") { 8 }
+    else if id.contains("ReducingGate") { 7 }
+    else if id.contains("MulExtensionGate") { 10 }
+    else if id.contains("ArithmeticExtensionGate") { 9 }
+    else if id.contains("ExponentiationGate") { 11 }
+    else if id.contains("CosetInterpolationGate") { 12 }
+    else if id.contains("LookupTableGate") { 14 }
+    else if id.contains("LookupGate") { 13 }
+    else if id.contains("PoseidonMdsGate") { 15 }
+    else { 255 } // Unknown
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
@@ -670,6 +811,25 @@ mod tests {
         // Verify
         verify_whir_plonky2_proof::<F, C, D>(&result.proof, &cd, &config)
             .expect("Verification must pass");
+
+        // Export full on-chain data (openings + challenges + circuit params)
+        let onchain_data = export_onchain_data(&result.proof, &cd);
+        println!("=== On-chain Data ===");
+        println!("  constants count: {}", onchain_data["openings"]["constants"].as_array().unwrap().len());
+        println!("  wires count: {}", onchain_data["openings"]["wires"].as_array().unwrap().len());
+        println!("  quotientPolys count: {}", onchain_data["openings"]["quotientPolys"].as_array().unwrap().len());
+        println!("  gates count: {}", onchain_data["gates"].as_array().unwrap().len());
+        println!("  degreeBits: {}", onchain_data["circuitParams"]["degreeBits"]);
+        println!("  numGateConstraints: {}", onchain_data["circuitParams"]["numGateConstraints"]);
+
+        // Save fixture for Foundry tests
+        let fixture_path = std::path::Path::new("tests/fixtures/whir_constraint_data.json");
+        if let Some(parent) = fixture_path.parent() {
+            std::fs::create_dir_all(parent).ok();
+        }
+        std::fs::write(fixture_path, serde_json::to_string_pretty(&onchain_data).unwrap())
+            .expect("Failed to write fixture");
+        println!("  Saved to: {}", fixture_path.display());
     }
 
     #[test]
