@@ -103,9 +103,16 @@ contract Plonky2VerifierTest is Test, Plonky2Verifier {
 
         Plonky2Verifier.GateInfo[] memory gates = new Plonky2Verifier.GateInfo[](numGates);
         for (uint256 i = 0; i < numGates; i++) {
+            // Parse gate-specific config if present, else provide defaults
+            uint256[] memory config;
+            uint256 gt = gateTypes[i];
+            if (gt == 1) { config = new uint256[](1); config[0] = 2; }             // ConstantGate: numConsts=2
+            else if (gt == 4) { config = new uint256[](1); config[0] = 20; }       // ArithmeticGate: numOps=20
+            else { config = new uint256[](0); }
             gates[i] = Plonky2Verifier.GateInfo(
                 gateTypes[i], selectorIndices[i], groupStarts[i],
-                groupEnds[i], rowInGroups[i], numConstraintsList[i]
+                groupEnds[i], rowInGroups[i], numConstraintsList[i],
+                config
             );
         }
         return gates;
