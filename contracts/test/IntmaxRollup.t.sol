@@ -23,9 +23,6 @@ contract IntmaxRollupTest is Test {
     uint32  constant DEFAULT_PROOF_LENGTH = 1024;
     bytes32 constant DEFAULT_STATE_ROOT = keccak256("default_state");
 
-    bytes   internal _kzgCommitment48;
-    bytes32 internal _kzgBlobHash;
-
     // -----------------------------------------------------------------------
     // Helpers
     // -----------------------------------------------------------------------
@@ -33,12 +30,6 @@ contract IntmaxRollupTest is Test {
     function _mockBlob() internal {
         bytes32[] memory hashes = new bytes32[](1);
         hashes[0] = FAKE_BLOB_HASH;
-        vm.blobhashes(hashes);
-    }
-
-    function _mockKZGBlob() internal {
-        bytes32[] memory hashes = new bytes32[](1);
-        hashes[0] = _kzgBlobHash;
         vm.blobhashes(hashes);
     }
 
@@ -289,19 +280,6 @@ contract IntmaxRollupTest is Test {
         );
     }
 
-    /// @dev Backward-compat stub: KZG proof from pre-stored _kzgCommitment48 / _kzgBlobHash
-    ///      (used by tests that only need the FALSE path through finalize/fraudProof).
-    function _kzgProof(uint256 dataLen) internal view returns (KZGProof memory kzg) {
-        uint256 N = (dataLen + 31) / 32;
-        kzg = KZGProof({
-            kzgCommitment48: _kzgCommitment48,
-            kzgCommitmentG1: new bytes(128),
-            openingProof:    new bytes(128),
-            vanishingG2:     new bytes(256),
-            lagrangeBasisG1: new bytes(N * 128)
-        });
-    }
-
     function loadProof()
         internal
         view
@@ -382,12 +360,6 @@ contract IntmaxRollupTest is Test {
         vm.deal(aggregator, 10 ether);
         vm.deal(fraudTreasury, 0);
 
-        _kzgCommitment48 = new bytes(48);
-        (bool ok, bytes memory h) = address(0x02).staticcall(_kzgCommitment48);
-        require(ok, "sha256 precompile failed in setUp");
-        _kzgBlobHash = bytes32(
-            (uint256(0x01) << 248) | (uint256(bytes32(h)) & (type(uint256).max >> 8))
-        );
     }
 
     // -----------------------------------------------------------------------
@@ -768,11 +740,12 @@ contract IntmaxRollupTest is Test {
 
         IntmaxRollup.ValidityPublicInputs memory vpis;
 
-        // Returns false (submission not found)
+        // Returns false (submission not found) — KZG is never verified but must be non-dummy
+        (KZGProof memory kzg, ) = _computeKZGProof(new bytes(32));
         assertFalse(rollup.finalize(
             999, bytes32(0), bytes32(0), "", vpis,
             config, statement, whirProof, transcript,
-            _kzgProof(0),
+            kzg,
             _groth16()
         ));
     }
@@ -867,10 +840,12 @@ contract IntmaxRollupTest is Test {
         uint32[] memory ids2 = new uint32[](1);
         ids2[0] = 32;
         IntmaxRollup.SubBlock[] memory batch2 = _singleBlockBatch(7, ids2, 610, bytes32(uint256(0xaaa)));
-        // Use a non-zero blobHash; KZG validity doesn't matter — commitment check fails first
-        bytes32 dummyBlobHash = bytes32(uint256(0xBEEF));
+        // Compute a real KZG proof so blobHash is a valid versioned hash.
+        // The commitment stored at post time uses keccak256("wrong") as proofHash, so
+        // fraudProof (which recomputes from proofBytes) will fail the binding check.
+        (KZGProof memory kzg, bytes32 blobHash) = _computeKZGProof(proofBytes);
         bytes32[] memory bh2 = new bytes32[](1);
-        bh2[0] = dummyBlobHash;
+        bh2[0] = blobHash;
         vm.blobhashes(bh2);
         vm.prank(submitter);
         rollup.postBlockAndSubmit{value: 1 ether}(batch2, keccak256("wrong"), uint32(999), stateRoot);
@@ -878,9 +853,9 @@ contract IntmaxRollupTest is Test {
         // fraudProof returns false: commitment check failed
         // (stored commitment used keccak256("wrong")/999, but proofBytes has different hash/length)
         bool fraudConfirmed = rollup.fraudProof(
-            0, dummyBlobHash, stateRoot, proofBytes, vpis,
+            0, blobHash, stateRoot, proofBytes, vpis,
             config, statement, whirProof, transcript,
-            _kzgProof(proofBytes.length), groth16
+            kzg, groth16
         );
         assertFalse(fraudConfirmed, "Can't confirm fraud if binding fails");
     }
