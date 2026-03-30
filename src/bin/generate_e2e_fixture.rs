@@ -25,7 +25,7 @@ use intmax3_zkp::{
 };
 use intmax3_zkp::ethereum_types::u32limb_trait::U32LimbTrait;
 use plonky2::{
-    field::goldilocks_field::GoldilocksField,
+    field::{goldilocks_field::GoldilocksField, types::PrimeField64},
     plonk::config::PoseidonGoldilocksConfig,
 };
 use intmax3_zkp::wrapper_config::plonky2_config::PoseidonBN128GoldilocksConfig;
@@ -259,9 +259,58 @@ fn main() -> anyhow::Result<()> {
         )?;
         eprintln!("[e2e] Constraint data written to contracts/test/data/wrapper_constraint_data.json");
 
-        // TODO: Export WHIR proof in sol-whir compatible JSON format
-        // Requires implementing WHIR proof transcript → sol-whir JSON serialization
-        eprintln!("[e2e] Note: WHIR proof JSON export not yet implemented (constraint data is sufficient for Plonky2Verifier test)");
+        // Export WHIR proof as spongefish-native format (transcript + hints)
+        // SpongefishWhir.sol consumes these raw bytes directly.
+        {
+            let proof = &whir_result.proof;
+            let whir_proof_fixture = serde_json::json!({
+                "constants_sigmas": {
+                    "transcript": format!("0x{}", hex::encode(&proof.constants_sigmas_whir.proof_narg)),
+                    "hints": format!("0x{}", hex::encode(&proof.constants_sigmas_whir.proof_hints)),
+                    "num_variables": proof.constants_sigmas_whir.num_variables,
+                    "evaluations": proof.constants_sigmas_whir.evaluations.iter()
+                        .map(|e| format!("{:?}", e))
+                        .collect::<Vec<_>>(),
+                },
+                "wires": {
+                    "transcript": format!("0x{}", hex::encode(&proof.wires_whir.proof_narg)),
+                    "hints": format!("0x{}", hex::encode(&proof.wires_whir.proof_hints)),
+                    "num_variables": proof.wires_whir.num_variables,
+                    "evaluations": proof.wires_whir.evaluations.iter()
+                        .map(|e| format!("{:?}", e))
+                        .collect::<Vec<_>>(),
+                },
+                "zs_partial_products": {
+                    "transcript": format!("0x{}", hex::encode(&proof.zs_partial_products_whir.proof_narg)),
+                    "hints": format!("0x{}", hex::encode(&proof.zs_partial_products_whir.proof_hints)),
+                    "num_variables": proof.zs_partial_products_whir.num_variables,
+                    "evaluations": proof.zs_partial_products_whir.evaluations.iter()
+                        .map(|e| format!("{:?}", e))
+                        .collect::<Vec<_>>(),
+                },
+                "quotient_polys": {
+                    "transcript": format!("0x{}", hex::encode(&proof.quotient_polys_whir.proof_narg)),
+                    "hints": format!("0x{}", hex::encode(&proof.quotient_polys_whir.proof_hints)),
+                    "num_variables": proof.quotient_polys_whir.num_variables,
+                    "evaluations": proof.quotient_polys_whir.evaluations.iter()
+                        .map(|e| format!("{:?}", e))
+                        .collect::<Vec<_>>(),
+                },
+                "expected_result": proof.expected_result,
+                "public_inputs": proof.standard_proof.public_inputs.iter()
+                    .map(|f| f.to_canonical_u64())
+                    .collect::<Vec<_>>(),
+            });
+            let whir_json = serde_json::to_string_pretty(&whir_proof_fixture)?;
+            let whir_dir = out_dir.join("whir");
+            fs::create_dir_all(&whir_dir)?;
+            fs::write(whir_dir.join("wrapper_whir_proof.json"), &whir_json)?;
+            eprintln!("[e2e] WHIR proof written to contracts/test/data/whir/wrapper_whir_proof.json");
+            eprintln!("[e2e]   constants_sigmas transcript: {} bytes", proof.constants_sigmas_whir.proof_narg.len());
+            eprintln!("[e2e]   wires transcript: {} bytes", proof.wires_whir.proof_narg.len());
+            eprintln!("[e2e]   zs_partial_products transcript: {} bytes", proof.zs_partial_products_whir.proof_narg.len());
+            eprintln!("[e2e]   quotient_polys transcript: {} bytes", proof.quotient_polys_whir.proof_narg.len());
+        }
     }
 
     eprintln!("[e2e] Done!");
