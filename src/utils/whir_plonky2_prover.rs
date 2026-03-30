@@ -596,16 +596,30 @@ pub fn export_whir_verifier_data(
     // Instance encoding for Empty struct — Empty encodes as [] (zero bytes)
     let instance_bytes: Vec<u8> = Vec::new();
 
-    // Evaluation values as hex strings
-    let evaluations_hex: Vec<String> = commitment.evaluations.iter().map(|e| {
-        // Field64_3 → bytes (serialize as canonical representation)
-        format!("{:?}", e)
+    // Evaluation values as structured {c0, c1, c2}
+    let evaluations_structured: Vec<serde_json::Value> = commitment.evaluations.iter().map(|e| {
+        use ark_ff::{Field, PrimeField};
+        let base_elems: Vec<_> = e.to_base_prime_field_elements().collect();
+        serde_json::json!({
+            "c0": base_elems[0].into_bigint().0[0],
+            "c1": base_elems[1].into_bigint().0[0],
+            "c2": base_elems[2].into_bigint().0[0],
+        })
     }).collect();
 
     // Canonical evaluation point
     let point: Vec<String> = (0..commitment.num_variables)
         .map(|i| format!("{}", i + 1))
         .collect();
+
+    // Compute detailed WHIR protocol parameters for Solidity verifier
+    let num_rounds = params.round_configs.len();
+    let final_sumcheck_rounds = params.final_sumcheck.num_rounds;
+    let final_size = params.final_sumcheck.initial_size;
+    let initial_sumcheck_rounds = params.initial_sumcheck.num_rounds;
+    let in_domain_samples = params.initial_committer.in_domain_samples;
+    let out_domain_samples = params.initial_committer.out_domain_samples;
+    let num_vectors = params.initial_committer.num_vectors;
 
     serde_json::json!({
         "protocol_id": format!("0x{}", hex::encode(protocol_id)),
@@ -614,7 +628,7 @@ pub fn export_whir_verifier_data(
         "transcript": format!("0x{}", hex::encode(&commitment.proof_narg)),
         "hints": format!("0x{}", hex::encode(&commitment.proof_hints)),
         "num_variables": commitment.num_variables,
-        "evaluations": evaluations_hex,
+        "evaluations": evaluations_structured,
         "evaluation_point": point,
         "session_name": commitment.session_name,
         "whir_config": {
@@ -622,6 +636,26 @@ pub fn export_whir_verifier_data(
             "folding_factor": config.params.folding_factor,
             "security_level": config.params.security_level,
             "starting_log_inv_rate": config.params.starting_log_inv_rate,
+        },
+        "whir_params": {
+            "num_variables": commitment.num_variables,
+            "folding_factor": config.params.folding_factor,
+            "num_vectors": num_vectors,
+            "out_domain_samples": out_domain_samples,
+            "in_domain_samples": in_domain_samples,
+            "initial_sumcheck_rounds": initial_sumcheck_rounds,
+            "num_rounds": num_rounds,
+            "final_sumcheck_rounds": final_sumcheck_rounds,
+            "final_size": final_size,
+            "round_in_domain_samples": if num_rounds > 0 {
+                params.round_configs[0].irs_committer.in_domain_samples
+            } else { 0 },
+            "round_out_domain_samples": if num_rounds > 0 {
+                params.round_configs[0].irs_committer.out_domain_samples
+            } else { 0 },
+            "round_sumcheck_rounds": if num_rounds > 0 {
+                params.round_configs[0].sumcheck.num_rounds
+            } else { 0 },
         },
     })
 }
@@ -822,6 +856,8 @@ fn _gate_config(id: &str) -> Vec<u64> {
         let vec_size = 1u64 << bits;
         vec![bits, num_copies, num_extra_constants, vec_size]
     } else if id.contains("ReducingExtensionGate") {
+        vec![extract("num_coeffs").unwrap_or(0)]
+    } else if id.contains("ReducingGate") {
         vec![extract("num_coeffs").unwrap_or(0)]
     } else if id.contains("MulExtensionGate") {
         vec![extract("num_ops").unwrap_or(0)]

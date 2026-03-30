@@ -73,10 +73,11 @@ struct VPIFixture {
 }
 
 fn main() -> anyhow::Result<()> {
+    let skip_groth16 = std::env::args().any(|a| a == "--skip-groth16");
     let gnark_bin = Path::new("gnark/gnark-wrapper");
-    if !gnark_bin.exists() {
+    if !skip_groth16 && !gnark_bin.exists() {
         anyhow::bail!(
-            "gnark-wrapper binary not found at {}. Build with: cd gnark && go build -o gnark-wrapper .",
+            "gnark-wrapper binary not found at {}. Build with: cd gnark && go build -o gnark-wrapper .\nOr use --skip-groth16 to skip Groth16 wrapping.",
             gnark_bin.display()
         );
     }
@@ -132,6 +133,10 @@ fn main() -> anyhow::Result<()> {
     wrapper.data.verify(wrapped_proof.clone())?;
     eprintln!("[e2e] Wrapper proof verified");
 
+    if skip_groth16 {
+        eprintln!("[e2e] Step 3: Skipping Groth16 (--skip-groth16)");
+    }
+    if !skip_groth16 {
     eprintln!("[e2e] Step 3: Groth16 wrapping via gnark");
     let wrap = groth16_wrap(&wrapper.data, &wrapped_proof, gnark_bin, true)?;
     eprintln!("[e2e] Groth16 proof generated");
@@ -216,13 +221,17 @@ fn main() -> anyhow::Result<()> {
         .expect("block hash");
     eprintln!("[e2e]   blockHashChain: {}", block_hash);
 
-    let out_dir = Path::new("contracts/test/data");
-    fs::create_dir_all(out_dir)?;
+    let out_dir2 = Path::new("contracts/test/data");
+    fs::create_dir_all(out_dir2)?;
     let json = serde_json::to_string_pretty(&fixture)?;
-    fs::write(out_dir.join("e2e_fixture.json"), &json)?;
+    fs::write(out_dir2.join("e2e_fixture.json"), &json)?;
 
     eprintln!("[e2e] Fixture written to contracts/test/data/e2e_fixture.json");
     eprintln!("[e2e] piHashReduced = {} (use for WHIR fixture generation)", pi_hash_reduced_hex);
+    } // end if !skip_groth16
+
+    let out_dir = Path::new("contracts/test/data");
+    fs::create_dir_all(out_dir)?;
 
     // -----------------------------------------------------------------------
     // Step 4: Generate WHIR proof + constraint data for WrapperCircuit
@@ -310,6 +319,24 @@ fn main() -> anyhow::Result<()> {
             eprintln!("[e2e]   wires transcript: {} bytes", proof.wires_whir.proof_narg.len());
             eprintln!("[e2e]   zs_partial_products transcript: {} bytes", proof.zs_partial_products_whir.proof_narg.len());
             eprintln!("[e2e]   quotient_polys transcript: {} bytes", proof.quotient_polys_whir.proof_narg.len());
+        }
+
+        // Export WHIR verifier data for each commitment (for SpongefishWhirVerify on-chain test)
+        {
+            use intmax3_zkp::utils::whir_plonky2_prover::export_whir_verifier_data;
+            let whir_dir = out_dir.join("whir");
+            let commitments = [
+                ("constants_sigmas", &whir_result.proof.constants_sigmas_whir),
+                ("wires", &whir_result.proof.wires_whir),
+                ("zs_partial_products", &whir_result.proof.zs_partial_products_whir),
+                ("quotient_polys", &whir_result.proof.quotient_polys_whir),
+            ];
+            for (name, commitment) in &commitments {
+                let data = export_whir_verifier_data(commitment, &whir_config);
+                let path = whir_dir.join(format!("wrapper_{}_verifier_data.json", name));
+                fs::write(&path, serde_json::to_string_pretty(&data)?)?;
+                eprintln!("[e2e] WHIR verifier data: {}", path.display());
+            }
         }
     }
 
