@@ -19,6 +19,13 @@ import {DuplexSponge} from "./DuplexSponge.sol";
 ///   6. Final vector + Merkle open
 ///   7. Final sumcheck
 ///   8. FinalClaim verification
+///
+///   TODO (medium priority): Merkle verification is currently a skeleton.
+///   Hints are consumed (read sequentially) but not verified against the
+///   Merkle root. Transcript replay and sumcheck verification ARE fully
+///   implemented and accurate. Completing Merkle verification will improve
+///   soundness by ensuring opened polynomial evaluations are consistent
+///   with the committed Merkle tree.
 library SpongefishWhirVerify {
     using GoldilocksExt3 for GoldilocksExt3.Ext3;
     using DuplexSponge for DuplexSponge.Sponge;
