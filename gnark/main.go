@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"crypto/sha256"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -11,6 +12,7 @@ import (
 
 	"github.com/consensys/gnark-crypto/ecc"
 	"github.com/consensys/gnark-crypto/ecc/bn254/fr"
+	"github.com/consensys/gnark/backend"
 	"github.com/consensys/gnark/backend/groth16"
 	groth16_bn254 "github.com/consensys/gnark/backend/groth16/bn254"
 	"github.com/consensys/gnark/frontend"
@@ -168,10 +170,10 @@ func main() {
 	}
 	publicWitness, _ := witness.Public()
 
-	// Prove
+	// Prove with SHA-256 as HashToField (required for gnark v0.10+ Solidity verifier)
 	fmt.Fprintf(os.Stderr, "[gnark] Generating Groth16 proof...\n")
 	tProve := time.Now()
-	proof, err := groth16.Prove(cs, pk, witness)
+	proof, err := groth16.Prove(cs, pk, witness, backend.WithProverHashToFieldFunction(sha256.New()))
 	provingTime := time.Since(tProve)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "[gnark] Prove error: %v\n", err)
@@ -179,9 +181,9 @@ func main() {
 	}
 	fmt.Fprintf(os.Stderr, "[gnark] Proving time: %v\n", provingTime)
 
-	// Verify locally — then extract the commitment hash that the verifier computed
+	// Verify locally with SHA-256 hash function (must match prover)
 	fmt.Fprintf(os.Stderr, "[gnark] Verifying proof locally...\n")
-	err = groth16.Verify(proof, vk, publicWitness)
+	err = groth16.Verify(proof, vk, publicWitness, backend.WithVerifierHashToFieldFunction(sha256.New()))
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "[gnark] Verification FAILED: %v\n", err)
 		os.Exit(1)
