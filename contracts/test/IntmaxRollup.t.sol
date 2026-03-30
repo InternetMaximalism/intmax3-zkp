@@ -2,7 +2,8 @@
 pragma solidity ^0.8.24;
 
 import {Test, console} from "forge-std/Test.sol";
-import {IntmaxRollup, WhirVerifierWrapper} from "../src/IntmaxRollup.sol";
+import {IntmaxRollup, WhirVerifierWrapper, IGnarkVerifier} from "../src/IntmaxRollup.sol";
+import {Verifier as GnarkVerifier} from "../src/GnarkGroth16Verifier.sol";
 import {IForcedTxLogic} from "../src/IForcedTxLogic.sol";
 import {KZGProof} from "../src/BlobKZGVerifier.sol";
 import {Groth16Verifier} from "../src/Groth16Verifier.sol";
@@ -12,7 +13,9 @@ import {JSONWhirProof, JSONUtils} from "sol-whir/utils/WhirJson.sol";
 
 contract IntmaxRollupTest is Test {
     IntmaxRollup public rollup;
+    IntmaxRollup public e2eRollup;
     WhirVerifierWrapper public verifierWrapper;
+    GnarkVerifier public gnarkVerifierContract;
 
     address submitter = makeAddr("submitter");
     address aggregator = makeAddr("aggregator");
@@ -108,7 +111,13 @@ contract IntmaxRollupTest is Test {
     /// @dev Groth16 params with all-zero pubInputs and a valid pairing proof.
     function _groth16() internal view returns (IntmaxRollup.Groth16Params memory) {
         uint256[] memory inputs = new uint256[](8);
-        return IntmaxRollup.Groth16Params({proof: _groth16ProofFor(inputs), pubInputs: inputs});
+        uint256[2] memory emptyC;
+        return IntmaxRollup.Groth16Params({
+            proof: _groth16ProofFor(inputs),
+            pubInputs: inputs,
+            commitments: emptyC,
+            commitmentPok: emptyC
+        });
     }
 
     /// @dev Compute keccak256(ValidityPublicInputs) — same layout as the contract's _computeValidityPIHash.
@@ -132,7 +141,13 @@ contract IntmaxRollupTest is Test {
         for (uint256 i = 0; i < 8; i++) {
             inputs[i] = (h >> (224 - i * 32)) & 0xFFFFFFFF;
         }
-        return IntmaxRollup.Groth16Params({proof: _groth16ProofFor(inputs), pubInputs: inputs});
+        uint256[2] memory emptyC;
+        return IntmaxRollup.Groth16Params({
+            proof: _groth16ProofFor(inputs),
+            pubInputs: inputs,
+            commitments: emptyC,
+            commitmentPok: emptyC
+        });
     }
 
     // -----------------------------------------------------------------------
@@ -336,6 +351,15 @@ contract IntmaxRollupTest is Test {
         ));
     }
 
+    /// @dev Load the INTMAX3 E2E WHIR fixture (bound to the same piHash as gnark Groth16).
+    function loadE2EProof()
+        internal view returns (WhirConfig memory, Statement memory, WhirProof memory, bytes memory)
+    {
+        return _loadWhirFixture(string.concat(
+            vm.projectRoot(), "/test/data/whir/intmax3_e2e_whir_fixture.json"
+        ));
+    }
+
     /// @dev Build a dummy ValidityPublicInputs that matches on-chain state.
     function _defaultValidityPIs(bytes32 stateRoot)
         internal view returns (IntmaxRollup.ValidityPublicInputs memory pis)
@@ -371,7 +395,7 @@ contract IntmaxRollupTest is Test {
         if (statement.evaluations.length == 0) {
             statement.evaluations = new BN254.ScalarField[](1);
         }
-        statement.evaluations[0] = BN254.ScalarField.wrap(uint256(piHash));
+        statement.evaluations[0] = BN254.ScalarField.wrap(uint256(piHash) % BN254.R_MOD);
     }
 
     // -----------------------------------------------------------------------
@@ -380,17 +404,25 @@ contract IntmaxRollupTest is Test {
 
     function setUp() public {
         verifierWrapper = new WhirVerifierWrapper();
+        gnarkVerifierContract = new GnarkVerifier();
 
         // Load WHIR config from test data and compute its hash for the constructor.
         (WhirConfig memory whirCfg,,,) = loadProof();
         bytes32 cfgHash = keccak256(abi.encode(whirCfg));
 
-        rollup = new IntmaxRollup(verifierWrapper, fraudTreasury, _groth16Vk(), cfgHash);
+        rollup = new IntmaxRollup(verifierWrapper, fraudTreasury, _groth16Vk(), cfgHash, IGnarkVerifier(address(0)));
+
+        // E2E rollup with gnark verifier — uses e2e WHIR config
+        (WhirConfig memory e2eCfg,,,) = loadE2EProof();
+        bytes32 e2eCfgHash = keccak256(abi.encode(e2eCfg));
+        e2eRollup = new IntmaxRollup(
+            verifierWrapper, fraudTreasury, _groth16Vk(), e2eCfgHash,
+            IGnarkVerifier(address(gnarkVerifierContract))
+        );
 
         vm.deal(submitter, 10 ether);
         vm.deal(aggregator, 10 ether);
         vm.deal(fraudTreasury, 0);
-
     }
 
     // -----------------------------------------------------------------------
@@ -1480,7 +1512,7 @@ contract IntmaxRollupTest is Test {
         (WhirConfig memory whirCfg,,,) = loadProof();
         bytes32 cfgHash = keccak256(abi.encode(whirCfg));
         IntmaxRollup rollup2 = new IntmaxRollup(
-            new WhirVerifierWrapper(), address(revTreasury), _groth16Vk(), cfgHash
+            new WhirVerifierWrapper(), address(revTreasury), _groth16Vk(), cfgHash, IGnarkVerifier(address(0))
         );
 
         address sub2 = makeAddr("sub2");
@@ -1576,6 +1608,98 @@ contract IntmaxRollupTest is Test {
         vm.prank(anyUser);
         vm.expectRevert(IntmaxRollup.ForcedTxLogicAlreadyRegistered.selector);
         rollup.registerForcedTxLogic(99999, address(logic2));
+    }
+
+    /// @dev gnark Groth16 raw proof bytes — stored as state to avoid via_ir inlining issues.
+    bytes internal _gnarkRawProof = hex"07b73461134ed24b94cedaf234922c62224997b83784064c489f65ef3fe674b216b0bd162ccaf6ac674949bb994ed4115be6ec53ea58ce0bb288e687e531e187123f8392318d38a5e24b8b5196980e77603c51ba6bc4204baa9354fe382c47b00fba9eeb255514d79ea29d7024f5364f79278085a3b46da1c39d0098ad87162f0ef17d7c3cadf8a9620cc748e71c8cf549a669f8b289b96346cef4311eff3b861ee04d08a3921c2f8bb4f162c40e62046cf887ec4993b8173d3b9e55c80b0e471199414586525fdfcb7998407e396b4d30bc7fb4a917c70d212fe5c9b7826f661eed2d97eb3f0649f561c51ac3bf42ab898bdc1bc3ce0a24410d0823c9fd60270000000109c0e0341f14beaf0aa49803b2eea690aaae9594f11825eee1509be33adf85f110caa026ae6277f4440b0c0c74caa2c91285db838074ab03238d25273e1546111b8015653615ce6e13f48beb2c664b03fc83110c789f68cc7ec1445521ddb68d1f549bbf1d9eea73ec1d4431a38a507bb7a76d1ff66b13e15495837a72218c95";
+
+    /// @dev Parse gnark Groth16 proof by reading 32-byte chunks from stored raw bytes.
+    function _realGnarkProof() internal view returns (IntmaxRollup.Groth16Params memory params) {
+        bytes memory raw = _gnarkRawProof;
+        // A (64 bytes) at offset 0
+        params.proof.a[0] = _readUint(raw, 0);
+        params.proof.a[1] = _readUint(raw, 32);
+        // B (128 bytes) at offset 64
+        params.proof.b[0][0] = _readUint(raw, 64);
+        params.proof.b[0][1] = _readUint(raw, 96);
+        params.proof.b[1][0] = _readUint(raw, 128);
+        params.proof.b[1][1] = _readUint(raw, 160);
+        // C (64 bytes) at offset 192
+        params.proof.c[0] = _readUint(raw, 192);
+        params.proof.c[1] = _readUint(raw, 224);
+        // Commitment (64 bytes at offset 260 = 256 + 4 for nbCommitments)
+        params.commitments[0] = _readUint(raw, 260);
+        params.commitments[1] = _readUint(raw, 292);
+        // CommitmentPok (64 bytes at offset 324)
+        params.commitmentPok[0] = _readUint(raw, 324);
+        params.commitmentPok[1] = _readUint(raw, 356);
+        // piHash = 0x6467732d3ff664b85497807da9a5c8bc058642bfab878c7a6816359bc9799ab2
+        params.pubInputs = new uint256[](8);
+        params.pubInputs[0] = 1684501293; params.pubInputs[1] = 1073112248;
+        params.pubInputs[2] = 1419214973; params.pubInputs[3] = 2846214332;
+        params.pubInputs[4] = 92684991;   params.pubInputs[5] = 2877787258;
+        params.pubInputs[6] = 1746285979; params.pubInputs[7] = 3380189874;
+    }
+
+    function _readUint(bytes memory data, uint256 offset) internal pure returns (uint256 val) {
+        assembly { val := mload(add(add(data, 32), offset)) }
+    }
+
+    /// @notice Complete finalize() E2E with real gnark Groth16 + real WHIR + real KZG.
+    ///         Uses gnark-generated GnarkGroth16Verifier with commitment support.
+    function test_finalize_realE2E() public {
+        _finalize_realE2E_impl();
+    }
+
+    function _finalize_realE2E_impl() internal {
+        // VPI from e2e_fixture.json (hardcoded)
+        bytes32 initialExtCommitment = 0x428e53c73d2e45bfa8ec3ab8e9c45fb7dcd96288a95fe1ba1fcab889e4bee766;
+        bytes32 finalExtCommitment   = 0xc37a8de7f17f7efbf676c27e3dd54bd5b9750a14bf1574bebb23bde2f7a54f2c;
+        bytes32 finalBlockChain      = 0x3ed44a28fc0c21371feee564ee3ce682ea7a32b4b78819d32b0d50251c3e089f;
+
+        // Load WHIR proof (e2e fixture bound to piHash)
+        (WhirConfig memory config, Statement memory statement,
+         WhirProof memory whirProof, bytes memory transcript) = loadE2EProof();
+
+        IntmaxRollup.ValidityPublicInputs memory vpis = IntmaxRollup.ValidityPublicInputs({
+            initialBlockNumber: 0, initialBlockChain: bytes32(0),
+            initialExtCommitment: initialExtCommitment,
+            finalBlockNumber: 1, finalBlockChain: finalBlockChain,
+            finalExtCommitment: finalExtCommitment, prover: address(0)
+        });
+
+        // Real gnark Groth16 proof
+        IntmaxRollup.Groth16Params memory groth16 = _realGnarkProof();
+
+        // Use pre-deployed e2eRollup
+        // Set on-chain state to match fixture VPI (slot numbers from `forge inspect IntmaxRollup storageLayout`)
+        vm.store(address(e2eRollup), bytes32(uint256(27)), initialExtCommitment); // latestFinalizedStateRoot
+        vm.store(address(e2eRollup), keccak256(abi.encode(uint256(1), uint256(20))), finalBlockChain); // blockHashChainAt[1]
+        vm.store(address(e2eRollup), bytes32(uint256(21)), bytes32(uint256(1))); // blockNumber
+
+        // Build proofBytes + KZG
+        bytes memory proofBytes = abi.encode(groth16, config, statement, whirProof, transcript);
+        (KZGProof memory kzg, bytes32 blobHash) = _computeKZGProof(proofBytes);
+
+        // Create submission
+        bytes32 commitment = keccak256(
+            abi.encodePacked(blobHash, keccak256(proofBytes), uint32(proofBytes.length), finalExtCommitment)
+        );
+        vm.store(address(e2eRollup), keccak256(abi.encode(uint256(0), uint256(25))), commitment); // _submissions[0].commitment
+
+        bytes32[] memory bhs = new bytes32[](1);
+        bhs[0] = blobHash;
+        vm.blobhashes(bhs);
+
+        // FINALIZE
+        bool ok = e2eRollup.finalize(
+            0, blobHash, finalExtCommitment, proofBytes, vpis,
+            config, statement, whirProof, transcript, kzg, groth16
+        );
+
+        assertTrue(ok, "finalize() must succeed with real gnark Groth16 + real WHIR + real KZG");
+        assertTrue(e2eRollup.isFinalized(0));
+        assertEq(e2eRollup.latestFinalizedStateRoot(), finalExtCommitment);
     }
 }
 

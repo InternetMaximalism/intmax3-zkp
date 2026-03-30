@@ -9,3 +9,4 @@ evm_version = "prague"
 optimizer = true
 optimizer_runs = 200
 fs_permissions = [{ access = "read", path = "./" }, { access = "read", path = "../tests/fixtures/" }]
+# Default memory_limit and gas_limit

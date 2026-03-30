@@ -8,6 +8,18 @@ import {BlobKZGVerifier, KZGProof} from "./BlobKZGVerifier.sol";
 import {Groth16Verifier} from "./Groth16Verifier.sol";
 import {IForcedTxLogic} from "./IForcedTxLogic.sol";
 
+/// @title IGnarkVerifier
+/// @notice Interface for gnark-generated Groth16 verifier with commitment support.
+///         The verifier has VK constants hardcoded and reverts on invalid proof.
+interface IGnarkVerifier {
+    function verifyProof(
+        uint256[8] calldata proof,
+        uint256[2] calldata commitments,
+        uint256[2] calldata commitmentPok,
+        uint256[8] calldata input
+    ) external view;
+}
+
 /// @title WhirVerifierWrapper
 /// @notice External wrapper so IntmaxRollup can try/catch on WHIR verification.
 contract WhirVerifierWrapper {
@@ -179,6 +191,8 @@ contract IntmaxRollup {
     struct Groth16Params {
         Groth16Verifier.Proof proof;
         uint256[] pubInputs;
+        uint256[2] commitments;     // gnark commitment point (G1)
+        uint256[2] commitmentPok;   // gnark commitment proof of knowledge (G1)
     }
 
     /// @notice Mirrors the Rust `ValidityPublicInputs` struct.
@@ -285,6 +299,7 @@ contract IntmaxRollup {
     uint256 private constant FRAUD_REWARD_PERCENT = 90;
     uint256 private constant FRAUD_TREASURY_PERCENT = 10;
     address public immutable fraudTreasury;
+    IGnarkVerifier public immutable gnarkVerifier;
 
     mapping(uint256 => StakeInfo) public stakeInfo;
     mapping(address => uint256) public pendingWithdrawals;
@@ -303,12 +318,14 @@ contract IntmaxRollup {
         WhirVerifierWrapper _whirVerifier,
         address _fraudTreasury,
         Groth16Verifier.VerifyingKey memory verifyingKey,
-        bytes32 _whirConfigHash
+        bytes32 _whirConfigHash,
+        IGnarkVerifier _gnarkVerifier
     ) {
         whirVerifier = _whirVerifier;
         fraudTreasury = _fraudTreasury;
         _setGroth16VerifyingKey(verifyingKey);
         whirConfigHash = _whirConfigHash;
+        gnarkVerifier = _gnarkVerifier;
         // Genesis: block 0 has default (zero) hash chains
         blockHashChainAt[0] = bytes32(0);
     }
@@ -573,7 +590,7 @@ contract IntmaxRollup {
             whirValid = false;
         }
 
-        bool groth16Valid = Groth16Verifier.verify(groth16Vk, groth16.proof, groth16.pubInputs);
+        bool groth16Valid = _verifyGroth16(groth16);
 
         return whirValid && groth16Valid;
     }
@@ -756,8 +773,8 @@ contract IntmaxRollup {
         }
         if (!whirValid) return false;
 
-        // 8. Groth16 verification
-        if (!Groth16Verifier.verify(groth16Vk, groth16.proof, groth16.pubInputs)) return false;
+        // 8. Groth16 verification via gnark verifier (with commitment support)
+        if (!_verifyGroth16(groth16)) return false;
 
         return true;
     }
@@ -844,7 +861,7 @@ contract IntmaxRollup {
         }
 
         // (d) Groth16 verification fails
-        if (!Groth16Verifier.verify(groth16Vk, groth16.proof, groth16.pubInputs)) return true;
+        if (!_verifyGroth16(groth16)) return true;
 
         return false;
     }
@@ -860,6 +877,31 @@ contract IntmaxRollup {
             kzg,
             _toFieldElements(proofBytes)
         );
+    }
+
+    /// @dev Verify Groth16 proof via the gnark-generated verifier (with commitment support).
+    ///      Falls back to the built-in Groth16Verifier if no gnark verifier is set.
+    function _verifyGroth16(Groth16Params memory groth16) internal view returns (bool) {
+        if (address(gnarkVerifier) != address(0)) {
+            // Convert proof to gnark format: [a.x, a.y, b.x00, b.x01, b.x10, b.x11, c.x, c.y]
+            uint256[8] memory proof = [
+                groth16.proof.a[0], groth16.proof.a[1],
+                groth16.proof.b[0][0], groth16.proof.b[0][1],
+                groth16.proof.b[1][0], groth16.proof.b[1][1],
+                groth16.proof.c[0], groth16.proof.c[1]
+            ];
+            // Convert pubInputs to fixed-size array
+            uint256[8] memory input;
+            for (uint256 i = 0; i < 8 && i < groth16.pubInputs.length; i++) {
+                input[i] = groth16.pubInputs[i];
+            }
+            try gnarkVerifier.verifyProof(proof, groth16.commitments, groth16.commitmentPok, input) {
+                return true;
+            } catch {
+                return false;
+            }
+        }
+        return Groth16Verifier.verify(groth16Vk, groth16.proof, groth16.pubInputs);
     }
 
     // -----------------------------------------------------------------------
