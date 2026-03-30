@@ -719,6 +719,12 @@ contract IntmaxRollup {
         //    The gnark ExampleVerifierCircuit exposes the Plonky2 validity circuit's public inputs
         //    directly: the circuit registers keccak256(ValidityPublicInputs).to_u32_vec() (8 limbs)
         //    as its public inputs, and gnark maps each Goldilocks element to one BN254 scalar.
+        //
+        //    TODO: also check statement.evaluations[0] == piHash here (same binding as _verifyFraud
+        //    condition b.5).  The INTMAX3 prover must set evaluations[0] = keccak256(ValidityPublicInputs)
+        //    so that both WHIR and Groth16 commit to the same state.  This check is deferred until a
+        //    real INTMAX3 WHIR fixture (where the polynomial encodes a Plonky2 proof with known
+        //    ValidityPublicInputs) is available for end-to-end testing.
         {
             bytes32 piHash = _computeValidityPIHash(validityPIs);
             if (!_groth16PIHashMatches(groth16.pubInputs, piHash)) return false;
@@ -800,9 +806,12 @@ contract IntmaxRollup {
         if (keccak256(abi.encode(config)) != whirConfigHash) return true;
 
         // (b) Groth16 pubInputs don't encode the correct PI hash as 8 big-endian u32 limbs
+        // (b.5) WHIR statement.evaluations[0] is not bound to the same piHash
         {
             bytes32 piHash = _computeValidityPIHash(validityPIs);
             if (!_groth16PIHashMatches(groth16.pubInputs, piHash)) return true;
+            if (statement.evaluations.length == 0 ||
+                BN254.ScalarField.unwrap(statement.evaluations[0]) != uint256(piHash)) return true;
         }
 
         // (c) WHIR verification fails

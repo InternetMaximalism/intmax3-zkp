@@ -1010,7 +1010,9 @@ contract IntmaxRollupTest is Test {
         bytes32 stateRoot = keccak256("e2e_fraud_state");
         IntmaxRollup.ValidityPublicInputs memory vpis = _defaultValidityPIs(stateRoot);
 
-        // Use correct piHash so Groth16 pubInputs condition (b) passes — fraud confirmed by WHIR (c).
+        // Use correct piHash so Groth16 pubInputs condition (b) passes.
+        // statement.evaluations[0] is the sol-whir fixture value (≠ piHash), so fraud is
+        // confirmed at condition (b.5): WHIR statement not bound to the same ValidityPublicInputs.
         bytes32 piHash = _computePIHash(vpis);
         IntmaxRollup.Groth16Params memory groth16 = _groth16WithPIHash(piHash);
 
@@ -1062,7 +1064,9 @@ contract IntmaxRollupTest is Test {
         bytes32 stateRoot = keccak256("random_bytes_fraud");
         IntmaxRollup.ValidityPublicInputs memory vpis = _defaultValidityPIs(stateRoot);
 
-        // Use correct piHash so condition (b) passes — fraud confirmed by real WHIR (c).
+        // Use correct piHash so Groth16 pubInputs condition (b) passes.
+        // statement.evaluations[0] is the sol-whir fixture value (≠ piHash), so fraud is
+        // confirmed at condition (b.5): WHIR statement not bound to the same ValidityPublicInputs.
         bytes32 piHash = _computePIHash(vpis);
         IntmaxRollup.Groth16Params memory groth16 = _groth16WithPIHash(piHash);
 
