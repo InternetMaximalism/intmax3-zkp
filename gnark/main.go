@@ -10,7 +10,9 @@ import (
 	"time"
 
 	"github.com/consensys/gnark-crypto/ecc"
+	"github.com/consensys/gnark-crypto/ecc/bn254/fr"
 	"github.com/consensys/gnark/backend/groth16"
+	groth16_bn254 "github.com/consensys/gnark/backend/groth16/bn254"
 	"github.com/consensys/gnark/frontend"
 	"github.com/consensys/gnark/frontend/cs/r1cs"
 	"github.com/succinctlabs/gnark-plonky2-verifier/types"
@@ -22,6 +24,7 @@ import (
 type Groth16Output struct {
 	Proof        Groth16ProofJSON `json:"proof"`
 	PublicInputs []string         `json:"public_inputs"`
+	RawProofHex  string           `json:"raw_proof_hex"`
 	ProvingTime  float64          `json:"proving_time_ms"`
 	SetupTime    float64          `json:"setup_time_ms"`
 	ProofSize    int              `json:"proof_size_bytes"`
@@ -48,6 +51,7 @@ func main() {
 	outFile := flag.String("out", "groth16_proof.json", "output file for Groth16 proof")
 	solFile := flag.String("sol", "", "output Solidity verifier contract (optional)")
 	setupDir := flag.String("setup-dir", "", "directory to save/load trusted setup (pk.bin, vk.bin). If empty, setup is regenerated each time (dev mode)")
+	expectedResult := flag.Int("expected-result", 1, "1 = prove validity (finalize), 0 = prove fraud")
 	flag.Parse()
 
 	if *dataDir == "" {
@@ -57,6 +61,8 @@ func main() {
 
 	// Read Plonky2 proof data
 	fmt.Fprintf(os.Stderr, "[gnark] Reading Plonky2 data from %s\n", *dataDir)
+	fmt.Fprintf(os.Stderr, "[gnark] Expected result: %d (1=validity, 0=fraud)\n", *expectedResult)
+	_ = *expectedResult // Used for circuit mode selection (future: FraudAwareVerifierCircuit)
 
 	commonCircuitData := types.ReadCommonCircuitData(*dataDir + "/common_circuit_data.json")
 	proofWithPis := variables.DeserializeProofWithPublicInputs(
@@ -201,25 +207,50 @@ func main() {
 	c[0] = new(big.Int).SetBytes(proofBytes[fpSize*6 : fpSize*7])
 	c[1] = new(big.Int).SetBytes(proofBytes[fpSize*7 : fpSize*8])
 
-	// Extract public inputs from the witness
-	pubWitnessSchema, _ := frontend.NewSchema(&assignment)
-	pubWitnessJSON, _ := publicWitness.ToJSON(pubWitnessSchema)
-	var pubWitnessMap map[string]interface{}
-	json.Unmarshal(pubWitnessJSON, &pubWitnessMap)
-
+	// Extract user public inputs from the witness.
+	pubVec := publicWitness.Vector().(fr.Vector)
 	var pubInputStrs []string
-	// Add Plonky2 public inputs (8 Goldilocks elements = 8 u32 limbs of keccak256(ValidityPIs))
-	if pis, ok := pubWitnessMap["PublicInputs"]; ok {
-		if pisList, ok := pis.([]interface{}); ok {
-			for _, pi := range pisList {
-				if piMap, ok := pi.(map[string]interface{}); ok {
-					if limb, ok := piMap["Limb"]; ok {
-						pubInputStrs = append(pubInputStrs, fmt.Sprintf("%v", limb))
-					}
-				}
+	for _, elem := range pubVec {
+		var val big.Int
+		elem.BigInt(&val)
+		pubInputStrs = append(pubInputStrs, val.String())
+	}
+
+	// Compute the 9th public input (commitment hash) using gnark's verifier logic.
+	// After groth16.Verify() succeeds, we replicate its commitment hash computation.
+	{
+		// Access BN254-specific VK to get commitment info
+		bn254VK := vk.(*groth16_bn254.VerifyingKey)
+		fmt.Fprintf(os.Stderr, "[gnark] VK.G1.K length: %d\n", len(bn254VK.G1.K))
+		fmt.Fprintf(os.Stderr, "[gnark] VK.PublicAndCommitmentCommitted: %v\n", bn254VK.PublicAndCommitmentCommitted)
+
+		// Parse commitment point from raw proof
+		commitBytes := proofBytes[fpSize*8 : fpSize*10] // 64 bytes
+
+		// Build prehash: commitment_point || committed_public_inputs
+		var prehash []byte
+		prehash = append(prehash, commitBytes...)
+		if len(bn254VK.PublicAndCommitmentCommitted) > 0 {
+			for _, idx := range bn254VK.PublicAndCommitmentCommitted[0] {
+				prehash = append(prehash, pubVec[idx-1].Marshal()...)
 			}
 		}
+
+		commitmentDst := []byte("bsb22-commitment")
+		res, err := fr.Hash(prehash, commitmentDst, 1)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "[gnark] Commitment hash error: %v\n", err)
+			os.Exit(1)
+		}
+		var commitHashBigInt big.Int
+		res[0].BigInt(&commitHashBigInt)
+		pubInputStrs = append(pubInputStrs, commitHashBigInt.String())
+		fmt.Fprintf(os.Stderr, "[gnark] Commitment hash (9th input): %s\n", commitHashBigInt.String())
 	}
+
+	// Also output the raw proof bytes as hex for on-chain use with gnark generated verifier
+	rawProofHex := fmt.Sprintf("0x%x", proofBytes)
+	fmt.Fprintf(os.Stderr, "[gnark] Public inputs: %d (user + commitment), raw proof: %d bytes\n", len(pubInputStrs), len(proofBytes))
 
 	// Extract VK for on-chain deployment
 	var vkBuf bytes.Buffer
@@ -290,6 +321,7 @@ func main() {
 			IC:    vkIC,
 		},
 		PublicInputs: pubInputStrs,
+		RawProofHex:  rawProofHex,
 		ProvingTime:  float64(provingTime.Milliseconds()),
 		SetupTime:    float64(setupTime.Milliseconds()),
 		ProofSize:    len(proofBytes),
