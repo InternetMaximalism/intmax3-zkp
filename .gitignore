@@ -11,3 +11,4 @@ gnark/gnark-plonky2-verifier/testdata/
 
 # Claude Code internals
 .claude/
+CLAUDE.md
