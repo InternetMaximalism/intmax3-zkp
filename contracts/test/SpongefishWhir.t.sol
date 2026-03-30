@@ -3,6 +3,8 @@ pragma solidity ^0.8.20;
 
 import {Test} from "forge-std/Test.sol";
 import {DuplexSponge} from "../src/spongefish/DuplexSponge.sol";
+import {SpongefishWhirVerify} from "../src/spongefish/SpongefishWhirVerify.sol";
+import {GoldilocksExt3} from "../src/spongefish/GoldilocksExt3.sol";
 
 /// @title SpongefishWhirTest
 /// @notice Tests that the Solidity DuplexSponge matches spongefish's Keccak sponge
@@ -69,6 +71,51 @@ contract SpongefishWhirTest is Test {
         assertEq(protocolId.length, 64, "protocol_id must be 64 bytes");
         assertEq(sessionId.length, 32, "session_id must be 32 bytes");
         assertTrue(transcriptBytes.length > 0, "transcript must be non-empty");
+    }
+
+    /// @notice Test full WHIR proof verification via SpongefishWhirVerify.
+    function test_whir_verify_full() public {
+        string memory json = vm.readFile(
+            string.concat(vm.projectRoot(), "/../tests/fixtures/whir_verifier_data.json")
+        );
+
+        bytes memory protocolId = abi.decode(vm.parseJson(json, ".protocol_id"), (bytes));
+        bytes32 sessionIdB32 = abi.decode(vm.parseJson(json, ".session_id"), (bytes32));
+        bytes memory sessionId = abi.encodePacked(sessionIdB32);
+        bytes memory transcriptBytes = abi.decode(vm.parseJson(json, ".transcript"), (bytes));
+        bytes memory hintsBytes = abi.decode(vm.parseJson(json, ".hints"), (bytes));
+        uint256 numVariables = abi.decode(vm.parseJson(json, ".num_variables"), (uint256));
+
+        // Evaluation (single Field64_3 element)
+        GoldilocksExt3.Ext3[] memory evaluations = new GoldilocksExt3.Ext3[](1);
+        // From fixture: "CubicExtField { c0: 7929543407631650170, c1: 0, c2: 0 }"
+        evaluations[0] = GoldilocksExt3.Ext3(7929543407631650170, 0, 0);
+
+        SpongefishWhirVerify.WhirParams memory params = SpongefishWhirVerify.WhirParams({
+            numVariables: numVariables,
+            foldingFactor: 4,
+            numVectors: 1,
+            outDomainSamples: 1,
+            inDomainSamples: 108,
+            initialSumcheckRounds: 4,
+            numRounds: 1,
+            finalSumcheckRounds: 3,
+            finalSize: 8,
+            roundInDomainSamples: 108,
+            roundOutDomainSamples: 1,
+            roundSumcheckRounds: 4,
+            numLayers: numVariables
+        });
+
+        bool valid = SpongefishWhirVerify.verifyWhirProof(
+            protocolId,
+            sessionId,
+            transcriptBytes,
+            hintsBytes,
+            evaluations,
+            params
+        );
+        assertTrue(valid, "WHIR proof must verify on-chain");
     }
 
     /// @notice Test that DuplexSponge absorb + squeeze produces deterministic output.

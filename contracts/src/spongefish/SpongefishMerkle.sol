@@ -24,7 +24,7 @@ library SpongefishMerkle {
         uint256 numLayers,
         uint256[] memory indices,
         bytes32[] memory leafHashes,
-        bytes calldata hints,
+        bytes memory hints,
         uint256 hintOffset
     ) internal pure returns (uint256) {
         require(indices.length == leafHashes.length, "length mismatch");
@@ -60,7 +60,10 @@ library SpongefishMerkle {
                 } else {
                     // Single index — read sibling from hints
                     require(hintOffset + 32 <= hints.length, "insufficient hints");
-                    bytes32 sibling = bytes32(hints[hintOffset:hintOffset + 32]);
+                    bytes32 sibling;
+                    assembly {
+                        sibling := mload(add(add(hints, 0x20), hintOffset))
+                    }
                     hintOffset += 32;
 
                     bytes32 left;

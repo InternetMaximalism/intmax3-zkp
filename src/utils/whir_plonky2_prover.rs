@@ -972,6 +972,26 @@ mod tests {
         std::fs::write(whir_fixture_path, serde_json::to_string_pretty(&whir_verifier_data).unwrap())
             .expect("Failed to write WHIR verifier fixture");
         println!("  WHIR verifier data saved to: {}", whir_fixture_path.display());
+
+        // Verify that WHIR verify succeeds with the exported data
+        whir_verify_standalone(&result.proof.constants_sigmas_whir, &config)
+            .expect("constants_sigmas WHIR must verify");
+        println!("  WHIR verify (constants_sigmas): OK");
+
+        // Export WHIR config parameters for Solidity verifier
+        let poly_size = 1usize << result.proof.constants_sigmas_whir.num_variables;
+        let params = InternalWhirConfig::<Basefield<Field64_3>>::new(poly_size, &config.params);
+        println!("  WHIR config:");
+        println!("    initial_committer.num_vectors: {}", params.initial_committer.num_vectors);
+        println!("    initial_committer.out_domain_samples: {}", params.initial_committer.out_domain_samples);
+        println!("    initial_committer.in_domain_samples: {}", params.initial_committer.in_domain_samples);
+        println!("    initial_sumcheck.num_rounds: {}", params.initial_sumcheck.num_rounds);
+        println!("    round_configs: {}", params.round_configs.len());
+        for (i, rc) in params.round_configs.iter().enumerate() {
+            println!("      round {}: sumcheck.num_rounds={}", i, rc.sumcheck.num_rounds);
+        }
+        println!("    final_sumcheck.num_rounds: {}", params.final_sumcheck.num_rounds);
+        println!("    final_sumcheck.initial_size: {}", params.final_sumcheck.initial_size);
     }
 
     #[test]

@@ -53,11 +53,11 @@ library SpongefishWhir {
     ///      Matches: verifier_state.prover_message::<T>()
     function proverMessage(
         TranscriptState memory ts,
-        bytes calldata transcript,
+        bytes memory transcript,
         uint256 numBytes
     ) internal pure returns (bytes memory data) {
         require(ts.transcriptPos + numBytes <= transcript.length, "transcript underflow");
-        data = transcript[ts.transcriptPos:ts.transcriptPos + numBytes];
+        data = _memSlice(transcript, ts.transcriptPos, numBytes);
         ts.transcriptPos += numBytes;
         ts.sponge.absorb(data);
     }
@@ -65,7 +65,7 @@ library SpongefishWhir {
     /// @dev Read a 32-byte hash from transcript and absorb.
     function proverMessageHash(
         TranscriptState memory ts,
-        bytes calldata transcript
+        bytes memory transcript
     ) internal pure returns (bytes32 h) {
         bytes memory data = proverMessage(ts, transcript, 32);
         assembly { h := mload(add(data, 32)) }
@@ -74,7 +74,7 @@ library SpongefishWhir {
     /// @dev Read a Goldilocks field element (8 bytes LE) from transcript and absorb.
     function proverMessageField64(
         TranscriptState memory ts,
-        bytes calldata transcript
+        bytes memory transcript
     ) internal pure returns (uint64 val) {
         bytes memory data = proverMessage(ts, transcript, 8);
         // Little-endian decode
@@ -107,7 +107,7 @@ library SpongefishWhir {
     ///      Each 8-byte chunk is LE-encoded Field64.
     function proverMessageField64x3(
         TranscriptState memory ts,
-        bytes calldata transcript
+        bytes memory transcript
     ) internal pure returns (uint64 c0, uint64 c1, uint64 c2) {
         bytes memory data = proverMessage(ts, transcript, 24);
         c0 = _leModReduce64(data, 0, 8);
@@ -130,18 +130,18 @@ library SpongefishWhir {
     ///      Matches: verifier_state.prover_hint::<T>()
     function proverHint(
         TranscriptState memory ts,
-        bytes calldata hints,
+        bytes memory hints,
         uint256 numBytes
     ) internal pure returns (bytes memory data) {
         require(ts.hintPos + numBytes <= hints.length, "hints underflow");
-        data = hints[ts.hintPos:ts.hintPos + numBytes];
+        data = _memSlice(hints, ts.hintPos, numBytes);
         ts.hintPos += numBytes;
     }
 
     /// @dev Read a 32-byte hash from hints.
     function proverHintHash(
         TranscriptState memory ts,
-        bytes calldata hints
+        bytes memory hints
     ) internal pure returns (bytes32 h) {
         bytes memory data = proverHint(ts, hints, 32);
         assembly { h := mload(add(data, 32)) }
@@ -224,7 +224,7 @@ library SpongefishWhir {
     /// @return newSum The updated sum after all rounds
     function verifySumcheck(
         TranscriptState memory ts,
-        bytes calldata transcript,
+        bytes memory transcript,
         uint256 numRounds,
         uint64 sum
     ) internal pure returns (uint64[] memory foldingRandomness, uint64 newSum) {
@@ -328,6 +328,14 @@ library SpongefishWhir {
 
     function _ceilDiv(uint256 a, uint256 b) private pure returns (uint256) {
         return (a + b - 1) / b;
+    }
+
+    /// @dev Copy a slice of a memory bytes array.
+    function _memSlice(bytes memory data, uint256 offset, uint256 len) private pure returns (bytes memory result) {
+        result = new bytes(len);
+        for (uint256 i = 0; i < len; i++) {
+            result[i] = data[offset + i];
+        }
     }
 
     function _sortAndDedup(uint256[] memory arr) private pure {
