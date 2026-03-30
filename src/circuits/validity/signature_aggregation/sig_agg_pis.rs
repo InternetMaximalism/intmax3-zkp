@@ -3,7 +3,6 @@ use plonky2::{
     hash::hash_types::RichField,
     iop::{target::Target, witness::WitnessWrite},
     plonk::{
-        circuit_builder::CircuitBuilder,
         circuit_data::{CircuitConfig, VerifierCircuitTarget, VerifierOnlyCircuitData},
         config::{AlgebraicHasher, GenericConfig},
     },
@@ -11,7 +10,7 @@ use plonky2::{
 use thiserror::Error;
 
 use crate::{
-    common::u63::{BlockNumber, BlockNumberTarget, U63Target},
+    common::u63::{BlockNumber, BlockNumberTarget},
     ethereum_types::{
         bytes32::{BYTES32_LEN, Bytes32, Bytes32Target},
         u32limb_trait::{U32LimbTargetTrait as _, U32LimbTrait as _},

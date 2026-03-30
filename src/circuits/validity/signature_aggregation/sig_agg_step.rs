@@ -30,13 +30,13 @@ use crate::{
             AccountLeaf, AccountLeafTarget, AccountMerkleProof, AccountMerkleProofTarget,
             SendLeaf, SendLeafTarget, SendMerkleProof, SendMerkleProofTarget,
         },
-        u63::{BlockNumber, BlockNumberTarget, U63},
+        u63::{BlockNumber, BlockNumberTarget},
         user_id::{UserId, UserIdTarget},
     },
     constants::{ACCOUNT_TREE_HEIGHT, KEY_SET_TREE_HEIGHT, SEND_TREE_HEIGHT},
     ethereum_types::{
         bytes32::{Bytes32, Bytes32Target},
-        u32limb_trait::{U32LimbTargetTrait as _, U32LimbTrait as _},
+        u32limb_trait::{U32LimbTargetTrait as _},
     },
     utils::{
         conversion::ToU64,
