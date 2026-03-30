@@ -319,13 +319,15 @@ contract IntmaxRollup {
         address _fraudTreasury,
         Groth16Verifier.VerifyingKey memory verifyingKey,
         bytes32 _whirConfigHash,
-        IGnarkVerifier _gnarkVerifier
+        IGnarkVerifier _gnarkVerifier,
+        bytes32 _genesisStateRoot
     ) {
         whirVerifier = _whirVerifier;
         fraudTreasury = _fraudTreasury;
         _setGroth16VerifyingKey(verifyingKey);
         whirConfigHash = _whirConfigHash;
         gnarkVerifier = _gnarkVerifier;
+        latestFinalizedStateRoot = _genesisStateRoot;
         // Genesis: block 0 has default (zero) hash chains
         blockHashChainAt[0] = bytes32(0);
     }
@@ -1069,12 +1071,21 @@ contract IntmaxRollup {
         bytes32 blockDepositHashChain,
         bytes32 blockForcedTxHashChain
     ) internal pure returns (bytes32) {
-        // Build the u32 array matching Rust's layout
+        // Build the u32 array matching Rust's solidity_keccak256 layout.
+        // NOTE: abi.encodePacked(uint32[]) pads each element to 32 bytes, which
+        // does NOT match Rust's 4-byte-per-u32 packing. We must manually pack
+        // the localIds as raw 4-byte big-endian values.
         bytes memory packed = abi.encodePacked(
             prevHash,
             aggregatorId,
-            timestamp,
-            localIds,
+            timestamp
+        );
+        // Pack localIds as 4-byte big-endian values (matching Rust u32 layout)
+        for (uint256 i = 0; i < localIds.length; i++) {
+            packed = bytes.concat(packed, bytes4(localIds[i]));
+        }
+        packed = bytes.concat(
+            packed,
             txTreeRoot,
             blockDepositHashChain,
             blockForcedTxHashChain
