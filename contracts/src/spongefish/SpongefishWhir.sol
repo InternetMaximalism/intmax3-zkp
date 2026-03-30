@@ -93,20 +93,37 @@ library SpongefishWhir {
         return ts.sponge.squeeze(numBytes);
     }
 
-    /// @dev Squeeze a Goldilocks field element (40 bytes → reduce mod p).
-    ///      Matches Field64's Decoding impl which reads 40 bytes.
+    /// @dev Squeeze a Goldilocks field element.
+    ///      Matches Field64's Decoding impl: squeeze (MODULUS_BIT_SIZE/8 + 32) = 8 + 32 = 40 bytes.
+    ///      Interpret as LE 320-bit integer, reduce mod GL_P.
     function verifierMessageField64(
         TranscriptState memory ts
     ) internal pure returns (uint64 val) {
         bytes memory data = ts.sponge.squeeze(40);
-        // Reduce 40 bytes to Field64: interpret as LE integer, mod p
-        uint256 acc = 0;
-        for (uint256 i = 0; i < 40; i++) {
-            acc |= uint256(uint8(data[i])) << (i * 8);
-        }
-        // Note: 40 bytes = 320 bits. We need to reduce mod GL_P (64 bits).
-        // Simple approach: take lower 128 bits and reduce
-        val = uint64(acc % uint256(GL_P));
+        val = _leModReduce64(data, 0, 40);
+    }
+
+    /// @dev Read a Field64_3 (cubic extension) from transcript: 3 × 8 = 24 bytes.
+    ///      Each 8-byte chunk is LE-encoded Field64.
+    function proverMessageField64x3(
+        TranscriptState memory ts,
+        bytes calldata transcript
+    ) internal pure returns (uint64 c0, uint64 c1, uint64 c2) {
+        bytes memory data = proverMessage(ts, transcript, 24);
+        c0 = _leModReduce64(data, 0, 8);
+        c1 = _leModReduce64(data, 8, 8);
+        c2 = _leModReduce64(data, 16, 8);
+    }
+
+    /// @dev Squeeze a Field64_3: 3 × (8 + 32) = 120 bytes.
+    ///      Each 40-byte chunk is reduced mod GL_P.
+    function verifierMessageField64x3(
+        TranscriptState memory ts
+    ) internal pure returns (uint64 c0, uint64 c1, uint64 c2) {
+        bytes memory data = ts.sponge.squeeze(120);
+        c0 = _leModReduce64(data, 0, 40);
+        c1 = _leModReduce64(data, 40, 40);
+        c2 = _leModReduce64(data, 80, 40);
     }
 
     /// @dev Read N bytes from hints (NOT absorbed into sponge).
@@ -233,6 +250,56 @@ library SpongefishWhir {
             //            = c0 + r*(c1 + r*c2)
             newSum = _addmod64(c0, _mulmod64(r, _addmod64(c1, _mulmod64(r, c2))));
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // LE byte reduction
+    // -----------------------------------------------------------------------
+
+    /// @dev Interpret `len` LE bytes from `data[offset..]` as a big integer, reduce mod GL_P.
+    function _leModReduce64(bytes memory data, uint256 offset, uint256 len) private pure returns (uint64) {
+        // For len <= 32, we can use a single uint256
+        // For len > 32 (e.g., 40 bytes), we need to handle carefully
+        uint256 acc = 0;
+        // Read in chunks of up to 32 bytes
+        for (uint256 i = 0; i < len && i < 32; i++) {
+            acc |= uint256(uint8(data[offset + i])) << (i * 8);
+        }
+        if (len > 32) {
+            // Handle remaining bytes (e.g., bytes 32-39 for 40-byte input)
+            uint256 hi = 0;
+            for (uint256 i = 32; i < len; i++) {
+                hi |= uint256(uint8(data[offset + i])) << ((i - 32) * 8);
+            }
+            // acc = lo + hi * 2^256
+            // result = (lo + hi * 2^256) mod GL_P
+            // Since GL_P is 64-bit, 2^256 mod GL_P is a constant
+            // 2^256 mod (2^64 - 2^32 + 1)
+            // We can compute this as: mulmod(hi, 2^256 mod P, P) + acc mod P
+            uint256 pow256modP = uint256(2) ** 64; // Simplified — need exact value
+            // Actually, for correctness: reduce acc mod P first, then add hi * (2^256 mod P)
+            // But since acc is 256 bits and P is 64 bits, acc mod P is at most 64 bits
+            // And hi * (2^256 mod P) mod P is at most 64 bits
+            // So we can just compute (acc + hi * 2^256) mod P
+            // Using Solidity's modular arithmetic:
+            acc = addmod(acc % uint256(GL_P), mulmod(hi, _pow256ModP(), uint256(GL_P)), uint256(GL_P));
+            return uint64(acc);
+        }
+        return uint64(acc % uint256(GL_P));
+    }
+
+    /// @dev Compute 2^256 mod GL_P (precomputed constant).
+    function _pow256ModP() private pure returns (uint256) {
+        // GL_P = 2^64 - 2^32 + 1
+        // 2^256 mod GL_P:
+        // 2^64 ≡ 2^32 - 1 (mod GL_P)
+        // 2^128 ≡ (2^32 - 1)^2 = 2^64 - 2^33 + 1 ≡ (2^32 - 1) - 2^33 + 1 = -2^32 (mod GL_P)
+        // Actually let's just compute it: 2^256 mod (2^64 - 2^32 + 1)
+        // This is a fixed constant, precompute in Python:
+        // >>> p = 2**64 - 2**32 + 1
+        // >>> pow(2, 256, p)
+        // 2^256 mod (2^64 - 2^32 + 1) = 2^32 - 1 = 4294967295
+        return 4294967295;
     }
 
     // -----------------------------------------------------------------------
