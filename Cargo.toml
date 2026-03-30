@@ -31,10 +31,12 @@ clap = { version = "4.5", features = ["derive"] }
 whir = { git = "https://github.com/WizardOfMenlo/whir", features = ["parallel"], optional = true }
 ark-ff = { version = "0.5", features = ["asm", "std"], optional = true }
 ark-std = { version = "0.5", features = ["std"], optional = true }
+sha3 = { version = "0.10", optional = true }
+ciborium = { version = "0.2", optional = true }
 
 [features]
 default = []
-whir = ["dep:whir", "dep:ark-ff", "dep:ark-std"]
+whir = ["dep:whir", "dep:ark-ff", "dep:ark-std", "dep:sha3", "dep:ciborium"]
 
 
 [dev-dependencies]

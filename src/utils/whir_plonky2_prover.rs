@@ -557,6 +557,76 @@ where
 }
 
 // ---------------------------------------------------------------------------
+// On-chain verifier data export
+// ---------------------------------------------------------------------------
+
+/// Export all data needed for on-chain WHIR verification via SpongefishWhir.sol.
+///
+/// This includes the domain separator initialization values (protocol_id, session_id),
+/// the raw transcript + hints, evaluations, and WHIR config parameters.
+/// The Solidity verifier can then replay the spongefish transcript exactly.
+pub fn export_whir_verifier_data(
+    commitment: &WhirPolyCommitment,
+    config: &WhirWrapConfig,
+) -> serde_json::Value {
+    let poly_size = 1usize << commitment.num_variables;
+    let params = InternalWhirConfig::<Basefield<Field64_3>>::new(poly_size, &config.params);
+
+    // Compute protocol_id: SHA3-512 of CBOR-serialized config
+    // (WizardOfMenlo/whir DomainSeparator::protocol)
+    let protocol_id = {
+        use sha3::{Digest, Sha3_512};
+        let mut hash = Sha3_512::new();
+        ciborium::into_writer(&params, &mut hash).expect("CBOR serialization failed");
+        let result: [u8; 64] = hash.finalize().into();
+        result
+    };
+
+    // Compute session_id: spongefish::session_id (Keccak sponge squeeze of session_name)
+    // The WizardOfMenlo DomainSeparator::session uses SHA3-256 + CBOR
+    let session_id = {
+        use sha3::{Digest, Sha3_256};
+        let mut hash = Sha3_256::new();
+        ciborium::into_writer(&commitment.session_name, &mut hash)
+            .expect("CBOR serialization failed");
+        let result: [u8; 32] = hash.finalize().into();
+        result
+    };
+
+    // Instance encoding for Empty struct — Empty encodes as [] (zero bytes)
+    let instance_bytes: Vec<u8> = Vec::new();
+
+    // Evaluation values as hex strings
+    let evaluations_hex: Vec<String> = commitment.evaluations.iter().map(|e| {
+        // Field64_3 → bytes (serialize as canonical representation)
+        format!("{:?}", e)
+    }).collect();
+
+    // Canonical evaluation point
+    let point: Vec<String> = (0..commitment.num_variables)
+        .map(|i| format!("{}", i + 1))
+        .collect();
+
+    serde_json::json!({
+        "protocol_id": format!("0x{}", hex::encode(protocol_id)),
+        "session_id": format!("0x{}", hex::encode(session_id)),
+        "instance": format!("0x{}", hex::encode(&instance_bytes)),
+        "transcript": format!("0x{}", hex::encode(&commitment.proof_narg)),
+        "hints": format!("0x{}", hex::encode(&commitment.proof_hints)),
+        "num_variables": commitment.num_variables,
+        "evaluations": evaluations_hex,
+        "evaluation_point": point,
+        "session_name": commitment.session_name,
+        "whir_config": {
+            "num_variables": commitment.num_variables,
+            "folding_factor": config.params.folding_factor,
+            "security_level": config.params.security_level,
+            "starting_log_inv_rate": config.params.starting_log_inv_rate,
+        },
+    })
+}
+
+// ---------------------------------------------------------------------------
 // Gas estimation
 // ---------------------------------------------------------------------------
 
@@ -893,6 +963,15 @@ mod tests {
         std::fs::write(fixture_path, serde_json::to_string_pretty(&onchain_data).unwrap())
             .expect("Failed to write fixture");
         println!("  Saved to: {}", fixture_path.display());
+
+        // Export WHIR verifier data for on-chain verification
+        let whir_verifier_data = export_whir_verifier_data(
+            &result.proof.constants_sigmas_whir, &config,
+        );
+        let whir_fixture_path = std::path::Path::new("tests/fixtures/whir_verifier_data.json");
+        std::fs::write(whir_fixture_path, serde_json::to_string_pretty(&whir_verifier_data).unwrap())
+            .expect("Failed to write WHIR verifier fixture");
+        println!("  WHIR verifier data saved to: {}", whir_fixture_path.display());
     }
 
     #[test]
