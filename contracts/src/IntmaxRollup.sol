@@ -720,14 +720,16 @@ contract IntmaxRollup {
         //    directly: the circuit registers keccak256(ValidityPublicInputs).to_u32_vec() (8 limbs)
         //    as its public inputs, and gnark maps each Goldilocks element to one BN254 scalar.
         //
-        //    TODO: also check statement.evaluations[0] == piHash here (same binding as _verifyFraud
-        //    condition b.5).  The INTMAX3 prover must set evaluations[0] = keccak256(ValidityPublicInputs)
-        //    so that both WHIR and Groth16 commit to the same state.  This check is deferred until a
-        //    real INTMAX3 WHIR fixture (where the polynomial encodes a Plonky2 proof with known
-        //    ValidityPublicInputs) is available for end-to-end testing.
+        // 6.5 WHIR statement.evaluations[0] must also equal piHash (reduced to BN254 scalar field).
+        //     The INTMAX3 prover sets evaluations[0] = keccak256(ValidityPublicInputs) mod R so
+        //     that both WHIR and Groth16 commit to the same state transition.
+        //     Reduction is required because keccak256 outputs 256 bits but BN254 scalars are ~254 bits.
         {
             bytes32 piHash = _computeValidityPIHash(validityPIs);
             if (!_groth16PIHashMatches(groth16.pubInputs, piHash)) return false;
+            uint256 piHashReduced = uint256(piHash) % BN254.R_MOD;
+            if (statement.evaluations.length == 0 ||
+                BN254.ScalarField.unwrap(statement.evaluations[0]) != piHashReduced) return false;
         }
 
         // 7. WHIR verification
@@ -806,12 +808,13 @@ contract IntmaxRollup {
         if (keccak256(abi.encode(config)) != whirConfigHash) return true;
 
         // (b) Groth16 pubInputs don't encode the correct PI hash as 8 big-endian u32 limbs
-        // (b.5) WHIR statement.evaluations[0] is not bound to the same piHash
+        // (b.5) WHIR statement.evaluations[0] is not bound to the same piHash (reduced mod BN254.R_MOD)
         {
             bytes32 piHash = _computeValidityPIHash(validityPIs);
             if (!_groth16PIHashMatches(groth16.pubInputs, piHash)) return true;
+            uint256 piHashReduced = uint256(piHash) % BN254.R_MOD;
             if (statement.evaluations.length == 0 ||
-                BN254.ScalarField.unwrap(statement.evaluations[0]) != uint256(piHash)) return true;
+                BN254.ScalarField.unwrap(statement.evaluations[0]) != piHashReduced) return true;
         }
 
         // (c) WHIR verification fails

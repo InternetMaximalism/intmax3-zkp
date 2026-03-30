@@ -280,6 +280,27 @@ contract IntmaxRollupTest is Test {
         );
     }
 
+    function _loadWhirFixture(string memory filename)
+        internal
+        view
+        returns (
+            WhirConfig memory config,
+            Statement memory statement,
+            WhirProof memory whirProof,
+            bytes memory transcript
+        )
+    {
+        string memory json = vm.readFile(filename);
+        bytes memory parsed = vm.parseJson(json);
+        JSONWhirProof memory jsonProof = abi.decode(parsed, (JSONWhirProof));
+
+        config     = JSONUtils.jsonWhirConfigToWhirConfig(jsonProof.config);
+        statement  = JSONUtils.jsonStatementToStatement(jsonProof.statement);
+        whirProof  = JSONUtils.jsonWhirProofToWhirProof(jsonProof);
+        transcript = jsonProof.arthur.transcript;
+    }
+
+    /// @dev Load the sol-whir sample fixture (for tests that do NOT reach WHIR-piHash binding).
     function loadProof()
         internal
         view
@@ -290,19 +311,29 @@ contract IntmaxRollupTest is Test {
             bytes memory transcript
         )
     {
-        string memory path = string.concat(
+        return _loadWhirFixture(string.concat(
             vm.projectRoot(),
             "/lib/sol-whir/test/data/whir/",
             "proof_16_4_1_ConjectureList_30_6_80_ProverHelps.json"
-        );
-        string memory json = vm.readFile(path);
-        bytes memory parsed = vm.parseJson(json);
-        JSONWhirProof memory jsonProof = abi.decode(parsed, (JSONWhirProof));
+        ));
+    }
 
-        config     = JSONUtils.jsonWhirConfigToWhirConfig(jsonProof.config);
-        statement  = JSONUtils.jsonStatementToStatement(jsonProof.statement);
-        whirProof  = JSONUtils.jsonWhirProofToWhirProof(jsonProof);
-        transcript = jsonProof.arthur.transcript;
+    /// @dev Load the INTMAX3 WHIR fixture where evaluations[0] = piHash (reduced mod BN254.R_MOD).
+    ///      Used by finalize tests that require the WHIR-Groth16 piHash binding check.
+    function loadIntmax3Proof()
+        internal
+        view
+        returns (
+            WhirConfig memory config,
+            Statement memory statement,
+            WhirProof memory whirProof,
+            bytes memory transcript
+        )
+    {
+        return _loadWhirFixture(string.concat(
+            vm.projectRoot(),
+            "/test/data/whir/intmax3_whir_fixture.json"
+        ));
     }
 
     /// @dev Build a dummy ValidityPublicInputs that matches on-chain state.
@@ -591,7 +622,7 @@ contract IntmaxRollupTest is Test {
             Statement memory statement,
             WhirProof memory whirProof,
             bytes memory transcript
-        ) = loadProof();
+        ) = loadIntmax3Proof();
 
         bytes32 stateRoot = keccak256("finalized_state");
 
@@ -633,9 +664,9 @@ contract IntmaxRollupTest is Test {
             Statement memory statement,
             WhirProof memory whirProof,
             bytes memory transcript
-        ) = loadProof();
+        ) = loadIntmax3Proof();
 
-        bytes32 stateRoot = keccak256("s");
+        bytes32 stateRoot = keccak256("finalized_state");
 
         IntmaxRollup.ValidityPublicInputs memory vpis = _defaultValidityPIs(stateRoot);
         bytes32 piHash = _computePIHash(vpis);
@@ -1103,9 +1134,9 @@ contract IntmaxRollupTest is Test {
             Statement memory statement,
             WhirProof memory whirProof,
             bytes memory transcript
-        ) = loadProof();
+        ) = loadIntmax3Proof();
 
-        bytes32 stateRoot = keccak256("final_state_for_fraud");
+        bytes32 stateRoot = keccak256("finalized_state");
 
         // vpis computed BEFORE posting so proof params binding is consistent.
         IntmaxRollup.ValidityPublicInputs memory vpis = _defaultValidityPIs(stateRoot);
@@ -1316,9 +1347,9 @@ contract IntmaxRollupTest is Test {
             Statement memory statement,
             WhirProof memory whirProof,
             bytes memory transcript
-        ) = loadProof();
+        ) = loadIntmax3Proof();
 
-        bytes32 stateRoot = keccak256("gas_finalize");
+        bytes32 stateRoot = keccak256("finalized_state");
 
         IntmaxRollup.ValidityPublicInputs memory vpis = _defaultValidityPIs(stateRoot);
         bytes32 piHash = _computePIHash(vpis);
