@@ -78,9 +78,7 @@ contract IntmaxRollup {
     error ForcedTxLogicAlreadyRegistered();
     error ForcedTxLogicNotAccepted();
     error InvalidStakeAmount();
-    error RewardTransferFailed();
-    error TreasuryTransferFailed();
-    error StakeRefundFailed();
+    error NothingToWithdraw();
 
     // -----------------------------------------------------------------------
     // Events
@@ -133,6 +131,8 @@ contract IntmaxRollup {
         bytes32 newAccumulator
     );
 
+    event WithdrawalCredited(address indexed recipient, uint256 amount);
+
     // -----------------------------------------------------------------------
     // Types
     // -----------------------------------------------------------------------
@@ -169,6 +169,7 @@ contract IntmaxRollup {
         uint64 endBlockNumber;
         bytes32 previousBlockHash;
         bytes32 previousDepositHashChain;
+        bytes32 pendingDepositHashChainBefore;
         uint64 postingRoundBefore;
         uint64 postingRoundAfter;
         uint64 processedDepositCountBefore;
@@ -286,6 +287,7 @@ contract IntmaxRollup {
     address public immutable fraudTreasury;
 
     mapping(uint256 => StakeInfo) public stakeInfo;
+    mapping(address => uint256) public pendingWithdrawals;
     mapping(uint64 => DepositRecord) internal _depositRecords;
     mapping(uint256 => BatchMetadata) internal _batchMetadata;
     uint64 public processedDepositCount;
@@ -416,7 +418,8 @@ contract IntmaxRollup {
         uint64 processedDepositsBefore = processedDepositCount;
 
         // --- Prepare deposits and forced txs for this posting round ---
-        bytes32 batchDepositHashChain = _pendingDepositHashChain;
+        bytes32 pendingHashBefore = _pendingDepositHashChain;
+        bytes32 batchDepositHashChain = pendingHashBefore;
         _pendingDepositHashChain = bytes32(0);
 
         uint64 previousPostingRound = postingRound;
@@ -475,6 +478,7 @@ contract IntmaxRollup {
             endBlockNumber: currentBlockNumber,
             previousBlockHash: previousBlockHash,
             previousDepositHashChain: previousDepositHashChain,
+            pendingDepositHashChainBefore: pendingHashBefore,
             postingRoundBefore: previousPostingRound,
             postingRoundAfter: currentRound,
             processedDepositCountBefore: processedDepositsBefore
@@ -665,6 +669,17 @@ contract IntmaxRollup {
 
     function isFinalized(uint256 id) external view returns (bool) {
         return _submissions[id].finalized;
+    }
+
+    /// @notice Pull-payment: claim pending withdrawals (stake refunds / fraud rewards).
+    ///         Finalize and fraudProof credit amounts to pendingWithdrawals instead of
+    ///         pushing ETH, so reverting recipients cannot block protocol operations.
+    function withdraw() external nonReentrant {
+        uint256 amount = pendingWithdrawals[msg.sender];
+        if (amount == 0) revert NothingToWithdraw();
+        pendingWithdrawals[msg.sender] = 0;
+        (bool ok, ) = msg.sender.call{value: amount}("");
+        require(ok, "Withdraw failed");
     }
 
     // -----------------------------------------------------------------------
@@ -893,27 +908,11 @@ contract IntmaxRollup {
         }
 
         processedDepositCount = meta.processedDepositCountBefore;
-        _pendingDepositHashChain = _rebuildPendingDeposits(meta.processedDepositCountBefore);
+        _pendingDepositHashChain = meta.pendingDepositHashChainBefore;
     }
 
-    function _rebuildPendingDeposits(uint64 startIndex) internal view returns (bytes32 hash) {
-        if (startIndex >= depositCount) {
-            return bytes32(0);
-        }
-        hash = bytes32(0);
-        for (uint64 i = startIndex; i < depositCount; i++) {
-            DepositRecord storage record = _depositRecords[i];
-            hash = _computeDepositHash(
-                hash,
-                record.depositor,
-                record.recipient,
-                record.tokenIndex,
-                record.amount,
-                record.auxData
-            );
-        }
-    }
-
+    /// @dev Credit fraud reward/treasury share to pendingWithdrawals (pull-payment).
+    ///      Recipients call withdraw() to claim. A reverting recipient cannot block fraudProof().
     function _slashStake(uint256 submissionId, address reporter) internal {
         StakeInfo storage info = stakeInfo[submissionId];
         if (info.submitter == address(0) || info.spent) {
@@ -927,13 +926,15 @@ contract IntmaxRollup {
         uint256 reward = (POST_BLOCK_STAKE * FRAUD_REWARD_PERCENT) / 100;
         uint256 treasuryShare = POST_BLOCK_STAKE - reward;
 
-        (bool rewardOk, ) = reporter.call{value: reward}("");
-        require(rewardOk, "Reward transfer failed");
+        pendingWithdrawals[reporter] += reward;
+        pendingWithdrawals[fraudTreasury] += treasuryShare;
 
-        (bool treasuryOk, ) = fraudTreasury.call{value: treasuryShare}("");
-        require(treasuryOk, "Treasury transfer failed");
+        emit WithdrawalCredited(reporter, reward);
+        emit WithdrawalCredited(fraudTreasury, treasuryShare);
     }
 
+    /// @dev Credit stake refund to pendingWithdrawals (pull-payment).
+    ///      Submitter calls withdraw() to claim. A reverting submitter cannot block finalize().
     function _refundStake(uint256 submissionId) internal {
         StakeInfo storage info = stakeInfo[submissionId];
         if (info.submitter == address(0) || info.spent) {
@@ -945,8 +946,8 @@ contract IntmaxRollup {
         address recipient = info.submitter;
         delete stakeInfo[submissionId];
 
-        (bool ok, ) = recipient.call{value: POST_BLOCK_STAKE}("");
-        require(ok, "Stake refund failed");
+        pendingWithdrawals[recipient] += POST_BLOCK_STAKE;
+        emit WithdrawalCredited(recipient, POST_BLOCK_STAKE);
     }
 
     function _setGroth16VerifyingKey(Groth16Verifier.VerifyingKey memory vkInput) internal {

@@ -655,7 +655,11 @@ contract IntmaxRollupTest is Test {
         assertTrue(ok);
         assertTrue(rollup.isFinalized(0));
         assertEq(rollup.latestFinalizedStateRoot(), stateRoot);
-        assertEq(submitter.balance, stakeBalanceBefore, "stake should be refunded");
+        // Pull-payment: stake credited to pendingWithdrawals, not pushed
+        assertEq(rollup.pendingWithdrawals(submitter), 1 ether, "stake should be credited");
+        vm.prank(submitter);
+        rollup.withdraw();
+        assertEq(submitter.balance, stakeBalanceBefore, "stake should be withdrawn");
     }
 
     function test_finalize_alreadyFinalized() public {
@@ -1009,9 +1013,19 @@ contract IntmaxRollupTest is Test {
 
         uint256 expectedReward = 2 * 0.9 ether;
         uint256 expectedTreasury = 2 * 0.1 ether;
-        assertEq(reporter.balance, reporterBefore + expectedReward, "Reporter reward mismatch");
-        assertEq(fraudTreasury.balance, treasuryBefore + expectedTreasury, "Treasury share mismatch");
-        assertEq(address(rollup).balance, 0, "Stakes should be slashed");
+        // Pull-payment: rewards credited to pendingWithdrawals
+        assertEq(rollup.pendingWithdrawals(reporter), expectedReward, "Reporter reward mismatch");
+        assertEq(rollup.pendingWithdrawals(fraudTreasury), expectedTreasury, "Treasury share mismatch");
+        // Contract still holds the funds until withdraw()
+        assertEq(address(rollup).balance, expectedReward + expectedTreasury, "Stakes in escrow");
+        vm.prank(reporter);
+        rollup.withdraw();
+        assertEq(reporter.balance, reporterBefore + expectedReward, "Reporter withdrew");
+        // (treasury is an EOA in this test, so it can also withdraw)
+        vm.prank(fraudTreasury);
+        rollup.withdraw();
+        assertEq(fraudTreasury.balance, treasuryBefore + expectedTreasury, "Treasury withdrew");
+        assertEq(address(rollup).balance, 0, "All funds withdrawn");
         assertEq(rollup.blockNumber(), 0, "Blocks should roll back");
         assertEq(rollup.nextSubmissionId(), 0, "Submissions truncated");
         assertEq(rollup.postingRound(), 0, "Posting round reset");
