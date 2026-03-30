@@ -196,6 +196,26 @@ fn main() -> anyhow::Result<()> {
         pi_hash_reduced: pi_hash_reduced_hex.clone(),
     };
 
+    // Also export block data for Solidity test (SubBlock parameters)
+    let block = generator
+        .block_chain_witness
+        .get(&generator.block_number)
+        .map(|w| &w.block)
+        .expect("block data");
+    eprintln!("[e2e] Block data for Solidity:");
+    eprintln!("[e2e]   num_users:      {}", block.num_users);
+    eprintln!("[e2e]   aggregator_id:  {}", block.aggregator_id);
+    eprintln!("[e2e]   timestamp:      {}", block.timestamp);
+    eprintln!("[e2e]   local_ids:      {:?}", block.local_ids);
+    eprintln!("[e2e]   tx_tree_root:   {}", block.tx_tree_root);
+    eprintln!("[e2e]   deposit_hash:   {}", block.deposit_hash_chain);
+    eprintln!("[e2e]   forced_tx_hash: {}", block.forced_tx_hash_chain);
+
+    // Compute blockHashChain for verification
+    let block_hash = block.hash_with_prev_hash(intmax3_zkp::ethereum_types::bytes32::Bytes32::default())
+        .expect("block hash");
+    eprintln!("[e2e]   blockHashChain: {}", block_hash);
+
     let out_dir = Path::new("contracts/test/data");
     fs::create_dir_all(out_dir)?;
     let json = serde_json::to_string_pretty(&fixture)?;
