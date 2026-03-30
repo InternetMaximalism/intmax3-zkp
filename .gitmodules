@@ -4,6 +4,3 @@
 [submodule "contracts/lib/sol-whir"]
 	path = contracts/lib/sol-whir
 	url = https://github.com/privacy-scaling-explorations/sol-whir
-[submodule "contracts/lib/lib-keccak"]
-	path = contracts/lib/lib-keccak
-	url = https://github.com/ethereum-optimism/lib-keccak
