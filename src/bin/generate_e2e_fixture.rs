@@ -203,6 +203,47 @@ fn main() -> anyhow::Result<()> {
 
     eprintln!("[e2e] Fixture written to contracts/test/data/e2e_fixture.json");
     eprintln!("[e2e] piHashReduced = {} (use for WHIR fixture generation)", pi_hash_reduced_hex);
+
+    // -----------------------------------------------------------------------
+    // Step 4: Generate WHIR proof + constraint data for WrapperCircuit
+    // -----------------------------------------------------------------------
+    #[cfg(feature = "whir")]
+    {
+        use intmax3_zkp::utils::whir_plonky2_prover::{
+            prove_with_whir, export_onchain_data, WhirWrapConfig,
+        };
+        use plonky2::iop::witness::{PartialWitness, WitnessWrite};
+
+        eprintln!("[e2e] Step 4: Generate WHIR proof for WrapperCircuit");
+
+        let whir_config = WhirWrapConfig::default_keccak();
+
+        // Build the same PartialWitness as wrapper.prove()
+        let mut pw = PartialWitness::new();
+        pw.set_proof_with_pis_target(&wrapper.wrap_proof, &validity_proof);
+
+        let whir_result = prove_with_whir::<F, BN128C, D>(
+            &wrapper.data, pw, &whir_config, true,
+        )?;
+        eprintln!("[e2e] WHIR proof generated");
+        eprintln!("[e2e]   Plonky2 time: {:?}", whir_result.plonky2_prove_time);
+        eprintln!("[e2e]   WHIR time:    {:?}", whir_result.whir_time);
+        eprintln!("[e2e]   Total time:   {:?}", whir_result.total_time);
+
+        // Export on-chain constraint data
+        let onchain_data = export_onchain_data(&whir_result.proof, &wrapper.data);
+        let constraint_json = serde_json::to_string_pretty(&onchain_data)?;
+        fs::write(
+            out_dir.join("wrapper_constraint_data.json"),
+            &constraint_json,
+        )?;
+        eprintln!("[e2e] Constraint data written to contracts/test/data/wrapper_constraint_data.json");
+
+        // TODO: Export WHIR proof in sol-whir compatible JSON format
+        // Requires implementing WHIR proof transcript → sol-whir JSON serialization
+        eprintln!("[e2e] Note: WHIR proof JSON export not yet implemented (constraint data is sufficient for Plonky2Verifier test)");
+    }
+
     eprintln!("[e2e] Done!");
 
     Ok(())

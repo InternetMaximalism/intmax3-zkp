@@ -654,17 +654,19 @@ where
     // Circuit params
     let selectors_info = &common.selectors_info;
 
-    // Gate info
+    // Gate info (with per-gate config for Solidity verifier)
     let gate_infos: Vec<serde_json::Value> = common.gates.iter().enumerate().map(|(i, gate)| {
         let sel_idx = selectors_info.selector_indices[i];
         let group = &selectors_info.groups[sel_idx];
+        let id = gate.0.id();
         serde_json::json!({
-            "gateType": _gate_type_id(&gate.0.id()),
+            "gateType": _gate_type_id(&id),
             "selectorIndex": sel_idx,
             "groupStart": group.start,
             "groupEnd": group.end,
             "rowInGroup": i,
             "numConstraints": gate.0.num_constraints(),
+            "gateConfig": _gate_config(&id),
         })
     }).collect();
 
@@ -705,6 +707,66 @@ where
             .map(|f| f.to_canonical_u64())
             .collect::<Vec<_>>(),
     })
+}
+
+/// Extract gate-specific configuration parameters from the Debug ID string.
+///
+/// Returns a Vec<u64> matching the Solidity GateInfo.gateConfig format:
+///   Constant(1): [numConsts]
+///   Arithmetic(4): [numOps]
+///   BaseSumGate(5): [numLimbs, base]
+///   RandomAccessGate(6): [bits, numCopies, numExtraConstants, vecSize]
+///   ReducingExtensionGate(8): [numCoeffs]
+///   ArithmeticExtensionGate(9): [numOps]
+///   MulExtensionGate(10): [numOps]
+///   ExponentiationGate(11): [numPowerBits]
+///   CosetInterpolationGate(12): [subgroupBits, numPoints, numIntermediates, degree]
+fn _gate_config(id: &str) -> Vec<u64> {
+    // Helper: extract a named numeric field from Debug output like "FieldName { num_ops: 20 }"
+    let extract = |field_name: &str| -> Option<u64> {
+        let needle = format!("{}: ", field_name);
+        id.find(&needle).and_then(|pos| {
+            let start = pos + needle.len();
+            let rest = &id[start..];
+            let end = rest.find(|c: char| !c.is_ascii_digit()).unwrap_or(rest.len());
+            rest[..end].parse().ok()
+        })
+    };
+
+    if id.contains("ConstantGate") {
+        vec![extract("num_consts").unwrap_or(2)]
+    } else if id.contains("ArithmeticExtensionGate") {
+        vec![extract("num_ops").unwrap_or(0)]
+    } else if id.contains("ArithmeticGate") {
+        vec![extract("num_ops").unwrap_or(20)]
+    } else if id.contains("BaseSumGate") {
+        let num_limbs = extract("num_limbs").unwrap_or(0);
+        // Base is in the type parameter: "BaseSumGate { ... }" with B=2 typically
+        // The Debug format includes it as part of the struct name or inner field
+        let base = 2u64; // BaseSumGate<2> is the standard config
+        vec![num_limbs, base]
+    } else if id.contains("RandomAccessGate") {
+        let bits = extract("bits").unwrap_or(0);
+        let num_copies = extract("num_copies").unwrap_or(0);
+        let num_extra_constants = extract("num_extra_constants").unwrap_or(0);
+        let vec_size = 1u64 << bits;
+        vec![bits, num_copies, num_extra_constants, vec_size]
+    } else if id.contains("ReducingExtensionGate") {
+        vec![extract("num_coeffs").unwrap_or(0)]
+    } else if id.contains("MulExtensionGate") {
+        vec![extract("num_ops").unwrap_or(0)]
+    } else if id.contains("ExponentiationGate") {
+        vec![extract("num_power_bits").unwrap_or(0)]
+    } else if id.contains("CosetInterpolationGate") {
+        let subgroup_bits = extract("subgroup_bits").unwrap_or(0);
+        let num_points = 1u64 << subgroup_bits;
+        // degree and num_intermediates are computed from config
+        let degree = extract("degree").unwrap_or(2);
+        let num_intermediates = if degree > 1 { (num_points - 2) / (degree - 1) } else { 0 };
+        vec![subgroup_bits, num_points, num_intermediates, degree]
+    } else {
+        vec![]
+    }
 }
 
 /// Map Plonky2 gate ID strings to numeric type IDs for Solidity.

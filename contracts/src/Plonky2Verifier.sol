@@ -3,6 +3,7 @@ pragma solidity ^0.8.20;
 
 import "./GoldilocksField.sol";
 import "./PoseidonGateEval.sol";
+import "./PoseidonConstants.sol";
 
 /// @title Plonky2Verifier — On-chain Plonky2 constraint satisfaction check
 /// @dev Verifies that polynomial openings at challenge point ζ satisfy
@@ -265,11 +266,13 @@ contract Plonky2Verifier {
         if (gateType == 4) return _evalArithmeticGate(openings, constOffset, gateConfig); // ArithmeticGate
         if (gateType == 5) return _evalBaseSumGate(openings, gateConfig);                 // BaseSumGate
         if (gateType == 6) return _evalRandomAccessGate(openings, gateConfig);            // RandomAccessGate
+        if (gateType == 7) return _evalReducingGate(openings, gateConfig);                // ReducingGate
         if (gateType == 8) return _evalReducingExtensionGate(openings, gateConfig);       // ReducingExtensionGate
         if (gateType == 9) return _evalArithmeticExtensionGate(openings, constOffset, gateConfig); // ArithmeticExtensionGate
         if (gateType == 10) return _evalMulExtensionGate(openings, constOffset, gateConfig); // MulExtensionGate
         if (gateType == 11) return _evalExponentiationGate(openings, gateConfig);         // ExponentiationGate
         if (gateType == 12) return _evalCosetInterpolationGate(openings, gateConfig);     // CosetInterpolationGate
+        if (gateType == 15) return _evalPoseidonMdsGate(openings);                        // PoseidonMdsGate
         revert("Plonky2Verifier: unsupported gate type");
     }
 
@@ -420,6 +423,57 @@ contract Plonky2Verifier {
             curSize = half;
         }
         c[cBase + bits + 1] = list[0].sub(openings.wires[rBase + 1]);
+    }
+
+    /// @dev ReducingGate: Horner reduction with BASE FIELD coefficients
+    ///      Same as ReducingExtensionGate but coefficients are single base field elements,
+    ///      not extension field elements.
+    ///      gateConfig: [numCoeffs]
+    function _evalReducingGate(
+        Openings memory openings,
+        uint256[] memory gateConfig
+    ) internal pure returns (GoldilocksExt2.Ext2[] memory) {
+        uint256 numCoeffs = gateConfig[0];
+        uint256 D = 2;
+        GoldilocksExt2.Ext2[] memory c = new GoldilocksExt2.Ext2[](numCoeffs * D);
+
+        // Wire layout (D=2):
+        //   wires[0..1]: output (extension element)
+        //   wires[2..3]: alpha (extension element)
+        //   wires[4..5]: old_acc (initial accumulator)
+        //   wires[6..6+numCoeffs-1]: coefficients (numCoeffs BASE FIELD scalars)
+        //   Non-routed: accumulators (numCoeffs extension elements, last reuses output)
+        GoldilocksExt2.Ext2 memory alpha = GoldilocksExt2.Ext2(
+            openings.wires[2].c0, openings.wires[3].c0
+        );
+        uint256 numRouted = 3 * D + numCoeffs; // coefficients are single scalars
+
+        GoldilocksExt2.Ext2 memory prevAcc = GoldilocksExt2.Ext2(
+            openings.wires[4].c0, openings.wires[5].c0
+        );
+
+        for (uint256 i = 0; i < numCoeffs; i++) {
+            // Coefficient is a single base field scalar (promoted to Ext2 via fromBase)
+            GoldilocksExt2.Ext2 memory coeff = GoldilocksExt2.fromBase(openings.wires[6 + i].c0);
+            GoldilocksExt2.Ext2 memory computed = prevAcc.mul(alpha).add(coeff);
+
+            GoldilocksExt2.Ext2 memory actualAcc;
+            if (i == numCoeffs - 1) {
+                actualAcc = GoldilocksExt2.Ext2(openings.wires[0].c0, openings.wires[1].c0);
+            } else {
+                uint256 accBase = numRouted + i * D;
+                actualAcc = GoldilocksExt2.Ext2(
+                    openings.wires[accBase].c0, openings.wires[accBase + 1].c0
+                );
+            }
+
+            GoldilocksExt2.Ext2 memory diff = actualAcc.sub(computed);
+            c[i * D] = GoldilocksExt2.fromBase(diff.c0);
+            c[i * D + 1] = GoldilocksExt2.fromBase(diff.c1);
+
+            prevAcc = actualAcc;
+        }
+        return c;
     }
 
     /// @dev ReducingExtensionGate: Horner-style polynomial evaluation
@@ -682,6 +736,47 @@ contract Plonky2Verifier {
             c[numConstraints - 1] = GoldilocksExt2.fromBase(finalDiff.c1);
         }
 
+        return c;
+    }
+
+    /// @dev PoseidonMdsGate: MDS matrix multiplication on 12 extension elements
+    ///      output[r] = Σ MDS_CIRC[i] * input[(i+r)%12] + MDS_DIAG[r] * input[r]
+    ///      24 constraints (12 outputs × D=2)
+    function _evalPoseidonMdsGate(
+        Openings memory openings
+    ) internal pure returns (GoldilocksExt2.Ext2[] memory) {
+        uint256 D = 2;
+        uint256 W = 12; // SPONGE_WIDTH
+        GoldilocksExt2.Ext2[] memory c = new GoldilocksExt2.Ext2[](W * D);
+
+        // Read 12 input extension elements
+        GoldilocksExt2.Ext2[12] memory inputs;
+        for (uint256 i = 0; i < W; i++) {
+            inputs[i] = GoldilocksExt2.Ext2(
+                openings.wires[i * D].c0,
+                openings.wires[i * D + 1].c0
+            );
+        }
+
+        // For each output row r, compute MDS multiplication
+        for (uint256 r = 0; r < W; r++) {
+            GoldilocksExt2.Ext2 memory acc = GoldilocksExt2.zero();
+            for (uint256 i = 0; i < W; i++) {
+                uint256 idx = (i + r) % W;
+                acc = acc.add(inputs[idx].mulScalar(PoseidonConstants.mdsCirc(i)));
+            }
+            acc = acc.add(inputs[r].mulScalar(PoseidonConstants.mdsDiag(r)));
+
+            // Read output extension element
+            GoldilocksExt2.Ext2 memory output = GoldilocksExt2.Ext2(
+                openings.wires[(W + r) * D].c0,
+                openings.wires[(W + r) * D + 1].c0
+            );
+
+            GoldilocksExt2.Ext2 memory diff = output.sub(acc);
+            c[r * D] = GoldilocksExt2.fromBase(diff.c0);
+            c[r * D + 1] = GoldilocksExt2.fromBase(diff.c1);
+        }
         return c;
     }
 
