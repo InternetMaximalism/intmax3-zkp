@@ -110,4 +110,63 @@ contract Plonky2VerifierTest is Test, Plonky2Verifier {
         }
         return gates;
     }
+
+    // -----------------------------------------------------------------------
+    // Negative tests — corrupted proofs must be rejected
+    // -----------------------------------------------------------------------
+
+    /// @dev Helper: load all fixture data into memory structs.
+    function _loadFixture() internal returns (
+        Plonky2Verifier.Openings memory openings,
+        Plonky2Verifier.CircuitParams memory params,
+        Plonky2Verifier.Challenges memory challenges,
+        Plonky2Verifier.PermutationData memory permData,
+        Plonky2Verifier.GateInfo[] memory gates,
+        uint256[] memory publicInputs
+    ) {
+        string memory json = vm.readFile("../tests/fixtures/whir_constraint_data.json");
+        params.degreeBits = abi.decode(vm.parseJson(json, ".circuitParams.degreeBits"), (uint256));
+        params.numChallenges = abi.decode(vm.parseJson(json, ".circuitParams.numChallenges"), (uint256));
+        params.numRoutedWires = abi.decode(vm.parseJson(json, ".circuitParams.numRoutedWires"), (uint256));
+        params.quotientDegreeFactor = abi.decode(vm.parseJson(json, ".circuitParams.quotientDegreeFactor"), (uint256));
+        params.numPartialProducts = abi.decode(vm.parseJson(json, ".circuitParams.numPartialProducts"), (uint256));
+        params.numGateConstraints = abi.decode(vm.parseJson(json, ".circuitParams.numGateConstraints"), (uint256));
+        params.numSelectors = abi.decode(vm.parseJson(json, ".circuitParams.numSelectors"), (uint256));
+        params.numLookupSelectors = abi.decode(vm.parseJson(json, ".circuitParams.numLookupSelectors"), (uint256));
+        openings.constants = _parseExt2Array(json, ".openings.constants", 4);
+        openings.plonkSigmas = _parseExt2Array(json, ".openings.plonkSigmas", 80);
+        openings.wires = _parseExt2Array(json, ".openings.wires", 135);
+        openings.plonkZs = _parseExt2Array(json, ".openings.plonkZs", 2);
+        openings.plonkZsNext = _parseExt2Array(json, ".openings.plonkZsNext", 2);
+        openings.partialProducts = _parseExt2Array(json, ".openings.partialProducts", 18);
+        openings.quotientPolys = _parseExt2Array(json, ".openings.quotientPolys", 16);
+        challenges.plonkBetas = _parseU256Array(json, ".challenges.plonkBetas", 2);
+        challenges.plonkGammas = _parseU256Array(json, ".challenges.plonkGammas", 2);
+        challenges.plonkAlphas = _parseU256Array(json, ".challenges.plonkAlphas", 2);
+        { uint256[] memory z = _parseU256Array(json, ".challenges.plonkZeta", 2); challenges.plonkZeta = GoldilocksExt2.Ext2(z[0], z[1]); }
+        permData.kIs = _parseU256Array(json, ".permutation.kIs", 80);
+        gates = _parseGates(json, 4);
+        publicInputs = _parseU256Array(json, ".publicInputs", 8);
+    }
+
+    function test_verifyConstraints_wrongOpenings() public {
+        (Openings memory o, CircuitParams memory p, Challenges memory c, PermutationData memory pd, GateInfo[] memory g, uint256[] memory pi) = _loadFixture();
+        // Corrupt one wire opening
+        o.wires[0].c0 = o.wires[0].c0 ^ 1;
+        assertFalse(verifyConstraints(o, p, c, pd, g, pi), "Wrong openings must fail");
+    }
+
+    function test_verifyConstraints_wrongChallenges() public {
+        (Openings memory o, CircuitParams memory p, Challenges memory c, PermutationData memory pd, GateInfo[] memory g, uint256[] memory pi) = _loadFixture();
+        // Corrupt plonkZeta
+        c.plonkZeta.c0 = c.plonkZeta.c0 ^ 1;
+        assertFalse(verifyConstraints(o, p, c, pd, g, pi), "Wrong challenges must fail");
+    }
+
+    function test_verifyConstraints_wrongPublicInputs() public {
+        (Openings memory o, CircuitParams memory p, Challenges memory c, PermutationData memory pd, GateInfo[] memory g, uint256[] memory pi) = _loadFixture();
+        // Corrupt one public input
+        pi[0] = pi[0] ^ 1;
+        assertFalse(verifyConstraints(o, p, c, pd, g, pi), "Wrong public inputs must fail");
+    }
 }

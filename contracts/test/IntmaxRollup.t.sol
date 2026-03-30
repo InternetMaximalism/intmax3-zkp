@@ -1425,6 +1425,163 @@ contract IntmaxRollupTest is Test {
         uint256 gasUsed = gasBefore - gasleft();
         console.log("postBlockAndSubmit() with mature forced tx gas:", gasUsed);
     }
+    // -----------------------------------------------------------------------
+    // Pull-payment resilience tests
+    // -----------------------------------------------------------------------
+
+    function test_withdraw_afterFinalize() public {
+        (WhirConfig memory config, Statement memory statement, WhirProof memory whirProof, bytes memory transcript) = loadIntmax3Proof();
+        bytes32 stateRoot = keccak256("finalized_state");
+        IntmaxRollup.ValidityPublicInputs memory vpis = _defaultValidityPIs(stateRoot);
+        bytes32 piHash = _computePIHash(vpis);
+        IntmaxRollup.Groth16Params memory groth16 = _groth16WithPIHash(piHash);
+        bytes memory proofBytes = abi.encode(groth16, config, statement, whirProof, transcript);
+        uint32[] memory ids = new uint32[](1); ids[0] = 1;
+        (KZGProof memory kzg, bytes32 blobHash) = _postWithKZG(_singleBlockBatch(1, ids, 100, bytes32(uint256(0xabc))), proofBytes, stateRoot, submitter);
+
+        rollup.finalize(0, blobHash, stateRoot, proofBytes, vpis, config, statement, whirProof, transcript, kzg, groth16);
+
+        assertEq(rollup.pendingWithdrawals(submitter), 1 ether, "stake credited");
+        uint256 balBefore = submitter.balance;
+        vm.prank(submitter);
+        rollup.withdraw();
+        assertEq(submitter.balance, balBefore + 1 ether, "stake withdrawn");
+        assertEq(rollup.pendingWithdrawals(submitter), 0, "no pending after withdraw");
+    }
+
+    function test_finalize_succeedsEvenIfSubmitterReverts() public {
+        (WhirConfig memory config, Statement memory statement, WhirProof memory whirProof, bytes memory transcript) = loadIntmax3Proof();
+        bytes32 stateRoot = keccak256("finalized_state");
+
+        // Submitter is a reverting contract
+        RevertingReceiver revSub = new RevertingReceiver();
+        vm.deal(address(revSub), 10 ether);
+
+        IntmaxRollup.ValidityPublicInputs memory vpis = _defaultValidityPIs(stateRoot);
+        bytes32 piHash = _computePIHash(vpis);
+        IntmaxRollup.Groth16Params memory groth16 = _groth16WithPIHash(piHash);
+        bytes memory proofBytes = abi.encode(groth16, config, statement, whirProof, transcript);
+        uint32[] memory ids = new uint32[](1); ids[0] = 1;
+        (KZGProof memory kzg, bytes32 blobHash) = _postWithKZG(
+            _singleBlockBatch(1, ids, 100, bytes32(uint256(0xabc))),
+            proofBytes, stateRoot, address(revSub)
+        );
+
+        // Under old push-payment, this would revert because revSub rejects ETH.
+        // Under pull-payment, finalize completes and credits pendingWithdrawals.
+        bool ok = rollup.finalize(0, blobHash, stateRoot, proofBytes, vpis, config, statement, whirProof, transcript, kzg, groth16);
+        assertTrue(ok, "finalize must succeed even with reverting submitter");
+        assertEq(rollup.pendingWithdrawals(address(revSub)), 1 ether, "stake credited to reverting submitter");
+    }
+
+    function test_fraudProof_succeedsEvenIfTreasuryReverts() public {
+        // Deploy rollup with a reverting treasury
+        RevertingReceiver revTreasury = new RevertingReceiver();
+        (WhirConfig memory whirCfg,,,) = loadProof();
+        bytes32 cfgHash = keccak256(abi.encode(whirCfg));
+        IntmaxRollup rollup2 = new IntmaxRollup(
+            new WhirVerifierWrapper(), address(revTreasury), _groth16Vk(), cfgHash
+        );
+
+        address sub2 = makeAddr("sub2");
+        vm.deal(sub2, 10 ether);
+
+        (WhirConfig memory config, Statement memory statement, WhirProof memory whirProof, bytes memory transcript) = loadProof();
+        IntmaxRollup.Groth16Params memory groth16 = _groth16();
+        bytes32 stateRoot = keccak256("bad_state");
+
+        // Build vpis BEFORE posting (rollup2 initial state: all zeros)
+        IntmaxRollup.ValidityPublicInputs memory vpis = IntmaxRollup.ValidityPublicInputs({
+            initialBlockNumber: 0,
+            initialBlockChain:  rollup2.blockHashChainAt(0),
+            initialExtCommitment: rollup2.latestFinalizedStateRoot(),
+            finalBlockNumber:   rollup2.blockNumber(),
+            finalBlockChain:    rollup2.blockHashChain(),
+            finalExtCommitment: stateRoot,
+            prover: address(0)
+        });
+
+        bytes memory proofBytes = abi.encode(groth16, config, statement, whirProof, transcript);
+        uint32[] memory ids = new uint32[](1); ids[0] = 21;
+
+        bytes32[] memory hs = new bytes32[](1);
+        (KZGProof memory kzg, bytes32 blobHash) = _computeKZGProof(proofBytes);
+        hs[0] = blobHash;
+        vm.blobhashes(hs);
+        vm.prank(sub2);
+        rollup2.postBlockAndSubmit{value: 1 ether}(
+            _singleBlockBatch(5, ids, 500, bytes32(uint256(0x888))),
+            keccak256(proofBytes), uint32(proofBytes.length), stateRoot
+        );
+
+        address reporter2 = makeAddr("reporter2");
+        vm.deal(reporter2, 1 ether);
+        vm.prank(reporter2);
+        bool confirmed = rollup2.fraudProof(0, blobHash, stateRoot, proofBytes, vpis, config, statement, whirProof, transcript, kzg, groth16);
+        assertTrue(confirmed, "fraud must be confirmed even with reverting treasury");
+        assertGt(rollup2.pendingWithdrawals(reporter2), 0, "reporter reward credited");
+        assertGt(rollup2.pendingWithdrawals(address(revTreasury)), 0, "treasury share credited");
+    }
+
+    // -----------------------------------------------------------------------
+    // Rollback gas test
+    // -----------------------------------------------------------------------
+
+    function test_fraudProof_rollbackGasWithManyDeposits() public {
+        // Queue many deposits
+        for (uint256 i = 0; i < 200; i++) {
+            rollup.deposit(bytes32(uint256(i + 1)), uint32(i % 10), 100 + i, bytes32(uint256(i)));
+        }
+
+        (WhirConfig memory config, Statement memory statement, WhirProof memory whirProof, bytes memory transcript) = loadProof();
+        IntmaxRollup.Groth16Params memory groth16 = _groth16();
+        bytes memory proofBytes = abi.encode(groth16, config, statement, whirProof, transcript);
+        bytes32 stateRoot = keccak256("bad_state");
+        uint32[] memory ids = new uint32[](1); ids[0] = 21;
+
+        (KZGProof memory kzg, bytes32 blobHash) = _postWithKZG(
+            _singleBlockBatch(5, ids, 500, bytes32(uint256(0x888))),
+            proofBytes, stateRoot, submitter
+        );
+
+        IntmaxRollup.ValidityPublicInputs memory vpis;
+        address reporter = makeAddr("gasReporter");
+        vm.deal(reporter, 1 ether);
+        vm.prank(reporter);
+        uint256 gasBefore = gasleft();
+        rollup.fraudProof(0, blobHash, stateRoot, proofBytes, vpis, config, statement, whirProof, transcript, kzg, groth16);
+        uint256 gasUsed = gasBefore - gasleft();
+        console.log("fraudProof() gas with 200 deposits (O(1) rollback):", gasUsed);
+        // With O(1) deposit rollback, gas should not scale with deposit count.
+        // The ~7M gas is from the WHIR/Groth16 verification pipeline + block cleanup,
+        // NOT from O(n) deposit re-hashing (which was removed).
+        assertLt(gasUsed, 10_000_000, "rollback gas must be bounded");
+    }
+
+    // -----------------------------------------------------------------------
+    // Forced tx ownership test
+    // -----------------------------------------------------------------------
+
+    function test_registerForcedTxLogic_permissionlessButImmutable() public {
+        MockForcedTxLogic logic1 = new MockForcedTxLogic(bytes32(uint256(0x111)));
+        address anyUser = makeAddr("anyUser");
+
+        // Anyone can register (permissionless — the logic contract's acceptRegistration is the gate)
+        vm.prank(anyUser);
+        rollup.registerForcedTxLogic(99999, address(logic1));
+        assertEq(rollup.forcedTxLogicContracts(99999), address(logic1));
+
+        // Second registration for same userId reverts (immutable)
+        MockForcedTxLogic logic2 = new MockForcedTxLogic(bytes32(uint256(0x222)));
+        vm.prank(anyUser);
+        vm.expectRevert(IntmaxRollup.ForcedTxLogicAlreadyRegistered.selector);
+        rollup.registerForcedTxLogic(99999, address(logic2));
+    }
+}
+
+/// @dev Contract that reverts on ETH receipt — tests pull-payment resilience.
+contract RevertingReceiver {
+    receive() external payable { revert("no ETH accepted"); }
 }
 
 /// @dev Mock forced tx logic contract that returns a fixed tx hash.
