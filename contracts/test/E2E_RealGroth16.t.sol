@@ -36,13 +36,11 @@ contract E2E_RealGroth16Test is Test {
         }
 
         // Parse 9 public inputs (8 user + 1 commitment hash)
+        // Use hex-encoded values for reliable Solidity parsing
         uint256[9] memory input;
-        {
-            uint256[] memory pis = abi.decode(vm.parseJson(groth16Json, ".public_inputs"), (uint256[]));
-            require(pis.length == 9, "Expected 9 public inputs");
-            for (uint256 i = 0; i < 9; i++) {
-                input[i] = pis[i];
-            }
+        for (uint256 i = 0; i < 9; i++) {
+            string memory key = string.concat(".public_inputs_hex[", vm.toString(i), "]");
+            input[i] = abi.decode(vm.parseJson(groth16Json, key), (uint256));
         }
 
         // Verify — reverts with ProofInvalid() if verification fails

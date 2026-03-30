@@ -179,7 +179,7 @@ func main() {
 	}
 	fmt.Fprintf(os.Stderr, "[gnark] Proving time: %v\n", provingTime)
 
-	// Verify locally
+	// Verify locally — then extract the commitment hash that the verifier computed
 	fmt.Fprintf(os.Stderr, "[gnark] Verifying proof locally...\n")
 	err = groth16.Verify(proof, vk, publicWitness)
 	if err != nil {
@@ -187,6 +187,17 @@ func main() {
 		os.Exit(1)
 	}
 	fmt.Fprintf(os.Stderr, "[gnark] Verification passed\n")
+
+	// After verification, the publicWitness was not modified. But we can replicate
+	// the exact computation from groth16/bn254/verify.go by accessing the BN254-specific
+	// proof structure which contains Commitments.
+	bn254Proof := proof.(*groth16_bn254.Proof)
+	fmt.Fprintf(os.Stderr, "[gnark] Proof has %d commitments\n", len(bn254Proof.Commitments))
+	if len(bn254Proof.Commitments) > 0 {
+		commitMarshaled := bn254Proof.Commitments[0].Marshal()
+		fmt.Fprintf(os.Stderr, "[gnark] Commitment[0] marshaled length: %d bytes\n", len(commitMarshaled))
+		fmt.Fprintf(os.Stderr, "[gnark] Commitment[0] hex: 0x%x\n", commitMarshaled)
+	}
 
 	// Extract proof bytes
 	const fpSize = 4 * 8
@@ -225,7 +236,9 @@ func main() {
 		fmt.Fprintf(os.Stderr, "[gnark] VK.PublicAndCommitmentCommitted: %v\n", bn254VK.PublicAndCommitmentCommitted)
 
 		// Parse commitment point from raw proof
-		commitBytes := proofBytes[fpSize*8 : fpSize*10] // 64 bytes
+		// Layout: A(64) + B(128) + C(64) = 256 bytes, then nbCommitments(4), then commitment(64)
+		commitOffset := fpSize*8 + 4 // skip nbCommitments (4 bytes)
+		commitBytes := proofBytes[commitOffset : commitOffset+64] // 64 bytes
 
 		// Build prehash: commitment_point || committed_public_inputs
 		var prehash []byte
