@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.20;
 
-import {DuplexSponge} from "./DuplexSponge.sol";
+import {Keccak256Chain} from "./Keccak256Chain.sol";
+import {GoldilocksExt3} from "./GoldilocksExt3.sol";
 import {SpongefishMerkle} from "./SpongefishMerkle.sol";
 
 /// @title SpongefishWhir
@@ -19,12 +20,12 @@ import {SpongefishMerkle} from "./SpongefishMerkle.sol";
 ///   algorithm involves sumcheck, Merkle openings, and constraint evaluation
 ///   in the Goldilocks cubic extension field.
 library SpongefishWhir {
-    using DuplexSponge for DuplexSponge.Sponge;
+    using Keccak256Chain for Keccak256Chain.Sponge;
 
     uint64 constant GL_P = 0xFFFFFFFF00000001; // Goldilocks prime
 
     struct TranscriptState {
-        DuplexSponge.Sponge sponge;
+        Keccak256Chain.Sponge sponge;
         uint256 transcriptPos;
         uint256 hintPos;
     }
@@ -37,16 +38,17 @@ library SpongefishWhir {
     ///      Matches: spongefish::DomainSeparator::new(protocol_id).session(session_id).instance(&Empty)
     function initTranscript(
         bytes memory protocolId,
-        bytes memory sessionId
+        bytes memory sessionId,
+        bytes memory instance
     ) internal pure returns (TranscriptState memory ts) {
-        ts.sponge = DuplexSponge.init();
+        ts.sponge = Keccak256Chain.init();
         // public_message(&protocol_id) → absorb 64 bytes
         ts.sponge.absorb(protocolId);
         // public_message(&session_id) → absorb 32 bytes
-        if (sessionId.length > 0) {
-            ts.sponge.absorb(sessionId);
-        }
-        // public_message(&Empty) → absorb 0 bytes (no-op)
+        ts.sponge.absorb(sessionId);
+        // public_message(&instance) → absorb instance bytes
+        // NOTE: Even empty absorb changes state in Keccak256Chain: keccak256(state || "")
+        ts.sponge.absorb(instance);
     }
 
     /// @dev Read N bytes from transcript and absorb into sponge.
@@ -153,6 +155,7 @@ library SpongefishWhir {
 
     /// @dev Generate challenge indices by squeezing bytes and reducing mod numLeaves.
     ///      Matches: challenge_indices(transcript, num_leaves, count, deduplicate=true)
+    ///      IMPORTANT: Rust squeezes ONE BYTE AT A TIME via verifier_message::<u8>().
     function challengeIndices(
         TranscriptState memory ts,
         uint256 numLeaves,
@@ -165,13 +168,15 @@ library SpongefishWhir {
             return indices;
         }
 
-        // Calculate bytes needed per index
         uint256 sizeBytes = _ceilDiv(_log2(numLeaves), 8);
+        uint256 totalBytes = count * sizeBytes;
 
-        // Squeeze all needed bytes
-        bytes memory entropy = ts.sponge.squeeze(count * sizeBytes);
+        // Squeeze one byte at a time to match Rust (using SHA3 opcode directly)
+        bytes memory entropy = new bytes(totalBytes);
+        for (uint256 i = 0; i < totalBytes; i++) {
+            entropy[i] = bytes1(ts.sponge.squeezeByte());
+        }
 
-        // Convert to indices
         indices = new uint256[](count);
         for (uint256 i = 0; i < count; i++) {
             uint256 val = 0;
@@ -185,24 +190,45 @@ library SpongefishWhir {
         _sortAndDedup(indices);
     }
 
-    /// @dev Geometric challenge: squeeze one Field64 value, return [1, x, x^2, ..., x^(count-1)]
-    ///      Matches: geometric_challenge(transcript, count)
+    /// @dev Geometric challenge: squeeze one Field64_3 value, return [1, x, x^2, ..., x^(count-1)]
+    ///      Matches: geometric_challenge(transcript, count) where F = Ext3
     function geometricChallenge(
         TranscriptState memory ts,
         uint256 count
-    ) internal pure returns (uint64[] memory coeffs) {
-        if (count == 0) return new uint64[](0);
+    ) internal pure returns (GoldilocksExt3.Ext3[] memory coeffs) {
+        if (count == 0) return new GoldilocksExt3.Ext3[](0);
         if (count == 1) {
-            coeffs = new uint64[](1);
-            coeffs[0] = 1;
+            coeffs = new GoldilocksExt3.Ext3[](1);
+            coeffs[0] = GoldilocksExt3.one();
             return coeffs;
         }
 
-        uint64 x = verifierMessageField64(ts);
-        coeffs = new uint64[](count);
-        coeffs[0] = 1;
+        (uint64 c0, uint64 c1, uint64 c2) = verifierMessageField64x3(ts);
+        coeffs = new GoldilocksExt3.Ext3[](count);
+        coeffs[0] = GoldilocksExt3.one();
         for (uint256 i = 1; i < count; i++) {
-            coeffs[i] = _mulmod64(coeffs[i - 1], x);
+            coeffs[i] = GoldilocksExt3.zero();
+        }
+        // Fill geometric sequence in assembly: coeffs[i] = coeffs[i-1] * x
+        assembly {
+            let p := 0xFFFFFFFF00000001
+            let x0 := c0
+            let x1 := c1
+            let x2 := c2
+            let cData := add(coeffs, 0x20)
+
+            for { let i := 1 } lt(i, count) { i := add(i, 1) } {
+                let prevPtr := mload(add(cData, mul(sub(i, 1), 0x20)))
+                let p0 := mload(prevPtr)
+                let p1 := mload(add(prevPtr, 0x20))
+                let p2 := mload(add(prevPtr, 0x40))
+
+                let t := addmod(mulmod(p1, x2, p), mulmod(p2, x1, p), p)
+                let curPtr := mload(add(cData, mul(i, 0x20)))
+                mstore(curPtr, addmod(mulmod(p0, x0, p), mulmod(2, t, p), p))
+                mstore(add(curPtr, 0x20), addmod(addmod(mulmod(p0, x1, p), mulmod(p1, x0, p), p), mulmod(2, mulmod(p2, x2, p), p), p))
+                mstore(add(curPtr, 0x40), addmod(addmod(mulmod(p0, x2, p), mulmod(p1, x1, p), p), mulmod(p2, x0, p), p))
+            }
         }
     }
 
@@ -333,23 +359,18 @@ library SpongefishWhir {
     /// @dev Copy a slice of a memory bytes array.
     function _memSlice(bytes memory data, uint256 offset, uint256 len) private pure returns (bytes memory result) {
         result = new bytes(len);
-        for (uint256 i = 0; i < len; i++) {
-            result[i] = data[offset + i];
+        assembly {
+            let src := add(add(data, 0x20), offset)
+            let dst := add(result, 0x20)
+            for { let i := 0 } lt(i, len) { i := add(i, 32) } {
+                mstore(add(dst, i), mload(add(src, i)))
+            }
         }
     }
 
     function _sortAndDedup(uint256[] memory arr) private pure {
         uint256 n = arr.length;
-        // Insertion sort
-        for (uint256 i = 1; i < n; i++) {
-            uint256 key = arr[i];
-            uint256 j = i;
-            while (j > 0 && arr[j - 1] > key) {
-                arr[j] = arr[j - 1];
-                j--;
-            }
-            arr[j] = key;
-        }
+        if (n > 1) _quicksort(arr, 0, n - 1);
         // Dedup
         if (n <= 1) return;
         uint256 write = 1;
@@ -359,5 +380,24 @@ library SpongefishWhir {
             }
         }
         assembly { mstore(arr, write) }
+    }
+
+    function _quicksort(uint256[] memory arr, uint256 lo, uint256 hi) private pure {
+        if (lo >= hi) return;
+        uint256 pivot = arr[(lo + hi) / 2];
+        uint256 i = lo;
+        uint256 j = hi;
+        while (i <= j) {
+            while (arr[i] < pivot) i++;
+            while (arr[j] > pivot) { if (j == 0) break; j--; }
+            if (i <= j) {
+                (arr[i], arr[j]) = (arr[j], arr[i]);
+                i++;
+                if (j == 0) break;
+                j--;
+            }
+        }
+        if (lo < j) _quicksort(arr, lo, j);
+        if (i < hi) _quicksort(arr, i, hi);
     }
 }

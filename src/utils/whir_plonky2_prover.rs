@@ -572,24 +572,40 @@ pub fn export_whir_verifier_data(
     let poly_size = 1usize << commitment.num_variables;
     let params = InternalWhirConfig::<Basefield<Field64_3>>::new(poly_size, &config.params);
 
-    // Compute protocol_id: SHA3-512 of CBOR-serialized config
-    // (WizardOfMenlo/whir DomainSeparator::protocol)
+    // Compute protocol_id: keccak256-based (leohio/whir fork)
+    // protocol_id[0..32] = keccak256(0x00 || cbor(config))
+    // protocol_id[32..64] = keccak256(0x01 || cbor(config))
     let protocol_id = {
-        use sha3::{Digest, Sha3_512};
-        let mut hash = Sha3_512::new();
-        ciborium::into_writer(&params, &mut hash).expect("CBOR serialization failed");
-        let result: [u8; 64] = hash.finalize().into();
+        use sha3::{Digest, Keccak256};
+        let mut config_bytes = Vec::new();
+        ciborium::into_writer(&params, &mut config_bytes).expect("CBOR serialization failed");
+        let first: [u8; 32] = {
+            let mut h = Keccak256::new();
+            h.update([0x00]);
+            h.update(&config_bytes);
+            h.finalize().into()
+        };
+        let second: [u8; 32] = {
+            let mut h = Keccak256::new();
+            h.update([0x01]);
+            h.update(&config_bytes);
+            h.finalize().into()
+        };
+        let mut result = [0u8; 64];
+        result[..32].copy_from_slice(&first);
+        result[32..].copy_from_slice(&second);
         result
     };
 
-    // Compute session_id: spongefish::session_id (Keccak sponge squeeze of session_name)
-    // The WizardOfMenlo DomainSeparator::session uses SHA3-256 + CBOR
+    // Compute session_id: keccak256(cbor(session_name)) (leohio/whir fork)
     let session_id = {
-        use sha3::{Digest, Sha3_256};
-        let mut hash = Sha3_256::new();
-        ciborium::into_writer(&commitment.session_name, &mut hash)
+        use sha3::{Digest, Keccak256};
+        let mut session_bytes = Vec::new();
+        ciborium::into_writer(&commitment.session_name, &mut session_bytes)
             .expect("CBOR serialization failed");
-        let result: [u8; 32] = hash.finalize().into();
+        let mut h = Keccak256::new();
+        h.update(&session_bytes);
+        let result: [u8; 32] = h.finalize().into();
         result
     };
 
@@ -621,6 +637,58 @@ pub fn export_whir_verifier_data(
     let out_domain_samples = params.initial_committer.out_domain_samples;
     let num_vectors = params.initial_committer.num_vectors;
 
+    // Codeword lengths and domain generators for Merkle verification and FinalClaim
+    use ark_ff::PrimeField;
+    // Compute domain generator: primitive N-th root of unity for the given codeword length.
+    // Uses ark_ff's FftField trait directly.
+    use ark_ff::FftField;
+
+    // Helper: compute primitive N-th root of unity as a u64 for Goldilocks field
+    let gl_root_of_unity = |n: usize| -> u64 {
+        let g: Field64 = Field64::get_root_of_unity(n as u64)
+            .expect("No root of unity for requested size");
+        g.into_bigint().0[0]
+    };
+
+    let log2_of = |mut n: usize| -> usize {
+        let mut d = 0;
+        while n > 1 { n >>= 1; d += 1; }
+        d
+    };
+
+    let initial_codeword_length = params.initial_committer.codeword_length;
+    let initial_merkle_depth = log2_of(initial_codeword_length);
+    let initial_domain_generator = gl_root_of_unity(initial_codeword_length);
+
+    // Coset parameters for evaluation point computation (FinalClaim)
+    let initial_mml = params.initial_committer.masked_message_length();
+    let initial_coset_size = {
+        let mut cs = initial_mml.next_power_of_two();
+        while initial_codeword_length % cs != 0 { cs *= 2; }
+        cs
+    };
+    let initial_num_cosets = initial_codeword_length / initial_coset_size;
+
+    // Build per-round params array
+    let rounds_json: Vec<serde_json::Value> = params.round_configs.iter().map(|rc| {
+        let cl = rc.irs_committer.codeword_length;
+        let mml = rc.irs_committer.masked_message_length();
+        let mut cs = mml.next_power_of_two();
+        while cl % cs != 0 { cs *= 2; }
+        serde_json::json!({
+            "codeword_length": cl,
+            "merkle_depth": log2_of(cl),
+            "domain_generator": gl_root_of_unity(cl),
+            "in_domain_samples": rc.irs_committer.in_domain_samples,
+            "out_domain_samples": rc.irs_committer.out_domain_samples,
+            "sumcheck_rounds": rc.sumcheck.num_rounds,
+            "interleaving_depth": rc.irs_committer.interleaving_depth,
+            "coset_size": cs,
+            "num_cosets": cl / cs,
+            "num_variables": rc.initial_num_variables(),
+        })
+    }).collect();
+
     serde_json::json!({
         "protocol_id": format!("0x{}", hex::encode(protocol_id)),
         "session_id": format!("0x{}", hex::encode(session_id)),
@@ -647,15 +715,14 @@ pub fn export_whir_verifier_data(
             "num_rounds": num_rounds,
             "final_sumcheck_rounds": final_sumcheck_rounds,
             "final_size": final_size,
-            "round_in_domain_samples": if num_rounds > 0 {
-                params.round_configs[0].irs_committer.in_domain_samples
-            } else { 0 },
-            "round_out_domain_samples": if num_rounds > 0 {
-                params.round_configs[0].irs_committer.out_domain_samples
-            } else { 0 },
-            "round_sumcheck_rounds": if num_rounds > 0 {
-                params.round_configs[0].sumcheck.num_rounds
-            } else { 0 },
+            "initial_codeword_length": initial_codeword_length,
+            "initial_merkle_depth": log2_of(initial_codeword_length),
+            "initial_domain_generator": gl_root_of_unity(initial_codeword_length),
+            "initial_interleaving_depth": params.initial_committer.interleaving_depth,
+            "initial_num_variables": params.initial_num_variables(),
+            "initial_coset_size": initial_coset_size,
+            "initial_num_cosets": initial_num_cosets,
+            "rounds": rounds_json,
         },
     })
 }
