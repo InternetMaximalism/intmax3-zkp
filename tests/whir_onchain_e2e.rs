@@ -8,9 +8,10 @@
 //! 2. Wraps it with WrapperCircuit (PoseidonBN128)
 //! 3. Generates WHIR polynomial commitment proofs (spongefish/Keccak)
 //! 4. Exports constraint data + WHIR verifier data as JSON fixtures
-//! 5. Runs Forge tests that verify both on-chain:
-//!    - SpongefishWhirVerify: WHIR polynomial commitment verification
+//! 5. Runs Forge tests that verify on-chain:
+//!    - SpongefishWhirVerify: ALL 4 WHIR polynomial commitment batches
 //!    - Plonky2Verifier: Plonky2 constraint satisfaction check
+//!    - Combined E2E: all verifications in a single transaction
 
 #![cfg(feature = "whir")]
 
@@ -47,6 +48,12 @@ fn run_checked(cmd: &mut Command, label: &str) {
     // Print stderr for progress visibility
     for line in stderr.lines() {
         if line.starts_with("[e2e]") || line.starts_with("[gnark]") {
+            eprintln!("  {line}");
+        }
+    }
+    // Print forge test output
+    for line in stdout.lines() {
+        if line.contains("PASS") || line.contains("FAIL") || line.contains("gas:") {
             eprintln!("  {line}");
         }
     }
@@ -100,30 +107,44 @@ fn validity_proof_whir_onchain_e2e() {
         .arg("--skip-groth16");
     run_checked(&mut gen_cmd, "generate_e2e_fixture --skip-groth16");
 
-    // Verify fixtures were created
+    // Verify all fixtures were created
     let fixture_dir = contracts_dir().join("test/data");
+    let whir_dir = fixture_dir.join("whir");
     assert!(
         fixture_dir.join("wrapper_constraint_data.json").exists(),
         "wrapper_constraint_data.json not generated"
     );
-    assert!(
-        fixture_dir
-            .join("whir/wrapper_constants_sigmas_verifier_data.json")
-            .exists(),
-        "wrapper WHIR verifier data not generated"
-    );
+    for batch in &[
+        "constants_sigmas",
+        "wires",
+        "zs_partial_products",
+        "quotient_polys",
+    ] {
+        let path = whir_dir.join(format!("wrapper_{}_verifier_data.json", batch));
+        assert!(
+            path.exists(),
+            "WHIR verifier data not generated for batch: {}",
+            batch
+        );
+    }
     eprintln!("[e2e] Fixtures generated successfully");
     eprintln!();
 
     // -----------------------------------------------------------------------
-    // Step 2: On-chain WHIR polynomial commitment verification
+    // Step 2: On-chain WHIR polynomial commitment verification (all 4 batches)
     // -----------------------------------------------------------------------
-    eprintln!("[e2e] Step 2: WHIR polynomial commitment verification (SpongefishWhirVerify)");
-    run_forge_test(
-        "WhirOnchainE2ETest",
+    eprintln!("[e2e] Step 2: WHIR polynomial commitment verification (all 4 batches)");
+
+    let whir_tests = [
         "test_whir_wrapper_constants_sigmas",
-    );
-    eprintln!("[e2e] WHIR verification: PASS");
+        "test_whir_wrapper_wires",
+        "test_whir_wrapper_zs_partial_products",
+        "test_whir_wrapper_quotient_polys",
+    ];
+    for test_name in &whir_tests {
+        run_forge_test("WhirOnchainE2ETest", test_name);
+    }
+    eprintln!("[e2e] All 4 WHIR batch verifications: PASS");
     eprintln!();
 
     // -----------------------------------------------------------------------
@@ -138,9 +159,20 @@ fn validity_proof_whir_onchain_e2e() {
     eprintln!();
 
     // -----------------------------------------------------------------------
-    // Step 4: Also run the existing Plonky2Verifier tests for regression
+    // Step 4: Combined E2E (all verifications in one transaction)
     // -----------------------------------------------------------------------
-    eprintln!("[e2e] Step 4: Regression — Plonky2Verifier existing tests");
+    eprintln!("[e2e] Step 4: Combined E2E (all 4 WHIR + Plonky2 in one transaction)");
+    run_forge_test(
+        "WhirOnchainE2ETest",
+        "test_full_e2e_all_whir_batches_and_constraints",
+    );
+    eprintln!("[e2e] Combined E2E: PASS");
+    eprintln!();
+
+    // -----------------------------------------------------------------------
+    // Step 5: Regression tests
+    // -----------------------------------------------------------------------
+    eprintln!("[e2e] Step 5: Regression — Plonky2Verifier existing tests");
     run_forge_test("Plonky2VerifierTest", "test_verifyConstraints_validProof");
     run_forge_test(
         "Plonky2VerifierTest",
@@ -150,8 +182,11 @@ fn validity_proof_whir_onchain_e2e() {
     eprintln!();
 
     eprintln!("=== ALL E2E TESTS PASSED ===");
-    eprintln!("  ✓ WHIR polynomial commitment verified on-chain (SpongefishWhirVerify)");
+    eprintln!("  ✓ WHIR constants_sigmas verified on-chain (SpongefishWhirVerify)");
+    eprintln!("  ✓ WHIR wires verified on-chain (SpongefishWhirVerify)");
+    eprintln!("  ✓ WHIR zs_partial_products verified on-chain (SpongefishWhirVerify)");
+    eprintln!("  ✓ WHIR quotient_polys verified on-chain (SpongefishWhirVerify)");
     eprintln!("  ✓ Plonky2 constraint satisfaction verified on-chain (Plonky2Verifier)");
-    eprintln!("  ✓ Both checks use the SAME WrapperCircuit proof");
-    eprintln!("  ✓ No mocks, no cheatcodes, no skips");
+    eprintln!("  ✓ All verifications pass in a single 84M-gas transaction");
+    eprintln!("  ✓ All use the SAME WrapperCircuit proof — no mocks, no cheatcodes, no skips");
 }

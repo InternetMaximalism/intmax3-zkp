@@ -606,15 +606,12 @@ contract IntmaxRollup {
     ///         binding to on-chain state, WHIR↔plonky2 public input match.
     function finalize(
         uint256 submissionId,
-        bytes32 blobVersionedHash,
         bytes32 stateRoot,
-        bytes calldata proofBytes,
         ValidityPublicInputs calldata validityPIs,
         WhirConfig calldata config,
         Statement calldata statement,
         WhirProof calldata whirProof,
         bytes calldata transcript,
-        KZGProof calldata kzg,
         Groth16Params memory groth16
     ) external nonReentrant returns (bool) {
         Submission storage sub = _submissions[submissionId];
@@ -622,9 +619,8 @@ contract IntmaxRollup {
         if (sub.finalized) return false;
 
         bool valid = _fullVerify(
-            submissionId, blobVersionedHash, stateRoot,
-            proofBytes, validityPIs,
-            config, statement, whirProof, transcript, kzg, groth16
+            stateRoot, validityPIs,
+            config, statement, whirProof, transcript, groth16
         );
         if (!valid) return false;
 
@@ -706,58 +702,28 @@ contract IntmaxRollup {
     // -----------------------------------------------------------------------
 
     /// @dev Full verification pipeline for finalize() — all checks must pass.
+    ///      No KZG/blob binding: validity proofs are verified directly from calldata.
+    ///      KZG binding is only needed for fraud proofs (proving committed blob is invalid).
     function _fullVerify(
-        uint256 submissionId,
-        bytes32 blobVersionedHash,
         bytes32 stateRoot,
-        bytes calldata proofBytes,
         ValidityPublicInputs calldata validityPIs,
         WhirConfig calldata config,
         Statement calldata statement,
         WhirProof calldata whirProof,
         bytes calldata transcript,
-        KZGProof calldata kzg,
         Groth16Params memory groth16
     ) internal view returns (bool) {
-        // 1. Commitment check
-        {
-            uint32 proofLength = uint32(proofBytes.length);
-            bytes32 proofHash = keccak256(proofBytes);
-            bytes32 commitment = keccak256(
-                abi.encodePacked(blobVersionedHash, proofHash, proofLength, stateRoot)
-            );
-            if (commitment != _submissions[submissionId].commitment) return false;
-        }
-
-        // 2. KZG blob binding
-        try this._verifyKZG(blobVersionedHash, kzg, proofBytes) {
-        } catch {
-            return false;
-        }
-
-        // 3. PI binding to on-chain state
+        // 1. PI binding to on-chain state
         if (validityPIs.initialExtCommitment != latestFinalizedStateRoot) return false;
         if (validityPIs.initialBlockChain != blockHashChainAt[validityPIs.initialBlockNumber]) return false;
         if (validityPIs.finalBlockChain != blockHashChainAt[validityPIs.finalBlockNumber]) return false;
         if (validityPIs.finalExtCommitment != stateRoot) return false;
 
-        // 4. Proof params binding: blob must encode exactly (groth16, config, statement, whirProof, transcript)
-        if (keccak256(abi.encode(groth16, config, statement, whirProof, transcript)) != keccak256(proofBytes)) {
-            return false;
-        }
-
-        // 5. WhirConfig must match registered config
+        // 2. WhirConfig must match registered config
         if (keccak256(abi.encode(config)) != whirConfigHash) return false;
 
-        // 6. Groth16 pubInputs must encode keccak256(ValidityPublicInputs) as 8 big-endian u32 limbs.
-        //    The gnark ExampleVerifierCircuit exposes the Plonky2 validity circuit's public inputs
-        //    directly: the circuit registers keccak256(ValidityPublicInputs).to_u32_vec() (8 limbs)
-        //    as its public inputs, and gnark maps each Goldilocks element to one BN254 scalar.
-        //
-        // 6.5 WHIR statement.evaluations[0] must also equal piHash (reduced to BN254 scalar field).
-        //     The INTMAX3 prover sets evaluations[0] = keccak256(ValidityPublicInputs) mod R so
-        //     that both WHIR and Groth16 commit to the same state transition.
-        //     Reduction is required because keccak256 outputs 256 bits but BN254 scalars are ~254 bits.
+        // 3. Groth16 pubInputs must encode keccak256(ValidityPublicInputs) as 8 big-endian u32 limbs.
+        //    WHIR statement.evaluations[0] must also equal piHash (reduced to BN254 scalar field).
         {
             bytes32 piHash = _computeValidityPIHash(validityPIs);
             if (!_groth16PIHashMatches(groth16.pubInputs, piHash)) return false;
@@ -766,7 +732,7 @@ contract IntmaxRollup {
                 BN254.ScalarField.unwrap(statement.evaluations[0]) != piHashReduced) return false;
         }
 
-        // 7. WHIR verification
+        // 4. WHIR verification
         bool whirValid;
         try whirVerifier.verify(config, statement, whirProof, transcript) returns (bool v) {
             whirValid = v;
@@ -775,7 +741,7 @@ contract IntmaxRollup {
         }
         if (!whirValid) return false;
 
-        // 8. Groth16 verification via gnark verifier (with commitment support)
+        // 5. Groth16 verification via gnark verifier (with commitment support)
         if (!_verifyGroth16(groth16)) return false;
 
         return true;

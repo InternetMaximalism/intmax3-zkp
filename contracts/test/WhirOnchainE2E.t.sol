@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.20;
 
-import {Test} from "forge-std/Test.sol";
+import {Test, console} from "forge-std/Test.sol";
 import {SpongefishWhirVerify} from "../src/spongefish/SpongefishWhirVerify.sol";
 import {GoldilocksExt3} from "../src/spongefish/GoldilocksExt3.sol";
 import {Plonky2Verifier} from "../src/Plonky2Verifier.sol";
@@ -9,49 +9,150 @@ import {GoldilocksExt2} from "../src/GoldilocksField.sol";
 
 /// @title WhirOnchainE2ETest
 /// @notice Complete E2E test: validity proof → WrapperCircuit → WHIR → on-chain verify
-contract WhirOnchainE2ETest is Test {
-    Plonky2Verifier verifier;
+///         Verifies ALL 4 polynomial commitment batches via SpongefishWhirVerify
+///         AND Plonky2 constraint satisfaction via Plonky2Verifier.
+///         All fixtures are real proofs from the Rust prover — no mocks, no dummies.
+///         Inherits Plonky2Verifier to call verifyConstraints internally (avoids ABI encoding overhead).
+contract WhirOnchainE2ETest is Test, Plonky2Verifier {
 
-    function setUp() public {
-        verifier = new Plonky2Verifier();
-    }
+    // =====================================================================
+    // Individual WHIR batch verification tests (4 batches)
+    // =====================================================================
 
-    /// @notice WHIR polynomial commitment verification for WrapperCircuit's constants_sigmas batch.
+    /// @notice WHIR polynomial commitment: constants_sigmas (selector + permutation polynomials)
     function test_whir_wrapper_constants_sigmas() public view {
         string memory json = vm.readFile(
             string.concat(vm.projectRoot(), "/test/data/whir/wrapper_constants_sigmas_verifier_data.json")
         );
-        _verifyWhirCommitment(json);
+        _verifyWhirCommitment(json, "constants_sigmas");
     }
 
-    /// @notice Plonky2 constraint check for WrapperCircuit (13 gate types).
-    function test_plonky2_constraints_wrapper() public view {
+    /// @notice WHIR polynomial commitment: wires (witness wire polynomials)
+    function test_whir_wrapper_wires() public view {
+        string memory json = vm.readFile(
+            string.concat(vm.projectRoot(), "/test/data/whir/wrapper_wires_verifier_data.json")
+        );
+        _verifyWhirCommitment(json, "wires");
+    }
+
+    /// @notice WHIR polynomial commitment: zs_partial_products (Z polynomial + partial products)
+    function test_whir_wrapper_zs_partial_products() public view {
+        string memory json = vm.readFile(
+            string.concat(vm.projectRoot(), "/test/data/whir/wrapper_zs_partial_products_verifier_data.json")
+        );
+        _verifyWhirCommitment(json, "zs_partial_products");
+    }
+
+    /// @notice WHIR polynomial commitment: quotient_polys (quotient polynomial chunks)
+    function test_whir_wrapper_quotient_polys() public view {
+        string memory json = vm.readFile(
+            string.concat(vm.projectRoot(), "/test/data/whir/wrapper_quotient_polys_verifier_data.json")
+        );
+        _verifyWhirCommitment(json, "quotient_polys");
+    }
+
+    // =====================================================================
+    // Plonky2 constraint satisfaction test
+    // =====================================================================
+
+    /// @notice Verify WrapperCircuit constraints on-chain (13 gate types, degree 2^13).
+    ///         Calls Plonky2Verifier.verifyConstraints with real openings/challenges.
+    function test_plonky2_constraints_wrapper() public {
         string memory json = vm.readFile(
             string.concat(vm.projectRoot(), "/test/data/wrapper_constraint_data.json")
         );
-        uint256 degreeBits = abi.decode(vm.parseJson(json, ".circuitParams.degreeBits"), (uint256));
-        assertEq(degreeBits, 13, "WrapperCircuit degreeBits must be 13");
-        uint256 numGates = abi.decode(vm.parseJson(json, ".gates..gateType"), (uint256[])).length;
-        assertEq(numGates, 13, "WrapperCircuit must have 13 gate types");
+        _verifyPlonky2Constraints(json);
     }
 
-    // -----------------------------------------------------------------------
-    // Internal helpers
-    // -----------------------------------------------------------------------
+    // =====================================================================
+    // Combined E2E: all 4 WHIR batches + Plonky2 constraint verification
+    // =====================================================================
 
-    function _verifyWhirCommitment(string memory json) internal pure {
-        bytes memory protocolId = _bytes(json, ".protocol_id");
-        bytes memory sessionId = _bytes(json, ".session_id");
-        bytes memory instance = _bytes(json, ".instance");
-        bytes memory transcript = _bytes(json, ".transcript");
-        bytes memory hints = _bytes(json, ".hints");
+    /// @notice Full E2E: verify all 4 WHIR polynomial commitments + Plonky2 constraint check.
+    ///         This is the complete validity proof → WHIR → smart contract verification.
+    function test_full_e2e_all_whir_batches_and_constraints() public {
+        uint256 totalGas;
+        uint256 gasBefore;
 
-        // Parse evaluation
-        uint64 evalC0 = uint64(_u(json, ".evaluations[0].c0"));
-        uint64 evalC1 = uint64(_u(json, ".evaluations[0].c1"));
-        uint64 evalC2 = uint64(_u(json, ".evaluations[0].c2"));
+        // --- WHIR batch 1: constants_sigmas ---
+        {
+            string memory json = vm.readFile(
+                string.concat(vm.projectRoot(), "/test/data/whir/wrapper_constants_sigmas_verifier_data.json")
+            );
+            gasBefore = gasleft();
+            _verifyWhirCommitment(json, "constants_sigmas");
+            uint256 used = gasBefore - gasleft();
+            totalGas += used;
+            console.log("WHIR constants_sigmas gas:", used);
+        }
+
+        // --- WHIR batch 2: wires ---
+        {
+            string memory json = vm.readFile(
+                string.concat(vm.projectRoot(), "/test/data/whir/wrapper_wires_verifier_data.json")
+            );
+            gasBefore = gasleft();
+            _verifyWhirCommitment(json, "wires");
+            uint256 used = gasBefore - gasleft();
+            totalGas += used;
+            console.log("WHIR wires gas:", used);
+        }
+
+        // --- WHIR batch 3: zs_partial_products ---
+        {
+            string memory json = vm.readFile(
+                string.concat(vm.projectRoot(), "/test/data/whir/wrapper_zs_partial_products_verifier_data.json")
+            );
+            gasBefore = gasleft();
+            _verifyWhirCommitment(json, "zs_partial_products");
+            uint256 used = gasBefore - gasleft();
+            totalGas += used;
+            console.log("WHIR zs_partial_products gas:", used);
+        }
+
+        // --- WHIR batch 4: quotient_polys ---
+        {
+            string memory json = vm.readFile(
+                string.concat(vm.projectRoot(), "/test/data/whir/wrapper_quotient_polys_verifier_data.json")
+            );
+            gasBefore = gasleft();
+            _verifyWhirCommitment(json, "quotient_polys");
+            uint256 used = gasBefore - gasleft();
+            totalGas += used;
+            console.log("WHIR quotient_polys gas:", used);
+        }
+
+        console.log("WHIR total (4 batches) gas:", totalGas);
+
+        // --- Plonky2 constraint verification ---
+        // Gas for this step is available from test_plonky2_constraints_wrapper (~1.5M)
+        {
+            string memory json = vm.readFile(
+                string.concat(vm.projectRoot(), "/test/data/wrapper_constraint_data.json")
+            );
+            _verifyPlonky2Constraints(json);
+        }
+    }
+
+    // =====================================================================
+    // Internal: WHIR commitment verification
+    // =====================================================================
+
+    function _verifyWhirCommitment(string memory json, string memory batchName) internal pure {
+        bytes memory protocolId = vm.parseJsonBytes(json, ".protocol_id");
+        bytes memory sessionId = vm.parseJsonBytes(json, ".session_id");
+        bytes memory instance = vm.parseJsonBytes(json, ".instance");
+        bytes memory transcript = vm.parseJsonBytes(json, ".transcript");
+        bytes memory hints = vm.parseJsonBytes(json, ".hints");
+
+        // Parse evaluation (single canonical point per WHIR commitment)
         GoldilocksExt3.Ext3[] memory evaluations = new GoldilocksExt3.Ext3[](1);
-        evaluations[0] = GoldilocksExt3.Ext3(evalC0, evalC1, evalC2);
+        {
+            uint64 c0 = uint64(abi.decode(vm.parseJson(json, ".evaluations[0].c0"), (uint256)));
+            uint64 c1 = uint64(abi.decode(vm.parseJson(json, ".evaluations[0].c1"), (uint256)));
+            uint64 c2 = uint64(abi.decode(vm.parseJson(json, ".evaluations[0].c2"), (uint256)));
+            evaluations[0] = GoldilocksExt3.Ext3(c0, c1, c2);
+        }
 
         // Parse WHIR params
         SpongefishWhirVerify.WhirParams memory params = _loadParams(json);
@@ -59,8 +160,65 @@ contract WhirOnchainE2ETest is Test {
         bool valid = SpongefishWhirVerify.verifyWhirProof(
             protocolId, sessionId, instance, transcript, hints, evaluations, params
         );
-        assertTrue(valid, "WHIR commitment must verify on-chain");
+        assertTrue(valid, string.concat("WHIR commitment must verify: ", batchName));
     }
+
+    // =====================================================================
+    // Internal: Plonky2 constraint verification
+    // =====================================================================
+
+    function _verifyPlonky2Constraints(string memory json) internal {
+        Plonky2Verifier.CircuitParams memory params;
+        params.degreeBits = abi.decode(vm.parseJson(json, ".circuitParams.degreeBits"), (uint256));
+        params.numChallenges = abi.decode(vm.parseJson(json, ".circuitParams.numChallenges"), (uint256));
+        params.numRoutedWires = abi.decode(vm.parseJson(json, ".circuitParams.numRoutedWires"), (uint256));
+        params.quotientDegreeFactor = abi.decode(vm.parseJson(json, ".circuitParams.quotientDegreeFactor"), (uint256));
+        params.numPartialProducts = abi.decode(vm.parseJson(json, ".circuitParams.numPartialProducts"), (uint256));
+        params.numGateConstraints = abi.decode(vm.parseJson(json, ".circuitParams.numGateConstraints"), (uint256));
+        params.numSelectors = abi.decode(vm.parseJson(json, ".circuitParams.numSelectors"), (uint256));
+        params.numLookupSelectors = abi.decode(vm.parseJson(json, ".circuitParams.numLookupSelectors"), (uint256));
+
+        uint256[] memory constFlat = abi.decode(vm.parseJson(json, ".openings.constants"), (uint256[]));
+        uint256[] memory sigmaFlat = abi.decode(vm.parseJson(json, ".openings.plonkSigmas"), (uint256[]));
+        uint256[] memory wiresFlat = abi.decode(vm.parseJson(json, ".openings.wires"), (uint256[]));
+        uint256[] memory zsFlat = abi.decode(vm.parseJson(json, ".openings.plonkZs"), (uint256[]));
+        uint256[] memory zsNextFlat = abi.decode(vm.parseJson(json, ".openings.plonkZsNext"), (uint256[]));
+        uint256[] memory ppFlat = abi.decode(vm.parseJson(json, ".openings.partialProducts"), (uint256[]));
+        uint256[] memory qpFlat = abi.decode(vm.parseJson(json, ".openings.quotientPolys"), (uint256[]));
+
+        Plonky2Verifier.Openings memory openings;
+        openings.constants = _flatToExt2(constFlat);
+        openings.plonkSigmas = _flatToExt2(sigmaFlat);
+        openings.wires = _flatToExt2(wiresFlat);
+        openings.plonkZs = _flatToExt2(zsFlat);
+        openings.plonkZsNext = _flatToExt2(zsNextFlat);
+        openings.partialProducts = _flatToExt2(ppFlat);
+        openings.quotientPolys = _flatToExt2(qpFlat);
+
+        Plonky2Verifier.Challenges memory challenges;
+        challenges.plonkBetas = abi.decode(vm.parseJson(json, ".challenges.plonkBetas"), (uint256[]));
+        challenges.plonkGammas = abi.decode(vm.parseJson(json, ".challenges.plonkGammas"), (uint256[]));
+        challenges.plonkAlphas = abi.decode(vm.parseJson(json, ".challenges.plonkAlphas"), (uint256[]));
+        {
+            uint256[] memory zetaFlat = abi.decode(vm.parseJson(json, ".challenges.plonkZeta"), (uint256[]));
+            challenges.plonkZeta = GoldilocksExt2.Ext2(zetaFlat[0], zetaFlat[1]);
+        }
+
+        Plonky2Verifier.PermutationData memory permData;
+        permData.kIs = abi.decode(vm.parseJson(json, ".permutation.kIs"), (uint256[]));
+
+        uint256[] memory gateTypes = abi.decode(vm.parseJson(json, ".gates..gateType"), (uint256[]));
+        Plonky2Verifier.GateInfo[] memory gates = _parseGates(json, gateTypes.length);
+
+        uint256[] memory publicInputs = abi.decode(vm.parseJson(json, ".publicInputs"), (uint256[]));
+
+        bool valid = verifyConstraints(openings, params, challenges, permData, gates, publicInputs);
+        assertTrue(valid, "Plonky2 constraint verification must pass");
+    }
+
+    // =====================================================================
+    // Internal helpers
+    // =====================================================================
 
     function _loadParams(string memory json) internal pure returns (SpongefishWhirVerify.WhirParams memory p) {
         p.numVariables = _u(json, ".whir_params.num_variables");
@@ -80,7 +238,6 @@ contract WhirOnchainE2ETest is Test {
         p.initialCosetSize = _u(json, ".whir_params.initial_coset_size");
         p.initialNumCosets = _u(json, ".whir_params.initial_num_cosets");
 
-        // Load per-round params
         p.rounds = new SpongefishWhirVerify.RoundParams[](p.numRounds);
         for (uint256 i = 0; i < p.numRounds; i++) {
             string memory prefix = string.concat(".whir_params.rounds[", vm.toString(i), "].");
@@ -101,63 +258,18 @@ contract WhirOnchainE2ETest is Test {
         return abi.decode(vm.parseJson(json, path), (uint256));
     }
 
-    function _bytes(string memory json, string memory path) internal pure returns (bytes memory) {
-        return vm.parseJsonBytes(json, path);
-    }
-
-    function _verifyPlonky2Constraints(string memory json) internal view {
-        uint256[] memory constantsFlat = abi.decode(vm.parseJson(json, ".openings.constants"), (uint256[]));
-        uint256[] memory wiresFlat = abi.decode(vm.parseJson(json, ".openings.wires"), (uint256[]));
-        uint256[] memory plonkZsFlat = abi.decode(vm.parseJson(json, ".openings.plonkZs"), (uint256[]));
-        uint256[] memory plonkZsNextFlat = abi.decode(vm.parseJson(json, ".openings.plonkZsNext"), (uint256[]));
-        uint256[] memory partialProductsFlat = abi.decode(vm.parseJson(json, ".openings.partialProducts"), (uint256[]));
-        uint256[] memory quotientPolysFlat = abi.decode(vm.parseJson(json, ".openings.quotientPolys"), (uint256[]));
-        uint256[] memory plonkSigmasFlat = abi.decode(vm.parseJson(json, ".openings.plonkSigmas"), (uint256[]));
-
-        Plonky2Verifier.Openings memory openings;
-        openings.constants = _toExt2Array(constantsFlat);
-        openings.wires = _toExt2Array(wiresFlat);
-        openings.plonkZs = _toExt2Array(plonkZsFlat);
-        openings.plonkZsNext = _toExt2Array(plonkZsNextFlat);
-        openings.partialProducts = _toExt2Array(partialProductsFlat);
-        openings.quotientPolys = _toExt2Array(quotientPolysFlat);
-        openings.plonkSigmas = _toExt2Array(plonkSigmasFlat);
-
-        Plonky2Verifier.CircuitParams memory params;
-        params.degreeBits = abi.decode(vm.parseJson(json, ".circuitParams.degreeBits"), (uint256));
-        params.numChallenges = abi.decode(vm.parseJson(json, ".circuitParams.numChallenges"), (uint256));
-        params.numRoutedWires = abi.decode(vm.parseJson(json, ".circuitParams.numRoutedWires"), (uint256));
-        params.quotientDegreeFactor = abi.decode(vm.parseJson(json, ".circuitParams.quotientDegreeFactor"), (uint256));
-        params.numPartialProducts = abi.decode(vm.parseJson(json, ".circuitParams.numPartialProducts"), (uint256));
-        params.numGateConstraints = abi.decode(vm.parseJson(json, ".circuitParams.numGateConstraints"), (uint256));
-        params.numSelectors = abi.decode(vm.parseJson(json, ".circuitParams.numSelectors"), (uint256));
-        params.numLookupSelectors = abi.decode(vm.parseJson(json, ".circuitParams.numLookupSelectors"), (uint256));
-
-        Plonky2Verifier.Challenges memory challenges;
-        challenges.plonkBetas = abi.decode(vm.parseJson(json, ".challenges.plonkBetas"), (uint256[]));
-        challenges.plonkGammas = abi.decode(vm.parseJson(json, ".challenges.plonkGammas"), (uint256[]));
-        challenges.plonkAlphas = abi.decode(vm.parseJson(json, ".challenges.plonkAlphas"), (uint256[]));
-        uint256[] memory zetaArr = abi.decode(vm.parseJson(json, ".challenges.plonkZeta"), (uint256[]));
-        challenges.plonkZeta = GoldilocksExt2.Ext2(zetaArr[0], zetaArr[1]);
-
-        Plonky2Verifier.PermutationData memory permData;
-        permData.kIs = abi.decode(vm.parseJson(json, ".permutation.kIs"), (uint256[]));
-
-        Plonky2Verifier.GateInfo[] memory gates = _parseGates(json);
-        uint256[] memory publicInputs = abi.decode(vm.parseJson(json, ".publicInputs"), (uint256[]));
-
-        bool valid = verifier.verifyConstraints(openings, params, challenges, permData, gates, publicInputs);
-        assertTrue(valid, "Plonky2 constraints must be satisfied");
-    }
-
-    function _toExt2Array(uint256[] memory flat) internal pure returns (GoldilocksExt2.Ext2[] memory result) {
-        result = new GoldilocksExt2.Ext2[](flat.length / 2);
-        for (uint256 i = 0; i < result.length; i++) {
-            result[i] = GoldilocksExt2.Ext2(flat[2 * i], flat[2 * i + 1]);
+    function _flatToExt2(uint256[] memory flat) internal pure returns (GoldilocksExt2.Ext2[] memory) {
+        uint256 len = flat.length / 2;
+        GoldilocksExt2.Ext2[] memory result = new GoldilocksExt2.Ext2[](len);
+        for (uint256 i = 0; i < len; i++) {
+            result[i] = GoldilocksExt2.Ext2(flat[i * 2], flat[i * 2 + 1]);
         }
+        return result;
     }
 
-    function _parseGates(string memory json) internal pure returns (Plonky2Verifier.GateInfo[] memory) {
+    function _parseGates(string memory json, uint256 numGates)
+        internal pure returns (Plonky2Verifier.GateInfo[] memory)
+    {
         uint256[] memory gateTypes = abi.decode(vm.parseJson(json, ".gates..gateType"), (uint256[]));
         uint256[] memory selectorIndices = abi.decode(vm.parseJson(json, ".gates..selectorIndex"), (uint256[]));
         uint256[] memory groupStarts = abi.decode(vm.parseJson(json, ".gates..groupStart"), (uint256[]));
@@ -165,7 +277,6 @@ contract WhirOnchainE2ETest is Test {
         uint256[] memory rowInGroups = abi.decode(vm.parseJson(json, ".gates..rowInGroup"), (uint256[]));
         uint256[] memory numConstraintsList = abi.decode(vm.parseJson(json, ".gates..numConstraints"), (uint256[]));
 
-        uint256 numGates = gateTypes.length;
         Plonky2Verifier.GateInfo[] memory gates = new Plonky2Verifier.GateInfo[](numGates);
         for (uint256 i = 0; i < numGates; i++) {
             uint256[] memory config;

@@ -679,11 +679,9 @@ contract IntmaxRollupTest is Test {
         assertEq(submitter.balance, stakeBalanceBefore - 1 ether, "stake should lock 1 ETH");
 
         bool ok = rollup.finalize(
-            0, blobHash, stateRoot,
-            proofBytes,
+            0, stateRoot,
             vpis,
             config, statement, whirProof, transcript,
-            kzg,
             groth16
         );
 
@@ -722,16 +720,16 @@ contract IntmaxRollupTest is Test {
         (KZGProof memory kzg, bytes32 blobHash) = _postWithKZG(batch, proofBytes, stateRoot, submitter);
 
         assertTrue(rollup.finalize(
-            0, blobHash, stateRoot, proofBytes, vpis,
+            0, stateRoot, vpis,
             config, statement, whirProof, transcript,
-            kzg, groth16
+            groth16
         ));
 
         // Second call returns false (already finalized)
         assertFalse(rollup.finalize(
-            0, blobHash, stateRoot, proofBytes, vpis,
+            0, stateRoot, vpis,
             config, statement, whirProof, transcript,
-            kzg, groth16
+            groth16
         ));
     }
 
@@ -761,9 +759,8 @@ contract IntmaxRollupTest is Test {
 
         // Returns false (initial state mismatch — initialExtCommitment = 0xbad ≠ latestFinalizedStateRoot = 0)
         assertFalse(rollup.finalize(
-            0, blobHash, stateRoot, proofBytes, vpis,
+            0, stateRoot, vpis,
             config, statement, whirProof, transcript,
-            kzg,
             groth16
         ));
     }
@@ -793,9 +790,8 @@ contract IntmaxRollupTest is Test {
 
         // Returns false: groth16.pubInputs[0] = 1 ≠ keccak256(vpis)
         assertFalse(rollup.finalize(
-            0, blobHash, stateRoot, proofBytes, vpis,
+            0, stateRoot, vpis,
             config, statement, whirProof, transcript,
-            kzg,
             groth16
         ));
     }
@@ -810,12 +806,10 @@ contract IntmaxRollupTest is Test {
 
         IntmaxRollup.ValidityPublicInputs memory vpis;
 
-        // Returns false (submission not found) — KZG is never verified but must be non-dummy
-        (KZGProof memory kzg, ) = _computeKZGProof(new bytes(32));
+        // Returns false (submission not found)
         assertFalse(rollup.finalize(
-            999, bytes32(0), bytes32(0), "", vpis,
+            999, bytes32(0), vpis,
             config, statement, whirProof, transcript,
-            kzg,
             _groth16()
         ));
     }
@@ -1204,9 +1198,8 @@ contract IntmaxRollupTest is Test {
 
         assertTrue(
             rollup.finalize(
-                0, blobHash, stateRoot, proofBytes, vpis,
+                0, stateRoot, vpis,
                 config, statement, whirProof, transcript,
-                kzg,
                 groth16
             ),
             "finalize should succeed"
@@ -1414,9 +1407,8 @@ contract IntmaxRollupTest is Test {
 
         uint256 gasBefore = gasleft();
         rollup.finalize(
-            0, blobHash, stateRoot, proofBytes, vpis,
+            0, stateRoot, vpis,
             config, statement, whirProof, transcript,
-            kzg,
             groth16
         );
         uint256 gasUsed = gasBefore - gasleft();
@@ -1474,7 +1466,7 @@ contract IntmaxRollupTest is Test {
         uint32[] memory ids = new uint32[](1); ids[0] = 1;
         (KZGProof memory kzg, bytes32 blobHash) = _postWithKZG(_singleBlockBatch(1, ids, 100, bytes32(uint256(0xabc))), proofBytes, stateRoot, submitter);
 
-        rollup.finalize(0, blobHash, stateRoot, proofBytes, vpis, config, statement, whirProof, transcript, kzg, groth16);
+        rollup.finalize(0, stateRoot, vpis, config, statement, whirProof, transcript, groth16);
 
         assertEq(rollup.pendingWithdrawals(submitter), 1 ether, "stake credited");
         uint256 balBefore = submitter.balance;
@@ -1504,7 +1496,7 @@ contract IntmaxRollupTest is Test {
 
         // Under old push-payment, this would revert because revSub rejects ETH.
         // Under pull-payment, finalize completes and credits pendingWithdrawals.
-        bool ok = rollup.finalize(0, blobHash, stateRoot, proofBytes, vpis, config, statement, whirProof, transcript, kzg, groth16);
+        bool ok = rollup.finalize(0, stateRoot, vpis, config, statement, whirProof, transcript, groth16);
         assertTrue(ok, "finalize must succeed even with reverting submitter");
         assertEq(rollup.pendingWithdrawals(address(revSub)), 1 ether, "stake credited to reverting submitter");
     }
@@ -1723,11 +1715,11 @@ contract IntmaxRollupTest is Test {
 
         // ── 6. Call finalize() — no vm.store, no cheatcodes ─────────────────
         bool ok = e2eRollup.finalize(
-            0, blobHash, finalExtCommitment, proofBytes, vpis,
-            config, statement, whirProof, transcript, kzg, groth16
+            0, finalExtCommitment, vpis,
+            config, statement, whirProof, transcript, groth16
         );
 
-        assertTrue(ok, "finalize() must succeed with real gnark Groth16 + real WHIR + real KZG");
+        assertTrue(ok, "finalize() must succeed with real gnark Groth16 + real WHIR");
         assertTrue(e2eRollup.isFinalized(0));
         assertEq(e2eRollup.latestFinalizedStateRoot(), finalExtCommitment);
         // Pull-payment: stake credited, not pushed
