@@ -167,9 +167,10 @@
                 workerReady = true;
                 currentThreadCount = data.threadCount;
                 currentThreadsSpan.textContent = currentThreadCount;
-                updateStatus(`Worker ready with ${currentThreadCount} threads!`, 'success');
+                const gpuLabel = data.gpuEnabled ? 'GPU: ON' : 'GPU: OFF';
+                updateStatus(`Worker ready with ${currentThreadCount} threads | ${gpuLabel}`, 'success');
                 setButtons(true);
-                addOutput(`WASM initialized with ${currentThreadCount} threads`, 'success');
+                addOutput(`WASM initialized with ${currentThreadCount} threads, ${gpuLabel}`, 'success');
                 break;
               case 'result':
                 addOutput(`${data.function} completed in ${data.duration}`, 'success');

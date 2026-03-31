@@ -82,11 +82,12 @@ async function initializeWasm(threadCount = null) {
         console.timeEnd('wasm_thread_pool_init');
 
         // Initialize GPU Merkle if available
+        let gpuEnabled = false;
         try {
-            await wasmModule.init_gpu_merkle();
-            console.log('Worker: GPU Merkle initialized');
+            gpuEnabled = await wasmModule.init_gpu_merkle();
+            console.log(`Worker: GPU Merkle ${gpuEnabled ? 'initialized' : 'not available (CPU-only build)'}`);
         } catch (e) {
-            console.warn('Worker: GPU init skipped (not available):', e);
+            console.warn('Worker: GPU init failed:', e);
         }
 
         console.timeEnd('wasm_total_init');
@@ -95,7 +96,7 @@ async function initializeWasm(threadCount = null) {
         self.postMessage({
             type: 'ready',
             message: `WASM initialized with ${numThreads} threads`,
-            data: { threadCount: numThreads }
+            data: { threadCount: numThreads, gpuEnabled }
         });
 
     } catch (error) {
