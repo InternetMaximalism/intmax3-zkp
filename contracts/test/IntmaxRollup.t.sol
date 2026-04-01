@@ -1354,8 +1354,8 @@ contract IntmaxRollupTest is Test {
 
         IntmaxRollup.ValidityPublicInputs memory vpis = _defaultValidityPIs(stateRoot);
 
-        // Advance past FINALIZE_DEADLINE_BLOCKS (144 + 1 blocks)
-        vm.roll(block.number + 145);
+        // Advance past FINALIZE_DEADLINE_BLOCKS (3600 + 1 blocks)
+        vm.roll(block.number + 3601);
 
         address reporter = makeAddr("timeout_reporter");
         vm.deal(reporter, 1 ether);
@@ -1386,8 +1386,8 @@ contract IntmaxRollupTest is Test {
 
         IntmaxRollup.ValidityPublicInputs memory vpis = _defaultValidityPIs(stateRoot);
 
-        // Do NOT advance past deadline — stay within 144 blocks
-        vm.roll(block.number + 100);
+        // Do NOT advance past deadline — stay within 3600 blocks
+        vm.roll(block.number + 3000);
 
         address reporter = makeAddr("early_reporter");
         vm.deal(reporter, 1 ether);

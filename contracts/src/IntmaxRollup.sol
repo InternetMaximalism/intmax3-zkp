@@ -59,7 +59,7 @@ interface IGnarkVerifier {
 ///    1) Finalized intmax block number is recorded on-chain; each submission's
 ///       commitment includes the Eth block number at posting time.
 ///    2) Fraud proofs cannot target submissions at or before the finalized block.
-///    3) Submissions not finalized within 144 Eth blocks (~29 min) after posting
+///    3) Submissions not finalized within 3600 Eth blocks (~12 hours) after posting
 ///       are removed unconditionally (no ZKP verification needed).
 ///    4) Successful fraud proof deletes the target and all subsequent submissions.
 ///
@@ -336,7 +336,7 @@ contract IntmaxRollup {
 
     /// @notice Submissions not finalized within this many Eth blocks after posting
     ///         can be removed unconditionally via fraudProof (no proof needed).
-    uint256 private constant FINALIZE_DEADLINE_BLOCKS = 12 * 12;
+    uint256 private constant FINALIZE_DEADLINE_BLOCKS = 5 * 60 * 12;
     address public immutable fraudTreasury;
     IGnarkVerifier public immutable gnarkVerifier;
 
@@ -687,8 +687,8 @@ contract IntmaxRollup {
     ///      commitment includes the Eth block number at posting time.
     ///   2. Fraud proofs CANNOT target submissions at or before the latest
     ///      finalized intmax block (reverts with SubmissionBeforeFinalizedBlock).
-    ///   3. Submissions not finalized within FINALIZE_DEADLINE_BLOCKS (144 Eth
-    ///      blocks) after posting are removed unconditionally — no ZKP
+    ///   3. Submissions not finalized within FINALIZE_DEADLINE_BLOCKS (3600 Eth
+    ///      blocks, ~12 hours) after posting are removed unconditionally — no ZKP
     ///      verification required.
     ///   4. On successful fraud proof, the target submission AND all subsequent
     ///      submissions are deleted and their blocks rolled back.
