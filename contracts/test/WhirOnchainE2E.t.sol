@@ -9,46 +9,22 @@ import {GoldilocksExt2} from "../src/GoldilocksField.sol";
 
 /// @title WhirOnchainE2ETest
 /// @notice Complete E2E test: validity proof → WrapperCircuit → WHIR → on-chain verify
-///         Verifies ALL 4 polynomial commitment batches via SpongefishWhirVerify
+///         Verifies a single combined WHIR proof (all 4 polynomial batches concatenated)
 ///         AND Plonky2 constraint satisfaction via Plonky2Verifier.
 ///         All fixtures are real proofs from the Rust prover — no mocks, no dummies.
 ///         Inherits Plonky2Verifier to call verifyConstraints internally (avoids ABI encoding overhead).
 contract WhirOnchainE2ETest is Test, Plonky2Verifier {
 
     // =====================================================================
-    // Individual WHIR batch verification tests (4 batches)
+    // Combined WHIR verification test (all 4 batches in 1 proof)
     // =====================================================================
 
-    /// @notice WHIR polynomial commitment: constants_sigmas (selector + permutation polynomials)
-    function test_whir_wrapper_constants_sigmas() public view {
+    /// @notice WHIR polynomial commitment: combined (all 4 batches concatenated)
+    function test_whir_wrapper_combined() public view {
         string memory json = vm.readFile(
-            string.concat(vm.projectRoot(), "/test/data/whir/wrapper_constants_sigmas_verifier_data.json")
+            string.concat(vm.projectRoot(), "/test/data/whir/wrapper_combined_verifier_data.json")
         );
-        _verifyWhirCommitment(json, "constants_sigmas");
-    }
-
-    /// @notice WHIR polynomial commitment: wires (witness wire polynomials)
-    function test_whir_wrapper_wires() public view {
-        string memory json = vm.readFile(
-            string.concat(vm.projectRoot(), "/test/data/whir/wrapper_wires_verifier_data.json")
-        );
-        _verifyWhirCommitment(json, "wires");
-    }
-
-    /// @notice WHIR polynomial commitment: zs_partial_products (Z polynomial + partial products)
-    function test_whir_wrapper_zs_partial_products() public view {
-        string memory json = vm.readFile(
-            string.concat(vm.projectRoot(), "/test/data/whir/wrapper_zs_partial_products_verifier_data.json")
-        );
-        _verifyWhirCommitment(json, "zs_partial_products");
-    }
-
-    /// @notice WHIR polynomial commitment: quotient_polys (quotient polynomial chunks)
-    function test_whir_wrapper_quotient_polys() public view {
-        string memory json = vm.readFile(
-            string.concat(vm.projectRoot(), "/test/data/whir/wrapper_quotient_polys_verifier_data.json")
-        );
-        _verifyWhirCommitment(json, "quotient_polys");
+        _verifyWhirCommitment(json, "combined");
     }
 
     // =====================================================================
@@ -68,70 +44,67 @@ contract WhirOnchainE2ETest is Test, Plonky2Verifier {
     // Combined E2E: all 4 WHIR batches + Plonky2 constraint verification
     // =====================================================================
 
-    /// @notice Full E2E: verify all 4 WHIR polynomial commitments + Plonky2 constraint check.
+    /// @notice Full E2E: verify combined WHIR proof + Plonky2 constraint check.
     ///         This is the complete validity proof → WHIR → smart contract verification.
-    function test_full_e2e_all_whir_batches_and_constraints() public {
-        uint256 totalGas;
+    function test_full_e2e_combined_whir_and_constraints() public {
         uint256 gasBefore;
 
-        // --- WHIR batch 1: constants_sigmas ---
+        // --- Combined WHIR verification (all 4 batches in 1 proof) ---
         {
             string memory json = vm.readFile(
-                string.concat(vm.projectRoot(), "/test/data/whir/wrapper_constants_sigmas_verifier_data.json")
+                string.concat(vm.projectRoot(), "/test/data/whir/wrapper_combined_verifier_data.json")
             );
             gasBefore = gasleft();
-            _verifyWhirCommitment(json, "constants_sigmas");
+            _verifyWhirCommitment(json, "combined");
             uint256 used = gasBefore - gasleft();
-            totalGas += used;
-            console.log("WHIR constants_sigmas gas:", used);
+            console.log("WHIR combined (1 proof) gas:", used);
         }
-
-        // --- WHIR batch 2: wires ---
-        {
-            string memory json = vm.readFile(
-                string.concat(vm.projectRoot(), "/test/data/whir/wrapper_wires_verifier_data.json")
-            );
-            gasBefore = gasleft();
-            _verifyWhirCommitment(json, "wires");
-            uint256 used = gasBefore - gasleft();
-            totalGas += used;
-            console.log("WHIR wires gas:", used);
-        }
-
-        // --- WHIR batch 3: zs_partial_products ---
-        {
-            string memory json = vm.readFile(
-                string.concat(vm.projectRoot(), "/test/data/whir/wrapper_zs_partial_products_verifier_data.json")
-            );
-            gasBefore = gasleft();
-            _verifyWhirCommitment(json, "zs_partial_products");
-            uint256 used = gasBefore - gasleft();
-            totalGas += used;
-            console.log("WHIR zs_partial_products gas:", used);
-        }
-
-        // --- WHIR batch 4: quotient_polys ---
-        {
-            string memory json = vm.readFile(
-                string.concat(vm.projectRoot(), "/test/data/whir/wrapper_quotient_polys_verifier_data.json")
-            );
-            gasBefore = gasleft();
-            _verifyWhirCommitment(json, "quotient_polys");
-            uint256 used = gasBefore - gasleft();
-            totalGas += used;
-            console.log("WHIR quotient_polys gas:", used);
-        }
-
-        console.log("WHIR total (4 batches) gas:", totalGas);
 
         // --- Plonky2 constraint verification ---
-        // Gas for this step is available from test_plonky2_constraints_wrapper (~1.5M)
         {
             string memory json = vm.readFile(
                 string.concat(vm.projectRoot(), "/test/data/wrapper_constraint_data.json")
             );
             _verifyPlonky2Constraints(json);
         }
+    }
+
+    // =====================================================================
+    // Gas measurement: pure WHIR verification (no JSON parsing overhead)
+    // =====================================================================
+
+    /// @notice Measure pure verifyWhirProof gas for the combined proof (excludes JSON parsing).
+    function test_gas_pure_whir_verification() public {
+        string memory json = vm.readFile(
+            string.concat(vm.projectRoot(), "/test/data/whir/wrapper_combined_verifier_data.json")
+        );
+
+        // --- Parse all data BEFORE gas measurement ---
+        bytes memory protocolId = vm.parseJsonBytes(json, ".protocol_id");
+        bytes memory sessionId = vm.parseJsonBytes(json, ".session_id");
+        bytes memory instance = vm.parseJsonBytes(json, ".instance");
+        bytes memory transcript = vm.parseJsonBytes(json, ".transcript");
+        bytes memory hints = vm.parseJsonBytes(json, ".hints");
+
+        GoldilocksExt3.Ext3[] memory evaluations = new GoldilocksExt3.Ext3[](1);
+        {
+            uint64 c0 = uint64(abi.decode(vm.parseJson(json, ".evaluations[0].c0"), (uint256)));
+            uint64 c1 = uint64(abi.decode(vm.parseJson(json, ".evaluations[0].c1"), (uint256)));
+            uint64 c2 = uint64(abi.decode(vm.parseJson(json, ".evaluations[0].c2"), (uint256)));
+            evaluations[0] = GoldilocksExt3.Ext3(c0, c1, c2);
+        }
+
+        SpongefishWhirVerify.WhirParams memory params = _loadParams(json);
+
+        // --- Measure ONLY verifyWhirProof ---
+        uint256 gasBefore = gasleft();
+        bool valid = SpongefishWhirVerify.verifyWhirProof(
+            protocolId, sessionId, instance, transcript, hints, evaluations, params
+        );
+        uint256 gasUsed = gasBefore - gasleft();
+
+        assertTrue(valid, "WHIR combined must verify");
+        console.log("Pure WHIR verify [combined] gas:", gasUsed);
     }
 
     // =====================================================================

@@ -129,21 +129,24 @@ pub struct WhirPolyCommitment {
 ///
 /// Contains:
 /// - The standard Plonky2 proof (openings, public inputs) for constraint checking
-/// - WHIR commitments for each polynomial batch (replaces FRI)
+/// - A single combined WHIR commitment covering all polynomial batches (replaces FRI)
+///
+/// All 4 polynomial batches (constants_sigmas, wires, zs_partial_products, quotient_chunks)
+/// are concatenated into a single polynomial and committed via one WHIR proof.
+/// The MLE evaluation at the canonical point provides implicit random linear combination
+/// security over all coefficients, so explicit RLC challenges are unnecessary.
 #[derive(Clone, Debug)]
 pub struct WhirPlonky2Proof<F: RichField + Extendable<D>, C: GenericConfig<D, F = F>, const D: usize> {
     /// The standard Plonky2 proof (contains openings at zeta, Merkle caps, FRI proof).
     /// We keep this for reference / dual-path verification.
     pub standard_proof: ProofWithPublicInputs<F, C, D>,
 
-    /// WHIR commitment for constants + sigmas polynomials.
-    pub constants_sigmas_whir: WhirPolyCommitment,
-    /// WHIR commitment for wire polynomials.
-    pub wires_whir: WhirPolyCommitment,
-    /// WHIR commitment for Z/partial products/lookup polynomials.
-    pub zs_partial_products_whir: WhirPolyCommitment,
-    /// WHIR commitment for quotient polynomial chunks.
-    pub quotient_polys_whir: WhirPolyCommitment,
+    /// Single WHIR commitment for all polynomial batches (concatenated).
+    pub combined_whir: WhirPolyCommitment,
+    /// Sizes (in Field64 elements) of each batch before concatenation.
+    /// Order: [constants_sigmas, wires, zs_partial_products, quotient_chunks].
+    /// Each batch is already padded to a power of 2 by `polys_to_whir_field`.
+    pub batch_sizes: Vec<usize>,
 
     /// Public input: `true` = validity proof, `false` = fraud proof.
     /// This is bound into the WHIR proof's Fiat-Shamir transcript.
@@ -182,6 +185,23 @@ fn polys_to_whir_field<F: RichField>(polys: &[PolynomialCoeffs<F>]) -> Vec<Field
     let target = flat.len().next_power_of_two().max(256);
     flat.resize(target, Field64::ZERO);
     flat
+}
+
+// ---------------------------------------------------------------------------
+// Batch concatenation
+// ---------------------------------------------------------------------------
+
+/// Concatenate multiple polynomial batches into a single vector for combined WHIR commitment.
+///
+/// Each input batch is already padded to a power of 2 by `polys_to_whir_field`.
+/// The concatenated result is further padded to a power of 2 (minimum 256).
+/// Returns the combined polynomial and the size of each input batch.
+fn concat_batches(batches: &[Vec<Field64>]) -> (Vec<Field64>, Vec<usize>) {
+    let sizes: Vec<usize> = batches.iter().map(|b| b.len()).collect();
+    let mut combined: Vec<Field64> = batches.iter().flat_map(|b| b.iter().copied()).collect();
+    let target = combined.len().next_power_of_two().max(256);
+    combined.resize(target, Field64::ZERO);
+    (combined, sizes)
 }
 
 // ---------------------------------------------------------------------------
@@ -425,39 +445,35 @@ where
 
     let whir_start = Instant::now();
 
-    // Bind expected_result into WHIR session names for domain separation.
+    // Bind expected_result into WHIR session name for domain separation.
     let er_tag = if expected_result { "valid" } else { "fraud" };
 
-    // Batch 1: Constants + sigmas (fixed per circuit)
+    // Convert each polynomial batch to WHIR field elements
     let constants_sigmas_polys =
         polys_to_whir_field(&circuit_data.prover_only.constants_sigmas_commitment.polynomials);
-    let constants_sigmas_whir = whir_commit_and_prove(
-        &constants_sigmas_polys,
-        &format!("whir-plonky2-constants-sigmas-{}", er_tag),
-        whir_config,
-    );
-
-    // Batch 2: Wire polynomials (actual coefficients from prove_with_polys)
     let wires_poly = polys_to_whir_field(&polys.wires);
-    let wires_whir = whir_commit_and_prove(
-        &wires_poly,
-        &format!("whir-plonky2-wires-{}", er_tag),
-        whir_config,
-    );
-
-    // Batch 3: Z + partial products + lookup polynomials
     let zs_poly = polys_to_whir_field(&polys.zs_partial_products);
-    let zs_partial_products_whir = whir_commit_and_prove(
-        &zs_poly,
-        &format!("whir-plonky2-zs-partial-products-{}", er_tag),
-        whir_config,
+    let quotient_poly = polys_to_whir_field(&polys.quotient_chunks);
+
+    // Concatenate all 4 batches into a single polynomial for one WHIR proof.
+    // MLE evaluation at the canonical point provides implicit RLC security.
+    let (combined_poly, batch_sizes) = concat_batches(&[
+        constants_sigmas_polys,
+        wires_poly,
+        zs_poly,
+        quotient_poly,
+    ]);
+
+    eprintln!(
+        "[whir] Combined polynomial: {} elements (nv={}), batch_sizes={:?}",
+        combined_poly.len(),
+        combined_poly.len().trailing_zeros(),
+        batch_sizes
     );
 
-    // Batch 4: Quotient polynomial chunks
-    let quotient_poly = polys_to_whir_field(&polys.quotient_chunks);
-    let quotient_polys_whir = whir_commit_and_prove(
-        &quotient_poly,
-        &format!("whir-plonky2-quotient-{}", er_tag),
+    let combined_whir = whir_commit_and_prove(
+        &combined_poly,
+        &format!("whir-plonky2-combined-{}", er_tag),
         whir_config,
     );
 
@@ -469,10 +485,8 @@ where
 
     let proof = WhirPlonky2Proof {
         standard_proof,
-        constants_sigmas_whir,
-        wires_whir,
-        zs_partial_products_whir,
-        quotient_polys_whir,
+        combined_whir,
+        batch_sizes,
         expected_result,
     };
 
@@ -519,17 +533,14 @@ where
     C::InnerHasher: Hasher<F>,
 {
     // -----------------------------------------------------------------------
-    // Check 1: WHIR polynomial commitment validity
+    // Check 1: WHIR polynomial commitment validity (single combined proof)
     //
-    // Each WHIR proof is verified independently.  The session names
-    // include the expected_result tag, so a validity proof cannot be
-    // replayed as a fraud proof.
+    // The combined WHIR proof covers all 4 polynomial batches concatenated.
+    // The session name includes the expected_result tag, so a validity proof
+    // cannot be replayed as a fraud proof.
     // -----------------------------------------------------------------------
 
-    whir_verify_standalone(&proof.constants_sigmas_whir, whir_config)?;
-    whir_verify_standalone(&proof.wires_whir, whir_config)?;
-    whir_verify_standalone(&proof.zs_partial_products_whir, whir_config)?;
-    whir_verify_standalone(&proof.quotient_polys_whir, whir_config)?;
+    whir_verify_standalone(&proof.combined_whir, whir_config)?;
 
     // -----------------------------------------------------------------------
     // Check 2: Plonky2 verification + expected_result check
@@ -731,7 +742,7 @@ pub fn export_whir_verifier_data(
 // Gas estimation
 // ---------------------------------------------------------------------------
 
-/// Estimate EVM gas cost for on-chain WHIR verification of all 4 polynomial batches.
+/// Estimate EVM gas cost for on-chain WHIR verification (single combined proof).
 pub fn estimate_whir_verification_gas<
     F: RichField + Extendable<D>,
     C: GenericConfig<D, F = F>,
@@ -739,22 +750,12 @@ pub fn estimate_whir_verification_gas<
 >(
     proof: &WhirPlonky2Proof<F, C, D>,
 ) -> u64 {
-    let commitments = [
-        &proof.constants_sigmas_whir,
-        &proof.wires_whir,
-        &proof.zs_partial_products_whir,
-        &proof.quotient_polys_whir,
-    ];
+    let c = &proof.combined_whir;
+    let proof_size = c.proof_narg.len() + c.proof_hints.len();
+    let calldata_gas = proof_size as u64 * 16; // 16 gas per non-zero byte
+    let hash_gas = c.verify_hashes as u64 * 42; // Keccak: 30 + 6*2 = 42
 
-    let mut total_gas = 0u64;
-    for c in &commitments {
-        let proof_size = c.proof_narg.len() + c.proof_hints.len();
-        let calldata_gas = proof_size as u64 * 16; // 16 gas per non-zero byte
-        let hash_gas = c.verify_hashes as u64 * 42; // Keccak: 30 + 6*2 = 42
-        total_gas += calldata_gas + hash_gas;
-    }
-
-    total_gas + 50_000 // overhead: constraint check + base tx
+    calldata_gas + hash_gas + 50_000 // overhead: constraint check + base tx
 }
 
 // ---------------------------------------------------------------------------

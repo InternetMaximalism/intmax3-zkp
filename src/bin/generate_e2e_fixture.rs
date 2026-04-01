@@ -268,43 +268,20 @@ fn main() -> anyhow::Result<()> {
         )?;
         eprintln!("[e2e] Constraint data written to contracts/test/data/wrapper_constraint_data.json");
 
-        // Export WHIR proof as spongefish-native format (transcript + hints)
+        // Export combined WHIR proof as spongefish-native format (transcript + hints)
         // SpongefishWhir.sol consumes these raw bytes directly.
         {
             let proof = &whir_result.proof;
             let whir_proof_fixture = serde_json::json!({
-                "constants_sigmas": {
-                    "transcript": format!("0x{}", hex::encode(&proof.constants_sigmas_whir.proof_narg)),
-                    "hints": format!("0x{}", hex::encode(&proof.constants_sigmas_whir.proof_hints)),
-                    "num_variables": proof.constants_sigmas_whir.num_variables,
-                    "evaluations": proof.constants_sigmas_whir.evaluations.iter()
+                "combined": {
+                    "transcript": format!("0x{}", hex::encode(&proof.combined_whir.proof_narg)),
+                    "hints": format!("0x{}", hex::encode(&proof.combined_whir.proof_hints)),
+                    "num_variables": proof.combined_whir.num_variables,
+                    "evaluations": proof.combined_whir.evaluations.iter()
                         .map(|e| format!("{:?}", e))
                         .collect::<Vec<_>>(),
                 },
-                "wires": {
-                    "transcript": format!("0x{}", hex::encode(&proof.wires_whir.proof_narg)),
-                    "hints": format!("0x{}", hex::encode(&proof.wires_whir.proof_hints)),
-                    "num_variables": proof.wires_whir.num_variables,
-                    "evaluations": proof.wires_whir.evaluations.iter()
-                        .map(|e| format!("{:?}", e))
-                        .collect::<Vec<_>>(),
-                },
-                "zs_partial_products": {
-                    "transcript": format!("0x{}", hex::encode(&proof.zs_partial_products_whir.proof_narg)),
-                    "hints": format!("0x{}", hex::encode(&proof.zs_partial_products_whir.proof_hints)),
-                    "num_variables": proof.zs_partial_products_whir.num_variables,
-                    "evaluations": proof.zs_partial_products_whir.evaluations.iter()
-                        .map(|e| format!("{:?}", e))
-                        .collect::<Vec<_>>(),
-                },
-                "quotient_polys": {
-                    "transcript": format!("0x{}", hex::encode(&proof.quotient_polys_whir.proof_narg)),
-                    "hints": format!("0x{}", hex::encode(&proof.quotient_polys_whir.proof_hints)),
-                    "num_variables": proof.quotient_polys_whir.num_variables,
-                    "evaluations": proof.quotient_polys_whir.evaluations.iter()
-                        .map(|e| format!("{:?}", e))
-                        .collect::<Vec<_>>(),
-                },
+                "batch_sizes": proof.batch_sizes,
                 "expected_result": proof.expected_result,
                 "public_inputs": proof.standard_proof.public_inputs.iter()
                     .map(|f| f.to_canonical_u64())
@@ -315,28 +292,18 @@ fn main() -> anyhow::Result<()> {
             fs::create_dir_all(&whir_dir)?;
             fs::write(whir_dir.join("wrapper_whir_proof.json"), &whir_json)?;
             eprintln!("[e2e] WHIR proof written to contracts/test/data/whir/wrapper_whir_proof.json");
-            eprintln!("[e2e]   constants_sigmas transcript: {} bytes", proof.constants_sigmas_whir.proof_narg.len());
-            eprintln!("[e2e]   wires transcript: {} bytes", proof.wires_whir.proof_narg.len());
-            eprintln!("[e2e]   zs_partial_products transcript: {} bytes", proof.zs_partial_products_whir.proof_narg.len());
-            eprintln!("[e2e]   quotient_polys transcript: {} bytes", proof.quotient_polys_whir.proof_narg.len());
+            eprintln!("[e2e]   combined transcript: {} bytes", proof.combined_whir.proof_narg.len());
+            eprintln!("[e2e]   batch_sizes: {:?}", proof.batch_sizes);
         }
 
-        // Export WHIR verifier data for each commitment (for SpongefishWhirVerify on-chain test)
+        // Export combined WHIR verifier data (for SpongefishWhirVerify on-chain test)
         {
             use intmax3_zkp::utils::whir_plonky2_prover::export_whir_verifier_data;
             let whir_dir = out_dir.join("whir");
-            let commitments = [
-                ("constants_sigmas", &whir_result.proof.constants_sigmas_whir),
-                ("wires", &whir_result.proof.wires_whir),
-                ("zs_partial_products", &whir_result.proof.zs_partial_products_whir),
-                ("quotient_polys", &whir_result.proof.quotient_polys_whir),
-            ];
-            for (name, commitment) in &commitments {
-                let data = export_whir_verifier_data(commitment, &whir_config);
-                let path = whir_dir.join(format!("wrapper_{}_verifier_data.json", name));
-                fs::write(&path, serde_json::to_string_pretty(&data)?)?;
-                eprintln!("[e2e] WHIR verifier data: {}", path.display());
-            }
+            let data = export_whir_verifier_data(&whir_result.proof.combined_whir, &whir_config);
+            let path = whir_dir.join("wrapper_combined_verifier_data.json");
+            fs::write(&path, serde_json::to_string_pretty(&data)?)?;
+            eprintln!("[e2e] WHIR verifier data: {}", path.display());
         }
     }
 
