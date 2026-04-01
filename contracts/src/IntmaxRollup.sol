@@ -1,11 +1,11 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.24;
 
-import {Verifier} from "sol-whir/Whir.sol";
-import {WhirProof, Statement, WhirConfig} from "sol-whir/WhirStructs.sol";
-import {BN254} from "solidity-bn254/BN254.sol";
+import {SpongefishWhirVerify} from "./spongefish/SpongefishWhirVerify.sol";
+import {GoldilocksExt3} from "./spongefish/GoldilocksExt3.sol";
 import {BlobKZGVerifier, KZGProof} from "./BlobKZGVerifier.sol";
 import {Groth16Verifier} from "./Groth16Verifier.sol";
+import {Plonky2Verifier} from "./Plonky2Verifier.sol";
 import {IForcedTxLogic} from "./IForcedTxLogic.sol";
 
 /// @title IGnarkVerifier
@@ -18,19 +18,6 @@ interface IGnarkVerifier {
         uint256[2] calldata commitmentPok,
         uint256[8] calldata input
     ) external view;
-}
-
-/// @title WhirVerifierWrapper
-/// @notice External wrapper so IntmaxRollup can try/catch on WHIR verification.
-contract WhirVerifierWrapper {
-    function verify(
-        WhirConfig calldata config,
-        Statement calldata statement,
-        WhirProof calldata whirProof,
-        bytes calldata transcript
-    ) external pure returns (bool) {
-        return Verifier.verify(config, statement, whirProof, transcript);
-    }
 }
 
 /// @title IntmaxRollup
@@ -57,7 +44,7 @@ contract WhirVerifierWrapper {
 ///       on-chain block_hash_chain snapshots and accept the new state root.
 ///
 ///  Blob format (both finalize and fraudProof):
-///    blob = abi.encode(Groth16Params, WhirConfig, Statement, WhirProof, transcript)
+///    blob = abi.encode(Groth16Params, WhirBatchProof[], Plonky2ConstraintData)
 ///
 ///  Verification checks (finalize — both must pass):
 ///    a) Blob commitment (KZG multi-point opening)
@@ -68,7 +55,15 @@ contract WhirVerifierWrapper {
 ///    e) WHIR proof verification
 ///    f) Groth16 verification
 ///
-///  Fraud proof checks (either failure = fraud):
+///  Fraud proof rules:
+///    1) Finalized intmax block number is recorded on-chain; each submission's
+///       commitment includes the Eth block number at posting time.
+///    2) Fraud proofs cannot target submissions at or before the finalized block.
+///    3) Submissions not finalized within 144 Eth blocks (~29 min) after posting
+///       are removed unconditionally (no ZKP verification needed).
+///    4) Successful fraud proof deletes the target and all subsequent submissions.
+///
+///  Fraud proof ZKP checks (either failure = fraud):
 ///    a) Blob commitment + KZG binding + PI binding all PASS
 ///    b) Proof params binding PASSES (fake-fraud prevention)
 ///    c) WHIR fails OR Groth16 fails → fraud confirmed
@@ -91,6 +86,8 @@ contract IntmaxRollup {
     error ForcedTxLogicNotAccepted();
     error InvalidStakeAmount();
     error NothingToWithdraw();
+    error SubmissionAlreadyFinalized();
+    error SubmissionBeforeFinalizedBlock();
 
     // -----------------------------------------------------------------------
     // Events
@@ -150,9 +147,10 @@ contract IntmaxRollup {
     // -----------------------------------------------------------------------
 
     struct Submission {
-        bytes32 commitment;   // keccak256(blobHash || proofHash || proofLength || stateRoot)
+        bytes32 commitment;   // keccak256(blobHash || proofHash || proofLength || stateRoot || ethBlockNumber)
         address submitter;    // packed with `finalized` into one slot
         bool    finalized;
+        uint64  submittedAtBlock; // Eth block number when submitted
     }
 
     struct StakeInfo {
@@ -195,6 +193,31 @@ contract IntmaxRollup {
         uint256[2] commitmentPok;   // gnark commitment proof of knowledge (G1)
     }
 
+    /// @notice Bundles a single WHIR batch proof (Goldilocks Ext3 field).
+    ///         The full validity proof consists of 4 WHIR batch proofs:
+    ///         constants_sigmas, wires, zs_partial_products, quotient_polys.
+    struct WhirBatchProof {
+        bytes protocolId;
+        bytes sessionId;
+        bytes instance;
+        bytes transcript;
+        bytes hints;
+        GoldilocksExt3.Ext3[] evaluations;
+        SpongefishWhirVerify.WhirParams params;
+    }
+
+    /// @notice Plonky2 constraint satisfaction data.
+    ///         The openings/challenges/publicInputs are proof-specific;
+    ///         the params/permData/gates are circuit-constant.
+    struct Plonky2ConstraintData {
+        Plonky2Verifier.Openings openings;
+        Plonky2Verifier.CircuitParams params;
+        Plonky2Verifier.Challenges challenges;
+        Plonky2Verifier.PermutationData permData;
+        Plonky2Verifier.GateInfo[] gates;
+        uint256[] publicInputs;
+    }
+
     /// @notice Mirrors the Rust `ValidityPublicInputs` struct.
     ///         All fields are u32-packed, matching the Rust keccak256 input layout.
     ///         initial_block_number (2 u32), initial_block_chain (8 u32),
@@ -214,15 +237,22 @@ contract IntmaxRollup {
     // -----------------------------------------------------------------------
     // State
     // -----------------------------------------------------------------------
-    WhirVerifierWrapper public immutable whirVerifier;
     Groth16Verifier.VerifyingKey internal groth16Vk;
 
-    /// @notice Keccak256 hash of the expected WhirConfig.
+    /// @notice Keccak256 hash of the expected WHIR WhirParams array.
     ///         Set at deploy time. All finalize/fraudProof calls must supply
-    ///         a WhirConfig whose abi.encode hash matches this value.
+    ///         WhirBatchProof[] whose WhirParams hashes match this value.
     ///         This prevents attackers from submitting weak WHIR parameters
     ///         (e.g. low security_level, few queries) to forge proofs.
     bytes32 public whirConfigHash;
+
+    /// @notice Keccak256 hash of the expected Plonky2 circuit-constant parameters:
+    ///         (CircuitParams, PermutationData, GateInfo[]).
+    ///         Prevents circuit parameter substitution attacks.
+    bytes32 public plonky2CircuitHash;
+
+    /// @notice External Plonky2 constraint verifier contract.
+    Plonky2Verifier public immutable plonky2Verifier;
 
     uint256 private constant _NOT_ENTERED = 1;
     uint256 private constant _ENTERED = 2;
@@ -269,6 +299,11 @@ contract IntmaxRollup {
     /// @notice The latest finalized state root (= final_ext_commitment from the last accepted proof).
     bytes32 public latestFinalizedStateRoot;
 
+    /// @notice The latest finalized intmax block number.
+    ///         Fraud proofs cannot target submissions at or before this block.
+    ///         Updated by finalize().
+    uint64 public latestFinalizedBlockNumber;
+
     // -----------------------------------------------------------------------
     // Forced Transaction State
     // -----------------------------------------------------------------------
@@ -298,6 +333,10 @@ contract IntmaxRollup {
     uint256 private constant POST_BLOCK_STAKE = 1 ether;
     uint256 private constant FRAUD_REWARD_PERCENT = 90;
     uint256 private constant FRAUD_TREASURY_PERCENT = 10;
+
+    /// @notice Submissions not finalized within this many Eth blocks after posting
+    ///         can be removed unconditionally via fraudProof (no proof needed).
+    uint256 private constant FINALIZE_DEADLINE_BLOCKS = 12 * 12;
     address public immutable fraudTreasury;
     IGnarkVerifier public immutable gnarkVerifier;
 
@@ -315,17 +354,19 @@ contract IntmaxRollup {
     // Constructor
     // -----------------------------------------------------------------------
     constructor(
-        WhirVerifierWrapper _whirVerifier,
         address _fraudTreasury,
         Groth16Verifier.VerifyingKey memory verifyingKey,
         bytes32 _whirConfigHash,
+        bytes32 _plonky2CircuitHash,
+        Plonky2Verifier _plonky2Verifier,
         IGnarkVerifier _gnarkVerifier,
         bytes32 _genesisStateRoot
     ) {
-        whirVerifier = _whirVerifier;
         fraudTreasury = _fraudTreasury;
         _setGroth16VerifyingKey(verifyingKey);
         whirConfigHash = _whirConfigHash;
+        plonky2CircuitHash = _plonky2CircuitHash;
+        plonky2Verifier = _plonky2Verifier;
         gnarkVerifier = _gnarkVerifier;
         latestFinalizedStateRoot = _genesisStateRoot;
         // Genesis: block 0 has default (zero) hash chains
@@ -554,14 +595,16 @@ contract IntmaxRollup {
         if (blobHash == bytes32(0)) revert NoBlobAttached();
 
         submissionId = nextSubmissionId++;
+        uint64 ethBlock = uint64(block.number);
         bytes32 commitment = keccak256(
-            abi.encodePacked(blobHash, proofHash, proofLength, stateRoot)
+            abi.encodePacked(blobHash, proofHash, proofLength, stateRoot, ethBlock)
         );
 
         _submissions[submissionId] = Submission({
             commitment: commitment,
             submitter: msg.sender,
-            finalized: false
+            finalized: false,
+            submittedAtBlock: ethBlock
         });
 
         emit Submitted(submissionId, msg.sender, blobHash, proofHash, proofLength, stateRoot);
@@ -571,30 +614,29 @@ contract IntmaxRollup {
     // verify()  —  pure WHIR verification (no binding)
     // -----------------------------------------------------------------------
 
-    /// @notice WHIR + Groth16 verification from calldata. No KZG, no blob binding.
-    ///         Both verifiers must pass for the result to be true.
+    /// @notice WHIR + Plonky2 + Groth16 verification from calldata. No KZG, no blob binding.
+    ///         All three verifiers must pass for the result to be true.
     function verify(
-        WhirConfig calldata config,
-        Statement calldata statement,
-        WhirProof calldata whirProof,
-        bytes calldata transcript,
+        WhirBatchProof[] memory whirBatches,
+        Plonky2ConstraintData memory constraintData,
         Groth16Params memory groth16
     ) external view returns (bool) {
-        // WhirConfig binding — reject weak/mismatched WHIR parameters
-        if (keccak256(abi.encode(config)) != whirConfigHash) {
-            return false;
+        // WhirConfig binding
+        if (!_whirConfigMatches(whirBatches)) return false;
+
+        // Verify all WHIR batches
+        if (!_verifyAllWhirBatches(whirBatches)) return false;
+
+        // Plonky2 constraint verification (when registered)
+        if (plonky2CircuitHash != bytes32(0)) {
+            if (!_plonky2CircuitMatches(constraintData)) return false;
+            if (!_verifyPlonky2Constraints(constraintData)) return false;
         }
 
-        bool whirValid;
-        try whirVerifier.verify(config, statement, whirProof, transcript) returns (bool v) {
-            whirValid = v;
-        } catch {
-            whirValid = false;
-        }
+        // Verify Groth16
+        if (!_verifyGroth16(groth16)) return false;
 
-        bool groth16Valid = _verifyGroth16(groth16);
-
-        return whirValid && groth16Valid;
+        return true;
     }
 
     // -----------------------------------------------------------------------
@@ -602,30 +644,31 @@ contract IntmaxRollup {
     // -----------------------------------------------------------------------
 
     /// @notice Verify and finalize a submission.
-    ///         Checks: commitment, KZG blob binding, WHIR proof, public input
-    ///         binding to on-chain state, WHIR↔plonky2 public input match.
+    ///         Checks: WHIR proof (Goldilocks Ext3), Plonky2 constraints,
+    ///         Groth16 proof, public input binding to on-chain state.
     function finalize(
         uint256 submissionId,
         bytes32 stateRoot,
         ValidityPublicInputs calldata validityPIs,
-        WhirConfig calldata config,
-        Statement calldata statement,
-        WhirProof calldata whirProof,
-        bytes calldata transcript,
+        WhirBatchProof[] memory whirBatches,
+        Plonky2ConstraintData memory constraintData,
         Groth16Params memory groth16
     ) external nonReentrant returns (bool) {
         Submission storage sub = _submissions[submissionId];
         if (sub.commitment == bytes32(0)) return false;
         if (sub.finalized) return false;
 
-        bool valid = _fullVerify(
-            stateRoot, validityPIs,
-            config, statement, whirProof, transcript, groth16
-        );
+        bool valid;
+        try this.fullVerify(stateRoot, validityPIs, whirBatches, constraintData, groth16) returns (bool v) {
+            valid = v;
+        } catch {
+            valid = false;
+        }
         if (!valid) return false;
 
         sub.finalized = true;
         latestFinalizedStateRoot = stateRoot;
+        latestFinalizedBlockNumber = validityPIs.finalBlockNumber;
 
         emit Finalized(submissionId, stateRoot);
         _refundStake(submissionId);
@@ -638,6 +681,20 @@ contract IntmaxRollup {
 
     /// @notice Prove that a submission's proof is INVALID.
     ///
+    /// ## Fraud proof rules
+    ///
+    ///   1. Finalized intmax block number is recorded on-chain; each submission's
+    ///      commitment includes the Eth block number at posting time.
+    ///   2. Fraud proofs CANNOT target submissions at or before the latest
+    ///      finalized intmax block (reverts with SubmissionBeforeFinalizedBlock).
+    ///   3. Submissions not finalized within FINALIZE_DEADLINE_BLOCKS (144 Eth
+    ///      blocks) after posting are removed unconditionally — no ZKP
+    ///      verification required.
+    ///   4. On successful fraud proof, the target submission AND all subsequent
+    ///      submissions are deleted and their blocks rolled back.
+    ///
+    /// ## Normal fraud verification
+    ///
     ///   The fraud prover supplies the exact blob bytes (Groth16 + WHIR) that
     ///   were committed, plus a KZG proof binding them to the blob.
     ///   Fraud is confirmed when binding checks pass and either proof fails.
@@ -647,21 +704,34 @@ contract IntmaxRollup {
         bytes32 stateRoot,
         bytes calldata proofBytes,
         ValidityPublicInputs calldata validityPIs,
-        WhirConfig calldata config,
-        Statement calldata statement,
-        WhirProof calldata whirProof,
-        bytes calldata transcript,
+        WhirBatchProof[] memory whirBatches,
+        Plonky2ConstraintData memory constraintData,
         KZGProof calldata kzg,
         Groth16Params memory groth16
     ) external nonReentrant returns (bool fraudConfirmed) {
         Submission storage sub = _submissions[submissionId];
         if (sub.commitment == bytes32(0)) return false;
-        if (sub.finalized) revert AlreadyFinalized();
+        if (sub.finalized) revert SubmissionAlreadyFinalized();
+
+        // Guard: cannot fraud-proof submissions whose blocks are at or before
+        // the latest finalized intmax block.
+        BatchMetadata memory meta = _batchMetadata[submissionId];
+        if (meta.startBlockNumber <= latestFinalizedBlockNumber) {
+            revert SubmissionBeforeFinalizedBlock();
+        }
+
+        // Timeout removal: if the submission was not finalized within
+        // FINALIZE_DEADLINE_BLOCKS Eth blocks, remove it unconditionally.
+        if (block.number > uint256(sub.submittedAtBlock) + FINALIZE_DEADLINE_BLOCKS) {
+            _truncateSubmissions(submissionId, msg.sender);
+            emit FraudConfirmed(submissionId, msg.sender);
+            return true;
+        }
 
         bool confirmed = _verifyFraud(
             submissionId, blobVersionedHash, stateRoot,
             proofBytes, validityPIs,
-            config, statement, whirProof, transcript, kzg, groth16
+            whirBatches, constraintData, kzg, groth16
         );
         if (!confirmed) return false;
 
@@ -704,44 +774,41 @@ contract IntmaxRollup {
     /// @dev Full verification pipeline for finalize() — all checks must pass.
     ///      No KZG/blob binding: validity proofs are verified directly from calldata.
     ///      KZG binding is only needed for fraud proofs (proving committed blob is invalid).
-    function _fullVerify(
+    /// @dev External entry point so _fullVerify runs in a fresh EVM call context.
+    ///      This avoids via_ir + optimizer code generation issues with large memory structs.
+    function fullVerify(
         bytes32 stateRoot,
         ValidityPublicInputs calldata validityPIs,
-        WhirConfig calldata config,
-        Statement calldata statement,
-        WhirProof calldata whirProof,
-        bytes calldata transcript,
+        WhirBatchProof[] memory whirBatches,
+        Plonky2ConstraintData memory constraintData,
         Groth16Params memory groth16
-    ) internal view returns (bool) {
+    ) external view returns (bool) {
         // 1. PI binding to on-chain state
         if (validityPIs.initialExtCommitment != latestFinalizedStateRoot) return false;
         if (validityPIs.initialBlockChain != blockHashChainAt[validityPIs.initialBlockNumber]) return false;
         if (validityPIs.finalBlockChain != blockHashChainAt[validityPIs.finalBlockNumber]) return false;
         if (validityPIs.finalExtCommitment != stateRoot) return false;
 
-        // 2. WhirConfig must match registered config
-        if (keccak256(abi.encode(config)) != whirConfigHash) return false;
+        // 2. WhirParams must match registered config
+        if (!_whirConfigMatches(whirBatches)) return false;
 
-        // 3. Groth16 pubInputs must encode keccak256(ValidityPublicInputs) as 8 big-endian u32 limbs.
-        //    WHIR statement.evaluations[0] must also equal piHash (reduced to BN254 scalar field).
-        {
-            bytes32 piHash = _computeValidityPIHash(validityPIs);
-            if (!_groth16PIHashMatches(groth16.pubInputs, piHash)) return false;
-            uint256 piHashReduced = uint256(piHash) % BN254.R_MOD;
-            if (statement.evaluations.length == 0 ||
-                BN254.ScalarField.unwrap(statement.evaluations[0]) != piHashReduced) return false;
+        // 3. piHash binding: Groth16 pubInputs must encode keccak256(ValidityPublicInputs)
+        //    as 8 big-endian u32 limbs.
+        bytes32 piHash = _computeValidityPIHash(validityPIs);
+        if (!_groth16PIHashMatches(groth16.pubInputs, piHash)) return false;
+
+        // 4. Plonky2 constraint verification (when registered) — run before WHIR
+        //    to avoid memory pressure from WHIR transcripts.
+        if (plonky2CircuitHash != bytes32(0)) {
+            if (!_plonky2CircuitMatches(constraintData)) return false;
+            if (!_piHashMatchesU32Limbs(constraintData.publicInputs, piHash)) return false;
+            if (!_verifyPlonky2Constraints(constraintData)) return false;
         }
 
-        // 4. WHIR verification
-        bool whirValid;
-        try whirVerifier.verify(config, statement, whirProof, transcript) returns (bool v) {
-            whirValid = v;
-        } catch {
-            whirValid = false;
-        }
-        if (!whirValid) return false;
+        // 5. WHIR verification (all batches: constants_sigmas, wires, zs_partial_products, quotient_polys)
+        if (!_verifyAllWhirBatches(whirBatches)) return false;
 
-        // 5. Groth16 verification via gnark verifier (with commitment support)
+        // 6. Groth16 verification via gnark verifier (with commitment support)
         if (!_verifyGroth16(groth16)) return false;
 
         return true;
@@ -756,9 +823,9 @@ contract IntmaxRollup {
     ///     4. Proof params binding: blob == abi.encode(groth16, config, statement, whirProof, transcript)
     ///
     ///   Fraud confirmed if any of:
-    ///     (a) Wrong WhirConfig in committed blob
-    ///     (b) Groth16 pubInputs[0] != keccak256(ValidityPublicInputs) — PI hash mismatch
-    ///     (c) WHIR verification fails
+    ///     (a) Wrong WhirParams in committed blob
+    ///     (b) Groth16 pubInputs don't encode keccak256(ValidityPublicInputs) — PI hash mismatch
+    ///     (c) Any WHIR batch verification fails
     ///     (d) Groth16 verification fails
     function _verifyFraud(
         uint256 submissionId,
@@ -766,21 +833,20 @@ contract IntmaxRollup {
         bytes32 stateRoot,
         bytes calldata proofBytes,
         ValidityPublicInputs calldata validityPIs,
-        WhirConfig calldata config,
-        Statement calldata statement,
-        WhirProof calldata whirProof,
-        bytes calldata transcript,
+        WhirBatchProof[] memory whirBatches,
+        Plonky2ConstraintData memory constraintData,
         KZGProof calldata kzg,
         Groth16Params memory groth16
     ) internal view returns (bool) {
         // ── Pre-conditions ────────────────────────────────────────────────
 
-        // 1. Commitment check
+        // 1. Commitment check (includes Eth block number at submission time)
         {
             uint32 proofLength = uint32(proofBytes.length);
             bytes32 proofHash = keccak256(proofBytes);
+            uint64 ethBlock = _submissions[submissionId].submittedAtBlock;
             bytes32 commitment = keccak256(
-                abi.encodePacked(blobVersionedHash, proofHash, proofLength, stateRoot)
+                abi.encodePacked(blobVersionedHash, proofHash, proofLength, stateRoot, ethBlock)
             );
             if (commitment != _submissions[submissionId].commitment) return false;
         }
@@ -798,37 +864,30 @@ contract IntmaxRollup {
         if (validityPIs.finalExtCommitment != stateRoot) return false;
 
         // 4. Proof params binding — ensures we verify exactly what was committed
-        if (keccak256(abi.encode(groth16, config, statement, whirProof, transcript)) != keccak256(proofBytes)) {
+        if (keccak256(abi.encode(groth16, whirBatches, constraintData)) != keccak256(proofBytes)) {
             return false;
         }
 
         // ── Fraud detection (any failure = fraud) ────────────────────────
 
-        // (a) Wrong WhirConfig
-        if (keccak256(abi.encode(config)) != whirConfigHash) return true;
+        // (a) Wrong WhirParams
+        if (!_whirConfigMatches(whirBatches)) return true;
 
-        // (b) Groth16 pubInputs don't encode the correct PI hash as 8 big-endian u32 limbs
-        // (b.5) WHIR statement.evaluations[0] is not bound to the same piHash (reduced mod BN254.R_MOD)
-        {
-            bytes32 piHash = _computeValidityPIHash(validityPIs);
-            if (!_groth16PIHashMatches(groth16.pubInputs, piHash)) return true;
-            uint256 piHashReduced = uint256(piHash) % BN254.R_MOD;
-            if (statement.evaluations.length == 0 ||
-                BN254.ScalarField.unwrap(statement.evaluations[0]) != piHashReduced) return true;
+        // (b) piHash mismatch: Groth16 pubInputs
+        bytes32 piHash = _computeValidityPIHash(validityPIs);
+        if (!_groth16PIHashMatches(groth16.pubInputs, piHash)) return true;
+
+        // (c) Any WHIR batch verification fails
+        if (!_verifyAllWhirBatches(whirBatches)) return true;
+
+        // (d) Plonky2 constraint verification fails (when registered)
+        if (plonky2CircuitHash != bytes32(0)) {
+            if (!_plonky2CircuitMatches(constraintData)) return true;
+            if (!_piHashMatchesU32Limbs(constraintData.publicInputs, piHash)) return true;
+            if (!_verifyPlonky2Constraints(constraintData)) return true;
         }
 
-        // (c) WHIR verification fails
-        {
-            bool whirValid;
-            try whirVerifier.verify(config, statement, whirProof, transcript) returns (bool v) {
-                whirValid = v;
-            } catch {
-                whirValid = false;
-            }
-            if (!whirValid) return true;
-        }
-
-        // (d) Groth16 verification fails
+        // (e) Groth16 verification fails
         if (!_verifyGroth16(groth16)) return true;
 
         return false;
@@ -870,6 +929,90 @@ contract IntmaxRollup {
             }
         }
         return Groth16Verifier.verify(groth16Vk, groth16.proof, groth16.pubInputs);
+    }
+
+    // -----------------------------------------------------------------------
+    // Internal — WHIR verification helpers
+    // -----------------------------------------------------------------------
+
+    /// @dev Check that all WhirParams in the batch match the registered config hash.
+    function _whirConfigMatches(WhirBatchProof[] memory whirBatches) internal view returns (bool) {
+        if (whirBatches.length == 0) return false;
+        bytes memory packed;
+        for (uint256 i = 0; i < whirBatches.length; i++) {
+            packed = abi.encodePacked(packed, abi.encode(whirBatches[i].params));
+        }
+        return keccak256(packed) == whirConfigHash;
+    }
+
+    /// @dev Verify all WHIR batch proofs. Returns false if any batch fails.
+    function _verifyAllWhirBatches(WhirBatchProof[] memory whirBatches) internal view returns (bool) {
+        for (uint256 i = 0; i < whirBatches.length; i++) {
+            bool batchValid;
+            try this._verifyWhirBatch(whirBatches[i]) returns (bool v) {
+                batchValid = v;
+            } catch {
+                batchValid = false;
+            }
+            if (!batchValid) return false;
+        }
+        return true;
+    }
+
+    /// @dev External helper so _fullVerify/_verifyFraud can try/catch on WHIR verification.
+    ///      Similar pattern to _verifyKZG.
+    function _verifyWhirBatch(WhirBatchProof memory batch) external pure returns (bool) {
+        return SpongefishWhirVerify.verifyWhirProof(
+            batch.protocolId,
+            batch.sessionId,
+            batch.instance,
+            batch.transcript,
+            batch.hints,
+            batch.evaluations,
+            batch.params
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Internal — Plonky2 verification helpers
+    // -----------------------------------------------------------------------
+
+    /// @dev Check that circuit-constant Plonky2 parameters match the registered hash.
+    function _plonky2CircuitMatches(Plonky2ConstraintData memory cd) internal view returns (bool) {
+        return keccak256(abi.encode(cd.params, cd.permData, cd.gates)) == plonky2CircuitHash;
+    }
+
+    /// @dev Verify Plonky2 constraint satisfaction via external Plonky2Verifier contract.
+    ///      Uses low-level staticcall + assembly decode to avoid a via_ir + optimizer
+    ///      bug where abi.decode(retData, (bool)) reverts on valid return data.
+    function _verifyPlonky2Constraints(Plonky2ConstraintData memory cd) internal view returns (bool) {
+        bytes memory callData = abi.encodeCall(
+            Plonky2Verifier.verifyConstraints,
+            (cd.openings, cd.params, cd.challenges, cd.permData, cd.gates, cd.publicInputs)
+        );
+        (bool success, bytes memory retData) = address(plonky2Verifier).staticcall(callData);
+        if (!success || retData.length < 32) return false;
+        // Use assembly to decode bool — abi.decode reverts here under via_ir + optimizer
+        bool result;
+        assembly {
+            result := mload(add(retData, 32))
+        }
+        return result;
+    }
+
+    /// @dev Check that publicInputs encode piHash as 8 big-endian u32 limbs.
+    ///      Shared by both Groth16 and Plonky2 public input binding checks.
+    function _piHashMatchesU32Limbs(
+        uint256[] memory pubInputs,
+        bytes32 piHash
+    ) internal pure returns (bool) {
+        if (pubInputs.length < 8) return false;
+        uint256 h = uint256(piHash);
+        for (uint256 i = 0; i < 8; i++) {
+            uint256 limb = (h >> (224 - i * 32)) & 0xFFFFFFFF;
+            if (pubInputs[i] != limb) return false;
+        }
+        return true;
     }
 
     // -----------------------------------------------------------------------
