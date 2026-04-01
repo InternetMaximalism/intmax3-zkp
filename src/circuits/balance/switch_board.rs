@@ -431,11 +431,11 @@ where
         }
     }
 
-    pub fn prove(
+    fn prepare_witness(
         &self,
         balance_vd: &VerifierCircuitData<F, C, D>,
         witness: &BalanceSwichBoard<F, C, D>,
-    ) -> Result<ProofWithPublicInputs<F, C, D>, BalanceSwitchBoardError> {
+    ) -> Result<PartialWitness<F>, BalanceSwitchBoardError> {
         let new_full_pis = witness.to_public_inputs(
             balance_vd,
             &self.receive_transfer_vd,
@@ -452,9 +452,29 @@ where
             &self.dummy_proofs,
         )?;
         self.public_inputs.set_witness(&mut pw, &new_full_pis);
+        Ok(pw)
+    }
 
+    pub fn prove(
+        &self,
+        balance_vd: &VerifierCircuitData<F, C, D>,
+        witness: &BalanceSwichBoard<F, C, D>,
+    ) -> Result<ProofWithPublicInputs<F, C, D>, BalanceSwitchBoardError> {
+        let pw = self.prepare_witness(balance_vd, witness)?;
         self.data
             .prove(pw)
+            .map_err(|e| BalanceSwitchBoardError::FailedToProve(e.to_string()))
+    }
+
+    pub async fn prove_async(
+        &self,
+        balance_vd: &VerifierCircuitData<F, C, D>,
+        witness: &BalanceSwichBoard<F, C, D>,
+    ) -> Result<ProofWithPublicInputs<F, C, D>, BalanceSwitchBoardError> {
+        let pw = self.prepare_witness(balance_vd, witness)?;
+        self.data
+            .prove_async(pw)
+            .await
             .map_err(|e| BalanceSwitchBoardError::FailedToProve(e.to_string()))
     }
 
