@@ -7,8 +7,8 @@ edition = "2024"
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
-plonky2 = { git = "https://github.com/InternetMaximalism/Lita-Plonky2.git", branch = "wasm-zkp3", default-features = false, features = ["parallel", "std"] }
-starky = { git = "https://github.com/InternetMaximalism/Lita-Plonky2.git", package = "starky", branch = "wasm-zkp3", default-features = false, features = ["parallel", "std"] }
+plonky2 = { git = "https://github.com/InternetMaximalism/Lita-Plonky2.git", branch = "wasm", default-features = false, features = ["parallel", "std"] }
+starky = { git = "https://github.com/InternetMaximalism/Lita-Plonky2.git", package = "starky", branch = "wasm", default-features = false, features = ["parallel", "std"] }
 plonky2_u32 = { git = "https://github.com/lita-xyz/plonky2-u32.git", branch = "wasm", default-features = false }
 plonky2_bn254 = { git = "https://github.com/lita-xyz/plonky2_bn254.git", branch = "wasm", default-features = false }
 plonky2_keccak = { git = "https://github.com/lita-xyz/plonky2_keccak.git", branch = "wasm", default-features = false }
@@ -56,11 +56,11 @@ web-time = "0.2"
 gpu_merkle = ["plonky2/gpu_merkle", "starky/gpu_merkle", "plonky2_keccak/gpu_merkle"]
 
 [patch."https://github.com/InternetMaximalism/polygon-plonky2.git"]
-plonky2 = { git = "https://github.com/InternetMaximalism/Lita-Plonky2.git", branch = "wasm-zkp3" }
+plonky2 = { git = "https://github.com/InternetMaximalism/Lita-Plonky2.git", branch = "wasm" }
 
 [patch."https://github.com/lita-xyz/Plonky2.git"]
-plonky2 = { git = "https://github.com/InternetMaximalism/Lita-Plonky2.git", branch = "wasm-zkp3" }
-starky = { git = "https://github.com/InternetMaximalism/Lita-Plonky2.git", branch = "wasm-zkp3" }
+plonky2 = { git = "https://github.com/InternetMaximalism/Lita-Plonky2.git", branch = "wasm" }
+starky = { git = "https://github.com/InternetMaximalism/Lita-Plonky2.git", branch = "wasm" }
 
 [dev-dependencies]
 criterion = { version = "0.5", default-features = false }
