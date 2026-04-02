@@ -80,7 +80,7 @@ harness = false
 opt-level = 3
 lto = "fat"
 codegen-units = 1
-panic = "unwind"  # Use "abort" for production (smaller binary), "unwind" for debugging
+panic = "abort"  # Use "abort" for production (smaller binary), "unwind" for debugging
 
 # Post-build WASM binary optimization pass (runs after compilation)
 [package.metadata.wasm-pack.profile.release]
