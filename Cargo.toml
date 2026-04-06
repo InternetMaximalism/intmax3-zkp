@@ -27,16 +27,12 @@ lazy_static = "1.5.0"
 bincode = { version = "2.0.1", features = ["serde"] }
 clap = { version = "4.5", features = ["derive"] }
 
-# WHIR post-quantum wrapper (optional, native-only)
-whir = { git = "https://github.com/leohio/whir", features = ["parallel"], optional = true }
-ark-ff = { version = "0.5", features = ["asm", "std"], optional = true }
-ark-std = { version = "0.5", features = ["std"], optional = true }
-sha3 = { version = "0.10", optional = true }
-ciborium = { version = "0.2", optional = true }
+# WHIR post-quantum wrapper (via plonky2-whir-verifier submodule)
+plonky2-whir-verifier = { path = "plonky2-whir-verifier", default-features = false, features = ["whir"], optional = true }
 
 [features]
 default = []
-whir = ["dep:whir", "dep:ark-ff", "dep:ark-std", "dep:sha3", "dep:ciborium"]
+whir = ["dep:plonky2-whir-verifier"]
 
 
 [dev-dependencies]

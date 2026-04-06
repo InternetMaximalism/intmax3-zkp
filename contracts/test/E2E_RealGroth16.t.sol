@@ -3,19 +3,13 @@ pragma solidity ^0.8.24;
 
 import "forge-std/Test.sol";
 import {Verifier as GnarkVerifier} from "../src/GnarkGroth16Verifier.sol";
-import {Verifier as WhirVerifier} from "sol-whir/Whir.sol";
-import {WhirProof, Statement, WhirConfig} from "sol-whir/WhirStructs.sol";
-import {BN254} from "solidity-bn254/BN254.sol";
-import {JSONWhirProof, JSONUtils} from "sol-whir/utils/WhirJson.sol";
 
-/// @title E2E test with REAL Groth16 (gnark) + REAL WHIR proof
-/// @notice Verifies that:
-///   1. A real gnark Groth16 proof (from Plonky2 validity circuit) passes on-chain verification
-///   2. A real WHIR proof (BN254) passes sol-whir verification
-///   3. Both are bound to the same piHash (keccak256 of ValidityPublicInputs)
+/// @title E2E test with REAL Groth16 (gnark)
+/// @notice Verifies that a real gnark Groth16 proof (from Plonky2 validity circuit)
+///         passes on-chain verification.
 ///
-/// NOTE: Complete finalize() E2E test (test_finalize_realE2E) is in IntmaxRollup.t.sol
-/// to share the existing test infrastructure and avoid via_ir compilation issues.
+/// NOTE: WHIR verification (Goldilocks Ext3) is tested in WhirOnchainE2E.t.sol.
+///       Complete finalize() E2E test (test_finalize_realE2E) is in IntmaxRollup.t.sol.
 contract E2E_RealGroth16Test is Test {
 
     function test_realGroth16_verifies() public {
@@ -60,43 +54,15 @@ contract E2E_RealGroth16Test is Test {
         assertTrue(true, "Real gnark Groth16 proof verified on-chain");
     }
 
-    function test_realWhir_verifies() public {
-        string memory whirJson = vm.readFile(
-            string.concat(vm.projectRoot(), "/test/data/whir/intmax3_e2e_whir_fixture.json")
-        );
-        bytes memory parsed = vm.parseJson(whirJson);
-        JSONWhirProof memory jsonProof = abi.decode(parsed, (JSONWhirProof));
-
-        WhirConfig memory config = JSONUtils.jsonWhirConfigToWhirConfig(jsonProof.config);
-        Statement memory statement = JSONUtils.jsonStatementToStatement(jsonProof.statement);
-        WhirProof memory whirProof = JSONUtils.jsonWhirProofToWhirProof(jsonProof);
-        bytes memory transcript = jsonProof.arthur.transcript;
-
-        bool ok = WhirVerifier.verify(config, statement, whirProof, transcript);
-        assertTrue(ok, "Real WHIR proof verified on-chain");
-    }
-
-    function test_e2e_piHash_binding() public {
+    function test_e2e_piHash_binding_groth16() public {
         string memory e2eJson = vm.readFile(
             string.concat(vm.projectRoot(), "/test/data/e2e_fixture.json")
         );
-        bytes32 piHashReducedBytes = abi.decode(vm.parseJson(e2eJson, ".pi_hash_reduced"), (bytes32));
-        uint256 piHashReduced = uint256(piHashReducedBytes);
-
-        string memory whirJson = vm.readFile(
-            string.concat(vm.projectRoot(), "/test/data/whir/intmax3_e2e_whir_fixture.json")
-        );
-        bytes memory parsed = vm.parseJson(whirJson);
-        JSONWhirProof memory jsonProof = abi.decode(parsed, (JSONWhirProof));
-        Statement memory statement = JSONUtils.jsonStatementToStatement(jsonProof.statement);
-
-        uint256 whirEval = BN254.ScalarField.unwrap(statement.evaluations[0]);
-        assertEq(whirEval, piHashReduced, "WHIR evaluations[0] must equal piHashReduced");
+        bytes32 piHash = abi.decode(vm.parseJson(e2eJson, ".pi_hash"), (bytes32));
 
         string memory groth16Json = vm.readFile(
             string.concat(vm.projectRoot(), "/test/data/e2e_groth16.json")
         );
-        bytes32 piHash = abi.decode(vm.parseJson(e2eJson, ".pi_hash"), (bytes32));
         bytes32 reconstructed;
         for (uint256 i = 0; i < 8; i++) {
             string memory key = string.concat(".public_inputs_hex[", vm.toString(i), "]");

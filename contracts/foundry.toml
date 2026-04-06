@@ -2,6 +2,7 @@
 src = "src"
 out = "out"
 libs = ["lib"]
+allow_paths = ["../plonky2-whir-verifier/contracts/src"]
 solc_version = "0.8.29"
 via_ir = true
 evm_version = "prague"

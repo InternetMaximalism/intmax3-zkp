@@ -13,13 +13,10 @@ pub mod serializer;
 pub mod trees;
 pub mod wrapper;
 
-/// WHIR-based Plonky2 prover — replaces FRI with WHIR as PCS.
-/// This extracts actual polynomial coefficients from Plonky2's prover
-/// and generates WHIR commitments + evaluation proofs over them,
-/// providing cryptographically sound post-quantum verification.
+/// WHIR-based Plonky2 prover — re-exported from plonky2-whir-verifier submodule.
 /// Requires the `whir` cargo feature.
 #[cfg(feature = "whir")]
-pub mod whir_plonky2_prover;
+pub use plonky2_whir_verifier::prover as whir_plonky2_prover;
 
 /// Groth16 wrapper for Plonky2 proofs via gnark subprocess.
 /// Not available on WASM targets.

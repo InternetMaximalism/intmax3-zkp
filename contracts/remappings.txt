@@ -1,5 +1,2 @@
 forge-std/=lib/forge-std/src/
-sol-whir/=lib/sol-whir/src/
-solidity-bn254/=lib/sol-whir/lib/solidity-bn254/src/
-solady/=lib/sol-whir/lib/solady/
-@openzeppelin/contracts/=lib/sol-whir/lib/openzeppelin-contracts/contracts/
+@plonky2-whir-verifier/=../plonky2-whir-verifier/contracts/src/
