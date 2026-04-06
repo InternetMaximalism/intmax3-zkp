@@ -6,7 +6,7 @@
 //!
 //! The signature proves the user authorised their inclusion in this block with
 //! the given tx_tree_root.  The corresponding public key is authenticated
-//! against the `pk_hash` field stored in the `AccountLeaf`.
+//! against the `pk_set_root` field stored in the `AccountLeaf`.
 
 use plonky2::iop::target::Target;
 

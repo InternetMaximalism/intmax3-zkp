@@ -5,11 +5,12 @@ use crate::{
     },
     common::{
         block::{Block, BlockError, BlockTarget},
+        forced_tx::{ForcedTx, ForcedTxTarget},
         trees::account_tree::{
             AccountLeaf, AccountLeafTarget, AccountMerkleProof, AccountMerkleProofTarget, SendLeaf,
             SendLeafTarget, SendMerkleProof, SendMerkleProofTarget,
         },
-        u63::{BlockNumber, BlockNumberTarget, U63Target},
+        u63::{BlockNumber, BlockNumberTarget, U63, U63Target},
         user_id::{UserId, UserIdError, UserIdTarget},
     },
     constants::{ACCOUNT_TREE_HEIGHT, SEND_TREE_HEIGHT},
@@ -64,6 +65,10 @@ pub struct UpdateAccountPublicInputs {
     pub new_block_hash_chain: Bytes32,
     pub new_account_tree_root: PoseidonHashOut,
     pub deposit_hash_chain: Bytes32,
+    pub prev_forced_tx_hash_chain: Bytes32,
+    pub forced_tx_hash_chain: Bytes32,
+    pub prev_forced_tx_count: U63,
+    pub forced_tx_count: U63,
 }
 
 #[derive(Clone, Debug)]
@@ -85,6 +90,14 @@ pub struct UpdateAccountTree {
     // SPHINCS+ signature witnesses for each user slot (index matches local_ids).
     // Use SpxSigWitness::dummy() for inactive (zero local_id) slots.
     pub sig_witnesses: Vec<SpxSigWitness>,
+
+    // Forced transaction witnesses (merged from ForcedTxStep)
+    pub prev_forced_tx_hash_chain: Bytes32,
+    pub prev_forced_tx_count: U63,
+    pub forced_txs: Vec<ForcedTx>,
+    pub forced_tx_prev_account_leaves: Vec<AccountLeaf>,
+    pub forced_tx_account_merkle_proofs: Vec<AccountMerkleProof>,
+    pub forced_tx_send_merkle_proofs: Vec<SendMerkleProof>,
 }
 
 impl UpdateAccountTree {
@@ -157,14 +170,86 @@ impl UpdateAccountTree {
                 send_merkle_proof.get_root(&new_send_leaf, prev_account_leaf.index.into());
 
             // create new account leaf and compute new account tree root
-            // pk_hash is preserved from the previous leaf across state transitions
+            // pk_set_root and threshold preserved from previous leaf across state transitions
             let new_account_leaf = AccountLeaf {
                 index: prev_account_leaf.index + 1,
                 prev: self.block_number,
                 send_tree_root: new_send_tree_root,
-                pk_hash: prev_account_leaf.pk_hash,
+                pk_set_root: prev_account_leaf.pk_set_root,
+                threshold: prev_account_leaf.threshold,
             };
             account_tree_root = account_merkle_proof.get_root(&new_account_leaf, user_id.as_u64());
+        }
+
+        // Process forced txs after regular users
+        let mut ftx_hash_chain = self.prev_forced_tx_hash_chain;
+        let mut ftx_count = self.prev_forced_tx_count;
+        for (i, forced_tx) in self.forced_txs.iter().enumerate() {
+            let prev_account_leaf = &self.forced_tx_prev_account_leaves[i];
+            let account_merkle_proof = &self.forced_tx_account_merkle_proofs[i];
+            let send_merkle_proof = &self.forced_tx_send_merkle_proofs[i];
+
+            // Verify account leaf membership
+            account_merkle_proof
+                .verify(
+                    prev_account_leaf,
+                    forced_tx.user_id.as_u64(),
+                    account_tree_root,
+                )
+                .map_err(|e| {
+                    UpdateAccountTreeError::MerkleProofError(format!(
+                        "failed to verify forced tx account merkle proof for i {}: {}",
+                        i, e
+                    ))
+                })?;
+
+            // Verify empty send leaf at the index
+            send_merkle_proof
+                .verify(
+                    &SendLeaf::empty_leaf(),
+                    prev_account_leaf.index.into(),
+                    prev_account_leaf.send_tree_root,
+                )
+                .map_err(|e| {
+                    UpdateAccountTreeError::MerkleProofError(format!(
+                        "failed to verify forced tx send merkle proof for i {}: {}",
+                        i, e
+                    ))
+                })?;
+
+            // Create new send leaf with forced tx hash as tx_tree_root
+            let new_send_leaf = SendLeaf {
+                prev: prev_account_leaf.prev,
+                cur: self.block_number,
+                tx_tree_root: forced_tx.tx_hash,
+            };
+            let new_send_tree_root =
+                send_merkle_proof.get_root(&new_send_leaf, prev_account_leaf.index.into());
+
+            // Create new account leaf
+            let new_account_leaf = AccountLeaf {
+                index: prev_account_leaf.index + 1,
+                prev: self.block_number,
+                send_tree_root: new_send_tree_root,
+                pk_set_root: prev_account_leaf.pk_set_root,
+                threshold: prev_account_leaf.threshold,
+            };
+            account_tree_root = account_merkle_proof
+                .get_root(&new_account_leaf, forced_tx.user_id.as_u64());
+
+            // Chain forced tx hash
+            ftx_hash_chain = forced_tx.hash_with_prev_hash(ftx_hash_chain);
+            ftx_count = ftx_count.add(1).map_err(|e| {
+                UpdateAccountTreeError::InvalidLength(format!("forced tx count overflow: {e}"))
+            })?;
+        }
+
+        // Verify computed hash chain matches block's expected value
+        if ftx_hash_chain != self.block.forced_tx_hash_chain {
+            return Err(UpdateAccountTreeError::MerkleProofError(
+                "forced tx hash chain mismatch: computed chain does not match block value"
+                    .to_string(),
+            ));
         }
 
         Ok(UpdateAccountPublicInputs {
@@ -175,12 +260,19 @@ impl UpdateAccountTree {
             new_block_hash_chain,
             new_account_tree_root: account_tree_root,
             deposit_hash_chain: self.block.deposit_hash_chain,
+            prev_forced_tx_hash_chain: self.prev_forced_tx_hash_chain,
+            forced_tx_hash_chain: ftx_hash_chain,
+            prev_forced_tx_count: self.prev_forced_tx_count,
+            forced_tx_count: ftx_count,
         })
     }
 }
 
+// block_number(1) + block_timestamp(U64_LEN) + prev_block_hash_chain + prev_account_tree_root
+// + new_block_hash_chain + new_account_tree_root + deposit_hash_chain
+// + prev_forced_tx_hash_chain + forced_tx_hash_chain + prev_forced_tx_count(1) + forced_tx_count(1)
 const UPDATE_ACCOUNT_PUBLIC_INPUTS_LEN: usize =
-    1 + U64_LEN + 3 * BYTES32_LEN + 2 * POSEIDON_HASH_OUT_LEN;
+    1 + U64_LEN + 5 * BYTES32_LEN + 2 * POSEIDON_HASH_OUT_LEN + 2;
 
 impl UpdateAccountPublicInputs {
     pub fn to_u64_vec(&self) -> Vec<u64> {
@@ -191,6 +283,10 @@ impl UpdateAccountPublicInputs {
         result.extend(self.new_block_hash_chain.to_u64_vec());
         result.extend(self.new_account_tree_root.to_u64_vec());
         result.extend(self.deposit_hash_chain.to_u64_vec());
+        result.extend(self.prev_forced_tx_hash_chain.to_u64_vec());
+        result.extend(self.forced_tx_hash_chain.to_u64_vec());
+        result.extend(self.prev_forced_tx_count.to_u64_vec());
+        result.extend(self.forced_tx_count.to_u64_vec());
         result
     }
 
@@ -238,6 +334,25 @@ impl UpdateAccountPublicInputs {
 
         let deposit_hash_chain = Bytes32::from_u64_slice(&values[cursor..cursor + BYTES32_LEN])
             .map_err(|e| UpdateAccountTreeError::InvalidLength(e.to_string()))?;
+        cursor += BYTES32_LEN;
+
+        let prev_forced_tx_hash_chain =
+            Bytes32::from_u64_slice(&values[cursor..cursor + BYTES32_LEN])
+                .map_err(|e| UpdateAccountTreeError::InvalidLength(e.to_string()))?;
+        cursor += BYTES32_LEN;
+
+        let forced_tx_hash_chain = Bytes32::from_u64_slice(&values[cursor..cursor + BYTES32_LEN])
+            .map_err(|e| UpdateAccountTreeError::InvalidLength(e.to_string()))?;
+        cursor += BYTES32_LEN;
+
+        let prev_forced_tx_count = U63::new(values[cursor]).map_err(|e| {
+            UpdateAccountTreeError::InvalidLength(format!("invalid prev forced tx count: {e}"))
+        })?;
+        cursor += 1;
+
+        let forced_tx_count = U63::new(values[cursor]).map_err(|e| {
+            UpdateAccountTreeError::InvalidLength(format!("invalid forced tx count: {e}"))
+        })?;
 
         Ok(Self {
             block_number,
@@ -247,6 +362,10 @@ impl UpdateAccountPublicInputs {
             new_block_hash_chain,
             new_account_tree_root,
             deposit_hash_chain,
+            prev_forced_tx_hash_chain,
+            forced_tx_hash_chain,
+            prev_forced_tx_count,
+            forced_tx_count,
         })
     }
 }
@@ -260,6 +379,10 @@ pub struct UpdateAccountPublicInputsTarget {
     pub new_block_hash_chain: Bytes32Target,
     pub new_account_tree_root: PoseidonHashOutTarget,
     pub deposit_hash_chain: Bytes32Target,
+    pub prev_forced_tx_hash_chain: Bytes32Target,
+    pub forced_tx_hash_chain: Bytes32Target,
+    pub prev_forced_tx_count: U63Target,
+    pub forced_tx_count: U63Target,
 }
 
 impl UpdateAccountPublicInputsTarget {
@@ -274,6 +397,10 @@ impl UpdateAccountPublicInputsTarget {
         let new_block_hash_chain = Bytes32Target::new(builder, is_checked);
         let new_account_tree_root = PoseidonHashOutTarget::new(builder);
         let deposit_hash_chain = Bytes32Target::new(builder, is_checked);
+        let prev_forced_tx_hash_chain = Bytes32Target::new(builder, is_checked);
+        let forced_tx_hash_chain = Bytes32Target::new(builder, is_checked);
+        let prev_forced_tx_count = U63Target::new(builder, is_checked);
+        let forced_tx_count = U63Target::new(builder, is_checked);
         Self {
             block_number,
             block_timestamp,
@@ -282,6 +409,10 @@ impl UpdateAccountPublicInputsTarget {
             new_block_hash_chain,
             new_account_tree_root,
             deposit_hash_chain,
+            prev_forced_tx_hash_chain,
+            forced_tx_hash_chain,
+            prev_forced_tx_count,
+            forced_tx_count,
         }
     }
 
@@ -294,6 +425,10 @@ impl UpdateAccountPublicInputsTarget {
             self.new_block_hash_chain.to_vec(),
             self.new_account_tree_root.to_vec(),
             self.deposit_hash_chain.to_vec(),
+            self.prev_forced_tx_hash_chain.to_vec(),
+            self.forced_tx_hash_chain.to_vec(),
+            self.prev_forced_tx_count.to_vec(),
+            self.forced_tx_count.to_vec(),
         ]
         .concat()
     }
@@ -337,6 +472,19 @@ impl UpdateAccountPublicInputsTarget {
         cursor += POSEIDON_HASH_OUT_LEN;
 
         let deposit_hash_chain = Bytes32Target::from_slice(&values[cursor..cursor + BYTES32_LEN]);
+        cursor += BYTES32_LEN;
+
+        let prev_forced_tx_hash_chain =
+            Bytes32Target::from_slice(&values[cursor..cursor + BYTES32_LEN]);
+        cursor += BYTES32_LEN;
+
+        let forced_tx_hash_chain = Bytes32Target::from_slice(&values[cursor..cursor + BYTES32_LEN]);
+        cursor += BYTES32_LEN;
+
+        let prev_forced_tx_count = U63Target::from_slice(&values[cursor..cursor + 1]);
+        cursor += 1;
+
+        let forced_tx_count = U63Target::from_slice(&values[cursor..cursor + 1]);
 
         Self {
             block_number,
@@ -346,6 +494,10 @@ impl UpdateAccountPublicInputsTarget {
             new_block_hash_chain,
             new_account_tree_root,
             deposit_hash_chain,
+            prev_forced_tx_hash_chain,
+            forced_tx_hash_chain,
+            prev_forced_tx_count,
+            forced_tx_count,
         }
     }
 
@@ -367,6 +519,14 @@ impl UpdateAccountPublicInputsTarget {
             .set_witness(witness, value.new_account_tree_root);
         self.deposit_hash_chain
             .set_witness(witness, value.deposit_hash_chain);
+        self.prev_forced_tx_hash_chain
+            .set_witness(witness, value.prev_forced_tx_hash_chain);
+        self.forced_tx_hash_chain
+            .set_witness(witness, value.forced_tx_hash_chain);
+        self.prev_forced_tx_count
+            .set_witness(witness, value.prev_forced_tx_count);
+        self.forced_tx_count
+            .set_witness(witness, value.forced_tx_count);
     }
 
     pub fn select<F: RichField + Extendable<D>, const D: usize>(
@@ -418,6 +578,30 @@ impl UpdateAccountPublicInputsTarget {
                 when_true.deposit_hash_chain.clone(),
                 when_false.deposit_hash_chain.clone(),
             ),
+            prev_forced_tx_hash_chain: Bytes32Target::select(
+                builder,
+                condition,
+                when_true.prev_forced_tx_hash_chain.clone(),
+                when_false.prev_forced_tx_hash_chain.clone(),
+            ),
+            forced_tx_hash_chain: Bytes32Target::select(
+                builder,
+                condition,
+                when_true.forced_tx_hash_chain.clone(),
+                when_false.forced_tx_hash_chain.clone(),
+            ),
+            prev_forced_tx_count: U63Target::select(
+                builder,
+                condition,
+                &when_true.prev_forced_tx_count,
+                &when_false.prev_forced_tx_count,
+            ),
+            forced_tx_count: U63Target::select(
+                builder,
+                condition,
+                &when_true.forced_tx_count,
+                &when_false.forced_tx_count,
+            ),
         }
     }
 }
@@ -434,10 +618,23 @@ pub struct UpdateAccountTreeTarget {
     pub public_inputs: UpdateAccountPublicInputsTarget,
     /// SPHINCS+ signature witness targets for each user slot.
     pub spx_sig_targets: Vec<SpxSigTargets>,
+
+    // Forced tx targets
+    pub prev_forced_tx_hash_chain: Bytes32Target,
+    pub prev_forced_tx_count: U63Target,
+    pub forced_tx_targets: Vec<ForcedTxTarget>,
+    pub forced_tx_is_active: Vec<BoolTarget>,
+    pub forced_tx_prev_account_leaves: Vec<AccountLeafTarget>,
+    pub forced_tx_account_merkle_proofs: Vec<AccountMerkleProofTarget>,
+    pub forced_tx_send_merkle_proofs: Vec<SendMerkleProofTarget>,
 }
 
 impl UpdateAccountTreeTarget {
-    pub fn new<F, C, const D: usize>(builder: &mut CircuitBuilder<F, D>, num_users: u32) -> Self
+    pub fn new<F, C, const D: usize>(
+        builder: &mut CircuitBuilder<F, D>,
+        num_users: u32,
+        num_forced_txs: u32,
+    ) -> Self
     where
         F: RichField + Extendable<D>,
         C: GenericConfig<D, F = F> + 'static,
@@ -512,8 +709,9 @@ impl UpdateAccountTreeTarget {
                 index: next_index,
                 prev: block_number.clone(),
                 send_tree_root: new_send_tree_root.clone(),
-                // pk_hash is preserved unchanged across state transitions
-                pk_hash: prev_account_leaf.pk_hash.clone(),
+                // pk_set_root and threshold preserved unchanged across state transitions
+                pk_set_root: prev_account_leaf.pk_set_root.clone(),
+                threshold: prev_account_leaf.threshold.clone(),
             };
 
             let updated_root =
@@ -524,21 +722,21 @@ impl UpdateAccountTreeTarget {
 
             // ── SPHINCS+ signature verification ────────────────────────────
             //
-            // For each active user whose pk_hash is non-zero (has_pk_hash) we
-            // verify that:
-            //   1. Poseidon(pub_seed || root) == prev_account_leaf.pk_hash
+            // For each active user whose pk_set_root is non-zero we verify that:
+            //   1. Poseidon(pub_seed || root) == prev_account_leaf.pk_set_root
+            //      (for single-sig compatibility; multi-sig uses signature_aggregation circuit)
             //   2. The SPHINCS+ signature is valid over the message
             //      M_i = [block_number, aggregator_id, local_id, tx_tree_root×8]
             //
-            // When pk_hash == 0 (user has no registered key yet) the signature
-            // constraints are skipped — dummy witnesses are accepted.
+            // When pk_set_root == 0 (user has no registered key set yet) the
+            // signature constraints are skipped — dummy witnesses are accepted.
             // For padding slots (should_update=false) constraints are also skipped.
 
-            // -- Compute should_verify_sig = should_update AND has_pk_hash --
-            // Only enforce SPHINCS+ when the user has a registered key (pk_hash != 0).
+            // -- Compute should_verify_sig = should_update AND has_pk_set --
+            // Only enforce SPHINCS+ when the user has a registered key set.
             let should_verify_sig = {
                 let zero = builder.zero();
-                let e = &prev_account_leaf.pk_hash.elements;
+                let e = &prev_account_leaf.pk_set_root.elements;
                 let z0 = builder.is_equal(e[0], zero);
                 let z1 = builder.is_equal(e[1], zero);
                 let z2 = builder.is_equal(e[2], zero);
@@ -546,8 +744,8 @@ impl UpdateAccountTreeTarget {
                 let all_zero_01 = builder.and(z0, z1);
                 let all_zero_012 = builder.and(all_zero_01, z2);
                 let all_zero = builder.and(all_zero_012, z3);
-                let has_pk_hash = builder.not(all_zero);
-                builder.and(should_update, has_pk_hash)
+                let has_pk_set = builder.not(all_zero);
+                builder.and(should_update, has_pk_set)
             };
 
             // -- Allocate virtual targets for PK and signature components --
@@ -565,12 +763,14 @@ impl UpdateAccountTreeTarget {
                 .map(|_| builder.add_virtual_targets(SPX_AUTH_GL_LEN))
                 .collect();
 
-            // -- Verify pk_hash stored in account leaf matches the provided PK --
+            // -- Verify pk_set_root stored in account leaf matches the provided PK --
+            // NOTE: For single-sig compatibility, pk_set_root == Poseidon(pub_seed || pub_root).
+            // For multi-sig, use the signature_aggregation circuit instead.
             let pk_inputs: Vec<_> = [pub_seed_gl.as_slice(), pub_root_gl.as_slice()].concat();
             let computed_pk_hash =
                 PoseidonHashOutTarget::hash_inputs(builder, &pk_inputs);
             prev_account_leaf
-                .pk_hash
+                .pk_set_root
                 .conditional_assert_eq(builder, computed_pk_hash, should_verify_sig);
 
             // -- Build message: [block_number, aggregator_id, local_id, tx_root×8] --
@@ -619,6 +819,112 @@ impl UpdateAccountTreeTarget {
             });
         }
 
+        // ── Forced tx processing ──────────────────────────────────────────
+        let prev_forced_tx_hash_chain_target = Bytes32Target::new(builder, true);
+        let prev_forced_tx_count_target = U63Target::new(builder, true);
+
+        let mut ftx_hash_chain = prev_forced_tx_hash_chain_target.clone();
+        let mut ftx_count_value = prev_forced_tx_count_target.value;
+
+        let mut forced_tx_targets: Vec<ForcedTxTarget> =
+            Vec::with_capacity(num_forced_txs as usize);
+        let mut forced_tx_is_active: Vec<BoolTarget> =
+            Vec::with_capacity(num_forced_txs as usize);
+        let mut forced_tx_prev_account_leaves: Vec<AccountLeafTarget> =
+            Vec::with_capacity(num_forced_txs as usize);
+        let mut forced_tx_account_merkle_proofs: Vec<AccountMerkleProofTarget> =
+            Vec::with_capacity(num_forced_txs as usize);
+        let mut forced_tx_send_merkle_proofs: Vec<SendMerkleProofTarget> =
+            Vec::with_capacity(num_forced_txs as usize);
+
+        let ftx_empty_send_leaf = SendLeafTarget::constant(builder, SendLeaf::empty_leaf());
+
+        for _i in 0..(num_forced_txs as usize) {
+            let is_active = builder.add_virtual_bool_target_safe();
+            let forced_tx = ForcedTxTarget::new(builder, true);
+            let prev_account_leaf = AccountLeafTarget::new(builder, true);
+            let account_merkle_proof =
+                AccountMerkleProofTarget::new(builder, ACCOUNT_TREE_HEIGHT);
+            let send_merkle_proof = SendMerkleProofTarget::new(builder, SEND_TREE_HEIGHT);
+
+            let user_id = forced_tx.user_id.clone();
+
+            // Verify account leaf membership
+            let current_root = account_tree_root.clone();
+            let leaf_root = account_merkle_proof.get_root::<F, C, D>(
+                builder,
+                &prev_account_leaf,
+                user_id.value,
+            );
+            current_root.conditional_assert_eq(builder, leaf_root, is_active);
+
+            // Verify empty send leaf
+            send_merkle_proof.conditional_verify::<F, C, D>(
+                builder,
+                is_active,
+                &ftx_empty_send_leaf,
+                prev_account_leaf.index,
+                prev_account_leaf.send_tree_root.clone(),
+            );
+
+            // Create new send leaf with forced tx hash as tx_tree_root
+            let new_send_leaf = SendLeafTarget {
+                prev: prev_account_leaf.prev.clone(),
+                cur: block_number.clone(),
+                tx_tree_root: forced_tx.tx_hash.clone(),
+            };
+            let new_send_tree_root = send_merkle_proof.get_root::<F, C, D>(
+                builder,
+                &new_send_leaf,
+                prev_account_leaf.index,
+            );
+
+            // Create new account leaf
+            let next_index = builder.add_const(prev_account_leaf.index, F::ONE);
+            let new_account_leaf = AccountLeafTarget {
+                index: next_index,
+                prev: block_number.clone(),
+                send_tree_root: new_send_tree_root,
+                pk_set_root: prev_account_leaf.pk_set_root.clone(),
+                threshold: prev_account_leaf.threshold.clone(),
+            };
+            let updated_root = account_merkle_proof.get_root::<F, C, D>(
+                builder,
+                &new_account_leaf,
+                user_id.value,
+            );
+            account_tree_root = PoseidonHashOutTarget::select(
+                builder,
+                is_active,
+                updated_root,
+                current_root,
+            );
+
+            // Chain forced tx hash (only when active)
+            let new_hash =
+                forced_tx.hash_with_prev_hash::<F, C, D>(builder, ftx_hash_chain.clone());
+            ftx_hash_chain =
+                Bytes32Target::select(builder, is_active, new_hash, ftx_hash_chain);
+
+            // Increment count (only when active)
+            let incremented = builder.add_const(ftx_count_value, F::ONE);
+            builder.range_check(incremented, 63);
+            ftx_count_value = builder.select(is_active, incremented, ftx_count_value);
+
+            forced_tx_targets.push(forced_tx);
+            forced_tx_is_active.push(is_active);
+            forced_tx_prev_account_leaves.push(prev_account_leaf);
+            forced_tx_account_merkle_proofs.push(account_merkle_proof);
+            forced_tx_send_merkle_proofs.push(send_merkle_proof);
+        }
+
+        // Verify computed forced tx hash chain matches block's expected value
+        ftx_hash_chain.connect(builder, block.forced_tx_hash_chain.clone());
+
+        let ftx_count_target = U63Target {
+            value: ftx_count_value,
+        };
+
         let public_inputs = UpdateAccountPublicInputsTarget {
             block_number: block_number.clone(),
             block_timestamp: block.timestamp.clone(),
@@ -627,6 +933,10 @@ impl UpdateAccountTreeTarget {
             new_block_hash_chain,
             new_account_tree_root: account_tree_root.clone(),
             deposit_hash_chain: block.deposit_hash_chain.clone(),
+            prev_forced_tx_hash_chain: prev_forced_tx_hash_chain_target.clone(),
+            forced_tx_hash_chain: ftx_hash_chain.clone(),
+            prev_forced_tx_count: prev_forced_tx_count_target.clone(),
+            forced_tx_count: ftx_count_target,
         };
 
         Self {
@@ -639,6 +949,13 @@ impl UpdateAccountTreeTarget {
             send_merkle_proofs,
             public_inputs,
             spx_sig_targets,
+            prev_forced_tx_hash_chain: prev_forced_tx_hash_chain_target,
+            prev_forced_tx_count: prev_forced_tx_count_target,
+            forced_tx_targets,
+            forced_tx_is_active,
+            forced_tx_prev_account_leaves,
+            forced_tx_account_merkle_proofs,
+            forced_tx_send_merkle_proofs,
         }
     }
 
@@ -684,6 +1001,36 @@ impl UpdateAccountTreeTarget {
         {
             target.set_witness(witness, sig);
         }
+
+        // Set forced tx witnesses
+        self.prev_forced_tx_hash_chain
+            .set_witness(witness, value.prev_forced_tx_hash_chain);
+        self.prev_forced_tx_count
+            .set_witness(witness, value.prev_forced_tx_count);
+
+        let num_forced_txs = self.forced_tx_targets.len();
+        let num_active = value.forced_txs.len();
+        for i in 0..num_forced_txs {
+            let is_active = i < num_active;
+            witness.set_bool_target(self.forced_tx_is_active[i], is_active);
+            if is_active {
+                self.forced_tx_targets[i].set_witness(witness, &value.forced_txs[i]);
+                self.forced_tx_prev_account_leaves[i]
+                    .set_witness(witness, &value.forced_tx_prev_account_leaves[i]);
+                self.forced_tx_account_merkle_proofs[i]
+                    .set_witness(witness, &value.forced_tx_account_merkle_proofs[i]);
+                self.forced_tx_send_merkle_proofs[i]
+                    .set_witness(witness, &value.forced_tx_send_merkle_proofs[i]);
+            } else {
+                self.forced_tx_targets[i].set_witness(witness, &ForcedTx::default());
+                self.forced_tx_prev_account_leaves[i]
+                    .set_witness(witness, &AccountLeaf::default());
+                self.forced_tx_account_merkle_proofs[i]
+                    .set_witness(witness, &AccountMerkleProof::dummy(ACCOUNT_TREE_HEIGHT));
+                self.forced_tx_send_merkle_proofs[i]
+                    .set_witness(witness, &SendMerkleProof::dummy(SEND_TREE_HEIGHT));
+            }
+        }
     }
 }
 
@@ -702,6 +1049,7 @@ where
     <C as GenericConfig<D>>::Hasher: AlgebraicHasher<F>,
 {
     pub num_users: u32,
+    pub num_forced_txs: u32,
     pub data: CircuitData<F, C, D>,
     pub target: UpdateAccountTreeTarget,
     pub public_inputs: UpdateAccountPublicInputsTarget,
@@ -714,8 +1062,13 @@ where
     <C as GenericConfig<D>>::Hasher: AlgebraicHasher<F>,
 {
     pub fn new(num_users: u32) -> Self {
+        Self::new_with_forced_txs(num_users, 0)
+    }
+
+    pub fn new_with_forced_txs(num_users: u32, num_forced_txs: u32) -> Self {
         let mut builder = CircuitBuilder::<F, D>::new(CircuitConfig::standard_recursion_config());
-        let target = UpdateAccountTreeTarget::new::<F, C, D>(&mut builder, num_users);
+        let target =
+            UpdateAccountTreeTarget::new::<F, C, D>(&mut builder, num_users, num_forced_txs);
         let public_inputs = target.public_inputs.clone();
         builder.register_public_inputs(&public_inputs.to_vec());
 
@@ -726,6 +1079,7 @@ where
 
         Self {
             num_users,
+            num_forced_txs,
             data,
             target,
             public_inputs,
@@ -796,7 +1150,8 @@ mod tests {
             index: send_tree_user1.len() as u32,
             prev: send_leaf_user1_prev.cur,
             send_tree_root: send_tree_user1.get_root(),
-            pk_hash: PoseidonHashOut::default(),
+            pk_set_root: PoseidonHashOut::default(),
+            threshold: 0,
         };
 
         let user2 = UserId::new(aggregator_id, 2).unwrap();
@@ -811,7 +1166,8 @@ mod tests {
             index: send_tree_user2.len() as u32,
             prev: block_number,
             send_tree_root: send_tree_user2.get_root(),
-            pk_hash: PoseidonHashOut::default(),
+            pk_set_root: PoseidonHashOut::default(),
+            threshold: 0,
         };
 
         let mut account_tree = AccountTree::new(ACCOUNT_TREE_HEIGHT);
@@ -829,6 +1185,7 @@ mod tests {
         );
 
         let timestamp = rng.next_u64();
+        let forced_tx_hash_chain = Bytes32::default();
         let block = Block::new(
             num_users,
             aggregator_id,
@@ -836,6 +1193,7 @@ mod tests {
             timestamp,
             tx_tree_root,
             deposit_hash_chain,
+            forced_tx_hash_chain,
         )
         .unwrap();
 
@@ -878,7 +1236,8 @@ mod tests {
                     index: prev_leaf.index + 1,
                     prev: block_number,
                     send_tree_root: new_send_root,
-                    pk_hash: prev_leaf.pk_hash,
+                    pk_set_root: prev_leaf.pk_set_root,
+                    threshold: prev_leaf.threshold,
                 };
                 account_tree_for_proofs.update(user_id.as_u64(), new_account_leaf);
             }
@@ -896,6 +1255,12 @@ mod tests {
             account_merkle_proofs: account_merkle_proofs.clone(),
             send_merkle_proofs: send_merkle_proofs.clone(),
             sig_witnesses,
+            prev_forced_tx_hash_chain: Bytes32::default(),
+            prev_forced_tx_count: U63::default(),
+            forced_txs: vec![],
+            forced_tx_prev_account_leaves: vec![],
+            forced_tx_account_merkle_proofs: vec![],
+            forced_tx_send_merkle_proofs: vec![],
         };
 
         let public_inputs = update_account_tree.to_public_inputs().unwrap();

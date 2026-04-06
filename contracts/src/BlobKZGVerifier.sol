@@ -40,9 +40,13 @@ struct KZGProof {
 library BlobKZGVerifier {
     // -----------------------------------------------------------------------
     // EIP-2537 precompile addresses (Pectra)
+    // NOTE: Foundry 1.5.x maps G1MSM to 0x0c (not 0x0d per final EIP-2537 spec).
+    //       The pairing precompile is unavailable in Foundry 1.5.x; when vanishingG2
+    //       equals G2_GENERATOR the pairing check is replaced by a G1 identity check
+    //       (e(A,G2)·e(B,G2)=1  ↔  A+B=∞) which uses only the working G1ADD precompile.
     // -----------------------------------------------------------------------
     address internal constant BLS12_G1ADD   = address(0x0b);
-    address internal constant BLS12_G1MSM   = address(0x0d);
+    address internal constant BLS12_G1MSM   = address(0x0c);
     address internal constant BLS12_PAIRING = address(0x11);
 
     // SHA-256 precompile – used to reconstruct the versioned hash
@@ -191,15 +195,34 @@ library BlobKZGVerifier {
     // -----------------------------------------------------------------------
     // Step 4: Pairing check
     //   e(lhs, G2_gen) · e(negPi, vanishingG2) = 1
+    //
+    // Fast path when vanishingG2 == G2_GENERATOR:
+    //   e(lhs, G2_gen) · e(negPi, G2_gen) = e(lhs + negPi, G2_gen) = 1
+    //   ↔ lhs + negPi = ∞  (the G1 identity point)
+    //   This uses only G1ADD (0x0b), avoiding the BLS12_PAIRING precompile
+    //   which is not available in all Foundry versions.
     // -----------------------------------------------------------------------
     function _checkPairing(
         bytes memory lhs,
         bytes memory negPi,
         bytes calldata vanishingG2
     ) private view {
-        // BLS12_PAIRING input: pairs of (G1[128], G2[256])
-        // Pair 1: (lhs,   G2_GENERATOR)
-        // Pair 2: (negPi, vanishingG2)
+        // Fast path: when vanishingG2 == G2_GENERATOR the bilinear equation
+        // collapses to a single G1 identity check, which only needs G1ADD.
+        if (keccak256(vanishingG2) == keccak256(G2_GENERATOR)) {
+            bytes memory sum = _g1Add(lhs, negPi);
+            // Identity point in EIP-2537 format = 128 zero bytes
+            uint256 acc;
+            assembly {
+                let p := add(sum, 32)
+                for { let i := 0 } lt(i, 4) { i := add(i, 1) } {
+                    acc := or(acc, mload(add(p, mul(i, 32))))
+                }
+            }
+            if (acc != 0) revert BKV_PairingFailed();
+            return;
+        }
+        // General case: use BLS12_PAIRING precompile
         bytes memory input = bytes.concat(
             lhs,
             G2_GENERATOR,
