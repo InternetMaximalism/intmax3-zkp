@@ -1,7 +1,3 @@
 [submodule "contracts/lib/forge-std"]
 	path = contracts/lib/forge-std
 	url = https://github.com/foundry-rs/forge-std
-[submodule "plonky2-whir-verifier"]
-	path = plonky2-whir-verifier
-	url = https://github.com/InternetMaximalism/plonky2-whir-verifier.git
-	branch = canonicalplonky2
