@@ -4,15 +4,21 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-plonky2 = { git = "https://github.com/InternetMaximalism/polygon-plonky2.git", branch = "wasm", default-features = false, features = [
+# All plonky2 ecosystem uses mleintroduction branch (rebased on wasm)
+plonky2 = { git = "https://github.com/InternetMaximalism/polygon-plonky2.git", branch = "mleintroduction", default-features = false, features = [
     "parallel",
 ] }
-plonky2_u32 = { git = "https://github.com/InternetMaximalism/plonky2-u32.git", branch = "wasm", default-features = false }
-plonky2_bn254 = { git = "https://github.com/InternetMaximalism/plonky2_bn254", branch = "wasm", default-features = false }
-plonky2_keccak = { git = "https://github.com/InternetMaximalism/plonky2_keccak", branch = "wasm", default-features = false }
-sphincsplus-circuits = { git = "https://github.com/InternetMaximalism/aggregated_SPHINCS_plus.git" }
-sphincsplus-params = { git = "https://github.com/InternetMaximalism/aggregated_SPHINCS_plus.git" }
-sphincsplus-poseidon = { git = "https://github.com/InternetMaximalism/aggregated_SPHINCS_plus.git" }
+plonky2_mle = { git = "https://github.com/InternetMaximalism/polygon-plonky2.git", branch = "mleintroduction" }
+# These crates depend on polygon-plonky2 wasm branch internally;
+# [patch] below redirects their transitive plonky2 dep to mleintroduction.
+plonky2_u32 = { git = "https://github.com/InternetMaximalism/plonky2-u32.git", branch = "mleintroduction", default-features = false }
+plonky2_bn254 = { git = "https://github.com/InternetMaximalism/plonky2_bn254", branch = "mleintroduction", default-features = false }
+plonky2_keccak = { git = "https://github.com/InternetMaximalism/plonky2_keccak", branch = "mleintroduction", default-features = false }
+
+sphincsplus-circuits = { git = "https://github.com/InternetMaximalism/aggregated_SPHINCS_plus.git", branch = "mleintroduction" }
+sphincsplus-params = { git = "https://github.com/InternetMaximalism/aggregated_SPHINCS_plus.git", branch = "mleintroduction" }
+sphincsplus-poseidon = { git = "https://github.com/InternetMaximalism/aggregated_SPHINCS_plus.git", branch = "mleintroduction" }
+keccak-hash = "0.8.0"
 hex = "0.4.3"
 rand = "0.8.5"
 thiserror = "2.0.17"
@@ -27,16 +33,8 @@ lazy_static = "1.5.0"
 bincode = { version = "2.0.1", features = ["serde"] }
 clap = { version = "4.5", features = ["derive"] }
 
-# WHIR post-quantum wrapper (optional, native-only)
-whir = { git = "https://github.com/leohio/whir", features = ["parallel"], optional = true }
-ark-ff = { version = "0.5", features = ["asm", "std"], optional = true }
-ark-std = { version = "0.5", features = ["std"], optional = true }
-sha3 = { version = "0.10", optional = true }
-ciborium = { version = "0.2", optional = true }
-
 [features]
 default = []
-whir = ["dep:whir", "dep:ark-ff", "dep:ark-std", "dep:sha3", "dep:ciborium"]
 
 
 [dev-dependencies]
@@ -54,3 +52,4 @@ harness = false
 [[bench]]
 name = "degree_report"
 harness = false
+
