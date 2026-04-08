@@ -887,7 +887,7 @@ contract IntmaxRollup {
         GoldilocksExt3.Ext3[] memory emptyEvals = new GoldilocksExt3.Ext3[](0);
         return mleVerifier.verify(
             mleProof, mleDegreeBits, bytes32(0), emptyParams,
-            "", "", "", emptyEvals, emptyEvals
+            "", "", emptyEvals
         );
     }
 

@@ -303,11 +303,9 @@ contract IntmaxRollupTest is Test {
     function _defaultMleProof() internal pure returns (MleVerifier.MleProof memory proof) {
         // All fields default to zero/empty, which is fine for non-E2E tests.
         proof.circuitDigest = new uint256[](0);
-        proof.preprocessedWhirTranscript = "";
-        proof.preprocessedWhirHints = "";
+        proof.whirTranscript = "";
+        proof.whirHints = "";
         proof.preprocessedIndividualEvals = new uint256[](0);
-        proof.witnessWhirTranscript = "";
-        proof.witnessWhirHints = "";
         proof.witnessIndividualEvals = new uint256[](0);
         proof.publicInputs = new uint256[](0);
         proof.tau = new uint256[](0);
@@ -568,7 +566,7 @@ contract IntmaxRollupTest is Test {
         MleVerifier.MleProof memory mleProof = _defaultMleProof();
 
         // Corrupt the commitmentRoot
-        mleProof.witnessWhirTranscript = hex"DEADBEEF";
+        mleProof.whirTranscript = hex"DEADBEEF";
 
         bool result = rollup.verify(
             mleProof,
@@ -762,7 +760,7 @@ contract IntmaxRollupTest is Test {
         IntmaxRollup.ValidityPublicInputs memory vpis = _defaultValidityPIs(stateRoot);
 
         // Modify MLE proof AFTER proofBytes was created, so params binding fails
-        mleProof.witnessWhirTranscript = hex"DEAD";
+        mleProof.whirTranscript = hex"DEAD";
 
         // Fraud NOT confirmed: proof params binding fails (mleProof was modified after creating
         // proofBytes), so keccak256(abi.encode(groth16, mleProof)) != keccak256(proofBytes).
@@ -936,7 +934,7 @@ contract IntmaxRollupTest is Test {
         MleVerifier.MleProof memory mleProof = _defaultMleProof();
 
         // Corrupt commitmentRoot
-        mleProof.witnessWhirTranscript = hex"DEADDEADDEADDEAD";
+        mleProof.whirTranscript = hex"DEADDEADDEADDEAD";
 
         // Compute vpis BEFORE posting (initial state: everything zero).
         // blockHashChainAt[0] stays 0 forever, so PI binding will pass.
@@ -977,7 +975,7 @@ contract IntmaxRollupTest is Test {
         MleVerifier.MleProof memory mleProof = _defaultMleProof();
 
         // Corrupt WHIR transcript with random data
-        mleProof.witnessWhirTranscript = hex"DEADBEEFCAFEBABE123456789ABCDEF0";
+        mleProof.whirTranscript = hex"DEADBEEFCAFEBABE123456789ABCDEF0";
         // Also corrupt evalValue
         mleProof.witnessEvalValue = 0xBADBADBAD;
 

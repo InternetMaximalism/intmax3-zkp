@@ -61,6 +61,7 @@ contract MleE2ETest is Test {
         params.numVariables = vm.parseJsonUint(json, ".whirParams.numVariables");
         params.foldingFactor = vm.parseJsonUint(json, ".whirParams.foldingFactor");
         params.numVectors = vm.parseJsonUint(json, ".whirParams.numVectors");
+        params.numCommitments = vm.parseJsonUint(json, ".whirParams.numCommitments");
         params.outDomainSamples = vm.parseJsonUint(json, ".whirParams.outDomainSamples");
         params.inDomainSamples = vm.parseJsonUint(json, ".whirParams.inDomainSamples");
         params.initialSumcheckRounds = vm.parseJsonUint(json, ".whirParams.initialSumcheckRounds");
@@ -102,15 +103,17 @@ contract MleE2ETest is Test {
         // Circuit digest
         proof.circuitDigest = _parseArrayByIndex(json, ".circuitDigest", 4);
 
-        // Preprocessed WHIR
-        proof.preprocessedWhirTranscript = vm.parseJsonBytes(json, ".preprocessedWhirTranscript");
-        proof.preprocessedWhirHints = vm.parseJsonBytes(json, ".preprocessedWhirHints");
+        // Unified WHIR
+        proof.whirTranscript = vm.parseJsonBytes(json, ".whirTranscript");
+        proof.whirHints = vm.parseJsonBytes(json, ".whirHints");
+        proof.preprocessedRoot = vm.parseJsonBytes32(json, ".preprocessedCommitmentRoot");
+        proof.witnessRoot = vm.parseJsonBytes32(json, ".witnessCommitmentRoot");
+
+        // Preprocessed batch
         proof.preprocessedEvalValue = _u(json, ".preprocessedEvalValue");
         proof.preprocessedBatchR = _u(json, ".preprocessedBatchR");
 
-        // Witness WHIR
-        proof.witnessWhirTranscript = vm.parseJsonBytes(json, ".witnessWhirTranscript");
-        proof.witnessWhirHints = vm.parseJsonBytes(json, ".witnessWhirHints");
+        // Witness batch
         proof.witnessEvalValue = _u(json, ".witnessEvalValue");
         proof.witnessBatchR = _u(json, ".witnessBatchR");
 
@@ -153,15 +156,20 @@ contract MleE2ETest is Test {
         bytes32 preCommitRoot = vm.parseJsonBytes32(json, ".preprocessedCommitmentRoot");
         SpongefishWhirVerify.WhirParams memory whirParams = _parseWhirParams(json);
         bytes memory protocolId = vm.parseJsonBytes(json, ".whirProtocolId");
-        bytes memory preSessionId = vm.parseJsonBytes(json, ".whirPreprocessedSessionId");
-        bytes memory witSessionId = vm.parseJsonBytes(json, ".whirWitnessSessionId");
-        GoldilocksExt3.Ext3[] memory preWhirEvals = _parseExt3(json, ".preprocessedWhirEval");
-        GoldilocksExt3.Ext3[] memory witWhirEvals = _parseExt3(json, ".witnessWhirEval");
+        bytes memory splitSessionId = vm.parseJsonBytes(json, ".whirSplitSessionId");
+
+        // Two Ext3 evaluations: [preprocessed, witness]
+        GoldilocksExt3.Ext3[] memory whirEvals = new GoldilocksExt3.Ext3[](2);
+        {
+            GoldilocksExt3.Ext3[] memory preEval = _parseExt3(json, ".preprocessedWhirEval");
+            GoldilocksExt3.Ext3[] memory witEval = _parseExt3(json, ".witnessWhirEval");
+            whirEvals[0] = preEval[0];
+            whirEvals[1] = witEval[0];
+        }
 
         bool ok = verifier.verify(
             proof, degreeBits, preCommitRoot, whirParams,
-            protocolId, preSessionId, witSessionId,
-            preWhirEvals, witWhirEvals
+            protocolId, splitSessionId, whirEvals
         );
         assertTrue(ok, "MLE+WHIR proof verification failed");
     }
@@ -174,16 +182,20 @@ contract MleE2ETest is Test {
         bytes32 preCommitRoot = vm.parseJsonBytes32(json, ".preprocessedCommitmentRoot");
         SpongefishWhirVerify.WhirParams memory whirParams = _parseWhirParams(json);
         bytes memory protocolId = vm.parseJsonBytes(json, ".whirProtocolId");
-        bytes memory preSessionId = vm.parseJsonBytes(json, ".whirPreprocessedSessionId");
-        bytes memory witSessionId = vm.parseJsonBytes(json, ".whirWitnessSessionId");
-        GoldilocksExt3.Ext3[] memory preWhirEvals = _parseExt3(json, ".preprocessedWhirEval");
-        GoldilocksExt3.Ext3[] memory witWhirEvals = _parseExt3(json, ".witnessWhirEval");
+        bytes memory splitSessionId = vm.parseJsonBytes(json, ".whirSplitSessionId");
+
+        GoldilocksExt3.Ext3[] memory whirEvals = new GoldilocksExt3.Ext3[](2);
+        {
+            GoldilocksExt3.Ext3[] memory preEval = _parseExt3(json, ".preprocessedWhirEval");
+            GoldilocksExt3.Ext3[] memory witEval = _parseExt3(json, ".witnessWhirEval");
+            whirEvals[0] = preEval[0];
+            whirEvals[1] = witEval[0];
+        }
 
         uint256 gasBefore = gasleft();
         bool ok = verifier.verify(
             proof, degreeBits, preCommitRoot, whirParams,
-            protocolId, preSessionId, witSessionId,
-            preWhirEvals, witWhirEvals
+            protocolId, splitSessionId, whirEvals
         );
         uint256 gasUsed = gasBefore - gasleft();
 
