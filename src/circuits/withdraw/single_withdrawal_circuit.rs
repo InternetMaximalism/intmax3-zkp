@@ -536,16 +536,35 @@ where
         }
     }
 
-    pub fn prove(
+    fn prepare_witness(
         &self,
         witness: &SingleWithdawalWitness<F, C, D>,
-    ) -> Result<ProofWithPublicInputs<F, C, D>, SingleWithdawalCircuitError> {
+    ) -> Result<PartialWitness<F>, SingleWithdawalCircuitError> {
         let public_inputs = witness.to_public_inputs(&self.balance_vd)?;
         let mut pw = PartialWitness::<F>::new();
         self.target.set_witness::<F, C, _>(&mut pw, witness);
         self.public_inputs.set_witness(&mut pw, &public_inputs);
+        Ok(pw)
+    }
+
+    pub fn prove(
+        &self,
+        witness: &SingleWithdawalWitness<F, C, D>,
+    ) -> Result<ProofWithPublicInputs<F, C, D>, SingleWithdawalCircuitError> {
+        let pw = self.prepare_witness(witness)?;
         self.data
             .prove(pw)
+            .map_err(|e| SingleWithdawalCircuitError::FailedToProve(e.to_string()))
+    }
+
+    pub async fn prove_async(
+        &self,
+        witness: &SingleWithdawalWitness<F, C, D>,
+    ) -> Result<ProofWithPublicInputs<F, C, D>, SingleWithdawalCircuitError> {
+        let pw = self.prepare_witness(witness)?;
+        self.data
+            .prove_async(pw)
+            .await
             .map_err(|e| SingleWithdawalCircuitError::FailedToProve(e.to_string()))
     }
 

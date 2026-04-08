@@ -3,13 +3,15 @@ name = "intmax3-zkp"
 version = "0.1.0"
 edition = "2024"
 
+[lib]
+crate-type = ["cdylib", "rlib"]
+
 [dependencies]
-plonky2 = { git = "https://github.com/InternetMaximalism/polygon-plonky2.git", branch = "wasm", default-features = false, features = [
-    "parallel",
-] }
-plonky2_u32 = { git = "https://github.com/InternetMaximalism/plonky2-u32.git", branch = "wasm", default-features = false }
-plonky2_bn254 = { git = "https://github.com/InternetMaximalism/plonky2_bn254", branch = "wasm", default-features = false }
-plonky2_keccak = { git = "https://github.com/InternetMaximalism/plonky2_keccak", branch = "wasm", default-features = false }
+plonky2 = { git = "https://github.com/InternetMaximalism/Lita-Plonky2.git", branch = "wasm", default-features = false, features = ["parallel", "std"] }
+starky = { git = "https://github.com/InternetMaximalism/Lita-Plonky2.git", package = "starky", branch = "wasm", default-features = false, features = ["parallel", "std"] }
+plonky2_u32 = { git = "https://github.com/lita-xyz/plonky2-u32.git", branch = "wasm", default-features = false }
+plonky2_bn254 = { git = "https://github.com/lita-xyz/plonky2_bn254.git", branch = "wasm", default-features = false }
+plonky2_keccak = { git = "https://github.com/lita-xyz/plonky2_keccak.git", branch = "wasm", default-features = false }
 sphincsplus-circuits = { git = "https://github.com/InternetMaximalism/aggregated_SPHINCS_plus.git" }
 sphincsplus-params = { git = "https://github.com/InternetMaximalism/aggregated_SPHINCS_plus.git" }
 sphincsplus-poseidon = { git = "https://github.com/InternetMaximalism/aggregated_SPHINCS_plus.git" }
@@ -34,18 +36,47 @@ ark-std = { version = "0.5", features = ["std"], optional = true }
 sha3 = { version = "0.10", optional = true }
 ciborium = { version = "0.2", optional = true }
 
+# Threading
+rayon = "1.8"
+wasm-bindgen-rayon = { version = "1.2", features = ["no-bundler"] }
+
+# WASM bindings
+wasm-bindgen = "0.2"
+wasm-bindgen-futures = "0.4"
+
+# Web APIs
+web-sys = { version = "0.3", features = ["console", "Performance", "Window"] }
+js-sys = "0.3"
+
+# Error handling
+console_error_panic_hook = "0.1.7"
+
+# Random numbers (WASM-compatible)
+getrandom = { version = "0.3", features = ["wasm_js"] }
+
+# Async support
+futures = "0.3"
+
+# Timing (WASM-compatible)
+web-time = "0.2"
+
 [features]
 default = []
+gpu_merkle = ["plonky2/gpu_merkle", "starky/gpu_merkle", "plonky2_keccak/gpu_merkle"]
 whir = ["dep:whir", "dep:ark-ff", "dep:ark-std", "dep:sha3", "dep:ciborium"]
 
+[patch."https://github.com/InternetMaximalism/polygon-plonky2.git"]
+plonky2 = { git = "https://github.com/InternetMaximalism/Lita-Plonky2.git", branch = "wasm" }
+
+[patch."https://github.com/lita-xyz/Plonky2.git"]
+plonky2 = { git = "https://github.com/InternetMaximalism/Lita-Plonky2.git", branch = "wasm" }
+starky = { git = "https://github.com/InternetMaximalism/Lita-Plonky2.git", branch = "wasm" }
 
 [dev-dependencies]
 criterion = { version = "0.5", default-features = false }
 once_cell = "1.20"
-wasm-bindgen = "0.2"
 wasm-bindgen-test = "0.3"
 web-time = "0.2"
-js-sys = "0.3"
 
 [[bench]]
 name = "proof_bench"
@@ -54,3 +85,17 @@ harness = false
 [[bench]]
 name = "degree_report"
 harness = false
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+panic = "abort"  # Use "abort" for production (smaller binary), "unwind" for debugging
+
+# Post-build WASM binary optimization pass (runs after compilation)
+[package.metadata.wasm-pack.profile.release]
+wasm-opt = [
+    "-O4",                  # Most aggressive optimization (smaller + faster WASM)
+    "--enable-bulk-memory",  # Bulk memory ops for faster memcpy/memset
+    "--enable-simd"          # SIMD instructions for parallel 128-bit math
+]

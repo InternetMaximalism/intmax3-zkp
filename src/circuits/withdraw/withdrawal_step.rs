@@ -427,10 +427,14 @@ where
     C: GenericConfig<D, F = F> + 'static,
     <C as GenericConfig<D>>::Hasher: AlgebraicHasher<F>,
 {
-    pub fn new(
+    fn setup_builder(
         withdrawal_chain_cd: &CommonCircuitData<F, D>,
         single_withdrawal_vd: &VerifierCircuitData<F, C, D>,
-    ) -> Self {
+    ) -> (
+        CircuitBuilder<F, D>,
+        WithdrawalStepTarget<D>,
+        WithdrawalStepPublicInputsTarget,
+    ) {
         let mut builder = CircuitBuilder::<F, D>::new(CircuitConfig::standard_recursion_config());
         let target = WithdrawalStepTarget::new::<F, C>(
             &mut builder,
@@ -439,16 +443,59 @@ where
         );
         let public_inputs = target.new_pis.clone();
         builder.register_public_inputs(&public_inputs.to_vec(&withdrawal_chain_cd.config));
-        let data = builder.build::<C>();
-        let dummy_proof = DummyProof::new(withdrawal_chain_cd);
+        (builder, target, public_inputs)
+    }
 
+    fn from_parts(
+        data: CircuitData<F, C, D>,
+        target: WithdrawalStepTarget<D>,
+        public_inputs: WithdrawalStepPublicInputsTarget,
+        dummy_proof: ProofWithPublicInputs<F, C, D>,
+        single_withdrawal_vd: &VerifierCircuitData<F, C, D>,
+    ) -> Self {
         Self {
             data,
             target,
             public_inputs,
-            dummy_proof: dummy_proof.proof,
+            dummy_proof,
             single_withdrawal_vd: single_withdrawal_vd.clone(),
         }
+    }
+
+    pub fn new(
+        withdrawal_chain_cd: &CommonCircuitData<F, D>,
+        single_withdrawal_vd: &VerifierCircuitData<F, C, D>,
+    ) -> Self {
+        let (builder, target, public_inputs) =
+            Self::setup_builder(withdrawal_chain_cd, single_withdrawal_vd);
+        let data = builder.build::<C>();
+        let dummy_proof = DummyProof::new(withdrawal_chain_cd);
+        Self::from_parts(data, target, public_inputs, dummy_proof.proof, single_withdrawal_vd)
+    }
+
+    pub async fn new_async(
+        withdrawal_chain_cd: &CommonCircuitData<F, D>,
+        single_withdrawal_vd: &VerifierCircuitData<F, C, D>,
+    ) -> Self {
+        let (builder, target, public_inputs) =
+            Self::setup_builder(withdrawal_chain_cd, single_withdrawal_vd);
+        let data = builder.build_async::<C>().await;
+        let dummy_proof = DummyProof::new_async(withdrawal_chain_cd).await;
+        Self::from_parts(data, target, public_inputs, dummy_proof.proof, single_withdrawal_vd)
+    }
+
+    fn prepare_witness(
+        &self,
+        withdrawal_chain_vd: &VerifierCircuitData<F, C, D>,
+        witness: &WithdrawalStepWitness<F, C, D>,
+    ) -> Result<PartialWitness<F>, WithdrawalStepError> {
+        let new_pis = witness.to_public_inputs(withdrawal_chain_vd, &self.single_withdrawal_vd)?;
+        let mut pw = PartialWitness::<F>::new();
+        self.target
+            .set_witness(&mut pw, witness, &new_pis, &self.dummy_proof);
+        self.public_inputs
+            .set_witness::<F, C, D, _>(&mut pw, &new_pis);
+        Ok(pw)
     }
 
     pub fn prove(
@@ -456,14 +503,21 @@ where
         withdrawal_chain_vd: &VerifierCircuitData<F, C, D>,
         witness: &WithdrawalStepWitness<F, C, D>,
     ) -> Result<ProofWithPublicInputs<F, C, D>, WithdrawalStepError> {
-        let new_pis = witness.to_public_inputs(withdrawal_chain_vd, &self.single_withdrawal_vd)?;
-        let mut pw = PartialWitness::<F>::new();
-        self.target
-            .set_witness(&mut pw, witness, &new_pis, &self.dummy_proof);
-        self.public_inputs
-            .set_witness::<F, C, D, _>(&mut pw, &new_pis);
+        let pw = self.prepare_witness(withdrawal_chain_vd, witness)?;
         self.data
             .prove(pw)
+            .map_err(|e| WithdrawalStepError::FailedToProve(e.to_string()))
+    }
+
+    pub async fn prove_async(
+        &self,
+        withdrawal_chain_vd: &VerifierCircuitData<F, C, D>,
+        witness: &WithdrawalStepWitness<F, C, D>,
+    ) -> Result<ProofWithPublicInputs<F, C, D>, WithdrawalStepError> {
+        let pw = self.prepare_witness(withdrawal_chain_vd, witness)?;
+        self.data
+            .prove_async(pw)
+            .await
             .map_err(|e| WithdrawalStepError::FailedToProve(e.to_string()))
     }
 

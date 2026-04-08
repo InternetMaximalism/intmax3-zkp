@@ -1,5 +1,9 @@
 /target
 tests/fixtures/*.bin
+self_certs/
+node_modules/
+pkg/
+.DS_Store
 
 # WHIR Keccak256Chain fixture (regenerated from Rust tests)
 contracts/test/data/whir/keccak256chain_verifier_data.json
@@ -8,10 +12,3 @@ contracts/test/data/whir/keccak256chain_verifier_data.json
 AGENTS.md
 gnark/gnark-wrapper
 gnark/gnark-plonky2-verifier/testdata/
-
-# macOS
-.DS_Store
-
-# Claude Code internals
-.claude/
-CLAUDE.md

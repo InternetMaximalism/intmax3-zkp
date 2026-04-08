@@ -67,6 +67,28 @@ where
         }
     }
 
+    pub async fn new_async(single_withdrawal_vd: &VerifierCircuitData<F, C, D>) -> Self {
+        let withdrawal_chain_cd =
+            WithdrawalChainCircuit::<F, C, D>::generate_cd_async().await;
+        let withdrawal_step_circuit =
+            WithdrawalStepCircuit::<F, C, D>::new_async(&withdrawal_chain_cd, single_withdrawal_vd)
+                .await;
+        let withdrawal_chain_circuit = WithdrawalChainCircuit::<F, C, D>::new_async(
+            &withdrawal_chain_cd,
+            &withdrawal_step_circuit.data.verifier_data(),
+        )
+        .await;
+        let withdrawal_circuit =
+            WithdrawalCircuit::<F, C, D>::new_async(&withdrawal_chain_circuit.data.verifier_data())
+                .await;
+
+        Self {
+            withdrawal_step_circuit,
+            withdrawal_chain_circuit,
+            withdrawal_circuit,
+        }
+    }
+
     pub fn withdrawal_step_vd(&self) -> VerifierCircuitData<F, C, D> {
         self.withdrawal_step_circuit.data.verifier_data()
     }
@@ -104,6 +126,39 @@ where
             withdrawal_aggregator,
             ext_public_state,
         )?;
+        Ok(withdrawal_proof)
+    }
+
+    pub async fn prove_step_async(
+        &self,
+        witness: &WithdrawalStepWitness<F, C, D>,
+    ) -> Result<ProofWithPublicInputs<F, C, D>, WithdrawalProcessorError> {
+        let withdrawal_chain_vd = self.withdrawal_chain_vd();
+        let withdrawal_step_proof = self
+            .withdrawal_step_circuit
+            .prove_async(&withdrawal_chain_vd, witness)
+            .await?;
+        let withdrawal_chain_proof = self
+            .withdrawal_chain_circuit
+            .prove_async(&withdrawal_step_proof)
+            .await?;
+        Ok(withdrawal_chain_proof)
+    }
+
+    pub async fn prove_final_async(
+        &self,
+        withdrawal_chain_proof: &ProofWithPublicInputs<F, C, D>,
+        withdrawal_aggregator: Address,
+        ext_public_state: &ExtendedPublicState,
+    ) -> Result<ProofWithPublicInputs<F, C, D>, WithdrawalProcessorError> {
+        let withdrawal_proof = self
+            .withdrawal_circuit
+            .prove_async(
+                withdrawal_chain_proof,
+                withdrawal_aggregator,
+                ext_public_state,
+            )
+            .await?;
         Ok(withdrawal_proof)
     }
 }
