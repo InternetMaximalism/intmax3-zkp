@@ -877,15 +877,18 @@ contract IntmaxRollup {
     }
 
     /// @dev External helper so _verifyMle can try/catch on MLE verification.
-    /// TODO: Pass whirParams, protocolId, sessionId, evaluations from calldata or storage.
-    ///       Currently uses placeholder empty values — will be connected in a follow-up.
+    /// TODO: Pass whirParams, protocolId, sessionIds, evaluations, preprocessedCommitmentRoot
+    ///       from calldata or storage. Currently uses placeholder empty values.
     function _verifyMleExternal(MleVerifier.MleProof calldata mleProof) external view returns (bool) {
         SpongefishWhirVerify.WhirParams memory emptyParams;
         emptyParams.rounds = new SpongefishWhirVerify.RoundParams[](0);
         emptyParams.evaluationPoint = new GoldilocksExt3.Ext3[](0);
         emptyParams.evaluationPoint2 = new GoldilocksExt3.Ext3[](0);
         GoldilocksExt3.Ext3[] memory emptyEvals = new GoldilocksExt3.Ext3[](0);
-        return mleVerifier.verify(mleProof, mleDegreeBits, emptyParams, "", "", emptyEvals);
+        return mleVerifier.verify(
+            mleProof, mleDegreeBits, bytes32(0), emptyParams,
+            "", "", "", emptyEvals, emptyEvals
+        );
     }
 
     // -----------------------------------------------------------------------

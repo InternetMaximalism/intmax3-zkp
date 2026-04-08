@@ -18,7 +18,7 @@ use intmax3_zkp::{
     },
     ethereum_types::{address::Address, bytes32::Bytes32},
     utils::{
-        mle_prover::{prove_with_mle, export_mle_json},
+        mle_prover::{prove_with_mle, setup_mle_vk, export_mle_json},
         wrapper::WrapperCircuit,
         conversion::ToU64,
     },
@@ -105,6 +105,10 @@ fn main() -> anyhow::Result<()> {
     // -----------------------------------------------------------------------
     // Step 3: Generate MLE proof
     // -----------------------------------------------------------------------
+    // Setup: compute verification key (deterministic, once per circuit)
+    let vk = setup_mle_vk::<F, C, D>(&wrapper.data);
+    eprintln!("[e2e] MLE VK computed (preprocessed_commitment_root: {} bytes)", vk.preprocessed_commitment_root.len());
+
     eprintln!("[e2e] Step 3: Generate MLE proof");
 
     let mut pw = PartialWitness::new();
@@ -116,7 +120,7 @@ fn main() -> anyhow::Result<()> {
     )?;
     eprintln!("[e2e] MLE proof generated in {:?}", mle_result.prove_time);
 
-    intmax3_zkp::utils::mle_prover::verify_mle_proof(&wrapper.data, &mle_result.proof)?;
+    intmax3_zkp::utils::mle_prover::verify_mle_proof(&wrapper.data, &vk, &mle_result.proof)?;
     eprintln!("[e2e] MLE proof verified locally");
 
     // -----------------------------------------------------------------------

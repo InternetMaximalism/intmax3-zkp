@@ -302,11 +302,14 @@ contract IntmaxRollupTest is Test {
     ///      be structurally valid for abi.encode().
     function _defaultMleProof() internal pure returns (MleVerifier.MleProof memory proof) {
         // All fields default to zero/empty, which is fine for non-E2E tests.
-        // Explicitly set dynamic arrays to empty so abi.encode is deterministic.
-        proof.whirTranscript = "";
-        proof.whirHints = "";
+        proof.circuitDigest = new uint256[](0);
+        proof.preprocessedWhirTranscript = "";
+        proof.preprocessedWhirHints = "";
+        proof.preprocessedIndividualEvals = new uint256[](0);
+        proof.witnessWhirTranscript = "";
+        proof.witnessWhirHints = "";
+        proof.witnessIndividualEvals = new uint256[](0);
         proof.publicInputs = new uint256[](0);
-        proof.individualEvals = new uint256[](0);
         proof.tau = new uint256[](0);
         proof.tauPerm = new uint256[](0);
     }
@@ -565,7 +568,7 @@ contract IntmaxRollupTest is Test {
         MleVerifier.MleProof memory mleProof = _defaultMleProof();
 
         // Corrupt the commitmentRoot
-        mleProof.whirTranscript = hex"DEADBEEF";
+        mleProof.witnessWhirTranscript = hex"DEADBEEF";
 
         bool result = rollup.verify(
             mleProof,
@@ -759,7 +762,7 @@ contract IntmaxRollupTest is Test {
         IntmaxRollup.ValidityPublicInputs memory vpis = _defaultValidityPIs(stateRoot);
 
         // Modify MLE proof AFTER proofBytes was created, so params binding fails
-        mleProof.whirTranscript = hex"DEAD";
+        mleProof.witnessWhirTranscript = hex"DEAD";
 
         // Fraud NOT confirmed: proof params binding fails (mleProof was modified after creating
         // proofBytes), so keccak256(abi.encode(groth16, mleProof)) != keccak256(proofBytes).
@@ -933,7 +936,7 @@ contract IntmaxRollupTest is Test {
         MleVerifier.MleProof memory mleProof = _defaultMleProof();
 
         // Corrupt commitmentRoot
-        mleProof.whirTranscript = hex"DEADDEADDEADDEAD";
+        mleProof.witnessWhirTranscript = hex"DEADDEADDEADDEAD";
 
         // Compute vpis BEFORE posting (initial state: everything zero).
         // blockHashChainAt[0] stays 0 forever, so PI binding will pass.
@@ -974,9 +977,9 @@ contract IntmaxRollupTest is Test {
         MleVerifier.MleProof memory mleProof = _defaultMleProof();
 
         // Corrupt WHIR transcript with random data
-        mleProof.whirTranscript = hex"DEADBEEFCAFEBABE123456789ABCDEF0";
+        mleProof.witnessWhirTranscript = hex"DEADBEEFCAFEBABE123456789ABCDEF0";
         // Also corrupt evalValue
-        mleProof.evalValue = 0xBADBADBAD;
+        mleProof.witnessEvalValue = 0xBADBADBAD;
 
         // Compute vpis BEFORE posting (initial zero state)
         bytes32 stateRoot = keccak256("random_bytes_fraud");
