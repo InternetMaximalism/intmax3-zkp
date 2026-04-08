@@ -6,8 +6,3 @@ rustflags = [
     "-C", "link-args=-z stack-size=16777216",         # 16MB stack (default 1MB is too small for deep recursion)
     '--cfg', 'getrandom_backend="wasm_js"'            # Use JS random source for WASM
 ]
-
-[unstable]
-# Recompile std from source with atomics support (prebuilt std lacks it).
-# "panic_abort" is the crate name, not a setting — actual panic behavior is set in Cargo.toml.
-build-std = ["std", "panic_abort"]

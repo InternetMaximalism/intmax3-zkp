@@ -370,13 +370,18 @@ openssl req -x509 -newkey rsa:2048 \
 
 #### 3. Build WASM
 
+The WASM build requires recompiling `std` from source with atomics support (`build-std`), because the pre-built WASM `std` does not include atomics — which are needed for `SharedArrayBuffer` and multi-threaded Web Workers (rayon).
+
+
 ```bash
 # CPU-only
-wasm-pack build --release --target web
+CARGO_UNSTABLE_BUILD_STD=std,panic_abort wasm-pack build --release --target web
 
 # With WebGPU acceleration (recommended)
-wasm-pack build --release --target web -- --features gpu_merkle
+CARGO_UNSTABLE_BUILD_STD=std,panic_abort wasm-pack build --release --target web -- --features gpu_merkle
 ```
+
+We pass `build-std` via the `CARGO_UNSTABLE_BUILD_STD` environment variable rather than putting it in `.cargo/config.toml` because Cargo's `[unstable]` section is **global** — it cannot be scoped to a specific target like `[target.wasm32-unknown-unknown]`. If `build-std` were in `config.toml`, it would also recompile `std` for native builds, causing "duplicate lang item in crate `core`" errors that break `cargo test --release`.
 
 #### 4. Install dependencies and start server
 
