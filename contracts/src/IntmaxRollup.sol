@@ -44,7 +44,7 @@ interface IGnarkVerifier {
 ///       on-chain block_hash_chain snapshots and accept the new state root.
 ///
 ///  Blob format (both finalize and fraudProof):
-///    blob = abi.encode(Groth16Params, MleVerifier.MleProof)
+///    blob = abi.encode(Groth16Params, MleVerifier.MleProof, GoldilocksExt3.Ext3[])
 ///
 ///  Verification checks (finalize — both must pass):
 ///    a) Blob commitment (KZG multi-point opening)
@@ -232,6 +232,16 @@ contract IntmaxRollup {
     ///         Production deployments MUST set degreeBits > 0 with correct VK parameters.
     MleVk public mleVk;
 
+    /// @notice WHIR protocol parameters — fixed per circuit, set at deploy time.
+    ///         Stored in storage because WhirParams contains dynamic arrays (rounds[]).
+    SpongefishWhirVerify.WhirParams internal _whirParams;
+
+    /// @notice WHIR protocol ID (64 bytes) — domain separation for the WHIR PCS.
+    bytes public whirProtocolId;
+
+    /// @notice WHIR session ID for split-commit mode (32 bytes).
+    bytes public whirSplitSessionId;
+
     uint256 private constant _NOT_ENTERED = 1;
     uint256 private constant _ENTERED = 2;
     uint256 private _status = _NOT_ENTERED;
@@ -335,6 +345,9 @@ contract IntmaxRollup {
         address _fraudTreasury,
         Groth16Verifier.VerifyingKey memory verifyingKey,
         MleVk memory _mleVk,
+        SpongefishWhirVerify.WhirParams memory whirParams_,
+        bytes memory _whirProtocolId,
+        bytes memory _whirSplitSessionId,
         MleVerifier _mleVerifier,
         IGnarkVerifier _gnarkVerifier,
         bytes32 _genesisStateRoot
@@ -342,6 +355,36 @@ contract IntmaxRollup {
         fraudTreasury = _fraudTreasury;
         _setGroth16VerifyingKey(verifyingKey);
         mleVk = _mleVk;
+        // Deep-copy WhirParams to storage (scalar fields + dynamic arrays)
+        _whirParams.numVariables = whirParams_.numVariables;
+        _whirParams.foldingFactor = whirParams_.foldingFactor;
+        _whirParams.numVectors = whirParams_.numVectors;
+        _whirParams.numCommitments = whirParams_.numCommitments;
+        _whirParams.outDomainSamples = whirParams_.outDomainSamples;
+        _whirParams.inDomainSamples = whirParams_.inDomainSamples;
+        _whirParams.initialSumcheckRounds = whirParams_.initialSumcheckRounds;
+        _whirParams.numRounds = whirParams_.numRounds;
+        _whirParams.finalSumcheckRounds = whirParams_.finalSumcheckRounds;
+        _whirParams.finalSize = whirParams_.finalSize;
+        _whirParams.initialCodewordLength = whirParams_.initialCodewordLength;
+        _whirParams.initialMerkleDepth = whirParams_.initialMerkleDepth;
+        _whirParams.initialDomainGenerator = whirParams_.initialDomainGenerator;
+        _whirParams.initialInterleavingDepth = whirParams_.initialInterleavingDepth;
+        _whirParams.initialNumVariables = whirParams_.initialNumVariables;
+        _whirParams.initialCosetSize = whirParams_.initialCosetSize;
+        _whirParams.initialNumCosets = whirParams_.initialNumCosets;
+        // Copy dynamic arrays
+        for (uint256 i = 0; i < whirParams_.rounds.length; i++) {
+            _whirParams.rounds.push(whirParams_.rounds[i]);
+        }
+        for (uint256 i = 0; i < whirParams_.evaluationPoint.length; i++) {
+            _whirParams.evaluationPoint.push(whirParams_.evaluationPoint[i]);
+        }
+        for (uint256 i = 0; i < whirParams_.evaluationPoint2.length; i++) {
+            _whirParams.evaluationPoint2.push(whirParams_.evaluationPoint2[i]);
+        }
+        whirProtocolId = _whirProtocolId;
+        whirSplitSessionId = _whirSplitSessionId;
         mleVerifier = _mleVerifier;
         gnarkVerifier = _gnarkVerifier;
         latestFinalizedStateRoot = _genesisStateRoot;
@@ -594,10 +637,11 @@ contract IntmaxRollup {
     ///         Both verifiers must pass for the result to be true.
     function verify(
         MleVerifier.MleProof calldata mleProof,
+        GoldilocksExt3.Ext3[] calldata whirEvals,
         Groth16Params memory groth16
     ) external view returns (bool) {
         // Verify MLE proof
-        if (!_verifyMle(mleProof)) return false;
+        if (!_verifyMle(mleProof, whirEvals)) return false;
 
         // Verify Groth16
         if (!_verifyGroth16(groth16)) return false;
@@ -616,6 +660,7 @@ contract IntmaxRollup {
         bytes32 stateRoot,
         ValidityPublicInputs calldata validityPIs,
         MleVerifier.MleProof calldata mleProof,
+        GoldilocksExt3.Ext3[] calldata whirEvals,
         Groth16Params memory groth16
     ) external nonReentrant returns (bool) {
         Submission storage sub = _submissions[submissionId];
@@ -623,7 +668,7 @@ contract IntmaxRollup {
         if (sub.finalized) return false;
 
         bool valid;
-        try this.fullVerify(stateRoot, validityPIs, mleProof, groth16) returns (bool v) {
+        try this.fullVerify(stateRoot, validityPIs, mleProof, whirEvals, groth16) returns (bool v) {
             valid = v;
         } catch {
             valid = false;
@@ -669,6 +714,7 @@ contract IntmaxRollup {
         bytes calldata proofBytes,
         ValidityPublicInputs calldata validityPIs,
         MleVerifier.MleProof calldata mleProof,
+        GoldilocksExt3.Ext3[] calldata whirEvals,
         KZGProof calldata kzg,
         Groth16Params memory groth16
     ) external nonReentrant returns (bool fraudConfirmed) {
@@ -694,7 +740,7 @@ contract IntmaxRollup {
         bool confirmed = _verifyFraud(
             submissionId, blobVersionedHash, stateRoot,
             proofBytes, validityPIs,
-            mleProof, kzg, groth16
+            mleProof, whirEvals, kzg, groth16
         );
         if (!confirmed) return false;
 
@@ -743,6 +789,7 @@ contract IntmaxRollup {
         bytes32 stateRoot,
         ValidityPublicInputs calldata validityPIs,
         MleVerifier.MleProof calldata mleProof,
+        GoldilocksExt3.Ext3[] calldata whirEvals,
         Groth16Params memory groth16
     ) external view returns (bool) {
         // 1. PI binding to on-chain state
@@ -757,7 +804,7 @@ contract IntmaxRollup {
         if (!_groth16PIHashMatches(groth16.pubInputs, piHash)) return false;
 
         // 3. MLE proof verification
-        if (!_verifyMle(mleProof)) return false;
+        if (!_verifyMle(mleProof, whirEvals)) return false;
 
         // 4. Groth16 verification via gnark verifier (with commitment support)
         if (!_verifyGroth16(groth16)) return false;
@@ -785,6 +832,7 @@ contract IntmaxRollup {
         bytes calldata proofBytes,
         ValidityPublicInputs calldata validityPIs,
         MleVerifier.MleProof calldata mleProof,
+        GoldilocksExt3.Ext3[] calldata whirEvals,
         KZGProof calldata kzg,
         Groth16Params memory groth16
     ) internal view returns (bool) {
@@ -813,8 +861,10 @@ contract IntmaxRollup {
         if (validityPIs.finalBlockChain != blockHashChainAt[validityPIs.finalBlockNumber]) return false;
         if (validityPIs.finalExtCommitment != stateRoot) return false;
 
-        // 4. Proof params binding — ensures we verify exactly what was committed
-        if (keccak256(abi.encode(groth16, mleProof)) != keccak256(proofBytes)) {
+        // 4. Proof params binding — ensures we verify exactly what was committed.
+        //    SECURITY: whirEvals is included so an attacker cannot substitute
+        //    different WHIR evaluations to falsely accuse a valid proof.
+        if (keccak256(abi.encode(groth16, mleProof, whirEvals)) != keccak256(proofBytes)) {
             return false;
         }
 
@@ -825,7 +875,7 @@ contract IntmaxRollup {
         if (!_groth16PIHashMatches(groth16.pubInputs, piHash)) return true;
 
         // (b) MLE proof verification fails
-        if (!_verifyMle(mleProof)) return true;
+        if (!_verifyMle(mleProof, whirEvals)) return true;
 
         // (c) Groth16 verification fails
         if (!_verifyGroth16(groth16)) return true;
@@ -879,12 +929,15 @@ contract IntmaxRollup {
     ///      SECURITY: When mleVk.degreeBits == 0, MLE verification is disabled.
     ///      This is intentional for deployments that only use Groth16 verification.
     ///      Production deployments MUST set degreeBits > 0.
-    function _verifyMle(MleVerifier.MleProof calldata mleProof) internal view returns (bool) {
+    function _verifyMle(
+        MleVerifier.MleProof calldata mleProof,
+        GoldilocksExt3.Ext3[] calldata whirEvals
+    ) internal view returns (bool) {
         // SECURITY: Skip MLE verification when not configured.
         // Production deployments MUST set mleVk.degreeBits > 0.
         if (mleVk.degreeBits == 0) return true;
 
-        try this._verifyMleExternal(mleProof) returns (bool v) {
+        try this._verifyMleExternal(mleProof, whirEvals) returns (bool v) {
             return v;
         } catch {
             return false;
@@ -892,21 +945,14 @@ contract IntmaxRollup {
     }
 
     /// @dev External helper so _verifyMle can try/catch on MLE verification.
-    ///      Uses stored MLE VK parameters for circuit binding.
-    ///      TODO: whirParams, protocolId, splitSessionId, and whirEvals must be
-    ///      passed via calldata or stored on-chain for full WHIR PCS verification.
-    ///      Currently only sumcheck + constraint checks are bound to the VK;
-    ///      WHIR PCS verification uses placeholder empty values.
-    function _verifyMleExternal(MleVerifier.MleProof calldata mleProof) external view returns (bool) {
-        // SECURITY: VK parameters from storage — binds verification to the deployed circuit.
-        SpongefishWhirVerify.WhirParams memory whirParams;
-        whirParams.rounds = new SpongefishWhirVerify.RoundParams[](0);
-        whirParams.evaluationPoint = new GoldilocksExt3.Ext3[](0);
-        whirParams.evaluationPoint2 = new GoldilocksExt3.Ext3[](0);
-        // TODO: Store and use real whirParams, protocolId, splitSessionId, whirEvals
-        //       for full WHIR PCS verification. Currently only sumcheck + constraints
-        //       + VK binding checks are performed with real parameters.
-        GoldilocksExt3.Ext3[] memory emptyEvals = new GoldilocksExt3.Ext3[](0);
+    ///      Uses stored VK parameters (mleVk, _whirParams, whirProtocolId,
+    ///      whirSplitSessionId) and per-proof whirEvals from calldata.
+    function _verifyMleExternal(
+        MleVerifier.MleProof calldata mleProof,
+        GoldilocksExt3.Ext3[] calldata whirEvals
+    ) external view returns (bool) {
+        // SECURITY: Load WHIR params from storage — deep copy to memory for the library call.
+        SpongefishWhirVerify.WhirParams memory whirParams = _loadWhirParams();
         return mleVerifier.verify(
             mleProof,
             mleVk.degreeBits,
@@ -914,8 +960,47 @@ contract IntmaxRollup {
             mleVk.numConstants,
             mleVk.numRoutedWires,
             whirParams,
-            "", "", emptyEvals
+            whirProtocolId,
+            whirSplitSessionId,
+            whirEvals
         );
+    }
+
+    /// @dev Load WhirParams from storage into memory.
+    function _loadWhirParams() private view returns (SpongefishWhirVerify.WhirParams memory p) {
+        p.numVariables = _whirParams.numVariables;
+        p.foldingFactor = _whirParams.foldingFactor;
+        p.numVectors = _whirParams.numVectors;
+        p.numCommitments = _whirParams.numCommitments;
+        p.outDomainSamples = _whirParams.outDomainSamples;
+        p.inDomainSamples = _whirParams.inDomainSamples;
+        p.initialSumcheckRounds = _whirParams.initialSumcheckRounds;
+        p.numRounds = _whirParams.numRounds;
+        p.finalSumcheckRounds = _whirParams.finalSumcheckRounds;
+        p.finalSize = _whirParams.finalSize;
+        p.initialCodewordLength = _whirParams.initialCodewordLength;
+        p.initialMerkleDepth = _whirParams.initialMerkleDepth;
+        p.initialDomainGenerator = _whirParams.initialDomainGenerator;
+        p.initialInterleavingDepth = _whirParams.initialInterleavingDepth;
+        p.initialNumVariables = _whirParams.initialNumVariables;
+        p.initialCosetSize = _whirParams.initialCosetSize;
+        p.initialNumCosets = _whirParams.initialNumCosets;
+        // Copy dynamic arrays from storage to memory
+        uint256 rLen = _whirParams.rounds.length;
+        p.rounds = new SpongefishWhirVerify.RoundParams[](rLen);
+        for (uint256 i = 0; i < rLen; i++) {
+            p.rounds[i] = _whirParams.rounds[i];
+        }
+        uint256 epLen = _whirParams.evaluationPoint.length;
+        p.evaluationPoint = new GoldilocksExt3.Ext3[](epLen);
+        for (uint256 i = 0; i < epLen; i++) {
+            p.evaluationPoint[i] = _whirParams.evaluationPoint[i];
+        }
+        uint256 ep2Len = _whirParams.evaluationPoint2.length;
+        p.evaluationPoint2 = new GoldilocksExt3.Ext3[](ep2Len);
+        for (uint256 i = 0; i < ep2Len; i++) {
+            p.evaluationPoint2[i] = _whirParams.evaluationPoint2[i];
+        }
     }
 
     // -----------------------------------------------------------------------
