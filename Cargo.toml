@@ -35,6 +35,7 @@ ark-ff = { version = "0.5", features = ["asm", "std"], optional = true }
 ark-std = { version = "0.5", features = ["std"], optional = true }
 sha3 = { version = "0.10", optional = true }
 ciborium = { version = "0.2", optional = true }
+blake3 = { version = "=1.8.3", optional = true }  # Pin: blake3 1.8.4 pulls digest 0.11 which breaks whir
 
 # Threading
 rayon = "1.8"
@@ -63,7 +64,7 @@ web-time = "0.2"
 [features]
 default = []
 gpu_merkle = ["plonky2/gpu_merkle", "starky/gpu_merkle", "plonky2_keccak/gpu_merkle"]
-whir = ["dep:whir", "dep:ark-ff", "dep:ark-std", "dep:sha3", "dep:ciborium"]
+whir = ["dep:whir", "dep:ark-ff", "dep:ark-std", "dep:sha3", "dep:ciborium", "dep:blake3"]
 
 [patch."https://github.com/InternetMaximalism/polygon-plonky2.git"]
 plonky2 = { git = "https://github.com/InternetMaximalism/Lita-Plonky2.git", branch = "wasm" }
