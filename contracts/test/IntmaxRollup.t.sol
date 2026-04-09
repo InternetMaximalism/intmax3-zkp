@@ -282,12 +282,22 @@ contract IntmaxRollupTest is Test {
         bytes32 stateRoot,
         address poster
     ) internal returns (KZGProof memory kzg, bytes32 blobHash) {
+        return _postWithKZG_on(rollup, batch, proofBytes, stateRoot, poster);
+    }
+
+    function _postWithKZG_on(
+        IntmaxRollup target,
+        IntmaxRollup.SubBlock[] memory batch,
+        bytes memory proofBytes,
+        bytes32 stateRoot,
+        address poster
+    ) internal returns (KZGProof memory kzg, bytes32 blobHash) {
         (kzg, blobHash) = _computeKZGProof(proofBytes);
         bytes32[] memory hs = new bytes32[](1);
         hs[0] = blobHash;
         vm.blobhashes(hs);
         vm.prank(poster);
-        rollup.postBlockAndSubmit{value: 1 ether}(
+        target.postBlockAndSubmit{value: 1 ether}(
             batch, keccak256(proofBytes), uint32(proofBytes.length), stateRoot
         );
     }
@@ -296,8 +306,13 @@ contract IntmaxRollupTest is Test {
     // MLE proof helper — structurally valid but dummy (for non-E2E tests)
     // -----------------------------------------------------------------------
 
+    /// @dev Return an empty MleVk (degreeBits=0 → MLE verification disabled).
+    function _emptyMleVk() internal pure returns (IntmaxRollup.MleVk memory vk) {
+        // All fields default to zero. degreeBits=0 skips MLE verification.
+    }
+
     /// @dev Return a default MleProof with empty/zero values.
-    ///      Non-E2E tests deploy the rollup with mleDegreeBits=0, so MLE
+    ///      Non-E2E tests deploy the rollup with mleVk.degreeBits=0, so MLE
     ///      verification is effectively a no-op.  This proof only needs to
     ///      be structurally valid for abi.encode().
     function _defaultMleProof() internal pure returns (MleVerifier.MleProof memory proof) {
@@ -339,12 +354,12 @@ contract IntmaxRollupTest is Test {
         gnarkVerifierContract = new GnarkVerifier();
         MleVerifier mleVerifierContract = new MleVerifier();
 
-        // Non-E2E rollup: mleDegreeBits = 0 to skip MLE verification
+        // Non-E2E rollup: mleVk.degreeBits = 0 to skip MLE verification
         // (non-E2E tests use synthetic Groth16 proofs with arbitrary piHash)
         rollup = new IntmaxRollup(
             fraudTreasury,
             _groth16Vk(),
-            0, // mleDegreeBits = 0 (skip MLE verification)
+            _emptyMleVk(), // degreeBits = 0 → skip MLE verification
             mleVerifierContract,
             IGnarkVerifier(address(0)),
             bytes32(0)
@@ -356,7 +371,7 @@ contract IntmaxRollupTest is Test {
         e2eRollup = new IntmaxRollup(
             fraudTreasury,
             _groth16Vk(),
-            0, // mleDegreeBits for e2e (use 0 for now until real MLE fixtures exist)
+            _emptyMleVk(), // degreeBits = 0 (use empty VK until real MLE fixtures exist)
             mleVerifierContract,
             IGnarkVerifier(address(gnarkVerifierContract)),
             e2eGenesisRoot
@@ -563,12 +578,23 @@ contract IntmaxRollupTest is Test {
     }
 
     function test_verify_invalidProof_returnsFalse() public {
-        MleVerifier.MleProof memory mleProof = _defaultMleProof();
+        // Deploy a rollup with MLE enabled (degreeBits > 0)
+        // so that invalid MLE proofs are actually rejected.
+        IntmaxRollup.MleVk memory enabledVk = IntmaxRollup.MleVk({
+            degreeBits: 13,
+            preprocessedRoot: bytes32(0),
+            numConstants: 0,
+            numRoutedWires: 0
+        });
+        IntmaxRollup mleRollup = new IntmaxRollup(
+            fraudTreasury, _groth16Vk(), enabledVk,
+            rollup.mleVerifier(), IGnarkVerifier(address(0)), bytes32(0)
+        );
 
-        // Corrupt the commitmentRoot
+        MleVerifier.MleProof memory mleProof = _defaultMleProof();
         mleProof.whirTranscript = hex"DEADBEEF";
 
-        bool result = rollup.verify(
+        bool result = mleRollup.verify(
             mleProof,
             _groth16()
         );
@@ -931,6 +957,20 @@ contract IntmaxRollupTest is Test {
     ///         vpis computed BEFORE posting so finalBlockNumber=0 and
     ///         blockHashChainAt[0]=0 always match.
     function test_fraudProof_e2e_corruptedMleCommitment() public {
+        // Deploy a rollup with MLE enabled (degreeBits > 0)
+        // to test that corrupted MLE proofs trigger fraud detection.
+        IntmaxRollup.MleVk memory enabledVk = IntmaxRollup.MleVk({
+            degreeBits: 13,
+            preprocessedRoot: bytes32(0),
+            numConstants: 0,
+            numRoutedWires: 0
+        });
+        MleVerifier mleVerifierContract = new MleVerifier();
+        IntmaxRollup mleRollup = new IntmaxRollup(
+            fraudTreasury, _groth16Vk(), enabledVk,
+            mleVerifierContract, IGnarkVerifier(address(0)), bytes32(0)
+        );
+
         MleVerifier.MleProof memory mleProof = _defaultMleProof();
 
         // Corrupt commitmentRoot
@@ -953,25 +993,38 @@ contract IntmaxRollupTest is Test {
         ids[0] = 50;
         IntmaxRollup.SubBlock[] memory batch = _singleBlockBatch(11, ids, 900, bytes32(uint256(0xE2E)));
 
-        (KZGProof memory kzg, bytes32 blobHash) = _postWithKZG(batch, proofBytes, stateRoot, submitter);
+        (KZGProof memory kzg, bytes32 blobHash) = _postWithKZG_on(mleRollup, batch, proofBytes, stateRoot, submitter);
 
         address reporter = makeAddr("e2e_reporter");
         vm.deal(reporter, 1 ether);
         vm.prank(reporter);
-        bool fraudConfirmed = rollup.fraudProof(
+        bool fraudConfirmed = mleRollup.fraudProof(
             0, blobHash, stateRoot, proofBytes, vpis,
             mleProof,
             kzg, groth16
         );
         assertTrue(fraudConfirmed, "Fraud: MLE rejects corrupted whirTranscript (condition c)");
 
-        IntmaxRollup.Submission memory sub = rollup.getSubmission(0);
+        IntmaxRollup.Submission memory sub = mleRollup.getSubmission(0);
         assertEq(sub.commitment, bytes32(0), "Submission deleted after fraud");
     }
 
     /// @notice E2E fraud proof: corrupted MLE pcsEvaluations and evalValue.
     ///         The MLE verifier rejects them, confirming fraud (condition c).
     function test_fraudProof_e2e_corruptedMleEvals() public {
+        // Deploy a rollup with MLE enabled (degreeBits > 0)
+        IntmaxRollup.MleVk memory enabledVk = IntmaxRollup.MleVk({
+            degreeBits: 13,
+            preprocessedRoot: bytes32(0),
+            numConstants: 0,
+            numRoutedWires: 0
+        });
+        MleVerifier mleVerifierContract = new MleVerifier();
+        IntmaxRollup mleRollup = new IntmaxRollup(
+            fraudTreasury, _groth16Vk(), enabledVk,
+            mleVerifierContract, IGnarkVerifier(address(0)), bytes32(0)
+        );
+
         MleVerifier.MleProof memory mleProof = _defaultMleProof();
 
         // Corrupt WHIR transcript with random data
@@ -995,19 +1048,19 @@ contract IntmaxRollupTest is Test {
         ids[0] = 60;
         IntmaxRollup.SubBlock[] memory batch = _singleBlockBatch(12, ids, 950, bytes32(uint256(0xBAD)));
 
-        (KZGProof memory kzg, bytes32 blobHash) = _postWithKZG(batch, proofBytes, stateRoot, submitter);
+        (KZGProof memory kzg, bytes32 blobHash) = _postWithKZG_on(mleRollup, batch, proofBytes, stateRoot, submitter);
 
         address reporter = makeAddr("random_reporter");
         vm.deal(reporter, 1 ether);
         vm.prank(reporter);
-        bool fraudConfirmed = rollup.fraudProof(
+        bool fraudConfirmed = mleRollup.fraudProof(
             0, blobHash, stateRoot, proofBytes, vpis,
             mleProof,
             kzg, groth16
         );
         assertTrue(fraudConfirmed, "Fraud: MLE rejects corrupted proof data (condition c)");
 
-        IntmaxRollup.Submission memory sub = rollup.getSubmission(0);
+        IntmaxRollup.Submission memory sub = mleRollup.getSubmission(0);
         assertEq(sub.commitment, bytes32(0), "Submission deleted after fraud");
     }
 
@@ -1496,7 +1549,7 @@ contract IntmaxRollupTest is Test {
         IntmaxRollup rollup2 = new IntmaxRollup(
             address(revTreasury),
             _groth16Vk(),
-            0, // mleDegreeBits = 0 (skip MLE verification)
+            _emptyMleVk(), // degreeBits = 0 → skip MLE verification
             rollup.mleVerifier(),
             IGnarkVerifier(address(0)),
             bytes32(0)

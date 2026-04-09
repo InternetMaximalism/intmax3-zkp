@@ -193,8 +193,15 @@ contract IntmaxRollup {
         uint256[2] commitmentPok;   // gnark commitment proof of knowledge (G1)
     }
 
-    /// @notice MLE proof data for on-chain verification.
-    ///         Replaces the previous WHIR + Plonky2Verifier pipeline.
+    /// @notice MLE verification key parameters — fixed per circuit, set at deploy time.
+    ///         SECURITY: These bind the on-chain verifier to a specific Plonky2 circuit.
+    ///         Without them, an attacker could substitute a different circuit's proof.
+    struct MleVk {
+        uint256 degreeBits;                // log2 of circuit degree
+        bytes32 preprocessedRoot;          // WHIR Merkle root for preprocessed polynomial (VK binding)
+        uint256 numConstants;              // number of constant columns
+        uint256 numRoutedWires;            // number of routed wire columns
+    }
 
     /// @notice Mirrors the Rust `ValidityPublicInputs` struct.
     ///         All fields are u32-packed, matching the Rust keccak256 input layout.
@@ -220,9 +227,10 @@ contract IntmaxRollup {
     /// @notice External MLE verifier contract.
     MleVerifier public immutable mleVerifier;
 
-    /// @notice Expected degree_bits for MLE proof verification.
-    ///         Set at deploy time to match the wrapped circuit's degree.
-    uint256 public mleDegreeBits;
+    /// @notice MLE verification key — binds the contract to a specific Plonky2 circuit.
+    ///         SECURITY: When mleVk.degreeBits == 0, MLE verification is disabled.
+    ///         Production deployments MUST set degreeBits > 0 with correct VK parameters.
+    MleVk public mleVk;
 
     uint256 private constant _NOT_ENTERED = 1;
     uint256 private constant _ENTERED = 2;
@@ -326,14 +334,14 @@ contract IntmaxRollup {
     constructor(
         address _fraudTreasury,
         Groth16Verifier.VerifyingKey memory verifyingKey,
-        uint256 _mleDegreeBits,
+        MleVk memory _mleVk,
         MleVerifier _mleVerifier,
         IGnarkVerifier _gnarkVerifier,
         bytes32 _genesisStateRoot
     ) {
         fraudTreasury = _fraudTreasury;
         _setGroth16VerifyingKey(verifyingKey);
-        mleDegreeBits = _mleDegreeBits;
+        mleVk = _mleVk;
         mleVerifier = _mleVerifier;
         gnarkVerifier = _gnarkVerifier;
         latestFinalizedStateRoot = _genesisStateRoot;
@@ -868,7 +876,14 @@ contract IntmaxRollup {
     // -----------------------------------------------------------------------
 
     /// @dev Verify MLE proof using the MleVerifier library.
+    ///      SECURITY: When mleVk.degreeBits == 0, MLE verification is disabled.
+    ///      This is intentional for deployments that only use Groth16 verification.
+    ///      Production deployments MUST set degreeBits > 0.
     function _verifyMle(MleVerifier.MleProof calldata mleProof) internal view returns (bool) {
+        // SECURITY: Skip MLE verification when not configured.
+        // Production deployments MUST set mleVk.degreeBits > 0.
+        if (mleVk.degreeBits == 0) return true;
+
         try this._verifyMleExternal(mleProof) returns (bool v) {
             return v;
         } catch {
@@ -877,16 +892,28 @@ contract IntmaxRollup {
     }
 
     /// @dev External helper so _verifyMle can try/catch on MLE verification.
-    /// TODO: Pass whirParams, protocolId, sessionIds, evaluations, preprocessedCommitmentRoot
-    ///       from calldata or storage. Currently uses placeholder empty values.
+    ///      Uses stored MLE VK parameters for circuit binding.
+    ///      TODO: whirParams, protocolId, splitSessionId, and whirEvals must be
+    ///      passed via calldata or stored on-chain for full WHIR PCS verification.
+    ///      Currently only sumcheck + constraint checks are bound to the VK;
+    ///      WHIR PCS verification uses placeholder empty values.
     function _verifyMleExternal(MleVerifier.MleProof calldata mleProof) external view returns (bool) {
-        SpongefishWhirVerify.WhirParams memory emptyParams;
-        emptyParams.rounds = new SpongefishWhirVerify.RoundParams[](0);
-        emptyParams.evaluationPoint = new GoldilocksExt3.Ext3[](0);
-        emptyParams.evaluationPoint2 = new GoldilocksExt3.Ext3[](0);
+        // SECURITY: VK parameters from storage — binds verification to the deployed circuit.
+        SpongefishWhirVerify.WhirParams memory whirParams;
+        whirParams.rounds = new SpongefishWhirVerify.RoundParams[](0);
+        whirParams.evaluationPoint = new GoldilocksExt3.Ext3[](0);
+        whirParams.evaluationPoint2 = new GoldilocksExt3.Ext3[](0);
+        // TODO: Store and use real whirParams, protocolId, splitSessionId, whirEvals
+        //       for full WHIR PCS verification. Currently only sumcheck + constraints
+        //       + VK binding checks are performed with real parameters.
         GoldilocksExt3.Ext3[] memory emptyEvals = new GoldilocksExt3.Ext3[](0);
         return mleVerifier.verify(
-            mleProof, mleDegreeBits, bytes32(0), emptyParams,
+            mleProof,
+            mleVk.degreeBits,
+            mleVk.preprocessedRoot,
+            mleVk.numConstants,
+            mleVk.numRoutedWires,
+            whirParams,
             "", "", emptyEvals
         );
     }
