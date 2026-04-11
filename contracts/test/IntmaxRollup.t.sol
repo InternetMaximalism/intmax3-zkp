@@ -330,7 +330,8 @@ contract IntmaxRollupTest is Test {
     ///      verification is effectively a no-op.  This proof only needs to
     ///      be structurally valid for abi.encode().
     function _defaultMleProof() internal pure returns (MleVerifier.MleProof memory proof) {
-        // All fields default to zero/empty, which is fine for non-E2E tests.
+        // All fields default to zero/empty, which is fine for non-E2E tests
+        // (mleVk.degreeBits == 0 → MLE verification skipped).
         proof.circuitDigest = new uint256[](0);
         proof.whirTranscript = "";
         proof.whirHints = "";
@@ -338,7 +339,6 @@ contract IntmaxRollupTest is Test {
         proof.witnessIndividualEvals = new uint256[](0);
         proof.publicInputs = new uint256[](0);
         proof.tau = new uint256[](0);
-        proof.tauPerm = new uint256[](0);
     }
 
     function _u(string memory json, string memory path) internal pure returns (uint256) {
