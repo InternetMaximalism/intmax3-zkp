@@ -53,3 +53,17 @@ harness = false
 name = "degree_report"
 harness = false
 
+# Force all transitive plonky2 deps to use the local submodule pinned at b3e0f051.
+# Branch HEAD (fd33b3dc) merged upstream main which bumped plonky2 0.2.2 -> 1.1.0
+# and changed the PartialWitness::set_target API to return Result, but plonky2_u32
+# / plonky2_bn254 / plonky2_keccak haven't been updated for the new API. b3e0f051
+# is the latest commit with the Solidity evaluationPoint binding security fix and
+# remains API-compatible with cb0f0467 plonky2_u32.
+[patch."https://github.com/InternetMaximalism/polygon-plonky2.git"]
+plonky2 = { path = "contracts/lib/polygon-plonky2/plonky2" }
+plonky2_field = { path = "contracts/lib/polygon-plonky2/field" }
+plonky2_util = { path = "contracts/lib/polygon-plonky2/util" }
+plonky2_maybe_rayon = { path = "contracts/lib/polygon-plonky2/maybe_rayon" }
+plonky2_mle = { path = "contracts/lib/polygon-plonky2/mle" }
+starky = { path = "contracts/lib/polygon-plonky2/starky" }
+
