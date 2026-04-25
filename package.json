@@ -1,0 +1,11 @@
+{
+  "name": "intmax3-zkp",
+  "version": "0.1.0",
+  "private": true,
+  "dependencies": {
+    "express": "^5.0.0"
+  },
+  "devDependencies": {
+    "playwright": "^1.55.0"
+  }
+}

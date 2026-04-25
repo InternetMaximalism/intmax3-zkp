@@ -407,17 +407,36 @@ where
         }
     }
 
-    pub fn prove(
+    fn prepare_witness(
         &self,
         witness: &ReceiveDepositWitness<F, C, D>,
-    ) -> Result<ProofWithPublicInputs<F, C, D>, ReceiveDepositError> {
+    ) -> Result<PartialWitness<F>, ReceiveDepositError> {
         let new_full_pis = witness.to_public_inputs(&self.balance_cd)?;
         let mut pw = PartialWitness::<F>::new();
         self.target
             .set_witness::<F, C, _>(&mut pw, witness, &new_full_pis);
         self.public_inputs.set_witness(&mut pw, &new_full_pis);
+        Ok(pw)
+    }
+
+    pub fn prove(
+        &self,
+        witness: &ReceiveDepositWitness<F, C, D>,
+    ) -> Result<ProofWithPublicInputs<F, C, D>, ReceiveDepositError> {
+        let pw = self.prepare_witness(witness)?;
         self.data
             .prove(pw)
+            .map_err(|e| ReceiveDepositError::FailedToProve(e.to_string()))
+    }
+
+    pub async fn prove_async(
+        &self,
+        witness: &ReceiveDepositWitness<F, C, D>,
+    ) -> Result<ProofWithPublicInputs<F, C, D>, ReceiveDepositError> {
+        let pw = self.prepare_witness(witness)?;
+        self.data
+            .prove_async(pw)
+            .await
             .map_err(|e| ReceiveDepositError::FailedToProve(e.to_string()))
     }
 

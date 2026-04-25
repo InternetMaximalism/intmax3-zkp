@@ -1,17 +1,70 @@
+# =============================================================================
+# Rust / Cargo
+# =============================================================================
 /target
+**/*.rs.bk
+*.profraw
+*.profdata
+
+# =============================================================================
+# Foundry / Solidity
+# =============================================================================
+contracts/cache/
+contracts/out/
+contracts/broadcast/
+contracts/foundry.lock
+
+# =============================================================================
+# Test artifacts (binary fixtures, log noise)
+# =============================================================================
 tests/fixtures/*.bin
+test_output.log
+*.log
 
 # WHIR Keccak256Chain fixture (regenerated from Rust tests)
 contracts/test/data/whir/keccak256chain_verifier_data.json
 
-# codex file
-AGENTS.md
-gnark/gnark-wrapper
-gnark/gnark-plonky2-verifier/testdata/
+# =============================================================================
+# Stray submodule checkouts (from cross-branch work)
+# =============================================================================
+contracts/lib/polygon-plonky2/
 
-# macOS
+# =============================================================================
+# Node / WASM tooling
+# =============================================================================
+node_modules/
+pkg/
+dist/
+build/
+.npm/
+.pnpm-store/
+
+# WebDriver / TLS certs for browser tests
+self_certs/
+
+# =============================================================================
+# OS / editor noise
+# =============================================================================
 .DS_Store
+Thumbs.db
+*.swp
+*.swo
+*~
+.idea/
+*.iml
 
-# Claude Code internals
+# =============================================================================
+# AI agents / local-only notes
+# =============================================================================
+# codex
+AGENTS.md
+
+# Claude Code internals (settings, cached agent state)
 .claude/
-CLAUDE.md
+
+# =============================================================================
+# Misc
+# =============================================================================
+tmp/
+temp/
+*.bak

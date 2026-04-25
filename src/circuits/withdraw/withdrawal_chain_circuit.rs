@@ -50,10 +50,10 @@ where
     C: GenericConfig<D, F = F> + 'static,
     <C as GenericConfig<D>>::Hasher: AlgebraicHasher<F>,
 {
-    pub fn new(
+    fn setup_builder(
         withdrawal_chain_cd: &CommonCircuitData<F, D>,
         withdrawal_step_vd: &VerifierCircuitData<F, C, D>,
-    ) -> Self {
+    ) -> (CircuitBuilder<F, D>, ProofWithPublicInputsTarget<D>) {
         let mut builder = CircuitBuilder::<F, D>::new(withdrawal_chain_cd.config.clone());
         let withdrawal_step_proof = add_proof_target_and_verify(withdrawal_step_vd, &mut builder);
         let new_chain_pis = WithdrawalStepPublicInputsTarget::from_pis(
@@ -61,22 +61,48 @@ where
             &withdrawal_chain_cd.config,
         );
         builder.register_public_inputs(&new_chain_pis.to_vec(&withdrawal_chain_cd.config));
+        (builder, withdrawal_step_proof)
+    }
 
-        let (data, success) = builder.try_build_with_options::<C>(true);
+    fn from_build_result(
+        data: CircuitData<F, C, D>,
+        success: bool,
+        withdrawal_chain_cd: &CommonCircuitData<F, D>,
+        withdrawal_step_proof: ProofWithPublicInputsTarget<D>,
+    ) -> Self {
         assert_eq!(
             data.common,
             withdrawal_chain_cd.clone(),
             "Common data mismatch in withdrawal chain circuit",
         );
         assert!(success, "Failed to build withdrawal chain circuit");
-
         Self {
             data,
             withdrawal_step_proof,
         }
     }
 
-    pub fn generate_cd() -> CommonCircuitData<F, D> {
+    pub fn new(
+        withdrawal_chain_cd: &CommonCircuitData<F, D>,
+        withdrawal_step_vd: &VerifierCircuitData<F, C, D>,
+    ) -> Self {
+        let (builder, withdrawal_step_proof) =
+            Self::setup_builder(withdrawal_chain_cd, withdrawal_step_vd);
+        let (data, success) = builder.try_build_with_options::<C>(true);
+        Self::from_build_result(data, success, withdrawal_chain_cd, withdrawal_step_proof)
+    }
+
+    pub async fn new_async(
+        withdrawal_chain_cd: &CommonCircuitData<F, D>,
+        withdrawal_step_vd: &VerifierCircuitData<F, C, D>,
+    ) -> Self {
+        let (builder, withdrawal_step_proof) =
+            Self::setup_builder(withdrawal_chain_cd, withdrawal_step_vd);
+        let (data, success) = builder.try_build_with_options_async::<C>(true).await;
+        Self::from_build_result(data, success, withdrawal_chain_cd, withdrawal_step_proof)
+    }
+
+    fn setup_cd_builder() -> CircuitBuilder<F, D> {
         let data = simple_recursion_circuit_data::<F, C, D>();
         let mut builder = CircuitBuilder::<F, D>::new(CircuitConfig::default());
         let proof = builder.add_virtual_proof_with_pis(&data.common);
@@ -86,19 +112,51 @@ where
         };
         builder.verify_proof::<C>(&proof, &verifier_data, &data.common);
         add_noop_gates(&mut builder, 1 << 12);
-        let mut common = builder.build::<C>().common;
+        builder
+    }
+
+    fn finalize_cd(mut common: CommonCircuitData<F, D>) -> CommonCircuitData<F, D> {
         common.num_public_inputs = WITHDRAWAL_STEP_PUBLIC_INPUTS_LEN + vd_vec_len(&common.config);
         common
+    }
+
+    pub fn generate_cd() -> CommonCircuitData<F, D> {
+        let builder = Self::setup_cd_builder();
+        Self::finalize_cd(builder.build::<C>().common)
+    }
+
+    pub async fn generate_cd_async() -> CommonCircuitData<F, D> {
+        let builder = Self::setup_cd_builder();
+        Self::finalize_cd(builder.build_async::<C>().await.common)
+    }
+
+    fn prepare_witness(
+        &self,
+        withdrawal_step_proof: &ProofWithPublicInputs<F, C, D>,
+    ) -> PartialWitness<F> {
+        let mut pw = PartialWitness::<F>::new();
+        pw.set_proof_with_pis_target(&self.withdrawal_step_proof, withdrawal_step_proof);
+        pw
     }
 
     pub fn prove(
         &self,
         withdrawal_step_proof: &ProofWithPublicInputs<F, C, D>,
     ) -> Result<ProofWithPublicInputs<F, C, D>, WithdrawalChainCircuitError> {
-        let mut pw = PartialWitness::<F>::new();
-        pw.set_proof_with_pis_target(&self.withdrawal_step_proof, withdrawal_step_proof);
+        let pw = self.prepare_witness(withdrawal_step_proof);
         self.data
             .prove(pw)
+            .map_err(|e| WithdrawalChainCircuitError::FailedToProve(e.to_string()))
+    }
+
+    pub async fn prove_async(
+        &self,
+        withdrawal_step_proof: &ProofWithPublicInputs<F, C, D>,
+    ) -> Result<ProofWithPublicInputs<F, C, D>, WithdrawalChainCircuitError> {
+        let pw = self.prepare_witness(withdrawal_step_proof);
+        self.data
+            .prove_async(pw)
+            .await
             .map_err(|e| WithdrawalChainCircuitError::FailedToProve(e.to_string()))
     }
 
