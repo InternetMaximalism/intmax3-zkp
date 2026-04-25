@@ -10,19 +10,8 @@ crate-type = ["cdylib", "rlib"]
 plonky2 = { git = "https://github.com/InternetMaximalism/polygon-plonky2.git", branch = "main", default-features = false, features = ["parallel", "std"] }
 starky = { git = "https://github.com/InternetMaximalism/polygon-plonky2.git", package = "starky", branch = "main", default-features = false, features = ["parallel", "std"] }
 plonky2_u32 = { git = "https://github.com/InternetMaximalism/plonky2-u32.git", branch = "wasm-main", default-features = false }
-# SECURITY REGRESSION (TEMPORARY): the `not-constrain-bn254-stark` /
-# `not-constrain-keccak` features disable the in-circuit STARK proofs of
-# bn254 / keccak witness correctness. They are required here only because the
-# upstream sibling crates have not been migrated to plonky2 1.x's starky API
-# (multi-stark CTL flow). With the features on, the prover-side witness
-# generators still compute correct outputs but the in-circuit constraints are
-# absent — a malicious prover can lie. The application layer (intmax3 onchain
-# state hashes, validity proof) MUST be re-evaluated for soundness once the
-# starky 1.x migration of plonky2_keccak / plonky2_bn254 lands. Tracked in:
-#   https://github.com/InternetMaximalism/plonky2_keccak  (wasm-main: gated)
-#   https://github.com/InternetMaximalism/plonky2_bn254   (wasm-main: gated)
-plonky2_bn254 = { git = "https://github.com/InternetMaximalism/plonky2_bn254.git", branch = "wasm-main", default-features = false, features = ["not-constrain-bn254-stark"] }
-plonky2_keccak = { git = "https://github.com/InternetMaximalism/plonky2_keccak.git", branch = "wasm-main", default-features = false, features = ["not-constrain-keccak"] }
+plonky2_bn254 = { git = "https://github.com/InternetMaximalism/plonky2_bn254.git", branch = "wasm-main", default-features = false }
+plonky2_keccak = { git = "https://github.com/InternetMaximalism/plonky2_keccak.git", branch = "wasm-main", default-features = false }
 sphincsplus-circuits = { git = "https://github.com/InternetMaximalism/aggregated_SPHINCS_plus.git", branch = "wasm-main" }
 sphincsplus-params = { git = "https://github.com/InternetMaximalism/aggregated_SPHINCS_plus.git", branch = "wasm-main" }
 sphincsplus-poseidon = { git = "https://github.com/InternetMaximalism/aggregated_SPHINCS_plus.git", branch = "wasm-main" }
