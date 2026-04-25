@@ -338,6 +338,38 @@ impl PublicStateTarget {
         self.prev_public_state_root
             .connect(builder, other.prev_public_state_root.clone());
     }
+
+    /// Conditionally asserts `self == other`. When `condition` is false, no
+    /// equality constraint is imposed.
+    pub fn conditional_assert_eq<F: RichField + Extendable<D>, const D: usize>(
+        &self,
+        builder: &mut CircuitBuilder<F, D>,
+        other: &Self,
+        condition: BoolTarget,
+    ) {
+        builder.conditional_assert_eq(
+            condition.target,
+            self.block_number.value,
+            other.block_number.value,
+        );
+        self.timestamp
+            .conditional_assert_eq(builder, other.timestamp, condition);
+        self.account_tree_root.conditional_assert_eq(
+            builder,
+            other.account_tree_root,
+            condition,
+        );
+        self.deposit_tree_root.conditional_assert_eq(
+            builder,
+            other.deposit_tree_root,
+            condition,
+        );
+        self.prev_public_state_root.conditional_assert_eq(
+            builder,
+            other.prev_public_state_root,
+            condition,
+        );
+    }
 }
 
 impl LeafableTarget for PublicStateTarget {
