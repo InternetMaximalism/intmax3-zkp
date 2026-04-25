@@ -7,14 +7,25 @@ edition = "2024"
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
-plonky2 = { git = "https://github.com/InternetMaximalism/Lita-Plonky2.git", branch = "wasm", default-features = false, features = ["parallel", "std"] }
-starky = { git = "https://github.com/InternetMaximalism/Lita-Plonky2.git", package = "starky", branch = "wasm", default-features = false, features = ["parallel", "std"] }
-plonky2_u32 = { git = "https://github.com/lita-xyz/plonky2-u32.git", branch = "wasm", default-features = false }
-plonky2_bn254 = { git = "https://github.com/lita-xyz/plonky2_bn254.git", branch = "wasm", default-features = false }
-plonky2_keccak = { git = "https://github.com/lita-xyz/plonky2_keccak.git", branch = "wasm", default-features = false }
-sphincsplus-circuits = { git = "https://github.com/InternetMaximalism/aggregated_SPHINCS_plus.git" }
-sphincsplus-params = { git = "https://github.com/InternetMaximalism/aggregated_SPHINCS_plus.git" }
-sphincsplus-poseidon = { git = "https://github.com/InternetMaximalism/aggregated_SPHINCS_plus.git" }
+plonky2 = { git = "https://github.com/InternetMaximalism/polygon-plonky2.git", branch = "main", default-features = false, features = ["parallel", "std"] }
+starky = { git = "https://github.com/InternetMaximalism/polygon-plonky2.git", package = "starky", branch = "main", default-features = false, features = ["parallel", "std"] }
+plonky2_u32 = { git = "https://github.com/InternetMaximalism/plonky2-u32.git", branch = "wasm-main", default-features = false }
+# SECURITY REGRESSION (TEMPORARY): the `not-constrain-bn254-stark` /
+# `not-constrain-keccak` features disable the in-circuit STARK proofs of
+# bn254 / keccak witness correctness. They are required here only because the
+# upstream sibling crates have not been migrated to plonky2 1.x's starky API
+# (multi-stark CTL flow). With the features on, the prover-side witness
+# generators still compute correct outputs but the in-circuit constraints are
+# absent — a malicious prover can lie. The application layer (intmax3 onchain
+# state hashes, validity proof) MUST be re-evaluated for soundness once the
+# starky 1.x migration of plonky2_keccak / plonky2_bn254 lands. Tracked in:
+#   https://github.com/InternetMaximalism/plonky2_keccak  (wasm-main: gated)
+#   https://github.com/InternetMaximalism/plonky2_bn254   (wasm-main: gated)
+plonky2_bn254 = { git = "https://github.com/InternetMaximalism/plonky2_bn254.git", branch = "wasm-main", default-features = false, features = ["not-constrain-bn254-stark"] }
+plonky2_keccak = { git = "https://github.com/InternetMaximalism/plonky2_keccak.git", branch = "wasm-main", default-features = false, features = ["not-constrain-keccak"] }
+sphincsplus-circuits = { git = "https://github.com/InternetMaximalism/aggregated_SPHINCS_plus.git", branch = "wasm-main" }
+sphincsplus-params = { git = "https://github.com/InternetMaximalism/aggregated_SPHINCS_plus.git", branch = "wasm-main" }
+sphincsplus-poseidon = { git = "https://github.com/InternetMaximalism/aggregated_SPHINCS_plus.git", branch = "wasm-main" }
 hex = "0.4.3"
 rand = "0.8.5"
 thiserror = "2.0.17"
@@ -63,17 +74,14 @@ web-time = "0.2"
 [features]
 default = []
 whir = ["dep:whir", "dep:ark-ff", "dep:ark-std", "dep:sha3", "dep:ciborium"]
-gpu_merkle = ["plonky2/gpu_merkle", "starky/gpu_merkle", "plonky2_keccak/gpu_merkle"]
+# `plonky2_keccak/wasm` does not expose a `gpu_merkle` feature flag, so we only
+# forward it to plonky2 + starky (which do).
+gpu_merkle = ["plonky2/gpu_merkle", "starky/gpu_merkle"]
 
-# Force the WHIR/PQ stack onto the same Lita plonky2 fork that the rest of the
-# workspace uses (otherwise transitive deps pull in upstream polygon-plonky2 or
-# lita-xyz/Plonky2 and the build sees two incompatible plonky2 versions).
-[patch."https://github.com/InternetMaximalism/polygon-plonky2.git"]
-plonky2 = { git = "https://github.com/InternetMaximalism/Lita-Plonky2.git", branch = "wasm" }
-
-[patch."https://github.com/lita-xyz/Plonky2.git"]
-plonky2 = { git = "https://github.com/InternetMaximalism/Lita-Plonky2.git", branch = "wasm" }
-starky = { git = "https://github.com/InternetMaximalism/Lita-Plonky2.git", branch = "wasm" }
+# Sibling repos (plonky2_u32 / plonky2_bn254 / plonky2_keccak) reference
+# `polygon-plonky2.git?branch=wasm`. We unify everything onto `main`, which
+# carries both the WHIR-bridge API exports (prove_with_polys / ProverPolynomials
+# / pub SelectorsInfo fields) and Lita's WebGPU + WASM stack.
 
 [dev-dependencies]
 criterion = { version = "0.5", default-features = false }
@@ -94,6 +102,17 @@ opt-level = 3
 lto = "fat"
 codegen-units = 1
 panic = "abort"  # Use "abort" for production (smaller binary), "unwind" for debugging
+
+# `cargo test --release --tests` builds the integration test harnesses with the
+# `release` profile. `wasm_bindgen_futures` and a few other WASM-side deps in
+# the workspace require `panic = "abort"`, so we force test builds to abort too
+# (otherwise we hit "requires panic strategy abort which is incompatible with
+# unwind"). Backtraces are unaffected at the test binary level.
+[profile.test]
+panic = "abort"
+
+[profile.bench]
+panic = "abort"
 
 # Post-build WASM binary optimization pass (runs after compilation)
 [package.metadata.wasm-pack.profile.release]

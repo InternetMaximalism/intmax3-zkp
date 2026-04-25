@@ -85,7 +85,7 @@ where
             circuit_digest: builder.add_virtual_hash(),
         };
         builder.verify_proof::<C>(&proof, &verifier_data, &data.common);
-        add_noop_gates(&mut builder, 1 << 12);
+        add_noop_gates(&mut builder, 1 << 11);
         let mut common = builder.build::<C>().common;
         common.num_public_inputs = DEPOSIT_CHAIN_PUBLIC_INPUTS_LEN + vd_vec_len(&common.config);
         common
