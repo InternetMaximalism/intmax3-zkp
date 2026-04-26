@@ -1811,7 +1811,7 @@ checksum = "a89322df9ebe1c1578d689c92318e070967d1042b512afbe49518723f4e6d5cd"
 [[package]]
 name = "plonky2"
 version = "1.1.0"
-source = "git+https://github.com/InternetMaximalism/polygon-plonky2.git?branch=main#10fdb50f349f57b1a735e0d25d1473df0c6cb17c"
+source = "git+https://github.com/InternetMaximalism/polygon-plonky2.git?branch=main#d67ab49ea76338b8703c9ee74eb618de5be74547"
 dependencies = [
  "ahash",
  "anyhow",
@@ -1871,7 +1871,7 @@ dependencies = [
 [[package]]
 name = "plonky2_field"
 version = "1.0.0"
-source = "git+https://github.com/InternetMaximalism/polygon-plonky2.git?branch=main#10fdb50f349f57b1a735e0d25d1473df0c6cb17c"
+source = "git+https://github.com/InternetMaximalism/polygon-plonky2.git?branch=main#d67ab49ea76338b8703c9ee74eb618de5be74547"
 dependencies = [
  "anyhow",
  "itertools 0.11.0",
@@ -1903,7 +1903,7 @@ dependencies = [
 [[package]]
 name = "plonky2_maybe_rayon"
 version = "1.0.0"
-source = "git+https://github.com/InternetMaximalism/polygon-plonky2.git?branch=main#10fdb50f349f57b1a735e0d25d1473df0c6cb17c"
+source = "git+https://github.com/InternetMaximalism/polygon-plonky2.git?branch=main#d67ab49ea76338b8703c9ee74eb618de5be74547"
 dependencies = [
  "rayon",
 ]
@@ -1923,7 +1923,7 @@ dependencies = [
 [[package]]
 name = "plonky2_util"
 version = "1.0.0"
-source = "git+https://github.com/InternetMaximalism/polygon-plonky2.git?branch=main#10fdb50f349f57b1a735e0d25d1473df0c6cb17c"
+source = "git+https://github.com/InternetMaximalism/polygon-plonky2.git?branch=main#d67ab49ea76338b8703c9ee74eb618de5be74547"
 
 [[package]]
 name = "pollster"
@@ -2402,7 +2402,7 @@ dependencies = [
 [[package]]
 name = "starky"
 version = "1.1.0"
-source = "git+https://github.com/InternetMaximalism/polygon-plonky2.git?branch=main#10fdb50f349f57b1a735e0d25d1473df0c6cb17c"
+source = "git+https://github.com/InternetMaximalism/polygon-plonky2.git?branch=main#d67ab49ea76338b8703c9ee74eb618de5be74547"
 dependencies = [
  "ahash",
  "anyhow",
