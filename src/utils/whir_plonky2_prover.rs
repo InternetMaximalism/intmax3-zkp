@@ -1070,7 +1070,7 @@ mod tests {
 
         // Export WHIR verifier data for on-chain verification
         let whir_verifier_data = export_whir_verifier_data(
-            &result.proof.constants_sigmas_whir, &config,
+            &result.proof.combined_whir, &config,
         );
         let whir_fixture_path = std::path::Path::new("tests/fixtures/whir_verifier_data.json");
         std::fs::write(whir_fixture_path, serde_json::to_string_pretty(&whir_verifier_data).unwrap())
@@ -1078,12 +1078,12 @@ mod tests {
         println!("  WHIR verifier data saved to: {}", whir_fixture_path.display());
 
         // Verify that WHIR verify succeeds with the exported data
-        whir_verify_standalone(&result.proof.constants_sigmas_whir, &config)
-            .expect("constants_sigmas WHIR must verify");
-        println!("  WHIR verify (constants_sigmas): OK");
+        whir_verify_standalone(&result.proof.combined_whir, &config)
+            .expect("combined WHIR must verify");
+        println!("  WHIR verify (combined): OK");
 
         // Export WHIR config parameters for Solidity verifier
-        let poly_size = 1usize << result.proof.constants_sigmas_whir.num_variables;
+        let poly_size = 1usize << result.proof.combined_whir.num_variables;
         let params = InternalWhirConfig::<Basefield<Field64_3>>::new(poly_size, &config.params);
         println!("  WHIR config:");
         println!("    initial_committer.num_vectors: {}", params.initial_committer.num_vectors);
@@ -1106,15 +1106,11 @@ mod tests {
         let config = WhirWrapConfig::default_keccak();
         let result = prove_with_whir::<F, C, D>(&cd, pw, &config, true).unwrap();
 
-        // Each WHIR commitment must verify independently
-        whir_verify_standalone(&result.proof.constants_sigmas_whir, &config)
-            .expect("constants_sigmas WHIR must verify");
-        whir_verify_standalone(&result.proof.wires_whir, &config)
-            .expect("wires WHIR must verify");
-        whir_verify_standalone(&result.proof.zs_partial_products_whir, &config)
-            .expect("zs_partial_products WHIR must verify");
-        whir_verify_standalone(&result.proof.quotient_polys_whir, &config)
-            .expect("quotient_polys WHIR must verify");
+        // After the per-batch -> combined refactor (`d48a44e`), the proof
+        // carries a single unified WHIR commitment covering all 4 polynomial
+        // batches concatenated. Verify it standalone.
+        whir_verify_standalone(&result.proof.combined_whir, &config)
+            .expect("combined WHIR must verify");
     }
 
     #[test]
@@ -1138,8 +1134,12 @@ mod tests {
     }
 
     /// Test that corrupted WHIR proof data is rejected.
-    /// This is the core fraud proof E2E test: if the Plonky2 proof in the blob
-    /// is invalid, WHIR verification must fail.
+    /// This is the core fraud-proof E2E security regression: if the Plonky2
+    /// proof in the blob is invalid, WHIR verification must fail.
+    ///
+    /// SECURITY: post-refactor (`d48a44e`) the proof carries a single
+    /// `combined_whir` covering all 4 polynomial batches concatenated, so each
+    /// case below corrupts that one commitment in a different way.
     #[test]
     fn test_whir_rejects_corrupted_proof_data() {
         let (cd, initial) = build_test_circuit();
@@ -1155,8 +1155,8 @@ mod tests {
         // --- Case 1: Random bytes as WHIR proof narg ---
         {
             let mut corrupted = result.proof.clone();
-            corrupted.constants_sigmas_whir.proof_narg = vec![0xDE; 256];
-            let err = whir_verify_standalone(&corrupted.constants_sigmas_whir, &config);
+            corrupted.combined_whir.proof_narg = vec![0xDE; 256];
+            let err = whir_verify_standalone(&corrupted.combined_whir, &config);
             assert!(err.is_err(), "Random bytes in proof_narg must be rejected");
             eprintln!("Case 1 passed: random bytes rejected. Error: {}", err.unwrap_err());
         }
@@ -1164,10 +1164,12 @@ mod tests {
         // --- Case 2: Tampered evaluation values ---
         {
             let mut corrupted = result.proof.clone();
-            if !corrupted.wires_whir.evaluations.is_empty() {
-                corrupted.wires_whir.evaluations[0] = Field64_3::from(999999u64);
-            }
-            let err = whir_verify_standalone(&corrupted.wires_whir, &config);
+            assert!(
+                !corrupted.combined_whir.evaluations.is_empty(),
+                "combined_whir must have at least one evaluation to tamper with",
+            );
+            corrupted.combined_whir.evaluations[0] = Field64_3::from(999999u64);
+            let err = whir_verify_standalone(&corrupted.combined_whir, &config);
             assert!(err.is_err(), "Tampered evaluations must be rejected");
             eprintln!("Case 2 passed: tampered evaluations rejected. Error: {}", err.unwrap_err());
         }
@@ -1175,9 +1177,9 @@ mod tests {
         // --- Case 3: Empty proof data ---
         {
             let mut corrupted = result.proof.clone();
-            corrupted.quotient_polys_whir.proof_narg = vec![];
-            corrupted.quotient_polys_whir.proof_hints = vec![];
-            let err = whir_verify_standalone(&corrupted.quotient_polys_whir, &config);
+            corrupted.combined_whir.proof_narg = vec![];
+            corrupted.combined_whir.proof_hints = vec![];
+            let err = whir_verify_standalone(&corrupted.combined_whir, &config);
             assert!(err.is_err(), "Empty proof data must be rejected");
             eprintln!("Case 3 passed: empty proof rejected. Error: {}", err.unwrap_err());
         }
@@ -1185,8 +1187,8 @@ mod tests {
         // --- Case 4: Full pipeline with corrupted proof ---
         {
             let mut corrupted = result.proof.clone();
-            // Corrupt all 4 WHIR commitments with random data
-            for byte in corrupted.constants_sigmas_whir.proof_narg.iter_mut() {
+            // Bit-flip the combined WHIR proof bytes (simulates flipped narg).
+            for byte in corrupted.combined_whir.proof_narg.iter_mut() {
                 *byte = byte.wrapping_add(1);
             }
             let err = verify_whir_plonky2_proof::<F, C, D>(&corrupted, &cd, &config);
