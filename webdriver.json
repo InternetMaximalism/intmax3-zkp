@@ -1,0 +1,6 @@
+{
+  "goog:chromeOptions": {
+    "args": ["--enable-features=SharedArrayBuffer"],
+    "timeouts": { "script": 3600000 }
+  }
+}

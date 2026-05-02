@@ -1,0 +1,8 @@
+[target.wasm32-unknown-unknown]
+rustflags = [
+    "-C", "target-feature=+atomics,+bulk-memory",  # Required for multi-threading (SharedArrayBuffer)
+    "-C", "target-feature=+simd128",                # SIMD for parallel math on 128-bit vectors
+    "-C", "link-arg=--max-memory=4294967296",        # 4GB max WASM linear memory (wasm32 hard limit)
+    "-C", "link-args=-z stack-size=16777216",         # 16MB stack (default 1MB is too small for deep recursion)
+    '--cfg', 'getrandom_backend="wasm_js"'            # Use JS random source for WASM
+]

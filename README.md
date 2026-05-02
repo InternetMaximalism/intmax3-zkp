@@ -311,16 +311,24 @@ intmax3-zkp/
 │   └── test/
 │       └── IntmaxRollup.t.sol     # 16 Foundry tests
 ├── tests/
-│   └── e2e.rs                     # End-to-end: deposit → transfer → withdrawal → validity
-└── docs/
-    └── spec.md                    # Protocol specification
+│   ├── e2e.rs                     # End-to-end: deposit → transfer → withdrawal → validity
+│   ├── wasm_proofs.rs             # WASM browser proof tests
+│   └── fixtures/                  # Pre-serialized circuit binaries (.bin)
+├── index.html                     # Browser test runner UI
+├── test-worker.js                 # Web Worker for WASM proof execution
+├── server.js                      # HTTPS dev server (COEP/COOP headers)
+├── self_certs/                    # Self-signed TLS certificates (generated locally)
+└── .cargo/config.toml             # WASM target flags (atomics, SIMD, memory limits)
 ```
 
 ## Requirements
 
 - Rust nightly (`nightly-2025-03-23`, managed via `rust-toolchain.toml`)
 - [wasm-pack](https://rustwasm.github.io/wasm-pack/) (for WebAssembly builds and tests)
+- [Node.js](https://nodejs.org/) (for the browser test server)
+- [OpenSSL](https://www.openssl.org/) (for generating self-signed TLS certificates)
 - [Foundry](https://book.getfoundry.sh/) (for Solidity contract tests)
+- Chrome (for browser testing; WebGPU support required for GPU acceleration)
 
 ## Build & Test
 
@@ -335,12 +343,59 @@ cargo build --release --features whir
 cargo test --release --features whir
 ```
 
-### WASM
+### WASM (Browser)
+
+#### 1. Generate circuit fixtures (first time only)
+
+Pre-serializes circuits to `.bin` files so the browser loads them via `from_bytes()` instead of building at runtime.
 
 ```bash
-cargo run -r --bin generate_wasm_fixtures
-wasm-pack test --release --firefox --headless
+cargo run --release --bin generate_wasm_fixtures
 ```
+
+This produces `tests/fixtures/*.bin` (~711MB total). Requires 32GB+ RAM.
+
+#### 2. Generate self-signed TLS certificates
+
+HTTPS is required for `SharedArrayBuffer` (COEP/COOP headers only work over HTTPS).
+
+```bash
+mkdir -p self_certs
+openssl req -x509 -newkey rsa:2048 \
+  -keyout self_certs/key.pem \
+  -out self_certs/cert.pem \
+  -days 365 -nodes \
+  -subj '/CN=localhost'
+```
+
+#### 3. Build WASM
+
+The WASM build requires recompiling `std` from source with atomics support (`build-std`), because the pre-built WASM `std` does not include atomics — which are needed for `SharedArrayBuffer` and multi-threaded Web Workers (rayon).
+
+
+```bash
+# CPU-only
+CARGO_UNSTABLE_BUILD_STD=std,panic_abort wasm-pack build --release --target web
+
+# With WebGPU acceleration (recommended)
+CARGO_UNSTABLE_BUILD_STD=std,panic_abort wasm-pack build --release --target web -- --features gpu_merkle
+```
+
+We pass `build-std` via the `CARGO_UNSTABLE_BUILD_STD` environment variable rather than putting it in `.cargo/config.toml` because Cargo's `[unstable]` section is **global** — it cannot be scoped to a specific target like `[target.wasm32-unknown-unknown]`. If `build-std` were in `config.toml`, it would also recompile `std` for native builds, causing "duplicate lang item in crate `core`" errors that break `cargo test --release`.
+
+#### 4. Install dependencies and start server
+
+```bash
+npm install
+node server.js
+```
+
+#### 5. Run in browser
+
+Open https://localhost:8000 in Chrome (accept the self-signed certificate).
+
+- **Run Withdrawal Proof** — full withdrawal proof pipeline (deposit, spend, send-tx, single withdrawal, chain step, chain final)
+- **Run Balance Processor Flow** — balance processor flow with deposit, spend, send-tx, and receive-transfer
 
 ### Solidity (L1 contracts)
 
@@ -349,6 +404,35 @@ cd contracts
 forge install                 # install sol-whir, forge-std dependencies
 forge test -vvv               # 16 tests
 ```
+
+## Browser Proving Architecture
+
+The browser proving setup uses three optimization layers on top of WASM:
+
+| Layer | Speedup | How |
+|-------|---------|-----|
+| SIMD128 | ~2-4x | Field arithmetic acceleration via 128-bit vector instructions |
+| Multi-threading | ~4-8x | Web Workers + `wasm-bindgen-rayon` thread pool |
+| WebGPU | ~4-16x | GPU Poseidon hashing for FRI Merkle trees during `prove()` |
+
+Circuits are pre-serialized offline (`generate_wasm_fixtures`) and loaded via `from_bytes()`. This eliminates runtime circuit construction — only `prove()` methods and `WithdrawalProcessor::new()` run at runtime in the browser.
+
+### Key files
+
+| File | Purpose |
+|------|---------|
+| `src/lib.rs` | `#[wasm_bindgen]` entry points: `run_single_withdrawal_proof()`, `run_balance_processor_flow()`, `init_gpu_merkle()` |
+| `.cargo/config.toml` | WASM target flags (atomics, SIMD, 4GB max memory, 16MB stack) |
+| `index.html` | Browser test runner UI |
+| `test-worker.js` | Web Worker: WASM init, thread pool, GPU init, proof dispatch |
+| `server.js` | HTTPS dev server with COEP/COOP headers for SharedArrayBuffer |
+
+### WASM memory constraints
+
+WASM32 has a **4GB hard limit** on linear memory. The proof pipeline uses ~4GB at peak. Key mitigations:
+- **Strategic `drop()` calls** in `src/lib.rs` — circuit data, witnesses, and proofs are freed as soon as no longer needed
+- **Memory-pressure CPU fallback** — GPU Merkle falls back to CPU when WASM memory exceeds 3.5GB
+- **Zero-copy GPU readback** — hashes read on-the-fly from mapped staging buffer instead of allocating intermediate Vecs
 
 ## Benchmarks
 
@@ -473,7 +557,8 @@ architecture and design rationale.
 
 | Crate / Library | Purpose |
 |-----------------|---------|
-| [plonky2](https://github.com/0xPolygonZero/plonky2) | ZK proof system (FRI-based STARK) |
+| [plonky2](https://github.com/InternetMaximalism/Lita-Plonky2) (Lita fork, `wasm-zkp3` branch) | ZK proof system (FRI-based STARK) with WebGPU support |
+| [plonky2_u32](https://github.com/lita-xyz/plonky2-u32), [plonky2_bn254](https://github.com/lita-xyz/plonky2_bn254), [plonky2_keccak](https://github.com/lita-xyz/plonky2_keccak) | Extension circuits (lita-xyz forks) |
 | [sphincsplus-circuits](https://github.com/InternetMaximalism/aggregated_SPHINCS_plus) | In-circuit SPHINCS+ signature verification |
 | [sphincsplus-poseidon](https://github.com/InternetMaximalism/aggregated_SPHINCS_plus) | Native SPHINCS+ hash primitives |
 | [whir](https://github.com/WizardOfMenlo/whir) | Off-chain WHIR polynomial commitment (optional, `--features whir`) |
