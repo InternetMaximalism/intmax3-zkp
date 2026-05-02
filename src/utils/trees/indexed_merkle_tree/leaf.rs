@@ -46,8 +46,33 @@ impl IndexedMerkleLeaf {
 impl Leafable for IndexedMerkleLeaf {
     type LeafableHasher = PoseidonLeafableHasher;
 
+    // SECURITY (BAL-CRIT-001): Empty tree positions MUST hash differently from
+    // the sentinel leaf pushed at position 0 by `IndexedMerkleTree::new`.
+    //
+    // The sentinel is constructed explicitly with `IndexedMerkleLeaf::default()`
+    // (all zeros) so that it plays the role of a "lower-infinity" boundary for
+    // the first real insertion. `empty_leaf` is what `MerkleTree` uses for
+    // `zero_hashes`, i.e. every unoccupied tree slot. If `empty_leaf == default`
+    // then sentinel and empty positions are indistinguishable at the hash level,
+    // and an insertion proof can treat any empty slot as a pseudo-sentinel and
+    // reinsert an already-present key. This was exploited by
+    // `tests/nullifier_duplicate_insertion_poc.rs`.
+    //
+    // INTENTIONALLY SIMPLE: set `key = U256::MAX` so the lower-bound check
+    //   `prev_low_leaf.key < new_key`
+    // in `IndexedInsertionProof::get_new_root` (see `insertion.rs`) fails
+    // whenever `prev_low_leaf` was cloned off an empty position (because every
+    // realistic key is < MAX). `next_key` and `value` stay at default.
+    // `next_index = u64::MAX` is set to a non-zero distinguishable value as
+    // defense-in-depth; only `key` is strictly required for soundness.
     fn empty_leaf() -> Self {
-        Self::default()
+        Self {
+            next_index: u64::MAX,
+            key: U256::from_u32_slice(&[u32::MAX; 8])
+                .expect("8-limb slice always fits in U256"),
+            next_key: U256::default(),
+            value: 0,
+        }
     }
 
     fn hash(&self) -> PoseidonHashOut {

@@ -238,6 +238,26 @@ where
             deposit_count = deposit_inputs.deposit_count;
         }
 
+        // Forced tx processing is now integrated into UpdateAccountTree.
+        // Verify consistency: prev_forced_tx state matches previous extended public state.
+        if update_account_inputs.prev_forced_tx_hash_chain
+            != prev_public_state_ext.forced_tx_hash_chain
+        {
+            return Err(BlockStepError::InvalidInput(
+                "update account proof prev_forced_tx_hash_chain mismatch with previous state"
+                    .to_string(),
+            ));
+        }
+        if update_account_inputs.prev_forced_tx_count != prev_public_state_ext.forced_tx_count {
+            return Err(BlockStepError::InvalidInput(
+                "update account proof prev_forced_tx_count mismatch with previous state"
+                    .to_string(),
+            ));
+        }
+        // Use the proved forced tx values from UpdateAccountTree
+        let forced_tx_hash_chain = update_account_inputs.forced_tx_hash_chain;
+        let forced_tx_count = update_account_inputs.forced_tx_count;
+
         // Verify previous public state membership and derive the root prior to this update.
         let empty_public_state = PublicState::empty_leaf();
         self.public_state_merkle_proof
@@ -269,6 +289,8 @@ where
             block_hash_chain,
             deposit_hash_chain,
             deposit_count,
+            forced_tx_hash_chain,
+            forced_tx_count,
         );
 
         Ok(BlockChainPublicInputs {
@@ -302,7 +324,6 @@ pub struct BlockStepTarget<const D: usize> {
 }
 
 impl<const D: usize> BlockStepTarget<D> {
-    #[allow(clippy::too_many_arguments)]
     pub fn new<F, C>(
         builder: &mut CircuitBuilder<F, D>,
         block_chain_cd: &CommonCircuitData<F, D>,
@@ -480,6 +501,22 @@ impl<const D: usize> BlockStepTarget<D> {
             &prev_public_state_ext.deposit_count,
         );
 
+        // Forced tx processing is now integrated into UpdateAccountTree.
+        // Verify consistency: prev_forced_tx state in UpdateAccountTree matches previous state.
+        selected_update_inputs
+            .prev_forced_tx_hash_chain
+            .connect(builder, prev_public_state_ext.forced_tx_hash_chain.clone());
+        builder.connect(
+            selected_update_inputs.prev_forced_tx_count.value,
+            prev_public_state_ext.forced_tx_count.value,
+        );
+
+        // account_tree_root now includes forced tx updates from UpdateAccountTree
+        let selected_account_tree_root = account_tree_root;
+        // forced tx values are proved by UpdateAccountTree
+        let selected_forced_tx_hash_chain = selected_update_inputs.forced_tx_hash_chain.clone();
+        let selected_forced_tx_count = selected_update_inputs.forced_tx_count.clone();
+
         let public_state_merkle_proof =
             PublicStateMerkleProofTarget::new(builder, PUBLIC_STATE_TREE_HEIGHT);
 
@@ -504,13 +541,15 @@ impl<const D: usize> BlockStepTarget<D> {
                 inner: PublicStateTarget {
                     block_number: next_block_number,
                     timestamp: selected_update_inputs.block_timestamp.clone(),
-                    account_tree_root,
+                    account_tree_root: selected_account_tree_root,
                     deposit_tree_root: selected_deposit_tree_root,
                     prev_public_state_root,
                 },
                 block_hash_chain,
                 deposit_hash_chain: selected_deposit_hash_chain,
                 deposit_count: selected_deposit_count,
+                forced_tx_hash_chain: selected_forced_tx_hash_chain,
+                forced_tx_count: selected_forced_tx_count,
             },
             vd: block_chain_vd.clone(),
         };
@@ -690,7 +729,6 @@ where
         }
     }
 
-    #[allow(clippy::too_many_arguments)]
     pub fn prove(
         &self,
         block_chain_vd: &VerifierCircuitData<F, C, D>,
@@ -728,8 +766,11 @@ where
             }
         }
 
-        let new_public_inputs =
-            witness.to_public_inputs(block_chain_vd, update_account_vds, deposit_chain_vd)?;
+        let new_public_inputs = witness.to_public_inputs(
+            block_chain_vd,
+            update_account_vds,
+            deposit_chain_vd,
+        )?;
 
         let mut pw = PartialWitness::<F>::new();
         self.target.set_witness(
@@ -763,18 +804,17 @@ mod tests {
     use crate::{
         circuits::{
             test_utils::block_witness_generator::BlockWitnessGenerator,
-            validity::{
-                block_hash_chain::{
-                    block_chain_pis::BLOCK_CHAIN_PUBLIC_INPUTS_LEN,
-                    sphincs_sig::SpxSigWitness,
-                    update_account_tree::{UpdateAccountCircuit, UpdateAccountTree},
-                },
-                deposit_hash_chain::deposit_chain_pis::DEPOSIT_CHAIN_PUBLIC_INPUTS_LEN,
+            validity::block_hash_chain::{
+                block_chain_pis::BLOCK_CHAIN_PUBLIC_INPUTS_LEN,
+                sphincs_sig::SpxSigWitness,
+                update_account_tree::{UpdateAccountCircuit, UpdateAccountTree},
             },
         },
+        common::u63::U63,
         ethereum_types::{bytes32::Bytes32, u32limb_trait::U32LimbTrait as _},
         utils::cyclic::TestCyclicCircuit,
     };
+    use crate::circuits::validity::deposit_hash_chain::deposit_chain_pis::DEPOSIT_CHAIN_PUBLIC_INPUTS_LEN;
     use plonky2::{
         field::goldilocks_field::GoldilocksField,
         plonk::{circuit_data::CircuitConfig, config::PoseidonGoldilocksConfig},
@@ -826,6 +866,12 @@ mod tests {
             account_merkle_proofs: block_witness.account_merkle_proofs.clone(),
             send_merkle_proofs: block_witness.send_merkle_proofs.clone(),
             sig_witnesses: vec![SpxSigWitness::dummy(); num_users],
+            prev_forced_tx_hash_chain: Bytes32::default(),
+            prev_forced_tx_count: U63::default(),
+            forced_txs: vec![],
+            forced_tx_prev_account_leaves: vec![],
+            forced_tx_account_merkle_proofs: vec![],
+            forced_tx_send_merkle_proofs: vec![],
         };
         let update_inputs = update_tree.to_public_inputs().expect("update inputs");
         let update_proof = update_circuit
@@ -872,7 +918,11 @@ mod tests {
         };
 
         let public_inputs = witness
-            .to_public_inputs(&block_chain_vd, &update_account_vds, &deposit_chain_vd)
+            .to_public_inputs(
+                &block_chain_vd,
+                &update_account_vds,
+                &deposit_chain_vd,
+            )
             .expect("block step public inputs");
         assert_eq!(
             public_inputs.ext_public_state.inner.block_number,

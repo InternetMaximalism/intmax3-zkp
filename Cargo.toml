@@ -7,14 +7,14 @@ edition = "2024"
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
-plonky2 = { git = "https://github.com/InternetMaximalism/Lita-Plonky2.git", branch = "wasm", default-features = false, features = ["parallel", "std"] }
-starky = { git = "https://github.com/InternetMaximalism/Lita-Plonky2.git", package = "starky", branch = "wasm", default-features = false, features = ["parallel", "std"] }
-plonky2_u32 = { git = "https://github.com/lita-xyz/plonky2-u32.git", branch = "wasm", default-features = false }
-plonky2_bn254 = { git = "https://github.com/lita-xyz/plonky2_bn254.git", branch = "wasm", default-features = false }
-plonky2_keccak = { git = "https://github.com/lita-xyz/plonky2_keccak.git", branch = "wasm", default-features = false }
-sphincsplus-circuits = { git = "https://github.com/InternetMaximalism/aggregated_SPHINCS_plus.git" }
-sphincsplus-params = { git = "https://github.com/InternetMaximalism/aggregated_SPHINCS_plus.git" }
-sphincsplus-poseidon = { git = "https://github.com/InternetMaximalism/aggregated_SPHINCS_plus.git" }
+plonky2 = { git = "https://github.com/InternetMaximalism/polygon-plonky2.git", branch = "main", default-features = false, features = ["parallel", "std"] }
+starky = { git = "https://github.com/InternetMaximalism/polygon-plonky2.git", package = "starky", branch = "main", default-features = false, features = ["parallel", "std"] }
+plonky2_u32 = { git = "https://github.com/InternetMaximalism/plonky2-u32.git", branch = "wasm-main", default-features = false }
+plonky2_bn254 = { git = "https://github.com/InternetMaximalism/plonky2_bn254.git", branch = "wasm-main", default-features = false }
+plonky2_keccak = { git = "https://github.com/InternetMaximalism/plonky2_keccak.git", branch = "wasm-main", default-features = false }
+sphincsplus-circuits = { git = "https://github.com/InternetMaximalism/aggregated_SPHINCS_plus.git", branch = "wasm-main" }
+sphincsplus-params = { git = "https://github.com/InternetMaximalism/aggregated_SPHINCS_plus.git", branch = "wasm-main" }
+sphincsplus-poseidon = { git = "https://github.com/InternetMaximalism/aggregated_SPHINCS_plus.git", branch = "wasm-main" }
 hex = "0.4.3"
 rand = "0.8.5"
 thiserror = "2.0.17"
@@ -27,6 +27,14 @@ ff = { package = "ff", version = "0.13", features = ["derive"] }
 anyhow = "1.0.100"
 lazy_static = "1.5.0"
 bincode = { version = "2.0.1", features = ["serde"] }
+clap = { version = "4.5", features = ["derive"] }
+
+# WHIR post-quantum wrapper (optional, native-only)
+whir = { git = "https://github.com/leohio/whir", features = ["parallel"], optional = true }
+ark-ff = { version = "0.5", features = ["asm", "std"], optional = true }
+ark-std = { version = "0.5", features = ["std"], optional = true }
+sha3 = { version = "0.10", optional = true }
+ciborium = { version = "0.2", optional = true }
 
 # Threading
 rayon = "1.8"
@@ -53,14 +61,16 @@ futures = "0.3"
 web-time = "0.2"
 
 [features]
-gpu_merkle = ["plonky2/gpu_merkle", "starky/gpu_merkle", "plonky2_keccak/gpu_merkle"]
+default = []
+whir = ["dep:whir", "dep:ark-ff", "dep:ark-std", "dep:sha3", "dep:ciborium"]
+# `plonky2_keccak/wasm` does not expose a `gpu_merkle` feature flag, so we only
+# forward it to plonky2 + starky (which do).
+gpu_merkle = ["plonky2/gpu_merkle", "starky/gpu_merkle"]
 
-[patch."https://github.com/InternetMaximalism/polygon-plonky2.git"]
-plonky2 = { git = "https://github.com/InternetMaximalism/Lita-Plonky2.git", branch = "wasm" }
-
-[patch."https://github.com/lita-xyz/Plonky2.git"]
-plonky2 = { git = "https://github.com/InternetMaximalism/Lita-Plonky2.git", branch = "wasm" }
-starky = { git = "https://github.com/InternetMaximalism/Lita-Plonky2.git", branch = "wasm" }
+# Sibling repos (plonky2_u32 / plonky2_bn254 / plonky2_keccak) reference
+# `polygon-plonky2.git?branch=wasm`. We unify everything onto `main`, which
+# carries both the WHIR-bridge API exports (prove_with_polys / ProverPolynomials
+# / pub SelectorsInfo fields) and Lita's WebGPU + WASM stack.
 
 [dev-dependencies]
 criterion = { version = "0.5", default-features = false }
@@ -81,6 +91,17 @@ opt-level = 3
 lto = "fat"
 codegen-units = 1
 panic = "abort"  # Use "abort" for production (smaller binary), "unwind" for debugging
+
+# `cargo test --release --tests` builds the integration test harnesses with the
+# `release` profile. `wasm_bindgen_futures` and a few other WASM-side deps in
+# the workspace require `panic = "abort"`, so we force test builds to abort too
+# (otherwise we hit "requires panic strategy abort which is incompatible with
+# unwind"). Backtraces are unaffected at the test binary level.
+[profile.test]
+panic = "abort"
+
+[profile.bench]
+panic = "abort"
 
 # Post-build WASM binary optimization pass (runs after compilation)
 [package.metadata.wasm-pack.profile.release]

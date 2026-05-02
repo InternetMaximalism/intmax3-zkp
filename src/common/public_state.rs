@@ -338,6 +338,38 @@ impl PublicStateTarget {
         self.prev_public_state_root
             .connect(builder, other.prev_public_state_root.clone());
     }
+
+    /// Conditionally asserts `self == other`. When `condition` is false, no
+    /// equality constraint is imposed.
+    pub fn conditional_assert_eq<F: RichField + Extendable<D>, const D: usize>(
+        &self,
+        builder: &mut CircuitBuilder<F, D>,
+        other: &Self,
+        condition: BoolTarget,
+    ) {
+        builder.conditional_assert_eq(
+            condition.target,
+            self.block_number.value,
+            other.block_number.value,
+        );
+        self.timestamp
+            .conditional_assert_eq(builder, other.timestamp, condition);
+        self.account_tree_root.conditional_assert_eq(
+            builder,
+            other.account_tree_root,
+            condition,
+        );
+        self.deposit_tree_root.conditional_assert_eq(
+            builder,
+            other.deposit_tree_root,
+            condition,
+        );
+        self.prev_public_state_root.conditional_assert_eq(
+            builder,
+            other.prev_public_state_root,
+            condition,
+        );
+    }
 }
 
 impl LeafableTarget for PublicStateTarget {
@@ -439,6 +471,7 @@ impl FullPublicState {
             timestamp,
             tx_tree_root,
             self.deposit_hash_chain,
+            Bytes32::default(), // forced_tx_hash_chain: no forced txs in this context
         )?;
 
         // update public state tree
@@ -482,12 +515,13 @@ impl FullPublicState {
 
             let current_account_leaf = self.account_tree.get_leaf(user_id.as_u64());
 
-            // sanity check (pk_hash preserved from tree, not reconstructed from send leaves)
+            // sanity check (pk_set_root preserved from tree, not reconstructed from send leaves)
             let account_leaf = AccountLeaf {
                 index: send_tree.len() as u32,
                 prev,
                 send_tree_root: send_tree.get_root(),
-                pk_hash: current_account_leaf.pk_hash,
+                pk_set_root: current_account_leaf.pk_set_root,
+                threshold: current_account_leaf.threshold,
             };
             assert_eq!(
                 current_account_leaf, account_leaf,
@@ -507,12 +541,13 @@ impl FullPublicState {
             send_leaves.push(new_send_leaf);
             self.send_leaves.insert(user_id, send_leaves.clone());
 
-            // update account tree (pk_hash is preserved across state transitions)
+            // update account tree (pk_set_root/threshold preserved across state transitions)
             let new_account_leaf = AccountLeaf {
                 index: send_tree.len() as u32,
                 prev: current_block,
                 send_tree_root: send_tree.get_root(),
-                pk_hash: current_account_leaf.pk_hash,
+                pk_set_root: current_account_leaf.pk_set_root,
+                threshold: current_account_leaf.threshold,
             };
             self.account_tree.update(user_id.as_u64(), new_account_leaf);
         }

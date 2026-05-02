@@ -838,13 +838,15 @@ mod tests {
             index: send_tree_sender.len() as u32,
             prev: send_leaf_sender.cur,
             send_tree_root: send_tree_sender.get_root(),
-            pk_hash: PoseidonHashOut::default(),
+            pk_set_root: PoseidonHashOut::default(),
+            threshold: 0,
         };
         let account_leaf_receiver = AccountLeaf {
             index: send_tree_receiver.len() as u32,
             prev: send_leaf_receiver.prev,
             send_tree_root: send_tree_receiver.get_root(),
-            pk_hash: PoseidonHashOut::default(),
+            pk_set_root: PoseidonHashOut::default(),
+            threshold: 0,
         };
 
         let mut account_tree = AccountTree::new(ACCOUNT_TREE_HEIGHT);

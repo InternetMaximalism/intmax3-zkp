@@ -248,7 +248,7 @@ fn fors_sign_impl(
 
         // Auth path
         let mut idx = n + leaf_idx;
-        for j in 0..SPX_FORS_HEIGHT {
+        for _j in 0..SPX_FORS_HEIGHT {
             let sibling = if idx & 1 == 0 { idx + 1 } else { idx - 1 };
             sig[sig_offset..sig_offset + SPX_N].copy_from_slice(&tree[sibling]);
             sig_offset += SPX_N;

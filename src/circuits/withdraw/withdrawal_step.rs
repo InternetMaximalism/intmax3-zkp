@@ -271,6 +271,19 @@ where
                 &withdrawal_chain_vd.common.config,
             )?;
 
+            // SECURITY (WDR-CRIT-001): every step in the chain must output the
+            // SAME public_state (the canonical target state the whole batch is
+            // anchored to). Enforce it here so that each step's
+            // `update_public_state` is a valid Merkle transition from that
+            // step's single_withdrawal.public_state to the canonical target.
+            if prev_inputs.public_state != self.update_public_state.new {
+                return Err(WithdrawalStepError::InvalidInput(format!(
+                    "update_public_state.new must equal prev chain public_state; \
+                     prev.public_state = {:?}, update_public_state.new = {:?}",
+                    prev_inputs.public_state, self.update_public_state.new,
+                )));
+            }
+
             prev_hash = prev_inputs.withdrawal_hash_chain;
         }
 
@@ -280,7 +293,12 @@ where
 
         Ok(WithdrawalStepPublicInputs {
             withdrawal_hash_chain,
-            public_state: self.update_public_state.old.clone(),
+            // SECURITY (WDR-CRIT-001): output the chain-wide canonical state
+            // `update_public_state.new`, not `.old`. The chain wrapper then
+            // anchors this to the canonical validity-proof state on L1, which
+            // cascades back through every step's Merkle proof to force every
+            // single_withdrawal's public_state to be on real on-chain history.
+            public_state: self.update_public_state.new.clone(),
             vd,
         })
     }
@@ -342,6 +360,19 @@ impl<const D: usize> WithdrawalStepTarget<D> {
             .old
             .connect(builder, &single_withdrawal_pis.public_state);
 
+        // SECURITY (WDR-CRIT-001): force every non-initial step's
+        // `update_public_state.new` to equal the chain's running `public_state`.
+        // Combined with the output below (`public_state = update_public_state.new`),
+        // this means the chain carries a single fixed public_state across all
+        // steps; the L1 anchor on the final state cascades back through every
+        // step's Merkle proof of `old -> new`, forcing every
+        // single_withdrawal.public_state to be a real on-chain historical state.
+        update_public_state.new.conditional_assert_eq(
+            builder,
+            &prev_withdrawal_chain_pis.public_state,
+            not_initial,
+        );
+
         let zero_hash = Bytes32Target::constant::<F, D, Bytes32>(builder, Bytes32::default());
         let prev_withdrawal_hash_chain = Bytes32Target::select(
             builder,
@@ -356,7 +387,11 @@ impl<const D: usize> WithdrawalStepTarget<D> {
 
         let new_pis = WithdrawalStepPublicInputsTarget {
             withdrawal_hash_chain,
-            public_state: update_public_state.old.clone(),
+            // SECURITY (WDR-CRIT-001): output `update_public_state.new`, not
+            // `.old`. See the companion witness-side change above and the
+            // `conditional_assert_eq` that ties consecutive steps' `.new`
+            // together.
+            public_state: update_public_state.new.clone(),
             vd: withdrawal_chain_vd,
         };
 
