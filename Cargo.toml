@@ -63,9 +63,7 @@ web-time = "0.2"
 [features]
 default = []
 whir = ["dep:whir", "dep:ark-ff", "dep:ark-std", "dep:sha3", "dep:ciborium"]
-# `plonky2_keccak/wasm` does not expose a `gpu_merkle` feature flag, so we only
-# forward it to plonky2 + starky (which do).
-gpu_merkle = ["plonky2/gpu_merkle", "starky/gpu_merkle"]
+gpu_merkle = ["plonky2/gpu_merkle", "starky/gpu_merkle", "plonky2_keccak/gpu_merkle"]
 
 # Sibling repos (plonky2_u32 / plonky2_bn254 / plonky2_keccak) reference
 # `polygon-plonky2.git?branch=wasm`. We unify everything onto `main`, which

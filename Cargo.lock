@@ -1886,10 +1886,11 @@ dependencies = [
 [[package]]
 name = "plonky2_keccak"
 version = "0.1.0"
-source = "git+https://github.com/InternetMaximalism/plonky2_keccak.git?branch=wasm-main#f7816f6d942cac458e0fb6036ea56dcf7f279627"
+source = "git+https://github.com/InternetMaximalism/plonky2_keccak.git?branch=wasm-main#2507786148ae6323d0ea547bf88e1752f901434e"
 dependencies = [
  "anyhow",
  "env_logger",
+ "futures",
  "hashbrown 0.14.5",
  "hex",
  "itertools 0.12.1",
