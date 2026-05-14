@@ -90,33 +90,15 @@ where
         common
     }
 
-    fn prepare_witness(
-        &self,
-        switch_board_proof: &ProofWithPublicInputs<F, C, D>,
-    ) -> PartialWitness<F> {
-        let mut pw = PartialWitness::<F>::new();
-        pw.set_proof_with_pis_target(&self.switch_proof, switch_board_proof);
-        pw
-    }
-
     pub fn prove(
         &self,
         switch_board_proof: &ProofWithPublicInputs<F, C, D>,
     ) -> Result<ProofWithPublicInputs<F, C, D>, BalanceCircuitError> {
-        let pw = self.prepare_witness(switch_board_proof);
+        let mut pw = PartialWitness::<F>::new();
+        pw.set_proof_with_pis_target(&self.switch_proof, switch_board_proof);
+
         self.data
             .prove(pw)
-            .map_err(|e| BalanceCircuitError::FailedToProve(e.to_string()))
-    }
-
-    pub async fn prove_async(
-        &self,
-        switch_board_proof: &ProofWithPublicInputs<F, C, D>,
-    ) -> Result<ProofWithPublicInputs<F, C, D>, BalanceCircuitError> {
-        let pw = self.prepare_witness(switch_board_proof);
-        self.data
-            .prove_async(pw)
-            .await
             .map_err(|e| BalanceCircuitError::FailedToProve(e.to_string()))
     }
 

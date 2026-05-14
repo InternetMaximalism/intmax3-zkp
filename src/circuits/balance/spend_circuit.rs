@@ -428,29 +428,16 @@ where
         }
     }
 
-    fn prepare_witness(&self, w: &SpendWitness) -> Result<PartialWitness<F>, SpendError> {
+    pub fn prove(&self, w: &SpendWitness) -> Result<ProofWithPublicInputs<F, C, D>, SpendError> {
         let mut pw = PartialWitness::<F>::new();
+
         let public_inputs = w.to_public_inputs()?;
+
         self.target.set_witness(&mut pw, w);
         self.public_inputs.set_witness(&mut pw, &public_inputs);
-        Ok(pw)
-    }
 
-    pub fn prove(&self, w: &SpendWitness) -> Result<ProofWithPublicInputs<F, C, D>, SpendError> {
-        let pw = self.prepare_witness(w)?;
         self.data
             .prove(pw)
-            .map_err(|e| SpendError::FailedToProve(e.to_string()))
-    }
-
-    pub async fn prove_async(
-        &self,
-        w: &SpendWitness,
-    ) -> Result<ProofWithPublicInputs<F, C, D>, SpendError> {
-        let pw = self.prepare_witness(w)?;
-        self.data
-            .prove_async(pw)
-            .await
             .map_err(|e| SpendError::FailedToProve(e.to_string()))
     }
 

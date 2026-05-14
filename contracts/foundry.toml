@@ -9,3 +9,8 @@ evm_version = "prague"
 optimizer = true
 optimizer_runs = 200
 fs_permissions = [{ access = "read", path = "./" }, { access = "read", path = "../tests/fixtures/" }]
+
+remappings = [
+    "@mle/=lib/polygon-plonky2/mle/contracts/src/",
+    "forge-std/=lib/forge-std/src/",
+]

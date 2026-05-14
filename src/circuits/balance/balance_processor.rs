@@ -91,165 +91,113 @@ where
         self.balance_circuit.data.verifier_data()
     }
 
-    fn prove_via_switch_board(
-        &self,
-        switch_board_witness: &BalanceSwichBoard<F, C, D>,
-    ) -> Result<ProofWithPublicInputs<F, C, D>, BalanceProcessorError> {
-        let switch_board_proof = self
-            .switch_board_circuit
-            .prove(&self.balance_vd(), switch_board_witness)
-            .map_err(|e| BalanceProcessorError::SwitchBoardCircuitError(e))?;
-        self.balance_circuit
-            .prove(&switch_board_proof)
-            .map_err(|e| BalanceProcessorError::BalanceCircuitError(e))
-    }
-
-    async fn prove_via_switch_board_async(
-        &self,
-        switch_board_witness: &BalanceSwichBoard<F, C, D>,
-    ) -> Result<ProofWithPublicInputs<F, C, D>, BalanceProcessorError> {
-        let switch_board_proof = self
-            .switch_board_circuit
-            .prove_async(&self.balance_vd(), switch_board_witness)
-            .await
-            .map_err(|e| BalanceProcessorError::SwitchBoardCircuitError(e))?;
-        self.balance_circuit
-            .prove_async(&switch_board_proof)
-            .await
-            .map_err(|e| BalanceProcessorError::BalanceCircuitError(e))
-    }
-
     pub fn prove_initial(
         &self,
         user_id: UserId,
         salt: Salt,
     ) -> Result<ProofWithPublicInputs<F, C, D>, BalanceProcessorError> {
-        let witness = BalanceSwichBoard::<F, C, D> {
+        let switch_board_witness = BalanceSwichBoard::<F, C, D> {
             initial_value: Some((user_id, salt)),
             receive_transfer_proof: None,
             receive_deposit_proof: None,
             send_tx_proof: None,
         };
-        self.prove_via_switch_board(&witness)
+        let switch_board_proof = self
+            .switch_board_circuit
+            .prove(&self.balance_vd(), &switch_board_witness)
+            .map_err(|e| BalanceProcessorError::SwitchBoardCircuitError(e))?;
+        let balance_proof = self
+            .balance_circuit
+            .prove(&switch_board_proof)
+            .map_err(|e| BalanceProcessorError::BalanceCircuitError(e))?;
+        Ok(balance_proof)
     }
 
     pub fn prove_receive_transfer(
         &self,
         witness: &ReceiveTransferWitness<F, C, D>,
     ) -> Result<ProofWithPublicInputs<F, C, D>, BalanceProcessorError> {
-        let proof = self
+        let receive_transfer_proof = self
             .receive_transfer_circuit
             .prove(witness)
             .map_err(|e| BalanceProcessorError::ReceiveTransferCircuitError(e))?;
-        let sb_witness = BalanceSwichBoard::<F, C, D> {
+
+        let switch_board_witness = BalanceSwichBoard::<F, C, D> {
             initial_value: None,
-            receive_transfer_proof: Some(proof),
+            receive_transfer_proof: Some(receive_transfer_proof),
             receive_deposit_proof: None,
             send_tx_proof: None,
         };
-        self.prove_via_switch_board(&sb_witness)
+
+        let switch_board_proof = self
+            .switch_board_circuit
+            .prove(&self.balance_vd(), &switch_board_witness)
+            .map_err(|e| BalanceProcessorError::SwitchBoardCircuitError(e))?;
+
+        let balance_proof = self
+            .balance_circuit
+            .prove(&switch_board_proof)
+            .map_err(|e| BalanceProcessorError::BalanceCircuitError(e))?;
+
+        Ok(balance_proof)
     }
 
     pub fn prove_receive_deposit(
         &self,
         witness: &ReceiveDepositWitness<F, C, D>,
     ) -> Result<ProofWithPublicInputs<F, C, D>, BalanceProcessorError> {
-        let proof = self
+        let receive_deposit_proof = self
             .receive_deposit_circuit
             .prove(witness)
             .map_err(|e| BalanceProcessorError::ReceiveDepositCircuitError(e))?;
-        let sb_witness = BalanceSwichBoard::<F, C, D> {
+
+        let switch_board_witness = BalanceSwichBoard::<F, C, D> {
             initial_value: None,
             receive_transfer_proof: None,
-            receive_deposit_proof: Some(proof),
+            receive_deposit_proof: Some(receive_deposit_proof),
             send_tx_proof: None,
         };
-        self.prove_via_switch_board(&sb_witness)
+
+        let switch_board_proof = self
+            .switch_board_circuit
+            .prove(&self.balance_vd(), &switch_board_witness)
+            .map_err(|e| BalanceProcessorError::SwitchBoardCircuitError(e))?;
+
+        let balance_proof = self
+            .balance_circuit
+            .prove(&switch_board_proof)
+            .map_err(|e| BalanceProcessorError::BalanceCircuitError(e))?;
+
+        Ok(balance_proof)
     }
 
     pub fn prove_send_tx(
         &self,
         witness: &SendTxWitness<F, C, D>,
     ) -> Result<ProofWithPublicInputs<F, C, D>, BalanceProcessorError> {
-        let proof = self
+        let send_tx_proof = self
             .send_tx_circuit
             .prove(witness)
             .map_err(|e| BalanceProcessorError::SendTxCircuitError(e))?;
-        let sb_witness = BalanceSwichBoard::<F, C, D> {
+
+        let switch_board_witness = BalanceSwichBoard::<F, C, D> {
             initial_value: None,
             receive_transfer_proof: None,
             receive_deposit_proof: None,
-            send_tx_proof: Some(proof),
+            send_tx_proof: Some(send_tx_proof),
         };
-        self.prove_via_switch_board(&sb_witness)
-    }
 
-    pub async fn prove_initial_async(
-        &self,
-        user_id: UserId,
-        salt: Salt,
-    ) -> Result<ProofWithPublicInputs<F, C, D>, BalanceProcessorError> {
-        let witness = BalanceSwichBoard::<F, C, D> {
-            initial_value: Some((user_id, salt)),
-            receive_transfer_proof: None,
-            receive_deposit_proof: None,
-            send_tx_proof: None,
-        };
-        self.prove_via_switch_board_async(&witness).await
-    }
+        let switch_board_proof = self
+            .switch_board_circuit
+            .prove(&self.balance_vd(), &switch_board_witness)
+            .map_err(|e| BalanceProcessorError::SwitchBoardCircuitError(e))?;
 
-    pub async fn prove_receive_transfer_async(
-        &self,
-        witness: &ReceiveTransferWitness<F, C, D>,
-    ) -> Result<ProofWithPublicInputs<F, C, D>, BalanceProcessorError> {
-        let proof = self
-            .receive_transfer_circuit
-            .prove_async(witness)
-            .await
-            .map_err(|e| BalanceProcessorError::ReceiveTransferCircuitError(e))?;
-        let sb_witness = BalanceSwichBoard::<F, C, D> {
-            initial_value: None,
-            receive_transfer_proof: Some(proof),
-            receive_deposit_proof: None,
-            send_tx_proof: None,
-        };
-        self.prove_via_switch_board_async(&sb_witness).await
-    }
+        let balance_proof = self
+            .balance_circuit
+            .prove(&switch_board_proof)
+            .map_err(|e| BalanceProcessorError::BalanceCircuitError(e))?;
 
-    pub async fn prove_receive_deposit_async(
-        &self,
-        witness: &ReceiveDepositWitness<F, C, D>,
-    ) -> Result<ProofWithPublicInputs<F, C, D>, BalanceProcessorError> {
-        let proof = self
-            .receive_deposit_circuit
-            .prove_async(witness)
-            .await
-            .map_err(|e| BalanceProcessorError::ReceiveDepositCircuitError(e))?;
-        let sb_witness = BalanceSwichBoard::<F, C, D> {
-            initial_value: None,
-            receive_transfer_proof: None,
-            receive_deposit_proof: Some(proof),
-            send_tx_proof: None,
-        };
-        self.prove_via_switch_board_async(&sb_witness).await
-    }
-
-    pub async fn prove_send_tx_async(
-        &self,
-        witness: &SendTxWitness<F, C, D>,
-    ) -> Result<ProofWithPublicInputs<F, C, D>, BalanceProcessorError> {
-        let proof = self
-            .send_tx_circuit
-            .prove_async(witness)
-            .await
-            .map_err(|e| BalanceProcessorError::SendTxCircuitError(e))?;
-        let sb_witness = BalanceSwichBoard::<F, C, D> {
-            initial_value: None,
-            receive_transfer_proof: None,
-            receive_deposit_proof: None,
-            send_tx_proof: Some(proof),
-        };
-        self.prove_via_switch_board_async(&sb_witness).await
+        Ok(balance_proof)
     }
 
     pub fn to_bytes(&self) -> Result<Vec<u8>, CircuitSerializationError> {

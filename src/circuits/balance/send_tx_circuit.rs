@@ -305,36 +305,19 @@ where
         }
     }
 
-    fn prepare_witness(
-        &self,
-        witness: &SendTxWitness<F, C, D>,
-    ) -> Result<PartialWitness<F>, SendTxError> {
-        let balance_pis = witness.to_public_inputs(&self.balance_cd)?;
-        let mut pw = PartialWitness::<F>::new();
-        self.target
-            .set_witness::<F, C, _>(&mut pw, witness, &balance_pis);
-        self.public_inputs.set_witness(&mut pw, &balance_pis);
-        Ok(pw)
-    }
-
     pub fn prove(
         &self,
         witness: &SendTxWitness<F, C, D>,
     ) -> Result<ProofWithPublicInputs<F, C, D>, SendTxError> {
-        let pw = self.prepare_witness(witness)?;
+        let balance_pis = witness.to_public_inputs(&self.balance_cd)?;
+        let mut pw = PartialWitness::<F>::new();
+
+        self.target
+            .set_witness::<F, C, _>(&mut pw, witness, &balance_pis);
+        self.public_inputs.set_witness(&mut pw, &balance_pis);
+
         self.data
             .prove(pw)
-            .map_err(|e| SendTxError::FailedToProve(e.to_string()))
-    }
-
-    pub async fn prove_async(
-        &self,
-        witness: &SendTxWitness<F, C, D>,
-    ) -> Result<ProofWithPublicInputs<F, C, D>, SendTxError> {
-        let pw = self.prepare_witness(witness)?;
-        self.data
-            .prove_async(pw)
-            .await
             .map_err(|e| SendTxError::FailedToProve(e.to_string()))
     }
 

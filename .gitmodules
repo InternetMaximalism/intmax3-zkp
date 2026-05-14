@@ -1,6 +1,7 @@
 [submodule "contracts/lib/forge-std"]
 	path = contracts/lib/forge-std
 	url = https://github.com/foundry-rs/forge-std
-[submodule "contracts/lib/sol-whir"]
-	path = contracts/lib/sol-whir
-	url = https://github.com/privacy-scaling-explorations/sol-whir
+[submodule "contracts/lib/polygon-plonky2"]
+	path = contracts/lib/polygon-plonky2
+	url = https://github.com/InternetMaximalism/polygon-plonky2.git
+	branch = mleintroduction

@@ -121,23 +121,6 @@ where
         })
     }
 
-    pub async fn new_async(
-        user_id: UserId,
-        salt: Salt,
-        block_witness_generator: BlockWitnessGeneratorHandle,
-        balance_processor: &BalanceProcessor<F, C, D>,
-    ) -> Result<Self, BalanceWitnessGeneratorError> {
-        let balance_proof = balance_processor.prove_initial_async(user_id, salt).await?;
-
-        Ok(Self {
-            user_id,
-            salt,
-            balance_proof,
-            full_private_state: FullPrivateState::new(salt),
-            block_witness_generator,
-        })
-    }
-
     // get balance public inputs from the witness generator
     pub fn get_public_inputs(&self) -> Result<BalancePublicInputs, BalanceWitnessGeneratorError> {
         let pis_u64 = self.balance_proof.public_inputs.to_u64_vec();

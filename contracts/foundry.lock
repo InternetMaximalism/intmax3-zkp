@@ -1,0 +1,14 @@
+{
+  "lib/forge-std": {
+    "rev": "f5495c9b993bfc6e79dd52adfdcb7dac0a1da918"
+  },
+  "lib/polygon-plonky2": {
+    "branch": {
+      "name": "mleintroduction",
+      "rev": "db26a8dd107193b96f5c54de4194586043680eea"
+    }
+  },
+  "lib/sol-whir": {
+    "rev": "b719b97b5961ac1c1679383b31e55439a26682f9"
+  }
+}

@@ -72,9 +72,9 @@ fn log_step(message: &str) {
     log(message);
 }
 
-fn log_bench(step: &str, duration: web_time::Duration) {
+fn log_proof_duration(step: &str, duration: web_time::Duration) {
     log(&format!(
-        "[BENCH] {step}: {:.3}s",
+        "{step} proof completed in {:.3}s",
         duration.as_secs_f64()
     ));
 }
@@ -114,16 +114,13 @@ struct SendTxOutcome {
 impl BalanceScenario {
     fn new(supported_user_counts: &[u32], rng: &mut StdRng) -> Self {
         log_step("Initializing balance scenario");
-        let loading_timer = Instant::now();
         let spend_circuit = load_spend_circuit();
         let balance_processor = load_balance_processor();
-        log_bench("Circuit loading", loading_timer.elapsed());
         let block_witness_generator =
             BlockWitnessGeneratorHandle::new(BlockWitnessGenerator::new(supported_user_counts));
 
         let user_id = UserId::new(0, 1).expect("user id");
         let salt = Salt::rand(rng);
-        let init_timer = Instant::now();
         let balance_witness_generator = BalanceWitnessGenerator::new(
             user_id,
             salt,
@@ -131,7 +128,6 @@ impl BalanceScenario {
             &balance_processor,
         )
         .expect("balance witness generator");
-        log_bench("Balance witness generator init", init_timer.elapsed());
 
         log_step("Balance scenario ready");
         Self {
@@ -179,7 +175,7 @@ fn perform_deposit(scenario: &mut BalanceScenario, rng: &mut StdRng) -> SendTxOu
         .prove_receive_deposit(&deposit_witness)
         .expect("deposit proof");
     let deposit_elapsed = deposit_timer.elapsed();
-    log_bench("Deposit proof", deposit_elapsed);
+    log_proof_duration("Deposit", deposit_elapsed);
     scenario
         .balance_witness_generator
         .commit_receive_deposit(&deposit_proof, &deposit_witness)
@@ -207,7 +203,7 @@ fn perform_deposit(scenario: &mut BalanceScenario, rng: &mut StdRng) -> SendTxOu
         .prove(&spend_witness)
         .expect("spend proof");
     let spend_elapsed = spend_timer.elapsed();
-    log_bench("Spend proof", spend_elapsed);
+    log_proof_duration("Spend", spend_elapsed);
 
     let mut transfer_tree = TransferTree::init();
     transfer_tree.push(transfer.clone());
@@ -254,7 +250,7 @@ fn perform_deposit(scenario: &mut BalanceScenario, rng: &mut StdRng) -> SendTxOu
         .prove_send_tx(&send_tx_witness)
         .expect("send tx proof");
     let send_elapsed = send_timer.elapsed();
-    log_bench("Send tx proof", send_elapsed);
+    log_proof_duration("Send transaction", send_elapsed);
     scenario
         .balance_witness_generator
         .commit_send_tx(&balance_proof, &send_tx_witness, &spend_witness)
@@ -274,7 +270,6 @@ fn perform_deposit(scenario: &mut BalanceScenario, rng: &mut StdRng) -> SendTxOu
 #[wasm_bindgen_test]
 fn wasm_balance_processor_flow() {
     log_step("=== wasm_balance_processor_flow start ===");
-    let flow_timer = Instant::now();
     let supported_user_counts = vec![2];
     let mut rng = StdRng::seed_from_u64(42);
     let mut scenario = BalanceScenario::new(&supported_user_counts, &mut rng);
@@ -318,19 +313,17 @@ fn wasm_balance_processor_flow() {
         .prove_receive_transfer(&receive_witness)
         .expect("receive transfer proof");
     let receive_elapsed = receive_timer.elapsed();
-    log_bench("Receive transfer proof", receive_elapsed);
+    log_proof_duration("Receive transfer", receive_elapsed);
     receiver
         .commit_receive_transfer(&receive_proof, &receive_witness)
         .expect("commit receive transfer");
     log_step("Receive transfer committed");
-    log_bench("Total flow", flow_timer.elapsed());
     log_step("=== wasm_balance_processor_flow end ===");
 }
 
 #[wasm_bindgen_test]
 fn wasm_single_withdrawal_proof() {
     log_step("=== wasm_single_withdrawal_proof start ===");
-    let flow_timer = Instant::now();
     let supported_user_counts = vec![2];
     let mut rng = StdRng::seed_from_u64(1234);
     let mut scenario = BalanceScenario::new(&supported_user_counts, &mut rng);
@@ -358,7 +351,7 @@ fn wasm_single_withdrawal_proof() {
         .prove(&spend_witness)
         .expect("withdrawal spend proof");
     let withdrawal_spend_elapsed = spend_timer.elapsed();
-    log_bench("Spend proof", withdrawal_spend_elapsed);
+    log_proof_duration("Withdrawal spend", withdrawal_spend_elapsed);
 
     let mut transfer_tree = TransferTree::init();
     transfer_tree.push(transfer.clone());
@@ -406,7 +399,7 @@ fn wasm_single_withdrawal_proof() {
         .prove_send_tx(&send_tx_witness)
         .expect("withdrawal send proof");
     let withdrawal_send_elapsed = send_timer.elapsed();
-    log_bench("Send tx proof", withdrawal_send_elapsed);
+    log_proof_duration("Withdrawal send transaction", withdrawal_send_elapsed);
     scenario
         .balance_witness_generator
         .commit_send_tx(&balance_proof, &send_tx_witness, &spend_witness)
@@ -434,17 +427,15 @@ fn wasm_single_withdrawal_proof() {
         .prove(&withdrawal_witness)
         .expect("single withdrawal proof");
     let withdrawal_elapsed = withdrawal_timer.elapsed();
-    log_bench("Single withdrawal proof", withdrawal_elapsed);
+    log_proof_duration("Single withdrawal", withdrawal_elapsed);
     log_step("Verifying single withdrawal proof");
     single_withdrawal_circuit
         .data
         .verify(proof.clone())
         .expect("single withdrawal proof verifies");
 
-    let wp_timer = Instant::now();
     let withdrawal_processor =
         WithdrawalProcessor::<F, C, D>::new(&single_withdrawal_circuit.data.verifier_data());
-    log_bench("Withdrawal processor construction", wp_timer.elapsed());
     finalize_withdrawal_chain(
         &withdrawal_processor,
         proof,
@@ -452,7 +443,6 @@ fn wasm_single_withdrawal_proof() {
         &scenario.block_witness_generator,
     )
     .expect("final withdrawal proof");
-    log_bench("Total flow", flow_timer.elapsed());
     log_step("=== wasm_single_withdrawal_proof end ===");
 }
 
@@ -472,7 +462,7 @@ fn finalize_withdrawal_chain(
     let step_timer = Instant::now();
     let chain_proof = withdrawal_processor.prove_step(&step_witness)?;
     let step_elapsed = step_timer.elapsed();
-    log_bench("Withdrawal chain step", step_elapsed);
+    log_proof_duration("Withdrawal chain step", step_elapsed);
 
     let ext_public_state = block_witness_generator
         .borrow()
@@ -486,7 +476,7 @@ fn finalize_withdrawal_chain(
         &ext_public_state,
     )?;
     let final_elapsed = final_timer.elapsed();
-    log_bench("Withdrawal chain final", final_elapsed);
+    log_proof_duration("Withdrawal chain final", final_elapsed);
     log_step("Verifying final withdrawal proof");
     withdrawal_processor
         .withdrawal_vd()
