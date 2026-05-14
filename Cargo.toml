@@ -3,14 +3,22 @@ name = "intmax3-zkp"
 version = "0.1.0"
 edition = "2024"
 
+[lib]
+crate-type = ["cdylib", "rlib"]
+
 [dependencies]
-# All plonky2 ecosystem uses mleintroduction branch (rebased on wasm)
+# All plonky2 ecosystem uses mleintroduction branch; [patch] below redirects
+# this to the local polygon-plonky2 submodule (which carries both the MLE PCS
+# and the Lita WASM/WebGPU port — polygon-plonky2 main has merged mleintroduction).
 plonky2 = { git = "https://github.com/InternetMaximalism/polygon-plonky2.git", branch = "mleintroduction", default-features = false, features = [
     "parallel",
 ] }
+starky = { git = "https://github.com/InternetMaximalism/polygon-plonky2.git", package = "starky", branch = "mleintroduction", default-features = false, features = [
+    "parallel",
+] }
 plonky2_mle = { git = "https://github.com/InternetMaximalism/polygon-plonky2.git", branch = "mleintroduction" }
-# These crates depend on polygon-plonky2 wasm branch internally;
-# [patch] below redirects their transitive plonky2 dep to mleintroduction.
+# Sibling crates use `mleintroduction` branch (pinned to old PartialWitness
+# void-returning API) to stay API-compatible with submodule b3e0f051.
 plonky2_u32 = { git = "https://github.com/InternetMaximalism/plonky2-u32.git", branch = "mleintroduction", default-features = false }
 plonky2_bn254 = { git = "https://github.com/InternetMaximalism/plonky2_bn254", branch = "mleintroduction", default-features = false }
 plonky2_keccak = { git = "https://github.com/InternetMaximalism/plonky2_keccak", branch = "mleintroduction", default-features = false }
@@ -33,17 +41,50 @@ lazy_static = "1.5.0"
 bincode = { version = "2.0.1", features = ["serde"] }
 clap = { version = "4.5", features = ["derive"] }
 
+# Threading
+rayon = "1.8"
+wasm-bindgen-rayon = { version = "1.2", features = ["no-bundler"] }
+
+# WASM bindings
+wasm-bindgen = "0.2"
+wasm-bindgen-futures = "0.4"
+
+# Web APIs
+web-sys = { version = "0.3", features = ["console", "Performance", "Window"] }
+js-sys = "0.3"
+
+# Error handling
+console_error_panic_hook = "0.1.7"
+
+# Random numbers (WASM-compatible)
+getrandom = { version = "0.3", features = ["wasm_js"] }
+
+# Async support
+futures = "0.3"
+
+# Timing (WASM-compatible)
+web-time = "0.2"
+
 [features]
 default = []
-
+# NOTE: `gpu_merkle` is intentionally NOT re-exposed here.
+#
+# The local polygon-plonky2 submodule is pinned at b3e0f051, which is the last
+# commit whose MleVerifier API matches intmax3's IntmaxRollup.sol wiring. The
+# `gpu_merkle` feature (WebGPU-accelerated Merkle tree hashing) was added later
+# (polygon-plonky2 PR #11 `feat/wasm-webgpu-merkle`, merge commit 940ce731),
+# but that branch also pulled in the v2 MLE-verifier soundness fixes (Issues
+# R2-#1 / R2-#2) which changed `MleVerifier.verify`'s signature (added
+# `gatesDigest`, removed `protocolId/sessionId/whirEvals`, etc). Re-enabling
+# `gpu_merkle` therefore requires upgrading both the submodule AND the
+# Solidity wiring + MLE fixture format simultaneously — tracked as a separate
+# follow-up. WASM/browser proving without gpu_merkle (CPU Merkle fallback)
+# already works on b3e0f051.
 
 [dev-dependencies]
 criterion = { version = "0.5", default-features = false }
 once_cell = "1.20"
-wasm-bindgen = "0.2"
 wasm-bindgen-test = "0.3"
-web-time = "0.2"
-js-sys = "0.3"
 
 [[bench]]
 name = "proof_bench"
@@ -54,11 +95,12 @@ name = "degree_report"
 harness = false
 
 # Force all transitive plonky2 deps to use the local submodule pinned at b3e0f051.
-# Branch HEAD (fd33b3dc) merged upstream main which bumped plonky2 0.2.2 -> 1.1.0
-# and changed the PartialWitness::set_target API to return Result, but plonky2_u32
-# / plonky2_bn254 / plonky2_keccak haven't been updated for the new API. b3e0f051
-# is the latest commit with the Solidity evaluationPoint binding security fix and
-# remains API-compatible with cb0f0467 plonky2_u32.
+# polygon-plonky2 main has merged mleintroduction (PR #8) AND carries the
+# wasm-webgpu-merkle port (PR #11). b3e0f051 specifically is the latest commit
+# with the Solidity evaluationPoint binding security fix and remains
+# API-compatible with cb0f0467 plonky2_u32 (which is on the `mleintroduction`
+# branches of all sibling crates). Pin via [patch] so all transitive deps
+# resolve to the same code.
 [patch."https://github.com/InternetMaximalism/polygon-plonky2.git"]
 plonky2 = { path = "contracts/lib/polygon-plonky2/plonky2" }
 plonky2_field = { path = "contracts/lib/polygon-plonky2/field" }
@@ -67,3 +109,27 @@ plonky2_maybe_rayon = { path = "contracts/lib/polygon-plonky2/maybe_rayon" }
 plonky2_mle = { path = "contracts/lib/polygon-plonky2/mle" }
 starky = { path = "contracts/lib/polygon-plonky2/starky" }
 
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+panic = "abort"  # Use "abort" for production (smaller binary), "unwind" for debugging
+
+# `cargo test --release --tests` builds the integration test harnesses with the
+# `release` profile. `wasm_bindgen_futures` and a few other WASM-side deps in
+# the workspace require `panic = "abort"`, so we force test builds to abort too
+# (otherwise we hit "requires panic strategy abort which is incompatible with
+# unwind"). Backtraces are unaffected at the test binary level.
+[profile.test]
+panic = "abort"
+
+[profile.bench]
+panic = "abort"
+
+# Post-build WASM binary optimization pass (runs after compilation)
+[package.metadata.wasm-pack.profile.release]
+wasm-opt = [
+    "-O4",                  # Most aggressive optimization (smaller + faster WASM)
+    "--enable-bulk-memory",  # Bulk memory ops for faster memcpy/memset
+    "--enable-simd"          # SIMD instructions for parallel 128-bit math
+]

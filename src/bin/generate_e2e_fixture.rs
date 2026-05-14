@@ -49,6 +49,19 @@ struct VPIFixture {
 }
 
 fn main() -> anyhow::Result<()> {
+    // Accept `--skip-groth16` for backward compatibility with the WHIR-era
+    // pipeline. The current MLE-based pipeline never invokes gnark/Groth16
+    // (Groth16 fixtures are tracked separately), so the flag is effectively a
+    // no-op here. We still accept it so existing scripts / README commands
+    // continue to work, and we acknowledge it in the log output.
+    let skip_groth16 = std::env::args().any(|a| a == "--skip-groth16");
+    if skip_groth16 {
+        eprintln!(
+            "[e2e] --skip-groth16 accepted (no-op on MLE pipeline; Groth16 \
+             fixtures are managed separately under contracts/test/data/e2e_groth16.json)"
+        );
+    }
+
     eprintln!("[e2e] Step 1: Generate Plonky2 validity proof");
 
     let supported_user_counts = vec![2u32];
