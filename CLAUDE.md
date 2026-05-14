@@ -1,5 +1,165 @@
 # CLAUDE.md
 
+This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+
+## Project Overview
+
+intmax3-zkp is a zero-knowledge proof system for the INTMAX3 rollup protocol. It combines FRI-based STARK proofs (Plonky2) for validity proof generation, Solidity smart contracts (Foundry) for L1 settlement, post-quantum signatures (SPHINCS+ with Poseidon), and a multilinear (MLE) PCS with WHIR for the on-chain wrapper proof.
+
+**Stack:** Rust 2024 edition (nightly-2025-03-23) + Solidity 0.8.29 (Foundry, Prague EVM)
+
+## Build & Test Commands
+
+```bash
+# Rust
+cargo build --release
+cargo test --release                    # Tests MUST run in release mode (debug is ignored via cfg_attr)
+cargo test --release -- --nocapture     # With stdout
+cargo test --release -p intmax3-zkp --lib <test_name>  # Single unit test
+cargo test --test e2e --release         # End-to-end integration test
+cargo test --test mle_onchain_e2e --release  # MLE/WHIR on-chain E2E (drives Forge inside)
+cargo bench --bench proof_bench         # Proof generation benchmarks
+cargo bench --bench degree_report       # Circuit complexity report
+
+# Formatting & Linting
+cargo fmt
+cargo clippy --release
+
+# Solidity contracts (from contracts/ directory)
+cd contracts && forge install
+forge test -vvv
+forge build
+# Skip the (slow) gnark Groth16 fixture test:
+SKIP_GROTH16=true forge test
+
+# WASM (CPU-only)
+cargo run -r --bin generate_wasm_fixtures
+wasm-pack build --release --target web
+
+# WASM (with WebGPU acceleration) — pending the v2 MleVerifier migration; see "Known follow-up" below
+# wasm-pack build --release --target web -- --features gpu_merkle
+
+# Browser testing
+npm install           # First time only
+node server.js        # Serves at https://localhost:8000
+# Open https://localhost:8000 in Chrome, click "Run Withdrawal Proof" or "Run Balance Processor Flow"
+```
+
+**Important:** All Rust tests use `#[cfg_attr(debug_assertions, ignore = "run with --release")]` — they will be skipped in debug mode.
+
+## Development Guidelines
+
+### No Mocks or Dummies
+
+### 1. Default to Planning Mode
+- Switch to planning mode for every non-simple task (those with 3 or more steps or design choices)
+- If issues arise, halt and revise the plan immediately — never force progress
+- Apply planning mode to verification and confirmation processes, not just construction
+- Draft thorough specifications in advance to eliminate ambiguity
+- **For any change touching proof logic, cryptographic protocols, or security-sensitive components: write a full threat model before writing any code**
+
+### 2. Subagent Approach to Maintain Clear Main Context
+- Delegate investigation, discovery, and parallel evaluations to subagents
+- For complex or ambiguous issues, allocate additional reasoning through subagents
+- Assign a single responsibility per subagent for concentrated, focused analysis
+- **Use dedicated subagents for security review — separate from the implementation subagent. Never let the same subagent both implement and security-review its own work**
+- Spin up an explicit "attacker subagent" for any protocol-level design or change (see §Adversarial Thinking)
+
+### 3. Task Oversight
+1. **Prioritize Planning**: Document the strategy in `tasks/todo.md` with verifiable, falsifiable elements
+2. **Approve the Plan**: Consult the user before beginning execution
+3. **Monitor Advancement**: Check off elements as they are completed
+4. **Clarify Modifications**: Provide a high-level summary at each phase
+5. **Record Outcomes**: Include an assessment in `tasks/todo.md`
+6. **Log Insights**: Update `tasks/lessons.md` after adjustments — but never suppress a security concern to reduce "interruption frequency"
+
+**Acceptable in tests:**
+- `vm.blobhashes()` to set up EIP-4844 blob transaction context (environment setup, not crypto faking)
+- Helper contracts that implement real interfaces with simple fixed behavior (e.g., `FixedReturnForcedTxLogic`)
+- `vm.prank()`, `vm.deal()`, `vm.expectRevert()` and other standard Foundry cheatcodes
+
+## Architecture
+
+### Four Proof Types
+
+1. **Balance Proofs** (`src/circuits/balance/`) — User account state (spend, send-tx, receive-transfer, receive-deposit). Uses recursive IVC via a switch board circuit that routes to sub-circuits, coordinated by `balance_processor.rs`.
+
+2. **Validity Proofs** (`src/circuits/validity/`) — Block-level consensus. Two chains: block hash chain (account tree updates + SPHINCS+ signature verification) and deposit hash chain. Main circuit in `validity_circuit.rs` binds initial/final state commitments. Public inputs = `keccak256(ValidityPublicInputs)` for on-chain binding.
+
+3. **Withdrawal Proofs** (`src/circuits/withdraw/`) — Extract transfers from balance proofs and aggregate N withdrawals via chain circuit.
+
+4. **On-Chain Verification** (`contracts/src/IntmaxRollup.sol`) — L1 contract with `postBlock()`, `deposit()`, `submit()`, `finalize()` steps. Verifies the MLE+WHIR wrapper proof and Groth16 in parallel.
+
+### Wrapper proof pipeline (Rust → on-chain)
+
+The validity proof is wrapped via `WrapperCircuit` and then committed/opened via the upstream `plonky2_mle` integration (`mle_prove` → `MleProof<F>`), which is verified on-chain by `@mle/MleVerifier.sol` from the `polygon-plonky2` submodule (`contracts/lib/polygon-plonky2`, pinned via Cargo `[patch]`). The MLE pipeline binds WHIR's commitment root into the Keccak Fiat-Shamir transcript so all MLE challenges (alpha/beta/gamma/tau/tau_perm/batchR) are bound to the committed polynomial — replacing the legacy in-tree `whir_plonky2_prover.rs` wrapper that left ζ-openings unbound to the WHIR commitment.
+
+### Key Modules
+
+- `src/common/` — Core types: Block, Deposit, Transfer, Tx, UserId, PrivateState, PublicState, and Merkle trees (account, deposit, tx, transfer, indexed)
+- `src/ethereum_types/` — Ethereum-compatible types (Address, Bytes32, U256) as u32 arrays for Plonky2 compatibility
+- `src/utils/` — Poseidon hash, cyclic recursion helpers, serialization, hash chains, tree abstractions, and the MLE prover wrapper (`mle_prover.rs`)
+- `src/wrapper_config/` — Plonky2 circuit config (PoseidonGoldilocksConfig, F=Goldilocks, D=2)
+- `src/circuits/test_utils/` — Witness generators and native SPHINCS+ signing for tests
+
+### Circuit Patterns
+
+- **Config:** `PoseidonGoldilocksConfig` with Goldilocks field, degree-2 extensions (`F = GoldilocksField, const D: usize = 2`)
+- **Recursion:** Cyclic recursion via `RecursivelyVerifiable` trait and `cyclic.rs` utilities
+- **Public Input Binding:** Proofs bind to on-chain state via `keccak256(ValidityPublicInputs)` → MLE/WHIR evaluations → Groth16 public inputs
+- **Witness Pattern:** Separate `*Witness` structs for circuit inputs; `*WitnessGenerator` for building them in tests
+
+### Dependencies
+
+- `plonky2`, `starky`, `plonky2_mle` (polygon-plonky2 submodule at `contracts/lib/polygon-plonky2`, pinned via `[patch]`) — FRI-based STARK system and the multilinear (MLE) PCS with WHIR
+- `plonky2_u32`, `plonky2_bn254`, `plonky2_keccak` — Extension circuits (`mleintroduction` branches, paired with the submodule pin)
+- `sphincsplus-circuits`, `sphincsplus-poseidon`, `sphincsplus-params` — Post-quantum signatures
+
+### Solidity Contracts
+
+- `IntmaxRollup.sol` — Main rollup contract (6-step verification pipeline)
+- `@mle/MleVerifier.sol` (via `contracts/lib/polygon-plonky2/mle/contracts/src/`, Foundry remapping `@mle/=lib/polygon-plonky2/mle/contracts/src/`) — MLE proof + WHIR PCS verification
+- `BlobKZGVerifier.sol` — EIP-2537 KZG multi-point opening
+- `Groth16Verifier.sol` / `GnarkGroth16Verifier.sol` — BN254 Groth16 pairing verification
+- Foundry config: optimizer on (200 runs), via_ir enabled, Prague EVM
+
+## WASM / Browser Architecture
+
+The browser proving setup runs against the same `polygon-plonky2` submodule pin used for native builds. WebGPU-accelerated Merkle hashing is **not yet enabled on this branch** — see the "Known follow-up" section below.
+
+### Three optimization layers (current state)
+
+1. **SIMD128** — field arithmetic acceleration (enabled via `.cargo/config.toml` target features)
+2. **Multi-threading** — Web Workers + `wasm-bindgen-rayon` thread pool (requires HTTPS + COEP/COOP headers)
+3. **WebGPU** — *(pending)* GPU Poseidon hashing for FRI Merkle trees during `prove()` (`gpu_merkle` feature, currently disabled — see "Known follow-up")
+
+### Key WASM files
+
+- `src/lib.rs` — `#[wasm_bindgen]` entry points: `run_single_withdrawal_proof()`, `run_balance_processor_flow()`, `init_gpu_merkle()`
+- `src/wasm_demo.rs` — Browser proving entry implementations
+- `.cargo/config.toml` — WASM target flags (atomics, SIMD, 4GB max memory, 16MB stack)
+- `index.html` — Browser test runner UI
+- `test-worker.js` — Web Worker that initializes WASM, thread pool, GPU, and dispatches proof actions
+- `server.js` — HTTPS dev server with COEP/COOP headers for SharedArrayBuffer
+
+### WASM memory constraints
+
+WASM32 has a **4GB hard limit** on linear memory. The proof pipeline uses ~4GB at peak. Key mitigations:
+- **Strategic `drop()` calls** in `src/lib.rs` — circuit data, witnesses, and proofs are dropped as soon as no longer needed between proving steps
+- **Memory-pressure CPU fallback** *(GPU path only)* — when WASM memory exceeds 3.5GB, Merkle tree construction falls back from GPU to CPU
+- `prove_async()` is mandatory in WASM with `gpu_merkle`; sync `prove()` panics on that path
+
+### Known follow-up: gpu_merkle re-enable
+
+The `gpu_merkle` feature is intentionally not exposed in `Cargo.toml` on this branch. Re-enabling it requires bumping the `polygon-plonky2` submodule to `940ce731` (PR #11 `feat/wasm-webgpu-merkle` merge) or later, which simultaneously introduces the v2 MLE-verifier soundness fixes (R2-#1 gate binding, R2-#2 logUp) that change `MleVerifier.verify`'s signature (new `gatesDigest`, `whirEvals` consolidated into `MleProof`). A coordinated migration across `IntmaxRollup.sol`, `IntmaxRollup.t.sol`, `MleE2E.t.sol`, `generate_e2e_fixture.rs`, and `mle_fixture.json` is tracked as a separate PR.
+
+## Code Style
+
+- `rustfmt.toml`: `imports_granularity = "Crate"`, `wrap_comments = true`, `comment_width = 150`
+- Rust nightly required (pinned in `rust-toolchain.toml`)
+
+---
+
 ## Workflow Coordination
 
 ### 1. Default to Planning Mode
