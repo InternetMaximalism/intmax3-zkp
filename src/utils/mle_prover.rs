@@ -88,5 +88,5 @@ pub fn export_mle_json<F: RichField + Extendable<D>, const D: usize>(
     proof: &MleProof<F>,
     common_data: &plonky2::plonk::circuit_data::CommonCircuitData<F, D>,
 ) -> String {
-    plonky2_mle::fixture::proof_to_json(proof, common_data.degree_bits())
+    plonky2_mle::fixture::proof_to_json(proof, common_data, common_data.degree_bits())
 }
