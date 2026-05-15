@@ -4,28 +4,40 @@ version = "0.1.0"
 edition = "2024"
 
 [lib]
-crate-type = ["cdylib", "rlib"]
+# `cdylib` is only required at WASM build time (wasm-pack flow). For native
+# test / bin builds, cargo's resolver "2" + multiple `intmax3-zkp` dependents
+# in the workspace produce an "output filename collision" warning and silently
+# breaks transitive `[patch]` resolution on macOS (plonky2_keccak / sphincsplus
+# can't find their transitive sibling crates → 200+ E0463 errors). Forcing
+# `rlib`-only on native sidesteps that. WASM builds should append `cdylib` at
+# wasm-pack invocation time, e.g. via `--crate-type=cdylib`.
+crate-type = ["rlib"]
 
 [dependencies]
-# All plonky2 ecosystem uses mleintroduction branch; [patch] below redirects
-# this to the local polygon-plonky2 submodule (which carries both the MLE PCS
-# and the Lita WASM/WebGPU port — polygon-plonky2 main has merged mleintroduction).
-plonky2 = { git = "https://github.com/InternetMaximalism/polygon-plonky2.git", branch = "mleintroduction", default-features = false, features = [
+# polygon-plonky2 main (≥ PR #11 wasm-webgpu-merkle merge `940ce731`, currently
+# pinned to `d67ab49e`) carries both the MLE PCS and the WASM/WebGPU Merkle
+# port. The local submodule under contracts/lib/polygon-plonky2 is the source
+# of truth; the [patch] block below redirects all transitive `polygon-plonky2.git`
+# refs (regardless of branch label) to the submodule path so everything in the
+# workspace resolves to the same code.
+plonky2 = { git = "https://github.com/InternetMaximalism/polygon-plonky2.git", branch = "main", default-features = false, features = [
     "parallel",
+    "std",
 ] }
-starky = { git = "https://github.com/InternetMaximalism/polygon-plonky2.git", package = "starky", branch = "mleintroduction", default-features = false, features = [
+starky = { git = "https://github.com/InternetMaximalism/polygon-plonky2.git", package = "starky", branch = "main", default-features = false, features = [
     "parallel",
+    "std",
 ] }
-plonky2_mle = { git = "https://github.com/InternetMaximalism/polygon-plonky2.git", branch = "mleintroduction" }
-# Sibling crates use `mleintroduction` branch (pinned to old PartialWitness
-# void-returning API) to stay API-compatible with submodule b3e0f051.
-plonky2_u32 = { git = "https://github.com/InternetMaximalism/plonky2-u32.git", branch = "mleintroduction", default-features = false }
-plonky2_bn254 = { git = "https://github.com/InternetMaximalism/plonky2_bn254", branch = "mleintroduction", default-features = false }
-plonky2_keccak = { git = "https://github.com/InternetMaximalism/plonky2_keccak", branch = "mleintroduction", default-features = false }
+plonky2_mle = { git = "https://github.com/InternetMaximalism/polygon-plonky2.git", branch = "main" }
+# Sibling crates use `wasm-main` (Result-returning PartialWitness::set_target,
+# matches polygon-plonky2 main HEAD which now includes PR #11 wasm-webgpu-merkle).
+plonky2_u32 = { git = "https://github.com/InternetMaximalism/plonky2-u32.git", branch = "wasm-main", default-features = false }
+plonky2_bn254 = { git = "https://github.com/InternetMaximalism/plonky2_bn254", branch = "wasm-main", default-features = false }
+plonky2_keccak = { git = "https://github.com/InternetMaximalism/plonky2_keccak", branch = "wasm-main", default-features = false }
 
-sphincsplus-circuits = { git = "https://github.com/InternetMaximalism/aggregated_SPHINCS_plus.git", branch = "mleintroduction" }
-sphincsplus-params = { git = "https://github.com/InternetMaximalism/aggregated_SPHINCS_plus.git", branch = "mleintroduction" }
-sphincsplus-poseidon = { git = "https://github.com/InternetMaximalism/aggregated_SPHINCS_plus.git", branch = "mleintroduction" }
+sphincsplus-circuits = { git = "https://github.com/InternetMaximalism/aggregated_SPHINCS_plus.git", branch = "wasm-main" }
+sphincsplus-params = { git = "https://github.com/InternetMaximalism/aggregated_SPHINCS_plus.git", branch = "wasm-main" }
+sphincsplus-poseidon = { git = "https://github.com/InternetMaximalism/aggregated_SPHINCS_plus.git", branch = "wasm-main" }
 keccak-hash = "0.8.0"
 hex = "0.4.3"
 rand = "0.8.5"
@@ -67,19 +79,9 @@ web-time = "0.2"
 
 [features]
 default = []
-# NOTE: `gpu_merkle` is intentionally NOT re-exposed here.
-#
-# The local polygon-plonky2 submodule is pinned at b3e0f051, which is the last
-# commit whose MleVerifier API matches intmax3's IntmaxRollup.sol wiring. The
-# `gpu_merkle` feature (WebGPU-accelerated Merkle tree hashing) was added later
-# (polygon-plonky2 PR #11 `feat/wasm-webgpu-merkle`, merge commit 940ce731),
-# but that branch also pulled in the v2 MLE-verifier soundness fixes (Issues
-# R2-#1 / R2-#2) which changed `MleVerifier.verify`'s signature (added
-# `gatesDigest`, removed `protocolId/sessionId/whirEvals`, etc). Re-enabling
-# `gpu_merkle` therefore requires upgrading both the submodule AND the
-# Solidity wiring + MLE fixture format simultaneously — tracked as a separate
-# follow-up. WASM/browser proving without gpu_merkle (CPU Merkle fallback)
-# already works on b3e0f051.
+# `plonky2_keccak/wasm` does not expose a `gpu_merkle` feature flag, so we only
+# forward it to plonky2 + starky (which do).
+gpu_merkle = ["plonky2/gpu_merkle", "starky/gpu_merkle"]
 
 [dev-dependencies]
 criterion = { version = "0.5", default-features = false }
@@ -94,13 +96,12 @@ harness = false
 name = "degree_report"
 harness = false
 
-# Force all transitive plonky2 deps to use the local submodule pinned at b3e0f051.
-# polygon-plonky2 main has merged mleintroduction (PR #8) AND carries the
-# wasm-webgpu-merkle port (PR #11). b3e0f051 specifically is the latest commit
-# with the Solidity evaluationPoint binding security fix and remains
-# API-compatible with cb0f0467 plonky2_u32 (which is on the `mleintroduction`
-# branches of all sibling crates). Pin via [patch] so all transitive deps
-# resolve to the same code.
+# Pin all transitive polygon-plonky2 deps to the local submodule. The
+# submodule is updated to a post-PR#11 commit so it carries: (a) MLE PCS with
+# the v2 soundness fixes (R2-#1 gate binding, R2-#2 logUp), and (b) the
+# WebGPU Merkle accelerator (`gpu_merkle` feature). All sibling crates
+# (`plonky2_u32` / `plonky2_bn254` / `plonky2_keccak` / `sphincsplus-*`)
+# transitively reference `polygon-plonky2.git` and are redirected here too.
 [patch."https://github.com/InternetMaximalism/polygon-plonky2.git"]
 plonky2 = { path = "contracts/lib/polygon-plonky2/plonky2" }
 plonky2_field = { path = "contracts/lib/polygon-plonky2/field" }
