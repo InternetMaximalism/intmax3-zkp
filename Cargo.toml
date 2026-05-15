@@ -4,14 +4,17 @@ version = "0.1.0"
 edition = "2024"
 
 [lib]
-# `cdylib` is only required at WASM build time (wasm-pack flow). For native
-# test / bin builds, cargo's resolver "2" + multiple `intmax3-zkp` dependents
-# in the workspace produce an "output filename collision" warning and silently
-# breaks transitive `[patch]` resolution on macOS (plonky2_keccak / sphincsplus
-# can't find their transitive sibling crates → 200+ E0463 errors). Forcing
-# `rlib`-only on native sidesteps that. WASM builds should append `cdylib` at
-# wasm-pack invocation time, e.g. via `--crate-type=cdylib`.
-crate-type = ["rlib"]
+# `cdylib` is required for the wasm-pack flow (wasm-pack reads `Cargo.toml`
+# directly and refuses to build a WebAssembly artifact unless `cdylib` is
+# listed — passing `--crate-type=cdylib` at the CLI does not satisfy that
+# check). `rlib` is required for native consumers (integration tests,
+# downstream binaries). Both targets coexist cleanly with the current
+# submodule pin (`polygon-plonky2` at the post-CosetInterpolation commit);
+# the historical "output filename collision" / E0463 storm that affected
+# earlier submodule states is no longer reproducible — `cargo test --release
+# --lib` (157/157) and `cargo check --tests --release` both pass with this
+# dual crate-type. See PR #16 for the migration rationale.
+crate-type = ["cdylib", "rlib"]
 
 [dependencies]
 # polygon-plonky2 main (≥ PR #11 wasm-webgpu-merkle merge `940ce731`, currently
