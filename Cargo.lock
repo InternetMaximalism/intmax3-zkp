@@ -1885,6 +1885,7 @@ source = "git+https://github.com/InternetMaximalism/plonky2_keccak?branch=wasm-m
 dependencies = [
  "anyhow",
  "env_logger",
+ "futures",
  "hashbrown 0.14.5",
  "hex",
  "itertools 0.12.1",

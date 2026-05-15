@@ -9,7 +9,9 @@ use plonky2::{
         config::{AlgebraicHasher, GenericConfig},
         proof::{ProofWithPublicInputs, ProofWithPublicInputsTarget},
     },
-    recursion::dummy_circuit::{dummy_circuit, dummy_proof},
+    recursion::dummy_circuit::{
+        dummy_circuit, dummy_circuit_async, dummy_proof, dummy_proof_async,
+    },
 };
 
 #[derive(Debug, Clone)]
@@ -30,6 +32,23 @@ where
     pub fn new(common: &CommonCircuitData<F, D>) -> Self {
         let data = dummy_circuit::<F, C, D>(common);
         let proof = dummy_proof(&data, vec![].into_iter().enumerate().collect()).unwrap();
+        Self { proof }
+    }
+
+    /// Async counterpart of `new`. Both the circuit build (`dummy_circuit_async`)
+    /// AND the dummy proof generation (`dummy_proof_async`) must be the async
+    /// variants on `wasm32 + gpu_merkle`, because the upstream sync
+    /// `CircuitData::prove` panics with "plonk::prover::prove must be awaited
+    /// on wasm with gpu_merkle enabled; use prove_async instead". 6d8d3d3's
+    /// original `new_async` only async-ified the build half and silently fell
+    /// back to sync `dummy_proof`, which crashed `WithdrawalProcessor::new_async`
+    /// during the browser smoke test. See PR #16 thread for the diagnostic
+    /// trace (circuit_data.rs:190 panic during `Building withdrawal processor`).
+    pub async fn new_async(common: &CommonCircuitData<F, D>) -> Self {
+        let data = dummy_circuit_async::<F, C, D>(common).await;
+        let proof = dummy_proof_async(&data, vec![].into_iter().enumerate().collect())
+            .await
+            .unwrap();
         Self { proof }
     }
 }
@@ -57,21 +76,10 @@ pub(crate) fn conditionally_verify_proof<
     builder.verify_proof::<C>(proof_with_pis, &selected_verifier_data, inner_common_data);
 }
 
-pub fn internal_dummy_circuit<
-    F: RichField + Extendable<D>,
-    C: GenericConfig<D, F = F>,
-    const D: usize,
->(
+fn setup_internal_dummy_builder<F: RichField + Extendable<D>, const D: usize>(
     common_data: &CommonCircuitData<F, D>,
-) -> CircuitData<F, C, D> {
+) -> CircuitBuilder<F, D> {
     let config = common_data.config.clone();
-    // assert!(
-    //     !common_data.config.zero_knowledge,
-    //     "Degree calculation can be off if zero-knowledge is on."
-    // );
-
-    // Number of `NoopGate`s to add to get a circuit of size `degree` in the end.
-    // Need to account for public input hashing, a `PublicInputGate` and a `ConstantGate`.
     let degree = common_data.degree();
     let num_noop_gate = degree - common_data.num_public_inputs.div_ceil(8) - 2;
 
@@ -85,8 +93,31 @@ pub fn internal_dummy_circuit<
     for _ in 0..common_data.num_public_inputs {
         builder.add_virtual_public_input();
     }
+    builder
+}
 
+pub fn internal_dummy_circuit<
+    F: RichField + Extendable<D>,
+    C: GenericConfig<D, F = F>,
+    const D: usize,
+>(
+    common_data: &CommonCircuitData<F, D>,
+) -> CircuitData<F, C, D> {
+    let builder = setup_internal_dummy_builder(common_data);
     let circuit = builder.build::<C>();
+    assert_eq!(&circuit.common, common_data);
+    circuit
+}
+
+pub async fn internal_dummy_circuit_async<
+    F: RichField + Extendable<D>,
+    C: GenericConfig<D, F = F>,
+    const D: usize,
+>(
+    common_data: &CommonCircuitData<F, D>,
+) -> CircuitData<F, C, D> {
+    let builder = setup_internal_dummy_builder(common_data);
+    let circuit = builder.build_async::<C>().await;
     assert_eq!(&circuit.common, common_data);
     circuit
 }
