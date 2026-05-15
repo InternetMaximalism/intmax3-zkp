@@ -9,7 +9,9 @@ use plonky2::{
         config::{AlgebraicHasher, GenericConfig},
         proof::{ProofWithPublicInputs, ProofWithPublicInputsTarget},
     },
-    recursion::dummy_circuit::{dummy_circuit, dummy_circuit_async, dummy_proof},
+    recursion::dummy_circuit::{
+        dummy_circuit, dummy_circuit_async, dummy_proof, dummy_proof_async,
+    },
 };
 
 #[derive(Debug, Clone)]
@@ -27,17 +29,27 @@ where
     C: GenericConfig<D, F = F> + 'static,
     <C as GenericConfig<D>>::Hasher: AlgebraicHasher<F>,
 {
-    fn from_circuit_data(data: CircuitData<F, C, D>) -> Self {
+    pub fn new(common: &CommonCircuitData<F, D>) -> Self {
+        let data = dummy_circuit::<F, C, D>(common);
         let proof = dummy_proof(&data, vec![].into_iter().enumerate().collect()).unwrap();
         Self { proof }
     }
 
-    pub fn new(common: &CommonCircuitData<F, D>) -> Self {
-        Self::from_circuit_data(dummy_circuit::<F, C, D>(common))
-    }
-
+    /// Async counterpart of `new`. Both the circuit build (`dummy_circuit_async`)
+    /// AND the dummy proof generation (`dummy_proof_async`) must be the async
+    /// variants on `wasm32 + gpu_merkle`, because the upstream sync
+    /// `CircuitData::prove` panics with "plonk::prover::prove must be awaited
+    /// on wasm with gpu_merkle enabled; use prove_async instead". 6d8d3d3's
+    /// original `new_async` only async-ified the build half and silently fell
+    /// back to sync `dummy_proof`, which crashed `WithdrawalProcessor::new_async`
+    /// during the browser smoke test. See PR #16 thread for the diagnostic
+    /// trace (circuit_data.rs:190 panic during `Building withdrawal processor`).
     pub async fn new_async(common: &CommonCircuitData<F, D>) -> Self {
-        Self::from_circuit_data(dummy_circuit_async::<F, C, D>(common).await)
+        let data = dummy_circuit_async::<F, C, D>(common).await;
+        let proof = dummy_proof_async(&data, vec![].into_iter().enumerate().collect())
+            .await
+            .unwrap();
+        Self { proof }
     }
 }
 

@@ -82,9 +82,19 @@ web-time = "0.2"
 
 [features]
 default = []
-# `plonky2_keccak/wasm` does not expose a `gpu_merkle` feature flag, so we only
-# forward it to plonky2 + starky (which do).
-gpu_merkle = ["plonky2/gpu_merkle", "starky/gpu_merkle"]
+# Forward `gpu_merkle` to every transitive dependency that exposes it. Missing
+# any one of these turns into a runtime panic on the browser proving path:
+# - `plonky2/gpu_merkle`: makes `CircuitData::prove` panic ("must be awaited"),
+#   replacing it with `prove_async` that drives WebGPU Merkle.
+# - `starky/gpu_merkle`: same contract for `prove_with_commitment` /
+#   `prove_with_commitment_async` (used inside multi-STARK proving).
+# - `plonky2_keccak/gpu_merkle`: bridges the SimpleGenerator's sync
+#   `run_once` to starky's async `prove_with_commitment_async` via
+#   `futures::executor::block_on`. Forgetting this forward yielded a
+#   `Stark prover must be awaited on wasm with gpu_merkle enabled; use
+#   prove_with_commitment_async instead` panic during the browser smoke
+#   test at `withdrawal_chain_step`.
+gpu_merkle = ["plonky2/gpu_merkle", "starky/gpu_merkle", "plonky2_keccak/gpu_merkle"]
 
 [dev-dependencies]
 criterion = { version = "0.5", default-features = false }
