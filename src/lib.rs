@@ -2,6 +2,8 @@ pub mod circuits;
 pub mod common;
 pub mod constants;
 pub mod ethereum_types;
+pub mod plonky3;
+pub mod plonky3_backend;
 pub mod utils;
 pub mod wrapper_config;
 
