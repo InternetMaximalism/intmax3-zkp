@@ -1,101 +1,92 @@
-use anyhow::{Context, Result, anyhow, ensure};
+use std::rc::Rc;
+
+use anyhow::{anyhow, ensure, Context, Result};
 use p3_batch_stark::ProverData;
-use p3_circuit::builder::CircuitBuilder;
-use p3_circuit::ops::{
-    KoalaBearD1Width16, Poseidon2Config, generate_poseidon2_trace,
+use p3_circuit::{
+    builder::CircuitBuilder,
+    ops::{generate_poseidon2_trace, generate_recompose_trace, Poseidon2Config},
+    Circuit, ExprId,
 };
-use p3_circuit::{Circuit, ExprId};
-use p3_circuit_prover::batch_stark_prover::{
-    Poseidon2Preprocessor, poseidon2_air_builders_d5, poseidon2_table_provers_d5,
-};
-use p3_circuit_prover::common::{NpoPreprocessor, get_airs_and_degrees_with_prep};
-use p3_circuit_prover::config::KoalaBearConfig;
 use p3_circuit_prover::{
-    BatchStarkProver, CircuitProverData, ConstraintProfile, TablePacking, config,
+    batch_stark_prover::{poseidon2_air_builders, recompose_air_builders},
+    common::{get_airs_and_degrees_with_prep, NpoPreprocessor},
+    BatchStarkProof, BatchStarkProver, CircuitProverData, ConstraintProfile, Poseidon2Preprocessor,
+    RecomposePreprocessor, TablePacking,
 };
-use p3_field::{PrimeCharacteristicRing, PrimeField64};
-use p3_field::extension::QuinticTrinomialExtensionField;
-use p3_koala_bear::{KoalaBear, default_koalabear_poseidon2_16};
+use p3_field::{BasedVectorSpace, PrimeCharacteristicRing, PrimeField64};
+use p3_koala_bear::{default_koalabear_poseidon2_16, KoalaBear};
+use p3_poseidon2_circuit_air::KoalaBearD4Width16;
+use p3_recursion::RecursionOutput;
 use p3_symmetric::{CryptographicHasher, PaddingFreeSponge};
-use p3_test_utils::LiftPermToQuintic;
+use p3_uni_stark::StarkGenericConfig;
 
-pub const KOALA_POSEIDON2_RATE: usize = 8;
+use super::config::{
+    KoalaChallenge, KoalaRecursionConfig, KOALA_CHALLENGE_DEGREE, KOALA_HASH_RATE,
+};
+
 pub const KOALA_LIMB_BITS: usize = 16;
+pub const KOALA_HASH_OUTPUT_LIMBS: usize = KOALA_HASH_RATE / KOALA_CHALLENGE_DEGREE;
 
-pub type KoalaExt5 = QuinticTrinomialExtensionField<KoalaBear>;
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct KoalaPoseidon2HashOut {
-    pub elements: [u64; KOALA_POSEIDON2_RATE],
+    pub elements: [u64; KOALA_HASH_RATE],
 }
 
 impl KoalaPoseidon2HashOut {
-    pub fn to_public_inputs(self) -> [KoalaExt5; KOALA_POSEIDON2_RATE] {
-        self.elements.map(lift_u64)
+    pub fn to_public_inputs(self) -> [KoalaChallenge; KOALA_HASH_OUTPUT_LIMBS] {
+        core::array::from_fn(|i| {
+            let start = i * KOALA_CHALLENGE_DEGREE;
+            KoalaChallenge::from_basis_coefficients_slice(
+                &self.elements[start..start + KOALA_CHALLENGE_DEGREE]
+                    .iter()
+                    .copied()
+                    .map(KoalaBear::from_u64)
+                    .collect::<Vec<_>>(),
+            )
+            .expect("hash output chunk length should match challenge degree")
+        })
     }
 }
 
-fn lift_u64(value: u64) -> KoalaExt5 {
-    KoalaExt5::new([
-        KoalaBear::from_u64(value),
-        KoalaBear::ZERO,
-        KoalaBear::ZERO,
-        KoalaBear::ZERO,
-        KoalaBear::ZERO,
-    ])
-}
-
-fn u64_to_koala_limbs(value: u64) -> [u64; 4] {
-    [
-        value & 0xffff,
-        (value >> 16) & 0xffff,
-        (value >> 32) & 0xffff,
-        (value >> 48) & 0xffff,
-    ]
-}
-
-pub fn split_u64s_to_koala_limbs(inputs: &[u64]) -> Vec<u64> {
-    inputs.iter().flat_map(|&value| u64_to_koala_limbs(value)).collect()
-}
-
-pub fn hash_u64s_with_koala_poseidon2(inputs: &[u64]) -> KoalaPoseidon2HashOut {
-    let perm = default_koalabear_poseidon2_16();
-    let hasher = PaddingFreeSponge::<_, 16, 8, 8>::new(perm);
-    let limbs = split_u64s_to_koala_limbs(inputs);
-    let out = hasher.hash_iter(limbs.iter().copied().map(KoalaBear::from_u64));
-    KoalaPoseidon2HashOut {
-        elements: out.map(|x| x.as_canonical_u64()),
-    }
+pub struct KoalaHashProof {
+    pub expected: KoalaPoseidon2HashOut,
+    pub output: RecursionOutput<KoalaRecursionConfig>,
 }
 
 pub struct KoalaHashCircuit {
     input_len: usize,
     limb_len: usize,
-    circuit: Circuit<KoalaExt5>,
-    prover_data: CircuitProverData<KoalaBearConfig>,
+    circuit: Circuit<KoalaChallenge>,
+    config: KoalaRecursionConfig,
+    prover_data: Rc<CircuitProverData<KoalaRecursionConfig>>,
     table_packing: TablePacking,
 }
 
 impl KoalaHashCircuit {
     pub fn new(input_len: usize) -> Result<Self> {
         let limb_len = input_len * 4;
-        let inner_perm = default_koalabear_poseidon2_16();
-        let lift_perm = LiftPermToQuintic::<KoalaBear, _, 16>::new(inner_perm);
-
-        let mut builder = CircuitBuilder::<KoalaExt5>::new();
-        builder.enable_poseidon2_perm_base::<KoalaBearD1Width16, _>(
-            generate_poseidon2_trace::<KoalaExt5, KoalaBearD1Width16>,
-            lift_perm,
+        ensure!(
+            limb_len % KOALA_CHALLENGE_DEGREE == 0,
+            "limb length must be aligned to the recursive extension degree"
         );
 
-        let input_exprs: Vec<ExprId> = (0..limb_len)
+        let perm = default_koalabear_poseidon2_16();
+        let mut builder = CircuitBuilder::<KoalaChallenge>::new();
+        builder.enable_poseidon2_perm::<KoalaBearD4Width16, _>(
+            generate_poseidon2_trace::<KoalaChallenge, KoalaBearD4Width16>,
+            perm,
+        );
+        builder
+            .enable_recompose::<KoalaBear>(generate_recompose_trace::<KoalaBear, KoalaChallenge>);
+
+        let input_exprs: Vec<ExprId> = (0..(limb_len / KOALA_CHALLENGE_DEGREE))
             .map(|_| builder.public_input())
             .collect();
         let outputs = builder
-            .add_hash_slice(&Poseidon2Config::KOALA_BEAR_D1_W16, &input_exprs, true)
+            .add_hash_slice(&Poseidon2Config::KOALA_BEAR_D4_W16, &input_exprs, true)
             .context("failed to add KoalaBear Poseidon2 hash op")?;
         ensure!(
-            outputs.len() == KOALA_POSEIDON2_RATE,
+            outputs.len() == KOALA_HASH_OUTPUT_LIMBS,
             "unexpected KoalaBear Poseidon2 output arity"
         );
 
@@ -104,13 +95,19 @@ impl KoalaHashCircuit {
             builder.connect(output, expected);
         }
 
-        let circuit = builder.build().context("failed to build KoalaBear plonky3 circuit")?;
-        let table_packing = TablePacking::default();
-        let npo_prep: Vec<Box<dyn NpoPreprocessor<KoalaBear>>> =
-            vec![Box::new(Poseidon2Preprocessor)];
-        let air_builders = poseidon2_air_builders_d5::<KoalaBearConfig>();
+        let circuit = builder
+            .build()
+            .context("failed to build KoalaBear plonky3 circuit")?;
+        let config = KoalaRecursionConfig::new();
+        let table_packing = TablePacking::new(2, 2);
+        let npo_prep: Vec<Box<dyn NpoPreprocessor<KoalaBear>>> = vec![
+            Box::new(Poseidon2Preprocessor),
+            Box::new(RecomposePreprocessor::default()),
+        ];
+        let mut air_builders = poseidon2_air_builders::<KoalaRecursionConfig, 4>();
+        air_builders.extend(recompose_air_builders(1, false));
         let (airs_degrees, primitive_columns, non_primitive_columns) =
-            get_airs_and_degrees_with_prep::<KoalaBearConfig, _, 5>(
+            get_airs_and_degrees_with_prep::<KoalaRecursionConfig, _, 4>(
                 &circuit,
                 &table_packing,
                 &npo_prep,
@@ -119,14 +116,19 @@ impl KoalaHashCircuit {
             )
             .context("failed to derive AIRs for KoalaBear hash circuit")?;
         let (airs, degrees): (Vec<_>, Vec<usize>) = airs_degrees.into_iter().unzip();
-        let prover_data = ProverData::from_airs_and_degrees(&config::koala_bear(), &airs, &degrees);
-        let prover_data =
-            CircuitProverData::new(prover_data, primitive_columns, non_primitive_columns);
+        let ext_degrees: Vec<usize> = degrees.iter().map(|&d| d + config.is_zk()).collect();
+        let prover_data = ProverData::from_airs_and_degrees(&config, &airs, &ext_degrees);
+        let prover_data = Rc::new(CircuitProverData::new(
+            prover_data,
+            primitive_columns,
+            non_primitive_columns,
+        ));
 
         Ok(Self {
             input_len,
             limb_len,
             circuit,
+            config,
             prover_data,
             table_packing,
         })
@@ -142,7 +144,7 @@ impl KoalaHashCircuit {
         Ok(hash_u64s_with_koala_poseidon2(inputs))
     }
 
-    pub fn prove_and_verify(&self, inputs: &[u64]) -> Result<KoalaPoseidon2HashOut> {
+    pub fn prove(&self, inputs: &[u64]) -> Result<KoalaHashProof> {
         ensure!(
             inputs.len() == self.input_len,
             "input length mismatch: expected {}, got {}",
@@ -151,19 +153,7 @@ impl KoalaHashCircuit {
         );
 
         let expected = self.hash_native(inputs)?;
-        let limb_inputs = split_u64s_to_koala_limbs(inputs);
-        ensure!(
-            limb_inputs.len() == self.limb_len,
-            "limb length mismatch: expected {}, got {}",
-            self.limb_len,
-            limb_inputs.len()
-        );
-
-        let public_inputs = limb_inputs
-            .into_iter()
-            .map(lift_u64)
-            .chain(expected.to_public_inputs())
-            .collect::<Vec<_>>();
+        let public_inputs = self.public_inputs(inputs, expected)?;
 
         let mut runner = self.circuit.runner();
         runner
@@ -173,20 +163,97 @@ impl KoalaHashCircuit {
             .run()
             .context("failed to execute KoalaBear hash circuit")?;
 
-        let mut prover =
-            BatchStarkProver::new(config::koala_bear()).with_table_packing(self.table_packing.clone());
-        for table_prover in poseidon2_table_provers_d5(Poseidon2Config::KOALA_BEAR_D1_W16) {
-            prover.register_table_prover(table_prover);
-        }
+        let mut prover = BatchStarkProver::new(self.config.clone())
+            .with_table_packing(self.table_packing.clone());
+        prover.register_poseidon2_table::<4>(Poseidon2Config::KOALA_BEAR_D4_W16);
+        prover.register_recompose_table::<4>(false);
 
         let proof = prover
             .prove_all_tables(&traces, &self.prover_data)
             .context("failed to create KoalaBear plonky3 proof")?;
-        prover
-            .verify_all_tables(&proof)
-            .map_err(|e| anyhow!("failed to verify KoalaBear plonky3 proof: {e}"))?;
-        Ok(expected)
+
+        Ok(KoalaHashProof {
+            expected,
+            output: RecursionOutput(proof, Rc::clone(&self.prover_data)),
+        })
     }
+
+    pub fn verify_base_proof(&self, proof: &BatchStarkProof<KoalaRecursionConfig>) -> Result<()> {
+        let mut prover = BatchStarkProver::new(self.config.clone())
+            .with_table_packing(self.table_packing.clone());
+        prover.register_poseidon2_table::<4>(Poseidon2Config::KOALA_BEAR_D4_W16);
+        prover.register_recompose_table::<4>(false);
+        prover
+            .verify_all_tables(proof)
+            .map_err(|e| anyhow!("failed to verify KoalaBear batch proof: {e}"))?;
+        Ok(())
+    }
+
+    pub fn prove_and_verify(&self, inputs: &[u64]) -> Result<KoalaPoseidon2HashOut> {
+        let proof = self.prove(inputs)?;
+        self.verify_base_proof(&proof.output.0)?;
+        Ok(proof.expected)
+    }
+
+    fn public_inputs(
+        &self,
+        inputs: &[u64],
+        expected: KoalaPoseidon2HashOut,
+    ) -> Result<Vec<KoalaChallenge>> {
+        let limb_inputs = split_u64s_to_koala_limbs(inputs);
+        ensure!(
+            limb_inputs.len() == self.limb_len,
+            "limb length mismatch: expected {}, got {}",
+            self.limb_len,
+            limb_inputs.len()
+        );
+
+        Ok(pack_limbs_to_ext4(&limb_inputs)
+            .into_iter()
+            .chain(expected.to_public_inputs())
+            .collect())
+    }
+}
+
+fn u64_to_koala_limbs(value: u64) -> [u64; 4] {
+    [
+        value & 0xffff,
+        (value >> 16) & 0xffff,
+        (value >> 32) & 0xffff,
+        (value >> 48) & 0xffff,
+    ]
+}
+
+pub fn split_u64s_to_koala_limbs(inputs: &[u64]) -> Vec<u64> {
+    inputs
+        .iter()
+        .flat_map(|&value| u64_to_koala_limbs(value))
+        .collect()
+}
+
+pub fn hash_u64s_with_koala_poseidon2(inputs: &[u64]) -> KoalaPoseidon2HashOut {
+    let perm = default_koalabear_poseidon2_16();
+    let hasher = PaddingFreeSponge::<_, 16, 8, 8>::new(perm);
+    let limbs = split_u64s_to_koala_limbs(inputs);
+    let out = hasher.hash_iter(limbs.iter().copied().map(KoalaBear::from_u64));
+    KoalaPoseidon2HashOut {
+        elements: out.map(|x| x.as_canonical_u64()),
+    }
+}
+
+fn pack_limbs_to_ext4(limbs: &[u64]) -> Vec<KoalaChallenge> {
+    limbs
+        .chunks(KOALA_CHALLENGE_DEGREE)
+        .map(|chunk| {
+            let coeffs = chunk
+                .iter()
+                .copied()
+                .map(KoalaBear::from_u64)
+                .collect::<Vec<_>>();
+            KoalaChallenge::from_basis_coefficients_slice(&coeffs)
+                .expect("limb chunk length should match challenge degree")
+        })
+        .collect()
 }
 
 #[cfg(test)]

@@ -2,7 +2,10 @@ use anyhow::Result;
 
 use crate::common::{private_state::PrivateState, salt::Salt};
 
-use super::hash::{KoalaHashCircuit, KoalaPoseidon2HashOut};
+use super::{
+    hash::{KoalaHashCircuit, KoalaPoseidon2HashOut},
+    recursion::{prove_hash_recursively, KoalaRecursiveHashProof},
+};
 
 pub struct PrivateStateCommitmentCircuit {
     hash_circuit: KoalaHashCircuit,
@@ -19,11 +22,16 @@ impl PrivateStateCommitmentCircuit {
         self.hash_circuit.hash_native(&private_state.to_u64_vec())
     }
 
-    pub fn prove_and_verify(
+    pub fn prove_and_verify(&self, private_state: &PrivateState) -> Result<KoalaPoseidon2HashOut> {
+        self.hash_circuit
+            .prove_and_verify(&private_state.to_u64_vec())
+    }
+
+    pub fn prove_and_verify_recursively(
         &self,
         private_state: &PrivateState,
-    ) -> Result<KoalaPoseidon2HashOut> {
-        self.hash_circuit.prove_and_verify(&private_state.to_u64_vec())
+    ) -> Result<KoalaRecursiveHashProof> {
+        prove_hash_recursively(&self.hash_circuit, &private_state.to_u64_vec())
     }
 }
 
@@ -39,5 +47,16 @@ mod tests {
         let native = circuit.commitment(&private_state).unwrap();
         let proved = circuit.prove_and_verify(&private_state).unwrap();
         assert_eq!(native, proved);
+    }
+
+    #[test]
+    fn private_state_commitment_recursive_round_trip() {
+        let circuit = PrivateStateCommitmentCircuit::new().unwrap();
+        let private_state = PrivateState::new(Salt::default());
+        let native = circuit.commitment(&private_state).unwrap();
+        let proved = circuit
+            .prove_and_verify_recursively(&private_state)
+            .unwrap();
+        assert_eq!(native, proved.expected);
     }
 }

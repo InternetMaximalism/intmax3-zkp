@@ -31,14 +31,23 @@ clap = { version = "4.5", features = ["derive"] }
 
 # Plonky3 migration bridge
 p3-batch-stark = { git = "https://github.com/Plonky3/Plonky3", rev = "56952503e1401a62982ceaf952c5e4a829b61803" }
+p3-challenger = { git = "https://github.com/Plonky3/Plonky3", rev = "56952503e1401a62982ceaf952c5e4a829b61803" }
 p3-circuit = { git = "https://github.com/Plonky3/Plonky3-recursion", rev = "524665d0c2e1d294722c064786ae11dff8d9f33b" }
 p3-circuit-prover = { git = "https://github.com/Plonky3/Plonky3-recursion", rev = "524665d0c2e1d294722c064786ae11dff8d9f33b" }
+p3-commit = { git = "https://github.com/Plonky3/Plonky3", rev = "56952503e1401a62982ceaf952c5e4a829b61803" }
+p3-dft = { git = "https://github.com/Plonky3/Plonky3", rev = "56952503e1401a62982ceaf952c5e4a829b61803" }
 p3-field = { git = "https://github.com/Plonky3/Plonky3", rev = "56952503e1401a62982ceaf952c5e4a829b61803" }
+p3-fri = { git = "https://github.com/Plonky3/Plonky3", rev = "56952503e1401a62982ceaf952c5e4a829b61803" }
 p3-goldilocks = { git = "https://github.com/Plonky3/Plonky3", rev = "56952503e1401a62982ceaf952c5e4a829b61803" }
 p3-koala-bear = { git = "https://github.com/Plonky3/Plonky3", rev = "56952503e1401a62982ceaf952c5e4a829b61803" }
+p3-lookup = { git = "https://github.com/Plonky3/Plonky3", rev = "56952503e1401a62982ceaf952c5e4a829b61803" }
+p3-merkle-tree = { git = "https://github.com/Plonky3/Plonky3", rev = "56952503e1401a62982ceaf952c5e4a829b61803" }
 p3-poseidon2 = { git = "https://github.com/Plonky3/Plonky3", rev = "56952503e1401a62982ceaf952c5e4a829b61803" }
+p3-poseidon2-circuit-air = { git = "https://github.com/Plonky3/Plonky3-recursion", rev = "524665d0c2e1d294722c064786ae11dff8d9f33b" }
+p3-recursion = { git = "https://github.com/Plonky3/Plonky3-recursion", package = "p3-recursion", rev = "524665d0c2e1d294722c064786ae11dff8d9f33b" }
 p3-symmetric = { git = "https://github.com/Plonky3/Plonky3", rev = "56952503e1401a62982ceaf952c5e4a829b61803" }
 p3-test-utils = { git = "https://github.com/Plonky3/Plonky3-recursion", rev = "524665d0c2e1d294722c064786ae11dff8d9f33b" }
+p3-uni-stark = { git = "https://github.com/Plonky3/Plonky3", rev = "56952503e1401a62982ceaf952c5e4a829b61803" }
 rand_10 = { package = "rand", version = "0.10.1" }
 
 # WHIR post-quantum wrapper (optional, native-only)
