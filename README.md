@@ -565,3 +565,63 @@ architecture and design rationale.
 | [gnark-plonky2-verifier](https://github.com/succinctlabs/gnark-plonky2-verifier) | Plonky2 → Groth16 conversion (Go, via `gnark/` directory) |
 | [sol-whir](https://github.com/leohio/whirtest) | On-chain WHIR polynomial commitment verification |
 | [forge-std](https://github.com/foundry-rs/forge-std) | Foundry test framework |
+
+## Plonky2 vs Plonky3 Notes
+
+As of May 25, 2026, the production proving path in this repository is still
+the Plonky2-based one. Experimental Plonky3 code exists under
+`src/plonky3/`, but it should be treated as an ongoing migration effort
+rather than a drop-in replacement for the current balance / validity /
+withdraw pipeline.
+
+### Current status
+
+- `plonky2` is the only backend that currently matches the repository's
+  production `send_tx` flow.
+- `plonky3` has experimental native statement proofs, recursive wrapping, and
+  proof-carrying link experiments for `send_tx`.
+- `plonky3` does not yet fully replace the old Plonky2 leaf gadgets 1:1. In
+  particular, the migrated path is still missing a full native port of the
+  old Merkle/account-state leaf logic used by the production circuits.
+
+### Measured proving times
+
+The following numbers were measured on the experimental migration branch on
+May 25, 2026. They should be read as engineering snapshots, not as final
+backend limits.
+
+| Path | Scope | Time |
+|------|-------|------|
+| `plonky2` | Existing `prove_send_tx` path used by the repository E2E flow | about `1.03s` |
+| `plonky3` | Native `send_tx` statement proof only | about `21ms` |
+| `plonky3` | Native `send_tx` statement proof + one recursive wrap | about `5.99s` |
+| `plonky3` | Compact recursive `send_tx` bundle | about `6.03s` |
+| `plonky3` | Proof-carrying `send_tx` link circuit | about `6.03s` |
+| `plonky3` | Linked recursive `send_tx` bundle | about `66.49s` |
+
+### What these numbers mean
+
+The current results do **not** show that AIR/STARK recursion is universally
+slower than PLONKish recursion. They do show that, for this repository and
+this specific `send_tx` architecture, the current Plonky3 migration is not
+yet competitive with the mature Plonky2 implementation.
+
+The main reasons are practical:
+
+- the Plonky2 path is already heavily specialized for this application;
+- the Plonky3 path is still experimental and uses generic recursive verifier
+  machinery;
+- the current Plonky3 proof-carrying path pays a large fixed cost for
+  recursive verification;
+- fixed recursive layers and proof shapes have not yet been fully reduced and
+  cached for this repository's workload.
+
+### Bottom line
+
+If you need the fastest working `send_tx` prover in this repository today, use
+the existing Plonky2 path.
+
+If you want to continue the Plonky3 migration, the remaining work is not just
+"port the syntax." It requires redesigning the recursive layer so that the
+application-level recursion of INTMAX transactions is expressed efficiently in
+Plonky3 rather than reproduced through a heavy generic wrapping path.
