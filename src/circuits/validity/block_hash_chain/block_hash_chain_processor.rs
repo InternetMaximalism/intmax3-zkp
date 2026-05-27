@@ -36,8 +36,11 @@ use crate::{
             account_tree::{AccountLeaf, AccountMerkleProof, SendMerkleProof},
             deposit_tree::DepositMerkleProof,
             public_state_tree::PublicStateMerkleProof,
+            tx_v2_tree::{ChannelActionMerkleProof, TxV2MerkleProof},
         },
+        tx::{ChannelAction, TxV2},
     },
+    constants::TX_TREE_HEIGHT,
     utils::conversion::ToU64,
 };
 
@@ -71,6 +74,13 @@ pub struct BlockHashChainProcessorWitness {
     /// If None, dummy (all-zero) witnesses are used — valid only when the
     /// signature verification constraints are conditionally disabled (inactive slots).
     pub sig_witnesses: Option<Vec<SpxSigWitness>>,
+    /// Optional TxV2 witnesses used to bind active hub/account_no slots to concrete tx leaves.
+    pub tx_v2_indices: Option<Vec<u64>>,
+    pub tx_v2s: Option<Vec<TxV2>>,
+    pub tx_v2_merkle_proofs: Option<Vec<TxV2MerkleProof>>,
+    pub channel_action_indices: Option<Vec<u64>>,
+    pub channel_actions: Option<Vec<ChannelAction>>,
+    pub channel_action_merkle_proofs: Option<Vec<ChannelActionMerkleProof>>,
     /// Forced transaction witnesses for this block.
     pub forced_txs: Vec<ForcedTx>,
     pub forced_tx_prev_account_leaves: Vec<AccountLeaf>,
@@ -224,6 +234,14 @@ where
                 )
             })?;
         let num_users = witness.block.num_users;
+        let dummy_tx_v2_indices = vec![0; num_users as usize];
+        let dummy_tx_v2s = vec![TxV2::default(); num_users as usize];
+        let dummy_tx_v2_merkle_proofs =
+            vec![TxV2MerkleProof::dummy(TX_TREE_HEIGHT); num_users as usize];
+        let dummy_channel_action_indices = vec![0; num_users as usize];
+        let dummy_channel_actions = vec![ChannelAction::default(); num_users as usize];
+        let dummy_channel_action_merkle_proofs =
+            vec![ChannelActionMerkleProof::dummy(TX_TREE_HEIGHT); num_users as usize];
         let update_account_tree = UpdateAccountTree {
             prev_block_hash_chain: prev_ext_public_state.block_hash_chain,
             prev_account_tree_root: prev_ext_public_state.inner.account_tree_root,
@@ -238,6 +256,24 @@ where
                 .sig_witnesses
                 .clone()
                 .unwrap_or_else(|| vec![SpxSigWitness::dummy(); num_users as usize]),
+            tx_v2_indices: witness.tx_v2_indices.clone().unwrap_or(dummy_tx_v2_indices),
+            tx_v2s: witness.tx_v2s.clone().unwrap_or(dummy_tx_v2s),
+            tx_v2_merkle_proofs: witness
+                .tx_v2_merkle_proofs
+                .clone()
+                .unwrap_or(dummy_tx_v2_merkle_proofs),
+            channel_action_indices: witness
+                .channel_action_indices
+                .clone()
+                .unwrap_or(dummy_channel_action_indices),
+            channel_actions: witness
+                .channel_actions
+                .clone()
+                .unwrap_or(dummy_channel_actions),
+            channel_action_merkle_proofs: witness
+                .channel_action_merkle_proofs
+                .clone()
+                .unwrap_or(dummy_channel_action_merkle_proofs),
             prev_forced_tx_hash_chain: prev_ext_public_state.forced_tx_hash_chain,
             prev_forced_tx_count: prev_ext_public_state.forced_tx_count,
             forced_txs: witness.forced_txs.clone(),

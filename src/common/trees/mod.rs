@@ -6,3 +6,4 @@ pub mod public_state_tree;
 pub mod sent_tx_tree;
 pub mod transfer_tree;
 pub mod tx_tree;
+pub mod tx_v2_tree;

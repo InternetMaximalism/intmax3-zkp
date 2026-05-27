@@ -20,8 +20,8 @@ use crate::{
     },
     common::{
         trees::account_tree::{
-            AccountLeaf, AccountLeafTarget, AccountMerkleProof, AccountMerkleProofTarget,
-            SendLeaf, SendLeafTarget, SendMerkleProof, SendMerkleProofTarget,
+            AccountLeaf, AccountLeafTarget, AccountMerkleProof, AccountMerkleProofTarget, SendLeaf,
+            SendLeafTarget, SendMerkleProof, SendMerkleProofTarget,
         },
         u63::{BlockNumber, BlockNumberTarget},
         user_id::{UserId, UserIdTarget},
@@ -107,10 +107,9 @@ impl AccountApplyBlockWitness {
             }
 
             // Verify empty send leaf at index
-            let empty_send_root = user.send_merkle_proof.get_root(
-                &SendLeaf::empty_leaf(),
-                user.prev_account_leaf.index as u64,
-            );
+            let empty_send_root = user
+                .send_merkle_proof
+                .get_root(&SendLeaf::empty_leaf(), user.prev_account_leaf.index as u64);
             if empty_send_root != user.prev_account_leaf.send_tree_root {
                 return Err(AccountApplyBlockError::InvalidInput(format!(
                     "Send merkle proof mismatch for user {}",
@@ -126,10 +125,9 @@ impl AccountApplyBlockWitness {
             };
 
             // Compute new send tree root
-            let new_send_tree_root = user.send_merkle_proof.get_root(
-                &new_send_leaf,
-                user.prev_account_leaf.index as u64,
-            );
+            let new_send_tree_root = user
+                .send_merkle_proof
+                .get_root(&new_send_leaf, user.prev_account_leaf.index as u64);
 
             // Create new account leaf
             let new_account_leaf = AccountLeaf {
@@ -217,19 +215,15 @@ impl AccountApplyBlockTarget {
             let prev_account_leaf = AccountLeafTarget::new::<F, D>(builder, true);
             let account_merkle_proof =
                 AccountMerkleProofTarget::new::<F, D>(builder, ACCOUNT_TREE_HEIGHT);
-            let send_merkle_proof =
-                SendMerkleProofTarget::new::<F, D>(builder, SEND_TREE_HEIGHT);
+            let send_merkle_proof = SendMerkleProofTarget::new::<F, D>(builder, SEND_TREE_HEIGHT);
 
             // Compute user_id
             let user_id =
                 UserIdTarget::from_parts(builder, aggregator_id, user_local_id, true).value;
 
             // Verify old leaf membership against current_root
-            let old_root = account_merkle_proof.get_root::<F, C, D>(
-                builder,
-                &prev_account_leaf,
-                user_id,
-            );
+            let old_root =
+                account_merkle_proof.get_root::<F, C, D>(builder, &prev_account_leaf, user_id);
             current_root.conditional_assert_eq(builder, old_root, is_active);
 
             // Verify empty send leaf at index in prev send tree
@@ -263,11 +257,8 @@ impl AccountApplyBlockTarget {
                 pk_set_root: prev_account_leaf.pk_set_root.clone(),
                 threshold: prev_account_leaf.threshold,
             };
-            let updated_root = account_merkle_proof.get_root::<F, C, D>(
-                builder,
-                &new_account_leaf,
-                user_id,
-            );
+            let updated_root =
+                account_merkle_proof.get_root::<F, C, D>(builder, &new_account_leaf, user_id);
 
             // Conditionally update root
             current_root =
@@ -290,8 +281,7 @@ impl AccountApplyBlockTarget {
             // Update first_user_id (only on first active user, when count was still 0)
             let is_first = builder.is_equal(current_first_user_id, zero);
             let is_first_active = builder.and(is_active, is_first);
-            current_first_user_id =
-                builder.select(is_first_active, user_id, current_first_user_id);
+            current_first_user_id = builder.select(is_first_active, user_id, current_first_user_id);
 
             // Update last_user_id (always update on active)
             current_last_user_id = builder.select(is_active, user_id, current_last_user_id);

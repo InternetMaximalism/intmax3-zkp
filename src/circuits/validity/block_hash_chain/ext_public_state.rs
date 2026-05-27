@@ -203,7 +203,8 @@ impl ExtendedPublicStateTarget {
         self.deposit_count.connect(builder, &other.deposit_count);
         self.forced_tx_hash_chain
             .connect(builder, other.forced_tx_hash_chain);
-        self.forced_tx_count.connect(builder, &other.forced_tx_count);
+        self.forced_tx_count
+            .connect(builder, &other.forced_tx_count);
     }
 
     pub fn select<F: RichField + Extendable<D>, const D: usize>(

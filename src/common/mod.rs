@@ -1,4 +1,6 @@
 pub mod block;
+pub mod channel;
+pub mod channel_message;
 pub mod deposit;
 pub mod error;
 pub mod forced_tx;

@@ -11,7 +11,8 @@ use plonky2_keccak::{builder::BuilderKeccak256 as _, utils::solidity_keccak256};
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    constants::{AGGREGATOR_ID_BITS, LOCAL_ID_BITS},
+    common::{trees::tx_v2_tree::compute_tx_v2_root, tx::TxV2},
+    constants::{ACCOUNT_NO_BITS, HUB_ID_BITS},
     ethereum_types::{
         bytes32::{Bytes32, Bytes32Target},
         u32limb_trait::{U32LimbTargetTrait as _, U32LimbTrait},
@@ -52,6 +53,46 @@ pub struct BlockTarget {
 }
 
 impl Block {
+    pub fn new_with_tx_v2s(
+        num_users: u32,
+        hub_id: u32,
+        account_nos: &[u32],
+        timestamp: u64,
+        txs: &[TxV2],
+        deposit_hash_chain: Bytes32,
+        forced_tx_hash_chain: Bytes32,
+    ) -> Result<Self, BlockError> {
+        Self::new_with_hub(
+            num_users,
+            hub_id,
+            account_nos,
+            timestamp,
+            compute_tx_v2_root(txs).into(),
+            deposit_hash_chain,
+            forced_tx_hash_chain,
+        )
+    }
+
+    pub fn new_with_hub(
+        num_users: u32,
+        hub_id: u32,
+        account_nos: &[u32],
+        timestamp: u64,
+        tx_tree_root: Bytes32,
+        deposit_hash_chain: Bytes32,
+        forced_tx_hash_chain: Bytes32,
+    ) -> Result<Self, BlockError> {
+        Self::new(
+            num_users,
+            hub_id,
+            account_nos,
+            timestamp,
+            tx_tree_root,
+            deposit_hash_chain,
+            forced_tx_hash_chain,
+        )
+    }
+
     pub fn new(
         num_users: u32,
         aggregator_id: u32,
@@ -83,8 +124,16 @@ impl Block {
         })
     }
 
+    pub fn hub_id(&self) -> u32 {
+        self.aggregator_id
+    }
+
+    pub fn account_nos(&self) -> &[u32] {
+        &self.local_ids
+    }
+
     pub fn hash_with_prev_hash(&self, prev_hash: Bytes32) -> Result<Bytes32, BlockError> {
-        // local_ids should be alread padded with zeros
+        // account_nos should already be padded with zeros
         if self.local_ids.len() as u32 != self.num_users {
             return Err(BlockError::InvalidNumUsers(format!(
                 "local_ids length is {}, but num_users is {}",
@@ -94,9 +143,9 @@ impl Block {
         }
         let inputs = [
             prev_hash.to_u32_vec(),
-            vec![self.aggregator_id],
+            vec![self.hub_id()],
             U64::from(self.timestamp).to_u32_vec(),
-            self.local_ids.to_vec(),
+            self.account_nos().to_vec(),
             self.tx_tree_root.to_u32_vec(),
             self.deposit_hash_chain.to_u32_vec(),
             self.forced_tx_hash_chain.to_u32_vec(),
@@ -114,7 +163,7 @@ impl BlockTarget {
     ) -> Self {
         let aggregator_id = builder.add_virtual_target();
         if is_checked {
-            builder.range_check(aggregator_id, AGGREGATOR_ID_BITS);
+            builder.range_check(aggregator_id, HUB_ID_BITS);
         }
 
         let timestamp = U64Target::new(builder, is_checked);
@@ -123,7 +172,7 @@ impl BlockTarget {
             .map(|_| {
                 let target = builder.add_virtual_target();
                 if is_checked {
-                    builder.range_check(target, LOCAL_ID_BITS);
+                    builder.range_check(target, ACCOUNT_NO_BITS);
                 }
                 target
             })
@@ -195,6 +244,14 @@ impl BlockTarget {
         Bytes32Target::from_slice(&builder.keccak256::<C>(&inputs))
     }
 
+    pub fn hub_id(&self) -> Target {
+        self.aggregator_id
+    }
+
+    pub fn account_nos(&self) -> &[Target] {
+        &self.local_ids
+    }
+
     pub fn set_witness<F: Field, W: WitnessWrite<F>>(&self, witness: &mut W, value: &Block) {
         assert_eq!(self.num_users, value.num_users, "num_users mismatch");
         witness.set_target(
@@ -252,29 +309,85 @@ mod tests {
         let prev_hash = Bytes32::default();
 
         let block_no_forced = Block::new(
-            1, 1, &[1], 100, tx_tree_root, deposit_hash_chain, Bytes32::default(),
+            1,
+            1,
+            &[1],
+            100,
+            tx_tree_root,
+            deposit_hash_chain,
+            Bytes32::default(),
         )
         .unwrap();
 
         let block_with_forced = Block::new(
-            1, 1, &[1], 100, tx_tree_root, deposit_hash_chain, Bytes32::rand(&mut rng),
+            1,
+            1,
+            &[1],
+            100,
+            tx_tree_root,
+            deposit_hash_chain,
+            Bytes32::rand(&mut rng),
         )
         .unwrap();
 
         let h1 = block_no_forced.hash_with_prev_hash(prev_hash).unwrap();
         let h2 = block_with_forced.hash_with_prev_hash(prev_hash).unwrap();
-        assert_ne!(h1, h2, "different forced_tx_hash_chain should produce different block hashes");
+        assert_ne!(
+            h1, h2,
+            "different forced_tx_hash_chain should produce different block hashes"
+        );
     }
 
     #[test]
     fn test_block_padding() {
         let block = Block::new(
-            4, 1, &[10, 20], 100,
-            Bytes32::default(), Bytes32::default(), Bytes32::default(),
+            4,
+            1,
+            &[10, 20],
+            100,
+            Bytes32::default(),
+            Bytes32::default(),
+            Bytes32::default(),
         )
         .unwrap();
         assert_eq!(block.local_ids.len(), 4);
         assert_eq!(block.local_ids[2], 0);
         assert_eq!(block.local_ids[3], 0);
+    }
+
+    #[test]
+    fn test_block_new_with_tx_v2s_uses_poseidon_root() {
+        use crate::common::{
+            trees::tx_v2_tree::{compute_channel_action_root, compute_tx_v2_root},
+            tx::{ChannelAction, ChannelActionKind, TxClass, TxV2},
+            user_id::AccountId,
+        };
+
+        let tx = TxV2 {
+            tx_class: TxClass::ChannelAction,
+            transfer_tree_root: Default::default(),
+            nonce: 11,
+            channel_action_root: compute_channel_action_root(&[ChannelAction {
+                kind: ChannelActionKind::InterChannelSend,
+                source_channel_id: AccountId::new(1, 10).unwrap(),
+                destination_channel_id: AccountId::new(2, 20).unwrap(),
+                tx_hash: Bytes32::default(),
+                seal: Bytes32::default(),
+                payload_hash: Default::default(),
+            }]),
+        };
+
+        let block = Block::new_with_tx_v2s(
+            1,
+            3,
+            &[9],
+            100,
+            &[tx],
+            Bytes32::default(),
+            Bytes32::default(),
+        )
+        .unwrap();
+
+        assert_eq!(block.tx_tree_root, compute_tx_v2_root(&[tx]).into());
     }
 }

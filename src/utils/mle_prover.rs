@@ -12,11 +12,10 @@ use plonky2::{
     iop::witness::PartialWitness,
     plonk::{
         circuit_data::CircuitData,
-        config::GenericConfig,
+        config::{GenericConfig, Hasher},
     },
     util::timing::TimingTree,
 };
-use plonky2::plonk::config::Hasher;
 use plonky2_mle::{
     proof::{MleProof, MleVerificationKey},
     prover::{mle_prove, mle_setup},
@@ -31,11 +30,7 @@ pub struct MleProveResult<F: plonky2::field::types::Field> {
 
 /// Compute the MLE verification key for a circuit.
 /// This must be done once during setup (deterministic).
-pub fn setup_mle_vk<
-    F: RichField + Extendable<D>,
-    C: GenericConfig<D, F = F>,
-    const D: usize,
->(
+pub fn setup_mle_vk<F: RichField + Extendable<D>, C: GenericConfig<D, F = F>, const D: usize>(
     circuit_data: &CircuitData<F, C, D>,
 ) -> MleVerificationKey<F>
 where
@@ -45,11 +40,7 @@ where
 }
 
 /// Generate an MLE proof for a Plonky2 circuit.
-pub fn prove_with_mle<
-    F: RichField + Extendable<D>,
-    C: GenericConfig<D, F = F>,
-    const D: usize,
->(
+pub fn prove_with_mle<F: RichField + Extendable<D>, C: GenericConfig<D, F = F>, const D: usize>(
     circuit_data: &CircuitData<F, C, D>,
     inputs: PartialWitness<F>,
 ) -> Result<MleProveResult<F>>
@@ -72,10 +63,7 @@ where
 }
 
 /// Verify an MLE proof against the circuit's common data and verification key.
-pub fn verify_mle_proof<
-    F: RichField + Extendable<D>,
-    const D: usize,
->(
+pub fn verify_mle_proof<F: RichField + Extendable<D>, const D: usize>(
     circuit_data: &CircuitData<F, impl GenericConfig<D, F = F>, D>,
     vk: &MleVerificationKey<F>,
     proof: &MleProof<F>,

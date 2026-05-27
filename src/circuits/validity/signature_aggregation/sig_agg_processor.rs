@@ -41,10 +41,8 @@ where
     pub fn new() -> Self {
         let sig_agg_cd = SigAggCircuit::<F, C, D>::generate_cd();
         let sig_agg_step_circuit = SigAggStepCircuit::<F, C, D>::new(&sig_agg_cd);
-        let sig_agg_circuit = SigAggCircuit::<F, C, D>::new(
-            &sig_agg_cd,
-            &sig_agg_step_circuit.data.verifier_data(),
-        );
+        let sig_agg_circuit =
+            SigAggCircuit::<F, C, D>::new(&sig_agg_cd, &sig_agg_step_circuit.data.verifier_data());
         Self {
             sig_agg_step_circuit,
             sig_agg_circuit,
@@ -67,10 +65,7 @@ where
         Ok(sig_agg_proof)
     }
 
-    pub fn verify(
-        &self,
-        proof: &ProofWithPublicInputs<F, C, D>,
-    ) -> Result<(), SigAggCircuitError> {
+    pub fn verify(&self, proof: &ProofWithPublicInputs<F, C, D>) -> Result<(), SigAggCircuitError> {
         self.sig_agg_circuit.verify(proof)
     }
 }
@@ -79,9 +74,13 @@ where
 mod tests {
     use super::*;
     use crate::{
-        circuits::validity::block_hash_chain::sphincs_sig::SpxSigWitness,
-        circuits::validity::signature_aggregation::sig_agg_pis::SigAggPublicInputs,
-        circuits::test_utils::sphincs_sign::{pk_hash_from_pk_bytes, sphincs_keygen, sphincs_sign},
+        circuits::{
+            test_utils::sphincs_sign::{pk_hash_from_pk_bytes, sphincs_keygen, sphincs_sign},
+            validity::{
+                block_hash_chain::sphincs_sig::SpxSigWitness,
+                signature_aggregation::sig_agg_pis::SigAggPublicInputs,
+            },
+        },
         common::{
             key_set::{KeySetMerkleProof, KeySetTree, PkLeaf},
             trees::account_tree::{AccountLeaf, AccountTree, SendLeaf, SendTree},
@@ -113,7 +112,10 @@ mod tests {
 
         let t0 = Instant::now();
         let processor = SigAggProcessor::<F, C, D>::new();
-        println!("SigAggProcessor::new() (circuit construction): {:?}", t0.elapsed());
+        println!(
+            "SigAggProcessor::new() (circuit construction): {:?}",
+            t0.elapsed()
+        );
         let sig_agg_vd = processor.sig_agg_vd();
 
         let block_number = BlockNumber::new(5).unwrap();
@@ -160,10 +162,7 @@ mod tests {
             .chain(std::iter::once(local_id as u64))
             .chain(tx_tree_root.to_u64_vec())
             .collect();
-        let msg_bytes: Vec<u8> = msg_u64
-            .iter()
-            .flat_map(|w| w.to_le_bytes())
-            .collect();
+        let msg_bytes: Vec<u8> = msg_u64.iter().flat_map(|w| w.to_le_bytes()).collect();
         let sig = sphincs_sign(&msg_bytes, &kp);
         let sig_witness = SpxSigWitness::from_bytes(&kp.pk_bytes, &sig);
 
@@ -194,9 +193,7 @@ mod tests {
         };
 
         let t1 = Instant::now();
-        let step1_proof = processor
-            .prove_step(&step1_witness)
-            .expect("step 1 proof");
+        let step1_proof = processor.prove_step(&step1_witness).expect("step 1 proof");
         println!("Step 1 (sig_verify, initial): {:?}", t1.elapsed());
         processor.verify(&step1_proof).expect("step 1 verify");
 
@@ -233,8 +230,7 @@ mod tests {
         assert_eq!(final_pis.current_user_local_id, 0);
         assert_eq!(final_pis.processed_count, 1);
         assert_ne!(
-            final_pis.account_tree_root,
-            initial_account_tree_root,
+            final_pis.account_tree_root, initial_account_tree_root,
             "account tree root should change after finalization"
         );
     }

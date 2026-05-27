@@ -1,5 +1,7 @@
-use plonky2::hash::poseidon::{Poseidon, ALL_ROUND_CONSTANTS};
-use plonky2::field::goldilocks_field::GoldilocksField;
+use plonky2::{
+    field::goldilocks_field::GoldilocksField,
+    hash::poseidon::{ALL_ROUND_CONSTANTS, Poseidon},
+};
 
 fn main() {
     // ALL_ROUND_CONSTANTS (360 values = 30 rounds * 12 elements)

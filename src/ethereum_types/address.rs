@@ -11,7 +11,7 @@ use super::{
 pub const ADDRESS_LEN: usize = 5;
 
 /// A structure representing the address type in Ethereum.
-#[derive(Clone, Copy, PartialEq, Default, Hash)]
+#[derive(Clone, Copy, PartialEq, Eq, Default, Hash)]
 pub struct Address {
     limbs: [u32; ADDRESS_LEN],
 }

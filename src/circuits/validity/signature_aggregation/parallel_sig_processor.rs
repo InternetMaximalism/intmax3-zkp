@@ -165,9 +165,9 @@ where
     ) -> Result<ProofWithPublicInputs<F, C, D>, ParallelSigProcessorError> {
         let sig_merge_vd = self.sig_merge_vd();
         let sig_batch_vd = self.sig_batch_vd();
-        let step_proof = self
-            .sig_merge_step_circuit
-            .prove(&sig_merge_vd, &sig_batch_vd, witness)?;
+        let step_proof =
+            self.sig_merge_step_circuit
+                .prove(&sig_merge_vd, &sig_batch_vd, witness)?;
         let merge_proof = self.sig_merge_circuit.prove(&step_proof)?;
         Ok(merge_proof)
     }
@@ -245,16 +245,20 @@ where
 mod tests {
     use super::*;
     use crate::{
-        circuits::validity::block_hash_chain::sphincs_sig::SpxSigWitness,
-        circuits::validity::signature_aggregation::{
-            account_apply_block::{AccountApplyBlockWitness, AccountApplyUserWitness},
-            account_apply_step::AccountApplyInitialValue,
-            sig_batch_pis::SigBatchPublicInputs,
-            sig_batch_step::{SigBatchInitialValue, SigBatchStepWitness},
-            sig_merge_pis::SigMergePublicInputs,
-            sig_merge_step::{SigMergeInitialValue, SigMergeStepWitness},
+        circuits::{
+            test_utils::sphincs_sign::{pk_hash_from_pk_bytes, sphincs_keygen, sphincs_sign},
+            validity::{
+                block_hash_chain::sphincs_sig::SpxSigWitness,
+                signature_aggregation::{
+                    account_apply_block::{AccountApplyBlockWitness, AccountApplyUserWitness},
+                    account_apply_step::AccountApplyInitialValue,
+                    sig_batch_pis::SigBatchPublicInputs,
+                    sig_batch_step::{SigBatchInitialValue, SigBatchStepWitness},
+                    sig_merge_pis::SigMergePublicInputs,
+                    sig_merge_step::{SigMergeInitialValue, SigMergeStepWitness},
+                },
+            },
         },
-        circuits::test_utils::sphincs_sign::{pk_hash_from_pk_bytes, sphincs_keygen, sphincs_sign},
         common::{
             key_set::{KeySetMerkleProof, KeySetTree, PkLeaf},
             trees::account_tree::{AccountLeaf, AccountTree, SendLeaf, SendTree},
@@ -500,9 +504,7 @@ mod tests {
             })
             .expect("merge step 2");
         println!("Merge step 2 (absorb batch B): {:?}", t6.elapsed());
-        processor
-            .verify_merge(&merge_final)
-            .expect("merge verify");
+        processor.verify_merge(&merge_final).expect("merge verify");
 
         // Check final merge PIS
         let sig_merge_vd = processor.sig_merge_vd();
@@ -520,17 +522,16 @@ mod tests {
         println!("\n=== All assertions passed ===");
         println!("  Batch A: 1 user verified");
         println!("  Batch B: 1 user verified");
-        println!(
-            "  Merge: 2 users total, IDs [{}, {}]",
-            user_id_a, user_id_b
-        );
+        println!("  Merge: 2 users total, IDs [{}, {}]", user_id_a, user_id_b);
     }
 
     #[cfg_attr(debug_assertions, ignore = "run with --release")]
     #[test]
     fn test_account_apply_block_and_merge() {
-        use crate::circuits::validity::signature_aggregation::account_apply_block::ACCOUNT_APPLY_BLOCK_SIZE;
-        use crate::circuits::validity::signature_aggregation::account_apply_pis::AccountApplyPublicInputs;
+        use crate::circuits::validity::signature_aggregation::{
+            account_apply_block::ACCOUNT_APPLY_BLOCK_SIZE,
+            account_apply_pis::AccountApplyPublicInputs,
+        };
         use std::time::Instant;
         let mut rng = StdRng::seed_from_u64(42);
 
@@ -561,15 +562,13 @@ mod tests {
         let account_proof_a = account_tree.prove(user_id_a.as_u64());
         let send_proof_a = st_a.prove(leaf_a.index.into());
 
-        let mut users = vec![
-            AccountApplyUserWitness {
-                is_active: true,
-                user_local_id: local_id_a,
-                prev_account_leaf: leaf_a.clone(),
-                account_merkle_proof: account_proof_a,
-                send_merkle_proof: send_proof_a,
-            },
-        ];
+        let mut users = vec![AccountApplyUserWitness {
+            is_active: true,
+            user_local_id: local_id_a,
+            prev_account_leaf: leaf_a.clone(),
+            account_merkle_proof: account_proof_a,
+            send_merkle_proof: send_proof_a,
+        }];
 
         // Apply user A's update to account tree (off-circuit) to get updated proofs for user B
         let new_send_leaf_a = SendLeaf {
@@ -600,8 +599,7 @@ mod tests {
         });
 
         // Pad remaining slots with inactive dummies
-        use crate::common::trees::account_tree::AccountMerkleProof;
-        use crate::common::trees::account_tree::SendMerkleProof;
+        use crate::common::trees::account_tree::{AccountMerkleProof, SendMerkleProof};
         while users.len() < ACCOUNT_APPLY_BLOCK_SIZE {
             users.push(AccountApplyUserWitness {
                 is_active: false,

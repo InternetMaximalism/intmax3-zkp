@@ -5,46 +5,48 @@
 //! additional data, use explicit `drop()` to free circuit data, witnesses, and
 //! proofs as soon as they are no longer needed.
 
-use wasm_bindgen::prelude::{wasm_bindgen, JsValue};
+use wasm_bindgen::prelude::{JsValue, wasm_bindgen};
 
-use plonky2::field::goldilocks_field::GoldilocksField;
-use plonky2::plonk::config::PoseidonGoldilocksConfig;
-use plonky2::plonk::proof::ProofWithPublicInputs;
-use rand::{rngs::StdRng, SeedableRng};
+use plonky2::{
+    field::goldilocks_field::GoldilocksField,
+    plonk::{config::PoseidonGoldilocksConfig, proof::ProofWithPublicInputs},
+};
+use rand::{SeedableRng, rngs::StdRng};
 use web_time::Instant;
 
-use crate::circuits::balance::{
-    balance_processor::BalanceProcessor,
+use crate::{
+    circuits::{
+        balance::{
+            balance_processor::BalanceProcessor,
+            common::{
+                recipient::{calculate_recipient_from_address, calculate_recipient_from_user_id},
+                update_public_state::UpdatePublicState,
+            },
+            spend_circuit::SpendCircuit,
+        },
+        test_utils::{
+            balance_witness_generator::{
+                BalanceWitnessGenerator, ReceiveDepositData, ReceiveTransferData, SendTxData,
+                SingleWithdrawalData,
+            },
+            block_witness_generator::{BlockWitnessGenerator, BlockWitnessGeneratorHandle},
+        },
+        withdraw::{
+            single_withdrawal_circuit::SingleWithdawalCircuit,
+            withdrawal_processor::WithdrawalProcessor, withdrawal_step::WithdrawalStepWitness,
+        },
+    },
     common::{
-        recipient::{calculate_recipient_from_address, calculate_recipient_from_user_id},
-        update_public_state::UpdatePublicState,
+        salt::Salt,
+        transfer::Transfer,
+        trees::{
+            transfer_tree::{TransferMerkleProof, TransferTree},
+            tx_tree::TxTree,
+        },
+        tx::Tx,
+        user_id::UserId,
     },
-    spend_circuit::SpendCircuit,
-};
-use crate::circuits::test_utils::{
-    balance_witness_generator::{
-        BalanceWitnessGenerator, ReceiveDepositData, ReceiveTransferData, SendTxData,
-        SingleWithdrawalData,
-    },
-    block_witness_generator::{BlockWitnessGenerator, BlockWitnessGeneratorHandle},
-};
-use crate::circuits::withdraw::{
-    single_withdrawal_circuit::SingleWithdawalCircuit,
-    withdrawal_processor::WithdrawalProcessor,
-    withdrawal_step::WithdrawalStepWitness,
-};
-use crate::common::{
-    salt::Salt,
-    transfer::Transfer,
-    trees::{
-        transfer_tree::{TransferMerkleProof, TransferTree},
-        tx_tree::TxTree,
-    },
-    tx::Tx,
-    user_id::UserId,
-};
-use crate::ethereum_types::{
-    address::Address, bytes32::Bytes32, u256::U256, u32limb_trait::U32LimbTrait,
+    ethereum_types::{address::Address, bytes32::Bytes32, u32limb_trait::U32LimbTrait, u256::U256},
 };
 
 const D: usize = 2;
@@ -112,8 +114,7 @@ impl BalanceScenarioAsync {
         let block_witness_generator =
             BlockWitnessGeneratorHandle::new(BlockWitnessGenerator::new(supported_user_counts));
 
-        let user_id =
-            UserId::new(0, 1).map_err(|e| JsValue::from_str(&format!("user id: {e}")))?;
+        let user_id = UserId::new(0, 1).map_err(|e| JsValue::from_str(&format!("user id: {e}")))?;
         let salt = Salt::rand(rng);
 
         log("Creating balance witness generator (async)...");
@@ -198,8 +199,8 @@ async fn perform_deposit_async(
 
     // Internal transfer: spend 3 tokens to user_id=(1,1)
     let transfer_recipient_salt = Salt::rand(rng);
-    let recipient_user = UserId::new(1, 1)
-        .map_err(|e| JsValue::from_str(&format!("recipient user id: {e}")))?;
+    let recipient_user =
+        UserId::new(1, 1).map_err(|e| JsValue::from_str(&format!("recipient user id: {e}")))?;
     let transfer = Transfer {
         recipient: calculate_recipient_from_user_id(recipient_user, transfer_recipient_salt),
         token_index: 0,
@@ -255,6 +256,8 @@ async fn perform_deposit_async(
         tx_tree_root: tx_tree_root_bytes,
         tx: tx.clone(),
         tx_merkle_proof: tx_merkle_proof.clone(),
+        tx_v2: None,
+        tx_v2_merkle_proof: None,
     };
     let send_tx_witness = scenario
         .balance_witness_generator
@@ -404,6 +407,8 @@ pub async fn run_single_withdrawal_proof() -> Result<(), JsValue> {
         tx_tree_root: tx_tree_root_bytes,
         tx: tx.clone(),
         tx_merkle_proof: tx_merkle_proof.clone(),
+        tx_v2: None,
+        tx_v2_merkle_proof: None,
     };
     log("Building withdrawal send witness");
     let send_tx_witness = scenario
@@ -431,6 +436,8 @@ pub async fn run_single_withdrawal_proof() -> Result<(), JsValue> {
         tx_tree_root: tx_tree_root_bytes,
         tx: tx.clone(),
         tx_merkle_proof,
+        tx_v2: None,
+        tx_v2_merkle_proof: None,
         transfer: transfer.clone(),
         transfer_index,
         transfer_merkle_proof,
@@ -461,10 +468,8 @@ pub async fn run_single_withdrawal_proof() -> Result<(), JsValue> {
     log("Building withdrawal processor...");
     let t = Instant::now();
     let withdrawal_processor =
-        WithdrawalProcessor::<F, C, D>::new_async(
-            &single_withdrawal_circuit.data.verifier_data(),
-        )
-        .await;
+        WithdrawalProcessor::<F, C, D>::new_async(&single_withdrawal_circuit.data.verifier_data())
+            .await;
     log_bench("Withdrawal processor construction", t.elapsed());
 
     let update_public_state = withdrawal_witness.update_public_state.clone();
@@ -513,8 +518,8 @@ pub async fn run_balance_processor_flow() -> Result<(), JsValue> {
 
     // === Receive Transfer (second user) ===
     log("Setting up receiver...");
-    let user_id2 = UserId::new(1, 1)
-        .map_err(|e| JsValue::from_str(&format!("second user id: {e}")))?;
+    let user_id2 =
+        UserId::new(1, 1).map_err(|e| JsValue::from_str(&format!("second user id: {e}")))?;
     let salt2 = Salt::rand(&mut rng);
 
     // Drop spend_circuit before creating receiver to free memory
@@ -537,6 +542,8 @@ pub async fn run_balance_processor_flow() -> Result<(), JsValue> {
         tx_tree_root: outcome.send_tx_data.tx_tree_root,
         tx: outcome.send_tx_data.tx.clone(),
         tx_merkle_proof: outcome.send_tx_data.tx_merkle_proof.clone(),
+        tx_v2: outcome.send_tx_data.tx_v2,
+        tx_v2_merkle_proof: outcome.send_tx_data.tx_v2_merkle_proof.clone(),
         transfer_index: outcome.transfer_index,
         transfer_merkle_proof: outcome.transfer_merkle_proof,
         transfer_salt: outcome.transfer_salt,

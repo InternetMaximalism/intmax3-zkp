@@ -40,8 +40,7 @@ use crate::{
 ///   processed_count:           1
 ///   processed_users_hash:      POSEIDON_HASH_OUT_LEN (4)
 ///   Total: 31
-pub const SIG_AGG_PUBLIC_INPUTS_LEN: usize =
-    4 * POSEIDON_HASH_OUT_LEN + BYTES32_LEN + 7;
+pub const SIG_AGG_PUBLIC_INPUTS_LEN: usize = 4 * POSEIDON_HASH_OUT_LEN + BYTES32_LEN + 7;
 
 #[derive(Debug, Error)]
 pub enum SigAggPublicInputsError {
@@ -131,12 +130,11 @@ where
                 })?;
         cursor += POSEIDON_HASH_OUT_LEN;
 
-        let block_number = BlockNumber::new(inputs[cursor]).map_err(|e| {
-            SigAggPublicInputsError::ParseError {
+        let block_number =
+            BlockNumber::new(inputs[cursor]).map_err(|e| SigAggPublicInputsError::ParseError {
                 field: "block_number",
                 message: e.to_string(),
-            }
-        })?;
+            })?;
         cursor += 1;
 
         let aggregator_id = inputs[cursor] as u32;

@@ -80,8 +80,7 @@ fn log_proof_duration(step: &str, duration: web_time::Duration) {
 }
 
 fn load_spend_circuit() -> SpendCircuit<F, C, D> {
-    SpendCircuit::<F, C, D>::from_bytes(SPEND_CIRCUIT_BYTES)
-        .expect("load spend circuit from bytes")
+    SpendCircuit::<F, C, D>::from_bytes(SPEND_CIRCUIT_BYTES).expect("load spend circuit from bytes")
 }
 
 fn load_balance_processor() -> BalanceProcessor<F, C, D> {

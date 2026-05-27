@@ -330,6 +330,12 @@ impl BlockWitnessGenerator {
             send_merkle_proofs,
             public_state_merkle_proof,
             sig_witnesses: None, // dummy witnesses used by default in tests
+            tx_v2_indices: None,
+            tx_v2s: None,
+            tx_v2_merkle_proofs: None,
+            channel_action_indices: None,
+            channel_actions: None,
+            channel_action_merkle_proofs: None,
             forced_txs: vec![],
             forced_tx_prev_account_leaves: vec![],
             forced_tx_account_merkle_proofs: vec![],

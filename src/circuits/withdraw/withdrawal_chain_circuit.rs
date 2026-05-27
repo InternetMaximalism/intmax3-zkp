@@ -265,6 +265,8 @@ mod tests {
             tx_tree_root: tx_tree_root_bytes,
             tx: tx.clone(),
             tx_merkle_proof: tx_merkle_proof.clone(),
+            tx_v2: None,
+            tx_v2_merkle_proof: None,
         };
         let send_tx_witness = balance_witness_generator
             .send_tx_witness(&send_tx_data)
@@ -280,6 +282,8 @@ mod tests {
             tx_tree_root: tx_tree_root_bytes,
             tx: tx.clone(),
             tx_merkle_proof,
+            tx_v2: None,
+            tx_v2_merkle_proof: None,
             transfer: transfer.clone(),
             transfer_index,
             transfer_merkle_proof,

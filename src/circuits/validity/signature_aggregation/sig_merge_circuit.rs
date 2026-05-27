@@ -115,10 +115,7 @@ where
                 ))
             })?;
         self.data.verify(proof.clone()).map_err(|e| {
-            SigMergeCircuitError::ProofVerificationError(format!(
-                "Failed to verify proof: {:?}",
-                e
-            ))
+            SigMergeCircuitError::ProofVerificationError(format!("Failed to verify proof: {:?}", e))
         })
     }
 }

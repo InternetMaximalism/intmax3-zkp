@@ -14,37 +14,37 @@ use thiserror::Error;
 
 use crate::{
     common::u63::{U63, U63Target},
-    constants::{AGGREGATOR_ID_BITS, LOCAL_ID_BITS, MAX_NUM_AGGREGATORS},
+    constants::{ACCOUNT_NO_BITS, HUB_ID_BITS, MAX_NUM_HUBS},
 };
 
 #[derive(Debug, Error)]
-pub enum UserIdError {
-    #[error("Invalid aggregator ID: {0}")]
-    InvalidAggregatorId(String),
-    #[error("Invalid local ID: {0}")]
-    InvalidLocalId(String),
+pub enum AccountIdError {
+    #[error("Invalid hub ID: {0}")]
+    InvalidHubId(String),
+    #[error("Invalid account number: {0}")]
+    InvalidAccountNo(String),
     #[error("Invalid raw value: {0}")]
     InvalidValue(String),
 }
 
 #[derive(Clone, Copy, Debug, Hash, PartialEq, Eq, Serialize, Deserialize)]
-pub struct UserId(U63);
+pub struct AccountId(U63);
 
-impl UserId {
-    pub fn new(aggregator_id: u32, local_id: u32) -> Result<Self, UserIdError> {
-        if aggregator_id as usize >= MAX_NUM_AGGREGATORS {
-            return Err(UserIdError::InvalidAggregatorId(format!(
+impl AccountId {
+    pub fn new(hub_id: u32, account_no: u32) -> Result<Self, AccountIdError> {
+        if hub_id as usize >= MAX_NUM_HUBS {
+            return Err(AccountIdError::InvalidHubId(format!(
                 "{} >= {}",
-                aggregator_id, MAX_NUM_AGGREGATORS
+                hub_id, MAX_NUM_HUBS
             )));
         }
-        if aggregator_id == 0 && local_id == 0 {
-            return Err(UserIdError::InvalidLocalId(
-                "Both aggregator_id=0 and local_id=0 are reserved for dummy".to_string(),
+        if hub_id == 0 && account_no == 0 {
+            return Err(AccountIdError::InvalidAccountNo(
+                "Both hub_id=0 and account_no=0 are reserved for dummy".to_string(),
             ));
         }
-        let value = U63::from_parts(aggregator_id, local_id)
-            .map_err(|err| UserIdError::InvalidValue(err.to_string()))?;
+        let value = U63::from_parts(hub_id, account_no)
+            .map_err(|err| AccountIdError::InvalidValue(err.to_string()))?;
         Ok(Self(value))
     }
 
@@ -52,11 +52,11 @@ impl UserId {
         Self(U63::default())
     }
 
-    pub fn aggregator_id(&self) -> u32 {
+    pub fn hub_id(&self) -> u32 {
         self.0.high()
     }
 
-    pub fn local_id(&self) -> u32 {
+    pub fn account_no(&self) -> u32 {
         self.0.low()
     }
 
@@ -76,60 +76,68 @@ impl UserId {
         self.0.to_u64_vec()
     }
 
-    pub fn from_u63(value: U63) -> Result<Self, UserIdError> {
+    pub fn from_u63(value: U63) -> Result<Self, AccountIdError> {
         Self::validate_components(value.high(), value.low())?;
         Ok(Self(value))
     }
 
-    pub fn from_u64(value: u64) -> Result<Self, UserIdError> {
-        let value = U63::new(value).map_err(|err| UserIdError::InvalidValue(err.to_string()))?;
+    pub fn from_u64(value: u64) -> Result<Self, AccountIdError> {
+        let value = U63::new(value).map_err(|err| AccountIdError::InvalidValue(err.to_string()))?;
         Self::from_u63(value)
     }
 
-    fn validate_components(aggregator_id: u32, local_id: u32) -> Result<(), UserIdError> {
-        if aggregator_id as usize >= MAX_NUM_AGGREGATORS {
-            return Err(UserIdError::InvalidAggregatorId(format!(
+    pub fn aggregator_id(&self) -> u32 {
+        self.hub_id()
+    }
+
+    pub fn local_id(&self) -> u32 {
+        self.account_no()
+    }
+
+    fn validate_components(hub_id: u32, account_no: u32) -> Result<(), AccountIdError> {
+        if hub_id as usize >= MAX_NUM_HUBS {
+            return Err(AccountIdError::InvalidHubId(format!(
                 "{} >= {}",
-                aggregator_id, MAX_NUM_AGGREGATORS
+                hub_id, MAX_NUM_HUBS
             )));
         }
-        if aggregator_id == 0 && local_id == 0 {
-            return Err(UserIdError::InvalidLocalId(
-                "Both aggregator_id=0 and local_id=0 are reserved for dummy".to_string(),
+        if hub_id == 0 && account_no == 0 {
+            return Err(AccountIdError::InvalidAccountNo(
+                "Both hub_id=0 and account_no=0 are reserved for dummy".to_string(),
             ));
         }
         Ok(())
     }
 }
 
-impl From<UserId> for U63 {
-    fn from(value: UserId) -> Self {
+impl From<AccountId> for U63 {
+    fn from(value: AccountId) -> Self {
         value.0
     }
 }
 
-impl From<&UserId> for U63 {
-    fn from(value: &UserId) -> Self {
+impl From<&AccountId> for U63 {
+    fn from(value: &AccountId) -> Self {
         value.0
     }
 }
 
-impl From<UserId> for u64 {
-    fn from(value: UserId) -> Self {
+impl From<AccountId> for u64 {
+    fn from(value: AccountId) -> Self {
         value.as_u64()
     }
 }
 
-impl TryFrom<U63> for UserId {
-    type Error = UserIdError;
+impl TryFrom<U63> for AccountId {
+    type Error = AccountIdError;
 
     fn try_from(value: U63) -> Result<Self, Self::Error> {
         Self::from_u63(value)
     }
 }
 
-impl TryFrom<u64> for UserId {
-    type Error = UserIdError;
+impl TryFrom<u64> for AccountId {
+    type Error = AccountIdError;
 
     fn try_from(value: u64) -> Result<Self, Self::Error> {
         Self::from_u64(value)
@@ -137,11 +145,11 @@ impl TryFrom<u64> for UserId {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct UserIdTarget {
+pub struct AccountIdTarget {
     pub value: Target,
 }
 
-impl UserIdTarget {
+impl AccountIdTarget {
     pub fn new<F: RichField + Extendable<D>, const D: usize>(
         builder: &mut CircuitBuilder<F, D>,
         is_checked: bool,
@@ -152,7 +160,7 @@ impl UserIdTarget {
 
     pub fn constant<F: RichField + Extendable<D>, const D: usize>(
         builder: &mut CircuitBuilder<F, D>,
-        value: UserId,
+        value: AccountId,
     ) -> Self {
         let base = U63Target::constant(builder, value.into());
         Self { value: base.value }
@@ -160,15 +168,15 @@ impl UserIdTarget {
 
     pub fn from_parts<F: RichField + Extendable<D>, const D: usize>(
         builder: &mut CircuitBuilder<F, D>,
-        aggregator_id: Target,
-        local_id: Target,
+        hub_id: Target,
+        account_no: Target,
         is_checked: bool,
     ) -> Self {
         if is_checked {
-            builder.range_check(aggregator_id, AGGREGATOR_ID_BITS);
-            builder.range_check(local_id, LOCAL_ID_BITS);
+            builder.range_check(hub_id, HUB_ID_BITS);
+            builder.range_check(account_no, ACCOUNT_NO_BITS);
         }
-        let base = U63Target::from_parts(builder, aggregator_id, local_id, is_checked);
+        let base = U63Target::from_parts(builder, hub_id, account_no, is_checked);
         Self { value: base.value }
     }
 
@@ -206,7 +214,7 @@ impl UserIdTarget {
         U63Target { value: self.value }.to_u64_vec()
     }
 
-    pub fn aggregator_id<F: RichField + Extendable<D>, const D: usize>(
+    pub fn hub_id<F: RichField + Extendable<D>, const D: usize>(
         &self,
         builder: &mut CircuitBuilder<F, D>,
     ) -> Target {
@@ -214,12 +222,26 @@ impl UserIdTarget {
         high
     }
 
-    pub fn local_id<F: RichField + Extendable<D>, const D: usize>(
+    pub fn account_no<F: RichField + Extendable<D>, const D: usize>(
         &self,
         builder: &mut CircuitBuilder<F, D>,
     ) -> Target {
         let (_, low) = U63Target { value: self.value }.split_parts(builder);
         low
+    }
+
+    pub fn aggregator_id<F: RichField + Extendable<D>, const D: usize>(
+        &self,
+        builder: &mut CircuitBuilder<F, D>,
+    ) -> Target {
+        self.hub_id(builder)
+    }
+
+    pub fn local_id<F: RichField + Extendable<D>, const D: usize>(
+        &self,
+        builder: &mut CircuitBuilder<F, D>,
+    ) -> Target {
+        self.account_no(builder)
     }
 
     pub fn connect<F: RichField + Extendable<D>, const D: usize>(
@@ -308,7 +330,11 @@ impl UserIdTarget {
         }
     }
 
-    pub fn set_witness<F: Field, W: WitnessWrite<F>>(&self, witness: &mut W, value: UserId) {
+    pub fn set_witness<F: Field, W: WitnessWrite<F>>(&self, witness: &mut W, value: AccountId) {
         U63Target { value: self.value }.set_witness(witness, value.into());
     }
 }
+
+pub type UserId = AccountId;
+pub type UserIdError = AccountIdError;
+pub type UserIdTarget = AccountIdTarget;

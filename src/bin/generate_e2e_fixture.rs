@@ -16,20 +16,19 @@ use intmax3_zkp::{
             validity_circuit::{ValidityCircuit, ValidityPublicInputs},
         },
     },
-    ethereum_types::{address::Address, bytes32::Bytes32},
+    ethereum_types::{address::Address, bytes32::Bytes32, u32limb_trait::U32LimbTrait},
     utils::{
-        mle_prover::{prove_with_mle, setup_mle_vk, export_mle_json},
-        wrapper::WrapperCircuit,
         conversion::ToU64,
+        mle_prover::{export_mle_json, prove_with_mle, setup_mle_vk},
+        wrapper::WrapperCircuit,
     },
+    wrapper_config::plonky2_config::PoseidonBN128GoldilocksConfig,
 };
-use intmax3_zkp::ethereum_types::u32limb_trait::U32LimbTrait;
 use plonky2::{
     field::{goldilocks_field::GoldilocksField, types::PrimeField64},
     iop::witness::{PartialWitness, WitnessWrite},
     plonk::config::PoseidonGoldilocksConfig,
 };
-use intmax3_zkp::wrapper_config::plonky2_config::PoseidonBN128GoldilocksConfig;
 use serde::Serialize;
 
 type F = GoldilocksField;
@@ -77,8 +76,7 @@ fn main() -> anyhow::Result<()> {
         .expect("block witness");
 
     let processor = BlockHashChainProcessor::<F, C, D>::new(&supported_user_counts);
-    let block_proof = processor
-        .prove_block(Some(initial_state.clone()), None, &block_witness)?;
+    let block_proof = processor.prove_block(Some(initial_state.clone()), None, &block_witness)?;
     let block_chain_vd = processor.block_chain_vd();
 
     let validity_circuit = ValidityCircuit::<F, C, D>::new(&block_chain_vd);
@@ -107,30 +105,31 @@ fn main() -> anyhow::Result<()> {
     // -----------------------------------------------------------------------
     eprintln!("[e2e] Step 2: Wrap with WrapperCircuit");
 
-    let wrapper = WrapperCircuit::<F, C, C, D>::new(
-        &validity_circuit.data.verifier_data(),
-    );
+    let wrapper = WrapperCircuit::<F, C, C, D>::new(&validity_circuit.data.verifier_data());
     let wrapped_proof = wrapper.prove(&validity_proof)?;
     wrapper.data.verify(wrapped_proof.clone())?;
     let common = &wrapper.data.common;
-    eprintln!("[e2e] Wrapper proof verified (degree_bits={})", common.degree_bits());
+    eprintln!(
+        "[e2e] Wrapper proof verified (degree_bits={})",
+        common.degree_bits()
+    );
 
     // -----------------------------------------------------------------------
     // Step 3: Generate MLE proof
     // -----------------------------------------------------------------------
     // Setup: compute verification key (deterministic, once per circuit)
     let vk = setup_mle_vk::<F, C, D>(&wrapper.data);
-    eprintln!("[e2e] MLE VK computed (preprocessed_commitment_root: {} bytes)", vk.preprocessed_commitment_root.len());
+    eprintln!(
+        "[e2e] MLE VK computed (preprocessed_commitment_root: {} bytes)",
+        vk.preprocessed_commitment_root.len()
+    );
 
     eprintln!("[e2e] Step 3: Generate MLE proof");
 
     let mut pw = PartialWitness::new();
     pw.set_proof_with_pis_target(&wrapper.wrap_proof, &validity_proof);
 
-    let mle_result = prove_with_mle::<F, C, D>(
-        &wrapper.data,
-        pw,
-    )?;
+    let mle_result = prove_with_mle::<F, C, D>(&wrapper.data, pw)?;
     eprintln!("[e2e] MLE proof generated in {:?}", mle_result.prove_time);
 
     intmax3_zkp::utils::mle_prover::verify_mle_proof(&wrapper.data, &vk, &mle_result.proof)?;

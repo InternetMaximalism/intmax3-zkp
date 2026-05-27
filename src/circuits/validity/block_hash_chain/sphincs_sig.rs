@@ -99,8 +99,8 @@ impl SpxSigWitness {
         let fors_sig_gl = pack(&sig_bytes[16..16 + fors_bytes_len]);
 
         // Hypertree: SPX_D layers, each with WOTS sig + auth path
-        let wots_bytes = SPX_WOTS_LEN * 16;       // per layer WOTS sig bytes
-        let auth_bytes = SPX_TREE_HEIGHT * 16;     // per layer auth path bytes
+        let wots_bytes = SPX_WOTS_LEN * 16; // per layer WOTS sig bytes
+        let auth_bytes = SPX_TREE_HEIGHT * 16; // per layer auth path bytes
         let layer_bytes = wots_bytes + auth_bytes;
 
         let mut offset = 16 + fors_bytes_len;

@@ -120,10 +120,7 @@ mod tests {
     use plonky2::{
         field::goldilocks_field::GoldilocksField,
         iop::witness::PartialWitness,
-        plonk::{
-            circuit_data::CircuitConfig,
-            config::PoseidonGoldilocksConfig,
-        },
+        plonk::{circuit_data::CircuitConfig, config::PoseidonGoldilocksConfig},
     };
 
     const D: usize = 2;

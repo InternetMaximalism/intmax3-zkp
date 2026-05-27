@@ -24,18 +24,16 @@
 //!
 //! This module is not available on WASM targets (subprocess calls not supported).
 
-use std::fs;
-use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::{
+    fs,
+    path::{Path, PathBuf},
+    process::Command,
+};
 
 use plonky2::{
     field::extension::Extendable,
     hash::hash_types::RichField,
-    plonk::{
-        circuit_data::CircuitData,
-        config::GenericConfig,
-        proof::ProofWithPublicInputs,
-    },
+    plonk::{circuit_data::CircuitData, config::GenericConfig, proof::ProofWithPublicInputs},
 };
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -56,10 +54,7 @@ pub enum Groth16Error {
     SerializationError(String),
 
     #[error("gnark-wrapper failed with exit code {code:?}: {stderr}")]
-    SubprocessFailed {
-        code: Option<i32>,
-        stderr: String,
-    },
+    SubprocessFailed { code: Option<i32>, stderr: String },
 
     #[error("Failed to read gnark-wrapper output: {0}")]
     OutputReadError(std::io::Error),
@@ -128,7 +123,8 @@ pub const DEFAULT_GNARK_BIN: &str = "gnark/gnark-wrapper";
 /// * `circuit_data` — The Plonky2 circuit data (contains common data + verifier data)
 /// * `proof` — The Plonky2 proof with public inputs
 /// * `gnark_bin_path` — Path to the `gnark-wrapper` Go binary
-/// * `expected_result` — `true` for finalize (prove validity), `false` for fraud proof (prove invalidity)
+/// * `expected_result` — `true` for finalize (prove validity), `false` for fraud proof (prove
+///   invalidity)
 ///
 /// # Returns
 ///
@@ -161,9 +157,8 @@ pub const DEFAULT_GNARK_BIN: &str = "gnark/gnark-wrapper";
 /// * `proof` — The Plonky2 proof with public inputs
 /// * `gnark_bin_path` — Path to the `gnark-wrapper` Go binary
 /// * `expected_result` — `true` for validity proof, `false` for fraud proof
-/// * `setup_dir` — Optional persistent directory for trusted setup (PK/VK).
-///   If `None`, uses a temp directory that persists across test runs.
-///   If `Some(path)`, saves/loads PK/VK from that path.
+/// * `setup_dir` — Optional persistent directory for trusted setup (PK/VK). If `None`, uses a temp
+///   directory that persists across test runs. If `Some(path)`, saves/loads PK/VK from that path.
 pub fn groth16_wrap<F, C, const D: usize>(
     circuit_data: &CircuitData<F, C, D>,
     proof: &ProofWithPublicInputs<F, C, D>,
@@ -223,8 +218,10 @@ where
     // Use circuit-specific setup directory based on common data hash.
     // Different circuits have different R1CS constraint counts and need separate setups.
     let circuit_hash = {
-        use std::collections::hash_map::DefaultHasher;
-        use std::hash::{Hash, Hasher};
+        use std::{
+            collections::hash_map::DefaultHasher,
+            hash::{Hash, Hasher},
+        };
         let mut hasher = DefaultHasher::new();
         cd_json.hash(&mut hasher);
         format!("{:016x}", hasher.finish())
@@ -258,8 +255,7 @@ where
     }
 
     // 5. Parse output JSON
-    let out_str =
-        std::fs::read_to_string(&out_file).map_err(Groth16Error::OutputReadError)?;
+    let out_str = std::fs::read_to_string(&out_file).map_err(Groth16Error::OutputReadError)?;
     let out: serde_json::Value = serde_json::from_str(&out_str)
         .map_err(|e| Groth16Error::OutputParseError(e.to_string()))?;
 
@@ -283,9 +279,9 @@ where
         .unwrap_or_default();
 
     // Parse verifying key if present
-    let verifying_key = out.get("verifying_key").and_then(|vk_val| {
-        serde_json::from_value::<Groth16VerifyingKey>(vk_val.clone()).ok()
-    });
+    let verifying_key = out
+        .get("verifying_key")
+        .and_then(|vk_val| serde_json::from_value::<Groth16VerifyingKey>(vk_val.clone()).ok());
 
     Ok(Groth16WrapResult {
         proof: Groth16Proof { a, b, c },
@@ -331,9 +327,7 @@ fn parse_g1_point(value: Option<&serde_json::Value>) -> Result<[String; 2], Grot
     ])
 }
 
-fn parse_g2_point(
-    value: Option<&serde_json::Value>,
-) -> Result<[[String; 2]; 2], Groth16Error> {
+fn parse_g2_point(value: Option<&serde_json::Value>) -> Result<[[String; 2]; 2], Groth16Error> {
     let arr = value
         .and_then(|v| v.as_array())
         .ok_or_else(|| Groth16Error::OutputParseError("invalid G2 point".into()))?;
@@ -357,20 +351,14 @@ fn parse_g2_point(
                 .and_then(|v| v.as_str())
                 .unwrap_or("0")
                 .to_string(),
-            x.get(1)
-                .and_then(|v| v.as_str())
-                .unwrap_or("0")
-                .to_string(),
+            x.get(1).and_then(|v| v.as_str()).unwrap_or("0").to_string(),
         ],
         [
             y.first()
                 .and_then(|v| v.as_str())
                 .unwrap_or("0")
                 .to_string(),
-            y.get(1)
-                .and_then(|v| v.as_str())
-                .unwrap_or("0")
-                .to_string(),
+            y.get(1).and_then(|v| v.as_str()).unwrap_or("0").to_string(),
         ],
     ])
 }
@@ -386,7 +374,8 @@ mod tests {
         circuits::{
             test_utils::block_witness_generator::BlockWitnessGenerator,
             validity::block_hash_chain::{
-                block_hash_chain_processor::BlockHashChainProcessor, validity_circuit::ValidityCircuit,
+                block_hash_chain_processor::BlockHashChainProcessor,
+                validity_circuit::ValidityCircuit,
             },
         },
         ethereum_types::{address::Address, bytes32::Bytes32},
@@ -394,8 +383,7 @@ mod tests {
         wrapper_config::plonky2_config::PoseidonBN128GoldilocksConfig,
     };
     use plonky2::{
-        field::goldilocks_field::GoldilocksField,
-        field::types::Field,
+        field::{goldilocks_field::GoldilocksField, types::Field},
         hash::{
             hash_types::{HashOut, HashOutTarget},
             poseidon::PoseidonHash,
@@ -436,7 +424,10 @@ mod tests {
 
         let cd = builder.build::<BN128C>();
         eprintln!("Circuit degree_bits: {}", cd.common.degree_bits());
-        eprintln!("Circuit gates: {:?}", cd.common.gates.iter().map(|g| g.0.id()).collect::<Vec<_>>());
+        eprintln!(
+            "Circuit gates: {:?}",
+            cd.common.gates.iter().map(|g| g.0.id()).collect::<Vec<_>>()
+        );
         (cd, initial)
     }
 
@@ -472,7 +463,8 @@ mod tests {
         let proof = cd.prove(pw).expect("plonky2 proof");
 
         // Verify with Plonky2's native verifier first
-        cd.verify(proof.clone()).expect("plonky2 native verification should pass");
+        cd.verify(proof.clone())
+            .expect("plonky2 native verification should pass");
 
         let start = Instant::now();
         let wrap = groth16_wrap(&cd, &proof, gnark_bin, true).expect("groth16 wrap");
@@ -547,15 +539,14 @@ mod tests {
         // Step 2: Wrap with WrapperCircuit to convert from PoseidonGoldilocksConfig
         // to PoseidonBN128GoldilocksConfig. This changes the Merkle tree commitment
         // scheme to BN254 Poseidon, which gnark-plonky2-verifier can verify natively.
-        eprintln!("Building WrapperCircuit (PoseidonGoldilocksConfig -> PoseidonBN128GoldilocksConfig)...");
-        let wrapper = WrapperCircuit::<F, C, BN128C, D>::new(
-            &validity_circuit.data.verifier_data(),
+        eprintln!(
+            "Building WrapperCircuit (PoseidonGoldilocksConfig -> PoseidonBN128GoldilocksConfig)..."
         );
+        let wrapper =
+            WrapperCircuit::<F, C, BN128C, D>::new(&validity_circuit.data.verifier_data());
         eprintln!("WrapperCircuit built. Generating wrapped proof...");
 
-        let wrapped_proof = wrapper
-            .prove(&validity_proof)
-            .expect("wrapper proof");
+        let wrapped_proof = wrapper.prove(&validity_proof).expect("wrapper proof");
         eprintln!("Wrapped proof generated. Verifying...");
 
         // Verify the wrapped proof with Plonky2's native verifier.
@@ -626,10 +617,11 @@ mod tests {
         // --- Part B: Verify fraud detection does NOT require Groth16 ExpectedResult=0 ---
         //
         // Important finding: gnark's FraudAwareVerifierCircuit cannot generate fraud proofs
-        // (ExpectedResult=0) for corrupted Plonky2 proofs. This is because the VerifyAndReturnResult
-        // softens only the final PLONK/FRI comparison checks, but the underlying Goldilocks field
-        // arithmetic uses hard constraints (api.AssertIsEqual). Corrupted proof data causes
-        // intermediate computations to fail these hard constraints, making the circuit unsatisfiable.
+        // (ExpectedResult=0) for corrupted Plonky2 proofs. This is because the
+        // VerifyAndReturnResult softens only the final PLONK/FRI comparison checks, but the
+        // underlying Goldilocks field arithmetic uses hard constraints (api.AssertIsEqual).
+        // Corrupted proof data causes intermediate computations to fail these hard
+        // constraints, making the circuit unsatisfiable.
         //
         // However, this is NOT a security issue for the INTMAX3 system. The on-chain fraud proof
         // mechanism works through multiple verification steps:

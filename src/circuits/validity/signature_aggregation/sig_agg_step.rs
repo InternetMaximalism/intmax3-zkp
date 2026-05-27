@@ -17,8 +17,8 @@ use sphincsplus_circuits::verification::{SpxVerifyWitness, verify_circuit};
 use crate::{
     circuits::validity::{
         block_hash_chain::sphincs_sig::{
-            SpxSigTargets, SpxSigWitness, SPX_AUTH_GL_LEN, SPX_D, SPX_FORS_SIG_GL_LEN,
-            SPX_WOTS_SIG_GL_LEN,
+            SPX_AUTH_GL_LEN, SPX_D, SPX_FORS_SIG_GL_LEN, SPX_WOTS_SIG_GL_LEN, SpxSigTargets,
+            SpxSigWitness,
         },
         signature_aggregation::sig_agg_pis::{
             SigAggPublicInputs, SigAggPublicInputsError, SigAggPublicInputsTarget,
@@ -27,8 +27,8 @@ use crate::{
     common::{
         key_set::{KeySetMerkleProof, KeySetMerkleProofTarget, PkLeaf, PkLeafTarget},
         trees::account_tree::{
-            AccountLeaf, AccountLeafTarget, AccountMerkleProof, AccountMerkleProofTarget,
-            SendLeaf, SendLeafTarget, SendMerkleProof, SendMerkleProofTarget,
+            AccountLeaf, AccountLeafTarget, AccountMerkleProof, AccountMerkleProofTarget, SendLeaf,
+            SendLeafTarget, SendMerkleProof, SendMerkleProofTarget,
         },
         u63::{BlockNumber, BlockNumberTarget},
         user_id::{UserId, UserIdTarget},
@@ -36,7 +36,7 @@ use crate::{
     constants::{ACCOUNT_TREE_HEIGHT, KEY_SET_TREE_HEIGHT, SEND_TREE_HEIGHT},
     ethereum_types::{
         bytes32::{Bytes32, Bytes32Target},
-        u32limb_trait::{U32LimbTargetTrait as _},
+        u32limb_trait::U32LimbTargetTrait as _,
     },
     utils::{
         conversion::ToU64,
@@ -68,8 +68,8 @@ pub enum SigAggStepError {
 /// Witness for a single signature aggregation step.
 ///
 /// Two modes:
-/// - `is_finalize = false`: Verify one SPHINCS+ signature for the current user.
-///   If this is the first sig for a user, also provide account leaf data.
+/// - `is_finalize = false`: Verify one SPHINCS+ signature for the current user. If this is the
+///   first sig for a user, also provide account leaf data.
 /// - `is_finalize = true`: Finalize the current user (check threshold, update account tree).
 pub struct SigAggStepWitness<
     F: RichField + Extendable<D>,
@@ -416,8 +416,7 @@ impl<const D: usize> SigAggStepTarget<D> {
             &prev_pis.vd,
             sig_agg_cd,
         );
-        let sig_agg_vd =
-            builder.add_virtual_verifier_data(sig_agg_cd.config.fri_config.cap_height);
+        let sig_agg_vd = builder.add_virtual_verifier_data(sig_agg_cd.config.fri_config.cap_height);
         conditionally_connect_vd(builder, not_initial, &prev_pis.vd, &sig_agg_vd);
 
         // ── Select previous state ──
@@ -440,13 +439,14 @@ impl<const D: usize> SigAggStepTarget<D> {
             prev_pis.block_number.value,
             block_number.value,
         );
-        builder.conditional_assert_eq(
-            not_initial.target,
-            prev_pis.aggregator_id,
-            aggregator_id,
-        );
+        builder.conditional_assert_eq(not_initial.target, prev_pis.aggregator_id, aggregator_id);
         // tx_tree_root consistency (conditional on not_initial)
-        for (a, b) in prev_pis.tx_tree_root.to_vec().iter().zip(tx_tree_root.to_vec().iter()) {
+        for (a, b) in prev_pis
+            .tx_tree_root
+            .to_vec()
+            .iter()
+            .zip(tx_tree_root.to_vec().iter())
+        {
             builder.conditional_assert_eq(not_initial.target, *a, *b);
         }
 
@@ -467,37 +467,21 @@ impl<const D: usize> SigAggStepTarget<D> {
         // Previous user state
         let zero = builder.zero();
         let zero_hash = PoseidonHashOutTarget::constant(builder, PoseidonHashOut::default());
-        let prev_current_user_local_id = builder.select(
-            is_initial,
-            zero,
-            prev_pis.current_user_local_id,
-        );
+        let prev_current_user_local_id =
+            builder.select(is_initial, zero, prev_pis.current_user_local_id);
         let prev_current_user_pk_set_root = PoseidonHashOutTarget::select(
             builder,
             is_initial,
             zero_hash.clone(),
             prev_pis.current_user_pk_set_root.clone(),
         );
-        let prev_current_user_threshold = builder.select(
-            is_initial,
-            zero,
-            prev_pis.current_user_threshold,
-        );
-        let prev_current_user_sigs_verified = builder.select(
-            is_initial,
-            zero,
-            prev_pis.current_user_sigs_verified,
-        );
-        let prev_current_user_last_pk_index = builder.select(
-            is_initial,
-            zero,
-            prev_pis.current_user_last_pk_index,
-        );
-        let prev_processed_count = builder.select(
-            is_initial,
-            zero,
-            prev_pis.processed_count,
-        );
+        let prev_current_user_threshold =
+            builder.select(is_initial, zero, prev_pis.current_user_threshold);
+        let prev_current_user_sigs_verified =
+            builder.select(is_initial, zero, prev_pis.current_user_sigs_verified);
+        let prev_current_user_last_pk_index =
+            builder.select(is_initial, zero, prev_pis.current_user_last_pk_index);
+        let prev_processed_count = builder.select(is_initial, zero, prev_pis.processed_count);
         let prev_processed_users_hash = PoseidonHashOutTarget::select(
             builder,
             is_initial,
@@ -513,20 +497,13 @@ impl<const D: usize> SigAggStepTarget<D> {
         // Verify account leaf membership
         let user_id_for_new =
             UserIdTarget::from_parts(builder, sel_aggregator_id, new_user_local_id, true).value;
-        let leaf_root_new = account_merkle_proof.get_root::<F, C, D>(
-            builder,
-            &prev_account_leaf,
-            user_id_for_new,
-        );
-        prev_account_tree_root
-            .conditional_assert_eq(builder, leaf_root_new, is_new_user);
+        let leaf_root_new =
+            account_merkle_proof.get_root::<F, C, D>(builder, &prev_account_leaf, user_id_for_new);
+        prev_account_tree_root.conditional_assert_eq(builder, leaf_root_new, is_new_user);
 
         // Select current user state
-        let cur_local_id = builder.select(
-            is_new_user,
-            new_user_local_id,
-            prev_current_user_local_id,
-        );
+        let cur_local_id =
+            builder.select(is_new_user, new_user_local_id, prev_current_user_local_id);
         let cur_pk_set_root = PoseidonHashOutTarget::select(
             builder,
             is_new_user,
@@ -538,16 +515,8 @@ impl<const D: usize> SigAggStepTarget<D> {
             prev_account_leaf.threshold,
             prev_current_user_threshold,
         );
-        let cur_sigs_verified = builder.select(
-            is_new_user,
-            zero,
-            prev_current_user_sigs_verified,
-        );
-        let cur_last_pk_index = builder.select(
-            is_new_user,
-            zero,
-            prev_current_user_last_pk_index,
-        );
+        let cur_sigs_verified = builder.select(is_new_user, zero, prev_current_user_sigs_verified);
+        let cur_last_pk_index = builder.select(is_new_user, zero, prev_current_user_last_pk_index);
 
         // ── Signature verification (conditional on not_finalize) ──
         // Compute pk_hash = Poseidon(pub_seed || pub_root)
@@ -623,20 +592,15 @@ impl<const D: usize> SigAggStepTarget<D> {
         builder.range_check(sig_check_val, 32);
 
         // Finalize: verify account leaf and update tree
-        let user_id_for_finalize = UserIdTarget::from_parts(
-            builder,
-            sel_aggregator_id,
-            prev_current_user_local_id,
-            true,
-        )
-        .value;
+        let user_id_for_finalize =
+            UserIdTarget::from_parts(builder, sel_aggregator_id, prev_current_user_local_id, true)
+                .value;
         let leaf_root_finalize = account_merkle_proof.get_root::<F, C, D>(
             builder,
             &prev_account_leaf,
             user_id_for_finalize,
         );
-        prev_account_tree_root
-            .conditional_assert_eq(builder, leaf_root_finalize, is_finalize);
+        prev_account_tree_root.conditional_assert_eq(builder, leaf_root_finalize, is_finalize);
 
         // Verify empty send leaf
         let empty_send_leaf = SendLeafTarget::constant(builder, SendLeaf::empty_leaf());
@@ -654,11 +618,8 @@ impl<const D: usize> SigAggStepTarget<D> {
             cur: block_number.clone(),
             tx_tree_root: sel_tx_tree_root.clone(),
         };
-        let new_send_tree_root = send_merkle_proof.get_root::<F, C, D>(
-            builder,
-            &new_send_leaf,
-            prev_account_leaf.index,
-        );
+        let new_send_tree_root =
+            send_merkle_proof.get_root::<F, C, D>(builder, &new_send_leaf, prev_account_leaf.index);
 
         // Create new account leaf
         let next_index = builder.add_const(prev_account_leaf.index, F::ONE);
@@ -699,32 +660,18 @@ impl<const D: usize> SigAggStepTarget<D> {
 
         let one_target = builder.one();
         let new_processed_count = builder.add(prev_processed_count, one_target);
-        let out_processed_count = builder.select(
-            is_finalize,
-            new_processed_count,
-            prev_processed_count,
-        );
+        let out_processed_count =
+            builder.select(is_finalize, new_processed_count, prev_processed_count);
 
         // ── Select final output state ──
         // After finalize: reset user state; after sig_verify: updated user state
         let out_current_user_local_id = builder.select(is_finalize, zero, cur_local_id);
-        let out_current_user_pk_set_root = PoseidonHashOutTarget::select(
-            builder,
-            is_finalize,
-            zero_hash.clone(),
-            cur_pk_set_root,
-        );
+        let out_current_user_pk_set_root =
+            PoseidonHashOutTarget::select(builder, is_finalize, zero_hash.clone(), cur_pk_set_root);
         let out_current_user_threshold = builder.select(is_finalize, zero, cur_threshold);
-        let out_current_user_sigs_verified = builder.select(
-            is_finalize,
-            zero,
-            new_sigs_verified_sig,
-        );
-        let out_current_user_last_pk_index = builder.select(
-            is_finalize,
-            zero,
-            pk_index,
-        );
+        let out_current_user_sigs_verified =
+            builder.select(is_finalize, zero, new_sigs_verified_sig);
+        let out_current_user_last_pk_index = builder.select(is_finalize, zero, pk_index);
 
         let new_pis = SigAggPublicInputsTarget {
             initial_account_tree_root: prev_initial_account_tree_root,
@@ -835,10 +782,7 @@ impl<const D: usize> SigAggStepTarget<D> {
         self.send_merkle_proof
             .set_witness(witness, &value.send_merkle_proof);
 
-        witness.set_target(
-            self.pk_index,
-            F::from_canonical_u64(value.pk_index as u64),
-        );
+        witness.set_target(self.pk_index, F::from_canonical_u64(value.pk_index as u64));
         self.key_set_merkle_proof
             .set_witness(witness, &value.key_set_merkle_proof);
 
@@ -868,8 +812,7 @@ where
     <C as GenericConfig<D>>::Hasher: AlgebraicHasher<F>,
 {
     pub fn new(sig_agg_cd: &CommonCircuitData<F, D>) -> Self {
-        let mut builder =
-            CircuitBuilder::<F, D>::new(CircuitConfig::standard_recursion_config());
+        let mut builder = CircuitBuilder::<F, D>::new(CircuitConfig::standard_recursion_config());
         let target = SigAggStepTarget::new::<F, C>(&mut builder, sig_agg_cd);
         let public_inputs = target.new_pis.clone();
         builder.register_public_inputs(&public_inputs.to_vec(&sig_agg_cd.config));

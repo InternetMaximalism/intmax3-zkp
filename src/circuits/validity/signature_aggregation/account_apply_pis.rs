@@ -80,6 +80,10 @@ impl<F: RichField + Extendable<D>, C: GenericConfig<D, F = F>, const D: usize>
 where
     <C as GenericConfig<D>>::Hasher: AlgebraicHasher<F>,
 {
+    pub fn hub_id(&self) -> u32 {
+        self.aggregator_id
+    }
+
     pub fn to_u64_vec(&self, config: &CircuitConfig) -> Vec<u64> {
         [
             self.prev_account_tree_root.to_u64_vec(),
@@ -200,6 +204,10 @@ pub struct AccountApplyPublicInputsTarget {
 }
 
 impl AccountApplyPublicInputsTarget {
+    pub fn hub_id(&self) -> Target {
+        self.aggregator_id
+    }
+
     pub fn to_vec(&self, config: &CircuitConfig) -> Vec<Target> {
         [
             self.prev_account_tree_root.to_vec(),
@@ -300,10 +308,7 @@ impl AccountApplyPublicInputsTarget {
             self.first_user_id,
             F::from_canonical_u64(value.first_user_id),
         );
-        witness.set_target(
-            self.last_user_id,
-            F::from_canonical_u64(value.last_user_id),
-        );
+        witness.set_target(self.last_user_id, F::from_canonical_u64(value.last_user_id));
         witness.set_verifier_data_target(&self.vd, &value.vd);
     }
 }

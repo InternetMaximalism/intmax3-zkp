@@ -23,7 +23,7 @@ use crate::{
 ///   initial_account_tree_root:  POSEIDON_HASH_OUT_LEN (4)
 ///   final_account_tree_root:    POSEIDON_HASH_OUT_LEN (4)
 ///   block_number:               1
-///   aggregator_id:              1
+///   hub_id:                     1
 ///   tx_tree_root:               BYTES32_LEN (8)
 ///   users_hash:                 POSEIDON_HASH_OUT_LEN (4)
 ///   user_count:                 1
@@ -57,6 +57,10 @@ pub struct AccountApplyBlockPublicInputs {
 }
 
 impl AccountApplyBlockPublicInputs {
+    pub fn hub_id(&self) -> u32 {
+        self.aggregator_id
+    }
+
     pub fn to_u64_vec(&self) -> Vec<u64> {
         [
             self.initial_account_tree_root.to_u64_vec(),
@@ -72,9 +76,7 @@ impl AccountApplyBlockPublicInputs {
         .concat()
     }
 
-    pub fn from_u64_slice(
-        inputs: &[u64],
-    ) -> Result<Self, AccountApplyBlockPublicInputsError> {
+    pub fn from_u64_slice(inputs: &[u64]) -> Result<Self, AccountApplyBlockPublicInputsError> {
         let expected = ACCOUNT_APPLY_BLOCK_PUBLIC_INPUTS_LEN;
         if inputs.len() != expected {
             return Err(AccountApplyBlockPublicInputsError::InvalidLength {
@@ -163,6 +165,10 @@ pub struct AccountApplyBlockPublicInputsTarget {
 }
 
 impl AccountApplyBlockPublicInputsTarget {
+    pub fn hub_id(&self) -> Target {
+        self.aggregator_id
+    }
+
     pub fn to_vec(&self) -> Vec<Target> {
         [
             self.initial_account_tree_root.to_vec(),
@@ -247,9 +253,6 @@ impl AccountApplyBlockPublicInputsTarget {
             self.first_user_id,
             F::from_canonical_u64(value.first_user_id),
         );
-        witness.set_target(
-            self.last_user_id,
-            F::from_canonical_u64(value.last_user_id),
-        );
+        witness.set_target(self.last_user_id, F::from_canonical_u64(value.last_user_id));
     }
 }

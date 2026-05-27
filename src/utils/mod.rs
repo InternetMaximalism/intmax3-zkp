@@ -18,7 +18,6 @@ pub mod wrapper;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod mle_prover;
 
-
 /// Groth16 wrapper for Plonky2 proofs via gnark subprocess.
 /// Not available on WASM targets.
 #[cfg(not(target_arch = "wasm32"))]

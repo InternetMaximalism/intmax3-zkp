@@ -766,11 +766,8 @@ where
             }
         }
 
-        let new_public_inputs = witness.to_public_inputs(
-            block_chain_vd,
-            update_account_vds,
-            deposit_chain_vd,
-        )?;
+        let new_public_inputs =
+            witness.to_public_inputs(block_chain_vd, update_account_vds, deposit_chain_vd)?;
 
         let mut pw = PartialWitness::<F>::new();
         self.target.set_witness(
@@ -804,17 +801,19 @@ mod tests {
     use crate::{
         circuits::{
             test_utils::block_witness_generator::BlockWitnessGenerator,
-            validity::block_hash_chain::{
-                block_chain_pis::BLOCK_CHAIN_PUBLIC_INPUTS_LEN,
-                sphincs_sig::SpxSigWitness,
-                update_account_tree::{UpdateAccountCircuit, UpdateAccountTree},
+            validity::{
+                block_hash_chain::{
+                    block_chain_pis::BLOCK_CHAIN_PUBLIC_INPUTS_LEN,
+                    sphincs_sig::SpxSigWitness,
+                    update_account_tree::{UpdateAccountCircuit, UpdateAccountTree},
+                },
+                deposit_hash_chain::deposit_chain_pis::DEPOSIT_CHAIN_PUBLIC_INPUTS_LEN,
             },
         },
         common::u63::U63,
         ethereum_types::{bytes32::Bytes32, u32limb_trait::U32LimbTrait as _},
         utils::cyclic::TestCyclicCircuit,
     };
-    use crate::circuits::validity::deposit_hash_chain::deposit_chain_pis::DEPOSIT_CHAIN_PUBLIC_INPUTS_LEN;
     use plonky2::{
         field::goldilocks_field::GoldilocksField,
         plonk::{circuit_data::CircuitConfig, config::PoseidonGoldilocksConfig},
@@ -866,6 +865,22 @@ mod tests {
             account_merkle_proofs: block_witness.account_merkle_proofs.clone(),
             send_merkle_proofs: block_witness.send_merkle_proofs.clone(),
             sig_witnesses: vec![SpxSigWitness::dummy(); num_users],
+            tx_v2_indices: vec![0; num_users],
+            tx_v2s: vec![crate::common::tx::TxV2::default(); num_users],
+            tx_v2_merkle_proofs: vec![
+                crate::common::trees::tx_v2_tree::TxV2MerkleProof::dummy(
+                    crate::constants::TX_TREE_HEIGHT,
+                );
+                num_users
+            ],
+            channel_action_indices: vec![0; num_users],
+            channel_actions: vec![crate::common::tx::ChannelAction::default(); num_users],
+            channel_action_merkle_proofs: vec![
+                crate::common::trees::tx_v2_tree::ChannelActionMerkleProof::dummy(
+                    crate::constants::TX_TREE_HEIGHT,
+                );
+                num_users
+            ],
             prev_forced_tx_hash_chain: Bytes32::default(),
             prev_forced_tx_count: U63::default(),
             forced_txs: vec![],
@@ -918,11 +933,7 @@ mod tests {
         };
 
         let public_inputs = witness
-            .to_public_inputs(
-                &block_chain_vd,
-                &update_account_vds,
-                &deposit_chain_vd,
-            )
+            .to_public_inputs(&block_chain_vd, &update_account_vds, &deposit_chain_vd)
             .expect("block step public inputs");
         assert_eq!(
             public_inputs.ext_public_state.inner.block_number,

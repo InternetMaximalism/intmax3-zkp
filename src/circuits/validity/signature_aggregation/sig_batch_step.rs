@@ -17,8 +17,8 @@ use sphincsplus_circuits::verification::{SpxVerifyWitness, verify_circuit};
 use crate::{
     circuits::validity::{
         block_hash_chain::sphincs_sig::{
-            SpxSigTargets, SpxSigWitness, SPX_AUTH_GL_LEN, SPX_D, SPX_FORS_SIG_GL_LEN,
-            SPX_WOTS_SIG_GL_LEN,
+            SPX_AUTH_GL_LEN, SPX_D, SPX_FORS_SIG_GL_LEN, SPX_WOTS_SIG_GL_LEN, SpxSigTargets,
+            SpxSigWitness,
         },
         signature_aggregation::sig_batch_pis::{
             SigBatchPublicInputs, SigBatchPublicInputsError, SigBatchPublicInputsTarget,
@@ -71,8 +71,8 @@ pub struct SigBatchInitialValue {
 ///
 /// Two modes:
 /// - `is_finalize = false`: Verify one SPHINCS+ signature for the current user.
-/// - `is_finalize = true`: Finalize user (check threshold, record in verified_users_hash).
-///   NO account tree update — this is the key difference from SigAggStep.
+/// - `is_finalize = true`: Finalize user (check threshold, record in verified_users_hash). NO
+///   account tree update — this is the key difference from SigAggStep.
 pub struct SigBatchStepWitness<
     F: RichField + Extendable<D>,
     C: GenericConfig<D, F = F>,
@@ -154,7 +154,7 @@ where
                 )));
             }
 
-            let user_id = UserId::new(prev_pis.aggregator_id, prev_pis.current_user_local_id)
+            let user_id = UserId::new(prev_pis.hub_id(), prev_pis.current_user_local_id)
                 .map_err(|e| SigBatchStepError::InvalidInput(e.to_string()))?;
 
             // Update verified_users_hash
@@ -186,7 +186,7 @@ where
             Ok(SigBatchPublicInputs {
                 account_tree_root: prev_pis.account_tree_root,
                 block_number: prev_pis.block_number,
-                aggregator_id: prev_pis.aggregator_id,
+                aggregator_id: prev_pis.hub_id(),
                 tx_tree_root: prev_pis.tx_tree_root,
                 current_user_local_id: 0,
                 current_user_pk_set_root: PoseidonHashOut::default(),
@@ -208,7 +208,7 @@ where
                         "new_user_local_id must be non-zero when starting a new user".to_string(),
                     ));
                 }
-                let user_id = UserId::new(prev_pis.aggregator_id, self.new_user_local_id)
+                let user_id = UserId::new(prev_pis.hub_id(), self.new_user_local_id)
                     .map_err(|e| SigBatchStepError::InvalidInput(e.to_string()))?;
 
                 // Verify account leaf membership (read-only)
@@ -264,7 +264,7 @@ where
             Ok(SigBatchPublicInputs {
                 account_tree_root: prev_pis.account_tree_root,
                 block_number: prev_pis.block_number,
-                aggregator_id: prev_pis.aggregator_id,
+                aggregator_id: prev_pis.hub_id(),
                 tx_tree_root: prev_pis.tx_tree_root,
                 current_user_local_id: local_id,
                 current_user_pk_set_root: pk_set_root,
@@ -380,7 +380,7 @@ impl<const D: usize> SigBatchStepTarget<D> {
             prev_pis.block_number.value,
             block_number.value,
         );
-        builder.conditional_assert_eq(not_initial.target, prev_pis.aggregator_id, aggregator_id);
+        builder.conditional_assert_eq(not_initial.target, prev_pis.hub_id(), aggregator_id);
         for (a, b) in prev_pis
             .tx_tree_root
             .to_vec()
@@ -390,7 +390,7 @@ impl<const D: usize> SigBatchStepTarget<D> {
             builder.conditional_assert_eq(not_initial.target, *a, *b);
         }
 
-        let sel_aggregator_id = builder.select(is_initial, initial_aggregator_id, aggregator_id);
+        let sel_hub_id = builder.select(is_initial, initial_aggregator_id, aggregator_id);
         let sel_tx_tree_root = Bytes32Target::select(
             builder,
             is_initial,
@@ -429,23 +429,25 @@ impl<const D: usize> SigBatchStepTarget<D> {
 
         // ── New user setup: verify account leaf (read-only) ──
         let user_id_for_new =
-            UserIdTarget::from_parts(builder, sel_aggregator_id, new_user_local_id, true).value;
-        let leaf_root_new = account_merkle_proof.get_root::<F, C, D>(
-            builder,
-            &prev_account_leaf,
-            user_id_for_new,
-        );
+            UserIdTarget::from_parts(builder, sel_hub_id, new_user_local_id, true).value;
+        let leaf_root_new =
+            account_merkle_proof.get_root::<F, C, D>(builder, &prev_account_leaf, user_id_for_new);
         prev_account_tree_root.conditional_assert_eq(builder, leaf_root_new, is_new_user);
 
         // Select current user state
-        let cur_local_id = builder.select(is_new_user, new_user_local_id, prev_current_user_local_id);
+        let cur_local_id =
+            builder.select(is_new_user, new_user_local_id, prev_current_user_local_id);
         let cur_pk_set_root = PoseidonHashOutTarget::select(
             builder,
             is_new_user,
             prev_account_leaf.pk_set_root.clone(),
             prev_current_user_pk_set_root,
         );
-        let cur_threshold = builder.select(is_new_user, prev_account_leaf.threshold, prev_current_user_threshold);
+        let cur_threshold = builder.select(
+            is_new_user,
+            prev_account_leaf.threshold,
+            prev_current_user_threshold,
+        );
         let cur_sigs_verified = builder.select(is_new_user, zero, prev_current_user_sigs_verified);
         let cur_last_pk_index = builder.select(is_new_user, zero, prev_current_user_last_pk_index);
 
@@ -460,9 +462,9 @@ impl<const D: usize> SigBatchStepTarget<D> {
             key_set_merkle_proof.get_root::<F, C, D>(builder, &pk_leaf_target, pk_index);
         cur_pk_set_root.conditional_assert_eq(builder, key_set_root_from_proof, not_finalize);
 
-        // Message: [block_number, aggregator_id, local_id, tx_tree_root×8]
+        // Message: [block_number, hub_id, account_no, tx_tree_root×8]
         let msg_gl: Vec<_> = std::iter::once(block_number.value)
-            .chain(std::iter::once(sel_aggregator_id))
+            .chain(std::iter::once(sel_hub_id))
             .chain(std::iter::once(cur_local_id))
             .chain(sel_tx_tree_root.to_vec())
             .collect();
@@ -511,13 +513,8 @@ impl<const D: usize> SigBatchStepTarget<D> {
         builder.range_check(sig_check_val, 32);
 
         // Compute user_id for finalization
-        let user_id_for_finalize = UserIdTarget::from_parts(
-            builder,
-            sel_aggregator_id,
-            prev_current_user_local_id,
-            true,
-        )
-        .value;
+        let user_id_for_finalize =
+            UserIdTarget::from_parts(builder, sel_hub_id, prev_current_user_local_id, true).value;
 
         // Update verified_users_hash: Poseidon(prev || user_id)
         let hash_inputs: Vec<_> = prev_verified_users_hash
@@ -535,12 +532,14 @@ impl<const D: usize> SigBatchStepTarget<D> {
 
         let one_target = builder.one();
         let new_verified_count = builder.add(prev_verified_count, one_target);
-        let out_verified_count = builder.select(is_finalize, new_verified_count, prev_verified_count);
+        let out_verified_count =
+            builder.select(is_finalize, new_verified_count, prev_verified_count);
 
         // first_user_id: set on first finalize only
         let is_first_finalize_zero = builder.is_equal(prev_first_user_id, zero);
         let is_first_finalize = builder.and(is_finalize, is_first_finalize_zero);
-        let out_first_user_id = builder.select(is_first_finalize, user_id_for_finalize, prev_first_user_id);
+        let out_first_user_id =
+            builder.select(is_first_finalize, user_id_for_finalize, prev_first_user_id);
 
         // last_user_id: updated on every finalize
         let out_last_user_id = builder.select(is_finalize, user_id_for_finalize, prev_last_user_id);
@@ -556,12 +555,8 @@ impl<const D: usize> SigBatchStepTarget<D> {
 
         // ── Output ──
         let out_current_user_local_id = builder.select(is_finalize, zero, cur_local_id);
-        let out_current_user_pk_set_root = PoseidonHashOutTarget::select(
-            builder,
-            is_finalize,
-            zero_hash.clone(),
-            cur_pk_set_root,
-        );
+        let out_current_user_pk_set_root =
+            PoseidonHashOutTarget::select(builder, is_finalize, zero_hash.clone(), cur_pk_set_root);
         let out_current_user_threshold = builder.select(is_finalize, zero, cur_threshold);
         let out_current_user_sigs_verified =
             builder.select(is_finalize, zero, new_sigs_verified_sig);
@@ -570,7 +565,7 @@ impl<const D: usize> SigBatchStepTarget<D> {
         let new_pis = SigBatchPublicInputsTarget {
             account_tree_root: prev_account_tree_root,
             block_number: block_number.clone(),
-            aggregator_id: sel_aggregator_id,
+            aggregator_id: sel_hub_id,
             tx_tree_root: sel_tx_tree_root,
             current_user_local_id: out_current_user_local_id,
             current_user_pk_set_root: out_current_user_pk_set_root,
@@ -671,10 +666,7 @@ impl<const D: usize> SigBatchStepTarget<D> {
             .set_witness(witness, &value.prev_account_leaf);
         self.account_merkle_proof
             .set_witness(witness, &value.account_merkle_proof);
-        witness.set_target(
-            self.pk_index,
-            F::from_canonical_u64(value.pk_index as u64),
-        );
+        witness.set_target(self.pk_index, F::from_canonical_u64(value.pk_index as u64));
         self.key_set_merkle_proof
             .set_witness(witness, &value.key_set_merkle_proof);
         self.spx_sig_targets
@@ -702,8 +694,7 @@ where
     <C as GenericConfig<D>>::Hasher: AlgebraicHasher<F>,
 {
     pub fn new(sig_batch_cd: &CommonCircuitData<F, D>) -> Self {
-        let mut builder =
-            CircuitBuilder::<F, D>::new(CircuitConfig::standard_recursion_config());
+        let mut builder = CircuitBuilder::<F, D>::new(CircuitConfig::standard_recursion_config());
         let target = SigBatchStepTarget::new::<F, C>(&mut builder, sig_batch_cd);
         let public_inputs = target.new_pis.clone();
         builder.register_public_inputs(&public_inputs.to_vec(&sig_batch_cd.config));

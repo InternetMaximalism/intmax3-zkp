@@ -147,9 +147,9 @@ where
                 "block_number mismatch".to_string(),
             ));
         }
-        if batch_pis.aggregator_id != prev_merge.aggregator_id {
+        if batch_pis.hub_id() != prev_merge.hub_id() {
             return Err(SigMergeStepError::InvalidInput(
-                "aggregator_id mismatch".to_string(),
+                "hub_id mismatch".to_string(),
             ));
         }
         if batch_pis.tx_tree_root != prev_merge.tx_tree_root {
@@ -186,7 +186,7 @@ where
         Ok(SigMergePublicInputs {
             account_tree_root: prev_merge.account_tree_root,
             block_number: prev_merge.block_number,
-            aggregator_id: prev_merge.aggregator_id,
+            aggregator_id: prev_merge.hub_id(),
             tx_tree_root: prev_merge.tx_tree_root,
             verified_users_hash: new_verified_users_hash,
             verified_count: new_count,
@@ -273,10 +273,13 @@ impl<const D: usize> SigMergeStepTarget<D> {
             initial_account_tree_root.clone(),
             prev_merge_pis.account_tree_root.clone(),
         );
-        let prev_block_number =
-            builder.select(is_initial, initial_block_number.value, prev_merge_pis.block_number.value);
-        let prev_aggregator_id =
-            builder.select(is_initial, initial_aggregator_id, prev_merge_pis.aggregator_id);
+        let prev_block_number = builder.select(
+            is_initial,
+            initial_block_number.value,
+            prev_merge_pis.block_number.value,
+        );
+        let prev_hub_id =
+            builder.select(is_initial, initial_aggregator_id, prev_merge_pis.hub_id());
         let prev_tx_tree_root = Bytes32Target::select(
             builder,
             is_initial,
@@ -300,7 +303,7 @@ impl<const D: usize> SigMergeStepTarget<D> {
             _true,
         );
         builder.connect(prev_block_number, batch_pis.block_number.value);
-        builder.connect(prev_aggregator_id, batch_pis.aggregator_id);
+        builder.connect(prev_hub_id, batch_pis.hub_id());
         for (a, b) in prev_tx_tree_root
             .to_vec()
             .iter()
@@ -340,7 +343,7 @@ impl<const D: usize> SigMergeStepTarget<D> {
         let new_pis = SigMergePublicInputsTarget {
             account_tree_root: prev_account_tree_root,
             block_number: BlockNumberTarget::from_slice(&[prev_block_number]),
-            aggregator_id: prev_aggregator_id,
+            aggregator_id: prev_hub_id,
             tx_tree_root: prev_tx_tree_root,
             verified_users_hash: new_verified_users_hash,
             verified_count: new_verified_count,
@@ -430,10 +433,8 @@ where
         sig_merge_cd: &CommonCircuitData<F, D>,
         sig_batch_vd: &VerifierCircuitData<F, C, D>,
     ) -> Self {
-        let mut builder =
-            CircuitBuilder::<F, D>::new(CircuitConfig::standard_recursion_config());
-        let target =
-            SigMergeStepTarget::new::<F, C>(&mut builder, sig_merge_cd, sig_batch_vd);
+        let mut builder = CircuitBuilder::<F, D>::new(CircuitConfig::standard_recursion_config());
+        let target = SigMergeStepTarget::new::<F, C>(&mut builder, sig_merge_cd, sig_batch_vd);
         let public_inputs = target.new_pis.clone();
         builder.register_public_inputs(&public_inputs.to_vec(&sig_merge_cd.config));
         let data = builder.build::<C>();

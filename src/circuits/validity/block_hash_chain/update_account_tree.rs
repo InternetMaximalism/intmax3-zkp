@@ -1,19 +1,26 @@
 use crate::{
     circuits::validity::block_hash_chain::sphincs_sig::{
-        SpxSigTargets, SpxSigWitness, SPX_AUTH_GL_LEN, SPX_D, SPX_FORS_SIG_GL_LEN,
-        SPX_WOTS_SIG_GL_LEN,
+        SPX_AUTH_GL_LEN, SPX_D, SPX_FORS_SIG_GL_LEN, SPX_WOTS_SIG_GL_LEN, SpxSigTargets,
+        SpxSigWitness,
     },
     common::{
         block::{Block, BlockError, BlockTarget},
         forced_tx::{ForcedTx, ForcedTxTarget},
-        trees::account_tree::{
-            AccountLeaf, AccountLeafTarget, AccountMerkleProof, AccountMerkleProofTarget, SendLeaf,
-            SendLeafTarget, SendMerkleProof, SendMerkleProofTarget,
+        trees::{
+            account_tree::{
+                AccountLeaf, AccountLeafTarget, AccountMerkleProof, AccountMerkleProofTarget,
+                SendLeaf, SendLeafTarget, SendMerkleProof, SendMerkleProofTarget,
+            },
+            tx_v2_tree::{
+                ChannelActionMerkleProof, ChannelActionMerkleProofTarget, TxV2MerkleProof,
+                TxV2MerkleProofTarget,
+            },
         },
+        tx::{ChannelAction, ChannelActionKind, ChannelActionTarget, TxClass, TxV2, TxV2Target},
         u63::{BlockNumber, BlockNumberTarget, U63, U63Target},
         user_id::{UserId, UserIdError, UserIdTarget},
     },
-    constants::{ACCOUNT_TREE_HEIGHT, SEND_TREE_HEIGHT},
+    constants::{ACCOUNT_TREE_HEIGHT, SEND_TREE_HEIGHT, TX_TREE_HEIGHT},
     ethereum_types::{
         bytes32::{BYTES32_LEN, Bytes32, Bytes32Target},
         u32limb_trait::{U32LimbTargetTrait as _, U32LimbTrait as _},
@@ -25,7 +32,6 @@ use crate::{
         poseidon_hash_out::{POSEIDON_HASH_OUT_LEN, PoseidonHashOut, PoseidonHashOutTarget},
     },
 };
-use sphincsplus_circuits::verification::{SpxVerifyWitness, verify_circuit};
 use plonky2::{
     field::{extension::Extendable, types::Field},
     hash::hash_types::RichField,
@@ -40,6 +46,7 @@ use plonky2::{
         proof::ProofWithPublicInputs,
     },
 };
+use sphincsplus_circuits::verification::{SpxVerifyWitness, verify_circuit};
 
 #[derive(thiserror::Error, Debug)]
 pub enum UpdateAccountTreeError {
@@ -91,6 +98,15 @@ pub struct UpdateAccountTree {
     // Use SpxSigWitness::dummy() for inactive (zero local_id) slots.
     pub sig_witnesses: Vec<SpxSigWitness>,
 
+    // One bound TxV2 witness per user slot. For channel-aware blocks, this proves that
+    // the block tx root contains a transaction attributable to the slot's hub/account_no.
+    pub tx_v2_indices: Vec<u64>,
+    pub tx_v2s: Vec<TxV2>,
+    pub tx_v2_merkle_proofs: Vec<TxV2MerkleProof>,
+    pub channel_action_indices: Vec<u64>,
+    pub channel_actions: Vec<ChannelAction>,
+    pub channel_action_merkle_proofs: Vec<ChannelActionMerkleProof>,
+
     // Forced transaction witnesses (merged from ForcedTxStep)
     pub prev_forced_tx_hash_chain: Bytes32,
     pub prev_forced_tx_count: U63,
@@ -105,12 +121,24 @@ impl UpdateAccountTree {
         if self.prev_account_leaves.len() != self.block.num_users as usize
             || self.account_merkle_proofs.len() != self.block.num_users as usize
             || self.send_merkle_proofs.len() != self.block.num_users as usize
+            || self.tx_v2_indices.len() != self.block.num_users as usize
+            || self.tx_v2s.len() != self.block.num_users as usize
+            || self.tx_v2_merkle_proofs.len() != self.block.num_users as usize
+            || self.channel_action_indices.len() != self.block.num_users as usize
+            || self.channel_actions.len() != self.block.num_users as usize
+            || self.channel_action_merkle_proofs.len() != self.block.num_users as usize
         {
             return Err(UpdateAccountTreeError::InvalidLength(format!(
-                "prev_account_leaves length is {}, account_merkle_proofs length is {}, send_merkle_proofs length is {}, but block.num_users is {}",
+                "prev_account_leaves={}, account_merkle_proofs={}, send_merkle_proofs={}, tx_v2_indices={}, tx_v2s={}, tx_v2_merkle_proofs={}, channel_action_indices={}, channel_actions={}, channel_action_merkle_proofs={}, block.num_users={}",
                 self.prev_account_leaves.len(),
                 self.account_merkle_proofs.len(),
                 self.send_merkle_proofs.len(),
+                self.tx_v2_indices.len(),
+                self.tx_v2s.len(),
+                self.tx_v2_merkle_proofs.len(),
+                self.channel_action_indices.len(),
+                self.channel_actions.len(),
+                self.channel_action_merkle_proofs.len(),
                 self.block.num_users,
             )));
         }
@@ -119,13 +147,14 @@ impl UpdateAccountTree {
 
         // update account tree
         let mut account_tree_root = self.prev_account_tree_root;
-        let aggregator_id = self.block.aggregator_id;
-        for (i, &local_id) in self.block.local_ids.iter().enumerate() {
-            if local_id == 0 {
-                // ignore zero local_id (padding or dummy)
+        let block_tx_root = self.block.tx_tree_root.reduce_to_hash_out();
+        let hub_id = self.block.hub_id();
+        for (i, &account_no) in self.block.account_nos().iter().enumerate() {
+            if account_no == 0 {
+                // ignore zero account number (padding or dummy)
                 continue;
             }
-            let user_id = UserId::new(aggregator_id, local_id)?;
+            let user_id = UserId::new(hub_id, account_no)?;
 
             let prev_account_leaf = &self.prev_account_leaves[i];
             let account_merkle_proof = &self.account_merkle_proofs[i];
@@ -144,6 +173,66 @@ impl UpdateAccountTree {
             if prev_account_leaf.prev == self.block_number {
                 // already updated in this block
                 continue;
+            }
+
+            let tx_v2 = &self.tx_v2s[i];
+            let tx_v2_proof = &self.tx_v2_merkle_proofs[i];
+            let tx_v2_index = self.tx_v2_indices[i];
+            tx_v2_proof
+                .verify(tx_v2, tx_v2_index, block_tx_root)
+                .map_err(|e| {
+                    UpdateAccountTreeError::MerkleProofError(format!(
+                        "failed to verify tx_v2 merkle proof for i {}: {}",
+                        i, e
+                    ))
+                })?;
+
+            match tx_v2.tx_class {
+                TxClass::UserTransfer => {
+                    if tx_v2.channel_action_root != PoseidonHashOut::default() {
+                        return Err(UpdateAccountTreeError::InvalidLength(format!(
+                            "user-transfer tx at i {} must have zero channel_action_root",
+                            i
+                        )));
+                    }
+                }
+                TxClass::ChannelAction => {
+                    if tx_v2.transfer_tree_root != PoseidonHashOut::default() {
+                        return Err(UpdateAccountTreeError::InvalidLength(format!(
+                            "channel-action tx at i {} must have zero transfer_tree_root",
+                            i
+                        )));
+                    }
+
+                    let channel_action = &self.channel_actions[i];
+                    let channel_action_proof = &self.channel_action_merkle_proofs[i];
+                    let channel_action_index = self.channel_action_indices[i];
+                    channel_action_proof
+                        .verify(
+                            channel_action,
+                            channel_action_index,
+                            tx_v2.channel_action_root,
+                        )
+                        .map_err(|e| {
+                            UpdateAccountTreeError::MerkleProofError(format!(
+                                "failed to verify channel action merkle proof for i {}: {}",
+                                i, e
+                            ))
+                        })?;
+
+                    if channel_action.source_channel_id != user_id {
+                        return Err(UpdateAccountTreeError::InvalidLength(format!(
+                            "channel action source_channel_id mismatch for i {}: expected {}, got {}",
+                            i,
+                            user_id.as_u64(),
+                            channel_action.source_channel_id.as_u64(),
+                        )));
+                    }
+
+                    match channel_action.kind {
+                        ChannelActionKind::InterChannelSend | ChannelActionKind::ChannelClose => {}
+                    }
+                }
             }
 
             // verify the inclusion of empty leaf in the send tree
@@ -234,8 +323,8 @@ impl UpdateAccountTree {
                 pk_set_root: prev_account_leaf.pk_set_root,
                 threshold: prev_account_leaf.threshold,
             };
-            account_tree_root = account_merkle_proof
-                .get_root(&new_account_leaf, forced_tx.user_id.as_u64());
+            account_tree_root =
+                account_merkle_proof.get_root(&new_account_leaf, forced_tx.user_id.as_u64());
 
             // Chain forced tx hash
             ftx_hash_chain = forced_tx.hash_with_prev_hash(ftx_hash_chain);
@@ -341,8 +430,9 @@ impl UpdateAccountPublicInputs {
                 .map_err(|e| UpdateAccountTreeError::InvalidLength(e.to_string()))?;
         cursor += BYTES32_LEN;
 
-        let forced_tx_hash_chain = Bytes32::from_u64_slice(&values[cursor..cursor + BYTES32_LEN])
-            .map_err(|e| UpdateAccountTreeError::InvalidLength(e.to_string()))?;
+        let forced_tx_hash_chain =
+            Bytes32::from_u64_slice(&values[cursor..cursor + BYTES32_LEN])
+                .map_err(|e| UpdateAccountTreeError::InvalidLength(e.to_string()))?;
         cursor += BYTES32_LEN;
 
         let prev_forced_tx_count = U63::new(values[cursor]).map_err(|e| {
@@ -615,6 +705,12 @@ pub struct UpdateAccountTreeTarget {
     pub prev_account_leaves: Vec<AccountLeafTarget>,
     pub account_merkle_proofs: Vec<AccountMerkleProofTarget>,
     pub send_merkle_proofs: Vec<SendMerkleProofTarget>,
+    pub tx_v2_indices: Vec<Target>,
+    pub tx_v2_targets: Vec<TxV2Target>,
+    pub tx_v2_merkle_proofs: Vec<TxV2MerkleProofTarget>,
+    pub channel_action_indices: Vec<Target>,
+    pub channel_action_targets: Vec<ChannelActionTarget>,
+    pub channel_action_merkle_proofs: Vec<ChannelActionMerkleProofTarget>,
     pub public_inputs: UpdateAccountPublicInputsTarget,
     /// SPHINCS+ signature witness targets for each user slot.
     pub spx_sig_targets: Vec<SpxSigTargets>,
@@ -655,6 +751,34 @@ impl UpdateAccountTreeTarget {
         let send_merkle_proofs = (0..num_users)
             .map(|_| SendMerkleProofTarget::new(builder, SEND_TREE_HEIGHT))
             .collect::<Vec<_>>();
+        let block_tx_root = block.tx_tree_root.to_hash_out(builder);
+        let zero_hash = PoseidonHashOutTarget::constant(builder, PoseidonHashOut::default());
+        let tx_v2_indices = (0..num_users)
+            .map(|_| {
+                let index = builder.add_virtual_target();
+                builder.range_check(index, TX_TREE_HEIGHT);
+                index
+            })
+            .collect::<Vec<_>>();
+        let tx_v2_targets = (0..num_users)
+            .map(|_| TxV2Target::new(builder))
+            .collect::<Vec<_>>();
+        let tx_v2_merkle_proofs = (0..num_users)
+            .map(|_| TxV2MerkleProofTarget::new(builder, TX_TREE_HEIGHT))
+            .collect::<Vec<_>>();
+        let channel_action_indices = (0..num_users)
+            .map(|_| {
+                let index = builder.add_virtual_target();
+                builder.range_check(index, TX_TREE_HEIGHT);
+                index
+            })
+            .collect::<Vec<_>>();
+        let channel_action_targets = (0..num_users)
+            .map(|_| ChannelActionTarget::new(builder, true))
+            .collect::<Vec<_>>();
+        let channel_action_merkle_proofs = (0..num_users)
+            .map(|_| ChannelActionMerkleProofTarget::new(builder, TX_TREE_HEIGHT))
+            .collect::<Vec<_>>();
 
         let new_block_hash_chain =
             block.hash_with_prev_hash::<F, C, D>(builder, prev_block_hash_chain.clone());
@@ -669,6 +793,12 @@ impl UpdateAccountTreeTarget {
             let prev_account_leaf = &prev_account_leaves[i];
             let account_merkle_proof = &account_merkle_proofs[i];
             let send_merkle_proof = &send_merkle_proofs[i];
+            let tx_v2_index = tx_v2_indices[i];
+            let tx_v2 = &tx_v2_targets[i];
+            let tx_v2_merkle_proof = &tx_v2_merkle_proofs[i];
+            let channel_action_index = channel_action_indices[i];
+            let channel_action = &channel_action_targets[i];
+            let channel_action_merkle_proof = &channel_action_merkle_proofs[i];
             let user_id =
                 UserIdTarget::from_parts(builder, block.aggregator_id, local_id, true).value;
 
@@ -684,6 +814,51 @@ impl UpdateAccountTreeTarget {
             let prev_matches_block = prev_account_leaf.prev.is_equal(builder, &block_number);
             let prev_differs = builder.not(prev_matches_block);
             let should_update = builder.and(should_check_account, prev_differs);
+
+            let bound_tx_root = tx_v2_merkle_proof.get_root::<F, C, D>(builder, tx_v2, tx_v2_index);
+            block_tx_root.conditional_assert_eq(builder, bound_tx_root, should_update);
+
+            let user_transfer_class =
+                builder.constant(F::from_canonical_u32(TxClass::UserTransfer.as_u32()));
+            let channel_action_class =
+                builder.constant(F::from_canonical_u32(TxClass::ChannelAction.as_u32()));
+            let is_user_transfer = builder.is_equal(tx_v2.tx_class, user_transfer_class);
+            let is_channel_action = builder.is_equal(tx_v2.tx_class, channel_action_class);
+            let valid_tx_class = builder.or(is_user_transfer, is_channel_action);
+            let should_check_user_transfer = builder.and(should_update, is_user_transfer);
+            let should_check_channel_action = builder.and(should_update, is_channel_action);
+            builder.conditional_assert_eq(
+                should_update.target,
+                valid_tx_class.target,
+                should_update.target,
+            );
+
+            zero_hash.conditional_assert_eq(
+                builder,
+                tx_v2.channel_action_root.clone(),
+                should_check_user_transfer,
+            );
+            zero_hash.conditional_assert_eq(
+                builder,
+                tx_v2.transfer_tree_root.clone(),
+                should_check_channel_action,
+            );
+
+            let bound_channel_action_root = channel_action_merkle_proof.get_root::<F, C, D>(
+                builder,
+                channel_action,
+                channel_action_index,
+            );
+            tx_v2.channel_action_root.conditional_assert_eq(
+                builder,
+                bound_channel_action_root,
+                should_check_channel_action,
+            );
+            builder.conditional_assert_eq(
+                should_check_channel_action.target,
+                channel_action.source_channel_id.value,
+                user_id,
+            );
 
             send_merkle_proof.conditional_verify::<F, C, D>(
                 builder,
@@ -723,10 +898,10 @@ impl UpdateAccountTreeTarget {
             // ── SPHINCS+ signature verification ────────────────────────────
             //
             // For each active user whose pk_set_root is non-zero we verify that:
-            //   1. Poseidon(pub_seed || root) == prev_account_leaf.pk_set_root
-            //      (for single-sig compatibility; multi-sig uses signature_aggregation circuit)
-            //   2. The SPHINCS+ signature is valid over the message
-            //      M_i = [block_number, aggregator_id, local_id, tx_tree_root×8]
+            //   1. Poseidon(pub_seed || root) == prev_account_leaf.pk_set_root (for single-sig
+            //      compatibility; multi-sig uses signature_aggregation circuit)
+            //   2. The SPHINCS+ signature is valid over the message M_i = [block_number,
+            //      aggregator_id, local_id, tx_tree_root×8]
             //
             // When pk_set_root == 0 (user has no registered key set yet) the
             // signature constraints are skipped — dummy witnesses are accepted.
@@ -749,12 +924,9 @@ impl UpdateAccountTreeTarget {
             };
 
             // -- Allocate virtual targets for PK and signature components --
-            let pub_seed_gl: [_; 2] =
-                std::array::from_fn(|_| builder.add_virtual_target());
-            let pub_root_gl: [_; 2] =
-                std::array::from_fn(|_| builder.add_virtual_target());
-            let r_gl: [_; 2] =
-                std::array::from_fn(|_| builder.add_virtual_target());
+            let pub_seed_gl: [_; 2] = std::array::from_fn(|_| builder.add_virtual_target());
+            let pub_root_gl: [_; 2] = std::array::from_fn(|_| builder.add_virtual_target());
+            let r_gl: [_; 2] = std::array::from_fn(|_| builder.add_virtual_target());
             let fors_sig_gl = builder.add_virtual_targets(SPX_FORS_SIG_GL_LEN);
             let ht_sig_gls: Vec<Vec<_>> = (0..SPX_D)
                 .map(|_| builder.add_virtual_targets(SPX_WOTS_SIG_GL_LEN))
@@ -767,11 +939,12 @@ impl UpdateAccountTreeTarget {
             // NOTE: For single-sig compatibility, pk_set_root == Poseidon(pub_seed || pub_root).
             // For multi-sig, use the signature_aggregation circuit instead.
             let pk_inputs: Vec<_> = [pub_seed_gl.as_slice(), pub_root_gl.as_slice()].concat();
-            let computed_pk_hash =
-                PoseidonHashOutTarget::hash_inputs(builder, &pk_inputs);
-            prev_account_leaf
-                .pk_set_root
-                .conditional_assert_eq(builder, computed_pk_hash, should_verify_sig);
+            let computed_pk_hash = PoseidonHashOutTarget::hash_inputs(builder, &pk_inputs);
+            prev_account_leaf.pk_set_root.conditional_assert_eq(
+                builder,
+                computed_pk_hash,
+                should_verify_sig,
+            );
 
             // -- Build message: [block_number, aggregator_id, local_id, tx_root×8] --
             let msg_gl: Vec<_> = std::iter::once(block_number.value)
@@ -828,8 +1001,7 @@ impl UpdateAccountTreeTarget {
 
         let mut forced_tx_targets: Vec<ForcedTxTarget> =
             Vec::with_capacity(num_forced_txs as usize);
-        let mut forced_tx_is_active: Vec<BoolTarget> =
-            Vec::with_capacity(num_forced_txs as usize);
+        let mut forced_tx_is_active: Vec<BoolTarget> = Vec::with_capacity(num_forced_txs as usize);
         let mut forced_tx_prev_account_leaves: Vec<AccountLeafTarget> =
             Vec::with_capacity(num_forced_txs as usize);
         let mut forced_tx_account_merkle_proofs: Vec<AccountMerkleProofTarget> =
@@ -843,8 +1015,7 @@ impl UpdateAccountTreeTarget {
             let is_active = builder.add_virtual_bool_target_safe();
             let forced_tx = ForcedTxTarget::new(builder, true);
             let prev_account_leaf = AccountLeafTarget::new(builder, true);
-            let account_merkle_proof =
-                AccountMerkleProofTarget::new(builder, ACCOUNT_TREE_HEIGHT);
+            let account_merkle_proof = AccountMerkleProofTarget::new(builder, ACCOUNT_TREE_HEIGHT);
             let send_merkle_proof = SendMerkleProofTarget::new(builder, SEND_TREE_HEIGHT);
 
             let user_id = forced_tx.user_id.clone();
@@ -888,23 +1059,15 @@ impl UpdateAccountTreeTarget {
                 pk_set_root: prev_account_leaf.pk_set_root.clone(),
                 threshold: prev_account_leaf.threshold.clone(),
             };
-            let updated_root = account_merkle_proof.get_root::<F, C, D>(
-                builder,
-                &new_account_leaf,
-                user_id.value,
-            );
-            account_tree_root = PoseidonHashOutTarget::select(
-                builder,
-                is_active,
-                updated_root,
-                current_root,
-            );
+            let updated_root =
+                account_merkle_proof.get_root::<F, C, D>(builder, &new_account_leaf, user_id.value);
+            account_tree_root =
+                PoseidonHashOutTarget::select(builder, is_active, updated_root, current_root);
 
             // Chain forced tx hash (only when active)
             let new_hash =
                 forced_tx.hash_with_prev_hash::<F, C, D>(builder, ftx_hash_chain.clone());
-            ftx_hash_chain =
-                Bytes32Target::select(builder, is_active, new_hash, ftx_hash_chain);
+            ftx_hash_chain = Bytes32Target::select(builder, is_active, new_hash, ftx_hash_chain);
 
             // Increment count (only when active)
             let incremented = builder.add_const(ftx_count_value, F::ONE);
@@ -947,6 +1110,12 @@ impl UpdateAccountTreeTarget {
             prev_account_leaves,
             account_merkle_proofs,
             send_merkle_proofs,
+            tx_v2_indices,
+            tx_v2_targets,
+            tx_v2_merkle_proofs,
+            channel_action_indices,
+            channel_action_targets,
+            channel_action_merkle_proofs,
             public_inputs,
             spx_sig_targets,
             prev_forced_tx_hash_chain: prev_forced_tx_hash_chain_target,
@@ -992,13 +1161,43 @@ impl UpdateAccountTreeTarget {
         {
             target.set_witness(witness, proof);
         }
+        for (target, index) in self.tx_v2_indices.iter().zip(value.tx_v2_indices.iter()) {
+            witness.set_target(*target, F::from_canonical_u64(*index));
+        }
+        for (target, tx_v2) in self.tx_v2_targets.iter().zip(value.tx_v2s.iter()) {
+            target.set_witness(witness, *tx_v2);
+        }
+        for (target, proof) in self
+            .tx_v2_merkle_proofs
+            .iter()
+            .zip(value.tx_v2_merkle_proofs.iter())
+        {
+            target.set_witness(witness, proof);
+        }
+        for (target, index) in self
+            .channel_action_indices
+            .iter()
+            .zip(value.channel_action_indices.iter())
+        {
+            witness.set_target(*target, F::from_canonical_u64(*index));
+        }
+        for (target, action) in self
+            .channel_action_targets
+            .iter()
+            .zip(value.channel_actions.iter())
+        {
+            target.set_witness(witness, *action);
+        }
+        for (target, proof) in self
+            .channel_action_merkle_proofs
+            .iter()
+            .zip(value.channel_action_merkle_proofs.iter())
+        {
+            target.set_witness(witness, proof);
+        }
 
         // Set SPHINCS+ signature witnesses
-        for (target, sig) in self
-            .spx_sig_targets
-            .iter()
-            .zip(value.sig_witnesses.iter())
-        {
+        for (target, sig) in self.spx_sig_targets.iter().zip(value.sig_witnesses.iter()) {
             target.set_witness(witness, sig);
         }
 
@@ -1023,8 +1222,7 @@ impl UpdateAccountTreeTarget {
                     .set_witness(witness, &value.forced_tx_send_merkle_proofs[i]);
             } else {
                 self.forced_tx_targets[i].set_witness(witness, &ForcedTx::default());
-                self.forced_tx_prev_account_leaves[i]
-                    .set_witness(witness, &AccountLeaf::default());
+                self.forced_tx_prev_account_leaves[i].set_witness(witness, &AccountLeaf::default());
                 self.forced_tx_account_merkle_proofs[i]
                     .set_witness(witness, &AccountMerkleProof::dummy(ACCOUNT_TREE_HEIGHT));
                 self.forced_tx_send_merkle_proofs[i]
@@ -1107,7 +1305,11 @@ mod tests {
         circuits::validity::block_hash_chain::sphincs_sig::SpxSigWitness,
         common::{
             block::Block,
-            trees::account_tree::{AccountLeaf, AccountTree, SendLeaf, SendTree},
+            trees::{
+                account_tree::{AccountLeaf, AccountTree, SendLeaf, SendTree},
+                tx_v2_tree::{ChannelActionTree, TxV2Tree},
+            },
+            tx::{ChannelAction, ChannelActionKind, TxClass, TxV2},
             u63::BlockNumber,
             user_id::UserId,
         },
@@ -1255,6 +1457,15 @@ mod tests {
             account_merkle_proofs: account_merkle_proofs.clone(),
             send_merkle_proofs: send_merkle_proofs.clone(),
             sig_witnesses,
+            tx_v2_indices: vec![0; num_users as usize],
+            tx_v2s: vec![TxV2::default(); num_users as usize],
+            tx_v2_merkle_proofs: vec![TxV2MerkleProof::dummy(TX_TREE_HEIGHT); num_users as usize],
+            channel_action_indices: vec![0; num_users as usize],
+            channel_actions: vec![ChannelAction::default(); num_users as usize],
+            channel_action_merkle_proofs: vec![
+                ChannelActionMerkleProof::dummy(TX_TREE_HEIGHT);
+                num_users as usize
+            ],
             prev_forced_tx_hash_chain: Bytes32::default(),
             prev_forced_tx_count: U63::default(),
             forced_txs: vec![],
@@ -1280,6 +1491,104 @@ mod tests {
         );
         assert_eq!(public_inputs.deposit_hash_chain, block.deposit_hash_chain);
 
+        let circuit = UpdateAccountCircuit::<F, C, D>::new(num_users);
+        let proof = circuit.prove(&update_account_tree).unwrap();
+        circuit.data.verify(proof.clone()).unwrap();
+
+        let expected_public_inputs: Vec<F> = public_inputs
+            .to_u64_vec()
+            .into_iter()
+            .map(F::from_canonical_u64)
+            .collect();
+        assert_eq!(proof.public_inputs, expected_public_inputs);
+    }
+
+    #[cfg_attr(debug_assertions, ignore = "run with --release")]
+    #[test]
+    fn test_update_account_tree_binds_channel_action_to_source_account() {
+        let block_number = BlockNumber::new(30).unwrap();
+        let hub_id = 9u32;
+        let account_no = 7u32;
+        let num_users = 1;
+
+        let mut rng = StdRng::seed_from_u64(99);
+        let prev_block_hash_chain = Bytes32::rand(&mut rng);
+        let deposit_hash_chain = Bytes32::rand(&mut rng);
+
+        let user_id = UserId::new(hub_id, account_no).unwrap();
+        let send_tree = SendTree::init();
+        let prev_account_leaf = AccountLeaf {
+            index: 0,
+            prev: BlockNumber::new(4).unwrap(),
+            send_tree_root: send_tree.get_root(),
+            pk_set_root: PoseidonHashOut::default(),
+            threshold: 0,
+        };
+
+        let mut account_tree = AccountTree::new(ACCOUNT_TREE_HEIGHT);
+        account_tree.update(user_id.as_u64(), prev_account_leaf.clone());
+        let prev_account_tree_root = account_tree.get_root();
+
+        let channel_action = ChannelAction {
+            kind: ChannelActionKind::InterChannelSend,
+            source_channel_id: user_id,
+            destination_channel_id: UserId::new(10, 55).unwrap(),
+            tx_hash: Bytes32::rand(&mut rng),
+            seal: Bytes32::rand(&mut rng),
+            payload_hash: PoseidonHashOut::rand(&mut rng),
+        };
+        let mut channel_action_tree = ChannelActionTree::init();
+        channel_action_tree.update(0, channel_action);
+        let channel_action_proof = channel_action_tree.prove(0);
+
+        let tx_v2 = TxV2 {
+            tx_class: TxClass::ChannelAction,
+            transfer_tree_root: PoseidonHashOut::default(),
+            nonce: 1,
+            channel_action_root: channel_action_tree.get_root(),
+        };
+        let mut tx_v2_tree = TxV2Tree::init();
+        tx_v2_tree.update(0, tx_v2);
+        let tx_v2_proof = tx_v2_tree.prove(0);
+
+        let block = Block::new_with_tx_v2s(
+            num_users,
+            hub_id,
+            &[account_no],
+            rng.next_u64(),
+            &[tx_v2],
+            deposit_hash_chain,
+            Bytes32::default(),
+        )
+        .unwrap();
+
+        let account_merkle_proof = account_tree.prove(user_id.as_u64());
+        let send_merkle_proof = send_tree.prove(prev_account_leaf.index.into());
+
+        let update_account_tree = UpdateAccountTree {
+            prev_block_hash_chain,
+            prev_account_tree_root,
+            block_number,
+            block: block.clone(),
+            prev_account_leaves: vec![prev_account_leaf.clone()],
+            account_merkle_proofs: vec![account_merkle_proof],
+            send_merkle_proofs: vec![send_merkle_proof],
+            sig_witnesses: vec![SpxSigWitness::dummy()],
+            tx_v2_indices: vec![0],
+            tx_v2s: vec![tx_v2],
+            tx_v2_merkle_proofs: vec![tx_v2_proof],
+            channel_action_indices: vec![0],
+            channel_actions: vec![channel_action],
+            channel_action_merkle_proofs: vec![channel_action_proof],
+            prev_forced_tx_hash_chain: Bytes32::default(),
+            prev_forced_tx_count: U63::default(),
+            forced_txs: vec![],
+            forced_tx_prev_account_leaves: vec![],
+            forced_tx_account_merkle_proofs: vec![],
+            forced_tx_send_merkle_proofs: vec![],
+        };
+
+        let public_inputs = update_account_tree.to_public_inputs().unwrap();
         let circuit = UpdateAccountCircuit::<F, C, D>::new(num_users);
         let proof = circuit.prove(&update_account_tree).unwrap();
         circuit.data.verify(proof.clone()).unwrap();

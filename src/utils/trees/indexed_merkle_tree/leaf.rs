@@ -68,8 +68,7 @@ impl Leafable for IndexedMerkleLeaf {
     fn empty_leaf() -> Self {
         Self {
             next_index: u64::MAX,
-            key: U256::from_u32_slice(&[u32::MAX; 8])
-                .expect("8-limb slice always fits in U256"),
+            key: U256::from_u32_slice(&[u32::MAX; 8]).expect("8-limb slice always fits in U256"),
             next_key: U256::default(),
             value: 0,
         }

@@ -103,10 +103,7 @@ where
             .map_err(|e| SigAggCircuitError::FailedToProve(e.to_string()))
     }
 
-    pub fn verify(
-        &self,
-        proof: &ProofWithPublicInputs<F, C, D>,
-    ) -> Result<(), SigAggCircuitError> {
+    pub fn verify(&self, proof: &ProofWithPublicInputs<F, C, D>) -> Result<(), SigAggCircuitError> {
         check_cyclic_proof_verifier_data(proof, &self.data.verifier_only, &self.data.common)
             .map_err(|e| {
                 SigAggCircuitError::ProofVerificationError(format!(
@@ -115,10 +112,7 @@ where
                 ))
             })?;
         self.data.verify(proof.clone()).map_err(|e| {
-            SigAggCircuitError::ProofVerificationError(format!(
-                "Failed to verify proof: {:?}",
-                e
-            ))
+            SigAggCircuitError::ProofVerificationError(format!("Failed to verify proof: {:?}", e))
         })
     }
 }

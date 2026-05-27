@@ -3,7 +3,10 @@ use std::collections::HashMap;
 use plonky2::{
     field::{extension::Extendable, types::Field},
     hash::hash_types::RichField,
-    iop::{target::Target, witness::WitnessWrite},
+    iop::{
+        target::{BoolTarget, Target},
+        witness::WitnessWrite,
+    },
     plonk::{
         circuit_builder::CircuitBuilder,
         config::{AlgebraicHasher, GenericConfig},
@@ -183,6 +186,24 @@ impl<VT: LeafableTarget> SparseMerkleProofTarget<VT> {
     {
         self.0
             .verify::<F, C, D>(builder, leaf_data, index, merkle_root)
+    }
+
+    pub fn conditional_verify<
+        F: RichField + Extendable<D>,
+        C: GenericConfig<D, F = F> + 'static,
+        const D: usize,
+    >(
+        &self,
+        builder: &mut CircuitBuilder<F, D>,
+        condition: BoolTarget,
+        leaf_data: &VT,
+        index: Target,
+        merkle_root: HashOutTarget<VT>,
+    ) where
+        <C as GenericConfig<D>>::Hasher: AlgebraicHasher<F>,
+    {
+        self.0
+            .conditional_verify::<F, C, D>(builder, condition, leaf_data, index, merkle_root)
     }
 }
 

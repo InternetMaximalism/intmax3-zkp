@@ -19,8 +19,7 @@ use crate::{
             AccountApplyBlockPublicInputs, AccountApplyBlockPublicInputsTarget,
         },
         account_apply_pis::{
-            AccountApplyPublicInputs, AccountApplyPublicInputsError,
-            AccountApplyPublicInputsTarget,
+            AccountApplyPublicInputs, AccountApplyPublicInputsError, AccountApplyPublicInputsTarget,
         },
     },
     common::u63::{BlockNumber, BlockNumberTarget},
@@ -146,9 +145,9 @@ where
                 "block_number mismatch".to_string(),
             ));
         }
-        if block_pis.aggregator_id != prev_apply.aggregator_id {
+        if block_pis.hub_id() != prev_apply.hub_id() {
             return Err(AccountApplyStepError::InvalidInput(
-                "aggregator_id mismatch".to_string(),
+                "hub_id mismatch".to_string(),
             ));
         }
         if block_pis.tx_tree_root != prev_apply.tx_tree_root {
@@ -186,7 +185,7 @@ where
             prev_account_tree_root: prev_apply.prev_account_tree_root,
             new_account_tree_root: block_pis.final_account_tree_root,
             block_number: prev_apply.block_number,
-            aggregator_id: prev_apply.aggregator_id,
+            aggregator_id: prev_apply.hub_id(),
             tx_tree_root: prev_apply.tx_tree_root,
             verified_users_hash: new_verified_users_hash,
             verified_count: new_count,
@@ -248,8 +247,7 @@ impl<const D: usize> AccountApplyStepTarget<D> {
 
         // ── Block proof (always verified, flat circuit) ──
         let block_proof = add_proof_target_and_verify(account_apply_block_vd, builder);
-        let block_pis =
-            AccountApplyBlockPublicInputsTarget::from_pis(&block_proof.public_inputs);
+        let block_pis = AccountApplyBlockPublicInputsTarget::from_pis(&block_proof.public_inputs);
 
         // ── Block user_count > 0 ──
         let zero = builder.zero();
@@ -279,11 +277,8 @@ impl<const D: usize> AccountApplyStepTarget<D> {
             initial_block_number.value,
             prev_apply_pis.block_number.value,
         );
-        let prev_aggregator_id = builder.select(
-            is_initial,
-            initial_aggregator_id,
-            prev_apply_pis.aggregator_id,
-        );
+        let prev_hub_id =
+            builder.select(is_initial, initial_aggregator_id, prev_apply_pis.hub_id());
         let prev_tx_tree_root = Bytes32Target::select(
             builder,
             is_initial,
@@ -296,12 +291,9 @@ impl<const D: usize> AccountApplyStepTarget<D> {
             zero_hash,
             prev_apply_pis.verified_users_hash.clone(),
         );
-        let prev_verified_count =
-            builder.select(is_initial, zero, prev_apply_pis.verified_count);
-        let prev_first_user_id =
-            builder.select(is_initial, zero, prev_apply_pis.first_user_id);
-        let prev_last_user_id =
-            builder.select(is_initial, zero, prev_apply_pis.last_user_id);
+        let prev_verified_count = builder.select(is_initial, zero, prev_apply_pis.verified_count);
+        let prev_first_user_id = builder.select(is_initial, zero, prev_apply_pis.first_user_id);
+        let prev_last_user_id = builder.select(is_initial, zero, prev_apply_pis.last_user_id);
 
         // ── Root chaining: prev.new_account_tree_root == block.initial_account_tree_root ──
         let _true = builder._true();
@@ -313,7 +305,7 @@ impl<const D: usize> AccountApplyStepTarget<D> {
 
         // ── Block data consistency ──
         builder.connect(prev_block_number, block_pis.block_number.value);
-        builder.connect(prev_aggregator_id, block_pis.aggregator_id);
+        builder.connect(prev_hub_id, block_pis.hub_id());
         for (a, b) in prev_tx_tree_root
             .to_vec()
             .iter()
@@ -354,7 +346,7 @@ impl<const D: usize> AccountApplyStepTarget<D> {
             prev_account_tree_root: prev_prev_account_tree_root,
             new_account_tree_root: block_pis.final_account_tree_root,
             block_number: BlockNumberTarget::from_slice(&[prev_block_number]),
-            aggregator_id: prev_aggregator_id,
+            aggregator_id: prev_hub_id,
             tx_tree_root: prev_tx_tree_root,
             verified_users_hash: new_verified_users_hash,
             verified_count: new_verified_count,
@@ -444,8 +436,7 @@ where
         account_apply_cd: &CommonCircuitData<F, D>,
         account_apply_block_vd: &VerifierCircuitData<F, C, D>,
     ) -> Self {
-        let mut builder =
-            CircuitBuilder::<F, D>::new(CircuitConfig::standard_recursion_config());
+        let mut builder = CircuitBuilder::<F, D>::new(CircuitConfig::standard_recursion_config());
         let target = AccountApplyStepTarget::new::<F, C>(
             &mut builder,
             account_apply_cd,
