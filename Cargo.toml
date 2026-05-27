@@ -41,6 +41,7 @@ sphincsplus-poseidon = { git = "https://github.com/InternetMaximalism/aggregated
 keccak-hash = "0.8.0"
 hex = "0.4.3"
 rand = "0.8.5"
+rand09 = { package = "rand", version = "0.9.4" }
 thiserror = "2.0.17"
 num-bigint = "0.4.6"
 num = "0.4.3"
@@ -52,6 +53,22 @@ anyhow = "1.0.100"
 lazy_static = "1.5.0"
 bincode = { version = "2.0.1", features = ["serde"] }
 clap = { version = "4.5", features = ["derive"] }
+postcard = { version = "1.1.3", features = ["alloc"] }
+
+# Plonky3 / uni-stark
+p3-air = "0.4.2"
+p3-challenger = "0.4.2"
+p3-commit = "0.4.2"
+p3-dft = "0.4.2"
+p3-field = "0.4.2"
+p3-fri = "0.4.2"
+p3-goldilocks = "0.4.2"
+p3-matrix = "0.4.2"
+p3-merkle-tree = "0.4.2"
+p3-maybe-rayon = "0.4.2"
+p3-poseidon2 = "0.4.2"
+p3-symmetric = "0.4.2"
+p3-uni-stark = "0.4.2"
 
 # Threading
 rayon = "1.8"
@@ -109,6 +126,11 @@ plonky2_util = { path = "contracts/lib/polygon-plonky2/util" }
 plonky2_maybe_rayon = { path = "contracts/lib/polygon-plonky2/maybe_rayon" }
 plonky2_mle = { path = "contracts/lib/polygon-plonky2/mle" }
 starky = { path = "contracts/lib/polygon-plonky2/starky" }
+
+[patch.crates-io]
+p3-merkle-tree = { path = "vendor/plonky3/p3-merkle-tree" }
+p3-fri = { path = "vendor/plonky3/p3-fri" }
+p3-uni-stark = { path = "vendor/plonky3/p3-uni-stark" }
 
 [profile.release]
 opt-level = 3

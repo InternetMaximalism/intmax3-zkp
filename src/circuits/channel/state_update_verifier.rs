@@ -34,6 +34,12 @@ pub struct ChannelStateUpdatePublicInputs {
     pub prev_state_digest: Bytes32,
     pub next_state_digest: Bytes32,
     pub amount: u64,
+    pub sender_balance_before: u64,
+    pub sender_balance_after: u64,
+    pub receiver_balance_before: u64,
+    pub receiver_balance_after: u64,
+    pub receiver_entry_count: u64,
+    pub receiver_dummy_count: u64,
     pub sender: AccountId,
     pub receiver: AccountId,
     pub channel_fund_before: U256,
@@ -55,6 +61,12 @@ impl ChannelStateUpdatePublicInputs {
             self.prev_state_digest.to_u32_vec(),
             self.next_state_digest.to_u32_vec(),
             split_u64(self.amount),
+            split_u64(self.sender_balance_before),
+            split_u64(self.sender_balance_after),
+            split_u64(self.receiver_balance_before),
+            split_u64(self.receiver_balance_after),
+            split_u64(self.receiver_entry_count),
+            split_u64(self.receiver_dummy_count),
             self.sender.to_u32_vec(),
             self.receiver.to_u32_vec(),
             self.channel_fund_before.to_u32_vec(),
@@ -119,6 +131,9 @@ pub enum ChannelStateUpdateError {
 
     #[error("proof verification failed: {0}")]
     ProofVerification(String),
+
+    #[error("public input mismatch: {0}")]
+    PublicInputMismatch(String),
 }
 
 #[derive(Clone, Debug)]
@@ -266,6 +281,12 @@ impl InChannelTransferUpdateWitness {
             prev_state_digest: self.prev_state.digest,
             next_state_digest: self.next_state.digest,
             amount,
+            sender_balance_before: self.sender_before_opening.amount,
+            sender_balance_after: self.sender_after_opening.amount,
+            receiver_balance_before: self.receiver_before_opening.amount,
+            receiver_balance_after: self.receiver_after_opening.amount,
+            receiver_entry_count: 1,
+            receiver_dummy_count: 0,
             sender: self.pay.sender,
             receiver: self.pay.receiver,
             channel_fund_before: self.prev_state.channel_fund.amount,
@@ -370,6 +391,12 @@ impl InterChannelSendUpdateWitness {
             prev_state_digest: self.prev_state.digest,
             next_state_digest: self.next_state.digest,
             amount: self.amount,
+            sender_balance_before: self.sender_before_opening.amount,
+            sender_balance_after: self.sender_after_opening.amount,
+            receiver_balance_before: 0,
+            receiver_balance_after: 0,
+            receiver_entry_count: self.inter_channel_tx.receiver_deltas.len() as u64,
+            receiver_dummy_count: count_dummy_delta_openings(&self.receiver_delta_openings),
             sender: self.sender_member_id,
             receiver: self.inter_channel_tx.receiver_channel_id,
             channel_fund_before: self.prev_state.channel_fund.amount,
@@ -463,6 +490,18 @@ impl InterChannelImportUpdateWitness {
             prev_state_digest: self.prev_state.digest,
             next_state_digest: self.next_state.digest,
             amount: self.amount,
+            sender_balance_before: 0,
+            sender_balance_after: 0,
+            receiver_balance_before: 0,
+            receiver_balance_after: 0,
+            receiver_entry_count: self.inter_channel_tx.receiver_deltas.len() as u64,
+            receiver_dummy_count: count_dummy_delta_openings(
+                &self
+                    .receiver_applications
+                    .iter()
+                    .map(|application| application.delta_opening.clone())
+                    .collect::<Vec<_>>(),
+            ),
             sender: self.inter_channel_tx.sender_channel_id,
             receiver: self.inter_channel_tx.receiver_channel_id,
             channel_fund_before: self.prev_state.channel_fund.amount,
@@ -688,6 +727,13 @@ fn verify_receiver_delta_applications<VL: LatticeBindingVerifier>(
     Ok(())
 }
 
+fn count_dummy_delta_openings(openings: &[LatticeOpening]) -> u64 {
+    openings
+        .iter()
+        .filter(|opening| opening.amount <= MAX_DUMMY_DELTA_AMOUNT)
+        .count() as u64
+}
+
 fn split_u64(value: u64) -> Vec<u32> {
     vec![(value >> 32) as u32, value as u32]
 }
@@ -700,7 +746,13 @@ fn u64_to_u256(value: u64) -> U256 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::common::channel::{ChannelFund, MemberSignature};
+    use crate::{
+        circuits::channel::plonky3_state::{
+            RealPlonky3ChannelProofVerifier, ReceiverBundleRowWitness, ReceiverBundleWitness,
+            SingleTransitionWitness, receiver_bundle_envelope, single_transition_envelope,
+        },
+        common::channel::{ChannelFund, MemberSignature},
+    };
 
     struct MockProofVerifier;
 
@@ -711,6 +763,23 @@ mod tests {
             _public_inputs: &ChannelStateUpdatePublicInputs,
         ) -> Result<(), ChannelStateUpdateError> {
             Ok(())
+        }
+    }
+
+    struct MixedProofVerifier;
+
+    impl ChannelProofVerifier for MixedProofVerifier {
+        fn verify(
+            &self,
+            proof: &ChannelProofEnvelope,
+            public_inputs: &ChannelStateUpdatePublicInputs,
+        ) -> Result<(), ChannelStateUpdateError> {
+            match (proof.role, proof.backend) {
+                (TransitionProofRole::ChannelStateUpdate, ProofBackend::Plonky3) => {
+                    RealPlonky3ChannelProofVerifier.verify(proof, public_inputs)
+                }
+                _ => Ok(()),
+            }
         }
     }
 
@@ -1017,5 +1086,237 @@ mod tests {
             err,
             ChannelStateUpdateError::InvalidTransitionDigest(_)
         ));
+    }
+
+    #[test]
+    fn inter_channel_send_verifies_real_plonky3_proof() {
+        let prev = sample_state();
+        let mut next = prev.clone();
+        next.epoch += 1;
+        next.channel_fund.amount = U256::from(93u32);
+        next.user_fund_root = Bytes32::from_u32_slice(&[0, 0, 1, 0, 0, 0, 0, 0]).unwrap();
+        next.channel_nullifier_root = Bytes32::from_u32_slice(&[1, 0, 0, 0, 0, 0, 0, 0]).unwrap();
+        next.prev_digest = prev.digest;
+        next = next.with_computed_digest();
+
+        let state_update_proof = single_transition_envelope(SingleTransitionWitness {
+            is_in_channel: false,
+            amount: 7,
+            sender_before: 50,
+            sender_after: 43,
+            receiver_before: 0,
+            receiver_after: 0,
+            channel_fund_before: 100,
+            channel_fund_after: 93,
+        })
+        .unwrap();
+
+        let witness = InterChannelSendUpdateWitness {
+            prev_state: prev.clone(),
+            next_state: next,
+            inter_channel_tx: InterChannelTx {
+                mkproof: crate::common::channel::MerkleInclusionProof {
+                    siblings: vec![],
+                    leaf_index: U256::default(),
+                },
+                sender_amount: commitment(1),
+                sender_channel_id: prev.channel_id,
+                receiver_channel_id: AccountId::new(7, 1).unwrap(),
+                seal: Bytes32::default(),
+                tx_hash: Bytes32::default(),
+                intmax_transfer_commitment: Bytes32::default(),
+                recipient_memo: vec![],
+                receiver_deltas: vec![
+                    ReceiverBalanceDelta {
+                        receiver_id: AccountId::new(7, 11).unwrap(),
+                        amount: commitment(21),
+                    },
+                    ReceiverBalanceDelta {
+                        receiver_id: AccountId::new(7, 12).unwrap(),
+                        amount: commitment(22),
+                    },
+                    ReceiverBalanceDelta {
+                        receiver_id: AccountId::new(7, 13).unwrap(),
+                        amount: commitment(23),
+                    },
+                ],
+                receiver_update_proof: vec![1],
+                sender_debit_proof: vec![2],
+                sender_channel_signatures: vec![],
+            },
+            sender_member_id: AccountId::new(5, 10).unwrap(),
+            amount: 7,
+            sender_amount_opening: LatticeOpening {
+                amount: 7,
+                randomness: vec![],
+            },
+            sender_before_commitment: commitment(2),
+            sender_before_opening: LatticeOpening {
+                amount: 50,
+                randomness: vec![],
+            },
+            sender_after_commitment: commitment(3),
+            sender_after_opening: LatticeOpening {
+                amount: 43,
+                randomness: vec![],
+            },
+            receiver_delta_openings: vec![
+                LatticeOpening {
+                    amount: 5,
+                    randomness: vec![],
+                },
+                LatticeOpening {
+                    amount: 1,
+                    randomness: vec![],
+                },
+                LatticeOpening {
+                    amount: 1,
+                    randomness: vec![],
+                },
+            ],
+            state_update_proof,
+            transport_proof: transport_proof(),
+        };
+
+        witness
+            .verify(&MixedProofVerifier, &MockLatticeVerifier)
+            .unwrap();
+    }
+
+    #[test]
+    fn inter_channel_import_verifies_real_plonky3_bundle_proof() {
+        let prev = sample_state();
+        let mut next = prev.clone();
+        next.epoch += 1;
+        next.channel_fund.amount = U256::from(107u32);
+        next.user_fund_root = Bytes32::from_u32_slice(&[0, 0, 2, 0, 0, 0, 0, 0]).unwrap();
+        next.channel_nullifier_root = Bytes32::from_u32_slice(&[2, 0, 0, 0, 0, 0, 0, 0]).unwrap();
+        next.prev_digest = prev.digest;
+        next = next.with_computed_digest();
+
+        let state_update_proof = receiver_bundle_envelope(ReceiverBundleWitness {
+            amount: 7,
+            channel_fund_before: 100,
+            channel_fund_after: 107,
+            rows: vec![
+                ReceiverBundleRowWitness {
+                    receiver_before: 10,
+                    delta_amount: 5,
+                    receiver_after: 15,
+                    is_dummy: false,
+                },
+                ReceiverBundleRowWitness {
+                    receiver_before: 20,
+                    delta_amount: 1,
+                    receiver_after: 21,
+                    is_dummy: true,
+                },
+                ReceiverBundleRowWitness {
+                    receiver_before: 30,
+                    delta_amount: 1,
+                    receiver_after: 31,
+                    is_dummy: true,
+                },
+            ],
+        })
+        .unwrap();
+
+        let witness = InterChannelImportUpdateWitness {
+            prev_state: prev.clone(),
+            next_state: next,
+            inter_channel_tx: InterChannelTx {
+                mkproof: crate::common::channel::MerkleInclusionProof {
+                    siblings: vec![],
+                    leaf_index: U256::default(),
+                },
+                sender_amount: commitment(31),
+                sender_channel_id: AccountId::new(6, 1).unwrap(),
+                receiver_channel_id: prev.channel_id,
+                seal: Bytes32::default(),
+                tx_hash: Bytes32::default(),
+                intmax_transfer_commitment: Bytes32::default(),
+                recipient_memo: vec![],
+                receiver_deltas: vec![
+                    ReceiverBalanceDelta {
+                        receiver_id: AccountId::new(5, 12).unwrap(),
+                        amount: commitment(32),
+                    },
+                    ReceiverBalanceDelta {
+                        receiver_id: AccountId::new(5, 13).unwrap(),
+                        amount: commitment(33),
+                    },
+                    ReceiverBalanceDelta {
+                        receiver_id: AccountId::new(5, 14).unwrap(),
+                        amount: commitment(34),
+                    },
+                ],
+                receiver_update_proof: state_update_proof.proof.clone(),
+                sender_debit_proof: vec![2],
+                sender_channel_signatures: vec![],
+            },
+            amount: 7,
+            receiver_applications: vec![
+                ReceiverDeltaApplicationWitness {
+                    receiver_id: AccountId::new(5, 12).unwrap(),
+                    delta_commitment: commitment(32),
+                    delta_opening: LatticeOpening {
+                        amount: 5,
+                        randomness: vec![],
+                    },
+                    receiver_before_commitment: commitment(40),
+                    receiver_before_opening: LatticeOpening {
+                        amount: 10,
+                        randomness: vec![],
+                    },
+                    receiver_after_commitment: commitment(41),
+                    receiver_after_opening: LatticeOpening {
+                        amount: 15,
+                        randomness: vec![],
+                    },
+                },
+                ReceiverDeltaApplicationWitness {
+                    receiver_id: AccountId::new(5, 13).unwrap(),
+                    delta_commitment: commitment(33),
+                    delta_opening: LatticeOpening {
+                        amount: 1,
+                        randomness: vec![],
+                    },
+                    receiver_before_commitment: commitment(42),
+                    receiver_before_opening: LatticeOpening {
+                        amount: 20,
+                        randomness: vec![],
+                    },
+                    receiver_after_commitment: commitment(43),
+                    receiver_after_opening: LatticeOpening {
+                        amount: 21,
+                        randomness: vec![],
+                    },
+                },
+                ReceiverDeltaApplicationWitness {
+                    receiver_id: AccountId::new(5, 14).unwrap(),
+                    delta_commitment: commitment(34),
+                    delta_opening: LatticeOpening {
+                        amount: 1,
+                        randomness: vec![],
+                    },
+                    receiver_before_commitment: commitment(44),
+                    receiver_before_opening: LatticeOpening {
+                        amount: 30,
+                        randomness: vec![],
+                    },
+                    receiver_after_commitment: commitment(45),
+                    receiver_after_opening: LatticeOpening {
+                        amount: 31,
+                        randomness: vec![],
+                    },
+                },
+            ],
+            state_update_proof,
+            transport_proof: transport_proof(),
+        };
+
+        witness
+            .verify(&MixedProofVerifier, &MockLatticeVerifier)
+            .unwrap();
     }
 }
