@@ -23,7 +23,6 @@ Intmax3 channel model described in
     - `ChannelState`
     - `Pay`
     - `InterChannelTx`
-    - `ReceiverClaim`
     - `CloseWithdrawal`
   - inter-channel receive design is now changing toward:
     - sender-supplied receiver-side lattice delta bundles
@@ -34,7 +33,6 @@ Intmax3 channel model described in
     - Intmax transport / close settlement use `Plonky2`
     - concretely:
       - `InChannelTransfer` -> state proof `Plonky3`
-      - `ReceiverClaim` -> state proof `Plonky3`
       - `InterChannelSend` -> state proof `Plonky3` + transport proof `Plonky2`
       - `InterChannelImport` -> state proof `Plonky3` + transport proof `Plonky2`
       - `ChannelClose` -> close settlement proof `Plonky2`
@@ -121,7 +119,8 @@ workstreams.
   constrains `source_channel_id == hub_id + account_no`
 - `src/circuits/channel/state_update_verifier.rs` now rejects channel updates unless:
   - the transition uses the required backend split (`Plonky3` for state updates, `Plonky2` for Intmax transport)
-  - `Pay` and `ReceiverClaim` digests are correctly bound to sender/receiver/amount/state
+  - `Pay` digests are correctly bound to sender/receiver/amount/state
+  - sender-made receiver delta bundles are balanced, include dummy receivers, and are applied immediately on import
   - `channel_fund`, `nullifier`, `incoming`, and `user_fund_root` transitions match the transition kind
 - the next validity steps are:
   - propagate the same typed binding into the remaining settlement / receive paths

@@ -16,7 +16,6 @@ pub type SignatureBytes = Vec<u8>;
 const CHANNEL_STATE_DOMAIN: u32 = 0x494d4348; // "IMCH"
 const PAY_DOMAIN: u32 = 0x494d5041; // "IMPA"
 const INTER_CHANNEL_TX_DOMAIN: u32 = 0x494d4954; // "IMIT"
-const RECEIVER_CLAIM_DOMAIN: u32 = 0x494d5243; // "IMRC"
 const CLOSE_TX_DOMAIN: u32 = 0x494d434c; // "IMCL"
 const CLOSE_INTENT_DOMAIN: u32 = 0x494d4349; // "IMCI"
 const CANCEL_CLOSE_DOMAIN: u32 = 0x494d434e; // "IMCN"
@@ -52,17 +51,15 @@ pub enum ChannelTransitionKind {
     InChannelTransfer,
     InterChannelSend,
     InterChannelImport,
-    ReceiverClaim,
     ChannelClose,
 }
 
 impl ChannelTransitionKind {
     pub const fn required_state_backend(self) -> Option<ProofBackend> {
         match self {
-            Self::InChannelTransfer
-            | Self::InterChannelSend
-            | Self::InterChannelImport
-            | Self::ReceiverClaim => Some(ProofBackend::Plonky3),
+            Self::InChannelTransfer | Self::InterChannelSend | Self::InterChannelImport => {
+                Some(ProofBackend::Plonky3)
+            }
             Self::ChannelClose => None,
         }
     }
@@ -72,7 +69,7 @@ impl ChannelTransitionKind {
             Self::InterChannelSend | Self::InterChannelImport | Self::ChannelClose => {
                 Some(ProofBackend::Plonky2)
             }
-            Self::InChannelTransfer | Self::ReceiverClaim => None,
+            Self::InChannelTransfer => None,
         }
     }
 }
@@ -128,7 +125,7 @@ pub struct UserFund {
 pub struct ChannelMember {
     pub member_id: MemberId,
     pub signing_pubkey: Vec<u8>,
-    pub intmax_claim_destination: AccountId,
+    pub l1_withdrawal_recipient: Address,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -290,36 +287,6 @@ impl InterChannelTx {
                 bytes_to_u32_words(&self.receiver_update_proof),
                 vec![self.sender_debit_proof.len() as u32],
                 bytes_to_u32_words(&self.sender_debit_proof),
-            ]
-            .concat(),
-        )
-    }
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ReceiverClaim {
-    pub incoming_tx_hash: Bytes32,
-    pub receiver_id: MemberId,
-    pub receiver_amount: LatticeCommitment,
-    pub personal_nullifier: Bytes32,
-    pub recipient_memo: Vec<u8>,
-    pub claim_proof: Vec<u8>,
-}
-
-impl ReceiverClaim {
-    pub fn signing_digest(&self, channel_id: ChannelId, prev_state_digest: Bytes32) -> Bytes32 {
-        hash_words(
-            &[
-                vec![RECEIVER_CLAIM_DOMAIN],
-                channel_id.to_u32_vec(),
-                prev_state_digest.to_u32_vec(),
-                self.incoming_tx_hash.to_u32_vec(),
-                self.receiver_id.to_u32_vec(),
-                self.receiver_amount.digest().to_u32_vec(),
-                self.personal_nullifier.to_u32_vec(),
-                vec![self.recipient_memo.len() as u32],
-                bytes_to_u32_words(&self.recipient_memo),
             ]
             .concat(),
         )
@@ -508,7 +475,6 @@ pub enum ChannelTransition {
     InChannelTransfer(Pay),
     InterChannelSend(InterChannelTx),
     InterChannelImport(InterChannelTx),
-    ReceiverClaim(ReceiverClaim),
     ChannelClose(CloseWithdrawal),
 }
 
@@ -518,7 +484,6 @@ impl ChannelTransition {
             Self::InChannelTransfer(_) => ChannelTransitionKind::InChannelTransfer,
             Self::InterChannelSend(_) => ChannelTransitionKind::InterChannelSend,
             Self::InterChannelImport(_) => ChannelTransitionKind::InterChannelImport,
-            Self::ReceiverClaim(_) => ChannelTransitionKind::ReceiverClaim,
             Self::ChannelClose(_) => ChannelTransitionKind::ChannelClose,
         }
     }
@@ -584,10 +549,6 @@ mod tests {
     fn transition_backend_matches_spec() {
         assert_eq!(
             ChannelTransitionKind::InChannelTransfer.required_state_backend(),
-            Some(ProofBackend::Plonky3)
-        );
-        assert_eq!(
-            ChannelTransitionKind::ReceiverClaim.required_state_backend(),
             Some(ProofBackend::Plonky3)
         );
         assert_eq!(

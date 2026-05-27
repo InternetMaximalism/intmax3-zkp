@@ -6,7 +6,7 @@ use crate::{
     common::{
         channel::{
             ChannelId, ChannelState, ChannelTransitionKind, InterChannelTx, LatticeCommitment,
-            LatticeOpening, Pay, ProofBackend, ReceiverBalanceDelta, ReceiverClaim,
+            LatticeOpening, Pay, ProofBackend, ReceiverBalanceDelta,
             TransitionProofRole,
         },
         user_id::AccountId,
@@ -175,20 +175,6 @@ pub struct InterChannelImportUpdateWitness {
     pub receiver_applications: Vec<ReceiverDeltaApplicationWitness>,
     pub state_update_proof: ChannelProofEnvelope,
     pub transport_proof: ChannelProofEnvelope,
-}
-
-#[derive(Clone, Debug)]
-pub struct ReceiverClaimUpdateWitness {
-    pub prev_state: ChannelState,
-    pub next_state: ChannelState,
-    pub claim: ReceiverClaim,
-    pub amount: u64,
-    pub receiver_amount_opening: LatticeOpening,
-    pub receiver_before_commitment: LatticeCommitment,
-    pub receiver_before_opening: LatticeOpening,
-    pub receiver_after_commitment: LatticeCommitment,
-    pub receiver_after_opening: LatticeOpening,
-    pub state_update_proof: ChannelProofEnvelope,
 }
 
 impl InChannelTransferUpdateWitness {
@@ -502,93 +488,6 @@ impl InterChannelImportUpdateWitness {
             &self.transport_proof,
             TransitionProofRole::IntmaxTransport,
             ProofBackend::Plonky2,
-            &public_inputs,
-        )?;
-        Ok(public_inputs)
-    }
-}
-
-impl ReceiverClaimUpdateWitness {
-    pub fn verify<VP, VL>(
-        &self,
-        proof_verifier: &VP,
-        lattice_verifier: &VL,
-    ) -> Result<ChannelStateUpdatePublicInputs, ChannelStateUpdateError>
-    where
-        VP: ChannelProofVerifier,
-        VL: LatticeBindingVerifier,
-    {
-        verify_state_linkage(&self.prev_state, &self.next_state)?;
-        ensure_same_channel_fund(&self.prev_state, &self.next_state)?;
-        ensure_different_root(
-            "user_fund_root",
-            self.prev_state.user_fund_root,
-            self.next_state.user_fund_root,
-        )?;
-        ensure_same_root(
-            "channel_nullifier_root",
-            self.prev_state.channel_nullifier_root,
-            self.next_state.channel_nullifier_root,
-        )?;
-        ensure_different_root(
-            "personal_nullifier_root",
-            self.prev_state.personal_nullifier_root,
-            self.next_state.personal_nullifier_root,
-        )?;
-        ensure_same_root(
-            "incoming_root",
-            self.prev_state.incoming_root,
-            self.next_state.incoming_root,
-        )?;
-
-        lattice_verifier.verify(
-            &self.receiver_before_commitment,
-            &self.receiver_before_opening,
-        )?;
-        lattice_verifier.verify(
-            &self.receiver_after_commitment,
-            &self.receiver_after_opening,
-        )?;
-        lattice_verifier.verify(&self.claim.receiver_amount, &self.receiver_amount_opening)?;
-        if self.receiver_amount_opening.amount != self.amount {
-            return Err(ChannelStateUpdateError::InvalidAmountRelation(
-                "receiver claim amount opening mismatch".to_string(),
-            ));
-        }
-
-        if self.receiver_after_opening.amount != self.receiver_before_opening.amount + self.amount {
-            return Err(ChannelStateUpdateError::InvalidAmountRelation(
-                "receiver balance increment mismatch".to_string(),
-            ));
-        }
-        let claim_digest = self
-            .claim
-            .signing_digest(self.prev_state.channel_id, self.prev_state.digest);
-
-        let public_inputs = ChannelStateUpdatePublicInputs {
-            kind: ChannelTransitionKind::ReceiverClaim,
-            channel_id: self.prev_state.channel_id,
-            prev_state_digest: self.prev_state.digest,
-            next_state_digest: self.next_state.digest,
-            amount: self.amount,
-            sender: self.prev_state.channel_id,
-            receiver: self.claim.receiver_id,
-            channel_fund_before: self.prev_state.channel_fund.amount,
-            channel_fund_after: self.next_state.channel_fund.amount,
-            channel_nullifier_before: self.prev_state.channel_nullifier_root,
-            channel_nullifier_after: self.next_state.channel_nullifier_root,
-            personal_nullifier_before: self.prev_state.personal_nullifier_root,
-            personal_nullifier_after: self.next_state.personal_nullifier_root,
-            incoming_before: self.prev_state.incoming_root,
-            incoming_after: self.next_state.incoming_root,
-            transition_digest: claim_digest,
-        };
-
-        verify_proof(
-            proof_verifier,
-            &self.state_update_proof,
-            TransitionProofRole::ChannelStateUpdate,
-            ProofBackend::Plonky3,
             &public_inputs,
         )?;
         Ok(public_inputs)
@@ -1058,50 +957,6 @@ mod tests {
             ],
             state_update_proof: state_update_proof(),
             transport_proof: transport_proof(),
-        };
-
-        witness
-            .verify(&MockProofVerifier, &MockLatticeVerifier)
-            .unwrap();
-    }
-
-    #[test]
-    fn receiver_claim_requires_personal_nullifier_change() {
-        let prev = sample_state();
-        let mut next = prev.clone();
-        next.epoch += 1;
-        next.user_fund_root = Bytes32::from_u32_slice(&[0, 0, 0, 1, 0, 0, 0, 0]).unwrap();
-        next.personal_nullifier_root = Bytes32::from_u32_slice(&[0, 1, 0, 0, 0, 0, 0, 0]).unwrap();
-        next.prev_digest = prev.digest;
-        next = next.with_computed_digest();
-
-        let witness = ReceiverClaimUpdateWitness {
-            prev_state: prev.clone(),
-            next_state: next,
-            claim: ReceiverClaim {
-                incoming_tx_hash: Bytes32::default(),
-                receiver_id: AccountId::new(5, 12).unwrap(),
-                receiver_amount: commitment(4),
-                personal_nullifier: Bytes32::default(),
-                recipient_memo: vec![],
-                claim_proof: vec![],
-            },
-            amount: 9,
-            receiver_amount_opening: LatticeOpening {
-                amount: 9,
-                randomness: vec![],
-            },
-            receiver_before_commitment: commitment(5),
-            receiver_before_opening: LatticeOpening {
-                amount: 11,
-                randomness: vec![],
-            },
-            receiver_after_commitment: commitment(6),
-            receiver_after_opening: LatticeOpening {
-                amount: 20,
-                randomness: vec![],
-            },
-            state_update_proof: state_update_proof(),
         };
 
         witness

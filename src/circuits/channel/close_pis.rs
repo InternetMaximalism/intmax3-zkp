@@ -3,7 +3,10 @@ use thiserror::Error;
 
 use crate::{
     common::{
-        channel::{ChannelError, ChannelState, CloseIntent, CloseWithdrawal},
+        channel::{
+            ChannelError, ChannelMember, ChannelState, CloseIntent, CloseWithdrawal,
+            LatticeOpening,
+        },
         user_id::AccountId,
     },
     ethereum_types::{bytes32::Bytes32, u32limb_trait::U32LimbTrait, u256::U256},
@@ -106,8 +109,10 @@ impl ChannelClosePublicInputs {
 #[serde(rename_all = "camelCase")]
 pub struct ChannelCloseWitness {
     pub final_channel_state: ChannelState,
+    pub registered_members: Vec<ChannelMember>,
     pub close_tx: CloseWithdrawal,
     pub close_intent: CloseIntent,
+    pub transfer_openings: Vec<LatticeOpening>,
 }
 
 #[derive(Debug, Error)]
@@ -128,6 +133,29 @@ pub enum ChannelCloseWitnessError {
         close_tx: AccountId,
         close_intent: AccountId,
     },
+
+    #[error("close transfer count {transfers} does not match opening count {openings}")]
+    TransferOpeningCountMismatch { transfers: usize, openings: usize },
+
+    #[error("duplicate registered member {0:?} in close witness")]
+    DuplicateRegisteredMember(AccountId),
+
+    #[error("duplicate close transfer for member {0:?}")]
+    DuplicateCloseTransfer(AccountId),
+
+    #[error("no registered member found for close transfer member {0:?}")]
+    MissingRegisteredMember(AccountId),
+
+    #[error("close transfer recipient mismatch for member {member:?}")]
+    RecipientMismatch {
+        member: AccountId,
+    },
+
+    #[error("registered member {0:?} is missing from close withdrawal")]
+    MissingCloseTransfer(AccountId),
+
+    #[error("withdrawal total mismatch: expected {expected:?}, got {actual:?}")]
+    WithdrawalTotalMismatch { expected: U256, actual: U256 },
 }
 
 impl ChannelCloseWitness {
@@ -150,6 +178,54 @@ impl ChannelCloseWitness {
             return Err(ChannelCloseWitnessError::ChannelIdMismatch {
                 close_tx: self.close_tx.channel_id,
                 close_intent: self.close_intent.channel_id,
+            });
+        }
+        if self.close_tx.transfers.len() != self.transfer_openings.len() {
+            return Err(ChannelCloseWitnessError::TransferOpeningCountMismatch {
+                transfers: self.close_tx.transfers.len(),
+                openings: self.transfer_openings.len(),
+            });
+        }
+
+        let mut registered = std::collections::BTreeMap::new();
+        for member in &self.registered_members {
+            if registered.insert(member.member_id.as_u64(), member).is_some() {
+                return Err(ChannelCloseWitnessError::DuplicateRegisteredMember(
+                    member.member_id,
+                ));
+            }
+        }
+
+        let mut seen_transfers = std::collections::BTreeSet::new();
+        let mut total = U256::default();
+        for (transfer, opening) in self.close_tx.transfers.iter().zip(&self.transfer_openings) {
+            if !seen_transfers.insert(transfer.member_id.as_u64()) {
+                return Err(ChannelCloseWitnessError::DuplicateCloseTransfer(
+                    transfer.member_id,
+                ));
+            }
+
+            let registered_member = registered.get(&transfer.member_id.as_u64()).ok_or(
+                ChannelCloseWitnessError::MissingRegisteredMember(transfer.member_id),
+            )?;
+            if transfer.l1_recipient != registered_member.l1_withdrawal_recipient {
+                return Err(ChannelCloseWitnessError::RecipientMismatch {
+                    member: transfer.member_id,
+                });
+            }
+
+            total += u64_to_u256(opening.amount);
+        }
+
+        for member in &self.registered_members {
+            if !seen_transfers.contains(&member.member_id.as_u64()) {
+                return Err(ChannelCloseWitnessError::MissingCloseTransfer(member.member_id));
+            }
+        }
+        if total != self.final_channel_state.channel_fund.amount {
+            return Err(ChannelCloseWitnessError::WithdrawalTotalMismatch {
+                expected: self.final_channel_state.channel_fund.amount,
+                actual: total,
             });
         }
 
@@ -177,13 +253,18 @@ fn join_u64(limbs: &[u64]) -> u64 {
     ((limbs[0] as u64) << 32) | limbs[1] as u64
 }
 
+fn u64_to_u256(value: u64) -> U256 {
+    U256::from_u64_slice(&[0, 0, 0, 0, 0, 0, (value >> 32), value as u32 as u64])
+        .expect("u64 must fit into U256")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::{
         common::channel::{
-            ChannelFund, ChannelState, CloseTransfer, CloseWithdrawal, LatticeCommitment,
-            MemberSignature,
+            ChannelFund, ChannelMember, ChannelState, CloseTransfer, CloseWithdrawal,
+            LatticeCommitment, LatticeOpening, MemberSignature,
         },
         ethereum_types::{address::Address, bytes32::Bytes32, u32limb_trait::U32LimbTrait},
     };
@@ -230,8 +311,17 @@ mod tests {
         let close_intent = CloseIntent::new(5, &state, &close_tx, 123).unwrap();
         let witness = ChannelCloseWitness {
             final_channel_state: state,
+            registered_members: vec![ChannelMember {
+                member_id: AccountId::new(3, 10).unwrap(),
+                signing_pubkey: vec![1, 2, 3],
+                l1_withdrawal_recipient: Address::from_u32_slice(&[1, 2, 3, 4, 5]).unwrap(),
+            }],
             close_tx,
             close_intent,
+            transfer_openings: vec![LatticeOpening {
+                amount: 77,
+                randomness: vec![],
+            }],
         };
 
         let public_inputs = witness.to_public_inputs().unwrap();

@@ -765,7 +765,7 @@ The close and post-close portion should be implemented as four explicit workstre
 - the channel itself is an Intmax3 account
 - the ID system is unified as `hub_id + account_no`
 - the P2/P3 connection uses a public-values hash bridge instead of proof recursion
-- receiver claim is separated from import, and the claim itself is a P3 channel-local update
+- receiver-side balance application is bundled directly into import, and the sender carries the P3 receiver-update proof
 - on-chain logic does not require a Plonky3 verifier from the start; the fully signed state is the authoritative object
 - channel close is not a single final action; it is a challenged intent with cancellation and post-close recovery paths
 

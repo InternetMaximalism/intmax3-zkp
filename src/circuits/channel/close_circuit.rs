@@ -193,8 +193,8 @@ mod tests {
     use crate::{
         common::{
             channel::{
-                ChannelFund, ChannelState, CloseIntent, CloseTransfer, CloseWithdrawal,
-                LatticeCommitment, MemberSignature,
+                ChannelFund, ChannelMember, ChannelState, CloseIntent, CloseTransfer,
+                CloseWithdrawal, LatticeCommitment, LatticeOpening, MemberSignature,
             },
             user_id::AccountId,
         },
@@ -250,8 +250,17 @@ mod tests {
 
         ChannelCloseWitness {
             final_channel_state: state,
+            registered_members: vec![ChannelMember {
+                member_id: AccountId::new(3, 10).unwrap(),
+                signing_pubkey: vec![1, 2, 3],
+                l1_withdrawal_recipient: Address::from_u32_slice(&[1, 2, 3, 4, 5]).unwrap(),
+            }],
             close_tx,
             close_intent,
+            transfer_openings: vec![LatticeOpening {
+                amount: 77,
+                randomness: vec![],
+            }],
         }
     }
 
