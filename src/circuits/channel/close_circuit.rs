@@ -2,7 +2,7 @@ use plonky2::{
     field::{extension::Extendable, types::Field},
     hash::hash_types::RichField,
     iop::{
-        target::Target,
+        target::{BoolTarget, Target},
         witness::{PartialWitness, WitnessWrite},
     },
     plonk::{
@@ -28,6 +28,8 @@ use crate::{
         u256::{U256_LEN, U256Target},
     },
 };
+
+const MAX_CLOSE_TRANSFERS: usize = 16;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ChannelClosePublicInputsTarget {
@@ -154,6 +156,8 @@ where
 {
     pub data: CircuitData<F, C, D>,
     pub public_inputs: ChannelClosePublicInputsTarget,
+    transfer_amounts: Vec<U64Target>,
+    transfer_is_active: Vec<BoolTarget>,
 }
 
 impl<F, C, const D: usize> ChannelCloseCircuit<F, C, D>
@@ -165,12 +169,40 @@ where
         let mut builder =
             CircuitBuilder::<F, D>::new(CircuitConfig::standard_recursion_zk_config());
         let public_inputs = ChannelClosePublicInputsTarget::new(&mut builder);
+        let zero = builder.zero();
+        for limb in &public_inputs.channel_fund_amount.to_vec()[0..6] {
+            builder.connect(*limb, zero);
+        }
+
+        let expected_total =
+            U64Target::from_slice(&public_inputs.channel_fund_amount.to_vec()[6..8]);
+        let mut running_total = U64Target::constant(&mut builder, U64::from(0u64));
+        let mut transfer_amounts = Vec::with_capacity(MAX_CLOSE_TRANSFERS);
+        let mut transfer_is_active = Vec::with_capacity(MAX_CLOSE_TRANSFERS);
+
+        for _ in 0..MAX_CLOSE_TRANSFERS {
+            let is_active = builder.add_virtual_bool_target_safe();
+            let amount = U64Target::from_slice(&builder.add_virtual_targets(2));
+            let gated_amount = U64Target::from_slice(&[
+                builder.select(is_active, amount.to_vec()[0], zero),
+                builder.select(is_active, amount.to_vec()[1], zero),
+            ]);
+            running_total = running_total.add(&mut builder, &gated_amount);
+            transfer_amounts.push(amount);
+            transfer_is_active.push(is_active);
+        }
+
+        for (lhs, rhs) in running_total.to_vec().iter().zip(expected_total.to_vec().iter()) {
+            builder.connect(*lhs, *rhs);
+        }
         builder.register_public_inputs(&public_inputs.to_vec());
         let data = builder.build::<C>();
 
         Self {
             data,
             public_inputs,
+            transfer_amounts,
+            transfer_is_active,
         }
     }
 
@@ -178,9 +210,26 @@ where
         &self,
         witness: &ChannelCloseWitness,
     ) -> Result<ProofWithPublicInputs<F, C, D>, ChannelCloseCircuitError> {
+        if witness.transfer_openings.len() > MAX_CLOSE_TRANSFERS {
+            return Err(ChannelCloseCircuitError::FailedToProve(format!(
+                "close witness has {} transfers, exceeds max {MAX_CLOSE_TRANSFERS}",
+                witness.transfer_openings.len()
+            )));
+        }
         let public_inputs = witness.to_public_inputs()?;
         let mut pw = PartialWitness::<F>::new();
         self.public_inputs.set_witness(&mut pw, &public_inputs);
+        for (idx, amount_target) in self.transfer_amounts.iter().enumerate() {
+            let is_active = idx < witness.transfer_openings.len();
+            pw.set_bool_target(self.transfer_is_active[idx], is_active)
+                .map_err(|e| ChannelCloseCircuitError::FailedToProve(e.to_string()))?;
+            let amount = if is_active {
+                witness.transfer_openings[idx].amount
+            } else {
+                0
+            };
+            amount_target.set_witness(&mut pw, U64::from(amount));
+        }
         self.data
             .prove(pw)
             .map_err(|e| ChannelCloseCircuitError::FailedToProve(e.to_string()))
