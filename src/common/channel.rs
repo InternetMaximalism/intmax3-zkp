@@ -20,6 +20,7 @@ const CLOSE_TX_DOMAIN: u32 = 0x494d434c; // "IMCL"
 const CLOSE_INTENT_DOMAIN: u32 = 0x494d4349; // "IMCI"
 const CANCEL_CLOSE_DOMAIN: u32 = 0x494d434e; // "IMCN"
 const POST_CLOSE_CLAIM_DOMAIN: u32 = 0x494d4350; // "IMCP"
+pub const MAX_CLOSE_TRANSFERS: usize = 16;
 
 #[derive(Debug, Error)]
 pub enum ChannelError {
@@ -329,11 +330,59 @@ impl CloseWithdrawal {
     }
 }
 
+pub fn settlement_digest(
+    channel_id: ChannelId,
+    final_channel_state_digest: Bytes32,
+    intmax_state_root: Bytes32,
+    transfers: &[CloseTransfer],
+    transfer_openings: &[LatticeOpening],
+) -> Result<Bytes32, ChannelError> {
+    if transfers.len() != transfer_openings.len() {
+        return Err(ChannelError::InvalidCloseBinding(format!(
+            "settlement transfer count {} != opening count {}",
+            transfers.len(),
+            transfer_openings.len()
+        )));
+    }
+
+    if transfers.len() > MAX_CLOSE_TRANSFERS {
+        return Err(ChannelError::InvalidCloseBinding(format!(
+            "settlement transfer count {} exceeds max {}",
+            transfers.len(),
+            MAX_CLOSE_TRANSFERS
+        )));
+    }
+
+    let mut words = vec![CLOSE_TX_DOMAIN];
+    words.extend(channel_id.to_u32_vec());
+    words.extend(final_channel_state_digest.to_u32_vec());
+    words.extend(intmax_state_root.to_u32_vec());
+    words.push(transfers.len() as u32);
+    for idx in 0..MAX_CLOSE_TRANSFERS {
+        let maybe_transfer = transfers.get(idx).zip(transfer_openings.get(idx));
+        words.push(maybe_transfer.is_some() as u32);
+        if let Some((transfer, opening)) = maybe_transfer {
+            words.extend(transfer.member_id.to_u32_vec());
+            words.extend(transfer.l1_recipient.to_u32_vec());
+            words.extend(transfer.user_amount.digest().to_u32_vec());
+            words.extend(split_u64(opening.amount));
+        } else {
+            words.extend([0u32; 2]);
+            words.extend([0u32; 5]);
+            words.extend([0u32; 8]);
+            words.extend([0u32; 2]);
+        }
+    }
+
+    Ok(hash_words(&words))
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CloseIntent {
     pub channel_id: ChannelId,
     pub close_nonce: u64,
+    pub final_epoch: u64,
     pub final_channel_state_digest: Bytes32,
     pub channel_fund_snapshot: ChannelFund,
     pub settlement_digest: Bytes32,
@@ -345,6 +394,7 @@ impl CloseIntent {
         close_nonce: u64,
         final_channel_state: &ChannelState,
         close_withdrawal: &CloseWithdrawal,
+        transfer_openings: &[LatticeOpening],
         snapshot_block_number: u64,
     ) -> Result<Self, ChannelError> {
         if final_channel_state.channel_id != close_withdrawal.channel_id {
@@ -371,9 +421,16 @@ impl CloseIntent {
         Ok(Self {
             channel_id: final_channel_state.channel_id,
             close_nonce,
+            final_epoch: final_channel_state.epoch,
             final_channel_state_digest: final_channel_state.digest,
             channel_fund_snapshot: final_channel_state.channel_fund.clone(),
-            settlement_digest: close_withdrawal.signing_digest(),
+            settlement_digest: settlement_digest(
+                close_withdrawal.channel_id,
+                close_withdrawal.final_channel_state_digest,
+                close_withdrawal.intmax_state_root,
+                &close_withdrawal.transfers,
+                transfer_openings,
+            )?,
             snapshot_block_number,
         })
     }
@@ -384,6 +441,7 @@ impl CloseIntent {
                 vec![CLOSE_INTENT_DOMAIN],
                 self.channel_id.to_u32_vec(),
                 split_u64(self.close_nonce),
+                split_u64(self.final_epoch),
                 self.final_channel_state_digest.to_u32_vec(),
                 self.channel_fund_snapshot.channel_id.to_u32_vec(),
                 self.channel_fund_snapshot.amount.to_u32_vec(),
@@ -443,6 +501,7 @@ pub struct PostCloseIncomingClaim {
     pub close_intent_digest: Bytes32,
     pub incoming_tx_hash: Bytes32,
     pub receiver_id: MemberId,
+    pub l1_recipient: Address,
     pub receiver_amount: LatticeCommitment,
     pub personal_nullifier: Bytes32,
     pub recipient_memo: Vec<u8>,
@@ -457,6 +516,7 @@ impl PostCloseIncomingClaim {
                 self.close_intent_digest.to_u32_vec(),
                 self.incoming_tx_hash.to_u32_vec(),
                 self.receiver_id.to_u32_vec(),
+                self.l1_recipient.to_u32_vec(),
                 self.receiver_amount.digest().to_u32_vec(),
                 self.personal_nullifier.to_u32_vec(),
                 vec![self.recipient_memo.len() as u32],
@@ -613,12 +673,17 @@ mod tests {
             }],
             zkp: vec![1, 2, 3],
         };
+        let transfer_openings = vec![LatticeOpening {
+            amount: 100,
+            randomness: vec![],
+        }];
 
-        let intent_a = CloseIntent::new(9, &final_state, &close_tx, 123).unwrap();
-        let intent_b = CloseIntent::new(9, &final_state, &close_tx, 123).unwrap();
+        let intent_a = CloseIntent::new(9, &final_state, &close_tx, &transfer_openings, 123).unwrap();
+        let intent_b = CloseIntent::new(9, &final_state, &close_tx, &transfer_openings, 123).unwrap();
         assert_eq!(intent_a.signing_digest(), intent_b.signing_digest());
 
-        let different = CloseIntent::new(10, &final_state, &close_tx, 123).unwrap();
+        let different =
+            CloseIntent::new(10, &final_state, &close_tx, &transfer_openings, 123).unwrap();
         assert_ne!(intent_a.signing_digest(), different.signing_digest());
     }
 
@@ -632,7 +697,7 @@ mod tests {
             transfers: vec![],
             zkp: vec![],
         };
-        let close_intent = CloseIntent::new(1, &final_state, &close_tx, 55).unwrap();
+        let close_intent = CloseIntent::new(1, &final_state, &close_tx, &[], 55).unwrap();
         let inter_channel_tx = InterChannelTx {
             mkproof: MerkleInclusionProof {
                 siblings: vec![],
@@ -664,6 +729,7 @@ mod tests {
             close_intent_digest: Bytes32::default(),
             incoming_tx_hash: Bytes32::default(),
             receiver_id: AccountId::new(1, 2).unwrap(),
+            l1_recipient: Address::from_u32_slice(&[5, 4, 3, 2, 1]).unwrap(),
             receiver_amount: commitment(3),
             personal_nullifier: Bytes32::default(),
             recipient_memo: vec![1, 2, 3],

@@ -356,7 +356,27 @@ fn channel_close_flow_e2e() {
         ],
         zkp: vec![9, 9, 9],
     };
-    let close_intent = CloseIntent::new(5, &next_import, &close_tx, 123).unwrap();
+    let close_intent = CloseIntent::new(
+        5,
+        &next_import,
+        &close_tx,
+        &[
+            LatticeOpening {
+                amount: 15,
+                randomness: vec![],
+            },
+            LatticeOpening {
+                amount: 21,
+                randomness: vec![],
+            },
+            LatticeOpening {
+                amount: 71,
+                randomness: vec![],
+            },
+        ],
+        123,
+    )
+    .unwrap();
     let close_witness = ChannelCloseWitness {
         final_channel_state: next_import.clone(),
         registered_members: vec![
@@ -409,6 +429,7 @@ fn channel_close_flow_e2e() {
         close_intent_digest: close_intent.signing_digest(),
         incoming_tx_hash: import_tx.tx_hash,
         receiver_id: AccountId::new(5, 12).unwrap(),
+        l1_recipient: Address::from_u32_slice(&[1, 2, 3, 4, 5]).unwrap(),
         receiver_amount: import_tx.receiver_deltas[0].amount.clone(),
         personal_nullifier: Bytes32::from_u32_slice(&[5, 0, 0, 0, 0, 0, 0, 0]).unwrap(),
         recipient_memo: vec![8, 8],

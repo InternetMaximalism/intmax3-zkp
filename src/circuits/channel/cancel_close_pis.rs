@@ -9,18 +9,16 @@ use crate::{
     ethereum_types::{bytes32::Bytes32, u32limb_trait::U32LimbTrait},
 };
 
-pub const CANCEL_CLOSE_PUBLIC_INPUTS_LEN: usize = 43;
+pub const CANCEL_CLOSE_PUBLIC_INPUTS_LEN: usize = 33;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CancelClosePublicInputs {
     pub channel_id: AccountId,
     pub close_intent_digest: Bytes32,
-    pub final_channel_state_digest: Bytes32,
     pub revived_inter_channel_tx_digest: Bytes32,
     pub revived_tx_hash: Bytes32,
     pub revived_seal: Bytes32,
-    pub snapshot_block_number: u64,
 }
 
 #[derive(Debug, Error)]
@@ -64,11 +62,9 @@ impl CancelCloseWitness {
         Ok(CancelClosePublicInputs {
             channel_id: self.close_intent.channel_id,
             close_intent_digest: self.close_intent.signing_digest(),
-            final_channel_state_digest: self.close_intent.final_channel_state_digest,
             revived_inter_channel_tx_digest: self.revived_tx.signing_digest(),
             revived_tx_hash: self.revived_tx.tx_hash,
             revived_seal: self.revived_tx.seal,
-            snapshot_block_number: self.close_intent.snapshot_block_number,
         })
     }
 }
@@ -78,11 +74,9 @@ impl CancelClosePublicInputs {
         [
             self.channel_id.to_u64_vec(),
             self.close_intent_digest.to_u64_vec(),
-            self.final_channel_state_digest.to_u64_vec(),
             self.revived_inter_channel_tx_digest.to_u64_vec(),
             self.revived_tx_hash.to_u64_vec(),
             self.revived_seal.to_u64_vec(),
-            split_u64(self.snapshot_block_number),
         ]
         .concat()
     }
@@ -98,23 +92,12 @@ impl CancelClosePublicInputs {
         Ok(Self {
             channel_id: AccountId::from_u64(values[0]).map_err(|e| e.to_string())?,
             close_intent_digest: Bytes32::from_u64_slice(&values[1..9]).map_err(|e| e.to_string())?,
-            final_channel_state_digest: Bytes32::from_u64_slice(&values[9..17])
+            revived_inter_channel_tx_digest: Bytes32::from_u64_slice(&values[9..17])
                 .map_err(|e| e.to_string())?,
-            revived_inter_channel_tx_digest: Bytes32::from_u64_slice(&values[17..25])
-                .map_err(|e| e.to_string())?,
-            revived_tx_hash: Bytes32::from_u64_slice(&values[25..33]).map_err(|e| e.to_string())?,
-            revived_seal: Bytes32::from_u64_slice(&values[33..41]).map_err(|e| e.to_string())?,
-            snapshot_block_number: join_u64(&values[41..43]),
+            revived_tx_hash: Bytes32::from_u64_slice(&values[17..25]).map_err(|e| e.to_string())?,
+            revived_seal: Bytes32::from_u64_slice(&values[25..33]).map_err(|e| e.to_string())?,
         })
     }
-}
-
-fn split_u64(value: u64) -> Vec<u64> {
-    vec![(value >> 32), value as u32 as u64]
-}
-
-fn join_u64(limbs: &[u64]) -> u64 {
-    (limbs[0] << 32) | limbs[1]
 }
 
 #[cfg(test)]
@@ -156,7 +139,7 @@ mod tests {
             transfers: vec![],
             zkp: vec![7],
         };
-        CloseIntent::new(5, &state, &close_withdrawal, 123).unwrap()
+        CloseIntent::new(5, &state, &close_withdrawal, &[], 123).unwrap()
     }
 
     #[test]

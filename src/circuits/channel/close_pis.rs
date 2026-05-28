@@ -12,13 +12,14 @@ use crate::{
     ethereum_types::{bytes32::Bytes32, u32limb_trait::U32LimbTrait, u256::U256},
 };
 
-pub const CHANNEL_CLOSE_PUBLIC_INPUTS_LEN: usize = 45;
+pub const CHANNEL_CLOSE_PUBLIC_INPUTS_LEN: usize = 47;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ChannelClosePublicInputs {
     pub channel_id: AccountId,
     pub close_nonce: u64,
+    pub final_epoch: u64,
     pub final_channel_state_digest: Bytes32,
     pub channel_fund_amount: U256,
     pub channel_fund_intmax_state_root: Bytes32,
@@ -56,6 +57,7 @@ impl ChannelClosePublicInputs {
         [
             self.channel_id.to_u64_vec(),
             split_u64(self.close_nonce),
+            split_u64(self.final_epoch),
             self.final_channel_state_digest.to_u64_vec(),
             self.channel_fund_amount.to_u64_vec(),
             self.channel_fund_intmax_state_root.to_u64_vec(),
@@ -77,24 +79,26 @@ impl ChannelClosePublicInputs {
         let channel_id = AccountId::from_u64(values[0])
             .map_err(|e| ChannelClosePublicInputsError::InvalidChannelId(e.to_string()))?;
         let close_nonce = join_u64(&values[1..3]);
-        let final_channel_state_digest = Bytes32::from_u64_slice(&values[3..11]).map_err(|e| {
+        let final_epoch = join_u64(&values[3..5]);
+        let final_channel_state_digest = Bytes32::from_u64_slice(&values[5..13]).map_err(|e| {
             ChannelClosePublicInputsError::InvalidFinalChannelStateDigest(e.to_string())
         })?;
-        let channel_fund_amount = U256::from_u64_slice(&values[11..19])
+        let channel_fund_amount = U256::from_u64_slice(&values[13..21])
             .map_err(|e| ChannelClosePublicInputsError::InvalidChannelFundAmount(e.to_string()))?;
         let channel_fund_intmax_state_root =
-            Bytes32::from_u64_slice(&values[19..27]).map_err(|e| {
+            Bytes32::from_u64_slice(&values[21..29]).map_err(|e| {
                 ChannelClosePublicInputsError::InvalidChannelFundIntmaxStateRoot(e.to_string())
             })?;
-        let settlement_digest = Bytes32::from_u64_slice(&values[27..35])
+        let settlement_digest = Bytes32::from_u64_slice(&values[29..37])
             .map_err(|e| ChannelClosePublicInputsError::InvalidSettlementDigest(e.to_string()))?;
-        let close_intent_digest = Bytes32::from_u64_slice(&values[35..43])
+        let close_intent_digest = Bytes32::from_u64_slice(&values[37..45])
             .map_err(|e| ChannelClosePublicInputsError::InvalidCloseIntentDigest(e.to_string()))?;
-        let snapshot_block_number = join_u64(&values[43..45]);
+        let snapshot_block_number = join_u64(&values[45..47]);
 
         Ok(Self {
             channel_id,
             close_nonce,
+            final_epoch,
             final_channel_state_digest,
             channel_fund_amount,
             channel_fund_intmax_state_root,
@@ -164,6 +168,7 @@ impl ChannelCloseWitness {
             self.close_intent.close_nonce,
             &self.final_channel_state,
             &self.close_tx,
+            &self.transfer_openings,
             self.close_intent.snapshot_block_number,
         )?;
 
@@ -232,6 +237,7 @@ impl ChannelCloseWitness {
         Ok(ChannelClosePublicInputs {
             channel_id: self.close_intent.channel_id,
             close_nonce: self.close_intent.close_nonce,
+            final_epoch: self.close_intent.final_epoch,
             final_channel_state_digest: self.close_intent.final_channel_state_digest,
             channel_fund_amount: self.close_intent.channel_fund_snapshot.amount,
             channel_fund_intmax_state_root: self
@@ -308,7 +314,17 @@ mod tests {
             }],
             zkp: vec![9, 9, 9],
         };
-        let close_intent = CloseIntent::new(5, &state, &close_tx, 123).unwrap();
+        let close_intent = CloseIntent::new(
+            5,
+            &state,
+            &close_tx,
+            &[LatticeOpening {
+                amount: 77,
+                randomness: vec![],
+            }],
+            123,
+        )
+        .unwrap();
         let witness = ChannelCloseWitness {
             final_channel_state: state,
             registered_members: vec![ChannelMember {

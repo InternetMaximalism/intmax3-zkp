@@ -6,20 +6,19 @@ use crate::{
         channel::{InterChannelTx, LatticeOpening, PostCloseIncomingClaim},
         user_id::AccountId,
     },
-    ethereum_types::{bytes32::Bytes32, u32limb_trait::U32LimbTrait},
+    ethereum_types::{address::Address, bytes32::Bytes32, u32limb_trait::U32LimbTrait},
 };
 
-pub const POST_CLOSE_CLAIM_PUBLIC_INPUTS_LEN: usize = 37;
+pub const POST_CLOSE_CLAIM_PUBLIC_INPUTS_LEN: usize = 33;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PostCloseClaimPublicInputs {
     pub close_intent_digest: Bytes32,
     pub receiver_channel_id: AccountId,
-    pub sender_channel_id: AccountId,
     pub incoming_tx_hash: Bytes32,
     pub receiver_id: AccountId,
-    pub receiver_amount_digest: Bytes32,
+    pub recipient: Address,
     pub personal_nullifier: Bytes32,
     pub amount: u64,
 }
@@ -71,10 +70,9 @@ impl PostCloseClaimWitness {
         Ok(PostCloseClaimPublicInputs {
             close_intent_digest: self.close_intent_digest,
             receiver_channel_id: self.closed_channel_id,
-            sender_channel_id: self.source_tx.sender_channel_id,
             incoming_tx_hash: self.source_tx.tx_hash,
             receiver_id: self.claim.receiver_id,
-            receiver_amount_digest: self.claim.receiver_amount.digest(),
+            recipient: self.claim.l1_recipient,
             personal_nullifier: self.claim.personal_nullifier,
             amount: self.receiver_amount_opening.amount,
         })
@@ -86,10 +84,9 @@ impl PostCloseClaimPublicInputs {
         [
             self.close_intent_digest.to_u64_vec(),
             self.receiver_channel_id.to_u64_vec(),
-            self.sender_channel_id.to_u64_vec(),
             self.incoming_tx_hash.to_u64_vec(),
             self.receiver_id.to_u64_vec(),
-            self.receiver_amount_digest.to_u64_vec(),
+            self.recipient.to_u64_vec(),
             self.personal_nullifier.to_u64_vec(),
             split_u64(self.amount),
         ]
@@ -106,12 +103,11 @@ impl PostCloseClaimPublicInputs {
         Ok(Self {
             close_intent_digest: Bytes32::from_u64_slice(&values[0..8]).map_err(|e| e.to_string())?,
             receiver_channel_id: AccountId::from_u64(values[8]).map_err(|e| e.to_string())?,
-            sender_channel_id: AccountId::from_u64(values[9]).map_err(|e| e.to_string())?,
-            incoming_tx_hash: Bytes32::from_u64_slice(&values[10..18]).map_err(|e| e.to_string())?,
-            receiver_id: AccountId::from_u64(values[18]).map_err(|e| e.to_string())?,
-            receiver_amount_digest: Bytes32::from_u64_slice(&values[19..27]).map_err(|e| e.to_string())?,
-            personal_nullifier: Bytes32::from_u64_slice(&values[27..35]).map_err(|e| e.to_string())?,
-            amount: join_u64(&values[35..37]),
+            incoming_tx_hash: Bytes32::from_u64_slice(&values[9..17]).map_err(|e| e.to_string())?,
+            receiver_id: AccountId::from_u64(values[17]).map_err(|e| e.to_string())?,
+            recipient: Address::from_u64_slice(&values[18..23]).map_err(|e| e.to_string())?,
+            personal_nullifier: Bytes32::from_u64_slice(&values[23..31]).map_err(|e| e.to_string())?,
+            amount: join_u64(&values[31..33]),
         })
     }
 }
@@ -130,7 +126,7 @@ mod tests {
     use crate::common::channel::{
         LatticeCommitment, MerkleInclusionProof, ReceiverBalanceDelta,
     };
-    use crate::ethereum_types::{bytes32::Bytes32, u256::U256};
+    use crate::ethereum_types::{address::Address, bytes32::Bytes32, u256::U256};
 
     #[test]
     fn post_close_claim_public_inputs_roundtrip() {
@@ -163,6 +159,7 @@ mod tests {
             close_intent_digest: Bytes32::from_u32_slice(&[1, 0, 0, 0, 0, 0, 0, 0]).unwrap(),
             incoming_tx_hash: source_tx.tx_hash,
             receiver_id,
+            l1_recipient: Address::from_u32_slice(&[1, 2, 3, 4, 5]).unwrap(),
             receiver_amount: source_tx.receiver_deltas[0].amount.clone(),
             personal_nullifier: Bytes32::from_u32_slice(&[2, 0, 0, 0, 0, 0, 0, 0]).unwrap(),
             recipient_memo: vec![5, 6],

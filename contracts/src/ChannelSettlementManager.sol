@@ -3,7 +3,7 @@ pragma solidity ^0.8.24;
 
 interface IChannelSettlementVerifier {
     function verifyCloseIntent(
-        uint256 channelId,
+        uint64 channelId,
         uint64 closeNonce,
         uint64 finalEpoch,
         bytes32 finalChannelStateDigest,
@@ -15,7 +15,7 @@ interface IChannelSettlementVerifier {
     ) external view returns (bool);
 
     function verifyCancelClose(
-        uint256 channelId,
+        uint64 channelId,
         bytes32 closeIntentDigest,
         bytes32 revivedInterChannelTxDigest,
         bytes32 revivedTxHash,
@@ -24,18 +24,22 @@ interface IChannelSettlementVerifier {
     ) external view returns (bool);
 
     function verifyPostCloseClaim(
-        uint256 channelId,
+        uint64 channelId,
         bytes32 closeIntentDigest,
         bytes32 incomingTxHash,
-        uint256 receiverId,
+        uint64 receiverId,
         address recipient,
-        uint256 amount,
+        uint64 amount,
         bytes32 personalNullifier,
         bytes calldata proof
     ) external view returns (bool);
 }
 
 contract ChannelSettlementManager {
+    uint32 internal constant CLOSE_TX_DOMAIN = 0x494d434c;
+    uint32 internal constant CLOSE_INTENT_DOMAIN = 0x494d4349;
+    uint256 internal constant MAX_CLOSE_TRANSFERS = 16;
+
     error InvalidChannelId();
     error InvalidCloseProof();
     error InvalidCancelProof();
@@ -50,6 +54,13 @@ contract ChannelSettlementManager {
     error CloseIntentDigestMismatch();
     error NullifierAlreadyUsed();
     error NoWithdrawalCredit();
+    error InvalidRegisteredMember();
+    error DuplicateRegisteredMember();
+    error TooManyTransfers();
+    error UnknownMember();
+    error DuplicateSettlementMember();
+    error RecipientMismatch();
+    error SettlementCoverageMismatch();
 
     event CloseSubmitted(
         bytes32 indexed closeIntentDigest,
@@ -90,9 +101,16 @@ contract ChannelSettlementManager {
         uint64 snapshotBlockNumber;
     }
 
-    struct Withdrawal {
+    struct MemberBinding {
+        uint64 memberId;
         address recipient;
-        uint256 amount;
+    }
+
+    struct SettledWithdrawal {
+        uint64 memberId;
+        address recipient;
+        bytes32 userAmountDigest;
+        uint64 amount;
     }
 
     struct CancelCloseRequest {
@@ -105,9 +123,9 @@ contract ChannelSettlementManager {
     struct PostCloseClaim {
         bytes32 closeIntentDigest;
         bytes32 incomingTxHash;
-        uint256 receiverId;
+        uint64 receiverId;
         address recipient;
-        uint256 amount;
+        uint64 amount;
         bytes32 personalNullifier;
     }
 
@@ -124,7 +142,7 @@ contract ChannelSettlementManager {
         uint64 snapshotBlockNumber;
     }
 
-    uint256 public immutable channelId;
+    uint64 public immutable channelId;
     uint64 public immutable challengePeriod;
     IChannelSettlementVerifier public immutable verifier;
 
@@ -136,32 +154,99 @@ contract ChannelSettlementManager {
 
     mapping(address => uint256) public withdrawalCredits;
     mapping(bytes32 => bool) public usedPersonalNullifiers;
+    mapping(uint64 => address) public registeredRecipientOf;
+    mapping(uint64 => uint256) public registeredMemberIndexPlusOne;
+    uint64[] public registeredMemberIds;
 
     constructor(
-        uint256 channelId_,
+        uint64 channelId_,
         uint64 challengePeriod_,
-        IChannelSettlementVerifier verifier_
+        IChannelSettlementVerifier verifier_,
+        MemberBinding[] memory memberBindings
     ) {
         channelId = channelId_;
         challengePeriod = challengePeriod_;
         verifier = verifier_;
+
+        if (channelId_ == 0) {
+            revert InvalidChannelId();
+        }
+        for (uint256 i = 0; i < memberBindings.length; i++) {
+            MemberBinding memory binding = memberBindings[i];
+            if (binding.memberId == 0 || binding.recipient == address(0)) {
+                revert InvalidRegisteredMember();
+            }
+            if (registeredMemberIndexPlusOne[binding.memberId] != 0) {
+                revert DuplicateRegisteredMember();
+            }
+            registeredRecipientOf[binding.memberId] = binding.recipient;
+            registeredMemberIndexPlusOne[binding.memberId] = registeredMemberIds.length + 1;
+            registeredMemberIds.push(binding.memberId);
+        }
+    }
+
+    function memberCount() public view returns (uint256) {
+        return registeredMemberIds.length;
     }
 
     function computeSettlementDigest(
-        Withdrawal[] memory withdrawals
-    ) public pure returns (bytes32) {
-        return keccak256(abi.encode(withdrawals));
+        bytes32 finalChannelStateDigest,
+        bytes32 intmaxStateRoot,
+        SettledWithdrawal[] memory withdrawals
+    ) public view returns (bytes32) {
+        if (withdrawals.length > MAX_CLOSE_TRANSFERS) {
+            revert TooManyTransfers();
+        }
+
+        bytes memory packed = abi.encodePacked(
+            bytes4(CLOSE_TX_DOMAIN),
+            channelId,
+            finalChannelStateDigest,
+            intmaxStateRoot,
+            uint32(withdrawals.length)
+        );
+
+        for (uint256 i = 0; i < MAX_CLOSE_TRANSFERS; i++) {
+            if (i < withdrawals.length) {
+                SettledWithdrawal memory withdrawal = withdrawals[i];
+                packed = bytes.concat(
+                    packed,
+                    abi.encodePacked(
+                        uint32(1),
+                        withdrawal.memberId,
+                        withdrawal.recipient,
+                        withdrawal.userAmountDigest,
+                        withdrawal.amount
+                    )
+                );
+            } else {
+                packed = bytes.concat(
+                    packed,
+                    abi.encodePacked(
+                        uint32(0),
+                        uint64(0),
+                        address(0),
+                        bytes32(0),
+                        uint64(0)
+                    )
+                );
+            }
+        }
+
+        return keccak256(packed);
     }
 
     function computeCloseIntentDigest(
         CloseIntent memory intent
     ) public view returns (bytes32) {
         return keccak256(
-            abi.encode(
+            abi.encodePacked(
+                bytes4(CLOSE_INTENT_DOMAIN),
                 channelId,
                 intent.closeNonce,
                 intent.finalEpoch,
                 intent.finalChannelStateDigest,
+                channelId,
                 intent.channelFundAmount,
                 intent.channelFundIntmaxStateRoot,
                 intent.settlementDigest,
@@ -242,22 +327,49 @@ contract ChannelSettlementManager {
         );
     }
 
-    function finalizeClose(Withdrawal[] calldata withdrawals) external {
+    function finalizeClose(SettledWithdrawal[] calldata withdrawals) external {
         if (!pendingClose.active) {
             revert CloseNotActive();
         }
         if (block.timestamp < pendingClose.challengeDeadline) {
             revert ChallengeWindowOpen();
         }
-        if (computeSettlementDigest(withdrawals) != pendingClose.settlementDigest) {
+        if (withdrawals.length > MAX_CLOSE_TRANSFERS) {
+            revert TooManyTransfers();
+        }
+        if (withdrawals.length != registeredMemberIds.length) {
+            revert SettlementCoverageMismatch();
+        }
+        if (
+            computeSettlementDigest(
+                pendingClose.finalChannelStateDigest,
+                pendingClose.channelFundIntmaxStateRoot,
+                withdrawals
+            ) != pendingClose.settlementDigest
+        ) {
             revert SettlementDigestMismatch();
         }
 
         uint256 total;
+        bool[] memory seen = new bool[](registeredMemberIds.length);
         for (uint256 i = 0; i < withdrawals.length; i++) {
-            total += withdrawals[i].amount;
-            withdrawalCredits[withdrawals[i].recipient] += withdrawals[i].amount;
+            SettledWithdrawal calldata withdrawal = withdrawals[i];
+            uint256 memberIndexPlusOne = registeredMemberIndexPlusOne[withdrawal.memberId];
+            if (memberIndexPlusOne == 0) {
+                revert UnknownMember();
+            }
+            uint256 memberIndex = memberIndexPlusOne - 1;
+            if (seen[memberIndex]) {
+                revert DuplicateSettlementMember();
+            }
+            if (registeredRecipientOf[withdrawal.memberId] != withdrawal.recipient) {
+                revert RecipientMismatch();
+            }
+            seen[memberIndex] = true;
+            total += withdrawal.amount;
+            withdrawalCredits[withdrawal.recipient] += withdrawal.amount;
         }
+
         if (total != pendingClose.channelFundAmount) {
             revert SettlementTotalMismatch();
         }
