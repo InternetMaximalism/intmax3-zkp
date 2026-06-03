@@ -478,7 +478,6 @@ impl FullPublicState {
             timestamp,
             tx_tree_root,
             self.deposit_hash_chain,
-            Bytes32::default(), // forced_tx_hash_chain: no forced txs in this context
         )?;
 
         // update public state tree

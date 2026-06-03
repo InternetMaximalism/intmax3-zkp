@@ -56,7 +56,7 @@ pub struct ChannelMessage {
     pub allocations: Vec<Allocation>,
 
     /// Pre-computed Intmax tx tree root corresponding to these allocations.
-    /// This is the value that will be inserted as a forced tx on close.
+    /// This anchors the close-time settlement payload.
     pub tx_tree_root: Bytes32,
 }
 

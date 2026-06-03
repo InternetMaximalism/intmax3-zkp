@@ -238,26 +238,6 @@ where
             deposit_count = deposit_inputs.deposit_count;
         }
 
-        // Forced tx processing is now integrated into UpdateAccountTree.
-        // Verify consistency: prev_forced_tx state matches previous extended public state.
-        if update_account_inputs.prev_forced_tx_hash_chain
-            != prev_public_state_ext.forced_tx_hash_chain
-        {
-            return Err(BlockStepError::InvalidInput(
-                "update account proof prev_forced_tx_hash_chain mismatch with previous state"
-                    .to_string(),
-            ));
-        }
-        if update_account_inputs.prev_forced_tx_count != prev_public_state_ext.forced_tx_count {
-            return Err(BlockStepError::InvalidInput(
-                "update account proof prev_forced_tx_count mismatch with previous state"
-                    .to_string(),
-            ));
-        }
-        // Use the proved forced tx values from UpdateAccountTree
-        let forced_tx_hash_chain = update_account_inputs.forced_tx_hash_chain;
-        let forced_tx_count = update_account_inputs.forced_tx_count;
-
         // Verify previous public state membership and derive the root prior to this update.
         let empty_public_state = PublicState::empty_leaf();
         self.public_state_merkle_proof
@@ -289,8 +269,6 @@ where
             block_hash_chain,
             deposit_hash_chain,
             deposit_count,
-            forced_tx_hash_chain,
-            forced_tx_count,
         );
 
         Ok(BlockChainPublicInputs {
@@ -501,21 +479,7 @@ impl<const D: usize> BlockStepTarget<D> {
             &prev_public_state_ext.deposit_count,
         );
 
-        // Forced tx processing is now integrated into UpdateAccountTree.
-        // Verify consistency: prev_forced_tx state in UpdateAccountTree matches previous state.
-        selected_update_inputs
-            .prev_forced_tx_hash_chain
-            .connect(builder, prev_public_state_ext.forced_tx_hash_chain.clone());
-        builder.connect(
-            selected_update_inputs.prev_forced_tx_count.value,
-            prev_public_state_ext.forced_tx_count.value,
-        );
-
-        // account_tree_root now includes forced tx updates from UpdateAccountTree
         let selected_account_tree_root = account_tree_root;
-        // forced tx values are proved by UpdateAccountTree
-        let selected_forced_tx_hash_chain = selected_update_inputs.forced_tx_hash_chain.clone();
-        let selected_forced_tx_count = selected_update_inputs.forced_tx_count.clone();
 
         let public_state_merkle_proof =
             PublicStateMerkleProofTarget::new(builder, PUBLIC_STATE_TREE_HEIGHT);
@@ -548,8 +512,6 @@ impl<const D: usize> BlockStepTarget<D> {
                 block_hash_chain,
                 deposit_hash_chain: selected_deposit_hash_chain,
                 deposit_count: selected_deposit_count,
-                forced_tx_hash_chain: selected_forced_tx_hash_chain,
-                forced_tx_count: selected_forced_tx_count,
             },
             vd: block_chain_vd.clone(),
         };
@@ -881,12 +843,6 @@ mod tests {
                 );
                 num_users
             ],
-            prev_forced_tx_hash_chain: Bytes32::default(),
-            prev_forced_tx_count: U63::default(),
-            forced_txs: vec![],
-            forced_tx_prev_account_leaves: vec![],
-            forced_tx_account_merkle_proofs: vec![],
-            forced_tx_send_merkle_proofs: vec![],
         };
         let update_inputs = update_tree.to_public_inputs().expect("update inputs");
         let update_proof = update_circuit

@@ -18,7 +18,7 @@ Zero-knowledge proof circuits and L1 settlement contracts for the INTMAX3 rollup
                  │ Fast Block  │       │  sub-blocks:     │              │  state binding  │
                  │ (5s cycle)  │       │  hash chain ×60  │              │                 │
                  │ - local_ids │       │  deposit (last)  │              │  Accept new     │
-                 │ - tx_root   │       │  forced tx (last)│              │  stateRoot      │
+                 │ - tx_root   │       │  deposit (last)  │              │  stateRoot      │
                  │ - SPHINCS+  │       │                  │              └─────────────────┘
                  │ - NO deposit│       │  Store snapshot: │                      ▲
                  │ - NO forced │       │  blockHashChain  │                      │
@@ -31,7 +31,7 @@ Zero-knowledge proof circuits and L1 settlement contracts for the INTMAX3 rollup
 ```
 
 **Key invariant:** All three layers share the same `Block` structure and `BlockStep` ZK circuit.
-Fast blocks simply have `deposit_hash_chain = 0` and `forced_tx_hash_chain = 0`.
+Fast blocks simply have `deposit_hash_chain = 0`.
 The ZK circuit processes every block identically; only the L1 posting frequency differs.
 
 ## Proof Pipeline
@@ -114,7 +114,6 @@ Every value in the validity proof's public inputs is bound to on-chain state:
 │                              token_index ‖ amount ‖ aux_data             │
 │                                                                          │
 │  blockDepositHash[n]  ◄─── actual deposit_hash_chain used in block n    │
-│  blockForcedTxHash[n] ◄─── matured forcedTxAccumulator snapshot used     │
 │  latestFinalizedStateRoot ◄── finalize() sets to final_ext_commitment   │
 │                                                                          │
 └──────────────────────────────────────────────────────────────────────────┘
@@ -163,7 +162,6 @@ Every value in the validity proof's public inputs is bound to on-chain state:
 │  ┌────────────────────────┐  Aggregators post blocks + proof blobs      │
 │  │  postBlockAndSubmit()  │  → updates blockHashChain on-chain          │
 │  │  ~160k gas             │  → blockHashChainAt[n], blockDepositHash[n] │
-│  │                        │    blockForcedTxHash[n] snapshots stored    │
 │  │                        │  → stores commitment (blobHash‖proof‖SR)    │
 │  │                        │  → locks 1 ETH stake until finalize/fraud   │
 │  └────────────────────────┘                                             │
@@ -187,7 +185,7 @@ Every value in the validity proof's public inputs is bound to on-chain state:
 │                                                                         │
 │  ┌─────────────────┐                                                    │
 │  │  fraudProof()   │  Confirms blob fraud, slashes stake (90/10 split), │
-│  │                 │  clears blockDepositHash / blockForcedTxHash and   │
+│  │                 │  clears blockDepositHash and                       │
 │  │                 │  rewinds blockHashChain snapshots + submissions    │
 │  └─────────────────┘                                                    │
 │                                                                         │
@@ -459,7 +457,7 @@ WASM32 has a **4GB hard limit** on linear memory. The proof pipeline uses ~4GB a
 
 | Function | Gas | Storage Writes |
 |----------|-----|---------------|
-| `postBlockAndSubmit()` | ~160k | ≥6 slots (blockHashChain, blockHashChainAt[n], blockDepositHash[n], blockForcedTxHash[n], commitment, submitter+finalized) + locks 1 ETH stake |
+| `postBlockAndSubmit()` | ~160k | ≥5 slots (blockHashChain, blockHashChainAt[n], blockDepositHash[n], commitment, submitter+finalized) + locks 1 ETH stake |
 | `deposit()` | ~55k | 1 slot (pendingDepositHashChain) |
 | `finalize()` | ~1.6M | 2 slots (finalized flag, latestFinalizedStateRoot) |
 | `verify()` | ~842k | 0 (view) |
@@ -550,7 +548,6 @@ architecture and design rationale.
 | Document | Description |
 |----------|-------------|
 | [docs/spec.md](docs/spec.md) | Protocol specification (types, circuits, state) |
-| [docs/forced-tx-queue.md](docs/forced-tx-queue.md) | Forced TX Queue architecture, Solidity interface, ZK circuit pipeline |
 | [docs/signature-aggregation.md](docs/signature-aggregation.md) | Multi-sig accounts, parallel proving architecture, benchmarks |
 
 ## Dependencies

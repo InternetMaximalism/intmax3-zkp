@@ -6,7 +6,6 @@ import {SpongefishWhirVerify} from "@mle/spongefish/SpongefishWhirVerify.sol";
 import {GoldilocksExt3} from "@mle/spongefish/GoldilocksExt3.sol";
 import {BlobKZGVerifier, KZGProof} from "./BlobKZGVerifier.sol";
 import {Groth16Verifier} from "./Groth16Verifier.sol";
-import {IForcedTxLogic} from "./IForcedTxLogic.sol";
 
 /// @title IGnarkVerifier
 /// @notice Interface for gnark-generated Groth16 verifier with commitment support.
@@ -25,7 +24,7 @@ interface IGnarkVerifier {
 ///
 ///  Three-layer block architecture:
 ///    Off-chain — "fast blocks" (~5 seconds):
-///       Pure user-tx blocks.  No deposits, no forced txs.
+///       Pure user-tx blocks. No deposits.
 ///       Aggregators collect txs and build blocks off-chain.
 ///       Each block still has a block_number and updates the hash chain
 ///       inside the ZK circuit, but is NOT individually posted to L1.
@@ -34,8 +33,8 @@ interface IGnarkVerifier {
 ///       Aggregators call `postBlock(SubBlock[])` to commit a batch of
 ///       fast blocks to L1 as calldata.  The contract iterates over the
 ///       batch and recomputes the cumulative block_hash_chain.
-///       Deposits and forced txs are processed at this boundary only
-///       (applied to the last sub-block in the batch).
+///       Deposits are processed at this boundary only (applied to the
+///       last sub-block in the batch).
 ///       `blockHashChainAt[lastBlockNumber]` is recorded for the batch.
 ///
 ///    Layer 1 — "finalization" (~6 hours, validity proof):
@@ -79,11 +78,7 @@ contract IntmaxRollup {
     error InitialStateMismatch();
     error BlockChainMismatch();
     error MleVerificationFailed();
-    error NoForcedTxLogicRegistered();
-    error ForcedTxInsertFailed();
     error EmptyBatch();
-    error ForcedTxLogicAlreadyRegistered();
-    error ForcedTxLogicNotAccepted();
     error InvalidStakeAmount();
     error NothingToWithdraw();
     error SubmissionAlreadyFinalized();
@@ -127,17 +122,6 @@ contract IntmaxRollup {
     event FraudConfirmed(
         uint256 indexed id,
         address indexed prover
-    );
-
-    event ForcedTxLogicRegistered(
-        uint64 indexed userId,
-        address logicContract
-    );
-
-    event ForcedTxQueued(
-        uint64 indexed userId,
-        bytes32 txHash,
-        bytes32 newAccumulator
     );
 
     event WithdrawalCredited(address indexed recipient, uint256 amount);
@@ -274,7 +258,6 @@ contract IntmaxRollup {
     ///         Updated by `postBlock()` — iterates over a batch of sub-blocks.
     bytes32 public blockHashChain;
     mapping(uint64 => bytes32) public blockDepositHash;
-    mapping(uint64 => bytes32) public blockForcedTxHash;
 
     /// @notice Snapshot of blockHashChain at posting-round boundaries.
     ///         Only the last block number of each batch is recorded.
@@ -285,7 +268,6 @@ contract IntmaxRollup {
     uint64 public blockNumber;
 
     /// @notice Posting round counter (incremented once per postBlock call).
-    ///         Used for forced tx slot maturation (2-round delay).
     uint64 public postingRound;
 
     /// @notice On-chain deposit hash chain state.
@@ -308,29 +290,6 @@ contract IntmaxRollup {
     ///         Fraud proofs cannot target submissions at or before this block.
     ///         Updated by finalize().
     uint64 public latestFinalizedBlockNumber;
-
-    // -----------------------------------------------------------------------
-    // Forced Transaction State
-    // -----------------------------------------------------------------------
-
-    /// @notice Mapping from userId to their forced tx logic contract.
-    ///         Set during user registration via registerForcedTxLogic().
-    mapping(uint64 => address) public forcedTxLogicContracts;
-
-    /// @notice Running keccak hash chain of ALL queued forced txs.
-    ///         Updated by queueForcedTx().
-    bytes32 public forcedTxAccumulator;
-
-    /// @notice Snapshot of forcedTxAccumulator at each posting round.
-    ///         Used for slot maturation: forced txs queued before round R
-    ///         become eligible for inclusion at round R+2.
-    mapping(uint64 => bytes32) public forcedTxAccumulatorAtRound;
-
-    /// @notice Total number of forced txs queued.
-    uint64 public forcedTxCount;
-
-    /// @notice Gas limit for external insertIntmaxTx() calls.
-    uint256 internal constant FORCED_TX_GAS_LIMIT = 100_000;
 
     // -----------------------------------------------------------------------
     // Fraud/Stake configuration
@@ -418,69 +377,6 @@ contract IntmaxRollup {
         blockHashChainAt[0] = bytes32(0);
     }
 
-    // -----------------------------------------------------------------------
-    // registerForcedTxLogic()  —  register a forced tx logic contract for a userId
-    // -----------------------------------------------------------------------
-
-    /// @notice Register the forced tx logic contract for a userId.
-    ///         Can only be set once per userId (immutable after registration).
-    ///         The logic contract must accept the registration by returning the
-    ///         userId when called with acceptRegistration(userId).
-    /// @param userId         The Intmax user ID (aggregator_id << 32 | local_id).
-    /// @param logicContract  Address of the contract implementing IForcedTxLogic.
-    function registerForcedTxLogic(uint64 userId, address logicContract) external {
-        if (forcedTxLogicContracts[userId] != address(0)) {
-            revert ForcedTxLogicAlreadyRegistered();
-        }
-        // The logic contract must confirm it accepts this userId.
-        // This prevents an attacker from registering a malicious contract
-        // for someone else's userId — the logic contract itself must consent.
-        (bool ok, bytes memory ret) = logicContract.call{gas: FORCED_TX_GAS_LIMIT}(
-            abi.encodeWithSignature("acceptRegistration(uint64)", userId)
-        );
-        if (!ok || ret.length < 32 || abi.decode(ret, (uint64)) != userId) {
-            revert ForcedTxLogicNotAccepted();
-        }
-
-        forcedTxLogicContracts[userId] = logicContract;
-        emit ForcedTxLogicRegistered(userId, logicContract);
-    }
-
-    // -----------------------------------------------------------------------
-    // queueForcedTx()  —  queue a forced tx (separate from postBlock)
-    // -----------------------------------------------------------------------
-
-    /// @notice Queue a forced transaction for a userId.
-    ///         Calls the registered logic contract's insertIntmaxTx() with a gas
-    ///         limit.  If a valid tx hash is returned, it is added to the
-    ///         forced tx accumulator hash chain.
-    ///         Callable by anyone — the logic contract controls whether a tx
-    ///         should actually be inserted.
-    /// @param userId  The Intmax user ID to insert a forced tx for.
-    function queueForcedTx(uint64 userId) external {
-        address logicContract = forcedTxLogicContracts[userId];
-        if (logicContract == address(0)) revert NoForcedTxLogicRegistered();
-
-        // Call with gas limit to prevent griefing
-        (bool success, bytes memory returnData) = logicContract.call{gas: FORCED_TX_GAS_LIMIT}(
-            abi.encodeCall(IForcedTxLogic.insertIntmaxTx, ())
-        );
-
-        if (!success || returnData.length < 32) revert ForcedTxInsertFailed();
-        bytes32 txHash = abi.decode(returnData, (bytes32));
-
-        // bytes32(0) signals "no tx to insert"
-        if (txHash == bytes32(0)) revert ForcedTxInsertFailed();
-
-        forcedTxCount++;
-        forcedTxAccumulator = keccak256(
-            abi.encodePacked(forcedTxAccumulator, userId, txHash)
-        );
-
-        emit ForcedTxQueued(userId, txHash, forcedTxAccumulator);
-    }
-
-    // -----------------------------------------------------------------------
     // postBlock()  —  post a batch of fast blocks (one posting round)
     // -----------------------------------------------------------------------
 
@@ -488,9 +384,8 @@ contract IntmaxRollup {
     ///         posting round (~5 minutes).  All sub-blocks' data lives in
     ///         calldata for data availability.
     ///
-    ///         Deposits and forced txs are applied to the LAST sub-block in
-    ///         the batch only.  Intermediate sub-blocks have zero deposit and
-    ///         forced tx hash chains.
+    ///         Deposits are applied to the LAST sub-block in the batch only.
+    ///         Intermediate sub-blocks have zero deposit hash chains.
     ///
     ///         `blockHashChainAt` is recorded only for the final block number
     ///         of the batch (the posting-round boundary).
@@ -522,7 +417,7 @@ contract IntmaxRollup {
         bytes32 previousDepositHashChain = depositHashChain;
         uint64 processedDepositsBefore = processedDepositCount;
 
-        // --- Prepare deposits and forced txs for this posting round ---
+        // --- Prepare deposits for this posting round ---
         bytes32 pendingHashBefore = _pendingDepositHashChain;
         bytes32 batchDepositHashChain = pendingHashBefore;
         _pendingDepositHashChain = bytes32(0);
@@ -530,24 +425,16 @@ contract IntmaxRollup {
         uint64 previousPostingRound = postingRound;
         postingRound++;
         uint64 currentRound = postingRound;
-        forcedTxAccumulatorAtRound[currentRound] = forcedTxAccumulator;
-
-        bytes32 batchForcedTxHashChain = bytes32(0);
-        if (currentRound >= 3) {
-            batchForcedTxHashChain = forcedTxAccumulatorAtRound[currentRound - 2];
-        }
 
         // --- Iterate over sub-blocks ---
         uint256 lastIdx = subBlocks.length - 1;
         for (uint256 i = 0; i < subBlocks.length; i++) {
             currentBlockNumber++;
 
-            // Only the last sub-block carries deposits and forced txs
+            // Only the last sub-block carries deposits.
             bytes32 depositHash = bytes32(0);
-            bytes32 forcedTxHash = bytes32(0);
             if (i == lastIdx) {
                 depositHash = batchDepositHashChain;
-                forcedTxHash = batchForcedTxHashChain;
             }
 
             currentHash = _computeBlockHash(
@@ -556,11 +443,9 @@ contract IntmaxRollup {
                 subBlocks[i].timestamp,
                 subBlocks[i].localIds,
                 subBlocks[i].txTreeRoot,
-                depositHash,
-                forcedTxHash
+                depositHash
             );
             blockDepositHash[currentBlockNumber] = depositHash;
-            blockForcedTxHash[currentBlockNumber] = forcedTxHash;
 
             emit BlockPosted(
                 currentBlockNumber,
@@ -1067,12 +952,10 @@ contract IntmaxRollup {
         }
         depositHashChain = meta.previousDepositHashChain;
         postingRound = meta.postingRoundBefore;
-        delete forcedTxAccumulatorAtRound[meta.postingRoundAfter];
 
         if (meta.endBlockNumber >= meta.startBlockNumber && meta.endBlockNumber != 0) {
             for (uint64 bn = meta.startBlockNumber; bn <= meta.endBlockNumber; bn++) {
                 delete blockDepositHash[bn];
-                delete blockForcedTxHash[bn];
                 delete blockHashChainAt[bn];
                 if (bn == meta.endBlockNumber) break;
             }
@@ -1187,7 +1070,7 @@ contract IntmaxRollup {
 
     /// @dev Compute block hash matching Rust's Block::hash_with_prev_hash:
     ///      keccak256(prev_hash || aggregator_id || timestamp || local_ids
-    ///               || tx_tree_root || deposit_hash_chain || forced_tx_hash_chain)
+    ///               || tx_tree_root || deposit_hash_chain)
     ///      All values packed as u32 words.
     function _computeBlockHash(
         bytes32 prevHash,
@@ -1195,8 +1078,7 @@ contract IntmaxRollup {
         uint64 timestamp,
         uint32[] calldata localIds,
         bytes32 txTreeRoot,
-        bytes32 blockDepositHashChain,
-        bytes32 blockForcedTxHashChain
+        bytes32 blockDepositHashChain
     ) internal pure returns (bytes32) {
         // Build the u32 array matching Rust's solidity_keccak256 layout.
         // NOTE: abi.encodePacked(uint32[]) pads each element to 32 bytes, which
@@ -1214,8 +1096,7 @@ contract IntmaxRollup {
         packed = bytes.concat(
             packed,
             txTreeRoot,
-            blockDepositHashChain,
-            blockForcedTxHashChain
+            blockDepositHashChain
         );
         return keccak256(packed);
     }

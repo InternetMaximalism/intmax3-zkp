@@ -31,7 +31,6 @@ use crate::{
     common::{
         block::Block,
         deposit::Deposit,
-        forced_tx::ForcedTx,
         trees::{
             account_tree::{AccountLeaf, AccountMerkleProof, SendMerkleProof},
             deposit_tree::DepositMerkleProof,
@@ -81,11 +80,6 @@ pub struct BlockHashChainProcessorWitness {
     pub channel_action_indices: Option<Vec<u64>>,
     pub channel_actions: Option<Vec<ChannelAction>>,
     pub channel_action_merkle_proofs: Option<Vec<ChannelActionMerkleProof>>,
-    /// Forced transaction witnesses for this block.
-    pub forced_txs: Vec<ForcedTx>,
-    pub forced_tx_prev_account_leaves: Vec<AccountLeaf>,
-    pub forced_tx_account_merkle_proofs: Vec<AccountMerkleProof>,
-    pub forced_tx_send_merkle_proofs: Vec<SendMerkleProof>,
 }
 
 pub struct BlockHashChainProcessor<F, C, const D: usize>
@@ -274,12 +268,6 @@ where
                 .channel_action_merkle_proofs
                 .clone()
                 .unwrap_or(dummy_channel_action_merkle_proofs),
-            prev_forced_tx_hash_chain: prev_ext_public_state.forced_tx_hash_chain,
-            prev_forced_tx_count: prev_ext_public_state.forced_tx_count,
-            forced_txs: witness.forced_txs.clone(),
-            forced_tx_prev_account_leaves: witness.forced_tx_prev_account_leaves.clone(),
-            forced_tx_account_merkle_proofs: witness.forced_tx_account_merkle_proofs.clone(),
-            forced_tx_send_merkle_proofs: witness.forced_tx_send_merkle_proofs.clone(),
         };
         let update_account_proof = update_account_circuit.prove(&update_account_tree)?;
 

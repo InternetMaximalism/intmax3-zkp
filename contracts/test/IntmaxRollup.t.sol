@@ -4,7 +4,6 @@ pragma solidity ^0.8.24;
 import {Test, console} from "forge-std/Test.sol";
 import {IntmaxRollup, IGnarkVerifier} from "../src/IntmaxRollup.sol";
 import {Verifier as GnarkVerifier} from "../src/GnarkGroth16Verifier.sol";
-import {IForcedTxLogic} from "../src/IForcedTxLogic.sol";
 import {KZGProof} from "../src/BlobKZGVerifier.sol";
 import {Groth16Verifier} from "../src/Groth16Verifier.sol";
 import {MleVerifier} from "@mle/MleVerifier.sol";
@@ -882,17 +881,10 @@ contract IntmaxRollupTest is Test {
         assertFalse(fraudConfirmed, "Can't confirm fraud if binding fails");
     }
 
-    function test_blockDepositAndForcedHash_persistAndRollback() public {
-        // Register forced tx logic and queue a tx so we have a non-zero accumulator.
-        MockForcedTxLogic mockLogic = new MockForcedTxLogic(bytes32(uint256(0xabc)));
-        rollup.registerForcedTxLogic(42, address(mockLogic));
-        rollup.queueForcedTx(42);
-
-        // Warm up two posting rounds so the forced tx matures on round 3.
+    function test_blockDepositHash_persistAndRollback() public {
         uint32[] memory ids = new uint32[](1);
         ids[0] = 1;
         _postAndSubmitDefault(_singleBlockBatch(1, ids, 100, bytes32(uint256(0x101))));
-        bytes32 forcedSnapshotRound1 = rollup.forcedTxAccumulatorAtRound(1);
         _postAndSubmitDefault(_singleBlockBatch(1, ids, 200, bytes32(uint256(0x202))));
 
         uint256 badSubmissionId = rollup.nextSubmissionId();
@@ -915,11 +907,6 @@ contract IntmaxRollupTest is Test {
         uint64 targetBlock = rollup.blockNumber();
         bytes32 storedDepositHash = rollup.blockDepositHash(targetBlock);
         assertTrue(storedDepositHash != bytes32(0), "deposit hash must be recorded");
-        assertEq(
-            rollup.blockForcedTxHash(targetBlock),
-            forcedSnapshotRound1,
-            "forced tx hash should use matured snapshot"
-        );
 
         IntmaxRollup.ValidityPublicInputs memory vpis = _defaultValidityPIs(stateRoot);
         // groth16.pubInputs[0..7] = 0 != keccak256(vpis) -- fraud confirmed via condition (b)
@@ -940,7 +927,6 @@ contract IntmaxRollupTest is Test {
         assertTrue(fraudConfirmed, "fraud should be confirmed");
 
         assertEq(rollup.blockDepositHash(targetBlock), bytes32(0), "deposit hash cleared on rollback");
-        assertEq(rollup.blockForcedTxHash(targetBlock), bytes32(0), "forced hash cleared on rollback");
     }
 
     function test_fraudProof_slashesCascadeAndRollsBack() public {
@@ -1370,118 +1356,6 @@ contract IntmaxRollupTest is Test {
     }
 
     // -----------------------------------------------------------------------
-    // Forced TX tests
-    // -----------------------------------------------------------------------
-
-    function test_registerForcedTxLogic() public {
-        MockForcedTxLogic mockLogic = new MockForcedTxLogic(bytes32(uint256(0xaaa)));
-        rollup.registerForcedTxLogic(42, address(mockLogic));
-        assertEq(rollup.forcedTxLogicContracts(42), address(mockLogic));
-    }
-
-    function test_registerForcedTxLogic_immutable() public {
-        MockForcedTxLogic mock1 = new MockForcedTxLogic(bytes32(uint256(0xaaa)));
-        MockForcedTxLogic mock2 = new MockForcedTxLogic(bytes32(uint256(0xbbb)));
-        rollup.registerForcedTxLogic(42, address(mock1));
-
-        // Second registration for same userId reverts
-        vm.expectRevert(IntmaxRollup.ForcedTxLogicAlreadyRegistered.selector);
-        rollup.registerForcedTxLogic(42, address(mock2));
-    }
-
-    function test_registerForcedTxLogic_rejectingContract() public {
-        RevertingForcedTxLogic revertLogic = new RevertingForcedTxLogic();
-        vm.expectRevert(IntmaxRollup.ForcedTxLogicNotAccepted.selector);
-        rollup.registerForcedTxLogic(42, address(revertLogic));
-    }
-
-    function test_queueForcedTx_noLogicRegistered() public {
-        vm.expectRevert(IntmaxRollup.NoForcedTxLogicRegistered.selector);
-        rollup.queueForcedTx(999);
-    }
-
-    function test_queueForcedTx_success() public {
-        // Deploy a mock logic contract that returns a valid tx hash
-        MockForcedTxLogic mockLogic = new MockForcedTxLogic(bytes32(uint256(0xdeadbeef)));
-        rollup.registerForcedTxLogic(42, address(mockLogic));
-
-        rollup.queueForcedTx(42);
-
-        assertEq(rollup.forcedTxCount(), 1);
-        assertTrue(rollup.forcedTxAccumulator() != bytes32(0));
-    }
-
-    function test_queueForcedTx_returnsZero_reverts() public {
-        // Deploy a mock that returns bytes32(0) = no tx to insert
-        MockForcedTxLogic mockLogic = new MockForcedTxLogic(bytes32(0));
-        rollup.registerForcedTxLogic(42, address(mockLogic));
-
-        vm.expectRevert(IntmaxRollup.ForcedTxInsertFailed.selector);
-        rollup.queueForcedTx(42);
-    }
-
-    function test_queueForcedTx_revertingLogic() public {
-        // Deploy a mock that accepts registration but reverts on insertIntmaxTx
-        RevertOnInsertLogic mockLogic = new RevertOnInsertLogic();
-        rollup.registerForcedTxLogic(42, address(mockLogic));
-
-        vm.expectRevert(IntmaxRollup.ForcedTxInsertFailed.selector);
-        rollup.queueForcedTx(42);
-    }
-
-    function test_forcedTx_slotMaturation() public {
-        // Queue a forced tx, then post 3 rounds. The forced tx should
-        // mature at round 3 (queued before round 1, snapshot at round 1,
-        // mature at round 3 = accumulatorAtRound[3-2] = accumulatorAtRound[1]).
-        MockForcedTxLogic mockLogic = new MockForcedTxLogic(bytes32(uint256(0xabc)));
-        rollup.registerForcedTxLogic(42, address(mockLogic));
-
-        rollup.queueForcedTx(42);
-        bytes32 accumulatorAfterQueue = rollup.forcedTxAccumulator();
-
-        uint32[] memory ids = new uint32[](1);
-        ids[0] = 1;
-
-        // Round 1: snapshot accumulator
-        _postAndSubmitDefault(_singleBlockBatch(1, ids, 100, bytes32(uint256(0x111))));
-        assertEq(rollup.forcedTxAccumulatorAtRound(1), accumulatorAfterQueue);
-
-        // Round 2
-        _postAndSubmitDefault(_singleBlockBatch(1, ids, 200, bytes32(uint256(0x222))));
-
-        // Round 3: mature forced txs = accumulatorAtRound[3-2] = accumulatorAtRound[1]
-        _postAndSubmitDefault(_singleBlockBatch(1, ids, 300, bytes32(uint256(0x333))));
-
-        // Verify the accumulator was snapshotted correctly
-        assertEq(rollup.forcedTxAccumulatorAtRound(1), accumulatorAfterQueue);
-        assertEq(rollup.postingRound(), 3);
-    }
-
-    function test_forcedTx_hashChainAccumulation() public {
-        MockForcedTxLogic mock1 = new MockForcedTxLogic(bytes32(uint256(0x111)));
-        MockForcedTxLogic mock2 = new MockForcedTxLogic(bytes32(uint256(0x222)));
-        rollup.registerForcedTxLogic(10, address(mock1));
-        rollup.registerForcedTxLogic(20, address(mock2));
-
-        rollup.queueForcedTx(10);
-        bytes32 afterFirst = rollup.forcedTxAccumulator();
-
-        rollup.queueForcedTx(20);
-        bytes32 afterSecond = rollup.forcedTxAccumulator();
-
-        assertEq(rollup.forcedTxCount(), 2);
-        assertTrue(afterFirst != bytes32(0));
-        assertTrue(afterSecond != afterFirst);
-
-        // Verify the hash chain matches expected computation
-        bytes32 expected1 = keccak256(abi.encodePacked(bytes32(0), uint64(10), bytes32(uint256(0x111))));
-        assertEq(afterFirst, expected1);
-
-        bytes32 expected2 = keccak256(abi.encodePacked(expected1, uint64(20), bytes32(uint256(0x222))));
-        assertEq(afterSecond, expected2);
-    }
-
-    // -----------------------------------------------------------------------
     // Gas measurement
     // -----------------------------------------------------------------------
 
@@ -1512,43 +1386,6 @@ contract IntmaxRollupTest is Test {
         console.log("finalize() gas:", gasUsed);
     }
 
-    function test_gas_registerForcedTxLogic() public {
-        MockForcedTxLogic mockLogic = new MockForcedTxLogic(bytes32(uint256(0xaaa)));
-        uint256 gasBefore = gasleft();
-        rollup.registerForcedTxLogic(42, address(mockLogic));
-        uint256 gasUsed = gasBefore - gasleft();
-        console.log("registerForcedTxLogic() gas:", gasUsed);
-    }
-
-    function test_gas_queueForcedTx() public {
-        MockForcedTxLogic mockLogic = new MockForcedTxLogic(bytes32(uint256(0xdeadbeef)));
-        rollup.registerForcedTxLogic(42, address(mockLogic));
-
-        uint256 gasBefore = gasleft();
-        rollup.queueForcedTx(42);
-        uint256 gasUsed = gasBefore - gasleft();
-        console.log("queueForcedTx() gas:", gasUsed);
-    }
-
-    function test_gas_postBlock_withForcedTx() public {
-        // Queue forced tx, then measure postBlock with maturation logic
-        MockForcedTxLogic mockLogic = new MockForcedTxLogic(bytes32(uint256(0xabc)));
-        rollup.registerForcedTxLogic(42, address(mockLogic));
-        rollup.queueForcedTx(42);
-
-        uint32[] memory ids = new uint32[](2);
-        ids[0] = 1;
-        ids[1] = 2;
-
-        // Post 3 rounds so maturation kicks in on the third
-        _postAndSubmitDefault(_singleBlockBatch(1, ids, 100, bytes32(uint256(0x111))));
-        _postAndSubmitDefault(_singleBlockBatch(1, ids, 200, bytes32(uint256(0x222))));
-
-        uint256 gasBefore = gasleft();
-        _postAndSubmitDefault(_singleBlockBatch(1, ids, 300, bytes32(uint256(0x333))));
-        uint256 gasUsed = gasBefore - gasleft();
-        console.log("postBlockAndSubmit() with mature forced tx gas:", gasUsed);
-    }
     // -----------------------------------------------------------------------
     // Pull-payment resilience tests
     // -----------------------------------------------------------------------
@@ -1689,185 +1526,9 @@ contract IntmaxRollupTest is Test {
         assertLt(gasUsed, 250_000_000, "rollback gas must be bounded");
     }
 
-    // -----------------------------------------------------------------------
-    // Forced tx ownership test
-    // -----------------------------------------------------------------------
-
-    function test_registerForcedTxLogic_permissionlessButImmutable() public {
-        MockForcedTxLogic logic1 = new MockForcedTxLogic(bytes32(uint256(0x111)));
-        address anyUser = makeAddr("anyUser");
-
-        // Anyone can register (permissionless -- the logic contract's acceptRegistration is the gate)
-        vm.prank(anyUser);
-        rollup.registerForcedTxLogic(99999, address(logic1));
-        assertEq(rollup.forcedTxLogicContracts(99999), address(logic1));
-
-        // Second registration for same userId reverts (immutable)
-        MockForcedTxLogic logic2 = new MockForcedTxLogic(bytes32(uint256(0x222)));
-        vm.prank(anyUser);
-        vm.expectRevert(IntmaxRollup.ForcedTxLogicAlreadyRegistered.selector);
-        rollup.registerForcedTxLogic(99999, address(logic2));
-    }
-
-    /// @dev gnark Groth16 raw proof bytes -- stored as state to avoid via_ir inlining issues.
-    bytes internal _gnarkRawProof = hex"07b73461134ed24b94cedaf234922c62224997b83784064c489f65ef3fe674b216b0bd162ccaf6ac674949bb994ed4115be6ec53ea58ce0bb288e687e531e187123f8392318d38a5e24b8b5196980e77603c51ba6bc4204baa9354fe382c47b00fba9eeb255514d79ea29d7024f5364f79278085a3b46da1c39d0098ad87162f0ef17d7c3cadf8a9620cc748e71c8cf549a669f8b289b96346cef4311eff3b861ee04d08a3921c2f8bb4f162c40e62046cf887ec4993b8173d3b9e55c80b0e471199414586525fdfcb7998407e396b4d30bc7fb4a917c70d212fe5c9b7826f661eed2d97eb3f0649f561c51ac3bf42ab898bdc1bc3ce0a24410d0823c9fd60270000000109c0e0341f14beaf0aa49803b2eea690aaae9594f11825eee1509be33adf85f110caa026ae6277f4440b0c0c74caa2c91285db838074ab03238d25273e1546111b8015653615ce6e13f48beb2c664b03fc83110c789f68cc7ec1445521ddb68d1f549bbf1d9eea73ec1d4431a38a507bb7a76d1ff66b13e15495837a72218c95";
-
-    /// @dev Parse gnark Groth16 proof by reading 32-byte chunks from stored raw bytes.
-    function _realGnarkProof() internal view returns (IntmaxRollup.Groth16Params memory params) {
-        bytes memory raw = _gnarkRawProof;
-        // A (64 bytes) at offset 0
-        params.proof.a[0] = _readUint(raw, 0);
-        params.proof.a[1] = _readUint(raw, 32);
-        // B (128 bytes) at offset 64
-        params.proof.b[0][0] = _readUint(raw, 64);
-        params.proof.b[0][1] = _readUint(raw, 96);
-        params.proof.b[1][0] = _readUint(raw, 128);
-        params.proof.b[1][1] = _readUint(raw, 160);
-        // C (64 bytes) at offset 192
-        params.proof.c[0] = _readUint(raw, 192);
-        params.proof.c[1] = _readUint(raw, 224);
-        // Commitment (64 bytes at offset 260 = 256 + 4 for nbCommitments)
-        params.commitments[0] = _readUint(raw, 260);
-        params.commitments[1] = _readUint(raw, 292);
-        // CommitmentPok (64 bytes at offset 324)
-        params.commitmentPok[0] = _readUint(raw, 324);
-        params.commitmentPok[1] = _readUint(raw, 356);
-        // piHash = 0x6467732d3ff664b85497807da9a5c8bc058642bfab878c7a6816359bc9799ab2
-        params.pubInputs = new uint256[](8);
-        params.pubInputs[0] = 1684501293; params.pubInputs[1] = 1073112248;
-        params.pubInputs[2] = 1419214973; params.pubInputs[3] = 2846214332;
-        params.pubInputs[4] = 92684991;   params.pubInputs[5] = 2877787258;
-        params.pubInputs[6] = 1746285979; params.pubInputs[7] = 3380189874;
-    }
-
-    function _readUint(bytes memory data, uint256 offset) internal pure returns (uint256 val) {
-        assembly { val := mload(add(add(data, 32), offset)) }
-    }
-
-    /// @notice Complete finalize() E2E with real gnark Groth16 + MLE + real KZG.
-    ///         Uses gnark-generated GnarkGroth16Verifier with commitment support.
-    function test_finalize_realE2E() public {
-        _finalize_realE2E_impl();
-    }
-
-    function _finalize_realE2E_impl() internal {
-        // This test uses real postBlockAndSubmit() -> real finalize() end-to-end.
-
-        // VPI from e2e fixture (hardcoded -- generated by Plonky2 validity circuit)
-        bytes32 initialExtCommitment = 0x428e53c73d2e45bfa8ec3ab8e9c45fb7dcd96288a95fe1ba1fcab889e4bee766;
-        bytes32 finalExtCommitment   = 0xc37a8de7f17f7efbf676c27e3dd54bd5b9750a14bf1574bebb23bde2f7a54f2c;
-
-        // Default MLE proof (e2eRollup has mleDegreeBits=0, so MLE verification is skipped)
-        MleVerifier.MleProof memory mleProof = _defaultMleProof();
-
-        // Real gnark Groth16 proof (hardcoded from gnark v0.10 output)
-        IntmaxRollup.Groth16Params memory groth16 = _realGnarkProof();
-
-        // -- 1. Verify pre-conditions --
-        // e2eRollup was deployed in setUp with genesisStateRoot = initialExtCommitment
-        assertEq(e2eRollup.latestFinalizedStateRoot(), initialExtCommitment,
-            "genesis state root must match fixture");
-        assertEq(e2eRollup.blockNumber(), 0, "no blocks posted yet");
-
-        // -- 2. Build proofBytes --
-        bytes memory proofBytes = abi.encode(groth16, mleProof);
-
-        // -- 3. Compute real KZG proof --
-        (KZGProof memory kzg, bytes32 blobHash) = _computeKZGProof(proofBytes);
-
-        // -- 4. Post batch via real postBlockAndSubmit() --
-        // SubBlock matches the Rust fixture: aggregatorId=1, timestamp=1, localIds=[0,0], txTreeRoot=0x0
-        uint32[] memory localIds = new uint32[](2);  // [0, 0] -- padded to num_users=2
-        IntmaxRollup.SubBlock[] memory batch = new IntmaxRollup.SubBlock[](1);
-        batch[0] = IntmaxRollup.SubBlock({
-            aggregatorId: 1,
-            localIds: localIds,
-            timestamp: 1,
-            txTreeRoot: bytes32(0)
-        });
-
-        // Set blobhashes for the EIP-4844 context
-        bytes32[] memory bhs = new bytes32[](1);
-        bhs[0] = blobHash;
-        vm.blobhashes(bhs);
-
-        // Fund and post as submitter -- this creates the submission with real commitment
-        vm.deal(address(this), 10 ether);
-        e2eRollup.postBlockAndSubmit{value: 1 ether}(
-            batch,
-            keccak256(proofBytes),
-            uint32(proofBytes.length),
-            finalExtCommitment  // stateRoot
-        );
-
-        // Verify state after posting
-        assertEq(e2eRollup.blockNumber(), 1, "block number must be 1 after posting");
-
-        // -- 5. Build VPI matching on-chain state --
-        IntmaxRollup.ValidityPublicInputs memory vpis = IntmaxRollup.ValidityPublicInputs({
-            initialBlockNumber: 0,
-            initialBlockChain: e2eRollup.blockHashChainAt(0),
-            initialExtCommitment: initialExtCommitment,
-            finalBlockNumber: 1,
-            finalBlockChain: e2eRollup.blockHashChainAt(1),
-            finalExtCommitment: finalExtCommitment,
-            prover: address(0)
-        });
-
-        // -- 6. Call finalize() -- no vm.store, no cheatcodes --
-        bool ok = e2eRollup.finalize(
-            0, finalExtCommitment, vpis,
-            mleProof, groth16
-        );
-
-        assertTrue(ok, "finalize() must succeed with real gnark Groth16 + MLE");
-        assertTrue(e2eRollup.isFinalized(0));
-        assertEq(e2eRollup.latestFinalizedStateRoot(), finalExtCommitment);
-        // Pull-payment: stake credited, not pushed
-        assertEq(e2eRollup.pendingWithdrawals(address(this)), 1 ether, "stake must be credited");
-    }
 }
 
 /// @dev Contract that reverts on ETH receipt -- tests pull-payment resilience.
 contract RevertingReceiver {
     receive() external payable { revert("no ETH accepted"); }
-}
-
-/// @dev Mock forced tx logic contract that returns a fixed tx hash.
-contract MockForcedTxLogic is IForcedTxLogic {
-    bytes32 private _txHash;
-
-    constructor(bytes32 txHash) {
-        _txHash = txHash;
-    }
-
-    function insertIntmaxTx() external override returns (bytes32) {
-        return _txHash;
-    }
-
-    function acceptRegistration(uint64 userId) external pure override returns (uint64) {
-        return userId;
-    }
-}
-
-/// @dev Mock forced tx logic contract that always reverts (including registration).
-contract RevertingForcedTxLogic is IForcedTxLogic {
-    function insertIntmaxTx() external pure override returns (bytes32) {
-        revert("intentional revert");
-    }
-
-    function acceptRegistration(uint64) external pure override returns (uint64) {
-        revert("intentional revert");
-    }
-}
-
-/// @dev Mock that accepts registration but reverts on insertIntmaxTx.
-contract RevertOnInsertLogic is IForcedTxLogic {
-    function insertIntmaxTx() external pure override returns (bytes32) {
-        revert("intentional revert on insert");
-    }
-
-    function acceptRegistration(uint64 userId) external pure override returns (uint64) {
-        return userId;
-    }
 }

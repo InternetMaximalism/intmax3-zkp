@@ -36,7 +36,6 @@ pub struct Block {
     pub local_ids: Vec<u32>,
     pub tx_tree_root: Bytes32,
     pub deposit_hash_chain: Bytes32,
-    pub forced_tx_hash_chain: Bytes32,
 }
 
 #[derive(Debug, Clone)]
@@ -49,7 +48,6 @@ pub struct BlockTarget {
     pub local_ids: Vec<Target>,
     pub tx_tree_root: Bytes32Target,
     pub deposit_hash_chain: Bytes32Target,
-    pub forced_tx_hash_chain: Bytes32Target,
 }
 
 impl Block {
@@ -60,7 +58,6 @@ impl Block {
         timestamp: u64,
         txs: &[TxV2],
         deposit_hash_chain: Bytes32,
-        forced_tx_hash_chain: Bytes32,
     ) -> Result<Self, BlockError> {
         Self::new_with_hub(
             num_users,
@@ -69,7 +66,6 @@ impl Block {
             timestamp,
             compute_tx_v2_root(txs).into(),
             deposit_hash_chain,
-            forced_tx_hash_chain,
         )
     }
 
@@ -80,7 +76,6 @@ impl Block {
         timestamp: u64,
         tx_tree_root: Bytes32,
         deposit_hash_chain: Bytes32,
-        forced_tx_hash_chain: Bytes32,
     ) -> Result<Self, BlockError> {
         Self::new(
             num_users,
@@ -89,7 +84,6 @@ impl Block {
             timestamp,
             tx_tree_root,
             deposit_hash_chain,
-            forced_tx_hash_chain,
         )
     }
 
@@ -100,7 +94,6 @@ impl Block {
         timestamp: u64,
         tx_tree_root: Bytes32,
         deposit_hash_chain: Bytes32,
-        forced_tx_hash_chain: Bytes32,
     ) -> Result<Self, BlockError> {
         if local_ids.len() as u32 > num_users {
             return Err(BlockError::InvalidNumUsers(format!(
@@ -120,7 +113,6 @@ impl Block {
             local_ids,
             tx_tree_root,
             deposit_hash_chain,
-            forced_tx_hash_chain,
         })
     }
 
@@ -148,7 +140,6 @@ impl Block {
             self.account_nos().to_vec(),
             self.tx_tree_root.to_u32_vec(),
             self.deposit_hash_chain.to_u32_vec(),
-            self.forced_tx_hash_chain.to_u32_vec(),
         ]
         .concat();
         Ok(Bytes32::from_u32_slice(&solidity_keccak256(&inputs)).expect("hashing result invalid"))
@@ -180,7 +171,6 @@ impl BlockTarget {
 
         let tx_tree_root = Bytes32Target::new(builder, is_checked);
         let deposit_hash_chain = Bytes32Target::new(builder, is_checked);
-        let forced_tx_hash_chain = Bytes32Target::new(builder, is_checked);
 
         Self {
             num_users,
@@ -189,7 +179,6 @@ impl BlockTarget {
             local_ids,
             tx_tree_root,
             deposit_hash_chain,
-            forced_tx_hash_chain,
         }
     }
 
@@ -210,7 +199,6 @@ impl BlockTarget {
             .collect();
         let tx_tree_root = Bytes32Target::constant(builder, value.tx_tree_root);
         let deposit_hash_chain = Bytes32Target::constant(builder, value.deposit_hash_chain);
-        let forced_tx_hash_chain = Bytes32Target::constant(builder, value.forced_tx_hash_chain);
         Self {
             num_users: value.num_users,
             aggregator_id,
@@ -218,7 +206,6 @@ impl BlockTarget {
             local_ids,
             tx_tree_root,
             deposit_hash_chain,
-            forced_tx_hash_chain,
         }
     }
 
@@ -240,7 +227,6 @@ impl BlockTarget {
         inputs.extend(self.local_ids.iter().copied());
         inputs.extend(self.tx_tree_root.to_vec());
         inputs.extend(self.deposit_hash_chain.to_vec());
-        inputs.extend(self.forced_tx_hash_chain.to_vec());
         Bytes32Target::from_slice(&builder.keccak256::<C>(&inputs))
     }
 
@@ -266,8 +252,6 @@ impl BlockTarget {
         self.tx_tree_root.set_witness(witness, value.tx_tree_root);
         self.deposit_hash_chain
             .set_witness(witness, value.deposit_hash_chain);
-        self.forced_tx_hash_chain
-            .set_witness(witness, value.forced_tx_hash_chain);
     }
 }
 
@@ -282,7 +266,6 @@ mod tests {
         let mut rng = StdRng::seed_from_u64(42);
         let tx_tree_root = Bytes32::rand(&mut rng);
         let deposit_hash_chain = Bytes32::rand(&mut rng);
-        let forced_tx_hash_chain = Bytes32::rand(&mut rng);
         let prev_hash = Bytes32::rand(&mut rng);
 
         let block = Block::new(
@@ -292,7 +275,6 @@ mod tests {
             1000,
             tx_tree_root,
             deposit_hash_chain,
-            forced_tx_hash_chain,
         )
         .unwrap();
 
@@ -302,40 +284,35 @@ mod tests {
     }
 
     #[test]
-    fn test_block_hash_differs_with_forced_tx_hash_chain() {
+    fn test_block_hash_is_stable_without_extra_queue_state() {
         let mut rng = StdRng::seed_from_u64(99);
         let tx_tree_root = Bytes32::rand(&mut rng);
         let deposit_hash_chain = Bytes32::rand(&mut rng);
         let prev_hash = Bytes32::default();
 
-        let block_no_forced = Block::new(
+        let block_a = Block::new(
             1,
             1,
             &[1],
             100,
             tx_tree_root,
             deposit_hash_chain,
-            Bytes32::default(),
         )
         .unwrap();
 
-        let block_with_forced = Block::new(
+        let block_b = Block::new(
             1,
             1,
             &[1],
             100,
             tx_tree_root,
             deposit_hash_chain,
-            Bytes32::rand(&mut rng),
         )
         .unwrap();
 
-        let h1 = block_no_forced.hash_with_prev_hash(prev_hash).unwrap();
-        let h2 = block_with_forced.hash_with_prev_hash(prev_hash).unwrap();
-        assert_ne!(
-            h1, h2,
-            "different forced_tx_hash_chain should produce different block hashes"
-        );
+        let h1 = block_a.hash_with_prev_hash(prev_hash).unwrap();
+        let h2 = block_b.hash_with_prev_hash(prev_hash).unwrap();
+        assert_eq!(h1, h2, "block hash should depend only on the block payload");
     }
 
     #[test]
@@ -345,7 +322,6 @@ mod tests {
             1,
             &[10, 20],
             100,
-            Bytes32::default(),
             Bytes32::default(),
             Bytes32::default(),
         )
@@ -383,7 +359,6 @@ mod tests {
             &[9],
             100,
             &[tx],
-            Bytes32::default(),
             Bytes32::default(),
         )
         .unwrap();

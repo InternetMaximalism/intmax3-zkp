@@ -21,7 +21,7 @@ use crate::{
     utils::poseidon_hash_out::{PoseidonHashOut, PoseidonHashOutTarget},
 };
 
-pub const EXTENDED_PUBLIC_STATE_U64_LEN: usize = PUBLIC_STATE_U64_LEN + 3 * BYTES32_LEN + 2;
+pub const EXTENDED_PUBLIC_STATE_U64_LEN: usize = PUBLIC_STATE_U64_LEN + 2 * BYTES32_LEN + 1;
 
 #[derive(Debug, Error)]
 pub enum ExtendedPublicStateError {
@@ -41,8 +41,6 @@ pub struct ExtendedPublicState {
     pub block_hash_chain: Bytes32,
     pub deposit_hash_chain: Bytes32,
     pub deposit_count: U63,
-    pub forced_tx_hash_chain: Bytes32,
-    pub forced_tx_count: U63,
 }
 
 impl ExtendedPublicState {
@@ -51,16 +49,12 @@ impl ExtendedPublicState {
         block_hash_chain: Bytes32,
         deposit_hash_chain: Bytes32,
         deposit_count: U63,
-        forced_tx_hash_chain: Bytes32,
-        forced_tx_count: U63,
     ) -> Self {
         Self {
             inner,
             block_hash_chain,
             deposit_hash_chain,
             deposit_count,
-            forced_tx_hash_chain,
-            forced_tx_count,
         }
     }
 
@@ -70,8 +64,6 @@ impl ExtendedPublicState {
             self.block_hash_chain.to_u64_vec(),
             self.deposit_hash_chain.to_u64_vec(),
             self.deposit_count.to_u64_vec(),
-            self.forced_tx_hash_chain.to_u64_vec(),
-            self.forced_tx_count.to_u64_vec(),
         ]
         .concat()
     }
@@ -104,23 +96,12 @@ impl ExtendedPublicState {
         let deposit_count = U63::new(values[cursor]).map_err(|e| {
             ExtendedPublicStateError::InvalidLength(format!("invalid deposit count: {e}"))
         })?;
-        cursor += 1;
-
-        let forced_tx_hash_chain = Bytes32::from_u64_slice(&values[cursor..cursor + BYTES32_LEN])
-            .map_err(|e| ExtendedPublicStateError::Bytes32(e.to_string()))?;
-        cursor += BYTES32_LEN;
-
-        let forced_tx_count = U63::new(values[cursor]).map_err(|e| {
-            ExtendedPublicStateError::InvalidLength(format!("invalid forced tx count: {e}"))
-        })?;
 
         Ok(Self {
             inner,
             block_hash_chain,
             deposit_hash_chain,
             deposit_count,
-            forced_tx_hash_chain,
-            forced_tx_count,
         })
     }
 }
@@ -131,8 +112,6 @@ pub struct ExtendedPublicStateTarget {
     pub block_hash_chain: Bytes32Target,
     pub deposit_hash_chain: Bytes32Target,
     pub deposit_count: U63Target,
-    pub forced_tx_hash_chain: Bytes32Target,
-    pub forced_tx_count: U63Target,
 }
 
 impl ExtendedPublicStateTarget {
@@ -145,8 +124,6 @@ impl ExtendedPublicStateTarget {
             block_hash_chain: Bytes32Target::new::<F, D>(builder, is_checked),
             deposit_hash_chain: Bytes32Target::new::<F, D>(builder, is_checked),
             deposit_count: U63Target::new(builder, is_checked),
-            forced_tx_hash_chain: Bytes32Target::new::<F, D>(builder, is_checked),
-            forced_tx_count: U63Target::new(builder, is_checked),
         }
     }
 
@@ -165,11 +142,6 @@ impl ExtendedPublicStateTarget {
                 value.deposit_hash_chain,
             ),
             deposit_count: U63Target::constant(builder, value.deposit_count),
-            forced_tx_hash_chain: Bytes32Target::constant::<F, D, Bytes32>(
-                builder,
-                value.forced_tx_hash_chain,
-            ),
-            forced_tx_count: U63Target::constant(builder, value.forced_tx_count),
         }
     }
 
@@ -184,10 +156,6 @@ impl ExtendedPublicStateTarget {
         self.deposit_hash_chain
             .set_witness(witness, value.deposit_hash_chain);
         self.deposit_count.set_witness(witness, value.deposit_count);
-        self.forced_tx_hash_chain
-            .set_witness(witness, value.forced_tx_hash_chain);
-        self.forced_tx_count
-            .set_witness(witness, value.forced_tx_count);
     }
 
     pub fn connect<F: RichField + Extendable<D>, const D: usize>(
@@ -201,10 +169,6 @@ impl ExtendedPublicStateTarget {
         self.deposit_hash_chain
             .connect(builder, other.deposit_hash_chain);
         self.deposit_count.connect(builder, &other.deposit_count);
-        self.forced_tx_hash_chain
-            .connect(builder, other.forced_tx_hash_chain);
-        self.forced_tx_count
-            .connect(builder, &other.forced_tx_count);
     }
 
     pub fn select<F: RichField + Extendable<D>, const D: usize>(
@@ -238,18 +202,6 @@ impl ExtendedPublicStateTarget {
                 &when_true.deposit_count,
                 &when_false.deposit_count,
             ),
-            forced_tx_hash_chain: Bytes32Target::select(
-                builder,
-                condition,
-                when_true.forced_tx_hash_chain.clone(),
-                when_false.forced_tx_hash_chain.clone(),
-            ),
-            forced_tx_count: U63Target::select(
-                builder,
-                condition,
-                &when_true.forced_tx_count,
-                &when_false.forced_tx_count,
-            ),
         }
     }
 
@@ -259,8 +211,6 @@ impl ExtendedPublicStateTarget {
             self.block_hash_chain.to_vec(),
             self.deposit_hash_chain.to_vec(),
             self.deposit_count.to_vec(),
-            self.forced_tx_hash_chain.to_vec(),
-            self.forced_tx_count.to_vec(),
         ]
         .concat()
     }
@@ -291,20 +241,12 @@ impl ExtendedPublicStateTarget {
         cursor += BYTES32_LEN;
 
         let deposit_count = U63Target::from_slice(&values[cursor..cursor + 1]);
-        cursor += 1;
-
-        let forced_tx_hash_chain = Bytes32Target::from_slice(&values[cursor..cursor + BYTES32_LEN]);
-        cursor += BYTES32_LEN;
-
-        let forced_tx_count = U63Target::from_slice(&values[cursor..cursor + 1]);
 
         Self {
             inner,
             block_hash_chain,
             deposit_hash_chain,
             deposit_count,
-            forced_tx_hash_chain,
-            forced_tx_count,
         }
     }
 }
