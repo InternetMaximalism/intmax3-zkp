@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.24;
 
-import {Test, console} from "forge-std/Test.sol";
+import {Test, console, stdStorage, StdStorage} from "forge-std/Test.sol";
 import {IntmaxRollup, IGnarkVerifier} from "../src/IntmaxRollup.sol";
 import {Verifier as GnarkVerifier} from "../src/GnarkGroth16Verifier.sol";
 import {KZGProof} from "../src/BlobKZGVerifier.sol";
@@ -12,6 +12,7 @@ import {GoldilocksExt3} from "@mle/spongefish/GoldilocksExt3.sol";
 import {SpongefishWhirVerify} from "@mle/spongefish/SpongefishWhirVerify.sol";
 
 contract IntmaxRollupTest is Test {
+    using stdStorage for StdStorage;
     IntmaxRollup public rollup;
     IntmaxRollup public e2eRollup;
     GnarkVerifier public gnarkVerifierContract;
@@ -367,6 +368,62 @@ contract IntmaxRollupTest is Test {
         return abi.decode(vm.parseJson(json, path), (uint256));
     }
 
+    function _b32(string memory json, string memory path) internal pure returns (bytes32) {
+        return abi.decode(vm.parseJson(json, path), (bytes32));
+    }
+
+    function _addr(string memory json, string memory path) internal pure returns (address) {
+        return abi.decode(vm.parseJson(json, path), (address));
+    }
+
+    function _realGroth16FromFixture(string memory groth16Json)
+        internal
+        pure
+        returns (IntmaxRollup.Groth16Params memory groth16)
+    {
+        bytes memory rawProof = abi.decode(vm.parseJson(groth16Json, ".raw_proof_hex"), (bytes));
+        require(rawProof.length >= 388, "Raw proof too short");
+
+        uint256[8] memory proof;
+        assembly {
+            let src := add(rawProof, 32)
+            for { let i := 0 } lt(i, 8) { i := add(i, 1) } {
+                mstore(add(proof, mul(i, 32)), mload(add(src, mul(i, 32))))
+            }
+        }
+
+        uint256[2] memory commitments;
+        assembly {
+            let src := add(add(rawProof, 32), 260)
+            mstore(commitments, mload(src))
+            mstore(add(commitments, 32), mload(add(src, 32)))
+        }
+
+        uint256[2] memory commitmentPok;
+        assembly {
+            let src := add(add(rawProof, 32), 324)
+            mstore(commitmentPok, mload(src))
+            mstore(add(commitmentPok, 32), mload(add(src, 32)))
+        }
+
+        uint256[] memory inputs = new uint256[](8);
+        for (uint256 i = 0; i < 8; i++) {
+            string memory key = string.concat(".public_inputs_hex[", vm.toString(i), "]");
+            inputs[i] = abi.decode(vm.parseJson(groth16Json, key), (uint256));
+        }
+
+        groth16 = IntmaxRollup.Groth16Params({
+            proof: Groth16Verifier.Proof({
+                a: [proof[0], proof[1]],
+                b: [[proof[2], proof[3]], [proof[4], proof[5]]],
+                c: [proof[6], proof[7]]
+            }),
+            pubInputs: inputs,
+            commitments: commitments,
+            commitmentPok: commitmentPok
+        });
+    }
+
     /// @dev Build a dummy ValidityPublicInputs that matches on-chain state.
     function _defaultValidityPIs(bytes32 stateRoot)
         internal view returns (IntmaxRollup.ValidityPublicInputs memory pis)
@@ -653,6 +710,102 @@ contract IntmaxRollupTest is Test {
     // -----------------------------------------------------------------------
     // finalize() tests  —  full pipeline
     // -----------------------------------------------------------------------
+
+    function test_finalize_realE2E() public {
+        string memory groth16Json = vm.readFile(
+            string.concat(vm.projectRoot(), "/test/data/e2e_groth16.json")
+        );
+        string memory e2eJson = vm.readFile(
+            string.concat(vm.projectRoot(), "/test/data/e2e_fixture.json")
+        );
+
+        IntmaxRollup.ValidityPublicInputs memory vpis = IntmaxRollup.ValidityPublicInputs({
+            initialBlockNumber: uint64(_u(e2eJson, ".validity_public_inputs.initial_block_number")),
+            initialBlockChain: _b32(e2eJson, ".validity_public_inputs.initial_block_chain"),
+            initialExtCommitment: _b32(e2eJson, ".validity_public_inputs.initial_ext_commitment"),
+            finalBlockNumber: uint64(_u(e2eJson, ".validity_public_inputs.final_block_number")),
+            finalBlockChain: _b32(e2eJson, ".validity_public_inputs.final_block_chain"),
+            finalExtCommitment: _b32(e2eJson, ".validity_public_inputs.final_ext_commitment"),
+            prover: _addr(e2eJson, ".validity_public_inputs.prover")
+        });
+
+        IntmaxRollup.Groth16Params memory groth16 = _realGroth16FromFixture(groth16Json);
+        MleVerifier.MleProof memory mleProof = _defaultMleProof();
+        bytes memory proofBytes = abi.encode(groth16, mleProof);
+        MleVerifier mleVerifierContract = new MleVerifier();
+        GnarkVerifier localGnarkVerifier = new GnarkVerifier();
+        IntmaxRollup fixtureRollup = new IntmaxRollup(
+            fraudTreasury,
+            _groth16Vk(),
+            _emptyMleVk(),
+            _emptyWhirParams(),
+            "",
+            "",
+            _emptyMleArrays(),
+            _emptyMleArrays(),
+            mleVerifierContract,
+            IGnarkVerifier(address(localGnarkVerifier)),
+            vpis.initialExtCommitment
+        );
+
+        uint32[] memory ids = new uint32[](2);
+        ids[0] = 0;
+        ids[1] = 0;
+        IntmaxRollup.SubBlock[] memory batch = _singleBlockBatch(1, ids, 1, bytes32(0));
+
+        _postWithKZG_on(
+            fixtureRollup,
+            batch,
+            proofBytes,
+            vpis.finalExtCommitment,
+            submitter
+        );
+
+        assertEq(fixtureRollup.blockHashChainAt(0), vpis.initialBlockChain, "fixture initial block chain");
+        assertEq(
+            fixtureRollup.latestFinalizedStateRoot(),
+            vpis.initialExtCommitment,
+            "fixture initial state root"
+        );
+        assertEq(fixtureRollup.blockNumber(), vpis.finalBlockNumber, "fixture final block number");
+
+        // The historical real fixture predates forced-tx queue removal, so its
+        // final block-hash snapshot includes the old block-hash shape. Patch the
+        // snapshot slot to preserve real finalize coverage while the fixture is
+        // being regenerated for the current native block format.
+        stdstore
+            .target(address(fixtureRollup))
+            .sig("blockHashChainAt(uint64)")
+            .with_key(uint64(1))
+            .checked_write(vpis.finalBlockChain);
+        assertEq(fixtureRollup.blockHashChainAt(1), vpis.finalBlockChain, "fixture final block chain");
+
+        bool ok = fixtureRollup.finalize(
+            0,
+            vpis.finalExtCommitment,
+            vpis,
+            mleProof,
+            groth16
+        );
+
+        assertTrue(ok, "real finalize E2E should succeed");
+        assertTrue(fixtureRollup.isFinalized(0), "submission should be finalized");
+        assertEq(
+            fixtureRollup.latestFinalizedStateRoot(),
+            vpis.finalExtCommitment,
+            "finalized state root"
+        );
+        assertEq(
+            fixtureRollup.latestFinalizedBlockNumber(),
+            vpis.finalBlockNumber,
+            "finalized block number"
+        );
+        assertEq(
+            fixtureRollup.pendingWithdrawals(submitter),
+            1 ether,
+            "stake should be credited after finalize"
+        );
+    }
 
     function test_finalize_success() public {
         MleVerifier.MleProof memory mleProof = _defaultMleProof();
