@@ -1,253 +1,210 @@
-# Intmax3 Hub-Based Confidential Channel Specification
+# Intmax3 Channel-Based Confidential Payment Specification
 
-Status: Draft 0  
-Scope: Specification design only. Implementation comes next.
+Status: Draft 1  
+Scope: Specification design only. Implementation follows this document.
 
 ## 1. Purpose
 
-This document defines an extended `Intmax3` design that supports:
+This document defines an `Intmax3` extension that supports:
 
-- in-channel transfers
-- inter-channel transfers
-- channel close
-- channel-close cancellation
-- post-close incoming claims
+- confidential in-channel transfers
+- channel-to-channel native Intmax transfers
+- BP-driven small-block sequencing inside each channel
+- normal close
+- special close with BP slashing
+- close cancellation
+- post-close recovery of late-known incoming native transfers
 - direct L1 withdrawal after close
 
-It is based on the current `intmax3-zkp` repository and
-`InternetMaximalism/SIS-lattice-paymentchannel`.
+This design uses the following terminology throughout:
 
-This design fixes the following decisions:
+- `channel balance`: a participant balance represented by a lattice commitment inside the channel
+- `Intmax balance`: the channel fund on native Intmax, visible to channel members and owned by the channel
 
-- all account IDs use `hub_id` instead of `aggregator_id`
-- every account ID is a composite of `hub_id + account_no`
-- in-channel state updates use `Plonky3`
-- inter-channel transfer, Intmax-side settlement, import, and close use `Plonky2`
+The protocol keeps the base Intmax architecture mostly unchanged, but changes the channel boundary
+substantially:
 
-This design intentionally does **not** redesign the whole Intmax3 base protocol.
+- native authorization becomes `ChannelId / KeyId / UserId` based
+- native channel-to-channel transfer becomes a fully signed small-block-root flow
+- channel-local state updates use `Plonky3`
+- Intmax-side transport, close, cancel, and post-close recovery use `Plonky2`
+- close freezes the channel for further native sends
 
-The intended boundary is:
+## 2. Core Update Summary
 
-- the base Intmax3 validity / inclusion model remains mostly unchanged
-- channel-related transport objects, account naming, memo/seal handling, and withdrawal/close logic are extended
-- normal non-channel Intmax3 transfer flow remains conceptually the same
+The core design update is:
 
-## 2. Assumptions About the Current Codebase
+1. a channel is a native authorization domain
+2. each channel has an ordered member set of `KeyId`
+3. each `KeyId` has its own SPHINCS+ key set and threshold
+4. each signing identity is `UserId = ChannelId || KeyId`
+5. BP collects many native channel txs into a small-block Merkle tree
+6. all channel members verify the full small block and sign the same small-block root message
+7. a small block is valid only when every member `KeyId` condition is satisfied on that root
+8. sender-side and receiver-side channel state updates are both all-member state transitions
+9. if a fully signed small block is not included within `5` medium blocks, anyone may trigger a
+   special close and slash the BP
+10. after close submission, that channel is frozen for new native sends
 
-The current `intmax3-zkp` repository has the following structure:
+This replaces the older simplified model where native transport was treated as a channel-local
+object with optional signatures attached.
 
-- `src/common/user_id.rs`: `UserId = (aggregator_id, local_id)` packed into 63 bits
-- `src/common/block.rs`: blocks contain `aggregator_id` and `local_ids`
-- `src/common/trees/account_tree.rs`: the account tree leaf index is `UserId`
-- `src/common/tx.rs` / `src/common/transfer.rs`: the normal Intmax3 transfer model
-- `src/common/channel_message.rs`: a simple channel-close message format
-- `src/plonky3/*`: the Plonky3 migration bridge
-- `src/circuits/**/*`: the main validity / withdrawal / settlement circuits are still Plonky2-based
+## 3. Identity and Registry Model
 
-Because of this, adding channel functionality alone is not sufficient. We also need to redesign:
+### 3.1 Canonical IDs
 
-- the ID model
-- block/account-tree naming and public inputs
-- the off-chain channel state
-- the transport object used for inter-channel transfers
-- close / cancel / withdrawal handling around the channel boundary
-
-At the same time, the following parts are intentionally preserved as much as possible:
-
-- the ordinary Intmax3 deposit flow
-- the ordinary account tree / send tree / block inclusion architecture
-- the ordinary validity recursion flow for non-channel transactions
-- the ordinary non-channel transfer semantics
-
-## 3. ID Model Changes
-
-### 3.1 New Common ID Type
-
-The canonical model is `AccountId`, and every actor is represented by it.
-
-During migration, `UserId` may remain as a compatibility alias in code, but the specification
-uses only `AccountId`.
+The canonical native authorization IDs are:
 
 ```rust
-struct AccountId {
-    hub_id: u32,      // 31 bits
-    account_no: u32,  // account number inside the hub
-}
+type ChannelId = [u8; 5];
+type KeyId = [u8; 5];
+type UserId = [u8; 10]; // ChannelId || KeyId
 ```
 
-The encoding remains compatible with the current 63-bit packed integer format.
+Rules:
 
-```text
-account_id_u64 = (hub_id << 32) | account_no
+- `UserId` is exactly the byte concatenation `channel_id || key_id`
+- byte order is fixed network byte order
+- `ChannelId` is the native identifier of the hub/channel in MVP
+- every signature message binds the exact `UserId`
+
+### 3.2 Channel Record
+
+Each channel has a registration record:
+
+```rust
+struct ChannelRecord {
+    channel_id: ChannelId,
+    bp_key_id: KeyId,
+    member_key_ids: Vec<KeyId>, // strictly ordered, no duplicates
+    member_key_ids_root: Bytes32,
+    special_close_penalty: U256,
+    status: ChannelStatus,
+}
+
+enum ChannelStatus {
+    Active,
+    ClosePending,
+    Closed,
+}
 ```
 
 Constraints:
 
-- `hub_id < 2^31`
-- `account_no < 2^32`
-- `(hub_id, account_no) = (0, 0)` is reserved as the dummy value
+- MVP fixes exactly one BP per channel at a time
+- `member_key_ids` is canonicalized as a strictly ordered list
+- every `member_key_id` must exist in the key registry
+- `status = ClosePending` freezes further outgoing native sends from this channel
 
-### 3.2 Naming Changes
+### 3.3 Key Record
 
-The following terminology is replaced across the codebase:
-
-- `aggregator_id` -> `hub_id`
-- `local_id` -> `account_no`
-- `UserId` -> `AccountId`
-- `MAX_NUM_AGGREGATORS` -> `MAX_NUM_HUBS`
-- `USER_ID_BITS` -> `ACCOUNT_ID_BITS`
-
-### 3.3 Channels Also Have `AccountId`
-
-A channel itself is also treated as a single Intmax3 account.
+Each `KeyId` resolves to a SPHINCS+ threshold authorization record:
 
 ```rust
-type ChannelId = AccountId;
-type MemberId = AccountId;
-```
-
-This lets us map the following directly onto the existing Intmax3 account model:
-
-- the Intmax3-side owner of the channel fund
-- the sender during close
-- the source channel in inter-channel send
-
-## 4. Account Categories
-
-`AccountId` is shared, but there are two conceptual account categories.
-
-```rust
-enum AccountKind {
-    User,
-    Channel,
-}
-```
-
-### 4.1 User Account
-
-- a normal Intmax3 user
-- has deposit / receive / withdraw / channel-join destination behavior
-
-### 4.2 Channel Account
-
-- represented on Intmax3 as a multisig account
-- `AccountLeaf.threshold = n`
-- `AccountLeaf.pk_set_root = the signing-key set of the channel members`
-- external transfers from the channel are sent by this channel account
-
-This avoids introducing a separate ID namespace specifically for channels at L1.
-
-## 5. Required Changes to Existing Intmax3 Types
-
-### 5.1 `src/common/user_id.rs`
-
-Replace `UserId` with `AccountId`.
-
-```rust
-impl AccountId {
-    fn new(hub_id: u32, account_no: u32) -> Result<Self, AccountIdError>;
-    fn hub_id(&self) -> u32;
-    fn account_no(&self) -> u32;
-    fn as_u64(&self) -> u64;
-}
-```
-
-### 5.2 `src/common/block.rs`
-
-```rust
-struct BlockV2 {
-    num_accounts: u32,
-    hub_id: u32,
-    timestamp: u64,
-    account_nos: Vec<u32>,
-    tx_tree_root: Bytes32,
-    deposit_hash_chain: Bytes32,
-    forced_tx_hash_chain: Bytes32,
-}
-```
-
-Changes:
-
-- rename `aggregator_id` to `hub_id`
-- rename `local_ids` to `account_nos`
-- replace `aggregator_id` with `hub_id` inside the block signing message as well
-
-The meaning does not change. The important point is that the sequencing domain is now formally a
-hub, and every account is explicitly associated with a hub.
-
-### 5.3 `src/common/trees/account_tree.rs`
-
-The leaf index uses the packed `AccountId` value.
-
-```text
-account_tree[account_id.as_u64()] = AccountLeaf
-```
-
-`AccountLeaf` itself does not need a major change.
-
-```rust
-struct AccountLeafV2 {
-    index: u32,
-    prev: BlockNumber,
-    send_tree_root: PoseidonHashOut,
-    pk_set_root: PoseidonHashOut,
+struct KeyRecord {
+    key_id: KeyId,
+    sphincs_pubkey_hashes_root: Bytes32,
     threshold: u32,
+    num_keys: u32,
 }
 ```
 
-A channel account is represented as a multisig leaf with `threshold = member_count`.
+Semantics:
 
-### 5.4 `src/common/transfer.rs` and `src/common/tx.rs`
+- one `KeyId` is one channel participant authorization domain
+- that participant may itself use threshold SPHINCS+ signing internally
+- native proof systems verify that the threshold condition of that `KeyId` is satisfied
 
-The current `Transfer` / `Tx` model is enough for normal transfers, but packing channel actions
-into `aux_data` would be brittle and hard to maintain.
+### 3.4 Native Authorization Rule
 
-So `Tx` is extended into a typed-body format for channel-aware transport.
+For a native small-block root to be valid for a channel:
+
+- for every `key_id` in `ChannelRecord.member_key_ids`
+- there exists a valid threshold-signature proof for `UserId = channel_id || key_id`
+- all such proofs are bound to the same small-block root message
+
+This is stricter than a single multisig account threshold. The native channel root is valid only if
+all registered participant domains sign it.
+
+## 4. Native Message and Signature Model
+
+### 4.1 Signed Message
+
+Participants do not sign isolated channel-to-channel tx objects directly. They sign the small-block
+root message:
 
 ```rust
-enum TxClass {
-    UserTransfer,
-    ChannelAction,
-}
-
-struct TxV2 {
-    tx_class: TxClass,
-    transfer_tree_root: PoseidonHashOut,
-    nonce: u32,
-    channel_action_root: PoseidonHashOut, // zero for UserTransfer
-}
-```
-
-`ChannelAction` represents a channel-derived action included on Intmax3.
-
-```rust
-enum ChannelActionKind {
-    InterChannelSend,
-    ChannelClose,
-}
-
-struct ChannelAction {
-    kind: ChannelActionKind,
-    source_channel_id: AccountId,
-    destination_channel_id: AccountId, // zero for close
-    tx_hash: Bytes32,
-    seal: Bytes32,
-    payload_hash: PoseidonHashOut,
+struct SmallBlockRootMessage {
+    channel_id: ChannelId,
+    bp_key_id: KeyId,
+    small_block_number: u64,
+    prev_small_block_root: Bytes32,
+    tx_tree_root: Bytes32,
+    state_commitment_root: Bytes32,
+    medium_epoch_hint: u64,
+    close_freeze_nonce: u64,
 }
 ```
 
-Notes:
+Each signature proof additionally binds:
 
-- the plaintext amount is not stored directly inside `ChannelAction`
-- only the public values required for Intmax transport are bundled by hash
-- detailed amount / commitment / nullifier information stays in channel-side state
-- channel-specific memo / seal / bridge payload is modeled explicitly rather than overloaded into legacy `aux_data`
+- `user_id`
+- the corresponding `KeyRecord`
+- the corresponding inclusion proof that `key_id` is a member of `channel_id`
 
-## 6. Off-Chain Channel State
+### 4.2 Reuse of INTMAX PQ Signature Verification
 
-The `ParticipantLeaf`-based structure from `SIS-lattice-paymentchannel` is extended so that
-inter-channel receive-side balance updates are prepared by the sender, including dummy receiver
-entries for anonymity.
+The channel protocol should reuse the existing INTMAX PQ signature verification and aggregation
+machinery wherever possible.
+
+Required reuse points:
+
+- verifying each `KeyId` threshold satisfaction on a small-block root
+- proving that all `KeyId` conditions for a channel are satisfied
+- proving all-member channel final-state signatures during close
+- proving all-member confirmation during receiver-side Intmax-balance updates
+
+This is preferred over inventing a second incompatible PQ signature stack just for channels.
+
+## 5. BP and Block Hierarchy
+
+### 5.1 BP Role
+
+In MVP, each channel has one fixed BP chosen when the channel is registered.
+
+BP responsibilities:
+
+- collect native channel txs
+- build a small-block Merkle tree
+- provide all tx data, proofs, and resulting state commitments to every member
+- collect all-member root signatures
+- submit the signed small block into the native Intmax pipeline
+
+### 5.2 Small / Medium / Large Blocks
+
+The native sequence hierarchy is:
+
+1. `small block`
+   - cadence: seconds
+   - contents: one channel-local Merkle tree of native txs
+   - final off-chain condition: all member `KeyId` conditions satisfied on the same root
+
+2. `medium block`
+   - cadence: minutes
+   - semantics: optimistic rollup-style aggregation of many small blocks
+   - used as the timeout reference for special close
+
+3. `large block`
+   - cadence: hours
+   - semantics: fully onchain verified ZKP checkpoint
+
+The protocol must define deterministic inclusion relations:
+
+- a small block is either included in a medium block or not
+- a medium block is either included in a large block or not
+- close and special close reason about the latest finalized medium-block boundary
+
+## 6. Channel State
 
 ### 6.1 Lattice Commitment
 
@@ -266,515 +223,568 @@ struct LatticeOpening {
 
 ```rust
 struct ChannelMember {
-    member_id: AccountId,
-    signing_pubkey: Bytes,
-    intmax_claim_destination: AccountId,
+    key_id: KeyId,
+    user_id: UserId,
+    l1_withdrawal_recipient: Address,
 }
 ```
 
-### 6.3 User Fund
+### 6.3 Channel Balance
 
 ```rust
-struct UserFund {
+struct ChannelBalance {
     channel_id: ChannelId,
-    member_id: MemberId,
+    key_id: KeyId,
     balance_commitment: LatticeCommitment,
 }
 ```
 
-### 6.4 Receiver Balance Delta Bundle
+This is the member's confidential in-channel balance.
 
-For an inter-channel transfer, the sender prepares the receiver-side lattice deltas in advance.
-This bundle contains the real receiver plus at least two dummy receivers whose amounts are `0` or
-very small.
-
-```rust
-struct ReceiverBalanceDelta {
-    receiver_id: MemberId,
-    amount_commitment: LatticeCommitment,
-}
-
-struct ReceiverBalanceDeltaBundle {
-    source_channel_id: ChannelId,
-    destination_channel_id: ChannelId,
-    tx_hash: Bytes32,
-    deltas: Vec<ReceiverBalanceDelta>,
-    receiver_update_p3_proof: Bytes,
-}
-```
-
-Here:
-
-- exactly one delta is the real receiver amount
-- at least two deltas are dummy amounts `0` or tiny values
-- the sender includes the P3 proof that these deltas are the receiver-side state update to be signed
-- the receiver channel signs the post-update state containing all real and dummy additions
-
-### 6.5 Channel Fund
+### 6.4 Channel Fund
 
 ```rust
 struct ChannelFund {
     channel_id: ChannelId,
-    visible_amount_to_members: u64,
+    intmax_visible_amount_to_members: u64,
     intmax_state_root: Bytes32,
 }
 ```
 
-`visible_amount_to_members` is visible to the channel members but not part of the external public
-state.
+This is the native Intmax balance of the channel. It is part of the channel state and must be
+agreed by all members.
 
-### 6.6 Channel State
+### 6.5 Channel State
 
 ```rust
-struct ChannelStateV2 {
+struct ChannelState {
     channel_id: ChannelId,
-    hub_id: u32,
     epoch: u64,
+    small_block_number: u64,
     channel_fund: ChannelFund,
-    user_fund_root: Bytes32,
-    channel_nullifier_root: Bytes32,
+    channel_balance_root: Bytes32,
+    shared_native_nullifier_root: Bytes32,
     prev_state_hash: Bytes32,
     transition_hash: Bytes32,
     proof_bridge_hash: Bytes32,
-    member_signatures: Vec<Signature>,
+    all_member_signatures: Vec<Signature>,
 }
 ```
 
 Notes:
 
-- `transition_hash`: typed hash of the current state transition
-- `proof_bridge_hash`: digest used to connect Plonky2 and Plonky3 public values
+- `channel_balance_root` commits to all confidential participant balances
+- `shared_native_nullifier_root` is still required for native Intmax transport uniqueness
+- the old receiver personal-nullifier claim path is not part of the normal receive flow anymore
+- `all_member_signatures` means one satisfied authorization proof per registered `KeyId`
 
 ## 7. Proof System Split
 
-### 7.1 Responsibilities of Plonky3
+### 7.1 Plonky3 Scope
 
-Plonky3 proves channel-local state transitions.
-
-Scope:
+`Plonky3` proves channel-local state transitions:
 
 - in-channel transfer
-- receiver-side delta application for inter-channel receive
-- user-fund-root update
-- untouched leaf invariance
+- sender-side channel-balance debit for channel-to-channel send
+- receiver-side application of sender-supplied receiver delta bundles
+- channel-balance Merkle updates
+- balance non-negativity and amount range
+- dummy-commitment structure for receiver anonymity
 
-What the P3 circuit verifies directly:
+### 7.2 Plonky2 Scope
 
-- lattice commitment add/sub consistency
-- sender non-negativity
-- amount range
-- Merkle paths
-- old/new state hashes
+`Plonky2` proves Intmax-side and close-side transitions:
 
-### 7.2 Responsibilities of Plonky2
+- native transport correctness for sender-side and receiver-side channel updates
+- inclusion of signed small blocks into medium/large-block flow
+- normal close
+- special close
+- close cancellation
+- post-close incoming recovery
 
-Plonky2 proves the transitions that land on the Intmax3 side.
+### 7.3 Bridge Rule
 
-Scope:
+The P2/P3 boundary is bridged by a public-values hash:
 
-- inter-channel send from the sender channel
-- import into the receiver channel
-- channel close
-- inclusion / settlement of `TxV2(ChannelAction)` inside Intmax3
+- native transport and inclusion results are canonicalized and hashed
+- that hash enters `proof_bridge_hash`
+- P3 channel-state proofs bind that bridge hash
 
-What the P2 circuit verifies directly:
+This keeps the mixed P2/P3 architecture implementable in MVP.
 
-- Intmax3 account-tree / send-tree / tx inclusion
-- validity of the channel account multisig
-- uniqueness of `seal` / `tx_hash`
-- consistency of public inputs between sender and receiver channels
-- consistency between the final state and the payout list during close
+## 8. Native Channel-to-Channel Transfer
 
-### 7.3 How Plonky2 and Plonky3 Are Connected
+### 8.1 Native Tx Object
 
-Plonky3 does not recursively verify the Plonky2 proof itself.
-
-Reason:
-
-- the repository is currently in a mixed Plonky2 / Plonky3 transition phase
-- designing heterogeneous recursive verification first would make implementation much heavier
-
-Instead, the channel state stores `proof_bridge_hash`, which is the hash of the Plonky2 public
-values.
-
-Flow:
-
-1. the sender channel / receiver channel verifies the Plonky2 proof
-2. the public values are canonical-encoded and hashed
-3. that hash is inserted into `transition_hash` or `proof_bridge_hash`
-4. Plonky3 treats that hash as part of the state-transition public input
-
-With this design, P3 only needs to reason about the sender-supplied receiver delta bundle that is
-part of the receiver channel state update.
-
-## 8. Transaction Types
-
-### 8.1 In-Channel Transfer
+The native channel-to-channel tx is hub-to-hub:
 
 ```rust
-struct ChannelInTx {
-    channel_id: ChannelId,
-    epoch: u64,
-    sender_id: MemberId,
-    receiver_id: MemberId,
-    amount_commitment: LatticeCommitment,
-    sender_post_balance_proof: Bytes,
-    p3_state_proof: Bytes,
-    prev_state_hash: Bytes32,
-    next_state_hash: Bytes32,
-}
-```
-
-Verification:
-
-- sender / receiver are channel members
-- `sender_old_balance - amount >= 0`
-- `receiver_new_balance = receiver_old_balance + amount`
-- untouched members remain unchanged
-- `next_state_hash` matches the P3 proof
-
-### 8.2 Inter-Channel Transfer: Sender Side
-
-```rust
-struct InterChannelSendTx {
+struct NativeChannelTransfer {
     source_channel_id: ChannelId,
     destination_channel_id: ChannelId,
-    source_member_id: MemberId,
-    epoch: u64,
-    amount_commitment: LatticeCommitment,
-    seal: Bytes32,
+    source_key_id: KeyId,
     tx_hash: Bytes32,
+    seal: Bytes32,
+    amount_commitment: LatticeCommitment,
     recipient_memo: Bytes,
-    receiver_deltas: Vec<ReceiverBalanceDelta>,
-    receiver_update_p3_proof: Bytes,
-    sender_debit_p2_proof: Bytes,
-    channel_signatures: Vec<Signature>,
+    sender_channel_balance_delta_p3_proof: Bytes,
+    receiver_delta_bundle: ReceiverDeltaBundle,
+    transport_p2_public_hash: Bytes32,
 }
 ```
 
-Meaning:
+### 8.2 Receiver Delta Bundle
 
-- decreases the sender member's `UserFund`
-- decreases `ChannelFund.visible_amount_to_members` in the source channel
-- carries the receiver-side lattice deltas to be applied in the destination channel
-- emits `ChannelAction(InterChannelSend)` from the channel account on Intmax3
-
-Accounting note:
-
-- `amount_commitment` is the total sender debit
-- this total equals the sum of all receiver deltas, including dummy dust amounts
-
-The sender side uses P2 to prove Intmax3 transport correctness, while the local `UserFund` debit
-is handled as a signed channel-state update. The same transport object also carries the sender-made
-receiver delta bundle and its P3 proof.
-
-### 8.3 Inter-Channel Transfer: Receiver-Side Import
+The sender prepares the receiver-side confidential additions in advance:
 
 ```rust
-struct InterChannelImportTx {
+struct ReceiverDelta {
+    receiver_key_id: KeyId,
+    amount_commitment: LatticeCommitment,
+}
+
+struct ReceiverDeltaBundle {
     source_channel_id: ChannelId,
     destination_channel_id: ChannelId,
     tx_hash: Bytes32,
-    seal: Bytes32,
-    amount_commitment: LatticeCommitment,
-    receiver_deltas: Vec<ReceiverBalanceDelta>,
-    receiver_update_p3_proof: Bytes,
-    inclusion_proof: Bytes,
-    sender_channel_signatures: Vec<Signature>,
+    deltas: Vec<ReceiverDelta>,
+    receiver_bundle_p3_proof: Bytes,
 }
 ```
 
-At import time, the receiver channel applies all sender-supplied receiver deltas immediately.
-This includes the true receiver and at least two dummy receivers.
+Rules:
 
-The following are updated:
+- exactly one delta is the real receiver amount
+- at least two deltas are dummy amounts `0` or tiny dust
+- the sender supplies the P3 proof that the bundle is the receiver-side confidential update
+- the receiver channel later signs the post-update state containing all real and dummy additions
 
-- `ChannelFund.visible_amount_to_members += amount`
-- `channel_nullifier_root`
-- `user_fund_root`
+This replaces the older personal-nullifier-based confidential receive claim as the normal path.
 
-This is assigned to P2 because Intmax3 inclusion is the essential property here.
+### 8.3 Sender-Side Flow
 
-### 8.5 Channel Close
+Sender-side native send proceeds as follows:
+
+1. sender prepares the native channel transfer and the sender-side P3 channel-balance debit proof
+2. BP collects the tx into the channel's small-block Merkle tree
+3. every channel member verifies:
+   - the tx contents
+   - the sender-side P3 debit proof
+   - the native transport P2 bridge data
+   - the resulting Intmax-balance update
+4. every member signs the same small-block root message
+5. once every `KeyId` condition is satisfied, the small block is a fully signed native root
+6. after native confirmation, the sender channel updates:
+   - `channel_fund.intmax_visible_amount_to_members -= amount`
+   - sender channel balance decreases
+   - shared native nullifier root updates
+7. all members sign the resulting new `ChannelState`
+
+If sender-side all-member signatures do not complete within the timeout, the channel closes.
+
+### 8.4 Receiver-Side Flow
+
+Receiver-side reflection proceeds as follows:
+
+1. one sender-side participant communicates the fully signed native tx, inclusion data, and
+   receiver bundle to the receiver channel
+2. the receiver channel verifies:
+   - the native tx belongs to this destination channel
+   - the native transport proof and inclusion proof are valid
+   - the tx is confirmed in the native flow
+   - the sender-supplied receiver delta bundle and its P3 proof are valid
+3. receiver channel first updates its `ChannelFund` Intmax balance state
+4. all receiver members sign that updated state
+5. receiver channel then applies the confidential receiver delta bundle to `channel_balance_root`
+6. all receiver members sign the post-application state
+
+If any receiver-side member refuses or the update is not propagated, the receiver channel cannot
+reach consensus on state and must close.
+
+## 9. Small-Block Finality and Failure
+
+### 9.1 Fully Signed Small Block
+
+A small block is fully signed only if:
+
+- every registered `KeyId` of the channel has a satisfied threshold-signature proof
+- all those proofs bind the same `SmallBlockRootMessage`
+- the channel is not frozen by a pending close
+
+### 9.2 Partial Signature Failure
+
+If only a partial set of members sign:
+
+- signing participants treat it as protocol failure
+- the small block is not valid
+- if the timeout expires without full signatures, the channel must close
 
 ```rust
+const SMALL_BLOCK_SIGNATURE_TIMEOUT: u64 = 1 minute;
+```
+
+### 9.3 BP Penalty Reserve
+
+BP must prove that its penalty reserve remains above the configured slashing amount.
+
+The required statement is:
+
+```text
+special_close_penalty <= bp_available_native_balance < 2^64
+```
+
+This is the same range-proof family as ordinary balance proofs, but with lower bound
+`special_close_penalty` instead of `0`.
+
+If BP cannot prove this reserve condition, members must not sign outgoing native transfer blocks
+proposed by that BP.
+
+## 10. Close Freeze Rule
+
+Once a close is submitted for `channel_id`:
+
+- `ChannelRecord.status` becomes `ClosePending`
+- `close_freeze_nonce` increases
+- any later small block from that channel is invalid
+
+This must be enforced by native validity constraints:
+
+- the small-block root message binds `close_freeze_nonce`
+- native inclusion circuits reject a small block whose `channel_id` is already `ClosePending`
+- sender-side transport proofs from a frozen channel are invalid
+
+This prevents a channel from continuing to issue native transfers after close submission.
+
+## 11. Close Types
+
+### 11.1 Normal Close
+
+Normal close fixes:
+
+- the final fully signed `ChannelState`
+- the final `channel_balance_root`
+- the final `ChannelFund` snapshot
+- the burn-backed native withdrawal object
+
+```rust
+struct CloseWithdrawal {
+    channel_id: ChannelId,
+    final_state_hash: Bytes32,
+    final_channel_balance_root: Bytes32,
+    intmax_state_root: Bytes32,
+    burn_tx_hash: Bytes32,
+    burn_amount: U256,
+    close_p2_proof: Bytes,
+}
+
 struct CloseIntent {
     channel_id: ChannelId,
     close_epoch: u64,
     final_state_hash: Bytes32,
-    channel_fund_commitment: Bytes32, // commits to visible_amount_to_members + intmax_state_root
-    intmax_state_root: Bytes32,
-    transfers_root: Bytes32,
-    close_p2_proof: Bytes,
-    member_signatures: Vec<Signature>,
-}
-
-struct FinalizedClose {
-    close_intent_hash: Bytes32,
-    final_state_hash: Bytes32,
+    final_channel_balance_root: Bytes32,
     channel_fund_commitment: Bytes32,
-    challenge_start_block: u64,
-    challenge_end_block: u64,
+    intmax_state_root: Bytes32,
+    burn_tx_hash: Bytes32,
+    close_withdrawal_digest: Bytes32,
+    snapshot_medium_block_number: u64,
+    all_member_signature_proof: Bytes,
 }
+```
 
-struct CloseTransfer {
-    member_id: MemberId,
+The protocol intentionally does **not** build a plaintext payout list for all members at close.
+That is rejected because confidential balances would require collecting every participant's balance
+opening. Instead:
+
+- close fixes the confidential root and burned native value
+- each participant withdraws later with an individual proof
+
+### 11.2 Special Close
+
+If a fully signed small block is not included within `5` medium blocks, any channel participant may
+trigger a special close:
+
+```rust
+struct SpecialCloseProof {
+    channel_id: ChannelId,
+    offending_bp_key_id: KeyId,
+    fully_signed_small_block_root: Bytes32,
+    small_block_number: u64,
+    signed_medium_block_number: u64,
+    latest_finalized_medium_block_number: u64,
+    non_inclusion_proof: Bytes,
+    all_member_signature_proof: Bytes,
+}
+```
+
+Required statement:
+
+- the small block was fully signed by the whole channel
+- it still was not included by the time `latest_finalized_medium_block_number >= signed_medium_block_number + 5`
+- therefore the channel may special-close and the BP is slashed by `special_close_penalty`
+
+This is different from normal close because it additionally punishes BP censorship or failure.
+
+### 11.3 Why Both Close Types Exist
+
+- normal close handles ordinary exit, disagreement, or timeout
+- special close handles a fully signed but withheld small block
+
+Both freeze the channel immediately when submitted.
+
+## 12. Individual Withdrawal After Close
+
+After close finalization, L1 withdrawal is individual and root-based:
+
+```rust
+struct WithdrawalClaim {
+    close_intent_hash: Bytes32,
+    user_id: UserId,
     l1_recipient: Address,
     amount_commitment: LatticeCommitment,
+    membership_proof: MK,
+    withdrawal_nullifier: Bytes32,
     amount_opening_proof: Bytes,
 }
 ```
 
-Close is a two-phase process.
+The withdrawal proof must establish:
 
-Phase 1: submit `CloseIntent`.
+- the claimant leaf is included in `final_channel_balance_root`
+- the lattice opening is valid
+- the claimant `user_id` matches a registered channel member
+- the `l1_recipient` matches the registered withdrawal recipient
+- the `withdrawal_nullifier` is fresh
 
-What is fixed by `CloseIntent`:
+Contract rule:
 
-- the final fully signed channel state
-- the channel-fund snapshot used by that close
-- the payout root derived from that final state
+- the total amount withdrawn from this close may not exceed the burned `ChannelFund` amount
 
-Phase 2: wait for challenge resolution, then finalize and distribute.
+The burn-backed close object is required so the same native value cannot remain spendable on L2 and
+also be claimed on L1.
 
-During close, P2 verifies:
+## 13. Close Challenge, Cancellation, and Recovery
 
-- the final state is signed n-of-n
-- the state's `channel_id` matches the channel account
-- each withdrawal entry matches the corresponding `UserFund` opening
-- the total matches `channel_fund.visible_amount_to_members`
-- the close withdrawal object is emitted by the channel account
+### 13.1 Mandatory Challenge Window
 
-### 8.6 Close Challenge Rules
+Close must challenge both:
 
-The close path needs a mandatory challenge window for **both**:
-
-- the final `ChannelStateV2`
-- the `ChannelFund` snapshot (`visible_amount_to_members`, `intmax_state_root`)
-
-Reason:
-
-- the Intmax-side balance itself cannot be forged arbitrarily
-- but a malicious participant can intentionally submit a valid under-withdrawal / under-distribution close
-- therefore the contract must allow one day for anyone to replace the submitted close with a newer or more complete valid close
+- the final channel state
+- the `ChannelFund` snapshot
 
 ```rust
 const CLOSE_CHALLENGE_PERIOD: u64 = 1 day;
 ```
 
-The following replacements must be allowed during the challenge window:
+Reason:
 
-- newer `close_epoch`
-- same `close_epoch` with a strictly better `ChannelFund` snapshot if the old one omitted valid incoming value
-- same state but a valid cancellation proof
+- a malicious participant may submit a valid but incomplete close
+- the protocol must allow replacement by a newer or more complete valid close
 
-### 8.7 Close Cancellation
+### 13.2 Close Cancellation
 
-An inter-channel send may have triggered close because the corresponding Intmax-side transport was
-censored. After the final state has already been submitted onchain, that Intmax tx can later become
-fully signed and valid.
-
-In that case, the close must be cancellable.
+If a channel tried to close because a native transfer appeared censored, but later that native tx
+becomes fully signed and valid, the pending close must be cancellable.
 
 ```rust
 struct CancelCloseProof {
     close_intent_hash: Bytes32,
     channel_id: ChannelId,
     final_state_hash: Bytes32,
-    reactivated_tx_hash: Bytes32,
-    reactivated_seal: Bytes32,
-    reactivated_transport_proof: Bytes,
-    all_member_signatures: Vec<Signature>,
+    revived_small_block_root: Bytes32,
+    revived_tx_hash: Bytes32,
+    revived_seal: Bytes32,
+    revived_transport_proof: Bytes,
+    all_member_signature_proof: Bytes,
 }
 ```
 
-`CancelCloseProof` establishes:
+Required statement:
 
-- a close for `close_intent_hash` is currently pending
-- after that close submission, a fully signed valid inter-channel Intmax tx exists
-- the tx belongs to the same channel and is compatible with the submitted state
-- therefore the pending close should be cancelled rather than finalized
+- the close is pending
+- after close submission, a fully signed valid native transfer or small block exists
+- that revived native object belongs to the same channel and invalidates the close assumption
 
-This cancellation is a protocol requirement, not an optional enhancement.
+If cancellation succeeds:
 
-### 8.8 Post-Close Incoming Claim
+- the pending close is removed
+- `ChannelRecord.status` returns to `Active`
+- the revived native object may proceed through the normal inclusion path
 
-There is another case: after the final channel state has been submitted onchain, an incoming
-inter-channel Intmax tx may become known to a participant, but that tx was not reflected in the
-`ChannelFund` snapshot used by the submitted close.
+### 13.3 Post-Close Incoming Recovery
 
-This must not be lost. Instead, it becomes a post-close claim.
+If a valid incoming native transfer to the channel was not reflected in the close snapshot, it must
+still be recoverable after close.
 
 ```rust
 struct PostCloseIncomingClaim {
     close_intent_hash: Bytes32,
     channel_id: ChannelId,
-    claimer_id: MemberId,
+    claimer_user_id: UserId,
     incoming_tx_hash: Bytes32,
     seal: Bytes32,
     receiver_amount_commitment: LatticeCommitment,
-    personal_nullifier: Bytes32,
     missing_incoming_proof: Bytes,
+    shared_native_nullifier: Bytes32,
 }
 ```
 
-`PostCloseIncomingClaim` establishes:
+Required statement:
 
-- the incoming Intmax tx is addressed to this channel
-- the tx was not reflected in the `ChannelFund` snapshot used by the finalized close
-- the claim does not hit the claimer's personal nullifier
-- the claimer is authorized by the memo
-- the post-close withdrawal claimed after close is equivalent to the missed incoming value
+- the incoming native tx is addressed to this channel
+- it was not reflected in the finalized close snapshot
+- it is not already consumed in the shared native nullifier root
+- the claim amount is equivalent to the missed incoming value
 
-This is the recovery path for valid late-known incoming transfers.
+This claim additionally updates the shared native nullifier so the value cannot be claimed twice.
 
-### 8.9 Close Distribution and Exit Modes
+### 13.4 Late Outgoing Debit at Close
 
-After a close is finalized, the contract does **not** directly trust arbitrary participant-declared
-amounts. Instead, L1 withdrawal happens from a withdrawal list proven by ZKP.
+If a native outgoing tx was created just before a participant tried to close using the previous
+state, the sender-prepared Plonky3 channel-balance-decrease commitment and proof may be used to
+carry that outgoing debit into the close state.
 
-Exit modes are:
+This means the close logic must support:
 
-- channel close exits to L1 withdrawal recipients fixed by the proved close output
-- outside close, ordinary inter-channel Intmax transfer remains available
-- outside close, unanimous external payment remains available if later specified
+- proving that a sender-side native tx was already fully formed and signed at the channel level
+- proving that its sender-side confidential debit proof exists
+- adjusting the close state so the stale pre-send state cannot be used to avoid the debit
 
-The intended rule is:
+This is required to prevent a sender from closing on the immediately previous state after emitting a
+native transfer.
 
-- outside a close, channel value leaves the channel only by
-  - unanimous channel agreement for an external payment, or
-  - a dedicated non-close withdrawal flow if the protocol later adds one
-- after a finalized close, participant payouts are executed as direct L1 withdrawals derived from the final state
+## 14. Invariants
 
-## 9. State Transition Hash
+### 14.1 In-Channel Transfer
 
-The current `ChannelMessage` is only a simple allocation format for close, and that is not enough
-for the new design. It is replaced by a typed transition hash.
+- `ChannelFund.intmax_visible_amount_to_members` is unchanged
+- the sum of channel balances is unchanged
 
-```rust
-enum ChannelTransition {
-    InChannel(ChannelInTxSummary),
-    InterChannelSend(InterChannelSendSummary),
-    InterChannelImport(InterChannelImportSummary),
-    Close(CloseSummary),
-}
-```
+### 14.2 Native Inter-Channel Send
 
-`ChannelStateV2.transition_hash` stores the hash of this summary.
+- sender-side `ChannelFund.intmax_visible_amount_to_members` decreases
+- sender-side channel balance decreases
+- the decrease equals the total of the receiver delta bundle, including dummy dust amounts
 
-Purpose:
+### 14.3 Receiver Intmax-Balance Import
 
-- fix the signing target separately for each transition type
-- avoid ambiguous overloading of `aux_data`
-- bind the P2/P3 bridge hash to the transition
+- receiver-side `ChannelFund.intmax_visible_amount_to_members` increases
+- `channel_balance_root` may remain temporarily unchanged until the delta bundle is applied
 
-## 10. Invariants
+### 14.4 Receiver Bundle Application
 
-### 10.1 In-Channel Transfer
+- receiver-side `channel_balance_root` increases by the bundle total
+- exactly one receiver delta is real
+- at least two receiver deltas are dummy commitments
 
-- `channel_fund.visible_amount_to_members` is unchanged
-- `sum(user_funds)` is unchanged
+### 14.5 Accounting Equation
 
-### 10.2 Inter-Channel Send
-
-- the source channel's `channel_fund.visible_amount_to_members` decreases
-- the sender's `UserFund` decreases
-- the decrease equals the sum of all receiver deltas, including dummy dust amounts
-
-### 10.3 Inter-Channel Import
-
-- the destination channel's `channel_fund.visible_amount_to_members` increases
-- `user_fund_root` is updated immediately
-- `sum(user_funds)` increases by exactly the imported delta total
-
-### 10.5 Accounting Equation
+Because receiver import and receiver bundle application may be separate transitions:
 
 ```text
-sum(opened_user_funds) = channel_fund.visible_amount_to_members
+sum(opened_channel_balances) + unallocated_confirmed_incoming
+    = ChannelFund.intmax_visible_amount_to_members
 ```
 
-### 10.6 Close Safety Invariants
+After the receiver bundle is fully applied:
 
-- a finalized close must bind both the final channel state and the channel-fund snapshot
-- a close can be cancelled if a previously censored but now fully signed inter-channel Intmax tx becomes valid
-- a valid incoming tx that was not reflected in the close snapshot remains claimable after close
-- no participant can be forced into loss merely because another participant submitted a valid under-distribution close first
+```text
+sum(opened_channel_balances) = ChannelFund.intmax_visible_amount_to_members
+```
 
-## 11. Implementation Boundary
+### 14.6 Close Safety
 
-### 11.1 Files to Change First
+- no close may ignore a fully signed and provable outgoing native debit
+- no valid late-known incoming native value may be lost
+- no post-close claim may bypass the shared native nullifier
+- once close is pending, the channel is frozen for new native sends
+- a fully signed but withheld small block can trigger slashing special close
+
+## 15. Implementation Boundary
+
+### 15.1 Migration Impact
+
+The current repository still contains a legacy packed `AccountId = hub_id + account_no` model in
+multiple places. This specification supersedes that as the canonical native authorization model.
+
+Implementation must therefore migrate:
+
+- native signing identities: from `AccountId` to `UserId = ChannelId || KeyId`
+- channel membership: from one account-threshold leaf to `ChannelRecord + KeyRecord`
+- channel-level finality: from optional attached signatures to fully signed small-block roots
+
+The legacy packed account model may remain temporarily only as an implementation bridge for
+non-channel Intmax components.
+
+### 15.2 Files and Modules That Must Change
 
 - [src/common/user_id.rs](/Users/plasma/repos/intmax3-zkp-enshrined-paymentchannel/src/common/user_id.rs)
-- [src/constants.rs](/Users/plasma/repos/intmax3-zkp-enshrined-paymentchannel/src/constants.rs)
-- [src/common/block.rs](/Users/plasma/repos/intmax3-zkp-enshrined-paymentchannel/src/common/block.rs)
 - [src/common/trees/account_tree.rs](/Users/plasma/repos/intmax3-zkp-enshrined-paymentchannel/src/common/trees/account_tree.rs)
+- [src/common/key_set.rs](/Users/plasma/repos/intmax3-zkp-enshrined-paymentchannel/src/common/key_set.rs)
 - [src/common/tx.rs](/Users/plasma/repos/intmax3-zkp-enshrined-paymentchannel/src/common/tx.rs)
-- [src/common/transfer.rs](/Users/plasma/repos/intmax3-zkp-enshrined-paymentchannel/src/common/transfer.rs)
-- [src/common/channel_message.rs](/Users/plasma/repos/intmax3-zkp-enshrined-paymentchannel/src/common/channel_message.rs)
+- [src/common/channel.rs](/Users/plasma/repos/intmax3-zkp-enshrined-paymentchannel/src/common/channel.rs)
+- [src/circuits/validity/signature_aggregation/](/Users/plasma/repos/intmax3-zkp-enshrined-paymentchannel/src/circuits/validity/signature_aggregation)
+- [contracts/src/ChannelSettlementManager.sol](/Users/plasma/repos/intmax3-zkp-enshrined-paymentchannel/contracts/src/ChannelSettlementManager.sol)
 
-### 11.2 Main New Files Needed
+### 15.3 Main Workstreams
 
-- `src/common/account_id.rs` or a rename of `user_id.rs`
-- `src/common/channel_state_v2.rs`
-- `src/common/channel_transition.rs`
-- `src/common/channel_action.rs`
-- `src/plonky3/channel_state/`
-- `src/circuits/channel_transport/` or channel-action circuits under the existing Plonky2 validity tree
+1. `registry refactor`
+   - add `ChannelRecord`
+   - add `KeyRecord`
+   - bind `UserId = ChannelId || KeyId`
 
-### 11.3 Primary Implementation Workstreams
+2. `native sign-back integration`
+   - make small-block root signing the canonical native authorization event
+   - prove that every `KeyId` condition of a channel is satisfied
+   - reuse INTMAX PQ aggregation logic
 
-The close and post-close portion should be implemented as four explicit workstreams.
+3. `BP and special-close logic`
+   - fixed BP registration for MVP
+   - penalty reserve proof
+   - special close with slashing if a fully signed small block is withheld
 
-1. `onchain contract`
-   - store `CloseIntent`
-   - enforce the 1-day challenge period for both the final channel state and the channel-fund snapshot
-   - allow replacement by newer valid state/fund evidence
-   - support close cancellation, finalization, L1 withdrawal, and post-close incoming recovery
+4. `receiver-flow rewrite`
+   - sender-prepared receiver delta bundle
+   - receiver-side Intmax-balance consensus
+   - receiver-side channel-balance bundle application consensus
+   - no ordinary personal-nullifier receive claim path
 
-2. `Plonky2 close proof`
-   - prove that the final signed channel state is valid for the channel account
-   - prove that the L1 withdrawal list is equivalent to the final `UserFund` state
-   - prove that the withdrawal total matches the challenged `ChannelFund`
-   - output the withdrawal object used after close
+5. `close and post-close`
+   - normal close
+   - freeze rule
+   - cancellation by revived native tx
+   - post-close incoming recovery
+   - stale close prevention for just-emitted outgoing native txs
 
-3. `post-close claim proof`
-   - prove that a late-known incoming Intmax tx belongs to the closed channel
-   - prove that it was not reflected in the finalized close snapshot
-   - prove memo authorization and personal-nullifier freshness
-   - allow equivalent post-close withdrawal or recovery
+## 16. Implementation Order
 
-4. `cancel proof`
-   - prove that a previously censored inter-channel Intmax tx became fully signed after close submission
-   - bind that tx to the pending `CloseIntent`
-   - cancel the pending close before finalization
+1. introduce `ChannelId`, `KeyId`, and `UserId`
+2. add `ChannelRecord` and `KeyRecord`
+3. change native signature messages to small-block root messages
+4. integrate INTMAX PQ signature aggregation over all `KeyId` of a channel
+5. bind sender-side and receiver-side native transport to fully signed small blocks
+6. add BP penalty reserve proof and special close
+7. add close freeze rule to native validity constraints
+8. implement root-based close withdrawal claims
+9. implement close cancellation and post-close incoming recovery
+10. implement stale-close correction for already-emitted outgoing native txs
 
-## 12. Implementation Order
+## 17. Design Decisions Fixed by This Draft
 
-1. rename to `AccountId` while keeping packed-ID compatibility
-2. convert block / account tree / signing messages to `hub_id`
-3. add `ChannelStateV2`, `ChannelAction`, and typed transition hashes
-4. bind `tx_tree_root` to concrete `TxV2` / `ChannelAction` witnesses inside `block_hash_chain`
-5. implement Plonky3 state-update proofs for `ChannelInTx` and `ReceiveClaimTx`
-6. implement Plonky2 handling for `InterChannelSendTx`, `InterChannelImportTx`, `CloseIntent`, and close distribution
-7. fix the P2/P3 boundary around `proof_bridge_hash`
-8. implement close challenge / cancellation / post-close-claim on the contract boundary
-9. merge the current `channel_message.rs` into the new spec or remove it
+- a channel is the native authorization domain in MVP
+- each channel has one fixed BP in MVP
+- canonical native signing identity is `UserId = ChannelId || KeyId`
+- a native small block is valid only if all channel member `KeyId` conditions are satisfied
+- sender-prepared dummy receiver bundles replace the ordinary personal-nullifier receive-claim path
+- `ChannelFund` Intmax balance is part of the all-member channel state
+- after close submission, the channel is frozen for new native sends
+- special close exists and slashes BP for withholding a fully signed small block
+- close and small-block finality should reuse INTMAX PQ signature verification logic
 
-## 13. Design Decisions at This Stage
-
-- the channel itself is an Intmax3 account
-- the ID system is unified as `hub_id + account_no`
-- the P2/P3 connection uses a public-values hash bridge instead of proof recursion
-- receiver-side balance application is bundled directly into import, and the sender carries the P3 receiver-update proof
-- on-chain logic does not require a Plonky3 verifier from the start; the fully signed state is the authoritative object
-- channel close is not a single final action; it is a challenged intent with cancellation and post-close recovery paths
-
-## 14. TODO
+## 18. TODO
 
 - improve hub-level nullifier sizing by changing the nullifier tree into a year/month-capped structure
 - include year/month/day metadata in the transaction body and bind it in both ZKP public inputs and channel-state updates
 - use the bound date metadata to separate old nullifier subtrees from active subtrees
 - allow pruning of old date-partitioned nullifier data once it is outside the active retention window
-
-This is a reasonable MVP. It preserves the existing Plonky2 validity path while also making use of
-the already-added Plonky3 bridge with the minimum architecture needed to support both.
+- add BP rotation and replacement rules after MVP
+- add a deterministic rule for medium-block and large-block cutoff references during close challenges

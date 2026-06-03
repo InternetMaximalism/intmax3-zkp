@@ -6,18 +6,20 @@ use p3_commit::testing::TrivialPcs;
 use p3_dft::Radix2DitParallel;
 use p3_field::{PrimeCharacteristicRing, extension::BinomialExtensionField};
 use p3_goldilocks::{Goldilocks, Poseidon2Goldilocks};
-use p3_matrix::Matrix;
-use p3_matrix::dense::RowMajorMatrix;
+use p3_matrix::{Matrix, dense::RowMajorMatrix};
 use p3_uni_stark::{Proof, StarkConfig, prove, verify};
 use rand09::{SeedableRng, rngs::StdRng};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-use crate::circuits::channel::state_update_verifier::{
-    ChannelProofEnvelope, ChannelProofVerifier, ChannelStateUpdateError, ChannelStateUpdatePublicInputs,
+use crate::{
+    circuits::channel::state_update_verifier::{
+        ChannelProofEnvelope, ChannelProofVerifier, ChannelStateUpdateError,
+        ChannelStateUpdatePublicInputs,
+    },
+    common::channel::{ProofBackend, ReceiverBalanceDelta, TransitionProofRole},
+    ethereum_types::u32limb_trait::U32LimbTrait,
 };
-use crate::common::channel::{ProofBackend, ReceiverBalanceDelta, TransitionProofRole};
-use crate::ethereum_types::u32limb_trait::U32LimbTrait;
 
 type Val = Goldilocks;
 type Challenge = BinomialExtensionField<Val, 2>;
@@ -59,8 +61,8 @@ pub struct ReceiverBundleRowWitness {
 #[serde(rename_all = "camelCase")]
 pub struct ReceiverBundleWitness {
     pub amount: u64,
-    pub channel_fund_before: u64,
-    pub channel_fund_after: u64,
+    pub unallocated_before: u64,
+    pub unallocated_after: u64,
     pub rows: Vec<ReceiverBundleRowWitness>,
 }
 
@@ -161,7 +163,9 @@ impl<F> BaseAirWithPublicValues<F> for SingleTransitionAir {
 impl<AB: AirBuilderWithPublicValues> Air<AB> for SingleTransitionAir {
     fn eval(&self, builder: &mut AB) {
         let main = builder.main();
-        let row = main.row_slice(0).expect("single transition trace must have one row");
+        let row = main
+            .row_slice(0)
+            .expect("single transition trace must have one row");
         let row: &SingleTransitionRow<AB::Var> = (*row).borrow();
         let pi_amount = builder.public_values()[0].clone();
         let pi_sender_before = builder.public_values()[1].clone();
@@ -197,9 +201,8 @@ impl<AB: AirBuilderWithPublicValues> Air<AB> for SingleTransitionAir {
             .when_first_row()
             .assert_eq(row.is_in_channel.clone(), pi_is_in_channel);
 
-        builder.assert_zero(
-            row.is_in_channel.clone() * (row.is_in_channel.clone() - AB::Expr::ONE),
-        );
+        builder
+            .assert_zero(row.is_in_channel.clone() * (row.is_in_channel.clone() - AB::Expr::ONE));
         builder.assert_eq(
             row.sender_before.clone(),
             row.sender_after.clone() + row.amount.clone(),
@@ -209,9 +212,10 @@ impl<AB: AirBuilderWithPublicValues> Air<AB> for SingleTransitionAir {
         builder
             .when(row.is_in_channel.clone())
             .assert_eq(receiver_delta.clone(), row.amount.clone());
-        builder
-            .when(row.is_in_channel.clone())
-            .assert_eq(row.channel_fund_before.clone(), row.channel_fund_after.clone());
+        builder.when(row.is_in_channel.clone()).assert_eq(
+            row.channel_fund_before.clone(),
+            row.channel_fund_after.clone(),
+        );
         builder
             .when(AB::Expr::ONE - row.is_in_channel.clone())
             .assert_zero(receiver_delta);
@@ -239,13 +243,17 @@ impl<F> BaseAirWithPublicValues<F> for ReceiverBundleAir {
 impl<AB: AirBuilderWithPublicValues> Air<AB> for ReceiverBundleAir {
     fn eval(&self, builder: &mut AB) {
         let main = builder.main();
-        let local_row = main.row_slice(0).expect("receiver bundle trace missing current row");
-        let next_row = main.row_slice(1).expect("receiver bundle trace missing next row");
+        let local_row = main
+            .row_slice(0)
+            .expect("receiver bundle trace missing current row");
+        let next_row = main
+            .row_slice(1)
+            .expect("receiver bundle trace missing next row");
         let local: &ReceiverBundleRow<AB::Var> = (*local_row).borrow();
         let next: &ReceiverBundleRow<AB::Var> = (*next_row).borrow();
         let amount = builder.public_values()[0].clone();
-        let fund_before = builder.public_values()[1].clone();
-        let fund_after = builder.public_values()[2].clone();
+        let unallocated_before = builder.public_values()[1].clone();
+        let unallocated_after = builder.public_values()[2].clone();
         let entry_count = builder.public_values()[3].clone();
         let dummy_count = builder.public_values()[4].clone();
 
@@ -253,12 +261,10 @@ impl<AB: AirBuilderWithPublicValues> Air<AB> for ReceiverBundleAir {
         builder.assert_zero(local.is_dummy.clone() * (local.is_dummy.clone() - AB::Expr::ONE));
         builder.assert_zero((AB::Expr::ONE - local.is_active.clone()) * local.is_dummy.clone());
 
-        builder
-            .when(local.is_active.clone())
-            .assert_eq(
-                local.receiver_after.clone(),
-                local.receiver_before.clone() + local.delta_amount.clone(),
-            );
+        builder.when(local.is_active.clone()).assert_eq(
+            local.receiver_after.clone(),
+            local.receiver_before.clone() + local.delta_amount.clone(),
+        );
         builder
             .when(AB::Expr::ONE - local.is_active.clone())
             .assert_zero(local.receiver_before.clone());
@@ -273,12 +279,10 @@ impl<AB: AirBuilderWithPublicValues> Air<AB> for ReceiverBundleAir {
             .when(local.is_dummy.clone())
             .assert_zero(local.delta_amount.clone() * (local.delta_amount.clone() - AB::Expr::ONE));
 
-        builder
-            .when_first_row()
-            .assert_eq(
-                local.running_sum.clone(),
-                local.is_active.clone() * local.delta_amount.clone(),
-            );
+        builder.when_first_row().assert_eq(
+            local.running_sum.clone(),
+            local.is_active.clone() * local.delta_amount.clone(),
+        );
         builder
             .when_first_row()
             .assert_eq(local.running_dummy_count.clone(), local.is_dummy.clone());
@@ -311,7 +315,7 @@ impl<AB: AirBuilderWithPublicValues> Air<AB> for ReceiverBundleAir {
         builder
             .when_last_row()
             .assert_eq(local.running_active_count.clone(), entry_count);
-        builder.assert_zero(fund_before.into() + amount.into() - fund_after.into());
+        builder.assert_zero(unallocated_after.into() + amount.into() - unallocated_before.into());
     }
 }
 
@@ -335,8 +339,8 @@ fn single_public_values(witness: &SingleTransitionWitness) -> [Val; SINGLE_PUBLI
 fn bundle_public_values(witness: &ReceiverBundleWitness) -> [Val; BUNDLE_PUBLIC_VALUES] {
     [
         Val::from_u64(witness.amount),
-        Val::from_u64(witness.channel_fund_before),
-        Val::from_u64(witness.channel_fund_after),
+        Val::from_u64(witness.unallocated_before),
+        Val::from_u64(witness.unallocated_after),
         Val::from_u64(witness.rows.len() as u64),
         Val::from_u64(witness.rows.iter().filter(|row| row.is_dummy).count() as u64),
     ]
@@ -418,7 +422,9 @@ fn bundle_trace(witness: &ReceiverBundleWitness) -> RowMajorMatrix<Val> {
     RowMajorMatrix::new(values, BUNDLE_TRACE_WIDTH)
 }
 
-fn validate_single_witness(witness: &SingleTransitionWitness) -> Result<(), Plonky3ChannelProofError> {
+fn validate_single_witness(
+    witness: &SingleTransitionWitness,
+) -> Result<(), Plonky3ChannelProofError> {
     if witness.sender_before != witness.sender_after + witness.amount {
         return Err(Plonky3ChannelProofError::InvalidSingleWitness(
             "sender_before must equal sender_after + amount".to_string(),
@@ -450,7 +456,9 @@ fn validate_single_witness(witness: &SingleTransitionWitness) -> Result<(), Plon
     Ok(())
 }
 
-fn validate_bundle_witness(witness: &ReceiverBundleWitness) -> Result<(), Plonky3ChannelProofError> {
+fn validate_bundle_witness(
+    witness: &ReceiverBundleWitness,
+) -> Result<(), Plonky3ChannelProofError> {
     if witness.rows.is_empty() {
         return Err(Plonky3ChannelProofError::InvalidBundleWitness(
             "receiver bundle must contain at least one row".to_string(),
@@ -478,9 +486,9 @@ fn validate_bundle_witness(witness: &ReceiverBundleWitness) -> Result<(), Plonky
             "receiver delta total must equal amount".to_string(),
         ));
     }
-    if witness.channel_fund_after != witness.channel_fund_before + witness.amount {
+    if witness.unallocated_before != witness.unallocated_after + witness.amount {
         return Err(Plonky3ChannelProofError::InvalidBundleWitness(
-            "channel fund must increase by amount on import".to_string(),
+            "unallocated incoming must decrease by amount on bundle application".to_string(),
         ));
     }
     Ok(())
@@ -491,11 +499,18 @@ pub fn prove_single_transition(
 ) -> Result<Plonky3ChannelStateProof, Plonky3ChannelProofError> {
     validate_single_witness(&witness)?;
     let config = make_config(0);
-    let proof = prove(&config, &SingleTransitionAir, single_trace(&witness), &single_public_values(&witness))
-        ;
+    let proof = prove(
+        &config,
+        &SingleTransitionAir,
+        single_trace(&witness),
+        &single_public_values(&witness),
+    );
     let bytes = postcard::to_allocvec(&proof)
         .map_err(|e| Plonky3ChannelProofError::Serialization(e.to_string()))?;
-    Ok(Plonky3ChannelStateProof::Single { witness, proof: bytes })
+    Ok(Plonky3ChannelStateProof::Single {
+        witness,
+        proof: bytes,
+    })
 }
 
 pub fn single_transition_envelope(
@@ -516,10 +531,18 @@ pub fn prove_receiver_bundle(
 ) -> Result<Plonky3ChannelStateProof, Plonky3ChannelProofError> {
     validate_bundle_witness(&witness)?;
     let config = make_config(witness.rows.len().max(1).next_power_of_two().ilog2() as usize);
-    let proof = prove(&config, &ReceiverBundleAir, bundle_trace(&witness), &bundle_public_values(&witness));
+    let proof = prove(
+        &config,
+        &ReceiverBundleAir,
+        bundle_trace(&witness),
+        &bundle_public_values(&witness),
+    );
     let bytes = postcard::to_allocvec(&proof)
         .map_err(|e| Plonky3ChannelProofError::Serialization(e.to_string()))?;
-    Ok(Plonky3ChannelStateProof::ReceiverBundle { witness, proof: bytes })
+    Ok(Plonky3ChannelStateProof::ReceiverBundle {
+        witness,
+        proof: bytes,
+    })
 }
 
 pub fn receiver_bundle_envelope(
@@ -544,8 +567,13 @@ pub fn verify_state_proof(
             let config = make_config(0);
             let stark_proof: StarkProof = postcard::from_bytes(proof)
                 .map_err(|e| Plonky3ChannelProofError::Serialization(e.to_string()))?;
-            verify(&config, &SingleTransitionAir, &stark_proof, &single_public_values(witness))
-                .map_err(|e| Plonky3ChannelProofError::Verification(format!("{e:?}")))
+            verify(
+                &config,
+                &SingleTransitionAir,
+                &stark_proof,
+                &single_public_values(witness),
+            )
+            .map_err(|e| Plonky3ChannelProofError::Verification(format!("{e:?}")))
         }
         Plonky3ChannelStateProof::ReceiverBundle { witness, proof } => {
             validate_bundle_witness(witness)?;
@@ -553,8 +581,13 @@ pub fn verify_state_proof(
                 make_config(witness.rows.len().max(1).next_power_of_two().ilog2() as usize);
             let stark_proof: StarkProof = postcard::from_bytes(proof)
                 .map_err(|e| Plonky3ChannelProofError::Serialization(e.to_string()))?;
-            verify(&config, &ReceiverBundleAir, &stark_proof, &bundle_public_values(witness))
-                .map_err(|e| Plonky3ChannelProofError::Verification(format!("{e:?}")))
+            verify(
+                &config,
+                &ReceiverBundleAir,
+                &stark_proof,
+                &bundle_public_values(witness),
+            )
+            .map_err(|e| Plonky3ChannelProofError::Verification(format!("{e:?}")))
         }
     }
 }
@@ -604,7 +637,7 @@ impl ChannelProofVerifier for RealPlonky3ChannelProofVerifier {
             }
             Plonky3ChannelStateProof::ReceiverBundle { witness, .. } => {
                 if public_inputs.kind
-                    != crate::common::channel::ChannelTransitionKind::InterChannelImport
+                    != crate::common::channel::ChannelTransitionKind::ReceiverBundleApply
                 {
                     return Err(ChannelStateUpdateError::ProofVerification(
                         "receiver-bundle proof kind mismatch".to_string(),
@@ -612,8 +645,8 @@ impl ChannelProofVerifier for RealPlonky3ChannelProofVerifier {
                 }
                 let dummy_count = witness.rows.iter().filter(|row| row.is_dummy).count() as u64;
                 if witness.amount != public_inputs.amount
-                    || witness.channel_fund_before != public_inputs.channel_fund_before.low_u64()
-                    || witness.channel_fund_after != public_inputs.channel_fund_after.low_u64()
+                    || witness.unallocated_before != public_inputs.unallocated_before.low_u64()
+                    || witness.unallocated_after != public_inputs.unallocated_after.low_u64()
                     || witness.rows.len() as u64 != public_inputs.receiver_entry_count
                     || dummy_count != public_inputs.receiver_dummy_count
                 {
@@ -670,8 +703,8 @@ mod tests {
     fn receiver_bundle_proof_roundtrip() {
         let proof = prove_receiver_bundle(ReceiverBundleWitness {
             amount: 7,
-            channel_fund_before: 100,
-            channel_fund_after: 107,
+            unallocated_before: 7,
+            unallocated_after: 0,
             rows: vec![
                 ReceiverBundleRowWitness {
                     receiver_before: 10,

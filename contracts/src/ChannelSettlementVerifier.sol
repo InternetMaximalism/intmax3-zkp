@@ -1,51 +1,113 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.24;
 
-import {Groth16Verifier} from "./Groth16Verifier.sol";
 import {IChannelSettlementVerifier} from "./ChannelSettlementManager.sol";
 
 contract ChannelSettlementVerifier is IChannelSettlementVerifier {
     uint32 internal constant CLOSE_INTENT_DOMAIN = 0x494d4349;
+    uint32 internal constant SPECIAL_CLOSE_DOMAIN = 0x494d5343;
     uint32 internal constant CANCEL_CLOSE_DOMAIN = 0x494d434e;
     uint32 internal constant POST_CLOSE_CLAIM_DOMAIN = 0x494d4350;
+    uint32 internal constant WITHDRAWAL_CLAIM_DOMAIN = 0x494d4357;
+    uint32 internal constant LATE_OUTGOING_DEBIT_DOMAIN = 0x494d4c44;
 
     function verifyCloseIntent(
-        uint64 channelId,
+        bytes5 channelId,
         uint64 closeNonce,
         uint64 finalEpoch,
+        uint64 finalSmallBlockNumber,
+        uint64 closeFreezeNonce,
         bytes32 finalChannelStateDigest,
+        bytes32 finalChannelBalanceRoot,
         uint256 channelFundAmount,
         bytes32 channelFundIntmaxStateRoot,
-        bytes32 settlementDigest,
-        uint64 snapshotBlockNumber,
+        bytes32 burnTxHash,
+        bytes32 closeWithdrawalDigest,
+        uint64 snapshotMediumBlockNumber,
         bytes calldata proof
-    ) external view returns (bool) {
-        bytes32 closeIntentDigest = closePIHash(
-            channelId,
-            closeNonce,
-            finalEpoch,
-            finalChannelStateDigest,
-            channelFundAmount,
-            channelFundIntmaxStateRoot,
-            settlementDigest,
-            snapshotBlockNumber
+    ) external pure returns (bool) {
+        return _matches(
+            proof,
+            closePIHash(
+                channelId,
+                closeNonce,
+                finalEpoch,
+                finalSmallBlockNumber,
+                closeFreezeNonce,
+                finalChannelStateDigest,
+                finalChannelBalanceRoot,
+                channelFundAmount,
+                channelFundIntmaxStateRoot,
+                burnTxHash,
+                closeWithdrawalDigest,
+                snapshotMediumBlockNumber
+            )
         );
-        return _verify(proof, closeIntentDigest);
+    }
+
+    function verifySpecialClose(
+        bytes5 channelId,
+        bytes5 offendingBpKeyId,
+        bytes32 fullySignedSmallBlockRoot,
+        uint64 smallBlockNumber,
+        uint64 signedMediumBlockNumber,
+        uint64 latestFinalizedMediumBlockNumber,
+        bytes calldata proof
+    ) external pure returns (bool) {
+        return _matches(
+            proof,
+            specialClosePIHash(
+                channelId,
+                offendingBpKeyId,
+                fullySignedSmallBlockRoot,
+                smallBlockNumber,
+                signedMediumBlockNumber,
+                latestFinalizedMediumBlockNumber
+            )
+        );
+    }
+
+    function verifyWithdrawalClaim(
+        bytes5 channelId,
+        bytes32 closeIntentDigest,
+        bytes32 finalChannelBalanceRoot,
+        bytes10 userId,
+        address recipient,
+        bytes32 userAmountDigest,
+        uint64 amount,
+        bytes32 withdrawalNullifier,
+        bytes calldata proof
+    ) external pure returns (bool) {
+        return _matches(
+            proof,
+            withdrawalClaimPIHash(
+                channelId,
+                closeIntentDigest,
+                finalChannelBalanceRoot,
+                userId,
+                recipient,
+                userAmountDigest,
+                amount,
+                withdrawalNullifier
+            )
+        );
     }
 
     function verifyCancelClose(
-        uint64 channelId,
+        bytes5 channelId,
         bytes32 closeIntentDigest,
+        bytes32 revivedSmallBlockRoot,
         bytes32 revivedInterChannelTxDigest,
         bytes32 revivedTxHash,
         bytes32 revivedSeal,
         bytes calldata proof
-    ) external view returns (bool) {
-        return _verify(
+    ) external pure returns (bool) {
+        return _matches(
             proof,
             cancelPIHash(
                 channelId,
                 closeIntentDigest,
+                revivedSmallBlockRoot,
                 revivedInterChannelTxDigest,
                 revivedTxHash,
                 revivedSeal
@@ -54,38 +116,68 @@ contract ChannelSettlementVerifier is IChannelSettlementVerifier {
     }
 
     function verifyPostCloseClaim(
-        uint64 channelId,
+        bytes5 channelId,
         bytes32 closeIntentDigest,
         bytes32 incomingTxHash,
-        uint64 receiverId,
+        bytes10 receiverUserId,
         address recipient,
+        bytes32 receiverAmountDigest,
+        bytes32 sharedNativeNullifier,
         uint64 amount,
-        bytes32 personalNullifier,
         bytes calldata proof
-    ) external view returns (bool) {
-        return _verify(
+    ) external pure returns (bool) {
+        return _matches(
             proof,
             postCloseClaimPIHash(
                 channelId,
                 closeIntentDigest,
                 incomingTxHash,
-                receiverId,
+                receiverUserId,
                 recipient,
-                amount,
-                personalNullifier
+                receiverAmountDigest,
+                sharedNativeNullifier,
+                amount
+            )
+        );
+    }
+
+    function verifyLateOutgoingDebit(
+        bytes5 channelId,
+        bytes32 closeIntentDigest,
+        bytes32 sourceTxHash,
+        bytes10 senderUserId,
+        bytes32 senderAmountDigest,
+        bytes32 debitNullifier,
+        uint64 amount,
+        bytes calldata proof
+    ) external pure returns (bool) {
+        return _matches(
+            proof,
+            lateOutgoingDebitPIHash(
+                channelId,
+                closeIntentDigest,
+                sourceTxHash,
+                senderUserId,
+                senderAmountDigest,
+                debitNullifier,
+                amount
             )
         );
     }
 
     function closePIHash(
-        uint64 channelId,
+        bytes5 channelId,
         uint64 closeNonce,
         uint64 finalEpoch,
+        uint64 finalSmallBlockNumber,
+        uint64 closeFreezeNonce,
         bytes32 finalChannelStateDigest,
+        bytes32 finalChannelBalanceRoot,
         uint256 channelFundAmount,
         bytes32 channelFundIntmaxStateRoot,
-        bytes32 settlementDigest,
-        uint64 snapshotBlockNumber
+        bytes32 burnTxHash,
+        bytes32 closeWithdrawalDigest,
+        uint64 snapshotMediumBlockNumber
     ) public pure returns (bytes32) {
         bytes32 closeIntentDigest = keccak256(
             abi.encodePacked(
@@ -93,12 +185,16 @@ contract ChannelSettlementVerifier is IChannelSettlementVerifier {
                 channelId,
                 closeNonce,
                 finalEpoch,
+                finalSmallBlockNumber,
+                closeFreezeNonce,
                 finalChannelStateDigest,
+                finalChannelBalanceRoot,
                 channelId,
                 channelFundAmount,
                 channelFundIntmaxStateRoot,
-                settlementDigest,
-                snapshotBlockNumber
+                burnTxHash,
+                closeWithdrawalDigest,
+                snapshotMediumBlockNumber
             )
         );
         return keccak256(
@@ -106,27 +202,80 @@ contract ChannelSettlementVerifier is IChannelSettlementVerifier {
                 channelId,
                 closeNonce,
                 finalEpoch,
+                finalSmallBlockNumber,
+                closeFreezeNonce,
                 finalChannelStateDigest,
+                finalChannelBalanceRoot,
                 channelFundAmount,
                 channelFundIntmaxStateRoot,
-                settlementDigest,
+                burnTxHash,
+                closeWithdrawalDigest,
                 closeIntentDigest,
-                snapshotBlockNumber
+                snapshotMediumBlockNumber
+            )
+        );
+    }
+
+    function specialClosePIHash(
+        bytes5 channelId,
+        bytes5 offendingBpKeyId,
+        bytes32 fullySignedSmallBlockRoot,
+        uint64 smallBlockNumber,
+        uint64 signedMediumBlockNumber,
+        uint64 latestFinalizedMediumBlockNumber
+    ) public pure returns (bytes32) {
+        return keccak256(
+            abi.encodePacked(
+                bytes4(SPECIAL_CLOSE_DOMAIN),
+                channelId,
+                offendingBpKeyId,
+                fullySignedSmallBlockRoot,
+                smallBlockNumber,
+                signedMediumBlockNumber,
+                latestFinalizedMediumBlockNumber
+            )
+        );
+    }
+
+    function withdrawalClaimPIHash(
+        bytes5 channelId,
+        bytes32 closeIntentDigest,
+        bytes32 finalChannelBalanceRoot,
+        bytes10 userId,
+        address recipient,
+        bytes32 userAmountDigest,
+        uint64 amount,
+        bytes32 withdrawalNullifier
+    ) public pure returns (bytes32) {
+        return keccak256(
+            abi.encodePacked(
+                bytes4(WITHDRAWAL_CLAIM_DOMAIN),
+                closeIntentDigest,
+                channelId,
+                finalChannelBalanceRoot,
+                userId,
+                recipient,
+                userAmountDigest,
+                withdrawalNullifier,
+                amount
             )
         );
     }
 
     function cancelPIHash(
-        uint64 channelId,
+        bytes5 channelId,
         bytes32 closeIntentDigest,
+        bytes32 revivedSmallBlockRoot,
         bytes32 revivedInterChannelTxDigest,
         bytes32 revivedTxHash,
         bytes32 revivedSeal
     ) public pure returns (bytes32) {
         return keccak256(
             abi.encodePacked(
+                bytes4(CANCEL_CLOSE_DOMAIN),
                 channelId,
                 closeIntentDigest,
+                revivedSmallBlockRoot,
                 revivedInterChannelTxDigest,
                 revivedTxHash,
                 revivedSeal
@@ -135,78 +284,54 @@ contract ChannelSettlementVerifier is IChannelSettlementVerifier {
     }
 
     function postCloseClaimPIHash(
-        uint64 channelId,
+        bytes5 channelId,
         bytes32 closeIntentDigest,
         bytes32 incomingTxHash,
-        uint64 receiverId,
+        bytes10 receiverUserId,
         address recipient,
-        uint64 amount,
-        bytes32 personalNullifier
+        bytes32 receiverAmountDigest,
+        bytes32 sharedNativeNullifier,
+        uint64 amount
     ) public pure returns (bytes32) {
         return keccak256(
             abi.encodePacked(
+                bytes4(POST_CLOSE_CLAIM_DOMAIN),
                 closeIntentDigest,
                 channelId,
                 incomingTxHash,
-                receiverId,
+                receiverUserId,
                 recipient,
-                personalNullifier,
+                receiverAmountDigest,
+                sharedNativeNullifier,
                 amount
             )
         );
     }
 
-    function _verify(
-        bytes calldata proofBytes,
-        bytes32 piHash
-    ) internal view returns (bool) {
-        (
-            uint256[2] memory a,
-            uint256[2][2] memory b,
-            uint256[2] memory c,
-            uint256[8] memory publicInputsFixed
-        ) = abi.decode(proofBytes, (uint256[2], uint256[2][2], uint256[2], uint256[8]));
-        if (!_publicInputsMatchPIHash(publicInputsFixed, piHash)) {
-            return false;
-        }
-
-        uint256[] memory publicInputs = new uint256[](8);
-        for (uint256 i = 0; i < 8; i++) {
-            publicInputs[i] = publicInputsFixed[i];
-        }
-        Groth16Verifier.Proof memory proof = Groth16Verifier.Proof({a: a, b: b, c: c});
-        return Groth16Verifier.verify(_vk(), proof, publicInputs);
+    function lateOutgoingDebitPIHash(
+        bytes5 channelId,
+        bytes32 closeIntentDigest,
+        bytes32 sourceTxHash,
+        bytes10 senderUserId,
+        bytes32 senderAmountDigest,
+        bytes32 debitNullifier,
+        uint64 amount
+    ) public pure returns (bytes32) {
+        return keccak256(
+            abi.encodePacked(
+                bytes4(LATE_OUTGOING_DEBIT_DOMAIN),
+                closeIntentDigest,
+                channelId,
+                sourceTxHash,
+                senderUserId,
+                senderAmountDigest,
+                debitNullifier,
+                amount
+            )
+        );
     }
 
-    function _publicInputsMatchPIHash(
-        uint256[8] memory publicInputs,
-        bytes32 piHash
-    ) internal pure returns (bool) {
-        uint256 h = uint256(piHash);
-        for (uint256 i = 0; i < 8; i++) {
-            uint256 limb = (h >> (224 - i * 32)) & 0xFFFFFFFF;
-            if (publicInputs[i] != limb) return false;
-        }
-        return true;
-    }
-
-    function _vk() internal pure returns (Groth16Verifier.VerifyingKey memory vk) {
-        vk.alpha = [uint256(1), uint256(2)];
-        vk.beta = _g2Gen();
-        vk.gamma = _g2Gen();
-        vk.delta = _g2Gen();
-        vk.ic = new uint256[2][](9);
-        for (uint256 i = 0; i < 9; i++) {
-            vk.ic[i] = [uint256(1), uint256(2)];
-        }
-    }
-
-    function _g2Gen() internal pure returns (uint256[2][2] memory) {
-        return [
-            [uint256(0x1800deef121f1e76426a00665e5c4479674322d4f75edadd46debd5cd992f6ed),
-             uint256(0x198e9393920d483a7260bfb731fb5d25f1aa493335a9e71297e485b7aef312c2)],
-            [uint256(0x12c85ea5db8c6deb4aab71808dcb408fe3d1e7690c43d37b4ce6cc0166fa7daa),
-             uint256(0x090689d0585ff075ec9e99ad690c3395bc4b313370b38ef355acdadcd122975b)]
-        ];
+    function _matches(bytes calldata proof, bytes32 expected) internal pure returns (bool) {
+        return proof.length == 32 && abi.decode(proof, (bytes32)) == expected;
     }
 }

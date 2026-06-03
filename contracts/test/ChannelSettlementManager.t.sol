@@ -3,335 +3,296 @@ pragma solidity ^0.8.24;
 
 import {Test} from "forge-std/Test.sol";
 import {
-    ChannelSettlementManager
+    ChannelSettlementManager,
+    IChannelSettlementVerifier
 } from "../src/ChannelSettlementManager.sol";
-import {Groth16Verifier} from "../src/Groth16Verifier.sol";
 import {ChannelSettlementVerifier} from "../src/ChannelSettlementVerifier.sol";
 
 contract ChannelSettlementManagerTest is Test {
-    ChannelSettlementVerifier internal realVerifier;
+    ChannelSettlementVerifier internal verifier;
     ChannelSettlementManager internal manager;
 
     address internal alice = makeAddr("alice");
     address internal bob = makeAddr("bob");
-    uint64 internal constant CHANNEL_ID = 0x000300000009;
+    address internal carol = makeAddr("carol");
+
+    bytes5 internal constant CHANNEL_ID = hex"0003000009";
+    bytes5 internal constant BP_KEY_ID = hex"000000000a";
+    bytes10 internal constant USER_A = hex"0003000009000000000a";
+    bytes10 internal constant USER_B = hex"0003000009000000000b";
+    bytes10 internal constant USER_C = hex"0003000009000000000c";
     uint64 internal constant CHALLENGE_PERIOD = 1 days;
-    uint256 internal constant BN254_FIELD_P =
-        21888242871839275222246405745257275088696311157297823662689037894645226208583;
-    uint256 internal constant BN254_SCALAR_R =
-        21888242871839275222246405745257275088548364400416034343698204186575808495617;
+    uint256 internal constant SPECIAL_CLOSE_PENALTY = 9;
+    uint256 internal constant INITIAL_BP_BOND = 25;
 
     function setUp() external {
-        realVerifier = new ChannelSettlementVerifier();
+        verifier = new ChannelSettlementVerifier();
 
-        ChannelSettlementManager.MemberBinding[]
-            memory bindings = new ChannelSettlementManager.MemberBinding[](2);
-        bindings[0] = ChannelSettlementManager.MemberBinding({
-            memberId: 0x00030000000A,
-            recipient: alice
-        });
-        bindings[1] = ChannelSettlementManager.MemberBinding({
-            memberId: 0x00030000000B,
-            recipient: bob
-        });
+        ChannelSettlementManager.MemberBinding[] memory bindings =
+            new ChannelSettlementManager.MemberBinding[](3);
+        bindings[0] = ChannelSettlementManager.MemberBinding({userId: USER_A, recipient: alice});
+        bindings[1] = ChannelSettlementManager.MemberBinding({userId: USER_B, recipient: bob});
+        bindings[2] = ChannelSettlementManager.MemberBinding({userId: USER_C, recipient: carol});
+
         manager = new ChannelSettlementManager(
             CHANNEL_ID,
+            BP_KEY_ID,
             CHALLENGE_PERIOD,
-            realVerifier,
+            SPECIAL_CLOSE_PENALTY,
+            INITIAL_BP_BOND,
+            IChannelSettlementVerifier(address(verifier)),
             bindings
         );
     }
 
-    function _g2Gen() internal pure returns (uint256[2][2] memory) {
-        return [
-            [uint256(0x1800deef121f1e76426a00665e5c4479674322d4f75edadd46debd5cd992f6ed),
-             uint256(0x198e9393920d483a7260bfb731fb5d25f1aa493335a9e71297e485b7aef312c2)],
-            [uint256(0x12c85ea5db8c6deb4aab71808dcb408fe3d1e7690c43d37b4ce6cc0166fa7daa),
-             uint256(0x090689d0585ff075ec9e99ad690c3395bc4b313370b38ef355acdadcd122975b)]
-        ];
-    }
-
-    function _groth16ProofFor(uint256[] memory inputs)
-        internal
-        view
-        returns (Groth16Verifier.Proof memory proof)
-    {
-        uint256 scalar = 1;
-        for (uint256 i = 0; i < inputs.length; i++) {
-            scalar = addmod(scalar, inputs[i], BN254_SCALAR_R);
-        }
-
-        uint256[3] memory mulInput;
-        mulInput[0] = 1;
-        mulInput[1] = 2;
-        mulInput[2] = scalar;
-
-        uint256[2] memory vkX;
-        bool ok;
-        assembly {
-            ok := staticcall(gas(), 0x07, mulInput, 0x60, vkX, 0x40)
-        }
-        require(ok, "ecMul failed");
-
-        proof.a = [uint256(1), uint256(2)];
-        proof.b = _g2Gen();
-        proof.c = [vkX[0], BN254_FIELD_P - vkX[1]];
-    }
-
-    function _proofBytesForPIHash(bytes32 piHash) internal view returns (bytes memory) {
-        uint256[] memory inputs = new uint256[](8);
-        uint256[8] memory fixedInputs;
-        uint256 h = uint256(piHash);
-        for (uint256 i = 0; i < 8; i++) {
-            uint256 limb = (h >> (224 - i * 32)) & 0xFFFFFFFF;
-            inputs[i] = limb;
-            fixedInputs[i] = limb;
-        }
-
-        Groth16Verifier.Proof memory proof = _groth16ProofFor(inputs);
-        return abi.encode(proof.a, proof.b, proof.c, fixedInputs);
-    }
-
-    function _withdrawals()
-        internal
-        view
-        returns (ChannelSettlementManager.SettledWithdrawal[] memory withdrawals)
-    {
-        withdrawals = new ChannelSettlementManager.SettledWithdrawal[](2);
-        withdrawals[0] = ChannelSettlementManager.SettledWithdrawal({
-            memberId: 0x00030000000A,
-            recipient: alice,
-            userAmountDigest: keccak256("alice_amount"),
-            amount: 50
-        });
-        withdrawals[1] = ChannelSettlementManager.SettledWithdrawal({
-            memberId: 0x00030000000B,
-            recipient: bob,
-            userAmountDigest: keccak256("bob_amount"),
-            amount: 25
-        });
+    function _proofFor(bytes32 piHash) internal pure returns (bytes memory) {
+        return abi.encode(piHash);
     }
 
     function _intent(
         uint64 closeNonce,
-        uint64 finalEpoch
-    ) internal view returns (ChannelSettlementManager.CloseIntent memory intent) {
-        bytes32 finalChannelStateDigest = keccak256("final_state");
-        bytes32 intmaxRoot = keccak256("intmax_root");
+        uint64 finalEpoch,
+        uint64 finalSmallBlockNumber,
+        uint64 closeFreezeNonce
+    ) internal pure returns (ChannelSettlementManager.CloseIntent memory intent) {
         intent = ChannelSettlementManager.CloseIntent({
             closeNonce: closeNonce,
             finalEpoch: finalEpoch,
-            finalChannelStateDigest: finalChannelStateDigest,
+            finalSmallBlockNumber: finalSmallBlockNumber,
+            closeFreezeNonce: closeFreezeNonce,
+            finalChannelStateDigest: keccak256("final_state"),
+            finalChannelBalanceRoot: keccak256("channel_balance_root"),
             channelFundAmount: 75,
-            channelFundIntmaxStateRoot: intmaxRoot,
-            settlementDigest: manager.computeSettlementDigest(
-                finalChannelStateDigest,
-                intmaxRoot,
-                _withdrawals()
-            ),
-            snapshotBlockNumber: 77
+            channelFundIntmaxStateRoot: keccak256("intmax_root"),
+            burnTxHash: keccak256("burn_tx"),
+            closeWithdrawalDigest: keccak256("burn_backed_close"),
+            snapshotMediumBlockNumber: 77
         });
     }
 
-    function test_real_verifier_hash_helpers_are_stable() external view {
-        ChannelSettlementManager.CloseIntent memory intent = _intent(1, 9);
-        bytes32 closePiHash = realVerifier.closePIHash(
+    function _withdrawalClaim(
+        bytes32 closeIntentDigest,
+        bytes10 userId,
+        address recipient,
+        uint64 amount
+    ) internal pure returns (ChannelSettlementManager.WithdrawalClaim memory claim) {
+        claim = ChannelSettlementManager.WithdrawalClaim({
+            closeIntentDigest: closeIntentDigest,
+            userId: userId,
+            recipient: recipient,
+            userAmountDigest: keccak256(abi.encodePacked(userId, amount)),
+            amount: amount,
+            withdrawalNullifier: keccak256(abi.encodePacked("withdraw", closeIntentDigest, userId))
+        });
+    }
+
+    function test_hash_helpers_are_stable() external view {
+        ChannelSettlementManager.CloseIntent memory intent = _intent(1, 9, 22, 1);
+        bytes32 closePiHash = verifier.closePIHash(
             CHANNEL_ID,
             intent.closeNonce,
             intent.finalEpoch,
+            intent.finalSmallBlockNumber,
+            intent.closeFreezeNonce,
             intent.finalChannelStateDigest,
+            intent.finalChannelBalanceRoot,
             intent.channelFundAmount,
             intent.channelFundIntmaxStateRoot,
-            intent.settlementDigest,
-            intent.snapshotBlockNumber
+            intent.burnTxHash,
+            intent.closeWithdrawalDigest,
+            intent.snapshotMediumBlockNumber
         );
         assertTrue(closePiHash != bytes32(0));
 
-        bytes32 cancelPiHash = realVerifier.cancelPIHash(
-            CHANNEL_ID,
-            keccak256("close"),
-            keccak256("revived"),
-            keccak256("tx_hash"),
-            keccak256("seal")
-        );
-        assertTrue(cancelPiHash != bytes32(0));
-
-        bytes32 claimPiHash = realVerifier.postCloseClaimPIHash(
-            CHANNEL_ID,
-            keccak256("close"),
-            keccak256("incoming"),
-            0x00030000000A,
-            alice,
-            9,
-            keccak256("nullifier")
-        );
-        assertTrue(claimPiHash != bytes32(0));
-    }
-
-    function test_real_verifier_accepts_synthetic_proofs() external {
-        ChannelSettlementManager.CloseIntent memory intent = _intent(1, 9);
-        bytes32 closePiHash = realVerifier.closePIHash(
-            CHANNEL_ID,
-            intent.closeNonce,
-            intent.finalEpoch,
-            intent.finalChannelStateDigest,
-            intent.channelFundAmount,
-            intent.channelFundIntmaxStateRoot,
-            intent.settlementDigest,
-            intent.snapshotBlockNumber
-        );
         assertTrue(
-            realVerifier.verifyCloseIntent(
+            verifier.specialClosePIHash(
                 CHANNEL_ID,
-                intent.closeNonce,
-                intent.finalEpoch,
-                intent.finalChannelStateDigest,
-                intent.channelFundAmount,
-                intent.channelFundIntmaxStateRoot,
-                intent.settlementDigest,
-                intent.snapshotBlockNumber,
-                _proofBytesForPIHash(closePiHash)
-            )
+                BP_KEY_ID,
+                keccak256("root"),
+                33,
+                10,
+                15
+            ) != bytes32(0)
         );
 
-        bytes32 cancelPiHash = realVerifier.cancelPIHash(
-            CHANNEL_ID,
-            keccak256("close"),
-            keccak256("revived"),
-            keccak256("tx_hash"),
-            keccak256("seal")
-        );
         assertTrue(
-            realVerifier.verifyCancelClose(
+            verifier.withdrawalClaimPIHash(
                 CHANNEL_ID,
                 keccak256("close"),
-                keccak256("revived"),
-                keccak256("tx_hash"),
-                keccak256("seal"),
-                _proofBytesForPIHash(cancelPiHash)
-            )
+                keccak256("root"),
+                USER_A,
+                alice,
+                keccak256("amount"),
+                9,
+                keccak256("nullifier")
+            ) != bytes32(0)
         );
 
-        bytes32 claimPiHash = realVerifier.postCloseClaimPIHash(
-            CHANNEL_ID,
-            keccak256("close"),
-            keccak256("incoming"),
-            0x00030000000A,
-            alice,
-            9,
-            keccak256("nullifier")
-        );
         assertTrue(
-            realVerifier.verifyPostCloseClaim(
+            verifier.cancelPIHash(
+                CHANNEL_ID,
+                keccak256("close"),
+                keccak256("small_block"),
+                keccak256("revived"),
+                keccak256("tx_hash"),
+                keccak256("seal")
+            ) != bytes32(0)
+        );
+
+        assertTrue(
+            verifier.postCloseClaimPIHash(
                 CHANNEL_ID,
                 keccak256("close"),
                 keccak256("incoming"),
-                0x00030000000A,
-                alice,
-                9,
-                keccak256("nullifier"),
-                _proofBytesForPIHash(claimPiHash)
-            )
+                USER_B,
+                bob,
+                keccak256("receiver_amount"),
+                keccak256("shared_nullifier"),
+                9
+            ) != bytes32(0)
         );
     }
 
-    function test_submit_and_finalize_close() external {
-        ChannelSettlementManager.CloseIntent memory intent = _intent(1, 9);
-
+    function test_submit_finalize_withdraw_and_post_close_claim() external {
+        ChannelSettlementManager.CloseIntent memory intent = _intent(1, 9, 22, 1);
         manager.submitCloseIntent(
             intent,
-            _proofBytesForPIHash(
-                realVerifier.closePIHash(
+            _proofFor(
+                verifier.closePIHash(
                     CHANNEL_ID,
                     intent.closeNonce,
                     intent.finalEpoch,
+                    intent.finalSmallBlockNumber,
+                    intent.closeFreezeNonce,
                     intent.finalChannelStateDigest,
+                    intent.finalChannelBalanceRoot,
                     intent.channelFundAmount,
                     intent.channelFundIntmaxStateRoot,
-                    intent.settlementDigest,
-                    intent.snapshotBlockNumber
+                    intent.burnTxHash,
+                    intent.closeWithdrawalDigest,
+                    intent.snapshotMediumBlockNumber
                 )
             )
         );
-        assertTrue(manager.getPendingClose().active);
+
+        assertEq(uint256(manager.channelStatus()), uint256(ChannelSettlementManager.ChannelLifecycleStatus.ClosePending));
+        assertFalse(manager.isNativeSendAllowed(0));
 
         vm.warp(block.timestamp + CHALLENGE_PERIOD + 1);
-        manager.finalizeClose(_withdrawals());
+        manager.finalizeClose();
 
-        assertEq(manager.finalizedEpoch(), 9);
-        assertEq(manager.finalizedChannelFundAmount(), 75);
-        assertEq(manager.withdrawalCredits(alice), 50);
-        assertEq(manager.withdrawalCredits(bob), 25);
-    }
+        assertEq(uint256(manager.channelStatus()), uint256(ChannelSettlementManager.ChannelLifecycleStatus.Closed));
+        bytes32 closeIntentDigest = manager.finalizedCloseIntentDigest();
 
-    function test_newer_close_replaces_pending_close() external {
-        ChannelSettlementManager.CloseIntent memory first = _intent(1, 9);
-        manager.submitCloseIntent(
-            first,
-            _proofBytesForPIHash(
-                realVerifier.closePIHash(
-                    CHANNEL_ID,
-                    first.closeNonce,
-                    first.finalEpoch,
-                    first.finalChannelStateDigest,
-                    first.channelFundAmount,
-                    first.channelFundIntmaxStateRoot,
-                    first.settlementDigest,
-                    first.snapshotBlockNumber
-                )
-            )
+        ChannelSettlementManager.WithdrawalClaim memory aliceClaim = _withdrawalClaim(
+            closeIntentDigest,
+            USER_A,
+            alice,
+            30
         );
-        bytes32 oldDigest = manager.getPendingClose().closeIntentDigest;
-
-        ChannelSettlementManager.CloseIntent memory newer = _intent(2, 10);
-        newer.finalChannelStateDigest = keccak256("newer_state");
-        newer.settlementDigest = manager.computeSettlementDigest(
-            newer.finalChannelStateDigest,
-            newer.channelFundIntmaxStateRoot,
-            _withdrawals()
-        );
-        manager.submitCloseIntent(
-            newer,
-            _proofBytesForPIHash(
-                realVerifier.closePIHash(
+        manager.submitWithdrawalClaim(
+            aliceClaim,
+            _proofFor(
+                verifier.withdrawalClaimPIHash(
                     CHANNEL_ID,
-                    newer.closeNonce,
-                    newer.finalEpoch,
-                    newer.finalChannelStateDigest,
-                    newer.channelFundAmount,
-                    newer.channelFundIntmaxStateRoot,
-                    newer.settlementDigest,
-                    newer.snapshotBlockNumber
+                    closeIntentDigest,
+                    manager.finalizedChannelBalanceRoot(),
+                    USER_A,
+                    alice,
+                    aliceClaim.userAmountDigest,
+                    aliceClaim.amount,
+                    aliceClaim.withdrawalNullifier
                 )
             )
         );
 
-        assertTrue(manager.getPendingClose().active);
-        assertEq(manager.getPendingClose().finalEpoch, 10);
-        assertTrue(manager.getPendingClose().closeIntentDigest != oldDigest);
+        ChannelSettlementManager.PostCloseClaim memory postCloseClaim = ChannelSettlementManager
+            .PostCloseClaim({
+                closeIntentDigest: closeIntentDigest,
+                incomingTxHash: keccak256("incoming_tx"),
+                receiverUserId: USER_B,
+                recipient: bob,
+                receiverAmountDigest: keccak256("receiver_amount"),
+                sharedNativeNullifier: keccak256("shared_nullifier"),
+                amount: 5
+            });
+        manager.submitPostCloseClaim(
+            postCloseClaim,
+            _proofFor(
+                verifier.postCloseClaimPIHash(
+                    CHANNEL_ID,
+                    closeIntentDigest,
+                    postCloseClaim.incomingTxHash,
+                    USER_B,
+                    bob,
+                    postCloseClaim.receiverAmountDigest,
+                    postCloseClaim.sharedNativeNullifier,
+                    postCloseClaim.amount
+                )
+            )
+        );
+
+        assertEq(manager.withdrawalCredits(alice), 30);
+        assertEq(manager.withdrawalCredits(bob), 5);
     }
 
-    function test_cancel_close_clears_pending_intent() external {
-        ChannelSettlementManager.CloseIntent memory intent = _intent(1, 9);
+    function test_special_close_slashes_bp_and_freezes_channel() external {
+        ChannelSettlementManager.SpecialClose memory specialClose = ChannelSettlementManager
+            .SpecialClose({
+                offendingBpKeyId: BP_KEY_ID,
+                fullySignedSmallBlockRoot: keccak256("small_block_root"),
+                smallBlockNumber: 33,
+                signedMediumBlockNumber: 10,
+                latestFinalizedMediumBlockNumber: 15
+            });
+
+        manager.submitSpecialClose(
+            specialClose,
+            _proofFor(
+                verifier.specialClosePIHash(
+                    CHANNEL_ID,
+                    BP_KEY_ID,
+                    specialClose.fullySignedSmallBlockRoot,
+                    specialClose.smallBlockNumber,
+                    specialClose.signedMediumBlockNumber,
+                    specialClose.latestFinalizedMediumBlockNumber
+                )
+            )
+        );
+
+        assertEq(uint256(manager.channelStatus()), uint256(ChannelSettlementManager.ChannelLifecycleStatus.ClosePending));
+        assertEq(manager.currentCloseFreezeNonce(), 1);
+        assertEq(manager.bpBondCredits(), INITIAL_BP_BOND - SPECIAL_CLOSE_PENALTY);
+        assertEq(manager.withdrawalCredits(address(this)), SPECIAL_CLOSE_PENALTY);
+    }
+
+    function test_cancel_close_restores_active_channel() external {
+        ChannelSettlementManager.CloseIntent memory intent = _intent(1, 9, 22, 1);
         manager.submitCloseIntent(
             intent,
-            _proofBytesForPIHash(
-                realVerifier.closePIHash(
+            _proofFor(
+                verifier.closePIHash(
                     CHANNEL_ID,
                     intent.closeNonce,
                     intent.finalEpoch,
+                    intent.finalSmallBlockNumber,
+                    intent.closeFreezeNonce,
                     intent.finalChannelStateDigest,
+                    intent.finalChannelBalanceRoot,
                     intent.channelFundAmount,
                     intent.channelFundIntmaxStateRoot,
-                    intent.settlementDigest,
-                    intent.snapshotBlockNumber
+                    intent.burnTxHash,
+                    intent.closeWithdrawalDigest,
+                    intent.snapshotMediumBlockNumber
                 )
             )
         );
 
-        ChannelSettlementManager.CancelCloseRequest memory request =
-            ChannelSettlementManager.CancelCloseRequest({
-                closeIntentDigest: manager.computeCloseIntentDigest(intent),
+        bytes32 closeIntentDigest = manager.computeCloseIntentDigest(intent);
+        ChannelSettlementManager.CancelCloseRequest memory request = ChannelSettlementManager
+            .CancelCloseRequest({
+                closeIntentDigest: closeIntentDigest,
+                revivedSmallBlockRoot: keccak256("small_block"),
                 revivedInterChannelTxDigest: keccak256("revived_tx"),
                 revivedTxHash: keccak256("tx_hash"),
                 revivedSeal: keccak256("seal")
@@ -339,63 +300,123 @@ contract ChannelSettlementManagerTest is Test {
 
         manager.cancelClose(
             request,
-            _proofBytesForPIHash(
-                realVerifier.cancelPIHash(
+            _proofFor(
+                verifier.cancelPIHash(
                     CHANNEL_ID,
-                    request.closeIntentDigest,
+                    closeIntentDigest,
+                    request.revivedSmallBlockRoot,
                     request.revivedInterChannelTxDigest,
                     request.revivedTxHash,
                     request.revivedSeal
                 )
             )
         );
-        assertFalse(manager.getPendingClose().active);
+
+        assertEq(uint256(manager.channelStatus()), uint256(ChannelSettlementManager.ChannelLifecycleStatus.Active));
+        assertEq(manager.currentCloseFreezeNonce(), 1);
+        assertTrue(manager.isNativeSendAllowed(1));
     }
 
-    function test_post_close_claim_credits_late_incoming_amount() external {
-        ChannelSettlementManager.CloseIntent memory intent = _intent(1, 9);
+    function test_late_outgoing_debit_correction_invalidates_pending_close() external {
+        ChannelSettlementManager.CloseIntent memory intent = _intent(1, 9, 22, 1);
         manager.submitCloseIntent(
             intent,
-            _proofBytesForPIHash(
-                realVerifier.closePIHash(
+            _proofFor(
+                verifier.closePIHash(
                     CHANNEL_ID,
                     intent.closeNonce,
                     intent.finalEpoch,
+                    intent.finalSmallBlockNumber,
+                    intent.closeFreezeNonce,
                     intent.finalChannelStateDigest,
+                    intent.finalChannelBalanceRoot,
                     intent.channelFundAmount,
                     intent.channelFundIntmaxStateRoot,
-                    intent.settlementDigest,
-                    intent.snapshotBlockNumber
+                    intent.burnTxHash,
+                    intent.closeWithdrawalDigest,
+                    intent.snapshotMediumBlockNumber
                 )
             )
         );
-        vm.warp(block.timestamp + CHALLENGE_PERIOD + 1);
-        manager.finalizeClose(_withdrawals());
 
-        ChannelSettlementManager.PostCloseClaim memory claim =
-            ChannelSettlementManager.PostCloseClaim({
-                closeIntentDigest: manager.computeCloseIntentDigest(intent),
-                incomingTxHash: keccak256("late_tx"),
-                receiverId: 0x00030000000A,
-                recipient: alice,
-                amount: 9,
-                personalNullifier: keccak256("personal_nullifier")
+        bytes32 closeIntentDigest = manager.computeCloseIntentDigest(intent);
+        ChannelSettlementManager.LateOutgoingDebitCorrection memory correction =
+            ChannelSettlementManager.LateOutgoingDebitCorrection({
+                closeIntentDigest: closeIntentDigest,
+                sourceTxHash: keccak256("source_tx"),
+                senderUserId: USER_C,
+                senderAmountDigest: keccak256("sender_amount"),
+                debitNullifier: keccak256("debit_nullifier"),
+                amount: 7
             });
 
-        manager.submitPostCloseClaim(
-            claim,
-            _proofBytesForPIHash(
-                realVerifier.postCloseClaimPIHash(
+        manager.submitLateOutgoingDebitCorrection(
+            correction,
+            _proofFor(
+                verifier.lateOutgoingDebitPIHash(
                     CHANNEL_ID,
-                    claim.closeIntentDigest,
-                    claim.incomingTxHash,
-                    claim.receiverId,
-                    claim.recipient,
-                    claim.amount,
-                    claim.personalNullifier
+                    closeIntentDigest,
+                    correction.sourceTxHash,
+                    USER_C,
+                    correction.senderAmountDigest,
+                    correction.debitNullifier,
+                    correction.amount
                 )
             )
         );
-        assertEq(manager.withdrawalCredits(alice), 59);
+
+        assertEq(uint256(manager.channelStatus()), uint256(ChannelSettlementManager.ChannelLifecycleStatus.Active));
+        assertEq(manager.currentCloseFreezeNonce(), 1);
+    }
+
+    function test_special_close_then_submit_and_finalize_normal_close() external {
+        ChannelSettlementManager.SpecialClose memory specialClose = ChannelSettlementManager
+            .SpecialClose({
+                offendingBpKeyId: BP_KEY_ID,
+                fullySignedSmallBlockRoot: keccak256("small_block_root"),
+                smallBlockNumber: 33,
+                signedMediumBlockNumber: 10,
+                latestFinalizedMediumBlockNumber: 15
+            });
+        manager.submitSpecialClose(
+            specialClose,
+            _proofFor(
+                verifier.specialClosePIHash(
+                    CHANNEL_ID,
+                    BP_KEY_ID,
+                    specialClose.fullySignedSmallBlockRoot,
+                    specialClose.smallBlockNumber,
+                    specialClose.signedMediumBlockNumber,
+                    specialClose.latestFinalizedMediumBlockNumber
+                )
+            )
+        );
+
+        ChannelSettlementManager.CloseIntent memory intent = _intent(2, 10, 40, 1);
+        manager.submitCloseIntent(
+            intent,
+            _proofFor(
+                verifier.closePIHash(
+                    CHANNEL_ID,
+                    intent.closeNonce,
+                    intent.finalEpoch,
+                    intent.finalSmallBlockNumber,
+                    intent.closeFreezeNonce,
+                    intent.finalChannelStateDigest,
+                    intent.finalChannelBalanceRoot,
+                    intent.channelFundAmount,
+                    intent.channelFundIntmaxStateRoot,
+                    intent.burnTxHash,
+                    intent.closeWithdrawalDigest,
+                    intent.snapshotMediumBlockNumber
+                )
+            )
+        );
+
+        vm.warp(block.timestamp + CHALLENGE_PERIOD + 1);
+        manager.finalizeClose();
+        assertEq(manager.finalizedEpoch(), 10);
+        assertEq(manager.finalizedSmallBlockNumber(), 40);
+        assertEq(manager.finalizedBurnTxHash(), intent.burnTxHash);
     }
 }

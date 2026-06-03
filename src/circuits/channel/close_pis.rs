@@ -2,30 +2,28 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::{
-    common::{
-        channel::{
-            ChannelError, ChannelMember, ChannelState, CloseIntent, CloseWithdrawal,
-            LatticeOpening,
-        },
-        user_id::AccountId,
-    },
+    common::channel::{ChannelError, ChannelId, ChannelState, CloseIntent, CloseWithdrawal},
     ethereum_types::{bytes32::Bytes32, u32limb_trait::U32LimbTrait, u256::U256},
 };
 
-pub const CHANNEL_CLOSE_PUBLIC_INPUTS_LEN: usize = 47;
+pub const CHANNEL_CLOSE_PUBLIC_INPUTS_LEN: usize = 68;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ChannelClosePublicInputs {
-    pub channel_id: AccountId,
+    pub channel_id: ChannelId,
     pub close_nonce: u64,
     pub final_epoch: u64,
+    pub final_small_block_number: u64,
+    pub close_freeze_nonce: u64,
     pub final_channel_state_digest: Bytes32,
+    pub final_channel_balance_root: Bytes32,
     pub channel_fund_amount: U256,
     pub channel_fund_intmax_state_root: Bytes32,
-    pub settlement_digest: Bytes32,
+    pub burn_tx_hash: Bytes32,
+    pub close_withdrawal_digest: Bytes32,
     pub close_intent_digest: Bytes32,
-    pub snapshot_block_number: u64,
+    pub snapshot_medium_block_number: u64,
 }
 
 #[derive(Debug, Error)]
@@ -33,23 +31,8 @@ pub enum ChannelClosePublicInputsError {
     #[error("invalid public inputs length: expected {expected}, got {actual}")]
     InvalidLength { expected: usize, actual: usize },
 
-    #[error("invalid channel id: {0}")]
-    InvalidChannelId(String),
-
-    #[error("invalid final channel state digest: {0}")]
-    InvalidFinalChannelStateDigest(String),
-
-    #[error("invalid channel fund amount: {0}")]
-    InvalidChannelFundAmount(String),
-
-    #[error("invalid channel fund intmax state root: {0}")]
-    InvalidChannelFundIntmaxStateRoot(String),
-
-    #[error("invalid settlement digest: {0}")]
-    InvalidSettlementDigest(String),
-
-    #[error("invalid close intent digest: {0}")]
-    InvalidCloseIntentDigest(String),
+    #[error("invalid field: {0}")]
+    InvalidField(String),
 }
 
 impl ChannelClosePublicInputs {
@@ -58,12 +41,16 @@ impl ChannelClosePublicInputs {
             self.channel_id.to_u64_vec(),
             split_u64(self.close_nonce),
             split_u64(self.final_epoch),
+            split_u64(self.final_small_block_number),
+            split_u64(self.close_freeze_nonce),
             self.final_channel_state_digest.to_u64_vec(),
+            self.final_channel_balance_root.to_u64_vec(),
             self.channel_fund_amount.to_u64_vec(),
             self.channel_fund_intmax_state_root.to_u64_vec(),
-            self.settlement_digest.to_u64_vec(),
+            self.burn_tx_hash.to_u64_vec(),
+            self.close_withdrawal_digest.to_u64_vec(),
             self.close_intent_digest.to_u64_vec(),
-            split_u64(self.snapshot_block_number),
+            split_u64(self.snapshot_medium_block_number),
         ]
         .concat()
     }
@@ -76,35 +63,28 @@ impl ChannelClosePublicInputs {
             });
         }
 
-        let channel_id = AccountId::from_u64(values[0])
-            .map_err(|e| ChannelClosePublicInputsError::InvalidChannelId(e.to_string()))?;
-        let close_nonce = join_u64(&values[1..3]);
-        let final_epoch = join_u64(&values[3..5]);
-        let final_channel_state_digest = Bytes32::from_u64_slice(&values[5..13]).map_err(|e| {
-            ChannelClosePublicInputsError::InvalidFinalChannelStateDigest(e.to_string())
-        })?;
-        let channel_fund_amount = U256::from_u64_slice(&values[13..21])
-            .map_err(|e| ChannelClosePublicInputsError::InvalidChannelFundAmount(e.to_string()))?;
-        let channel_fund_intmax_state_root =
-            Bytes32::from_u64_slice(&values[21..29]).map_err(|e| {
-                ChannelClosePublicInputsError::InvalidChannelFundIntmaxStateRoot(e.to_string())
-            })?;
-        let settlement_digest = Bytes32::from_u64_slice(&values[29..37])
-            .map_err(|e| ChannelClosePublicInputsError::InvalidSettlementDigest(e.to_string()))?;
-        let close_intent_digest = Bytes32::from_u64_slice(&values[37..45])
-            .map_err(|e| ChannelClosePublicInputsError::InvalidCloseIntentDigest(e.to_string()))?;
-        let snapshot_block_number = join_u64(&values[45..47]);
-
         Ok(Self {
-            channel_id,
-            close_nonce,
-            final_epoch,
-            final_channel_state_digest,
-            channel_fund_amount,
-            channel_fund_intmax_state_root,
-            settlement_digest,
-            close_intent_digest,
-            snapshot_block_number,
+            channel_id: ChannelId::from_u64_slice(&values[0..2])
+                .map_err(|e| ChannelClosePublicInputsError::InvalidField(e.to_string()))?,
+            close_nonce: join_u64(&values[2..4]),
+            final_epoch: join_u64(&values[4..6]),
+            final_small_block_number: join_u64(&values[6..8]),
+            close_freeze_nonce: join_u64(&values[8..10]),
+            final_channel_state_digest: Bytes32::from_u64_slice(&values[10..18])
+                .map_err(|e| ChannelClosePublicInputsError::InvalidField(e.to_string()))?,
+            final_channel_balance_root: Bytes32::from_u64_slice(&values[18..26])
+                .map_err(|e| ChannelClosePublicInputsError::InvalidField(e.to_string()))?,
+            channel_fund_amount: U256::from_u64_slice(&values[26..34])
+                .map_err(|e| ChannelClosePublicInputsError::InvalidField(e.to_string()))?,
+            channel_fund_intmax_state_root: Bytes32::from_u64_slice(&values[34..42])
+                .map_err(|e| ChannelClosePublicInputsError::InvalidField(e.to_string()))?,
+            burn_tx_hash: Bytes32::from_u64_slice(&values[42..50])
+                .map_err(|e| ChannelClosePublicInputsError::InvalidField(e.to_string()))?,
+            close_withdrawal_digest: Bytes32::from_u64_slice(&values[50..58])
+                .map_err(|e| ChannelClosePublicInputsError::InvalidField(e.to_string()))?,
+            close_intent_digest: Bytes32::from_u64_slice(&values[58..66])
+                .map_err(|e| ChannelClosePublicInputsError::InvalidField(e.to_string()))?,
+            snapshot_medium_block_number: join_u64(&values[66..68]),
         })
     }
 }
@@ -113,10 +93,8 @@ impl ChannelClosePublicInputs {
 #[serde(rename_all = "camelCase")]
 pub struct ChannelCloseWitness {
     pub final_channel_state: ChannelState,
-    pub registered_members: Vec<ChannelMember>,
     pub close_tx: CloseWithdrawal,
     pub close_intent: CloseIntent,
-    pub transfer_openings: Vec<LatticeOpening>,
 }
 
 #[derive(Debug, Error)]
@@ -124,42 +102,8 @@ pub enum ChannelCloseWitnessError {
     #[error("invalid close binding: {0}")]
     InvalidCloseBinding(#[from] ChannelError),
 
-    #[error("close intent mismatch: expected {expected:?}, got {actual:?}")]
-    CloseIntentMismatch {
-        expected: CloseIntent,
-        actual: CloseIntent,
-    },
-
-    #[error(
-        "close tx channel id {close_tx:?} does not match close intent channel id {close_intent:?}"
-    )]
-    ChannelIdMismatch {
-        close_tx: AccountId,
-        close_intent: AccountId,
-    },
-
-    #[error("close transfer count {transfers} does not match opening count {openings}")]
-    TransferOpeningCountMismatch { transfers: usize, openings: usize },
-
-    #[error("duplicate registered member {0:?} in close witness")]
-    DuplicateRegisteredMember(AccountId),
-
-    #[error("duplicate close transfer for member {0:?}")]
-    DuplicateCloseTransfer(AccountId),
-
-    #[error("no registered member found for close transfer member {0:?}")]
-    MissingRegisteredMember(AccountId),
-
-    #[error("close transfer recipient mismatch for member {member:?}")]
-    RecipientMismatch {
-        member: AccountId,
-    },
-
-    #[error("registered member {0:?} is missing from close withdrawal")]
-    MissingCloseTransfer(AccountId),
-
-    #[error("withdrawal total mismatch: expected {expected:?}, got {actual:?}")]
-    WithdrawalTotalMismatch { expected: U256, actual: U256 },
+    #[error("close intent mismatch")]
+    CloseIntentMismatch,
 }
 
 impl ChannelCloseWitness {
@@ -168,85 +112,30 @@ impl ChannelCloseWitness {
             self.close_intent.close_nonce,
             &self.final_channel_state,
             &self.close_tx,
-            &self.transfer_openings,
-            self.close_intent.snapshot_block_number,
+            self.close_intent.snapshot_medium_block_number,
         )?;
 
         if expected_intent != self.close_intent {
-            return Err(ChannelCloseWitnessError::CloseIntentMismatch {
-                expected: expected_intent,
-                actual: self.close_intent.clone(),
-            });
-        }
-
-        if self.close_tx.channel_id != self.close_intent.channel_id {
-            return Err(ChannelCloseWitnessError::ChannelIdMismatch {
-                close_tx: self.close_tx.channel_id,
-                close_intent: self.close_intent.channel_id,
-            });
-        }
-        if self.close_tx.transfers.len() != self.transfer_openings.len() {
-            return Err(ChannelCloseWitnessError::TransferOpeningCountMismatch {
-                transfers: self.close_tx.transfers.len(),
-                openings: self.transfer_openings.len(),
-            });
-        }
-
-        let mut registered = std::collections::BTreeMap::new();
-        for member in &self.registered_members {
-            if registered.insert(member.member_id.as_u64(), member).is_some() {
-                return Err(ChannelCloseWitnessError::DuplicateRegisteredMember(
-                    member.member_id,
-                ));
-            }
-        }
-
-        let mut seen_transfers = std::collections::BTreeSet::new();
-        let mut total = U256::default();
-        for (transfer, opening) in self.close_tx.transfers.iter().zip(&self.transfer_openings) {
-            if !seen_transfers.insert(transfer.member_id.as_u64()) {
-                return Err(ChannelCloseWitnessError::DuplicateCloseTransfer(
-                    transfer.member_id,
-                ));
-            }
-
-            let registered_member = registered.get(&transfer.member_id.as_u64()).ok_or(
-                ChannelCloseWitnessError::MissingRegisteredMember(transfer.member_id),
-            )?;
-            if transfer.l1_recipient != registered_member.l1_withdrawal_recipient {
-                return Err(ChannelCloseWitnessError::RecipientMismatch {
-                    member: transfer.member_id,
-                });
-            }
-
-            total += u64_to_u256(opening.amount);
-        }
-
-        for member in &self.registered_members {
-            if !seen_transfers.contains(&member.member_id.as_u64()) {
-                return Err(ChannelCloseWitnessError::MissingCloseTransfer(member.member_id));
-            }
-        }
-        if total != self.final_channel_state.channel_fund.amount {
-            return Err(ChannelCloseWitnessError::WithdrawalTotalMismatch {
-                expected: self.final_channel_state.channel_fund.amount,
-                actual: total,
-            });
+            return Err(ChannelCloseWitnessError::CloseIntentMismatch);
         }
 
         Ok(ChannelClosePublicInputs {
             channel_id: self.close_intent.channel_id,
             close_nonce: self.close_intent.close_nonce,
             final_epoch: self.close_intent.final_epoch,
+            final_small_block_number: self.close_intent.final_small_block_number,
+            close_freeze_nonce: self.close_intent.close_freeze_nonce,
             final_channel_state_digest: self.close_intent.final_channel_state_digest,
+            final_channel_balance_root: self.close_intent.final_channel_balance_root,
             channel_fund_amount: self.close_intent.channel_fund_snapshot.amount,
             channel_fund_intmax_state_root: self
                 .close_intent
                 .channel_fund_snapshot
                 .intmax_state_root,
-            settlement_digest: self.close_intent.settlement_digest,
+            burn_tx_hash: self.close_intent.burn_tx_hash,
+            close_withdrawal_digest: self.close_intent.close_withdrawal_digest,
             close_intent_digest: self.close_intent.signing_digest(),
-            snapshot_block_number: self.close_intent.snapshot_block_number,
+            snapshot_medium_block_number: self.close_intent.snapshot_medium_block_number,
         })
     }
 }
@@ -259,40 +148,37 @@ fn join_u64(limbs: &[u64]) -> u64 {
     ((limbs[0] as u64) << 32) | limbs[1] as u64
 }
 
-fn u64_to_u256(value: u64) -> U256 {
-    U256::from_u64_slice(&[0, 0, 0, 0, 0, 0, (value >> 32), value as u32 as u64])
-        .expect("u64 must fit into U256")
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::{
         common::channel::{
-            ChannelFund, ChannelMember, ChannelState, CloseTransfer, CloseWithdrawal,
-            LatticeCommitment, LatticeOpening, MemberSignature,
+            ChannelFund, ChannelId, ChannelState, KeyId, MemberSignature, UserId,
         },
-        ethereum_types::{address::Address, bytes32::Bytes32, u32limb_trait::U32LimbTrait},
+        ethereum_types::bytes32::Bytes32,
     };
 
     fn sample_state() -> ChannelState {
         ChannelState {
-            channel_id: AccountId::new(3, 9).unwrap(),
+            channel_id: ChannelId::new(3).unwrap(),
             epoch: 8,
+            small_block_number: 22,
+            close_freeze_nonce: 0,
             channel_fund: ChannelFund {
-                channel_id: AccountId::new(3, 9).unwrap(),
+                channel_id: ChannelId::new(3).unwrap(),
                 amount: U256::from(77u32),
                 intmax_state_root: Bytes32::default(),
             },
-            user_fund_root: Bytes32::default(),
-            channel_nullifier_root: Bytes32::default(),
-            personal_nullifier_root: Bytes32::default(),
-            incoming_root: Bytes32::default(),
+            channel_balance_root: Bytes32::from_u32_slice(&[1, 0, 0, 0, 0, 0, 0, 0]).unwrap(),
+            shared_native_nullifier_root: Bytes32::from_u32_slice(&[2, 0, 0, 0, 0, 0, 0, 0]).unwrap(),
+            unallocated_confirmed_incoming: U256::zero(),
             prev_digest: Bytes32::default(),
             digest: Bytes32::default(),
             member_signatures: vec![MemberSignature {
-                signer: AccountId::new(3, 10).unwrap(),
+                key_id: KeyId::new(10).unwrap(),
+                user_id: UserId::from_parts(ChannelId::new(3).unwrap(), KeyId::new(10).unwrap()),
                 signature: vec![1, 2, 3],
+                key_condition_proof: vec![4, 5],
             }],
         }
         .with_computed_digest()
@@ -304,40 +190,17 @@ mod tests {
         let close_tx = CloseWithdrawal {
             channel_id: state.channel_id,
             final_channel_state_digest: state.digest,
+            final_channel_balance_root: state.channel_balance_root,
             intmax_state_root: state.channel_fund.intmax_state_root,
-            transfers: vec![CloseTransfer {
-                member_id: AccountId::new(3, 10).unwrap(),
-                l1_recipient: Address::from_u32_slice(&[1, 2, 3, 4, 5]).unwrap(),
-                user_amount: LatticeCommitment {
-                    commitment: vec![7; 48],
-                },
-            }],
+            burn_tx_hash: Bytes32::from_u32_slice(&[9, 0, 0, 0, 0, 0, 0, 0]).unwrap(),
+            burn_amount: state.channel_fund.amount,
             zkp: vec![9, 9, 9],
         };
-        let close_intent = CloseIntent::new(
-            5,
-            &state,
-            &close_tx,
-            &[LatticeOpening {
-                amount: 77,
-                randomness: vec![],
-            }],
-            123,
-        )
-        .unwrap();
+        let close_intent = CloseIntent::new(5, &state, &close_tx, 123).unwrap();
         let witness = ChannelCloseWitness {
             final_channel_state: state,
-            registered_members: vec![ChannelMember {
-                member_id: AccountId::new(3, 10).unwrap(),
-                signing_pubkey: vec![1, 2, 3],
-                l1_withdrawal_recipient: Address::from_u32_slice(&[1, 2, 3, 4, 5]).unwrap(),
-            }],
             close_tx,
             close_intent,
-            transfer_openings: vec![LatticeOpening {
-                amount: 77,
-                randomness: vec![],
-            }],
         };
 
         let public_inputs = witness.to_public_inputs().unwrap();
