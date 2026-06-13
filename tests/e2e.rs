@@ -12,7 +12,9 @@ use intmax3_zkp::{
                 BalanceWitnessGenerator, ReceiveDepositData, ReceiveTransferData, SendTxData,
                 SingleWithdrawalData,
             },
-            block_witness_generator::{BlockWitnessGenerator, BlockWitnessGeneratorHandle},
+            block_witness_generator::{
+                BlockTxV2Witness, BlockWitnessGenerator, BlockWitnessGeneratorHandle,
+            },
         },
         validity::block_hash_chain::{
             block_hash_chain_processor::BlockHashChainProcessor, validity_circuit::ValidityCircuit,
@@ -26,11 +28,12 @@ use intmax3_zkp::{
         channel_id::ChannelId as UserId,
         salt::Salt,
         transfer::Transfer,
-        trees::{transfer_tree::TransferTree, tx_tree::TxTree},
-        tx::Tx,
+        trees::{transfer_tree::TransferTree, tx_tree::TxTree, tx_v2_tree::TxV2Tree},
+        tx::{Tx, TxClass, TxV2},
         u63::BlockNumber,
     },
     ethereum_types::{address::Address, bytes32::Bytes32, u32limb_trait::U32LimbTrait, u256::U256},
+    utils::poseidon_hash_out::PoseidonHashOut,
 };
 use plonky2::{field::goldilocks_field::GoldilocksField, plonk::config::PoseidonGoldilocksConfig};
 use rand::{SeedableRng, rngs::StdRng};
@@ -156,16 +159,51 @@ fn e2e_deposit_validity_withdrawal() {
         nonce: balance_witness_generator.full_private_state.nonce,
     };
 
+    // Legacy Tx tree retained for the (legacy) Tx merkle proof carried alongside the witness,
+    // but the block's authoritative root is now a TxV2Tree root (the new tx_v2 model). The
+    // single source of truth for the tx is `internal_tx_v2` below; balance (TxSettlement) and
+    // validity (update_channel_tree) both open against the same TxV2Tree root.
     let mut internal_tx_tree = TxTree::init();
     internal_tx_tree.update(user_id.as_u64(), internal_tx.clone());
-    let internal_tx_tree_root = internal_tx_tree.get_root();
-    let internal_tx_tree_root_bytes: Bytes32 = internal_tx_tree_root.into();
     let internal_tx_merkle_proof = internal_tx_tree.prove(user_id.as_u64());
+
+    // Build the TxV2 (UserTransfer) for this block. `transfer_tree_root` MUST equal the transfer
+    // tree the balance-side spend actually committed to (so balance and validity agree on the
+    // same tx). channel_action_root == 0 for UserTransfer.
+    let internal_tx_v2 = TxV2 {
+        tx_class: TxClass::UserTransfer,
+        transfer_tree_root: internal_transfer_tree_root,
+        nonce: internal_tx.nonce,
+        channel_action_root: PoseidonHashOut::default(),
+    };
+    // TxV2Tree is indexed by channel_id (TX_TREE_HEIGHT == CHANNEL_ID_BITS), matching both
+    // `TxSettlement::verify` and `update_channel_tree`'s per-slot tx_v2 index.
+    let mut internal_tx_v2_tree = TxV2Tree::init();
+    internal_tx_v2_tree.update(user_id.as_u64(), internal_tx_v2);
+    let internal_tx_tree_root_bytes: Bytes32 = internal_tx_v2_tree.get_root().into();
+    let internal_tx_v2_merkle_proof = internal_tx_v2_tree.prove(user_id.as_u64());
+
+    // Per-slot tx_v2 witness for num_users = 2: slot 0 is the active channel (key_id 1), slot 1
+    // is a zero-key_id padding slot (dummy values, skipped in-circuit).
+    let internal_tx_v2_witness = BlockTxV2Witness {
+        tx_v2_indices: vec![user_id.as_u64(), 0],
+        tx_v2s: vec![internal_tx_v2, TxV2::default()],
+        tx_v2_merkle_proofs: vec![
+            internal_tx_v2_merkle_proof.clone(),
+            internal_tx_v2_merkle_proof.clone(),
+        ],
+    };
 
     {
         let mut generator = block_witness_generator.borrow_mut();
         generator
-            .add_block(user_id.channel_id(), &[1], 1, internal_tx_tree_root_bytes)
+            .add_block_with_tx_v2(
+                user_id.channel_id(),
+                &[1],
+                1,
+                internal_tx_tree_root_bytes,
+                Some(internal_tx_v2_witness),
+            )
             .expect("apply internal transfer block");
     }
 
@@ -174,8 +212,8 @@ fn e2e_deposit_validity_withdrawal() {
         tx_tree_root: internal_tx_tree_root_bytes,
         tx: internal_tx.clone(),
         tx_merkle_proof: internal_tx_merkle_proof.clone(),
-        tx_v2: None,
-        tx_v2_merkle_proof: None,
+        tx_v2: Some(internal_tx_v2),
+        tx_v2_merkle_proof: Some(internal_tx_v2_merkle_proof.clone()),
         transfer: internal_transfer.clone(),
         transfer_merkle_proof: internal_transfer_merkle_proof.clone(),
     };
@@ -209,8 +247,8 @@ fn e2e_deposit_validity_withdrawal() {
         transfer_index: internal_transfer_index,
         transfer_merkle_proof: internal_transfer_merkle_proof,
         transfer_salt,
-        tx_v2: None,
-        tx_v2_merkle_proof: None,
+        tx_v2: Some(internal_tx_v2),
+        tx_v2_merkle_proof: Some(internal_tx_v2_merkle_proof),
     };
     let receive_transfer_witness = balance_witness_generator2
         .receive_transfer_witness(&receive_transfer_data)
@@ -259,16 +297,42 @@ fn e2e_deposit_validity_withdrawal() {
         nonce: balance_witness_generator.full_private_state.nonce,
     };
 
+    // Legacy Tx tree retained only for the legacy Tx merkle proof; the block's authoritative
+    // root is the TxV2Tree root below (same single-source-of-truth pattern as the internal tx).
     let mut withdrawal_tx_tree = TxTree::init();
     withdrawal_tx_tree.update(user_id.as_u64(), withdrawal_tx.clone());
-    let withdrawal_tx_tree_root = withdrawal_tx_tree.get_root();
-    let withdrawal_tx_tree_root_bytes: Bytes32 = withdrawal_tx_tree_root.into();
     let withdrawal_tx_merkle_proof = withdrawal_tx_tree.prove(user_id.as_u64());
+
+    let withdrawal_tx_v2 = TxV2 {
+        tx_class: TxClass::UserTransfer,
+        transfer_tree_root: withdrawal_transfer_tree_root,
+        nonce: withdrawal_tx.nonce,
+        channel_action_root: PoseidonHashOut::default(),
+    };
+    let mut withdrawal_tx_v2_tree = TxV2Tree::init();
+    withdrawal_tx_v2_tree.update(user_id.as_u64(), withdrawal_tx_v2);
+    let withdrawal_tx_tree_root_bytes: Bytes32 = withdrawal_tx_v2_tree.get_root().into();
+    let withdrawal_tx_v2_merkle_proof = withdrawal_tx_v2_tree.prove(user_id.as_u64());
+
+    let withdrawal_tx_v2_witness = BlockTxV2Witness {
+        tx_v2_indices: vec![user_id.as_u64(), 0],
+        tx_v2s: vec![withdrawal_tx_v2, TxV2::default()],
+        tx_v2_merkle_proofs: vec![
+            withdrawal_tx_v2_merkle_proof.clone(),
+            withdrawal_tx_v2_merkle_proof.clone(),
+        ],
+    };
 
     {
         let mut generator = block_witness_generator.borrow_mut();
         generator
-            .add_block(user_id.channel_id(), &[1], 2, withdrawal_tx_tree_root_bytes)
+            .add_block_with_tx_v2(
+                user_id.channel_id(),
+                &[1],
+                2,
+                withdrawal_tx_tree_root_bytes,
+                Some(withdrawal_tx_v2_witness),
+            )
             .expect("apply withdrawal tx block");
     }
 
@@ -277,8 +341,8 @@ fn e2e_deposit_validity_withdrawal() {
         tx_tree_root: withdrawal_tx_tree_root_bytes,
         tx: withdrawal_tx.clone(),
         tx_merkle_proof: withdrawal_tx_merkle_proof.clone(),
-        tx_v2: None,
-        tx_v2_merkle_proof: None,
+        tx_v2: Some(withdrawal_tx_v2),
+        tx_v2_merkle_proof: Some(withdrawal_tx_v2_merkle_proof.clone()),
         transfer: withdrawal_transfer.clone(),
         transfer_merkle_proof: withdrawal_transfer_merkle_proof.clone(),
     };
@@ -309,8 +373,8 @@ fn e2e_deposit_validity_withdrawal() {
         transfer: withdrawal_transfer.clone(),
         transfer_index: withdrawal_transfer_index,
         transfer_merkle_proof: withdrawal_transfer_merkle_proof.clone(),
-        tx_v2: None,
-        tx_v2_merkle_proof: None,
+        tx_v2: Some(withdrawal_tx_v2),
+        tx_v2_merkle_proof: Some(withdrawal_tx_v2_merkle_proof.clone()),
     };
     let single_withdrawal_witness = balance_witness_generator
         .single_withdrawal_witness(&single_withdrawal_data)

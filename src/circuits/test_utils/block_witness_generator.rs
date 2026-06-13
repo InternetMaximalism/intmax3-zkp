@@ -20,7 +20,9 @@ use crate::{
             },
             deposit_tree::{DepositMerkleProof, DepositTree},
             public_state_tree::{PublicStateMerkleProof, PublicStateTree},
+            tx_v2_tree::TxV2MerkleProof,
         },
+        tx::TxV2,
         u63::{BlockNumber, BlockNumberError, U63},
     },
     constants::{CHANNEL_TREE_HEIGHT, SEND_TREE_HEIGHT},
@@ -220,8 +222,46 @@ impl BlockWitnessGenerator {
         timestamp: u64,
         tx_tree_root: Bytes32,
     ) -> Result<(), BlockWitnessGeneratorError> {
+        // Legacy path: no per-slot TxV2 witness. The block_hash_chain_processor fills dummy
+        // TxV2 witnesses; this is only sound for genuinely-empty blocks (tx_tree_root == default),
+        // where the dummy proof verifies by empty-tree consistency.
+        self.add_block_with_tx_v2(channel_id, key_ids, timestamp, tx_tree_root, None)
+    }
+
+    /// Like [`add_block`], but threads a real per-slot TxV2 witness into the block-hash-chain
+    /// witness so that `update_channel_tree`'s tx_v2 inclusion check passes for non-empty blocks.
+    ///
+    /// `tx_v2_witness` must be sized to `num_users` (one entry per key slot, padded for zero
+    /// key_id slots). `tx_tree_root` MUST equal the root of the `TxV2Tree` the witness proofs
+    /// open against — the caller is the single source of truth for that tree (the same root the
+    /// balance-side `TxSettlement` opens against). SECURITY: the channel-action sub-witness stays
+    /// dummy here because every slot in this model is a `TxClass::UserTransfer`, whose branch in
+    /// `update_channel_tree` does not verify the channel-action proof.
+    pub fn add_block_with_tx_v2(
+        &mut self,
+        channel_id: u32,
+        key_ids: &[u32],
+        timestamp: u64,
+        tx_tree_root: Bytes32,
+        tx_v2_witness: Option<BlockTxV2Witness>,
+    ) -> Result<(), BlockWitnessGeneratorError> {
         let num_users = get_num_users(key_ids.len(), &self.supported_user_counts)
             .ok_or(BlockWitnessGeneratorError::TooManyKeyIds(key_ids.len()))?;
+
+        if let Some(witness) = &tx_v2_witness {
+            if witness.tx_v2_indices.len() != num_users as usize
+                || witness.tx_v2s.len() != num_users as usize
+                || witness.tx_v2_merkle_proofs.len() != num_users as usize
+            {
+                return Err(BlockWitnessGeneratorError::InvalidRequest(format!(
+                    "tx_v2 witness arrays must each have num_users={} entries (got indices={}, txs={}, proofs={})",
+                    num_users,
+                    witness.tx_v2_indices.len(),
+                    witness.tx_v2s.len(),
+                    witness.tx_v2_merkle_proofs.len(),
+                )));
+            }
+        }
 
         let new_block_number = self
             .block_number
@@ -330,9 +370,12 @@ impl BlockWitnessGenerator {
             sig_witnesses: None, // dummy witnesses used by default in tests
             key_leaves: None,    // default KeyLeaf (pk_set_root = 0) → sig constraints skipped
             msg_fields: None,    // default IMSB fields (sig constraints skipped)
-            tx_v2_indices: None,
-            tx_v2s: None,
-            tx_v2_merkle_proofs: None,
+            tx_v2_indices: tx_v2_witness.as_ref().map(|w| w.tx_v2_indices.clone()),
+            tx_v2s: tx_v2_witness.as_ref().map(|w| w.tx_v2s.clone()),
+            tx_v2_merkle_proofs: tx_v2_witness
+                .as_ref()
+                .map(|w| w.tx_v2_merkle_proofs.clone()),
+            // UserTransfer-only model: channel-action sub-witness stays dummy (not verified).
             channel_action_indices: None,
             channel_actions: None,
             channel_action_merkle_proofs: None,
@@ -520,6 +563,19 @@ impl BlockWitnessGenerator {
         let deposit_merkle_proof = self.deposit_tree.prove(deposit_index);
         Ok((deposit, deposit_merkle_proof))
     }
+}
+
+/// Per-slot TxV2 witness for a non-empty block, sized to `num_users`.
+///
+/// Entry `i` corresponds to key slot `i` of the block. For the 1-block = 1-channel = 1-tx model
+/// (detail2 §A-2) the active slot's `tx_v2_indices[i]` is the channel id (the TxV2Tree is indexed
+/// by channel_id, matching `TxSettlement` and `TX_TREE_HEIGHT == CHANNEL_ID_BITS`). Padding slots
+/// (zero key_id) may carry dummy values — `update_channel_tree` skips them.
+#[derive(Debug, Clone)]
+pub struct BlockTxV2Witness {
+    pub tx_v2_indices: Vec<u64>,
+    pub tx_v2s: Vec<TxV2>,
+    pub tx_v2_merkle_proofs: Vec<TxV2MerkleProof>,
 }
 
 #[derive(Debug, Clone)]
