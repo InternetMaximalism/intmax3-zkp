@@ -105,19 +105,19 @@ contract IntmaxRollup {
         bytes32 newDepositHashChain
     );
 
-    event KeyRegistered(
-        uint64 indexed regIndex,
-        uint32 indexed keyId,
-        uint32  threshold,
-        uint32  numKeys,
-        bytes32[] pkHashes,
-        bytes32 newKeyRegHashChain
-    );
-
+    /// @notice One SPHINCS+ key per member (F7): a channel registers exactly `CHANNEL_MEMBERS`
+    /// members, each identified by their SPHINCS+ pubkey hash (bytes32). `memberPubkeysRoot` and
+    /// `regevPkRoot` are the L1/keccak digest forms anchored in the registration record (mirrors
+    /// the Rust `ChannelRecord`, src/common/channel.rs).
     event ChannelRegistered(
         uint64 indexed regIndex,
         uint32 indexed channelId,
-        uint32[] memberKeyIds,
+        uint8   bpMemberSlot,
+        bytes32[] memberSphincsPubkeyHashes,
+        bytes32[] regevPkDigests,
+        address[] recipients,
+        bytes32 memberPubkeysRoot,
+        bytes32 regevPkRoot,
         bytes32 newChannelRegHashChain
     );
 
@@ -306,16 +306,13 @@ contract IntmaxRollup {
     // proof consumes them (Step 4), these chains are RECORDED ONLY.
     // -----------------------------------------------------------------------
 
-    /// @notice key_id -> KeyLeaf{pk_set_root,threshold,num_keys} registration hash chain.
-    bytes32 internal _pendingKeyRegHashChain;
-    uint64 public keyRegCount;
-
-    /// @notice channel_id -> ChannelLeaf{member_key_ids_root} registration hash chain.
+    /// @notice channel_id -> ChannelLeaf{member_pubkeys_root, ...} registration hash chain.
     bytes32 internal _pendingChannelRegHashChain;
     uint64 public channelRegCount;
 
-    /// @notice Max SPHINCS+ keys per key_id = 2^KEY_SET_TREE_HEIGHT (matches Rust constants).
-    uint32 internal constant MAX_KEYS_PER_ID = 8;
+    /// @notice Members per channel = `CHANNEL_MEMBERS` (one SPHINCS+ key per member, F7;
+    /// mirrors the Rust `CHANNEL_MEMBERS` constant in src/constants.rs).
+    uint32 internal constant CHANNEL_MEMBERS = 3;
 
     mapping(uint256 => Submission) internal _submissions;
     uint256 public nextSubmissionId;
@@ -549,56 +546,79 @@ contract IntmaxRollup {
         emit Deposited(idx, msg.sender, recipient, tokenIndex, amount, auxData, newHash);
     }
 
-    /// @notice Register a keyID's M-of-N SPHINCS+ key set. `pkHashes[i]` is the Poseidon pk_hash
-    ///         (bytes32 = 4 Goldilocks limbs) used as a KeySetTree leaf. The validity proof later
-    ///         rebuilds KeySetTree -> pk_set_root and inserts
-    ///         KeyLeaf{pk_set_root, threshold, numKeys} at index `keyId` of the KeyTree.
-    /// @dev keccak preimage (must match the Rust circuit; big-endian, tightly packed, NO array
-    ///      padding): keccak256(prev || keyId(4) || threshold(4) || numKeys(4) || pkHashes(32*numKeys)).
-    function registerKey(uint32 keyId, bytes32[] calldata pkHashes, uint32 threshold) external {
-        require(keyId != 0, "key id 0 reserved");
-        uint32 numKeys = uint32(pkHashes.length);
-        require(numKeys > 0 && numKeys <= MAX_KEYS_PER_ID, "invalid key count");
-        require(threshold > 0 && threshold <= numKeys, "invalid threshold");
-
-        // Tightly-packed preimage. Arrays are concatenated element-by-element to avoid
-        // abi.encodePacked's 32-byte array-element padding (so the Rust circuit can match it).
-        bytes memory packed = abi.encodePacked(_pendingKeyRegHashChain, keyId, threshold, numKeys);
-        for (uint256 i = 0; i < pkHashes.length; i++) {
-            packed = abi.encodePacked(packed, pkHashes[i]); // bytes32: 32 bytes, no padding
-        }
-        bytes32 newHash = keccak256(packed);
-        _pendingKeyRegHashChain = newHash;
-        uint64 idx = keyRegCount++;
-        emit KeyRegistered(idx, keyId, threshold, numKeys, pkHashes, newHash);
-    }
-
-    /// @notice Register a channel's member key_id set (strictly ascending & unique, mirroring
-    ///         ChannelRecord::validate). The validity proof later rebuilds MemberKeyTree ->
-    ///         member_key_ids_root and inserts ChannelLeaf at index `channelId` of the ChannelTree.
-    /// @dev keccak preimage: keccak256(prev || channelId(4) || memberCount(4) || memberKeyIds(4*memberCount)).
-    function registerChannel(uint32 channelId, uint32[] calldata memberKeyIds) external {
+    /// @notice Register a channel's member set. One SPHINCS+ key per member (F7): exactly
+    ///         `CHANNEL_MEMBERS` members in slot order, each described by their SPHINCS+ pubkey
+    ///         hash (bytes32, the member identity), their Regev pubkey digest (bytes32), and
+    ///         their L1 withdrawal recipient (address). Mirrors the Rust `ChannelRecord`
+    ///         (src/common/channel.rs): the registration record carries
+    ///         `member_sphincs_pubkey_hashes`, the keccak `member_pubkeys_root`, the
+    ///         `regev_pk_root`, and the `bp_member_slot`. The member pubkey hashes must be
+    ///         nonzero and pairwise distinct (`ChannelRecord::validate`).
+    /// @dev RECORDED ONLY: this hash chain is not yet consumed by the validity proof (see the
+    ///      section header). The keccak preimage is tightly packed, NO array padding:
+    ///      keccak256(prev || channelId(4) || bpMemberSlot(1) ||
+    ///               (sphincsPubkeyHash(32) || regevPkDigest(32) || recipient(20)) * CHANNEL_MEMBERS).
+    ///      `memberPubkeysRoot` = keccak of the member pubkey hashes; `regevPkRoot` = keccak of
+    ///      the Regev pubkey digests (the L1/keccak digest forms anchored in the record).
+    function registerChannel(
+        uint32 channelId,
+        uint8 bpMemberSlot,
+        bytes32[] calldata memberSphincsPubkeyHashes,
+        bytes32[] calldata regevPkDigests,
+        address[] calldata recipients
+    ) external {
         require(channelId != 0, "channel id 0 reserved");
-        uint32 memberCount = uint32(memberKeyIds.length);
-        require(memberCount > 0, "no members");
-        for (uint256 i = 0; i < memberKeyIds.length; i++) {
-            require(memberKeyIds[i] != 0, "member key id 0 reserved");
-            if (i > 0) {
+        require(
+            memberSphincsPubkeyHashes.length == CHANNEL_MEMBERS &&
+            regevPkDigests.length == CHANNEL_MEMBERS &&
+            recipients.length == CHANNEL_MEMBERS,
+            "member count must be CHANNEL_MEMBERS"
+        );
+        require(uint256(bpMemberSlot) < CHANNEL_MEMBERS, "bp member slot out of range");
+
+        // One SPHINCS+ key per member: pubkey hashes must be nonzero and pairwise distinct
+        // (mirrors ChannelRecord::validate). Regev digests must be set; recipients must be set.
+        for (uint256 i = 0; i < CHANNEL_MEMBERS; i++) {
+            require(memberSphincsPubkeyHashes[i] != bytes32(0), "member pubkey hash 0 reserved");
+            require(regevPkDigests[i] != bytes32(0), "regev pk digest 0 reserved");
+            require(recipients[i] != address(0), "recipient 0 reserved");
+            for (uint256 j = i + 1; j < CHANNEL_MEMBERS; j++) {
                 require(
-                    memberKeyIds[i] > memberKeyIds[i - 1],
-                    "members must be strictly ascending & unique"
+                    memberSphincsPubkeyHashes[i] != memberSphincsPubkeyHashes[j],
+                    "member pubkey hashes must be distinct"
                 );
             }
         }
 
-        bytes memory packed = abi.encodePacked(_pendingChannelRegHashChain, channelId, memberCount);
-        for (uint256 i = 0; i < memberKeyIds.length; i++) {
-            packed = abi.encodePacked(packed, memberKeyIds[i]); // uint32: 4 bytes, no padding
+        // L1/keccak digest forms of the member tree root and the Regev-pk root.
+        bytes32 memberPubkeysRoot = keccak256(abi.encodePacked(memberSphincsPubkeyHashes));
+        bytes32 regevPkRoot = keccak256(abi.encodePacked(regevPkDigests));
+
+        bytes memory packed =
+            abi.encodePacked(_pendingChannelRegHashChain, channelId, bpMemberSlot);
+        for (uint256 i = 0; i < CHANNEL_MEMBERS; i++) {
+            // Element-by-element to avoid abi.encodePacked's array-element padding.
+            packed = abi.encodePacked(
+                packed,
+                memberSphincsPubkeyHashes[i], // bytes32: 32 bytes
+                regevPkDigests[i],            // bytes32: 32 bytes
+                recipients[i]                 // address: 20 bytes
+            );
         }
         bytes32 newHash = keccak256(packed);
         _pendingChannelRegHashChain = newHash;
         uint64 idx = channelRegCount++;
-        emit ChannelRegistered(idx, channelId, memberKeyIds, newHash);
+        emit ChannelRegistered(
+            idx,
+            channelId,
+            bpMemberSlot,
+            memberSphincsPubkeyHashes,
+            regevPkDigests,
+            recipients,
+            memberPubkeysRoot,
+            regevPkRoot,
+            newHash
+        );
     }
 
     // -----------------------------------------------------------------------

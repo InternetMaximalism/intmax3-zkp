@@ -527,13 +527,13 @@ impl FullPublicState {
 
             let current_user_leaf = self.channel_tree.get_leaf(channel_id.as_u64());
 
-            // sanity check (member_key_ids_root preserved from tree, not reconstructed from send
+            // sanity check (member_pubkeys_root preserved from tree, not reconstructed from send
             // leaves)
             let channel_leaf = ChannelLeaf {
                 index: send_tree.len() as u32,
                 prev,
                 send_tree_root: send_tree.get_root(),
-                member_key_ids_root: current_user_leaf.member_key_ids_root,
+                member_pubkeys_root: current_user_leaf.member_pubkeys_root,
             };
             assert_eq!(
                 current_user_leaf, channel_leaf,
@@ -553,12 +553,12 @@ impl FullPublicState {
             send_leaves.push(new_send_leaf);
             self.send_leaves.insert(channel_id, send_leaves.clone());
 
-            // update user tree (member_key_ids_root preserved across state transitions)
+            // update user tree (member_pubkeys_root preserved across state transitions)
             let new_user_leaf = ChannelLeaf {
                 index: send_tree.len() as u32,
                 prev: current_block,
                 send_tree_root: send_tree.get_root(),
-                member_key_ids_root: current_user_leaf.member_key_ids_root,
+                member_pubkeys_root: current_user_leaf.member_pubkeys_root,
             };
             self.channel_tree.update(channel_id.as_u64(), new_user_leaf);
         }

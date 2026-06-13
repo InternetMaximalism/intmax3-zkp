@@ -867,13 +867,13 @@ mod tests {
             index: send_tree_sender.len() as u32,
             prev: send_leaf_sender.cur,
             send_tree_root: send_tree_sender.get_root(),
-            member_key_ids_root: ChannelLeaf::default().member_key_ids_root,
+            member_pubkeys_root: ChannelLeaf::default().member_pubkeys_root,
         };
         let user_leaf_receiver = ChannelLeaf {
             index: send_tree_receiver.len() as u32,
             prev: send_leaf_receiver.prev,
             send_tree_root: send_tree_receiver.get_root(),
-            member_key_ids_root: ChannelLeaf::default().member_key_ids_root,
+            member_pubkeys_root: ChannelLeaf::default().member_pubkeys_root,
         };
 
         let mut channel_tree = ChannelTree::new(CHANNEL_TREE_HEIGHT);

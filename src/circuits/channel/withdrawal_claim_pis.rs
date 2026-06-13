@@ -20,9 +20,9 @@ use crate::{
     regev::{RegevPk, RegevSecurityLevel, verify_withdraw_claim},
 };
 
-// 8 (close intent digest) + 1 (channel id, single u32 limb) + 8 (h1) + 2 (user id) +
-// 5 (recipient) + 8 (ct digest) + 8 (nullifier) + 2 (amount).
-pub const WITHDRAWAL_CLAIM_PUBLIC_INPUTS_LEN: usize = 42;
+// 8 (close intent digest) + 1 (channel id, single u32 limb) + 8 (h1) +
+// 8 (member sphincs pubkey hash) + 5 (recipient) + 8 (ct digest) + 8 (nullifier) + 2 (amount).
+pub const WITHDRAWAL_CLAIM_PUBLIC_INPUTS_LEN: usize = 48;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -30,7 +30,7 @@ pub struct WithdrawalClaimPublicInputs {
     pub close_intent_digest: Bytes32,
     pub channel_id: crate::common::channel::ChannelId,
     pub final_balance_state_h1: Bytes32,
-    pub user_id: crate::common::channel::UserId,
+    pub member_sphincs_pubkey_hash: Bytes32,
     pub recipient: Address,
     pub user_amount_digest: Bytes32,
     pub withdrawal_nullifier: Bytes32,
@@ -66,7 +66,7 @@ pub struct WithdrawalClaimWitness {
     pub claim: WithdrawalClaim,
     /// The full final balance state — bound to the close intent via `h1()` recomputation.
     pub final_balance_state: BalanceState,
-    /// The claiming member's slot index in `enc_balances` (member_key_ids order).
+    /// The claiming member's slot index in `enc_balances` (member slot order).
     pub member_index: usize,
     /// The claiming member's Regev public key (E-3 statement input). Its authenticity is
     /// anchored by `ChannelRecord.regev_pk_root`, which the L1 close game checks separately.
@@ -89,14 +89,14 @@ impl WithdrawalClaimWitness {
         {
             return Err(WithdrawalClaimWitnessError::CloseWithdrawalMismatch);
         }
-        if self.member.user_id != self.claim.user_id
+        if self.member.sphincs_pubkey_hash != self.claim.member_sphincs_pubkey_hash
             || self.member.l1_withdrawal_recipient != self.claim.l1_recipient
         {
             return Err(WithdrawalClaimWitnessError::RecipientMismatch);
         }
         let expected_nullifier = WithdrawalClaim::derive_nullifier(
             self.close_intent.signing_digest(),
-            self.member.user_id,
+            self.member.sphincs_pubkey_hash,
         );
         if expected_nullifier != self.claim.withdrawal_nullifier {
             return Err(WithdrawalClaimWitnessError::NullifierMismatch);
@@ -144,7 +144,7 @@ impl WithdrawalClaimWitness {
             close_intent_digest: self.close_intent.signing_digest(),
             channel_id: self.close_intent.channel_id,
             final_balance_state_h1: self.close_intent.final_balance_state_h1,
-            user_id: self.member.user_id,
+            member_sphincs_pubkey_hash: self.member.sphincs_pubkey_hash,
             recipient: self.member.l1_withdrawal_recipient,
             user_amount_digest: self.claim.user_amount_ct.digest(),
             withdrawal_nullifier: self.claim.withdrawal_nullifier,
@@ -159,7 +159,7 @@ impl WithdrawalClaimPublicInputs {
             self.close_intent_digest.to_u64_vec(),
             self.channel_id.to_u64_vec(),
             self.final_balance_state_h1.to_u64_vec(),
-            self.user_id.to_u64_vec(),
+            self.member_sphincs_pubkey_hash.to_u64_vec(),
             self.recipient.to_u64_vec(),
             self.user_amount_digest.to_u64_vec(),
             self.withdrawal_nullifier.to_u64_vec(),
@@ -183,14 +183,14 @@ impl WithdrawalClaimPublicInputs {
                 .map_err(|e| e.to_string())?,
             final_balance_state_h1: Bytes32::from_u64_slice(&values[9..17])
                 .map_err(|e| e.to_string())?,
-            user_id: crate::common::channel::UserId::from_u64_slice(&values[17..19])
+            member_sphincs_pubkey_hash: Bytes32::from_u64_slice(&values[17..25])
                 .map_err(|e| e.to_string())?,
-            recipient: Address::from_u64_slice(&values[19..24]).map_err(|e| e.to_string())?,
-            user_amount_digest: Bytes32::from_u64_slice(&values[24..32])
+            recipient: Address::from_u64_slice(&values[25..30]).map_err(|e| e.to_string())?,
+            user_amount_digest: Bytes32::from_u64_slice(&values[30..38])
                 .map_err(|e| e.to_string())?,
-            withdrawal_nullifier: Bytes32::from_u64_slice(&values[32..40])
+            withdrawal_nullifier: Bytes32::from_u64_slice(&values[38..46])
                 .map_err(|e| e.to_string())?,
-            amount: join_u64(&values[40..42]),
+            amount: join_u64(&values[46..48]),
         })
     }
 }
@@ -209,10 +209,24 @@ mod tests {
 
     use super::*;
     use crate::{
-        common::channel::{ChannelFund, ChannelId, ChannelState, KeyId, MemberSignature, UserId},
+        common::channel::{ChannelFund, ChannelId, ChannelState, MemberSignature},
         ethereum_types::{address::Address, bytes32::Bytes32, u256::U256},
         regev::{channel_keygen, encrypt_amount, prove_withdraw_claim},
     };
+
+    fn pubkey_hash(seed: u32) -> Bytes32 {
+        Bytes32::from_u32_slice(&[
+            seed,
+            seed + 1,
+            seed + 2,
+            seed + 3,
+            seed + 4,
+            seed + 5,
+            seed + 6,
+            seed + 7,
+        ])
+        .unwrap()
+    }
 
     #[test]
     fn withdrawal_claim_verifies_e3_proof_and_roundtrips() {
@@ -251,10 +265,9 @@ mod tests {
             prev_digest: Bytes32::default(),
             digest: Bytes32::default(),
             member_signatures: vec![MemberSignature {
-                key_id: KeyId::new(10).unwrap(),
-                user_id: UserId::from_parts(channel_id, KeyId::new(10).unwrap()),
+                member_slot: 0,
+                sphincs_pubkey_hash: pubkey_hash(10),
                 signature: vec![1],
-                key_condition_proof: vec![2],
             }],
         }
         .with_computed_digest();
@@ -270,20 +283,20 @@ mod tests {
         let close_intent = CloseIntent::new(5, &state, &close_tx, 123).unwrap();
 
         let member = ChannelMember {
-            key_id: KeyId::new(10).unwrap(),
-            user_id: UserId::from_parts(channel_id, KeyId::new(10).unwrap()),
+            sphincs_pubkey_hash: pubkey_hash(10),
+            member_slot: 0,
             l1_withdrawal_recipient: Address::from_u32_slice(&[1, 2, 3, 4, 5]).unwrap(),
         };
         let claim_proof =
             prove_withdraw_claim(RegevSecurityLevel::Test, &pk0, &sk0, &ct0, amount).unwrap();
         let claim = WithdrawalClaim {
             close_intent_digest: close_intent.signing_digest(),
-            user_id: member.user_id,
+            member_sphincs_pubkey_hash: member.sphincs_pubkey_hash,
             l1_recipient: member.l1_withdrawal_recipient,
             user_amount_ct: ct0,
             withdrawal_nullifier: WithdrawalClaim::derive_nullifier(
                 close_intent.signing_digest(),
-                member.user_id,
+                member.sphincs_pubkey_hash,
             ),
             claim_proof,
         };

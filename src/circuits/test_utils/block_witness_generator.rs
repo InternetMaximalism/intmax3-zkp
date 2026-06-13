@@ -4,9 +4,13 @@ use crate::{
             account_state::AccountState,
             update_public_state::{UpdatePublicState, UpdatePublicStateError},
         },
+        test_utils::sphincs_sign::{
+            SpxKeyPair, pk_hash_from_pk_bytes, sphincs_keygen, sphincs_sign,
+        },
         validity::block_hash_chain::{
             block_hash_chain_processor::BlockHashChainProcessorWitness,
             ext_public_state::ExtendedPublicState,
+            sphincs_sig::{SmallBlockMessageFields, SpxSigWitness},
         },
     },
     common::{
@@ -19,14 +23,18 @@ use crate::{
                 ChannelLeaf, ChannelMerkleProof, ChannelTree, SendLeaf, SendMerkleProof, SendTree,
             },
             deposit_tree::{DepositMerkleProof, DepositTree},
+            key_tree::{MemberLeaf, MemberMerkleProof, MemberTree},
             public_state_tree::{PublicStateMerkleProof, PublicStateTree},
             tx_v2_tree::TxV2MerkleProof,
         },
         tx::TxV2,
         u63::{BlockNumber, BlockNumberError, U63},
     },
-    constants::{CHANNEL_TREE_HEIGHT, SEND_TREE_HEIGHT},
-    ethereum_types::{address::Address, bytes32::Bytes32, u256::U256},
+    constants::{CHANNEL_MEMBERS, CHANNEL_TREE_HEIGHT, SEND_TREE_HEIGHT},
+    ethereum_types::{
+        address::Address, bytes32::Bytes32, u32limb_trait::U32LimbTrait as _, u256::U256,
+    },
+    regev::{REGEV_N, REGEV_Q, RegevPk},
 };
 use std::collections::HashMap;
 
@@ -121,6 +129,65 @@ pub enum BlockWitnessGeneratorError {
     InvalidRequest(String),
 }
 
+/// Test-only per-channel member key material (one SPHINCS+ key per member, F1-F6).
+///
+/// Holds the channel's `CHANNEL_MEMBERS` SPHINCS+ keypairs + Regev public keys (slot order) and
+/// the Poseidon `MemberTree` whose root is committed into the channel's `ChannelLeaf`. When a slot
+/// `i` updates, `add_block` signs the block's IMSB digest with member `i`'s key and opens member
+/// `i`'s leaf at tree index `i` against this root — exactly what the live `update_channel_tree`
+/// binding now requires.
+#[derive(Debug, Clone)]
+pub struct ChannelMemberKeys {
+    pub keypairs: Vec<SpxKeyPair>,
+    pub regev_pks: Vec<RegevPk>,
+    pub member_tree: MemberTree,
+}
+
+impl ChannelMemberKeys {
+    /// Build deterministic member keys + tree for `channel_id`. Seeds are derived from the channel
+    /// id so the same channel always yields the same members (stable across re-runs).
+    fn deterministic(channel_id: u32) -> Self {
+        let mut keypairs = Vec::with_capacity(CHANNEL_MEMBERS);
+        let mut regev_pks = Vec::with_capacity(CHANNEL_MEMBERS);
+        let mut member_tree = MemberTree::init();
+        for slot in 0..CHANNEL_MEMBERS as u32 {
+            // Distinct 16-byte seeds per (channel, slot, role) — domain-separated by role byte.
+            let seed = |role: u8| {
+                let mut s = [0u8; 16];
+                s[0..4].copy_from_slice(&channel_id.to_le_bytes());
+                s[4..8].copy_from_slice(&slot.to_le_bytes());
+                s[8] = role;
+                s
+            };
+            let kp = sphincs_keygen(seed(1), seed(2), seed(3));
+            let regev = deterministic_regev_pk(channel_id.wrapping_mul(31).wrapping_add(slot + 1));
+            member_tree.push(MemberLeaf {
+                sphincs_pk_hash: pk_hash_from_pk_bytes(&kp.pk_bytes),
+                regev_pk_digest: regev.poseidon_digest(),
+            });
+            keypairs.push(kp);
+            regev_pks.push(regev);
+        }
+        Self {
+            keypairs,
+            regev_pks,
+            member_tree,
+        }
+    }
+}
+
+/// A distinct canonical Regev pubkey of the correct length, derived deterministically (coeffs < q).
+fn deterministic_regev_pk(seed: u32) -> RegevPk {
+    RegevPk {
+        a: (0..REGEV_N as u32)
+            .map(|i| (seed.wrapping_mul(2_654_435_761).wrapping_add(i)) % REGEV_Q)
+            .collect(),
+        b: (0..REGEV_N as u32)
+            .map(|i| (seed.wrapping_mul(40_503).wrapping_add(1000 + i)) % REGEV_Q)
+            .collect(),
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct BlockWitnessGenerator {
     pub supported_user_counts: Vec<u32>,
@@ -130,6 +197,9 @@ pub struct BlockWitnessGenerator {
     pub send_leaves: HashMap<ChannelId, Vec<SendLeaf>>,
     pub deposit_tree: DepositTree,
     pub public_state_tree: PublicStateTree,
+    /// Per-channel member key material (test-only). Populated by [`Self::register_channel`] before
+    /// the channel's first updating block.
+    pub channel_members: HashMap<ChannelId, ChannelMemberKeys>,
 
     pub block_hash_chain: Bytes32,
     pub deposit_hash_chain: Bytes32,
@@ -149,6 +219,7 @@ impl BlockWitnessGenerator {
             send_leaves: HashMap::new(),
             deposit_tree: DepositTree::init(),
             public_state_tree: PublicStateTree::init(),
+            channel_members: HashMap::new(),
             block_hash_chain: Bytes32::default(),
             deposit_hash_chain: Bytes32::default(),
             blocks: vec![Block::default()], // genesis block placeholder
@@ -156,6 +227,35 @@ impl BlockWitnessGenerator {
             deposit_counts: 0,
             block_chain_witness: HashMap::new(),
         }
+    }
+
+    /// Register a channel's member set (test-only) BEFORE its first updating block.
+    ///
+    /// Builds the deterministic `MemberTree` for `channel_id` and seeds the channel's `ChannelLeaf`
+    /// with `member_pubkeys_root = member_tree.get_root()`. This MUST run before any block is
+    /// produced for the channel: the live `update_channel_tree` binding opens each signing
+    /// member's leaf against this root taken from the channel leaf, and that root must be in place
+    /// from the channel's genesis (writing it later would break the per-block
+    /// prev/new account-tree-root chain the validity proof verifies).
+    ///
+    /// Idempotent: re-registering an already-registered channel is a no-op (returns the existing
+    /// keys). Returns the (clone of the) member keys for the caller to drive signing/encryption.
+    pub fn register_channel(&mut self, channel_id: u32) -> ChannelMemberKeys {
+        let channel = ChannelId::new(channel_id as u64).expect("channel id");
+        if let Some(existing) = self.channel_members.get(&channel) {
+            return existing.clone();
+        }
+        let keys = ChannelMemberKeys::deterministic(channel_id);
+        let member_pubkeys_root = keys.member_tree.get_root();
+
+        // Seed the channel leaf carrying the member root. The leaf is otherwise the default
+        // (index 0, prev 0, empty send tree) so the first updating block transitions it normally.
+        let mut channel_leaf = ChannelLeaf::default();
+        channel_leaf.member_pubkeys_root = member_pubkeys_root;
+        self.channel_tree.update(channel.as_u64(), channel_leaf);
+
+        self.channel_members.insert(channel, keys.clone());
+        keys
     }
 
     fn current_public_state(&self) -> PublicState {
@@ -248,6 +348,27 @@ impl BlockWitnessGenerator {
         let num_users = get_num_users(key_ids.len(), &self.supported_user_counts)
             .ok_or(BlockWitnessGeneratorError::TooManyKeyIds(key_ids.len()))?;
 
+        // A non-padding slot means the block updates a real channel; `channel_id == 0` is reserved
+        // for dummy/deposit-only blocks (`key_ids` all zero) and never constructs a `ChannelId`.
+        let has_active_slot = key_ids.iter().any(|&k| k != 0);
+        let channel_opt = if has_active_slot {
+            Some(ChannelId::new(channel_id as u64)?)
+        } else {
+            None
+        };
+
+        // Real member witnesses are emitted only for REGISTERED channels (member set built into
+        // the channel's leaf). Unregistered channels fall back to DUMMY member/sig witnesses — the
+        // prior behavior, sound for balance-only tests that never feed the block witness to the
+        // validity proof. See `register_channel` and the F6 blocker note in `tasks/todo.md`:
+        // registering a channel at genesis would change the genesis account-tree root, which the
+        // balance circuit's hardcoded `PublicState::default()` genesis (empty channel tree) does
+        // NOT match — so a chained validity proof over a real-member-signed block cannot currently
+        // share a generator with the balance proofs.
+        let channel_registered = channel_opt
+            .map(|c| self.channel_members.contains_key(&c))
+            .unwrap_or(false);
+
         if let Some(witness) = &tx_v2_witness {
             if witness.tx_v2_indices.len() != num_users as usize
                 || witness.tx_v2s.len() != num_users as usize
@@ -299,32 +420,129 @@ impl BlockWitnessGenerator {
 
         let mut account_tree_for_proofs = self.channel_tree.clone();
 
-        for &key_id in block.key_ids.iter() {
+        // ── Member-signature witnesses (live `update_channel_tree` binding) ────────
+        //
+        // For every slot `i` whose channel leaf actually transitions this block (`prev !=
+        // new_block_number`, the circuit's `should_update`), member `i` signs the block's IMSB
+        // digest and opens member `i`'s leaf at tree index `i` against the channel's
+        // `member_pubkeys_root`. Non-updating / padding slots carry dummy witnesses (their
+        // signature + binding constraints are skipped in-circuit).
+        //
+        // `channel` is bound above (auto-register check).
+        // `updating[i] = true` iff slot i triggers a leaf transition. All slots reference the SAME
+        // channel leaf, so only the FIRST non-padding slot actually transitions it (subsequent
+        // slots observe the already-updated leaf with `prev == new_block_number` and do NOT update
+        // — this mirrors the per-slot loop below exactly). That first updating slot is the IMSB
+        // block proposer (`bp_member_slot`).
+        let mut updating = vec![false; num_users as usize];
+        let mut any_update_slot: Option<usize> = None;
+        // Real member witnesses require a registered channel; otherwise fall back to dummies.
+        if channel_registered {
+            if let Some(channel) = channel_opt {
+                let prev_for_channel = account_tree_for_proofs.get_leaf(channel.as_u64());
+                if prev_for_channel.prev != new_block_number {
+                    if let Some(i) = block.key_ids.iter().position(|&k| k != 0) {
+                        updating[i] = true;
+                        any_update_slot = Some(i);
+                    }
+                }
+            }
+        }
+
+        // Build the block-level IMSB message fields (`bp_member_slot` = first updating slot). The
+        // signed digest is recomputed once and signed by EACH updating member at their own slot.
+        let member_keys = channel_opt.and_then(|c| self.channel_members.get(&c).cloned());
+        let (msg_fields, signed_digest) = if let Some(bp_slot) = any_update_slot {
+            let keys = member_keys.as_ref().ok_or_else(|| {
+                BlockWitnessGeneratorError::InvalidRequest(format!(
+                    "channel {} has an updating slot but is not registered; call register_channel first",
+                    channel_id
+                ))
+            })?;
+            let bp_hash: Bytes32 = keys
+                .member_tree
+                .get_leaf(bp_slot as u64)
+                .sphincs_pk_hash
+                .into();
+            let fields = SmallBlockMessageFields {
+                bp_member_slot: bp_slot as u32,
+                bp_sphincs_pubkey_hash: bp_hash,
+                small_block_number: 0,
+                prev_small_block_root: Bytes32::default(),
+                state_commitment_root: Bytes32::default(),
+                medium_epoch_hint: 0,
+                close_freeze_nonce: 0,
+            };
+            let digest = fields.signing_digest(channel_id, tx_tree_root);
+            (fields, Some(digest))
+        } else {
+            (SmallBlockMessageFields::default(), None)
+        };
+
+        let mut sig_witnesses = Vec::with_capacity(num_users as usize);
+        let mut member_merkle_proofs = Vec::with_capacity(num_users as usize);
+        let mut member_regev_pks = Vec::with_capacity(num_users as usize);
+        let dummy_member_proof = MemberMerkleProof::dummy(crate::constants::MEMBER_TREE_HEIGHT);
+        let dummy_regev = RegevPk {
+            a: vec![0u32; REGEV_N],
+            b: vec![0u32; REGEV_N],
+        };
+
+        for (i, &key_id) in block.key_ids.iter().enumerate() {
             if key_id == 0 {
                 prev_account_leaves.push(ChannelLeaf::default());
                 user_merkle_proofs.push(dummy_account_proof.clone());
                 send_merkle_proofs.push(dummy_send_proof.clone());
+                sig_witnesses.push(SpxSigWitness::dummy());
+                member_merkle_proofs.push(dummy_member_proof.clone());
+                member_regev_pks.push(dummy_regev.clone());
                 continue;
             }
 
             // Two-layer identity: channel-tree index = channel id alone (key_id is the member
-            // identity inside the channel, not part of the base-layer index).
-            let channel_id = ChannelId::new(channel_id as u64)?;
-            let send_entries = self.send_leaves.entry(channel_id).or_insert_with(Vec::new);
+            // identity inside the channel, not part of the base-layer index). A non-zero key_id
+            // implies `channel_opt.is_some()` (set above from a non-padding `key_ids`).
+            let channel = channel_opt.expect("non-zero key_id implies a channel");
+            let send_entries = self.send_leaves.entry(channel).or_insert_with(Vec::new);
 
             let mut send_tree = SendTree::init();
             for leaf in send_entries.iter() {
                 send_tree.push(leaf.clone());
             }
 
-            let prev_user_leaf = account_tree_for_proofs.get_leaf(channel_id.as_u64());
+            let prev_user_leaf = account_tree_for_proofs.get_leaf(channel.as_u64());
             prev_account_leaves.push(prev_user_leaf.clone());
 
-            let account_proof = account_tree_for_proofs.prove(channel_id.as_u64());
+            let account_proof = account_tree_for_proofs.prove(channel.as_u64());
             user_merkle_proofs.push(account_proof);
 
             let send_proof = send_tree.prove(prev_user_leaf.index.into());
             send_merkle_proofs.push(send_proof.clone());
+
+            // Real member witness for an updating slot; dummy otherwise.
+            if updating[i] {
+                let keys = member_keys.as_ref().ok_or_else(|| {
+                    BlockWitnessGeneratorError::InvalidRequest(format!(
+                        "channel {} updating slot {} but not registered",
+                        channel_id, i
+                    ))
+                })?;
+                let digest = signed_digest.expect("updating slot implies a signed digest");
+                let msg_bytes: Vec<u8> = digest
+                    .to_u32_vec()
+                    .into_iter()
+                    .flat_map(|limb| (limb as u64).to_le_bytes())
+                    .collect();
+                let kp = &keys.keypairs[i];
+                let sig = sphincs_sign(&msg_bytes, kp);
+                sig_witnesses.push(SpxSigWitness::from_bytes(&kp.pk_bytes, &sig));
+                member_merkle_proofs.push(keys.member_tree.prove(i as u64));
+                member_regev_pks.push(keys.regev_pks[i].clone());
+            } else {
+                sig_witnesses.push(SpxSigWitness::dummy());
+                member_merkle_proofs.push(dummy_member_proof.clone());
+                member_regev_pks.push(dummy_regev.clone());
+            }
 
             if prev_user_leaf.prev != new_block_number {
                 let new_send_leaf = SendLeaf {
@@ -337,15 +555,15 @@ impl BlockWitnessGenerator {
                 send_tree.push(new_send_leaf.clone());
                 send_entries.push(new_send_leaf.clone());
 
-                // member_key_ids_root preserved from previous leaf
+                // member_pubkeys_root preserved from previous leaf
                 let new_user_leaf = ChannelLeaf {
                     index: prev_user_leaf.index + 1,
                     prev: new_block_number,
                     send_tree_root: new_send_root,
-                    member_key_ids_root: prev_user_leaf.member_key_ids_root,
+                    member_pubkeys_root: prev_user_leaf.member_pubkeys_root,
                 };
-                account_tree_for_proofs.update(channel_id.as_u64(), new_user_leaf.clone());
-                self.channel_tree.update(channel_id.as_u64(), new_user_leaf);
+                account_tree_for_proofs.update(channel.as_u64(), new_user_leaf.clone());
+                self.channel_tree.update(channel.as_u64(), new_user_leaf);
             }
         }
 
@@ -367,9 +585,11 @@ impl BlockWitnessGenerator {
             user_merkle_proofs,
             send_merkle_proofs,
             public_state_merkle_proof,
-            sig_witnesses: None, // dummy witnesses used by default in tests
-            key_leaves: None,    // default KeyLeaf (pk_set_root = 0) → sig constraints skipped
-            msg_fields: None,    // default IMSB fields (sig constraints skipped)
+            // Real per-slot member witnesses (updating slots) + dummies (padding/non-updating).
+            sig_witnesses: Some(sig_witnesses),
+            member_merkle_proofs: Some(member_merkle_proofs),
+            member_regev_pks: Some(member_regev_pks),
+            msg_fields: Some(msg_fields),
             tx_v2_indices: tx_v2_witness.as_ref().map(|w| w.tx_v2_indices.clone()),
             tx_v2s: tx_v2_witness.as_ref().map(|w| w.tx_v2s.clone()),
             tx_v2_merkle_proofs: tx_v2_witness

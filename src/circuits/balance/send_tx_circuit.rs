@@ -590,7 +590,7 @@ mod tests {
             index: send_tree.len() as u32,
             prev: send_leaf.cur,
             send_tree_root: send_tree.get_root(),
-            member_key_ids_root: ChannelLeaf::default().member_key_ids_root,
+            member_pubkeys_root: ChannelLeaf::default().member_pubkeys_root,
         };
         let channel_id = ChannelId::new(key_id as u64).unwrap();
         channel_tree.update(channel_id.as_u64(), channel_leaf.clone());

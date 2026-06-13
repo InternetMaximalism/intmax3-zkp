@@ -826,8 +826,21 @@ mod tests {
             user_merkle_proofs: block_witness.user_merkle_proofs.clone(),
             send_merkle_proofs: block_witness.send_merkle_proofs.clone(),
             sig_witnesses: vec![SpxSigWitness::dummy(); num_users],
-            // Default KeyLeaf (pk_set_root = 0) → signature constraints skipped.
-            key_leaves: vec![crate::common::trees::key_tree::KeyLeaf::default(); num_users],
+            // Dummy member proofs/keys: this test path keeps every slot non-updating, so the
+            // member binding and signature constraints are skipped (should_update == false).
+            member_merkle_proofs: vec![
+                crate::common::trees::key_tree::MemberMerkleProof::dummy(
+                    crate::constants::MEMBER_TREE_HEIGHT,
+                );
+                num_users
+            ],
+            member_regev_pks: vec![
+                crate::regev::RegevPk {
+                    a: vec![0u32; crate::regev::REGEV_N],
+                    b: vec![0u32; crate::regev::REGEV_N],
+                };
+                num_users
+            ],
             msg_fields:
                 crate::circuits::validity::block_hash_chain::sphincs_sig::SmallBlockMessageFields::default(),
             tx_v2_indices: vec![0; num_users],

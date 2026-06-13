@@ -17,12 +17,14 @@ interface IChannelSettlementVerifier {
         uint64 snapshotMediumBlockNumber,
         uint64 finalStateVersion,
         bytes32 finalSettledTxChain,
+        bytes32 memberSetCommitment,
         bytes calldata proof
     ) external pure returns (bool);
 
     function verifySpecialClose(
         bytes4 channelId,
-        bytes4 offendingBpKeyId,
+        uint8 offendingBpMemberSlot,
+        bytes32 offendingBpSphincsPubkeyHash,
         bytes32 fullySignedSmallBlockRoot,
         uint64 smallBlockNumber,
         uint64 signedMediumBlockNumber,
@@ -34,7 +36,7 @@ interface IChannelSettlementVerifier {
         bytes4 channelId,
         bytes32 closeIntentDigest,
         bytes32 finalBalanceStateH1,
-        bytes8 userId,
+        bytes32 memberSphincsPubkeyHash,
         address recipient,
         bytes32 userAmountDigest,
         uint64 amount,
@@ -56,7 +58,7 @@ interface IChannelSettlementVerifier {
         bytes4 channelId,
         bytes32 closeIntentDigest,
         bytes32 incomingTxHash,
-        bytes8 receiverUserId,
+        bytes32 receiverSphincsPubkeyHash,
         address recipient,
         bytes32 sharedNativeNullifier,
         uint64 amount,
@@ -67,20 +69,32 @@ interface IChannelSettlementVerifier {
         bytes4 channelId,
         bytes32 closeIntentDigest,
         bytes32 sourceTxHash,
-        bytes8 senderUserId,
+        bytes32 senderSphincsPubkeyHash,
         bytes32 senderAmountDigest,
         bytes32 debitNullifier,
         uint64 amount,
         bytes calldata proof
     ) external pure returns (bool);
+
+    function closeMemberSetCommitment(
+        bytes32 sphincsPubkeyHash0,
+        bytes32 sphincsPubkeyHash1,
+        bytes32 sphincsPubkeyHash2
+    ) external pure returns (bytes32);
 }
 
 contract ChannelSettlementManager {
+    /// One SPHINCS+ key per member (F7): a channel has exactly `MEMBER_COUNT` members, identified
+    /// by their SPHINCS+ pubkey hash (bytes32), slot order 0..MEMBER_COUNT. Mirrors the Rust
+    /// `CHANNEL_MEMBERS` constant (src/constants.rs).
+    uint256 internal constant MEMBER_COUNT = 3;
+
     error InvalidChannelId();
-    error InvalidBpKeyId();
+    error InvalidBpMemberSlot();
     error InvalidChallengePeriod();
     error InvalidMemberBinding();
     error DuplicateRegisteredMember();
+    error InvalidMemberCount();
     error InvalidCloseProof();
     error InvalidSpecialCloseProof();
     error InvalidWithdrawalClaimProof();
@@ -133,8 +147,9 @@ contract ChannelSettlementManager {
 
     event SpecialCloseSubmitted(
         bytes32 indexed specialCloseDigest,
-        bytes4 indexed offendingBpKeyId,
+        bytes32 indexed offendingBpSphincsPubkeyHash,
         bytes32 indexed fullySignedSmallBlockRoot,
+        uint8 offendingBpMemberSlot,
         uint64 smallBlockNumber,
         uint256 slashedAmount,
         uint64 closeFreezeNonce
@@ -165,7 +180,7 @@ contract ChannelSettlementManager {
     event WithdrawalClaimAccepted(
         bytes32 indexed closeIntentDigest,
         bytes32 indexed withdrawalNullifier,
-        bytes8 indexed userId,
+        bytes32 indexed memberSphincsPubkeyHash,
         address recipient,
         uint256 amount
     );
@@ -173,7 +188,7 @@ contract ChannelSettlementManager {
     event PostCloseClaimAccepted(
         bytes32 indexed closeIntentDigest,
         bytes32 indexed sharedNativeNullifier,
-        bytes8 indexed receiverUserId,
+        bytes32 indexed receiverSphincsPubkeyHash,
         address recipient,
         uint256 amount
     );
@@ -210,21 +225,24 @@ contract ChannelSettlementManager {
     }
 
     struct SpecialClose {
-        bytes4 offendingBpKeyId;
+        uint8 offendingBpMemberSlot;
+        bytes32 offendingBpSphincsPubkeyHash;
         bytes32 fullySignedSmallBlockRoot;
         uint64 smallBlockNumber;
         uint64 signedMediumBlockNumber;
         uint64 latestFinalizedMediumBlockNumber;
     }
 
+    /// F7: a member is identified by its SPHINCS+ pubkey hash (bytes32), no longer a `bytes8
+    /// userId`. The recipient is the L1 withdrawal address for that member.
     struct MemberBinding {
-        bytes8 userId;
+        bytes32 sphincsPubkeyHash;
         address recipient;
     }
 
     struct WithdrawalClaim {
         bytes32 closeIntentDigest;
-        bytes8 userId;
+        bytes32 memberSphincsPubkeyHash;
         address recipient;
         bytes32 userAmountDigest;
         uint64 amount;
@@ -242,7 +260,7 @@ contract ChannelSettlementManager {
     struct PostCloseClaim {
         bytes32 closeIntentDigest;
         bytes32 incomingTxHash;
-        bytes8 receiverUserId;
+        bytes32 receiverSphincsPubkeyHash;
         address recipient;
         bytes32 sharedNativeNullifier;
         uint64 amount;
@@ -251,7 +269,7 @@ contract ChannelSettlementManager {
     struct LateOutgoingDebitCorrection {
         bytes32 closeIntentDigest;
         bytes32 sourceTxHash;
-        bytes8 senderUserId;
+        bytes32 senderSphincsPubkeyHash;
         bytes32 senderAmountDigest;
         bytes32 debitNullifier;
         uint64 amount;
@@ -291,10 +309,18 @@ contract ChannelSettlementManager {
     uint64 public constant CHALLENGE_PERIOD_SECS = 86_400;
 
     bytes4 public immutable channelId;
-    bytes4 public immutable bpKeyId;
+    /// F7: the block-proposer member is identified by its slot (0..MEMBER_COUNT) and its SPHINCS+
+    /// pubkey hash, replacing the legacy `bpKeyId`.
+    uint8 public immutable bpMemberSlot;
+    bytes32 public immutable bpSphincsPubkeyHash;
     uint64 public immutable challengePeriod;
     uint256 public immutable specialClosePenalty;
     IChannelSettlementVerifier public immutable verifier;
+
+    /// @notice The channel's registered member SPHINCS+ pubkey hashes in slot order. Mirrors the
+    /// Rust `ChannelRecord.member_sphincs_pubkey_hashes` (src/common/channel.rs). The close proof
+    /// is bound to exactly this set via the in-circuit `memberSetCommitment`.
+    bytes32[MEMBER_COUNT] public memberSphincsPubkeyHashes;
 
     ChannelLifecycleStatus public channelStatus;
     uint64 public currentCloseFreezeNonce;
@@ -320,14 +346,16 @@ contract ChannelSettlementManager {
     mapping(bytes32 => bool) public usedWithdrawalNullifiers;
     mapping(bytes32 => bool) public usedSharedNativeNullifiers;
     mapping(bytes32 => bool) public usedLateOutgoingDebitNullifiers;
-    mapping(bytes8 => address) public registeredRecipientOf;
-    mapping(bytes8 => uint256) public registeredMemberIndexPlusOne;
+    /// F7: member identity is the SPHINCS+ pubkey hash (bytes32).
+    mapping(bytes32 => address) public registeredRecipientOf;
+    mapping(bytes32 => uint256) public registeredMemberIndexPlusOne;
     mapping(address => bool) public isMemberRecipient;
-    bytes8[] public registeredUserIds;
+    bytes32[] public registeredMemberPubkeyHashes;
 
     constructor(
         bytes4 channelId_,
-        bytes4 bpKeyId_,
+        uint8 bpMemberSlot_,
+        bytes32 bpSphincsPubkeyHash_,
         uint64 challengePeriod_,
         uint256 specialClosePenalty_,
         uint256 initialBpBondCredits_,
@@ -335,13 +363,18 @@ contract ChannelSettlementManager {
         MemberBinding[] memory memberBindings
     ) {
         if (channelId_ == bytes4(0)) revert InvalidChannelId();
-        if (bpKeyId_ == bytes4(0)) revert InvalidBpKeyId();
+        // F7: the block-proposer slot must be a valid member index, and its pubkey hash nonzero.
+        if (uint256(bpMemberSlot_) >= MEMBER_COUNT) revert InvalidBpMemberSlot();
+        if (bpSphincsPubkeyHash_ == bytes32(0)) revert InvalidBpMemberSlot();
         // SECURITY: a zero challenge period would let any pending close finalize in the same
         // block, voiding the whole challenge game.
         if (challengePeriod_ == 0) revert InvalidChallengePeriod();
+        // One SPHINCS+ key per member: exactly MEMBER_COUNT members are registered, slot order.
+        if (memberBindings.length != MEMBER_COUNT) revert InvalidMemberCount();
 
         channelId = channelId_;
-        bpKeyId = bpKeyId_;
+        bpMemberSlot = bpMemberSlot_;
+        bpSphincsPubkeyHash = bpSphincsPubkeyHash_;
         challengePeriod = challengePeriod_;
         specialClosePenalty = specialClosePenalty_;
         bpBondCredits = initialBpBondCredits_;
@@ -351,24 +384,41 @@ contract ChannelSettlementManager {
         for (uint256 i = 0; i < memberBindings.length; i++) {
             MemberBinding memory binding = memberBindings[i];
             if (
-                binding.userId == bytes8(0) ||
-                binding.recipient == address(0) ||
-                _userChannelId(binding.userId) != channelId_
+                binding.sphincsPubkeyHash == bytes32(0) ||
+                binding.recipient == address(0)
             ) {
                 revert InvalidMemberBinding();
             }
-            if (registeredMemberIndexPlusOne[binding.userId] != 0) {
+            if (registeredMemberIndexPlusOne[binding.sphincsPubkeyHash] != 0) {
                 revert DuplicateRegisteredMember();
             }
-            registeredRecipientOf[binding.userId] = binding.recipient;
-            registeredMemberIndexPlusOne[binding.userId] = registeredUserIds.length + 1;
-            registeredUserIds.push(binding.userId);
+            registeredRecipientOf[binding.sphincsPubkeyHash] = binding.recipient;
+            registeredMemberIndexPlusOne[binding.sphincsPubkeyHash] =
+                registeredMemberPubkeyHashes.length + 1;
+            registeredMemberPubkeyHashes.push(binding.sphincsPubkeyHash);
+            memberSphincsPubkeyHashes[i] = binding.sphincsPubkeyHash;
             isMemberRecipient[binding.recipient] = true;
+        }
+        // The block-proposer pubkey hash must be the member registered at its slot.
+        if (memberSphincsPubkeyHashes[bpMemberSlot_] != bpSphincsPubkeyHash_) {
+            revert InvalidBpMemberSlot();
         }
     }
 
     function memberCount() external view returns (uint256) {
-        return registeredUserIds.length;
+        return registeredMemberPubkeyHashes.length;
+    }
+
+    /// @notice The close-circuit member-set commitment for this channel's registered members:
+    /// keccak([IMCM, memberSphincsPubkeyHashes[0..2]]). The close proof's in-circuit commitment
+    /// MUST equal this value (enforced in `_checkCloseProof`), binding the verified signing keys
+    /// to the registered member set (no non-member-key substitution).
+    function registeredMemberSetCommitment() public view returns (bytes32) {
+        return verifier.closeMemberSetCommitment(
+            memberSphincsPubkeyHashes[0],
+            memberSphincsPubkeyHashes[1],
+            memberSphincsPubkeyHashes[2]
+        );
     }
 
     function isNativeSendAllowed(uint64 suppliedCloseFreezeNonce) external view returns (bool) {
@@ -473,7 +523,12 @@ contract ChannelSettlementManager {
         bytes calldata proof
     ) external {
         if (channelStatus != ChannelLifecycleStatus.Active) revert ChannelAlreadyFrozen();
-        if (specialClose.offendingBpKeyId != bpKeyId) revert InvalidBpForSpecialClose();
+        // F7: the offending proposer must be this channel's registered block-proposer (slot and
+        // pubkey hash).
+        if (
+            specialClose.offendingBpMemberSlot != bpMemberSlot ||
+            specialClose.offendingBpSphincsPubkeyHash != bpSphincsPubkeyHash
+        ) revert InvalidBpForSpecialClose();
         if (
             specialClose.latestFinalizedMediumBlockNumber <
             specialClose.signedMediumBlockNumber + 5
@@ -481,7 +536,8 @@ contract ChannelSettlementManager {
         if (
             !verifier.verifySpecialClose(
                 channelId,
-                specialClose.offendingBpKeyId,
+                specialClose.offendingBpMemberSlot,
+                specialClose.offendingBpSphincsPubkeyHash,
                 specialClose.fullySignedSmallBlockRoot,
                 specialClose.smallBlockNumber,
                 specialClose.signedMediumBlockNumber,
@@ -505,8 +561,9 @@ contract ChannelSettlementManager {
         latestSpecialCloseDigest = computeSpecialCloseDigest(specialClose);
         emit SpecialCloseSubmitted(
             latestSpecialCloseDigest,
-            specialClose.offendingBpKeyId,
+            specialClose.offendingBpSphincsPubkeyHash,
             specialClose.fullySignedSmallBlockRoot,
+            specialClose.offendingBpMemberSlot,
             specialClose.smallBlockNumber,
             slashedAmount,
             currentCloseFreezeNonce
@@ -562,7 +619,7 @@ contract ChannelSettlementManager {
                 channelId,
                 correction.closeIntentDigest,
                 correction.sourceTxHash,
-                correction.senderUserId,
+                correction.senderSphincsPubkeyHash,
                 correction.senderAmountDigest,
                 correction.debitNullifier,
                 correction.amount,
@@ -626,7 +683,12 @@ contract ChannelSettlementManager {
         if (claim.closeIntentDigest != finalizedCloseIntentDigest) {
             revert CloseIntentDigestMismatch();
         }
-        if (registeredRecipientOf[claim.userId] != claim.recipient) {
+        // F7: the claiming member's pubkey hash must be a registered channel member, and the
+        // recipient must match the registration.
+        if (registeredMemberIndexPlusOne[claim.memberSphincsPubkeyHash] == 0) {
+            revert NotChannelMember();
+        }
+        if (registeredRecipientOf[claim.memberSphincsPubkeyHash] != claim.recipient) {
             revert RecipientMismatch();
         }
         if (usedWithdrawalNullifiers[claim.withdrawalNullifier]) {
@@ -637,7 +699,7 @@ contract ChannelSettlementManager {
                 channelId,
                 claim.closeIntentDigest,
                 finalizedBalanceStateH1,
-                claim.userId,
+                claim.memberSphincsPubkeyHash,
                 claim.recipient,
                 claim.userAmountDigest,
                 claim.amount,
@@ -657,7 +719,7 @@ contract ChannelSettlementManager {
         emit WithdrawalClaimAccepted(
             claim.closeIntentDigest,
             claim.withdrawalNullifier,
-            claim.userId,
+            claim.memberSphincsPubkeyHash,
             claim.recipient,
             claim.amount
         );
@@ -671,7 +733,10 @@ contract ChannelSettlementManager {
         if (claim.closeIntentDigest != finalizedCloseIntentDigest) {
             revert CloseIntentDigestMismatch();
         }
-        if (registeredRecipientOf[claim.receiverUserId] != claim.recipient) {
+        if (registeredMemberIndexPlusOne[claim.receiverSphincsPubkeyHash] == 0) {
+            revert NotChannelMember();
+        }
+        if (registeredRecipientOf[claim.receiverSphincsPubkeyHash] != claim.recipient) {
             revert RecipientMismatch();
         }
         if (usedSharedNativeNullifiers[claim.sharedNativeNullifier]) {
@@ -682,7 +747,7 @@ contract ChannelSettlementManager {
                 channelId,
                 claim.closeIntentDigest,
                 claim.incomingTxHash,
-                claim.receiverUserId,
+                claim.receiverSphincsPubkeyHash,
                 claim.recipient,
                 claim.sharedNativeNullifier,
                 claim.amount,
@@ -695,7 +760,7 @@ contract ChannelSettlementManager {
         emit PostCloseClaimAccepted(
             claim.closeIntentDigest,
             claim.sharedNativeNullifier,
-            claim.receiverUserId,
+            claim.receiverSphincsPubkeyHash,
             claim.recipient,
             claim.amount
         );
@@ -717,7 +782,7 @@ contract ChannelSettlementManager {
     /// bytes4/uint64/bytes32/uint256 reproduces the BE word stream exactly. The second
     /// `channelId` is the Rust `channel_fund_snapshot.channel_id` slot (this contract pins both
     /// to its own channel). `finalStateVersion` and `finalSettledTxChain` are appended at the
-    /// END of the legacy preimage (detail2 §C-8).
+    /// END of the legacy preimage (detail2 §C-8). F7: unchanged (not member-bearing).
     function computeCloseIntentDigest(
         CloseIntent memory intent
     ) public view returns (bytes32) {
@@ -750,7 +815,8 @@ contract ChannelSettlementManager {
             abi.encodePacked(
                 bytes4(0x494d5343),
                 channelId,
-                specialClose.offendingBpKeyId,
+                uint32(specialClose.offendingBpMemberSlot),
+                specialClose.offendingBpSphincsPubkeyHash,
                 specialClose.fullySignedSmallBlockRoot,
                 specialClose.smallBlockNumber,
                 specialClose.signedMediumBlockNumber,
@@ -763,6 +829,10 @@ contract ChannelSettlementManager {
         CloseIntent calldata intent,
         bytes calldata proof
     ) internal view {
+        // F7 SECURITY: the close proof's in-circuit `memberSetCommitment` must equal this
+        // channel's registered member-set commitment, so a close can only finalize with the
+        // channel's registered SPHINCS+ members (no non-member-key substitution). The commitment
+        // is part of the close-proof public inputs (closePIHash, 85 limbs).
         if (
             !verifier.verifyCloseIntent(
                 channelId,
@@ -779,6 +849,7 @@ contract ChannelSettlementManager {
                 intent.snapshotMediumBlockNumber,
                 intent.finalStateVersion,
                 intent.finalSettledTxChain,
+                registeredMemberSetCommitment(),
                 proof
             )
         ) revert InvalidCloseProof();
@@ -802,9 +873,5 @@ contract ChannelSettlementManager {
                 intent.finalEpoch == current.finalEpoch &&
                 intent.finalStateVersion > current.finalStateVersion
             );
-    }
-
-    function _userChannelId(bytes8 userId) internal pure returns (bytes4) {
-        return bytes4(userId);
     }
 }

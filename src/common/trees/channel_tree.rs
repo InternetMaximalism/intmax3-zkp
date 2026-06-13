@@ -96,10 +96,11 @@ pub struct ChannelLeaf {
     pub index: u32,                      // the next index of send leaf
     pub prev: BlockNumber,               // the previous block number
     pub send_tree_root: PoseidonHashOut, // the root of send tree
-    // Root of this channel's MemberKeyTree (its ordered, unique member key_id set). Replaces the
-    // former single (pk_set_root, threshold): per-keyID key sets + thresholds now live in KeyTree,
-    // and a channel authorizes iff EVERY member key_id clears its own threshold.
-    pub member_key_ids_root: PoseidonHashOut,
+    // Root of this channel's MemberTree: the ordered member leaves
+    // `MemberLeaf { sphincs_pk_hash, regev_pk_digest }`, slot 0..CHANNEL_MEMBERS. One SPHINCS+ key
+    // per member (no multisig / threshold). This root is the trusted anchor the validity circuit
+    // proves slot inclusion against to bind a signing pubkey to the channel's members.
+    pub member_pubkeys_root: PoseidonHashOut,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -107,7 +108,7 @@ pub struct ChannelLeafTarget {
     pub index: Target,                              // the next index of send leaf
     pub prev: BlockNumberTarget,                    // the previous block number
     pub send_tree_root: PoseidonHashOutTarget,      // the root of send tree
-    pub member_key_ids_root: PoseidonHashOutTarget, // root of this channel's MemberKeyTree
+    pub member_pubkeys_root: PoseidonHashOutTarget, // root of this channel's MemberTree
 }
 
 impl Leafable for ChannelLeaf {
@@ -218,8 +219,8 @@ impl Default for ChannelLeaf {
             index: 0,
             prev: BlockNumber::default(),
             send_tree_root: SendTree::init().get_root(),
-            // Unregistered channel: empty MemberKeyTree root (no members yet).
-            member_key_ids_root: crate::common::trees::key_tree::MemberKeyTree::init().get_root(),
+            // Unregistered channel: empty MemberTree root (no members yet).
+            member_pubkeys_root: crate::common::trees::key_tree::MemberTree::init().get_root(),
         }
     }
 }
@@ -230,7 +231,7 @@ impl ChannelLeaf {
             vec![CHANNEL_LEAF_DOMAIN, self.index as u64],
             self.prev.to_u64_vec(),
             self.send_tree_root.to_u64_vec(),
-            self.member_key_ids_root.to_u64_vec(),
+            self.member_pubkeys_root.to_u64_vec(),
         ]
         .concat()
     }
@@ -247,12 +248,12 @@ impl ChannelLeafTarget {
         }
         let prev = BlockNumberTarget::new(builder, is_checked);
         let send_tree_root = PoseidonHashOutTarget::new(builder);
-        let member_key_ids_root = PoseidonHashOutTarget::new(builder);
+        let member_pubkeys_root = PoseidonHashOutTarget::new(builder);
         Self {
             index,
             prev,
             send_tree_root,
-            member_key_ids_root,
+            member_pubkeys_root,
         }
     }
 
@@ -262,7 +263,7 @@ impl ChannelLeafTarget {
             vec![self.index],
             self.prev.to_vec(),
             self.send_tree_root.to_vec(),
-            self.member_key_ids_root.to_vec(),
+            self.member_pubkeys_root.to_vec(),
         ]
         .concat()
     }
@@ -275,9 +276,9 @@ impl ChannelLeafTarget {
             index: builder.constant(F::from_canonical_u64(value.index.into())),
             prev: BlockNumberTarget::constant(builder, value.prev),
             send_tree_root: PoseidonHashOutTarget::constant(builder, value.send_tree_root),
-            member_key_ids_root: PoseidonHashOutTarget::constant(
+            member_pubkeys_root: PoseidonHashOutTarget::constant(
                 builder,
-                value.member_key_ids_root,
+                value.member_pubkeys_root,
             ),
         }
     }
@@ -287,7 +288,7 @@ impl ChannelLeafTarget {
         self.prev.set_witness(witness, value.prev);
         self.send_tree_root
             .set_witness(witness, value.send_tree_root);
-        self.member_key_ids_root
-            .set_witness(witness, value.member_key_ids_root);
+        self.member_pubkeys_root
+            .set_witness(witness, value.member_pubkeys_root);
     }
 }

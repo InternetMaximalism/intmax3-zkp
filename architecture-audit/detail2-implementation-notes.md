@@ -109,6 +109,91 @@ of bindings can be satisfied with divergent values.
 
 ---
 
+## D5 — one SPHINCS+ key per member (multisig / threshold / KeyId / UserId removed)
+
+**Context (user directive, 2026-06-13):** the channel layer had inherited a two-layer
+identity with multisig/threshold (`KeyId`/`UserId`; `KeyTree`→`MemberKeyTree`→`KeySetTree`;
+`threshold`/`num_keys`; a `signature_aggregation/` pipeline). This **deviated from
+abstract2.md §1** ("1 人 1 key 1 account, address == pubkey",
+`memberKeys: Map<ChannelId,[(Address,RegevPk);3]>`) and — worse — the SPHINCS+ signing
+gadget's `KeyLeaf ↔ KeyTree` binding was **never enforced in-circuit**, so a prover could
+choose any key (a soundness hole). D5 removes the multisig machinery and closes that hole.
+abstract2.md needs no change; detail2.md was rewritten (§A-2, §C-2..C-9, §E, §F-3 + PI
+tables, §G, §H-1, §K-6).
+
+**DA — identity = SPHINCS+ pubkey hash.** Member identity is the SPHINCS+ public-key hash
+`Bytes32` (= `Poseidon(pub_seed || pub_root)` rendered as `Bytes32`) everywhere: digests,
+withdrawal/post-close claims, nullifiers, contract params. The `slot` (0/1/2) is **only**
+the `enc_balances`/`pending_adds` array index — it is not an identity. `ChannelRecord`
+now carries `member_sphincs_pubkey_hashes: [Bytes32; 3]` + `member_pubkeys_root` +
+`bp_member_slot: u8` (no `bp_key_id`/`member_key_ids`); `MemberSignature` is
+`{ member_slot, sphincs_pubkey_hash, signature }`. `KeyId`/`UserId`/`KeyRecord`/
+`KEY_RECORD_DOMAIN` ("IMKR") are deleted. `Block.key_ids` is retained by name but
+re-interpreted as "active member slots" (still in the block-hash preimage).
+
+**DB — Poseidon in-circuit member tree + keccak `ChannelRecord` L1 anchor.** The Regev/key
+binding is a **Poseidon `MemberTree`** (`src/common/trees/key_tree.rs`,
+`MEMBER_TREE_HEIGHT = 2`, leaf `MemberLeaf { sphincs_pk_hash, regev_pk_digest }`,
+`MEMBER_LEAF_DOMAIN` "MBLF"); its root is `ChannelLeaf.member_pubkeys_root`. The L1 anchor
+stays the existing **keccak** `ChannelRecord` digest (IMCR) plus the close PI
+`member_set_commitment` (keccak, `CLOSE_MEMBER_SET_DOMAIN` "IMCM" `0x494d434d`). Both are
+built from the same member set at registration. **keccak is confined to the L1 boundary**
+(in-circuit keccak would be ruinous under recursive STARK); the in-circuit binding is all
+Poseidon. The Regev digest in the leaf uses `REGEV_PK_POSEIDON_DOMAIN` "IMRP" `0x494d5250`.
+
+**DC — `signature_aggregation/` was dead code, deleted.** The ~6.3K-LOC
+`src/circuits/validity/signature_aggregation/` (16 files) and `src/common/key_set.rs`
+(`KeySetTree`/`PkLeaf`) were **not on the live validity path** — `BlockHashChainProcessor`
+composes only Deposit + UpdateUser + BlockStep + BlockHashChain, and the real signature
+verification lives in `update_channel_tree.rs` (UpdateUserTree). Both are deleted.
+
+**DD — N-of-N (3/3 unanimous).** No threshold. `signatures[i].member_slot == i` and
+`signatures[i].sphincs_pubkey_hash == record.member_sphincs_pubkey_hashes[i]`; the close
+circuit already verified 3/3.
+
+**Soundness binding (the hole-closing core) + verified negative tests.**
+- *Validity (in-circuit, Poseidon):* `update_channel_tree.rs` recomputes
+  `sphincs_pk_hash = Poseidon(pub_seed || pub_root)` from the **same** pubkey targets fed to
+  the SPHINCS+ verify gadget, computes `regev_pk_digest` from the witnessed Regev pk, and
+  proves slot inclusion of `MemberLeaf{…}` under the channel's trusted
+  `member_pubkeys_root` (itself merkle-bound under `account_tree_root`). The prover-choice
+  `pk_set_root` equality check and the standalone `KeyLeafTarget` are removed; `should_verify_sig
+  := should_update`.
+  Negative test: **`update_user_tree_rejects_pubkey_not_in_member_tree`** — signing with a
+  pubkey absent from the member tree fails inclusion and proof generation errors,
+  demonstrating the prior any-pubkey-accepted hole is closed.
+- *Close (PI + L1, keccak):* the close circuit exposes
+  `member_set_commitment = keccak([IMCM, sphincs_pk_hash_0..2])`; L1
+  (`ChannelSettlementManager`) matches it against the registered members.
+  Negative tests in `close_circuit.rs`:
+  **`channel_close_circuit_binds_member_set_commitment`**,
+  **`channel_close_circuit_rejects_invalid_member_signature`**,
+  **`channel_close_circuit_rejects_balance_chain_mismatch`**,
+  **`channel_close_circuit_rejects_tampered_final_state_version`**.
+
+**Solidity mirror.** `ChannelSettlementVerifier.closePIHash` is 85 limbs
+(`memberSetCommitment` appended at the end); `ChannelSettlementManager` stores
+`registeredMemberSetCommitment()` and matches it on close; registration is simplified to
+`channel ⇒ [(sphincsPubkeyHash bytes32, regevPkDigest bytes32, recipient address); 3]`
+(no `registerKey`/`bytes8 userId`); claims carry the `bytes32` pubkey hash;
+`bpKeyId → bpMemberSlot + bpSphincsPubkeyHash`. The Rust↔Solidity shared vector
+`test_member_set_commitment_matches_rust_shared_vector`
+(↔ `close_member_set_commitment_matches_solidity_shared_vector`) and
+`SKIP_GROTH16=true forge test` pass; the withdrawal/post-close/special-close close-intent
+shared vectors are re-pinned and pass.
+
+**Registration-reconciliation follow-up (deferred; detail2 §K-6).** The in-circuit binding
+is implemented and unit-tested, but the **registration mechanism that populates
+`member_pubkeys_root` into the genesis/account tree** so the binding has a real registered
+root to open against is **not** wired up: the balance circuit's genesis hardcodes an empty
+account tree (`switch_board.rs:230`, `default_pis.public_state`). Reconciling that with a
+registered genesis is deferred; **registration soundness stays genesis-trust per channel**
+(`intmax3-channel-mvp.md`). Consequence: the **full-stack close e2e is red on the
+registration block** until this follow-up lands — the binding's own negative/positive unit
+tests are green, but the end-to-end registered-genesis path is not yet built.
+
+---
+
 ## Additional recorded outcomes
 
 ### Hash-chain leaf definitions (§C-6)
@@ -141,12 +226,18 @@ to the 1-limb (4-byte) `ChannelId` was applied and the layouts re-pinned. Final 
 (constants in `src/circuits/channel/*_pis.rs`, mirrored by Solidity and shared Rust↔
 Solidity test vectors):
 
-| Circuit | Public inputs |
+| Circuit | Public inputs (at this migration) |
 |---|---|
 | close | 77 (`CHANNEL_CLOSE_PUBLIC_INPUTS_LEN`) |
 | withdrawal claim | 42 |
 | post-close claim | 34 — `receiverAmountDigest` dropped from the L1 hash |
 | cancel close | 41 |
+
+> **Superseded by D5.** The subsequent one-key-per-member refactor (D5) appended
+> `member_set_commitment` to close (→ **85**) and widened the claim member identifier from
+> a 2-limb id to an 8-limb pubkey hash: withdrawal claim **42 → 48**, post-close claim
+> **34 → 40**; cancel close stays **41**. The Solidity mirror and shared vectors track the
+> D5 values.
 
 ### Validity-circuit additions (§F-2)
 Block producers sign the IMSB `SmallBlockRootMessage::signing_digest()`
@@ -159,9 +250,12 @@ serializer.
 
 ## Known deferred items (documented, intentionally not implemented here)
 
-1. **KeyLeaf ↔ KeyTree binding** — SECURITY TODO inherited from the prior
-   two-layer-identity refactor; the binding between a member's key leaf and the channel
-   key tree is not yet enforced in-circuit.
+1. **KeyLeaf ↔ KeyTree binding** — **RESOLVED by D5.** The prior prover-chooses-the-key
+   hole is closed: the validity circuit now proves slot inclusion of the signing pubkey
+   under the channel's Poseidon `member_pubkeys_root` (negative test
+   `update_user_tree_rejects_pubkey_not_in_member_tree`). The residual piece is the
+   registration mechanism that anchors that root into the genesis/account tree — see D5's
+   "Registration-reconciliation follow-up" and §K-6.
 2. **M7 signed-but-unsettled race (§K-1)** — semantics to be fixed in abstract3.
 3. **`publishRegevPk` full registration ceremony (§K-4)** — current state: pk
    validation + `regev_pk_root` anchoring only.

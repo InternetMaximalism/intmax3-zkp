@@ -14,8 +14,14 @@ use crate::{
 //   closeFreezeNonce(2) | finalChannelStateDigest(8) | finalBalanceStateH1(8) |
 //   channelFundAmount(8) | channelFundIntmaxStateRoot(8) | burnTxHash(8) |
 //   closeWithdrawalDigest(8) | closeIntentDigest(8) | snapshotMediumBlockNumber(2) |
-//   finalStateVersion(2) | finalSettledTxChain(8)
-pub const CHANNEL_CLOSE_PUBLIC_INPUTS_LEN: usize = 77;
+//   finalStateVersion(2) | finalSettledTxChain(8) | memberSetCommitment(8)
+//
+// F5 SECURITY: `member_set_commitment` (8 limbs, appended at the END so the legacy close-intent
+// IMCI vector is byte-for-byte unchanged) = keccak([IMCM, sphincs_pk_hash_0..2]) over the 3
+// member SPHINCS+ pubkey hashes the close circuit's signatures verify (slot order). L1
+// (`ChannelSettlementManager`) matches it against the channel's registered member set, binding
+// the verified signing keys to the registered members (no non-member-key substitution).
+pub const CHANNEL_CLOSE_PUBLIC_INPUTS_LEN: usize = 85;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -39,6 +45,13 @@ pub struct ChannelClosePublicInputs {
     /// `settled_tx_chain` of the final balance state (detail2 §H-2). Matched in-circuit against
     /// the final balance proof's `settled_tx_chain` public input and anchored inside H1.
     pub final_settled_tx_chain: Bytes32,
+    /// F5 binding: `keccak([IMCM, sphincs_pk_hash_0..2])` over the 3 members' SPHINCS+ pubkey
+    /// hashes (slot order) whose signatures the close circuit verifies. Computed in-circuit from
+    /// the verified signing keys and matched on L1 against the channel's registered member set.
+    /// Derived by the circuit (`ChannelCloseCircuit::prove`) from the member auth, not by the
+    /// close witness alone — `ChannelCloseWitness::to_public_inputs` leaves it zero as a
+    /// placeholder.
+    pub member_set_commitment: Bytes32,
 }
 
 #[derive(Debug, Error)]
@@ -68,6 +81,7 @@ impl ChannelClosePublicInputs {
             split_u64(self.snapshot_medium_block_number),
             split_u64(self.final_state_version),
             self.final_settled_tx_chain.to_u64_vec(),
+            self.member_set_commitment.to_u64_vec(),
         ]
         .concat()
     }
@@ -104,6 +118,8 @@ impl ChannelClosePublicInputs {
             snapshot_medium_block_number: join_u64(&values[65..67]),
             final_state_version: join_u64(&values[67..69]),
             final_settled_tx_chain: Bytes32::from_u64_slice(&values[69..77])
+                .map_err(|e| ChannelClosePublicInputsError::InvalidField(e.to_string()))?,
+            member_set_commitment: Bytes32::from_u64_slice(&values[77..85])
                 .map_err(|e| ChannelClosePublicInputsError::InvalidField(e.to_string()))?,
         })
     }
@@ -158,6 +174,10 @@ impl ChannelCloseWitness {
             snapshot_medium_block_number: self.close_intent.snapshot_medium_block_number,
             final_state_version: self.close_intent.final_state_version,
             final_settled_tx_chain: self.close_intent.final_settled_tx_chain,
+            // F5: the member-set commitment is derived from the verified signing keys, which the
+            // close witness alone does not carry. `ChannelCloseCircuit::prove`/`fill_witness`
+            // computes it from `member_auth` and overrides this placeholder before proving.
+            member_set_commitment: Bytes32::default(),
         })
     }
 }
@@ -176,11 +196,25 @@ mod tests {
     use crate::{
         common::{
             balance_state::BalanceState,
-            channel::{ChannelFund, ChannelId, ChannelState, KeyId, MemberSignature, UserId},
+            channel::{ChannelFund, ChannelId, ChannelState, MemberSignature},
         },
         ethereum_types::bytes32::Bytes32,
         regev::{REGEV_N, REGEV_Q, RegevCiphertext},
     };
+
+    fn pubkey_hash(seed: u32) -> Bytes32 {
+        Bytes32::from_u32_slice(&[
+            seed,
+            seed + 1,
+            seed + 2,
+            seed + 3,
+            seed + 4,
+            seed + 5,
+            seed + 6,
+            seed + 7,
+        ])
+        .unwrap()
+    }
 
     fn ciphertext(seed: u32) -> RegevCiphertext {
         RegevCiphertext {
@@ -218,10 +252,9 @@ mod tests {
             prev_digest: Bytes32::default(),
             digest: Bytes32::default(),
             member_signatures: vec![MemberSignature {
-                key_id: KeyId::new(10).unwrap(),
-                user_id: UserId::from_parts(ChannelId::new(3).unwrap(), KeyId::new(10).unwrap()),
+                member_slot: 0,
+                sphincs_pubkey_hash: pubkey_hash(10),
                 signature: vec![1, 2, 3],
-                key_condition_proof: vec![4, 5],
             }],
         }
         .with_computed_digest()
@@ -246,12 +279,21 @@ mod tests {
             close_intent,
         };
 
-        let public_inputs = witness.to_public_inputs().unwrap();
+        let mut public_inputs = witness.to_public_inputs().unwrap();
+        // F5: the close witness leaves member_set_commitment zero; set a non-default value here so
+        // the roundtrip exercises the appended 8 limbs (the circuit fills it from member_auth).
+        public_inputs.member_set_commitment =
+            Bytes32::from_u32_slice(&[1, 2, 3, 4, 5, 6, 7, 8]).unwrap();
         let limbs = public_inputs.to_u64_vec();
         assert_eq!(
             limbs.len(),
             CHANNEL_CLOSE_PUBLIC_INPUTS_LEN,
-            "P8 closePIHash preimage is exactly 77 BE u32 words"
+            "P8 closePIHash preimage is exactly 85 BE u32 words (77 legacy + 8 memberSetCommitment)"
+        );
+        assert_eq!(
+            &limbs[77..85],
+            &public_inputs.member_set_commitment.to_u64_vec()[..],
+            "member_set_commitment occupies the final 8 limbs"
         );
         // The P8-pinned tail: snapshotMediumBlockNumber(2) | finalStateVersion(2 hi,lo) |
         // finalSettledTxChain(8).

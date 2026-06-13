@@ -1,102 +1,101 @@
-# Task: detail2.md 準拠実装アップデート（SIS → Regev/Ring-LWE 移行）
+# Task: 一人一鍵（one SPHINCS+ key per member）簡素化 + KeyLeaf↔member木 束縛 soundness 修復
 
-Status: DONE — 全フェーズ P0–P9 完了（計画全文: /Users/plasma/.claude/plans/golden-munching-badger.md）。
-前タスクは tasks/archive-two-layer-identity-todo.md にアーカイブ。
+Status: IN PROGRESS — 計画承認済み（/Users/plasma/.claude/plans/zazzy-hugging-zephyr.md）。
+直前の detail2.md Regev 移行は完了・push 済み（commit c9f8787）。
 
-## ユーザー承認済み設計決定
+## 確定設計決定
+- **DA**: メンバー識別子 = SPHINCS+ 公開鍵ハッシュ Bytes32（digest/claim/nullifier/契約全て）。slot(0/1/2) は配列添字のみ
+- **DB**: Regev 鍵束縛は回路内 Poseidon member 木への slot 包含のみ。keccak は L1 境界（ChannelRecord IMCR）のみ
+- **DC**: signature_aggregation/（死蔵コード ~6.3K LOC）全削除。実署名検証は update_channel_tree.rs
+- **DD**: N-of-N（3/3）、threshold なし
 
-- **D1**: 金額エンコーディング = 1 bit/係数（64係数、t=256）。`MAX_HOMO_ADDS_BEFORE_REFRESH = 64` 承認
-  （detail2 §B-1 の「8bits×8係数」は準同型加算1回で桁あふれするため訂正）
-- **D2**: refresh / withdrawClaimZKP は新規 **復号AIR**（sk を private witness）で構成
-  （§B-3 の「channelTxZKP delta=0 特例」は暗号化乱数 witness 不在のため実現不可能）
-- **D3**: `BalanceState.pending_adds: [u32; 3]`（member別準同型加算カウンタ）を H1 にハッシュ
-  （ノイズ/桁フラッディングによる exit-liveness DoS 対策）
-- **D4**: close 回路は **全部今回実装**（3 member SPHINCS+ 署名検証 + finalBalanceProof 再帰検証 + chain 等値制約）
+## フェーズチェックリスト（完了条件付き）
+- [ ] **F1** constants + trees: key_tree.rs を MemberTree/MemberLeaf に書換、key_set.rs 削除、channel_tree.rs rename(member_pubkeys_root)、constants 整理(MEMBER_TREE_HEIGHT=2)。完了: 当該モジュール compile
+- [ ] **F2** signature_aggregation/ 全16ファイル削除 + validity/mod.rs の mod 行。完了: 参照ゼロ確認
+- [ ] **F3** sphincs_sig.rs(bp_key_id除去) + channel.rs 型一括(KeyId/UserId廃止→pubkey hash、全 digest 更新、validate)。完了: channel.rs ユニットテスト
+- [ ] **F4** update_channel_tree.rs 束縛修復(member 木 slot 包含証明、KeyLeaf 撤廃)。完了: validity 回路テスト + **偽pubkey拒否の負例テスト**
+- [x] **F5** close_circuit.rs member-set commitment 束縛(close PI 77→85)。native helper close_member_set_commitment + 回路内 keccak(IMCM)。負例(b/c)+正例テスト追加。close_pis/withdrawal(48)/post_close(40)/cancel(41) roundtrip PASS（cheap tests green）。重い回路テストは F6 後にまとめて実行
+- [~] **F6** test_utils member witness 能力は実装済み。e2e は registration 整合ブロッカーで red →
+      **ユーザー決定(2026-06-13): binding 修復を完了確定、registration 整合は follow-up**（別 deferred）
+- [ ] **F7** Solidity(registration 簡素化、keyIds 除去、claim を bytes32 pubkey hash、closePIHash 77→85 +
+      member_set_commitment 照合、withdrawal 48/post_close 40 mirror) + 共有ベクタ再 pin。完了: forge test
+- [ ] **F8** detail2.md 書換 + detail2-implementation-notes.md に D5 ノート
+- [ ] **F9** 全体 `cargo test --release --lib`(243+) / forge / clippy / fmt + 独立セキュリティレビュー(束縛)。
+      e2e は registration follow-up までブロック該当で red（文書化）
 
-## フェーズチェックリスト（検証可能・反証可能な完了条件付き）
+## 確定: soundness 修復完了（ユーザー決定 2026-06-13）
+KeyLeaf↔KeyTree 束縛穴は validity(update_channel_tree) + close(member_set_commitment) 両経路で修復・検証済み。
+負例テスト PASS: update_user_tree_rejects_pubkey_not_in_member_tree / channel_close_circuit_binds_member_set_commitment /
+channel_close_circuit_rejects_invalid_member_signature。prover-choice 排除。
 
-- [x] **P0** 依存関係: `regev_plonky3` git pin (377dfc2) 追加、p3 0.4.2/0.5.3 共存。
-      完了条件: `cargo check` 通過、`cargo tree -i p3-field` で両バージョン解決確認
-- [x] **P1** `src/regev/{mod,params,keys,encrypt}.rs`。
-      完了条件: roundtrip / 準同型加算 / digest 安定性 / **非正準ct拒否** / 64回加算後復号 のユニットテスト全通過
-- [x] **P2** `src/regev/transfer_stark.rs`: E-1 DualKeyTransferAir / E-2 ChannelUpdateAir(公開amount) /
-      E-3 DecryptionAir / BalanceRefresh バッチ + `RealRegevProofVerifier`。
-      完了条件: 正例 + 敵対的負例（改竄ct/改竄amount/purpose間リプレイ/非正準ct）全通過。
-      最悪ケースノイズ解析を docs に記録
-- [x] **P3** `src/common/balance_state.rs` 新設 + `channel.rs` 型一括改修 + `constants.rs`。
-      完了条件: `cargo build --release` 復帰、channel.rs ユニットテスト通過
-- [x] **P4** `state_update_verifier.rs` RegevProofVerifier 化 + witness 再設計 + `e2e_flow.rs` 全面書き換え。
-      完了条件: e2e_flow 正例 + 負例（ZKP無し/改竄slot/tx_tree_root==0/version飛び/pending_adds超過）通過
-- [x] **P5** balance 回路 F-1: `settled_tx_chain` PI 化（LEN 20→28）+ keccak chain step。
-      完了条件: balance/switch_board 回路テスト通過、degree_report で degree 記録（2^16 超過なら poseidon 切替を escalate）
-- [x] **P6** validity 回路 F-2: IMSB digest 署名 + `tx_tree_root != 0` 制約。
-      完了条件: validity 系回路テスト + 空木 root ≠ 0 ユニットテスト通過
-- [x] **P7** close 回路 F-3 全実装: PI 78 limbs + H1 回路内再計算 + balance proof 再帰検証 + member 署名検証。
-      完了条件: close 回路テスト（正例 + chain 不一致拒否 + 署名欠落拒否）通過
-- [x] **P8** Solidity: requestClose / GRACE / (finalEpoch, finalStateVersion) 順 / closePIHash 更新。
-      完了条件: `SKIP_GROTH16=true forge test` 全通過（新規8テスト含む）、Rust↔Solidity 共有テストベクタ一致
-- [x] **P9** クリーンアップ（src/lattice, tools/lattice-proof-helper, vendor/sis_amount_stark 削除）+
-      docs（D1–D4 逸脱、秘匿境界、ノイズ解析）+ 全体 `cargo test --release --lib` / clippy / fmt。
-      **フルlibスイート 243 passed / 0 failed（948s）**。Groth16 test 無効化済み（0 tests）。
-      ⚠️ 統合テスト e2e.rs / mle_onchain_e2e.rs は**コンパイル不可**（plonky2_u32/[patch] 二重解決、
-      CLAUDE.md 記載のmacOS既知問題）。これらは MLE/WHIR/Groth16 ラッパー = 別スコープ（CLAUDE.md「Known follow-up」）。
-      回帰ではない（私のCargo.lock差分はplonky2系を無変更、ブランチは元々WIP破損）。要ユーザー判断: [patch]修正 or 据え置き
+## Follow-up（別タスク、本リファクタ範囲外）— 独立セキュリティレビュー(2026-06-13)で精緻化
 
-## 脅威モデル（attacker subagent レビュー結果、計画織込み済み）
+**レビュー結論**: close 経路は SOUND（L1 照合実装済み、prover-chosen-key 穴排除）。validity 経路は
+binding ロジックは正しい（負例テスト妥当）が **registration 機構欠如で production では inert**。
+空ルートは空葉にしか開けず任意鍵偽造は不可だが、実チャネルで署名可能スロットが無い。
 
-F0-A(新規AIR扱い) / F0-B+F7(close回路→D4) / F1-A/B(ct正準性→P1) / F2-A/B/C(transcript束縛→P2) /
-F3-A(aux_data多層検証→P4+P5) / F5-A/B(pending_adds→D3) / F6-B/C(L1→P8) / F9-A(regev_pk_root→P3)
+registration follow-up が満たすべき要件（レビュー Finding D/C）:
+1. **member_pubkeys_root を account tree に書き込み認証する registration 遷移**を実装
+   （現状 IntmaxRollup.registerChannel は "recorded only, validity proof で未消費"、
+   validity は root を「保持」のみ、balance genesis は空 tree ハードコード switch_board.rs:230）。
+2. **回路ガード追加**: 署名要求時に `member_pubkeys_root != empty/default ⇒ reject`
+   （現状 unregistered チャネルが「署名可能スロット無しで valid」と silently 扱われる、fail-open 気味）。
+3. **Finding C (HIGH)**: Poseidon `member_pubkeys_root`(validity) と keccak `ChannelRecord`(close/L1) は
+   別コミットメントで cross-binding 未証明。registration 実装時に単一 source of truth 化 or 回路内相互束縛必須
+   （現状 Poseidon 側=空、keccak 側=populated で異なる集合を表す）。
+4. balance 回路 genesis(空) と登録済み account tree の整合（VK 再生成要）。
+registration soundness 自体は genesis-trust deferred(intmax3-channel-mvp.md)。これが揃うまで e2e は red。
 
-## 残課題（実装しない・文書化のみ）
+## リスク
+- L1 member→channel 束縛（bare pubkey hash は channel 非内包 → claim で registeredMemberPubkeyHashes 包含 + 回路 slot 包含で緩和、要レビュー）
+- 登録時 Poseidon↔keccak 整合（genesis trust 前提、registration soundness は既存 deferred）
+- VK/degree 変化、巨大 blast radius（key_id 707 / user_id 665 参照）
 
-M7 race (§K-1) / retry version 意味論 (§K-2) / publishRegevPk 完全セレモニー (§K-4) /
-Lean v3 追随 (§K-5) / requestClose 反復凍結グリーフィング（残存リスク）
+## F5/F6 実装メモ（approved design — member-set commitment binding）
+- F5 close binding: 回路内で 3 つの `sphincs_pk_hash_i`(slot order) を Bytes32Target 化し、
+  `member_set_commitment = keccak([IMCM=0x494d434d, h0(8), h1(8), h2(8)])` を計算、新 close PI に connect。
+  native helper `close_member_set_commitment(&[Bytes32;3])` を channel.rs に追加（hash_words 使用、byte-for-byte 一致）。
+- close PI LEN 77 → 85（member_set_commitment を末尾に追加、既存 IMCI ベクタ温存）。
+- close path の `regev_pk_digest`/`MemberLeaf` 撤廃（close は sphincs hash のみで束縛）。
+- F6: block_witness_generator が channel 登録時に実 MemberTree(3 葉) を構築、root を ChannelLeaf へ。
+  更新 slot i ごとに 実 SpxSigWitness + MemberMerkleProof(slot i) + RegevPk + msg_fields を生成。
 
-### D1 / D3 関連の据え置き（ユーザー指示 2026-06-13: todoに残し一旦無視）
-- **D1**: MAX_HOMO_ADDS_BEFORE_REFRESH=64 の厳密な最悪ケースノイズ sign-off（docs/regev-noise-analysis.md に暫定解析あり、detail2 §B-3 の正式承認は保留）
-- **D3**: pending_adds カウンタの consensus 導出規則のフルスタック検証（off-circuit カウンタの整合性、retry 時の意味論 §K-2 と連動）
-
-## 完了: 統合テスト [patch] 衝突の修正（ユーザー承認 2026-06-13）
-根本原因 = submodule plonky2 の `crate-type=["cdylib","rlib"]` が macOS で `libplonky2.dylib` を
-二重生成し output filename collision → E0463（plonky2_keccak/sphincsplus/intmax3_zkp not found）。
-**修正2点**: (1) ルート Cargo.toml に `[workspace] resolver="2"` + `exclude`（nested workspace 分離）、
-(2) submodule plonky2 を `crate-type=["rlib"]` に（cdylib除去、wasm-pack flow に不要）。
-結果: `cargo build --release --tests --benches` クリーン、nullifier POC 2 passed、regev 30 passed、forge build OK。
-⚠️ 修正(2)は submodule 作業ツリー編集 = 親repo未追跡。submodule内コミット or `git submodule update`後に再適用が必要
-（詳細は detail2-implementation-notes.md の SETUP節）。
+## Solidity follow-ups for F7 (本フェーズでは実装しない、TODO のみ)
+- `ChannelSettlementVerifier.sol`: `closePIHash` 77 → 85（末尾に member_set_commitment 8 BE u32 words）。
+- `ChannelSettlementManager.sol`/`Verifier`: `member_set_commitment ==
+  keccak([IMCM, registered member_sphincs_pubkey_hashes(slot order)...])` を登録 ChannelRecord と照合。
 
 ## 結果記録
 
-- **P0 完了**: regev_plonky3 (git 377dfc2) 追加、p3 0.4.3/0.5.3 共存確認（`cargo tree`）。vendor/p3-*-0.5.3 を renamed patch で再利用
-- **P0.5 完了（計画外）**: 前セッションの未完了 two-layer-identity リファクタ（ChannelLeaf 統合・ChannelId 単一化）の67コンパイルエラーを修復。
-  既知の残存 SECURITY TODO: KeyLeaf witness の KeyTree 包含証明束縛が未実装（前タスクの §6.4 deferred 項目、コード内に `// SECURITY: TODO` 明記）
-- **P1 完了**: src/regev/{params,keys,encrypt}.rs。upstream decrypt_value の panic-DoS を回避する独自デコード採用。11テスト
-- **P2 完了**: transfer_stark.rs に4 AIR（E-1 DualKeyTransfer / E-2 ChannelUpdate 公開amount / E-3 Decryption / BalanceRefresh 結合AIR）。
-  FS transcript順序は健全と検証（公開値はz導出前に吸収）。E-3はΔ=15·2^19の正確なノイズ範囲分解（素朴な23bit分解はエイリアス可能と判明し回避）。
-  RefreshはバッチでなくAIR結合（published m(z)の辞書攻撃リーク回避）。敵対的テスト含め29テスト。
-  独立セキュリティレビュー実施: MEDIUM 1件（digest正準性がdebug_assertのみ）→ assert! に修正済み。docs/regev-noise-analysis.md 作成（MAX=64承認: 桁余裕4倍、ノイズ余裕~120倍、失敗確率0）
-- **P3 完了**: balance_state.rs（pending_adds入りH1）+ channel.rs 全面移行 + state_update_verifier.rs 再設計（5 witness + BalanceRefresh遷移）+
-  src/lattice・tools/lattice-proof-helper・plonky3_state.rs 削除。既存PIレイアウトの潜在バグ発見・修正（ChannelId 1 limb化未追従: close 68→67, withdrawal 44→42, post_close 36→34, cancel 42→41 — **P8でSolidity側に反映必須**）
-- **P4 完了**: e2e_flow.rs 全面書き換え（happy path 8段階 + 負例11種、各セキュリティ性質を個別エラーvariantで実証）。lib 237 passed
-  （既知の例外: groth16_wrapper の環境依存2失敗は本作業と無関係・既存）
-- **P5 完了**: balance PI に settled_tx_chain 追加（+8 limbs）、keccak chain step 回路（オフチェーン関数と等値性テスト済み）、
-  receive_transfer（aux_data≠0ゲート）/receive_deposit（nullifier無条件）/send_tx（index-0 transfer witness + is_valid&&aux_data≠0ゲート）/switch_board genesis=0。
-  CD不一致修復: receive_deposit に add_const_gate 追加（keccak hook が定数wireを供給しConstantGate自動挿入が消えたため）、serializer に Keccak256 generator登録。balance/test_utils 15テスト・channel 26テスト green
-- **P8 完了**: ChannelSettlementManager に requestClose()/GRACE(600s)強制/Active直接close禁止/(finalEpoch,finalStateVersion)厳密順 _isNewer。
-  CloseIntent rename(finalBalanceStateH1)+finalStateVersion/finalSettledTxChain追加。Verifier closePIHash 14引数化。
-  postCloseClaimPIHash の stale receiverAmountDigest 削除（v2でE-3が回路内束縛）。**Rust↔Solidity 共有digestテストベクタ一致**（0xa2679bf7...）。forge 56 passed
-  - P8 注記: P7 が出すべき close PI outer-hash limb順 = 既存67 + split_u64(final_state_version) + final_settled_tx_chain(8) = 77
-- **Groth16テスト無効化（ユーザー指示）**: src/utils/groth16_wrapper.rs の test mod を `cfg(all(test, feature="groth16_tests"))`（未定義feature）でゲート。0 tests に確認済み
-- **P6 完了（接続エラー後に検証）**: IMSB digest を回路内 keccak 再計算（compute_signing_digest、native signing_digest と同一preimage順）、
-  channel_id/tx_tree_root を block の実 target に connect（構造的(a)担保）、tx_tree_root≠0 を update_channel_tree（slot毎ゲート）と channel_apply_block（無条件）で強制(b)、
-  SPX_MSG_GL_LEN 11→8、signed_digest を sig_agg/sig_batch/sig_merge PI にスレッド、空 TxV2Tree root≠0 単体テスト追加
-- **P6 完了**: validity 回路に IMSB `SmallBlockRootMessage::signing_digest()` 署名検証を導入（block_hash_chain/sphincs_sig.rs）。
-  `tx_tree_root != 0` 制約を block step に追加（空木 root ≠ 0 のユニットテストで反証可能性確認）。
-  回路内 IMSB preimage とオフチェーン serializer のドリフトを golden テストで防止
-- **P7 完了**: close 回路 F-3 全実装（close_circuit.rs）。最終 PI は 78 でなく **77 limbs**（ChannelId 1 limb 化反映後の確定値）。
-  H1 回路内再計算（pending_adds 込み）+ IMCH digest（`ChannelState::signing_digest()`）回路内 keccak 再計算 +
-  finalBalanceProof 再帰検証（balance VK を定数焼き込み、settled_tx_chain / channel_id 等値制約）+ 3/3 member SPHINCS+ 署名検証。
-  正例 + chain 不一致拒否 + 署名欠落拒否テスト通過
-- **P8 完了**: Solidity close ゲーム更新（requestClose / GRACE 期間 / (finalEpoch, finalStateVersion) 順序 / closePIHash 77 limbs）。
-  post_close は receiverAmountDigest を L1 ハッシュから除外（PI 34）。Rust↔Solidity 共有 IMCI digest テストベクタ一致。
-  `SKIP_GROTH16=true forge test` 全通過
+### F5 — COMPLETE & VERIFIED
+- close PI 77 → 85（member_set_commitment 末尾 8 limbs）。native `close_member_set_commitment`
+  (IMCM=0x494d434d) + 回路内 keccak、byte-for-byte 一致。close path から MemberLeaf/regev_pk_digest 撤廃。
+- テスト: `channel_close_circuit_proves_full_close_statement`（commitment == keccak(3 signing keys)）,
+  `channel_close_circuit_binds_member_set_commitment`（(a)正値 (b)鍵差し替えで commitment 変化
+  (c)改竄 commitment PI を回路内 keccak が拒否）。
+- `cargo test --release --lib -- circuits::channel` → 30 passed（close 群含む）。
+- close_pis(85)/withdrawal_claim(48)/post_close(40)/cancel_close(41) roundtrip PASS。
+- Solidity TODO（F7）: closePIHash 85 mirror + member_set_commitment == keccak([IMCM, registered
+  member_sphincs_pubkey_hashes]) 照合（close_circuit.rs + 本ファイルに明記）。
+
+### F6 — BLOCKED（genesis-consistency design gap、要エスカレーション）
+- block_witness_generator は **登録済みチャネルに対し実 SpxSigWitness + MemberMerkleProof(slot i)
+  + RegevPk + msg_fields を生成**する能力を実装済み（`register_channel` + per-slot 署名）。
+  未登録チャネルは従来どおり dummy にフォールバック（balance-only テストは緑のまま）。
+- **ブロッカー**: 実署名のためにはチャネルの member root が **genesis の account tree** に入って
+  いる必要がある（validity 回路は member_pubkeys_root を「保持」するのみで、ブロック遷移で
+  「設定」する機構が無い＝registration は genesis-trust 前提、本リファクタ範囲外の deferred）。
+  しかし balance 回路の genesis は `PublicState::default()` = `ChannelTree::init()`（空 = member root
+  なし）にハードコードされている（balance_pis.rs:83 / public_state.rs:84）。
+  `register_channel` で genesis にメンバーを書くと account tree root が変わり、
+  `receive_deposit_witness` の `update_public_state.old == prev_balance_pis.public_state`
+  アサート（= 空 genesis）と不一致。逆に登録しないと block 2/3 の updating slot で live binding が
+  dummy proof を拒否（実測: e2e は block 2 で member merkle proof 不一致で fail）。
+- 中間登録（ブロック間で tree を変更）は validity の per-block prev/new account-root チェーンを破壊
+  （block N の new root ≠ block N+1 の chained prev root）→ 不可。
+- **必要な解決（範囲外・要承認）**: 次のいずれか。(i) balance 回路 genesis を登録済み account tree
+  root に対応させる（`PublicState::default()` 変更＝VK 再生成 = plan F9）。または (ii) validity に
+  registration-block 機構を追加し member root をブロック遷移で導入（新回路・VK 再生成）。
+  どちらも proof logic / VK 変更で、CLAUDE.md「Escalate, Don't Patch」に従い未着手のまま報告。
+- 現状: lib + all-targets clean、channel/validity/test_utils 群 green、**e2e は F6 ブロッカーにより
+  block 2 の member binding で fail（実署名を満たせない）**。チェックを弱めて通すことは行っていない。

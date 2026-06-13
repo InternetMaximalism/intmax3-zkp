@@ -17,8 +17,7 @@ use crate::{
         balance_state::settled_tx_chain_push,
         channel::{
             ChannelId, ChannelRecord, ChannelState, ChannelTransitionKind, ChannelTx,
-            InterChannelTx, ProofBackend, TransitionProofRole, UserId,
-            validate_all_member_signatures,
+            InterChannelTx, ProofBackend, TransitionProofRole, validate_all_member_signatures,
         },
     },
     constants::CHANNEL_MEMBERS,
@@ -206,7 +205,7 @@ pub enum ChannelStateUpdateError {
 #[derive(Clone, Debug)]
 pub struct InChannelTransferUpdateWitness {
     pub channel_record: ChannelRecord,
-    /// All member Regev public keys, in `member_key_ids` order. Checked against the
+    /// All member Regev public keys, in member slot order. Checked against the
     /// L1-anchored `channel_record.regev_pk_root` before any use (F9-A).
     pub regev_pks: [RegevPk; CHANNEL_MEMBERS],
     pub prev_state: ChannelState,
@@ -322,23 +321,23 @@ impl InChannelTransferUpdateWitness {
         // (c) All-member signatures on the next state (= hash(H1', 0) signatures, detail2 §D).
         verify_next_state_signatures(&self.channel_record, &self.next_state)?;
         // (d) Transaction digest and party consistency.
-        let sender = member_index_user_id(&self.channel_record, self.sender_index)?;
-        let recipient = member_index_user_id(&self.channel_record, self.recipient_index)?;
+        let sender = member_index_pubkey_hash(&self.channel_record, self.sender_index)?;
+        let recipient = member_index_pubkey_hash(&self.channel_record, self.recipient_index)?;
         if self.sender_index == self.recipient_index {
             return Err(ChannelStateUpdateError::InvalidStateLinkage(
                 "sender and recipient must be distinct members".to_string(),
             ));
         }
-        if self.channel_tx.sender_user_id != sender {
+        if self.channel_tx.sender_sphincs_pubkey_hash != sender {
             return Err(ChannelStateUpdateError::InvalidTransitionDigest(format!(
-                "channel_tx.sender_user_id {:?} does not match member index {}",
-                self.channel_tx.sender_user_id, self.sender_index
+                "channel_tx.sender_sphincs_pubkey_hash {:?} does not match member index {}",
+                self.channel_tx.sender_sphincs_pubkey_hash, self.sender_index
             )));
         }
-        if self.channel_tx.recipient_user_id != recipient {
+        if self.channel_tx.recipient_sphincs_pubkey_hash != recipient {
             return Err(ChannelStateUpdateError::InvalidTransitionDigest(format!(
-                "channel_tx.recipient_user_id {:?} does not match member index {}",
-                self.channel_tx.recipient_user_id, self.recipient_index
+                "channel_tx.recipient_sphincs_pubkey_hash {:?} does not match member index {}",
+                self.channel_tx.recipient_sphincs_pubkey_hash, self.recipient_index
             )));
         }
         if self.channel_tx.sender_signature.is_empty() {
@@ -351,8 +350,8 @@ impl InChannelTransferUpdateWitness {
             self.prev_state.digest,
             &self.channel_tx.enc_amount,
             self.channel_tx.nonce,
-            self.channel_tx.sender_user_id,
-            self.channel_tx.recipient_user_id,
+            self.channel_tx.sender_sphincs_pubkey_hash,
+            self.channel_tx.recipient_sphincs_pubkey_hash,
         );
         // (e) Public ciphertext recomputation: the recipient slot is the homomorphic sum, the
         // uninvolved member's slot is bit-identical.
@@ -438,8 +437,8 @@ impl InChannelTransferUpdateWitness {
             prev_settled_tx_chain: self.prev_state.balance_state.settled_tx_chain,
             next_settled_tx_chain: self.next_state.balance_state.settled_tx_chain,
             receiver_entry_count: 1,
-            sender_user_id_hash: hash_user_id(self.channel_tx.sender_user_id),
-            receiver_user_id_hash: hash_user_id(self.channel_tx.recipient_user_id),
+            sender_user_id_hash: hash_member(self.channel_tx.sender_sphincs_pubkey_hash),
+            receiver_user_id_hash: hash_member(self.channel_tx.recipient_sphincs_pubkey_hash),
             channel_fund_before: self.prev_state.channel_fund.amount,
             channel_fund_after: self.next_state.channel_fund.amount,
             unallocated_before: self.prev_state.unallocated_confirmed_incoming,
@@ -506,11 +505,8 @@ impl InterChannelSendUpdateWitness {
             ));
         }
         let receiver_delta = &self.inter_channel_tx.receiver_deltas[0];
-        if receiver_delta.receiver_user_id.key_id() != receiver_delta.receiver_key_id {
-            return Err(ChannelStateUpdateError::InvalidReceiverDeltaBundle(
-                "receiver_user_id must embed receiver_key_id".to_string(),
-            ));
-        }
+        // One key per member: the receiver pubkey hash is self-describing (no key_id embedding to
+        // re-check). Cross-channel membership of the receiver is the receiving channel's concern.
         // Chain push with the tx leaf (detail2 §C-6).
         let leaf = self
             .inter_channel_tx
@@ -536,15 +532,11 @@ impl InterChannelSendUpdateWitness {
             self.next_state.shared_native_nullifier_root,
         )?;
         // Sender slot rebind via the mandatory E-2 channelUpdateZKP. Other slots untouched.
-        let sender_index =
-            member_key_index(&self.channel_record, self.inter_channel_tx.source_key_id)?;
-        if self.inter_channel_tx.source_user_id
-            != member_index_user_id(&self.channel_record, sender_index)?
-        {
-            return Err(ChannelStateUpdateError::InvalidTransitionDigest(
-                "source_user_id must equal channel_id || source_key_id".to_string(),
-            ));
-        }
+        // The sender slot is located by its pubkey hash in the channel's member list.
+        let sender_index = member_slot_index(
+            &self.channel_record,
+            self.inter_channel_tx.source_sphincs_pubkey_hash,
+        )?;
         for index in 0..CHANNEL_MEMBERS {
             if index != sender_index {
                 ensure_slot_unchanged(&self.prev_state, &self.next_state, index)?;
@@ -587,8 +579,8 @@ impl InterChannelSendUpdateWitness {
             prev_settled_tx_chain: self.prev_state.balance_state.settled_tx_chain,
             next_settled_tx_chain: self.next_state.balance_state.settled_tx_chain,
             receiver_entry_count: 1,
-            sender_user_id_hash: hash_user_id(self.inter_channel_tx.source_user_id),
-            receiver_user_id_hash: hash_user_id(receiver_delta.receiver_user_id),
+            sender_user_id_hash: hash_member(self.inter_channel_tx.source_sphincs_pubkey_hash),
+            receiver_user_id_hash: hash_member(receiver_delta.receiver_sphincs_pubkey_hash),
             channel_fund_before: self.prev_state.channel_fund.amount,
             channel_fund_after: self.next_state.channel_fund.amount,
             unallocated_before: self.prev_state.unallocated_confirmed_incoming,
@@ -680,7 +672,7 @@ impl InterChannelFundImportUpdateWitness {
             .inter_channel_tx
             .receiver_deltas
             .first()
-            .map(|delta| delta.receiver_user_id)
+            .map(|delta| delta.receiver_sphincs_pubkey_hash)
             .ok_or_else(|| {
                 ChannelStateUpdateError::InvalidReceiverDeltaBundle(
                     "fund import requires the receiver delta entry".to_string(),
@@ -698,8 +690,8 @@ impl InterChannelFundImportUpdateWitness {
             prev_settled_tx_chain: self.prev_state.balance_state.settled_tx_chain,
             next_settled_tx_chain: self.next_state.balance_state.settled_tx_chain,
             receiver_entry_count: self.inter_channel_tx.receiver_deltas.len() as u64,
-            sender_user_id_hash: hash_user_id(self.inter_channel_tx.source_user_id),
-            receiver_user_id_hash: hash_user_id(receiver_user_id),
+            sender_user_id_hash: hash_member(self.inter_channel_tx.source_sphincs_pubkey_hash),
+            receiver_user_id_hash: hash_member(receiver_user_id),
             channel_fund_before: self.prev_state.channel_fund.amount,
             channel_fund_after: self.next_state.channel_fund.amount,
             unallocated_before: self.prev_state.unallocated_confirmed_incoming,
@@ -763,12 +755,13 @@ impl ReceiverBundleApplyUpdateWitness {
             ));
         }
         let receiver_delta = &self.inter_channel_tx.receiver_deltas[0];
-        let recipient = member_index_user_id(&self.receiver_channel_record, self.recipient_index)?;
-        if receiver_delta.receiver_user_id != recipient {
+        let recipient =
+            member_index_pubkey_hash(&self.receiver_channel_record, self.recipient_index)?;
+        if receiver_delta.receiver_sphincs_pubkey_hash != recipient {
             return Err(ChannelStateUpdateError::InvalidReceiverDeltaBundle(
                 format!(
                     "receiver delta user {:?} does not match member index {}",
-                    receiver_delta.receiver_user_id, self.recipient_index
+                    receiver_delta.receiver_sphincs_pubkey_hash, self.recipient_index
                 ),
             ));
         }
@@ -854,8 +847,8 @@ impl ReceiverBundleApplyUpdateWitness {
             prev_settled_tx_chain: self.prev_state.balance_state.settled_tx_chain,
             next_settled_tx_chain: self.next_state.balance_state.settled_tx_chain,
             receiver_entry_count: 1,
-            sender_user_id_hash: hash_user_id(self.inter_channel_tx.source_user_id),
-            receiver_user_id_hash: hash_user_id(receiver_delta.receiver_user_id),
+            sender_user_id_hash: hash_member(self.inter_channel_tx.source_sphincs_pubkey_hash),
+            receiver_user_id_hash: hash_member(receiver_delta.receiver_sphincs_pubkey_hash),
             channel_fund_before: self.prev_state.channel_fund.amount,
             channel_fund_after: self.next_state.channel_fund.amount,
             unallocated_before: self.prev_state.unallocated_confirmed_incoming,
@@ -892,7 +885,7 @@ impl BalanceRefreshUpdateWitness {
             self.prev_state.shared_native_nullifier_root,
             self.next_state.shared_native_nullifier_root,
         )?;
-        let member = member_index_user_id(&self.channel_record, self.member_index)?;
+        let member = member_index_pubkey_hash(&self.channel_record, self.member_index)?;
         // Only the refreshed member's slot changes; everyone else's slot and counter are frozen.
         for index in 0..CHANNEL_MEMBERS {
             if index != self.member_index {
@@ -940,8 +933,8 @@ impl BalanceRefreshUpdateWitness {
             prev_settled_tx_chain: self.prev_state.balance_state.settled_tx_chain,
             next_settled_tx_chain: self.next_state.balance_state.settled_tx_chain,
             receiver_entry_count: 0,
-            sender_user_id_hash: hash_user_id(member),
-            receiver_user_id_hash: hash_user_id(member),
+            sender_user_id_hash: hash_member(member),
+            receiver_user_id_hash: hash_member(member),
             channel_fund_before: self.prev_state.channel_fund.amount,
             channel_fund_after: self.next_state.channel_fund.amount,
             unallocated_before: self.prev_state.unallocated_confirmed_incoming,
@@ -1128,39 +1121,43 @@ fn require_pending_adds_unchanged(
     Ok(())
 }
 
-fn member_key_index(
+/// Slot index of the member identified by `pubkey_hash` in the channel's ordered member list.
+fn member_slot_index(
     record: &ChannelRecord,
-    key_id: crate::common::channel::KeyId,
+    pubkey_hash: Bytes32,
 ) -> Result<usize, ChannelStateUpdateError> {
     record
-        .member_key_ids
+        .member_sphincs_pubkey_hashes
         .iter()
-        .position(|member| *member == key_id)
+        .position(|member| *member == pubkey_hash)
         .ok_or_else(|| {
             ChannelStateUpdateError::InvalidStateLinkage(format!(
-                "key id {key_id:?} is not a channel member"
+                "pubkey hash {pubkey_hash:?} is not a channel member"
             ))
         })
 }
 
-fn member_index_user_id(
+/// The SPHINCS+ pubkey hash of the member at slot `index`.
+fn member_index_pubkey_hash(
     record: &ChannelRecord,
     index: usize,
-) -> Result<UserId, ChannelStateUpdateError> {
-    let key_id = record.member_key_ids.get(index).ok_or_else(|| {
-        ChannelStateUpdateError::InvalidStateLinkage(format!(
-            "member index {index} out of range (members: {})",
-            record.member_key_ids.len()
-        ))
-    })?;
-    Ok(UserId::from_parts(record.channel_id, *key_id))
+) -> Result<Bytes32, ChannelStateUpdateError> {
+    record
+        .member_sphincs_pubkey_hashes
+        .get(index)
+        .copied()
+        .ok_or_else(|| {
+            ChannelStateUpdateError::InvalidStateLinkage(format!(
+                "member index {index} out of range (members: {CHANNEL_MEMBERS})"
+            ))
+        })
 }
 
 fn verify_next_state_signatures(
     record: &ChannelRecord,
     next_state: &ChannelState,
 ) -> Result<(), ChannelStateUpdateError> {
-    validate_all_member_signatures(record, next_state.channel_id, &next_state.member_signatures)
+    validate_all_member_signatures(record, &next_state.member_signatures)
         .map_err(|err| ChannelStateUpdateError::InvalidMemberSignatures(err.to_string()))
 }
 
@@ -1181,7 +1178,13 @@ fn validate_signed_small_block(
             "small block message channel mismatch".to_string(),
         ));
     }
-    if signed.message.bp_key_id != source_channel_record.bp_key_id {
+    if signed.message.bp_member_slot != source_channel_record.bp_member_slot
+        || signed.message.bp_sphincs_pubkey_hash
+            != member_index_pubkey_hash(
+                source_channel_record,
+                source_channel_record.bp_member_slot as usize,
+            )?
+    {
         return Err(ChannelStateUpdateError::InvalidSmallBlock(
             "small block BP mismatch".to_string(),
         ));
@@ -1206,12 +1209,8 @@ fn validate_signed_small_block(
             "confirmation proof must not be empty".to_string(),
         ));
     }
-    validate_all_member_signatures(
-        source_channel_record,
-        expected_source_channel_id,
-        &signed.signatures,
-    )
-    .map_err(|err| ChannelStateUpdateError::InvalidSmallBlock(err.to_string()))
+    validate_all_member_signatures(source_channel_record, &signed.signatures)
+        .map_err(|err| ChannelStateUpdateError::InvalidSmallBlock(err.to_string()))
 }
 
 fn ensure_same_channel_fund(
@@ -1286,8 +1285,10 @@ where
     verifier.verify(proof, public_inputs)
 }
 
-fn hash_user_id(user_id: UserId) -> Bytes32 {
-    Bytes32::from_u32_slice(&solidity_keccak256(&user_id.to_u32_vec()))
+/// Keccak over a member's SPHINCS+ pubkey hash (8 u32 limbs) — the digest-friendly member id used
+/// in the channel-state-update public inputs.
+fn hash_member(pubkey_hash: Bytes32) -> Bytes32 {
+    Bytes32::from_u32_slice(&solidity_keccak256(&pubkey_hash.to_u32_vec()))
         .expect("keccak output must be bytes32")
 }
 
@@ -1308,7 +1309,7 @@ mod tests {
     use crate::{
         common::{
             balance_state::BalanceState,
-            channel::{ChannelFund, ChannelStatus, KeyId, MemberSignature},
+            channel::{ChannelFund, ChannelStatus, MemberSignature},
         },
         ethereum_types::u256::U256,
         regev::{
@@ -1316,8 +1317,19 @@ mod tests {
         },
     };
 
-    fn key(value: u64) -> KeyId {
-        KeyId::new(value).unwrap()
+    /// A distinct, canonical member SPHINCS+ pubkey hash (Bytes32) per seed.
+    fn pubkey_hash(seed: u32) -> Bytes32 {
+        Bytes32::from_u32_slice(&[
+            seed,
+            seed + 1,
+            seed + 2,
+            seed + 3,
+            seed + 4,
+            seed + 5,
+            seed + 6,
+            seed + 7,
+        ])
+        .unwrap()
     }
 
     /// Full in-channel fixture: 3 real key pairs, real balance encryptions, a real E-1 STARK at
@@ -1329,14 +1341,13 @@ mod tests {
 
     fn signatures_for(record: &ChannelRecord) -> Vec<MemberSignature> {
         record
-            .member_key_ids
+            .member_sphincs_pubkey_hashes
             .iter()
             .enumerate()
-            .map(|(idx, key_id)| MemberSignature {
-                key_id: *key_id,
-                user_id: UserId::from_parts(record.channel_id, *key_id),
+            .map(|(idx, hash)| MemberSignature {
+                member_slot: idx as u8,
+                sphincs_pubkey_hash: *hash,
                 signature: vec![1 + idx as u8],
-                key_condition_proof: vec![11 + idx as u8],
             })
             .collect()
     }
@@ -1351,9 +1362,9 @@ mod tests {
 
         let record = ChannelRecord {
             channel_id,
-            bp_key_id: key(10),
-            member_key_ids: vec![key(10), key(11), key(12)],
-            member_key_ids_root: Bytes32::default(),
+            member_sphincs_pubkey_hashes: [pubkey_hash(10), pubkey_hash(20), pubkey_hash(30)],
+            member_pubkeys_root: Bytes32::from_u32_slice(&[1, 1, 1, 1, 0, 0, 0, 0]).unwrap(),
+            bp_member_slot: 0,
             special_close_penalty: U256::from(7u32),
             close_freeze_nonce: 0,
             status: ChannelStatus::Active,
@@ -1419,10 +1430,8 @@ mod tests {
         }
         .with_computed_digest();
 
-        let sender_user_id = UserId::from_parts(channel_id, key(10));
-        let recipient_user_id = UserId::from_parts(channel_id, key(11));
         let channel_tx = ChannelTx {
-            recipient_user_id,
+            recipient_sphincs_pubkey_hash: pubkey_hash(20),
             enc_amount: enc_amount.0,
             nonce: Bytes32::from_u32_slice(&[7, 7, 7, 7, 0, 0, 0, 0]).unwrap(),
             channel_tx_zkp: ChannelProofEnvelope {
@@ -1430,7 +1439,7 @@ mod tests {
                 backend: ProofBackend::Plonky3,
                 proof,
             },
-            sender_user_id,
+            sender_sphincs_pubkey_hash: pubkey_hash(10),
             sender_signature: vec![1, 2, 3],
         };
 

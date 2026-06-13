@@ -12,7 +12,6 @@ use intmax3_zkp::circuits::{
         deposit_hash_chain::{
             deposit_hash_chain_circuit::DepositHashChainCircuit, deposit_step::DepositStepCircuit,
         },
-        signature_aggregation::{sig_agg_circuit::SigAggCircuit, sig_agg_step::SigAggStepCircuit},
     },
     withdraw::{
         single_withdrawal_circuit::SingleWithdawalCircuit,
@@ -98,20 +97,7 @@ fn main() {
         deposit_hash_chain.data.common.degree_bits(),
     ));
 
-    // Signature aggregation circuits
-    let sig_agg_cd = SigAggCircuit::<F, C, D>::generate_cd();
-    let sig_agg_step = SigAggStepCircuit::<F, C, D>::new(&sig_agg_cd);
-    rows.push((
-        "validity::SigAggStepCircuit".to_string(),
-        sig_agg_step.data.common.degree_bits(),
-    ));
-
-    let sig_agg_circuit =
-        SigAggCircuit::<F, C, D>::new(&sig_agg_cd, &sig_agg_step.data.verifier_data());
-    rows.push((
-        "validity::SigAggCircuit".to_string(),
-        sig_agg_circuit.data.common.degree_bits(),
-    ));
+    // (Signature aggregation circuits removed — one SPHINCS+ key per member, no multisig.)
 
     // Block hash chain circuits
     let block_chain_cd = BlockHashChainCircuit::<F, C, D>::generate_cd();

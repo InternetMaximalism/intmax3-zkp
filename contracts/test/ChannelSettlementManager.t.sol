@@ -25,10 +25,12 @@ contract ChannelSettlementManagerTest is Test {
     address internal mallory = makeAddr("mallory");
 
     bytes4 internal constant CHANNEL_ID = hex"00000009";
-    bytes4 internal constant BP_KEY_ID = hex"0000000a";
-    bytes8 internal constant USER_A = hex"000000090000000a";
-    bytes8 internal constant USER_B = hex"000000090000000b";
-    bytes8 internal constant USER_C = hex"000000090000000c";
+    // F7: members are identified by their SPHINCS+ pubkey hash (bytes32). The block-proposer is
+    // member slot 0 (USER_A).
+    uint8 internal constant BP_MEMBER_SLOT = 0;
+    bytes32 internal constant USER_A = keccak256("member_a_sphincs_pubkey_hash");
+    bytes32 internal constant USER_B = keccak256("member_b_sphincs_pubkey_hash");
+    bytes32 internal constant USER_C = keccak256("member_c_sphincs_pubkey_hash");
     uint64 internal constant CHALLENGE_PERIOD = 1 days;
     uint64 internal constant GRACE = 600;
     uint256 internal constant SPECIAL_CLOSE_PENALTY = 9;
@@ -45,13 +47,17 @@ contract ChannelSettlementManagerTest is Test {
 
         ChannelSettlementManager.MemberBinding[] memory bindings =
             new ChannelSettlementManager.MemberBinding[](3);
-        bindings[0] = ChannelSettlementManager.MemberBinding({userId: USER_A, recipient: alice});
-        bindings[1] = ChannelSettlementManager.MemberBinding({userId: USER_B, recipient: bob});
-        bindings[2] = ChannelSettlementManager.MemberBinding({userId: USER_C, recipient: carol});
+        bindings[0] =
+            ChannelSettlementManager.MemberBinding({sphincsPubkeyHash: USER_A, recipient: alice});
+        bindings[1] =
+            ChannelSettlementManager.MemberBinding({sphincsPubkeyHash: USER_B, recipient: bob});
+        bindings[2] =
+            ChannelSettlementManager.MemberBinding({sphincsPubkeyHash: USER_C, recipient: carol});
 
         manager = new ChannelSettlementManager(
             CHANNEL_ID,
-            BP_KEY_ID,
+            BP_MEMBER_SLOT,
+            USER_A, // block-proposer pubkey hash = member at BP_MEMBER_SLOT
             CHALLENGE_PERIOD,
             SPECIAL_CLOSE_PENALTY,
             INITIAL_BP_BOND,
@@ -106,6 +112,7 @@ contract ChannelSettlementManagerTest is Test {
     function _closeProof(
         ChannelSettlementManager.CloseIntent memory intent
     ) internal view returns (bytes memory) {
+        // F7: the close proof binds the channel's registered member-set commitment (85th limb).
         return _proofFor(
             verifier.closePIHash(
                 CHANNEL_ID,
@@ -121,7 +128,8 @@ contract ChannelSettlementManagerTest is Test {
                 intent.closeWithdrawalDigest,
                 intent.snapshotMediumBlockNumber,
                 intent.finalStateVersion,
-                intent.finalSettledTxChain
+                intent.finalSettledTxChain,
+                manager.registeredMemberSetCommitment()
             )
         );
     }
@@ -139,17 +147,19 @@ contract ChannelSettlementManagerTest is Test {
 
     function _withdrawalClaim(
         bytes32 closeIntentDigest,
-        bytes8 userId,
+        bytes32 memberSphincsPubkeyHash,
         address recipient,
         uint64 amount
     ) internal pure returns (ChannelSettlementManager.WithdrawalClaim memory claim) {
         claim = ChannelSettlementManager.WithdrawalClaim({
             closeIntentDigest: closeIntentDigest,
-            userId: userId,
+            memberSphincsPubkeyHash: memberSphincsPubkeyHash,
             recipient: recipient,
-            userAmountDigest: keccak256(abi.encodePacked(userId, amount)),
+            userAmountDigest: keccak256(abi.encodePacked(memberSphincsPubkeyHash, amount)),
             amount: amount,
-            withdrawalNullifier: keccak256(abi.encodePacked("withdraw", closeIntentDigest, userId))
+            withdrawalNullifier: keccak256(
+                abi.encodePacked("withdraw", closeIntentDigest, memberSphincsPubkeyHash)
+            )
         });
     }
 
@@ -169,14 +179,16 @@ contract ChannelSettlementManagerTest is Test {
             intent.closeWithdrawalDigest,
             intent.snapshotMediumBlockNumber,
             intent.finalStateVersion,
-            intent.finalSettledTxChain
+            intent.finalSettledTxChain,
+            manager.registeredMemberSetCommitment()
         );
         assertTrue(closePiHash != bytes32(0));
 
         assertTrue(
             verifier.specialClosePIHash(
                 CHANNEL_ID,
-                BP_KEY_ID,
+                BP_MEMBER_SLOT,
+                USER_A,
                 keccak256("root"),
                 33,
                 10,
@@ -242,6 +254,31 @@ contract ChannelSettlementManagerTest is Test {
             finalSettledTxChain: 0x0000003100000032000000330000003400000035000000360000003700000038
         });
         assertEq(manager.computeCloseIntentDigest(intent), SHARED_VECTOR_DIGEST);
+    }
+
+    // Shared Rust<->Solidity test vector for the F7 close-circuit member-set commitment:
+    // keccak([IMCM, h0, h1, h2]) over the 3 members' SPHINCS+ pubkey hashes (slot order). The
+    // Rust side asserts the same constant in
+    // src/common/channel.rs::close_member_set_commitment_matches_solidity_shared_vector. Each
+    // bytes32 is the byte form of 8 consecutive big-endian u32 limbs (h0 = 1..8, h1 = 9..16,
+    // h2 = 17..24), matching the Rust `pubkey_hash`-style limb layout used in that test.
+    bytes32 internal constant MEMBER_SET_VECTOR_H0 =
+        0x0000000100000002000000030000000400000005000000060000000700000008;
+    bytes32 internal constant MEMBER_SET_VECTOR_H1 =
+        0x000000090000000a0000000b0000000c0000000d0000000e0000000f00000010;
+    bytes32 internal constant MEMBER_SET_VECTOR_H2 =
+        0x0000001100000012000000130000001400000015000000160000001700000018;
+    bytes32 internal constant MEMBER_SET_COMMITMENT_VECTOR =
+        0x0f7f77fe100791e7f70be85d8d4d6f5067d833c0bc0847816b9e9d892c9fb8e6;
+
+    function test_member_set_commitment_matches_rust_shared_vector() external view {
+        // The shape is locked to this constant via the Rust counterpart; we recompute it here.
+        bytes32 commitment = verifier.closeMemberSetCommitment(
+            MEMBER_SET_VECTOR_H0,
+            MEMBER_SET_VECTOR_H1,
+            MEMBER_SET_VECTOR_H2
+        );
+        assertEq(commitment, MEMBER_SET_COMMITMENT_VECTOR);
     }
 
     function test_request_close_freezes_channel_and_emits() external {
@@ -482,7 +519,7 @@ contract ChannelSettlementManagerTest is Test {
             .PostCloseClaim({
                 closeIntentDigest: closeIntentDigest,
                 incomingTxHash: keccak256("incoming_tx"),
-                receiverUserId: USER_B,
+                receiverSphincsPubkeyHash: USER_B,
                 recipient: bob,
                 sharedNativeNullifier: keccak256("shared_nullifier"),
                 amount: 5
@@ -509,7 +546,8 @@ contract ChannelSettlementManagerTest is Test {
     function test_special_close_slashes_bp_and_freezes_channel() external {
         ChannelSettlementManager.SpecialClose memory specialClose = ChannelSettlementManager
             .SpecialClose({
-                offendingBpKeyId: BP_KEY_ID,
+                offendingBpMemberSlot: BP_MEMBER_SLOT,
+                offendingBpSphincsPubkeyHash: USER_A,
                 fullySignedSmallBlockRoot: keccak256("small_block_root"),
                 smallBlockNumber: 33,
                 signedMediumBlockNumber: 10,
@@ -521,7 +559,8 @@ contract ChannelSettlementManagerTest is Test {
             _proofFor(
                 verifier.specialClosePIHash(
                     CHANNEL_ID,
-                    BP_KEY_ID,
+                    specialClose.offendingBpMemberSlot,
+                    specialClose.offendingBpSphincsPubkeyHash,
                     specialClose.fullySignedSmallBlockRoot,
                     specialClose.smallBlockNumber,
                     specialClose.signedMediumBlockNumber,
@@ -588,7 +627,7 @@ contract ChannelSettlementManagerTest is Test {
             ChannelSettlementManager.LateOutgoingDebitCorrection({
                 closeIntentDigest: closeIntentDigest,
                 sourceTxHash: keccak256("source_tx"),
-                senderUserId: USER_C,
+                senderSphincsPubkeyHash: USER_C,
                 senderAmountDigest: keccak256("sender_amount"),
                 debitNullifier: keccak256("debit_nullifier"),
                 amount: 7
@@ -620,7 +659,8 @@ contract ChannelSettlementManagerTest is Test {
     function test_special_close_then_submit_and_finalize_normal_close() external {
         ChannelSettlementManager.SpecialClose memory specialClose = ChannelSettlementManager
             .SpecialClose({
-                offendingBpKeyId: BP_KEY_ID,
+                offendingBpMemberSlot: BP_MEMBER_SLOT,
+                offendingBpSphincsPubkeyHash: USER_A,
                 fullySignedSmallBlockRoot: keccak256("small_block_root"),
                 smallBlockNumber: 33,
                 signedMediumBlockNumber: 10,
@@ -631,7 +671,8 @@ contract ChannelSettlementManagerTest is Test {
             _proofFor(
                 verifier.specialClosePIHash(
                     CHANNEL_ID,
-                    BP_KEY_ID,
+                    specialClose.offendingBpMemberSlot,
+                    specialClose.offendingBpSphincsPubkeyHash,
                     specialClose.fullySignedSmallBlockRoot,
                     specialClose.smallBlockNumber,
                     specialClose.signedMediumBlockNumber,

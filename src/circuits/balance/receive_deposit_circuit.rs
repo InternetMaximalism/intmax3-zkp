@@ -607,7 +607,7 @@ mod tests {
             index: send_tree.len() as u32,
             prev: BlockNumber::new(0).unwrap(),
             send_tree_root: send_tree.get_root(),
-            member_key_ids_root: ChannelLeaf::default().member_key_ids_root,
+            member_pubkeys_root: ChannelLeaf::default().member_pubkeys_root,
         };
 
         let mut channel_tree = ChannelTree::new(CHANNEL_TREE_HEIGHT);

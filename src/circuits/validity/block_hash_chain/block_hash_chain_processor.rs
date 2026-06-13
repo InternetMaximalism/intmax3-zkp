@@ -32,15 +32,25 @@ use crate::{
         trees::{
             channel_tree::{ChannelLeaf, ChannelMerkleProof, SendMerkleProof},
             deposit_tree::DepositMerkleProof,
-            key_tree::KeyLeaf,
+            key_tree::MemberMerkleProof,
             public_state_tree::PublicStateMerkleProof,
             tx_v2_tree::{ChannelActionMerkleProof, TxV2MerkleProof},
         },
         tx::{ChannelAction, TxV2},
     },
-    constants::TX_TREE_HEIGHT,
+    constants::{MEMBER_TREE_HEIGHT, TX_TREE_HEIGHT},
+    regev::{REGEV_N, RegevPk},
     utils::conversion::ToU64,
 };
+
+/// All-zero Regev pubkey of the correct length for inactive (non-updating) slots. The member
+/// binding is gated by `should_update`, so these coefficients are never digest-checked.
+fn dummy_regev_pk() -> RegevPk {
+    RegevPk {
+        a: vec![0u32; REGEV_N],
+        b: vec![0u32; REGEV_N],
+    }
+}
 
 #[derive(Debug, Error)]
 pub enum BlockHashChainProcessorError {
@@ -72,10 +82,13 @@ pub struct BlockHashChainProcessorWitness {
     /// If None, dummy (all-zero) witnesses are used — valid only when the
     /// signature verification constraints are conditionally disabled (inactive slots).
     pub sig_witnesses: Option<Vec<SpxSigWitness>>,
-    /// Optional per-slot KeyTree records (pk_set_root, threshold) accompanying `sig_witnesses`.
-    /// If None, default leaves (pk_set_root = 0) are used, which skip the in-circuit signature
-    /// constraints — see `UpdateUserTree::key_leaves` SECURITY TODO.
-    pub key_leaves: Option<Vec<KeyLeaf>>,
+    /// Optional per-slot MemberTree inclusion proofs binding the signing pubkey to the channel's
+    /// member tree (see `UpdateUserTree::member_merkle_proofs`). If None, dummy proofs are used,
+    /// valid only when every slot is non-updating (signature/binding constraints skipped).
+    pub member_merkle_proofs: Option<Vec<MemberMerkleProof>>,
+    /// Optional per-slot Regev public keys accompanying `member_merkle_proofs`. If None, default
+    /// (empty/dummy) keys are used (valid only for non-updating slots).
+    pub member_regev_pks: Option<Vec<RegevPk>>,
     /// Optional per-block IMSB `SmallBlockRootMessage` preimage fields accompanying
     /// `sig_witnesses` (detail2 §F-2). If None, default fields are used — valid only when the
     /// signature constraints are skipped (dummy witnesses).
@@ -257,10 +270,13 @@ where
                 .sig_witnesses
                 .clone()
                 .unwrap_or_else(|| vec![SpxSigWitness::dummy(); num_users as usize]),
-            key_leaves: witness
-                .key_leaves
+            member_merkle_proofs: witness.member_merkle_proofs.clone().unwrap_or_else(|| {
+                vec![MemberMerkleProof::dummy(MEMBER_TREE_HEIGHT); num_users as usize]
+            }),
+            member_regev_pks: witness
+                .member_regev_pks
                 .clone()
-                .unwrap_or_else(|| vec![KeyLeaf::default(); num_users as usize]),
+                .unwrap_or_else(|| vec![dummy_regev_pk(); num_users as usize]),
             msg_fields: witness.msg_fields.clone().unwrap_or_default(),
             tx_v2_indices: witness.tx_v2_indices.clone().unwrap_or(dummy_tx_v2_indices),
             tx_v2s: witness.tx_v2s.clone().unwrap_or(dummy_tx_v2s),

@@ -295,6 +295,7 @@ fn fors_sign_impl(
 // ── Public API ───────────────────────────────────────────────────────────────
 
 /// SPHINCS+ key pair.
+#[derive(Clone, Debug)]
 pub struct SpxKeyPair {
     pub sk_seed: [u8; SPX_N],
     pub sk_prf: [u8; SPX_N],

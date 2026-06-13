@@ -6,7 +6,6 @@ pub const BLOCK_NUMBER_BITS: usize = 63;
 pub const PUBLIC_STATE_TREE_HEIGHT: usize = BLOCK_NUMBER_BITS;
 pub const DEPOSIT_TREE_HEIGHT: usize = 63;
 pub const CHANNEL_ID_BITS: usize = 32;
-pub const KEY_ID_BITS: usize = 32;
 pub const SEND_TREE_HEIGHT: usize = 32;
 // SECURITY: the BASE intmax native user IS the channel; base accounts are keyed by
 // `channel_id` ALONE (key_id lives only in the channel layer). So the base channel id is 32 bits
@@ -19,15 +18,11 @@ pub const ASSET_TREE_HEIGHT: usize = TOKEN_INDEX_BITS;
 pub const NULLIFIER_TREE_HEIGHT: usize = 32;
 pub const SENT_TX_TREE_HEIGHT: usize = 32;
 
-// Key Set (multi-sig)
-pub const KEY_SET_TREE_HEIGHT: usize = 3; // max 8 keys per ID
-
-// Key registry: KeyTree maps key_id -> KeyLeaf { pk_set_root, threshold, num_keys }.
-// Indexed by key_id, so the tree height equals the key id bit-width.
-pub const KEY_TREE_HEIGHT: usize = KEY_ID_BITS;
-// Per-channel member key-id set committed by ChannelLeaf.member_key_ids_root.
-// INTENTIONALLY SIMPLE: cap channel membership at 2^MEMBER_KEY_TREE_HEIGHT for the MVP.
-pub const MEMBER_KEY_TREE_HEIGHT: usize = 8;
+// Per-channel member tree (one SPHINCS+ key per member, no multisig/threshold).
+// `ChannelLeaf.member_pubkeys_root` commits the ordered member leaves
+// `MemberLeaf { sphincs_pk_hash, regev_pk_digest }`, indexed by member slot 0..CHANNEL_MEMBERS.
+// Height 2 (4 leaf slots) is the smallest tree covering the 3 members + 1 empty slot.
+pub const MEMBER_TREE_HEIGHT: usize = 2;
 
 // Payment channels (detail2 §G-1 / abstract2 §2.1, §2.5)
 /// Fixed channel membership (abstract2 §2.1: exactly 3 members per channel). `ChannelRecord`,

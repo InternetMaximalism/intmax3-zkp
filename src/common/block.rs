@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     common::{trees::tx_v2_tree::compute_tx_v2_root, tx::TxV2},
-    constants::{CHANNEL_ID_BITS, KEY_ID_BITS},
+    constants::CHANNEL_ID_BITS,
     ethereum_types::{
         bytes32::{Bytes32, Bytes32Target},
         u32limb_trait::{U32LimbTargetTrait as _, U32LimbTrait},
@@ -38,11 +38,13 @@ pub struct Block {
     /// this is the 5-byte `ChannelId` value constrained to the current u32 ABI.
     pub channel_id: u32,
     pub timestamp: u64,
-    /// Key identifiers for channel members participating in this block.
+    /// Active member slots of the channel participating in this block.
     ///
-    /// The serialized field is still named `key_ids` during migration. Each
-    /// non-zero entry is interpreted as a channel `KeyId`, and the signed user
-    /// identity is `ChannelId = ChannelId || KeyId`.
+    /// One SPHINCS+ key per member: the field (kept named `key_ids` to minimize churn during the
+    /// migration; F7/F8 finalize Block/Solidity) now carries the per-slot ACTIVE-MEMBER index. A
+    /// non-zero entry marks an active member slot; zero is padding/dummy. The signing identity of
+    /// a slot is the member's SPHINCS+ pubkey hash, proven slot-included under the channel's
+    /// `member_pubkeys_root` (see `update_channel_tree`), not a derived `channel_id || key_id`.
     pub key_ids: Vec<u32>,
     pub tx_tree_root: Bytes32,
     pub deposit_hash_chain: Bytes32,
@@ -173,7 +175,9 @@ impl BlockTarget {
             .map(|_| {
                 let target = builder.add_virtual_target();
                 if is_checked {
-                    builder.range_check(target, KEY_ID_BITS);
+                    // Active-member slot index (small); the legacy key-id bit-width bound is
+                    // retired, CHANNEL_ID_BITS is a safe wider u32 range bound.
+                    builder.range_check(target, CHANNEL_ID_BITS);
                 }
                 target
             })

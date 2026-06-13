@@ -21,7 +21,8 @@ pub use encrypt::{
     encode_amount, encrypt_amount,
 };
 pub use keys::{
-    REGEV_PK_DOMAIN, REGEV_PK_ROOT_DOMAIN, RegevPk, RegevSk, channel_keygen, regev_pk_root,
+    REGEV_PK_DOMAIN, REGEV_PK_POSEIDON_DOMAIN, REGEV_PK_ROOT_DOMAIN, RegevPk, RegevSk,
+    channel_keygen, regev_pk_root,
 };
 pub use params::{
     MAX_HOMO_ADDS_BEFORE_REFRESH, REGEV_ETA, REGEV_N, REGEV_PLAIN_BITS, REGEV_Q,

@@ -11,12 +11,23 @@ use super::{
     hash_words,
     params::{REGEV_N, REGEV_Q, channel_regev_params},
 };
-use crate::ethereum_types::{bytes32::Bytes32, u32limb_trait::U32LimbTrait as _};
+use crate::{
+    ethereum_types::{bytes32::Bytes32, u32limb_trait::U32LimbTrait as _},
+    utils::poseidon_hash_out::PoseidonHashOut,
+};
 
 /// Domain separator for [`RegevPk::digest`] ("IMRK").
 pub const REGEV_PK_DOMAIN: u32 = 0x494d524b;
 /// Domain separator for [`regev_pk_root`] ("IMRR").
 pub const REGEV_PK_ROOT_DOMAIN: u32 = 0x494d5252;
+/// Domain separator (Goldilocks limb) for [`RegevPk::poseidon_digest`] ("IMRP").
+///
+/// SECURITY: this is a SEPARATE, Poseidon-native digest used ONLY inside the validity circuit's
+/// member tree (`MemberLeaf.regev_pk_digest`). Recomputing the keccak [`RegevPk::digest`] in a
+/// recursive STARK is prohibitively expensive, so the in-circuit member binding hashes the raw
+/// coefficient vector with Poseidon instead. The off-chain L1 anchor still uses the keccak
+/// [`regev_pk_root`]; both are built from the same canonical coefficients at registration (DB).
+pub const REGEV_PK_POSEIDON_DOMAIN: u64 = 0x494d5250;
 
 /// A member's Regev public key: uniform `a` and `b = a·s + e`, both `REGEV_N` coefficients in
 /// canonical form (`< REGEV_Q`).
@@ -67,6 +78,24 @@ impl RegevPk {
             ]
             .concat(),
         )
+    }
+
+    /// Poseidon digest over the canonical coefficients, used as the in-circuit member-tree leaf
+    /// component: `Poseidon([REGEV_PK_POSEIDON_DOMAIN, n, a…, b…])` (Goldilocks limbs).
+    ///
+    /// SECURITY: MUST stay byte-identical to the in-circuit recompute in
+    /// `circuits::validity::block_hash_chain::update_channel_tree` (same domain, same
+    /// length-prefix, same a-then-b coefficient order). Canonicality is enforced (each
+    /// coefficient < q < 2^32, so each fits one Goldilocks limb without reduction).
+    pub fn poseidon_digest(&self) -> PoseidonHashOut {
+        assert!(
+            self.validate().is_ok(),
+            "poseidon_digest() on an invalid RegevPk"
+        );
+        let mut inputs = vec![REGEV_PK_POSEIDON_DOMAIN, REGEV_N as u64];
+        inputs.extend(self.a.iter().map(|&c| c as u64));
+        inputs.extend(self.b.iter().map(|&c| c as u64));
+        PoseidonHashOut::hash_inputs_u64(&inputs)
     }
 }
 

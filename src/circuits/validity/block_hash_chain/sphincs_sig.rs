@@ -70,8 +70,10 @@ pub const SPX_MSG_GL_LEN: usize = 8;
 /// structurally bound to the root actually applied.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct SmallBlockMessageFields {
-    /// Block producer's member key id (1 u32 limb in the preimage).
-    pub bp_key_id: u32,
+    /// Block-producer member slot (1 u32 limb in the preimage).
+    pub bp_member_slot: u32,
+    /// Block-producer SPHINCS+ pubkey hash (8 u32 limbs in the preimage).
+    pub bp_sphincs_pubkey_hash: Bytes32,
     pub small_block_number: u64,
     pub prev_small_block_root: Bytes32,
     /// H1' of the channel's BalanceState. The off-circuit equality check
@@ -84,13 +86,15 @@ pub struct SmallBlockMessageFields {
 
 impl SmallBlockMessageFields {
     /// Native mirror of `SmallBlockRootMessage::signing_digest()` (src/common/channel.rs).
-    /// Limb order: [IMSB domain (1), channel_id (1), bp_key_id (1),
-    /// small_block_number (2), prev_small_block_root (8), tx_tree_root (8),
-    /// state_commitment_root (8), medium_epoch_hint (2), close_freeze_nonce (2)] = 33 limbs.
+    /// Limb order: [IMSB domain (1), channel_id (1), bp_member_slot (1),
+    /// bp_sphincs_pubkey_hash (8), small_block_number (2), prev_small_block_root (8),
+    /// tx_tree_root (8), state_commitment_root (8), medium_epoch_hint (2),
+    /// close_freeze_nonce (2)] = 41 limbs.
     pub fn signing_digest(&self, channel_id: u32, tx_tree_root: Bytes32) -> Bytes32 {
         hash_words(
             &[
-                vec![SMALL_BLOCK_DOMAIN, channel_id, self.bp_key_id],
+                vec![SMALL_BLOCK_DOMAIN, channel_id, self.bp_member_slot],
+                self.bp_sphincs_pubkey_hash.to_u32_vec(),
                 split_u64(self.small_block_number),
                 self.prev_small_block_root.to_u32_vec(),
                 tx_tree_root.to_u32_vec(),
@@ -107,7 +111,8 @@ impl SmallBlockMessageFields {
 /// range-checked to 32 bits at allocation (required by the keccak gadget).
 #[derive(Clone, Debug)]
 pub struct SmallBlockMessageFieldsTarget {
-    pub bp_key_id: Target,
+    pub bp_member_slot: Target,
+    pub bp_sphincs_pubkey_hash: Bytes32Target,
     /// `split_u64(small_block_number)` limbs `[hi, lo]`.
     pub small_block_number: [Target; 2],
     pub prev_small_block_root: Bytes32Target,
@@ -127,14 +132,16 @@ impl SmallBlockMessageFieldsTarget {
             builder.range_check(t, 32);
             t
         };
-        let bp_key_id = u32_limb(builder);
+        let bp_member_slot = u32_limb(builder);
+        let bp_sphincs_pubkey_hash = Bytes32Target::new(builder, true);
         let small_block_number = [u32_limb(builder), u32_limb(builder)];
         let medium_epoch_hint = [u32_limb(builder), u32_limb(builder)];
         let close_freeze_nonce = [u32_limb(builder), u32_limb(builder)];
         let prev_small_block_root = Bytes32Target::new(builder, true);
         let state_commitment_root = Bytes32Target::new(builder, true);
         Self {
-            bp_key_id,
+            bp_member_slot,
+            bp_sphincs_pubkey_hash,
             small_block_number,
             prev_small_block_root,
             state_commitment_root,
@@ -162,7 +169,8 @@ impl SmallBlockMessageFieldsTarget {
         let domain = builder.constant(F::from_canonical_u32(SMALL_BLOCK_DOMAIN));
         // Preimage limb order matches `SmallBlockRootMessage::signing_digest()` exactly.
         let inputs: Vec<Target> = [
-            vec![domain, channel_id, self.bp_key_id],
+            vec![domain, channel_id, self.bp_member_slot],
+            self.bp_sphincs_pubkey_hash.to_vec(),
             self.small_block_number.to_vec(),
             self.prev_small_block_root.to_vec(),
             tx_tree_root.to_vec(),
@@ -179,7 +187,12 @@ impl SmallBlockMessageFieldsTarget {
         witness: &mut W,
         value: &SmallBlockMessageFields,
     ) {
-        witness.set_target(self.bp_key_id, F::from_canonical_u32(value.bp_key_id));
+        witness.set_target(
+            self.bp_member_slot,
+            F::from_canonical_u32(value.bp_member_slot),
+        );
+        self.bp_sphincs_pubkey_hash
+            .set_witness(witness, value.bp_sphincs_pubkey_hash);
         for (targets, native) in [
             (&self.small_block_number, value.small_block_number),
             (&self.medium_epoch_hint, value.medium_epoch_hint),
@@ -341,7 +354,7 @@ impl SpxSigTargets {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::common::channel::{ChannelId, KeyId, SmallBlockRootMessage};
+    use crate::common::channel::{ChannelId, SmallBlockRootMessage};
 
     /// SECURITY: guards against drift between the circuit-side IMSB preimage
     /// (`SmallBlockMessageFields::signing_digest`, mirrored limb-for-limb by
@@ -350,7 +363,8 @@ mod tests {
     #[test]
     fn small_block_message_fields_digest_matches_canonical_message() {
         let channel_id = ChannelId::new(5).unwrap();
-        let bp_key_id = KeyId::new(7).unwrap();
+        let bp_sphincs_pubkey_hash =
+            Bytes32::from_u32_slice(&[101, 102, 103, 104, 105, 106, 107, 108]).unwrap();
         let prev_small_block_root = Bytes32::from_u32_slice(&[1, 2, 3, 4, 5, 6, 7, 8]).unwrap();
         let tx_tree_root =
             Bytes32::from_u32_slice(&[9, 10, 11, 12, 13, 14, 15, 0xffff_ffff]).unwrap();
@@ -359,7 +373,8 @@ mod tests {
 
         let canonical = SmallBlockRootMessage {
             channel_id,
-            bp_key_id,
+            bp_member_slot: 2,
+            bp_sphincs_pubkey_hash,
             small_block_number: 0x1_2345_6789,
             prev_small_block_root,
             tx_tree_root,
@@ -370,7 +385,8 @@ mod tests {
         .signing_digest();
 
         let fields = SmallBlockMessageFields {
-            bp_key_id: 7,
+            bp_member_slot: 2,
+            bp_sphincs_pubkey_hash,
             small_block_number: 0x1_2345_6789,
             prev_small_block_root,
             state_commitment_root,

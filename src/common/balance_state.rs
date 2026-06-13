@@ -2,7 +2,7 @@
 //! (abstract2 §2.1, detail2 §C-2/§C-6, approved deviation D3).
 //!
 //! Channel balances live in state only as Regev ciphertexts (one per member slot, in
-//! `member_key_ids` order). `H1 = h1()` commits to the full balance state WITHOUT any proof
+//! member slot order). `H1 = h1()` commits to the full balance state WITHOUT any proof
 //! object, so all three members can sign `hash(H1, H2)` at state-authoring time (audit finding 3:
 //! no signing-time proof circularity). The settled-tx hash chain (`settled_tx_chain`) is the
 //! mechanical link between a signed `BalanceState` and the balance proof that imported the same
@@ -20,7 +20,7 @@ use plonky2_keccak::builder::BuilderKeccak256 as _;
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    common::channel::{ChannelError, ChannelId, UserId, hash_words, split_u64},
+    common::channel::{ChannelError, ChannelId, hash_words, split_u64},
     constants::CHANNEL_MEMBERS,
     ethereum_types::{
         bytes32::{Bytes32, Bytes32Target},
@@ -44,7 +44,7 @@ pub const SETTLED_TX_CHAIN_DOMAIN: u32 = 0x494d5443;
 #[serde(rename_all = "camelCase")]
 pub struct BalanceState {
     pub channel_id: ChannelId,
-    /// One balance ciphertext per member, in `member_key_ids` order.
+    /// One balance ciphertext per member, in member slot order.
     pub enc_balances: [RegevCiphertext; CHANNEL_MEMBERS],
     /// Hash chain over the settles this state has absorbed (genesis = 0x00…00).
     pub settled_tx_chain: Bytes32,
@@ -117,23 +117,23 @@ pub fn balance_state_hash(h1: Bytes32, h2: Bytes32) -> Bytes32 {
 }
 
 /// detail2 §C-6 `TxLeafHash`:
-/// `hash( hash([TX_LEAF_DOMAIN, source_user_id, sender_delta_digest]),
-///        hash([TX_LEAF_DOMAIN, receiver_user_id, receiver_delta_digest]) )`.
+/// `hash( hash([TX_LEAF_DOMAIN, source_pubkey_hash(8), sender_delta_digest]),
+///        hash([TX_LEAF_DOMAIN, receiver_pubkey_hash(8), receiver_delta_digest]) )`.
 ///
-/// SECURITY: both wings carry the user id AND the Regev delta-ciphertext digest, so the chain
-/// leaf binds the sending key, the receiving key and both hidden balance deltas. The leaf is
-/// computable at small-block signing time (flowSend1 step 6) — unlike the base-layer nullifier,
-/// which embeds the (then unknown) block number.
+/// SECURITY: both wings carry the member SPHINCS+ pubkey hash AND the Regev delta-ciphertext
+/// digest, so the chain leaf binds the sending member, the receiving member and both hidden
+/// balance deltas. The leaf is computable at small-block signing time (flowSend1 step 6) — unlike
+/// the base-layer nullifier, which embeds the (then unknown) block number.
 pub fn tx_leaf_hash(
-    source_user_id: UserId,
+    source_sphincs_pubkey_hash: Bytes32,
     sender_delta_digest: Bytes32,
-    receiver_user_id: UserId,
+    receiver_sphincs_pubkey_hash: Bytes32,
     receiver_delta_digest: Bytes32,
 ) -> Bytes32 {
     let sender_wing = hash_words(
         &[
             vec![TX_LEAF_DOMAIN],
-            source_user_id.to_u32_vec(),
+            source_sphincs_pubkey_hash.to_u32_vec(),
             sender_delta_digest.to_u32_vec(),
         ]
         .concat(),
@@ -141,7 +141,7 @@ pub fn tx_leaf_hash(
     let receiver_wing = hash_words(
         &[
             vec![TX_LEAF_DOMAIN],
-            receiver_user_id.to_u32_vec(),
+            receiver_sphincs_pubkey_hash.to_u32_vec(),
             receiver_delta_digest.to_u32_vec(),
         ]
         .concat(),
@@ -190,10 +190,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{
-        common::channel::KeyId,
-        regev::{REGEV_N, REGEV_Q},
-    };
+    use crate::regev::{REGEV_N, REGEV_Q};
 
     /// Deterministic canonical ciphertext (raw seed-derived coefficients < q). These are not
     /// decryptable — digest/H1 tests only need canonical, distinct ring elements.
@@ -218,8 +215,19 @@ mod tests {
         }
     }
 
-    fn user(channel: u64, key: u64) -> UserId {
-        UserId::from_parts(ChannelId::new(channel).unwrap(), KeyId::new(key).unwrap())
+    /// A distinct, canonical member SPHINCS+ pubkey hash (Bytes32) per seed.
+    fn pubkey_hash(seed: u32) -> Bytes32 {
+        Bytes32::from_u32_slice(&[
+            seed,
+            seed + 1,
+            seed + 2,
+            seed + 3,
+            seed + 4,
+            seed + 5,
+            seed + 6,
+            seed + 7,
+        ])
+        .unwrap()
     }
 
     #[test]
@@ -349,8 +357,8 @@ mod tests {
 
     #[test]
     fn tx_leaf_hash_is_wing_order_sensitive() {
-        let sender = user(5, 10);
-        let receiver = user(7, 21);
+        let sender = pubkey_hash(10);
+        let receiver = pubkey_hash(21);
         let d_send = ciphertext(11).digest();
         let d_recv = ciphertext(12).digest();
 
@@ -359,9 +367,12 @@ mod tests {
         // Swapping the wings (who sends / who receives) must change the leaf.
         assert_ne!(leaf, tx_leaf_hash(receiver, d_recv, sender, d_send));
         // Each component is binding.
-        assert_ne!(leaf, tx_leaf_hash(user(5, 11), d_send, receiver, d_recv));
+        assert_ne!(
+            leaf,
+            tx_leaf_hash(pubkey_hash(11), d_send, receiver, d_recv)
+        );
         assert_ne!(leaf, tx_leaf_hash(sender, d_recv, receiver, d_recv));
-        assert_ne!(leaf, tx_leaf_hash(sender, d_send, user(7, 22), d_recv));
+        assert_ne!(leaf, tx_leaf_hash(sender, d_send, pubkey_hash(22), d_recv));
         assert_ne!(leaf, tx_leaf_hash(sender, d_send, receiver, d_send));
     }
 

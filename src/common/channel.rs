@@ -6,10 +6,7 @@ use thiserror::Error;
 // share ONE channel identifier type with identical keccak digest semantics.
 pub use crate::common::channel_id::ChannelId;
 use crate::{
-    common::{
-        balance_state::{BalanceState, tx_leaf_hash},
-        channel_id::ChannelId as PackedUserId,
-    },
+    common::balance_state::{BalanceState, tx_leaf_hash},
     constants::CHANNEL_MEMBERS,
     ethereum_types::{
         address::Address, bytes32::Bytes32, u32limb_trait::U32LimbTrait as _, u256::U256,
@@ -34,7 +31,12 @@ const POST_CLOSE_CLAIM_DOMAIN: u32 = 0x494d4350; // "IMCP"
 const WITHDRAWAL_CLAIM_DOMAIN: u32 = 0x494d4357; // "IMCW"
 const CHANNEL_BALANCE_LEAF_DOMAIN: u32 = 0x494d5546; // "IMUF"
 const CHANNEL_RECORD_DOMAIN: u32 = 0x494d4352; // "IMCR"
-const KEY_RECORD_DOMAIN: u32 = 0x494d4b52; // "IMKR"
+// "IMCM" — domain separator for the close-circuit member-set commitment. The full channel-close
+// circuit exposes `member_set_commitment = keccak([IMCM, sphincs_pk_hash_0..2])` as a public input;
+// L1 (`ChannelSettlementManager`) matches it against `keccak([IMCM, registered
+// member_sphincs_pubkey_hashes])` so the 3 verified signing keys are bound to the channel's
+// registered member set (no non-member-key substitution). See `close_member_set_commitment`.
+const CLOSE_MEMBER_SET_DOMAIN: u32 = 0x494d434d; // "IMCM"
 pub const MAX_CLOSE_TRANSFERS: usize = 16;
 pub const SPECIAL_CLOSE_MEDIUM_BLOCK_WINDOW: u64 = 5;
 // NOTE: `SMALL_BLOCK_SIGNATURE_TIMEOUT_SECS` is superseded by `constants::SIGN_TIMEOUT_SECS`
@@ -159,130 +161,18 @@ impl ChannelProofEnvelope {
 // byte-identical to the legacy `[u8;4]`-backed type, so every keccak `signing_digest` preimage
 // below is unchanged.
 
-#[derive(Clone, Copy, Debug, Default, Hash, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(transparent)]
-pub struct KeyId([u8; 4]);
-
-impl KeyId {
-    pub fn new(value: u64) -> Result<Self, ChannelError> {
-        if value > u32::MAX as u64 {
-            return Err(ChannelError::InvalidIdValue(format!(
-                "key id {value} does not fit in 4 bytes"
-            )));
-        }
-        Ok(Self((value as u32).to_be_bytes()))
-    }
-
-    pub fn from_bytes(bytes: [u8; 4]) -> Result<Self, ChannelError> {
-        let out = Self(bytes);
-        if out.as_u64() == 0 {
-            return Err(ChannelError::InvalidIdValue(
-                "key id 0 is reserved".to_string(),
-            ));
-        }
-        Ok(out)
-    }
-
-    pub fn as_bytes(&self) -> [u8; 4] {
-        self.0
-    }
-
-    pub fn as_u64(&self) -> u64 {
-        u32::from_be_bytes(self.0) as u64
-    }
-
-    pub fn to_u32_vec(&self) -> Vec<u32> {
-        bytes_to_u32_words(&self.0)
-    }
-
-    pub fn to_u64_vec(&self) -> Vec<u64> {
-        self.to_u32_vec()
-            .into_iter()
-            .map(|value| value as u64)
-            .collect()
-    }
-
-    pub fn from_u64_slice(values: &[u64]) -> Result<Self, ChannelError> {
-        let bytes = fixed_bytes_from_u32_word_slice(values, 4)?;
-        Self::from_bytes(bytes.try_into().expect("slice len 4"))
-    }
-}
-
-#[derive(Clone, Copy, Debug, Default, Hash, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(transparent)]
-pub struct UserId([u8; 8]);
-
-impl UserId {
-    pub fn from_parts(channel_id: ChannelId, key_id: KeyId) -> Self {
-        let mut out = [0u8; 8];
-        out[..4].copy_from_slice(&channel_id.as_bytes());
-        out[4..8].copy_from_slice(&key_id.as_bytes());
-        Self(out)
-    }
-
-    pub fn as_bytes(&self) -> [u8; 8] {
-        self.0
-    }
-
-    pub fn channel_id(&self) -> ChannelId {
-        // SECURITY: the member id is `channel_id || key_id`; the channel_id component is a
-        // nonzero 4-byte big-endian value, so `from_bytes` (which rejects the reserved 0 id)
-        // never fails for a well-formed member id.
-        ChannelId::from_bytes(self.0[..4].try_into().expect("slice len 4"))
-            .expect("member id channel_id component must be nonzero")
-    }
-
-    pub fn key_id(&self) -> KeyId {
-        KeyId(self.0[4..8].try_into().expect("slice len 4"))
-    }
-
-    pub fn to_u32_vec(&self) -> Vec<u32> {
-        bytes_to_u32_words(&self.0)
-    }
-
-    pub fn to_u64_vec(&self) -> Vec<u64> {
-        self.to_u32_vec()
-            .into_iter()
-            .map(|value| value as u64)
-            .collect()
-    }
-
-    pub fn from_u64_slice(values: &[u64]) -> Result<Self, ChannelError> {
-        let bytes = fixed_bytes_from_u32_word_slice(values, 8)?;
-        Ok(Self(bytes.try_into().expect("slice len 8")))
-    }
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct KeyRecord {
-    pub key_id: KeyId,
-    pub sphincs_pubkey_hashes_root: Bytes32,
-    pub threshold: u32,
-    pub num_keys: u32,
-}
-
-impl KeyRecord {
-    pub fn signing_digest(&self) -> Bytes32 {
-        hash_words(
-            &[
-                vec![KEY_RECORD_DOMAIN],
-                self.key_id.to_u32_vec(),
-                self.sphincs_pubkey_hashes_root.to_u32_vec(),
-                vec![self.threshold, self.num_keys],
-            ]
-            .concat(),
-        )
-    }
-}
-
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ChannelRecord {
     pub channel_id: ChannelId,
-    pub bp_key_id: KeyId,
-    pub member_key_ids: Vec<KeyId>,
-    pub member_key_ids_root: Bytes32,
+    /// Ordered member identities = SPHINCS+ pubkey hashes, slot order 0..CHANNEL_MEMBERS.
+    pub member_sphincs_pubkey_hashes: [Bytes32; CHANNEL_MEMBERS],
+    /// L1/keccak digest form of the channel's member tree root. The in-circuit
+    /// `ChannelLeaf.member_pubkeys_root` is a Poseidon root (different representation, DB); this
+    /// keccak form anchors the same member set at the L1 boundary.
+    pub member_pubkeys_root: Bytes32,
+    /// The slot whose member acts as block-proposer (replaces `bp_key_id`). 0..CHANNEL_MEMBERS.
+    pub bp_member_slot: u8,
     pub special_close_penalty: U256,
     pub close_freeze_nonce: u64,
     pub status: ChannelStatus,
@@ -296,53 +186,54 @@ pub struct ChannelRecord {
 
 impl ChannelRecord {
     pub fn validate(&self) -> Result<(), ChannelError> {
-        // abstract2 §2.1: channel membership is fixed at exactly CHANNEL_MEMBERS (= 3).
-        if self.member_key_ids.len() != CHANNEL_MEMBERS {
-            return Err(ChannelError::InvalidChannelRecord(format!(
-                "member_key_ids must contain exactly {CHANNEL_MEMBERS} entries, got {}",
-                self.member_key_ids.len()
-            )));
-        }
         if self.regev_pk_root == Bytes32::default() {
             return Err(ChannelError::InvalidChannelRecord(
                 "regev_pk_root must be set (zero root would unanchor the member Regev keys)"
                     .to_string(),
             ));
         }
-        let mut prev: Option<KeyId> = None;
-        for key_id in &self.member_key_ids {
-            if let Some(previous) = prev {
-                if previous.as_u64() >= key_id.as_u64() {
+        if (self.bp_member_slot as usize) >= CHANNEL_MEMBERS {
+            return Err(ChannelError::InvalidChannelRecord(format!(
+                "bp_member_slot {} out of range (must be < {CHANNEL_MEMBERS})",
+                self.bp_member_slot
+            )));
+        }
+        // One SPHINCS+ key per member: the CHANNEL_MEMBERS pubkey hashes must be nonzero and
+        // pairwise distinct (no shared-key / duplicate-member forgery).
+        for (i, hash) in self.member_sphincs_pubkey_hashes.iter().enumerate() {
+            if *hash == Bytes32::default() {
+                return Err(ChannelError::InvalidChannelRecord(format!(
+                    "member_sphincs_pubkey_hashes[{i}] must be nonzero"
+                )));
+            }
+            for other in self.member_sphincs_pubkey_hashes.iter().skip(i + 1) {
+                if hash == other {
                     return Err(ChannelError::InvalidChannelRecord(
-                        "member_key_ids must be strictly ordered and unique".to_string(),
+                        "member_sphincs_pubkey_hashes must be pairwise distinct".to_string(),
                     ));
                 }
             }
-            prev = Some(*key_id);
-        }
-        if !self.member_key_ids.contains(&self.bp_key_id) {
-            return Err(ChannelError::InvalidChannelRecord(
-                "bp_key_id must belong to member_key_ids".to_string(),
-            ));
         }
         Ok(())
     }
 
+    /// IMCR signing digest. Member segment = `bp_member_slot`(1) + CHANNEL_MEMBERS pubkey hashes
+    /// (3*8 = 24 limbs) + `member_pubkeys_root`(8). `regev_pk_root` stays at the END of the legacy
+    /// preimage (detail2 §H-1).
     pub fn signing_digest(&self) -> Bytes32 {
         hash_words(
             &[
                 vec![CHANNEL_RECORD_DOMAIN],
                 self.channel_id.to_u32_vec(),
-                self.bp_key_id.to_u32_vec(),
+                vec![self.bp_member_slot as u32],
                 split_u64(self.close_freeze_nonce),
-                vec![self.status as u32, self.member_key_ids.len() as u32],
-                self.member_key_ids
+                vec![self.status as u32, CHANNEL_MEMBERS as u32],
+                self.member_sphincs_pubkey_hashes
                     .iter()
-                    .flat_map(KeyId::to_u32_vec)
+                    .flat_map(Bytes32::to_u32_vec)
                     .collect::<Vec<_>>(),
-                self.member_key_ids_root.to_u32_vec(),
+                self.member_pubkeys_root.to_u32_vec(),
                 self.special_close_penalty.to_u32_vec(),
-                // Appended at the END of the legacy IMCR preimage (detail2 §H-1).
                 self.regev_pk_root.to_u32_vec(),
             ]
             .concat(),
@@ -361,7 +252,9 @@ pub struct MerkleInclusionProof {
 #[serde(rename_all = "camelCase")]
 pub struct SmallBlockRootMessage {
     pub channel_id: ChannelId,
-    pub bp_key_id: KeyId,
+    /// Block-producer member slot (0..CHANNEL_MEMBERS) and its SPHINCS+ pubkey hash.
+    pub bp_member_slot: u8,
+    pub bp_sphincs_pubkey_hash: Bytes32,
     pub small_block_number: u64,
     pub prev_small_block_root: Bytes32,
     pub tx_tree_root: Bytes32,
@@ -371,12 +264,16 @@ pub struct SmallBlockRootMessage {
 }
 
 impl SmallBlockRootMessage {
+    /// IMSB signing digest. Member segment = `bp_member_slot`(1) + `bp_sphincs_pubkey_hash`(8).
+    /// MUST match the in-circuit recompute in
+    /// `circuits::validity::block_hash_chain::sphincs_sig` limb-for-limb.
     pub fn signing_digest(&self) -> Bytes32 {
         hash_words(
             &[
                 vec![SMALL_BLOCK_DOMAIN],
                 self.channel_id.to_u32_vec(),
-                self.bp_key_id.to_u32_vec(),
+                vec![self.bp_member_slot as u32],
+                self.bp_sphincs_pubkey_hash.to_u32_vec(),
                 split_u64(self.small_block_number),
                 self.prev_small_block_root.to_u32_vec(),
                 self.tx_tree_root.to_u32_vec(),
@@ -392,10 +289,11 @@ impl SmallBlockRootMessage {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct MemberSignature {
-    pub key_id: KeyId,
-    pub user_id: UserId,
+    /// Member slot (0..CHANNEL_MEMBERS) — array index into the channel's member list.
+    pub member_slot: u8,
+    /// The signing member's SPHINCS+ pubkey hash (their identity).
+    pub sphincs_pubkey_hash: Bytes32,
     pub signature: SignatureBytes,
-    pub key_condition_proof: Vec<u8>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -420,12 +318,10 @@ impl SignedSmallBlock {
                     .iter()
                     .flat_map(|signature| {
                         [
-                            signature.key_id.to_u32_vec(),
-                            signature.user_id.to_u32_vec(),
+                            vec![signature.member_slot as u32],
+                            signature.sphincs_pubkey_hash.to_u32_vec(),
                             vec![signature.signature.len() as u32],
                             bytes_to_u32_words(&signature.signature),
-                            vec![signature.key_condition_proof.len() as u32],
-                            bytes_to_u32_words(&signature.key_condition_proof),
                         ]
                         .concat()
                     })
@@ -452,7 +348,7 @@ pub struct ChannelFund {
 #[serde(rename_all = "camelCase")]
 pub struct ChannelBalance {
     pub channel_id: ChannelId,
-    pub user_id: UserId,
+    pub sphincs_pubkey_hash: Bytes32,
     /// The member's hidden balance, encrypted to their own `RegevPk` (detail2 §C-4).
     pub balance_ciphertext: RegevCiphertext,
 }
@@ -460,8 +356,8 @@ pub struct ChannelBalance {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ChannelMember {
-    pub key_id: KeyId,
-    pub user_id: UserId,
+    pub sphincs_pubkey_hash: Bytes32,
+    pub member_slot: u8,
     pub l1_withdrawal_recipient: Address,
 }
 
@@ -530,7 +426,7 @@ impl ChannelState {
 #[serde(rename_all = "camelCase")]
 pub struct Reject {
     pub proposal_digest: Bytes32,
-    pub rejecting_user_id: UserId,
+    pub rejecting_member_pubkey_hash: Bytes32,
     pub reason: RejectReason,
     pub detail: Vec<u8>,
     pub signature: SignatureBytes,
@@ -558,21 +454,21 @@ pub enum RejectReason {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ChannelTx {
-    pub recipient_user_id: UserId,
+    pub recipient_sphincs_pubkey_hash: Bytes32,
     /// Transfer amount encrypted to the recipient's `RegevPk`.
     pub enc_amount: RegevCiphertext,
     /// One-time random value, making otherwise-identical transfers distinguishable.
     pub nonce: Bytes32,
     /// Mandatory E-1 channelTxZKP — co-signers MUST refuse to sign without it.
     pub channel_tx_zkp: ChannelProofEnvelope,
-    pub sender_user_id: UserId,
+    pub sender_sphincs_pubkey_hash: Bytes32,
     pub sender_signature: SignatureBytes,
 }
 
 impl ChannelTx {
     /// IMPA signing digest (detail2 §C-5):
     /// `[PAY_DOMAIN, channel_id, prev_state_digest, enc_amount.digest(), nonce,
-    /// sender_user_id, recipient_user_id]`.
+    /// sender_pubkey_hash(8), recipient_pubkey_hash(8)]`.
     ///
     /// SECURITY: the ZKP envelope is deliberately NOT part of this digest — the sender authorizes
     /// the transfer (prev state, hidden amount ciphertext, parties); the proof object is
@@ -582,8 +478,8 @@ impl ChannelTx {
         prev_state_digest: Bytes32,
         enc_amount: &RegevCiphertext,
         nonce: Bytes32,
-        sender_user_id: UserId,
-        recipient_user_id: UserId,
+        sender_sphincs_pubkey_hash: Bytes32,
+        recipient_sphincs_pubkey_hash: Bytes32,
     ) -> Bytes32 {
         hash_words(
             &[
@@ -592,8 +488,8 @@ impl ChannelTx {
                 prev_state_digest.to_u32_vec(),
                 enc_amount.digest().to_u32_vec(),
                 nonce.to_u32_vec(),
-                sender_user_id.to_u32_vec(),
-                recipient_user_id.to_u32_vec(),
+                sender_sphincs_pubkey_hash.to_u32_vec(),
+                recipient_sphincs_pubkey_hash.to_u32_vec(),
             ]
             .concat(),
         )
@@ -603,8 +499,7 @@ impl ChannelTx {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ReceiverBalanceDelta {
-    pub receiver_key_id: KeyId,
-    pub receiver_user_id: UserId,
+    pub receiver_sphincs_pubkey_hash: Bytes32,
     /// Positive delta encrypted to the receiver's `RegevPk` (detail2 §C-6).
     pub amount: RegevCiphertext,
 }
@@ -619,8 +514,7 @@ pub struct InterChannelTx {
     pub sender_delta_ct: RegevCiphertext,
     pub source_channel_id: ChannelId,
     pub destination_channel_id: ChannelId,
-    pub source_key_id: KeyId,
-    pub source_user_id: UserId,
+    pub source_sphincs_pubkey_hash: Bytes32,
     pub seal: Bytes32,
     pub tx_hash: Bytes32,
     pub intmax_transfer_commitment: Bytes32,
@@ -641,8 +535,7 @@ impl InterChannelTx {
                 self.sender_delta_ct.digest().to_u32_vec(),
                 self.source_channel_id.to_u32_vec(),
                 self.destination_channel_id.to_u32_vec(),
-                self.source_key_id.to_u32_vec(),
-                self.source_user_id.to_u32_vec(),
+                self.source_sphincs_pubkey_hash.to_u32_vec(),
                 self.seal.to_u32_vec(),
                 self.tx_hash.to_u32_vec(),
                 self.intmax_transfer_commitment.to_u32_vec(),
@@ -653,8 +546,7 @@ impl InterChannelTx {
                     .iter()
                     .flat_map(|delta| {
                         [
-                            delta.receiver_key_id.to_u32_vec(),
-                            delta.receiver_user_id.to_u32_vec(),
+                            delta.receiver_sphincs_pubkey_hash.to_u32_vec(),
                             delta.amount.digest().to_u32_vec(),
                         ]
                         .concat()
@@ -679,9 +571,9 @@ impl InterChannelTx {
             )
         })?;
         Ok(tx_leaf_hash(
-            self.source_user_id,
+            self.source_sphincs_pubkey_hash,
             self.sender_delta_ct.digest(),
-            receiver.receiver_user_id,
+            receiver.receiver_sphincs_pubkey_hash,
             receiver.amount.digest(),
         ))
     }
@@ -834,7 +726,7 @@ impl CloseIntent {
 #[serde(rename_all = "camelCase")]
 pub struct WithdrawalClaim {
     pub close_intent_digest: Bytes32,
-    pub user_id: UserId,
+    pub member_sphincs_pubkey_hash: Bytes32,
     pub l1_recipient: Address,
     /// The member's final balance ciphertext (their slot of the final `BalanceState`); the
     /// `claim_proof` (E-3 withdrawClaimZKP) proves it decrypts to the public withdrawal amount.
@@ -844,12 +736,19 @@ pub struct WithdrawalClaim {
 }
 
 impl WithdrawalClaim {
-    pub fn derive_nullifier(close_intent_digest: Bytes32, user_id: UserId) -> Bytes32 {
+    /// Nullifier `[IMCW, close_intent_digest(8), member_sphincs_pubkey_hash(8)]`.
+    ///
+    /// SECURITY: `close_intent_digest` embeds `channel_id`, so the (channel, close, member) tuple
+    /// is unique even though a bare pubkey hash is channel-independent (plan §7 collision-freedom).
+    pub fn derive_nullifier(
+        close_intent_digest: Bytes32,
+        member_sphincs_pubkey_hash: Bytes32,
+    ) -> Bytes32 {
         hash_words(
             &[
                 vec![WITHDRAWAL_CLAIM_DOMAIN],
                 close_intent_digest.to_u32_vec(),
-                user_id.to_u32_vec(),
+                member_sphincs_pubkey_hash.to_u32_vec(),
             ]
             .concat(),
         )
@@ -860,7 +759,7 @@ impl WithdrawalClaim {
             &[
                 vec![WITHDRAWAL_CLAIM_DOMAIN],
                 self.close_intent_digest.to_u32_vec(),
-                self.user_id.to_u32_vec(),
+                self.member_sphincs_pubkey_hash.to_u32_vec(),
                 self.l1_recipient.to_u32_vec(),
                 self.user_amount_ct.digest().to_u32_vec(),
                 self.withdrawal_nullifier.to_u32_vec(),
@@ -876,7 +775,8 @@ impl WithdrawalClaim {
 #[serde(rename_all = "camelCase")]
 pub struct SpecialClose {
     pub channel_id: ChannelId,
-    pub offending_bp_key_id: KeyId,
+    pub offending_bp_member_slot: u8,
+    pub offending_bp_sphincs_pubkey_hash: Bytes32,
     pub fully_signed_small_block_root: Bytes32,
     pub small_block_number: u64,
     pub signed_medium_block_number: u64,
@@ -891,7 +791,8 @@ impl SpecialClose {
             &[
                 vec![SPECIAL_CLOSE_DOMAIN],
                 self.channel_id.to_u32_vec(),
-                self.offending_bp_key_id.to_u32_vec(),
+                vec![self.offending_bp_member_slot as u32],
+                self.offending_bp_sphincs_pubkey_hash.to_u32_vec(),
                 self.fully_signed_small_block_root.to_u32_vec(),
                 split_u64(self.small_block_number),
                 split_u64(self.signed_medium_block_number),
@@ -955,7 +856,7 @@ impl CancelClose {
 pub struct PostCloseIncomingClaim {
     pub close_intent_digest: Bytes32,
     pub incoming_tx_hash: Bytes32,
-    pub receiver_user_id: UserId,
+    pub receiver_sphincs_pubkey_hash: Bytes32,
     pub l1_recipient: Address,
     /// The receiver's delta ciphertext from the late inbound tx; the `claim_proof` (E-3) proves
     /// it decrypts to the public claim amount.
@@ -972,7 +873,7 @@ impl PostCloseIncomingClaim {
                 vec![POST_CLOSE_CLAIM_DOMAIN],
                 self.close_intent_digest.to_u32_vec(),
                 self.incoming_tx_hash.to_u32_vec(),
-                self.receiver_user_id.to_u32_vec(),
+                self.receiver_sphincs_pubkey_hash.to_u32_vec(),
                 self.l1_recipient.to_u32_vec(),
                 self.receiver_amount.digest().to_u32_vec(),
                 self.shared_native_nullifier.to_u32_vec(),
@@ -1022,39 +923,36 @@ impl ChannelTransition {
     }
 }
 
+/// Validate the 3/3 member signature set against the channel's member pubkey hashes by slot.
+///
+/// One SPHINCS+ key per member (N-of-N, no threshold): `signatures[i].member_slot == i` and
+/// `signatures[i].sphincs_pubkey_hash == record.member_sphincs_pubkey_hashes[i]`.
 pub fn validate_all_member_signatures(
     record: &ChannelRecord,
-    channel_id: ChannelId,
     signatures: &[MemberSignature],
 ) -> Result<(), ChannelError> {
     record.validate()?;
-    if signatures.len() != record.member_key_ids.len() {
+    if signatures.len() != CHANNEL_MEMBERS {
         return Err(ChannelError::InvalidSignatureSet(format!(
-            "expected {} member signatures, got {}",
-            record.member_key_ids.len(),
+            "expected {CHANNEL_MEMBERS} member signatures, got {}",
             signatures.len()
         )));
     }
-    for (expected_key_id, actual) in record.member_key_ids.iter().zip(signatures) {
-        if actual.key_id != *expected_key_id {
+    for (slot, actual) in signatures.iter().enumerate() {
+        if actual.member_slot as usize != slot {
             return Err(ChannelError::InvalidSignatureSet(format!(
-                "signature key {:?} does not match expected key {:?}",
-                actual.key_id, expected_key_id
+                "signature {slot} has member_slot {}, expected {slot}",
+                actual.member_slot
             )));
         }
-        if actual.user_id != UserId::from_parts(channel_id, *expected_key_id) {
-            return Err(ChannelError::InvalidSignatureSet(
-                "user_id must equal channel_id || key_id".to_string(),
-            ));
+        if actual.sphincs_pubkey_hash != record.member_sphincs_pubkey_hashes[slot] {
+            return Err(ChannelError::InvalidSignatureSet(format!(
+                "signature pubkey hash at slot {slot} does not match the channel member"
+            )));
         }
         if actual.signature.is_empty() {
             return Err(ChannelError::InvalidSignatureSet(
                 "signature bytes must not be empty".to_string(),
-            ));
-        }
-        if actual.key_condition_proof.is_empty() {
-            return Err(ChannelError::InvalidSignatureSet(
-                "key condition proof must not be empty".to_string(),
             ));
         }
     }
@@ -1063,14 +961,14 @@ pub fn validate_all_member_signatures(
 
 pub fn channel_balance_leaf_digest(
     channel_id: ChannelId,
-    user_id: UserId,
+    sphincs_pubkey_hash: Bytes32,
     balance_ciphertext: &RegevCiphertext,
 ) -> Bytes32 {
     hash_words(
         &[
             vec![CHANNEL_BALANCE_LEAF_DOMAIN],
             channel_id.to_u32_vec(),
-            user_id.to_u32_vec(),
+            sphincs_pubkey_hash.to_u32_vec(),
             balance_ciphertext.digest().to_u32_vec(),
         ]
         .concat(),
@@ -1079,10 +977,10 @@ pub fn channel_balance_leaf_digest(
 
 pub fn user_fund_leaf_digest(
     channel_id: ChannelId,
-    user_id: UserId,
+    sphincs_pubkey_hash: Bytes32,
     balance_ciphertext: &RegevCiphertext,
 ) -> Bytes32 {
-    channel_balance_leaf_digest(channel_id, user_id, balance_ciphertext)
+    channel_balance_leaf_digest(channel_id, sphincs_pubkey_hash, balance_ciphertext)
 }
 
 pub fn merkle_root_from_proof(leaf: Bytes32, proof: &MerkleInclusionProof) -> Bytes32 {
@@ -1101,17 +999,6 @@ pub fn merkle_root_from_proof(leaf: Bytes32, proof: &MerkleInclusionProof) -> By
     current
 }
 
-pub fn bridge_user_to_channel_id(user_id: PackedUserId) -> Result<ChannelId, ChannelError> {
-    // SECURITY: the canonical `ChannelId::new` now returns `ChannelIdError`; surface it through
-    // the channel layer's `ChannelError` so callers keep a single error type at this boundary.
-    ChannelId::new(user_id.channel_id() as u64)
-        .map_err(|e| ChannelError::InvalidIdValue(e.to_string()))
-}
-
-// NOTE (two-layer identity): `bridge_user_to_key_id` was removed. The base-layer `ChannelId`
-// carries ONLY the channel id (4 bytes); per-member `key_id` exists exclusively in the channel
-// layer and can no longer be derived from a base identifier.
-
 pub(crate) fn split_u64(value: u64) -> Vec<u32> {
     vec![(value >> 32) as u32, value as u32]
 }
@@ -1126,29 +1013,28 @@ fn bytes_to_u32_words(bytes: &[u8]) -> Vec<u32> {
     words
 }
 
-fn fixed_bytes_from_u32_word_slice(values: &[u64], len: usize) -> Result<Vec<u8>, ChannelError> {
-    let expected_words = len.div_ceil(4);
-    if values.len() != expected_words {
-        return Err(ChannelError::InvalidIdLength {
-            expected: expected_words,
-            actual: values.len(),
-        });
-    }
-    let mut out = Vec::with_capacity(expected_words * 4);
-    for word in values {
-        if *word > u32::MAX as u64 {
-            return Err(ChannelError::InvalidIdValue(format!(
-                "u32 limb out of range: {word}"
-            )));
-        }
-        out.extend_from_slice(&(u32::try_from(*word).unwrap()).to_be_bytes());
-    }
-    out.truncate(len);
-    Ok(out)
-}
-
 pub(crate) fn hash_words(words: &[u32]) -> Bytes32 {
     Bytes32::from_u32_slice(&solidity_keccak256(words)).expect("keccak output must be bytes32")
+}
+
+/// Close-circuit member-set commitment (detail2 §F-3, F5 soundness binding).
+///
+/// `member_set_commitment = keccak([IMCM, sphincs_pk_hash_0(8), sphincs_pk_hash_1(8),
+/// sphincs_pk_hash_2(8)])` over the 3 members' SPHINCS+ pubkey hashes in SLOT ORDER.
+///
+/// SECURITY: the full channel-close circuit recomputes this commitment in-circuit from the SAME 3
+/// pubkeys whose SPHINCS+ signatures it verifies, and exposes it as a public input. L1 matches the
+/// committed value against `keccak([IMCM, registered member_sphincs_pubkey_hashes])` from the
+/// channel's `ChannelRecord`, so a prover cannot substitute non-member signing keys. This native
+/// helper MUST agree byte-for-byte with the in-circuit keccak (`ChannelCloseCircuit::new`) — both
+/// use the canonical big-endian `solidity_keccak256` over one u32 word per limb.
+pub fn close_member_set_commitment(hashes: &[Bytes32; CHANNEL_MEMBERS]) -> Bytes32 {
+    let mut words = Vec::with_capacity(1 + CHANNEL_MEMBERS * 8);
+    words.push(CLOSE_MEMBER_SET_DOMAIN);
+    for hash in hashes.iter() {
+        words.extend_from_slice(&hash.to_u32_vec());
+    }
+    hash_words(&words)
 }
 
 #[cfg(test)]
@@ -1184,12 +1070,19 @@ mod tests {
         ChannelId::new(7).unwrap()
     }
 
-    fn sample_key_id(value: u64) -> KeyId {
-        KeyId::new(value).unwrap()
-    }
-
-    fn sample_user_id(value: u64) -> UserId {
-        UserId::from_parts(sample_channel_id(), sample_key_id(value))
+    /// A distinct, canonical member SPHINCS+ pubkey hash (Bytes32) per seed.
+    fn pubkey_hash(seed: u32) -> Bytes32 {
+        Bytes32::from_u32_slice(&[
+            seed,
+            seed + 1,
+            seed + 2,
+            seed + 3,
+            seed + 4,
+            seed + 5,
+            seed + 6,
+            seed + 7,
+        ])
+        .unwrap()
     }
 
     fn sample_balance_state(version: u64) -> BalanceState {
@@ -1222,34 +1115,31 @@ mod tests {
             digest: Bytes32::default(),
             member_signatures: vec![
                 MemberSignature {
-                    key_id: sample_key_id(10),
-                    user_id: sample_user_id(10),
+                    member_slot: 0,
+                    sphincs_pubkey_hash: pubkey_hash(10),
                     signature: vec![1],
-                    key_condition_proof: vec![2],
                 },
                 MemberSignature {
-                    key_id: sample_key_id(11),
-                    user_id: sample_user_id(11),
+                    member_slot: 1,
+                    sphincs_pubkey_hash: pubkey_hash(11),
                     signature: vec![3],
-                    key_condition_proof: vec![4],
                 },
                 MemberSignature {
-                    key_id: sample_key_id(12),
-                    user_id: sample_user_id(12),
+                    member_slot: 2,
+                    sphincs_pubkey_hash: pubkey_hash(12),
                     signature: vec![5],
-                    key_condition_proof: vec![6],
                 },
             ],
         }
         .with_computed_digest()
     }
 
-    fn sample_record(member_key_ids: Vec<KeyId>) -> ChannelRecord {
+    fn sample_record() -> ChannelRecord {
         ChannelRecord {
             channel_id: sample_channel_id(),
-            bp_key_id: sample_key_id(10),
-            member_key_ids,
-            member_key_ids_root: Bytes32::default(),
+            member_sphincs_pubkey_hashes: [pubkey_hash(10), pubkey_hash(11), pubkey_hash(12)],
+            member_pubkeys_root: Bytes32::from_u32_slice(&[7, 7, 7, 7, 0, 0, 0, 0]).unwrap(),
+            bp_member_slot: 0,
             special_close_penalty: U256::from(5u32),
             close_freeze_nonce: 0,
             status: ChannelStatus::Active,
@@ -1267,19 +1157,6 @@ mod tests {
             burn_amount: state.channel_fund.amount,
             zkp: vec![1, 2, 3],
         }
-    }
-
-    #[test]
-    fn user_id_roundtrip() {
-        let channel_id = ChannelId::new(0x01020304).unwrap();
-        let key_id = KeyId::new(0x06070809).unwrap();
-        let user_id = UserId::from_parts(channel_id, key_id);
-        assert_eq!(user_id.channel_id(), channel_id);
-        assert_eq!(user_id.key_id(), key_id);
-        assert_eq!(
-            UserId::from_u64_slice(&user_id.to_u64_vec()).unwrap(),
-            user_id
-        );
     }
 
     #[test]
@@ -1343,6 +1220,27 @@ mod tests {
         assert_eq!(intent.signing_digest(), expected);
     }
 
+    /// Shared Rust<->Solidity test vector for the F7 close-circuit member-set commitment. The
+    /// SAME 3 member pubkey hashes (h0 = limbs 1..8, h1 = 9..16, h2 = 17..24) are hashed by
+    /// `ChannelSettlementVerifier.closeMemberSetCommitment` in
+    /// contracts/test/ChannelSettlementManager.t.sol
+    /// (`test_member_set_commitment_matches_rust_shared_vector`) and MUST produce the same
+    /// constant. If the two sides disagree, the Solidity `abi.encodePacked` mirror of the IMCM
+    /// preimage is stale — fix Solidity, not this digest.
+    #[test]
+    fn close_member_set_commitment_matches_solidity_shared_vector() {
+        let words = |base: u32| -> Vec<u32> { (base..base + 8).collect() };
+        let hashes = [
+            Bytes32::from_u32_slice(&words(1)).unwrap(),
+            Bytes32::from_u32_slice(&words(9)).unwrap(),
+            Bytes32::from_u32_slice(&words(17)).unwrap(),
+        ];
+        let expected =
+            Bytes32::from_hex("0x0f7f77fe100791e7f70be85d8d4d6f5067d833c0bc0847816b9e9d892c9fb8e6")
+                .unwrap();
+        assert_eq!(close_member_set_commitment(&hashes), expected);
+    }
+
     #[test]
     fn close_intent_rejects_mismatched_balance_state_h1() {
         let state = sample_state();
@@ -1356,38 +1254,46 @@ mod tests {
     }
 
     #[test]
-    fn two_member_channel_records_are_rejected() {
-        // CHANNEL_MEMBERS = 3 is mandatory (abstract2 §2.1): the legacy 2-member record that the
-        // old test accepted must now FAIL validation.
-        let record = sample_record(vec![sample_key_id(10), sample_key_id(11)]);
+    fn duplicate_or_zero_member_pubkey_hashes_are_rejected() {
+        // One key per member: the 3 pubkey hashes must be nonzero and pairwise distinct.
+        let mut dup = sample_record();
+        dup.member_sphincs_pubkey_hashes[1] = dup.member_sphincs_pubkey_hashes[0];
         assert!(matches!(
-            record.validate(),
+            dup.validate(),
             Err(ChannelError::InvalidChannelRecord(_))
         ));
-        assert!(
-            validate_all_member_signatures(
-                &record,
-                sample_channel_id(),
-                &sample_state().member_signatures,
-            )
-            .is_err()
-        );
+
+        let mut zero = sample_record();
+        zero.member_sphincs_pubkey_hashes[2] = Bytes32::default();
+        assert!(matches!(
+            zero.validate(),
+            Err(ChannelError::InvalidChannelRecord(_))
+        ));
+
+        // bp_member_slot must be in range.
+        let mut bad_bp = sample_record();
+        bad_bp.bp_member_slot = CHANNEL_MEMBERS as u8;
+        assert!(matches!(
+            bad_bp.validate(),
+            Err(ChannelError::InvalidChannelRecord(_))
+        ));
     }
 
     #[test]
-    fn three_member_record_with_pk_root_validates_signatures() {
-        let record = sample_record(vec![
-            sample_key_id(10),
-            sample_key_id(11),
-            sample_key_id(12),
-        ]);
+    fn three_member_record_validates_signatures() {
+        let record = sample_record();
         record.validate().unwrap();
-        validate_all_member_signatures(
-            &record,
-            sample_channel_id(),
-            &sample_state().member_signatures,
-        )
-        .unwrap();
+        validate_all_member_signatures(&record, &sample_state().member_signatures).unwrap();
+
+        // A signature whose pubkey hash does not match the channel member at its slot is rejected.
+        let mut sigs = sample_state().member_signatures;
+        sigs[1].sphincs_pubkey_hash = pubkey_hash(99);
+        assert!(validate_all_member_signatures(&record, &sigs).is_err());
+
+        // A signature with the wrong slot index is rejected.
+        let mut sigs = sample_state().member_signatures;
+        sigs[2].member_slot = 0;
+        assert!(validate_all_member_signatures(&record, &sigs).is_err());
 
         // A zero regev_pk_root unanchors the member keys and must be rejected.
         let mut unanchored = record.clone();
@@ -1401,6 +1307,11 @@ mod tests {
         let mut other_root = record.clone();
         other_root.regev_pk_root = Bytes32::from_u32_slice(&[8, 8, 8, 8, 0, 0, 0, 0]).unwrap();
         assert_ne!(other_root.signing_digest(), record.signing_digest());
+
+        // The member pubkey hashes are signature-binding (IMCR member segment).
+        let mut other_member = record.clone();
+        other_member.member_sphincs_pubkey_hashes[0] = pubkey_hash(77);
+        assert_ne!(other_member.signing_digest(), record.signing_digest());
     }
 
     #[test]
@@ -1429,7 +1340,8 @@ mod tests {
         let small_block = SignedSmallBlock {
             message: SmallBlockRootMessage {
                 channel_id: sample_channel_id(),
-                bp_key_id: sample_key_id(10),
+                bp_member_slot: 0,
+                bp_sphincs_pubkey_hash: pubkey_hash(10),
                 small_block_number: 12,
                 prev_small_block_root: Bytes32::default(),
                 tx_tree_root: Bytes32::from_u32_slice(&[4, 0, 0, 0, 0, 0, 0, 0]).unwrap(),
@@ -1451,18 +1363,13 @@ mod tests {
             sender_delta_ct: ciphertext(31),
             source_channel_id: sample_channel_id(),
             destination_channel_id: ChannelId::new(8).unwrap(),
-            source_key_id: sample_key_id(10),
-            source_user_id: sample_user_id(10),
+            source_sphincs_pubkey_hash: pubkey_hash(10),
             seal: Bytes32::default(),
             tx_hash: Bytes32::from_u32_slice(&[3, 0, 0, 0, 0, 0, 0, 0]).unwrap(),
             intmax_transfer_commitment: Bytes32::default(),
             recipient_memo: vec![],
             receiver_deltas: vec![ReceiverBalanceDelta {
-                receiver_key_id: KeyId::new(21).unwrap(),
-                receiver_user_id: UserId::from_parts(
-                    ChannelId::new(8).unwrap(),
-                    KeyId::new(21).unwrap(),
-                ),
+                receiver_sphincs_pubkey_hash: pubkey_hash(21),
                 amount: ciphertext(32),
             }],
             channel_update_zkp: envelope(TransitionProofRole::ChannelStateUpdate, 7),
@@ -1514,9 +1421,9 @@ mod tests {
         assert_eq!(
             leaf,
             tx_leaf_hash(
-                tx.source_user_id,
+                tx.source_sphincs_pubkey_hash,
                 tx.sender_delta_ct.digest(),
-                tx.receiver_deltas[0].receiver_user_id,
+                tx.receiver_deltas[0].receiver_sphincs_pubkey_hash,
                 tx.receiver_deltas[0].amount.digest(),
             )
         );
@@ -1539,8 +1446,8 @@ mod tests {
             state.digest,
             &enc_amount,
             nonce,
-            sample_user_id(10),
-            sample_user_id(11),
+            pubkey_hash(10),
+            pubkey_hash(11),
         );
         // Sensitive to amount ciphertext, nonce, parties, prev state.
         assert_ne!(
@@ -1550,8 +1457,8 @@ mod tests {
                 state.digest,
                 &ciphertext(51),
                 nonce,
-                sample_user_id(10),
-                sample_user_id(11),
+                pubkey_hash(10),
+                pubkey_hash(11),
             )
         );
         assert_ne!(
@@ -1561,8 +1468,8 @@ mod tests {
                 state.digest,
                 &enc_amount,
                 Bytes32::default(),
-                sample_user_id(10),
-                sample_user_id(11),
+                pubkey_hash(10),
+                pubkey_hash(11),
             )
         );
         assert_ne!(
@@ -1572,8 +1479,8 @@ mod tests {
                 state.digest,
                 &enc_amount,
                 nonce,
-                sample_user_id(11),
-                sample_user_id(10),
+                pubkey_hash(11),
+                pubkey_hash(10),
             )
         );
         assert_ne!(
@@ -1583,17 +1490,23 @@ mod tests {
                 Bytes32::default(),
                 &enc_amount,
                 nonce,
-                sample_user_id(10),
-                sample_user_id(11),
+                pubkey_hash(10),
+                pubkey_hash(11),
             )
         );
     }
 
     #[test]
-    fn withdrawal_nullifier_depends_on_user_id() {
+    fn withdrawal_nullifier_depends_on_member_pubkey_hash() {
         let close_digest = Bytes32::from_u32_slice(&[7, 0, 0, 0, 0, 0, 0, 0]).unwrap();
-        let a = WithdrawalClaim::derive_nullifier(close_digest, sample_user_id(10));
-        let b = WithdrawalClaim::derive_nullifier(close_digest, sample_user_id(11));
+        let a = WithdrawalClaim::derive_nullifier(close_digest, pubkey_hash(10));
+        let b = WithdrawalClaim::derive_nullifier(close_digest, pubkey_hash(11));
         assert_ne!(a, b);
+        // The close-intent digest (which embeds channel_id) is part of the nullifier preimage.
+        let other_close = Bytes32::from_u32_slice(&[8, 0, 0, 0, 0, 0, 0, 0]).unwrap();
+        assert_ne!(
+            a,
+            WithdrawalClaim::derive_nullifier(other_close, pubkey_hash(10))
+        );
     }
 }

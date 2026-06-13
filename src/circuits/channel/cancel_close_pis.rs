@@ -102,14 +102,28 @@ mod tests {
         common::{
             balance_state::BalanceState,
             channel::{
-                ChannelFund, ChannelId, ChannelProofEnvelope, ChannelState, CloseWithdrawal, KeyId,
+                ChannelFund, ChannelId, ChannelProofEnvelope, ChannelState, CloseWithdrawal,
                 MemberSignature, MerkleInclusionProof, ProofBackend, ReceiverBalanceDelta,
-                SignedSmallBlock, SmallBlockRootMessage, TransitionProofRole, UserId,
+                SignedSmallBlock, SmallBlockRootMessage, TransitionProofRole,
             },
         },
         ethereum_types::{bytes32::Bytes32, u256::U256},
         regev::{REGEV_N, REGEV_Q, RegevCiphertext},
     };
+
+    fn pubkey_hash(seed: u32) -> Bytes32 {
+        Bytes32::from_u32_slice(&[
+            seed,
+            seed + 1,
+            seed + 2,
+            seed + 3,
+            seed + 4,
+            seed + 5,
+            seed + 6,
+            seed + 7,
+        ])
+        .unwrap()
+    }
 
     fn ciphertext(seed: u32) -> RegevCiphertext {
         RegevCiphertext {
@@ -146,10 +160,9 @@ mod tests {
             prev_digest: Bytes32::default(),
             digest: Bytes32::default(),
             member_signatures: vec![MemberSignature {
-                key_id: KeyId::new(10).unwrap(),
-                user_id: UserId::from_parts(ChannelId::new(3).unwrap(), KeyId::new(10).unwrap()),
+                member_slot: 0,
+                sphincs_pubkey_hash: pubkey_hash(10),
                 signature: vec![1],
-                key_condition_proof: vec![2],
             }],
         }
         .with_computed_digest();
@@ -176,7 +189,8 @@ mod tests {
             signed_small_block: SignedSmallBlock {
                 message: SmallBlockRootMessage {
                     channel_id: close_intent.channel_id,
-                    bp_key_id: KeyId::new(10).unwrap(),
+                    bp_member_slot: 0,
+                    bp_sphincs_pubkey_hash: pubkey_hash(10),
                     small_block_number: 5,
                     prev_small_block_root: Bytes32::default(),
                     tx_tree_root: Bytes32::from_u32_slice(&[4, 0, 0, 0, 0, 0, 0, 0]).unwrap(),
@@ -185,10 +199,9 @@ mod tests {
                     close_freeze_nonce: 0,
                 },
                 signatures: vec![MemberSignature {
-                    key_id: KeyId::new(10).unwrap(),
-                    user_id: UserId::from_parts(close_intent.channel_id, KeyId::new(10).unwrap()),
+                    member_slot: 0,
+                    sphincs_pubkey_hash: pubkey_hash(10),
                     signature: vec![1],
-                    key_condition_proof: vec![2],
                 }],
                 aggregated_signature_proof: vec![3],
                 medium_block_number: 3,
@@ -197,18 +210,13 @@ mod tests {
             sender_delta_ct: ciphertext(10),
             source_channel_id: close_intent.channel_id,
             destination_channel_id: ChannelId::new(4).unwrap(),
-            source_key_id: KeyId::new(10).unwrap(),
-            source_user_id: UserId::from_parts(close_intent.channel_id, KeyId::new(10).unwrap()),
+            source_sphincs_pubkey_hash: pubkey_hash(10),
             seal: Bytes32::from_u32_slice(&[8, 0, 0, 0, 0, 0, 0, 0]).unwrap(),
             tx_hash: Bytes32::from_u32_slice(&[9, 0, 0, 0, 0, 0, 0, 0]).unwrap(),
             intmax_transfer_commitment: Bytes32::default(),
             recipient_memo: vec![1, 2],
             receiver_deltas: vec![ReceiverBalanceDelta {
-                receiver_key_id: KeyId::new(11).unwrap(),
-                receiver_user_id: UserId::from_parts(
-                    ChannelId::new(4).unwrap(),
-                    KeyId::new(11).unwrap(),
-                ),
+                receiver_sphincs_pubkey_hash: pubkey_hash(11),
                 amount: ciphertext(11),
             }],
             channel_update_zkp: ChannelProofEnvelope {

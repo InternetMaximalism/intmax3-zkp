@@ -53,9 +53,9 @@ use crate::{
         channel::{
             CancelClose, ChannelFund, ChannelId, ChannelMember, ChannelRecord, ChannelState,
             ChannelStatus, ChannelTransitionKind, ChannelTx, CloseIntent, CloseWithdrawal,
-            InterChannelTx, KeyId, MemberSignature, MerkleInclusionProof, PostCloseIncomingClaim,
+            InterChannelTx, MemberSignature, MerkleInclusionProof, PostCloseIncomingClaim,
             ProofBackend, ReceiverBalanceDelta, SignedSmallBlock, SmallBlockRootMessage,
-            TransitionProofRole, UserId, WithdrawalClaim,
+            TransitionProofRole, WithdrawalClaim,
         },
     },
     constants::CHANNEL_MEMBERS,
@@ -114,12 +114,21 @@ impl ChannelProofVerifier for StructuralTransportVerifier {
 // Fixture helpers (patterns carried over from the SIS-era flow, on the new types)
 // ---------------------------------------------------------------------------
 
-fn key(value: u64) -> KeyId {
-    KeyId::new(value).unwrap()
-}
-
-fn user(channel_id: ChannelId, value: u64) -> UserId {
-    UserId::from_parts(channel_id, key(value))
+/// A member's SPHINCS+ pubkey hash, deterministic in (channel_id, member value). One key per
+/// member: this IS the member identity (no KeyId/UserId).
+fn user(channel_id: ChannelId, value: u64) -> Bytes32 {
+    let ch = channel_id.as_u64() as u32;
+    Bytes32::from_u32_slice(&[
+        0xdead_0000 ^ ch,
+        value as u32,
+        ch,
+        value as u32 + 1,
+        ch + 1,
+        value as u32 + 2,
+        ch + 2,
+        value as u32 + 3,
+    ])
+    .unwrap()
 }
 
 fn bytes32_word(word: u32) -> Bytes32 {
@@ -130,17 +139,19 @@ fn address_word(word: u32) -> Address {
     Address::from_u32_slice(&[0, 0, 0, 0, word]).unwrap()
 }
 
+/// Build a 3-member channel record. `member_pubkey_hashes` are in slot order; `bp_member_slot`
+/// selects the block proposer.
 fn channel_record(
     channel_id: ChannelId,
-    bp_key_id: KeyId,
-    member_key_ids: Vec<KeyId>,
+    bp_member_slot: u8,
+    member_pubkey_hashes: [Bytes32; CHANNEL_MEMBERS],
     regev_pk_root: Bytes32,
 ) -> ChannelRecord {
     ChannelRecord {
         channel_id,
-        bp_key_id,
-        member_key_ids,
-        member_key_ids_root: bytes32_word(100 + channel_id.as_u64() as u32),
+        member_sphincs_pubkey_hashes: member_pubkey_hashes,
+        member_pubkeys_root: bytes32_word(100 + channel_id.as_u64() as u32),
+        bp_member_slot,
         special_close_penalty: U256::from(9u32),
         close_freeze_nonce: 0,
         status: ChannelStatus::Active,
@@ -150,14 +161,13 @@ fn channel_record(
 
 fn signatures_for(record: &ChannelRecord) -> Vec<MemberSignature> {
     record
-        .member_key_ids
+        .member_sphincs_pubkey_hashes
         .iter()
         .enumerate()
-        .map(|(idx, key_id)| MemberSignature {
-            key_id: *key_id,
-            user_id: UserId::from_parts(record.channel_id, *key_id),
+        .map(|(idx, hash)| MemberSignature {
+            member_slot: idx as u8,
+            sphincs_pubkey_hash: *hash,
             signature: vec![1 + idx as u8],
-            key_condition_proof: vec![11 + idx as u8],
         })
         .collect()
 }
@@ -265,8 +275,8 @@ fn build_flow() -> FlowFixture {
     let a_pks = [a_pk0, a_pk1, a_pk2];
     let sender_record = channel_record(
         a_id,
-        key(10),
-        vec![key(10), key(11), key(12)],
+        0,
+        [user(a_id, 10), user(a_id, 11), user(a_id, 12)],
         regev_pk_root(&a_pks),
     );
 
@@ -277,8 +287,8 @@ fn build_flow() -> FlowFixture {
     let b_pks = [b_pk0, b_pk1, b_pk2];
     let receiver_record = channel_record(
         b_id,
-        key(21),
-        vec![key(21), key(22), key(23)],
+        0,
+        [user(b_id, 21), user(b_id, 22), user(b_id, 23)],
         regev_pk_root(&b_pks),
     );
 
@@ -335,11 +345,11 @@ fn build_flow() -> FlowFixture {
     .with_computed_digest();
 
     let channel_tx = ChannelTx {
-        recipient_user_id: user(a_id, 11),
+        recipient_sphincs_pubkey_hash: user(a_id, 11),
         enc_amount: enc_amount.0.clone(),
         nonce: bytes32_word(777),
         channel_tx_zkp: state_update_envelope(e1_proof),
-        sender_user_id: user(a_id, 10),
+        sender_sphincs_pubkey_hash: user(a_id, 10),
         sender_signature: vec![1, 2, 3],
     };
     let in_channel = InChannelTransferUpdateWitness {
@@ -414,7 +424,8 @@ fn build_flow() -> FlowFixture {
     let signed_small_block = SignedSmallBlock {
         message: SmallBlockRootMessage {
             channel_id: a_id,
-            bp_key_id: key(10),
+            bp_member_slot: 0,
+            bp_sphincs_pubkey_hash: user(a_id, 10),
             small_block_number: 1,
             prev_small_block_root: bytes32_word(300),
             tx_tree_root,
@@ -435,15 +446,13 @@ fn build_flow() -> FlowFixture {
         sender_delta_ct: sender_delta.0.clone(),
         source_channel_id: a_id,
         destination_channel_id: b_id,
-        source_key_id: key(10),
-        source_user_id: user(a_id, 10),
+        source_sphincs_pubkey_hash: user(a_id, 10),
         seal: bytes32_word(501),
         tx_hash: bytes32_word(502),
         intmax_transfer_commitment: bytes32_word(503),
         recipient_memo: vec![1, 2, 3],
         receiver_deltas: vec![ReceiverBalanceDelta {
-            receiver_key_id: key(21),
-            receiver_user_id: user(b_id, 21),
+            receiver_sphincs_pubkey_hash: user(b_id, 21),
             amount: receiver_delta.0.clone(),
         }],
         channel_update_zkp: state_update_envelope(e2_proof),
@@ -770,8 +779,8 @@ fn channel_native_regev_full_flow_e2e() {
     // (g) WithdrawalClaim for dave: the E-3 decryption AIR opens his final slot publicly.
     let final_amount = B_GENESIS[0] + INTER_CHANNEL_AMOUNT;
     let dave_member = ChannelMember {
-        key_id: key(21),
-        user_id: user(b_id, 21),
+        sphincs_pubkey_hash: user(b_id, 21),
+        member_slot: 0,
         l1_withdrawal_recipient: address_word(91),
     };
     let dave_slot = final_state.balance_state.enc_balances[0].clone();
@@ -779,12 +788,12 @@ fn channel_native_regev_full_flow_e2e() {
         prove_withdraw_claim(LEVEL, &f.b_pks[0], &f.b_sks[0], &dave_slot, final_amount).unwrap();
     let withdrawal_claim = WithdrawalClaim {
         close_intent_digest: close_intent.signing_digest(),
-        user_id: dave_member.user_id,
+        member_sphincs_pubkey_hash: dave_member.sphincs_pubkey_hash,
         l1_recipient: dave_member.l1_withdrawal_recipient,
         user_amount_ct: dave_slot,
         withdrawal_nullifier: WithdrawalClaim::derive_nullifier(
             close_intent.signing_digest(),
-            dave_member.user_id,
+            dave_member.sphincs_pubkey_hash,
         ),
         claim_proof,
     };
@@ -828,7 +837,7 @@ fn channel_native_regev_full_flow_e2e() {
     let post_close_claim = PostCloseIncomingClaim {
         close_intent_digest: close_intent.signing_digest(),
         incoming_tx_hash: f.send.inter_channel_tx.tx_hash,
-        receiver_user_id: user(b_id, 21),
+        receiver_sphincs_pubkey_hash: user(b_id, 21),
         l1_recipient: address_word(91),
         receiver_amount: late_delta_ct,
         shared_native_nullifier: bytes32_word(801),
