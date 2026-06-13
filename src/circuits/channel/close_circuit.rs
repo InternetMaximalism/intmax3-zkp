@@ -42,7 +42,7 @@ use crate::{
         test_utils::sphincs_sign::pk_hash_from_pk_bytes,
     },
     common::{balance_state::BALANCE_STATE_DOMAIN, channel::close_member_set_commitment},
-    constants::CHANNEL_MEMBERS,
+    constants::MAX_CHANNEL_MEMBERS,
     ethereum_types::{
         bytes32::{BYTES32_LEN, Bytes32, Bytes32Target},
         u32limb_trait::U32LimbTargetTrait,
@@ -88,10 +88,14 @@ pub struct ChannelClosePublicInputsTarget {
     pub snapshot_medium_block_number: U64Target,
     pub final_state_version: U64Target,
     pub final_settled_tx_chain: Bytes32Target,
-    /// F5 binding: keccak commitment over the 3 verified member SPHINCS+ pubkey hashes (slot
-    /// order). Computed in-circuit from the signing keys and matched on L1 against the channel's
-    /// registered member set.
+    /// F5 binding: keccak commitment over the verified member SPHINCS+ pubkey hashes
+    /// (`[IMCM, member_count, h_0..h_15]`, padding zeroed). Computed in-circuit from the signing
+    /// keys and matched on L1 against the channel's registered member set.
     pub member_set_commitment: Bytes32Target,
+    /// D6 (pad-to-MAX): number of ACTIVE members, range-checked `< MAX_CHANNEL_MEMBERS+1` and used
+    /// to gate per-slot SPHINCS+ verification and the member_set_commitment select. Single limb,
+    /// appended at the END of the close PI vector.
+    pub member_count: Target,
 }
 
 impl ChannelClosePublicInputsTarget {
@@ -124,6 +128,7 @@ impl ChannelClosePublicInputsTarget {
             final_state_version: U64Target::new(builder, true),
             final_settled_tx_chain: Bytes32Target::new(builder, true),
             member_set_commitment: Bytes32Target::new(builder, true),
+            member_count: u32_limb(builder),
         }
     }
 
@@ -145,6 +150,7 @@ impl ChannelClosePublicInputsTarget {
             self.final_state_version.to_vec(),
             self.final_settled_tx_chain.to_vec(),
             self.member_set_commitment.to_vec(),
+            vec![self.member_count],
         ]
         .concat();
         debug_assert_eq!(v.len(), CHANNEL_CLOSE_PUBLIC_INPUTS_LEN);
@@ -191,6 +197,8 @@ impl ChannelClosePublicInputsTarget {
         cursor += BYTES32_LEN;
         let member_set_commitment =
             Bytes32Target::from_slice(&values[cursor..cursor + BYTES32_LEN]);
+        cursor += BYTES32_LEN;
+        let member_count = values[cursor];
         Self {
             channel_id,
             close_nonce,
@@ -208,6 +216,7 @@ impl ChannelClosePublicInputsTarget {
             final_state_version,
             final_settled_tx_chain,
             member_set_commitment,
+            member_count,
         }
     }
 
@@ -251,6 +260,9 @@ impl ChannelClosePublicInputsTarget {
             .set_witness(witness, value.final_settled_tx_chain);
         self.member_set_commitment
             .set_witness(witness, value.member_set_commitment);
+        witness
+            .set_target(self.member_count, F::from_canonical_u8(value.member_count))
+            .unwrap();
     }
 }
 
@@ -297,21 +309,27 @@ where
     /// `settled_tx_chain` / `channel_id` public inputs are constrained equal to the close PIs;
     /// its verifier data is pinned as circuit constants (see `ChannelCloseCircuit::new`).
     pub final_balance_proof: ProofWithPublicInputs<F, C, D>,
-    /// Exactly `CHANNEL_MEMBERS` entries, one per member slot — ALL members must sign the final
-    /// channel state digest (unanimous close; no threshold relaxation).
+    /// Exactly `member_count` ACTIVE entries, one per active member slot (pad-to-MAX D6) — ALL
+    /// active members must sign the final channel state digest (unanimous close; no threshold
+    /// relaxation). Padding slots (`>= member_count`) are filled with a dummy SPHINCS+ witness
+    /// in-circuit and gated off.
     pub member_auth: Vec<MemberCloseAuth>,
 }
 
-/// Native mirror of the in-circuit member-set commitment: derive each member's `sphincs_pk_hash`
-/// from `pk_bytes` (slot order) and keccak them under the IMCM domain. MUST agree byte-for-byte
-/// with the in-circuit keccak in [`ChannelCloseCircuit::new`].
+/// Native mirror of the in-circuit member-set commitment: derive each ACTIVE member's
+/// `sphincs_pk_hash` from `pk_bytes` (slot order), pad to MAX_CHANNEL_MEMBERS (padding =
+/// `Bytes32::default()`), and keccak `[IMCM, member_count, h_0..h_{MAX-1}]`. MUST agree
+/// byte-for-byte with the in-circuit keccak in [`ChannelCloseCircuit::new`].
 ///
-/// The caller guarantees `member_auth.len() == CHANNEL_MEMBERS` (checked in `prove`); a wrong
-/// length here is a programming error and panics via the array conversion.
+/// The caller guarantees `member_auth.len()` equals the active member_count (checked in `prove`).
 fn member_set_commitment_for_auth(member_auth: &[MemberCloseAuth]) -> Bytes32 {
-    let hashes: [Bytes32; CHANNEL_MEMBERS] =
-        std::array::from_fn(|i| pk_hash_from_pk_bytes(&member_auth[i].pk_bytes).into());
-    close_member_set_commitment(&hashes)
+    let hashes: [Bytes32; MAX_CHANNEL_MEMBERS] = std::array::from_fn(|i| {
+        member_auth
+            .get(i)
+            .map(|a| pk_hash_from_pk_bytes(&a.pk_bytes).into())
+            .unwrap_or_default()
+    });
+    close_member_set_commitment(&hashes, member_auth.len() as u8)
 }
 
 pub struct ChannelCloseCircuit<F, C, const D: usize>
@@ -333,8 +351,11 @@ where
     pending_adds: Vec<Target>,
     /// The recursively verified final balance proof.
     final_balance_proof: ProofWithPublicInputsTarget<D>,
-    /// Per-member SPHINCS+ signature targets.
+    /// Per-slot SPHINCS+ signature targets (length MAX_CHANNEL_MEMBERS).
     member_sig_targets: Vec<SpxSigTargets>,
+    /// D6 per-slot activeness flags `active_bits[i] = (i < member_count)`. Set from member_count
+    /// in `fill_witness`.
+    active_bits: Vec<plonky2::iop::target::BoolTarget>,
 }
 
 impl<F, C, const D: usize> ChannelCloseCircuit<F, C, D>
@@ -366,12 +387,39 @@ where
         let final_state_unallocated_confirmed_incoming = U256Target::new(&mut builder, true);
         let final_state_prev_digest = Bytes32Target::new(&mut builder, true);
         let final_state_h2_tag = Bytes32Target::new(&mut builder, true);
-        let enc_balance_digests: Vec<Bytes32Target> = (0..CHANNEL_MEMBERS)
+        let enc_balance_digests: Vec<Bytes32Target> = (0..MAX_CHANNEL_MEMBERS)
             .map(|_| Bytes32Target::new(&mut builder, true))
             .collect();
-        let pending_adds: Vec<Target> = (0..CHANNEL_MEMBERS)
+        let pending_adds: Vec<Target> = (0..MAX_CHANNEL_MEMBERS)
             .map(|_| u32_limb(&mut builder))
             .collect();
+
+        // D6: per-slot activeness flags `slot_is_active[i] = (i < member_count)`. Built from a
+        // unary decomposition: `member_count = Σ_i active_bits[i]` with each bit Boolean and the
+        // sequence monotonically non-increasing (1*…1*0*…). This forces `active_bits[i] = (i <
+        // member_count)` for member_count in 0..=MAX_CHANNEL_MEMBERS. These flags gate the
+        // per-slot SPHINCS+ verification and the member_set_commitment select below.
+        let mut active_bits: Vec<plonky2::iop::target::BoolTarget> =
+            Vec::with_capacity(MAX_CHANNEL_MEMBERS);
+        for _ in 0..MAX_CHANNEL_MEMBERS {
+            active_bits.push(builder.add_virtual_bool_target_safe());
+        }
+        // Monotonicity: active_bits[i+1] => active_bits[i] (no active slot after a padding slot).
+        // Equivalent to active_bits[i] >= active_bits[i+1], i.e.
+        // active_bits[i+1]*(1-active_bits[i]) == 0.
+        let one = builder.one();
+        let zero_t = builder.zero();
+        for i in 0..MAX_CHANNEL_MEMBERS - 1 {
+            let one_minus_prev = builder.sub(one, active_bits[i].target);
+            let prod = builder.mul(active_bits[i + 1].target, one_minus_prev);
+            builder.connect(prod, zero_t);
+        }
+        // member_count == Σ active_bits (binds the witnessed flags to the PI limb).
+        let mut count_sum = builder.zero();
+        for bit in &active_bits {
+            count_sum = builder.add(count_sum, bit.target);
+        }
+        builder.connect(count_sum, public_inputs.member_count);
 
         let one = U64Target::constant(&mut builder, U64::from(1u64));
         let incremented_close_freeze_nonce = final_state_close_freeze_nonce.add(&mut builder, &one);
@@ -389,18 +437,20 @@ where
 
         // ── (b) H1 in-circuit recompute (IMBS, detail2 §C-2 + D3) ──────────
         //
-        // SECURITY: this anchors `final_settled_tx_chain` and `final_state_version` as the
-        // unique values inside the signed H1 — the same PI targets feed the H1 preimage, the
-        // IMCH/IMCI tails AND the balance-proof equality below, so no two of those bindings can
-        // diverge. Preimage limb order matches `BalanceState::h1()` exactly:
-        // [IMBS, channel_id, d0, d1, d2, settled_tx_chain, split_u64(state_version),
-        //  pending_adds[0..3]].
+        // SECURITY: this anchors `final_settled_tx_chain`, `final_state_version` AND `member_count`
+        // as the unique values inside the signed H1 — the same PI targets feed the H1 preimage,
+        // the IMCH/IMCI tails AND the balance-proof equality below, so no two of those bindings can
+        // diverge. Preimage limb order matches `BalanceState::h1()` exactly (pad-to-MAX D6):
+        // [IMBS, channel_id, member_count, d_0..d_{MAX-1}, settled_tx_chain,
+        //  split_u64(state_version), pending_adds[0..MAX]].
         let h1_inputs = [
             vec![balance_state_domain],
             public_inputs.channel_id.to_vec(),
-            enc_balance_digests[0].to_vec(),
-            enc_balance_digests[1].to_vec(),
-            enc_balance_digests[2].to_vec(),
+            vec![public_inputs.member_count],
+            enc_balance_digests
+                .iter()
+                .flat_map(Bytes32Target::to_vec)
+                .collect::<Vec<_>>(),
             public_inputs.final_settled_tx_chain.to_vec(),
             public_inputs.final_state_version.to_vec(),
             pending_adds.clone(),
@@ -490,26 +540,32 @@ where
             .settled_tx_chain
             .connect(&mut builder, public_inputs.final_settled_tx_chain);
 
-        // ── (f) 3-member SPHINCS+ signature verification over IMCH ─────────
+        // ── (f) N-member SPHINCS+ signature verification over IMCH (pad-to-MAX D6) ─
         //
         // Message = the 8 u32 limbs of the RECOMPUTED `final_channel_state_digest` (the same
-        // shape the validity circuits use, detail2 §F-2/§F-3). All `CHANNEL_MEMBERS` slots are
-        // verified UNCONDITIONALLY — a unanimous close admits no dummy slot and no threshold
-        // relaxation (D4).
+        // shape the validity circuits use, detail2 §F-2/§F-3). The loop runs over ALL
+        // `MAX_CHANNEL_MEMBERS` slots; `verify_circuit` is built for every slot (fixed circuit),
+        // but the root-equality assertion is GATED on `active_bits[i] = (i < member_count)`:
+        //   * ACTIVE slot: the recomputed hypertree root MUST equal the public root (real sig).
+        //   * PADDING slot: the equality is NOT enforced; the witness supplies a dummy
+        //     `SpxSigWitness` so the slot adds no real constraint (mirrors the gated
+        //     `conditional_assert_eq` pattern in `update_channel_tree.rs`). A unanimous close still
+        //     admits no threshold relaxation: ALL active members sign (D4).
         //
         // SECURITY (F5 member-set binding): for each slot we recompute `sphincs_pk_hash_i =
         // Poseidon(pub_seed_i || pub_root_i)` from the SAME pubkey verified below, convert it to
-        // its canonical 8-limb Bytes32 form, and commit all three (slot order) into
-        // `member_set_commitment = keccak([IMCM, h0, h1, h2])`, exposed as a public input. L1
-        // matches this against the channel's registered member set, so the 3 verified signing keys
-        // CANNOT be substituted with non-member keys (the prior prover-choice hole). The keccak
-        // here is byte-identical to the native `common::channel::close_member_set_commitment`.
+        // its canonical 8-limb Bytes32 form, SELECT zero for padding slots, and commit
+        // `member_set_commitment = keccak([IMCM, member_count, h_0..h_{MAX-1}])` (padding zeroed),
+        // exposed as a public input. L1 matches this against the channel's registered member set,
+        // so the verified signing keys CANNOT be substituted with non-member keys. The keccak here
+        // is byte-identical to the native `common::channel::close_member_set_commitment`.
         let msg_gl: Vec<Target> = state_digest.to_vec();
-        let mut member_sig_targets: Vec<SpxSigTargets> = Vec::with_capacity(CHANNEL_MEMBERS);
+        let mut member_sig_targets: Vec<SpxSigTargets> = Vec::with_capacity(MAX_CHANNEL_MEMBERS);
         let close_member_set_domain =
             builder.constant(F::from_canonical_u32(CLOSE_MEMBER_SET_DOMAIN));
-        let mut member_set_inputs: Vec<Target> = vec![close_member_set_domain];
-        for _ in 0..CHANNEL_MEMBERS {
+        let mut member_set_inputs: Vec<Target> =
+            vec![close_member_set_domain, public_inputs.member_count];
+        for (i, is_active) in active_bits.iter().enumerate() {
             let pub_seed_gl: [_; 2] = std::array::from_fn(|_| builder.add_virtual_target());
             let pub_root_gl: [_; 2] = std::array::from_fn(|_| builder.add_virtual_target());
             let r_gl: [_; 2] = std::array::from_fn(|_| builder.add_virtual_target());
@@ -525,10 +581,14 @@ where
             // `update_channel_tree.rs` / native `pk_hash_from_pk_bytes`).
             let pk_inputs: Vec<_> = [pub_seed_gl.as_slice(), pub_root_gl.as_slice()].concat();
             let computed_pk_hash = PoseidonHashOutTarget::hash_inputs(&mut builder, &pk_inputs);
-            // Canonical 8-limb Bytes32 form (matches `From<PoseidonHashOut> for Bytes32`), feeding
-            // the member-set keccak preimage.
+            // Canonical 8-limb Bytes32 form (matches `From<PoseidonHashOut> for Bytes32`). For a
+            // PADDING slot the keccak preimage word is forced to zero (select on is_active), so a
+            // dummy padding pubkey cannot affect the commitment.
             let pk_hash_bytes = Bytes32Target::from_hash_out(&mut builder, computed_pk_hash);
-            member_set_inputs.extend(pk_hash_bytes.to_vec());
+            for &limb in &pk_hash_bytes.to_vec() {
+                let selected = builder.select(*is_active, limb, zero_t);
+                member_set_inputs.push(selected);
+            }
 
             let pk_gl: Vec<_> = [pub_seed_gl.as_slice(), pub_root_gl.as_slice()].concat();
             let spx_witness = SpxVerifyWitness {
@@ -542,9 +602,11 @@ where
                 ht_auth_gl: ht_auth_gls.clone(),
             };
             let computed_root = verify_circuit(&mut builder, &spx_witness);
-            // Unconditional: the recomputed hypertree root MUST equal the public root.
-            builder.connect(computed_root[0], pub_root_gl[0]);
-            builder.connect(computed_root[1], pub_root_gl[1]);
+            // GATED: only ACTIVE slots assert the recomputed hypertree root == the public root.
+            // Padding slots verify a dummy signature whose root mismatch is intentionally ignored.
+            builder.conditional_assert_eq(is_active.target, computed_root[0], pub_root_gl[0]);
+            builder.conditional_assert_eq(is_active.target, computed_root[1], pub_root_gl[1]);
+            let _ = i;
 
             member_sig_targets.push(SpxSigTargets {
                 pub_seed_gl,
@@ -556,17 +618,16 @@ where
             });
         }
 
-        // Commit the 3 verified signing-key hashes (slot order) and bind to the PI.
+        // Commit the verified active signing-key hashes (member_count + slot order, padding zeroed)
+        // and bind to the PI.
         //
-        // SECURITY: this commitment is anchored on L1 (F7, IMPLEMENTED): the closePIHash preimage
-        // is 85 limbs (member_set_commitment appended as 8 BE u32 words), and
-        // `ChannelSettlementManager._checkCloseProof` enforces
-        // `member_set_commitment == keccak([IMCM, registered member_sphincs_pubkey_hashes])` via
-        // `registeredMemberSetCommitment()` (ChannelSettlementManager.sol). A close therefore can
-        // only finalize with the channel's registered members — the close-path prover-chosen-key
-        // hole is closed (security review 2026-06-13, close path SOUND under genesis-trusted
-        // registration). Registration distinctness is enforced on L1 (registerChannel /
-        // DuplicateRegisteredMember), so a repeated key cannot match the distinct registered set.
+        // SECURITY: this commitment is anchored on L1 (F7): the closePIHash preimage carries
+        // member_set_commitment (8 BE u32 words) + member_count (1 word), and
+        // `ChannelSettlementManager._checkCloseProof` enforces it equals the channel's registered
+        // member-set commitment. A close therefore can only finalize with the channel's registered
+        // active members (close-path prover-chosen-key hole closed under genesis-trusted
+        // registration). Registration distinctness is enforced on L1, so a repeated key cannot
+        // match the distinct registered set.
         let member_set_commitment =
             Bytes32Target::from_slice(&builder.keccak256::<C>(&member_set_inputs));
         member_set_commitment.connect(&mut builder, public_inputs.member_set_commitment);
@@ -585,6 +646,7 @@ where
             pending_adds,
             final_balance_proof,
             member_sig_targets,
+            active_bits,
         }
     }
 
@@ -596,14 +658,24 @@ where
         public_inputs: &ChannelClosePublicInputs,
         witness_value: &ChannelCloseFullWitness<F, C, D>,
     ) -> Result<PartialWitness<F>, ChannelCloseCircuitError> {
-        if witness_value.member_auth.len() != CHANNEL_MEMBERS {
+        let state = &witness_value.close.final_channel_state;
+        let member_count = state.balance_state.member_count as usize;
+        if !(2..=MAX_CHANNEL_MEMBERS).contains(&member_count) {
             return Err(ChannelCloseCircuitError::InvalidMemberAuth(format!(
-                "expected {CHANNEL_MEMBERS} member signatures, got {}",
+                "member_count {member_count} out of range (must be 2..={MAX_CHANNEL_MEMBERS})"
+            )));
+        }
+        if witness_value.member_auth.len() != member_count {
+            return Err(ChannelCloseCircuitError::InvalidMemberAuth(format!(
+                "expected {member_count} active member signatures (member_count), got {}",
                 witness_value.member_auth.len()
             )));
         }
-        let state = &witness_value.close.final_channel_state;
         let mut witness = PartialWitness::<F>::new();
+        // D6: set the per-slot activeness flags `active_bits[i] = (i < member_count)`.
+        for (i, bit) in self.active_bits.iter().enumerate() {
+            witness.set_bool_target(*bit, i < member_count).unwrap();
+        }
         // NOTE: `public_inputs.member_set_commitment` is honored AS GIVEN here — the in-circuit
         // keccak (`ChannelCloseCircuit::new`) constrains it to equal keccak(recomputed pubkey
         // hashes), so a tampered commitment PI is rejected at proving. `Self::prove` fills the
@@ -644,19 +716,26 @@ where
             )
             .map_err(|e| ChannelCloseCircuitError::FailedToProve(e.to_string()))?;
 
-        for (sig_targets, auth) in self
-            .member_sig_targets
-            .iter()
-            .zip(witness_value.member_auth.iter())
-        {
-            let sig_bytes: &[u8; SPX_SIG_BYTES] =
-                auth.signature.as_slice().try_into().map_err(|_| {
-                    ChannelCloseCircuitError::InvalidMemberAuth(format!(
-                        "SPHINCS+ signature must be {SPX_SIG_BYTES} bytes, got {}",
-                        auth.signature.len()
-                    ))
-                })?;
-            let sig_witness = SpxSigWitness::from_bytes(&auth.pk_bytes, sig_bytes);
+        // D6: ACTIVE slots get the real SPHINCS+ witness; PADDING slots get a dummy witness whose
+        // root mismatch is gated off by `active_bits` (so the slot adds no real constraint). The
+        // dummy uses the active[0] pubkey and an all-zero signature of the correct byte length —
+        // any well-shaped bytes work because the equality assertion is conditional.
+        let dummy_pk_bytes = witness_value.member_auth[0].pk_bytes;
+        let dummy_sig_bytes = [0u8; SPX_SIG_BYTES];
+        for (slot, sig_targets) in self.member_sig_targets.iter().enumerate() {
+            let sig_witness = if slot < member_count {
+                let auth = &witness_value.member_auth[slot];
+                let sig_bytes: &[u8; SPX_SIG_BYTES] =
+                    auth.signature.as_slice().try_into().map_err(|_| {
+                        ChannelCloseCircuitError::InvalidMemberAuth(format!(
+                            "SPHINCS+ signature must be {SPX_SIG_BYTES} bytes, got {}",
+                            auth.signature.len()
+                        ))
+                    })?;
+                SpxSigWitness::from_bytes(&auth.pk_bytes, sig_bytes)
+            } else {
+                SpxSigWitness::from_bytes(&dummy_pk_bytes, &dummy_sig_bytes)
+            };
             sig_targets.set_witness(&mut witness, &sig_witness);
         }
         Ok(witness)
@@ -666,14 +745,20 @@ where
         &self,
         witness_value: &ChannelCloseFullWitness<F, C, D>,
     ) -> Result<ProofWithPublicInputs<F, C, D>, ChannelCloseCircuitError> {
-        if witness_value.member_auth.len() != CHANNEL_MEMBERS {
+        let member_count = witness_value
+            .close
+            .final_channel_state
+            .balance_state
+            .member_count as usize;
+        if witness_value.member_auth.len() != member_count {
             return Err(ChannelCloseCircuitError::InvalidMemberAuth(format!(
-                "expected {CHANNEL_MEMBERS} member signatures, got {}",
+                "expected {member_count} active member signatures (member_count), got {}",
                 witness_value.member_auth.len()
             )));
         }
-        // F5: the exposed commitment binds the 3 verified signing keys (slot order); the
-        // in-circuit keccak constrains it, so this native value must match the recomputed hashes.
+        // F5: the exposed commitment binds the verified active signing keys (member_count + slot
+        // order, padding zeroed); the in-circuit keccak constrains it, so this native value must
+        // match the recomputed hashes.
         let mut public_inputs = witness_value.close.to_public_inputs()?;
         public_inputs.member_set_commitment =
             member_set_commitment_for_auth(&witness_value.member_auth);
@@ -723,13 +808,16 @@ pub(crate) mod test_fixture {
             balance::{balance_processor::BalanceProcessor, spend_circuit::SpendCircuit},
             test_utils::sphincs_sign::{sphincs_keygen, sphincs_sign},
         },
-        constants::CHANNEL_MEMBERS,
         ethereum_types::{bytes32::Bytes32, u32limb_trait::U32LimbTrait as _},
     };
 
     pub(crate) const D: usize = 2;
     pub(crate) type F = GoldilocksField;
     pub(crate) type C = PoseidonGoldilocksConfig;
+
+    /// Active member count used by the close-circuit test suite (pad-to-MAX D6: 3 active members,
+    /// the remaining `MAX_CHANNEL_MEMBERS - 3` slots are padding).
+    pub(crate) const TEST_ACTIVE_MEMBERS: usize = 3;
 
     pub(crate) struct CloseCircuitFixture {
         pub balance_processor: BalanceProcessor<F, C, D>,
@@ -762,16 +850,21 @@ pub(crate) mod test_fixture {
         })
     }
 
-    /// REAL SPHINCS+ member auth: `CHANNEL_MEMBERS` deterministic keypairs each signing the
-    /// given IMCH digest (8 u32 limbs as 8-byte LE words — the validity-circuit message shape).
-    pub(crate) fn member_auth_for_digest(digest: Bytes32, seed: u64) -> Vec<MemberCloseAuth> {
+    /// REAL SPHINCS+ member auth for an arbitrary ACTIVE member count (pad-to-MAX D6 multi-N):
+    /// `active` deterministic keypairs each signing the given IMCH digest (8 u32 limbs as 8-byte
+    /// LE words — the validity-circuit message shape).
+    pub(crate) fn member_auth_for_digest_n(
+        digest: Bytes32,
+        seed: u64,
+        active: usize,
+    ) -> Vec<MemberCloseAuth> {
         let mut rng = StdRng::seed_from_u64(seed);
         let msg_bytes: Vec<u8> = digest
             .to_u64_vec()
             .iter()
             .flat_map(|w| w.to_le_bytes())
             .collect();
-        (0..CHANNEL_MEMBERS)
+        (0..active)
             .map(|_| {
                 let kp = sphincs_keygen(rng.r#gen(), rng.r#gen(), rng.r#gen());
                 let signature = sphincs_sign(&msg_bytes, &kp).to_vec();
@@ -781,6 +874,12 @@ pub(crate) mod test_fixture {
                 }
             })
             .collect()
+    }
+
+    /// REAL SPHINCS+ member auth: `TEST_ACTIVE_MEMBERS` deterministic keypairs each signing the
+    /// given IMCH digest (8 u32 limbs as 8-byte LE words — the validity-circuit message shape).
+    pub(crate) fn member_auth_for_digest(digest: Bytes32, seed: u64) -> Vec<MemberCloseAuth> {
+        member_auth_for_digest_n(digest, seed, TEST_ACTIVE_MEMBERS)
     }
 }
 
@@ -814,10 +913,15 @@ mod tests {
         }
     }
 
-    /// A closable final state for `channel_id` 5 whose `settled_tx_chain` matches the genesis
-    /// chain (= 0) of a REAL initial balance proof.
-    fn final_state(settled_tx_chain: Bytes32) -> ChannelState {
+    /// A closable final state for `channel_id` 5 with `member_count` ACTIVE members (pad-to-MAX
+    /// D6) whose `settled_tx_chain` matches the genesis chain (= 0) of a REAL initial balance
+    /// proof. Active slots carry distinct canonical ciphertexts; padding slots are
+    /// `RegevCiphertext::padding()`.
+    fn final_state_n(member_count: usize, settled_tx_chain: Bytes32) -> ChannelState {
         let id = ChannelId::new(5).unwrap();
+        let enc: Vec<_> = (0..member_count as u32)
+            .map(|i| ciphertext(1 + i))
+            .collect();
         ChannelState {
             channel_id: id,
             epoch: 3,
@@ -830,10 +934,11 @@ mod tests {
             },
             balance_state: BalanceState {
                 channel_id: id,
-                enc_balances: [ciphertext(1), ciphertext(2), ciphertext(3)],
+                member_count: member_count as u8,
+                enc_balances: BalanceState::pad_enc_balances(&enc),
                 settled_tx_chain,
                 state_version: 9,
-                pending_adds: [0, 1, 0],
+                pending_adds: BalanceState::pad_pending_adds(&vec![0u32; member_count]),
             },
             h2_tag: Bytes32::default(),
             shared_native_nullifier_root: Bytes32::from_u32_slice(&[3, 0, 0, 0, 0, 0, 0, 0])
@@ -849,6 +954,11 @@ mod tests {
             }],
         }
         .with_computed_digest()
+    }
+
+    /// Three-active-member closable final state (existing default; pad-to-MAX D6).
+    fn final_state(settled_tx_chain: Bytes32) -> ChannelState {
+        final_state_n(TEST_ACTIVE_MEMBERS, settled_tx_chain)
     }
 
     fn close_witness_for(state: ChannelState) -> ChannelCloseWitness {
@@ -869,11 +979,14 @@ mod tests {
         }
     }
 
-    fn full_witness() -> ChannelCloseFullWitness<F, C, D> {
+    /// Build a full close witness for `member_count` ACTIVE members (pad-to-MAX D6 multi-N): the
+    /// final state, a REAL genesis balance proof (settled_tx_chain = 0), and `member_count` REAL
+    /// SPHINCS+ signatures over the recomputed IMCH digest.
+    fn full_witness_n(member_count: usize) -> ChannelCloseFullWitness<F, C, D> {
         let fx = fixture();
         // settled_tx_chain = 0: the channel never settled an inter-channel tx, so the genesis
         // (initial) balance proof carries the matching chain PI.
-        let state = final_state(Bytes32::default());
+        let state = final_state_n(member_count, Bytes32::default());
         let digest = state.digest;
         let close = close_witness_for(state);
         let mut rng = rand::thread_rng();
@@ -884,8 +997,144 @@ mod tests {
         ChannelCloseFullWitness {
             close,
             final_balance_proof,
-            member_auth: member_auth_for_digest(digest, 0xc105e),
+            member_auth: member_auth_for_digest_n(digest, 0xc105e, member_count),
         }
+    }
+
+    fn full_witness() -> ChannelCloseFullWitness<F, C, D> {
+        full_witness_n(TEST_ACTIVE_MEMBERS)
+    }
+
+    /// Prove AND verify a full close for `member_count` ACTIVE members and assert the exposed
+    /// `member_set_commitment` PI equals the native `close_member_set_commitment(&hashes,
+    /// member_count)` for that N. Shared by the multi-N happy-path tests below.
+    fn prove_and_verify_close_for(member_count: usize) {
+        let fx = fixture();
+        let witness = full_witness_n(member_count);
+        let t0 = std::time::Instant::now();
+        let proof = fx
+            .close_circuit
+            .prove(&witness)
+            .unwrap_or_else(|e| panic!("close proof for member_count {member_count} failed: {e}"));
+        println!(
+            "[close N={member_count}] full close proof: {:?} (degree bits {})",
+            t0.elapsed(),
+            fx.close_circuit.data.common.degree_bits()
+        );
+        fx.close_circuit.data.verify(proof.clone()).unwrap();
+
+        // Exposed PIs equal the close layout with the F5 commitment filled from member_auth.
+        let mut expected_pis = witness.close.to_public_inputs().unwrap();
+        let expected_commitment = member_set_commitment_for_auth(&witness.member_auth);
+        expected_pis.member_set_commitment = expected_commitment;
+        assert_eq!(expected_pis.member_count as usize, member_count);
+        let expected = expected_pis.to_u64_vec();
+        assert_eq!(expected.len(), CHANNEL_CLOSE_PUBLIC_INPUTS_LEN);
+        let actual = proof
+            .public_inputs
+            .iter()
+            .map(|field| field.to_canonical_u64())
+            .collect::<Vec<_>>();
+        assert_eq!(expected, actual);
+
+        // The exposed member_set_commitment must equal the NATIVE close_member_set_commitment over
+        // the active signing-key hashes (padding zeroed) for THIS member_count.
+        let hashes: [Bytes32; MAX_CHANNEL_MEMBERS] = std::array::from_fn(|i| {
+            witness
+                .member_auth
+                .get(i)
+                .map(|a| {
+                    crate::circuits::test_utils::sphincs_sign::pk_hash_from_pk_bytes(&a.pk_bytes)
+                        .into()
+                })
+                .unwrap_or_default()
+        });
+        let native_commitment =
+            crate::common::channel::close_member_set_commitment(&hashes, member_count as u8);
+        assert_eq!(
+            expected_commitment, native_commitment,
+            "exposed member_set_commitment must equal close_member_set_commitment for N={member_count}"
+        );
+    }
+
+    /// Multi-N happy path (D6 pad-to-MAX): full close for member_count = 2 (minimum). One close
+    /// proof at the close-circuit degree; runs in release.
+    #[cfg_attr(debug_assertions, ignore = "run with --release")]
+    #[test]
+    fn channel_close_circuit_proves_full_close_statement_n2() {
+        prove_and_verify_close_for(2);
+    }
+
+    /// Multi-N happy path (D6 pad-to-MAX): full close for member_count = MAX_CHANNEL_MEMBERS = 16
+    /// (all slots active, NO padding — every gated SPHINCS+ slot is a real active signature).
+    #[cfg_attr(debug_assertions, ignore = "run with --release")]
+    #[test]
+    fn channel_close_circuit_proves_full_close_statement_n16() {
+        assert_eq!(MAX_CHANNEL_MEMBERS, 16);
+        prove_and_verify_close_for(MAX_CHANNEL_MEMBERS);
+    }
+
+    /// Negative — member_count / active-set consistency (D6 gating): claim member_count = 3 but
+    /// make slot 2 a PADDING (dummy/zero) signature instead of a real one. Slot 2 is ACTIVE
+    /// (2 < member_count = 3), so the circuit GATES its SPHINCS+ root-equality ON and the dummy
+    /// signature's recomputed hypertree root does NOT match its public root → the close proof is
+    /// rejected. This proves the active gating binds member_count to the genuinely-signing slots:
+    /// a prover cannot under-sign an active slot by passing it off as padding.
+    #[cfg_attr(debug_assertions, ignore = "run with --release")]
+    #[test]
+    fn channel_close_circuit_rejects_padding_signature_in_active_slot() {
+        let fx = fixture();
+        // member_count = 3, but only slots 0,1 carry real signatures; slot 2 is a dummy
+        // (all-zero) signature of the correct byte length. We bypass `prove` (which would refuse
+        // the wrong auth length) and drive `fill_witness` with a hand-built witness whose
+        // member_auth has 3 entries, the last of which is a non-signing padding sig in an ACTIVE
+        // slot.
+        let mut witness = full_witness_n(3);
+        // Replace slot 2's REAL signature with an all-zero (non-verifying) one, keeping its pubkey
+        // so the byte/length checks pass — only the SPHINCS+ verification fails.
+        witness.member_auth[2].signature = vec![0u8; SPX_SIG_BYTES];
+
+        // The member_set_commitment PI must still be the value the circuit will recompute from the
+        // (now partly-dummy) pubkeys, so the FAILURE is isolated to the SPHINCS+ root equality on
+        // the active padding slot, not a commitment mismatch.
+        let mut public_inputs = witness.close.to_public_inputs().unwrap();
+        public_inputs.member_set_commitment = member_set_commitment_for_auth(&witness.member_auth);
+
+        let pw = fx
+            .close_circuit
+            .fill_witness(&public_inputs, &witness)
+            .unwrap();
+        let result = catch_unwind(AssertUnwindSafe(|| fx.close_circuit.data.prove(pw)));
+        assert!(
+            result.is_err() || result.unwrap().is_err(),
+            "an active slot whose signature is a (non-verifying) padding sig must be rejected — \
+             the gating binds member_count to the genuinely-signing active slots"
+        );
+    }
+
+    /// Negative — member_count vs auth-length consistency (native pre-check): a close witness
+    /// whose declared `member_count` (3) disagrees with the number of supplied member signatures
+    /// (here 2) is refused structurally before proving. This binds the auth set size to the
+    /// state's member_count.
+    #[cfg_attr(debug_assertions, ignore = "run with --release")]
+    #[test]
+    fn channel_close_circuit_rejects_member_count_auth_length_mismatch() {
+        let fx = fixture();
+        // State declares member_count = 3, but only 2 signatures are provided.
+        let mut witness = full_witness_n(3);
+        witness.member_auth.truncate(2);
+        assert!(matches!(
+            fx.close_circuit.prove(&witness),
+            Err(ChannelCloseCircuitError::InvalidMemberAuth(_))
+        ));
+
+        // And the in-circuit witness fill is likewise refused (active_bits would not match the
+        // supplied auths).
+        let public_inputs = witness.close.to_public_inputs().unwrap();
+        assert!(matches!(
+            fx.close_circuit.fill_witness(&public_inputs, &witness),
+            Err(ChannelCloseCircuitError::InvalidMemberAuth(_))
+        ));
     }
 
     /// Happy path: the FULL close statement (digest chain + H1 recompute + recursive balance
@@ -914,13 +1163,17 @@ mod tests {
             .collect::<Vec<_>>();
         assert_eq!(expected, actual);
 
-        // F5 binding: the exposed commitment is exactly keccak([IMCM, the 3 signing-key hashes]).
-        let expected_hashes: [Bytes32; CHANNEL_MEMBERS] =
-            std::array::from_fn(|i| pk_hash_from_pk_bytes(&witness.member_auth[i].pk_bytes).into());
+        // F5 binding: the exposed commitment is exactly keccak([IMCM, member_count, the active
+        // signing-key hashes, padding zeroed]).
         assert_eq!(
             expected_commitment,
-            close_member_set_commitment(&expected_hashes),
-            "member_set_commitment must commit exactly the 3 verified signing keys (slot order)"
+            member_set_commitment_for_auth(&witness.member_auth),
+            "member_set_commitment must commit exactly the active verified signing keys (slot order)"
+        );
+        assert_eq!(
+            expected.len(),
+            CHANNEL_CLOSE_PUBLIC_INPUTS_LEN,
+            "close PI is 86 limbs (incl. member_count, D6)"
         );
     }
 
@@ -935,20 +1188,16 @@ mod tests {
         let fx = fixture();
         let witness = full_witness();
 
-        // (a) the committed value is keccak over exactly the 3 signing keys.
-        let signed_hashes: [Bytes32; CHANNEL_MEMBERS] =
-            std::array::from_fn(|i| pk_hash_from_pk_bytes(&witness.member_auth[i].pk_bytes).into());
+        // (a) the committed value is keccak over exactly the active signing keys (member_count +
+        // slot order, padding zeroed).
         let commitment = member_set_commitment_for_auth(&witness.member_auth);
-        assert_eq!(commitment, close_member_set_commitment(&signed_hashes));
 
         // (b) a DIFFERENT (non-member) key set commits to a different value — substitution is
         // detectable by L1's member-set match.
         let other_auth = member_auth_for_digest(witness.close.final_channel_state.digest, 0xdecafe);
-        let other_hashes: [Bytes32; CHANNEL_MEMBERS] =
-            std::array::from_fn(|i| pk_hash_from_pk_bytes(&other_auth[i].pk_bytes).into());
         assert_ne!(
             commitment,
-            close_member_set_commitment(&other_hashes),
+            member_set_commitment_for_auth(&other_auth),
             "substituting the signing keys MUST change member_set_commitment"
         );
 

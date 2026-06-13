@@ -18,6 +18,7 @@ interface IChannelSettlementVerifier {
         uint64 finalStateVersion,
         bytes32 finalSettledTxChain,
         bytes32 memberSetCommitment,
+        uint8 memberCount,
         bytes calldata proof
     ) external pure returns (bool);
 
@@ -77,17 +78,18 @@ interface IChannelSettlementVerifier {
     ) external pure returns (bool);
 
     function closeMemberSetCommitment(
-        bytes32 sphincsPubkeyHash0,
-        bytes32 sphincsPubkeyHash1,
-        bytes32 sphincsPubkeyHash2
+        bytes32[16] memory memberSphincsPubkeyHashes,
+        uint8 memberCount
     ) external pure returns (bytes32);
 }
 
 contract ChannelSettlementManager {
-    /// One SPHINCS+ key per member (F7): a channel has exactly `MEMBER_COUNT` members, identified
-    /// by their SPHINCS+ pubkey hash (bytes32), slot order 0..MEMBER_COUNT. Mirrors the Rust
-    /// `CHANNEL_MEMBERS` constant (src/constants.rs).
-    uint256 internal constant MEMBER_COUNT = 3;
+    /// One SPHINCS+ key per member (D6 pad-to-MAX): a channel has between 2 and
+    /// `MAX_MEMBER_COUNT` ACTIVE members, identified by their SPHINCS+ pubkey hash (bytes32), slot
+    /// order 0..memberCount. Slots `memberCount..MAX_MEMBER_COUNT` are zero padding. Mirrors the
+    /// Rust `MAX_CHANNEL_MEMBERS` constant (src/constants.rs).
+    uint256 internal constant MAX_MEMBER_COUNT = 16;
+    uint256 internal constant MIN_MEMBER_COUNT = 2;
 
     error InvalidChannelId();
     error InvalidBpMemberSlot();
@@ -317,10 +319,16 @@ contract ChannelSettlementManager {
     uint256 public immutable specialClosePenalty;
     IChannelSettlementVerifier public immutable verifier;
 
-    /// @notice The channel's registered member SPHINCS+ pubkey hashes in slot order. Mirrors the
-    /// Rust `ChannelRecord.member_sphincs_pubkey_hashes` (src/common/channel.rs). The close proof
-    /// is bound to exactly this set via the in-circuit `memberSetCommitment`.
-    bytes32[MEMBER_COUNT] public memberSphincsPubkeyHashes;
+    /// @notice The number of ACTIVE members (2..=MAX_MEMBER_COUNT). Mirrors the Rust
+    /// `ChannelRecord.member_count` (src/common/channel.rs).
+    uint8 public immutable activeMemberCount;
+
+    /// @notice The channel's registered member SPHINCS+ pubkey hashes in slot order, ZERO-padded to
+    /// MAX_MEMBER_COUNT (D6 pad-to-MAX). Active slots (`< activeMemberCount`) are nonzero and
+    /// pairwise-distinct; padding slots are zero. Mirrors the Rust
+    /// `ChannelRecord.member_sphincs_pubkey_hashes` (src/common/channel.rs). The close proof is
+    /// bound to exactly this set via the in-circuit `memberSetCommitment`.
+    bytes32[MAX_MEMBER_COUNT] public memberSphincsPubkeyHashes;
 
     ChannelLifecycleStatus public channelStatus;
     uint64 public currentCloseFreezeNonce;
@@ -363,14 +371,20 @@ contract ChannelSettlementManager {
         MemberBinding[] memory memberBindings
     ) {
         if (channelId_ == bytes4(0)) revert InvalidChannelId();
-        // F7: the block-proposer slot must be a valid member index, and its pubkey hash nonzero.
-        if (uint256(bpMemberSlot_) >= MEMBER_COUNT) revert InvalidBpMemberSlot();
+        // D6 pad-to-MAX: 2..=MAX_MEMBER_COUNT active members are registered, slot order. Slots
+        // beyond `memberBindings.length` stay zero (padding).
+        if (
+            memberBindings.length < MIN_MEMBER_COUNT ||
+            memberBindings.length > MAX_MEMBER_COUNT
+        ) revert InvalidMemberCount();
+        // F7: the block-proposer slot must be a valid ACTIVE member index, and its pubkey hash
+        // nonzero. SECURITY: bpMemberSlot must be < the active member count (not just MAX), or a
+        // padding slot could masquerade as the proposer.
+        if (uint256(bpMemberSlot_) >= memberBindings.length) revert InvalidBpMemberSlot();
         if (bpSphincsPubkeyHash_ == bytes32(0)) revert InvalidBpMemberSlot();
         // SECURITY: a zero challenge period would let any pending close finalize in the same
         // block, voiding the whole challenge game.
         if (challengePeriod_ == 0) revert InvalidChallengePeriod();
-        // One SPHINCS+ key per member: exactly MEMBER_COUNT members are registered, slot order.
-        if (memberBindings.length != MEMBER_COUNT) revert InvalidMemberCount();
 
         channelId = channelId_;
         bpMemberSlot = bpMemberSlot_;
@@ -380,6 +394,7 @@ contract ChannelSettlementManager {
         bpBondCredits = initialBpBondCredits_;
         verifier = verifier_;
         channelStatus = ChannelLifecycleStatus.Active;
+        activeMemberCount = uint8(memberBindings.length);
 
         for (uint256 i = 0; i < memberBindings.length; i++) {
             MemberBinding memory binding = memberBindings[i];
@@ -409,16 +424,13 @@ contract ChannelSettlementManager {
         return registeredMemberPubkeyHashes.length;
     }
 
-    /// @notice The close-circuit member-set commitment for this channel's registered members:
-    /// keccak([IMCM, memberSphincsPubkeyHashes[0..2]]). The close proof's in-circuit commitment
-    /// MUST equal this value (enforced in `_checkCloseProof`), binding the verified signing keys
-    /// to the registered member set (no non-member-key substitution).
+    /// @notice The close-circuit member-set commitment for this channel's registered members
+    /// (D6 pad-to-MAX FIXED form): keccak([IMCM, activeMemberCount, memberSphincsPubkeyHashes[0..15]])
+    /// over ALL MAX_MEMBER_COUNT slots in slot order (padding zeroed). The close proof's in-circuit
+    /// commitment MUST equal this value (enforced in `_checkCloseProof`), binding the verified
+    /// signing keys to the registered member set (no non-member-key substitution).
     function registeredMemberSetCommitment() public view returns (bytes32) {
-        return verifier.closeMemberSetCommitment(
-            memberSphincsPubkeyHashes[0],
-            memberSphincsPubkeyHashes[1],
-            memberSphincsPubkeyHashes[2]
-        );
+        return verifier.closeMemberSetCommitment(memberSphincsPubkeyHashes, activeMemberCount);
     }
 
     function isNativeSendAllowed(uint64 suppliedCloseFreezeNonce) external view returns (bool) {
@@ -829,10 +841,12 @@ contract ChannelSettlementManager {
         CloseIntent calldata intent,
         bytes calldata proof
     ) internal view {
-        // F7 SECURITY: the close proof's in-circuit `memberSetCommitment` must equal this
-        // channel's registered member-set commitment, so a close can only finalize with the
-        // channel's registered SPHINCS+ members (no non-member-key substitution). The commitment
-        // is part of the close-proof public inputs (closePIHash, 85 limbs).
+        // F4/F7 SECURITY: the close proof's in-circuit `memberSetCommitment` must equal this
+        // channel's registered member-set commitment, AND the close proof's `memberCount` limb
+        // must equal this channel's `activeMemberCount`, so a close can only finalize with the
+        // channel's registered SPHINCS+ members at the registered active count (no non-member-key
+        // substitution, no active/padding-boundary forgery). Both are part of the close-proof
+        // public inputs (closePIHash, 86 limbs).
         if (
             !verifier.verifyCloseIntent(
                 channelId,
@@ -850,6 +864,7 @@ contract ChannelSettlementManager {
                 intent.finalStateVersion,
                 intent.finalSettledTxChain,
                 registeredMemberSetCommitment(),
+                activeMemberCount,
                 proof
             )
         ) revert InvalidCloseProof();

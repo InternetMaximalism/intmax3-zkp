@@ -38,6 +38,18 @@ pub struct RegevPk {
 }
 
 impl RegevPk {
+    /// Canonical all-zero public key used as the PADDING slot value in the pad-to-MAX channel
+    /// model (slots `member_count..MAX_CHANNEL_MEMBERS`). Unlike `Default::default()` (empty
+    /// vecs), this has the correct `REGEV_N` shape and all-zero (canonical) coefficients, so it
+    /// passes [`Self::validate`] and `regev_pk_root` can hash it. A padding slot carries no
+    /// member, so this fixed public constant is appropriate.
+    pub fn padding() -> Self {
+        Self {
+            a: vec![0u32; REGEV_N],
+            b: vec![0u32; REGEV_N],
+        }
+    }
+
     /// Canonicality / shape check. MUST be called on every key that crosses a trust boundary
     /// (deserialization, digest computation, encryption) before use.
     ///

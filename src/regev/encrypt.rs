@@ -57,6 +57,22 @@ pub struct RegevCiphertext {
 }
 
 impl RegevCiphertext {
+    /// Canonical all-zero ciphertext used as the PADDING slot value in the pad-to-MAX channel
+    /// model (slots `member_count..MAX_CHANNEL_MEMBERS`). Unlike `Default::default()` (empty
+    /// vecs), this has the correct `REGEV_N` shape and all-zero (canonical) coefficients, so it
+    /// passes [`Self::validate`] and has a well-defined [`Self::digest`].
+    ///
+    /// SECURITY: a padding slot carries no member, so its ciphertext is a fixed public constant —
+    /// `digest()` of it is deterministic and identical for every channel's padding slots, which is
+    /// exactly what the H1 preimage needs (padding contributes a constant, member_count selects
+    /// the active prefix).
+    pub fn padding() -> Self {
+        Self {
+            c1: vec![0u32; REGEV_N],
+            c2: vec![0u32; REGEV_N],
+        }
+    }
+
     /// Canonicality / shape check. MUST be called on every ciphertext that crosses a trust
     /// boundary (deserialization, digest computation, homomorphic addition, decryption).
     ///

@@ -2,10 +2,8 @@
 pragma solidity ^0.8.24;
 
 import {Test, console, stdStorage, StdStorage} from "forge-std/Test.sol";
-import {IntmaxRollup, IGnarkVerifier} from "../src/IntmaxRollup.sol";
-import {Verifier as GnarkVerifier} from "../src/GnarkGroth16Verifier.sol";
+import {IntmaxRollup} from "../src/IntmaxRollup.sol";
 import {KZGProof} from "../src/BlobKZGVerifier.sol";
-import {Groth16Verifier} from "../src/Groth16Verifier.sol";
 import {MleVerifier} from "@mle/MleVerifier.sol";
 import {Plonky2GateEvaluator} from "@mle/Plonky2GateEvaluator.sol";
 import {GoldilocksExt3} from "@mle/spongefish/GoldilocksExt3.sol";
@@ -14,8 +12,6 @@ import {SpongefishWhirVerify} from "@mle/spongefish/SpongefishWhirVerify.sol";
 contract IntmaxRollupTest is Test {
     using stdStorage for StdStorage;
     IntmaxRollup public rollup;
-    IntmaxRollup public e2eRollup;
-    GnarkVerifier public gnarkVerifierContract;
 
     address submitter = makeAddr("submitter");
     address blockProducer = makeAddr("blockProducer");
@@ -37,88 +33,8 @@ contract IntmaxRollupTest is Test {
     }
 
     // -----------------------------------------------------------------------
-    // Groth16 helpers — mathematically valid proofs using BN254 precompiles
+    // MLE public-input binding helpers (replace the removed Groth16 PI binding)
     // -----------------------------------------------------------------------
-
-    /// @dev BN254 field prime (for G1 y-coordinate negation).
-    uint256 internal constant BN254_FIELD_P =
-        21888242871839275222246405745257275088696311157297823662689037894645226208583;
-
-    /// @dev BN254 scalar field order (for scalar reduction before ecMul).
-    uint256 internal constant BN254_SCALAR_R =
-        21888242871839275222246405745257275088548364400416034343698204186575808495617;
-
-    /// @dev BN254 G2 generator coordinates in the format expected by Groth16Verifier:
-    ///      [[x.im, x.re], [y.im, y.re]]  (imaginary part first per gnark convention).
-    function _g2Gen() internal pure returns (uint256[2][2] memory) {
-        return [
-            [uint256(0x1800deef121f1e76426a00665e5c4479674322d4f75edadd46debd5cd992f6ed),
-             uint256(0x198e9393920d483a7260bfb731fb5d25f1aa493335a9e71297e485b7aef312c2)],
-            [uint256(0x12c85ea5db8c6deb4aab71808dcb408fe3d1e7690c43d37b4ce6cc0166fa7daa),
-             uint256(0x090689d0585ff075ec9e99ad690c3395bc4b313370b38ef355acdadcd122975b)]
-        ];
-    }
-
-    /// @dev Groth16 VK using actual BN254 generators.
-    ///      alpha = G1_gen, beta = gamma = delta = G2_gen, all IC[i] = G1_gen (9 points for 8 pubInputs).
-    ///      This VK is consistent with _groth16ProofFor() — proofs built for this VK
-    ///      satisfy the pairing equation exactly.
-    function _groth16Vk() internal pure returns (Groth16Verifier.VerifyingKey memory vk) {
-        vk.alpha = [uint256(1), uint256(2)];   // BN254 G1 generator
-        vk.beta  = _g2Gen();
-        vk.gamma = _g2Gen();
-        vk.delta = _g2Gen();
-        vk.ic = new uint256[2][](9);           // IC[0..8] for 8 public inputs
-        for (uint256 i = 0; i < 9; i++) {
-            vk.ic[i] = [uint256(1), uint256(2)];  // G1 generator
-        }
-    }
-
-    /// @dev Compute a Groth16 proof whose pairing check passes for the given 8 pubInputs
-    ///      under the VK produced by _groth16Vk().
-    ///
-    ///      Construction:
-    ///        proof.a = G1_gen, proof.b = G2_gen
-    ///        vkX = IC[0] + sum(inputs[i] * IC[i+1])
-    ///            = (1 + sum inputs[i]) * G1_gen          (since all IC[j] = G1_gen)
-    ///            = S * G1_gen   where S = 1 + sum inputs[i] mod r
-    ///        proof.c = -vkX = (vkX.x, p - vkX.y)
-    ///
-    ///      Pairing equation:
-    ///        e(-A, B) * e(alpha, beta) * e(vkX, gamma) * e(C, delta)
-    ///        = e(-G1,G2) * e(G1,G2) * e(S*G1,G2) * e(-S*G1,G2)
-    ///        = 1 * 1 = 1
-    function _groth16ProofFor(uint256[] memory inputs)
-        internal view returns (Groth16Verifier.Proof memory proof)
-    {
-        uint256 S = 1;
-        for (uint256 i = 0; i < inputs.length; i++) {
-            S = addmod(S, inputs[i], BN254_SCALAR_R);
-        }
-        // vkX = S * G1_gen via ecMul precompile (0x07)
-        uint256[3] memory mIn;
-        mIn[0] = 1; mIn[1] = 2; mIn[2] = S;
-        uint256[2] memory vkX;
-        bool ok;
-        assembly { ok := staticcall(gas(), 0x07, mIn, 0x60, vkX, 0x40) }
-        require(ok, "ecMul failed in _groth16ProofFor");
-
-        proof.a = [uint256(1), uint256(2)];
-        proof.b = _g2Gen();
-        proof.c = [vkX[0], BN254_FIELD_P - vkX[1]];  // -vkX
-    }
-
-    /// @dev Groth16 params with all-zero pubInputs and a valid pairing proof.
-    function _groth16() internal view returns (IntmaxRollup.Groth16Params memory) {
-        uint256[] memory inputs = new uint256[](8);
-        uint256[2] memory emptyC;
-        return IntmaxRollup.Groth16Params({
-            proof: _groth16ProofFor(inputs),
-            pubInputs: inputs,
-            commitments: emptyC,
-            commitmentPok: emptyC
-        });
-    }
 
     /// @dev Compute keccak256(ValidityPublicInputs) — same layout as the contract's _computeValidityPIHash.
     function _computePIHash(IntmaxRollup.ValidityPublicInputs memory pis) internal pure returns (bytes32) {
@@ -133,21 +49,16 @@ contract IntmaxRollupTest is Test {
         ));
     }
 
-    /// @dev Groth16 params with pubInputs = piHash split into 8 big-endian u32 limbs
-    ///      and proof.c computed to satisfy the pairing equation for those inputs.
-    function _groth16WithPIHash(bytes32 piHash) internal view returns (IntmaxRollup.Groth16Params memory) {
-        uint256[] memory inputs = new uint256[](8);
+    /// @dev Split a piHash into the 8 big-endian u32 limbs the contract's `_mlePublicInputsMatch`
+    ///      expects in `MleProof.publicInputs`. SECURITY: this is the soundness binding that
+    ///      replaces the removed Groth16 PI binding — only an MleProof whose `publicInputs` encode
+    ///      keccak256(ValidityPublicInputs) is accepted by finalize/fraudProof.
+    function _piLimbs(bytes32 piHash) internal pure returns (uint256[] memory limbs) {
+        limbs = new uint256[](8);
         uint256 h = uint256(piHash);
         for (uint256 i = 0; i < 8; i++) {
-            inputs[i] = (h >> (224 - i * 32)) & 0xFFFFFFFF;
+            limbs[i] = (h >> (224 - i * 32)) & 0xFFFFFFFF;
         }
-        uint256[2] memory emptyC;
-        return IntmaxRollup.Groth16Params({
-            proof: _groth16ProofFor(inputs),
-            pubInputs: inputs,
-            commitments: emptyC,
-            commitmentPok: emptyC
-        });
     }
 
     // -----------------------------------------------------------------------
@@ -376,52 +287,13 @@ contract IntmaxRollupTest is Test {
         return abi.decode(vm.parseJson(json, path), (address));
     }
 
-    function _realGroth16FromFixture(string memory groth16Json)
-        internal
-        pure
-        returns (IntmaxRollup.Groth16Params memory groth16)
-    {
-        bytes memory rawProof = abi.decode(vm.parseJson(groth16Json, ".raw_proof_hex"), (bytes));
-        require(rawProof.length >= 388, "Raw proof too short");
-
-        uint256[8] memory proof;
-        assembly {
-            let src := add(rawProof, 32)
-            for { let i := 0 } lt(i, 8) { i := add(i, 1) } {
-                mstore(add(proof, mul(i, 32)), mload(add(src, mul(i, 32))))
-            }
-        }
-
-        uint256[2] memory commitments;
-        assembly {
-            let src := add(add(rawProof, 32), 260)
-            mstore(commitments, mload(src))
-            mstore(add(commitments, 32), mload(add(src, 32)))
-        }
-
-        uint256[2] memory commitmentPok;
-        assembly {
-            let src := add(add(rawProof, 32), 324)
-            mstore(commitmentPok, mload(src))
-            mstore(add(commitmentPok, 32), mload(add(src, 32)))
-        }
-
-        uint256[] memory inputs = new uint256[](8);
-        for (uint256 i = 0; i < 8; i++) {
-            string memory key = string.concat(".public_inputs_hex[", vm.toString(i), "]");
-            inputs[i] = abi.decode(vm.parseJson(groth16Json, key), (uint256));
-        }
-
-        groth16 = IntmaxRollup.Groth16Params({
-            proof: Groth16Verifier.Proof({
-                a: [proof[0], proof[1]],
-                b: [[proof[2], proof[3]], [proof[4], proof[5]]],
-                c: [proof[6], proof[7]]
-            }),
-            pubInputs: inputs,
-            commitments: commitments,
-            commitmentPok: commitmentPok
-        });
+    /// @dev A default MleProof whose `publicInputs` encode keccak256(ValidityPublicInputs) as the 8
+    ///      big-endian u32 limbs the contract's `_mlePublicInputsMatch` requires. This is the new
+    ///      PI binding (replaces the old Groth16 pubInputs). For deployments with degreeBits=0 the
+    ///      MLE verification itself is skipped, so this proof exercises the binding path only.
+    function _mleProofWithPI(bytes32 piHash) internal pure returns (MleVerifier.MleProof memory proof) {
+        proof = _defaultMleProof();
+        proof.publicInputs = _piLimbs(piHash);
     }
 
     /// @dev Build a dummy ValidityPublicInputs that matches on-chain state.
@@ -444,14 +316,13 @@ contract IntmaxRollupTest is Test {
     // -----------------------------------------------------------------------
 
     function setUp() public {
-        gnarkVerifierContract = new GnarkVerifier();
         MleVerifier mleVerifierContract = new MleVerifier();
 
         // Non-E2E rollup: mleVk.degreeBits = 0 to skip MLE verification
-        // (non-E2E tests use synthetic Groth16 proofs with arbitrary piHash)
+        // (non-E2E tests exercise the MLE PI binding + KZG/fraud paths with a synthetic dummy
+        // proof whose `publicInputs` are set to the expected piHash limbs).
         rollup = new IntmaxRollup(
             fraudTreasury,
-            _groth16Vk(),
             _emptyMleVk(), // degreeBits = 0 → skip MLE verification
             _emptyWhirParams(),
             "",
@@ -459,25 +330,7 @@ contract IntmaxRollupTest is Test {
             _emptyMleArrays(),
             _emptyMleArrays(),
             mleVerifierContract,
-            IGnarkVerifier(address(0)),
             bytes32(0)
-        );
-
-        // E2E rollup with gnark verifier
-        // Genesis state root from e2e fixture (Plonky2 initial ExtendedPublicState hash)
-        bytes32 e2eGenesisRoot = 0x428e53c73d2e45bfa8ec3ab8e9c45fb7dcd96288a95fe1ba1fcab889e4bee766;
-        e2eRollup = new IntmaxRollup(
-            fraudTreasury,
-            _groth16Vk(),
-            _emptyMleVk(), // degreeBits = 0 (use empty VK until real MLE fixtures exist)
-            _emptyWhirParams(),
-            "",
-            "",
-            _emptyMleArrays(),
-            _emptyMleArrays(),
-            mleVerifierContract,
-            IGnarkVerifier(address(gnarkVerifierContract)),
-            e2eGenesisRoot
         );
 
         vm.deal(submitter, 10 ether);
@@ -674,8 +527,7 @@ contract IntmaxRollupTest is Test {
         MleVerifier.MleProof memory mleProof = _defaultMleProof();
 
         bool result = rollup.verify(
-            mleProof,
-            _groth16()
+            mleProof
         );
         assertTrue(result);
     }
@@ -691,18 +543,17 @@ contract IntmaxRollupTest is Test {
             gatesDigest: bytes32(0)
         });
         IntmaxRollup mleRollup = new IntmaxRollup(
-            fraudTreasury, _groth16Vk(), enabledVk,
+            fraudTreasury, enabledVk,
             _emptyWhirParams(), "", "",
             _emptyMleArrays(), _emptyMleArrays(),
-            rollup.mleVerifier(), IGnarkVerifier(address(0)), bytes32(0)
+            rollup.mleVerifier(), bytes32(0)
         );
 
         MleVerifier.MleProof memory mleProof = _defaultMleProof();
         mleProof.whirTranscript = hex"DEADBEEF";
 
         bool result = mleRollup.verify(
-            mleProof,
-            _groth16()
+            mleProof
         );
         assertFalse(result);
     }
@@ -711,100 +562,18 @@ contract IntmaxRollupTest is Test {
     // finalize() tests  —  full pipeline
     // -----------------------------------------------------------------------
 
-    function test_finalize_realE2E() public {
-        string memory groth16Json = vm.readFile(
-            string.concat(vm.projectRoot(), "/test/data/e2e_groth16.json")
-        );
-        string memory e2eJson = vm.readFile(
-            string.concat(vm.projectRoot(), "/test/data/e2e_fixture.json")
-        );
-
-        IntmaxRollup.ValidityPublicInputs memory vpis = IntmaxRollup.ValidityPublicInputs({
-            initialBlockNumber: uint64(_u(e2eJson, ".validity_public_inputs.initial_block_number")),
-            initialBlockChain: _b32(e2eJson, ".validity_public_inputs.initial_block_chain"),
-            initialExtCommitment: _b32(e2eJson, ".validity_public_inputs.initial_ext_commitment"),
-            finalBlockNumber: uint64(_u(e2eJson, ".validity_public_inputs.final_block_number")),
-            finalBlockChain: _b32(e2eJson, ".validity_public_inputs.final_block_chain"),
-            finalExtCommitment: _b32(e2eJson, ".validity_public_inputs.final_ext_commitment"),
-            prover: _addr(e2eJson, ".validity_public_inputs.prover")
-        });
-
-        IntmaxRollup.Groth16Params memory groth16 = _realGroth16FromFixture(groth16Json);
-        MleVerifier.MleProof memory mleProof = _defaultMleProof();
-        bytes memory proofBytes = abi.encode(groth16, mleProof);
-        MleVerifier mleVerifierContract = new MleVerifier();
-        GnarkVerifier localGnarkVerifier = new GnarkVerifier();
-        IntmaxRollup fixtureRollup = new IntmaxRollup(
-            fraudTreasury,
-            _groth16Vk(),
-            _emptyMleVk(),
-            _emptyWhirParams(),
-            "",
-            "",
-            _emptyMleArrays(),
-            _emptyMleArrays(),
-            mleVerifierContract,
-            IGnarkVerifier(address(localGnarkVerifier)),
-            vpis.initialExtCommitment
-        );
-
-        uint32[] memory ids = new uint32[](2);
-        ids[0] = 0;
-        ids[1] = 0;
-        IntmaxRollup.SubBlock[] memory batch = _singleBlockBatch(1, ids, 1, bytes32(0));
-
-        _postWithKZG_on(
-            fixtureRollup,
-            batch,
-            proofBytes,
-            vpis.finalExtCommitment,
-            submitter
-        );
-
-        assertEq(fixtureRollup.blockHashChainAt(0), vpis.initialBlockChain, "fixture initial block chain");
-        assertEq(
-            fixtureRollup.latestFinalizedStateRoot(),
-            vpis.initialExtCommitment,
-            "fixture initial state root"
-        );
-        assertEq(fixtureRollup.blockNumber(), vpis.finalBlockNumber, "fixture final block number");
-
-        // The historical real fixture predates forced-tx queue removal, so its
-        // final block-hash snapshot includes the old block-hash shape. Patch the
-        // snapshot slot to preserve real finalize coverage while the fixture is
-        // being regenerated for the current native block format.
-        stdstore
-            .target(address(fixtureRollup))
-            .sig("blockHashChainAt(uint64)")
-            .with_key(uint64(1))
-            .checked_write(vpis.finalBlockChain);
-        assertEq(fixtureRollup.blockHashChainAt(1), vpis.finalBlockChain, "fixture final block chain");
-
-        bool ok = fixtureRollup.finalize(
-            0,
-            vpis.finalExtCommitment,
-            vpis,
-            mleProof,
-            groth16
-        );
-
-        assertTrue(ok, "real finalize E2E should succeed");
-        assertTrue(fixtureRollup.isFinalized(0), "submission should be finalized");
-        assertEq(
-            fixtureRollup.latestFinalizedStateRoot(),
-            vpis.finalExtCommitment,
-            "finalized state root"
-        );
-        assertEq(
-            fixtureRollup.latestFinalizedBlockNumber(),
-            vpis.finalBlockNumber,
-            "finalized block number"
-        );
-        assertEq(
-            fixtureRollup.pendingWithdrawals(submitter),
-            1 ether,
-            "stake should be credited after finalize"
-        );
+    /// @notice Real MLE/WHIR finalize against the regenerated fixture (F6).
+    /// @dev PENDS F6: the Groth16 finalize fixture (e2e_groth16.json) is retired with the Groth16
+    ///      removal; the no-Groth16 finalize path is verified end-to-end by the Rust-driven
+    ///      `tests/mle_onchain_e2e.rs` harness (which regenerates the MLE fixture and drives Forge
+    ///      finalize against it). This in-suite placeholder is intentionally skipped until F6 wires
+    ///      a standalone MLE finalize fixture (mle_fixture.json + vpi_fixture.json) here. The
+    ///      no-Groth16 finalize SIGNATURE and the MLE PI binding are already exercised by
+    ///      `test_finalize_success` below (degreeBits=0, real PI binding via mleProof.publicInputs).
+    function test_finalize_realE2E_PENDS_F6() public pure {
+        // Intentionally empty: see doc comment. Real on-chain MLE finalize coverage lives in
+        // tests/mle_onchain_e2e.rs; F6 regenerates the fixture for the current circuit.
+        return;
     }
 
     function test_finalize_success() public {
@@ -815,9 +584,9 @@ contract IntmaxRollupTest is Test {
         // vpis computed BEFORE posting so blockHashChainAt[0]=0 and finalBlockNumber=0 always match.
         IntmaxRollup.ValidityPublicInputs memory vpis = _defaultValidityPIs(stateRoot);
         bytes32 piHash = _computePIHash(vpis);
-        IntmaxRollup.Groth16Params memory groth16 = _groth16WithPIHash(piHash);
+        mleProof.publicInputs = _piLimbs(piHash);
 
-        bytes memory proofBytes = abi.encode(groth16, mleProof);
+        bytes memory proofBytes = abi.encode(mleProof);
 
         uint32[] memory ids = new uint32[](1);
         ids[0] = 1;
@@ -830,8 +599,7 @@ contract IntmaxRollupTest is Test {
         bool ok = rollup.finalize(
             0, stateRoot,
             vpis,
-            mleProof,
-            groth16
+            mleProof
         );
 
         assertTrue(ok);
@@ -851,9 +619,9 @@ contract IntmaxRollupTest is Test {
 
         IntmaxRollup.ValidityPublicInputs memory vpis = _defaultValidityPIs(stateRoot);
         bytes32 piHash = _computePIHash(vpis);
-        IntmaxRollup.Groth16Params memory groth16 = _groth16WithPIHash(piHash);
+        mleProof.publicInputs = _piLimbs(piHash);
 
-        bytes memory proofBytes = abi.encode(groth16, mleProof);
+        bytes memory proofBytes = abi.encode(mleProof);
 
         uint32[] memory ids = new uint32[](1);
         ids[0] = 7;
@@ -863,15 +631,13 @@ contract IntmaxRollupTest is Test {
 
         assertTrue(rollup.finalize(
             0, stateRoot, vpis,
-            mleProof,
-            groth16
+            mleProof
         ));
 
         // Second call returns false (already finalized)
         assertFalse(rollup.finalize(
             0, stateRoot, vpis,
-            mleProof,
-            groth16
+            mleProof
         ));
     }
 
@@ -884,9 +650,9 @@ contract IntmaxRollupTest is Test {
         IntmaxRollup.ValidityPublicInputs memory vpis = _defaultValidityPIs(stateRoot);
         vpis.initialExtCommitment = bytes32(uint256(0xbad));
         bytes32 piHash = _computePIHash(vpis);
-        IntmaxRollup.Groth16Params memory groth16 = _groth16WithPIHash(piHash);
+        mleProof.publicInputs = _piLimbs(piHash);
 
-        bytes memory proofBytes = abi.encode(groth16, mleProof);
+        bytes memory proofBytes = abi.encode(mleProof);
 
         uint32[] memory ids = new uint32[](1);
         ids[0] = 9;
@@ -897,22 +663,24 @@ contract IntmaxRollupTest is Test {
         // Returns false (initial state mismatch -- initialExtCommitment = 0xbad != latestFinalizedStateRoot = 0)
         assertFalse(rollup.finalize(
             0, stateRoot, vpis,
-            mleProof,
-            groth16
+            mleProof
         ));
     }
 
-    /// @notice finalize() returns false when groth16.pubInputs[0] != keccak256(ValidityPublicInputs).
-    function test_finalize_wrongGroth16PubInputs() public {
+    /// @notice SECURITY (MLE PI binding): finalize() returns false when mleProof.publicInputs do
+    /// NOT encode keccak256(ValidityPublicInputs). This is the soundness anchor that replaces the
+    /// removed Groth16 PI binding — without it, arbitrary validityPIs (and thus an arbitrary state
+    /// root) could be finalized against any valid proof. Here the default mleProof carries EMPTY
+    /// publicInputs, so `_mlePublicInputsMatch` rejects it.
+    function test_finalize_unboundMlePublicInputs() public {
         MleVerifier.MleProof memory mleProof = _defaultMleProof();
 
         bytes32 stateRoot = keccak256("state_mismatch");
 
         IntmaxRollup.ValidityPublicInputs memory vpis = _defaultValidityPIs(stateRoot);
-        // pubInputs[0] = 1, which is != keccak256(vpis) -- PI binding check fails
-        IntmaxRollup.Groth16Params memory groth16 = _groth16(); // pubInputs[0] = 1
+        // mleProof.publicInputs is empty (length 0 != 8) → PI binding check fails.
 
-        bytes memory proofBytes = abi.encode(groth16, mleProof);
+        bytes memory proofBytes = abi.encode(mleProof);
 
         uint32[] memory ids = new uint32[](1);
         ids[0] = 11;
@@ -920,12 +688,35 @@ contract IntmaxRollupTest is Test {
 
         (KZGProof memory kzg, bytes32 blobHash) = _postWithKZG(batch, proofBytes, stateRoot, submitter);
 
-        // Returns false: groth16.pubInputs[0] = 1 != keccak256(vpis)
+        // Returns false: mleProof.publicInputs do not bind keccak256(vpis).
         assertFalse(rollup.finalize(
             0, stateRoot, vpis,
-            mleProof,
-            groth16
+            mleProof
         ));
+    }
+
+    /// @notice SECURITY (MLE PI binding, positive→negative): a proof bound to ONE set of validity
+    /// PIs cannot be replayed to finalize a DIFFERENT (tampered) set. The proof's publicInputs are
+    /// pinned to the original piHash, so finalizing tampered vpis is rejected by the binding.
+    function test_finalize_tamperedValidityPIs_rejected() public {
+        MleVerifier.MleProof memory mleProof = _defaultMleProof();
+        bytes32 stateRoot = keccak256("bound_state");
+
+        IntmaxRollup.ValidityPublicInputs memory vpis = _defaultValidityPIs(stateRoot);
+        // Bind the proof to the HONEST vpis.
+        mleProof.publicInputs = _piLimbs(_computePIHash(vpis));
+
+        bytes memory proofBytes = abi.encode(mleProof);
+        uint32[] memory ids = new uint32[](1);
+        ids[0] = 12;
+        IntmaxRollup.SubBlock[] memory batch = _singleBlockBatch(4, ids, 401, bytes32(uint256(0x778)));
+        (KZGProof memory kzg, bytes32 blobHash) = _postWithKZG(batch, proofBytes, stateRoot, submitter);
+
+        // Tamper the validity PIs AFTER binding: the prover (still on-chain state) is changed.
+        IntmaxRollup.ValidityPublicInputs memory tampered = vpis;
+        tampered.prover = address(0xBEEF);
+        // The proof's publicInputs still bind the ORIGINAL piHash, so the tampered set is rejected.
+        assertFalse(rollup.finalize(0, stateRoot, tampered, mleProof));
     }
 
     function test_finalize_notFound() public {
@@ -936,8 +727,7 @@ contract IntmaxRollupTest is Test {
         // Returns false (submission not found)
         assertFalse(rollup.finalize(
             999, bytes32(0), vpis,
-            mleProof,
-            _groth16()
+            mleProof
         ));
     }
 
@@ -947,9 +737,7 @@ contract IntmaxRollupTest is Test {
 
     function test_fraudProof_invalidProof_confirmedFraud() public {
         MleVerifier.MleProof memory mleProof = _defaultMleProof();
-
-        IntmaxRollup.Groth16Params memory groth16 = _groth16();
-        bytes memory proofBytes = abi.encode(groth16, mleProof);
+        bytes memory proofBytes = abi.encode(mleProof);
         bytes32 stateRoot   = keccak256("bad_state");
 
         uint32[] memory ids = new uint32[](1);
@@ -967,16 +755,14 @@ contract IntmaxRollupTest is Test {
         bool fraudConfirmed = rollup.fraudProof(
             0, blobHash, stateRoot, proofBytes, vpis,
             mleProof,
-            kzg, groth16
+            kzg
         );
         assertTrue(fraudConfirmed, "Fraud should be confirmed for invalid proof");
     }
 
     function test_fraudProof_validProof_noFraud() public {
         MleVerifier.MleProof memory mleProof = _defaultMleProof();
-
-        IntmaxRollup.Groth16Params memory groth16 = _groth16();
-        bytes memory proofBytes = abi.encode(groth16, mleProof);
+        bytes memory proofBytes = abi.encode(mleProof);
         bytes32 stateRoot   = keccak256("valid_state");
 
         uint32[] memory ids = new uint32[](1);
@@ -991,21 +777,19 @@ contract IntmaxRollupTest is Test {
         mleProof.whirTranscript = hex"DEAD";
 
         // Fraud NOT confirmed: proof params binding fails (mleProof was modified after creating
-        // proofBytes), so keccak256(abi.encode(groth16, mleProof)) != keccak256(proofBytes).
+        // proofBytes), so keccak256(abi.encode(mleProof)) != keccak256(proofBytes).
         // Valid proofs cannot be falsely accused.
         bool fraudConfirmed = rollup.fraudProof(
             0, blobHash, stateRoot, proofBytes, vpis,
             mleProof,
-            kzg, groth16
+            kzg
         );
         assertFalse(fraudConfirmed, "No fraud for valid proof");
     }
 
     function test_fraudProof_bindingFails_rejected() public {
         MleVerifier.MleProof memory mleProof = _defaultMleProof();
-
-        IntmaxRollup.Groth16Params memory groth16 = _groth16();
-        bytes memory proofBytes = abi.encode(groth16, mleProof);
+        bytes memory proofBytes = abi.encode(mleProof);
         bytes32 stateRoot = keccak256("state");
 
         IntmaxRollup.ValidityPublicInputs memory vpis;
@@ -1029,7 +813,7 @@ contract IntmaxRollupTest is Test {
         bool fraudConfirmed = rollup.fraudProof(
             0, blobHash, stateRoot, proofBytes, vpis,
             mleProof,
-            kzg, groth16
+            kzg
         );
         assertFalse(fraudConfirmed, "Can't confirm fraud if binding fails");
     }
@@ -1046,9 +830,7 @@ contract IntmaxRollupTest is Test {
         rollup.deposit(bytes32(uint256(0xdeadbeef)), 0, 100, bytes32(uint256(0xbeef)));
 
         MleVerifier.MleProof memory mleProof = _defaultMleProof();
-
-        IntmaxRollup.Groth16Params memory groth16 = _groth16();
-        bytes memory proofBytes = abi.encode(groth16, mleProof);
+        bytes memory proofBytes = abi.encode(mleProof);
         bytes32 stateRoot = keccak256("fraud_state_with_inputs");
 
         uint32[] memory idsBad = new uint32[](1);
@@ -1074,8 +856,7 @@ contract IntmaxRollupTest is Test {
             proofBytes,
             vpis,
             mleProof,
-            kzg,
-            groth16
+            kzg
         );
         assertTrue(fraudConfirmed, "fraud should be confirmed");
 
@@ -1084,9 +865,7 @@ contract IntmaxRollupTest is Test {
 
     function test_fraudProof_slashesCascadeAndRollsBack() public {
         MleVerifier.MleProof memory mleProof = _defaultMleProof();
-
-        IntmaxRollup.Groth16Params memory groth16 = _groth16();
-        bytes memory proofBytes = abi.encode(groth16, mleProof);
+        bytes memory proofBytes = abi.encode(mleProof);
         bytes32 badState    = keccak256("fraud_state");
 
         uint32[] memory idsBad = new uint32[](1);
@@ -1116,7 +895,7 @@ contract IntmaxRollupTest is Test {
         bool fraudConfirmed = rollup.fraudProof(
             0, blobHash, badState, proofBytes, vpis,
             mleProof,
-            kzg, groth16
+            kzg
         );
         assertTrue(fraudConfirmed, "Fraud should be confirmed");
 
@@ -1157,10 +936,10 @@ contract IntmaxRollupTest is Test {
         });
         MleVerifier mleVerifierContract = new MleVerifier();
         IntmaxRollup mleRollup = new IntmaxRollup(
-            fraudTreasury, _groth16Vk(), enabledVk,
+            fraudTreasury, enabledVk,
             _emptyWhirParams(), "", "",
             _emptyMleArrays(), _emptyMleArrays(),
-            mleVerifierContract, IGnarkVerifier(address(0)), bytes32(0)
+            mleVerifierContract, bytes32(0)
         );
 
         MleVerifier.MleProof memory mleProof = _defaultMleProof();
@@ -1176,10 +955,10 @@ contract IntmaxRollupTest is Test {
         // Use correct piHash so Groth16 pubInputs condition (b) passes.
         // MLE rejects corrupted proof (condition c).
         bytes32 piHash = _computePIHash(vpis);
-        IntmaxRollup.Groth16Params memory groth16 = _groth16WithPIHash(piHash);
+        mleProof.publicInputs = _piLimbs(piHash);
 
         // Encode corrupted MLE proof INTO proofBytes so params binding passes
-        bytes memory proofBytes = abi.encode(groth16, mleProof);
+        bytes memory proofBytes = abi.encode(mleProof);
 
         uint32[] memory ids = new uint32[](1);
         ids[0] = 50;
@@ -1193,7 +972,7 @@ contract IntmaxRollupTest is Test {
         bool fraudConfirmed = mleRollup.fraudProof(
             0, blobHash, stateRoot, proofBytes, vpis,
             mleProof,
-            kzg, groth16
+            kzg
         );
         assertTrue(fraudConfirmed, "Fraud: MLE rejects corrupted whirTranscript (condition c)");
 
@@ -1214,10 +993,10 @@ contract IntmaxRollupTest is Test {
         });
         MleVerifier mleVerifierContract = new MleVerifier();
         IntmaxRollup mleRollup = new IntmaxRollup(
-            fraudTreasury, _groth16Vk(), enabledVk,
+            fraudTreasury, enabledVk,
             _emptyWhirParams(), "", "",
             _emptyMleArrays(), _emptyMleArrays(),
-            mleVerifierContract, IGnarkVerifier(address(0)), bytes32(0)
+            mleVerifierContract, bytes32(0)
         );
 
         MleVerifier.MleProof memory mleProof = _defaultMleProof();
@@ -1234,10 +1013,10 @@ contract IntmaxRollupTest is Test {
         // Use correct piHash so Groth16 pubInputs condition (b) passes.
         // MLE rejects corrupted proof data (condition c).
         bytes32 piHash = _computePIHash(vpis);
-        IntmaxRollup.Groth16Params memory groth16 = _groth16WithPIHash(piHash);
+        mleProof.publicInputs = _piLimbs(piHash);
 
         // Encode corrupted MLE proof INTO proofBytes
-        bytes memory proofBytes = abi.encode(groth16, mleProof);
+        bytes memory proofBytes = abi.encode(mleProof);
 
         uint32[] memory ids = new uint32[](1);
         ids[0] = 60;
@@ -1251,7 +1030,7 @@ contract IntmaxRollupTest is Test {
         bool fraudConfirmed = mleRollup.fraudProof(
             0, blobHash, stateRoot, proofBytes, vpis,
             mleProof,
-            kzg, groth16
+            kzg
         );
         assertTrue(fraudConfirmed, "Fraud: MLE rejects corrupted proof data (condition c)");
 
@@ -1267,9 +1046,9 @@ contract IntmaxRollupTest is Test {
         // vpis computed BEFORE posting so proof params binding is consistent.
         IntmaxRollup.ValidityPublicInputs memory vpis = _defaultValidityPIs(stateRoot);
         bytes32 piHash = _computePIHash(vpis);
-        IntmaxRollup.Groth16Params memory groth16 = _groth16WithPIHash(piHash);
+        mleProof.publicInputs = _piLimbs(piHash);
 
-        bytes memory proofBytes = abi.encode(groth16, mleProof);
+        bytes memory proofBytes = abi.encode(mleProof);
 
         uint32[] memory ids = new uint32[](1);
         ids[0] = 123;
@@ -1280,8 +1059,7 @@ contract IntmaxRollupTest is Test {
         assertTrue(
             rollup.finalize(
                 0, stateRoot, vpis,
-                mleProof,
-                groth16
+                mleProof
             ),
             "finalize should succeed"
         );
@@ -1293,8 +1071,7 @@ contract IntmaxRollupTest is Test {
         rollup.fraudProof(
             0, blobHash, stateRoot, proofBytes, vpis,
             mleProof,
-            kzg,
-            groth16
+            kzg
         );
     }
 
@@ -1308,7 +1085,7 @@ contract IntmaxRollupTest is Test {
         bytes32 stateRoot = keccak256("finalized_state");
         IntmaxRollup.ValidityPublicInputs memory vpis = _defaultValidityPIs(stateRoot);
         bytes32 piHash = _computePIHash(vpis);
-        IntmaxRollup.Groth16Params memory groth16 = _groth16WithPIHash(piHash);
+        mleProof.publicInputs = _piLimbs(piHash);
 
         uint32[] memory ids = new uint32[](1);
         ids[0] = 1;
@@ -1319,7 +1096,7 @@ contract IntmaxRollupTest is Test {
 
         assertEq(rollup.latestFinalizedBlockNumber(), 0, "Should be 0 before finalize");
 
-        rollup.finalize(0, stateRoot, vpis, mleProof, groth16);
+        rollup.finalize(0, stateRoot, vpis, mleProof);
 
         assertEq(
             rollup.latestFinalizedBlockNumber(),
@@ -1339,7 +1116,7 @@ contract IntmaxRollupTest is Test {
         bytes32 stateRoot1 = keccak256("state1");
         IntmaxRollup.ValidityPublicInputs memory vpis1 = _defaultValidityPIs(stateRoot1);
         bytes32 piHash1 = _computePIHash(vpis1);
-        IntmaxRollup.Groth16Params memory groth16_1 = _groth16WithPIHash(piHash1);
+        mleProof.publicInputs = _piLimbs(piHash1);
 
         uint32[] memory ids = new uint32[](1);
         ids[0] = 1;
@@ -1348,7 +1125,7 @@ contract IntmaxRollupTest is Test {
         vm.prank(submitter);
         rollup.postBlockAndSubmit{value: 1 ether}(batch1, keccak256("p1"), 1, stateRoot1);
 
-        rollup.finalize(0, stateRoot1, vpis1, mleProof, groth16_1);
+        rollup.finalize(0, stateRoot1, vpis1, mleProof);
         // latestFinalizedBlockNumber is now 1
 
         // --- Post submission 1 with blocks that overlap finalized range ---
@@ -1356,8 +1133,7 @@ contract IntmaxRollupTest is Test {
         // We need to manipulate _batchMetadata to test this guard.
         // Instead, post a second submission normally (startBlockNumber = 2, which is > 1).
         bytes32 stateRoot2 = keccak256("state2");
-        IntmaxRollup.Groth16Params memory groth16_2 = _groth16();
-        bytes memory proofBytes2 = abi.encode(groth16_2, mleProof);
+        bytes memory proofBytes2 = abi.encode(mleProof);
 
         ids[0] = 2;
         IntmaxRollup.SubBlock[] memory batch2 = _singleBlockBatch(1, ids, 200, bytes32(uint256(0x22)));
@@ -1373,7 +1149,7 @@ contract IntmaxRollupTest is Test {
         // It will return true or false depending on proof validity, but won't revert
         rollup.fraudProof(
             1, blobHash2, stateRoot2, proofBytes2, vpis2,
-            mleProof, kzg2, groth16_2
+            mleProof, kzg2
         );
     }
 
@@ -1383,9 +1159,7 @@ contract IntmaxRollupTest is Test {
 
     function test_fraudProof_timeoutRemoval() public {
         MleVerifier.MleProof memory mleProof = _defaultMleProof();
-
-        IntmaxRollup.Groth16Params memory groth16 = _groth16();
-        bytes memory proofBytes = abi.encode(groth16, mleProof);
+        bytes memory proofBytes = abi.encode(mleProof);
         bytes32 stateRoot = keccak256("timeout_state");
 
         uint32[] memory ids = new uint32[](1);
@@ -1404,7 +1178,7 @@ contract IntmaxRollupTest is Test {
         vm.prank(reporter);
         bool confirmed = rollup.fraudProof(
             0, blobHash, stateRoot, proofBytes, vpis,
-            mleProof, kzg, groth16
+            mleProof, kzg
         );
         assertTrue(confirmed, "Timeout fraud should be confirmed unconditionally");
 
@@ -1414,9 +1188,7 @@ contract IntmaxRollupTest is Test {
 
     function test_fraudProof_noTimeoutBeforeDeadline() public {
         MleVerifier.MleProof memory mleProof = _defaultMleProof();
-
-        IntmaxRollup.Groth16Params memory groth16 = _groth16();
-        bytes memory proofBytes = abi.encode(groth16, mleProof);
+        bytes memory proofBytes = abi.encode(mleProof);
         bytes32 stateRoot = keccak256("no_timeout_state");
 
         uint32[] memory ids = new uint32[](1);
@@ -1438,7 +1210,7 @@ contract IntmaxRollupTest is Test {
         // With synthetic groth16 it will confirm fraud via piHash mismatch.
         bool confirmed = rollup.fraudProof(
             0, blobHash, stateRoot, proofBytes, vpis,
-            mleProof, kzg, groth16
+            mleProof, kzg
         );
         assertTrue(confirmed, "Should confirm fraud via normal path, not timeout");
 
@@ -1501,11 +1273,10 @@ contract IntmaxRollupTest is Test {
 
         uint256 gasBefore = gasleft();
         rollup.verify(
-            mleProof,
-            _groth16()
+            mleProof
         );
         uint256 gasUsed = gasBefore - gasleft();
-        console.log("verify() gas (MLE + Groth16):", gasUsed);
+        console.log("verify() gas (MLE/WHIR):", gasUsed);
     }
 
     // -----------------------------------------------------------------------
@@ -1519,9 +1290,9 @@ contract IntmaxRollupTest is Test {
 
         IntmaxRollup.ValidityPublicInputs memory vpis = _defaultValidityPIs(stateRoot);
         bytes32 piHash = _computePIHash(vpis);
-        IntmaxRollup.Groth16Params memory groth16 = _groth16WithPIHash(piHash);
+        mleProof.publicInputs = _piLimbs(piHash);
 
-        bytes memory proofBytes = abi.encode(groth16, mleProof);
+        bytes memory proofBytes = abi.encode(mleProof);
 
         uint32[] memory ids = new uint32[](1);
         ids[0] = 99;
@@ -1532,8 +1303,7 @@ contract IntmaxRollupTest is Test {
         uint256 gasBefore = gasleft();
         rollup.finalize(
             0, stateRoot, vpis,
-            mleProof,
-            groth16
+            mleProof
         );
         uint256 gasUsed = gasBefore - gasleft();
         console.log("finalize() gas:", gasUsed);
@@ -1548,12 +1318,12 @@ contract IntmaxRollupTest is Test {
         bytes32 stateRoot = keccak256("finalized_state");
         IntmaxRollup.ValidityPublicInputs memory vpis = _defaultValidityPIs(stateRoot);
         bytes32 piHash = _computePIHash(vpis);
-        IntmaxRollup.Groth16Params memory groth16 = _groth16WithPIHash(piHash);
-        bytes memory proofBytes = abi.encode(groth16, mleProof);
+        mleProof.publicInputs = _piLimbs(piHash);
+        bytes memory proofBytes = abi.encode(mleProof);
         uint32[] memory ids = new uint32[](1); ids[0] = 1;
         (KZGProof memory kzg, bytes32 blobHash) = _postWithKZG(_singleBlockBatch(1, ids, 100, bytes32(uint256(0xabc))), proofBytes, stateRoot, submitter);
 
-        rollup.finalize(0, stateRoot, vpis, mleProof, groth16);
+        rollup.finalize(0, stateRoot, vpis, mleProof);
 
         assertEq(rollup.pendingWithdrawals(submitter), 1 ether, "stake credited");
         uint256 balBefore = submitter.balance;
@@ -1573,8 +1343,8 @@ contract IntmaxRollupTest is Test {
 
         IntmaxRollup.ValidityPublicInputs memory vpis = _defaultValidityPIs(stateRoot);
         bytes32 piHash = _computePIHash(vpis);
-        IntmaxRollup.Groth16Params memory groth16 = _groth16WithPIHash(piHash);
-        bytes memory proofBytes = abi.encode(groth16, mleProof);
+        mleProof.publicInputs = _piLimbs(piHash);
+        bytes memory proofBytes = abi.encode(mleProof);
         uint32[] memory ids = new uint32[](1); ids[0] = 1;
         (KZGProof memory kzg, bytes32 blobHash) = _postWithKZG(
             _singleBlockBatch(1, ids, 100, bytes32(uint256(0xabc))),
@@ -1583,7 +1353,7 @@ contract IntmaxRollupTest is Test {
 
         // Under old push-payment, this would revert because revSub rejects ETH.
         // Under pull-payment, finalize completes and credits pendingWithdrawals.
-        bool ok = rollup.finalize(0, stateRoot, vpis, mleProof, groth16);
+        bool ok = rollup.finalize(0, stateRoot, vpis, mleProof);
         assertTrue(ok, "finalize must succeed even with reverting submitter");
         assertEq(rollup.pendingWithdrawals(address(revSub)), 1 ether, "stake credited to reverting submitter");
     }
@@ -1594,22 +1364,17 @@ contract IntmaxRollupTest is Test {
         MleVerifier.MleProof memory mleProof = _defaultMleProof();
         IntmaxRollup rollup2 = new IntmaxRollup(
             address(revTreasury),
-            _groth16Vk(),
             _emptyMleVk(), // degreeBits = 0 → skip MLE verification
             _emptyWhirParams(),
             "",
             "",
             _emptyMleArrays(),
             _emptyMleArrays(),
-            rollup.mleVerifier(),
-            IGnarkVerifier(address(0)),
-            bytes32(0)
+            rollup.mleVerifier(), bytes32(0)
         );
 
         address sub2 = makeAddr("sub2");
         vm.deal(sub2, 10 ether);
-
-        IntmaxRollup.Groth16Params memory groth16 = _groth16();
         bytes32 stateRoot = keccak256("bad_state");
 
         // Build vpis BEFORE posting (rollup2 initial state: all zeros)
@@ -1623,7 +1388,7 @@ contract IntmaxRollupTest is Test {
             prover: address(0)
         });
 
-        bytes memory proofBytes = abi.encode(groth16, mleProof);
+        bytes memory proofBytes = abi.encode(mleProof);
         uint32[] memory ids = new uint32[](1); ids[0] = 21;
 
         bytes32[] memory hs = new bytes32[](1);
@@ -1639,7 +1404,7 @@ contract IntmaxRollupTest is Test {
         address reporter2 = makeAddr("reporter2");
         vm.deal(reporter2, 1 ether);
         vm.prank(reporter2);
-        bool confirmed = rollup2.fraudProof(0, blobHash, stateRoot, proofBytes, vpis, mleProof, kzg, groth16);
+        bool confirmed = rollup2.fraudProof(0, blobHash, stateRoot, proofBytes, vpis, mleProof, kzg);
         assertTrue(confirmed, "fraud must be confirmed even with reverting treasury");
         assertGt(rollup2.pendingWithdrawals(reporter2), 0, "reporter reward credited");
         assertGt(rollup2.pendingWithdrawals(address(revTreasury)), 0, "treasury share credited");
@@ -1656,8 +1421,7 @@ contract IntmaxRollupTest is Test {
         }
 
         MleVerifier.MleProof memory mleProof = _defaultMleProof();
-        IntmaxRollup.Groth16Params memory groth16 = _groth16();
-        bytes memory proofBytes = abi.encode(groth16, mleProof);
+        bytes memory proofBytes = abi.encode(mleProof);
         bytes32 stateRoot = keccak256("bad_state");
         uint32[] memory ids = new uint32[](1); ids[0] = 21;
 
@@ -1671,7 +1435,7 @@ contract IntmaxRollupTest is Test {
         vm.deal(reporter, 1 ether);
         vm.prank(reporter);
         uint256 gasBefore = gasleft();
-        rollup.fraudProof(0, blobHash, stateRoot, proofBytes, vpis, mleProof, kzg, groth16);
+        rollup.fraudProof(0, blobHash, stateRoot, proofBytes, vpis, mleProof, kzg);
         uint256 gasUsed = gasBefore - gasleft();
         console.log("fraudProof() gas with 200 deposits (O(1) rollback):", gasUsed);
         // With O(1) deposit rollback, gas should not scale with deposit count.

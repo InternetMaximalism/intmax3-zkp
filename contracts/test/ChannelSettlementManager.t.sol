@@ -112,7 +112,8 @@ contract ChannelSettlementManagerTest is Test {
     function _closeProof(
         ChannelSettlementManager.CloseIntent memory intent
     ) internal view returns (bytes memory) {
-        // F7: the close proof binds the channel's registered member-set commitment (85th limb).
+        // F4/F7: the close proof binds the channel's registered member-set commitment (limbs
+        // 77..85) AND the active member count (limb 85, appended at the END → 86 limbs).
         return _proofFor(
             verifier.closePIHash(
                 CHANNEL_ID,
@@ -129,7 +130,8 @@ contract ChannelSettlementManagerTest is Test {
                 intent.snapshotMediumBlockNumber,
                 intent.finalStateVersion,
                 intent.finalSettledTxChain,
-                manager.registeredMemberSetCommitment()
+                manager.registeredMemberSetCommitment(),
+                manager.activeMemberCount()
             )
         );
     }
@@ -180,7 +182,8 @@ contract ChannelSettlementManagerTest is Test {
             intent.snapshotMediumBlockNumber,
             intent.finalStateVersion,
             intent.finalSettledTxChain,
-            manager.registeredMemberSetCommitment()
+            manager.registeredMemberSetCommitment(),
+            manager.activeMemberCount()
         );
         assertTrue(closePiHash != bytes32(0));
 
@@ -256,12 +259,12 @@ contract ChannelSettlementManagerTest is Test {
         assertEq(manager.computeCloseIntentDigest(intent), SHARED_VECTOR_DIGEST);
     }
 
-    // Shared Rust<->Solidity test vector for the F7 close-circuit member-set commitment:
-    // keccak([IMCM, h0, h1, h2]) over the 3 members' SPHINCS+ pubkey hashes (slot order). The
-    // Rust side asserts the same constant in
-    // src/common/channel.rs::close_member_set_commitment_matches_solidity_shared_vector. Each
-    // bytes32 is the byte form of 8 consecutive big-endian u32 limbs (h0 = 1..8, h1 = 9..16,
-    // h2 = 17..24), matching the Rust `pubkey_hash`-style limb layout used in that test.
+    // Shared Rust<->Solidity test vector for the F4/D6 close-circuit member-set commitment (FIXED
+    // 16-slot form, pad-to-MAX): keccak([IMCM, memberCount, h0..h15]) over the member SPHINCS+
+    // pubkey hashes in slot order (130 u32 words; padding slots zeroed). The Rust side asserts the
+    // same constant in src/common/channel.rs::close_member_set_commitment_matches_solidity_shared_vector.
+    // Each active bytes32 is the byte form of 8 consecutive big-endian u32 limbs (h0 = 1..8,
+    // h1 = 9..16, h2 = 17..24), with memberCount = 3 and slots 3..15 zero.
     bytes32 internal constant MEMBER_SET_VECTOR_H0 =
         0x0000000100000002000000030000000400000005000000060000000700000008;
     bytes32 internal constant MEMBER_SET_VECTOR_H1 =
@@ -269,16 +272,104 @@ contract ChannelSettlementManagerTest is Test {
     bytes32 internal constant MEMBER_SET_VECTOR_H2 =
         0x0000001100000012000000130000001400000015000000160000001700000018;
     bytes32 internal constant MEMBER_SET_COMMITMENT_VECTOR =
-        0x0f7f77fe100791e7f70be85d8d4d6f5067d833c0bc0847816b9e9d892c9fb8e6;
+        0x12450612c5f67b7ff613b705f6e5efccf4bdd43e647570fcb207076f447236cc;
 
     function test_member_set_commitment_matches_rust_shared_vector() external view {
-        // The shape is locked to this constant via the Rust counterpart; we recompute it here.
-        bytes32 commitment = verifier.closeMemberSetCommitment(
-            MEMBER_SET_VECTOR_H0,
-            MEMBER_SET_VECTOR_H1,
-            MEMBER_SET_VECTOR_H2
-        );
+        // The shape is locked to this constant via the Rust counterpart; we recompute it here over
+        // the FIXED 16-slot array (3 active hashes + 13 zero padding slots) and memberCount = 3.
+        bytes32[16] memory hashes;
+        hashes[0] = MEMBER_SET_VECTOR_H0;
+        hashes[1] = MEMBER_SET_VECTOR_H1;
+        hashes[2] = MEMBER_SET_VECTOR_H2;
+        bytes32 commitment = verifier.closeMemberSetCommitment(hashes, 3);
         assertEq(commitment, MEMBER_SET_COMMITMENT_VECTOR);
+
+        // Padding slots (>= memberCount) are zeroed INTERNALLY (mirrors Rust + the in-circuit
+        // gadget), so a nonzero padding slot in the input array does NOT change the commitment —
+        // the value depends only on memberCount and the active hashes (injective on the active set).
+        bytes32[16] memory tampered = hashes;
+        tampered[3] = bytes32(uint256(1));
+        assertEq(verifier.closeMemberSetCommitment(tampered, 3), MEMBER_SET_COMMITMENT_VECTOR);
+
+        // memberCount is part of the preimage: a different count changes the value.
+        assertTrue(verifier.closeMemberSetCommitment(hashes, 4) != MEMBER_SET_COMMITMENT_VECTOR);
+    }
+
+    // -----------------------------------------------------------------------
+    // F4/D6: variable active member count (2..16, pad-to-MAX)
+    // -----------------------------------------------------------------------
+
+    function _bindings(uint256 n) internal returns (ChannelSettlementManager.MemberBinding[] memory b) {
+        b = new ChannelSettlementManager.MemberBinding[](n);
+        for (uint256 i = 0; i < n; i++) {
+            b[i] = ChannelSettlementManager.MemberBinding({
+                sphincsPubkeyHash: keccak256(abi.encodePacked("member", i)),
+                recipient: makeAddr(string.concat("rcpt", vm.toString(i)))
+            });
+        }
+    }
+
+    function _newManager(uint256 n, uint8 bpSlot)
+        internal
+        returns (ChannelSettlementManager m)
+    {
+        m = _newManagerFrom(_bindings(n), bpSlot);
+    }
+
+    /// @dev Construct a manager from pre-built bindings. Kept separate so `vm.expectRevert` can
+    /// immediately precede ONLY the constructor call (no intervening cheatcode-tripping helpers).
+    function _newManagerFrom(
+        ChannelSettlementManager.MemberBinding[] memory b,
+        uint8 bpSlot
+    ) internal returns (ChannelSettlementManager m) {
+        bytes32 bpHash = bpSlot < b.length ? b[bpSlot].sphincsPubkeyHash : bytes32(uint256(1));
+        m = new ChannelSettlementManager(
+            CHANNEL_ID,
+            bpSlot,
+            bpHash,
+            CHALLENGE_PERIOD,
+            SPECIAL_CLOSE_PENALTY,
+            INITIAL_BP_BOND,
+            IChannelSettlementVerifier(address(verifier)),
+            b
+        );
+    }
+
+    function test_variable_member_count_2_and_16() external {
+        ChannelSettlementManager m2 = _newManager(2, 0);
+        assertEq(uint256(m2.activeMemberCount()), 2);
+        assertEq(m2.memberCount(), 2);
+        // registeredMemberSetCommitment uses the FIXED 16-slot form with the active count.
+        bytes32[16] memory h2;
+        h2[0] = keccak256(abi.encodePacked("member", uint256(0)));
+        h2[1] = keccak256(abi.encodePacked("member", uint256(1)));
+        assertEq(m2.registeredMemberSetCommitment(), verifier.closeMemberSetCommitment(h2, 2));
+
+        ChannelSettlementManager m16 = _newManager(16, 5);
+        assertEq(uint256(m16.activeMemberCount()), 16);
+        assertEq(uint256(m16.bpMemberSlot()), 5);
+        bytes32[16] memory h16;
+        for (uint256 i = 0; i < 16; i++) {
+            h16[i] = keccak256(abi.encodePacked("member", i));
+        }
+        assertEq(m16.registeredMemberSetCommitment(), verifier.closeMemberSetCommitment(h16, 16));
+    }
+
+    function test_member_count_out_of_range_reverts() external {
+        // Build bindings BEFORE expectRevert so the cheatcode immediately precedes only the
+        // constructor call (Foundry requires the reverting call at the same depth).
+        ChannelSettlementManager.MemberBinding[] memory one = _bindings(1);
+        vm.expectRevert(ChannelSettlementManager.InvalidMemberCount.selector);
+        _newManagerFrom(one, 0);
+
+        ChannelSettlementManager.MemberBinding[] memory seventeen = _bindings(17);
+        vm.expectRevert(ChannelSettlementManager.InvalidMemberCount.selector);
+        _newManagerFrom(seventeen, 0);
+
+        // bpMemberSlot >= activeMemberCount reverts.
+        ChannelSettlementManager.MemberBinding[] memory three = _bindings(3);
+        vm.expectRevert(ChannelSettlementManager.InvalidBpMemberSlot.selector);
+        _newManagerFrom(three, 3);
     }
 
     function test_request_close_freezes_channel_and_emits() external {

@@ -5,19 +5,6 @@ import {MleVerifier} from "@mle/MleVerifier.sol";
 import {SpongefishWhirVerify} from "@mle/spongefish/SpongefishWhirVerify.sol";
 import {GoldilocksExt3} from "@mle/spongefish/GoldilocksExt3.sol";
 import {BlobKZGVerifier, KZGProof} from "./BlobKZGVerifier.sol";
-import {Groth16Verifier} from "./Groth16Verifier.sol";
-
-/// @title IGnarkVerifier
-/// @notice Interface for gnark-generated Groth16 verifier with commitment support.
-///         The verifier has VK constants hardcoded and reverts on invalid proof.
-interface IGnarkVerifier {
-    function verifyProof(
-        uint256[8] calldata proof,
-        uint256[2] calldata commitments,
-        uint256[2] calldata commitmentPok,
-        uint256[8] calldata input
-    ) external view;
-}
 
 /// @title IntmaxRollup
 /// @notice INTMAX3 validity proof rollup contract.
@@ -43,16 +30,20 @@ interface IGnarkVerifier {
 ///       on-chain block_hash_chain snapshots and accept the new state root.
 ///
 ///  Blob format (both finalize and fraudProof):
-///    blob = abi.encode(Groth16Params, MleVerifier.MleProof, GoldilocksExt3.Ext3[])
+///    blob = abi.encode(MleVerifier.MleProof)
 ///
-///  Verification checks (finalize — both must pass):
+///  On-chain verification is MLE/WHIR-only (Groth16 removed). The validity public inputs are
+///  bound to the proof through the MLE proof's own `publicInputs` field: the wrapped Plonky2
+///  validity circuit registers keccak256(ValidityPublicInputs) as its 8 public-input limbs, which
+///  flow into `mleProof.publicInputs` and are absorbed into the WHIR Fiat-Shamir transcript.
+///
+///  Verification checks (finalize — all must pass):
 ///    a) Blob commitment (KZG multi-point opening)
 ///    b) ValidityPublicInputs match on-chain state
-///    c) Proof params binding (blob bytes == abi.encode(groth16, mleProof))
-///    d) Groth16 pubInputs[0..7] == keccak256(ValidityPublicInputs) as 8 big-endian u32 limbs
-///       (matches the Plonky2 validity circuit's public inputs as exposed by gnark)
+///    c) Proof params binding (blob bytes == abi.encode(mleProof))
+///    d) mleProof.publicInputs[0..7] == keccak256(ValidityPublicInputs) as 8 big-endian u32 limbs
+///       (SECURITY: binds the verified MLE proof to the claimed validity PIs)
 ///    e) MLE proof verification
-///    f) Groth16 verification
 ///
 ///  Fraud proof rules:
 ///    1) Finalized intmax block number is recorded on-chain; each submission's
@@ -62,10 +53,10 @@ interface IGnarkVerifier {
 ///       are removed unconditionally (no ZKP verification needed).
 ///    4) Successful fraud proof deletes the target and all subsequent submissions.
 ///
-///  Fraud proof ZKP checks (either failure = fraud):
+///  Fraud proof ZKP checks (any failure = fraud):
 ///    a) Blob commitment + KZG binding + PI binding all PASS
 ///    b) Proof params binding PASSES (fake-fraud prevention)
-///    c) WHIR fails OR Groth16 fails → fraud confirmed
+///    c) MLE publicInputs don't bind keccak256(ValidityPublicInputs) OR MLE verification fails
 contract IntmaxRollup {
     // -----------------------------------------------------------------------
     // Errors
@@ -185,14 +176,6 @@ contract IntmaxRollup {
         uint64 processedDepositCountBefore;
     }
 
-    /// @notice Bundles Groth16 verification parameters to avoid stack-too-deep.
-    struct Groth16Params {
-        Groth16Verifier.Proof proof;
-        uint256[] pubInputs;
-        uint256[2] commitments;     // gnark commitment point (G1)
-        uint256[2] commitmentPok;   // gnark commitment proof of knowledge (G1)
-    }
-
     /// @notice MLE verification key parameters — fixed per circuit, set at deploy time.
     ///         SECURITY: These bind the on-chain verifier to a specific Plonky2 circuit.
     ///         Without them, an attacker could substitute a different circuit's proof.
@@ -227,7 +210,6 @@ contract IntmaxRollup {
     // -----------------------------------------------------------------------
     // State
     // -----------------------------------------------------------------------
-    Groth16Verifier.VerifyingKey internal groth16Vk;
 
     /// @notice External MLE verifier contract.
     MleVerifier public immutable mleVerifier;
@@ -310,9 +292,11 @@ contract IntmaxRollup {
     bytes32 internal _pendingChannelRegHashChain;
     uint64 public channelRegCount;
 
-    /// @notice Members per channel = `CHANNEL_MEMBERS` (one SPHINCS+ key per member, F7;
-    /// mirrors the Rust `CHANNEL_MEMBERS` constant in src/constants.rs).
-    uint32 internal constant CHANNEL_MEMBERS = 3;
+    /// @notice Bounds on members per channel (one SPHINCS+ key per member, D6 pad-to-MAX; mirrors
+    /// the Rust `MAX_CHANNEL_MEMBERS` constant in src/constants.rs). A channel registers between
+    /// `MIN_CHANNEL_MEMBERS` and `MAX_CHANNEL_MEMBERS` ACTIVE members in slot order.
+    uint32 internal constant MAX_CHANNEL_MEMBERS = 16;
+    uint32 internal constant MIN_CHANNEL_MEMBERS = 2;
 
     mapping(uint256 => Submission) internal _submissions;
     uint256 public nextSubmissionId;
@@ -336,7 +320,6 @@ contract IntmaxRollup {
     ///         can be removed unconditionally via fraudProof (no proof needed).
     uint256 private constant FINALIZE_DEADLINE_BLOCKS = 5 * 60 * 12;
     address public immutable fraudTreasury;
-    IGnarkVerifier public immutable gnarkVerifier;
 
     mapping(uint256 => StakeInfo) public stakeInfo;
     mapping(address => uint256) public pendingWithdrawals;
@@ -353,7 +336,6 @@ contract IntmaxRollup {
     // -----------------------------------------------------------------------
     constructor(
         address _fraudTreasury,
-        Groth16Verifier.VerifyingKey memory verifyingKey,
         MleVk memory _mleVk,
         SpongefishWhirVerify.WhirParams memory whirParams_,
         bytes memory _whirProtocolId,
@@ -361,11 +343,9 @@ contract IntmaxRollup {
         uint256[] memory _kIs,
         uint256[] memory _subgroupGenPowers,
         MleVerifier _mleVerifier,
-        IGnarkVerifier _gnarkVerifier,
         bytes32 _genesisStateRoot
     ) {
         fraudTreasury = _fraudTreasury;
-        _setGroth16VerifyingKey(verifyingKey);
         mleVk = _mleVk;
         // Deep-copy WhirParams to storage (scalar fields + dynamic arrays)
         _whirParams.numVariables = whirParams_.numVariables;
@@ -405,7 +385,6 @@ contract IntmaxRollup {
             _mleSubgroupGenPowers.push(_subgroupGenPowers[i]);
         }
         mleVerifier = _mleVerifier;
-        gnarkVerifier = _gnarkVerifier;
         latestFinalizedStateRoot = _genesisStateRoot;
         // Genesis: block 0 has default (zero) hash chains
         blockHashChainAt[0] = bytes32(0);
@@ -546,20 +525,21 @@ contract IntmaxRollup {
         emit Deposited(idx, msg.sender, recipient, tokenIndex, amount, auxData, newHash);
     }
 
-    /// @notice Register a channel's member set. One SPHINCS+ key per member (F7): exactly
-    ///         `CHANNEL_MEMBERS` members in slot order, each described by their SPHINCS+ pubkey
-    ///         hash (bytes32, the member identity), their Regev pubkey digest (bytes32), and
-    ///         their L1 withdrawal recipient (address). Mirrors the Rust `ChannelRecord`
-    ///         (src/common/channel.rs): the registration record carries
-    ///         `member_sphincs_pubkey_hashes`, the keccak `member_pubkeys_root`, the
-    ///         `regev_pk_root`, and the `bp_member_slot`. The member pubkey hashes must be
-    ///         nonzero and pairwise distinct (`ChannelRecord::validate`).
+    /// @notice Register a channel's member set. One SPHINCS+ key per member (D6 pad-to-MAX):
+    ///         between `MIN_CHANNEL_MEMBERS` and `MAX_CHANNEL_MEMBERS` ACTIVE members in slot
+    ///         order, each described by their SPHINCS+ pubkey hash (bytes32, the member identity),
+    ///         their Regev pubkey digest (bytes32), and their L1 withdrawal recipient (address).
+    ///         Mirrors the Rust `ChannelRecord` (src/common/channel.rs): the registration record
+    ///         carries `member_sphincs_pubkey_hashes`, the keccak `member_pubkeys_root`, the
+    ///         `regev_pk_root`, and the `bp_member_slot`. The ACTIVE member pubkey hashes must be
+    ///         nonzero and pairwise distinct (`ChannelRecord::validate`); the active count is the
+    ///         array length.
     /// @dev RECORDED ONLY: this hash chain is not yet consumed by the validity proof (see the
-    ///      section header). The keccak preimage is tightly packed, NO array padding:
-    ///      keccak256(prev || channelId(4) || bpMemberSlot(1) ||
-    ///               (sphincsPubkeyHash(32) || regevPkDigest(32) || recipient(20)) * CHANNEL_MEMBERS).
-    ///      `memberPubkeysRoot` = keccak of the member pubkey hashes; `regevPkRoot` = keccak of
-    ///      the Regev pubkey digests (the L1/keccak digest forms anchored in the record).
+    ///      section header). The keccak preimage is tightly packed over the ACTIVE members, NO
+    ///      array padding: keccak256(prev || channelId(4) || bpMemberSlot(1) || memberCount(1) ||
+    ///               (sphincsPubkeyHash(32) || regevPkDigest(32) || recipient(20)) * memberCount).
+    ///      `memberPubkeysRoot` = keccak of the active member pubkey hashes; `regevPkRoot` = keccak
+    ///      of the active Regev pubkey digests (the L1/keccak digest forms anchored in the record).
     function registerChannel(
         uint32 channelId,
         uint8 bpMemberSlot,
@@ -568,21 +548,23 @@ contract IntmaxRollup {
         address[] calldata recipients
     ) external {
         require(channelId != 0, "channel id 0 reserved");
+        uint256 memberCount = memberSphincsPubkeyHashes.length;
         require(
-            memberSphincsPubkeyHashes.length == CHANNEL_MEMBERS &&
-            regevPkDigests.length == CHANNEL_MEMBERS &&
-            recipients.length == CHANNEL_MEMBERS,
-            "member count must be CHANNEL_MEMBERS"
+            memberCount >= MIN_CHANNEL_MEMBERS &&
+            memberCount <= MAX_CHANNEL_MEMBERS &&
+            regevPkDigests.length == memberCount &&
+            recipients.length == memberCount,
+            "member count out of range (2..16) or array length mismatch"
         );
-        require(uint256(bpMemberSlot) < CHANNEL_MEMBERS, "bp member slot out of range");
+        require(uint256(bpMemberSlot) < memberCount, "bp member slot out of range");
 
-        // One SPHINCS+ key per member: pubkey hashes must be nonzero and pairwise distinct
+        // One SPHINCS+ key per member: active pubkey hashes must be nonzero and pairwise distinct
         // (mirrors ChannelRecord::validate). Regev digests must be set; recipients must be set.
-        for (uint256 i = 0; i < CHANNEL_MEMBERS; i++) {
+        for (uint256 i = 0; i < memberCount; i++) {
             require(memberSphincsPubkeyHashes[i] != bytes32(0), "member pubkey hash 0 reserved");
             require(regevPkDigests[i] != bytes32(0), "regev pk digest 0 reserved");
             require(recipients[i] != address(0), "recipient 0 reserved");
-            for (uint256 j = i + 1; j < CHANNEL_MEMBERS; j++) {
+            for (uint256 j = i + 1; j < memberCount; j++) {
                 require(
                     memberSphincsPubkeyHashes[i] != memberSphincsPubkeyHashes[j],
                     "member pubkey hashes must be distinct"
@@ -590,13 +572,14 @@ contract IntmaxRollup {
             }
         }
 
-        // L1/keccak digest forms of the member tree root and the Regev-pk root.
+        // L1/keccak digest forms of the member tree root and the Regev-pk root (active members).
         bytes32 memberPubkeysRoot = keccak256(abi.encodePacked(memberSphincsPubkeyHashes));
         bytes32 regevPkRoot = keccak256(abi.encodePacked(regevPkDigests));
 
-        bytes memory packed =
-            abi.encodePacked(_pendingChannelRegHashChain, channelId, bpMemberSlot);
-        for (uint256 i = 0; i < CHANNEL_MEMBERS; i++) {
+        bytes memory packed = abi.encodePacked(
+            _pendingChannelRegHashChain, channelId, bpMemberSlot, uint8(memberCount)
+        );
+        for (uint256 i = 0; i < memberCount; i++) {
             // Element-by-element to avoid abi.encodePacked's array-element padding.
             packed = abi.encodePacked(
                 packed,
@@ -653,23 +636,16 @@ contract IntmaxRollup {
     // verify()  —  pure WHIR verification (no binding)
     // -----------------------------------------------------------------------
 
-    /// @notice MLE + Groth16 verification from calldata. No KZG, no blob binding.
-    ///         Both verifiers must pass for the result to be true.
+    /// @notice MLE/WHIR verification from calldata. No KZG, no blob binding.
     /// @dev v2: the WHIR ext3 evaluations previously passed as a separate
     ///      `whirEvals` parameter are now embedded inside `mleProof`, so
     ///      this surface gets one fewer argument and is safer (the prover
-    ///      can no longer supply mismatched evals).
+    ///      can no longer supply mismatched evals). Groth16 is removed: on-chain
+    ///      verification is MLE/WHIR-only.
     function verify(
-        MleVerifier.MleProof calldata mleProof,
-        Groth16Params memory groth16
+        MleVerifier.MleProof calldata mleProof
     ) external view returns (bool) {
-        // Verify MLE proof
-        if (!_verifyMle(mleProof)) return false;
-
-        // Verify Groth16
-        if (!_verifyGroth16(groth16)) return false;
-
-        return true;
+        return _verifyMle(mleProof);
     }
 
     // -----------------------------------------------------------------------
@@ -677,20 +653,19 @@ contract IntmaxRollup {
     // -----------------------------------------------------------------------
 
     /// @notice Verify and finalize a submission.
-    ///         Checks: MLE proof, Groth16 proof, public input binding to on-chain state.
+    ///         Checks: MLE proof, public input binding to on-chain state and to the MLE proof.
     function finalize(
         uint256 submissionId,
         bytes32 stateRoot,
         ValidityPublicInputs calldata validityPIs,
-        MleVerifier.MleProof calldata mleProof,
-        Groth16Params memory groth16
+        MleVerifier.MleProof calldata mleProof
     ) external nonReentrant returns (bool) {
         Submission storage sub = _submissions[submissionId];
         if (sub.commitment == bytes32(0)) return false;
         if (sub.finalized) return false;
 
         bool valid;
-        try this.fullVerify(stateRoot, validityPIs, mleProof, groth16) returns (bool v) {
+        try this.fullVerify(stateRoot, validityPIs, mleProof) returns (bool v) {
             valid = v;
         } catch {
             valid = false;
@@ -726,9 +701,9 @@ contract IntmaxRollup {
     ///
     /// ## Normal fraud verification
     ///
-    ///   The fraud prover supplies the exact blob bytes (Groth16 + WHIR) that
+    ///   The fraud prover supplies the exact blob bytes (the MLE proof) that
     ///   were committed, plus a KZG proof binding them to the blob.
-    ///   Fraud is confirmed when binding checks pass and either proof fails.
+    ///   Fraud is confirmed when binding checks pass and the proof fails.
     function fraudProof(
         uint256 submissionId,
         bytes32 blobVersionedHash,
@@ -736,8 +711,7 @@ contract IntmaxRollup {
         bytes calldata proofBytes,
         ValidityPublicInputs calldata validityPIs,
         MleVerifier.MleProof calldata mleProof,
-        KZGProof calldata kzg,
-        Groth16Params memory groth16
+        KZGProof calldata kzg
     ) external nonReentrant returns (bool fraudConfirmed) {
         Submission storage sub = _submissions[submissionId];
         if (sub.commitment == bytes32(0)) return false;
@@ -761,7 +735,7 @@ contract IntmaxRollup {
         bool confirmed = _verifyFraud(
             submissionId, blobVersionedHash, stateRoot,
             proofBytes, validityPIs,
-            mleProof, kzg, groth16
+            mleProof, kzg
         );
         if (!confirmed) return false;
 
@@ -809,8 +783,7 @@ contract IntmaxRollup {
     function fullVerify(
         bytes32 stateRoot,
         ValidityPublicInputs calldata validityPIs,
-        MleVerifier.MleProof calldata mleProof,
-        Groth16Params memory groth16
+        MleVerifier.MleProof calldata mleProof
     ) external view returns (bool) {
         // 1. PI binding to on-chain state
         if (validityPIs.initialExtCommitment != latestFinalizedStateRoot) return false;
@@ -818,16 +791,19 @@ contract IntmaxRollup {
         if (validityPIs.finalBlockChain != blockHashChainAt[validityPIs.finalBlockNumber]) return false;
         if (validityPIs.finalExtCommitment != stateRoot) return false;
 
-        // 2. piHash binding: Groth16 pubInputs must encode keccak256(ValidityPublicInputs)
-        //    as 8 big-endian u32 limbs.
+        // 2. piHash binding (SECURITY, replaces the removed Groth16 PI binding): the MLE proof's
+        //    own public inputs must encode keccak256(ValidityPublicInputs) as 8 big-endian u32
+        //    limbs. Without this, removing Groth16 would leave validityPIs UNBOUND to the verified
+        //    proof — an attacker could finalize arbitrary validityPIs (and thus an arbitrary state
+        //    root) against any valid MLE proof. `mleProof.publicInputs` is the wrapped Plonky2
+        //    validity circuit's public inputs (= keccak256(ValidityPublicInputs)), absorbed into
+        //    the WHIR Fiat-Shamir transcript inside `_verifyMle`, so binding them here ties the
+        //    claimed validityPIs to the proof that step 3 verifies.
         bytes32 piHash = _computeValidityPIHash(validityPIs);
-        if (!_groth16PIHashMatches(groth16.pubInputs, piHash)) return false;
+        if (!_mlePublicInputsMatch(mleProof.publicInputs, piHash)) return false;
 
         // 3. MLE proof verification
         if (!_verifyMle(mleProof)) return false;
-
-        // 4. Groth16 verification via gnark verifier (with commitment support)
-        if (!_verifyGroth16(groth16)) return false;
 
         return true;
     }
@@ -838,13 +814,11 @@ contract IntmaxRollup {
     ///     1. Commitment check
     ///     2. KZG blob binding
     ///     3. PI binding to on-chain state
-    ///     4. Proof params binding: blob == abi.encode(groth16, config, statement, whirProof, transcript)
+    ///     4. Proof params binding: blob == abi.encode(mleProof)
     ///
     ///   Fraud confirmed if any of:
-    ///     (a) Wrong WhirParams in committed blob
-    ///     (b) Groth16 pubInputs don't encode keccak256(ValidityPublicInputs) — PI hash mismatch
-    ///     (c) Any WHIR batch verification fails
-    ///     (d) Groth16 verification fails
+    ///     (a) mleProof.publicInputs don't encode keccak256(ValidityPublicInputs) — PI hash mismatch
+    ///     (b) MLE/WHIR verification fails
     function _verifyFraud(
         uint256 submissionId,
         bytes32 blobVersionedHash,
@@ -852,8 +826,7 @@ contract IntmaxRollup {
         bytes calldata proofBytes,
         ValidityPublicInputs calldata validityPIs,
         MleVerifier.MleProof calldata mleProof,
-        KZGProof calldata kzg,
-        Groth16Params memory groth16
+        KZGProof calldata kzg
     ) internal view returns (bool) {
         // ── Pre-conditions ────────────────────────────────────────────────
 
@@ -883,25 +856,23 @@ contract IntmaxRollup {
         // 4. Proof params binding — ensures we verify exactly what was committed.
         //    SECURITY: v2 moves the WHIR ext3 evaluations INSIDE `mleProof`
         //    (preprocessedWhirEval / witnessWhirEval / auxWhirEval + the R2-#1
-        //    and R2-#2 per-point fields), so a single keccak over (groth16,
-        //    mleProof) atomically pins them together with the rest of the
-        //    proof. An attacker can no longer substitute different WHIR
-        //    evaluations to falsely accuse a valid proof.
-        if (keccak256(abi.encode(groth16, mleProof)) != keccak256(proofBytes)) {
+        //    and R2-#2 per-point fields), so a single keccak over `mleProof`
+        //    atomically pins them together with the rest of the proof. An
+        //    attacker can no longer substitute different WHIR evaluations to
+        //    falsely accuse a valid proof.
+        if (keccak256(abi.encode(mleProof)) != keccak256(proofBytes)) {
             return false;
         }
 
         // ── Fraud detection (any failure = fraud) ────────────────────────
 
-        // (a) piHash mismatch: Groth16 pubInputs
+        // (a) piHash mismatch: mleProof.publicInputs must bind keccak256(ValidityPublicInputs).
+        //     SECURITY: this is the soundness anchor that replaces the removed Groth16 PI binding.
         bytes32 piHash = _computeValidityPIHash(validityPIs);
-        if (!_groth16PIHashMatches(groth16.pubInputs, piHash)) return true;
+        if (!_mlePublicInputsMatch(mleProof.publicInputs, piHash)) return true;
 
-        // (b) MLE proof verification fails
+        // (b) MLE/WHIR verification fails
         if (!_verifyMle(mleProof)) return true;
-
-        // (c) Groth16 verification fails
-        if (!_verifyGroth16(groth16)) return true;
 
         return false;
     }
@@ -919,38 +890,13 @@ contract IntmaxRollup {
         );
     }
 
-    /// @dev Verify Groth16 proof via the gnark-generated verifier (with commitment support).
-    ///      Falls back to the built-in Groth16Verifier if no gnark verifier is set.
-    function _verifyGroth16(Groth16Params memory groth16) internal view returns (bool) {
-        if (address(gnarkVerifier) != address(0)) {
-            // Convert proof to gnark format: [a.x, a.y, b.x00, b.x01, b.x10, b.x11, c.x, c.y]
-            uint256[8] memory proof = [
-                groth16.proof.a[0], groth16.proof.a[1],
-                groth16.proof.b[0][0], groth16.proof.b[0][1],
-                groth16.proof.b[1][0], groth16.proof.b[1][1],
-                groth16.proof.c[0], groth16.proof.c[1]
-            ];
-            // Convert pubInputs to fixed-size array
-            uint256[8] memory input;
-            for (uint256 i = 0; i < 8 && i < groth16.pubInputs.length; i++) {
-                input[i] = groth16.pubInputs[i];
-            }
-            try gnarkVerifier.verifyProof(proof, groth16.commitments, groth16.commitmentPok, input) {
-                return true;
-            } catch {
-                return false;
-            }
-        }
-        return Groth16Verifier.verify(groth16Vk, groth16.proof, groth16.pubInputs);
-    }
-
     // -----------------------------------------------------------------------
     // Internal — MLE verification helpers
     // -----------------------------------------------------------------------
 
     /// @dev Verify MLE proof using the MleVerifier library.
     ///      SECURITY: When mleVk.degreeBits == 0, MLE verification is disabled.
-    ///      This is intentional for deployments that only use Groth16 verification.
+    ///      This is intentional only for test deployments that do not exercise the proof path.
     ///      Production deployments MUST set degreeBits > 0.
     function _verifyMle(
         MleVerifier.MleProof calldata mleProof
@@ -1113,20 +1059,6 @@ contract IntmaxRollup {
         emit WithdrawalCredited(recipient, POST_BLOCK_STAKE);
     }
 
-    function _setGroth16VerifyingKey(Groth16Verifier.VerifyingKey memory vkInput) internal {
-        groth16Vk.alpha = vkInput.alpha;
-        groth16Vk.beta = vkInput.beta;
-        groth16Vk.gamma = vkInput.gamma;
-        groth16Vk.delta = vkInput.delta;
-
-        uint256 icLength = vkInput.ic.length;
-        delete groth16Vk.ic;
-        groth16Vk.ic = new uint256[2][](icLength);
-        for (uint256 i = 0; i < icLength; i++) {
-            groth16Vk.ic[i] = vkInput.ic[i];
-        }
-    }
-
     // -----------------------------------------------------------------------
     // Internal — Hash computation helpers
     // -----------------------------------------------------------------------
@@ -1157,22 +1089,26 @@ contract IntmaxRollup {
         );
     }
 
-    /// @dev Check that Groth16 pubInputs encode piHash as 8 big-endian u32 limbs.
+    /// @dev SECURITY: Check that the MLE proof's public inputs encode piHash as 8 big-endian u32
+    /// limbs — the soundness binding that replaces the removed Groth16 PI binding.
     ///
     /// The Plonky2 validity circuit registers keccak256(ValidityPublicInputs) as its public
-    /// inputs by calling Bytes32::to_u32_vec() — 8 u32 values in big-endian byte order.
-    /// gnark's ExampleVerifierCircuit exposes each Goldilocks element as one BN254 scalar,
-    /// so pubInputs must have exactly 8 elements, each equal to the corresponding u32 limb.
-    function _groth16PIHashMatches(
-        uint256[] memory pubInputs,
+    /// inputs by calling Bytes32::to_u32_vec() — 8 u32 values in big-endian byte order. The
+    /// WrapperCircuit re-registers exactly those 8 limbs as its own public inputs, which become
+    /// `MleProof.publicInputs` and are absorbed into the WHIR Fiat-Shamir transcript inside
+    /// `verify()`. So `publicInputs` must have exactly 8 elements, each equal to the corresponding
+    /// u32 limb of keccak256(ValidityPublicInputs). This ties the verified proof to the claimed
+    /// validityPIs (and therefore to the accepted state root) with no separately-trusted argument.
+    function _mlePublicInputsMatch(
+        uint256[] memory publicInputs,
         bytes32 piHash
     ) internal pure returns (bool) {
-        if (pubInputs.length != 8) return false;
+        if (publicInputs.length != 8) return false;
         uint256 h = uint256(piHash);
         for (uint256 i = 0; i < 8; i++) {
             // Extract the i-th big-endian u32 limb: bits [255-i*32 .. 224-i*32]
             uint256 limb = (h >> (224 - i * 32)) & 0xFFFFFFFF;
-            if (pubInputs[i] != limb) return false;
+            if (publicInputs[i] != limb) return false;
         }
         return true;
     }

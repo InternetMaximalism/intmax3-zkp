@@ -7,7 +7,7 @@ use thiserror::Error;
 pub use crate::common::channel_id::ChannelId;
 use crate::{
     common::balance_state::{BalanceState, tx_leaf_hash},
-    constants::CHANNEL_MEMBERS,
+    constants::MAX_CHANNEL_MEMBERS,
     ethereum_types::{
         address::Address, bytes32::Bytes32, u32limb_trait::U32LimbTrait as _, u256::U256,
     },
@@ -165,13 +165,20 @@ impl ChannelProofEnvelope {
 #[serde(rename_all = "camelCase")]
 pub struct ChannelRecord {
     pub channel_id: ChannelId,
-    /// Ordered member identities = SPHINCS+ pubkey hashes, slot order 0..CHANNEL_MEMBERS.
-    pub member_sphincs_pubkey_hashes: [Bytes32; CHANNEL_MEMBERS],
+    /// Number of ACTIVE members (2..=MAX_CHANNEL_MEMBERS). Active members occupy slots
+    /// `0..member_count`; slots `member_count..MAX_CHANNEL_MEMBERS` are padding
+    /// (`Bytes32::default()` pubkey hashes). Pad-to-MAX deviation D6.
+    pub member_count: u8,
+    /// Ordered member identities = SPHINCS+ pubkey hashes, slot order 0..MAX_CHANNEL_MEMBERS.
+    /// Active slots (`< member_count`) are nonzero and pairwise-distinct; padding slots are
+    /// `Bytes32::default()`.
+    pub member_sphincs_pubkey_hashes: [Bytes32; MAX_CHANNEL_MEMBERS],
     /// L1/keccak digest form of the channel's member tree root. The in-circuit
     /// `ChannelLeaf.member_pubkeys_root` is a Poseidon root (different representation, DB); this
     /// keccak form anchors the same member set at the L1 boundary.
     pub member_pubkeys_root: Bytes32,
-    /// The slot whose member acts as block-proposer (replaces `bp_key_id`). 0..CHANNEL_MEMBERS.
+    /// The slot whose member acts as block-proposer (replaces `bp_key_id`). Must be `<
+    /// member_count`.
     pub bp_member_slot: u8,
     pub special_close_penalty: U256,
     pub close_freeze_nonce: u64,
@@ -192,34 +199,61 @@ impl ChannelRecord {
                     .to_string(),
             ));
         }
-        if (self.bp_member_slot as usize) >= CHANNEL_MEMBERS {
+        let count = self.member_count as usize;
+        if count < 2 || count > MAX_CHANNEL_MEMBERS {
             return Err(ChannelError::InvalidChannelRecord(format!(
-                "bp_member_slot {} out of range (must be < {CHANNEL_MEMBERS})",
+                "member_count {count} out of range (must be 2..={MAX_CHANNEL_MEMBERS})"
+            )));
+        }
+        if (self.bp_member_slot as usize) >= count {
+            return Err(ChannelError::InvalidChannelRecord(format!(
+                "bp_member_slot {} out of range (must be < member_count {count})",
                 self.bp_member_slot
             )));
         }
-        // One SPHINCS+ key per member: the CHANNEL_MEMBERS pubkey hashes must be nonzero and
-        // pairwise distinct (no shared-key / duplicate-member forgery).
+        // One SPHINCS+ key per member: the ACTIVE pubkey hashes (slots 0..member_count) must be
+        // nonzero and pairwise distinct (no shared-key / duplicate-member forgery); PADDING slots
+        // (>= member_count) must be Bytes32::default().
         for (i, hash) in self.member_sphincs_pubkey_hashes.iter().enumerate() {
-            if *hash == Bytes32::default() {
-                return Err(ChannelError::InvalidChannelRecord(format!(
-                    "member_sphincs_pubkey_hashes[{i}] must be nonzero"
-                )));
-            }
-            for other in self.member_sphincs_pubkey_hashes.iter().skip(i + 1) {
-                if hash == other {
-                    return Err(ChannelError::InvalidChannelRecord(
-                        "member_sphincs_pubkey_hashes must be pairwise distinct".to_string(),
-                    ));
+            if i < count {
+                if *hash == Bytes32::default() {
+                    return Err(ChannelError::InvalidChannelRecord(format!(
+                        "member_sphincs_pubkey_hashes[{i}] (active) must be nonzero"
+                    )));
                 }
+                for (j, other) in self
+                    .member_sphincs_pubkey_hashes
+                    .iter()
+                    .enumerate()
+                    .skip(i + 1)
+                {
+                    if j < count && hash == other {
+                        return Err(ChannelError::InvalidChannelRecord(
+                            "active member_sphincs_pubkey_hashes must be pairwise distinct"
+                                .to_string(),
+                        ));
+                    }
+                }
+            } else if *hash != Bytes32::default() {
+                return Err(ChannelError::InvalidChannelRecord(format!(
+                    "member_sphincs_pubkey_hashes[{i}] is a padding slot (>= member_count {count}) \
+                     and must be Bytes32::default()"
+                )));
             }
         }
         Ok(())
     }
 
-    /// IMCR signing digest. Member segment = `bp_member_slot`(1) + CHANNEL_MEMBERS pubkey hashes
-    /// (3*8 = 24 limbs) + `member_pubkeys_root`(8). `regev_pk_root` stays at the END of the legacy
-    /// preimage (detail2 §H-1).
+    /// IMCR signing digest (pad-to-MAX D6). Member segment = `bp_member_slot`(1) +
+    /// `status`(1) + `member_count`(1) + ALL `MAX_CHANNEL_MEMBERS` pubkey hashes (16*8 = 128
+    /// limbs, padding slots contribute their `Bytes32::default()` zero limbs) +
+    /// `member_pubkeys_root`(8). `regev_pk_root` stays at the END of the preimage (detail2 §H-1).
+    ///
+    /// PREIMAGE (exact): `[IMCR, channel_id(1), bp_member_slot(1), split_u64(close_freeze_nonce),
+    /// status(1), member_count(1), member_hashes(16*8), member_pubkeys_root(8),
+    /// special_close_penalty(8), regev_pk_root(8)]`. The `member_count` limb replaces the legacy
+    /// `CHANNEL_MEMBERS` constant limb in the same position; hashing all 16 hashes (not just the
+    /// active ones) fixes the active/padding split under the member signatures.
     pub fn signing_digest(&self) -> Bytes32 {
         hash_words(
             &[
@@ -227,7 +261,7 @@ impl ChannelRecord {
                 self.channel_id.to_u32_vec(),
                 vec![self.bp_member_slot as u32],
                 split_u64(self.close_freeze_nonce),
-                vec![self.status as u32, CHANNEL_MEMBERS as u32],
+                vec![self.status as u32, self.member_count as u32],
                 self.member_sphincs_pubkey_hashes
                     .iter()
                     .flat_map(Bytes32::to_u32_vec)
@@ -252,7 +286,7 @@ pub struct MerkleInclusionProof {
 #[serde(rename_all = "camelCase")]
 pub struct SmallBlockRootMessage {
     pub channel_id: ChannelId,
-    /// Block-producer member slot (0..CHANNEL_MEMBERS) and its SPHINCS+ pubkey hash.
+    /// Block-producer member slot (0..member_count) and its SPHINCS+ pubkey hash.
     pub bp_member_slot: u8,
     pub bp_sphincs_pubkey_hash: Bytes32,
     pub small_block_number: u64,
@@ -289,7 +323,7 @@ impl SmallBlockRootMessage {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct MemberSignature {
-    /// Member slot (0..CHANNEL_MEMBERS) — array index into the channel's member list.
+    /// Member slot (0..member_count) — array index into the channel's active member list.
     pub member_slot: u8,
     /// The signing member's SPHINCS+ pubkey hash (their identity).
     pub sphincs_pubkey_hash: Bytes32,
@@ -923,18 +957,21 @@ impl ChannelTransition {
     }
 }
 
-/// Validate the 3/3 member signature set against the channel's member pubkey hashes by slot.
+/// Validate the N-of-N member signature set against the channel's ACTIVE member pubkey hashes by
+/// slot (pad-to-MAX D6: exactly `member_count` signatures, one per active slot).
 ///
 /// One SPHINCS+ key per member (N-of-N, no threshold): `signatures[i].member_slot == i` and
-/// `signatures[i].sphincs_pubkey_hash == record.member_sphincs_pubkey_hashes[i]`.
+/// `signatures[i].sphincs_pubkey_hash == record.member_sphincs_pubkey_hashes[i]` for every active
+/// slot `i in 0..member_count`.
 pub fn validate_all_member_signatures(
     record: &ChannelRecord,
     signatures: &[MemberSignature],
 ) -> Result<(), ChannelError> {
     record.validate()?;
-    if signatures.len() != CHANNEL_MEMBERS {
+    let count = record.member_count as usize;
+    if signatures.len() != count {
         return Err(ChannelError::InvalidSignatureSet(format!(
-            "expected {CHANNEL_MEMBERS} member signatures, got {}",
+            "expected {count} member signatures (member_count), got {}",
             signatures.len()
         )));
     }
@@ -1017,22 +1054,43 @@ pub(crate) fn hash_words(words: &[u32]) -> Bytes32 {
     Bytes32::from_u32_slice(&solidity_keccak256(words)).expect("keccak output must be bytes32")
 }
 
-/// Close-circuit member-set commitment (detail2 §F-3, F5 soundness binding).
+/// Close-circuit member-set commitment (detail2 §F-3, F5 soundness binding; pad-to-MAX D6).
 ///
-/// `member_set_commitment = keccak([IMCM, sphincs_pk_hash_0(8), sphincs_pk_hash_1(8),
-/// sphincs_pk_hash_2(8)])` over the 3 members' SPHINCS+ pubkey hashes in SLOT ORDER.
+/// `member_set_commitment = keccak([IMCM, member_count, h_0(8), …, h_{MAX-1}(8)])` over
+/// `member_count` (single u32 limb right after the domain) and ALL `MAX_CHANNEL_MEMBERS` SPHINCS+
+/// pubkey hashes in SLOT ORDER, where PADDING slots (`>= member_count`) contribute their
+/// `Bytes32::default()` (zero) limbs. This preimage is FIXED-LENGTH.
 ///
-/// SECURITY: the full channel-close circuit recomputes this commitment in-circuit from the SAME 3
-/// pubkeys whose SPHINCS+ signatures it verifies, and exposes it as a public input. L1 matches the
-/// committed value against `keccak([IMCM, registered member_sphincs_pubkey_hashes])` from the
-/// channel's `ChannelRecord`, so a prover cannot substitute non-member signing keys. This native
-/// helper MUST agree byte-for-byte with the in-circuit keccak (`ChannelCloseCircuit::new`) — both
-/// use the canonical big-endian `solidity_keccak256` over one u32 word per limb.
-pub fn close_member_set_commitment(hashes: &[Bytes32; CHANNEL_MEMBERS]) -> Bytes32 {
-    let mut words = Vec::with_capacity(1 + CHANNEL_MEMBERS * 8);
+/// SECURITY: this commits the active set INJECTIVELY — `member_count` fixes the active/padding
+/// boundary and padding hashes are zero (the close circuit selects zero for `slot >= member_count`
+/// and `ChannelRecord::validate` rejects nonzero padding hashes), so two different active sets
+/// cannot collide. The full channel-close circuit recomputes this commitment in-circuit from the
+/// SAME pubkeys whose SPHINCS+ signatures it verifies, and exposes it as a public input; L1 matches
+/// it against the channel's registered member set, so a prover cannot substitute non-member signing
+/// keys.
+///
+/// DESIGN NOTE (D6, forced): the preimage is fixed-length (member_count + all 16 hashes, padding
+/// zeroed) rather than the "active-only" variable-length form, because the in-circuit keccak gadget
+/// takes a build-time-fixed input length and cannot hash a `member_count`-dependent number of
+/// words. The fixed form is cryptographically equivalent (member_count + zeroed padding is
+/// injective on the active set). This native helper MUST agree byte-for-byte with the in-circuit
+/// keccak (`ChannelCloseCircuit::new`) and the L1 mirror — all use the canonical big-endian
+/// `solidity_keccak256` over one u32 word per limb.
+pub fn close_member_set_commitment(
+    hashes: &[Bytes32; MAX_CHANNEL_MEMBERS],
+    member_count: u8,
+) -> Bytes32 {
+    let count = member_count as usize;
+    let mut words = Vec::with_capacity(2 + MAX_CHANNEL_MEMBERS * 8);
     words.push(CLOSE_MEMBER_SET_DOMAIN);
-    for hash in hashes.iter() {
-        words.extend_from_slice(&hash.to_u32_vec());
+    words.push(member_count as u32);
+    for (i, hash) in hashes.iter().enumerate() {
+        // Padding slots contribute zero limbs (matches the in-circuit select on slot_is_active).
+        if i < count {
+            words.extend_from_slice(&hash.to_u32_vec());
+        } else {
+            words.extend_from_slice(&Bytes32::default().to_u32_vec());
+        }
     }
     hash_words(&words)
 }
@@ -1088,10 +1146,15 @@ mod tests {
     fn sample_balance_state(version: u64) -> BalanceState {
         BalanceState {
             channel_id: sample_channel_id(),
-            enc_balances: [ciphertext(1), ciphertext(2), ciphertext(3)],
+            member_count: 3,
+            enc_balances: BalanceState::pad_enc_balances(&[
+                ciphertext(1),
+                ciphertext(2),
+                ciphertext(3),
+            ]),
             settled_tx_chain: Bytes32::default(),
             state_version: version,
-            pending_adds: [0, 0, 0],
+            pending_adds: BalanceState::pad_pending_adds(&[0, 0, 0]),
         }
     }
 
@@ -1134,10 +1197,20 @@ mod tests {
         .with_computed_digest()
     }
 
+    /// Pad an active prefix of member pubkey hashes to the full MAX_CHANNEL_MEMBERS array.
+    fn pad_hashes(active: &[Bytes32]) -> [Bytes32; MAX_CHANNEL_MEMBERS] {
+        std::array::from_fn(|i| active.get(i).copied().unwrap_or_default())
+    }
+
     fn sample_record() -> ChannelRecord {
         ChannelRecord {
             channel_id: sample_channel_id(),
-            member_sphincs_pubkey_hashes: [pubkey_hash(10), pubkey_hash(11), pubkey_hash(12)],
+            member_count: 3,
+            member_sphincs_pubkey_hashes: pad_hashes(&[
+                pubkey_hash(10),
+                pubkey_hash(11),
+                pubkey_hash(12),
+            ]),
             member_pubkeys_root: Bytes32::from_u32_slice(&[7, 7, 7, 7, 0, 0, 0, 0]).unwrap(),
             bp_member_slot: 0,
             special_close_penalty: U256::from(5u32),
@@ -1230,15 +1303,36 @@ mod tests {
     #[test]
     fn close_member_set_commitment_matches_solidity_shared_vector() {
         let words = |base: u32| -> Vec<u32> { (base..base + 8).collect() };
-        let hashes = [
+        // 3 ACTIVE member hashes padded to MAX_CHANNEL_MEMBERS. The commitment is the FIXED 16-slot
+        // form (pad-to-MAX D6): keccak([IMCM, member_count, h_0..h_15]) with padding slots zeroed
+        // (130 u32 words). This pinned constant is mirrored by the Foundry test
+        // `test_member_set_commitment_matches_rust_shared_vector` in
+        // contracts/test/ChannelSettlementManager.t.sol — if they disagree, fix Solidity, not this
+        // digest.
+        let active = vec![
             Bytes32::from_u32_slice(&words(1)).unwrap(),
             Bytes32::from_u32_slice(&words(9)).unwrap(),
             Bytes32::from_u32_slice(&words(17)).unwrap(),
         ];
+        let hashes = pad_hashes(&active);
+        let committed = close_member_set_commitment(&hashes, 3);
         let expected =
-            Bytes32::from_hex("0x0f7f77fe100791e7f70be85d8d4d6f5067d833c0bc0847816b9e9d892c9fb8e6")
+            Bytes32::from_hex("0x12450612c5f67b7ff613b705f6e5efccf4bdd43e647570fcb207076f447236cc")
                 .unwrap();
-        assert_eq!(close_member_set_commitment(&hashes), expected);
+        assert_eq!(committed, expected);
+        // Padding slots (>= member_count) are zeroed INTERNALLY, so a nonzero padding slot in the
+        // input array does NOT change the commitment — the value depends only on member_count and
+        // the active hashes. This makes the FIXED-form commitment injective on the active set
+        // (and `validate()` independently forbids nonzero padding on real records).
+        let mut tampered_padding = hashes;
+        tampered_padding[3] = Bytes32::from_u32_slice(&words(25)).unwrap();
+        assert_eq!(
+            close_member_set_commitment(&tampered_padding, 3),
+            committed,
+            "padding slots are zeroed internally and must not affect member_set_commitment"
+        );
+        // member_count is part of the preimage: a different count changes the value.
+        assert_ne!(close_member_set_commitment(&hashes, 4), committed);
     }
 
     #[test]
@@ -1270,13 +1364,119 @@ mod tests {
             Err(ChannelError::InvalidChannelRecord(_))
         ));
 
-        // bp_member_slot must be in range.
+        // bp_member_slot must be in range (< member_count, here 3).
         let mut bad_bp = sample_record();
-        bad_bp.bp_member_slot = CHANNEL_MEMBERS as u8;
+        bad_bp.bp_member_slot = bad_bp.member_count;
         assert!(matches!(
             bad_bp.validate(),
             Err(ChannelError::InvalidChannelRecord(_))
         ));
+    }
+
+    /// Build a `ChannelRecord` with `count` ACTIVE members (distinct nonzero pubkey hashes in
+    /// slots 0..count, padding = default) for the multi-N native `validate()` coverage below.
+    fn record_with_members(count: u8) -> ChannelRecord {
+        let active: Vec<Bytes32> = (0..count as u32)
+            .map(|i| pubkey_hash(100 + i * 8))
+            .collect();
+        ChannelRecord {
+            channel_id: sample_channel_id(),
+            member_count: count,
+            member_sphincs_pubkey_hashes: pad_hashes(&active),
+            member_pubkeys_root: Bytes32::from_u32_slice(&[7, 7, 7, 7, 0, 0, 0, 0]).unwrap(),
+            bp_member_slot: 0,
+            special_close_penalty: U256::from(5u32),
+            close_freeze_nonce: 0,
+            status: ChannelStatus::Active,
+            regev_pk_root: Bytes32::from_u32_slice(&[9, 9, 9, 9, 0, 0, 0, 0]).unwrap(),
+        }
+    }
+
+    /// Multi-N (D6 pad-to-MAX): `ChannelRecord::validate()` ACCEPTS member_count = 2 / 8 / 16
+    /// (the boundary and an interior value) when active slots are distinct + nonzero and padding
+    /// slots are `Bytes32::default()`, and REJECTS the D6 boundary violations.
+    #[test]
+    fn channel_record_validate_multi_n() {
+        // Accepts 2 (min), 8 (interior), 16 (max, all slots active, no padding).
+        for count in [2u8, 8, 16] {
+            record_with_members(count)
+                .validate()
+                .unwrap_or_else(|e| panic!("member_count {count} must validate: {e}"));
+        }
+
+        // member_count < 2 is rejected.
+        let mut too_few = record_with_members(2);
+        too_few.member_count = 1;
+        // slot 1 is now a "padding" slot but nonzero — but the count check fires first regardless.
+        assert!(matches!(
+            too_few.validate(),
+            Err(ChannelError::InvalidChannelRecord(_))
+        ));
+
+        // member_count > MAX_CHANNEL_MEMBERS is rejected.
+        let mut too_many = record_with_members(16);
+        too_many.member_count = (MAX_CHANNEL_MEMBERS + 1) as u8;
+        assert!(matches!(
+            too_many.validate(),
+            Err(ChannelError::InvalidChannelRecord(_))
+        ));
+
+        // A nonzero PADDING slot (>= member_count) is rejected (would smuggle a non-member key).
+        let mut nonzero_pad = record_with_members(8);
+        nonzero_pad.member_sphincs_pubkey_hashes[8] = pubkey_hash(500);
+        assert!(matches!(
+            nonzero_pad.validate(),
+            Err(ChannelError::InvalidChannelRecord(_))
+        ));
+
+        // A duplicate ACTIVE hash is rejected (no shared-key / duplicate-member forgery).
+        let mut dup = record_with_members(8);
+        dup.member_sphincs_pubkey_hashes[5] = dup.member_sphincs_pubkey_hashes[2];
+        assert!(matches!(
+            dup.validate(),
+            Err(ChannelError::InvalidChannelRecord(_))
+        ));
+
+        // bp_member_slot >= member_count is rejected.
+        let mut bad_bp = record_with_members(8);
+        bad_bp.bp_member_slot = 8;
+        assert!(matches!(
+            bad_bp.validate(),
+            Err(ChannelError::InvalidChannelRecord(_))
+        ));
+
+        // bp_member_slot < member_count (e.g. last active slot) is accepted.
+        let mut ok_bp = record_with_members(8);
+        ok_bp.bp_member_slot = 7;
+        ok_bp.validate().unwrap();
+    }
+
+    /// `close_member_set_commitment` binds `member_count`: with the SAME 16-slot hash array, the
+    /// digest for count = 2 differs from count = 3. Proves member_count is genuinely part of the
+    /// preimage (not ignored), so two active sets that share a hash prefix cannot collide.
+    #[test]
+    fn close_member_set_commitment_binds_member_count() {
+        let hashes = pad_hashes(&[
+            pubkey_hash(10),
+            pubkey_hash(20),
+            pubkey_hash(30),
+            pubkey_hash(40),
+        ]);
+        let c2 = close_member_set_commitment(&hashes, 2);
+        let c3 = close_member_set_commitment(&hashes, 3);
+        assert_ne!(
+            c2, c3,
+            "member_count must be bound into close_member_set_commitment (count=2 vs count=3)"
+        );
+        // And across the full supported range every adjacent count is distinct on the same array.
+        for count in 2u8..MAX_CHANNEL_MEMBERS as u8 {
+            assert_ne!(
+                close_member_set_commitment(&hashes, count),
+                close_member_set_commitment(&hashes, count + 1),
+                "count {count} vs {} must differ",
+                count + 1
+            );
+        }
     }
 
     #[test]

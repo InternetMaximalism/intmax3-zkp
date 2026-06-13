@@ -15,7 +15,7 @@ use crate::{
         balance_state::BalanceState,
         channel::{ChannelMember, CloseIntent, CloseWithdrawal, WithdrawalClaim},
     },
-    constants::CHANNEL_MEMBERS,
+    constants::MAX_CHANNEL_MEMBERS,
     ethereum_types::{address::Address, bytes32::Bytes32, u32limb_trait::U32LimbTrait},
     regev::{RegevPk, RegevSecurityLevel, verify_withdraw_claim},
 };
@@ -116,11 +116,19 @@ impl WithdrawalClaimWitness {
                 "final balance state channel_id mismatch".to_string(),
             ));
         }
-        // The claimed ciphertext IS the member's slot of the H1-bound balance state.
-        if self.member_index >= CHANNEL_MEMBERS {
+        // The claimed ciphertext IS the member's slot of the H1-bound balance state. Pad-to-MAX
+        // D6: the claiming member must be an ACTIVE slot (`< member_count`); padding slots carry
+        // the empty ciphertext and are not withdrawable.
+        if self.member_index >= MAX_CHANNEL_MEMBERS {
             return Err(WithdrawalClaimWitnessError::MemberSlotMismatch(format!(
-                "member_index {} out of range",
+                "member_index {} out of range (>= MAX_CHANNEL_MEMBERS)",
                 self.member_index
+            )));
+        }
+        if self.member_index >= self.final_balance_state.member_count as usize {
+            return Err(WithdrawalClaimWitnessError::MemberSlotMismatch(format!(
+                "member_index {} is a padding slot (>= member_count {})",
+                self.member_index, self.final_balance_state.member_count
             )));
         }
         if self.claim.user_amount_ct != self.final_balance_state.enc_balances[self.member_index] {
@@ -242,10 +250,11 @@ mod tests {
         let (ct2, _) = encrypt_amount(&mut rng, &pk2, 11).unwrap();
         let final_balance_state = BalanceState {
             channel_id,
-            enc_balances: [ct0.clone(), ct1, ct2],
+            member_count: 3,
+            enc_balances: BalanceState::pad_enc_balances(&[ct0.clone(), ct1, ct2]),
             settled_tx_chain: Bytes32::default(),
             state_version: 6,
-            pending_adds: [0, 0, 0],
+            pending_adds: BalanceState::pad_pending_adds(&[0, 0, 0]),
         };
 
         let state = ChannelState {

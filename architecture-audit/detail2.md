@@ -86,7 +86,7 @@ pub struct RegevCiphertext {
 |---|---|
 | `RegevPk` | 2 × 128 × 4 = **1,024 bytes** |
 | `RegevCiphertext` | 2 × 128 × 4 = **1,024 bytes** |
-| `encBalances`(3 member 分) | **3,072 bytes** |
+| `encBalances`(1 member 分) | **1,024 bytes**(× `member_count`、最大 16 = 16,384 bytes、D6) |
 | 復号鍵 `RegevSk { s: Vec<i8> }` | 128 bytes(本人のみ保持。どの構造体にも現れない) |
 
 `RegevCiphertext::digest() = hash_words([REGEV_CT_DOMAIN, c1.len() as u32, c1…, c2…]) → Bytes32`
@@ -143,15 +143,16 @@ pub struct RegevCiphertext {
 /// abstract2.md: BalanceState { encBalances, settledTxChain, stateVersion }
 pub struct BalanceState {
     pub channel_id: ChannelId,
-    pub enc_balances: [RegevCiphertext; CHANNEL_MEMBERS],   // member index 順
+    pub member_count: u8,                                  // active = slot 0..member_count(2..=16、D6)
+    pub enc_balances: [RegevCiphertext; MAX_CHANNEL_MEMBERS],   // 16 スロット、padding は default/zero
     pub settled_tx_chain: Bytes32,                          // genesis = 0x00…00
     pub state_version: u64,                                 // チャネル内・間の両更新で +1
 }
 impl BalanceState {
     /// H1 = hash(BalanceState)。proof オブジェクトを含まない(署名時点で全成分既知)
     pub fn h1(&self) -> Bytes32 {
-        // 順序: [BALANCE_STATE_DOMAIN, channel_id,
-        //        enc_balances[0].digest(), enc_balances[1].digest(), enc_balances[2].digest(),
+        // 順序: [BALANCE_STATE_DOMAIN, channel_id, member_count,
+        //        enc_balances[0..16].digest(), pending_adds[0..16],   // 固定 16 スロット(D6)
         //        settled_tx_chain, split_u64(state_version)] → keccak256
     }
 }
@@ -161,13 +162,19 @@ pub fn balance_state_hash(h1: Bytes32, h2: Bytes32) -> Bytes32 {
 }
 ```
 
-- `CHANNEL_MEMBERS = 3`(固定、§G)。member は **slot 0/1/2** で `enc_balances` /
+- **N メンバー(`MAX_CHANNEL_MEMBERS = 16`、pad-to-MAX、§G、D6)。** member 数は channel ごとの
+  `member_count: u8`(`2 <= member_count <= 16`)で可変。回路は分岐せず常に 16 スロットを処理し、
+  active = slot `0..member_count`、padding slot は default/zero。全 member 配列は `[_; 16]`。
+  `BalanceState` / `ChannelRecord` に `member_count` を追加し、`h1()` / IMCR は 16 個全成分 +
+  `member_count` をハッシュする(D6)。member は **slot** で `enc_balances` /
   `pending_adds`(D3)の配列添字として参照される。**member の identity は SPHINCS+ 公開鍵ハッシュ
   (`Bytes32`)**であり(DA)、slot はあくまで配列位置にすぎない。`ChannelRecord::validate()` は
-  `member_sphincs_pubkey_hashes` が **3 つの相異なる非ゼロハッシュ**であること、および
-  `bp_member_slot < CHANNEL_MEMBERS` を要求する。channel→member の束縛木は新 `MemberTree`
-  (`src/common/trees/key_tree.rs`、高さ `MEMBER_TREE_HEIGHT = 2`)であり、その root が
+  active スロットが **相異なる非ゼロハッシュ**であること、padding スロットが default であること、および
+  `bp_member_slot < member_count` を要求する。channel→member の束縛木は新 `MemberTree`
+  (`src/common/trees/key_tree.rs`、高さ `MEMBER_TREE_HEIGHT = 4` = 16 leaves)であり、その root が
   `ChannelLeaf.member_pubkeys_root`(§G、DB)。
+  *(abstract2.md §2.1 の `[(Address,RegevPk);3]` は 3 人固定なので N メンバーは spec deviation。
+  authoritative delta は detail2-implementation-notes.md の D6。)*
 - `H2` の値域: `0x00…00`(チャネル内)/ 自 small block の `tx_tree_root`(チャネル間、§A-2)。
   **`H2 = 0` の予約**: チャネル間経路で `tx_tree_root == 0` は検証で拒否する(空木 root が 0 に
   ならないことを keccak ベースの木で保証。v2 監査所見 4 への実装回答)。
@@ -437,8 +444,8 @@ state↔proof の対応は「`balanceProof.PI.settled_tx_chain == BalanceState.s
 
 | 定数 | 値 | 根拠 |
 |---|---|---|
-| `CHANNEL_MEMBERS` | **3** | abstract2.md §2.1(3 人固定) |
-| `MEMBER_TREE_HEIGHT` | **2** | 新 `MemberTree`(4 葉 ≥ 3 slot)の Poseidon Merkle 高さ(DB)。旧 `KEY_TREE_HEIGHT` / `KEY_SET_TREE_HEIGHT` / `MEMBER_KEY_TREE_HEIGHT` / `KEY_ID_BITS` を**置換・削除** |
+| `MAX_CHANNEL_MEMBERS` | **16** | N メンバー(pad-to-MAX、D6)。channel ごとの可変 `member_count: u8`(`2..=16`)で active 数を決定。abstract2.md §2.1 の 3 人固定からの spec deviation(旧 `CHANNEL_MEMBERS = 3` を置換) |
+| `MEMBER_TREE_HEIGHT` | **4**(= 16 葉) | 新 `MemberTree`(16 葉 = `MAX_CHANNEL_MEMBERS`)の Poseidon Merkle 高さ(DB / D6)。旧 `KEY_TREE_HEIGHT` / `KEY_SET_TREE_HEIGHT` / `MEMBER_KEY_TREE_HEIGHT` / `KEY_ID_BITS` を**置換・削除** |
 | `SIGN_TIMEOUT_SECS` | **180** | abstract2.md §2.5(3 min)。旧 `SMALL_BLOCK_SIGNATURE_TIMEOUT_SECS = 60` を置換 |
 | `GRACE_BEFORE_PROCESS_SECS` | **600** | abstract2.md §2.5(10 min)。§H-2 |
 | `CHALLENGE_PERIOD_SECS` | **86,400** | abstract2.md §2.5(1 day)。`ChannelSettlementManager` の immutable `challengePeriod` に設定 |
@@ -481,8 +488,8 @@ IMCR / IMLD。木: `CHANNEL_TREE_HEIGHT = 32`,
 
 | abstract2.md | 実装(更新版) |
 |---|---|
-| §3.0 `publishRegevPk` | channel 作成時、`registerChannel` で channel ごとに `[(sphincs_pubkey_hash, regev_pk, l1_recipient); 3]` を確定(per-key_id の threshold / key-set 登録は廃止、DA/DC)。`memberKeys[channel_id]` は abstract2 §1 の `Map<ChannelId,[(Address,RegevPk);3]>`。L1 アンカー: `ChannelRecord` の `member_sphincs_pubkey_hashes` + `member_pubkeys_root` + `regev_pk_root`(keccak "IMRR")を IMCR `signing_digest` に取り込む。回路内束縛は同一メンバーから組む Poseidon `MemberTree`(DB) |
-| §3.1 `agreeBalanceState` | `ChannelState::signing_digest()`(= hash(H1,H2) 内包)への 3 member 署名収集。検証項目は abstract2 §3.1 のとおり(version+1 / chain 整合 / 自成分復号検証 / `channelTxZKP` / `channelUpdateZKP` + 包含証明) |
+| §3.0 `publishRegevPk` | channel 作成時、`registerChannel` で channel ごとに可変 **2..16 メンバー** `(sphincs_pubkey_hash, regev_pk, l1_recipient)` + `member_count` を確定(per-key_id の threshold / key-set 登録は廃止、DA/DC)。`ChannelSettlementManager` は `bytes32[16]` + `activeMemberCount` を格納(pad-to-MAX、D6)。`memberKeys[channel_id]` は abstract2 §1 の `Map<ChannelId,[(Address,RegevPk);3]>` を N メンバーへ一般化した spec deviation(D6)。L1 アンカー: `ChannelRecord` の `member_sphincs_pubkey_hashes`(16 スロット)+ `member_count` + `member_pubkeys_root` + `regev_pk_root`(keccak "IMRR")を IMCR `signing_digest` に取り込む。回路内束縛は同一メンバーから組む Poseidon `MemberTree`(DB) |
+| §3.1 `agreeBalanceState` | `ChannelState::signing_digest()`(= hash(H1,H2) 内包)への active member(`0..member_count`)署名収集。検証項目は abstract2 §3.1 のとおり(version+1 / chain 整合 / 自成分復号検証 / `channelTxZKP` / `channelUpdateZKP` + 包含証明) |
 | §3.2 `channelTransfer` | `ChannelTx` 構築(§C-5)→ `channelTxZKP` 生成(§E-1)→ 伝播 → co-sign。`ChannelTransition::InChannelTransfer` |
 | §3.3.1 `rangeProof` | `bp_member_slot` で指名された member が `channelUpdateZKP` を `RegevProofVerifier` で検証 |
 | §3.3.2 `signChannelState` | `SmallBlockRootMessage` 署名(§C-7)。包含確認は 1-leaf 木に対する `tx_inclusion_proof`(§A-2) |
@@ -543,15 +550,21 @@ L1 の置換規則は「`final_epoch` が大きい、同点なら `final_state_v
 | `src/circuits/channel/withdrawal_claim_pis.rs` | `user_amount_digest` の意味を `RegevCiphertext::digest()` に |
 | `contracts/src/ChannelSettlementManager.sol` | `requestClose()` 追加・GRACE 強制・chain 照合・`final_state_version` 比較(§H-2) |
 | `contracts/src/ChannelSettlementVerifier.sol` | close 系 PI hash に `final_state_version` / `final_settled_tx_chain` を追加 |
-| `src/constants.rs` | §G の定数追加、`CHANNEL_MEMBERS = 3` |
+| `src/constants.rs` | §G の定数追加、`MAX_CHANNEL_MEMBERS = 16`(可変 `member_count`、D6) |
 | `src/circuits/channel/e2e_flow.rs` | E2E を Regev 化(opening 受け渡し撤去、ZKP 必須化) |
 
 ### I-3. 不変
 
 `src/common/transfer.rs`(`Transfer` / `SettledTransfer` / nullifier)、`src/common/block.rs`、
 `src/common/public_state.rs`、`src/utils/hash_chain/`、SPHINCS+ 系
-(`sphincs_sig.rs`)、`IntmaxRollup.sol` の postBlock / deposit / finalize パイプライン、
-MLE/WHIR ラッパ。
+(`sphincs_sig.rs`)、`IntmaxRollup.sol` の postBlock / deposit パイプライン、MLE/WHIR ラッパ。
+
+> **更新(D6 Change B):** `IntmaxRollup` の `finalize` / `fraudProof` / `verify` / `fullVerify` は
+> **MLE/WHIR 単独**となり、Groth16 を除去した(`Groth16Params` を受け取らない)。従来 Groth16 の PI-hash
+> チェックだけが担っていた validity-PI 束縛は、`_mlePublicInputsMatch(mleProof.publicInputs,
+> keccak256(ValidityPublicInputs))` に置換(soundness-critical)。`Groth16Verifier.sol` /
+> `GnarkGroth16Verifier.sol` / `E2E_RealGroth16.t.sol` / `src/utils/groth16_wrapper.rs` を削除。
+> 詳細・検証テストは detail2-implementation-notes.md D6。
 
 ---
 

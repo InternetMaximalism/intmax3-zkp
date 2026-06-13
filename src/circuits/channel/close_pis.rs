@@ -16,12 +16,16 @@ use crate::{
 //   closeWithdrawalDigest(8) | closeIntentDigest(8) | snapshotMediumBlockNumber(2) |
 //   finalStateVersion(2) | finalSettledTxChain(8) | memberSetCommitment(8)
 //
-// F5 SECURITY: `member_set_commitment` (8 limbs, appended at the END so the legacy close-intent
-// IMCI vector is byte-for-byte unchanged) = keccak([IMCM, sphincs_pk_hash_0..2]) over the 3
-// member SPHINCS+ pubkey hashes the close circuit's signatures verify (slot order). L1
-// (`ChannelSettlementManager`) matches it against the channel's registered member set, binding
-// the verified signing keys to the registered members (no non-member-key substitution).
-pub const CHANNEL_CLOSE_PUBLIC_INPUTS_LEN: usize = 85;
+// F5 SECURITY: `member_set_commitment` (8 limbs) = keccak([IMCM, member_count, h_0..h_15]) over
+// the member SPHINCS+ pubkey hashes the close circuit's signatures verify (slot order, padding
+// zeroed; pad-to-MAX D6). L1 (`ChannelSettlementManager`) matches it against the channel's
+// registered member set, binding the verified signing keys to the registered members.
+//
+// D6 (pad-to-MAX): `member_count` (1 limb) is APPENDED at the very END of the vector (after
+// `member_set_commitment`) so the legacy 85-limb layout is byte-for-byte unchanged for limbs
+// 0..85; total is now 86 limbs. The Solidity `closePIHash` preimage (F4/F5 workstream) must
+// append the same `member_count` limb.
+pub const CHANNEL_CLOSE_PUBLIC_INPUTS_LEN: usize = 86;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -52,6 +56,10 @@ pub struct ChannelClosePublicInputs {
     /// close witness alone — `ChannelCloseWitness::to_public_inputs` leaves it zero as a
     /// placeholder.
     pub member_set_commitment: Bytes32,
+    /// D6 (pad-to-MAX): number of ACTIVE members (2..=MAX_CHANNEL_MEMBERS). Appended at the END of
+    /// the close PI vector (single limb). Anchored in-circuit as the unique count inside the
+    /// signed H1 preimage and the member_set_commitment.
+    pub member_count: u8,
 }
 
 #[derive(Debug, Error)]
@@ -82,6 +90,7 @@ impl ChannelClosePublicInputs {
             split_u64(self.final_state_version),
             self.final_settled_tx_chain.to_u64_vec(),
             self.member_set_commitment.to_u64_vec(),
+            vec![self.member_count as u64],
         ]
         .concat()
     }
@@ -121,6 +130,12 @@ impl ChannelClosePublicInputs {
                 .map_err(|e| ChannelClosePublicInputsError::InvalidField(e.to_string()))?,
             member_set_commitment: Bytes32::from_u64_slice(&values[77..85])
                 .map_err(|e| ChannelClosePublicInputsError::InvalidField(e.to_string()))?,
+            member_count: u8::try_from(values[85]).map_err(|_| {
+                ChannelClosePublicInputsError::InvalidField(format!(
+                    "member_count limb {} does not fit in u8",
+                    values[85]
+                ))
+            })?,
         })
     }
 }
@@ -178,6 +193,8 @@ impl ChannelCloseWitness {
             // close witness alone does not carry. `ChannelCloseCircuit::prove`/`fill_witness`
             // computes it from `member_auth` and overrides this placeholder before proving.
             member_set_commitment: Bytes32::default(),
+            // D6: member_count comes from the final balance state (its h1 binds it).
+            member_count: self.final_channel_state.balance_state.member_count,
         })
     }
 }
@@ -240,10 +257,15 @@ mod tests {
             },
             balance_state: BalanceState {
                 channel_id: ChannelId::new(3).unwrap(),
-                enc_balances: [ciphertext(1), ciphertext(2), ciphertext(3)],
+                member_count: 3,
+                enc_balances: BalanceState::pad_enc_balances(&[
+                    ciphertext(1),
+                    ciphertext(2),
+                    ciphertext(3),
+                ]),
                 settled_tx_chain: Bytes32::from_u32_slice(&[1, 0, 0, 0, 0, 0, 0, 0]).unwrap(),
                 state_version: 12,
-                pending_adds: [0, 0, 0],
+                pending_adds: BalanceState::pad_pending_adds(&[0, 0, 0]),
             },
             h2_tag: Bytes32::default(),
             shared_native_nullifier_root: Bytes32::from_u32_slice(&[2, 0, 0, 0, 0, 0, 0, 0])
@@ -288,12 +310,17 @@ mod tests {
         assert_eq!(
             limbs.len(),
             CHANNEL_CLOSE_PUBLIC_INPUTS_LEN,
-            "P8 closePIHash preimage is exactly 85 BE u32 words (77 legacy + 8 memberSetCommitment)"
+            "closePIHash preimage is exactly 86 BE u32 words (77 legacy + 8 memberSetCommitment + \
+             1 memberCount)"
         );
         assert_eq!(
             &limbs[77..85],
             &public_inputs.member_set_commitment.to_u64_vec()[..],
-            "member_set_commitment occupies the final 8 limbs"
+            "member_set_commitment occupies limbs 77..85"
+        );
+        assert_eq!(
+            limbs[85], public_inputs.member_count as u64,
+            "member_count occupies the final limb (D6)"
         );
         // The P8-pinned tail: snapshotMediumBlockNumber(2) | finalStateVersion(2 hi,lo) |
         // finalSettledTxChain(8).

@@ -2,9 +2,11 @@
 //!
 //! `MemberTree` commits the ordered member set of a single channel. Each leaf binds a member's
 //! SPHINCS+ public-key hash to that member's Regev public-key digest at the member's slot
-//! (0..CHANNEL_MEMBERS). Its root is stored in `ChannelLeaf.member_pubkeys_root` and is the
-//! trusted on-chain-bound root against which the validity circuit proves slot inclusion of the
-//! signing pubkey (see `circuits::validity::block_hash_chain::update_channel_tree`).
+//! (0..MAX_CHANNEL_MEMBERS). Active members occupy slots `0..member_count`; slots
+//! `member_count..MAX_CHANNEL_MEMBERS` are empty leaves (pad-to-MAX D6). Its root is stored in
+//! `ChannelLeaf.member_pubkeys_root` and is the trusted on-chain-bound root against which the
+//! validity circuit proves slot inclusion of the signing pubkey (see
+//! `circuits::validity::block_hash_chain::update_channel_tree`).
 //!
 //! SECURITY: the leaf is domain-separated (leading `MEMBER_LEAF_DOMAIN` tag) so a leaf of this
 //! tree can never be reinterpreted as a leaf of another tree (cross-tree confusion). The tree is

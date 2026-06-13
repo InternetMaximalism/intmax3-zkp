@@ -194,6 +194,94 @@ tests are green, but the end-to-end registered-genesis path is not yet built.
 
 ---
 
+## D6 — N メンバー（pad-to-MAX=16）+ オンチェーン検証 MLE/WHIR 化（Groth16 除去）
+
+**Context (phase F7):** D5 までは channel メンバーは固定 3 人（abstract2.md §2.1
+`memberKeys: Map<ChannelId,[(Address,RegevPk);3]>` に追従）だった。F7 は (A) メンバー数を
+**2..16 の可変 N**(pad-to-MAX 方式)へ一般化し、(B) オンチェーン検証を **MLE/WHIR 単独**に切り替えて
+Groth16 を完全に除去した。abstract2.md は変更しない(N メンバーは spec deviation として記録)。
+
+### Change A — N メンバー(pad-to-MAX=16)
+
+**spec deviation:** abstract2.md §2.1 の `[(Address,RegevPk);3]` は 3 人固定なので、N メンバー化は
+abstract2 からの逸脱。detail2.md §C-2 / §G 定数 / §H-1 を N メンバー注記に更新(authoritative delta は
+本 D6)。
+
+- **pad-to-MAX 単一回路。** `MAX_CHANNEL_MEMBERS = 16`(member tree 高さ 4 = 16 leaves)。回路は分岐せず
+  常に 16 スロットを処理する単一回路。channel ごとの `member_count: u8` を持ち、active = slot
+  `0..member_count`、padding slot(`member_count..16`)は default/zero。全 member 配列は `[_; 16]`。
+  `BalanceState` と `ChannelRecord` に `member_count` フィールドを追加。
+- **close 回路は 16 スロット全 SPHINCS+ を `slot < member_count` ゲートで検証。** padding スロットの署名検証は
+  ゲートで無効化(active スロットのみ実検証)。degree は **2^19** で計測済み、feasible。
+- **`validate()` 制約。** `ChannelRecord::validate` / `BalanceState::validate`:
+  `2 <= member_count <= 16`、active スロットは相異なる非ゼロ、padding スロットは default、
+  `bp_member_slot < member_count`。withdrawal の `member_index` は `< member_count` に束縛。
+
+**Forced sub-deviation — `member_set_commitment` は固定長 keccak(可変長 active-only ではない)。**
+`close_member_set_commitment`(L1)および in-circuit の `member_set_commitment` は、active メンバーのみを
+詰めた**可変長 keccak ではなく**、
+
+```
+keccak([CLOSE_MEMBER_SET_DOMAIN/IMCM 0x494d434d, member_count, h_0 .. h_15])   // 130 u32 words
+```
+
+の**固定長 keccak**(padding 分の hash はゼロ埋め、計 130 u32 words)。理由は plonky2_keccak の gadget が
+build-time 固定の入力長を要求するため(可変長は不可)。**injective 性**は preimage 内の `member_count` +
+padding ゼロ埋めにより active 集合に対して保たれる(member_count が異なれば preimage が異なり、同一
+member_count では active hash が一意に並ぶ)。Rust / 回路 / Solidity の三者が同じ固定形をミラー。
+Rust↔Solidity 共有ベクタは
+`0x12450612c5f67b7ff613b705f6e5efccf4bdd43e647570fcb207076f447236cc` に再ピン。
+
+**正確なレイアウト変更:**
+- `BalanceState::h1()` preimage に `member_count`(channel_id の直後に 1 limb)を追加し、16 個の
+  `enc_balance` digest + 16 個の `pending_adds` を全てハッシュ(active/padding 問わず固定 16 個)。
+- `ChannelRecord` の IMCR digest に `member_count` + 16 個全ハッシュを追加。
+- close PI: **85 → 86**(末尾に `member_count` を追加)。
+- withdrawal の `member_index` は `< member_count` に束縛。
+
+**Solidity ミラー。** `registerChannel` は可変 2..16 メンバーを受理。`ChannelSettlementManager` は
+`bytes32[16]` + `activeMemberCount` を格納し、close 時の固定長 commitment を上記固定形でミラー。
+
+**Tests(全 green):**
+- multi-N close prove+verify: **N = 2 / 3 / 16**(degree 2^19)。
+- native `validate` / `h1` / `member_set_commitment` の multi-N + 否定テスト。
+- Forge の variable-member-count テスト。
+
+### Change B — オンチェーン検証 MLE/WHIR 単独化(Groth16 除去)
+
+`IntmaxRollup` の `finalize` / `fraudProof` / `verify` / `fullVerify` は `Groth16Params` を**受け取らず**、
+Groth16 を**呼ばなくなった**。
+
+**Soundness-critical — validity-PI 束縛の置換。** 従来 validity public inputs の束縛は **Groth16 の
+PI-hash チェックだけ**で担保されていた。これを
+
+```
+_mlePublicInputsMatch(mleProof.publicInputs, keccak256(ValidityPublicInputs))
+```
+
+に置換 — MLE proof の `publicInputs`(wrap された validity 回路の 8 個の keccak limbs)を、オンチェーンの
+validity PIs と突き合わせて束縛する。これにより Groth16 を外しても validity-PI の on-chain 束縛は維持される。
+
+**v2 MleVerifier はピン済み submodule で既に有効。** R2-#1 gate binding / R2-#2 logUp を含む v2
+MleVerifier は対象 submodule で既にアクティブ。MLE fixture は現行回路向けに再生成。
+
+**削除物:** `Groth16Verifier.sol`、`GnarkGroth16Verifier.sol`、`E2E_RealGroth16.t.sol`、
+`src/utils/groth16_wrapper.rs`。
+
+**Verified(オンチェーン経路が実際に通ることを確認):**
+- Forge の MLE / finalize / fraudProof **20 テスト** pass。新しい MLE PI 束縛が unbound/tampered PI を
+  実際に拒否することを示す否定テストを含む:
+  - **`test_finalize_tamperedValidityPIs_rejected`**
+  - **`test_finalize_unboundMlePublicInputs`**
+- **`test_mleVerify_realProof`** — 実 proof のオンチェーン MLE+WHIR verify(gas ~11.2M)。
+- **`tests/mle_onchain_e2e.rs`** pass。
+
+**注記(残課題):** D5 の **one-key registration follow-up(§K-6、registration soundness = genesis-trust)は
+依然 outstanding** であり、N メンバーにも等しく適用される。`e2e.rs` の updating-block 経路は当該
+registration gap によりまだ red(本 F7 では未解消)。
+
+---
+
 ## Additional recorded outcomes
 
 ### Hash-chain leaf definitions (§C-6)

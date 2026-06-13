@@ -22,6 +22,10 @@ contract ChannelSettlementVerifier is IChannelSettlementVerifier {
     /// "IMCM" — close-circuit member-set commitment domain (mirrors Rust
     /// `CLOSE_MEMBER_SET_DOMAIN` / `close_member_set_commitment`, src/common/channel.rs).
     uint32 internal constant CLOSE_MEMBER_SET_DOMAIN = 0x494d434d;
+    /// D6 pad-to-MAX: the close circuit is sized for this many member slots (mirrors Rust
+    /// `MAX_CHANNEL_MEMBERS`, src/constants.rs). Active members occupy slots `0..memberCount`;
+    /// padding slots are zero.
+    uint256 internal constant MAX_CHANNEL_MEMBERS = 16;
 
     function verifyCloseIntent(
         bytes4 channelId,
@@ -39,6 +43,7 @@ contract ChannelSettlementVerifier is IChannelSettlementVerifier {
         uint64 finalStateVersion,
         bytes32 finalSettledTxChain,
         bytes32 memberSetCommitment,
+        uint8 memberCount,
         bytes calldata proof
     ) external pure returns (bool) {
         return _matches(
@@ -58,7 +63,8 @@ contract ChannelSettlementVerifier is IChannelSettlementVerifier {
                 snapshotMediumBlockNumber,
                 finalStateVersion,
                 finalSettledTxChain,
-                memberSetCommitment
+                memberSetCommitment,
+                memberCount
             )
         );
     }
@@ -183,21 +189,22 @@ contract ChannelSettlementVerifier is IChannelSettlementVerifier {
         );
     }
 
-    /// @dev OUTER keccak mirror of the 85-limb `ChannelClosePublicInputs.to_u64_vec()`
-    /// (src/circuits/channel/close_pis.rs, post-F7): the legacy 67 limbs — channelId(1),
+    /// @dev OUTER keccak mirror of the 86-limb `ChannelClosePublicInputs.to_u64_vec()`
+    /// (src/circuits/channel/close_pis.rs, post-F4/D6): the legacy 67 limbs — channelId(1),
     /// closeNonce(2), finalEpoch(2), finalSmallBlockNumber(2), closeFreezeNonce(2),
     /// finalChannelStateDigest(8), finalBalanceStateH1(8), channelFundAmount(8),
     /// channelFundIntmaxStateRoot(8), burnTxHash(8), closeWithdrawalDigest(8),
     /// closeIntentDigest(8), snapshotMediumBlockNumber(2) — followed by
-    /// split_u64(finalStateVersion)(2), finalSettledTxChain(8) and the appended
-    /// memberSetCommitment(8). Each limb is one big-endian u32 word, so `abi.encodePacked` of
-    /// the typed fields reproduces the byte stream exactly.
+    /// split_u64(finalStateVersion)(2), finalSettledTxChain(8), memberSetCommitment(8) and the
+    /// appended memberCount(1) at the very END. Each limb is one big-endian u32 word, so
+    /// `abi.encodePacked` of the typed fields (memberCount as uint32) reproduces the byte stream
+    /// exactly. Total = 86 limbs.
     ///
     /// The INNER keccak (`closeIntentDigest`) mirrors the Rust IMCI preimage
     /// (`CloseIntent::signing_digest()`, src/common/channel.rs) including the
     /// `channel_fund_snapshot.channel_id` slot (second `channelId`) and the appended
     /// finalStateVersion / finalSettledTxChain tail (detail2 §C-8). It is NOT member-bearing, so
-    /// it is byte-for-byte unchanged by F7 (the shared close-intent vector is preserved).
+    /// it is byte-for-byte unchanged by F4/D6 (the shared close-intent vector is preserved).
     function closePIHash(
         bytes4 channelId,
         uint64 closeNonce,
@@ -213,7 +220,8 @@ contract ChannelSettlementVerifier is IChannelSettlementVerifier {
         uint64 snapshotMediumBlockNumber,
         uint64 finalStateVersion,
         bytes32 finalSettledTxChain,
-        bytes32 memberSetCommitment
+        bytes32 memberSetCommitment,
+        uint8 memberCount
     ) public pure returns (bytes32) {
         bytes32 closeIntentDigest = keccak256(
             abi.encodePacked(
@@ -252,28 +260,42 @@ contract ChannelSettlementVerifier is IChannelSettlementVerifier {
                 snapshotMediumBlockNumber,
                 finalStateVersion,
                 finalSettledTxChain,
-                memberSetCommitment
+                memberSetCommitment,
+                uint32(memberCount)
             )
         );
     }
 
-    /// @dev F7 member-set commitment: keccak([IMCM, sphincsPubkeyHash[0..2]]) over the 3 members'
-    /// SPHINCS+ pubkey hashes in slot order. Byte-for-byte mirror of Rust
-    /// `close_member_set_commitment` (src/common/channel.rs): one big-endian u32 word per limb,
-    /// so `abi.encodePacked(bytes4(domain), bytes32, bytes32, bytes32)` reproduces the preimage.
+    /// @dev F4/D6 member-set commitment (pad-to-MAX): FIXED-length keccak over
+    /// `[IMCM, memberCount, h_0..h_{MAX-1}]` — the domain word, the `memberCount` u32 limb, and
+    /// ALL `MAX_CHANNEL_MEMBERS` (16) SPHINCS+ pubkey hashes in slot order, where padding slots
+    /// (`>= memberCount`) contribute zero. Byte-for-byte mirror of Rust
+    /// `close_member_set_commitment` (src/common/channel.rs): one big-endian u32 word per limb
+    /// (130 u32 words total = 4 domain + 4 memberCount + 16*32 hash bytes), so
+    /// `abi.encodePacked(bytes4(domain), uint32(memberCount), h_0..h_15)` reproduces the preimage.
+    ///
+    /// SECURITY: this is the in-circuit FIXED form — the close circuit zeroes padding slots and
+    /// `memberCount` fixes the active/padding boundary, so the commitment is injective on the
+    /// active member set (no non-member-key substitution). The caller MUST pass the channel's
+    /// registered hashes already zero-padded to MAX_CHANNEL_MEMBERS.
     function closeMemberSetCommitment(
-        bytes32 sphincsPubkeyHash0,
-        bytes32 sphincsPubkeyHash1,
-        bytes32 sphincsPubkeyHash2
+        bytes32[MAX_CHANNEL_MEMBERS] memory memberSphincsPubkeyHashes,
+        uint8 memberCount
     ) public pure returns (bytes32) {
-        return keccak256(
-            abi.encodePacked(
-                bytes4(CLOSE_MEMBER_SET_DOMAIN),
-                sphincsPubkeyHash0,
-                sphincsPubkeyHash1,
-                sphincsPubkeyHash2
-            )
+        bytes memory packed = abi.encodePacked(
+            bytes4(CLOSE_MEMBER_SET_DOMAIN),
+            uint32(memberCount)
         );
+        for (uint256 i = 0; i < MAX_CHANNEL_MEMBERS; i++) {
+            // SECURITY: zero padding slots (>= memberCount) INTERNALLY, exactly mirroring the Rust
+            // `close_member_set_commitment` (which substitutes Bytes32::default() for slots
+            // >= member_count) and the in-circuit gadget (which selects zero on slot_is_active).
+            // This makes the commitment depend ONLY on memberCount and the active hashes, so it is
+            // injective on the active set regardless of any (malformed) padding the caller supplies.
+            bytes32 slot = i < memberCount ? memberSphincsPubkeyHashes[i] : bytes32(0);
+            packed = abi.encodePacked(packed, slot);
+        }
+        return keccak256(packed);
     }
 
     /// @dev Mirrors the Rust `SpecialClose::signing_digest()` (IMSC, src/common/channel.rs): the

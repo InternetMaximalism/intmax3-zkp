@@ -30,7 +30,7 @@ use crate::{
         tx::TxV2,
         u63::{BlockNumber, BlockNumberError, U63},
     },
-    constants::{CHANNEL_MEMBERS, CHANNEL_TREE_HEIGHT, SEND_TREE_HEIGHT},
+    constants::{CHANNEL_TREE_HEIGHT, SEND_TREE_HEIGHT},
     ethereum_types::{
         address::Address, bytes32::Bytes32, u32limb_trait::U32LimbTrait as _, u256::U256,
     },
@@ -129,13 +129,19 @@ pub enum BlockWitnessGeneratorError {
     InvalidRequest(String),
 }
 
+/// Active member count for test channels (pad-to-MAX D6): these fixtures register 3 active members
+/// per channel; the member tree is height MEMBER_TREE_HEIGHT (MAX_CHANNEL_MEMBERS = 16 slots) with
+/// slots 3..16 left as empty leaves (padding). Kept at 3 so existing validity/balance tests are
+/// unchanged.
+pub const TEST_ACTIVE_MEMBERS: usize = 3;
+
 /// Test-only per-channel member key material (one SPHINCS+ key per member, F1-F6).
 ///
-/// Holds the channel's `CHANNEL_MEMBERS` SPHINCS+ keypairs + Regev public keys (slot order) and
-/// the Poseidon `MemberTree` whose root is committed into the channel's `ChannelLeaf`. When a slot
-/// `i` updates, `add_block` signs the block's IMSB digest with member `i`'s key and opens member
-/// `i`'s leaf at tree index `i` against this root — exactly what the live `update_channel_tree`
-/// binding now requires.
+/// Holds the channel's `TEST_ACTIVE_MEMBERS` active SPHINCS+ keypairs + Regev public keys (slot
+/// order) and the Poseidon `MemberTree` (height MEMBER_TREE_HEIGHT, padding slots = empty leaves)
+/// whose root is committed into the channel's `ChannelLeaf`. When a slot `i` updates, `add_block`
+/// signs the block's IMSB digest with member `i`'s key and opens member `i`'s leaf at tree index
+/// `i` against this root — exactly what the live `update_channel_tree` binding now requires.
 #[derive(Debug, Clone)]
 pub struct ChannelMemberKeys {
     pub keypairs: Vec<SpxKeyPair>,
@@ -145,12 +151,14 @@ pub struct ChannelMemberKeys {
 
 impl ChannelMemberKeys {
     /// Build deterministic member keys + tree for `channel_id`. Seeds are derived from the channel
-    /// id so the same channel always yields the same members (stable across re-runs).
+    /// id so the same channel always yields the same members (stable across re-runs). Active
+    /// members occupy slots `0..TEST_ACTIVE_MEMBERS`; the remaining `MemberTree` slots stay empty
+    /// (pad-to-MAX D6).
     fn deterministic(channel_id: u32) -> Self {
-        let mut keypairs = Vec::with_capacity(CHANNEL_MEMBERS);
-        let mut regev_pks = Vec::with_capacity(CHANNEL_MEMBERS);
+        let mut keypairs = Vec::with_capacity(TEST_ACTIVE_MEMBERS);
+        let mut regev_pks = Vec::with_capacity(TEST_ACTIVE_MEMBERS);
         let mut member_tree = MemberTree::init();
-        for slot in 0..CHANNEL_MEMBERS as u32 {
+        for slot in 0..TEST_ACTIVE_MEMBERS as u32 {
             // Distinct 16-byte seeds per (channel, slot, role) — domain-separated by role byte.
             let seed = |role: u8| {
                 let mut s = [0u8; 16];

@@ -20,14 +20,24 @@ pub const SENT_TX_TREE_HEIGHT: usize = 32;
 
 // Per-channel member tree (one SPHINCS+ key per member, no multisig/threshold).
 // `ChannelLeaf.member_pubkeys_root` commits the ordered member leaves
-// `MemberLeaf { sphincs_pk_hash, regev_pk_digest }`, indexed by member slot 0..CHANNEL_MEMBERS.
-// Height 2 (4 leaf slots) is the smallest tree covering the 3 members + 1 empty slot.
-pub const MEMBER_TREE_HEIGHT: usize = 2;
+// `MemberLeaf { sphincs_pk_hash, regev_pk_digest }`, indexed by member slot
+// 0..MAX_CHANNEL_MEMBERS. Height 4 (16 leaf slots) covers the pad-to-MAX member set: a channel's
+// `member_count` active members occupy slots 0..member_count and the remaining slots are empty
+// leaves.
+pub const MEMBER_TREE_HEIGHT: usize = 4;
 
 // Payment channels (detail2 §G-1 / abstract2 §2.1, §2.5)
-/// Fixed channel membership (abstract2 §2.1: exactly 3 members per channel). `ChannelRecord`,
-/// `BalanceState.enc_balances` and `BalanceState.pending_adds` are all sized by this constant.
-pub const CHANNEL_MEMBERS: usize = 3;
+/// Maximum channel membership under the pad-to-MAX (N-member) model. Every channel uses
+/// arrays/circuits sized for this constant; a per-channel `member_count` (2..=MAX_CHANNEL_MEMBERS)
+/// selects how many leading slots are active (slots `member_count..MAX_CHANNEL_MEMBERS` are
+/// padding: default/empty ciphertexts, zero pending-adds, `Bytes32::default()` pubkey hashes).
+/// `ChannelRecord`, `BalanceState.enc_balances` and `BalanceState.pending_adds` are all sized by
+/// this constant.
+///
+/// SECURITY: this is a STATIC ZK-circuit size (the close circuit verifies MAX_CHANNEL_MEMBERS
+/// SPHINCS+ slots, gating padding slots off). Deviation D6 from abstract2 §2.1 (which fixes 3
+/// members) — see detail2-implementation-notes.md.
+pub const MAX_CHANNEL_MEMBERS: usize = 16;
 /// Co-signing timeout (abstract2 §2.5: 3 minutes). Replaces the retired
 /// `SMALL_BLOCK_SIGNATURE_TIMEOUT_SECS = 60`.
 pub const SIGN_TIMEOUT_SECS: u64 = 180;

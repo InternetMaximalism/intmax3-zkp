@@ -20,7 +20,7 @@ use crate::{
             InterChannelTx, ProofBackend, TransitionProofRole, validate_all_member_signatures,
         },
     },
-    constants::CHANNEL_MEMBERS,
+    constants::MAX_CHANNEL_MEMBERS,
     ethereum_types::{bytes32::Bytes32, u32limb_trait::U32LimbTrait as _, u256::U256},
     regev::{
         BALANCE_REFRESH_ZKP_DOMAIN, MAX_HOMO_ADDS_BEFORE_REFRESH, RealRegevProofVerifier,
@@ -207,7 +207,7 @@ pub struct InChannelTransferUpdateWitness {
     pub channel_record: ChannelRecord,
     /// All member Regev public keys, in member slot order. Checked against the
     /// L1-anchored `channel_record.regev_pk_root` before any use (F9-A).
-    pub regev_pks: [RegevPk; CHANNEL_MEMBERS],
+    pub regev_pks: [RegevPk; MAX_CHANNEL_MEMBERS],
     pub prev_state: ChannelState,
     pub next_state: ChannelState,
     pub channel_tx: ChannelTx,
@@ -223,7 +223,7 @@ pub struct InChannelTransferUpdateWitness {
 #[derive(Clone, Debug)]
 pub struct InterChannelSendUpdateWitness {
     pub channel_record: ChannelRecord,
-    pub regev_pks: [RegevPk; CHANNEL_MEMBERS],
+    pub regev_pks: [RegevPk; MAX_CHANNEL_MEMBERS],
     /// The destination channel recipient's Regev public key (receiver_deltas[0] is encrypted to
     /// it). Authenticity is the destination channel's `regev_pk_root` concern; the sender-side
     /// co-signers verify the E-2 statement against the key the sender claims.
@@ -253,7 +253,7 @@ pub struct InterChannelFundImportUpdateWitness {
 pub struct ReceiverBundleApplyUpdateWitness {
     pub receiver_channel_record: ChannelRecord,
     /// The RECEIVER channel's member keys (root-checked against `receiver_channel_record`).
-    pub regev_pks: [RegevPk; CHANNEL_MEMBERS],
+    pub regev_pks: [RegevPk; MAX_CHANNEL_MEMBERS],
     /// The source channel sender's Regev public key (statement input for re-verifying the E-2
     /// proof signed into the IMIT digest).
     pub source_sender_pk: RegevPk,
@@ -281,7 +281,7 @@ pub struct ReceiverBundleApplyUpdateWitness {
 #[derive(Clone, Debug)]
 pub struct BalanceRefreshUpdateWitness {
     pub channel_record: ChannelRecord,
-    pub regev_pks: [RegevPk; CHANNEL_MEMBERS],
+    pub regev_pks: [RegevPk; MAX_CHANNEL_MEMBERS],
     pub prev_state: ChannelState,
     pub next_state: ChannelState,
     pub member_index: usize,
@@ -368,7 +368,7 @@ impl InChannelTransferUpdateWitness {
                     .to_string(),
             ));
         }
-        for index in 0..CHANNEL_MEMBERS {
+        for index in 0..MAX_CHANNEL_MEMBERS {
             if index != self.sender_index && index != self.recipient_index {
                 ensure_slot_unchanged(&self.prev_state, &self.next_state, index)?;
             }
@@ -381,7 +381,7 @@ impl InChannelTransferUpdateWitness {
                 "sender slot is freshly re-encrypted; its pending_adds must reset to 0".to_string(),
             ));
         }
-        for index in 0..CHANNEL_MEMBERS {
+        for index in 0..MAX_CHANNEL_MEMBERS {
             if index != self.sender_index && index != self.recipient_index {
                 require_pending_adds_unchanged(&self.prev_state, &self.next_state, index)?;
             }
@@ -537,7 +537,7 @@ impl InterChannelSendUpdateWitness {
             &self.channel_record,
             self.inter_channel_tx.source_sphincs_pubkey_hash,
         )?;
-        for index in 0..CHANNEL_MEMBERS {
+        for index in 0..MAX_CHANNEL_MEMBERS {
             if index != sender_index {
                 ensure_slot_unchanged(&self.prev_state, &self.next_state, index)?;
                 require_pending_adds_unchanged(&self.prev_state, &self.next_state, index)?;
@@ -654,7 +654,7 @@ impl InterChannelFundImportUpdateWitness {
             ));
         }
         // Balances are untouched by the import: every slot and counter must be bit-identical.
-        for index in 0..CHANNEL_MEMBERS {
+        for index in 0..MAX_CHANNEL_MEMBERS {
             ensure_slot_unchanged(&self.prev_state, &self.next_state, index)?;
             require_pending_adds_unchanged(&self.prev_state, &self.next_state, index)?;
         }
@@ -786,7 +786,7 @@ impl ReceiverBundleApplyUpdateWitness {
                     .to_string(),
             ));
         }
-        for index in 0..CHANNEL_MEMBERS {
+        for index in 0..MAX_CHANNEL_MEMBERS {
             if index != self.recipient_index {
                 ensure_slot_unchanged(&self.prev_state, &self.next_state, index)?;
                 require_pending_adds_unchanged(&self.prev_state, &self.next_state, index)?;
@@ -887,7 +887,7 @@ impl BalanceRefreshUpdateWitness {
         )?;
         let member = member_index_pubkey_hash(&self.channel_record, self.member_index)?;
         // Only the refreshed member's slot changes; everyone else's slot and counter are frozen.
-        for index in 0..CHANNEL_MEMBERS {
+        for index in 0..MAX_CHANNEL_MEMBERS {
             if index != self.member_index {
                 ensure_slot_unchanged(&self.prev_state, &self.next_state, index)?;
                 require_pending_adds_unchanged(&self.prev_state, &self.next_state, index)?;
@@ -1016,7 +1016,7 @@ fn verify_balance_state_common(
 
 fn verify_regev_pk_root(
     record: &ChannelRecord,
-    regev_pks: &[RegevPk; CHANNEL_MEMBERS],
+    regev_pks: &[RegevPk; MAX_CHANNEL_MEMBERS],
 ) -> Result<(), ChannelStateUpdateError> {
     for (index, pk) in regev_pks.iter().enumerate() {
         pk.validate().map_err(|err| {
@@ -1148,7 +1148,7 @@ fn member_index_pubkey_hash(
         .copied()
         .ok_or_else(|| {
             ChannelStateUpdateError::InvalidStateLinkage(format!(
-                "member index {index} out of range (members: {CHANNEL_MEMBERS})"
+                "member index {index} out of range (members: {MAX_CHANNEL_MEMBERS})"
             ))
         })
 }
@@ -1332,6 +1332,18 @@ mod tests {
         .unwrap()
     }
 
+    /// Pad an active prefix of member pubkey hashes to the full MAX_CHANNEL_MEMBERS array (padding
+    /// = `Bytes32::default()`, pad-to-MAX D6).
+    fn pad_hashes(active: &[Bytes32]) -> [Bytes32; MAX_CHANNEL_MEMBERS] {
+        std::array::from_fn(|i| active.get(i).copied().unwrap_or_default())
+    }
+
+    /// Pad an active prefix of Regev pubkeys to the full MAX_CHANNEL_MEMBERS array (padding =
+    /// `RegevPk::padding()`).
+    fn pad_pks(active: &[RegevPk]) -> [RegevPk; MAX_CHANNEL_MEMBERS] {
+        std::array::from_fn(|i| active.get(i).cloned().unwrap_or_else(RegevPk::padding))
+    }
+
     /// Full in-channel fixture: 3 real key pairs, real balance encryptions, a real E-1 STARK at
     /// RegevSecurityLevel::Test, and prev/next states wired per the v2 transition rules.
     struct InChannelFixture {
@@ -1340,10 +1352,12 @@ mod tests {
     }
 
     fn signatures_for(record: &ChannelRecord) -> Vec<MemberSignature> {
+        // pad-to-MAX D6: only the ACTIVE members (0..member_count) sign.
         record
             .member_sphincs_pubkey_hashes
             .iter()
             .enumerate()
+            .take(record.member_count as usize)
             .map(|(idx, hash)| MemberSignature {
                 member_slot: idx as u8,
                 sphincs_pubkey_hash: *hash,
@@ -1358,11 +1372,17 @@ mod tests {
         let (pk0, sk0) = channel_keygen(&mut rng);
         let (pk1, sk1) = channel_keygen(&mut rng);
         let (pk2, sk2) = channel_keygen(&mut rng);
-        let pks = [pk0, pk1, pk2];
+        // pad-to-MAX D6: 3 active members + padding pks.
+        let pks = pad_pks(&[pk0, pk1, pk2]);
 
         let record = ChannelRecord {
             channel_id,
-            member_sphincs_pubkey_hashes: [pubkey_hash(10), pubkey_hash(20), pubkey_hash(30)],
+            member_count: 3,
+            member_sphincs_pubkey_hashes: pad_hashes(&[
+                pubkey_hash(10),
+                pubkey_hash(20),
+                pubkey_hash(30),
+            ]),
             member_pubkeys_root: Bytes32::from_u32_slice(&[1, 1, 1, 1, 0, 0, 0, 0]).unwrap(),
             bp_member_slot: 0,
             special_close_penalty: U256::from(7u32),
@@ -1403,10 +1423,15 @@ mod tests {
             channel_fund: fund.clone(),
             balance_state: BalanceState {
                 channel_id,
-                enc_balances: [before_s.0.clone(), before_r.0.clone(), before_t.0.clone()],
+                member_count: 3,
+                enc_balances: BalanceState::pad_enc_balances(&[
+                    before_s.0.clone(),
+                    before_r.0.clone(),
+                    before_t.0.clone(),
+                ]),
                 settled_tx_chain: Bytes32::default(),
                 state_version: 3,
-                pending_adds: [0, 2, 0],
+                pending_adds: BalanceState::pad_pending_adds(&[0, 2, 0]),
             },
             h2_tag: Bytes32::default(),
             shared_native_nullifier_root: Bytes32::default(),
@@ -1420,10 +1445,15 @@ mod tests {
             epoch: 2,
             balance_state: BalanceState {
                 channel_id,
-                enc_balances: [after_s.0.clone(), after_r.clone(), before_t.0.clone()],
+                member_count: 3,
+                enc_balances: BalanceState::pad_enc_balances(&[
+                    after_s.0.clone(),
+                    after_r.clone(),
+                    before_t.0.clone(),
+                ]),
                 settled_tx_chain: Bytes32::default(),
                 state_version: 4,
-                pending_adds: [0, 3, 0],
+                pending_adds: BalanceState::pad_pending_adds(&[0, 3, 0]),
             },
             prev_digest: prev_state.digest,
             ..prev_state.clone()

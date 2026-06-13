@@ -149,10 +149,15 @@ mod tests {
             },
             balance_state: BalanceState {
                 channel_id: ChannelId::new(3).unwrap(),
-                enc_balances: [ciphertext(1), ciphertext(2), ciphertext(3)],
+                member_count: 3,
+                enc_balances: BalanceState::pad_enc_balances(&[
+                    ciphertext(1),
+                    ciphertext(2),
+                    ciphertext(3),
+                ]),
                 settled_tx_chain: Bytes32::default(),
                 state_version: 7,
-                pending_adds: [0, 0, 0],
+                pending_adds: BalanceState::pad_pending_adds(&[0, 0, 0]),
             },
             h2_tag: Bytes32::default(),
             shared_native_nullifier_root: Bytes32::default(),

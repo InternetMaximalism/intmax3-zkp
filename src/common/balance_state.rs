@@ -21,7 +21,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     common::channel::{ChannelError, ChannelId, hash_words, split_u64},
-    constants::CHANNEL_MEMBERS,
+    constants::MAX_CHANNEL_MEMBERS,
     ethereum_types::{
         bytes32::{Bytes32, Bytes32Target},
         u32limb_trait::{U32LimbTargetTrait as _, U32LimbTrait as _},
@@ -44,8 +44,17 @@ pub const SETTLED_TX_CHAIN_DOMAIN: u32 = 0x494d5443;
 #[serde(rename_all = "camelCase")]
 pub struct BalanceState {
     pub channel_id: ChannelId,
-    /// One balance ciphertext per member, in member slot order.
-    pub enc_balances: [RegevCiphertext; CHANNEL_MEMBERS],
+    /// Number of ACTIVE members (2..=MAX_CHANNEL_MEMBERS). Active members occupy slots
+    /// `0..member_count`; slots `member_count..MAX_CHANNEL_MEMBERS` are padding
+    /// (`RegevCiphertext::padding()` balances, zero `pending_adds`).
+    ///
+    /// SECURITY (D6 pad-to-MAX): `member_count` is part of the H1 preimage (see [`Self::h1`]) so
+    /// the active/padding split is fixed by the same all-member signatures that bind the balances;
+    /// a state could not silently re-interpret a padding slot as active or vice-versa.
+    pub member_count: u8,
+    /// One balance ciphertext per slot, in member slot order. Slots `>= member_count` are
+    /// `RegevCiphertext::padding()`.
+    pub enc_balances: [RegevCiphertext; MAX_CHANNEL_MEMBERS],
     /// Hash chain over the settles this state has absorbed (genesis = 0x00…00).
     pub settled_tx_chain: Bytes32,
     /// Monotone state counter, +1 on every in-channel AND inter-channel update. Independent of
@@ -53,21 +62,47 @@ pub struct BalanceState {
     pub state_version: u64,
     /// Homomorphic-add counters per member slot since that member's last fresh re-encryption
     /// (approved deviation D3 from detail2 §C-2; closes the noise/digit-flooding exit-liveness
-    /// DoS). Co-signers must refuse adds at `MAX_HOMO_ADDS_BEFORE_REFRESH`.
-    pub pending_adds: [u32; CHANNEL_MEMBERS],
+    /// DoS). Co-signers must refuse adds at `MAX_HOMO_ADDS_BEFORE_REFRESH`. Padding slots are 0.
+    pub pending_adds: [u32; MAX_CHANNEL_MEMBERS],
 }
 
 impl BalanceState {
-    /// H1 (detail2 §C-2 + D3): keccak over
-    /// `[BALANCE_STATE_DOMAIN, channel_id, d0, d1, d2, settled_tx_chain,
-    /// split_u64(state_version), pending_adds[0..3]]` where `d_i = enc_balances[i].digest()`.
+    /// Pad `active` ciphertexts (len = `member_count`, the active prefix) to a full
+    /// `MAX_CHANNEL_MEMBERS`-sized array, filling slots `member_count..MAX` with
+    /// `RegevCiphertext::padding()`. Convenience constructor for callers/tests that work with the
+    /// active prefix only.
+    pub fn pad_enc_balances(active: &[RegevCiphertext]) -> [RegevCiphertext; MAX_CHANNEL_MEMBERS] {
+        std::array::from_fn(|i| {
+            active
+                .get(i)
+                .cloned()
+                .unwrap_or_else(RegevCiphertext::padding)
+        })
+    }
+
+    /// Pad `active` add-counters (len = `member_count`) to a full `MAX_CHANNEL_MEMBERS`-sized
+    /// array, filling padding slots with 0.
+    pub fn pad_pending_adds(active: &[u32]) -> [u32; MAX_CHANNEL_MEMBERS] {
+        std::array::from_fn(|i| active.get(i).copied().unwrap_or(0))
+    }
+
+    /// H1 (detail2 §C-2 + D3, pad-to-MAX deviation D6): keccak over
+    /// `[BALANCE_STATE_DOMAIN, channel_id, member_count, d_0, …, d_{MAX-1}, settled_tx_chain,
+    /// split_u64(state_version), pending_adds[0..MAX]]` where `d_i = enc_balances[i].digest()`.
     ///
-    /// SECURITY: `pending_adds` is part of the H1 preimage so the D3 add-counters are enforced by
-    /// the same all-member signatures that bind the balances — an out-of-state counter would be
-    /// unenforceable (adversarial review finding F5-A).
+    /// PREIMAGE (exact, one u32 word per limb): `member_count` is placed as a single u32 limb
+    /// RIGHT AFTER `channel_id` (before the ciphertext digests); ALL `MAX_CHANNEL_MEMBERS`
+    /// ciphertext digests and pending-add counters are hashed (padding slots use
+    /// `RegevCiphertext::padding()` digests and 0 counters). This must stay byte-identical to the
+    /// in-circuit recompute in `circuits::channel::close_circuit` and to the L1 mirror.
+    ///
+    /// SECURITY: hashing `member_count` and ALL 16 slots fixes the active/padding split under the
+    /// member signatures (D6). `pending_adds` is part of the preimage so the D3 add-counters are
+    /// enforced by the same all-member signatures that bind the balances (adversarial review F5-A).
     pub fn h1(&self) -> Bytes32 {
         let mut words = vec![BALANCE_STATE_DOMAIN];
         words.extend(self.channel_id.to_u32_vec());
+        words.push(self.member_count as u32);
         for ct in &self.enc_balances {
             words.extend(ct.digest().to_u32_vec());
         }
@@ -79,20 +114,41 @@ impl BalanceState {
 
     /// Canonicality / budget check. MUST run on every balance state that crosses a trust
     /// boundary: each ciphertext must be canonical (otherwise its digest — and hence H1 — is
-    /// malleable, F1-A) and every add counter must respect the D3 refresh budget.
+    /// malleable, F1-A) and every add counter must respect the D3 refresh budget. Also enforces
+    /// the pad-to-MAX (D6) invariants: `2 <= member_count <= MAX_CHANNEL_MEMBERS`, and every
+    /// padding slot (`>= member_count`) is the default/empty value.
     pub fn validate(&self) -> Result<(), ChannelError> {
+        let count = self.member_count as usize;
+        if count < 2 || count > MAX_CHANNEL_MEMBERS {
+            return Err(ChannelError::InvalidBalanceState(format!(
+                "member_count {count} out of range (must be 2..={MAX_CHANNEL_MEMBERS})"
+            )));
+        }
         for (index, ct) in self.enc_balances.iter().enumerate() {
             ct.validate().map_err(|err| {
                 ChannelError::InvalidBalanceState(format!(
                     "enc_balances[{index}] is not canonical: {err}"
                 ))
             })?;
+            // Padding slots MUST be the canonical empty ciphertext (D6): a non-default padding slot
+            // would smuggle hidden value past the active/member_count accounting.
+            if index >= count && *ct != RegevCiphertext::padding() {
+                return Err(ChannelError::InvalidBalanceState(format!(
+                    "enc_balances[{index}] is a padding slot (>= member_count {count}) and must be \
+                     RegevCiphertext::padding()"
+                )));
+            }
         }
         for (index, &adds) in self.pending_adds.iter().enumerate() {
             if adds > MAX_HOMO_ADDS_BEFORE_REFRESH {
                 return Err(ChannelError::InvalidBalanceState(format!(
                     "pending_adds[{index}] = {adds} exceeds MAX_HOMO_ADDS_BEFORE_REFRESH = \
                      {MAX_HOMO_ADDS_BEFORE_REFRESH}"
+                )));
+            }
+            if index >= count && adds != 0 {
+                return Err(ChannelError::InvalidBalanceState(format!(
+                    "pending_adds[{index}] is a padding slot (>= member_count {count}) and must be 0"
                 )));
             }
         }
@@ -208,10 +264,15 @@ mod tests {
     fn sample_state() -> BalanceState {
         BalanceState {
             channel_id: ChannelId::new(7).unwrap(),
-            enc_balances: [ciphertext(1), ciphertext(2), ciphertext(3)],
+            member_count: 3,
+            enc_balances: BalanceState::pad_enc_balances(&[
+                ciphertext(1),
+                ciphertext(2),
+                ciphertext(3),
+            ]),
             settled_tx_chain: Bytes32::default(),
             state_version: 5,
-            pending_adds: [0, 1, 2],
+            pending_adds: BalanceState::pad_pending_adds(&[0, 1, 2]),
         }
     }
 
@@ -240,7 +301,12 @@ mod tests {
         s.channel_id = ChannelId::new(8).unwrap();
         assert_ne!(h1, s.h1(), "channel_id must affect h1");
 
-        for slot in 0..CHANNEL_MEMBERS {
+        // member_count is part of the H1 preimage (D6): changing it must change H1.
+        let mut s = sample_state();
+        s.member_count = 4;
+        assert_ne!(h1, s.h1(), "member_count must affect h1");
+
+        for slot in 0..sample_state().member_count as usize {
             let mut s = sample_state();
             s.enc_balances[slot] = ciphertext(99 + slot as u32);
             assert_ne!(h1, s.h1(), "enc_balances[{slot}] must affect h1");
@@ -254,10 +320,84 @@ mod tests {
         s.state_version += 1;
         assert_ne!(h1, s.h1(), "state_version must affect h1");
 
-        for slot in 0..CHANNEL_MEMBERS {
+        for slot in 0..sample_state().member_count as usize {
             let mut s = sample_state();
             s.pending_adds[slot] += 1;
             assert_ne!(h1, s.h1(), "pending_adds[{slot}] must affect h1 (D3)");
+        }
+    }
+
+    /// Build a `BalanceState` with `count` ACTIVE members (distinct canonical ciphertexts in
+    /// slots 0..count, padding = `RegevCiphertext::padding()`) for multi-N coverage below.
+    fn state_with_members(count: u8) -> BalanceState {
+        let active: Vec<RegevCiphertext> = (0..count as u32).map(|i| ciphertext(1 + i)).collect();
+        BalanceState {
+            channel_id: ChannelId::new(7).unwrap(),
+            member_count: count,
+            enc_balances: BalanceState::pad_enc_balances(&active),
+            settled_tx_chain: Bytes32::default(),
+            state_version: 5,
+            pending_adds: BalanceState::pad_pending_adds(&vec![0u32; count as usize]),
+        }
+    }
+
+    /// Multi-N (D6 pad-to-MAX): `BalanceState::validate()` ACCEPTS member_count = 2 / 8 / 16 with
+    /// canonical active ciphertexts + `RegevCiphertext::padding()` padding, and REJECTS the D6
+    /// boundary violations (out-of-range count, nonzero padding slot, nonzero padding add-counter).
+    #[test]
+    fn balance_state_validate_multi_n() {
+        for count in [2u8, 8, 16] {
+            state_with_members(count)
+                .validate()
+                .unwrap_or_else(|e| panic!("member_count {count} must validate: {e}"));
+        }
+
+        // member_count < 2 rejected.
+        let mut too_few = state_with_members(2);
+        too_few.member_count = 1;
+        assert!(matches!(
+            too_few.validate(),
+            Err(ChannelError::InvalidBalanceState(_))
+        ));
+
+        // member_count > MAX_CHANNEL_MEMBERS rejected.
+        let mut too_many = state_with_members(16);
+        too_many.member_count = (MAX_CHANNEL_MEMBERS + 1) as u8;
+        assert!(matches!(
+            too_many.validate(),
+            Err(ChannelError::InvalidBalanceState(_))
+        ));
+
+        // A non-default (nonzero) PADDING ciphertext slot is rejected (would smuggle hidden value).
+        let mut nonzero_pad = state_with_members(8);
+        nonzero_pad.enc_balances[8] = ciphertext(99);
+        assert!(matches!(
+            nonzero_pad.validate(),
+            Err(ChannelError::InvalidBalanceState(_))
+        ));
+
+        // A nonzero PADDING add-counter is rejected.
+        let mut nonzero_add = state_with_members(8);
+        nonzero_add.pending_adds[8] = 1;
+        assert!(matches!(
+            nonzero_add.validate(),
+            Err(ChannelError::InvalidBalanceState(_))
+        ));
+    }
+
+    /// `BalanceState::h1()` binds `member_count`: two states identical except for `member_count`
+    /// (active prefix repadded to match) produce DIFFERENT H1 digests across the supported range.
+    /// Proves member_count is genuinely part of the H1 preimage (D6), so the active/padding split
+    /// cannot be silently reinterpreted under the all-member signatures.
+    #[test]
+    fn h1_binds_member_count_multi_n() {
+        for count in 2u8..MAX_CHANNEL_MEMBERS as u8 {
+            assert_ne!(
+                state_with_members(count).h1(),
+                state_with_members(count + 1).h1(),
+                "member_count {count} vs {} must change h1",
+                count + 1
+            );
         }
     }
 

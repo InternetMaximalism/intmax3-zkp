@@ -58,7 +58,7 @@ use crate::{
             TransitionProofRole, WithdrawalClaim,
         },
     },
-    constants::CHANNEL_MEMBERS,
+    constants::MAX_CHANNEL_MEMBERS,
     ethereum_types::{
         address::Address, bytes32::Bytes32, u32limb_trait::U32LimbTrait as _, u256::U256,
     },
@@ -80,10 +80,25 @@ const VERIFIER: RealRegevProofVerifier = RealRegevProofVerifier { level: LEVEL }
 const IN_CHANNEL_AMOUNT: u64 = 7;
 /// alice → dave (public) inter-channel amount.
 const INTER_CHANNEL_AMOUNT: u64 = 5;
-/// Genesis balances of channel A: alice / bob / carol.
-const A_GENESIS: [u64; CHANNEL_MEMBERS] = [50, 10, 30];
+/// Active member count for this e2e flow (pad-to-MAX D6: 3 active members per channel, the rest
+/// padding slots).
+const E2E_ACTIVE: usize = 3;
+/// Genesis balances of channel A: alice / bob / carol (the 3 active members).
+const A_GENESIS: [u64; E2E_ACTIVE] = [50, 10, 30];
 /// Genesis balances of channel B: dave / erin / frank.
-const B_GENESIS: [u64; CHANNEL_MEMBERS] = [10, 20, 30];
+const B_GENESIS: [u64; E2E_ACTIVE] = [10, 20, 30];
+
+/// Pad an active prefix of Regev pubkeys to the full MAX_CHANNEL_MEMBERS array (padding =
+/// `RegevPk::padding()`, pad-to-MAX D6).
+fn pad_pks(active: &[RegevPk]) -> [RegevPk; MAX_CHANNEL_MEMBERS] {
+    std::array::from_fn(|i| active.get(i).cloned().unwrap_or_else(RegevPk::padding))
+}
+
+/// Pad an active prefix of member pubkey hashes to the full MAX_CHANNEL_MEMBERS array (padding =
+/// `Bytes32::default()`).
+fn pad_hashes(active: &[Bytes32]) -> [Bytes32; MAX_CHANNEL_MEMBERS] {
+    std::array::from_fn(|i| active.get(i).copied().unwrap_or_default())
+}
 
 /// Transport-level (Plonky2 intmax) proof verifier for this flow.
 ///
@@ -139,17 +154,19 @@ fn address_word(word: u32) -> Address {
     Address::from_u32_slice(&[0, 0, 0, 0, word]).unwrap()
 }
 
-/// Build a 3-member channel record. `member_pubkey_hashes` are in slot order; `bp_member_slot`
+/// Build an `E2E_ACTIVE`-member channel record (pad-to-MAX D6). `active_member_pubkey_hashes` are
+/// the active prefix in slot order; padding slots are `Bytes32::default()`. `bp_member_slot`
 /// selects the block proposer.
 fn channel_record(
     channel_id: ChannelId,
     bp_member_slot: u8,
-    member_pubkey_hashes: [Bytes32; CHANNEL_MEMBERS],
+    active_member_pubkey_hashes: [Bytes32; E2E_ACTIVE],
     regev_pk_root: Bytes32,
 ) -> ChannelRecord {
     ChannelRecord {
         channel_id,
-        member_sphincs_pubkey_hashes: member_pubkey_hashes,
+        member_count: E2E_ACTIVE as u8,
+        member_sphincs_pubkey_hashes: pad_hashes(&active_member_pubkey_hashes),
         member_pubkeys_root: bytes32_word(100 + channel_id.as_u64() as u32),
         bp_member_slot,
         special_close_penalty: U256::from(9u32),
@@ -160,10 +177,12 @@ fn channel_record(
 }
 
 fn signatures_for(record: &ChannelRecord) -> Vec<MemberSignature> {
+    // pad-to-MAX D6: only the ACTIVE members (0..member_count) sign.
     record
         .member_sphincs_pubkey_hashes
         .iter()
         .enumerate()
+        .take(record.member_count as usize)
         .map(|(idx, hash)| MemberSignature {
             member_slot: idx as u8,
             sphincs_pubkey_hash: *hash,
@@ -193,12 +212,12 @@ fn transport_envelope() -> ChannelProofEnvelope {
 fn genesis_state(
     rng: &mut SmallRng,
     record: &ChannelRecord,
-    pks: &[RegevPk; CHANNEL_MEMBERS],
-    balances: [u64; CHANNEL_MEMBERS],
+    pks: &[RegevPk; MAX_CHANNEL_MEMBERS],
+    balances: [u64; E2E_ACTIVE],
     fund_amount: u32,
     nullifier_root: Bytes32,
-) -> (ChannelState, [crate::regev::AmountWitness; CHANNEL_MEMBERS]) {
-    let enc: Vec<_> = (0..CHANNEL_MEMBERS)
+) -> (ChannelState, [crate::regev::AmountWitness; E2E_ACTIVE]) {
+    let enc: Vec<_> = (0..E2E_ACTIVE)
         .map(|i| encrypt_amount(rng, &pks[i], balances[i]).unwrap())
         .collect();
     let mut enc = enc.into_iter();
@@ -217,10 +236,11 @@ fn genesis_state(
         },
         balance_state: BalanceState {
             channel_id: record.channel_id,
-            enc_balances: [ct0, ct1, ct2],
+            member_count: E2E_ACTIVE as u8,
+            enc_balances: BalanceState::pad_enc_balances(&[ct0, ct1, ct2]),
             settled_tx_chain: Bytes32::default(),
             state_version: 0,
-            pending_adds: [0; CHANNEL_MEMBERS],
+            pending_adds: BalanceState::pad_pending_adds(&[0; E2E_ACTIVE]),
         },
         h2_tag: Bytes32::default(),
         shared_native_nullifier_root: nullifier_root,
@@ -245,9 +265,9 @@ fn u256_from_u64(value: u64) -> U256 {
 /// dry-run construction here; tests verify clones (happy path) or tampered clones (negatives),
 /// so the proof generation count stays bounded.
 struct FlowFixture {
-    a_pks: [RegevPk; CHANNEL_MEMBERS],
+    a_pks: [RegevPk; MAX_CHANNEL_MEMBERS],
     a_sks: Vec<RegevSk>,
-    b_pks: [RegevPk; CHANNEL_MEMBERS],
+    b_pks: [RegevPk; MAX_CHANNEL_MEMBERS],
     b_sks: Vec<RegevSk>,
     in_channel: InChannelTransferUpdateWitness,
     send: InterChannelSendUpdateWitness,
@@ -272,7 +292,7 @@ fn build_flow() -> FlowFixture {
     let (a_pk0, a_sk0) = channel_keygen(&mut rng);
     let (a_pk1, a_sk1) = channel_keygen(&mut rng);
     let (a_pk2, a_sk2) = channel_keygen(&mut rng);
-    let a_pks = [a_pk0, a_pk1, a_pk2];
+    let a_pks = pad_pks(&[a_pk0, a_pk1, a_pk2]);
     let sender_record = channel_record(
         a_id,
         0,
@@ -284,7 +304,7 @@ fn build_flow() -> FlowFixture {
     let (b_pk0, b_sk0) = channel_keygen(&mut rng);
     let (b_pk1, b_sk1) = channel_keygen(&mut rng);
     let (b_pk2, b_sk2) = channel_keygen(&mut rng);
-    let b_pks = [b_pk0, b_pk1, b_pk2];
+    let b_pks = pad_pks(&[b_pk0, b_pk1, b_pk2]);
     let receiver_record = channel_record(
         b_id,
         0,
@@ -330,14 +350,15 @@ fn build_flow() -> FlowFixture {
         epoch: 2,
         balance_state: BalanceState {
             channel_id: a_id,
-            enc_balances: [
+            member_count: E2E_ACTIVE as u8,
+            enc_balances: BalanceState::pad_enc_balances(&[
                 alice_after_tx.0.clone(),
                 bob_after,
                 a0.balance_state.enc_balances[2].clone(),
-            ],
+            ]),
             settled_tx_chain: a0.balance_state.settled_tx_chain,
             state_version: 1,
-            pending_adds: [0, 1, 0],
+            pending_adds: BalanceState::pad_pending_adds(&[0, 1, 0]),
         },
         prev_digest: a0.digest,
         ..a0.clone()
@@ -404,11 +425,12 @@ fn build_flow() -> FlowFixture {
         },
         balance_state: BalanceState {
             channel_id: a_id,
-            enc_balances: [
+            member_count: E2E_ACTIVE as u8,
+            enc_balances: BalanceState::pad_enc_balances(&[
                 alice_after_send.0.clone(),
                 a1.balance_state.enc_balances[1].clone(),
                 a1.balance_state.enc_balances[2].clone(),
-            ],
+            ]),
             settled_tx_chain: settled_tx_chain_push(a1.balance_state.settled_tx_chain, tx_leaf),
             state_version: 2,
             pending_adds: a1.balance_state.pending_adds,
@@ -507,15 +529,15 @@ fn build_flow() -> FlowFixture {
     let b2 = ChannelState {
         epoch: 3,
         balance_state: BalanceState {
-            enc_balances: [
+            enc_balances: BalanceState::pad_enc_balances(&[
                 dave_after.clone(),
                 b1.balance_state.enc_balances[1].clone(),
                 b1.balance_state.enc_balances[2].clone(),
-            ],
+            ]),
             // The receiver chains the SAME tx leaf the sender chained (F3-A multi-layer defense).
             settled_tx_chain: settled_tx_chain_push(b1.balance_state.settled_tx_chain, tx_leaf),
             state_version: 2,
-            pending_adds: [1, 0, 0],
+            pending_adds: BalanceState::pad_pending_adds(&[1, 0, 0]),
             ..b1.balance_state.clone()
         },
         unallocated_confirmed_incoming: U256::zero(),
@@ -545,13 +567,13 @@ fn build_flow() -> FlowFixture {
     let b3 = ChannelState {
         epoch: 4,
         balance_state: BalanceState {
-            enc_balances: [
+            enc_balances: BalanceState::pad_enc_balances(&[
                 dave_refreshed,
                 b2.balance_state.enc_balances[1].clone(),
                 b2.balance_state.enc_balances[2].clone(),
-            ],
+            ]),
             state_version: 3,
-            pending_adds: [0, 0, 0],
+            pending_adds: BalanceState::pad_pending_adds(&[0, 0, 0]),
             ..b2.balance_state.clone()
         },
         prev_digest: b2.digest,
@@ -624,7 +646,7 @@ fn channel_native_regev_full_flow_e2e() {
         "in-channel transfers never advance the settled-tx chain"
     );
     assert_eq!(
-        f.in_channel.next_state.balance_state.pending_adds,
+        f.in_channel.next_state.balance_state.pending_adds[..E2E_ACTIVE],
         [0, 1, 0]
     );
     // …then as the recipient (decryption check, abstract2 §3.1).
@@ -691,7 +713,10 @@ fn channel_native_regev_full_flow_e2e() {
         settled_tx_chain_push(pis.prev_settled_tx_chain, f.tx_leaf),
         "the receiver chains the SAME tx leaf the sender chained"
     );
-    assert_eq!(f.bundle.next_state.balance_state.pending_adds, [1, 0, 0]);
+    assert_eq!(
+        f.bundle.next_state.balance_state.pending_adds[..E2E_ACTIVE],
+        [1, 0, 0]
+    );
     let mut as_dave = f.bundle.clone();
     as_dave.recipient_sk = Some(f.b_sks[0].clone());
     as_dave.expected_amount = Some(INTER_CHANNEL_AMOUNT);
@@ -714,7 +739,10 @@ fn channel_native_regev_full_flow_e2e() {
         pis.prev_settled_tx_chain, pis.next_settled_tx_chain,
         "a refresh never advances the settled-tx chain"
     );
-    assert_eq!(f.refresh.next_state.balance_state.pending_adds, [0, 0, 0]);
+    assert_eq!(
+        f.refresh.next_state.balance_state.pending_adds[..E2E_ACTIVE],
+        [0, 0, 0]
+    );
     let final_state = f.refresh.next_state.clone();
     assert_eq!(
         decrypt_amount(&f.b_sks[0], &final_state.balance_state.enc_balances[0]).unwrap(),
