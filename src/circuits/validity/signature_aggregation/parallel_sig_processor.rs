@@ -9,11 +9,11 @@ use plonky2::{
 };
 
 use crate::circuits::validity::signature_aggregation::{
-    account_apply_block::{
-        AccountApplyBlockCircuit, AccountApplyBlockError, AccountApplyBlockWitness,
+    channel_apply_block::{
+        ChannelApplyBlockCircuit, ChannelApplyBlockError, ChannelApplyBlockWitness,
     },
-    account_apply_circuit::{AccountApplyCircuit, AccountApplyCircuitError},
-    account_apply_step::{AccountApplyStepCircuit, AccountApplyStepError, AccountApplyStepWitness},
+    channel_apply_circuit::{ChannelApplyCircuit, ChannelApplyCircuitError},
+    channel_apply_step::{ChannelApplyStepCircuit, ChannelApplyStepError, ChannelApplyStepWitness},
     sig_batch_circuit::{SigBatchCircuit, SigBatchCircuitError},
     sig_batch_step::{SigBatchStepCircuit, SigBatchStepError, SigBatchStepWitness},
     sig_merge_circuit::{SigMergeCircuit, SigMergeCircuitError},
@@ -35,13 +35,13 @@ pub enum ParallelSigProcessorError {
     MergeCircuitError(#[from] SigMergeCircuitError),
 
     #[error("Account apply block error: {0}")]
-    ApplyBlockError(#[from] AccountApplyBlockError),
+    ApplyBlockError(#[from] ChannelApplyBlockError),
 
     #[error("Account apply step error: {0}")]
-    ApplyStepError(#[from] AccountApplyStepError),
+    ApplyStepError(#[from] ChannelApplyStepError),
 
     #[error("Account apply circuit error: {0}")]
-    ApplyCircuitError(#[from] AccountApplyCircuitError),
+    ApplyCircuitError(#[from] ChannelApplyCircuitError),
 }
 
 /// Orchestrator for the parallel signature aggregation pipeline.
@@ -57,7 +57,7 @@ pub enum ParallelSigProcessorError {
 /// ║  Batch_C: users 51-75 ─┤                                 ║
 /// ║  ...                   ┘                                  ║
 /// ╠═══════════════════════════════════════════════════════════╣
-/// ║  Pipeline 2: Account Tree Updates (parallel + merge)      ║
+/// ║  Pipeline 2: User Tree Updates (parallel + merge)      ║
 /// ║  [Parallel - N workers]          [Linear Merge]           ║
 /// ║  Block_1: users 1-20  ─┐                                 ║
 /// ║  Block_2: users 21-40 ─┼─→ ApplyMerge(1,2,...) ─→ proof  ║
@@ -80,9 +80,9 @@ where
     sig_merge_circuit: SigMergeCircuit<F, C, D>,
 
     // Account tree update pipeline
-    account_apply_block_circuit: AccountApplyBlockCircuit<F, C, D>,
-    account_apply_step_circuit: AccountApplyStepCircuit<F, C, D>,
-    account_apply_circuit: AccountApplyCircuit<F, C, D>,
+    user_apply_block_circuit: ChannelApplyBlockCircuit<F, C, D>,
+    user_apply_step_circuit: ChannelApplyStepCircuit<F, C, D>,
+    channel_apply_circuit: ChannelApplyCircuit<F, C, D>,
 }
 
 impl<F, C, const D: usize> ParallelSigProcessor<F, C, D>
@@ -112,15 +112,15 @@ where
         );
 
         // Build account apply pipeline
-        let account_apply_block_circuit = AccountApplyBlockCircuit::<F, C, D>::new();
-        let account_apply_cd = AccountApplyCircuit::<F, C, D>::generate_cd();
-        let account_apply_step_circuit = AccountApplyStepCircuit::<F, C, D>::new(
-            &account_apply_cd,
-            &account_apply_block_circuit.data.verifier_data(),
+        let user_apply_block_circuit = ChannelApplyBlockCircuit::<F, C, D>::new();
+        let user_apply_cd = ChannelApplyCircuit::<F, C, D>::generate_cd();
+        let user_apply_step_circuit = ChannelApplyStepCircuit::<F, C, D>::new(
+            &user_apply_cd,
+            &user_apply_block_circuit.data.verifier_data(),
         );
-        let account_apply_circuit = AccountApplyCircuit::<F, C, D>::new(
-            &account_apply_cd,
-            &account_apply_step_circuit.data.verifier_data(),
+        let channel_apply_circuit = ChannelApplyCircuit::<F, C, D>::new(
+            &user_apply_cd,
+            &user_apply_step_circuit.data.verifier_data(),
         );
 
         Self {
@@ -128,9 +128,9 @@ where
             sig_batch_circuit,
             sig_merge_step_circuit,
             sig_merge_circuit,
-            account_apply_block_circuit,
-            account_apply_step_circuit,
-            account_apply_circuit,
+            user_apply_block_circuit,
+            user_apply_step_circuit,
+            channel_apply_circuit,
         }
     }
 
@@ -190,37 +190,37 @@ where
 
     // ── Account tree update pipeline ──
 
-    pub fn account_apply_block_vd(&self) -> VerifierCircuitData<F, C, D> {
-        self.account_apply_block_circuit.data.verifier_data()
+    pub fn user_apply_block_vd(&self) -> VerifierCircuitData<F, C, D> {
+        self.user_apply_block_circuit.data.verifier_data()
     }
 
-    pub fn account_apply_vd(&self) -> VerifierCircuitData<F, C, D> {
-        self.account_apply_circuit.data.verifier_data()
+    pub fn user_apply_vd(&self) -> VerifierCircuitData<F, C, D> {
+        self.channel_apply_circuit.data.verifier_data()
     }
 
-    /// Prove a flat block of account tree updates (parallelizable).
+    /// Prove a flat block of user tree updates (parallelizable).
     ///
-    /// Each block processes up to ACCOUNT_APPLY_BLOCK_SIZE users.
+    /// Each block processes up to USER_APPLY_BLOCK_SIZE users.
     /// Multiple blocks can be proven in parallel since each block
     /// operates on pre-computed intermediate tree states.
     pub fn prove_apply_block(
         &self,
-        witness: &AccountApplyBlockWitness,
+        witness: &ChannelApplyBlockWitness,
     ) -> Result<ProofWithPublicInputs<F, C, D>, ParallelSigProcessorError> {
-        let proof = self.account_apply_block_circuit.prove(witness)?;
+        let proof = self.user_apply_block_circuit.prove(witness)?;
         Ok(proof)
     }
 
-    /// Prove a single apply merge step: absorb one AccountApplyBlock proof.
+    /// Prove a single apply merge step: absorb one ChannelApplyBlock proof.
     pub fn prove_apply_step(
         &self,
-        witness: &AccountApplyStepWitness<F, C, D>,
+        witness: &ChannelApplyStepWitness<F, C, D>,
     ) -> Result<ProofWithPublicInputs<F, C, D>, ParallelSigProcessorError> {
-        let account_apply_vd = self.account_apply_vd();
+        let user_apply_vd = self.user_apply_vd();
         let step_proof = self
-            .account_apply_step_circuit
-            .prove(&account_apply_vd, witness)?;
-        let apply_proof = self.account_apply_circuit.prove(&step_proof)?;
+            .user_apply_step_circuit
+            .prove(&user_apply_vd, witness)?;
+        let apply_proof = self.channel_apply_circuit.prove(&step_proof)?;
         Ok(apply_proof)
     }
 
@@ -228,16 +228,16 @@ where
     pub fn verify_apply_block(
         &self,
         proof: &ProofWithPublicInputs<F, C, D>,
-    ) -> Result<(), AccountApplyBlockError> {
-        self.account_apply_block_circuit.verify(proof)
+    ) -> Result<(), ChannelApplyBlockError> {
+        self.user_apply_block_circuit.verify(proof)
     }
 
     /// Verify a merged apply proof.
     pub fn verify_apply(
         &self,
         proof: &ProofWithPublicInputs<F, C, D>,
-    ) -> Result<(), AccountApplyCircuitError> {
-        self.account_apply_circuit.verify(proof)
+    ) -> Result<(), ChannelApplyCircuitError> {
+        self.channel_apply_circuit.verify(proof)
     }
 }
 
@@ -248,10 +248,10 @@ mod tests {
         circuits::{
             test_utils::sphincs_sign::{pk_hash_from_pk_bytes, sphincs_keygen, sphincs_sign},
             validity::{
-                block_hash_chain::sphincs_sig::SpxSigWitness,
+                block_hash_chain::sphincs_sig::{SmallBlockMessageFields, SpxSigWitness},
                 signature_aggregation::{
-                    account_apply_block::{AccountApplyBlockWitness, AccountApplyUserWitness},
-                    account_apply_step::AccountApplyInitialValue,
+                    channel_apply_block::{ChannelApplyBlockWitness, ChannelApplyUserWitness},
+                    channel_apply_step::ChannelApplyInitialValue,
                     sig_batch_pis::SigBatchPublicInputs,
                     sig_batch_step::{SigBatchInitialValue, SigBatchStepWitness},
                     sig_merge_pis::SigMergePublicInputs,
@@ -260,12 +260,15 @@ mod tests {
             },
         },
         common::{
+            channel_id::ChannelId,
             key_set::{KeySetMerkleProof, KeySetTree, PkLeaf},
-            trees::account_tree::{AccountLeaf, AccountTree, SendLeaf, SendTree},
+            trees::{
+                channel_tree::{ChannelLeaf, ChannelTree, SendLeaf, SendTree},
+                key_tree::KeyLeaf,
+            },
             u63::BlockNumber,
-            user_id::UserId,
         },
-        constants::{ACCOUNT_TREE_HEIGHT, KEY_SET_TREE_HEIGHT, SEND_TREE_HEIGHT},
+        constants::{CHANNEL_TREE_HEIGHT, KEY_SET_TREE_HEIGHT, SEND_TREE_HEIGHT},
         ethereum_types::{bytes32::Bytes32, u32limb_trait::U32LimbTrait},
         utils::conversion::ToU64,
     };
@@ -280,13 +283,10 @@ mod tests {
 
     use crate::circuits::test_utils::sphincs_sign::SpxKeyPair;
 
-    /// Helper: create a user with a key set and register in account tree.
-    fn setup_user(
-        rng: &mut StdRng,
-        account_tree: &mut AccountTree,
-        aggregator_id: u32,
-        local_id: u32,
-    ) -> (SpxKeyPair, KeySetTree, AccountLeaf, SendTree) {
+    /// Helper: create a member keyID with a 1-of-1 SPHINCS+ key set.
+    /// Two-layer identity: the per-keyID (pk_set_root, threshold) live in the KeyLeaf
+    /// (KeyTree), not in the channel leaf.
+    fn setup_member(_rng: &mut StdRng) -> (SpxKeyPair, KeySetTree, KeyLeaf) {
         let sk_seed: [u8; 16] = rand::random();
         let sk_prf: [u8; 16] = rand::random();
         let pub_seed: [u8; 16] = rand::random();
@@ -296,6 +296,22 @@ mod tests {
         let mut key_set_tree = KeySetTree::init();
         key_set_tree.update(0, PkLeaf::new(pk_hash));
 
+        let key_leaf = KeyLeaf {
+            pk_set_root: key_set_tree.get_root(),
+            threshold: 1,
+            num_keys: 1,
+        };
+
+        (kp, key_set_tree, key_leaf)
+    }
+
+    /// Helper: create the channel's single leaf (indexed by channel_id) and register it in the
+    /// channel tree.
+    fn setup_channel(
+        rng: &mut StdRng,
+        channel_tree: &mut ChannelTree,
+        channel_id: u32,
+    ) -> (ChannelLeaf, SendTree) {
         let mut send_tree = SendTree::init();
         let prev_send_leaf = SendLeaf {
             prev: BlockNumber::new(1).unwrap(),
@@ -304,18 +320,17 @@ mod tests {
         };
         send_tree.push(prev_send_leaf);
 
-        let prev_account_leaf = AccountLeaf {
+        let channel_leaf = ChannelLeaf {
             index: send_tree.len() as u32,
             prev: BlockNumber::new(3).unwrap(),
             send_tree_root: send_tree.get_root(),
-            pk_set_root: key_set_tree.get_root(),
-            threshold: 1,
+            member_key_ids_root: ChannelLeaf::default().member_key_ids_root,
         };
 
-        let user_id = UserId::new(aggregator_id, local_id).unwrap();
-        account_tree.update(user_id.as_u64(), prev_account_leaf.clone());
+        let channel = ChannelId::new(channel_id as u64).unwrap();
+        channel_tree.update(channel.as_u64(), channel_leaf.clone());
 
-        (kp, key_set_tree, prev_account_leaf, send_tree)
+        (channel_leaf, send_tree)
     }
 
     #[cfg_attr(debug_assertions, ignore = "run with --release")]
@@ -330,39 +345,48 @@ mod tests {
 
         let sig_batch_vd = processor.sig_batch_vd();
         let block_number = BlockNumber::new(5).unwrap();
-        let aggregator_id = 1u32;
+        let channel_id = 1u32;
         let tx_tree_root = Bytes32::rand(&mut rng);
 
-        // Set up two users
-        let mut account_tree = AccountTree::new(ACCOUNT_TREE_HEIGHT);
+        // Set up one channel (single leaf) with two member keyIDs
+        let mut channel_tree = ChannelTree::new(CHANNEL_TREE_HEIGHT);
 
-        let local_id_a = 10u32;
-        let local_id_b = 20u32;
+        let key_id_a = 10u32;
+        let key_id_b = 20u32;
 
-        let (kp_a, kst_a, leaf_a, st_a) =
-            setup_user(&mut rng, &mut account_tree, aggregator_id, local_id_a);
-        let (kp_b, kst_b, leaf_b, st_b) =
-            setup_user(&mut rng, &mut account_tree, aggregator_id, local_id_b);
+        let (kp_a, kst_a, key_leaf_a) = setup_member(&mut rng);
+        let (kp_b, kst_b, key_leaf_b) = setup_member(&mut rng);
+        let (channel_leaf, _send_tree) = setup_channel(&mut rng, &mut channel_tree, channel_id);
+        let leaf_a = channel_leaf.clone();
+        let leaf_b = channel_leaf.clone();
 
-        let account_tree_root = account_tree.get_root();
+        let account_tree_root = channel_tree.get_root();
 
-        // Helper to sign
-        let sign_msg = |kp: &SpxKeyPair, local_id: u32| {
-            let msg_u64: Vec<u64> = std::iter::once(block_number.as_u64())
-                .chain(std::iter::once(aggregator_id as u64))
-                .chain(std::iter::once(local_id as u64))
-                .chain(tx_tree_root.to_u64_vec())
+        // All members sign the SAME IMSB digest (detail2 §F-2): the 8 u32 digest limbs,
+        // each serialised as an 8-byte little-endian word — matching the in-circuit msg_gl.
+        let msg_fields = SmallBlockMessageFields {
+            bp_key_id: key_id_a,
+            small_block_number: 5,
+            prev_small_block_root: Bytes32::rand(&mut rng),
+            state_commitment_root: Bytes32::rand(&mut rng), // H1' (any nonzero test value)
+            medium_epoch_hint: 1,
+            close_freeze_nonce: 0,
+        };
+        let signed_digest = msg_fields.signing_digest(channel_id, tx_tree_root);
+        let sign_msg = |kp: &SpxKeyPair| {
+            let msg_bytes: Vec<u8> = signed_digest
+                .to_u64_vec()
+                .iter()
+                .flat_map(|w| w.to_le_bytes())
                 .collect();
-            let msg_bytes: Vec<u8> = msg_u64.iter().flat_map(|w| w.to_le_bytes()).collect();
             sphincs_sign(&msg_bytes, kp)
         };
 
-        // ── Batch A: user_a (local_id=10) ──
-        let sig_a = sign_msg(&kp_a, local_id_a);
+        // ── Batch A: user_a (key_id=10) ──
+        let sig_a = sign_msg(&kp_a);
         let sig_witness_a = SpxSigWitness::from_bytes(&kp_a.pk_bytes, &sig_a);
         let account_proof_a =
-            account_tree.prove(UserId::new(aggregator_id, local_id_a).unwrap().as_u64());
-        let _send_proof_a = st_a.prove(leaf_a.index.into());
+            channel_tree.prove(ChannelId::new(channel_id as u64).unwrap().as_u64());
         let kst_proof_a = kst_a.prove(0);
 
         let t1 = Instant::now();
@@ -372,17 +396,20 @@ mod tests {
                 initial_value: Some(SigBatchInitialValue {
                     account_tree_root,
                     block_number,
-                    aggregator_id,
+                    channel_id,
                     tx_tree_root,
+                    signed_digest,
                 }),
                 prev_batch_proof: None,
                 is_finalize: false,
                 block_number,
-                aggregator_id,
+                channel_id,
                 tx_tree_root,
-                new_user_local_id: local_id_a,
-                prev_account_leaf: leaf_a.clone(),
-                account_merkle_proof: account_proof_a.clone(),
+                signed_digest,
+                new_user_key_id: key_id_a,
+                prev_user_leaf: leaf_a.clone(),
+                user_merkle_proof: account_proof_a.clone(),
+                key_leaf: key_leaf_a.clone(),
                 pk_index: 0,
                 key_set_merkle_proof: kst_proof_a,
                 sig_witness: sig_witness_a,
@@ -398,11 +425,13 @@ mod tests {
                 prev_batch_proof: Some(batch_a_step1),
                 is_finalize: true,
                 block_number,
-                aggregator_id,
+                channel_id,
                 tx_tree_root,
-                new_user_local_id: 0,
-                prev_account_leaf: leaf_a.clone(),
-                account_merkle_proof: account_proof_a,
+                signed_digest,
+                new_user_key_id: 0,
+                prev_user_leaf: leaf_a.clone(),
+                user_merkle_proof: account_proof_a,
+                key_leaf: KeyLeaf::default(),
                 pk_index: 0,
                 key_set_merkle_proof: KeySetMerkleProof::dummy(KEY_SET_TREE_HEIGHT),
                 sig_witness: SpxSigWitness::dummy(),
@@ -420,17 +449,17 @@ mod tests {
         )
         .unwrap();
         assert_eq!(batch_a_pis.verified_count, 1);
-        assert_eq!(batch_a_pis.current_user_local_id, 0);
-        let user_id_a = UserId::new(aggregator_id, local_id_a).unwrap().as_u64();
+        assert_eq!(batch_a_pis.current_user_key_id, 0);
+        // Two-layer identity: the per-user ordering/chain ids are member key_ids.
+        let user_id_a = key_id_a as u64;
         assert_eq!(batch_a_pis.first_user_id, user_id_a);
         assert_eq!(batch_a_pis.last_user_id, user_id_a);
 
-        // ── Batch B: user_b (local_id=20) ──
-        let sig_b = sign_msg(&kp_b, local_id_b);
+        // ── Batch B: user_b (key_id=20) ──
+        let sig_b = sign_msg(&kp_b);
         let sig_witness_b = SpxSigWitness::from_bytes(&kp_b.pk_bytes, &sig_b);
         let account_proof_b =
-            account_tree.prove(UserId::new(aggregator_id, local_id_b).unwrap().as_u64());
-        let _send_proof_b = st_b.prove(leaf_b.index.into());
+            channel_tree.prove(ChannelId::new(channel_id as u64).unwrap().as_u64());
         let kst_proof_b = kst_b.prove(0);
 
         let t3 = Instant::now();
@@ -439,17 +468,20 @@ mod tests {
                 initial_value: Some(SigBatchInitialValue {
                     account_tree_root,
                     block_number,
-                    aggregator_id,
+                    channel_id,
                     tx_tree_root,
+                    signed_digest,
                 }),
                 prev_batch_proof: None,
                 is_finalize: false,
                 block_number,
-                aggregator_id,
+                channel_id,
                 tx_tree_root,
-                new_user_local_id: local_id_b,
-                prev_account_leaf: leaf_b.clone(),
-                account_merkle_proof: account_proof_b.clone(),
+                signed_digest,
+                new_user_key_id: key_id_b,
+                prev_user_leaf: leaf_b.clone(),
+                user_merkle_proof: account_proof_b.clone(),
+                key_leaf: key_leaf_b.clone(),
                 pk_index: 0,
                 key_set_merkle_proof: kst_proof_b,
                 sig_witness: sig_witness_b,
@@ -464,11 +496,13 @@ mod tests {
                 prev_batch_proof: Some(batch_b_step1),
                 is_finalize: true,
                 block_number,
-                aggregator_id,
+                channel_id,
                 tx_tree_root,
-                new_user_local_id: 0,
-                prev_account_leaf: leaf_b.clone(),
-                account_merkle_proof: account_proof_b,
+                signed_digest,
+                new_user_key_id: 0,
+                prev_user_leaf: leaf_b.clone(),
+                user_merkle_proof: account_proof_b,
+                key_leaf: KeyLeaf::default(),
                 pk_index: 0,
                 key_set_merkle_proof: KeySetMerkleProof::dummy(KEY_SET_TREE_HEIGHT),
                 sig_witness: SpxSigWitness::dummy(),
@@ -486,8 +520,9 @@ mod tests {
                 initial_value: Some(SigMergeInitialValue {
                     account_tree_root,
                     block_number,
-                    aggregator_id,
+                    channel_id,
                     tx_tree_root,
+                    signed_digest,
                 }),
                 prev_merge_proof: None,
                 batch_proof: batch_a_final,
@@ -515,7 +550,7 @@ mod tests {
         .unwrap();
         assert_eq!(merge_pis.verified_count, 2);
         assert_eq!(merge_pis.first_user_id, user_id_a);
-        let user_id_b = UserId::new(aggregator_id, local_id_b).unwrap().as_u64();
+        let user_id_b = key_id_b as u64;
         assert_eq!(merge_pis.last_user_id, user_id_b);
         assert_eq!(merge_pis.account_tree_root, account_tree_root);
 
@@ -527,10 +562,9 @@ mod tests {
 
     #[cfg_attr(debug_assertions, ignore = "run with --release")]
     #[test]
-    fn test_account_apply_block_and_merge() {
+    fn test_user_apply_block_and_merge() {
         use crate::circuits::validity::signature_aggregation::{
-            account_apply_block::ACCOUNT_APPLY_BLOCK_SIZE,
-            account_apply_pis::AccountApplyPublicInputs,
+            channel_apply_block::USER_APPLY_BLOCK_SIZE, channel_apply_pis::ChannelApplyPublicInputs,
         };
         use std::time::Instant;
         let mut rng = StdRng::seed_from_u64(42);
@@ -540,81 +574,89 @@ mod tests {
         println!("ParallelSigProcessor::new(): {:?}", t0.elapsed());
 
         let block_number = BlockNumber::new(5).unwrap();
-        let aggregator_id = 1u32;
+        let channel_id = 1u32;
         let tx_tree_root = Bytes32::rand(&mut rng);
 
-        // Set up 2 users for account tree updates
-        let mut account_tree = AccountTree::new(ACCOUNT_TREE_HEIGHT);
-        let local_id_a = 10u32;
-        let local_id_b = 20u32;
+        // Set up one channel (single leaf) with two member keyIDs updating it in turn
+        let mut channel_tree = ChannelTree::new(CHANNEL_TREE_HEIGHT);
+        let key_id_a = 10u32;
+        let key_id_b = 20u32;
 
-        let (_kp_a, _kst_a, leaf_a, st_a) =
-            setup_user(&mut rng, &mut account_tree, aggregator_id, local_id_a);
-        let (_kp_b, _kst_b, leaf_b, st_b) =
-            setup_user(&mut rng, &mut account_tree, aggregator_id, local_id_b);
+        let (channel_leaf, send_tree) = setup_channel(&mut rng, &mut channel_tree, channel_id);
 
-        let initial_root = account_tree.get_root();
+        let initial_root = channel_tree.get_root();
 
-        // ── Build AccountApplyBlock with 2 active users ──
-        let user_id_a = UserId::new(aggregator_id, local_id_a).unwrap();
-        let user_id_b = UserId::new(aggregator_id, local_id_b).unwrap();
+        // ── Build ChannelApplyBlock with 2 active member keyIDs on the same channel leaf ──
+        let channel = ChannelId::new(channel_id as u64).unwrap();
 
-        let account_proof_a = account_tree.prove(user_id_a.as_u64());
-        let send_proof_a = st_a.prove(leaf_a.index.into());
+        let account_proof_a = channel_tree.prove(channel.as_u64());
+        let send_proof_a = send_tree.prove(channel_leaf.index.into());
 
-        let mut users = vec![AccountApplyUserWitness {
+        let mut users = vec![ChannelApplyUserWitness {
             is_active: true,
-            user_local_id: local_id_a,
-            prev_account_leaf: leaf_a.clone(),
-            account_merkle_proof: account_proof_a,
+            user_key_id: key_id_a,
+            prev_user_leaf: channel_leaf.clone(),
+            user_merkle_proof: account_proof_a,
             send_merkle_proof: send_proof_a,
         }];
 
-        // Apply user A's update to account tree (off-circuit) to get updated proofs for user B
+        // Apply member A's update to the channel leaf (off-circuit) to get updated proofs for
+        // member B — both members update the SAME channel leaf in sequence.
         let new_send_leaf_a = SendLeaf {
-            prev: leaf_a.prev,
+            prev: channel_leaf.prev,
             cur: block_number,
             tx_tree_root,
         };
-        let mut updated_st_a = st_a.clone();
-        updated_st_a.push(new_send_leaf_a);
-        let new_account_leaf_a = AccountLeaf {
-            index: leaf_a.index + 1,
+        let mut updated_send_tree = send_tree.clone();
+        updated_send_tree.push(new_send_leaf_a);
+        let new_channel_leaf_a = ChannelLeaf {
+            index: channel_leaf.index + 1,
             prev: block_number,
-            send_tree_root: updated_st_a.get_root(),
-            pk_set_root: leaf_a.pk_set_root,
-            threshold: leaf_a.threshold,
+            send_tree_root: updated_send_tree.get_root(),
+            member_key_ids_root: channel_leaf.member_key_ids_root,
         };
-        account_tree.update(user_id_a.as_u64(), new_account_leaf_a);
+        channel_tree.update(channel.as_u64(), new_channel_leaf_a.clone());
 
-        let account_proof_b = account_tree.prove(user_id_b.as_u64());
-        let send_proof_b = st_b.prove(leaf_b.index.into());
+        let account_proof_b = channel_tree.prove(channel.as_u64());
+        let send_proof_b = updated_send_tree.prove(new_channel_leaf_a.index.into());
 
-        users.push(AccountApplyUserWitness {
+        users.push(ChannelApplyUserWitness {
             is_active: true,
-            user_local_id: local_id_b,
-            prev_account_leaf: leaf_b.clone(),
-            account_merkle_proof: account_proof_b,
+            user_key_id: key_id_b,
+            prev_user_leaf: new_channel_leaf_a.clone(),
+            user_merkle_proof: account_proof_b,
             send_merkle_proof: send_proof_b,
         });
 
         // Pad remaining slots with inactive dummies
-        use crate::common::trees::account_tree::{AccountMerkleProof, SendMerkleProof};
-        while users.len() < ACCOUNT_APPLY_BLOCK_SIZE {
-            users.push(AccountApplyUserWitness {
+        use crate::common::trees::channel_tree::{ChannelMerkleProof, SendMerkleProof};
+        while users.len() < USER_APPLY_BLOCK_SIZE {
+            users.push(ChannelApplyUserWitness {
                 is_active: false,
-                user_local_id: 0,
-                prev_account_leaf: AccountLeaf::default(),
-                account_merkle_proof: AccountMerkleProof::dummy(ACCOUNT_TREE_HEIGHT),
+                user_key_id: 0,
+                prev_user_leaf: ChannelLeaf::default(),
+                user_merkle_proof: ChannelMerkleProof::dummy(CHANNEL_TREE_HEIGHT),
                 send_merkle_proof: SendMerkleProof::dummy(SEND_TREE_HEIGHT),
             });
         }
 
-        let block_witness = AccountApplyBlockWitness {
+        // IMSB message fields for this block — the apply-block circuit recomputes the digest
+        // in-circuit, binding it to the block's channel_id/tx_tree_root targets.
+        let msg_fields = SmallBlockMessageFields {
+            bp_key_id: key_id_a,
+            small_block_number: 5,
+            prev_small_block_root: Bytes32::rand(&mut rng),
+            state_commitment_root: Bytes32::rand(&mut rng), // H1' (any nonzero test value)
+            medium_epoch_hint: 1,
+            close_freeze_nonce: 0,
+        };
+        let signed_digest = msg_fields.signing_digest(channel_id, tx_tree_root);
+        let block_witness = ChannelApplyBlockWitness {
             initial_account_tree_root: initial_root,
             block_number,
-            aggregator_id,
+            channel_id,
             tx_tree_root,
+            msg_fields,
             users,
         };
 
@@ -623,7 +665,7 @@ mod tests {
         let block_proof = processor
             .prove_apply_block(&block_witness)
             .expect("apply block");
-        println!("AccountApplyBlock prove (2 users): {:?}", t1.elapsed());
+        println!("ChannelApplyBlock prove (2 users): {:?}", t1.elapsed());
         processor
             .verify_apply_block(&block_proof)
             .expect("apply block verify");
@@ -631,25 +673,26 @@ mod tests {
         // ── Merge the block ──
         let t2 = Instant::now();
         let apply_proof = processor
-            .prove_apply_step(&AccountApplyStepWitness::<F, C, D> {
-                initial_value: Some(AccountApplyInitialValue {
+            .prove_apply_step(&ChannelApplyStepWitness::<F, C, D> {
+                initial_value: Some(ChannelApplyInitialValue {
                     account_tree_root: initial_root,
                     block_number,
-                    aggregator_id,
+                    channel_id,
                     tx_tree_root,
+                    signed_digest,
                 }),
                 prev_apply_proof: None,
                 block_proof,
             })
             .expect("apply merge step");
-        println!("AccountApplyMerge step (absorb block): {:?}", t2.elapsed());
+        println!("ChannelApplyMerge step (absorb block): {:?}", t2.elapsed());
         processor
             .verify_apply(&apply_proof)
             .expect("apply merge verify");
 
         // Check final apply PIS
-        let apply_vd = processor.account_apply_vd();
-        let apply_pis = AccountApplyPublicInputs::<F, C, D>::from_u64_slice(
+        let apply_vd = processor.user_apply_vd();
+        let apply_pis = ChannelApplyPublicInputs::<F, C, D>::from_u64_slice(
             &apply_proof.public_inputs.to_u64_vec(),
             &apply_vd.common.config,
         )
@@ -658,10 +701,11 @@ mod tests {
         assert_eq!(apply_pis.prev_account_tree_root, initial_root);
         // new_account_tree_root should be different from initial (users were applied)
         assert_ne!(apply_pis.new_account_tree_root, initial_root);
-        assert_eq!(apply_pis.first_user_id, user_id_a.as_u64());
-        assert_eq!(apply_pis.last_user_id, user_id_b.as_u64());
+        // Two-layer identity: the per-user ordering/chain ids are member key_ids.
+        assert_eq!(apply_pis.first_user_id, key_id_a as u64);
+        assert_eq!(apply_pis.last_user_id, key_id_b as u64);
 
-        println!("\n=== AccountApply test passed ===");
+        println!("\n=== ChannelApply test passed ===");
         println!("  Block: 2 users applied");
         println!("  Initial root: {:?}", initial_root);
         println!("  Final root: {:?}", apply_pis.new_account_tree_root);

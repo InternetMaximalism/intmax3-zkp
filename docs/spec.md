@@ -69,8 +69,8 @@ struct Tx {
 ```rust
 struct Block {
     timestamp: u64,
-    aggregator_id: u32,
-    local_ids: [u32; MAX_USER_IDS],
+    channel_id: u32,
+    key_ids: [u32; MAX_USER_IDS],
     tx_tree_root: Bytes32,
     deposit_hash_chain: Bytes32
 }
@@ -78,8 +78,8 @@ struct Block {
 
 On-chain acceptance rules:
 
-- `local_ids` is a fixed-length array.
-- `aggregator_ids[msg.sender] == aggregator_id`.
+- `key_ids` is a fixed-length array.
+- `channel_ids[msg.sender] == channel_id`.
 
 ### 1.5 Block/Deposit hash chains
 
@@ -116,12 +116,12 @@ Examples:
 { prev: 100, cur: 150, tx_tree_root: tx_tree_root2 }
 ```
 
-### 2.2 Account Tree
+### 2.2 User Tree
 
-The account tree is a Merkle tree whose leaf at index `user_id` stores the root of that user’s send tree and related metadata.
+The user tree is a Merkle tree whose leaf at index `user_id` stores the root of that user’s send tree and related metadata.
 
 ```rust
-struct AccountLeaf {
+struct UserLeaf {
     index: u32,          // index of the next empty send leaf
     prev: u64,           // value of send_leaf.cur for the latest inserted send leaf
     send_tree_root: Bytes32,
@@ -153,7 +153,7 @@ struct PublicState {
 
 ```rust
 struct BalancePublicInputs {
-    user_id: u64,                   // [aggregator_id, local_id]
+    user_id: u64,                   // [channel_id, key_id]
     public_state: PublicState,      // public state used to query transactions and deposits
     block_r: u64,                   // user may incorporate deposits/transfers with block <= block_r
     private_state_commitment: Bytes32   // hash(private_state)
@@ -223,14 +223,14 @@ struct PublicStateUpdateWitness {
 1. If `w.new == w.old`, return `true`.
 2. Otherwise, verify `w.merkle_proof.verify(w.old.block_number, w.old, w.new.prev_public_state_root)`.
 
-### 5.2 AccountWitness
+### 5.2 UserWitness
 
 Attests to the state of a specific account.
 
 ```rust
-struct AccountWitness {
-    account_leaf: AccountLeaf,
-    account_merkle_proof: MerkleProof,
+struct UserWitness {
+    user_leaf: UserLeaf,
+    user_merkle_proof: MerkleProof,
     send_index: u32,
     send_leaf: SendLeaf,
     send_merkle_proof: MerkleProof
@@ -239,8 +239,8 @@ struct AccountWitness {
 
 `w.verify(user_id, account_tree_root) -> bool`:
 
-1. Verify `w.send_merkle_proof.verify(w.send_index, w.send_leaf, w.account_leaf.send_tree_root)`.
-2. Verify `w.account_merkle_proof.verify(user_id, w.account_leaf, account_tree_root)`.
+1. Verify `w.send_merkle_proof.verify(w.send_index, w.send_leaf, w.user_leaf.send_tree_root)`.
+2. Verify `w.user_merkle_proof.verify(user_id, w.user_leaf, account_tree_root)`.
 
 ### 5.3 TransferWitness
 
@@ -282,21 +282,21 @@ struct TxSettlementWitness {
     tx: Tx,
     public_state: PublicState,          // latest public state
     tx_merkle_proof: MerkleProof,       // inclusion under send_leaf.tx_tree_root
-    account_witness: AccountWitness,    // attests to the account state
+    user_witness: UserWitness,    // attests to the account state
     spent_proof: ProofWithPublicInputs  // proof described in §4
 }
 ```
 
 `w.verify() -> bool`:
 
-1. Verify `w.tx_merkle_proof.verify(w.account_witness.send_index, w.tx, w.account_witness.send_leaf.tx_tree_root)`.
-2. Verify `w.account_witness.verify(w.user_id, w.public_state.account_tree_root)`.
+1. Verify `w.tx_merkle_proof.verify(w.user_witness.send_index, w.tx, w.user_witness.send_leaf.tx_tree_root)`.
+2. Verify `w.user_witness.verify(w.user_id, w.public_state.account_tree_root)`.
 3. Check that `w.spent_proof.tx == w.tx`.
 
 Helper methods:
 
-- `w.send_block_number_before_tx()` returns `w.account_witness.send_leaf.prev`.
-- `w.tx_block_number()` returns `w.account_witness.send_leaf.cur`.
+- `w.send_block_number_before_tx()` returns `w.user_witness.send_leaf.prev`.
+- `w.tx_block_number()` returns `w.user_witness.send_leaf.cur`.
 
 ## 6. Validity Proof and SPHINCS+ Signature Verification
 
@@ -317,18 +317,18 @@ The validity circuit enforces **SPHINCS+ (SPX-128s Poseidon)** signatures for ea
 **Signed message** for slot `i` in a block:
 
 ```
-M_i = [block_number ‖ aggregator_id ‖ local_id_i ‖ tx_tree_root]
+M_i = [block_number ‖ channel_id ‖ key_id_i ‖ tx_tree_root]
     = 11 Goldilocks field elements = 88 bytes
 ```
 
 **Constraint** (per active user slot in the validity circuit):
 
 ```
-if (local_id_i ≠ 0)           // active (non-padding) slot
+if (key_id_i ≠ 0)           // active (non-padding) slot
    AND (prev ≠ block_number)   // account not yet updated this block
    AND (pk_hash ≠ 0):          // user has registered a SPHINCS+ key
 then:
-    assert Poseidon(pub_seed ‖ pub_root) == account_leaf.pk_hash
+    assert Poseidon(pub_seed ‖ pub_root) == user_leaf.pk_hash
     assert sphincs_verify(sig_i, M_i, pub_key_i) == true
 ```
 
@@ -369,7 +369,7 @@ When `pk_hash == 0` (user has not yet registered a public key), the signature co
 - The receiver’s `receiver_balance_proof` before receiving.
 - `receiver_public_state_update_witness` anchoring `receiver_balance_proof.public_state` to the latest state.
 - `new_block_r`.
-- `account_witness` proving there is no outgoing transaction from `receiver_balance_proof.block_r` to `new_block_r`.
+- `user_witness` proving there is no outgoing transaction from `receiver_balance_proof.block_r` to `new_block_r`.
 - `tx_settlement_witness`.
 - `transfer_witness`.
 
@@ -379,9 +379,9 @@ When `pk_hash == 0` (user has not yet registered a public key), the signature co
 
 **Constraints**
 
-1. Let `public_state := sender_public_state_update_witness.new`. Verify `sender_balance_proof.verify()`, `sender_public_state_update_witness.verify()`, `receiver_balance_proof.verify()`, `receiver_public_state_update_witness.verify()`, `account_witness.verify(recipient_user_id, public_state.account_tree_root)`, `tx_settlement_witness.verify()`, and `transfer_witness.verify(tx_settlement_witness.tx.transfer_merkle_root)` where `recipient_user_id == receiver_balance_proof.user_id` and `public_state == receiver_public_state_update_witness.new == tx_settlement_witness.public_state`.
+1. Let `public_state := sender_public_state_update_witness.new`. Verify `sender_balance_proof.verify()`, `sender_public_state_update_witness.verify()`, `receiver_balance_proof.verify()`, `receiver_public_state_update_witness.verify()`, `user_witness.verify(recipient_user_id, public_state.account_tree_root)`, `tx_settlement_witness.verify()`, and `transfer_witness.verify(tx_settlement_witness.tx.transfer_merkle_root)` where `recipient_user_id == receiver_balance_proof.user_id` and `public_state == receiver_public_state_update_witness.new == tx_settlement_witness.public_state`.
 2. Check `sender_balance_proof.public_state == sender_public_state_update_witness.old` and `receiver_balance_proof.public_state == receiver_public_state_update_witness.old`.
-3. Check `receiver_balance_proof.block_r <= new_block_r <= public_state.block_number`. Additionally, if `account_witness.account_leaf.prev != 0`, assert `account_witness.send_leaf.prev <= receiver_balance_proof.block_r` and `new_block_r < account_witness.send_leaf.cur`.
+3. Check `receiver_balance_proof.block_r <= new_block_r <= public_state.block_number`. Additionally, if `user_witness.user_leaf.prev != 0`, assert `user_witness.send_leaf.prev <= receiver_balance_proof.block_r` and `new_block_r < user_witness.send_leaf.cur`.
 4. Check `tx_settlement_witness.tx_block_number() <= new_block_r`.
 5. Assert `tx_settlement_witness.spent_proof.prev_private_state_commitment == sender_balance_proof.private_state_commitment` and `tx_settlement_witness.spent_proof.is_valid == true`.
 6. Update `receiver_balance_proof.block_r <- new_block_r` and incorporate the transfer into `receiver_balance_proof.private_state`, updating `asset_root` and `nullifier_root`.
@@ -393,13 +393,13 @@ When `pk_hash == 0` (user has not yet registered a public key), the signature co
 - The receiver’s `receiver_balance_proof` before receiving.
 - `public_state_update_witness` anchoring `receiver_balance_proof.public_state` to the latest state.
 - `new_block_r`.
-- `account_witness` proving there is no outgoing transaction from `receiver_balance_proof.block_r` to `new_block_r`.
+- `user_witness` proving there is no outgoing transaction from `receiver_balance_proof.block_r` to `new_block_r`.
 - `deposit_witness`.
 
 **Constraints**
 
-1. Let `public_state := public_state_update_witness.new`. Verify `public_state_update_witness.verify()`, `receiver_balance_proof.verify()`, `account_witness.verify(receiver_balance_proof.user_id, public_state.account_tree_root)`, and `deposit_witness.verify(receiver_balance_proof.user_id, public_state.deposit_tree_root)`.
-2. Check `receiver_balance_proof.block_r <= new_block_r <= public_state.block_number`. Additionally, if `account_witness.account_leaf.prev != 0`, assert `account_witness.send_leaf.prev <= receiver_balance_proof.block_r` and `new_block_r < account_witness.send_leaf.cur`.
+1. Let `public_state := public_state_update_witness.new`. Verify `public_state_update_witness.verify()`, `receiver_balance_proof.verify()`, `user_witness.verify(receiver_balance_proof.user_id, public_state.account_tree_root)`, and `deposit_witness.verify(receiver_balance_proof.user_id, public_state.deposit_tree_root)`.
+2. Check `receiver_balance_proof.block_r <= new_block_r <= public_state.block_number`. Additionally, if `user_witness.user_leaf.prev != 0`, assert `user_witness.send_leaf.prev <= receiver_balance_proof.block_r` and `new_block_r < user_witness.send_leaf.cur`.
 3. Check `deposit_witness.deposit.block_number <= new_block_r`.
 4. Update `receiver_balance_proof.block_r <- new_block_r` and insert the deposit into `receiver_balance_proof.private_state`, updating `asset_root` and `nullifier_root`.
 

@@ -1,5 +1,3 @@
-use std::convert::TryFrom;
-
 use plonky2::{
     field::{extension::Extendable, types::Field},
     hash::hash_types::RichField,
@@ -10,134 +8,130 @@ use plonky2::{
     plonk::circuit_builder::CircuitBuilder,
 };
 use serde::{Deserialize, Serialize};
+use std::convert::TryFrom;
 use thiserror::Error;
 
-use crate::{
-    common::u63::{U63, U63Target},
-    constants::{ACCOUNT_NO_BITS, HUB_ID_BITS, MAX_NUM_HUBS},
-};
+use crate::constants::CHANNEL_ID_BITS;
 
 #[derive(Debug, Error)]
-pub enum AccountIdError {
-    #[error("Invalid hub ID: {0}")]
-    InvalidHubId(String),
-    #[error("Invalid account number: {0}")]
-    InvalidAccountNo(String),
+pub enum ChannelIdError {
+    #[error("Invalid channel ID: {0}")]
+    InvalidChannelId(String),
     #[error("Invalid raw value: {0}")]
     InvalidValue(String),
 }
 
-#[derive(Clone, Copy, Debug, Hash, PartialEq, Eq, Serialize, Deserialize)]
-pub struct AccountId(U63);
+/// Canonical channel identifier, shared by the BASE intmax layer and the channel layer.
+///
+/// SECURITY / ARCHITECTURE: in the enshrined-payment-channel design the base intmax native
+/// "user" IS the channel. The identifier therefore carries ONLY `channel_id` (a single u32
+/// limb); per-member `key_id` exists exclusively in the channel layer (`crate::common::channel`,
+/// the `UserId([u8;8])` member identity). The packed value is the channel id and doubles as the
+/// channel-tree Merkle index (32-bit space).
+///
+/// SECURITY: the channel layer computes keccak `signing_digest`s from this type via
+/// `to_u32_vec()` / `as_bytes()` / `as_u64()`. Those outputs MUST stay byte-identical to the
+/// legacy `[u8;4]`-backed `ChannelId`: for value `v`, `to_u32_vec() == vec![v]`,
+/// `to_u64_vec() == vec![v as u64]`, `as_u64() == v as u64`, `as_bytes() == v.to_be_bytes()`,
+/// and `from_bytes(b) == u32::from_be_bytes(b)`. The u32 backing satisfies all of these.
+#[derive(Clone, Copy, Debug, Default, Hash, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ChannelId(u32);
 
-impl AccountId {
-    pub fn new(hub_id: u32, account_no: u32) -> Result<Self, AccountIdError> {
-        if hub_id as usize >= MAX_NUM_HUBS {
-            return Err(AccountIdError::InvalidHubId(format!(
-                "{} >= {}",
-                hub_id, MAX_NUM_HUBS
-            )));
-        }
-        if hub_id == 0 && account_no == 0 {
-            return Err(AccountIdError::InvalidAccountNo(
-                "Both hub_id=0 and account_no=0 are reserved for dummy".to_string(),
-            ));
-        }
-        let value = U63::from_parts(hub_id, account_no)
-            .map_err(|err| AccountIdError::InvalidValue(err.to_string()))?;
-        Ok(Self(value))
+impl ChannelId {
+    /// Construct a channel id from a raw value. `value = 0` is reserved for the dummy.
+    ///
+    /// SECURITY: accepts a `u64` so both layers share one constructor. The channel layer's legacy
+    /// `ChannelId::new(u64)` enforced the 32-bit range; this constructor keeps that range check
+    /// and additionally rejects the reserved `0` id (the base layer always rejected `0`).
+    pub fn new(value: u64) -> Result<Self, ChannelIdError> {
+        let channel_id = u32::try_from(value).map_err(|_| {
+            ChannelIdError::InvalidValue(format!("channel id {value} does not fit in 4 bytes"))
+        })?;
+        Self::validate_components(channel_id)?;
+        Ok(Self(channel_id))
     }
 
     pub fn dummy() -> Self {
-        Self(U63::default())
+        Self(0)
     }
 
-    pub fn hub_id(&self) -> u32 {
-        self.0.high()
-    }
-
-    pub fn account_no(&self) -> u32 {
-        self.0.low()
-    }
-
-    pub fn as_u63(&self) -> U63 {
+    pub fn channel_id(&self) -> u32 {
         self.0
     }
 
+    pub fn as_u63(&self) -> u64 {
+        self.0 as u64
+    }
+
     pub fn as_u64(&self) -> u64 {
-        self.0.as_u64()
+        self.0 as u64
+    }
+
+    /// SECURITY: byte layout MUST equal the legacy `[u8;4]` big-endian encoding so keccak
+    /// preimages are unchanged.
+    pub fn as_bytes(&self) -> [u8; 4] {
+        self.0.to_be_bytes()
+    }
+
+    /// SECURITY: inverse of `as_bytes`; rejects the reserved `0` id exactly like the legacy
+    /// `[u8;4]`-backed `ChannelId::from_bytes`.
+    pub fn from_bytes(bytes: [u8; 4]) -> Result<Self, ChannelIdError> {
+        let channel_id = u32::from_be_bytes(bytes);
+        Self::validate_components(channel_id)?;
+        Ok(Self(channel_id))
     }
 
     pub fn to_u32_vec(&self) -> Vec<u32> {
-        self.0.to_u32_vec()
+        vec![self.0]
     }
 
     pub fn to_u64_vec(&self) -> Vec<u64> {
-        self.0.to_u64_vec()
+        vec![self.0 as u64]
     }
 
-    pub fn from_u63(value: U63) -> Result<Self, AccountIdError> {
-        Self::validate_components(value.high(), value.low())?;
-        Ok(Self(value))
+    pub fn from_u63(value: u64) -> Result<Self, ChannelIdError> {
+        Self::from_u64(value)
     }
 
-    pub fn from_u64(value: u64) -> Result<Self, AccountIdError> {
-        let value = U63::new(value).map_err(|err| AccountIdError::InvalidValue(err.to_string()))?;
-        Self::from_u63(value)
+    pub fn from_u64(value: u64) -> Result<Self, ChannelIdError> {
+        Self::new(value)
     }
 
-    pub fn aggregator_id(&self) -> u32 {
-        self.hub_id()
-    }
-
-    pub fn local_id(&self) -> u32 {
-        self.account_no()
-    }
-
-    fn validate_components(hub_id: u32, account_no: u32) -> Result<(), AccountIdError> {
-        if hub_id as usize >= MAX_NUM_HUBS {
-            return Err(AccountIdError::InvalidHubId(format!(
-                "{} >= {}",
-                hub_id, MAX_NUM_HUBS
+    /// SECURITY: parses the single-word u32 limb encoding used by the channel-layer digests.
+    pub fn from_u64_slice(values: &[u64]) -> Result<Self, ChannelIdError> {
+        if values.len() != 1 {
+            return Err(ChannelIdError::InvalidValue(format!(
+                "channel id expects a single u32 limb, got {}",
+                values.len()
             )));
         }
-        if hub_id == 0 && account_no == 0 {
-            return Err(AccountIdError::InvalidAccountNo(
-                "Both hub_id=0 and account_no=0 are reserved for dummy".to_string(),
+        Self::from_u64(values[0])
+    }
+
+    fn validate_components(channel_id: u32) -> Result<(), ChannelIdError> {
+        if channel_id == 0 {
+            return Err(ChannelIdError::InvalidChannelId(
+                "channel_id=0 is reserved for dummy".to_string(),
             ));
         }
         Ok(())
     }
 }
 
-impl From<AccountId> for U63 {
-    fn from(value: AccountId) -> Self {
-        value.0
+impl From<ChannelId> for u64 {
+    fn from(value: ChannelId) -> Self {
+        value.0 as u64
     }
 }
 
-impl From<&AccountId> for U63 {
-    fn from(value: &AccountId) -> Self {
-        value.0
+impl From<&ChannelId> for u64 {
+    fn from(value: &ChannelId) -> Self {
+        value.0 as u64
     }
 }
 
-impl From<AccountId> for u64 {
-    fn from(value: AccountId) -> Self {
-        value.as_u64()
-    }
-}
-
-impl TryFrom<U63> for AccountId {
-    type Error = AccountIdError;
-
-    fn try_from(value: U63) -> Result<Self, Self::Error> {
-        Self::from_u63(value)
-    }
-}
-
-impl TryFrom<u64> for AccountId {
-    type Error = AccountIdError;
+impl TryFrom<u64> for ChannelId {
+    type Error = ChannelIdError;
 
     fn try_from(value: u64) -> Result<Self, Self::Error> {
         Self::from_u64(value)
@@ -145,44 +139,46 @@ impl TryFrom<u64> for AccountId {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct AccountIdTarget {
+pub struct ChannelIdTarget {
     pub value: Target,
 }
 
-impl AccountIdTarget {
+impl ChannelIdTarget {
     pub fn new<F: RichField + Extendable<D>, const D: usize>(
         builder: &mut CircuitBuilder<F, D>,
         is_checked: bool,
     ) -> Self {
-        let base = U63Target::new(builder, is_checked);
-        Self { value: base.value }
+        let value = builder.add_virtual_target();
+        if is_checked {
+            builder.range_check(value, CHANNEL_ID_BITS);
+        }
+        Self { value }
     }
 
     pub fn constant<F: RichField + Extendable<D>, const D: usize>(
         builder: &mut CircuitBuilder<F, D>,
-        value: AccountId,
+        value: ChannelId,
     ) -> Self {
-        let base = U63Target::constant(builder, value.into());
-        Self { value: base.value }
+        Self {
+            value: builder.constant(F::from_canonical_u64(value.as_u64())),
+        }
     }
 
+    /// Build a channel id target from its `channel_id` limb.
     pub fn from_parts<F: RichField + Extendable<D>, const D: usize>(
         builder: &mut CircuitBuilder<F, D>,
-        hub_id: Target,
-        account_no: Target,
+        channel_id: Target,
         is_checked: bool,
     ) -> Self {
         if is_checked {
-            builder.range_check(hub_id, HUB_ID_BITS);
-            builder.range_check(account_no, ACCOUNT_NO_BITS);
+            builder.range_check(channel_id, CHANNEL_ID_BITS);
         }
-        let base = U63Target::from_parts(builder, hub_id, account_no, is_checked);
-        Self { value: base.value }
+        Self { value: channel_id }
     }
 
     pub fn from_slice(values: &[Target]) -> Self {
-        let base = U63Target::from_slice(values);
-        Self { value: base.value }
+        assert_eq!(values.len(), 1, "ChannelIdTarget expects a single target");
+        Self { value: values[0] }
     }
 
     pub fn from_u32_slice<F: RichField + Extendable<D>, const D: usize>(
@@ -190,13 +186,16 @@ impl AccountIdTarget {
         limbs: &[Target],
         is_checked: bool,
     ) -> Self {
-        let base = U63Target::from_u32_slice(builder, limbs, is_checked);
-        Self { value: base.value }
+        assert_eq!(
+            limbs.len(),
+            1,
+            "ChannelIdTarget expects a single u32 limb (channel_id)"
+        );
+        Self::from_parts(builder, limbs[0], is_checked)
     }
 
     pub fn from_u64_slice(limbs: &[Target]) -> Self {
-        let base = U63Target::from_u64_slice(limbs);
-        Self { value: base.value }
+        Self::from_slice(limbs)
     }
 
     pub fn to_vec(&self) -> Vec<Target> {
@@ -205,43 +204,20 @@ impl AccountIdTarget {
 
     pub fn to_u32_vec<F: RichField + Extendable<D>, const D: usize>(
         &self,
-        builder: &mut CircuitBuilder<F, D>,
+        _builder: &mut CircuitBuilder<F, D>,
     ) -> Vec<Target> {
-        U63Target { value: self.value }.to_u32_vec(builder)
+        vec![self.value]
     }
 
     pub fn to_u64_vec(&self) -> Vec<Target> {
-        U63Target { value: self.value }.to_u64_vec()
+        vec![self.value]
     }
 
-    pub fn hub_id<F: RichField + Extendable<D>, const D: usize>(
+    pub fn channel_id<F: RichField + Extendable<D>, const D: usize>(
         &self,
-        builder: &mut CircuitBuilder<F, D>,
+        _builder: &mut CircuitBuilder<F, D>,
     ) -> Target {
-        let (high, _) = U63Target { value: self.value }.split_parts(builder);
-        high
-    }
-
-    pub fn account_no<F: RichField + Extendable<D>, const D: usize>(
-        &self,
-        builder: &mut CircuitBuilder<F, D>,
-    ) -> Target {
-        let (_, low) = U63Target { value: self.value }.split_parts(builder);
-        low
-    }
-
-    pub fn aggregator_id<F: RichField + Extendable<D>, const D: usize>(
-        &self,
-        builder: &mut CircuitBuilder<F, D>,
-    ) -> Target {
-        self.hub_id(builder)
-    }
-
-    pub fn local_id<F: RichField + Extendable<D>, const D: usize>(
-        &self,
-        builder: &mut CircuitBuilder<F, D>,
-    ) -> Target {
-        self.account_no(builder)
+        self.value
     }
 
     pub fn connect<F: RichField + Extendable<D>, const D: usize>(
@@ -249,7 +225,7 @@ impl AccountIdTarget {
         builder: &mut CircuitBuilder<F, D>,
         other: &Self,
     ) {
-        U63Target { value: self.value }.connect(builder, &U63Target { value: other.value });
+        builder.connect(self.value, other.value);
     }
 
     pub fn is_equal<F: RichField + Extendable<D>, const D: usize>(
@@ -257,14 +233,15 @@ impl AccountIdTarget {
         builder: &mut CircuitBuilder<F, D>,
         other: &Self,
     ) -> BoolTarget {
-        U63Target { value: self.value }.is_equal(builder, &U63Target { value: other.value })
+        builder.is_equal(self.value, other.value)
     }
 
     pub fn is_zero<F: RichField + Extendable<D>, const D: usize>(
         &self,
         builder: &mut CircuitBuilder<F, D>,
     ) -> BoolTarget {
-        U63Target { value: self.value }.is_zero(builder)
+        let zero = builder.zero();
+        builder.is_equal(self.value, zero)
     }
 
     pub fn enforce_ge<F: RichField + Extendable<D>, const D: usize>(
@@ -272,7 +249,8 @@ impl AccountIdTarget {
         builder: &mut CircuitBuilder<F, D>,
         lower: &Self,
     ) {
-        U63Target { value: self.value }.enforce_ge(builder, &U63Target { value: lower.value });
+        let diff = builder.sub(self.value, lower.value);
+        builder.range_check(diff, CHANNEL_ID_BITS);
     }
 
     pub fn enforce_gt<F: RichField + Extendable<D>, const D: usize>(
@@ -280,7 +258,13 @@ impl AccountIdTarget {
         builder: &mut CircuitBuilder<F, D>,
         lower: &Self,
     ) {
-        U63Target { value: self.value }.enforce_gt(builder, &U63Target { value: lower.value });
+        let lower_plus_one = builder.add_const(lower.value, F::ONE);
+        self.enforce_ge(
+            builder,
+            &Self {
+                value: lower_plus_one,
+            },
+        );
     }
 
     pub fn conditional_ge<F: RichField + Extendable<D>, const D: usize>(
@@ -289,11 +273,10 @@ impl AccountIdTarget {
         lower: &Self,
         condition: BoolTarget,
     ) {
-        U63Target { value: self.value }.conditional_ge(
-            builder,
-            &U63Target { value: lower.value },
-            condition,
-        );
+        let diff = builder.sub(self.value, lower.value);
+        let zero = builder.zero();
+        let diff_when_true = builder.select(condition, diff, zero);
+        builder.range_check(diff_when_true, CHANNEL_ID_BITS);
     }
 
     pub fn conditional_gt<F: RichField + Extendable<D>, const D: usize>(
@@ -302,9 +285,12 @@ impl AccountIdTarget {
         lower: &Self,
         condition: BoolTarget,
     ) {
-        U63Target { value: self.value }.conditional_gt(
+        let lower_plus_one = builder.add_const(lower.value, F::ONE);
+        self.conditional_ge(
             builder,
-            &U63Target { value: lower.value },
+            &Self {
+                value: lower_plus_one,
+            },
             condition,
         );
     }
@@ -315,26 +301,12 @@ impl AccountIdTarget {
         when_true: &Self,
         when_false: &Self,
     ) -> Self {
-        let target = U63Target::select(
-            builder,
-            condition,
-            &U63Target {
-                value: when_true.value,
-            },
-            &U63Target {
-                value: when_false.value,
-            },
-        );
         Self {
-            value: target.value,
+            value: builder.select(condition, when_true.value, when_false.value),
         }
     }
 
-    pub fn set_witness<F: Field, W: WitnessWrite<F>>(&self, witness: &mut W, value: AccountId) {
-        U63Target { value: self.value }.set_witness(witness, value.into());
+    pub fn set_witness<F: Field, W: WitnessWrite<F>>(&self, witness: &mut W, value: ChannelId) {
+        witness.set_target(self.value, F::from_canonical_u64(value.as_u64()));
     }
 }
-
-pub type UserId = AccountId;
-pub type UserIdError = AccountIdError;
-pub type UserIdTarget = AccountIdTarget;

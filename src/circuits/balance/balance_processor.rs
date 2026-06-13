@@ -21,7 +21,7 @@ use crate::{
         send_tx_circuit::{SendTxCircuit, SendTxError, SendTxWitness},
         switch_board::{BalanceSwichBoard, BalanceSwichBoardCircuit, BalanceSwitchBoardError},
     },
-    common::{salt::Salt, user_id::UserId},
+    common::{channel_id::ChannelId, salt::Salt},
     utils::serialize::CircuitSerializationError,
 };
 
@@ -93,11 +93,11 @@ where
 
     pub fn prove_initial(
         &self,
-        user_id: UserId,
+        channel_id: ChannelId,
         salt: Salt,
     ) -> Result<ProofWithPublicInputs<F, C, D>, BalanceProcessorError> {
         let switch_board_witness = BalanceSwichBoard::<F, C, D> {
-            initial_value: Some((user_id, salt)),
+            initial_value: Some((channel_id, salt)),
             receive_transfer_proof: None,
             receive_deposit_proof: None,
             send_tx_proof: None,

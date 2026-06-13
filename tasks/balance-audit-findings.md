@@ -110,7 +110,7 @@ This attack is feasible against **any** user who ever received at least one tran
 Each option below eliminates the ambiguity between sentinel and empty positions, but they differ in invariants.
 
 1. **Change `empty_leaf` to a non-default value**: set `empty_leaf()` to something like `IndexedMerkleLeaf { next_index: u64::MAX, next_key: U256::MAX, ..default() }` so empty positions hash differently from any valid insertion proof's `prev_low_leaf`. Requires updating `zero_hashes` computation and all tests.
-2. **Assert `low_leaf_index < leaves_count`**: add a monotonic "leaves inserted" counter to the public inputs and range-check `low_leaf_index < count` inside the circuit. Requires carrying `count` through every caller (nullifier tree, account tree, etc.).
+2. **Assert `low_leaf_index < leaves_count`**: add a monotonic "leaves inserted" counter to the public inputs and range-check `low_leaf_index < count` inside the circuit. Requires carrying `count` through every caller (nullifier tree, user tree, etc.).
 3. **Prove non-membership of `key`**: the existing IMT design intends `prev_low_leaf` to also be a non-membership witness for `key`, but fails to enforce that `prev_low_leaf` is the *actual* predecessor. A stronger construction (e.g., proving both that the key is absent from every relevant slot, or using an append-only linked-list accumulator that verifies chain consistency) would close the gap. Substantially more work.
 4. **Use a "sparse set" primitive**: replace `IndexedMerkleTree` for nullifiers with a Merkle-tree-backed set that stores `key → 1` and requires the insertion to prove that the old leaf at `Hash(key) mod 2^h` was empty. Incompatible with the current tree schema.
 
@@ -118,7 +118,7 @@ Option 1 is the smallest diff and the most likely to get the fix landed quickly;
 
 ### Scope propagation
 - Nullifier tree (receive_transfer, receive_deposit) — **directly exploitable**.
-- Account tree — uses `SparseMerkleTree<AccountLeaf>` (see `src/common/trees/account_tree.rs:145`), **not** `IndexedMerkleTree`. **Not affected by this specific bug** but should be audited separately for its own soundness.
+- Account tree — uses `SparseMerkleTree<UserLeaf>` (see `src/common/trees/account_tree.rs:145`), **not** `IndexedMerkleTree`. **Not affected by this specific bug** but should be audited separately for its own soundness.
 - Any other consumer of `IndexedMerkleTree` must be checked: `grep -R IndexedMerkleTree src/` shows only the nullifier tree uses it today.
 
 ---
@@ -127,7 +127,7 @@ Option 1 is the smallest diff and the most likely to get the fix landed quickly;
 
 ### BAL-INFO-01 — spend_circuit lacks explicit signer binding (H-5)
 
-Reviewed `src/circuits/balance/spend_circuit.rs`. Spend PIs carry `(prev_private_commitment, new_private_commitment, tx, is_valid)` but no `user_id`/pubkey. Authentication happens at the balance-proof level: `send_tx_circuit.rs:200` connects `prev.user_id == tx_settlement.user_id`, and `tx_settlement` separately proves the `(user_id, tx)` tuple is present in a block via the account tree's send_tree. At validity-chain level, that block's local_ids are bound to SPHINCS+ signatures over the corresponding pks. The chain is complete — the balance layer doesn't need to know about pubkeys directly. **Invalidated.**
+Reviewed `src/circuits/balance/spend_circuit.rs`. Spend PIs carry `(prev_private_commitment, new_private_commitment, tx, is_valid)` but no `user_id`/pubkey. Authentication happens at the balance-proof level: `send_tx_circuit.rs:200` connects `prev.user_id == tx_settlement.user_id`, and `tx_settlement` separately proves the `(user_id, tx)` tuple is present in a block via the user tree's send_tree. At validity-chain level, that block's key_ids are bound to SPHINCS+ signatures over the corresponding pks. The chain is complete — the balance layer doesn't need to know about pubkeys directly. **Invalidated.**
 
 ### BAL-INFO-02 — send_tx path when `spend_pis.is_valid = false` (H-2)
 
@@ -169,7 +169,7 @@ Reviewed `src/circuits/balance/common/recipient.rs:29-55`. `calculate_recipient_
 
 ## Cross-cutting follow-ups
 
-- `src/common/trees/account_tree.rs` uses `SparseMerkleTree`. It is NOT affected by BAL-CRIT-001 but should be independently audited — especially whether inserting an `AccountLeaf` at `user_id` requires proving the old leaf was `empty_leaf` and whether `AccountLeaf::default()` collides with any legitimate state.
+- `src/common/trees/account_tree.rs` uses `SparseMerkleTree`. It is NOT affected by BAL-CRIT-001 but should be independently audited — especially whether inserting an `UserLeaf` at `user_id` requires proving the old leaf was `empty_leaf` and whether `UserLeaf::default()` collides with any legitimate state.
 - The same indexed-merkle-tree primitive is used nowhere else in the current source, but if it is ever used for sent_tx_tree, deposit_tree, or any other uniqueness tree, BAL-CRIT-001 applies verbatim. Grep before extending.
 
 ## Reproduction artifacts

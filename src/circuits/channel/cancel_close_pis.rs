@@ -6,7 +6,8 @@ use crate::{
     ethereum_types::{bytes32::Bytes32, u32limb_trait::U32LimbTrait},
 };
 
-pub const CANCEL_CLOSE_PUBLIC_INPUTS_LEN: usize = 42;
+// 1 (channel id, single u32 limb) + 5 x 8 (digests/hashes).
+pub const CANCEL_CLOSE_PUBLIC_INPUTS_LEN: usize = 41;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -80,13 +81,16 @@ impl CancelClosePublicInputs {
             ));
         }
         Ok(Self {
-            channel_id: crate::common::channel::ChannelId::from_u64_slice(&values[0..2])
+            channel_id: crate::common::channel::ChannelId::from_u64_slice(&values[0..1])
                 .map_err(|e| e.to_string())?,
-            close_intent_digest: Bytes32::from_u64_slice(&values[2..10]).map_err(|e| e.to_string())?,
-            revived_small_block_root: Bytes32::from_u64_slice(&values[10..18]).map_err(|e| e.to_string())?,
-            revived_inter_channel_tx_digest: Bytes32::from_u64_slice(&values[18..26]).map_err(|e| e.to_string())?,
-            revived_tx_hash: Bytes32::from_u64_slice(&values[26..34]).map_err(|e| e.to_string())?,
-            revived_seal: Bytes32::from_u64_slice(&values[34..42]).map_err(|e| e.to_string())?,
+            close_intent_digest: Bytes32::from_u64_slice(&values[1..9])
+                .map_err(|e| e.to_string())?,
+            revived_small_block_root: Bytes32::from_u64_slice(&values[9..17])
+                .map_err(|e| e.to_string())?,
+            revived_inter_channel_tx_digest: Bytes32::from_u64_slice(&values[17..25])
+                .map_err(|e| e.to_string())?,
+            revived_tx_hash: Bytes32::from_u64_slice(&values[25..33]).map_err(|e| e.to_string())?,
+            revived_seal: Bytes32::from_u64_slice(&values[33..41]).map_err(|e| e.to_string())?,
         })
     }
 }
@@ -95,13 +99,28 @@ impl CancelClosePublicInputs {
 mod tests {
     use super::*;
     use crate::{
-        common::channel::{
-            ChannelFund, ChannelId, ChannelState, CloseWithdrawal, KeyId, LatticeCommitment,
-            MemberSignature, MerkleInclusionProof, ReceiverBalanceDelta, SignedSmallBlock,
-            SmallBlockRootMessage, UserId,
+        common::{
+            balance_state::BalanceState,
+            channel::{
+                ChannelFund, ChannelId, ChannelProofEnvelope, ChannelState, CloseWithdrawal, KeyId,
+                MemberSignature, MerkleInclusionProof, ProofBackend, ReceiverBalanceDelta,
+                SignedSmallBlock, SmallBlockRootMessage, TransitionProofRole, UserId,
+            },
         },
         ethereum_types::{bytes32::Bytes32, u256::U256},
+        regev::{REGEV_N, REGEV_Q, RegevCiphertext},
     };
+
+    fn ciphertext(seed: u32) -> RegevCiphertext {
+        RegevCiphertext {
+            c1: (0..REGEV_N as u32)
+                .map(|i| (seed.wrapping_mul(2_654_435_761).wrapping_add(i)) % REGEV_Q)
+                .collect(),
+            c2: (0..REGEV_N as u32)
+                .map(|i| (seed.wrapping_mul(40_503).wrapping_add(1000 + i)) % REGEV_Q)
+                .collect(),
+        }
+    }
 
     fn sample_close_intent() -> CloseIntent {
         let state = ChannelState {
@@ -114,7 +133,14 @@ mod tests {
                 amount: U256::from(77u32),
                 intmax_state_root: Bytes32::default(),
             },
-            channel_balance_root: Bytes32::default(),
+            balance_state: BalanceState {
+                channel_id: ChannelId::new(3).unwrap(),
+                enc_balances: [ciphertext(1), ciphertext(2), ciphertext(3)],
+                settled_tx_chain: Bytes32::default(),
+                state_version: 7,
+                pending_adds: [0, 0, 0],
+            },
+            h2_tag: Bytes32::default(),
             shared_native_nullifier_root: Bytes32::default(),
             unallocated_confirmed_incoming: U256::zero(),
             prev_digest: Bytes32::default(),
@@ -130,7 +156,7 @@ mod tests {
         let close_withdrawal = CloseWithdrawal {
             channel_id: state.channel_id,
             final_channel_state_digest: state.digest,
-            final_channel_balance_root: state.channel_balance_root,
+            final_balance_state_h1: state.balance_state.h1(),
             intmax_state_root: state.channel_fund.intmax_state_root,
             burn_tx_hash: Bytes32::from_u32_slice(&[7, 0, 0, 0, 0, 0, 0, 0]).unwrap(),
             burn_amount: state.channel_fund.amount,
@@ -153,7 +179,7 @@ mod tests {
                     bp_key_id: KeyId::new(10).unwrap(),
                     small_block_number: 5,
                     prev_small_block_root: Bytes32::default(),
-                    tx_tree_root: Bytes32::default(),
+                    tx_tree_root: Bytes32::from_u32_slice(&[4, 0, 0, 0, 0, 0, 0, 0]).unwrap(),
                     state_commitment_root: Bytes32::default(),
                     medium_epoch_hint: 3,
                     close_freeze_nonce: 0,
@@ -168,9 +194,7 @@ mod tests {
                 medium_block_number: 3,
                 confirmation_proof: vec![4],
             },
-            sender_amount: LatticeCommitment {
-                commitment: vec![1; 48],
-            },
+            sender_delta_ct: ciphertext(10),
             source_channel_id: close_intent.channel_id,
             destination_channel_id: ChannelId::new(4).unwrap(),
             source_key_id: KeyId::new(10).unwrap(),
@@ -181,13 +205,17 @@ mod tests {
             recipient_memo: vec![1, 2],
             receiver_deltas: vec![ReceiverBalanceDelta {
                 receiver_key_id: KeyId::new(11).unwrap(),
-                receiver_user_id: UserId::from_parts(ChannelId::new(4).unwrap(), KeyId::new(11).unwrap()),
-                amount: LatticeCommitment {
-                    commitment: vec![2; 48],
-                },
+                receiver_user_id: UserId::from_parts(
+                    ChannelId::new(4).unwrap(),
+                    KeyId::new(11).unwrap(),
+                ),
+                amount: ciphertext(11),
             }],
-            receiver_update_proof: vec![3],
-            sender_balance_update_proof: vec![4],
+            channel_update_zkp: ChannelProofEnvelope {
+                role: TransitionProofRole::ChannelStateUpdate,
+                backend: ProofBackend::Plonky3,
+                proof: vec![3],
+            },
             transport_proof: vec![5],
         };
         let cancel_close = CancelClose::new(&close_intent, &revived_tx, vec![5, 6]);

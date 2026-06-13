@@ -11,13 +11,13 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     common::{
-        trees::account_tree::{
-            AccountLeaf, AccountLeafTarget, AccountMerkleProof, AccountMerkleProofTarget, SendLeaf,
+        channel_id::{ChannelId, ChannelIdTarget},
+        trees::channel_tree::{
+            ChannelLeaf, ChannelLeafTarget, ChannelMerkleProof, ChannelMerkleProofTarget, SendLeaf,
             SendLeafTarget, SendMerkleProof, SendMerkleProofTarget,
         },
-        user_id::{UserId, UserIdTarget},
     },
-    constants::{ACCOUNT_TREE_HEIGHT, SEND_TREE_HEIGHT},
+    constants::{CHANNEL_TREE_HEIGHT, SEND_TREE_HEIGHT},
     utils::poseidon_hash_out::{PoseidonHashOut, PoseidonHashOutTarget},
 };
 
@@ -27,39 +27,39 @@ pub enum AccountStateError {
     InvalidSendMerkleProof(String),
 
     #[error("Invalid account merkle proof: {0}")]
-    InvalidAccountMerkleProof(String),
+    InvalidUserMerkleProof(String),
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct AccountState {
-    pub user_id: UserId,
+    pub channel_id: ChannelId,
     pub account_tree_root: PoseidonHashOut,
 
     pub send_leaf: SendLeaf,
     pub send_leaf_index: u32,
     pub send_merkle_proof: SendMerkleProof,
-    pub account_leaf: AccountLeaf,
-    pub account_merkle_proof: AccountMerkleProof,
+    pub channel_leaf: ChannelLeaf,
+    pub user_merkle_proof: ChannelMerkleProof,
 }
 
 impl AccountState {
     pub fn new(
-        user_id: UserId,
+        channel_id: ChannelId,
         account_tree_root: PoseidonHashOut,
         send_leaf: SendLeaf,
         send_leaf_index: u32,
         send_merkle_proof: SendMerkleProof,
-        account_leaf: AccountLeaf,
-        account_merkle_proof: AccountMerkleProof,
+        channel_leaf: ChannelLeaf,
+        user_merkle_proof: ChannelMerkleProof,
     ) -> Result<Self, AccountStateError> {
         let state = Self {
-            user_id,
+            channel_id,
             account_tree_root,
             send_leaf,
             send_leaf_index,
             send_merkle_proof,
-            account_leaf,
-            account_merkle_proof,
+            channel_leaf,
+            user_merkle_proof,
         };
         state.verify()?;
         Ok(state)
@@ -71,32 +71,32 @@ impl AccountState {
             .verify(
                 &self.send_leaf,
                 self.send_leaf_index as u64,
-                self.account_leaf.send_tree_root,
+                self.channel_leaf.send_tree_root,
             )
             .map_err(|e| AccountStateError::InvalidSendMerkleProof(e.to_string()))?;
 
         // verify account leaf inclusion
-        self.account_merkle_proof
+        self.user_merkle_proof
             .verify(
-                &self.account_leaf,
-                self.user_id.as_u64(),
+                &self.channel_leaf,
+                self.channel_id.as_u64(),
                 self.account_tree_root,
             )
-            .map_err(|e| AccountStateError::InvalidAccountMerkleProof(e.to_string()))?;
+            .map_err(|e| AccountStateError::InvalidUserMerkleProof(e.to_string()))?;
         Ok(())
     }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct AccountStateTarget {
-    pub user_id: UserIdTarget,
+    pub channel_id: ChannelIdTarget,
     pub account_tree_root: PoseidonHashOutTarget,
 
     pub send_leaf: SendLeafTarget,
     pub send_leaf_index: Target,
     pub send_merkle_proof: SendMerkleProofTarget,
-    pub account_leaf: AccountLeafTarget,
-    pub account_merkle_proof: AccountMerkleProofTarget,
+    pub channel_leaf: ChannelLeafTarget,
+    pub user_merkle_proof: ChannelMerkleProofTarget,
 }
 
 impl AccountStateTarget {
@@ -107,7 +107,7 @@ impl AccountStateTarget {
     where
         <C as GenericConfig<D>>::Hasher: AlgebraicHasher<F>,
     {
-        let user_id = UserIdTarget::new(builder, is_checked);
+        let channel_id = ChannelIdTarget::new(builder, is_checked);
         let account_tree_root = PoseidonHashOutTarget::new(builder);
 
         let send_leaf = SendLeafTarget::new(builder, is_checked);
@@ -117,36 +117,36 @@ impl AccountStateTarget {
         }
         let send_merkle_proof = SendMerkleProofTarget::new(builder, SEND_TREE_HEIGHT);
 
-        let account_leaf = AccountLeafTarget::new(builder, is_checked);
-        let account_merkle_proof = AccountMerkleProofTarget::new(builder, ACCOUNT_TREE_HEIGHT);
+        let channel_leaf = ChannelLeafTarget::new(builder, is_checked);
+        let user_merkle_proof = ChannelMerkleProofTarget::new(builder, CHANNEL_TREE_HEIGHT);
 
         send_merkle_proof.verify::<F, C, D>(
             builder,
             &send_leaf,
             send_leaf_index,
-            account_leaf.send_tree_root,
+            channel_leaf.send_tree_root,
         );
 
-        account_merkle_proof.verify::<F, C, D>(
+        user_merkle_proof.verify::<F, C, D>(
             builder,
-            &account_leaf,
-            user_id.value,
+            &channel_leaf,
+            channel_id.value,
             account_tree_root,
         );
 
         Self {
-            user_id,
+            channel_id,
             account_tree_root,
             send_leaf,
             send_leaf_index,
             send_merkle_proof,
-            account_leaf,
-            account_merkle_proof,
+            channel_leaf,
+            user_merkle_proof,
         }
     }
 
     pub fn set_witness<F: Field, W: WitnessWrite<F>>(&self, witness: &mut W, value: &AccountState) {
-        self.user_id.set_witness(witness, value.user_id);
+        self.channel_id.set_witness(witness, value.channel_id);
         self.account_tree_root
             .set_witness(witness, value.account_tree_root);
         self.send_leaf.set_witness(witness, &value.send_leaf);
@@ -156,8 +156,8 @@ impl AccountStateTarget {
         );
         self.send_merkle_proof
             .set_witness(witness, &value.send_merkle_proof);
-        self.account_leaf.set_witness(witness, &value.account_leaf);
-        self.account_merkle_proof
-            .set_witness(witness, &value.account_merkle_proof);
+        self.channel_leaf.set_witness(witness, &value.channel_leaf);
+        self.user_merkle_proof
+            .set_witness(witness, &value.user_merkle_proof);
     }
 }

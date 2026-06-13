@@ -11,19 +11,19 @@ use crate::{
     },
     common::{
         block::{Block, BlockError},
+        channel_id::{ChannelId, ChannelIdError as UserIdError},
         deposit::Deposit,
         public_state::{PublicState, get_num_users},
         trees::{
-            account_tree::{
-                AccountLeaf, AccountMerkleProof, AccountTree, SendLeaf, SendMerkleProof, SendTree,
+            channel_tree::{
+                ChannelLeaf, ChannelMerkleProof, ChannelTree, SendLeaf, SendMerkleProof, SendTree,
             },
             deposit_tree::{DepositMerkleProof, DepositTree},
             public_state_tree::{PublicStateMerkleProof, PublicStateTree},
         },
         u63::{BlockNumber, BlockNumberError, U63},
-        user_id::{UserId, UserIdError},
     },
-    constants::{ACCOUNT_TREE_HEIGHT, SEND_TREE_HEIGHT},
+    constants::{CHANNEL_TREE_HEIGHT, SEND_TREE_HEIGHT},
     ethereum_types::{address::Address, bytes32::Bytes32, u256::U256},
 };
 use std::collections::HashMap;
@@ -100,10 +100,10 @@ impl BlockWitnessGeneratorHandle {
 
 #[derive(thiserror::Error, Debug)]
 pub enum BlockWitnessGeneratorError {
-    #[error("Too many local IDs: {0}")]
-    TooManyLocalIds(usize),
+    #[error("Too many key IDs: {0}")]
+    TooManyKeyIds(usize),
 
-    #[error("UserId error: {0}")]
+    #[error("ChannelId error: {0}")]
     UserIdError(#[from] UserIdError),
 
     #[error("Block error: {0}")]
@@ -124,8 +124,8 @@ pub struct BlockWitnessGenerator {
     pub supported_user_counts: Vec<u32>,
 
     pub block_number: BlockNumber,
-    pub account_tree: AccountTree,
-    pub send_leaves: HashMap<UserId, Vec<SendLeaf>>,
+    pub channel_tree: ChannelTree,
+    pub send_leaves: HashMap<ChannelId, Vec<SendLeaf>>,
     pub deposit_tree: DepositTree,
     pub public_state_tree: PublicStateTree,
 
@@ -143,7 +143,7 @@ impl BlockWitnessGenerator {
         Self {
             supported_user_counts: supported_user_counts.to_vec(),
             block_number: BlockNumber::default(),
-            account_tree: AccountTree::init(),
+            channel_tree: ChannelTree::init(),
             send_leaves: HashMap::new(),
             deposit_tree: DepositTree::init(),
             public_state_tree: PublicStateTree::init(),
@@ -166,7 +166,7 @@ impl BlockWitnessGenerator {
         PublicState {
             block_number: self.block_number,
             timestamp,
-            account_tree_root: self.account_tree.get_root(),
+            account_tree_root: self.channel_tree.get_root(),
             deposit_tree_root: self.deposit_tree.get_root(),
             prev_public_state_root: self.public_state_tree.get_root(),
         }
@@ -215,13 +215,13 @@ impl BlockWitnessGenerator {
 
     pub fn add_block(
         &mut self,
-        aggregator_id: u32,
-        local_ids: &[u32],
+        channel_id: u32,
+        key_ids: &[u32],
         timestamp: u64,
         tx_tree_root: Bytes32,
     ) -> Result<(), BlockWitnessGeneratorError> {
-        let num_users = get_num_users(local_ids.len(), &self.supported_user_counts)
-            .ok_or(BlockWitnessGeneratorError::TooManyLocalIds(local_ids.len()))?;
+        let num_users = get_num_users(key_ids.len(), &self.supported_user_counts)
+            .ok_or(BlockWitnessGeneratorError::TooManyKeyIds(key_ids.len()))?;
 
         let new_block_number = self
             .block_number
@@ -237,8 +237,8 @@ impl BlockWitnessGenerator {
 
         let block = Block::new(
             num_users,
-            aggregator_id,
-            local_ids,
+            channel_id,
+            key_ids,
             timestamp,
             tx_tree_root,
             projected_deposit_hash_chain,
@@ -251,60 +251,61 @@ impl BlockWitnessGenerator {
         self.public_state_tree.push(prev_ext_state.inner.clone());
 
         let mut prev_account_leaves = Vec::with_capacity(num_users as usize);
-        let mut account_merkle_proofs = Vec::with_capacity(num_users as usize);
+        let mut user_merkle_proofs = Vec::with_capacity(num_users as usize);
         let mut send_merkle_proofs = Vec::with_capacity(num_users as usize);
 
-        let dummy_account_proof = AccountMerkleProof::dummy(ACCOUNT_TREE_HEIGHT);
+        let dummy_account_proof = ChannelMerkleProof::dummy(CHANNEL_TREE_HEIGHT);
         let dummy_send_proof = SendMerkleProof::dummy(SEND_TREE_HEIGHT);
 
-        let mut account_tree_for_proofs = self.account_tree.clone();
+        let mut account_tree_for_proofs = self.channel_tree.clone();
 
-        for &local_id in block.local_ids.iter() {
-            if local_id == 0 {
-                prev_account_leaves.push(AccountLeaf::default());
-                account_merkle_proofs.push(dummy_account_proof.clone());
+        for &key_id in block.key_ids.iter() {
+            if key_id == 0 {
+                prev_account_leaves.push(ChannelLeaf::default());
+                user_merkle_proofs.push(dummy_account_proof.clone());
                 send_merkle_proofs.push(dummy_send_proof.clone());
                 continue;
             }
 
-            let user_id = UserId::new(aggregator_id, local_id)?;
-            let send_entries = self.send_leaves.entry(user_id).or_insert_with(Vec::new);
+            // Two-layer identity: channel-tree index = channel id alone (key_id is the member
+            // identity inside the channel, not part of the base-layer index).
+            let channel_id = ChannelId::new(channel_id as u64)?;
+            let send_entries = self.send_leaves.entry(channel_id).or_insert_with(Vec::new);
 
             let mut send_tree = SendTree::init();
             for leaf in send_entries.iter() {
                 send_tree.push(leaf.clone());
             }
 
-            let prev_account_leaf = account_tree_for_proofs.get_leaf(user_id.as_u64());
-            prev_account_leaves.push(prev_account_leaf.clone());
+            let prev_user_leaf = account_tree_for_proofs.get_leaf(channel_id.as_u64());
+            prev_account_leaves.push(prev_user_leaf.clone());
 
-            let account_proof = account_tree_for_proofs.prove(user_id.as_u64());
-            account_merkle_proofs.push(account_proof);
+            let account_proof = account_tree_for_proofs.prove(channel_id.as_u64());
+            user_merkle_proofs.push(account_proof);
 
-            let send_proof = send_tree.prove(prev_account_leaf.index.into());
+            let send_proof = send_tree.prove(prev_user_leaf.index.into());
             send_merkle_proofs.push(send_proof.clone());
 
-            if prev_account_leaf.prev != new_block_number {
+            if prev_user_leaf.prev != new_block_number {
                 let new_send_leaf = SendLeaf {
-                    prev: prev_account_leaf.prev,
+                    prev: prev_user_leaf.prev,
                     cur: new_block_number,
                     tx_tree_root,
                 };
                 let new_send_root =
-                    send_proof.get_root(&new_send_leaf, prev_account_leaf.index.into());
+                    send_proof.get_root(&new_send_leaf, prev_user_leaf.index.into());
                 send_tree.push(new_send_leaf.clone());
                 send_entries.push(new_send_leaf.clone());
 
-                // pk_set_root and threshold preserved from previous leaf
-                let new_account_leaf = AccountLeaf {
-                    index: prev_account_leaf.index + 1,
+                // member_key_ids_root preserved from previous leaf
+                let new_user_leaf = ChannelLeaf {
+                    index: prev_user_leaf.index + 1,
                     prev: new_block_number,
                     send_tree_root: new_send_root,
-                    pk_set_root: prev_account_leaf.pk_set_root,
-                    threshold: prev_account_leaf.threshold,
+                    member_key_ids_root: prev_user_leaf.member_key_ids_root,
                 };
-                account_tree_for_proofs.update(user_id.as_u64(), new_account_leaf.clone());
-                self.account_tree.update(user_id.as_u64(), new_account_leaf);
+                account_tree_for_proofs.update(channel_id.as_u64(), new_user_leaf.clone());
+                self.channel_tree.update(channel_id.as_u64(), new_user_leaf);
             }
         }
 
@@ -323,10 +324,12 @@ impl BlockWitnessGenerator {
             deposit_step_witness,
             block: block.clone(),
             prev_account_leaves,
-            account_merkle_proofs,
+            user_merkle_proofs,
             send_merkle_proofs,
             public_state_merkle_proof,
             sig_witnesses: None, // dummy witnesses used by default in tests
+            key_leaves: None,    // default KeyLeaf (pk_set_root = 0) → sig constraints skipped
+            msg_fields: None,    // default IMSB fields (sig constraints skipped)
             tx_v2_indices: None,
             tx_v2s: None,
             tx_v2_merkle_proofs: None,
@@ -347,10 +350,14 @@ impl BlockWitnessGenerator {
 
     pub fn get_send_status(
         &self,
-        user_id: UserId,
+        channel_id: ChannelId,
         at_block: BlockNumber,
     ) -> Result<SendStatus, BlockWitnessGeneratorError> {
-        let send_leaves = self.send_leaves.get(&user_id).cloned().unwrap_or_default();
+        let send_leaves = self
+            .send_leaves
+            .get(&channel_id)
+            .cloned()
+            .unwrap_or_default();
         if send_leaves.is_empty() {
             return Ok(SendStatus {
                 last_send_block: BlockNumber::default(),
@@ -377,7 +384,7 @@ impl BlockWitnessGenerator {
 
     pub fn get_account_state(
         &self,
-        user_id: UserId,
+        channel_id: ChannelId,
         block_number: BlockNumber,
     ) -> Result<(BlockNumber, AccountState), BlockWitnessGeneratorError> {
         let current_block_number = self.block_number;
@@ -390,7 +397,11 @@ impl BlockWitnessGenerator {
         }
 
         // find send tree for the user
-        let send_leaves = self.send_leaves.get(&user_id).cloned().unwrap_or_default();
+        let send_leaves = self
+            .send_leaves
+            .get(&channel_id)
+            .cloned()
+            .unwrap_or_default();
         let mut send_tree = SendTree::init();
         for leaf in send_leaves.iter() {
             send_tree.push(leaf.clone());
@@ -407,39 +418,43 @@ impl BlockWitnessGenerator {
         let send_leaf = send_tree.get_leaf(send_leaf_index as u64);
         let send_merkle_proof = send_tree.prove(send_leaf_index as u64);
 
-        let account_tree_root = self.account_tree.get_root();
-        let account_leaf = self.account_tree.get_leaf(user_id.as_u64());
-        let account_merkle_proof = self.account_tree.prove(user_id.as_u64());
+        let account_tree_root = self.channel_tree.get_root();
+        let channel_leaf = self.channel_tree.get_leaf(channel_id.as_u64());
+        let user_merkle_proof = self.channel_tree.prove(channel_id.as_u64());
 
         Ok((
             current_block_number,
             AccountState {
-                user_id,
+                channel_id,
                 account_tree_root,
                 send_leaf,
                 send_leaf_index,
                 send_merkle_proof,
-                account_leaf,
-                account_merkle_proof,
+                channel_leaf,
+                user_merkle_proof,
             },
         ))
     }
 
     pub fn get_account_state_for_tx(
         &self,
-        user_id: UserId,
+        channel_id: ChannelId,
         tx_tree_root: Bytes32,
     ) -> Result<(BlockNumber, AccountState), BlockWitnessGeneratorError> {
         let current_block_number = self.block_number;
 
         // find send tree for the user
-        let send_leaves = self.send_leaves.get(&user_id).cloned().unwrap_or_default();
+        let send_leaves = self
+            .send_leaves
+            .get(&channel_id)
+            .cloned()
+            .unwrap_or_default();
         let send_leaf_index = send_leaves
             .iter()
             .position(|leaf| leaf.tx_tree_root == tx_tree_root)
             .ok_or(BlockWitnessGeneratorError::InvalidRequest(format!(
                 "No send leaf found for user {:?} with tx_tree_root {:?}",
-                user_id, tx_tree_root
+                channel_id, tx_tree_root
             )))? as u32;
 
         let mut send_tree = SendTree::init();
@@ -449,20 +464,20 @@ impl BlockWitnessGenerator {
         let send_leaf = send_tree.get_leaf(send_leaf_index as u64);
         let send_merkle_proof = send_tree.prove(send_leaf_index as u64);
 
-        let account_tree_root = self.account_tree.get_root();
-        let account_leaf = self.account_tree.get_leaf(user_id.as_u64());
-        let account_merkle_proof = self.account_tree.prove(user_id.as_u64());
+        let account_tree_root = self.channel_tree.get_root();
+        let channel_leaf = self.channel_tree.get_leaf(channel_id.as_u64());
+        let user_merkle_proof = self.channel_tree.prove(channel_id.as_u64());
 
         Ok((
             current_block_number,
             AccountState {
-                user_id,
+                channel_id,
                 account_tree_root,
                 send_leaf,
                 send_leaf_index,
                 send_merkle_proof,
-                account_leaf,
-                account_merkle_proof,
+                channel_leaf,
+                user_merkle_proof,
             },
         ))
     }

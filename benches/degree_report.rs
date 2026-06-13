@@ -7,7 +7,7 @@ use intmax3_zkp::circuits::{
     validity::{
         block_hash_chain::{
             block_hash_chain_circuit::BlockHashChainCircuit, block_step::BlockStepCircuit,
-            update_account_tree::UpdateAccountCircuit, validity_circuit::ValidityCircuit,
+            update_channel_tree::UpdateUserCircuit, validity_circuit::ValidityCircuit,
         },
         deposit_hash_chain::{
             deposit_hash_chain_circuit::DepositHashChainCircuit, deposit_step::DepositStepCircuit,
@@ -115,20 +115,20 @@ fn main() {
 
     // Block hash chain circuits
     let block_chain_cd = BlockHashChainCircuit::<F, C, D>::generate_cd();
-    let update_account_circuits: Vec<UpdateAccountCircuit<F, C, D>> = supported_user_counts
+    let update_user_circuits: Vec<UpdateUserCircuit<F, C, D>> = supported_user_counts
         .iter()
-        .map(|&n| UpdateAccountCircuit::<F, C, D>::new(n))
+        .map(|&n| UpdateUserCircuit::<F, C, D>::new(n))
         .collect();
-    for circuit in &update_account_circuits {
+    for circuit in &update_user_circuits {
         rows.push((
             format!(
-                "validity::UpdateAccountCircuit(num_users={})",
+                "validity::UpdateUserCircuit(num_users={})",
                 circuit.num_users
             ),
             circuit.data.common.degree_bits(),
         ));
     }
-    let update_account_vds = update_account_circuits
+    let update_account_vds = update_user_circuits
         .iter()
         .map(|c| (c.num_users, c.data.verifier_data()))
         .collect::<Vec<_>>();

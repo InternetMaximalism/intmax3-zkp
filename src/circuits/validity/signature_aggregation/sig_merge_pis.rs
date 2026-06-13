@@ -29,14 +29,15 @@ use crate::{
 /// Fields:
 ///   account_tree_root:     POSEIDON_HASH_OUT_LEN (4)  — read-only snapshot
 ///   block_number:          1
-///   aggregator_id:         1
+///   channel_id:         1
 ///   tx_tree_root:          BYTES32_LEN (8)
+///   signed_digest:         BYTES32_LEN (8)            — IMSB digest the signatures verify
 ///   verified_users_hash:   POSEIDON_HASH_OUT_LEN (4)  — cumulative hash of all verified users
 ///   verified_count:        1                           — total verified users across all batches
-///   first_user_id:         1                           — first user_id across all merged batches
-///   last_user_id:          1                           — last user_id across all merged batches
-///   Total: 21
-pub const SIG_MERGE_PUBLIC_INPUTS_LEN: usize = 2 * POSEIDON_HASH_OUT_LEN + BYTES32_LEN + 5;
+///   first_user_id:         1                           — first channel_id across all merged
+/// batches   last_user_id:          1                           — last channel_id across all merged
+/// batches   Total: 29
+pub const SIG_MERGE_PUBLIC_INPUTS_LEN: usize = 2 * POSEIDON_HASH_OUT_LEN + 2 * BYTES32_LEN + 5;
 
 #[derive(Debug, Error)]
 pub enum SigMergePublicInputsError {
@@ -56,18 +57,21 @@ pub struct SigMergePublicInputs<
 > where
     <C as GenericConfig<D>>::Hasher: AlgebraicHasher<F>,
 {
-    /// Read-only account tree root (same as batch proofs).
+    /// Read-only user tree root (same as batch proofs).
     pub account_tree_root: PoseidonHashOut,
     pub block_number: BlockNumber,
-    pub aggregator_id: u32,
+    pub channel_id: u32,
     pub tx_tree_root: Bytes32,
+    /// IMSB `SmallBlockRootMessage::signing_digest()` every merged signature was verified
+    /// over (detail2 §F-2); all merged batches must agree on it.
+    pub signed_digest: Bytes32,
 
     /// Cumulative hash of all verified users from merged batches.
     pub verified_users_hash: PoseidonHashOut,
     pub verified_count: u32,
-    /// First finalized user_id across all merged batches.
+    /// First finalized channel_id across all merged batches.
     pub first_user_id: u64,
-    /// Last finalized user_id across all merged batches.
+    /// Last finalized channel_id across all merged batches.
     pub last_user_id: u64,
 
     pub vd: VerifierOnlyCircuitData<C, D>,
@@ -78,16 +82,17 @@ impl<F: RichField + Extendable<D>, C: GenericConfig<D, F = F>, const D: usize>
 where
     <C as GenericConfig<D>>::Hasher: AlgebraicHasher<F>,
 {
-    pub fn hub_id(&self) -> u32 {
-        self.aggregator_id
+    pub fn channel_id(&self) -> u32 {
+        self.channel_id
     }
 
     pub fn to_u64_vec(&self, config: &CircuitConfig) -> Vec<u64> {
         [
             self.account_tree_root.to_u64_vec(),
             self.block_number.to_u64_vec(),
-            vec![self.aggregator_id as u64],
+            vec![self.channel_id as u64],
             self.tx_tree_root.to_u64_vec(),
+            self.signed_digest.to_u64_vec(),
             self.verified_users_hash.to_u64_vec(),
             vec![self.verified_count as u64],
             vec![self.first_user_id],
@@ -128,7 +133,7 @@ where
         })?;
         cursor += 1;
 
-        let aggregator_id = inputs[cursor] as u32;
+        let channel_id = inputs[cursor] as u32;
         cursor += 1;
 
         let tx_tree_root =
@@ -137,6 +142,13 @@ where
                     field: "tx_tree_root",
                     message: e.to_string(),
                 }
+            })?;
+        cursor += BYTES32_LEN;
+
+        let signed_digest = Bytes32::from_u64_slice(&inputs[cursor..cursor + BYTES32_LEN])
+            .map_err(|e| SigMergePublicInputsError::ParseError {
+                field: "signed_digest",
+                message: e.to_string(),
             })?;
         cursor += BYTES32_LEN;
 
@@ -166,8 +178,9 @@ where
         Ok(Self {
             account_tree_root,
             block_number,
-            aggregator_id,
+            channel_id,
             tx_tree_root,
+            signed_digest,
             verified_users_hash,
             verified_count,
             first_user_id,
@@ -181,8 +194,9 @@ where
 pub struct SigMergePublicInputsTarget {
     pub account_tree_root: PoseidonHashOutTarget,
     pub block_number: BlockNumberTarget,
-    pub aggregator_id: Target,
+    pub channel_id: Target,
     pub tx_tree_root: Bytes32Target,
+    pub signed_digest: Bytes32Target,
     pub verified_users_hash: PoseidonHashOutTarget,
     pub verified_count: Target,
     pub first_user_id: Target,
@@ -191,16 +205,17 @@ pub struct SigMergePublicInputsTarget {
 }
 
 impl SigMergePublicInputsTarget {
-    pub fn hub_id(&self) -> Target {
-        self.aggregator_id
+    pub fn channel_id(&self) -> Target {
+        self.channel_id
     }
 
     pub fn to_vec(&self, config: &CircuitConfig) -> Vec<Target> {
         [
             self.account_tree_root.to_vec(),
             self.block_number.to_vec(),
-            vec![self.aggregator_id],
+            vec![self.channel_id],
             self.tx_tree_root.to_vec(),
+            self.signed_digest.to_vec(),
             self.verified_users_hash.to_vec(),
             vec![self.verified_count],
             vec![self.first_user_id],
@@ -223,10 +238,13 @@ impl SigMergePublicInputsTarget {
         let block_number = BlockNumberTarget::from_slice(&pis[cursor..cursor + 1]);
         cursor += 1;
 
-        let aggregator_id = pis[cursor];
+        let channel_id = pis[cursor];
         cursor += 1;
 
         let tx_tree_root = Bytes32Target::from_slice(&pis[cursor..cursor + BYTES32_LEN]);
+        cursor += BYTES32_LEN;
+
+        let signed_digest = Bytes32Target::from_slice(&pis[cursor..cursor + BYTES32_LEN]);
         cursor += BYTES32_LEN;
 
         let verified_users_hash =
@@ -247,8 +265,9 @@ impl SigMergePublicInputsTarget {
         Self {
             account_tree_root,
             block_number,
-            aggregator_id,
+            channel_id,
             tx_tree_root,
+            signed_digest,
             verified_users_hash,
             verified_count,
             first_user_id,
@@ -273,10 +292,11 @@ impl SigMergePublicInputsTarget {
             .set_witness(witness, value.account_tree_root);
         self.block_number.set_witness(witness, value.block_number);
         witness.set_target(
-            self.aggregator_id,
-            F::from_canonical_u64(value.aggregator_id as u64),
+            self.channel_id,
+            F::from_canonical_u64(value.channel_id as u64),
         );
         self.tx_tree_root.set_witness(witness, value.tx_tree_root);
+        self.signed_digest.set_witness(witness, value.signed_digest);
         self.verified_users_hash
             .set_witness(witness, value.verified_users_hash);
         witness.set_target(

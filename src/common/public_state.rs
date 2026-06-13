@@ -17,17 +17,17 @@ use serde::{Deserialize, Serialize};
 use crate::{
     common::{
         block::{Block, BlockError},
+        channel_id::{ChannelId, ChannelIdError as UserIdError},
         channel_message::ChannelMessage,
         deposit::Deposit,
         trees::{
-            account_tree::{AccountLeaf, AccountTree, SendLeaf, SendTree},
+            channel_tree::{ChannelLeaf, ChannelTree, SendLeaf, SendTree},
             deposit_tree::DepositTree,
             public_state_tree::PublicStateTree,
             tx_v2_tree::compute_tx_v2_root,
         },
         tx::TxV2,
         u63::{BlockNumber, BlockNumberError, BlockNumberTarget, U63, U63Target},
-        user_id::{UserId, UserIdError},
     },
     ethereum_types::{
         address::Address,
@@ -81,7 +81,7 @@ impl Default for PublicState {
         Self {
             block_number: BlockNumber::default(),
             timestamp: 0,
-            account_tree_root: AccountTree::init().get_root(),
+            account_tree_root: ChannelTree::init().get_root(),
             deposit_tree_root: DepositTree::init().get_root(),
             prev_public_state_root: PublicStateTree::init().get_root(),
         }
@@ -391,10 +391,10 @@ impl LeafableTarget for PublicStateTarget {
 
 #[derive(thiserror::Error, Debug)]
 pub enum FullPublicStateError {
-    #[error("Too many local IDs: {0}")]
-    TooManyLocalIds(usize),
+    #[error("Too many key IDs: {0}")]
+    TooManyKeyIds(usize),
 
-    #[error("UserId error: {0}")]
+    #[error("ChannelId error: {0}")]
     UserIdError(#[from] UserIdError),
 
     #[error("Block error: {0}")]
@@ -405,8 +405,8 @@ pub struct FullPublicState {
     pub supported_user_counts: Vec<u32>,
 
     pub block_number: BlockNumber,
-    pub account_tree: AccountTree,
-    pub send_leaves: HashMap<UserId, Vec<SendLeaf>>,
+    pub channel_tree: ChannelTree,
+    pub send_leaves: HashMap<ChannelId, Vec<SendLeaf>>,
     pub deposit_tree: DepositTree,
     pub public_state_tree: PublicStateTree,
 
@@ -422,7 +422,7 @@ impl FullPublicState {
             supported_user_counts: supported_user_counts.to_vec(),
 
             block_number: BlockNumber::default(),
-            account_tree: AccountTree::init(),
+            channel_tree: ChannelTree::init(),
             send_leaves: HashMap::new(),
             deposit_tree: DepositTree::init(),
             public_state_tree: PublicStateTree::init(),
@@ -444,7 +444,7 @@ impl FullPublicState {
         PublicState {
             block_number: self.block_number,
             timestamp,
-            account_tree_root: self.account_tree.get_root(),
+            account_tree_root: self.channel_tree.get_root(),
             deposit_tree_root: self.deposit_tree.get_root(),
             prev_public_state_root: self.public_state_tree.get_root(),
         }
@@ -452,29 +452,29 @@ impl FullPublicState {
 
     pub fn add_block(
         &mut self,
-        aggregator_id: u32,
-        local_ids: &[u32],
+        channel_id: u32,
+        key_ids: &[u32],
         timestamp: u64,
         tx_tree_root: Bytes32,
     ) -> Result<(), FullPublicStateError> {
-        self.add_block_with_hub(aggregator_id, local_ids, timestamp, tx_tree_root)
+        self.add_block_with_channel(channel_id, key_ids, timestamp, tx_tree_root)
     }
 
-    pub fn add_block_with_hub(
+    pub fn add_block_with_channel(
         &mut self,
-        hub_id: u32,
-        account_nos: &[u32],
+        channel_id: u32,
+        key_ids: &[u32],
         timestamp: u64,
         tx_tree_root: Bytes32,
     ) -> Result<(), FullPublicStateError> {
-        let num_users = get_num_users(account_nos.len(), &self.supported_user_counts)
-            .ok_or(FullPublicStateError::TooManyLocalIds(account_nos.len()))?;
+        let num_users = get_num_users(key_ids.len(), &self.supported_user_counts)
+            .ok_or(FullPublicStateError::TooManyKeyIds(key_ids.len()))?;
 
         // create block
-        let block = Block::new_with_hub(
+        let block = Block::new_with_channel(
             num_users,
-            hub_id,
-            account_nos,
+            channel_id,
+            key_ids,
             timestamp,
             tx_tree_root,
             self.deposit_hash_chain,
@@ -493,14 +493,20 @@ impl FullPublicState {
             .hash_with_prev_hash(self.block_hash_chain)
             .expect("hashing should not fail");
 
-        // update account tree
-        for &account_no in account_nos {
-            if account_no == 0 {
+        // update user tree
+        for &key_id in key_ids {
+            if key_id == 0 {
                 // ignore zero account number (padding or dummy)
                 continue;
             }
-            let user_id = UserId::new(hub_id, account_no)?;
-            let mut send_leaves = self.send_leaves.get(&user_id).cloned().unwrap_or_default();
+            // Two-layer identity: the channel-tree index is the channel id alone; member key_ids
+            // identify signers within the channel and do not index base-layer state.
+            let channel_id = ChannelId::new(channel_id as u64)?;
+            let mut send_leaves = self
+                .send_leaves
+                .get(&channel_id)
+                .cloned()
+                .unwrap_or_default();
             let prev = if let Some(last) = send_leaves.last() {
                 last.cur
             } else {
@@ -519,20 +525,20 @@ impl FullPublicState {
                 send_tree.push(leaf.clone());
             }
 
-            let current_account_leaf = self.account_tree.get_leaf(user_id.as_u64());
+            let current_user_leaf = self.channel_tree.get_leaf(channel_id.as_u64());
 
-            // sanity check (pk_set_root preserved from tree, not reconstructed from send leaves)
-            let account_leaf = AccountLeaf {
+            // sanity check (member_key_ids_root preserved from tree, not reconstructed from send
+            // leaves)
+            let channel_leaf = ChannelLeaf {
                 index: send_tree.len() as u32,
                 prev,
                 send_tree_root: send_tree.get_root(),
-                pk_set_root: current_account_leaf.pk_set_root,
-                threshold: current_account_leaf.threshold,
+                member_key_ids_root: current_user_leaf.member_key_ids_root,
             };
             assert_eq!(
-                current_account_leaf, account_leaf,
-                "Account leaf mismatch for user_id {:?}: calculated from send leaves {:?}, actual {:?}",
-                user_id, account_leaf, current_account_leaf
+                current_user_leaf, channel_leaf,
+                "Account leaf mismatch for channel_id {:?}: calculated from send leaves {:?}, actual {:?}",
+                channel_id, channel_leaf, current_user_leaf
             );
 
             // add new send leaf
@@ -545,17 +551,16 @@ impl FullPublicState {
 
             // update send leaves
             send_leaves.push(new_send_leaf);
-            self.send_leaves.insert(user_id, send_leaves.clone());
+            self.send_leaves.insert(channel_id, send_leaves.clone());
 
-            // update account tree (pk_set_root/threshold preserved across state transitions)
-            let new_account_leaf = AccountLeaf {
+            // update user tree (member_key_ids_root preserved across state transitions)
+            let new_user_leaf = ChannelLeaf {
                 index: send_tree.len() as u32,
                 prev: current_block,
                 send_tree_root: send_tree.get_root(),
-                pk_set_root: current_account_leaf.pk_set_root,
-                threshold: current_account_leaf.threshold,
+                member_key_ids_root: current_user_leaf.member_key_ids_root,
             };
-            self.account_tree.update(user_id.as_u64(), new_account_leaf);
+            self.channel_tree.update(channel_id.as_u64(), new_user_leaf);
         }
 
         Ok(())
@@ -563,35 +568,35 @@ impl FullPublicState {
 
     pub fn add_block_with_tx_tree_root_v2(
         &mut self,
-        hub_id: u32,
-        account_nos: &[u32],
+        channel_id: u32,
+        key_ids: &[u32],
         timestamp: u64,
         tx_tree_root: PoseidonHashOut,
     ) -> Result<(), FullPublicStateError> {
-        self.add_block_with_hub(hub_id, account_nos, timestamp, tx_tree_root.into())
+        self.add_block_with_channel(channel_id, key_ids, timestamp, tx_tree_root.into())
     }
 
     pub fn add_block_with_tx_v2s(
         &mut self,
-        hub_id: u32,
-        account_nos: &[u32],
+        channel_id: u32,
+        key_ids: &[u32],
         timestamp: u64,
         txs: &[TxV2],
     ) -> Result<(), FullPublicStateError> {
-        self.add_block_with_tx_tree_root_v2(hub_id, account_nos, timestamp, compute_tx_v2_root(txs))
+        self.add_block_with_tx_tree_root_v2(channel_id, key_ids, timestamp, compute_tx_v2_root(txs))
     }
 
     pub fn add_channel_close_block(
         &mut self,
-        hub_id: u32,
-        account_nos: &[u32],
+        channel_id: u32,
+        key_ids: &[u32],
         timestamp: u64,
         channel_message: &ChannelMessage,
         seal: Bytes32,
         nonce: u32,
     ) -> Result<(), FullPublicStateError> {
         let close_tx = channel_message.to_channel_close_tx_v2(seal, nonce);
-        self.add_block_with_tx_v2s(hub_id, account_nos, timestamp, &[close_tx])
+        self.add_block_with_tx_v2s(channel_id, key_ids, timestamp, &[close_tx])
     }
 
     pub fn add_deposit(
@@ -636,9 +641,9 @@ pub fn get_num_users(length: usize, supported_user_counts: &[u32]) -> Option<u32
 mod tests {
     use super::*;
     use crate::common::{
+        channel_id::ChannelId,
         trees::tx_v2_tree::compute_tx_v2_root,
         tx::{ChannelAction, ChannelActionKind, TxClass, TxV2},
-        user_id::AccountId,
     };
 
     #[test]
@@ -651,8 +656,8 @@ mod tests {
             channel_action_root: crate::common::trees::tx_v2_tree::compute_channel_action_root(&[
                 ChannelAction {
                     kind: ChannelActionKind::InterChannelSend,
-                    source_channel_id: AccountId::new(1, 10).unwrap(),
-                    destination_channel_id: AccountId::new(2, 20).unwrap(),
+                    source_channel_id: ChannelId::new(1).unwrap(),
+                    destination_channel_id: ChannelId::new(2).unwrap(),
                     tx_hash: Bytes32::default(),
                     seal: Bytes32::default(),
                     payload_hash: PoseidonHashOut::default(),
@@ -663,8 +668,8 @@ mod tests {
         state.add_block_with_tx_v2s(1, &[10], 123, &[tx]).unwrap();
 
         let block = state.blocks.last().unwrap();
-        assert_eq!(block.hub_id(), 1);
-        assert_eq!(block.account_nos(), &[10]);
+        assert_eq!(block.channel_id(), 1);
+        assert_eq!(block.key_ids(), &[10]);
         assert_eq!(block.tx_tree_root, compute_tx_v2_root(&[tx]).into());
     }
 
@@ -672,7 +677,7 @@ mod tests {
     fn add_channel_close_block_connects_channel_message_to_block_inclusion() {
         let mut state = FullPublicState::new(&[2]);
         let message = ChannelMessage {
-            channel_id: UserId::new(7, 77).unwrap(),
+            channel_id: ChannelId::new(7).unwrap(),
             sequence: 3,
             allocations: vec![],
             tx_tree_root: Bytes32::default(),

@@ -5,8 +5,8 @@ use plonky2::{
 
 use crate::{
     common::{
+        channel_id::{ChannelId, ChannelIdTarget},
         salt::{Salt, SaltTarget},
-        user_id::{UserId, UserIdTarget},
     },
     ethereum_types::{
         address::{Address, AddressTarget},
@@ -26,8 +26,8 @@ pub enum RecipientError {
     InvalidRecipient(String),
 }
 
-pub fn calculate_recipient_from_user_id(user_id: UserId, salt: Salt) -> Bytes32 {
-    let inputs = vec![vec![USER_ID_DOMAIN, user_id.as_u64()], salt.to_u64_vec()].concat();
+pub fn calculate_recipient_from_user_id(channel_id: ChannelId, salt: Salt) -> Bytes32 {
+    let inputs = [vec![USER_ID_DOMAIN, channel_id.as_u64()], salt.to_u64_vec()].concat();
     let hash: Bytes32 = PoseidonHashOut::hash_inputs_u64(&inputs).into();
 
     // replace the first byte with the tag
@@ -38,12 +38,12 @@ pub fn calculate_recipient_from_user_id(user_id: UserId, salt: Salt) -> Bytes32 
 
 pub fn calculate_recipient_from_user_id_circuit<F: RichField + Extendable<D>, const D: usize>(
     builder: &mut CircuitBuilder<F, D>,
-    user_id: &UserIdTarget,
+    channel_id: &ChannelIdTarget,
     salt: &SaltTarget,
 ) -> Bytes32Target {
     let mut inputs = vec![
         builder.constant(F::from_canonical_u64(USER_ID_DOMAIN)),
-        user_id.value,
+        channel_id.value,
     ];
     inputs.extend(salt.to_vec());
 
@@ -106,13 +106,13 @@ mod tests {
         const D: usize = 2;
         type C = PoseidonGoldilocksConfig;
 
-        let user_id = UserId::new(1, 42).unwrap();
+        let channel_id = ChannelId::new(1).unwrap();
         let mut rng = rand::thread_rng();
         let salt = Salt::rand(&mut rng);
-        let expected = calculate_recipient_from_user_id(user_id, salt);
+        let expected = calculate_recipient_from_user_id(channel_id, salt);
 
         let mut builder = CircuitBuilder::<F, D>::new(CircuitConfig::default());
-        let user_id_target = UserIdTarget::constant(&mut builder, user_id);
+        let user_id_target = ChannelIdTarget::constant(&mut builder, channel_id);
         let salt_target = SaltTarget::constant(&mut builder, salt);
 
         let recipient_target =

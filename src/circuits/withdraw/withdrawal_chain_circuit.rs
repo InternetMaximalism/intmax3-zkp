@@ -145,11 +145,11 @@ mod tests {
             },
         },
         common::{
+            channel_id::ChannelId,
             salt::Salt,
             transfer::Transfer,
             trees::{transfer_tree::TransferTree, tx_tree::TxTree},
             tx::Tx,
-            user_id::UserId,
         },
         constants::MAX_NUM_TRANSFERS_PER_TX,
         ethereum_types::{
@@ -180,10 +180,10 @@ mod tests {
         let block_witness_generator =
             BlockWitnessGeneratorHandle::new(BlockWitnessGenerator::new(&supported_user_counts));
 
-        let user_id = UserId::new(0, 1).unwrap();
+        let channel_id = ChannelId::new(1).unwrap();
         let salt = Salt::rand(&mut rng);
         let mut balance_witness_generator = BalanceWitnessGenerator::new(
-            user_id,
+            channel_id,
             salt,
             block_witness_generator.clone(),
             &balance_processor,
@@ -192,7 +192,7 @@ mod tests {
 
         // Fund the account via deposit.
         let deposit_salt = Salt::rand(&mut rng);
-        let deposit_recipient = calculate_recipient_from_user_id(user_id, deposit_salt);
+        let deposit_recipient = calculate_recipient_from_user_id(channel_id, deposit_salt);
         block_witness_generator
             .borrow_mut()
             .add_deposit(
@@ -245,19 +245,14 @@ mod tests {
             nonce: balance_witness_generator.full_private_state.nonce,
         };
         let mut tx_tree = TxTree::init();
-        tx_tree.update(user_id.local_id() as u64, tx.clone());
+        tx_tree.update(channel_id.as_u64(), tx.clone());
         let tx_tree_root = tx_tree.get_root();
         let tx_tree_root_bytes: Bytes32 = tx_tree_root.into();
-        let tx_merkle_proof = tx_tree.prove(user_id.local_id() as u64);
+        let tx_merkle_proof = tx_tree.prove(channel_id.as_u64());
 
         block_witness_generator
             .borrow_mut()
-            .add_block(
-                user_id.aggregator_id(),
-                &[user_id.local_id()],
-                0,
-                tx_tree_root_bytes,
-            )
+            .add_block(channel_id.channel_id(), &[1], 0, tx_tree_root_bytes)
             .unwrap();
 
         let send_tx_data = SendTxData {
@@ -267,6 +262,8 @@ mod tests {
             tx_merkle_proof: tx_merkle_proof.clone(),
             tx_v2: None,
             tx_v2_merkle_proof: None,
+            transfer: transfer.clone(),
+            transfer_merkle_proof: transfer_merkle_proof.clone(),
         };
         let send_tx_witness = balance_witness_generator
             .send_tx_witness(&send_tx_data)
@@ -318,14 +315,14 @@ mod tests {
             .verify(withdrawal_chain_proof.clone())
             .expect("withdrawal chain proof verifies");
 
-        let withdrawal_aggregator = Address::rand(&mut rng);
+        let withdrawal_prover = Address::rand(&mut rng);
         let ext_public_state = block_witness_generator
             .borrow()
             .current_extended_public_state();
         let withdrawal_proof = withdrawal_processor
             .prove_final(
                 &withdrawal_chain_proof,
-                withdrawal_aggregator,
+                withdrawal_prover,
                 &ext_public_state,
             )
             .expect("withdrawal proof");
@@ -342,7 +339,7 @@ mod tests {
         let ext_public_state_commitment = ext_public_state.commitment();
         let expected_withdrawal_inputs = WithdrawalProofPublicInputs {
             withdrawal_hash: chain_inputs.withdrawal_hash_chain,
-            withdrawal_aggregator,
+            withdrawal_prover,
             ext_public_state_commitment,
             block_number: ext_public_state.inner.block_number,
         };

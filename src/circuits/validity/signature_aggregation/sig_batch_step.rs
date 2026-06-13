@@ -25,14 +25,17 @@ use crate::{
         },
     },
     common::{
+        channel_id::{ChannelId, ChannelIdTarget},
         key_set::{KeySetMerkleProof, KeySetMerkleProofTarget, PkLeaf, PkLeafTarget},
-        trees::account_tree::{
-            AccountLeaf, AccountLeafTarget, AccountMerkleProof, AccountMerkleProofTarget,
+        trees::{
+            channel_tree::{
+                ChannelLeaf, ChannelLeafTarget, ChannelMerkleProof, ChannelMerkleProofTarget,
+            },
+            key_tree::{KeyLeaf, KeyLeafTarget},
         },
         u63::{BlockNumber, BlockNumberTarget},
-        user_id::{UserId, UserIdTarget},
     },
-    constants::{ACCOUNT_TREE_HEIGHT, KEY_SET_TREE_HEIGHT},
+    constants::{CHANNEL_TREE_HEIGHT, KEY_ID_BITS, KEY_SET_TREE_HEIGHT},
     ethereum_types::{
         bytes32::{Bytes32, Bytes32Target},
         u32limb_trait::U32LimbTargetTrait as _,
@@ -63,16 +66,18 @@ pub enum SigBatchStepError {
 pub struct SigBatchInitialValue {
     pub account_tree_root: PoseidonHashOut,
     pub block_number: BlockNumber,
-    pub aggregator_id: u32,
+    pub channel_id: u32,
     pub tx_tree_root: Bytes32,
+    /// IMSB signing digest (detail2 §F-2) for this block.
+    pub signed_digest: Bytes32,
 }
 
 /// Witness for a single batch step.
 ///
 /// Two modes:
 /// - `is_finalize = false`: Verify one SPHINCS+ signature for the current user.
-/// - `is_finalize = true`: Finalize user (check threshold, record in verified_users_hash). NO
-///   account tree update — this is the key difference from SigAggStep.
+/// - `is_finalize = true`: Finalize user (check threshold, record in verified_users_hash). NO user
+///   tree update — this is the key difference from SigAggStep.
 pub struct SigBatchStepWitness<
     F: RichField + Extendable<D>,
     C: GenericConfig<D, F = F>,
@@ -84,12 +89,25 @@ pub struct SigBatchStepWitness<
     pub prev_batch_proof: Option<ProofWithPublicInputs<F, C, D>>,
     pub is_finalize: bool,
     pub block_number: BlockNumber,
-    pub aggregator_id: u32,
+    pub channel_id: u32,
     pub tx_tree_root: Bytes32,
-    pub new_user_local_id: u32,
+    /// IMSB signing digest the member signatures are verified over (detail2 §F-2).
+    /// Carried through the PI chain; recomputed+bound to the block's tx_tree_root at the
+    /// block-level circuit (`channel_apply_block.rs`).
+    pub signed_digest: Bytes32,
+    pub new_user_key_id: u32,
     /// Account leaf for new user setup (read-only membership verification).
-    pub prev_account_leaf: AccountLeaf,
-    pub account_merkle_proof: AccountMerkleProof,
+    pub prev_user_leaf: ChannelLeaf,
+    pub user_merkle_proof: ChannelMerkleProof,
+    /// KeyTree record for the new user's key_id, supplying (pk_set_root, threshold)
+    /// (used when starting a new user). Two-layer identity: this data was moved out of
+    /// `ChannelLeaf` into the per-keyID `KeyLeaf`.
+    ///
+    /// SECURITY: TODO — this leaf is NOT yet proven included in the on-chain-bound KeyTree at
+    /// index `new_user_key_id` (design tasks/channel-key-tree-design.md §3 step 2b / §6.4), nor
+    /// is the key_id yet proven a member of `prev_user_leaf.member_key_ids_root` (§3 step 2a).
+    /// Until that binding lands, the pk set / threshold are prover-chosen.
+    pub key_leaf: KeyLeaf,
     /// Key set membership proof (sig_verify mode only).
     pub pk_index: u32,
     pub key_set_merkle_proof: KeySetMerkleProof,
@@ -118,9 +136,10 @@ where
             SigBatchPublicInputs {
                 account_tree_root: initial.account_tree_root,
                 block_number: initial.block_number,
-                aggregator_id: initial.aggregator_id,
+                channel_id: initial.channel_id,
                 tx_tree_root: initial.tx_tree_root,
-                current_user_local_id: 0,
+                signed_digest: initial.signed_digest,
+                current_user_key_id: 0,
                 current_user_pk_set_root: PoseidonHashOut::default(),
                 current_user_threshold: 0,
                 current_user_sigs_verified: 0,
@@ -141,8 +160,8 @@ where
 
         if self.is_finalize {
             // Finalize mode: check threshold met, record user in hash chain.
-            // NO account tree update.
-            if prev_pis.current_user_local_id == 0 {
+            // NO user tree update.
+            if prev_pis.current_user_key_id == 0 {
                 return Err(SigBatchStepError::InvalidInput(
                     "Cannot finalize: no current user".to_string(),
                 ));
@@ -154,41 +173,43 @@ where
                 )));
             }
 
-            let user_id = UserId::new(prev_pis.hub_id(), prev_pis.current_user_local_id)
-                .map_err(|e| SigBatchStepError::InvalidInput(e.to_string()))?;
+            // Two-layer identity: the per-user identity inside the channel is the member key_id;
+            // the verified-users chain / ordering ids are over key_ids (the channel id is a
+            // single PI shared by the whole chain).
+            let member_key_id = prev_pis.current_user_key_id as u64;
 
             // Update verified_users_hash
             let new_verified_users_hash = PoseidonHashOut::hash_inputs_u64(
                 &[
                     prev_pis.verified_users_hash.to_u64_vec(),
-                    vec![user_id.as_u64()],
+                    vec![member_key_id],
                 ]
                 .concat(),
             );
 
             let new_count = prev_pis.verified_count + 1;
             let first_user_id = if prev_pis.first_user_id == 0 {
-                user_id.as_u64()
+                member_key_id
             } else {
                 prev_pis.first_user_id
             };
-            let last_user_id = user_id.as_u64();
+            let last_user_id = member_key_id;
 
-            // Enforce strict ordering: last finalized user_id must increase
-            if prev_pis.last_user_id != 0 && user_id.as_u64() <= prev_pis.last_user_id {
+            // Enforce strict ordering: last finalized member key_id must increase
+            if prev_pis.last_user_id != 0 && member_key_id <= prev_pis.last_user_id {
                 return Err(SigBatchStepError::InvalidInput(format!(
                     "User IDs must be strictly increasing: {} <= {}",
-                    user_id.as_u64(),
-                    prev_pis.last_user_id
+                    member_key_id, prev_pis.last_user_id
                 )));
             }
 
             Ok(SigBatchPublicInputs {
                 account_tree_root: prev_pis.account_tree_root,
                 block_number: prev_pis.block_number,
-                aggregator_id: prev_pis.hub_id(),
+                channel_id: prev_pis.channel_id(),
                 tx_tree_root: prev_pis.tx_tree_root,
-                current_user_local_id: 0,
+                signed_digest: prev_pis.signed_digest,
+                current_user_key_id: 0,
                 current_user_pk_set_root: PoseidonHashOut::default(),
                 current_user_threshold: 0,
                 current_user_sigs_verified: 0,
@@ -201,35 +222,49 @@ where
             })
         } else {
             // Sig verify mode (same as SigAggStep but no tree update)
-            let is_new_user = prev_pis.current_user_local_id == 0;
-            let (local_id, pk_set_root, threshold, sigs_verified, last_pk_index) = if is_new_user {
-                if self.new_user_local_id == 0 {
+            //
+            // SECURITY (detail2 §C-2): tx_tree_root == 0 (H2 = 0) is reserved for in-channel
+            // updates; a member signature must never be applied over it. Mirrors the in-circuit
+            // `not_finalize → tx_tree_root != 0` constraint.
+            if prev_pis.tx_tree_root == Bytes32::default() {
+                return Err(SigBatchStepError::InvalidInput(
+                    "tx_tree_root must be nonzero when a member signature is applied (H2=0 is reserved for in-channel updates)"
+                        .to_string(),
+                ));
+            }
+            let is_new_user = prev_pis.current_user_key_id == 0;
+            let (key_id, pk_set_root, threshold, sigs_verified, last_pk_index) = if is_new_user {
+                if self.new_user_key_id == 0 {
                     return Err(SigBatchStepError::InvalidInput(
-                        "new_user_local_id must be non-zero when starting a new user".to_string(),
+                        "new_user_key_id must be non-zero when starting a new user".to_string(),
                     ));
                 }
-                let user_id = UserId::new(prev_pis.hub_id(), self.new_user_local_id)
+                // Two-layer identity: channel-tree index = channel id alone.
+                let channel_id = ChannelId::new(prev_pis.channel_id() as u64)
                     .map_err(|e| SigBatchStepError::InvalidInput(e.to_string()))?;
 
                 // Verify account leaf membership (read-only)
-                self.account_merkle_proof
+                self.user_merkle_proof
                     .verify(
-                        &self.prev_account_leaf,
-                        user_id.as_u64(),
+                        &self.prev_user_leaf,
+                        channel_id.as_u64(),
                         prev_pis.account_tree_root,
                     )
                     .map_err(|e| SigBatchStepError::MerkleProofError(e.to_string()))?;
 
+                // (pk_set_root, threshold) now live in the per-keyID KeyLeaf (KeyTree).
+                // SECURITY: TODO — bind `self.key_leaf` to the KeyTree at `new_user_key_id` and
+                // bind `new_user_key_id` to `prev_user_leaf.member_key_ids_root` (see field doc).
                 (
-                    self.new_user_local_id,
-                    self.prev_account_leaf.pk_set_root,
-                    self.prev_account_leaf.threshold,
+                    self.new_user_key_id,
+                    self.key_leaf.pk_set_root,
+                    self.key_leaf.threshold,
                     0u32,
                     0u32,
                 )
             } else {
                 (
-                    prev_pis.current_user_local_id,
+                    prev_pis.current_user_key_id,
                     prev_pis.current_user_pk_set_root,
                     prev_pis.current_user_threshold,
                     prev_pis.current_user_sigs_verified,
@@ -264,9 +299,10 @@ where
             Ok(SigBatchPublicInputs {
                 account_tree_root: prev_pis.account_tree_root,
                 block_number: prev_pis.block_number,
-                aggregator_id: prev_pis.hub_id(),
+                channel_id: prev_pis.channel_id(),
                 tx_tree_root: prev_pis.tx_tree_root,
-                current_user_local_id: local_id,
+                signed_digest: prev_pis.signed_digest,
+                current_user_key_id: key_id,
                 current_user_pk_set_root: pk_set_root,
                 current_user_threshold: threshold,
                 current_user_sigs_verified: sigs_verified + 1,
@@ -287,15 +323,20 @@ pub struct SigBatchStepTarget<const D: usize> {
     pub is_finalize: BoolTarget,
     pub initial_account_tree_root: PoseidonHashOutTarget,
     pub initial_block_number: BlockNumberTarget,
-    pub initial_aggregator_id: Target,
+    pub initial_channel_id: Target,
     pub initial_tx_tree_root: Bytes32Target,
+    pub initial_signed_digest: Bytes32Target,
     pub prev_batch_proof: ProofWithPublicInputsTarget<D>,
     pub block_number: BlockNumberTarget,
-    pub aggregator_id: Target,
+    pub channel_id: Target,
     pub tx_tree_root: Bytes32Target,
-    pub new_user_local_id: Target,
-    pub prev_account_leaf: AccountLeafTarget,
-    pub account_merkle_proof: AccountMerkleProofTarget,
+    pub signed_digest: Bytes32Target,
+    pub new_user_key_id: Target,
+    pub prev_user_leaf: ChannelLeafTarget,
+    pub user_merkle_proof: ChannelMerkleProofTarget,
+    // KeyTree record for the new user's key_id — see `SigBatchStepWitness::key_leaf` SECURITY
+    // TODO.
+    pub key_leaf: KeyLeafTarget,
     pub pk_index: Target,
     pub key_set_merkle_proof: KeySetMerkleProofTarget,
     pub spx_sig_targets: SpxSigTargets,
@@ -320,16 +361,23 @@ impl<const D: usize> SigBatchStepTarget<D> {
         // Initial values
         let initial_account_tree_root = PoseidonHashOutTarget::new(builder);
         let initial_block_number = BlockNumberTarget::new(builder, true);
-        let initial_aggregator_id = builder.add_virtual_target();
+        let initial_channel_id = builder.add_virtual_target();
         let initial_tx_tree_root = Bytes32Target::new::<F, D>(builder, true);
+        let initial_signed_digest = Bytes32Target::new::<F, D>(builder, true);
 
         let block_number = BlockNumberTarget::new(builder, true);
-        let aggregator_id = builder.add_virtual_target();
+        let channel_id = builder.add_virtual_target();
         let tx_tree_root = Bytes32Target::new::<F, D>(builder, true);
+        let signed_digest = Bytes32Target::new::<F, D>(builder, true);
 
-        let new_user_local_id = builder.add_virtual_target();
-        let prev_account_leaf = AccountLeafTarget::new(builder, true);
-        let account_merkle_proof = AccountMerkleProofTarget::new(builder, ACCOUNT_TREE_HEIGHT);
+        let new_user_key_id = builder.add_virtual_target();
+        // SECURITY: key_id is used as the member identity (message, verified-users hash,
+        // ordering ids); keep it range-checked (the old combined-id constructor used to
+        // range-check it).
+        builder.range_check(new_user_key_id, KEY_ID_BITS);
+        let prev_user_leaf = ChannelLeafTarget::new(builder, true);
+        let user_merkle_proof = ChannelMerkleProofTarget::new(builder, CHANNEL_TREE_HEIGHT);
+        let key_leaf = KeyLeafTarget::new(builder, true);
         let pk_index = builder.add_virtual_target();
         builder.range_check(pk_index, KEY_SET_TREE_HEIGHT);
         let key_set_merkle_proof = KeySetMerkleProofTarget::new(builder, KEY_SET_TREE_HEIGHT);
@@ -380,7 +428,7 @@ impl<const D: usize> SigBatchStepTarget<D> {
             prev_pis.block_number.value,
             block_number.value,
         );
-        builder.conditional_assert_eq(not_initial.target, prev_pis.hub_id(), aggregator_id);
+        builder.conditional_assert_eq(not_initial.target, prev_pis.channel_id(), channel_id);
         for (a, b) in prev_pis
             .tx_tree_root
             .to_vec()
@@ -389,18 +437,33 @@ impl<const D: usize> SigBatchStepTarget<D> {
         {
             builder.conditional_assert_eq(not_initial.target, *a, *b);
         }
+        // signed_digest consistency (conditional on not_initial)
+        for (a, b) in prev_pis
+            .signed_digest
+            .to_vec()
+            .iter()
+            .zip(signed_digest.to_vec().iter())
+        {
+            builder.conditional_assert_eq(not_initial.target, *a, *b);
+        }
 
-        let sel_hub_id = builder.select(is_initial, initial_aggregator_id, aggregator_id);
+        let sel_channel_id = builder.select(is_initial, initial_channel_id, channel_id);
         let sel_tx_tree_root = Bytes32Target::select(
             builder,
             is_initial,
             initial_tx_tree_root.clone(),
             tx_tree_root.clone(),
         );
+        let sel_signed_digest = Bytes32Target::select(
+            builder,
+            is_initial,
+            initial_signed_digest.clone(),
+            signed_digest.clone(),
+        );
 
         // Previous user state
-        let prev_current_user_local_id =
-            builder.select(is_initial, zero, prev_pis.current_user_local_id);
+        let prev_current_user_key_id =
+            builder.select(is_initial, zero, prev_pis.current_user_key_id);
         let prev_current_user_pk_set_root = PoseidonHashOutTarget::select(
             builder,
             is_initial,
@@ -423,31 +486,30 @@ impl<const D: usize> SigBatchStepTarget<D> {
         let prev_first_user_id = builder.select(is_initial, zero, prev_pis.first_user_id);
         let prev_last_user_id = builder.select(is_initial, zero, prev_pis.last_user_id);
 
-        // ── is_new_user: current_user_local_id == 0 AND not_finalize ──
-        let is_no_current_user = builder.is_equal(prev_current_user_local_id, zero);
+        // ── is_new_user: current_user_key_id == 0 AND not_finalize ──
+        let is_no_current_user = builder.is_equal(prev_current_user_key_id, zero);
         let is_new_user = builder.and(is_no_current_user, not_finalize);
 
-        // ── New user setup: verify account leaf (read-only) ──
-        let user_id_for_new =
-            UserIdTarget::from_parts(builder, sel_hub_id, new_user_local_id, true).value;
+        // ── New user setup: verify account leaf (read-only; channel-tree index = channel id) ──
+        let user_id_for_new = ChannelIdTarget::from_parts(builder, sel_channel_id, true).value;
         let leaf_root_new =
-            account_merkle_proof.get_root::<F, C, D>(builder, &prev_account_leaf, user_id_for_new);
+            user_merkle_proof.get_root::<F, C, D>(builder, &prev_user_leaf, user_id_for_new);
         prev_account_tree_root.conditional_assert_eq(builder, leaf_root_new, is_new_user);
 
-        // Select current user state
-        let cur_local_id =
-            builder.select(is_new_user, new_user_local_id, prev_current_user_local_id);
+        // Select current user state. Two-layer identity: (pk_set_root, threshold) come from the
+        // per-keyID KeyLeaf (KeyTree), no longer from the ChannelLeaf.
+        // SECURITY: TODO — `key_leaf` is not yet bound to the KeyTree at `new_user_key_id`, nor
+        // is `new_user_key_id` bound to `prev_user_leaf.member_key_ids_root`
+        // (tasks/channel-key-tree-design.md §3 steps 2a/2b; needs key_tree_root in the PIs, §6.4).
+        let cur_key_id = builder.select(is_new_user, new_user_key_id, prev_current_user_key_id);
         let cur_pk_set_root = PoseidonHashOutTarget::select(
             builder,
             is_new_user,
-            prev_account_leaf.pk_set_root.clone(),
+            key_leaf.pk_set_root.clone(),
             prev_current_user_pk_set_root,
         );
-        let cur_threshold = builder.select(
-            is_new_user,
-            prev_account_leaf.threshold,
-            prev_current_user_threshold,
-        );
+        let cur_threshold =
+            builder.select(is_new_user, key_leaf.threshold, prev_current_user_threshold);
         let cur_sigs_verified = builder.select(is_new_user, zero, prev_current_user_sigs_verified);
         let cur_last_pk_index = builder.select(is_new_user, zero, prev_current_user_last_pk_index);
 
@@ -462,12 +524,15 @@ impl<const D: usize> SigBatchStepTarget<D> {
             key_set_merkle_proof.get_root::<F, C, D>(builder, &pk_leaf_target, pk_index);
         cur_pk_set_root.conditional_assert_eq(builder, key_set_root_from_proof, not_finalize);
 
-        // Message: [block_number, hub_id, account_no, tx_tree_root×8]
-        let msg_gl: Vec<_> = std::iter::once(block_number.value)
-            .chain(std::iter::once(sel_hub_id))
-            .chain(std::iter::once(cur_local_id))
-            .chain(sel_tx_tree_root.to_vec())
-            .collect();
+        // Message: the 8 u32 limbs of the IMSB signing digest (detail2 §F-2). The digest is
+        // a chain PI; it is recomputed from the block context (binding tx_tree_root) at the
+        // block-level circuit, so verifying over it here preserves the structural guarantee.
+        let msg_gl: Vec<_> = sel_signed_digest.to_vec();
+
+        // SECURITY (detail2 §C-2): tx_tree_root != 0 whenever a member signature is applied
+        // (not_finalize) — H2 = 0 is reserved for in-channel updates.
+        let tx_tree_root_is_zero = sel_tx_tree_root.is_zero::<F, D, Bytes32>(builder);
+        builder.conditional_assert_eq(not_finalize.target, tx_tree_root_is_zero.target, zero);
 
         let pk_gl: Vec<_> = [pub_seed_gl.as_slice(), pub_root_gl.as_slice()].concat();
         let spx_witness = SpxVerifyWitness {
@@ -498,7 +563,7 @@ impl<const D: usize> SigBatchStepTarget<D> {
         let new_sigs_verified_sig = builder.add_const(cur_sigs_verified, F::ONE);
 
         // ── Finalization: check threshold, record user, NO tree update ──
-        let is_zero_user = builder.is_equal(prev_current_user_local_id, zero);
+        let is_zero_user = builder.is_equal(prev_current_user_key_id, zero);
         let has_current_user = builder.not(is_zero_user);
         let finalize_check = builder.and(is_finalize, has_current_user);
         builder.conditional_assert_eq(
@@ -512,11 +577,11 @@ impl<const D: usize> SigBatchStepTarget<D> {
         let sig_check_val = builder.select(is_finalize, sig_surplus, zero);
         builder.range_check(sig_check_val, 32);
 
-        // Compute user_id for finalization
-        let user_id_for_finalize =
-            UserIdTarget::from_parts(builder, sel_hub_id, prev_current_user_local_id, true).value;
+        // Two-layer identity: the finalized "user" identity is the member key_id (the channel id
+        // is a single PI shared by the whole chain); matches the native side above.
+        let user_id_for_finalize = prev_current_user_key_id;
 
-        // Update verified_users_hash: Poseidon(prev || user_id)
+        // Update verified_users_hash: Poseidon(prev || member_key_id)
         let hash_inputs: Vec<_> = prev_verified_users_hash
             .to_vec()
             .into_iter()
@@ -544,7 +609,7 @@ impl<const D: usize> SigBatchStepTarget<D> {
         // last_user_id: updated on every finalize
         let out_last_user_id = builder.select(is_finalize, user_id_for_finalize, prev_last_user_id);
 
-        // Ordering: user_id > prev_last_user_id (when prev_last_user_id != 0)
+        // Ordering: channel_id > prev_last_user_id (when prev_last_user_id != 0)
         let is_prev_last_zero = builder.is_equal(prev_last_user_id, zero);
         let has_prev_finalized = builder.not(is_prev_last_zero);
         let should_check_user_order = builder.and(is_finalize, has_prev_finalized);
@@ -554,7 +619,7 @@ impl<const D: usize> SigBatchStepTarget<D> {
         builder.range_check(user_order_check, 63);
 
         // ── Output ──
-        let out_current_user_local_id = builder.select(is_finalize, zero, cur_local_id);
+        let out_current_user_key_id = builder.select(is_finalize, zero, cur_key_id);
         let out_current_user_pk_set_root =
             PoseidonHashOutTarget::select(builder, is_finalize, zero_hash.clone(), cur_pk_set_root);
         let out_current_user_threshold = builder.select(is_finalize, zero, cur_threshold);
@@ -565,9 +630,10 @@ impl<const D: usize> SigBatchStepTarget<D> {
         let new_pis = SigBatchPublicInputsTarget {
             account_tree_root: prev_account_tree_root,
             block_number: block_number.clone(),
-            aggregator_id: sel_hub_id,
+            channel_id: sel_channel_id,
             tx_tree_root: sel_tx_tree_root,
-            current_user_local_id: out_current_user_local_id,
+            signed_digest: sel_signed_digest,
+            current_user_key_id: out_current_user_key_id,
             current_user_pk_set_root: out_current_user_pk_set_root,
             current_user_threshold: out_current_user_threshold,
             current_user_sigs_verified: out_current_user_sigs_verified,
@@ -593,15 +659,18 @@ impl<const D: usize> SigBatchStepTarget<D> {
             is_finalize,
             initial_account_tree_root,
             initial_block_number,
-            initial_aggregator_id,
+            initial_channel_id,
             initial_tx_tree_root,
+            initial_signed_digest,
             prev_batch_proof,
             block_number,
-            aggregator_id,
+            channel_id,
             tx_tree_root,
-            new_user_local_id,
-            prev_account_leaf,
-            account_merkle_proof,
+            signed_digest,
+            new_user_key_id,
+            prev_user_leaf,
+            user_merkle_proof,
+            key_leaf,
             pk_index,
             key_set_merkle_proof,
             spx_sig_targets,
@@ -631,18 +700,22 @@ impl<const D: usize> SigBatchStepTarget<D> {
             self.initial_block_number
                 .set_witness(witness, initial.block_number);
             witness.set_target(
-                self.initial_aggregator_id,
-                F::from_canonical_u64(initial.aggregator_id as u64),
+                self.initial_channel_id,
+                F::from_canonical_u64(initial.channel_id as u64),
             );
             self.initial_tx_tree_root
                 .set_witness(witness, initial.tx_tree_root);
+            self.initial_signed_digest
+                .set_witness(witness, initial.signed_digest);
         } else {
             self.initial_account_tree_root
                 .set_witness(witness, PoseidonHashOut::default());
             self.initial_block_number
                 .set_witness(witness, BlockNumber::default());
-            witness.set_target(self.initial_aggregator_id, F::ZERO);
+            witness.set_target(self.initial_channel_id, F::ZERO);
             self.initial_tx_tree_root
+                .set_witness(witness, Bytes32::default());
+            self.initial_signed_digest
                 .set_witness(witness, Bytes32::default());
         }
 
@@ -654,18 +727,20 @@ impl<const D: usize> SigBatchStepTarget<D> {
 
         self.block_number.set_witness(witness, value.block_number);
         witness.set_target(
-            self.aggregator_id,
-            F::from_canonical_u64(value.aggregator_id as u64),
+            self.channel_id,
+            F::from_canonical_u64(value.channel_id as u64),
         );
         self.tx_tree_root.set_witness(witness, value.tx_tree_root);
+        self.signed_digest.set_witness(witness, value.signed_digest);
         witness.set_target(
-            self.new_user_local_id,
-            F::from_canonical_u64(value.new_user_local_id as u64),
+            self.new_user_key_id,
+            F::from_canonical_u64(value.new_user_key_id as u64),
         );
-        self.prev_account_leaf
-            .set_witness(witness, &value.prev_account_leaf);
-        self.account_merkle_proof
-            .set_witness(witness, &value.account_merkle_proof);
+        self.prev_user_leaf
+            .set_witness(witness, &value.prev_user_leaf);
+        self.user_merkle_proof
+            .set_witness(witness, &value.user_merkle_proof);
+        self.key_leaf.set_witness(witness, &value.key_leaf);
         witness.set_target(self.pk_index, F::from_canonical_u64(value.pk_index as u64));
         self.key_set_merkle_proof
             .set_witness(witness, &value.key_set_merkle_proof);

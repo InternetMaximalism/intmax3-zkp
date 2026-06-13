@@ -21,11 +21,15 @@ use crate::{
         BalancePublicInputsError, BalancePublicInputsTarget,
     },
     common::{
+        channel_id::{ChannelId, ChannelIdTarget},
         private_state::{PrivateState, PrivateStateTarget},
         public_state::PublicStateTarget,
         salt::{Salt, SaltTarget},
         u63::BlockNumberTarget,
-        user_id::{UserId, UserIdTarget},
+    },
+    ethereum_types::{
+        bytes32::{Bytes32, Bytes32Target},
+        u32limb_trait::U32LimbTargetTrait as _,
     },
     utils::{
         conversion::ToU64,
@@ -66,7 +70,7 @@ pub struct BalanceSwichBoard<
 > where
     <C as GenericConfig<D>>::Hasher: AlgebraicHasher<F>,
 {
-    pub initial_value: Option<(UserId, Salt)>,
+    pub initial_value: Option<(ChannelId, Salt)>,
     pub receive_transfer_proof: Option<ProofWithPublicInputs<F, C, D>>,
     pub receive_deposit_proof: Option<ProofWithPublicInputs<F, C, D>>,
     pub send_tx_proof: Option<ProofWithPublicInputs<F, C, D>>,
@@ -96,8 +100,8 @@ where
         }
 
         if self.initial_value.is_some() {
-            let (user_id, salt) = self.initial_value.unwrap();
-            let pis = BalancePublicInputs::new(user_id, salt);
+            let (channel_id, salt) = self.initial_value.unwrap();
+            let pis = BalancePublicInputs::new(channel_id, salt);
             return Ok(BalanceFullPublicInputs {
                 pis,
                 vd: balance_vd.verifier_only.clone(),
@@ -157,7 +161,7 @@ where
 pub struct BalanceSwichBoardTarget<const D: usize> {
     pub one_hot: [BoolTarget; 4], // initial_value, receive_transfer, receive_deposit, send_tx
 
-    pub initial_value: (UserIdTarget, SaltTarget),
+    pub initial_value: (ChannelIdTarget, SaltTarget),
     pub receive_transfer_proof: ProofWithPublicInputsTarget<D>,
     pub receive_deposit_proof: ProofWithPublicInputsTarget<D>,
     pub send_tx_proof: ProofWithPublicInputsTarget<D>,
@@ -196,7 +200,7 @@ impl<const D: usize> BalanceSwichBoardTarget<D> {
         builder.assert_one(sum);
 
         // Case0: initial value
-        let initial_user_id = UserIdTarget::new(builder, true);
+        let initial_user_id = ChannelIdTarget::new(builder, true);
         let initial_salt = SaltTarget::new(builder);
         let default_private_state = PrivateState::new(Salt::default());
         let initial_private_state = PrivateStateTarget {
@@ -220,12 +224,14 @@ impl<const D: usize> BalanceSwichBoardTarget<D> {
             salt: initial_salt,
         };
         let initial_private_commitment = initial_private_state.commitment(builder);
-        let default_pis = BalancePublicInputs::new(UserId::dummy(), Salt::default());
+        let default_pis = BalancePublicInputs::new(ChannelId::dummy(), Salt::default());
         let initial_pis = BalancePublicInputsTarget {
-            user_id: initial_user_id.clone(),
+            channel_id: initial_user_id.clone(),
             public_state: PublicStateTarget::constant(builder, &default_pis.public_state),
             block_r: BlockNumberTarget::constant(builder, default_pis.block_r),
             private_commitment: initial_private_commitment,
+            // Genesis settled-tx chain is the all-zero Bytes32 (detail2 §F-1).
+            settled_tx_chain: Bytes32Target::constant(builder, Bytes32::default()),
         };
         let new_pis0 = BalanceFullPublicInputsTarget {
             pis: initial_pis,
@@ -311,11 +317,13 @@ impl<const D: usize> BalanceSwichBoardTarget<D> {
             witness.set_bool_target(*target, *flag);
         }
 
-        if let Some((user_id, salt)) = value.initial_value {
-            self.initial_value.0.set_witness(witness, user_id);
+        if let Some((channel_id, salt)) = value.initial_value {
+            self.initial_value.0.set_witness(witness, channel_id);
             self.initial_value.1.set_witness(witness, salt);
         } else {
-            self.initial_value.0.set_witness(witness, UserId::dummy());
+            self.initial_value
+                .0
+                .set_witness(witness, ChannelId::dummy());
             self.initial_value.1.set_witness(witness, Salt::default());
         }
 
@@ -609,7 +617,8 @@ mod tests {
     use super::*;
     use crate::{
         circuits::balance::balance_pis::BalanceFullPublicInputs,
-        common::{public_state::PublicState, salt::Salt, u63::BlockNumber, user_id::UserId},
+        common::{channel_id::ChannelId, public_state::PublicState, salt::Salt, u63::BlockNumber},
+        ethereum_types::u32limb_trait::U32LimbTrait as _,
         utils::{conversion::ToField, cyclic::add_noop_gates, poseidon_hash_out::PoseidonHashOut},
     };
     use plonky2::{
@@ -661,7 +670,7 @@ mod tests {
     }
 
     fn make_balance_full_inputs(
-        user_id: UserId,
+        channel_id: ChannelId,
         block_r: u64,
         commitment_seed: u64,
         balance_vd: &VerifierCircuitData<F, C, D>,
@@ -675,10 +684,21 @@ mod tests {
         ])
         .unwrap();
         let pis = BalancePublicInputs {
-            user_id,
+            channel_id,
             public_state,
             block_r: BlockNumber::new(block_r).unwrap(),
             private_commitment,
+            settled_tx_chain: Bytes32::from_u32_slice(&[
+                commitment_seed as u32,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                1,
+            ])
+            .unwrap(),
         };
         BalanceFullPublicInputs {
             pis,
@@ -693,12 +713,12 @@ mod tests {
         let balance_vd = balance_data.verifier_data();
         let balance_cd = balance_data.common.clone();
 
-        let initial_user = UserId::new(0, 1).unwrap();
+        let initial_user = ChannelId::new(1).unwrap();
         let initial_salt = Salt::default();
 
-        let transfer_pis = make_balance_full_inputs(UserId::new(0, 2).unwrap(), 5, 10, &balance_vd);
-        let deposit_pis = make_balance_full_inputs(UserId::new(0, 3).unwrap(), 6, 20, &balance_vd);
-        let send_pis = make_balance_full_inputs(UserId::new(0, 4).unwrap(), 7, 30, &balance_vd);
+        let transfer_pis = make_balance_full_inputs(ChannelId::new(2).unwrap(), 5, 10, &balance_vd);
+        let deposit_pis = make_balance_full_inputs(ChannelId::new(3).unwrap(), 6, 20, &balance_vd);
+        let send_pis = make_balance_full_inputs(ChannelId::new(4).unwrap(), 7, 30, &balance_vd);
 
         let transfer_proof = prove_balance(&balance_data, &balance_target, &transfer_pis);
         let deposit_proof = prove_balance(&balance_data, &balance_target, &deposit_pis);

@@ -254,7 +254,7 @@ where
         )
         .map_err(|e| SingleWithdawalWitnessError::BalancePublicInputs(e.to_string()))?;
         let balance_pis = balance_full_pis.pis;
-        let user_id = balance_pis.user_id;
+        let channel_id = balance_pis.channel_id;
 
         // verify the private state by checking the commitment
         if balance_pis.private_commitment != self.private_state.commitment() {
@@ -298,15 +298,15 @@ where
             })?;
 
         // verify the account state
-        if self.account_state.user_id != user_id {
+        if self.account_state.channel_id != channel_id {
             return Err(SingleWithdawalWitnessError::InconsistentWitness(format!(
                 "account state user {:?} != balance proof user {:?}",
-                self.account_state.user_id, user_id
+                self.account_state.channel_id, channel_id
             )));
         }
         if self.account_state.account_tree_root != public_state.account_tree_root {
             return Err(SingleWithdawalWitnessError::InconsistentWitness(format!(
-                "account tree root mismatch: {:?} vs {:?}",
+                "user tree root mismatch: {:?} vs {:?}",
                 self.account_state.account_tree_root, public_state.account_tree_root
             )));
         }
@@ -325,8 +325,10 @@ where
         // verify that the tx is included in the tx tree root
         match (&self.tx_v2, &self.tx_v2_merkle_proof) {
             (Some(tx_v2), Some(tx_v2_merkle_proof)) => {
+                // Two-layer identity: the block tx tree is indexed by channel_id
+                // (TX_TREE_HEIGHT == CHANNEL_ID_BITS).
                 tx_v2_merkle_proof
-                    .verify(tx_v2, user_id.local_id() as u64, tx_tree_root)
+                    .verify(tx_v2, channel_id.as_u64(), tx_tree_root)
                     .map_err(|e| SingleWithdawalWitnessError::TxV2MerkleProof(e.to_string()))?;
 
                 if tx_v2.tx_class != TxClass::UserTransfer {
@@ -354,7 +356,7 @@ where
             }
             (None, None) => {
                 self.tx_merkle_proof
-                    .verify(&self.tx, user_id.local_id() as u64, tx_tree_root)
+                    .verify(&self.tx, channel_id.as_u64(), tx_tree_root)
                     .map_err(|e| SingleWithdawalWitnessError::TxMerkleProof(e.to_string()))?;
             }
             _ => {
@@ -370,7 +372,7 @@ where
 
         let settled_transfer = SettledTransfer::new(
             transfer.clone(),
-            user_id,
+            channel_id,
             self.transfer_witness.transfer_index,
             tx_block_number,
         );
@@ -444,7 +446,9 @@ impl<const D: usize> SingleWithdawalTarget<D> {
             .connect(builder, &balance_pis.public_state);
         let public_state = update_public_state.new.clone();
 
-        account_state.user_id.connect(builder, &balance_pis.user_id);
+        account_state
+            .channel_id
+            .connect(builder, &balance_pis.channel_id);
         account_state
             .account_tree_root
             .connect(builder, public_state.account_tree_root.clone());
@@ -464,20 +468,22 @@ impl<const D: usize> SingleWithdawalTarget<D> {
             .send_leaf
             .tx_tree_root
             .reduce_to_hash_out(builder);
-        let local_id = balance_pis.user_id.local_id(builder);
+        // Two-layer identity: the block tx tree is indexed by channel_id
+        // (TX_TREE_HEIGHT == CHANNEL_ID_BITS).
+        let tx_index = balance_pis.channel_id.channel_id(builder);
         let use_legacy_tx = builder.not(use_tx_v2);
         tx_merkle_proof.conditional_verify::<F, C, D>(
             builder,
             use_legacy_tx,
             &tx,
-            local_id,
+            tx_index,
             tx_tree_root.clone(),
         );
         tx_v2_merkle_proof.conditional_verify::<F, C, D>(
             builder,
             use_tx_v2,
             &tx_v2,
-            local_id,
+            tx_index,
             tx_tree_root,
         );
 
@@ -499,7 +505,7 @@ impl<const D: usize> SingleWithdawalTarget<D> {
 
         let settled_transfer = SettledTransferTarget {
             inner: transfer_witness.transfer.clone(),
-            from: balance_pis.user_id.clone(),
+            from: balance_pis.channel_id.clone(),
             transfer_index: transfer_witness.transfer_index,
             block_number: account_state.send_leaf.cur.clone(),
         };
@@ -704,11 +710,11 @@ mod tests {
             },
         },
         common::{
+            channel_id::ChannelId,
             salt::Salt,
             transfer::Transfer,
             trees::{transfer_tree::TransferTree, tx_tree::TxTree},
             tx::Tx,
-            user_id::UserId,
         },
         constants::MAX_NUM_TRANSFERS_PER_TX,
         ethereum_types::{
@@ -738,10 +744,10 @@ mod tests {
             BlockWitnessGeneratorHandle::new(BlockWitnessGenerator::new(&supported_user_counts));
 
         let mut rng = StdRng::seed_from_u64(1234);
-        let user_id = UserId::new(0, 1).unwrap();
+        let channel_id = ChannelId::new(1).unwrap();
         let salt = Salt::rand(&mut rng);
         let mut balance_witness_generator = BalanceWitnessGenerator::new(
-            user_id,
+            channel_id,
             salt,
             block_witness_generator.clone(),
             &balance_processor,
@@ -750,7 +756,7 @@ mod tests {
 
         // Fund the account via deposit.
         let deposit_salt = Salt::rand(&mut rng);
-        let deposit_recipient = calculate_recipient_from_user_id(user_id, deposit_salt);
+        let deposit_recipient = calculate_recipient_from_user_id(channel_id, deposit_salt);
         block_witness_generator
             .borrow_mut()
             .add_deposit(
@@ -804,19 +810,14 @@ mod tests {
             nonce: balance_witness_generator.full_private_state.nonce,
         };
         let mut tx_tree = TxTree::init();
-        tx_tree.update(user_id.local_id() as u64, tx.clone());
+        tx_tree.update(channel_id.as_u64(), tx.clone());
         let tx_tree_root = tx_tree.get_root();
         let tx_tree_root_bytes: Bytes32 = tx_tree_root.into();
-        let tx_merkle_proof = tx_tree.prove(user_id.local_id() as u64);
+        let tx_merkle_proof = tx_tree.prove(channel_id.as_u64());
 
         block_witness_generator
             .borrow_mut()
-            .add_block(
-                user_id.aggregator_id(),
-                &[user_id.local_id()],
-                0,
-                tx_tree_root_bytes,
-            )
+            .add_block(channel_id.channel_id(), &[1], 0, tx_tree_root_bytes)
             .unwrap();
 
         let send_tx_data = SendTxData {
@@ -826,6 +827,8 @@ mod tests {
             tx_merkle_proof: tx_merkle_proof.clone(),
             tx_v2: None,
             tx_v2_merkle_proof: None,
+            transfer: transfer.clone(),
+            transfer_merkle_proof: transfer_merkle_proof.clone(),
         };
         let send_tx_witness = balance_witness_generator
             .send_tx_witness(&send_tx_data)
@@ -900,10 +903,10 @@ mod tests {
             BlockWitnessGeneratorHandle::new(BlockWitnessGenerator::new(&supported_user_counts));
 
         let mut rng = StdRng::seed_from_u64(4321);
-        let user_id = UserId::new(0, 1).unwrap();
+        let channel_id = ChannelId::new(1).unwrap();
         let salt = Salt::rand(&mut rng);
         let mut balance_witness_generator = BalanceWitnessGenerator::new(
-            user_id,
+            channel_id,
             salt,
             block_witness_generator.clone(),
             &balance_processor,
@@ -911,7 +914,7 @@ mod tests {
         .unwrap();
 
         let deposit_salt = Salt::rand(&mut rng);
-        let deposit_recipient = calculate_recipient_from_user_id(user_id, deposit_salt);
+        let deposit_recipient = calculate_recipient_from_user_id(channel_id, deposit_salt);
         block_witness_generator
             .borrow_mut()
             .add_deposit(
@@ -969,23 +972,18 @@ mod tests {
             channel_action_root: PoseidonHashOut::default(),
         };
         let mut tx_v2_tree = TxV2Tree::init();
-        tx_v2_tree.update(user_id.local_id() as u64, tx_v2);
+        tx_v2_tree.update(channel_id.as_u64(), tx_v2);
         let tx_tree_root = tx_v2_tree.get_root();
         let tx_tree_root_bytes: Bytes32 = tx_tree_root.into();
-        let tx_v2_merkle_proof = tx_v2_tree.prove(user_id.local_id() as u64);
+        let tx_v2_merkle_proof = tx_v2_tree.prove(channel_id.as_u64());
 
         let mut tx_tree = TxTree::init();
-        tx_tree.update(user_id.local_id() as u64, tx.clone());
-        let tx_merkle_proof = tx_tree.prove(user_id.local_id() as u64);
+        tx_tree.update(channel_id.as_u64(), tx.clone());
+        let tx_merkle_proof = tx_tree.prove(channel_id.as_u64());
 
         block_witness_generator
             .borrow_mut()
-            .add_block(
-                user_id.aggregator_id(),
-                &[user_id.local_id()],
-                0,
-                tx_tree_root_bytes,
-            )
+            .add_block(channel_id.channel_id(), &[1], 0, tx_tree_root_bytes)
             .unwrap();
 
         let send_tx_data = SendTxData {
@@ -995,6 +993,8 @@ mod tests {
             tx_merkle_proof: tx_merkle_proof.clone(),
             tx_v2: Some(tx_v2),
             tx_v2_merkle_proof: Some(tx_v2_merkle_proof.clone()),
+            transfer: transfer.clone(),
+            transfer_merkle_proof: transfer_merkle_proof.clone(),
         };
         let send_tx_witness = balance_witness_generator
             .send_tx_witness(&send_tx_data)

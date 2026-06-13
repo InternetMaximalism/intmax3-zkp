@@ -273,13 +273,13 @@ mod tests {
         let mut generator = BlockWitnessGenerator::new(&supported_user_counts);
         let initial_state = generator.current_extended_public_state();
 
-        let aggregator_id = 1;
-        // Use empty local_ids (all-padding) to bypass SPHINCS+ signature constraints.
-        let local_ids: Vec<u32> = vec![];
+        let channel_id = 1;
+        // Use empty key_ids (all-padding) to bypass SPHINCS+ signature constraints.
+        let key_ids: Vec<u32> = vec![];
         let timestamp = 42u64;
         let tx_tree_root = Bytes32::default();
         generator
-            .add_block(aggregator_id, &local_ids, timestamp, tx_tree_root)
+            .add_block(channel_id, &key_ids, timestamp, tx_tree_root)
             .expect("add block");
 
         let block_number = generator.block_number;

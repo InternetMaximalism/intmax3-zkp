@@ -23,12 +23,12 @@ use intmax3_zkp::{
         },
     },
     common::{
+        channel_id::ChannelId as UserId,
         salt::Salt,
         transfer::Transfer,
         trees::{transfer_tree::TransferTree, tx_tree::TxTree},
         tx::Tx,
         u63::BlockNumber,
-        user_id::UserId,
     },
     ethereum_types::{address::Address, bytes32::Bytes32, u32limb_trait::U32LimbTrait, u256::U256},
 };
@@ -64,7 +64,7 @@ fn e2e_deposit_validity_withdrawal() {
         BlockWitnessGeneratorHandle::new(BlockWitnessGenerator::new(&supported_user_counts));
 
     let mut rng = StdRng::seed_from_u64(1);
-    let user_id = UserId::new(0, 1).expect("user id");
+    let user_id = UserId::new(1).expect("user id");
     let salt = Salt::rand(&mut rng);
 
     let mut balance_witness_generator = BalanceWitnessGenerator::new(
@@ -117,7 +117,7 @@ fn e2e_deposit_validity_withdrawal() {
     // ----- Internal transfer & receive -----
     let sender_proof = balance_witness_generator.balance_proof.clone();
     let transfer_salt = Salt::rand(&mut rng);
-    let user_id2 = UserId::new(1, 1).expect("user id 2");
+    let user_id2 = UserId::new(2).expect("user id 2");
     let mut balance_witness_generator2 = BalanceWitnessGenerator::new(
         user_id2,
         Salt::rand(&mut rng),
@@ -157,20 +157,15 @@ fn e2e_deposit_validity_withdrawal() {
     };
 
     let mut internal_tx_tree = TxTree::init();
-    internal_tx_tree.update(user_id.local_id() as u64, internal_tx.clone());
+    internal_tx_tree.update(user_id.as_u64(), internal_tx.clone());
     let internal_tx_tree_root = internal_tx_tree.get_root();
     let internal_tx_tree_root_bytes: Bytes32 = internal_tx_tree_root.into();
-    let internal_tx_merkle_proof = internal_tx_tree.prove(user_id.local_id() as u64);
+    let internal_tx_merkle_proof = internal_tx_tree.prove(user_id.as_u64());
 
     {
         let mut generator = block_witness_generator.borrow_mut();
         generator
-            .add_block(
-                user_id.aggregator_id(),
-                &[user_id.local_id()],
-                1,
-                internal_tx_tree_root_bytes,
-            )
+            .add_block(user_id.channel_id(), &[1], 1, internal_tx_tree_root_bytes)
             .expect("apply internal transfer block");
     }
 
@@ -179,6 +174,10 @@ fn e2e_deposit_validity_withdrawal() {
         tx_tree_root: internal_tx_tree_root_bytes,
         tx: internal_tx.clone(),
         tx_merkle_proof: internal_tx_merkle_proof.clone(),
+        tx_v2: None,
+        tx_v2_merkle_proof: None,
+        transfer: internal_transfer.clone(),
+        transfer_merkle_proof: internal_transfer_merkle_proof.clone(),
     };
     let internal_send_tx_witness = balance_witness_generator
         .send_tx_witness(&internal_send_tx_data)
@@ -210,6 +209,8 @@ fn e2e_deposit_validity_withdrawal() {
         transfer_index: internal_transfer_index,
         transfer_merkle_proof: internal_transfer_merkle_proof,
         transfer_salt,
+        tx_v2: None,
+        tx_v2_merkle_proof: None,
     };
     let receive_transfer_witness = balance_witness_generator2
         .receive_transfer_witness(&receive_transfer_data)
@@ -259,20 +260,15 @@ fn e2e_deposit_validity_withdrawal() {
     };
 
     let mut withdrawal_tx_tree = TxTree::init();
-    withdrawal_tx_tree.update(user_id.local_id() as u64, withdrawal_tx.clone());
+    withdrawal_tx_tree.update(user_id.as_u64(), withdrawal_tx.clone());
     let withdrawal_tx_tree_root = withdrawal_tx_tree.get_root();
     let withdrawal_tx_tree_root_bytes: Bytes32 = withdrawal_tx_tree_root.into();
-    let withdrawal_tx_merkle_proof = withdrawal_tx_tree.prove(user_id.local_id() as u64);
+    let withdrawal_tx_merkle_proof = withdrawal_tx_tree.prove(user_id.as_u64());
 
     {
         let mut generator = block_witness_generator.borrow_mut();
         generator
-            .add_block(
-                user_id.aggregator_id(),
-                &[user_id.local_id()],
-                2,
-                withdrawal_tx_tree_root_bytes,
-            )
+            .add_block(user_id.channel_id(), &[1], 2, withdrawal_tx_tree_root_bytes)
             .expect("apply withdrawal tx block");
     }
 
@@ -281,6 +277,10 @@ fn e2e_deposit_validity_withdrawal() {
         tx_tree_root: withdrawal_tx_tree_root_bytes,
         tx: withdrawal_tx.clone(),
         tx_merkle_proof: withdrawal_tx_merkle_proof.clone(),
+        tx_v2: None,
+        tx_v2_merkle_proof: None,
+        transfer: withdrawal_transfer.clone(),
+        transfer_merkle_proof: withdrawal_transfer_merkle_proof.clone(),
     };
     let withdrawal_send_tx_witness = balance_witness_generator
         .send_tx_witness(&withdrawal_send_tx_data)
@@ -309,6 +309,8 @@ fn e2e_deposit_validity_withdrawal() {
         transfer: withdrawal_transfer.clone(),
         transfer_index: withdrawal_transfer_index,
         transfer_merkle_proof: withdrawal_transfer_merkle_proof.clone(),
+        tx_v2: None,
+        tx_v2_merkle_proof: None,
     };
     let single_withdrawal_witness = balance_witness_generator
         .single_withdrawal_witness(&single_withdrawal_data)
@@ -351,12 +353,12 @@ fn e2e_deposit_validity_withdrawal() {
     let ext_public_state = block_witness_generator
         .borrow()
         .current_extended_public_state();
-    let withdrawal_aggregator = Address::rand(&mut rng);
+    let withdrawal_prover = Address::rand(&mut rng);
     let withdrawal_final_timer = Instant::now();
     let withdrawal_proof = withdrawal_processor
         .prove_final(
             &withdrawal_chain_proof,
-            withdrawal_aggregator,
+            withdrawal_prover,
             &ext_public_state,
         )
         .expect("withdrawal proof");

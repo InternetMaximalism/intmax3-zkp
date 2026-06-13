@@ -84,7 +84,7 @@ node server.js        # Serves at https://localhost:8000
 
 1. **Balance Proofs** (`src/circuits/balance/`) — User account state (spend, send-tx, receive-transfer, receive-deposit). Uses recursive IVC via a switch board circuit that routes to sub-circuits, coordinated by `balance_processor.rs`.
 
-2. **Validity Proofs** (`src/circuits/validity/`) — Block-level consensus. Two chains: block hash chain (account tree updates + SPHINCS+ signature verification) and deposit hash chain. Main circuit in `validity_circuit.rs` binds initial/final state commitments. Public inputs = `keccak256(ValidityPublicInputs)` for on-chain binding.
+2. **Validity Proofs** (`src/circuits/validity/`) — Block-level consensus. Two chains: block hash chain (user tree updates + SPHINCS+ signature verification) and deposit hash chain. Main circuit in `validity_circuit.rs` binds initial/final state commitments. Public inputs = `keccak256(ValidityPublicInputs)` for on-chain binding.
 
 3. **Withdrawal Proofs** (`src/circuits/withdraw/`) — Extract transfers from balance proofs and aggregate N withdrawals via chain circuit.
 

@@ -23,10 +23,14 @@ use crate::{
             update_public_state::{UpdatePublicState, UpdatePublicStateTarget},
         },
     },
-    common::u63::{BlockNumber, BlockNumberTarget},
+    common::{
+        balance_state::{settled_tx_chain_push, settled_tx_chain_push_circuit},
+        u63::{BlockNumber, BlockNumberTarget},
+    },
     ethereum_types::u32limb_trait::U32LimbTargetTrait as _,
     utils::{
         conversion::ToU64,
+        cyclic::add_const_gate,
         serialize::{AllGateSerializer, AllGeneratorSerializer, CircuitSerializationError},
     },
 };
@@ -102,7 +106,7 @@ where
         let balance_vd = prev_full_pis.vd.clone();
 
         let prev_balance_pis = prev_full_pis.pis;
-        let receiver_user_id = prev_balance_pis.user_id;
+        let receiver_user_id = prev_balance_pis.channel_id;
 
         self.update_public_state.verify().map_err(|e| {
             ReceiveDepositError::ConnectionError(format!(
@@ -126,10 +130,10 @@ where
                 ))
             })?;
 
-        if self.account_state.user_id != receiver_user_id {
+        if self.account_state.channel_id != receiver_user_id {
             return Err(ReceiveDepositError::ConnectionError(format!(
-                "account_state.user_id {:?} != receiver_user_id {:?}",
-                self.account_state.user_id, receiver_user_id,
+                "account_state.channel_id {:?} != receiver_user_id {:?}",
+                self.account_state.channel_id, receiver_user_id,
             )));
         }
         if self.account_state.account_tree_root != public_state.account_tree_root {
@@ -139,10 +143,10 @@ where
             )));
         }
 
-        if self.deposit_witness.user_id != receiver_user_id {
+        if self.deposit_witness.channel_id != receiver_user_id {
             return Err(ReceiveDepositError::ConnectionError(format!(
-                "deposit_witness.user_id {:?} != receiver_user_id {:?}",
-                self.deposit_witness.user_id, receiver_user_id,
+                "deposit_witness.channel_id {:?} != receiver_user_id {:?}",
+                self.deposit_witness.channel_id, receiver_user_id,
             )));
         }
 
@@ -171,7 +175,7 @@ where
             )));
         }
 
-        if self.account_state.account_leaf.prev != BlockNumber::default() {
+        if self.account_state.channel_leaf.prev != BlockNumber::default() {
             if self.account_state.send_leaf.prev > prev_block_r {
                 return Err(ReceiveDepositError::BlockNumberError(format!(
                     "Not account_state.send_leaf.prev <= prev_balance_pis.block_r: {:?} <= {:?}",
@@ -225,12 +229,20 @@ where
 
         let new_private_commitment = self.update_private_state.new_private_state.commitment();
 
+        // detail2 §C-6/§F-1: every consumed deposit is folded into the settled-tx chain. The
+        // concrete "deposit hash" of the spec is `Deposit::nullifier()` — the same value that is
+        // inserted into the nullifier tree, so the chain leaf and the double-spend guard bind the
+        // identical deposit instance.
+        let new_settled_tx_chain =
+            settled_tx_chain_push(prev_balance_pis.settled_tx_chain, deposit_nullifier);
+
         let new_balance_pis = BalanceFullPublicInputs {
             pis: BalancePublicInputs {
-                user_id: receiver_user_id,
+                channel_id: receiver_user_id,
                 public_state,
                 block_r: self.new_block_r,
                 private_commitment: new_private_commitment,
+                settled_tx_chain: new_settled_tx_chain,
             },
             vd: balance_vd,
         };
@@ -282,15 +294,15 @@ impl<const D: usize> ReceiveDepositTarget<D> {
         let public_state = &update_public_state.new;
 
         account_state
-            .user_id
-            .connect(builder, &prev_balance_pis.user_id);
+            .channel_id
+            .connect(builder, &prev_balance_pis.channel_id);
         account_state
             .account_tree_root
             .connect(builder, public_state.account_tree_root.clone());
 
         deposit_witness
-            .user_id
-            .connect(builder, &prev_balance_pis.user_id);
+            .channel_id
+            .connect(builder, &prev_balance_pis.channel_id);
         deposit_witness
             .deposit_tree_root
             .connect(builder, public_state.deposit_tree_root.clone());
@@ -299,7 +311,7 @@ impl<const D: usize> ReceiveDepositTarget<D> {
         new_block_r.enforce_ge(builder, &prev_block_r);
         public_state.block_number.enforce_ge(builder, &new_block_r);
 
-        let prev_is_zero = account_state.account_leaf.prev.is_zero(builder);
+        let prev_is_zero = account_state.channel_leaf.prev.is_zero(builder);
         let has_outgoing = builder.not(prev_is_zero);
         prev_block_r.conditional_ge(builder, &account_state.send_leaf.prev, has_outgoing);
         account_state
@@ -326,11 +338,22 @@ impl<const D: usize> ReceiveDepositTarget<D> {
         prev_private_commitment.connect(builder, prev_balance_pis.private_commitment.clone());
         let new_private_commitment = update_private_state.new_private_state.commitment(builder);
 
+        // detail2 §C-6/§F-1: unconditionally fold the consumed deposit into the settled-tx chain.
+        // The chain leaf is the in-circuit deposit nullifier — the very value whose merkle-bound
+        // preimage (the deposit leaf) was just verified against public_state.deposit_tree_root,
+        // so the chain PI is a faithful fold of the deposits this proof actually consumed.
+        let new_settled_tx_chain = settled_tx_chain_push_circuit::<F, C, D>(
+            builder,
+            prev_balance_pis.settled_tx_chain,
+            deposit_nullifier_target,
+        );
+
         let new_pis = BalancePublicInputsTarget {
-            user_id: prev_balance_pis.user_id.clone(),
+            channel_id: prev_balance_pis.channel_id.clone(),
             public_state: public_state.clone(),
             block_r: new_block_r.clone(),
             private_commitment: new_private_commitment,
+            settled_tx_chain: new_settled_tx_chain,
         };
         let new_full_pis = BalanceFullPublicInputsTarget {
             pis: new_pis,
@@ -397,6 +420,14 @@ where
         let target = ReceiveDepositTarget::new::<F, C>(&mut builder, &balance_cd);
         let public_inputs = target.new_full_pis.clone();
         builder.register_public_inputs(&public_inputs.to_vec(&balance_cd.config));
+
+        // Add a constant gate to enable `conditionally_verify_proof` (same as send_tx /
+        // receive_transfer): the dummy-circuit reconstruction always emits a `ConstantGate`,
+        // so this circuit's gate set must contain one as well. Since the P5 keccak hook
+        // (settled_tx_chain_push_circuit) supplies enough spare constant wires, the builder
+        // no longer inserts a `ConstantGate` on its own.
+        add_const_gate(&mut builder);
+
         let data = builder.build();
 
         Self {
@@ -498,21 +529,23 @@ mod tests {
             },
         },
         common::{
+            channel_id::ChannelId,
             deposit::Deposit,
             private_state::FullPrivateState,
             public_state::PublicState,
             salt::Salt,
             trees::{
-                account_tree::{AccountLeaf, AccountTree, SendLeaf, SendTree},
                 asset_tree::AssetTree,
+                channel_tree::{ChannelLeaf, ChannelTree, SendLeaf, SendTree},
                 deposit_tree::DepositTree,
                 nullifier_tree::NullifierTree,
             },
             u63::{BlockNumber, U63},
-            user_id::UserId,
         },
-        constants::{ACCOUNT_TREE_HEIGHT, ASSET_TREE_HEIGHT, SEND_TREE_HEIGHT},
-        ethereum_types::{address::Address, bytes32::Bytes32, u256::U256},
+        constants::{ASSET_TREE_HEIGHT, CHANNEL_TREE_HEIGHT, SEND_TREE_HEIGHT},
+        ethereum_types::{
+            address::Address, bytes32::Bytes32, u32limb_trait::U32LimbTrait as _, u256::U256,
+        },
         utils::{
             conversion::ToField as _, cyclic::TestCyclicCircuit, poseidon_hash_out::PoseidonHashOut,
         },
@@ -528,7 +561,7 @@ mod tests {
     #[cfg_attr(debug_assertions, ignore = "run with --release")]
     #[test]
     fn test_receive_deposit_circuit() {
-        let receiver_user_id = UserId::new(0, 7).unwrap();
+        let receiver_user_id = ChannelId::new(7).unwrap();
         let mut rng = rand::thread_rng();
         let deposit_salt = Salt::rand(&mut rng);
 
@@ -570,18 +603,17 @@ mod tests {
         let send_leaf_index = 0u32;
         let send_merkle_proof = send_tree.prove(send_leaf_index as u64);
 
-        let account_leaf = AccountLeaf {
+        let channel_leaf = ChannelLeaf {
             index: send_tree.len() as u32,
             prev: BlockNumber::new(0).unwrap(),
             send_tree_root: send_tree.get_root(),
-            pk_set_root: PoseidonHashOut::default(),
-            threshold: 0,
+            member_key_ids_root: ChannelLeaf::default().member_key_ids_root,
         };
 
-        let mut account_tree = AccountTree::new(ACCOUNT_TREE_HEIGHT);
-        account_tree.update(receiver_user_id.as_u64(), account_leaf.clone());
-        let account_merkle_proof = account_tree.prove(receiver_user_id.as_u64());
-        let account_tree_root = account_tree.get_root();
+        let mut channel_tree = ChannelTree::new(CHANNEL_TREE_HEIGHT);
+        channel_tree.update(receiver_user_id.as_u64(), channel_leaf.clone());
+        let user_merkle_proof = channel_tree.prove(receiver_user_id.as_u64());
+        let account_tree_root = channel_tree.get_root();
 
         let account_state = AccountState::new(
             receiver_user_id,
@@ -589,8 +621,8 @@ mod tests {
             send_leaf,
             send_leaf_index,
             send_merkle_proof,
-            account_leaf,
-            account_merkle_proof,
+            channel_leaf,
+            user_merkle_proof,
         )
         .expect("account state should be valid");
 
@@ -632,11 +664,14 @@ mod tests {
             UpdatePublicState::new(public_state.clone(), public_state.clone(), None)
                 .expect("update public state");
 
+        // Nonzero previous chain so the test exercises real folding, not just genesis push.
+        let prev_settled_tx_chain = Bytes32::from_u32_slice(&[7, 7, 7, 7, 7, 7, 7, 7]).unwrap();
         let prev_balance_pis = BalancePublicInputs {
-            user_id: receiver_user_id,
+            channel_id: receiver_user_id,
             public_state: update_public_state.old.clone(),
             block_r: prev_block_r,
             private_commitment: prev_private_state.commitment(),
+            settled_tx_chain: prev_settled_tx_chain,
         };
 
         let balance_common_data =
@@ -686,5 +721,13 @@ mod tests {
 
         assert_eq!(proof.public_inputs, expected_fields);
         assert_eq!(expected.pis.block_r, new_block_r);
+        // detail2 §C-6: every consumed deposit chains its nullifier (the "deposit hash").
+        assert_eq!(
+            expected.pis.settled_tx_chain,
+            crate::common::balance_state::settled_tx_chain_push(
+                prev_settled_tx_chain,
+                deposit.nullifier()
+            ),
+        );
     }
 }

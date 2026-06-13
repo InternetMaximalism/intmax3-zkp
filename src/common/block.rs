@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     common::{trees::tx_v2_tree::compute_tx_v2_root, tx::TxV2},
-    constants::{ACCOUNT_NO_BITS, HUB_ID_BITS},
+    constants::{CHANNEL_ID_BITS, KEY_ID_BITS},
     ethereum_types::{
         bytes32::{Bytes32, Bytes32Target},
         u32limb_trait::{U32LimbTargetTrait as _, U32LimbTrait},
@@ -22,7 +22,7 @@ use crate::{
 
 #[derive(thiserror::Error, Debug, Clone)]
 pub enum BlockError {
-    #[error("Invalid number of local IDs: {0}")]
+    #[error("Invalid number of key IDs: {0}")]
     InvalidNumUsers(String),
 }
 
@@ -31,9 +31,19 @@ pub struct Block {
     // the number of users in this block
     pub num_users: u32,
 
-    pub aggregator_id: u32,
+    /// Channel identifier for this fast/small block.
+    ///
+    /// The serialized field is still named `channel_id` in a few call sites
+    /// and contracts during migration, but protocol semantics are channel based:
+    /// this is the 5-byte `ChannelId` value constrained to the current u32 ABI.
+    pub channel_id: u32,
     pub timestamp: u64,
-    pub local_ids: Vec<u32>,
+    /// Key identifiers for channel members participating in this block.
+    ///
+    /// The serialized field is still named `key_ids` during migration. Each
+    /// non-zero entry is interpreted as a channel `KeyId`, and the signed user
+    /// identity is `ChannelId = ChannelId || KeyId`.
+    pub key_ids: Vec<u32>,
     pub tx_tree_root: Bytes32,
     pub deposit_hash_chain: Bytes32,
 }
@@ -43,9 +53,9 @@ pub struct BlockTarget {
     // user length is the constant of the circuit
     pub num_users: u32,
 
-    pub aggregator_id: Target,
+    pub channel_id: Target,
     pub timestamp: U64Target,
-    pub local_ids: Vec<Target>,
+    pub key_ids: Vec<Target>,
     pub tx_tree_root: Bytes32Target,
     pub deposit_hash_chain: Bytes32Target,
 }
@@ -53,34 +63,34 @@ pub struct BlockTarget {
 impl Block {
     pub fn new_with_tx_v2s(
         num_users: u32,
-        hub_id: u32,
-        account_nos: &[u32],
+        channel_id: u32,
+        key_ids: &[u32],
         timestamp: u64,
         txs: &[TxV2],
         deposit_hash_chain: Bytes32,
     ) -> Result<Self, BlockError> {
-        Self::new_with_hub(
+        Self::new_with_channel(
             num_users,
-            hub_id,
-            account_nos,
+            channel_id,
+            key_ids,
             timestamp,
             compute_tx_v2_root(txs).into(),
             deposit_hash_chain,
         )
     }
 
-    pub fn new_with_hub(
+    pub fn new_with_channel(
         num_users: u32,
-        hub_id: u32,
-        account_nos: &[u32],
+        channel_id: u32,
+        key_ids: &[u32],
         timestamp: u64,
         tx_tree_root: Bytes32,
         deposit_hash_chain: Bytes32,
     ) -> Result<Self, BlockError> {
         Self::new(
             num_users,
-            hub_id,
-            account_nos,
+            channel_id,
+            key_ids,
             timestamp,
             tx_tree_root,
             deposit_hash_chain,
@@ -89,55 +99,55 @@ impl Block {
 
     pub fn new(
         num_users: u32,
-        aggregator_id: u32,
-        local_ids: &[u32],
+        channel_id: u32,
+        key_ids: &[u32],
         timestamp: u64,
         tx_tree_root: Bytes32,
         deposit_hash_chain: Bytes32,
     ) -> Result<Self, BlockError> {
-        if local_ids.len() as u32 > num_users {
+        if key_ids.len() as u32 > num_users {
             return Err(BlockError::InvalidNumUsers(format!(
-                "local_ids length is {}, but num_users is {}",
-                local_ids.len(),
+                "key_ids length is {}, but num_users is {}",
+                key_ids.len(),
                 num_users
             )));
         }
         // pad user_ids with zeros
-        let mut local_ids = local_ids.to_vec();
-        local_ids.resize(num_users as usize, 0);
+        let mut key_ids = key_ids.to_vec();
+        key_ids.resize(num_users as usize, 0);
 
         Ok(Self {
             num_users,
-            aggregator_id,
+            channel_id,
             timestamp,
-            local_ids,
+            key_ids,
             tx_tree_root,
             deposit_hash_chain,
         })
     }
 
-    pub fn hub_id(&self) -> u32 {
-        self.aggregator_id
+    pub fn channel_id(&self) -> u32 {
+        self.channel_id
     }
 
-    pub fn account_nos(&self) -> &[u32] {
-        &self.local_ids
+    pub fn key_ids(&self) -> &[u32] {
+        &self.key_ids
     }
 
     pub fn hash_with_prev_hash(&self, prev_hash: Bytes32) -> Result<Bytes32, BlockError> {
-        // account_nos should already be padded with zeros
-        if self.local_ids.len() as u32 != self.num_users {
+        // key_ids should already be padded with zeros
+        if self.key_ids.len() as u32 != self.num_users {
             return Err(BlockError::InvalidNumUsers(format!(
-                "local_ids length is {}, but num_users is {}",
-                self.local_ids.len(),
+                "key_ids length is {}, but num_users is {}",
+                self.key_ids.len(),
                 self.num_users
             )));
         }
         let inputs = [
             prev_hash.to_u32_vec(),
-            vec![self.hub_id()],
+            vec![self.channel_id()],
             U64::from(self.timestamp).to_u32_vec(),
-            self.account_nos().to_vec(),
+            self.key_ids().to_vec(),
             self.tx_tree_root.to_u32_vec(),
             self.deposit_hash_chain.to_u32_vec(),
         ]
@@ -152,18 +162,18 @@ impl BlockTarget {
         num_users: u32,
         is_checked: bool,
     ) -> Self {
-        let aggregator_id = builder.add_virtual_target();
+        let channel_id = builder.add_virtual_target();
         if is_checked {
-            builder.range_check(aggregator_id, HUB_ID_BITS);
+            builder.range_check(channel_id, CHANNEL_ID_BITS);
         }
 
         let timestamp = U64Target::new(builder, is_checked);
 
-        let local_ids = (0..num_users)
+        let key_ids = (0..num_users)
             .map(|_| {
                 let target = builder.add_virtual_target();
                 if is_checked {
-                    builder.range_check(target, ACCOUNT_NO_BITS);
+                    builder.range_check(target, KEY_ID_BITS);
                 }
                 target
             })
@@ -174,9 +184,9 @@ impl BlockTarget {
 
         Self {
             num_users,
-            aggregator_id,
+            channel_id,
             timestamp,
-            local_ids,
+            key_ids,
             tx_tree_root,
             deposit_hash_chain,
         }
@@ -186,13 +196,13 @@ impl BlockTarget {
         builder: &mut CircuitBuilder<F, D>,
         value: &Block,
     ) -> Self {
-        if value.local_ids.len() as u32 != value.num_users {
+        if value.key_ids.len() as u32 != value.num_users {
             panic!("user_ids length does not match num_users");
         }
-        let aggregator_id = builder.constant(F::from_canonical_u32(value.aggregator_id));
+        let channel_id = builder.constant(F::from_canonical_u32(value.channel_id));
         let timestamp = U64Target::constant(builder, U64::from(value.timestamp));
-        let local_ids = value
-            .local_ids
+        let key_ids = value
+            .key_ids
             .iter()
             .cloned()
             .map(|id| builder.constant(F::from_canonical_u32(id)))
@@ -201,9 +211,9 @@ impl BlockTarget {
         let deposit_hash_chain = Bytes32Target::constant(builder, value.deposit_hash_chain);
         Self {
             num_users: value.num_users,
-            aggregator_id,
+            channel_id,
             timestamp,
-            local_ids,
+            key_ids,
             tx_tree_root,
             deposit_hash_chain,
         }
@@ -222,32 +232,29 @@ impl BlockTarget {
         <C as GenericConfig<D>>::Hasher: AlgebraicHasher<F>,
     {
         let mut inputs = prev_hash.to_vec();
-        inputs.push(self.aggregator_id);
+        inputs.push(self.channel_id);
         inputs.extend(self.timestamp.to_vec());
-        inputs.extend(self.local_ids.iter().copied());
+        inputs.extend(self.key_ids.iter().copied());
         inputs.extend(self.tx_tree_root.to_vec());
         inputs.extend(self.deposit_hash_chain.to_vec());
         Bytes32Target::from_slice(&builder.keccak256::<C>(&inputs))
     }
 
-    pub fn hub_id(&self) -> Target {
-        self.aggregator_id
+    pub fn channel_id(&self) -> Target {
+        self.channel_id
     }
 
-    pub fn account_nos(&self) -> &[Target] {
-        &self.local_ids
+    pub fn key_ids(&self) -> &[Target] {
+        &self.key_ids
     }
 
     pub fn set_witness<F: Field, W: WitnessWrite<F>>(&self, witness: &mut W, value: &Block) {
         assert_eq!(self.num_users, value.num_users, "num_users mismatch");
-        witness.set_target(
-            self.aggregator_id,
-            F::from_canonical_u32(value.aggregator_id),
-        );
+        witness.set_target(self.channel_id, F::from_canonical_u32(value.channel_id));
         self.timestamp
             .set_witness(witness, U64::from(value.timestamp));
-        for (target, local_id) in self.local_ids.iter().zip(value.local_ids.iter()) {
-            witness.set_target(*target, F::from_canonical_u32(*local_id));
+        for (target, key_id) in self.key_ids.iter().zip(value.key_ids.iter()) {
+            witness.set_target(*target, F::from_canonical_u32(*key_id));
         }
         self.tx_tree_root.set_witness(witness, value.tx_tree_root);
         self.deposit_hash_chain
@@ -268,15 +275,7 @@ mod tests {
         let deposit_hash_chain = Bytes32::rand(&mut rng);
         let prev_hash = Bytes32::rand(&mut rng);
 
-        let block = Block::new(
-            2,
-            1,
-            &[10, 20],
-            1000,
-            tx_tree_root,
-            deposit_hash_chain,
-        )
-        .unwrap();
+        let block = Block::new(2, 1, &[10, 20], 1000, tx_tree_root, deposit_hash_chain).unwrap();
 
         let h1 = block.hash_with_prev_hash(prev_hash).unwrap();
         let h2 = block.hash_with_prev_hash(prev_hash).unwrap();
@@ -290,25 +289,9 @@ mod tests {
         let deposit_hash_chain = Bytes32::rand(&mut rng);
         let prev_hash = Bytes32::default();
 
-        let block_a = Block::new(
-            1,
-            1,
-            &[1],
-            100,
-            tx_tree_root,
-            deposit_hash_chain,
-        )
-        .unwrap();
+        let block_a = Block::new(1, 1, &[1], 100, tx_tree_root, deposit_hash_chain).unwrap();
 
-        let block_b = Block::new(
-            1,
-            1,
-            &[1],
-            100,
-            tx_tree_root,
-            deposit_hash_chain,
-        )
-        .unwrap();
+        let block_b = Block::new(1, 1, &[1], 100, tx_tree_root, deposit_hash_chain).unwrap();
 
         let h1 = block_a.hash_with_prev_hash(prev_hash).unwrap();
         let h2 = block_b.hash_with_prev_hash(prev_hash).unwrap();
@@ -317,26 +300,19 @@ mod tests {
 
     #[test]
     fn test_block_padding() {
-        let block = Block::new(
-            4,
-            1,
-            &[10, 20],
-            100,
-            Bytes32::default(),
-            Bytes32::default(),
-        )
-        .unwrap();
-        assert_eq!(block.local_ids.len(), 4);
-        assert_eq!(block.local_ids[2], 0);
-        assert_eq!(block.local_ids[3], 0);
+        let block =
+            Block::new(4, 1, &[10, 20], 100, Bytes32::default(), Bytes32::default()).unwrap();
+        assert_eq!(block.key_ids.len(), 4);
+        assert_eq!(block.key_ids[2], 0);
+        assert_eq!(block.key_ids[3], 0);
     }
 
     #[test]
     fn test_block_new_with_tx_v2s_uses_poseidon_root() {
         use crate::common::{
+            channel_id::ChannelId,
             trees::tx_v2_tree::{compute_channel_action_root, compute_tx_v2_root},
             tx::{ChannelAction, ChannelActionKind, TxClass, TxV2},
-            user_id::AccountId,
         };
 
         let tx = TxV2 {
@@ -345,23 +321,15 @@ mod tests {
             nonce: 11,
             channel_action_root: compute_channel_action_root(&[ChannelAction {
                 kind: ChannelActionKind::InterChannelSend,
-                source_channel_id: AccountId::new(1, 10).unwrap(),
-                destination_channel_id: AccountId::new(2, 20).unwrap(),
+                source_channel_id: ChannelId::new(1).unwrap(),
+                destination_channel_id: ChannelId::new(2).unwrap(),
                 tx_hash: Bytes32::default(),
                 seal: Bytes32::default(),
                 payload_hash: Default::default(),
             }]),
         };
 
-        let block = Block::new_with_tx_v2s(
-            1,
-            3,
-            &[9],
-            100,
-            &[tx],
-            Bytes32::default(),
-        )
-        .unwrap();
+        let block = Block::new_with_tx_v2s(1, 3, &[9], 100, &[tx], Bytes32::default()).unwrap();
 
         assert_eq!(block.tx_tree_root, compute_tx_v2_root(&[tx]).into());
     }

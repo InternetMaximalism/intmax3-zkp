@@ -170,7 +170,7 @@ mod tests {
             spend_circuit::SpendCircuit,
             switch_board::{BalanceSwichBoard, BalanceSwichBoardCircuit},
         },
-        common::{salt::Salt, user_id::UserId},
+        common::{channel_id::ChannelId, salt::Salt},
         utils::conversion::ToU64,
     };
 
@@ -202,11 +202,11 @@ mod tests {
         let balance_vd = balance_circuit.data.verifier_data();
 
         let mut rng = rand::thread_rng();
-        let user_id = UserId::new(0, 1).unwrap();
+        let channel_id = ChannelId::new(1).unwrap();
         let salt = Salt::rand(&mut rng);
 
         let switch_board_witness = BalanceSwichBoard::<F, C, D> {
-            initial_value: Some((user_id, salt)),
+            initial_value: Some((channel_id, salt)),
             receive_transfer_proof: None,
             receive_deposit_proof: None,
             send_tx_proof: None,
@@ -228,7 +228,7 @@ mod tests {
         )
         .expect("Failed to parse balance public inputs");
 
-        let expected_pis = BalancePublicInputs::new(user_id, salt);
+        let expected_pis = BalancePublicInputs::new(channel_id, salt);
         assert_eq!(balance_pis, expected_pis);
     }
 }

@@ -1,6 +1,7 @@
-pub mod account_tree;
 pub mod asset_tree;
+pub mod channel_tree;
 pub mod deposit_tree;
+pub mod key_tree;
 pub mod nullifier_tree;
 pub mod public_state_tree;
 pub mod sent_tx_tree;

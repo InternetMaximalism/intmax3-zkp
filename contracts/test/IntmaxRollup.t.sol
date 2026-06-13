@@ -18,7 +18,7 @@ contract IntmaxRollupTest is Test {
     GnarkVerifier public gnarkVerifierContract;
 
     address submitter = makeAddr("submitter");
-    address aggregator = makeAddr("aggregator");
+    address blockProducer = makeAddr("blockProducer");
     address fraudTreasury = makeAddr("fraudTreasury");
 
     bytes32 constant FAKE_BLOB_HASH = bytes32(uint256(0xdeadbeef));
@@ -481,7 +481,7 @@ contract IntmaxRollupTest is Test {
         );
 
         vm.deal(submitter, 10 ether);
-        vm.deal(aggregator, 10 ether);
+        vm.deal(blockProducer, 10 ether);
         vm.deal(fraudTreasury, 0);
     }
 
@@ -493,10 +493,10 @@ contract IntmaxRollupTest is Test {
         uint32 aggId, uint64 ts, bytes32 txRoot, uint32[] memory ids
     ) internal pure returns (IntmaxRollup.SubBlock memory) {
         return IntmaxRollup.SubBlock({
-            aggregatorId: aggId,
+            channelId: aggId,
             timestamp: ts,
             txTreeRoot: txRoot,
-            localIds: ids
+            keyIds: ids
         });
     }
 
@@ -526,12 +526,12 @@ contract IntmaxRollupTest is Test {
     // -----------------------------------------------------------------------
 
     function test_postBlock_singleSubBlock() public {
-        uint32[] memory localIds = new uint32[](2);
-        localIds[0] = 1;
-        localIds[1] = 2;
+        uint32[] memory keyIds = new uint32[](2);
+        keyIds[0] = 1;
+        keyIds[1] = 2;
 
-        vm.prank(aggregator);
-        _postAndSubmitDefault(_singleBlockBatch(5, localIds, uint64(block.timestamp), bytes32(uint256(0xabc))));
+        vm.prank(blockProducer);
+        _postAndSubmitDefault(_singleBlockBatch(5, keyIds, uint64(block.timestamp), bytes32(uint256(0xabc))));
 
         assertEq(rollup.blockNumber(), 1);
         assertEq(rollup.postingRound(), 1);
@@ -605,7 +605,7 @@ contract IntmaxRollupTest is Test {
         );
 
         _mockBlob();
-        vm.prank(aggregator);
+        vm.prank(blockProducer);
         vm.expectRevert(IntmaxRollup.InvalidStakeAmount.selector);
         rollup.postBlockAndSubmit(batch, DEFAULT_PROOF_HASH, DEFAULT_PROOF_LENGTH, DEFAULT_STATE_ROOT);
     }
@@ -1099,7 +1099,7 @@ contract IntmaxRollupTest is Test {
         uint32[] memory idsGood = new uint32[](1);
         idsGood[0] = 88;
         IntmaxRollup.SubBlock[] memory goodBatch = _singleBlockBatch(10, idsGood, 810, bytes32(uint256(0x2222)));
-        vm.prank(aggregator);
+        vm.prank(blockProducer);
         _postAndSubmitDefault(goodBatch);
 
         IntmaxRollup.ValidityPublicInputs memory vpis = _defaultValidityPIs(badState);
@@ -1469,12 +1469,12 @@ contract IntmaxRollupTest is Test {
     // -----------------------------------------------------------------------
 
     function test_gas_postBlockAndSubmit_single() public {
-        uint32[] memory localIds = new uint32[](2);
-        localIds[0] = 1;
-        localIds[1] = 2;
+        uint32[] memory keyIds = new uint32[](2);
+        keyIds[0] = 1;
+        keyIds[1] = 2;
 
         uint256 gasBefore = gasleft();
-        _postAndSubmitDefault(_singleBlockBatch(5, localIds, uint64(block.timestamp), bytes32(uint256(0xabc))));
+        _postAndSubmitDefault(_singleBlockBatch(5, keyIds, uint64(block.timestamp), bytes32(uint256(0xabc))));
         uint256 gasUsed = gasBefore - gasleft();
         console.log("postBlockAndSubmit(1 sub-block) gas:", gasUsed);
     }

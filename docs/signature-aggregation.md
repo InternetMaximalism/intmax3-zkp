@@ -7,7 +7,7 @@ Multi-signature support and parallelized SPHINCS+ signature verification for the
 The signature aggregation system enables:
 1. **Multi-sig accounts** — each account can have up to 8 public keys with a configurable threshold
 2. **Parallel signature verification** — independent batches of signatures are proven concurrently
-3. **Parallel account tree updates** — tree updates are proven in flat parallel blocks
+3. **Parallel user tree updates** — tree updates are proven in flat parallel blocks
 
 The combined architecture processes **1000 SPHINCS+ signatures in ~140 seconds** with 20 CPU cores.
 
@@ -53,7 +53,7 @@ Two independent pipelines run concurrently:
 ║  Each batch: sig_verify + finalize steps (~1.4s/step)           ║
 ║  Account tree is READ-ONLY → full parallelism                   ║
 ╠══════════════════════════════════════════════════════════════════╣
-║  Pipeline 2: Account Tree Updates                                ║
+║  Pipeline 2: User Tree Updates                                ║
 ║                                                                  ║
 ║  [Parallel — N workers]              [Linear — 1 worker]        ║
 ║                                                                  ║
@@ -74,7 +74,7 @@ Total time ≈ max(Pipeline 1, Pipeline 2) ≈ 140s with 20 workers
 
 | Module | Purpose | Time/step |
 |--------|---------|-----------|
-| `sig_agg_step` | Full sequential: SPHINCS+ verify + account tree update | ~1.4s |
+| `sig_agg_step` | Full sequential: SPHINCS+ verify + user tree update | ~1.4s |
 | `sig_agg_circuit` | Cyclic wrapper for sig_agg_step | — |
 | `sig_agg_processor` | Orchestrator for sequential pipeline | — |
 
@@ -89,15 +89,15 @@ Total time ≈ max(Pipeline 1, Pipeline 2) ≈ 140s with 20 workers
 | `sig_merge_step` | Linear: absorbs batch proofs, combines verified_users_hash | ~0.45s |
 | `sig_merge_circuit` | Cyclic wrapper for sig_merge_step | — |
 
-**Account Tree Updates:**
+**User Tree Updates:**
 
 | Module | Purpose | Time/step |
 |--------|---------|-----------|
-| `account_apply_block` | Flat parallel: N users' Merkle tree updates (no recursion) | ~0.24s |
-| `account_apply_block_pis` | Public inputs for flat block proofs | — |
-| `account_apply_step` | Linear: absorbs block proofs, chains roots | ~0.45s |
-| `account_apply_circuit` | Cyclic wrapper for apply merge | — |
-| `account_apply_pis` | Public inputs for merge result | — |
+| `user_apply_block` | Flat parallel: N users' Merkle tree updates (no recursion) | ~0.24s |
+| `user_apply_block_pis` | Public inputs for flat block proofs | — |
+| `user_apply_step` | Linear: absorbs block proofs, chains roots | ~0.45s |
+| `user_apply_circuit` | Cyclic wrapper for apply merge | — |
+| `user_apply_pis` | Public inputs for merge result | — |
 
 **Orchestrator:**
 
@@ -107,15 +107,15 @@ Total time ≈ max(Pipeline 1, Pipeline 2) ≈ 140s with 20 workers
 
 ## Key Design Decisions
 
-### Why split into SigBatch + AccountApply?
+### Why split into SigBatch + UserApply?
 
-The original `sig_agg_step` updates the account tree during finalize. This creates a **sequential dependency**: each user's tree update changes the root, blocking the next user.
+The original `sig_agg_step` updates the user tree during finalize. This creates a **sequential dependency**: each user's tree update changes the root, blocking the next user.
 
 By splitting:
-- **SigBatch** treats the account tree as read-only (snapshot at block start) → fully parallelizable
-- **AccountApply** handles tree updates separately, also parallelizable (flat proofs with pre-computed intermediate roots)
+- **SigBatch** treats the user tree as read-only (snapshot at block start) → fully parallelizable
+- **UserApply** handles tree updates separately, also parallelizable (flat proofs with pre-computed intermediate roots)
 
-### Why flat proofs for AccountApply?
+### Why flat proofs for UserApply?
 
 Each step in a cyclic recursion chain takes ~1.4s minimum (dominated by recursive proof verification overhead). For 1000 users sequentially, that's 1400s — far too slow.
 
@@ -126,7 +126,7 @@ Flat proofs (no cyclic recursion) process N users in one shot. Gate count scales
 The two pipelines produce independent proofs that must be bound:
 
 - **SigMerge** produces `verified_users_hash` — a Poseidon hash chain of all verified user IDs, combined at the batch level: `H(merge_hash || batch_hash)`
-- **AccountApply** produces its own `users_hash` — built per-user within each block: `H(prev || user_id)`
+- **UserApply** produces its own `users_hash` — built per-user within each block: `H(prev || user_id)`
 
 The on-chain verifier or a binding circuit checks that both cover the same user set.
 
@@ -139,7 +139,7 @@ Single-step timings (Apple Silicon, release mode):
 | SigBatch step (sig_verify, with SPHINCS+) | 1.37-1.44s |
 | SigBatch step (finalize, no SPHINCS+) | 1.36-1.38s |
 | SigMerge step (absorb batch proof) | 0.44-0.45s |
-| AccountApplyBlock (20-slot, flat) | 0.24s |
+| UserApplyBlock (20-slot, flat) | 0.24s |
 | ApplyMerge step (absorb block proof) | 0.45s |
 | Circuit construction (ParallelSigProcessor::new) | ~5.1s |
 
@@ -168,14 +168,14 @@ src/circuits/validity/signature_aggregation/
 ├── sig_merge_step.rs         # Linear: merge batch proofs
 ├── sig_merge_pis.rs          # Merge public inputs
 ├── sig_merge_circuit.rs      # Merge cyclic wrapper
-├── account_apply_block.rs    # Flat parallel: tree updates
-├── account_apply_block_pis.rs# Block public inputs
-├── account_apply_step.rs     # Linear: merge block proofs
-├── account_apply_pis.rs      # Apply merge public inputs
-├── account_apply_circuit.rs  # Apply merge cyclic wrapper
+├── user_apply_block.rs    # Flat parallel: tree updates
+├── user_apply_block_pis.rs# Block public inputs
+├── user_apply_step.rs     # Linear: merge block proofs
+├── user_apply_pis.rs      # Apply merge public inputs
+├── user_apply_circuit.rs  # Apply merge cyclic wrapper
 └── parallel_sig_processor.rs # Unified orchestrator API
 
 src/common/
 ├── key_set.rs                # KeySetTree, PkLeaf, PkLeafTarget
-└── trees/account_tree.rs     # AccountLeaf (extended with pk_set_root, threshold)
+└── trees/account_tree.rs     # UserLeaf (extended with pk_set_root, threshold)
 ```

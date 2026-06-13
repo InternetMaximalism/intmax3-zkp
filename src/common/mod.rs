@@ -1,5 +1,7 @@
+pub mod balance_state;
 pub mod block;
 pub mod channel;
+pub mod channel_id;
 pub mod channel_message;
 pub mod deposit;
 pub mod error;
@@ -11,5 +13,4 @@ pub mod transfer;
 pub mod trees;
 pub mod tx;
 pub mod u63;
-pub mod user_id;
 pub mod withdrawal;

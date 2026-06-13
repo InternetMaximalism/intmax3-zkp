@@ -44,6 +44,9 @@ use plonky2::{
     recursion::dummy_circuit::DummyProofGenerator,
     util::serialization::{GateSerializer, WitnessGeneratorSerializer},
 };
+use plonky2_keccak::generators::{
+    single_generator::Keccak256SingleGenerator, stark_proof_generator::Keccak256StarkProofGenerator,
+};
 use plonky2_u32::gates::{
     add_many_u32::{U32AddManyGate, U32AddManyGenerator},
     comparison::{ComparisonGate, ComparisonGenerator},
@@ -124,7 +127,12 @@ where
         WireSplitGenerator,
         ComparisonGenerator<F, D>,
         U32AddManyGenerator<F, D>,
-        U32SubtractionGenerator<F, D>
+        U32SubtractionGenerator<F, D>,
+        // Witness generators installed by the plonky2_keccak builder hook
+        // (`BuilderKeccak256::keccak256`); required since the balance circuits started
+        // hashing the settled_tx_chain public input with keccak (detail2 §F-1).
+        Keccak256SingleGenerator,
+        Keccak256StarkProofGenerator<F, C, D>
     }
 }
 

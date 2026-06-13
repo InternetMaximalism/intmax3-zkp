@@ -4,6 +4,7 @@ use crate::{
         spend_circuit::{SpendPublicInputs, SpendPublicInputsTarget},
     },
     common::{
+        channel_id::{ChannelId, ChannelIdTarget},
         public_state::{PublicState, PublicStateTarget},
         trees::{
             tx_tree::{TxMerkleProof, TxMerkleProofTarget},
@@ -11,7 +12,6 @@ use crate::{
         },
         tx::{Tx, TxClass, TxTarget, TxV2, TxV2Target},
         u63::{BlockNumber, BlockNumberTarget},
-        user_id::{UserId, UserIdTarget},
     },
     constants::TX_TREE_HEIGHT,
     utils::{
@@ -60,7 +60,7 @@ pub enum TxSettlementError {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(bound = "")]
 pub struct TxSettlement<F: RichField + Extendable<D>, C: GenericConfig<D, F = F>, const D: usize> {
-    pub user_id: UserId,
+    pub channel_id: ChannelId,
     pub tx: Tx,
     pub public_state: PublicState,
     pub account_state: AccountState,
@@ -77,7 +77,7 @@ where
 {
     pub fn new(
         spend_vd: &VerifierCircuitData<F, C, D>,
-        user_id: UserId,
+        channel_id: ChannelId,
         tx: Tx,
         public_state: PublicState,
 
@@ -87,7 +87,7 @@ where
     ) -> Result<Self, TxSettlementError> {
         Self::new_with_optional_tx_v2(
             spend_vd,
-            user_id,
+            channel_id,
             tx,
             public_state,
             account_state,
@@ -100,7 +100,7 @@ where
 
     pub fn new_with_tx_v2(
         spend_vd: &VerifierCircuitData<F, C, D>,
-        user_id: UserId,
+        channel_id: ChannelId,
         tx: Tx,
         public_state: PublicState,
         account_state: AccountState,
@@ -111,7 +111,7 @@ where
     ) -> Result<Self, TxSettlementError> {
         Self::new_with_optional_tx_v2(
             spend_vd,
-            user_id,
+            channel_id,
             tx,
             public_state,
             account_state,
@@ -124,7 +124,7 @@ where
 
     fn new_with_optional_tx_v2(
         spend_vd: &VerifierCircuitData<F, C, D>,
-        user_id: UserId,
+        channel_id: ChannelId,
         tx: Tx,
         public_state: PublicState,
         account_state: AccountState,
@@ -140,9 +140,9 @@ where
 
         // verify account state
         account_state.verify()?;
-        if account_state.user_id != user_id {
+        if account_state.channel_id != channel_id {
             return Err(TxSettlementError::InvalidUserId(
-                "user_id does not match".to_string(),
+                "channel_id does not match".to_string(),
             ));
         }
         if account_state.account_tree_root != public_state.account_tree_root {
@@ -155,8 +155,10 @@ where
         let tx_tree_root = account_state.send_leaf.tx_tree_root.reduce_to_hash_out();
         match (&tx_v2, &tx_v2_merkle_proof) {
             (Some(tx_v2), Some(tx_v2_merkle_proof)) => {
+                // Two-layer identity: the block tx tree is indexed by channel_id
+                // (TX_TREE_HEIGHT == CHANNEL_ID_BITS).
                 tx_v2_merkle_proof
-                    .verify(tx_v2, user_id.local_id() as u64, tx_tree_root)
+                    .verify(tx_v2, channel_id.as_u64(), tx_tree_root)
                     .map_err(|e| TxSettlementError::InvalidTxV2MerkleProof(e.to_string()))?;
 
                 if tx_v2.tx_class != TxClass::UserTransfer {
@@ -184,7 +186,7 @@ where
             }
             (None, None) => {
                 tx_merkle_proof
-                    .verify(&tx, user_id.local_id() as u64, tx_tree_root)
+                    .verify(&tx, channel_id.as_u64(), tx_tree_root)
                     .map_err(|e| TxSettlementError::InvalidTxMerkleProof(e.to_string()))?;
             }
             _ => {
@@ -209,7 +211,7 @@ where
         }
 
         Ok(Self {
-            user_id,
+            channel_id,
             tx,
             public_state,
             tx_merkle_proof,
@@ -244,7 +246,7 @@ where
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(bound = "")]
 pub struct TxSettlementTarget<const D: usize> {
-    pub user_id: UserIdTarget,
+    pub channel_id: ChannelIdTarget,
     pub tx: TxTarget,
     pub public_state: PublicStateTarget,
     pub account_state: AccountStateTarget,
@@ -266,7 +268,7 @@ impl<const D: usize> TxSettlementTarget<D> {
         C: GenericConfig<D, F = F> + 'static,
         <C as GenericConfig<D>>::Hasher: AlgebraicHasher<F>,
     {
-        let user_id = UserIdTarget::new(builder, is_checked);
+        let channel_id = ChannelIdTarget::new(builder, is_checked);
         let tx = TxTarget::new(builder);
         let public_state = PublicStateTarget::new(builder, is_checked);
         let account_state = AccountStateTarget::new::<F, C, D>(builder, is_checked);
@@ -276,7 +278,7 @@ impl<const D: usize> TxSettlementTarget<D> {
         let tx_v2 = TxV2Target::new(builder);
         let spend_proof = add_proof_target_and_verify(spend_vd, builder);
 
-        account_state.user_id.connect(builder, &user_id);
+        account_state.channel_id.connect(builder, &channel_id);
         account_state
             .account_tree_root
             .connect(builder, public_state.account_tree_root);
@@ -285,20 +287,22 @@ impl<const D: usize> TxSettlementTarget<D> {
             .send_leaf
             .tx_tree_root
             .reduce_to_hash_out(builder);
-        let local_id = user_id.local_id(builder);
+        // Two-layer identity: the block tx tree is indexed by channel_id
+        // (TX_TREE_HEIGHT == CHANNEL_ID_BITS).
+        let tx_index = channel_id.channel_id(builder);
         let use_legacy_tx = builder.not(use_tx_v2);
         tx_merkle_proof.conditional_verify::<F, C, D>(
             builder,
             use_legacy_tx,
             &tx,
-            local_id,
+            tx_index,
             tx_tree_root.clone(),
         );
         tx_v2_merkle_proof.conditional_verify::<F, C, D>(
             builder,
             use_tx_v2,
             &tx_v2,
-            local_id,
+            tx_index,
             tx_tree_root,
         );
 
@@ -319,7 +323,7 @@ impl<const D: usize> TxSettlementTarget<D> {
         tx.connect(builder, &spend_public_inputs.tx);
 
         Self {
-            user_id,
+            channel_id,
             tx,
             public_state,
             account_state,
@@ -338,7 +342,7 @@ impl<const D: usize> TxSettlementTarget<D> {
         <C as GenericConfig<D>>::Hasher: AlgebraicHasher<F>,
         W: WitnessWrite<F>,
     {
-        self.user_id.set_witness(witness, value.user_id);
+        self.channel_id.set_witness(witness, value.channel_id);
         self.tx.set_witness::<W, F>(witness, value.tx);
         self.public_state.set_witness(witness, &value.public_state);
         self.account_state
@@ -377,11 +381,11 @@ mod tests {
     use crate::{
         circuits::balance::spend_circuit::SPEND_PUBLIC_INPUTS_LEN,
         common::trees::{
-            account_tree::{AccountLeaf, AccountTree, SendLeaf, SendTree},
+            channel_tree::{ChannelLeaf, ChannelTree, SendLeaf, SendTree},
             tx_tree::TxTree,
             tx_v2_tree::TxV2Tree,
         },
-        constants::{ACCOUNT_TREE_HEIGHT, SEND_TREE_HEIGHT},
+        constants::{CHANNEL_TREE_HEIGHT, SEND_TREE_HEIGHT},
         ethereum_types::bytes32::Bytes32,
         utils::poseidon_hash_out::PoseidonHashOut,
     };
@@ -418,9 +422,9 @@ mod tests {
 
         let mut tx_tree = TxTree::init();
         let tx = Tx::default();
-        let local_id = 1u32;
-        tx_tree.update(local_id as u64, tx);
-        let tx_merkle_proof = tx_tree.prove(local_id as u64);
+        let key_id = 1u32;
+        tx_tree.update(key_id as u64, tx);
+        let tx_merkle_proof = tx_tree.prove(key_id as u64);
         let tx_tree_root: PoseidonHashOut = tx_tree.get_root();
         let tx_tree_root_bytes: Bytes32 = tx_tree_root.clone().into();
 
@@ -434,18 +438,17 @@ mod tests {
         send_tree.push(send_leaf.clone());
         let send_merkle_proof = send_tree.prove(send_leaf_index as u64);
 
-        let mut account_tree = AccountTree::new(ACCOUNT_TREE_HEIGHT);
-        let account_leaf = AccountLeaf {
+        let mut channel_tree = ChannelTree::new(CHANNEL_TREE_HEIGHT);
+        let channel_leaf = ChannelLeaf {
             index: send_tree.len() as u32,
             prev: BlockNumber::default(),
             send_tree_root: send_tree.get_root(),
-            pk_set_root: PoseidonHashOut::default(),
-            threshold: 0,
+            member_key_ids_root: ChannelLeaf::default().member_key_ids_root,
         };
-        let user_id = UserId::new(0, local_id).expect("user id");
-        account_tree.update(user_id.as_u64(), account_leaf.clone());
-        let account_merkle_proof = account_tree.prove(user_id.as_u64());
-        let account_tree_root = account_tree.get_root();
+        let channel_id = ChannelId::new(key_id as u64).expect("user id");
+        channel_tree.update(channel_id.as_u64(), channel_leaf.clone());
+        let user_merkle_proof = channel_tree.prove(channel_id.as_u64());
+        let account_tree_root = channel_tree.get_root();
 
         let public_state = PublicState {
             block_number: BlockNumber::default(),
@@ -456,19 +459,19 @@ mod tests {
         };
 
         let account_state = AccountState::new(
-            user_id.clone(),
+            channel_id.clone(),
             public_state.account_tree_root,
             send_leaf,
             send_leaf_index,
             send_merkle_proof,
-            account_leaf,
-            account_merkle_proof,
+            channel_leaf,
+            user_merkle_proof,
         )
         .expect("account state");
 
         let tx_settlement = TxSettlement::new(
             &spend_vd,
-            user_id,
+            channel_id,
             tx,
             public_state,
             account_state,
@@ -511,15 +514,15 @@ mod tests {
             nonce: tx.nonce,
             channel_action_root: PoseidonHashOut::default(),
         };
-        let local_id = 1u32;
+        let key_id = 1u32;
 
         let mut tx_tree = TxTree::init();
-        tx_tree.update(local_id as u64, tx);
-        let tx_merkle_proof = tx_tree.prove(local_id as u64);
+        tx_tree.update(key_id as u64, tx);
+        let tx_merkle_proof = tx_tree.prove(key_id as u64);
 
         let mut tx_v2_tree = TxV2Tree::init();
-        tx_v2_tree.update(local_id as u64, tx_v2);
-        let tx_v2_merkle_proof = tx_v2_tree.prove(local_id as u64);
+        tx_v2_tree.update(key_id as u64, tx_v2);
+        let tx_v2_merkle_proof = tx_v2_tree.prove(key_id as u64);
         let tx_tree_root: PoseidonHashOut = tx_v2_tree.get_root();
         let tx_tree_root_bytes: Bytes32 = tx_tree_root.into();
 
@@ -533,18 +536,17 @@ mod tests {
         send_tree.push(send_leaf.clone());
         let send_merkle_proof = send_tree.prove(send_leaf_index as u64);
 
-        let mut account_tree = AccountTree::new(ACCOUNT_TREE_HEIGHT);
-        let account_leaf = AccountLeaf {
+        let mut channel_tree = ChannelTree::new(CHANNEL_TREE_HEIGHT);
+        let channel_leaf = ChannelLeaf {
             index: send_tree.len() as u32,
             prev: BlockNumber::default(),
             send_tree_root: send_tree.get_root(),
-            pk_set_root: PoseidonHashOut::default(),
-            threshold: 0,
+            member_key_ids_root: ChannelLeaf::default().member_key_ids_root,
         };
-        let user_id = UserId::new(0, local_id).expect("user id");
-        account_tree.update(user_id.as_u64(), account_leaf.clone());
-        let account_merkle_proof = account_tree.prove(user_id.as_u64());
-        let account_tree_root = account_tree.get_root();
+        let channel_id = ChannelId::new(key_id as u64).expect("user id");
+        channel_tree.update(channel_id.as_u64(), channel_leaf.clone());
+        let user_merkle_proof = channel_tree.prove(channel_id.as_u64());
+        let account_tree_root = channel_tree.get_root();
 
         let public_state = PublicState {
             block_number: BlockNumber::default(),
@@ -555,19 +557,19 @@ mod tests {
         };
 
         let account_state = AccountState::new(
-            user_id,
+            channel_id,
             public_state.account_tree_root,
             send_leaf,
             send_leaf_index,
             send_merkle_proof,
-            account_leaf,
-            account_merkle_proof,
+            channel_leaf,
+            user_merkle_proof,
         )
         .expect("account state");
 
         let tx_settlement = TxSettlement::new_with_tx_v2(
             &spend_vd,
-            user_id,
+            channel_id,
             tx,
             public_state,
             account_state,

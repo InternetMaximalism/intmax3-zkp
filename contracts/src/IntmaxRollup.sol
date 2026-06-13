@@ -89,8 +89,8 @@ contract IntmaxRollup {
     // -----------------------------------------------------------------------
     event BlockPosted(
         uint64 indexed blockNumber,
-        uint32 aggregatorId,
-        uint32[] localIds,
+        uint32 channelId,
+        uint32[] keyIds,
         bytes32 txTreeRoot,
         bytes32 newBlockHashChain
     );
@@ -103,6 +103,22 @@ contract IntmaxRollup {
         uint256 amount,
         bytes32 auxData,
         bytes32 newDepositHashChain
+    );
+
+    event KeyRegistered(
+        uint64 indexed regIndex,
+        uint32 indexed keyId,
+        uint32  threshold,
+        uint32  numKeys,
+        bytes32[] pkHashes,
+        bytes32 newKeyRegHashChain
+    );
+
+    event ChannelRegistered(
+        uint64 indexed regIndex,
+        uint32 indexed channelId,
+        uint32[] memberKeyIds,
+        bytes32 newChannelRegHashChain
     );
 
     event Submitted(
@@ -144,10 +160,10 @@ contract IntmaxRollup {
 
     /// @notice A single fast block (~5 seconds) within a posting-round batch.
     struct SubBlock {
-        uint32   aggregatorId;
+        uint32   channelId;
         uint64   timestamp;
         bytes32  txTreeRoot;
-        uint32[] localIds;
+        uint32[] keyIds;
     }
 
     struct DepositRecord {
@@ -280,6 +296,27 @@ contract IntmaxRollup {
     /// @notice Pending deposits for the next block (rolled into block's deposit_hash_chain).
     bytes32 internal _pendingDepositHashChain;
 
+    // -----------------------------------------------------------------------
+    // Identity registration (channel-as-base-user model).
+    //
+    // SECURITY: on-chain registration gives data availability; the validity proof
+    // deterministically rebuilds the KeyTree / ChannelTree from these hash chains and
+    // proves the tree contents match EXACTLY the registered set — no unregistered
+    // entry, no omission (see tasks/channel-key-tree-design.md). Until the validity
+    // proof consumes them (Step 4), these chains are RECORDED ONLY.
+    // -----------------------------------------------------------------------
+
+    /// @notice key_id -> KeyLeaf{pk_set_root,threshold,num_keys} registration hash chain.
+    bytes32 internal _pendingKeyRegHashChain;
+    uint64 public keyRegCount;
+
+    /// @notice channel_id -> ChannelLeaf{member_key_ids_root} registration hash chain.
+    bytes32 internal _pendingChannelRegHashChain;
+    uint64 public channelRegCount;
+
+    /// @notice Max SPHINCS+ keys per key_id = 2^KEY_SET_TREE_HEIGHT (matches Rust constants).
+    uint32 internal constant MAX_KEYS_PER_ID = 8;
+
     mapping(uint256 => Submission) internal _submissions;
     uint256 public nextSubmissionId;
 
@@ -392,7 +429,7 @@ contract IntmaxRollup {
     ///
     /// @notice Post a batch of fast blocks and submit the proof commitment in
     ///         a single transaction.
-    // TODO: Add access control (aggregator whitelist) before mainnet.
+    // TODO: Add access control (blockProducer whitelist) before mainnet.
     function postBlockAndSubmit(
         SubBlock[] calldata subBlocks,
         bytes32 proofHash,
@@ -439,9 +476,9 @@ contract IntmaxRollup {
 
             currentHash = _computeBlockHash(
                 currentHash,
-                subBlocks[i].aggregatorId,
+                subBlocks[i].channelId,
                 subBlocks[i].timestamp,
-                subBlocks[i].localIds,
+                subBlocks[i].keyIds,
                 subBlocks[i].txTreeRoot,
                 depositHash
             );
@@ -449,8 +486,8 @@ contract IntmaxRollup {
 
             emit BlockPosted(
                 currentBlockNumber,
-                subBlocks[i].aggregatorId,
-                subBlocks[i].localIds,
+                subBlocks[i].channelId,
+                subBlocks[i].keyIds,
                 subBlocks[i].txTreeRoot,
                 currentHash
             );
@@ -510,6 +547,58 @@ contract IntmaxRollup {
         });
 
         emit Deposited(idx, msg.sender, recipient, tokenIndex, amount, auxData, newHash);
+    }
+
+    /// @notice Register a keyID's M-of-N SPHINCS+ key set. `pkHashes[i]` is the Poseidon pk_hash
+    ///         (bytes32 = 4 Goldilocks limbs) used as a KeySetTree leaf. The validity proof later
+    ///         rebuilds KeySetTree -> pk_set_root and inserts
+    ///         KeyLeaf{pk_set_root, threshold, numKeys} at index `keyId` of the KeyTree.
+    /// @dev keccak preimage (must match the Rust circuit; big-endian, tightly packed, NO array
+    ///      padding): keccak256(prev || keyId(4) || threshold(4) || numKeys(4) || pkHashes(32*numKeys)).
+    function registerKey(uint32 keyId, bytes32[] calldata pkHashes, uint32 threshold) external {
+        require(keyId != 0, "key id 0 reserved");
+        uint32 numKeys = uint32(pkHashes.length);
+        require(numKeys > 0 && numKeys <= MAX_KEYS_PER_ID, "invalid key count");
+        require(threshold > 0 && threshold <= numKeys, "invalid threshold");
+
+        // Tightly-packed preimage. Arrays are concatenated element-by-element to avoid
+        // abi.encodePacked's 32-byte array-element padding (so the Rust circuit can match it).
+        bytes memory packed = abi.encodePacked(_pendingKeyRegHashChain, keyId, threshold, numKeys);
+        for (uint256 i = 0; i < pkHashes.length; i++) {
+            packed = abi.encodePacked(packed, pkHashes[i]); // bytes32: 32 bytes, no padding
+        }
+        bytes32 newHash = keccak256(packed);
+        _pendingKeyRegHashChain = newHash;
+        uint64 idx = keyRegCount++;
+        emit KeyRegistered(idx, keyId, threshold, numKeys, pkHashes, newHash);
+    }
+
+    /// @notice Register a channel's member key_id set (strictly ascending & unique, mirroring
+    ///         ChannelRecord::validate). The validity proof later rebuilds MemberKeyTree ->
+    ///         member_key_ids_root and inserts ChannelLeaf at index `channelId` of the ChannelTree.
+    /// @dev keccak preimage: keccak256(prev || channelId(4) || memberCount(4) || memberKeyIds(4*memberCount)).
+    function registerChannel(uint32 channelId, uint32[] calldata memberKeyIds) external {
+        require(channelId != 0, "channel id 0 reserved");
+        uint32 memberCount = uint32(memberKeyIds.length);
+        require(memberCount > 0, "no members");
+        for (uint256 i = 0; i < memberKeyIds.length; i++) {
+            require(memberKeyIds[i] != 0, "member key id 0 reserved");
+            if (i > 0) {
+                require(
+                    memberKeyIds[i] > memberKeyIds[i - 1],
+                    "members must be strictly ascending & unique"
+                );
+            }
+        }
+
+        bytes memory packed = abi.encodePacked(_pendingChannelRegHashChain, channelId, memberCount);
+        for (uint256 i = 0; i < memberKeyIds.length; i++) {
+            packed = abi.encodePacked(packed, memberKeyIds[i]); // uint32: 4 bytes, no padding
+        }
+        bytes32 newHash = keccak256(packed);
+        _pendingChannelRegHashChain = newHash;
+        uint64 idx = channelRegCount++;
+        emit ChannelRegistered(idx, channelId, memberKeyIds, newHash);
     }
 
     // -----------------------------------------------------------------------
@@ -1069,29 +1158,29 @@ contract IntmaxRollup {
     }
 
     /// @dev Compute block hash matching Rust's Block::hash_with_prev_hash:
-    ///      keccak256(prev_hash || aggregator_id || timestamp || local_ids
+    ///      keccak256(prev_hash || channel_id || timestamp || key_ids
     ///               || tx_tree_root || deposit_hash_chain)
     ///      All values packed as u32 words.
     function _computeBlockHash(
         bytes32 prevHash,
-        uint32 aggregatorId,
+        uint32 channelId,
         uint64 timestamp,
-        uint32[] calldata localIds,
+        uint32[] calldata keyIds,
         bytes32 txTreeRoot,
         bytes32 blockDepositHashChain
     ) internal pure returns (bytes32) {
         // Build the u32 array matching Rust's solidity_keccak256 layout.
         // NOTE: abi.encodePacked(uint32[]) pads each element to 32 bytes, which
         // does NOT match Rust's 4-byte-per-u32 packing. We must manually pack
-        // the localIds as raw 4-byte big-endian values.
+        // the keyIds as raw 4-byte big-endian values.
         bytes memory packed = abi.encodePacked(
             prevHash,
-            aggregatorId,
+            channelId,
             timestamp
         );
-        // Pack localIds as 4-byte big-endian values (matching Rust u32 layout)
-        for (uint256 i = 0; i < localIds.length; i++) {
-            packed = bytes.concat(packed, bytes4(localIds[i]));
+        // Pack keyIds as 4-byte big-endian values (matching Rust u32 layout)
+        for (uint256 i = 0; i < keyIds.length; i++) {
+            packed = bytes.concat(packed, bytes4(keyIds[i]));
         }
         packed = bytes.concat(
             packed,

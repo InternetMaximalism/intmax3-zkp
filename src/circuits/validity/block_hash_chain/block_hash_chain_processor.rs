@@ -18,10 +18,8 @@ use crate::{
             block_hash_chain_circuit::{BlockHashChainCircuit, BlockHashChainCircuitError},
             block_step::{BlockStepCircuit, BlockStepError, BlockStepWitness},
             ext_public_state::ExtendedPublicState,
-            sphincs_sig::SpxSigWitness,
-            update_account_tree::{
-                UpdateAccountCircuit, UpdateAccountCircuitError, UpdateAccountTree,
-            },
+            sphincs_sig::{SmallBlockMessageFields, SpxSigWitness},
+            update_channel_tree::{UpdateUserCircuit, UpdateUserCircuitError, UpdateUserTree},
         },
         deposit_hash_chain::{
             deposit_chain_processor::{DepositChainProcessor, DepositChainProcessorError},
@@ -32,8 +30,9 @@ use crate::{
         block::Block,
         deposit::Deposit,
         trees::{
-            account_tree::{AccountLeaf, AccountMerkleProof, SendMerkleProof},
+            channel_tree::{ChannelLeaf, ChannelMerkleProof, SendMerkleProof},
             deposit_tree::DepositMerkleProof,
+            key_tree::KeyLeaf,
             public_state_tree::PublicStateMerkleProof,
             tx_v2_tree::{ChannelActionMerkleProof, TxV2MerkleProof},
         },
@@ -54,7 +53,7 @@ pub enum BlockHashChainProcessorError {
     #[error("deposit chain processor error: {0}")]
     DepositChainProcessor(#[from] DepositChainProcessorError),
     #[error("update account circuit error: {0}")]
-    UpdateAccountCircuit(#[from] UpdateAccountCircuitError),
+    UpdateUserCircuit(#[from] UpdateUserCircuitError),
     #[error("block step error: {0}")]
     BlockStep(#[from] BlockStepError),
     #[error("block hash chain circuit error: {0}")]
@@ -65,15 +64,23 @@ pub enum BlockHashChainProcessorError {
 pub struct BlockHashChainProcessorWitness {
     pub deposit_step_witness: Vec<(Deposit, DepositMerkleProof)>,
     pub block: Block,
-    pub prev_account_leaves: Vec<AccountLeaf>,
-    pub account_merkle_proofs: Vec<AccountMerkleProof>,
+    pub prev_account_leaves: Vec<ChannelLeaf>,
+    pub user_merkle_proofs: Vec<ChannelMerkleProof>,
     pub send_merkle_proofs: Vec<SendMerkleProof>,
     pub public_state_merkle_proof: PublicStateMerkleProof,
     /// Optional SPHINCS+ signature witnesses, one per user slot.
     /// If None, dummy (all-zero) witnesses are used — valid only when the
     /// signature verification constraints are conditionally disabled (inactive slots).
     pub sig_witnesses: Option<Vec<SpxSigWitness>>,
-    /// Optional TxV2 witnesses used to bind active hub/account_no slots to concrete tx leaves.
+    /// Optional per-slot KeyTree records (pk_set_root, threshold) accompanying `sig_witnesses`.
+    /// If None, default leaves (pk_set_root = 0) are used, which skip the in-circuit signature
+    /// constraints — see `UpdateUserTree::key_leaves` SECURITY TODO.
+    pub key_leaves: Option<Vec<KeyLeaf>>,
+    /// Optional per-block IMSB `SmallBlockRootMessage` preimage fields accompanying
+    /// `sig_witnesses` (detail2 §F-2). If None, default fields are used — valid only when the
+    /// signature constraints are skipped (dummy witnesses).
+    pub msg_fields: Option<SmallBlockMessageFields>,
+    /// Optional TxV2 witnesses used to bind active hub/key_id slots to concrete tx leaves.
     pub tx_v2_indices: Option<Vec<u64>>,
     pub tx_v2s: Option<Vec<TxV2>>,
     pub tx_v2_merkle_proofs: Option<Vec<TxV2MerkleProof>>,
@@ -92,7 +99,7 @@ where
     block_step_circuit: BlockStepCircuit<F, C, D>,
     deposit_chain_vd: VerifierCircuitData<F, C, D>,
     update_account_vds: Vec<(u32, VerifierCircuitData<F, C, D>)>,
-    update_account_circuits: HashMap<u32, UpdateAccountCircuit<F, C, D>>,
+    update_user_circuits: HashMap<u32, UpdateUserCircuit<F, C, D>>,
     deposit_chain_processor: DepositChainProcessor<F, C, D>,
 }
 
@@ -113,13 +120,13 @@ where
         let deposit_chain_processor = DepositChainProcessor::<F, C, D>::new();
         let deposit_chain_vd = deposit_chain_processor.deposit_chain_vd();
 
-        let mut update_account_circuits = HashMap::new();
+        let mut update_user_circuits = HashMap::new();
         let mut update_account_vds = Vec::with_capacity(supported_user_counts.len());
         for &num_users in supported_user_counts {
-            let circuit = UpdateAccountCircuit::<F, C, D>::new(num_users);
+            let circuit = UpdateUserCircuit::<F, C, D>::new(num_users);
             let vd = circuit.data.verifier_data();
             update_account_vds.push((num_users, vd.clone()));
-            update_account_circuits.insert(num_users, circuit);
+            update_user_circuits.insert(num_users, circuit);
         }
 
         let block_step_circuit = BlockStepCircuit::<F, C, D>::new(
@@ -138,7 +145,7 @@ where
             block_step_circuit,
             deposit_chain_vd,
             update_account_vds,
-            update_account_circuits,
+            update_user_circuits,
             deposit_chain_processor,
         }
     }
@@ -159,7 +166,7 @@ where
     ) -> Result<ProofWithPublicInputs<F, C, D>, BlockHashChainProcessorError> {
         // get corresponding update account circuit
         let num_users = witness.block.num_users;
-        let update_account_circuit = self.update_account_circuits.get(&num_users).ok_or(
+        let update_account_circuit = self.update_user_circuits.get(&num_users).ok_or(
             BlockHashChainProcessorError::UnsupportedUserCount(num_users),
         )?;
 
@@ -236,13 +243,13 @@ where
         let dummy_channel_actions = vec![ChannelAction::default(); num_users as usize];
         let dummy_channel_action_merkle_proofs =
             vec![ChannelActionMerkleProof::dummy(TX_TREE_HEIGHT); num_users as usize];
-        let update_account_tree = UpdateAccountTree {
+        let update_channel_tree = UpdateUserTree {
             prev_block_hash_chain: prev_ext_public_state.block_hash_chain,
             prev_account_tree_root: prev_ext_public_state.inner.account_tree_root,
             block_number,
             block: witness.block.clone(),
             prev_account_leaves: witness.prev_account_leaves.clone(),
-            account_merkle_proofs: witness.account_merkle_proofs.clone(),
+            user_merkle_proofs: witness.user_merkle_proofs.clone(),
             send_merkle_proofs: witness.send_merkle_proofs.clone(),
             // Use dummy witnesses when real SPHINCS+ keys are not provided.
             // In production, replace with actual SpxSigWitness::from_bytes calls.
@@ -250,6 +257,11 @@ where
                 .sig_witnesses
                 .clone()
                 .unwrap_or_else(|| vec![SpxSigWitness::dummy(); num_users as usize]),
+            key_leaves: witness
+                .key_leaves
+                .clone()
+                .unwrap_or_else(|| vec![KeyLeaf::default(); num_users as usize]),
+            msg_fields: witness.msg_fields.clone().unwrap_or_default(),
             tx_v2_indices: witness.tx_v2_indices.clone().unwrap_or(dummy_tx_v2_indices),
             tx_v2s: witness.tx_v2s.clone().unwrap_or(dummy_tx_v2s),
             tx_v2_merkle_proofs: witness
@@ -269,14 +281,14 @@ where
                 .clone()
                 .unwrap_or(dummy_channel_action_merkle_proofs),
         };
-        let update_account_proof = update_account_circuit.prove(&update_account_tree)?;
+        let update_user_proof = update_account_circuit.prove(&update_channel_tree)?;
 
         let block_step_witness = BlockStepWitness::<F, C, D> {
             num_users,
             initial_public_state: initial_public_state.clone(),
             prev_block_chain_proof: prev_block_chain_proof.clone(),
             deposit_hash_chain_proof: deposit_chain_proof.clone(),
-            update_account_proof: update_account_proof.clone(),
+            update_user_proof: update_user_proof.clone(),
             public_state_merkle_proof: witness.public_state_merkle_proof.clone(),
         };
         let block_step_proof = self.block_step_circuit.prove(
@@ -344,7 +356,7 @@ mod tests {
 
         let tx_tree_root = Bytes32::rand(&mut rng);
         let timestamp = rng.next_u64();
-        // Use empty local_ids (all-padding) so should_update=false, bypassing SPHINCS+.
+        // Use empty key_ids (all-padding) so should_update=false, bypassing SPHINCS+.
         generator
             .add_block(1, &[], timestamp, tx_tree_root)
             .expect("add block");

@@ -5,19 +5,14 @@ pub const TOKEN_INDEX_BITS: usize = 32;
 pub const BLOCK_NUMBER_BITS: usize = 63;
 pub const PUBLIC_STATE_TREE_HEIGHT: usize = BLOCK_NUMBER_BITS;
 pub const DEPOSIT_TREE_HEIGHT: usize = 63;
-pub const HUB_ID_BITS: usize = 31;
-pub const ACCOUNT_NO_BITS: usize = 32;
-pub const ACCOUNT_ID_BITS: usize = HUB_ID_BITS + ACCOUNT_NO_BITS;
+pub const CHANNEL_ID_BITS: usize = 32;
+pub const KEY_ID_BITS: usize = 32;
 pub const SEND_TREE_HEIGHT: usize = 32;
-pub const ACCOUNT_TREE_HEIGHT: usize = ACCOUNT_ID_BITS;
-pub const MAX_NUM_HUBS: usize = 1 << HUB_ID_BITS;
-
-// Backward-compatible aliases while the rest of the codebase is migrated from
-// aggregator/local naming to hub/account naming.
-pub const AGGREGATOR_ID_BITS: usize = HUB_ID_BITS;
-pub const LOCAL_ID_BITS: usize = ACCOUNT_NO_BITS;
-pub const USER_ID_BITS: usize = ACCOUNT_ID_BITS;
-pub const MAX_NUM_AGGREGATORS: usize = MAX_NUM_HUBS;
+// SECURITY: the BASE intmax native user IS the channel; base accounts are keyed by
+// `channel_id` ALONE (key_id lives only in the channel layer). So the base channel id is 32 bits
+// and the channel tree is indexed by channel_id.
+pub const CHANNEL_TREE_HEIGHT: usize = CHANNEL_ID_BITS;
+pub const MAX_NUM_CHANNELS: usize = 1usize << CHANNEL_ID_BITS;
 
 // Private State
 pub const ASSET_TREE_HEIGHT: usize = TOKEN_INDEX_BITS;
@@ -27,7 +22,28 @@ pub const SENT_TX_TREE_HEIGHT: usize = 32;
 // Key Set (multi-sig)
 pub const KEY_SET_TREE_HEIGHT: usize = 3; // max 8 keys per ID
 
+// Key registry: KeyTree maps key_id -> KeyLeaf { pk_set_root, threshold, num_keys }.
+// Indexed by key_id, so the tree height equals the key id bit-width.
+pub const KEY_TREE_HEIGHT: usize = KEY_ID_BITS;
+// Per-channel member key-id set committed by ChannelLeaf.member_key_ids_root.
+// INTENTIONALLY SIMPLE: cap channel membership at 2^MEMBER_KEY_TREE_HEIGHT for the MVP.
+pub const MEMBER_KEY_TREE_HEIGHT: usize = 8;
+
+// Payment channels (detail2 §G-1 / abstract2 §2.1, §2.5)
+/// Fixed channel membership (abstract2 §2.1: exactly 3 members per channel). `ChannelRecord`,
+/// `BalanceState.enc_balances` and `BalanceState.pending_adds` are all sized by this constant.
+pub const CHANNEL_MEMBERS: usize = 3;
+/// Co-signing timeout (abstract2 §2.5: 3 minutes). Replaces the retired
+/// `SMALL_BLOCK_SIGNATURE_TIMEOUT_SECS = 60`.
+pub const SIGN_TIMEOUT_SECS: u64 = 180;
+/// Grace period between `requestClose` and the first close-intent submission
+/// (abstract2 §2.5: 10 minutes; detail2 §H-2).
+pub const GRACE_BEFORE_PROCESS_SECS: u64 = 600;
+/// L1 close-challenge window (abstract2 §2.5: 1 day; detail2 §G-1).
+pub const CHALLENGE_PERIOD_SECS: u64 = 86_400;
+
 // Transactions
 pub const TRANSFER_TREE_HEIGHT: usize = 6;
 pub const MAX_NUM_TRANSFERS_PER_TX: usize = 1 << TRANSFER_TREE_HEIGHT;
-pub const TX_TREE_HEIGHT: usize = ACCOUNT_NO_BITS;
+// The base tx tree is indexed by channel_id (one base "user" = one channel).
+pub const TX_TREE_HEIGHT: usize = CHANNEL_ID_BITS;

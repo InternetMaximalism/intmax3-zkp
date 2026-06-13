@@ -12,19 +12,19 @@ The canonical specification now uses:
 - BP-produced fully signed small blocks
 - all-member channel-state agreement on both channel balances and Intmax balances
 
-Some code paths below still reflect the older `hub_id + account_no` migration
+Some code paths below still reflect the older `channel_id + key_id` migration
 bridge. They are implementation leftovers, not the target design.
 
 ## Implemented foundations
 
 - `src/common/user_id.rs`
-  - introduced a migration bridge around the older packed account model
+  - introduced a migration bridge around the older packed user model
   - this is no longer the canonical native authorization model in the spec
   - it remains in code only to keep existing proofs compiling during refactor
 
 - `src/constants.rs`
-  - introduced `HUB_ID_BITS`, `ACCOUNT_NO_BITS`, `ACCOUNT_ID_BITS`, `MAX_NUM_HUBS`
-  - old aggregator/local constants remain as aliases during migration
+  - introduced `CHANNEL_ID_BITS`, `KEY_ID_BITS`, `USER_ID_BITS`, `MAX_NUM_CHANNELS`
+  - old proof_submitter/local constants remain as aliases during migration
 
 - `src/common/channel.rs`
   - added the first generation of channel-side state objects:
@@ -78,7 +78,7 @@ The canonical working spec is now stored in-repo at:
 - `src/circuits/balance/*`
 - `src/common/channel_message.rs`
 
-These areas still use legacy account naming and will need the next migration
+These areas still use legacy user naming and will need the next migration
 pass.
 
 ## Current Workstreams
@@ -124,7 +124,7 @@ The updated specification breaks implementation into five main workstreams.
 - burn-backed close and root-based withdrawal claims are already the intended exit direction
 
 The major missing migration is no longer just naming. It is the move from the
-legacy packed account model to:
+legacy packed user model to:
 
 - `ChannelId`
 - `KeyId`

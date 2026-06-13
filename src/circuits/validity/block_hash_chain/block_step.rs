@@ -25,7 +25,7 @@ use crate::{
                 BlockChainPublicInputs, BlockChainPublicInputsError, BlockChainPublicInputsTarget,
             },
             ext_public_state::{ExtendedPublicState, ExtendedPublicStateTarget},
-            update_account_tree::{UpdateAccountPublicInputs, UpdateAccountPublicInputsTarget},
+            update_channel_tree::{UpdateUserPublicInputs, UpdateUserPublicInputsTarget},
         },
         deposit_hash_chain::deposit_chain_pis::{
             DepositChainPublicInputs, DepositChainPublicInputsError, DepositChainPublicInputsTarget,
@@ -61,7 +61,7 @@ pub enum BlockStepError {
     InvalidProof(String),
 
     #[error("Missing update account verifier data for num_users {0}")]
-    MissingUpdateAccountVerifierData(u32),
+    MissingUpdateUserVerifierData(u32),
 
     #[error("Deposit chain public inputs error: {0}")]
     DepositChainPublicInputs(#[from] DepositChainPublicInputsError),
@@ -70,7 +70,7 @@ pub enum BlockStepError {
     BlockChainPublicInputs(#[from] BlockChainPublicInputsError),
 
     #[error("Update account public inputs error: {0}")]
-    UpdateAccountPublicInputs(String),
+    UpdateUserPublicInputs(String),
 
     #[error("Public state merkle proof error: {0}")]
     PublicStateMerkleProof(String),
@@ -98,7 +98,7 @@ pub struct BlockStepWitness<
     pub deposit_hash_chain_proof: Option<ProofWithPublicInputs<F, C, D>>,
 
     // Update account proof corresponding to this block
-    pub update_account_proof: ProofWithPublicInputs<F, C, D>,
+    pub update_user_proof: ProofWithPublicInputs<F, C, D>,
 
     // Merkle proof to update public state tree
     pub public_state_merkle_proof: PublicStateMerkleProof,
@@ -144,46 +144,45 @@ where
         let update_vd_map: HashMap<u32, &VerifierCircuitData<F, C, D>> =
             update_account_vds.iter().map(|(n, vd)| (*n, vd)).collect();
         let update_vd = update_vd_map.get(&self.num_users).copied().ok_or(
-            BlockStepError::MissingUpdateAccountVerifierData(self.num_users),
+            BlockStepError::MissingUpdateUserVerifierData(self.num_users),
         )?;
         update_vd
-            .verify(self.update_account_proof.clone())
+            .verify(self.update_user_proof.clone())
             .map_err(|e| {
                 BlockStepError::InvalidProof(format!("update account proof invalid: {e}"))
             })?;
-        let update_account_inputs = UpdateAccountPublicInputs::from_u64_slice(
-            &self.update_account_proof.public_inputs.to_u64_vec(),
+        let update_user_inputs = UpdateUserPublicInputs::from_u64_slice(
+            &self.update_user_proof.public_inputs.to_u64_vec(),
         )
-        .map_err(|e| BlockStepError::UpdateAccountPublicInputs(e.to_string()))?;
+        .map_err(|e| BlockStepError::UpdateUserPublicInputs(e.to_string()))?;
 
         // validate consistency between update account proof and previous public state
         let block_number = prev_public_state.block_number.add(1).map_err(|_e| {
             BlockStepError::InvalidInput("previous block number is at max value".to_string())
         })?;
-        if update_account_inputs.block_number != block_number {
+        if update_user_inputs.block_number != block_number {
             return Err(BlockStepError::InvalidInput(
                 "update account proof block number must be previous block number + 1".to_string(),
             ));
         }
-        if update_account_inputs.prev_account_tree_root != prev_public_state.account_tree_root {
+        if update_user_inputs.prev_account_tree_root != prev_public_state.account_tree_root {
             return Err(BlockStepError::InvalidInput(
-                "update account proof initial account tree root mismatch".to_string(),
+                "update account proof initial user tree root mismatch".to_string(),
             ));
         }
-        if update_account_inputs.prev_block_hash_chain != prev_public_state_ext.block_hash_chain {
+        if update_user_inputs.prev_block_hash_chain != prev_public_state_ext.block_hash_chain {
             return Err(BlockStepError::InvalidInput(
                 "update account proof initial block hash chain mismatch".to_string(),
             ));
         }
-        let account_tree_root = update_account_inputs.new_account_tree_root;
-        let block_hash_chain = update_account_inputs.new_block_hash_chain;
+        let account_tree_root = update_user_inputs.new_account_tree_root;
+        let block_hash_chain = update_user_inputs.new_block_hash_chain;
 
         let mut deposit_hash_chain = prev_public_state_ext.deposit_hash_chain;
         let mut deposit_tree_root = prev_public_state.deposit_tree_root;
         let mut deposit_count = prev_public_state_ext.deposit_count;
         // if there is update in deposit hash chain, the deposit proof must be provided
-        if prev_inputs.ext_public_state.deposit_hash_chain
-            != update_account_inputs.deposit_hash_chain
+        if prev_inputs.ext_public_state.deposit_hash_chain != update_user_inputs.deposit_hash_chain
         {
             let deposit_proof = self.deposit_hash_chain_proof.as_ref().ok_or_else(|| {
                 BlockStepError::InvalidInput(
@@ -220,7 +219,7 @@ where
                     "deposit proof initial deposit count mismatch".to_string(),
                 ));
             }
-            if deposit_inputs.deposit_hash_chain != update_account_inputs.deposit_hash_chain {
+            if deposit_inputs.deposit_hash_chain != update_user_inputs.deposit_hash_chain {
                 return Err(BlockStepError::InvalidInput(
                     "deposit proof resulting deposit hash chain must match update account input"
                         .to_string(),
@@ -258,7 +257,7 @@ where
 
         let new_public_state = PublicState {
             block_number,
-            timestamp: update_account_inputs.block_timestamp,
+            timestamp: update_user_inputs.block_timestamp,
             account_tree_root,
             deposit_tree_root,
             prev_public_state_root,
@@ -292,8 +291,8 @@ pub struct BlockStepTarget<const D: usize> {
     pub deposit_hash_chain_proof: ProofWithPublicInputsTarget<D>,
 
     // Update account proof different for each number of users
-    pub update_account_proofs: Vec<ProofWithPublicInputsTarget<D>>,
-    pub selected_update_inputs: UpdateAccountPublicInputsTarget,
+    pub update_user_proofs: Vec<ProofWithPublicInputsTarget<D>>,
+    pub selected_update_inputs: UpdateUserPublicInputsTarget,
 
     pub public_state_merkle_proof: PublicStateMerkleProofTarget,
     pub block_chain_vd: VerifierCircuitTarget,
@@ -365,25 +364,25 @@ impl<const D: usize> BlockStepTarget<D> {
             .fold(builder.zero(), |acc, flag| builder.add(acc, flag.target));
         builder.assert_one(hot_sum);
 
-        let mut update_account_proofs = Vec::with_capacity(update_account_vds.len());
-        let mut update_account_inputs = Vec::with_capacity(update_account_vds.len());
+        let mut update_user_proofs = Vec::with_capacity(update_account_vds.len());
+        let mut update_user_inputs = Vec::with_capacity(update_account_vds.len());
         for (flag, (_num_users, vd)) in one_hot.iter().zip(update_account_vds.iter()) {
             let proof = add_proof_target_and_conditionally_verify(vd, builder, *flag);
-            let inputs = UpdateAccountPublicInputsTarget::from_slice(&proof.public_inputs);
-            update_account_proofs.push(proof);
-            update_account_inputs.push(inputs);
+            let inputs = UpdateUserPublicInputsTarget::from_slice(&proof.public_inputs);
+            update_user_proofs.push(proof);
+            update_user_inputs.push(inputs);
         }
 
-        let update_account_inputs_commitments = update_account_inputs
+        let update_user_inputs_commitments = update_user_inputs
             .iter()
             .map(|inputs| inputs.commitment(builder))
             .collect::<Vec<_>>();
-        let update_commitment_vecs = update_account_inputs_commitments
+        let update_commitment_vecs = update_user_inputs_commitments
             .iter()
             .map(|inputs| inputs.to_vec())
             .collect::<Vec<_>>();
         let selected_commitment_vec = builder.select_vec(&update_commitment_vecs, &one_hot);
-        let selected_update_inputs = UpdateAccountPublicInputsTarget::new(builder, false);
+        let selected_update_inputs = UpdateUserPublicInputsTarget::new(builder, false);
         selected_update_inputs.commitment(builder).connect(
             builder,
             PoseidonHashOutTarget::from_slice(&selected_commitment_vec),
@@ -523,7 +522,7 @@ impl<const D: usize> BlockStepTarget<D> {
             initial_public_state,
             prev_block_chain_proof,
             deposit_hash_chain_proof,
-            update_account_proofs,
+            update_user_proofs,
             selected_update_inputs,
             public_state_merkle_proof,
             block_chain_vd,
@@ -584,18 +583,18 @@ impl<const D: usize> BlockStepTarget<D> {
         for ((flag_target, proof_target), (num_users, _vd)) in self
             .one_hot
             .iter()
-            .zip(self.update_account_proofs.iter())
+            .zip(self.update_user_proofs.iter())
             .zip(update_account_vds.iter())
         {
             let is_selected = value.num_users == *num_users;
             witness.set_bool_target(*flag_target, is_selected);
             if is_selected {
                 matched_update_proof = true;
-                witness.set_proof_with_pis_target(proof_target, &value.update_account_proof);
-                let selected_update_inputs = UpdateAccountPublicInputs::from_u64_slice(
-                    &value.update_account_proof.public_inputs.to_u64_vec(),
+                witness.set_proof_with_pis_target(proof_target, &value.update_user_proof);
+                let selected_update_inputs = UpdateUserPublicInputs::from_u64_slice(
+                    &value.update_user_proof.public_inputs.to_u64_vec(),
                 )
-                .map_err(|e| BlockStepError::UpdateAccountPublicInputs(e.to_string()))?;
+                .map_err(|e| BlockStepError::UpdateUserPublicInputs(e.to_string()))?;
                 self.selected_update_inputs
                     .set_witness(witness, &selected_update_inputs);
             } else {
@@ -610,7 +609,7 @@ impl<const D: usize> BlockStepTarget<D> {
         }
 
         if !matched_update_proof {
-            return Err(BlockStepError::MissingUpdateAccountVerifierData(
+            return Err(BlockStepError::MissingUpdateUserVerifierData(
                 value.num_users,
             ));
         }
@@ -767,7 +766,7 @@ mod tests {
                 block_hash_chain::{
                     block_chain_pis::BLOCK_CHAIN_PUBLIC_INPUTS_LEN,
                     sphincs_sig::SpxSigWitness,
-                    update_account_tree::{UpdateAccountCircuit, UpdateAccountTree},
+                    update_channel_tree::{UpdateUserCircuit, UpdateUserTree},
                 },
                 deposit_hash_chain::deposit_chain_pis::DEPOSIT_CHAIN_PUBLIC_INPUTS_LEN,
             },
@@ -797,9 +796,9 @@ mod tests {
 
         let tx_tree_root = Bytes32::rand(&mut rng);
         let timestamp = rng.next_u64();
-        // Use empty local_ids (all-padding block) so that should_update=false for
+        // Use empty key_ids (all-padding block) so that should_update=false for
         // every slot, bypassing SPHINCS+ signature verification.  Dedicated signing
-        // tests live in update_account_tree.rs.
+        // tests live in update_channel_tree.rs.
         generator
             .add_block(1, &[], timestamp, tx_tree_root)
             .expect("add block");
@@ -810,7 +809,7 @@ mod tests {
             .get(&block_number)
             .expect("block witness");
 
-        let update_circuit = UpdateAccountCircuit::<F, C, D>::new(block_witness.block.num_users);
+        let update_circuit = UpdateUserCircuit::<F, C, D>::new(block_witness.block.num_users);
         let next_block_number = initial_state
             .inner
             .block_number
@@ -818,15 +817,19 @@ mod tests {
             .expect("increment block number");
 
         let num_users = block_witness.block.num_users as usize;
-        let update_tree = UpdateAccountTree {
+        let update_tree = UpdateUserTree {
             prev_block_hash_chain: initial_state.block_hash_chain,
             prev_account_tree_root: initial_state.inner.account_tree_root,
             block_number: next_block_number,
             block: block_witness.block.clone(),
             prev_account_leaves: block_witness.prev_account_leaves.clone(),
-            account_merkle_proofs: block_witness.account_merkle_proofs.clone(),
+            user_merkle_proofs: block_witness.user_merkle_proofs.clone(),
             send_merkle_proofs: block_witness.send_merkle_proofs.clone(),
             sig_witnesses: vec![SpxSigWitness::dummy(); num_users],
+            // Default KeyLeaf (pk_set_root = 0) → signature constraints skipped.
+            key_leaves: vec![crate::common::trees::key_tree::KeyLeaf::default(); num_users],
+            msg_fields:
+                crate::circuits::validity::block_hash_chain::sphincs_sig::SmallBlockMessageFields::default(),
             tx_v2_indices: vec![0; num_users],
             tx_v2s: vec![crate::common::tx::TxV2::default(); num_users],
             tx_v2_merkle_proofs: vec![
@@ -884,7 +887,7 @@ mod tests {
             prev_block_chain_proof: None,
             deposit_hash_chain_proof: None,
             num_users: block_witness.block.num_users,
-            update_account_proof: update_proof,
+            update_user_proof: update_proof,
             public_state_merkle_proof: block_witness.public_state_merkle_proof.clone(),
         };
 

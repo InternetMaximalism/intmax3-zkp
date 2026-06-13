@@ -11,7 +11,7 @@ use rand::Rng;
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    common::user_id::{AccountId, AccountIdTarget},
+    common::channel_id::{ChannelId, ChannelIdTarget},
     ethereum_types::{
         bytes32::{Bytes32, Bytes32Target},
         u32limb_trait::{U32LimbTargetTrait as _, U32LimbTrait as _},
@@ -225,8 +225,8 @@ impl ChannelActionKind {
 #[serde(rename_all = "camelCase")]
 pub struct ChannelAction {
     pub kind: ChannelActionKind,
-    pub source_channel_id: AccountId,
-    pub destination_channel_id: AccountId,
+    pub source_channel_id: ChannelId,
+    pub destination_channel_id: ChannelId,
     pub tx_hash: Bytes32,
     pub seal: Bytes32,
     pub payload_hash: PoseidonHashOut,
@@ -256,12 +256,12 @@ impl ChannelAction {
 
         Ok(Self {
             kind: ChannelActionKind::from_u32(input[0] as u32)?,
-            source_channel_id: AccountId::from_u64(input[1]).map_err(|e| {
+            source_channel_id: ChannelId::from_u64(input[1]).map_err(|e| {
                 crate::common::error::CommonError::InvalidData(format!(
                     "invalid source channel id: {e}"
                 ))
             })?,
-            destination_channel_id: AccountId::from_u64(input[2]).map_err(|e| {
+            destination_channel_id: ChannelId::from_u64(input[2]).map_err(|e| {
                 crate::common::error::CommonError::InvalidData(format!(
                     "invalid destination channel id: {e}"
                 ))
@@ -283,8 +283,8 @@ impl Default for ChannelAction {
     fn default() -> Self {
         Self {
             kind: ChannelActionKind::InterChannelSend,
-            source_channel_id: AccountId::dummy(),
-            destination_channel_id: AccountId::dummy(),
+            source_channel_id: ChannelId::dummy(),
+            destination_channel_id: ChannelId::dummy(),
             tx_hash: Bytes32::default(),
             seal: Bytes32::default(),
             payload_hash: PoseidonHashOut::default(),
@@ -307,8 +307,8 @@ impl Leafable for ChannelAction {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ChannelActionTarget {
     pub kind: Target,
-    pub source_channel_id: AccountIdTarget,
-    pub destination_channel_id: AccountIdTarget,
+    pub source_channel_id: ChannelIdTarget,
+    pub destination_channel_id: ChannelIdTarget,
     pub tx_hash: Bytes32Target,
     pub seal: Bytes32Target,
     pub payload_hash: PoseidonHashOutTarget,
@@ -321,8 +321,8 @@ impl ChannelActionTarget {
     ) -> Self {
         Self {
             kind: builder.add_virtual_target(),
-            source_channel_id: AccountIdTarget::new(builder, is_checked),
-            destination_channel_id: AccountIdTarget::new(builder, is_checked),
+            source_channel_id: ChannelIdTarget::new(builder, is_checked),
+            destination_channel_id: ChannelIdTarget::new(builder, is_checked),
             tx_hash: Bytes32Target::new(builder, is_checked),
             seal: Bytes32Target::new(builder, is_checked),
             payload_hash: PoseidonHashOutTarget::new(builder),
@@ -335,8 +335,8 @@ impl ChannelActionTarget {
     ) -> Self {
         Self {
             kind: builder.constant(F::from_canonical_u32(value.kind.as_u32())),
-            source_channel_id: AccountIdTarget::constant(builder, value.source_channel_id),
-            destination_channel_id: AccountIdTarget::constant(
+            source_channel_id: ChannelIdTarget::constant(builder, value.source_channel_id),
+            destination_channel_id: ChannelIdTarget::constant(
                 builder,
                 value.destination_channel_id,
             ),
@@ -547,8 +547,8 @@ mod tx_v2_tests {
     fn channel_action_roundtrip() {
         let action = ChannelAction {
             kind: ChannelActionKind::InterChannelSend,
-            source_channel_id: AccountId::new(4, 10).unwrap(),
-            destination_channel_id: AccountId::new(9, 20).unwrap(),
+            source_channel_id: ChannelId::new(4).unwrap(),
+            destination_channel_id: ChannelId::new(9).unwrap(),
             tx_hash: Bytes32::default(),
             seal: Bytes32::default(),
             payload_hash: PoseidonHashOut::default(),

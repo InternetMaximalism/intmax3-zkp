@@ -37,6 +37,7 @@ use crate::{
         },
     },
     common::{
+        channel_id::ChannelId,
         salt::Salt,
         transfer::Transfer,
         trees::{
@@ -44,7 +45,6 @@ use crate::{
             tx_tree::TxTree,
         },
         tx::Tx,
-        user_id::UserId,
     },
     ethereum_types::{address::Address, bytes32::Bytes32, u32limb_trait::U32LimbTrait, u256::U256},
 };
@@ -99,7 +99,7 @@ struct BalanceScenarioAsync {
     spend_circuit: SpendCircuit<F, C, D>,
     balance_processor: BalanceProcessor<F, C, D>,
     block_witness_generator: BlockWitnessGeneratorHandle,
-    user_id: UserId,
+    channel_id: ChannelId,
     balance_witness_generator: BalanceWitnessGenerator<F, C, D>,
 }
 
@@ -114,13 +114,14 @@ impl BalanceScenarioAsync {
         let block_witness_generator =
             BlockWitnessGeneratorHandle::new(BlockWitnessGenerator::new(supported_user_counts));
 
-        let user_id = UserId::new(0, 1).map_err(|e| JsValue::from_str(&format!("user id: {e}")))?;
+        let channel_id =
+            ChannelId::new(1).map_err(|e| JsValue::from_str(&format!("user id: {e}")))?;
         let salt = Salt::rand(rng);
 
         log("Creating balance witness generator (async)...");
         let t = Instant::now();
         let balance_witness_generator = BalanceWitnessGenerator::new_async(
-            user_id,
+            channel_id,
             salt,
             block_witness_generator.clone(),
             &balance_processor,
@@ -133,7 +134,7 @@ impl BalanceScenarioAsync {
             spend_circuit,
             balance_processor,
             block_witness_generator,
-            user_id,
+            channel_id,
             balance_witness_generator,
         })
     }
@@ -150,14 +151,14 @@ struct SendTxOutcome {
 }
 
 /// Async equivalent of `perform_deposit` in `tests/wasm_proofs.rs`.
-/// Deposits 10 tokens, then performs an internal transfer of 3 tokens to user_id=(1,1).
+/// Deposits 10 tokens, then performs an internal transfer of 3 tokens to channel_id=(1,1).
 async fn perform_deposit_async(
     scenario: &mut BalanceScenarioAsync,
     rng: &mut StdRng,
 ) -> Result<SendTxOutcome, JsValue> {
     log("Starting deposit flow");
     let deposit_salt = Salt::rand(rng);
-    let deposit_recipient = calculate_recipient_from_user_id(scenario.user_id, deposit_salt);
+    let deposit_recipient = calculate_recipient_from_user_id(scenario.channel_id, deposit_salt);
     {
         let mut block_gen = scenario.block_witness_generator.borrow_mut();
         block_gen
@@ -197,10 +198,10 @@ async fn perform_deposit_async(
         .map_err(|e| JsValue::from_str(&format!("commit deposit: {e}")))?;
     log("Deposit committed");
 
-    // Internal transfer: spend 3 tokens to user_id=(1,1)
+    // Internal transfer: spend 3 tokens to channel_id=(1,1)
     let transfer_recipient_salt = Salt::rand(rng);
     let recipient_user =
-        UserId::new(1, 1).map_err(|e| JsValue::from_str(&format!("recipient user id: {e}")))?;
+        ChannelId::new(2).map_err(|e| JsValue::from_str(&format!("recipient user id: {e}")))?;
     let transfer = Transfer {
         recipient: calculate_recipient_from_user_id(recipient_user, transfer_recipient_salt),
         token_index: 0,
@@ -234,17 +235,17 @@ async fn perform_deposit_async(
         nonce: scenario.balance_witness_generator.full_private_state.nonce,
     };
     let mut tx_tree = TxTree::init();
-    tx_tree.update(scenario.user_id.local_id() as u64, tx.clone());
+    tx_tree.update(scenario.channel_id.as_u64(), tx.clone());
     let tx_tree_root = tx_tree.get_root();
-    let tx_merkle_proof = tx_tree.prove(scenario.user_id.local_id() as u64);
+    let tx_merkle_proof = tx_tree.prove(scenario.channel_id.as_u64());
     let tx_tree_root_bytes: Bytes32 = tx_tree_root.into();
 
     {
         let mut block_gen = scenario.block_witness_generator.borrow_mut();
         block_gen
             .add_block(
-                scenario.user_id.aggregator_id(),
-                &[scenario.user_id.local_id()],
+                scenario.channel_id.channel_id(),
+                &[1],
                 1,
                 tx_tree_root_bytes,
             )
@@ -258,6 +259,8 @@ async fn perform_deposit_async(
         tx_merkle_proof: tx_merkle_proof.clone(),
         tx_v2: None,
         tx_v2_merkle_proof: None,
+        transfer: transfer.clone(),
+        transfer_merkle_proof: transfer_merkle_proof.clone(),
     };
     let send_tx_witness = scenario
         .balance_witness_generator
@@ -385,17 +388,17 @@ pub async fn run_single_withdrawal_proof() -> Result<(), JsValue> {
         nonce: scenario.balance_witness_generator.full_private_state.nonce,
     };
     let mut tx_tree = TxTree::init();
-    tx_tree.update(scenario.user_id.local_id() as u64, tx.clone());
+    tx_tree.update(scenario.channel_id.as_u64(), tx.clone());
     let tx_tree_root = tx_tree.get_root();
     let tx_tree_root_bytes: Bytes32 = tx_tree_root.into();
-    let tx_merkle_proof = tx_tree.prove(scenario.user_id.local_id() as u64);
+    let tx_merkle_proof = tx_tree.prove(scenario.channel_id.as_u64());
 
     {
         let mut block_gen = scenario.block_witness_generator.borrow_mut();
         block_gen
             .add_block(
-                scenario.user_id.aggregator_id(),
-                &[scenario.user_id.local_id()],
+                scenario.channel_id.channel_id(),
+                &[1],
                 2,
                 tx_tree_root_bytes,
             )
@@ -409,6 +412,8 @@ pub async fn run_single_withdrawal_proof() -> Result<(), JsValue> {
         tx_merkle_proof: tx_merkle_proof.clone(),
         tx_v2: None,
         tx_v2_merkle_proof: None,
+        transfer: transfer.clone(),
+        transfer_merkle_proof: transfer_merkle_proof.clone(),
     };
     log("Building withdrawal send witness");
     let send_tx_witness = scenario
@@ -519,7 +524,7 @@ pub async fn run_balance_processor_flow() -> Result<(), JsValue> {
     // === Receive Transfer (second user) ===
     log("Setting up receiver...");
     let user_id2 =
-        UserId::new(1, 1).map_err(|e| JsValue::from_str(&format!("second user id: {e}")))?;
+        ChannelId::new(2).map_err(|e| JsValue::from_str(&format!("second user id: {e}")))?;
     let salt2 = Salt::rand(&mut rng);
 
     // Drop spend_circuit before creating receiver to free memory

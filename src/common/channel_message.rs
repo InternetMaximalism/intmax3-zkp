@@ -3,9 +3,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     common::{
+        channel_id::ChannelId,
         trees::tx_v2_tree::compute_channel_action_root,
         tx::{ChannelAction, ChannelActionKind, TxClass, TxV2},
-        user_id::UserId,
     },
     ethereum_types::{bytes32::Bytes32, u32limb_trait::U32LimbTrait, u256::U256},
     utils::poseidon_hash_out::PoseidonHashOut,
@@ -46,8 +46,8 @@ impl Allocation {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ChannelMessage {
-    /// The channel's userId (multisig account ID).
-    pub channel_id: UserId,
+    /// The channel's userId (multisig user ID).
+    pub channel_id: ChannelId,
 
     /// Monotonically increasing sequence number. Higher = newer state.
     pub sequence: u64,
@@ -116,7 +116,7 @@ impl ChannelMessage {
         ChannelAction {
             kind: ChannelActionKind::ChannelClose,
             source_channel_id: self.channel_id,
-            destination_channel_id: UserId::dummy(),
+            destination_channel_id: ChannelId::dummy(),
             tx_hash: self.signing_hash(),
             seal,
             payload_hash: self.close_action_payload_hash(),
@@ -144,7 +144,7 @@ impl ChannelMessage {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::common::user_id::UserId;
+    use crate::common::channel_id::ChannelId;
     use rand::{SeedableRng, rngs::StdRng};
 
     #[test]
@@ -157,7 +157,7 @@ mod tests {
     #[test]
     fn test_signing_hash_deterministic() {
         let msg = ChannelMessage {
-            channel_id: UserId::new(1, 100).unwrap(),
+            channel_id: ChannelId::new(1).unwrap(),
             sequence: 5,
             allocations: vec![Allocation {
                 recipient: Bytes32::default(),
@@ -175,13 +175,13 @@ mod tests {
     #[test]
     fn test_different_sequences_produce_different_hashes() {
         let msg1 = ChannelMessage {
-            channel_id: UserId::new(1, 100).unwrap(),
+            channel_id: ChannelId::new(1).unwrap(),
             sequence: 1,
             allocations: vec![],
             tx_tree_root: Bytes32::default(),
         };
         let msg2 = ChannelMessage {
-            channel_id: UserId::new(1, 100).unwrap(),
+            channel_id: ChannelId::new(1).unwrap(),
             sequence: 2,
             allocations: vec![],
             tx_tree_root: Bytes32::default(),
@@ -194,7 +194,7 @@ mod tests {
     fn test_serialization_roundtrip() {
         let mut rng = StdRng::seed_from_u64(42);
         let msg = ChannelMessage {
-            channel_id: UserId::new(2, 50).unwrap(),
+            channel_id: ChannelId::new(2).unwrap(),
             sequence: 10,
             allocations: vec![
                 Allocation {
@@ -219,7 +219,7 @@ mod tests {
     #[test]
     fn test_channel_close_tx_v2_is_deterministic() {
         let msg = ChannelMessage {
-            channel_id: UserId::new(2, 50).unwrap(),
+            channel_id: ChannelId::new(2).unwrap(),
             sequence: 10,
             allocations: vec![],
             tx_tree_root: Bytes32::default(),
@@ -250,7 +250,7 @@ mod tests {
     ///   - Channel message format is distinct from Intmax Tx
     #[test]
     fn test_full_lifecycle_offchain_messages() {
-        let channel_id = UserId::new(1, 42).unwrap();
+        let channel_id = ChannelId::new(1).unwrap();
 
         let alice_recipient = Bytes32::from_u32_slice(&[0, 0, 0, 0, 0, 0, 0, 1]).unwrap();
         let bob_recipient = Bytes32::from_u32_slice(&[0, 0, 0, 0, 0, 0, 0, 2]).unwrap();

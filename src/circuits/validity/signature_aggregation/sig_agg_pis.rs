@@ -30,17 +30,18 @@ use crate::{
 ///   initial_account_tree_root: POSEIDON_HASH_OUT_LEN (4)
 ///   account_tree_root:         POSEIDON_HASH_OUT_LEN (4)
 ///   block_number:              1
-///   aggregator_id:             1
+///   channel_id:             1
 ///   tx_tree_root:              BYTES32_LEN (8)
-///   current_user_local_id:     1
+///   signed_digest:             BYTES32_LEN (8)
+///   current_user_key_id:     1
 ///   current_user_pk_set_root:  POSEIDON_HASH_OUT_LEN (4)
 ///   current_user_threshold:    1
 ///   current_user_sigs_verified:1
 ///   current_user_last_pk_index:1
 ///   processed_count:           1
 ///   processed_users_hash:      POSEIDON_HASH_OUT_LEN (4)
-///   Total: 31
-pub const SIG_AGG_PUBLIC_INPUTS_LEN: usize = 4 * POSEIDON_HASH_OUT_LEN + BYTES32_LEN + 7;
+///   Total: 39
+pub const SIG_AGG_PUBLIC_INPUTS_LEN: usize = 4 * POSEIDON_HASH_OUT_LEN + 2 * BYTES32_LEN + 7;
 
 #[derive(Debug, Error)]
 pub enum SigAggPublicInputsError {
@@ -63,9 +64,13 @@ pub struct SigAggPublicInputs<
     pub initial_account_tree_root: PoseidonHashOut,
     pub account_tree_root: PoseidonHashOut,
     pub block_number: BlockNumber,
-    pub aggregator_id: u32,
+    pub channel_id: u32,
     pub tx_tree_root: Bytes32,
-    pub current_user_local_id: u32,
+    /// IMSB `SmallBlockRootMessage::signing_digest()` every member signature in this chain is
+    /// verified over (detail2 §F-2). Recomputed+connected from the block context at the
+    /// block-level circuit; carried through the per-signature steps as a PI.
+    pub signed_digest: Bytes32,
+    pub current_user_key_id: u32,
     pub current_user_pk_set_root: PoseidonHashOut,
     pub current_user_threshold: u32,
     pub current_user_sigs_verified: u32,
@@ -85,9 +90,10 @@ where
             self.initial_account_tree_root.to_u64_vec(),
             self.account_tree_root.to_u64_vec(),
             self.block_number.to_u64_vec(),
-            vec![self.aggregator_id as u64],
+            vec![self.channel_id as u64],
             self.tx_tree_root.to_u64_vec(),
-            vec![self.current_user_local_id as u64],
+            self.signed_digest.to_u64_vec(),
+            vec![self.current_user_key_id as u64],
             self.current_user_pk_set_root.to_u64_vec(),
             vec![self.current_user_threshold as u64],
             vec![self.current_user_sigs_verified as u64],
@@ -137,7 +143,7 @@ where
             })?;
         cursor += 1;
 
-        let aggregator_id = inputs[cursor] as u32;
+        let channel_id = inputs[cursor] as u32;
         cursor += 1;
 
         let tx_tree_root =
@@ -149,7 +155,14 @@ where
             })?;
         cursor += BYTES32_LEN;
 
-        let current_user_local_id = inputs[cursor] as u32;
+        let signed_digest = Bytes32::from_u64_slice(&inputs[cursor..cursor + BYTES32_LEN])
+            .map_err(|e| SigAggPublicInputsError::ParseError {
+                field: "signed_digest",
+                message: e.to_string(),
+            })?;
+        cursor += BYTES32_LEN;
+
+        let current_user_key_id = inputs[cursor] as u32;
         cursor += 1;
 
         let current_user_pk_set_root =
@@ -192,9 +205,10 @@ where
             initial_account_tree_root,
             account_tree_root,
             block_number,
-            aggregator_id,
+            channel_id,
             tx_tree_root,
-            current_user_local_id,
+            signed_digest,
+            current_user_key_id,
             current_user_pk_set_root,
             current_user_threshold,
             current_user_sigs_verified,
@@ -211,9 +225,10 @@ pub struct SigAggPublicInputsTarget {
     pub initial_account_tree_root: PoseidonHashOutTarget,
     pub account_tree_root: PoseidonHashOutTarget,
     pub block_number: BlockNumberTarget,
-    pub aggregator_id: Target,
+    pub channel_id: Target,
     pub tx_tree_root: Bytes32Target,
-    pub current_user_local_id: Target,
+    pub signed_digest: Bytes32Target,
+    pub current_user_key_id: Target,
     pub current_user_pk_set_root: PoseidonHashOutTarget,
     pub current_user_threshold: Target,
     pub current_user_sigs_verified: Target,
@@ -229,9 +244,10 @@ impl SigAggPublicInputsTarget {
             self.initial_account_tree_root.to_vec(),
             self.account_tree_root.to_vec(),
             self.block_number.to_vec(),
-            vec![self.aggregator_id],
+            vec![self.channel_id],
             self.tx_tree_root.to_vec(),
-            vec![self.current_user_local_id],
+            self.signed_digest.to_vec(),
+            vec![self.current_user_key_id],
             self.current_user_pk_set_root.to_vec(),
             vec![self.current_user_threshold],
             vec![self.current_user_sigs_verified],
@@ -260,13 +276,16 @@ impl SigAggPublicInputsTarget {
         let block_number = BlockNumberTarget::from_slice(&pis[cursor..cursor + 1]);
         cursor += 1;
 
-        let aggregator_id = pis[cursor];
+        let channel_id = pis[cursor];
         cursor += 1;
 
         let tx_tree_root = Bytes32Target::from_slice(&pis[cursor..cursor + BYTES32_LEN]);
         cursor += BYTES32_LEN;
 
-        let current_user_local_id = pis[cursor];
+        let signed_digest = Bytes32Target::from_slice(&pis[cursor..cursor + BYTES32_LEN]);
+        cursor += BYTES32_LEN;
+
+        let current_user_key_id = pis[cursor];
         cursor += 1;
 
         let current_user_pk_set_root =
@@ -297,9 +316,10 @@ impl SigAggPublicInputsTarget {
             initial_account_tree_root,
             account_tree_root,
             block_number,
-            aggregator_id,
+            channel_id,
             tx_tree_root,
-            current_user_local_id,
+            signed_digest,
+            current_user_key_id,
             current_user_pk_set_root,
             current_user_threshold,
             current_user_sigs_verified,
@@ -328,13 +348,14 @@ impl SigAggPublicInputsTarget {
             .set_witness(witness, value.account_tree_root);
         self.block_number.set_witness(witness, value.block_number);
         witness.set_target(
-            self.aggregator_id,
-            F::from_canonical_u64(value.aggregator_id as u64),
+            self.channel_id,
+            F::from_canonical_u64(value.channel_id as u64),
         );
         self.tx_tree_root.set_witness(witness, value.tx_tree_root);
+        self.signed_digest.set_witness(witness, value.signed_digest);
         witness.set_target(
-            self.current_user_local_id,
-            F::from_canonical_u64(value.current_user_local_id as u64),
+            self.current_user_key_id,
+            F::from_canonical_u64(value.current_user_key_id as u64),
         );
         self.current_user_pk_set_root
             .set_witness(witness, value.current_user_pk_set_root);

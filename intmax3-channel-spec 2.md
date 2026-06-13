@@ -703,16 +703,16 @@ sum(opened_channel_balances) = ChannelFund.intmax_visible_amount_to_members
 
 ### 15.1 Migration Impact
 
-The current repository still contains a legacy packed `AccountId = hub_id + account_no` model in
+The current repository still contains a legacy packed `UserId = channel_id + key_id` model in
 multiple places. This specification supersedes that as the canonical native authorization model.
 
 Implementation must therefore migrate:
 
-- native signing identities: from `AccountId` to `UserId = ChannelId || KeyId`
+- native signing identities: from `UserId` to `UserId = ChannelId || KeyId`
 - channel membership: from one account-threshold leaf to `ChannelRecord + KeyRecord`
 - channel-level finality: from optional attached signatures to fully signed small-block roots
 
-The legacy packed account model may remain temporarily only as an implementation bridge for
+The legacy packed user model may remain temporarily only as an implementation bridge for
 non-channel Intmax components.
 
 ### 15.2 Files and Modules That Must Change

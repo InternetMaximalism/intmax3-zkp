@@ -3,24 +3,26 @@ pragma solidity ^0.8.24;
 
 interface IChannelSettlementVerifier {
     function verifyCloseIntent(
-        bytes5 channelId,
+        bytes4 channelId,
         uint64 closeNonce,
         uint64 finalEpoch,
         uint64 finalSmallBlockNumber,
         uint64 closeFreezeNonce,
         bytes32 finalChannelStateDigest,
-        bytes32 finalChannelBalanceRoot,
+        bytes32 finalBalanceStateH1,
         uint256 channelFundAmount,
         bytes32 channelFundIntmaxStateRoot,
         bytes32 burnTxHash,
         bytes32 closeWithdrawalDigest,
         uint64 snapshotMediumBlockNumber,
+        uint64 finalStateVersion,
+        bytes32 finalSettledTxChain,
         bytes calldata proof
     ) external pure returns (bool);
 
     function verifySpecialClose(
-        bytes5 channelId,
-        bytes5 offendingBpKeyId,
+        bytes4 channelId,
+        bytes4 offendingBpKeyId,
         bytes32 fullySignedSmallBlockRoot,
         uint64 smallBlockNumber,
         uint64 signedMediumBlockNumber,
@@ -29,10 +31,10 @@ interface IChannelSettlementVerifier {
     ) external pure returns (bool);
 
     function verifyWithdrawalClaim(
-        bytes5 channelId,
+        bytes4 channelId,
         bytes32 closeIntentDigest,
-        bytes32 finalChannelBalanceRoot,
-        bytes10 userId,
+        bytes32 finalBalanceStateH1,
+        bytes8 userId,
         address recipient,
         bytes32 userAmountDigest,
         uint64 amount,
@@ -41,7 +43,7 @@ interface IChannelSettlementVerifier {
     ) external pure returns (bool);
 
     function verifyCancelClose(
-        bytes5 channelId,
+        bytes4 channelId,
         bytes32 closeIntentDigest,
         bytes32 revivedSmallBlockRoot,
         bytes32 revivedInterChannelTxDigest,
@@ -51,22 +53,21 @@ interface IChannelSettlementVerifier {
     ) external pure returns (bool);
 
     function verifyPostCloseClaim(
-        bytes5 channelId,
+        bytes4 channelId,
         bytes32 closeIntentDigest,
         bytes32 incomingTxHash,
-        bytes10 receiverUserId,
+        bytes8 receiverUserId,
         address recipient,
-        bytes32 receiverAmountDigest,
         bytes32 sharedNativeNullifier,
         uint64 amount,
         bytes calldata proof
     ) external pure returns (bool);
 
     function verifyLateOutgoingDebit(
-        bytes5 channelId,
+        bytes4 channelId,
         bytes32 closeIntentDigest,
         bytes32 sourceTxHash,
-        bytes10 senderUserId,
+        bytes8 senderUserId,
         bytes32 senderAmountDigest,
         bytes32 debitNullifier,
         uint64 amount,
@@ -77,6 +78,7 @@ interface IChannelSettlementVerifier {
 contract ChannelSettlementManager {
     error InvalidChannelId();
     error InvalidBpKeyId();
+    error InvalidChallengePeriod();
     error InvalidMemberBinding();
     error DuplicateRegisteredMember();
     error InvalidCloseProof();
@@ -101,12 +103,21 @@ contract ChannelSettlementManager {
     error RecipientMismatch();
     error ChannelAlreadyFrozen();
     error ChannelClosed();
+    error NotChannelMember();
+    error CloseNotRequested();
+    error GracePeriodNotElapsed();
 
     enum ChannelLifecycleStatus {
         Active,
         ClosePending,
         Closed
     }
+
+    event CloseRequested(
+        address indexed requester,
+        uint64 closeRequestedAt,
+        uint64 closeFreezeNonce
+    );
 
     event CloseSubmitted(
         bytes32 indexed closeIntentDigest,
@@ -115,12 +126,14 @@ contract ChannelSettlementManager {
         uint64 finalEpoch,
         uint64 closeFreezeNonce,
         uint256 channelFundAmount,
-        uint64 challengeDeadline
+        uint64 challengeDeadline,
+        uint64 finalStateVersion,
+        bytes32 finalSettledTxChain
     );
 
     event SpecialCloseSubmitted(
         bytes32 indexed specialCloseDigest,
-        bytes5 indexed offendingBpKeyId,
+        bytes4 indexed offendingBpKeyId,
         bytes32 indexed fullySignedSmallBlockRoot,
         uint64 smallBlockNumber,
         uint256 slashedAmount,
@@ -144,13 +157,15 @@ contract ChannelSettlementManager {
         bytes32 indexed closeIntentDigest,
         bytes32 indexed burnTxHash,
         uint64 indexed finalEpoch,
-        uint256 channelFundAmount
+        uint256 channelFundAmount,
+        uint64 finalStateVersion,
+        bytes32 finalSettledTxChain
     );
 
     event WithdrawalClaimAccepted(
         bytes32 indexed closeIntentDigest,
         bytes32 indexed withdrawalNullifier,
-        bytes10 indexed userId,
+        bytes8 indexed userId,
         address recipient,
         uint256 amount
     );
@@ -158,29 +173,44 @@ contract ChannelSettlementManager {
     event PostCloseClaimAccepted(
         bytes32 indexed closeIntentDigest,
         bytes32 indexed sharedNativeNullifier,
-        bytes10 indexed receiverUserId,
+        bytes8 indexed receiverUserId,
         address recipient,
         uint256 amount
     );
 
     event WithdrawalClaimed(address indexed recipient, uint256 amount);
 
+    /// @dev Mirror of Rust `CloseIntent` (src/common/channel.rs), minus the channel id (this
+    /// contract is per-channel; `channelId` is the immutable).
+    ///
+    /// Chain-matching division of labor (abstract2 §3.5.2, detail2 §H-2): L1 only CARRIES and
+    /// BINDS `finalSettledTxChain` (it is part of the IMCI digest and the close-proof public
+    /// inputs). The semantic equality `balance_pis.settled_tx_chain ==
+    /// close_pis.final_settled_tx_chain` — i.e. that the closing balance state really settled
+    /// exactly this tx chain — is enforced INSIDE the plonky2 close circuit (P7), not here.
     struct CloseIntent {
         uint64 closeNonce;
         uint64 finalEpoch;
         uint64 finalSmallBlockNumber;
         uint64 closeFreezeNonce;
         bytes32 finalChannelStateDigest;
-        bytes32 finalChannelBalanceRoot;
+        /// `h1()` of the final hidden `BalanceState` (rename of the legacy
+        /// `finalChannelBalanceRoot`; detail2 §C-3).
+        bytes32 finalBalanceStateH1;
         uint256 channelFundAmount;
         bytes32 channelFundIntmaxStateRoot;
         bytes32 burnTxHash;
         bytes32 closeWithdrawalDigest;
         uint64 snapshotMediumBlockNumber;
+        /// `state_version` of the final balance state — challenge ordering compares
+        /// `(finalEpoch, finalStateVersion)` (detail2 §H-4).
+        uint64 finalStateVersion;
+        /// `settled_tx_chain` of the final balance state (detail2 §H-2; see the struct doc).
+        bytes32 finalSettledTxChain;
     }
 
     struct SpecialClose {
-        bytes5 offendingBpKeyId;
+        bytes4 offendingBpKeyId;
         bytes32 fullySignedSmallBlockRoot;
         uint64 smallBlockNumber;
         uint64 signedMediumBlockNumber;
@@ -188,13 +218,13 @@ contract ChannelSettlementManager {
     }
 
     struct MemberBinding {
-        bytes10 userId;
+        bytes8 userId;
         address recipient;
     }
 
     struct WithdrawalClaim {
         bytes32 closeIntentDigest;
-        bytes10 userId;
+        bytes8 userId;
         address recipient;
         bytes32 userAmountDigest;
         uint64 amount;
@@ -212,9 +242,8 @@ contract ChannelSettlementManager {
     struct PostCloseClaim {
         bytes32 closeIntentDigest;
         bytes32 incomingTxHash;
-        bytes10 receiverUserId;
+        bytes8 receiverUserId;
         address recipient;
-        bytes32 receiverAmountDigest;
         bytes32 sharedNativeNullifier;
         uint64 amount;
     }
@@ -222,7 +251,7 @@ contract ChannelSettlementManager {
     struct LateOutgoingDebitCorrection {
         bytes32 closeIntentDigest;
         bytes32 sourceTxHash;
-        bytes10 senderUserId;
+        bytes8 senderUserId;
         bytes32 senderAmountDigest;
         bytes32 debitNullifier;
         uint64 amount;
@@ -237,34 +266,53 @@ contract ChannelSettlementManager {
         uint64 challengeDeadline;
         bytes32 closeIntentDigest;
         bytes32 finalChannelStateDigest;
-        bytes32 finalChannelBalanceRoot;
+        bytes32 finalBalanceStateH1;
         uint256 channelFundAmount;
         bytes32 channelFundIntmaxStateRoot;
         bytes32 burnTxHash;
         bytes32 closeWithdrawalDigest;
         uint64 snapshotMediumBlockNumber;
+        uint64 finalStateVersion;
+        bytes32 finalSettledTxChain;
     }
 
-    bytes5 public immutable channelId;
-    bytes5 public immutable bpKeyId;
+    /// @notice Grace period between `requestClose()` and the first `submitCloseIntent` of the
+    /// frozen era (abstract2 §2.5: "10 minutes after the freeze request is when the close
+    /// process can start").
+    ///
+    /// SECURITY: the grace window guarantees every member observes the freeze (no further
+    /// `isNativeSendAllowed` sends) and has time to gossip its newest signed state BEFORE any
+    /// close intent can be recorded. Without it, the requester could freeze and immediately
+    /// submit a stale state, racing honest members' newer versions.
+    uint64 public constant GRACE_BEFORE_PROCESS_SECS = 600;
+
+    /// @notice Reference challenge period (abstract2 §3.5: 1 day). The constructor argument is
+    /// kept for test configurability but MUST be nonzero.
+    uint64 public constant CHALLENGE_PERIOD_SECS = 86_400;
+
+    bytes4 public immutable channelId;
+    bytes4 public immutable bpKeyId;
     uint64 public immutable challengePeriod;
     uint256 public immutable specialClosePenalty;
     IChannelSettlementVerifier public immutable verifier;
 
     ChannelLifecycleStatus public channelStatus;
     uint64 public currentCloseFreezeNonce;
+    uint64 public closeRequestedAt;
     uint256 public bpBondCredits;
 
     PendingClose public pendingClose;
     bytes32 public latestSpecialCloseDigest;
     bytes32 public finalizedCloseIntentDigest;
     bytes32 public finalizedChannelStateDigest;
-    bytes32 public finalizedChannelBalanceRoot;
+    bytes32 public finalizedBalanceStateH1;
     bytes32 public finalizedBurnTxHash;
     bytes32 public finalizedCloseWithdrawalDigest;
     bytes32 public finalizedChannelFundIntmaxStateRoot;
+    bytes32 public finalizedSettledTxChain;
     uint64 public finalizedEpoch;
     uint64 public finalizedSmallBlockNumber;
+    uint64 public finalizedStateVersion;
     uint256 public finalizedChannelFundAmount;
     uint256 public totalWithdrawn;
 
@@ -272,21 +320,25 @@ contract ChannelSettlementManager {
     mapping(bytes32 => bool) public usedWithdrawalNullifiers;
     mapping(bytes32 => bool) public usedSharedNativeNullifiers;
     mapping(bytes32 => bool) public usedLateOutgoingDebitNullifiers;
-    mapping(bytes10 => address) public registeredRecipientOf;
-    mapping(bytes10 => uint256) public registeredMemberIndexPlusOne;
-    bytes10[] public registeredUserIds;
+    mapping(bytes8 => address) public registeredRecipientOf;
+    mapping(bytes8 => uint256) public registeredMemberIndexPlusOne;
+    mapping(address => bool) public isMemberRecipient;
+    bytes8[] public registeredUserIds;
 
     constructor(
-        bytes5 channelId_,
-        bytes5 bpKeyId_,
+        bytes4 channelId_,
+        bytes4 bpKeyId_,
         uint64 challengePeriod_,
         uint256 specialClosePenalty_,
         uint256 initialBpBondCredits_,
         IChannelSettlementVerifier verifier_,
         MemberBinding[] memory memberBindings
     ) {
-        if (channelId_ == bytes5(0)) revert InvalidChannelId();
-        if (bpKeyId_ == bytes5(0)) revert InvalidBpKeyId();
+        if (channelId_ == bytes4(0)) revert InvalidChannelId();
+        if (bpKeyId_ == bytes4(0)) revert InvalidBpKeyId();
+        // SECURITY: a zero challenge period would let any pending close finalize in the same
+        // block, voiding the whole challenge game.
+        if (challengePeriod_ == 0) revert InvalidChallengePeriod();
 
         channelId = channelId_;
         bpKeyId = bpKeyId_;
@@ -299,7 +351,7 @@ contract ChannelSettlementManager {
         for (uint256 i = 0; i < memberBindings.length; i++) {
             MemberBinding memory binding = memberBindings[i];
             if (
-                binding.userId == bytes10(0) ||
+                binding.userId == bytes8(0) ||
                 binding.recipient == address(0) ||
                 _userChannelId(binding.userId) != channelId_
             ) {
@@ -311,6 +363,7 @@ contract ChannelSettlementManager {
             registeredRecipientOf[binding.userId] = binding.recipient;
             registeredMemberIndexPlusOne[binding.userId] = registeredUserIds.length + 1;
             registeredUserIds.push(binding.userId);
+            isMemberRecipient[binding.recipient] = true;
         }
     }
 
@@ -328,6 +381,23 @@ contract ChannelSettlementManager {
         bpBondCredits += amount;
     }
 
+    /// @notice Step 1 of the two-step close (abstract2 §3.5): a registered member freezes the
+    /// channel. The first close intent can only be processed after
+    /// `GRACE_BEFORE_PROCESS_SECS`.
+    function requestClose() external {
+        if (channelStatus == ChannelLifecycleStatus.Closed) revert ChannelClosed();
+        if (channelStatus != ChannelLifecycleStatus.Active) revert ChannelAlreadyFrozen();
+        if (!isMemberRecipient[msg.sender]) revert NotChannelMember();
+
+        currentCloseFreezeNonce += 1;
+        channelStatus = ChannelLifecycleStatus.ClosePending;
+        closeRequestedAt = uint64(block.timestamp);
+        emit CloseRequested(msg.sender, closeRequestedAt, currentCloseFreezeNonce);
+    }
+
+    /// @notice Step 2 of the two-step close: record (or challenge-replace) a close intent.
+    /// Direct submission from `Active` is disallowed — `requestClose()` must run first
+    /// (abstract2 §3.5).
     function submitCloseIntent(
         CloseIntent calldata intent,
         bytes calldata proof
@@ -336,6 +406,11 @@ contract ChannelSettlementManager {
         _checkCloseProof(intent, proof);
 
         if (pendingClose.active) {
+            // Challenge path: a newer signed state replaces the pending one.
+            //
+            // SECURITY: the grace period deliberately does NOT apply here — challenges race the
+            // fixed `challengeDeadline`, and re-imposing the grace delay would shrink the
+            // effective challenge window for honest members holding a newer state.
             if (block.timestamp > pendingClose.challengeDeadline) {
                 revert ChallengeWindowClosed();
             }
@@ -347,12 +422,15 @@ contract ChannelSettlementManager {
             }
         } else {
             if (channelStatus == ChannelLifecycleStatus.Active) {
-                if (intent.closeFreezeNonce != currentCloseFreezeNonce + 1) {
-                    revert InvalidFreezeNonce();
-                }
-                currentCloseFreezeNonce = intent.closeFreezeNonce;
-                channelStatus = ChannelLifecycleStatus.ClosePending;
-            } else if (intent.closeFreezeNonce != currentCloseFreezeNonce) {
+                // Two-step close (abstract2 §3.5): the freeze must be requested first.
+                revert CloseNotRequested();
+            }
+            // First intent of the frozen era: the grace window must have elapsed so all
+            // members had time to observe the freeze and surface their newest state.
+            if (block.timestamp < uint256(closeRequestedAt) + GRACE_BEFORE_PROCESS_SECS) {
+                revert GracePeriodNotElapsed();
+            }
+            if (intent.closeFreezeNonce != currentCloseFreezeNonce) {
                 revert InvalidFreezeNonce();
             }
         }
@@ -367,12 +445,14 @@ contract ChannelSettlementManager {
             challengeDeadline: uint64(block.timestamp + challengePeriod),
             closeIntentDigest: closeIntentDigest,
             finalChannelStateDigest: intent.finalChannelStateDigest,
-            finalChannelBalanceRoot: intent.finalChannelBalanceRoot,
+            finalBalanceStateH1: intent.finalBalanceStateH1,
             channelFundAmount: intent.channelFundAmount,
             channelFundIntmaxStateRoot: intent.channelFundIntmaxStateRoot,
             burnTxHash: intent.burnTxHash,
             closeWithdrawalDigest: intent.closeWithdrawalDigest,
-            snapshotMediumBlockNumber: intent.snapshotMediumBlockNumber
+            snapshotMediumBlockNumber: intent.snapshotMediumBlockNumber,
+            finalStateVersion: intent.finalStateVersion,
+            finalSettledTxChain: intent.finalSettledTxChain
         });
 
         emit CloseSubmitted(
@@ -382,7 +462,9 @@ contract ChannelSettlementManager {
             intent.finalEpoch,
             intent.closeFreezeNonce,
             intent.channelFundAmount,
-            pendingClose.challengeDeadline
+            pendingClose.challengeDeadline,
+            intent.finalStateVersion,
+            intent.finalSettledTxChain
         );
     }
 
@@ -410,6 +492,9 @@ contract ChannelSettlementManager {
 
         currentCloseFreezeNonce += 1;
         channelStatus = ChannelLifecycleStatus.ClosePending;
+        // A special close IS a freeze request: the first close intent of this frozen era is
+        // subject to the same grace window as a member-requested close.
+        closeRequestedAt = uint64(block.timestamp);
         uint256 slashedAmount = specialClosePenalty;
         if (slashedAmount > bpBondCredits) {
             slashedAmount = bpBondCredits;
@@ -451,6 +536,9 @@ contract ChannelSettlementManager {
         bytes32 closeIntentDigest = pendingClose.closeIntentDigest;
         delete pendingClose;
         channelStatus = ChannelLifecycleStatus.Active;
+        // Restoring Active ends the frozen era; a future close needs a fresh requestClose()
+        // (and therefore a fresh grace window).
+        closeRequestedAt = 0;
         emit CloseCancelled(
             closeIntentDigest,
             request.revivedTxHash,
@@ -486,6 +574,8 @@ contract ChannelSettlementManager {
         bytes32 closeIntentDigest = pendingClose.closeIntentDigest;
         delete pendingClose;
         channelStatus = ChannelLifecycleStatus.Active;
+        // Restoring Active ends the frozen era (see cancelClose).
+        closeRequestedAt = 0;
 
         emit LateOutgoingDebitAccepted(
             closeIntentDigest,
@@ -503,21 +593,26 @@ contract ChannelSettlementManager {
 
         finalizedCloseIntentDigest = pendingClose.closeIntentDigest;
         finalizedChannelStateDigest = pendingClose.finalChannelStateDigest;
-        finalizedChannelBalanceRoot = pendingClose.finalChannelBalanceRoot;
+        finalizedBalanceStateH1 = pendingClose.finalBalanceStateH1;
         finalizedBurnTxHash = pendingClose.burnTxHash;
         finalizedCloseWithdrawalDigest = pendingClose.closeWithdrawalDigest;
         finalizedChannelFundIntmaxStateRoot = pendingClose.channelFundIntmaxStateRoot;
+        finalizedSettledTxChain = pendingClose.finalSettledTxChain;
         finalizedEpoch = pendingClose.finalEpoch;
         finalizedSmallBlockNumber = pendingClose.finalSmallBlockNumber;
+        finalizedStateVersion = pendingClose.finalStateVersion;
         finalizedChannelFundAmount = pendingClose.channelFundAmount;
         totalWithdrawn = 0;
         channelStatus = ChannelLifecycleStatus.Closed;
+        closeRequestedAt = 0;
 
         emit CloseFinalized(
             pendingClose.closeIntentDigest,
             pendingClose.burnTxHash,
             pendingClose.finalEpoch,
-            pendingClose.channelFundAmount
+            pendingClose.channelFundAmount,
+            pendingClose.finalStateVersion,
+            pendingClose.finalSettledTxChain
         );
 
         delete pendingClose;
@@ -541,7 +636,7 @@ contract ChannelSettlementManager {
             !verifier.verifyWithdrawalClaim(
                 channelId,
                 claim.closeIntentDigest,
-                finalizedChannelBalanceRoot,
+                finalizedBalanceStateH1,
                 claim.userId,
                 claim.recipient,
                 claim.userAmountDigest,
@@ -589,7 +684,6 @@ contract ChannelSettlementManager {
                 claim.incomingTxHash,
                 claim.receiverUserId,
                 claim.recipient,
-                claim.receiverAmountDigest,
                 claim.sharedNativeNullifier,
                 claim.amount,
                 proof
@@ -618,6 +712,12 @@ contract ChannelSettlementManager {
         return pendingClose;
     }
 
+    /// @dev Byte-exact mirror of Rust `CloseIntent::signing_digest()` (src/common/channel.rs,
+    /// IMCI domain): keccak over big-endian u32 words. `abi.encodePacked` of
+    /// bytes4/uint64/bytes32/uint256 reproduces the BE word stream exactly. The second
+    /// `channelId` is the Rust `channel_fund_snapshot.channel_id` slot (this contract pins both
+    /// to its own channel). `finalStateVersion` and `finalSettledTxChain` are appended at the
+    /// END of the legacy preimage (detail2 §C-8).
     function computeCloseIntentDigest(
         CloseIntent memory intent
     ) public view returns (bytes32) {
@@ -630,13 +730,15 @@ contract ChannelSettlementManager {
                 intent.finalSmallBlockNumber,
                 intent.closeFreezeNonce,
                 intent.finalChannelStateDigest,
-                intent.finalChannelBalanceRoot,
+                intent.finalBalanceStateH1,
                 channelId,
                 intent.channelFundAmount,
                 intent.channelFundIntmaxStateRoot,
                 intent.burnTxHash,
                 intent.closeWithdrawalDigest,
-                intent.snapshotMediumBlockNumber
+                intent.snapshotMediumBlockNumber,
+                intent.finalStateVersion,
+                intent.finalSettledTxChain
             )
         );
     }
@@ -669,17 +771,27 @@ contract ChannelSettlementManager {
                 intent.finalSmallBlockNumber,
                 intent.closeFreezeNonce,
                 intent.finalChannelStateDigest,
-                intent.finalChannelBalanceRoot,
+                intent.finalBalanceStateH1,
                 intent.channelFundAmount,
                 intent.channelFundIntmaxStateRoot,
                 intent.burnTxHash,
                 intent.closeWithdrawalDigest,
                 intent.snapshotMediumBlockNumber,
+                intent.finalStateVersion,
+                intent.finalSettledTxChain,
                 proof
             )
         ) revert InvalidCloseProof();
     }
 
+    /// @dev Challenge ordering: lexicographic strict `(finalEpoch, finalStateVersion)`.
+    ///
+    /// SECURITY: within one epoch the channel layer guarantees at most ONE fully-signed
+    /// balance state per `state_version` (OneStatePerVersion; ChannelSafety2.lean
+    /// `challenge_latest_wins2`, detail2 §H-4), so "higher version" is well-defined and the
+    /// honest member's newest state always wins a challenge. The tiebreak is STRICT `>` —
+    /// re-submitting an equal `(epoch, version)` pair is rejected (`CloseNotNewer`), which
+    /// prevents challenge-window extension by replaying the pending state.
     function _isNewer(
         CloseIntent calldata intent,
         PendingClose memory current
@@ -688,11 +800,11 @@ contract ChannelSettlementManager {
             intent.finalEpoch > current.finalEpoch ||
             (
                 intent.finalEpoch == current.finalEpoch &&
-                intent.closeNonce > current.closeNonce
+                intent.finalStateVersion > current.finalStateVersion
             );
     }
 
-    function _userChannelId(bytes10 userId) internal pure returns (bytes5) {
-        return bytes5(userId);
+    function _userChannelId(bytes8 userId) internal pure returns (bytes4) {
+        return bytes4(userId);
     }
 }

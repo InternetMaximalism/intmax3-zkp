@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     common::u63::{BlockNumber, BlockNumberTarget},
-    constants::{ACCOUNT_TREE_HEIGHT, SEND_TREE_HEIGHT},
+    constants::{CHANNEL_TREE_HEIGHT, SEND_TREE_HEIGHT},
     ethereum_types::{
         bytes32::{Bytes32, Bytes32Target},
         u32limb_trait::{U32LimbTargetTrait as _, U32LimbTrait as _},
@@ -88,25 +88,29 @@ impl LeafableTarget for SendLeafTarget {
     }
 }
 
+/// Domain-separation tag for ChannelLeaf Poseidon preimage (see key_tree.rs for the others).
+const CHANNEL_LEAF_DOMAIN: u64 = 0x43484c46; // "CHLF"
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub struct AccountLeaf {
+pub struct ChannelLeaf {
     pub index: u32,                      // the next index of send leaf
     pub prev: BlockNumber,               // the previous block number
     pub send_tree_root: PoseidonHashOut, // the root of send tree
-    pub pk_set_root: PoseidonHashOut,    // Merkle root of the key set tree (multi-sig public keys)
-    pub threshold: u32,                  // minimum number of signatures required
+    // Root of this channel's MemberKeyTree (its ordered, unique member key_id set). Replaces the
+    // former single (pk_set_root, threshold): per-keyID key sets + thresholds now live in KeyTree,
+    // and a channel authorizes iff EVERY member key_id clears its own threshold.
+    pub member_key_ids_root: PoseidonHashOut,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct AccountLeafTarget {
-    pub index: Target,                         // the next index of send leaf
-    pub prev: BlockNumberTarget,               // the previous block number
-    pub send_tree_root: PoseidonHashOutTarget, // the root of send tree
-    pub pk_set_root: PoseidonHashOutTarget,    // Merkle root of the key set tree
-    pub threshold: Target,                     // minimum number of signatures required
+pub struct ChannelLeafTarget {
+    pub index: Target,                              // the next index of send leaf
+    pub prev: BlockNumberTarget,                    // the previous block number
+    pub send_tree_root: PoseidonHashOutTarget,      // the root of send tree
+    pub member_key_ids_root: PoseidonHashOutTarget, // root of this channel's MemberKeyTree
 }
 
-impl Leafable for AccountLeaf {
+impl Leafable for ChannelLeaf {
     type LeafableHasher = PoseidonLeafableHasher;
 
     fn empty_leaf() -> Self {
@@ -118,14 +122,14 @@ impl Leafable for AccountLeaf {
     }
 }
 
-impl LeafableTarget for AccountLeafTarget {
-    type Leaf = AccountLeaf;
+impl LeafableTarget for ChannelLeafTarget {
+    type Leaf = ChannelLeaf;
 
     fn empty_leaf<F: RichField + Extendable<D>, const D: usize>(
         builder: &mut CircuitBuilder<F, D>,
     ) -> Self {
-        let empty_leaf = <AccountLeaf as Leafable>::empty_leaf();
-        AccountLeafTarget::constant(builder, empty_leaf)
+        let empty_leaf = <ChannelLeaf as Leafable>::empty_leaf();
+        ChannelLeafTarget::constant(builder, empty_leaf)
     }
 
     fn hash<F: RichField + Extendable<D>, C: GenericConfig<D, F = F> + 'static, const D: usize>(
@@ -135,20 +139,23 @@ impl LeafableTarget for AccountLeafTarget {
     where
         <C as GenericConfig<D>>::Hasher: AlgebraicHasher<F>,
     {
-        PoseidonHashOutTarget::hash_inputs(builder, &self.to_vec())
+        // Prepend the domain tag in-circuit to match ChannelLeaf::to_u64_vec (cross-tree safety).
+        let domain = builder.constant(F::from_canonical_u64(CHANNEL_LEAF_DOMAIN));
+        let inputs = [vec![domain], self.to_vec()].concat();
+        PoseidonHashOutTarget::hash_inputs(builder, &inputs)
     }
 }
 
-/// AccountTree is a Merkle tree where each leaf is an AccountLeaf.
-/// The position of each leaf is determined by the global user id (concatenation of aggregator id
-/// and account id).
-pub type AccountTree = SparseMerkleTree<AccountLeaf>;
-pub type AccountMerkleProof = SparseMerkleProof<AccountLeaf>;
-pub type AccountMerkleProofTarget = SparseMerkleProofTarget<AccountLeafTarget>;
+/// ChannelTree is a Merkle tree where each leaf is an ChannelLeaf.
+/// The position of each leaf is determined by the global user id (concatenation of proof_submitter
+/// id and user id).
+pub type ChannelTree = SparseMerkleTree<ChannelLeaf>;
+pub type ChannelMerkleProof = SparseMerkleProof<ChannelLeaf>;
+pub type ChannelMerkleProofTarget = SparseMerkleProofTarget<ChannelLeafTarget>;
 
-impl AccountTree {
+impl ChannelTree {
     pub fn init() -> Self {
-        Self::new(ACCOUNT_TREE_HEIGHT)
+        Self::new(CHANNEL_TREE_HEIGHT)
     }
 }
 
@@ -205,32 +212,31 @@ impl SendLeafTarget {
     }
 }
 
-impl Default for AccountLeaf {
+impl Default for ChannelLeaf {
     fn default() -> Self {
         Self {
             index: 0,
             prev: BlockNumber::default(),
             send_tree_root: SendTree::init().get_root(),
-            pk_set_root: PoseidonHashOut::default(),
-            threshold: 0,
+            // Unregistered channel: empty MemberKeyTree root (no members yet).
+            member_key_ids_root: crate::common::trees::key_tree::MemberKeyTree::init().get_root(),
         }
     }
 }
 
-impl AccountLeaf {
+impl ChannelLeaf {
     pub fn to_u64_vec(&self) -> Vec<u64> {
         [
-            vec![self.index as u64],
+            vec![CHANNEL_LEAF_DOMAIN, self.index as u64],
             self.prev.to_u64_vec(),
             self.send_tree_root.to_u64_vec(),
-            self.pk_set_root.to_u64_vec(),
-            vec![self.threshold as u64],
+            self.member_key_ids_root.to_u64_vec(),
         ]
         .concat()
     }
 }
 
-impl AccountLeafTarget {
+impl ChannelLeafTarget {
     pub fn new<F: RichField + Extendable<D>, const D: usize>(
         builder: &mut CircuitBuilder<F, D>,
         is_checked: bool,
@@ -241,54 +247,47 @@ impl AccountLeafTarget {
         }
         let prev = BlockNumberTarget::new(builder, is_checked);
         let send_tree_root = PoseidonHashOutTarget::new(builder);
-        let pk_set_root = PoseidonHashOutTarget::new(builder);
-        let threshold = builder.add_virtual_target();
-        if is_checked {
-            // threshold fits in KEY_SET_TREE_HEIGHT + 1 bits (max 2^KEY_SET_TREE_HEIGHT)
-            builder.range_check(threshold, crate::constants::KEY_SET_TREE_HEIGHT + 1);
-        }
+        let member_key_ids_root = PoseidonHashOutTarget::new(builder);
         Self {
             index,
             prev,
             send_tree_root,
-            pk_set_root,
-            threshold,
+            member_key_ids_root,
         }
     }
 
+    /// Field targets WITHOUT the domain tag (prepended inside `LeafableTarget::hash`).
     pub fn to_vec(&self) -> Vec<Target> {
         [
             vec![self.index],
             self.prev.to_vec(),
             self.send_tree_root.to_vec(),
-            self.pk_set_root.to_vec(),
-            vec![self.threshold],
+            self.member_key_ids_root.to_vec(),
         ]
         .concat()
     }
 
     pub fn constant<F: RichField + Extendable<D>, const D: usize>(
         builder: &mut CircuitBuilder<F, D>,
-        value: AccountLeaf,
+        value: ChannelLeaf,
     ) -> Self {
         Self {
             index: builder.constant(F::from_canonical_u64(value.index.into())),
             prev: BlockNumberTarget::constant(builder, value.prev),
             send_tree_root: PoseidonHashOutTarget::constant(builder, value.send_tree_root),
-            pk_set_root: PoseidonHashOutTarget::constant(builder, value.pk_set_root),
-            threshold: builder.constant(F::from_canonical_u64(value.threshold.into())),
+            member_key_ids_root: PoseidonHashOutTarget::constant(
+                builder,
+                value.member_key_ids_root,
+            ),
         }
     }
 
-    pub fn set_witness<F: Field, W: WitnessWrite<F>>(&self, witness: &mut W, value: &AccountLeaf) {
+    pub fn set_witness<F: Field, W: WitnessWrite<F>>(&self, witness: &mut W, value: &ChannelLeaf) {
         witness.set_target(self.index, F::from_canonical_u64(value.index.into()));
         self.prev.set_witness(witness, value.prev);
         self.send_tree_root
             .set_witness(witness, value.send_tree_root);
-        self.pk_set_root.set_witness(witness, value.pk_set_root);
-        witness.set_target(
-            self.threshold,
-            F::from_canonical_u64(value.threshold.into()),
-        );
+        self.member_key_ids_root
+            .set_witness(witness, value.member_key_ids_root);
     }
 }

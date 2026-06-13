@@ -78,11 +78,11 @@ where
     pub fn prove_end(
         &self,
         cyclic_proof: &ProofWithPublicInputs<F, C, D>,
-        aggregator: Address,
+        proof_submitter: Address,
     ) -> Result<ProofWithPublicInputs<F, C, D>> {
         let end_proof = self
             .chain_end_circuit
-            .prove(cyclic_proof, aggregator)
+            .prove(cyclic_proof, proof_submitter)
             .map_err(|e| HashChainError::ChainEndProofError(e.to_string()))?;
         Ok(end_proof)
     }

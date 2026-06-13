@@ -48,18 +48,20 @@ pub enum SigMergeStepError {
 pub struct SigMergeInitialValue {
     pub account_tree_root: PoseidonHashOut,
     pub block_number: BlockNumber,
-    pub aggregator_id: u32,
+    pub channel_id: u32,
     pub tx_tree_root: Bytes32,
+    /// IMSB signing digest (detail2 §F-2) for this block.
+    pub signed_digest: Bytes32,
 }
 
 /// Witness for a single merge step.
 ///
 /// Each step absorbs one completed SigBatch proof. The batch must be "complete"
-/// (current_user_local_id == 0, meaning no in-progress user).
+/// (current_user_key_id == 0, meaning no in-progress user).
 ///
 /// The merge step:
 /// 1. Verifies the batch proof is valid
-/// 2. Checks batch is complete (current_user_local_id == 0)
+/// 2. Checks batch is complete (current_user_key_id == 0)
 /// 3. Checks ordering: prev_merge.last_user_id < batch.first_user_id
 /// 4. Combines verified_users_hash: Poseidon(merge_hash || batch_hash)
 /// 5. Accumulates verified_count
@@ -103,9 +105,9 @@ where
         .map_err(|e| SigMergeStepError::InvalidInput(format!("Bad batch PIS: {}", e)))?;
 
         // Batch must be complete
-        if batch_pis.current_user_local_id != 0 {
+        if batch_pis.current_user_key_id != 0 {
             return Err(SigMergeStepError::InvalidInput(
-                "Batch proof is incomplete: current_user_local_id != 0".to_string(),
+                "Batch proof is incomplete: current_user_key_id != 0".to_string(),
             ));
         }
 
@@ -120,8 +122,9 @@ where
             SigMergePublicInputs {
                 account_tree_root: initial.account_tree_root,
                 block_number: initial.block_number,
-                aggregator_id: initial.aggregator_id,
+                channel_id: initial.channel_id,
                 tx_tree_root: initial.tx_tree_root,
+                signed_digest: initial.signed_digest,
                 verified_users_hash: PoseidonHashOut::default(),
                 verified_count: 0,
                 first_user_id: 0,
@@ -147,14 +150,19 @@ where
                 "block_number mismatch".to_string(),
             ));
         }
-        if batch_pis.hub_id() != prev_merge.hub_id() {
+        if batch_pis.channel_id() != prev_merge.channel_id() {
             return Err(SigMergeStepError::InvalidInput(
-                "hub_id mismatch".to_string(),
+                "channel_id mismatch".to_string(),
             ));
         }
         if batch_pis.tx_tree_root != prev_merge.tx_tree_root {
             return Err(SigMergeStepError::InvalidInput(
                 "tx_tree_root mismatch".to_string(),
+            ));
+        }
+        if batch_pis.signed_digest != prev_merge.signed_digest {
+            return Err(SigMergeStepError::InvalidInput(
+                "signed_digest mismatch".to_string(),
             ));
         }
 
@@ -186,8 +194,9 @@ where
         Ok(SigMergePublicInputs {
             account_tree_root: prev_merge.account_tree_root,
             block_number: prev_merge.block_number,
-            aggregator_id: prev_merge.hub_id(),
+            channel_id: prev_merge.channel_id(),
             tx_tree_root: prev_merge.tx_tree_root,
+            signed_digest: prev_merge.signed_digest,
             verified_users_hash: new_verified_users_hash,
             verified_count: new_count,
             first_user_id,
@@ -202,8 +211,9 @@ pub struct SigMergeStepTarget<const D: usize> {
     pub is_initial: BoolTarget,
     pub initial_account_tree_root: PoseidonHashOutTarget,
     pub initial_block_number: BlockNumberTarget,
-    pub initial_aggregator_id: Target,
+    pub initial_channel_id: Target,
     pub initial_tx_tree_root: Bytes32Target,
+    pub initial_signed_digest: Bytes32Target,
     pub prev_merge_proof: ProofWithPublicInputsTarget<D>,
     pub batch_proof: ProofWithPublicInputsTarget<D>,
     pub new_pis: SigMergePublicInputsTarget,
@@ -226,8 +236,9 @@ impl<const D: usize> SigMergeStepTarget<D> {
         // Initial values
         let initial_account_tree_root = PoseidonHashOutTarget::new(builder);
         let initial_block_number = BlockNumberTarget::new(builder, true);
-        let initial_aggregator_id = builder.add_virtual_target();
+        let initial_channel_id = builder.add_virtual_target();
         let initial_tx_tree_root = Bytes32Target::new::<F, D>(builder, true);
+        let initial_signed_digest = Bytes32Target::new::<F, D>(builder, true);
 
         // ── Previous merge proof (conditional) ──
         let prev_merge_proof = builder.add_virtual_proof_with_pis(sig_merge_cd);
@@ -253,9 +264,9 @@ impl<const D: usize> SigMergeStepTarget<D> {
             &sig_batch_vd.common.config,
         );
 
-        // ── Batch completeness: current_user_local_id == 0 ──
+        // ── Batch completeness: current_user_key_id == 0 ──
         let zero = builder.zero();
-        let batch_complete = builder.is_equal(batch_pis.current_user_local_id, zero);
+        let batch_complete = builder.is_equal(batch_pis.current_user_key_id, zero);
         let _true = builder._true();
         builder.connect(batch_complete.target, _true.target);
 
@@ -278,13 +289,19 @@ impl<const D: usize> SigMergeStepTarget<D> {
             initial_block_number.value,
             prev_merge_pis.block_number.value,
         );
-        let prev_hub_id =
-            builder.select(is_initial, initial_aggregator_id, prev_merge_pis.hub_id());
+        let prev_channel_id =
+            builder.select(is_initial, initial_channel_id, prev_merge_pis.channel_id());
         let prev_tx_tree_root = Bytes32Target::select(
             builder,
             is_initial,
             initial_tx_tree_root.clone(),
             prev_merge_pis.tx_tree_root.clone(),
+        );
+        let prev_signed_digest = Bytes32Target::select(
+            builder,
+            is_initial,
+            initial_signed_digest.clone(),
+            prev_merge_pis.signed_digest.clone(),
         );
         let prev_verified_users_hash = PoseidonHashOutTarget::select(
             builder,
@@ -303,11 +320,19 @@ impl<const D: usize> SigMergeStepTarget<D> {
             _true,
         );
         builder.connect(prev_block_number, batch_pis.block_number.value);
-        builder.connect(prev_hub_id, batch_pis.hub_id());
+        builder.connect(prev_channel_id, batch_pis.channel_id());
         for (a, b) in prev_tx_tree_root
             .to_vec()
             .iter()
             .zip(batch_pis.tx_tree_root.to_vec().iter())
+        {
+            builder.connect(*a, *b);
+        }
+        // signed_digest consistency: all merged batches verified over the same IMSB digest
+        for (a, b) in prev_signed_digest
+            .to_vec()
+            .iter()
+            .zip(batch_pis.signed_digest.to_vec().iter())
         {
             builder.connect(*a, *b);
         }
@@ -343,8 +368,9 @@ impl<const D: usize> SigMergeStepTarget<D> {
         let new_pis = SigMergePublicInputsTarget {
             account_tree_root: prev_account_tree_root,
             block_number: BlockNumberTarget::from_slice(&[prev_block_number]),
-            aggregator_id: prev_hub_id,
+            channel_id: prev_channel_id,
             tx_tree_root: prev_tx_tree_root,
+            signed_digest: prev_signed_digest,
             verified_users_hash: new_verified_users_hash,
             verified_count: new_verified_count,
             first_user_id: out_first_user_id,
@@ -356,8 +382,9 @@ impl<const D: usize> SigMergeStepTarget<D> {
             is_initial,
             initial_account_tree_root,
             initial_block_number,
-            initial_aggregator_id,
+            initial_channel_id,
             initial_tx_tree_root,
+            initial_signed_digest,
             prev_merge_proof,
             batch_proof,
             new_pis,
@@ -385,18 +412,22 @@ impl<const D: usize> SigMergeStepTarget<D> {
             self.initial_block_number
                 .set_witness(witness, initial.block_number);
             witness.set_target(
-                self.initial_aggregator_id,
-                F::from_canonical_u64(initial.aggregator_id as u64),
+                self.initial_channel_id,
+                F::from_canonical_u64(initial.channel_id as u64),
             );
             self.initial_tx_tree_root
                 .set_witness(witness, initial.tx_tree_root);
+            self.initial_signed_digest
+                .set_witness(witness, initial.signed_digest);
         } else {
             self.initial_account_tree_root
                 .set_witness(witness, PoseidonHashOut::default());
             self.initial_block_number
                 .set_witness(witness, BlockNumber::default());
-            witness.set_target(self.initial_aggregator_id, F::ZERO);
+            witness.set_target(self.initial_channel_id, F::ZERO);
             self.initial_tx_tree_root
+                .set_witness(witness, Bytes32::default());
+            self.initial_signed_digest
                 .set_witness(witness, Bytes32::default());
         }
 

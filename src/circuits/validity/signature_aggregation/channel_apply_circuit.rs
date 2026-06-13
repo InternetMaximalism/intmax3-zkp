@@ -16,8 +16,8 @@ use plonky2::{
 use thiserror::Error;
 
 use crate::{
-    circuits::validity::signature_aggregation::account_apply_pis::{
-        ACCOUNT_APPLY_PUBLIC_INPUTS_LEN, AccountApplyPublicInputsTarget,
+    circuits::validity::signature_aggregation::channel_apply_pis::{
+        ChannelApplyPublicInputsTarget, USER_APPLY_PUBLIC_INPUTS_LEN,
     },
     utils::{
         cyclic::{add_noop_gates, simple_recursion_circuit_data, vd_vec_len},
@@ -26,7 +26,7 @@ use crate::{
 };
 
 #[derive(Debug, Error)]
-pub enum AccountApplyCircuitError {
+pub enum ChannelApplyCircuitError {
     #[error("Failed to prove: {0}")]
     FailedToProve(String),
 
@@ -34,46 +34,45 @@ pub enum AccountApplyCircuitError {
     ProofVerificationError(String),
 }
 
-pub struct AccountApplyCircuit<F, C, const D: usize>
+pub struct ChannelApplyCircuit<F, C, const D: usize>
 where
     F: RichField + Extendable<D>,
     C: GenericConfig<D, F = F>,
     <C as GenericConfig<D>>::Hasher: AlgebraicHasher<F>,
 {
     pub data: CircuitData<F, C, D>,
-    pub account_apply_step_proof: ProofWithPublicInputsTarget<D>,
+    pub user_apply_step_proof: ProofWithPublicInputsTarget<D>,
 }
 
-impl<F, C, const D: usize> AccountApplyCircuit<F, C, D>
+impl<F, C, const D: usize> ChannelApplyCircuit<F, C, D>
 where
     F: RichField + Extendable<D>,
     C: GenericConfig<D, F = F> + 'static,
     <C as GenericConfig<D>>::Hasher: AlgebraicHasher<F>,
 {
     pub fn new(
-        account_apply_cd: &CommonCircuitData<F, D>,
-        account_apply_step_vd: &VerifierCircuitData<F, C, D>,
+        user_apply_cd: &CommonCircuitData<F, D>,
+        user_apply_step_vd: &VerifierCircuitData<F, C, D>,
     ) -> Self {
-        let mut builder = CircuitBuilder::<F, D>::new(account_apply_cd.config.clone());
-        let account_apply_step_proof =
-            add_proof_target_and_verify(account_apply_step_vd, &mut builder);
-        let new_pis = AccountApplyPublicInputsTarget::from_pis(
-            &account_apply_step_proof.public_inputs,
-            &account_apply_cd.config,
+        let mut builder = CircuitBuilder::<F, D>::new(user_apply_cd.config.clone());
+        let user_apply_step_proof = add_proof_target_and_verify(user_apply_step_vd, &mut builder);
+        let new_pis = ChannelApplyPublicInputsTarget::from_pis(
+            &user_apply_step_proof.public_inputs,
+            &user_apply_cd.config,
         );
-        builder.register_public_inputs(&new_pis.to_vec(&account_apply_cd.config));
+        builder.register_public_inputs(&new_pis.to_vec(&user_apply_cd.config));
 
         let (data, success) = builder.try_build_with_options::<C>(true);
         assert_eq!(
             data.common,
-            account_apply_cd.clone(),
+            user_apply_cd.clone(),
             "Common data mismatch in account apply circuit",
         );
         assert!(success, "Failed to build account apply circuit");
 
         Self {
             data,
-            account_apply_step_proof,
+            user_apply_step_proof,
         }
     }
 
@@ -86,37 +85,37 @@ where
             circuit_digest: builder.add_virtual_hash(),
         };
         builder.verify_proof::<C>(&proof, &verifier_data, &data.common);
-        add_noop_gates(&mut builder, 1 << 11);
+        add_noop_gates(&mut builder, 1 << 12);
         let mut common = builder.build::<C>().common;
-        common.num_public_inputs = ACCOUNT_APPLY_PUBLIC_INPUTS_LEN + vd_vec_len(&common.config);
+        common.num_public_inputs = USER_APPLY_PUBLIC_INPUTS_LEN + vd_vec_len(&common.config);
         common
     }
 
     pub fn prove(
         &self,
-        account_apply_step_proof: &ProofWithPublicInputs<F, C, D>,
-    ) -> Result<ProofWithPublicInputs<F, C, D>, AccountApplyCircuitError> {
+        user_apply_step_proof: &ProofWithPublicInputs<F, C, D>,
+    ) -> Result<ProofWithPublicInputs<F, C, D>, ChannelApplyCircuitError> {
         let mut pw = PartialWitness::<F>::new();
-        pw.set_proof_with_pis_target(&self.account_apply_step_proof, account_apply_step_proof);
+        pw.set_proof_with_pis_target(&self.user_apply_step_proof, user_apply_step_proof);
 
         self.data
             .prove(pw)
-            .map_err(|e| AccountApplyCircuitError::FailedToProve(e.to_string()))
+            .map_err(|e| ChannelApplyCircuitError::FailedToProve(e.to_string()))
     }
 
     pub fn verify(
         &self,
         proof: &ProofWithPublicInputs<F, C, D>,
-    ) -> Result<(), AccountApplyCircuitError> {
+    ) -> Result<(), ChannelApplyCircuitError> {
         check_cyclic_proof_verifier_data(proof, &self.data.verifier_only, &self.data.common)
             .map_err(|e| {
-                AccountApplyCircuitError::ProofVerificationError(format!(
+                ChannelApplyCircuitError::ProofVerificationError(format!(
                     "Cyclic proof verifier data check failed: {:?}",
                     e
                 ))
             })?;
         self.data.verify(proof.clone()).map_err(|e| {
-            AccountApplyCircuitError::ProofVerificationError(format!(
+            ChannelApplyCircuitError::ProofVerificationError(format!(
                 "Failed to verify proof: {:?}",
                 e
             ))

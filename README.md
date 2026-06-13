@@ -9,7 +9,7 @@ Zero-knowledge proof circuits and L1 settlement contracts for the INTMAX3 rollup
   ─────────────────────────────────────     ───────────────────────────────     ──────────────────────────
 
   ┌──────────┐    ┌──────────┐      postBlockAndSubmit(SubBlock[] + proof)     finalize()
-  │  User A  │───▶│Aggregator│              │                                   │
+  │  User A  │───▶│Block Producer│              │                                   │
   │  User B  │    │          │              ▼                                   ▼
   │  ...     │    └────┬─────┘         ┌──────────────────┐              ┌─────────────────┐
   └──────────┘         │               │  IntmaxRollup    │              │  Verify:        │
@@ -17,7 +17,7 @@ Zero-knowledge proof circuits and L1 settlement contracts for the INTMAX3 rollup
                  ┌─────────────┐       │  Iterate ~60     │              │  Groth16 +      │
                  │ Fast Block  │       │  sub-blocks:     │              │  state binding  │
                  │ (5s cycle)  │       │  hash chain ×60  │              │                 │
-                 │ - local_ids │       │  deposit (last)  │              │  Accept new     │
+                 │ - key_ids │       │  deposit (last)  │              │  Accept new     │
                  │ - tx_root   │       │  deposit (last)  │              │  stateRoot      │
                  │ - SPHINCS+  │       │                  │              └─────────────────┘
                  │ - NO deposit│       │  Store snapshot: │                      ▲
@@ -44,7 +44,7 @@ The system produces four independent proof types that work together:
 │                                                                             │
 │  Block 1          Block 2          Block N                                  │
 │  ┌──────────┐    ┌──────────┐    ┌──────────┐                               │
-│  │local_ids │    │local_ids │    │local_ids │                               │
+│  │key_ids │    │key_ids │    │key_ids │                               │
 │  │tx_root   │    │tx_root   │    │tx_root   │                               │
 │  │SPHINCS+  │    │SPHINCS+  │    │SPHINCS+  │                               │
 │  │signatures│    │signatures│    │signatures│                               │
@@ -52,8 +52,8 @@ The system produces four independent proof types that work together:
 │       │               │               │                                     │
 │       ▼               ▼               ▼                                     │
 │  ┌─────────────────────────────────────────┐                                │
-│  │      Block Hash Chain Circuit           │ ◄── account tree updates       │
-│  │  (UpdateAccountTree + SPHINCS+ verify)  │     + signature verification   │
+│  │      Block Hash Chain Circuit           │ ◄── user tree updates       │
+│  │  (UpdateUserTree + SPHINCS+ verify)  │     + signature verification   │
 │  └─────────────────┬───────────────────────┘                                │
 │                    │                                                        │
 │                    ▼                                                        │
@@ -106,8 +106,8 @@ Every value in the validity proof's public inputs is bound to on-chain state:
 ┌─ On-chain Storage ───────────────────────────────────────────────────────┐
 │                                                                          │
 │  blockHashChainAt[n]  ◄─── postBlockAndSubmit() computes keccak256 of:  │
-│                              prev_hash ‖ aggregator_id ‖ timestamp ‖     │
-│                              local_ids ‖ tx_tree_root ‖ deposit_chain   │
+│                              prev_hash ‖ channel_id ‖ timestamp ‖     │
+│                              key_ids ‖ tx_tree_root ‖ deposit_chain   │
 │                                                                          │
 │  depositHashChain     ◄─── deposit() computes keccak256 of:             │
 │                              prev_hash ‖ depositor ‖ recipient ‖         │
@@ -203,21 +203,21 @@ Every value in the validity proof's public inputs is bound to on-chain state:
 
 ## SPHINCS+ Post-Quantum Signature Verification
 
-The validity circuit enforces [SPHINCS+](https://github.com/InternetMaximalism/aggregated_SPHINCS_plus) (SPX-128s Poseidon) signatures in the `UpdateAccountTree` sub-circuit:
+The validity circuit enforces [SPHINCS+](https://github.com/InternetMaximalism/aggregated_SPHINCS_plus) (SPX-128s Poseidon) signatures in the `UpdateUserTree` sub-circuit:
 
 ```
 Per user slot i in a block:
 
-  is_active       = (local_id_i ≠ 0)              ── not a padding slot
+  is_active       = (key_id_i ≠ 0)              ── not a padding slot
   should_update   = is_active AND (prev ≠ block_number)  ── first inclusion this block
   has_pk_hash     = (pk_hash ≠ [0,0,0,0])         ── user has registered a key
   should_verify   = should_update AND has_pk_hash
 
   if should_verify:
-      assert Poseidon(pub_seed ‖ pub_root) == account_leaf.pk_hash
+      assert Poseidon(pub_seed ‖ pub_root) == user_leaf.pk_hash
       assert SPHINCS+_verify(signature_i, M_i, pub_key_i) == true
 
-  Message:  M_i = [block_number ‖ aggregator_id ‖ local_id_i ‖ tx_tree_root]
+  Message:  M_i = [block_number ‖ channel_id ‖ key_id_i ‖ tx_tree_root]
                  = 11 Goldilocks field elements = 88 bytes
 ```
 
@@ -236,12 +236,12 @@ Per user slot i in a block:
 
 ## Data Structures
 
-### Account Tree
+### User Tree
 
 ```
 AccountTree (sparse Merkle tree, leaf index = user_id)
 
-  AccountLeaf {
+  UserLeaf {
       index: u32,             // next empty send leaf index
       prev: BlockNumber,      // last block that updated this account
       send_tree_root: Hash,   // root of user's send tree
@@ -256,11 +256,11 @@ ExtendedPublicState {
     inner: PublicState {
         block_number,
         timestamp,
-        account_tree_root,     ◄── includes all AccountLeaf updates
+        account_tree_root,     ◄── includes all UserLeaf updates
         deposit_tree_root,
         prev_public_state_root,
     },
-    block_hash_chain,          ◄── keccak chain of all blocks (includes local_ids)
+    block_hash_chain,          ◄── keccak chain of all blocks (includes key_ids)
     deposit_hash_chain,        ◄── keccak chain of all deposits
     deposit_count,
 }
@@ -273,9 +273,9 @@ state_root = Poseidon(ExtendedPublicState)   ← this is final_ext_commitment
 ```
 block_hash_chain[n] = keccak256(
     block_hash_chain[n-1]       (32 bytes)
-    ‖ aggregator_id             ( 4 bytes)
+    ‖ channel_id             ( 4 bytes)
     ‖ timestamp                 ( 8 bytes)
-    ‖ local_ids[0..num_users]   ( 4 × num_users bytes)   ◄── the ID list
+    ‖ key_ids[0..num_users]   ( 4 × num_users bytes)   ◄── the ID list
     ‖ tx_tree_root              (32 bytes)
     ‖ deposit_hash_chain        (32 bytes)
 )
@@ -289,7 +289,7 @@ intmax3-zkp/
 │   ├── circuits/
 │   │   ├── balance/               # Balance proof circuits (spend, send, receive, deposit)
 │   │   ├── validity/
-│   │   │   ├── block_hash_chain/  # Block step, update_account_tree (SPHINCS+), validity
+│   │   │   ├── block_hash_chain/  # Block step, update_user_tree (SPHINCS+), validity
 │   │   │   └── deposit_hash_chain/# Deposit step circuit
 │   │   ├── withdraw/              # Single withdrawal, chain, final proof
 │   │   └── test_utils/            # BlockWitnessGenerator, BalanceWitnessGenerator,
@@ -529,7 +529,7 @@ updated with real proofs.
 ### Parallel signature aggregation orchestrator
 
 The parallel signature aggregation circuits and APIs are implemented
-(`ParallelSigProcessor`, `SigBatch`, `SigMerge`, `AccountApplyBlock`, etc.),
+(`ParallelSigProcessor`, `SigBatch`, `SigMerge`, `UserApplyBlock`, etc.),
 but the **runtime orchestrator using rayon/thread pool is not yet implemented**.
 Currently, callers must manage parallelism externally (e.g., spawning threads
 and calling `prove_batch_step()` / `prove_apply_block()` concurrently).

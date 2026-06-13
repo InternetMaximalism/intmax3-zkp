@@ -6,7 +6,16 @@ use crate::{
     ethereum_types::{bytes32::Bytes32, u32limb_trait::U32LimbTrait, u256::U256},
 };
 
-pub const CHANNEL_CLOSE_PUBLIC_INPUTS_LEN: usize = 68;
+// NOTE: the unified `ChannelId` is a single u32 limb (channel-id-only base identity). The P7
+// (F-3) layout appends final_state_version (2 limbs, hi/lo) and final_settled_tx_chain (8 limbs)
+// to the legacy 67-limb vector, for 77 limbs total. This order is pinned by the P8 Solidity
+// `closePIHash` preimage (ChannelSettlementVerifier.sol) — one BE u32 word per limb:
+//   channelId(1) | closeNonce(2) | finalEpoch(2) | finalSmallBlockNumber(2) |
+//   closeFreezeNonce(2) | finalChannelStateDigest(8) | finalBalanceStateH1(8) |
+//   channelFundAmount(8) | channelFundIntmaxStateRoot(8) | burnTxHash(8) |
+//   closeWithdrawalDigest(8) | closeIntentDigest(8) | snapshotMediumBlockNumber(2) |
+//   finalStateVersion(2) | finalSettledTxChain(8)
+pub const CHANNEL_CLOSE_PUBLIC_INPUTS_LEN: usize = 77;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -17,13 +26,19 @@ pub struct ChannelClosePublicInputs {
     pub final_small_block_number: u64,
     pub close_freeze_nonce: u64,
     pub final_channel_state_digest: Bytes32,
-    pub final_channel_balance_root: Bytes32,
+    pub final_balance_state_h1: Bytes32,
     pub channel_fund_amount: U256,
     pub channel_fund_intmax_state_root: Bytes32,
     pub burn_tx_hash: Bytes32,
     pub close_withdrawal_digest: Bytes32,
     pub close_intent_digest: Bytes32,
     pub snapshot_medium_block_number: u64,
+    /// `state_version` of the final balance state (detail2 §H-4 L1 ordering key). Anchored
+    /// in-circuit as the unique version inside the signed H1 preimage.
+    pub final_state_version: u64,
+    /// `settled_tx_chain` of the final balance state (detail2 §H-2). Matched in-circuit against
+    /// the final balance proof's `settled_tx_chain` public input and anchored inside H1.
+    pub final_settled_tx_chain: Bytes32,
 }
 
 #[derive(Debug, Error)]
@@ -44,13 +59,15 @@ impl ChannelClosePublicInputs {
             split_u64(self.final_small_block_number),
             split_u64(self.close_freeze_nonce),
             self.final_channel_state_digest.to_u64_vec(),
-            self.final_channel_balance_root.to_u64_vec(),
+            self.final_balance_state_h1.to_u64_vec(),
             self.channel_fund_amount.to_u64_vec(),
             self.channel_fund_intmax_state_root.to_u64_vec(),
             self.burn_tx_hash.to_u64_vec(),
             self.close_withdrawal_digest.to_u64_vec(),
             self.close_intent_digest.to_u64_vec(),
             split_u64(self.snapshot_medium_block_number),
+            split_u64(self.final_state_version),
+            self.final_settled_tx_chain.to_u64_vec(),
         ]
         .concat()
     }
@@ -64,27 +81,30 @@ impl ChannelClosePublicInputs {
         }
 
         Ok(Self {
-            channel_id: ChannelId::from_u64_slice(&values[0..2])
+            channel_id: ChannelId::from_u64_slice(&values[0..1])
                 .map_err(|e| ChannelClosePublicInputsError::InvalidField(e.to_string()))?,
-            close_nonce: join_u64(&values[2..4]),
-            final_epoch: join_u64(&values[4..6]),
-            final_small_block_number: join_u64(&values[6..8]),
-            close_freeze_nonce: join_u64(&values[8..10]),
-            final_channel_state_digest: Bytes32::from_u64_slice(&values[10..18])
+            close_nonce: join_u64(&values[1..3]),
+            final_epoch: join_u64(&values[3..5]),
+            final_small_block_number: join_u64(&values[5..7]),
+            close_freeze_nonce: join_u64(&values[7..9]),
+            final_channel_state_digest: Bytes32::from_u64_slice(&values[9..17])
                 .map_err(|e| ChannelClosePublicInputsError::InvalidField(e.to_string()))?,
-            final_channel_balance_root: Bytes32::from_u64_slice(&values[18..26])
+            final_balance_state_h1: Bytes32::from_u64_slice(&values[17..25])
                 .map_err(|e| ChannelClosePublicInputsError::InvalidField(e.to_string()))?,
-            channel_fund_amount: U256::from_u64_slice(&values[26..34])
+            channel_fund_amount: U256::from_u64_slice(&values[25..33])
                 .map_err(|e| ChannelClosePublicInputsError::InvalidField(e.to_string()))?,
-            channel_fund_intmax_state_root: Bytes32::from_u64_slice(&values[34..42])
+            channel_fund_intmax_state_root: Bytes32::from_u64_slice(&values[33..41])
                 .map_err(|e| ChannelClosePublicInputsError::InvalidField(e.to_string()))?,
-            burn_tx_hash: Bytes32::from_u64_slice(&values[42..50])
+            burn_tx_hash: Bytes32::from_u64_slice(&values[41..49])
                 .map_err(|e| ChannelClosePublicInputsError::InvalidField(e.to_string()))?,
-            close_withdrawal_digest: Bytes32::from_u64_slice(&values[50..58])
+            close_withdrawal_digest: Bytes32::from_u64_slice(&values[49..57])
                 .map_err(|e| ChannelClosePublicInputsError::InvalidField(e.to_string()))?,
-            close_intent_digest: Bytes32::from_u64_slice(&values[58..66])
+            close_intent_digest: Bytes32::from_u64_slice(&values[57..65])
                 .map_err(|e| ChannelClosePublicInputsError::InvalidField(e.to_string()))?,
-            snapshot_medium_block_number: join_u64(&values[66..68]),
+            snapshot_medium_block_number: join_u64(&values[65..67]),
+            final_state_version: join_u64(&values[67..69]),
+            final_settled_tx_chain: Bytes32::from_u64_slice(&values[69..77])
+                .map_err(|e| ChannelClosePublicInputsError::InvalidField(e.to_string()))?,
         })
     }
 }
@@ -126,7 +146,7 @@ impl ChannelCloseWitness {
             final_small_block_number: self.close_intent.final_small_block_number,
             close_freeze_nonce: self.close_intent.close_freeze_nonce,
             final_channel_state_digest: self.close_intent.final_channel_state_digest,
-            final_channel_balance_root: self.close_intent.final_channel_balance_root,
+            final_balance_state_h1: self.close_intent.final_balance_state_h1,
             channel_fund_amount: self.close_intent.channel_fund_snapshot.amount,
             channel_fund_intmax_state_root: self
                 .close_intent
@@ -136,27 +156,42 @@ impl ChannelCloseWitness {
             close_withdrawal_digest: self.close_intent.close_withdrawal_digest,
             close_intent_digest: self.close_intent.signing_digest(),
             snapshot_medium_block_number: self.close_intent.snapshot_medium_block_number,
+            final_state_version: self.close_intent.final_state_version,
+            final_settled_tx_chain: self.close_intent.final_settled_tx_chain,
         })
     }
 }
 
 fn split_u64(value: u64) -> Vec<u64> {
-    vec![(value >> 32) as u64, value as u32 as u64]
+    vec![value >> 32, value as u32 as u64]
 }
 
 fn join_u64(limbs: &[u64]) -> u64 {
-    ((limbs[0] as u64) << 32) | limbs[1] as u64
+    (limbs[0] << 32) | limbs[1]
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::{
-        common::channel::{
-            ChannelFund, ChannelId, ChannelState, KeyId, MemberSignature, UserId,
+        common::{
+            balance_state::BalanceState,
+            channel::{ChannelFund, ChannelId, ChannelState, KeyId, MemberSignature, UserId},
         },
         ethereum_types::bytes32::Bytes32,
+        regev::{REGEV_N, REGEV_Q, RegevCiphertext},
     };
+
+    fn ciphertext(seed: u32) -> RegevCiphertext {
+        RegevCiphertext {
+            c1: (0..REGEV_N as u32)
+                .map(|i| (seed.wrapping_mul(2_654_435_761).wrapping_add(i)) % REGEV_Q)
+                .collect(),
+            c2: (0..REGEV_N as u32)
+                .map(|i| (seed.wrapping_mul(40_503).wrapping_add(1000 + i)) % REGEV_Q)
+                .collect(),
+        }
+    }
 
     fn sample_state() -> ChannelState {
         ChannelState {
@@ -169,8 +204,16 @@ mod tests {
                 amount: U256::from(77u32),
                 intmax_state_root: Bytes32::default(),
             },
-            channel_balance_root: Bytes32::from_u32_slice(&[1, 0, 0, 0, 0, 0, 0, 0]).unwrap(),
-            shared_native_nullifier_root: Bytes32::from_u32_slice(&[2, 0, 0, 0, 0, 0, 0, 0]).unwrap(),
+            balance_state: BalanceState {
+                channel_id: ChannelId::new(3).unwrap(),
+                enc_balances: [ciphertext(1), ciphertext(2), ciphertext(3)],
+                settled_tx_chain: Bytes32::from_u32_slice(&[1, 0, 0, 0, 0, 0, 0, 0]).unwrap(),
+                state_version: 12,
+                pending_adds: [0, 0, 0],
+            },
+            h2_tag: Bytes32::default(),
+            shared_native_nullifier_root: Bytes32::from_u32_slice(&[2, 0, 0, 0, 0, 0, 0, 0])
+                .unwrap(),
             unallocated_confirmed_incoming: U256::zero(),
             prev_digest: Bytes32::default(),
             digest: Bytes32::default(),
@@ -190,7 +233,7 @@ mod tests {
         let close_tx = CloseWithdrawal {
             channel_id: state.channel_id,
             final_channel_state_digest: state.digest,
-            final_channel_balance_root: state.channel_balance_root,
+            final_balance_state_h1: state.balance_state.h1(),
             intmax_state_root: state.channel_fund.intmax_state_root,
             burn_tx_hash: Bytes32::from_u32_slice(&[9, 0, 0, 0, 0, 0, 0, 0]).unwrap(),
             burn_amount: state.channel_fund.amount,
@@ -204,8 +247,31 @@ mod tests {
         };
 
         let public_inputs = witness.to_public_inputs().unwrap();
-        let roundtrip =
-            ChannelClosePublicInputs::from_u64_slice(&public_inputs.to_u64_vec()).unwrap();
+        let limbs = public_inputs.to_u64_vec();
+        assert_eq!(
+            limbs.len(),
+            CHANNEL_CLOSE_PUBLIC_INPUTS_LEN,
+            "P8 closePIHash preimage is exactly 77 BE u32 words"
+        );
+        // The P8-pinned tail: snapshotMediumBlockNumber(2) | finalStateVersion(2 hi,lo) |
+        // finalSettledTxChain(8).
+        assert_eq!(limbs[65], 0, "snapshot_medium_block_number hi limb");
+        assert_eq!(limbs[66], 123, "snapshot_medium_block_number lo limb");
+        assert_eq!(limbs[67], 0, "final_state_version hi limb");
+        assert_eq!(
+            limbs[68], 12,
+            "final_state_version lo limb (sample state_version)"
+        );
+        assert_eq!(
+            &limbs[69..77],
+            &witness
+                .final_channel_state
+                .balance_state
+                .settled_tx_chain
+                .to_u64_vec()[..],
+            "final_settled_tx_chain limbs"
+        );
+        let roundtrip = ChannelClosePublicInputs::from_u64_slice(&limbs).unwrap();
         assert_eq!(public_inputs, roundtrip);
     }
 }

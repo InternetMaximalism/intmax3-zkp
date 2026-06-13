@@ -24,26 +24,27 @@ use crate::{
     },
 };
 
-/// Public inputs for the AccountApply circuit.
+/// Public inputs for the ChannelApply circuit.
 ///
-/// This circuit merges batch proofs AND updates the account tree in one pass.
-/// It replaces the separate SigMerge + AccountApply pipeline.
+/// This circuit merges batch proofs AND updates the user tree in one pass.
+/// It replaces the separate SigMerge + ChannelApply pipeline.
 ///
 /// Fields:
 ///   prev_account_tree_root:  POSEIDON_HASH_OUT_LEN (4) — snapshot from batches (read-only)
 ///   new_account_tree_root:   POSEIDON_HASH_OUT_LEN (4) — updated after applying all users
 ///   block_number:            1
-///   aggregator_id:           1
+///   channel_id:           1
 ///   tx_tree_root:            BYTES32_LEN (8)
+///   signed_digest:           BYTES32_LEN (8)           — IMSB digest from the block proofs
 ///   verified_users_hash:     POSEIDON_HASH_OUT_LEN (4) — cumulative hash of all verified users
 ///   verified_count:          1                          — total verified users
-///   first_user_id:           1                          — first user_id
-///   last_user_id:            1                          — last user_id
-///   Total: 25
-pub const ACCOUNT_APPLY_PUBLIC_INPUTS_LEN: usize = 3 * POSEIDON_HASH_OUT_LEN + BYTES32_LEN + 5;
+///   first_user_id:           1                          — first channel_id
+///   last_user_id:            1                          — last channel_id
+///   Total: 33
+pub const USER_APPLY_PUBLIC_INPUTS_LEN: usize = 3 * POSEIDON_HASH_OUT_LEN + 2 * BYTES32_LEN + 5;
 
 #[derive(Debug, Error)]
-pub enum AccountApplyPublicInputsError {
+pub enum ChannelApplyPublicInputsError {
     #[error("Invalid public inputs length: expected {expected}, got {actual}")]
     InvalidLength { expected: usize, actual: usize },
     #[error("Failed to parse {field}: {message}")]
@@ -53,20 +54,23 @@ pub enum AccountApplyPublicInputsError {
     },
 }
 
-pub struct AccountApplyPublicInputs<
+pub struct ChannelApplyPublicInputs<
     F: RichField + Extendable<D>,
     C: GenericConfig<D, F = F>,
     const D: usize,
 > where
     <C as GenericConfig<D>>::Hasher: AlgebraicHasher<F>,
 {
-    /// Read-only account tree root (snapshot, same as batch proofs).
+    /// Read-only user tree root (snapshot, same as batch proofs).
     pub prev_account_tree_root: PoseidonHashOut,
-    /// Mutable account tree root, updated after each batch's users are applied.
+    /// Mutable user tree root, updated after each batch's users are applied.
     pub new_account_tree_root: PoseidonHashOut,
     pub block_number: BlockNumber,
-    pub aggregator_id: u32,
+    pub channel_id: u32,
     pub tx_tree_root: Bytes32,
+    /// IMSB `SmallBlockRootMessage::signing_digest()` recomputed (and bound to
+    /// `tx_tree_root`) inside every absorbed `ChannelApplyBlock` proof (detail2 §F-2).
+    pub signed_digest: Bytes32,
     /// Cumulative hash of all verified users from absorbed batches.
     pub verified_users_hash: PoseidonHashOut,
     pub verified_count: u32,
@@ -76,12 +80,12 @@ pub struct AccountApplyPublicInputs<
 }
 
 impl<F: RichField + Extendable<D>, C: GenericConfig<D, F = F>, const D: usize>
-    AccountApplyPublicInputs<F, C, D>
+    ChannelApplyPublicInputs<F, C, D>
 where
     <C as GenericConfig<D>>::Hasher: AlgebraicHasher<F>,
 {
-    pub fn hub_id(&self) -> u32 {
-        self.aggregator_id
+    pub fn channel_id(&self) -> u32 {
+        self.channel_id
     }
 
     pub fn to_u64_vec(&self, config: &CircuitConfig) -> Vec<u64> {
@@ -89,8 +93,9 @@ where
             self.prev_account_tree_root.to_u64_vec(),
             self.new_account_tree_root.to_u64_vec(),
             self.block_number.to_u64_vec(),
-            vec![self.aggregator_id as u64],
+            vec![self.channel_id as u64],
             self.tx_tree_root.to_u64_vec(),
+            self.signed_digest.to_u64_vec(),
             self.verified_users_hash.to_u64_vec(),
             vec![self.verified_count as u64],
             vec![self.first_user_id],
@@ -103,11 +108,11 @@ where
     pub fn from_u64_slice(
         inputs: &[u64],
         config: &CircuitConfig,
-    ) -> Result<Self, AccountApplyPublicInputsError> {
+    ) -> Result<Self, ChannelApplyPublicInputsError> {
         let vd_len = vd_vec_len(config);
-        let expected = ACCOUNT_APPLY_PUBLIC_INPUTS_LEN + vd_len;
+        let expected = USER_APPLY_PUBLIC_INPUTS_LEN + vd_len;
         if inputs.len() != expected {
-            return Err(AccountApplyPublicInputsError::InvalidLength {
+            return Err(ChannelApplyPublicInputsError::InvalidLength {
                 expected,
                 actual: inputs.len(),
             });
@@ -117,7 +122,7 @@ where
 
         let prev_account_tree_root =
             PoseidonHashOut::from_u64_slice(&inputs[cursor..cursor + POSEIDON_HASH_OUT_LEN])
-                .map_err(|e| AccountApplyPublicInputsError::ParseError {
+                .map_err(|e| ChannelApplyPublicInputsError::ParseError {
                     field: "prev_account_tree_root",
                     message: e.to_string(),
                 })?;
@@ -125,35 +130,42 @@ where
 
         let new_account_tree_root =
             PoseidonHashOut::from_u64_slice(&inputs[cursor..cursor + POSEIDON_HASH_OUT_LEN])
-                .map_err(|e| AccountApplyPublicInputsError::ParseError {
+                .map_err(|e| ChannelApplyPublicInputsError::ParseError {
                     field: "new_account_tree_root",
                     message: e.to_string(),
                 })?;
         cursor += POSEIDON_HASH_OUT_LEN;
 
         let block_number = BlockNumber::new(inputs[cursor]).map_err(|e| {
-            AccountApplyPublicInputsError::ParseError {
+            ChannelApplyPublicInputsError::ParseError {
                 field: "block_number",
                 message: e.to_string(),
             }
         })?;
         cursor += 1;
 
-        let aggregator_id = inputs[cursor] as u32;
+        let channel_id = inputs[cursor] as u32;
         cursor += 1;
 
         let tx_tree_root =
             Bytes32::from_u64_slice(&inputs[cursor..cursor + BYTES32_LEN]).map_err(|e| {
-                AccountApplyPublicInputsError::ParseError {
+                ChannelApplyPublicInputsError::ParseError {
                     field: "tx_tree_root",
                     message: e.to_string(),
                 }
             })?;
         cursor += BYTES32_LEN;
 
+        let signed_digest = Bytes32::from_u64_slice(&inputs[cursor..cursor + BYTES32_LEN])
+            .map_err(|e| ChannelApplyPublicInputsError::ParseError {
+                field: "signed_digest",
+                message: e.to_string(),
+            })?;
+        cursor += BYTES32_LEN;
+
         let verified_users_hash =
             PoseidonHashOut::from_u64_slice(&inputs[cursor..cursor + POSEIDON_HASH_OUT_LEN])
-                .map_err(|e| AccountApplyPublicInputsError::ParseError {
+                .map_err(|e| ChannelApplyPublicInputsError::ParseError {
                     field: "verified_users_hash",
                     message: e.to_string(),
                 })?;
@@ -168,7 +180,7 @@ where
 
         let vd_slice = &inputs[cursor..cursor + vd_len];
         let vd = vd_from_pis_slice::<F, C, D>(&vd_slice.to_field_vec(), config).map_err(|e| {
-            AccountApplyPublicInputsError::ParseError {
+            ChannelApplyPublicInputsError::ParseError {
                 field: "verifier data",
                 message: e.to_string(),
             }
@@ -178,8 +190,9 @@ where
             prev_account_tree_root,
             new_account_tree_root,
             block_number,
-            aggregator_id,
+            channel_id,
             tx_tree_root,
+            signed_digest,
             verified_users_hash,
             verified_count,
             first_user_id,
@@ -190,12 +203,13 @@ where
 }
 
 #[derive(Clone, Debug)]
-pub struct AccountApplyPublicInputsTarget {
+pub struct ChannelApplyPublicInputsTarget {
     pub prev_account_tree_root: PoseidonHashOutTarget,
     pub new_account_tree_root: PoseidonHashOutTarget,
     pub block_number: BlockNumberTarget,
-    pub aggregator_id: Target,
+    pub channel_id: Target,
     pub tx_tree_root: Bytes32Target,
+    pub signed_digest: Bytes32Target,
     pub verified_users_hash: PoseidonHashOutTarget,
     pub verified_count: Target,
     pub first_user_id: Target,
@@ -203,9 +217,9 @@ pub struct AccountApplyPublicInputsTarget {
     pub vd: VerifierCircuitTarget,
 }
 
-impl AccountApplyPublicInputsTarget {
-    pub fn hub_id(&self) -> Target {
-        self.aggregator_id
+impl ChannelApplyPublicInputsTarget {
+    pub fn channel_id(&self) -> Target {
+        self.channel_id
     }
 
     pub fn to_vec(&self, config: &CircuitConfig) -> Vec<Target> {
@@ -213,8 +227,9 @@ impl AccountApplyPublicInputsTarget {
             self.prev_account_tree_root.to_vec(),
             self.new_account_tree_root.to_vec(),
             self.block_number.to_vec(),
-            vec![self.aggregator_id],
+            vec![self.channel_id],
             self.tx_tree_root.to_vec(),
+            self.signed_digest.to_vec(),
             self.verified_users_hash.to_vec(),
             vec![self.verified_count],
             vec![self.first_user_id],
@@ -226,7 +241,7 @@ impl AccountApplyPublicInputsTarget {
 
     pub fn from_pis(pis: &[Target], config: &CircuitConfig) -> Self {
         let vd_len = vd_vec_len(config);
-        assert!(pis.len() >= ACCOUNT_APPLY_PUBLIC_INPUTS_LEN + vd_len);
+        assert!(pis.len() >= USER_APPLY_PUBLIC_INPUTS_LEN + vd_len);
 
         let mut cursor = 0;
 
@@ -241,10 +256,13 @@ impl AccountApplyPublicInputsTarget {
         let block_number = BlockNumberTarget::from_slice(&pis[cursor..cursor + 1]);
         cursor += 1;
 
-        let aggregator_id = pis[cursor];
+        let channel_id = pis[cursor];
         cursor += 1;
 
         let tx_tree_root = Bytes32Target::from_slice(&pis[cursor..cursor + BYTES32_LEN]);
+        cursor += BYTES32_LEN;
+
+        let signed_digest = Bytes32Target::from_slice(&pis[cursor..cursor + BYTES32_LEN]);
         cursor += BYTES32_LEN;
 
         let verified_users_hash =
@@ -266,8 +284,9 @@ impl AccountApplyPublicInputsTarget {
             prev_account_tree_root,
             new_account_tree_root,
             block_number,
-            aggregator_id,
+            channel_id,
             tx_tree_root,
+            signed_digest,
             verified_users_hash,
             verified_count,
             first_user_id,
@@ -284,7 +303,7 @@ impl AccountApplyPublicInputsTarget {
     >(
         &self,
         witness: &mut W,
-        value: &AccountApplyPublicInputs<F, C, D>,
+        value: &ChannelApplyPublicInputs<F, C, D>,
     ) where
         <C as GenericConfig<D>>::Hasher: AlgebraicHasher<F>,
     {
@@ -294,10 +313,11 @@ impl AccountApplyPublicInputsTarget {
             .set_witness(witness, value.new_account_tree_root);
         self.block_number.set_witness(witness, value.block_number);
         witness.set_target(
-            self.aggregator_id,
-            F::from_canonical_u64(value.aggregator_id as u64),
+            self.channel_id,
+            F::from_canonical_u64(value.channel_id as u64),
         );
         self.tx_tree_root.set_witness(witness, value.tx_tree_root);
+        self.signed_digest.set_witness(witness, value.signed_digest);
         self.verified_users_hash
             .set_witness(witness, value.verified_users_hash);
         witness.set_target(

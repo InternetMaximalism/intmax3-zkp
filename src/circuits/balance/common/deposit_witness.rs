@@ -14,10 +14,10 @@ use crate::{
         calculate_recipient_from_user_id, calculate_recipient_from_user_id_circuit,
     },
     common::{
+        channel_id::{ChannelId, ChannelIdTarget},
         deposit::{Deposit, DepositTarget},
         salt::{Salt, SaltTarget},
         trees::deposit_tree::{DepositMerkleProof, DepositMerkleProofTarget},
-        user_id::{UserId, UserIdTarget},
     },
     constants::DEPOSIT_TREE_HEIGHT,
     ethereum_types::u32limb_trait::U32LimbTargetTrait as _,
@@ -38,7 +38,7 @@ pub enum DepositWitnessError {
 
 #[derive(Clone, Debug)]
 pub struct DepositWitness {
-    pub user_id: UserId,
+    pub channel_id: ChannelId,
     pub deposit_tree_root: PoseidonHashOut,
     pub deposit_salt: Salt,
     pub deposit: Deposit,
@@ -47,7 +47,7 @@ pub struct DepositWitness {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct DepositWitnessTarget {
-    pub user_id: UserIdTarget,
+    pub channel_id: ChannelIdTarget,
     pub deposit_tree_root: PoseidonHashOutTarget,
     pub deposit_salt: SaltTarget,
     pub deposit: DepositTarget,
@@ -56,14 +56,14 @@ pub struct DepositWitnessTarget {
 
 impl DepositWitness {
     pub fn new(
-        user_id: UserId,
+        channel_id: ChannelId,
         deposit_tree_root: PoseidonHashOut,
         deposit_salt: Salt,
         deposit: Deposit,
         deposit_merkle_proof: DepositMerkleProof,
     ) -> Result<Self, DepositWitnessError> {
         let witness = Self {
-            user_id,
+            channel_id,
             deposit_tree_root,
             deposit_salt,
             deposit,
@@ -87,8 +87,9 @@ impl DepositWitness {
             .verify(&self.deposit, deposit_index, self.deposit_tree_root)
             .map_err(|e| DepositWitnessError::InvalidDepositMerkleProof(e.to_string()))?;
 
-        // verify the deposit's user_id and salt.
-        let expected_recpient = calculate_recipient_from_user_id(self.user_id, self.deposit_salt);
+        // verify the deposit's channel_id and salt.
+        let expected_recpient =
+            calculate_recipient_from_user_id(self.channel_id, self.deposit_salt);
         if self.deposit.recipient != expected_recpient {
             return Err(DepositWitnessError::InvalidRecipient(format!(
                 "expected {}, got {}",
@@ -107,7 +108,7 @@ impl DepositWitnessTarget {
     where
         <C as GenericConfig<D>>::Hasher: AlgebraicHasher<F>,
     {
-        let user_id = UserIdTarget::new(builder, is_checked);
+        let channel_id = ChannelIdTarget::new(builder, is_checked);
         let deposit_tree_root = PoseidonHashOutTarget::new(builder);
         let deposit_salt = SaltTarget::new(builder);
         let deposit = DepositTarget::new(builder, is_checked);
@@ -121,11 +122,11 @@ impl DepositWitnessTarget {
         );
 
         let expected_recipient =
-            calculate_recipient_from_user_id_circuit(builder, &user_id, &deposit_salt);
+            calculate_recipient_from_user_id_circuit(builder, &channel_id, &deposit_salt);
         deposit.recipient.connect(builder, expected_recipient);
 
         Self {
-            user_id,
+            channel_id,
             deposit_tree_root,
             deposit_salt,
             deposit,
@@ -138,7 +139,7 @@ impl DepositWitnessTarget {
         witness: &mut W,
         value: &DepositWitness,
     ) {
-        self.user_id.set_witness(witness, value.user_id);
+        self.channel_id.set_witness(witness, value.channel_id);
         self.deposit_tree_root
             .set_witness(witness, value.deposit_tree_root);
         self.deposit_salt.set_witness(witness, value.deposit_salt);

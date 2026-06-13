@@ -1,8 +1,8 @@
-pub mod account_apply_block;
-pub mod account_apply_block_pis;
-pub mod account_apply_circuit;
-pub mod account_apply_pis;
-pub mod account_apply_step;
+pub mod channel_apply_block;
+pub mod channel_apply_block_pis;
+pub mod channel_apply_circuit;
+pub mod channel_apply_pis;
+pub mod channel_apply_step;
 pub mod parallel_sig_processor;
 pub mod sig_agg_circuit;
 pub mod sig_agg_pis;

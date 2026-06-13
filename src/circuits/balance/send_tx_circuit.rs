@@ -17,11 +17,19 @@ use crate::{
             BalancePublicInputsError, BalancePublicInputsTarget,
         },
         common::{
+            transfer_witness::{TransferWitness, TransferWitnessTarget},
             tx_settlement::{TxSettlement, TxSettlementTarget},
             update_public_state::{UpdatePublicState, UpdatePublicStateTarget},
         },
     },
-    common::u63::BlockNumberTarget,
+    common::{
+        balance_state::{settled_tx_chain_push, settled_tx_chain_push_circuit},
+        u63::BlockNumberTarget,
+    },
+    ethereum_types::{
+        bytes32::{Bytes32, Bytes32Target},
+        u32limb_trait::U32LimbTargetTrait as _,
+    },
     utils::{
         conversion::ToU64,
         cyclic::add_const_gate,
@@ -69,6 +77,12 @@ where
     /* update_public_state.new ==
      * tx_settlement.public_state */
     pub tx_settlement: TxSettlement<F, C, D>,
+
+    /* The outgoing transfer at index 0 of the transfer tree bound by
+     * tx_settlement.tx.transfer_tree_root (detail2 §A-2: 1 block = 1 tx, the
+     * inter-channel transfer is fixed at leaf 0). Its aux_data is folded into
+     * the settled_tx_chain PI when the spend is valid and aux_data != 0. */
+    pub transfer_witness: TransferWitness,
 }
 
 impl<F: RichField + Extendable<D>, C: GenericConfig<D, F = F>, const D: usize>
@@ -99,11 +113,11 @@ where
                 self.update_public_state.new, self.tx_settlement.public_state
             )));
         }
-        if self.tx_settlement.user_id != prev_balance_pis.user_id {
+        if self.tx_settlement.channel_id != prev_balance_pis.channel_id {
             return Err(SendTxError::ConnectionError(format!(
-                "tx_settlement.user_id: {}, prev_balance_pis.user_id: {}",
-                self.tx_settlement.user_id.as_u64(),
-                prev_balance_pis.user_id.as_u64()
+                "tx_settlement.channel_id: {}, prev_balance_pis.channel_id: {}",
+                self.tx_settlement.channel_id.as_u64(),
+                prev_balance_pis.channel_id.as_u64()
             )));
         }
         let spend_pis = self
@@ -130,6 +144,23 @@ where
                 prev_balance_pis.block_r.as_u64()
             )));
         }
+        // The outgoing transfer witness must sit at index 0 of the settled tx's transfer tree.
+        if self.transfer_witness.transfer_index != 0 {
+            return Err(SendTxError::ConnectionError(format!(
+                "transfer_witness.transfer_index must be 0, got {}",
+                self.transfer_witness.transfer_index
+            )));
+        }
+        if self.transfer_witness.transfer_tree_root != self.tx_settlement.tx.transfer_tree_root {
+            return Err(SendTxError::ConnectionError(format!(
+                "transfer_witness.transfer_tree_root {:?} != tx.transfer_tree_root {:?}",
+                self.transfer_witness.transfer_tree_root, self.tx_settlement.tx.transfer_tree_root,
+            )));
+        }
+        self.transfer_witness
+            .verify()
+            .map_err(|e| SendTxError::ConnectionError(format!("invalid transfer witness: {e}")))?;
+
         let (new_block_r, new_private_commitment) = if spend_pis.is_valid {
             (
                 self.tx_settlement.tx_block_number(),
@@ -141,11 +172,21 @@ where
                 prev_balance_pis.private_commitment,
             )
         };
+        // detail2 §C-6/§F-1: fold the outgoing inter-channel transfer's aux_data (= tx leaf
+        // hash) into the chain — only when this send actually settled (spend valid) and the
+        // transfer is inter-channel (aux_data != 0).
+        let aux_data = self.transfer_witness.transfer.aux_data;
+        let new_settled_tx_chain = if spend_pis.is_valid && aux_data != Bytes32::default() {
+            settled_tx_chain_push(prev_balance_pis.settled_tx_chain, aux_data)
+        } else {
+            prev_balance_pis.settled_tx_chain
+        };
         let new_balance_pis = BalancePublicInputs {
-            user_id: prev_balance_pis.user_id,
+            channel_id: prev_balance_pis.channel_id,
             public_state: self.update_public_state.new.clone(),
             block_r: new_block_r,
             private_commitment: new_private_commitment,
+            settled_tx_chain: new_settled_tx_chain,
         };
         Ok(BalanceFullPublicInputs {
             pis: new_balance_pis,
@@ -159,6 +200,7 @@ pub struct SendTxTarget<const D: usize> {
     pub prev_balance_proof: ProofWithPublicInputsTarget<D>,
     pub update_public_state: UpdatePublicStateTarget,
     pub tx_settlement: TxSettlementTarget<D>,
+    pub transfer_witness: TransferWitnessTarget,
 
     pub new_full_pis: BalanceFullPublicInputsTarget,
 }
@@ -187,6 +229,7 @@ impl<const D: usize> SendTxTarget<D> {
 
         let update_public_state = UpdatePublicStateTarget::new::<F, C, D>(builder);
         let tx_settlement = TxSettlementTarget::new(builder, spend_vd, true);
+        let transfer_witness = TransferWitnessTarget::new::<F, C, D>(builder, true);
 
         // The previous public state must match the updater's old state.
         prev.public_state.connect(builder, &update_public_state.old);
@@ -197,7 +240,7 @@ impl<const D: usize> SendTxTarget<D> {
             .connect(builder, &update_public_state.new);
 
         // Link user IDs across components.
-        prev.user_id.connect(builder, &tx_settlement.user_id);
+        prev.channel_id.connect(builder, &tx_settlement.channel_id);
 
         // Previous private commitment must coincide with the spend proof.
         let spend_pis = tx_settlement.spend_pis();
@@ -225,11 +268,40 @@ impl<const D: usize> SendTxTarget<D> {
             spend_pis.new_private_commitment.clone(),
             prev.private_commitment.clone(),
         );
+
+        // The outgoing inter-channel transfer is fixed at index 0 of the settled tx's transfer
+        // tree (detail2 §A-2: 1 block = 1 tx). TransferWitnessTarget::new already verified the
+        // merkle inclusion of (transfer, index) against transfer_tree_root; pin the root to the
+        // settled tx and the index to 0.
+        transfer_witness
+            .transfer_tree_root
+            .connect(builder, tx_settlement.tx.transfer_tree_root);
+        builder.assert_zero(transfer_witness.transfer_index);
+
+        // detail2 §C-6/§F-1 chain fold of the outgoing transfer's aux_data (= tx leaf hash),
+        // mirroring the block_r / private_commitment spend-validity selection above and
+        // additionally gated on aux_data != 0 (intra-channel / legacy sends chain nothing).
+        //
+        // SECURITY: aux_data is merkle-bound inside the transfer leaf that this circuit just
+        // verified against tx.transfer_tree_root, so the chain PI is a faithful fold of the
+        // leaf the settled tx actually carries. Semantic correctness of
+        // `aux_data == tx_leaf_hash(...)` is enforced off-circuit at co-sign time (threat model
+        // F3-A, multi-layered with §E-2 verification).
+        let aux_data = transfer_witness.transfer.aux_data;
+        let aux_is_zero = aux_data.is_zero::<F, D, Bytes32>(builder);
+        let aux_is_nonzero = builder.not(aux_is_zero);
+        let do_push = builder.and(spend_pis.is_valid, aux_is_nonzero);
+        let pushed_chain =
+            settled_tx_chain_push_circuit::<F, C, D>(builder, prev.settled_tx_chain, aux_data);
+        let new_settled_tx_chain =
+            Bytes32Target::select(builder, do_push, pushed_chain, prev.settled_tx_chain);
+
         let new_pis = BalancePublicInputsTarget {
-            user_id: prev.user_id.clone(),
+            channel_id: prev.channel_id.clone(),
             public_state: update_public_state.new.clone(),
             block_r: new_block_r,
             private_commitment: new_private_commitment,
+            settled_tx_chain: new_settled_tx_chain,
         };
         let new_full_pis = BalanceFullPublicInputsTarget {
             pis: new_pis.clone(),
@@ -239,6 +311,7 @@ impl<const D: usize> SendTxTarget<D> {
             prev_balance_proof,
             update_public_state,
             tx_settlement,
+            transfer_witness,
             new_full_pis,
         }
     }
@@ -259,6 +332,8 @@ impl<const D: usize> SendTxTarget<D> {
             .set_witness(witness, &value.update_public_state);
         self.tx_settlement
             .set_witness::<F, C, _>(witness, &value.tx_settlement);
+        self.transfer_witness
+            .set_witness(witness, &value.transfer_witness);
         self.new_full_pis.set_witness(witness, balance_full_pis);
     }
 }
@@ -386,24 +461,26 @@ mod tests {
             spend_circuit::{SpendCircuit, SpendWitness},
         },
         common::{
+            balance_state::settled_tx_chain_push,
+            channel_id::ChannelId,
             private_state::FullPrivateState,
             public_state::PublicState,
             salt::Salt,
             transfer::Transfer,
             trees::{
-                account_tree::{AccountLeaf, AccountTree, SendLeaf, SendTree},
                 asset_tree::AssetTree,
+                channel_tree::{ChannelLeaf, ChannelTree, SendLeaf, SendTree},
+                transfer_tree::TransferTree,
                 tx_tree::TxTree,
             },
             tx::Tx,
             u63::BlockNumber,
-            user_id::UserId,
         },
         constants::{
-            ACCOUNT_TREE_HEIGHT, ASSET_TREE_HEIGHT, MAX_NUM_TRANSFERS_PER_TX, SEND_TREE_HEIGHT,
+            ASSET_TREE_HEIGHT, CHANNEL_TREE_HEIGHT, MAX_NUM_TRANSFERS_PER_TX, SEND_TREE_HEIGHT,
             TRANSFER_TREE_HEIGHT,
         },
-        ethereum_types::{bytes32::Bytes32, u256::U256},
+        ethereum_types::{bytes32::Bytes32, u32limb_trait::U32LimbTrait as _, u256::U256},
         utils::{
             conversion::ToField as _, cyclic::TestCyclicCircuit,
             poseidon_hash_out::PoseidonHashOut, trees::get_root::get_merkle_root_from_leaves,
@@ -427,6 +504,9 @@ mod tests {
         let mut asset_tree_initial = AssetTree::new(ASSET_TREE_HEIGHT);
         let mut transfers = Vec::with_capacity(MAX_NUM_TRANSFERS_PER_TX);
 
+        // The outgoing transfer at index 0 carries a nonzero aux_data (= tx leaf hash, detail2
+        // §C-6) so the chain fold is exercised.
+        let outgoing_aux = Bytes32::from_u32_slice(&[1, 2, 3, 4, 5, 6, 7, 8]).unwrap();
         for i in 0..MAX_NUM_TRANSFERS_PER_TX {
             let amount = U256::from((i + 1) as u32);
             let base_balance = amount + U256::from(10u32);
@@ -434,7 +514,11 @@ mod tests {
                 recipient: Bytes32::default(),
                 token_index: i as u32,
                 amount,
-                aux_data: Bytes32::default(),
+                aux_data: if i == 0 {
+                    outgoing_aux
+                } else {
+                    Bytes32::default()
+                },
             };
             asset_tree_initial.update(i as u64, base_balance);
             transfers.push(transfer);
@@ -468,7 +552,7 @@ mod tests {
         let spend_witness = SpendWitness {
             tx_nonce: prev_private_state.nonce,
             prev_private_state: prev_private_state.clone(),
-            transfers,
+            transfers: transfers.clone(),
             before_balances,
             asset_merkle_proofs,
             sent_tx_merkle_proof,
@@ -486,9 +570,9 @@ mod tests {
 
         let tx = spend_pis.tx;
         let mut tx_tree = TxTree::init();
-        let local_id = 1u32;
-        tx_tree.update(local_id as u64, tx.clone());
-        let tx_merkle_proof = tx_tree.prove(local_id as u64);
+        let key_id = 1u32;
+        tx_tree.update(key_id as u64, tx.clone());
+        let tx_merkle_proof = tx_tree.prove(key_id as u64);
         let tx_tree_root: PoseidonHashOut = tx_tree.get_root();
 
         let send_leaf = SendLeaf {
@@ -501,18 +585,17 @@ mod tests {
         let send_leaf_index = 0u32;
         let send_merkle_proof = send_tree.prove(send_leaf_index as u64);
 
-        let mut account_tree = AccountTree::new(ACCOUNT_TREE_HEIGHT);
-        let account_leaf = AccountLeaf {
+        let mut channel_tree = ChannelTree::new(CHANNEL_TREE_HEIGHT);
+        let channel_leaf = ChannelLeaf {
             index: send_tree.len() as u32,
             prev: send_leaf.cur,
             send_tree_root: send_tree.get_root(),
-            pk_set_root: PoseidonHashOut::default(),
-            threshold: 0,
+            member_key_ids_root: ChannelLeaf::default().member_key_ids_root,
         };
-        let user_id = UserId::new(0, local_id).unwrap();
-        account_tree.update(user_id.as_u64(), account_leaf.clone());
-        let account_merkle_proof = account_tree.prove(user_id.as_u64());
-        let account_tree_root = account_tree.get_root();
+        let channel_id = ChannelId::new(key_id as u64).unwrap();
+        channel_tree.update(channel_id.as_u64(), channel_leaf.clone());
+        let user_merkle_proof = channel_tree.prove(channel_id.as_u64());
+        let account_tree_root = channel_tree.get_root();
 
         let public_state = PublicState {
             block_number: BlockNumber::new(6).unwrap(),
@@ -523,13 +606,13 @@ mod tests {
         };
 
         let account_state = AccountState::new(
-            user_id,
+            channel_id,
             public_state.account_tree_root,
             send_leaf,
             send_leaf_index,
             send_merkle_proof,
-            account_leaf,
-            account_merkle_proof,
+            channel_leaf,
+            user_merkle_proof,
         )
         .expect("account state should be valid");
 
@@ -539,7 +622,7 @@ mod tests {
 
         let tx_settlement = TxSettlement::new(
             &spend_vd,
-            user_id,
+            channel_id,
             tx,
             public_state.clone(),
             account_state,
@@ -548,11 +631,28 @@ mod tests {
         )
         .expect("tx settlement");
 
+        // Outgoing transfer witness at index 0 of the tx's transfer tree.
+        let mut transfer_tree = TransferTree::new(TRANSFER_TREE_HEIGHT);
+        for transfer in &transfers {
+            transfer_tree.push(transfer.clone());
+        }
+        assert_eq!(transfer_tree.get_root(), tx.transfer_tree_root);
+        let transfer_witness = TransferWitness::new(
+            transfer_tree.get_root(),
+            transfers[0].clone(),
+            0,
+            transfer_tree.prove(0),
+        )
+        .expect("transfer witness");
+
+        // Nonzero previous chain so the test exercises real folding, not just genesis push.
+        let prev_settled_tx_chain = Bytes32::from_u32_slice(&[5, 5, 5, 5, 5, 5, 5, 5]).unwrap();
         let prev_balance_pis = BalancePublicInputs {
-            user_id,
+            channel_id,
             public_state: public_state.clone(),
             block_r: BlockNumber::new(2).unwrap(),
             private_commitment: spend_pis.prev_private_commitment,
+            settled_tx_chain: prev_settled_tx_chain,
         };
 
         let balance_common_data =
@@ -574,6 +674,7 @@ mod tests {
             prev_balance_proof,
             update_public_state,
             tx_settlement,
+            transfer_witness,
         };
 
         let send_tx_circuit = SendTxCircuit::<F, C, D>::new(&balance_cd, &spend_vd);
@@ -593,11 +694,16 @@ mod tests {
         let expected_fields = expected_u64.to_field_vec::<F>();
 
         assert_eq!(proof.public_inputs, expected_fields);
-        assert_eq!(expected_pis.pis.user_id.as_u64(), user_id.as_u64());
+        assert_eq!(expected_pis.pis.channel_id.as_u64(), channel_id.as_u64());
         assert_eq!(expected_pis.pis.block_r, BlockNumber::new(3).unwrap());
         assert_eq!(
             expected_pis.pis.private_commitment,
             spend_pis.new_private_commitment,
+        );
+        // detail2 §C-6/§F-1: a valid spend with a nonzero aux_data folds the outgoing transfer.
+        assert_eq!(
+            expected_pis.pis.settled_tx_chain,
+            settled_tx_chain_push(prev_settled_tx_chain, outgoing_aux),
         );
     }
 }
