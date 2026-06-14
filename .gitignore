@@ -62,9 +62,20 @@ AGENTS.md
 # Claude Code internals (settings, cached agent state)
 .claude/
 
+# Secrets — testnet/Sepolia deployer private key and any private-key material.
+# Explicit belt-and-suspenders on top of `.claude/` above: NEVER commit these.
+.claude/priv
+priv
+*.priv
+*.key
+*.eth
+.env
+.env.*
+
 # =============================================================================
 # Browser-wallet e2e runtime scratch (JSON handoffs + CLI state)
 wallet-e2e-work/
+wallet-live-work/
 cli_state.json
 
 # =============================================================================

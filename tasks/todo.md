@@ -108,7 +108,7 @@ User choice: "local close e2e first" (rehearsal before Sepolia).
 - New: CloseE2EBase.sol (shared CREATE2 deploy), CloseManagerAddr.t.sol, CloseLifecycleE2E.t.sol,
   4 close_*.json fixtures. Added WD_RECIPIENT/WD_OUT_PREFIX support to generate_withdrawal_fixture.
 - **Next: P7 Sepolia redeploy + real 2-member lifecycle** (production is a normal deploy = deployer is an EOA, no CREATE2 factory
-  problem. The key is .claude/worktrees/.eth, shell-expand only without reading the contents).
+  problem. The key is .claude/priv, shell-expand only without reading the contents).
 
 ---
 
