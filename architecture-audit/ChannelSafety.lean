@@ -22,7 +22,7 @@ The model is *abstract*: cryptographic primitives are replaced by their
   (A2) balanceProof / validityProof ZK soundness — a proof cannot certify a
        balance the channel does not have. Modeled by the solvency
        side-conditions (`hsolv`) on ledger transitions and on `exitBurn`
-       (abstract.md §2.1 前提, §3.5.4 step 2).
+       (abstract.md §2.1 premise, §3.5.4 step 2).
   (A3) Honest-member discipline — honest members follow §3.1/§3.2.3/§3.4/§3.5.1
        (sign only valid states, one state per version, freeze after
        requestClose). Modeled by `SignsOnlyValid`, `OneStatePerVersion`
@@ -124,7 +124,7 @@ structure SigModel where
   honest : Member → Prop
 
 /-- abstract.md §3.1 out: a `BalanceState` is confirmed iff all three members
-    signed its hash (`[SpxSigWitness; 3]` 揃ったとき確定). -/
+    signed its hash (confirmed once all `[SpxSigWitness; 3]` are gathered). -/
 def Confirmed (M : SigModel) (s : BalanceState) : Prop :=
   ∀ i : Member, M.signsState i s
 
@@ -133,8 +133,8 @@ def Confirmed (M : SigModel) (s : BalanceState) : Prop :=
 def SignsOnlyValid (M : SigModel) (Valid : BalanceState → Prop) : Prop :=
   ∀ i s, M.honest i → M.signsState i s → Valid s
 
-/-- Honest-member discipline, part 2 (abstract.md §3.1: `stateVersion` が現行 +1
-    を各自検証): an honest member never signs two *different* states carrying
+/-- Honest-member discipline, part 2 (abstract.md §3.1: each member verifies
+    that `stateVersion` is the current one +1): an honest member never signs two *different* states carrying
     the same version. -/
 def OneStatePerVersion (M : SigModel) : Prop :=
   ∀ i s s', M.honest i → M.signsState i s → M.signsState i s' →
@@ -222,7 +222,7 @@ theorem channelTx_preserves_validity (s : BalanceState) (t : ChannelTx)
 
 /-- The sending-channel view of an inter-channel `Transfer` (abstract.md §2.3):
     `amount` leaves the channel, so the new `balanceProof'` certifies
-    `provenTotal - amount` (flowSend1 step 8: post-send L2 残高 `B - amount`). -/
+    `provenTotal - amount` (flowSend1 step 8: post-send L2 balance `B - amount`). -/
 structure OutgoingTransfer where
   sender : Member
   amount : Int
@@ -235,8 +235,8 @@ def deduct (s : BalanceState) (t : OutgoingTransfer) : BalanceState where
   version := s.version + 1
 
 /-- Outgoing deduction keeps the state valid when the sender is solvent —
-    exactly the `rangeProof` check of §3.3.1 (残高 ≥ 送金額) — and the
-    certified total decreases monotonically (§4.3 単調更新: 送信側は減少).
+    exactly the `rangeProof` check of §3.3.1 (balance ≥ transfer amount) — and the
+    certified total decreases monotonically (§4.3 monotone update: the sender side decreases).
     This is the completeness counterpart: honest members *can* sign the
     deducted state. -/
 theorem interSend_preserves_validity (s : BalanceState) (t : OutgoingTransfer)
@@ -264,11 +264,11 @@ theorem interSend_preserves_validity (s : BalanceState) (t : OutgoingTransfer)
   · show s.provenTotal - t.amount ≤ s.provenTotal
     omega
 
-/-- abstract.md §3.4 不変則 (署名のアトミック性): the signature model extended
+/-- abstract.md §3.4 invariant (signature atomicity): the signature model extended
     with `tx_tree_root` signatures (`senderRootSig`, §3.3.2). The `atomic`
     field IS the invariant: a member's root signature over a tree containing
     transfer `t` from state `s` is only *valid* together with that member's
-    signature on the deducted state `deduct s t` (片方だけの署名は無効). -/
+    signature on the deducted state `deduct s t` (a signature on only one side is invalid). -/
 structure AtomicSigModel extends SigModel where
   signsRoot : Member → OutgoingTransfer → BalanceState → Prop
   atomic : ∀ i t s, signsRoot i t s → signsState i (deduct s t)
@@ -280,11 +280,11 @@ def TransferAuthorized (M : AtomicSigModel) (t : OutgoingTransfer)
     (s : BalanceState) : Prop :=
   ∀ i : Member, M.signsRoot i t s
 
-/-- **Property 1, atomicity half (abstract.md §3.4 不変則 / §4.1).**
+/-- **Property 1, atomicity half (abstract.md §3.4 invariant / §4.1).**
     If an inter-channel transfer is authorized, the deducted `BalanceState'`
     is automatically confirmed, so the attack "authorize the send, then
     refuse to sign the internal deduction, shifting the loss to co-members"
-    (intra-channel 窃取) cannot occur.
+    (intra-channel theft) cannot occur.
 
     NOTE: this theorem *records the consequence of the assumed atomic
     co-signing rule* (the `atomic` field of `AtomicSigModel`); it does not
@@ -315,7 +315,7 @@ The side conditions of each constructor are exactly the checks the validity
 circuit enforces (A2):
 
   * `hsolv`  — solvency: `rangeProof` (§3.3.1) + balanceProof soundness
-               (§2.1 前提: 過大な残高には偽造できない);
+               (§2.1 premise: an excessive balance cannot be forged);
   * `hfresh` — `ChannelLeaf.prev`: the channel's last-included block number
                must not exceed the current block (§2.3 `PublicState`,
                §3.3.5 step 2). -/
@@ -436,7 +436,7 @@ theorem apply_blockNo {L L' : Ledger} {op : Op} (h : Apply L op L') :
 /-- **Property 2, conservation (abstract.md §4.2, single step).**
     A settlement step changes the total spendable supply by exactly
     `mint − burn`: transfers move value, deposits mint it, burns destroy it.
-    In particular no transfer can create value (不正 mint 防止). -/
+    In particular no transfer can create value (preventing illicit mint). -/
 theorem apply_conservation {L L' : Ledger} {op : Op} (h : Apply L op L')
     {C : Nat} (hC : op.inRange C) :
     sumBelow L'.spendable C = sumBelow L.spendable C + op.mint - op.burn := by
@@ -652,7 +652,7 @@ structure L1CloseRule (g : CloseGame) : Prop where
   paid_le_claim : ∀ m, g.paid m ≤ g.claims m
   total_capped : g.totalPaid ≤ g.cap
 
-/-- **Property 4 / audit C2, C5 (abstract.md §4.2 出金 cap).**
+/-- **Property 4 / audit C2, C5 (abstract.md §4.2 withdrawal cap).**
     *Given that the L2 burn of `withdrawCap` succeeded* (§3.5.4 step 2 —
     this is where balanceProof soundness A2 enters, as the `hsolv` side
     condition of `exitBurn`; see M2), the total L1 payout is bounded by the

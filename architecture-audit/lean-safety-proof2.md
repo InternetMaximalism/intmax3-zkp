@@ -1,137 +1,137 @@
-# abstract2.md(Lattice 版)の Lean 安全性証明 — 解説・脅威モデル・限界
+# Lean safety proof of abstract2.md (Lattice version) — explanation, threat model, limitations
 
-`abstract2.md`(v2 = Lattice/Regev 秘匿版)の安全性質を Lean 4 で形式化し機械検証したものが
-[`ChannelSafety2.lean`](./ChannelSafety2.lean) である。v1 の証明
-[`ChannelSafety.lean`](./ChannelSafety.lean) を **import で再利用**しており、v1 解説
-[`lean-safety-proof.md`](./lean-safety-proof.md) の前提知識を仮定する。
+[`ChannelSafety2.lean`](./ChannelSafety2.lean) is the Lean 4 formalization and machine verification of the
+safety properties of `abstract2.md` (v2 = Lattice/Regev confidential version). It **reuses, via import**, the v1 proof
+[`ChannelSafety.lean`](./ChannelSafety.lean), and assumes the prerequisite knowledge of the v1 explanation
+[`lean-safety-proof.md`](./lean-safety-proof.md).
 
-## 検証方法(2 ステップビルド)
+## Verification method (2-step build)
 
 ```bash
 cd architecture-audit
-lean ChannelSafety.lean -o ChannelSafety.olean   # v1 をコンパイル(再利用部)
-LEAN_PATH=$PWD lean ChannelSafety2.lean          # v2 本体。exit 0 = 全定理検証済み
+lean ChannelSafety.lean -o ChannelSafety.olean   # Compile v1 (reused part)
+LEAN_PATH=$PWD lean ChannelSafety2.lean          # v2 body. exit 0 = all theorems verified
 ```
 
-Lean 4.10.0 / core のみ。`sorry` / `axiom` 不使用。
+Lean 4.10.0 / core only. No use of `sorry` / `axiom`.
 
-## v1 からの再利用と新規部分
+## Reuse from v1 and new parts
 
-| 区分 | 内容 |
+| Category | Content |
 |---|---|
-| **再利用(import)** | base 層 ledger 遷移系と全定理(供給量保存・残高非負・nullifier 一意性・集約 exit 上限)、close ゲーム(`L1CloseRule`、`close_no_overdraw`、境界二重支払い)、`Member` 型と補題群 |
-| **新規(v2)** | `Ct`(Regev 暗号文の平文意味論)、`EncBalanceState`(暗号化残高 state)、`Tag`(H2: internal / txRoot)、タグ付き署名モデル、`ChannelUpdate`/`UpdateProven`(channelUpdateZKP 健全性契約)、**受信側** `applyReceive`、チャネル横断保存則、構造的アトミック性、暗号化 state 上の challenge ゲーム・close 合成定理 |
+| **Reuse (import)** | base-layer ledger transition system and all theorems (supply conservation, balance non-negativity, nullifier uniqueness, aggregated exit upper bound), close game (`L1CloseRule`, `close_no_overdraw`, boundary double-spend), `Member` type and lemma group |
+| **New (v2)** | `Ct` (plaintext semantics of Regev ciphertext), `EncBalanceState` (encrypted balance state), `Tag` (H2: internal / txRoot), tagged signature model, `ChannelUpdate`/`UpdateProven` (channelUpdateZKP soundness contract), **receiver side** `applyReceive`, inter-channel conservation law, structural atomicity, challenge game and close composition theorem over encrypted state |
 
-## v2 で新たに証明できたこと(v1 との差分)
+## What v2 newly proves (diff from v1)
 
-1. **構造的アトミック性** — v1 では「root 署名と減算 state 署名のアトミック性」は
-   `AtomicSigModel.atomic` という**仮定**だった(v1 監査所見 5)。v2 は署名対象が
-   `hash(H1, H2)` のペアであるため、`bridgeToV1` により「任意の v2 署名モデルから v1
-   `AtomicSigModel` が構成でき、`atomic` フィールドが**証明**される」ことを機械検証した。
-   ※ ただし述語モデル上の主張であり、root に入る木の中身との束縛は別問題(M6、後述)。
-2. **受信側の形式化**(v1 M4 の一部解消)— `applyReceive` +
-   `receive_preserves_validity`(受信者が実際に検証できる事実 `RecipientVerified` のみを仮定)。
-3. **チャネル横断保存則** `interChannel_conservation` /
-   `interChannel_conservation_bound` — senderΔ と recipientΔ の等量逆符号(channelUpdateZKP)
-   により、送信側+受信側チャネル総額の和が保存される。`_bound` 版は「両側が同一の
-   `TxLeafHash` コミットメントを開く」束縛を A1(衝突困難性 = `commit` の単射性)として明示。
-4. **タグ付き challenge / close 合成** — `challenge_latest_wins2`、`end_to_end_close_safety2`
-   (出金は各自の `withdrawClaimZKP` による自分の暗号化残高の証明、他者の協力不要)。
+1. **Structural atomicity** — in v1, "atomicity of root signature and subtraction-state signature" was an
+   **assumption** named `AtomicSigModel.atomic` (v1 audit finding 5). In v2, because the signed object is a pair
+   `hash(H1, H2)`, we machine-verified via `bridgeToV1` that "from any v2 signature model a v1
+   `AtomicSigModel` can be constructed, and the `atomic` field is **proven**".
+   * Note however that this is a claim over the predicate model; binding to the contents of the tree that enters the root is a separate problem (M6, described below).
+2. **Formalization of the receiver side** (partial resolution of v1 M4) — `applyReceive` +
+   `receive_preserves_validity` (assumes only the fact `RecipientVerified` that the receiver can actually verify).
+3. **Inter-channel conservation law** `interChannel_conservation` /
+   `interChannel_conservation_bound` — by the equal-magnitude opposite-sign senderΔ and recipientΔ (channelUpdateZKP),
+   the sum of the sender-side + receiver-side channel totals is conserved. The `_bound` version makes explicit the binding that "both sides open the same
+   `TxLeafHash` commitment" as A1 (collision resistance = injectivity of `commit`).
+4. **Tagged challenge / close composition** — `challenge_latest_wins2`, `end_to_end_close_safety2`
+   (withdrawal is each party's proof of their own encrypted balance via `withdrawClaimZKP`, no cooperation of others needed).
 
-## 定理 ↔ 仕様 対応表(v2 新規分)
+## Theorem ↔ specification correspondence table (v2 new part)
 
-| abstract2.md | 性質 | Lean 定理 |
+| abstract2.md | Property | Lean theorem |
 |---|---|---|
-| §3.1 / §4.1 | 認可 | `authorization2`, `confirmed_unique_per_version2` |
+| §3.1 / §4.1 | authorization | `authorization2`, `confirmed_unique_per_version2` |
 | §3.2 / §4.3 | solvency | `channelTx2_preserves_validity` |
-| §3.4 / §4.3 | solvency | `send_preserves_validity`(provenTotal 単調減少含む) |
-| §3.4 flowReceive3 | solvency | `receive_preserves_validity`(NEW) |
-| §4.3 delta 両翼束縛 | 保存則 | `interChannel_conservation(_bound)`(NEW) |
-| §3.3.2 / §4.1 | 認可 | `TransferAuthorized2`, `authorized_send_state_valid`, `bridgeToV1`(NEW: v1 仮定の定理化) |
-| §3.3.5 | 合成 | `settled_transfer_guarantees`(`hcircuit` は仮定、M6) |
-| §3.5.2–3.5.3 / §4.4 | 退出 | `challenge_latest_wins2` |
-| §3.5.4 | 合成 | `end_to_end_close_safety2` |
-| — | 非空虚性 | §9 Sanity(`sampleUpdate_proven`、`oneHonestModel2` 等) |
+| §3.4 / §4.3 | solvency | `send_preserves_validity` (including provenTotal monotone decrease) |
+| §3.4 flowReceive3 | solvency | `receive_preserves_validity` (NEW) |
+| §4.3 delta both-wings binding | conservation law | `interChannel_conservation(_bound)` (NEW) |
+| §3.3.2 / §4.1 | authorization | `TransferAuthorized2`, `authorized_send_state_valid`, `bridgeToV1` (NEW: turning the v1 assumption into a theorem) |
+| §3.3.5 | composition | `settled_transfer_guarantees` (`hcircuit` is an assumption, M6) |
+| §3.5.2–3.5.3 / §4.4 | exit | `challenge_latest_wins2` |
+| §3.5.4 | composition | `end_to_end_close_safety2` |
+| — | non-vacuity | §9 Sanity (`sampleUpdate_proven`, `oneHonestModel2`, etc.) |
 
-base 層(§4.2 の no-double-spend 系)は v1 定理がそのまま適用される。
+For the base layer (the no-double-spend family of §4.2), the v1 theorems apply as-is.
 
-## 信頼基盤(A1–A6)
+## Trust base (A1–A6)
 
-- **A1** SPHINCS+ 偽造不能 + `hash(H1,H2)` の衝突困難性(署名は (state, tag) ペアを束縛)
-- **A2** ZK 健全性(balanceProof / validityProof / channelUpdateZKP / withdrawClaimZKP)
-- **A3** 善良メンバー規律(valid のみ署名・1 version 1 state・close 後凍結)
-- **A4** L1 コントラクトの正しさ
-- **A5** lattice 準同型の正しさ(**ノイズ溢れ・法 p の wraparound が無いことを含む** — 後述所見 6)
-- **A6** Regev IND-CPA(秘匿性 = 性質 5。モデル外。構造的事実: base 層 `Ledger` 型には
-  member 別データが存在しない)
+- **A1** SPHINCS+ unforgeability + collision resistance of `hash(H1,H2)` (the signature binds the (state, tag) pair)
+- **A2** ZK soundness (balanceProof / validityProof / channelUpdateZKP / withdrawClaimZKP)
+- **A3** honest-member discipline (sign only valid, 1 version 1 state, freeze after close)
+- **A4** correctness of the L1 contract
+- **A5** correctness of the lattice homomorphism (**including the absence of noise overflow and modulo-p wraparound** — see finding 6 below)
+- **A6** Regev IND-CPA (confidentiality = property 5. Out of model. Structural fact: the base-layer `Ledger` type
+  has no per-member data)
 
-## 第 2 回敵対的レビュー所見と対応(2026-06-11)
+## Second adversarial review findings and responses (2026-06-11)
 
-実装と別の敵対的 subagent による監査。16 所見、うち CRITICAL 6 件。
+Audit by an adversarial subagent separate from the implementation. 16 findings, 6 of which CRITICAL.
 
-**コードに反映済み**
-- 所見 10: `receive_preserves_validity` の仮定を受信者が実際に検証可能な
-  `RecipientVerified` に弱化(送信側残高は受信者に見えないため仮定から除去)。
-- 所見 8: 横断保存則の「変数共有による束縛」を `interChannel_conservation_bound` で
-  明示的なコミットメント単射性(A1)仮定に格上げ。
-- 所見 1, 2, 14, 15: `settled_transfer_guarantees` / `bridgeToV1` / A6 の docstring を
-  是正(仮定と結論の境界、述語モデル上の主張であることを明記)。
-- 所見 5, 6: M5 新設、A5 にノイズ/wraparound の不開示を追記。
+**Reflected in code**
+- Finding 10: weaken the assumption of `receive_preserves_validity` to
+  `RecipientVerified`, which the receiver can actually verify (the sender-side balance is not visible to the receiver, so it is removed from the assumptions).
+- Finding 8: promote the "binding via variable sharing" of the inter-channel conservation law to
+  an explicit commitment-injectivity (A1) assumption in `interChannel_conservation_bound`.
+- Findings 1, 2, 14, 15: correct the docstrings of `settled_transfer_guarantees` / `bridgeToV1` / A6
+  (clarify the boundary between assumption and conclusion, and that they are claims over the predicate model).
+- Findings 5, 6: establish M5 anew, and add the non-disclosure of noise/wraparound to A5.
 
-**モデル限界として明示(ヘッダ M1–M7)**
-- **M5**(所見 5・14): `ValidEncState` は全員の平文に対する述語だが、実際の善良メンバーは
-  **自分の成分 + ZKP しか検証できない**。チャネル内誤配分は仕様自身が受容リスクと明記。
-  `authorization2` の結論は「善良チェック + A2 の合算が与えるもの」と読むこと。
-- **M6**(所見 1・2): `TransferAuthorized2` は state を素の root 番号に束縛するだけで、
-  **root の木の中身(TxLeafHash)と減算の一致**は未モデル。`hcircuit` は自由仮説。
-  validity 回路制約の形式化(`Apply` を署名モデルと tx 木でパラメータ化)が v3 の本命。
-- **M4 改**(所見 9・13): 受信側で形式化したのは**会計**のみ。同一 settled tx の
-  **二重 credit を防ぐ仕組み(balanceProof 再計算)は未モデル**。
+**Made explicit as model limitations (header M1–M7)**
+- **M5** (findings 5, 14): `ValidEncState` is a predicate over everyone's plaintext, but an actual honest member
+  can **only verify their own component + ZKP**. In-channel misallocation is, per the spec itself, an explicitly accepted risk.
+  The conclusion of `authorization2` should be read as "what the honest check + the aggregation of A2 give".
+- **M6** (findings 1, 2): `TransferAuthorized2` only binds the state to the bare root number, and
+  **the agreement between the contents of the root's tree (TxLeafHash) and the subtraction** is unmodeled. `hcircuit` is a free hypothesis.
+  Formalizing the validity-circuit constraints (parameterizing `Apply` by the signature model and the tx tree) is the main goal of v3.
+- **M4 revised** (findings 9, 13): what is formalized on the receiver side is **accounting only**. The mechanism that prevents
+  the **double credit** of the same settled tx (balanceProof recomputation) **is unmodeled**.
 
-**仕様(abstract2.md)レベルの問題 — 修正推奨**
-- **M7 / 所見 11(最重要)**: flowSend1 step 6 で減算後 state は **L1 取り込み前に**全員署名
-  で確定する。tx がブロックに入らなかった場合、「settle されていない減算」を含む version v+1
-  の全員署名 state が存在し、close ゲームは最高 version を採るため**起きなかった送金の減算が
-  close で強制される**。対策案: (a) `.txRoot` タグ付き state の close 採用に L1 包含証明を
-  要求する、(b) 包含確認後にのみ internal version を進める。
-- **所見 12**: 送金失敗時の **retry / version 再割当の意味論が未定義**。同一 version での
-  再試行は `OneStatePerVersion`(M3)と矛盾し、善良メンバーが詰む。試行ごとに version を
-  消費する等の明文化が必要。
-- **所見 3**: `H1 = hash(BalanceState)` が `balanceProof` を含むが、署名時点(step 6)では
-  減算後 `balanceProof'` は未生成(step 8 で生成)。**H1 は proof オブジェクトを除いた
-  `(encBalances, stateVersion, 公開入力)` にコミットする**と明文化すべき。
-- **所見 4**: `H2 = 0` の予約値と `tx_tree_root` の数値衝突(空木 root 等)・ドメイン分離が
-  未規定。inter-channel 経路で `H2 = 0` を拒否する検証と、署名対象のドメイン分離タグを推奨。
+**Spec (abstract2.md)-level issues — fix recommended**
+- **M7 / finding 11 (most important)**: at flowSend1 step 6, the post-subtraction state is finalized with everyone's signature
+  **before L1 inclusion**. If the tx did not enter a block, a version v+1
+  state with everyone's signature exists that includes a "subtraction that was not settled", and since the close game takes the highest version,
+  **a subtraction for a transfer that never happened is forced at close**. Countermeasures: (a) require an L1 inclusion proof
+  for close adoption of a `.txRoot`-tagged state, (b) advance the internal version only after inclusion is confirmed.
+- **Finding 12**: the **retry / version-reassignment semantics** on transfer failure **are undefined**. Retry at the same version
+  contradicts `OneStatePerVersion` (M3), and the honest member gets stuck. Explicit specification is needed, e.g. consuming a version
+  per attempt.
+- **Finding 3**: `H1 = hash(BalanceState)` includes `balanceProof`, but at signing time (step 6) the
+  post-subtraction `balanceProof'` is not yet generated (it is generated at step 8). It should be specified that **H1 commits to
+  `(encBalances, stateVersion, public inputs)` excluding the proof object**.
+- **Finding 4**: the numerical collision between the reserved value `H2 = 0` and `tx_tree_root` (empty-tree root, etc.) and domain separation
+  are unspecified. We recommend verification that rejects `H2 = 0` on the inter-channel path, and a domain-separation tag for the signed object.
 
-## 改訂(2026-06-11、所見 3・5 の仕様反映)
+## Revision (2026-06-11, reflecting findings 3, 5 into the spec)
 
-監査所見 3(H1 の proof 循環)と所見 5(チャネル内 range ZKP 欠落 = M5)を
-**abstract2.md の仕様変更として解消**し、モデルを追随させた:
+We resolved audit finding 3 (H1 proof cycle) and finding 5 (missing in-channel range ZKP = M5)
+**as spec changes to abstract2.md**, and made the model follow them:
 
-1. **`channelTxZKP`(チャネル内 range ZKP)の必須化** — 送信者が「更新後の自分の暗号化残高 ≥ 0」を
-   証明し、co-sign の必須検証項目に追加(abstract2.md §2.2 / §3.2)。
-   - Lean: `ChannelTxProven`(ZKP 健全性契約、A2)を導入し、`channelTx2_preserves_validity` の
-     仮定をこれに置換。これで同定理の仮定は**全て検証可能な事実**になり、有効 state からの帰納的
-     維持が成立(M5 解消)。
-   - 新定理 `claims_exactly_fill_cap`: valid な確定 state では Σ(非負成分) = `withdrawCap` が
-     **ちょうど**成立 — 負残高成分による「close 出金の横取り」攻撃の封鎖を記録。
-2. **`settledTxChain` による state↔balanceProof 束縛** — `H1` は proof オブジェクトでなく
-   settle 履歴(`TxLeafHash` / deposit hash)の hash chain にコミット。balance 回路が同じ chain を
-   公開入力に expose し、close/challenge 時に L1 が一致照合(abstract2.md §2.1 / §3.5)。
-   - **nullifier が使えない理由**: nullifier の preimage は `block_number` を含むため、
-     署名時点(flowSend1 step 6、ブロック投稿前)に計算できない。`TxLeafHash` は既知なので
-     タイミング問題がない。`block_number` 束縛による二重 settle 防止は base 層 nullifier が続投。
-   - Lean §9: `chainOf_injective`(A1 衝突困難性 ⇒ chain 一致 ⇒ 同一 settle 履歴)と
-     `chain_binding_resolves_attachment`(chain 一致する proof は state が前提とする履歴の
-     総額をちょうど証明する)で束縛の健全性を機械検証。
+1. **Making `channelTxZKP` (in-channel range ZKP) mandatory** — the sender proves "their own encrypted balance after the update ≥ 0",
+   and it is added to the mandatory verification items of co-sign (abstract2.md §2.2 / §3.2).
+   - Lean: introduce `ChannelTxProven` (ZKP soundness contract, A2) and replace the assumption of `channelTx2_preserves_validity`
+     with it. Now the assumptions of that theorem become **all verifiable facts**, and inductive maintenance from a valid state
+     holds (M5 resolved).
+   - New theorem `claims_exactly_fill_cap`: in a valid finalized state, Σ(non-negative components) = `withdrawCap` holds
+     **exactly** — recording the blocking of the "close-withdrawal hijacking" attack via negative balance components.
+2. **state↔balanceProof binding via `settledTxChain`** — `H1` commits not to the proof object but to the
+   hash chain of settle history (`TxLeafHash` / deposit hash). The balance circuit exposes the same chain
+   in its public input, and L1 cross-checks for agreement at close/challenge (abstract2.md §2.1 / §3.5).
+   - **Why a nullifier cannot be used**: the nullifier's preimage includes `block_number`, so it cannot be computed at
+     signing time (flowSend1 step 6, before block posting). `TxLeafHash` is known, so there is no
+     timing problem. Double-settle prevention via `block_number` binding is continued by the base-layer nullifier.
+   - Lean §9: `chainOf_injective` (A1 collision resistance ⇒ chain agreement ⇒ same settle history) and
+     `chain_binding_resolves_attachment` (a proof whose chain agrees proves exactly the total amount of the history that the state
+     presupposes) machine-verify the soundness of the binding.
 
-これにより未解決の仕様課題は **M7(signed-but-unsettled race)と retry/version 意味論、
-H2 ドメイン分離**の 3 点に減った。
+With this, the open spec issues are reduced to the 3 points of **M7 (signed-but-unsettled race), retry/version semantics,
+and H2 domain separation**.
 
-## 結論
+## Conclusion
 
-v2 の主要な改善(署名アトミック性の構造化・受信側保存則)は機械検証で裏付けられた。
-一方でレビューは、**仕様自体に残る 4 つの未規定点**(M7 の signed-but-unsettled race、
-retry 意味論、H1 の proof 循環、H2 ドメイン分離)を特定した。これらは abstract3 で
-仕様側を先に更新し、その後 v3 モデル(`Apply` の署名パラメータ化、tx 木束縛、
-受信 replay 防止)で形式化を追随させるのが推奨順序である。
+The main improvements of v2 (structuring of signature atomicity, receiver-side conservation law) were backed by machine verification.
+On the other hand, the review identified **4 unspecified points remaining in the spec itself** (M7's signed-but-unsettled race,
+retry semantics, H1's proof cycle, H2 domain separation). For these, the recommended order is to first update the spec side in abstract3,
+and then have the formalization follow with the v3 model (`Apply` signature parameterization, tx-tree binding,
+receive replay prevention).

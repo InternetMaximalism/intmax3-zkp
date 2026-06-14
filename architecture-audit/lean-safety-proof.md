@@ -1,94 +1,94 @@
-# abstract.md の Lean 安全性証明 — 解説・脅威モデル・限界
+# Lean Safety Proof for abstract.md — Explanation, Threat Model, Limitations
 
-`abstract.md`(最小仕様)の 4 安全性質を Lean 4 で形式化し機械検証したものが
-[`ChannelSafety.lean`](./ChannelSafety.lean) である。本書はその読み方・信頼基盤・
-敵対的レビューで判明した限界を記録する。
+The 4 safety properties of `abstract.md` (the minimal specification) formalized in Lean 4 and machine-checked is
+[`ChannelSafety.lean`](./ChannelSafety.lean). This document records how to read it, its trust base, and the
+limitations found in adversarial review.
 
-## 検証方法
+## Verification Method
 
 ```bash
 cd architecture-audit
-lean ChannelSafety.lean   # Lean 4.10.0 / core のみ(mathlib 不使用)。exit 0 = 全定理検証済み
+lean ChannelSafety.lean   # Lean 4.10.0 / core only (mathlib not used). exit 0 = all theorems verified
 ```
 
-`sorry` / `axiom` / `native_decide` は不使用(grep で確認済み)。全主張は Lean カーネルが検査する。
+`sorry` / `axiom` / `native_decide` are not used (confirmed via grep). All claims are checked by the Lean kernel.
 
-## 脅威モデル
+## Threat Model
 
-- **敵対者**: channel メンバー 3 人中最大 2 人、Block Producer(BP)、channel 外部の任意の者。
-  これらは任意のメッセージ・任意の `BalanceState`・任意の close/challenge 提出を行える。
-- **守る対象**: abstract.md §0 の 4 性質のうち **safety 側**
-  (不正ステートの確定不能・供給量保存・nullifier 再利用不能・出金上限・stale close 不能)。
-- **信頼基盤(攻撃不能と仮定するもの)**: SPHINCS+ 署名の偽造、balanceProof / validityProof の
-  ZK 健全性破り、L1 コントラクトのバグ、L1 検閲。これらはファイルヘッダの A1–A4 として
-  仮説(hypothesis)の形で明示されている。**liveness(タイムアウト到達・L1 包含・配送)は対象外。**
+- **Adversary**: at most 2 of the 3 channel members, the Block Producer (BP), and any party external to the channel.
+  These can send arbitrary messages, arbitrary `BalanceState`, and arbitrary close/challenge submissions.
+- **What is protected**: the **safety side** of the 4 properties in abstract.md §0
+  (no finalization of invalid state, supply conservation, no nullifier reuse, withdrawal cap, no stale close).
+- **Trust base (assumed unbreakable)**: forgery of SPHINCS+ signatures, breaking the ZK soundness of
+  balanceProof / validityProof, L1 contract bugs, L1 censorship. These are stated explicitly as A1–A4 in the file header
+  in the form of hypotheses. **Liveness (timeout reachability, L1 inclusion, delivery) is out of scope.**
 
-## 定理 ↔ 仕様 対応表
+## Theorem ↔ Specification Correspondence Table
 
-| abstract.md | 性質 | Lean 定理 | 内容 |
+| abstract.md | Property | Lean theorem | Content |
 |---|---|---|---|
-| §3.1 / §4.1 | 認可 | `authorization` | 善良メンバーが 1 人でもいれば、確定(全員署名)した state は必ず valid |
-| §3.1 | 認可 | `confirmed_unique_per_version` | 同一 version の確定 state は一意 |
-| §3.2 / §4.3 | solvency | `channelTx_preserves_validity` | チャネル内送金は残高保存・非負を保つ(total = provenTotal 不変) |
-| §3.4 / §4.3 | solvency | `interSend_preserves_validity` | 減算後 state は valid かつ provenTotal 単調減少(送信側) |
-| §3.4 不変則 / §4.1 | 認可 | `atomicity_no_loss_shift` | 送金認可 ⇒ 減算後 state の確定(損失転嫁不能)※仮定の明示化、下記 M 注意 |
-| §3.4 | 認可 | `atomicity_comember_unaffected` | 減算は送信者のみが負担、co-member 残高不変 |
-| §3.3 / §4.2 | no-double-spend | `apply_conservation` / `exec_conservation` | 供給量変化 = Σdeposit − Σburn(transfer は mint 不能) |
-| §2.3 / §4.2 | no-double-spend | `no_double_settlement` | 同一 nullifier(block 番号で束縛)の二重 settle 不能 ※M1 |
-| §3.3.1 / §4.3 | solvency | `apply_nonneg` / `exec_nonneg` | rangeProof 条件下で全残高が非負不変 |
-| §3.5.4 / §4.2 C2,C5 | 出金 cap | `close_no_overdraw` | Σ出金 ≤ withdrawCap ≤ 実 L2 残高(burn 成功を仮定 ※M2) |
-| §3.5.4 / §4.2 C1 | no-double-spend | `close_boundary_no_double_spend` | L1 出金 + 残存 L2 spendable ≤ close 前残高(境界二重支払い不能) |
-| §3.5.4 + §3.5.5 | no-double-spend | `exec_exit_bound` | close burn + 全 late claim の総額 ≤ 初期供給 + Σdeposit(集約 solvency) |
-| §3.5.2–3.5.3 / §4.4 | 退出 | `challenge_latest_wins` | 最新確定 state を提出すれば stale state での close は不能 |
-| 全体合成 | 1–4 | `end_to_end_close_safety` | 各人の受領 ≤ 合意残高、総出金 ≤ 実残高、cap = 合意総額(過不足なし) |
-| — | 非空虚性 | §9 Sanity(`oneHonestModel` 等) | 仮定群が矛盾していない(空虚な証明でない)ことの証人 |
+| §3.1 / §4.1 | Authorization | `authorization` | If at least one honest member exists, a finalized (all-signed) state is necessarily valid |
+| §3.1 | Authorization | `confirmed_unique_per_version` | A finalized state of the same version is unique |
+| §3.2 / §4.3 | solvency | `channelTx_preserves_validity` | In-channel transfers preserve balance and non-negativity (total = provenTotal invariant) |
+| §3.4 / §4.3 | solvency | `interSend_preserves_validity` | The post-subtraction state is valid and provenTotal monotonically decreases (sender side) |
+| §3.4 invariant / §4.1 | Authorization | `atomicity_no_loss_shift` | Transfer authorization ⇒ finalization of the post-subtraction state (no loss shifting) ※ making assumption explicit, see note M below |
+| §3.4 | Authorization | `atomicity_comember_unaffected` | Subtraction is borne only by the sender; co-member balances unchanged |
+| §3.3 / §4.2 | no-double-spend | `apply_conservation` / `exec_conservation` | Supply change = Σdeposit − Σburn (transfer cannot mint) |
+| §2.3 / §4.2 | no-double-spend | `no_double_settlement` | The same nullifier (bound by block number) cannot be settled twice ※M1 |
+| §3.3.1 / §4.3 | solvency | `apply_nonneg` / `exec_nonneg` | Under the rangeProof condition, all balances remain non-negative invariantly |
+| §3.5.4 / §4.2 C2,C5 | Withdrawal cap | `close_no_overdraw` | Σwithdrawal ≤ withdrawCap ≤ actual L2 balance (assuming burn success ※M2) |
+| §3.5.4 / §4.2 C1 | no-double-spend | `close_boundary_no_double_spend` | L1 withdrawal + remaining L2 spendable ≤ pre-close balance (no boundary double spend) |
+| §3.5.4 + §3.5.5 | no-double-spend | `exec_exit_bound` | close burn + total of all late claims ≤ initial supply + Σdeposit (aggregate solvency) |
+| §3.5.2–3.5.3 / §4.4 | Exit | `challenge_latest_wins` | If the latest finalized state is submitted, close with a stale state is impossible |
+| Overall composition | 1–4 | `end_to_end_close_safety` | Each party's receipt ≤ agreed balance, total withdrawal ≤ actual balance, cap = agreed total (no excess or shortfall) |
+| — | Non-vacuity | §9 Sanity (`oneHonestModel` etc.) | Witness that the assumptions are not contradictory (the proof is not vacuous) |
 
-## 信頼基盤(ファイルヘッダ A1–A4 の要約)
+## Trust Base (Summary of File Header A1–A4)
 
-- **A1** SPHINCS+ 偽造不能(署名 = 述語 `signsState`)
-- **A2** balanceProof / validityProof の ZK 健全性(`hsolv` 側条件として遷移系に埋め込み)
-- **A3** 善良メンバーの規律(valid のみ署名・1 version 1 state・requestClose 後の署名停止)
-- **A4** L1 コントラクトの正しさ(全員署名検査・version 単調置換・Σ出金 ≤ cap)
+- **A1** SPHINCS+ unforgeability (signature = predicate `signsState`)
+- **A2** ZK soundness of balanceProof / validityProof (embedded in the transition system as the `hsolv`-side condition)
+- **A3** Discipline of honest members (sign only valid, 1 version 1 state, stop signing after requestClose)
+- **A4** Correctness of the L1 contract (all-signature check, monotonic version replacement, Σwithdrawal ≤ cap)
 
-## 敵対的レビュー所見と対応(2026-06-10)
+## Adversarial Review Findings and Responses (2026-06-10)
 
-実装とは別の敵対的レビュー subagent による監査を実施した。所見と処置:
+An audit by an adversarial review subagent, separate from the implementation, was conducted. Findings and actions:
 
-**修正済み(コード/文言に反映)**
-1. `interSend_preserves_validity` が `0 ≤ amount` を使っていなかった → 結論に
-   「provenTotal 単調減少」を追加し仮定を実質化(§4.3 単調更新に対応)。
-2. close + late claim の集約 solvency 定理が無かった → `exec_exit_bound` を追加。
-   「同じ L2 残高が close 出金と late claim の両方を裏付ける」攻撃は ledger 層では不能と証明。
-3. 非空虚性の証人が全員善良の構成しかなかった → 善良 1 人 + 無制約な敵対者 2 人の
-   `oneHonestModel` を追加。
-4. `atomicity_no_loss_shift` / `close_no_overdraw` / `no_double_settlement` /
-   `challenge_latest_wins` の docstring が証明内容より強く読めた → 仮定と結論の境界を明記。
+**Fixed (reflected in code/wording)**
+1. `interSend_preserves_validity` did not use `0 ≤ amount` → added
+   "provenTotal monotonically decreases" to the conclusion, making the assumption substantive (corresponds to §4.3 monotonic update).
+2. There was no aggregate solvency theorem for close + late claim → added `exec_exit_bound`.
+   Proved that the attack "the same L2 balance backs both the close withdrawal and the late claim" is impossible at the ledger layer.
+3. The witness of non-vacuity only had the all-honest configuration → added
+   `oneHonestModel` with 1 honest member + 2 unconstrained adversaries.
+4. The docstrings of `atomicity_no_loss_shift` / `close_no_overdraw` / `no_double_settlement` /
+   `challenge_latest_wins` could read as stronger than the proof content → clarified the boundary between assumptions and conclusions.
 
-**モデルの限界として明示(ヘッダ M1–M4。今後の強化候補)**
-- **M1 — 1 block 1 settlement 抽象**: `no_double_settlement` は block 番号のみから一意性を導く。
-  実システムは `TxV2Tree` で 1 block に複数 tx をバッチするため、block 内一意性は
-  `nullifier()` の `transfer_index` / `from` に依存する。これは未モデル。
-  *強化案*: block を op のリストにし `(block_number, transfer_index, from)` から一意性を証明。
-- **M2 — provenTotal と ledger の未接続**: `BalanceState.provenTotal` は state 層では自由な値で、
-  「proof は実残高を超えて証明できない」(A2)は exit 時の `hsolv` でのみ効く。
-  したがって `close_no_overdraw` は「L2 burn が成功した」ことを仮定する(導出ではない)。
-  *強化案*: `provenTotal ≤ spendable` を結ぶ述語を導入し、署名時点での裏付けを定理化。
-- **M3 — OneStatePerVersion は規律仮定**: 並行送金やクラッシュ復旧で善良メンバーが同一 version の
-  異なる state に署名する競合は §3.1 のテキストだけでは排除されない。プロトコル実装側で
-  single-threaded signing / 永続化を保証する必要がある(仕様へ追記推奨)。
-- **M4 — 受信側・lateBalanceProof 個別管理は未モデル**: `flowReceive3`(provenTotal 増加側)と
-  「lateBalanceProof は finalBalanceProof と別変数で onchain 保管」(§3.5.5)は個別にはモデルせず、
-  `exec_exit_bound` の集約上限で代替している。受信側の偽 balanceProof 拒否(§3.4 flowReceive3
-  step 1)の形式化は今後の課題。
+**Stated explicitly as model limitations (header M1–M4; candidates for future strengthening)**
+- **M1 — 1 block 1 settlement abstraction**: `no_double_settlement` derives uniqueness from the block number alone.
+  Since the real system batches multiple txs into 1 block via `TxV2Tree`, in-block uniqueness depends on
+  `nullifier()`'s `transfer_index` / `from`. This is not modeled.
+  *Strengthening proposal*: make a block a list of ops and prove uniqueness from `(block_number, transfer_index, from)`.
+- **M2 — provenTotal and ledger not connected**: `BalanceState.provenTotal` is a free value at the state layer, and
+  "a proof cannot prove beyond the actual balance" (A2) takes effect only at exit time via `hsolv`.
+  Therefore `close_no_overdraw` assumes "the L2 burn succeeded" (it is not derived).
+  *Strengthening proposal*: introduce a predicate connecting `provenTotal ≤ spendable` and theorematize the backing at signing time.
+- **M3 — OneStatePerVersion is a discipline assumption**: a race where an honest member signs different states
+  of the same version due to concurrent transfers or crash recovery is not ruled out by the text of §3.1 alone. The protocol implementation side must
+  guarantee single-threaded signing / persistence (recommend adding to the spec).
+- **M4 — receiver-side / lateBalanceProof individual management not modeled**: `flowReceive3` (provenTotal-increasing side) and
+  "lateBalanceProof is stored on-chain as a separate variable from finalBalanceProof" (§3.5.5) are not modeled individually;
+  the aggregate upper bound of `exec_exit_bound` is used as a substitute. Formalization of the receiver-side rejection of forged balanceProof (§3.4 flowReceive3
+  step 1) is a future task.
 
-**仕様(abstract.md)側への示唆**
-- §3.1 に「同一 version への二重署名禁止(クラッシュ復旧含む)」を明文化すべき(M3)。
-- §2.3 nullifier の block 内一意性が `transfer_index`/`from` に依存することを
-  二重支払い防止の根拠として明記すべき(M1)。
+**Implications for the specification (abstract.md) side**
+- §3.1 should explicitly state "prohibition of double-signing the same version (including crash recovery)" (M3).
+- It should be made explicit that the in-block uniqueness of the §2.3 nullifier depends on `transfer_index`/`from`
+  as the basis for double-spend prevention (M1).
 
-## 結論
+## Conclusion
 
-abstract.md の 4 性質の safety 側は、A1–A4 の信頼基盤と M1–M4 の抽象化の下で
-**全て機械検証済み**。証明が「仮定の明示化」にとどまる箇所(アトミック署名規則、burn 成功)は
-docstring とヘッダで明示しており、これらは実装(回路・L1 コントラクト)側で担保すべき
-検証項目リストとして読める。
+The safety side of the 4 properties of abstract.md is **all machine-verified** under the A1–A4 trust base and the M1–M4
+abstractions. The points where the proof remains at "making assumptions explicit" (atomic signing rule, burn success) are
+stated explicitly in the docstrings and the header; these can be read as a list of verification items to be ensured on the
+implementation (circuit / L1 contract) side.

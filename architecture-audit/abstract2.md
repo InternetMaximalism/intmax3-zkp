@@ -1,422 +1,422 @@
-# abstract2 — 最小仕様とセキュリティ機構(Lattice 版)
+# abstract2 — Minimal Specification and Security Mechanisms (Lattice version)
 
-本書は「安全かつ秘匿な送金機能」を定義するための**仮想的な最小仕様**である。各データに変数名、各動作に関数名を付ける。
-余計なデータ・構造は一切増やさない(本書に列挙したものが全て)。
-[abstract.md](./abstract.md)(v1)をベースに、Lattice(Regev/LWE)暗号による残高秘匿仕様を反映した改訂版(v2)。
+This document is a **hypothetical minimal specification** for defining a "secure and confidential transfer function." Each piece of data is given a variable name, and each operation is given a function name.
+No extraneous data or structures are added whatsoever (everything is enumerated in this document).
+Based on [abstract.md](./abstract.md) (v1), this is a revised version (v2) reflecting a balance-confidentiality specification using Lattice (Regev/LWE) encryption.
 
-## v1 からの差分(要約)
+## Differences from v1 (summary)
 
-1. **残高の秘匿化**: 各 member が Regev 公開鍵を channel 内で公開し、各人の残高はその鍵で暗号化された
-   lattice 暗号文(`LatticeCt`)として保持される。平文残高は state に現れない。
-2. **残高ステートの二部構成**: 合意対象が `hash(H1, H2)` になる。`H1` = 残高ステート本体のハッシュ、
-   `H2` = 送金種別タグ(0 = チャネル内 / `tx_tree_root` = チャネル間)。
-3. **channelUpdateZKP**: チャネル間送金の lattice 残高変化(送信側 −、受信側 +)の正当性を送信者が ZKP で証明。
-   `rangeProof` はこの ZKP の検証として再定義される。
-4. **署名アトミック性の構造化**: v1 では「tx_tree_root 署名と減算後 state 署名を同時に行う」は**運用規則**
-   (§3.4 不変則)だったが、v2 では署名対象そのものが `hash(H1', H2 = tx_tree_root)` であるため、
-   送金認可と残高減算の合意が**1 つの署名に構造的に内蔵**される(分離不可能)。
-5. **validity 回路の制約追加**: channel ステート署名が tx_tree_root への署名の**代替**として
-   validity 回路内で検証・制約される。
-6. **close 後出金の ZKP 化**: 確定 state は暗号文しか含まないため、各 member は自分の暗号化残高を
-   ZKP で証明して出金する。
-7. **チャネル内 range ZKP(`channelTxZKP`)— 監査反映**: チャネル内送金にも、送信者が
-   「更新後の自分の暗号化残高 ≥ 0」を証明する ZKP を必須化(`channelUpdateZKP` のチャネル内版)。
-   v1 では平文残高を全員が目視検証できたが、v2 の暗号化でその防御が消えていた(監査所見 5)。
-8. **state↔balanceProof の束縛(`settledTxChain`)— 監査反映**: `H1` は proof オブジェクトではなく
-   settle 履歴の hash chain にコミットし、balance 回路が同じ chain を公開入力に expose、close 時に
-   L1 が一致を照合する。署名時点で未生成の proof を state に含める循環(監査所見 3)を解消。
+1. **Balance confidentiality**: Each member publishes a Regev public key within the channel, and each person's balance is held as a
+   lattice ciphertext (`LatticeCt`) encrypted with that key. Plaintext balances never appear in the state.
+2. **Two-part structure of the balance state**: The agreement target becomes `hash(H1, H2)`. `H1` = hash of the balance state body,
+   `H2` = transfer-type tag (0 = intra-channel / `tx_tree_root` = inter-channel).
+3. **channelUpdateZKP**: The sender proves via ZKP the validity of the lattice balance change for an inter-channel transfer (sender −, receiver +).
+   `rangeProof` is redefined as the verification of this ZKP.
+4. **Structuring of signature atomicity**: In v1, "signing the tx_tree_root and the post-subtraction state simultaneously" was an **operational rule**
+   (§3.4 invariant), but in v2 the signature target itself is `hash(H1', H2 = tx_tree_root)`, so
+   the agreement on transfer authorization and balance subtraction is **structurally embedded into a single signature** (inseparable).
+5. **Added constraint to the validity circuit**: The channel state signature is verified and constrained within the validity circuit as a **substitute** for
+   signing the tx_tree_root.
+6. **ZKP-ization of post-close withdrawal**: Since the finalized state contains only ciphertexts, each member proves their encrypted balance
+   via ZKP to withdraw.
+7. **Intra-channel range ZKP (`channelTxZKP`) — audit reflection**: For intra-channel transfers as well, a ZKP proving that the sender's
+   "post-update encrypted balance ≥ 0" is made mandatory (the intra-channel version of `channelUpdateZKP`).
+   In v1 everyone could visually verify plaintext balances, but in v2's encryption that defense was lost (audit finding 5).
+8. **Binding of state↔balanceProof (`settledTxChain`) — audit reflection**: `H1` commits not to a proof object but to a
+   hash chain of the settle history, the balance circuit exposes the same chain as a public input, and at close time
+   L1 checks the match. This resolves the cycle of including a proof in the state that is not yet generated at signing time (audit finding 3).
 
-## 0. MECE の骨格
+## 0. MECE skeleton
 
-送金(`transfer`)は次の 2 つに排他かつ網羅的に分かれる。**排他性・網羅性は `H2` タグが構造的に保証する**:
-- **A. チャネル内送金** `channelTransfer`(同一 channel の 3 人の間)— 合意署名の `H2 = 0`
-- **B. チャネル間送金** `interChannelTransfer`(channel → channel、Intmax 経由)— 合意署名の `H2 = tx_tree_root ≠ 0`
+A transfer (`transfer`) splits into the following 2 exclusively and exhaustively. **Exclusivity and exhaustiveness are structurally guaranteed by the `H2` tag**:
+- **A. Intra-channel transfer** `channelTransfer` (among the 3 people of the same channel) — agreement signature's `H2 = 0`
+- **B. Inter-channel transfer** `interChannelTransfer` (channel → channel, via Intmax) — agreement signature's `H2 = tx_tree_root ≠ 0`
 
-安全性は次の 5 性質に分割される(後述 §4):
-1. **認可** authorization(全員署名。署名対象 = `hash(H1, H2)`)
-2. **二重支払い/不正 mint 防止** no-double-spend(`commonState` + `validityProof`)
-3. **支払い能力** solvency(`balanceProof` + `rangeProof` = `channelUpdateZKP` 検証)
-4. **退出/活性** exit-liveness(close ゲーム + タイムアウト + `lateBalanceProof` + 出金 ZKP)
-5. **残高秘匿** confidentiality(Regev 暗号 + `channelUpdateZKP`)— v2 で新設
-
----
-
-> **命名方針:** base intmax(channel が関わらない)層は**既存実装の型・フィールド名を採用**する。channel 層
-> および lattice 関連(新規設計)は抽象名を用いる(対応する実装型は未存在)。
-
-## 1. 全体前提 [key / address]
-
-- `Address` : 公開鍵 = アドレス(`src/ethereum_types/address.rs`)。**1 人 1 key 1 account**(`address == pubkey`)。
-- `U256` : 数量(平文の残高・送金額)の型(`src/ethereum_types/u256.rs`)。base 層の tx 内容では数量は平文。
-- `SpxSigWitness` : SPHINCS+ 署名(`src/circuits/validity/block_hash_chain/sphincs_sig.rs`)。本書で「署名」はこれを指す。
-- `RegevPk` : 各 member の Regev(LWE)暗号公開鍵(新規)。**channel 内で全員に公開**される。
-- `LatticeCt` : Regev 暗号文(新規)。残高・残高変化(delta)の秘匿表現。残高 ct への**加法**(delta の加算)が定義される。
-  負の delta(減算)は負値の平文を暗号化した ct として表す。
+Security is divided into the following 5 properties (described later in §4):
+1. **Authorization** authorization (all-member signature. Signature target = `hash(H1, H2)`)
+2. **Double-spend / illicit mint prevention** no-double-spend (`commonState` + `validityProof`)
+3. **Solvency** solvency (`balanceProof` + `rangeProof` = `channelUpdateZKP` verification)
+4. **Exit / liveness** exit-liveness (close game + timeout + `lateBalanceProof` + withdrawal ZKP)
+5. **Balance confidentiality** confidentiality (Regev encryption + `channelUpdateZKP`) — newly added in v2
 
 ---
 
-## 2. データ定義(変数)
+> **Naming policy:** The base intmax layer (which does not involve channels) **adopts the type and field names of the existing implementation**. The channel layer
+> and lattice-related parts (new design) use abstract names (no corresponding implementation type exists yet).
 
-### 2.1 多人数ペイメントチャネル(channel 層 = 新規)
+## 1. Overall premises [key / address]
 
-- `ChannelId` : チャネル識別子(既存型 `ChannelId`, `src/common/channel_id.rs`)。
-- `memberKeys : Map<ChannelId, [(Address, RegevPk); 3]>` : channel ID から **3 人(固定)の署名鍵と Regev 公開鍵**への mapping。
-- `encBalances : [LatticeCt; 3]` : channel 内 3 人の残高。**member i の残高は member i の `RegevPk` で暗号化**され、
-  本人のみ復号できる。平文残高はどこにも置かない。
-- `balanceProof` : 「今 channel 全体にいくら残高があるか」の **ZKP proof**(balance 回路の `ProofWithPublicInputs`)。
-  生成には `validityProof` が必要。**出金時に L1 で検証される**(close の `finalBalanceProof`、late の `lateBalanceProof` とも)。
-  前提(健全性): 一旦 tx が L2 にあるか broadcast されている場合、`balanceProof` はその tx を反映し、過大な残高には**偽造できない**。
-  **`balanceProof` は `H1` にコミットされない**(チャネル間送金では署名時点で減算後 proof が未生成のため。
-  監査所見 3)。state との対応は下記 `settledTxChain` で束縛し、close 提出時に L1 が照合する。
-- `settledTxChain` : この channel に取り込まれた base 層 settle 識別子の **hash chain**(channel 層・新規)。
-  genesis は 0。チャネル間送金(送・受)を取り込むたびに
-  `settledTxChain' = hash(settledTxChain, TxLeafHash)`、deposit の取り込みは deposit hash で同様に更新。
-  チャネル内送金では不変。**`TxLeafHash` は署名時点(flowSend1 step 6)で既知**なので、減算後 state の
-  chain はその場で計算できる。nullifier は `block_number` を含むため署名時点では計算できず、
-  この用途には使えない(`block_number` 束縛による二重 settle 防止は base 層の nullifier が引き続き担う)。
-- `BalancePublicInputs` : `balanceProof` の**公開入力**(proof とは別物)。
-  **新規要件: 回路が取り込んだ settle 履歴の `settledTxChain` を公開入力に expose する。**
-- `stateVersion` : 残高ステートの版番号(channel 層・新規)。
-- `BalanceState { encBalances, settledTxChain, stateVersion }` : 残高ステートの内容(channel 層・新規)。
-- `H1 = hash(BalanceState) = hash(encBalances, settledTxChain, stateVersion)` : 残高ステート本体のハッシュ。
-  署名時点で全成分が既知(proof オブジェクトを含まない)。
-- `H2` : 送金種別タグ。**基本は 0**。自 channel 発の intmax 送金時のみ当該 `tx_tree_root` が入る。
-  - `H2 = 0` ⇔ チャネル内更新(チャネル内送金・受金反映)
-  - `H2 = tx_tree_root ≠ 0` ⇔ チャネル間送金(intmax 送金 + その残高減算の同時認可)
-- `balanceStateHash = hash(H1, H2)` : **合意・署名対象**。v1 の `hash(BalanceState)` をこれで置き換える。
+- `Address` : public key = address (`src/ethereum_types/address.rs`). **1 person, 1 key, 1 account** (`address == pubkey`).
+- `U256` : the type for quantities (plaintext balances and transfer amounts) (`src/ethereum_types/u256.rs`). In base-layer tx contents, quantities are plaintext.
+- `SpxSigWitness` : SPHINCS+ signature (`src/circuits/validity/block_hash_chain/sphincs_sig.rs`). In this document, "signature" refers to this.
+- `RegevPk` : each member's Regev (LWE) encryption public key (new). **Published to all within the channel.**
+- `LatticeCt` : Regev ciphertext (new). The confidential representation of balances and balance changes (deltas). **Addition** to a balance ct (adding a delta) is defined.
+  A negative delta (subtraction) is represented as a ct encrypting a negative-valued plaintext.
 
-### 2.2 チャネル内 tx(channel 層・新規)
+---
 
-- `ChannelTx { recipient, encAmount, nonce }` : チャネル内送金 tx。
-  - `recipient : Address`(受け取り人公開鍵)
-  - `encAmount : LatticeCt`(**受け取り人の `RegevPk` で暗号化**された送金額)
-  - `nonce`(ワンタイムランダム値)
-- `channelTxZKP`(新規・監査反映): チャネル内送金に**必須**で添付される ZKP。送信者が生成し、
-  1. `encAmount` が非負の額の、受取人 `RegevPk` への正しい暗号文であること、
-  2. **送信者の更新後暗号化残高 ≥ 0**(残高 ≥ 送金額の range 制約)
-  を平文を明かさず証明する(チャネル間の `channelUpdateZKP` のチャネル内版)。
-  これが無いと、結託した 2 人がチャネル内で残高超過送金 → 負残高成分を作り、close 時に非負成分の
-  合計が `withdrawCap` を超えて正直メンバーの出金を横取りできる(監査所見 5)。
+## 2. Data definitions (variables)
 
-### 2.3 Intmax(base 層 = 既存実装の命名を使用。lattice 拡張は新規)
+### 2.1 Multi-party payment channel (channel layer = new)
 
-- 役割 `BP`(Block producer): **1 人だけ固定**。各 channel の tx を集めてブロックを作る。
-- 役割 `ITS`(intmax-tx-sender): **channel 内で固定**の 1 人。BP に tx を送り、tx tree root に係る通信を担う。
-- `BlockNumber` : ブロック番号(= `U63`, `src/common/u63.rs`)。block は 1 種類。
-- `Transfer`(チャネル間送金 tx の**内容**、既存型 `src/common/transfer.rs` を基に拡張):
-  - 内容 = 受信 channel の `ChannelId`、実質の受信人の公開鍵 `recipient : Address`、数量 `amount : U256`(**base 層では平文**)。
-- `TxAux`(新規・tx のハッシュ構造内の付随データ):
+- `ChannelId` : channel identifier (existing type `ChannelId`, `src/common/channel_id.rs`).
+- `memberKeys : Map<ChannelId, [(Address, RegevPk); 3]>` : mapping from channel ID to the **3 (fixed) signing keys and Regev public keys**.
+- `encBalances : [LatticeCt; 3]` : the balances of the 3 people within the channel. **Member i's balance is encrypted with member i's `RegevPk`**,
+  decryptable only by that person. Plaintext balances are kept nowhere.
+- `balanceProof` : the **ZKP proof** of "how much balance the whole channel currently has" (the balance circuit's `ProofWithPublicInputs`).
+  Generation requires `validityProof`. **Verified on L1 at withdrawal time** (both close's `finalBalanceProof` and late's `lateBalanceProof`).
+  Premise (soundness): once a tx is on L2 or has been broadcast, `balanceProof` reflects that tx and **cannot be forged** to an excessive balance.
+  **`balanceProof` is not committed to `H1`** (because for inter-channel transfers the post-subtraction proof is not yet generated at signing time.
+  Audit finding 3). The correspondence with the state is bound by `settledTxChain` below, and L1 checks it at close submission.
+- `settledTxChain` : the **hash chain** of base-layer settle identifiers taken into this channel (channel layer, new).
+  Genesis is 0. Each time an inter-channel transfer (send/receive) is taken in,
+  `settledTxChain' = hash(settledTxChain, TxLeafHash)`; taking in a deposit updates it similarly with the deposit hash.
+  Invariant for intra-channel transfers. **`TxLeafHash` is known at signing time (flowSend1 step 6)**, so the post-subtraction state's
+  chain can be computed on the spot. The nullifier includes `block_number`, so it cannot be computed at signing time and
+  cannot be used for this purpose (double-settle prevention via `block_number` binding continues to be handled by the base-layer nullifier).
+- `BalancePublicInputs` : the **public input** of `balanceProof` (separate from the proof).
+  **New requirement: the circuit exposes the `settledTxChain` of the settle history it took in as a public input.**
+- `stateVersion` : the version number of the balance state (channel layer, new).
+- `BalanceState { encBalances, settledTxChain, stateVersion }` : the contents of the balance state (channel layer, new).
+- `H1 = hash(BalanceState) = hash(encBalances, settledTxChain, stateVersion)` : the hash of the balance state body.
+  All components are known at signing time (it does not include a proof object).
+- `H2` : the transfer-type tag. **Basically 0.** Only for an intmax transfer originating from one's own channel does the corresponding `tx_tree_root` enter.
+  - `H2 = 0` ⇔ intra-channel update (intra-channel transfer / received-funds reflection)
+  - `H2 = tx_tree_root ≠ 0` ⇔ inter-channel transfer (intmax transfer + simultaneous authorization of its balance subtraction)
+- `balanceStateHash = hash(H1, H2)` : the **agreement/signature target**. This replaces v1's `hash(BalanceState)`.
+
+### 2.2 Intra-channel tx (channel layer, new)
+
+- `ChannelTx { recipient, encAmount, nonce }` : an intra-channel transfer tx.
+  - `recipient : Address` (recipient's public key)
+  - `encAmount : LatticeCt` (the transfer amount **encrypted with the recipient's `RegevPk`**)
+  - `nonce` (one-time random value)
+- `channelTxZKP` (new, audit reflection): a ZKP attached **mandatorily** to an intra-channel transfer. Generated by the sender, it
+  1. that `encAmount` is a correct ciphertext to the recipient's `RegevPk` of a non-negative amount,
+  2. **the sender's post-update encrypted balance ≥ 0** (the range constraint balance ≥ transfer amount)
+  proves these without revealing the plaintext (the intra-channel version of the inter-channel `channelUpdateZKP`).
+  Without it, 2 colluding people could make an over-balance transfer within the channel → create a negative balance component, and at close the sum of the
+  non-negative components could exceed `withdrawCap` and steal an honest member's withdrawal (audit finding 5).
+
+### 2.3 Intmax (base layer = uses the existing implementation's naming. Lattice extensions are new)
+
+- Role `BP` (Block producer): **fixed to just 1 person**. Collects each channel's tx and builds blocks.
+- Role `ITS` (intmax-tx-sender): **fixed within a channel**, 1 person. Sends tx to the BP and handles communication related to the tx tree root.
+- `BlockNumber` : block number (= `U63`, `src/common/u63.rs`). There is 1 kind of block.
+- `Transfer` (the **contents** of an inter-channel transfer tx, extended based on the existing type `src/common/transfer.rs`):
+  - contents = the receiving channel's `ChannelId`, the actual recipient's public key `recipient : Address`, the quantity `amount : U256` (**plaintext in the base layer**).
+- `TxAux` (new, ancillary data within the tx's hash structure):
   `{ senderAddr, recipientAddr, senderChannelId, recipientChannelId, senderDelta : LatticeCt, recipientDelta : LatticeCt }`
-  - `senderDelta` : **送信 channel の送信者残高に加算される負の lattice ct**(減算分)。
-  - `recipientDelta` : **受信 channel の受金者残高に加算される正の lattice ct**。
-- `TxLeafHash = hash( hash(senderAddr, senderDelta), hash(recipientAddr, recipientDelta) )` : tx のハッシュ構造(新規)。
-  送信者・受信者それぞれの公開鍵と lattice 残高変化が**両翼で束縛**される。
-- `channelUpdateZKP`(新規): **送信者が作る** ZKP。次を証明する:
-  1. `senderDelta` と `recipientDelta` が同一の `amount` に対応する(等量・符号逆)。
-  2. `senderDelta` 適用後も送信者残高が非負(**残高 ≥ 送金額**の range 制約)。
-  3. 各 delta がそれぞれの `RegevPk` に対する正しい暗号文である。
-- `SettledTransfer::nullifier()` : tx hash / nullifier(既存)。`TxLeafHash`・`from`・`transfer_index`・`block_number` を束縛。二重支払い防止に使う。
-- `TxV2 { tx_class, transfer_tree_root, nonce, channel_action_root }`(`src/common/tx.rs`): tx tree の leaf。
-- `TxV2Tree = SparseMerkleTree<TxV2>`(`src/common/trees/tx_v2_tree.rs`): BP が複数の送信者(channel)から集めた tx のマークル木。
-- `tx_tree_root` : `TxV2Tree` の root(`Block.tx_tree_root`)。
-- `TxV2MerkleProof = SparseMerkleProof<TxV2>` : ある tx が tx tree に含まれることの merkle proof。
-- `channelStateSig`(型 `SpxSigWitness`、**v1 の `senderRootSig` を置換**):
-  送信 channel 全員による **`hash(H1', H2 = tx_tree_root)` への署名**。
-  tx_tree_root への直接署名は**存在しない**。この署名が tx_tree_root への署名の**代替**となり、
-  validity 回路で「tx_tree_root への証明方法」として検証・制約される(§3.3.5)。
-- `Block { num_users, channel_id, timestamp, key_ids, tx_tree_root, deposit_hash_chain }`(`src/common/block.rs`):
-  L1 に L2 ブロックとして投稿。
-- `PublicState`(= 仕様文中の `commonState`, `src/common/public_state.rs`): **ZKP 証明可能共有ステート**。
-  各 channel が「最後に tx に署名してブロックに取り込まれたのが何ブロック目か」を
-  `account_tree_root`(各 `ChannelLeaf.prev`)に持つ(二重支払い・不正 mint の防止)。
-- `validityProof` : `PublicState` 遷移の **ZKP proof**。各ブロックごとに生成・オフチェーン公開。
-- `ValidityPublicInputs` : `validityProof` の公開入力。on-chain には `keccak(ValidityPublicInputs)` が束縛される。
+  - `senderDelta` : **the negative lattice ct added to the sender's balance in the sending channel** (the subtraction amount).
+  - `recipientDelta` : **the positive lattice ct added to the receiver's balance in the receiving channel**.
+- `TxLeafHash = hash( hash(senderAddr, senderDelta), hash(recipientAddr, recipientDelta) )` : the tx's hash structure (new).
+  The sender's and receiver's respective public keys and lattice balance changes are **bound on both wings**.
+- `channelUpdateZKP` (new): a ZKP **created by the sender**. It proves the following:
+  1. `senderDelta` and `recipientDelta` correspond to the same `amount` (equal quantity, opposite sign).
+  2. The sender's balance remains non-negative after applying `senderDelta` (the range constraint **balance ≥ transfer amount**).
+  3. Each delta is a correct ciphertext for its respective `RegevPk`.
+- `SettledTransfer::nullifier()` : tx hash / nullifier (existing). Binds `TxLeafHash`, `from`, `transfer_index`, `block_number`. Used for double-spend prevention.
+- `TxV2 { tx_class, transfer_tree_root, nonce, channel_action_root }` (`src/common/tx.rs`): the leaf of the tx tree.
+- `TxV2Tree = SparseMerkleTree<TxV2>` (`src/common/trees/tx_v2_tree.rs`): the Merkle tree of txs that the BP collected from multiple senders (channels).
+- `tx_tree_root` : the root of `TxV2Tree` (`Block.tx_tree_root`).
+- `TxV2MerkleProof = SparseMerkleProof<TxV2>` : the merkle proof that a certain tx is included in the tx tree.
+- `channelStateSig` (type `SpxSigWitness`, **replaces v1's `senderRootSig`**):
+  the **signature over `hash(H1', H2 = tx_tree_root)`** by all members of the sending channel.
+  A direct signature over tx_tree_root **does not exist**. This signature is the **substitute** for signing the tx_tree_root, and
+  it is verified and constrained in the validity circuit as "the method of proving the tx_tree_root" (§3.3.5).
+- `Block { num_users, channel_id, timestamp, key_ids, tx_tree_root, deposit_hash_chain }` (`src/common/block.rs`):
+  posted to L1 as an L2 block.
+- `PublicState` (= `commonState` in the spec text, `src/common/public_state.rs`): the **ZKP-provable shared state**.
+  Each channel holds in `account_tree_root` (each `ChannelLeaf.prev`) "at which block number it last signed a tx and was taken into a block"
+  (double-spend / illicit-mint prevention).
+- `validityProof` : the **ZKP proof** of the `PublicState` transition. Generated per block and published off-chain.
+- `ValidityPublicInputs` : the public input of `validityProof`. On-chain, `keccak(ValidityPublicInputs)` is bound.
 
-### 2.4 Close(channel 層・新規)
+### 2.4 Close (channel layer, new)
 
-- `finalBalanceState` : challenge 期間で確定した最終 `BalanceState`(暗号化残高のまま)。
-- `finalBalanceProof` : 確定 state に**紐づく** `balanceProof`。紐付けは公開入力の
-  `settledTxChain` = `finalBalanceState.settledTxChain` の一致で L1 が照合する(§2.1)。
-- `withdrawCap` : `finalBalanceProof` が証明する channel 総残高。close 後の**最大出金総額**。
-  `finalBalanceState` が何を主張しても、合計出金は `withdrawCap` を超えられない。
-- `burnAddress : Address` : 固定の burn アドレス。ここへの送金は intmax L2 の spendable supply から価値を除去する。
+- `finalBalanceState` : the final `BalanceState` finalized during the challenge period (still as encrypted balances).
+- `finalBalanceProof` : the `balanceProof` **linked to** the finalized state. The link is checked by L1 via the match of the public input
+  `settledTxChain` = `finalBalanceState.settledTxChain` (§2.1).
+- `withdrawCap` : the channel total balance that `finalBalanceProof` proves. The **maximum total withdrawal** after close.
+  No matter what `finalBalanceState` claims, the total withdrawal cannot exceed `withdrawCap`.
+- `burnAddress : Address` : a fixed burn address. A transfer to here removes value from the intmax L2 spendable supply.
 - `closeBurnTx : Transfer { recipient = burnAddress, amount = withdrawCap, ... }` :
-  close state 確定時に提出される、channel 残高を burn する intmax `Transfer`。
-- `withdrawClaimZKP`(新規): close 後、各 member が「`finalBalanceState.encBalances` 内の**自分の暗号化残高**の平文が
-  自分の出金額である」ことを、復号せず L1 上で証明する ZKP。
-- `lateBalanceProof` : close 後の `balanceProof`(同じ balance 回路の proof)。**最終ステートとは別変数**として onchain に保管される。
+  an intmax `Transfer` that burns the channel balance, submitted at close-state finalization.
+- `withdrawClaimZKP` (new): after close, a ZKP by which each member proves on L1, without decrypting, that "the plaintext of **their own encrypted balance**
+  within `finalBalanceState.encBalances` is their withdrawal amount."
+- `lateBalanceProof` : a `balanceProof` after close (a proof of the same balance circuit). Stored on-chain as a **separate variable from the final state**.
 
-### 2.5 タイムアウト定数
+### 2.5 Timeout constants
 
-- `SIGN_TIMEOUT = 3 min` : channel 内署名が揃わない許容時間。
-- `GRACE_BEFORE_PROCESS = 10 min` : close 申請から startProcess までの猶予。
-- `CHALLENGE_PERIOD = 1 day` : challenge 期間。
+- `SIGN_TIMEOUT = 3 min` : the allowed time for intra-channel signatures not being assembled.
+- `GRACE_BEFORE_PROCESS = 10 min` : the grace period from close request to startProcess.
+- `CHALLENGE_PERIOD = 1 day` : the challenge period.
 
 ---
 
-## 3. 関数定義(動作)
+## 3. Function definitions (operations)
 
-各動作を「**actor(誰が)**」「**操作(何を、どのデータに)**」で 1 動作ずつ区切る。
-actor: `member[i]`(channel メンバー、i∈{0,1,2})/ `sender`(送信する member)/ `ITS` / `BP` / `L1`(オンチェーン契約)。
+Each operation is delimited one at a time by "**actor (who)**" and "**operation (what, on which data)**".
+actor: `member[i]` (channel member, i∈{0,1,2}) / `sender` (the member who sends) / `ITS` / `BP` / `L1` (the on-chain contract).
 
-### 3.0 チャネル構成(前提)
+### 3.0 Channel composition (premise)
 
-- `memberKeys[channel_id] = [(Address, RegevPk); 3]` : channel 作成時に確定(以降不変)。
-- 各 member は自分の `RegevPk` を channel 内で公開する(`publishRegevPk`)。
+- `memberKeys[channel_id] = [(Address, RegevPk); 3]` : finalized at channel creation (immutable thereafter).
+- Each member publishes their own `RegevPk` within the channel (`publishRegevPk`).
 
-### 3.1 残高ステート合意 `agreeBalanceState`
+### 3.1 Balance state agreement `agreeBalanceState`
 
-**actor: member[0..2] 全員**
-- in: 候補 `BalanceState { encBalances, balanceProof, stateVersion }`, タグ `H2`
-1. `member[i]` が候補の正当性を各自検証:
-   - `stateVersion` が現行 +1 であること。
-   - `settledTxChain` の整合(チャネル内更新なら不変、チャネル間なら `hash(現行 chain, TxLeafHash)`)。
-   - **自分宛ての `encBalances[i]`** が正しく更新されていること(自分の Regev 秘密鍵で検証可能)。
-   - チャネル内送金なら `channelTxZKP` の検証(送信者の更新後残高 ≥ 0。無い/不正なら署名しない)。
-   - チャネル間(`H2 ≠ 0`)なら `channelUpdateZKP` と `TxV2MerkleProof` の検証(§3.3.2)。
-   - 残高は暗号文のため他人の平文は見えないが、**全ての更新に range ZKP(`channelTxZKP` /
-     `channelUpdateZKP`)が付くため、有効な state から始めれば全成分の非負と総和整合が帰納的に
-     維持**される。これにより Σ(非負成分) = 総額 = `withdrawCap` が保たれ、close での出金横取りは
-     生じない(§4.3)。
-2. 不正なら署名しない(善良ノードは合意しない)。
-3. 正当なら `member[i]` が `balanceStateHash = hash(H1, H2)` に署名し `SpxSigWitness` を出す。
-- out: `[SpxSigWitness; 3]`。3 つ揃ったとき `BalanceState` が確定。
+**actor: all of member[0..2]**
+- in: candidate `BalanceState { encBalances, balanceProof, stateVersion }`, tag `H2`
+1. `member[i]` individually verifies the validity of the candidate:
+   - that `stateVersion` is the current +1.
+   - consistency of `settledTxChain` (invariant for an intra-channel update, `hash(current chain, TxLeafHash)` for inter-channel).
+   - that **`encBalances[i]` addressed to oneself** is correctly updated (verifiable with one's own Regev secret key).
+   - for an intra-channel transfer, verification of `channelTxZKP` (sender's post-update balance ≥ 0. Do not sign if absent/invalid).
+   - for inter-channel (`H2 ≠ 0`), verification of `channelUpdateZKP` and `TxV2MerkleProof` (§3.3.2).
+   - Because balances are ciphertexts, others' plaintexts are not visible, but **since every update is accompanied by a range ZKP (`channelTxZKP` /
+     `channelUpdateZKP`), starting from a valid state, the non-negativity of all components and total-sum consistency are inductively
+     maintained**. Thereby Σ(non-negative components) = total = `withdrawCap` is preserved, and withdrawal theft at close does
+     not occur (§4.3).
+2. If invalid, do not sign (a good node does not agree).
+3. If valid, `member[i]` signs `balanceStateHash = hash(H1, H2)` and emits `SpxSigWitness`.
+- out: `[SpxSigWitness; 3]`. When 3 are assembled, `BalanceState` is finalized.
 
-### 3.2 チャネル内送金 `channelTransfer`(`H2 = 0`)
+### 3.2 Intra-channel transfer `channelTransfer` (`H2 = 0`)
 
-前提: 現行 `balanceProof`・`encBalances`・確定済み `BalanceState`。`balanceProof` は不変。
+Premise: the current `balanceProof`, `encBalances`, and a finalized `BalanceState`. `balanceProof` is invariant.
 
 #### 3.2.1 `signChannelTx` — **actor: sender**
 - in: `ChannelTx { recipient, encAmount, nonce }`
-1. `sender` が `amount` を受取人の `RegevPk` で暗号化し `encAmount` を作る。
-2. `sender` が **`channelTxZKP` を生成**(`encAmount` の正当性 + 更新後の自残高 ≥ 0、§2.2)。
-3. `sender` が `encBalances` を更新: 自分の ct に減算 delta を加算、受取人の ct に `encAmount` を加算。
-4. `sender` が `BalanceState' = { encBalances', settledTxChain(不変), stateVersion+1 }` を構成。
-5. `sender` が `ChannelTx` と `balanceStateHash' = hash(H1', H2 = 0)` の**両方**に署名。
-- out: `(ChannelTx, channelTxZKP, BalanceState', SpxSigWitness_tx, SpxSigWitness_state)`。
+1. `sender` encrypts `amount` with the recipient's `RegevPk` and creates `encAmount`.
+2. `sender` **generates `channelTxZKP`** (validity of `encAmount` + post-update own balance ≥ 0, §2.2).
+3. `sender` updates `encBalances`: adds the subtraction delta to their own ct, and adds `encAmount` to the recipient's ct.
+4. `sender` constructs `BalanceState' = { encBalances', settledTxChain(invariant), stateVersion+1 }`.
+5. `sender` signs **both** `ChannelTx` and `balanceStateHash' = hash(H1', H2 = 0)`.
+- out: `(ChannelTx, channelTxZKP, BalanceState', SpxSigWitness_tx, SpxSigWitness_state)`.
 
 #### 3.2.2 `propagateChannelTx` — **actor: sender**
-1. `sender` が残りの `member` に `ChannelTx`・`channelTxZKP`・`BalanceState'` を伝播。
+1. `sender` propagates `ChannelTx`, `channelTxZKP`, and `BalanceState'` to the remaining `member`s.
 
-#### 3.2.3 `coSignBalanceState` — **actor: 残り member(sender 以外の 2 人)**
+#### 3.2.3 `coSignBalanceState` — **actor: the remaining members (the 2 other than sender)**
 - in: `ChannelTx`, `channelTxZKP`, `BalanceState'`
-1. 全 `member` が **`channelTxZKP` を検証**(無い/不正なら署名しない)。受取人はさらに `encAmount` を
-   復号して自分の残高増加を検証。各 `member` は §3.1 の検証項目を確認。
-2. 正当なら `hash(H1', 0)` に署名。
-- out: 追加 `SpxSigWitness`。全 3 署名で `BalanceState'` 確定。
+1. All `member`s **verify `channelTxZKP`** (do not sign if absent/invalid). The recipient additionally decrypts `encAmount`
+   to verify their balance increase. Each `member` checks the verification items of §3.1.
+2. If valid, sign `hash(H1', 0)`.
+- out: additional `SpxSigWitness`. `BalanceState'` is finalized with all 3 signatures.
 
-### 3.3 Intmax 基盤プリミティブ
+### 3.3 Intmax foundational primitives
 
 #### 3.3.1 `rangeProof` — **actor: ITS**
-- in: `channelUpdateZKP`, `Transfer`, 現行 `balanceProof`
-1. `ITS` が `channelUpdateZKP` を検証する(これを **range proof** と呼ぶ):
-   delta の等量性・送信者残高 ≥ 送金額・暗号文の正当性(§2.3)。
-- out: `bool`(偽なら `BP` に渡さない)。
+- in: `channelUpdateZKP`, `Transfer`, current `balanceProof`
+1. `ITS` verifies `channelUpdateZKP` (this is called the **range proof**):
+   equal quantity of deltas, sender balance ≥ transfer amount, validity of ciphertexts (§2.3).
+- out: `bool` (if false, do not pass to `BP`).
 
-#### 3.3.2 `signChannelState` — **actor: 送信 1 user(= channel メンバー全員 = 1 user)。v1 の `signTxTreeRoot` を置換**
-- in: `tx_tree_root`, `TxV2MerkleProof`, 自分の `TxV2`(内に `Transfer` + `TxAux` + `channelUpdateZKP`), 減算後 `BalanceState'`
-1. `TxV2MerkleProof` を検証し、自分の `TxV2` が `tx_tree_root` に含まれることを確認。
-2. `channelUpdateZKP` を検証し、`BalanceState'.encBalances` が証明済み `senderDelta` を正しく適用したものであることを確認。
-3. 確認できたら **`hash(H1', H2 = tx_tree_root)` に署名**する。
-- out: `channelStateSig : SpxSigWitness`。
-- **アトミック性(構造的)**: この 1 署名が「intmax 送金の認可」と「減算後残高ステートの合意」を同時に表す。
-  `H2` に `tx_tree_root` が、`H1'` に減算後ステートが入っているため、**片方だけに署名することは定義上不可能**。
-  v1 §3.4 の運用上の不変則は、本仕様ではハッシュ構造に内蔵される。
+#### 3.3.2 `signChannelState` — **actor: sending 1 user (= all channel members = 1 user). Replaces v1's `signTxTreeRoot`**
+- in: `tx_tree_root`, `TxV2MerkleProof`, one's own `TxV2` (containing `Transfer` + `TxAux` + `channelUpdateZKP`), post-subtraction `BalanceState'`
+1. Verify `TxV2MerkleProof` and confirm that one's own `TxV2` is included in `tx_tree_root`.
+2. Verify `channelUpdateZKP` and confirm that `BalanceState'.encBalances` correctly applies the proven `senderDelta`.
+3. Once confirmed, **sign `hash(H1', H2 = tx_tree_root)`**.
+- out: `channelStateSig : SpxSigWitness`.
+- **Atomicity (structural)**: this single signature simultaneously represents "authorization of the intmax transfer" and "agreement on the post-subtraction balance state".
+  Because `H2` contains `tx_tree_root` and `H1'` contains the post-subtraction state, **signing only one of them is impossible by definition**.
+  The operational invariant of v1 §3.4 is built into the hash structure in this specification.
 
-#### 3.3.2b 署名不要の特例(deposit mint / close burn) — **actor: validity / 検証回路**
-- **deposit(mint)と `closeBurnTx`(burn)は、ZKP の validity 回路 / 出金検証回路の中で L2 署名(`signChannelState`)なしで受理される。**
-- 根拠: deposit は L1 発の入金、`closeBurnTx` は close 確定の結果として L1/close 駆動で生じる出金であり、いずれも channel メンバーの共署名を要しない。
-- 効果: `requestClose` 後の署名停止(§3.5.1)中でも `closeBurnTx` を L2 決済でき、freeze と burn 署名の矛盾を解消する。
+#### 3.3.2b Signature-free exceptions (deposit mint / close burn) — **actor: validity / verification circuit**
+- **deposit (mint) and `closeBurnTx` (burn) are accepted within the ZKP validity circuit / withdrawal verification circuit without an L2 signature (`signChannelState`).**
+- Rationale: a deposit is an L1-originated inflow, and `closeBurnTx` is an L1/close-driven outflow that arises as a result of close finalization; neither requires a co-signature of the channel members.
+- Effect: even during the signature halt after `requestClose` (§3.5.1), `closeBurnTx` can be settled on L2, resolving the contradiction between freeze and burn signing.
 
 #### 3.3.3 `produceBlock` — **actor: BP**
-- in: 各 channel からの `TxV2` 群, 各 channel の `channelStateSig`
-1. `BP` が `TxV2` 群から `TxV2Tree` を構築し `tx_tree_root` を得る。
-2. `BP` が `Block { num_users, channel_id, timestamp, key_ids, tx_tree_root, deposit_hash_chain }` を構成。
-- out: `Block`。
+- in: the group of `TxV2` from each channel, each channel's `channelStateSig`
+1. `BP` builds `TxV2Tree` from the group of `TxV2` and obtains `tx_tree_root`.
+2. `BP` constructs `Block { num_users, channel_id, timestamp, key_ids, tx_tree_root, deposit_hash_chain }`.
+- out: `Block`.
 
 #### 3.3.4 `postBlock` — **actor: BP**
 - in: `Block`
-1. `BP` が `Block` を Ethereum L1 に L2 ブロックとして投稿。
-- out: 確定 `BlockNumber`。
+1. `BP` posts `Block` to Ethereum L1 as an L2 block.
+- out: finalized `BlockNumber`.
 
-#### 3.3.5 `generateValidityProof` — **actor: BP(プルーバ)**
-- in: `tx_tree_root`, `channelStateSig` 群, `Block`, 新 `PublicState`
-1. `tx_tree_root`・各 `channelStateSig`・`Block`・結果としての `PublicState`(`commonState`)遷移を ZKP 回路で一貫検証。
-   **重要**: `channelStateSig`(= `hash(H1', H2 = tx_tree_root)` への署名)が tx_tree_root への署名の**代替**であることを
-   回路が検証・制約する。すなわち回路は「署名対象の `H2` 成分 = 当該 `tx_tree_root`」を开示・検証し、
-   署名なし tx・`H2` 不一致 tx を不正として弾く。
-2. `PublicState.account_tree_root` の各 `ChannelLeaf.prev` を「取り込んだ `BlockNumber`」に更新(二重支払い・不正 mint 防止)。
-- out: `validityProof`(公開入力 = `ValidityPublicInputs`)。各ブロックごとに生成・オフチェーン公開。
+#### 3.3.5 `generateValidityProof` — **actor: BP (prover)**
+- in: `tx_tree_root`, the group of `channelStateSig`, `Block`, the new `PublicState`
+1. Consistently verify the `tx_tree_root`, each `channelStateSig`, `Block`, and the resulting `PublicState` (`commonState`) transition in the ZKP circuit.
+   **Important**: the circuit verifies and constrains that `channelStateSig` (= the signature over `hash(H1', H2 = tx_tree_root)`) is the **substitute** for signing the tx_tree_root.
+   That is, the circuit reveals and verifies "the signature target's `H2` component = the corresponding `tx_tree_root`", and
+   rejects unsigned txs and `H2`-mismatched txs as invalid.
+2. Update each `ChannelLeaf.prev` of `PublicState.account_tree_root` to "the `BlockNumber` taken in" (double-spend / illicit-mint prevention).
+- out: `validityProof` (public input = `ValidityPublicInputs`). Generated per block and published off-chain.
 
-#### 3.3.6 `generateBalanceProof` — **actor: channel(ITS が代表)**
-- in: `validityProof`, 当該 channel の状態
-1. `validityProof` を入力に、channel 総残高を主張する `balanceProof` を生成(`validityProof` が必須)。
-- out: `balanceProof`(公開入力 = `BalancePublicInputs`)。
+#### 3.3.6 `generateBalanceProof` — **actor: channel (ITS as representative)**
+- in: `validityProof`, the state of the channel in question
+1. With `validityProof` as input, generate a `balanceProof` asserting the channel total balance (`validityProof` is required).
+- out: `balanceProof` (public input = `BalancePublicInputs`).
 
-### 3.4 チャネル間送金 `interChannelTransfer`(3 フロー、`H2 = tx_tree_root`)
+### 3.4 Inter-channel transfer `interChannelTransfer` (3 flows, `H2 = tx_tree_root`)
 
-送信名義も受信名義も channel。送金額 `amount` の `Transfer` を送信 channel → 受金 channel に運ぶ。
+Both the sending name and the receiving name are channels. Carries a `Transfer` of transfer amount `amount` from the sending channel → the receiving channel.
 
-> **アトミック性(構造的・v1 不変則の置換)**: 送金認可と減算後ステート合意は、単一の署名対象
-> `hash(H1', H2 = tx_tree_root)` に統合されている(§3.3.2)。「送金だけ認可して減算を拒否する」
-> 署名は存在し得ないため、co-member への損失転嫁(intra-channel 窃取)と過大 state での強制 close は
-> 構造的に封じられる。
+> **Atomicity (structural, replacing the v1 invariant)**: transfer authorization and post-subtraction state agreement are unified into a single signature target
+> `hash(H1', H2 = tx_tree_root)` (§3.3.2). Because a signature that "authorizes only the transfer and refuses the subtraction"
+> cannot exist, loss-shifting to co-members (intra-channel theft) and forced close with an inflated state are
+> structurally sealed off.
 
-#### 送金フロー 1 `flowSend1`(送信 channel:tx + ZKP 作成 〜 構造的アトミック認可 〜 伝播)
+#### Transfer flow 1 `flowSend1` (sending channel: tx + ZKP creation 〜 structural atomic authorization 〜 propagation)
 
 - **actor: sender**
-  1. `sender` が**両 channel(送信・受金)に close 申請がないこと**を `L1` で確認。
-  2. `sender` が `Transfer`(受信 `ChannelId`・実受信者公開鍵・`amount`)と
-     `TxAux`(両者のアドレス・両 `ChannelId`・`senderDelta`・`recipientDelta`)を作り、
-     **`channelUpdateZKP` を生成**する。
-  3. `sender` が `(Transfer, TxAux, channelUpdateZKP)` を `ITS` に渡す。
+  1. `sender` confirms on `L1` that **neither channel (sending/receiving) has a close request**.
+  2. `sender` creates the `Transfer` (receiving `ChannelId`, actual recipient public key, `amount`) and
+     `TxAux` (both parties' addresses, both `ChannelId`s, `senderDelta`, `recipientDelta`), and
+     **generates `channelUpdateZKP`**.
+  3. `sender` passes `(Transfer, TxAux, channelUpdateZKP)` to `ITS`.
 - **actor: ITS**
-  4. `ITS` が `rangeProof`(= `channelUpdateZKP` の検証、§3.3.1)を行い、OK なら `BP` に tx を渡す。
-  5. `ITS` が tx の内容・`TxV2Tree`・減算後 `BalanceState'`(`encBalances'` = 送信者 ct に `senderDelta` 適用、
-     `settledTxChain' = hash(settledTxChain, TxLeafHash)`、`stateVersion+1`)を全員に共有。
-     `TxLeafHash` は既知なので chain' はこの時点で計算できる。
-- **actor: 送信 channel 全員(member[0..2])**
-  6. 各 `member` が `signChannelState`(§3.3.2)で **`hash(H1', H2 = tx_tree_root)` に署名**。
-     - 全員が揃わなければ送金は**認可されない**(部分署名は無効 = 送金不成立、co-member に損失なし)。
+  4. `ITS` performs `rangeProof` (= verification of `channelUpdateZKP`, §3.3.1), and if OK passes the tx to `BP`.
+  5. `ITS` shares with everyone the tx contents, `TxV2Tree`, and post-subtraction `BalanceState'` (`encBalances'` = `senderDelta` applied to the sender ct,
+     `settledTxChain' = hash(settledTxChain, TxLeafHash)`, `stateVersion+1`).
+     Since `TxLeafHash` is known, chain' can be computed at this point.
+- **actor: all of the sending channel (member[0..2])**
+  6. Each `member` **signs `hash(H1', H2 = tx_tree_root)`** via `signChannelState` (§3.3.2).
+     - If not all are assembled, the transfer is **not authorized** (a partial signature is invalid = the transfer does not take effect, and there is no loss to co-members).
 - **actor: ITS → BP**
-  7. 揃った `channelStateSig` を `ITS` が `BP` に渡す(`BP` が `produceBlock` → `postBlock`)。
-- **actor: ITS(送信 channel)**
-  8. `tx_tree_root` が L1 ブロックに入ったら、`ITS` が `generateBalanceProof` で減算後 `balanceProof'` を生成。
-     `balanceProof'` は偽造不可で post-send の L2 残高(`B-amount`)を反映するため、step6 で署名確定済みの
-     `BalanceState'.encBalances`(減算後)と**必ず一致**し、公開入力の `settledTxChain` は
-     `BalanceState'.settledTxChain` と一致する(新たな交渉・署名は不要)。
-  9. `ITS` が `(tx のデータ(=Transfer, TxAux, channelUpdateZKP), TxV2MerkleProof, balanceProof')` を**受金 channel** に伝播。
+  7. `ITS` passes the assembled `channelStateSig` to `BP` (`BP` does `produceBlock` → `postBlock`).
+- **actor: ITS (sending channel)**
+  8. Once `tx_tree_root` enters an L1 block, `ITS` generates the post-subtraction `balanceProof'` via `generateBalanceProof`.
+     Because `balanceProof'` is unforgeable and reflects the post-send L2 balance (`B-amount`), it **necessarily matches** the
+     `BalanceState'.encBalances` (post-subtraction) already finalized by signing at step6, and the public input `settledTxChain`
+     matches `BalanceState'.settledTxChain` (no new negotiation or signing is needed).
+  9. `ITS` propagates `(tx data (=Transfer, TxAux, channelUpdateZKP), TxV2MerkleProof, balanceProof')` to the **receiving channel**.
 
-#### 送金フロー 2 `flowSend2`(送信 channel:balanceProof 確定)
+#### Transfer flow 2 `flowSend2` (sending channel: balanceProof finalization)
 
-- **actor: ITS(送信 channel)**
-  1. step8 の `balanceProof'` を、step6 で署名済みの `BalanceState'` に**紐づく proof としてローカル保管**する。
-     state 自体は step6 で確定済み・不変。紐付けは「`balanceProof'` の公開入力 `settledTxChain` =
-     `BalanceState'.settledTxChain`」で機械的に検証でき、close 提出時に L1 が照合する
-     (**proof を後から state に「入れる」必要はない** — 署名時 proof 未生成の循環、監査所見 3 の解消)。
-- **actor: BP(プルーバ、並行)**
-  2. `generateValidityProof` で当該 block の `validityProof` を生成(`channelStateSig` を tx_tree_root 署名の代替として制約)。
-- 註: 構造的アトミック署名(flow1 step6)が揃わなければ送金は不成立。一般の無応答には `SIGN_TIMEOUT`(3 分)超過で `requestClose`(§3.5)。
+- **actor: ITS (sending channel)**
+  1. **Store locally** the `balanceProof'` of step8 as a proof **linked to** the `BalanceState'` already signed at step6.
+     The state itself is already finalized and immutable at step6. The link can be mechanically verified by "the public input `settledTxChain` of `balanceProof'` =
+     `BalanceState'.settledTxChain`", and L1 checks it at close submission
+     (**there is no need to "put" the proof into the state afterward** — resolving the cycle of the proof not being generated at signing time, audit finding 3).
+- **actor: BP (prover, in parallel)**
+  2. Generate the `validityProof` for the block via `generateValidityProof` (constraining `channelStateSig` as the substitute for the tx_tree_root signature).
+- Note: if the structural atomic signature (flow1 step6) is not assembled, the transfer does not take effect. For general non-responsiveness, `requestClose` (§3.5) is available upon exceeding `SIGN_TIMEOUT` (3 minutes).
 
-#### 送金フロー 3 `flowReceive3`(受金 channel:残高ステート反映、`H2 = 0`)
+#### Transfer flow 3 `flowReceive3` (receiving channel: balance state reflection, `H2 = 0`)
 
-- **actor: 受金 channel 全員(member[0..2])**
-  1. 伝播された `(tx のデータ, TxV2MerkleProof, balanceProof)` が valid か全員が確認
-     (`TxV2MerkleProof` の包含検証 + `balanceProof` の整合 + **`channelUpdateZKP` の検証**)。
-     `balanceProof` が無ければ送信者を無視。
-- **actor: ITS(受金 channel)**
-  2. `ITS` が `balanceProof` を**増加**側に更新(`generateBalanceProof`)。
-  3. `ITS` が tx 内の受信者公開鍵を見て、
-     `BalanceState' = { encBalances'(受金者 ct に channelUpdateZKP で証明済みの recipientDelta を加算),
-     settledTxChain' = hash(settledTxChain, TxLeafHash), stateVersion+1 }` を構成
-     (`balanceProof'` は chain で紐づくローカル保管)。
-- **actor: 受金 channel 全員(member[0..2])**
-  4. `agreeBalanceState(BalanceState', H2 = 0)` で全員が `hash(H1', 0)` に合意署名。
+- **actor: all of the receiving channel (member[0..2])**
+  1. Everyone confirms whether the propagated `(tx data, TxV2MerkleProof, balanceProof)` is valid
+     (inclusion verification of `TxV2MerkleProof` + consistency of `balanceProof` + **verification of `channelUpdateZKP`**).
+     If `balanceProof` is absent, ignore the sender.
+- **actor: ITS (receiving channel)**
+  2. `ITS` updates `balanceProof` on the **increase** side (`generateBalanceProof`).
+  3. `ITS` looks at the recipient public key in the tx and constructs
+     `BalanceState' = { encBalances' (adds the recipientDelta proven by channelUpdateZKP to the receiver's ct),
+     settledTxChain' = hash(settledTxChain, TxLeafHash), stateVersion+1 }`
+     (`balanceProof'` is stored locally, linked by the chain).
+- **actor: all of the receiving channel (member[0..2])**
+  4. Via `agreeBalanceState(BalanceState', H2 = 0)`, everyone agrees and signs `hash(H1', 0)`.
 
-### 3.5 チャネル close ゲーム
+### 3.5 Channel close game
 
-順番: `requestClose` →(`GRACE_BEFORE_PROCESS`=10 分)→ `startProcess` →(`CHALLENGE_PERIOD`=1 日)→ `closeAndWithdraw`。
+Order: `requestClose` → (`GRACE_BEFORE_PROCESS`=10 minutes) → `startProcess` → (`CHALLENGE_PERIOD`=1 day) → `closeAndWithdraw`.
 
-#### 3.5.1 `requestClose` — **actor: channel 内の任意の member**
+#### 3.5.1 `requestClose` — **actor: any member within the channel**
 - in: `channel_id`
-1. 任意の `member` が `L1` に close を申請。
-2. 申請後、全 `member` は当該 channel に関する**全署名行為を停止**(`agreeBalanceState`・`signChannelState` 等を行わない)。channel 外の者も当該 channel に送金しない。
-3. `GRACE_BEFORE_PROCESS`(10 分)の猶予により、申請直前/直後の署名や通信ラグは「無いもの」とみなす。
+1. Any `member` requests close to `L1`.
+2. After the request, all `member`s **halt all signing actions** concerning the channel (do not perform `agreeBalanceState`, `signChannelState`, etc.). Those outside the channel also do not transfer to the channel.
+3. By the grace of `GRACE_BEFORE_PROCESS` (10 minutes), signatures or communication lag immediately before/after the request are regarded as "nonexistent".
 
-#### 3.5.2 `startProcess` — **actor: 申請者(または任意 member)**
-- in: `BalanceState`(全員署名済み), その中の `balanceProof`(= intmax-balanceProof)
-1. 申請から 10 分後、`member` が `L1` に `BalanceState` と `balanceProof` を提出。
-2. `L1` が `balanceStateHash = hash(H1, H2)` への全員署名を確認し、`balanceProof` を検証し、
-   **公開入力の `settledTxChain` が `BalanceState.settledTxChain` と一致**することを照合して、
-   `CHALLENGE_PERIOD`(1 日)を開始。
+#### 3.5.2 `startProcess` — **actor: the requester (or any member)**
+- in: `BalanceState` (signed by all), the `balanceProof` within it (= intmax-balanceProof)
+1. 10 minutes after the request, the `member` submits `BalanceState` and `balanceProof` to `L1`.
+2. `L1` confirms the all-member signature over `balanceStateHash = hash(H1, H2)`, verifies `balanceProof`, and
+   checks that **the public input `settledTxChain` matches `BalanceState.settledTxChain`**, then
+   starts `CHALLENGE_PERIOD` (1 day).
 
-#### 3.5.3 `challenge` — **actor: 任意 member**
-- in: 提出済みより新しい `BalanceState_newer`(全員署名済み)とその中の `balanceProof`
-1. `member` が `BalanceState_newer` を `L1` に提出。
-2. `L1` が提出物すべてに**全員署名がある**ことを確認し、添付 `balanceProof` の公開入力
-   `settledTxChain` が当該 state のものと一致することを照合。
-3. `BalanceState_newer.stateVersion > 現提出.stateVersion` なら置換。
-4. 期間終了で `finalBalanceState` / `finalBalanceProof` が確定(古い state での close を防ぐ)。
+#### 3.5.3 `challenge` — **actor: any member**
+- in: a `BalanceState_newer` (signed by all) newer than the submitted one, and the `balanceProof` within it
+1. The `member` submits `BalanceState_newer` to `L1`.
+2. `L1` confirms that **all submissions have all-member signatures**, and checks that the public input
+   `settledTxChain` of the attached `balanceProof` matches that of the state.
+3. If `BalanceState_newer.stateVersion > current submission.stateVersion`, replace.
+4. At the end of the period, `finalBalanceState` / `finalBalanceProof` are finalized (preventing close with an old state).
 
-#### 3.5.4 `closeAndWithdraw` — **actor: 各 member / L1 / intmax L2**
-- in: 確定 `finalBalanceState` / `finalBalanceProof`, `closeBurnTx`, 各 member の `withdrawClaimZKP`
-1. **(burn tx 提出)** close state 確定後、`member` が `closeBurnTx`(= `Transfer { recipient: burnAddress, amount: withdrawCap, ... }`)を `finalBalanceProof` と共に `L1` に提出。
-2. **(L2 burn として処理)** 同じ `closeBurnTx` は intmax L2 でも「close state 確定時 burn tx」として処理され、channel 残高が L2 の spendable から除去される。
-   - L2 で `withdrawCap` を burn するには**その額が現に channel に存在**する必要がある(通常の `Transfer` と同じ solvency 検証)。既に送金済みの古い残高は burn できない。
-3. **(cap 確定)** `L1` が `finalBalanceProof` を検証し、`withdrawCap = finalBalanceProof の証明残高 = closeBurnTx.amount` を確定。
-4. **(ZKP 付き個別出金)** 各 `member` は **`withdrawClaimZKP`** で「`finalBalanceState.encBalances` 内の自分の暗号化残高の平文 = 自分の出金額」を `L1` 上で証明して出金する。
-   `L1` は **Σ(出金) ≤ `withdrawCap`** を強制。`finalBalanceState` が `withdrawCap` 超を主張しても超過分は出金不可。
+#### 3.5.4 `closeAndWithdraw` — **actor: each member / L1 / intmax L2**
+- in: finalized `finalBalanceState` / `finalBalanceProof`, `closeBurnTx`, each member's `withdrawClaimZKP`
+1. **(burn tx submission)** After close-state finalization, the `member` submits `closeBurnTx` (= `Transfer { recipient: burnAddress, amount: withdrawCap, ... }`) together with `finalBalanceProof` to `L1`.
+2. **(processed as L2 burn)** The same `closeBurnTx` is also processed on intmax L2 as a "close-state-finalization burn tx", and the channel balance is removed from L2's spendable.
+   - To burn `withdrawCap` on L2, **that amount must actually exist in the channel** (the same solvency verification as a normal `Transfer`). An old balance already transferred away cannot be burned.
+3. **(cap finalization)** `L1` verifies `finalBalanceProof` and finalizes `withdrawCap = the balance proven by finalBalanceProof = closeBurnTx.amount`.
+4. **(individual withdrawal with ZKP)** Each `member` withdraws by proving on `L1`, via **`withdrawClaimZKP`**, "the plaintext of their own encrypted balance within `finalBalanceState.encBalances` = their withdrawal amount".
+   `L1` enforces **Σ(withdrawals) ≤ `withdrawCap`**. Even if `finalBalanceState` claims more than `withdrawCap`, the excess cannot be withdrawn.
 
-#### 3.5.5 `claimLateTx` — **actor: 受信者(late tx の受取人)**
-- in: `lateBalanceProof`, `tx のデータ`, `TxV2MerkleProof`
-1. close 確定 version より後に知らされた当該 channel への intmax `Transfer` について、受信者が `lateBalanceProof` を入力に新しい `balanceProof` を ZKP で作る(balance 回路は `balanceProof` と同一)。
-2. `L1` で verify されると受信者が onchain で受け取る。
-3. `lateBalanceProof` は `finalBalanceProof` とは**別変数**で onchain 保管。
+#### 3.5.5 `claimLateTx` — **actor: the recipient (the receiver of a late tx)**
+- in: `lateBalanceProof`, `tx data`, `TxV2MerkleProof`
+1. For an intmax `Transfer` to the channel notified after the close-finalized version, the recipient creates a new `balanceProof` via ZKP with `lateBalanceProof` as input (the balance circuit is identical to `balanceProof`).
+2. Once verified on `L1`, the recipient receives it on-chain.
+3. `lateBalanceProof` is stored on-chain as a **separate variable** from `finalBalanceProof`.
 
-補足: `balanceProof` は tx 送信時に必ず受信者に添付する(`flowSend1`/`flowReceive3`)。受信者はそれが無い場合、送信者を無視する。
+Supplement: `balanceProof` is always attached to the recipient at tx send time (`flowSend1`/`flowReceive3`). If the recipient does not have it, they ignore the sender.
 
 ---
 
-## 4. セキュリティ機構
+## 4. Security mechanisms
 
-各機構が **§0 の 5 性質**のどれを守るかを示す。
+This shows which of the **5 properties of §0** each mechanism guards.
 
-### 4.1 認可 authorization
-- **全員署名(`agreeBalanceState` / `coSignBalanceState` / `signChannelState`)**: 残高ステート更新は
-  `hash(H1, H2)` への 3 人全員の署名が合意対象。善良なノードは不正ステートに署名しないため、不正更新は成立しない。
-- **署名アトミック性の構造化**: 送金認可と減算後ステート合意は単一の署名対象 `hash(H1', H2 = tx_tree_root)` に
-  統合されている。v1 では運用規則だった「片方だけの署名は無効」が、v2 では**定義上表現不可能**になる
-  (送金だけ認可する署名というものが存在しない)。validity 回路がこの署名を tx_tree_root 署名の代替として
-  検証・制約する(§3.3.5)ため、回路レベルでも分離できない。
-- **close は最後の合意 state で可能**: 合意が壊れても、最後に全員署名した `BalanceState` で onchain close できる。
+### 4.1 Authorization authorization
+- **All-member signature (`agreeBalanceState` / `coSignBalanceState` / `signChannelState`)**: a balance state update
+  has the signature of all 3 people over `hash(H1, H2)` as its agreement target. Because a good node does not sign an invalid state, an invalid update does not take effect.
+- **Structuring of signature atomicity**: transfer authorization and post-subtraction state agreement are unified into a single signature target `hash(H1', H2 = tx_tree_root)`.
+  "A signature of only one side is invalid", which was an operational rule in v1, becomes **inexpressible by definition** in v2
+  (a signature that authorizes only the transfer does not exist). Because the validity circuit verifies and constrains this signature as the substitute for the tx_tree_root signature
+  (§3.3.5), it cannot be separated at the circuit level either.
+- **Close is possible with the last agreed state**: even if agreement breaks down, one can close on-chain with the last `BalanceState` signed by all.
 
-### 4.2 二重支払い / 不正 mint 防止 no-double-spend
-- **`PublicState`(`commonState`)**: 各 channel が「最後に tx を取り込まれたブロック番号」を
-  `account_tree_root`(各 `ChannelLeaf.prev`)に持ち、同一資金の二重支払いや不正な mint を防ぐ。
-- **`validityProof`**: `tx_tree_root`・`channelStateSig`・`Block`・`PublicState` を ZKP で一貫検証し、各ブロックで公開。
-- **`signChannelState` の merkle 検証**: 送信 1 user は tx が `TxV2Tree` に含まれることを `TxV2MerkleProof` で確認してから署名。
-- **出金 cap(`withdrawCap`)**: close 後の総出金は `finalBalanceProof` が証明する残高で上限化
-  (`closeAndWithdraw` で `Σ(出金) ≤ withdrawCap` を強制)。膨張ステートや stale ステートでの窃取(監査 C1/C2/C5)を封じる。
-- **close burn tx(`closeBurnTx`)**: L1 出金には `closeBurnTx` を `finalBalanceProof` と共に提出し、
-  **同じ tx を intmax L2 でも burn として処理**する。L2 で `withdrawCap` を burn するには実残高が必要なので、
-  既に送金済みの古い残高は burn できず L1 でも引き出せない(close 境界の二重支払い C1 を封じる)。
-- **`settledTxChain` による state↔proof 束縛**: `H1` は proof オブジェクトでなく settle 履歴の
-  hash chain にコミットし、balance 回路が同じ chain を公開入力に expose、close/challenge 時に L1 が
-  一致を照合する。確定 state に対して**別の settle 履歴に基づく `balanceProof` を添付する攻撃**を封じ、
-  「署名時点で proof 未生成」の循環(監査所見 3)も解消する。
+### 4.2 Double-spend / illicit mint prevention no-double-spend
+- **`PublicState` (`commonState`)**: each channel holds "the block number at which a tx was last taken in" in
+  `account_tree_root` (each `ChannelLeaf.prev`), preventing double-spending of the same funds or illicit minting.
+- **`validityProof`**: consistently verifies `tx_tree_root`, `channelStateSig`, `Block`, and `PublicState` with ZKP, and publishes per block.
+- **merkle verification in `signChannelState`**: the sending 1 user confirms that the tx is included in `TxV2Tree` via `TxV2MerkleProof` before signing.
+- **Withdrawal cap (`withdrawCap`)**: the total withdrawal after close is capped by the balance proven by `finalBalanceProof`
+  (`closeAndWithdraw` enforces `Σ(withdrawals) ≤ withdrawCap`). This seals off theft with an inflated state or a stale state (audit C1/C2/C5).
+- **close burn tx (`closeBurnTx`)**: for L1 withdrawal, `closeBurnTx` is submitted together with `finalBalanceProof`, and
+  **the same tx is also processed as a burn on intmax L2**. Because burning `withdrawCap` on L2 requires the actual balance,
+  an old balance already transferred away cannot be burned and cannot be withdrawn on L1 either (sealing off the close-boundary double-spend C1).
+- **state↔proof binding via `settledTxChain`**: `H1` commits not to a proof object but to a
+  hash chain of the settle history, the balance circuit exposes the same chain as a public input, and at close/challenge time L1
+  checks the match. This seals off the **attack of attaching a `balanceProof` based on a different settle history** to a finalized state, and
+  also resolves the cycle of "the proof not being generated at signing time" (audit finding 3).
 
-### 4.3 支払い能力 solvency
-- **`balanceProof` 添付必須**: 送金 tx には必ず `balanceProof` を添付。無ければ受信者は送信者を無視。
-- **`rangeProof` = `channelUpdateZKP` 検証**: 残高が暗号化されたままでも「送信者残高 ≥ 送金額」が
-  ZKP の range 制約として証明される(v1 の平文比較を置換)。ITS が検証してから BP に渡す。
-- **`channelTxZKP`(チャネル内 range ZKP)**: チャネル内送金でも送信者の更新後残高 ≥ 0 を ZKP で証明
-  (co-sign の必須検証項目)。暗号化残高でも**全成分の非負が帰納的に維持**され、
-  Σ(成分) = 総額 = `withdrawCap` が保たれる。負残高成分を作って close で非負成分の合計を cap 超に
-  膨らませ、正直メンバーの出金を横取りする攻撃(監査所見 5)を封じる。
-- **`balanceProof` の単調更新**: 送信側は減少(`flowSend2`)、受金側は増加(`flowReceive3`)するように更新し、全員合意で固定。
-- **delta の両翼束縛**: `TxLeafHash` が送信側 `senderDelta`(負)と受信側 `recipientDelta`(正)を同一 hash 構造に
-  束縛し、`channelUpdateZKP` が等量性を証明するため、「送信側は小さく減らし受信側は大きく増やす」改竄ができない。
+### 4.3 Solvency solvency
+- **`balanceProof` attachment mandatory**: a `balanceProof` is always attached to a transfer tx. If absent, the recipient ignores the sender.
+- **`rangeProof` = `channelUpdateZKP` verification**: even with balances kept encrypted, "sender balance ≥ transfer amount" is
+  proven as a ZKP range constraint (replacing v1's plaintext comparison). ITS verifies it before passing to BP.
+- **`channelTxZKP` (intra-channel range ZKP)**: for intra-channel transfers as well, the sender's post-update balance ≥ 0 is proven via ZKP
+  (a mandatory verification item of co-sign). Even with encrypted balances, **the non-negativity of all components is inductively maintained**, and
+  Σ(components) = total = `withdrawCap` is preserved. This seals off the attack of creating a negative balance component and at close
+  inflating the sum of non-negative components beyond the cap to steal an honest member's withdrawal (audit finding 5).
+- **Monotonic update of `balanceProof`**: updated so that the sending side decreases (`flowSend2`) and the receiving side increases (`flowReceive3`), and fixed by all-member agreement.
+- **Both-wing binding of deltas**: because `TxLeafHash` binds the sending-side `senderDelta` (negative) and the receiving-side `recipientDelta` (positive) into the same hash structure,
+  and `channelUpdateZKP` proves equal quantity, the tampering of "decreasing the sending side by a little and increasing the receiving side by a lot" is impossible.
 
-### 4.4 退出 / 活性 exit-liveness
-- **close ゲームの順序と challenge**: `requestClose` → 10 分 → `startProcess` → 1 日 challenge → close。
-  challenge 期間で**より新しい version の state**に置換でき、最終ステートが確定する(古い state での close を防ぐ)。
-- **`GRACE_BEFORE_PROCESS`(10 分)**: 申請直前・直後の署名や通信ラグを「全部ないもの」とみなせる。
-- **`SIGN_TIMEOUT`(3 分)**: 署名が中途半端で揃わない場合はプロトコル違反とみなし、close で退出可能(活性確保)。
-- **両 channel の close 申請確認(`flowSend1`)**: close 申請のある channel への送金を行わない。
-- **`withdrawClaimZKP`**: 残高が暗号化されていても、各 member は**自力で**(他 member の協力なしに)
-  自分の取り分を証明して出金できる(退出に他者の復号協力を要しない)。
-- **`lateBalanceProof`**: close 確定 version より後に届いた intmax tx の資金も、`lateBalanceProof` 入力の
-  新 `balanceProof` を onchain verify することで受信者が受け取れる(資金の取りこぼし防止)。`balanceProof` と同一回路。
+### 4.4 Exit / liveness exit-liveness
+- **Order and challenge of the close game**: `requestClose` → 10 minutes → `startProcess` → 1-day challenge → close.
+  During the challenge period one can replace with **a state of a newer version**, and the final state is finalized (preventing close with an old state).
+- **`GRACE_BEFORE_PROCESS` (10 minutes)**: signatures or communication lag immediately before/after the request can be regarded as "all nonexistent".
+- **`SIGN_TIMEOUT` (3 minutes)**: if signatures are half-assembled and incomplete, it is regarded as a protocol violation, and exit is possible via close (liveness assurance).
+- **Close-request confirmation of both channels (`flowSend1`)**: do not transfer to a channel that has a close request.
+- **`withdrawClaimZKP`**: even if balances are encrypted, each member can prove their own share and withdraw **by themselves** (without the cooperation of other members)
+  (exit does not require the decryption cooperation of others).
+- **`lateBalanceProof`**: funds of an intmax tx that arrived after the close-finalized version can also be received by the recipient by on-chain verifying
+  the new `balanceProof` with `lateBalanceProof` as input (preventing the loss of funds). The same circuit as `balanceProof`.
 
-### 4.5 残高秘匿 confidentiality(v2 新設)
-- **Regev 暗号化残高(`encBalances`)**: 各人の残高は本人の `RegevPk` でのみ復号可能な暗号文。
-  channel 内の他 member・BP・L1 を含め、本人以外は個別残高を知り得ない。
-- **チャネル内送金額の秘匿(`ChannelTx.encAmount`)**: 送金額は受取人の鍵で暗号化され、第三 member にも秘匿される。
-- **`channelUpdateZKP` / `channelTxZKP`**: 残高・delta の平文を明かさずに正当性(等量・非負・暗号文整合・
-  更新後残高 ≥ 0)を証明する。これにより秘匿と solvency 検証(§4.3)が両立する
-  (チャネル内送金の検証も平文開示なしで可能)。
-- **秘匿境界(明示)**:
-  - チャネル間送金の `amount` は base 層 tx 内容として**平文**であり、BP・L1 から可視(§2.3)。
-    秘匿されるのは**チャネル内の個人別残高と内訳**である。
-  - channel 総残高は `balanceProof` の公開入力として可視(close の cap 決定に必要)。
-  - チャネル内送金の受取人は自分宛て金額を当然知る(復号できる)。
+### 4.5 Balance confidentiality confidentiality (newly added in v2)
+- **Regev-encrypted balances (`encBalances`)**: each person's balance is a ciphertext decryptable only with that person's `RegevPk`.
+  No one other than the person, including other members within the channel, the BP, and L1, can know the individual balance.
+- **Confidentiality of intra-channel transfer amount (`ChannelTx.encAmount`)**: the transfer amount is encrypted with the recipient's key and is kept confidential even from the third member.
+- **`channelUpdateZKP` / `channelTxZKP`**: proves validity (equal quantity, non-negativity, ciphertext consistency,
+  post-update balance ≥ 0) without revealing the plaintext of balances and deltas. Thereby confidentiality and solvency verification (§4.3) coexist
+  (verification of intra-channel transfers is also possible without plaintext disclosure).
+- **Confidentiality boundary (explicit)**:
+  - The `amount` of an inter-channel transfer is **plaintext** as base-layer tx content and is visible from the BP and L1 (§2.3).
+    What is kept confidential is **the per-individual balances and breakdown within the channel**.
+  - The channel total balance is visible as a public input of `balanceProof` (needed for determining the close cap).
+  - The recipient of an intra-channel transfer naturally knows the amount addressed to them (they can decrypt it).

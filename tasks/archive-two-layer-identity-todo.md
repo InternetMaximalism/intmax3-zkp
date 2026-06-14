@@ -1,268 +1,268 @@
-# Task: 二層アイデンティティ化(base = channel_id) → base L1 出金 payout → channel close 統合
+# Task: Two-layer identity (base = channel_id) → base L1 withdrawal payout → channel close integration
 
-Status: PLANNING — 実装前。コードはまだ書かない。本計画は §1 の foundational decision に基づく全面改訂版。
+Status: PLANNING — pre-implementation. Do not write code yet. This plan is a full revision based on the foundational decision in §1.
 
-## 0. 確定モデル(合意済み)
+## 0. Confirmed model (agreed)
 
-- **base intmax = チャネル間(channel-to-channel)決済レイヤー。** base のネイティブ「ユーザー」は
-  **チャネルそのもの**。
-- **channel レイヤー = チャネル内(member-to-member)機密残高レイヤー。** key_id はここだけの概念。
-- channel close = 「channel という base ユーザー」の L1 native 出金申請(時間のかかる申請+上書き
-  ウィンドウ)。出金後にプール内をメンバー(key_id)で分配。
-- cap(総額上限)は **base intmax の出金 proof** が決める。channel は自分が実際に持つ base 残高しか
-  出せない。守るべき唯一の不変条件 = **チャネル間隔離**。内部誤配分は受容リスク(自チャネル pool 内)。
-- nullifier 最終形: **#1 = base intmax 出金 nullifier(本タスクで新設)**、#2 = per-member フラグ
-  (現状維持)。#3 / post-close incoming の内部 ZK 検証は今回 OUT(stub のまま、受容リスク)。
-  集約 **solvency 上限**(全 credit ≤ 実受領額)は外さない。
+- **base intmax = channel-to-channel settlement layer.** The native "user" of base is
+  **the channel itself**.
+- **channel layer = intra-channel (member-to-member) confidential balance layer.** key_id is a concept only here.
+- channel close = an L1 native withdrawal request of "the channel as a base user" (a time-consuming request + an override
+  window). After withdrawal, the pool is distributed among members (key_id).
+- The cap (total amount limit) is decided by the **base intmax withdrawal proof**. A channel can only
+  withdraw the base balance it actually holds. The sole invariant to protect = **inter-channel isolation**. Internal misallocation is an accepted risk (within one's own channel pool).
+- Final form of nullifiers: **#1 = base intmax withdrawal nullifier (newly added in this task)**, #2 = per-member flag
+  (status quo). Internal ZK verification of #3 / post-close incoming is OUT this time (left as a stub, accepted risk).
+  The aggregate **solvency upper bound** (all credit ≤ actual received amount) is not dropped.
 
-## 1. FOUNDATIONAL DECISION(本改訂の中核)
+## 1. FOUNDATIONAL DECISION (the core of this revision)
 
-**base intmax のネイティブ口座キーを `channel_id`(4 bytes)のみにする。key_id を base から抜く。**
+**Make the native account key of base intmax `channel_id` (4 bytes) only. Remove key_id from base.**
 
-- 現状: base `UserId = (channel_id << 32) | key_id`(8 bytes 相当 / u64)。account tree は
-  `user_id.as_u64()` を leaf index にしている(src/common/user_id.rs:30-38, account_state.rs:82)。
-  → base 口座が**メンバー単位**になっており、「channel 1つ」の単一 base 口座が存在しない。
-- 変更後: base `UserId = channel_id`(u32, 4 bytes)。account tree leaf index = `channel_id`。
-  → **channel = base の 1 口座**。channel fund = その口座の base ネイティブ残高。
-  → 「channel を base 実残高にアンカーする」問題が**構造的に消滅**(別 proof 不要)。
-- key_id は **channel レイヤー(src/common/channel.rs)専用**として残す(メンバー識別・内部分配)。
-  base レイヤーは key_id を一切持たない/見ない。
+- Current: base `UserId = (channel_id << 32) | key_id` (8 bytes equivalent / u64). The account tree uses
+  `user_id.as_u64()` as the leaf index (src/common/user_id.rs:30-38, account_state.rs:82).
+  → The base account is **per-member**, and a single base account for "one channel" does not exist.
+- After the change: base `UserId = channel_id` (u32, 4 bytes). account tree leaf index = `channel_id`.
+  → **channel = one base account**. channel fund = that account's base native balance.
+  → The "anchor the channel to the actual base balance" problem **disappears structurally** (no separate proof needed).
+- key_id remains as **channel-layer-only (src/common/channel.rs)** (member identification / internal distribution).
+  The base layer holds / sees no key_id at all.
 
-### 1.1 この決定が触る範囲(全面 = code impact map)
+### 1.1 Scope this decision touches (full = code impact map)
 
-base レイヤー(channel_id 化):
-- [ ] src/common/user_id.rs — `UserId` を u32(channel_id)へ。`new/from_*/to_*` / Target を改訂。
-      dummy 予約(現 channel_id=0&&key_id=0)を channel_id=0 予約へ再定義。
-- [ ] src/circuits/balance/common/account_state.rs — account leaf index = channel_id。tree 深度見直し
-      (index 空間 64bit→32bit)。
-- [ ] balance 系回路全般(src/circuits/balance/ : send_tx / receive_transfer / receive_deposit /
-      tx_settlement / spend)で user_id を channel_id として扱う。
-- [ ] nullifier 派生(src/common/transfer.rs)— from = channel_id。base 出金 nullifier の一意性が
-      channel 単位で保たれることを確認。
-- [ ] validity / block / signature(src/circuits/validity/)— base ブロック署名は**チャネルの集約
-      署名**(channel が 1 ユーザーとして署名)。member 署名は channel レイヤーへ。
-- [ ] deposit 経路 — recipient/account = channel_id(IntmaxRollup.sol deposit の recipient 符号化)。
+base layer (channel_id-ification):
+- [ ] src/common/user_id.rs — change `UserId` to u32 (channel_id). Revise `new/from_*/to_*` / Target.
+      Redefine the dummy reservation (currently channel_id=0 && key_id=0) into a channel_id=0 reservation.
+- [ ] src/circuits/balance/common/account_state.rs — account leaf index = channel_id. Revisit tree depth
+      (index space 64bit→32bit).
+- [ ] balance-family circuits in general (src/circuits/balance/ : send_tx / receive_transfer / receive_deposit /
+      tx_settlement / spend) treat user_id as channel_id.
+- [ ] nullifier derivation (src/common/transfer.rs) — from = channel_id. Confirm that the uniqueness of the base
+      withdrawal nullifier is preserved per channel.
+- [ ] validity / block / signature (src/circuits/validity/) — base block signatures are the **channel's aggregate
+      signature** (the channel signs as one user). member signatures move to the channel layer.
+- [ ] deposit path — recipient/account = channel_id (recipient encoding of IntmaxRollup.sol deposit).
 
-channel レイヤー(key_id 維持・橋渡し改訂):
-- [ ] src/common/channel.rs — channel `UserId = channel_id||key_id` は内部用に維持。
-      `bridge_user_to_channel_id/key_id`(1026-1032)を「base=channel_id」前提に改訂/整理。
-- [ ] InterChannelFundImport 等 — base 残高(channel_id 口座)と channel fund の関係を一本化。
+channel layer (key_id retained, bridging revised):
+- [ ] src/common/channel.rs — keep channel `UserId = channel_id||key_id` for internal use.
+      Revise/organize `bridge_user_to_channel_id/key_id` (1026-1032) on the "base=channel_id" premise.
+- [ ] InterChannelFundImport etc. — unify the relationship between the base balance (channel_id account) and the channel fund.
 
-## 1.2 登録 → Poseidon tree → ZKP 束縛(W3 の中核 / 合意済み)
+## 1.2 Registration → Poseidon tree → ZKP binding (core of W3 / agreed)
 
-**登録系は全て on-chain**(DA 確保):
-- `registerKey(key_id, pubkeys[], threshold)` — 公開鍵を calldata に出す。
-- `registerChannel(channel_id, member_key_ids[])` — member keyID 集合を calldata に出す。
+**Registration is all on-chain** (DA secured):
+- `registerKey(key_id, pubkeys[], threshold)` — emit public keys into calldata.
+- `registerChannel(channel_id, member_key_ids[])` — emit the member keyID set into calldata.
 
-**登録後、決定論的 Poseidon tree を構築し ZKP で一致を証明**(2 層):
+**After registration, build a deterministic Poseidon tree and prove consistency with ZKP** (2 layers):
 ```
 KeySetTree(pubkey hashes) → pk_set_root
-KeyLeaf { pk_set_root, threshold }  →  KeyTree(keyID 索引) → key_tree_root
+KeyLeaf { pk_set_root, threshold }  →  KeyTree(keyID index) → key_tree_root
 member_key_ids → member_key_ids_root
-ChannelLeaf { member_key_ids_root, ... }  →  ChannelTree(channel_id 索引) → channel_tree_root
+ChannelLeaf { member_key_ids_root, ... }  →  ChannelTree(channel_id index) → channel_tree_root
 ```
 
-**SECURITY 不変条件(必達)**: ZKP は「Poseidon tree が on-chain 登録エントリと**過不足なく一致**」を
-証明する。未登録鍵の混入 / 登録鍵の省略 / X 登録→Y 投入、を一切許さない。
+**SECURITY invariant (must achieve)**: the ZKP proves "the Poseidon tree **exactly matches** the on-chain registration
+entries". It allows no insertion of unregistered keys / omission of registered keys / register-X→inject-Y.
 
-**束縛手段**(既存パターン踏襲): deposit=`deposit_hash_chain`, block=`block_hash_chain` で calldata を
-hash chain 化し `validity_circuit` が `keccak(ValidityPublicInputs)` で on-chain 束縛しているのと同様、
-登録も hash chain(または block hash chain へ統合)→ ZKP が Poseidon tree 遷移=登録列を証明 →
-root を on-chain 束縛する。← attacker pass の主対象。
+**Binding means** (following existing patterns): just as deposit=`deposit_hash_chain`, block=`block_hash_chain` hash-chain
+the calldata and `validity_circuit` binds on-chain via `keccak(ValidityPublicInputs)`,
+registration is likewise hash-chained (or integrated into the block hash chain) → the ZKP proves the Poseidon tree
+transition = the registration sequence → the root is bound on-chain. ← the primary target of the attacker pass.
 
-## 2. スコープ(本決定を前提とした Option A)
+## 2. Scope (Option A premised on this decision)
 
-### IN(必須)
-- **§1 の base アイデンティティ二層化**(channel_id 化)。
-- **base L1 ユーザー出金 payout(新規)**:
-  - aggregated withdrawal proof をオンチェーン検証(IntmaxRollup の既存 MLE/WHIR+Groth16 再利用)。
-    proof は `IntmaxRollup.latestFinalizedStateRoot` に束縛。
-  - recipient へ native 送金(pull-payment / `pendingWithdrawals` 方式)。
-  - **base withdrawal nullifier mapping**(`mapping(bytes32=>bool)`)で二重出金防止。
-  - `aux_data` をオンチェーン露出(recipient 属性付け用)。
-- **channel を base 出金の利用者に**: close = channel_id 口座の base 出金(recipient =
-  `ChannelSettlementManager`, `aux_data = channel_id`)。cap = **実受領額にアンカー**。
-  close/burn 経路の stub verifier を廃止。
-- **solvency 上限(放置不可)**: Manager の全 credit パス(withdrawal claim / post-close incoming)を
-  実受領 burn 総額で縛る。`claimWithdrawalCredit` は実 native 送金を残高で縛る。
-  - 現状の穴: submitPostCloseClaim (ChannelSettlementManager.sol:599-600) は cap チェック無し。
-- **replace ウィンドウ**(§4)。
+### IN (required)
+- **The base identity two-layering of §1** (channel_id-ification).
+- **base L1 user withdrawal payout (new)**:
+  - On-chain verification of the aggregated withdrawal proof (reusing IntmaxRollup's existing MLE/WHIR+Groth16).
+    The proof is bound to `IntmaxRollup.latestFinalizedStateRoot`.
+  - Native transfer to the recipient (pull-payment / `pendingWithdrawals` scheme).
+  - **base withdrawal nullifier mapping** (`mapping(bytes32=>bool)`) to prevent double withdrawal.
+  - Expose `aux_data` on-chain (for recipient attribution).
+- **Make the channel a user of base withdrawal**: close = base withdrawal of the channel_id account (recipient =
+  `ChannelSettlementManager`, `aux_data = channel_id`). cap = **anchored to the actual received amount**.
+  Abolish the stub verifier on the close/burn path.
+- **solvency upper bound (cannot be left alone)**: bind all of the Manager's credit paths (withdrawal claim / post-close incoming)
+  by the actual received burn total. `claimWithdrawalCredit` binds the actual native transfer by the balance.
+  - Current hole: submitPostCloseClaim (ChannelSettlementManager.sol:599-600) has no cap check.
+- **replace window** (§4).
 
-### OUT(今回放置=stub のまま、受容リスク。intra-channel に閉じる)
-- #2 per-member withdrawal claim の内部 ZK 検証。
-- #3 late outgoing debit / post-close incoming の内部 ZK 検証。
-- #2/#3 統合(別タスク)。
+### OUT (left alone this time = remains a stub, accepted risk. Closed within intra-channel)
+- Internal ZK verification of #2 per-member withdrawal claim.
+- Internal ZK verification of #3 late outgoing debit / post-close incoming.
+- #2/#3 integration (separate task).
 
-## 3. Phase 0 結果(完了) — linchpin 不成立。本決定で解消する。
+## 3. Phase 0 result (done) — the linchpin does not hold. Resolved by this decision.
 
-1. channel は base-intmax の実口座ではなかった(`intmax_state_root` 未制約)→ **§1 で channel_id 口座化
-   して解消**。
-2. base rollup にユーザー出金 payout がオンチェーンに存在しない(`withdraw()` は stake/fraud 専用、
-   nullifier mapping 無し、aux_data 未露出)→ **§2 で新設**。
+1. The channel was not an actual base-intmax account (`intmax_state_root` unconstrained) → **resolved in §1 by making it a channel_id
+   account**.
+2. There is no on-chain user withdrawal payout in the base rollup (`withdraw()` is stake/fraud-only,
+   no nullifier mapping, aux_data not exposed) → **newly added in §2**.
 
-## 4. replace ウィンドウ設計(新規メカニズム)
+## 4. replace window design (new mechanism)
 
-- 申請は **1 メンバーでも可**。チャレンジ期間中、**より高バージョンの fully-signed state** で上書き可。
-  - [ ] 上書き優先規則の全順序化(`close_nonce`/`epoch`/`final_small_block_number`/fully-signed)。
-- **payout 確定との順序(最重要)**: base 出金が L1 着金すると上書き不能 → 「申請受付フェーズ
-  (replace 可)」と「base 出金実行・着金フェーズ(replace 不可)」を分離。早期着金で replace を
-  無意味化する窓=0 を保証。special-close の 5 medium block 窓と整合。
+- A request is **allowed even from 1 member**. During the challenge period, it can be overridden by a **higher-version fully-signed state**.
+  - [ ] Total-order the override priority rule (`close_nonce`/`epoch`/`final_small_block_number`/fully-signed).
+- **Ordering with payout finalization (most important)**: once the base withdrawal lands on L1, override becomes impossible → separate the "request-acceptance phase
+  (replace allowed)" from the "base withdrawal execution / landing phase (replace not allowed)". Guarantee that
+  the window in which early landing makes replace meaningless = 0. Consistent with the special-close 5 medium block window.
 
-## 5. Threat Model(コード前に attacker subagent で独立検証)
+## 5. Threat Model (independently verified by an attacker subagent before code)
 
-- **アイデンティティ移行の健全性**: channel_id 化で「別チャネルの残高をなりすまし出金」できないこと。
-  account tree index 衝突・dummy 予約の取り違え・index 空間縮小の影響。
-- **base 出金 soundness**: proof が必ず `latestFinalizedStateRoot` に束縛、未確定 state からの出金不可。
-  Fiat-Shamir / domain 分離(channel close PIs vs base withdrawal PIs)。
-- **nullifier**: 同一出金の二重 payout を新設 mapping が確実に弾く。channel double-burn 不可。
-- **burn↔channel 束縛**: Manager は amount/属性を実受領 or 検証済み base 状態から得る。aux_data
-  spoofing で別チャネルの出金を誤属性できないこと。
-- **solvency**: Σ(payable credits) ≤ 実受領 burn 総額(全 credit パス横断、post-close incoming 含む)。
-- **replace 競合 / 古い state リプレイ / 1 人申請悪用**: 勝者確定後に旧 state 出金 revert。検閲時は
-  cancel/special-close 救済。replace と着金の順序逆転で二重 native が出る窓=0 の論証。
-- **payout 安全**: reentrancy / reverting recipient(pull-payment 準拠)。
+- **Soundness of identity migration**: that channel_id-ification cannot "impersonate-withdraw another channel's balance".
+  Effects of account tree index collision / mistaking the dummy reservation / index space shrinkage.
+- **base withdrawal soundness**: the proof is always bound to `latestFinalizedStateRoot`; withdrawal from an unfinalized state is impossible.
+  Fiat-Shamir / domain separation (channel close PIs vs base withdrawal PIs).
+- **nullifier**: the newly added mapping reliably rejects a double payout of the same withdrawal. channel double-burn impossible.
+- **burn↔channel binding**: the Manager derives amount/attributes from the actual receipt or a verified base state. It cannot
+  misattribute another channel's withdrawal via aux_data spoofing.
+- **solvency**: Σ(payable credits) ≤ actual received burn total (across all credit paths, including post-close incoming).
+- **replace contention / old state replay / single-person request abuse**: after the winner is finalized, old-state withdrawal reverts. On censorship,
+  cancel/special-close rescue. Argument that the window where order reversal of replace and landing yields a double native = 0.
+- **payout safety**: reentrancy / reverting recipient (pull-payment compliant).
 
-## 6. Falsifiable 検証項目(テストで証明)
+## 6. Falsifiable verification items (proven by tests)
 
-- [ ] channel_id 化後も base 残高/送受信/deposit が健全(回帰)。別 channel_id の残高を出金不可。
-- [ ] base 出金: 未確定 state root への proof は revert。確定 root のみ通る。
-- [ ] base 出金 nullifier の再生は revert(二重 payout 不可)。
-- [ ] close 後 channel 払い出し可能 native ≤ channel の実 base 残高(クロスチャネル隔離)。
-- [ ] Σ(任意時点 payable な withdrawalCredits) ≤ 実受領 burn native(solvency property test、
-      post-close incoming 経路含む)。
-- [ ] `finalizedChannelFundAmount` が submitter calldata に影響されない。
-- [ ] channel C への burn を C' が claim 不能(属性テスト)。
-- [ ] replace: 低バージョン申請が高バージョンで上書き、確定後に低バージョン出金 revert。着金後の
-      replace は無効。
+- [ ] After channel_id-ification, base balance / send-receive / deposit remain sound (regression). Cannot withdraw another channel_id's balance.
+- [ ] base withdrawal: a proof for an unfinalized state root reverts. Only a finalized root passes.
+- [ ] Replaying a base withdrawal nullifier reverts (double payout impossible).
+- [ ] After close, the channel's payable native ≤ the channel's actual base balance (cross-channel isolation).
+- [ ] Σ(withdrawalCredits payable at any point in time) ≤ actual received burn native (solvency property test,
+      including the post-close incoming path).
+- [ ] `finalizedChannelFundAmount` is not influenced by submitter calldata.
+- [ ] A burn to channel C cannot be claimed by C' (attribution test).
+- [ ] replace: a low-version request is overridden by a high version, and after finalization the low-version withdrawal reverts. A
+      replace after landing is invalid.
 
-## 7. 実装フェーズ(詳細設計承認後 / 各 Phase で承認)
+## 7. Implementation phases (after detailed-design approval / approval at each Phase)
 
-1. **§1 base アイデンティティ二層化(channel_id 化)** — 最初に土台を変える。回帰テスト緑を確認。
-2. **base L1 出金 payout** — オンチェーン verify + nullifier mapping + payout + aux_data 露出 +
-   Rust 側 PI 整備。
-3. **channel close を base 出金の利用者に** — recipient=Manager, aux_data=channel_id, cap=実受領。
-   close/burn 経路 stub 置換。
-4. **Manager** — 全 credit パスに solvency 上限 / `claimWithdrawalCredit` 実送金化 / replace ウィンドウ+
-   フェーズ分離。
-5. テスト(§6)を category 別(happy/boundary/malformed/cross-protocol/property)で実装。
+1. **§1 base identity two-layering (channel_id-ification)** — change the foundation first. Confirm regression tests green.
+2. **base L1 withdrawal payout** — on-chain verify + nullifier mapping + payout + aux_data exposure +
+   Rust-side PI preparation.
+3. **Make channel close a user of base withdrawal** — recipient=Manager, aux_data=channel_id, cap=actual receipt.
+   Replace the close/burn path stub.
+4. **Manager** — solvency upper bound on all credit paths / make `claimWithdrawalCredit` an actual transfer / replace window +
+   phase separation.
+5. Implement the tests (§6) by category (happy/boundary/malformed/cross-protocol/property).
 
-## 8. プロセス(CLAUDE.md 準拠)
+## 8. Process (CLAUDE.md compliant)
 
-- 実装 subagent と **security-review subagent を分離**。
-- protocol 変更につき **attacker subagent** を §5 で起動、merge 前にレビュー。
-- 想定外テスト結果は「まず security 仮説」。test を通すための改変はしない。
-- base のアイデンティティ変更と payout はオンチェーン資金移動・全回路波及を伴う重い変更 →
-  各 Phase で承認を取る。
+- **Separate the implementation subagent and the security-review subagent**.
+- For protocol changes, launch the **attacker subagent** in §5, review before merge.
+- For unexpected test results, "security hypothesis first". Do not modify to make tests pass.
+- base identity changes and payout are heavy changes involving on-chain fund movement and circuit-wide ripple →
+  take approval at each Phase.
 
-## 9. Assessment(随時更新)
+## 9. Assessment (updated as needed)
 
-- Phase 0: 完了。linchpin 不成立(§3)。方向 = Option A。
-- Foundational decision(§1): base ネイティブ口座 = channel_id(4 bytes)、key_id 除去で確定。
-- §1 実装(base ID 二層化 + 用語リネーム + 型統一): **完了**。base `UserId`→単一 `ChannelId(u32)`+
-  `ChannelIdTarget` に統一(channel.rs の [u8;4] 版削除、keccak preimage 不変)。user 系シンボル全部
-  channel 系へ(account_tree→channel_tree, USER_TREE_HEIGHT 64→CHANNEL_TREE_HEIGHT 32 等)。
-  build は既知の論理エラー21個のみ・新規ゼロで検証済み。channel 層 member id([u8;8])は不変。
-- W3 ステップ2(新ツリー型): **完了**。`src/common/trees/key_tree.rs` 新設(`KeyLeaf`/`KeyTree`
-  =keyID索引、`MemberKeyLeaf`/`MemberKeyTree`、domain 分離タグ KYLF/MKLF)。`ChannelLeaf` 再構成
-  (`pk_set_root`+`threshold` 除去 → `member_key_ids_root` 追加、domain タグ CHLF)。constants に
-  `KEY_TREE_HEIGHT`/`MEMBER_KEY_TREE_HEIGHT`。新コードはエラーゼロでコンパイル。design は
-  tasks/channel-key-tree-design.md。build 総エラーは 21→67(ChannelLeaf 再構成の下流=W3 サイト、想定内)。
-- W3 ステップ3(on-chain 登録): **完了**。`IntmaxRollup.sol` に `registerKey(keyId, pkHashes[], threshold)`
-  と `registerChannel(channelId, memberKeyIds[])` を追加(deposit hash-chain パターン踏襲)。登録 hash chain
-  `_pendingKeyRegHashChain`/`_pendingChannelRegHashChain` + counts + events。配列は要素ごとに tight 連結
-  (abi.encodePacked の 32byte パディング footgun 回避)。keccak 前像をコメントで明記(Step4 の Rust 回路が一致
-  させる対象)。`forge build` OK。**記録のみ**で tree 適用は Step4。member は昇順一意・非0を検証。
-- W3 ステップ4(登録適用回路): **設計完了**(channel-key-tree-design.md §6)。ChannelTree 共有の順序制約を反映。
-- **MVP 方針確定**: 登録は genesis 済み・KeyTree/ChannelTree は不変(以降の登録なし)。登録消費(§3/§4)は
-  MVP 対象外。MVP は別ファイルの自己完結モジュールとして署名規則(全 member keyID 閾値クリア)を固定木に対し証明。
-  仕様 = tasks/channel-key-tree-mvp.md(本体 design.md にポインタ明記済み)。既存の壊れた再帰 flow は MVP の前提条件ではない。
-- 残り(本体 build 緑化に必要、MVP とは別):
-  - W1-mechanical: key_id 除去サイト(tx_settlement / single_withdrawal / public_state /
-    block_witness_generator / bridge_user_to_key_id)。tx tree は channel_id index 化。
-    → **完了**(2026-06-12 ベースライン修復): `cargo check` / `cargo check --all-targets` 緑。
-    tx tree index = channel_id、ChannelTree index = channel_id 単独、bridge_user_to_key_id 削除。
-  - W3-consensus: signature_aggregation + ChannelLeaf を B2=A(channel が member-keyID 集合 root を持ち、
-    全 member keyID が閾値クリア)へ再設計。← コンセンサス署名規則。threat model 推奨。
-    → **未完(機械移行のみ実施)**: (pk_set_root, threshold) の供給源を ChannelLeaf から `KeyLeaf`
-    witness へ移したが、KeyTree への inclusion 束縛(§3 2b)と member_key_ids_root への member 束縛
-    (§3 2a)は key_tree_root の PI 配線(design §6.4)待ち。該当箇所に `SECURITY: TODO` を明記
-    (update_channel_tree.rs / sig_agg_step.rs / sig_batch_step.rs)。束縛が入るまで KeyLeaf は
-    prover-chosen であり、署名検証の健全性は旧モデル相当に未回復。
-  - 潜在バグ(先在・要確認): channel PIs の from_u64_slice 幅不整合(&values[0..2] vs 1 word)。
-
----
-
-# Task: architecture-audit/abstract.md の Lean 安全性証明(2026-06-10)
-
-Status: DONE(2026-06-10)
-
-## 計画
-
-- [x] 脅威モデル・信頼基盤(trust base)を明文化(architecture-audit/lean-safety-proof.md)
-- [x] `architecture-audit/ChannelSafety.lean` — abstract.md §0 の 4 性質を Lean 4 (core, mathlib 不使用) で形式化・機械検証
-  - [x] 認可 authorization(§4.1): 全員署名 + 善良ノード規律 ⇒ confirmed state は valid(`authorization`)
-  - [x] 署名アトミック性(§3.4 不変則): 送金認可 ⇒ 減算後 state の confirm(`atomicity_no_loss_shift` — 仮定の明示化と明記)
-  - [x] 二重支払い/不正 mint 防止(§4.2): 供給量保存(`exec_conservation`)+ nullifier 一意性(`no_double_settlement`、M1 制限付き)
-  - [x] 支払い能力 solvency(§4.3): 残高非負不変(`exec_nonneg`)+ 状態 valid 保存(`channelTx/interSend_preserves_validity`)
-  - [x] close ゲーム: `close_no_overdraw`・`close_boundary_no_double_spend`・集約 `exec_exit_bound`
-  - [x] challenge ゲーム(§3.5.3): `challenge_latest_wins`(stale close 不能)
-  - [x] 健全性チェック: §9 Sanity(全員善良 + 善良1人/敵対2人 の両構成で仮定充足を証明)
-- [x] `lean ChannelSafety.lean` でコンパイル検証(Lean 4.10.0、exit 0、警告 0、sorry/axiom なし)
-- [x] 別 subagent による敵対的レビュー → 18 所見。4 件をコード修正で反映、モデル限界 M1–M4 としてヘッダ+解説に明示
-
-## 評価(Record Outcomes)
-
-- 4 性質の safety 側は信頼基盤 A1–A4・抽象化 M1–M4 の下で全て機械検証済み。
-- レビューで判明した本質的ギャップ(M1: 1 block 1 tx 抽象、M2: provenTotal–ledger 未接続、
-  M3: OneStatePerVersion は規律仮定、M4: 受信側/late claim 個別管理未モデル)は
-  lean-safety-proof.md に強化案付きで記録。仕様 abstract.md への追記推奨 2 点も同文書に記載。
-
-## Lessons(tasks/lessons.md 相当)
-
-- Lean core の `omega` は `abbrev Amount := Int` 越しの atom を認識しない(4.30-rc2 でも同様)。
-  形式化では型エイリアスを避け素の `Int`/`Nat` を使うこと。
-- 「証明した」と「仮定を明示した」の区別を docstring に書かないと、形式化はかえって過信を生む。
-  敵対的レビューはこの過大主張の検出に特に有効だった。
+- Phase 0: done. The linchpin does not hold (§3). Direction = Option A.
+- Foundational decision (§1): confirmed as base native account = channel_id (4 bytes), with key_id removed.
+- §1 implementation (base ID two-layering + terminology rename + type unification): **done**. Unified base `UserId`→a single `ChannelId(u32)`+
+  `ChannelIdTarget` (removed channel.rs's [u8;4] version, keccak preimage unchanged). All user-family symbols moved
+  to channel-family (account_tree→channel_tree, USER_TREE_HEIGHT 64→CHANNEL_TREE_HEIGHT 32, etc.).
+  The build is verified with only the known 21 logic errors and zero new ones. The channel-layer member id ([u8;8]) is unchanged.
+- W3 step 2 (new tree types): **done**. Added `src/common/trees/key_tree.rs` (`KeyLeaf`/`KeyTree`
+  =keyID index, `MemberKeyLeaf`/`MemberKeyTree`, domain separation tags KYLF/MKLF). Restructured `ChannelLeaf`
+  (removed `pk_set_root`+`threshold` → added `member_key_ids_root`, domain tag CHLF). Added
+  `KEY_TREE_HEIGHT`/`MEMBER_KEY_TREE_HEIGHT` to constants. The new code compiles with zero errors. design is
+  tasks/channel-key-tree-design.md. Total build errors 21→67 (downstream of the ChannelLeaf restructure = W3 sites, as expected).
+- W3 step 3 (on-chain registration): **done**. Added `registerKey(keyId, pkHashes[], threshold)`
+  and `registerChannel(channelId, memberKeyIds[])` to `IntmaxRollup.sol` (following the deposit hash-chain pattern). Registration hash chains
+  `_pendingKeyRegHashChain`/`_pendingChannelRegHashChain` + counts + events. Arrays are tightly concatenated per element
+  (avoiding the 32-byte padding footgun of abi.encodePacked). The keccak preimage is specified in comments (the target the Step4 Rust circuit
+  matches). `forge build` OK. **Record only**; tree application is Step4. members are verified as ascending-unique and non-0.
+- W3 step 4 (registration-application circuit): **design done** (channel-key-tree-design.md §6). Reflects the ChannelTree-shared ordering constraint.
+- **MVP policy confirmed**: registration is genesis-done; KeyTree/ChannelTree are immutable (no further registration). Registration consumption (§3/§4) is
+  out of MVP scope. The MVP is a self-contained module in a separate file that proves the signature rule (all member keyIDs clear the threshold) against the fixed tree.
+  Spec = tasks/channel-key-tree-mvp.md (a pointer is noted in the main design.md). The existing broken recursive flow is not a precondition of the MVP.
+- Remaining (needed to green the main build, separate from the MVP):
+  - W1-mechanical: key_id removal sites (tx_settlement / single_withdrawal / public_state /
+    block_witness_generator / bridge_user_to_key_id). tx tree becomes channel_id-indexed.
+    → **done** (2026-06-12 baseline repair): `cargo check` / `cargo check --all-targets` green.
+    tx tree index = channel_id, ChannelTree index = channel_id alone, bridge_user_to_key_id removed.
+  - W3-consensus: redesign signature_aggregation + ChannelLeaf to B2=A (the channel holds the member-keyID set root, and
+    all member keyIDs clear the threshold). ← consensus signature rule. Threat-model recommended.
+    → **incomplete (only mechanical migration done)**: moved the supply source of (pk_set_root, threshold) from ChannelLeaf to a `KeyLeaf`
+    witness, but the inclusion binding to KeyTree (§3 2b) and the member binding to member_key_ids_root
+    (§3 2a) await the key_tree_root PI wiring (design §6.4). `SECURITY: TODO` is noted at the relevant sites
+    (update_channel_tree.rs / sig_agg_step.rs / sig_batch_step.rs). Until the binding is in, KeyLeaf is
+    prover-chosen, and the soundness of signature verification is not restored to the old-model level.
+  - Potential bug (pre-existing, to confirm): from_u64_slice width mismatch in channel PIs (&values[0..2] vs 1 word).
 
 ---
 
-# Task: abstract2.md(Lattice 版)作成 + Lean 安全性証明 v2(2026-06-11)
+# Task: Lean safety proof of architecture-audit/abstract.md (2026-06-10)
+
+Status: DONE (2026-06-10)
+
+## Plan
+
+- [x] Document the threat model / trust base explicitly (architecture-audit/lean-safety-proof.md)
+- [x] `architecture-audit/ChannelSafety.lean` — formalize and machine-verify the 4 properties of abstract.md §0 in Lean 4 (core, no mathlib)
+  - [x] authorization (§4.1): all-signed + good-node discipline ⇒ a confirmed state is valid (`authorization`)
+  - [x] signature atomicity (§3.4 invariant): transfer authorization ⇒ confirm of the post-subtraction state (`atomicity_no_loss_shift` — making the assumption explicit and noting it)
+  - [x] double-spend / illegal-mint prevention (§4.2): supply conservation (`exec_conservation`) + nullifier uniqueness (`no_double_settlement`, M1-restricted)
+  - [x] solvency (§4.3): balance-non-negative invariant (`exec_nonneg`) + state-valid preservation (`channelTx/interSend_preserves_validity`)
+  - [x] close game: `close_no_overdraw` / `close_boundary_no_double_spend` / aggregate `exec_exit_bound`
+  - [x] challenge game (§3.5.3): `challenge_latest_wins` (stale close impossible)
+  - [x] sanity check: §9 Sanity (prove assumption satisfaction in both the all-good and the good-1/adversarial-2 configurations)
+- [x] Compile-verify with `lean ChannelSafety.lean` (Lean 4.10.0, exit 0, 0 warnings, no sorry/axiom)
+- [x] Adversarial review by a separate subagent → 18 findings. 4 reflected as code fixes, model limits M1–M4 noted in the header + commentary
+
+## Assessment (Record Outcomes)
+
+- The safety side of the 4 properties is all machine-verified under trust base A1–A4 / abstractions M1–M4.
+- The essential gaps revealed in review (M1: 1-block-1-tx abstraction, M2: provenTotal–ledger unconnected,
+  M3: OneStatePerVersion is a discipline assumption, M4: receiver-side/late-claim individual management unmodeled) are
+  recorded in lean-safety-proof.md with strengthening proposals. The 2 recommended additions to the spec abstract.md are also noted in the same document.
+
+## Lessons (equivalent to tasks/lessons.md)
+
+- Lean core's `omega` does not recognize atoms through `abbrev Amount := Int` (same in 4.30-rc2).
+  In formalization, avoid type aliases and use plain `Int`/`Nat`.
+- Unless you write the distinction between "proved" and "made the assumption explicit" in the docstring, formalization rather breeds overconfidence.
+  Adversarial review was especially effective at detecting this overclaiming.
+
+---
+
+# Task: Create abstract2.md (Lattice version) + Lean safety proof v2 (2026-06-11)
 
 Status: DONE
 
-- [x] architecture-audit/abstract2.md — v1 をベースに LATTICE 仕様差分を MECE で反映
-  (Regev 秘匿・H1/H2 二部 state・channelUpdateZKP・署名対象 hash(H1,H2)・close 出金 ZKP、
-  安全性は 5 性質に拡張: + confidentiality)
-- [x] architecture-audit/ChannelSafety2.lean — v1 を import 再利用した v2 証明
-  (Lean 4.10、exit 0、警告 0、sorry/axiom なし。2 ステップビルド:
+- [x] architecture-audit/abstract2.md — reflect the LATTICE spec diff over v1 in a MECE manner
+  (Regev confidentiality / H1/H2 two-part state / channelUpdateZKP / signature target hash(H1,H2) / close withdrawal ZKP,
+  safety extended to 5 properties: + confidentiality)
+- [x] architecture-audit/ChannelSafety2.lean — v2 proof reusing v1 via import
+  (Lean 4.10, exit 0, 0 warnings, no sorry/axiom. 2-step build:
   `lean ChannelSafety.lean -o ChannelSafety.olean` → `LEAN_PATH=$PWD lean ChannelSafety2.lean`)
-  - 新規定理: bridgeToV1(v1 アトミック性仮定の定理化)、applyReceive/receive_preserves_validity、
-    interChannel_conservation(_bound)、challenge_latest_wins2、end_to_end_close_safety2
-- [x] 第 2 回敵対的レビュー(16 所見、CRITICAL 6)→ 4 件コード反映、M4 改訂 + M5–M7 新設
-- [x] architecture-audit/lean-safety-proof2.md — 解説・定理対応表・所見記録
+  - New theorems: bridgeToV1 (theoremization of the v1 atomicity assumption), applyReceive/receive_preserves_validity,
+    interChannel_conservation(_bound), challenge_latest_wins2, end_to_end_close_safety2
+- [x] 2nd adversarial review (16 findings, CRITICAL 6) → 4 reflected in code, M4 revised + M5–M7 added
+- [x] architecture-audit/lean-safety-proof2.md — commentary / theorem correspondence table / findings record
 
-## 評価
+## Assessment
 
-- v2 の主要改善(構造的アトミック性・受信側保存則)は機械検証済み。
-- **仕様レベルの未規定 4 点を発見(abstract2.md への修正推奨)**:
-  1. M7: 署名済み・未 settle の減算 state が close で勝つ race(L1 包含証明の要求が必要)
-  2. 送金失敗時の retry / version 再割当意味論が未定義(OneStatePerVersion と矛盾)
-  3. H1 が balanceProof を含むが署名時点で proof 未生成(H1 のコミット対象を明文化すべき)
-  4. H2=0 予約値と tx_tree_root の衝突・ドメイン分離未規定
-- v3 形式化の本命: Apply の署名モデル/tx 木パラメータ化(M6)、受信 replay 防止(M4 改)。
+- The major improvements of v2 (structural atomicity / receiver-side conservation law) are machine-verified.
+- **Found 4 spec-level unspecified points (revision recommended for abstract2.md)**:
+  1. M7: a race where a signed-but-unsettled subtraction state wins at close (an L1 inclusion proof requirement is needed)
+  2. The retry / version reassignment semantics on transfer failure are undefined (contradicts OneStatePerVersion)
+  3. H1 includes balanceProof but the proof is not generated at signing time (the commit target of H1 should be specified)
+  4. The collision of the H2=0 reserved value with tx_tree_root / domain separation is unspecified
+- The main target of v3 formalization: the signature model / tx-tree parameterization of Apply (M6), receiver replay prevention (M4 revised).
 
-## 追補(2026-06-11、ユーザー指示による仕様修正)
+## Addendum (2026-06-11, spec revision per user instruction)
 
-- [x] 所見 5(M5)解消: `channelTxZKP`(チャネル内 range ZKP)を abstract2.md §2.2/§3.2 に必須化。
-  Lean: `ChannelTxProven` 導入 + `channelTx2_preserves_validity` 仮定置換 + `claims_exactly_fill_cap`。
-- [x] 所見 3 解消: `settledTxChain`(settle 履歴 hash chain)で state↔balanceProof を束縛。
-  H1 は proof を含まず chain にコミット、回路が chain を公開入力 expose、L1 が close/challenge で照合。
-  nullifier は block_number を含み署名時点で計算不能のため不採用(base 層の二重 settle 防止は続投)。
-  Lean §9: `chainOf_injective` / `chain_binding_resolves_attachment`。
-- 残る仕様課題: M7(signed-but-unsettled race)、retry/version 意味論、H2 ドメイン分離。
+- [x] Resolved finding 5 (M5): make `channelTxZKP` (intra-channel range ZKP) mandatory in abstract2.md §2.2/§3.2.
+  Lean: introduced `ChannelTxProven` + replaced the `channelTx2_preserves_validity` assumption + `claims_exactly_fill_cap`.
+- [x] Resolved finding 3: bind state↔balanceProof with `settledTxChain` (a settle-history hash chain).
+  H1 commits to the chain without including the proof, the circuit exposes the chain as a public input, and L1 cross-checks at close/challenge.
+  Since the nullifier includes block_number and is uncomputable at signing time, it is not adopted (base-layer double-settle prevention continues).
+  Lean §9: `chainOf_injective` / `chain_binding_resolves_attachment`.
+- Remaining spec issues: M7 (signed-but-unsettled race), retry/version semantics, H2 domain separation.
 
-## 脅威モデル(要約 — 詳細は lean-safety-proof.md)
+## Threat model (summary — details in lean-safety-proof.md)
 
-- 敵対者: channel メンバー最大 2/3、BP、外部者。SPHINCS+ 偽造・ZKP 偽造・L1 検閲は信頼基盤(仮定)。
-- 守るもの: abstract.md §0 の 4 性質のうち safety 側(認可・no-double-spend・solvency・stale-close 防止)。
-- liveness(タイムアウト到達・L1 包含)はモデル外と明記。
+- Adversary: channel members up to 2/3, BP, outsiders. SPHINCS+ forgery / ZKP forgery / L1 censorship are the trust base (assumptions).
+- What is protected: the safety side of the 4 properties of abstract.md §0 (authorization / no-double-spend / solvency / stale-close prevention).
+- liveness (timeout reach / L1 inclusion) is explicitly out of model.

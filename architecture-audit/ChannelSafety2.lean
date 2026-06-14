@@ -26,7 +26,7 @@ unchanged:
       contract (abstract2.md §2.3), and the RECEIVE side (`applyReceive`),
       closing part of v1 review finding M4
     * `interChannel_conservation` — sender + recipient channel totals are
-      conserved across an inter-channel transfer (delta 両翼束縛, §4.3)
+      conserved across an inter-channel transfer (delta both-sides binding, §4.3)
     * challenge game and end-to-end close safety re-proved over encrypted
       states (`challenge_latest_wins2`, `end_to_end_close_safety2`)
 
@@ -236,7 +236,7 @@ structure ChannelTx2 where
     the sender proves, without revealing any plaintext, that `encAmount`
     encrypts a non-negative amount under the recipient's `RegevPk` and that
     the sender's post-deduction encrypted balance stays non-negative
-    (残高 ≥ 送金額). Co-signers VERIFY this proof before signing (§3.2.3) —
+    (balance ≥ transfer amount). Co-signers VERIFY this proof before signing (§3.2.3) —
     which is exactly what makes the hypotheses of
     `channelTx2_preserves_validity` checkable by members who cannot see the
     sender's plaintext. Without it, two colluding members could create a
@@ -310,7 +310,7 @@ theorem channelTx2_preserves_validity (s : EncBalanceState) (t : ChannelTx2)
 /-- abstract2.md §2.3 `TxAux` deltas: `senderDelta` is the (negative) ct added
     to the sending channel's sender balance, `recipientDelta` the (positive)
     ct added to the receiving channel's recipient balance. `amount` is the
-    base-layer plaintext amount (public, §4.5 秘匿境界). -/
+    base-layer plaintext amount (public, §4.5 confidentiality boundary). -/
 structure ChannelUpdate where
   amount : Int
   senderDelta : Ct
@@ -319,7 +319,7 @@ structure ChannelUpdate where
 /-- abstract2.md §2.3 `channelUpdateZKP` soundness contract (A2): what a
     verified proof guarantees about the deltas —
     1. equal magnitude, opposite signs, matching the public `amount`;
-    2. the sender stays solvent (残高 ≥ 送金額, the §3.3.1 range constraint).
+    2. the sender stays solvent (balance ≥ transfer amount, the §3.3.1 range constraint).
     Ciphertext well-formedness w.r.t. the `RegevPk`s is absorbed into A5. -/
 def UpdateProven (u : ChannelUpdate) (s : EncBalanceState) (sender : Member) : Prop :=
   0 ≤ u.amount
@@ -357,7 +357,7 @@ theorem applyReceive_total (r : EncBalanceState) (recipient : Member)
 
 /-- **Property 3, send half (abstract2.md §4.3).** With a verified
     `channelUpdateZKP`, the deducted state stays valid and the certified total
-    decreases monotonically (送信側は減少). Honest members *can* sign it. -/
+    decreases monotonically (the sender side decreases). Honest members *can* sign it. -/
 theorem send_preserves_validity (s : EncBalanceState) (sender : Member)
     (u : ChannelUpdate)
     (hvalid : ValidEncState s) (hu : UpdateProven u s sender) :
@@ -405,7 +405,7 @@ theorem updateProven_recipientVerified {u : ChannelUpdate}
 /-- **Property 3, receive half (abstract2.md §4.3, flowReceive3) — NEW in v2.**
     Crediting the proven `recipientDelta` keeps the receiving channel's state
     valid and increases its certified total by exactly the public `amount`
-    (受金側は増加). The hypothesis is only what the receiver can check
+    (the receiver side increases). The hypothesis is only what the receiver can check
     (`RecipientVerified`), not the sender-side solvency it cannot see. -/
 theorem receive_preserves_validity (r : EncBalanceState)
     (recipient : Member) (u : ChannelUpdate)
@@ -434,7 +434,7 @@ theorem receive_preserves_validity (r : EncBalanceState)
     omega
 
 /-- **Property 2/3 — cross-channel conservation (abstract2.md §4.3 delta
-    両翼束縛) — NEW in v2.** `channelUpdateZKP` proves `senderDelta` and
+    both-sides binding) — NEW in v2.** `channelUpdateZKP` proves `senderDelta` and
     `recipientDelta` equal and opposite, so an inter-channel transfer
     conserves the sum of the two channels' totals. (v1 could not even state
     this — the receive side was unmodeled, review finding 13/M4.)

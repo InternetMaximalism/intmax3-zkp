@@ -214,7 +214,7 @@ pub struct InChannelTransferUpdateWitness {
     pub sender_index: usize,
     pub recipient_index: usize,
     /// Set when the verifying member IS the recipient: enables the decryption check
-    /// (abstract2 §3.1 "自成分復号検証"). Must be paired with `expected_amount`.
+    /// (abstract2 §3.1 "self-component decryption verification"). Must be paired with `expected_amount`.
     pub recipient_sk: Option<RegevSk>,
     pub expected_amount: Option<u64>,
 }

@@ -114,7 +114,7 @@ of bindings can be satisfied with divergent values.
 **Context (user directive, 2026-06-13):** the channel layer had inherited a two-layer
 identity with multisig/threshold (`KeyId`/`UserId`; `KeyTree`→`MemberKeyTree`→`KeySetTree`;
 `threshold`/`num_keys`; a `signature_aggregation/` pipeline). This **deviated from
-abstract2.md §1** ("1 人 1 key 1 account, address == pubkey",
+abstract2.md §1** ("1 person 1 key 1 account, address == pubkey",
 `memberKeys: Map<ChannelId,[(Address,RegevPk);3]>`) and — worse — the SPHINCS+ signing
 gadget's `KeyLeaf ↔ KeyTree` binding was **never enforced in-circuit**, so a prover could
 choose any key (a soundness hole). D5 removes the multisig machinery and closes that hole.
@@ -194,91 +194,91 @@ tests are green, but the end-to-end registered-genesis path is not yet built.
 
 ---
 
-## D6 — N メンバー（pad-to-MAX=16）+ オンチェーン検証 MLE/WHIR 化（Groth16 除去）
+## D6 — N members (pad-to-MAX=16) + on-chain verification switched to MLE/WHIR (Groth16 removed)
 
-**Context (phase F7):** D5 までは channel メンバーは固定 3 人（abstract2.md §2.1
-`memberKeys: Map<ChannelId,[(Address,RegevPk);3]>` に追従）だった。F7 は (A) メンバー数を
-**2..16 の可変 N**(pad-to-MAX 方式)へ一般化し、(B) オンチェーン検証を **MLE/WHIR 単独**に切り替えて
-Groth16 を完全に除去した。abstract2.md は変更しない(N メンバーは spec deviation として記録)。
+**Context (phase F7):** up to D5, channel members were a fixed 3 (following abstract2.md §2.1
+`memberKeys: Map<ChannelId,[(Address,RegevPk);3]>`). F7 (A) generalizes the member count to
+a **variable N in 2..16** (pad-to-MAX scheme), and (B) switches on-chain verification to **MLE/WHIR alone**,
+fully removing Groth16. abstract2.md is unchanged (N members is recorded as a spec deviation).
 
-### Change A — N メンバー(pad-to-MAX=16)
+### Change A — N members (pad-to-MAX=16)
 
-**spec deviation:** abstract2.md §2.1 の `[(Address,RegevPk);3]` は 3 人固定なので、N メンバー化は
-abstract2 からの逸脱。detail2.md §C-2 / §G 定数 / §H-1 を N メンバー注記に更新(authoritative delta は
-本 D6)。
+**spec deviation:** abstract2.md §2.1's `[(Address,RegevPk);3]` is fixed at 3, so N-member generalization is
+a deviation from abstract2. detail2.md §C-2 / §G constants / §H-1 are updated with N-member notes (the authoritative delta is
+this D6).
 
-- **pad-to-MAX 単一回路。** `MAX_CHANNEL_MEMBERS = 16`(member tree 高さ 4 = 16 leaves)。回路は分岐せず
-  常に 16 スロットを処理する単一回路。channel ごとの `member_count: u8` を持ち、active = slot
-  `0..member_count`、padding slot(`member_count..16`)は default/zero。全 member 配列は `[_; 16]`。
-  `BalanceState` と `ChannelRecord` に `member_count` フィールドを追加。
-- **close 回路は 16 スロット全 SPHINCS+ を `slot < member_count` ゲートで検証。** padding スロットの署名検証は
-  ゲートで無効化(active スロットのみ実検証)。degree は **2^19** で計測済み、feasible。
-- **`validate()` 制約。** `ChannelRecord::validate` / `BalanceState::validate`:
-  `2 <= member_count <= 16`、active スロットは相異なる非ゼロ、padding スロットは default、
-  `bp_member_slot < member_count`。withdrawal の `member_index` は `< member_count` に束縛。
+- **pad-to-MAX single circuit.** `MAX_CHANNEL_MEMBERS = 16` (member tree height 4 = 16 leaves). The circuit does not branch;
+  it is a single circuit that always processes 16 slots. It carries a per-channel `member_count: u8`, with active = slot
+  `0..member_count` and padding slots (`member_count..16`) being default/zero. All member arrays are `[_; 16]`.
+  A `member_count` field is added to `BalanceState` and `ChannelRecord`.
+- **The close circuit verifies all 16 slots' SPHINCS+ behind a `slot < member_count` gate.** Signature verification for padding slots is
+  disabled by the gate (only active slots are really verified). The degree is measured at **2^19**, feasible.
+- **`validate()` constraints.** `ChannelRecord::validate` / `BalanceState::validate`:
+  `2 <= member_count <= 16`, active slots are distinct and non-zero, padding slots are default,
+  `bp_member_slot < member_count`. The withdrawal's `member_index` is bound to `< member_count`.
 
-**Forced sub-deviation — `member_set_commitment` は固定長 keccak(可変長 active-only ではない)。**
-`close_member_set_commitment`(L1)および in-circuit の `member_set_commitment` は、active メンバーのみを
-詰めた**可変長 keccak ではなく**、
+**Forced sub-deviation — `member_set_commitment` is a fixed-length keccak (not a variable-length active-only one).**
+`close_member_set_commitment` (L1) and the in-circuit `member_set_commitment` are **not a variable-length keccak** packing only
+the active members, but rather
 
 ```
 keccak([CLOSE_MEMBER_SET_DOMAIN/IMCM 0x494d434d, member_count, h_0 .. h_15])   // 130 u32 words
 ```
 
-の**固定長 keccak**(padding 分の hash はゼロ埋め、計 130 u32 words)。理由は plonky2_keccak の gadget が
-build-time 固定の入力長を要求するため(可変長は不可)。**injective 性**は preimage 内の `member_count` +
-padding ゼロ埋めにより active 集合に対して保たれる(member_count が異なれば preimage が異なり、同一
-member_count では active hash が一意に並ぶ)。Rust / 回路 / Solidity の三者が同じ固定形をミラー。
-Rust↔Solidity 共有ベクタは
-`0x12450612c5f67b7ff613b705f6e5efccf4bdd43e647570fcb207076f447236cc` に再ピン。
+a **fixed-length keccak** (the hash of the padding is zero-filled, 130 u32 words total). The reason is that the plonky2_keccak gadget
+requires a build-time-fixed input length (variable length is not possible). **Injectivity** is preserved with respect to the active
+set via the `member_count` in the preimage plus the padding zero-fill (a different member_count yields a different preimage, and for the
+same member_count the active hashes are laid out uniquely). Rust / circuit / Solidity all three mirror the same fixed form.
+The Rust↔Solidity shared vector is re-pinned to
+`0x12450612c5f67b7ff613b705f6e5efccf4bdd43e647570fcb207076f447236cc`.
 
-**正確なレイアウト変更:**
-- `BalanceState::h1()` preimage に `member_count`(channel_id の直後に 1 limb)を追加し、16 個の
-  `enc_balance` digest + 16 個の `pending_adds` を全てハッシュ(active/padding 問わず固定 16 個)。
-- `ChannelRecord` の IMCR digest に `member_count` + 16 個全ハッシュを追加。
-- close PI: **85 → 86**(末尾に `member_count` を追加)。
-- withdrawal の `member_index` は `< member_count` に束縛。
+**Exact layout changes:**
+- Add `member_count` (1 limb immediately after channel_id) to the `BalanceState::h1()` preimage, and hash all 16
+  `enc_balance` digests + 16 `pending_adds` (a fixed 16, regardless of active/padding).
+- Add `member_count` + all 16 hashes to the `ChannelRecord` IMCR digest.
+- close PI: **85 → 86** (`member_count` appended at the end).
+- The withdrawal's `member_index` is bound to `< member_count`.
 
-**Solidity ミラー。** `registerChannel` は可変 2..16 メンバーを受理。`ChannelSettlementManager` は
-`bytes32[16]` + `activeMemberCount` を格納し、close 時の固定長 commitment を上記固定形でミラー。
+**Solidity mirror.** `registerChannel` accepts a variable 2..16 members. `ChannelSettlementManager` stores
+`bytes32[16]` + `activeMemberCount` and mirrors the fixed-length commitment at close time in the fixed form above.
 
-**Tests(全 green):**
+**Tests (all green):**
 - multi-N close prove+verify: **N = 2 / 3 / 16**(degree 2^19)。
-- native `validate` / `h1` / `member_set_commitment` の multi-N + 否定テスト。
-- Forge の variable-member-count テスト。
+- native `validate` / `h1` / `member_set_commitment` multi-N + negative tests.
+- Forge variable-member-count test.
 
-### Change B — オンチェーン検証 MLE/WHIR 単独化(Groth16 除去)
+### Change B — on-chain verification switched to MLE/WHIR alone (Groth16 removed)
 
-`IntmaxRollup` の `finalize` / `fraudProof` / `verify` / `fullVerify` は `Groth16Params` を**受け取らず**、
-Groth16 を**呼ばなくなった**。
+`IntmaxRollup`'s `finalize` / `fraudProof` / `verify` / `fullVerify` **no longer take** `Groth16Params` and
+**no longer call** Groth16.
 
-**Soundness-critical — validity-PI 束縛の置換。** 従来 validity public inputs の束縛は **Groth16 の
-PI-hash チェックだけ**で担保されていた。これを
+**Soundness-critical — replacement of the validity-PI binding.** Previously, the binding of the validity public inputs was secured **only by the Groth16
+PI-hash check**. This is replaced with
 
 ```
 _mlePublicInputsMatch(mleProof.publicInputs, keccak256(ValidityPublicInputs))
 ```
 
-に置換 — MLE proof の `publicInputs`(wrap された validity 回路の 8 個の keccak limbs)を、オンチェーンの
-validity PIs と突き合わせて束縛する。これにより Groth16 を外しても validity-PI の on-chain 束縛は維持される。
+— it binds the MLE proof's `publicInputs` (the 8 keccak limbs of the wrapped validity circuit) by matching them against the on-chain
+validity PIs. This way, even with Groth16 removed, the on-chain binding of the validity-PI is maintained.
 
-**v2 MleVerifier はピン済み submodule で既に有効。** R2-#1 gate binding / R2-#2 logUp を含む v2
-MleVerifier は対象 submodule で既にアクティブ。MLE fixture は現行回路向けに再生成。
+**The v2 MleVerifier is already active in the pinned submodule.** The v2 MleVerifier including R2-#1 gate binding / R2-#2 logUp
+is already active in the target submodule. The MLE fixture is regenerated for the current circuit.
 
-**削除物:** `Groth16Verifier.sol`、`GnarkGroth16Verifier.sol`、`E2E_RealGroth16.t.sol`、
-`src/utils/groth16_wrapper.rs`。
+**Removed:** `Groth16Verifier.sol`, `GnarkGroth16Verifier.sol`, `E2E_RealGroth16.t.sol`,
+`src/utils/groth16_wrapper.rs`.
 
-**Verified(オンチェーン経路が実際に通ることを確認):**
-- Forge の MLE / finalize / fraudProof **20 テスト** pass。新しい MLE PI 束縛が unbound/tampered PI を
-  実際に拒否することを示す否定テストを含む:
+**Verified (confirmed that the on-chain path actually goes through):**
+- Forge MLE / finalize / fraudProof **20 tests** pass. This includes negative tests showing that the new MLE PI binding
+  actually rejects unbound/tampered PI:
   - **`test_finalize_tamperedValidityPIs_rejected`**
   - **`test_finalize_unboundMlePublicInputs`**
-- **`test_mleVerify_realProof`** — 実 proof のオンチェーン MLE+WHIR verify(gas ~11.2M)。
-- **`tests/mle_onchain_e2e.rs`** pass。
+- **`test_mleVerify_realProof`** — on-chain MLE+WHIR verify of a real proof (gas ~11.2M).
+- **`tests/mle_onchain_e2e.rs`** pass.
 
-**注記(残課題):** D5 の **one-key registration follow-up(§K-6、registration soundness = genesis-trust)は
-依然 outstanding** であり、N メンバーにも等しく適用される。`e2e.rs` の updating-block 経路は当該
-registration gap によりまだ red(本 F7 では未解消)。
+**Note (remaining items):** D5's **one-key registration follow-up (§K-6, registration soundness = genesis-trust) is
+still outstanding**, and applies equally to N members. The updating-block path in `e2e.rs` is still red due to that
+registration gap (not resolved in this F7).
 
 ---
 
