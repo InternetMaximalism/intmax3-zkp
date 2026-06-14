@@ -47,6 +47,40 @@ struct VPIFixture {
     prover: String,
 }
 
+/// Fixture describing the EXACT on-chain `postBlockAndSubmit` call that
+/// reconstructs the empty block #1 the validity proof proved, plus the
+/// finalize-binding values. Consumed by `contracts/test/MleFinalizeE2E.t.sol`
+/// to exercise the full real on-chain path (postBlock → finalize with real
+/// MLE verification ON).
+///
+/// SECURITY: every field is pulled programmatically from the proved `Block`
+/// and the `ValidityPublicInputs`, never hardcoded — the on-chain block-hash
+/// recomputation and PI-hash binding are what actually validate these.
+#[derive(Serialize)]
+struct BlockFixture {
+    // --- SubBlock reconstruction (must reproduce Block::hash_with_prev_hash) ---
+    channel_id: u32,
+    timestamp: u64,
+    tx_tree_root: String,
+    // key_ids are padded to num_users in the proved Block; the on-chain SubBlock
+    // MUST carry the identical padded vector or the block hash will not match.
+    key_ids: Vec<u32>,
+    block_deposit_hash_chain: String,
+    block_channel_reg_hash_chain: String,
+    // --- finalize() binding values (mirror of vpi_fixture, repeated for convenience) ---
+    genesis_state_root: String,
+    final_state_root: String,
+    initial_block_number: u64,
+    final_block_number: u64,
+    initial_block_chain: String,
+    final_block_chain: String,
+    // --- _submit() commitment inputs (NOT re-checked by finalize/fullVerify; see note) ---
+    // proofHash/proofLength only feed the submission commitment used by the FRAUD path,
+    // which finalize does not touch. Deterministic values derived from the MLE proof bytes.
+    proof_hash: String,
+    proof_length: u32,
+}
+
 fn main() -> anyhow::Result<()> {
     // Accept `--skip-groth16` for backward compatibility with the WHIR-era
     // pipeline. The current MLE-based pipeline never invokes gnark/Groth16
@@ -160,6 +194,76 @@ fn main() -> anyhow::Result<()> {
     let vpi_json = serde_json::to_string_pretty(&vpi_fixture)?;
     fs::write(out_dir.join("vpi_fixture.json"), &vpi_json)?;
     eprintln!("[e2e] VPI fixture written to contracts/test/data/vpi_fixture.json");
+
+    // -----------------------------------------------------------------------
+    // Step 5: Export the block fixture (full on-chain postBlock + finalize path)
+    // -----------------------------------------------------------------------
+    // Pull the EXACT fields the on-chain `_postBlock` folds into the block hash
+    // from the proved Block. `key_ids` is already padded to `num_users` inside
+    // `Block::new` (block.rs:136), so we serialize the padded vector verbatim —
+    // the on-chain SubBlock must carry the identical vector for the recomputed
+    // `_computeBlockHash` to equal `final_block_chain`.
+    let block = &block_witness.block;
+
+    // SANITY: recompute the block hash in Rust exactly as the validity proof did
+    // (prev_hash = genesis blockHashChainAt[0] = 0). This must equal
+    // vpis.final_block_chain; if not, the emitter and the proof disagree and the
+    // on-chain test would fail — we fail loud here instead.
+    let recomputed = block.hash_with_prev_hash(Bytes32::default())?;
+    assert_eq!(
+        recomputed.to_string(),
+        vpis.final_block_chain.to_string(),
+        "block hash sanity check failed: recomputed block hash != vpis.final_block_chain"
+    );
+    // Genesis deposit/reg chains carried by the empty block #1 must be zero
+    // (no deposits, no channel registrations), matching the on-chain genesis state.
+    assert_eq!(
+        block.deposit_hash_chain,
+        Bytes32::default(),
+        "empty block #1 deposit_hash_chain must be zero"
+    );
+    assert_eq!(
+        block.channel_reg_hash_chain,
+        Bytes32::default(),
+        "empty block #1 channel_reg_hash_chain must be zero"
+    );
+
+    // proofHash/proofLength feed ONLY the submission commitment used by the fraud
+    // path; finalize()/fullVerify() never re-check them. Deterministic values
+    // derived from the serialized MLE proof bytes.
+    let proof_length = mle_json.len() as u32;
+    let proof_hash = {
+        // Deterministic, dependency-free FNV-1a digest over the MLE JSON, placed
+        // in the low 64 bits of a bytes32. The value is UNCONSTRAINED on-chain
+        // (finalize/fullVerify never re-derive the submission commitment), so any
+        // deterministic value is sound; we use this only for reproducibility.
+        let mut h: u64 = 0xcbf29ce484222325;
+        for b in mle_json.as_bytes() {
+            h ^= *b as u64;
+            h = h.wrapping_mul(0x100000001b3);
+        }
+        format!("0x{:064x}", h as u128)
+    };
+
+    let block_fixture = BlockFixture {
+        channel_id: block.channel_id,
+        timestamp: block.timestamp,
+        tx_tree_root: block.tx_tree_root.to_string(),
+        key_ids: block.key_ids.clone(),
+        block_deposit_hash_chain: block.deposit_hash_chain.to_string(),
+        block_channel_reg_hash_chain: block.channel_reg_hash_chain.to_string(),
+        genesis_state_root: vpis.initial_ext_commitment.to_string(),
+        final_state_root: vpis.final_ext_commitment.to_string(),
+        initial_block_number: vpis.initial_block_number.as_u64(),
+        final_block_number: vpis.final_block_number.as_u64(),
+        initial_block_chain: vpis.initial_block_chain.to_string(),
+        final_block_chain: vpis.final_block_chain.to_string(),
+        proof_hash,
+        proof_length,
+    };
+    let block_json = serde_json::to_string_pretty(&block_fixture)?;
+    fs::write(out_dir.join("block_fixture.json"), &block_json)?;
+    eprintln!("[e2e] Block fixture written to contracts/test/data/block_fixture.json");
 
     eprintln!("[e2e] Done!");
     Ok(())

@@ -1,47 +1,43 @@
-# Task: registration 機構（オンチェーン受付 → 決定論的 channel tree → validity proof で証明）
+# Task: Sepolia testnet smoke deploy（段階的・第1マイルストーン）
 
-Status: IN PROGRESS — 計画承認済み（/Users/plasma/.claude/plans/zazzy-hugging-zephyr.md）。
-直前: N人化 + MLE/WHIR化 完了・push（commit c71ac3e）。これで D5/Finding D の registration 穴を塞ぎ e2e green 化。
+Status: IN PROGRESS — ユーザー承認済みスコープ「段階的：まず deploy+空ブロック finalize の smoke」。
+secrets(RPC/deployer 鍵) はユーザーが .env/keystore で後追い用意。まず秘密情報不要の build + ローカル検証から。
 
-## 確定設計（R1-R6）
-- R1: deposit パターン踏襲（新 channel_reg_step 回路、block_step 統合）
-- R2: cross-binding（同一 Poseidon member 値が keccak preimage と Poseidon MemberLeaf 両方に → Finding C 解決）
-- R3: registration preimage を固定16・word-aligned 形に（registerChannel 改修、回路 keccak 1個）
-- R4(改訂 2026-06-14): registration を **block hash に含める**（deposit と同様、オンチェーン真正性アンカー）。ext-commitmentのみは捏造登録で channel 乗っ取り可能と判明
-- R5: one-time registration（prev ChannelLeaf == default の unregistered guard）
-- R6: intra-block 排他（registration block vs user-update block）
+## ゴール（第1マイルストーン = smoke）
+Sepolia(Pectra) に MleVerifier + IntmaxRollup を deploy し、**現 fixture（空ブロック#1）で
+deploy → postBlock(blob tx) → finalize（実 MLE/WHIR 検証 ON）まで通す**。送金 lifecycle は第2マイルストーン。
 
-## フェーズ
-- [x] **G1** ChannelRegRecord（src/common/channel_registration.rs）+ native hash_with_prev_hash（R3 固定形）+
-      registerChannel preimage を R3 形に改修 + **byte-exact 差分テスト（Rust↔Solidity, member_count 2/8/16）**
-- [x] **G2** channel_reg_step 回路（src/circuits/validity/channel_reg_hash_chain/、deposit_hash_chain 雛形）:
-      keccak chain 消費 + Poseidon MemberTree 構築（R2）+ ChannelLeaf set + unregistered guard（R5）+ 単体テスト（含 上書き拒否負例）
-- [x] **G3** ExtendedPublicState に channel_reg_hash_chain 追加（commitment ripple）
-- [x] **G4** block_step 統合（条件検証 + R6 排他 + account_tree_root select）
-- [x] **G5** ✅ e2e GREEN化(180.6s)。registration block→deposit→transfer→close、member binding 充足。Finding D 穴を閉鎖 test_utils: register_channel → add_channel_registration（in-band）。e2e: register→deposit→transfer→close
-- [x] **G6** ✅ block-hash アンカー(R4改訂) byte-exact 差分テスト PASS、postBlock accumulator+rollback、block_step が reg chain 強制、e2e PASS、forge 62/62 block-hash アンカー(R4改訂): Block.channel_reg_hash_chain + _computeBlockHash + 回路内block hash再計算 + generator + postBlock snapshot + channelRegHashChain accumulator、byte-exact。registerChannel R3 は G1 済み
-- [~] **G7** fixture 再生成済み、forge MLE/finalize 17 PASS(realProof オンチェーン検証 + 負例)。セキュリティレビュー: validity-path binding SOUND・Finding C 閉鎖。全体lib/clippy 実行中 VK 再生成 + MLE fixture 再生成 + **フルスタック e2e PASS（以前 red の解消実証）** + forge + 全体 lib + clippy/fmt + セキュリティレビュー
+## 重要な事実（調査結果）
+- 既存テストはフローを**分割**検証: `MleE2E.t.sol`=MLE 検証単体、`IntmaxRollup.t.sol` finalize=degreeBits=0(MLE skip)+ダミーPI。
+  **「実 MLE proof + 実 ValidityPI + 実 postBlock block-hash が1つの finalize で噛み合う」フルパスは未テスト** → smoke の核心。
+- fixture は `mle_fixture.json`(MLE proof+VK) と `vpi_fixture.json`(state roots) のみ出力。
+  **postBlock の SubBlock 引数（block hash 0x3ed4… を再現する channelId/timestamp/txTreeRoot/keyIds + deposit/reg hash chain）は未出力** → 新規に必要。
+- block hash = `keccak(prev||channelId||timestamp(u64BE)||keyIds(4B each)||txTreeRoot||depositHashChain||channelRegHashChain)`（IntmaxRollup `_computeBlockHash`、Rust `Block::hash_with_prev_hash` と byte 一致）。
+  空ブロック#1: prev=0(genesis), deposit/reg chain=0, channelId=1, txTreeRoot=0, keyIds=[], timestamp=Rust値。
+- postBlock は **type-3 blob tx 必須**（`blobhash(0)` 空なら NoBlobAttached revert）。finalize は calldata のみ。
+- Pectra は Sepolia 稼働済み（EIP-2537/4844 利用可）。MLE 検証 ~11M gas（block limit 36M 内）。
+- genesisStateRoot = `vpi_fixture.initial_ext_commitment`。deploy 時にこれを渡し、誰も他 tx を打たなければ fixture 列を再現可能。
+
+## フェーズ（S1-S6）
+- [ ] **S1**（秘密情報不要・最優先 de-risk）emitter 拡張: `block_witness` の Block から `block_fixture.json` を出力
+      （channelId, timestamp, txTreeRoot, keyIds[], blockDepositHashChain, blockChannelRegHashChain, proofHash, proofLength, finalStateRoot=final_ext_commitment, genesisStateRoot=initial_ext_commitment）。
+- [ ] **S2**（秘密情報不要・de-risk 核心）フルパス Forge テスト `MleFinalizeE2E.t.sol`:
+      実 mleVk+genesis で IntmaxRollup deploy → postBlockAndSubmit(vm.blobhashes mock, S1 の SubBlock) → finalize(実 ValidityPI + 実 MleProof, degreeBits>0)。
+      **実 MLE 検証 ON で finalize 成功を assert**。失敗時は CLAUDE.md に従い検査を弱めず STOP→調査。
+- [ ] **S3** Forge deploy script `script/Deploy.s.sol`: fixtures を読み MleVerifier+ChannelSettlementVerifier+IntmaxRollup を deploy（任意で registerChannel(opus/codex 2人)+ChannelSettlementManager）。
+- [ ] **S4** blob tx ツール/runbook: `cast send --blob` で postBlockAndSubmit、`cast send` で finalize。Forge script は blob を素直に送れないため cast 併用。
+- [ ] **S5** `foundry.toml [rpc_endpoints]` + `contracts/.env.example` + keystore 手順（`cast wallet import`）。鍵はチャットに出さない。
+- [ ] **S6** ユーザーが RPC/鍵を用意後、Sepolia で deploy→postBlock(blob)→finalize を実行・Etherscan 確認。
 
 ## 検証の要
-- **R3 byte-exact**: native == 回路内 keccak == Solidity preimage（差分テスト）
-- **フルスタック e2e green**: register block 後の更新ブロックで member binding 充足
-- VK/fixture 一括再生成（ext layout 変化）
+- S2 フルパス finalize がローカルで PASS（実 MLE 検証）→ これが通れば Sepolia smoke の主リスクは除去。
+- block hash byte 一致（S1 の SubBlock が 0x3ed4… を再現）。
+- PI hash 束縛（`_mlePublicInputsMatch`）が実 ValidityPI で成立。
 
 ## リスク
-- 🔴 keccak byte-exactness（R3 固定形で軽減も差分テスト必須）
-- ext commitment 変化 → genesis/MLE fixture/VK 一括再生成
-- R6 排他制約漏れ / R5 full-default guard / distinctness は契約委譲
+- 🔴 block hash / PI hash の byte 不一致で finalize revert（S2 で先に潰す）。
+- 🔴 blob tx 送信（Foundry/cast の EIP-4844 対応）。
+- open readiness blocker（registerChannel アクセス制御なし=squatting）は smoke では許容、本番前に対応。
 
 ## 結果記録
 （各フェーズ完了時に追記）
-
-## セキュリティレビュー結果（G7、2026-06-14）
-- **validity-path member binding は SOUND**（prover はオンチェーン登録メンバーにしか束縛不可、Finding C keccak↔Poseidon 閉鎖、block-hash 真正性アンカー airtight、R5/R6 成立）
-- **MEDIUM (Finding E)**: validity-path 登録(IntmaxRollup.registerChannel→member_pubkeys_root) と close-path(ChannelSettlementManager→registeredMemberSetCommitment) が独立別登録面、等価未強制。bp_member_slot も authenticated だが validity 回路で未束縛 → **要ユーザー判断: close-path を validity-path member 集合に統一**
-- **LOW**: registerChannel アクセス制御なし → channel_id squatting/DoS（soundness 破壊ではない、trust model 確認）
-
-## Finding E 修正（2026-06-14、contracts のみ、push 前）
-- **設計**: rollup 登録を single source of truth 化。registerChannel が per-channel に close-form IMCM commitment（`keccak(bytes4(IMCM)||uint32(memberCount)||h_0..h_15)`、verifier/close 回路と byte-exact）+ bp slot/hash を保存、one-time guard（`channelMemberSetCommitment[channelId]==0`）。ChannelSettlementManager constructor が `IChannelRegistry registry` を受け取り、自 commitment + bp が rollup 登録と一致を assert（MemberSetMismatch/BpMismatch）。
-- **検証**: `SKIP_GROTH16=true forge test` 69 passed/0 failed（ChannelSettlementManager 25 + IntmaxRollup 42 + MleE2E 2）。新テスト: 一致 success / member 差異・count 差異・bp 差異・未登録 で revert / commitment byte-equality（count 2/8/16）/ 二重登録 revert。
-- **独立敵対レビュー結論**: **SOUND**（bytes4→uint32 cast 正、commitment byte-exact かつ (count, ordered hashes) で衝突耐性 = 一致 commitment ⇒ 同一集合・順序、bp range-check 済み、zero-bind 不可、TOCTOU なし、deployment-integrity 前提で close==validity 等価）。soundness 変更は merge 前に不要。
-- **残（非ブロッキング）**: LOW-1 registerChannel アクセス制御（既知 #2、squatting を permanent DoS 化するが soundness 破壊でない）。LOW-2 deployment-integrity 前提（manager.registry/channelId 検証）→ ChannelSettlementManager.sol に inline 文書化済み。validity 回路内 per-block IMSB bp_member_slot 束縛は ChannelLeaf/VK 変更要の別 follow-up。
