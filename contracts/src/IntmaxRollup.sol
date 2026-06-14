@@ -614,18 +614,23 @@ contract IntmaxRollup {
         bytes32 pendingHashBefore = _pendingDepositHashChain;
         bytes32 batchDepositHashChain = pendingHashBefore;
 
-        // --- Prepare channel registrations for this posting round (G6, mirror of deposits) ---
-        // The pending reg chain accumulated by `registerChannel` becomes this batch's resulting reg
-        // chain; the registration block carries it in its hash. If no registration happened this
-        // round, `_pendingChannelRegHashChain == channelRegHashChain` (unchanged), so the value the
-        // last sub-block carries equals the prior accumulator — byte-identical to the Rust ordinary
-        // block that carries the unchanged channel_reg_hash_chain.
+        // --- Channel registrations: CUMULATIVE running chain (matches the Rust channel_reg chain) ---
+        // SECURITY: `_pendingChannelRegHashChain` is the LIVE CUMULATIVE registration chain — folded
+        // by `registerChannel`, seeded from genesis 0, and NOT reset per round. So a second
+        // registration in a later round folds onto the FIRST registration's chain, byte-identical to
+        // the Rust witness generator (`ChannelRegRecord::hash_with_prev_hash(self.channel_reg_hash_chain)`,
+        // block_witness_generator.rs). The previous per-round reset-to-0 made a 2nd registration fold
+        // onto 0 instead of the prior chain — fine for a single registration (the single-channel
+        // path), but diverging from Rust for ANY channel registered in a later round than another
+        // (the channel-to-channel path). Mirrors the cumulative deposit chain above.
         bytes32 previousChannelRegHashChain = channelRegHashChain;
         bytes32 pendingChannelRegBefore = _pendingChannelRegHashChain;
+        // CUMULATIVE: `_pendingChannelRegHashChain` is NOT reset (see comment above), so when a
+        // registration has occurred it already equals the running cumulative; the ternary still
+        // selects `previous` only in the never-registered case (pending == 0).
         bytes32 batchChannelRegHashChain = pendingChannelRegBefore == bytes32(0)
             ? previousChannelRegHashChain
             : pendingChannelRegBefore;
-        _pendingChannelRegHashChain = bytes32(0);
 
         uint64 previousPostingRound = postingRound;
         postingRound++;

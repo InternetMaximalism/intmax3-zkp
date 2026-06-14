@@ -264,3 +264,36 @@ ext_commitment≠finalized revert、改竄 Withdrawal(pis_hash 不一致) revert
 ## 既存デプロイ（旧 smoke、空ブロック genesis、再デプロイで置換予定）
 - IntmaxRollup 0xBa057F093765a0AA4c4001d8deC5171E836A0af0 / MleVerifier 0x4154a4A27Ad06dc57Dab86e3a696e2454a62d871（Sepolia）
 - deployer 0x2C0BF10558adafDd21296CbF71dd6FE88c782C80、残高 ~10 ETH（+回収可 1 ETH）
+
+## 2026-06-14 第3マイルストーン: チャネル間送金 (channel-to-channel) 実 Sepolia 完走 ✅
+新デプロイ (manager-free / direct-to-EOA exit):
+- IntmaxRollup  0x5D8e7BAfbFe2Fb79ca8D4a28C3DeC496528Aa452
+- MleVerifier   0xf15a24686Ac6ce10d0c68D7d8005E6ddaE516d41
+順序 (cumulative reg+deposit chain が一致する唯一の順序; C2CBlockHash.t.sol で事前検証):
+  register(ch1) -> postBlock(b0,空) -> deposit(10wei 実エスクロー) -> postBlock(b1,空) ->
+  **register(ch2) を postBlock 間に interleave** -> postBlock(b2,空) -> postBlock(b3, ch1->ch2 transfer) ->
+  postBlock(b4, ch2 withdrawal) -> finalize(sub=4, 実 validity MLE/WHIR) ->
+  withdrawNative(ch2->EOA, 実 withdrawal MLE/WHIR) -> withdraw()(受け手 EOA が実 ETH 受領)
+検証: blockHashChainAt(5)=0xc2f0da7f…=proved final_block_chain 一致 / latestFinalizedStateRoot=0x998c9aa3…(block5)
+      / totalEscrowed 10->7 / pendingWithdrawals[EOA]=1ETH+3wei / withdraw() で実 ETH 受領。
+tx: register1 0x2e54f387… / deposit 0x85ca4b78… / register2 0xc533f4b2… / postBlock b0..b4
+    (0xfdd36fd0/0x244bb605/0x6e15be7b/0x4ea9ea17/0x219bb32e) / finalize 0xfa3b13a2… /
+    withdrawNative 0x4cf96d76… / withdraw 0x7d674fdd…
+ツール: script/DeployC2C.s.sol, script/RunC2C.s.sol, test/C2CFullE2E.t.sol(in-EVM フル e2e PASS),
+        test/C2CBlockHash.t.sol(PASS), src/bin/generate_c2c_fixture.rs(WD_PROVER_SEED 追加).
+
+### ★finding: withdrawal proof calldata が 128KiB(131072B) per-tx 上限に張り付く
+- 単一=130180B(下), c2c seed777=131012B→raw tx 131134B が publicnode/drpc/tenderly 全部で oversized data 拒否
+  (128KiB=go-ethereum txpool 普遍制限)。WHIR/FRI auth-path pruning が FS query index で変動 ⇒ instance 間 ~800B ぶれ。
+- 対処: withdrawal_prover seed(=pis_hash→FS→query index を re-roll, statement/anchored root 不変=demo-neutral)を
+  WD_PROVER_SEED で振る。seed=1 で 130084B<130950 ⇒ 送信成功。generate_c2c_fixture の default を 1 に。
+  将来課題: 大 proof は blob-carried submission か proof 圧縮が要。
+- gotcha: withdraw() を forge script で送ると gas 過少見積で revert ⇒ `cast send "withdraw()" --gas-limit 120000`。
+
+### 未完 / ブロック中
+- [ ] CloseLifecycleE2E.t.sol: reg-chain bytecode 変更で manager CREATE2 addr が 0x5Ddb…→0x2E37DF9A… にシフト。
+      close_* fixture を WD_RECIPIENT=0x2E37DF9AF5A948a1c2a5e2ad69dFdb390F164A55 で再生成要。
+      **現在ブロック**: 並行セッションの WASM wallet WIP(src/wallet_core.rs/wasm_wallet.rs/lib.rs/constants.rs/Cargo.*)が
+      未コンパイル状態 ⇒ generate_withdrawal_fixture がビルド不可。lib が通れば再生成→PASS の見込み。並行作業は不可触。
+- [ ] sub 0..3 の postBlock stake 4ETH ロック中(同 proof で finalize(0..3) すれば各1ETH 回収可、任意)。
+- [ ] commit/push: c2c ツール + reg-chain fix のみを選択ステージ(lib.rs/wallet_core.rs/constants.rs/Cargo.* = 並行WIPは除外)。ユーザー判断待ち。
