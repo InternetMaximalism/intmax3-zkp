@@ -705,8 +705,84 @@ contract IntmaxRollupTest is Test {
     // -----------------------------------------------------------------------
 
     function test_deposit() public {
-        rollup.deposit(bytes32(uint256(0xdead)), 0, 100, bytes32(0));
+        rollup.deposit{value: 100}(bytes32(uint256(0xdead)), 0, 100, bytes32(0));
         assertEq(rollup.depositCount(), 1);
+    }
+
+    // --- Phase 1: native-ETH escrow ---------------------------------------
+
+    /// ETH deposit with msg.value == amount escrows real ETH: totalEscrowed grows and the
+    /// contract's ETH balance grows by exactly `amount`.
+    function test_deposit_eth_escrowsValue() public {
+        address depositor = makeAddr("ethDepositor");
+        vm.deal(depositor, 5 ether);
+
+        uint256 escrowBefore = rollup.totalEscrowed();
+        uint256 balBefore = address(rollup).balance;
+        uint256 amount = 1.5 ether;
+
+        vm.prank(depositor);
+        rollup.deposit{value: amount}(bytes32(uint256(0xCAFE)), 0, amount, bytes32(0));
+
+        assertEq(rollup.totalEscrowed(), escrowBefore + amount, "totalEscrowed += amount");
+        assertEq(address(rollup).balance, balBefore + amount, "contract ETH balance += amount");
+        assertEq(rollup.depositCount(), 1, "deposit accounting still advances");
+    }
+
+    /// ETH deposit where msg.value != amount must revert (no partial / over escrow).
+    function test_deposit_eth_valueMismatch_reverts() public {
+        address depositor = makeAddr("ethDepositor2");
+        vm.deal(depositor, 5 ether);
+
+        // value < amount
+        vm.prank(depositor);
+        vm.expectRevert(bytes("ETH deposit value mismatch"));
+        rollup.deposit{value: 99}(bytes32(uint256(0x1)), 0, 100, bytes32(0));
+
+        // value > amount
+        vm.prank(depositor);
+        vm.expectRevert(bytes("ETH deposit value mismatch"));
+        rollup.deposit{value: 101}(bytes32(uint256(0x1)), 0, 100, bytes32(0));
+
+        assertEq(rollup.totalEscrowed(), 0, "no escrow recorded on revert");
+        assertEq(rollup.depositCount(), 0, "no deposit recorded on revert");
+    }
+
+    /// Non-ETH deposit (tokenIndex != 0) must reject any forwarded ETH.
+    function test_deposit_nonEth_withValue_reverts() public {
+        address depositor = makeAddr("tokenDepositor");
+        vm.deal(depositor, 5 ether);
+
+        vm.prank(depositor);
+        vm.expectRevert(bytes("non-ETH deposit must not carry ETH"));
+        rollup.deposit{value: 1}(bytes32(uint256(0x2)), 7, 100, bytes32(0));
+
+        assertEq(rollup.totalEscrowed(), 0, "non-ETH deposit never escrows");
+        assertEq(rollup.depositCount(), 0, "no deposit recorded on revert");
+    }
+
+    /// Non-ETH deposit with zero value succeeds (accounting-only) and does not change totalEscrowed.
+    function test_deposit_nonEth_zeroValue_succeeds() public {
+        uint256 escrowBefore = rollup.totalEscrowed();
+        uint256 balBefore = address(rollup).balance;
+
+        rollup.deposit(bytes32(uint256(0x3)), 7, 100, bytes32(0));
+
+        assertEq(rollup.depositCount(), 1, "non-ETH deposit accounting advances");
+        assertEq(rollup.totalEscrowed(), escrowBefore, "totalEscrowed unchanged for non-ETH");
+        assertEq(address(rollup).balance, balBefore, "no ETH custodied for non-ETH deposit");
+    }
+
+    /// Plain ETH transfer (no calldata) to the rollup must revert: no receive()/fallback() exists,
+    /// so stray ETH cannot inflate the contract balance outside of `deposit`.
+    function test_plainEthTransfer_reverts() public {
+        address sender = makeAddr("straySender");
+        vm.deal(sender, 5 ether);
+
+        vm.prank(sender);
+        (bool ok, ) = address(rollup).call{value: 1 ether}("");
+        assertFalse(ok, "plain ETH transfer to rollup must revert");
+        assertEq(address(rollup).balance, 0, "no stray ETH accepted");
     }
 
     // -----------------------------------------------------------------------
@@ -1064,7 +1140,7 @@ contract IntmaxRollupTest is Test {
         uint256 badSubmissionId = rollup.nextSubmissionId();
 
         // Queue a deposit so the target block picks it up.
-        rollup.deposit(bytes32(uint256(0xdeadbeef)), 0, 100, bytes32(uint256(0xbeef)));
+        rollup.deposit{value: 100}(bytes32(uint256(0xdeadbeef)), 0, 100, bytes32(uint256(0xbeef)));
 
         MleVerifier.MleProof memory mleProof = _defaultMleProof();
         bytes memory proofBytes = abi.encode(mleProof);
@@ -1654,7 +1730,11 @@ contract IntmaxRollupTest is Test {
     function test_fraudProof_rollbackGasWithManyDeposits() public {
         // Queue many deposits
         for (uint256 i = 0; i < 200; i++) {
-            rollup.deposit(bytes32(uint256(i + 1)), uint32(i % 10), 100 + i, bytes32(uint256(i)));
+            uint32 tokenIndex = uint32(i % 10);
+            uint256 amount = 100 + i;
+            // ETH deposits (tokenIndex == 0) must forward exactly `amount`; non-ETH must send 0.
+            uint256 depositValue = tokenIndex == 0 ? amount : 0;
+            rollup.deposit{value: depositValue}(bytes32(uint256(i + 1)), tokenIndex, amount, bytes32(uint256(i)));
         }
 
         MleVerifier.MleProof memory mleProof = _defaultMleProof();

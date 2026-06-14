@@ -133,9 +133,40 @@ contract IntmaxRollup {
 
     event WithdrawalCredited(address indexed recipient, uint256 amount);
 
+    /// @notice Emitted once when the deployer fixes the withdrawal-circuit MLE VK.
+    event WithdrawalVkInitialized(uint256 degreeBits, bytes32 preprocessedRoot);
+
+    /// @notice Emitted per `Withdrawal` leaf paid out by `withdrawNative`.
+    event NativeWithdrawn(
+        address indexed recipient,
+        uint256 amount,
+        bytes32 indexed nullifier,
+        uint64 blockNumber
+    );
+
+    error WithdrawalVkNotSet();
+    error WithdrawalExtCommitmentMismatch();
+    error WithdrawalPublicInputsMismatch();
+    error WithdrawalProofInvalid();
+    error WithdrawalNullifierUsed();
+    error WithdrawalNotEthToken();
+    error WithdrawalEmptySet();
+
     // -----------------------------------------------------------------------
     // Types
     // -----------------------------------------------------------------------
+
+    /// @notice A single native withdrawal leaf, byte-identical to the Rust `common::Withdrawal`
+    ///         (src/common/withdrawal.rs). The keccak `withdrawal_hash` chain folds these in order
+    ///         (`solidity_keccak256` u32→4-byte-BE packing), and the fold is re-checked on-chain so
+    ///         the amount/recipient paid is the one bound by the verified proof — never caller-declared.
+    struct Withdrawal {
+        address recipient;   // 20 bytes  (Rust Address, 5×u32 big-endian)
+        uint32  tokenIndex;  // 4 bytes
+        uint256 amount;      // 32 bytes  (Rust U256, 8×u32 big-endian)
+        bytes32 nullifier;   // 32 bytes
+        bytes32 auxData;     // 32 bytes
+    }
 
     struct Submission {
         bytes32 commitment;   // keccak256(blobHash || proofHash || proofLength || stateRoot || ethBlockNumber)
@@ -244,6 +275,42 @@ contract IntmaxRollup {
     ///         the logUp h̃(r) binding gap (R2-#2).
     uint256[] internal _mleSubgroupGenPowers;
 
+    // -----------------------------------------------------------------------
+    // Withdrawal payout VK (Phase 2) — a SECOND, independent MLE verification
+    // key for the on-chain native-ETH withdrawal proof. It verifies the wrapped
+    // `WithdrawalCircuit` proof, which is a DIFFERENT Plonky2 circuit than the
+    // validity proof, so it needs its own preprocessedRoot / gatesDigest / kIs /
+    // subgroupGenPowers / WhirParams. The MleVerifier CONTRACT is shared (one
+    // deploy) — only the VK parameters differ — keeping us under EIP-170.
+    //
+    // SECURITY: set EXACTLY ONCE by the deployer via `initializeWithdrawalVk`,
+    // after which it is immutable. `withdrawNative` reverts until it is set with
+    // `degreeBits > 0`, so there is no window in which the payout path runs with
+    // MLE verification disabled (unlike the validity path's degreeBits==0
+    // test-disable seam, which the money path deliberately does NOT inherit).
+    // -----------------------------------------------------------------------
+
+    /// @notice Deployer — the only address allowed to set the withdrawal VK (once).
+    address public immutable deployer;
+
+    /// @notice Withdrawal-circuit MLE verification key. degreeBits == 0 ⇒ unset.
+    MleVk public withdrawalMleVk;
+
+    /// @notice True once `initializeWithdrawalVk` has run. Set-once latch.
+    bool public withdrawalVkInitialized;
+
+    SpongefishWhirVerify.WhirParams internal _whirParamsW;
+    bytes public whirProtocolIdW;
+    bytes public whirSplitSessionIdW;
+    uint256[] internal _mleKIsW;
+    uint256[] internal _mleSubgroupGenPowersW;
+
+    /// @notice Spent withdrawal nullifiers (rollup-level, native payout path).
+    /// SECURITY: each verified `Withdrawal.nullifier` (= Poseidon over the
+    ///           settled transfer, recipient/amount-binding) may be paid out at
+    ///           most once. Checked-then-set (CEI) before any value is credited.
+    mapping(bytes32 => bool) public withdrawalNullifierUsed;
+
     uint256 private constant _NOT_ENTERED = 1;
     uint256 private constant _ENTERED = 2;
     uint256 private _status = _NOT_ENTERED;
@@ -335,11 +402,36 @@ contract IntmaxRollup {
     /// `registerChannel` is byte-identical to the one the close path matches (Finding E).
     uint32 internal constant CLOSE_MEMBER_SET_DOMAIN = 0x494d434d;
 
+    /// @notice The token index reserved for native ETH. A deposit with this token index escrows
+    ///         real ETH (msg.value must equal `amount`); any other token index is accounting-only
+    ///         in v1 and must not carry ETH.
+    uint32 public constant ETH_TOKEN_INDEX = 0;
+
+    /// @notice Sum of real native ETH held by this contract on behalf of queued/finalized deposits.
+    /// SECURITY: `totalEscrowed` is the global ceiling for all future native payouts
+    ///           (Σ payouts ≤ totalEscrowed). It is enforced later by an underflow-revert on every
+    ///           decrement at payout time, so no payout path can ever release more ETH than was
+    ///           escrowed here. It is intentionally kept disjoint from the `POST_BLOCK_STAKE` ETH
+    ///           tracked by `stakeInfo`/`pendingWithdrawals` (fraud-stake accounting), which is NOT
+    ///           part of this balance.
+    uint256 public totalEscrowed;
+
     mapping(uint256 => Submission) internal _submissions;
     uint256 public nextSubmissionId;
 
     /// @notice The latest finalized state root (= final_ext_commitment from the last accepted proof).
     bytes32 public latestFinalizedStateRoot;
+
+    /// @notice Set of ALL state roots that have ever been finalized (the latest plus every prior).
+    /// SECURITY: a native withdrawal proof binds to the state root it was proven against
+    ///           (`ext_public_state_commitment`). Finalization advances `latestFinalizedStateRoot`
+    ///           continuously, so checking equality against only the latest would lock honest
+    ///           withdrawers out of an already-earned withdrawal the moment the next block finalizes.
+    ///           Finalized roots are PERMANENT — `finalize` cannot re-target a finalized submission
+    ///           and `fraudProof` cannot touch blocks at/before the latest finalized block — so a
+    ///           root in this set can never be rolled back. Accepting any member is therefore sound
+    ///           (the per-withdrawal nullifier still prevents double-spend across roots).
+    mapping(bytes32 => bool) internal finalizedStateRoots;
 
     /// @notice The latest finalized intmax block number.
     ///         Fraud proofs cannot target submissions at or before this block.
@@ -383,35 +475,10 @@ contract IntmaxRollup {
         bytes32 _genesisStateRoot
     ) {
         fraudTreasury = _fraudTreasury;
+        deployer = msg.sender;
         mleVk = _mleVk;
-        // Deep-copy WhirParams to storage (scalar fields + dynamic arrays)
-        _whirParams.numVariables = whirParams_.numVariables;
-        _whirParams.foldingFactor = whirParams_.foldingFactor;
-        _whirParams.numVectors = whirParams_.numVectors;
-        _whirParams.numCommitments = whirParams_.numCommitments;
-        _whirParams.outDomainSamples = whirParams_.outDomainSamples;
-        _whirParams.inDomainSamples = whirParams_.inDomainSamples;
-        _whirParams.initialSumcheckRounds = whirParams_.initialSumcheckRounds;
-        _whirParams.numRounds = whirParams_.numRounds;
-        _whirParams.finalSumcheckRounds = whirParams_.finalSumcheckRounds;
-        _whirParams.finalSize = whirParams_.finalSize;
-        _whirParams.initialCodewordLength = whirParams_.initialCodewordLength;
-        _whirParams.initialMerkleDepth = whirParams_.initialMerkleDepth;
-        _whirParams.initialDomainGenerator = whirParams_.initialDomainGenerator;
-        _whirParams.initialInterleavingDepth = whirParams_.initialInterleavingDepth;
-        _whirParams.initialNumVariables = whirParams_.initialNumVariables;
-        _whirParams.initialCosetSize = whirParams_.initialCosetSize;
-        _whirParams.initialNumCosets = whirParams_.initialNumCosets;
-        // Copy dynamic arrays
-        for (uint256 i = 0; i < whirParams_.rounds.length; i++) {
-            _whirParams.rounds.push(whirParams_.rounds[i]);
-        }
-        for (uint256 i = 0; i < whirParams_.evaluationPoint.length; i++) {
-            _whirParams.evaluationPoint.push(whirParams_.evaluationPoint[i]);
-        }
-        for (uint256 i = 0; i < whirParams_.evaluationPoint2.length; i++) {
-            _whirParams.evaluationPoint2.push(whirParams_.evaluationPoint2[i]);
-        }
+        // Deep-copy WhirParams to storage (scalar fields + dynamic arrays).
+        _copyWhirParams(_whirParams, whirParams_);
         whirProtocolId = _whirProtocolId;
         whirSplitSessionId = _whirSplitSessionId;
         // v2 VK-bound permutation context (R2-#2 logUp soundness fix)
@@ -427,6 +494,73 @@ contract IntmaxRollup {
         blockHashChainAt[0] = bytes32(0);
     }
 
+    /// @dev Deep-copy a WhirParams (scalar fields + dynamic arrays) from memory into a storage
+    ///      slot. Used by the constructor (validity VK) and `initializeWithdrawalVk` (withdrawal
+    ///      VK). The destination arrays are assumed empty (each VK slot is written exactly once).
+    function _copyWhirParams(
+        SpongefishWhirVerify.WhirParams storage dst,
+        SpongefishWhirVerify.WhirParams memory src
+    ) private {
+        dst.numVariables = src.numVariables;
+        dst.foldingFactor = src.foldingFactor;
+        dst.numVectors = src.numVectors;
+        dst.numCommitments = src.numCommitments;
+        dst.outDomainSamples = src.outDomainSamples;
+        dst.inDomainSamples = src.inDomainSamples;
+        dst.initialSumcheckRounds = src.initialSumcheckRounds;
+        dst.numRounds = src.numRounds;
+        dst.finalSumcheckRounds = src.finalSumcheckRounds;
+        dst.finalSize = src.finalSize;
+        dst.initialCodewordLength = src.initialCodewordLength;
+        dst.initialMerkleDepth = src.initialMerkleDepth;
+        dst.initialDomainGenerator = src.initialDomainGenerator;
+        dst.initialInterleavingDepth = src.initialInterleavingDepth;
+        dst.initialNumVariables = src.initialNumVariables;
+        dst.initialCosetSize = src.initialCosetSize;
+        dst.initialNumCosets = src.initialNumCosets;
+        for (uint256 i = 0; i < src.rounds.length; i++) {
+            dst.rounds.push(src.rounds[i]);
+        }
+        for (uint256 i = 0; i < src.evaluationPoint.length; i++) {
+            dst.evaluationPoint.push(src.evaluationPoint[i]);
+        }
+        for (uint256 i = 0; i < src.evaluationPoint2.length; i++) {
+            dst.evaluationPoint2.push(src.evaluationPoint2[i]);
+        }
+    }
+
+    /// @notice Set the withdrawal-circuit MLE verification key. Deployer-only, set EXACTLY ONCE.
+    /// @dev SECURITY: the withdrawal VK governs which Plonky2 circuit `withdrawNative` accepts. It
+    ///      is fixed by the deployer immediately after deploy (same trust as the constructor's
+    ///      validity VK) and can never be changed (`withdrawalVkInitialized` latch). `degreeBits`
+    ///      must be > 0 — the payout path never runs with verification disabled. Splitting this out
+    ///      of the constructor avoids re-plumbing 9 existing deploy sites; the set-once + deployer
+    ///      guard make it behaviorally immutable, and `withdrawNative` reverts until it is set.
+    function initializeWithdrawalVk(
+        MleVk memory _vk,
+        SpongefishWhirVerify.WhirParams memory whirParams_,
+        bytes memory _protocolId,
+        bytes memory _sessionId,
+        uint256[] memory _kIs,
+        uint256[] memory _subgroupGenPowers
+    ) external {
+        require(msg.sender == deployer, "only deployer");
+        require(!withdrawalVkInitialized, "withdrawal vk already set");
+        require(_vk.degreeBits > 0, "withdrawal vk degreeBits 0");
+        withdrawalVkInitialized = true;
+        withdrawalMleVk = _vk;
+        _copyWhirParams(_whirParamsW, whirParams_);
+        whirProtocolIdW = _protocolId;
+        whirSplitSessionIdW = _sessionId;
+        for (uint256 i = 0; i < _kIs.length; i++) {
+            _mleKIsW.push(_kIs[i]);
+        }
+        for (uint256 i = 0; i < _subgroupGenPowers.length; i++) {
+            _mleSubgroupGenPowersW.push(_subgroupGenPowers[i]);
+        }
+        emit WithdrawalVkInitialized(_vk.degreeBits, _vk.preprocessedRoot);
+    }
+
     // postBlock()  —  post a batch of fast blocks (one posting round)
     // -----------------------------------------------------------------------
 
@@ -435,7 +569,9 @@ contract IntmaxRollup {
     ///         calldata for data availability.
     ///
     ///         Deposits are applied to the LAST sub-block in the batch only.
-    ///         Intermediate sub-blocks have zero deposit hash chains.
+    ///         The deposit hash chain is CUMULATIVE: intermediate sub-blocks carry the chain as of
+    ///         the previous round, and the last sub-block carries it including this round's deposits
+    ///         (matches the Rust `deposit_hash_chain`; mirrors the channel-reg carry-forward).
     ///
     ///         `blockHashChainAt` is recorded only for the final block number
     ///         of the batch (the posting-round boundary).
@@ -467,10 +603,16 @@ contract IntmaxRollup {
         bytes32 previousDepositHashChain = depositHashChain;
         uint64 processedDepositsBefore = processedDepositCount;
 
-        // --- Prepare deposits for this posting round ---
+        // --- Deposits: cumulative running chain (matches the Rust `deposit_hash_chain`) ---
+        // SECURITY: `_pendingDepositHashChain` is the LIVE CUMULATIVE deposit chain — folded by
+        // `deposit()`, seeded from genesis 0, and NOT reset per round. So an empty round carries it
+        // forward and a deposit round folds onto the prior cumulative, byte-identical to the Rust
+        // witness generator whose every block carries `self.deposit_hash_chain`
+        // (block_witness_generator.rs:617,631). The previous per-round reset-to-0 diverged from Rust
+        // for any block following a deposit and silently dropped deposit history across rounds —
+        // this mirrors the channel-reg chain's existing carry-forward semantics below.
         bytes32 pendingHashBefore = _pendingDepositHashChain;
         bytes32 batchDepositHashChain = pendingHashBefore;
-        _pendingDepositHashChain = bytes32(0);
 
         // --- Prepare channel registrations for this posting round (G6, mirror of deposits) ---
         // The pending reg chain accumulated by `registerChannel` becomes this batch's resulting reg
@@ -494,8 +636,12 @@ contract IntmaxRollup {
         for (uint256 i = 0; i < subBlocks.length; i++) {
             currentBlockNumber++;
 
-            // Only the last sub-block carries deposits.
-            bytes32 depositHash = bytes32(0);
+            // Deposits: every block carries the cumulative chain. Intermediate sub-blocks carry the
+            // chain as of the previous round (this round's deposits are all assigned to the last
+            // sub-block); the last sub-block carries the chain including this round's deposits.
+            // Mirrors the channel-reg carry-forward and the Rust generator (every block carries the
+            // cumulative deposit_hash_chain).
+            bytes32 depositHash = previousDepositHashChain;
             if (i == lastIdx) {
                 depositHash = batchDepositHashChain;
             }
@@ -563,7 +709,22 @@ contract IntmaxRollup {
         uint32 tokenIndex,
         uint256 amount,
         bytes32 auxData
-    ) external {
+    ) external payable {
+        // --- Native-ETH escrow (Phase 1) ---
+        // SECURITY: For ETH deposits the caller MUST forward exactly `amount` wei; we then grow
+        // `totalEscrowed`, the global ceiling for all future native payouts. CEI: this is a pure
+        // effect on our own balance/storage — there is no external call here, so there is nothing
+        // to reorder. Stray ETH on a non-ETH deposit is rejected (no value sink), and plain ETH
+        // transfers revert because the contract exposes no receive()/fallback().
+        if (tokenIndex == ETH_TOKEN_INDEX) {
+            require(msg.value == amount, "ETH deposit value mismatch");
+            totalEscrowed += amount;
+        } else {
+            // Non-ETH tokens are out of scope for v1: accounting is preserved below, but no real
+            // value is custodied, so the call must not carry ETH.
+            require(msg.value == 0, "non-ETH deposit must not carry ETH");
+        }
+
         uint64 idx = depositCount++;
 
         // Compute deposit hash matching Rust's Deposit::hash_with_prev_hash:
@@ -790,6 +951,7 @@ contract IntmaxRollup {
 
         sub.finalized = true;
         latestFinalizedStateRoot = stateRoot;
+        finalizedStateRoots[stateRoot] = true; // permanent; enables withdrawals against any finalized root
         latestFinalizedBlockNumber = validityPIs.finalBlockNumber;
 
         emit Finalized(submissionId, stateRoot);
@@ -885,6 +1047,147 @@ contract IntmaxRollup {
         pendingWithdrawals[msg.sender] = 0;
         (bool ok, ) = msg.sender.call{value: amount}("");
         require(ok, "Withdraw failed");
+    }
+
+    // -----------------------------------------------------------------------
+    // withdrawNative()  —  native ETH payout for a verified withdrawal proof (Phase 2)
+    // -----------------------------------------------------------------------
+
+    /// @notice Pay out native ETH for a wrapped `WithdrawalCircuit` proof, bound to the latest
+    ///         finalized state. The recipient / amount / nullifier of every leaf come from the
+    ///         VERIFIED proof (re-folded keccak chain → pis_hash), never from caller declaration.
+    ///
+    /// @param ws               The withdrawal leaves, in chain order. Re-folded and bound to the proof.
+    /// @param withdrawalProver The `withdrawal_prover` address committed in the proof's pis_hash.
+    /// @param mleProof         The wrapped WithdrawalCircuit MLE/WHIR proof.
+    ///
+    /// SECURITY:
+    ///   • MLE/WHIR verify the wrapped WithdrawalCircuit proof under the withdrawal VK (real, not a stub).
+    ///   • `ext_public_state_commitment` PI (limbs 8..16) must equal `latestFinalizedStateRoot` —
+    ///     the withdrawals are anchored to a state the validity proof already finalized.
+    ///   • `ws` are re-folded into `withdrawal_hash` → `pis_hash` (limbs 0..8 of the proof). A
+    ///     tampered amount/recipient breaks the hash and reverts. So payout == proof.
+    ///   • Per leaf: single-use nullifier (CEI check-then-set) + `totalEscrowed -= amount` (the
+    ///     GLOBAL solvency ceiling: Σ payouts ≤ Σ real ETH escrowed; underflow reverts the whole
+    ///     call → cross-channel theft impossible) + pull-payment credit. v1 pays ETH token only.
+    ///   • No external call here (pull-payment via `withdraw()`); `nonReentrant` is belt-and-braces.
+    function withdrawNative(
+        Withdrawal[] calldata ws,
+        address withdrawalProver,
+        MleVerifier.MleProof calldata mleProof
+    ) external nonReentrant {
+        if (!withdrawalVkInitialized) revert WithdrawalVkNotSet();
+        if (ws.length == 0) revert WithdrawalEmptySet();
+
+        // 1. Verify the wrapped WithdrawalCircuit proof (real MLE/WHIR under the withdrawal VK).
+        if (!_verifyMleWithdrawal(mleProof)) revert WithdrawalProofInvalid();
+
+        // 2. The wrapped WithdrawalCircuit registers 17 PI limbs:
+        //      [ pis_hash(8) || ext_commitment(8) || block_number(1) ]  (withdrawal_circuit.rs:206-208)
+        //    NOTE: `block_number` is a u63 that fits in ONE Goldilocks field element, so its
+        //    REGISTERED form is a single limb (`BlockNumberTarget::to_vec()`), even though the
+        //    pis_hash keccak PREIMAGE splits it into 2 big-endian u32 words (`to_u32_vec`).
+        uint256[] memory pi = mleProof.publicInputs;
+        if (pi.length != 17) revert WithdrawalPublicInputsMismatch();
+
+        // 2a. ext_commitment PI must be a state root this rollup has finalized (anchors the
+        //     withdrawal to finalized state). Any historically-finalized root is accepted, not just
+        //     the latest — finalized roots are permanent, so this is sound and avoids locking honest
+        //     withdrawers out when the next block finalizes (the nullifier still blocks double-spend).
+        bytes32 extCommitment = _limbsToBytes32(pi, 8);
+        if (!finalizedStateRoots[extCommitment]) revert WithdrawalExtCommitmentMismatch();
+
+        // 2b. block_number PI (single limb 16 = the u63 value). Used in the pis_hash recomputation
+        //     below (re-split into 2 big-endian u32 words there); no separate equality check is
+        //     needed — the pis_hash binding (step 3) already forces it to equal the circuit's value.
+        uint64 blockNumber = uint64(pi[16]);
+
+        // 3. Re-fold the keccak withdrawal chain (seed 0) → withdrawal_hash, recompute pis_hash, and
+        //    require it equals the proof's pis_hash PI (limbs 0..8). Binds `ws` to the verified proof.
+        bytes32 withdrawalHash = bytes32(0);
+        for (uint256 i = 0; i < ws.length; i++) {
+            withdrawalHash = _foldWithdrawalLeaf(withdrawalHash, ws[i]);
+        }
+        bytes32 pisHash = _withdrawalPisHash(withdrawalHash, withdrawalProver, extCommitment, blockNumber);
+        if (!_limbsMatchBytes32(pi, 0, pisHash)) revert WithdrawalPublicInputsMismatch();
+
+        // 4. Pay out each leaf (CEI: all checks/effects precede any value movement; pull-payment).
+        for (uint256 i = 0; i < ws.length; i++) {
+            Withdrawal calldata w = ws[i];
+            if (w.tokenIndex != ETH_TOKEN_INDEX) revert WithdrawalNotEthToken(); // v1: ETH only
+            if (withdrawalNullifierUsed[w.nullifier]) revert WithdrawalNullifierUsed();
+            withdrawalNullifierUsed[w.nullifier] = true;
+            // GLOBAL solvency ceiling: Solidity 0.8 underflow reverts if Σ would exceed real escrow.
+            totalEscrowed -= w.amount;
+            pendingWithdrawals[w.recipient] += w.amount;
+            emit NativeWithdrawn(w.recipient, w.amount, w.nullifier, blockNumber);
+        }
+    }
+
+    /// @dev Fold one Withdrawal leaf into the keccak chain. Byte-identical to Rust
+    ///      `Withdrawal::hash_with_prev_hash` (withdrawal.rs:97, via solidity_keccak256's u32→4-byte
+    ///      big-endian packing):
+    ///        keccak256( prev(32) || recipient(20) || tokenIndex(4) || amount(32) || nullifier(32) || auxData(32) )
+    ///      = 152-byte preimage. abi.encodePacked emits address as 20 bytes, uint32 as 4, uint256 as
+    ///      32 (big-endian) — matching the Rust 5/1/8 u32-limb layout exactly.
+    function _foldWithdrawalLeaf(bytes32 prev, Withdrawal calldata w) private pure returns (bytes32) {
+        return keccak256(
+            abi.encodePacked(prev, w.recipient, w.tokenIndex, w.amount, w.nullifier, w.auxData)
+        );
+    }
+
+    /// @dev pis_hash = remove_3bits( keccak256(
+    ///        withdrawal_hash(32) || prover(20) || ext_commitment(32) || blockNumber(8, big-endian) ) )
+    ///      mirroring `WithdrawalProofPublicInputs` (withdrawal_circuit.rs:57-68, 121-125).
+    ///      remove_3bits clears the TOP 3 bits of the 256-bit value (Rust Bytes32::remove_3bits:
+    ///      `limb[0] &= (1<<29)-1`, limb[0] = most-significant u32) ⇒ `value & ((1<<253)-1)`.
+    ///      blockNumber as abi.encodePacked(uint64) = [high32_BE, low32_BE] = Rust to_u32_vec [high, low].
+    function _withdrawalPisHash(
+        bytes32 withdrawalHash,
+        address prover,
+        bytes32 extCommitment,
+        uint64 blockNumber
+    ) private pure returns (bytes32) {
+        bytes32 h = keccak256(abi.encodePacked(withdrawalHash, prover, extCommitment, blockNumber));
+        return bytes32(uint256(h) & ((uint256(1) << 253) - 1));
+    }
+
+    /// @dev Reconstruct a bytes32 from 8 big-endian u32 limbs starting at `off` (Bytes32::to_u32_vec
+    ///      order: limb[0] = most-significant 4 bytes). Limbs are masked to u32; after a successful
+    ///      `_verifyMleWithdrawal` the proof's publicInputs ARE the circuit's registered u32 PI wires.
+    function _limbsToBytes32(uint256[] memory limbs, uint256 off) private pure returns (bytes32) {
+        uint256 v = 0;
+        for (uint256 i = 0; i < 8; i++) {
+            v = (v << 32) | (limbs[off + i] & 0xFFFFFFFF);
+        }
+        return bytes32(v);
+    }
+
+    /// @dev Check 8 big-endian u32 limbs at `off` equal `value` EXACTLY (no masking — a limb with
+    ///      high bits set is malformed and rejected). Mirrors `_mlePublicInputsMatch`.
+    function _limbsMatchBytes32(uint256[] memory limbs, uint256 off, bytes32 value)
+        private pure returns (bool)
+    {
+        uint256 h = uint256(value);
+        for (uint256 i = 0; i < 8; i++) {
+            uint256 limb = (h >> (224 - i * 32)) & 0xFFFFFFFF;
+            if (limbs[off + i] != limb) return false;
+        }
+        return true;
+    }
+
+    /// @dev Verify the wrapped WithdrawalCircuit proof under the withdrawal VK.
+    ///      SECURITY: NO `degreeBits == 0` disable seam — `withdrawNative` already requires
+    ///      `withdrawalVkInitialized`, and `initializeWithdrawalVk` enforces `degreeBits > 0`, so the
+    ///      payout path ALWAYS runs real MLE/WHIR verification (unlike the validity test-disable path).
+    function _verifyMleWithdrawal(
+        MleVerifier.MleProof calldata mleProof
+    ) internal view returns (bool) {
+        try this._verifyMleWithVk(mleProof, true) returns (bool v) {
+            return v;
+        } catch {
+            return false;
+        }
     }
 
     // -----------------------------------------------------------------------
@@ -1021,71 +1324,75 @@ contract IntmaxRollup {
         // Production deployments MUST set mleVk.degreeBits > 0.
         if (mleVk.degreeBits == 0) return true;
 
-        try this._verifyMleExternal(mleProof) returns (bool v) {
+        try this._verifyMleWithVk(mleProof, false) returns (bool v) {
             return v;
         } catch {
             return false;
         }
     }
 
-    /// @dev External helper so _verifyMle can try/catch on MLE verification.
-    ///      Uses stored VK parameters (mleVk, _whirParams, whirProtocolId,
-    ///      whirSplitSessionId, _mleKIs, _mleSubgroupGenPowers, mleVk.gatesDigest).
-    ///      v2: the WHIR ext3 evaluations that were previously a separate
-    ///      `whirEvals` parameter are now embedded inside `mleProof` itself
-    ///      (Issues #3 + #7), so an attacker can no longer mix-and-match them.
-    function _verifyMleExternal(
-        MleVerifier.MleProof calldata mleProof
+    /// @dev External helper so `_verifyMle`/`_verifyMleWithdrawal` can try/catch on MLE verification.
+    ///      `isWithdrawal` selects which VK storage to use: the validity VK (`mleVk`/`_whirParams`/…)
+    ///      or the withdrawal VK (`withdrawalMleVk`/`_whirParamsW`/…). Shared to stay under EIP-170.
+    ///      v2: the WHIR ext3 evaluations are embedded inside `mleProof` itself (Issues #3 + #7), so
+    ///      an attacker cannot mix-and-match them.
+    function _verifyMleWithVk(
+        MleVerifier.MleProof calldata mleProof,
+        bool isWithdrawal
     ) external view returns (bool) {
-        // SECURITY: Load WHIR params from storage — deep copy to memory for the library call.
-        SpongefishWhirVerify.WhirParams memory whirParams = _loadWhirParams();
+        MleVk storage vk = isWithdrawal ? withdrawalMleVk : mleVk;
+        SpongefishWhirVerify.WhirParams memory whirParams =
+            _loadWhirParamsFrom(isWithdrawal ? _whirParamsW : _whirParams);
         MleVerifier.VerifyParams memory vp = MleVerifier.VerifyParams({
-            degreeBits: mleVk.degreeBits,
-            preprocessedCommitmentRoot: mleVk.preprocessedRoot,
-            numConstants: mleVk.numConstants,
-            numRoutedWires: mleVk.numRoutedWires,
-            protocolId: whirProtocolId,
-            sessionId: whirSplitSessionId,
-            kIs: _mleKIs,
-            subgroupGenPowers: _mleSubgroupGenPowers
+            degreeBits: vk.degreeBits,
+            preprocessedCommitmentRoot: vk.preprocessedRoot,
+            numConstants: vk.numConstants,
+            numRoutedWires: vk.numRoutedWires,
+            protocolId: isWithdrawal ? whirProtocolIdW : whirProtocolId,
+            sessionId: isWithdrawal ? whirSplitSessionIdW : whirSplitSessionId,
+            kIs: isWithdrawal ? _mleKIsW : _mleKIs,
+            subgroupGenPowers: isWithdrawal ? _mleSubgroupGenPowersW : _mleSubgroupGenPowers
         });
-        return mleVerifier.verify(mleProof, vp, whirParams, mleVk.gatesDigest);
+        return mleVerifier.verify(mleProof, vp, whirParams, vk.gatesDigest);
     }
 
-    /// @dev Load WhirParams from storage into memory.
-    function _loadWhirParams() private view returns (SpongefishWhirVerify.WhirParams memory p) {
-        p.numVariables = _whirParams.numVariables;
-        p.foldingFactor = _whirParams.foldingFactor;
-        p.numVectors = _whirParams.numVectors;
-        p.numCommitments = _whirParams.numCommitments;
-        p.outDomainSamples = _whirParams.outDomainSamples;
-        p.inDomainSamples = _whirParams.inDomainSamples;
-        p.initialSumcheckRounds = _whirParams.initialSumcheckRounds;
-        p.numRounds = _whirParams.numRounds;
-        p.finalSumcheckRounds = _whirParams.finalSumcheckRounds;
-        p.finalSize = _whirParams.finalSize;
-        p.initialCodewordLength = _whirParams.initialCodewordLength;
-        p.initialMerkleDepth = _whirParams.initialMerkleDepth;
-        p.initialDomainGenerator = _whirParams.initialDomainGenerator;
-        p.initialInterleavingDepth = _whirParams.initialInterleavingDepth;
-        p.initialNumVariables = _whirParams.initialNumVariables;
-        p.initialCosetSize = _whirParams.initialCosetSize;
-        p.initialNumCosets = _whirParams.initialNumCosets;
-        // Copy dynamic arrays from storage to memory
-        uint256 rLen = _whirParams.rounds.length;
+    /// @dev Load a WhirParams from the given storage slot into memory. Shared by the validity
+    ///      (`_whirParams`) and withdrawal (`_whirParamsW`) verification paths to avoid duplicating
+    ///      this (bytecode-heavy) field-by-field copy twice (EIP-170 budget).
+    function _loadWhirParamsFrom(SpongefishWhirVerify.WhirParams storage s)
+        private view returns (SpongefishWhirVerify.WhirParams memory p)
+    {
+        p.numVariables = s.numVariables;
+        p.foldingFactor = s.foldingFactor;
+        p.numVectors = s.numVectors;
+        p.numCommitments = s.numCommitments;
+        p.outDomainSamples = s.outDomainSamples;
+        p.inDomainSamples = s.inDomainSamples;
+        p.initialSumcheckRounds = s.initialSumcheckRounds;
+        p.numRounds = s.numRounds;
+        p.finalSumcheckRounds = s.finalSumcheckRounds;
+        p.finalSize = s.finalSize;
+        p.initialCodewordLength = s.initialCodewordLength;
+        p.initialMerkleDepth = s.initialMerkleDepth;
+        p.initialDomainGenerator = s.initialDomainGenerator;
+        p.initialInterleavingDepth = s.initialInterleavingDepth;
+        p.initialNumVariables = s.initialNumVariables;
+        p.initialCosetSize = s.initialCosetSize;
+        p.initialNumCosets = s.initialNumCosets;
+        uint256 rLen = s.rounds.length;
         p.rounds = new SpongefishWhirVerify.RoundParams[](rLen);
         for (uint256 i = 0; i < rLen; i++) {
-            p.rounds[i] = _whirParams.rounds[i];
+            p.rounds[i] = s.rounds[i];
         }
-        uint256 epLen = _whirParams.evaluationPoint.length;
+        uint256 epLen = s.evaluationPoint.length;
         p.evaluationPoint = new GoldilocksExt3.Ext3[](epLen);
         for (uint256 i = 0; i < epLen; i++) {
-            p.evaluationPoint[i] = _whirParams.evaluationPoint[i];
+            p.evaluationPoint[i] = s.evaluationPoint[i];
         }
-        uint256 ep2Len = _whirParams.evaluationPoint2.length;
+        uint256 ep2Len = s.evaluationPoint2.length;
         p.evaluationPoint2 = new GoldilocksExt3.Ext3[](ep2Len);
         for (uint256 i = 0; i < ep2Len; i++) {
-            p.evaluationPoint2[i] = _whirParams.evaluationPoint2[i];
+            p.evaluationPoint2[i] = s.evaluationPoint2[i];
         }
     }
 
