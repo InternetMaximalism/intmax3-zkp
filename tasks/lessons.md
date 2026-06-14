@@ -34,3 +34,20 @@
    witness for a homomorphic sum. Attempting to force the spec shape (e.g. with a fake witness)
    would have destroyed soundness; the correct move was to halt, redesign (combined
    Decryption+Encryption AIR), and get the deviation approved.
+
+## CREATE2 address prediction vs external-library linking (2026-06-14, close e2e)
+
+When baking a contract's CREATE2 address into a ZK proof ahead of time (the channel-close
+withdrawal proof bakes the ChannelSettlementManager address as the L1 recipient), the address
+MUST be computed in the SAME execution context that will deploy it. `MleVerifier` links external
+libraries (Plonky2GateEvaluator / SpongefishWhirVerify) via delegatecall, and their addresses are
+baked into `type(MleVerifier).creationCode`. Foundry resolves those library addresses DIFFERENTLY
+in a forge SCRIPT vs a forge TEST, so a manager address predicted/deployed from a script does NOT
+match the address the lifecycle TEST deploys. Symptom: identical VK/genesis/registration fixtures
+(verified byte-equal) yet a different CREATE2 manager address script-vs-test; the rollup INITCODE
+HASH was identical within a context but the contexts disagreed on the linked MleVerifier address.
+Fix: compute the address with a forge TEST (CloseManagerAddr.t.sol), deploy everything via the
+canonical CREATE2 factory (deployer-independent) with fixed salts, and reuse the EXACT same deploy
+path (CloseE2EBase._deployAll) in both the address-printer test and the lifecycle test. The VK is
+witness-independent, so the plain P2 fixtures predict the same address as the close fixtures —
+which lets the address be known before the close proof is generated.
