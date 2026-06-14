@@ -29,6 +29,48 @@ latestFinalizedStateRoot に束縛、native payout + nullifier。設計調査完
 - (h) 別 finalized root への replay → nullifier は root 非依存で一意、retain した root のみ受理。
 - (i) manager 受領 ETH と finalizedChannelFundAmount の乖離 → 受領 msg.value から設定、intent.channelFundAmount は一致 check のみ。
 
+## P3+P4 実行スペック（2026-06-14 調査確定）— close 実体化
+
+決定（ユーザー）: P2 commit 済み（ae06923）→ P3+P4（close を実体化）。
+
+### 現状（調査確定、file:line）
+- `ChannelSettlementManager.claimWithdrawalCredit`(827-832): credit を 0 化するだけ、**実 ETH 送金なし**。receive()/fallback() 無し＝ETH 保持不可。
+- `finalizedChannelFundAmount`(374): solvency cap だが **intent 申告から copy**(719)＝偽装可。`submitWithdrawalClaim`(770) は cap check 有り、**`submitPostCloseClaim`(786-825) は cap check 欠落**（withdrawalCredits += するが totalWithdrawn 非加算）。
+- manager は rollup を `IChannelRegistry`(read-only) として参照、withdrawNative 呼び/受領 経路なし。manager は registerChannel 後にデプロイ（member set/bp を constructor で照合）。
+- ChannelSettlementVerifier: 全 verify* が `_matches(proof==keccak(PI))` stub。
+
+### 設計（approved plan project_channel_close_unification と整合）
+**核心**: close 集約 settlement = **channel-as-user の withdrawal proof（recipient=manager）を P2 `withdrawNative` で実行** → `pendingWithdrawals[manager]`。manager が実受領し、それを cap として member へ分配。base intmax = channel 単位（base account=channel_id）なので集約引出、member split は channel layer（intra、accepted-stub）。
+- **P3-a manager 実 ETH 化**: `receive() payable`（**msg.sender==rollup のみ**、誤送金拒否）+ `pullChannelFunds()`（`rollup.withdraw()` 呼び、balance 差分を `receivedChannelFunds` に記録）。
+- **P3-b cap を実受領額に降格**: `finalizedChannelFundAmount` を intent 申告 → **実受領額（pullChannelFunds の balance 差分）** に。intent の channelFundAmount は一致 check のみ（非権威 hint）。これが cross-channel isolation の非交渉不変条件。
+- **P3-c claimWithdrawalCredit 実送金**: CEI+nonReentrant、`Σ credits ≤ receivedChannelFunds`、`address(this).balance>=amount`、pull-payment。
+- **P3-d submitPostCloseClaim に cap 追加**: totalWithdrawn 加算 + `≤ receivedChannelFunds` 強制（現状欠落の穴を塞ぐ）。
+- **P4 verify* 整理（文書化）**: aggregate solvency = withdrawNative の実 MLE proof + 実受領 cap が担う（実強制）。verifyCloseIntent/WithdrawalClaim/PostCloseClaim/SpecialClose/CancelClose/LateOutgoingDebit は **intra-channel 合意（2者 signature+challenge）= accepted-stub** として明示文書化（実 ZK 置換は本スコープ外、intra-channel リスクは accepted）。
+
+### 脅威モデル（attack→mitigation）
+- (a) cap 超過分配/cross-channel theft → claimWithdrawalCredit の `Σ≤receivedChannelFunds`+balance check、submitWithdrawalClaim/PostCloseClaim 両方に cap。受領額は withdrawNative の実 proof amount（intent 申告ではない）。
+- (b) manager 誤送金滞留 → receive() を rollup のみに制限。
+- (c) close proof recipient 偽装 → withdrawNative の pis_hash 束縛（recipient は proof 由来、P2 で実証済み）。
+- (d) reentrancy → 全 ETH 移動関数 nonReentrant+CEI、pull-payment。
+- (e) finalizedChannelFundAmount 偽装 → 実受領額に降格（pull の balance 差分）、intent 申告無視。
+- (f) manager address ↔ proof recipient 一致 → close withdrawal proof の recipient=manager。fixture/テストは CREATE2 等で決定的 manager address を proof 生成時に固定。
+
+### 検証
+- Solidity unit: receive 制限、pullChannelFunds、claimWithdrawalCredit 実送金、cap（両 claim）、reentrancy。
+- フル e2e（任意・重）: recipient=manager の close withdrawal fixture 再生成（heavy run + CREATE2 manager）→ deposit→close 集約引出→manager 受領→finalizeClose→submitWithdrawalClaim→claimWithdrawalCredit→member 実 ETH。
+- 独立敵対レビュー。
+
+### 2026-06-14 P3+P4 完了 ✅（Solidity unit スコープ）
+- 実装（ChannelSettlementManager.sol）: `receive()`(rollup のみ) + `pullChannelFunds()`(nonReentrant、balance 差分→receivedChannelFunds) + `claimWithdrawalCredit`(nonReentrant+CEI、実 ETH 送金、`totalCreditedOut+amount<=receivedChannelFunds` = cross-channel solvency cap) + `submitPostCloseClaim` に欠落 cap 追加 + reentrancy guard + `finalizedChannelFundAmount` を非権威 hint に降格。`IChannelRegistry` に `withdraw()` 追加。
+- P4: ChannelSettlementVerifier ヘッダに trust-boundary 明文化（verify* は intra-channel accepted-stub、cross-channel solvency は withdrawNative 実 MLE + receivedChannelFunds cap が担保）。
+- テスト: ChannelSettlementManager.t.sol に P3 6本追加（receive 拒否/pull/実送金/over-cap revert/postClose cap/reentrancy blocked）。MockChannelRegistry に withdraw()+creditWithdrawal 追加。
+- **全 Forge 87/87 green**（IntmaxRollup 47 + ChannelSettlement 31 + MleE2E 2 + MleFinalizeE2E 1 + WithdrawNativeE2E 6）。EIP-170: manager 11.4KB、IntmaxRollup +112B。
+- **独立敵対レビュー: SOUND**（critical/high なし）。cross-channel isolation 2層（rollup totalEscrowed + manager receivedChannelFunds）。残 LOW: finalizedChannelFundAmount footgun（intra-channel liveness、accepted・文書化済み）、fundBpBondCredits は intent-level（payout cap で bounded、pre-existing）。
+- **元の3ハリボテすべて実体化完了**: ①非payable deposit→実エスクロー(P1) ②settlement digest stub→manager 実 ETH+cap+close→withdrawNative 配線(P3/P4) ③価値移さぬ withdrawal→withdrawNative 実払出(P2)。残 accepted-stub は intra-channel split のみ（cross-channel safety に不要）。
+- 残: P7 Sepolia 再デプロイ + 実 2メンバー lifecycle（checkpoint 後）。
+
+---
+
 ## P2 実行スペック（2026-06-14 調査確定 — このセッションのスコープ）
 
 決定（ユーザー 2026-06-14）: (1) **pipeline 先・heavy proving は review 後に1回**、(2) **P2 で checkpoint**（anvil で deposit→finalize→withdrawNative を実証→独立レビュー→go/no-go）。P3+ と再デプロイは触らない。

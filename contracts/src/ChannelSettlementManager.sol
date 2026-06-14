@@ -93,6 +93,11 @@ interface IChannelRegistry {
     function channelMemberSetCommitment(uint32 channelId) external view returns (bytes32);
     function channelBpMemberSlot(uint32 channelId) external view returns (uint8);
     function channelBpSphincsPubkeyHash(uint32 channelId) external view returns (bytes32);
+    /// @notice Pull-payment claim on the rollup. The channel close pays the channel's native ETH
+    ///         to THIS manager (recipient == manager) via `IntmaxRollup.withdrawNative`, crediting
+    ///         the rollup's `pendingWithdrawals[manager]`; `pullChannelFunds` then calls this to
+    ///         move that ETH into the manager so it can be split among members.
+    function withdraw() external;
 }
 
 contract ChannelSettlementManager {
@@ -132,6 +137,12 @@ contract ChannelSettlementManager {
     error WithdrawalCapExceeded();
     error NoWithdrawalCredit();
     error RecipientMismatch();
+    /// Only the bound rollup (`registry`) may send native ETH to this manager (via its `withdraw`).
+    error OnlyRollup();
+    /// A native ETH transfer out of the manager failed.
+    error TransferFailed();
+    /// Reentrancy guard tripped.
+    error Reentrant();
     error ChannelAlreadyFrozen();
     error ChannelClosed();
     error NotChannelMember();
@@ -371,8 +382,21 @@ contract ChannelSettlementManager {
     uint64 public finalizedEpoch;
     uint64 public finalizedSmallBlockNumber;
     uint64 public finalizedStateVersion;
+    /// @notice The channel-fund amount DECLARED by the finalized close intent. SECURITY: this is a
+    ///         non-authoritative hint / secondary accrual bound only. The AUTHORITATIVE solvency cap
+    ///         is `receivedChannelFunds` (real ETH pulled from the rollup), enforced at payout.
     uint256 public finalizedChannelFundAmount;
+    /// @notice Σ of accepted withdrawal/post-close claim amounts (intent-level accrual bound).
     uint256 public totalWithdrawn;
+
+    /// @notice Real native ETH this manager has pulled from the rollup for this channel's close
+    ///         (cumulative `pullChannelFunds` balance deltas). SECURITY: this — NOT the intent's
+    ///         declared `finalizedChannelFundAmount` — is the authoritative cross-channel solvency
+    ///         ceiling: `claimWithdrawalCredit` enforces Σ paid out ≤ receivedChannelFunds, so the
+    ///         manager can never pay members more ETH than the channel actually received on L1.
+    uint256 public receivedChannelFunds;
+    /// @notice Σ native ETH actually paid out via `claimWithdrawalCredit` (the payout-side cap base).
+    uint256 public totalCreditedOut;
 
     mapping(address => uint256) public withdrawalCredits;
     mapping(bytes32 => bool) public usedWithdrawalNullifiers;
@@ -383,6 +407,31 @@ contract ChannelSettlementManager {
     mapping(bytes32 => uint256) public registeredMemberIndexPlusOne;
     mapping(address => bool) public isMemberRecipient;
     bytes32[] public registeredMemberPubkeyHashes;
+
+    /// @notice Emitted when real native ETH is pulled from the rollup into this manager.
+    event ChannelFundsPulled(uint256 amount, uint256 totalReceived);
+
+    // --- Reentrancy guard (the manager moves native ETH in pullChannelFunds/claimWithdrawalCredit) ---
+    uint256 private constant _NOT_ENTERED = 1;
+    uint256 private constant _ENTERED = 2;
+    uint256 private _status = _NOT_ENTERED;
+
+    modifier nonReentrant() {
+        if (_status == _ENTERED) revert Reentrant();
+        _status = _ENTERED;
+        _;
+        _status = _NOT_ENTERED;
+    }
+
+    /// @notice Accept native ETH ONLY from the bound rollup (its `withdraw()` pays this manager via
+    ///         a low-level call). SECURITY: restricting the sender keeps `receivedChannelFunds`
+    ///         (measured as the `pullChannelFunds` balance delta) the sole source of payout capacity
+    ///         and prevents stray/forced ETH from being mistaken for real channel funds. (SELFDESTRUCT
+    ///         force-feeds are still possible but are NOT counted — only `pullChannelFunds` deltas
+    ///         increment `receivedChannelFunds`, and payouts are capped by it.)
+    receive() external payable {
+        if (msg.sender != address(registry)) revert OnlyRollup();
+    }
 
     constructor(
         bytes4 channelId_,
@@ -813,6 +862,15 @@ contract ChannelSettlementManager {
             )
         ) revert InvalidPostCloseClaimProof();
 
+        // Cap accrual against the (intent-declared) channel fund, mirroring submitWithdrawalClaim.
+        // SECURITY: post-close claims share the SAME accrual budget as withdrawal claims — without
+        // this, post-close claims could mint unbounded credits past the channel fund. (The
+        // authoritative ETH ceiling is still `receivedChannelFunds`, enforced at payout.)
+        uint256 newTotalWithdrawn = totalWithdrawn + claim.amount;
+        if (newTotalWithdrawn > finalizedChannelFundAmount) {
+            revert WithdrawalCapExceeded();
+        }
+        totalWithdrawn = newTotalWithdrawn;
         usedSharedNativeNullifiers[claim.sharedNativeNullifier] = true;
         withdrawalCredits[claim.recipient] += claim.amount;
         emit PostCloseClaimAccepted(
@@ -824,11 +882,35 @@ contract ChannelSettlementManager {
         );
     }
 
-    function claimWithdrawalCredit() external returns (uint256 amount) {
+    /// @notice Pull this channel's native ETH from the rollup into the manager. Permissionless: it
+    ///         only moves the manager's own `pendingWithdrawals[manager]` (credited when the close
+    ///         paid this manager via `IntmaxRollup.withdrawNative`). The balance delta is added to
+    ///         `receivedChannelFunds` — the authoritative payout ceiling.
+    /// @dev nonReentrant; measures balance before/after the external `registry.withdraw()` call.
+    function pullChannelFunds() external nonReentrant returns (uint256 pulled) {
+        uint256 balBefore = address(this).balance;
+        registry.withdraw(); // rollup pays pendingWithdrawals[manager] to this contract (receive())
+        pulled = address(this).balance - balBefore;
+        receivedChannelFunds += pulled;
+        emit ChannelFundsPulled(pulled, receivedChannelFunds);
+    }
+
+    /// @notice Claim a member's accrued credit as real native ETH (pull-payment).
+    /// @dev SECURITY: the GLOBAL cross-channel solvency invariant is enforced HERE —
+    ///      `totalCreditedOut + amount <= receivedChannelFunds` — so the manager can never pay out
+    ///      more ETH than it actually received from the rollup for this channel, regardless of any
+    ///      inflated intent or intra-channel mis-accounting (those are accepted intra-channel risks).
+    ///      CEI: credit zeroed + paid-out accumulator bumped BEFORE the external transfer;
+    ///      nonReentrant for defense in depth.
+    function claimWithdrawalCredit() external nonReentrant returns (uint256 amount) {
         amount = withdrawalCredits[msg.sender];
         if (amount == 0) revert NoWithdrawalCredit();
+        if (totalCreditedOut + amount > receivedChannelFunds) revert WithdrawalCapExceeded();
         withdrawalCredits[msg.sender] = 0;
+        totalCreditedOut += amount;
         emit WithdrawalClaimed(msg.sender, amount);
+        (bool ok, ) = msg.sender.call{value: amount}("");
+        if (!ok) revert TransferFailed();
     }
 
     function getPendingClose() external view returns (PendingClose memory) {

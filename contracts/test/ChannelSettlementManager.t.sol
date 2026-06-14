@@ -51,6 +51,24 @@ contract MockChannelRegistry is IChannelRegistry {
         channelBpMemberSlot[channelId] = bpMemberSlot;
         channelBpSphincsPubkeyHash[channelId] = bpHash;
     }
+
+    // --- Native-payout stand-in for IntmaxRollup.withdraw() (P3 close→payout tests) ---
+    // Models the rollup's pull-payment: the close pays the manager via withdrawNative, crediting
+    // pendingWithdrawals[manager]; the manager later calls withdraw() to pull that ETH.
+    mapping(address => uint256) public pendingWithdrawals;
+
+    /// Fund + credit a recipient's pull balance (simulates a finalized native withdrawal payout).
+    function creditWithdrawal(address recipient) external payable {
+        pendingWithdrawals[recipient] += msg.value;
+    }
+
+    function withdraw() external override {
+        uint256 amount = pendingWithdrawals[msg.sender];
+        require(amount > 0, "nothing to withdraw");
+        pendingWithdrawals[msg.sender] = 0;
+        (bool ok, ) = msg.sender.call{value: amount}("");
+        require(ok, "withdraw failed");
+    }
 }
 
 contract ChannelSettlementManagerTest is Test {
@@ -959,5 +977,205 @@ contract ChannelSettlementManagerTest is Test {
         assertEq(manager.finalizedEpoch(), 10);
         assertEq(manager.finalizedSmallBlockNumber(), 40);
         assertEq(manager.finalizedBurnTxHash(), intent.burnTxHash);
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    //  P3: real native-ETH payout (close → manager pulls funds → member split)
+    // ═══════════════════════════════════════════════════════════════════════
+
+    /// Drive the default manager to Closed and return the finalized close-intent digest.
+    function _finalizeDefault() internal returns (bytes32) {
+        _requestCloseAndElapseGrace();
+        _submitClose(_intent(1, 9, 22, 1)); // channelFundAmount = 75
+        vm.warp(block.timestamp + CHALLENGE_PERIOD + 1);
+        manager.finalizeClose();
+        return manager.finalizedCloseIntentDigest();
+    }
+
+    function _submitWd(bytes32 d, bytes32 memberHash, address recipient, uint64 amount) internal {
+        ChannelSettlementManager.WithdrawalClaim memory c = _withdrawalClaim(d, memberHash, recipient, amount);
+        manager.submitWithdrawalClaim(
+            c,
+            _proofFor(
+                verifier.withdrawalClaimPIHash(
+                    CHANNEL_ID, d, manager.finalizedBalanceStateH1(), memberHash, recipient,
+                    c.userAmountDigest, c.amount, c.withdrawalNullifier
+                )
+            )
+        );
+    }
+
+    /// Simulate the rollup paying this manager via a finalized native withdrawal, then pull it in.
+    function _fundAndPull(MockChannelRegistry reg, ChannelSettlementManager m, uint256 amount) internal {
+        vm.deal(address(this), address(this).balance + amount);
+        reg.creditWithdrawal{value: amount}(address(m));
+        m.pullChannelFunds();
+    }
+
+    function _closeProofFor(ChannelSettlementManager m, ChannelSettlementManager.CloseIntent memory intent)
+        internal view returns (bytes memory)
+    {
+        return _proofFor(
+            verifier.closePIHash(
+                CHANNEL_ID, intent.closeNonce, intent.finalEpoch, intent.finalSmallBlockNumber,
+                intent.closeFreezeNonce, intent.finalChannelStateDigest, intent.finalBalanceStateH1,
+                intent.channelFundAmount, intent.channelFundIntmaxStateRoot, intent.burnTxHash,
+                intent.closeWithdrawalDigest, intent.snapshotMediumBlockNumber, intent.finalStateVersion,
+                intent.finalSettledTxChain, m.registeredMemberSetCommitment(), m.activeMemberCount()
+            )
+        );
+    }
+
+    /// Deploy a manager whose member-slot-0 recipient is `r0` (USER_A/B/C hashes unchanged, so the
+    /// Finding-E member-set commitment still matches). Used for the reentrancy test.
+    function _managerWithRecipient0(address r0)
+        internal returns (ChannelSettlementManager m, MockChannelRegistry reg)
+    {
+        reg = new MockChannelRegistry(IChannelSettlementVerifier(address(verifier)));
+        bytes32[] memory activeHashes = new bytes32[](3);
+        activeHashes[0] = USER_A; activeHashes[1] = USER_B; activeHashes[2] = USER_C;
+        reg.register(uint32(CHANNEL_ID), BP_MEMBER_SLOT, activeHashes);
+        ChannelSettlementManager.MemberBinding[] memory b = new ChannelSettlementManager.MemberBinding[](3);
+        b[0] = ChannelSettlementManager.MemberBinding({sphincsPubkeyHash: USER_A, recipient: r0});
+        b[1] = ChannelSettlementManager.MemberBinding({sphincsPubkeyHash: USER_B, recipient: bob});
+        b[2] = ChannelSettlementManager.MemberBinding({sphincsPubkeyHash: USER_C, recipient: carol});
+        m = new ChannelSettlementManager(
+            CHANNEL_ID, BP_MEMBER_SLOT, USER_A, CHALLENGE_PERIOD, SPECIAL_CLOSE_PENALTY,
+            INITIAL_BP_BOND, IChannelSettlementVerifier(address(verifier)), IChannelRegistry(address(reg)), b
+        );
+    }
+
+    /// Stray ETH from a non-rollup sender must be rejected (receive() restricted to the registry).
+    function test_p3_receive_rejectsNonRollup() external {
+        vm.deal(mallory, 1 ether);
+        vm.prank(mallory);
+        (bool ok, ) = address(manager).call{value: 1}("");
+        assertFalse(ok, "non-rollup ETH must be rejected");
+        assertEq(address(manager).balance, 0, "no stray ETH held");
+    }
+
+    /// pullChannelFunds moves the manager's rollup credit into the manager and records it.
+    function test_p3_pullChannelFunds_recordsReceived() external {
+        _fundAndPull(registry, manager, 60);
+        assertEq(manager.receivedChannelFunds(), 60, "receivedChannelFunds == pulled");
+        assertEq(address(manager).balance, 60, "manager holds the pulled ETH");
+    }
+
+    /// Happy path: members claim their accrued credit as real native ETH.
+    function test_p3_claimWithdrawalCredit_paysRealEth() external {
+        bytes32 d = _finalizeDefault();
+        _submitWd(d, USER_A, alice, 30);
+        _submitWd(d, USER_B, bob, 20); // distinct nullifier (keyed by member hash)
+        _fundAndPull(registry, manager, 75);
+
+        uint256 aliceBefore = alice.balance;
+        vm.prank(alice);
+        uint256 got = manager.claimWithdrawalCredit();
+        assertEq(got, 30, "alice claims her credit");
+        assertEq(alice.balance, aliceBefore + 30, "alice received real ETH");
+        assertEq(manager.withdrawalCredits(alice), 0, "credit cleared");
+        assertEq(manager.totalCreditedOut(), 30, "paid-out accumulator");
+
+        vm.prank(bob);
+        manager.claimWithdrawalCredit();
+        assertEq(bob.balance, 20, "bob received real ETH");
+        assertEq(manager.totalCreditedOut(), 50, "total paid out");
+    }
+
+    /// CROSS-CHANNEL ISOLATION (non-negotiable): the manager cannot pay out more ETH than it
+    /// actually received from the rollup, even if intra-channel credits say otherwise.
+    function test_p3_claimWithdrawalCredit_cappedByReceivedFunds() external {
+        bytes32 d = _finalizeDefault();
+        _submitWd(d, USER_A, alice, 30);   // credit = 30
+        _fundAndPull(registry, manager, 10); // but only 10 ETH actually received
+        vm.prank(alice);
+        vm.expectRevert(ChannelSettlementManager.WithdrawalCapExceeded.selector);
+        manager.claimWithdrawalCredit();
+        assertEq(alice.balance, 0, "no over-cap payout");
+    }
+
+    /// submitPostCloseClaim now shares the channel-fund accrual budget (previously uncapped).
+    function test_p3_submitPostCloseClaim_capEnforced() external {
+        bytes32 d = _finalizeDefault();
+        _submitWd(d, USER_A, alice, 70); // totalWithdrawn = 70 (≤ 75)
+        ChannelSettlementManager.PostCloseClaim memory pc = ChannelSettlementManager.PostCloseClaim({
+            closeIntentDigest: d,
+            incomingTxHash: keccak256("itx"),
+            receiverSphincsPubkeyHash: USER_B,
+            recipient: bob,
+            sharedNativeNullifier: keccak256("snn"),
+            amount: 10 // 70 + 10 = 80 > 75 -> must revert
+        });
+        // Precompute the proof BEFORE expectRevert: vm.expectRevert applies to the next external
+        // call, which would otherwise be the argument-side postCloseClaimPIHash() rather than
+        // submitPostCloseClaim().
+        bytes memory proof = _proofFor(
+            verifier.postCloseClaimPIHash(
+                CHANNEL_ID, d, pc.incomingTxHash, USER_B, bob, pc.sharedNativeNullifier, pc.amount
+            )
+        );
+        vm.expectRevert(ChannelSettlementManager.WithdrawalCapExceeded.selector);
+        manager.submitPostCloseClaim(pc, proof);
+    }
+
+    /// A reentering recipient cannot double-withdraw: nonReentrant + CEI make the reentrant call
+    /// revert, which bubbles up and reverts the whole claim (credit preserved, no ETH drained).
+    function test_p3_claimWithdrawalCredit_reentrancyBlocked() external {
+        ReentrantClaimer attacker = new ReentrantClaimer();
+        (ChannelSettlementManager m, MockChannelRegistry reg) = _managerWithRecipient0(address(attacker));
+        attacker.setManager(m);
+
+        vm.prank(bob);
+        m.requestClose();
+        vm.warp(block.timestamp + GRACE);
+        ChannelSettlementManager.CloseIntent memory intent = _intent(1, 9, 22, 1);
+        m.submitCloseIntent(intent, _closeProofFor(m, intent));
+        vm.warp(block.timestamp + CHALLENGE_PERIOD + 1);
+        m.finalizeClose();
+        bytes32 d = m.finalizedCloseIntentDigest();
+
+        ChannelSettlementManager.WithdrawalClaim memory c = _withdrawalClaim(d, USER_A, address(attacker), 30);
+        m.submitWithdrawalClaim(
+            c,
+            _proofFor(
+                verifier.withdrawalClaimPIHash(
+                    CHANNEL_ID, d, m.finalizedBalanceStateH1(), USER_A, address(attacker),
+                    c.userAmountDigest, c.amount, c.withdrawalNullifier
+                )
+            )
+        );
+
+        vm.deal(address(this), address(this).balance + 75);
+        reg.creditWithdrawal{value: 75}(address(m));
+        m.pullChannelFunds();
+
+        // attacker re-enters during the payout → inner call reverts (Reentrant) → outer reverts.
+        vm.expectRevert();
+        attacker.claim();
+
+        assertEq(m.withdrawalCredits(address(attacker)), 30, "credit preserved (no double-pay)");
+        assertEq(m.totalCreditedOut(), 0, "nothing paid out");
+        assertEq(address(attacker).balance, 0, "no ETH drained");
+    }
+}
+
+/// @dev Attacker that re-enters claimWithdrawalCredit on receiving ETH (reentrancy test).
+contract ReentrantClaimer {
+    ChannelSettlementManager public mgr;
+    uint256 public reenterCount;
+
+    function setManager(ChannelSettlementManager m) external {
+        mgr = m;
+    }
+
+    function claim() external returns (uint256) {
+        return mgr.claimWithdrawalCredit();
+    }
+
+    receive() external payable {
+        if (reenterCount == 0) {
+            reenterCount = 1;
+            mgr.claimWithdrawalCredit(); // reentrant attempt; reverts under nonReentrant
+        }
     }
 }

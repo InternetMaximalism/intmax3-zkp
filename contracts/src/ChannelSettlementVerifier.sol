@@ -8,6 +8,22 @@ import {IChannelSettlementVerifier} from "./ChannelSettlementManager.sol";
 /// mirrors of the Rust public-input limb vectors (`to_u64_vec()`, big-endian u32 words) in
 /// `src/circuits/channel/*_pis.rs`, with the protocol domain word prepended.
 ///
+/// SECURITY — TRUST BOUNDARY (P3/P4, accepted-stub scope):
+///   These verify* checks are INTRA-CHANNEL consensus stubs (2-party signed close intent + a
+///   challenge/replace window), NOT a real ZK verification of the close state transition. They are
+///   accepted-stubs by design: the protocol-critical invariant is CROSS-CHANNEL isolation, and that
+///   is enforced elsewhere by REAL cryptography, not here:
+///     • The channel's aggregate native settlement is paid by `IntmaxRollup.withdrawNative`, which
+///       verifies a real MLE/WHIR withdrawal proof bound to a finalized state root (recipient = the
+///       channel's `ChannelSettlementManager`).
+///     • `ChannelSettlementManager` then caps ALL member payouts at `receivedChannelFunds` — the
+///       real ETH it actually pulled from the rollup — so Σ paid ≤ Σ received. A channel can never
+///       pay out (and thus never steal) more ETH than its own verified withdrawal delivered,
+///       regardless of what these stubs accept. Intra-channel mis-allocation among a channel's own
+///       members is the accepted residual risk of these stubs.
+///   Replacing these with real close-circuit ZK proofs is tracked as future work; doing so would
+///   harden intra-channel correctness but is NOT required for cross-channel safety.
+///
 /// F7 (one SPHINCS+ key per member): member identity is the SPHINCS+ pubkey hash (bytes32, 8
 /// limbs); the legacy `bytes8 userId` (2 limbs) is removed from the withdrawal / post-close
 /// claims, and the close PI appends a `memberSetCommitment` (keccak over the 3 members' pubkey
