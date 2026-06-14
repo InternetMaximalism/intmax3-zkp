@@ -22,30 +22,31 @@ provide, which is why the rehearsal below works locally.
 
 ---
 
-## ⚠️ Known blocker: MleVerifier exceeds the EIP-170 24 KB code-size limit
+## ✅ Resolved: MleVerifier now fits under the EIP-170 24 KB code-size limit
 
-`MleVerifier` deployed bytecode is **53,975 bytes**, far above the **24,576-byte**
-EIP-170 contract-size limit enforced on mainnet/Sepolia. Consequences:
+`MleVerifier` deployed bytecode was **53,975 bytes**, over the **24,576-byte**
+EIP-170 limit (it inlined the gate-evaluation and WHIR-verification subtrees).
+**Resolved** by externalizing the two coarse, once-called entry points
+`Plonky2GateEvaluator.evalCombinedFlat` and `SpongefishWhirVerify.verifyWhirProof`
+from `internal pure` to `external pure` (polygon-plonky2 submodule commit
+`2a1f5028`), so they deploy as separate delegatecall-linked libraries:
 
-- Forge **will refuse to broadcast** the deploy unless you pass
-  `--disable-code-size-limit` to `forge script`, and even then a **real network
-  node will reject the create transaction** (EIP-170 is consensus-enforced, not
-  a client knob). On a fresh local **anvil** you can bypass it node-side with
-  `anvil --disable-code-size-limit`, which is what the rehearsal uses.
-- **Therefore the Sepolia smoke as-is cannot deploy `MleVerifier` as a single
-  contract.** This is a real, pre-existing deployment constraint surfaced by this
-  tooling — NOT something these scripts can or should silently work around.
+- `MleVerifier` 53,975 → **14,030 bytes** (margin +10,546).
+- Extracted libraries: `Plonky2GateEvaluator` 21,911 B, `SpongefishWhirVerify`
+  22,218 B — both under the limit.
+- Confirmed: deploy now succeeds on `anvil --hardfork prague` **without**
+  `--disable-code-size-limit`, i.e. under real EIP-170 enforcement.
 
-**Resolution options (out of scope for this tooling — pick one before a real Sepolia run):**
-1. Split `MleVerifier` (and/or its `Plonky2GateEvaluator` / `SumcheckVerifier` /
-   `SpongefishWhirVerify` dependencies) into multiple deployed contracts that
-   each fit under 24 KB, wiring them via external calls/libraries.
-2. Deploy the heavy verifier logic as one or more **external libraries** linked
-   into a thin `MleVerifier` facade.
-3. Use a factory / `CREATE2` chunked-deploy (e.g. SSTORE2-style) pattern.
+The change is strictly behavior-preserving (both functions are `pure`; no
+storage/context/transcript state crosses the boundary; ABI-lossless). Verified by
+the submodule's 79/79 suite (incl. tamper/boundary-reject tests), parent
+`MleE2E` + `MleFinalizeE2E`, and an independent adversarial review.
 
-Until one of those lands, the **local anvil rehearsal is the authoritative proof
-that the call sequence and the real MLE verification are correct**.
+**Deploy-trust note:** the two libraries are linked at deploy time via Forge's
+auto-deploy/auto-link (`new MleVerifier()` in `script/Deploy.s.sol`). The library
+address is fixed in immutable code, not attacker-controllable. Do NOT hand-specify
+a `[libraries]` address in `foundry.toml` for a real deploy — always use the
+auto-link path so a malicious delegatecall target cannot be substituted.
 
 ---
 
@@ -98,12 +99,12 @@ ValidityPublicInputs and the MleProof.
 forge script script/Deploy.s.sol \
   --rpc-url sepolia \
   --account smoke-deployer \
-  --broadcast \
-  --disable-code-size-limit          # required because MleVerifier > 24 KB (see blocker above)
+  --broadcast
 ```
 
-> NOTE: on a real Sepolia node the create tx for `MleVerifier` will still be
-> rejected by EIP-170 even with this flag. Resolve the size blocker first.
+> Forge auto-deploys and links the two external libraries (`Plonky2GateEvaluator`,
+> `SpongefishWhirVerify`) before `MleVerifier`. No `--disable-code-size-limit` is
+> needed — all contracts are under EIP-170 (see the resolved section above).
 
 Record the printed `IntmaxRollup` address and set it in your env:
 
@@ -200,18 +201,19 @@ This is the **main deliverable**: the full sequence run against a local anvil
 using only anvil's built-in throwaway dev account. No real key, no external RPC.
 
 ```bash
-# Terminal A — start anvil (Prague hardfork for blobs + EIP-2537; size limit
-# disabled because MleVerifier > 24 KB — see the blocker section above).
-anvil --hardfork prague --disable-code-size-limit
+# Terminal A — start anvil (Prague hardfork for blobs + EIP-2537). No
+# --disable-code-size-limit: all contracts are under EIP-170 now, so this
+# rehearsal runs under the same size enforcement as a real Sepolia node.
+anvil --hardfork prague
 
 # Terminal B — from contracts/. ANVIL0 is anvil account[0]'s well-known dev key
 # (a public throwaway, safe to put on the CLI; NEVER do this with a real key).
 ANVIL0=0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80
 RPC=http://127.0.0.1:8545
 
-# 1. deploy
+# 1. deploy (auto-deploys + links the 2 external verifier libraries)
 forge script script/Deploy.s.sol --rpc-url $RPC --private-key $ANVIL0 \
-  --broadcast --disable-code-size-limit
+  --broadcast
 # → capture the printed IntmaxRollup address, e.g.:
 ROLLUP=0xe7f1725E7734CE288F8367e1Bb143E90bb3F0512
 
