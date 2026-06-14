@@ -4,6 +4,7 @@ pragma solidity ^0.8.24;
 import {Test, console, stdStorage, StdStorage} from "forge-std/Test.sol";
 import {Vm} from "forge-std/Vm.sol";
 import {IntmaxRollup} from "../src/IntmaxRollup.sol";
+import {ChannelSettlementVerifier} from "../src/ChannelSettlementVerifier.sol";
 import {KZGProof} from "../src/BlobKZGVerifier.sol";
 import {MleVerifier} from "@mle/MleVerifier.sol";
 import {Plonky2GateEvaluator} from "@mle/Plonky2GateEvaluator.sol";
@@ -484,6 +485,82 @@ contract IntmaxRollupTest is Test {
             }
         }
         revert("ChannelRegistered event not found");
+    }
+
+    /// @dev Deploy a FRESH rollup with an empty config (registration-only tests).
+    function _freshRollup() internal returns (IntmaxRollup) {
+        return new IntmaxRollup(
+            fraudTreasury,
+            _emptyMleVk(),
+            _emptyWhirParams(),
+            "",
+            "",
+            _emptyMleArrays(),
+            _emptyMleArrays(),
+            new MleVerifier(),
+            bytes32(0)
+        );
+    }
+
+    /// Finding E: the close-form member-set commitment the rollup records at `registerChannel` MUST
+    /// be BYTE-IDENTICAL to `ChannelSettlementVerifier.closeMemberSetCommitment(paddedHashes,
+    /// memberCount)` — the exact value the close path matches the close proof against. If these
+    /// diverge, the close-path `ChannelSettlementManager` could bind a different signer set than the
+    /// validity-path registration.
+    function test_channelMemberSetCommitmentMatchesVerifier() public {
+        ChannelSettlementVerifier verifier = new ChannelSettlementVerifier();
+        uint32[3] memory counts = [uint32(2), 8, 16];
+        for (uint256 c = 0; c < counts.length; c++) {
+            uint256 memberCount = counts[c];
+            IntmaxRollup fresh = _freshRollup();
+            (bytes32[] memory sphincs, bytes32[] memory regev, address[] memory recipients) =
+                _diffMembers(memberCount);
+            uint32 channelId = 7;
+            fresh.registerChannel(channelId, 1, sphincs, regev, recipients);
+
+            // Pad the active hashes to the fixed-16 form the verifier consumes.
+            bytes32[16] memory padded;
+            for (uint256 i = 0; i < memberCount; i++) {
+                padded[i] = sphincs[i];
+            }
+            bytes32 expected =
+                verifier.closeMemberSetCommitment(padded, uint8(memberCount));
+            assertEq(
+                fresh.channelMemberSetCommitment(channelId),
+                expected,
+                "rollup IMCM commitment != verifier closeMemberSetCommitment (byte mismatch)"
+            );
+            // bp identity recorded at slot 1.
+            assertEq(uint256(fresh.channelBpMemberSlot(channelId)), 1, "bp slot mismatch");
+            assertEq(
+                fresh.channelBpSphincsPubkeyHash(channelId),
+                sphincs[1],
+                "bp pubkey hash mismatch"
+            );
+        }
+    }
+
+    /// Finding E: `registerChannel` is ONE-TIME per channel id. A second registration (even with a
+    /// different member set) reverts, keeping the recorded commitment an unambiguous single source
+    /// of truth.
+    function test_registerChannel_oneTime_reverts() public {
+        IntmaxRollup fresh = _freshRollup();
+        (bytes32[] memory sphincs, bytes32[] memory regev, address[] memory recipients) =
+            _diffMembers(3);
+        fresh.registerChannel(7, 1, sphincs, regev, recipients);
+
+        // Same channel id, second time: reverts regardless of member set.
+        vm.expectRevert(bytes("channel already registered"));
+        fresh.registerChannel(7, 1, sphincs, regev, recipients);
+
+        // A DIFFERENT member set for the same channel id also reverts.
+        (bytes32[] memory s2, bytes32[] memory r2, address[] memory rc2) = _diffMembers(4);
+        vm.expectRevert(bytes("channel already registered"));
+        fresh.registerChannel(7, 0, s2, r2, rc2);
+
+        // A different channel id still succeeds.
+        fresh.registerChannel(8, 1, sphincs, regev, recipients);
+        assertTrue(fresh.channelMemberSetCommitment(8) != bytes32(0));
     }
 
     /// G6 byte-exact block-hash differential: `_computeBlockHash` over the SAME fields as the Rust

@@ -4,9 +4,54 @@ pragma solidity ^0.8.24;
 import {Test} from "forge-std/Test.sol";
 import {
     ChannelSettlementManager,
-    IChannelSettlementVerifier
+    IChannelSettlementVerifier,
+    IChannelRegistry
 } from "../src/ChannelSettlementManager.sol";
 import {ChannelSettlementVerifier} from "../src/ChannelSettlementVerifier.sol";
+
+/// @dev Minimal stand-in for `IntmaxRollup`'s registration surface (Finding E). It records the
+/// SAME close-form IMCM commitment + bp identity the real rollup stores at `registerChannel`,
+/// computed via the verifier's `closeMemberSetCommitment` so the byte form is identical. Tests
+/// register a channel here BEFORE deploying the manager (the real deployment order).
+contract MockChannelRegistry is IChannelRegistry {
+    IChannelSettlementVerifier internal immutable verifier;
+    mapping(uint32 => bytes32) public channelMemberSetCommitment;
+    mapping(uint32 => uint8) public channelBpMemberSlot;
+    mapping(uint32 => bytes32) public channelBpSphincsPubkeyHash;
+
+    constructor(IChannelSettlementVerifier verifier_) {
+        verifier = verifier_;
+    }
+
+    /// Register a channel's member set + bp from the active hashes (slot order) — mirrors the
+    /// rollup's `registerChannel` recording (one-time, but the mock is permissive for test reuse).
+    function register(
+        uint32 channelId,
+        uint8 bpMemberSlot,
+        bytes32[] memory activeHashes
+    ) external {
+        bytes32[16] memory padded;
+        for (uint256 i = 0; i < activeHashes.length; i++) {
+            padded[i] = activeHashes[i];
+        }
+        channelMemberSetCommitment[channelId] =
+            verifier.closeMemberSetCommitment(padded, uint8(activeHashes.length));
+        channelBpMemberSlot[channelId] = bpMemberSlot;
+        channelBpSphincsPubkeyHash[channelId] = activeHashes[bpMemberSlot];
+    }
+
+    /// Register an EXPLICIT (possibly mismatching) commitment + bp, for negative tests.
+    function registerRaw(
+        uint32 channelId,
+        bytes32 commitment,
+        uint8 bpMemberSlot,
+        bytes32 bpHash
+    ) external {
+        channelMemberSetCommitment[channelId] = commitment;
+        channelBpMemberSlot[channelId] = bpMemberSlot;
+        channelBpSphincsPubkeyHash[channelId] = bpHash;
+    }
+}
 
 contract ChannelSettlementManagerTest is Test {
     // Redeclared for vm.expectEmit.
@@ -17,6 +62,7 @@ contract ChannelSettlementManagerTest is Test {
     );
 
     ChannelSettlementVerifier internal verifier;
+    MockChannelRegistry internal registry;
     ChannelSettlementManager internal manager;
 
     address internal alice = makeAddr("alice");
@@ -44,6 +90,7 @@ contract ChannelSettlementManagerTest is Test {
 
     function setUp() external {
         verifier = new ChannelSettlementVerifier();
+        registry = new MockChannelRegistry(IChannelSettlementVerifier(address(verifier)));
 
         ChannelSettlementManager.MemberBinding[] memory bindings =
             new ChannelSettlementManager.MemberBinding[](3);
@@ -54,6 +101,14 @@ contract ChannelSettlementManagerTest is Test {
         bindings[2] =
             ChannelSettlementManager.MemberBinding({sphincsPubkeyHash: USER_C, recipient: carol});
 
+        // Finding E DEPLOYMENT ORDER: register the channel on the (mock) rollup FIRST, then deploy
+        // the manager so its member set + bp can be bound to the on-chain registration.
+        bytes32[] memory activeHashes = new bytes32[](3);
+        activeHashes[0] = USER_A;
+        activeHashes[1] = USER_B;
+        activeHashes[2] = USER_C;
+        registry.register(uint32(CHANNEL_ID), BP_MEMBER_SLOT, activeHashes);
+
         manager = new ChannelSettlementManager(
             CHANNEL_ID,
             BP_MEMBER_SLOT,
@@ -62,6 +117,7 @@ contract ChannelSettlementManagerTest is Test {
             SPECIAL_CLOSE_PENALTY,
             INITIAL_BP_BOND,
             IChannelSettlementVerifier(address(verifier)),
+            IChannelRegistry(address(registry)),
             bindings
         );
     }
@@ -323,6 +379,20 @@ contract ChannelSettlementManagerTest is Test {
         uint8 bpSlot
     ) internal returns (ChannelSettlementManager m) {
         bytes32 bpHash = bpSlot < b.length ? b[bpSlot].sphincsPubkeyHash : bytes32(uint256(1));
+        // Finding E: when the bindings are in-range (so the manager reaches the registry-consistency
+        // check), register a MATCHING member set on the shared mock registry first so the
+        // constructor binding succeeds. Out-of-range cases revert in the manager BEFORE the registry
+        // check (and BEFORE the registry check matters). We reuse the shared `registry` (deployed in
+        // setUp) rather than deploying a new contract here, so the ONLY call after a caller's
+        // `vm.expectRevert` is the manager constructor itself (Foundry requires the reverting call
+        // immediately after the cheatcode).
+        if (b.length >= 2 && b.length <= 16 && bpSlot < b.length) {
+            bytes32[] memory activeHashes = new bytes32[](b.length);
+            for (uint256 i = 0; i < b.length; i++) {
+                activeHashes[i] = b[i].sphincsPubkeyHash;
+            }
+            registry.register(uint32(CHANNEL_ID), bpSlot, activeHashes);
+        }
         m = new ChannelSettlementManager(
             CHANNEL_ID,
             bpSlot,
@@ -331,6 +401,7 @@ contract ChannelSettlementManagerTest is Test {
             SPECIAL_CLOSE_PENALTY,
             INITIAL_BP_BOND,
             IChannelSettlementVerifier(address(verifier)),
+            IChannelRegistry(address(registry)),
             b
         );
     }
@@ -370,6 +441,107 @@ contract ChannelSettlementManagerTest is Test {
         ChannelSettlementManager.MemberBinding[] memory three = _bindings(3);
         vm.expectRevert(ChannelSettlementManager.InvalidBpMemberSlot.selector);
         _newManagerFrom(three, 3);
+    }
+
+    // -----------------------------------------------------------------------
+    // Finding E: manager member set + bp MUST equal the rollup registration
+    // -----------------------------------------------------------------------
+
+    /// @dev Deploy a manager bound to `reg`, from 3 bindings (USER_A/B/C, bp slot 0).
+    function _newManagerWithRegistry(IChannelRegistry reg)
+        internal
+        returns (ChannelSettlementManager)
+    {
+        ChannelSettlementManager.MemberBinding[] memory b =
+            new ChannelSettlementManager.MemberBinding[](3);
+        b[0] = ChannelSettlementManager.MemberBinding({sphincsPubkeyHash: USER_A, recipient: alice});
+        b[1] = ChannelSettlementManager.MemberBinding({sphincsPubkeyHash: USER_B, recipient: bob});
+        b[2] = ChannelSettlementManager.MemberBinding({sphincsPubkeyHash: USER_C, recipient: carol});
+        return new ChannelSettlementManager(
+            CHANNEL_ID,
+            BP_MEMBER_SLOT,
+            USER_A,
+            CHALLENGE_PERIOD,
+            SPECIAL_CLOSE_PENALTY,
+            INITIAL_BP_BOND,
+            IChannelSettlementVerifier(address(verifier)),
+            reg,
+            b
+        );
+    }
+
+    /// (a) Manager constructor SUCCEEDS when its member set + bp match the rollup registration, and
+    /// the manager's `registeredMemberSetCommitment()` equals the registry's recorded commitment.
+    function test_findingE_constructorSucceeds_whenMemberSetMatches() external {
+        MockChannelRegistry reg =
+            new MockChannelRegistry(IChannelSettlementVerifier(address(verifier)));
+        bytes32[] memory active = new bytes32[](3);
+        active[0] = USER_A;
+        active[1] = USER_B;
+        active[2] = USER_C;
+        reg.register(uint32(CHANNEL_ID), BP_MEMBER_SLOT, active);
+
+        ChannelSettlementManager m = _newManagerWithRegistry(IChannelRegistry(address(reg)));
+        assertEq(
+            m.registeredMemberSetCommitment(),
+            reg.channelMemberSetCommitment(uint32(CHANNEL_ID)),
+            "manager commitment != registry commitment"
+        );
+        assertEq(address(m.registry()), address(reg));
+    }
+
+    /// (b1) REVERTS when an active member differs from the registration.
+    function test_findingE_constructorReverts_whenMemberDiffers() external {
+        MockChannelRegistry reg =
+            new MockChannelRegistry(IChannelSettlementVerifier(address(verifier)));
+        bytes32[] memory active = new bytes32[](3);
+        active[0] = USER_A;
+        active[1] = USER_B;
+        active[2] = keccak256("a_DIFFERENT_member_c"); // registration has a different member C
+        reg.register(uint32(CHANNEL_ID), BP_MEMBER_SLOT, active);
+
+        vm.expectRevert(ChannelSettlementManager.MemberSetMismatch.selector);
+        _newManagerWithRegistry(IChannelRegistry(address(reg)));
+    }
+
+    /// (b2) REVERTS when the registration has a different member_count (extra member).
+    function test_findingE_constructorReverts_whenMemberCountDiffers() external {
+        MockChannelRegistry reg =
+            new MockChannelRegistry(IChannelSettlementVerifier(address(verifier)));
+        bytes32[] memory active = new bytes32[](4); // registration has 4 members, manager has 3
+        active[0] = USER_A;
+        active[1] = USER_B;
+        active[2] = USER_C;
+        active[3] = keccak256("extra_member_d");
+        reg.register(uint32(CHANNEL_ID), BP_MEMBER_SLOT, active);
+
+        vm.expectRevert(ChannelSettlementManager.MemberSetMismatch.selector);
+        _newManagerWithRegistry(IChannelRegistry(address(reg)));
+    }
+
+    /// (b3) REVERTS when the registered bp differs (commitment matches but bp slot/hash differs).
+    function test_findingE_constructorReverts_whenBpDiffers() external {
+        MockChannelRegistry reg =
+            new MockChannelRegistry(IChannelSettlementVerifier(address(verifier)));
+        bytes32[] memory active = new bytes32[](3);
+        active[0] = USER_A;
+        active[1] = USER_B;
+        active[2] = USER_C;
+        // Same member-set commitment, but bp registered at slot 1 (USER_B) instead of slot 0.
+        reg.register(uint32(CHANNEL_ID), 1, active);
+
+        vm.expectRevert(ChannelSettlementManager.BpMismatch.selector);
+        _newManagerWithRegistry(IChannelRegistry(address(reg)));
+    }
+
+    /// (b4) REVERTS when the channel was never registered (commitment is bytes32(0)) — enforces the
+    /// register-then-deploy order.
+    function test_findingE_constructorReverts_whenUnregistered() external {
+        MockChannelRegistry reg =
+            new MockChannelRegistry(IChannelSettlementVerifier(address(verifier)));
+        // No register() call: registry returns bytes32(0).
+        vm.expectRevert(ChannelSettlementManager.MemberSetMismatch.selector);
+        _newManagerWithRegistry(IChannelRegistry(address(reg)));
     }
 
     function test_request_close_freezes_channel_and_emits() external {

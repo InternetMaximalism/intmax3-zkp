@@ -83,6 +83,18 @@ interface IChannelSettlementVerifier {
     ) external pure returns (bytes32);
 }
 
+/// @notice Read-only view of the rollup's per-channel registration (the SINGLE SOURCE OF TRUTH for
+/// a channel's member set + block-proposer identity). Finding E: the close-path
+/// `ChannelSettlementManager` binds its own member set + bp to these values in its constructor, so
+/// the validity-path (registration) and close-path authenticate the SAME signer set. Satisfied by
+/// `IntmaxRollup`'s public mappings `channelMemberSetCommitment`/`channelBpMemberSlot`/
+/// `channelBpSphincsPubkeyHash`.
+interface IChannelRegistry {
+    function channelMemberSetCommitment(uint32 channelId) external view returns (bytes32);
+    function channelBpMemberSlot(uint32 channelId) external view returns (uint8);
+    function channelBpSphincsPubkeyHash(uint32 channelId) external view returns (bytes32);
+}
+
 contract ChannelSettlementManager {
     /// One SPHINCS+ key per member (D6 pad-to-MAX): a channel has between 2 and
     /// `MAX_MEMBER_COUNT` ACTIVE members, identified by their SPHINCS+ pubkey hash (bytes32), slot
@@ -97,6 +109,9 @@ contract ChannelSettlementManager {
     error InvalidMemberBinding();
     error DuplicateRegisteredMember();
     error InvalidMemberCount();
+    /// Finding E: the manager's member set / bp does not equal the rollup's on-chain registration.
+    error MemberSetMismatch();
+    error BpMismatch();
     error InvalidCloseProof();
     error InvalidSpecialCloseProof();
     error InvalidWithdrawalClaimProof();
@@ -319,6 +334,15 @@ contract ChannelSettlementManager {
     uint256 public immutable specialClosePenalty;
     IChannelSettlementVerifier public immutable verifier;
 
+    /// @notice Finding E: the rollup registry holding this channel's authoritative member set + bp
+    /// (the validity-path registration). The constructor asserts this manager's member set + bp
+    /// EQUAL the registry's, making them PROVABLY the same signer set.
+    /// DEPLOYMENT-INTEGRITY ASSUMPTION (review LOW-2): the equality guarantee holds only when
+    /// `registry` is the real `IntmaxRollup` and `channelId` is the intended channel. Both are
+    /// deployer-supplied constructor args with no on-chain back-link from the rollup. Integrators
+    /// MUST verify `registry()` and `channelId()` on the deployed manager before funding a channel.
+    IChannelRegistry public immutable registry;
+
     /// @notice The number of ACTIVE members (2..=MAX_MEMBER_COUNT). Mirrors the Rust
     /// `ChannelRecord.member_count` (src/common/channel.rs).
     uint8 public immutable activeMemberCount;
@@ -368,6 +392,7 @@ contract ChannelSettlementManager {
         uint256 specialClosePenalty_,
         uint256 initialBpBondCredits_,
         IChannelSettlementVerifier verifier_,
+        IChannelRegistry registry_,
         MemberBinding[] memory memberBindings
     ) {
         if (channelId_ == bytes4(0)) revert InvalidChannelId();
@@ -393,6 +418,7 @@ contract ChannelSettlementManager {
         specialClosePenalty = specialClosePenalty_;
         bpBondCredits = initialBpBondCredits_;
         verifier = verifier_;
+        registry = registry_;
         channelStatus = ChannelLifecycleStatus.Active;
         activeMemberCount = uint8(memberBindings.length);
 
@@ -417,6 +443,26 @@ contract ChannelSettlementManager {
         // The block-proposer pubkey hash must be the member registered at its slot.
         if (memberSphincsPubkeyHashes[bpMemberSlot_] != bpSphincsPubkeyHash_) {
             revert InvalidBpMemberSlot();
+        }
+
+        // Finding E: bind this manager's member set + bp to the rollup's on-chain registration (the
+        // validity-path single source of truth). SECURITY: without this, the validity proof and the
+        // close proof could authenticate DIFFERENT signer sets for the same channel. The close-form
+        // IMCM commitment over the just-built `memberSphincsPubkeyHashes`/`activeMemberCount` MUST
+        // equal the commitment the rollup recorded at `registerChannel` (computed with the SAME
+        // fixed-16 keccak preimage), and the bp identity MUST match.
+        //
+        // DEPLOYMENT ORDER: `registerChannel(channelId, ...)` on the rollup MUST run BEFORE this
+        // manager is deployed; otherwise the registry returns bytes32(0) and this reverts.
+        uint32 channelIdU32 = uint32(channelId_);
+        if (registeredMemberSetCommitment() != registry.channelMemberSetCommitment(channelIdU32)) {
+            revert MemberSetMismatch();
+        }
+        if (
+            bpMemberSlot_ != registry.channelBpMemberSlot(channelIdU32) ||
+            bpSphincsPubkeyHash_ != registry.channelBpSphincsPubkeyHash(channelIdU32)
+        ) {
+            revert BpMismatch();
         }
     }
 

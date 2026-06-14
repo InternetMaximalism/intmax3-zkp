@@ -39,3 +39,9 @@ Status: IN PROGRESS — 計画承認済み（/Users/plasma/.claude/plans/zazzy-h
 - **validity-path member binding は SOUND**（prover はオンチェーン登録メンバーにしか束縛不可、Finding C keccak↔Poseidon 閉鎖、block-hash 真正性アンカー airtight、R5/R6 成立）
 - **MEDIUM (Finding E)**: validity-path 登録(IntmaxRollup.registerChannel→member_pubkeys_root) と close-path(ChannelSettlementManager→registeredMemberSetCommitment) が独立別登録面、等価未強制。bp_member_slot も authenticated だが validity 回路で未束縛 → **要ユーザー判断: close-path を validity-path member 集合に統一**
 - **LOW**: registerChannel アクセス制御なし → channel_id squatting/DoS（soundness 破壊ではない、trust model 確認）
+
+## Finding E 修正（2026-06-14、contracts のみ、push 前）
+- **設計**: rollup 登録を single source of truth 化。registerChannel が per-channel に close-form IMCM commitment（`keccak(bytes4(IMCM)||uint32(memberCount)||h_0..h_15)`、verifier/close 回路と byte-exact）+ bp slot/hash を保存、one-time guard（`channelMemberSetCommitment[channelId]==0`）。ChannelSettlementManager constructor が `IChannelRegistry registry` を受け取り、自 commitment + bp が rollup 登録と一致を assert（MemberSetMismatch/BpMismatch）。
+- **検証**: `SKIP_GROTH16=true forge test` 69 passed/0 failed（ChannelSettlementManager 25 + IntmaxRollup 42 + MleE2E 2）。新テスト: 一致 success / member 差異・count 差異・bp 差異・未登録 で revert / commitment byte-equality（count 2/8/16）/ 二重登録 revert。
+- **独立敵対レビュー結論**: **SOUND**（bytes4→uint32 cast 正、commitment byte-exact かつ (count, ordered hashes) で衝突耐性 = 一致 commitment ⇒ 同一集合・順序、bp range-check 済み、zero-bind 不可、TOCTOU なし、deployment-integrity 前提で close==validity 等価）。soundness 変更は merge 前に不要。
+- **残（非ブロッキング）**: LOW-1 registerChannel アクセス制御（既知 #2、squatting を permanent DoS 化するが soundness 破壊でない）。LOW-2 deployment-integrity 前提（manager.registry/channelId 検証）→ ChannelSettlementManager.sol に inline 文書化済み。validity 回路内 per-block IMSB bp_member_slot 束縛は ChannelLeaf/VK 変更要の別 follow-up。

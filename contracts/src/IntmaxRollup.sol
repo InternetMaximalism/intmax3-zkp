@@ -299,6 +299,26 @@ contract IntmaxRollup {
     bytes32 internal _pendingChannelRegHashChain;
     uint64 public channelRegCount;
 
+    /// @notice Finding E (member-set consistency): the SINGLE SOURCE OF TRUTH for a channel's
+    ///         member set + block-proposer identity, recorded at `registerChannel`. The close-path
+    ///         `ChannelSettlementManager` constructor asserts its own member set + bp EQUAL these
+    ///         values, so the validity-path (registration) and close-path authenticate the SAME
+    ///         signer set (no divergent-signer-set attack).
+    ///
+    /// @dev `channelMemberSetCommitment[channelId]` is the close-form IMCM commitment computed with
+    ///      the SAME fixed-16 keccak preimage as
+    ///      `ChannelSettlementVerifier.closeMemberSetCommitment` — i.e.
+    ///      `keccak256(bytes4(0x494d434d) || uint32(memberCount) || h_0 || .. || h_15)` with padding
+    ///      slots (>= memberCount) zeroed. This is byte-identical to what the close path matches the
+    ///      close proof's `member_set_commitment` PI against (asserted by
+    ///      `IntmaxRollup.t.sol::test_channelMemberSetCommitmentMatchesVerifier`). A nonzero value
+    ///      also acts as the per-channel one-time-registration guard.
+    mapping(uint32 => bytes32) public channelMemberSetCommitment;
+    /// @notice channelId -> registered block-proposer member slot (matches `channelBpSphincsPubkeyHash`).
+    mapping(uint32 => uint8) public channelBpMemberSlot;
+    /// @notice channelId -> registered block-proposer SPHINCS+ pubkey hash (member at `bpMemberSlot`).
+    mapping(uint32 => bytes32) public channelBpSphincsPubkeyHash;
+
     /// @notice On-chain channel-registration hash chain accumulator (mirror of `depositHashChain`).
     ///         Advanced per posting round in `postBlock`; the resulting value is committed into the
     ///         registration block's hash (G6) and the validity proof's ext-state.
@@ -309,6 +329,11 @@ contract IntmaxRollup {
     /// `MIN_CHANNEL_MEMBERS` and `MAX_CHANNEL_MEMBERS` ACTIVE members in slot order.
     uint32 internal constant MAX_CHANNEL_MEMBERS = 16;
     uint32 internal constant MIN_CHANNEL_MEMBERS = 2;
+
+    /// @notice IMCM domain word ("IMCM" = 0x494d434d) for the close-form member-set commitment.
+    /// MUST equal `ChannelSettlementVerifier.CLOSE_MEMBER_SET_DOMAIN` so the commitment recorded by
+    /// `registerChannel` is byte-identical to the one the close path matches (Finding E).
+    uint32 internal constant CLOSE_MEMBER_SET_DOMAIN = 0x494d434d;
 
     mapping(uint256 => Submission) internal _submissions;
     uint256 public nextSubmissionId;
@@ -592,6 +617,10 @@ contract IntmaxRollup {
         address[] calldata recipients
     ) external {
         require(channelId != 0, "channel id 0 reserved");
+        // Finding E: ONE-TIME registration per channel. Matches the validity R5 one-time guard and
+        // makes `channelMemberSetCommitment[channelId]` an unambiguous single source of truth that
+        // the close-path manager binds to. A nonzero commitment means already registered.
+        require(channelMemberSetCommitment[channelId] == bytes32(0), "channel already registered");
         uint256 memberCount = memberSphincsPubkeyHashes.length;
         require(
             memberCount >= MIN_CHANNEL_MEMBERS &&
@@ -656,6 +685,27 @@ contract IntmaxRollup {
         }
         bytes32 newHash = keccak256(packed);
         _pendingChannelRegHashChain = newHash;
+
+        // Finding E: record the close-form IMCM member-set commitment + bp identity as the SINGLE
+        // SOURCE OF TRUTH for this channel. The preimage is BYTE-IDENTICAL to
+        // `ChannelSettlementVerifier.closeMemberSetCommitment(paddedHashes, memberCount)`:
+        //   keccak256( bytes4(0x494d434d) || uint32(memberCount) || h_0 || .. || h_15 )
+        // with active hashes in slot order and padding slots (i >= memberCount) zeroed. The close
+        // path matches this exact value against the close proof's `member_set_commitment` PI, so
+        // recording it here binds the close-path signer set to the registered (validity-path) set.
+        bytes memory memberSetPreimage = abi.encodePacked(
+            bytes4(CLOSE_MEMBER_SET_DOMAIN),
+            uint32(memberCount)
+        );
+        for (uint256 i = 0; i < MAX_CHANNEL_MEMBERS; i++) {
+            bytes32 slot = i < memberCount ? memberSphincsPubkeyHashes[i] : bytes32(0);
+            memberSetPreimage = abi.encodePacked(memberSetPreimage, slot);
+        }
+        channelMemberSetCommitment[channelId] = keccak256(memberSetPreimage);
+        // bp identity: the member registered at `bpMemberSlot` (already range-checked above).
+        channelBpMemberSlot[channelId] = bpMemberSlot;
+        channelBpSphincsPubkeyHash[channelId] = memberSphincsPubkeyHashes[bpMemberSlot];
+
         uint64 idx = channelRegCount++;
         emit ChannelRegistered(
             idx,
