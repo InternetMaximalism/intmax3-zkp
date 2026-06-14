@@ -69,6 +69,46 @@ latestFinalizedStateRoot に束縛、native payout + nullifier。設計調査完
 - **元の3ハリボテすべて実体化完了**: ①非payable deposit→実エスクロー(P1) ②settlement digest stub→manager 実 ETH+cap+close→withdrawNative 配線(P3/P4) ③価値移さぬ withdrawal→withdrawNative 実払出(P2)。残 accepted-stub は intra-channel split のみ（cross-channel safety に不要）。
 - 残: P7 Sepolia 再デプロイ + 実 2メンバー lifecycle（checkpoint 後）。
 
+### 2026-06-14 ローカル close e2e（着手中・未完）
+ユーザー選択: 「まずローカル close e2e」（Sepolia 前リハーサル）。
+- **済**: `generate_withdrawal_fixture.rs` を close 対応に拡張（compiles）。`WD_RECIPIENT=0x..20bytes` で
+  withdrawal recipient を manager アドレスに、`WD_OUT_PREFIX=close_` で別名出力（P2 fixture を上書きしない）。
+  `parse_address_hex` 追加。**working tree 未コミット**。
+- **残りレシピ（CREATE2 orchestration が核心）**:
+  1. canonical CREATE2 factory(0x4e59b44847b379578588920cA78FbF26c0B4956C) で
+     MleVerifier→IntmaxRollup(VK 引数 from 既存 lifecycle_validity_mle.json、VK は同回路で close でも不変)→
+     ChannelSettlementVerifier→ChannelSettlementManager(registry=rollup addr, bindings from lifecycle.json
+     registration) の決定的アドレスを `vm.computeCreate2Address` 連鎖で算出 → manager addr 確定。
+     factory 使用で deployer 非依存＝算出 script と実テストで同一アドレス。
+  2. `WD_RECIPIENT=<manager addr> WD_OUT_PREFIX=close_ cargo run --release --bin generate_withdrawal_fixture`
+     （heavy run ~2分）→ close_lifecycle.json / close_lifecycle_validity_mle.json / close_withdrawal_mle.json /
+     close_withdrawal_payout.json。VK が P2 と一致を assert（addr 一貫性）。
+  3. CloseLifecycleE2E.t.sol（WithdrawNativeE2E + ChannelSettlementManager パターン合体）: 同 CREATE2 で実
+     デプロイ → initializeWithdrawalVk → registerChannel(lifecycle.registration) → deposit{value} →
+     postBlock×3 → finalize(validity) → withdrawNative([recipient=manager],prover,close withdrawal proof) →
+     manager.pullChannelFunds() → requestClose→submitCloseIntent(stub)→finalizeClose→
+     submitWithdrawalClaim(stub, member, amount≤received)→claimWithdrawalCredit→member 実 ETH 受領 + cap 検証。
+  4. 独立レビュー → checkpoint → P7 Sepolia。
+- 注: P1–P4（ハリボテ全廃本体）は完了・コミット済み(ae06923,8dfca7f)。close e2e は検証リハーサル。
+
+### 2026-06-14 ローカル close e2e 完了 ✅
+- `CloseLifecycleE2E.t.sol` **PASS**: deploy(CREATE2)→registerChannel→deposit{value}→postBlock×3→
+  finalize(実 validity MLE)→withdrawNative(recipient=manager, 実 withdrawal MLE)→pullChannelFunds→
+  requestClose→submitCloseIntent→finalizeClose→submitWithdrawalClaim→claimWithdrawalCredit→**member 実 ETH 受領**。
+  manager(actual)=0x5Ddb=焼いた recipient 一致。全 Forge 89/89 green。
+- **重要な学び（CREATE2 + 外部ライブラリリンク）**: `MleVerifier` は外部ライブラリ(delegatecall)を使い、
+  `type(MleVerifier).creationCode` にリンク済みライブラリアドレスが焼かれる。Foundry は script と test で
+  ライブラリを**異なるアドレスにリンク**するため、manager CREATE2 アドレスが script/test で食い違う。
+  → アドレスは**必ず test コンテキストで算出**（`CloseManagerAddr.t.sol::test_printCloseManagerAddress`）。
+  rollup initcode は P2/close fixture で完全一致（VK は witness 非依存）なので P2 fixture で算出可。
+- 手順（runbook）: (1) `forge test --match-test test_printCloseManagerAddress -vv` → manager addr 取得。
+  (2) `WD_RECIPIENT=<addr> WD_OUT_PREFIX=close_ cargo run --release --bin generate_withdrawal_fixture`。
+  (3) `forge test --match-path test/CloseLifecycleE2E.t.sol`。
+- 新規: CloseE2EBase.sol（CREATE2 deploy 共有）、CloseManagerAddr.t.sol、CloseLifecycleE2E.t.sol、
+  close_*.json fixture 4本。generate_withdrawal_fixture に WD_RECIPIENT/WD_OUT_PREFIX 対応。
+- **次: P7 Sepolia 再デプロイ + 実 2メンバー lifecycle**（本番は通常デプロイ＝deployer は EOA、CREATE2 factory
+  問題なし。鍵は .claude/worktrees/.eth、中身読まずシェル展開のみ）。
+
 ---
 
 ## P2 実行スペック（2026-06-14 調査確定 — このセッションのスコープ）

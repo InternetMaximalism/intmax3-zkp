@@ -182,6 +182,26 @@ fn fnv1a_bytes32(bytes: &[u8]) -> String {
     format!("0x{:064x}", h as u128)
 }
 
+/// Parse a 20-byte hex address ("0x..." or bare) into an `Address` (5 big-endian u32 limbs).
+fn parse_address_hex(hex: &str) -> Address {
+    let s = hex.trim().trim_start_matches("0x");
+    let bytes = (0..s.len())
+        .step_by(2)
+        .map(|i| u8::from_str_radix(&s[i..i + 2], 16).expect("hex byte"))
+        .collect::<Vec<u8>>();
+    assert_eq!(bytes.len(), 20, "address must be 20 bytes");
+    let mut limbs = [0u32; 5];
+    for (i, limb) in limbs.iter_mut().enumerate() {
+        *limb = u32::from_be_bytes([
+            bytes[i * 4],
+            bytes[i * 4 + 1],
+            bytes[i * 4 + 2],
+            bytes[i * 4 + 3],
+        ]);
+    }
+    Address::from_u32_slice(&limbs).expect("address from limbs")
+}
+
 fn main() -> anyhow::Result<()> {
     let supported_user_counts = vec![2u32];
 
@@ -306,7 +326,15 @@ fn main() -> anyhow::Result<()> {
     // DROPPED. The user withdraws directly.
     // -----------------------------------------------------------------------
     eprintln!("[wd] Step 3: withdrawal tx (block 3)");
-    let withdrawal_address = Address::rand(&mut rng);
+    // The withdrawal recipient (an L1 address). For the CLOSE lifecycle e2e it must equal the
+    // `ChannelSettlementManager`'s CREATE2 address so the channel's aggregate withdrawal is paid to
+    // the manager; pass it via `WD_RECIPIENT=0x...20bytes`. Otherwise (the plain P2 fixture) a
+    // deterministic random L1 address is used.
+    let withdrawal_address = match std::env::var("WD_RECIPIENT") {
+        Ok(hex) => parse_address_hex(&hex),
+        Err(_) => Address::rand(&mut rng),
+    };
+    eprintln!("[wd] withdrawal recipient (L1) = {}", withdrawal_address.to_string());
     let withdrawal_transfer = Transfer {
         recipient: calculate_recipient_from_address(withdrawal_address),
         token_index: 0,
@@ -573,13 +601,18 @@ fn main() -> anyhow::Result<()> {
     let out_dir = Path::new("contracts/test/data");
     fs::create_dir_all(out_dir)?;
 
+    // Output filename prefix: set WD_OUT_PREFIX=close_ for the close-lifecycle fixture set so it
+    // does NOT overwrite the plain P2 withdrawal fixtures consumed by WithdrawNativeE2E.t.sol.
+    let prefix = std::env::var("WD_OUT_PREFIX").unwrap_or_default();
+    let name = |base: &str| format!("{prefix}{base}");
+
     // 1. withdrawal_mle.json
-    fs::write(out_dir.join("withdrawal_mle.json"), &withdrawal_mle_json)?;
-    eprintln!("[wd] wrote contracts/test/data/withdrawal_mle.json");
+    fs::write(out_dir.join(name("withdrawal_mle.json")), &withdrawal_mle_json)?;
+    eprintln!("[wd] wrote contracts/test/data/{}", name("withdrawal_mle.json"));
 
     // 2. lifecycle_validity_mle.json
-    fs::write(out_dir.join("lifecycle_validity_mle.json"), &validity_mle_json)?;
-    eprintln!("[wd] wrote contracts/test/data/lifecycle_validity_mle.json");
+    fs::write(out_dir.join(name("lifecycle_validity_mle.json")), &validity_mle_json)?;
+    eprintln!("[wd] wrote contracts/test/data/{}", name("lifecycle_validity_mle.json"));
 
     // 3. lifecycle.json
     let blocks_fixture: Vec<BlockFixture> = {
@@ -635,8 +668,8 @@ fn main() -> anyhow::Result<()> {
         proof_length: validity_mle_json.len() as u32,
     };
     let lifecycle_json = serde_json::to_string_pretty(&lifecycle)?;
-    fs::write(out_dir.join("lifecycle.json"), &lifecycle_json)?;
-    eprintln!("[wd] wrote contracts/test/data/lifecycle.json");
+    fs::write(out_dir.join(name("lifecycle.json")), &lifecycle_json)?;
+    eprintln!("[wd] wrote contracts/test/data/{}", name("lifecycle.json"));
 
     // 4. withdrawal_payout.json
     let payout = WithdrawalPayoutFixture {
@@ -652,8 +685,8 @@ fn main() -> anyhow::Result<()> {
         ext_commitment: ext_public_state.commitment().to_string(),
     };
     let payout_json = serde_json::to_string_pretty(&payout)?;
-    fs::write(out_dir.join("withdrawal_payout.json"), &payout_json)?;
-    eprintln!("[wd] wrote contracts/test/data/withdrawal_payout.json");
+    fs::write(out_dir.join(name("withdrawal_payout.json")), &payout_json)?;
+    eprintln!("[wd] wrote contracts/test/data/{}", name("withdrawal_payout.json"));
 
     eprintln!("[wd] Done!");
     Ok(())
