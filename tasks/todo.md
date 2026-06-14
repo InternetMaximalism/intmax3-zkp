@@ -295,5 +295,13 @@ tx: register1 0x2e54f387… / deposit 0x85ca4b78… / register2 0xc533f4b2… / 
       close_* fixture を WD_RECIPIENT=0x2E37DF9AF5A948a1c2a5e2ad69dFdb390F164A55 で再生成要。
       **現在ブロック**: 並行セッションの WASM wallet WIP(src/wallet_core.rs/wasm_wallet.rs/lib.rs/constants.rs/Cargo.*)が
       未コンパイル状態 ⇒ generate_withdrawal_fixture がビルド不可。lib が通れば再生成→PASS の見込み。並行作業は不可触。
-- [ ] sub 0..3 の postBlock stake 4ETH ロック中(同 proof で finalize(0..3) すれば各1ETH 回収可、任意)。
+- [x] **訂正(重要)**: 「同 proof で finalize(0..3) すれば回収可」は**誤り**。finalize は
+      `initialExtCommitment == latestFinalizedStateRoot` を要求し、sub4 finalize で latest が
+      genesis→0x998c に進んだ。c2c proof の initial=genesis なので finalize(0..3) は false を返す。
+      ⇒ **sub0..3 の stake 4ETH は現 proof では回収不能・stranded**(Sepolia testnet ETH なので write-off 推奨)。
+      唯一の回収路: block5→block5 の no-op validity proof を生成し finalize(0..3) を全部それで通す(重い・prover 対応未確認)。
+      教訓: 各 postBlockAndSubmit が 1 stake をロックし finalize でしか戻らない。multi-submission chain で全 stake を
+      戻すには各 submission を incremental proof で個別 finalize するか、SubBlock[] を 1 call にまとめて submission 数を減らす。
+      ⇒ C2CFullE2E.t.sol に `test_c2c_postBlockStakes_recovery_and_strandedLesson`(refund→withdraw 正常路 +
+      aggregate proof 再 finalize=false の stranding)を追加して回帰固定。
 - [ ] commit/push: c2c ツール + reg-chain fix のみを選択ステージ(lib.rs/wallet_core.rs/constants.rs/Cargo.* = 並行WIPは除外)。ユーザー判断待ち。
