@@ -74,6 +74,17 @@ contract IntmaxRollup {
     error NothingToWithdraw();
     error SubmissionAlreadyFinalized();
     error SubmissionBeforeFinalizedBlock();
+    error NothingToReclaim();
+    error SubmissionNotYetFinalized();
+    // Size-optimized replacements for former require-strings (custom errors are ~4 bytes vs a full
+    // string literal duplicated at each use site by via_ir inlining). Behavior is unchanged.
+    error ReentrantCall();
+    error ChannelIdZeroReserved();
+    error BpMemberSlotOutOfRange();
+    error MemberPubkeyHashZeroReserved();
+    error RegevPkDigestZeroReserved();
+    error RecipientZeroReserved();
+    error WithdrawalVkDegreeBitsZero();
 
     // -----------------------------------------------------------------------
     // Events
@@ -316,7 +327,7 @@ contract IntmaxRollup {
     uint256 private _status = _NOT_ENTERED;
 
     modifier nonReentrant() {
-        require(_status != _ENTERED, "ReentrancyGuard: reentrant call");
+        if (_status == _ENTERED) revert ReentrantCall();
         _status = _ENTERED;
         _;
         _status = _NOT_ENTERED;
@@ -546,7 +557,7 @@ contract IntmaxRollup {
     ) external {
         require(msg.sender == deployer, "only deployer");
         require(!withdrawalVkInitialized, "withdrawal vk already set");
-        require(_vk.degreeBits > 0, "withdrawal vk degreeBits 0");
+        if (_vk.degreeBits == 0) revert WithdrawalVkDegreeBitsZero();
         withdrawalVkInitialized = true;
         withdrawalMleVk = _vk;
         _copyWhirParams(_whirParamsW, whirParams_);
@@ -782,7 +793,7 @@ contract IntmaxRollup {
         bytes32[] calldata regevPkDigests,
         address[] calldata recipients
     ) external {
-        require(channelId != 0, "channel id 0 reserved");
+        if (channelId == 0) revert ChannelIdZeroReserved();
         // Finding E: ONE-TIME registration per channel. Matches the validity R5 one-time guard and
         // makes `channelMemberSetCommitment[channelId]` an unambiguous single source of truth that
         // the close-path manager binds to. A nonzero commitment means already registered.
@@ -795,14 +806,14 @@ contract IntmaxRollup {
             recipients.length == memberCount,
             "member count out of range (2..16) or array length mismatch"
         );
-        require(uint256(bpMemberSlot) < memberCount, "bp member slot out of range");
+        if (uint256(bpMemberSlot) >= memberCount) revert BpMemberSlotOutOfRange();
 
         // One SPHINCS+ key per member: active pubkey hashes must be nonzero and pairwise distinct
         // (mirrors ChannelRecord::validate). Regev digests must be set; recipients must be set.
         for (uint256 i = 0; i < memberCount; i++) {
-            require(memberSphincsPubkeyHashes[i] != bytes32(0), "member pubkey hash 0 reserved");
-            require(regevPkDigests[i] != bytes32(0), "regev pk digest 0 reserved");
-            require(recipients[i] != address(0), "recipient 0 reserved");
+            if (memberSphincsPubkeyHashes[i] == bytes32(0)) revert MemberPubkeyHashZeroReserved();
+            if (regevPkDigests[i] == bytes32(0)) revert RegevPkDigestZeroReserved();
+            if (recipients[i] == address(0)) revert RecipientZeroReserved();
             for (uint256 j = i + 1; j < memberCount; j++) {
                 require(
                     memberSphincsPubkeyHashes[i] != memberSphincsPubkeyHashes[j],
@@ -1054,6 +1065,71 @@ contract IntmaxRollup {
         require(ok, "Withdraw failed");
     }
 
+    /// @notice Reclaim a POST_BLOCK_STAKE bond once its submission's batch is part of canonical
+    ///         FINALIZED history. Permissionless caller; the bond is always credited to the recorded
+    ///         submitter (a helper may sweep on their behalf with no benefit to itself).
+    ///
+    /// ## Why this is needed
+    ///   `_refundStake` (the finalize path) is otherwise the ONLY way a bond returns. But `finalize`
+    ///   advances a single global `latestFinalizedStateRoot` monotonically and refunds exactly ONE
+    ///   submission, so when one aggregate validity proof finalizes many posted blocks at once, every
+    ///   other posting round in that range is permanently stranded: it can never be finalized (no
+    ///   proof chains backwards) and `fraudProof` refuses it (`startBlockNumber <= latestFinalized`,
+    ///   so it can no longer be slashed either). The bond is then dead weight with no exit. This is
+    ///   the protocol's normal flow (aggregate finalization), so on mainnet it leaks a real-ETH bond
+    ///   per un-finalized posting round. `reclaimStake` is the missing exit.
+    ///
+    /// ## Why it is sound (bond no longer at risk)
+    ///   A bond exists to back the claim "my committed blob holds a valid proof for this state." Once
+    ///   the batch's blocks are FINALIZED canonical history, (a) a valid proof for that state provably
+    ///   exists (some finalize verified the chain past it) and (b) `fraudProof` can no longer target
+    ///   it. So the bond is settled and must return.
+    ///
+    /// ## Eligibility (ALL required) — see tasks/reclaim-stake-threat-model.md
+    ///   1. The stake exists and was neither refunded (finalize) nor slashed (fraud):
+    ///      `stakeInfo.submitter != 0 && !stakeInfo.spent`. An unknown / truncated id has
+    ///      `submitter == 0` and is rejected here.
+    ///   2. The whole batch is finalized: `meta.endBlockNumber <= latestFinalizedBlockNumber`. Uses the
+    ///      LAST block of the batch — strictly stronger than the fraud-exclusion guard's
+    ///      `startBlockNumber <= latestFinalizedBlockNumber`, so a batch straddling the finalized
+    ///      boundary is NOT reclaimable until its tail finalizes too.
+    ///
+    /// ## SECURITY: why a height comparison alone is sufficient (no per-batch hash binding needed)
+    ///   An adversarial review noted `finalize` does not bind `submissionId` to the verified proof, and
+    ///   worried a non-canonical batch at a finalized height could be reclaimed. That cannot happen,
+    ///   from two invariants of the fraud/rollback machinery:
+    ///     (a) ROLLBACK FLOOR: `fraudProof` refuses any submission with
+    ///         `startBlockNumber <= latestFinalizedBlockNumber` (the guard above), and
+    ///         `_truncateSubmissions`/`_rollbackBatch` only rewind from the fraud target upward — so
+    ///         `blockNumber` can never be rewound below `latestFinalizedBlockNumber`. Hence
+    ///         `blockHashChainAt[k]` for every finalized height `k <= latestFinalizedBlockNumber` is
+    ///         IMMUTABLE, and equals the canonical chain `finalize` verified
+    ///         (`finalBlockChain == blockHashChainAt[finalBlockNumber]`).
+    ///     (b) UNIQUE LIVE BATCH PER HEIGHT: posting strictly advances `blockNumber`; the only way two
+    ///         batches share an end height is to rewind and repost, which requires `_truncateSubmissions`
+    ///         to first DELETE the prior submission there (clearing its `stakeInfo`). So at any time at
+    ///         most one *live* submission ends at a given height.
+    ///   Together: if a submission with `endBlockNumber = k <= latestFinalizedBlockNumber` still has a
+    ///   live stake (cond 1), it is THE canonical batch finalized at height k. Releasing its bond is
+    ///   therefore correct. These invariants are pinned by tests
+    ///   (test_reclaim_* in ReclaimStake.t.sol): repost-after-truncate cannot reclaim, and rollback
+    ///   cannot descend below the finalized height.
+    function reclaimStake(uint256 submissionId) external nonReentrant {
+        StakeInfo storage info = stakeInfo[submissionId];
+        address submitter = info.submitter;
+        if (submitter == address(0) || info.spent) revert NothingToReclaim();
+
+        if (_batchMetadata[submissionId].endBlockNumber > latestFinalizedBlockNumber) {
+            revert SubmissionNotYetFinalized();
+        }
+
+        // Effects before credit (CEI); pull-payment only — no external call here.
+        info.spent = true;
+        delete stakeInfo[submissionId];
+        pendingWithdrawals[submitter] += POST_BLOCK_STAKE;
+        emit WithdrawalCredited(submitter, POST_BLOCK_STAKE);
+    }
+
     // -----------------------------------------------------------------------
     // withdrawNative()  —  native ETH payout for a verified withdrawal proof (Phase 2)
     // -----------------------------------------------------------------------
@@ -1210,6 +1286,12 @@ contract IntmaxRollup {
         MleVerifier.MleProof calldata mleProof
     ) external view returns (bool) {
         // 1. PI binding to on-chain state
+        // SECURITY (defense-in-depth for INV-A / reclaimStake): finalization must only ADVANCE the
+        // finalized height. The initialExtCommitment check below already forces forward chaining, but
+        // asserting monotonicity on-chain removes any reliance on the validity circuit guaranteeing
+        // `finalBlockNumber >= initialBlockNumber` — and `latestFinalizedBlockNumber` is the height
+        // `reclaimStake` compares against, so a backward move must never be accepted.
+        if (validityPIs.finalBlockNumber < latestFinalizedBlockNumber) return false;
         if (validityPIs.initialExtCommitment != latestFinalizedStateRoot) return false;
         if (validityPIs.initialBlockChain != blockHashChainAt[validityPIs.initialBlockNumber]) return false;
         if (validityPIs.finalBlockChain != blockHashChainAt[validityPIs.finalBlockNumber]) return false;

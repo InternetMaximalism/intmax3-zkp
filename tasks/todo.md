@@ -305,3 +305,24 @@ tx: register1 0x2e54f387… / deposit 0x85ca4b78… / register2 0xc533f4b2… / 
       ⇒ C2CFullE2E.t.sol に `test_c2c_postBlockStakes_recovery_and_strandedLesson`(refund→withdraw 正常路 +
       aggregate proof 再 finalize=false の stranding)を追加して回帰固定。
 - [ ] commit/push: c2c ツール + reg-chain fix のみを選択ステージ(lib.rs/wallet_core.rs/constants.rs/Cargo.* = 並行WIPは除外)。ユーザー判断待ち。
+
+## 2026-06-15 stake stranding バグ修正: reclaimStake 追加（脅威モデル→敵対レビュー→実装）
+ユーザー指摘「stake が回収できないのは本番でも起こるバグでは？」→ YES。本物の資金ロス設計欠陥と判明:
+POST_BLOCK_STAKE のボンドは `finalize(その submission)` でしか戻らないが、集約 proof は 1 submission しか
+finalize せず（latestFinalizedStateRoot を単調前進）、飛ばされた submission は finalize 不能 + fraudProof も
+guard で不可 → ボンド永久凍結。これはシステムの標準動作（集約 finalize）なので mainnet で毎ラウンド実 ETH を失う。
+
+修正 = `reclaimStake(submissionId)`（fraud bond 設計は維持、ブロック確定後にボンドを submitter へ返す）:
+- 条件: stakeInfo live（refund/slash 済みでない）+ `endBlockNumber <= latestFinalizedBlockNumber`。height のみ。
+- 健全性: INV-A(rollback は latestFinalizedBlockNumber 未満に巻き戻せない→finalized 高さの blockHashChainAt 不変) +
+  INV-B(投稿は blockNumber を厳密前進、同一高さの再投稿は先に prior submission を truncate=stakeInfo 削除) より、
+  live stake かつ end<=finalized は「その高さの唯一の canonical finalized batch」⇒ ボンド清算済み⇒返却正当。
+- 防御: fullVerify に `finalBlockNumber >= latestFinalizedBlockNumber` の単調 assert を追加（INV-A の on-chain 補強）。
+プロセス: tasks/reclaim-stake-threat-model.md(脅威モデル)→独立 attacker subagent(height-only hole 指摘=HIGH)→
+INV-A/B で到達不能と論証し height-only 採用→独立 security-review subagent が **SOUND-TO-MERGE**(INV-A/B 検証、
+double-pay/ETH 保存/spam いずれも安全、require→error 変換は挙動不変)。
+EIP-170: reclaimStake +303B で超過したため、require 文字列を custom error 化(nonReentrant の
+"ReentrancyGuard…" が via_ir inline で多重複製されていたのが最大)→ **24,404B / +172 余裕**(元 +47 より良化)。
+テスト: contracts/test/ReclaimStake.t.sol 7/7(stranded 全回収→実ETH、before-finalize revert、double/after-refund
+revert、unknown revert、timeout-truncate 後 reclaim 不可、reclaim→finalize 二重不可、truncate→repost で fresh bond)。
+全 Forge 96/97(唯一の赤は CloseLifecycleE2E の stale fixture=並行 WASM WIP で lib 未コンパイルのため再生成ブロック中)。
