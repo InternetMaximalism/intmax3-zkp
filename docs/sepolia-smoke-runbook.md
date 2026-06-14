@@ -253,3 +253,26 @@ verification is ON). The EIP-2537 / blob precompiles were present on anvil — n
 precompile gap was found.
 
 Clean up: `rm blob.bin` and stop anvil when done.
+
+---
+
+## Real Sepolia deployment record (2026-06-14)
+
+The full smoke was executed on live **Sepolia (chainId 11155111)**, deployer
+`0x2C0BF10558adafDd21296CbF71dd6FE88c782C80`, public RPC
+`https://ethereum-sepolia-rpc.publicnode.com`.
+
+| Step | Result |
+|------|--------|
+| MleVerifier | `0x4154a4A27Ad06dc57Dab86e3a696e2454a62d871` — 14,030 B on-chain, accepted under **real EIP-170 enforcement** (the size fix works on a consensus node, not just `--disable-code-size-limit` anvil) |
+| IntmaxRollup | `0xBa057F093765a0AA4c4001d8deC5171E836A0af0` — `latestFinalizedStateRoot` initialized to genesis `0x5accf1e4…43c7` |
+| postBlock (type-3 blob tx `0xb106e2d2…afc7`) | status 1; `blockHashChainAt(1)` = `0x3ed44a28…089f` = Rust fixture ✓ |
+| finalize (`0x766a6fa4…07a7`) | `finalize returned: true`; `latestFinalizedStateRoot` = `0x2cfa6af8…215b3`, `blockNumber` = 1; real MLE/WHIR verified on-chain (degreeBits=13). 1 ETH stake credited to `pendingWithdrawals` (recoverable). |
+
+Gas notes for a tight balance: the blob tx needed an explicit
+`--blob-gas-price 20gwei` (cast's auto cap fell just under the live blob base
+fee). `finalize` was broadcast with `--with-gas-price 25gwei
+--gas-estimate-multiplier 115` so `gasLimit × maxFeePerGas` stayed within the
+deployer balance (forge's default estimate reserved 18M × ~47 gwei ≈ 0.85 ETH).
+The whole smoke (deploy + 1 ETH postBlock stake + finalize) fit in ~1.95 ETH
+with the stake recoverable; budget more headroom or run at low gas next time.
