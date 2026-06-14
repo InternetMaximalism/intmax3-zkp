@@ -1,0 +1,20 @@
+<!doctype html>
+<html>
+<head><meta charset="utf-8"><title>wallet feasibility probe</title></head>
+<body>
+<h3>Regev STARK in-wasm feasibility probe</h3>
+<pre id="out">starting…</pre>
+<script type="module">
+const out = document.getElementById('out');
+const log = (m) => { out.textContent += '\n' + m; console.log(m); };
+const w = new Worker('./feasibility-worker.js', { type: 'module' });
+w.onmessage = (e) => {
+  if (e.data.type === 'done') { log('OK: ' + e.data.msg); out.dataset.status = 'ok'; }
+  else if (e.data.type === 'error') { log('ERROR: ' + e.data.msg); out.dataset.status = 'error'; }
+  else log(e.data.msg);
+};
+w.onerror = (e) => { log('WORKER ERROR: ' + e.message); out.dataset.status = 'error'; };
+w.postMessage({ action: 'run' });
+</script>
+</body>
+</html>

@@ -1144,11 +1144,13 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0de51e6874e94e7bf76d726fc5d13ba782deca734ff60d5bb2fb2607c7406555"
 dependencies = [
  "cfg-if",
+ "js-sys",
  "libc",
  "r-efi 6.0.0",
  "rand_core 0.10.1",
  "wasip2",
  "wasip3",
+ "wasm-bindgen",
 ]
 
 [[package]]
@@ -1352,6 +1354,7 @@ dependencies = [
  "ff",
  "futures",
  "getrandom 0.3.4",
+ "getrandom 0.4.2",
  "hex",
  "js-sys",
  "keccak-hash",
@@ -2750,7 +2753,7 @@ dependencies = [
 [[package]]
 name = "regev_plonky3"
 version = "0.1.0"
-source = "git+https://github.com/leohio/regv-plonky3.git?rev=377dfc2fbd642f75e6f065c1e546ad1d48fc5d35#377dfc2fbd642f75e6f065c1e546ad1d48fc5d35"
+source = "git+https://github.com/leohio/regv-plonky3.git?rev=3b17b8e#3b17b8e341036b4dc5b077c0fe99e6539b7d0a36"
 dependencies = [
  "hashbrown 0.16.1",
  "p3-air 0.5.3",

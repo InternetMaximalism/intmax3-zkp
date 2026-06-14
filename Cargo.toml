@@ -70,7 +70,7 @@ postcard = { version = "1.1.3", features = ["alloc"] }
 # side by side). Pinned to the same rev the SIS-lattice-paymentchannel port
 # source uses. `default-features = false` drops `parallel` for wasm safety;
 # enable the `regev-parallel` feature for native proving speed.
-regev_plonky3 = { git = "https://github.com/leohio/regv-plonky3.git", rev = "377dfc2fbd642f75e6f065c1e546ad1d48fc5d35", default-features = false }
+regev_plonky3 = { git = "https://github.com/leohio/regv-plonky3.git", rev = "3b17b8e", default-features = false }
 rand010 = { package = "rand", version = "0.10" }
 p3-air-05 = { package = "p3-air", version = "0.5.3" }
 p3-field-05 = { package = "p3-field", version = "0.5.3" }
@@ -117,8 +117,21 @@ futures = "0.3"
 # Timing (WASM-compatible)
 web-time = "0.2"
 
+# `rand` 0.10 (alias `rand010`, used by the Regev layer) pulls getrandom 0.4, whose wasm
+# support is a Cargo *feature* (`wasm_js`) rather than the `getrandom_backend="wasm_js"` cfg
+# that getrandom 0.3 above uses. Enabling the feature here makes getrandom 0.4 select its
+# `wasm_js` backend on wasm32 (otherwise `inner_u32`/`inner_u64` are undefined and the link
+# fails). Renamed to avoid colliding with the getrandom 0.3 dep; we never import it directly —
+# this edge exists only to unify the `wasm_js` feature onto the getrandom 0.4 in the graph.
+# wasm-only so native builds are unaffected.
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+getrandom_v04 = { package = "getrandom", version = "0.4", features = ["wasm_js"] }
+
 [features]
 default = []
+# Legacy plonky2 balance-processor browser demo (`src/wasm_demo.rs`). Off by default because the
+# module is stale on this branch (removed `*_async` APIs, missing generated fixtures). See lib.rs.
+legacy_wasm_demo = []
 # `plonky2_keccak/wasm` does not expose a `gpu_merkle` feature flag, so we only
 # forward it to plonky2 + starky (which do).
 gpu_merkle = ["plonky2/gpu_merkle", "starky/gpu_merkle"]

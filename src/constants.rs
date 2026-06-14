@@ -11,7 +11,10 @@ pub const SEND_TREE_HEIGHT: usize = 32;
 // `channel_id` ALONE (key_id lives only in the channel layer). So the base channel id is 32 bits
 // and the channel tree is indexed by channel_id.
 pub const CHANNEL_TREE_HEIGHT: usize = CHANNEL_ID_BITS;
-pub const MAX_NUM_CHANNELS: usize = 1usize << CHANNEL_ID_BITS;
+// `u64`, not `usize`: `1 << 32` overflows the 32-bit `usize` on the wasm32 target (fine on 64-bit
+// native). This constant is informational (channel-id space size) and unused elsewhere, so widening
+// the type is value-preserving on native and portable to wasm.
+pub const MAX_NUM_CHANNELS: u64 = 1u64 << CHANNEL_ID_BITS;
 
 // Private State
 pub const ASSET_TREE_HEIGHT: usize = TOKEN_INDEX_BITS;
