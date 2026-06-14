@@ -289,7 +289,15 @@ fn main() -> anyhow::Result<()> {
     eprintln!("[wd] Step 2: deposit (block 2)");
     let deposit_salt = Salt::rand(&mut rng);
     let deposit_recipient = calculate_recipient_from_user_id(user_id, deposit_salt);
-    let depositor = Address::rand(&mut rng);
+    // The depositor is folded into the on-chain deposit hash (= block 2's hash). On a real chain the
+    // deposit tx's msg.sender IS the depositor, so for the Sepolia run set WD_DEPOSITOR to the EOA
+    // that will send `deposit()`; otherwise a deterministic random address (local-test path uses
+    // vm.prank to match).
+    let depositor = match std::env::var("WD_DEPOSITOR") {
+        Ok(hex) => parse_address_hex(&hex),
+        Err(_) => Address::rand(&mut rng),
+    };
+    eprintln!("[wd] depositor = {}", depositor.to_string());
     {
         let mut generator = block_witness_generator.borrow_mut();
         generator
