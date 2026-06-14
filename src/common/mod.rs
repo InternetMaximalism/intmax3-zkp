@@ -3,6 +3,7 @@ pub mod block;
 pub mod channel;
 pub mod channel_id;
 pub mod channel_message;
+pub mod channel_registration;
 pub mod deposit;
 pub mod error;
 pub mod private_state;

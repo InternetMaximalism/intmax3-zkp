@@ -1,9 +1,9 @@
 {
   "initial_block_number": 0,
   "initial_block_chain": "0x0000000000000000000000000000000000000000000000000000000000000000",
-  "initial_ext_commitment": "0x735d7ff1afc157eeace6806e03d6320a997b62684f5c57bc4510247ea03c8204",
+  "initial_ext_commitment": "0x5accf1e4f63f4df5b05ccfa8ec08ce9c13be5f72973310075d4ecb9c168b43c7",
   "final_block_number": 1,
-  "final_block_chain": "0x17ec476a79115d60eff19092d834d43ebffe116aed4aee3e4e7b1337b8f63893",
-  "final_ext_commitment": "0xdadda2fa19c875ea5a644810a8dece249dc544e5f5b24d45e81e3f8b874d4656",
+  "final_block_chain": "0x3ed44a28fc0c21371feee564ee3ce682ea7a32b4b78819d32b0d50251c3e089f",
+  "final_ext_commitment": "0x2cfa6af8d4c60fb00b2002506dcc5631b06689e74e43cca96730f88058a215b3",
   "prover": "0x0000000000000000000000000000000000000000"
 }

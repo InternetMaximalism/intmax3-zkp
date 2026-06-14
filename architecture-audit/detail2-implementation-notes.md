@@ -385,3 +385,70 @@ the collision for single-target builds); (2) is needed specifically for integrat
 After both changes: `cargo build --release --tests --benches` is clean, and integration tests
 run (e.g. `nullifier_duplicate_insertion_poc`: 2 passed). e2e.rs / mle_onchain_e2e.rs exercise
 the MLE/WHIR/Groth16 wrapper pipeline (separate-PR scope per CLAUDE.md) but now compile.
+
+---
+
+## D7 — on-chain registration consumed by the validity proof (closes the D5 follow-up)
+
+**Context:** D5 introduced the per-block member-signature binding (the signing pubkey must be
+included at its slot in the channel's Poseidon `member_pubkeys_root`), but nothing SET that
+root — it was only preserved, so it was empty for real channels and the binding was inert
+(security-review Finding D), and the in-circuit Poseidon root was never cross-bound to the
+keccak `ChannelRecord` (Finding C). D7 closes both: channels register on-chain and the validity
+(block) ZK proof deterministically rebuilds the channel tree from the on-chain registration hash
+chain, mirroring the DEPOSIT mechanism.
+
+**R1 — deposit-pattern registration step.** New `channel_reg_step` circuit
+(`src/circuits/validity/channel_reg_hash_chain/`, cloned from `deposit_hash_chain/`) consumes a
+keccak registration hash chain and, per registration, deterministically builds the Poseidon
+`MemberTree` and writes the channel's `ChannelLeaf{member_pubkeys_root}` into the channel tree.
+`ExtendedPublicState` gained `channel_reg_hash_chain`; `block_step` conditionally verifies the
+reg-chain proof (like deposits) and updates `account_tree_root`.
+
+**R2 — keccak↔Poseidon cross-binding (closes Finding C).** The SAME witnessed `PoseidonHashOut`
+member values feed BOTH the keccak preimage (via `Bytes32Target::from_hash_out`, an injective
+canonical split) AND the Poseidon `MemberLeaf{sphincs_pk_hash, regev_pk_digest}`. Reusing the
+identical targets IS the binding — no separate equality constraint. The consumption side
+(`update_channel_tree`) opens the identical `MemberLeaf` encoding against the same root.
+
+**R3 — word-aligned fixed-16 preimage.** `ChannelRegRecord::hash_with_prev_hash`
+(`src/common/channel_registration.rs`) and `IntmaxRollup.registerChannel` both keccak the
+word-aligned u32-limb stream `[prev(8), channel_id(1), bp_member_slot(1), member_count(1),
+16×(sphincs_pk_hash(8), regev_pk_digest(8), recipient(5))]` (padding zeroed) — one in-circuit
+keccak, no byte-straddling. Rust↔Solidity byte-exactness pinned by a differential test
+(member_count 2/8/16).
+
+**R4 (REVISED) — block-hash authenticity anchor.** `channel_reg_hash_chain` is folded into the
+BLOCK HASH (`Block` + `_computeBlockHash`), exactly like `deposit_hash_chain`. The initial R4
+(ext-commitment only) was found INSUFFICIENT in review: without an on-chain-built anchor a prover
+could fabricate a registration in-proof and hijack a `channel_id`. The block-hash chain
+(`blockHashChainAt`, postBlock-built from `_pendingChannelRegHashChain`) is the authenticity
+anchor `finalize` matches; a second byte-exact differential test pins the block hash.
+
+**R5 — one-time registration.** The step asserts the prior `ChannelLeaf == ChannelLeaf::default()`
+(full default, not just empty member root) before writing, preventing overwrite of an active
+channel.
+
+**R6 — intra-block exclusion.** A registration block carries no user updates
+(`has_channel_reg_proof ⇒ prev_account_tree_root == new_account_tree_root`), so the registration's
+channel-tree root is the sole account-tree update that block.
+
+**Genesis reconciliation.** Registration-via-blocks keeps BOTH balance and validity genesis empty
+(channels enter the tree through a registration block, not genesis) — this RESOLVES the prior
+F6/e2e blocker. The full-stack e2e (`tests/e2e.rs`: register block → deposit → transfer → close)
+now PASSES; the validity-path member binding is FUNCTIONAL.
+
+**Verified:** `cargo test --lib` 253 passed; e2e PASS; forge MLE/finalize (incl.
+`test_mleVerify_realProof`, tampered/unbound-PI rejection) + the differential tests green; MLE
+fixture regenerated. Independent security review: the validity-path member binding is SOUND — a
+prover can only bind to on-chain-registered members; Finding C closed; the block-hash anchor is
+airtight.
+
+**Residual (escalated):**
+- **MEDIUM** — the validity-path registration (`IntmaxRollup.registerChannel` → `member_pubkeys_root`)
+  and the close-path member set (`ChannelSettlementManager` constructor → `registeredMemberSetCommitment`)
+  are INDEPENDENT registration surfaces with no enforced equality; `bp_member_slot` is authenticated
+  on-chain but not re-bound in the validity circuit. Unify (have the settlement manager derive its
+  set from the rollup registration) or document the trust assumption.
+- **LOW** — `registerChannel` has no access control → `channel_id` squatting/DoS (not a soundness
+  break under one-time R5). Confirm the intended channel-id allocation trust model.

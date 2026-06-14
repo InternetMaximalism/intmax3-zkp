@@ -21,6 +21,12 @@ use crate::{
             sphincs_sig::{SmallBlockMessageFields, SpxSigWitness},
             update_channel_tree::{UpdateUserCircuit, UpdateUserCircuitError, UpdateUserTree},
         },
+        channel_reg_hash_chain::{
+            channel_reg_chain_processor::{
+                ChannelRegChainProcessor, ChannelRegChainProcessorError,
+            },
+            channel_reg_step::ChannelRegStepWitness,
+        },
         deposit_hash_chain::{
             deposit_chain_processor::{DepositChainProcessor, DepositChainProcessorError},
             deposit_step::DepositStepWitness,
@@ -28,6 +34,7 @@ use crate::{
     },
     common::{
         block::Block,
+        channel_registration::ChannelRegRecord,
         deposit::Deposit,
         trees::{
             channel_tree::{ChannelLeaf, ChannelMerkleProof, SendMerkleProof},
@@ -62,6 +69,8 @@ pub enum BlockHashChainProcessorError {
 
     #[error("deposit chain processor error: {0}")]
     DepositChainProcessor(#[from] DepositChainProcessorError),
+    #[error("channel reg chain processor error: {0}")]
+    ChannelRegChainProcessor(#[from] ChannelRegChainProcessorError),
     #[error("update account circuit error: {0}")]
     UpdateUserCircuit(#[from] UpdateUserCircuitError),
     #[error("block step error: {0}")]
@@ -73,6 +82,10 @@ pub enum BlockHashChainProcessorError {
 #[derive(Debug, Clone)]
 pub struct BlockHashChainProcessorWitness {
     pub deposit_step_witness: Vec<(Deposit, DepositMerkleProof)>,
+    /// Per-registration witnesses for a registration block (R1, mirror of `deposit_step_witness`).
+    /// Empty for ordinary (non-registration) blocks — the only path exercised on this branch — in
+    /// which case the channel-registration chain proof is `None` and the chain stays unchanged.
+    pub channel_reg_step_witness: Vec<(ChannelRegRecord, ChannelMerkleProof)>,
     pub block: Block,
     pub prev_account_leaves: Vec<ChannelLeaf>,
     pub user_merkle_proofs: Vec<ChannelMerkleProof>,
@@ -111,9 +124,11 @@ where
     block_hash_chain_circuit: BlockHashChainCircuit<F, C, D>,
     block_step_circuit: BlockStepCircuit<F, C, D>,
     deposit_chain_vd: VerifierCircuitData<F, C, D>,
+    channel_reg_chain_vd: VerifierCircuitData<F, C, D>,
     update_account_vds: Vec<(u32, VerifierCircuitData<F, C, D>)>,
     update_user_circuits: HashMap<u32, UpdateUserCircuit<F, C, D>>,
     deposit_chain_processor: DepositChainProcessor<F, C, D>,
+    channel_reg_chain_processor: ChannelRegChainProcessor<F, C, D>,
 }
 
 impl<F, C, const D: usize> BlockHashChainProcessor<F, C, D>
@@ -133,6 +148,9 @@ where
         let deposit_chain_processor = DepositChainProcessor::<F, C, D>::new();
         let deposit_chain_vd = deposit_chain_processor.deposit_chain_vd();
 
+        let channel_reg_chain_processor = ChannelRegChainProcessor::<F, C, D>::new();
+        let channel_reg_chain_vd = channel_reg_chain_processor.channel_reg_chain_vd();
+
         let mut update_user_circuits = HashMap::new();
         let mut update_account_vds = Vec::with_capacity(supported_user_counts.len());
         for &num_users in supported_user_counts {
@@ -146,6 +164,7 @@ where
             &block_chain_cd,
             &update_account_vds,
             &deposit_chain_vd,
+            &channel_reg_chain_vd,
         );
 
         let block_hash_chain_circuit = BlockHashChainCircuit::<F, C, D>::new(
@@ -157,9 +176,11 @@ where
             block_hash_chain_circuit,
             block_step_circuit,
             deposit_chain_vd,
+            channel_reg_chain_vd,
             update_account_vds,
             update_user_circuits,
             deposit_chain_processor,
+            channel_reg_chain_processor,
         }
     }
 
@@ -169,6 +190,10 @@ where
 
     pub fn deposit_chain_vd(&self) -> VerifierCircuitData<F, C, D> {
         self.deposit_chain_vd.clone()
+    }
+
+    pub fn channel_reg_chain_vd(&self) -> VerifierCircuitData<F, C, D> {
+        self.channel_reg_chain_vd.clone()
     }
 
     pub fn prove_block(
@@ -247,6 +272,35 @@ where
                     "previous block number is at max value".to_string(),
                 )
             })?;
+
+        // Generate the channel-registration chain proof (mirror of the deposit chain above). Empty
+        // for ordinary blocks, in which case the proof is `None` and the channel_reg_hash_chain in
+        // the resulting ext state is unchanged. For a registration block the chain rebuilds the
+        // Poseidon channel tree starting from the block's prev account_tree_root.
+        let mut channel_reg_chain_proof = None;
+        for (record, channel_merkle_proof) in &witness.channel_reg_step_witness {
+            let initial_value = if channel_reg_chain_proof.is_none() {
+                Some((
+                    prev_ext_public_state.channel_reg_hash_chain,
+                    prev_ext_public_state.inner.account_tree_root,
+                    crate::common::u63::U63::default(),
+                ))
+            } else {
+                None
+            };
+            let channel_reg_step_witness = ChannelRegStepWitness::<F, C, D> {
+                initial_value,
+                prev_channel_reg_chain_proof: channel_reg_chain_proof.clone(),
+                record: record.clone(),
+                channel_merkle_proof: channel_merkle_proof.clone(),
+                block_number,
+            };
+            let proof = self
+                .channel_reg_chain_processor
+                .prove_step(&channel_reg_step_witness)?;
+            channel_reg_chain_proof = Some(proof);
+        }
+
         let num_users = witness.block.num_users;
         let dummy_tx_v2_indices = vec![0; num_users as usize];
         let dummy_tx_v2s = vec![TxV2::default(); num_users as usize];
@@ -304,6 +358,7 @@ where
             initial_public_state: initial_public_state.clone(),
             prev_block_chain_proof: prev_block_chain_proof.clone(),
             deposit_hash_chain_proof: deposit_chain_proof.clone(),
+            channel_reg_hash_chain_proof: channel_reg_chain_proof.clone(),
             update_user_proof: update_user_proof.clone(),
             public_state_merkle_proof: witness.public_state_merkle_proof.clone(),
         };
@@ -311,6 +366,7 @@ where
             &self.block_chain_vd(),
             &self.update_account_vds,
             &self.deposit_chain_vd,
+            &self.channel_reg_chain_vd,
             &block_step_witness,
         )?;
 

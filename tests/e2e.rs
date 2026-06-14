@@ -82,6 +82,21 @@ fn e2e_deposit_validity_withdrawal() {
         .borrow()
         .current_extended_public_state();
 
+    // ----- Channel registration phase (in-band, block 1) -----
+    // Register channel 1's member set via a dedicated REGISTRATION block BEFORE its first updating
+    // block. This populates the channel tree's `member_pubkeys_root` so the later updating blocks'
+    // member-signature binding (live `update_channel_tree`) is satisfiable, and the validity proof
+    // actually consumes the registration via the `channel_reg_step` chain. Without this, the
+    // updating blocks would require a member-tree inclusion proof against an empty root — the
+    // previously-RED full-stack gap this phase closes.
+    {
+        let mut generator = block_witness_generator.borrow_mut();
+        generator.add_channel_registration(user_id.channel_id());
+        generator
+            .add_registration_block(0)
+            .expect("apply channel registration block");
+    }
+
     // ----- Deposit phase -----
     let deposit_salt = Salt::rand(&mut rng);
     let deposit_recipient = calculate_recipient_from_user_id(user_id, deposit_salt);

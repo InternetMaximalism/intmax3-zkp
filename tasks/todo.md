@@ -1,37 +1,41 @@
-# Task: N人メンバー対応（MAX=16, pad-to-MAX）+ オンチェーン検証 MLE/WHIR 化（Groth16 除去）
+# Task: registration 機構（オンチェーン受付 → 決定論的 channel tree → validity proof で証明）
 
 Status: IN PROGRESS — 計画承認済み（/Users/plasma/.claude/plans/zazzy-hugging-zephyr.md）。
-直前: 一人一鍵リファクタ完了・push（commit f86eacd）。
+直前: N人化 + MLE/WHIR化 完了・push（commit c71ac3e）。これで D5/Finding D の registration 穴を塞ぎ e2e green 化。
 
-## 確定設計決定（ユーザー選択 2026-06-13）
-- MAX_CHANNEL_MEMBERS=16（member 木高さ4=16葉）
-- pad-to-MAX 単一回路（全チャネル16スロット、未使用は padding）
-- Groth16 を契約 finalize/fraudProof から除去（コード・引数削除、MLE PI binding 依存）
+## 確定設計（R1-R6）
+- R1: deposit パターン踏襲（新 channel_reg_step 回路、block_step 統合）
+- R2: cross-binding（同一 Poseidon member 値が keccak preimage と Poseidon MemberLeaf 両方に → Finding C 解決）
+- R3: registration preimage を固定16・word-aligned 形に（registerChannel 改修、回路 keccak 1個）
+- R4(改訂 2026-06-14): registration を **block hash に含める**（deposit と同様、オンチェーン真正性アンカー）。ext-commitmentのみは捏造登録で channel 乗っ取り可能と判明
+- R5: one-time registration（prev ChannelLeaf == default の unregistered guard）
+- R6: intra-block 排他（registration block vs user-update block）
 
-## 重要 soundness 要件（Task2）
-Groth16 除去時、`mleProof.publicInputs == keccak256(ValidityPublicInputs)` 照合を finalize に**追加必須**
-（現状この束縛は Groth16 PI binding のみが担う。単純削除は任意 validityPIs を通せる穴）。
+## フェーズ
+- [x] **G1** ChannelRegRecord（src/common/channel_registration.rs）+ native hash_with_prev_hash（R3 固定形）+
+      registerChannel preimage を R3 形に改修 + **byte-exact 差分テスト（Rust↔Solidity, member_count 2/8/16）**
+- [x] **G2** channel_reg_step 回路（src/circuits/validity/channel_reg_hash_chain/、deposit_hash_chain 雛形）:
+      keccak chain 消費 + Poseidon MemberTree 構築（R2）+ ChannelLeaf set + unregistered guard（R5）+ 単体テスト（含 上書き拒否負例）
+- [x] **G3** ExtendedPublicState に channel_reg_hash_chain 追加（commitment ripple）
+- [x] **G4** block_step 統合（条件検証 + R6 排他 + account_tree_root select）
+- [x] **G5** ✅ e2e GREEN化(180.6s)。registration block→deposit→transfer→close、member binding 充足。Finding D 穴を閉鎖 test_utils: register_channel → add_channel_registration（in-band）。e2e: register→deposit→transfer→close
+- [x] **G6** ✅ block-hash アンカー(R4改訂) byte-exact 差分テスト PASS、postBlock accumulator+rollback、block_step が reg chain 強制、e2e PASS、forge 62/62 block-hash アンカー(R4改訂): Block.channel_reg_hash_chain + _computeBlockHash + 回路内block hash再計算 + generator + postBlock snapshot + channelRegHashChain accumulator、byte-exact。registerChannel R3 は G1 済み
+- [~] **G7** fixture 再生成済み、forge MLE/finalize 17 PASS(realProof オンチェーン検証 + 負例)。セキュリティレビュー: validity-path binding SOUND・Finding C 閉鎖。全体lib/clippy 実行中 VK 再生成 + MLE fixture 再生成 + **フルスタック e2e PASS（以前 red の解消実証）** + forge + 全体 lib + clippy/fmt + セキュリティレビュー
 
-## フェーズチェックリスト
-- [x] **F1** constants(MAX=16, MEMBER_TREE_HEIGHT=4) + balance_state(配列16, h1にmember_count) +
-      channel.rs(ChannelRecord [Bytes32;16]+member_count, validate, IMCR, close_member_set_commitment は active のみ)
-- [x] **F2** member 木高さ4 + close 回路 pad-to-MAX（slot<member_count ゲート）+ state_update_verifier(0..MAX) + PIs。
-      **🔴 最優先: close 回路 degree 早期計測。2^20超/proving数分超なら per-count variant へ切替を escalate**
-- [ ] **F3** test_utils + e2e_flow（複数 N=2/3/8/16 テスト + binding 負例）
-- [x] **F4** Solidity Task1: registerChannel 可変2..16, bytes32[16]+activeMemberCount, closePIHash 86, closeMemberSetCommitment 固定16形
-- [x] **F5** Solidity Task2: Groth16 完全除去 + **MLE PI binding 追加（_mlePublicInputsMatch, soundness-critical, 負例テスト付き）**。
-      Groth16Verifier.sol/Gnark/E2E_RealGroth16.t.sol/groth16_wrapper.rs 削除。forge 60/60、共有ベクタ再pin(0x12450612...)
-- [x] **F6** MLE fixture 再生成完了 + Forge 20テスト(MleE2E real proof, finalize, fraudProof) PASS + mle_onchain_e2e PASS(44s)。tampered validityPIs/unbound MLE PI 拒否=soundness束縛OK + Forge MLE/finalize + mle_onchain_e2e PASS 確認
-- [ ] **F7** detail2-implementation-notes.md に D6 ノート + 最終検証（lib/forge/clippy/fmt）+ 改竄validityPIs拒否のForge実証
+## 検証の要
+- **R3 byte-exact**: native == 回路内 keccak == Solidity preimage（差分テスト）
+- **フルスタック e2e green**: register block 後の更新ブロックで member binding 充足
+- VK/fixture 一括再生成（ext layout 変化）
 
 ## リスク
-- 🔴 close 回路 degree 激増（16 SPHINCS+）— F2 早期計測、実用外なら escalate
-- 🔴 Task2 soundness — Groth16 除去 = MLE PI binding 追加と一体
-- member_count を H1/IMCR/close PI/L1 全一貫
-- VK 再生成 → MLE fixture 再生成は Task1 後
-- 一人一鍵 registration follow-up は未解決のまま（本計画対象外）
-- abstract2.md 3固定 → N は spec 逸脱（D6）
+- 🔴 keccak byte-exactness（R3 固定形で軽減も差分テスト必須）
+- ext commitment 変化 → genesis/MLE fixture/VK 一括再生成
+- R6 排他制約漏れ / R5 full-default guard / distinctness は契約委譲
 
 ## 結果記録
-- **degree de-risk（最大リスク解消）**: SPHINCS+ verify_circuit degree 計測 N=1→2^14, 3→2^16, 8→2^17, **16→2^18**。
-  close 回路全体は 2^18〜2^19 見込み = 実用範囲内。**pad-to-MAX=16 フィージブル、escalate 不要**。
+（各フェーズ完了時に追記）
+
+## セキュリティレビュー結果（G7、2026-06-14）
+- **validity-path member binding は SOUND**（prover はオンチェーン登録メンバーにしか束縛不可、Finding C keccak↔Poseidon 閉鎖、block-hash 真正性アンカー airtight、R5/R6 成立）
+- **MEDIUM (Finding E)**: validity-path 登録(IntmaxRollup.registerChannel→member_pubkeys_root) と close-path(ChannelSettlementManager→registeredMemberSetCommitment) が独立別登録面、等価未強制。bp_member_slot も authenticated だが validity 回路で未束縛 → **要ユーザー判断: close-path を validity-path member 集合に統一**
+- **LOW**: registerChannel アクセス制御なし → channel_id squatting/DoS（soundness 破壊ではない、trust model 確認）

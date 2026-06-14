@@ -2,6 +2,7 @@
 pragma solidity ^0.8.24;
 
 import {Test, console, stdStorage, StdStorage} from "forge-std/Test.sol";
+import {Vm} from "forge-std/Vm.sol";
 import {IntmaxRollup} from "../src/IntmaxRollup.sol";
 import {KZGProof} from "../src/BlobKZGVerifier.sol";
 import {MleVerifier} from "@mle/MleVerifier.sol";
@@ -372,6 +373,165 @@ contract IntmaxRollupTest is Test {
 
     function _postAndSubmitDefault(IntmaxRollup.SubBlock[] memory batch) internal {
         _postAndSubmit(batch, DEFAULT_PROOF_HASH, DEFAULT_PROOF_LENGTH, DEFAULT_STATE_ROOT);
+    }
+
+    // -----------------------------------------------------------------------
+    // G1 differential test: registerChannel R3 word-aligned preimage (byte-exact vs Rust)
+    // -----------------------------------------------------------------------
+
+    /// @dev Build the same deterministic test record the Rust `make_record(memberCount)` builds
+    ///      (src/common/channel_registration.rs): channelId = 7, bpMemberSlot = 1, and for active
+    ///      member i (0-indexed, s = i + 1):
+    ///        sphincs_pk_hash = 8 big-endian u32 limbs all = 0x11110000 + s
+    ///        regev_pk_digest = 8 big-endian u32 limbs all = 0x22220000 + s
+    ///        recipient       = 5 big-endian u32 limbs all = 0x33330000 + s  (20-byte address)
+    function _diffMembers(uint256 memberCount)
+        internal
+        pure
+        returns (bytes32[] memory sphincs, bytes32[] memory regev, address[] memory recipients)
+    {
+        sphincs = new bytes32[](memberCount);
+        regev = new bytes32[](memberCount);
+        recipients = new address[](memberCount);
+        for (uint256 i = 0; i < memberCount; i++) {
+            uint32 s = uint32(i) + 1;
+            sphincs[i] = _repeatU32x8(0x11110000 + s);
+            regev[i] = _repeatU32x8(0x22220000 + s);
+            recipients[i] = _repeatU32x5Addr(0x33330000 + s);
+        }
+    }
+
+    /// @dev bytes32 whose 8 big-endian u32 words all equal `w` (matches Rust Bytes32 of 8 limbs).
+    function _repeatU32x8(uint32 w) internal pure returns (bytes32 out) {
+        uint256 v;
+        for (uint256 k = 0; k < 8; k++) {
+            v = (v << 32) | uint256(w);
+        }
+        out = bytes32(v);
+    }
+
+    /// @dev address whose 5 big-endian u32 words all equal `w` (matches Rust Address of 5 limbs).
+    function _repeatU32x5Addr(uint32 w) internal pure returns (address out) {
+        uint256 v;
+        for (uint256 k = 0; k < 5; k++) {
+            v = (v << 32) | uint256(w);
+        }
+        out = address(uint160(v));
+    }
+
+    /// THE DE-RISK GATE (Solidity side): drive `registerChannel` for memberCount ∈ {2, 8, 16}
+    /// from a fresh rollup (`_pendingChannelRegHashChain == bytes32(0)`, the Rust differential
+    /// seed) and assert the emitted `newChannelRegHashChain` equals the SAME pinned constants
+    /// asserted by
+    /// `src/common/channel_registration.rs::test_channel_reg_preimage_pinned_differential`.
+    ///
+    /// SECURITY: passing this with byte-identical pinned constants proves the Rust / circuit /
+    /// Solidity registerChannel preimages are byte-for-byte equal (R3). If it diverges, the
+    /// validity circuit would bind a different member set than the contract recorded.
+    function test_channelRegPreimageDifferential() public {
+        // Pinned constants — identical to the Rust test. DO NOT edit without regenerating both.
+        bytes32 pinnedMc2 =
+            0xf2a056ed43f19020a838a9c5c541fffbd93eb0d954b9ca258cbbe2ea29c1d31e;
+        bytes32 pinnedMc8 =
+            0xe8eac7c89493dede3ab7a120d3a6fdbc33fbd5af9df594ecc6a4dbe7d1d63ea7;
+        bytes32 pinnedMc16 =
+            0x8afc4abe3b56afd6fef05f88c8028133282eb39493180cfb96fca3868ef3ab41;
+
+        assertEq(_registerChannelDiff(2), pinnedMc2, "MC2 preimage hash drifted");
+        // Each call starts from a fresh rollup so the pending chain seed is always bytes32(0).
+        assertEq(_registerChannelDiff(8), pinnedMc8, "MC8 preimage hash drifted");
+        assertEq(_registerChannelDiff(16), pinnedMc16, "MC16 preimage hash drifted");
+    }
+
+    /// @dev Deploy a FRESH rollup (so `_pendingChannelRegHashChain == bytes32(0)`), call
+    ///      `registerChannel`, and return the emitted `newChannelRegHashChain`.
+    function _registerChannelDiff(uint256 memberCount) internal returns (bytes32) {
+        MleVerifier mleVerifierContract = new MleVerifier();
+        IntmaxRollup fresh = new IntmaxRollup(
+            fraudTreasury,
+            _emptyMleVk(),
+            _emptyWhirParams(),
+            "",
+            "",
+            _emptyMleArrays(),
+            _emptyMleArrays(),
+            mleVerifierContract,
+            bytes32(0)
+        );
+
+        (bytes32[] memory sphincs, bytes32[] memory regev, address[] memory recipients) =
+            _diffMembers(memberCount);
+
+        vm.recordLogs();
+        fresh.registerChannel(7, 1, sphincs, regev, recipients);
+        Vm.Log[] memory logs = vm.getRecordedLogs();
+
+        // ChannelRegistered(uint64 indexed, uint32 indexed, uint8, bytes32[], bytes32[], address[],
+        //                   bytes32 memberPubkeysRoot, bytes32 regevPkRoot, bytes32 newChainHash)
+        bytes32 topic0 = keccak256(
+            "ChannelRegistered(uint64,uint32,uint8,bytes32[],bytes32[],address[],bytes32,bytes32,bytes32)"
+        );
+        for (uint256 i = 0; i < logs.length; i++) {
+            if (logs[i].topics[0] == topic0) {
+                // Non-indexed params (in order): bpMemberSlot(uint8), memberSphincsPubkeyHashes
+                // (bytes32[]), regevPkDigests(bytes32[]), recipients(address[]),
+                // memberPubkeysRoot(bytes32), regevPkRoot(bytes32), newChannelRegHashChain(bytes32).
+                (, , , , , , bytes32 newChainHash) = abi.decode(
+                    logs[i].data,
+                    (uint8, bytes32[], bytes32[], address[], bytes32, bytes32, bytes32)
+                );
+                return newChainHash;
+            }
+        }
+        revert("ChannelRegistered event not found");
+    }
+
+    /// G6 byte-exact block-hash differential: `_computeBlockHash` over the SAME fields as the Rust
+    /// `Block::hash_with_prev_hash` (incl. a NONZERO channel_reg_hash_chain) MUST produce the
+    /// IDENTICAL pinned constant from `common::block::tests::test_block_hash_channel_reg_differential`.
+    /// SECURITY: a drift here means the on-chain block-hash chain (the registration anchor) no
+    /// longer matches what the validity proof commits — DO NOT update blindly.
+    function test_blockHashChannelRegDifferential() public {
+        BlockHashHarness harness = new BlockHashHarness(
+            fraudTreasury,
+            _emptyMleVk(),
+            _emptyWhirParams(),
+            "",
+            "",
+            _emptyMleArrays(),
+            _emptyMleArrays(),
+            new MleVerifier(),
+            bytes32(0)
+        );
+
+        // Fields IDENTICAL to the Rust test: prev=0x0a*, txRoot=0x0b*, deposit=0x0c*, reg=0x0d*,
+        // channelId=7, single keyId=9, timestamp=0x1122334455667788.
+        bytes32 prevHash = bytes32(_rep32(0x0a));
+        bytes32 txTreeRoot = bytes32(_rep32(0x0b));
+        bytes32 depositChain = bytes32(_rep32(0x0c));
+        bytes32 regChain = bytes32(_rep32(0x0d));
+        uint32[] memory keyIds = new uint32[](1);
+        keyIds[0] = 9;
+
+        bytes32 pinned =
+            0x3099e735b9d4cc17baec8e5797b12e65a09186ee6abd8e0094470d81aa1d2ad7;
+        bytes32 got = harness.computeBlockHashForTest(
+            prevHash,
+            7,
+            uint64(0x1122334455667788),
+            keyIds,
+            txTreeRoot,
+            depositChain,
+            regChain
+        );
+        assertEq(got, pinned, "block-hash preimage (incl. channel_reg_hash_chain) drifted");
+    }
+
+    /// @dev A bytes32 whose every byte equals `b` (mirrors the Rust `[0x_b_b_b_b; 8]` u32 limbs).
+    function _rep32(uint8 b) internal pure returns (uint256 v) {
+        for (uint256 i = 0; i < 32; i++) {
+            v = (v << 8) | uint256(b);
+        }
     }
 
     // -----------------------------------------------------------------------
@@ -1448,4 +1608,53 @@ contract IntmaxRollupTest is Test {
 /// @dev Contract that reverts on ETH receipt -- tests pull-payment resilience.
 contract RevertingReceiver {
     receive() external payable { revert("no ETH accepted"); }
+}
+
+/// @dev Test-only harness exposing the internal `_computeBlockHash` so the G6 byte-exact
+///      differential test can assert the block-hash preimage (incl. channel_reg_hash_chain)
+///      matches the Rust `Block::hash_with_prev_hash` constant.
+contract BlockHashHarness is IntmaxRollup {
+    constructor(
+        address fraudTreasury_,
+        MleVk memory mleVk_,
+        SpongefishWhirVerify.WhirParams memory whirParams_,
+        bytes memory whirProtocolId_,
+        bytes memory whirSplitSessionId_,
+        uint256[] memory mleKIs_,
+        uint256[] memory mleSubgroupGenPowers_,
+        MleVerifier mleVerifier_,
+        bytes32 genesisStateRoot_
+    )
+        IntmaxRollup(
+            fraudTreasury_,
+            mleVk_,
+            whirParams_,
+            whirProtocolId_,
+            whirSplitSessionId_,
+            mleKIs_,
+            mleSubgroupGenPowers_,
+            mleVerifier_,
+            genesisStateRoot_
+        )
+    {}
+
+    function computeBlockHashForTest(
+        bytes32 prevHash,
+        uint32 channelId,
+        uint64 timestamp,
+        uint32[] calldata keyIds,
+        bytes32 txTreeRoot,
+        bytes32 blockDepositHashChain,
+        bytes32 blockChannelRegHashChain
+    ) external pure returns (bytes32) {
+        return _computeBlockHash(
+            prevHash,
+            channelId,
+            timestamp,
+            keyIds,
+            txTreeRoot,
+            blockDepositHashChain,
+            blockChannelRegHashChain
+        );
+    }
 }

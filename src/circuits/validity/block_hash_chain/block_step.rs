@@ -27,6 +27,10 @@ use crate::{
             ext_public_state::{ExtendedPublicState, ExtendedPublicStateTarget},
             update_channel_tree::{UpdateUserPublicInputs, UpdateUserPublicInputsTarget},
         },
+        channel_reg_hash_chain::channel_reg_chain_pis::{
+            ChannelRegChainPublicInputs, ChannelRegChainPublicInputsError,
+            ChannelRegChainPublicInputsTarget,
+        },
         deposit_hash_chain::deposit_chain_pis::{
             DepositChainPublicInputs, DepositChainPublicInputsError, DepositChainPublicInputsTarget,
         },
@@ -66,6 +70,9 @@ pub enum BlockStepError {
     #[error("Deposit chain public inputs error: {0}")]
     DepositChainPublicInputs(#[from] DepositChainPublicInputsError),
 
+    #[error("Channel reg chain public inputs error: {0}")]
+    ChannelRegChainPublicInputs(#[from] ChannelRegChainPublicInputsError),
+
     #[error("Block chain public inputs error: {0}")]
     BlockChainPublicInputs(#[from] BlockChainPublicInputsError),
 
@@ -97,6 +104,9 @@ pub struct BlockStepWitness<
     // Deposit hash chain proof if there is a deposit in this block
     pub deposit_hash_chain_proof: Option<ProofWithPublicInputs<F, C, D>>,
 
+    // Channel-registration hash chain proof if there is a registration in this block
+    pub channel_reg_hash_chain_proof: Option<ProofWithPublicInputs<F, C, D>>,
+
     // Update account proof corresponding to this block
     pub update_user_proof: ProofWithPublicInputs<F, C, D>,
 
@@ -114,6 +124,7 @@ where
         block_chain_vd: &VerifierCircuitData<F, C, D>,
         update_account_vds: &[(u32, VerifierCircuitData<F, C, D>)],
         deposit_chain_vd: &VerifierCircuitData<F, C, D>,
+        channel_reg_chain_vd: &VerifierCircuitData<F, C, D>,
     ) -> Result<BlockChainPublicInputs<F, C, D>, BlockStepError> {
         let prev_inputs = if let Some(prev_proof) = &self.prev_block_chain_proof {
             block_chain_vd.verify(prev_proof.clone()).map_err(|e| {
@@ -175,7 +186,6 @@ where
                 "update account proof initial block hash chain mismatch".to_string(),
             ));
         }
-        let account_tree_root = update_user_inputs.new_account_tree_root;
         let block_hash_chain = update_user_inputs.new_block_hash_chain;
 
         let mut deposit_hash_chain = prev_public_state_ext.deposit_hash_chain;
@@ -237,6 +247,85 @@ where
             deposit_count = deposit_inputs.deposit_count;
         }
 
+        // Channel-registration chain (mirror of the deposit conditional logic above). A
+        // registration block carries a channel_reg proof; the account_tree_root for the
+        // block is then taken from the registration chain's deterministically rebuilt
+        // channel tree instead of the update account proof. R6: a registration block and a
+        // user-update block are mutually exclusive, so when the registration proof is
+        // present the update account proof MUST leave the account tree root unchanged.
+        let mut channel_reg_hash_chain = prev_public_state_ext.channel_reg_hash_chain;
+        let mut account_tree_root = update_user_inputs.new_account_tree_root;
+        let has_channel_reg_proof = self.channel_reg_hash_chain_proof.is_some();
+        if let Some(channel_reg_proof) = &self.channel_reg_hash_chain_proof {
+            channel_reg_chain_vd
+                .verify(channel_reg_proof.clone())
+                .map_err(|e| {
+                    BlockStepError::InvalidProof(format!(
+                        "channel reg hash chain proof invalid: {e}"
+                    ))
+                })?;
+            let channel_reg_inputs = ChannelRegChainPublicInputs::<F, C, D>::from_u64_slice(
+                &channel_reg_proof.public_inputs.to_u64_vec(),
+                &channel_reg_chain_vd.common.config,
+            )?;
+
+            // initial channel_reg_hash_chain must match the previous ext state.
+            if channel_reg_inputs.initial_channel_reg_hash_chain
+                != prev_public_state_ext.channel_reg_hash_chain
+            {
+                return Err(BlockStepError::InvalidInput(
+                    "channel reg proof initial channel reg hash chain mismatch".to_string(),
+                ));
+            }
+            // initial channel tree root must be the block's prev account tree root (same prev the
+            // update account proof saw).
+            if channel_reg_inputs.initial_channel_tree_root != prev_public_state.account_tree_root {
+                return Err(BlockStepError::InvalidInput(
+                    "channel reg proof initial channel tree root mismatch".to_string(),
+                ));
+            }
+            if channel_reg_inputs.block_number != block_number {
+                return Err(BlockStepError::InvalidInput(
+                    "channel reg proof block number mismatch".to_string(),
+                ));
+            }
+            // R6: registration blocks must not also update users — the update account proof must
+            // leave the account tree root unchanged.
+            if update_user_inputs.new_account_tree_root != update_user_inputs.prev_account_tree_root
+            {
+                return Err(BlockStepError::InvalidInput(
+                    "registration block must not update the account tree (R6 exclusion)"
+                        .to_string(),
+                ));
+            }
+
+            // The block's new account tree root is the registration chain's channel tree root.
+            account_tree_root = channel_reg_inputs.channel_tree_root;
+            channel_reg_hash_chain = channel_reg_inputs.channel_reg_hash_chain;
+        }
+        // A change in the channel_reg_hash_chain requires the proof (mirror of the deposit guard).
+        if (channel_reg_hash_chain != prev_public_state_ext.channel_reg_hash_chain)
+            != has_channel_reg_proof
+        {
+            return Err(BlockStepError::InvalidInput(
+                "channel_reg_hash_chain_proof must be provided iff the channel reg hash chain changes"
+                    .to_string(),
+            ));
+        }
+
+        // G6: the block's `channel_reg_hash_chain` (folded into the block hash via update_user, so
+        // it is committed in the on-chain block hash chain) MUST equal the resulting ext-state
+        // channel_reg_hash_chain (the proof-consumed value on a registration block, else the
+        // unchanged prev). This is what anchors the registration chain on-chain: a prover cannot
+        // advance the in-proof reg chain without it appearing in the block hash that the contract's
+        // `blockHashChainAt` snapshot must match.
+        if update_user_inputs.channel_reg_hash_chain != channel_reg_hash_chain {
+            return Err(BlockStepError::InvalidInput(
+                "block channel_reg_hash_chain (in block hash) must equal the resulting ext-state channel_reg_hash_chain"
+                    .to_string(),
+            ));
+        }
+
         // Verify previous public state membership and derive the root prior to this update.
         let empty_public_state = PublicState::empty_leaf();
         self.public_state_merkle_proof
@@ -268,6 +357,7 @@ where
             block_hash_chain,
             deposit_hash_chain,
             deposit_count,
+            channel_reg_hash_chain,
         );
 
         Ok(BlockChainPublicInputs {
@@ -286,9 +376,11 @@ pub struct BlockStepTarget<const D: usize> {
 
     pub has_prev_block_proof: BoolTarget,
     pub has_deposit_proof: BoolTarget,
+    pub has_channel_reg_proof: BoolTarget,
     pub initial_public_state: ExtendedPublicStateTarget,
     pub prev_block_chain_proof: ProofWithPublicInputsTarget<D>,
     pub deposit_hash_chain_proof: ProofWithPublicInputsTarget<D>,
+    pub channel_reg_hash_chain_proof: ProofWithPublicInputsTarget<D>,
 
     // Update account proof different for each number of users
     pub update_user_proofs: Vec<ProofWithPublicInputsTarget<D>>,
@@ -306,6 +398,7 @@ impl<const D: usize> BlockStepTarget<D> {
         block_chain_cd: &CommonCircuitData<F, D>,
         update_account_vds: &[(u32, VerifierCircuitData<F, C, D>)],
         deposit_chain_vd: &VerifierCircuitData<F, C, D>,
+        channel_reg_chain_vd: &VerifierCircuitData<F, C, D>,
     ) -> Self
     where
         F: RichField + Extendable<D>,
@@ -399,6 +492,17 @@ impl<const D: usize> BlockStepTarget<D> {
             &deposit_chain_vd.common.config,
         );
 
+        let has_channel_reg_proof = builder.add_virtual_bool_target_safe();
+        let channel_reg_hash_chain_proof = add_proof_target_and_conditionally_verify_cyclic(
+            channel_reg_chain_vd,
+            builder,
+            has_channel_reg_proof,
+        );
+        let channel_reg_inputs = ChannelRegChainPublicInputsTarget::from_pis(
+            &channel_reg_hash_chain_proof.public_inputs,
+            &channel_reg_chain_vd.common.config,
+        );
+
         let prev_public_state_ext = selected_prev_state.clone();
         let prev_public_state = prev_public_state_ext.inner.clone();
 
@@ -478,7 +582,72 @@ impl<const D: usize> BlockStepTarget<D> {
             &prev_public_state_ext.deposit_count,
         );
 
-        let selected_account_tree_root = account_tree_root;
+        // Channel-registration chain (mirror of the deposit conditional logic above).
+        //
+        // R6 (intra-block exclusion): a registration block and a user-update block are mutually
+        // exclusive. When the registration proof is present, the update account proof MUST leave
+        // the account tree root unchanged, so the registration's channel_tree_root is the
+        // sole account-tree update for the block. We detect "user updated" as
+        // prev_account_tree_root != new_account_tree_root on the selected update inputs.
+        let account_root_eq = selected_update_inputs
+            .prev_account_tree_root
+            .is_equal(builder, &selected_update_inputs.new_account_tree_root);
+        // has_channel_reg_proof => account_root_eq (no user update in a registration block)
+        builder.conditional_assert_true(has_channel_reg_proof, account_root_eq);
+
+        // initial channel reg hash chain must match the previous ext state.
+        channel_reg_inputs
+            .initial_channel_reg_hash_chain
+            .conditional_assert_eq(
+                builder,
+                prev_public_state_ext.channel_reg_hash_chain.clone(),
+                has_channel_reg_proof,
+            );
+        // initial channel tree root must equal the block's prev account tree root (the same prev
+        // the update account proof saw).
+        channel_reg_inputs
+            .initial_channel_tree_root
+            .conditional_assert_eq(
+                builder,
+                prev_public_state.account_tree_root.clone(),
+                has_channel_reg_proof,
+            );
+        builder.conditional_assert_eq(
+            has_channel_reg_proof.target,
+            channel_reg_inputs.block_number.value,
+            next_block_number.value,
+        );
+
+        // Account tree root: from the registration chain on a registration block, else from the
+        // update account proof.
+        let selected_account_tree_root = PoseidonHashOutTarget::select(
+            builder,
+            has_channel_reg_proof,
+            channel_reg_inputs.channel_tree_root.clone(),
+            account_tree_root,
+        );
+        // Resulting channel_reg_hash_chain: advanced by the registration chain, else unchanged.
+        let selected_channel_reg_hash_chain = Bytes32Target::select(
+            builder,
+            has_channel_reg_proof,
+            channel_reg_inputs.channel_reg_hash_chain.clone(),
+            prev_public_state_ext.channel_reg_hash_chain.clone(),
+        );
+        // has_channel_reg_proof iff the channel_reg_hash_chain changed (mirror of the deposit
+        // guard).
+        let channel_reg_hash_eq = prev_public_state_ext
+            .channel_reg_hash_chain
+            .is_equal(builder, &selected_channel_reg_hash_chain);
+        let channel_reg_changed = builder.not(channel_reg_hash_eq);
+        builder.connect(has_channel_reg_proof.target, channel_reg_changed.target);
+
+        // G6: bind the block's `channel_reg_hash_chain` (the value folded into the block hash by
+        // update_user, hence committed in the on-chain block hash chain) to the resulting ext-state
+        // channel_reg_hash_chain. This anchors the registration chain on-chain — the in-proof reg
+        // chain cannot advance without it appearing in the block hash the contract snapshots.
+        selected_update_inputs
+            .channel_reg_hash_chain
+            .connect(builder, selected_channel_reg_hash_chain.clone());
 
         let public_state_merkle_proof =
             PublicStateMerkleProofTarget::new(builder, PUBLIC_STATE_TREE_HEIGHT);
@@ -511,6 +680,7 @@ impl<const D: usize> BlockStepTarget<D> {
                 block_hash_chain,
                 deposit_hash_chain: selected_deposit_hash_chain,
                 deposit_count: selected_deposit_count,
+                channel_reg_hash_chain: selected_channel_reg_hash_chain,
             },
             vd: block_chain_vd.clone(),
         };
@@ -519,9 +689,11 @@ impl<const D: usize> BlockStepTarget<D> {
             one_hot,
             has_prev_block_proof,
             has_deposit_proof,
+            has_channel_reg_proof,
             initial_public_state,
             prev_block_chain_proof,
             deposit_hash_chain_proof,
+            channel_reg_hash_chain_proof,
             update_user_proofs,
             selected_update_inputs,
             public_state_merkle_proof,
@@ -540,6 +712,7 @@ impl<const D: usize> BlockStepTarget<D> {
         new_public_inputs: &BlockChainPublicInputs<F, C, D>,
         dummy_prev_block_proof: &ProofWithPublicInputs<F, C, D>,
         dummy_deposit_proof: &ProofWithPublicInputs<F, C, D>,
+        dummy_channel_reg_proof: &ProofWithPublicInputs<F, C, D>,
         dummy_update_proofs: &HashMap<u32, ProofWithPublicInputs<F, C, D>>,
     ) -> Result<(), BlockStepError>
     where
@@ -577,6 +750,17 @@ impl<const D: usize> BlockStepTarget<D> {
             witness.set_proof_with_pis_target(&self.deposit_hash_chain_proof, proof);
         } else {
             witness.set_proof_with_pis_target(&self.deposit_hash_chain_proof, dummy_deposit_proof);
+        }
+
+        let has_channel_reg_proof = value.channel_reg_hash_chain_proof.is_some();
+        witness.set_bool_target(self.has_channel_reg_proof, has_channel_reg_proof);
+        if let Some(proof) = &value.channel_reg_hash_chain_proof {
+            witness.set_proof_with_pis_target(&self.channel_reg_hash_chain_proof, proof);
+        } else {
+            witness.set_proof_with_pis_target(
+                &self.channel_reg_hash_chain_proof,
+                dummy_channel_reg_proof,
+            );
         }
 
         let mut matched_update_proof = false;
@@ -636,9 +820,11 @@ where
     pub public_inputs: BlockChainPublicInputsTarget,
     pub block_chain_cd: CommonCircuitData<F, D>,
     pub deposit_chain_common: CommonCircuitData<F, D>,
+    pub channel_reg_chain_common: CommonCircuitData<F, D>,
     pub supported_user_counts: Vec<u32>,
     pub dummy_prev_block_proof: ProofWithPublicInputs<F, C, D>,
     pub dummy_deposit_proof: ProofWithPublicInputs<F, C, D>,
+    pub dummy_channel_reg_proof: ProofWithPublicInputs<F, C, D>,
     pub dummy_update_proofs: HashMap<u32, ProofWithPublicInputs<F, C, D>>,
 }
 
@@ -652,6 +838,7 @@ where
         block_chain_cd: &CommonCircuitData<F, D>,
         update_account_vds: &[(u32, VerifierCircuitData<F, C, D>)],
         deposit_chain_vd: &VerifierCircuitData<F, C, D>,
+        channel_reg_chain_vd: &VerifierCircuitData<F, C, D>,
     ) -> Self {
         let mut builder = CircuitBuilder::<F, D>::new(CircuitConfig::standard_recursion_config());
         let target = BlockStepTarget::new::<F, C>(
@@ -659,6 +846,7 @@ where
             block_chain_cd,
             update_account_vds,
             deposit_chain_vd,
+            channel_reg_chain_vd,
         );
         let public_inputs = target.new_pis.clone();
         builder.register_public_inputs(&public_inputs.to_vec(&block_chain_cd.config));
@@ -667,6 +855,7 @@ where
 
         let dummy_prev_block_proof = DummyProof::new(block_chain_cd).proof;
         let dummy_deposit_proof = DummyProof::new(&deposit_chain_vd.common).proof;
+        let dummy_channel_reg_proof = DummyProof::new(&channel_reg_chain_vd.common).proof;
         let mut dummy_update_proofs = HashMap::new();
         for (num_users, vd) in update_account_vds.iter() {
             let dummy = DummyProof::new(&vd.common);
@@ -683,9 +872,11 @@ where
             public_inputs,
             block_chain_cd: block_chain_cd.clone(),
             deposit_chain_common: deposit_chain_vd.common.clone(),
+            channel_reg_chain_common: channel_reg_chain_vd.common.clone(),
             supported_user_counts,
             dummy_prev_block_proof,
             dummy_deposit_proof,
+            dummy_channel_reg_proof,
             dummy_update_proofs,
         }
     }
@@ -695,6 +886,7 @@ where
         block_chain_vd: &VerifierCircuitData<F, C, D>,
         update_account_vds: &[(u32, VerifierCircuitData<F, C, D>)],
         deposit_chain_vd: &VerifierCircuitData<F, C, D>,
+        channel_reg_chain_vd: &VerifierCircuitData<F, C, D>,
         witness: &BlockStepWitness<F, C, D>,
     ) -> Result<ProofWithPublicInputs<F, C, D>, BlockStepError> {
         if block_chain_vd.common != self.block_chain_cd {
@@ -705,6 +897,11 @@ where
         if deposit_chain_vd.common != self.deposit_chain_common {
             return Err(BlockStepError::InvalidInput(
                 "deposit chain verifier common data mismatch".to_string(),
+            ));
+        }
+        if channel_reg_chain_vd.common != self.channel_reg_chain_common {
+            return Err(BlockStepError::InvalidInput(
+                "channel reg chain verifier common data mismatch".to_string(),
             ));
         }
         if update_account_vds.len() != self.supported_user_counts.len() {
@@ -727,8 +924,12 @@ where
             }
         }
 
-        let new_public_inputs =
-            witness.to_public_inputs(block_chain_vd, update_account_vds, deposit_chain_vd)?;
+        let new_public_inputs = witness.to_public_inputs(
+            block_chain_vd,
+            update_account_vds,
+            deposit_chain_vd,
+            channel_reg_chain_vd,
+        )?;
 
         let mut pw = PartialWitness::<F>::new();
         self.target.set_witness(
@@ -739,6 +940,7 @@ where
             &new_public_inputs,
             &self.dummy_prev_block_proof,
             &self.dummy_deposit_proof,
+            &self.dummy_channel_reg_proof,
             &self.dummy_update_proofs,
         )?;
         self.public_inputs
@@ -768,6 +970,7 @@ mod tests {
                     sphincs_sig::SpxSigWitness,
                     update_channel_tree::{UpdateUserCircuit, UpdateUserTree},
                 },
+                channel_reg_hash_chain::channel_reg_chain_pis::CHANNEL_REG_CHAIN_PUBLIC_INPUTS_LEN,
                 deposit_hash_chain::deposit_chain_pis::DEPOSIT_CHAIN_PUBLIC_INPUTS_LEN,
             },
         },
@@ -884,6 +1087,15 @@ mod tests {
         );
         let deposit_chain_vd = deposit_chain_circuit.data.verifier_data();
 
+        let channel_reg_chain_cd =
+            TestCyclicCircuit::<F, C, D>::generate_cd(CHANNEL_REG_CHAIN_PUBLIC_INPUTS_LEN);
+        let channel_reg_chain_circuit = TestCyclicCircuit::<F, C, D>::new(
+            CircuitConfig::standard_recursion_config(),
+            CHANNEL_REG_CHAIN_PUBLIC_INPUTS_LEN,
+            &channel_reg_chain_cd,
+        );
+        let channel_reg_chain_vd = channel_reg_chain_circuit.data.verifier_data();
+
         let update_account_vds = vec![(
             block_witness.block.num_users,
             update_circuit.data.verifier_data(),
@@ -893,19 +1105,26 @@ mod tests {
             &block_chain_common,
             &update_account_vds,
             &deposit_chain_vd,
+            &channel_reg_chain_vd,
         );
 
         let witness = BlockStepWitness {
             initial_public_state: Some(initial_state.clone()),
             prev_block_chain_proof: None,
             deposit_hash_chain_proof: None,
+            channel_reg_hash_chain_proof: None,
             num_users: block_witness.block.num_users,
             update_user_proof: update_proof,
             public_state_merkle_proof: block_witness.public_state_merkle_proof.clone(),
         };
 
         let public_inputs = witness
-            .to_public_inputs(&block_chain_vd, &update_account_vds, &deposit_chain_vd)
+            .to_public_inputs(
+                &block_chain_vd,
+                &update_account_vds,
+                &deposit_chain_vd,
+                &channel_reg_chain_vd,
+            )
             .expect("block step public inputs");
         assert_eq!(
             public_inputs.ext_public_state.inner.block_number,
@@ -921,6 +1140,7 @@ mod tests {
                 &block_chain_vd,
                 &update_account_vds,
                 &deposit_chain_vd,
+                &channel_reg_chain_vd,
                 &witness,
             )
             .expect("block step proof");

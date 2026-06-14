@@ -16,6 +16,7 @@ use crate::{
     common::{
         block::{Block, BlockError},
         channel_id::{ChannelId, ChannelIdError as UserIdError},
+        channel_registration::{ChannelRegRecord, MemberRegEntry},
         deposit::Deposit,
         public_state::{PublicState, get_num_users},
         trees::{
@@ -30,7 +31,7 @@ use crate::{
         tx::TxV2,
         u63::{BlockNumber, BlockNumberError, U63},
     },
-    constants::{CHANNEL_TREE_HEIGHT, SEND_TREE_HEIGHT},
+    constants::{CHANNEL_TREE_HEIGHT, MAX_CHANNEL_MEMBERS, SEND_TREE_HEIGHT},
     ethereum_types::{
         address::Address, bytes32::Bytes32, u32limb_trait::U32LimbTrait as _, u256::U256,
     },
@@ -182,6 +183,41 @@ impl ChannelMemberKeys {
             member_tree,
         }
     }
+
+    /// Build the on-chain [`ChannelRegRecord`] for `channel_id` from this member key material.
+    ///
+    /// SECURITY (R2 cross-binding consistency): each active slot's `sphincs_pk_hash` /
+    /// `regev_pk_digest` is the canonical `Bytes32::from(PoseidonHashOut)` of the SAME Poseidon
+    /// identity stored in `member_tree`. The `channel_reg_step` circuit witnesses these as
+    /// `PoseidonHashOut` via `reduce_to_hash_out` and recomputes the member root, so the
+    /// `member_pubkeys_root` it writes equals `member_tree.get_root()` — exactly the root the later
+    /// updating-block member-signature binding opens against. The `recipient` is a deterministic
+    /// test L1 address; it only enters the keccak preimage, not the Poseidon member tree.
+    fn to_reg_record(&self, channel_id: u32) -> ChannelRegRecord {
+        let mut members: [MemberRegEntry; MAX_CHANNEL_MEMBERS] = Default::default();
+        for i in 0..TEST_ACTIVE_MEMBERS {
+            let leaf = self.member_tree.get_leaf(i as u64);
+            members[i] = MemberRegEntry {
+                sphincs_pk_hash: Bytes32::from(leaf.sphincs_pk_hash),
+                regev_pk_digest: Bytes32::from(leaf.regev_pk_digest),
+                // Deterministic per-(channel, slot) test recipient (keccak preimage only).
+                recipient: Address::from_u32_slice(
+                    &[0x3333_0000u32
+                        .wrapping_add(channel_id.wrapping_mul(16))
+                        .wrapping_add(i as u32); 5],
+                )
+                .expect("address from u32 slice"),
+            };
+        }
+        ChannelRegRecord {
+            channel_id: ChannelId::new(channel_id as u64).expect("channel id"),
+            // Block proposer is slot 0 by convention (matches the first updating slot the later
+            // blocks sign with).
+            bp_member_slot: 0,
+            member_count: TEST_ACTIVE_MEMBERS as u32,
+            members,
+        }
+    }
 }
 
 /// A distinct canonical Regev pubkey of the correct length, derived deterministically (coeffs < q).
@@ -211,10 +247,19 @@ pub struct BlockWitnessGenerator {
 
     pub block_hash_chain: Bytes32,
     pub deposit_hash_chain: Bytes32,
+    /// On-chain keccak channel-registration hash chain (genesis = default). Non-registration
+    /// blocks (the only path exercised on this branch) leave it unchanged; G5 will advance it
+    /// when an in-band registration block is queued.
+    pub channel_reg_hash_chain: Bytes32,
 
     pub blocks: Vec<Block>,
     pub deposits: HashMap<BlockNumber, Vec<Deposit>>,
     pub deposit_counts: u64,
+    /// Channels queued for in-band registration (mirror of `deposits`). Each entry is the keccak
+    /// registration record + the channel's member key material; drained into a dedicated
+    /// registration block by [`Self::add_registration_block`]. Queued, not yet applied to
+    /// `channel_tree` (the registration block applies it).
+    pub channel_registrations: Vec<(ChannelRegRecord, ChannelMemberKeys)>,
     pub block_chain_witness: HashMap<BlockNumber, BlockHashChainProcessorWitness>,
 }
 
@@ -230,39 +275,209 @@ impl BlockWitnessGenerator {
             channel_members: HashMap::new(),
             block_hash_chain: Bytes32::default(),
             deposit_hash_chain: Bytes32::default(),
+            channel_reg_hash_chain: Bytes32::default(),
             blocks: vec![Block::default()], // genesis block placeholder
             deposits: HashMap::new(),
             deposit_counts: 0,
+            channel_registrations: Vec::new(),
             block_chain_witness: HashMap::new(),
         }
     }
 
-    /// Register a channel's member set (test-only) BEFORE its first updating block.
+    /// Queue an in-band channel registration (mirror of [`Self::add_deposit`]).
     ///
-    /// Builds the deterministic `MemberTree` for `channel_id` and seeds the channel's `ChannelLeaf`
-    /// with `member_pubkeys_root = member_tree.get_root()`. This MUST run before any block is
-    /// produced for the channel: the live `update_channel_tree` binding opens each signing
-    /// member's leaf against this root taken from the channel leaf, and that root must be in place
-    /// from the channel's genesis (writing it later would break the per-block
-    /// prev/new account-tree-root chain the validity proof verifies).
+    /// Builds the deterministic member key material + the on-chain [`ChannelRegRecord`] for
+    /// `channel_id` and queues it for the NEXT registration block. Does NOT mutate `channel_tree`
+    /// yet — the registration block (produced by [`Self::add_registration_block`]) applies it,
+    /// advancing the channel-registration keccak chain and writing the channel's `ChannelLeaf`
+    /// (with `member_pubkeys_root = member_tree.get_root()`) deterministically, exactly as the
+    /// `channel_reg_step` validity circuit does. The member keys are recorded immediately in
+    /// `channel_members` so the caller can drive signing for the channel's later updating blocks.
     ///
-    /// Idempotent: re-registering an already-registered channel is a no-op (returns the existing
-    /// keys). Returns the (clone of the) member keys for the caller to drive signing/encryption.
-    pub fn register_channel(&mut self, channel_id: u32) -> ChannelMemberKeys {
+    /// This MUST be followed by a registration block (and that block MUST land before the channel's
+    /// first updating block): the live `update_channel_tree` binding opens each signing member's
+    /// leaf against the channel leaf's `member_pubkeys_root`, which only exists once the
+    /// registration block has written it.
+    ///
+    /// Idempotent: registering an already-registered (or already-queued) channel is a no-op that
+    /// returns the existing keys. Returns the (clone of the) member keys.
+    pub fn add_channel_registration(&mut self, channel_id: u32) -> ChannelMemberKeys {
         let channel = ChannelId::new(channel_id as u64).expect("channel id");
         if let Some(existing) = self.channel_members.get(&channel) {
             return existing.clone();
         }
         let keys = ChannelMemberKeys::deterministic(channel_id);
-        let member_pubkeys_root = keys.member_tree.get_root();
-
-        // Seed the channel leaf carrying the member root. The leaf is otherwise the default
-        // (index 0, prev 0, empty send tree) so the first updating block transitions it normally.
-        let mut channel_leaf = ChannelLeaf::default();
-        channel_leaf.member_pubkeys_root = member_pubkeys_root;
-        self.channel_tree.update(channel.as_u64(), channel_leaf);
-
+        let record = keys.to_reg_record(channel_id);
+        record
+            .validate()
+            .expect("deterministic test registration record must be valid");
+        self.channel_registrations.push((record, keys.clone()));
         self.channel_members.insert(channel, keys.clone());
+        keys
+    }
+
+    /// Produce a dedicated REGISTRATION block consuming exactly ONE queued registration (R6: a
+    /// registration block carries no user updates, so `key_ids` is empty/all-padding and the
+    /// account tree is mutated solely by the registration's channel-tree write).
+    ///
+    /// Drains the front of `channel_registrations`, builds the `(record, ChannelMerkleProof)`
+    /// witness against the CURRENT (unregistered) channel tree, advances the projected
+    /// `channel_reg_hash_chain` via `ChannelRegRecord::hash_with_prev_hash`, applies the
+    /// registration to `channel_tree` (writing the real `ChannelLeaf` with the member root), and
+    /// stores the block witness with the channel-reg step witness populated so `block_step`'s
+    /// channel-reg proof is generated and consumed. Returns the registered `ChannelId`.
+    ///
+    /// One registration per block keeps the channel_reg_step chain a single step (simplest sound
+    /// form); call repeatedly to register several channels.
+    pub fn add_registration_block(
+        &mut self,
+        timestamp: u64,
+    ) -> Result<ChannelId, BlockWitnessGeneratorError> {
+        if self.channel_registrations.is_empty() {
+            return Err(BlockWitnessGeneratorError::InvalidRequest(
+                "no queued channel registration to produce a registration block".to_string(),
+            ));
+        }
+        let (record, _keys) = self.channel_registrations.remove(0);
+        let channel = record.channel_id;
+
+        // R5 unregistered guard (native mirror): the channel must currently be the default leaf.
+        let prev_leaf = self.channel_tree.get_leaf(channel.as_u64());
+        if prev_leaf != ChannelLeaf::default() {
+            return Err(BlockWitnessGeneratorError::InvalidRequest(format!(
+                "channel {} is already registered; one-time registration only (R5)",
+                channel.as_u64()
+            )));
+        }
+
+        let new_block_number = self
+            .block_number
+            .add(1)
+            .map_err(BlockWitnessGeneratorError::BlockNumber)?;
+
+        // A registration block must NOT carry deposits (it would change the deposit hash chain and
+        // entangle two account-tree-root sources). Reject if any deposit was queued for this slot.
+        if self.deposits.contains_key(&new_block_number) {
+            return Err(BlockWitnessGeneratorError::InvalidRequest(
+                "a registration block cannot also process deposits; sequence them in separate blocks"
+                    .to_string(),
+            ));
+        }
+
+        // num_users from empty key_ids (all-padding ⇒ no user update ⇒ R6 satisfied).
+        let key_ids: [u32; 0] = [];
+        let num_users = get_num_users(0, &self.supported_user_counts)
+            .ok_or(BlockWitnessGeneratorError::TooManyKeyIds(0))?;
+
+        // Advance the projected channel-reg keccak chain (single step) — this is the POST-apply
+        // chain that the registration block carries in its block hash (G6).
+        let new_channel_reg_hash_chain = record.hash_with_prev_hash(self.channel_reg_hash_chain);
+
+        // Deposit hash chain is unchanged (no deposits this block); the channel_reg_hash_chain is
+        // the post-registration value, mirroring how `deposit_hash_chain` carries the post-deposit
+        // value. Both are folded into the block hash (G6).
+        let block = Block::new(
+            num_users,
+            0,
+            &key_ids,
+            timestamp,
+            Bytes32::default(),
+            self.deposit_hash_chain,
+            new_channel_reg_hash_chain,
+        )?;
+
+        let prev_ext_state = self.current_extended_public_state();
+        let public_state_index = self.block_number.as_u64();
+        let public_state_merkle_proof: PublicStateMerkleProof =
+            self.public_state_tree.prove(public_state_index);
+        self.public_state_tree.push(prev_ext_state.inner.clone());
+
+        // ── Channel-reg step witness: prove against the CURRENT (unregistered) channel tree ──
+        let channel_merkle_proof = self.channel_tree.prove(channel.as_u64());
+
+        // Apply the registration to the channel tree (write the real member root leaf), exactly as
+        // `channel_reg_step` does in-circuit.
+        let member_pubkeys_root = _keys.member_tree.get_root();
+        let registered_leaf = ChannelLeaf {
+            index: 0,
+            prev: BlockNumber::default(),
+            send_tree_root: ChannelLeaf::default().send_tree_root,
+            member_pubkeys_root,
+        };
+        self.channel_tree.update(channel.as_u64(), registered_leaf);
+
+        // ── update_user witness: all-padding slots (no leaf transition ⇒ account tree unchanged)
+        // ──
+        let dummy_account_proof = ChannelMerkleProof::dummy(CHANNEL_TREE_HEIGHT);
+        let dummy_send_proof = SendMerkleProof::dummy(SEND_TREE_HEIGHT);
+        let dummy_member_proof = MemberMerkleProof::dummy(crate::constants::MEMBER_TREE_HEIGHT);
+        let dummy_regev = RegevPk {
+            a: vec![0u32; REGEV_N],
+            b: vec![0u32; REGEV_N],
+        };
+        let mut prev_account_leaves = Vec::with_capacity(num_users as usize);
+        let mut user_merkle_proofs = Vec::with_capacity(num_users as usize);
+        let mut send_merkle_proofs = Vec::with_capacity(num_users as usize);
+        let mut sig_witnesses = Vec::with_capacity(num_users as usize);
+        let mut member_merkle_proofs = Vec::with_capacity(num_users as usize);
+        let mut member_regev_pks = Vec::with_capacity(num_users as usize);
+        for _ in 0..num_users {
+            prev_account_leaves.push(ChannelLeaf::default());
+            user_merkle_proofs.push(dummy_account_proof.clone());
+            send_merkle_proofs.push(dummy_send_proof.clone());
+            sig_witnesses.push(SpxSigWitness::dummy());
+            member_merkle_proofs.push(dummy_member_proof.clone());
+            member_regev_pks.push(dummy_regev.clone());
+        }
+
+        let block_witness = BlockHashChainProcessorWitness {
+            deposit_step_witness: Vec::new(),
+            // The single registration drives the channel-reg chain proof in `prove_block`.
+            channel_reg_step_witness: vec![(record, channel_merkle_proof)],
+            block: block.clone(),
+            prev_account_leaves,
+            user_merkle_proofs,
+            send_merkle_proofs,
+            public_state_merkle_proof,
+            sig_witnesses: Some(sig_witnesses),
+            member_merkle_proofs: Some(member_merkle_proofs),
+            member_regev_pks: Some(member_regev_pks),
+            msg_fields: Some(SmallBlockMessageFields::default()),
+            tx_v2_indices: None,
+            tx_v2s: None,
+            tx_v2_merkle_proofs: None,
+            channel_action_indices: None,
+            channel_actions: None,
+            channel_action_merkle_proofs: None,
+        };
+
+        self.block_chain_witness
+            .insert(new_block_number, block_witness);
+
+        self.channel_reg_hash_chain = new_channel_reg_hash_chain;
+        self.block_hash_chain = block.hash_with_prev_hash(self.block_hash_chain)?;
+        self.blocks.push(block);
+        self.block_number = new_block_number;
+
+        Ok(channel)
+    }
+
+    /// Convenience wrapper: queue a registration and immediately produce its registration block.
+    /// Returns the channel's member key material. Kept so existing call sites that just want a
+    /// registered channel before its first updating block keep working with the in-band path.
+    pub fn register_channel(&mut self, channel_id: u32) -> ChannelMemberKeys {
+        let channel = ChannelId::new(channel_id as u64).expect("channel id");
+        if self.channel_tree.get_leaf(channel.as_u64()) != ChannelLeaf::default() {
+            // Already registered on-chain: return the existing keys (idempotent).
+            return self
+                .channel_members
+                .get(&channel)
+                .cloned()
+                .expect("registered channel must have recorded member keys");
+        }
+        let keys = self.add_channel_registration(channel_id);
+        self.add_registration_block(0)
+            .expect("produce registration block");
         keys
     }
 
@@ -288,6 +503,7 @@ impl BlockWitnessGenerator {
             self.block_hash_chain,
             self.deposit_hash_chain,
             U63::new(self.deposit_tree.len() as u64).expect("deposit count fits in 63 bits"),
+            self.channel_reg_hash_chain,
         )
     }
 
@@ -404,6 +620,8 @@ impl BlockWitnessGenerator {
                 deposit.hash_with_prev_hash(projected_deposit_hash_chain);
         }
 
+        // Ordinary (non-registration) block: the channel_reg_hash_chain is unchanged. It is folded
+        // into the block hash (G6), mirroring how the unchanged deposit_hash_chain is carried.
         let block = Block::new(
             num_users,
             channel_id,
@@ -411,6 +629,7 @@ impl BlockWitnessGenerator {
             timestamp,
             tx_tree_root,
             projected_deposit_hash_chain,
+            self.channel_reg_hash_chain,
         )?;
 
         let prev_ext_state = self.current_extended_public_state();
@@ -588,6 +807,10 @@ impl BlockWitnessGenerator {
 
         let block_witness = BlockHashChainProcessorWitness {
             deposit_step_witness,
+            // Ordinary (non-registration) block: no channel registrations, so the channel-reg chain
+            // proof is None and the channel_reg_hash_chain stays unchanged (G5 adds the in-band
+            // registration-block path).
+            channel_reg_step_witness: Vec::new(),
             block: block.clone(),
             prev_account_leaves,
             user_merkle_proofs,

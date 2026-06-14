@@ -9,6 +9,10 @@ use intmax3_zkp::circuits::{
             block_hash_chain_circuit::BlockHashChainCircuit, block_step::BlockStepCircuit,
             update_channel_tree::UpdateUserCircuit, validity_circuit::ValidityCircuit,
         },
+        channel_reg_hash_chain::{
+            channel_reg_hash_chain_circuit::ChannelRegHashChainCircuit,
+            channel_reg_step::ChannelRegStepCircuit,
+        },
         deposit_hash_chain::{
             deposit_hash_chain_circuit::DepositHashChainCircuit, deposit_step::DepositStepCircuit,
         },
@@ -119,10 +123,26 @@ fn main() {
         .map(|c| (c.num_users, c.data.verifier_data()))
         .collect::<Vec<_>>();
 
+    let channel_reg_chain_cd = ChannelRegHashChainCircuit::<F, C, D>::generate_cd();
+    let channel_reg_step = ChannelRegStepCircuit::<F, C, D>::new(&channel_reg_chain_cd);
+    rows.push((
+        "validity::ChannelRegStepCircuit".to_string(),
+        channel_reg_step.data.common.degree_bits(),
+    ));
+    let channel_reg_hash_chain = ChannelRegHashChainCircuit::<F, C, D>::new(
+        &channel_reg_chain_cd,
+        &channel_reg_step.data.verifier_data(),
+    );
+    rows.push((
+        "validity::ChannelRegHashChainCircuit".to_string(),
+        channel_reg_hash_chain.data.common.degree_bits(),
+    ));
+
     let block_step = BlockStepCircuit::<F, C, D>::new(
         &block_chain_cd,
         &update_account_vds,
         &deposit_hash_chain.data.verifier_data(),
+        &channel_reg_hash_chain.data.verifier_data(),
     );
     rows.push((
         "validity::BlockStepCircuit".to_string(),

@@ -73,6 +73,10 @@ pub struct UpdateUserPublicInputs {
     pub new_block_hash_chain: Bytes32,
     pub new_account_tree_root: PoseidonHashOut,
     pub deposit_hash_chain: Bytes32,
+    /// The block's `channel_reg_hash_chain` (folded into the block hash, G6). Surfaced here so
+    /// block_step can constrain the block-hash-committed reg chain to equal the value the
+    /// channel-reg proof consumed (= the new ext-state channel_reg_hash_chain).
+    pub channel_reg_hash_chain: Bytes32,
 }
 
 #[derive(Clone, Debug)]
@@ -327,14 +331,15 @@ impl UpdateUserTree {
             new_block_hash_chain,
             new_account_tree_root: account_tree_root,
             deposit_hash_chain: self.block.deposit_hash_chain,
+            channel_reg_hash_chain: self.block.channel_reg_hash_chain,
         })
     }
 }
 
 // block_number(1) + block_timestamp(U64_LEN) + prev_block_hash_chain + prev_account_tree_root
-// + new_block_hash_chain + new_account_tree_root + deposit_hash_chain
+// + new_block_hash_chain + new_account_tree_root + deposit_hash_chain + channel_reg_hash_chain
 const UPDATE_ACCOUNT_PUBLIC_INPUTS_LEN: usize =
-    1 + U64_LEN + 3 * BYTES32_LEN + 2 * POSEIDON_HASH_OUT_LEN;
+    1 + U64_LEN + 4 * BYTES32_LEN + 2 * POSEIDON_HASH_OUT_LEN;
 
 impl UpdateUserPublicInputs {
     pub fn to_u64_vec(&self) -> Vec<u64> {
@@ -345,6 +350,7 @@ impl UpdateUserPublicInputs {
         result.extend(self.new_block_hash_chain.to_u64_vec());
         result.extend(self.new_account_tree_root.to_u64_vec());
         result.extend(self.deposit_hash_chain.to_u64_vec());
+        result.extend(self.channel_reg_hash_chain.to_u64_vec());
         result
     }
 
@@ -392,6 +398,10 @@ impl UpdateUserPublicInputs {
 
         let deposit_hash_chain = Bytes32::from_u64_slice(&values[cursor..cursor + BYTES32_LEN])
             .map_err(|e| UpdateUserTreeError::InvalidLength(e.to_string()))?;
+        cursor += BYTES32_LEN;
+
+        let channel_reg_hash_chain = Bytes32::from_u64_slice(&values[cursor..cursor + BYTES32_LEN])
+            .map_err(|e| UpdateUserTreeError::InvalidLength(e.to_string()))?;
 
         Ok(Self {
             block_number,
@@ -401,6 +411,7 @@ impl UpdateUserPublicInputs {
             new_block_hash_chain,
             new_account_tree_root,
             deposit_hash_chain,
+            channel_reg_hash_chain,
         })
     }
 }
@@ -414,6 +425,7 @@ pub struct UpdateUserPublicInputsTarget {
     pub new_block_hash_chain: Bytes32Target,
     pub new_account_tree_root: PoseidonHashOutTarget,
     pub deposit_hash_chain: Bytes32Target,
+    pub channel_reg_hash_chain: Bytes32Target,
 }
 
 impl UpdateUserPublicInputsTarget {
@@ -428,6 +440,7 @@ impl UpdateUserPublicInputsTarget {
         let new_block_hash_chain = Bytes32Target::new(builder, is_checked);
         let new_account_tree_root = PoseidonHashOutTarget::new(builder);
         let deposit_hash_chain = Bytes32Target::new(builder, is_checked);
+        let channel_reg_hash_chain = Bytes32Target::new(builder, is_checked);
         Self {
             block_number,
             block_timestamp,
@@ -436,6 +449,7 @@ impl UpdateUserPublicInputsTarget {
             new_block_hash_chain,
             new_account_tree_root,
             deposit_hash_chain,
+            channel_reg_hash_chain,
         }
     }
 
@@ -448,6 +462,7 @@ impl UpdateUserPublicInputsTarget {
             self.new_block_hash_chain.to_vec(),
             self.new_account_tree_root.to_vec(),
             self.deposit_hash_chain.to_vec(),
+            self.channel_reg_hash_chain.to_vec(),
         ]
         .concat()
     }
@@ -491,6 +506,10 @@ impl UpdateUserPublicInputsTarget {
         cursor += POSEIDON_HASH_OUT_LEN;
 
         let deposit_hash_chain = Bytes32Target::from_slice(&values[cursor..cursor + BYTES32_LEN]);
+        cursor += BYTES32_LEN;
+
+        let channel_reg_hash_chain =
+            Bytes32Target::from_slice(&values[cursor..cursor + BYTES32_LEN]);
 
         Self {
             block_number,
@@ -500,6 +519,7 @@ impl UpdateUserPublicInputsTarget {
             new_block_hash_chain,
             new_account_tree_root,
             deposit_hash_chain,
+            channel_reg_hash_chain,
         }
     }
 
@@ -521,6 +541,8 @@ impl UpdateUserPublicInputsTarget {
             .set_witness(witness, value.new_account_tree_root);
         self.deposit_hash_chain
             .set_witness(witness, value.deposit_hash_chain);
+        self.channel_reg_hash_chain
+            .set_witness(witness, value.channel_reg_hash_chain);
     }
 
     pub fn select<F: RichField + Extendable<D>, const D: usize>(
@@ -571,6 +593,12 @@ impl UpdateUserPublicInputsTarget {
                 condition,
                 when_true.deposit_hash_chain.clone(),
                 when_false.deposit_hash_chain.clone(),
+            ),
+            channel_reg_hash_chain: Bytes32Target::select(
+                builder,
+                condition,
+                when_true.channel_reg_hash_chain.clone(),
+                when_false.channel_reg_hash_chain.clone(),
             ),
         }
     }
@@ -921,6 +949,7 @@ impl UpdateUserTreeTarget {
             new_block_hash_chain,
             new_account_tree_root: account_tree_root.clone(),
             deposit_hash_chain: block.deposit_hash_chain.clone(),
+            channel_reg_hash_chain: block.channel_reg_hash_chain.clone(),
         };
 
         Self {
@@ -1196,6 +1225,7 @@ mod tests {
         let prev_block_hash_chain = Bytes32::rand(&mut rng);
         let tx_tree_root = Bytes32::rand(&mut rng);
         let deposit_hash_chain = Bytes32::rand(&mut rng);
+        let channel_reg_hash_chain = Bytes32::rand(&mut rng);
 
         // Two-layer identity: the channel has a SINGLE leaf indexed by channel_id; the two
         // key_ids in the block are member identities of that one channel.
@@ -1231,6 +1261,7 @@ mod tests {
             timestamp,
             tx_tree_root,
             deposit_hash_chain,
+            channel_reg_hash_chain,
         )
         .unwrap();
 
@@ -1321,6 +1352,10 @@ mod tests {
             block.hash_with_prev_hash(prev_block_hash_chain).unwrap()
         );
         assert_eq!(public_inputs.deposit_hash_chain, block.deposit_hash_chain);
+        assert_eq!(
+            public_inputs.channel_reg_hash_chain,
+            block.channel_reg_hash_chain
+        );
 
         let circuit = UpdateUserCircuit::<F, C, D>::new(num_users);
         let proof = circuit.prove(&update_channel_tree).unwrap();
@@ -1409,6 +1444,7 @@ mod tests {
             rng.next_u64(),
             &[tx_v2],
             deposit_hash_chain,
+            Bytes32::default(),
         )
         .unwrap();
 
@@ -1542,6 +1578,7 @@ mod tests {
             rng.next_u64(),
             &[tx_v2],
             deposit_hash_chain,
+            Bytes32::default(),
         )
         .unwrap();
 

@@ -174,6 +174,9 @@ contract IntmaxRollup {
         uint64 postingRoundBefore;
         uint64 postingRoundAfter;
         uint64 processedDepositCountBefore;
+        // G6: channel-registration chain snapshot for rollback (mirror of the deposit fields).
+        bytes32 previousChannelRegHashChain;
+        bytes32 pendingChannelRegHashChainBefore;
     }
 
     /// @notice MLE verification key parameters — fixed per circuit, set at deploy time.
@@ -257,6 +260,10 @@ contract IntmaxRollup {
     bytes32 public blockHashChain;
     mapping(uint64 => bytes32) public blockDepositHash;
 
+    /// @notice Per-block channel-registration hash chain value folded into that block's hash (G6).
+    ///         Mirrors `blockDepositHash`. Captured in `postBlock`; cleared on rollback.
+    mapping(uint64 => bytes32) public blockChannelRegHash;
+
     /// @notice Snapshot of blockHashChain at posting-round boundaries.
     ///         Only the last block number of each batch is recorded.
     ///         finalize() references these snapshots for verification.
@@ -291,6 +298,11 @@ contract IntmaxRollup {
     /// @notice channel_id -> ChannelLeaf{member_pubkeys_root, ...} registration hash chain.
     bytes32 internal _pendingChannelRegHashChain;
     uint64 public channelRegCount;
+
+    /// @notice On-chain channel-registration hash chain accumulator (mirror of `depositHashChain`).
+    ///         Advanced per posting round in `postBlock`; the resulting value is committed into the
+    ///         registration block's hash (G6) and the validity proof's ext-state.
+    bytes32 public channelRegHashChain;
 
     /// @notice Bounds on members per channel (one SPHINCS+ key per member, D6 pad-to-MAX; mirrors
     /// the Rust `MAX_CHANNEL_MEMBERS` constant in src/constants.rs). A channel registers between
@@ -435,6 +447,19 @@ contract IntmaxRollup {
         bytes32 batchDepositHashChain = pendingHashBefore;
         _pendingDepositHashChain = bytes32(0);
 
+        // --- Prepare channel registrations for this posting round (G6, mirror of deposits) ---
+        // The pending reg chain accumulated by `registerChannel` becomes this batch's resulting reg
+        // chain; the registration block carries it in its hash. If no registration happened this
+        // round, `_pendingChannelRegHashChain == channelRegHashChain` (unchanged), so the value the
+        // last sub-block carries equals the prior accumulator — byte-identical to the Rust ordinary
+        // block that carries the unchanged channel_reg_hash_chain.
+        bytes32 previousChannelRegHashChain = channelRegHashChain;
+        bytes32 pendingChannelRegBefore = _pendingChannelRegHashChain;
+        bytes32 batchChannelRegHashChain = pendingChannelRegBefore == bytes32(0)
+            ? previousChannelRegHashChain
+            : pendingChannelRegBefore;
+        _pendingChannelRegHashChain = bytes32(0);
+
         uint64 previousPostingRound = postingRound;
         postingRound++;
         uint64 currentRound = postingRound;
@@ -450,15 +475,26 @@ contract IntmaxRollup {
                 depositHash = batchDepositHashChain;
             }
 
+            // G6: the channel-reg chain value folded into this block's hash. Only the last sub-block
+            // advances to the batch (post-registration) value; earlier sub-blocks carry the
+            // unchanged prior accumulator. Mirrors the Rust witness generator (ordinary blocks carry
+            // the unchanged chain; the registration block carries the post-apply chain).
+            bytes32 regHash = previousChannelRegHashChain;
+            if (i == lastIdx) {
+                regHash = batchChannelRegHashChain;
+            }
+
             currentHash = _computeBlockHash(
                 currentHash,
                 subBlocks[i].channelId,
                 subBlocks[i].timestamp,
                 subBlocks[i].keyIds,
                 subBlocks[i].txTreeRoot,
-                depositHash
+                depositHash,
+                regHash
             );
             blockDepositHash[currentBlockNumber] = depositHash;
+            blockChannelRegHash[currentBlockNumber] = regHash;
 
             emit BlockPosted(
                 currentBlockNumber,
@@ -474,6 +510,7 @@ contract IntmaxRollup {
         blockHashChain = currentHash;
         blockHashChainAt[currentBlockNumber] = currentHash;
         depositHashChain = batchDepositHashChain;
+        channelRegHashChain = batchChannelRegHashChain;
         processedDepositCount = depositCount;
 
         meta = BatchMetadata({
@@ -484,7 +521,9 @@ contract IntmaxRollup {
             pendingDepositHashChainBefore: pendingHashBefore,
             postingRoundBefore: previousPostingRound,
             postingRoundAfter: currentRound,
-            processedDepositCountBefore: processedDepositsBefore
+            processedDepositCountBefore: processedDepositsBefore,
+            previousChannelRegHashChain: previousChannelRegHashChain,
+            pendingChannelRegHashChainBefore: pendingChannelRegBefore
         });
     }
 
@@ -534,10 +573,15 @@ contract IntmaxRollup {
     ///         `regev_pk_root`, and the `bp_member_slot`. The ACTIVE member pubkey hashes must be
     ///         nonzero and pairwise distinct (`ChannelRecord::validate`); the active count is the
     ///         array length.
-    /// @dev RECORDED ONLY: this hash chain is not yet consumed by the validity proof (see the
-    ///      section header). The keccak preimage is tightly packed over the ACTIVE members, NO
-    ///      array padding: keccak256(prev || channelId(4) || bpMemberSlot(1) || memberCount(1) ||
-    ///               (sphincsPubkeyHash(32) || regevPkDigest(32) || recipient(20)) * memberCount).
+    /// @dev R3 WORD-ALIGNED fixed-16 preimage (consumed by the validity `channel_reg_step`
+    ///      circuit). The keccak chain folds a FIXED 16-slot, word-aligned stream so the circuit
+    ///      can consume it with a SINGLE keccak (no byte-straddling); padding slots
+    ///      (i >= memberCount) contribute zeros. Header fields are uint32 (4-byte words):
+    ///        keccak256(prev || channelId(uint32) || bpMemberSlot(uint32) || memberCount(uint32) ||
+    ///                  for i in 0..16: (sphincsPubkeyHash(32) || regevPkDigest(32) || recipient(20))).
+    ///      This is byte-identical to the Rust `ChannelRegRecord::hash_with_prev_hash`
+    ///      (src/common/channel_registration.rs) and its in-circuit twin — asserted by
+    ///      `IntmaxRollup.t.sol::test_channelRegPreimageDifferential`.
     ///      `memberPubkeysRoot` = keccak of the active member pubkey hashes; `regevPkRoot` = keccak
     ///      of the active Regev pubkey digests (the L1/keccak digest forms anchored in the record).
     function registerChannel(
@@ -576,17 +620,39 @@ contract IntmaxRollup {
         bytes32 memberPubkeysRoot = keccak256(abi.encodePacked(memberSphincsPubkeyHashes));
         bytes32 regevPkRoot = keccak256(abi.encodePacked(regevPkDigests));
 
+        // R3 WORD-ALIGNED fixed-16 preimage (D6 pad-to-MAX): the keccak chain hashes a FIXED
+        // 16-slot, word-aligned stream so the validity (channel_reg_step) circuit can consume it
+        // with a SINGLE keccak (no byte-straddling). Padding slots (i >= memberCount) contribute
+        // bytes32(0) || bytes32(0) || 20 zero bytes. Header fields are uint32 (4-byte words) to
+        // stay word-aligned, matching the Rust `ChannelRegRecord::hash_with_prev_hash` u32 stream:
+        //   prev(32) || channelId(uint32=4) || bpMemberSlot(uint32=4) || memberCount(uint32=4) ||
+        //   for i in 0..16: ( sphincsHash(32) || regevDigest(32) || recipient(20) ).
+        // SECURITY: recipient is appended as the 20 address bytes (abi.encodePacked(address)),
+        // which equals the Rust Address 5-u32 big-endian encoding — NOT a 32-byte left-pad.
+        // Byte-identity with Rust/circuit is asserted by test_channelRegPreimageDifferential.
         bytes memory packed = abi.encodePacked(
-            _pendingChannelRegHashChain, channelId, bpMemberSlot, uint8(memberCount)
+            _pendingChannelRegHashChain,
+            channelId,
+            uint32(bpMemberSlot),
+            uint32(memberCount)
         );
-        for (uint256 i = 0; i < memberCount; i++) {
-            // Element-by-element to avoid abi.encodePacked's array-element padding.
-            packed = abi.encodePacked(
-                packed,
-                memberSphincsPubkeyHashes[i], // bytes32: 32 bytes
-                regevPkDigests[i],            // bytes32: 32 bytes
-                recipients[i]                 // address: 20 bytes
-            );
+        for (uint256 i = 0; i < MAX_CHANNEL_MEMBERS; i++) {
+            if (i < memberCount) {
+                packed = abi.encodePacked(
+                    packed,
+                    memberSphincsPubkeyHashes[i], // bytes32: 32 bytes
+                    regevPkDigests[i],            // bytes32: 32 bytes
+                    recipients[i]                 // address: 20 bytes
+                );
+            } else {
+                // Padding slot: zeroed sphincs(32) || regev(32) || recipient(20).
+                packed = abi.encodePacked(
+                    packed,
+                    bytes32(0),
+                    bytes32(0),
+                    bytes20(0)
+                );
+            }
         }
         bytes32 newHash = keccak256(packed);
         _pendingChannelRegHashChain = newHash;
@@ -1006,11 +1072,14 @@ contract IntmaxRollup {
             blockNumber = meta.startBlockNumber - 1;
         }
         depositHashChain = meta.previousDepositHashChain;
+        // G6: roll back the channel-registration chain accumulator (mirror of deposits).
+        channelRegHashChain = meta.previousChannelRegHashChain;
         postingRound = meta.postingRoundBefore;
 
         if (meta.endBlockNumber >= meta.startBlockNumber && meta.endBlockNumber != 0) {
             for (uint64 bn = meta.startBlockNumber; bn <= meta.endBlockNumber; bn++) {
                 delete blockDepositHash[bn];
+                delete blockChannelRegHash[bn];
                 delete blockHashChainAt[bn];
                 if (bn == meta.endBlockNumber) break;
             }
@@ -1018,6 +1087,7 @@ contract IntmaxRollup {
 
         processedDepositCount = meta.processedDepositCountBefore;
         _pendingDepositHashChain = meta.pendingDepositHashChainBefore;
+        _pendingChannelRegHashChain = meta.pendingChannelRegHashChainBefore;
     }
 
     /// @dev Credit fraud reward/treasury share to pendingWithdrawals (pull-payment).
@@ -1123,7 +1193,8 @@ contract IntmaxRollup {
         uint64 timestamp,
         uint32[] calldata keyIds,
         bytes32 txTreeRoot,
-        bytes32 blockDepositHashChain
+        bytes32 blockDepositHashChain,
+        bytes32 blockChannelRegHashChain
     ) internal pure returns (bytes32) {
         // Build the u32 array matching Rust's solidity_keccak256 layout.
         // NOTE: abi.encodePacked(uint32[]) pads each element to 32 bytes, which
@@ -1138,10 +1209,17 @@ contract IntmaxRollup {
         for (uint256 i = 0; i < keyIds.length; i++) {
             packed = bytes.concat(packed, bytes4(keyIds[i]));
         }
+        // G6: the block-hash preimage is
+        //   prev || channelId || timestamp || keyIds || txTreeRoot ||
+        //   deposit_hash_chain || channel_reg_hash_chain
+        // byte-identical to Rust `Block::hash_with_prev_hash` (deposit chain then reg chain, each
+        // 32 bytes). This folds the registration chain into the on-chain block hash chain, so the
+        // `blockHashChainAt` snapshot the validity proof must match commits the registration set.
         packed = bytes.concat(
             packed,
             txTreeRoot,
-            blockDepositHashChain
+            blockDepositHashChain,
+            blockChannelRegHashChain
         );
         return keccak256(packed);
     }

@@ -21,7 +21,7 @@ use crate::{
     utils::poseidon_hash_out::{PoseidonHashOut, PoseidonHashOutTarget},
 };
 
-pub const EXTENDED_PUBLIC_STATE_U64_LEN: usize = PUBLIC_STATE_U64_LEN + 2 * BYTES32_LEN + 1;
+pub const EXTENDED_PUBLIC_STATE_U64_LEN: usize = PUBLIC_STATE_U64_LEN + 3 * BYTES32_LEN + 1;
 
 #[derive(Debug, Error)]
 pub enum ExtendedPublicStateError {
@@ -41,6 +41,9 @@ pub struct ExtendedPublicState {
     pub block_hash_chain: Bytes32,
     pub deposit_hash_chain: Bytes32,
     pub deposit_count: U63,
+    /// On-chain keccak channel-registration hash chain (R4). Binds the deterministically rebuilt
+    /// Poseidon channel tree (inner.account_tree_root) to the registrations the contract recorded.
+    pub channel_reg_hash_chain: Bytes32,
 }
 
 impl ExtendedPublicState {
@@ -49,12 +52,14 @@ impl ExtendedPublicState {
         block_hash_chain: Bytes32,
         deposit_hash_chain: Bytes32,
         deposit_count: U63,
+        channel_reg_hash_chain: Bytes32,
     ) -> Self {
         Self {
             inner,
             block_hash_chain,
             deposit_hash_chain,
             deposit_count,
+            channel_reg_hash_chain,
         }
     }
 
@@ -64,6 +69,7 @@ impl ExtendedPublicState {
             self.block_hash_chain.to_u64_vec(),
             self.deposit_hash_chain.to_u64_vec(),
             self.deposit_count.to_u64_vec(),
+            self.channel_reg_hash_chain.to_u64_vec(),
         ]
         .concat()
     }
@@ -96,12 +102,17 @@ impl ExtendedPublicState {
         let deposit_count = U63::new(values[cursor]).map_err(|e| {
             ExtendedPublicStateError::InvalidLength(format!("invalid deposit count: {e}"))
         })?;
+        cursor += 1;
+
+        let channel_reg_hash_chain = Bytes32::from_u64_slice(&values[cursor..cursor + BYTES32_LEN])
+            .map_err(|e| ExtendedPublicStateError::Bytes32(e.to_string()))?;
 
         Ok(Self {
             inner,
             block_hash_chain,
             deposit_hash_chain,
             deposit_count,
+            channel_reg_hash_chain,
         })
     }
 }
@@ -112,6 +123,7 @@ pub struct ExtendedPublicStateTarget {
     pub block_hash_chain: Bytes32Target,
     pub deposit_hash_chain: Bytes32Target,
     pub deposit_count: U63Target,
+    pub channel_reg_hash_chain: Bytes32Target,
 }
 
 impl ExtendedPublicStateTarget {
@@ -124,6 +136,7 @@ impl ExtendedPublicStateTarget {
             block_hash_chain: Bytes32Target::new::<F, D>(builder, is_checked),
             deposit_hash_chain: Bytes32Target::new::<F, D>(builder, is_checked),
             deposit_count: U63Target::new(builder, is_checked),
+            channel_reg_hash_chain: Bytes32Target::new::<F, D>(builder, is_checked),
         }
     }
 
@@ -142,6 +155,10 @@ impl ExtendedPublicStateTarget {
                 value.deposit_hash_chain,
             ),
             deposit_count: U63Target::constant(builder, value.deposit_count),
+            channel_reg_hash_chain: Bytes32Target::constant::<F, D, Bytes32>(
+                builder,
+                value.channel_reg_hash_chain,
+            ),
         }
     }
 
@@ -156,6 +173,8 @@ impl ExtendedPublicStateTarget {
         self.deposit_hash_chain
             .set_witness(witness, value.deposit_hash_chain);
         self.deposit_count.set_witness(witness, value.deposit_count);
+        self.channel_reg_hash_chain
+            .set_witness(witness, value.channel_reg_hash_chain);
     }
 
     pub fn connect<F: RichField + Extendable<D>, const D: usize>(
@@ -169,6 +188,8 @@ impl ExtendedPublicStateTarget {
         self.deposit_hash_chain
             .connect(builder, other.deposit_hash_chain);
         self.deposit_count.connect(builder, &other.deposit_count);
+        self.channel_reg_hash_chain
+            .connect(builder, other.channel_reg_hash_chain);
     }
 
     pub fn select<F: RichField + Extendable<D>, const D: usize>(
@@ -202,6 +223,12 @@ impl ExtendedPublicStateTarget {
                 &when_true.deposit_count,
                 &when_false.deposit_count,
             ),
+            channel_reg_hash_chain: Bytes32Target::select(
+                builder,
+                condition,
+                when_true.channel_reg_hash_chain.clone(),
+                when_false.channel_reg_hash_chain.clone(),
+            ),
         }
     }
 
@@ -211,6 +238,7 @@ impl ExtendedPublicStateTarget {
             self.block_hash_chain.to_vec(),
             self.deposit_hash_chain.to_vec(),
             self.deposit_count.to_vec(),
+            self.channel_reg_hash_chain.to_vec(),
         ]
         .concat()
     }
@@ -241,12 +269,17 @@ impl ExtendedPublicStateTarget {
         cursor += BYTES32_LEN;
 
         let deposit_count = U63Target::from_slice(&values[cursor..cursor + 1]);
+        cursor += 1;
+
+        let channel_reg_hash_chain =
+            Bytes32Target::from_slice(&values[cursor..cursor + BYTES32_LEN]);
 
         Self {
             inner,
             block_hash_chain,
             deposit_hash_chain,
             deposit_count,
+            channel_reg_hash_chain,
         }
     }
 }

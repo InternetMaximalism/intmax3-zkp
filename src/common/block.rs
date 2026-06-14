@@ -48,6 +48,15 @@ pub struct Block {
     pub key_ids: Vec<u32>,
     pub tx_tree_root: Bytes32,
     pub deposit_hash_chain: Bytes32,
+    /// On-chain channel-registration hash chain AFTER this block's registrations.
+    ///
+    /// SECURITY (G6): this is folded into the block hash exactly like `deposit_hash_chain`, so the
+    /// postBlock-built block hash chain (the on-chain authenticity anchor, snapshotted in
+    /// `blockHashChainAt`) commits the registration chain. The validity proof must match that
+    /// block hash, preventing in-proof fabrication of registrations with no on-chain
+    /// `registerChannel` call. For a registration block this is the post-registration chain; for
+    /// an ordinary block it is unchanged from the previous block.
+    pub channel_reg_hash_chain: Bytes32,
 }
 
 #[derive(Debug, Clone)]
@@ -60,9 +69,11 @@ pub struct BlockTarget {
     pub key_ids: Vec<Target>,
     pub tx_tree_root: Bytes32Target,
     pub deposit_hash_chain: Bytes32Target,
+    pub channel_reg_hash_chain: Bytes32Target,
 }
 
 impl Block {
+    #[allow(clippy::too_many_arguments)]
     pub fn new_with_tx_v2s(
         num_users: u32,
         channel_id: u32,
@@ -70,6 +81,7 @@ impl Block {
         timestamp: u64,
         txs: &[TxV2],
         deposit_hash_chain: Bytes32,
+        channel_reg_hash_chain: Bytes32,
     ) -> Result<Self, BlockError> {
         Self::new_with_channel(
             num_users,
@@ -78,9 +90,11 @@ impl Block {
             timestamp,
             compute_tx_v2_root(txs).into(),
             deposit_hash_chain,
+            channel_reg_hash_chain,
         )
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn new_with_channel(
         num_users: u32,
         channel_id: u32,
@@ -88,6 +102,7 @@ impl Block {
         timestamp: u64,
         tx_tree_root: Bytes32,
         deposit_hash_chain: Bytes32,
+        channel_reg_hash_chain: Bytes32,
     ) -> Result<Self, BlockError> {
         Self::new(
             num_users,
@@ -96,9 +111,11 @@ impl Block {
             timestamp,
             tx_tree_root,
             deposit_hash_chain,
+            channel_reg_hash_chain,
         )
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         num_users: u32,
         channel_id: u32,
@@ -106,6 +123,7 @@ impl Block {
         timestamp: u64,
         tx_tree_root: Bytes32,
         deposit_hash_chain: Bytes32,
+        channel_reg_hash_chain: Bytes32,
     ) -> Result<Self, BlockError> {
         if key_ids.len() as u32 > num_users {
             return Err(BlockError::InvalidNumUsers(format!(
@@ -125,6 +143,7 @@ impl Block {
             key_ids,
             tx_tree_root,
             deposit_hash_chain,
+            channel_reg_hash_chain,
         })
     }
 
@@ -152,6 +171,7 @@ impl Block {
             self.key_ids().to_vec(),
             self.tx_tree_root.to_u32_vec(),
             self.deposit_hash_chain.to_u32_vec(),
+            self.channel_reg_hash_chain.to_u32_vec(),
         ]
         .concat();
         Ok(Bytes32::from_u32_slice(&solidity_keccak256(&inputs)).expect("hashing result invalid"))
@@ -185,6 +205,7 @@ impl BlockTarget {
 
         let tx_tree_root = Bytes32Target::new(builder, is_checked);
         let deposit_hash_chain = Bytes32Target::new(builder, is_checked);
+        let channel_reg_hash_chain = Bytes32Target::new(builder, is_checked);
 
         Self {
             num_users,
@@ -193,6 +214,7 @@ impl BlockTarget {
             key_ids,
             tx_tree_root,
             deposit_hash_chain,
+            channel_reg_hash_chain,
         }
     }
 
@@ -213,6 +235,7 @@ impl BlockTarget {
             .collect();
         let tx_tree_root = Bytes32Target::constant(builder, value.tx_tree_root);
         let deposit_hash_chain = Bytes32Target::constant(builder, value.deposit_hash_chain);
+        let channel_reg_hash_chain = Bytes32Target::constant(builder, value.channel_reg_hash_chain);
         Self {
             num_users: value.num_users,
             channel_id,
@@ -220,6 +243,7 @@ impl BlockTarget {
             key_ids,
             tx_tree_root,
             deposit_hash_chain,
+            channel_reg_hash_chain,
         }
     }
 
@@ -241,6 +265,7 @@ impl BlockTarget {
         inputs.extend(self.key_ids.iter().copied());
         inputs.extend(self.tx_tree_root.to_vec());
         inputs.extend(self.deposit_hash_chain.to_vec());
+        inputs.extend(self.channel_reg_hash_chain.to_vec());
         Bytes32Target::from_slice(&builder.keccak256::<C>(&inputs))
     }
 
@@ -263,6 +288,8 @@ impl BlockTarget {
         self.tx_tree_root.set_witness(witness, value.tx_tree_root);
         self.deposit_hash_chain
             .set_witness(witness, value.deposit_hash_chain);
+        self.channel_reg_hash_chain
+            .set_witness(witness, value.channel_reg_hash_chain);
     }
 }
 
@@ -272,14 +299,61 @@ mod tests {
     use crate::ethereum_types::{bytes32::Bytes32, u32limb_trait::U32LimbTrait};
     use rand::{SeedableRng, rngs::StdRng};
 
+    /// G6 byte-exact differential vector (Rust side). A single-keyId block with a NONZERO
+    /// `channel_reg_hash_chain` proves the reg chain is folded into the block-hash preimage
+    /// `prev || channel_id || timestamp || key_ids || tx_tree_root || deposit_hash_chain ||
+    /// channel_reg_hash_chain`. The Foundry test `test_blockHashChannelRegDifferential` calls
+    /// `_computeBlockHash` over the IDENTICAL fields and MUST produce the SAME constant.
+    ///
+    /// SECURITY: if this constant changes, the Rust <-> Solidity block-hash encodings have
+    /// diverged — DO NOT update blindly; investigate the layout.
+    const PINNED_BLOCK_HASH_WITH_REG: &str =
+        "0x3099e735b9d4cc17baec8e5797b12e65a09186ee6abd8e0094470d81aa1d2ad7";
+
+    #[test]
+    fn test_block_hash_channel_reg_differential() {
+        // Fixed, easy-to-mirror values (whole-word u32 limbs).
+        let prev_hash = Bytes32::from_u32_slice(&[0x0a0a_0a0a; 8]).unwrap();
+        let tx_tree_root = Bytes32::from_u32_slice(&[0x0b0b_0b0b; 8]).unwrap();
+        let deposit_hash_chain = Bytes32::from_u32_slice(&[0x0c0c_0c0c; 8]).unwrap();
+        let channel_reg_hash_chain = Bytes32::from_u32_slice(&[0x0d0d_0d0d; 8]).unwrap();
+        // num_users = 1, channel_id = 7, single key_id = 9, timestamp = 0x1122334455667788.
+        let block = Block::new(
+            1,
+            7,
+            &[9],
+            0x1122_3344_5566_7788,
+            tx_tree_root,
+            deposit_hash_chain,
+            channel_reg_hash_chain,
+        )
+        .unwrap();
+        let h = format!("{}", block.hash_with_prev_hash(prev_hash).unwrap());
+        println!("BLOCK_HASH_WITH_REG = {h}");
+        assert_eq!(
+            h, PINNED_BLOCK_HASH_WITH_REG,
+            "block-hash preimage (incl. channel_reg_hash_chain) drifted"
+        );
+    }
+
     #[test]
     fn test_block_new_and_hash() {
         let mut rng = StdRng::seed_from_u64(42);
         let tx_tree_root = Bytes32::rand(&mut rng);
         let deposit_hash_chain = Bytes32::rand(&mut rng);
+        let channel_reg_hash_chain = Bytes32::rand(&mut rng);
         let prev_hash = Bytes32::rand(&mut rng);
 
-        let block = Block::new(2, 1, &[10, 20], 1000, tx_tree_root, deposit_hash_chain).unwrap();
+        let block = Block::new(
+            2,
+            1,
+            &[10, 20],
+            1000,
+            tx_tree_root,
+            deposit_hash_chain,
+            channel_reg_hash_chain,
+        )
+        .unwrap();
 
         let h1 = block.hash_with_prev_hash(prev_hash).unwrap();
         let h2 = block.hash_with_prev_hash(prev_hash).unwrap();
@@ -291,11 +365,30 @@ mod tests {
         let mut rng = StdRng::seed_from_u64(99);
         let tx_tree_root = Bytes32::rand(&mut rng);
         let deposit_hash_chain = Bytes32::rand(&mut rng);
+        let channel_reg_hash_chain = Bytes32::rand(&mut rng);
         let prev_hash = Bytes32::default();
 
-        let block_a = Block::new(1, 1, &[1], 100, tx_tree_root, deposit_hash_chain).unwrap();
+        let block_a = Block::new(
+            1,
+            1,
+            &[1],
+            100,
+            tx_tree_root,
+            deposit_hash_chain,
+            channel_reg_hash_chain,
+        )
+        .unwrap();
 
-        let block_b = Block::new(1, 1, &[1], 100, tx_tree_root, deposit_hash_chain).unwrap();
+        let block_b = Block::new(
+            1,
+            1,
+            &[1],
+            100,
+            tx_tree_root,
+            deposit_hash_chain,
+            channel_reg_hash_chain,
+        )
+        .unwrap();
 
         let h1 = block_a.hash_with_prev_hash(prev_hash).unwrap();
         let h2 = block_b.hash_with_prev_hash(prev_hash).unwrap();
@@ -304,8 +397,16 @@ mod tests {
 
     #[test]
     fn test_block_padding() {
-        let block =
-            Block::new(4, 1, &[10, 20], 100, Bytes32::default(), Bytes32::default()).unwrap();
+        let block = Block::new(
+            4,
+            1,
+            &[10, 20],
+            100,
+            Bytes32::default(),
+            Bytes32::default(),
+            Bytes32::default(),
+        )
+        .unwrap();
         assert_eq!(block.key_ids.len(), 4);
         assert_eq!(block.key_ids[2], 0);
         assert_eq!(block.key_ids[3], 0);
@@ -333,7 +434,16 @@ mod tests {
             }]),
         };
 
-        let block = Block::new_with_tx_v2s(1, 3, &[9], 100, &[tx], Bytes32::default()).unwrap();
+        let block = Block::new_with_tx_v2s(
+            1,
+            3,
+            &[9],
+            100,
+            &[tx],
+            Bytes32::default(),
+            Bytes32::default(),
+        )
+        .unwrap();
 
         assert_eq!(block.tx_tree_root, compute_tx_v2_root(&[tx]).into());
     }

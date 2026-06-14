@@ -414,6 +414,9 @@ pub struct FullPublicState {
     pub deposits: Vec<Deposit>,
     pub block_hash_chain: Bytes32,
     pub deposit_hash_chain: Bytes32,
+    /// This simple helper never registers channels, so the reg chain stays the zero default; it is
+    /// still folded into the block hash (G6) for layout consistency with the on-chain block hash.
+    pub channel_reg_hash_chain: Bytes32,
 }
 
 impl FullPublicState {
@@ -431,6 +434,7 @@ impl FullPublicState {
             deposits: vec![],
             block_hash_chain: Bytes32::default(),
             deposit_hash_chain: Bytes32::default(),
+            channel_reg_hash_chain: Bytes32::default(),
         }
     }
 
@@ -478,6 +482,7 @@ impl FullPublicState {
             timestamp,
             tx_tree_root,
             self.deposit_hash_chain,
+            self.channel_reg_hash_chain,
         )?;
 
         // update public state tree
