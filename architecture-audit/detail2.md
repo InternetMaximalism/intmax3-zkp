@@ -51,6 +51,19 @@ root (`tx_tree_root`)." The current implementation differs, and **this spec does
 This difference does not weaken the safety properties (the 5 properties of abstract2.md §4): the inclusion proof degenerates because there is no aggregation tree, but
 the structure of the signing target `hash(H1, H2)`, the chain binding, and the cap enforcement are all preserved.
 
+### A-3. Signatures: SPHINCS+ → Poseidon-preimage ZK signature (two-key)
+
+The member signatures this spec describes as SPHINCS+ (§B-4, §C, §D, §F) were **replaced by a
+Poseidon-preimage ZK signature** (a ZK proof of knowledge of `sk` with `pk = Poseidon(sk)`, message
+bound as a public input), and SPHINCS+ was removed entirely. Two keys per member, each native to its
+proof system: a **Goldilocks** key `pk_g` (Plonky2 — channel-state agreement / close / small-block,
+via `SingleSigCircuit` aggregated by a recursive `ListCircuit`) and a **BabyBear** key `pk_b` (Plonky3
+— the in-channel channel-tx sender authorization, via `Poseidon2HashSigAir`). The member identity
+`pk_g` occupies the same `Bytes32` slot the SPHINCS+ pubkey hash did; `pk_b` is added to `MemberLeaf`.
+The full delta (validity `bp_sig_chain` accumulator, close list-proof consumer, two-key A11 binding,
+wallet Goldilocks co-signing, SPHINCS+ removal) is **D8 in detail2-implementation-notes.md**; threat
+model in `tasks/poseidon-signature-threat-model.md`.
+
 ---
 
 ## B. Cryptographic primitives and parameters
@@ -119,7 +132,7 @@ pub struct RegevCiphertext {
 | `withdrawClaimZKP` | Plonky3 STARK | A degenerate form of the above ("the plaintext of my own ct = the public withdrawal amount") |
 | `balanceProof` / `validityProof` | Plonky2 (existing) | `src/circuits/balance/`, `src/circuits/validity/` (changes are in §F) |
 | close / claim PI binding | Plonky2 (existing) | `src/circuits/channel/close_circuit.rs` and others |
-| Signature | SPHINCS+ (Poseidon) | Existing (`SpxSigWitness`). No change |
+| Signature | ~~SPHINCS+ (Poseidon)~~ → **Poseidon-preimage ZK sig (two-key)** | **SUPERSEDED — see D8** in detail2-implementation-notes.md. Goldilocks `pk_g` (Plonky2 `SingleSigCircuit` + recursive `ListCircuit`) for state/close/IMSB; BabyBear `pk_b` (Plonky3 `Poseidon2HashSigAir`) for the channel-tx sender. SPHINCS+ fully removed. |
 
 `ChannelProofEnvelope { role, backend, proof }` (`state_update_verifier.rs:20-24`) is retained, and
 `ProofBackend::Plonky3` is used to carry the lattice STARKs (as in the existing design).

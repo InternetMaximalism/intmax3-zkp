@@ -90,6 +90,10 @@ refresh proof).
 
 ## D4 — Close circuit: full recursive balance-proof verification + 3/3 SPHINCS+ signatures
 
+> **Signature part SUPERSEDED by D8 (2026-06-15):** the "3/3 (→ N-of-N) SPHINCS+ signatures" are
+> replaced by a recursively-verified Goldilocks `ListCircuit` proof over `(IMCH_digest, pk_g_i)`. The
+> recursive `finalBalanceProof` verification, H1/IMCH recomputes, and shared-binding structure stand.
+
 The close circuit (`src/circuits/channel/close_circuit.rs`, 77 public inputs *(→85 in D5, →86 in D6)*) goes
 beyond the minimal §F-3 sketch and fully internalizes the close validity argument:
 
@@ -111,6 +115,11 @@ of bindings can be satisfied with divergent values.
 ---
 
 ## D5 — one SPHINCS+ key per member (multisig / threshold / KeyId / UserId removed)
+
+> **SUPERSEDED by D8 (2026-06-15):** the signature primitive is no longer SPHINCS+. The multisig /
+> threshold / KeyId / UserId removal (one identity per member, no aggregation pipeline) STANDS; but
+> **DA "identity = SPHINCS+ pubkey hash"** becomes the two-key identity `pk_g` (Goldilocks
+> Poseidon-preimage pubkey, same `Bytes32` slot) + `pk_b` (BabyBear), see D8.
 
 **Context (user directive, 2026-06-13):** the channel layer had inherited a two-layer
 identity with multisig/threshold (`KeyId`/`UserId`; `KeyTree`→`MemberKeyTree`→`KeySetTree`;
@@ -453,3 +462,89 @@ airtight.
   set from the rollup registration) or document the trust assumption.
 - **LOW** — `registerChannel` has no access control → `channel_id` squatting/DoS (not a soundness
   break under one-time R5). Confirm the intended channel-id allocation trust model.
+
+---
+
+## D8 — SPHINCS+ → two-key Poseidon-preimage ZK signature (branch `paymentchannel-delegate`, 2026-06-15)
+
+**Context (user directive):** replace the SPHINCS+ (Poseidon) member signatures — which §B-4 lists as
+"Existing / No change" and which D4/D5 use — with a ZK-friendly **Poseidon-preimage signature**
+verified only inside ZK proofs, and remove SPHINCS+ entirely. This **supersedes** the SPHINCS+ parts of
+D4 (close "3/3 SPHINCS+ signatures") and D5/DA ("identity = SPHINCS+ pubkey hash"). abstract2.md needs
+no change; this is the authoritative delta. Done in phases P1–P4 (commits `99af590`, `afd500d`,
+`5df2f6f`, `049c768`, `11393d4`, `a4101fe`, `b0a29fa`).
+
+### Scheme (replaces §B-4 "Signature: SPHINCS+ (Poseidon)")
+A "signature" is a **ZK proof of knowledge** of a secret key `sk` with `pk = Poseidon(DOMAIN_PK ‖ sk)`,
+with the message `m` (an existing domain-separated signing digest, IMSB/IMCH/IMPA/…) bound as a public
+input. Unforgeability reduces to **Poseidon preimage resistance** on `sk` (≥256-bit; classical 2^256 /
+quantum 2^128). SECURITY (approved): this is a bespoke "preimage-as-signature" on an algebraic hash,
+not a standardized PQ signature — the trade-off (cheap in-circuit, recursively aggregatable, still
+plausibly post-quantum) was accepted; `SECRET_KEY_LEN`/digest width are approved parameters. `sig` is
+witness-only (never published; A6). Full threat model: `tasks/poseidon-signature-threat-model.md`.
+
+### Two keys per member (no field unification — each native to its proof system)
+- **Goldilocks key** `pk_g = Poseidon_Goldilocks(DOMAIN_PK_G ‖ sk_g)` (`src/poseidon_sig/`): signs
+  channel-state agreement (IMCH), close, and intmax-tx / small-block (IMSB). Verified **natively in
+  Plonky2** via `SingleSigCircuit` (`circuit.rs`), aggregated by a recursive order-sensitive Poseidon
+  hash-chain **`ListCircuit`** (`list.rs`, reuses the in-tree `CyclicChainCircuit`); consumers rebuild
+  the commitment and check membership/distinctness (`consumer.rs`). `pk_g` is the same `PoseidonHashOut`/
+  `Bytes32` slot the SPHINCS+ pubkey hash (D5/DA) occupied — a semantic rename, not a width change.
+- **BabyBear key** `pk_b = Poseidon2_BabyBear(DOMAIN_PK_B ‖ sk_b)` (`src/regev/hash_sig.rs`): signs the
+  in-channel channel-tx sender authorization. Verified **natively in Plonky3** by `Poseidon2HashSigAir`
+  (a SEPARATE Poseidon2-BabyBear STARK — the channelTxZKP is single-AIR/128-row-fixed, so same-proof
+  integration was infeasible), bound to the channelTxZKP by the off-chain verifier (see A11). The AIR
+  reuses the audited upstream Poseidon2 round constraints via `vendor/p3-poseidon2-air-0.5.3` with a
+  **visibility-only** change (`pub(crate) fn eval → pub fn eval`; round-constraint body byte-for-byte
+  upstream); the message digest (8×u32, which would alias mod the BabyBear prime ≈ 2^31) is
+  re-decomposed into 16×16-bit limbs for injective absorption.
+
+### Validity (§F-2) — supersedes the inline SPHINCS+ `verify_circuit`
+`update_channel_tree` no longer verifies SPHINCS+ inline. A `bp_sig_chain: Bytes32` accumulator is
+threaded through `ExtendedPublicState` (mirroring `channel_reg_hash_chain`): the bp slot folds
+`(IMSB_digest, bp_pk_g)` into it via the shared `poseidon_sig::list` gadgets, using the SAME wires bound
+to `member_pubkeys_root` and `tx_tree_root`. `validity_circuit` **conditionally** verifies the
+`ListCircuit` proof gated on the COMPUTED `final.bp_sig_chain != 0` (not a prover flag), asserting
+`C == final.bp_sig_chain` and `initial == 0`. `bp_sig_chain` is bound into `ValidityPublicInputs`.
+
+### Close (§F-3) — supersedes D4's "3/3 (→ N-of-N) SPHINCS+ signatures"
+`close_circuit` removes per-slot SPHINCS+ verify; it recursively verifies a `ListCircuit` proof,
+rebuilds `C'` over ACTIVE member slots `(IMCH_digest, pk_g_i)` (select prev on padding), asserts
+`C' == C` + pubkey distinctness, and keeps `member_set_commitment` (IMCM keccak) over `pk_g_i` only.
+
+### MemberLeaf / registration / A11 (two-key binding) — supersedes D5/DA single-hash leaf
+`MemberLeaf` is now `{pk_g, pk_b, regev_pk_digest}` (`key_tree.rs`). `pk_b` enters the registration
+keccak reg-chain preimage between `pk_g` and `regev_pk_digest` (`CHANNEL_REG_PREIMAGE_U32_LEN` updated;
+Rust↔Solidity `channelRegPreimage` differential re-pinned + passing; Solidity `registerChannel` takes
+`pkBs`). `member_set_commitment` (IMCM, close) stays `pk_g`-only. **A11 (two-key binding) is off-chain:**
+the channel-tx verifier checks `(pk_g, pk_b, regev_pk)` belong to one registered `MemberLeaf` — closed
+in the wallet (P4-1) by making the wallet `member_pubkeys_root` the canonical Poseidon 3-field leaf root
+AND binding `payload.record` to the session's trusted record (`verify_send_transition`'s
+`trusted_record`). end-to-end the SAME `pk_b` is bound at wallet / in-circuit Poseidon root / L1 keccak
+reg chain. The off-chain dependency (every co-signer runs the check) is a LOCKED/documented assumption.
+
+### Wallet co-signing (P4-2) and SPHINCS+ removal (P4-3)
+Wallet member channel-state co-signing moved from SPHINCS+ to Goldilocks: each member produces a
+`SingleSigCircuit` proof over the IMCH digest; `verify_all_signatures` verifies each individually
+(binding `pk_g ∈ member set` + the exact digest). SPHINCS+ is **fully removed**:
+`sphincsplus-{circuits,params,poseidon}` deps gone (`Cargo.lock` count 0), `test_utils/sphincs_sign.rs`
++ `validity/block_hash_chain/sphincs_sig.rs` + `tests/sphincs_timing.rs` deleted; `SmallBlockMessageFields`
+moved to `block_hash_chain/small_block_message.rs` (byte-identical IMSB digest).
+
+### New domain constants (extends §G-2)
+`DOMAIN_PK_G = 0x494d5047` ("IMPG"), `DOMAIN_SIG_G = 0x494d5347` ("IMSG"),
+`LIST_LEAF_DOMAIN = 0x494d4c4c` ("IMLL"); BabyBear `DOMAIN_PK_B`/`DOMAIN_SIG_B` (`src/regev/hash_sig.rs`).
+All proven non-colliding with the existing IMxx set.
+
+### Verification & review
+Per-phase independent security reviews (separate agents) found no fund-theft/forgery soundness hole;
+the P4 review's residual caller-layer A11 gap was fixed (trusted-record binding) with negative tests
+(`p4_1_attacker_pk_b_swap_is_rejected`, `p4_1_foreign_self_consistent_record_is_rejected`). Green: forge
+99/99; `cargo test --test e2e` 1/1; `wallet_core_e2e` 3/3; `poseidon_sig` 25/25; `regev::hash_sig` 20/20;
+WASM lib check clean; Groth16/gnark not run (project rule).
+
+### Degree-hint note (P3-3)
+`Poseidon2HashSigAir::max_constraint_degree()` returns `Some(3)` (the true committed degree with
+`SBOX_REGISTERS=1`); the batch-stark's hint≥actual guard is a `debug_assert` (compiled out in release),
+so the hint is load-bearing — the prove/verify + native-equality tests are the regression sentinel, and
+production verification must use `default_config` (84 queries), not `test_config` (8 queries).
