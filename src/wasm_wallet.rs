@@ -329,9 +329,9 @@ pub fn wallet_finalize(state_json: String) -> Result<String, JsValue> {
             return Err(js_err("state_version must increment by exactly 1"));
         }
         // Adopt, then fully verify (record/root/balance-state validity, every member's REAL
-        // SPHINCS+ signature, own-slot decryption). `verify_snapshot` already runs the full
+        // Goldilocks SingleSig proof, own-slot decryption). `verify_snapshot` already runs the full
         // signature check, so we don't call `verify_all_signatures` separately (it would re-run all
-        // SLH-DSA verifications and roughly double finalize latency).
+        // SingleSig proof verifications and roughly double finalize latency).
         snapshot.state = next_state;
         verify_snapshot(&snapshot, Some((&session.keys, slot))).map_err(js_err)?;
         let balance = decrypt_balance(&session.keys, &snapshot, slot).map_err(js_err)?;
