@@ -855,6 +855,35 @@ where
     Ok((z, proof))
 }
 
+// ---------------------------------------------------------------------------
+// STEP 0 PoC: bare Poseidon2-BabyBear permutation through the batch-stark backend
+// ---------------------------------------------------------------------------
+
+/// Prove a bare Poseidon2-BabyBear permutation trace (no public values) through the regev
+/// `test_config()` batch-stark backend. Used by the P3 de-risk PoC only.
+pub fn prove_poseidon2_poc(
+    trace: &RowMajorMatrix<F>,
+) -> Result<Vec<u8>, RegevError> {
+    let air = super::hash_sig::NoLookupPoseidon2Air::new();
+    prove_one(&test_config(), &air, trace, Vec::new())
+}
+
+/// Verify a PoC Poseidon2 permutation proof. The shape check inside `verify_one` is specific to
+/// the dual-key AIRs, so this PoC path calls `verify_batch` directly via a minimal helper.
+pub fn verify_poseidon2_poc(proof_bytes: &[u8]) -> Result<(), RegevError> {
+    regev_plonky3::init_thread_pool();
+    let mut air = super::hash_sig::NoLookupPoseidon2Air::new();
+    let proof: BatchProof<RegevStarkConfig> =
+        postcard::from_bytes(proof_bytes).map_err(|e| RegevError::ProofCodec(e.to_string()))?;
+    let lookups = air.get_lookups();
+    let airs = vec![air];
+    let common = CommonData::new(None, vec![lookups]);
+    let pvs: Vec<Vec<F>> = vec![Vec::new()];
+    stark::verify_batch(&test_config(), &airs, &proof, &pvs, &common)
+        .map_err(|e| RegevError::ProofVerification(format!("{e:?}")))?;
+    Ok(())
+}
+
 /// Horner evaluation of a base-field coefficient vector at the extension-field point `z`.
 fn eval_at(coeffs: impl DoubleEndedIterator<Item = F>, z: Challenge) -> Challenge {
     coeffs

@@ -78,6 +78,10 @@ p3-matrix-05 = { package = "p3-matrix", version = "0.5.3" }
 p3-baby-bear = "0.5.3"
 p3-batch-stark = "0.5.3"
 p3-lookup = "0.5.3"
+# Upstream Poseidon2 AIR (round constraints) + the 0.5.3 symmetric `Permutation` trait, for the
+# P3 native BabyBear hash-signature (`src/regev/hash_sig.rs`). Same 0.5.3 family as the regev path.
+p3-poseidon2-air = "0.5.3"
+p3-symmetric-05 = { package = "p3-symmetric", version = "0.5.3" }
 # Plonky3 / uni-stark
 p3-air = "0.4.2"
 p3-challenger = "0.4.2"

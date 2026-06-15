@@ -12,6 +12,7 @@
 //! leak out of this module except through the sender-private [`AmountWitness`].
 
 pub mod encrypt;
+pub mod hash_sig;
 pub mod keys;
 pub mod params;
 pub mod transfer_stark;
