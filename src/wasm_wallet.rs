@@ -48,10 +48,6 @@ fn js_err(m: impl std::fmt::Display) -> JsValue {
     JsValue::from_str(&m.to_string())
 }
 
-fn hex(bytes: &[u8]) -> String {
-    bytes.iter().map(|b| format!("{b:02x}")).collect()
-}
-
 fn with_session<T>(f: impl FnOnce(&mut Session) -> Result<T, JsValue>) -> Result<T, JsValue> {
     SESSION.with(|s| {
         let mut guard = s.borrow_mut();
@@ -65,7 +61,8 @@ fn with_session<T>(f: impl FnOnce(&mut Session) -> Result<T, JsValue>) -> Result
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct Identity {
-    sphincs_pk_hex: String,
+    /// The member's Goldilocks signing public key `pk_g` (canonical Bytes32 hex, P4-2 — the member
+    /// identity stored in the channel record and committed in the registered `MemberLeaf`).
     pk_g: String,
     /// P3: the member's BabyBear hash-sig public key `pk_b` (canonical Bytes32 hex). Published so
     /// the CLI can build the `MemberInfo` / registration record that commits it (A11).
@@ -73,13 +70,12 @@ struct Identity {
     regev_pk: crate::regev::RegevPk,
 }
 
-/// Generate this member's SPHINCS+ + Regev key pairs and start a fresh session.
+/// Generate this member's Goldilocks + BabyBear + Regev key material and start a fresh session.
 #[wasm_bindgen]
 pub fn wallet_keygen() -> Result<String, JsValue> {
     let mut rng = rand010::rng();
     let keys = MemberKeys::generate(&mut rng);
     let identity = Identity {
-        sphincs_pk_hex: hex(&keys.kp.pk_bytes),
         pk_g: keys.pk_g().to_hex(),
         pk_b: keys.pk_b().to_hex(),
         regev_pk: keys.regev_pk.clone(),
@@ -101,7 +97,8 @@ pub fn wallet_keygen() -> Result<String, JsValue> {
 #[serde(rename_all = "camelCase")]
 struct GenesisContribution {
     regev_pk: crate::regev::RegevPk,
-    sphincs_pk_hex: String,
+    /// The member's Goldilocks signing public key `pk_g` (canonical Bytes32 hex, P4-2).
+    pk_g: String,
     /// P3: the member's BabyBear hash-sig public key `pk_b` (canonical Bytes32 hex, A11).
     pk_b: String,
     genesis_ct: crate::regev::RegevCiphertext,
@@ -118,7 +115,7 @@ pub fn wallet_genesis_contribution(balance: u64) -> Result<String, JsValue> {
         session.balance = Some((balance, witness));
         let out = GenesisContribution {
             regev_pk: session.keys.regev_pk.clone(),
-            sphincs_pk_hex: hex(&session.keys.kp.pk_bytes),
+            pk_g: session.keys.pk_g().to_hex(),
             pk_b: session.keys.pk_b().to_hex(),
             genesis_ct: ct,
         };
@@ -152,7 +149,7 @@ pub fn wallet_sign_state(slot: u8, state_json: String) -> Result<String, JsValue
             &state.balance_state.enc_balances[slot as usize],
         )
         .map_err(|e| js_err(format!("cannot decrypt own slot {slot}: {e}")))?;
-        let sig: MemberSignature = sign_state(&session.keys, slot, &state);
+        let sig: MemberSignature = sign_state(&session.keys, slot, &state).map_err(js_err)?;
         serde_json::to_string(&sig).map_err(js_err)
     })
 }
@@ -304,10 +301,11 @@ pub fn wallet_cosign(payload_json: String) -> Result<String, JsValue> {
         } else {
             (None, None)
         };
-        verify_send_transition(&snapshot.state, &payload, LEVEL, sk, expected).map_err(js_err)?;
+        verify_send_transition(&snapshot.state, &snapshot.record, &payload, LEVEL, sk, expected)
+            .map_err(js_err)?;
 
         let mut next = payload.proposed_next_state.clone();
-        let sig = sign_state(&session.keys, slot, &next);
+        let sig = sign_state(&session.keys, slot, &next).map_err(js_err)?;
         add_signature(&mut next, sig);
         serde_json::to_string(&next).map_err(js_err)
     })

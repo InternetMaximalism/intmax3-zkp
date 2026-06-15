@@ -18,7 +18,7 @@ use crate::{
             block_hash_chain_circuit::{BlockHashChainCircuit, BlockHashChainCircuitError},
             block_step::{BlockStepCircuit, BlockStepError, BlockStepWitness},
             ext_public_state::ExtendedPublicState,
-            sphincs_sig::SmallBlockMessageFields,
+            small_block_message::SmallBlockMessageFields,
             update_channel_tree::{UpdateUserCircuit, UpdateUserCircuitError, UpdateUserTree},
         },
         channel_reg_hash_chain::{

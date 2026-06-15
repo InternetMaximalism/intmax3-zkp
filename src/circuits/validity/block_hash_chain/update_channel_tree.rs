@@ -1,5 +1,5 @@
 use crate::{
-    circuits::validity::block_hash_chain::sphincs_sig::{
+    circuits::validity::block_hash_chain::small_block_message::{
         SmallBlockMessageFields, SmallBlockMessageFieldsTarget,
     },
     common::{
@@ -1232,7 +1232,7 @@ where
 mod tests {
     use super::*;
     use crate::{
-        circuits::validity::block_hash_chain::sphincs_sig::SmallBlockMessageFields,
+        circuits::validity::block_hash_chain::small_block_message::SmallBlockMessageFields,
         common::{
             block::Block,
             channel_id::ChannelId,

@@ -3,6 +3,6 @@ pub mod block_hash_chain_circuit;
 pub mod block_hash_chain_processor;
 pub mod block_step;
 pub mod ext_public_state;
-pub mod sphincs_sig;
+pub mod small_block_message;
 pub mod update_channel_tree;
 pub mod validity_circuit;

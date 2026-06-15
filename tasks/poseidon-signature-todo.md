@@ -166,19 +166,56 @@ ZK hash-signature and removes SPHINCS+ entirely.
 - [ ] P3-10. Separate security review + attacker pass.
 
 ## Phase 4 (this session, user-approved scope expansion) — wallet Goldilocks co-signing + SPHINCS+ removal
+- [x] **P4-1 DONE.** Wallet `member_pubkeys_root` (`src/wallet_core.rs`) is now the canonical Poseidon
+      `MemberTree` root over `MemberLeaf{pk_g, pk_b, regev_pk_digest}` (matching circuit/registration),
+      re-bound in `verify_snapshot` AND independently in `verify_send_transition` (the payload has its
+      own record/members). The A11 check reads `pk_b` from this AUTHENTICATED set; regev_pk double-use
+      fixed (registered = member-root-anchored slot key; sender's claimed = the array fed to the E-1
+      witness, re-bound to `regev_pk_root` by `InChannelTransferUpdateWitness::verify`). Negative test
+      `p4_1_attacker_pk_b_swap_is_rejected` (tests/wallet_core_e2e.rs): attacker pk_b + self-consistent
+      forged hash-sig is REJECTED at the member-root anchoring check. Both wallet_core_e2e tests green.
 - [ ] **P4-1 (soundness, top priority): fix the P3-5 wallet A11 gap.** Make the wallet's registered
       member set commit `pk_b` (e.g. the wallet `member_pubkeys_root` becomes the Poseidon 3-field leaf
       root matching the circuit, or pk_b is otherwise bound by `verify_snapshot`), so the A11 check reads
       `pk_b` from an AUTHENTICATED source, not the raw payload. Fix the regev_pk double-use (pass the
       sender's actual regev_pk vs the registered one). Add a payload-tamper negative test.
+- [x] P4-2 DONE (wallet co-signing → Goldilocks). `MemberKeys.signing_key: GoldilocksSecretKey`
+      (replaces `kp: SpxKeyPair`); kept `baby_key`. `sign_state` produces a `SingleSigCircuit` proof
+      over the IMCH `signing_digest` (proof bytes = the `MemberSignature.signature`); shared circuit
+      via `OnceLock`. `verify_all_signatures` verifies each member's proof INDIVIDUALLY, binding the
+      proof's `[pk_g(8), m(8)]` PIs to `record.member_pk_gs[slot]` + the recomputed digest (pk_g ∈
+      member set). `MemberInfo.sphincs_pk_hex` → `pk_g: Bytes32`. wasm_wallet/channel_member updated
+      (Identity/GenesisContribution/BrowserContribution emit `pk_g`, sign_state `?`/`.expect`).
+      `sign_state` now returns `WResult<MemberSignature>`. wallet_core_e2e 2/2 green (0.08s).
 - [ ] P4-2. Wallet channel-state co-signing → Goldilocks: each member produces a Goldilocks
       `SingleSigCircuit` proof over the `ChannelState` IMCH digest (= their signature); the wallet's
       `verify_all_signatures` verifies each proof individually (+ pk_g ∈ member set). The on-chain
       aggregation into the list proof (close/validity, slot order) is the existing P2b path. Replace
       `MemberKeys.kp` (SPHINCS+) with `GoldilocksSecretKey`.
+- [x] P4-3 DONE. Removed `sphincsplus-{circuits,params,poseidon}` from Cargo.toml (gone from
+      Cargo.lock); deleted `src/circuits/test_utils/sphincs_sign.rs` (+ mod decl) and
+      `tests/sphincs_timing.rs`; deleted `sphincs_sig.rs` after MOVING `SmallBlockMessageFields`/
+      `SmallBlockMessageFieldsTarget` (+ its differential test) into new
+      `block_hash_chain/small_block_message.rs` and dropping the dead `SpxSigWitness`/`SpxSigTargets`/
+      `SPX_*` residue. All `sphincs_sig::` import sites repointed. grep for
+      sphincsplus/SpxSig/SpxKeyPair/verify_sphincs/sphincs_sign/sphincs_keygen → ZERO active refs
+      (only historical prose in wallet_core.rs:179). Native lib + bins + tests build clean.
 - [ ] P4-3. Remove SPHINCS+ entirely: deps `sphincsplus-{circuits,params,poseidon}`,
       `test_utils/sphincs_sign.rs`, `SpxSig*` residue (move `SmallBlockMessageFields` out if still used);
       grep → zero refs. Native + WASM build clean.
+- [~] P4-4 IN PROGRESS. Generators emit `member_pk_bs` (`MemberFixture` in generate_c2c_fixture.rs +
+      generate_withdrawal_fixture.rs). Fixed STALE forge JSON keys `.member_sphincs_pubkey_hashes` →
+      `.member_pk_gs` (C2CFullE2E, C2CBlockHash, ReclaimStake, WithdrawNativeE2E — predated the P2b
+      rename; fixtures had neither key). Regenerated lifecycle.json/withdrawal_* (plain). WithdrawNativeE2E
+      6/6 PASS. Rust `cargo test --test e2e` 1/1 PASS. c2c_* regen IN PROGRESS. close_* needs
+      WD_RECIPIENT=0xb83a993604b0c7438F5Ce1D5a1e1787D34CB5C96 (fresh CloseManagerAddr — rollup initcode
+      changed) WD_OUT_PREFIX=close_. mle_fixture.json (generate_e2e_fixture) has no MemberFixture (no regen
+      needed for member_pk_bs).
+- [x] P4-4 DONE. All fixtures regenerated with `member_pk_bs`: lifecycle/withdrawal (plain),
+      c2c_* (generate_c2c_fixture), close_* (WD_RECIPIENT=0xb83a99...5C96 WD_OUT_PREFIX=close_). Stale
+      forge JSON keys `.member_sphincs_pubkey_hashes` → `.member_pk_gs` fixed (4 tests). FULL FORGE
+      SUITE: 99/99 pass, 0 fail, 0 skip (Groth16/gnark not run, project rule). Rust `cargo test --test
+      e2e` 1/1. WASM lib `cargo check --target wasm32` clean.
 - [ ] P4-4. e2e fixture regeneration (`member_pk_bs`); full Rust e2e + forge E2E green; WASM green.
 - [ ] P4-5. Separate security review + attacker pass (A11 end-to-end, wallet co-sign, SPHINCS+ gone).
 
@@ -189,3 +226,29 @@ ZK hash-signature and removes SPHINCS+ entirely.
   exact channelTx digest, else the balance-reduction proof is accepted without authorization.
 - **A11 off-chain dependency**: security now relies on every co-signer running the membership check;
   document this as an explicit trust assumption.
+
+---
+
+## FINAL STATUS — P4 COMPLETE (2026-06-15), migration P1→P4 done
+
+- **P4-1 fully closed (member-root + caller-layer).** The implementation agent made the wallet
+  `member_pubkeys_root` the canonical Poseidon 3-field `MemberLeaf` root (so `pk_b` is authenticated,
+  not read from a raw payload). The independent P4 security review then found a RESIDUAL caller-layer
+  gap (the A11 check ran against `payload.record`, not the session's trusted record). Fixed here:
+  `verify_send_transition` now takes `trusted_record: &ChannelRecord` and rejects unless
+  `payload.record.signing_digest() == trusted_record.signing_digest()` (callers pass
+  `snapshot.record`). The cosmetic regev self-check was removed (regev is authenticated via the
+  member-root anchoring + the E-1 statement). Negative tests: `p4_1_attacker_pk_b_swap_is_rejected`
+  (rejects at member_pubkeys_root) + `p4_1_foreign_self_consistent_record_is_rejected` (rejects at the
+  trusted-record binding). Both green.
+- **P4-2/3/4 done**: wallet co-signing = per-member Goldilocks `SingleSigCircuit` proof verified
+  individually; SPHINCS+ fully removed (deps + sphincs_sign.rs + sphincs_sig.rs gone, 0 active refs;
+  `SmallBlockMessageFields` moved to `small_block_message.rs`); e2e fixtures regenerated with
+  `member_pk_bs`.
+- **Verified**: full forge 99/99 (agent); Rust `cargo test --test e2e` 1/1; `wallet_core_e2e` 3/3;
+  all test targets compile; WASM lib check clean; SPHINCS+ grep = 0 active + Cargo.lock 0.
+- **Independent P4 security review**: NO real fund-theft/forgery hole; P4-1 gap closed (member-root +
+  the trusted-record fix above); end-to-end A11 (wallet → MemberLeaf Poseidon root → L1 keccak reg
+  chain) binds the same pk_b at every layer; co-signing forgery paths (reuse/skip/wrong-state) rejected.
+- **Remaining (non-blocking)**: P4-5 broader attacker pass if desired; detail2 doc delta (P3-9). The
+  off-chain A11 trust assumption (every co-signer runs the check) is LOCKED/documented.

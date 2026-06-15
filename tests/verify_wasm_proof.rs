@@ -28,6 +28,7 @@ fn native_verifies_wasm_e1_proof() {
         serde_json::from_str(&std::fs::read_to_string(snap_path).unwrap()).unwrap();
     let res = verify_send_transition(
         &snapshot.state,
+        &snapshot.record,
         &payload,
         RegevSecurityLevel::Production,
         None,
@@ -40,7 +41,7 @@ fn native_verifies_wasm_e1_proof() {
 fn member_info(slot: u8, keys: &MemberKeys) -> MemberInfo {
     MemberInfo {
         slot,
-        sphincs_pk_hex: keys.kp.pk_bytes.iter().map(|b| format!("{b:02x}")).collect(),
+        pk_g: keys.pk_g(),
         pk_b: keys.pk_b(),
         regev_pk: keys.regev_pk.clone(),
     }
@@ -61,9 +62,9 @@ fn native_json_roundtrip_verifies() {
     let (ct0, w0) = encrypt_amount(&mut rng, &m0.regev_pk, bal0).unwrap();
     let (ct1, _w1) = encrypt_amount(&mut rng, &m1.regev_pk, bal1).unwrap();
     let mut genesis = assemble_genesis_state(&record, &[ct0, ct1], bal0 + bal1).unwrap();
-    let g0 = sign_state(&m0, 0, &genesis);
+    let g0 = sign_state(&m0, 0, &genesis).expect("sign g0");
     add_signature(&mut genesis, g0);
-    let g1 = sign_state(&m1, 1, &genesis);
+    let g1 = sign_state(&m1, 1, &genesis).expect("sign g1");
     add_signature(&mut genesis, g1);
     let snapshot = ChannelSnapshot { record, state: genesis, members };
 
@@ -74,8 +75,10 @@ fn native_json_roundtrip_verifies() {
     .unwrap();
 
     // In-memory verify (control).
-    verify_send_transition(&snapshot.state, &payload, RegevSecurityLevel::Production, None, None)
-        .expect("in-memory native verify");
+    verify_send_transition(
+        &snapshot.state, &snapshot.record, &payload, RegevSecurityLevel::Production, None, None,
+    )
+    .expect("in-memory native verify");
 
     // JSON round-trip BOTH the snapshot and the payload (same path as browser↔CLI), then verify.
     let snap_json = serde_json::to_string(&snapshot).unwrap();
@@ -83,7 +86,7 @@ fn native_json_roundtrip_verifies() {
     let snapshot2: ChannelSnapshot = serde_json::from_str(&snap_json).unwrap();
     let payload2: SendPayload = serde_json::from_str(&payload_json).unwrap();
     let res = verify_send_transition(
-        &snapshot2.state, &payload2, RegevSecurityLevel::Production, None, None,
+        &snapshot2.state, &snapshot2.record, &payload2, RegevSecurityLevel::Production, None, None,
     );
     eprintln!("native verify after JSON round-trip: {res:?}");
     res.expect("native verify of a JSON-round-tripped native proof");

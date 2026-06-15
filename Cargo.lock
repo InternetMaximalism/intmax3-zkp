@@ -1397,9 +1397,6 @@ dependencies = [
  "regev_plonky3",
  "serde",
  "serde_json",
- "sphincsplus-circuits",
- "sphincsplus-params",
- "sphincsplus-poseidon",
  "starky",
  "thiserror",
  "wasm-bindgen",
@@ -3016,37 +3013,6 @@ name = "smallvec"
 version = "1.15.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "67b1b7a3b5fe4f1376887184045fcf45c69e92af734b7aaddc05fb777b6fbd03"
-
-[[package]]
-name = "sphincsplus-circuits"
-version = "0.1.0"
-source = "git+https://github.com/InternetMaximalism/aggregated_SPHINCS_plus.git?branch=wasm-main#5710cc4084b33ec51ad881f951cea0efe308d90e"
-dependencies = [
- "anyhow",
- "log",
- "plonky2",
- "sphincsplus-params",
- "sphincsplus-poseidon",
-]
-
-[[package]]
-name = "sphincsplus-params"
-version = "0.1.0"
-source = "git+https://github.com/InternetMaximalism/aggregated_SPHINCS_plus.git?branch=wasm-main#5710cc4084b33ec51ad881f951cea0efe308d90e"
-dependencies = [
- "serde",
-]
-
-[[package]]
-name = "sphincsplus-poseidon"
-version = "0.1.0"
-source = "git+https://github.com/InternetMaximalism/aggregated_SPHINCS_plus.git?branch=wasm-main#5710cc4084b33ec51ad881f951cea0efe308d90e"
-dependencies = [
- "anyhow",
- "plonky2",
- "rand 0.8.6",
- "sphincsplus-params",
-]
 
 [[package]]
 name = "spin"

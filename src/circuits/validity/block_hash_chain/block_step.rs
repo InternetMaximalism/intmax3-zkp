@@ -1065,7 +1065,7 @@ mod tests {
             ],
             member_pk_bs: vec![crate::utils::poseidon_hash_out::PoseidonHashOut::default(); num_users],
             msg_fields:
-                crate::circuits::validity::block_hash_chain::sphincs_sig::SmallBlockMessageFields::default(),
+                crate::circuits::validity::block_hash_chain::small_block_message::SmallBlockMessageFields::default(),
             tx_v2_indices: vec![0; num_users],
             tx_v2s: vec![crate::common::tx::TxV2::default(); num_users],
             tx_v2_merkle_proofs: vec![

@@ -58,7 +58,8 @@ struct CliState {
 #[serde(rename_all = "camelCase")]
 struct BrowserContribution {
     regev_pk: RegevPk,
-    sphincs_pk_hex: String,
+    /// The browser member's Goldilocks signing public key `pk_g` (canonical Bytes32 hex, P4-2).
+    pk_g: String,
     /// P3: the browser member's BabyBear hash-sig public key `pk_b` (canonical Bytes32 hex, A11).
     pk_b: String,
     genesis_ct: RegevCiphertext,
@@ -76,7 +77,7 @@ fn keys_for(seed: u64) -> MemberKeys {
 fn member_info_for(slot: u8, keys: &MemberKeys) -> MemberInfo {
     MemberInfo {
         slot,
-        sphincs_pk_hex: keys.kp.pk_bytes.iter().map(|b| format!("{b:02x}")).collect(),
+        pk_g: keys.pk_g(),
         pk_b: keys.pk_b(),
         regev_pk: keys.regev_pk.clone(),
     }
@@ -126,7 +127,8 @@ fn cmd_init(args: &[String]) {
     // Build the member list: slot 0 from the browser, CLI slots from deterministic keys.
     let mut members = vec![MemberInfo {
         slot: 0,
-        sphincs_pk_hex: contrib.sphincs_pk_hex.clone(),
+        pk_g: Bytes32::from_hex(&contrib.pk_g)
+            .unwrap_or_else(|e| die(format!("parse browser pk_g: {e:?}"))),
         pk_b: Bytes32::from_hex(&contrib.pk_b)
             .unwrap_or_else(|e| die(format!("parse browser pk_b: {e:?}"))),
         regev_pk: contrib.regev_pk.clone(),
@@ -162,7 +164,7 @@ fn cmd_init(args: &[String]) {
     // CLI members sign the genesis; the browser's slot-0 signature is collected next.
     for c in &controlled {
         let keys = keys_for(c.keygen_seed);
-        let sig = sign_state(&keys, c.slot, &genesis);
+        let sig = sign_state(&keys, c.slot, &genesis).unwrap_or_else(|e| die(e));
         add_signature(&mut genesis, sig);
     }
 
@@ -252,8 +254,15 @@ fn cmd_cosign(args: &[String]) {
     } else {
         (None, None)
     };
-    verify_send_transition(&state.snapshot.state, &payload, LEVEL, sk.as_ref(), expected)
-        .unwrap_or_else(|e| die(format!("transition invalid: {e}")));
+    verify_send_transition(
+        &state.snapshot.state,
+        &state.snapshot.record,
+        &payload,
+        LEVEL,
+        sk.as_ref(),
+        expected,
+    )
+    .unwrap_or_else(|e| die(format!("transition invalid: {e}")));
 
     // Add signatures for every controlled slot not yet signed.
     for c in &state.controlled {
@@ -262,7 +271,7 @@ fn cmd_cosign(args: &[String]) {
             continue;
         }
         let keys = keys_for(c.keygen_seed);
-        let sig = sign_state(&keys, c.slot, &next_state);
+        let sig = sign_state(&keys, c.slot, &next_state).unwrap_or_else(|e| die(e));
         add_signature(&mut next_state, sig);
     }
     write_json(out_path, &next_state);

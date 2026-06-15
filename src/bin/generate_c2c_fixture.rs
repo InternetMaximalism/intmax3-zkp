@@ -107,6 +107,11 @@ struct MemberFixture {
     channel_id: u32,
     bp_member_slot: u8,
     member_pk_gs: Vec<String>,
+    /// P3/P4: each active member's BabyBear hash-sig public key `pk_b` (L1/keccak digest form),
+    /// in slot order. Consumed by `registerChannel`'s `pkBs` argument and the forge E2E callers
+    /// (`.member_pk_bs`); committed into the keccak registration chain between `pk_g` and the Regev
+    /// digest, matching `MemberRegEntry`.
+    member_pk_bs: Vec<String>,
     regev_pk_digests: Vec<String>,
     recipients: Vec<String>,
 }
@@ -222,11 +227,13 @@ fn member_fixture(member_keys: &ChannelMemberKeys, channel_id_u32: u32) -> Membe
     let member_count = TEST_ACTIVE_MEMBERS;
     let bp_member_slot: u8 = 0;
     let mut member_pk_gs = Vec::with_capacity(member_count);
+    let mut member_pk_bs = Vec::with_capacity(member_count);
     let mut regev_pk_digests = Vec::with_capacity(member_count);
     let mut recipients = Vec::with_capacity(member_count);
     for i in 0..member_count {
         let leaf = member_keys.member_tree.get_leaf(i as u64);
-        let sphincs_hash = Bytes32::from(leaf.pk_g);
+        let pk_g = Bytes32::from(leaf.pk_g);
+        let pk_b = Bytes32::from(leaf.pk_b);
         let regev_digest = Bytes32::from(leaf.regev_pk_digest);
         // Deterministic per-(channel, slot) recipient — identical formula to
         // `ChannelMemberKeys::to_reg_record`.
@@ -236,7 +243,8 @@ fn member_fixture(member_keys: &ChannelMemberKeys, channel_id_u32: u32) -> Membe
                 .wrapping_add(i as u32); 5],
         )
         .expect("address from u32 slice");
-        member_pk_gs.push(sphincs_hash.to_string());
+        member_pk_gs.push(pk_g.to_string());
+        member_pk_bs.push(pk_b.to_string());
         regev_pk_digests.push(regev_digest.to_string());
         recipients.push(recipient.to_string());
     }
@@ -244,6 +252,7 @@ fn member_fixture(member_keys: &ChannelMemberKeys, channel_id_u32: u32) -> Membe
         channel_id: channel_id_u32,
         bp_member_slot,
         member_pk_gs,
+        member_pk_bs,
         regev_pk_digests,
         recipients,
     }

@@ -8,8 +8,8 @@ edition = "2024"
 # workspaces so their `{ workspace = true }` dependency inheritance still
 # resolves, while pinning OUR resolver to "2" (edition 2024 would otherwise
 # default to "3") to avoid the plonky2-vs-plonky2 "output filename collision"
-# that breaks transitive sibling-crate resolution (E0463 on plonky2_keccak /
-# sphincsplus_*) for integration-test targets on macOS.
+# that breaks transitive sibling-crate resolution (E0463 on plonky2_keccak)
+# for integration-test targets on macOS.
 [workspace]
 resolver = "2"
 exclude = ["contracts/lib/polygon-plonky2", "vendor", "gnark"]
@@ -46,9 +46,6 @@ plonky2_u32 = { git = "https://github.com/InternetMaximalism/plonky2-u32.git", b
 plonky2_bn254 = { git = "https://github.com/InternetMaximalism/plonky2_bn254", branch = "wasm-main", default-features = false }
 plonky2_keccak = { git = "https://github.com/InternetMaximalism/plonky2_keccak", branch = "wasm-main", default-features = false }
 
-sphincsplus-circuits = { git = "https://github.com/InternetMaximalism/aggregated_SPHINCS_plus.git", branch = "wasm-main" }
-sphincsplus-params = { git = "https://github.com/InternetMaximalism/aggregated_SPHINCS_plus.git", branch = "wasm-main" }
-sphincsplus-poseidon = { git = "https://github.com/InternetMaximalism/aggregated_SPHINCS_plus.git", branch = "wasm-main" }
 keccak-hash = "0.8.0"
 hex = "0.4.3"
 rand = "0.8.5"
@@ -159,7 +156,7 @@ harness = false
 # submodule is updated to a post-PR#11 commit so it carries: (a) MLE PCS with
 # the v2 soundness fixes (R2-#1 gate binding, R2-#2 logUp), and (b) the
 # WebGPU Merkle accelerator (`gpu_merkle` feature). All sibling crates
-# (`plonky2_u32` / `plonky2_bn254` / `plonky2_keccak` / `sphincsplus-*`)
+# (`plonky2_u32` / `plonky2_bn254` / `plonky2_keccak`)
 # transitively reference `polygon-plonky2.git` and are redirected here too.
 [patch."https://github.com/InternetMaximalism/polygon-plonky2.git"]
 plonky2 = { path = "contracts/lib/polygon-plonky2/plonky2" }

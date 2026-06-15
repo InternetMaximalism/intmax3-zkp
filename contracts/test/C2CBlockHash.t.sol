@@ -68,7 +68,7 @@ contract C2CBlockHashTest is Test {
     function _register(string memory key) internal {
         uint32 channelId = uint32(vm.parseJsonUint(lc, string.concat(key, ".channel_id")));
         uint8 bpSlot = uint8(vm.parseJsonUint(lc, string.concat(key, ".bp_member_slot")));
-        bytes32[] memory sphincs = vm.parseJsonBytes32Array(lc, string.concat(key, ".member_sphincs_pubkey_hashes"));
+        bytes32[] memory sphincs = vm.parseJsonBytes32Array(lc, string.concat(key, ".member_pk_gs"));
         bytes32[] memory pkBs = vm.parseJsonBytes32Array(lc, string.concat(key, ".member_pk_bs"));
         bytes32[] memory regev = vm.parseJsonBytes32Array(lc, string.concat(key, ".regev_pk_digests"));
         address[] memory recipients = vm.parseJsonAddressArray(lc, string.concat(key, ".recipients"));

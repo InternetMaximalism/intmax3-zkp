@@ -19,7 +19,7 @@ pub type SignatureBytes = Vec<u8>;
 const CHANNEL_STATE_DOMAIN: u32 = 0x494d4348; // "IMCH"
 const PAY_DOMAIN: u32 = 0x494d5041; // "IMPA"
 // pub(crate): the validity circuits recompute the IMSB signing digest in-circuit
-// (`circuits::validity::block_hash_chain::sphincs_sig`) and must use the SAME domain limb.
+// (`circuits::validity::block_hash_chain::small_block_message`) and must use the SAME domain limb.
 pub(crate) const SMALL_BLOCK_DOMAIN: u32 = 0x494d5342; // "IMSB"
 const SIGNED_SMALL_BLOCK_DOMAIN: u32 = 0x494d5353; // "IMSS"
 const INTER_CHANNEL_TX_DOMAIN: u32 = 0x494d4954; // "IMIT"
@@ -300,7 +300,7 @@ pub struct SmallBlockRootMessage {
 impl SmallBlockRootMessage {
     /// IMSB signing digest. Member segment = `bp_member_slot`(1) + `bp_pk_g`(8).
     /// MUST match the in-circuit recompute in
-    /// `circuits::validity::block_hash_chain::sphincs_sig` limb-for-limb.
+    /// `circuits::validity::block_hash_chain::small_block_message` limb-for-limb.
     pub fn signing_digest(&self) -> Bytes32 {
         hash_words(
             &[

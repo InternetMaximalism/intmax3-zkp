@@ -7,7 +7,7 @@ use crate::{
         validity::block_hash_chain::{
             block_hash_chain_processor::BlockHashChainProcessorWitness,
             ext_public_state::ExtendedPublicState,
-            sphincs_sig::SmallBlockMessageFields,
+            small_block_message::SmallBlockMessageFields,
         },
     },
     poseidon_sig::GoldilocksSecretKey,
