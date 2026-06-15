@@ -86,12 +86,12 @@ abstract contract CloseE2EBase is Test {
         address rollupAddr
     ) internal pure returns (bytes memory) {
         uint8 bpSlot = uint8(vm.parseJsonUint(lifecycleJson, ".registration.bp_member_slot"));
-        bytes32[] memory hashes = vm.parseJsonBytes32Array(lifecycleJson, ".registration.member_sphincs_pubkey_hashes");
+        bytes32[] memory hashes = vm.parseJsonBytes32Array(lifecycleJson, ".registration.member_pk_gs");
         address[] memory recipients = vm.parseJsonAddressArray(lifecycleJson, ".registration.recipients");
         ChannelSettlementManager.MemberBinding[] memory bindings =
             new ChannelSettlementManager.MemberBinding[](hashes.length);
         for (uint256 i = 0; i < hashes.length; i++) {
-            bindings[i] = ChannelSettlementManager.MemberBinding({sphincsPubkeyHash: hashes[i], recipient: recipients[i]});
+            bindings[i] = ChannelSettlementManager.MemberBinding({pkG: hashes[i], recipient: recipients[i]});
         }
         bytes4 channelId = bytes4(uint32(vm.parseJsonUint(lifecycleJson, ".registration.channel_id")));
         return abi.encodePacked(
@@ -159,7 +159,7 @@ abstract contract CloseE2EBase is Test {
         {
             uint32 channelId = uint32(vm.parseJsonUint(lcJson, ".registration.channel_id"));
             uint8 bpSlot = uint8(vm.parseJsonUint(lcJson, ".registration.bp_member_slot"));
-            bytes32[] memory sphincs = vm.parseJsonBytes32Array(lcJson, ".registration.member_sphincs_pubkey_hashes");
+            bytes32[] memory sphincs = vm.parseJsonBytes32Array(lcJson, ".registration.member_pk_gs");
             bytes32[] memory regev = vm.parseJsonBytes32Array(lcJson, ".registration.regev_pk_digests");
             address[] memory recipients = vm.parseJsonAddressArray(lcJson, ".registration.recipients");
             rollup_.registerChannel(channelId, bpSlot, sphincs, regev, recipients);

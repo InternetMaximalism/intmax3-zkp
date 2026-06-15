@@ -97,7 +97,7 @@ pub struct ChannelLeaf {
     pub prev: BlockNumber,               // the previous block number
     pub send_tree_root: PoseidonHashOut, // the root of send tree
     // Root of this channel's MemberTree: the ordered member leaves
-    // `MemberLeaf { sphincs_pk_hash, regev_pk_digest }`, slot 0..MAX_CHANNEL_MEMBERS (active
+    // `MemberLeaf { pk_g, regev_pk_digest }`, slot 0..MAX_CHANNEL_MEMBERS (active
     // members first, padding slots empty; pad-to-MAX D6). One SPHINCS+ key
     // per member (no multisig / threshold). This root is the trusted anchor the validity circuit
     // proves slot inclusion against to bind a signing pubkey to the channel's members.

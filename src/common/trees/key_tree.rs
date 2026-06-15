@@ -1,7 +1,8 @@
-//! Per-channel member identity tree (one SPHINCS+ key per member; no multisig / threshold).
+//! Per-channel member identity tree (one Goldilocks signing key per member; no multisig / threshold).
 //!
 //! `MemberTree` commits the ordered member set of a single channel. Each leaf binds a member's
-//! SPHINCS+ public-key hash to that member's Regev public-key digest at the member's slot
+//! Goldilocks public key `pk_g` (the Poseidon-preimage signature public key,
+//! `poseidon_sig::GoldilocksSecretKey::public_key()`) to that member's Regev public-key digest at the slot
 //! (0..MAX_CHANNEL_MEMBERS). Active members occupy slots `0..member_count`; slots
 //! `member_count..MAX_CHANNEL_MEMBERS` are empty leaves (pad-to-MAX D6). Its root is stored in
 //! `ChannelLeaf.member_pubkeys_root` and is the trusted on-chain-bound root against which the
@@ -39,23 +40,23 @@ use crate::{
 const MEMBER_LEAF_DOMAIN: u64 = 0x4d424c46;
 
 // ---------------------------------------------------------------------------
-// MemberTree: slot -> MemberLeaf { sphincs_pk_hash, regev_pk_digest }
+// MemberTree: slot -> MemberLeaf { pk_g, regev_pk_digest }
 // ---------------------------------------------------------------------------
 
 /// One channel member's identity leaf.
 ///
-/// * `sphincs_pk_hash = Poseidon(pub_seed[0..2] || pub_root[0..2])` — the SPHINCS+ pubkey hash (the
-///   member's canonical signing identity).
+/// * `pk_g` — the member's Goldilocks public key `Poseidon([DOMAIN_PK_G] || sk_g)` (the member's
+///   canonical signing identity, supplied at registration from `GoldilocksSecretKey::public_key()`).
 /// * `regev_pk_digest` = the Poseidon reduction of the member's Regev public-key digest.
 #[derive(Clone, Debug, PartialEq, Default, Serialize, Deserialize)]
 pub struct MemberLeaf {
-    pub sphincs_pk_hash: PoseidonHashOut,
+    pub pk_g: PoseidonHashOut,
     pub regev_pk_digest: PoseidonHashOut,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct MemberLeafTarget {
-    pub sphincs_pk_hash: PoseidonHashOutTarget,
+    pub pk_g: PoseidonHashOutTarget,
     pub regev_pk_digest: PoseidonHashOutTarget,
 }
 
@@ -63,7 +64,7 @@ impl MemberLeaf {
     pub fn to_u64_vec(&self) -> Vec<u64> {
         [
             vec![MEMBER_LEAF_DOMAIN],
-            self.sphincs_pk_hash.to_u64_vec(),
+            self.pk_g.to_u64_vec(),
             self.regev_pk_digest.to_u64_vec(),
         ]
         .concat()
@@ -87,14 +88,14 @@ impl MemberLeafTarget {
         builder: &mut CircuitBuilder<F, D>,
     ) -> Self {
         Self {
-            sphincs_pk_hash: PoseidonHashOutTarget::new(builder),
+            pk_g: PoseidonHashOutTarget::new(builder),
             regev_pk_digest: PoseidonHashOutTarget::new(builder),
         }
     }
 
     /// Field targets WITHOUT the domain tag (prepended inside `LeafableTarget::hash`).
     pub fn to_vec(&self) -> Vec<plonky2::iop::target::Target> {
-        [self.sphincs_pk_hash.to_vec(), self.regev_pk_digest.to_vec()].concat()
+        [self.pk_g.to_vec(), self.regev_pk_digest.to_vec()].concat()
     }
 
     pub fn constant<F: RichField + Extendable<D>, const D: usize>(
@@ -102,14 +103,14 @@ impl MemberLeafTarget {
         value: MemberLeaf,
     ) -> Self {
         Self {
-            sphincs_pk_hash: PoseidonHashOutTarget::constant(builder, value.sphincs_pk_hash),
+            pk_g: PoseidonHashOutTarget::constant(builder, value.pk_g),
             regev_pk_digest: PoseidonHashOutTarget::constant(builder, value.regev_pk_digest),
         }
     }
 
     pub fn set_witness<F: Field, W: WitnessWrite<F>>(&self, witness: &mut W, value: &MemberLeaf) {
-        self.sphincs_pk_hash
-            .set_witness(witness, value.sphincs_pk_hash);
+        self.pk_g
+            .set_witness(witness, value.pk_g);
         self.regev_pk_digest
             .set_witness(witness, value.regev_pk_digest);
     }

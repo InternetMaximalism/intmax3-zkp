@@ -17,7 +17,7 @@ contract MockChannelRegistry is IChannelRegistry {
     IChannelSettlementVerifier internal immutable verifier;
     mapping(uint32 => bytes32) public channelMemberSetCommitment;
     mapping(uint32 => uint8) public channelBpMemberSlot;
-    mapping(uint32 => bytes32) public channelBpSphincsPubkeyHash;
+    mapping(uint32 => bytes32) public channelBpPkG;
 
     constructor(IChannelSettlementVerifier verifier_) {
         verifier = verifier_;
@@ -37,7 +37,7 @@ contract MockChannelRegistry is IChannelRegistry {
         channelMemberSetCommitment[channelId] =
             verifier.closeMemberSetCommitment(padded, uint8(activeHashes.length));
         channelBpMemberSlot[channelId] = bpMemberSlot;
-        channelBpSphincsPubkeyHash[channelId] = activeHashes[bpMemberSlot];
+        channelBpPkG[channelId] = activeHashes[bpMemberSlot];
     }
 
     /// Register an EXPLICIT (possibly mismatching) commitment + bp, for negative tests.
@@ -49,7 +49,7 @@ contract MockChannelRegistry is IChannelRegistry {
     ) external {
         channelMemberSetCommitment[channelId] = commitment;
         channelBpMemberSlot[channelId] = bpMemberSlot;
-        channelBpSphincsPubkeyHash[channelId] = bpHash;
+        channelBpPkG[channelId] = bpHash;
     }
 
     // --- Native-payout stand-in for IntmaxRollup.withdraw() (P3 close→payout tests) ---
@@ -113,11 +113,11 @@ contract ChannelSettlementManagerTest is Test {
         ChannelSettlementManager.MemberBinding[] memory bindings =
             new ChannelSettlementManager.MemberBinding[](3);
         bindings[0] =
-            ChannelSettlementManager.MemberBinding({sphincsPubkeyHash: USER_A, recipient: alice});
+            ChannelSettlementManager.MemberBinding({pkG: USER_A, recipient: alice});
         bindings[1] =
-            ChannelSettlementManager.MemberBinding({sphincsPubkeyHash: USER_B, recipient: bob});
+            ChannelSettlementManager.MemberBinding({pkG: USER_B, recipient: bob});
         bindings[2] =
-            ChannelSettlementManager.MemberBinding({sphincsPubkeyHash: USER_C, recipient: carol});
+            ChannelSettlementManager.MemberBinding({pkG: USER_C, recipient: carol});
 
         // Finding E DEPLOYMENT ORDER: register the channel on the (mock) rollup FIRST, then deploy
         // the manager so its member set + bp can be bound to the on-chain registration.
@@ -223,18 +223,18 @@ contract ChannelSettlementManagerTest is Test {
 
     function _withdrawalClaim(
         bytes32 closeIntentDigest,
-        bytes32 memberSphincsPubkeyHash,
+        bytes32 memberPkG,
         address recipient,
         uint64 amount
     ) internal pure returns (ChannelSettlementManager.WithdrawalClaim memory claim) {
         claim = ChannelSettlementManager.WithdrawalClaim({
             closeIntentDigest: closeIntentDigest,
-            memberSphincsPubkeyHash: memberSphincsPubkeyHash,
+            memberPkG: memberPkG,
             recipient: recipient,
-            userAmountDigest: keccak256(abi.encodePacked(memberSphincsPubkeyHash, amount)),
+            userAmountDigest: keccak256(abi.encodePacked(memberPkG, amount)),
             amount: amount,
             withdrawalNullifier: keccak256(
-                abi.encodePacked("withdraw", closeIntentDigest, memberSphincsPubkeyHash)
+                abi.encodePacked("withdraw", closeIntentDigest, memberPkG)
             )
         });
     }
@@ -377,7 +377,7 @@ contract ChannelSettlementManagerTest is Test {
         b = new ChannelSettlementManager.MemberBinding[](n);
         for (uint256 i = 0; i < n; i++) {
             b[i] = ChannelSettlementManager.MemberBinding({
-                sphincsPubkeyHash: keccak256(abi.encodePacked("member", i)),
+                pkG: keccak256(abi.encodePacked("member", i)),
                 recipient: makeAddr(string.concat("rcpt", vm.toString(i)))
             });
         }
@@ -396,7 +396,7 @@ contract ChannelSettlementManagerTest is Test {
         ChannelSettlementManager.MemberBinding[] memory b,
         uint8 bpSlot
     ) internal returns (ChannelSettlementManager m) {
-        bytes32 bpHash = bpSlot < b.length ? b[bpSlot].sphincsPubkeyHash : bytes32(uint256(1));
+        bytes32 bpHash = bpSlot < b.length ? b[bpSlot].pkG : bytes32(uint256(1));
         // Finding E: when the bindings are in-range (so the manager reaches the registry-consistency
         // check), register a MATCHING member set on the shared mock registry first so the
         // constructor binding succeeds. Out-of-range cases revert in the manager BEFORE the registry
@@ -407,7 +407,7 @@ contract ChannelSettlementManagerTest is Test {
         if (b.length >= 2 && b.length <= 16 && bpSlot < b.length) {
             bytes32[] memory activeHashes = new bytes32[](b.length);
             for (uint256 i = 0; i < b.length; i++) {
-                activeHashes[i] = b[i].sphincsPubkeyHash;
+                activeHashes[i] = b[i].pkG;
             }
             registry.register(uint32(CHANNEL_ID), bpSlot, activeHashes);
         }
@@ -472,9 +472,9 @@ contract ChannelSettlementManagerTest is Test {
     {
         ChannelSettlementManager.MemberBinding[] memory b =
             new ChannelSettlementManager.MemberBinding[](3);
-        b[0] = ChannelSettlementManager.MemberBinding({sphincsPubkeyHash: USER_A, recipient: alice});
-        b[1] = ChannelSettlementManager.MemberBinding({sphincsPubkeyHash: USER_B, recipient: bob});
-        b[2] = ChannelSettlementManager.MemberBinding({sphincsPubkeyHash: USER_C, recipient: carol});
+        b[0] = ChannelSettlementManager.MemberBinding({pkG: USER_A, recipient: alice});
+        b[1] = ChannelSettlementManager.MemberBinding({pkG: USER_B, recipient: bob});
+        b[2] = ChannelSettlementManager.MemberBinding({pkG: USER_C, recipient: carol});
         return new ChannelSettlementManager(
             CHANNEL_ID,
             BP_MEMBER_SLOT,
@@ -800,7 +800,7 @@ contract ChannelSettlementManagerTest is Test {
             .PostCloseClaim({
                 closeIntentDigest: closeIntentDigest,
                 incomingTxHash: keccak256("incoming_tx"),
-                receiverSphincsPubkeyHash: USER_B,
+                receiverPkG: USER_B,
                 recipient: bob,
                 sharedNativeNullifier: keccak256("shared_nullifier"),
                 amount: 5
@@ -828,7 +828,7 @@ contract ChannelSettlementManagerTest is Test {
         ChannelSettlementManager.SpecialClose memory specialClose = ChannelSettlementManager
             .SpecialClose({
                 offendingBpMemberSlot: BP_MEMBER_SLOT,
-                offendingBpSphincsPubkeyHash: USER_A,
+                offendingBpPkG: USER_A,
                 fullySignedSmallBlockRoot: keccak256("small_block_root"),
                 smallBlockNumber: 33,
                 signedMediumBlockNumber: 10,
@@ -841,7 +841,7 @@ contract ChannelSettlementManagerTest is Test {
                 verifier.specialClosePIHash(
                     CHANNEL_ID,
                     specialClose.offendingBpMemberSlot,
-                    specialClose.offendingBpSphincsPubkeyHash,
+                    specialClose.offendingBpPkG,
                     specialClose.fullySignedSmallBlockRoot,
                     specialClose.smallBlockNumber,
                     specialClose.signedMediumBlockNumber,
@@ -908,7 +908,7 @@ contract ChannelSettlementManagerTest is Test {
             ChannelSettlementManager.LateOutgoingDebitCorrection({
                 closeIntentDigest: closeIntentDigest,
                 sourceTxHash: keccak256("source_tx"),
-                senderSphincsPubkeyHash: USER_C,
+                senderPkG: USER_C,
                 senderAmountDigest: keccak256("sender_amount"),
                 debitNullifier: keccak256("debit_nullifier"),
                 amount: 7
@@ -941,7 +941,7 @@ contract ChannelSettlementManagerTest is Test {
         ChannelSettlementManager.SpecialClose memory specialClose = ChannelSettlementManager
             .SpecialClose({
                 offendingBpMemberSlot: BP_MEMBER_SLOT,
-                offendingBpSphincsPubkeyHash: USER_A,
+                offendingBpPkG: USER_A,
                 fullySignedSmallBlockRoot: keccak256("small_block_root"),
                 smallBlockNumber: 33,
                 signedMediumBlockNumber: 10,
@@ -953,7 +953,7 @@ contract ChannelSettlementManagerTest is Test {
                 verifier.specialClosePIHash(
                     CHANNEL_ID,
                     specialClose.offendingBpMemberSlot,
-                    specialClose.offendingBpSphincsPubkeyHash,
+                    specialClose.offendingBpPkG,
                     specialClose.fullySignedSmallBlockRoot,
                     specialClose.smallBlockNumber,
                     specialClose.signedMediumBlockNumber,
@@ -1036,9 +1036,9 @@ contract ChannelSettlementManagerTest is Test {
         activeHashes[0] = USER_A; activeHashes[1] = USER_B; activeHashes[2] = USER_C;
         reg.register(uint32(CHANNEL_ID), BP_MEMBER_SLOT, activeHashes);
         ChannelSettlementManager.MemberBinding[] memory b = new ChannelSettlementManager.MemberBinding[](3);
-        b[0] = ChannelSettlementManager.MemberBinding({sphincsPubkeyHash: USER_A, recipient: r0});
-        b[1] = ChannelSettlementManager.MemberBinding({sphincsPubkeyHash: USER_B, recipient: bob});
-        b[2] = ChannelSettlementManager.MemberBinding({sphincsPubkeyHash: USER_C, recipient: carol});
+        b[0] = ChannelSettlementManager.MemberBinding({pkG: USER_A, recipient: r0});
+        b[1] = ChannelSettlementManager.MemberBinding({pkG: USER_B, recipient: bob});
+        b[2] = ChannelSettlementManager.MemberBinding({pkG: USER_C, recipient: carol});
         m = new ChannelSettlementManager(
             CHANNEL_ID, BP_MEMBER_SLOT, USER_A, CHALLENGE_PERIOD, SPECIAL_CLOSE_PENALTY,
             INITIAL_BP_BOND, IChannelSettlementVerifier(address(verifier)), IChannelRegistry(address(reg)), b
@@ -1101,7 +1101,7 @@ contract ChannelSettlementManagerTest is Test {
         ChannelSettlementManager.PostCloseClaim memory pc = ChannelSettlementManager.PostCloseClaim({
             closeIntentDigest: d,
             incomingTxHash: keccak256("itx"),
-            receiverSphincsPubkeyHash: USER_B,
+            receiverPkG: USER_B,
             recipient: bob,
             sharedNativeNullifier: keccak256("snn"),
             amount: 10 // 70 + 10 = 80 > 75 -> must revert

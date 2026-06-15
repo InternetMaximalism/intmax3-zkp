@@ -181,15 +181,15 @@ pub fn balance_state_hash(h1: Bytes32, h2: Bytes32) -> Bytes32 {
 /// balance deltas. The leaf is computable at small-block signing time (flowSend1 step 6) — unlike
 /// the base-layer nullifier, which embeds the (then unknown) block number.
 pub fn tx_leaf_hash(
-    source_sphincs_pubkey_hash: Bytes32,
+    source_pk_g: Bytes32,
     sender_delta_digest: Bytes32,
-    receiver_sphincs_pubkey_hash: Bytes32,
+    receiver_pk_g: Bytes32,
     receiver_delta_digest: Bytes32,
 ) -> Bytes32 {
     let sender_wing = hash_words(
         &[
             vec![TX_LEAF_DOMAIN],
-            source_sphincs_pubkey_hash.to_u32_vec(),
+            source_pk_g.to_u32_vec(),
             sender_delta_digest.to_u32_vec(),
         ]
         .concat(),
@@ -197,7 +197,7 @@ pub fn tx_leaf_hash(
     let receiver_wing = hash_words(
         &[
             vec![TX_LEAF_DOMAIN],
-            receiver_sphincs_pubkey_hash.to_u32_vec(),
+            receiver_pk_g.to_u32_vec(),
             receiver_delta_digest.to_u32_vec(),
         ]
         .concat(),

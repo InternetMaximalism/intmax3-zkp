@@ -49,7 +49,7 @@ pub struct ChannelClosePublicInputs {
     /// `settled_tx_chain` of the final balance state (detail2 §H-2). Matched in-circuit against
     /// the final balance proof's `settled_tx_chain` public input and anchored inside H1.
     pub final_settled_tx_chain: Bytes32,
-    /// F5 binding: `keccak([IMCM, sphincs_pk_hash_0..2])` over the 3 members' SPHINCS+ pubkey
+    /// F5 binding: `keccak([IMCM, pk_g_0..2])` over the 3 members' SPHINCS+ pubkey
     /// hashes (slot order) whose signatures the close circuit verifies. Computed in-circuit from
     /// the verified signing keys and matched on L1 against the channel's registered member set.
     /// Derived by the circuit (`ChannelCloseCircuit::prove`) from the member auth, not by the
@@ -275,7 +275,7 @@ mod tests {
             digest: Bytes32::default(),
             member_signatures: vec![MemberSignature {
                 member_slot: 0,
-                sphincs_pubkey_hash: pubkey_hash(10),
+                pk_g: pubkey_hash(10),
                 signature: vec![1, 2, 3],
             }],
         }

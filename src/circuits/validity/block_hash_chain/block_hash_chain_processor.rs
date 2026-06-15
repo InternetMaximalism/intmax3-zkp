@@ -18,7 +18,7 @@ use crate::{
             block_hash_chain_circuit::{BlockHashChainCircuit, BlockHashChainCircuitError},
             block_step::{BlockStepCircuit, BlockStepError, BlockStepWitness},
             ext_public_state::ExtendedPublicState,
-            sphincs_sig::{SmallBlockMessageFields, SpxSigWitness},
+            sphincs_sig::SmallBlockMessageFields,
             update_channel_tree::{UpdateUserCircuit, UpdateUserCircuitError, UpdateUserTree},
         },
         channel_reg_hash_chain::{
@@ -91,10 +91,6 @@ pub struct BlockHashChainProcessorWitness {
     pub user_merkle_proofs: Vec<ChannelMerkleProof>,
     pub send_merkle_proofs: Vec<SendMerkleProof>,
     pub public_state_merkle_proof: PublicStateMerkleProof,
-    /// Optional SPHINCS+ signature witnesses, one per user slot.
-    /// If None, dummy (all-zero) witnesses are used — valid only when the
-    /// signature verification constraints are conditionally disabled (inactive slots).
-    pub sig_witnesses: Option<Vec<SpxSigWitness>>,
     /// Optional per-slot MemberTree inclusion proofs binding the signing pubkey to the channel's
     /// member tree (see `UpdateUserTree::member_merkle_proofs`). If None, dummy proofs are used,
     /// valid only when every slot is non-updating (signature/binding constraints skipped).
@@ -318,12 +314,8 @@ where
             prev_account_leaves: witness.prev_account_leaves.clone(),
             user_merkle_proofs: witness.user_merkle_proofs.clone(),
             send_merkle_proofs: witness.send_merkle_proofs.clone(),
-            // Use dummy witnesses when real SPHINCS+ keys are not provided.
-            // In production, replace with actual SpxSigWitness::from_bytes calls.
-            sig_witnesses: witness
-                .sig_witnesses
-                .clone()
-                .unwrap_or_else(|| vec![SpxSigWitness::dummy(); num_users as usize]),
+            // P2b: the bp IMSB-signature list accumulator before this block (the prev ext-state's).
+            prev_bp_sig_chain: prev_ext_public_state.bp_sig_chain,
             member_merkle_proofs: witness.member_merkle_proofs.clone().unwrap_or_else(|| {
                 vec![MemberMerkleProof::dummy(MEMBER_TREE_HEIGHT); num_users as usize]
             }),

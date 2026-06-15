@@ -113,9 +113,15 @@ fn main() -> anyhow::Result<()> {
     let block_proof = processor.prove_block(Some(initial_state.clone()), None, &block_witness)?;
     let block_chain_vd = processor.block_chain_vd();
 
-    let validity_circuit = ValidityCircuit::<F, C, D>::new(&block_chain_vd);
+    // P2b: the validity circuit conditionally verifies a poseidon-sig ListCircuit proof. This empty
+    // (all-padding) block has no signing event ⇒ final.bp_sig_chain == 0 ⇒ the list proof is None.
+    let single_sig = intmax3_zkp::poseidon_sig::circuit::SingleSigCircuit::new();
+    let list_circuit =
+        intmax3_zkp::poseidon_sig::list::ListCircuit::new(&single_sig.verifier_data());
+    let validity_circuit =
+        ValidityCircuit::<F, C, D>::new(&block_chain_vd, &list_circuit.verifier_data());
     let prover = Address::default();
-    let validity_proof = validity_circuit.prove(&block_proof, prover)?;
+    let validity_proof = validity_circuit.prove(&block_proof, None, prover)?;
 
     validity_circuit
         .data

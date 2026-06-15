@@ -474,7 +474,7 @@ contract IntmaxRollupTest is Test {
         );
         for (uint256 i = 0; i < logs.length; i++) {
             if (logs[i].topics[0] == topic0) {
-                // Non-indexed params (in order): bpMemberSlot(uint8), memberSphincsPubkeyHashes
+                // Non-indexed params (in order): bpMemberSlot(uint8), memberPkGs
                 // (bytes32[]), regevPkDigests(bytes32[]), recipients(address[]),
                 // memberPubkeysRoot(bytes32), regevPkRoot(bytes32), newChannelRegHashChain(bytes32).
                 (, , , , , , bytes32 newChainHash) = abi.decode(
@@ -533,7 +533,7 @@ contract IntmaxRollupTest is Test {
             // bp identity recorded at slot 1.
             assertEq(uint256(fresh.channelBpMemberSlot(channelId)), 1, "bp slot mismatch");
             assertEq(
-                fresh.channelBpSphincsPubkeyHash(channelId),
+                fresh.channelBpPkG(channelId),
                 sphincs[1],
                 "bp pubkey hash mismatch"
             );

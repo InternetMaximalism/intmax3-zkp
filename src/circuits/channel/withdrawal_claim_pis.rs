@@ -30,7 +30,7 @@ pub struct WithdrawalClaimPublicInputs {
     pub close_intent_digest: Bytes32,
     pub channel_id: crate::common::channel::ChannelId,
     pub final_balance_state_h1: Bytes32,
-    pub member_sphincs_pubkey_hash: Bytes32,
+    pub member_pk_g: Bytes32,
     pub recipient: Address,
     pub user_amount_digest: Bytes32,
     pub withdrawal_nullifier: Bytes32,
@@ -89,14 +89,14 @@ impl WithdrawalClaimWitness {
         {
             return Err(WithdrawalClaimWitnessError::CloseWithdrawalMismatch);
         }
-        if self.member.sphincs_pubkey_hash != self.claim.member_sphincs_pubkey_hash
+        if self.member.pk_g != self.claim.member_pk_g
             || self.member.l1_withdrawal_recipient != self.claim.l1_recipient
         {
             return Err(WithdrawalClaimWitnessError::RecipientMismatch);
         }
         let expected_nullifier = WithdrawalClaim::derive_nullifier(
             self.close_intent.signing_digest(),
-            self.member.sphincs_pubkey_hash,
+            self.member.pk_g,
         );
         if expected_nullifier != self.claim.withdrawal_nullifier {
             return Err(WithdrawalClaimWitnessError::NullifierMismatch);
@@ -152,7 +152,7 @@ impl WithdrawalClaimWitness {
             close_intent_digest: self.close_intent.signing_digest(),
             channel_id: self.close_intent.channel_id,
             final_balance_state_h1: self.close_intent.final_balance_state_h1,
-            member_sphincs_pubkey_hash: self.member.sphincs_pubkey_hash,
+            member_pk_g: self.member.pk_g,
             recipient: self.member.l1_withdrawal_recipient,
             user_amount_digest: self.claim.user_amount_ct.digest(),
             withdrawal_nullifier: self.claim.withdrawal_nullifier,
@@ -167,7 +167,7 @@ impl WithdrawalClaimPublicInputs {
             self.close_intent_digest.to_u64_vec(),
             self.channel_id.to_u64_vec(),
             self.final_balance_state_h1.to_u64_vec(),
-            self.member_sphincs_pubkey_hash.to_u64_vec(),
+            self.member_pk_g.to_u64_vec(),
             self.recipient.to_u64_vec(),
             self.user_amount_digest.to_u64_vec(),
             self.withdrawal_nullifier.to_u64_vec(),
@@ -191,7 +191,7 @@ impl WithdrawalClaimPublicInputs {
                 .map_err(|e| e.to_string())?,
             final_balance_state_h1: Bytes32::from_u64_slice(&values[9..17])
                 .map_err(|e| e.to_string())?,
-            member_sphincs_pubkey_hash: Bytes32::from_u64_slice(&values[17..25])
+            member_pk_g: Bytes32::from_u64_slice(&values[17..25])
                 .map_err(|e| e.to_string())?,
             recipient: Address::from_u64_slice(&values[25..30]).map_err(|e| e.to_string())?,
             user_amount_digest: Bytes32::from_u64_slice(&values[30..38])
@@ -275,7 +275,7 @@ mod tests {
             digest: Bytes32::default(),
             member_signatures: vec![MemberSignature {
                 member_slot: 0,
-                sphincs_pubkey_hash: pubkey_hash(10),
+                pk_g: pubkey_hash(10),
                 signature: vec![1],
             }],
         }
@@ -292,7 +292,7 @@ mod tests {
         let close_intent = CloseIntent::new(5, &state, &close_tx, 123).unwrap();
 
         let member = ChannelMember {
-            sphincs_pubkey_hash: pubkey_hash(10),
+            pk_g: pubkey_hash(10),
             member_slot: 0,
             l1_withdrawal_recipient: Address::from_u32_slice(&[1, 2, 3, 4, 5]).unwrap(),
         };
@@ -300,12 +300,12 @@ mod tests {
             prove_withdraw_claim(RegevSecurityLevel::Test, &pk0, &sk0, &ct0, amount).unwrap();
         let claim = WithdrawalClaim {
             close_intent_digest: close_intent.signing_digest(),
-            member_sphincs_pubkey_hash: member.sphincs_pubkey_hash,
+            member_pk_g: member.pk_g,
             l1_recipient: member.l1_withdrawal_recipient,
             user_amount_ct: ct0,
             withdrawal_nullifier: WithdrawalClaim::derive_nullifier(
                 close_intent.signing_digest(),
-                member.sphincs_pubkey_hash,
+                member.pk_g,
             ),
             claim_proof,
         };

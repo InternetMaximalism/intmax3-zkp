@@ -117,7 +117,7 @@ mod tests {
         for i in 0..(member_count as usize) {
             let s = (i as u32) + 1;
             members[i] = MemberRegEntry {
-                sphincs_pk_hash: Bytes32::from(PoseidonHashOut::hash_inputs_u64(&[
+                pk_g: Bytes32::from(PoseidonHashOut::hash_inputs_u64(&[
                     channel_id as u64,
                     s as u64,
                     0x5e,

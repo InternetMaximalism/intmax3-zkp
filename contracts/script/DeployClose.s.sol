@@ -59,7 +59,7 @@ contract DeployClose is Script {
         // registerChannel BEFORE the manager deploy (Finding E).
         uint32 channelId = uint32(vm.parseJsonUint(lcJson, ".registration.channel_id"));
         uint8 bpSlot = uint8(vm.parseJsonUint(lcJson, ".registration.bp_member_slot"));
-        bytes32[] memory sphincs = vm.parseJsonBytes32Array(lcJson, ".registration.member_sphincs_pubkey_hashes");
+        bytes32[] memory sphincs = vm.parseJsonBytes32Array(lcJson, ".registration.member_pk_gs");
         bytes32[] memory regev = vm.parseJsonBytes32Array(lcJson, ".registration.regev_pk_digests");
         address[] memory recipients = vm.parseJsonAddressArray(lcJson, ".registration.recipients");
         rollup.registerChannel(channelId, bpSlot, sphincs, regev, recipients);
@@ -74,7 +74,7 @@ contract DeployClose is Script {
             new ChannelSettlementManager.MemberBinding[](sphincs.length);
         for (uint256 i = 0; i < sphincs.length; i++) {
             address r = (i == 0) ? msg.sender : recipients[i];
-            bindings[i] = ChannelSettlementManager.MemberBinding({sphincsPubkeyHash: sphincs[i], recipient: r});
+            bindings[i] = ChannelSettlementManager.MemberBinding({pkG: sphincs[i], recipient: r});
         }
         ChannelSettlementManager manager = new ChannelSettlementManager(
             bytes4(channelId), bpSlot, sphincs[bpSlot], CHALLENGE_PERIOD, SPECIAL_CLOSE_PENALTY,

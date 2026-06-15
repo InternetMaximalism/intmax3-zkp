@@ -22,10 +22,15 @@ use crate::{
     common::u63::{BlockNumber, BlockNumberTarget},
     ethereum_types::{
         address::{Address, AddressTarget},
-        bytes32::{Bytes32, Bytes32Target},
+        bytes32::{BYTES32_LEN, Bytes32, Bytes32Target},
         u32limb_trait::{U32LimbTargetTrait as _, U32LimbTrait},
     },
-    utils::recursively_verifiable::add_proof_target_and_verify_cyclic,
+    utils::{
+        dummy::DummyProof,
+        recursively_verifiable::{
+            add_proof_target_and_conditionally_verify, add_proof_target_and_verify_cyclic,
+        },
+    },
 };
 
 pub struct ValidityPublicInputs {
@@ -167,6 +172,11 @@ where
 {
     pub data: CircuitData<F, C, D>,
     pub block_hash_chain_proof: ProofWithPublicInputsTarget<D>,
+    /// P2b: the recursive `ListCircuit` proof carrying the bp IMSB single-sig list commitment `C`.
+    /// Verified CONDITIONALLY (gated on the computed `final.bp_sig_chain != 0`, decision D3).
+    pub list_proof: ProofWithPublicInputsTarget<D>,
+    /// Dummy `ListCircuit` proof for the no-signing-block span (chain == 0 ⇒ verification skipped).
+    pub list_dummy: ProofWithPublicInputs<F, C, D>,
     pub prover: AddressTarget,
 }
 
@@ -176,7 +186,12 @@ where
     C: GenericConfig<D, F = F> + 'static,
     <C as GenericConfig<D>>::Hasher: AlgebraicHasher<F>,
 {
-    pub fn new(block_hash_chain_vd: &VerifierCircuitData<F, C, D>) -> Self {
+    /// `list_vd` is the `poseidon_sig::list::ListCircuit` verifier data; it is baked in as a
+    /// build-time constant (A7) inside `add_proof_target_and_conditionally_verify`.
+    pub fn new(
+        block_hash_chain_vd: &VerifierCircuitData<F, C, D>,
+        list_vd: &VerifierCircuitData<F, C, D>,
+    ) -> Self {
         let mut builder = CircuitBuilder::<F, D>::new(CircuitConfig::default());
         let block_hash_chain_proof =
             add_proof_target_and_verify_cyclic(block_hash_chain_vd, &mut builder);
@@ -184,6 +199,43 @@ where
         let block_chain_pis = BlockChainPublicInputsTarget::from_pis(
             &block_hash_chain_proof.public_inputs,
             &block_hash_chain_vd.common.config,
+        );
+
+        // ── P2b: conditional verification of the bp IMSB-signature list proof (decision D3) ──
+        //
+        // The `ListCircuit` cannot represent the empty (0-entry) list (C == 0 has no proof). The
+        // validity span's `final.bp_sig_chain` is an ACCUMULATED commitment over every signing
+        // block. When it is non-zero we MUST verify the list proof and assert its commitment equals
+        // the accumulator (so every folded pair was a verified Poseidon single-sig — A8 truncation
+        // guard). When it is zero (no signing block in the span) we skip with a dummy proof.
+        //
+        // SECURITY: the gate is the COMPUTED final.bp_sig_chain (an accumulated value bound to the
+        // per-block bp_pk_g / IMSB digest wires), NOT a prover flag — so a prover cannot turn the
+        // list verification off while still having applied a signed update.
+        let final_bp_sig_chain = block_chain_pis.ext_public_state.bp_sig_chain.clone();
+        let initial_bp_sig_chain = block_chain_pis
+            .initial_ext_public_state
+            .bp_sig_chain
+            .clone();
+        // initial.bp_sig_chain == 0 (the span starts with an empty signature list).
+        let zero = builder.zero();
+        for limb in initial_bp_sig_chain.to_vec() {
+            builder.connect(limb, zero);
+        }
+        let chain_is_zero = final_bp_sig_chain.is_zero::<F, D, Bytes32>(&mut builder);
+        let should_verify_list = builder.not(chain_is_zero);
+        let list_proof = add_proof_target_and_conditionally_verify(
+            list_vd,
+            &mut builder,
+            should_verify_list,
+        );
+        // The list circuit's public output [0..8] is its commitment C. When verifying, assert
+        // C == final.bp_sig_chain.
+        let list_commitment = Bytes32Target::from_slice(&list_proof.public_inputs[0..BYTES32_LEN]);
+        list_commitment.conditional_assert_eq(
+            &mut builder,
+            final_bp_sig_chain.clone(),
+            should_verify_list,
         );
 
         let initial_commitment = block_chain_pis
@@ -213,20 +265,32 @@ where
 
         let data = builder.build::<C>();
 
+        // Dummy ListCircuit proof for the no-signing-block span (verification is gated off).
+        let list_dummy = DummyProof::new(&list_vd.common).proof;
+
         Self {
             data,
             block_hash_chain_proof,
+            list_proof,
+            list_dummy,
             prover,
         }
     }
 
+    /// Prove the validity statement. `list_proof` is the recursive `ListCircuit` proof over the
+    /// span's bp IMSB single-sigs; it MUST be `Some` exactly when `final.bp_sig_chain != 0` (the
+    /// span has at least one signing block). When `None`, the dummy proof is supplied and the
+    /// conditional list verification is gated off.
     pub fn prove(
         &self,
         block_hash_chain_proof: &ProofWithPublicInputs<F, C, D>,
+        list_proof: Option<&ProofWithPublicInputs<F, C, D>>,
         prover: Address,
     ) -> Result<ProofWithPublicInputs<F, C, D>, ValidityCircuitError> {
         let mut pw = PartialWitness::<F>::new();
         pw.set_proof_with_pis_target(&self.block_hash_chain_proof, block_hash_chain_proof);
+        let list = list_proof.unwrap_or(&self.list_dummy);
+        pw.set_proof_with_pis_target(&self.list_proof, list);
         self.prover.set_witness(&mut pw, prover);
 
         self.data
@@ -295,10 +359,16 @@ mod tests {
             .expect("block hash chain proof");
         let block_chain_vd = processor.block_chain_vd();
 
-        let validity_circuit = ValidityCircuit::<F, C, D>::new(&block_chain_vd);
+        // The span has no signing block (all-padding key_ids) ⇒ final.bp_sig_chain == 0 ⇒ the list
+        // proof is None and its conditional verification is gated off.
+        use crate::poseidon_sig::{circuit::SingleSigCircuit, list::ListCircuit};
+        let single = SingleSigCircuit::new();
+        let list = ListCircuit::new(&single.verifier_data());
+
+        let validity_circuit = ValidityCircuit::<F, C, D>::new(&block_chain_vd, &list.verifier_data());
         let prover = Address::default();
         let validity_proof = validity_circuit
-            .prove(&block_hash_chain_proof, prover)
+            .prove(&block_hash_chain_proof, None, prover)
             .expect("validity proof");
         validity_circuit
             .verify(&validity_proof)

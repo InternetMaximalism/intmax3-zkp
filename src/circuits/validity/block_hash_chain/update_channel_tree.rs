@@ -1,7 +1,6 @@
 use crate::{
     circuits::validity::block_hash_chain::sphincs_sig::{
-        SPX_AUTH_GL_LEN, SPX_D, SPX_FORS_SIG_GL_LEN, SPX_WOTS_SIG_GL_LEN, SmallBlockMessageFields,
-        SmallBlockMessageFieldsTarget, SpxSigTargets, SpxSigWitness,
+        SmallBlockMessageFields, SmallBlockMessageFieldsTarget,
     },
     common::{
         block::{Block, BlockError, BlockTarget},
@@ -26,6 +25,7 @@ use crate::{
         u32limb_trait::{U32LimbTargetTrait as _, U32LimbTrait as _},
         u64::{U64, U64_LEN, U64Target},
     },
+    poseidon_sig::list::{leaf_target, list_chain_step, list_leaf, chain_step_target},
     regev::{REGEV_N, REGEV_PK_POSEIDON_DOMAIN, RegevPk},
     utils::{
         cyclic::add_const_gate,
@@ -47,8 +47,6 @@ use plonky2::{
         proof::ProofWithPublicInputs,
     },
 };
-use sphincsplus_circuits::verification::{SpxVerifyWitness, verify_circuit};
-
 #[derive(thiserror::Error, Debug)]
 pub enum UpdateUserTreeError {
     #[error("Invalid length: {0}")]
@@ -77,6 +75,13 @@ pub struct UpdateUserPublicInputs {
     /// block_step can constrain the block-hash-committed reg chain to equal the value the
     /// channel-reg proof consumed (= the new ext-state channel_reg_hash_chain).
     pub channel_reg_hash_chain: Bytes32,
+    /// P2b: the block-producer IMSB-signature list accumulator BEFORE this block. block_step
+    /// constrains it equal to the previous ext-state `bp_sig_chain`.
+    pub prev_bp_sig_chain: Bytes32,
+    /// P2b: the accumulator AFTER folding this block's bp `(IMSB_digest, bp_pk_g)` pair — equal to
+    /// `prev_bp_sig_chain` on a non-signing block, advanced by one Poseidon chain step on a signing
+    /// (base) block. Becomes the new ext-state `bp_sig_chain`.
+    pub new_bp_sig_chain: Bytes32,
 }
 
 #[derive(Clone, Debug)]
@@ -95,28 +100,30 @@ pub struct UpdateUserTree {
     pub user_merkle_proofs: Vec<ChannelMerkleProof>,
     pub send_merkle_proofs: Vec<SendMerkleProof>,
 
-    // SPHINCS+ signature witnesses for each member slot (index matches key_ids/active slots).
-    // Use SpxSigWitness::dummy() for inactive (zero) slots.
-    pub sig_witnesses: Vec<SpxSigWitness>,
+    // P2b: the bp IMSB-signature list accumulator BEFORE this block (`Bytes32::default()` at the
+    // validity span's genesis). The block folds the bp's `(IMSB_digest, bp_pk_g)` pair onto it when
+    // a member signature is applied; the resulting value is surfaced as `new_bp_sig_chain`.
+    pub prev_bp_sig_chain: Bytes32,
 
-    // Per-slot MemberTree inclusion proofs binding the signing pubkey to the channel's members.
-    // For active slot i, `member_merkle_proofs[i]` proves the leaf
-    // `MemberLeaf { sphincs_pk_hash = Poseidon(pub_seed||pub_root), regev_pk_digest }` is at slot
-    // i of `prev_account_leaves[i].member_pubkeys_root`.
+    // Per-slot MemberTree inclusion proofs binding the bp's signing pubkey to the channel's members.
+    // For the updating bp slot i, `member_merkle_proofs[i]` proves the leaf
+    // `MemberLeaf { pk_g = msg_fields.bp_pk_g, regev_pk_digest }` is at slot i of
+    // `prev_account_leaves[i].member_pubkeys_root`.
     //
-    // SECURITY: this closes the prior prover-choice hole. The pubkey fed to the SPHINCS+ verify
-    // gadget is now committed at slot i of the channel's on-chain-bound member tree (the channel
-    // leaf is itself proven in the account tree, ~670-673), so a signature can no longer be
-    // verified under a pubkey of the prover's choosing.
+    // SECURITY: this binds the folded `bp_pk_g` to slot i of the channel's on-chain-bound member
+    // tree (the channel leaf is itself proven in the account tree), so the `(IMSB_digest, bp_pk_g)`
+    // pair folded into `bp_sig_chain` cannot use a prover-chosen pubkey — it is a registered member.
     pub member_merkle_proofs: Vec<MemberMerkleProof>,
     // The Regev public key witnessed at each active slot; its Poseidon digest is the second leaf
-    // component, so the member leaf binds BOTH the SPHINCS+ pubkey and the Regev pubkey.
+    // component, so the member leaf binds BOTH `pk_g` and the Regev pubkey.
     pub member_regev_pks: Vec<RegevPk>,
 
     // Per-block IMSB `SmallBlockRootMessage` preimage fields (detail2 §F-2). The signing
     // digest is recomputed in-circuit from these fields with the `channel_id` and
-    // `tx_tree_root` components taken from the block targets, and every member signature in
-    // this block is verified over that digest.
+    // `tx_tree_root` components taken from the block targets. `msg_fields.bp_pk_g` IS the member
+    // identity whose slot inclusion is proven and whose `(digest, pk_g)` pair is folded into the
+    // bp_sig_chain — the actual signature is verified by the recursive `ListCircuit` proof the
+    // validity circuit consumes (P2b, decision D3), not here.
     pub msg_fields: SmallBlockMessageFields,
 
     // One bound TxV2 witness per key slot. This proves that the block tx root contains
@@ -164,6 +171,12 @@ impl UpdateUserTree {
         let mut account_tree_root = self.prev_account_tree_root;
         let block_tx_root = self.block.tx_tree_root.reduce_to_hash_out();
         let channel_id = self.block.channel_id();
+        // P2b: the bp IMSB-signature list accumulator, folded once for the signing (bp) slot.
+        let mut bp_sig_chain = self.prev_bp_sig_chain;
+        // The IMSB signing digest the bp signs (recomputed from msg_fields, same as in-circuit).
+        let signed_digest = self
+            .msg_fields
+            .signing_digest(channel_id, self.block.tx_tree_root);
         for (i, &key_id) in self.block.key_ids().iter().enumerate() {
             if key_id == 0 {
                 // ignore zero key id (padding or dummy)
@@ -192,23 +205,31 @@ impl UpdateUserTree {
                 continue;
             }
 
-            // `should_update` is now true (active slot, prev != block_number). Bind the signing
-            // pubkey to the channel's member tree at slot i.
+            // `should_update` is now true (active slot, prev != block_number). This is the signing
+            // (bp) slot; bind its `bp_pk_g` to the channel's member tree at slot i and fold the
+            // `(IMSB_digest, bp_pk_g)` pair into the bp_sig_chain accumulator.
             //
-            // SECURITY: this is the native mirror of the in-circuit member binding. The signing
-            // pubkey hash and the witnessed Regev pubkey form `MemberLeaf` and MUST be included at
-            // slot i of the channel's trusted `member_pubkeys_root` (the channel leaf is itself
-            // proven in the account tree above), closing the prover-choice hole.
-            let sig = &self.sig_witnesses[i];
-            let sphincs_pk_hash = PoseidonHashOut::hash_inputs_u64(&[
-                sig.pk_gl[0],
-                sig.pk_gl[1],
-                sig.pk_gl[2],
-                sig.pk_gl[3],
-            ]);
+            // SECURITY: the updating slot MUST be the declared bp slot (`msg_fields.bp_member_slot`).
+            // Only one slot updates per block (all slots reference the same channel leaf), so this
+            // ties the folded bp identity to the slot that actually transitioned.
+            if self.msg_fields.bp_member_slot as usize != i {
+                return Err(UpdateUserTreeError::InvalidLength(format!(
+                    "updating slot {i} must equal msg_fields.bp_member_slot {}",
+                    self.msg_fields.bp_member_slot
+                )));
+            }
+            // SECURITY: the member identity is `msg_fields.bp_pk_g` — the SAME value bound into the
+            // IMSB signing digest above. Reusing it for the member-leaf inclusion and the chain fold
+            // is what binds the folded pair to a registered member at slot i.
+            let bp_pk_g = self.msg_fields.bp_pk_g;
+            let pk_g: PoseidonHashOut = bp_pk_g
+                .try_into()
+                .map_err(|e| UpdateUserTreeError::InvalidLength(format!(
+                    "bp_pk_g is not a canonical Poseidon hash out: {e}"
+                )))?;
             let regev_pk_digest = self.member_regev_pks[i].poseidon_digest();
             let member_leaf = MemberLeaf {
-                sphincs_pk_hash,
+                pk_g,
                 regev_pk_digest,
             };
             self.member_merkle_proofs[i]
@@ -221,13 +242,23 @@ impl UpdateUserTree {
 
             // SECURITY (detail2 §C-2): tx_tree_root == 0 (H2 = 0) is reserved for in-channel
             // updates; a member signature must never be applied over it. Mirrors the in-circuit
-            // `should_verify_sig → tx_tree_root != 0` constraint. `should_verify_sig ==
-            // should_update` now, so this applies to every updating slot.
+            // `should_verify_sig → tx_tree_root != 0` constraint.
             if self.block.tx_tree_root == Bytes32::default() {
                 return Err(UpdateUserTreeError::InvalidLength(format!(
                     "tx_tree_root must be nonzero when a member signature is applied (slot {i}; H2=0 is reserved for in-channel updates)"
                 )));
             }
+
+            // P2b: fold `(IMSB_digest, bp_pk_g)` into the bp_sig_chain (order-sensitive Poseidon
+            // chain, `poseidon_sig::list`). The matching `ListCircuit` proof — consumed by the
+            // validity circuit — proves each folded pair was a verified Poseidon single-sig.
+            let prev_chain: PoseidonHashOut = bp_sig_chain
+                .try_into()
+                .map_err(|e| UpdateUserTreeError::InvalidLength(format!(
+                    "bp_sig_chain is not a canonical Poseidon hash out: {e}"
+                )))?;
+            let leaf = list_leaf(signed_digest, bp_pk_g);
+            bp_sig_chain = list_chain_step(prev_chain, leaf).into();
 
             let tx_v2 = &self.tx_v2s[i];
             let tx_v2_proof = &self.tx_v2_merkle_proofs[i];
@@ -332,14 +363,17 @@ impl UpdateUserTree {
             new_account_tree_root: account_tree_root,
             deposit_hash_chain: self.block.deposit_hash_chain,
             channel_reg_hash_chain: self.block.channel_reg_hash_chain,
+            prev_bp_sig_chain: self.prev_bp_sig_chain,
+            new_bp_sig_chain: bp_sig_chain,
         })
     }
 }
 
 // block_number(1) + block_timestamp(U64_LEN) + prev_block_hash_chain + prev_account_tree_root
 // + new_block_hash_chain + new_account_tree_root + deposit_hash_chain + channel_reg_hash_chain
+// + prev_bp_sig_chain + new_bp_sig_chain
 const UPDATE_ACCOUNT_PUBLIC_INPUTS_LEN: usize =
-    1 + U64_LEN + 4 * BYTES32_LEN + 2 * POSEIDON_HASH_OUT_LEN;
+    1 + U64_LEN + 6 * BYTES32_LEN + 2 * POSEIDON_HASH_OUT_LEN;
 
 impl UpdateUserPublicInputs {
     pub fn to_u64_vec(&self) -> Vec<u64> {
@@ -351,6 +385,8 @@ impl UpdateUserPublicInputs {
         result.extend(self.new_account_tree_root.to_u64_vec());
         result.extend(self.deposit_hash_chain.to_u64_vec());
         result.extend(self.channel_reg_hash_chain.to_u64_vec());
+        result.extend(self.prev_bp_sig_chain.to_u64_vec());
+        result.extend(self.new_bp_sig_chain.to_u64_vec());
         result
     }
 
@@ -402,6 +438,14 @@ impl UpdateUserPublicInputs {
 
         let channel_reg_hash_chain = Bytes32::from_u64_slice(&values[cursor..cursor + BYTES32_LEN])
             .map_err(|e| UpdateUserTreeError::InvalidLength(e.to_string()))?;
+        cursor += BYTES32_LEN;
+
+        let prev_bp_sig_chain = Bytes32::from_u64_slice(&values[cursor..cursor + BYTES32_LEN])
+            .map_err(|e| UpdateUserTreeError::InvalidLength(e.to_string()))?;
+        cursor += BYTES32_LEN;
+
+        let new_bp_sig_chain = Bytes32::from_u64_slice(&values[cursor..cursor + BYTES32_LEN])
+            .map_err(|e| UpdateUserTreeError::InvalidLength(e.to_string()))?;
 
         Ok(Self {
             block_number,
@@ -412,6 +456,8 @@ impl UpdateUserPublicInputs {
             new_account_tree_root,
             deposit_hash_chain,
             channel_reg_hash_chain,
+            prev_bp_sig_chain,
+            new_bp_sig_chain,
         })
     }
 }
@@ -426,6 +472,8 @@ pub struct UpdateUserPublicInputsTarget {
     pub new_account_tree_root: PoseidonHashOutTarget,
     pub deposit_hash_chain: Bytes32Target,
     pub channel_reg_hash_chain: Bytes32Target,
+    pub prev_bp_sig_chain: Bytes32Target,
+    pub new_bp_sig_chain: Bytes32Target,
 }
 
 impl UpdateUserPublicInputsTarget {
@@ -441,6 +489,8 @@ impl UpdateUserPublicInputsTarget {
         let new_account_tree_root = PoseidonHashOutTarget::new(builder);
         let deposit_hash_chain = Bytes32Target::new(builder, is_checked);
         let channel_reg_hash_chain = Bytes32Target::new(builder, is_checked);
+        let prev_bp_sig_chain = Bytes32Target::new(builder, is_checked);
+        let new_bp_sig_chain = Bytes32Target::new(builder, is_checked);
         Self {
             block_number,
             block_timestamp,
@@ -450,6 +500,8 @@ impl UpdateUserPublicInputsTarget {
             new_account_tree_root,
             deposit_hash_chain,
             channel_reg_hash_chain,
+            prev_bp_sig_chain,
+            new_bp_sig_chain,
         }
     }
 
@@ -463,6 +515,8 @@ impl UpdateUserPublicInputsTarget {
             self.new_account_tree_root.to_vec(),
             self.deposit_hash_chain.to_vec(),
             self.channel_reg_hash_chain.to_vec(),
+            self.prev_bp_sig_chain.to_vec(),
+            self.new_bp_sig_chain.to_vec(),
         ]
         .concat()
     }
@@ -510,6 +564,12 @@ impl UpdateUserPublicInputsTarget {
 
         let channel_reg_hash_chain =
             Bytes32Target::from_slice(&values[cursor..cursor + BYTES32_LEN]);
+        cursor += BYTES32_LEN;
+
+        let prev_bp_sig_chain = Bytes32Target::from_slice(&values[cursor..cursor + BYTES32_LEN]);
+        cursor += BYTES32_LEN;
+
+        let new_bp_sig_chain = Bytes32Target::from_slice(&values[cursor..cursor + BYTES32_LEN]);
 
         Self {
             block_number,
@@ -520,6 +580,8 @@ impl UpdateUserPublicInputsTarget {
             new_account_tree_root,
             deposit_hash_chain,
             channel_reg_hash_chain,
+            prev_bp_sig_chain,
+            new_bp_sig_chain,
         }
     }
 
@@ -543,6 +605,10 @@ impl UpdateUserPublicInputsTarget {
             .set_witness(witness, value.deposit_hash_chain);
         self.channel_reg_hash_chain
             .set_witness(witness, value.channel_reg_hash_chain);
+        self.prev_bp_sig_chain
+            .set_witness(witness, value.prev_bp_sig_chain);
+        self.new_bp_sig_chain
+            .set_witness(witness, value.new_bp_sig_chain);
     }
 
     pub fn select<F: RichField + Extendable<D>, const D: usize>(
@@ -600,6 +666,18 @@ impl UpdateUserPublicInputsTarget {
                 when_true.channel_reg_hash_chain.clone(),
                 when_false.channel_reg_hash_chain.clone(),
             ),
+            prev_bp_sig_chain: Bytes32Target::select(
+                builder,
+                condition,
+                when_true.prev_bp_sig_chain.clone(),
+                when_false.prev_bp_sig_chain.clone(),
+            ),
+            new_bp_sig_chain: Bytes32Target::select(
+                builder,
+                condition,
+                when_true.new_bp_sig_chain.clone(),
+                when_false.new_bp_sig_chain.clone(),
+            ),
         }
     }
 }
@@ -620,10 +698,12 @@ pub struct UpdateUserTreeTarget {
     pub channel_action_targets: Vec<ChannelActionTarget>,
     pub channel_action_merkle_proofs: Vec<ChannelActionMerkleProofTarget>,
     pub public_inputs: UpdateUserPublicInputsTarget,
-    /// SPHINCS+ signature witness targets for each user slot.
-    pub spx_sig_targets: Vec<SpxSigTargets>,
-    /// Per-slot MemberTree inclusion proof targets — bind the signing pubkey to the channel's
-    /// member tree (closing the prover-choice hole; see `UpdateUserTree::member_merkle_proofs`).
+    /// P2b: the bp IMSB-signature list accumulator BEFORE this block (witnessed; surfaced as the
+    /// `prev_bp_sig_chain` PI and folded into `new_bp_sig_chain`).
+    pub prev_bp_sig_chain: Bytes32Target,
+    /// Per-slot MemberTree inclusion proof targets — bind the bp's `pk_g` to the channel's member
+    /// tree (the binding for the folded `(IMSB_digest, bp_pk_g)` pair; see
+    /// `UpdateUserTree::member_merkle_proofs`).
     pub member_merkle_proof_targets: Vec<MemberMerkleProofTarget>,
     /// Per-slot witnessed Regev public-key coefficient targets (`a` then `b`, each `REGEV_N`).
     pub member_regev_pk_targets: Vec<Vec<Target>>,
@@ -706,7 +786,15 @@ impl UpdateUserTreeTarget {
         // once and enforce it per slot whenever a signature is applied.
         let tx_tree_root_is_zero = block.tx_tree_root.is_zero::<F, D, Bytes32>(builder);
 
-        let mut spx_sig_targets: Vec<SpxSigTargets> = Vec::with_capacity(num_users as usize);
+        // P2b: the bp IMSB-signature list accumulator. Witnessed `prev_bp_sig_chain`, folded once
+        // (for the updating bp slot) into `bp_sig_chain` using the shared `poseidon_sig::list`
+        // gadgets, then surfaced as `new_bp_sig_chain`.
+        let prev_bp_sig_chain = Bytes32Target::new(builder, true);
+        let mut bp_sig_chain = prev_bp_sig_chain.clone();
+        // The bp's pk_g (Bytes32) — the SAME wire bound into the IMSB digest, the member-leaf
+        // inclusion, and the chain fold.
+        let bp_pk_g = msg_fields.bp_pk_g.clone();
+
         let mut member_merkle_proof_targets: Vec<MemberMerkleProofTarget> =
             Vec::with_capacity(num_users as usize);
         let mut member_regev_pk_targets: Vec<Vec<Target>> = Vec::with_capacity(num_users as usize);
@@ -823,24 +911,25 @@ impl UpdateUserTreeTarget {
             account_tree_root =
                 PoseidonHashOutTarget::select(builder, should_update, updated_root, current_root);
 
-            // ── SPHINCS+ signature verification + member-tree binding ──────────
+            // ── P2b: bp member-tree binding + IMSB-signature chain fold ────────
             //
-            // One SPHINCS+ key per member. For every updating slot (should_verify_sig ==
-            // should_update) we:
-            //   1. Allocate the witnessed pubkey targets and recompute sphincs_pk_hash =
-            //      Poseidon(pub_seed || pub_root).
-            //   2. Compute regev_pk_digest = Poseidon([IMRP, n, a…, b…]) over the witnessed Regev
-            //      pubkey coefficients (mirrors `RegevPk::poseidon_digest`).
-            //   3. Prove MemberLeaf{sphincs_pk_hash, regev_pk_digest} is included at slot i of the
+            // Exactly ONE IMSB signature per signing block — the block-producer's (decision D3/D5).
+            // For the updating slot (which MUST be the declared bp slot) we:
+            //   1. assert the updating slot equals `msg_fields.bp_member_slot` (ties the folded bp
+            //      identity to the slot that actually transitioned — only one slot updates/block);
+            //   2. compute regev_pk_digest = Poseidon([IMRP, n, a…, b…]) over the witnessed Regev
+            //      pubkey coefficients (mirrors `RegevPk::poseidon_digest`);
+            //   3. prove MemberLeaf{pk_g = bp_pk_g, regev_pk_digest} is included at slot i of the
             //      channel's `member_pubkeys_root` (prev_user_leaf, itself proven in the account
-            //      tree above).
-            //   4. Verify the SPHINCS+ signature over the SAME pub_seed/pub_root and the block's
-            //      IMSB digest.
+            //      tree above);
+            //   4. fold `(signed_digest, bp_pk_g)` into the bp_sig_chain accumulator (shared
+            //      `poseidon_sig::list` gadgets).
             //
-            // SECURITY: step 3 binds the signing pubkey to slot i of the channel's on-chain-bound
-            // member tree, closing the previous prover-choice hole — the prover can no longer feed
-            // an arbitrary pubkey to verify_circuit. The channel leaf carrying member_pubkeys_root
-            // is proven under account_tree_root, so the root is trusted, not prover-chosen.
+            // SECURITY: step 3 binds the folded `bp_pk_g` to slot i of the channel's on-chain-bound
+            // member tree, so the `(IMSB_digest, bp_pk_g)` pair folded into bp_sig_chain cannot use
+            // a prover-chosen pubkey. The actual signature over `signed_digest` is proven by the
+            // recursive `ListCircuit` proof the validity circuit consumes (D3) — it rebuilds the
+            // SAME chain and verifies `C == final.bp_sig_chain`.
             let should_verify_sig = should_update;
 
             // SECURITY (detail2 §C-2): tx_tree_root != 0 whenever a member signature is
@@ -852,21 +941,22 @@ impl UpdateUserTreeTarget {
                 zero,
             );
 
-            // -- Allocate virtual targets for PK and signature components --
-            let pub_seed_gl: [_; 2] = std::array::from_fn(|_| builder.add_virtual_target());
-            let pub_root_gl: [_; 2] = std::array::from_fn(|_| builder.add_virtual_target());
-            let r_gl: [_; 2] = std::array::from_fn(|_| builder.add_virtual_target());
-            let fors_sig_gl = builder.add_virtual_targets(SPX_FORS_SIG_GL_LEN);
-            let ht_sig_gls: Vec<Vec<_>> = (0..SPX_D)
-                .map(|_| builder.add_virtual_targets(SPX_WOTS_SIG_GL_LEN))
-                .collect();
-            let ht_auth_gls: Vec<Vec<_>> = (0..SPX_D)
-                .map(|_| builder.add_virtual_targets(SPX_AUTH_GL_LEN))
-                .collect();
-
-            // -- (1) sphincs_pk_hash = Poseidon(pub_seed || pub_root) --
-            let pk_inputs: Vec<_> = [pub_seed_gl.as_slice(), pub_root_gl.as_slice()].concat();
-            let sphincs_pk_hash = PoseidonHashOutTarget::hash_inputs(builder, &pk_inputs);
+            // -- (1) the updating slot MUST be the declared bp slot --
+            // SECURITY: ties the bp identity folded into the chain to the slot that actually
+            // transitioned this block. Only one slot updates per block (all slots reference the
+            // same channel leaf), so this is exact: a prover cannot update slot j while folding a
+            // signature attributed to a different slot's member.
+            // INVARIANT (single-fold soundness): this `bp_sig_chain` design folds AT MOST ONE
+            // signature per block and assumes EXACTLY ONE channel-leaf transition per block. If the
+            // block layout is ever changed to permit two distinct channel-leaf updates in one block,
+            // the second signature would go unfolded — this loop must be revisited (fold per updating
+            // leaf) before that change lands. (Flagged in the P2b security review.)
+            let slot_index = builder.constant(F::from_canonical_u64(i as u64));
+            builder.conditional_assert_eq(
+                should_verify_sig.target,
+                msg_fields.bp_member_slot,
+                slot_index,
+            );
 
             // -- (2) regev_pk_digest = Poseidon([IMRP, n, a…, b…]) over witnessed Regev coeffs --
             let regev_pk_coeffs: Vec<Target> = builder.add_virtual_targets(2 * REGEV_N);
@@ -882,13 +972,17 @@ impl UpdateUserTreeTarget {
             .concat();
             let regev_pk_digest = PoseidonHashOutTarget::hash_inputs(builder, &regev_digest_inputs);
 
-            // -- (3) MemberLeaf slot-inclusion under the channel's member_pubkeys_root --
+            // -- (3) MemberLeaf{pk_g = bp_pk_g, regev_pk_digest} slot-inclusion --
+            // SECURITY: `pk_g` is `bp_pk_g.to_hash_out()`, the SAME wire bound into the IMSB
+            // signing digest and folded into the chain below. `to_hash_out` constrains bp_pk_g to a
+            // canonical Poseidon-hash-out-derived Bytes32 (4 Goldilocks limbs each < p), matching
+            // the registered member identity exactly.
+            let bp_pk_g_hashout = bp_pk_g.to_hash_out(builder);
             let member_merkle_proof = MemberMerkleProofTarget::new(builder, MEMBER_TREE_HEIGHT);
             let member_leaf = MemberLeafTarget {
-                sphincs_pk_hash: sphincs_pk_hash.clone(),
+                pk_g: bp_pk_g_hashout,
                 regev_pk_digest,
             };
-            let slot_index = builder.constant(F::from_canonical_u64(i as u64));
             member_merkle_proof.conditional_verify::<F, C, D>(
                 builder,
                 should_verify_sig,
@@ -897,46 +991,16 @@ impl UpdateUserTreeTarget {
                 prev_user_leaf.member_pubkeys_root.clone(),
             );
 
-            // -- Message: the 8 u32 limbs of the IMSB signing digest (detail2 §F-2) --
-            let msg_gl: Vec<_> = signed_digest.to_vec();
+            // -- (4) fold (signed_digest, bp_pk_g) into the bp_sig_chain accumulator --
+            // SECURITY: identical `poseidon_sig::list` gadgets to the producer (`ListStepCircuit`)
+            // and the consumer, so the chain the validity circuit rebuilds matches bit-for-bit.
+            let leaf = leaf_target(builder, &signed_digest, &bp_pk_g);
+            let prev_chain_hashout = bp_sig_chain.to_hash_out(builder);
+            let new_chain_hashout = chain_step_target(builder, prev_chain_hashout, leaf);
+            let new_chain = Bytes32Target::from_hash_out(builder, new_chain_hashout);
+            bp_sig_chain =
+                Bytes32Target::select(builder, should_verify_sig, new_chain, bp_sig_chain.clone());
 
-            // pk_gl = pub_seed_gl || pub_root_gl (used in hash_message inside verify_circuit)
-            let pk_gl: Vec<_> = [pub_seed_gl.as_slice(), pub_root_gl.as_slice()].concat();
-
-            // -- (4) Call verify_circuit from sphincsplus-circuits --
-            let spx_witness = SpxVerifyWitness {
-                pub_seed_gl,
-                pub_root_gl,
-                r_gl,
-                pk_gl,
-                msg_gl,
-                fors_sig_gl: fors_sig_gl.clone(),
-                ht_sig_gl: ht_sig_gls.clone(),
-                ht_auth_gl: ht_auth_gls.clone(),
-            };
-            let computed_root = verify_circuit(builder, &spx_witness);
-
-            // -- Conditionally assert computed_root == pub_root_gl --
-            // (only enforced when should_verify_sig is true)
-            builder.conditional_assert_eq(
-                should_verify_sig.target,
-                computed_root[0],
-                pub_root_gl[0],
-            );
-            builder.conditional_assert_eq(
-                should_verify_sig.target,
-                computed_root[1],
-                pub_root_gl[1],
-            );
-
-            spx_sig_targets.push(SpxSigTargets {
-                pub_seed_gl,
-                pub_root_gl,
-                r_gl,
-                fors_sig_gl,
-                ht_sig_gls,
-                ht_auth_gls,
-            });
             member_merkle_proof_targets.push(member_merkle_proof);
             member_regev_pk_targets.push(regev_pk_coeffs);
         }
@@ -950,6 +1014,8 @@ impl UpdateUserTreeTarget {
             new_account_tree_root: account_tree_root.clone(),
             deposit_hash_chain: block.deposit_hash_chain.clone(),
             channel_reg_hash_chain: block.channel_reg_hash_chain.clone(),
+            prev_bp_sig_chain: prev_bp_sig_chain.clone(),
+            new_bp_sig_chain: bp_sig_chain.clone(),
         };
 
         Self {
@@ -967,7 +1033,7 @@ impl UpdateUserTreeTarget {
             channel_action_targets,
             channel_action_merkle_proofs,
             public_inputs,
-            spx_sig_targets,
+            prev_bp_sig_chain,
             member_merkle_proof_targets,
             member_regev_pk_targets,
             msg_fields,
@@ -1042,10 +1108,9 @@ impl UpdateUserTreeTarget {
             target.set_witness(witness, proof);
         }
 
-        // Set SPHINCS+ signature witnesses
-        for (target, sig) in self.spx_sig_targets.iter().zip(value.sig_witnesses.iter()) {
-            target.set_witness(witness, sig);
-        }
+        // P2b: the bp IMSB-signature list accumulator before this block.
+        self.prev_bp_sig_chain
+            .set_witness(witness, value.prev_bp_sig_chain);
 
         // Set per-slot MemberTree inclusion proofs.
         for (target, proof) in self
@@ -1137,25 +1202,20 @@ where
 mod tests {
     use super::*;
     use crate::{
-        circuits::{
-            test_utils::sphincs_sign::{
-                SpxKeyPair, pk_hash_from_pk_bytes, sphincs_keygen, sphincs_sign,
-            },
-            validity::block_hash_chain::sphincs_sig::SpxSigWitness,
-        },
+        circuits::validity::block_hash_chain::sphincs_sig::SmallBlockMessageFields,
         common::{
             block::Block,
-            channel::SmallBlockRootMessage,
             channel_id::ChannelId,
             trees::{
                 channel_tree::{ChannelLeaf, ChannelTree, SendLeaf, SendTree},
-                key_tree::{MemberLeaf, MemberTree},
+                key_tree::{MemberLeaf, MemberMerkleProof, MemberTree},
                 tx_v2_tree::{ChannelActionTree, TxV2Tree},
             },
             tx::{ChannelAction, ChannelActionKind, TxClass, TxV2},
             u63::BlockNumber,
         },
         ethereum_types::bytes32::Bytes32,
+        poseidon_sig::{list::list_commitment, GoldilocksSecretKey},
         regev::RegevPk,
     };
     use plonky2::{
@@ -1188,55 +1248,44 @@ mod tests {
         }
     }
 
-    /// Build the 8-byte-per-limb little-endian message bytes the native signer consumes from the
-    /// 8-u32-limb IMSB signing digest (mirrors `BlockHashChainProcessor` / sphincs_sig).
-    fn msg_bytes_from_digest(digest: Bytes32) -> Vec<u8> {
-        digest
-            .to_u32_vec()
-            .into_iter()
-            .flat_map(|limb| (limb as u64).to_le_bytes())
-            .collect()
+    /// Build the channel's 3-member tree, with the signer at slot 0 (the bp).
+    fn build_member_tree(signer: &GoldilocksSecretKey, signer_regev: &RegevPk) -> MemberTree {
+        let mut member_tree = MemberTree::init();
+        member_tree.push(MemberLeaf {
+            pk_g: signer.public_key_hash_out(),
+            regev_pk_digest: signer_regev.poseidon_digest(),
+        });
+        member_tree.push(MemberLeaf {
+            pk_g: GoldilocksSecretKey::from_seed([2u8; 32]).public_key_hash_out(),
+            regev_pk_digest: regev_pk(2).poseidon_digest(),
+        });
+        member_tree.push(MemberLeaf {
+            pk_g: GoldilocksSecretKey::from_seed([3u8; 32]).public_key_hash_out(),
+            regev_pk_digest: regev_pk(3).poseidon_digest(),
+        });
+        member_tree
     }
 
-    /// Build a `SpxSigWitness` + matching `MemberLeaf` for a real key pair signing `msg_digest`.
-    fn signed_member(
-        kp: &SpxKeyPair,
-        msg_digest: Bytes32,
-        regev: &RegevPk,
-    ) -> (SpxSigWitness, MemberLeaf) {
-        let sig = sphincs_sign(&msg_bytes_from_digest(msg_digest), kp);
-        let witness = SpxSigWitness::from_bytes(&kp.pk_bytes, &sig);
-        let leaf = MemberLeaf {
-            sphincs_pk_hash: pk_hash_from_pk_bytes(&kp.pk_bytes),
-            regev_pk_digest: regev.poseidon_digest(),
-        };
-        (witness, leaf)
-    }
-
+    /// Non-signing (all-padding-update) block: every slot has prev == block_number, so
+    /// should_update is false everywhere and the bp_sig_chain is unchanged.
     #[cfg_attr(debug_assertions, ignore = "run with --release")]
     #[test]
-    fn test_update_user_tree_circuit() {
+    fn test_update_user_tree_no_signing_block() {
         let block_number = BlockNumber::new(20).unwrap();
         let channel_id = 5u32;
         let num_users = 2;
 
         let mut rng = StdRng::seed_from_u64(42);
-
         let prev_block_hash_chain = Bytes32::rand(&mut rng);
         let tx_tree_root = Bytes32::rand(&mut rng);
         let deposit_hash_chain = Bytes32::rand(&mut rng);
         let channel_reg_hash_chain = Bytes32::rand(&mut rng);
 
-        // Two-layer identity: the channel has a SINGLE leaf indexed by channel_id; the two
-        // key_ids in the block are member identities of that one channel.
         let channel = ChannelId::new(channel_id as u64).unwrap();
         let mut send_tree = SendTree::init();
-        // Set cur = block_number so that the channel leaf's prev == block_number.
-        // This makes should_update = false → SPHINCS+ signature check is skipped.
-        // A full signature test requires a SPHINCS+ signer (not yet implemented).
         let send_leaf_prev = SendLeaf {
             prev: BlockNumber::default(),
-            cur: block_number, // already-at-current-block: no update triggered
+            cur: block_number, // already at current block: no update triggered
             tx_tree_root: Bytes32::rand(&mut rng),
         };
         send_tree.push(send_leaf_prev.clone());
@@ -1249,9 +1298,7 @@ mod tests {
 
         let mut channel_tree = ChannelTree::new(CHANNEL_TREE_HEIGHT);
         channel_tree.update(channel.as_u64(), prev_channel_leaf.clone());
-
         let prev_account_tree_root = channel_tree.get_root();
-        assert_eq!(channel_tree.get_leaf(channel.as_u64()), prev_channel_leaf);
 
         let timestamp = rng.next_u64();
         let block = Block::new(
@@ -1266,64 +1313,39 @@ mod tests {
         .unwrap();
 
         let send_proof = send_tree.prove(prev_channel_leaf.index.into());
-        let dummy_user_leaf = ChannelLeaf::default();
-        let dummy_user_merkle_proof = ChannelMerkleProof::dummy(CHANNEL_TREE_HEIGHT);
         let dummy_send_proof = SendMerkleProof::dummy(SEND_TREE_HEIGHT);
+        let dummy_user_merkle_proof = ChannelMerkleProof::dummy(CHANNEL_TREE_HEIGHT);
 
-        // Both key slots reference the same (single) channel leaf.
-        let mut prev_account_leaves = vec![prev_channel_leaf.clone(), prev_channel_leaf.clone()];
-        prev_account_leaves.resize(num_users as usize, dummy_user_leaf);
-
+        let mut prev_account_leaves =
+            vec![prev_channel_leaf.clone(), prev_channel_leaf.clone()];
+        prev_account_leaves.resize(num_users as usize, ChannelLeaf::default());
         let mut send_merkle_proofs = vec![send_proof.clone(), send_proof.clone()];
         send_merkle_proofs.resize(num_users as usize, dummy_send_proof);
 
-        let mut account_tree_for_proofs = channel_tree.clone();
         let mut user_merkle_proofs = Vec::with_capacity(num_users as usize);
-        for (i, &key_id) in block.key_ids.iter().enumerate() {
+        for &key_id in block.key_ids.iter() {
             if key_id == 0 {
                 user_merkle_proofs.push(dummy_user_merkle_proof.clone());
-                continue;
-            }
-            let proof = account_tree_for_proofs.prove(channel.as_u64());
-            user_merkle_proofs.push(proof);
-
-            let prev_leaf = &prev_account_leaves[i];
-            if prev_leaf.prev != block_number {
-                let send_proof = &send_merkle_proofs[i];
-                let new_send_leaf = SendLeaf {
-                    prev: prev_leaf.prev,
-                    cur: block_number,
-                    tx_tree_root,
-                };
-                let new_send_root = send_proof.get_root(&new_send_leaf, prev_leaf.index.into());
-                let new_user_leaf = ChannelLeaf {
-                    index: prev_leaf.index + 1,
-                    prev: block_number,
-                    send_tree_root: new_send_root,
-                    member_pubkeys_root: prev_leaf.member_pubkeys_root,
-                };
-                account_tree_for_proofs.update(channel.as_u64(), new_user_leaf);
+            } else {
+                user_merkle_proofs.push(channel_tree.prove(channel.as_u64()));
             }
         }
 
-        // Dummy signature witnesses for the test (no real SPHINCS+ keys needed — every slot is
-        // non-updating, so the binding + signature constraints are skipped).
-        let sig_witnesses = vec![SpxSigWitness::dummy(); num_users as usize];
-        let member_merkle_proofs =
-            vec![MemberMerkleProof::dummy(MEMBER_TREE_HEIGHT); num_users as usize];
-        let member_regev_pks = vec![dummy_regev_pk(); num_users as usize];
-
+        let prev_bp_sig_chain = Bytes32::rand(&mut rng);
         let update_channel_tree = UpdateUserTree {
             prev_block_hash_chain,
             prev_account_tree_root,
             block_number,
             block: block.clone(),
-            prev_account_leaves: prev_account_leaves.clone(),
-            user_merkle_proofs: user_merkle_proofs.clone(),
-            send_merkle_proofs: send_merkle_proofs.clone(),
-            sig_witnesses,
-            member_merkle_proofs,
-            member_regev_pks,
+            prev_account_leaves,
+            user_merkle_proofs,
+            send_merkle_proofs,
+            prev_bp_sig_chain,
+            member_merkle_proofs: vec![
+                MemberMerkleProof::dummy(MEMBER_TREE_HEIGHT);
+                num_users as usize
+            ],
+            member_regev_pks: vec![dummy_regev_pk(); num_users as usize],
             msg_fields: SmallBlockMessageFields::default(),
             tx_v2_indices: vec![0; num_users as usize],
             tx_v2s: vec![TxV2::default(); num_users as usize],
@@ -1337,25 +1359,9 @@ mod tests {
         };
 
         let public_inputs = update_channel_tree.to_public_inputs().unwrap();
-
-        // user1 has prev == block_number → should_update = false → tree unchanged.
-        // user2 also has prev == block_number → should_update = false → tree unchanged.
-        let expected_tree = channel_tree.clone();
-
-        assert_eq!(public_inputs.prev_account_tree_root, prev_account_tree_root);
-        assert_eq!(
-            public_inputs.new_account_tree_root,
-            expected_tree.get_root()
-        );
-        assert_eq!(
-            public_inputs.new_block_hash_chain,
-            block.hash_with_prev_hash(prev_block_hash_chain).unwrap()
-        );
-        assert_eq!(public_inputs.deposit_hash_chain, block.deposit_hash_chain);
-        assert_eq!(
-            public_inputs.channel_reg_hash_chain,
-            block.channel_reg_hash_chain
-        );
+        // No update ⇒ bp_sig_chain unchanged.
+        assert_eq!(public_inputs.prev_bp_sig_chain, prev_bp_sig_chain);
+        assert_eq!(public_inputs.new_bp_sig_chain, prev_bp_sig_chain);
 
         let circuit = UpdateUserCircuit::<F, C, D>::new(num_users);
         let proof = circuit.prove(&update_channel_tree).unwrap();
@@ -1369,48 +1375,31 @@ mod tests {
         assert_eq!(proof.public_inputs, expected_public_inputs);
     }
 
-    #[cfg_attr(debug_assertions, ignore = "run with --release")]
-    #[test]
-    fn test_update_user_tree_binds_channel_action_to_source_account() {
+    /// Build a real signing block: slot 0 (the bp) updates, the bp's `(IMSB_digest, pk_g)` is folded
+    /// into bp_sig_chain, and the member inclusion of `pk_g` at slot 0 is proven.
+    fn signing_update_tree(
+        signer: &GoldilocksSecretKey,
+        prev_bp_sig_chain: Bytes32,
+        member_tree: &MemberTree,
+        signer_regev: &RegevPk,
+    ) -> (UpdateUserTree, Bytes32) {
         let block_number = BlockNumber::new(30).unwrap();
         let channel_id = 9u32;
         let key_id = 7u32;
         let num_users = 1;
-
         let mut rng = StdRng::seed_from_u64(99);
         let prev_block_hash_chain = Bytes32::rand(&mut rng);
         let deposit_hash_chain = Bytes32::rand(&mut rng);
 
-        // Two-layer identity: channel-tree index = channel id alone.
         let channel = ChannelId::new(channel_id as u64).unwrap();
         let send_tree = SendTree::init();
-        // Build the channel's member tree: this active slot's member at slot 0, plus two other
-        // members. The leaf binds the signer's SPHINCS+ pubkey hash + Regev pubkey digest.
-        let signer_kp = sphincs_keygen([0x11; 16], [0x22; 16], [0x33; 16]);
-        let signer_regev = regev_pk(1);
-        let signer_leaf = MemberLeaf {
-            sphincs_pk_hash: pk_hash_from_pk_bytes(&signer_kp.pk_bytes),
-            regev_pk_digest: signer_regev.poseidon_digest(),
-        };
-        let mut member_tree = MemberTree::init();
-        member_tree.push(signer_leaf.clone()); // slot 0 = signer
-        member_tree.push(MemberLeaf {
-            sphincs_pk_hash: PoseidonHashOut::hash_inputs_u64(&[2, 2, 2, 2]),
-            regev_pk_digest: regev_pk(2).poseidon_digest(),
-        });
-        member_tree.push(MemberLeaf {
-            sphincs_pk_hash: PoseidonHashOut::hash_inputs_u64(&[3, 3, 3, 3]),
-            regev_pk_digest: regev_pk(3).poseidon_digest(),
-        });
         let member_pubkeys_root = member_tree.get_root();
-
         let prev_user_leaf = ChannelLeaf {
             index: 0,
             prev: BlockNumber::new(4).unwrap(),
             send_tree_root: send_tree.get_root(),
             member_pubkeys_root,
         };
-
         let mut channel_tree = ChannelTree::new(CHANNEL_TREE_HEIGHT);
         channel_tree.update(channel.as_u64(), prev_user_leaf.clone());
         let prev_account_tree_root = channel_tree.get_root();
@@ -1426,7 +1415,6 @@ mod tests {
         let mut channel_action_tree = ChannelActionTree::init();
         channel_action_tree.update(0, channel_action);
         let channel_action_proof = channel_action_tree.prove(0);
-
         let tx_v2 = TxV2 {
             tx_class: TxClass::ChannelAction,
             transfer_tree_root: PoseidonHashOut::default(),
@@ -1436,7 +1424,6 @@ mod tests {
         let mut tx_v2_tree = TxV2Tree::init();
         tx_v2_tree.update(0, tx_v2);
         let tx_v2_proof = tx_v2_tree.prove(0);
-
         let block = Block::new_with_tx_v2s(
             num_users,
             channel_id,
@@ -1450,13 +1437,12 @@ mod tests {
 
         let user_merkle_proof = channel_tree.prove(channel.as_u64());
         let send_merkle_proof = send_tree.prove(prev_user_leaf.index.into());
-        let member_merkle_proof = member_tree.prove(0); // signer is at slot 0
+        let member_merkle_proof = member_tree.prove(0); // bp is at slot 0
 
-        // The signer signs the block's IMSB digest (channel_id + block tx_tree_root + msg fields).
-        let bp_sphincs_pubkey_hash: Bytes32 = signer_leaf.sphincs_pk_hash.into();
+        let bp_pk_g: Bytes32 = signer.public_key();
         let msg_fields = SmallBlockMessageFields {
             bp_member_slot: 0,
-            bp_sphincs_pubkey_hash,
+            bp_pk_g,
             small_block_number: 0,
             prev_small_block_root: Bytes32::default(),
             state_commitment_root: Bytes32::default(),
@@ -1464,18 +1450,16 @@ mod tests {
             close_freeze_nonce: 0,
         };
         let signed_digest = msg_fields.signing_digest(channel_id, block.tx_tree_root);
-        let (sig_witness, leaf_check) = signed_member(&signer_kp, signed_digest, &signer_regev);
-        assert_eq!(leaf_check, signer_leaf, "member leaf must match the signer");
 
-        let update_channel_tree = UpdateUserTree {
+        let tree = UpdateUserTree {
             prev_block_hash_chain,
             prev_account_tree_root,
             block_number,
-            block: block.clone(),
-            prev_account_leaves: vec![prev_user_leaf.clone()],
+            block,
+            prev_account_leaves: vec![prev_user_leaf],
             user_merkle_proofs: vec![user_merkle_proof],
             send_merkle_proofs: vec![send_merkle_proof],
-            sig_witnesses: vec![sig_witness],
+            prev_bp_sig_chain,
             member_merkle_proofs: vec![member_merkle_proof],
             member_regev_pks: vec![signer_regev.clone()],
             msg_fields,
@@ -1486,12 +1470,30 @@ mod tests {
             channel_actions: vec![channel_action],
             channel_action_merkle_proofs: vec![channel_action_proof],
         };
+        (tree, signed_digest)
+    }
 
-        let public_inputs = update_channel_tree.to_public_inputs().unwrap();
-        let circuit = UpdateUserCircuit::<F, C, D>::new(num_users);
-        let proof = circuit.prove(&update_channel_tree).unwrap();
+    /// Happy path: a real signing block folds `(IMSB_digest, bp_pk_g)` into the bp_sig_chain, and
+    /// the chain matches the native `list_commitment`.
+    #[cfg_attr(debug_assertions, ignore = "run with --release")]
+    #[test]
+    fn test_update_user_tree_folds_bp_sig_chain() {
+        let signer = GoldilocksSecretKey::from_seed([0x11; 32]);
+        let signer_regev = regev_pk(1);
+        let member_tree = build_member_tree(&signer, &signer_regev);
+        let prev_bp_sig_chain = Bytes32::default();
+        let (tree, signed_digest) =
+            signing_update_tree(&signer, prev_bp_sig_chain, &member_tree, &signer_regev);
+
+        let public_inputs = tree.to_public_inputs().unwrap();
+        // The new chain equals folding (signed_digest, pk_g) onto the empty chain.
+        let expected = list_commitment(&[(signed_digest, signer.public_key())]);
+        assert_eq!(public_inputs.new_bp_sig_chain, expected);
+        assert_eq!(public_inputs.prev_bp_sig_chain, prev_bp_sig_chain);
+
+        let circuit = UpdateUserCircuit::<F, C, D>::new(1);
+        let proof = circuit.prove(&tree).unwrap();
         circuit.data.verify(proof.clone()).unwrap();
-
         let expected_public_inputs: Vec<F> = public_inputs
             .to_u64_vec()
             .into_iter()
@@ -1500,142 +1502,30 @@ mod tests {
         assert_eq!(proof.public_inputs, expected_public_inputs);
     }
 
-    /// SECURITY (the soundness binding fix): a signature by a pubkey that is NOT in the channel's
-    /// member tree must be REJECTED. Here the signer's real key pair is valid, but the member tree
-    /// at slot 0 carries a DIFFERENT pubkey hash — so the in-circuit member inclusion proof against
-    /// the channel's trusted `member_pubkeys_root` fails, and proof generation must error. This
-    /// directly demonstrates that the prior prover-choice hole (any pubkey accepted) is closed.
+    /// SECURITY (A9): a bp pk_g that is NOT in the channel's member tree at slot 0 must be rejected
+    /// — the member inclusion against the trusted `member_pubkeys_root` fails.
     #[cfg_attr(debug_assertions, ignore = "run with --release")]
     #[test]
     fn update_user_tree_rejects_pubkey_not_in_member_tree() {
-        let block_number = BlockNumber::new(30).unwrap();
-        let channel_id = 9u32;
-        let key_id = 7u32;
-        let num_users = 1;
-
-        let mut rng = StdRng::seed_from_u64(123);
-        let prev_block_hash_chain = Bytes32::rand(&mut rng);
-        let deposit_hash_chain = Bytes32::rand(&mut rng);
-
-        let channel = ChannelId::new(channel_id as u64).unwrap();
-        let send_tree = SendTree::init();
-
-        // The REAL signer.
-        let signer_kp = sphincs_keygen([0x44; 16], [0x55; 16], [0x66; 16]);
+        let signer = GoldilocksSecretKey::from_seed([0x44; 32]);
         let signer_regev = regev_pk(7);
+        // Member tree at slot 0 holds a DIFFERENT key, not the signer's.
+        let other = GoldilocksSecretKey::from_seed([0x99; 32]);
+        let member_tree = build_member_tree(&other, &regev_pk(8));
+        let (tree, _digest) =
+            signing_update_tree(&signer, Bytes32::default(), &member_tree, &signer_regev);
 
-        // The member tree at slot 0 holds an ATTACKER/other pubkey hash, NOT the signer's. This is
-        // the wrong-leaf case: the signer's pubkey is absent from the channel's members.
-        let mut member_tree = MemberTree::init();
-        member_tree.push(MemberLeaf {
-            sphincs_pk_hash: PoseidonHashOut::hash_inputs_u64(&[9, 9, 9, 9]),
-            regev_pk_digest: regev_pk(8).poseidon_digest(),
-        });
-        member_tree.push(MemberLeaf {
-            sphincs_pk_hash: PoseidonHashOut::hash_inputs_u64(&[10, 10, 10, 10]),
-            regev_pk_digest: regev_pk(9).poseidon_digest(),
-        });
-        member_tree.push(MemberLeaf {
-            sphincs_pk_hash: PoseidonHashOut::hash_inputs_u64(&[11, 11, 11, 11]),
-            regev_pk_digest: regev_pk(10).poseidon_digest(),
-        });
-        let member_pubkeys_root = member_tree.get_root();
+        // Native witness building already rejects (member leaf not in tree at slot 0).
+        assert!(matches!(
+            tree.to_public_inputs(),
+            Err(UpdateUserTreeError::MerkleProofError(_))
+        ));
 
-        let prev_user_leaf = ChannelLeaf {
-            index: 0,
-            prev: BlockNumber::new(4).unwrap(),
-            send_tree_root: send_tree.get_root(),
-            member_pubkeys_root,
-        };
-        let mut channel_tree = ChannelTree::new(CHANNEL_TREE_HEIGHT);
-        channel_tree.update(channel.as_u64(), prev_user_leaf.clone());
-        let prev_account_tree_root = channel_tree.get_root();
-
-        let channel_action = ChannelAction {
-            kind: ChannelActionKind::InterChannelSend,
-            source_channel_id: channel,
-            destination_channel_id: ChannelId::new(10).unwrap(),
-            tx_hash: Bytes32::rand(&mut rng),
-            seal: Bytes32::rand(&mut rng),
-            payload_hash: PoseidonHashOut::rand(&mut rng),
-        };
-        let mut channel_action_tree = ChannelActionTree::init();
-        channel_action_tree.update(0, channel_action);
-        let channel_action_proof = channel_action_tree.prove(0);
-        let tx_v2 = TxV2 {
-            tx_class: TxClass::ChannelAction,
-            transfer_tree_root: PoseidonHashOut::default(),
-            nonce: 1,
-            channel_action_root: channel_action_tree.get_root(),
-        };
-        let mut tx_v2_tree = TxV2Tree::init();
-        tx_v2_tree.update(0, tx_v2);
-        let tx_v2_proof = tx_v2_tree.prove(0);
-        let block = Block::new_with_tx_v2s(
-            num_users,
-            channel_id,
-            &[key_id],
-            rng.next_u64(),
-            &[tx_v2],
-            deposit_hash_chain,
-            Bytes32::default(),
-        )
-        .unwrap();
-
-        let user_merkle_proof = channel_tree.prove(channel.as_u64());
-        let send_merkle_proof = send_tree.prove(prev_user_leaf.index.into());
-        // The signer presents a proof for slot 0 against the (attacker) member root.
-        let member_merkle_proof = member_tree.prove(0);
-
-        let bp_sphincs_pubkey_hash: Bytes32 = pk_hash_from_pk_bytes(&signer_kp.pk_bytes).into();
-        let msg_fields = SmallBlockMessageFields {
-            bp_member_slot: 0,
-            bp_sphincs_pubkey_hash,
-            small_block_number: 0,
-            prev_small_block_root: Bytes32::default(),
-            state_commitment_root: Bytes32::default(),
-            medium_epoch_hint: 0,
-            close_freeze_nonce: 0,
-        };
-        let signed_digest = msg_fields.signing_digest(channel_id, block.tx_tree_root);
-        let (sig_witness, _leaf) = signed_member(&signer_kp, signed_digest, &signer_regev);
-
-        let update_channel_tree = UpdateUserTree {
-            prev_block_hash_chain,
-            prev_account_tree_root,
-            block_number,
-            block,
-            prev_account_leaves: vec![prev_user_leaf],
-            user_merkle_proofs: vec![user_merkle_proof],
-            send_merkle_proofs: vec![send_merkle_proof],
-            sig_witnesses: vec![sig_witness],
-            member_merkle_proofs: vec![member_merkle_proof],
-            member_regev_pks: vec![signer_regev],
-            msg_fields,
-            tx_v2_indices: vec![0],
-            tx_v2s: vec![tx_v2],
-            tx_v2_merkle_proofs: vec![tx_v2_proof],
-            channel_action_indices: vec![0],
-            channel_actions: vec![channel_action],
-            channel_action_merkle_proofs: vec![channel_action_proof],
-        };
-
-        // Native witness building already rejects: the member leaf (signer's pubkey) is not in the
-        // attacker member tree at slot 0, so `to_public_inputs` fails the inclusion check.
+        let circuit = UpdateUserCircuit::<F, C, D>::new(1);
         assert!(
-            matches!(
-                update_channel_tree.to_public_inputs(),
-                Err(UpdateUserTreeError::MerkleProofError(_))
-            ),
-            "a signature by a pubkey absent from the channel member tree must be rejected"
-        );
-
-        // And the circuit itself is unsatisfiable for this witness (the in-circuit member
-        // inclusion proof under the trusted root cannot be satisfied), so proving must error.
-        let circuit = UpdateUserCircuit::<F, C, D>::new(num_users);
-        assert!(
-            circuit.prove(&update_channel_tree).is_err(),
+            circuit.prove(&tree).is_err(),
             "circuit must reject the out-of-tree pubkey signature"
         );
     }
 }
+

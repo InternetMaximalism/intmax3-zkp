@@ -115,7 +115,7 @@ contract IntmaxRollup {
         uint64 indexed regIndex,
         uint32 indexed channelId,
         uint8   bpMemberSlot,
-        bytes32[] memberSphincsPubkeyHashes,
+        bytes32[] memberPkGs,
         bytes32[] regevPkDigests,
         address[] recipients,
         bytes32 memberPubkeysRoot,
@@ -392,10 +392,10 @@ contract IntmaxRollup {
     ///      `IntmaxRollup.t.sol::test_channelMemberSetCommitmentMatchesVerifier`). A nonzero value
     ///      also acts as the per-channel one-time-registration guard.
     mapping(uint32 => bytes32) public channelMemberSetCommitment;
-    /// @notice channelId -> registered block-proposer member slot (matches `channelBpSphincsPubkeyHash`).
+    /// @notice channelId -> registered block-proposer member slot (matches `channelBpPkG`).
     mapping(uint32 => uint8) public channelBpMemberSlot;
     /// @notice channelId -> registered block-proposer SPHINCS+ pubkey hash (member at `bpMemberSlot`).
-    mapping(uint32 => bytes32) public channelBpSphincsPubkeyHash;
+    mapping(uint32 => bytes32) public channelBpPkG;
 
     /// @notice On-chain channel-registration hash chain accumulator (mirror of `depositHashChain`).
     ///         Advanced per posting round in `postBlock`; the resulting value is committed into the
@@ -771,7 +771,7 @@ contract IntmaxRollup {
     ///         order, each described by their SPHINCS+ pubkey hash (bytes32, the member identity),
     ///         their Regev pubkey digest (bytes32), and their L1 withdrawal recipient (address).
     ///         Mirrors the Rust `ChannelRecord` (src/common/channel.rs): the registration record
-    ///         carries `member_sphincs_pubkey_hashes`, the keccak `member_pubkeys_root`, the
+    ///         carries `member_pk_gs`, the keccak `member_pubkeys_root`, the
     ///         `regev_pk_root`, and the `bp_member_slot`. The ACTIVE member pubkey hashes must be
     ///         nonzero and pairwise distinct (`ChannelRecord::validate`); the active count is the
     ///         array length.
@@ -780,7 +780,7 @@ contract IntmaxRollup {
     ///      can consume it with a SINGLE keccak (no byte-straddling); padding slots
     ///      (i >= memberCount) contribute zeros. Header fields are uint32 (4-byte words):
     ///        keccak256(prev || channelId(uint32) || bpMemberSlot(uint32) || memberCount(uint32) ||
-    ///                  for i in 0..16: (sphincsPubkeyHash(32) || regevPkDigest(32) || recipient(20))).
+    ///                  for i in 0..16: (pkG(32) || regevPkDigest(32) || recipient(20))).
     ///      This is byte-identical to the Rust `ChannelRegRecord::hash_with_prev_hash`
     ///      (src/common/channel_registration.rs) and its in-circuit twin — asserted by
     ///      `IntmaxRollup.t.sol::test_channelRegPreimageDifferential`.
@@ -789,7 +789,7 @@ contract IntmaxRollup {
     function registerChannel(
         uint32 channelId,
         uint8 bpMemberSlot,
-        bytes32[] calldata memberSphincsPubkeyHashes,
+        bytes32[] calldata memberPkGs,
         bytes32[] calldata regevPkDigests,
         address[] calldata recipients
     ) external {
@@ -798,7 +798,7 @@ contract IntmaxRollup {
         // makes `channelMemberSetCommitment[channelId]` an unambiguous single source of truth that
         // the close-path manager binds to. A nonzero commitment means already registered.
         require(channelMemberSetCommitment[channelId] == bytes32(0), "channel already registered");
-        uint256 memberCount = memberSphincsPubkeyHashes.length;
+        uint256 memberCount = memberPkGs.length;
         require(
             memberCount >= MIN_CHANNEL_MEMBERS &&
             memberCount <= MAX_CHANNEL_MEMBERS &&
@@ -811,19 +811,19 @@ contract IntmaxRollup {
         // One SPHINCS+ key per member: active pubkey hashes must be nonzero and pairwise distinct
         // (mirrors ChannelRecord::validate). Regev digests must be set; recipients must be set.
         for (uint256 i = 0; i < memberCount; i++) {
-            if (memberSphincsPubkeyHashes[i] == bytes32(0)) revert MemberPubkeyHashZeroReserved();
+            if (memberPkGs[i] == bytes32(0)) revert MemberPubkeyHashZeroReserved();
             if (regevPkDigests[i] == bytes32(0)) revert RegevPkDigestZeroReserved();
             if (recipients[i] == address(0)) revert RecipientZeroReserved();
             for (uint256 j = i + 1; j < memberCount; j++) {
                 require(
-                    memberSphincsPubkeyHashes[i] != memberSphincsPubkeyHashes[j],
+                    memberPkGs[i] != memberPkGs[j],
                     "member pubkey hashes must be distinct"
                 );
             }
         }
 
         // L1/keccak digest forms of the member tree root and the Regev-pk root (active members).
-        bytes32 memberPubkeysRoot = keccak256(abi.encodePacked(memberSphincsPubkeyHashes));
+        bytes32 memberPubkeysRoot = keccak256(abi.encodePacked(memberPkGs));
         bytes32 regevPkRoot = keccak256(abi.encodePacked(regevPkDigests));
 
         // R3 WORD-ALIGNED fixed-16 preimage (D6 pad-to-MAX): the keccak chain hashes a FIXED
@@ -832,7 +832,7 @@ contract IntmaxRollup {
         // bytes32(0) || bytes32(0) || 20 zero bytes. Header fields are uint32 (4-byte words) to
         // stay word-aligned, matching the Rust `ChannelRegRecord::hash_with_prev_hash` u32 stream:
         //   prev(32) || channelId(uint32=4) || bpMemberSlot(uint32=4) || memberCount(uint32=4) ||
-        //   for i in 0..16: ( sphincsHash(32) || regevDigest(32) || recipient(20) ).
+        //   for i in 0..16: ( pkG(32) || regevDigest(32) || recipient(20) ).
         // SECURITY: recipient is appended as the 20 address bytes (abi.encodePacked(address)),
         // which equals the Rust Address 5-u32 big-endian encoding — NOT a 32-byte left-pad.
         // Byte-identity with Rust/circuit is asserted by test_channelRegPreimageDifferential.
@@ -846,7 +846,7 @@ contract IntmaxRollup {
             if (i < memberCount) {
                 packed = abi.encodePacked(
                     packed,
-                    memberSphincsPubkeyHashes[i], // bytes32: 32 bytes
+                    memberPkGs[i], // bytes32: 32 bytes
                     regevPkDigests[i],            // bytes32: 32 bytes
                     recipients[i]                 // address: 20 bytes
                 );
@@ -875,20 +875,20 @@ contract IntmaxRollup {
             uint32(memberCount)
         );
         for (uint256 i = 0; i < MAX_CHANNEL_MEMBERS; i++) {
-            bytes32 slot = i < memberCount ? memberSphincsPubkeyHashes[i] : bytes32(0);
+            bytes32 slot = i < memberCount ? memberPkGs[i] : bytes32(0);
             memberSetPreimage = abi.encodePacked(memberSetPreimage, slot);
         }
         channelMemberSetCommitment[channelId] = keccak256(memberSetPreimage);
         // bp identity: the member registered at `bpMemberSlot` (already range-checked above).
         channelBpMemberSlot[channelId] = bpMemberSlot;
-        channelBpSphincsPubkeyHash[channelId] = memberSphincsPubkeyHashes[bpMemberSlot];
+        channelBpPkG[channelId] = memberPkGs[bpMemberSlot];
 
         uint64 idx = channelRegCount++;
         emit ChannelRegistered(
             idx,
             channelId,
             bpMemberSlot,
-            memberSphincsPubkeyHashes,
+            memberPkGs,
             regevPkDigests,
             recipients,
             memberPubkeysRoot,

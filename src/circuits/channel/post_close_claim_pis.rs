@@ -23,7 +23,7 @@ pub struct PostCloseClaimPublicInputs {
     pub close_intent_digest: Bytes32,
     pub receiver_channel_id: crate::common::channel::ChannelId,
     pub incoming_tx_hash: Bytes32,
-    pub receiver_sphincs_pubkey_hash: Bytes32,
+    pub receiver_pk_g: Bytes32,
     pub recipient: Address,
     pub shared_native_nullifier: Bytes32,
     /// Public claim amount, proven equal to the plaintext of `receiver_amount` by the E-3 proof.
@@ -75,7 +75,7 @@ impl PostCloseClaimWitness {
 
         // The claimed ciphertext must be the receiver's delta of the signed source tx.
         let matching_delta = self.source_tx.receiver_deltas.iter().any(|delta| {
-            delta.receiver_sphincs_pubkey_hash == self.claim.receiver_sphincs_pubkey_hash
+            delta.receiver_pk_g == self.claim.receiver_pk_g
                 && delta.amount == self.claim.receiver_amount
         });
         if !matching_delta {
@@ -96,7 +96,7 @@ impl PostCloseClaimWitness {
             close_intent_digest: self.close_intent_digest,
             receiver_channel_id: self.closed_channel_id,
             incoming_tx_hash: self.source_tx.tx_hash,
-            receiver_sphincs_pubkey_hash: self.claim.receiver_sphincs_pubkey_hash,
+            receiver_pk_g: self.claim.receiver_pk_g,
             recipient: self.claim.l1_recipient,
             shared_native_nullifier: self.claim.shared_native_nullifier,
             amount: self.amount,
@@ -110,7 +110,7 @@ impl PostCloseClaimPublicInputs {
             self.close_intent_digest.to_u64_vec(),
             self.receiver_channel_id.to_u64_vec(),
             self.incoming_tx_hash.to_u64_vec(),
-            self.receiver_sphincs_pubkey_hash.to_u64_vec(),
+            self.receiver_pk_g.to_u64_vec(),
             self.recipient.to_u64_vec(),
             self.shared_native_nullifier.to_u64_vec(),
             split_u64(self.amount),
@@ -131,7 +131,7 @@ impl PostCloseClaimPublicInputs {
             receiver_channel_id: crate::common::channel::ChannelId::from_u64_slice(&values[8..9])
                 .map_err(|e| e.to_string())?,
             incoming_tx_hash: Bytes32::from_u64_slice(&values[9..17]).map_err(|e| e.to_string())?,
-            receiver_sphincs_pubkey_hash: Bytes32::from_u64_slice(&values[17..25])
+            receiver_pk_g: Bytes32::from_u64_slice(&values[17..25])
                 .map_err(|e| e.to_string())?,
             recipient: Address::from_u64_slice(&values[25..30]).map_err(|e| e.to_string())?,
             shared_native_nullifier: Bytes32::from_u64_slice(&values[30..38])
@@ -197,7 +197,7 @@ mod tests {
         let amount = 21u64;
         let (delta_ct, _) = encrypt_amount(&mut rng, &receiver_pk, amount).unwrap();
 
-        let receiver_sphincs_pubkey_hash = pubkey_hash(11);
+        let receiver_pk_g = pubkey_hash(11);
         let source_tx = InterChannelTx {
             tx_inclusion_proof: MerkleInclusionProof {
                 siblings: vec![],
@@ -207,7 +207,7 @@ mod tests {
                 message: SmallBlockRootMessage {
                     channel_id: ChannelId::new(5).unwrap(),
                     bp_member_slot: 0,
-                    bp_sphincs_pubkey_hash: pubkey_hash(10),
+                    bp_pk_g: pubkey_hash(10),
                     small_block_number: 1,
                     prev_small_block_root: Bytes32::default(),
                     tx_tree_root: Bytes32::from_u32_slice(&[4, 0, 0, 0, 0, 0, 0, 0]).unwrap(),
@@ -223,13 +223,13 @@ mod tests {
             sender_delta_ct: ciphertext(1),
             source_channel_id: ChannelId::new(5).unwrap(),
             destination_channel_id: ChannelId::new(7).unwrap(),
-            source_sphincs_pubkey_hash: pubkey_hash(10),
+            source_pk_g: pubkey_hash(10),
             seal: Bytes32::default(),
             tx_hash: Bytes32::from_u32_slice(&[9, 0, 0, 0, 0, 0, 0, 0]).unwrap(),
             intmax_transfer_commitment: Bytes32::default(),
             recipient_memo: vec![1, 2],
             receiver_deltas: vec![ReceiverBalanceDelta {
-                receiver_sphincs_pubkey_hash,
+                receiver_pk_g,
                 amount: delta_ct.clone(),
             }],
             channel_update_zkp: ChannelProofEnvelope {
@@ -250,7 +250,7 @@ mod tests {
         let claim = PostCloseIncomingClaim {
             close_intent_digest: Bytes32::from_u32_slice(&[1, 0, 0, 0, 0, 0, 0, 0]).unwrap(),
             incoming_tx_hash: source_tx.tx_hash,
-            receiver_sphincs_pubkey_hash,
+            receiver_pk_g,
             l1_recipient: Address::from_u32_slice(&[1, 2, 3, 4, 5]).unwrap(),
             receiver_amount: delta_ct,
             shared_native_nullifier: Bytes32::from_u32_slice(&[2, 0, 0, 0, 0, 0, 0, 0]).unwrap(),

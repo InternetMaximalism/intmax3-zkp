@@ -96,13 +96,13 @@ contract RunClose is Script {
     /// submitWithdrawalClaim for member slot 0 (recipient = the EOA, per the manager binding).
     function withdrawalClaimStep() external {
         string memory lc = _lc();
-        bytes32 memberHash = vm.parseJsonBytes32Array(lc, ".registration.member_sphincs_pubkey_hashes")[0];
+        bytes32 memberHash = vm.parseJsonBytes32Array(lc, ".registration.member_pk_gs")[0];
         address recipient = msg.sender; // member0 recipient was set to the deployer EOA at deploy
         uint64 amount = uint64(vm.envOr("CLAIM", uint256(3)));
         bytes32 digest = _manager().finalizedCloseIntentDigest();
         ChannelSettlementManager.WithdrawalClaim memory claim = ChannelSettlementManager.WithdrawalClaim({
             closeIntentDigest: digest,
-            memberSphincsPubkeyHash: memberHash,
+            memberPkG: memberHash,
             recipient: recipient,
             userAmountDigest: keccak256(abi.encodePacked(memberHash, amount)),
             amount: amount,

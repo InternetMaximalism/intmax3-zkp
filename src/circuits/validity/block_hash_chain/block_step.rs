@@ -188,6 +188,16 @@ where
         }
         let block_hash_chain = update_user_inputs.new_block_hash_chain;
 
+        // P2b: the bp IMSB-signature list accumulator threads through the update proof. The update's
+        // declared `prev_bp_sig_chain` MUST equal the previous ext-state's; the resulting ext-state
+        // carries the update's `new_bp_sig_chain` (advanced on a signing block, unchanged otherwise).
+        if update_user_inputs.prev_bp_sig_chain != prev_public_state_ext.bp_sig_chain {
+            return Err(BlockStepError::InvalidInput(
+                "update account proof initial bp_sig_chain mismatch".to_string(),
+            ));
+        }
+        let bp_sig_chain = update_user_inputs.new_bp_sig_chain;
+
         let mut deposit_hash_chain = prev_public_state_ext.deposit_hash_chain;
         let mut deposit_tree_root = prev_public_state.deposit_tree_root;
         let mut deposit_count = prev_public_state_ext.deposit_count;
@@ -358,6 +368,7 @@ where
             deposit_hash_chain,
             deposit_count,
             channel_reg_hash_chain,
+            bp_sig_chain,
         );
 
         Ok(BlockChainPublicInputs {
@@ -527,6 +538,14 @@ impl<const D: usize> BlockStepTarget<D> {
             .connect(builder, prev_public_state_ext.block_hash_chain.clone());
         let block_hash_chain = selected_update_inputs.new_block_hash_chain.clone();
 
+        // P2b: the bp IMSB-signature list accumulator threads through the update proof. The update's
+        // `prev_bp_sig_chain` MUST equal the previous ext-state's; the resulting ext-state carries
+        // the update's `new_bp_sig_chain`.
+        selected_update_inputs
+            .prev_bp_sig_chain
+            .connect(builder, prev_public_state_ext.bp_sig_chain.clone());
+        let bp_sig_chain = selected_update_inputs.new_bp_sig_chain.clone();
+
         let deposit_hash_eq = prev_public_state_ext
             .deposit_hash_chain
             .is_equal(builder, &selected_update_inputs.deposit_hash_chain);
@@ -681,6 +700,7 @@ impl<const D: usize> BlockStepTarget<D> {
                 deposit_hash_chain: selected_deposit_hash_chain,
                 deposit_count: selected_deposit_count,
                 channel_reg_hash_chain: selected_channel_reg_hash_chain,
+                bp_sig_chain,
             },
             vd: block_chain_vd.clone(),
         };
@@ -967,7 +987,6 @@ mod tests {
             validity::{
                 block_hash_chain::{
                     block_chain_pis::BLOCK_CHAIN_PUBLIC_INPUTS_LEN,
-                    sphincs_sig::SpxSigWitness,
                     update_channel_tree::{UpdateUserCircuit, UpdateUserTree},
                 },
                 channel_reg_hash_chain::channel_reg_chain_pis::CHANNEL_REG_CHAIN_PUBLIC_INPUTS_LEN,
@@ -1028,7 +1047,7 @@ mod tests {
             prev_account_leaves: block_witness.prev_account_leaves.clone(),
             user_merkle_proofs: block_witness.user_merkle_proofs.clone(),
             send_merkle_proofs: block_witness.send_merkle_proofs.clone(),
-            sig_witnesses: vec![SpxSigWitness::dummy(); num_users],
+            prev_bp_sig_chain: initial_state.bp_sig_chain,
             // Dummy member proofs/keys: this test path keeps every slot non-updating, so the
             // member binding and signature constraints are skipped (should_update == false).
             member_merkle_proofs: vec![

@@ -166,7 +166,7 @@ mod tests {
             digest: Bytes32::default(),
             member_signatures: vec![MemberSignature {
                 member_slot: 0,
-                sphincs_pubkey_hash: pubkey_hash(10),
+                pk_g: pubkey_hash(10),
                 signature: vec![1],
             }],
         }
@@ -195,7 +195,7 @@ mod tests {
                 message: SmallBlockRootMessage {
                     channel_id: close_intent.channel_id,
                     bp_member_slot: 0,
-                    bp_sphincs_pubkey_hash: pubkey_hash(10),
+                    bp_pk_g: pubkey_hash(10),
                     small_block_number: 5,
                     prev_small_block_root: Bytes32::default(),
                     tx_tree_root: Bytes32::from_u32_slice(&[4, 0, 0, 0, 0, 0, 0, 0]).unwrap(),
@@ -205,7 +205,7 @@ mod tests {
                 },
                 signatures: vec![MemberSignature {
                     member_slot: 0,
-                    sphincs_pubkey_hash: pubkey_hash(10),
+                    pk_g: pubkey_hash(10),
                     signature: vec![1],
                 }],
                 aggregated_signature_proof: vec![3],
@@ -215,13 +215,13 @@ mod tests {
             sender_delta_ct: ciphertext(10),
             source_channel_id: close_intent.channel_id,
             destination_channel_id: ChannelId::new(4).unwrap(),
-            source_sphincs_pubkey_hash: pubkey_hash(10),
+            source_pk_g: pubkey_hash(10),
             seal: Bytes32::from_u32_slice(&[8, 0, 0, 0, 0, 0, 0, 0]).unwrap(),
             tx_hash: Bytes32::from_u32_slice(&[9, 0, 0, 0, 0, 0, 0, 0]).unwrap(),
             intmax_transfer_commitment: Bytes32::default(),
             recipient_memo: vec![1, 2],
             receiver_deltas: vec![ReceiverBalanceDelta {
-                receiver_sphincs_pubkey_hash: pubkey_hash(11),
+                receiver_pk_g: pubkey_hash(11),
                 amount: ciphertext(11),
             }],
             channel_update_zkp: ChannelProofEnvelope {

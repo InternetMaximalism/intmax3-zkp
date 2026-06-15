@@ -17,7 +17,8 @@
 //! verifier data (constant-VD) so only proofs from this circuit can extend the list (A7).
 
 use plonky2::{
-    field::types::Field as _,
+    field::{extension::Extendable, types::Field as _},
+    hash::hash_types::RichField,
     iop::witness::{PartialWitness, WitnessWrite as _},
     plonk::{
         circuit_builder::CircuitBuilder,
@@ -80,12 +81,16 @@ pub fn list_commitment(pairs: &[(Bytes32, Bytes32)]) -> Bytes32 {
 // ----------------------------------------------------------------------------------------------
 
 /// In-circuit `leaf = Poseidon([LIST_LEAF_DOMAIN] ‖ m ‖ pk)`. Mirrors [`list_leaf`].
-pub(crate) fn leaf_target(
-    builder: &mut CircuitBuilder<F, D>,
+///
+/// Generic over the field so the SAME gadget can be used by the producer (`ListStepCircuit`), the
+/// consumer, and the validity/close circuits — guaranteeing the folded commitment is computed by
+/// identical constraints everywhere (the validity path uses `F = GoldilocksField, D = 2`).
+pub(crate) fn leaf_target<GF: RichField + Extendable<GD>, const GD: usize>(
+    builder: &mut CircuitBuilder<GF, GD>,
     message: &Bytes32Target,
     public_key: &Bytes32Target,
 ) -> PoseidonHashOutTarget {
-    let dom = builder.constant(F::from_canonical_u32(LIST_LEAF_DOMAIN));
+    let dom = builder.constant(GF::from_canonical_u32(LIST_LEAF_DOMAIN));
     let mut inputs = Vec::with_capacity(1 + 2 * BYTES32_LEN);
     inputs.push(dom);
     inputs.extend(message.to_vec());
@@ -93,9 +98,10 @@ pub(crate) fn leaf_target(
     PoseidonHashOutTarget::hash_inputs(builder, &inputs)
 }
 
-/// In-circuit `C' = Poseidon(prev ‖ leaf)`. Mirrors [`list_chain_step`].
-pub(crate) fn chain_step_target(
-    builder: &mut CircuitBuilder<F, D>,
+/// In-circuit `C' = Poseidon(prev ‖ leaf)`. Mirrors [`list_chain_step`]. Generic over the field
+/// for the same shared-gadget reason as [`leaf_target`].
+pub(crate) fn chain_step_target<GF: RichField + Extendable<GD>, const GD: usize>(
+    builder: &mut CircuitBuilder<GF, GD>,
     prev: PoseidonHashOutTarget,
     leaf: PoseidonHashOutTarget,
 ) -> PoseidonHashOutTarget {

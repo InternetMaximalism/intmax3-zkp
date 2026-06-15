@@ -6,7 +6,7 @@
 //!
 //! ## Security properties
 //!
-//! * **R2 cross-binding (keccak ↔ Poseidon).** The 16 members' `sphincs_pk_hash` and
+//! * **R2 cross-binding (keccak ↔ Poseidon).** The 16 members' `pk_g` and
 //!   `regev_pk_digest` are witnessed ONCE as `PoseidonHashOutTarget`s. They feed BOTH the keccak
 //!   preimage (split to 32 bytes via `Bytes32Target::from_hash_out`) AND the Poseidon
 //!   `MemberLeaf`s. Reusing the same targets is the binding — no separate equality constraint is
@@ -96,7 +96,7 @@ pub fn member_pubkeys_root_for(record: &ChannelRegRecord) -> PoseidonHashOut {
     let mut tree = MemberTree::init();
     for i in 0..(record.member_count as usize) {
         let leaf = MemberLeaf {
-            sphincs_pk_hash: record.members[i].sphincs_pk_hash.reduce_to_hash_out(),
+            pk_g: record.members[i].pk_g.reduce_to_hash_out(),
             regev_pk_digest: record.members[i].regev_pk_digest.reduce_to_hash_out(),
         };
         tree.push(leaf);
@@ -229,7 +229,7 @@ pub struct ChannelRegStepTarget<const D: usize> {
     pub member_count: Target,
     /// The 16 members' Poseidon identity components, witnessed ONCE and reused for both the keccak
     /// preimage and the Poseidon member-tree leaves (R2 cross-binding).
-    pub member_sphincs_pk_hashes: [PoseidonHashOutTarget; MAX_CHANNEL_MEMBERS],
+    pub member_pk_ges: [PoseidonHashOutTarget; MAX_CHANNEL_MEMBERS],
     pub member_regev_pk_digests: [PoseidonHashOutTarget; MAX_CHANNEL_MEMBERS],
     pub member_recipients: [crate::ethereum_types::address::AddressTarget; MAX_CHANNEL_MEMBERS],
     pub channel_merkle_proof: ChannelMerkleProofTarget,
@@ -264,7 +264,7 @@ impl<const D: usize> ChannelRegStepTarget<D> {
         builder.range_check(member_count, 32);
 
         // -- Member identity components (witnessed once; R2 cross-binding) --
-        let member_sphincs_pk_hashes: [PoseidonHashOutTarget; MAX_CHANNEL_MEMBERS] =
+        let member_pk_ges: [PoseidonHashOutTarget; MAX_CHANNEL_MEMBERS] =
             std::array::from_fn(|_| PoseidonHashOutTarget::new(builder));
         let member_regev_pk_digests: [PoseidonHashOutTarget; MAX_CHANNEL_MEMBERS] =
             std::array::from_fn(|_| PoseidonHashOutTarget::new(builder));
@@ -368,11 +368,11 @@ impl<const D: usize> ChannelRegStepTarget<D> {
         for i in 0..MAX_CHANNEL_MEMBERS {
             let not_active = builder.not(is_active[i]);
             // Force sphincs == 0 and regev == 0 on inactive slots.
-            member_sphincs_pk_hashes[i].conditional_assert_eq(builder, zero_hash, not_active);
+            member_pk_ges[i].conditional_assert_eq(builder, zero_hash, not_active);
             member_regev_pk_digests[i].conditional_assert_eq(builder, zero_hash, not_active);
 
             let member_leaf = MemberLeafTarget {
-                sphincs_pk_hash: member_sphincs_pk_hashes[i],
+                pk_g: member_pk_ges[i],
                 regev_pk_digest: member_regev_pk_digests[i],
             };
             leaf_hashes.push(member_leaf.hash::<F, C, D>(builder));
@@ -382,7 +382,7 @@ impl<const D: usize> ChannelRegStepTarget<D> {
         // ── keccak preimage: build 32-byte forms from the SAME Poseidon targets (R2) ──
         let members_reg_entries: [MemberRegEntryTarget; MAX_CHANNEL_MEMBERS] =
             std::array::from_fn(|i| MemberRegEntryTarget {
-                sphincs_pk_hash: Bytes32Target::from_hash_out(builder, member_sphincs_pk_hashes[i]),
+                pk_g: Bytes32Target::from_hash_out(builder, member_pk_ges[i]),
                 regev_pk_digest: Bytes32Target::from_hash_out(builder, member_regev_pk_digests[i]),
                 recipient: member_recipients[i],
             });
@@ -442,7 +442,7 @@ impl<const D: usize> ChannelRegStepTarget<D> {
             channel_id,
             bp_member_slot,
             member_count,
-            member_sphincs_pk_hashes,
+            member_pk_ges,
             member_regev_pk_digests,
             member_recipients,
             channel_merkle_proof,
@@ -500,8 +500,8 @@ impl<const D: usize> ChannelRegStepTarget<D> {
         // Members: split each 32-byte digest to its reduced PoseidonHashOut (the witnessed value).
         for i in 0..MAX_CHANNEL_MEMBERS {
             let m = &value.record.members[i];
-            self.member_sphincs_pk_hashes[i]
-                .set_witness(witness, m.sphincs_pk_hash.reduce_to_hash_out());
+            self.member_pk_ges[i]
+                .set_witness(witness, m.pk_g.reduce_to_hash_out());
             self.member_regev_pk_digests[i]
                 .set_witness(witness, m.regev_pk_digest.reduce_to_hash_out());
             self.member_recipients[i].set_witness(witness, m.recipient);
@@ -650,7 +650,7 @@ mod tests {
         for i in 0..(member_count as usize) {
             let s = (i as u32) + 1;
             members[i] = MemberRegEntry {
-                sphincs_pk_hash: Bytes32::from(PoseidonHashOut::hash_inputs_u64(&[
+                pk_g: Bytes32::from(PoseidonHashOut::hash_inputs_u64(&[
                     channel_id as u64,
                     s as u64,
                     0x5e,

@@ -106,7 +106,7 @@ type C = PoseidonGoldilocksConfig;
 struct MemberFixture {
     channel_id: u32,
     bp_member_slot: u8,
-    member_sphincs_pubkey_hashes: Vec<String>,
+    member_pk_gs: Vec<String>,
     regev_pk_digests: Vec<String>,
     recipients: Vec<String>,
 }
@@ -213,7 +213,7 @@ fn parse_address_hex(hex: &str) -> Address {
 /// `generate_withdrawal_fixture.rs` does (it replicates the private
 /// `ChannelMemberKeys::to_reg_record(channel_id)`).
 ///
-/// SECURITY: each active slot's sphincs_pk_hash / regev_pk_digest is the
+/// SECURITY: each active slot's pk_g / regev_pk_digest is the
 /// canonical `Bytes32::from(PoseidonHashOut)` of the SAME Poseidon identity
 /// stored in `member_tree` (the root committed into the channel leaf). The
 /// recipient is the deterministic per-(channel, slot) test L1 address used by
@@ -221,12 +221,12 @@ fn parse_address_hex(hex: &str) -> Address {
 fn member_fixture(member_keys: &ChannelMemberKeys, channel_id_u32: u32) -> MemberFixture {
     let member_count = TEST_ACTIVE_MEMBERS;
     let bp_member_slot: u8 = 0;
-    let mut member_sphincs_pubkey_hashes = Vec::with_capacity(member_count);
+    let mut member_pk_gs = Vec::with_capacity(member_count);
     let mut regev_pk_digests = Vec::with_capacity(member_count);
     let mut recipients = Vec::with_capacity(member_count);
     for i in 0..member_count {
         let leaf = member_keys.member_tree.get_leaf(i as u64);
-        let sphincs_hash = Bytes32::from(leaf.sphincs_pk_hash);
+        let sphincs_hash = Bytes32::from(leaf.pk_g);
         let regev_digest = Bytes32::from(leaf.regev_pk_digest);
         // Deterministic per-(channel, slot) recipient — identical formula to
         // `ChannelMemberKeys::to_reg_record`.
@@ -236,14 +236,14 @@ fn member_fixture(member_keys: &ChannelMemberKeys, channel_id_u32: u32) -> Membe
                 .wrapping_add(i as u32); 5],
         )
         .expect("address from u32 slice");
-        member_sphincs_pubkey_hashes.push(sphincs_hash.to_string());
+        member_pk_gs.push(sphincs_hash.to_string());
         regev_pk_digests.push(regev_digest.to_string());
         recipients.push(recipient.to_string());
     }
     MemberFixture {
         channel_id: channel_id_u32,
         bp_member_slot,
-        member_sphincs_pubkey_hashes,
+        member_pk_gs,
         regev_pk_digests,
         recipients,
     }
@@ -694,11 +694,20 @@ fn main() -> anyhow::Result<()> {
     }
 
     let final_block_chain_proof = last_block_proof.expect("final block hash chain proof");
-    let validity_circuit = ValidityCircuit::<F, C, D>::new(&block_chain_vd);
+    // P2b: build + verify the bp IMSB-signature ListCircuit proof (decision D3).
+    let single_sig = intmax3_zkp::poseidon_sig::circuit::SingleSigCircuit::new();
+    let list_circuit =
+        intmax3_zkp::poseidon_sig::list::ListCircuit::new(&single_sig.verifier_data());
+    let list_proof = block_witness_generator
+        .borrow()
+        .build_bp_sig_list_proof(&single_sig, &list_circuit)
+        .expect("build bp sig list proof");
+    let validity_circuit =
+        ValidityCircuit::<F, C, D>::new(&block_chain_vd, &list_circuit.verifier_data());
     // FIXED validity prover address.
     let validity_prover = Address::default();
     let validity_proof = validity_circuit
-        .prove(&final_block_chain_proof, validity_prover)
+        .prove(&final_block_chain_proof, list_proof.as_ref(), validity_prover)
         .expect("validity proof");
     validity_circuit
         .verify(&validity_proof)

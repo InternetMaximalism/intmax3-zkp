@@ -102,7 +102,7 @@ impl MemberKeys {
     }
 
     /// This member's identity = SPHINCS+ pubkey hash (the value stored in `ChannelRecord`).
-    pub fn sphincs_pk_hash(&self) -> Bytes32 {
+    pub fn pk_g(&self) -> Bytes32 {
         pk_hash_from_pk_bytes(&self.kp.pk_bytes).into()
     }
 }
@@ -217,7 +217,7 @@ fn member_at(members: &[MemberInfo], slot: usize) -> WResult<&MemberInfo> {
 fn member_pubkeys_root(record: &ChannelRecord) -> Bytes32 {
     let mut words = Vec::new();
     for i in 0..record.member_count as usize {
-        words.extend(record.member_sphincs_pubkey_hashes[i].to_u32_vec());
+        words.extend(record.member_pk_gs[i].to_u32_vec());
     }
     Bytes32::from_u32_slice(&plonky2_keccak::utils::solidity_keccak256(&words))
         .expect("keccak output is bytes32")
@@ -253,7 +253,7 @@ pub fn build_record(
     let mut record = ChannelRecord {
         channel_id: ChannelId::new(channel_id as u64).map_err(|e| WalletError(format!("{e:?}")))?,
         member_count: n as u8,
-        member_sphincs_pubkey_hashes: hashes,
+        member_pk_gs: hashes,
         member_pubkeys_root: Bytes32::default(),
         bp_member_slot,
         special_close_penalty: U256::from(0u32),
@@ -313,7 +313,7 @@ pub fn sign_state(keys: &MemberKeys, slot: u8, state: &ChannelState) -> MemberSi
     let digest = state.signing_digest();
     MemberSignature {
         member_slot: slot,
-        sphincs_pubkey_hash: keys.sphincs_pk_hash(),
+        pk_g: keys.pk_g(),
         signature: sign_digest(&keys.kp, &digest),
     }
 }
@@ -337,13 +337,13 @@ pub fn verify_all_signatures(
         return bail("state.digest does not match recomputed signing_digest()");
     }
     for slot in 0..record.member_count as usize {
-        let expected_hash = record.member_sphincs_pubkey_hashes[slot];
+        let expected_hash = record.member_pk_gs[slot];
         let sig = state
             .member_signatures
             .iter()
             .find(|s| s.member_slot as usize == slot)
             .ok_or_else(|| WalletError(format!("missing signature for slot {slot}")))?;
-        if sig.sphincs_pubkey_hash != expected_hash {
+        if sig.pk_g != expected_hash {
             return bail(format!("slot {slot} signature pubkey hash mismatch"));
         }
         let m = member_at(members, slot)?;
@@ -408,7 +408,7 @@ pub fn verify_snapshot(
         if m.regev_pk != keys.regev_pk {
             return bail("my slot's Regev pk in the snapshot does not match my key");
         }
-        if snapshot.record.member_sphincs_pubkey_hashes[slot as usize] != keys.sphincs_pk_hash() {
+        if snapshot.record.member_pk_gs[slot as usize] != keys.pk_g() {
             return bail("my slot's SPHINCS+ hash in the record does not match my key");
         }
         // Confirm we can decrypt our own balance slot (no panic / valid ciphertext).
@@ -526,8 +526,8 @@ pub fn build_send(
     }
     .with_computed_digest();
 
-    let sender_hash = record.member_sphincs_pubkey_hashes[sender_slot as usize];
-    let recipient_hash = record.member_sphincs_pubkey_hashes[recipient_slot as usize];
+    let sender_hash = record.member_pk_gs[sender_slot as usize];
+    let recipient_hash = record.member_pk_gs[recipient_slot as usize];
     let tx_digest = ChannelTx::signing_digest(
         prev.channel_id,
         prev.digest,
@@ -537,7 +537,7 @@ pub fn build_send(
         recipient_hash,
     );
     let channel_tx = ChannelTx {
-        recipient_sphincs_pubkey_hash: recipient_hash,
+        recipient_pk_g: recipient_hash,
         enc_amount,
         nonce,
         channel_tx_zkp: ChannelProofEnvelope {
@@ -545,7 +545,7 @@ pub fn build_send(
             backend: ProofBackend::Plonky3,
             proof,
         },
-        sender_sphincs_pubkey_hash: sender_hash,
+        sender_pk_g: sender_hash,
         sender_signature: sign_digest(&keys.kp, &tx_digest),
     };
 
@@ -586,8 +586,8 @@ pub fn verify_send_transition(
         prev.digest,
         &payload.channel_tx.enc_amount,
         payload.channel_tx.nonce,
-        payload.channel_tx.sender_sphincs_pubkey_hash,
-        payload.channel_tx.recipient_sphincs_pubkey_hash,
+        payload.channel_tx.sender_pk_g,
+        payload.channel_tx.recipient_pk_g,
     );
     let sender = member_at(&payload.members, payload.sender_index as usize)?;
     verify_sphincs_sig(&sender.sphincs_pk_bytes()?, &tx_digest, &payload.channel_tx.sender_signature)?;
@@ -625,7 +625,7 @@ fn fill_placeholder_sigs(record: &ChannelRecord, state: &mut ChannelState) {
     state.member_signatures = (0..record.member_count as usize)
         .map(|slot| MemberSignature {
             member_slot: slot as u8,
-            sphincs_pubkey_hash: record.member_sphincs_pubkey_hashes[slot],
+            pk_g: record.member_pk_gs[slot],
             signature: vec![1],
         })
         .collect();

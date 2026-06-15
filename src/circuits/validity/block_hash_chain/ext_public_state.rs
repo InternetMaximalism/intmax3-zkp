@@ -21,7 +21,7 @@ use crate::{
     utils::poseidon_hash_out::{PoseidonHashOut, PoseidonHashOutTarget},
 };
 
-pub const EXTENDED_PUBLIC_STATE_U64_LEN: usize = PUBLIC_STATE_U64_LEN + 3 * BYTES32_LEN + 1;
+pub const EXTENDED_PUBLIC_STATE_U64_LEN: usize = PUBLIC_STATE_U64_LEN + 4 * BYTES32_LEN + 1;
 
 #[derive(Debug, Error)]
 pub enum ExtendedPublicStateError {
@@ -44,6 +44,19 @@ pub struct ExtendedPublicState {
     /// On-chain keccak channel-registration hash chain (R4). Binds the deterministically rebuilt
     /// Poseidon channel tree (inner.account_tree_root) to the registrations the contract recorded.
     pub channel_reg_hash_chain: Bytes32,
+    /// P2b block-producer IMSB-signature list-commitment accumulator. The order-sensitive Poseidon
+    /// hash chain (`poseidon_sig::list`) over every signing block's `(IMSB_digest, bp_pk_g)` pair,
+    /// folded inside `update_channel_tree` for the block-producer slot of each block that applies a
+    /// member signature. Starts at `Bytes32::default()` (the empty list) at the validity span's
+    /// initial state. The validity circuit conditionally verifies the matching `ListCircuit` proof
+    /// and asserts `C == final.bp_sig_chain` (D3) — so every folded pair was a verified Poseidon
+    /// single-sig.
+    ///
+    /// SECURITY: this is an ACCUMULATED value (not a prover flag): it is computed from the per-block
+    /// `bp_pk_g`/`signed_digest` wires that are themselves bound to `member_pubkeys_root` /
+    /// `tx_tree_root`. A non-zero final value forces the list-proof verification on (A8 truncation
+    /// guard); a zero final value means no block in the span applied a signature.
+    pub bp_sig_chain: Bytes32,
 }
 
 impl ExtendedPublicState {
@@ -53,6 +66,7 @@ impl ExtendedPublicState {
         deposit_hash_chain: Bytes32,
         deposit_count: U63,
         channel_reg_hash_chain: Bytes32,
+        bp_sig_chain: Bytes32,
     ) -> Self {
         Self {
             inner,
@@ -60,6 +74,7 @@ impl ExtendedPublicState {
             deposit_hash_chain,
             deposit_count,
             channel_reg_hash_chain,
+            bp_sig_chain,
         }
     }
 
@@ -70,6 +85,7 @@ impl ExtendedPublicState {
             self.deposit_hash_chain.to_u64_vec(),
             self.deposit_count.to_u64_vec(),
             self.channel_reg_hash_chain.to_u64_vec(),
+            self.bp_sig_chain.to_u64_vec(),
         ]
         .concat()
     }
@@ -106,6 +122,10 @@ impl ExtendedPublicState {
 
         let channel_reg_hash_chain = Bytes32::from_u64_slice(&values[cursor..cursor + BYTES32_LEN])
             .map_err(|e| ExtendedPublicStateError::Bytes32(e.to_string()))?;
+        cursor += BYTES32_LEN;
+
+        let bp_sig_chain = Bytes32::from_u64_slice(&values[cursor..cursor + BYTES32_LEN])
+            .map_err(|e| ExtendedPublicStateError::Bytes32(e.to_string()))?;
 
         Ok(Self {
             inner,
@@ -113,6 +133,7 @@ impl ExtendedPublicState {
             deposit_hash_chain,
             deposit_count,
             channel_reg_hash_chain,
+            bp_sig_chain,
         })
     }
 }
@@ -124,6 +145,7 @@ pub struct ExtendedPublicStateTarget {
     pub deposit_hash_chain: Bytes32Target,
     pub deposit_count: U63Target,
     pub channel_reg_hash_chain: Bytes32Target,
+    pub bp_sig_chain: Bytes32Target,
 }
 
 impl ExtendedPublicStateTarget {
@@ -137,6 +159,7 @@ impl ExtendedPublicStateTarget {
             deposit_hash_chain: Bytes32Target::new::<F, D>(builder, is_checked),
             deposit_count: U63Target::new(builder, is_checked),
             channel_reg_hash_chain: Bytes32Target::new::<F, D>(builder, is_checked),
+            bp_sig_chain: Bytes32Target::new::<F, D>(builder, is_checked),
         }
     }
 
@@ -159,6 +182,7 @@ impl ExtendedPublicStateTarget {
                 builder,
                 value.channel_reg_hash_chain,
             ),
+            bp_sig_chain: Bytes32Target::constant::<F, D, Bytes32>(builder, value.bp_sig_chain),
         }
     }
 
@@ -175,6 +199,7 @@ impl ExtendedPublicStateTarget {
         self.deposit_count.set_witness(witness, value.deposit_count);
         self.channel_reg_hash_chain
             .set_witness(witness, value.channel_reg_hash_chain);
+        self.bp_sig_chain.set_witness(witness, value.bp_sig_chain);
     }
 
     pub fn connect<F: RichField + Extendable<D>, const D: usize>(
@@ -190,6 +215,7 @@ impl ExtendedPublicStateTarget {
         self.deposit_count.connect(builder, &other.deposit_count);
         self.channel_reg_hash_chain
             .connect(builder, other.channel_reg_hash_chain);
+        self.bp_sig_chain.connect(builder, other.bp_sig_chain);
     }
 
     pub fn select<F: RichField + Extendable<D>, const D: usize>(
@@ -229,6 +255,12 @@ impl ExtendedPublicStateTarget {
                 when_true.channel_reg_hash_chain.clone(),
                 when_false.channel_reg_hash_chain.clone(),
             ),
+            bp_sig_chain: Bytes32Target::select(
+                builder,
+                condition,
+                when_true.bp_sig_chain.clone(),
+                when_false.bp_sig_chain.clone(),
+            ),
         }
     }
 
@@ -239,6 +271,7 @@ impl ExtendedPublicStateTarget {
             self.deposit_hash_chain.to_vec(),
             self.deposit_count.to_vec(),
             self.channel_reg_hash_chain.to_vec(),
+            self.bp_sig_chain.to_vec(),
         ]
         .concat()
     }
@@ -273,6 +306,9 @@ impl ExtendedPublicStateTarget {
 
         let channel_reg_hash_chain =
             Bytes32Target::from_slice(&values[cursor..cursor + BYTES32_LEN]);
+        cursor += BYTES32_LEN;
+
+        let bp_sig_chain = Bytes32Target::from_slice(&values[cursor..cursor + BYTES32_LEN]);
 
         Self {
             inner,
@@ -280,6 +316,7 @@ impl ExtendedPublicStateTarget {
             deposit_hash_chain,
             deposit_count,
             channel_reg_hash_chain,
+            bp_sig_chain,
         }
     }
 }

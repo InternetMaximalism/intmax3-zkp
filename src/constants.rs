@@ -23,7 +23,7 @@ pub const SENT_TX_TREE_HEIGHT: usize = 32;
 
 // Per-channel member tree (one SPHINCS+ key per member, no multisig/threshold).
 // `ChannelLeaf.member_pubkeys_root` commits the ordered member leaves
-// `MemberLeaf { sphincs_pk_hash, regev_pk_digest }`, indexed by member slot
+// `MemberLeaf { pk_g, regev_pk_digest }`, indexed by member slot
 // 0..MAX_CHANNEL_MEMBERS. Height 4 (16 leaf slots) covers the pad-to-MAX member set: a channel's
 // `member_count` active members occupy slots 0..member_count and the remaining slots are empty
 // leaves.

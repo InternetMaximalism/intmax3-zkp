@@ -36,7 +36,7 @@ use crate::{
 
 /// One channel member's registration entry.
 ///
-/// * `sphincs_pk_hash` — keccak/L1 digest form of the member's SPHINCS+ pubkey hash (32 bytes).
+/// * `pk_g` — keccak/L1 digest form of the member's Goldilocks signing public key (32 bytes).
 /// * `regev_pk_digest` — keccak/L1 digest form of the member's Regev pubkey digest (32 bytes).
 /// * `recipient` — the L1 address that receives this member's settlement (20 bytes / 5 u32 limbs).
 ///
@@ -48,7 +48,7 @@ use crate::{
 /// SECURITY (canonicality): because the circuit witnesses the identity as a `PoseidonHashOut`
 /// (4 Goldilocks limbs, each < p) and derives the 32-byte keccak form via `from_hash_out`, the L1
 /// `bytes32` registered MUST be the canonical reduction `Bytes32::from(PoseidonHashOut)` of the
-/// member's identity — i.e. `sphincs_pk_hash = Bytes32::from(Poseidon(pub_seed||pub_root))` and
+/// member's identity — i.e. `pk_g = Bytes32::from(GoldilocksSecretKey::public_key_hash_out())` and
 /// `regev_pk_digest = Bytes32::from(RegevPk::poseidon_digest())`. This is exactly the member
 /// identity the consumption side (`block_hash_chain::update_channel_tree`) proves slot inclusion
 /// against, so both sides bind the identical canonical value. A non-canonical `bytes32` simply
@@ -57,14 +57,14 @@ use crate::{
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct MemberRegEntry {
-    pub sphincs_pk_hash: Bytes32,
+    pub pk_g: Bytes32,
     pub regev_pk_digest: Bytes32,
     pub recipient: Address,
 }
 
 #[derive(Clone, Debug)]
 pub struct MemberRegEntryTarget {
-    pub sphincs_pk_hash: Bytes32Target,
+    pub pk_g: Bytes32Target,
     pub regev_pk_digest: Bytes32Target,
     pub recipient: AddressTarget,
 }
@@ -84,10 +84,10 @@ pub struct ChannelRegRecord {
 pub enum ChannelRegRecordError {
     #[error("member_count {0} out of range (must be 2..={MAX_CHANNEL_MEMBERS})")]
     MemberCountOutOfRange(u32),
-    #[error("active member {0} has a zero sphincs_pk_hash")]
-    ZeroActiveSphincsHash(usize),
-    #[error("active members {0} and {1} have equal sphincs_pk_hash (must be distinct)")]
-    DuplicateSphincsHash(usize, usize),
+    #[error("active member {0} has a zero pk_g")]
+    ZeroActivePkG(usize),
+    #[error("active members {0} and {1} have equal pk_g (must be distinct)")]
+    DuplicatePkG(usize, usize),
     #[error("padding slot {0} is not default/zero")]
     NonZeroPaddingSlot(usize),
     #[error("bp_member_slot {0} must be < member_count {1}")]
@@ -107,12 +107,12 @@ impl ChannelRegRecord {
         }
         let mc = self.member_count as usize;
         for i in 0..mc {
-            if self.members[i].sphincs_pk_hash == Bytes32::default() {
-                return Err(ChannelRegRecordError::ZeroActiveSphincsHash(i));
+            if self.members[i].pk_g == Bytes32::default() {
+                return Err(ChannelRegRecordError::ZeroActivePkG(i));
             }
             for j in (i + 1)..mc {
-                if self.members[i].sphincs_pk_hash == self.members[j].sphincs_pk_hash {
-                    return Err(ChannelRegRecordError::DuplicateSphincsHash(i, j));
+                if self.members[i].pk_g == self.members[j].pk_g {
+                    return Err(ChannelRegRecordError::DuplicatePkG(i, j));
                 }
             }
         }
@@ -134,7 +134,7 @@ impl ChannelRegRecord {
     ///
     /// Preimage u32-limb stream (each whole-word):
     /// `[ prev(8), channel_id(1), bp_member_slot(1), member_count(1),
-    ///    for i in 0..16: ( sphincs_pk_hash(8), regev_pk_digest(8), recipient(5) ) ]`
+    ///    for i in 0..16: ( pk_g(8), regev_pk_digest(8), recipient(5) ) ]`
     /// Total = 8 + 1 + 1 + 1 + 16*(8+8+5) = 11 + 336 = 347 u32. Padding slots hash their zero
     /// values. `solidity_keccak256` treats each u32 as one big-endian 4-byte word, so this stream
     /// is byte-identical to the Solidity `abi.encodePacked` preimage in
@@ -146,7 +146,7 @@ impl ChannelRegRecord {
         inputs.push(self.bp_member_slot); // 1
         inputs.push(self.member_count); // 1
         for m in self.members.iter() {
-            inputs.extend(m.sphincs_pk_hash.to_u32_vec()); // 8
+            inputs.extend(m.pk_g.to_u32_vec()); // 8
             inputs.extend(m.regev_pk_digest.to_u32_vec()); // 8
             inputs.extend(m.recipient.to_u32_vec()); // 5
         }
@@ -160,11 +160,11 @@ impl ChannelRegRecord {
 pub const CHANNEL_REG_PREIMAGE_U32_LEN: usize = 8 + 1 + 1 + 1 + MAX_CHANNEL_MEMBERS * (8 + 8 + 5);
 
 impl MemberRegEntryTarget {
-    /// The u32-limb stream for one member slot: sphincs_pk_hash(8) || regev_pk_digest(8) ||
+    /// The u32-limb stream for one member slot: pk_g(8) || regev_pk_digest(8) ||
     /// recipient(5). Mirrors [`MemberRegEntry`]'s contribution to the keccak preimage.
     pub fn to_u32_stream(&self) -> Vec<Target> {
         [
-            self.sphincs_pk_hash.to_vec(),
+            self.pk_g.to_vec(),
             self.regev_pk_digest.to_vec(),
             self.recipient.to_vec(),
         ]
@@ -175,7 +175,7 @@ impl MemberRegEntryTarget {
 /// In-circuit twin of [`ChannelRegRecord::hash_with_prev_hash`]. Builds the SAME word-aligned u32
 /// stream from targets and runs ONE `builder.keccak256`.
 ///
-/// SECURITY (R2 cross-binding): the caller supplies the SAME `sphincs_pk_hash` / `regev_pk_digest`
+/// SECURITY (R2 cross-binding): the caller supplies the SAME `pk_g` / `regev_pk_digest`
 /// 32-byte targets (split from the witnessed Poseidon member values via
 /// `Bytes32Target::from_hash_out`) that feed the Poseidon member-tree leaves. Reusing those exact
 /// targets here is what binds the keccak chain to the Poseidon `member_pubkeys_root`.
@@ -210,7 +210,7 @@ impl MemberRegEntryTarget {
         is_checked: bool,
     ) -> Self {
         Self {
-            sphincs_pk_hash: Bytes32Target::new(builder, is_checked),
+            pk_g: Bytes32Target::new(builder, is_checked),
             regev_pk_digest: Bytes32Target::new(builder, is_checked),
             recipient: AddressTarget::new(builder, is_checked),
         }
@@ -221,8 +221,8 @@ impl MemberRegEntryTarget {
         witness: &mut W,
         value: &MemberRegEntry,
     ) {
-        self.sphincs_pk_hash
-            .set_witness(witness, value.sphincs_pk_hash);
+        self.pk_g
+            .set_witness(witness, value.pk_g);
         self.regev_pk_digest
             .set_witness(witness, value.regev_pk_digest);
         self.recipient.set_witness(witness, value.recipient);
@@ -239,10 +239,10 @@ mod tests {
     fn make_record(member_count: u32) -> ChannelRegRecord {
         let mut members: [MemberRegEntry; MAX_CHANNEL_MEMBERS] = Default::default();
         for i in 0..(member_count as usize) {
-            // sphincs_pk_hash = 0x11..11 * (i+1) pattern, regev = 0x22.., recipient = 0x33..
+            // pk_g = 0x11..11 * (i+1) pattern, regev = 0x22.., recipient = 0x33..
             let s = (i as u32) + 1;
             members[i] = MemberRegEntry {
-                sphincs_pk_hash: Bytes32::from_u32_slice(&[0x1111_0000 + s; 8]).unwrap(),
+                pk_g: Bytes32::from_u32_slice(&[0x1111_0000 + s; 8]).unwrap(),
                 regev_pk_digest: Bytes32::from_u32_slice(&[0x2222_0000 + s; 8]).unwrap(),
                 recipient: Address::from_u32_slice(&[0x3333_0000 + s; 5]).unwrap(),
             };
@@ -267,7 +267,7 @@ mod tests {
         assert!(bad.validate().is_err());
         // padding slot nonzero.
         let mut bad2 = make_record(2);
-        bad2.members[5].sphincs_pk_hash = Bytes32::from_u32_slice(&[1u32; 8]).unwrap();
+        bad2.members[5].pk_g = Bytes32::from_u32_slice(&[1u32; 8]).unwrap();
         assert!(bad2.validate().is_err());
         // bp_member_slot >= member_count.
         let mut bad3 = make_record(2);
@@ -275,7 +275,7 @@ mod tests {
         assert!(bad3.validate().is_err());
         // duplicate active sphincs hash.
         let mut bad4 = make_record(2);
-        bad4.members[1].sphincs_pk_hash = bad4.members[0].sphincs_pk_hash;
+        bad4.members[1].pk_g = bad4.members[0].pk_g;
         assert!(bad4.validate().is_err());
     }
 

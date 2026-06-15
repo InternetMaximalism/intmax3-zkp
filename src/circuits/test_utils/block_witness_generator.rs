@@ -4,15 +4,13 @@ use crate::{
             account_state::AccountState,
             update_public_state::{UpdatePublicState, UpdatePublicStateError},
         },
-        test_utils::sphincs_sign::{
-            SpxKeyPair, pk_hash_from_pk_bytes, sphincs_keygen, sphincs_sign,
-        },
         validity::block_hash_chain::{
             block_hash_chain_processor::BlockHashChainProcessorWitness,
             ext_public_state::ExtendedPublicState,
-            sphincs_sig::{SmallBlockMessageFields, SpxSigWitness},
+            sphincs_sig::SmallBlockMessageFields,
         },
     },
+    poseidon_sig::GoldilocksSecretKey,
     common::{
         block::{Block, BlockError},
         channel_id::{ChannelId, ChannelIdError as UserIdError},
@@ -136,16 +134,17 @@ pub enum BlockWitnessGeneratorError {
 /// unchanged.
 pub const TEST_ACTIVE_MEMBERS: usize = 3;
 
-/// Test-only per-channel member key material (one SPHINCS+ key per member, F1-F6).
+/// Test-only per-channel member key material (one Goldilocks signing key per member, P2b).
 ///
-/// Holds the channel's `TEST_ACTIVE_MEMBERS` active SPHINCS+ keypairs + Regev public keys (slot
-/// order) and the Poseidon `MemberTree` (height MEMBER_TREE_HEIGHT, padding slots = empty leaves)
-/// whose root is committed into the channel's `ChannelLeaf`. When a slot `i` updates, `add_block`
-/// signs the block's IMSB digest with member `i`'s key and opens member `i`'s leaf at tree index
-/// `i` against this root — exactly what the live `update_channel_tree` binding now requires.
+/// Holds the channel's `TEST_ACTIVE_MEMBERS` active `GoldilocksSecretKey`s + Regev public keys
+/// (slot order) and the Poseidon `MemberTree` (height MEMBER_TREE_HEIGHT, padding slots = empty
+/// leaves) whose root is committed into the channel's `ChannelLeaf`. When the block-producer slot
+/// updates, `add_block` records the block's IMSB digest as the bp's signing message and opens the
+/// bp's leaf against this root; the actual single-sig + list proofs are produced at the validity
+/// level (P2b decision D3).
 #[derive(Debug, Clone)]
 pub struct ChannelMemberKeys {
-    pub keypairs: Vec<SpxKeyPair>,
+    pub secret_keys: Vec<GoldilocksSecretKey>,
     pub regev_pks: Vec<RegevPk>,
     pub member_tree: MemberTree,
 }
@@ -156,29 +155,29 @@ impl ChannelMemberKeys {
     /// members occupy slots `0..TEST_ACTIVE_MEMBERS`; the remaining `MemberTree` slots stay empty
     /// (pad-to-MAX D6).
     fn deterministic(channel_id: u32) -> Self {
-        let mut keypairs = Vec::with_capacity(TEST_ACTIVE_MEMBERS);
+        let mut secret_keys = Vec::with_capacity(TEST_ACTIVE_MEMBERS);
         let mut regev_pks = Vec::with_capacity(TEST_ACTIVE_MEMBERS);
         let mut member_tree = MemberTree::init();
         for slot in 0..TEST_ACTIVE_MEMBERS as u32 {
-            // Distinct 16-byte seeds per (channel, slot, role) — domain-separated by role byte.
-            let seed = |role: u8| {
-                let mut s = [0u8; 16];
-                s[0..4].copy_from_slice(&channel_id.to_le_bytes());
-                s[4..8].copy_from_slice(&slot.to_le_bytes());
-                s[8] = role;
-                s
-            };
-            let kp = sphincs_keygen(seed(1), seed(2), seed(3));
+            // Distinct 32-byte seed per (channel, slot), domain-separated so the secret keys are
+            // distinct across channels and slots. Non-zero (avoids the degenerate all-zero key the
+            // single-sig circuit rejects).
+            let mut seed = [0u8; 32];
+            seed[0..4].copy_from_slice(&channel_id.to_le_bytes());
+            seed[4..8].copy_from_slice(&slot.to_le_bytes());
+            seed[8] = 0xa5;
+            seed[31] = slot as u8 + 1;
+            let sk = GoldilocksSecretKey::from_seed(seed);
             let regev = deterministic_regev_pk(channel_id.wrapping_mul(31).wrapping_add(slot + 1));
             member_tree.push(MemberLeaf {
-                sphincs_pk_hash: pk_hash_from_pk_bytes(&kp.pk_bytes),
+                pk_g: sk.public_key_hash_out(),
                 regev_pk_digest: regev.poseidon_digest(),
             });
-            keypairs.push(kp);
+            secret_keys.push(sk);
             regev_pks.push(regev);
         }
         Self {
-            keypairs,
+            secret_keys,
             regev_pks,
             member_tree,
         }
@@ -186,7 +185,7 @@ impl ChannelMemberKeys {
 
     /// Build the on-chain [`ChannelRegRecord`] for `channel_id` from this member key material.
     ///
-    /// SECURITY (R2 cross-binding consistency): each active slot's `sphincs_pk_hash` /
+    /// SECURITY (R2 cross-binding consistency): each active slot's `pk_g` /
     /// `regev_pk_digest` is the canonical `Bytes32::from(PoseidonHashOut)` of the SAME Poseidon
     /// identity stored in `member_tree`. The `channel_reg_step` circuit witnesses these as
     /// `PoseidonHashOut` via `reduce_to_hash_out` and recomputes the member root, so the
@@ -198,7 +197,7 @@ impl ChannelMemberKeys {
         for i in 0..TEST_ACTIVE_MEMBERS {
             let leaf = self.member_tree.get_leaf(i as u64);
             members[i] = MemberRegEntry {
-                sphincs_pk_hash: Bytes32::from(leaf.sphincs_pk_hash),
+                pk_g: Bytes32::from(leaf.pk_g),
                 regev_pk_digest: Bytes32::from(leaf.regev_pk_digest),
                 // Deterministic per-(channel, slot) test recipient (keccak preimage only).
                 recipient: Address::from_u32_slice(
@@ -261,6 +260,11 @@ pub struct BlockWitnessGenerator {
     /// `channel_tree` (the registration block applies it).
     pub channel_registrations: Vec<(ChannelRegRecord, ChannelMemberKeys)>,
     pub block_chain_witness: HashMap<BlockNumber, BlockHashChainProcessorWitness>,
+    /// P2b: the ordered list of bp IMSB signing events `(bp_secret_key, IMSB_digest)` over the
+    /// whole span, in block order. The validity-level e2e turns each into a `SingleSigCircuit`
+    /// proof and folds them into one `ListCircuit` proof whose commitment must equal the final
+    /// `bp_sig_chain` (decision D3).
+    pub bp_sig_events: Vec<(GoldilocksSecretKey, Bytes32)>,
 }
 
 impl BlockWitnessGenerator {
@@ -281,6 +285,7 @@ impl BlockWitnessGenerator {
             deposit_counts: 0,
             channel_registrations: Vec::new(),
             block_chain_witness: HashMap::new(),
+            bp_sig_events: Vec::new(),
         }
     }
 
@@ -418,14 +423,12 @@ impl BlockWitnessGenerator {
         let mut prev_account_leaves = Vec::with_capacity(num_users as usize);
         let mut user_merkle_proofs = Vec::with_capacity(num_users as usize);
         let mut send_merkle_proofs = Vec::with_capacity(num_users as usize);
-        let mut sig_witnesses = Vec::with_capacity(num_users as usize);
         let mut member_merkle_proofs = Vec::with_capacity(num_users as usize);
         let mut member_regev_pks = Vec::with_capacity(num_users as usize);
         for _ in 0..num_users {
             prev_account_leaves.push(ChannelLeaf::default());
             user_merkle_proofs.push(dummy_account_proof.clone());
             send_merkle_proofs.push(dummy_send_proof.clone());
-            sig_witnesses.push(SpxSigWitness::dummy());
             member_merkle_proofs.push(dummy_member_proof.clone());
             member_regev_pks.push(dummy_regev.clone());
         }
@@ -439,7 +442,6 @@ impl BlockWitnessGenerator {
             user_merkle_proofs,
             send_merkle_proofs,
             public_state_merkle_proof,
-            sig_witnesses: Some(sig_witnesses),
             member_merkle_proofs: Some(member_merkle_proofs),
             member_regev_pks: Some(member_regev_pks),
             msg_fields: Some(SmallBlockMessageFields::default()),
@@ -504,7 +506,55 @@ impl BlockWitnessGenerator {
             self.deposit_hash_chain,
             U63::new(self.deposit_tree.len() as u64).expect("deposit count fits in 63 bits"),
             self.channel_reg_hash_chain,
+            self.current_bp_sig_chain(),
         )
+    }
+
+    /// P2b: the running bp IMSB-signature list commitment over all signing events so far (the
+    /// authoritative value the validity proof's `final.bp_sig_chain` must equal). Folds
+    /// `(IMSB_digest, bp_pk_g)` pairs with the shared `poseidon_sig::list` native helper.
+    pub fn current_bp_sig_chain(&self) -> Bytes32 {
+        let pairs: Vec<(Bytes32, Bytes32)> = self
+            .bp_sig_events
+            .iter()
+            .map(|(sk, digest)| (*digest, sk.public_key()))
+            .collect();
+        crate::poseidon_sig::list::list_commitment(&pairs)
+    }
+
+    /// P2b: build the recursive `ListCircuit` proof over all recorded bp IMSB signing events (block
+    /// order). Returns `None` when there were no signing blocks in the span (the validity circuit
+    /// then gates the list verification off). Each event becomes one `SingleSigCircuit` proof over
+    /// the bp's IMSB digest, folded into the running `ListCircuit` proof; its final commitment
+    /// equals [`Self::current_bp_sig_chain`].
+    pub fn build_bp_sig_list_proof(
+        &self,
+        single_sig: &crate::poseidon_sig::circuit::SingleSigCircuit,
+        list: &crate::poseidon_sig::list::ListCircuit,
+    ) -> anyhow::Result<
+        Option<
+            plonky2::plonk::proof::ProofWithPublicInputs<
+                plonky2::field::goldilocks_field::GoldilocksField,
+                plonky2::plonk::config::PoseidonGoldilocksConfig,
+                2,
+            >,
+        >,
+    > {
+        if self.bp_sig_events.is_empty() {
+            return Ok(None);
+        }
+        let pairs: Vec<(Bytes32, Bytes32)> = self
+            .bp_sig_events
+            .iter()
+            .map(|(sk, digest)| (*digest, sk.public_key()))
+            .collect();
+        let mut prev = None;
+        for (i, (sk, digest)) in self.bp_sig_events.iter().enumerate() {
+            let sig = single_sig.prove(sk, *digest)?;
+            let prefix = crate::poseidon_sig::list::list_commitment(&pairs[0..i]);
+            prev = Some(list.prove_append(&sig, prefix, &prev)?);
+        }
+        Ok(prev)
     }
 
     pub fn add_deposit(
@@ -689,11 +739,11 @@ impl BlockWitnessGenerator {
             let bp_hash: Bytes32 = keys
                 .member_tree
                 .get_leaf(bp_slot as u64)
-                .sphincs_pk_hash
+                .pk_g
                 .into();
             let fields = SmallBlockMessageFields {
                 bp_member_slot: bp_slot as u32,
-                bp_sphincs_pubkey_hash: bp_hash,
+                bp_pk_g: bp_hash,
                 small_block_number: 0,
                 prev_small_block_root: Bytes32::default(),
                 state_commitment_root: Bytes32::default(),
@@ -706,7 +756,6 @@ impl BlockWitnessGenerator {
             (SmallBlockMessageFields::default(), None)
         };
 
-        let mut sig_witnesses = Vec::with_capacity(num_users as usize);
         let mut member_merkle_proofs = Vec::with_capacity(num_users as usize);
         let mut member_regev_pks = Vec::with_capacity(num_users as usize);
         let dummy_member_proof = MemberMerkleProof::dummy(crate::constants::MEMBER_TREE_HEIGHT);
@@ -720,7 +769,6 @@ impl BlockWitnessGenerator {
                 prev_account_leaves.push(ChannelLeaf::default());
                 user_merkle_proofs.push(dummy_account_proof.clone());
                 send_merkle_proofs.push(dummy_send_proof.clone());
-                sig_witnesses.push(SpxSigWitness::dummy());
                 member_merkle_proofs.push(dummy_member_proof.clone());
                 member_regev_pks.push(dummy_regev.clone());
                 continue;
@@ -746,7 +794,11 @@ impl BlockWitnessGenerator {
             let send_proof = send_tree.prove(prev_user_leaf.index.into());
             send_merkle_proofs.push(send_proof.clone());
 
-            // Real member witness for an updating slot; dummy otherwise.
+            // Real member witness for the updating (bp) slot; dummy otherwise. P2b: instead of an
+            // inline SPHINCS+ signature, we record the bp's `(secret_key, IMSB_digest)` signing
+            // event so the validity level can produce the `SingleSigCircuit` proof and fold it into
+            // the `ListCircuit` proof (decision D3). The folded `(digest, pk_g)` pair is bound here
+            // via the member-leaf inclusion.
             if updating[i] {
                 let keys = member_keys.as_ref().ok_or_else(|| {
                     BlockWitnessGeneratorError::InvalidRequest(format!(
@@ -755,18 +807,11 @@ impl BlockWitnessGenerator {
                     ))
                 })?;
                 let digest = signed_digest.expect("updating slot implies a signed digest");
-                let msg_bytes: Vec<u8> = digest
-                    .to_u32_vec()
-                    .into_iter()
-                    .flat_map(|limb| (limb as u64).to_le_bytes())
-                    .collect();
-                let kp = &keys.keypairs[i];
-                let sig = sphincs_sign(&msg_bytes, kp);
-                sig_witnesses.push(SpxSigWitness::from_bytes(&kp.pk_bytes, &sig));
+                // Record the bp signing event (block order) for the list proof.
+                self.bp_sig_events.push((keys.secret_keys[i], digest));
                 member_merkle_proofs.push(keys.member_tree.prove(i as u64));
                 member_regev_pks.push(keys.regev_pks[i].clone());
             } else {
-                sig_witnesses.push(SpxSigWitness::dummy());
                 member_merkle_proofs.push(dummy_member_proof.clone());
                 member_regev_pks.push(dummy_regev.clone());
             }
@@ -817,7 +862,6 @@ impl BlockWitnessGenerator {
             send_merkle_proofs,
             public_state_merkle_proof,
             // Real per-slot member witnesses (updating slots) + dummies (padding/non-updating).
-            sig_witnesses: Some(sig_witnesses),
             member_merkle_proofs: Some(member_merkle_proofs),
             member_regev_pks: Some(member_regev_pks),
             msg_fields: Some(msg_fields),

@@ -66,7 +66,7 @@ fn with_session<T>(f: impl FnOnce(&mut Session) -> Result<T, JsValue>) -> Result
 #[serde(rename_all = "camelCase")]
 struct Identity {
     sphincs_pk_hex: String,
-    sphincs_pk_hash: String,
+    pk_g: String,
     regev_pk: crate::regev::RegevPk,
 }
 
@@ -77,7 +77,7 @@ pub fn wallet_keygen() -> Result<String, JsValue> {
     let keys = MemberKeys::generate(&mut rng);
     let identity = Identity {
         sphincs_pk_hex: hex(&keys.kp.pk_bytes),
-        sphincs_pk_hash: keys.sphincs_pk_hash().to_hex(),
+        pk_g: keys.pk_g().to_hex(),
         regev_pk: keys.regev_pk.clone(),
     };
     let json = serde_json::to_string(&identity).map_err(js_err)?;

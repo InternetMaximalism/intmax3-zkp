@@ -76,7 +76,7 @@ contract CloseLifecycleE2ETest is CloseE2EBase {
         // ── D. Drive the channel close to Closed (stub intra-channel consensus). ──
         string memory lcJson = _lifecycleJson();
         address member0 = vm.parseJsonAddress(lcJson, ".registration.recipients[0]");
-        bytes32 member0Hash = vm.parseJsonBytes32Array(lcJson, ".registration.member_sphincs_pubkey_hashes")[0];
+        bytes32 member0Hash = vm.parseJsonBytes32Array(lcJson, ".registration.member_pk_gs")[0];
 
         vm.prank(member0);
         manager.requestClose();
@@ -91,7 +91,7 @@ contract CloseLifecycleE2ETest is CloseE2EBase {
         // ── E. A member claims their split (≤ receivedChannelFunds) and pulls REAL ETH. ──
         ChannelSettlementManager.WithdrawalClaim memory claim = ChannelSettlementManager.WithdrawalClaim({
             closeIntentDigest: digest,
-            memberSphincsPubkeyHash: member0Hash,
+            memberPkG: member0Hash,
             recipient: member0,
             userAmountDigest: keccak256(abi.encodePacked(member0Hash, uint64(channelAmount))),
             amount: uint64(channelAmount),
@@ -119,7 +119,7 @@ contract CloseLifecycleE2ETest is CloseE2EBase {
     function _registerChannel(string memory lcJson) internal {
         uint32 channelId = uint32(vm.parseJsonUint(lcJson, ".registration.channel_id"));
         uint8 bpSlot = uint8(vm.parseJsonUint(lcJson, ".registration.bp_member_slot"));
-        bytes32[] memory sphincs = vm.parseJsonBytes32Array(lcJson, ".registration.member_sphincs_pubkey_hashes");
+        bytes32[] memory sphincs = vm.parseJsonBytes32Array(lcJson, ".registration.member_pk_gs");
         bytes32[] memory regev = vm.parseJsonBytes32Array(lcJson, ".registration.regev_pk_digests");
         address[] memory recipients = vm.parseJsonAddressArray(lcJson, ".registration.recipients");
         rollup.registerChannel(channelId, bpSlot, sphincs, regev, recipients);
