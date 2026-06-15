@@ -37,7 +37,7 @@
 <main>
   <section class="panel">
     <h2>1 · Identity</h2>
-    <p class="hint">Generate this member's SPHINCS+ and Regev keys (session-only; lost on reload).</p>
+    <p class="hint">Generate this member's Goldilocks + BabyBear + Regev keys (session-only; lost on reload).</p>
     <button id="btnKeygen" disabled>Generate keys</button>
     <div class="out" id="outIdentity" data-status=""></div>
   </section>
@@ -144,7 +144,7 @@ $('btnKeygen').onclick = async () => {
   const j = await call('keygen');
   const id = JSON.parse(j);
   const o = $('outIdentity');
-  o.textContent = `sphincs hash: ${id.sphincsPkHash.slice(0,18)}…  regev pk: a[${id.regevPk.a.length}]`;
+  o.textContent = `pk_g: ${id.pkG.slice(0,18)}…  pk_b: ${id.pkB.slice(0,18)}…  regev pk: a[${id.regevPk.a.length}]`;
   o.dataset.status = 'ok';
 };
 $('btnGenesis').onclick = async () => {

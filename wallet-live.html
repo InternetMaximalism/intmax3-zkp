@@ -36,7 +36,7 @@
 <main>
   <section class="panel">
     <h2>1 · Open a channel</h2>
-    <p class="hint">Generates your keys (SPHINCS+ + Regev), funds your slot, and the local CLI runs the other two members. All proving/lattice work happens in your browser.</p>
+    <p class="hint">Generates your keys (Goldilocks signing key + BabyBear hash-sig key + Regev), funds your slot, and the local CLI runs the other two members. All proving/lattice work happens in your browser.</p>
     <label>Your opening balance</label>
     <input id="openBalance" type="number" value="50" min="0" />
     <button id="btnOpen" disabled>Generate keys & open channel</button>
@@ -50,13 +50,13 @@
 
   <section class="panel">
     <h2>3 · Send</h2>
-    <p class="hint">Builds the E-1 zero-knowledge proof (~3ms) and two SPHINCS+ signatures in your browser; the signatures dominate the time. Then the other members co-sign.</p>
+    <p class="hint">Builds the Regev E-1 zero-knowledge proof (~3ms) and the sender's BabyBear hash-sig ZK proof in your browser; the ZK proving dominates the time. Then the other members co-sign (each a Goldilocks SingleSig ZK proof).</p>
     <div class="row">
       <div><label>To member slot</label><input id="toSlot" type="number" value="1" /></div>
       <div><label>Amount</label><input id="amount" type="number" value="7" /></div>
     </div>
     <button id="btnSend" disabled>Send</button>
-    <p class="hint">The wait is two SPHINCS+ signatures (post-quantum, hash-based) in-browser — ~30–140s. The Regev STARK proof itself is ~3ms. The button shows elapsed time.</p>
+    <p class="hint">The wait is the in-browser ZK proving — the sender's BabyBear Poseidon2 hash-sig proof (Plonky3) plus circuit setup; the Regev STARK itself is ~3ms. The button shows elapsed time.</p>
   </section>
 
   <div id="log"></div>
@@ -108,7 +108,7 @@ $('btnOpen').onclick = async () => {
     await step('generate keys', () => call('keygen'));
     const contribution = await step('encrypt opening balance', () => call('genesisContribution', { balance: $('openBalance').value }));
     const genesisToSign = await step('CLI builds channel (other members)', () => api('/api/init', contribution));
-    const sig = await step('sign genesis (SPHINCS+ in browser — slowest step)', () => call('signState', { slot: 0, stateJson: genesisToSign }));
+    const sig = await step('sign genesis (Goldilocks SingleSig ZK proof; first call also builds the circuit)', () => call('signState', { slot: 0, stateJson: genesisToSign }));
     const snapshot = await step('CLI collects signatures', () => api('/api/add-genesis-sig', sig));
     const r = JSON.parse(await step('import & verify channel', () => call('importChannel', { snapshotJson: snapshot })));
     mySlot = r.slot;
@@ -128,7 +128,7 @@ $('btnSend').onclick = async () => {
     $('btnSend').disabled = true;
     const to = +$('toSlot').value, amt = $('amount').value;
     if (to === mySlot) throw new Error('cannot send to yourself (slot '+mySlot+')');
-    log(`E-1 proof (~3ms) + 2 SPHINCS+ signatures (slow) for ${amt} → slot ${to}…`);
+    log(`Regev E-1 proof (~3ms) + sender BabyBear hash-sig ZK proof for ${amt} → slot ${to}…`);
     const payload = await call('send', { recipientSlot: to, amount: amt });
     log('other members co-signing…');
     const finalState = await api('/api/cosign', payload);
