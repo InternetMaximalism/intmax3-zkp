@@ -75,10 +75,11 @@ adversary can flood a victim slot with homomorphic adds, driving digit sums or
 accumulated noise past the decryption bound. The victim's balance ciphertext becomes
 undecryptable → E-3 withdrawClaimZKP unprovable → *exit-liveness DoS*.
 
-**Implemented:** `pending_adds: [u32; CHANNEL_MEMBERS]` in
+**Implemented:** `pending_adds: [u32; CHANNEL_MEMBERS]` *(D6: widened to
+`[u32; MAX_CHANNEL_MEMBERS]` = 16, all 16 hashed into H1)* in
 `src/common/balance_state.rs`, included in the H1 preimage
 (`[BALANCE_STATE_DOMAIN, channel_id, d0, d1, d2, settled_tx_chain, split_u64(state_version),
-pending_adds[0..3]]`), so the counters are co-signed and cannot be silently rewound.
+pending_adds[0..3]]` *(D6: all 16 slots)*), so the counters are co-signed and cannot be silently rewound.
 
 **Co-sign rules:** +1 on the receiving slot per homomorphic add; co-signers MUST reject
 an add when the slot counter is at `MAX_HOMO_ADDS_BEFORE_REFRESH` (64); the counter
@@ -89,7 +90,7 @@ refresh proof).
 
 ## D4 — Close circuit: full recursive balance-proof verification + 3/3 SPHINCS+ signatures
 
-The close circuit (`src/circuits/channel/close_circuit.rs`, 77 public inputs) goes
+The close circuit (`src/circuits/channel/close_circuit.rs`, 77 public inputs *(→85 in D5, →86 in D6)*) goes
 beyond the minimal §F-3 sketch and fully internalizes the close validity argument:
 
 - **Recursive verification of `finalBalanceProof`:** the balance circuit's verifier key
@@ -100,7 +101,7 @@ beyond the minimal §F-3 sketch and fully internalizes the close validity argume
   fields (including `pending_adds`, D3) rather than trusting a claimed digest.
 - **IMCH digest recompute:** `ChannelState::signing_digest()` is recomputed in-circuit
   (keccak), internalizing `hash(H1, H2)` via the balance-root slot.
-- **3/3 member SPHINCS+ signatures** over the recomputed IMCH digest are verified
+- **3/3 member SPHINCS+ signatures** *(→ N-of-N gated over 16 slots in D6)* over the recomputed IMCH digest are verified
   in-circuit (7856-byte signatures, 8 u32-limb digest serialization).
 
 Shared mutually-binding structure: the in-circuit keccak preimages (IMBS/IMCH/IMCL/IMCI)
@@ -133,7 +134,7 @@ re-interpreted as "active member slots" (still in the block-hash preimage).
 
 **DB — Poseidon in-circuit member tree + keccak `ChannelRecord` L1 anchor.** The Regev/key
 binding is a **Poseidon `MemberTree`** (`src/common/trees/key_tree.rs`,
-`MEMBER_TREE_HEIGHT = 2`, leaf `MemberLeaf { sphincs_pk_hash, regev_pk_digest }`,
+`MEMBER_TREE_HEIGHT = 2` *(superseded by D6: height 4 = 16 leaves)*, leaf `MemberLeaf { sphincs_pk_hash, regev_pk_digest }`,
 `MEMBER_LEAF_DOMAIN` "MBLF"); its root is `ChannelLeaf.member_pubkeys_root`. The L1 anchor
 stays the existing **keccak** `ChannelRecord` digest (IMCR) plus the close PI
 `member_set_commitment` (keccak, `CLOSE_MEMBER_SET_DOMAIN` "IMCM" `0x494d434d`). Both are
@@ -182,7 +183,7 @@ circuit already verified 3/3.
 `SKIP_GROTH16=true forge test` pass; the withdrawal/post-close/special-close close-intent
 shared vectors are re-pinned and pass.
 
-**Registration-reconciliation follow-up (deferred; detail2 §K-6).** The in-circuit binding
+**Registration-reconciliation follow-up (deferred; detail2 §K-6) — (resolved by D7).** The in-circuit binding
 is implemented and unit-tested, but the **registration mechanism that populates
 `member_pubkeys_root` into the genesis/account tree** so the binding has a real registered
 root to open against is **not** wired up: the balance circuit's genesis hardcodes an empty
@@ -278,7 +279,7 @@ is already active in the target submodule. The MLE fixture is regenerated for th
 
 **Note (remaining items):** D5's **one-key registration follow-up (§K-6, registration soundness = genesis-trust) is
 still outstanding**, and applies equally to N members. The updating-block path in `e2e.rs` is still red due to that
-registration gap (not resolved in this F7).
+registration gap (not resolved in this F7) *(resolved in D7)*.
 
 ---
 
@@ -343,7 +344,7 @@ serializer.
    under the channel's Poseidon `member_pubkeys_root` (negative test
    `update_user_tree_rejects_pubkey_not_in_member_tree`). The residual piece is the
    registration mechanism that anchors that root into the genesis/account tree — see D5's
-   "Registration-reconciliation follow-up" and §K-6.
+   "Registration-reconciliation follow-up" and §K-6 — **(resolved by D7).**
 2. **M7 signed-but-unsettled race (§K-1)** — semantics to be fixed in abstract3.
 3. **`publishRegevPk` full registration ceremony (§K-4)** — current state: pk
    validation + `regev_pk_root` anchoring only.

@@ -65,7 +65,7 @@ Follows the `channel_params` of the port source `SIS-lattice-paymentchannel/crat
 | `n` (ring degree) | **128** (power of 2, requires ≥ 64) | Number of coefficients of one polynomial |
 | `eta` (noise) | 2 | CBD (centered binomial) parameter |
 | `plain_bits` | 8 | Plaintext bits per coefficient |
-| Amount type | `u64` | Encoded into 8 bits × 8 coefficients (remaining coefficients are 0) |
+| Amount type | `u64` | Encoded into 8 bits × 8 coefficients (remaining coefficients are 0) *(superseded by D1: 1 bit/coefficient × 64 coefficients, t=256)* |
 
 ### B-2. Types and sizes
 
@@ -102,12 +102,13 @@ pub struct RegevCiphertext {
   This way, the sender-side ct's noise does not accumulate.
 - The recipient-side ct accumulates noise via homomorphic addition. It is mandatory that **for every `MAX_HOMO_ADDS_BEFORE_REFRESH` additions,
   the recipient themselves performs a fresh re-encryption (refresh) in the version where they next author state**.
-  The validity of refresh is also proved by the same "plaintext equality" STARK as `channelTxZKP` (the special case delta = 0).
+  The validity of refresh is proved by a separate `RefreshAir` (a combined Decrypt+Encrypt AIR proving plaintext
+  equality in-circuit), **not** by `channelTxZKP` with delta = 0 (see D2, `src/regev/transfer_stark.rs`).
 - Noise condition (decryption correctness): the ∞-norm of the accumulated noise must be less than `q / 2^(plain_bits+1)`.
   `MAX_HOMO_ADDS_BEFORE_REFRESH` is derived from the per-ct noise upper bound of CBD (eta=2).
-  > **SECURITY (requires approval)**: This document sets the provisional value `MAX_HOMO_ADDS_BEFORE_REFRESH = 64`, but
-  > this is an unverified security parameter. Before implementation, perform a rigorous noise analysis (including the
-  > decryption failure rate) for eta=2 / n=128 / q=BabyBear, and obtain user approval.
+  > **SECURITY (approved)**: `MAX_HOMO_ADDS_BEFORE_REFRESH = 64` is an **approved** security parameter
+  > (see D1 in detail2-implementation-notes.md and `docs/regev-noise-analysis.md`: worst-case digit headroom ≈ 4×,
+  > noise headroom ≈ 120×, zero decryption-failure within the budget for eta=2 / n=128 / q=BabyBear).
   > Do not change it silently (CLAUDE.md general rule).
 
 ### B-4. ZK proof systems
@@ -152,8 +153,9 @@ impl BalanceState {
     /// H1 = hash(BalanceState). Does not include the proof object (all components known at signing time)
     pub fn h1(&self) -> Bytes32 {
         // order: [BALANCE_STATE_DOMAIN, channel_id, member_count,
-        //        enc_balances[0..16].digest(), pending_adds[0..16],   // fixed 16 slots (D6)
-        //        settled_tx_chain, split_u64(state_version)] → keccak256
+        //        enc_balances[0..16].digest(), settled_tx_chain,
+        //        split_u64(state_version), pending_adds[0..16]]   // fixed 16 slots (D6)
+        //        → keccak256 (src/common/balance_state.rs:102-112)
     }
 }
 /// Agreement / signing target (abstract2.md: balanceStateHash = hash(H1, H2))
@@ -294,17 +296,18 @@ The preimage of `signing_digest()` (domain `0x494d5342` "IMSB") updates only the
 | `PostCloseIncomingClaim` (`channel.rs:856-`) | [Chg] make `receiver_amount` a `RegevCiphertext`. Member identification `receiver_user_id: UserId` → **`receiver_sphincs_pubkey_hash: Bytes32`** (DA). Implementation of abstract2.md §3.5.5 `claimLateTx`. `lateBalanceProof` is verified inside `claim_proof`, and is managed as a **separate variable** from `finalBalanceProof` (also separated in contract storage via the `usedSharedNativeNullifiers` family). |
 | `SpecialClose` / `CancelClose` | [Chg] hash only the member identifiers to pubkey hashes (`SpecialClose`'s censorship BP designation = `offending_bp_member_slot: u8` + `offending_bp_sphincs_pubkey_hash: Bytes32`, DA). Otherwise [Keep] (additional defenses outside the scope of abstract2.md. Retained since they are additions that do not weaken the safety properties. §I-3) |
 
-**[New] close PI's `member_set_commitment` (F5 SECURITY, DB)**: the full channel-close circuit
-**exposes `member_set_commitment = keccak([CLOSE_MEMBER_SET_DOMAIN, sphincs_pk_hash_0(8), sphincs_pk_hash_1(8),
-sphincs_pk_hash_2(8)])`** (`close_member_set_commitment`, domain `CLOSE_MEMBER_SET_DOMAIN = 0x494d434d`
-"IMCM") **in the last 8 limbs of the close PI**. L1 (`ChannelSettlementManager`) recomputes the same keccak from the registered
-`member_sphincs_pubkey_hashes` and reconciles, **binding that the keys whose 3/3 signatures were verified inside the circuit
+**[New] close PI's `member_set_commitment` (F5 SECURITY, DB; D6)**: the full channel-close circuit
+**exposes `member_set_commitment = keccak([CLOSE_MEMBER_SET_DOMAIN, member_count(1), sphincs_pk_hash_0(8) …
+sphincs_pk_hash_15(8)])`** (fixed 16-slot keccak, padding slots zeroed, D6; `close_member_set_commitment`,
+domain `CLOSE_MEMBER_SET_DOMAIN = 0x494d434d` "IMCM") (code: `src/common/channel.rs:1079-1097`). It
+**occupies close-PI limbs 78–85**, and `member_count` (1 limb) is appended last (limb 86)
+(`close_pis.rs:24-27`). L1 (`ChannelSettlementManager`) recomputes the same keccak from the registered
+`member_sphincs_pubkey_hashes` + `member_count` and reconciles, **binding that the keys whose N-of-N signatures were verified inside the circuit
 are the registered member set of that channel** (excluding signature substitution by non-member keys).
-Since it is appended to the end of the PI, the existing close-intent shared vector (the 77-limb portion) does not shift.
 
 ### C-9. [Keep/Del] base-layer types
 
-`Transfer` (`transfer.rs:34-39`, TRANSFER_LEN = 9), `SettledTransfer` (including the nullifier),
+`Transfer` (`transfer.rs:34-42`, TRANSFER_LEN = 25), `SettledTransfer` (including the nullifier),
 `Block`, `PublicState`, `ValidityPublicInputs`, `ChannelId` — all unchanged.
 
 - **[Del]** `KeyId` / `UserId` / `KeyRecord` (and `KEY_RECORD_DOMAIN`) were **deleted** (DA/DC, §D5).
@@ -381,6 +384,11 @@ The old `LatticeBindingVerifier` / `LatticeProofPurpose::{TransferAmount, Balanc
 `ReceiverDeltaApplicationWitness` / `InChannelTransferUpdateWitness` are abolished.
 The external helper process (`tools/lattice-proof-helper`) is also abolished, and the Plonky3 STARK is verified in-process.
 
+> **Note (D2):** `RegevProofPurpose` is defined in `src/regev` and only re-exported by
+> `state_update_verifier.rs:14`. The four shipped AIRs that back these purposes are
+> `DualKeyTransferAir` (E-1) / `ChannelUpdateAir` (E-2) / `DecryptionAir` (E-3) / `RefreshAir` (§B-3 refresh)
+> in `src/regev/transfer_stark.rs` — refresh is a separate `RefreshAir`, not E-1 with delta = 0.
+
 ---
 
 ## F. Changes to the balance / validity circuits
@@ -417,16 +425,17 @@ state↔proof correspondence can be mechanically verified by the
 ### F-3. ChannelClosePublicInputs (`close_pis.rs`)
 
 Added fields: `final_state_version: u64` (2 limbs), `final_settled_tx_chain: Bytes32` (8 limbs),
-**`member_set_commitment: Bytes32` (8 limbs, §C-8, appended at the end)**.
+**`member_set_commitment: Bytes32` (8 limbs, §C-8) + `member_count` (1 limb, appended last, D6)**.
 `final_channel_balance_root` is renamed to `final_balance_state_h1`.
-**`CHANNEL_CLOSE_PUBLIC_INPUTS_LEN = 77 → 85`** (adds `member_set_commitment` as the last 8 limbs.
+**`CHANNEL_CLOSE_PUBLIC_INPUTS_LEN = 77 → 86`** (adds `member_set_commitment` as 8 limbs plus a trailing
+`member_count` limb, D6; code: `close_pis.rs:28 = 86`, `ChannelSettlementVerifier.sol:217` "Total = 86 limbs".
 Since the existing layout of the 77 limbs is unchanged, the close-intent shared vector is preserved).
 
 Other close PIs (the 2→8 limbs expansion of member identifiers accompanying DA):
 
 | Circuit | PI length | Change |
 |---|---|---|
-| close (`close_pis.rs`) | **77 → 85** | append `member_set_commitment` (8) at the end |
+| close (`close_pis.rs`) | **77 → 86** | append `member_set_commitment` (8) + `member_count` (1) at the end (D6) |
 | withdrawal claim (`withdrawal_claim_pis.rs`) | **42 → 48** | `user_id` (2) → `member_sphincs_pubkey_hash` (8) |
 | post-close claim (`post_close_claim_pis.rs`) | **34 → 40** | `receiver_user_id` (2) → `receiver_pubkey_hash` (8) |
 | cancel close (`cancel_close_pis.rs`) | **41** (unchanged) | The PI is channel_id only. Only removal of `UserId`/`KeyId` on the witness side |
@@ -448,7 +457,7 @@ Other close PIs (the 2→8 limbs expansion of member identifiers accompanying DA
 | `SIGN_TIMEOUT_SECS` | **180** | abstract2.md §2.5 (3 min). Replaces old `SMALL_BLOCK_SIGNATURE_TIMEOUT_SECS = 60` |
 | `GRACE_BEFORE_PROCESS_SECS` | **600** | abstract2.md §2.5 (10 min). §H-2 |
 | `CHALLENGE_PERIOD_SECS` | **86,400** | abstract2.md §2.5 (1 day). Set to the immutable `challengePeriod` of `ChannelSettlementManager` |
-| `MAX_HOMO_ADDS_BEFORE_REFRESH` | **64 (provisional, requires approval)** | §B-3 |
+| `MAX_HOMO_ADDS_BEFORE_REFRESH` | **64 (approved — see D1 and docs/regev-noise-analysis.md)** | §B-3 |
 | `REGEV_N` / `REGEV_ETA` / `REGEV_PLAIN_BITS` | 128 / 2 / 8 | §B-1 |
 
 ### G-2. Newly established domain constants (non-collision with existing IMxx confirmed)
@@ -502,10 +511,10 @@ and `IMKR` (`KEY_RECORD_DOMAIN`) and the threshold / num_keys constants (DA/DC, 
 | abstract2.md | Implementation (updated version) | Change |
 |---|---|---|
 | §3.5.1 `requestClose` | **[New] `requestClose()`**: immediately makes `channelStatus` `ClosePending` and records `closeRequestedAt = block.timestamp` (the signal to stop signing. `isNativeSendAllowed` becomes false) | Since the current contract does not separate request/startProcess, **a function is added** |
-| §3.5.2 `startProcess` | Add **`require(block.timestamp ≥ closeRequestedAt + GRACE_BEFORE_PROCESS_SECS)`** to `submitCloseIntent(CloseIntent, proof)` (`ChannelSettlementManager.sol:331-387`). Add to L1 verification: **(new) "the PI `settled_tx_chain` of `finalBalanceProof` == `CloseIntent.final_settled_tx_chain`" "all member signatures are over a `hash(H1,H2)`-family digest"** | Adding chain reconciliation is the core of v2 |
-| §3.5.3 `challenge` | Existing "replacement by a newer close intent within the challenge period" (the ClosePending branch inside `331-387`). Change the replacement order from `(final_epoch, closeNonce)` to **`(final_epoch, final_state_version)`**. Perform chain reconciliation for each submission | To `final_state_version` comparison |
-| §3.5.4 `closeAndWithdraw` | `finalizeClose()` (`498-524`) → each member's `submitWithdrawalClaim` (`526-569`, claim_proof = withdrawClaimZKP §E-3) → `claimWithdrawalCredit()` (`610-615`). **Σ(withdrawals) ≤ withdrawCap** is enforced by the existing `totalWithdrawn + amount ≤ finalizedChannelFundAmount`. `closeBurnTx` is submitted to L1 as `burn_tx_hash` + L2 burn processing (no signature required, §D table row 4) | The contents of claim_proof become Regev-based |
-| §3.5.5 `claimLateTx` | `submitPostCloseClaim` (`571-608`). `lateBalanceProof` is verified inside claim_proof, with `usedSharedNativeNullifiers` preventing double receipt | [Keep] |
+| §3.5.2 `startProcess` | Add **`require(block.timestamp ≥ closeRequestedAt + GRACE_BEFORE_PROCESS_SECS)`** to `submitCloseIntent(CloseIntent, proof)` (`ChannelSettlementManager.sol:submitCloseIntent` :558; GRACE check :587). Add to L1 verification: **(new) "the PI `settled_tx_chain` of `finalBalanceProof` == `CloseIntent.final_settled_tx_chain`" "all member signatures are over a `hash(H1,H2)`-family digest"** | Adding chain reconciliation is the core of v2 |
+| §3.5.3 `challenge` | Existing "replacement by a newer close intent within the challenge period" (the ClosePending branch inside `submitCloseIntent`). Change the replacement order from `(final_epoch, closeNonce)` to **`(final_epoch, final_state_version)`**. Perform chain reconciliation for each submission | To `final_state_version` comparison |
+| §3.5.4 `closeAndWithdraw` | `finalizeClose()` (`:752`) → each member's `submitWithdrawalClaim` (`:785`, claim_proof = withdrawClaimZKP §E-3) → `claimWithdrawalCredit()` (`:905`). **Σ(withdrawals) ≤ withdrawCap** is enforced by the existing `totalWithdrawn + amount ≤ finalizedChannelFundAmount`. `closeBurnTx` is submitted to L1 as `burn_tx_hash` + L2 burn processing (no signature required, §D table row 4) | The contents of claim_proof become Regev-based |
+| §3.5.5 `claimLateTx` | `submitPostCloseClaim` (`:835`). `lateBalanceProof` is verified inside claim_proof, with `usedSharedNativeNullifiers` preventing double receipt | [Keep] |
 
 ### H-3. Implementation-specific additional defenses (outside the scope of abstract2.md, retained)
 
@@ -556,7 +565,14 @@ Thereby "the all-signed state of the highest version is uniquely determined" (co
 
 `src/common/transfer.rs` (`Transfer` / `SettledTransfer` / nullifier), `src/common/block.rs`,
 `src/common/public_state.rs`, `src/utils/hash_chain/`, the SPHINCS+ family
-(`sphincs_sig.rs`), the postBlock / deposit pipeline of `IntmaxRollup.sol`, the MLE/WHIR wrapper.
+(`sphincs_sig.rs`), the MLE/WHIR wrapper.
+
+> **Update — `IntmaxRollup.sol` is no longer "Unchanged".** Its escrow / withdraw / registration
+> surface changed: payable `deposit()` escrow tracked by `totalEscrowed` (`IntmaxRollup.sol:428,723-737`),
+> `withdrawNative()` (`:1155`), `withdraw()` (`:1060`), `reclaimStake()` (`:1117`), and
+> `registerChannel()` (`:789`, the D7 on-chain registration surface). `finalize` / `fraudProof` / `verify`
+> are now MLE/WHIR-only with Groth16 removed (D6 — see the D6 Change B note above). Only the
+> postBlock / deposit ingestion flow is structurally as before.
 
 > **Update (D6 Change B):** `IntmaxRollup`'s `finalize` / `fraudProof` / `verify` / `fullVerify` become
 > **MLE/WHIR-only**, removing Groth16 (no longer taking `Groth16Params`). The validity-PI binding that
@@ -602,10 +618,13 @@ Thereby "the all-signed state of the highest version is uniquely determined" (co
    encrypted with one's own key) is to be designed at implementation time.
 5. **Following up the Lean model**: reflect `final_state_version` comparison, the 1 block = 1 tx degeneration, and the refresh operation
    into the v3 revision of ChannelSafety2.lean (parameterizing the signature of `Apply`).
-6. **Registration mechanism (genesis ingestion of the member tree)** (DA/DB, §D5): the in-circuit binding
-   (`update_channel_tree` proving slot inclusion under `member_pubkeys_root`) is **implemented and unit-tested**,
-   but the **registration path that injects the root (`member_pubkeys_root`) that this binding reconciles against into the genesis / account tree** is
-   not in place (the balance circuit's genesis hard-codes an empty account tree at `switch_board.rs:230`).
-   Currently it is **registration soundness = genesis-trust** (per channel, the premise of `intmax3-channel-mvp.md`), and
-   consistency with a registered genesis is a follow-up. Accordingly, **close's full-stack e2e is red at the registration block**
-   (the negative test of the binding itself is green, see §D5).
+6. **Registration mechanism (genesis ingestion of the member tree)** (DA/DB, §D5) — **RESOLVED by D7.**
+   The in-circuit binding (`update_channel_tree` proving slot inclusion under `member_pubkeys_root`) is
+   implemented and unit-tested, and the registration path is now in place: channels enter via a **registration
+   block** (`src/circuits/validity/channel_reg_hash_chain/` + `src/common/channel_registration.rs` +
+   `IntmaxRollup.registerChannel`), whose ZK proof deterministically rebuilds the channel tree from the on-chain
+   registration hash chain (mirroring the deposit mechanism). `tests/e2e.rs:94` calls `add_channel_registration`
+   and the full-stack e2e (register block → deposit → transfer → close) **PASSES**. The
+   `switch_board.rs:230` empty-genesis is **intentional** — channels enter through a registration block, not
+   genesis. (Residual unification items between the validity-path and close-path registration surfaces are
+   tracked in D7's "Residual".)
