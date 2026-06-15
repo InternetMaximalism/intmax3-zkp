@@ -884,6 +884,79 @@ pub fn verify_poseidon2_poc(proof_bytes: &[u8]) -> Result<(), RegevError> {
     Ok(())
 }
 
+// ---------------------------------------------------------------------------
+// P3-3: Poseidon2 hash-signature prove / verify (standalone binding AIR)
+// ---------------------------------------------------------------------------
+
+/// Prove the Poseidon2-BabyBear hash signature for `(sk, m)`: knowledge of `sk_b` such that
+/// `pk_b = Poseidon2([DOMAIN_PK_B] ‖ sk_b)` and `sig_b = Poseidon2_sponge([DOMAIN_SIG_B] ‖ sk_b ‖
+/// m)`, with public values `[pk_b ‖ m]` ([`Poseidon2HashSigAir`]). Returns the postcard-serialized
+/// proof and its public values (the caller binds the PVs to the channel-tx digest off-chain, P3-5).
+pub fn prove_hash_sig(
+    level: RegevSecurityLevel,
+    sk: &super::hash_sig::BabyBearSecretKey,
+    m_limbs: &[F; super::hash_sig::MSG_LIMBS],
+) -> Result<(Vec<u8>, Vec<F>), RegevError> {
+    let (trace, pvs, _sig_b) = super::hash_sig::generate_hash_sig_trace(sk, m_limbs);
+    let air = super::hash_sig::Poseidon2HashSigAir::new();
+    let proof = prove_one(&level.config(), &air, &trace, pvs.clone())?;
+    Ok((proof, pvs))
+}
+
+/// Test-only: prove the hash-sig AIR from an arbitrary (possibly adversarially crafted) trace,
+/// at the `Test` security level. Used by the padding-forgery negative test to splice a foreign
+/// permutation into a padding row and confirm the binding still holds.
+#[doc(hidden)]
+pub fn prove_one_test_hash_sig(
+    trace: &RowMajorMatrix<F>,
+    public_values: Vec<F>,
+) -> Result<Vec<u8>, RegevError> {
+    let air = super::hash_sig::Poseidon2HashSigAir::new();
+    prove_one(&test_config(), &air, trace, public_values)
+}
+
+/// Verify a Poseidon2 hash-signature proof against the supplied public values `[pk_b ‖ m]`.
+///
+/// SECURITY: the public values are caller-supplied (the off-chain verifier recomputes `pk_b` from
+/// the registered `MemberLeaf` and `m` from the channel-tx digest, P3-5). They are absorbed into
+/// the Fiat-Shamir transcript by `verify_batch`, so a proof for a different `(pk_b, m)` is rejected.
+pub fn verify_hash_sig(
+    level: RegevSecurityLevel,
+    proof_bytes: &[u8],
+    public_values: &[F],
+) -> Result<(), RegevError> {
+    regev_plonky3::init_thread_pool();
+    if public_values.len() != super::hash_sig::HASH_SIG_NUM_PV {
+        return Err(RegevError::ProofVerification(format!(
+            "hash-sig: expected {} public values, got {}",
+            super::hash_sig::HASH_SIG_NUM_PV,
+            public_values.len()
+        )));
+    }
+    let config = level.config();
+    let mut air = super::hash_sig::Poseidon2HashSigAir::new();
+    let proof: BatchProof<RegevStarkConfig> =
+        postcard::from_bytes(proof_bytes).map_err(|e| RegevError::ProofCodec(e.to_string()))?;
+    // SECURITY (shape check, mirrors `verify_one`): pin the instance count and trace height BEFORE
+    // `verify_batch`, so a malformed-height proof is rejected early rather than reaching FRI-domain
+    // construction. The hash-sig trace is exactly `HASH_SIG_HEIGHT` rows (one instance).
+    let expected_db =
+        super::hash_sig::HASH_SIG_HEIGHT.trailing_zeros() as usize + config.is_zk();
+    if proof.degree_bits.len() != 1 || proof.degree_bits[0] != expected_db {
+        return Err(RegevError::ProofVerification(
+            "hash-sig: proof shape: expected one instance with trace height == HASH_SIG_HEIGHT"
+                .to_string(),
+        ));
+    }
+    let lookups = air.get_lookups();
+    let airs = vec![air];
+    let common = CommonData::new(None, vec![lookups]);
+    let pvs: Vec<Vec<F>> = vec![public_values.to_vec()];
+    stark::verify_batch(&config, &airs, &proof, &pvs, &common)
+        .map_err(|e| RegevError::ProofVerification(format!("{e:?}")))?;
+    Ok(())
+}
+
 /// Horner evaluation of a base-field coefficient vector at the extension-field point `z`.
 fn eval_at(coeffs: impl DoubleEndedIterator<Item = F>, z: Challenge) -> Challenge {
     coeffs

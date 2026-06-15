@@ -2260,8 +2260,6 @@ dependencies = [
 [[package]]
 name = "p3-poseidon2-air"
 version = "0.5.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8ebddb36356d46d5194a937eb4a033bfac2fde09876a8a6ea46c47342c7026cf"
 dependencies = [
  "p3-air 0.5.3",
  "p3-field 0.5.3",

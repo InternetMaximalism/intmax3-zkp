@@ -126,13 +126,24 @@ ZK hash-signature and removes SPHINCS+ entirely.
   membership check reads it). Registration carries `pk_b`.
 
 ## Falsifiable steps
-- [ ] P3-1. `p3-poseidon2-air@0.5.3` dep; integrate Poseidon2BabyBear<16> + its round constants;
-      prove/verify a Poseidon2Air via the repo's BabyBear stark config (LookupAir no-op wrapper if
-      needed). De-risk PoC first (prove+verify a known permutation) before building the hash-sig.
-- [ ] P3-2. Native BabyBear primitive: `sk_b` keygen, `pk_b = Poseidon2([DOMAIN_PK_B]‖sk_b)`,
-      `sig_b = Poseidon2([DOMAIN_SIG_B]‖sk_b‖m_limbs)`; injective 16-bit digest re-decomposition.
-- [ ] P3-3. `Poseidon2HashSigAir`: PVs expose `pk_b` + the message limbs; witness `sk_b`; constrain
-      `pk_b = Poseidon2(sk_b)` and `sig_b = Poseidon2(sk_b, m)`; non-degenerate sk_b.
+- [x] P3-1. `p3-poseidon2-air@0.5.3` integrated; Poseidon2Air PoC proves+verifies via the regev 0.5.3
+      batch-stark and matches `default_babybear_poseidon2_16().permute()` bit-for-bit. (commit `049c768`)
+- [x] P3-2. Native BabyBear primitive: `sk_b` 9 limbs (all-zero/non-canonical rejected), `pk_b`,
+      `sig_b` rate-8 sponge (witness-only), injective 16×16-bit digest decomposition. (commit `049c768`)
+- [x] P3-3. `Poseidon2HashSigAir` (binding AIR) — **DONE + security-reviewed (no soundness hole)**.
+      Vendor route (composition needed extra binding-tail columns; the upstream whole-row `eval` /
+      `Poseidon2Cols` fixed width can't hold them): `vendor/p3-poseidon2-air-0.5.3` with a
+      VISIBILITY-ONLY diff (`pub(crate) fn eval` → `pub fn eval`, audited body byte-for-byte upstream).
+      Row = `[Poseidon2Cols | selectors(6)+sk(9)]`; calls the audited `eval` per row, adds one-hot-gated
+      cross-row binding (pk input/output, sponge chaining over all 16 m-limbs, sk broadcast). sk≠0 is
+      OUT of the AIR (keygen/verifier, locked). Independent review verdict: selector schedule forced,
+      all PVs bound, degree-3 override correct (actual==3, not attacker-controlled), padding non-forging,
+      native≡in-circuit. Hardening applied from review: `verify_hash_sig` degree_bits/height shape check
+      (mirrors `verify_one`); +3 constraint-level negative tests (selector-tamper, sk-not-broadcast,
+      chaining-tamper). 20/20 `regev::hash_sig` tests green.
+      Review notes carried to P3-5: production verify path must use `default_config` (84 queries), not
+      `test_config` (8 queries ≈ 8-bit, tests only); `max_constraint_degree==Some(3)` is load-bearing
+      (release-mode guard is `debug_assert`) — the prove/verify + native-equality tests are the sentinel.
 - [ ] P3-4. `ChannelTx`: replace `sender_signature: SignatureBytes` (SPHINCS+) with the hash-sig proof
       envelope + `sender_pk_b`. Keep `sender_pk_g` (member identity).
 - [ ] P3-5. Off-chain verifier (`RealRegevProofVerifier`/`verify_channel_tx` caller/`wallet_core`):

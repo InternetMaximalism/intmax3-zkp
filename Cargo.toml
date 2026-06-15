@@ -180,6 +180,13 @@ p3-field-0503 = { path = "vendor/p3-field-0.5.3", package = "p3-field" }
 p3-fri-0503 = { path = "vendor/p3-fri-0.5.3", package = "p3-fri" }
 p3-merkle-tree-0503 = { path = "vendor/p3-merkle-tree-0.5.3", package = "p3-merkle-tree" }
 p3-uni-stark-0503 = { path = "vendor/p3-uni-stark-0.5.3", package = "p3-uni-stark" }
+# Vendored p3-poseidon2-air 0.5.3 with a VISIBILITY-ONLY change (`pub(crate) fn eval`
+# -> `pub fn eval`, see vendor/p3-poseidon2-air-0.5.3/src/air.rs). This exposes the
+# upstream whole-permutation constraint evaluator so the P3-3 hash-sig wrapper AIR
+# (a wider `[Poseidon2Cols | binding_cols]` row) can invoke it on the Poseidon2Cols
+# prefix and add cross-row binding constraints. NO constraint logic is changed; the
+# audited round-constraint body is byte-for-byte upstream.
+p3-poseidon2-air-0503 = { path = "vendor/p3-poseidon2-air-0.5.3", package = "p3-poseidon2-air" }
 
 [profile.release]
 opt-level = 3
