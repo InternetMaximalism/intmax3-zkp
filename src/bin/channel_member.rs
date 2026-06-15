@@ -233,7 +233,7 @@ fn cmd_send(args: &[String]) {
 fn cmd_cosign(args: &[String]) {
     let in_path = args.get(1).unwrap_or_else(|| die("cosign <payload_or_state.json> <out>"));
     let out_path = args.get(2).map(String::as_str).unwrap_or("cosigned_state.json");
-    let state = load_state();
+    let mut state = load_state();
 
     // SECURITY: require a SendPayload (which carries the ChannelTx + E-1 proof) so EVERY cosigner
     // re-verifies the transition before signing — never sign a bare state we did not validate.
@@ -279,6 +279,14 @@ fn cmd_cosign(args: &[String]) {
     let signed: Vec<u8> = next_state.member_signatures.iter().map(|s| s.member_slot).collect();
     println!("co-signed → {out_path}. Signatures now present for slots {signed:?} (need 0..{}).",
         state.snapshot.record.member_count);
+
+    // DEMO: advance this CLI member's stored head to the just-cosigned state so SEQUENTIAL sends
+    // work. Without this, cli_state stays at the genesis head and the 2nd send fails "payload does
+    // not extend the current head". The browser finalizes exactly what we cosigned in this single
+    // relay flow, so advancing optimistically is safe here; a real multi-party deployment would
+    // advance only on confirmed finalization.
+    state.snapshot.state = next_state;
+    save_state(&state);
 }
 
 fn cmd_finalize(args: &[String]) {
