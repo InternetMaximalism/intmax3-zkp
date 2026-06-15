@@ -49,7 +49,7 @@ pub enum WithdrawalCircuitError {
 #[serde(rename_all = "camelCase")]
 pub struct WithdrawalProofPublicInputs {
     pub withdrawal_hash: Bytes32,
-    pub withdrawal_aggregator: Address,
+    pub withdrawal_prover: Address,
     pub ext_public_state_commitment: Bytes32,
     pub block_number: BlockNumber,
 }
@@ -58,7 +58,7 @@ impl WithdrawalProofPublicInputs {
     pub fn to_u32_vec(&self) -> Vec<u32> {
         let vec = [
             self.withdrawal_hash.to_u32_vec(),
-            self.withdrawal_aggregator.to_u32_vec(),
+            self.withdrawal_prover.to_u32_vec(),
             self.ext_public_state_commitment.to_u32_vec(),
             self.block_number.to_u32_vec(),
         ]
@@ -79,7 +79,7 @@ impl WithdrawalProofPublicInputs {
         let withdrawal_hash =
             Bytes32::from_u32_slice(&slice[cursor..cursor + BYTES32_LEN]).unwrap();
         cursor += BYTES32_LEN;
-        let withdrawal_aggregator =
+        let withdrawal_prover =
             Address::from_u32_slice(&slice[cursor..cursor + ADDRESS_LEN]).unwrap();
         cursor += ADDRESS_LEN;
         let ext_public_state_commitment =
@@ -90,7 +90,7 @@ impl WithdrawalProofPublicInputs {
                 .map_err(|e| WithdrawalCircuitError::InvalidPublicInputs(e.to_string()))?;
         Ok(Self {
             withdrawal_hash,
-            withdrawal_aggregator,
+            withdrawal_prover,
             ext_public_state_commitment,
             block_number,
         })
@@ -128,7 +128,7 @@ impl WithdrawalProofPublicInputs {
 #[derive(Debug, Clone)]
 struct WithdrawalProofPublicInputsTarget {
     withdrawal_hash: Bytes32Target,
-    withdrawal_aggregator: AddressTarget,
+    withdrawal_prover: AddressTarget,
     ext_public_state_commitment: Bytes32Target,
     block_number: BlockNumberTarget,
 }
@@ -141,7 +141,7 @@ impl WithdrawalProofPublicInputsTarget {
         let mut values =
             Vec::with_capacity(BYTES32_LEN + ADDRESS_LEN + BYTES32_LEN + BLOCK_NUMBER_U32_LEN);
         values.extend(self.withdrawal_hash.to_vec());
-        values.extend(self.withdrawal_aggregator.to_vec());
+        values.extend(self.withdrawal_prover.to_vec());
         values.extend(self.ext_public_state_commitment.to_vec());
         values.extend(self.block_number.to_u32_vec(builder));
         values
@@ -169,7 +169,7 @@ where
     pub data: CircuitData<F, C, D>,
     proof: ProofWithPublicInputsTarget<D>,
     ext_public_state: ExtendedPublicStateTarget,
-    withdrawal_aggregator: AddressTarget,
+    withdrawal_prover: AddressTarget,
 }
 
 impl<F, C, const D: usize> WithdrawalCircuit<F, C, D>
@@ -193,10 +193,10 @@ where
             .connect(&mut builder, &chain_public_state);
         let ext_public_state_commitment = ext_public_state.commitment(&mut builder);
         let block_number = ext_public_state.inner.block_number.clone();
-        let withdrawal_aggregator = AddressTarget::new(&mut builder, true);
+        let withdrawal_prover = AddressTarget::new(&mut builder, true);
         let pis = WithdrawalProofPublicInputsTarget {
             withdrawal_hash,
-            withdrawal_aggregator,
+            withdrawal_prover,
             ext_public_state_commitment: ext_public_state_commitment.clone(),
             block_number: block_number.clone(),
         };
@@ -211,21 +211,21 @@ where
             data,
             proof,
             ext_public_state,
-            withdrawal_aggregator,
+            withdrawal_prover,
         }
     }
 
     pub fn prove(
         &self,
         proof: &ProofWithPublicInputs<F, C, D>,
-        withdrawal_aggregator: Address,
+        withdrawal_prover: Address,
         ext_public_state: &ExtendedPublicState,
     ) -> Result<ProofWithPublicInputs<F, C, D>, WithdrawalCircuitError> {
         let mut pw = PartialWitness::<F>::new();
         pw.set_proof_with_pis_target(&self.proof, proof);
         self.ext_public_state.set_witness(&mut pw, ext_public_state);
-        self.withdrawal_aggregator
-            .set_witness(&mut pw, withdrawal_aggregator);
+        self.withdrawal_prover
+            .set_witness(&mut pw, withdrawal_prover);
         self.data
             .prove(pw)
             .map_err(|e| WithdrawalCircuitError::FailedToProve(e.to_string()))

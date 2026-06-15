@@ -3,14 +3,25 @@ name = "intmax3-zkp"
 version = "0.1.0"
 edition = "2024"
 
+# Explicit single-member workspace root with resolver "2". `exclude` keeps the
+# nested `contracts/lib/polygon-plonky2` workspace (and `vendor/`) as their own
+# workspaces so their `{ workspace = true }` dependency inheritance still
+# resolves, while pinning OUR resolver to "2" (edition 2024 would otherwise
+# default to "3") to avoid the plonky2-vs-plonky2 "output filename collision"
+# that breaks transitive sibling-crate resolution (E0463 on plonky2_keccak /
+# sphincsplus_*) for integration-test targets on macOS.
+[workspace]
+resolver = "2"
+exclude = ["contracts/lib/polygon-plonky2", "vendor", "gnark"]
+
 [lib]
 # `cdylib` is only required at WASM build time (wasm-pack flow). For native
-# test / bin builds, cargo's resolver "2" + multiple `intmax3-zkp` dependents
-# in the workspace produce an "output filename collision" warning and silently
-# breaks transitive `[patch]` resolution on macOS (plonky2_keccak / sphincsplus
-# can't find their transitive sibling crates → 200+ E0463 errors). Forcing
-# `rlib`-only on native sidesteps that. WASM builds should append `cdylib` at
-# wasm-pack invocation time, e.g. via `--crate-type=cdylib`.
+# test / bin builds, the historical "output filename collision" → E0463 issue
+# is now fully resolved by the `[workspace]` resolver pin above PLUS dropping
+# `cdylib` from the submodule's `plonky2` crate-type (see SETUP note in
+# architecture-audit/detail2-implementation-notes.md). Keeping the lib `rlib`-
+# only here remains correct; WASM builds append `cdylib` at wasm-pack invocation
+# time, e.g. via `--crate-type=cdylib`.
 crate-type = ["rlib"]
 
 [dependencies]
@@ -41,6 +52,7 @@ sphincsplus-poseidon = { git = "https://github.com/InternetMaximalism/aggregated
 keccak-hash = "0.8.0"
 hex = "0.4.3"
 rand = "0.8.5"
+rand09 = { package = "rand", version = "0.9.4" }
 thiserror = "2.0.17"
 num-bigint = "0.4.6"
 num = "0.4.3"
@@ -52,6 +64,34 @@ anyhow = "1.0.100"
 lazy_static = "1.5.0"
 bincode = { version = "2.0.1", features = ["serde"] }
 clap = { version = "4.5", features = ["derive"] }
+postcard = { version = "1.1.3", features = ["alloc"] }
+# Regev (Ring-LWE) lattice layer — rides the Plonky3 0.5.3 graph, which
+# coexists with the 0.4.2 graph below (semver-incompatible majors resolve
+# side by side). Pinned to the same rev the SIS-lattice-paymentchannel port
+# source uses. `default-features = false` drops `parallel` for wasm safety;
+# enable the `regev-parallel` feature for native proving speed.
+regev_plonky3 = { git = "https://github.com/leohio/regv-plonky3.git", rev = "3b17b8e", default-features = false }
+rand010 = { package = "rand", version = "0.10" }
+p3-air-05 = { package = "p3-air", version = "0.5.3" }
+p3-field-05 = { package = "p3-field", version = "0.5.3" }
+p3-matrix-05 = { package = "p3-matrix", version = "0.5.3" }
+p3-baby-bear = "0.5.3"
+p3-batch-stark = "0.5.3"
+p3-lookup = "0.5.3"
+# Plonky3 / uni-stark
+p3-air = "0.4.2"
+p3-challenger = "0.4.2"
+p3-commit = "0.4.2"
+p3-dft = "0.4.2"
+p3-field = "0.4.2"
+p3-fri = "0.4.2"
+p3-goldilocks = "0.4.2"
+p3-matrix = "0.4.2"
+p3-merkle-tree = "0.4.2"
+p3-maybe-rayon = "0.4.2"
+p3-poseidon2 = "0.4.2"
+p3-symmetric = "0.4.2"
+p3-uni-stark = "0.4.2"
 
 # Threading
 rayon = "1.8"
@@ -77,11 +117,26 @@ futures = "0.3"
 # Timing (WASM-compatible)
 web-time = "0.2"
 
+# `rand` 0.10 (alias `rand010`, used by the Regev layer) pulls getrandom 0.4, whose wasm
+# support is a Cargo *feature* (`wasm_js`) rather than the `getrandom_backend="wasm_js"` cfg
+# that getrandom 0.3 above uses. Enabling the feature here makes getrandom 0.4 select its
+# `wasm_js` backend on wasm32 (otherwise `inner_u32`/`inner_u64` are undefined and the link
+# fails). Renamed to avoid colliding with the getrandom 0.3 dep; we never import it directly —
+# this edge exists only to unify the `wasm_js` feature onto the getrandom 0.4 in the graph.
+# wasm-only so native builds are unaffected.
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+getrandom_v04 = { package = "getrandom", version = "0.4", features = ["wasm_js"] }
+
 [features]
 default = []
+# Legacy plonky2 balance-processor browser demo (`src/wasm_demo.rs`). Off by default because the
+# module is stale on this branch (removed `*_async` APIs, missing generated fixtures). See lib.rs.
+legacy_wasm_demo = []
 # `plonky2_keccak/wasm` does not expose a `gpu_merkle` feature flag, so we only
 # forward it to plonky2 + starky (which do).
 gpu_merkle = ["plonky2/gpu_merkle", "starky/gpu_merkle"]
+# Rayon-parallel Regev STARK proving (native only; do not enable for wasm).
+regev-parallel = ["regev_plonky3/parallel"]
 
 [dev-dependencies]
 criterion = { version = "0.5", default-features = false }
@@ -109,6 +164,18 @@ plonky2_util = { path = "contracts/lib/polygon-plonky2/util" }
 plonky2_maybe_rayon = { path = "contracts/lib/polygon-plonky2/maybe_rayon" }
 plonky2_mle = { path = "contracts/lib/polygon-plonky2/mle" }
 starky = { path = "contracts/lib/polygon-plonky2/starky" }
+
+[patch.crates-io]
+p3-merkle-tree = { path = "vendor/plonky3/p3-merkle-tree" }
+p3-fri = { path = "vendor/plonky3/p3-fri" }
+p3-uni-stark = { path = "vendor/plonky3/p3-uni-stark" }
+# Second-version patches for the Plonky3 0.5.3 graph (regev_plonky3). These are
+# MSRV-downgrade fixes for the pinned nightly-2025-03-23 toolchain, reused from
+# the (now retired) external lattice-proof-helper setup.
+p3-field-0503 = { path = "vendor/p3-field-0.5.3", package = "p3-field" }
+p3-fri-0503 = { path = "vendor/p3-fri-0.5.3", package = "p3-fri" }
+p3-merkle-tree-0503 = { path = "vendor/p3-merkle-tree-0.5.3", package = "p3-merkle-tree" }
+p3-uni-stark-0503 = { path = "vendor/p3-uni-stark-0.5.3", package = "p3-uni-stark" }
 
 [profile.release]
 opt-level = 3

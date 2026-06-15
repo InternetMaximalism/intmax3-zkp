@@ -32,12 +32,16 @@ const CHAIN_END_PROOF_PUBLIC_INPUTS_LEN: usize = BYTES32_LEN + ADDRESS_LEN;
 #[serde(rename_all = "camelCase")]
 pub struct ChainEndProofPublicInputs {
     pub last_hash: Bytes32,
-    pub aggregator: Address,
+    pub proof_submitter: Address,
 }
 
 impl ChainEndProofPublicInputs {
     pub fn to_u32_vec(&self) -> Vec<u32> {
-        let vec = [self.last_hash.to_u32_vec(), self.aggregator.to_u32_vec()].concat();
+        let vec = [
+            self.last_hash.to_u32_vec(),
+            self.proof_submitter.to_u32_vec(),
+        ]
+        .concat();
         assert_eq!(vec.len(), CHAIN_END_PROOF_PUBLIC_INPUTS_LEN);
         vec
     }
@@ -51,10 +55,10 @@ impl ChainEndProofPublicInputs {
             )));
         }
         let last_hash = Bytes32::from_u32_slice(&slice[0..BYTES32_LEN]).unwrap();
-        let aggregator = Address::from_u32_slice(&slice[BYTES32_LEN..]).unwrap();
+        let proof_submitter = Address::from_u32_slice(&slice[BYTES32_LEN..]).unwrap();
         Ok(Self {
             last_hash,
-            aggregator,
+            proof_submitter,
         })
     }
 
@@ -88,12 +92,12 @@ impl ChainEndProofPublicInputs {
 #[derive(Debug, Clone)]
 struct ChainEndProofPublicInputsTarget {
     last_hash: Bytes32Target,
-    aggregator: AddressTarget,
+    proof_submitter: AddressTarget,
 }
 
 impl ChainEndProofPublicInputsTarget {
     fn to_vec(&self) -> Vec<Target> {
-        [self.last_hash.to_vec(), self.aggregator.to_vec()].concat()
+        [self.last_hash.to_vec(), self.proof_submitter.to_vec()].concat()
     }
 
     fn hash<F: RichField + Extendable<D>, C: GenericConfig<D, F = F> + 'static, const D: usize>(
@@ -115,7 +119,7 @@ where
 {
     pub data: CircuitData<F, C, D>,
     proof: ProofWithPublicInputsTarget<D>,
-    aggregator: AddressTarget, // Who makes the aggregated proof and receive the reward
+    proof_submitter: AddressTarget, // Who makes the aggregated proof and receive the reward
 }
 
 impl<F, C, const D: usize> ChainEndCircuit<F, C, D>
@@ -128,10 +132,10 @@ where
         let mut builder = CircuitBuilder::<F, D>::new(CircuitConfig::default());
         let proof = add_proof_target_and_verify_cyclic(verifier_data, &mut builder);
         let last_hash = Bytes32Target::from_slice(&proof.public_inputs[0..BYTES32_LEN]);
-        let aggregator = AddressTarget::new(&mut builder, true);
+        let proof_submitter = AddressTarget::new(&mut builder, true);
         let pis = ChainEndProofPublicInputsTarget {
             last_hash,
-            aggregator,
+            proof_submitter,
         };
         let pis_hash = pis.hash::<F, C, D>(&mut builder);
         builder.register_public_inputs(&pis_hash.to_vec());
@@ -139,18 +143,18 @@ where
         Self {
             data,
             proof,
-            aggregator,
+            proof_submitter,
         }
     }
 
     pub fn prove(
         &self,
         proof: &ProofWithPublicInputs<F, C, D>,
-        aggregator: Address,
+        proof_submitter: Address,
     ) -> super::error::Result<ProofWithPublicInputs<F, C, D>> {
         let mut pw = PartialWitness::<F>::new();
         pw.set_proof_with_pis_target(&self.proof, proof);
-        self.aggregator.set_witness(&mut pw, aggregator);
+        self.proof_submitter.set_witness(&mut pw, proof_submitter);
         self.data.prove(pw).map_err(|e| {
             crate::utils::error::UtilsError::from(super::error::HashChainError::ChainEndProofError(
                 e.to_string(),

@@ -8,9 +8,11 @@
 //! Not intended for production use — only for `#[cfg(test)]` helpers.
 
 use sphincsplus_params::*;
-use sphincsplus_poseidon::hash_functions::{gen_message_random, hash_message, prf_addr, thash};
-use sphincsplus_poseidon::fors::message_to_indices;
-use sphincsplus_poseidon::wots::chain_lengths;
+use sphincsplus_poseidon::{
+    fors::message_to_indices,
+    hash_functions::{gen_message_random, hash_message, prf_addr, thash},
+    wots::chain_lengths,
+};
 
 // ── Private helpers ─────────────────────────────────────────────────────────
 
@@ -293,9 +295,10 @@ fn fors_sign_impl(
 // ── Public API ───────────────────────────────────────────────────────────────
 
 /// SPHINCS+ key pair.
+#[derive(Clone, Debug)]
 pub struct SpxKeyPair {
     pub sk_seed: [u8; SPX_N],
-    pub sk_prf:  [u8; SPX_N],
+    pub sk_prf: [u8; SPX_N],
     pub pub_seed: [u8; SPX_N],
     /// 32-byte public key: `pub_seed || pub_root`
     pub pk_bytes: [u8; SPX_PK_BYTES],
@@ -317,7 +320,12 @@ pub fn sphincs_keygen(
     pk_bytes[..SPX_N].copy_from_slice(&pub_seed);
     pk_bytes[SPX_N..].copy_from_slice(&pub_root);
 
-    SpxKeyPair { sk_seed, sk_prf, pub_seed, pk_bytes }
+    SpxKeyPair {
+        sk_seed,
+        sk_prf,
+        pub_seed,
+        pk_bytes,
+    }
 }
 
 /// Sign `msg_bytes` with the given SPHINCS+ secret key.
@@ -379,7 +387,9 @@ pub fn sphincs_sign(msg_bytes: &[u8], kp: &SpxKeyPair) -> [u8; SPX_BYTES] {
 /// `pk_hash = PoseidonHashOut::hash_inputs_u64(&[pub_seed_gl[0], pub_seed_gl[1],
 ///                                               pub_root_gl[0], pub_root_gl[1]])`
 /// where `pub_seed_gl` and `pub_root_gl` are the LE-u64 packing of the 16-byte values.
-pub fn pk_hash_from_pk_bytes(pk_bytes: &[u8; SPX_PK_BYTES]) -> crate::utils::poseidon_hash_out::PoseidonHashOut {
+pub fn pk_hash_from_pk_bytes(
+    pk_bytes: &[u8; SPX_PK_BYTES],
+) -> crate::utils::poseidon_hash_out::PoseidonHashOut {
     // Pack the 32 bytes as four LE u64 values (GL elements).
     let gl: Vec<u64> = pk_bytes
         .chunks(8)
@@ -396,7 +406,7 @@ mod tests {
     #[test]
     fn test_sphincs_sign_and_verify() {
         let sk_seed = [0x11u8; SPX_N];
-        let sk_prf  = [0x22u8; SPX_N];
+        let sk_prf = [0x22u8; SPX_N];
         let pub_seed = [0x33u8; SPX_N];
 
         let kp = sphincs_keygen(sk_seed, sk_prf, pub_seed);

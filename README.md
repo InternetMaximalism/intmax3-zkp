@@ -9,7 +9,7 @@ Zero-knowledge proof circuits and L1 settlement contracts for the INTMAX3 rollup
   ─────────────────────────────────────     ───────────────────────────────     ──────────────────────────
 
   ┌──────────┐    ┌──────────┐      postBlockAndSubmit(SubBlock[] + proof)     finalize()
-  │  User A  │───▶│Aggregator│              │                                   │
+  │  User A  │───▶│Block Producer│              │                                   │
   │  User B  │    │          │              ▼                                   ▼
   │  ...     │    └────┬─────┘         ┌──────────────────┐              ┌─────────────────┐
   └──────────┘         │               │  IntmaxRollup    │              │  Verify:        │
@@ -17,8 +17,8 @@ Zero-knowledge proof circuits and L1 settlement contracts for the INTMAX3 rollup
                  ┌─────────────┐       │  Iterate ~60     │              │  Groth16 +      │
                  │ Fast Block  │       │  sub-blocks:     │              │  state binding  │
                  │ (5s cycle)  │       │  hash chain ×60  │              │                 │
-                 │ - local_ids │       │  deposit (last)  │              │  Accept new     │
-                 │ - tx_root   │       │  forced tx (last)│              │  stateRoot      │
+                 │ - key_ids │       │  deposit (last)  │              │  Accept new     │
+                 │ - tx_root   │       │  deposit (last)  │              │  stateRoot      │
                  │ - SPHINCS+  │       │                  │              └─────────────────┘
                  │ - NO deposit│       │  Store snapshot: │                      ▲
                  │ - NO forced │       │  blockHashChain  │                      │
@@ -31,7 +31,7 @@ Zero-knowledge proof circuits and L1 settlement contracts for the INTMAX3 rollup
 ```
 
 **Key invariant:** All three layers share the same `Block` structure and `BlockStep` ZK circuit.
-Fast blocks simply have `deposit_hash_chain = 0` and `forced_tx_hash_chain = 0`.
+Fast blocks simply have `deposit_hash_chain = 0`.
 The ZK circuit processes every block identically; only the L1 posting frequency differs.
 
 ## Proof Pipeline
@@ -44,7 +44,7 @@ The system produces four independent proof types that work together:
 │                                                                             │
 │  Block 1          Block 2          Block N                                  │
 │  ┌──────────┐    ┌──────────┐    ┌──────────┐                               │
-│  │local_ids │    │local_ids │    │local_ids │                               │
+│  │key_ids │    │key_ids │    │key_ids │                               │
 │  │tx_root   │    │tx_root   │    │tx_root   │                               │
 │  │SPHINCS+  │    │SPHINCS+  │    │SPHINCS+  │                               │
 │  │signatures│    │signatures│    │signatures│                               │
@@ -52,8 +52,8 @@ The system produces four independent proof types that work together:
 │       │               │               │                                     │
 │       ▼               ▼               ▼                                     │
 │  ┌─────────────────────────────────────────┐                                │
-│  │      Block Hash Chain Circuit           │ ◄── account tree updates       │
-│  │  (UpdateAccountTree + SPHINCS+ verify)  │     + signature verification   │
+│  │      Block Hash Chain Circuit           │ ◄── user tree updates       │
+│  │  (UpdateUserTree + SPHINCS+ verify)  │     + signature verification   │
 │  └─────────────────┬───────────────────────┘                                │
 │                    │                                                        │
 │                    ▼                                                        │
@@ -106,15 +106,14 @@ Every value in the validity proof's public inputs is bound to on-chain state:
 ┌─ On-chain Storage ───────────────────────────────────────────────────────┐
 │                                                                          │
 │  blockHashChainAt[n]  ◄─── postBlockAndSubmit() computes keccak256 of:  │
-│                              prev_hash ‖ aggregator_id ‖ timestamp ‖     │
-│                              local_ids ‖ tx_tree_root ‖ deposit_chain   │
+│                              prev_hash ‖ channel_id ‖ timestamp ‖     │
+│                              key_ids ‖ tx_tree_root ‖ deposit_chain   │
 │                                                                          │
 │  depositHashChain     ◄─── deposit() computes keccak256 of:             │
 │                              prev_hash ‖ depositor ‖ recipient ‖         │
 │                              token_index ‖ amount ‖ aux_data             │
 │                                                                          │
 │  blockDepositHash[n]  ◄─── actual deposit_hash_chain used in block n    │
-│  blockForcedTxHash[n] ◄─── matured forcedTxAccumulator snapshot used     │
 │  latestFinalizedStateRoot ◄── finalize() sets to final_ext_commitment   │
 │                                                                          │
 └──────────────────────────────────────────────────────────────────────────┘
@@ -163,7 +162,6 @@ Every value in the validity proof's public inputs is bound to on-chain state:
 │  ┌────────────────────────┐  Aggregators post blocks + proof blobs      │
 │  │  postBlockAndSubmit()  │  → updates blockHashChain on-chain          │
 │  │  ~160k gas             │  → blockHashChainAt[n], blockDepositHash[n] │
-│  │                        │    blockForcedTxHash[n] snapshots stored    │
 │  │                        │  → stores commitment (blobHash‖proof‖SR)    │
 │  │                        │  → locks 1 ETH stake until finalize/fraud   │
 │  └────────────────────────┘                                             │
@@ -187,7 +185,7 @@ Every value in the validity proof's public inputs is bound to on-chain state:
 │                                                                         │
 │  ┌─────────────────┐                                                    │
 │  │  fraudProof()   │  Confirms blob fraud, slashes stake (90/10 split), │
-│  │                 │  clears blockDepositHash / blockForcedTxHash and   │
+│  │                 │  clears blockDepositHash and                       │
 │  │                 │  rewinds blockHashChain snapshots + submissions    │
 │  └─────────────────┘                                                    │
 │                                                                         │
@@ -205,21 +203,21 @@ Every value in the validity proof's public inputs is bound to on-chain state:
 
 ## SPHINCS+ Post-Quantum Signature Verification
 
-The validity circuit enforces [SPHINCS+](https://github.com/InternetMaximalism/aggregated_SPHINCS_plus) (SPX-128s Poseidon) signatures in the `UpdateAccountTree` sub-circuit:
+The validity circuit enforces [SPHINCS+](https://github.com/InternetMaximalism/aggregated_SPHINCS_plus) (SPX-128s Poseidon) signatures in the `UpdateUserTree` sub-circuit:
 
 ```
 Per user slot i in a block:
 
-  is_active       = (local_id_i ≠ 0)              ── not a padding slot
+  is_active       = (key_id_i ≠ 0)              ── not a padding slot
   should_update   = is_active AND (prev ≠ block_number)  ── first inclusion this block
   has_pk_hash     = (pk_hash ≠ [0,0,0,0])         ── user has registered a key
   should_verify   = should_update AND has_pk_hash
 
   if should_verify:
-      assert Poseidon(pub_seed ‖ pub_root) == account_leaf.pk_hash
+      assert Poseidon(pub_seed ‖ pub_root) == user_leaf.pk_hash
       assert SPHINCS+_verify(signature_i, M_i, pub_key_i) == true
 
-  Message:  M_i = [block_number ‖ aggregator_id ‖ local_id_i ‖ tx_tree_root]
+  Message:  M_i = [block_number ‖ channel_id ‖ key_id_i ‖ tx_tree_root]
                  = 11 Goldilocks field elements = 88 bytes
 ```
 
@@ -238,12 +236,12 @@ Per user slot i in a block:
 
 ## Data Structures
 
-### Account Tree
+### User Tree
 
 ```
 AccountTree (sparse Merkle tree, leaf index = user_id)
 
-  AccountLeaf {
+  UserLeaf {
       index: u32,             // next empty send leaf index
       prev: BlockNumber,      // last block that updated this account
       send_tree_root: Hash,   // root of user's send tree
@@ -258,11 +256,11 @@ ExtendedPublicState {
     inner: PublicState {
         block_number,
         timestamp,
-        account_tree_root,     ◄── includes all AccountLeaf updates
+        account_tree_root,     ◄── includes all UserLeaf updates
         deposit_tree_root,
         prev_public_state_root,
     },
-    block_hash_chain,          ◄── keccak chain of all blocks (includes local_ids)
+    block_hash_chain,          ◄── keccak chain of all blocks (includes key_ids)
     deposit_hash_chain,        ◄── keccak chain of all deposits
     deposit_count,
 }
@@ -275,9 +273,9 @@ state_root = Poseidon(ExtendedPublicState)   ← this is final_ext_commitment
 ```
 block_hash_chain[n] = keccak256(
     block_hash_chain[n-1]       (32 bytes)
-    ‖ aggregator_id             ( 4 bytes)
+    ‖ channel_id             ( 4 bytes)
     ‖ timestamp                 ( 8 bytes)
-    ‖ local_ids[0..num_users]   ( 4 × num_users bytes)   ◄── the ID list
+    ‖ key_ids[0..num_users]   ( 4 × num_users bytes)   ◄── the ID list
     ‖ tx_tree_root              (32 bytes)
     ‖ deposit_hash_chain        (32 bytes)
 )
@@ -291,7 +289,7 @@ intmax3-zkp/
 │   ├── circuits/
 │   │   ├── balance/               # Balance proof circuits (spend, send, receive, deposit)
 │   │   ├── validity/
-│   │   │   ├── block_hash_chain/  # Block step, update_account_tree (SPHINCS+), validity
+│   │   │   ├── block_hash_chain/  # Block step, update_user_tree (SPHINCS+), validity
 │   │   │   └── deposit_hash_chain/# Deposit step circuit
 │   │   ├── withdraw/              # Single withdrawal, chain, final proof
 │   │   └── test_utils/            # BlockWitnessGenerator, BalanceWitnessGenerator,
@@ -434,6 +432,47 @@ WASM32 has a **4GB hard limit** on linear memory. The proof pipeline uses ~4GB a
 - **Memory-pressure CPU fallback** — GPU Merkle falls back to CPU when WASM memory exceeds 3.5GB
 - **Zero-copy GPU readback** — hashes read on-the-fly from mapped staging buffer instead of allocating intermediate Vecs
 
+## Browser Channel Wallet (Regev send/receive)
+
+A self-contained, in-browser wallet for confidential **in-channel** transfers on the Regev (Ring-LWE)
+channel model. One channel member runs in the browser with real SPHINCS+ + Regev keys and real funds;
+the other members are driven by a CLI companion. The browser does the ZK proving (multithreaded WASM);
+co-signing of each new channel state is N-of-N SPHINCS+ over `ChannelState::signing_digest()`.
+
+```
+  Browser member (wallet.html)            Local relay (wallet-relay.js)         Other members
+  ─────────────────────────────           ─────────────────────────────        ──────────────
+  keygen / open channel                    serves wallet static files           channel_member (CLI):
+  build ChannelTx + E-1 proof   ── /api ──▶ (COEP/COOP for SAB/threads)  ──────▶ native co-sign (SPHINCS+)
+  wasm-bindgen-rayon proving               bridges /api → CLI companion          verify + counter-sign
+  decrypt own balance slot      ◀────────────────────────────────────────────── return co-signed state
+```
+
+| File | Purpose |
+|------|---------|
+| `src/wallet_core.rs` | Target-independent wallet core: SPHINCS+ + Regev key management, channel send/receive, state verification |
+| `src/wasm_wallet.rs` | `wasm-bindgen` session entry points (keygen, genesis, send, receive) |
+| `src/bin/channel_member.rs` | CLI companion that runs the other channel members (native co-signing) |
+| `wallet.html` + `wallet-worker.js` | Standalone browser UI; multithreaded proving via `wasm-bindgen-rayon` |
+| `wallet-live.html` + `wallet-relay.js` | "Live" UI + local HTTPS relay that bridges browser `/api` calls to the CLI companion so a real send runs with just clicks (dev-only, localhost, self-signed TLS) |
+| `build-wallet-wasm.sh` | Builds the wallet WASM package |
+| `wallet-e2e.js` / `wallet-live-smoke.js` / `wallet-live-debug.js` | Playwright end-to-end / smoke / debug drivers (browser sends, receives, verifies) |
+| `wallet-feasibility.html` + `feasibility-*.js` | Browser feasibility probe for the WASM proving stack |
+| `tests/wallet_core_e2e.rs` | Native end-to-end of the wallet core |
+| `tests/regev_timing.rs`, `tests/sphincs_timing.rs` | Regev / SPHINCS+ timing benchmarks |
+
+Security requirements the wallet/CLI must enforce (the library leaves some to the caller — e.g. running
+real SLH-DSA verification, decrypting the wallet's own balance slot, and confirming non-recipient
+ciphertexts are unchanged) are documented in
+[tasks/wallet-threat-model.md](tasks/wallet-threat-model.md) and
+[tasks/wallet-lessons.md](tasks/wallet-lessons.md).
+
+```bash
+./build-wallet-wasm.sh                 # build the wallet WASM package
+node wallet-relay.js                   # serve wallet-live.html + bridge to the CLI companion (HTTPS)
+# open https://localhost:8000/wallet-live.html and click "Open channel" / "Send"
+```
+
 ## Benchmarks
 
 ### ZKP Proof Generation (release mode, Apple M-series)
@@ -459,7 +498,7 @@ WASM32 has a **4GB hard limit** on linear memory. The proof pipeline uses ~4GB a
 
 | Function | Gas | Storage Writes |
 |----------|-----|---------------|
-| `postBlockAndSubmit()` | ~160k | ≥6 slots (blockHashChain, blockHashChainAt[n], blockDepositHash[n], blockForcedTxHash[n], commitment, submitter+finalized) + locks 1 ETH stake |
+| `postBlockAndSubmit()` | ~160k | ≥5 slots (blockHashChain, blockHashChainAt[n], blockDepositHash[n], commitment, submitter+finalized) + locks 1 ETH stake |
 | `deposit()` | ~55k | 1 slot (pendingDepositHashChain) |
 | `finalize()` | ~1.6M | 2 slots (finalized flag, latestFinalizedStateRoot) |
 | `verify()` | ~842k | 0 (view) |
@@ -531,7 +570,7 @@ updated with real proofs.
 ### Parallel signature aggregation orchestrator
 
 The parallel signature aggregation circuits and APIs are implemented
-(`ParallelSigProcessor`, `SigBatch`, `SigMerge`, `AccountApplyBlock`, etc.),
+(`ParallelSigProcessor`, `SigBatch`, `SigMerge`, `UserApplyBlock`, etc.),
 but the **runtime orchestrator using rayon/thread pool is not yet implemented**.
 Currently, callers must manage parallelism externally (e.g., spawning threads
 and calling `prove_batch_step()` / `prove_apply_block()` concurrently).
@@ -550,8 +589,9 @@ architecture and design rationale.
 | Document | Description |
 |----------|-------------|
 | [docs/spec.md](docs/spec.md) | Protocol specification (types, circuits, state) |
-| [docs/forced-tx-queue.md](docs/forced-tx-queue.md) | Forced TX Queue architecture, Solidity interface, ZK circuit pipeline |
 | [docs/signature-aggregation.md](docs/signature-aggregation.md) | Multi-sig accounts, parallel proving architecture, benchmarks |
+| [tasks/wallet-threat-model.md](tasks/wallet-threat-model.md) | Browser channel wallet + CLI companion — threat model and must-enforce requirements |
+| [tasks/wallet-lessons.md](tasks/wallet-lessons.md) | Browser channel wallet — implementation lessons |
 
 ## Dependencies
 

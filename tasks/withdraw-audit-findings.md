@@ -99,8 +99,8 @@ Combined with WDR-HIGH-001 (balance IVC has no anchor), an attacker can:
    - `balance_proof` is a valid cyclic IVC (the attacker built it correctly).
    - `private_state.commitment() == balance_pis.private_commitment` (attacker controls both sides).
    - `sent_tx_merkle_proof` opens `fake_tx` at `fake_tx.nonce` under the fabricated `sent_tx_tree_root`.
-   - `account_state` opens the attacker's fabricated `AccountLeaf` at `user_id` in the fake `account_tree_root` (= `public_state.account_tree_root`, both fake but connected).
-   - `tx_merkle_proof` opens `fake_tx` at `user_id.local_id()` in `send_leaf.tx_tree_root` (fake).
+   - `account_state` opens the attacker's fabricated `UserLeaf` at `user_id` in the fake `account_tree_root` (= `public_state.account_tree_root`, both fake but connected).
+   - `tx_merkle_proof` opens `fake_tx` at `user_id.key_id()` in `send_leaf.tx_tree_root` (fake).
    - `transfer_witness` opens the fake `Transfer` in `fake_tx.transfer_tree_root`.
    - `extract_address_from_recipient_circuit` sees tag byte `0x02` (attacker set it).
    - `settled_transfer.nullifier()` becomes a fresh, unique value (never seen on L1).
@@ -249,7 +249,7 @@ Local defense (spend_circuit / sent_tx_tree): a user can only run `send_tx_circu
 
 ### Is this exploitable against intmax3 today?
 It requires:
-  - the user to sign the same (block_number, aggregator_id, local_id, tx_tree_root) message for two distinct blocks (two signatures, not one replay);
+  - the user to sign the same (block_number, channel_id, key_id, tx_tree_root) message for two distinct blocks (two signatures, not one replay);
   - two aggregators willing to include both. The signature message is block-specific (`sig_agg_step` includes `block_number` in `msg_gl`), so a single SPHINCS+ signature cannot be replayed — the user must sign twice.
 
 So the attack is "sign twice on purpose", which yields withdrawal of double the user's real balance. Whether this is considered a soundness violation or a protocol-level policy violation depends on whether intmax3 considers a user's signatures a commitment against double-signing. The spec explicitly includes `settled_block_number` in the nullifier (§3), suggesting the designers accepted this as a feature, not a bug. We flag it as informational because it does not arise from a circuit constraint miss; it is a deliberate protocol choice with a surprising consequence, and should at minimum be called out in the threat model.
@@ -272,8 +272,8 @@ The duplicate-insertion bug in `IndexedMerkleTree` (nullifier tree) documented i
 |---|---|
 | `common/withdrawal.rs` | Withdrawal encoding/hash-chain are straightforward keccak over u32 limbs; range-checks via `is_checked=true` when constructed in `WithdrawalTarget::new`. |
 | `common/transfer.rs` | SettledTransfer nullifier derivation binds `inner, from, transfer_index, block_number` via Poseidon — strong binding. Note WDR-INFO-02 for the block_number policy. |
-| `balance/common/account_state.rs` | Verifies `send_leaf ∈ account_leaf.send_tree_root` and `account_leaf ∈ account_tree_root`. Soundness of these verifications is standard Merkle; the *root* is not anchored — see WDR-HIGH-001. |
-| `balance/common/tx_settlement.rs` | Binds tx through `tx_merkle_proof.verify(tx, user_id.local_id, account_state.send_leaf.tx_tree_root)` and `spend_public_inputs.tx == tx`. Strong internal binding; external anchoring depends on WDR-HIGH-001. |
+| `balance/common/account_state.rs` | Verifies `send_leaf ∈ user_leaf.send_tree_root` and `user_leaf ∈ account_tree_root`. Soundness of these verifications is standard Merkle; the *root* is not anchored — see WDR-HIGH-001. |
+| `balance/common/tx_settlement.rs` | Binds tx through `tx_merkle_proof.verify(tx, user_id.key_id, account_state.send_leaf.tx_tree_root)` and `spend_public_inputs.tx == tx`. Strong internal binding; external anchoring depends on WDR-HIGH-001. |
 | `balance/common/transfer_witness.rs` | Transfer merkle proof verifies transfer at `transfer_index` in `transfer_tree_root`. Clean. |
 | `balance/balance_pis.rs` | PI serialization consistent; `vd` is part of the full PI to allow cyclic identification. |
 | `balance/balance_circuit.rs` | Cyclic outer wrapper. `check_cyclic_proof_verifier_data` is used at verify time. The initial `public_state` is constrained via switch_board to `PublicState::default()`. |

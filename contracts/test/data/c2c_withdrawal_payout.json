@@ -1,0 +1,14 @@
+{
+  "withdrawals": [
+    {
+      "recipient": "0x2c0bf10558adafdd21296cbf71dd6fe88c782c80",
+      "token_index": 0,
+      "amount": "3",
+      "nullifier": "0xc85986d9915a520ac81ed907841b2805cf64fc8934d50ae962ebb1b09df3a276",
+      "aux_data": "0x0000000000000000000000000000000000000000000000000000000000000000"
+    }
+  ],
+  "withdrawal_prover": "0xd3301861f9681a64cc0d694ab0f4d1253248c9da",
+  "block_number": 5,
+  "ext_commitment": "0x998c9aa3702c653a7a553a1802a414b1ffdca2e2eca349b99ac170a9c8753419"
+}

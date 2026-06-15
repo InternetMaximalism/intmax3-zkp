@@ -1,7 +1,7 @@
 use crate::{
     common::{
+        channel_id::{ChannelId, ChannelIdTarget},
         u63::{BlockNumber, BlockNumberTarget},
-        user_id::{UserId, UserIdTarget},
     },
     ethereum_types::{
         bytes32::{BYTES32_LEN, Bytes32, Bytes32Target},
@@ -43,7 +43,7 @@ pub struct Transfer {
 #[serde(rename_all = "camelCase")]
 pub struct SettledTransfer {
     pub inner: Transfer,
-    pub from: UserId,
+    pub from: ChannelId,
     pub transfer_index: u32,
     pub block_number: BlockNumber,
 }
@@ -59,7 +59,7 @@ pub struct TransferTarget {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SettledTransferTarget {
     pub inner: TransferTarget,
-    pub from: UserIdTarget,
+    pub from: ChannelIdTarget,
     pub transfer_index: Target,
     pub block_number: BlockNumberTarget,
 }
@@ -95,7 +95,7 @@ impl Transfer {
 impl SettledTransfer {
     pub fn new(
         inner: Transfer,
-        from: UserId,
+        from: ChannelId,
         transfer_index: u32,
         block_number: BlockNumber,
     ) -> Self {
@@ -197,7 +197,7 @@ impl SettledTransferTarget {
     ) -> Self {
         Self {
             inner: TransferTarget::new(builder, is_checked),
-            from: UserIdTarget::new(builder, is_checked),
+            from: ChannelIdTarget::new(builder, is_checked),
             transfer_index: builder.add_virtual_target(),
             block_number: BlockNumberTarget::new(builder, is_checked),
         }
@@ -209,7 +209,7 @@ impl SettledTransferTarget {
     ) -> Self {
         Self {
             inner: TransferTarget::constant(builder, value.inner.clone()),
-            from: UserIdTarget::constant(builder, value.from),
+            from: ChannelIdTarget::constant(builder, value.from),
             transfer_index: builder.constant(F::from_canonical_u32(value.transfer_index)),
             block_number: BlockNumberTarget::constant(builder, value.block_number),
         }

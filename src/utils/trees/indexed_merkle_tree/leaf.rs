@@ -29,7 +29,7 @@ pub struct IndexedMerkleLeaf {
     pub next_index: u64,
     pub key: U256,
     pub next_key: U256,
-    pub value: u64, // last block number for account tree or just zero for nullifier
+    pub value: u64, // last block number for user tree or just zero for nullifier
 }
 
 impl IndexedMerkleLeaf {
@@ -68,8 +68,7 @@ impl Leafable for IndexedMerkleLeaf {
     fn empty_leaf() -> Self {
         Self {
             next_index: u64::MAX,
-            key: U256::from_u32_slice(&[u32::MAX; 8])
-                .expect("8-limb slice always fits in U256"),
+            key: U256::from_u32_slice(&[u32::MAX; 8]).expect("8-limb slice always fits in U256"),
             next_key: U256::default(),
             value: 0,
         }

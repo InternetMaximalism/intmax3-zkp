@@ -1,0 +1,197 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>INTMAX3 Channel Wallet</title>
+<style>
+  :root { --bg:#0f1419; --panel:#1a2129; --fg:#e6edf3; --muted:#8b949e; --accent:#2f81f7; --ok:#3fb950; --err:#f85149; --border:#30363d; }
+  * { box-sizing: border-box; }
+  body { margin:0; font:14px/1.5 ui-monospace,SFMono-Regular,Menlo,monospace; background:var(--bg); color:var(--fg); }
+  header { padding:14px 20px; border-bottom:1px solid var(--border); display:flex; align-items:center; gap:16px; flex-wrap:wrap; }
+  h1 { font-size:16px; margin:0; }
+  #status { color:var(--muted); }
+  #status.ready { color:var(--ok); }
+  main { display:grid; grid-template-columns:1fr 1fr; gap:14px; padding:16px 20px; }
+  .panel { background:var(--panel); border:1px solid var(--border); border-radius:8px; padding:14px; }
+  .panel h2 { font-size:13px; margin:0 0 10px; color:var(--accent); text-transform:uppercase; letter-spacing:.05em; }
+  label { display:block; color:var(--muted); margin:8px 0 2px; font-size:12px; }
+  input, textarea { width:100%; background:#0d1117; color:var(--fg); border:1px solid var(--border); border-radius:6px; padding:7px; font:inherit; }
+  textarea { min-height:70px; resize:vertical; white-space:pre; overflow:auto; }
+  button { background:var(--accent); color:#fff; border:0; border-radius:6px; padding:8px 14px; font:inherit; cursor:pointer; margin-top:8px; }
+  button:disabled { opacity:.5; cursor:not-allowed; }
+  button.sec { background:#21262d; border:1px solid var(--border); }
+  .out { margin-top:8px; color:var(--ok); white-space:pre-wrap; word-break:break-all; min-height:1em; }
+  .row { display:flex; gap:8px; }
+  .row > * { flex:1; }
+  #log { grid-column:1/3; background:#0d1117; border:1px solid var(--border); border-radius:8px; padding:10px; height:200px; overflow:auto; white-space:pre-wrap; }
+  .hint { color:var(--muted); font-size:12px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>INTMAX3 Channel Wallet</h1>
+  <span id="status">initializing…</span>
+  <span class="hint">threads: <span id="threads">?</span> · proving runs in-browser (Regev / plonky3 STARK)</span>
+</header>
+<main>
+  <section class="panel">
+    <h2>1 · Identity</h2>
+    <p class="hint">Generate this member's SPHINCS+ and Regev keys (session-only; lost on reload).</p>
+    <button id="btnKeygen" disabled>Generate keys</button>
+    <div class="out" id="outIdentity" data-status=""></div>
+  </section>
+
+  <section class="panel">
+    <h2>2 · Genesis contribution</h2>
+    <p class="hint">Encrypt your own opening balance; hand the output to the CLI (<code>channel_member init</code>).</p>
+    <label>Opening balance</label>
+    <input id="genBalance" type="number" value="50" min="0" />
+    <button id="btnGenesis" disabled>Create contribution</button>
+    <label>Contribution JSON (→ CLI)</label>
+    <textarea id="outGenesis" readonly></textarea>
+    <button class="sec" data-copy="outGenesis">Copy</button>
+  </section>
+
+  <section class="panel">
+    <h2>3 · Sign genesis</h2>
+    <p class="hint">Paste the CLI's <code>genesis_to_sign.json</code>; returns your signature.</p>
+    <label>genesis_to_sign.json</label>
+    <textarea id="inSignState"></textarea>
+    <div class="row"><label>your slot</label><input id="signSlot" type="number" value="0" /></div>
+    <button id="btnSign" disabled>Sign state</button>
+    <label>MemberSignature JSON (→ CLI add-genesis-sig)</label>
+    <textarea id="outSign" readonly></textarea>
+    <button class="sec" data-copy="outSign">Copy</button>
+  </section>
+
+  <section class="panel">
+    <h2>4 · Import channel</h2>
+    <p class="hint">Paste the fully-signed <code>channel_snapshot.json</code> from the CLI.</p>
+    <label>channel_snapshot.json</label>
+    <textarea id="inImport"></textarea>
+    <button id="btnImport" disabled>Import &amp; verify</button>
+    <button id="btnBalance" class="sec" disabled>Refresh balance</button>
+    <div class="out" id="outImport" data-status=""></div>
+  </section>
+
+  <section class="panel">
+    <h2>5 · Send</h2>
+    <p class="hint">Generates the E-1 proof in-browser (Production params — can take a while).</p>
+    <div class="row">
+      <div><label>recipient slot</label><input id="sendTo" type="number" value="1" /></div>
+      <div><label>amount</label><input id="sendAmount" type="number" value="7" /></div>
+    </div>
+    <button id="btnSend" disabled>Send</button>
+    <label>SendPayload JSON (→ CLI cosign)</label>
+    <textarea id="outSend" readonly></textarea>
+    <button class="sec" data-copy="outSend">Copy</button>
+  </section>
+
+  <section class="panel">
+    <h2>6 · Co-sign / Finalize</h2>
+    <p class="hint">Co-sign an incoming payload (you may be the recipient), or finalize a fully-signed state.</p>
+    <label>SendPayload or final ChannelState JSON</label>
+    <textarea id="inCosign"></textarea>
+    <div class="row">
+      <button id="btnCosign" disabled>Co-sign</button>
+      <button id="btnFinalize" disabled>Finalize</button>
+    </div>
+    <label>Output JSON</label>
+    <textarea id="outCosign" readonly></textarea>
+    <button class="sec" data-copy="outCosign">Copy</button>
+    <div class="out" id="outFinal" data-status=""></div>
+  </section>
+
+  <div id="log"></div>
+</main>
+
+<script type="module">
+const $ = (id) => document.getElementById(id);
+const log = (m, cls='') => { const l=$('log'); l.innerHTML += `\n${cls?`[${cls}] `:''}${m}`; l.scrollTop = l.scrollHeight; };
+const worker = new Worker('./wallet-worker.js', { type: 'module' });
+const buttons = ['btnKeygen','btnGenesis','btnSign','btnImport','btnBalance','btnSend','btnCosign','btnFinalize'];
+const setEnabled = (on) => buttons.forEach(b => { $(b).disabled = !on; });
+
+// Route worker results to the action that issued them.
+const handlers = {};
+function call(action, payload) {
+  return new Promise((resolve, reject) => {
+    handlers[action] = { resolve, reject };
+    setEnabled(false);
+    log(`${action}…`);
+    worker.postMessage({ action, ...payload });
+  });
+}
+
+worker.onmessage = (e) => {
+  const d = e.data;
+  if (d.type === 'ready') { $('status').textContent = 'ready'; $('status').className='ready'; $('threads').textContent = d.threads; $('status').dataset.ready='1'; setEnabled(true); return; }
+  if (d.type === 'log') { log(d.message, d.level); return; }
+  if (d.type === 'result') {
+    log(`${d.action} ok (${d.ms} ms)`);
+    setEnabled(true);
+    handlers[d.action]?.resolve(d.result);
+  } else if (d.type === 'error') {
+    log(`${d.action} ERROR: ${d.message}`, 'err');
+    setEnabled(true);
+    handlers[d.action]?.reject(new Error(d.message));
+  }
+};
+worker.onerror = (e) => log('worker error: ' + e.message, 'err');
+
+$('btnKeygen').onclick = async () => {
+  const j = await call('keygen');
+  const id = JSON.parse(j);
+  const o = $('outIdentity');
+  o.textContent = `sphincs hash: ${id.sphincsPkHash.slice(0,18)}…  regev pk: a[${id.regevPk.a.length}]`;
+  o.dataset.status = 'ok';
+};
+$('btnGenesis').onclick = async () => {
+  const j = await call('genesisContribution', { balance: $('genBalance').value });
+  $('outGenesis').value = j;
+};
+$('btnSign').onclick = async () => {
+  const j = await call('signState', { slot: +$('signSlot').value, stateJson: $('inSignState').value });
+  $('outSign').value = j;
+};
+$('btnImport').onclick = async () => {
+  const j = await call('importChannel', { snapshotJson: $('inImport').value });
+  const r = JSON.parse(j);
+  const o = $('outImport');
+  o.textContent = `slot ${r.slot} · balance ${r.balance} · v${r.stateVersion} · canSend=${r.canSend}`;
+  o.dataset.status = 'ok'; o.dataset.balance = r.balance;
+};
+$('btnBalance').onclick = async () => {
+  const r = JSON.parse(await call('balance'));
+  const o = $('outImport');
+  o.textContent = `slot ${r.slot} · balance ${r.balance} · v${r.stateVersion} · canSend=${r.canSend}`;
+  o.dataset.status = 'ok'; o.dataset.balance = r.balance;
+};
+$('btnSend').onclick = async () => {
+  const j = await call('send', { recipientSlot: +$('sendTo').value, amount: $('sendAmount').value });
+  $('outSend').value = j;
+};
+$('btnCosign').onclick = async () => {
+  const j = await call('cosign', { payloadJson: $('inCosign').value });
+  $('outCosign').value = j;
+};
+$('btnFinalize').onclick = async () => {
+  const j = await call('finalize', { stateJson: $('inCosign').value });
+  const r = JSON.parse(j);
+  const o = $('outFinal');
+  o.textContent = `finalized · slot ${r.slot} · balance ${r.balance} · v${r.stateVersion} · canSend=${r.canSend}`;
+  o.dataset.status = 'ok'; o.dataset.balance = r.balance;
+};
+
+document.querySelectorAll('button[data-copy]').forEach(b => {
+  b.onclick = () => { const t=$(b.dataset.copy); t.select(); navigator.clipboard?.writeText(t.value); };
+});
+
+// Programmatic hook for automated end-to-end testing (humans use the buttons above).
+window.walletCall = call;
+
+worker.postMessage({ action: 'init', threads: navigator.hardwareConcurrency || 4 });
+</script>
+</body>
+</html>

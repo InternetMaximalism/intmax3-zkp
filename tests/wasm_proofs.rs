@@ -80,8 +80,7 @@ fn log_proof_duration(step: &str, duration: web_time::Duration) {
 }
 
 fn load_spend_circuit() -> SpendCircuit<F, C, D> {
-    SpendCircuit::<F, C, D>::from_bytes(SPEND_CIRCUIT_BYTES)
-        .expect("load spend circuit from bytes")
+    SpendCircuit::<F, C, D>::from_bytes(SPEND_CIRCUIT_BYTES).expect("load spend circuit from bytes")
 }
 
 fn load_balance_processor() -> BalanceProcessor<F, C, D> {
@@ -216,17 +215,17 @@ fn perform_deposit(scenario: &mut BalanceScenario, rng: &mut StdRng) -> SendTxOu
         nonce: scenario.balance_witness_generator.full_private_state.nonce,
     };
     let mut tx_tree = TxTree::init();
-    tx_tree.update(scenario.user_id.local_id() as u64, tx.clone());
+    tx_tree.update(scenario.user_id.key_id() as u64, tx.clone());
     let tx_tree_root = tx_tree.get_root();
-    let tx_merkle_proof = tx_tree.prove(scenario.user_id.local_id() as u64);
+    let tx_merkle_proof = tx_tree.prove(scenario.user_id.key_id() as u64);
     let tx_tree_root_bytes: Bytes32 = tx_tree_root.into();
 
     {
         let mut generator = scenario.block_witness_generator.borrow_mut();
         generator
             .add_block(
-                scenario.user_id.aggregator_id(),
-                &[scenario.user_id.local_id()],
+                scenario.user_id.channel_id(),
+                &[scenario.user_id.key_id()],
                 1,
                 tx_tree_root_bytes,
             )
@@ -238,6 +237,10 @@ fn perform_deposit(scenario: &mut BalanceScenario, rng: &mut StdRng) -> SendTxOu
         tx_tree_root: tx_tree_root_bytes,
         tx: tx.clone(),
         tx_merkle_proof: tx_merkle_proof.clone(),
+        tx_v2: None,
+        tx_v2_merkle_proof: None,
+        transfer: transfer.clone(),
+        transfer_merkle_proof: transfer_merkle_proof.clone(),
     };
     let send_tx_witness = scenario
         .balance_witness_generator
@@ -364,17 +367,17 @@ fn wasm_single_withdrawal_proof() {
         nonce: scenario.balance_witness_generator.full_private_state.nonce,
     };
     let mut tx_tree = TxTree::init();
-    tx_tree.update(scenario.user_id.local_id() as u64, tx.clone());
+    tx_tree.update(scenario.user_id.key_id() as u64, tx.clone());
     let tx_tree_root = tx_tree.get_root();
     let tx_tree_root_bytes: Bytes32 = tx_tree_root.into();
-    let tx_merkle_proof = tx_tree.prove(scenario.user_id.local_id() as u64);
+    let tx_merkle_proof = tx_tree.prove(scenario.user_id.key_id() as u64);
 
     {
         let mut generator = scenario.block_witness_generator.borrow_mut();
         generator
             .add_block(
-                scenario.user_id.aggregator_id(),
-                &[scenario.user_id.local_id()],
+                scenario.user_id.channel_id(),
+                &[scenario.user_id.key_id()],
                 2,
                 tx_tree_root_bytes,
             )
@@ -386,6 +389,10 @@ fn wasm_single_withdrawal_proof() {
         tx_tree_root: tx_tree_root_bytes,
         tx: tx.clone(),
         tx_merkle_proof: tx_merkle_proof.clone(),
+        tx_v2: None,
+        tx_v2_merkle_proof: None,
+        transfer: transfer.clone(),
+        transfer_merkle_proof: transfer_merkle_proof.clone(),
     };
     log_step("Building withdrawal send witness");
     let send_tx_witness = scenario

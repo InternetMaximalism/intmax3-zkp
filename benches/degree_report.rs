@@ -7,13 +7,14 @@ use intmax3_zkp::circuits::{
     validity::{
         block_hash_chain::{
             block_hash_chain_circuit::BlockHashChainCircuit, block_step::BlockStepCircuit,
-            update_account_tree::UpdateAccountCircuit, validity_circuit::ValidityCircuit,
+            update_channel_tree::UpdateUserCircuit, validity_circuit::ValidityCircuit,
+        },
+        channel_reg_hash_chain::{
+            channel_reg_hash_chain_circuit::ChannelRegHashChainCircuit,
+            channel_reg_step::ChannelRegStepCircuit,
         },
         deposit_hash_chain::{
             deposit_hash_chain_circuit::DepositHashChainCircuit, deposit_step::DepositStepCircuit,
-        },
-        signature_aggregation::{
-            sig_agg_circuit::SigAggCircuit, sig_agg_step::SigAggStepCircuit,
         },
     },
     withdraw::{
@@ -100,47 +101,48 @@ fn main() {
         deposit_hash_chain.data.common.degree_bits(),
     ));
 
-    // Signature aggregation circuits
-    let sig_agg_cd = SigAggCircuit::<F, C, D>::generate_cd();
-    let sig_agg_step = SigAggStepCircuit::<F, C, D>::new(&sig_agg_cd);
-    rows.push((
-        "validity::SigAggStepCircuit".to_string(),
-        sig_agg_step.data.common.degree_bits(),
-    ));
-
-    let sig_agg_circuit = SigAggCircuit::<F, C, D>::new(
-        &sig_agg_cd,
-        &sig_agg_step.data.verifier_data(),
-    );
-    rows.push((
-        "validity::SigAggCircuit".to_string(),
-        sig_agg_circuit.data.common.degree_bits(),
-    ));
+    // (Signature aggregation circuits removed — one SPHINCS+ key per member, no multisig.)
 
     // Block hash chain circuits
     let block_chain_cd = BlockHashChainCircuit::<F, C, D>::generate_cd();
-    let update_account_circuits: Vec<UpdateAccountCircuit<F, C, D>> = supported_user_counts
+    let update_user_circuits: Vec<UpdateUserCircuit<F, C, D>> = supported_user_counts
         .iter()
-        .map(|&n| UpdateAccountCircuit::<F, C, D>::new(n))
+        .map(|&n| UpdateUserCircuit::<F, C, D>::new(n))
         .collect();
-    for circuit in &update_account_circuits {
+    for circuit in &update_user_circuits {
         rows.push((
             format!(
-                "validity::UpdateAccountCircuit(num_users={})",
+                "validity::UpdateUserCircuit(num_users={})",
                 circuit.num_users
             ),
             circuit.data.common.degree_bits(),
         ));
     }
-    let update_account_vds = update_account_circuits
+    let update_account_vds = update_user_circuits
         .iter()
         .map(|c| (c.num_users, c.data.verifier_data()))
         .collect::<Vec<_>>();
+
+    let channel_reg_chain_cd = ChannelRegHashChainCircuit::<F, C, D>::generate_cd();
+    let channel_reg_step = ChannelRegStepCircuit::<F, C, D>::new(&channel_reg_chain_cd);
+    rows.push((
+        "validity::ChannelRegStepCircuit".to_string(),
+        channel_reg_step.data.common.degree_bits(),
+    ));
+    let channel_reg_hash_chain = ChannelRegHashChainCircuit::<F, C, D>::new(
+        &channel_reg_chain_cd,
+        &channel_reg_step.data.verifier_data(),
+    );
+    rows.push((
+        "validity::ChannelRegHashChainCircuit".to_string(),
+        channel_reg_hash_chain.data.common.degree_bits(),
+    ));
 
     let block_step = BlockStepCircuit::<F, C, D>::new(
         &block_chain_cd,
         &update_account_vds,
         &deposit_hash_chain.data.verifier_data(),
+        &channel_reg_hash_chain.data.verifier_data(),
     );
     rows.push((
         "validity::BlockStepCircuit".to_string(),

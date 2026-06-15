@@ -14,3 +14,14 @@ remappings = [
     "@mle/=lib/polygon-plonky2/mle/contracts/src/",
     "forge-std/=lib/forge-std/src/",
 ]
+
+# Named RPC endpoints for `forge script --rpc-url <name>` / `cast --rpc-url <name>`.
+# `sepolia` reads SEPOLIA_RPC_URL from the environment (.env / shell); `anvil` is the
+# local rehearsal node started with `anvil --hardfork prague`.
+[rpc_endpoints]
+sepolia = "${SEPOLIA_RPC_URL}"
+anvil = "http://127.0.0.1:8545"
+
+# Optional contract verification on Etherscan (only used with `forge script --verify`).
+[etherscan]
+sepolia = { key = "${ETHERSCAN_API_KEY}", chain = 11155111 }

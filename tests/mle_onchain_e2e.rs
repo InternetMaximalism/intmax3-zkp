@@ -10,10 +10,7 @@
 //! 4. Exports MLE fixture data as JSON
 //! 5. Runs Forge tests that verify on-chain via MleVerifier
 
-use std::{
-    path::PathBuf,
-    process::Command,
-};
+use std::{path::PathBuf, process::Command};
 
 fn repo_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -83,10 +80,7 @@ fn validity_proof_mle_onchain_e2e() {
 
     // Verify fixture was created
     let fixture_path = contracts_dir().join("test/data/mle_fixture.json");
-    assert!(
-        fixture_path.exists(),
-        "mle_fixture.json not generated"
-    );
+    assert!(fixture_path.exists(), "mle_fixture.json not generated");
     eprintln!("[e2e] Fixtures generated successfully");
     eprintln!();
 

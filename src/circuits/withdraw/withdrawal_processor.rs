@@ -96,12 +96,12 @@ where
     pub fn prove_final(
         &self,
         withdrawal_chain_proof: &ProofWithPublicInputs<F, C, D>,
-        withdrawal_aggregator: Address,
+        withdrawal_prover: Address,
         ext_public_state: &ExtendedPublicState,
     ) -> Result<ProofWithPublicInputs<F, C, D>, WithdrawalProcessorError> {
         let withdrawal_proof = self.withdrawal_circuit.prove(
             withdrawal_chain_proof,
-            withdrawal_aggregator,
+            withdrawal_prover,
             ext_public_state,
         )?;
         Ok(withdrawal_proof)

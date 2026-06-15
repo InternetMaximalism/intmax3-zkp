@@ -1,0 +1,147 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>INTMAX3 Channel Wallet — Live</title>
+<style>
+  :root { --bg:#0f1419; --panel:#1a2129; --fg:#e6edf3; --muted:#8b949e; --accent:#2f81f7; --ok:#3fb950; --err:#f85149; --border:#30363d; }
+  * { box-sizing:border-box; }
+  body { margin:0; font:15px/1.6 ui-monospace,SFMono-Regular,Menlo,monospace; background:var(--bg); color:var(--fg); }
+  header { padding:16px 22px; border-bottom:1px solid var(--border); display:flex; gap:16px; align-items:baseline; flex-wrap:wrap; }
+  h1 { font-size:17px; margin:0; }
+  #status { color:var(--muted); } #status.ready { color:var(--ok); }
+  main { max-width:760px; margin:0 auto; padding:20px; display:flex; flex-direction:column; gap:16px; }
+  .panel { background:var(--panel); border:1px solid var(--border); border-radius:10px; padding:18px; }
+  .panel h2 { font-size:13px; margin:0 0 12px; color:var(--accent); text-transform:uppercase; letter-spacing:.06em; }
+  .bal { font-size:34px; font-weight:600; }
+  .bal small { font-size:13px; color:var(--muted); font-weight:400; }
+  label { color:var(--muted); font-size:13px; display:block; margin:10px 0 3px; }
+  input { width:100%; background:#0d1117; color:var(--fg); border:1px solid var(--border); border-radius:7px; padding:9px; font:inherit; }
+  .row { display:flex; gap:12px; } .row > * { flex:1; }
+  button { background:var(--accent); color:#fff; border:0; border-radius:7px; padding:11px 18px; font:inherit; font-weight:600; cursor:pointer; margin-top:12px; width:100%; }
+  button:disabled { opacity:.45; cursor:not-allowed; }
+  .members { color:var(--muted); font-size:13px; margin-top:8px; }
+  #log { background:#0d1117; border:1px solid var(--border); border-radius:10px; padding:12px; height:200px; overflow:auto; white-space:pre-wrap; font-size:13px; }
+  .hint { color:var(--muted); font-size:13px; }
+  .ok { color:var(--ok); } .err { color:var(--err); }
+</style>
+</head>
+<body>
+<header>
+  <h1>INTMAX3 Channel Wallet</h1>
+  <span id="status">initializing…</span>
+  <span class="hint">threads <span id="threads">?</span> · proving runs in your browser</span>
+</header>
+<main>
+  <section class="panel">
+    <h2>1 · Open a channel</h2>
+    <p class="hint">Generates your keys (SPHINCS+ + Regev), funds your slot, and the local CLI runs the other two members. All proving/lattice work happens in your browser.</p>
+    <label>Your opening balance</label>
+    <input id="openBalance" type="number" value="50" min="0" />
+    <button id="btnOpen" disabled>Generate keys & open channel</button>
+    <div class="members" id="members"></div>
+  </section>
+
+  <section class="panel">
+    <h2>2 · Your balance</h2>
+    <div class="bal"><span id="balance">—</span> <small id="balMeta"></small></div>
+  </section>
+
+  <section class="panel">
+    <h2>3 · Send</h2>
+    <p class="hint">Builds the E-1 zero-knowledge proof (~3ms) and two SPHINCS+ signatures in your browser; the signatures dominate the time. Then the other members co-sign.</p>
+    <div class="row">
+      <div><label>To member slot</label><input id="toSlot" type="number" value="1" /></div>
+      <div><label>Amount</label><input id="amount" type="number" value="7" /></div>
+    </div>
+    <button id="btnSend" disabled>Send</button>
+    <p class="hint">The wait is two SPHINCS+ signatures (post-quantum, hash-based) in-browser — ~30–140s. The Regev STARK proof itself is ~3ms. The button shows elapsed time.</p>
+  </section>
+
+  <div id="log"></div>
+</main>
+
+<script type="module">
+const $ = (id) => document.getElementById(id);
+const log = (m, cls='') => { const l=$('log'); l.innerHTML += `\n<span class="${cls}">${m}</span>`; l.scrollTop=l.scrollHeight; };
+let mySlot = 0;
+
+// ---- worker plumbing (same protocol as wallet-worker.js) ----
+const worker = new Worker('./wallet-worker.js', { type: 'module' });
+const handlers = {};
+function call(action, payload={}) {
+  return new Promise((resolve, reject) => { handlers[action] = { resolve, reject }; worker.postMessage({ action, ...payload }); });
+}
+worker.onmessage = (e) => {
+  const d = e.data;
+  if (d.type === 'ready') { $('status').textContent='ready'; $('status').className='ready'; $('threads').textContent=d.threads; $('btnOpen').disabled=false; return; }
+  if (d.type === 'log') { return; }
+  if (d.type === 'result') handlers[d.action]?.resolve(d.result);
+  else if (d.type === 'error') handlers[d.action]?.reject(new Error(d.message));
+};
+worker.onerror = (e) => log('worker error: '+e.message, 'err');
+
+async function api(pathname, body) {
+  const r = await fetch(pathname, { method:'POST', headers:{'Content-Type':'application/json'}, body });
+  const text = await r.text();
+  if (!r.ok) throw new Error('relay '+pathname+': '+text);
+  return text; // pass JSON text straight back into the wasm calls
+}
+function showBalance(r) {
+  $('balance').textContent = r.balance;
+  $('balMeta').textContent = `· slot ${r.slot} · v${r.stateVersion} · ${r.canSend ? 'can send' : 'receive-only (refresh needed)'}`;
+}
+
+async function step(label, fn) {
+  const t = Date.now();
+  log(label + '…');
+  const r = await fn();
+  log(`  ${label} done (${((Date.now()-t)/1000).toFixed(1)}s)`);
+  return r;
+}
+$('btnOpen').onclick = async () => {
+  const t0 = Date.now();
+  const tick = setInterval(() => { $('btnOpen').textContent = `Opening… ${Math.round((Date.now()-t0)/1000)}s`; }, 250);
+  try {
+    $('btnOpen').disabled = true;
+    await step('generate keys', () => call('keygen'));
+    const contribution = await step('encrypt opening balance', () => call('genesisContribution', { balance: $('openBalance').value }));
+    const genesisToSign = await step('CLI builds channel (other members)', () => api('/api/init', contribution));
+    const sig = await step('sign genesis (SPHINCS+ in browser — slowest step)', () => call('signState', { slot: 0, stateJson: genesisToSign }));
+    const snapshot = await step('CLI collects signatures', () => api('/api/add-genesis-sig', sig));
+    const r = JSON.parse(await step('import & verify channel', () => call('importChannel', { snapshotJson: snapshot })));
+    mySlot = r.slot;
+    showBalance(r);
+    $('members').textContent = `You are slot ${r.slot}. Other members: slot 1 (CLI), slot 2 (CLI).`;
+    $('btnSend').disabled = false;
+    log(`channel open in ${Math.round((Date.now()-t0)/1000)}s. balance ${r.balance}`, 'ok');
+  } catch (e) { log('open failed: '+e.message, 'err'); $('btnOpen').disabled=false; }
+  clearInterval(tick);
+  $('btnOpen').textContent = 'Generate keys & open channel';
+};
+
+$('btnSend').onclick = async () => {
+  const t0 = Date.now();
+  const tick = setInterval(() => { $('btnSend').textContent = `Proving… ${Math.round((Date.now()-t0)/1000)}s`; }, 250);
+  try {
+    $('btnSend').disabled = true;
+    const to = +$('toSlot').value, amt = $('amount').value;
+    if (to === mySlot) throw new Error('cannot send to yourself (slot '+mySlot+')');
+    log(`E-1 proof (~3ms) + 2 SPHINCS+ signatures (slow) for ${amt} → slot ${to}…`);
+    const payload = await call('send', { recipientSlot: to, amount: amt });
+    log('other members co-signing…');
+    const finalState = await api('/api/cosign', payload);
+    const r = JSON.parse(await call('finalize', { stateJson: finalState }));
+    showBalance(r);
+    log(`sent ${amt} to slot ${to} in ${Math.round((Date.now()-t0)/1000)}s. new balance ${r.balance}`, 'ok');
+  } catch (e) { log('send failed: '+e.message, 'err'); }
+  clearInterval(tick);
+  $('btnSend').textContent = 'Send';
+  $('btnSend').disabled = false;
+};
+
+worker.postMessage({ action: 'init', threads: navigator.hardwareConcurrency || 4 });
+</script>
+</body>
+</html>

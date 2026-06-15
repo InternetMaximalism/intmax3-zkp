@@ -27,13 +27,13 @@ use intmax3_zkp::{
         },
     },
     common::{
+        channel_id::ChannelId as UserId,
         deposit::Deposit,
         salt::Salt,
         transfer::Transfer,
         trees::{deposit_tree::DepositTree, transfer_tree::TransferTree, tx_tree::TxTree},
         tx::Tx,
         u63::U63,
-        user_id::UserId,
     },
     ethereum_types::{address::Address, bytes32::Bytes32, u32limb_trait::U32LimbTrait, u256::U256},
 };
@@ -51,7 +51,7 @@ static BALANCE_PROCESSOR: Lazy<BalanceProcessor<F, C, D>> =
 
 fn build_balance_initial_inputs() -> (&'static BalanceProcessor<F, C, D>, UserId, Salt) {
     let balance_processor = &*BALANCE_PROCESSOR;
-    let user_id = UserId::new(0, 1).expect("user id");
+    let user_id = UserId::new(1).expect("user id");
     let mut rng = StdRng::seed_from_u64(0);
     let salt = Salt::rand(&mut rng);
     (balance_processor, user_id, salt)
@@ -68,7 +68,7 @@ fn build_deposit_bench_inputs() -> (
         BlockWitnessGeneratorHandle::new(BlockWitnessGenerator::new(&supported_user_counts));
 
     let mut rng = StdRng::seed_from_u64(1);
-    let user_id = UserId::new(0, 1).expect("user id");
+    let user_id = UserId::new(1).expect("user id");
     let salt = Salt::rand(&mut rng);
 
     let balance_witness_generator = BalanceWitnessGenerator::new(
@@ -117,7 +117,7 @@ fn build_send_tx_bench_inputs() -> (&'static BalanceProcessor<F, C, D>, SendTxWi
         BlockWitnessGeneratorHandle::new(BlockWitnessGenerator::new(&supported_user_counts));
 
     let mut rng = StdRng::seed_from_u64(2);
-    let user_id = UserId::new(0, 1).expect("user id");
+    let user_id = UserId::new(1).expect("user id");
     let salt = Salt::rand(&mut rng);
     let mut balance_witness_generator = BalanceWitnessGenerator::new(
         user_id,
@@ -180,20 +180,15 @@ fn build_send_tx_bench_inputs() -> (&'static BalanceProcessor<F, C, D>, SendTxWi
     };
 
     let mut tx_tree = TxTree::init();
-    tx_tree.update(user_id.local_id() as u64, tx.clone());
+    tx_tree.update(user_id.as_u64(), tx.clone());
     let tx_tree_root = tx_tree.get_root();
-    let tx_merkle_proof = tx_tree.prove(user_id.local_id() as u64);
+    let tx_merkle_proof = tx_tree.prove(user_id.as_u64());
     let tx_tree_root_bytes: Bytes32 = tx_tree_root.into();
 
     {
         let mut generator = block_witness_generator.borrow_mut();
         generator
-            .add_block(
-                user_id.aggregator_id(),
-                &[user_id.local_id()],
-                1,
-                tx_tree_root_bytes,
-            )
+            .add_block(user_id.channel_id(), &[1], 1, tx_tree_root_bytes)
             .expect("apply tx block");
     }
 
@@ -202,6 +197,10 @@ fn build_send_tx_bench_inputs() -> (&'static BalanceProcessor<F, C, D>, SendTxWi
         tx_tree_root: tx_tree_root_bytes,
         tx: tx.clone(),
         tx_merkle_proof: tx_merkle_proof.clone(),
+        tx_v2: None,
+        tx_v2_merkle_proof: None,
+        transfer: transfer.clone(),
+        transfer_merkle_proof: transfer_tree.prove(0),
     };
     let send_tx_witness = balance_witness_generator
         .send_tx_witness(&send_tx_data)
@@ -222,7 +221,7 @@ fn build_receive_transfer_bench_inputs() -> (
         BlockWitnessGeneratorHandle::new(BlockWitnessGenerator::new(&supported_user_counts));
 
     let mut rng = StdRng::seed_from_u64(3);
-    let user_id = UserId::new(0, 1).expect("user id");
+    let user_id = UserId::new(1).expect("user id");
     let salt = Salt::rand(&mut rng);
     let mut balance_witness_generator = BalanceWitnessGenerator::new(
         user_id,
@@ -266,7 +265,7 @@ fn build_receive_transfer_bench_inputs() -> (
 
     let sender_proof = balance_witness_generator.balance_proof.clone();
     let transfer_salt = Salt::rand(&mut rng);
-    let user_id2 = UserId::new(1, 1).expect("user id 2");
+    let user_id2 = UserId::new(2).expect("user id 2");
     let balance_witness_generator2 = BalanceWitnessGenerator::new(
         user_id2,
         Salt::rand(&mut rng),
@@ -298,20 +297,15 @@ fn build_receive_transfer_bench_inputs() -> (
     };
 
     let mut tx_tree = TxTree::init();
-    tx_tree.update(user_id.local_id() as u64, tx.clone());
+    tx_tree.update(user_id.as_u64(), tx.clone());
     let tx_tree_root = tx_tree.get_root();
-    let tx_merkle_proof = tx_tree.prove(user_id.local_id() as u64);
+    let tx_merkle_proof = tx_tree.prove(user_id.as_u64());
     let tx_tree_root_bytes: Bytes32 = tx_tree_root.into();
 
     {
         let mut generator = block_witness_generator.borrow_mut();
         generator
-            .add_block(
-                user_id.aggregator_id(),
-                &[user_id.local_id()],
-                1,
-                tx_tree_root_bytes,
-            )
+            .add_block(user_id.channel_id(), &[1], 1, tx_tree_root_bytes)
             .expect("apply transfer block");
     }
 
@@ -320,6 +314,10 @@ fn build_receive_transfer_bench_inputs() -> (
         tx_tree_root: tx_tree_root_bytes,
         tx: tx.clone(),
         tx_merkle_proof: tx_merkle_proof.clone(),
+        tx_v2: None,
+        tx_v2_merkle_proof: None,
+        transfer: transfer.clone(),
+        transfer_merkle_proof: transfer_merkle_proof.clone(),
     };
     let send_tx_witness = balance_witness_generator
         .send_tx_witness(&send_tx_data)
@@ -342,6 +340,8 @@ fn build_receive_transfer_bench_inputs() -> (
         transfer_index,
         transfer_merkle_proof,
         transfer_salt,
+        tx_v2: None,
+        tx_v2_merkle_proof: None,
     };
     let receive_transfer_witness = balance_witness_generator2
         .receive_transfer_witness(&receive_transfer_data)

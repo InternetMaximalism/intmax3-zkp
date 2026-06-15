@@ -2,12 +2,13 @@ use plonky2_keccak::utils::solidity_keccak256;
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    common::user_id::UserId,
-    ethereum_types::{
-        bytes32::Bytes32,
-        u256::U256,
-        u32limb_trait::U32LimbTrait,
+    common::{
+        channel_id::ChannelId,
+        trees::tx_v2_tree::compute_channel_action_root,
+        tx::{ChannelAction, ChannelActionKind, TxClass, TxV2},
     },
+    ethereum_types::{bytes32::Bytes32, u32limb_trait::U32LimbTrait, u256::U256},
+    utils::poseidon_hash_out::PoseidonHashOut,
 };
 
 /// Magic bytes identifying a channel message: "IMPC" (0x494D5043).
@@ -45,8 +46,8 @@ impl Allocation {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ChannelMessage {
-    /// The channel's userId (multisig account ID).
-    pub channel_id: UserId,
+    /// The channel's userId (multisig user ID).
+    pub channel_id: ChannelId,
 
     /// Monotonically increasing sequence number. Higher = newer state.
     pub sequence: u64,
@@ -55,7 +56,7 @@ pub struct ChannelMessage {
     pub allocations: Vec<Allocation>,
 
     /// Pre-computed Intmax tx tree root corresponding to these allocations.
-    /// This is the value that will be inserted as a forced tx on close.
+    /// This anchors the close-time settlement payload.
     pub tx_tree_root: Bytes32,
 }
 
@@ -98,12 +99,52 @@ impl ChannelMessage {
 
         Bytes32::from_u32_slice(&solidity_keccak256(&inputs)).expect("hash result invalid")
     }
+
+    pub fn close_action_payload_hash(&self) -> PoseidonHashOut {
+        PoseidonHashOut::hash_inputs_u32(
+            &[
+                self.channel_id.to_u32_vec(),
+                vec![self.sequence as u32, (self.sequence >> 32) as u32],
+                self.allocations_hash().to_u32_vec(),
+                self.tx_tree_root.to_u32_vec(),
+            ]
+            .concat(),
+        )
+    }
+
+    pub fn to_channel_close_action(&self, seal: Bytes32) -> ChannelAction {
+        ChannelAction {
+            kind: ChannelActionKind::ChannelClose,
+            source_channel_id: self.channel_id,
+            destination_channel_id: ChannelId::dummy(),
+            tx_hash: self.signing_hash(),
+            seal,
+            payload_hash: self.close_action_payload_hash(),
+        }
+    }
+
+    pub fn to_channel_close_tx_v2(&self, seal: Bytes32, nonce: u32) -> TxV2 {
+        let action = self.to_channel_close_action(seal);
+        let channel_action_root = compute_channel_action_root(&[action]);
+        TxV2 {
+            tx_class: TxClass::ChannelAction,
+            transfer_tree_root: PoseidonHashOut::default(),
+            nonce,
+            channel_action_root,
+        }
+    }
+
+    pub fn channel_close_tx_v2_root(&self, seal: Bytes32, nonce: u32) -> PoseidonHashOut {
+        crate::common::trees::tx_v2_tree::compute_tx_v2_root(&[
+            self.to_channel_close_tx_v2(seal, nonce)
+        ])
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::common::user_id::UserId;
+    use crate::common::channel_id::ChannelId;
     use rand::{SeedableRng, rngs::StdRng};
 
     #[test]
@@ -116,7 +157,7 @@ mod tests {
     #[test]
     fn test_signing_hash_deterministic() {
         let msg = ChannelMessage {
-            channel_id: UserId::new(1, 100).unwrap(),
+            channel_id: ChannelId::new(1).unwrap(),
             sequence: 5,
             allocations: vec![Allocation {
                 recipient: Bytes32::default(),
@@ -134,13 +175,13 @@ mod tests {
     #[test]
     fn test_different_sequences_produce_different_hashes() {
         let msg1 = ChannelMessage {
-            channel_id: UserId::new(1, 100).unwrap(),
+            channel_id: ChannelId::new(1).unwrap(),
             sequence: 1,
             allocations: vec![],
             tx_tree_root: Bytes32::default(),
         };
         let msg2 = ChannelMessage {
-            channel_id: UserId::new(1, 100).unwrap(),
+            channel_id: ChannelId::new(1).unwrap(),
             sequence: 2,
             allocations: vec![],
             tx_tree_root: Bytes32::default(),
@@ -153,7 +194,7 @@ mod tests {
     fn test_serialization_roundtrip() {
         let mut rng = StdRng::seed_from_u64(42);
         let msg = ChannelMessage {
-            channel_id: UserId::new(2, 50).unwrap(),
+            channel_id: ChannelId::new(2).unwrap(),
             sequence: 10,
             allocations: vec![
                 Allocation {
@@ -175,6 +216,25 @@ mod tests {
         assert_eq!(msg, deserialized);
     }
 
+    #[test]
+    fn test_channel_close_tx_v2_is_deterministic() {
+        let msg = ChannelMessage {
+            channel_id: ChannelId::new(2).unwrap(),
+            sequence: 10,
+            allocations: vec![],
+            tx_tree_root: Bytes32::default(),
+        };
+        let seal = Bytes32::from_u32_slice(&[1, 2, 3, 4, 5, 6, 7, 8]).unwrap();
+        let tx_a = msg.to_channel_close_tx_v2(seal, 99);
+        let tx_b = msg.to_channel_close_tx_v2(seal, 99);
+        assert_eq!(tx_a, tx_b);
+        assert_eq!(tx_a.tx_class, TxClass::ChannelAction);
+        assert_eq!(
+            msg.channel_close_tx_v2_root(seal, 99),
+            crate::common::trees::tx_v2_tree::compute_tx_v2_root(&[tx_a])
+        );
+    }
+
     /// Full lifecycle test: channel opening → 3 payments → non-cooperative close.
     ///
     /// Simulates Alice & Bob with off-chain channel messages:
@@ -190,47 +250,38 @@ mod tests {
     ///   - Channel message format is distinct from Intmax Tx
     #[test]
     fn test_full_lifecycle_offchain_messages() {
-        let channel_id = UserId::new(1, 42).unwrap();
+        let channel_id = ChannelId::new(1).unwrap();
 
         let alice_recipient = Bytes32::from_u32_slice(&[0, 0, 0, 0, 0, 0, 0, 1]).unwrap();
         let bob_recipient = Bytes32::from_u32_slice(&[0, 0, 0, 0, 0, 0, 0, 2]).unwrap();
         let token_index: u32 = 0; // ETH
 
         // Helper: create a channel message with given allocations
-        let make_msg =
-            |seq: u64, alice_amt: u64, bob_amt: u64| -> ChannelMessage {
-                let allocations = vec![
-                    Allocation {
-                        recipient: alice_recipient,
-                        token_index,
-                        amount: U256::from(alice_amt as u32),
-                    },
-                    Allocation {
-                        recipient: bob_recipient,
-                        token_index,
-                        amount: U256::from(bob_amt as u32),
-                    },
-                ];
-                // Use a deterministic fake tx_tree_root derived from sequence
-                let tx_tree_root = Bytes32::from_u32_slice(&[
-                    0,
-                    0,
-                    0,
-                    0,
-                    0,
-                    0,
-                    seq as u32,
-                    (seq >> 32) as u32,
-                ])
-                .unwrap();
+        let make_msg = |seq: u64, alice_amt: u64, bob_amt: u64| -> ChannelMessage {
+            let allocations = vec![
+                Allocation {
+                    recipient: alice_recipient,
+                    token_index,
+                    amount: U256::from(alice_amt as u32),
+                },
+                Allocation {
+                    recipient: bob_recipient,
+                    token_index,
+                    amount: U256::from(bob_amt as u32),
+                },
+            ];
+            // Use a deterministic fake tx_tree_root derived from sequence
+            let tx_tree_root =
+                Bytes32::from_u32_slice(&[0, 0, 0, 0, 0, 0, seq as u32, (seq >> 32) as u32])
+                    .unwrap();
 
-                ChannelMessage {
-                    channel_id,
-                    sequence: seq,
-                    allocations,
-                    tx_tree_root,
-                }
-            };
+            ChannelMessage {
+                channel_id,
+                sequence: seq,
+                allocations,
+                tx_tree_root,
+            }
+        };
 
         // ── M0: Initial deposit state ──
         let m0 = make_msg(0, 100, 50);
@@ -285,15 +336,13 @@ mod tests {
             );
         }
 
-        // 4. Signing hash differs from Intmax Tx hash (different domain)
-        //    The magic prefix ensures domain separation.
-        //    Just verify the hash is non-zero and 32 bytes.
+        // 4. Signing hash differs from Intmax Tx hash (different domain) The magic prefix ensures
+        //    domain separation. Just verify the hash is non-zero and 32 bytes.
         let h = m3.signing_hash();
         assert_ne!(h, Bytes32::default(), "signing hash should not be zero");
 
-        // 5. For non-cooperative close, Bob would submit m3 on-chain.
-        //    The on-chain contract only needs (sequence=3, tx_tree_root=m3.tx_tree_root).
-        //    Verify these are accessible.
+        // 5. For non-cooperative close, Bob would submit m3 on-chain. The on-chain contract only
+        //    needs (sequence=3, tx_tree_root=m3.tx_tree_root). Verify these are accessible.
         assert_eq!(m3.sequence, 3);
         assert_ne!(m3.tx_tree_root, Bytes32::default());
 

@@ -24,16 +24,10 @@
 
 use intmax3_zkp::{
     constants::NULLIFIER_TREE_HEIGHT,
-    ethereum_types::{
-        bytes32::Bytes32,
-        u256::U256,
-        u32limb_trait::U32LimbTrait as _,
-    },
+    ethereum_types::{bytes32::Bytes32, u32limb_trait::U32LimbTrait as _, u256::U256},
     utils::trees::{
         incremental_merkle_tree::IncrementalMerkleTree,
-        indexed_merkle_tree::{
-            insertion::IndexedInsertionProof, leaf::IndexedMerkleLeaf,
-        },
+        indexed_merkle_tree::{insertion::IndexedInsertionProof, leaf::IndexedMerkleLeaf},
     },
 };
 
@@ -71,8 +65,7 @@ fn regression_duplicate_nullifier_insertion_blocked() {
         value: 0,
     };
 
-    let mut legit_tree =
-        IncrementalMerkleTree::<IndexedMerkleLeaf>::new(NULLIFIER_TREE_HEIGHT);
+    let mut legit_tree = IncrementalMerkleTree::<IndexedMerkleLeaf>::new(NULLIFIER_TREE_HEIGHT);
     legit_tree.push(updated_sentinel.clone());
     legit_tree.push(leaf_for_n1.clone());
     let root_after_legit = legit_tree.get_root();
@@ -100,8 +93,7 @@ fn regression_duplicate_nullifier_insertion_blocked() {
         next_key: n1_key,
         ..pseudo_sentinel.clone() // key=0, value=0 preserved
     };
-    let mut simulated_tree =
-        IncrementalMerkleTree::<IndexedMerkleLeaf>::new(NULLIFIER_TREE_HEIGHT);
+    let mut simulated_tree = IncrementalMerkleTree::<IndexedMerkleLeaf>::new(NULLIFIER_TREE_HEIGHT);
     simulated_tree.push(updated_sentinel.clone());
     simulated_tree.push(leaf_for_n1.clone());
     simulated_tree.push(new_low_leaf_malicious.clone());
@@ -121,12 +113,11 @@ fn regression_duplicate_nullifier_insertion_blocked() {
     // ---- Phase C: Assert the native check REJECTS the malicious proof.
     // Pre-fix this would have succeeded and produced a root with two leaves
     // sharing `n1_key`. Post-fix (see `leaf.rs` `empty_leaf()` comment):
-    //   * The attacker's `prev_low_leaf = (0, 0, 0, 0)` no longer hashes to
-    //     what is stored at an empty slot; `low_leaf_proof.verify` fails at
-    //     the Merkle layer.
-    //   * Even if the attacker adapts to `prev_low_leaf = empty_leaf()` (the
-    //     new non-zero sentinel), `empty_leaf.key = U256::MAX` fails the lower
-    //     bound check `prev_low_leaf.key < new_key`.
+    //   * The attacker's `prev_low_leaf = (0, 0, 0, 0)` no longer hashes to what is stored at an
+    //     empty slot; `low_leaf_proof.verify` fails at the Merkle layer.
+    //   * Even if the attacker adapts to `prev_low_leaf = empty_leaf()` (the new non-zero
+    //     sentinel), `empty_leaf.key = U256::MAX` fails the lower bound check `prev_low_leaf.key <
+    //     new_key`.
     let outcome = malicious_proof.get_new_root(n1_key, 0, root_after_legit);
     assert!(
         outcome.is_err(),
@@ -187,8 +178,14 @@ fn regression_duplicate_insertion_blocked_for_any_nonzero_key() {
         U256::from(1_000_000u32),
     ];
     let big: U256 = Bytes32::from_u32_slice(&[
-        0xFFFF_FFFF, 0xAAAA_AAAA, 0xBBBB_BBBB, 0xCCCC_CCCC,
-        0x1111_1111, 0x2222_2222, 0x3333_3333, 0x4444_4444,
+        0xFFFF_FFFF,
+        0xAAAA_AAAA,
+        0xBBBB_BBBB,
+        0xCCCC_CCCC,
+        0x1111_1111,
+        0x2222_2222,
+        0x3333_3333,
+        0x4444_4444,
     ])
     .unwrap()
     .into();
@@ -207,23 +204,19 @@ fn regression_duplicate_insertion_blocked_for_any_nonzero_key() {
             next_key: U256::default(),
             value: 0,
         };
-        let mut legit_tree =
-            IncrementalMerkleTree::<IndexedMerkleLeaf>::new(NULLIFIER_TREE_HEIGHT);
+        let mut legit_tree = IncrementalMerkleTree::<IndexedMerkleLeaf>::new(NULLIFIER_TREE_HEIGHT);
         legit_tree.push(updated_sentinel.clone());
         legit_tree.push(leaf_for_k.clone());
         let root = legit_tree.get_root();
 
-        for &(low_empty, new_empty) in
-            &[(2u64, 3u64), (5, 9), (100, 200), (1024, 2048)]
-        {
+        for &(low_empty, new_empty) in &[(2u64, 3u64), (5, 9), (100, 200), (1024, 2048)] {
             let low_proof = legit_tree.prove(low_empty);
             let new_low = IndexedMerkleLeaf {
                 next_index: new_empty,
                 next_key: k,
                 ..IndexedMerkleLeaf::default()
             };
-            let mut sim =
-                IncrementalMerkleTree::<IndexedMerkleLeaf>::new(NULLIFIER_TREE_HEIGHT);
+            let mut sim = IncrementalMerkleTree::<IndexedMerkleLeaf>::new(NULLIFIER_TREE_HEIGHT);
             sim.push(updated_sentinel.clone());
             sim.push(leaf_for_k.clone());
             for _ in sim.leaves().len() as u64..low_empty {

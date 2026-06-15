@@ -8,6 +8,17 @@ intmax3-zkp is a zero-knowledge proof system for the INTMAX3 rollup protocol. It
 
 **Stack:** Rust 2024 edition (nightly-2025-03-23) + Solidity 0.8.29 (Foundry, Prague EVM)
 
+## Secrets & Key Handling (MANDATORY)
+
+A real Ethereum private key (testnet/Sepolia deployer) is stored at `.claude/priv`.
+`.claude/` is gitignored (`.gitignore:63`) and `.claude/priv` is also listed explicitly
+(`.gitignore` "Secrets" block), so the key is never committed — keep it that way.
+
+- **NEVER read the key's contents.** Do not `cat`/`Read`/`head`/`tail`/`grep` the file, and never let its value enter the model context, a tool result, a commit, or any external/network call. Leaking it once is irreversible — anyone can drain the funds. Existence checks via `ls` only.
+- **Hand the key to local processes directly**, never through the assistant: e.g. `cast wallet import <name> --interactive` (keystore), then `forge script ... --account <name>`; or `--private-key "$(cat .claude/priv)"` so the *shell* expands it — do not echo, print, or write the value anywhere.
+- Never put the key (or command output containing it) in responses, commit messages, or files. The derived **address** is public and fine to record.
+- Store any new secret under `.claude/` or another gitignored path.
+
 ## Build & Test Commands
 
 ```bash
@@ -84,7 +95,7 @@ node server.js        # Serves at https://localhost:8000
 
 1. **Balance Proofs** (`src/circuits/balance/`) — User account state (spend, send-tx, receive-transfer, receive-deposit). Uses recursive IVC via a switch board circuit that routes to sub-circuits, coordinated by `balance_processor.rs`.
 
-2. **Validity Proofs** (`src/circuits/validity/`) — Block-level consensus. Two chains: block hash chain (account tree updates + SPHINCS+ signature verification) and deposit hash chain. Main circuit in `validity_circuit.rs` binds initial/final state commitments. Public inputs = `keccak256(ValidityPublicInputs)` for on-chain binding.
+2. **Validity Proofs** (`src/circuits/validity/`) — Block-level consensus. Two chains: block hash chain (user tree updates + SPHINCS+ signature verification) and deposit hash chain. Main circuit in `validity_circuit.rs` binds initial/final state commitments. Public inputs = `keccak256(ValidityPublicInputs)` for on-chain binding.
 
 3. **Withdrawal Proofs** (`src/circuits/withdraw/`) — Extract transfers from balance proofs and aggregate N withdrawals via chain circuit.
 

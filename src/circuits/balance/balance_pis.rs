@@ -15,11 +15,15 @@ use thiserror::Error;
 
 use crate::{
     common::{
+        channel_id::{ChannelId, ChannelIdTarget},
         private_state::PrivateState,
         public_state::{PUBLIC_STATE_U64_LEN, PublicState, PublicStateTarget},
         salt::Salt,
         u63::{BlockNumber, BlockNumberTarget},
-        user_id::{UserId, UserIdTarget},
+    },
+    ethereum_types::{
+        bytes32::{BYTES32_LEN, Bytes32, Bytes32Target},
+        u32limb_trait::{U32LimbTargetTrait as _, U32LimbTrait as _},
     },
     utils::{
         conversion::{ToField as _, ToU64},
@@ -30,7 +34,8 @@ use crate::{
     },
 };
 
-pub const BALANCE_PUBLIC_INPUTS_LEN: usize = 1 + PUBLIC_STATE_U64_LEN + 1 + POSEIDON_HASH_OUT_LEN;
+pub const BALANCE_PUBLIC_INPUTS_LEN: usize =
+    1 + PUBLIC_STATE_U64_LEN + 1 + POSEIDON_HASH_OUT_LEN + BYTES32_LEN;
 
 #[derive(Debug, Error)]
 pub enum BalancePublicInputsError {
@@ -46,7 +51,7 @@ pub enum BalancePublicInputsError {
 #[derive(Clone, Debug, PartialEq)]
 pub struct BalancePublicInputs {
     // User ID of the balance owner.
-    pub user_id: UserId,
+    pub channel_id: ChannelId,
 
     // Onchain state reference. Usually the latest state.
     pub public_state: PublicState,
@@ -60,24 +65,35 @@ pub struct BalancePublicInputs {
 
     // Commitment of private state.
     pub private_commitment: PoseidonHashOut,
+
+    /*
+     * Hash-chain fold over every settle (deposit / inter-channel
+     * transfer) this balance proof has absorbed (detail2 §F-1).
+     * Genesis = 0x00..00; updated in-circuit via
+     * settled_tx_chain_push_circuit. Matched off-chain against the
+     * signed BalanceState.settled_tx_chain.
+     */
+    pub settled_tx_chain: Bytes32,
 }
 
 impl BalancePublicInputs {
-    pub fn new(user_id: UserId, salt: Salt) -> Self {
+    pub fn new(channel_id: ChannelId, salt: Salt) -> Self {
         Self {
-            user_id,
+            channel_id,
             public_state: PublicState::default(),
             block_r: BlockNumber::default(),
             private_commitment: PrivateState::new(salt).commitment(),
+            settled_tx_chain: Bytes32::default(),
         }
     }
 
     pub fn to_u64_vec(&self) -> Vec<u64> {
         [
-            vec![self.user_id.as_u64()],
+            vec![self.channel_id.as_u64()],
             self.public_state.to_u64_vec(),
             self.block_r.to_u64_vec(),
             self.private_commitment.to_u64_vec(),
+            self.settled_tx_chain.to_u64_vec(),
         ]
         .concat()
     }
@@ -93,9 +109,9 @@ impl BalancePublicInputs {
 
         let mut cursor = 0;
 
-        let user_id =
-            UserId::try_from(pis[cursor]).map_err(|e| BalancePublicInputsError::ParseError {
-                field: "user_id",
+        let channel_id =
+            ChannelId::try_from(pis[cursor]).map_err(|e| BalancePublicInputsError::ParseError {
+                field: "channel_id",
                 message: e.to_string(),
             })?;
         cursor += 1;
@@ -118,22 +134,31 @@ impl BalancePublicInputs {
         let private_commitment =
             PoseidonHashOut::from_u64_slice(&pis[cursor..cursor + POSEIDON_HASH_OUT_LEN])
                 .expect("private_commitment must deserialize");
+        cursor += POSEIDON_HASH_OUT_LEN;
+
+        let settled_tx_chain = Bytes32::from_u64_slice(&pis[cursor..cursor + BYTES32_LEN])
+            .map_err(|e| BalancePublicInputsError::ParseError {
+                field: "settled_tx_chain",
+                message: e.to_string(),
+            })?;
 
         Ok(Self {
-            user_id,
+            channel_id,
             public_state,
             block_r,
             private_commitment,
+            settled_tx_chain,
         })
     }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct BalancePublicInputsTarget {
-    pub user_id: UserIdTarget,
+    pub channel_id: ChannelIdTarget,
     pub public_state: PublicStateTarget,
     pub block_r: BlockNumberTarget,
     pub private_commitment: PoseidonHashOutTarget,
+    pub settled_tx_chain: Bytes32Target,
 }
 
 impl BalancePublicInputsTarget {
@@ -142,19 +167,21 @@ impl BalancePublicInputsTarget {
         is_checked: bool,
     ) -> Self {
         Self {
-            user_id: UserIdTarget::new(builder, is_checked),
+            channel_id: ChannelIdTarget::new(builder, is_checked),
             public_state: PublicStateTarget::new(builder, is_checked),
             block_r: BlockNumberTarget::new(builder, is_checked),
             private_commitment: PoseidonHashOutTarget::new(builder),
+            settled_tx_chain: Bytes32Target::new(builder, is_checked),
         }
     }
 
     pub fn to_vec(&self) -> Vec<Target> {
         [
-            vec![self.user_id.value],
+            vec![self.channel_id.value],
             self.public_state.to_vec(),
             vec![self.block_r.value],
             self.private_commitment.to_vec(),
+            self.settled_tx_chain.to_vec(),
         ]
         .concat()
     }
@@ -163,7 +190,7 @@ impl BalancePublicInputsTarget {
         assert!(pis.len() >= BALANCE_PUBLIC_INPUTS_LEN);
         let mut cursor = 0;
 
-        let user_id = UserIdTarget { value: pis[cursor] };
+        let channel_id = ChannelIdTarget { value: pis[cursor] };
         cursor += 1;
 
         let public_state =
@@ -175,12 +202,16 @@ impl BalancePublicInputsTarget {
 
         let private_commitment =
             PoseidonHashOutTarget::from_slice(&pis[cursor..cursor + POSEIDON_HASH_OUT_LEN]);
+        cursor += POSEIDON_HASH_OUT_LEN;
+
+        let settled_tx_chain = Bytes32Target::from_slice(&pis[cursor..cursor + BYTES32_LEN]);
 
         Self {
-            user_id,
+            channel_id,
             public_state,
             block_r,
             private_commitment,
+            settled_tx_chain,
         }
     }
 
@@ -189,11 +220,13 @@ impl BalancePublicInputsTarget {
         witness: &mut W,
         value: &BalancePublicInputs,
     ) {
-        self.user_id.set_witness(witness, value.user_id);
+        self.channel_id.set_witness(witness, value.channel_id);
         self.public_state.set_witness(witness, &value.public_state);
         self.block_r.set_witness(witness, value.block_r);
         self.private_commitment
             .set_witness(witness, value.private_commitment);
+        self.settled_tx_chain
+            .set_witness(witness, value.settled_tx_chain);
     }
 
     pub fn connect<F: RichField + Extendable<D>, const D: usize>(
@@ -201,11 +234,13 @@ impl BalancePublicInputsTarget {
         builder: &mut CircuitBuilder<F, D>,
         other: &Self,
     ) {
-        builder.connect(self.user_id.value, other.user_id.value);
+        builder.connect(self.channel_id.value, other.channel_id.value);
         self.public_state.connect(builder, &other.public_state);
         builder.connect(self.block_r.value, other.block_r.value);
         self.private_commitment
             .connect(builder, other.private_commitment);
+        self.settled_tx_chain
+            .connect(builder, other.settled_tx_chain);
     }
 }
 

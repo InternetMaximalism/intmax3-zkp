@@ -29,11 +29,15 @@ use crate::{
         },
     },
     common::{
+        balance_state::{settled_tx_chain_push, settled_tx_chain_push_circuit},
         salt::{Salt, SaltTarget},
         transfer::{SettledTransfer, SettledTransferTarget},
         u63::{BlockNumber, BlockNumberTarget},
     },
-    ethereum_types::u32limb_trait::U32LimbTargetTrait,
+    ethereum_types::{
+        bytes32::{Bytes32, Bytes32Target},
+        u32limb_trait::U32LimbTargetTrait,
+    },
     utils::{
         conversion::ToU64,
         cyclic::add_const_gate,
@@ -139,8 +143,8 @@ where
         let prev_balance_pis = &prev_full_pis.pis;
         let sender_balance_pis = &sender_full_pis.pis;
 
-        let sender_user_id = sender_balance_pis.user_id;
-        let receiver_user_id = prev_balance_pis.user_id;
+        let sender_user_id = sender_balance_pis.channel_id;
+        let receiver_user_id = prev_balance_pis.channel_id;
 
         // check update_public_state connections
         if self.receiver_update_public_state.old != prev_balance_pis.public_state {
@@ -164,10 +168,10 @@ where
         let public_state = self.receiver_update_public_state.new.clone();
 
         // check account_state connections
-        if self.account_state.user_id != receiver_user_id {
+        if self.account_state.channel_id != receiver_user_id {
             return Err(ReceiveTransferError::ConnectionError(format!(
-                "account_state.user_id {:?} != receiver_user_id {:?}",
-                self.account_state.user_id, receiver_user_id,
+                "account_state.channel_id {:?} != receiver_user_id {:?}",
+                self.account_state.channel_id, receiver_user_id,
             )));
         }
         if self.account_state.account_tree_root != public_state.account_tree_root {
@@ -178,10 +182,10 @@ where
         }
 
         // check tx settlement connections
-        if self.tx_settlement.user_id != sender_user_id {
+        if self.tx_settlement.channel_id != sender_user_id {
             return Err(ReceiveTransferError::ConnectionError(format!(
-                "tx_settlement.user_id {:?} != sender_user_id {:?}",
-                self.tx_settlement.user_id, sender_user_id,
+                "tx_settlement.channel_id {:?} != sender_user_id {:?}",
+                self.tx_settlement.channel_id, sender_user_id,
             )));
         }
         if self.tx_settlement.public_state != public_state {
@@ -222,8 +226,8 @@ where
         }
 
         // if there is a previous outgoing tx check additional conditions
-        if self.account_state.account_leaf.prev != BlockNumber::default() {
-            // account_witness.send_leaf.prev <= receiver_balance_proof.block_r
+        if self.account_state.channel_leaf.prev != BlockNumber::default() {
+            // user_witness.send_leaf.prev <= receiver_balance_proof.block_r
             if self.account_state.send_leaf.prev > prev_block_r {
                 return Err(ReceiveTransferError::BlockNumberError(format!(
                     "Not account_state.send_leaf.prev <= prev_balance_pis.block_r: {:?} <= {:?}",
@@ -231,7 +235,7 @@ where
                 )));
             }
 
-            // new_block_r < account_witness.send_leaf.cur
+            // new_block_r < user_witness.send_leaf.cur
             if self.new_block_r >= self.account_state.send_leaf.cur {
                 return Err(ReceiveTransferError::BlockNumberError(format!(
                     "Not new_block_r < account_state.send_leaf.cur: {:?} < {:?}",
@@ -308,12 +312,22 @@ where
         }
         let new_private_commitment = self.update_private_state.new_private_state.commitment();
 
+        // detail2 §C-6/§F-1: for inter-channel transfers the merkle-bound `aux_data` carries the
+        // tx leaf hash and is folded into the settled-tx chain; legacy / intra transfers carry
+        // aux_data == 0 and leave the chain unchanged.
+        let new_settled_tx_chain = if transfer.aux_data == Bytes32::default() {
+            prev_balance_pis.settled_tx_chain
+        } else {
+            settled_tx_chain_push(prev_balance_pis.settled_tx_chain, transfer.aux_data)
+        };
+
         let new_full_pis = BalanceFullPublicInputs {
             pis: BalancePublicInputs {
-                user_id: receiver_user_id,
+                channel_id: receiver_user_id,
                 public_state,
                 block_r: self.new_block_r,
                 private_commitment: new_private_commitment,
+                settled_tx_chain: new_settled_tx_chain,
             },
             vd: balance_vd.clone(),
         };
@@ -369,8 +383,8 @@ impl<const D: usize> ReceiveTransferTarget<D> {
         let receiver_prev_pis = prev_balance_full_pis.pis.clone();
         let sender_prev_pis = sender_balance_full_pis.pis.clone();
 
-        let sender_user_id = &sender_prev_pis.user_id;
-        let receiver_user_id = &receiver_prev_pis.user_id;
+        let sender_user_id = &sender_prev_pis.channel_id;
+        let receiver_user_id = &receiver_prev_pis.channel_id;
 
         let sender_update_public_state = UpdatePublicStateTarget::new::<F, C, D>(builder);
         let receiver_update_public_state = UpdatePublicStateTarget::new::<F, C, D>(builder);
@@ -394,13 +408,13 @@ impl<const D: usize> ReceiveTransferTarget<D> {
         let public_state = &receiver_update_public_state.new;
 
         // check account_state connections
-        account_state.user_id.connect(builder, receiver_user_id);
+        account_state.channel_id.connect(builder, receiver_user_id);
         account_state
             .account_tree_root
             .connect(builder, public_state.account_tree_root);
 
         // check tx settlement connections
-        tx_settlement.user_id.connect(builder, &sender_user_id);
+        tx_settlement.channel_id.connect(builder, &sender_user_id);
         tx_settlement.public_state.connect(builder, public_state);
         let tx = &tx_settlement.tx;
 
@@ -412,7 +426,7 @@ impl<const D: usize> ReceiveTransferTarget<D> {
         // recipient check (salt check)
         let expected_recipient = calculate_recipient_from_user_id_circuit(
             builder,
-            &receiver_prev_pis.user_id,
+            &receiver_prev_pis.channel_id,
             &transfer_salt,
         );
         transfer_witness
@@ -429,13 +443,13 @@ impl<const D: usize> ReceiveTransferTarget<D> {
         // public_state.block_number >= new_block_r
         public_state.block_number.enforce_ge(builder, &new_block_r);
 
-        let has_no_outgoint_tx = account_state.account_leaf.prev.is_zero(builder);
+        let has_no_outgoint_tx = account_state.channel_leaf.prev.is_zero(builder);
         let has_outgoint_tx = builder.not(has_no_outgoint_tx);
 
-        // account_witness.send_leaf.prev <= prev_block_r if has_outgoint_tx==true
+        // user_witness.send_leaf.prev <= prev_block_r if has_outgoint_tx==true
         prev_block_r.conditional_ge(builder, &account_state.send_leaf.prev, has_outgoint_tx);
 
-        // new_block_r < account_witness.send_leaf.cur if has_outgoint_tx==true
+        // new_block_r < user_witness.send_leaf.cur if has_outgoint_tx==true
         account_state
             .send_leaf
             .cur
@@ -454,7 +468,7 @@ impl<const D: usize> ReceiveTransferTarget<D> {
 
         let settled_transfer = SettledTransferTarget {
             inner: transfer_witness.transfer.clone(),
-            from: tx_settlement.user_id.clone(),
+            from: tx_settlement.channel_id.clone(),
             transfer_index: transfer_witness.transfer_index,
             block_number: tx_block_number.clone(),
         };
@@ -476,11 +490,38 @@ impl<const D: usize> ReceiveTransferTarget<D> {
         prev_private_commitment.connect(builder, receiver_prev_pis.private_commitment);
         let new_private_commitment = update_private_state.new_private_state.commitment(builder);
 
+        // detail2 §C-6/§F-1 chain fold over the consumed transfer's aux_data, gated on
+        // aux_data != 0 (legacy / intra-channel transfers leave the chain unchanged).
+        //
+        // SECURITY: the circuit only guarantees that the chain PI is a faithful fold of the
+        // merkle-bound `aux_data` of the exact transfer leaf this proof consumed
+        // (transfer_witness verifies the leaf — including aux_data — against
+        // tx.transfer_tree_root, which is bound to the sender's settled tx). The *semantic*
+        // correctness of `aux_data == tx_leaf_hash(...)` for inter-channel transfers is enforced
+        // off-circuit at co-sign time (threat model F3-A), multi-layered with the §E-2
+        // channelUpdateZKP verification and the receiving channel's independent recomputation.
+        // The sender's own chain PI is NOT constrained here — the sender folds the same leaf in
+        // their send step.
+        let transfer_aux_data = transfer_witness.transfer.aux_data;
+        let aux_is_zero = transfer_aux_data.is_zero::<F, D, Bytes32>(builder);
+        let pushed_chain = settled_tx_chain_push_circuit::<F, C, D>(
+            builder,
+            receiver_prev_pis.settled_tx_chain,
+            transfer_aux_data,
+        );
+        let new_settled_tx_chain = Bytes32Target::select(
+            builder,
+            aux_is_zero,
+            receiver_prev_pis.settled_tx_chain,
+            pushed_chain,
+        );
+
         let new_pis = BalancePublicInputsTarget {
-            user_id: receiver_prev_pis.user_id.clone(),
+            channel_id: receiver_prev_pis.channel_id.clone(),
             public_state: receiver_update_public_state.new.clone(),
             block_r: new_block_r.clone(),
             private_commitment: new_private_commitment.clone(),
+            settled_tx_chain: new_settled_tx_chain,
         };
         let new_full_pis = BalanceFullPublicInputsTarget {
             pis: new_pis,
@@ -683,26 +724,26 @@ mod tests {
             spend_circuit::{SpendCircuit, SpendWitness},
         },
         common::{
+            channel_id::ChannelId,
             private_state::FullPrivateState,
             public_state::PublicState,
             salt::Salt,
             transfer::Transfer,
             trees::{
-                account_tree::{AccountLeaf, AccountTree, SendLeaf, SendTree},
                 asset_tree::AssetTree,
+                channel_tree::{ChannelLeaf, ChannelTree, SendLeaf, SendTree},
                 nullifier_tree::NullifierTree,
                 transfer_tree::TransferTree,
                 tx_tree::TxTree,
             },
             tx::Tx,
             u63::BlockNumber,
-            user_id::UserId,
         },
         constants::{
-            ACCOUNT_TREE_HEIGHT, ASSET_TREE_HEIGHT, MAX_NUM_TRANSFERS_PER_TX, SEND_TREE_HEIGHT,
+            ASSET_TREE_HEIGHT, CHANNEL_TREE_HEIGHT, MAX_NUM_TRANSFERS_PER_TX, SEND_TREE_HEIGHT,
             TRANSFER_TREE_HEIGHT,
         },
-        ethereum_types::{bytes32::Bytes32, u256::U256},
+        ethereum_types::{bytes32::Bytes32, u32limb_trait::U32LimbTrait as _, u256::U256},
         utils::{
             conversion::ToField as _, cyclic::TestCyclicCircuit,
             poseidon_hash_out::PoseidonHashOut, trees::get_root::get_merkle_root_from_leaves,
@@ -722,7 +763,7 @@ mod tests {
     fn test_receive_transfer_circuit() {
         let mut rng = rand::thread_rng();
 
-        let receiver_user_id = UserId::new(0, 2).unwrap();
+        let receiver_user_id = ChannelId::new(2).unwrap();
         let transfer_salt = Salt::rand(&mut rng);
         let recipient = calculate_recipient_from_user_id(receiver_user_id, transfer_salt);
 
@@ -732,6 +773,9 @@ mod tests {
         let mut before_balances = Vec::with_capacity(MAX_NUM_TRANSFERS_PER_TX);
         let mut asset_merkle_proofs = Vec::with_capacity(MAX_NUM_TRANSFERS_PER_TX);
 
+        // Inter-channel transfers carry a nonzero aux_data (= tx leaf hash, detail2 §C-6); the
+        // received transfer at index 0 uses one so the chain fold is exercised.
+        let inter_channel_aux = Bytes32::from_u32_slice(&[11, 22, 33, 44, 55, 66, 77, 88]).unwrap();
         for i in 0..MAX_NUM_TRANSFERS_PER_TX {
             let amount = U256::from((i as u32) + 1);
             let base_balance = amount + U256::from(10u32);
@@ -743,7 +787,11 @@ mod tests {
                 },
                 token_index: i as u32,
                 amount,
-                aux_data: Bytes32::default(),
+                aux_data: if i == 0 {
+                    inter_channel_aux
+                } else {
+                    Bytes32::default()
+                },
             };
             asset_tree_initial.update(i as u64, base_balance);
             transfers.push(transfer);
@@ -788,9 +836,9 @@ mod tests {
         let tx = spend_pis.tx.clone();
 
         let mut tx_tree = TxTree::init();
-        let local_id = 1u32;
-        tx_tree.update(local_id as u64, tx.clone());
-        let tx_merkle_proof = tx_tree.prove(local_id as u64);
+        let key_id = 1u32;
+        tx_tree.update(key_id as u64, tx.clone());
+        let tx_merkle_proof = tx_tree.prove(key_id as u64);
         let tx_tree_root: PoseidonHashOut = tx_tree.get_root();
 
         let send_leaf_sender = SendLeaf {
@@ -813,29 +861,27 @@ mod tests {
         let send_leaf_index_receiver = 0u32;
         let send_merkle_proof_receiver = send_tree_receiver.prove(send_leaf_index_receiver as u64);
 
-        let sender_user_id = UserId::new(0, local_id).unwrap();
+        let sender_user_id = ChannelId::new(key_id as u64).unwrap();
 
-        let account_leaf_sender = AccountLeaf {
+        let user_leaf_sender = ChannelLeaf {
             index: send_tree_sender.len() as u32,
             prev: send_leaf_sender.cur,
             send_tree_root: send_tree_sender.get_root(),
-            pk_set_root: PoseidonHashOut::default(),
-            threshold: 0,
+            member_pubkeys_root: ChannelLeaf::default().member_pubkeys_root,
         };
-        let account_leaf_receiver = AccountLeaf {
+        let user_leaf_receiver = ChannelLeaf {
             index: send_tree_receiver.len() as u32,
             prev: send_leaf_receiver.prev,
             send_tree_root: send_tree_receiver.get_root(),
-            pk_set_root: PoseidonHashOut::default(),
-            threshold: 0,
+            member_pubkeys_root: ChannelLeaf::default().member_pubkeys_root,
         };
 
-        let mut account_tree = AccountTree::new(ACCOUNT_TREE_HEIGHT);
-        account_tree.update(sender_user_id.as_u64(), account_leaf_sender.clone());
-        account_tree.update(receiver_user_id.as_u64(), account_leaf_receiver.clone());
-        let sender_account_merkle_proof = account_tree.prove(sender_user_id.as_u64());
-        let receiver_account_merkle_proof = account_tree.prove(receiver_user_id.as_u64());
-        let account_tree_root = account_tree.get_root();
+        let mut channel_tree = ChannelTree::new(CHANNEL_TREE_HEIGHT);
+        channel_tree.update(sender_user_id.as_u64(), user_leaf_sender.clone());
+        channel_tree.update(receiver_user_id.as_u64(), user_leaf_receiver.clone());
+        let sender_user_merkle_proof = channel_tree.prove(sender_user_id.as_u64());
+        let receiver_user_merkle_proof = channel_tree.prove(receiver_user_id.as_u64());
+        let account_tree_root = channel_tree.get_root();
 
         let account_state_sender = AccountState::new(
             sender_user_id,
@@ -843,8 +889,8 @@ mod tests {
             send_leaf_sender.clone(),
             send_leaf_index_sender,
             send_merkle_proof_sender.clone(),
-            account_leaf_sender.clone(),
-            sender_account_merkle_proof.clone(),
+            user_leaf_sender.clone(),
+            sender_user_merkle_proof.clone(),
         )
         .expect("sender account state should be valid");
         let account_state_receiver = AccountState::new(
@@ -853,8 +899,8 @@ mod tests {
             send_leaf_receiver.clone(),
             send_leaf_index_receiver,
             send_merkle_proof_receiver.clone(),
-            account_leaf_receiver.clone(),
-            receiver_account_merkle_proof.clone(),
+            user_leaf_receiver.clone(),
+            receiver_user_merkle_proof.clone(),
         )
         .expect("receiver account state should be valid");
 
@@ -940,17 +986,21 @@ mod tests {
         )
         .expect("update private state");
 
+        // Nonzero previous chain so the test exercises real folding, not just genesis push.
+        let receiver_prev_chain = Bytes32::from_u32_slice(&[9, 9, 9, 9, 9, 9, 9, 9]).unwrap();
         let receiver_prev_balance_pis = BalancePublicInputs {
-            user_id: receiver_user_id,
+            channel_id: receiver_user_id,
             public_state: public_state.clone(),
             block_r: BlockNumber::new(4).unwrap(),
             private_commitment: prev_private_state_receiver.commitment(),
+            settled_tx_chain: receiver_prev_chain,
         };
         let sender_prev_balance_pis = BalancePublicInputs {
-            user_id: sender_user_id,
+            channel_id: sender_user_id,
             public_state: public_state.clone(),
             block_r: BlockNumber::new(5).unwrap(),
             private_commitment: spend_pis.prev_private_commitment,
+            settled_tx_chain: Bytes32::default(),
         };
 
         let pis_len = BALANCE_PUBLIC_INPUTS_LEN;
@@ -1018,6 +1068,14 @@ mod tests {
         assert_eq!(
             expected.pis.private_commitment,
             update_private_state.new_private_state.commitment(),
+        );
+        // detail2 §C-6/§F-1: the nonzero aux_data of the consumed transfer is folded.
+        assert_eq!(
+            expected.pis.settled_tx_chain,
+            crate::common::balance_state::settled_tx_chain_push(
+                receiver_prev_chain,
+                inter_channel_aux
+            ),
         );
     }
 
