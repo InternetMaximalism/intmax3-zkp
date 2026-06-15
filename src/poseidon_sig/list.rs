@@ -75,6 +75,34 @@ pub fn list_commitment(pairs: &[(Bytes32, Bytes32)]) -> Bytes32 {
 }
 
 // ----------------------------------------------------------------------------------------------
+// Shared in-circuit gadgets — used by BOTH the producer (`ListStepCircuit`) and the consumer
+// (`super::consumer`), so the folded commitment is computed by identical constraints on both sides.
+// ----------------------------------------------------------------------------------------------
+
+/// In-circuit `leaf = Poseidon([LIST_LEAF_DOMAIN] ‖ m ‖ pk)`. Mirrors [`list_leaf`].
+pub(crate) fn leaf_target(
+    builder: &mut CircuitBuilder<F, D>,
+    message: &Bytes32Target,
+    public_key: &Bytes32Target,
+) -> PoseidonHashOutTarget {
+    let dom = builder.constant(F::from_canonical_u32(LIST_LEAF_DOMAIN));
+    let mut inputs = Vec::with_capacity(1 + 2 * BYTES32_LEN);
+    inputs.push(dom);
+    inputs.extend(message.to_vec());
+    inputs.extend(public_key.to_vec());
+    PoseidonHashOutTarget::hash_inputs(builder, &inputs)
+}
+
+/// In-circuit `C' = Poseidon(prev ‖ leaf)`. Mirrors [`list_chain_step`].
+pub(crate) fn chain_step_target(
+    builder: &mut CircuitBuilder<F, D>,
+    prev: PoseidonHashOutTarget,
+    leaf: PoseidonHashOutTarget,
+) -> PoseidonHashOutTarget {
+    PoseidonHashOutTarget::two_to_one(builder, prev, leaf)
+}
+
+// ----------------------------------------------------------------------------------------------
 // In-circuit per-step chain folder. Verifies one SingleSig proof, folds its (m, pk) into the chain.
 // ----------------------------------------------------------------------------------------------
 
@@ -99,19 +127,14 @@ impl ListStepCircuit {
         let message =
             Bytes32Target::from_slice(&single_sig_proof.public_inputs[BYTES32_LEN..2 * BYTES32_LEN]);
 
-        // leaf = Poseidon([LIST_LEAF_DOMAIN] ‖ m ‖ pk)
-        let dom = builder.constant(F::from_canonical_u32(LIST_LEAF_DOMAIN));
-        let mut leaf_inputs = Vec::with_capacity(1 + 2 * BYTES32_LEN);
-        leaf_inputs.push(dom);
-        leaf_inputs.extend(message.to_vec());
-        leaf_inputs.extend(pk.to_vec());
-        let leaf = PoseidonHashOutTarget::hash_inputs(&mut builder, &leaf_inputs);
+        // leaf = Poseidon([LIST_LEAF_DOMAIN] ‖ m ‖ pk)  (shared gadget — identical to the consumer).
+        let leaf = leaf_target(&mut builder, &message, &pk);
 
         // new_chain = Poseidon(prev_chain ‖ leaf). `to_hash_out` enforces that prev_chain is a valid
         // hash-out-derived Bytes32 (it always is: 0 on the first step, or a previous new_chain).
         let prev_chain = Bytes32Target::new(&mut builder, true);
         let prev_hashout = prev_chain.to_hash_out(&mut builder);
-        let new_hashout = PoseidonHashOutTarget::two_to_one(&mut builder, prev_hashout, leaf);
+        let new_hashout = chain_step_target(&mut builder, prev_hashout, leaf);
         let new_chain = Bytes32Target::from_hash_out(&mut builder, new_hashout);
 
         builder.register_public_inputs(&prev_chain.to_vec());

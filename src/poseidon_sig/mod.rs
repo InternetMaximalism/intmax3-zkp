@@ -25,6 +25,7 @@
 //!   no primitive is implemented from scratch.
 
 pub mod circuit;
+pub mod consumer;
 pub mod list;
 
 use plonky2::field::{

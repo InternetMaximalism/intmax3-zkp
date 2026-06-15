@@ -84,7 +84,17 @@ hash chain** reusing `CyclicChainCircuit`.
   list circuit alone proves only "these ordered (m,pk) were each signed" — duplicates pass at list level.
 - Exact-`m` + exact-`pk` + message-domain separation so an IMSB entry can't satisfy a close predicate (A4).
 
-## Phase 2b — two-key identity swap + validity/close wiring (NOT STARTED)
+## Phase 2b — two-key identity swap + validity/close wiring
+
+Sub-steps (each: impl → separate security review → tests):
+- **P2b-0 (standalone consumer gadget — IN PROGRESS):** an in-circuit `ListConsumer` that recursively
+  verifies a `ListCircuit` proof, rebuilds the commitment `C'` from a provided set of `(m, pk)` targets,
+  asserts `C' == C` (exact set/order/count), and enforces pubkey **distinctness**. Reuses shared
+  in-circuit leaf/chain gadgets (refactored out of `ListStep`) so producer == consumer. No live-circuit
+  change. Closes reviewer must-fix #1/#2 as a tested building block. [A4, A5, A8]
+- **P2b-1:** two-key identity types + MemberTree leaf `{pk_g, pk_b, regev_pk}` + registration.
+- **P2b-2:** wire validity (`update_channel_tree`).
+- **P2b-3:** wire close (`close_circuit`).
 
 - [ ] Enforce **non-degenerate `sk_g`** in keygen too (circuit already rejects all-zero). [A1]
 - [ ] Consider a `Signature` newtype (no `Serialize`/`Display`) so witness-only `sig` is compiler-enforced. [A6]
