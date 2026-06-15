@@ -122,6 +122,11 @@ mod tests {
                     s as u64,
                     0x5e,
                 ])),
+                pk_b: Bytes32::from(PoseidonHashOut::hash_inputs_u64(&[
+                    channel_id as u64,
+                    s as u64,
+                    0x7e,
+                ])),
                 regev_pk_digest: Bytes32::from(PoseidonHashOut::hash_inputs_u64(&[
                     channel_id as u64,
                     s as u64,

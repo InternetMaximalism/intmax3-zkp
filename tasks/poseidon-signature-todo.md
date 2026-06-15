@@ -144,20 +144,43 @@ ZK hash-signature and removes SPHINCS+ entirely.
       Review notes carried to P3-5: production verify path must use `default_config` (84 queries), not
       `test_config` (8 queries ≈ 8-bit, tests only); `max_constraint_degree==Some(3)` is load-bearing
       (release-mode guard is `debug_assert`) — the prove/verify + native-equality tests are the sentinel.
-- [ ] P3-4. `ChannelTx`: replace `sender_signature: SignatureBytes` (SPHINCS+) with the hash-sig proof
-      envelope + `sender_pk_b`. Keep `sender_pk_g` (member identity).
-- [ ] P3-5. Off-chain verifier (`RealRegevProofVerifier`/`verify_channel_tx` caller/`wallet_core`):
-      require both proofs; bind hash-sig `m == channelTx digest`; check `(sender_pk_g, sender_pk_b,
-      sender_regev_pk)` is one registered MemberLeaf (A11); sender == debited-balance owner.
-- [ ] P3-6. `MemberLeaf{pk_g, pk_b, regev_pk_digest}` + registration + member_pubkeys_root; update
-      validity `update_channel_tree` leaf construction (now 3-field). Mismatched-pair test (A11).
-- [ ] P3-7. Remove off-circuit SPHINCS+ sender sig; delete `sphincsplus-{circuits,params,poseidon}`
-      deps + `test_utils/sphincs_sign.rs` + `validity/.../sphincs_sig.rs` residue (confirm zero
-      remaining consumers after P2b). Confirm WASM build + circuit-size reduction.
-- [ ] P3-8. Tests: hash-sig prove/verify, wrong-sk/wrong-m rejection, verifier rejects channel-tx with
-      missing/mismatched hash-sig, mismatched member pair rejected, e2e green, WASM green.
+- [x] P3-4. `ChannelTx`: `sender_signature` → `sender_hash_sig: Vec<u8>` + `sender_pk_b: Bytes32`
+      (keep `sender_pk_g`). IMPA `signing_digest` preimage unchanged. (Chunk 1)
+- [~] P3-5. Off-chain verifier `verify_channel_tx_sender_hash_sig` (wallet_core): requires the hash-sig,
+      verifies it, binds `m == decompose(channelTx digest)` and `pk_b == sender_pk_b`. **⚠ A11 BINDING
+      UNSOUND — MUST FIX in Chunk 2 (P4):** `registered_pk_b` is read from the UNAUTHENTICATED
+      `payload.members[slot].pk_b` (the wallet's `member_pubkeys_root` is keccak-over-pk_g-only and does
+      NOT commit pk_b), and `verify_channel_tx_sender_hash_sig` is passed `sender.regev_pk` for both the
+      registered AND sender regev_pk (check trivial). An attacker can set both `sender_pk_b` and
+      `members[slot].pk_b` to their own key and pass. The validity-LAYER pk_b binding (member_pubkeys_root
+      Poseidon 3-field leaf + L1 keccak reg chain) IS sound; the gap is wallet-only.
+- [x] P3-6. `MemberLeaf{pk_g, pk_b, regev_pk_digest}` + registration (`pk_b` in the keccak reg-chain
+      preimage, `CHANNEL_REG_PREIMAGE_U32_LEN` updated, Rust↔Solidity differential re-pinned + PASS) +
+      `update_channel_tree` 3-field leaf (`bp_pk_b` witness). Solidity `registerChannel` takes `pkBs`. (Chunk 1)
+- [ ] P3-7. Remove off-circuit SPHINCS+. **BLOCKED → expanded to P4:** the wallet uses SPHINCS+ for
+      member channel-STATE co-signing (`sign_state`/`verify_all_signatures` over IMCH), the Goldilocks
+      key path. Full removal needs the wallet co-signing reworked to Goldilocks (see P4).
+- [ ] P3-8. Tests: e2e fixture generators must emit `member_pk_bs` (forge E2E callers parse it but the
+      JSON fixtures + Rust generators don't emit it yet → regenerate). WASM green.
 - [ ] P3-9. detail2 / detail2-implementation-notes: record the full signature-scheme delta.
 - [ ] P3-10. Separate security review + attacker pass.
+
+## Phase 4 (this session, user-approved scope expansion) — wallet Goldilocks co-signing + SPHINCS+ removal
+- [ ] **P4-1 (soundness, top priority): fix the P3-5 wallet A11 gap.** Make the wallet's registered
+      member set commit `pk_b` (e.g. the wallet `member_pubkeys_root` becomes the Poseidon 3-field leaf
+      root matching the circuit, or pk_b is otherwise bound by `verify_snapshot`), so the A11 check reads
+      `pk_b` from an AUTHENTICATED source, not the raw payload. Fix the regev_pk double-use (pass the
+      sender's actual regev_pk vs the registered one). Add a payload-tamper negative test.
+- [ ] P4-2. Wallet channel-state co-signing → Goldilocks: each member produces a Goldilocks
+      `SingleSigCircuit` proof over the `ChannelState` IMCH digest (= their signature); the wallet's
+      `verify_all_signatures` verifies each proof individually (+ pk_g ∈ member set). The on-chain
+      aggregation into the list proof (close/validity, slot order) is the existing P2b path. Replace
+      `MemberKeys.kp` (SPHINCS+) with `GoldilocksSecretKey`.
+- [ ] P4-3. Remove SPHINCS+ entirely: deps `sphincsplus-{circuits,params,poseidon}`,
+      `test_utils/sphincs_sign.rs`, `SpxSig*` residue (move `SmallBlockMessageFields` out if still used);
+      grep → zero refs. Native + WASM build clean.
+- [ ] P4-4. e2e fixture regeneration (`member_pk_bs`); full Rust e2e + forge E2E green; WASM green.
+- [ ] P4-5. Separate security review + attacker pass (A11 end-to-end, wallet co-sign, SPHINCS+ gone).
 
 ## New threat considerations (P3)
 - **Message-encoding injectivity** (BabyBear u32 aliasing) — the new A-item; the sub-31-bit

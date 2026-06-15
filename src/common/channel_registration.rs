@@ -37,6 +37,10 @@ use crate::{
 /// One channel member's registration entry.
 ///
 /// * `pk_g` — keccak/L1 digest form of the member's Goldilocks signing public key (32 bytes).
+/// * `pk_b` — keccak/L1 digest form of the member's BabyBear hash-signature public key (32 bytes,
+///   P3). Carried so the in-circuit 3-field `MemberLeaf{pk_g, pk_b, regev_pk}` it rebuilds binds
+///   `pk_b` into `member_pubkeys_root` (R2 cross-binding); the off-chain channel-tx verifier reads
+///   `pk_b` from the registered member set for the A11 two-key membership check.
 /// * `regev_pk_digest` — keccak/L1 digest form of the member's Regev pubkey digest (32 bytes).
 /// * `recipient` — the L1 address that receives this member's settlement (20 bytes / 5 u32 limbs).
 ///
@@ -58,6 +62,7 @@ use crate::{
 #[serde(rename_all = "camelCase")]
 pub struct MemberRegEntry {
     pub pk_g: Bytes32,
+    pub pk_b: Bytes32,
     pub regev_pk_digest: Bytes32,
     pub recipient: Address,
 }
@@ -65,6 +70,7 @@ pub struct MemberRegEntry {
 #[derive(Clone, Debug)]
 pub struct MemberRegEntryTarget {
     pub pk_g: Bytes32Target,
+    pub pk_b: Bytes32Target,
     pub regev_pk_digest: Bytes32Target,
     pub recipient: AddressTarget,
 }
@@ -134,11 +140,15 @@ impl ChannelRegRecord {
     ///
     /// Preimage u32-limb stream (each whole-word):
     /// `[ prev(8), channel_id(1), bp_member_slot(1), member_count(1),
-    ///    for i in 0..16: ( pk_g(8), regev_pk_digest(8), recipient(5) ) ]`
-    /// Total = 8 + 1 + 1 + 1 + 16*(8+8+5) = 11 + 336 = 347 u32. Padding slots hash their zero
+    ///    for i in 0..16: ( pk_g(8), pk_b(8), regev_pk_digest(8), recipient(5) ) ]`
+    /// Total = 8 + 1 + 1 + 1 + 16*(8+8+8+5) = 11 + 464 = 475 u32. Padding slots hash their zero
     /// values. `solidity_keccak256` treats each u32 as one big-endian 4-byte word, so this stream
     /// is byte-identical to the Solidity `abi.encodePacked` preimage in
     /// `IntmaxRollup.registerChannel` (verified by the differential test).
+    ///
+    /// SECURITY (P3): `pk_b` enters this preimage between `pk_g` and `regev_pk_digest` so the
+    /// in-circuit 3-field `MemberLeaf` (whose `pk_b` is split from the SAME witnessed Poseidon value)
+    /// is bound to the L1 keccak chain — `pk_b` is NOT a free witness at the validity layer.
     pub fn hash_with_prev_hash(&self, prev_hash: Bytes32) -> Bytes32 {
         let mut inputs: Vec<u32> = Vec::with_capacity(CHANNEL_REG_PREIMAGE_U32_LEN);
         inputs.extend(prev_hash.to_u32_vec()); // 8
@@ -147,6 +157,7 @@ impl ChannelRegRecord {
         inputs.push(self.member_count); // 1
         for m in self.members.iter() {
             inputs.extend(m.pk_g.to_u32_vec()); // 8
+            inputs.extend(m.pk_b.to_u32_vec()); // 8
             inputs.extend(m.regev_pk_digest.to_u32_vec()); // 8
             inputs.extend(m.recipient.to_u32_vec()); // 5
         }
@@ -157,14 +168,15 @@ impl ChannelRegRecord {
 
 /// Word count of the R3 registration preimage (excluding the keccak output): see
 /// [`ChannelRegRecord::hash_with_prev_hash`].
-pub const CHANNEL_REG_PREIMAGE_U32_LEN: usize = 8 + 1 + 1 + 1 + MAX_CHANNEL_MEMBERS * (8 + 8 + 5);
+pub const CHANNEL_REG_PREIMAGE_U32_LEN: usize = 8 + 1 + 1 + 1 + MAX_CHANNEL_MEMBERS * (8 + 8 + 8 + 5);
 
 impl MemberRegEntryTarget {
-    /// The u32-limb stream for one member slot: pk_g(8) || regev_pk_digest(8) ||
+    /// The u32-limb stream for one member slot: pk_g(8) || pk_b(8) || regev_pk_digest(8) ||
     /// recipient(5). Mirrors [`MemberRegEntry`]'s contribution to the keccak preimage.
     pub fn to_u32_stream(&self) -> Vec<Target> {
         [
             self.pk_g.to_vec(),
+            self.pk_b.to_vec(),
             self.regev_pk_digest.to_vec(),
             self.recipient.to_vec(),
         ]
@@ -211,6 +223,7 @@ impl MemberRegEntryTarget {
     ) -> Self {
         Self {
             pk_g: Bytes32Target::new(builder, is_checked),
+            pk_b: Bytes32Target::new(builder, is_checked),
             regev_pk_digest: Bytes32Target::new(builder, is_checked),
             recipient: AddressTarget::new(builder, is_checked),
         }
@@ -223,6 +236,8 @@ impl MemberRegEntryTarget {
     ) {
         self.pk_g
             .set_witness(witness, value.pk_g);
+        self.pk_b
+            .set_witness(witness, value.pk_b);
         self.regev_pk_digest
             .set_witness(witness, value.regev_pk_digest);
         self.recipient.set_witness(witness, value.recipient);
@@ -243,6 +258,7 @@ mod tests {
             let s = (i as u32) + 1;
             members[i] = MemberRegEntry {
                 pk_g: Bytes32::from_u32_slice(&[0x1111_0000 + s; 8]).unwrap(),
+                pk_b: Bytes32::from_u32_slice(&[0x4444_0000 + s; 8]).unwrap(),
                 regev_pk_digest: Bytes32::from_u32_slice(&[0x2222_0000 + s; 8]).unwrap(),
                 recipient: Address::from_u32_slice(&[0x3333_0000 + s; 5]).unwrap(),
             };
@@ -293,9 +309,9 @@ mod tests {
     //
     // SECURITY: if these change, the Rust <-> Solidity encodings have diverged — DO NOT update
     // blindly; investigate the layout.
-    const PINNED_MC2: &str = "0xf2a056ed43f19020a838a9c5c541fffbd93eb0d954b9ca258cbbe2ea29c1d31e";
-    const PINNED_MC8: &str = "0xe8eac7c89493dede3ab7a120d3a6fdbc33fbd5af9df594ecc6a4dbe7d1d63ea7";
-    const PINNED_MC16: &str = "0x8afc4abe3b56afd6fef05f88c8028133282eb39493180cfb96fca3868ef3ab41";
+    const PINNED_MC2: &str = "0xa0a5204098b9e8b2965fd58972d62331db02c366a6486d0d26f546fdaa764e1f";
+    const PINNED_MC8: &str = "0x0e6cd492a3a2ea889cd5f020fc3a1758f7260da5748fcf5644517e22695611a3";
+    const PINNED_MC16: &str = "0x164e28d07f1be6b57ef30418487a14c1173e5ab37de6fe02b86260d176ba725a";
 
     /// THE DE-RISK GATE (Rust side). Prints the three hashes (copy into the constants above + the
     /// Foundry test) and asserts they match the pinned constants.

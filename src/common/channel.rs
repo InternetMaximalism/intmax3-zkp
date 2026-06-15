@@ -496,7 +496,15 @@ pub struct ChannelTx {
     /// Mandatory E-1 channelTxZKP — co-signers MUST refuse to sign without it.
     pub channel_tx_zkp: ChannelProofEnvelope,
     pub sender_pk_g: Bytes32,
-    pub sender_signature: SignatureBytes,
+    /// P3 sender authorization: the Poseidon2-BabyBear hash-signature STARK proof bytes over the
+    /// IMPA `signing_digest` (replaces the legacy SPHINCS+ `sender_signature`). The proof's public
+    /// values are `[pk_b(8) ‖ m(16)]`; the off-chain verifier binds `m == decompose(signing_digest)`
+    /// and `pk_b == sender_pk_b`, and confirms `(sender_pk_g, sender_pk_b, sender_regev_pk)` is one
+    /// registered `MemberLeaf` (A11). The IMPA `signing_digest` preimage is UNCHANGED.
+    pub sender_hash_sig: Vec<u8>,
+    /// The sender's BabyBear hash-sig public key `pk_b` (canonical `Bytes32` digest), bound to the
+    /// proof's `pk_b` public value and to the sender's registered `MemberLeaf` (A11).
+    pub sender_pk_b: Bytes32,
 }
 
 impl ChannelTx {

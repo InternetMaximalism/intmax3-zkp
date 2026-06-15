@@ -780,16 +780,21 @@ contract IntmaxRollup {
     ///      can consume it with a SINGLE keccak (no byte-straddling); padding slots
     ///      (i >= memberCount) contribute zeros. Header fields are uint32 (4-byte words):
     ///        keccak256(prev || channelId(uint32) || bpMemberSlot(uint32) || memberCount(uint32) ||
-    ///                  for i in 0..16: (pkG(32) || regevPkDigest(32) || recipient(20))).
+    ///                  for i in 0..16: (pkG(32) || pkB(32) || regevPkDigest(32) || recipient(20))).
     ///      This is byte-identical to the Rust `ChannelRegRecord::hash_with_prev_hash`
     ///      (src/common/channel_registration.rs) and its in-circuit twin — asserted by
     ///      `IntmaxRollup.t.sol::test_channelRegPreimageDifferential`.
     ///      `memberPubkeysRoot` = keccak of the active member pubkey hashes; `regevPkRoot` = keccak
     ///      of the active Regev pubkey digests (the L1/keccak digest forms anchored in the record).
+    /// @dev P3: `pkBs[i]` is the member's BabyBear hash-sig public key (L1/keccak digest form). It
+    ///      enters the reg preimage between `pkG` and `regevPkDigest` so the in-circuit 3-field
+    ///      `MemberLeaf{pk_g, pk_b, regev_pk}` is bound to the L1 keccak chain (R2 cross-binding); the
+    ///      close-form IMCM member-set commitment below stays pk_g-ONLY (unaffected).
     function registerChannel(
         uint32 channelId,
         uint8 bpMemberSlot,
         bytes32[] calldata memberPkGs,
+        bytes32[] calldata pkBs,
         bytes32[] calldata regevPkDigests,
         address[] calldata recipients
     ) external {
@@ -802,6 +807,7 @@ contract IntmaxRollup {
         require(
             memberCount >= MIN_CHANNEL_MEMBERS &&
             memberCount <= MAX_CHANNEL_MEMBERS &&
+            pkBs.length == memberCount &&
             regevPkDigests.length == memberCount &&
             recipients.length == memberCount,
             "member count out of range (2..16) or array length mismatch"
@@ -832,10 +838,12 @@ contract IntmaxRollup {
         // bytes32(0) || bytes32(0) || 20 zero bytes. Header fields are uint32 (4-byte words) to
         // stay word-aligned, matching the Rust `ChannelRegRecord::hash_with_prev_hash` u32 stream:
         //   prev(32) || channelId(uint32=4) || bpMemberSlot(uint32=4) || memberCount(uint32=4) ||
-        //   for i in 0..16: ( pkG(32) || regevDigest(32) || recipient(20) ).
+        //   for i in 0..16: ( pkG(32) || pkB(32) || regevDigest(32) || recipient(20) ).
         // SECURITY: recipient is appended as the 20 address bytes (abi.encodePacked(address)),
         // which equals the Rust Address 5-u32 big-endian encoding — NOT a 32-byte left-pad.
-        // Byte-identity with Rust/circuit is asserted by test_channelRegPreimageDifferential.
+        // P3: pkB(32) sits between pkG and regevDigest (the Rust MemberRegEntry layout); padding
+        // slots contribute an extra bytes32(0) for it. Byte-identity with Rust/circuit is asserted
+        // by test_channelRegPreimageDifferential.
         bytes memory packed = abi.encodePacked(
             _pendingChannelRegHashChain,
             channelId,
@@ -846,14 +854,16 @@ contract IntmaxRollup {
             if (i < memberCount) {
                 packed = abi.encodePacked(
                     packed,
-                    memberPkGs[i], // bytes32: 32 bytes
-                    regevPkDigests[i],            // bytes32: 32 bytes
-                    recipients[i]                 // address: 20 bytes
+                    memberPkGs[i],     // bytes32: 32 bytes (pk_g)
+                    pkBs[i],           // bytes32: 32 bytes (pk_b, P3)
+                    regevPkDigests[i], // bytes32: 32 bytes
+                    recipients[i]      // address: 20 bytes
                 );
             } else {
-                // Padding slot: zeroed sphincs(32) || regev(32) || recipient(20).
+                // Padding slot: zeroed pkG(32) || pkB(32) || regev(32) || recipient(20).
                 packed = abi.encodePacked(
                     packed,
+                    bytes32(0),
                     bytes32(0),
                     bytes32(0),
                     bytes20(0)

@@ -67,6 +67,9 @@ fn with_session<T>(f: impl FnOnce(&mut Session) -> Result<T, JsValue>) -> Result
 struct Identity {
     sphincs_pk_hex: String,
     pk_g: String,
+    /// P3: the member's BabyBear hash-sig public key `pk_b` (canonical Bytes32 hex). Published so
+    /// the CLI can build the `MemberInfo` / registration record that commits it (A11).
+    pk_b: String,
     regev_pk: crate::regev::RegevPk,
 }
 
@@ -78,6 +81,7 @@ pub fn wallet_keygen() -> Result<String, JsValue> {
     let identity = Identity {
         sphincs_pk_hex: hex(&keys.kp.pk_bytes),
         pk_g: keys.pk_g().to_hex(),
+        pk_b: keys.pk_b().to_hex(),
         regev_pk: keys.regev_pk.clone(),
     };
     let json = serde_json::to_string(&identity).map_err(js_err)?;
@@ -98,6 +102,8 @@ pub fn wallet_keygen() -> Result<String, JsValue> {
 struct GenesisContribution {
     regev_pk: crate::regev::RegevPk,
     sphincs_pk_hex: String,
+    /// P3: the member's BabyBear hash-sig public key `pk_b` (canonical Bytes32 hex, A11).
+    pk_b: String,
     genesis_ct: crate::regev::RegevCiphertext,
 }
 
@@ -113,6 +119,7 @@ pub fn wallet_genesis_contribution(balance: u64) -> Result<String, JsValue> {
         let out = GenesisContribution {
             regev_pk: session.keys.regev_pk.clone(),
             sphincs_pk_hex: hex(&session.keys.kp.pk_bytes),
+            pk_b: session.keys.pk_b().to_hex(),
             genesis_ct: ct,
         };
         serde_json::to_string(&out).map_err(js_err)

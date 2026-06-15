@@ -160,9 +160,10 @@ abstract contract CloseE2EBase is Test {
             uint32 channelId = uint32(vm.parseJsonUint(lcJson, ".registration.channel_id"));
             uint8 bpSlot = uint8(vm.parseJsonUint(lcJson, ".registration.bp_member_slot"));
             bytes32[] memory sphincs = vm.parseJsonBytes32Array(lcJson, ".registration.member_pk_gs");
+            bytes32[] memory pkBs = vm.parseJsonBytes32Array(lcJson, ".registration.member_pk_bs");
             bytes32[] memory regev = vm.parseJsonBytes32Array(lcJson, ".registration.regev_pk_digests");
             address[] memory recipients = vm.parseJsonAddressArray(lcJson, ".registration.recipients");
-            rollup_.registerChannel(channelId, bpSlot, sphincs, regev, recipients);
+            rollup_.registerChannel(channelId, bpSlot, sphincs, pkBs, regev, recipients);
         }
 
         manager_ = ChannelSettlementManager(

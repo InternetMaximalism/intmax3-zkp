@@ -13,6 +13,7 @@
 //! the tx carrier), and decrypts its own balance slot on every state it adopts. Secret material
 //! (`SpxKeyPair`, `RegevSk`, `AmountWitness`) never leaves this module via any serialized type.
 
+use rand::SeedableRng as _;
 use rand010::Rng;
 use serde::{Deserialize, Serialize};
 use sphincsplus_poseidon::verify::crypto_sign_verify;
@@ -35,7 +36,8 @@ use crate::{
     regev::{
         AmountWitness, RegevCiphertext, RegevPk, RegevSecurityLevel, RegevSk, RealRegevProofVerifier,
         add_ciphertexts, channel_keygen, decrypt_amount, encrypt_amount, prove_channel_tx,
-        regev_pk_root,
+        prove_hash_sig, regev_pk_root, verify_hash_sig,
+        hash_sig::{BabyBearPublicKey, BabyBearSecretKey, decompose_digest_to_limbs},
     },
 };
 
@@ -79,7 +81,15 @@ pub type WResult<T> = Result<T, WalletError>;
 /// One member's full key material. Held only in process memory; never crosses a serialization
 /// boundary (no `Serialize`).
 pub struct MemberKeys {
+    /// SPHINCS+ keypair — STILL used for member channel-STATE (IMCH) co-signing (`sign_state` /
+    /// `verify_all_signatures`). NOTE (P3): the channel-tx SENDER signature has been migrated to the
+    /// BabyBear hash-sig (`baby_key`); the member-state co-signing remains SPHINCS+ because the
+    /// Goldilocks `poseidon_sig` scheme has no native standalone verifier (it is verified by the ZK
+    /// single-sig/list proof at the validity/close layer, not in the wallet).
     pub kp: SpxKeyPair,
+    /// P3 BabyBear hash-sig secret key — authorizes the channel-tx SENDER (IMPA) over the channel-tx
+    /// `signing_digest`. Its `pk_b` is committed in the member's registered `MemberLeaf` (A11).
+    pub baby_key: BabyBearSecretKey,
     pub regev_pk: RegevPk,
     pub regev_sk: RegevSk,
 }
@@ -93,9 +103,17 @@ impl MemberKeys {
         rng.fill_bytes(&mut sk_prf);
         rng.fill_bytes(&mut pub_seed);
         let kp = sphincs_keygen(sk_seed, sk_prf, pub_seed);
+        // Derive the BabyBear hash-sig key from a fresh 32-byte seed drawn from the wallet RNG.
+        // `BabyBearSecretKey::random` is defined over `rand` 0.8 (the regev layer), so we bridge by
+        // seeding a 0.8 `StdRng` from wallet entropy rather than sharing the `rand010` RNG directly.
+        let mut baby_seed = [0u8; 32];
+        rng.fill_bytes(&mut baby_seed);
+        let mut baby_rng = rand::rngs::StdRng::from_seed(baby_seed);
+        let baby_key = BabyBearSecretKey::random(&mut baby_rng);
         let (regev_pk, regev_sk) = channel_keygen(rng);
         Self {
             kp,
+            baby_key,
             regev_pk,
             regev_sk,
         }
@@ -104,6 +122,12 @@ impl MemberKeys {
     /// This member's identity = SPHINCS+ pubkey hash (the value stored in `ChannelRecord`).
     pub fn pk_g(&self) -> Bytes32 {
         pk_hash_from_pk_bytes(&self.kp.pk_bytes).into()
+    }
+
+    /// This member's BabyBear hash-sig public key `pk_b` (canonical `Bytes32` digest), committed in
+    /// the registered `MemberLeaf` for the A11 two-key binding.
+    pub fn pk_b(&self) -> Bytes32 {
+        self.baby_key.public_key().to_bytes32()
     }
 }
 
@@ -127,9 +151,85 @@ fn sign_digest(kp: &SpxKeyPair, digest: &Bytes32) -> Vec<u8> {
 }
 
 /// Verify a member's REAL SPHINCS+ signature over `digest`. `pk_bytes` is the 32-byte public key.
+///
+/// NOTE (P3): this is now used ONLY for member channel-STATE (IMCH) co-signing
+/// (`verify_all_signatures`). The channel-tx SENDER (IMPA) signature is the BabyBear hash-sig
+/// (`verify_channel_tx_sender_hash_sig`).
 pub fn verify_sphincs_sig(pk_bytes: &[u8], digest: &Bytes32, sig: &[u8]) -> WResult<()> {
     crypto_sign_verify(sig, &digest_msg_bytes(digest), pk_bytes)
         .map_err(|e| WalletError(format!("SPHINCS+ signature verification failed: {e}")))
+}
+
+// ---------------------------------------------------------------------------
+// P3: channel-tx SENDER BabyBear hash-signature (IMPA) signing / verification
+// ---------------------------------------------------------------------------
+
+/// Produce the channel-tx SENDER hash-sig proof over `tx_digest` (the IMPA `signing_digest`).
+/// Returns the proof bytes; the sender's `pk_b` is recorded separately on the `ChannelTx`.
+///
+/// SECURITY: the message is the 16-limb INJECTIVE decomposition of `tx_digest`
+/// (`decompose_digest_to_limbs`), the SAME map the verifier recomputes; the proof's public values
+/// bind `[pk_b ‖ m]`. Production verification uses `RegevSecurityLevel::Production` — but the
+/// `level` is the caller's (tests pass `Test`).
+fn sign_channel_tx_sender(
+    keys: &MemberKeys,
+    tx_digest: &Bytes32,
+    level: RegevSecurityLevel,
+) -> WResult<Vec<u8>> {
+    let m = decompose_digest_to_limbs(tx_digest);
+    let (proof, _pvs) = prove_hash_sig(level, &keys.baby_key, &m).map_err(we)?;
+    Ok(proof)
+}
+
+/// Verify the channel-tx SENDER hash-sig and bind it to the tx digest, the claimed `pk_b`, and the
+/// sender's registered `MemberLeaf` (A11). All four checks below are SOUNDNESS-CRITICAL.
+///
+/// SECURITY (A11 — off-chain trust assumption): the binding of `(pk_g, pk_b, regev_pk)` to ONE
+/// registered member is enforced HERE by every co-signer running this check against the channel's
+/// member set. There is no on-chain enforcement of the two-key pairing for in-channel transfers;
+/// the channel-tx is accepted only by parties that run this membership check. This mirrors the
+/// existing off-chain-verification trust model for the channelTxZKP.
+///
+/// * `level` MUST be `RegevSecurityLevel::Production` in production (84 FRI queries). `Test` is
+///   8-query (≈8-bit) and exists for the test suite only.
+/// * `registered_pk_g` / `registered_pk_b` / `registered_regev_pk` are the sender slot's registered
+///   `MemberLeaf` components (looked up by the caller from the authenticated channel member set).
+#[allow(clippy::too_many_arguments)]
+pub fn verify_channel_tx_sender_hash_sig(
+    channel_tx: &ChannelTx,
+    tx_digest: &Bytes32,
+    level: RegevSecurityLevel,
+    registered_pk_g: Bytes32,
+    registered_pk_b: Bytes32,
+    registered_regev_pk: &RegevPk,
+    sender_regev_pk: &RegevPk,
+) -> WResult<()> {
+    // (1) The proof must be present (atomicity: a balance-reduction without an owner sig is rejected).
+    if channel_tx.sender_hash_sig.is_empty() {
+        return bail("channel_tx sender hash-sig proof must not be empty");
+    }
+    // (2) A11 membership — the claimed (pk_g, pk_b, regev_pk) triple must be the SAME registered
+    // member (the sender slot's leaf). Binds pk_b to the member that owns pk_g and the Regev key.
+    if channel_tx.sender_pk_g != registered_pk_g {
+        return bail("A11: channel_tx.sender_pk_g is not the registered member at the sender slot");
+    }
+    if channel_tx.sender_pk_b != registered_pk_b {
+        return bail("A11: channel_tx.sender_pk_b is not the registered member's pk_b");
+    }
+    if sender_regev_pk != registered_regev_pk {
+        return bail("A11: sender Regev pk is not the registered member's Regev key");
+    }
+    // (3) Reconstruct the EXPECTED public values [pk_b ‖ m] from the registered pk_b and the
+    // recomputed IMPA digest decomposition — never from the proof carrier.
+    let pk_b = BabyBearPublicKey::from_bytes32(&channel_tx.sender_pk_b).map_err(we)?;
+    let m = decompose_digest_to_limbs(tx_digest);
+    let mut pvs: Vec<_> = Vec::with_capacity(pk_b.digest.len() + m.len());
+    pvs.extend_from_slice(&pk_b.digest);
+    pvs.extend_from_slice(&m);
+    // (4) Verify the STARK against those bound public values. `verify_hash_sig` absorbs the PVs into
+    // the Fiat-Shamir transcript, so a proof minted for a different (pk_b, m) is rejected.
+    verify_hash_sig(level, &channel_tx.sender_hash_sig, &pvs).map_err(we)?;
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -144,6 +244,9 @@ pub fn verify_sphincs_sig(pk_bytes: &[u8], digest: &Bytes32, sig: &[u8]) -> WRes
 pub struct MemberInfo {
     pub slot: u8,
     pub sphincs_pk_hex: String,
+    /// P3: the member's BabyBear hash-sig public key `pk_b` (canonical `Bytes32` digest). Used for
+    /// the A11 membership check on the channel-tx sender; bound into the registered `MemberLeaf`.
+    pub pk_b: Bytes32,
     pub regev_pk: RegevPk,
 }
 
@@ -536,6 +639,8 @@ pub fn build_send(
         sender_hash,
         recipient_hash,
     );
+    // P3: the SENDER authorizes the transfer with a BabyBear hash-sig over the IMPA tx digest.
+    let sender_hash_sig = sign_channel_tx_sender(keys, &tx_digest, level)?;
     let channel_tx = ChannelTx {
         recipient_pk_g: recipient_hash,
         enc_amount,
@@ -546,7 +651,8 @@ pub fn build_send(
             proof,
         },
         sender_pk_g: sender_hash,
-        sender_signature: sign_digest(&keys.kp, &tx_digest),
+        sender_hash_sig,
+        sender_pk_b: keys.pk_b(),
     };
 
     let mut proposed = next_state;
@@ -580,7 +686,8 @@ pub fn verify_send_transition(
     recipient_sk: Option<&RegevSk>,
     expected_amount: Option<u64>,
 ) -> WResult<()> {
-    // The sender's real signature over the ChannelTx digest.
+    // The sender's REAL authorization over the ChannelTx digest (P3: BabyBear hash-sig, replaces
+    // the SPHINCS+ sender signature). The IMPA `signing_digest` preimage is UNCHANGED.
     let tx_digest = ChannelTx::signing_digest(
         prev.channel_id,
         prev.digest,
@@ -589,8 +696,22 @@ pub fn verify_send_transition(
         payload.channel_tx.sender_pk_g,
         payload.channel_tx.recipient_pk_g,
     );
-    let sender = member_at(&payload.members, payload.sender_index as usize)?;
-    verify_sphincs_sig(&sender.sphincs_pk_bytes()?, &tx_digest, &payload.channel_tx.sender_signature)?;
+    let sender_slot = payload.sender_index as usize;
+    check_slot(sender_slot, payload.record.member_count as usize)?;
+    let sender = member_at(&payload.members, sender_slot)?;
+    // A11: the sender slot's REGISTERED (pk_g, pk_b, regev_pk) from the authenticated member set.
+    // The member list is bound to the record by `verify_snapshot` (regev_pk_root + per-slot pk_g);
+    // here we additionally bind pk_b via the hash-sig membership check.
+    let registered_pk_g = payload.record.member_pk_gs[sender_slot];
+    verify_channel_tx_sender_hash_sig(
+        &payload.channel_tx,
+        &tx_digest,
+        level,
+        registered_pk_g,
+        sender.pk_b,
+        &sender.regev_pk,
+        &sender.regev_pk,
+    )?;
 
     // `InChannelTransferUpdateWitness::verify` requires a STRUCTURALLY complete signature set
     // (one non-empty sig per active slot with the right pubkey hash). A co-signer validates the

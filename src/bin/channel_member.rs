@@ -20,6 +20,7 @@ use std::{fs, process::exit};
 
 use intmax3_zkp::{
     common::channel::{ChannelState, MemberSignature},
+    ethereum_types::{bytes32::Bytes32, u32limb_trait::U32LimbTrait as _},
     regev::{RegevCiphertext, RegevPk, RegevSecurityLevel, encrypt_amount},
     wallet_core::{
         BuiltSend, ChannelSnapshot, MemberInfo, MemberKeys, SendPayload, add_signature,
@@ -58,6 +59,8 @@ struct CliState {
 struct BrowserContribution {
     regev_pk: RegevPk,
     sphincs_pk_hex: String,
+    /// P3: the browser member's BabyBear hash-sig public key `pk_b` (canonical Bytes32 hex, A11).
+    pk_b: String,
     genesis_ct: RegevCiphertext,
 }
 
@@ -74,6 +77,7 @@ fn member_info_for(slot: u8, keys: &MemberKeys) -> MemberInfo {
     MemberInfo {
         slot,
         sphincs_pk_hex: keys.kp.pk_bytes.iter().map(|b| format!("{b:02x}")).collect(),
+        pk_b: keys.pk_b(),
         regev_pk: keys.regev_pk.clone(),
     }
 }
@@ -123,6 +127,8 @@ fn cmd_init(args: &[String]) {
     let mut members = vec![MemberInfo {
         slot: 0,
         sphincs_pk_hex: contrib.sphincs_pk_hex.clone(),
+        pk_b: Bytes32::from_hex(&contrib.pk_b)
+            .unwrap_or_else(|e| die(format!("parse browser pk_b: {e:?}"))),
         regev_pk: contrib.regev_pk.clone(),
     }];
     let mut controlled = Vec::new();

@@ -230,6 +230,7 @@ contract ReclaimStakeTest is Test {
             uint32(vm.parseJsonUint(lc, string.concat(key, ".channel_id"))),
             uint8(vm.parseJsonUint(lc, string.concat(key, ".bp_member_slot"))),
             vm.parseJsonBytes32Array(lc, string.concat(key, ".member_sphincs_pubkey_hashes")),
+            vm.parseJsonBytes32Array(lc, string.concat(key, ".member_pk_bs")),
             vm.parseJsonBytes32Array(lc, string.concat(key, ".regev_pk_digests")),
             vm.parseJsonAddressArray(lc, string.concat(key, ".recipients"))
         );

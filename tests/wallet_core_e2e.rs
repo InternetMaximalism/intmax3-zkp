@@ -25,6 +25,7 @@ fn member_info(slot: u8, keys: &MemberKeys) -> MemberInfo {
             .iter()
             .map(|b| format!("{b:02x}"))
             .collect(),
+        pk_b: keys.pk_b(),
         regev_pk: keys.regev_pk.clone(),
     }
 }

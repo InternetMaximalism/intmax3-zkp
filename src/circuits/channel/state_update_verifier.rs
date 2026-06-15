@@ -340,9 +340,15 @@ impl InChannelTransferUpdateWitness {
                 self.channel_tx.recipient_pk_g, self.recipient_index
             )));
         }
-        if self.channel_tx.sender_signature.is_empty() {
+        // P3: the SENDER authorization is now the BabyBear hash-sig proof. This witness layer checks
+        // it is PRESENT and that the claimed pk_b is canonical; the full hash-sig verification +
+        // A11 two-key membership binding (m == decompose(tx_digest), pk_b PV == sender_pk_b, and
+        // (pk_g, pk_b, regev_pk) ∈ one registered MemberLeaf) is performed by the channel-tx
+        // acceptance path (`wallet_core::verify_channel_tx_sender_hash_sig`), which has the
+        // authenticated channel member set this circuit-statement layer does not carry.
+        if self.channel_tx.sender_hash_sig.is_empty() {
             return Err(ChannelStateUpdateError::InvalidMemberSignatures(
-                "channel_tx sender signature must not be empty".to_string(),
+                "channel_tx sender hash-sig proof must not be empty".to_string(),
             ));
         }
         let tx_digest = ChannelTx::signing_digest(
@@ -1470,7 +1476,8 @@ mod tests {
                 proof,
             },
             sender_pk_g: pubkey_hash(10),
-            sender_signature: vec![1, 2, 3],
+            sender_hash_sig: vec![1, 2, 3],
+            sender_pk_b: pubkey_hash(40),
         };
 
         InChannelFixture {

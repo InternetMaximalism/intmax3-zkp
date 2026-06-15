@@ -33,8 +33,10 @@ use crate::{
     ethereum_types::{
         address::Address, bytes32::Bytes32, u32limb_trait::U32LimbTrait as _, u256::U256,
     },
-    regev::{REGEV_N, REGEV_Q, RegevPk},
+    regev::{REGEV_N, REGEV_Q, RegevPk, hash_sig::BabyBearSecretKey},
+    utils::poseidon_hash_out::PoseidonHashOut,
 };
+use rand::SeedableRng as _;
 use std::collections::HashMap;
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -145,6 +147,9 @@ pub const TEST_ACTIVE_MEMBERS: usize = 3;
 #[derive(Debug, Clone)]
 pub struct ChannelMemberKeys {
     pub secret_keys: Vec<GoldilocksSecretKey>,
+    /// Per-member BabyBear hash-sig secret keys (P3). Their `pk_b` digests are committed into the
+    /// 3-field `MemberLeaf` / registration record.
+    pub baby_keys: Vec<BabyBearSecretKey>,
     pub regev_pks: Vec<RegevPk>,
     pub member_tree: MemberTree,
 }
@@ -156,6 +161,7 @@ impl ChannelMemberKeys {
     /// (pad-to-MAX D6).
     fn deterministic(channel_id: u32) -> Self {
         let mut secret_keys = Vec::with_capacity(TEST_ACTIVE_MEMBERS);
+        let mut baby_keys = Vec::with_capacity(TEST_ACTIVE_MEMBERS);
         let mut regev_pks = Vec::with_capacity(TEST_ACTIVE_MEMBERS);
         let mut member_tree = MemberTree::init();
         for slot in 0..TEST_ACTIVE_MEMBERS as u32 {
@@ -168,16 +174,28 @@ impl ChannelMemberKeys {
             seed[8] = 0xa5;
             seed[31] = slot as u8 + 1;
             let sk = GoldilocksSecretKey::from_seed(seed);
+            // Deterministic BabyBear hash-sig key (P3): seed an RNG from the (channel, slot) so pk_b
+            // is stable across re-runs and distinct per member.
+            let baby_seed = (channel_id as u64)
+                .wrapping_mul(0x9e37_79b9)
+                .wrapping_add((slot as u64) << 8)
+                .wrapping_add(0xb1);
+            let mut baby_rng = rand::rngs::StdRng::seed_from_u64(baby_seed);
+            let baby = BabyBearSecretKey::random(&mut baby_rng);
+            let pk_b: PoseidonHashOut = baby.public_key().to_bytes32().reduce_to_hash_out();
             let regev = deterministic_regev_pk(channel_id.wrapping_mul(31).wrapping_add(slot + 1));
             member_tree.push(MemberLeaf {
                 pk_g: sk.public_key_hash_out(),
+                pk_b,
                 regev_pk_digest: regev.poseidon_digest(),
             });
             secret_keys.push(sk);
+            baby_keys.push(baby);
             regev_pks.push(regev);
         }
         Self {
             secret_keys,
+            baby_keys,
             regev_pks,
             member_tree,
         }
@@ -198,6 +216,7 @@ impl ChannelMemberKeys {
             let leaf = self.member_tree.get_leaf(i as u64);
             members[i] = MemberRegEntry {
                 pk_g: Bytes32::from(leaf.pk_g),
+                pk_b: Bytes32::from(leaf.pk_b),
                 regev_pk_digest: Bytes32::from(leaf.regev_pk_digest),
                 // Deterministic per-(channel, slot) test recipient (keccak preimage only).
                 recipient: Address::from_u32_slice(
@@ -425,12 +444,14 @@ impl BlockWitnessGenerator {
         let mut send_merkle_proofs = Vec::with_capacity(num_users as usize);
         let mut member_merkle_proofs = Vec::with_capacity(num_users as usize);
         let mut member_regev_pks = Vec::with_capacity(num_users as usize);
+        let mut member_pk_bs = Vec::with_capacity(num_users as usize);
         for _ in 0..num_users {
             prev_account_leaves.push(ChannelLeaf::default());
             user_merkle_proofs.push(dummy_account_proof.clone());
             send_merkle_proofs.push(dummy_send_proof.clone());
             member_merkle_proofs.push(dummy_member_proof.clone());
             member_regev_pks.push(dummy_regev.clone());
+            member_pk_bs.push(PoseidonHashOut::default());
         }
 
         let block_witness = BlockHashChainProcessorWitness {
@@ -444,6 +465,7 @@ impl BlockWitnessGenerator {
             public_state_merkle_proof,
             member_merkle_proofs: Some(member_merkle_proofs),
             member_regev_pks: Some(member_regev_pks),
+            member_pk_bs: Some(member_pk_bs),
             msg_fields: Some(SmallBlockMessageFields::default()),
             tx_v2_indices: None,
             tx_v2s: None,
@@ -758,6 +780,7 @@ impl BlockWitnessGenerator {
 
         let mut member_merkle_proofs = Vec::with_capacity(num_users as usize);
         let mut member_regev_pks = Vec::with_capacity(num_users as usize);
+        let mut member_pk_bs = Vec::with_capacity(num_users as usize);
         let dummy_member_proof = MemberMerkleProof::dummy(crate::constants::MEMBER_TREE_HEIGHT);
         let dummy_regev = RegevPk {
             a: vec![0u32; REGEV_N],
@@ -771,6 +794,7 @@ impl BlockWitnessGenerator {
                 send_merkle_proofs.push(dummy_send_proof.clone());
                 member_merkle_proofs.push(dummy_member_proof.clone());
                 member_regev_pks.push(dummy_regev.clone());
+                member_pk_bs.push(PoseidonHashOut::default());
                 continue;
             }
 
@@ -811,9 +835,13 @@ impl BlockWitnessGenerator {
                 self.bp_sig_events.push((keys.secret_keys[i], digest));
                 member_merkle_proofs.push(keys.member_tree.prove(i as u64));
                 member_regev_pks.push(keys.regev_pks[i].clone());
+                // P3: the bp slot's pk_b for the 3-field MemberLeaf inclusion (matches the leaf
+                // pushed into `member_tree` at construction).
+                member_pk_bs.push(keys.member_tree.get_leaf(i as u64).pk_b);
             } else {
                 member_merkle_proofs.push(dummy_member_proof.clone());
                 member_regev_pks.push(dummy_regev.clone());
+                member_pk_bs.push(PoseidonHashOut::default());
             }
 
             if prev_user_leaf.prev != new_block_number {
@@ -864,6 +892,7 @@ impl BlockWitnessGenerator {
             // Real per-slot member witnesses (updating slots) + dummies (padding/non-updating).
             member_merkle_proofs: Some(member_merkle_proofs),
             member_regev_pks: Some(member_regev_pks),
+            member_pk_bs: Some(member_pk_bs),
             msg_fields: Some(msg_fields),
             tx_v2_indices: tx_v2_witness.as_ref().map(|w| w.tx_v2_indices.clone()),
             tx_v2s: tx_v2_witness.as_ref().map(|w| w.tx_v2s.clone()),

@@ -47,7 +47,7 @@ use crate::{
     },
     constants::{MEMBER_TREE_HEIGHT, TX_TREE_HEIGHT},
     regev::{REGEV_N, RegevPk},
-    utils::conversion::ToU64,
+    utils::{conversion::ToU64, poseidon_hash_out::PoseidonHashOut},
 };
 
 /// All-zero Regev pubkey of the correct length for inactive (non-updating) slots. The member
@@ -98,6 +98,10 @@ pub struct BlockHashChainProcessorWitness {
     /// Optional per-slot Regev public keys accompanying `member_merkle_proofs`. If None, default
     /// (empty/dummy) keys are used (valid only for non-updating slots).
     pub member_regev_pks: Option<Vec<RegevPk>>,
+    /// Optional per-slot `pk_b` (BabyBear hash-sig public key) accompanying `member_merkle_proofs`
+    /// (P3, third `MemberLeaf` component). If None, default (zero) values are used — valid only for
+    /// non-updating slots (the leaf-inclusion constraint is skipped).
+    pub member_pk_bs: Option<Vec<PoseidonHashOut>>,
     /// Optional per-block IMSB `SmallBlockRootMessage` preimage fields accompanying
     /// `sig_witnesses` (detail2 §F-2). If None, default fields are used — valid only when the
     /// signature constraints are skipped (dummy witnesses).
@@ -323,6 +327,10 @@ where
                 .member_regev_pks
                 .clone()
                 .unwrap_or_else(|| vec![dummy_regev_pk(); num_users as usize]),
+            member_pk_bs: witness
+                .member_pk_bs
+                .clone()
+                .unwrap_or_else(|| vec![PoseidonHashOut::default(); num_users as usize]),
             msg_fields: witness.msg_fields.clone().unwrap_or_default(),
             tx_v2_indices: witness.tx_v2_indices.clone().unwrap_or(dummy_tx_v2_indices),
             tx_v2s: witness.tx_v2s.clone().unwrap_or(dummy_tx_v2s),

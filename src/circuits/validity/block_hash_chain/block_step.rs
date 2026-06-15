@@ -1063,6 +1063,7 @@ mod tests {
                 };
                 num_users
             ],
+            member_pk_bs: vec![crate::utils::poseidon_hash_out::PoseidonHashOut::default(); num_users],
             msg_fields:
                 crate::circuits::validity::block_hash_chain::sphincs_sig::SmallBlockMessageFields::default(),
             tx_v2_indices: vec![0; num_users],

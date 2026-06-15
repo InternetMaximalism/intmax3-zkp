@@ -371,7 +371,8 @@ fn build_flow() -> FlowFixture {
         nonce: bytes32_word(777),
         channel_tx_zkp: state_update_envelope(e1_proof),
         sender_pk_g: user(a_id, 10),
-        sender_signature: vec![1, 2, 3],
+        sender_hash_sig: vec![1, 2, 3],
+        sender_pk_b: user(a_id, 40),
     };
     let in_channel = InChannelTransferUpdateWitness {
         channel_record: sender_record.clone(),

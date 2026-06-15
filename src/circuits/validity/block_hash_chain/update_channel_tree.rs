@@ -114,9 +114,14 @@ pub struct UpdateUserTree {
     // tree (the channel leaf is itself proven in the account tree), so the `(IMSB_digest, bp_pk_g)`
     // pair folded into `bp_sig_chain` cannot use a prover-chosen pubkey — it is a registered member.
     pub member_merkle_proofs: Vec<MemberMerkleProof>,
-    // The Regev public key witnessed at each active slot; its Poseidon digest is the second leaf
-    // component, so the member leaf binds BOTH `pk_g` and the Regev pubkey.
+    // The Regev public key witnessed at each active slot; its Poseidon digest is the third leaf
+    // component, so the member leaf binds `pk_g`, `pk_b` AND the Regev pubkey.
     pub member_regev_pks: Vec<RegevPk>,
+    // The member's BabyBear hash-sig public key (`pk_b`) witnessed at each active slot (P3). The
+    // 3-field `MemberLeaf{pk_g, pk_b, regev_pk}` inclusion requires it so the rebuilt
+    // `member_pubkeys_root` matches the registration leaf (which now commits `pk_b`). `pk_b` is NOT
+    // part of the IMSB signing digest — that signature is the Goldilocks list-proof, unchanged.
+    pub member_pk_bs: Vec<PoseidonHashOut>,
 
     // Per-block IMSB `SmallBlockRootMessage` preimage fields (detail2 §F-2). The signing
     // digest is recomputed in-circuit from these fields with the `channel_id` and
@@ -143,6 +148,7 @@ impl UpdateUserTree {
             || self.send_merkle_proofs.len() != self.block.num_users as usize
             || self.member_merkle_proofs.len() != self.block.num_users as usize
             || self.member_regev_pks.len() != self.block.num_users as usize
+            || self.member_pk_bs.len() != self.block.num_users as usize
             || self.tx_v2_indices.len() != self.block.num_users as usize
             || self.tx_v2s.len() != self.block.num_users as usize
             || self.tx_v2_merkle_proofs.len() != self.block.num_users as usize
@@ -230,6 +236,7 @@ impl UpdateUserTree {
             let regev_pk_digest = self.member_regev_pks[i].poseidon_digest();
             let member_leaf = MemberLeaf {
                 pk_g,
+                pk_b: self.member_pk_bs[i],
                 regev_pk_digest,
             };
             self.member_merkle_proofs[i]
@@ -707,6 +714,10 @@ pub struct UpdateUserTreeTarget {
     pub member_merkle_proof_targets: Vec<MemberMerkleProofTarget>,
     /// Per-slot witnessed Regev public-key coefficient targets (`a` then `b`, each `REGEV_N`).
     pub member_regev_pk_targets: Vec<Vec<Target>>,
+    /// Per-slot witnessed `pk_b` (BabyBear hash-sig public key) targets — the third `MemberLeaf`
+    /// component (P3). Bound into the leaf inclusion so the rebuilt `member_pubkeys_root` matches
+    /// the registration leaf that now commits `pk_b`.
+    pub member_pk_b_targets: Vec<PoseidonHashOutTarget>,
     /// Per-block IMSB signing message fields — see `UpdateUserTree::msg_fields`.
     pub msg_fields: SmallBlockMessageFieldsTarget,
 }
@@ -798,6 +809,8 @@ impl UpdateUserTreeTarget {
         let mut member_merkle_proof_targets: Vec<MemberMerkleProofTarget> =
             Vec::with_capacity(num_users as usize);
         let mut member_regev_pk_targets: Vec<Vec<Target>> = Vec::with_capacity(num_users as usize);
+        let mut member_pk_b_targets: Vec<PoseidonHashOutTarget> =
+            Vec::with_capacity(num_users as usize);
         // Poseidon-digest domain for the Regev pubkey leaf component (mirrors
         // `RegevPk::poseidon_digest`).
         let regev_poseidon_domain =
@@ -978,9 +991,15 @@ impl UpdateUserTreeTarget {
             // canonical Poseidon-hash-out-derived Bytes32 (4 Goldilocks limbs each < p), matching
             // the registered member identity exactly.
             let bp_pk_g_hashout = bp_pk_g.to_hash_out(builder);
+            // P3: witness the member's pk_b (BabyBear hash-sig public key) for the 3-field leaf.
+            // It is a free Poseidon-hash-out witness here; its authenticity is enforced by the leaf
+            // inclusion against `member_pubkeys_root`, which is bound to the L1 registration keccak
+            // chain (the chain now commits pk_b, channel_reg_step R2 cross-binding).
+            let member_pk_b = PoseidonHashOutTarget::new(builder);
             let member_merkle_proof = MemberMerkleProofTarget::new(builder, MEMBER_TREE_HEIGHT);
             let member_leaf = MemberLeafTarget {
                 pk_g: bp_pk_g_hashout,
+                pk_b: member_pk_b,
                 regev_pk_digest,
             };
             member_merkle_proof.conditional_verify::<F, C, D>(
@@ -1003,6 +1022,7 @@ impl UpdateUserTreeTarget {
 
             member_merkle_proof_targets.push(member_merkle_proof);
             member_regev_pk_targets.push(regev_pk_coeffs);
+            member_pk_b_targets.push(member_pk_b);
         }
 
         let public_inputs = UpdateUserPublicInputsTarget {
@@ -1036,6 +1056,7 @@ impl UpdateUserTreeTarget {
             prev_bp_sig_chain,
             member_merkle_proof_targets,
             member_regev_pk_targets,
+            member_pk_b_targets,
             msg_fields,
         }
     }
@@ -1134,6 +1155,15 @@ impl UpdateUserTreeTarget {
             }
         }
 
+        // Set per-slot pk_b (BabyBear hash-sig public key) witnesses (P3, third leaf component).
+        for (target, pk_b) in self
+            .member_pk_b_targets
+            .iter()
+            .zip(value.member_pk_bs.iter())
+        {
+            target.set_witness(witness, *pk_b);
+        }
+
         // Set per-block IMSB signing message fields
         self.msg_fields.set_witness(witness, &value.msg_fields);
     }
@@ -1216,7 +1246,7 @@ mod tests {
         },
         ethereum_types::bytes32::Bytes32,
         poseidon_sig::{list::list_commitment, GoldilocksSecretKey},
-        regev::RegevPk,
+        regev::{hash_sig::BabyBearSecretKey, RegevPk},
     };
     use plonky2::{
         field::goldilocks_field::GoldilocksField, plonk::config::PoseidonGoldilocksConfig,
@@ -1248,19 +1278,37 @@ mod tests {
         }
     }
 
-    /// Build the channel's 3-member tree, with the signer at slot 0 (the bp).
-    fn build_member_tree(signer: &GoldilocksSecretKey, signer_regev: &RegevPk) -> MemberTree {
+    /// A distinct member `pk_b` (BabyBear hash-sig public key), derived deterministically from a seed
+    /// via the real `hash_sig` primitive — mirroring the production fixture
+    /// (`block_witness_generator::ChannelMemberKeys::deterministic`). P3 third `MemberLeaf` component.
+    fn member_pk_b(seed: u64) -> PoseidonHashOut {
+        let mut baby_rng = StdRng::seed_from_u64(seed.wrapping_mul(0x9e37_79b9).wrapping_add(0xb1));
+        let baby = BabyBearSecretKey::random(&mut baby_rng);
+        baby.public_key().to_bytes32().reduce_to_hash_out()
+    }
+
+    /// Build the channel's 3-member tree, with the signer at slot 0 (the bp). `signer_pk_b` is the
+    /// signer's BabyBear hash-sig public key, committed in the slot-0 leaf so the bp's witnessed
+    /// `member_pk_bs[0]` matches the registered leaf.
+    fn build_member_tree(
+        signer: &GoldilocksSecretKey,
+        signer_regev: &RegevPk,
+        signer_pk_b: PoseidonHashOut,
+    ) -> MemberTree {
         let mut member_tree = MemberTree::init();
         member_tree.push(MemberLeaf {
             pk_g: signer.public_key_hash_out(),
+            pk_b: signer_pk_b,
             regev_pk_digest: signer_regev.poseidon_digest(),
         });
         member_tree.push(MemberLeaf {
             pk_g: GoldilocksSecretKey::from_seed([2u8; 32]).public_key_hash_out(),
+            pk_b: member_pk_b(2),
             regev_pk_digest: regev_pk(2).poseidon_digest(),
         });
         member_tree.push(MemberLeaf {
             pk_g: GoldilocksSecretKey::from_seed([3u8; 32]).public_key_hash_out(),
+            pk_b: member_pk_b(3),
             regev_pk_digest: regev_pk(3).poseidon_digest(),
         });
         member_tree
@@ -1346,6 +1394,7 @@ mod tests {
                 num_users as usize
             ],
             member_regev_pks: vec![dummy_regev_pk(); num_users as usize],
+            member_pk_bs: vec![PoseidonHashOut::default(); num_users as usize],
             msg_fields: SmallBlockMessageFields::default(),
             tx_v2_indices: vec![0; num_users as usize],
             tx_v2s: vec![TxV2::default(); num_users as usize],
@@ -1382,6 +1431,7 @@ mod tests {
         prev_bp_sig_chain: Bytes32,
         member_tree: &MemberTree,
         signer_regev: &RegevPk,
+        signer_pk_b: PoseidonHashOut,
     ) -> (UpdateUserTree, Bytes32) {
         let block_number = BlockNumber::new(30).unwrap();
         let channel_id = 9u32;
@@ -1462,6 +1512,9 @@ mod tests {
             prev_bp_sig_chain,
             member_merkle_proofs: vec![member_merkle_proof],
             member_regev_pks: vec![signer_regev.clone()],
+            // The single updating slot IS the bp (slot 0); its witnessed pk_b must match the leaf at
+            // slot 0 so the 3-field member inclusion against `member_pubkeys_root` holds.
+            member_pk_bs: vec![signer_pk_b],
             msg_fields,
             tx_v2_indices: vec![0],
             tx_v2s: vec![tx_v2],
@@ -1480,10 +1533,16 @@ mod tests {
     fn test_update_user_tree_folds_bp_sig_chain() {
         let signer = GoldilocksSecretKey::from_seed([0x11; 32]);
         let signer_regev = regev_pk(1);
-        let member_tree = build_member_tree(&signer, &signer_regev);
+        let signer_pk_b = member_pk_b(1);
+        let member_tree = build_member_tree(&signer, &signer_regev, signer_pk_b);
         let prev_bp_sig_chain = Bytes32::default();
-        let (tree, signed_digest) =
-            signing_update_tree(&signer, prev_bp_sig_chain, &member_tree, &signer_regev);
+        let (tree, signed_digest) = signing_update_tree(
+            &signer,
+            prev_bp_sig_chain,
+            &member_tree,
+            &signer_regev,
+            signer_pk_b,
+        );
 
         let public_inputs = tree.to_public_inputs().unwrap();
         // The new chain equals folding (signed_digest, pk_g) onto the empty chain.
@@ -1511,9 +1570,14 @@ mod tests {
         let signer_regev = regev_pk(7);
         // Member tree at slot 0 holds a DIFFERENT key, not the signer's.
         let other = GoldilocksSecretKey::from_seed([0x99; 32]);
-        let member_tree = build_member_tree(&other, &regev_pk(8));
-        let (tree, _digest) =
-            signing_update_tree(&signer, Bytes32::default(), &member_tree, &signer_regev);
+        let member_tree = build_member_tree(&other, &regev_pk(8), member_pk_b(8));
+        let (tree, _digest) = signing_update_tree(
+            &signer,
+            Bytes32::default(),
+            &member_tree,
+            &signer_regev,
+            member_pk_b(7),
+        );
 
         // Native witness building already rejects (member leaf not in tree at slot 0).
         assert!(matches!(

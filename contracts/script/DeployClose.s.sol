@@ -60,9 +60,10 @@ contract DeployClose is Script {
         uint32 channelId = uint32(vm.parseJsonUint(lcJson, ".registration.channel_id"));
         uint8 bpSlot = uint8(vm.parseJsonUint(lcJson, ".registration.bp_member_slot"));
         bytes32[] memory sphincs = vm.parseJsonBytes32Array(lcJson, ".registration.member_pk_gs");
+        bytes32[] memory pkBs = vm.parseJsonBytes32Array(lcJson, ".registration.member_pk_bs");
         bytes32[] memory regev = vm.parseJsonBytes32Array(lcJson, ".registration.regev_pk_digests");
         address[] memory recipients = vm.parseJsonAddressArray(lcJson, ".registration.recipients");
-        rollup.registerChannel(channelId, bpSlot, sphincs, regev, recipients);
+        rollup.registerChannel(channelId, bpSlot, sphincs, pkBs, regev, recipients);
 
         // Manager member bindings. SECURITY/SCOPE: the close-form member-set commitment binds only
         // the SPHINCS+ pubkey hashes (not recipients), so we can route member slot 0's payout

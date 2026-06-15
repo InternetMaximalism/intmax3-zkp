@@ -33,8 +33,8 @@ pub use transfer_stark::{
     BALANCE_REFRESH_ZKP_DOMAIN, CHANNEL_TX_ZKP_DOMAIN, CHANNEL_UPDATE_ZKP_DOMAIN,
     RealRegevProofVerifier, RegevProofPurpose, RegevSecurityLevel, RegevStatement,
     WITHDRAW_CLAIM_ZKP_DOMAIN, prove_balance_refresh, prove_channel_tx, prove_channel_update,
-    prove_withdraw_claim, verify_balance_refresh, verify_channel_tx, verify_channel_update,
-    verify_withdraw_claim,
+    prove_hash_sig, prove_withdraw_claim, verify_balance_refresh, verify_channel_tx,
+    verify_channel_update, verify_hash_sig, verify_withdraw_claim,
 };
 
 use plonky2_keccak::utils::solidity_keccak256;

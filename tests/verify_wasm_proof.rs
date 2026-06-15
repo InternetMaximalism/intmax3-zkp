@@ -41,6 +41,7 @@ fn member_info(slot: u8, keys: &MemberKeys) -> MemberInfo {
     MemberInfo {
         slot,
         sphincs_pk_hex: keys.kp.pk_bytes.iter().map(|b| format!("{b:02x}")).collect(),
+        pk_b: keys.pk_b(),
         regev_pk: keys.regev_pk.clone(),
     }
 }
