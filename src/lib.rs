@@ -2,6 +2,7 @@ pub mod circuits;
 pub mod common;
 pub mod constants;
 pub mod ethereum_types;
+pub mod poseidon_sig;
 pub mod regev;
 pub mod utils;
 pub mod wallet_core;
