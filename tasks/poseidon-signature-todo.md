@@ -97,3 +97,61 @@ Phases A–E all done. Lib builds clean; all scoped tests green:
    keccak domain bytes, and each consumer matches the exact m it computed (A4 holds).
 5. pk_b deferred to P3 (LOCKED): MemberLeaf is a pure rename; no two-key binding yet. A11 is a P3
    obligation, explicitly out of scope here.
+
+---
+
+# Phase 3 — Plonky3 BabyBear sender hash-signature + SPHINCS+ removal
+
+Status: DESIGN LOCKED, implementation pending. The channel-tx sender authorization is today a
+SPHINCS+ sig verified OFF-CIRCUIT in `wallet_core.rs:593`. P3 moves it to a native Poseidon2-BabyBear
+ZK hash-signature and removes SPHINCS+ entirely.
+
+## LOCKED decisions (2026-06-15)
+- **Separate bound proof** (NOT same-proof): the sender hash-sig is its OWN Poseidon2-BabyBear STARK
+  (the regev channelTxZKP is single-AIR / 128-row-fixed / homogeneous-batch — same-proof integration
+  is too invasive). The off-chain verifier requires BOTH the channelTxZKP and the hash-sig proof and
+  binds them — atomicity ("a channel-tx is accepted only with a valid owner sig") is verifier-enforced.
+- **A11 binding off-chain**: the hash-sig AIR exposes `pk_b` as a public value; the co-signer's
+  verifier checks `pk_b` + the sender's regev_pk belong to the SAME registered `MemberLeaf` (MemberTree
+  lookup in software). Matches the existing off-chain-verification trust model for channelTxZKP.
+- **Use upstream `p3-poseidon2-air@0.5.3`** (confirmed available on crates.io) for the Poseidon2 round
+  constraints — do NOT hand-author them. Width-16 BabyBear, the SAME audited instance
+  (`default_babybear_poseidon2_16`) used as the regev transcript permutation.
+- **Message encoding**: the IMPA digest is 8×u32 (each <2^32) but BabyBear q≈2^31, so `from_u32`
+  aliases. Re-decompose the digest into sub-31-bit limbs (16-bit ⇒ ~16 limbs) for INJECTIVE absorption,
+  mirroring the existing 16-bit amount-limb workaround (`transfer_stark.rs:662-670`).
+- **BabyBear key entropy**: `sk_b` ~9 BabyBear limbs (≥256-bit / 128-bit-PQ, D2). `DOMAIN_PK_B`/
+  `DOMAIN_SIG_B` BabyBear domain constants (non-colliding).
+- **MemberLeaf** gains `pk_b` now (the deferred field), bound via `member_pubkeys_root` (the verifier's
+  membership check reads it). Registration carries `pk_b`.
+
+## Falsifiable steps
+- [ ] P3-1. `p3-poseidon2-air@0.5.3` dep; integrate Poseidon2BabyBear<16> + its round constants;
+      prove/verify a Poseidon2Air via the repo's BabyBear stark config (LookupAir no-op wrapper if
+      needed). De-risk PoC first (prove+verify a known permutation) before building the hash-sig.
+- [ ] P3-2. Native BabyBear primitive: `sk_b` keygen, `pk_b = Poseidon2([DOMAIN_PK_B]‖sk_b)`,
+      `sig_b = Poseidon2([DOMAIN_SIG_B]‖sk_b‖m_limbs)`; injective 16-bit digest re-decomposition.
+- [ ] P3-3. `Poseidon2HashSigAir`: PVs expose `pk_b` + the message limbs; witness `sk_b`; constrain
+      `pk_b = Poseidon2(sk_b)` and `sig_b = Poseidon2(sk_b, m)`; non-degenerate sk_b.
+- [ ] P3-4. `ChannelTx`: replace `sender_signature: SignatureBytes` (SPHINCS+) with the hash-sig proof
+      envelope + `sender_pk_b`. Keep `sender_pk_g` (member identity).
+- [ ] P3-5. Off-chain verifier (`RealRegevProofVerifier`/`verify_channel_tx` caller/`wallet_core`):
+      require both proofs; bind hash-sig `m == channelTx digest`; check `(sender_pk_g, sender_pk_b,
+      sender_regev_pk)` is one registered MemberLeaf (A11); sender == debited-balance owner.
+- [ ] P3-6. `MemberLeaf{pk_g, pk_b, regev_pk_digest}` + registration + member_pubkeys_root; update
+      validity `update_channel_tree` leaf construction (now 3-field). Mismatched-pair test (A11).
+- [ ] P3-7. Remove off-circuit SPHINCS+ sender sig; delete `sphincsplus-{circuits,params,poseidon}`
+      deps + `test_utils/sphincs_sign.rs` + `validity/.../sphincs_sig.rs` residue (confirm zero
+      remaining consumers after P2b). Confirm WASM build + circuit-size reduction.
+- [ ] P3-8. Tests: hash-sig prove/verify, wrong-sk/wrong-m rejection, verifier rejects channel-tx with
+      missing/mismatched hash-sig, mismatched member pair rejected, e2e green, WASM green.
+- [ ] P3-9. detail2 / detail2-implementation-notes: record the full signature-scheme delta.
+- [ ] P3-10. Separate security review + attacker pass.
+
+## New threat considerations (P3)
+- **Message-encoding injectivity** (BabyBear u32 aliasing) — the new A-item; the sub-31-bit
+  re-decomposition must be injective and bound into both the hash-sig PVs and the channelTx digest.
+- **Separate-proof binding**: the verifier MUST require the hash-sig proof AND bind its `m` to the
+  exact channelTx digest, else the balance-reduction proof is accepted without authorization.
+- **A11 off-chain dependency**: security now relies on every co-signer running the membership check;
+  document this as an explicit trust assumption.
