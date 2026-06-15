@@ -19,7 +19,7 @@ use crate::{
     regev::{AmountWitness, RegevSecurityLevel, encrypt_amount},
     wallet_core::{
         BuiltSend, ChannelSnapshot, MemberKeys, SendPayload, add_signature, build_send,
-        decrypt_balance, sign_state, verify_all_signatures, verify_send_transition, verify_snapshot,
+        decrypt_balance, sign_state, verify_send_transition, verify_snapshot,
     },
 };
 use crate::common::channel::{ChannelState, MemberSignature};
@@ -263,11 +263,9 @@ pub fn wallet_send(recipient_slot: u8, amount: u64) -> Result<String, JsValue> {
             &mut rng,
         )
         .map_err(js_err)?;
-        // Self-verify the proof we just built (in-wasm) before broadcasting. If this passes here
-        // but a native co-signer rejects it, the issue is wasm↔native proof portability, not a bad
-        // statement.
-        verify_send_transition(&snapshot.state, &payload, LEVEL, None, None)
-            .map_err(|e| js_err(format!("self-verify of own send failed in-wasm: {e}")))?;
+        // (We do not self-verify the freshly built proof here: it roughly doubles send latency and
+        // is redundant — every co-signer verifies the E-1 proof before signing. Portability of
+        // wasm-built proofs is covered by tests/verify_wasm_proof.rs.)
         session.pending_send =
             Some((payload.proposed_next_state.digest, new_balance, new_balance_witness));
         serde_json::to_string(&payload).map_err(js_err)
@@ -325,8 +323,10 @@ pub fn wallet_finalize(state_json: String) -> Result<String, JsValue> {
         if next_state.balance_state.state_version != snapshot.state.balance_state.state_version + 1 {
             return Err(js_err("state_version must increment by exactly 1"));
         }
-        verify_all_signatures(&snapshot.record, &snapshot.members, &next_state).map_err(js_err)?;
-        // Adopt.
+        // Adopt, then fully verify (record/root/balance-state validity, every member's REAL
+        // SPHINCS+ signature, own-slot decryption). `verify_snapshot` already runs the full
+        // signature check, so we don't call `verify_all_signatures` separately (it would re-run all
+        // SLH-DSA verifications and roughly double finalize latency).
         snapshot.state = next_state;
         verify_snapshot(&snapshot, Some((&session.keys, slot))).map_err(js_err)?;
         let balance = decrypt_balance(&session.keys, &snapshot, slot).map_err(js_err)?;

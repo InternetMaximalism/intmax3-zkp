@@ -432,6 +432,47 @@ WASM32 has a **4GB hard limit** on linear memory. The proof pipeline uses ~4GB a
 - **Memory-pressure CPU fallback** — GPU Merkle falls back to CPU when WASM memory exceeds 3.5GB
 - **Zero-copy GPU readback** — hashes read on-the-fly from mapped staging buffer instead of allocating intermediate Vecs
 
+## Browser Channel Wallet (Regev send/receive)
+
+A self-contained, in-browser wallet for confidential **in-channel** transfers on the Regev (Ring-LWE)
+channel model. One channel member runs in the browser with real SPHINCS+ + Regev keys and real funds;
+the other members are driven by a CLI companion. The browser does the ZK proving (multithreaded WASM);
+co-signing of each new channel state is N-of-N SPHINCS+ over `ChannelState::signing_digest()`.
+
+```
+  Browser member (wallet.html)            Local relay (wallet-relay.js)         Other members
+  ─────────────────────────────           ─────────────────────────────        ──────────────
+  keygen / open channel                    serves wallet static files           channel_member (CLI):
+  build ChannelTx + E-1 proof   ── /api ──▶ (COEP/COOP for SAB/threads)  ──────▶ native co-sign (SPHINCS+)
+  wasm-bindgen-rayon proving               bridges /api → CLI companion          verify + counter-sign
+  decrypt own balance slot      ◀────────────────────────────────────────────── return co-signed state
+```
+
+| File | Purpose |
+|------|---------|
+| `src/wallet_core.rs` | Target-independent wallet core: SPHINCS+ + Regev key management, channel send/receive, state verification |
+| `src/wasm_wallet.rs` | `wasm-bindgen` session entry points (keygen, genesis, send, receive) |
+| `src/bin/channel_member.rs` | CLI companion that runs the other channel members (native co-signing) |
+| `wallet.html` + `wallet-worker.js` | Standalone browser UI; multithreaded proving via `wasm-bindgen-rayon` |
+| `wallet-live.html` + `wallet-relay.js` | "Live" UI + local HTTPS relay that bridges browser `/api` calls to the CLI companion so a real send runs with just clicks (dev-only, localhost, self-signed TLS) |
+| `build-wallet-wasm.sh` | Builds the wallet WASM package |
+| `wallet-e2e.js` / `wallet-live-smoke.js` / `wallet-live-debug.js` | Playwright end-to-end / smoke / debug drivers (browser sends, receives, verifies) |
+| `wallet-feasibility.html` + `feasibility-*.js` | Browser feasibility probe for the WASM proving stack |
+| `tests/wallet_core_e2e.rs` | Native end-to-end of the wallet core |
+| `tests/regev_timing.rs`, `tests/sphincs_timing.rs` | Regev / SPHINCS+ timing benchmarks |
+
+Security requirements the wallet/CLI must enforce (the library leaves some to the caller — e.g. running
+real SLH-DSA verification, decrypting the wallet's own balance slot, and confirming non-recipient
+ciphertexts are unchanged) are documented in
+[tasks/wallet-threat-model.md](tasks/wallet-threat-model.md) and
+[tasks/wallet-lessons.md](tasks/wallet-lessons.md).
+
+```bash
+./build-wallet-wasm.sh                 # build the wallet WASM package
+node wallet-relay.js                   # serve wallet-live.html + bridge to the CLI companion (HTTPS)
+# open https://localhost:8000/wallet-live.html and click "Open channel" / "Send"
+```
+
 ## Benchmarks
 
 ### ZKP Proof Generation (release mode, Apple M-series)
@@ -549,6 +590,8 @@ architecture and design rationale.
 |----------|-------------|
 | [docs/spec.md](docs/spec.md) | Protocol specification (types, circuits, state) |
 | [docs/signature-aggregation.md](docs/signature-aggregation.md) | Multi-sig accounts, parallel proving architecture, benchmarks |
+| [tasks/wallet-threat-model.md](tasks/wallet-threat-model.md) | Browser channel wallet + CLI companion — threat model and must-enforce requirements |
+| [tasks/wallet-lessons.md](tasks/wallet-lessons.md) | Browser channel wallet — implementation lessons |
 
 ## Dependencies
 

@@ -1,0 +1,21 @@
+const { chromium } = require('playwright');
+(async () => {
+  const b = await chromium.launch({ args:['--ignore-certificate-errors'] });
+  const p = await (await b.newContext({ ignoreHTTPSErrors:true })).newPage();
+  p.setDefaultTimeout(300000);
+  p.on('console', m => { if (m.type()==='error') console.log('[err]', m.text()); });
+  p.on('pageerror', e => console.log('[pageerror]', e.message));
+  await p.goto('https://localhost:8000/wallet-live.html', { waitUntil:'load' });
+  await p.waitForSelector('#btnOpen:not([disabled])', { timeout:120000 });
+  console.log('opening channel…');
+  await p.click('#btnOpen');
+  await p.waitForFunction(() => document.getElementById('balance').textContent === '50', null, { timeout:180000 });
+  console.log('balance after open:', await p.$eval('#balance', e=>e.textContent));
+  console.log('sending 7 to slot 1…');
+  await p.fill('#toSlot','1'); await p.fill('#amount','7');
+  await p.click('#btnSend');
+  await p.waitForFunction(() => document.getElementById('balance').textContent === '43', null, { timeout:180000 });
+  console.log('balance after send:', await p.$eval('#balance', e=>e.textContent));
+  await b.close();
+  console.log('LIVE SMOKE OK');
+})().catch(e => { console.error('LIVE SMOKE FAIL:', e.message); process.exit(1); });
