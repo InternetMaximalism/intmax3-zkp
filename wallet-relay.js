@@ -27,6 +27,9 @@ app.use((req, res, next) => {
   res.setHeader('Cross-Origin-Embedder-Policy', 'require-corp');
   res.setHeader('Cross-Origin-Opener-Policy', 'same-origin');
   if (req.path.endsWith('.wasm')) res.setHeader('Content-Type', 'application/wasm');
+  // Dev: never let the browser cache the wallet HTML/JS/wasm — a stale cached wasm silently runs
+  // old code (e.g. a pre-migration build), so always serve fresh.
+  res.setHeader('Cache-Control', 'no-store');
   next();
 });
 
