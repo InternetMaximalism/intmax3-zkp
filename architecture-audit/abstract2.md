@@ -298,6 +298,26 @@ Both the sending name and the receiving name are channels. Carries a `Transfer` 
   2. Generate the `validityProof` for the block via `generateValidityProof` (constraining `channelStateSig` as the substitute for the tx_tree_root signature).
 - Note: if the structural atomic signature (flow1 step6) is not assembled, the transfer does not take effect. For general non-responsiveness, `requestClose` (§3.5) is available upon exceeding `SIGN_TIMEOUT` (3 minutes).
 
+> **No separate `transport_proof` is required (design decision).** The inter-channel transfer carries
+> NO bundled "transport proof" artifact attesting that the small block settled. The confirmation that
+> the sending side really posted and settled the transfer is verified by the **receiving channel
+> directly against L1** — `flowReceive3` step 1 checks the `TxV2MerkleProof` inclusion of the tx (its
+> `tx_tree_root` is in an L1 block) plus the sender's `balanceProof` and the `channelUpdateZKP`. L1
+> block state is public, so no proof needs to travel inside the tx.
+>
+> Liveness of inclusion is handled by member incentive, not by a proof. Because the sending channel's
+> members only sign `hash(H1', H2 = tx_tree_root)` (flow1 step6) when they intend the small block to be
+> included on L1:
+> 1. **A member does not sign the next intmax-native tx until the current one is included** (one
+>    state per version; never advance on an unconfirmed state).
+> 2. **If no one (the BP) includes the small block, a member includes it themselves** (force-include /
+>    self-post the small block to L1).
+>
+> This is the standard rollup force-inclusion argument and does **not** weaken safety: the receiver
+> only ever applies a *confirmed* incoming (verified against L1 in `flowReceive3` step 1; if absent,
+> the sender is ignored), so even if inclusion is delayed or censored, no incorrect balance is ever
+> reflected. Liveness (eventual inclusion) is the only thing at stake, and self-posting resolves it.
+
 #### Transfer flow 3 `flowReceive3` (receiving channel: balance state reflection, `H2 = 0`)
 
 - **actor: all of the receiving channel (member[0..2])**
