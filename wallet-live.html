@@ -36,7 +36,14 @@
 <main>
   <section class="panel">
     <h2>1 · Join the Intmax channel</h2>
-    <input id="openBalance" type="number" value="50" readonly />
+    <div class="row" style="margin-bottom:3px">
+      <span class="hint">channel ID</span>
+      <span class="hint">faucet (tokens)</span>
+    </div>
+    <div class="row">
+      <input id="joinChannel" type="number" value="7" title="which channel to join" />
+      <input id="openBalance" type="number" value="50" readonly title="faucet: the tokens you join with (your share of the channel's deposit-backed fund)" />
+    </div>
     <div class="row">
       <button id="btnOpen" disabled>Join</button>
       <button id="btnClear">Clear</button>
