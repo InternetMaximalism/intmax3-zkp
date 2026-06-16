@@ -51,6 +51,11 @@
 
   <section class="panel">
     <h2>3 · Send</h2>
+    <div class="row" style="margin-bottom:3px">
+      <span class="hint">channel ID</span>
+      <span class="hint">slot</span>
+      <span class="hint">amount (tokens)</span>
+    </div>
     <div class="row">
       <input id="toChannel" type="number" value="7" title="destination channel ID (same as this channel = intra-channel; different = inter-channel)" />
       <input id="toSlot" type="number" value="0" />
@@ -66,6 +71,15 @@
 const $ = (id) => document.getElementById(id);
 const log = (m, cls='') => { const l=$('log'); l.innerHTML += `\n<span class="${cls}">${m}</span>`; l.scrollTop=l.scrollHeight; };
 let mySlot = 0;
+let myChannel = null;
+// Parse this channel's id from a snapshot JSON (record.channelId) and remember it for the UI.
+function setChannelFrom(snapJson) {
+  try {
+    const c = JSON.parse(snapJson).record.channelId;
+    myChannel = (c && typeof c === 'object') ? (c.value ?? c.channelId ?? null) : c;
+    if (myChannel != null && $('toChannel')) $('toChannel').value = myChannel; // default = your own channel (intra)
+  } catch (e) {}
+}
 
 // Amounts: the protocol stores integer BASE UNITS; 1 token = 10^6 (TOKEN_DECIMALS = 6).
 const TOKEN_UNIT = 1000000;
@@ -96,12 +110,12 @@ async function tryRestore() {
   try {
     await call('keygenSeeded', { seed: channelSeed() });
     const snap = await api('/api/snapshot', null, 'GET');
+    setChannelFrom(snap);
     const r = JSON.parse(await call('importChannel', { snapshotJson: snap }));
     mySlot = r.slot; showBalance(r);
     $('btnSend').disabled = false; $('btnRefresh').disabled = false;
     $('btnOpen').textContent = 'Re-join';
-    log(`restored saved account at slot ${r.slot} (same key/slot across reloads)`);
-    log(`restored saved account → slot ${r.slot}, balance ${r.balance}`, 'ok');
+    log(`restored saved account → channel ${myChannel ?? '?'}, slot ${r.slot}, balance ${fmtAmt(r.balance)} (same key/slot across reloads)`, 'ok');
     return true;
   } catch (e) {
     log('saved account present but no matching channel to restore (relay reset or not yet joined) — click join to (re)create.', '');
@@ -134,7 +148,7 @@ async function api(pathname, body, method='POST') {
 }
 function showBalance(r) {
   $('balance').textContent = fmtAmt(r.balance);
-  $('balMeta').textContent = `· slot ${r.slot} · v${r.stateVersion} · ${r.canSend ? 'can send' : 'receive-only (refresh needed)'}`;
+  $('balMeta').textContent = `· channel ${myChannel ?? '?'} · slot ${r.slot} · v${r.stateVersion} · ${r.canSend ? 'can send' : 'receive-only (refresh needed)'}`;
 }
 
 // Log the channel's REAL on-chain deposit backing (detail2 §F-1) — proof it is genuinely funded.
@@ -166,13 +180,14 @@ $('btnOpen').onclick = async () => {
     // The browser is the DELEGATE: the CLI's three members sign the genesis and return the
     // fully-signed snapshot directly — the delegate does NOT co-sign state.
     const snapshot = await step('CLI builds channel + 3 members co-sign genesis', () => api('/api/init', contribution));
+    setChannelFrom(snapshot);
     const r = JSON.parse(await step('import & verify channel (as delegate)', () => call('importChannel', { snapshotJson: snapshot })));
     mySlot = r.slot;
     showBalance(r);
     log(`you are delegate slot ${r.slot} (co-signers: slots 0,1,2). Open another tab to join as slot ${r.slot+1}.`);
     $('btnSend').disabled = false;
     $('btnRefresh').disabled = false;
-    log(`joined as delegate slot ${r.slot} in ${Math.round((Date.now()-t0)/1000)}s. balance ${r.balance}. (Open more tabs BEFORE sending — each becomes a new delegate slot.)`, 'ok');
+    log(`joined as delegate slot ${r.slot} in ${Math.round((Date.now()-t0)/1000)}s. balance ${fmtAmt(r.balance)}. (Open more tabs BEFORE sending — each becomes a new delegate slot.)`, 'ok');
   } catch (e) { log('open failed: '+e.message, 'err'); $('btnOpen').disabled=false; }
   clearInterval(tick);
   $('btnOpen').textContent = 'Join';
@@ -186,7 +201,8 @@ $('btnClear').onclick = () => {
 
 async function attemptSend(to, amt) {
   // 1. Re-import the CURRENT channel head (picks up other tabs' sends + any joined delegates).
-  let rr = JSON.parse(await call('importChannel', { snapshotJson: await api('/api/snapshot', null, 'GET') }));
+  const headSnap = await api('/api/snapshot', null, 'GET'); setChannelFrom(headSnap);
+  let rr = JSON.parse(await call('importChannel', { snapshotJson: headSnap }));
   mySlot = rr.slot; showBalance(rr);
   // 2. If we received funds (receive-only), AUTO balance-refresh: re-encrypt our slot to clean digits
   //    (value preserved, proven) + members co-sign, so we can spend again.
@@ -237,10 +253,11 @@ $('btnRefresh').onclick = async () => {
   try {
     $('btnRefresh').disabled = true;
     const latest = await api('/api/snapshot', null, 'GET');
+    setChannelFrom(latest);
     const r = JSON.parse(await call('importChannel', { snapshotJson: latest }));
     mySlot = r.slot;
     showBalance(r);
-    log(`refreshed: you are slot ${r.slot}, balance ${r.balance}` + (r.canSend ? '' : ' (you received funds — a balance refresh is needed before you can send again)'), 'ok');
+    log(`refreshed: you are slot ${r.slot}, balance ${fmtAmt(r.balance)}` + (r.canSend ? '' : ' (you received funds — a balance refresh is needed before you can send again)'), 'ok');
   } catch (e) { log('refresh failed: '+e.message, 'err'); }
   $('btnRefresh').disabled = false;
 };
