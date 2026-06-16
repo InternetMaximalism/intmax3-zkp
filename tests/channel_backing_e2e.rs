@@ -6,7 +6,10 @@
 //! backing can be absent, foreign, stale, or forged is rejected.
 //!
 //! This is the genuine base/native ↔ channel connection: the channel's own base-layer balance proof
-//! (funded by an L1 deposit) is the backing; the Regev channel state is reconciled against it.
+//! is the backing, and it is funded by a REAL ON-CHAIN ETH deposit — this test spins up anvil,
+//! deploys IntmaxRollup, deposits real ETH to the channel recipient, reads the deposit back, and
+//! asserts the Rust witness reproduces the on-chain depositHashChain (no fabrication). Skips if
+//! foundry (anvil/forge/cast) is absent.
 #![cfg(not(debug_assertions))]
 
 use intmax3_zkp::{
@@ -20,7 +23,7 @@ use intmax3_zkp::{
             block_witness_generator::{BlockWitnessGenerator, BlockWitnessGeneratorHandle},
         },
     },
-    common::{channel_id::ChannelId, salt::Salt},
+    common::{channel_id::ChannelId, deposit::Deposit, salt::Salt},
     ethereum_types::{address::Address, bytes32::Bytes32, u256::U256, u32limb_trait::U32LimbTrait},
     regev::encrypt_amount,
     wallet_core::{
@@ -32,21 +35,96 @@ use intmax3_zkp::{
 use plonky2::{
     field::goldilocks_field::GoldilocksField, plonk::config::PoseidonGoldilocksConfig,
 };
+use std::{
+    path::PathBuf,
+    process::{Child, Command, Stdio},
+    thread,
+    time::Duration,
+};
 
 const D: usize = 2;
 type F = GoldilocksField;
 type C = PoseidonGoldilocksConfig;
 
 const CHANNEL: u32 = 1; // base-layer user id == channel id (detail2 §A-2)
+// anvil dev account[0] (public throwaway key; NEVER a real key).
+const ANVIL0: &str = "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80";
 
 fn info(slot: u8, k: &MemberKeys) -> MemberInfo {
     MemberInfo { slot, pk_g: k.pk_g(), pk_b: k.pk_b(), regev_pk: k.regev_pk.clone() }
 }
 
+struct AnvilGuard(Child);
+impl Drop for AnvilGuard {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}
+fn tool_present(bin: &str) -> bool {
+    Command::new(bin).arg("--version").stdout(Stdio::null()).stderr(Stdio::null()).status()
+        .map(|s| s.success()).unwrap_or(false)
+}
+fn run_capture(cmd: &mut Command, label: &str) -> String {
+    let out = cmd.output().unwrap_or_else(|e| panic!("{label} failed to start: {e}"));
+    assert!(out.status.success(), "{label} failed: {}", String::from_utf8_lossy(&out.stderr));
+    String::from_utf8_lossy(&out.stdout).to_string()
+}
+fn cast(rpc: &str, args: &[&str], label: &str) -> String {
+    run_capture(Command::new("cast").args(args).arg("--rpc-url").arg(rpc), label)
+}
+fn abi_word(data: &str, i: usize) -> &str {
+    &data[i * 64..(i + 1) * 64]
+}
+
 #[test]
 fn deposit_backing_gate_reconciles_and_fails_closed() {
-    // ---- 1. Fund the channel with a REAL L1 deposit → real base-layer balance proof ----------
+    // ---- 1. Fund the channel with a REAL ON-CHAIN ETH deposit → real base-layer balance proof ----
+    if !(tool_present("anvil") && tool_present("forge") && tool_present("cast")) {
+        eprintln!("[skip] foundry (anvil/forge/cast) not found — this test needs a real on-chain deposit");
+        return;
+    }
     use rand::{SeedableRng as _, rngs::StdRng as RandStdRng};
+
+    // Bring up a dedicated anvil + deploy IntmaxRollup.
+    const PORT: u16 = 8550;
+    let rpc = format!("http://127.0.0.1:{PORT}");
+    let anvil = Command::new("anvil")
+        .args(["--hardfork", "prague", "--port", &PORT.to_string()])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("spawn anvil");
+    let _guard = AnvilGuard(anvil);
+    let mut up = false;
+    for _ in 0..40 {
+        if Command::new("cast")
+            .args(["block-number", "--rpc-url", &rpc])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false)
+        {
+            up = true;
+            break;
+        }
+        thread::sleep(Duration::from_millis(250));
+    }
+    assert!(up, "anvil did not come up on {rpc}");
+    let contracts = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("contracts");
+    let deploy_out = run_capture(
+        Command::new("forge").current_dir(&contracts).args([
+            "script", "script/Deploy.s.sol", "--rpc-url", &rpc, "--private-key", ANVIL0, "--broadcast",
+        ]),
+        "forge deploy",
+    );
+    let rollup = deploy_out
+        .lines()
+        .find_map(|l| l.split("IntmaxRollup").nth(1).and_then(|s| s.split("0x").nth(1)))
+        .map(|s| format!("0x{}", &s.trim()[..40]))
+        .expect("parse IntmaxRollup address");
+
     let supported_user_counts = vec![1, 4, 512];
     let spend_circuit = SpendCircuit::<F, C, D>::new();
     let balance_processor = BalanceProcessor::<F, C, D>::new(&spend_circuit.data.verifier_data());
@@ -62,9 +140,52 @@ fn deposit_backing_gate_reconciles_and_fails_closed() {
 
     let deposit_salt = Salt::rand(&mut brng);
     let recipient = calculate_recipient_from_user_id(channel_id, deposit_salt);
+
+    // REAL ETH deposit to the channel's recipient, then read it back from the live receipt.
+    const AMOUNT: u64 = 50;
+    let send_json = run_capture(
+        Command::new("cast").args([
+            "send", &rollup, "deposit(bytes32,uint32,uint256,bytes32)", &recipient.to_hex(), "0",
+            &AMOUNT.to_string(),
+            "0x0000000000000000000000000000000000000000000000000000000000000000",
+            "--value", &AMOUNT.to_string(), "--private-key", ANVIL0, "--rpc-url", &rpc, "--json",
+        ]),
+        "cast deposit",
+    );
+    let txhash = send_json
+        .split("\"transactionHash\":\"")
+        .nth(1)
+        .and_then(|s| s.split('"').next())
+        .expect("tx hash");
+    let receipt = cast(&rpc, &["receipt", txhash, "--json"], "receipt");
+    let data = receipt
+        .split("\"data\":\"0x")
+        .nth(1)
+        .and_then(|s| s.split('"').next())
+        .expect("Deposited log data");
+    let depositor = Address::from_hex(&format!("0x{}", &abi_word(data, 0)[24..])).unwrap();
+    let onchain_chain = Bytes32::from_hex(&format!("0x{}", abi_word(data, 5))).unwrap();
+
+    // KEYSTONE: the Rust deposit reproduces the LIVE on-chain depositHashChain (no simulation gap).
+    let onchain_deposit = Deposit {
+        deposit_index: Default::default(),
+        block_number: Default::default(),
+        depositor,
+        recipient,
+        token_index: 0,
+        amount: U256::from(AMOUNT as u32),
+        aux_data: Bytes32::default(),
+    };
+    assert_eq!(
+        onchain_deposit.hash_with_prev_hash(Bytes32::default()),
+        onchain_chain,
+        "Rust deposit hash must reproduce the on-chain depositHashChain"
+    );
+
+    // Feed the REAL on-chain deposit fields into the witness generator → real-deposit-backed proof.
     block_witness_generator
         .borrow_mut()
-        .add_deposit(Address::rand(&mut brng), recipient, 0, U256::from(50), Bytes32::rand(&mut brng))
+        .add_deposit(depositor, recipient, 0, U256::from(AMOUNT as u32), Bytes32::default())
         .unwrap();
     block_witness_generator.borrow_mut().add_block(0, &[], 0, Bytes32::default()).unwrap();
 
