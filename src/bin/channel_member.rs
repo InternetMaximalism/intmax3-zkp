@@ -194,6 +194,14 @@ fn load_backing() -> (VerifierCircuitData<BF, BC, BD>, ChannelBalanceAttestation
 // anvil dev account[0] private key — a PUBLIC throwaway (safe on the CLI; NEVER a real key).
 const ANVIL_DEV_KEY: &str = "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80";
 
+/// The key that sends the on-chain deposit during `setup-backing`. Defaults to the public anvil dev
+/// key (local). For a real testnet (Sepolia) the funded deployer key is passed via the
+/// `INTMAX_DEPOSIT_KEY` env var so its value is handed to `cast` by the shell, never hardcoded.
+/// SECURITY: this is read once and passed straight to `cast --private-key`; it is never logged.
+fn deposit_key_env() -> String {
+    std::env::var("INTMAX_DEPOSIT_KEY").unwrap_or_else(|_| ANVIL_DEV_KEY.to_string())
+}
+
 /// Run `cast <args>` and return stdout (dies on failure; foundry `cast` must be on PATH).
 fn cast(args: &[&str]) -> String {
     let out = Command::new("cast")
@@ -248,11 +256,12 @@ fn cmd_setup_backing(args: &[String]) {
     // really escrows the value, and we read the deposit back from the receipt.
     eprintln!("setup-backing: real ETH deposit on {rpc} → IntmaxRollup {rollup} (amount {amount})…");
     let recipient_hex = recipient.to_hex();
+    let deposit_key = deposit_key_env();
     let send_out = cast(&[
         "send", &rollup, "deposit(bytes32,uint32,uint256,bytes32)", &recipient_hex, "0",
         &amount.to_string(),
         "0x0000000000000000000000000000000000000000000000000000000000000000",
-        "--value", &amount.to_string(), "--private-key", ANVIL_DEV_KEY, "--rpc-url", &rpc, "--json",
+        "--value", &amount.to_string(), "--private-key", &deposit_key, "--rpc-url", &rpc, "--json",
     ]);
     let txhash = send_out
         .split("\"transactionHash\":\"")
