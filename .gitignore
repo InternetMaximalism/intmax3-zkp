@@ -88,3 +88,8 @@ temp/
 # Sepolia/AWS deploy build artifacts (binary + cached backing — regenerated)
 deploy-staging/
 signer-bin/
+
+# Server / deployment operational records (IPs, instance ids, live URLs, on-chain addrs)
+deploy-record*.md
+**/deploy-record.md
+DEPLOYMENT.md

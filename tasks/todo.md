@@ -1,43 +1,33 @@
-# Sepolia + AWS deployment — two-channel payment-channel demo
+# Sepolia + AWS deployment — two-channel payment-channel demo (DONE)
 
-## Decisions (confirmed by user)
-- Frontend: **S3 + CloudFront** (CloudFront response-headers-policy injects COEP/COOP so the
-  multi-threaded wasm proving works — plain S3 cannot set those headers).
-- EC2 signer: **cached backing + relay** — the heavy `setup-backing` (~4GB balance proof) runs
-  LOCALLY (this Mac) against Sepolia; only the cached artifacts ship to EC2, which co-signs only.
-- Two channels: **7 and 8**, each its OWN IntmaxRollup on Sepolia (each deposit is first on its
-  contract → prev hash 0, keystone stays simple).
+> Operational/server records (live URL, EC2 instance/IP/SG, on-chain addresses, key paths) are
+> **gitignored** in `.claude/deploy-record.md` — not tracked here.
 
-## Prereqs (DONE)
-- [x] Sepolia deployer key: `…/intmax3-zkp-enshrined-paymentchannel/.claude/priv` (funded 2.45 ETH,
-      gitignored, contents NEVER read — handed to forge/cast via shell `$(cat …)` only).
-      Address `0x2C0BF10558adafDd21296CbF71dd6FE88c782C80`.
-- [x] Sepolia RPC: `https://ethereum-sepolia-rpc.publicnode.com` (verified).
-- [x] AWS: account 992382759484 / user s3-ec2-eu-north-1 / region eu-north-1 (S3+EC2 scoped).
-- [x] EIP-170 cleared: IntmaxRollup runtime 24,446 B (130 B margin) — fits Sepolia.
+## Architecture (confirmed)
+- **EC2-only hosting** (small instance): one box serves the static frontend AND the /api co-signing
+  from a single origin over HTTPS, with COEP/COOP so the multi-threaded wasm proving works
+  (SharedArrayBuffer needs a secure context + cross-origin isolation). TLS via a nip.io domain +
+  Let's Encrypt. S3+CloudFront was abandoned (IAM has no CloudFront perms; S3 alone cannot set
+  COEP/COOP, and the wasm is a shared-memory build).
+- **Two channels (7 & 8)**, each its OWN IntmaxRollup on Sepolia → each deposit is first on its
+  contract (prev hash 0, keystone simple).
+- **cached backing + relay**: the heavy `setup-backing` (Sepolia deposit + ~4GB balance proof) runs
+  LOCALLY; only the cached artifacts ship to EC2, which only co-signs (verified light: a real init
+  co-sign returned a valid snapshot in 8s using ~210MB on the 4GB box).
 
-## Phase 1 — Sepolia deploy (2 rollups)
-- [ ] Deploy IntmaxRollup #1 (channel 7) to Sepolia; record address.
-- [ ] Deploy IntmaxRollup #2 (channel 8) to Sepolia; record address.
+## Code changes (tracked)
+- `channel_member`: channel id from `INTMAX_CHANNEL` env; setup-backing deposit key from
+  `INTMAX_DEPOSIT_KEY` env (default = anvil dev key) so a funded Sepolia key is handed to `cast` by
+  the shell, never hardcoded.
+- `wallet-relay-ec2.js`: EC2 host (frontend + /api, COEP/COOP, HTTPS via TLS_CERT/TLS_KEY env).
+- `Dockerfile.signer` + `.dockerignore`: build the channel_member linux/arm64 binary locally
+  (`.dockerignore` excludes `.claude` (secrets) + target/.git/worktrees).
 
-## Phase 2 — Local cached backing against Sepolia
-- [ ] `setup-backing` ch7 vs rollup#1 over the Sepolia RPC (REAL Sepolia ETH deposit).
-- [ ] `setup-backing` ch8 vs rollup#2 over the Sepolia RPC (REAL Sepolia ETH deposit).
-- [ ] Verify on-chain depositHashChain == Rust Deposit hash for both (keystone).
-
-## Phase 3 — EC2 relay (signer)
-- [ ] Provision EC2 (eu-north-1). Sizing: build needs RAM; run (cosign) lighter.
-- [ ] Build channel_member on EC2 (or ship a linux binary). Ship cached backing.
-- [ ] Run relay; expose over HTTPS reachable from the browser.
-
-## Phase 4 — S3 + CloudFront frontend
-- [ ] Build wasm (release). Upload wallet-live.html + pkg + worker to S3.
-- [ ] CloudFront distribution + response-headers-policy (COEP/COOP). Point relay URL at EC2.
-
-## Phase 5 — Wire + verify
-- [ ] Frontend → EC2 relay; join channel 7 and 8; confirm a real send end-to-end.
-
-## Notes / risks
-- EC2 build RAM vs "small instance" wish: building this Rust stack needs a mid-size box; may build
-  on a larger instance (one-time) then downsize, or keep mid-size.
-- EC2 HTTPS cert reachable from the browser (CloudFront origin or domain+cert) — TBD in Phase 3.
+## Status
+- [x] Sepolia: 2 rollups deployed + 2 real deposits + cached backing (EIP-170 cleared: 24,446 B).
+- [x] EC2: small box, frontend + signer over HTTPS, both channels served, verified server-side.
+- [x] Real co-sign proving validated on the small box (8s, ~210MB).
+- [ ] In-browser click-through (wasm thread init + a full join) — not auto-testable here (no
+      connected browser); all server-side prerequisites are verified correct.
+- [ ] Actual inter-channel SEND logic (`build_inter_channel_send` + wasm wrapper) — only the UI field
+      exists so far.
