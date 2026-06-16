@@ -157,18 +157,20 @@ Legend: **[New]** = new type / **[Chg]** = change to existing type / **[Keep]** 
 /// abstract2.md: BalanceState { encBalances, settledTxChain, stateVersion }
 pub struct BalanceState {
     pub channel_id: ChannelId,
-    pub member_count: u8,                                  // active = slot 0..member_count (2..=16, D6)
-    pub enc_balances: [RegevCiphertext; MAX_CHANNEL_MEMBERS],   // 16 slots, padding is default/zero
+    pub member_count: u8,                                  // co-signing MEMBERS = slot 0..member_count (2..=16, D6)
+    pub delegate_count: u8,                                // DELEGATES = slot member_count..member_count+delegate_count (§L, D9)
+    pub enc_balances: [RegevCiphertext; MAX_CHANNEL_MEMBERS],   // 16 slots; active = members+delegates, padding default/zero
     pub settled_tx_chain: Bytes32,                          // genesis = 0x00…00
     pub state_version: u64,                                 // +1 on both intra- and inter-channel updates
 }
 impl BalanceState {
     /// H1 = hash(BalanceState). Does not include the proof object (all components known at signing time)
     pub fn h1(&self) -> Bytes32 {
-        // order: [BALANCE_STATE_DOMAIN, channel_id, member_count,
+        // order: [BALANCE_STATE_DOMAIN, channel_id, member_count, delegate_count,
         //        enc_balances[0..16].digest(), settled_tx_chain,
         //        split_u64(state_version), pending_adds[0..16]]   // fixed 16 slots (D6)
-        //        → keccak256 (src/common/balance_state.rs:102-112)
+        //        delegate_count = ONE u32 limb IMMEDIATELY AFTER member_count (§L, D9).
+        //        → keccak256 (src/common/balance_state.rs)
     }
 }
 /// Agreement / signing target (abstract2.md: balanceStateHash = hash(H1, H2))
@@ -641,3 +643,114 @@ Thereby "the all-signed state of the highest version is uniquely determined" (co
    `switch_board.rs:230` empty-genesis is **intentional** — channels enter through a registration block, not
    genesis. (Residual unification items between the validity-path and close-path registration surfaces are
    tracked in D7's "Residual".)
+
+---
+
+## L. Delegate account (added feature, 2026-06; D9)
+
+A **delegate account** is a channel participant that has a lattice (Regev) balance and SENDs / RECEIVEs /
+WITHDRAWs with the **identical proofs** a co-signing member uses, but does **NOT** participate in the
+N-of-N multisig that co-signs channel-state updates. It relies on the co-signing members for state
+maintenance. Not in abstract2.md; authoritative delta = **D9** in detail2-implementation-notes.md.
+Threat model + adversarial review: `tasks/delegate-account-threat-model.md` (DA1–DA6).
+
+### L-1. Slot regions (one fixed-16 array, contiguous regions)
+`delegate_count: u8` is added alongside `member_count: u8` on `BalanceState`, `ChannelRecord`, and the
+registration record. With `active = member_count + delegate_count`:
+- slots `0 .. member_count`            → **co-signing members** (balance + send/receive + N-of-N co-sign).
+- slots `member_count .. active`       → **delegates** (balance + send/receive/withdraw; **NO** co-sign).
+- slots `active .. 16`                 → padding (canonical empty ciphertext, `pending_adds = 0`).
+
+Invariants (enforced natively + in-circuit + Solidity): `2 <= member_count`, `active <= 16` (overflow-safe
+`checked_add`), active slots non-padding and pairwise-distinct `pk_g`, padding slots canonical,
+`bp_member_slot < member_count` (the block proposer must be a co-signing member, never a delegate).
+
+### L-2. Trust model (DLG-1 / DLG-2 / DLG-3)
+- **DLG-1 (theft protection — TRANSITION LAYER, honest-member only):** a debit of a delegate's slot is
+  bound to the delegate's OWN send authorization (E-1 `channelTxZKP` + the BabyBear A11 hash-sig over the
+  IMPA digest). **Honest signing members refuse to co-sign a state update that debits any slot via a send
+  lacking that sender's signature.** So under honest members, a delegate's funds move only by its own
+  authorization. Enforced by member honesty at sign time, NOT cryptographically at close.
+- **DLG-2 (final balance is TRUSTED to the members):** the delegate does not co-sign state, so **fully
+  colluding members CAN forge the delegate's final balance** (under-report it). Accepted by design — the
+  delegate has no cryptographic recourse; the N-of-N members' co-signature over the final state is
+  authoritative. The delegate also trusts members for others' balance soundness + sum conservation.
+- **DLG-3 (censorship / liveness): OUT OF SCOPE.** The delegate relies on members for inclusion of its
+  sends and close cooperation. Also covers the on-chain deployer-asserted delegate binding (L-5) — a
+  misbind only DENIES the delegate's honest claim (it cannot steal; E-3 needs the delegate's Regev key),
+  i.e. griefing, not theft.
+
+The only non-negotiable on-chain guarantees the delegate inherits (same as members): **solvency**
+(Σ all withdrawals ≤ channel fund) and **no double-withdraw** (nullifier).
+
+### L-3. Data layer — where `delegate_count` is committed
+`delegate_count` is committed as ONE u32 limb **IMMEDIATELY AFTER `member_count`**, byte-identically,
+in every "twin" preimage so the member/delegate/padding split is fixed under the members' signatures:
+- `BalanceState::h1()` (IMBS) + the close-circuit in-circuit H1 recompute (`close_circuit.rs`).
+- `ChannelRecord::signing_digest()` (IMCR) — NATIVE-ONLY digest (no circuit/Solidity twin).
+- Registration reg-chain keccak preimage: native `ChannelRegRecord::hash_with_prev_hash` + in-circuit twin
+  `channel_reg_step` (`channel_reg_hash_with_prev_hash_circuit`) + Solidity `IntmaxRollup.registerChannel`.
+  `CHANNEL_REG_PREIMAGE_U32_LEN`: **475 → 476**. (Re-pinned differentials `PINNED_MC2/8/16`.)
+- Close PI vector: `delegate_count` appended at the END (limb 86, after `member_count` at 85);
+  `CHANNEL_CLOSE_PUBLIC_INPUTS_LEN`: **86 → 87**; Solidity `closePIHash` appends it (packed
+  `(memberCount<<8)|delegateCount` into one uint16 in `CloseProofFields`).
+- **IMCM** close member-set commitment (`close_member_set_commitment`) STAYS **member-only**
+  (`0..member_count`) — delegates do not co-sign, so they are excluded.
+- `member_pubkeys_root` / the reg `MemberTree` COVER active (members + delegates) — a delegate has a real
+  `MemberLeaf{pk_g, pk_b, regev_pk_digest}` identity so it can send + withdraw.
+
+> **Gotcha (D9):** adding the `delegate_count` limb changes every hash that includes the registration
+> EVEN when `delegate_count = 0`. The reg preimage is folded on-chain into `_pendingChannelRegHashChain`,
+> which is bound into the validity proof's block-hash-chain, so ALL baked validity/c2c/withdrawal/close MLE
+> fixtures were regenerated. "delegate_count = 0 ⇒ byte-identical" holds for newly-generated artifacts
+> (Rust ↔ circuit ↔ Solidity agree) but NOT for baked proofs. A conditional-omit-when-0 encoding was
+> rejected (it would make the R3 word-aligned fixed-length single-keccak preimage variable-length).
+
+### L-4. Send / receive / withdraw / refresh (active-region; co-sign stays member-only)
+- **Send (delegate as sender):** identical to a member send — E-1 debits the delegate's slot, the BabyBear
+  A11 hash-sig authorizes (DLG-1). The off-chain checks (`wallet_core`: `check_slot`, `member_pubkeys_root`,
+  the member-list bijection, `verify_send_transition`/A11) admit the full active region
+  (`member_count + delegate_count`). The in-circuit `state_update_verifier` E-1 path is slot-agnostic.
+  `build_send` self-signs the next state ONLY for a member sender (`slot < member_count`); a DELEGATE is
+  send-only and adds NO state signature.
+- **Receive:** homomorphic credit to the delegate's slot, no signature (slot-agnostic).
+- **Balance refresh (detail2 §B-3):** after RECEIVING, a slot's `pending_adds` raises and it becomes
+  receive-only until a refresh (re-encrypt to clean digits, same value, `RefreshAir` proof). Wallet API:
+  `wallet_core::build_refresh` / `verify_refresh_transition` (+ `regev::prove_balance_refresh_witnessed`,
+  which also returns the fresh `AmountWitness` so the wallet can spend again) → wasm `wallet_refresh()` →
+  CLI `cosign-refresh`. Works identically for a member or a delegate slot; the members co-sign, the
+  delegate does not.
+- **Withdraw (delegate at close):** the final member-signed `BalanceState` includes the delegate slots. A
+  delegate withdraws via the SAME `WithdrawalClaim` + E-3 `withdrawClaimZKP` a member uses — the claimant
+  slot gate is `member_index < member_count + delegate_count` (`withdrawal_claim_pis.rs`); H1 (signed) binds
+  the active/padding boundary, the ciphertext binding + E-3 decryption are slot-agnostic; the per-(close,
+  pk_g) nullifier + solvency cap bound double/over-withdraw (DA4). The delegate is NOT among the IMCH close
+  co-signers (only `member_count` members sign the close state — DLG-2).
+- **Co-sign (UNCHANGED, member-only):** `verify_all_signatures` / `validate_all_member_signatures`, the
+  close circuit `active_bits` + IMCM member-set rebuild, and the validity bp set ALL stay `0..member_count`.
+  The split is signed (both counts in H1/IMCR), so neither side is relabelable without all members' consent.
+
+### L-5. On-chain (Solidity)
+- `IntmaxRollup.registerChannel(channelId, bpSlot, delegateCount, memberPkGs, pkBs, regevPkDigests, recipients)`
+  — the arrays carry the ACTIVE participants (members first, then delegates); `memberCount = arrayLength −
+  delegateCount`; `delegateCount` is committed in the reg preimage after `memberCount`. (Four registerChannel
+  require-strings were converted to custom errors to keep IntmaxRollup runtime under the EIP-170 24,576-byte
+  limit after the delegate logic.)
+- `ChannelSettlementManager` constructor takes a `delegateBindings` array (length = `delegateCount_`).
+  `_registerDelegates` records each delegate's `(pk_g → recipient)` in `registeredMemberIndexPlusOne`
+  (non-zero presence marker), `registeredRecipientOf`, and `isMemberRecipient`, so `submitWithdrawalClaim` /
+  `submitPostCloseClaim` accept delegates. Delegates are NOT added to `registeredMemberPkGs` / `memberPkGs`,
+  so the IMCM member-set commitment (`closeMemberSetCommitment`, uses `activeMemberCount`) and the N-of-N set
+  stay member-only. Delegate pk_g must be distinct from every member AND every other delegate. The global
+  solvency cap `totalWithdrawn ≤ finalizedChannelFundAmount` already covers members + delegates. TRUST:
+  delegate bindings are deployer-asserted (not re-checked vs the member-only registry IMCM) — DLG-3.
+- `closePIHash` takes the `CloseProofFields` struct (byte-identical 87-limb preimage) to keep callers within
+  the via-IR stack budget once the trailing limb count grew from 1 to 2.
+
+### L-6. Status
+Implemented + independently security-reviewed (separate adversarial agent: GO, no CRITICAL/HIGH; DA1–DA6 all
+blocked or accepted-as-designed). Branch `real-delegate-paymentchannel`. GREEN end-to-end: Rust native +
+circuits, Solidity forge full suite, and a real 2-session browser test (Playwright) of the wallet-live
+delegate demo (open as distinct delegate slots → send → receive → refresh → send again). A wallet-live demo
+runs 3 CLI co-signing members + browsers as send-only delegates (`channel_member` / `wallet-relay.js` /
+`wallet-live.html`).

@@ -548,3 +548,62 @@ WASM lib check clean; Groth16/gnark not run (project rule).
 `SBOX_REGISTERS=1`); the batch-stark's hint≥actual guard is a `debug_assert` (compiled out in release),
 so the hint is load-bearing — the prove/verify + native-equality tests are the regression sentinel, and
 production verification must use `default_config` (84 queries), not `test_config` (8 queries).
+
+---
+
+## D9 — Delegate account (send-only participant; branch `real-delegate-paymentchannel`, 2026-06-16)
+
+**Spec:** detail2.md §L. **Threat model + adversarial review:** `tasks/delegate-account-threat-model.md`
+(DA1–DA6) — independent security-review agent: **GO**, no CRITICAL/HIGH; all DA1–DA6 blocked or
+accepted-as-designed. **abstract2.md needs a new section** (the original is fixed at 3 co-signing members).
+
+### Why a deviation
+abstract2.md's channel is N co-signing members, all equal. A **delegate** has a Regev balance and uses the
+identical send/receive/withdraw/refresh proofs, but is EXCLUDED from the N-of-N state co-signing. It trusts
+the members for state maintenance (DLG-2). This splits the previously-fused "has a balance / can send" role
+from the "must co-sign" role.
+
+### What changed (authoritative)
+- **`delegate_count: u8`** added next to `member_count` on `BalanceState` / `ChannelRecord` /
+  `ChannelRegRecord`. Regions (in the one fixed-16 array): members `0..member_count`, delegates
+  `member_count..member_count+delegate_count`, padding the rest. `active = member_count + delegate_count`,
+  `2 <= member_count`, `active <= 16`.
+- **Committed IMMEDIATELY AFTER `member_count`** (one u32 limb) in `BalanceState::h1` (IMBS) + close-circuit
+  H1 recompute, `ChannelRecord::signing_digest` (IMCR, native-only), and the registration reg-chain keccak
+  preimage (native + `channel_reg_step` circuit twin + Solidity `registerChannel`); `CHANNEL_REG_PREIMAGE_U32_LEN`
+  475→476. Close PI: `delegate_count` appended at the END (limb 86); `CHANNEL_CLOSE_PUBLIC_INPUTS_LEN` 86→87;
+  Solidity `closePIHash` packs `(memberCount<<8)|delegateCount`. **IMCM close member-set commitment stays
+  member-only** (delegates don't co-sign); `member_pubkeys_root` / reg `MemberTree` cover active.
+- **Send/receive/withdraw/refresh** widened to the active region in `wallet_core` (`check_slot`,
+  `member_pubkeys_root`, the member-list bijection, `verify_send_transition`/A11, `build_send` self-signs
+  for members only, `withdrawal_claim_pis` claimant gate `< active`, new `build_refresh` /
+  `verify_refresh_transition` + `prove_balance_refresh_witnessed` + wasm `wallet_refresh` + CLI
+  `cosign-refresh`). In-circuit E-1/E-3/refresh were already slot-agnostic. **Co-sign paths stay
+  `0..member_count`** (`verify_all_signatures`, close `active_bits` + IMCM, validity bp set).
+- **Solidity:** `IntmaxRollup.registerChannel(..., delegateCount, ...)` (active arrays, members first);
+  4 require-strings → custom errors (EIP-170). `ChannelSettlementManager` ctor takes `delegateBindings`;
+  `_registerDelegates` records `(pk_g→recipient)` in the withdrawal-lookup maps but NOT in `registeredMemberPkGs`
+  / IMCM (member-only). `closePIHash` takes the `CloseProofFields` struct (byte-identical 87-limb preimage).
+
+### Trust residuals (within the user-confirmed model — NOT theft)
+- **DLG-1** (honest-member transition-layer protection): members refuse to co-sign a delegate debit lacking
+  the delegate's send signature. Honest-member-only, not enforced at close.
+- **DLG-2** (final balance trusted to members): fully colluding members can forge a delegate's final balance.
+  Accepted. On-chain solvency + no-double-withdraw still bind delegates.
+- **DLG-3** (censorship/liveness OUT OF SCOPE; deployer-misbind griefing): the manager's delegate
+  `(pk_g→recipient)` bindings are deployer-asserted (not re-checked vs the member-only registry IMCM). A
+  misbind only DENIES the delegate's honest claim (E-3 withdraw needs the delegate's Regev secret key;
+  `activeDelegateCount` is pinned to the signed H1) — griefing, not theft.
+
+### Gotcha (baked fixtures)
+Adding the `delegate_count` reg-preimage limb changes the validity block-hash-chain EVEN when 0, so ALL baked
+validity/c2c/withdrawal/close MLE fixtures were regenerated (`generate_withdrawal_fixture` default + `close_`
+prefix to the new manager CREATE2 addr; `generate_c2c_fixture`). "delegate_count=0 ⇒ byte-identical" holds for
+newly-generated artifacts, NOT baked proofs. Conditional-omit-when-0 rejected (breaks R3 fixed-length single-
+keccak preimage). The manager constructor change also shifts its CREATE2 address → re-bake `close_*` fixtures.
+
+### Status
+GREEN: Rust native + circuits, Solidity forge full suite, and a real 2-session browser test (Playwright) of
+the wallet-live delegate demo (open distinct delegate slots → send → receive → balance-refresh → send again).
+Demo: 3 CLI co-signing members + browsers as send-only delegates (`channel_member` / `wallet-relay.js` /
+`wallet-live.html`).
