@@ -116,19 +116,27 @@ impl WithdrawalClaimWitness {
                 "final balance state channel_id mismatch".to_string(),
             ));
         }
-        // The claimed ciphertext IS the member's slot of the H1-bound balance state. Pad-to-MAX
-        // D6: the claiming member must be an ACTIVE slot (`< member_count`); padding slots carry
-        // the empty ciphertext and are not withdrawable.
+        // The claimed ciphertext IS the claimant's slot of the H1-bound balance state. Pad-to-MAX
+        // D6 + delegate account: the claimant must be an ACTIVE slot — a co-signing MEMBER
+        // (`0..member_count`) OR a DELEGATE (`member_count..member_count+delegate_count`). Both own a
+        // real, withdrawable balance ciphertext; only padding slots
+        // (`>= member_count+delegate_count`) carry the empty ciphertext and are not withdrawable.
+        // SECURITY: H1 (checked above) commits BOTH `member_count` and `delegate_count`, so the
+        // active/padding boundary — and thus withdrawal eligibility — is fixed under the members'
+        // signed final state. Delegates do NOT co-sign, but their final balance IS member-attested
+        // (DLG-2), exactly the trust model the withdrawal inherits.
         if self.member_index >= MAX_CHANNEL_MEMBERS {
             return Err(WithdrawalClaimWitnessError::MemberSlotMismatch(format!(
                 "member_index {} out of range (>= MAX_CHANNEL_MEMBERS)",
                 self.member_index
             )));
         }
-        if self.member_index >= self.final_balance_state.member_count as usize {
+        let active = self.final_balance_state.member_count as usize
+            + self.final_balance_state.delegate_count as usize;
+        if self.member_index >= active {
             return Err(WithdrawalClaimWitnessError::MemberSlotMismatch(format!(
-                "member_index {} is a padding slot (>= member_count {})",
-                self.member_index, self.final_balance_state.member_count
+                "member_index {} is a padding slot (>= member_count+delegate_count {active})",
+                self.member_index
             )));
         }
         if self.claim.user_amount_ct != self.final_balance_state.enc_balances[self.member_index] {
@@ -347,6 +355,113 @@ mod tests {
         assert!(matches!(
             wrong_state.to_public_inputs(RegevSecurityLevel::Test),
             Err(WithdrawalClaimWitnessError::FinalBalanceStateMismatch(_))
+        ));
+    }
+
+    /// Delegate account (Phase 3 / DA4): a DELEGATE slot (`member_count..member_count+
+    /// delegate_count`) is an ACTIVE, withdrawable slot. The delegate withdraws its member-attested
+    /// final balance via the SAME E-3 WithdrawalClaim a member uses; a padding slot
+    /// (`>= member_count+delegate_count`) is still rejected. member_count=2, delegate_count=1
+    /// (delegate in slot 2).
+    #[test]
+    fn delegate_slot_withdrawal_claim_is_accepted_padding_rejected() {
+        let mut rng = SmallRng::seed_from_u64(0xDE1E);
+        let channel_id = ChannelId::new(4).unwrap();
+        let (pk0, _) = channel_keygen(&mut rng); // member 0
+        let (pk1, _) = channel_keygen(&mut rng); // member 1
+        let (pk_d, sk_d) = channel_keygen(&mut rng); // delegate (slot 2)
+
+        let d_amount = 42u64;
+        let (ct0, _) = encrypt_amount(&mut rng, &pk0, 7).unwrap();
+        let (ct1, _) = encrypt_amount(&mut rng, &pk1, 9).unwrap();
+        let (ct_d, _) = encrypt_amount(&mut rng, &pk_d, d_amount).unwrap();
+        let final_balance_state = BalanceState {
+            channel_id,
+            member_count: 2,
+            delegate_count: 1,
+            enc_balances: BalanceState::pad_enc_balances(&[ct0, ct1, ct_d.clone()]),
+            settled_tx_chain: Bytes32::default(),
+            state_version: 6,
+            pending_adds: BalanceState::pad_pending_adds(&[0, 0, 0]),
+        };
+
+        let state = ChannelState {
+            channel_id,
+            epoch: 8,
+            small_block_number: 5,
+            close_freeze_nonce: 0,
+            channel_fund: ChannelFund {
+                channel_id,
+                amount: U256::from(93u32),
+                intmax_state_root: Bytes32::default(),
+            },
+            balance_state: final_balance_state.clone(),
+            h2_tag: Bytes32::default(),
+            shared_native_nullifier_root: Bytes32::default(),
+            unallocated_confirmed_incoming: U256::zero(),
+            prev_digest: Bytes32::default(),
+            digest: Bytes32::default(),
+            member_signatures: vec![MemberSignature {
+                member_slot: 0,
+                pk_g: pubkey_hash(10),
+                signature: vec![1],
+            }],
+        }
+        .with_computed_digest();
+        let close_tx = CloseWithdrawal {
+            channel_id: state.channel_id,
+            final_channel_state_digest: state.digest,
+            final_balance_state_h1: state.balance_state.h1(),
+            intmax_state_root: state.channel_fund.intmax_state_root,
+            burn_tx_hash: Bytes32::from_u32_slice(&[9, 0, 0, 0, 0, 0, 0, 0]).unwrap(),
+            burn_amount: state.channel_fund.amount,
+            zkp: vec![9],
+        };
+        let close_intent = CloseIntent::new(5, &state, &close_tx, 123).unwrap();
+
+        // The DELEGATE claims its own slot-2 ciphertext.
+        let delegate = ChannelMember {
+            pk_g: pubkey_hash(30),
+            member_slot: 2,
+            l1_withdrawal_recipient: Address::from_u32_slice(&[2, 3, 4, 5, 6]).unwrap(),
+        };
+        let claim_proof =
+            prove_withdraw_claim(RegevSecurityLevel::Test, &pk_d, &sk_d, &ct_d, d_amount).unwrap();
+        let claim = WithdrawalClaim {
+            close_intent_digest: close_intent.signing_digest(),
+            member_pk_g: delegate.pk_g,
+            l1_recipient: delegate.l1_withdrawal_recipient,
+            user_amount_ct: ct_d,
+            withdrawal_nullifier: WithdrawalClaim::derive_nullifier(
+                close_intent.signing_digest(),
+                delegate.pk_g,
+            ),
+            claim_proof,
+        };
+        let witness = WithdrawalClaimWitness {
+            close_intent,
+            close_tx,
+            member: delegate,
+            claim,
+            final_balance_state,
+            member_index: 2, // delegate region (active = member_count + delegate_count = 3)
+            user_pk: pk_d,
+            amount: d_amount,
+        };
+
+        // The delegate's slot-2 withdrawal claim is ACCEPTED (E-3 verifies + slot in active range).
+        let pis = witness
+            .to_public_inputs(RegevSecurityLevel::Test)
+            .expect("delegate slot withdrawal must be accepted");
+        let roundtrip = WithdrawalClaimPublicInputs::from_u64_slice(&pis.to_u64_vec()).unwrap();
+        assert_eq!(pis, roundtrip);
+
+        // A padding slot (>= member_count + delegate_count = 3) is still rejected as non-withdrawable.
+        let mut padding = witness;
+        padding.member_index = 3;
+        assert!(matches!(
+            padding.to_public_inputs(RegevSecurityLevel::Test),
+            Err(WithdrawalClaimWitnessError::MemberSlotMismatch(_))
         ));
     }
 }
