@@ -57,6 +57,15 @@ app.get('/api/snapshot', (req, res) => {
   } catch (e) { res.status(404).json({ error: 'no channel yet' }); }
 });
 
+// The channel's REAL Intmax deposit backing (detail2 §F-1): { fund, settledTxChain,
+// intmaxStateRoot } produced once by `setup-backing`. The browser shows this so the user can see the
+// channel is genuinely backed by a deposited Intmax balance (not a self-minted number).
+app.get('/api/backing', (req, res) => {
+  try {
+    res.json(JSON.parse(fs.readFileSync(w('channel_backing.json'), 'utf8')));
+  } catch (e) { res.status(404).json({ error: 'no deposit backing yet' }); }
+});
+
 // (Legacy member-mode genesis co-signing — unused by the delegate demo, where the browser does not
 // sign the genesis. Kept for the member-mode wallet.)
 app.post('/api/add-genesis-sig', (req, res) => {

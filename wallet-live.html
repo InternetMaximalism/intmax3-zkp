@@ -35,11 +35,12 @@
 </header>
 <main>
   <section class="panel">
-    <h2>1 · Open a channel (as a delegate)</h2>
-    <p class="hint">You join as a send-only <b>delegate</b>: this generates your keys (Goldilocks + BabyBear hash-sig + Regev) and funds your slot, while the local CLI runs the <b>three co-signing members</b> (slots 0–2). The members sign the channel state; you only sign your own sends. All proving/lattice work happens in your browser.</p>
-    <label>Your opening balance</label>
-    <input id="openBalance" type="number" value="50" min="0" />
-    <button id="btnOpen" disabled>Generate keys & open channel</button>
+    <h2>1 · Join the Intmax-backed channel (as a delegate)</h2>
+    <p class="hint">This channel is backed by a <b>real Intmax deposit</b> (detail2 §F-1): the local CLI deposited the fund on the base layer and proved it (<code>balanceProof</code>), and the three co-signing members <b>refuse to sign any state whose <code>settled_tx_chain</code> does not match that deposit</b>. You are NOT minting a number — you join with your pre-allocated share of the deposited fund.</p>
+    <div id="backing" class="members">checking the channel's Intmax deposit backing…</div>
+    <label>Your allocation (your share of the channel's deposited fund)</label>
+    <input id="openBalance" type="number" value="50" readonly title="Fixed: your delegate allocation out of the channel's real Intmax deposit (so Σ balances == deposited fund)" />
+    <button id="btnOpen" disabled>Generate keys & join channel</button>
     <div class="members" id="members"></div>
   </section>
 
@@ -95,6 +96,19 @@ async function api(pathname, body, method='POST') {
 function showBalance(r) {
   $('balance').textContent = r.balance;
   $('balMeta').textContent = `· slot ${r.slot} · v${r.stateVersion} · ${r.canSend ? 'can send' : 'receive-only (refresh needed)'}`;
+}
+
+// Show the channel's REAL Intmax deposit backing (detail2 §F-1). This is the proof the channel is
+// genuinely funded on the base layer — the members will not co-sign a state that doesn't match it.
+async function showBacking() {
+  try {
+    const b = JSON.parse(await api('/api/backing', null, 'GET'));
+    const chain = b.settledTxChain || b.settled_tx_chain || '';
+    $('backing').innerHTML = `<span class="ok">✓ backed by a real Intmax deposit</span> · fund <b>${b.fund}</b> · `
+      + `settled_tx_chain <code title="the base-layer balanceProof public input the members reconcile against">${chain.slice(0,10)}…${chain.slice(-6)}</code>`;
+  } catch (e) {
+    $('backing').innerHTML = `<span class="err">no deposit backing yet</span> — the relay runs <code>setup-backing</code> on first launch (~30s); reload shortly.`;
+  }
 }
 
 async function step(label, fn) {
@@ -188,6 +202,7 @@ $('btnRefresh').onclick = async () => {
 };
 
 worker.postMessage({ action: 'init', threads: navigator.hardwareConcurrency || 4 });
+showBacking();
 </script>
 </body>
 </html>
