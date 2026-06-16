@@ -1,4 +1,21 @@
-# ACTIVE — Genuine intmax3-backed channel in the browser (funder-distributes model)
+# DONE (PASS 160s) — B-1: genuine inter-channel transfer E2E (detail2 §C-6/§E-2/§3.4, abstract2 §2.3/§3.4)
+
+Goal: a real channel→channel SEND with NO fabrication of the security-bearing parts.
+- Both channels backed by REAL on-chain ETH deposits (real balanceProof, §F-1 reconciled).
+- Real MemberKeys + build_record (real member_pubkeys_root / regev_pk_root — verify checks it).
+- Real E-2 channelUpdateZKP (detail2 §E-2): sender_delta & receiver_delta equal-magnitude /
+  opposite-sign, sender balance ≥ amount (no negative/inflation), correct cts to both RegevPks.
+- InterChannelSend + FundImport + ReceiverBundle verify with the REAL Regev verifier.
+- §F-1 (verify_channel_backing) on BOTH channels' genesis vs their real deposit balanceProofs.
+- Base-layer artifact (documented, NOT B-1 scope): the small-block signature + transport proof
+  remain structural (detail2 treats them as validity-proven in the base layer — that is B-2).
+
+Plan: tests/inter_channel_e2e.rs — anvil deposit keystone ×2 → 2 real-backed channels → real
+inter-channel send (real E-2) → import + bundle → §F-1 on both. Skip if foundry absent.
+
+---
+
+# Genuine intmax3-backed channel in the browser (funder-distributes model)
 
 ## Goal
 Replace the facade where every participant self-mints its genesis balance with a model where
