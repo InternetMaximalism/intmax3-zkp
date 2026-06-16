@@ -3,7 +3,7 @@ pragma solidity ^0.8.24;
 
 import {CloseE2EBase} from "./CloseE2EBase.sol";
 import {IntmaxRollup} from "../src/IntmaxRollup.sol";
-import {ChannelSettlementManager, IChannelSettlementVerifier, IChannelRegistry} from "../src/ChannelSettlementManager.sol";
+import {ChannelSettlementManager, IChannelSettlementVerifier, IChannelRegistry, CloseProofFields} from "../src/ChannelSettlementManager.sol";
 import {ChannelSettlementVerifier} from "../src/ChannelSettlementVerifier.sol";
 import {MleVerifier} from "@mle/MleVerifier.sol";
 import {FixtureLib} from "../script/FixtureLib.sol";
@@ -123,7 +123,7 @@ contract CloseLifecycleE2ETest is CloseE2EBase {
         bytes32[] memory pkBs = vm.parseJsonBytes32Array(lcJson, ".registration.member_pk_bs");
         bytes32[] memory regev = vm.parseJsonBytes32Array(lcJson, ".registration.regev_pk_digests");
         address[] memory recipients = vm.parseJsonAddressArray(lcJson, ".registration.recipients");
-        rollup.registerChannel(channelId, bpSlot, sphincs, pkBs, regev, recipients);
+        rollup.registerChannel(channelId, bpSlot, 0, sphincs, pkBs, regev, recipients);
     }
 
     function _runChainThroughFinalize() internal {
@@ -238,14 +238,42 @@ contract CloseLifecycleE2ETest is CloseE2EBase {
     function _closeStubProof(ChannelSettlementManager.CloseIntent memory intent)
         internal view returns (bytes memory)
     {
+        // Calldata-reentry (via-IR stack budget): `_closePiHashCd` reads the intent from calldata.
         return _proofFor(
-            settlementVerifier.closePIHash(
-                manager.channelId(), intent.closeNonce, intent.finalEpoch, intent.finalSmallBlockNumber,
-                intent.closeFreezeNonce, intent.finalChannelStateDigest, intent.finalBalanceStateH1,
-                intent.channelFundAmount, intent.channelFundIntmaxStateRoot, intent.burnTxHash,
-                intent.closeWithdrawalDigest, intent.snapshotMediumBlockNumber, intent.finalStateVersion,
-                intent.finalSettledTxChain, manager.registeredMemberSetCommitment(), manager.activeMemberCount()
+            this._closePiHashCd(
+                intent,
+                manager.channelId(),
+                manager.registeredMemberSetCommitment(),
+                (uint16(manager.activeMemberCount()) << 8) | uint16(manager.activeDelegateCount())
             )
         );
+    }
+
+    /// @dev External so `intent` is calldata; builds `CloseProofFields` from the calldata struct +
+    /// the per-channel `channelId`, member-set commitment and packed member/delegate count.
+    function _closePiHashCd(
+        ChannelSettlementManager.CloseIntent calldata intent,
+        bytes4 channelId,
+        bytes32 memberSetCommitment,
+        uint16 memberAndDelegateCount
+    ) external view returns (bytes32) {
+        return settlementVerifier.closePIHash(CloseProofFields({
+            channelId: channelId,
+            closeNonce: intent.closeNonce,
+            finalEpoch: intent.finalEpoch,
+            finalSmallBlockNumber: intent.finalSmallBlockNumber,
+            closeFreezeNonce: intent.closeFreezeNonce,
+            finalChannelStateDigest: intent.finalChannelStateDigest,
+            finalBalanceStateH1: intent.finalBalanceStateH1,
+            channelFundAmount: intent.channelFundAmount,
+            channelFundIntmaxStateRoot: intent.channelFundIntmaxStateRoot,
+            burnTxHash: intent.burnTxHash,
+            closeWithdrawalDigest: intent.closeWithdrawalDigest,
+            snapshotMediumBlockNumber: intent.snapshotMediumBlockNumber,
+            finalStateVersion: intent.finalStateVersion,
+            finalSettledTxChain: intent.finalSettledTxChain,
+            memberSetCommitment: memberSetCommitment,
+            memberAndDelegateCount: memberAndDelegateCount
+        }));
     }
 }

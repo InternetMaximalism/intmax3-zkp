@@ -3,7 +3,7 @@ pragma solidity ^0.8.24;
 
 import {Script, console2} from "forge-std/Script.sol";
 import {IntmaxRollup} from "../src/IntmaxRollup.sol";
-import {ChannelSettlementManager} from "../src/ChannelSettlementManager.sol";
+import {ChannelSettlementManager, CloseProofFields} from "../src/ChannelSettlementManager.sol";
 import {ChannelSettlementVerifier} from "../src/ChannelSettlementVerifier.sol";
 import {MleVerifier} from "@mle/MleVerifier.sol";
 import {FixtureLib} from "./FixtureLib.sol";
@@ -78,19 +78,54 @@ contract RunClose is Script {
             snapshotMediumBlockNumber: 77, finalStateVersion: 12,
             finalSettledTxChain: keccak256("settled_tx_chain")
         });
-        bytes memory proof = abi.encode(
-            _sv().closePIHash(
-                _manager().channelId(), intent.closeNonce, intent.finalEpoch, intent.finalSmallBlockNumber,
-                intent.closeFreezeNonce, intent.finalChannelStateDigest, intent.finalBalanceStateH1,
-                intent.channelFundAmount, intent.channelFundIntmaxStateRoot, intent.burnTxHash,
-                intent.closeWithdrawalDigest, intent.snapshotMediumBlockNumber, intent.finalStateVersion,
-                intent.finalSettledTxChain, _manager().registeredMemberSetCommitment(), _manager().activeMemberCount()
-            )
-        );
+        // Build the stub proof in a separate frame (`_closeProofBytes`) so the 16-field
+        // CloseProofFields construction does not share this function's stack with `intent` and the
+        // broadcast locals (via-IR stack budget).
+        bytes memory proof = _closeProofBytes(intent);
         vm.startBroadcast();
         _manager().submitCloseIntent(intent, proof);
         vm.stopBroadcast();
         console2.log("submitCloseIntent OK; challengeDeadline:", _manager().getPendingClose().challengeDeadline);
+    }
+
+    /// Build the stub close proof bytes: abi.encode(closePIHash(fields)). Re-enters via `this` so
+    /// `intent` arrives as CALLDATA in `_closeProofBytesCd` — reading the 14 shared fields from
+    /// calldata (not a memory struct) is what keeps the 16-field CloseProofFields construction
+    /// within the via-IR stack budget, exactly as the manager's `_runCloseVerify` does.
+    function _closeProofBytes(ChannelSettlementManager.CloseIntent memory intent)
+        internal view returns (bytes memory)
+    {
+        return this._closeProofBytesCd(intent);
+    }
+
+    /// @dev External so `intent` is calldata (see `_closeProofBytes`). Not part of the deploy flow.
+    function _closeProofBytesCd(ChannelSettlementManager.CloseIntent calldata intent)
+        external view returns (bytes memory)
+    {
+        ChannelSettlementManager mgr = _manager();
+        return abi.encode(
+            _sv().closePIHash(
+                CloseProofFields({
+                    channelId: mgr.channelId(),
+                    closeNonce: intent.closeNonce,
+                    finalEpoch: intent.finalEpoch,
+                    finalSmallBlockNumber: intent.finalSmallBlockNumber,
+                    closeFreezeNonce: intent.closeFreezeNonce,
+                    finalChannelStateDigest: intent.finalChannelStateDigest,
+                    finalBalanceStateH1: intent.finalBalanceStateH1,
+                    channelFundAmount: intent.channelFundAmount,
+                    channelFundIntmaxStateRoot: intent.channelFundIntmaxStateRoot,
+                    burnTxHash: intent.burnTxHash,
+                    closeWithdrawalDigest: intent.closeWithdrawalDigest,
+                    snapshotMediumBlockNumber: intent.snapshotMediumBlockNumber,
+                    finalStateVersion: intent.finalStateVersion,
+                    finalSettledTxChain: intent.finalSettledTxChain,
+                    memberSetCommitment: mgr.registeredMemberSetCommitment(),
+                    memberAndDelegateCount:
+                        (uint16(mgr.activeMemberCount()) << 8) | uint16(mgr.activeDelegateCount())
+                })
+            )
+        );
     }
 
     /// submitWithdrawalClaim for member slot 0 (recipient = the EOA, per the manager binding).

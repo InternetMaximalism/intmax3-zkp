@@ -169,9 +169,21 @@ pub struct ChannelRecord {
     /// `0..member_count`; slots `member_count..MAX_CHANNEL_MEMBERS` are padding
     /// (`Bytes32::default()` pubkey hashes). Pad-to-MAX deviation D6.
     pub member_count: u8,
-    /// Ordered member identities = SPHINCS+ pubkey hashes, slot order 0..MAX_CHANNEL_MEMBERS.
-    /// Active slots (`< member_count`) are nonzero and pairwise-distinct; padding slots are
-    /// `Bytes32::default()`.
+    /// Number of DELEGATE participants (send/receive/withdraw, NOT co-signing). Delegates occupy
+    /// the contiguous slot region `member_count..member_count+delegate_count`; slots
+    /// `member_count+delegate_count..MAX_CHANNEL_MEMBERS` are padding. Invariant: `member_count +
+    /// delegate_count <= MAX_CHANNEL_MEMBERS`.
+    ///
+    /// SECURITY (delegate account, Phase 1): `delegate_count` is committed into the IMCR
+    /// `signing_digest` IMMEDIATELY AFTER `member_count`, so the member/delegate/padding split is
+    /// fixed under the members' channel-record signature. Delegate slots carry a real
+    /// `MemberLeaf{pk_g, pk_b, regev_pk}` identity (so the delegate can send and withdraw); they are
+    /// part of `member_pubkeys_root` exactly like members. The only difference is that delegates do
+    /// NOT appear in the N-of-N co-sign set (those loops stay `0..member_count`; later phases).
+    pub delegate_count: u8,
+    /// Ordered member + delegate identities = SPHINCS+ pubkey hashes, slot order
+    /// 0..MAX_CHANNEL_MEMBERS. Active slots (`< member_count+delegate_count`) are nonzero and
+    /// pairwise-distinct; padding slots are `Bytes32::default()`.
     pub member_pk_gs: [Bytes32; MAX_CHANNEL_MEMBERS],
     /// L1/keccak digest form of the channel's member tree root. The in-circuit
     /// `ChannelLeaf.member_pubkeys_root` is a Poseidon root (different representation, DB); this
@@ -211,11 +223,26 @@ impl ChannelRecord {
                 self.bp_member_slot
             )));
         }
-        // One SPHINCS+ key per member: the ACTIVE pubkey hashes (slots 0..member_count) must be
-        // nonzero and pairwise distinct (no shared-key / duplicate-member forgery); PADDING slots
-        // (>= member_count) must be Bytes32::default().
+        // Delegate account regions: members `0..member_count`, delegates
+        // `member_count..member_count+delegate_count`, padding `member_count+delegate_count..MAX`.
+        // Active = members + delegates. `delegate_count` may be 0; `member_count + delegate_count`
+        // must not exceed MAX (no overflow / over-allocation).
+        let delegate_count = self.delegate_count as usize;
+        let active = count
+            .checked_add(delegate_count)
+            .filter(|&a| a <= MAX_CHANNEL_MEMBERS)
+            .ok_or_else(|| {
+                ChannelError::InvalidChannelRecord(format!(
+                    "member_count {count} + delegate_count {delegate_count} exceeds \
+                     MAX_CHANNEL_MEMBERS = {MAX_CHANNEL_MEMBERS}"
+                ))
+            })?;
+        // One SPHINCS+ key per ACTIVE participant: the ACTIVE pubkey hashes (members + delegates,
+        // slots `0..member_count+delegate_count`) must be nonzero and pairwise distinct (no
+        // shared-key / duplicate-participant forgery, across members AND delegates); PADDING slots
+        // (`>= member_count+delegate_count`) must be Bytes32::default().
         for (i, hash) in self.member_pk_gs.iter().enumerate() {
-            if i < count {
+            if i < active {
                 if *hash == Bytes32::default() {
                     return Err(ChannelError::InvalidChannelRecord(format!(
                         "member_pk_gs[{i}] (active) must be nonzero"
@@ -227,7 +254,7 @@ impl ChannelRecord {
                     .enumerate()
                     .skip(i + 1)
                 {
-                    if j < count && hash == other {
+                    if j < active && hash == other {
                         return Err(ChannelError::InvalidChannelRecord(
                             "active member_pk_gs must be pairwise distinct"
                                 .to_string(),
@@ -236,7 +263,7 @@ impl ChannelRecord {
                 }
             } else if *hash != Bytes32::default() {
                 return Err(ChannelError::InvalidChannelRecord(format!(
-                    "member_pk_gs[{i}] is a padding slot (>= member_count {count}) \
+                    "member_pk_gs[{i}] is a padding slot (>= member_count+delegate_count {active}) \
                      and must be Bytes32::default()"
                 )));
             }
@@ -250,10 +277,15 @@ impl ChannelRecord {
     /// `member_pubkeys_root`(8). `regev_pk_root` stays at the END of the preimage (detail2 §H-1).
     ///
     /// PREIMAGE (exact): `[IMCR, channel_id(1), bp_member_slot(1), split_u64(close_freeze_nonce),
-    /// status(1), member_count(1), member_hashes(16*8), member_pubkeys_root(8),
+    /// status(1), member_count(1), delegate_count(1), member_hashes(16*8), member_pubkeys_root(8),
     /// special_close_penalty(8), regev_pk_root(8)]`. The `member_count` limb replaces the legacy
-    /// `CHANNEL_MEMBERS` constant limb in the same position; hashing all 16 hashes (not just the
-    /// active ones) fixes the active/padding split under the member signatures.
+    /// `CHANNEL_MEMBERS` constant limb in the same position; `delegate_count` is a single u32 limb
+    /// IMMEDIATELY AFTER `member_count` (delegate account). Hashing all 16 hashes (not just the
+    /// active ones) plus both counts fixes the member/delegate/padding split under the member
+    /// signatures.
+    ///
+    /// NOTE: this IMCR digest is NATIVE-ONLY (it has no in-circuit or Solidity recompute twin), so
+    /// `delegate_count` is threaded here only.
     pub fn signing_digest(&self) -> Bytes32 {
         hash_words(
             &[
@@ -261,7 +293,11 @@ impl ChannelRecord {
                 self.channel_id.to_u32_vec(),
                 vec![self.bp_member_slot as u32],
                 split_u64(self.close_freeze_nonce),
-                vec![self.status as u32, self.member_count as u32],
+                vec![
+                    self.status as u32,
+                    self.member_count as u32,
+                    self.delegate_count as u32,
+                ],
                 self.member_pk_gs
                     .iter()
                     .flat_map(Bytes32::to_u32_vec)
@@ -1155,6 +1191,7 @@ mod tests {
         BalanceState {
             channel_id: sample_channel_id(),
             member_count: 3,
+            delegate_count: 0,
             enc_balances: BalanceState::pad_enc_balances(&[
                 ciphertext(1),
                 ciphertext(2),
@@ -1214,6 +1251,7 @@ mod tests {
         ChannelRecord {
             channel_id: sample_channel_id(),
             member_count: 3,
+            delegate_count: 0,
             member_pk_gs: pad_hashes(&[
                 pubkey_hash(10),
                 pubkey_hash(11),
@@ -1390,6 +1428,7 @@ mod tests {
         ChannelRecord {
             channel_id: sample_channel_id(),
             member_count: count,
+            delegate_count: 0,
             member_pk_gs: pad_hashes(&active),
             member_pubkeys_root: Bytes32::from_u32_slice(&[7, 7, 7, 7, 0, 0, 0, 0]).unwrap(),
             bp_member_slot: 0,

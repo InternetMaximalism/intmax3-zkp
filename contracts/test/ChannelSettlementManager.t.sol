@@ -5,7 +5,8 @@ import {Test} from "forge-std/Test.sol";
 import {
     ChannelSettlementManager,
     IChannelSettlementVerifier,
-    IChannelRegistry
+    IChannelRegistry,
+    CloseProofFields
 } from "../src/ChannelSettlementManager.sol";
 import {ChannelSettlementVerifier} from "../src/ChannelSettlementVerifier.sol";
 
@@ -131,6 +132,7 @@ contract ChannelSettlementManagerTest is Test {
             CHANNEL_ID,
             BP_MEMBER_SLOT,
             USER_A, // block-proposer pubkey hash = member at BP_MEMBER_SLOT
+            0, // delegate_count (Phase 1: member-only)
             CHALLENGE_PERIOD,
             SPECIAL_CLOSE_PENALTY,
             INITIAL_BP_BOND,
@@ -186,28 +188,45 @@ contract ChannelSettlementManagerTest is Test {
     function _closeProof(
         ChannelSettlementManager.CloseIntent memory intent
     ) internal view returns (bytes memory) {
-        // F4/F7: the close proof binds the channel's registered member-set commitment (limbs
-        // 77..85) AND the active member count (limb 85, appended at the END → 86 limbs).
+        // F4/F7 + delegate account: the close proof binds the channel's registered member-set
+        // commitment (limbs 77..84) AND the packed member/delegate counts (limbs 85,86 → 87 limbs).
         return _proofFor(
-            verifier.closePIHash(
-                CHANNEL_ID,
-                intent.closeNonce,
-                intent.finalEpoch,
-                intent.finalSmallBlockNumber,
-                intent.closeFreezeNonce,
-                intent.finalChannelStateDigest,
-                intent.finalBalanceStateH1,
-                intent.channelFundAmount,
-                intent.channelFundIntmaxStateRoot,
-                intent.burnTxHash,
-                intent.closeWithdrawalDigest,
-                intent.snapshotMediumBlockNumber,
-                intent.finalStateVersion,
-                intent.finalSettledTxChain,
+            this._closePiHashCd(
+                intent,
                 manager.registeredMemberSetCommitment(),
-                manager.activeMemberCount()
+                (uint16(manager.activeMemberCount()) << 8) | uint16(manager.activeDelegateCount())
             )
         );
+    }
+
+    /// @dev Compute the close PI hash. External so `intent` is read from CALLDATA — building the
+    /// 16-field `CloseProofFields` from a calldata struct (not a memory one) keeps the construction
+    /// within the via-IR stack budget, mirroring the manager's `_runCloseVerify`. `channelId` is the
+    /// fixed `CHANNEL_ID`; the member-set commitment and packed member/delegate count vary per
+    /// channel, so they are passed in.
+    function _closePiHashCd(
+        ChannelSettlementManager.CloseIntent calldata intent,
+        bytes32 memberSetCommitment,
+        uint16 memberAndDelegateCount
+    ) external view returns (bytes32) {
+        return verifier.closePIHash(CloseProofFields({
+            channelId: CHANNEL_ID,
+            closeNonce: intent.closeNonce,
+            finalEpoch: intent.finalEpoch,
+            finalSmallBlockNumber: intent.finalSmallBlockNumber,
+            closeFreezeNonce: intent.closeFreezeNonce,
+            finalChannelStateDigest: intent.finalChannelStateDigest,
+            finalBalanceStateH1: intent.finalBalanceStateH1,
+            channelFundAmount: intent.channelFundAmount,
+            channelFundIntmaxStateRoot: intent.channelFundIntmaxStateRoot,
+            burnTxHash: intent.burnTxHash,
+            closeWithdrawalDigest: intent.closeWithdrawalDigest,
+            snapshotMediumBlockNumber: intent.snapshotMediumBlockNumber,
+            finalStateVersion: intent.finalStateVersion,
+            finalSettledTxChain: intent.finalSettledTxChain,
+            memberSetCommitment: memberSetCommitment,
+            memberAndDelegateCount: memberAndDelegateCount
+        }));
     }
 
     function _submitClose(ChannelSettlementManager.CloseIntent memory intent) internal {
@@ -241,23 +260,10 @@ contract ChannelSettlementManagerTest is Test {
 
     function test_hash_helpers_are_stable() external view {
         ChannelSettlementManager.CloseIntent memory intent = _intent(1, 9, 22, 1);
-        bytes32 closePiHash = verifier.closePIHash(
-            CHANNEL_ID,
-            intent.closeNonce,
-            intent.finalEpoch,
-            intent.finalSmallBlockNumber,
-            intent.closeFreezeNonce,
-            intent.finalChannelStateDigest,
-            intent.finalBalanceStateH1,
-            intent.channelFundAmount,
-            intent.channelFundIntmaxStateRoot,
-            intent.burnTxHash,
-            intent.closeWithdrawalDigest,
-            intent.snapshotMediumBlockNumber,
-            intent.finalStateVersion,
-            intent.finalSettledTxChain,
+        bytes32 closePiHash = this._closePiHashCd(
+            intent,
             manager.registeredMemberSetCommitment(),
-            manager.activeMemberCount()
+            (uint16(manager.activeMemberCount()) << 8) | uint16(manager.activeDelegateCount())
         );
         assertTrue(closePiHash != bytes32(0));
 
@@ -415,6 +421,7 @@ contract ChannelSettlementManagerTest is Test {
             CHANNEL_ID,
             bpSlot,
             bpHash,
+            0, // delegate_count (Phase 1: member-only)
             CHALLENGE_PERIOD,
             SPECIAL_CLOSE_PENALTY,
             INITIAL_BP_BOND,
@@ -479,6 +486,7 @@ contract ChannelSettlementManagerTest is Test {
             CHANNEL_ID,
             BP_MEMBER_SLOT,
             USER_A,
+            0, // delegate_count (Phase 1: member-only)
             CHALLENGE_PERIOD,
             SPECIAL_CLOSE_PENALTY,
             INITIAL_BP_BOND,
@@ -1015,13 +1023,14 @@ contract ChannelSettlementManagerTest is Test {
     function _closeProofFor(ChannelSettlementManager m, ChannelSettlementManager.CloseIntent memory intent)
         internal view returns (bytes memory)
     {
+        // Same calldata-reentry as `_closeProof` (via-IR stack budget): `_closePiHashCd` reads the
+        // intent from calldata and uses CHANNEL_ID; the per-channel commitment + packed counts come
+        // from the supplied manager `m`.
         return _proofFor(
-            verifier.closePIHash(
-                CHANNEL_ID, intent.closeNonce, intent.finalEpoch, intent.finalSmallBlockNumber,
-                intent.closeFreezeNonce, intent.finalChannelStateDigest, intent.finalBalanceStateH1,
-                intent.channelFundAmount, intent.channelFundIntmaxStateRoot, intent.burnTxHash,
-                intent.closeWithdrawalDigest, intent.snapshotMediumBlockNumber, intent.finalStateVersion,
-                intent.finalSettledTxChain, m.registeredMemberSetCommitment(), m.activeMemberCount()
+            this._closePiHashCd(
+                intent,
+                m.registeredMemberSetCommitment(),
+                (uint16(m.activeMemberCount()) << 8) | uint16(m.activeDelegateCount())
             )
         );
     }
@@ -1040,7 +1049,7 @@ contract ChannelSettlementManagerTest is Test {
         b[1] = ChannelSettlementManager.MemberBinding({pkG: USER_B, recipient: bob});
         b[2] = ChannelSettlementManager.MemberBinding({pkG: USER_C, recipient: carol});
         m = new ChannelSettlementManager(
-            CHANNEL_ID, BP_MEMBER_SLOT, USER_A, CHALLENGE_PERIOD, SPECIAL_CLOSE_PENALTY,
+            CHANNEL_ID, BP_MEMBER_SLOT, USER_A, 0, CHALLENGE_PERIOD, SPECIAL_CLOSE_PENALTY,
             INITIAL_BP_BOND, IChannelSettlementVerifier(address(verifier)), IChannelRegistry(address(reg)), b
         );
     }

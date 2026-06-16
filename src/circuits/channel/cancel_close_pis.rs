@@ -150,6 +150,7 @@ mod tests {
             balance_state: BalanceState {
                 channel_id: ChannelId::new(3).unwrap(),
                 member_count: 3,
+                delegate_count: 0,
                 enc_balances: BalanceState::pad_enc_balances(&[
                     ciphertext(1),
                     ciphertext(2),

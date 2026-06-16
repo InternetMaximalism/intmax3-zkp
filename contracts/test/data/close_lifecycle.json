@@ -1,6 +1,6 @@
 {
   "genesis_state_root": "0x464864c822ae13e306bb41d549535412b182545fab0dbdf6c82cf103eda2103d",
-  "final_state_root": "0x478c6e412c7d3b9c2ece45c8c959ef128e641188178cb6369e8802ff1df614c5",
+  "final_state_root": "0xf880e26447c74784a455dccacf22c6ddbafc45b28088e49becab002821072da6",
   "registration": {
     "channel_id": 1,
     "bp_member_slot": 0,
@@ -56,7 +56,7 @@
     {
       "channel_id": 1,
       "timestamp": 2,
-      "tx_tree_root": "0x8e6f739dfa757d021db449d0afe3502f928b2647b9722546053f3c9024e27b94",
+      "tx_tree_root": "0x903dcd408c3492ac718722530c770c09d28739d67e9b17c42e6079204e268309",
       "key_ids": [
         1,
         0
@@ -69,10 +69,10 @@
     "initial_block_chain": "0x0000000000000000000000000000000000000000000000000000000000000000",
     "initial_ext_commitment": "0x464864c822ae13e306bb41d549535412b182545fab0dbdf6c82cf103eda2103d",
     "final_block_number": 3,
-    "final_block_chain": "0x967c581cc85957b749491f10c81a963bace654bb25babdb997ef4808dfd9e9d7",
-    "final_ext_commitment": "0x478c6e412c7d3b9c2ece45c8c959ef128e641188178cb6369e8802ff1df614c5",
+    "final_block_chain": "0x38ec74f11deae88884067dac201a861bdfbab66b75c0a8cdddf9008488eeafe7",
+    "final_ext_commitment": "0xf880e26447c74784a455dccacf22c6ddbafc45b28088e49becab002821072da6",
     "prover": "0x0000000000000000000000000000000000000000"
   },
-  "proof_hash": "0x000000000000000000000000000000000000000000000000075b8a49b3a39b05",
-  "proof_length": 210369
+  "proof_hash": "0x000000000000000000000000000000000000000000000000631e04b2ff8fe4c2",
+  "proof_length": 206769
 }

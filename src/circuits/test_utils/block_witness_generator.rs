@@ -233,6 +233,7 @@ impl ChannelMemberKeys {
             // blocks sign with).
             bp_member_slot: 0,
             member_count: TEST_ACTIVE_MEMBERS as u32,
+            delegate_count: 0,
             members,
         }
     }

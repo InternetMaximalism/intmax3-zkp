@@ -1384,6 +1384,7 @@ mod tests {
         let record = ChannelRecord {
             channel_id,
             member_count: 3,
+            delegate_count: 0,
             member_pk_gs: pad_hashes(&[
                 pubkey_hash(10),
                 pubkey_hash(20),
@@ -1430,6 +1431,7 @@ mod tests {
             balance_state: BalanceState {
                 channel_id,
                 member_count: 3,
+                delegate_count: 0,
                 enc_balances: BalanceState::pad_enc_balances(&[
                     before_s.0.clone(),
                     before_r.0.clone(),
@@ -1452,6 +1454,7 @@ mod tests {
             balance_state: BalanceState {
                 channel_id,
                 member_count: 3,
+                delegate_count: 0,
                 enc_balances: BalanceState::pad_enc_balances(&[
                     after_s.0.clone(),
                     after_r.clone(),

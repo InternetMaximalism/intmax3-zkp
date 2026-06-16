@@ -14,7 +14,8 @@ use crate::{
 //   closeFreezeNonce(2) | finalChannelStateDigest(8) | finalBalanceStateH1(8) |
 //   channelFundAmount(8) | channelFundIntmaxStateRoot(8) | burnTxHash(8) |
 //   closeWithdrawalDigest(8) | closeIntentDigest(8) | snapshotMediumBlockNumber(2) |
-//   finalStateVersion(2) | finalSettledTxChain(8) | memberSetCommitment(8)
+//   finalStateVersion(2) | finalSettledTxChain(8) | memberSetCommitment(8) | memberCount(1) |
+//   delegateCount(1)
 //
 // F5 SECURITY: `member_set_commitment` (8 limbs) = keccak([IMCM, member_count, h_0..h_15]) over
 // the member SPHINCS+ pubkey hashes the close circuit's signatures verify (slot order, padding
@@ -23,9 +24,10 @@ use crate::{
 //
 // D6 (pad-to-MAX): `member_count` (1 limb) is APPENDED at the very END of the vector (after
 // `member_set_commitment`) so the legacy 85-limb layout is byte-for-byte unchanged for limbs
-// 0..85; total is now 86 limbs. The Solidity `closePIHash` preimage (F4/F5 workstream) must
-// append the same `member_count` limb.
-pub const CHANNEL_CLOSE_PUBLIC_INPUTS_LEN: usize = 86;
+// 0..85. Delegate account: `delegate_count` (1 limb) is APPENDED right AFTER `member_count`, so
+// limbs 0..86 are unchanged; total is now 87 limbs. The Solidity `closePIHash` preimage must
+// append the same `member_count` then `delegate_count` limbs.
+pub const CHANNEL_CLOSE_PUBLIC_INPUTS_LEN: usize = 87;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -60,6 +62,11 @@ pub struct ChannelClosePublicInputs {
     /// the close PI vector (single limb). Anchored in-circuit as the unique count inside the
     /// signed H1 preimage and the member_set_commitment.
     pub member_count: u8,
+    /// Delegate account: number of DELEGATE participants. Appended right AFTER `member_count` (final
+    /// limb). Anchored in-circuit as the unique count inside the signed H1 preimage. NOT part of the
+    /// member_set_commitment (delegates do not co-sign), but bound to H1 so the close circuit
+    /// recomputes the now-`delegate_count`-bearing H1 from the same PI limb.
+    pub delegate_count: u8,
 }
 
 #[derive(Debug, Error)]
@@ -91,6 +98,7 @@ impl ChannelClosePublicInputs {
             self.final_settled_tx_chain.to_u64_vec(),
             self.member_set_commitment.to_u64_vec(),
             vec![self.member_count as u64],
+            vec![self.delegate_count as u64],
         ]
         .concat()
     }
@@ -134,6 +142,12 @@ impl ChannelClosePublicInputs {
                 ChannelClosePublicInputsError::InvalidField(format!(
                     "member_count limb {} does not fit in u8",
                     values[85]
+                ))
+            })?,
+            delegate_count: u8::try_from(values[86]).map_err(|_| {
+                ChannelClosePublicInputsError::InvalidField(format!(
+                    "delegate_count limb {} does not fit in u8",
+                    values[86]
                 ))
             })?,
         })
@@ -195,6 +209,9 @@ impl ChannelCloseWitness {
             member_set_commitment: Bytes32::default(),
             // D6: member_count comes from the final balance state (its h1 binds it).
             member_count: self.final_channel_state.balance_state.member_count,
+            // Delegate account: delegate_count likewise comes from the final balance state (its h1
+            // binds it immediately after member_count).
+            delegate_count: self.final_channel_state.balance_state.delegate_count,
         })
     }
 }
@@ -258,6 +275,7 @@ mod tests {
             balance_state: BalanceState {
                 channel_id: ChannelId::new(3).unwrap(),
                 member_count: 3,
+                delegate_count: 0,
                 enc_balances: BalanceState::pad_enc_balances(&[
                     ciphertext(1),
                     ciphertext(2),
@@ -310,8 +328,8 @@ mod tests {
         assert_eq!(
             limbs.len(),
             CHANNEL_CLOSE_PUBLIC_INPUTS_LEN,
-            "closePIHash preimage is exactly 86 BE u32 words (77 legacy + 8 memberSetCommitment + \
-             1 memberCount)"
+            "closePIHash preimage is exactly 87 BE u32 words (77 legacy + 8 memberSetCommitment + \
+             1 memberCount + 1 delegateCount)"
         );
         assert_eq!(
             &limbs[77..85],
@@ -320,7 +338,11 @@ mod tests {
         );
         assert_eq!(
             limbs[85], public_inputs.member_count as u64,
-            "member_count occupies the final limb (D6)"
+            "member_count occupies limb 85 (D6)"
+        );
+        assert_eq!(
+            limbs[86], public_inputs.delegate_count as u64,
+            "delegate_count occupies the final limb (delegate account)"
         );
         // The P8-pinned tail: snapshotMediumBlockNumber(2) | finalStateVersion(2 hi,lo) |
         // finalSettledTxChain(8).

@@ -211,7 +211,7 @@ contract WithdrawNativeE2ETest is Test {
         bytes32[] memory pkBs = vm.parseJsonBytes32Array(lifecycleJson, ".registration.member_pk_bs");
         bytes32[] memory regev = vm.parseJsonBytes32Array(lifecycleJson, ".registration.regev_pk_digests");
         address[] memory recipients = vm.parseJsonAddressArray(lifecycleJson, ".registration.recipients");
-        rollup.registerChannel(channelId, bpSlot, sphincs, pkBs, regev, recipients);
+        rollup.registerChannel(channelId, bpSlot, 0, sphincs, pkBs, regev, recipients);
     }
 
     function _depositFromFixture() internal {

@@ -83,6 +83,12 @@ pub struct ChannelRegRecord {
     pub channel_id: ChannelId,
     pub bp_member_slot: u32,
     pub member_count: u32,
+    /// Number of DELEGATE participants registered after the members (delegate account). Delegates
+    /// occupy slots `member_count..member_count+delegate_count`; padding is
+    /// `member_count+delegate_count..MAX`. Invariant: `member_count + delegate_count <=
+    /// MAX_CHANNEL_MEMBERS`. Committed into the reg-chain keccak preimage IMMEDIATELY AFTER
+    /// `member_count` so the member/delegate/padding split is bound to the L1 registration chain.
+    pub delegate_count: u32,
     pub members: [MemberRegEntry; MAX_CHANNEL_MEMBERS],
 }
 
@@ -90,6 +96,8 @@ pub struct ChannelRegRecord {
 pub enum ChannelRegRecordError {
     #[error("member_count {0} out of range (must be 2..={MAX_CHANNEL_MEMBERS})")]
     MemberCountOutOfRange(u32),
+    #[error("member_count {0} + delegate_count {1} exceeds MAX_CHANNEL_MEMBERS ({MAX_CHANNEL_MEMBERS})")]
+    DelegateCountOutOfRange(u32, u32),
     #[error("active member {0} has a zero pk_g")]
     ZeroActivePkG(usize),
     #[error("active members {0} and {1} have equal pk_g (must be distinct)")]
@@ -112,17 +120,27 @@ impl ChannelRegRecord {
             ));
         }
         let mc = self.member_count as usize;
-        for i in 0..mc {
+        // Delegate account regions: members `0..mc`, delegates `mc..mc+dc`, padding `mc+dc..MAX`.
+        // Active = members + delegates; both must be nonzero + pairwise distinct (no shared-key
+        // forgery across the WHOLE active set). `member_count + delegate_count` must not exceed MAX.
+        let active = mc
+            .checked_add(self.delegate_count as usize)
+            .filter(|&a| a <= MAX_CHANNEL_MEMBERS)
+            .ok_or(ChannelRegRecordError::DelegateCountOutOfRange(
+                self.member_count,
+                self.delegate_count,
+            ))?;
+        for i in 0..active {
             if self.members[i].pk_g == Bytes32::default() {
                 return Err(ChannelRegRecordError::ZeroActivePkG(i));
             }
-            for j in (i + 1)..mc {
+            for j in (i + 1)..active {
                 if self.members[i].pk_g == self.members[j].pk_g {
                     return Err(ChannelRegRecordError::DuplicatePkG(i, j));
                 }
             }
         }
-        for i in mc..MAX_CHANNEL_MEMBERS {
+        for i in active..MAX_CHANNEL_MEMBERS {
             if self.members[i] != MemberRegEntry::default() {
                 return Err(ChannelRegRecordError::NonZeroPaddingSlot(i));
             }
@@ -139,9 +157,10 @@ impl ChannelRegRecord {
     /// R3 WORD-ALIGNED fixed-16 keccak preimage (native).
     ///
     /// Preimage u32-limb stream (each whole-word):
-    /// `[ prev(8), channel_id(1), bp_member_slot(1), member_count(1),
+    /// `[ prev(8), channel_id(1), bp_member_slot(1), member_count(1), delegate_count(1),
     ///    for i in 0..16: ( pk_g(8), pk_b(8), regev_pk_digest(8), recipient(5) ) ]`
-    /// Total = 8 + 1 + 1 + 1 + 16*(8+8+8+5) = 11 + 464 = 475 u32. Padding slots hash their zero
+    /// Total = 8 + 1 + 1 + 1 + 1 + 16*(8+8+8+5) = 12 + 464 = 476 u32. `delegate_count` (delegate
+    /// account) is a single u32 limb IMMEDIATELY AFTER `member_count`. Padding slots hash their zero
     /// values. `solidity_keccak256` treats each u32 as one big-endian 4-byte word, so this stream
     /// is byte-identical to the Solidity `abi.encodePacked` preimage in
     /// `IntmaxRollup.registerChannel` (verified by the differential test).
@@ -155,6 +174,7 @@ impl ChannelRegRecord {
         inputs.extend(self.channel_id.to_u32_vec()); // 1
         inputs.push(self.bp_member_slot); // 1
         inputs.push(self.member_count); // 1
+        inputs.push(self.delegate_count); // 1 (delegate account, immediately after member_count)
         for m in self.members.iter() {
             inputs.extend(m.pk_g.to_u32_vec()); // 8
             inputs.extend(m.pk_b.to_u32_vec()); // 8
@@ -168,7 +188,8 @@ impl ChannelRegRecord {
 
 /// Word count of the R3 registration preimage (excluding the keccak output): see
 /// [`ChannelRegRecord::hash_with_prev_hash`].
-pub const CHANNEL_REG_PREIMAGE_U32_LEN: usize = 8 + 1 + 1 + 1 + MAX_CHANNEL_MEMBERS * (8 + 8 + 8 + 5);
+pub const CHANNEL_REG_PREIMAGE_U32_LEN: usize =
+    8 + 1 + 1 + 1 + 1 + MAX_CHANNEL_MEMBERS * (8 + 8 + 8 + 5);
 
 impl MemberRegEntryTarget {
     /// The u32-limb stream for one member slot: pk_g(8) || pk_b(8) || regev_pk_digest(8) ||
@@ -197,6 +218,7 @@ pub fn channel_reg_hash_with_prev_hash_circuit<F, C, const D: usize>(
     channel_id: &ChannelIdTarget,
     bp_member_slot: Target,
     member_count: Target,
+    delegate_count: Target,
     members: &[MemberRegEntryTarget; MAX_CHANNEL_MEMBERS],
 ) -> Bytes32Target
 where
@@ -209,6 +231,7 @@ where
     inputs.extend(channel_id.to_vec()); // 1
     inputs.push(bp_member_slot); // 1
     inputs.push(member_count); // 1
+    inputs.push(delegate_count); // 1 (delegate account, immediately after member_count)
     for m in members.iter() {
         inputs.extend(m.to_u32_stream()); // 8 + 8 + 5
     }
@@ -267,6 +290,7 @@ mod tests {
             channel_id: ChannelId::new(7).unwrap(),
             bp_member_slot: 1,
             member_count,
+            delegate_count: 0,
             members,
         }
     }
@@ -309,9 +333,11 @@ mod tests {
     //
     // SECURITY: if these change, the Rust <-> Solidity encodings have diverged — DO NOT update
     // blindly; investigate the layout.
-    const PINNED_MC2: &str = "0xa0a5204098b9e8b2965fd58972d62331db02c366a6486d0d26f546fdaa764e1f";
-    const PINNED_MC8: &str = "0x0e6cd492a3a2ea889cd5f020fc3a1758f7260da5748fcf5644517e22695611a3";
-    const PINNED_MC16: &str = "0x164e28d07f1be6b57ef30418487a14c1173e5ab37de6fe02b86260d176ba725a";
+    // Re-pinned after the delegate-account `delegate_count` limb (= 0 in these vectors) was added
+    // to the reg-chain preimage IMMEDIATELY AFTER `member_count` (LEN 475 -> 476).
+    const PINNED_MC2: &str = "0x6b32a3c7994eff98d812534363219a621be57b4675141395944c0aaca5edcb5a";
+    const PINNED_MC8: &str = "0x7625aed1893502adbf63e376e94f1786eb797fa21c77c0a5101e501993c19fea";
+    const PINNED_MC16: &str = "0x6d34a215c0db7a3a400af3e960a231eb1cb0db520076dae2bfa76b6a154b9809";
 
     /// THE DE-RISK GATE (Rust side). Prints the three hashes (copy into the constants above + the
     /// Foundry test) and asserts they match the pinned constants.

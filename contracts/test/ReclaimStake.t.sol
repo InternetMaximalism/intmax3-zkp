@@ -229,6 +229,8 @@ contract ReclaimStakeTest is Test {
         rollup.registerChannel(
             uint32(vm.parseJsonUint(lc, string.concat(key, ".channel_id"))),
             uint8(vm.parseJsonUint(lc, string.concat(key, ".bp_member_slot"))),
+            // Delegate account Phase 1: fixtures are member-only (delegate_count = 0).
+            0,
             vm.parseJsonBytes32Array(lc, string.concat(key, ".member_pk_gs")),
             vm.parseJsonBytes32Array(lc, string.concat(key, ".member_pk_bs")),
             vm.parseJsonBytes32Array(lc, string.concat(key, ".regev_pk_digests")),

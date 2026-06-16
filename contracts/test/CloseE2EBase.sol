@@ -96,8 +96,10 @@ abstract contract CloseE2EBase is Test {
         bytes4 channelId = bytes4(uint32(vm.parseJsonUint(lifecycleJson, ".registration.channel_id")));
         return abi.encodePacked(
             type(ChannelSettlementManager).creationCode,
+            // Delegate account: `delegateCount_ = 0` (no delegates in this lifecycle fixture), placed
+            // 4th to match the constructor (channelId, bpSlot, bpPkG, delegateCount, ...).
             abi.encode(
-                channelId, bpSlot, hashes[bpSlot], CHALLENGE_PERIOD, SPECIAL_CLOSE_PENALTY,
+                channelId, bpSlot, hashes[bpSlot], uint8(0), CHALLENGE_PERIOD, SPECIAL_CLOSE_PENALTY,
                 INITIAL_BP_BOND, IChannelSettlementVerifier(settlementVerifierAddr),
                 IChannelRegistry(rollupAddr), bindings
             )
@@ -163,7 +165,7 @@ abstract contract CloseE2EBase is Test {
             bytes32[] memory pkBs = vm.parseJsonBytes32Array(lcJson, ".registration.member_pk_bs");
             bytes32[] memory regev = vm.parseJsonBytes32Array(lcJson, ".registration.regev_pk_digests");
             address[] memory recipients = vm.parseJsonAddressArray(lcJson, ".registration.recipients");
-            rollup_.registerChannel(channelId, bpSlot, sphincs, pkBs, regev, recipients);
+            rollup_.registerChannel(channelId, bpSlot, 0, sphincs, pkBs, regev, recipients);
         }
 
         manager_ = ChannelSettlementManager(

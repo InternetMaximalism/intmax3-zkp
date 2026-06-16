@@ -1,24 +1,34 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.24;
 
+/// @dev File-scope close-PI field bundle passed across the manager→verifier boundary as ONE
+/// calldata struct. Collapsing the 14 close-intent scalars into a single argument keeps the
+/// `verifyCloseIntent` external call under the via-IR stack-too-deep limit (the delegate-account
+/// change pushed the previously-positional 17-arg signature over). The field set + order mirror the
+/// Rust `CloseIntent` / close-PI vector exactly.
+struct CloseProofFields {
+    bytes4 channelId;
+    uint64 closeNonce;
+    uint64 finalEpoch;
+    uint64 finalSmallBlockNumber;
+    uint64 closeFreezeNonce;
+    bytes32 finalChannelStateDigest;
+    bytes32 finalBalanceStateH1;
+    uint256 channelFundAmount;
+    bytes32 channelFundIntmaxStateRoot;
+    bytes32 burnTxHash;
+    bytes32 closeWithdrawalDigest;
+    uint64 snapshotMediumBlockNumber;
+    uint64 finalStateVersion;
+    bytes32 finalSettledTxChain;
+    bytes32 memberSetCommitment;
+    /// Packed `(memberCount << 8) | delegateCount` (delegate account).
+    uint16 memberAndDelegateCount;
+}
+
 interface IChannelSettlementVerifier {
     function verifyCloseIntent(
-        bytes4 channelId,
-        uint64 closeNonce,
-        uint64 finalEpoch,
-        uint64 finalSmallBlockNumber,
-        uint64 closeFreezeNonce,
-        bytes32 finalChannelStateDigest,
-        bytes32 finalBalanceStateH1,
-        uint256 channelFundAmount,
-        bytes32 channelFundIntmaxStateRoot,
-        bytes32 burnTxHash,
-        bytes32 closeWithdrawalDigest,
-        uint64 snapshotMediumBlockNumber,
-        uint64 finalStateVersion,
-        bytes32 finalSettledTxChain,
-        bytes32 memberSetCommitment,
-        uint8 memberCount,
+        CloseProofFields calldata fields,
         bytes calldata proof
     ) external pure returns (bool);
 
@@ -358,6 +368,14 @@ contract ChannelSettlementManager {
     /// `ChannelRecord.member_count` (src/common/channel.rs).
     uint8 public immutable activeMemberCount;
 
+    /// @notice The number of DELEGATE participants (delegate account). Mirrors the Rust
+    /// `ChannelRecord.delegate_count` / `BalanceState.delegate_count`. Delegates do NOT co-sign and
+    /// are NOT part of `memberBindings`/`memberPkGs`/the IMCM commitment, but `delegateCount` is a
+    /// committed limb in the close-proof public inputs (H1 binds it immediately after
+    /// `memberCount`), so the manager must pin it to verify the close proof. Invariant:
+    /// `activeMemberCount + activeDelegateCount <= MAX_MEMBER_COUNT`.
+    uint8 public immutable activeDelegateCount;
+
     /// @notice The channel's registered member SPHINCS+ pubkey hashes in slot order, ZERO-padded to
     /// MAX_MEMBER_COUNT (D6 pad-to-MAX). Active slots (`< activeMemberCount`) are nonzero and
     /// pairwise-distinct; padding slots are zero. Mirrors the Rust
@@ -437,6 +455,7 @@ contract ChannelSettlementManager {
         bytes4 channelId_,
         uint8 bpMemberSlot_,
         bytes32 bpPkG_,
+        uint8 delegateCount_,
         uint64 challengePeriod_,
         uint256 specialClosePenalty_,
         uint256 initialBpBondCredits_,
@@ -470,6 +489,11 @@ contract ChannelSettlementManager {
         registry = registry_;
         channelStatus = ChannelLifecycleStatus.Active;
         activeMemberCount = uint8(memberBindings.length);
+        // Delegate account: members + delegates must fit in the fixed MAX_MEMBER_COUNT slots.
+        if (uint256(memberBindings.length) + uint256(delegateCount_) > MAX_MEMBER_COUNT) {
+            revert InvalidMemberCount();
+        }
+        activeDelegateCount = delegateCount_;
 
         for (uint256 i = 0; i < memberBindings.length; i++) {
             MemberBinding memory binding = memberBindings[i];
@@ -593,6 +617,28 @@ contract ChannelSettlementManager {
         }
 
         bytes32 closeIntentDigest = computeCloseIntentDigest(intent);
+        // Isolated frame for the 15-field PendingClose build (via-IR stack limit).
+        _storePendingClose(intent, closeIntentDigest);
+
+        emit CloseSubmitted(
+            closeIntentDigest,
+            intent.burnTxHash,
+            intent.closeNonce,
+            intent.finalEpoch,
+            intent.closeFreezeNonce,
+            intent.channelFundAmount,
+            pendingClose.challengeDeadline,
+            intent.finalStateVersion,
+            intent.finalSettledTxChain
+        );
+    }
+
+    /// @dev Isolated frame for the 15-field PendingClose construction (keeps `submitCloseIntent`
+    /// under the via-IR stack limit once the close path threads `delegateCount`).
+    function _storePendingClose(
+        CloseIntent calldata intent,
+        bytes32 closeIntentDigest
+    ) internal {
         pendingClose = PendingClose({
             active: true,
             closeNonce: intent.closeNonce,
@@ -611,18 +657,6 @@ contract ChannelSettlementManager {
             finalStateVersion: intent.finalStateVersion,
             finalSettledTxChain: intent.finalSettledTxChain
         });
-
-        emit CloseSubmitted(
-            closeIntentDigest,
-            intent.burnTxHash,
-            intent.closeNonce,
-            intent.finalEpoch,
-            intent.closeFreezeNonce,
-            intent.channelFundAmount,
-            pendingClose.challengeDeadline,
-            intent.finalStateVersion,
-            intent.finalSettledTxChain
-        );
     }
 
     function submitSpecialClose(
@@ -926,24 +960,31 @@ contract ChannelSettlementManager {
     function computeCloseIntentDigest(
         CloseIntent memory intent
     ) public view returns (bytes32) {
+        // Built in two concatenated chunks so via-IR can free the intermediate field slots
+        // (stack-too-deep otherwise after the close path threads delegateCount elsewhere). The byte
+        // stream is identical to a single abi.encodePacked of all limbs in order.
         return keccak256(
-            abi.encodePacked(
-                bytes4(0x494d4349),
-                channelId,
-                intent.closeNonce,
-                intent.finalEpoch,
-                intent.finalSmallBlockNumber,
-                intent.closeFreezeNonce,
-                intent.finalChannelStateDigest,
-                intent.finalBalanceStateH1,
-                channelId,
-                intent.channelFundAmount,
-                intent.channelFundIntmaxStateRoot,
-                intent.burnTxHash,
-                intent.closeWithdrawalDigest,
-                intent.snapshotMediumBlockNumber,
-                intent.finalStateVersion,
-                intent.finalSettledTxChain
+            bytes.concat(
+                abi.encodePacked(
+                    bytes4(0x494d4349),
+                    channelId,
+                    intent.closeNonce,
+                    intent.finalEpoch,
+                    intent.finalSmallBlockNumber,
+                    intent.closeFreezeNonce,
+                    intent.finalChannelStateDigest,
+                    intent.finalBalanceStateH1
+                ),
+                abi.encodePacked(
+                    channelId,
+                    intent.channelFundAmount,
+                    intent.channelFundIntmaxStateRoot,
+                    intent.burnTxHash,
+                    intent.closeWithdrawalDigest,
+                    intent.snapshotMediumBlockNumber,
+                    intent.finalStateVersion,
+                    intent.finalSettledTxChain
+                )
             )
         );
     }
@@ -970,32 +1011,41 @@ contract ChannelSettlementManager {
         bytes calldata proof
     ) internal view {
         // F4/F7 SECURITY: the close proof's in-circuit `memberSetCommitment` must equal this
-        // channel's registered member-set commitment, AND the close proof's `memberCount` limb
-        // must equal this channel's `activeMemberCount`, so a close can only finalize with the
-        // channel's registered SPHINCS+ members at the registered active count (no non-member-key
-        // substitution, no active/padding-boundary forgery). Both are part of the close-proof
-        // public inputs (closePIHash, 86 limbs).
-        if (
-            !verifier.verifyCloseIntent(
-                channelId,
-                intent.closeNonce,
-                intent.finalEpoch,
-                intent.finalSmallBlockNumber,
-                intent.closeFreezeNonce,
-                intent.finalChannelStateDigest,
-                intent.finalBalanceStateH1,
-                intent.channelFundAmount,
-                intent.channelFundIntmaxStateRoot,
-                intent.burnTxHash,
-                intent.closeWithdrawalDigest,
-                intent.snapshotMediumBlockNumber,
-                intent.finalStateVersion,
-                intent.finalSettledTxChain,
-                registeredMemberSetCommitment(),
-                activeMemberCount,
-                proof
-            )
-        ) revert InvalidCloseProof();
+        // channel's registered member-set commitment, AND the close proof's `memberCount` /
+        // `delegateCount` limbs must equal this channel's `activeMemberCount` / `activeDelegateCount`,
+        // so a close can only finalize with the channel's registered SPHINCS+ members at the
+        // registered member/delegate split (no non-member-key substitution, no active/padding- or
+        // member/delegate-boundary forgery). All are part of the close-proof public inputs
+        // (closePIHash, 87 limbs incl. the appended delegateCount).
+        if (!_runCloseVerify(intent, proof)) revert InvalidCloseProof();
+    }
+
+    /// @dev Isolated frame for the 17-arg `verifyCloseIntent` marshaling (keeps `_checkCloseProof`
+    /// and `submitCloseIntent` under the via-IR stack limit once `delegateCount` is appended).
+    function _runCloseVerify(
+        CloseIntent calldata intent,
+        bytes calldata proof
+    ) internal view returns (bool) {
+        CloseProofFields memory fields = CloseProofFields({
+            channelId: channelId,
+            closeNonce: intent.closeNonce,
+            finalEpoch: intent.finalEpoch,
+            finalSmallBlockNumber: intent.finalSmallBlockNumber,
+            closeFreezeNonce: intent.closeFreezeNonce,
+            finalChannelStateDigest: intent.finalChannelStateDigest,
+            finalBalanceStateH1: intent.finalBalanceStateH1,
+            channelFundAmount: intent.channelFundAmount,
+            channelFundIntmaxStateRoot: intent.channelFundIntmaxStateRoot,
+            burnTxHash: intent.burnTxHash,
+            closeWithdrawalDigest: intent.closeWithdrawalDigest,
+            snapshotMediumBlockNumber: intent.snapshotMediumBlockNumber,
+            finalStateVersion: intent.finalStateVersion,
+            finalSettledTxChain: intent.finalSettledTxChain,
+            memberSetCommitment: registeredMemberSetCommitment(),
+            // Delegate account: pack the two registered counts into the uint16 the verifier expects.
+            memberAndDelegateCount: (uint16(activeMemberCount) << 8) | uint16(activeDelegateCount)
+        });
+        return verifier.verifyCloseIntent(fields, proof);
     }
 
     /// @dev Challenge ordering: lexicographic strict `(finalEpoch, finalStateVersion)`.

@@ -139,6 +139,7 @@ mod tests {
             channel_id: ChannelId::new(channel_id as u64).unwrap(),
             bp_member_slot: 0,
             member_count,
+            delegate_count: 0,
             members,
         }
     }

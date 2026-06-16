@@ -88,9 +88,13 @@ pub struct ChannelClosePublicInputsTarget {
     /// keys and matched on L1 against the channel's registered member set.
     pub member_set_commitment: Bytes32Target,
     /// D6 (pad-to-MAX): number of ACTIVE members, range-checked `< MAX_CHANNEL_MEMBERS+1` and used
-    /// to gate per-slot SPHINCS+ verification and the member_set_commitment select. Single limb,
-    /// appended at the END of the close PI vector.
+    /// to gate per-slot SPHINCS+ verification and the member_set_commitment select. Single limb.
     pub member_count: Target,
+    /// Delegate account: number of DELEGATE participants. Single limb, appended at the END of the
+    /// close PI vector (right after `member_count`). Anchored in-circuit ONLY into the H1 recompute
+    /// (immediately after `member_count` in the IMBS preimage); delegates do NOT enter the
+    /// member_set_commitment (they do not co-sign).
+    pub delegate_count: Target,
 }
 
 impl ChannelClosePublicInputsTarget {
@@ -124,6 +128,7 @@ impl ChannelClosePublicInputsTarget {
             final_settled_tx_chain: Bytes32Target::new(builder, true),
             member_set_commitment: Bytes32Target::new(builder, true),
             member_count: u32_limb(builder),
+            delegate_count: u32_limb(builder),
         }
     }
 
@@ -146,6 +151,7 @@ impl ChannelClosePublicInputsTarget {
             self.final_settled_tx_chain.to_vec(),
             self.member_set_commitment.to_vec(),
             vec![self.member_count],
+            vec![self.delegate_count],
         ]
         .concat();
         debug_assert_eq!(v.len(), CHANNEL_CLOSE_PUBLIC_INPUTS_LEN);
@@ -194,6 +200,8 @@ impl ChannelClosePublicInputsTarget {
             Bytes32Target::from_slice(&values[cursor..cursor + BYTES32_LEN]);
         cursor += BYTES32_LEN;
         let member_count = values[cursor];
+        cursor += 1;
+        let delegate_count = values[cursor];
         Self {
             channel_id,
             close_nonce,
@@ -212,6 +220,7 @@ impl ChannelClosePublicInputsTarget {
             final_settled_tx_chain,
             member_set_commitment,
             member_count,
+            delegate_count,
         }
     }
 
@@ -257,6 +266,12 @@ impl ChannelClosePublicInputsTarget {
             .set_witness(witness, value.member_set_commitment);
         witness
             .set_target(self.member_count, F::from_canonical_u8(value.member_count))
+            .unwrap();
+        witness
+            .set_target(
+                self.delegate_count,
+                F::from_canonical_u8(value.delegate_count),
+            )
             .unwrap();
     }
 }
@@ -437,16 +452,19 @@ where
 
         // ── (b) H1 in-circuit recompute (IMBS, detail2 §C-2 + D3) ──────────
         //
-        // SECURITY: this anchors `final_settled_tx_chain`, `final_state_version` AND `member_count`
-        // as the unique values inside the signed H1 — the same PI targets feed the H1 preimage,
-        // the IMCH/IMCI tails AND the balance-proof equality below, so no two of those bindings can
-        // diverge. Preimage limb order matches `BalanceState::h1()` exactly (pad-to-MAX D6):
-        // [IMBS, channel_id, member_count, d_0..d_{MAX-1}, settled_tx_chain,
-        //  split_u64(state_version), pending_adds[0..MAX]].
+        // SECURITY: this anchors `final_settled_tx_chain`, `final_state_version`, `member_count` AND
+        // `delegate_count` as the unique values inside the signed H1 — the same PI targets feed the
+        // H1 preimage, the IMCH/IMCI tails AND the balance-proof equality below, so no two of those
+        // bindings can diverge. Preimage limb order matches `BalanceState::h1()` exactly (pad-to-MAX
+        // D6 + delegate account):
+        // [IMBS, channel_id, member_count, delegate_count, d_0..d_{MAX-1}, settled_tx_chain,
+        //  split_u64(state_version), pending_adds[0..MAX]]. `delegate_count` is the single u32 limb
+        // IMMEDIATELY AFTER `member_count`, byte-identical to the off-chain `BalanceState::h1`.
         let h1_inputs = [
             vec![balance_state_domain],
             public_inputs.channel_id.to_vec(),
             vec![public_inputs.member_count],
+            vec![public_inputs.delegate_count],
             enc_balance_digests
                 .iter()
                 .flat_map(Bytes32Target::to_vec)
@@ -942,6 +960,7 @@ mod tests {
             balance_state: BalanceState {
                 channel_id: id,
                 member_count: member_count as u8,
+                delegate_count: 0,
                 enc_balances: BalanceState::pad_enc_balances(&enc),
                 settled_tx_chain,
                 state_version: 9,
@@ -1174,7 +1193,7 @@ mod tests {
         assert_eq!(
             expected.len(),
             CHANNEL_CLOSE_PUBLIC_INPUTS_LEN,
-            "close PI is 86 limbs (incl. member_count, D6)"
+            "close PI is 87 limbs (incl. member_count + delegate_count)"
         );
     }
 

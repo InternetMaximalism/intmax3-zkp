@@ -63,7 +63,7 @@ contract DeployClose is Script {
         bytes32[] memory pkBs = vm.parseJsonBytes32Array(lcJson, ".registration.member_pk_bs");
         bytes32[] memory regev = vm.parseJsonBytes32Array(lcJson, ".registration.regev_pk_digests");
         address[] memory recipients = vm.parseJsonAddressArray(lcJson, ".registration.recipients");
-        rollup.registerChannel(channelId, bpSlot, sphincs, pkBs, regev, recipients);
+        rollup.registerChannel(channelId, bpSlot, 0, sphincs, pkBs, regev, recipients);
 
         // Manager member bindings. SECURITY/SCOPE: the close-form member-set commitment binds only
         // the SPHINCS+ pubkey hashes (not recipients), so we can route member slot 0's payout
@@ -78,7 +78,7 @@ contract DeployClose is Script {
             bindings[i] = ChannelSettlementManager.MemberBinding({pkG: sphincs[i], recipient: r});
         }
         ChannelSettlementManager manager = new ChannelSettlementManager(
-            bytes4(channelId), bpSlot, sphincs[bpSlot], CHALLENGE_PERIOD, SPECIAL_CLOSE_PENALTY,
+            bytes4(channelId), bpSlot, sphincs[bpSlot], 0, CHALLENGE_PERIOD, SPECIAL_CLOSE_PENALTY,
             INITIAL_BP_BOND, IChannelSettlementVerifier(address(sv)), IChannelRegistry(address(rollup)), bindings
         );
 

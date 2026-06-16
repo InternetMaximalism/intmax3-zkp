@@ -94,7 +94,12 @@ pub enum ChannelRegStepError {
 /// `0..member_count`), with the remaining slots empty. Mirrors the in-circuit root computation.
 pub fn member_pubkeys_root_for(record: &ChannelRegRecord) -> PoseidonHashOut {
     let mut tree = MemberTree::init();
-    for i in 0..(record.member_count as usize) {
+    // Delegate account: the member tree covers ALL active participants — members
+    // (`0..member_count`) AND delegates (`member_count..member_count+delegate_count`). Delegates
+    // carry a real `MemberLeaf` identity so they can send and withdraw. Phase 1 `delegate_count = 0`
+    // makes this identical to the legacy `0..member_count` loop.
+    let active = record.member_count as usize + record.delegate_count as usize;
+    for i in 0..active {
         let leaf = MemberLeaf {
             pk_g: record.members[i].pk_g.reduce_to_hash_out(),
             pk_b: record.members[i].pk_b.reduce_to_hash_out(),
@@ -228,6 +233,9 @@ pub struct ChannelRegStepTarget<const D: usize> {
     pub channel_id: ChannelIdTarget,
     pub bp_member_slot: Target,
     pub member_count: Target,
+    /// Number of DELEGATE participants (delegate account). Active participants (members +
+    /// delegates) occupy slots `0..member_count+delegate_count`; padding is the rest.
+    pub delegate_count: Target,
     /// The 16 members' Poseidon identity components, witnessed ONCE and reused for both the keccak
     /// preimage and the Poseidon member-tree leaves (R2 cross-binding).
     pub member_pk_ges: [PoseidonHashOutTarget; MAX_CHANNEL_MEMBERS],
@@ -266,6 +274,9 @@ impl<const D: usize> ChannelRegStepTarget<D> {
         builder.range_check(bp_member_slot, 32);
         let member_count = builder.add_virtual_target();
         builder.range_check(member_count, 32);
+        // Delegate account: number of delegates registered after the members.
+        let delegate_count = builder.add_virtual_target();
+        builder.range_check(delegate_count, 32);
 
         // -- Member identity components (witnessed once; R2 cross-binding) --
         let member_pk_ges: [PoseidonHashOutTarget; MAX_CHANNEL_MEMBERS] =
@@ -359,12 +370,23 @@ impl<const D: usize> ChannelRegStepTarget<D> {
         let slot_diff = builder.sub(mc_minus_one, bp_member_slot);
         builder.range_check(slot_diff, 4);
 
-        // ── is_active thermometer mask: is_active[i] = (i < member_count) ──
-        // member_count is a single threshold, so the mask is monotonic non-increasing by
+        // ── delegate account: active = member_count + delegate_count, with active ∈ [2, 16] ──
+        // SECURITY: `active <= MAX_CHANNEL_MEMBERS` (no over-allocation past the fixed 16 slots);
+        // `delegate_count >= 0` so `active >= member_count >= 2` holds automatically. The
+        // thermometer mask below uses `active` as the threshold, so delegate slots
+        // (`member_count..active`) are treated as ACTIVE (non-forced-zero) exactly like members and
+        // padding only begins at `active`. Phase 1 `delegate_count = 0` makes `active == member_count`,
+        // so the mask is byte-for-byte the legacy one.
+        let active_count = builder.add(member_count, delegate_count);
+        let max_minus_active = builder.sub(max, active_count);
+        builder.range_check(max_minus_active, 4); // active in [member_count, 16] ⊆ [0,15] above 16-mc
+
+        // ── is_active thermometer mask: is_active[i] = (i < active_count) ──
+        // `active_count` is a single threshold, so the mask is monotonic non-increasing by
         // construction; `lt_const_threshold` pins each bit uniquely against the range-checked
-        // member_count.
+        // `active_count` (range [2, MAX_CHANNEL_MEMBERS]).
         let is_active: Vec<BoolTarget> = (0..MAX_CHANNEL_MEMBERS)
-            .map(|i| lt_const_threshold(builder, i, member_count))
+            .map(|i| lt_const_threshold(builder, i, active_count))
             .collect();
 
         // ── Build MemberLeaf targets + member_pubkeys_root (Poseidon) ──
@@ -401,6 +423,7 @@ impl<const D: usize> ChannelRegStepTarget<D> {
             &channel_id,
             bp_member_slot,
             member_count,
+            delegate_count,
             &members_reg_entries,
         );
 
@@ -451,6 +474,7 @@ impl<const D: usize> ChannelRegStepTarget<D> {
             channel_id,
             bp_member_slot,
             member_count,
+            delegate_count,
             member_pk_ges,
             member_pk_bs,
             member_regev_pk_digests,
@@ -506,6 +530,10 @@ impl<const D: usize> ChannelRegStepTarget<D> {
         witness.set_target(
             self.member_count,
             F::from_canonical_u32(value.record.member_count),
+        );
+        witness.set_target(
+            self.delegate_count,
+            F::from_canonical_u32(value.record.delegate_count),
         );
         // Members: split each 32-byte digest to its reduced PoseidonHashOut (the witnessed value).
         for i in 0..MAX_CHANNEL_MEMBERS {
@@ -684,6 +712,7 @@ mod tests {
             channel_id: ChannelId::new(channel_id as u64).unwrap(),
             bp_member_slot: 0,
             member_count,
+            delegate_count: 0,
             members,
         }
     }

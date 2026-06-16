@@ -383,6 +383,8 @@ pub fn build_record(
     let mut record = ChannelRecord {
         channel_id: ChannelId::new(channel_id as u64).map_err(|e| WalletError(format!("{e:?}")))?,
         member_count: n as u8,
+        // Phase 1 delegate account: wallet builds member-only channels (no delegates yet).
+        delegate_count: 0,
         member_pk_gs: hashes,
         member_pubkeys_root: Bytes32::default(),
         bp_member_slot,
@@ -418,6 +420,7 @@ pub fn assemble_genesis_state(
         balance_state: BalanceState {
             channel_id: record.channel_id,
             member_count: record.member_count,
+            delegate_count: record.delegate_count,
             enc_balances: BalanceState::pad_enc_balances(enc_balances_active),
             settled_tx_chain: Bytes32::default(),
             state_version: 0,

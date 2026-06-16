@@ -166,6 +166,7 @@ fn channel_record(
     ChannelRecord {
         channel_id,
         member_count: E2E_ACTIVE as u8,
+        delegate_count: 0,
         member_pk_gs: pad_hashes(&active_member_pubkey_hashes),
         member_pubkeys_root: bytes32_word(100 + channel_id.as_u64() as u32),
         bp_member_slot,
@@ -237,6 +238,7 @@ fn genesis_state(
         balance_state: BalanceState {
             channel_id: record.channel_id,
             member_count: E2E_ACTIVE as u8,
+            delegate_count: 0,
             enc_balances: BalanceState::pad_enc_balances(&[ct0, ct1, ct2]),
             settled_tx_chain: Bytes32::default(),
             state_version: 0,
@@ -351,6 +353,7 @@ fn build_flow() -> FlowFixture {
         balance_state: BalanceState {
             channel_id: a_id,
             member_count: E2E_ACTIVE as u8,
+            delegate_count: 0,
             enc_balances: BalanceState::pad_enc_balances(&[
                 alice_after_tx.0.clone(),
                 bob_after,
@@ -427,6 +430,7 @@ fn build_flow() -> FlowFixture {
         balance_state: BalanceState {
             channel_id: a_id,
             member_count: E2E_ACTIVE as u8,
+            delegate_count: 0,
             enc_balances: BalanceState::pad_enc_balances(&[
                 alice_after_send.0.clone(),
                 a1.balance_state.enc_balances[1].clone(),

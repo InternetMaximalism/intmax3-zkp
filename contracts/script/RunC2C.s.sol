@@ -30,7 +30,7 @@ contract RunC2C is Script {
         bytes32[] memory regev = vm.parseJsonBytes32Array(lc, string.concat(key, ".regev_pk_digests"));
         address[] memory recipients = vm.parseJsonAddressArray(lc, string.concat(key, ".recipients"));
         vm.startBroadcast();
-        _rollup().registerChannel(channelId, bpSlot, sphincs, pkBs, regev, recipients);
+        _rollup().registerChannel(channelId, bpSlot, 0, sphincs, pkBs, regev, recipients);
         vm.stopBroadcast();
         console2.log("registerChannel OK; pendingChannelRegHashChain now folded for", key);
     }

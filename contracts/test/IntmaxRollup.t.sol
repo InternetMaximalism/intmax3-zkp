@@ -439,12 +439,15 @@ contract IntmaxRollupTest is Test {
     /// validity circuit would bind a different member set than the contract recorded.
     function test_channelRegPreimageDifferential() public {
         // Pinned constants — identical to the Rust test. DO NOT edit without regenerating both.
+        // Re-pinned after the delegate-account `delegateCount` limb (= 0 in these vectors) was added
+        // to the reg-chain preimage IMMEDIATELY AFTER `memberCount` (LEN 475 -> 476); these match the
+        // Rust `PINNED_MC*` in src/common/channel_registration.rs (Rust<->Solidity byte-identical).
         bytes32 pinnedMc2 =
-            0xa0a5204098b9e8b2965fd58972d62331db02c366a6486d0d26f546fdaa764e1f;
+            0x6b32a3c7994eff98d812534363219a621be57b4675141395944c0aaca5edcb5a;
         bytes32 pinnedMc8 =
-            0x0e6cd492a3a2ea889cd5f020fc3a1758f7260da5748fcf5644517e22695611a3;
+            0x7625aed1893502adbf63e376e94f1786eb797fa21c77c0a5101e501993c19fea;
         bytes32 pinnedMc16 =
-            0x164e28d07f1be6b57ef30418487a14c1173e5ab37de6fe02b86260d176ba725a;
+            0x6d34a215c0db7a3a400af3e960a231eb1cb0db520076dae2bfa76b6a154b9809;
 
         assertEq(_registerChannelDiff(2), pinnedMc2, "MC2 preimage hash drifted");
         // Each call starts from a fresh rollup so the pending chain seed is always bytes32(0).
@@ -476,7 +479,7 @@ contract IntmaxRollupTest is Test {
         ) = _diffMembers(memberCount);
 
         vm.recordLogs();
-        fresh.registerChannel(7, 1, sphincs, pkBs, regev, recipients);
+        fresh.registerChannel(7, 1, 0, sphincs, pkBs, regev, recipients);
         Vm.Log[] memory logs = vm.getRecordedLogs();
 
         // ChannelRegistered(uint64 indexed, uint32 indexed, uint8, bytes32[], bytes32[], address[],
@@ -532,7 +535,7 @@ contract IntmaxRollupTest is Test {
                 address[] memory recipients
             ) = _diffMembers(memberCount);
             uint32 channelId = 7;
-            fresh.registerChannel(channelId, 1, sphincs, pkBs, regev, recipients);
+            fresh.registerChannel(channelId, 1, 0, sphincs, pkBs, regev, recipients);
 
             // Pad the active hashes to the fixed-16 form the verifier consumes.
             bytes32[16] memory padded;
@@ -567,11 +570,11 @@ contract IntmaxRollupTest is Test {
             bytes32[] memory regev,
             address[] memory recipients
         ) = _diffMembers(3);
-        fresh.registerChannel(7, 1, sphincs, pkBs, regev, recipients);
+        fresh.registerChannel(7, 1, 0, sphincs, pkBs, regev, recipients);
 
         // Same channel id, second time: reverts regardless of member set.
-        vm.expectRevert(bytes("channel already registered"));
-        fresh.registerChannel(7, 1, sphincs, pkBs, regev, recipients);
+        vm.expectRevert(IntmaxRollup.ChannelAlreadyRegistered.selector);
+        fresh.registerChannel(7, 1, 0, sphincs, pkBs, regev, recipients);
 
         // A DIFFERENT member set for the same channel id also reverts.
         (
@@ -580,11 +583,11 @@ contract IntmaxRollupTest is Test {
             bytes32[] memory r2,
             address[] memory rc2
         ) = _diffMembers(4);
-        vm.expectRevert(bytes("channel already registered"));
-        fresh.registerChannel(7, 0, s2, pkBs2, r2, rc2);
+        vm.expectRevert(IntmaxRollup.ChannelAlreadyRegistered.selector);
+        fresh.registerChannel(7, 0, 0, s2, pkBs2, r2, rc2);
 
         // A different channel id still succeeds.
-        fresh.registerChannel(8, 1, sphincs, pkBs, regev, recipients);
+        fresh.registerChannel(8, 1, 0, sphincs, pkBs, regev, recipients);
         assertTrue(fresh.channelMemberSetCommitment(8) != bytes32(0));
     }
 

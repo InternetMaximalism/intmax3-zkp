@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.24;
 
-import {IChannelSettlementVerifier} from "./ChannelSettlementManager.sol";
+import {IChannelSettlementVerifier, CloseProofFields} from "./ChannelSettlementManager.sol";
 
 /// @dev Stub proof verifier: each `verify*` recomputes the expected public-input hash and
 /// matches it against the supplied "proof" bytes. The `*PIHash` preimages are byte-exact
@@ -44,45 +44,14 @@ contract ChannelSettlementVerifier is IChannelSettlementVerifier {
     uint256 internal constant MAX_CHANNEL_MEMBERS = 16;
 
     function verifyCloseIntent(
-        bytes4 channelId,
-        uint64 closeNonce,
-        uint64 finalEpoch,
-        uint64 finalSmallBlockNumber,
-        uint64 closeFreezeNonce,
-        bytes32 finalChannelStateDigest,
-        bytes32 finalBalanceStateH1,
-        uint256 channelFundAmount,
-        bytes32 channelFundIntmaxStateRoot,
-        bytes32 burnTxHash,
-        bytes32 closeWithdrawalDigest,
-        uint64 snapshotMediumBlockNumber,
-        uint64 finalStateVersion,
-        bytes32 finalSettledTxChain,
-        bytes32 memberSetCommitment,
-        uint8 memberCount,
+        CloseProofFields calldata fields,
         bytes calldata proof
     ) external pure returns (bool) {
-        return _matches(
-            proof,
-            closePIHash(
-                channelId,
-                closeNonce,
-                finalEpoch,
-                finalSmallBlockNumber,
-                closeFreezeNonce,
-                finalChannelStateDigest,
-                finalBalanceStateH1,
-                channelFundAmount,
-                channelFundIntmaxStateRoot,
-                burnTxHash,
-                closeWithdrawalDigest,
-                snapshotMediumBlockNumber,
-                finalStateVersion,
-                finalSettledTxChain,
-                memberSetCommitment,
-                memberCount
-            )
-        );
+        // Compute the PI hash first, then match — keeps `proof` from being live across the
+        // closePIHash marshaling (via-IR stack limit). `closePIHash` takes the whole struct (members
+        // read by offset), so no 16 loose stack scalars are marshaled at the call site.
+        bytes32 piHash = closePIHash(fields);
+        return _matches(proof, piHash);
     }
 
     function verifySpecialClose(
@@ -205,79 +174,78 @@ contract ChannelSettlementVerifier is IChannelSettlementVerifier {
         );
     }
 
-    /// @dev OUTER keccak mirror of the 86-limb `ChannelClosePublicInputs.to_u64_vec()`
-    /// (src/circuits/channel/close_pis.rs, post-F4/D6): the legacy 67 limbs — channelId(1),
-    /// closeNonce(2), finalEpoch(2), finalSmallBlockNumber(2), closeFreezeNonce(2),
+    /// @dev OUTER keccak mirror of the 87-limb `ChannelClosePublicInputs.to_u64_vec()`
+    /// (src/circuits/channel/close_pis.rs, post-F4/D6 + delegate account): the legacy 67 limbs —
+    /// channelId(1), closeNonce(2), finalEpoch(2), finalSmallBlockNumber(2), closeFreezeNonce(2),
     /// finalChannelStateDigest(8), finalBalanceStateH1(8), channelFundAmount(8),
     /// channelFundIntmaxStateRoot(8), burnTxHash(8), closeWithdrawalDigest(8),
     /// closeIntentDigest(8), snapshotMediumBlockNumber(2) — followed by
-    /// split_u64(finalStateVersion)(2), finalSettledTxChain(8), memberSetCommitment(8) and the
-    /// appended memberCount(1) at the very END. Each limb is one big-endian u32 word, so
-    /// `abi.encodePacked` of the typed fields (memberCount as uint32) reproduces the byte stream
-    /// exactly. Total = 86 limbs.
+    /// split_u64(finalStateVersion)(2), finalSettledTxChain(8), memberSetCommitment(8), the
+    /// appended memberCount(1) and then delegateCount(1) at the very END. Each limb is one
+    /// big-endian u32 word, so `abi.encodePacked` of the typed fields (memberCount/delegateCount as
+    /// uint32) reproduces the byte stream exactly. Total = 87 limbs.
     ///
     /// The INNER keccak (`closeIntentDigest`) mirrors the Rust IMCI preimage
     /// (`CloseIntent::signing_digest()`, src/common/channel.rs) including the
     /// `channel_fund_snapshot.channel_id` slot (second `channelId`) and the appended
     /// finalStateVersion / finalSettledTxChain tail (detail2 §C-8). It is NOT member-bearing, so
     /// it is byte-for-byte unchanged by F4/D6 (the shared close-intent vector is preserved).
-    function closePIHash(
-        bytes4 channelId,
-        uint64 closeNonce,
-        uint64 finalEpoch,
-        uint64 finalSmallBlockNumber,
-        uint64 closeFreezeNonce,
-        bytes32 finalChannelStateDigest,
-        bytes32 finalBalanceStateH1,
-        uint256 channelFundAmount,
-        bytes32 channelFundIntmaxStateRoot,
-        bytes32 burnTxHash,
-        bytes32 closeWithdrawalDigest,
-        uint64 snapshotMediumBlockNumber,
-        uint64 finalStateVersion,
-        bytes32 finalSettledTxChain,
-        bytes32 memberSetCommitment,
-        uint8 memberCount
-    ) public pure returns (bytes32) {
+    /// Delegate account / via-IR: takes the `CloseProofFields` struct (memory) rather than 16 loose
+    /// scalars. Passing one struct pointer (members read by `mload`) instead of marshaling 16
+    /// stack arguments is what keeps every caller — and this function's own two keccak encodes —
+    /// within the via-IR 16-slot stack budget once the trailing limb count grew from 1
+    /// (`memberCount`) to 2 (`memberCount`, `delegateCount`). `fields.memberAndDelegateCount` is the
+    /// packed `(memberCount << 8) | delegateCount` (see verifyCloseIntent).
+    function closePIHash(CloseProofFields memory fields) public pure returns (bytes32) {
         bytes32 closeIntentDigest = keccak256(
             abi.encodePacked(
                 bytes4(CLOSE_INTENT_DOMAIN),
-                channelId,
-                closeNonce,
-                finalEpoch,
-                finalSmallBlockNumber,
-                closeFreezeNonce,
-                finalChannelStateDigest,
-                finalBalanceStateH1,
-                channelId,
-                channelFundAmount,
-                channelFundIntmaxStateRoot,
-                burnTxHash,
-                closeWithdrawalDigest,
-                snapshotMediumBlockNumber,
-                finalStateVersion,
-                finalSettledTxChain
+                fields.channelId,
+                fields.closeNonce,
+                fields.finalEpoch,
+                fields.finalSmallBlockNumber,
+                fields.closeFreezeNonce,
+                fields.finalChannelStateDigest,
+                fields.finalBalanceStateH1,
+                fields.channelId,
+                fields.channelFundAmount,
+                fields.channelFundIntmaxStateRoot,
+                fields.burnTxHash,
+                fields.closeWithdrawalDigest,
+                fields.snapshotMediumBlockNumber,
+                fields.finalStateVersion,
+                fields.finalSettledTxChain
             )
+        );
+        // Outer 87-limb preimage. The heavy field marshaling is a SINGLE 16-item `abi.encodePacked`
+        // into `pre`, then the two count limbs are appended in a TINY second encode where only
+        // `pre` + the packed count are live. The trailing limbs are memberCount(1) then
+        // delegateCount(1), each a u32 limb unpacked from `memberAndDelegateCount` — byte-identical
+        // to the Rust `ChannelClosePublicInputs.to_u64_vec()` tail. The result equals a single
+        // abi.encodePacked of all 87 limbs in order.
+        bytes memory pre = abi.encodePacked(
+            fields.channelId,
+            fields.closeNonce,
+            fields.finalEpoch,
+            fields.finalSmallBlockNumber,
+            fields.closeFreezeNonce,
+            fields.finalChannelStateDigest,
+            fields.finalBalanceStateH1,
+            fields.channelFundAmount,
+            fields.channelFundIntmaxStateRoot,
+            fields.burnTxHash,
+            fields.closeWithdrawalDigest,
+            closeIntentDigest,
+            fields.snapshotMediumBlockNumber,
+            fields.finalStateVersion,
+            fields.finalSettledTxChain,
+            fields.memberSetCommitment
         );
         return keccak256(
             abi.encodePacked(
-                channelId,
-                closeNonce,
-                finalEpoch,
-                finalSmallBlockNumber,
-                closeFreezeNonce,
-                finalChannelStateDigest,
-                finalBalanceStateH1,
-                channelFundAmount,
-                channelFundIntmaxStateRoot,
-                burnTxHash,
-                closeWithdrawalDigest,
-                closeIntentDigest,
-                snapshotMediumBlockNumber,
-                finalStateVersion,
-                finalSettledTxChain,
-                memberSetCommitment,
-                uint32(memberCount)
+                pre,
+                uint32(fields.memberAndDelegateCount >> 8),   // memberCount
+                uint32(fields.memberAndDelegateCount & 0xff)  // delegateCount
             )
         );
     }

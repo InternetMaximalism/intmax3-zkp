@@ -52,6 +52,17 @@ pub struct BalanceState {
     /// the active/padding split is fixed by the same all-member signatures that bind the balances;
     /// a state could not silently re-interpret a padding slot as active or vice-versa.
     pub member_count: u8,
+    /// Number of DELEGATE participants (send/receive/withdraw, but NOT co-signing the N-of-N
+    /// state). Delegates occupy the contiguous slot region
+    /// `member_count..member_count+delegate_count`; slots `member_count+delegate_count..MAX` are
+    /// padding. Invariant: `member_count + delegate_count <= MAX_CHANNEL_MEMBERS`.
+    ///
+    /// SECURITY (delegate account, Phase 1): `delegate_count` is part of the H1 preimage (see
+    /// [`Self::h1`]) IMMEDIATELY AFTER `member_count`, so the member/delegate/padding split is fixed
+    /// by the same all-member signatures that bind the balances. A state could not silently
+    /// re-interpret a delegate slot as a member (or vice-versa) or a padding slot as a delegate.
+    /// Delegate slots are ACTIVE balance slots (non-padding ciphertexts) exactly like member slots.
+    pub delegate_count: u8,
     /// One balance ciphertext per slot, in member slot order. Slots `>= member_count` are
     /// `RegevCiphertext::padding()`.
     pub enc_balances: [RegevCiphertext; MAX_CHANNEL_MEMBERS],
@@ -87,11 +98,13 @@ impl BalanceState {
     }
 
     /// H1 (detail2 §C-2 + D3, pad-to-MAX deviation D6): keccak over
-    /// `[BALANCE_STATE_DOMAIN, channel_id, member_count, d_0, …, d_{MAX-1}, settled_tx_chain,
-    /// split_u64(state_version), pending_adds[0..MAX]]` where `d_i = enc_balances[i].digest()`.
+    /// `[BALANCE_STATE_DOMAIN, channel_id, member_count, delegate_count, d_0, …, d_{MAX-1},
+    /// settled_tx_chain, split_u64(state_version), pending_adds[0..MAX]]` where
+    /// `d_i = enc_balances[i].digest()`.
     ///
     /// PREIMAGE (exact, one u32 word per limb): `member_count` is placed as a single u32 limb
-    /// RIGHT AFTER `channel_id` (before the ciphertext digests); ALL `MAX_CHANNEL_MEMBERS`
+    /// RIGHT AFTER `channel_id`, then `delegate_count` as a single u32 limb RIGHT AFTER
+    /// `member_count` (both before the ciphertext digests); ALL `MAX_CHANNEL_MEMBERS`
     /// ciphertext digests and pending-add counters are hashed (padding slots use
     /// `RegevCiphertext::padding()` digests and 0 counters). This must stay byte-identical to the
     /// in-circuit recompute in `circuits::channel::close_circuit` and to the L1 mirror.
@@ -103,6 +116,9 @@ impl BalanceState {
         let mut words = vec![BALANCE_STATE_DOMAIN];
         words.extend(self.channel_id.to_u32_vec());
         words.push(self.member_count as u32);
+        // delegate_count is committed as a single u32 limb IMMEDIATELY AFTER member_count, fixing
+        // the member/delegate/padding region split under the member signatures (delegate account).
+        words.push(self.delegate_count as u32);
         for ct in &self.enc_balances {
             words.extend(ct.digest().to_u32_vec());
         }
@@ -124,18 +140,34 @@ impl BalanceState {
                 "member_count {count} out of range (must be 2..={MAX_CHANNEL_MEMBERS})"
             )));
         }
+        // Delegate account regions: members occupy `0..member_count`, delegates occupy
+        // `member_count..member_count+delegate_count`, padding occupies
+        // `member_count+delegate_count..MAX`. Active = members + delegates. `delegate_count` may be
+        // 0; `member_count + delegate_count` must not exceed MAX (no overflow / over-allocation).
+        let delegate_count = self.delegate_count as usize;
+        let active = count
+            .checked_add(delegate_count)
+            .filter(|&a| a <= MAX_CHANNEL_MEMBERS)
+            .ok_or_else(|| {
+                ChannelError::InvalidBalanceState(format!(
+                    "member_count {count} + delegate_count {delegate_count} exceeds \
+                     MAX_CHANNEL_MEMBERS = {MAX_CHANNEL_MEMBERS}"
+                ))
+            })?;
         for (index, ct) in self.enc_balances.iter().enumerate() {
             ct.validate().map_err(|err| {
                 ChannelError::InvalidBalanceState(format!(
                     "enc_balances[{index}] is not canonical: {err}"
                 ))
             })?;
-            // Padding slots MUST be the canonical empty ciphertext (D6): a non-default padding slot
-            // would smuggle hidden value past the active/member_count accounting.
-            if index >= count && *ct != RegevCiphertext::padding() {
+            // Padding slots MUST be the canonical empty ciphertext (D6 + delegate account): a
+            // non-default padding slot would smuggle hidden value past the active accounting.
+            // Active slots = members (`< member_count`) + delegates
+            // (`member_count..member_count+delegate_count`). Padding = `>= active`.
+            if index >= active && *ct != RegevCiphertext::padding() {
                 return Err(ChannelError::InvalidBalanceState(format!(
-                    "enc_balances[{index}] is a padding slot (>= member_count {count}) and must be \
-                     RegevCiphertext::padding()"
+                    "enc_balances[{index}] is a padding slot (>= member_count+delegate_count \
+                     {active}) and must be RegevCiphertext::padding()"
                 )));
             }
         }
@@ -146,9 +178,10 @@ impl BalanceState {
                      {MAX_HOMO_ADDS_BEFORE_REFRESH}"
                 )));
             }
-            if index >= count && adds != 0 {
+            if index >= active && adds != 0 {
                 return Err(ChannelError::InvalidBalanceState(format!(
-                    "pending_adds[{index}] is a padding slot (>= member_count {count}) and must be 0"
+                    "pending_adds[{index}] is a padding slot (>= member_count+delegate_count \
+                     {active}) and must be 0"
                 )));
             }
         }
@@ -265,6 +298,7 @@ mod tests {
         BalanceState {
             channel_id: ChannelId::new(7).unwrap(),
             member_count: 3,
+            delegate_count: 0,
             enc_balances: BalanceState::pad_enc_balances(&[
                 ciphertext(1),
                 ciphertext(2),
@@ -334,6 +368,7 @@ mod tests {
         BalanceState {
             channel_id: ChannelId::new(7).unwrap(),
             member_count: count,
+            delegate_count: 0,
             enc_balances: BalanceState::pad_enc_balances(&active),
             settled_tx_chain: Bytes32::default(),
             state_version: 5,
@@ -383,6 +418,65 @@ mod tests {
             nonzero_add.validate(),
             Err(ChannelError::InvalidBalanceState(_))
         ));
+    }
+
+    /// Delegate account (Phase 1): `delegate_count` is part of the H1 preimage AND drives the
+    /// active/padding region split. A state with delegates in `member_count..member_count+
+    /// delegate_count` (active ciphertexts) validates; padding only begins at
+    /// `member_count+delegate_count`. `member_count + delegate_count > MAX` is rejected, and a
+    /// nonzero slot inside the would-be padding region (but now a delegate slot) is accepted.
+    #[test]
+    fn balance_state_delegate_count_regions_and_h1() {
+        // Base: member_count = 3, delegate_count = 0.
+        let base = state_with_members(3);
+        let base_h1 = base.h1();
+
+        // delegate_count is in the H1 preimage: bumping it (with a matching active delegate slot)
+        // changes H1.
+        let mut with_delegate = state_with_members(3);
+        with_delegate.delegate_count = 2;
+        with_delegate.enc_balances[3] = ciphertext(100);
+        with_delegate.enc_balances[4] = ciphertext(101);
+        assert_ne!(base_h1, with_delegate.h1(), "delegate_count must affect h1");
+        with_delegate
+            .validate()
+            .expect("members + delegates + padding must validate");
+
+        // member_count + delegate_count must be <= MAX.
+        let mut overflow = state_with_members(16);
+        overflow.delegate_count = 1;
+        assert!(
+            matches!(overflow.validate(), Err(ChannelError::InvalidBalanceState(_))),
+            "member_count + delegate_count > MAX must be rejected"
+        );
+
+        // A slot inside the delegate region must be ACTIVE (non-padding): if a declared delegate
+        // slot is left as padding it is fine (padding ct is canonical), but a slot BEYOND
+        // member_count+delegate_count that is non-default is rejected.
+        let mut bad_pad = state_with_members(3);
+        bad_pad.delegate_count = 1; // active region = 0..4
+        bad_pad.enc_balances[3] = ciphertext(50); // the single delegate slot
+        bad_pad.enc_balances[5] = ciphertext(51); // a padding slot (>= 4) — must be rejected
+        assert!(
+            matches!(bad_pad.validate(), Err(ChannelError::InvalidBalanceState(_))),
+            "non-default slot in the padding region (>= member_count+delegate_count) is rejected"
+        );
+
+        // The delegate region shifts the H1-committed split: same ciphertexts, different
+        // member/delegate boundary => different H1.
+        let mut split_a = state_with_members(2);
+        split_a.delegate_count = 2;
+        for s in 0..4u32 {
+            split_a.enc_balances[s as usize] = ciphertext(200 + s);
+        }
+        let mut split_b = split_a.clone();
+        split_b.member_count = 3;
+        split_b.delegate_count = 1; // same active span (4) but different member/delegate boundary
+        assert_ne!(
+            split_a.h1(),
+            split_b.h1(),
+            "moving the member/delegate boundary must change H1"
+        );
     }
 
     /// `BalanceState::h1()` binds `member_count`: two states identical except for `member_count`

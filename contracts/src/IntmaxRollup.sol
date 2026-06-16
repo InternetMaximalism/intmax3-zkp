@@ -85,6 +85,12 @@ contract IntmaxRollup {
     error RegevPkDigestZeroReserved();
     error RecipientZeroReserved();
     error WithdrawalVkDegreeBitsZero();
+    // registerChannel validation (custom errors instead of require-strings — keeps IntmaxRollup
+    // under the EIP-170 24,576-byte runtime limit after the delegate-account additions).
+    error ChannelAlreadyRegistered();
+    error DelegateCountExceedsActive();
+    error MemberCountOrArrayLenInvalid();
+    error MemberPubkeyHashesNotDistinct();
 
     // -----------------------------------------------------------------------
     // Events
@@ -778,21 +784,28 @@ contract IntmaxRollup {
     /// @dev R3 WORD-ALIGNED fixed-16 preimage (consumed by the validity `channel_reg_step`
     ///      circuit). The keccak chain folds a FIXED 16-slot, word-aligned stream so the circuit
     ///      can consume it with a SINGLE keccak (no byte-straddling); padding slots
-    ///      (i >= memberCount) contribute zeros. Header fields are uint32 (4-byte words):
+    ///      (i >= activeCount) contribute zeros. Header fields are uint32 (4-byte words):
     ///        keccak256(prev || channelId(uint32) || bpMemberSlot(uint32) || memberCount(uint32) ||
+    ///                  delegateCount(uint32) ||
     ///                  for i in 0..16: (pkG(32) || pkB(32) || regevPkDigest(32) || recipient(20))).
     ///      This is byte-identical to the Rust `ChannelRegRecord::hash_with_prev_hash`
     ///      (src/common/channel_registration.rs) and its in-circuit twin — asserted by
     ///      `IntmaxRollup.t.sol::test_channelRegPreimageDifferential`.
-    ///      `memberPubkeysRoot` = keccak of the active member pubkey hashes; `regevPkRoot` = keccak
-    ///      of the active Regev pubkey digests (the L1/keccak digest forms anchored in the record).
-    /// @dev P3: `pkBs[i]` is the member's BabyBear hash-sig public key (L1/keccak digest form). It
-    ///      enters the reg preimage between `pkG` and `regevPkDigest` so the in-circuit 3-field
-    ///      `MemberLeaf{pk_g, pk_b, regev_pk}` is bound to the L1 keccak chain (R2 cross-binding); the
-    ///      close-form IMCM member-set commitment below stays pk_g-ONLY (unaffected).
+    ///      `memberPubkeysRoot` = keccak of ALL active participant pubkey hashes (members +
+    ///      delegates); `regevPkRoot` = keccak of all active Regev pubkey digests.
+    /// @dev Delegate account: the `memberPkGs`/`pkBs`/`regevPkDigests`/`recipients` arrays carry the
+    ///      ACTIVE participants — members first (`0..memberCount`) then delegates
+    ///      (`memberCount..memberCount+delegateCount`). `memberCount = arrayLength - delegateCount`.
+    ///      `delegateCount` is committed into the reg preimage IMMEDIATELY AFTER `memberCount`. The
+    ///      close-form IMCM member-set commitment below stays MEMBER-ONLY (`0..memberCount`):
+    ///      delegates do not co-sign, so they are excluded from the N-of-N signer set.
+    /// @dev P3: `pkBs[i]` is the participant's BabyBear hash-sig public key (L1/keccak digest form).
+    ///      It enters the reg preimage between `pkG` and `regevPkDigest` so the in-circuit 3-field
+    ///      `MemberLeaf{pk_g, pk_b, regev_pk}` is bound to the L1 keccak chain (R2 cross-binding).
     function registerChannel(
         uint32 channelId,
         uint8 bpMemberSlot,
+        uint8 delegateCount,
         bytes32[] calldata memberPkGs,
         bytes32[] calldata pkBs,
         bytes32[] calldata regevPkDigests,
@@ -802,56 +815,132 @@ contract IntmaxRollup {
         // Finding E: ONE-TIME registration per channel. Matches the validity R5 one-time guard and
         // makes `channelMemberSetCommitment[channelId]` an unambiguous single source of truth that
         // the close-path manager binds to. A nonzero commitment means already registered.
-        require(channelMemberSetCommitment[channelId] == bytes32(0), "channel already registered");
-        uint256 memberCount = memberPkGs.length;
-        require(
-            memberCount >= MIN_CHANNEL_MEMBERS &&
-            memberCount <= MAX_CHANNEL_MEMBERS &&
-            pkBs.length == memberCount &&
-            regevPkDigests.length == memberCount &&
-            recipients.length == memberCount,
-            "member count out of range (2..16) or array length mismatch"
-        );
+        if (channelMemberSetCommitment[channelId] != bytes32(0)) revert ChannelAlreadyRegistered();
+        // Delegate account: the arrays carry the ACTIVE participants (members first, then
+        // delegates). `activeCount = memberPkGs.length` = memberCount + delegateCount; delegates
+        // occupy the contiguous region `memberCount..activeCount`. `memberCount` is derived as
+        // `activeCount - delegateCount`. With delegateCount = 0 this equals the legacy
+        // `memberCount = memberPkGs.length`, so the preimage is byte-identical (Phase 1).
+        uint256 activeCount = memberPkGs.length;
+        if (uint256(delegateCount) > activeCount) revert DelegateCountExceedsActive();
+        uint256 memberCount = activeCount - uint256(delegateCount);
+        if (
+            memberCount < MIN_CHANNEL_MEMBERS ||
+            activeCount > MAX_CHANNEL_MEMBERS ||
+            pkBs.length != activeCount ||
+            regevPkDigests.length != activeCount ||
+            recipients.length != activeCount
+        ) revert MemberCountOrArrayLenInvalid();
+        // bpMemberSlot must select a co-signing MEMBER, not a delegate.
         if (uint256(bpMemberSlot) >= memberCount) revert BpMemberSlotOutOfRange();
 
-        // One SPHINCS+ key per member: active pubkey hashes must be nonzero and pairwise distinct
-        // (mirrors ChannelRecord::validate). Regev digests must be set; recipients must be set.
-        for (uint256 i = 0; i < memberCount; i++) {
+        // One key per ACTIVE participant (members + delegates): active pubkey hashes must be nonzero
+        // and pairwise distinct (mirrors ChannelRecord::validate over `0..member_count+delegate_count`).
+        // Regev digests must be set; recipients must be set.
+        for (uint256 i = 0; i < activeCount; i++) {
             if (memberPkGs[i] == bytes32(0)) revert MemberPubkeyHashZeroReserved();
             if (regevPkDigests[i] == bytes32(0)) revert RegevPkDigestZeroReserved();
             if (recipients[i] == address(0)) revert RecipientZeroReserved();
-            for (uint256 j = i + 1; j < memberCount; j++) {
-                require(
-                    memberPkGs[i] != memberPkGs[j],
-                    "member pubkey hashes must be distinct"
-                );
+            for (uint256 j = i + 1; j < activeCount; j++) {
+                if (memberPkGs[i] == memberPkGs[j]) revert MemberPubkeyHashesNotDistinct();
             }
         }
 
-        // L1/keccak digest forms of the member tree root and the Regev-pk root (active members).
-        bytes32 memberPubkeysRoot = keccak256(abi.encodePacked(memberPkGs));
-        bytes32 regevPkRoot = keccak256(abi.encodePacked(regevPkDigests));
+        // R3 WORD-ALIGNED fixed-16 preimage built in a helper (keeps this frame off the via-IR
+        // stack-too-deep limit). The word-aligned HEADER (prev || channelId(uint32) ||
+        // bpMemberSlot(uint32) || memberCount(uint32) || delegateCount(uint32)) is assembled here and
+        // passed as ONE `bytes` slot; the helper folds the 16 fixed member slots and hashes. This is
+        // a byte-for-byte mirror of the Rust `ChannelRegRecord::hash_with_prev_hash`.
+        bytes32 newHash = _channelRegHashChain(
+            abi.encodePacked(
+                _pendingChannelRegHashChain,
+                channelId,
+                uint32(bpMemberSlot),
+                uint32(memberCount),
+                uint32(delegateCount)
+            ),
+            activeCount,
+            memberPkGs,
+            pkBs,
+            regevPkDigests,
+            recipients
+        );
+        _pendingChannelRegHashChain = newHash;
 
-        // R3 WORD-ALIGNED fixed-16 preimage (D6 pad-to-MAX): the keccak chain hashes a FIXED
-        // 16-slot, word-aligned stream so the validity (channel_reg_step) circuit can consume it
-        // with a SINGLE keccak (no byte-straddling). Padding slots (i >= memberCount) contribute
-        // bytes32(0) || bytes32(0) || 20 zero bytes. Header fields are uint32 (4-byte words) to
-        // stay word-aligned, matching the Rust `ChannelRegRecord::hash_with_prev_hash` u32 stream:
-        //   prev(32) || channelId(uint32=4) || bpMemberSlot(uint32=4) || memberCount(uint32=4) ||
-        //   for i in 0..16: ( pkG(32) || pkB(32) || regevDigest(32) || recipient(20) ).
-        // SECURITY: recipient is appended as the 20 address bytes (abi.encodePacked(address)),
-        // which equals the Rust Address 5-u32 big-endian encoding — NOT a 32-byte left-pad.
-        // P3: pkB(32) sits between pkG and regevDigest (the Rust MemberRegEntry layout); padding
-        // slots contribute an extra bytes32(0) for it. Byte-identity with Rust/circuit is asserted
-        // by test_channelRegPreimageDifferential.
-        bytes memory packed = abi.encodePacked(
-            _pendingChannelRegHashChain,
+        // Finding E: record the close-form IMCM member-set commitment (MEMBER-ONLY — delegates do
+        // not co-sign) + bp identity as the SINGLE SOURCE OF TRUTH for this channel. Computed in a
+        // helper to stay under the stack limit; byte-identical to
+        // `ChannelSettlementVerifier.closeMemberSetCommitment(paddedHashes, memberCount)`.
+        channelMemberSetCommitment[channelId] = _closeMemberSetCommitment(
+            uint32(memberCount),
+            memberPkGs
+        );
+        // bp identity: the member registered at `bpMemberSlot` (already range-checked above).
+        channelBpMemberSlot[channelId] = bpMemberSlot;
+        channelBpPkG[channelId] = memberPkGs[bpMemberSlot];
+
+        emit ChannelRegistered(
+            channelRegCount++,
             channelId,
-            uint32(bpMemberSlot),
-            uint32(memberCount)
+            bpMemberSlot,
+            memberPkGs,
+            regevPkDigests,
+            recipients,
+            // L1/keccak digest forms of the member tree root and the Regev-pk root (ALL active
+            // participants — members + delegates — exactly as the Rust `member_pubkeys_root_for`).
+            keccak256(abi.encodePacked(memberPkGs)),
+            keccak256(abi.encodePacked(regevPkDigests)),
+            newHash
+        );
+    }
+
+    /// @dev Close-form IMCM member-set commitment (MEMBER-ONLY, pad-to-MAX D6): keccak256(
+    ///      bytes4(0x494d434d) || uint32(memberCount) || h_0 || .. || h_15 ) with active hashes in
+    ///      slot order and padding slots (i >= memberCount) zeroed. Delegates are EXCLUDED (they do
+    ///      not co-sign). Byte-identical to `ChannelSettlementVerifier.closeMemberSetCommitment` and
+    ///      the Rust `close_member_set_commitment`. Extracted to its own frame for the via-IR stack
+    ///      limit.
+    function _closeMemberSetCommitment(
+        uint32 memberCount,
+        bytes32[] calldata memberPkGs
+    ) internal pure returns (bytes32) {
+        bytes memory memberSetPreimage = abi.encodePacked(
+            bytes4(CLOSE_MEMBER_SET_DOMAIN),
+            memberCount
         );
         for (uint256 i = 0; i < MAX_CHANNEL_MEMBERS; i++) {
-            if (i < memberCount) {
+            bytes32 slot = i < memberCount ? memberPkGs[i] : bytes32(0);
+            memberSetPreimage = abi.encodePacked(memberSetPreimage, slot);
+        }
+        return keccak256(memberSetPreimage);
+    }
+
+    /// @dev R3 WORD-ALIGNED fixed-16 reg-chain preimage (D6 pad-to-MAX + delegate account). The
+    ///      keccak chain hashes a FIXED 16-slot, word-aligned stream so the validity
+    ///      (channel_reg_step) circuit can consume it with a SINGLE keccak (no byte-straddling).
+    ///      Padding slots (i >= activeCount) contribute bytes32(0) || bytes32(0) || 20 zero bytes.
+    ///      Header fields are uint32 (4-byte words), matching the Rust
+    ///      `ChannelRegRecord::hash_with_prev_hash` u32 stream:
+    ///        prev(32) || channelId(uint32=4) || bpMemberSlot(uint32=4) || memberCount(uint32=4) ||
+    ///        delegateCount(uint32=4) ||
+    ///        for i in 0..16: ( pkG(32) || pkB(32) || regevDigest(32) || recipient(20) ).
+    ///      SECURITY: `delegateCount` sits IMMEDIATELY AFTER `memberCount` (delegate account); active
+    ///      slots are `0..memberCount+delegateCount`. recipient is appended as the 20 address bytes
+    ///      (abi.encodePacked(address)), equal to the Rust Address 5-u32 big-endian encoding — NOT a
+    ///      32-byte left-pad. P3: pkB(32) sits between pkG and regevDigest. Byte-identity with
+    ///      Rust/circuit is asserted by test_channelRegPreimageDifferential. Extracted to its own
+    ///      frame so `registerChannel` stays under the via-IR stack limit.
+    function _channelRegHashChain(
+        bytes memory header,
+        uint256 activeCount,
+        bytes32[] calldata memberPkGs,
+        bytes32[] calldata pkBs,
+        bytes32[] calldata regevPkDigests,
+        address[] calldata recipients
+    ) internal pure returns (bytes32) {
+        bytes memory packed = header;
+        for (uint256 i = 0; i < MAX_CHANNEL_MEMBERS; i++) {
+            if (i < activeCount) {
                 packed = abi.encodePacked(
                     packed,
                     memberPkGs[i],     // bytes32: 32 bytes (pk_g)
@@ -870,41 +959,7 @@ contract IntmaxRollup {
                 );
             }
         }
-        bytes32 newHash = keccak256(packed);
-        _pendingChannelRegHashChain = newHash;
-
-        // Finding E: record the close-form IMCM member-set commitment + bp identity as the SINGLE
-        // SOURCE OF TRUTH for this channel. The preimage is BYTE-IDENTICAL to
-        // `ChannelSettlementVerifier.closeMemberSetCommitment(paddedHashes, memberCount)`:
-        //   keccak256( bytes4(0x494d434d) || uint32(memberCount) || h_0 || .. || h_15 )
-        // with active hashes in slot order and padding slots (i >= memberCount) zeroed. The close
-        // path matches this exact value against the close proof's `member_set_commitment` PI, so
-        // recording it here binds the close-path signer set to the registered (validity-path) set.
-        bytes memory memberSetPreimage = abi.encodePacked(
-            bytes4(CLOSE_MEMBER_SET_DOMAIN),
-            uint32(memberCount)
-        );
-        for (uint256 i = 0; i < MAX_CHANNEL_MEMBERS; i++) {
-            bytes32 slot = i < memberCount ? memberPkGs[i] : bytes32(0);
-            memberSetPreimage = abi.encodePacked(memberSetPreimage, slot);
-        }
-        channelMemberSetCommitment[channelId] = keccak256(memberSetPreimage);
-        // bp identity: the member registered at `bpMemberSlot` (already range-checked above).
-        channelBpMemberSlot[channelId] = bpMemberSlot;
-        channelBpPkG[channelId] = memberPkGs[bpMemberSlot];
-
-        uint64 idx = channelRegCount++;
-        emit ChannelRegistered(
-            idx,
-            channelId,
-            bpMemberSlot,
-            memberPkGs,
-            regevPkDigests,
-            recipients,
-            memberPubkeysRoot,
-            regevPkRoot,
-            newHash
-        );
+        return keccak256(packed);
     }
 
     // -----------------------------------------------------------------------

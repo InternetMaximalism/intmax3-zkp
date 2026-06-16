@@ -251,6 +251,7 @@ mod tests {
         let final_balance_state = BalanceState {
             channel_id,
             member_count: 3,
+            delegate_count: 0,
             enc_balances: BalanceState::pad_enc_balances(&[ct0.clone(), ct1, ct2]),
             settled_tx_chain: Bytes32::default(),
             state_version: 6,

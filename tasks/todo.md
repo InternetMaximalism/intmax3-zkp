@@ -1,3 +1,61 @@
+# Phase 1 (data layer) — delegate account `delegate_count`
+
+SOUNDNESS-CRITICAL. ABSOLUTE RULE: never weaken/skip/stub a check; STOP and report unclear soundness.
+
+Goal: add record-level `delegate_count: u8` next to `member_count`. Regions: `0..member_count`
+members, `member_count..member_count+delegate_count` delegates, rest padding. Phase 1 = DATA LAYER
+ONLY. With `delegate_count = 0` => byte-for-byte behavior-identical (re-pin commitment differentials).
+
+## Preimage positions (chosen)
+- H1 (`BalanceState::h1`): single u32 limb IMMEDIATELY AFTER `member_count`.
+- IMCR (`ChannelRecord::signing_digest`): single u32 limb IMMEDIATELY AFTER `member_count`.
+  NATIVE-ONLY digest (no in-circuit/Solidity IMCR recompute exists — confirmed by grep).
+- Reg-chain (`ChannelRegRecord::hash_with_prev_hash`): limb AFTER `member_count` header word.
+  LEN 475 -> 476.
+- Close PI vector: `delegate_count` appended as the FINAL limb (after `member_count`). LEN 86 -> 87.
+- IMCM (close member-set commitment): UNCHANGED (delegates do not co-sign).
+
+## Tasks
+- [x] 1. BalanceState: field + h1 limb + validate regions.
+- [x] 2. close_circuit: PI target + H1 recompute limb + witness + len 87.
+- [x] 3. close_pis.rs: PI field + to/from u64 + len 87.
+- [x] 4. ChannelRecord: field + IMCR limb + validate regions.
+- [x] 5. channel_registration: field + reg preimage limb + LEN 476 + circuit twin sig + validate.
+- [x] 6. channel_reg_step circuit: delegate_count target + range-check + keccak twin + mask 0..mc+dc.
+- [x] 7. Solidity: registerChannel delegateCount param + preimage; closePIHash append delegateCount.
+- [x] 8. Re-pin differentials (Rust PINNED_MC + Foundry pinnedMc + close PI comments).
+- [x] 9. All construction sites: delegate_count = 0.
+- [x] 10. Regenerate JSON fixtures (REQUIRED — see finding below).
+- [x] 11. cargo test --release + forge full suite.
+
+## Outcome (Phase 1 — COMPLETE, pending security-review sign-off)
+
+GREEN: Rust native (balance_state 9, channel 14, close_pis 2, channel_reg 6), Rust circuits
+(circuits::channel 34, channel_reg_hash_chain 3), Solidity forge FULL suite 99 passed / 0 failed.
+
+### KEY FINDING — "delegate_count = 0 ⇒ byte-identical" is FALSE for baked artifacts
+Adding the `delegate_count` limb to the reg-chain keccak preimage changes the hash EVEN when 0.
+That preimage is folded on-chain into `_pendingChannelRegHashChain`, which is bound into the validity
+proof's block-hash-chain. So ALL baked validity/c2c/withdrawal/close MLE fixtures were invalidated
+(10 e2e tests went red: C2CBlockHash, C2CFullE2E ×2, ReclaimStake ×4, WithdrawNativeE2E ×3,
+CloseLifecycleE2E). They are NOT a soundness bug — the Rust↔circuit↔Solidity differentials all agree;
+the baked proofs were just stale. FIX (user-approved heavy regen): regenerated all 12 fixtures with the
+new (delegate-aware) circuit via `generate_withdrawal_fixture` (default + `close_` prefix, WD_RECIPIENT =
+new manager CREATE2 addr 0x48aB7542EE5b568B635C92CB6f3499E3eBFF9dA9) and `generate_c2c_fixture`.
+The conditional-omit-when-0 alternative was REJECTED: it would make the R3 word-aligned fixed-length
+keccak preimage variable-length, breaking the single-keccak in-circuit consumption (soundness risk).
+
+### EIP-170 / via-IR side-fixes (required for the data layer to deploy + compile)
+- IntmaxRollup grew to 24,777 B (over the 24,576 EIP-170 limit) from the registerChannel delegate logic
+  → converted 4 registerChannel require-strings to custom errors (ChannelAlreadyRegistered,
+  DelegateCountExceedsActive, MemberCountOrArrayLenInvalid, MemberPubkeyHashesNotDistinct) → 24,446 B.
+- closePIHash via-IR stack-too-deep (2nd trailing limb): refactored closePIHash to take the
+  `CloseProofFields` struct (byte-identical 87-limb preimage); test/script callers build the struct via
+  calldata-reentry (mirrors the manager's compiling `_runCloseVerify`). `_managerInitcode` now passes
+  `delegateCount_ = 0` (constructor arg #4).
+
+---
+
 # Task: Make the payment channel real (eliminate all stubs) — real ETH escrow + real on-chain settlement + value transfer
 
 Status: IN PROGRESS — user instruction "fix all the stubs, send funds via a real payment channel → close, redeploy".
