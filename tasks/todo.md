@@ -1,4 +1,4 @@
-# DONE (PASS 160s) — B-1: genuine inter-channel transfer E2E (detail2 §C-6/§E-2/§3.4, abstract2 §2.3/§3.4)
+# DONE — B-1 (inter-channel transfer, real deposit) + B-2 (channelStateSig validity-proven, transport_proof dropped) (detail2 §C-6/§E-2/§3.4, abstract2 §2.3/§3.4)
 
 Goal: a real channel→channel SEND with NO fabrication of the security-bearing parts.
 - Both channels backed by REAL on-chain ETH deposits (real balanceProof, §F-1 reconciled).

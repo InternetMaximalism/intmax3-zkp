@@ -111,7 +111,8 @@ fn inter_channel_small_block_sig_is_validity_proven() {
     };
     let mut tx_v2_tree = TxV2Tree::init();
     tx_v2_tree.update(channel_id.as_u64(), tx_v2);
-    let tx_tree_root: Bytes32 = tx_v2_tree.get_root().into(); // = H2 (the small block's tx_tree_root)
+    let tx_v2_root_h = tx_v2_tree.get_root();
+    let tx_tree_root: Bytes32 = tx_v2_root_h.into(); // = H2 (the small block's tx_tree_root)
     let tx_v2_proof = tx_v2_tree.prove(channel_id.as_u64());
     let tx_v2_witness = BlockTxV2Witness {
         tx_v2_indices: vec![channel_id.as_u64(), 0],
@@ -163,6 +164,14 @@ fn inter_channel_small_block_sig_is_validity_proven() {
         .prove(&final_block_chain_proof, list_proof.as_ref(), prover)
         .expect("validity proof");
     validity_circuit.verify(&validity_proof).expect("verify validity proof");
+
+    // ----- flowReceive3-1 (receiver side): the inter-channel tx is INCLUDED in the small block
+    // whose tx_tree_root (= H2) is bound in the validity-proven block — verified DIRECTLY (no
+    // transport_proof; abstract2 §3.4 note). (The E-2 channelUpdateZKP + the sender's balanceProof /
+    // §F-1 reconciliation are covered in tests/inter_channel_e2e.rs / channel_backing_e2e.rs.) -----
+    tx_v2_proof
+        .verify(&tx_v2, channel_id.as_u64(), tx_v2_root_h)
+        .expect("receiver: TxV2 inclusion in the validity-proven small block (flowReceive3-1)");
 
     eprintln!(
         "[B-2] OK: REAL validity proof verifies the channel small-block bp signature over \
