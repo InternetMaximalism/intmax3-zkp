@@ -84,3 +84,7 @@ cli_state.json
 tmp/
 temp/
 *.bak
+
+# Sepolia/AWS deploy build artifacts (binary + cached backing — regenerated)
+deploy-staging/
+signer-bin/

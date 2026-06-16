@@ -1,0 +1,11 @@
+.claude
+target
+.git
+node_modules
+wallet-live-work
+deploy-staging
+pkg
+self_certs
+*.log
+*.output
+.DS_Store

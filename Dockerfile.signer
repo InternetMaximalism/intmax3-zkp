@@ -1,0 +1,15 @@
+# Build the channel_member signer binary for linux (matches an Ubuntu 22.04 arm64 EC2).
+FROM ubuntu:22.04 AS build
+ENV DEBIAN_FRONTEND=noninteractive
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      curl ca-certificates build-essential clang cmake pkg-config libssl-dev git \
+    && rm -rf /var/lib/apt/lists/*
+RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain none
+ENV PATH="/root/.cargo/bin:${PATH}"
+WORKDIR /build
+COPY . .
+# rust-toolchain.toml pins nightly-2025-03-23 + rust-src; cargo auto-installs it on first invoke.
+RUN cargo build --release --bin channel_member
+# Extract just the binary.
+FROM scratch AS bin
+COPY --from=build /build/target/release/channel_member /channel_member
