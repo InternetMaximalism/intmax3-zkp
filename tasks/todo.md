@@ -86,6 +86,23 @@ member_set_commitment) — STAYS `0..member_count`.
   delegate-creation path + e2e create->send->withdraw. Solvency cap already covers all slots.
 - Phase 5 separate security review + attacker pass (DA1/DA2/DA4/DA5/DA6).
 
+## STATUS: DELEGATE ACCOUNT COMPLETE (all phases committed + reviewed GO)
+
+Commits aa50cbd..HEAD: f1c4948 (P1 data), cd246b4 (P2 send), ef94fe5 (P3 withdraw circuit),
+77fd70a (P4a Solidity manager delegate registration+withdraw), 05ade83 (P4b wallet build).
+Phase 5 comprehensive adversarial review (separate agent): GO — no CRITICAL/HIGH. DA1-DA6 all
+blocked or accepted-as-designed. Two documented residuals, both within the user-confirmed trust
+model (NOT theft):
+- DLG-2: colluding N-of-N members can forge a delegate's FINAL balance (delegate doesn't co-sign;
+  protection is honest-member-only at the transition layer DLG-1). Accepted by user.
+- DLG-3 (deployer misbind): manager delegate (pk_g->recipient) bindings are deployer-asserted (not
+  re-checked vs the member-only registry IMCM). A misbind can only DENY the delegate's honest claim
+  (E-3 needs the delegate's Regev secret key to withdraw; activeDelegateCount is pinned to the signed
+  H1) — liveness griefing, out of scope. Not theft.
+
+GREEN end-to-end: Rust native + circuits (close 34, channel_reg 3, withdrawal_claim 2, wallet_core
+6 delegate) + Solidity forge FULL 101 (incl. delegate manager + regenerated-fixture E2E).
+
 ---
 
 # Task: Make the payment channel real (eliminate all stubs) — real ETH escrow + real on-chain settlement + value transfer
