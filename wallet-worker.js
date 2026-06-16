@@ -26,6 +26,7 @@ async function init(threads) {
 // Map worker actions to wasm entry points. Each returns a JSON string (or void).
 const CALLS = {
   keygen: () => wasm.wallet_keygen(),
+  keygenSeeded: (a) => wasm.wallet_keygen_seeded(a.seed),
   genesisContribution: (a) => wasm.wallet_genesis_contribution(BigInt(a.balance)),
   signState: (a) => wasm.wallet_sign_state(a.slot, a.stateJson),
   importChannel: (a) => wasm.wallet_import_channel(a.snapshotJson),

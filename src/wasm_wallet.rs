@@ -74,7 +74,27 @@ struct Identity {
 #[wasm_bindgen]
 pub fn wallet_keygen() -> Result<String, JsValue> {
     let mut rng = rand010::rng();
-    let keys = MemberKeys::generate(&mut rng);
+    keygen_with_rng(&mut rng)
+}
+
+/// Like [`wallet_keygen`], but derives ALL key material DETERMINISTICALLY from a caller-supplied
+/// 32-byte master seed (hex). Same seed ⇒ same `(pk_g, pk_b, regev_pk)` ⇒ same channel slot on
+/// re-import, so the browser can restore the SAME account/slot across reloads.
+///
+/// SECURITY (testnet only): this relaxes the module's "secrets are session-only, never persisted"
+/// default — the caller (JS) generates and stores the seed (localStorage) and is responsible for it.
+/// The seed deterministically derives the Goldilocks/BabyBear/Regev secret keys, so anyone who reads
+/// the seed controls the account. Do NOT use seed-persistence for mainnet-value keys.
+#[wasm_bindgen]
+pub fn wallet_keygen_seeded(seed_hex: String) -> Result<String, JsValue> {
+    use rand010::SeedableRng;
+    let seed = parse_seed32(&seed_hex)?;
+    let mut rng = rand010::rngs::StdRng::from_seed(seed);
+    keygen_with_rng(&mut rng)
+}
+
+fn keygen_with_rng(rng: &mut impl rand010::Rng) -> Result<String, JsValue> {
+    let keys = MemberKeys::generate(rng);
     let identity = Identity {
         pk_g: keys.pk_g().to_hex(),
         pk_b: keys.pk_b().to_hex(),
@@ -91,6 +111,20 @@ pub fn wallet_keygen() -> Result<String, JsValue> {
         });
     });
     Ok(json)
+}
+
+/// Parse a `0x`-optional 64-hex-char string into a 32-byte seed.
+fn parse_seed32(seed_hex: &str) -> Result<[u8; 32], JsValue> {
+    let h = seed_hex.strip_prefix("0x").unwrap_or(seed_hex);
+    if h.len() != 64 {
+        return Err(js_err("seed must be exactly 32 bytes (64 hex chars)"));
+    }
+    let mut out = [0u8; 32];
+    for (i, b) in out.iter_mut().enumerate() {
+        *b = u8::from_str_radix(&h[2 * i..2 * i + 2], 16)
+            .map_err(|e| js_err(format!("invalid seed hex: {e}")))?;
+    }
+    Ok(out)
 }
 
 #[derive(Serialize)]

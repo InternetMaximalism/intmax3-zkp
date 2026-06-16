@@ -41,6 +41,7 @@
     <label>Your allocation (your share of the channel's deposited fund)</label>
     <input id="openBalance" type="number" value="50" readonly title="Fixed: your delegate allocation out of the channel's real Intmax deposit (so Σ balances == deposited fund)" />
     <button id="btnOpen" disabled>Generate keys & join channel</button>
+    <button id="btnClear" style="background:#3a2330;color:#f3a8bd;margin-top:8px">Clear saved account (localStorage)</button>
     <div class="members" id="members"></div>
   </section>
 
@@ -70,6 +71,43 @@ const $ = (id) => document.getElementById(id);
 const log = (m, cls='') => { const l=$('log'); l.innerHTML += `\n<span class="${cls}">${m}</span>`; l.scrollTop=l.scrollHeight; };
 let mySlot = 0;
 
+// ---- Persisted account (localStorage) ----------------------------------------------------------
+// The browser delegate's account = a 32-byte master seed kept in localStorage. The wasm derives all
+// keys deterministically from it (wallet_keygen_seeded), so reloading restores the SAME account →
+// SAME channel slot on re-import. SECURITY (testnet): this seed controls the account; it is stored
+// in plaintext in this origin's localStorage. Use the "Clear saved account" button to wipe it.
+const SEED_KEY = 'intmax_channel_seed';
+function channelSeed() {
+  let s = localStorage.getItem(SEED_KEY);
+  if (!s) {
+    const b = new Uint8Array(32); crypto.getRandomValues(b);
+    s = '0x' + [...b].map((x) => x.toString(16).padStart(2, '0')).join('');
+    localStorage.setItem(SEED_KEY, s);
+  }
+  return s;
+}
+function hasSavedAccount() { return !!localStorage.getItem(SEED_KEY); }
+function clearSavedAccount() { localStorage.removeItem(SEED_KEY); }
+
+// On load, if a saved account exists AND the channel still has us as a member, restore the SAME slot.
+async function tryRestore() {
+  if (!hasSavedAccount()) return false;
+  try {
+    await call('keygenSeeded', { seed: channelSeed() });
+    const snap = await api('/api/snapshot', null, 'GET');
+    const r = JSON.parse(await call('importChannel', { snapshotJson: snap }));
+    mySlot = r.slot; showBalance(r);
+    $('btnSend').disabled = false; $('btnRefresh').disabled = false;
+    $('btnOpen').textContent = 'Re-join (new account)';
+    $('members').textContent = `Restored your saved account at slot ${r.slot} (same key/slot across reloads). Co-signing members: slots 0,1,2 (CLI).`;
+    log(`restored saved account → slot ${r.slot}, balance ${r.balance}`, 'ok');
+    return true;
+  } catch (e) {
+    log('saved account present but no matching channel to restore (relay reset or not yet joined) — click join to (re)create.', '');
+    return false;
+  }
+}
+
 // ---- worker plumbing (same protocol as wallet-worker.js) ----
 const worker = new Worker('./wallet-worker.js', { type: 'module' });
 const handlers = {};
@@ -78,7 +116,7 @@ function call(action, payload={}) {
 }
 worker.onmessage = (e) => {
   const d = e.data;
-  if (d.type === 'ready') { $('status').textContent='ready'; $('status').className='ready'; $('threads').textContent=d.threads; $('btnOpen').disabled=false; return; }
+  if (d.type === 'ready') { $('status').textContent='ready'; $('status').className='ready'; $('threads').textContent=d.threads; $('btnOpen').disabled=false; tryRestore(); return; }
   if (d.type === 'log') { return; }
   if (d.type === 'result') handlers[d.action]?.resolve(d.result);
   else if (d.type === 'error') handlers[d.action]?.reject(new Error(d.message));
@@ -123,7 +161,8 @@ $('btnOpen').onclick = async () => {
   const tick = setInterval(() => { $('btnOpen').textContent = `Opening… ${Math.round((Date.now()-t0)/1000)}s`; }, 250);
   try {
     $('btnOpen').disabled = true;
-    await step('generate keys', () => call('keygen'));
+    // Derive keys from the PERSISTED seed (localStorage) so reloading restores the SAME account/slot.
+    await step('generate keys (from your saved account seed)', () => call('keygenSeeded', { seed: channelSeed() }));
     const contribution = await step('encrypt opening balance', () => call('genesisContribution', { balance: $('openBalance').value }));
     // The browser is the DELEGATE: the CLI's three members sign the genesis and return the
     // fully-signed snapshot directly — the delegate does NOT co-sign state.
@@ -138,6 +177,12 @@ $('btnOpen').onclick = async () => {
   } catch (e) { log('open failed: '+e.message, 'err'); $('btnOpen').disabled=false; }
   clearInterval(tick);
   $('btnOpen').textContent = 'Generate keys & open channel';
+};
+
+$('btnClear').onclick = () => {
+  clearSavedAccount();
+  log('cleared saved account from localStorage — reloading for a fresh account/slot.', '');
+  setTimeout(() => location.reload(), 400);
 };
 
 async function attemptSend(to, amt) {
