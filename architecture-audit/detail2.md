@@ -265,6 +265,15 @@ Retype existing `InterChannelTx` (`channel.rs:541-597`). Map abstract2's `TxAux`
 | (binding to tx_tree_root) | `signed_small_block: SignedSmallBlock` | [Keep] |
 | `tx_hash` etc. | `seal, tx_hash, intmax_transfer_commitment, recipient_memo, transport_proof` | [Keep] |
 
+> **`transport_proof` is DEPRECATED (no separate verifier).** Per the abstract2.md §3.4 design note,
+> the inter-channel transfer carries no bundled transport proof: the receiving channel verifies
+> settlement DIRECTLY against L1 (`flowReceive3` step 1 — `TxV2MerkleProof` inclusion of the
+> `tx_tree_root` in a validity-proven block + the sender's `balanceProof`), and the small-block
+> `channelStateSig` (`hash(H1', tx_tree_root)`) is verified by the REAL validity proof
+> (`update_channel_tree` / `bp_sig_chain`, §F-2). Inclusion liveness is by member force-include, not a
+> proof. The `transport_proof` field is retained only as a vestigial carrier and is NOT verified by a
+> dedicated `ChannelProofVerifier` (verified end-to-end in `tests/inter_channel_validity_b2.rs`).
+
 **[New] TxLeafHash** (abstract2.md §2.3. The update unit of `settledTxChain`):
 
 ```rust
