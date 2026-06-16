@@ -126,6 +126,19 @@ $('btnOpen').onclick = async () => {
   $('btnOpen').textContent = 'Generate keys & open channel';
 };
 
+async function attemptSend(to, amt) {
+  // Re-import the CURRENT channel head first (picks up other tabs' sends + any joined delegates), so
+  // the send extends the real head. Build the proof + co-sign + finalize.
+  const latest = await api('/api/snapshot', null, 'GET');
+  const rr = JSON.parse(await call('importChannel', { snapshotJson: latest }));
+  mySlot = rr.slot; showBalance(rr);
+  if (!rr.canSend) throw new Error('receive-only: you received funds — a balance refresh is needed before you can send again');
+  const payload = await call('send', { recipientSlot: to, amount: amt });
+  log('other members co-signing…');
+  const finalState = await api('/api/cosign', payload);
+  return JSON.parse(await call('finalize', { stateJson: finalState }));
+}
+
 $('btnSend').onclick = async () => {
   const t0 = Date.now();
   const tick = setInterval(() => { $('btnSend').textContent = `Proving… ${Math.round((Date.now()-t0)/1000)}s`; }, 250);
@@ -133,17 +146,18 @@ $('btnSend').onclick = async () => {
     $('btnSend').disabled = true;
     const to = +$('toSlot').value, amt = $('amount').value;
     if (to === mySlot) throw new Error('cannot send to yourself (slot '+mySlot+')');
-    // Re-import the latest channel head first: picks up any delegates that joined after you, and the
-    // current state, so the send extends the real head (the members will co-sign it).
-    const latest = await api('/api/snapshot', null, 'GET');
-    const rr = JSON.parse(await call('importChannel', { snapshotJson: latest }));
-    mySlot = rr.slot; showBalance(rr);
-    if (!rr.canSend) throw new Error('cannot send yet (received funds need a refresh, or re-open the channel)');
     log(`Regev E-1 proof (~3ms) + your BabyBear hash-sig ZK proof for ${amt} → slot ${to}…`);
-    const payload = await call('send', { recipientSlot: to, amount: amt });
-    log('other members co-signing…');
-    const finalState = await api('/api/cosign', payload);
-    const r = JSON.parse(await call('finalize', { stateJson: finalState }));
+    let r;
+    try {
+      r = await attemptSend(to, amt);
+    } catch (e) {
+      // Lost the head race to another tab (it advanced the head between our re-import and co-sign).
+      // Re-import the new head and rebuild once.
+      if (/does not extend the current head/.test(e.message)) {
+        log('  head moved (another tab sent first) — re-importing + retrying…');
+        r = await attemptSend(to, amt);
+      } else { throw e; }
+    }
     showBalance(r);
     log(`sent ${amt} to slot ${to} in ${Math.round((Date.now()-t0)/1000)}s. new balance ${r.balance}`, 'ok');
   } catch (e) { log('send failed: '+e.message, 'err'); }

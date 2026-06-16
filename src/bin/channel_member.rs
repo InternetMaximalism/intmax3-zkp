@@ -381,6 +381,10 @@ fn cmd_cosign(args: &[String]) {
     // advance only on confirmed finalization.
     state.snapshot.state = next_state;
     save_state(&state);
+    // HEAD SYNC: publish the advanced head so `/api/snapshot` (the browsers' re-import source) is
+    // current — otherwise a later re-import returns the stale init snapshot and the next send fails
+    // "payload does not extend the current head".
+    write_json("channel_snapshot.json", &state.snapshot);
 }
 
 fn cmd_finalize(args: &[String]) {
