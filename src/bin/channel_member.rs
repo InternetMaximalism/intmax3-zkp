@@ -19,7 +19,10 @@
 //!   finalize <fully_signed_state.json>
 //!   balance
 
-use std::{fs, process::exit};
+use std::{
+    fs,
+    process::{Command, exit},
+};
 
 use intmax3_zkp::{
     circuits::{
@@ -35,6 +38,7 @@ use intmax3_zkp::{
     common::{
         channel::{ChannelRecord, ChannelState, MemberSignature},
         channel_id::ChannelId,
+        deposit::Deposit,
         salt::Salt,
     },
     constants::MAX_CHANNEL_MEMBERS,
@@ -149,6 +153,11 @@ struct ChannelBacking {
     intmax_state_root: String,
     /// the deposited native value backing the channel (== Σ genesis balances).
     fund: u64,
+    /// On-chain provenance of the REAL deposit that backs this channel (detail2 §F-1 origin).
+    #[serde(default)]
+    rollup: String,
+    #[serde(default)]
+    deposit_tx: String,
 }
 
 fn backing_exists() -> bool {
@@ -174,13 +183,41 @@ fn load_backing() -> (VerifierCircuitData<BF, BC, BD>, ChannelBalanceAttestation
     (balance_vd, ChannelBalanceAttestation { balance_proof: proof }, backing)
 }
 
+// anvil dev account[0] private key — a PUBLIC throwaway (safe on the CLI; NEVER a real key).
+const ANVIL_DEV_KEY: &str = "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80";
+
+/// Run `cast <args>` and return stdout (dies on failure; foundry `cast` must be on PATH).
+fn cast(args: &[&str]) -> String {
+    let out = Command::new("cast")
+        .args(args)
+        .output()
+        .unwrap_or_else(|e| die(format!("cast failed to start ({e}); is foundry installed?")));
+    if !out.status.success() {
+        die(format!("cast {args:?} failed: {}", String::from_utf8_lossy(&out.stderr)));
+    }
+    String::from_utf8_lossy(&out.stdout).to_string()
+}
+
+/// The 32-byte ABI word at index `i` of a hex data blob (no `0x` prefix).
+fn abi_word(data: &str, i: usize) -> &str {
+    &data[i * 64..(i + 1) * 64]
+}
+
 /// ONE-TIME setup: fund the channel with a REAL L1 deposit and cache its base-layer balance proof as
 /// the channel's deposit backing (detail2 §F-1). Builds the `BalanceProcessor` (~25s), proves the
 /// deposit, and writes the attestation + verifier data + backed-genesis params. Run BEFORE `init`.
 /// `setup-backing [fund]` (default = Σ CLI member genesis balances).
 fn cmd_setup_backing(args: &[String]) {
     use rand::{SeedableRng as _, rngs::StdRng as DepRng};
-    let fund: u64 = args.get(1).and_then(|s| s.parse().ok()).unwrap_or_else(|| {
+    let rpc = args
+        .get(1)
+        .cloned()
+        .unwrap_or_else(|| die("setup-backing needs <rpc_url> <rollup_addr> [fund] (real on-chain deposit)"));
+    let rollup = args
+        .get(2)
+        .cloned()
+        .unwrap_or_else(|| die("setup-backing needs <rpc_url> <rollup_addr> [fund]"));
+    let fund: u64 = args.get(3).and_then(|s| s.parse().ok()).unwrap_or_else(|| {
         CLI_GENESIS.iter().map(|(_, a)| *a).sum::<u64>() + DELEGATE_GENESIS
     });
 
@@ -197,15 +234,57 @@ fn cmd_setup_backing(args: &[String]) {
 
     let deposit_salt = Salt::rand(&mut rng);
     let recipient = calculate_recipient_from_user_id(channel_id, deposit_salt);
+    let amount = fund.min(u32::MAX as u64);
+
+    // REAL on-chain ETH deposit (detail2 §F-1 backing ORIGIN — no fabrication): the local chain
+    // really escrows the value, and we read the deposit back from the receipt.
+    eprintln!("setup-backing: real ETH deposit on {rpc} → IntmaxRollup {rollup} (amount {amount})…");
+    let recipient_hex = recipient.to_hex();
+    let send_out = cast(&[
+        "send", &rollup, "deposit(bytes32,uint32,uint256,bytes32)", &recipient_hex, "0",
+        &amount.to_string(),
+        "0x0000000000000000000000000000000000000000000000000000000000000000",
+        "--value", &amount.to_string(), "--private-key", ANVIL_DEV_KEY, "--rpc-url", &rpc, "--json",
+    ]);
+    let txhash = send_out
+        .split("\"transactionHash\":\"")
+        .nth(1)
+        .and_then(|s| s.split('"').next())
+        .unwrap_or_else(|| die("deposit tx hash not found in cast output"))
+        .to_string();
+
+    // Read the deposit back from the LIVE receipt: depositor + the on-chain depositHashChain.
+    let receipt = cast(&["receipt", &txhash, "--rpc-url", &rpc, "--json"]);
+    let data = receipt
+        .split("\"data\":\"0x")
+        .nth(1)
+        .and_then(|s| s.split('"').next())
+        .unwrap_or_else(|| die("Deposited log data not found in receipt"));
+    let depositor = Address::from_hex(&format!("0x{}", &abi_word(data, 0)[24..]))
+        .unwrap_or_else(|e| die(format!("parse depositor: {e:?}")));
+    let onchain_chain = Bytes32::from_hex(&format!("0x{}", abi_word(data, 5)))
+        .unwrap_or_else(|e| die(format!("parse on-chain depositHashChain: {e:?}")));
+
+    // KEYSTONE (fail-closed): the Rust deposit MUST reproduce the on-chain depositHashChain, else the
+    // witness would not mirror the real deposit. Refuse to back the channel on any mismatch.
+    let rust_deposit = Deposit {
+        deposit_index: Default::default(),
+        block_number: Default::default(),
+        depositor,
+        recipient,
+        token_index: 0,
+        amount: U256::from(amount as u32),
+        aux_data: Bytes32::default(),
+    };
+    if rust_deposit.hash_with_prev_hash(Bytes32::default()) != onchain_chain {
+        die("on-chain depositHashChain != Rust deposit hash — refusing to back the channel with an unreconciled deposit");
+    }
+    eprintln!("setup-backing: on-chain deposit reconciled (depositHashChain {}).", onchain_chain.to_hex());
+
+    // Feed the REAL on-chain deposit fields into the witness generator → real-deposit-backed proof.
     bwgen
         .borrow_mut()
-        .add_deposit(
-            Address::rand(&mut rng),
-            recipient,
-            0,
-            U256::from(fund.min(u32::MAX as u64) as u32),
-            Bytes32::default(),
-        )
+        .add_deposit(depositor, recipient, 0, U256::from(amount as u32), Bytes32::default())
         .unwrap_or_else(|e| die(format!("queue deposit: {e:?}")));
     bwgen
         .borrow_mut()
@@ -235,10 +314,12 @@ fn cmd_setup_backing(args: &[String]) {
             // L1-close anchor (registration-time procedure is detail2 §K-4, open); NOT the §F-1 gate.
             intmax_state_root: Bytes32::default().to_hex(),
             fund,
+            rollup: rollup.clone(),
+            deposit_tx: txhash.clone(),
         },
     );
     println!(
-        "setup-backing OK: deposited {fund} to channel {CHANNEL_ID}; settled_tx_chain={}. Now run `init`.",
+        "setup-backing OK: REAL on-chain deposit {fund} to channel {CHANNEL_ID} (IntmaxRollup {rollup}, tx {txhash}); settled_tx_chain={}. Now run `init`.",
         pis.settled_tx_chain.to_hex()
     );
 }

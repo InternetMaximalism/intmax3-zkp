@@ -6,7 +6,7 @@ const express = require('express');
 const https = require('https');
 const fs = require('fs');
 const path = require('path');
-const { execFileSync } = require('child_process');
+const { execFileSync, spawn } = require('child_process');
 
 const ROOT = __dirname;
 const WORK = path.join(ROOT, 'wallet-live-work');
@@ -108,16 +108,33 @@ const opts = {
 fs.rmSync(w('cli_state.json'), { force: true });
 fs.rmSync(w('channel_snapshot.json'), { force: true });
 
-// detail2 §F-1 deposit backing: the channel must be backed by a REAL base-layer balance proof
-// before any member co-signs (the CLI gate refuses an unbacked channel). Produce it ONCE here
-// (~30s); it persists across relay restarts (the per-process reset above clears only the channel
-// state, not the backing files), so this runs only on the very first launch.
+// detail2 §F-1 deposit backing, REAL on-chain (no simulation): a local anvil chain really escrows
+// the deposit, the Rust witness is reconciled against the on-chain depositHashChain, and the
+// channel's balance proof is built from THAT deposit. Done ONCE here (~90s: anvil + deploy +
+// proof); the cached backing persists across relay restarts (the per-process reset above clears
+// only the channel state), so this runs only on the very first launch.
+const RPC = 'http://127.0.0.1:8545';
+const ANVIL0 = '0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80';
+const sh = (bin, args, opts) => execFileSync(bin, args, { encoding: 'utf8', ...opts });
+const rpcUp = () => { try { sh('cast', ['block-number', '--rpc-url', RPC], { stdio: 'pipe' }); return true; } catch (e) { return false; } };
+
 const backed = ['channel_backing.json', 'channel_attestation.bin', 'balance_vd.bin'].every((f) =>
   fs.existsSync(w(f))
 );
 if (!backed) {
-  console.log('No deposit backing yet — running `channel_member setup-backing` (one-time, ~30s)…');
-  cli(['setup-backing']);
+  console.log('Setting up REAL on-chain deposit backing (one-time)…');
+  if (!rpcUp()) {
+    console.log('  starting local anvil (Prague)…');
+    spawn('anvil', ['--hardfork', 'prague'], { stdio: 'ignore', detached: true }).unref();
+    for (let i = 0; i < 60 && !rpcUp(); i++) { try { sh('sleep', ['0.5']); } catch (e) {} }
+    if (!rpcUp()) { console.error('anvil did not come up on ' + RPC); process.exit(1); }
+  }
+  console.log('  deploying IntmaxRollup on the local chain…');
+  const out = sh('forge', ['script', 'script/Deploy.s.sol', '--rpc-url', RPC, '--private-key', ANVIL0, '--broadcast'], { cwd: path.join(ROOT, 'contracts') });
+  const m = out.match(/IntmaxRollup\s*:\s*(0x[0-9a-fA-F]{40})/);
+  if (!m) { console.error('could not parse IntmaxRollup address from forge output'); process.exit(1); }
+  console.log('  IntmaxRollup @ ' + m[1] + ' — setup-backing (real ETH deposit + balance proof, ~30s)…');
+  cli(['setup-backing', RPC, m[1]]);
 }
 
 https.createServer(opts, app).listen(PORT, '0.0.0.0', () => {

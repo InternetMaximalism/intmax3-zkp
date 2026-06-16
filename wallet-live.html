@@ -142,8 +142,13 @@ async function showBacking() {
   try {
     const b = JSON.parse(await api('/api/backing', null, 'GET'));
     const chain = b.settledTxChain || b.settled_tx_chain || '';
-    $('backing').innerHTML = `<span class="ok">✓ backed by a real Intmax deposit</span> · fund <b>${b.fund}</b> · `
-      + `settled_tx_chain <code title="the base-layer balanceProof public input the members reconcile against">${chain.slice(0,10)}…${chain.slice(-6)}</code>`;
+    const rollup = b.rollup || '';
+    const tx = b.depositTx || b.deposit_tx || '';
+    const onchain = rollup
+      ? ` · <span class="ok" title="the deposit really happened on this local chain — totalEscrowed grew by the deposited ETH">on-chain</span> IntmaxRollup <code>${rollup.slice(0,8)}…</code> tx <code>${tx.slice(0,10)}…</code>`
+      : '';
+    $('backing').innerHTML = `<span class="ok">✓ backed by a REAL on-chain ETH deposit</span> · fund <b>${b.fund}</b> · `
+      + `settled_tx_chain <code title="the base-layer balanceProof public input the members reconcile against">${chain.slice(0,10)}…${chain.slice(-6)}</code>${onchain}`;
   } catch (e) {
     $('backing').innerHTML = `<span class="err">no deposit backing yet</span> — the relay runs <code>setup-backing</code> on first launch (~30s); reload shortly.`;
   }
