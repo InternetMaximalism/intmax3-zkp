@@ -270,9 +270,20 @@ Retype existing `InterChannelTx` (`channel.rs:541-597`). Map abstract2's `TxAux`
 > settlement DIRECTLY against L1 (`flowReceive3` step 1 — `TxV2MerkleProof` inclusion of the
 > `tx_tree_root` in a validity-proven block + the sender's `balanceProof`), and the small-block
 > `channelStateSig` (`hash(H1', tx_tree_root)`) is verified by the REAL validity proof
-> (`update_channel_tree` / `bp_sig_chain`, §F-2). Inclusion liveness is by member force-include, not a
-> proof. The `transport_proof` field is retained only as a vestigial carrier and is NOT verified by a
-> dedicated `ChannelProofVerifier` (verified end-to-end in `tests/inter_channel_validity_b2.rs`).
+> (`update_channel_tree` / `bp_sig_chain`, §F-2). The `transport_proof` field is retained only as a
+> vestigial carrier and is NOT verified by a dedicated `ChannelProofVerifier` (verified end-to-end in
+> `tests/inter_channel_validity_b2.rs`).
+>
+> Inclusion liveness is handled by member incentive, NOT a proof. Because a channel's members only
+> sign `hash(H1', tx_tree_root)` when they intend the small block to be included on L1:
+> 1. **a member does not sign the next intmax-native tx until the current one is included** (one state
+>    per version — never advance on an unconfirmed state); and
+> 2. **if no one (the BP) includes the small block, a member includes it themselves** (force-include /
+>    self-post the small block to L1).
+>
+> This is the standard rollup force-inclusion argument; it costs only liveness (eventual inclusion),
+> never safety — the receiver only ever applies a *confirmed* incoming (verified on L1; absent ⇒ the
+> sender is ignored), so delay/censorship reflects no incorrect balance.
 
 **[New] TxLeafHash** (abstract2.md §2.3. The update unit of `settledTxChain`):
 
