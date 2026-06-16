@@ -25,8 +25,8 @@ use intmax3_zkp::{
     regev::encrypt_amount,
     wallet_core::{
         ChannelBalanceAttestation, MemberInfo, MemberKeys, add_signature, assemble_genesis_state,
-        assemble_genesis_state_backed, build_record, sign_state, verify_all_signatures,
-        verify_channel_backing,
+        assemble_genesis_state_backed, build_record, sign_state, sign_state_if_backed,
+        verify_all_signatures, verify_channel_backing,
     },
 };
 use plonky2::{
@@ -151,5 +151,16 @@ fn deposit_backing_gate_reconciles_and_fails_closed() {
     assert!(
         verify_channel_backing(&record, &unbacked, Some(&attestation), &balance_vd).is_err(),
         "an UNBACKED genesis must fail the gate, so no honest member co-signs it"
+    );
+
+    // ---- 7. ATOMIC check-and-sign (detail2 §3.1): sign_state_if_backed signs ONLY when the state's
+    // settled_tx_chain matches the held intmax balance backing, and never otherwise. ----------------
+    assert!(
+        sign_state_if_backed(&mkeys[0], 0, &record, &state, &attestation, &balance_vd).is_ok(),
+        "check-and-sign must produce a signature for a backed state"
+    );
+    assert!(
+        sign_state_if_backed(&mkeys[0], 0, &record, &unbacked, &attestation, &balance_vd).is_err(),
+        "check-and-sign must REFUSE (no signature) when settled_tx_chain does not match the backing"
     );
 }

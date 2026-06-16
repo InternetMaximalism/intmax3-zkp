@@ -614,6 +614,29 @@ pub fn sign_state(keys: &MemberKeys, slot: u8, state: &ChannelState) -> WResult<
     })
 }
 
+/// CHECK-AND-SIGN (detail2 §3.1 `agreeBalanceState`, atomic / non-bypassable): produce this member's
+/// signature over `state` **only if** the `settled_tx_chain` embedded in the state matches the
+/// signer's held intmax balance state — i.e. the channel's native `balanceProof` attestation
+/// reconciles (channel_id + settled_tx_chain, [`verify_channel_backing`]). On any mismatch it returns
+/// an error and produces NO signature.
+///
+/// This is the single operation a co-signer must use: a member never signs a channel state whose
+/// settle history disagrees with the intmax balance it actually holds. Prefer this over a bare
+/// [`sign_state`] on every co-sign path (genesis agreement, send co-sign, refresh, delegate join).
+pub fn sign_state_if_backed(
+    keys: &MemberKeys,
+    slot: u8,
+    record: &ChannelRecord,
+    state: &ChannelState,
+    attestation: &ChannelBalanceAttestation,
+    balance_vd: &VerifierCircuitData<F, C, D>,
+) -> WResult<MemberSignature> {
+    // The gate: the state's settled_tx_chain MUST equal the held balance proof's settled_tx_chain
+    // (and the proof must verify and be for this channel). Refuse to sign otherwise.
+    verify_channel_backing(record, state, Some(attestation), balance_vd)?;
+    sign_state(keys, slot, state)
+}
+
 /// Insert/replace a member signature in slot order.
 pub fn add_signature(state: &mut ChannelState, sig: MemberSignature) {
     state.member_signatures.retain(|s| s.member_slot != sig.member_slot);

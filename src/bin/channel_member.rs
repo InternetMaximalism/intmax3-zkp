@@ -46,7 +46,7 @@ use intmax3_zkp::{
     wallet_core::{
         BuiltSend, ChannelBalanceAttestation, ChannelSnapshot, MemberInfo, MemberKeys,
         RefreshPayload, SendPayload, add_signature, assemble_genesis_state_backed, build_record,
-        build_send, decrypt_balance, sign_state, verify_all_signatures, verify_channel_backing,
+        build_send, decrypt_balance, sign_state_if_backed, verify_all_signatures,
         verify_refresh_transition, verify_send_transition, verify_snapshot,
     },
 };
@@ -172,19 +172,6 @@ fn load_backing() -> (VerifierCircuitData<BF, BC, BD>, ChannelBalanceAttestation
         fs::read(ATTESTATION_FILE).unwrap_or_else(|e| die(format!("read {ATTESTATION_FILE}: {e}")));
     let backing: ChannelBacking = read_json(BACKING_FILE);
     (balance_vd, ChannelBalanceAttestation { balance_proof: proof }, backing)
-}
-
-/// The fail-closed co-sign GATE (detail2 §F-1 / §3.1): refuse to sign `state` unless the channel's
-/// deposit backing verifies and reconciles. Dies (non-zero exit) on ANY failure — never signs.
-fn gate_or_die(
-    record: &ChannelRecord,
-    state: &ChannelState,
-    balance_vd: &VerifierCircuitData<BF, BC, BD>,
-    att: &ChannelBalanceAttestation,
-) {
-    verify_channel_backing(record, state, Some(att), balance_vd).unwrap_or_else(|e| {
-        die(format!("REFUSING TO SIGN — channel deposit backing not verified: {e}"))
-    });
 }
 
 /// ONE-TIME setup: fund the channel with a REAL L1 deposit and cache its base-layer balance proof as
@@ -360,11 +347,18 @@ fn create_channel(
         assemble_genesis_state_backed(&record, &encs, backing.fund, settled, intmax_root)
             .unwrap_or_else(|e| die(e));
 
-    // GATE (fail-closed): the 3 members refuse to co-sign a genesis whose deposit backing does not
-    // verify + reconcile (detail2 §F-1 / §3.1).
-    gate_or_die(&record, &state, &balance_vd, &att);
+    // CHECK-AND-SIGN (detail2 §3.1, atomic): each member signs the genesis ONLY IF its
+    // settled_tx_chain matches the held deposit backing — fail-closed otherwise (never signs).
     for c in &controlled {
-        let sig = sign_state(&keys_for(c.keygen_seed), c.slot, &state).unwrap_or_else(|e| die(e));
+        let sig = sign_state_if_backed(
+            &keys_for(c.keygen_seed),
+            c.slot,
+            &record,
+            &state,
+            &att,
+            &balance_vd,
+        )
+        .unwrap_or_else(|e| die(format!("REFUSING TO SIGN genesis — {e}")));
         add_signature(&mut state, sig);
     }
     (record, state, members, controlled, BROWSER_DELEGATE_SLOT)
@@ -401,12 +395,19 @@ fn join_delegate(
     state.balance_state.state_version += 1;
     state.member_signatures = Vec::new();
     let mut state = state.with_computed_digest();
-    // GATE (fail-closed, detail2 §F-1): a delegate join does not change settled_tx_chain, so the
-    // existing deposit backing must still reconcile before the members re-sign.
+    // CHECK-AND-SIGN (detail2 §3.1): a delegate join does not change settled_tx_chain, so each
+    // member re-signs only if the existing deposit backing still reconciles. Fail-closed.
     let (balance_vd, att, _backing) = load_backing();
-    gate_or_die(&record, &state, &balance_vd, &att);
     for c in &prev.controlled {
-        let sig = sign_state(&keys_for(c.keygen_seed), c.slot, &state).unwrap_or_else(|e| die(e));
+        let sig = sign_state_if_backed(
+            &keys_for(c.keygen_seed),
+            c.slot,
+            &record,
+            &state,
+            &att,
+            &balance_vd,
+        )
+        .unwrap_or_else(|e| die(format!("REFUSING TO SIGN — {e}")));
         add_signature(&mut state, sig);
     }
     (record, state, members, prev.controlled, new_slot)
@@ -527,20 +528,24 @@ fn cmd_cosign(args: &[String]) {
     )
     .unwrap_or_else(|e| die(format!("transition invalid: {e}")));
 
-    // GATE (fail-closed, detail2 §F-1 / §3.1): refuse to co-sign unless the channel's deposit
-    // backing still reconciles with the state we are about to sign (settled_tx_chain is invariant
-    // across in-channel sends, so the genesis attestation backs every in-channel state).
+    // CHECK-AND-SIGN (detail2 §3.1): each member signs the next state ONLY IF its settled_tx_chain
+    // matches the held intmax balance backing (invariant across in-channel sends, so the genesis
+    // attestation backs every in-channel state). Fail-closed — refuse otherwise.
     let (balance_vd, att, _backing) = load_backing();
-    gate_or_die(&state.snapshot.record, &next_state, &balance_vd, &att);
-
-    // Add signatures for every controlled slot not yet signed.
     for c in &state.controlled {
         let already = next_state.member_signatures.iter().any(|s| s.member_slot == c.slot);
         if already {
             continue;
         }
-        let keys = keys_for(c.keygen_seed);
-        let sig = sign_state(&keys, c.slot, &next_state).unwrap_or_else(|e| die(e));
+        let sig = sign_state_if_backed(
+            &keys_for(c.keygen_seed),
+            c.slot,
+            &state.snapshot.record,
+            &next_state,
+            &att,
+            &balance_vd,
+        )
+        .unwrap_or_else(|e| die(format!("REFUSING TO SIGN — {e}")));
         add_signature(&mut next_state, sig);
     }
     write_json(out_path, &next_state);
@@ -576,15 +581,22 @@ fn cmd_cosign_refresh(args: &[String]) {
     }
     verify_refresh_transition(&state.snapshot.state, &state.snapshot.record, &payload, LEVEL)
         .unwrap_or_else(|e| die(format!("refresh transition invalid: {e}")));
-    // GATE (fail-closed, detail2 §F-1): a balance-refresh preserves settled_tx_chain, so the deposit
-    // backing must still reconcile before any member co-signs it.
+    // CHECK-AND-SIGN (detail2 §3.1): a balance-refresh preserves settled_tx_chain, so each member
+    // signs only if the deposit backing still reconciles. Fail-closed.
     let (balance_vd, att, _backing) = load_backing();
-    gate_or_die(&state.snapshot.record, &next_state, &balance_vd, &att);
     for c in &state.controlled {
         if next_state.member_signatures.iter().any(|s| s.member_slot == c.slot) {
             continue;
         }
-        let sig = sign_state(&keys_for(c.keygen_seed), c.slot, &next_state).unwrap_or_else(|e| die(e));
+        let sig = sign_state_if_backed(
+            &keys_for(c.keygen_seed),
+            c.slot,
+            &state.snapshot.record,
+            &next_state,
+            &att,
+            &balance_vd,
+        )
+        .unwrap_or_else(|e| die(format!("REFUSING TO SIGN — {e}")));
         add_signature(&mut next_state, sig);
     }
     write_json(out_path, &next_state);
