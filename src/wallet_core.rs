@@ -73,12 +73,22 @@ fn bail<T>(m: impl Into<String>) -> Result<T, WalletError> {
 
 /// Reject an out-of-range slot before it is used to index a fixed-size member array. SECURITY:
 /// `slot` originates from attacker-shaped JSON; an unchecked `u8 >= 16` index is a wasm OOB trap.
-fn check_slot(slot: usize, member_count: usize) -> WResult<()> {
+///
+/// `active_count` is the number of ACTIVE PARTICIPANTS = `member_count + delegate_count` (delegate
+/// account). Active participants are co-signing members (`0..member_count`) AND delegates
+/// (`member_count..member_count+delegate_count`); both have a balance slot and can send/receive,
+/// so every balance / send / receive / decrypt / snapshot-membership gate admits the full active
+/// region. This check is NOT a co-sign gate — co-signing is enforced separately over
+/// `0..member_count` only (`verify_all_signatures`, `validate_all_member_signatures`). With
+/// `delegate_count = 0`, `active_count == member_count` and this is byte-for-byte the legacy check.
+fn check_slot(slot: usize, active_count: usize) -> WResult<()> {
     if slot >= MAX_CHANNEL_MEMBERS {
         return bail(format!("slot {slot} exceeds MAX_CHANNEL_MEMBERS"));
     }
-    if slot >= member_count {
-        return bail(format!("slot {slot} is not an active member (member_count {member_count})"));
+    if slot >= active_count {
+        return bail(format!(
+            "slot {slot} is not an active participant (active_count {active_count})"
+        ));
     }
     Ok(())
 }
@@ -331,8 +341,8 @@ fn member_at(members: &[MemberInfo], slot: usize) -> WResult<&MemberInfo> {
 }
 
 /// The canonical Poseidon `MemberTree` root over the channel's registered member leaves
-/// `MemberLeaf{pk_g, pk_b, regev_pk_digest}`, in slot order (active slots `0..member_count`;
-/// padding slots are empty leaves, pad-to-MAX D6).
+/// `MemberLeaf{pk_g, pk_b, regev_pk_digest}`, in slot order (active slots
+/// `0..member_count+delegate_count`; padding slots are empty leaves, pad-to-MAX D6).
 ///
 /// SECURITY (P4-1, A11): this is the SAME root the validity / registration circuits commit
 /// (`block_witness_generator::ChannelMemberKeys::member_tree.get_root()`,
@@ -341,13 +351,22 @@ fn member_at(members: &[MemberInfo], slot: usize) -> WResult<&MemberInfo> {
 /// triple jointly, so a peer cannot substitute one member's `pk_b` (or Regev key) independently of
 /// their `pk_g`. The off-chain channel-tx A11 check then reads `pk_b` from this AUTHENTICATED set.
 ///
-/// `members` MUST cover slots `0..member_count` bijectively (the caller checks this via
-/// `verify_snapshot` / `check_slot`); `pk_g` for each slot is taken from the record (the value the
-/// member signatures are bound to), while `pk_b` and the Regev digest come from the per-member
+/// `members` MUST cover slots `0..member_count+delegate_count` bijectively (the caller checks this
+/// via `verify_snapshot` / `check_slot`); `pk_g` for each slot is taken from the record (the value
+/// the member signatures are bound to), while `pk_b` and the Regev digest come from the per-member
 /// `MemberInfo`.
+///
+/// SECURITY (delegate account): the loop covers ACTIVE participants = members
+/// (`0..member_count`) AND delegates (`member_count..member_count+delegate_count`). Delegates carry
+/// a real `MemberLeaf{pk_g, pk_b, regev_pk_digest}` identity so they can send (A11) and withdraw at
+/// close, distinguished from members ONLY by slot index. This MUST match the Phase-1 native
+/// `member_pubkeys_root_for` (channel_reg_step.rs, loops `0..member_count+delegate_count`) and the
+/// keccak reg-chain, so the wallet's `member_pubkeys_root` equals the registered root. With
+/// `delegate_count = 0` this is byte-for-byte the legacy `0..member_count` loop.
 fn member_pubkeys_root(record: &ChannelRecord, members: &[MemberInfo]) -> WResult<Bytes32> {
     let mut tree = MemberTree::init();
-    for slot in 0..record.member_count as usize {
+    let active = record.member_count as usize + record.delegate_count as usize;
+    for slot in 0..active {
         let m = member_at(members, slot)?;
         tree.push(MemberLeaf {
             pk_g: record.member_pk_gs[slot].reduce_to_hash_out(),
@@ -507,18 +526,20 @@ pub fn verify_snapshot(
         .record
         .validate()
         .map_err(|e| WalletError(format!("{e:?}")))?;
-    // Members must cover slots 0..member_count bijectively (no duplicates, no out-of-range or
-    // padding-slot entries). Prevents malformed/duplicate slot lists slipping past the root check.
-    let mc = snapshot.record.member_count as usize;
-    if snapshot.members.len() != mc {
+    // The members list must cover ALL active participants — members (`0..member_count`) AND
+    // delegates (`member_count..member_count+delegate_count`) — bijectively (no duplicates, no
+    // out-of-range or padding-slot entries). Prevents malformed/duplicate slot lists slipping past
+    // the root check. With `delegate_count = 0`, `active == member_count` (legacy behavior).
+    let active = snapshot.record.member_count as usize + snapshot.record.delegate_count as usize;
+    if snapshot.members.len() != active {
         return bail(format!(
-            "members list has {} entries but member_count is {mc}",
+            "members list has {} entries but active participants (member_count + delegate_count) is {active}",
             snapshot.members.len()
         ));
     }
     let mut seen = [false; MAX_CHANNEL_MEMBERS];
     for m in &snapshot.members {
-        check_slot(m.slot as usize, mc)?;
+        check_slot(m.slot as usize, active)?;
         if seen[m.slot as usize] {
             return bail(format!("duplicate member slot {}", m.slot));
         }
@@ -548,7 +569,9 @@ pub fn verify_snapshot(
         .map_err(|e| WalletError(format!("{e:?}")))?;
     verify_all_signatures(&snapshot.record, &snapshot.members, &snapshot.state)?;
     if let Some((keys, slot)) = my_keys {
-        check_slot(slot as usize, mc)?;
+        // A delegate (slot in `member_count..active`) verifies/decrypts its own slot exactly like a
+        // member, so admit the full active region.
+        check_slot(slot as usize, active)?;
         let m = member_at(&snapshot.members, slot as usize)?;
         if m.regev_pk != keys.regev_pk {
             return bail("my slot's Regev pk in the snapshot does not match my key");
@@ -568,7 +591,10 @@ pub fn verify_snapshot(
 
 /// Decrypt this member's hidden balance from a snapshot.
 pub fn decrypt_balance(keys: &MemberKeys, snapshot: &ChannelSnapshot, slot: u8) -> WResult<u64> {
-    check_slot(slot as usize, snapshot.state.balance_state.member_count as usize)?;
+    // Delegates own a balance slot too; admit the full active region (members + delegates).
+    let bs = &snapshot.state.balance_state;
+    let active = bs.member_count as usize + bs.delegate_count as usize;
+    check_slot(slot as usize, active)?;
     decrypt_amount(
         &keys.regev_sk,
         &snapshot.state.balance_state.enc_balances[slot as usize],
@@ -610,9 +636,13 @@ pub fn build_send(
     if sender_slot == recipient_slot {
         return bail("sender and recipient must differ");
     }
-    let mc = snapshot.record.member_count as usize;
-    check_slot(sender_slot as usize, mc)?;
-    check_slot(recipient_slot as usize, mc)?;
+    // Sender and recipient may each be a member OR a delegate (delegate account): both have a
+    // balance slot and send/receive with the identical proofs, so admit the full active region
+    // (`member_count + delegate_count`). The sender's authorization is still its own BabyBear
+    // hash-sig (A11) — only the slot region widened.
+    let active = snapshot.record.member_count as usize + snapshot.record.delegate_count as usize;
+    check_slot(sender_slot as usize, active)?;
+    check_slot(recipient_slot as usize, active)?;
     let record = &snapshot.record;
     let members = &snapshot.members;
     let prev = &snapshot.state;
@@ -750,25 +780,29 @@ pub fn verify_send_transition(
         payload.channel_tx.recipient_pk_g,
     );
     let sender_slot = payload.sender_index as usize;
-    let mc = payload.record.member_count as usize;
-    check_slot(sender_slot, mc)?;
+    // The sender may be a member OR a delegate (delegate account): a delegate sends with the
+    // identical E-1 + A11 mechanism, distinguished only by slot region. Admit the full active
+    // region (`member_count + delegate_count`); co-signing (`0..member_count`) is unaffected.
+    let active = payload.record.member_count as usize + payload.record.delegate_count as usize;
+    check_slot(sender_slot, active)?;
     // SECURITY (P4-1, A11): authenticate the payload's member set BEFORE trusting any `pk_b` /
     // `regev_pk` it carries. `verify_send_transition` runs on a peer-supplied `SendPayload` that has
     // its OWN `record` + `members` (it is NOT necessarily the snapshot already passed through
-    // `verify_snapshot`), so we must independently (a) check the member list covers slots
-    // `0..member_count` bijectively and (b) recompute the canonical Poseidon `MemberTree` root over
+    // `verify_snapshot`), so we must independently (a) check the member list covers the active
+    // slots `0..member_count+delegate_count` (members + delegates) bijectively and (b) recompute the
+    // canonical Poseidon `MemberTree` root over
     // `MemberLeaf{pk_g, pk_b, regev_pk_digest}` and bind it to `record.member_pubkeys_root`. Only
     // then are the per-slot `pk_b` and Regev keys authenticated against the registered set, closing
     // the P3-5 gap where `pk_b` was read from the raw payload.
-    if payload.members.len() != mc {
+    if payload.members.len() != active {
         return bail(format!(
-            "members list has {} entries but member_count is {mc}",
+            "members list has {} entries but active participants (member_count + delegate_count) is {active}",
             payload.members.len()
         ));
     }
     let mut seen = [false; MAX_CHANNEL_MEMBERS];
     for m in &payload.members {
-        check_slot(m.slot as usize, mc)?;
+        check_slot(m.slot as usize, active)?;
         if seen[m.slot as usize] {
             return bail(format!("duplicate member slot {}", m.slot));
         }
@@ -833,4 +867,478 @@ fn fill_placeholder_sigs(record: &ChannelRecord, state: &mut ChannelState) {
             signature: vec![1],
         })
         .collect();
+}
+
+// ---------------------------------------------------------------------------
+// Phase 2 delegate-account SEND authorization — tests
+// ---------------------------------------------------------------------------
+//
+// These tests live INLINE (not in tests/wallet_core_e2e.rs) so they can build a delegate-bearing
+// channel with the SAME private `member_pubkeys_root` / `regev_pks_array` helpers the verify path
+// uses — guaranteeing the test record's `member_pubkeys_root` is byte-identical to what
+// `verify_send_transition` recomputes, with no risk of a divergent hand-rolled Poseidon root.
+//
+// What these tests prove (delegate-account threat model §3):
+//   * DA-send-happy — a DELEGATE (slot >= member_count) sends with the IDENTICAL E-1 + A11
+//     mechanism as a member; `verify_send_transition` + `verify_channel_tx_sender_hash_sig` ACCEPT.
+//     This is the positive existence proof that the widened `check_slot`/`member_pubkeys_root`
+//     gates admit the delegate region.
+//   * DA2 — an unauthorized delegate send is REJECTED: (a) a hash-sig minted by a key that is NOT
+//     the delegate's registered `pk_b` (even though internally self-consistent) fails the A11
+//     anchoring; (b) a send claiming a delegate slot whose `sender_pk_g/pk_b` do not match the
+//     registered MemberLeaf fails A11. Closes threat DA2.
+//   * DA1 — a state that debits a delegate slot with NO corresponding delegate-signed ChannelTx is
+//     REJECTED by the transition layer (the E-1 statement is rebuilt from authenticated state and
+//     the sender hash-sig is mandatory). Closes threat DA1 at the TRANSITION layer (DLG-1); the
+//     accepted residual risk against FULLY-COLLUDING members is DLG-2, out of scope here.
+//   * regression — a member_count=3, delegate_count=0 channel behaves exactly as before (the
+//     widened gates are a no-op when active == member_count).
+#[cfg(test)]
+#[cfg(not(debug_assertions))]
+mod delegate_send_tests {
+    use super::*;
+    use crate::common::channel::{ChannelFund, ChannelStatus, ChannelTx};
+    use rand::SeedableRng as _;
+    use rand010::{SeedableRng as _, rngs::StdRng};
+
+    const LEVEL: RegevSecurityLevel = RegevSecurityLevel::Test;
+
+    fn member_info(slot: u8, keys: &MemberKeys) -> MemberInfo {
+        MemberInfo {
+            slot,
+            pk_g: keys.pk_g(),
+            pk_b: keys.pk_b(),
+            regev_pk: keys.regev_pk.clone(),
+        }
+    }
+
+    /// Build a channel record with `member_count` co-signing members followed by `delegate_count`
+    /// delegates (one `MemberKeys` per active slot, in slot order). Uses the SAME private
+    /// `member_pubkeys_root` / `regev_pks_array` the verify path uses.
+    fn build_delegate_record(
+        channel_id: u32,
+        keys: &[MemberKeys],
+        member_count: u8,
+        delegate_count: u8,
+    ) -> (ChannelRecord, Vec<MemberInfo>) {
+        let active = member_count as usize + delegate_count as usize;
+        assert_eq!(keys.len(), active, "one key per active slot");
+        let members: Vec<MemberInfo> =
+            keys.iter().enumerate().map(|(i, k)| member_info(i as u8, k)).collect();
+        let mut hashes: [Bytes32; MAX_CHANNEL_MEMBERS] =
+            std::array::from_fn(|_| Bytes32::default());
+        for (slot, h) in hashes.iter_mut().enumerate().take(active) {
+            *h = members[slot].pk_g;
+        }
+        let regev_pks = regev_pks_array(&members);
+        let mut record = ChannelRecord {
+            channel_id: ChannelId::new(channel_id as u64).unwrap(),
+            member_count,
+            delegate_count,
+            member_pk_gs: hashes,
+            member_pubkeys_root: Bytes32::default(),
+            bp_member_slot: 0,
+            special_close_penalty: U256::from(0u32),
+            close_freeze_nonce: 0,
+            status: ChannelStatus::Active,
+            regev_pk_root: regev_pk_root(&regev_pks),
+        };
+        record.member_pubkeys_root = member_pubkeys_root(&record, &members).unwrap();
+        record.validate().unwrap();
+        (record, members)
+    }
+
+    /// Assemble a genesis `ChannelState` over the FULL active set (members + delegates). Mirrors
+    /// `assemble_genesis_state`, but accepts `active`-length ciphertext / pending-add vectors so a
+    /// delegate's genesis balance slot is populated.
+    fn assemble_active_genesis(
+        record: &ChannelRecord,
+        enc_balances_active: &[RegevCiphertext],
+        fund_amount: u64,
+    ) -> ChannelState {
+        let active = record.member_count as usize + record.delegate_count as usize;
+        assert_eq!(enc_balances_active.len(), active);
+        ChannelState {
+            channel_id: record.channel_id,
+            epoch: 1,
+            small_block_number: 0,
+            close_freeze_nonce: 0,
+            channel_fund: ChannelFund {
+                channel_id: record.channel_id,
+                amount: U256::from(fund_amount.min(u32::MAX as u64) as u32),
+                intmax_state_root: Bytes32::default(),
+            },
+            balance_state: BalanceState {
+                channel_id: record.channel_id,
+                member_count: record.member_count,
+                delegate_count: record.delegate_count,
+                enc_balances: BalanceState::pad_enc_balances(enc_balances_active),
+                settled_tx_chain: Bytes32::default(),
+                state_version: 0,
+                pending_adds: BalanceState::pad_pending_adds(&vec![0u32; active]),
+            },
+            h2_tag: Bytes32::default(),
+            shared_native_nullifier_root: Bytes32::default(),
+            unallocated_confirmed_incoming: U256::zero(),
+            prev_digest: Bytes32::default(),
+            digest: Bytes32::default(),
+            member_signatures: Vec::new(),
+        }
+        .with_computed_digest()
+    }
+
+    /// A 2-member + 1-delegate channel (delegate in slot 2) with real keys, a genesis with a
+    /// balance for every active slot, and both MEMBERS' real co-signatures over the genesis.
+    /// Returns (record, all-active-keys, members, signed genesis, genesis witnesses).
+    fn setup_delegate_channel(
+        rng: &mut StdRng,
+        channel_id: u32,
+        balances: [u64; 3],
+    ) -> (
+        ChannelRecord,
+        Vec<MemberKeys>,
+        Vec<MemberInfo>,
+        ChannelState,
+        Vec<AmountWitness>,
+    ) {
+        // slots 0,1 = co-signing members; slot 2 = delegate.
+        let keys: Vec<MemberKeys> = (0..3).map(|_| MemberKeys::generate(rng)).collect();
+        let (record, members) = build_delegate_record(channel_id, &keys, 2, 1);
+
+        let mut cts = Vec::new();
+        let mut witnesses = Vec::new();
+        let mut fund = 0u64;
+        for (i, &bal) in balances.iter().enumerate() {
+            let (ct, w) = encrypt_amount(rng, &keys[i].regev_pk, bal).unwrap();
+            cts.push(ct);
+            witnesses.push(w);
+            fund += bal;
+        }
+        let mut genesis = assemble_active_genesis(&record, &cts, fund);
+        // ONLY the members (slots 0,1) co-sign — the delegate (slot 2) does NOT (N-of-N excludes it).
+        let g0 = sign_state(&keys[0], 0, &genesis).unwrap();
+        add_signature(&mut genesis, g0);
+        let g1 = sign_state(&keys[1], 1, &genesis).unwrap();
+        add_signature(&mut genesis, g1);
+
+        (record, keys, members, genesis, witnesses)
+    }
+
+    /// DA-send-happy: the DELEGATE (slot 2) builds a ChannelTx sending to a member (slot 0), with
+    /// its OWN BabyBear hash-sig (A11) over the IMPA digest and the E-1 channelTxZKP. The transition
+    /// + sender hash-sig MUST verify (the members would then co-sign). Asserts the delegate's slot is
+    /// debited and the recipient credited.
+    ///
+    /// PROVES: the widened `check_slot` (active region) + `member_pubkeys_root` (members + delegates)
+    /// admit a delegate sender; a delegate sends with the IDENTICAL mechanism as a member.
+    #[test]
+    fn da_send_happy_delegate_sends_to_member() {
+        let mut rng = StdRng::seed_from_u64(0xDADADA);
+        let (bal0, bal1, bal_d) = (50u64, 30u64, 20u64);
+        let (record, keys, members, genesis, witnesses) =
+            setup_delegate_channel(&mut rng, 11, [bal0, bal1, bal_d]);
+        let snapshot = ChannelSnapshot {
+            record: record.clone(),
+            state: genesis,
+            members: members.clone(),
+        };
+        // Both members AND the delegate fully verify the signed genesis (real roots / own-slot
+        // decrypt). The delegate verifying its own slot exercises the widened `verify_snapshot`.
+        verify_snapshot(&snapshot, Some((&keys[0], 0))).expect("member verify genesis");
+        verify_snapshot(&snapshot, Some((&keys[2], 2))).expect("DELEGATE verify genesis");
+        assert_eq!(decrypt_balance(&keys[2], &snapshot, 2).unwrap(), bal_d);
+
+        // The delegate (slot 2) sends 8 to member 0.
+        let amount = 8u64;
+        let BuiltSend { mut payload, .. } = build_send(
+            &keys[2],
+            &snapshot,
+            2, // delegate sender
+            0, // member recipient
+            amount,
+            bal_d,
+            &witnesses[2],
+            Bytes32::default(),
+            LEVEL,
+            &mut rng,
+        )
+        .expect("delegate build_send");
+
+        // Recipient (member 0) verifies the transition + E-1 proof + the delegate's A11 hash-sig.
+        verify_send_transition(
+            &snapshot.state,
+            &snapshot.record,
+            &payload,
+            LEVEL,
+            Some(&keys[0].regev_sk),
+            Some(amount),
+        )
+        .expect("delegate send transition must verify");
+
+        // Explicit A11 sender hash-sig check against the delegate's REGISTERED leaf at slot 2.
+        let tx_digest = ChannelTx::signing_digest(
+            snapshot.state.channel_id,
+            snapshot.state.digest,
+            &payload.channel_tx.enc_amount,
+            payload.channel_tx.nonce,
+            payload.channel_tx.sender_pk_g,
+            payload.channel_tx.recipient_pk_g,
+        );
+        verify_channel_tx_sender_hash_sig(
+            &payload.channel_tx,
+            &tx_digest,
+            LEVEL,
+            record.member_pk_gs[2],
+            members[2].pk_b,
+        )
+        .expect("delegate A11 sender hash-sig must verify");
+
+        // Members co-sign the result (delegate does NOT).
+        let s0 = sign_state(&keys[0], 0, &payload.proposed_next_state).unwrap();
+        add_signature(&mut payload.proposed_next_state, s0);
+        let s1 = sign_state(&keys[1], 1, &payload.proposed_next_state).unwrap();
+        add_signature(&mut payload.proposed_next_state, s1);
+        let final_snapshot = ChannelSnapshot {
+            record,
+            state: payload.proposed_next_state,
+            members,
+        };
+        verify_all_signatures(
+            &final_snapshot.record,
+            &final_snapshot.members,
+            &final_snapshot.state,
+        )
+        .expect("member n-of-n must verify (delegate excluded)");
+
+        // The delegate slot is debited; the recipient member is credited.
+        assert_eq!(decrypt_balance(&keys[2], &final_snapshot, 2).unwrap(), bal_d - amount);
+        assert_eq!(decrypt_balance(&keys[0], &final_snapshot, 0).unwrap(), bal0 + amount);
+    }
+
+    /// DA2 (a): the delegate send but with the hash-sig produced by a DIFFERENT key (not the
+    /// delegate's registered `pk_b`), with the `pk_b` swapped in the payload member list AND a
+    /// matching forged hash-sig — so the inner hash-sig is internally valid. The A11 anchoring
+    /// (member_pubkeys_root recompute) MUST reject it.
+    ///
+    /// PROVES (DA2): a delegate slot cannot be debited by a non-registered signing key.
+    #[test]
+    fn da2_delegate_send_wrong_key_rejected() {
+        let mut rng = StdRng::seed_from_u64(0xD2D2D2);
+        let (record, keys, members, genesis, witnesses) =
+            setup_delegate_channel(&mut rng, 12, [50, 30, 20]);
+        let snapshot = ChannelSnapshot {
+            record: record.clone(),
+            state: genesis,
+            members: members.clone(),
+        };
+        let amount = 8u64;
+        let BuiltSend { payload, .. } = build_send(
+            &keys[2], &snapshot, 2, 0, amount, 20, &witnesses[2], Bytes32::default(), LEVEL,
+            &mut rng,
+        )
+        .expect("delegate build_send");
+
+        // Attacker key forges a self-consistent hash-sig over the SAME IMPA digest.
+        let attacker_baby =
+            BabyBearSecretKey::random(&mut rand::rngs::StdRng::seed_from_u64(0xBAD));
+        let attacker_pk_b = attacker_baby.public_key().to_bytes32();
+        let tx_digest = ChannelTx::signing_digest(
+            snapshot.state.channel_id,
+            snapshot.state.digest,
+            &payload.channel_tx.enc_amount,
+            payload.channel_tx.nonce,
+            payload.channel_tx.sender_pk_g,
+            payload.channel_tx.recipient_pk_g,
+        );
+        let m = decompose_digest_to_limbs(&tx_digest);
+        let (attacker_sig, _pvs) = prove_hash_sig(LEVEL, &attacker_baby, &m).unwrap();
+
+        let mut tampered = payload.clone();
+        tampered.channel_tx.sender_pk_b = attacker_pk_b;
+        tampered.channel_tx.sender_hash_sig = attacker_sig;
+        for mi in tampered.members.iter_mut() {
+            if mi.slot == 2 {
+                mi.pk_b = attacker_pk_b;
+            }
+        }
+        let res = verify_send_transition(
+            &snapshot.state,
+            &snapshot.record,
+            &tampered,
+            LEVEL,
+            Some(&keys[0].regev_sk),
+            Some(amount),
+        );
+        let err = res.expect_err("DA2: delegate send with non-registered pk_b MUST be rejected");
+        assert!(
+            err.to_string().contains("member_pubkeys_root"),
+            "rejection must come from the member-set anchoring (A11), got: {err}"
+        );
+    }
+
+    /// DA2 (b): a send whose `sender_pk_g/pk_b` claim a delegate slot but do not match the
+    /// registered MemberLeaf at that slot. Here we keep the honest member list (so the
+    /// member_pubkeys_root anchoring passes) but tamper the ChannelTx's claimed sender_pk_b to a
+    /// value that is not the registered delegate's pk_b. The direct A11 check rejects it.
+    ///
+    /// PROVES (DA2): the A11 binding ties the ChannelTx's claimed (pk_g, pk_b) to the registered
+    /// leaf at the sender slot.
+    #[test]
+    fn da2_delegate_send_mismatched_leaf_rejected() {
+        let mut rng = StdRng::seed_from_u64(0xD2BBBB);
+        let (record, keys, members, genesis, witnesses) =
+            setup_delegate_channel(&mut rng, 13, [50, 30, 20]);
+        let snapshot = ChannelSnapshot {
+            record: record.clone(),
+            state: genesis,
+            members: members.clone(),
+        };
+        let amount = 8u64;
+        let BuiltSend { payload, .. } = build_send(
+            &keys[2], &snapshot, 2, 0, amount, 20, &witnesses[2], Bytes32::default(), LEVEL,
+            &mut rng,
+        )
+        .expect("delegate build_send");
+
+        let tx_digest = ChannelTx::signing_digest(
+            snapshot.state.channel_id,
+            snapshot.state.digest,
+            &payload.channel_tx.enc_amount,
+            payload.channel_tx.nonce,
+            payload.channel_tx.sender_pk_g,
+            payload.channel_tx.recipient_pk_g,
+        );
+        // The ChannelTx's claimed pk_b does NOT match the registered delegate leaf (members[2].pk_b
+        // is the real one). Direct A11 check with the WRONG claimed pk_b must reject. We feed a
+        // foreign pk_b as the "registered" value to model a leaf/claim mismatch.
+        let mut tampered_tx = payload.channel_tx.clone();
+        let foreign = MemberKeys::generate(&mut rng);
+        tampered_tx.sender_pk_b = foreign.pk_b();
+        let res = verify_channel_tx_sender_hash_sig(
+            &tampered_tx,
+            &tx_digest,
+            LEVEL,
+            record.member_pk_gs[2],
+            members[2].pk_b, // the genuinely registered delegate pk_b
+        );
+        let err = res.expect_err("DA2: ChannelTx pk_b not matching the registered leaf MUST reject");
+        assert!(
+            err.to_string().contains("A11"),
+            "rejection must be the A11 leaf-binding, got: {err}"
+        );
+    }
+
+    /// DA1: a state transition that LOWERS the delegate's balance with NO corresponding
+    /// delegate-signed ChannelTx is rejected by `verify_send_transition`. We take an honest
+    /// member-0 -> member-1 send and tamper the delegate's (uninvolved) slot ciphertext in the
+    /// proposed next state. The transition verifier requires every uninvolved slot to be bit-
+    /// identical AND the sender slot's E-1 statement to be rebuilt from authenticated state, so a
+    /// fabricated delegate debit with no authorizing ChannelTx is rejected.
+    ///
+    /// PROVES (DA1 at the TRANSITION layer / DLG-1): honest members will not co-sign a delegate
+    /// debit lacking the delegate's own send authorization — the verifier rejects it before any
+    /// co-signature. (Residual DLG-2 collusion risk is accepted out of scope.)
+    #[test]
+    fn da1_fabricated_delegate_debit_rejected() {
+        let mut rng = StdRng::seed_from_u64(0xD1D1D1);
+        let (record, keys, members, genesis, witnesses) =
+            setup_delegate_channel(&mut rng, 14, [50, 30, 20]);
+        let snapshot = ChannelSnapshot {
+            record: record.clone(),
+            state: genesis,
+            members: members.clone(),
+        };
+        // Honest member-0 -> member-1 send (the delegate at slot 2 is NOT involved).
+        let amount = 5u64;
+        let BuiltSend { mut payload, .. } = build_send(
+            &keys[0], &snapshot, 0, 1, amount, 50, &witnesses[0], Bytes32::default(), LEVEL,
+            &mut rng,
+        )
+        .expect("member build_send");
+
+        // ATTACK: re-encrypt the delegate's slot to a LOWER balance (a fabricated debit) with no
+        // ChannelTx authorizing it. The members would have to co-sign this — honest members refuse,
+        // and the transition verifier rejects it because slot 2 is uninvolved yet changed.
+        let (forged_lower, _w) = encrypt_amount(&mut rng, &keys[2].regev_pk, 1u64).unwrap();
+        let mut tampered_state = payload.proposed_next_state.clone();
+        tampered_state.balance_state.enc_balances[2] = forged_lower;
+        let tampered_state = tampered_state.with_computed_digest();
+        payload.proposed_next_state = tampered_state;
+
+        let res = verify_send_transition(
+            &snapshot.state,
+            &snapshot.record,
+            &payload,
+            LEVEL,
+            Some(&keys[1].regev_sk),
+            Some(amount),
+        );
+        assert!(
+            res.is_err(),
+            "DA1: a fabricated delegate debit with no authorizing ChannelTx MUST be rejected"
+        );
+    }
+
+    /// Regression: a member_count=3, delegate_count=0 channel behaves EXACTLY as before — the
+    /// widened active-region gates are a no-op when active == member_count. A member send verifies
+    /// and balances reconcile.
+    #[test]
+    fn regression_no_delegates_unchanged() {
+        let mut rng = StdRng::seed_from_u64(0x3030);
+        let keys: Vec<MemberKeys> = (0..3).map(|_| MemberKeys::generate(&mut rng)).collect();
+        let (record, members) = build_delegate_record(15, &keys, 3, 0);
+        assert_eq!(record.delegate_count, 0);
+
+        let (b0, b1, b2) = (40u64, 25u64, 35u64);
+        let mut cts = Vec::new();
+        let mut ws = Vec::new();
+        for (i, &b) in [b0, b1, b2].iter().enumerate() {
+            let (ct, w) = encrypt_amount(&mut rng, &keys[i].regev_pk, b).unwrap();
+            cts.push(ct);
+            ws.push(w);
+        }
+        let mut genesis = assemble_active_genesis(&record, &cts, b0 + b1 + b2);
+        for i in 0..3 {
+            let s = sign_state(&keys[i], i as u8, &genesis).unwrap();
+            add_signature(&mut genesis, s);
+        }
+        let snapshot = ChannelSnapshot {
+            record: record.clone(),
+            state: genesis,
+            members: members.clone(),
+        };
+        verify_snapshot(&snapshot, Some((&keys[0], 0))).expect("verify genesis (3 members)");
+
+        let amount = 6u64;
+        let BuiltSend { mut payload, .. } = build_send(
+            &keys[0], &snapshot, 0, 1, amount, b0, &ws[0], Bytes32::default(), LEVEL, &mut rng,
+        )
+        .expect("member build_send");
+        verify_send_transition(
+            &snapshot.state,
+            &snapshot.record,
+            &payload,
+            LEVEL,
+            Some(&keys[1].regev_sk),
+            Some(amount),
+        )
+        .expect("member send transition (no delegates) must verify");
+        for i in 0..3 {
+            let s = sign_state(&keys[i], i as u8, &payload.proposed_next_state).unwrap();
+            add_signature(&mut payload.proposed_next_state, s);
+        }
+        let final_snapshot = ChannelSnapshot {
+            record,
+            state: payload.proposed_next_state,
+            members,
+        };
+        verify_all_signatures(
+            &final_snapshot.record,
+            &final_snapshot.members,
+            &final_snapshot.state,
+        )
+        .expect("3-of-3 must verify");
+        assert_eq!(decrypt_balance(&keys[0], &final_snapshot, 0).unwrap(), b0 - amount);
+        assert_eq!(decrypt_balance(&keys[1], &final_snapshot, 1).unwrap(), b1 + amount);
+    }
 }

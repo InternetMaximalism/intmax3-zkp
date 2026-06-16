@@ -54,6 +54,38 @@ keccak preimage variable-length, breaking the single-keccak in-circuit consumpti
   calldata-reentry (mirrors the manager's compiling `_runCloseVerify`). `_managerInitcode` now passes
   `delegateCount_ = 0` (constructor arg #4).
 
+## Phase 2/3/4 implementation map (from Explore @ f1c4948)
+
+DESIGN DECISION D-A: delegates are "active participants" (active = member_count + delegate_count) in
+every IDENTITY / BALANCE / SNAPSHOT / REGISTRATION structure (MemberInfo list, Poseidon MemberTree /
+member_pubkeys_root, registration arrays, manager bindings), distinguished ONLY by slot index >=
+member_count. The ONLY member-only surface is CO-SIGNING (verify_all_signatures, close active_bits, IMCM
+member_set_commitment) — STAYS `0..member_count`.
+
+- Phase 2 SEND (COMPLETE): src/wallet_core.rs only. check_slot -> active at all 7 sites (none was a co-sign
+  context); member_pubkeys_root loop 0..active; verify_snapshot/verify_send_transition bijection
+  members.len()==active. A11 + in-circuit send confirmed already slot-agnostic (state_update_verifier loops
+  0..MAX, member_index_pubkey_hash just indexes; verify_channel_tx_sender_hash_sig is slot-free). build_record
+  / assemble_genesis_state KEPT delegate_count=0 (member-only wallet build path); VERIFY path now accepts
+  delegate-bearing snapshots. co-sign STAYS member-only (verify_all_signatures L500 0..member_count,
+  validate_all_member_signatures, fill_placeholder_sigs — untouched). Tests (inline #[cfg(test)] in
+  wallet_core.rs, mc=2 dc=1 delegate in slot 2, real Goldilocks+BabyBear+Regev keys, member co-sigs):
+  da_send_happy (delegate sends to member, ACCEPT, slot debited/recipient credited),
+  da2_delegate_send_wrong_key_rejected (forged self-consistent hash-sig w/ non-registered pk_b -> A11 reject),
+  da2_delegate_send_mismatched_leaf_rejected (ChannelTx pk_b != registered leaf -> A11 reject),
+  da1_fabricated_delegate_debit_rejected (delegate slot lowered w/ no ChannelTx -> transition reject),
+  regression_no_delegates_unchanged (mc=3 dc=0 member send works as before). GREEN: wallet_core lib 5/5 + 298
+  pre-existing; wallet_core_e2e 3/3; channel lib 73/73.
+- Phase 3 WITHDRAW circuit: withdrawal_claim_pis.rs:128 `member_index >= member_count` -> `>= active`
+  (allow delegate-slot E-3 WithdrawalClaim). H1 binds both counts; ct binding slot-agnostic. close_circuit
+  solvency loops already 0..MAX; co-sign loops STAY member-only.
+- Phase 4 Solidity manager + registration + wallet: manager memberBindings + registeredMemberIndexPlusOne
+  are MEMBER-ONLY (ctor 498-510); submitWithdrawalClaim(829)/post-close-claim(877) reject non-members =>
+  DELEGATES CANNOT WITHDRAW yet. Add delegate identities (pk_g+recipient) to the withdrawal lookup
+  (separate delegateBindings ctor arg -> same/parallel map), IMCM stays activeMemberCount-only. Wallet
+  delegate-creation path + e2e create->send->withdraw. Solvency cap already covers all slots.
+- Phase 5 separate security review + attacker pass (DA1/DA2/DA4/DA5/DA6).
+
 ---
 
 # Task: Make the payment channel real (eliminate all stubs) — real ETH escrow + real on-chain settlement + value transfer
