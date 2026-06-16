@@ -39,13 +39,22 @@ app.use((req, res, next) => {
 // the genesis).
 app.post('/api/init', (req, res) => {
   try {
-    // Fresh channel each time.
+    // CREATE-OR-JOIN: the first browser creates the channel (3 members + delegate slot 3); each
+    // later browser JOINS the SAME channel as a distinct delegate (slot 4, 5, …). cli_state.json is
+    // NOT reset here (only on relay startup) so existing delegates are preserved.
     fs.mkdirSync(WORK, { recursive: true });
-    fs.rmSync(w('cli_state.json'), { force: true });
     fs.writeFileSync(w('contribution.json'), JSON.stringify(req.body));
     cli(['init', 'contribution.json', 'channel_snapshot.json']);
     res.json(JSON.parse(fs.readFileSync(w('channel_snapshot.json'), 'utf8')));
   } catch (e) { { console.error(e.stderr ? String(e.stderr) : (e.message||e)); res.status(500).json({ error: String(e.stderr || e.message || e) }); } }
+});
+
+// Latest fully-signed channel snapshot — browsers re-import this before sending so they pick up any
+// newly-joined delegates (and the current head).
+app.get('/api/snapshot', (req, res) => {
+  try {
+    res.json(JSON.parse(fs.readFileSync(w('channel_snapshot.json'), 'utf8')));
+  } catch (e) { res.status(404).json({ error: 'no channel yet' }); }
 });
 
 // (Legacy member-mode genesis co-signing — unused by the delegate demo, where the browser does not
@@ -75,6 +84,11 @@ const opts = {
   key: fs.readFileSync(path.join(ROOT, 'self_certs', 'key.pem')),
   cert: fs.readFileSync(path.join(ROOT, 'self_certs', 'cert.pem')),
 };
+// Fresh channel per relay process: clear any prior channel on startup (restart the relay to start a
+// brand-new channel). During a run, the channel persists so delegates accumulate (create-or-join).
+fs.rmSync(w('cli_state.json'), { force: true });
+fs.rmSync(w('channel_snapshot.json'), { force: true });
+
 https.createServer(opts, app).listen(PORT, '0.0.0.0', () => {
   console.log(`wallet relay on https://localhost:${PORT}/wallet-live.html`);
 });

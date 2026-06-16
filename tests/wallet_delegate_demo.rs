@@ -100,3 +100,61 @@ fn delegate_demo_three_members_plus_browser_delegate_send() {
         final_snapshot.state.member_signatures.iter().map(|s| s.member_slot).collect();
     assert_eq!(signers, vec![0, 1, 2], "exactly the 3 members co-signed; delegate slot 3 did not");
 }
+
+/// Multi-delegate: 3 members (slots 0,1,2) + TWO delegates (slots 3,4) in the SAME channel. Delegate
+/// 3 sends to delegate 4. Proves two distinct delegates coexist and a delegate-to-delegate transfer
+/// is co-signed by the 3 members (neither delegate co-signs state).
+#[test]
+fn two_delegates_in_one_channel_delegate_to_delegate_send() {
+    let mut rng = StdRng::seed_from_u64(0x2DE1_2DE1);
+    let member_keys: Vec<MemberKeys> = (0..3).map(|_| MemberKeys::generate(&mut rng)).collect();
+    let d3 = MemberKeys::generate(&mut rng); // delegate slot 3
+    let d4 = MemberKeys::generate(&mut rng); // delegate slot 4
+
+    let mut members: Vec<MemberInfo> =
+        member_keys.iter().enumerate().map(|(i, k)| info(i as u8, k)).collect();
+    members.push(info(3, &d3));
+    members.push(info(4, &d4));
+
+    let record = build_record(7, &members, 0, 2).expect("2-delegate record");
+    assert_eq!((record.member_count, record.delegate_count), (3, 2));
+
+    let mut cts = Vec::new();
+    for (i, &bal) in [40u64, 30, 20].iter().enumerate() {
+        cts.push(encrypt_amount(&mut rng, &member_keys[i].regev_pk, bal).unwrap().0);
+    }
+    let (c3, w3) = encrypt_amount(&mut rng, &d3.regev_pk, 50).unwrap();
+    let (c4, _w4) = encrypt_amount(&mut rng, &d4.regev_pk, 60).unwrap();
+    cts.push(c3);
+    cts.push(c4);
+
+    let mut genesis = assemble_genesis_state(&record, &cts, 200).expect("genesis");
+    for slot in 0..3u8 {
+        let sig = sign_state(&member_keys[slot as usize], slot, &genesis).unwrap();
+        add_signature(&mut genesis, sig);
+    }
+    verify_all_signatures(&record, &members, &genesis).expect("3 members sign genesis");
+    let snapshot = ChannelSnapshot { record: record.clone(), state: genesis, members: members.clone() };
+
+    // Delegate 3 sends 9 to delegate 4.
+    let BuiltSend { payload, .. } = build_send(
+        &d3, &snapshot, 3, 4, 9, 50, &w3, Bytes32::default(), LEVEL, &mut rng,
+    )
+    .expect("delegate3 -> delegate4 send");
+    verify_send_transition(
+        &snapshot.state, &snapshot.record, &payload, LEVEL, Some(&d4.regev_sk), Some(9),
+    )
+    .expect("members re-verify delegate->delegate transition");
+
+    let mut next = payload.proposed_next_state.clone();
+    for slot in 0..3u8 {
+        let sig = sign_state(&member_keys[slot as usize], slot, &next).unwrap();
+        add_signature(&mut next, sig);
+    }
+    verify_all_signatures(&record, &members, &next).expect("3 members co-sign");
+    let fin = ChannelSnapshot { record, state: next, members };
+    assert_eq!(decrypt_balance(&d3, &fin, 3).unwrap(), 41, "delegate 3 debited");
+    assert_eq!(decrypt_balance(&d4, &fin, 4).unwrap(), 69, "delegate 4 credited");
+    let signers: Vec<u8> = fin.state.member_signatures.iter().map(|s| s.member_slot).collect();
+    assert_eq!(signers, vec![0, 1, 2], "only the 3 members co-signed; neither delegate did");
+}

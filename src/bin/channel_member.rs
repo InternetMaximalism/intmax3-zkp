@@ -22,6 +22,7 @@
 use std::{fs, process::exit};
 
 use intmax3_zkp::{
+    constants::MAX_CHANNEL_MEMBERS,
     common::channel::{ChannelState, MemberSignature},
     ethereum_types::{bytes32::Bytes32, u32limb_trait::U32LimbTrait as _},
     regev::{RegevCiphertext, RegevPk, RegevSecurityLevel, encrypt_amount},
@@ -111,6 +112,7 @@ fn main() {
     let cmd = args.first().map(String::as_str).unwrap_or("");
     match cmd {
         "init" => cmd_init(&args),
+        "gen-contribution" => cmd_gen_contribution(&args), // dev/test: simulate a browser delegate
         "add-genesis-sig" => cmd_add_genesis_sig(&args),
         "send" => cmd_send(&args),
         "cosign" => cmd_cosign(&args),
@@ -125,26 +127,53 @@ fn main() {
     }
 }
 
+/// `init` = CREATE-OR-JOIN. The first call builds the channel (3 members + this delegate at slot 3).
+/// Each later call JOINS the existing channel: it adds the new delegate at the next free slot
+/// (4, 5, …), PRESERVING every already-joined delegate's genesis ciphertext (so their browser's send
+/// witness stays valid), and the 3 members re-sign the resulting genesis. So multiple browsers become
+/// DISTINCT delegates (slots 3, 4, 5, …) in the SAME channel — not the same slot, and no silent reset.
+/// (Joining re-opens the genesis at v0; do delegate joins BEFORE sending.)
 fn cmd_init(args: &[String]) {
     let contrib_path = args.get(1).unwrap_or_else(|| die("init needs <browser_contribution.json>"));
-    // The browser is the DELEGATE, so init produces the FULLY-SIGNED snapshot directly (the delegate
-    // does not sign the genesis — only the members do).
     let out_path = args.get(2).map(String::as_str).unwrap_or("channel_snapshot.json");
     let contrib: BrowserContribution = read_json(contrib_path);
 
-    // Browser = the send-only DELEGATE at the highest active slot; CLI slots = co-signing members.
-    let mut members = vec![MemberInfo {
-        slot: BROWSER_DELEGATE_SLOT,
-        pk_g: Bytes32::from_hex(&contrib.pk_g)
-            .unwrap_or_else(|e| die(format!("parse browser pk_g: {e:?}"))),
-        pk_b: Bytes32::from_hex(&contrib.pk_b)
-            .unwrap_or_else(|e| die(format!("parse browser pk_b: {e:?}"))),
-        regev_pk: contrib.regev_pk.clone(),
-    }];
-    let mut controlled = Vec::new();
-    let mut enc_active: Vec<(u8, RegevCiphertext)> =
-        vec![(BROWSER_DELEGATE_SLOT, contrib.genesis_ct.clone())];
+    // (1) Gather EXISTING delegates (slot >= BROWSER_DELEGATE_SLOT) from a prior channel, if any,
+    // carrying over each one's preserved genesis ciphertext (keeps their send-witness valid).
+    let mut delegates: Vec<(MemberInfo, RegevCiphertext)> = Vec::new();
+    if std::path::Path::new(STATE_FILE).exists() {
+        let prev = load_state();
+        let mut existing: Vec<&MemberInfo> =
+            prev.snapshot.members.iter().filter(|m| m.slot >= BROWSER_DELEGATE_SLOT).collect();
+        existing.sort_by_key(|m| m.slot);
+        for m in existing {
+            let ct = prev.snapshot.state.balance_state.enc_balances[m.slot as usize].clone();
+            delegates.push((m.clone(), ct));
+        }
+    }
 
+    // (2) Append the NEW delegate at the next free slot.
+    let new_slot = BROWSER_DELEGATE_SLOT + delegates.len() as u8;
+    if CLI_SLOTS.len() + delegates.len() + 1 > MAX_CHANNEL_MEMBERS {
+        die("channel is full (member_count + delegate_count would exceed MAX_CHANNEL_MEMBERS)");
+    }
+    delegates.push((
+        MemberInfo {
+            slot: new_slot,
+            pk_g: Bytes32::from_hex(&contrib.pk_g)
+                .unwrap_or_else(|e| die(format!("parse browser pk_g: {e:?}"))),
+            pk_b: Bytes32::from_hex(&contrib.pk_b)
+                .unwrap_or_else(|e| die(format!("parse browser pk_b: {e:?}"))),
+            regev_pk: contrib.regev_pk.clone(),
+        },
+        contrib.genesis_ct.clone(),
+    ));
+    let _ = DELEGATE_COUNT; // (legacy single-delegate constant; delegate_count is now dynamic)
+
+    // (3) Members (slots 0,1,2): deterministic keys + genesis balances.
+    let mut members = Vec::new();
+    let mut enc_active: Vec<(u8, RegevCiphertext)> = Vec::new();
+    let mut controlled = Vec::new();
     for &slot in CLI_SLOTS {
         let keygen_seed = 0xC1_0000 + slot as u64;
         let keys = keys_for(keygen_seed);
@@ -154,45 +183,69 @@ fn cmd_init(args: &[String]) {
         let (ct, _w) = encrypt_amount(&mut StdRng::seed_from_u64(balance_seed), &keys.regev_pk, amount)
             .unwrap_or_else(|e| die(e));
         enc_active.push((slot, ct));
-        controlled.push(ControlledMember {
-            slot,
-            keygen_seed,
-            balance_amount: amount,
-            balance_seed,
-            has_witness: true,
-        });
+        controlled.push(ControlledMember { slot, keygen_seed, balance_amount: amount, balance_seed, has_witness: true });
+    }
+    // (4) Add all delegates (existing preserved + the new one).
+    for (info, ct) in &delegates {
+        members.push(info.clone());
+        enc_active.push((info.slot, ct.clone()));
     }
 
     members.sort_by_key(|m| m.slot);
-    // 3 co-signing members (CLI_SLOTS) + 1 delegate (browser): member_count = 3, delegate_count = 1.
-    let record = build_record(CHANNEL_ID, &members, BP_SLOT, DELEGATE_COUNT).unwrap_or_else(|e| die(e));
+    let delegate_count = delegates.len() as u8;
+    let record = build_record(CHANNEL_ID, &members, BP_SLOT, delegate_count).unwrap_or_else(|e| die(e));
     enc_active.sort_by_key(|(s, _)| *s);
     let enc: Vec<RegevCiphertext> = enc_active.into_iter().map(|(_, c)| c).collect();
-    let fund: u64 = CLI_GENESIS.iter().map(|(_, a)| *a).sum::<u64>() + 50; // +delegate (unknown plaintext; informational)
+    let fund: u64 = CLI_GENESIS.iter().map(|(_, a)| *a).sum::<u64>() + 50 * delegate_count as u64;
     let mut genesis = assemble_genesis_state(&record, &enc, fund).unwrap_or_else(|e| die(e));
 
-    // The three MEMBERS co-sign the genesis (N-of-N). The DELEGATE (browser) does NOT sign state.
+    // The three MEMBERS co-sign the genesis (N-of-N). The DELEGATEs (browsers) do NOT sign state.
     for c in &controlled {
         let keys = keys_for(c.keygen_seed);
         let sig = sign_state(&keys, c.slot, &genesis).unwrap_or_else(|e| die(e));
         add_signature(&mut genesis, sig);
     }
-    // Genesis is now fully member-signed; the delegate's slot is not a co-signer.
     verify_all_signatures(&record, &members, &genesis)
         .unwrap_or_else(|e| die(format!("genesis not fully/validly member-signed: {e}")));
 
-    let snapshot = ChannelSnapshot {
-        record,
-        state: genesis,
-        members,
-    };
+    let snapshot = ChannelSnapshot { record, state: genesis, members };
     save_state(&CliState { controlled, snapshot: snapshot.clone() });
-    // Hand the FULLY-SIGNED snapshot to the browser to import as the delegate (no genesis sig needed).
     write_json(out_path, &snapshot);
     println!(
-        "channel initialized (3 members signed genesis; browser is the delegate at slot {BROWSER_DELEGATE_SLOT}). \
+        "delegate joined at slot {new_slot} (member_count=3, delegate_count={delegate_count}). \
          Browser: wallet_import_channel(<{out_path}>)."
     );
+}
+
+/// DEV/TEST ONLY: simulate the browser's `wallet_genesis_contribution` — generate a delegate's keys
+/// + encrypt its opening balance, and emit a `BrowserContribution` JSON. Lets the relay flow be
+/// driven headlessly. `gen-contribution <balance> <seed> <out.json>`.
+fn cmd_gen_contribution(args: &[String]) {
+    let balance: u64 = args.get(1).and_then(|s| s.parse().ok()).unwrap_or(50);
+    let seed: u64 = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(1);
+    let out = args.get(3).map(String::as_str).unwrap_or("contribution.json");
+    let keys = MemberKeys::generate(&mut StdRng::seed_from_u64(seed));
+    let (ct, _w) =
+        encrypt_amount(&mut StdRng::seed_from_u64(seed ^ 0xA11CE), &keys.regev_pk, balance)
+            .unwrap_or_else(|e| die(e));
+    #[derive(Serialize)]
+    #[serde(rename_all = "camelCase")]
+    struct Contribution {
+        regev_pk: RegevPk,
+        pk_g: String,
+        pk_b: String,
+        genesis_ct: RegevCiphertext,
+    }
+    write_json(
+        out,
+        &Contribution {
+            regev_pk: keys.regev_pk.clone(),
+            pk_g: keys.pk_g().to_hex(),
+            pk_b: keys.pk_b().to_hex(),
+            genesis_ct: ct,
+        },
+    );
+    println!("wrote {out} (delegate balance {balance}, seed {seed})");
 }
 
 fn cmd_add_genesis_sig(args: &[String]) {
