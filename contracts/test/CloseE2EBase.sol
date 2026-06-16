@@ -101,7 +101,8 @@ abstract contract CloseE2EBase is Test {
             abi.encode(
                 channelId, bpSlot, hashes[bpSlot], uint8(0), CHALLENGE_PERIOD, SPECIAL_CLOSE_PENALTY,
                 INITIAL_BP_BOND, IChannelSettlementVerifier(settlementVerifierAddr),
-                IChannelRegistry(rollupAddr), bindings
+                IChannelRegistry(rollupAddr), bindings,
+                new ChannelSettlementManager.MemberBinding[](0) // no delegates
             )
         );
     }

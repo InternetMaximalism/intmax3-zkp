@@ -138,7 +138,8 @@ contract ChannelSettlementManagerTest is Test {
             INITIAL_BP_BOND,
             IChannelSettlementVerifier(address(verifier)),
             IChannelRegistry(address(registry)),
-            bindings
+            bindings,
+            new ChannelSettlementManager.MemberBinding[](0) // no delegates
         );
     }
 
@@ -427,7 +428,8 @@ contract ChannelSettlementManagerTest is Test {
             INITIAL_BP_BOND,
             IChannelSettlementVerifier(address(verifier)),
             IChannelRegistry(address(registry)),
-            b
+            b,
+            new ChannelSettlementManager.MemberBinding[](0) // no delegates
         );
     }
 
@@ -492,7 +494,8 @@ contract ChannelSettlementManagerTest is Test {
             INITIAL_BP_BOND,
             IChannelSettlementVerifier(address(verifier)),
             reg,
-            b
+            b,
+            new ChannelSettlementManager.MemberBinding[](0) // no delegates
         );
     }
 
@@ -832,6 +835,111 @@ contract ChannelSettlementManagerTest is Test {
         assertEq(manager.withdrawalCredits(bob), 5);
     }
 
+    /// Delegate account (Phase 4 / DA4): a DELEGATE is registered for the WITHDRAWAL path (its
+    /// pk_g -> recipient binding + presence + payout authorization) but is EXCLUDED from the IMCM
+    /// member-set commitment (member-only). After close+finalize the delegate withdraws its
+    /// member-attested balance via the SAME WithdrawalClaim a member uses; a stranger pk_g is
+    /// rejected. mc=2 (USER_A/B), dc=1 (USER_D -> dave).
+    function test_delegate_registered_and_withdraws_after_close() external {
+        bytes32 USER_D = keccak256("member_d_pubkey_hash");
+        address dave = makeAddr("dave");
+
+        // Fresh registry: register the 2 MEMBERS only (IMCM is member-only).
+        MockChannelRegistry reg = new MockChannelRegistry(IChannelSettlementVerifier(address(verifier)));
+        bytes32[] memory members = new bytes32[](2);
+        members[0] = USER_A;
+        members[1] = USER_B;
+        reg.register(uint32(CHANNEL_ID), BP_MEMBER_SLOT, members);
+
+        ChannelSettlementManager.MemberBinding[] memory mb =
+            new ChannelSettlementManager.MemberBinding[](2);
+        mb[0] = ChannelSettlementManager.MemberBinding({pkG: USER_A, recipient: alice});
+        mb[1] = ChannelSettlementManager.MemberBinding({pkG: USER_B, recipient: bob});
+        ChannelSettlementManager.MemberBinding[] memory db =
+            new ChannelSettlementManager.MemberBinding[](1);
+        db[0] = ChannelSettlementManager.MemberBinding({pkG: USER_D, recipient: dave});
+
+        ChannelSettlementManager m = new ChannelSettlementManager(
+            CHANNEL_ID, BP_MEMBER_SLOT, USER_A, 1, // delegate_count = 1
+            CHALLENGE_PERIOD, SPECIAL_CLOSE_PENALTY, INITIAL_BP_BOND,
+            IChannelSettlementVerifier(address(verifier)), IChannelRegistry(address(reg)), mb, db
+        );
+
+        // The delegate is in the withdrawal lookup + payout authorization, NOT in the member set.
+        assertEq(uint256(m.activeMemberCount()), 2);
+        assertEq(uint256(m.activeDelegateCount()), 1);
+        assertEq(m.memberCount(), 2, "registeredMemberPkGs is member-only (delegate excluded)");
+        assertTrue(m.registeredMemberIndexPlusOne(USER_D) != 0, "delegate present");
+        assertEq(m.registeredRecipientOf(USER_D), dave, "delegate recipient bound");
+        assertTrue(m.isMemberRecipient(dave), "delegate recipient can transact");
+        // IMCM commits ONLY the 2 members (delegate excluded) — matches the registry.
+        assertEq(m.registeredMemberSetCommitment(), reg.channelMemberSetCommitment(uint32(CHANNEL_ID)));
+
+        // Drive the close to Closed.
+        vm.prank(alice);
+        m.requestClose();
+        vm.warp(block.timestamp + GRACE);
+        ChannelSettlementManager.CloseIntent memory intent = _intent(1, 9, 22, 1);
+        m.submitCloseIntent(intent, _closeProofFor(m, intent));
+        vm.warp(block.timestamp + CHALLENGE_PERIOD + 1);
+        m.finalizeClose();
+        bytes32 cid = m.finalizedCloseIntentDigest();
+
+        // The DELEGATE withdraws its member-attested balance (40) — accepted.
+        ChannelSettlementManager.WithdrawalClaim memory dClaim =
+            _withdrawalClaim(cid, USER_D, dave, 40);
+        m.submitWithdrawalClaim(
+            dClaim,
+            _proofFor(
+                verifier.withdrawalClaimPIHash(
+                    CHANNEL_ID, cid, m.finalizedBalanceStateH1(), USER_D, dave,
+                    dClaim.userAmountDigest, dClaim.amount, dClaim.withdrawalNullifier
+                )
+            )
+        );
+        assertEq(m.withdrawalCredits(dave), 40, "delegate withdrawal credited");
+
+        // A stranger pk_g (not a member, not a delegate) is rejected. Build the proof args BEFORE
+        // expectRevert so the cheatcode targets ONLY the submitWithdrawalClaim call (not the view
+        // calls that assemble the proof).
+        bytes32 STRANGER = keccak256("not_in_channel");
+        ChannelSettlementManager.WithdrawalClaim memory sClaim =
+            _withdrawalClaim(cid, STRANGER, mallory, 1);
+        bytes memory sProof = _proofFor(
+            verifier.withdrawalClaimPIHash(
+                CHANNEL_ID, cid, m.finalizedBalanceStateH1(), STRANGER, mallory,
+                sClaim.userAmountDigest, sClaim.amount, sClaim.withdrawalNullifier
+            )
+        );
+        vm.expectRevert(ChannelSettlementManager.NotChannelMember.selector);
+        m.submitWithdrawalClaim(sClaim, sProof);
+    }
+
+    /// Delegate account: a delegate pk_g that collides with a MEMBER pk_g is rejected at
+    /// construction (no shared-key claim across the active set).
+    function test_delegate_pkg_collision_with_member_reverts() external {
+        MockChannelRegistry reg = new MockChannelRegistry(IChannelSettlementVerifier(address(verifier)));
+        bytes32[] memory members = new bytes32[](2);
+        members[0] = USER_A;
+        members[1] = USER_B;
+        reg.register(uint32(CHANNEL_ID), BP_MEMBER_SLOT, members);
+
+        ChannelSettlementManager.MemberBinding[] memory mb =
+            new ChannelSettlementManager.MemberBinding[](2);
+        mb[0] = ChannelSettlementManager.MemberBinding({pkG: USER_A, recipient: alice});
+        mb[1] = ChannelSettlementManager.MemberBinding({pkG: USER_B, recipient: bob});
+        ChannelSettlementManager.MemberBinding[] memory db =
+            new ChannelSettlementManager.MemberBinding[](1);
+        db[0] = ChannelSettlementManager.MemberBinding({pkG: USER_A, recipient: makeAddr("dave")}); // collides with member 0
+
+        vm.expectRevert(ChannelSettlementManager.DuplicateRegisteredMember.selector);
+        new ChannelSettlementManager(
+            CHANNEL_ID, BP_MEMBER_SLOT, USER_A, 1,
+            CHALLENGE_PERIOD, SPECIAL_CLOSE_PENALTY, INITIAL_BP_BOND,
+            IChannelSettlementVerifier(address(verifier)), IChannelRegistry(address(reg)), mb, db
+        );
+    }
+
     function test_special_close_slashes_bp_and_freezes_channel() external {
         ChannelSettlementManager.SpecialClose memory specialClose = ChannelSettlementManager
             .SpecialClose({
@@ -1050,7 +1158,8 @@ contract ChannelSettlementManagerTest is Test {
         b[2] = ChannelSettlementManager.MemberBinding({pkG: USER_C, recipient: carol});
         m = new ChannelSettlementManager(
             CHANNEL_ID, BP_MEMBER_SLOT, USER_A, 0, CHALLENGE_PERIOD, SPECIAL_CLOSE_PENALTY,
-            INITIAL_BP_BOND, IChannelSettlementVerifier(address(verifier)), IChannelRegistry(address(reg)), b
+            INITIAL_BP_BOND, IChannelSettlementVerifier(address(verifier)), IChannelRegistry(address(reg)), b,
+            new ChannelSettlementManager.MemberBinding[](0) // no delegates
         );
     }
 

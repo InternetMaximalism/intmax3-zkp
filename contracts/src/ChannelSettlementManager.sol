@@ -461,7 +461,11 @@ contract ChannelSettlementManager {
         uint256 initialBpBondCredits_,
         IChannelSettlementVerifier verifier_,
         IChannelRegistry registry_,
-        MemberBinding[] memory memberBindings
+        MemberBinding[] memory memberBindings,
+        // Delegate account: (pk_g -> recipient) bindings for the `delegateCount_` delegates. Empty
+        // when delegateCount_ == 0. Delegates are registered for the WITHDRAWAL path only — they are
+        // EXCLUDED from memberPkGs / the IMCM member-set commitment (they do not co-sign).
+        MemberBinding[] memory delegateBindings
     ) {
         if (channelId_ == bytes4(0)) revert InvalidChannelId();
         // D6 pad-to-MAX: 2..=MAX_MEMBER_COUNT active members are registered, slot order. Slots
@@ -518,6 +522,12 @@ contract ChannelSettlementManager {
             revert InvalidBpMemberSlot();
         }
 
+        // Delegate account: register delegate (pk_g -> recipient) bindings for the withdrawal path.
+        // Extracted to its own frame (via-IR stack) and AFTER the member loop so delegate pk_g
+        // distinctness is checked against members too. Delegates are NOT pushed to
+        // registeredMemberPkGs / memberPkGs, so the IMCM member-set commitment stays member-only.
+        _registerDelegates(delegateBindings);
+
         // Finding E: bind this manager's member set + bp to the rollup's on-chain registration (the
         // validity-path single source of truth). SECURITY: without this, the validity proof and the
         // close proof could authenticate DIFFERENT signer sets for the same channel. The close-form
@@ -536,6 +546,34 @@ contract ChannelSettlementManager {
             bpPkG_ != registry.channelBpPkG(channelIdU32)
         ) {
             revert BpMismatch();
+        }
+    }
+
+    /// @dev Register the delegate (pk_g -> recipient) bindings (delegate account). Delegates own a
+    /// balance slot and withdraw their member-attested final balance via the SAME WithdrawalClaim a
+    /// member uses, so their presence (`registeredMemberIndexPlusOne != 0`), recipient binding, and
+    /// payout authorization (`isMemberRecipient`) must be recorded. SECURITY: a delegate pk_g must be
+    /// distinct from every member AND every other delegate (the `!= 0` check covers both, since
+    /// members are registered first); delegates are NOT added to `registeredMemberPkGs`/`memberPkGs`,
+    /// so the IMCM member-set commitment and the N-of-N co-sign set stay member-only. The index value
+    /// is only a non-zero presence marker (the active-slot index+1); it is never used as an array
+    /// index. TRUST: delegate bindings are deployer-asserted (not re-checked against the registry
+    /// IMCM, which is member-only) — consistent with DLG-2 (the delegate already trusts the members
+    /// for its member-attested final balance).
+    function _registerDelegates(MemberBinding[] memory delegateBindings) private {
+        if (delegateBindings.length != activeDelegateCount) revert InvalidMemberCount();
+        for (uint256 j = 0; j < delegateBindings.length; j++) {
+            MemberBinding memory d = delegateBindings[j];
+            if (d.pkG == bytes32(0) || d.recipient == address(0)) {
+                revert InvalidMemberBinding();
+            }
+            if (registeredMemberIndexPlusOne[d.pkG] != 0) {
+                revert DuplicateRegisteredMember();
+            }
+            registeredRecipientOf[d.pkG] = d.recipient;
+            // Active-slot index+1 (members occupy 1..activeMemberCount): non-zero presence marker.
+            registeredMemberIndexPlusOne[d.pkG] = uint256(activeMemberCount) + j + 1;
+            isMemberRecipient[d.recipient] = true;
         }
     }
 

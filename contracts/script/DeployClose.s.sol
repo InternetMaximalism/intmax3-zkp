@@ -79,7 +79,8 @@ contract DeployClose is Script {
         }
         ChannelSettlementManager manager = new ChannelSettlementManager(
             bytes4(channelId), bpSlot, sphincs[bpSlot], 0, CHALLENGE_PERIOD, SPECIAL_CLOSE_PENALTY,
-            INITIAL_BP_BOND, IChannelSettlementVerifier(address(sv)), IChannelRegistry(address(rollup)), bindings
+            INITIAL_BP_BOND, IChannelSettlementVerifier(address(sv)), IChannelRegistry(address(rollup)), bindings,
+            new ChannelSettlementManager.MemberBinding[](0) // no delegates
         );
 
         // Withdrawal VK (deployer == EOA == msg.sender here, so the deployer-only guard passes).
