@@ -2097,6 +2097,20 @@ pub fn prove_balance_refresh(
     sk: &RegevSk,
     old_ct: &RegevCiphertext,
 ) -> Result<(RegevCiphertext, Vec<u8>), RegevError> {
+    let (new_ct, _aw, proof) = prove_balance_refresh_witnessed(rng, level, pk, sk, old_ct)?;
+    Ok((new_ct, proof))
+}
+
+/// Like [`prove_balance_refresh`] but ALSO returns the fresh `new_ct`'s [`AmountWitness`], so a wallet
+/// can keep spending from the refreshed slot without re-importing a fresh encryption. The witness is
+/// the one the proof was built against, so it matches `new_ct` exactly.
+pub fn prove_balance_refresh_witnessed(
+    rng: &mut impl rand010::Rng,
+    level: RegevSecurityLevel,
+    pk: &RegevPk,
+    sk: &RegevSk,
+    old_ct: &RegevCiphertext,
+) -> Result<(RegevCiphertext, AmountWitness, Vec<u8>), RegevError> {
     let upk = to_upstream_pk(pk)?;
     let uold = to_upstream_ct(old_ct)?;
 
@@ -2120,7 +2134,7 @@ pub fn prove_balance_refresh(
     let trace = generate_refresh_trace(&upk, &uold, &unew, &core, &aw.witness);
     let pvs = refresh_public_values(BALANCE_REFRESH_ZKP_DOMAIN, &upk, &uold, &unew);
     let proof = prove_one(&level.config(), &air, &trace, pvs)?;
-    Ok((new_ct, proof))
+    Ok((new_ct, aw, proof))
 }
 
 /// Verify a balance-refresh proof against the claimed statement (pk, old_ct, new_ct).

@@ -1,3 +1,104 @@
+# ACTIVE — Genuine intmax3-backed channel in the browser (funder-distributes model)
+
+## Goal
+Replace the facade where every participant self-mints its genesis balance with a model where
+ONE funder account (run on the CLI) holds the channel fund and **distributes** the initial
+50 tokens to the browser delegate via a REAL in-channel E-1 transfer. Browser = DELEGATE ONLY;
+funder + 3 co-signing members + all intmax3 backing run on the CLI.
+
+## Architecture decision (user-confirmed)
+- **Browser = delegate only** (keygen + receive + send with its own BabyBear A11 hash-sig).
+- **CLI = everything else**: funder account, 3 co-signing members, intmax3 backing (heavy
+  base-layer proving is native-release on the CLI, not wasm — avoids the 4GB / minutes limits).
+
+## Threat model (genesis / fund backing)
+- SECURITY: `ChannelFund.amount` is burned at close and **caps the L1 withdrawal**
+  (`channel.rs:748`). A fund not traceable to a real deposit ⇒ withdrawable value never
+  deposited = **inflation**. Today `intmax_state_root = Bytes32::default()` and `amount` is the
+  sum of self-minted balances → NOT genuinely backed (the facade the user flagged; close-to-L1
+  is itself still a stub, so not yet on-chain-exploitable).
+- Genuine backing = funder `intmax_state_root` bound to a real intmax3 balance (deposit →
+  `prove_receive_deposit` → state root); `ChannelFund.amount` == funder-deposited value.
+  detail2 §K-4 marks registration-time state-root verification as an open item → stage it.
+
+## Plan (phased; verify each phase before the next)
+
+### Phase 1 — funder-distributes genesis (channel-layer genuine)  [foundational]
+- [ ] `create_channel`: genesis funds ONLY the funder slot (slot 0) with the whole fund;
+      members 1,2 and the delegate start at **0** (no self-mint). Browser `genesis_ct` = enc(0).
+- [ ] New CLI command `distribute <to_slot> <amount>`: funder (slot 0) builds a REAL E-1
+      `build_send`, other members co-sign, finalize. The "distribute 50 from one account" step.
+- [ ] Browser UX: drop the "opening balance" type-in; delegate joins at 0 and RECEIVES 50 from
+      the funder (refresh → can send). wallet-live.html + wasm contribution encrypts 0.
+- [ ] Verify: native test — funder=50, distribute 50→delegate, delegate=50, sum invariant +
+      all member sigs verify.
+
+### Phase 2 — bind intmax_state_root to a real CLI deposit  [genuine backing]
+- [ ] CLI funder: deposit → `prove_receive_deposit` (native release) → real state root;
+      set `ChannelFund.intmax_state_root` + `amount` = deposited value.
+- [ ] `assemble_genesis_state` takes `intmax_state_root` as a param (drop hard-coded default).
+- [ ] Verify fund amount == deposited value (cap-soundness); close burn reconciles.
+
+## REVISED per user (2026-06-16): build the base/native ↔ channel connection (detail2 §F-1)
+
+Finding: the deposit→Regev-channel backing exists NOWHERE (wallet, e2e.rs, e2e_flow.rs all
+lack the §F-1 seam — e2e.rs is base-only/no Regev channel; e2e_flow.rs uses
+StructuralTransportVerifier + placeholder intmax_state_root + no real balanceProof). So this
+is NEW construction, not a port.
+
+### SECURITY INVARIANT (user-mandated, fail-closed)
+A co-signer MUST NOT sign a channel state update unless the channel's intmax deposit backing
+is verified. No verified backing ⇒ refuse to co-sign (the user is in a dangerous state).
+This is the detail2 §3.1 agreeBalanceState + §F-1 reconciliation, enforced fail-closed.
+
+### Reconciliation (detail2 §F-1), from balance_pis.rs:
+`balanceProof.PI` exposes: `channel_id`, `public_state`, `block_r`, `private_commitment`,
+`settled_tx_chain`. The seam check at sign time:
+1. the channel `balanceProof` VERIFIES against the balance verifier data (real, validity-backed);
+2. `balanceProof.PI.channel_id == record.channel_id`;
+3. `balanceProof.PI.settled_tx_chain == state.balance_state.settled_tx_chain` (§F-1);
+4. public_state/block_r freshness sanity.
+(Amount equivalence stays enforced by in-channel ZKPs + close withdrawCap, since the PI hides
+the plaintext balance inside `private_commitment`.)
+
+### Build steps
+- [x] Step 1 — `ChannelBalanceAttestation { balance_proof }` (co-signer-side artifact, NOT on the
+      snapshot wire format); `verify_channel_backing(record, state, attestation, balance_vd)`:
+      (1) balance proof verifies against `balance_vd`; (2) cyclic-recursion binding
+      `embedded vd.circuit_digest == balance_vd.verifier_only.circuit_digest`;
+      (3) `PI.channel_id == record.channel_id`; (4) `PI.settled_tx_chain ==
+      state.balance_state.settled_tx_chain`. Fail-closed (None ⇒ refuse). wallet_core.rs.
+- [x] Step 4 — `tests/channel_backing_e2e.rs`: REAL L1 deposit → `prove_receive_deposit` →
+      attestation; backed channel reconciles (Ok); None / foreign channel_id / mismatched
+      settled_tx_chain / tampered proof ⇒ REFUSED. PASSES (release, 30.8s).
+- [x] Step 3a — genuine backed genesis: `assemble_genesis_state_backed(record, cts, fund,
+      settled_tx_chain, intmax_state_root)`. `assemble_genesis_state` now delegates with zero
+      backing (= explicitly UNBACKED, refused by the gate). wallet_core.rs.
+- [x] Step 4b — full-path native proof in `channel_backing_e2e.rs`: backed genesis → each member
+      runs the gate BEFORE signing → fully member-signed; UNBACKED genesis → gate refuses (no
+      honest member signs). PASS (33.8s).
+- [x] Step 2 — SIGN GATE wired into the CLI (`channel_member.rs`), process-model aware (gate needs
+      only the small cached `balance_vd`, not the prover):
+      - `setup-backing` cmd: builds `BalanceProcessor` (~25s), does a REAL deposit, writes
+        `channel_attestation.bin` (proof) + `balance_vd.bin` (verifier data via
+        `serialize_verifier_data`) + `channel_backing.json` (settled_tx_chain/intmax_state_root/fund).
+      - `create_channel` uses `assemble_genesis_state_backed` with the backing; `fund` == deposited
+        value (Σ genesis balances), `settled_tx_chain` from the deposit.
+      - `gate_or_die` (load `balance_vd`+attestation → `verify_channel_backing`) is called in
+        `create_channel` (genesis), `cmd_cosign`, `cmd_cosign_refresh`, `join_delegate` — REFUSE on
+        any failure. `load_backing` dies if backing files are absent (fail-closed).
+      - `wallet-relay.js` runs `setup-backing` once on first launch (backing persists across restarts).
+- [x] Step 2 verify — live binary smoke (target/release/channel_member):
+      (1) no backing → `init` REFUSED; (2) `setup-backing` deposits 140 to channel 7;
+      (3a) valid backing → `init` SUCCEEDS (3 members sign); (3b) corrupted settled_tx_chain →
+      `init` REFUSED with the §F-1 gate message. All as expected.
+
+## Status: §F-1 base/native ↔ channel connection COMPLETE.
+## Steps 1, 2, 3a, 4, 4b DONE — gate primitive + genuine deposit-backed genesis + CLI wiring +
+## native full-path proof (PASS) + live-binary fail-closed smoke (PASS).
+
+---
+
 # Phase 1 (data layer) — delegate account `delegate_count`
 
 SOUNDNESS-CRITICAL. ABSOLUTE RULE: never weaken/skip/stub a check; STOP and report unclear soundness.

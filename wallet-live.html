@@ -127,12 +127,21 @@ $('btnOpen').onclick = async () => {
 };
 
 async function attemptSend(to, amt) {
-  // Re-import the CURRENT channel head first (picks up other tabs' sends + any joined delegates), so
-  // the send extends the real head. Build the proof + co-sign + finalize.
-  const latest = await api('/api/snapshot', null, 'GET');
-  const rr = JSON.parse(await call('importChannel', { snapshotJson: latest }));
+  // 1. Re-import the CURRENT channel head (picks up other tabs' sends + any joined delegates).
+  let rr = JSON.parse(await call('importChannel', { snapshotJson: await api('/api/snapshot', null, 'GET') }));
   mySlot = rr.slot; showBalance(rr);
-  if (!rr.canSend) throw new Error('receive-only: you received funds — a balance refresh is needed before you can send again');
+  // 2. If we received funds (receive-only), AUTO balance-refresh: re-encrypt our slot to clean digits
+  //    (value preserved, proven) + members co-sign, so we can spend again.
+  if (!rr.canSend) {
+    log('  you received funds → balance-refresh (re-encrypt your slot) so you can send…');
+    const refreshPayload = await call('refresh');
+    const cosigned = await api('/api/refresh-cosign', refreshPayload);
+    rr = JSON.parse(await call('finalize', { stateJson: cosigned }));
+    mySlot = rr.slot; showBalance(rr);
+    if (!rr.canSend) throw new Error('still receive-only after balance refresh');
+    log(`  refreshed — balance ${rr.balance}, ready to send`, 'ok');
+  }
+  // 3. Send.
   const payload = await call('send', { recipientSlot: to, amount: amt });
   log('other members co-signing…');
   const finalState = await api('/api/cosign', payload);

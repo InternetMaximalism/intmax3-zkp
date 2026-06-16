@@ -77,6 +77,16 @@ app.post('/api/cosign', (req, res) => {
   } catch (e) { { console.error(e.stderr ? String(e.stderr) : (e.message||e)); res.status(500).json({ error: String(e.stderr || e.message || e) }); } }
 });
 
+// Balance-refresh: browser re-encrypts its own slot (RefreshPayload) → CLI members co-sign → returns
+// the fully-signed next state for the browser to finalize. Lets a delegate send again after receiving.
+app.post('/api/refresh-cosign', (req, res) => {
+  try {
+    fs.writeFileSync(w('refresh_payload.json'), JSON.stringify(req.body));
+    cli(['cosign-refresh', 'refresh_payload.json', 'refresh_cosigned.json']);
+    res.json(JSON.parse(fs.readFileSync(w('refresh_cosigned.json'), 'utf8')));
+  } catch (e) { { console.error(e.stderr ? String(e.stderr) : (e.message||e)); res.status(500).json({ error: String(e.stderr || e.message || e) }); } }
+});
+
 // Static wallet files (wallet-live.html, wallet-worker.js, /pkg/...).
 app.use(express.static(ROOT));
 
@@ -88,6 +98,18 @@ const opts = {
 // brand-new channel). During a run, the channel persists so delegates accumulate (create-or-join).
 fs.rmSync(w('cli_state.json'), { force: true });
 fs.rmSync(w('channel_snapshot.json'), { force: true });
+
+// detail2 §F-1 deposit backing: the channel must be backed by a REAL base-layer balance proof
+// before any member co-signs (the CLI gate refuses an unbacked channel). Produce it ONCE here
+// (~30s); it persists across relay restarts (the per-process reset above clears only the channel
+// state, not the backing files), so this runs only on the very first launch.
+const backed = ['channel_backing.json', 'channel_attestation.bin', 'balance_vd.bin'].every((f) =>
+  fs.existsSync(w(f))
+);
+if (!backed) {
+  console.log('No deposit backing yet — running `channel_member setup-backing` (one-time, ~30s)…');
+  cli(['setup-backing']);
+}
 
 https.createServer(opts, app).listen(PORT, '0.0.0.0', () => {
   console.log(`wallet relay on https://localhost:${PORT}/wallet-live.html`);

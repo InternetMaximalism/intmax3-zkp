@@ -212,3 +212,51 @@ fn delegate_join_preserves_send_and_is_importable() {
     assert_eq!(decrypt_balance(&d4, &joined, 4).unwrap(), 60, "delegate 4 funded");
     assert_eq!(joined.state.balance_state.state_version, 2, "v1 send + join => v2");
 }
+
+/// Balance refresh: a delegate RECEIVES (its slot gets a homomorphic credit -> receive-only), then
+/// REFRESHES its slot (re-encrypt to clean digits, value preserved, members co-sign), and can SEND
+/// again. Proves the receive -> refresh -> send cycle for a delegate.
+#[test]
+fn delegate_refresh_after_receive_enables_send() {
+    use intmax3_zkp::wallet_core::{build_refresh, verify_refresh_transition};
+    let mut rng = StdRng::seed_from_u64(0x5EF5E5);
+    let mk: Vec<MemberKeys> = (0..3).map(|_| MemberKeys::generate(&mut rng)).collect();
+    let d3 = MemberKeys::generate(&mut rng); // sender delegate
+    let d4 = MemberKeys::generate(&mut rng); // receiver delegate
+
+    let mut members: Vec<MemberInfo> = mk.iter().enumerate().map(|(i, k)| info(i as u8, k)).collect();
+    members.push(info(3, &d3));
+    members.push(info(4, &d4));
+    let record = build_record(7, &members, 0, 2).unwrap();
+    let mut cts = Vec::new();
+    for (i, &b) in [40u64, 30, 20].iter().enumerate() { cts.push(encrypt_amount(&mut rng, &mk[i].regev_pk, b).unwrap().0); }
+    let (c3, w3) = encrypt_amount(&mut rng, &d3.regev_pk, 50).unwrap();
+    let (c4, _w4) = encrypt_amount(&mut rng, &d4.regev_pk, 60).unwrap();
+    cts.push(c3); cts.push(c4);
+    let mut g = assemble_genesis_state(&record, &cts, 200).unwrap();
+    for s in 0..3u8 { let x = sign_state(&mk[s as usize], s, &g).unwrap(); add_signature(&mut g, x); }
+    let snap = ChannelSnapshot { record: record.clone(), state: g, members: members.clone() };
+
+    // d3 sends 9 to d4 -> d4 now has pending_adds[4]=1 (received).
+    let BuiltSend { payload, .. } = build_send(&d3, &snap, 3, 4, 9, 50, &w3, Bytes32::default(), LEVEL, &mut rng).unwrap();
+    let mut v1 = payload.proposed_next_state.clone();
+    for s in 0..3u8 { let x = sign_state(&mk[s as usize], s, &v1).unwrap(); add_signature(&mut v1, x); }
+    let snap1 = ChannelSnapshot { record: record.clone(), state: v1, members: members.clone() };
+    assert_eq!(snap1.state.balance_state.pending_adds[4], 1, "d4 received (receive-only)");
+    assert_eq!(decrypt_balance(&d4, &snap1, 4).unwrap(), 69);
+
+    // d4 REFRESHES its slot (receive -> refresh). Members verify + co-sign.
+    let (rpayload, new_w4) = build_refresh(&d4, &snap1, 4, LEVEL, &mut rng).unwrap();
+    verify_refresh_transition(&snap1.state, &snap1.record, &rpayload, LEVEL).expect("members verify refresh");
+    let mut v2 = rpayload.proposed_next_state.clone();
+    for s in 0..3u8 { let x = sign_state(&mk[s as usize], s, &v2).unwrap(); add_signature(&mut v2, x); }
+    let snap2 = ChannelSnapshot { record: record.clone(), state: v2, members: members.clone() };
+    assert_eq!(snap2.state.balance_state.pending_adds[4], 0, "refresh reset d4's counter");
+    assert_eq!(decrypt_balance(&d4, &snap2, 4).unwrap(), 69, "refresh preserved d4's value");
+    let signers: Vec<u8> = snap2.state.member_signatures.iter().map(|s| s.member_slot).collect();
+    assert_eq!(signers, vec![0,1,2], "delegate did not co-sign the refresh");
+
+    // d4 can now SEND again (using the fresh witness from the refresh).
+    let BuiltSend { payload: p2, .. } = build_send(&d4, &snap2, 4, 0, 5, 69, &new_w4, Bytes32::default(), LEVEL, &mut rng).expect("d4 sends after refresh");
+    verify_send_transition(&snap2.state, &snap2.record, &p2, LEVEL, Some(&mk[0].regev_sk), Some(5)).expect("d4 post-refresh send verifies");
+}

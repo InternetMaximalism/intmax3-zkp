@@ -18,13 +18,16 @@
 
 use std::sync::OnceLock;
 
-use plonky2::plonk::proof::ProofWithPublicInputs;
+use plonky2::plonk::{circuit_data::VerifierCircuitData, proof::ProofWithPublicInputs};
 use rand::SeedableRng as _;
 use rand010::Rng;
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    circuits::channel::state_update_verifier::InChannelTransferUpdateWitness,
+    circuits::balance::balance_pis::BalanceFullPublicInputs,
+    circuits::channel::state_update_verifier::{
+        BalanceRefreshUpdateWitness, InChannelTransferUpdateWitness,
+    },
     poseidon_sig::{
         GoldilocksSecretKey,
         circuit::{C, D, F, SingleSigCircuit},
@@ -46,7 +49,8 @@ use crate::{
     },
     regev::{
         AmountWitness, RegevCiphertext, RegevPk, RegevSecurityLevel, RegevSk, RealRegevProofVerifier,
-        add_ciphertexts, channel_keygen, decrypt_amount, encrypt_amount, prove_channel_tx,
+        add_ciphertexts, channel_keygen, decrypt_amount, encrypt_amount,
+        prove_balance_refresh_witnessed, prove_channel_tx,
         prove_hash_sig, regev_pk_root, verify_hash_sig,
         hash_sig::{BabyBearPublicKey, BabyBearSecretKey, decompose_digest_to_limbs},
     },
@@ -300,13 +304,109 @@ pub struct MemberInfo {
     pub regev_pk: RegevPk,
 }
 
-/// A complete, signed channel snapshot shared between members.
+/// The channel's intmax NATIVE-balance backing: the base-layer balance proof for this channel's
+/// `channel_id` (detail2 §2.1 `balanceProof` / §F-1). Its public inputs expose `channel_id` and
+/// the `settled_tx_chain` fold over every deposit / inter-channel settle the channel has absorbed.
+/// Carried alongside the snapshot so co-signers can reconcile the signed `BalanceState` against a
+/// real, validity-backed balance proof BEFORE signing (the fail-closed gate below).
+///
+/// SECURITY: this is the cryptographic object that makes the channel genuinely intmax3-backed. A
+/// snapshot WITHOUT a valid attestation is an unbacked channel; co-signing it is unsafe (a close
+/// could later attempt to withdraw value that was never deposited — detail2 §2.4 `withdrawCap`).
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChannelBalanceAttestation {
+    /// Serialized `ProofWithPublicInputs<F, C, D>` of the channel's base-layer balance proof,
+    /// verifiable against the `BalanceProcessor`'s `balance_vd()`.
+    pub balance_proof: Vec<u8>,
+}
+
+/// A complete, signed channel snapshot shared between members. The deposit-backing attestation is
+/// NOT embedded here (it is a co-signer-side artifact passed separately to [`verify_channel_backing`])
+/// so the snapshot wire format stays unchanged and the browser delegate need not carry it.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ChannelSnapshot {
     pub record: ChannelRecord,
     pub state: ChannelState,
     pub members: Vec<MemberInfo>,
+}
+
+/// detail2 §F-1 / §3.1 reconciliation, enforced **fail-closed**: returns `Ok` only when the channel
+/// is genuinely backed by a verified intmax deposit balance proof. EVERY co-signer MUST call this
+/// before signing a `ChannelState`; on any failure it MUST refuse to sign (an unbacked channel
+/// leaves members unable to withdraw real value at close — the user-mandated safety invariant).
+///
+/// Checks (all required):
+/// 1. the attestation's balance proof VERIFIES against `balance_vd` (a real, validity-backed proof);
+/// 2. `balanceProof.PI.channel_id == record.channel_id` (the proof is for THIS channel);
+/// 3. `balanceProof.PI.settled_tx_chain == state.balance_state.settled_tx_chain` (detail2 §F-1: the
+///    signed state's settle history is exactly the one the balance proof absorbed).
+///
+/// The plaintext native balance is hidden inside `balanceProof.PI.private_commitment`, so the
+/// amount-equivalence `Σ enc_balances == channel_fund == attested balance` is NOT re-checked here —
+/// it is enforced by the in-channel E-1/E-2 range ZKPs and the close `withdrawCap` (detail2 §2.4).
+pub fn verify_channel_backing(
+    record: &ChannelRecord,
+    state: &ChannelState,
+    attestation: Option<&ChannelBalanceAttestation>,
+    balance_vd: &VerifierCircuitData<F, C, D>,
+) -> WResult<()> {
+    let att = attestation.ok_or_else(|| {
+        WalletError(
+            "refusing to co-sign: channel has NO intmax deposit-backing attestation (detail2 \
+             §F-1/§3.1). An unbacked channel cannot withdraw real value at close — unsafe."
+                .into(),
+        )
+    })?;
+    let proof = ProofWithPublicInputs::<F, C, D>::from_bytes(
+        att.balance_proof.clone(),
+        &balance_vd.common,
+    )
+    .map_err(|e| WalletError(format!("backing balance proof deserialization failed: {e}")))?;
+
+    // 1. The base-layer balance proof must really verify (it is validity-proof-backed: the balance
+    //    circuit only advances against a proven `PublicState`). A fabricated proof is rejected here.
+    balance_vd
+        .verify(proof.clone())
+        .map_err(|e| WalletError(format!("backing balance proof verification FAILED: {e}")))?;
+
+    // The balance proof is a cyclic-recursion proof: its public inputs are
+    // `[BalancePublicInputs ‖ embedded verifier-data]`. GoldilocksField PIs are stored canonically
+    // (`.0 < ORDER`), matching `to_u64_vec`. Parse both halves.
+    let pi_u64: Vec<u64> = proof.public_inputs.iter().map(|f| f.0).collect();
+    let full = BalanceFullPublicInputs::<F, C, D>::from_u64_slice(&pi_u64, &balance_vd.common.config)
+        .map_err(|e| WalletError(format!("backing balance proof public-input parse failed: {e}")))?;
+
+    // Cyclic-recursion binding: the proof's self-referential verifier data must be the EXPECTED
+    // balance circuit. Without this a valid proof from a DIFFERENT circuit carrying a look-alike
+    // `BalancePublicInputs` could be substituted. `circuit_digest` uniquely identifies the circuit.
+    if full.vd.circuit_digest != balance_vd.verifier_only.circuit_digest {
+        return bail(
+            "backing balance proof's embedded verifier data is not the expected balance circuit \
+             (cyclic-recursion binding failed)",
+        );
+    }
+    let pis = full.pis;
+
+    // 2. The proof must attest THIS channel's balance, not some other channel's.
+    if pis.channel_id != record.channel_id {
+        return bail(format!(
+            "backing balance proof is for channel {:?}, not this channel {:?}",
+            pis.channel_id, record.channel_id
+        ));
+    }
+
+    // 3. detail2 §F-1: the signed BalanceState's settle history must be exactly the one the balance
+    //    proof folded in. This is the seam binding the off-chain channel state to on-chain deposits.
+    if pis.settled_tx_chain != state.balance_state.settled_tx_chain {
+        return bail(
+            "backing balance proof settled_tx_chain != signed BalanceState.settled_tx_chain \
+             (detail2 §F-1): the channel state is not the one this deposit balance backs",
+        );
+    }
+
+    Ok(())
 }
 
 /// A send payload: the `ChannelTx` (with its E-1 proof + sender signature) plus the proposed next
@@ -442,6 +542,29 @@ pub fn assemble_genesis_state(
     enc_balances_active: &[RegevCiphertext],
     fund_amount: u64,
 ) -> WResult<ChannelState> {
+    // Legacy/UNBACKED genesis: zero settle-chain + zero intmax_state_root. A channel assembled this
+    // way has NO deposit backing, so `verify_channel_backing` REFUSES to co-sign it (fail-closed).
+    assemble_genesis_state_backed(
+        record,
+        enc_balances_active,
+        fund_amount,
+        Bytes32::default(),
+        Bytes32::default(),
+    )
+}
+
+/// Genuine deposit-BACKED genesis (detail2 §F-1). `settled_tx_chain` MUST equal the channel's
+/// base-layer `balanceProof.PI.settled_tx_chain` (the deposit settle-history that funds the channel),
+/// and `intmax_state_root` anchors the `ChannelFund` to that intmax state. The resulting genesis
+/// reconciles with the channel's [`ChannelBalanceAttestation`], so co-signers accept it. `fund_amount`
+/// should equal the deposited native value (the close `withdrawCap`).
+pub fn assemble_genesis_state_backed(
+    record: &ChannelRecord,
+    enc_balances_active: &[RegevCiphertext],
+    fund_amount: u64,
+    settled_tx_chain: Bytes32,
+    intmax_state_root: Bytes32,
+) -> WResult<ChannelState> {
     let active = record.member_count as usize + record.delegate_count as usize;
     if enc_balances_active.len() != active {
         return bail("genesis ciphertext count must equal member_count + delegate_count");
@@ -454,14 +577,14 @@ pub fn assemble_genesis_state(
         channel_fund: ChannelFund {
             channel_id: record.channel_id,
             amount: U256::from(fund_amount.min(u32::MAX as u64) as u32),
-            intmax_state_root: Bytes32::default(),
+            intmax_state_root,
         },
         balance_state: BalanceState {
             channel_id: record.channel_id,
             member_count: record.member_count,
             delegate_count: record.delegate_count,
             enc_balances: BalanceState::pad_enc_balances(enc_balances_active),
-            settled_tx_chain: Bytes32::default(),
+            settled_tx_chain,
             state_version: 0,
             pending_adds: BalanceState::pad_pending_adds(&vec![0u32; active]),
         },
@@ -895,6 +1018,122 @@ fn fill_placeholder_sigs(record: &ChannelRecord, state: &mut ChannelState) {
             signature: vec![1],
         })
         .collect();
+}
+
+// ---------------------------------------------------------------------------
+// Balance refresh (detail2 §B-3): re-encrypt one's own slot to clean digits so it can SEND again
+// after RECEIVING (a homomorphic credit raises `pending_adds`, which blocks the next send until a
+// refresh). The owner proves `old_ct` and `new_ct` encrypt the SAME value (RefreshAir); the members
+// co-sign the resulting state. Identical for a member or a delegate slot (slot-agnostic).
+// ---------------------------------------------------------------------------
+
+/// A proposed balance-refresh transition for the co-signers to verify + sign. Carries the value-
+/// preserving re-encryption proof; no amount/recipient (the slot's value is unchanged).
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RefreshPayload {
+    pub member_index: u8,
+    pub refresh_proof: ChannelProofEnvelope,
+    pub proposed_next_state: ChannelState,
+    pub members: Vec<MemberInfo>,
+    pub record: ChannelRecord,
+}
+
+/// Build a balance-refresh for `slot` (this wallet's own slot): re-encrypt the current balance to a
+/// FRESH ciphertext (clean digits, same value), prove `old_ct ≡ new_ct` (RefreshAir), and propose
+/// the next state (slot's ct replaced, its `pending_adds` reset to 0, version++). Returns the payload
+/// for the members to co-sign AND the fresh `AmountWitness` so the wallet can SEND from the slot
+/// afterwards. A DELEGATE slot does NOT co-sign state; a member slot self-signs (it is N-of-N).
+pub fn build_refresh(
+    keys: &MemberKeys,
+    snapshot: &ChannelSnapshot,
+    slot: u8,
+    level: RegevSecurityLevel,
+    rng: &mut impl Rng,
+) -> WResult<(RefreshPayload, AmountWitness)> {
+    let active =
+        snapshot.record.member_count as usize + snapshot.record.delegate_count as usize;
+    check_slot(slot as usize, active)?;
+    let prev = &snapshot.state;
+    let regev_pks = regev_pks_array(&snapshot.members);
+    let pk = &regev_pks[slot as usize];
+    let old_ct = &prev.balance_state.enc_balances[slot as usize];
+
+    // Value-preserving re-encryption + proof (also returns the fresh ct's witness so we can send).
+    let (new_ct, new_witness, proof) =
+        prove_balance_refresh_witnessed(rng, level, pk, &keys.regev_sk, old_ct).map_err(we)?;
+
+    let mut enc_balances = prev.balance_state.enc_balances.clone();
+    enc_balances[slot as usize] = new_ct;
+    let mut pending_adds = prev.balance_state.pending_adds;
+    pending_adds[slot as usize] = 0;
+    let next_state = ChannelState {
+        epoch: prev.epoch + 1,
+        balance_state: BalanceState {
+            enc_balances,
+            state_version: prev.balance_state.state_version + 1,
+            pending_adds,
+            ..prev.balance_state.clone()
+        },
+        prev_digest: prev.digest,
+        member_signatures: Vec::new(),
+        ..prev.clone()
+    }
+    .with_computed_digest();
+
+    let mut proposed = next_state;
+    if (slot as usize) < prev.balance_state.member_count as usize {
+        // A co-signing MEMBER self-signs (N-of-N). A DELEGATE is send-only — no state signature.
+        let sig = sign_state(keys, slot, &proposed)?;
+        add_signature(&mut proposed, sig);
+    }
+
+    let payload = RefreshPayload {
+        member_index: slot,
+        refresh_proof: ChannelProofEnvelope {
+            role: TransitionProofRole::ChannelStateUpdate,
+            backend: ProofBackend::Plonky3,
+            proof,
+        },
+        proposed_next_state: proposed,
+        members: snapshot.members.clone(),
+        record: snapshot.record.clone(),
+    };
+    Ok((payload, new_witness))
+}
+
+/// Verify a proposed balance-refresh against the prev state (a co-signer runs this before signing):
+/// the `BalanceRefreshUpdateWitness` checks only the refreshed slot changes, its counter resets to 0,
+/// and the RefreshAir proof attests `old_ct` and `new_ct` encrypt the SAME hidden value (no inflation).
+pub fn verify_refresh_transition(
+    prev: &ChannelState,
+    record: &ChannelRecord,
+    payload: &RefreshPayload,
+    level: RegevSecurityLevel,
+) -> WResult<()> {
+    let active = record.member_count as usize + record.delegate_count as usize;
+    check_slot(payload.member_index as usize, active)?;
+    // Anchor the carried member set to the trusted record (same as the send path).
+    let recomputed_root = member_pubkeys_root(&payload.record, &payload.members)?;
+    if recomputed_root != payload.record.member_pubkeys_root {
+        return bail("member_pubkeys_root mismatch: payload member set not anchored to the record");
+    }
+    let regev_pks = regev_pks_array(&payload.members);
+    let mut next_for_check = payload.proposed_next_state.clone();
+    fill_placeholder_sigs(&payload.record, &mut next_for_check);
+    let witness = BalanceRefreshUpdateWitness {
+        channel_record: record.clone(),
+        regev_pks,
+        prev_state: prev.clone(),
+        next_state: next_for_check,
+        member_index: payload.member_index as usize,
+        refresh_proof: payload.refresh_proof.clone(),
+    };
+    let verifier = RealRegevProofVerifier { level };
+    witness
+        .verify(&verifier)
+        .map_err(|e| WalletError(format!("balance-refresh transition invalid: {e:?}")))?;
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------

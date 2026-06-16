@@ -18,8 +18,8 @@ use crate::{
     ethereum_types::{bytes32::Bytes32, u32limb_trait::U32LimbTrait},
     regev::{AmountWitness, RegevSecurityLevel, encrypt_amount},
     wallet_core::{
-        BuiltSend, ChannelSnapshot, MemberKeys, SendPayload, add_signature, build_send,
-        decrypt_balance, sign_state, verify_send_transition, verify_snapshot,
+        BuiltSend, ChannelSnapshot, MemberKeys, SendPayload, add_signature, build_refresh,
+        build_send, decrypt_balance, sign_state, verify_send_transition, verify_snapshot,
     },
 };
 use crate::common::channel::{ChannelState, MemberSignature};
@@ -272,6 +272,30 @@ pub fn wallet_send(recipient_slot: u8, amount: u64) -> Result<String, JsValue> {
         // wasm-built proofs is covered by tests/verify_wasm_proof.rs.)
         session.pending_send =
             Some((payload.proposed_next_state.digest, new_balance, new_balance_witness));
+        serde_json::to_string(&payload).map_err(js_err)
+    })
+}
+
+/// Balance-refresh THIS wallet's own slot: re-encrypt the current balance to clean digits (same
+/// value) so the slot can SEND again after receiving (a received homomorphic credit blocks the next
+/// send until a refresh). Returns the `RefreshPayload` for the members to co-sign; once finalized,
+/// the slot is spendable again. Identical for a member or a delegate slot.
+#[wasm_bindgen]
+pub fn wallet_refresh() -> Result<String, JsValue> {
+    with_session(|session| {
+        let slot = session.slot.ok_or_else(|| js_err("no channel imported"))?;
+        let snapshot = session
+            .snapshot
+            .clone()
+            .ok_or_else(|| js_err("no channel imported"))?;
+        let value = decrypt_balance(&session.keys, &snapshot, slot).map_err(js_err)?;
+        let mut rng = rand010::rng();
+        let (payload, new_witness) =
+            build_refresh(&session.keys, &snapshot, slot, LEVEL, &mut rng).map_err(js_err)?;
+        // The refreshed slot holds the SAME value with a fresh witness; commit it on finalize so the
+        // wallet can send again.
+        session.pending_send =
+            Some((payload.proposed_next_state.digest, value, new_witness));
         serde_json::to_string(&payload).map_err(js_err)
     })
 }

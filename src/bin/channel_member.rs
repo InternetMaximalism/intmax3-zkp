@@ -22,29 +22,62 @@
 use std::{fs, process::exit};
 
 use intmax3_zkp::{
-    constants::MAX_CHANNEL_MEMBERS,
-    common::channel::{ChannelRecord, ChannelState, MemberSignature},
-    ethereum_types::{bytes32::Bytes32, u32limb_trait::U32LimbTrait as _},
-    regev::{RegevCiphertext, RegevPk, RegevSecurityLevel, encrypt_amount},
-    wallet_core::{
-        BuiltSend, ChannelSnapshot, MemberInfo, MemberKeys, SendPayload, add_signature,
-        assemble_genesis_state, build_record, build_send, decrypt_balance, sign_state,
-        verify_all_signatures, verify_send_transition, verify_snapshot,
+    circuits::{
+        balance::{
+            balance_processor::BalanceProcessor,
+            common::recipient::calculate_recipient_from_user_id, spend_circuit::SpendCircuit,
+        },
+        test_utils::{
+            balance_witness_generator::{BalanceWitnessGenerator, ReceiveDepositData},
+            block_witness_generator::{BlockWitnessGenerator, BlockWitnessGeneratorHandle},
+        },
     },
+    common::{
+        channel::{ChannelRecord, ChannelState, MemberSignature},
+        channel_id::ChannelId,
+        salt::Salt,
+    },
+    constants::MAX_CHANNEL_MEMBERS,
+    ethereum_types::{
+        address::Address, bytes32::Bytes32, u256::U256, u32limb_trait::U32LimbTrait as _,
+    },
+    regev::{RegevCiphertext, RegevPk, RegevSecurityLevel, encrypt_amount},
+    utils::serialize::{deserialize_verifier_data, serialize_verifier_data},
+    wallet_core::{
+        BuiltSend, ChannelBalanceAttestation, ChannelSnapshot, MemberInfo, MemberKeys,
+        RefreshPayload, SendPayload, add_signature, assemble_genesis_state_backed, build_record,
+        build_send, decrypt_balance, sign_state, verify_all_signatures, verify_channel_backing,
+        verify_refresh_transition, verify_send_transition, verify_snapshot,
+    },
+};
+use plonky2::{
+    field::goldilocks_field::GoldilocksField,
+    plonk::{circuit_data::VerifierCircuitData, config::PoseidonGoldilocksConfig},
 };
 use rand010::{SeedableRng, rngs::StdRng};
 use serde::{Deserialize, Serialize};
+
+// Base-layer proof config (matches `BalanceProcessor` / `poseidon_sig::circuit`).
+type BF = GoldilocksField;
+type BC = PoseidonGoldilocksConfig;
+const BD: usize = 2;
 
 const LEVEL: RegevSecurityLevel = RegevSecurityLevel::Production;
 const STATE_FILE: &str = "cli_state.json";
 const CHANNEL_ID: u32 = 7;
 const BP_SLOT: u8 = 0;
+// detail2 §F-1 deposit backing: produced ONCE by `setup-backing`, consumed by the co-sign gate.
+const BACKING_FILE: &str = "channel_backing.json"; // settled_tx_chain / intmax_state_root / fund
+const ATTESTATION_FILE: &str = "channel_attestation.bin"; // the channel's base-layer balance proof
+const BALANCE_VD_FILE: &str = "balance_vd.bin"; // cached balance verifier data (the gate needs only this)
 // Delegate demo: slots 0,1,2 = three CLI-controlled CO-SIGNING MEMBERS (with genesis balances);
 // slot 3 = the browser, a send-only DELEGATE (delegate_count = 1).
 const CLI_SLOTS: &[u8] = &[0, 1, 2];
 const CLI_GENESIS: &[(u8, u64)] = &[(0, 40), (1, 30), (2, 20)];
 const BROWSER_DELEGATE_SLOT: u8 = 3;
 const DELEGATE_COUNT: u8 = 1;
+// The first browser delegate's genesis allocation out of the deposited fund (so Σ balances == fund).
+const DELEGATE_GENESIS: u64 = 50;
 
 #[derive(Serialize, Deserialize)]
 struct ControlledMember {
@@ -107,20 +140,138 @@ fn save_state(state: &CliState) {
     write_json(STATE_FILE, state);
 }
 
+/// Backed-genesis parameters produced once by `setup-backing` (detail2 §F-1).
+#[derive(Serialize, Deserialize)]
+struct ChannelBacking {
+    /// hex of the deposit settle-history the channel's balance proof folded in (§F-1 reconciliation).
+    settled_tx_chain: String,
+    /// hex anchor of the channel fund to intmax state (close-time L1 check; NOT the §F-1 co-sign gate).
+    intmax_state_root: String,
+    /// the deposited native value backing the channel (== Σ genesis balances).
+    fund: u64,
+}
+
+fn backing_exists() -> bool {
+    std::path::Path::new(BACKING_FILE).exists()
+        && std::path::Path::new(ATTESTATION_FILE).exists()
+        && std::path::Path::new(BALANCE_VD_FILE).exists()
+}
+
+/// Load the cached deposit backing: the small `balance_vd` (the gate needs only this — not the
+/// prover), the channel's balance-proof attestation, and the backed-genesis params.
+fn load_backing() -> (VerifierCircuitData<BF, BC, BD>, ChannelBalanceAttestation, ChannelBacking) {
+    if !backing_exists() {
+        die("no deposit backing found: run `channel_member setup-backing` first (detail2 §F-1). \
+             Refusing to operate an unbacked channel.");
+    }
+    let vd_bytes =
+        fs::read(BALANCE_VD_FILE).unwrap_or_else(|e| die(format!("read {BALANCE_VD_FILE}: {e}")));
+    let balance_vd = deserialize_verifier_data::<BF, BC, BD>(&vd_bytes)
+        .unwrap_or_else(|e| die(format!("deserialize balance_vd: {e}")));
+    let proof =
+        fs::read(ATTESTATION_FILE).unwrap_or_else(|e| die(format!("read {ATTESTATION_FILE}: {e}")));
+    let backing: ChannelBacking = read_json(BACKING_FILE);
+    (balance_vd, ChannelBalanceAttestation { balance_proof: proof }, backing)
+}
+
+/// The fail-closed co-sign GATE (detail2 §F-1 / §3.1): refuse to sign `state` unless the channel's
+/// deposit backing verifies and reconciles. Dies (non-zero exit) on ANY failure — never signs.
+fn gate_or_die(
+    record: &ChannelRecord,
+    state: &ChannelState,
+    balance_vd: &VerifierCircuitData<BF, BC, BD>,
+    att: &ChannelBalanceAttestation,
+) {
+    verify_channel_backing(record, state, Some(att), balance_vd).unwrap_or_else(|e| {
+        die(format!("REFUSING TO SIGN — channel deposit backing not verified: {e}"))
+    });
+}
+
+/// ONE-TIME setup: fund the channel with a REAL L1 deposit and cache its base-layer balance proof as
+/// the channel's deposit backing (detail2 §F-1). Builds the `BalanceProcessor` (~25s), proves the
+/// deposit, and writes the attestation + verifier data + backed-genesis params. Run BEFORE `init`.
+/// `setup-backing [fund]` (default = Σ CLI member genesis balances).
+fn cmd_setup_backing(args: &[String]) {
+    use rand::{SeedableRng as _, rngs::StdRng as DepRng};
+    let fund: u64 = args.get(1).and_then(|s| s.parse().ok()).unwrap_or_else(|| {
+        CLI_GENESIS.iter().map(|(_, a)| *a).sum::<u64>() + DELEGATE_GENESIS
+    });
+
+    eprintln!("setup-backing: building the balance prover (one-time, ~25s)…");
+    let spend = SpendCircuit::<BF, BC, BD>::new();
+    let bp = BalanceProcessor::<BF, BC, BD>::new(&spend.data.verifier_data());
+    let bwgen = BlockWitnessGeneratorHandle::new(BlockWitnessGenerator::new(&[1, 4, 512]));
+
+    let mut rng = DepRng::seed_from_u64(0x00DE_C0DE ^ CHANNEL_ID as u64);
+    let channel_id = ChannelId::new(CHANNEL_ID as u64).unwrap_or_else(|e| die(format!("{e:?}")));
+    let salt = Salt::rand(&mut rng);
+    let mut bwg = BalanceWitnessGenerator::new(channel_id, salt, bwgen.clone(), &bp)
+        .unwrap_or_else(|e| die(format!("balance witness generator: {e:?}")));
+
+    let deposit_salt = Salt::rand(&mut rng);
+    let recipient = calculate_recipient_from_user_id(channel_id, deposit_salt);
+    bwgen
+        .borrow_mut()
+        .add_deposit(
+            Address::rand(&mut rng),
+            recipient,
+            0,
+            U256::from(fund.min(u32::MAX as u64) as u32),
+            Bytes32::default(),
+        )
+        .unwrap_or_else(|e| die(format!("queue deposit: {e:?}")));
+    bwgen
+        .borrow_mut()
+        .add_block(0, &[], 0, Bytes32::default())
+        .unwrap_or_else(|e| die(format!("apply deposit block: {e:?}")));
+
+    let dw = bwg
+        .receive_deposit_witness(&ReceiveDepositData { receiver: recipient, deposit_salt })
+        .unwrap_or_else(|e| die(format!("receive deposit witness: {e:?}")));
+    eprintln!("setup-backing: proving the deposit…");
+    let proof = bp
+        .prove_receive_deposit(&dw)
+        .unwrap_or_else(|e| die(format!("prove deposit: {e:?}")));
+    bwg.commit_receive_deposit(&proof, &dw)
+        .unwrap_or_else(|e| die(format!("commit deposit: {e:?}")));
+    let pis = bwg.get_public_inputs().unwrap_or_else(|e| die(format!("balance pis: {e:?}")));
+
+    fs::write(ATTESTATION_FILE, proof.to_bytes())
+        .unwrap_or_else(|e| die(format!("write {ATTESTATION_FILE}: {e}")));
+    let vd_bytes = serialize_verifier_data(&bp.balance_vd())
+        .unwrap_or_else(|e| die(format!("serialize balance_vd: {e}")));
+    fs::write(BALANCE_VD_FILE, vd_bytes).unwrap_or_else(|e| die(format!("write {BALANCE_VD_FILE}: {e}")));
+    write_json(
+        BACKING_FILE,
+        &ChannelBacking {
+            settled_tx_chain: pis.settled_tx_chain.to_hex(),
+            // L1-close anchor (registration-time procedure is detail2 §K-4, open); NOT the §F-1 gate.
+            intmax_state_root: Bytes32::default().to_hex(),
+            fund,
+        },
+    );
+    println!(
+        "setup-backing OK: deposited {fund} to channel {CHANNEL_ID}; settled_tx_chain={}. Now run `init`.",
+        pis.settled_tx_chain.to_hex()
+    );
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let cmd = args.first().map(String::as_str).unwrap_or("");
     match cmd {
+        "setup-backing" => cmd_setup_backing(&args),
         "init" => cmd_init(&args),
         "gen-contribution" => cmd_gen_contribution(&args), // dev/test: simulate a browser delegate
         "add-genesis-sig" => cmd_add_genesis_sig(&args),
         "send" => cmd_send(&args),
         "cosign" => cmd_cosign(&args),
+        "cosign-refresh" => cmd_cosign_refresh(&args),
         "finalize" => cmd_finalize(&args),
         "balance" => cmd_balance(),
         _ => {
             eprintln!(
-                "usage: channel_member <init|add-genesis-sig|send|cosign|finalize|balance> ..."
+                "usage: channel_member <setup-backing|init|add-genesis-sig|send|cosign|finalize|balance> ..."
             );
             exit(2);
         }
@@ -196,8 +347,22 @@ fn create_channel(
     let record = build_record(CHANNEL_ID, &members, BP_SLOT, 1).unwrap_or_else(|e| die(e));
     enc.sort_by_key(|(s, _)| *s);
     let encs: Vec<RegevCiphertext> = enc.into_iter().map(|(_, c)| c).collect();
-    let fund: u64 = CLI_GENESIS.iter().map(|(_, a)| *a).sum::<u64>() + 50;
-    let mut state = assemble_genesis_state(&record, &encs, fund).unwrap_or_else(|e| die(e));
+
+    // detail2 §F-1: the genesis is funded by the REAL L1 deposit backing (no self-minted fund).
+    // `fund` == the deposited native value; `settled_tx_chain` ties the state to that deposit so the
+    // co-sign gate reconciles. Σ(genesis balances) == fund (CLI members + delegate allocation).
+    let (balance_vd, att, backing) = load_backing();
+    let settled = Bytes32::from_hex(&backing.settled_tx_chain)
+        .unwrap_or_else(|e| die(format!("backing settled_tx_chain: {e:?}")));
+    let intmax_root = Bytes32::from_hex(&backing.intmax_state_root)
+        .unwrap_or_else(|e| die(format!("backing intmax_state_root: {e:?}")));
+    let mut state =
+        assemble_genesis_state_backed(&record, &encs, backing.fund, settled, intmax_root)
+            .unwrap_or_else(|e| die(e));
+
+    // GATE (fail-closed): the 3 members refuse to co-sign a genesis whose deposit backing does not
+    // verify + reconcile (detail2 §F-1 / §3.1).
+    gate_or_die(&record, &state, &balance_vd, &att);
     for c in &controlled {
         let sig = sign_state(&keys_for(c.keygen_seed), c.slot, &state).unwrap_or_else(|e| die(e));
         add_signature(&mut state, sig);
@@ -236,6 +401,10 @@ fn join_delegate(
     state.balance_state.state_version += 1;
     state.member_signatures = Vec::new();
     let mut state = state.with_computed_digest();
+    // GATE (fail-closed, detail2 §F-1): a delegate join does not change settled_tx_chain, so the
+    // existing deposit backing must still reconcile before the members re-sign.
+    let (balance_vd, att, _backing) = load_backing();
+    gate_or_die(&record, &state, &balance_vd, &att);
     for c in &prev.controlled {
         let sig = sign_state(&keys_for(c.keygen_seed), c.slot, &state).unwrap_or_else(|e| die(e));
         add_signature(&mut state, sig);
@@ -358,6 +527,12 @@ fn cmd_cosign(args: &[String]) {
     )
     .unwrap_or_else(|e| die(format!("transition invalid: {e}")));
 
+    // GATE (fail-closed, detail2 §F-1 / §3.1): refuse to co-sign unless the channel's deposit
+    // backing still reconciles with the state we are about to sign (settled_tx_chain is invariant
+    // across in-channel sends, so the genesis attestation backs every in-channel state).
+    let (balance_vd, att, _backing) = load_backing();
+    gate_or_die(&state.snapshot.record, &next_state, &balance_vd, &att);
+
     // Add signatures for every controlled slot not yet signed.
     for c in &state.controlled {
         let already = next_state.member_signatures.iter().any(|s| s.member_slot == c.slot);
@@ -385,6 +560,38 @@ fn cmd_cosign(args: &[String]) {
     // current — otherwise a later re-import returns the stale init snapshot and the next send fails
     // "payload does not extend the current head".
     write_json("channel_snapshot.json", &state.snapshot);
+}
+
+/// Co-sign a balance-REFRESH payload (a delegate/member re-encrypting its own slot to clean digits so
+/// it can send again after receiving). Each member re-verifies the value-preserving refresh transition
+/// before signing; the head advances + is published exactly like cmd_cosign.
+fn cmd_cosign_refresh(args: &[String]) {
+    let in_path = args.get(1).unwrap_or_else(|| die("cosign-refresh <payload.json> <out>"));
+    let out_path = args.get(2).map(String::as_str).unwrap_or("cosigned_state.json");
+    let mut state = load_state();
+    let payload: RefreshPayload = read_json(in_path);
+    let mut next_state = payload.proposed_next_state.clone();
+    if next_state.prev_digest != state.snapshot.state.digest {
+        die("payload does not extend the current head");
+    }
+    verify_refresh_transition(&state.snapshot.state, &state.snapshot.record, &payload, LEVEL)
+        .unwrap_or_else(|e| die(format!("refresh transition invalid: {e}")));
+    // GATE (fail-closed, detail2 §F-1): a balance-refresh preserves settled_tx_chain, so the deposit
+    // backing must still reconcile before any member co-signs it.
+    let (balance_vd, att, _backing) = load_backing();
+    gate_or_die(&state.snapshot.record, &next_state, &balance_vd, &att);
+    for c in &state.controlled {
+        if next_state.member_signatures.iter().any(|s| s.member_slot == c.slot) {
+            continue;
+        }
+        let sig = sign_state(&keys_for(c.keygen_seed), c.slot, &next_state).unwrap_or_else(|e| die(e));
+        add_signature(&mut next_state, sig);
+    }
+    write_json(out_path, &next_state);
+    state.snapshot.state = next_state;
+    save_state(&state);
+    write_json("channel_snapshot.json", &state.snapshot);
+    println!("balance-refresh co-signed for slot {} (head advanced).", payload.member_index);
 }
 
 fn cmd_finalize(args: &[String]) {
