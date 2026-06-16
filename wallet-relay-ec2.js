@@ -5,6 +5,7 @@
 // pre-built locally against Sepolia and shipped here, so there is NO anvil/forge/setup-backing on
 // this box — it only co-signs.
 const express = require('express');
+const compression = require('compression');
 const https = require('https');
 const http = require('http');
 const fs = require('fs');
@@ -40,6 +41,15 @@ for (const ch of CHANNELS) {
 }
 
 const app = express();
+// gzip the big static assets (the 2.5MB wasm → ~1.2MB) — a real win on mobile networks where the
+// download dominates "initializing". Compress wasm/js/html/json regardless of the default heuristic.
+app.use(compression({
+  filter: (req, res) => {
+    const ct = String(res.getHeader('Content-Type') || '');
+    if (/wasm|javascript|json|html|text|octet-stream/.test(ct)) return true;
+    return compression.filter(req, res);
+  },
+}));
 app.use(express.json({ limit: '64mb' }));
 // Cross-origin isolation (SharedArrayBuffer / wasm threads) + correct wasm mime + no caching.
 app.use((req, res, next) => {
@@ -47,7 +57,10 @@ app.use((req, res, next) => {
   res.setHeader('Cross-Origin-Opener-Policy', 'same-origin');
   res.setHeader('Cross-Origin-Resource-Policy', 'same-origin');
   if (req.path.endsWith('.wasm')) res.setHeader('Content-Type', 'application/wasm');
-  res.setHeader('Cache-Control', 'no-store');
+  // Cache the immutable prover assets so a reload doesn't re-download the 2.5MB wasm; never cache the
+  // HTML/JS shell or the dynamic /api responses.
+  if (req.path.startsWith('/pkg/')) res.setHeader('Cache-Control', 'public, max-age=3600');
+  else res.setHeader('Cache-Control', 'no-store');
   next();
 });
 

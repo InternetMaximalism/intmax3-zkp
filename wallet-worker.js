@@ -16,9 +16,11 @@ for (const level of ['log', 'warn', 'error']) {
 }
 
 async function init(threads) {
+  post('progress', { msg: 'downloading prover (wasm)…' });
   wasm = await import('/pkg/intmax3_zkp.js');
   await wasm.default();
   const n = threads || navigator.hardwareConcurrency || 4;
+  post('progress', { msg: `starting ${n} prover threads…` });
   await wasm.initThreadPool(n);
   post('ready', { threads: n });
 }

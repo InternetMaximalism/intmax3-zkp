@@ -149,7 +149,8 @@ function call(action, payload={}) {
 }
 worker.onmessage = (e) => {
   const d = e.data;
-  if (d.type === 'ready') { $('status').textContent='ready'; $('status').className='ready'; $('threads').textContent=d.threads; $('btnOpen').disabled=false; tryRestore(); return; }
+  if (d.type === 'progress') { const s=$('status'); s.dataset.base = d.msg; s.textContent = `${d.msg} ${s.dataset.elapsed||''}`; return; }
+  if (d.type === 'ready') { try { clearInterval(_initTick); } catch(e){} $('status').textContent='ready'; $('status').className='ready'; $('threads').textContent=d.threads; $('btnOpen').disabled=false; tryRestore(); return; }
   if (d.type === 'log') { return; }
   if (d.type === 'result') handlers[d.action]?.resolve(d.result);
   else if (d.type === 'error') handlers[d.action]?.reject(new Error(d.message));
@@ -288,7 +289,24 @@ $('btnRefresh').onclick = async () => {
   $('btnRefresh').disabled = false;
 };
 
-worker.postMessage({ action: 'init', threads: navigator.hardwareConcurrency || 4 });
+// Thread count: each rayon thread spawns a Web Worker that re-instantiates the wasm, so on a phone
+// (weaker CPU + tighter memory) a high core count makes "initializing" drag. Cap it — fewer threads
+// = much faster init; proving is a bit slower but mobile proving is the secondary path anyway.
+function pickThreads() {
+  const hwc = navigator.hardwareConcurrency || 4;
+  const isMobile = (navigator.userAgentData && navigator.userAgentData.mobile) || /Mobi|Android|iPhone|iPad|iPod/i.test(navigator.userAgent);
+  // Desktop: use ALL cores (proving speed matters). Mobile: cap so "initializing" (per-thread worker
+  // spawn) doesn't drag and memory stays bounded.
+  return isMobile ? Math.max(1, Math.min(hwc, 4)) : hwc;
+}
+// Live elapsed timer next to the status while initializing (so the wait is legible on mobile).
+const _initT0 = Date.now();
+const _initTick = setInterval(() => {
+  const s = $('status');
+  if (s && s.className !== 'ready') s.dataset.elapsed = `(${Math.round((Date.now()-_initT0)/1000)}s)`;
+  if (s && s.className !== 'ready' && s.dataset.base) s.textContent = `${s.dataset.base} ${s.dataset.elapsed}`;
+}, 500);
+worker.postMessage({ action: 'init', threads: pickThreads() });
 showBacking();
 </script>
 </body>
