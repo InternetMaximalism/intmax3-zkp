@@ -46,6 +46,8 @@
   <section class="panel">
     <h2>2 · Your balance</h2>
     <div class="bal"><span id="balance">—</span> <small id="balMeta"></small></div>
+    <button id="btnRefresh" disabled>Refresh (check for incoming)</button>
+    <p class="hint">Re-imports the latest channel state — click after someone sends you funds to see them arrive. (After receiving, a balance refresh is needed before you can send again.)</p>
   </section>
 
   <section class="panel">
@@ -117,6 +119,7 @@ $('btnOpen').onclick = async () => {
     showBalance(r);
     $('members').textContent = `You are the DELEGATE at slot ${r.slot} (send-only — you do NOT co-sign). Co-signing members: slots 0, 1, 2 (CLI). Open this page in ANOTHER tab to join as a second delegate (slot ${r.slot+1}).`;
     $('btnSend').disabled = false;
+    $('btnRefresh').disabled = false;
     log(`joined as delegate slot ${r.slot} in ${Math.round((Date.now()-t0)/1000)}s. balance ${r.balance}. (Open more tabs BEFORE sending — each becomes a new delegate slot.)`, 'ok');
   } catch (e) { log('open failed: '+e.message, 'err'); $('btnOpen').disabled=false; }
   clearInterval(tick);
@@ -147,6 +150,18 @@ $('btnSend').onclick = async () => {
   clearInterval(tick);
   $('btnSend').textContent = 'Send';
   $('btnSend').disabled = false;
+};
+
+$('btnRefresh').onclick = async () => {
+  try {
+    $('btnRefresh').disabled = true;
+    const latest = await api('/api/snapshot', null, 'GET');
+    const r = JSON.parse(await call('importChannel', { snapshotJson: latest }));
+    mySlot = r.slot;
+    showBalance(r);
+    log(`refreshed: you are slot ${r.slot}, balance ${r.balance}` + (r.canSend ? '' : ' (you received funds — a balance refresh is needed before you can send again)'), 'ok');
+  } catch (e) { log('refresh failed: '+e.message, 'err'); }
+  $('btnRefresh').disabled = false;
 };
 
 worker.postMessage({ action: 'init', threads: navigator.hardwareConcurrency || 4 });

@@ -23,7 +23,7 @@ use std::{fs, process::exit};
 
 use intmax3_zkp::{
     constants::MAX_CHANNEL_MEMBERS,
-    common::channel::{ChannelState, MemberSignature},
+    common::channel::{ChannelRecord, ChannelState, MemberSignature},
     ethereum_types::{bytes32::Bytes32, u32limb_trait::U32LimbTrait as _},
     regev::{RegevCiphertext, RegevPk, RegevSecurityLevel, encrypt_amount},
     wallet_core::{
@@ -127,52 +127,46 @@ fn main() {
     }
 }
 
-/// `init` = CREATE-OR-JOIN. The first call builds the channel (3 members + this delegate at slot 3).
-/// Each later call JOINS the existing channel: it adds the new delegate at the next free slot
-/// (4, 5, …), PRESERVING every already-joined delegate's genesis ciphertext (so their browser's send
-/// witness stays valid), and the 3 members re-sign the resulting genesis. So multiple browsers become
-/// DISTINCT delegates (slots 3, 4, 5, …) in the SAME channel — not the same slot, and no silent reset.
-/// (Joining re-opens the genesis at v0; do delegate joins BEFORE sending.)
+/// `init` = CREATE-OR-JOIN. The first call CREATES the channel (3 members + this delegate at slot 3,
+/// genesis v0). Each later call JOINS the existing channel as a NEW delegate at the next free slot —
+/// a state-PRESERVING membership add: the CURRENT balances and any sends already made are kept, the
+/// new delegate's slot is added, `state_version` is bumped, and the 3 members re-sign. So joining
+/// AFTER sends does NOT wipe them, and multiple browsers are DISTINCT delegates (slots 3,4,5,…) in
+/// the SAME channel.
 fn cmd_init(args: &[String]) {
     let contrib_path = args.get(1).unwrap_or_else(|| die("init needs <browser_contribution.json>"));
     let out_path = args.get(2).map(String::as_str).unwrap_or("channel_snapshot.json");
     let contrib: BrowserContribution = read_json(contrib_path);
+    let new_delegate = MemberInfo {
+        slot: 0, // assigned by create/join
+        pk_g: Bytes32::from_hex(&contrib.pk_g)
+            .unwrap_or_else(|e| die(format!("parse browser pk_g: {e:?}"))),
+        pk_b: Bytes32::from_hex(&contrib.pk_b)
+            .unwrap_or_else(|e| die(format!("parse browser pk_b: {e:?}"))),
+        regev_pk: contrib.regev_pk.clone(),
+    };
+    let new_ct = contrib.genesis_ct.clone();
 
-    // (1) Gather EXISTING delegates (slot >= BROWSER_DELEGATE_SLOT) from a prior channel, if any,
-    // carrying over each one's preserved genesis ciphertext (keeps their send-witness valid).
-    let mut delegates: Vec<(MemberInfo, RegevCiphertext)> = Vec::new();
-    if std::path::Path::new(STATE_FILE).exists() {
-        let prev = load_state();
-        let mut existing: Vec<&MemberInfo> =
-            prev.snapshot.members.iter().filter(|m| m.slot >= BROWSER_DELEGATE_SLOT).collect();
-        existing.sort_by_key(|m| m.slot);
-        for m in existing {
-            let ct = prev.snapshot.state.balance_state.enc_balances[m.slot as usize].clone();
-            delegates.push((m.clone(), ct));
-        }
-    }
+    let (record, state, members, controlled, slot) = if std::path::Path::new(STATE_FILE).exists() {
+        join_delegate(new_delegate, new_ct)
+    } else {
+        create_channel(new_delegate, new_ct)
+    };
 
-    // (2) Append the NEW delegate at the next free slot.
-    let new_slot = BROWSER_DELEGATE_SLOT + delegates.len() as u8;
-    if CLI_SLOTS.len() + delegates.len() + 1 > MAX_CHANNEL_MEMBERS {
-        die("channel is full (member_count + delegate_count would exceed MAX_CHANNEL_MEMBERS)");
-    }
-    delegates.push((
-        MemberInfo {
-            slot: new_slot,
-            pk_g: Bytes32::from_hex(&contrib.pk_g)
-                .unwrap_or_else(|e| die(format!("parse browser pk_g: {e:?}"))),
-            pk_b: Bytes32::from_hex(&contrib.pk_b)
-                .unwrap_or_else(|e| die(format!("parse browser pk_b: {e:?}"))),
-            regev_pk: contrib.regev_pk.clone(),
-        },
-        contrib.genesis_ct.clone(),
-    ));
-    let _ = DELEGATE_COUNT; // (legacy single-delegate constant; delegate_count is now dynamic)
+    verify_all_signatures(&record, &members, &state)
+        .unwrap_or_else(|e| die(format!("state not fully/validly member-signed: {e}")));
+    let snapshot = ChannelSnapshot { record, state, members };
+    let dc = snapshot.record.delegate_count;
+    let v = snapshot.state.balance_state.state_version;
+    save_state(&CliState { controlled, snapshot: snapshot.clone() });
+    write_json(out_path, &snapshot);
+    println!("delegate at slot {slot} (member_count=3, delegate_count={dc}, state_version={v}). Browser: wallet_import_channel(<{out_path}>).");
+}
 
-    // (3) Members (slots 0,1,2): deterministic keys + genesis balances.
+/// The three CLI co-signing members (deterministic keys + genesis balances).
+fn cli_members() -> (Vec<MemberInfo>, Vec<(u8, RegevCiphertext)>, Vec<ControlledMember>) {
     let mut members = Vec::new();
-    let mut enc_active: Vec<(u8, RegevCiphertext)> = Vec::new();
+    let mut enc = Vec::new();
     let mut controlled = Vec::new();
     for &slot in CLI_SLOTS {
         let keygen_seed = 0xC1_0000 + slot as u64;
@@ -182,39 +176,71 @@ fn cmd_init(args: &[String]) {
         let balance_seed = 0xBA_0000 + slot as u64;
         let (ct, _w) = encrypt_amount(&mut StdRng::seed_from_u64(balance_seed), &keys.regev_pk, amount)
             .unwrap_or_else(|e| die(e));
-        enc_active.push((slot, ct));
+        enc.push((slot, ct));
         controlled.push(ControlledMember { slot, keygen_seed, balance_amount: amount, balance_seed, has_witness: true });
     }
-    // (4) Add all delegates (existing preserved + the new one).
-    for (info, ct) in &delegates {
-        members.push(info.clone());
-        enc_active.push((info.slot, ct.clone()));
-    }
+    (members, enc, controlled)
+}
 
+/// CREATE the channel: 3 members + this delegate at slot 3, genesis (v0), 3 members sign.
+fn create_channel(
+    mut nd: MemberInfo,
+    new_ct: RegevCiphertext,
+) -> (ChannelRecord, ChannelState, Vec<MemberInfo>, Vec<ControlledMember>, u8) {
+    let _ = DELEGATE_COUNT; // (delegate_count is now dynamic; first channel has 1)
+    nd.slot = BROWSER_DELEGATE_SLOT;
+    let (mut members, mut enc, controlled) = cli_members();
+    members.push(nd);
+    enc.push((BROWSER_DELEGATE_SLOT, new_ct));
     members.sort_by_key(|m| m.slot);
-    let delegate_count = delegates.len() as u8;
-    let record = build_record(CHANNEL_ID, &members, BP_SLOT, delegate_count).unwrap_or_else(|e| die(e));
-    enc_active.sort_by_key(|(s, _)| *s);
-    let enc: Vec<RegevCiphertext> = enc_active.into_iter().map(|(_, c)| c).collect();
-    let fund: u64 = CLI_GENESIS.iter().map(|(_, a)| *a).sum::<u64>() + 50 * delegate_count as u64;
-    let mut genesis = assemble_genesis_state(&record, &enc, fund).unwrap_or_else(|e| die(e));
-
-    // The three MEMBERS co-sign the genesis (N-of-N). The DELEGATEs (browsers) do NOT sign state.
+    let record = build_record(CHANNEL_ID, &members, BP_SLOT, 1).unwrap_or_else(|e| die(e));
+    enc.sort_by_key(|(s, _)| *s);
+    let encs: Vec<RegevCiphertext> = enc.into_iter().map(|(_, c)| c).collect();
+    let fund: u64 = CLI_GENESIS.iter().map(|(_, a)| *a).sum::<u64>() + 50;
+    let mut state = assemble_genesis_state(&record, &encs, fund).unwrap_or_else(|e| die(e));
     for c in &controlled {
-        let keys = keys_for(c.keygen_seed);
-        let sig = sign_state(&keys, c.slot, &genesis).unwrap_or_else(|e| die(e));
-        add_signature(&mut genesis, sig);
+        let sig = sign_state(&keys_for(c.keygen_seed), c.slot, &state).unwrap_or_else(|e| die(e));
+        add_signature(&mut state, sig);
     }
-    verify_all_signatures(&record, &members, &genesis)
-        .unwrap_or_else(|e| die(format!("genesis not fully/validly member-signed: {e}")));
+    (record, state, members, controlled, BROWSER_DELEGATE_SLOT)
+}
 
-    let snapshot = ChannelSnapshot { record, state: genesis, members };
-    save_state(&CliState { controlled, snapshot: snapshot.clone() });
-    write_json(out_path, &snapshot);
-    println!(
-        "delegate joined at slot {new_slot} (member_count=3, delegate_count={delegate_count}). \
-         Browser: wallet_import_channel(<{out_path}>)."
-    );
+/// JOIN the existing channel as a NEW delegate, PRESERVING the current state (balances + sends). The
+/// new delegate's slot is added with its genesis ciphertext, `delegate_count` and `state_version` are
+/// bumped, and the 3 members re-sign the new state. Existing delegates' ciphertexts are untouched, so
+/// their browser send-witnesses stay valid.
+fn join_delegate(
+    mut nd: MemberInfo,
+    new_ct: RegevCiphertext,
+) -> (ChannelRecord, ChannelState, Vec<MemberInfo>, Vec<ControlledMember>, u8) {
+    let prev = load_state();
+    let existing = prev.snapshot.members.iter().filter(|m| m.slot >= BROWSER_DELEGATE_SLOT).count();
+    let new_slot = BROWSER_DELEGATE_SLOT + existing as u8;
+    if CLI_SLOTS.len() + existing + 1 > MAX_CHANNEL_MEMBERS {
+        die("channel is full (member_count + delegate_count would exceed MAX_CHANNEL_MEMBERS)");
+    }
+    nd.slot = new_slot;
+    let mut members = prev.snapshot.members.clone();
+    members.push(nd);
+    members.sort_by_key(|m| m.slot);
+    let new_delegate_count = (existing + 1) as u8;
+    let record = build_record(CHANNEL_ID, &members, BP_SLOT, new_delegate_count).unwrap_or_else(|e| die(e));
+
+    // Membership add: keep the CURRENT balance state (preserving every slot's ciphertext + any sends),
+    // add the new delegate's slot, bump delegate_count + state_version, clear sigs, members re-sign.
+    let mut state = prev.snapshot.state.clone();
+    state.prev_digest = state.digest;
+    state.balance_state.delegate_count = new_delegate_count;
+    state.balance_state.enc_balances[new_slot as usize] = new_ct;
+    state.balance_state.pending_adds[new_slot as usize] = 0;
+    state.balance_state.state_version += 1;
+    state.member_signatures = Vec::new();
+    let mut state = state.with_computed_digest();
+    for c in &prev.controlled {
+        let sig = sign_state(&keys_for(c.keygen_seed), c.slot, &state).unwrap_or_else(|e| die(e));
+        add_signature(&mut state, sig);
+    }
+    (record, state, members, prev.controlled, new_slot)
 }
 
 /// DEV/TEST ONLY: simulate the browser's `wallet_genesis_contribution` — generate a delegate's keys

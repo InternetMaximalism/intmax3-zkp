@@ -158,3 +158,57 @@ fn two_delegates_in_one_channel_delegate_to_delegate_send() {
     let signers: Vec<u8> = fin.state.member_signatures.iter().map(|s| s.member_slot).collect();
     assert_eq!(signers, vec![0, 1, 2], "only the 3 members co-signed; neither delegate did");
 }
+
+/// Membership-add JOIN: a 1-delegate channel where a member has already SENT, then a 2nd delegate
+/// joins via a state-PRESERVING add (the send survives), and BOTH delegates can import the new state
+/// (mirrors channel_member's join_delegate). Proves "join after sending does not wipe; the new state
+/// is importable by every delegate".
+#[test]
+fn delegate_join_preserves_send_and_is_importable() {
+    use intmax3_zkp::common::channel::ChannelState;
+    let mut rng = StdRng::seed_from_u64(0x10_1_E55);
+    let mk: Vec<MemberKeys> = (0..3).map(|_| MemberKeys::generate(&mut rng)).collect();
+    let d3 = MemberKeys::generate(&mut rng);
+
+    let mut members: Vec<MemberInfo> = mk.iter().enumerate().map(|(i, k)| info(i as u8, k)).collect();
+    members.push(info(3, &d3));
+    let record = build_record(7, &members, 0, 1).unwrap();
+    let mut cts = Vec::new();
+    for (i, &b) in [40u64, 30, 20].iter().enumerate() {
+        cts.push(encrypt_amount(&mut rng, &mk[i].regev_pk, b).unwrap().0);
+    }
+    let (c3, w3) = encrypt_amount(&mut rng, &d3.regev_pk, 50).unwrap();
+    cts.push(c3);
+    let mut state = assemble_genesis_state(&record, &cts, 200).unwrap();
+    for s in 0..3u8 { let g = sign_state(&mk[s as usize], s, &state).unwrap(); add_signature(&mut state, g); }
+
+    // Delegate 3 sends 8 to member 0 (v0 -> v1).
+    let snap = ChannelSnapshot { record: record.clone(), state, members: members.clone() };
+    let BuiltSend { payload, .. } = build_send(&d3, &snap, 3, 0, 8, 50, &w3, Bytes32::default(), LEVEL, &mut rng).unwrap();
+    let mut v1 = payload.proposed_next_state.clone();
+    for s in 0..3u8 { let g = sign_state(&mk[s as usize], s, &v1).unwrap(); add_signature(&mut v1, g); }
+    assert_eq!(decrypt_balance(&d3, &ChannelSnapshot{record:record.clone(),state:v1.clone(),members:members.clone()}, 3).unwrap(), 42);
+
+    // A 2nd delegate (slot 4) JOINS: state-preserving membership add on top of v1.
+    let d4 = MemberKeys::generate(&mut rng);
+    members.push(info(4, &d4));
+    let record2 = build_record(7, &members, 0, 2).unwrap();
+    let (c4, _w4) = encrypt_amount(&mut rng, &d4.regev_pk, 60).unwrap();
+    let mut v2: ChannelState = v1.clone();
+    v2.prev_digest = v2.digest;
+    v2.balance_state.delegate_count = 2;
+    v2.balance_state.enc_balances[4] = c4;
+    v2.balance_state.pending_adds[4] = 0;
+    v2.balance_state.state_version += 1;
+    v2.member_signatures.clear();
+    let mut v2 = v2.with_computed_digest();
+    for s in 0..3u8 { let g = sign_state(&mk[s as usize], s, &v2).unwrap(); add_signature(&mut v2, g); }
+
+    let joined = ChannelSnapshot { record: record2, state: v2, members };
+    // BOTH delegates import the joined state; the earlier send is preserved (delegate 3 still 42).
+    verify_snapshot(&joined, Some((&d3, 3))).expect("delegate 3 imports joined state");
+    verify_snapshot(&joined, Some((&d4, 4))).expect("delegate 4 imports joined state");
+    assert_eq!(decrypt_balance(&d3, &joined, 3).unwrap(), 42, "delegate 3 send survived the join");
+    assert_eq!(decrypt_balance(&d4, &joined, 4).unwrap(), 60, "delegate 4 funded");
+    assert_eq!(joined.state.balance_state.state_version, 2, "v1 send + join => v2");
+}
