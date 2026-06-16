@@ -748,8 +748,16 @@ pub fn build_send(
     };
 
     let mut proposed = next_state;
-    let sender_sig = sign_state(keys, sender_slot, &proposed)?;
-    add_signature(&mut proposed, sender_sig);
+    // SECURITY/delegate account: a co-signing MEMBER sender (slot < member_count) contributes its
+    // own Goldilocks state signature here (it is one of the N-of-N). A DELEGATE sender
+    // (slot >= member_count) is send-only — it authorizes the debit with its BabyBear A11 hash-sig
+    // (above) but does NOT co-sign channel state, so it adds NO state signature; the N-of-N members
+    // co-sign the resulting state. (A delegate signature would be ignored by verify_all_signatures
+    // anyway, but emitting it would contradict the send-only model and waste a proof.)
+    if (sender_slot as usize) < prev.balance_state.member_count as usize {
+        let sender_sig = sign_state(keys, sender_slot, &proposed)?;
+        add_signature(&mut proposed, sender_sig);
+    }
 
     Ok(BuiltSend {
         payload: SendPayload {

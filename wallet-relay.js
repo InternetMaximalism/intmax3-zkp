@@ -33,20 +33,23 @@ app.use((req, res, next) => {
   next();
 });
 
-// Step 1: browser sends its genesis contribution → CLI builds the channel → returns the genesis
-// state for the browser to sign.
+// Step 1 (delegate demo): browser sends its DELEGATE genesis contribution → CLI builds the channel
+// with 3 co-signing members + the browser delegate, the 3 members sign the genesis, and the CLI
+// returns the FULLY-SIGNED snapshot for the browser to import directly (the delegate does NOT sign
+// the genesis).
 app.post('/api/init', (req, res) => {
   try {
     // Fresh channel each time.
     fs.mkdirSync(WORK, { recursive: true });
     fs.rmSync(w('cli_state.json'), { force: true });
     fs.writeFileSync(w('contribution.json'), JSON.stringify(req.body));
-    cli(['init', 'contribution.json', 'genesis_to_sign.json']);
-    res.json(JSON.parse(fs.readFileSync(w('genesis_to_sign.json'), 'utf8')));
+    cli(['init', 'contribution.json', 'channel_snapshot.json']);
+    res.json(JSON.parse(fs.readFileSync(w('channel_snapshot.json'), 'utf8')));
   } catch (e) { { console.error(e.stderr ? String(e.stderr) : (e.message||e)); res.status(500).json({ error: String(e.stderr || e.message || e) }); } }
 });
 
-// Step 2: browser returns its genesis signature → CLI assembles the fully-signed snapshot.
+// (Legacy member-mode genesis co-signing — unused by the delegate demo, where the browser does not
+// sign the genesis. Kept for the member-mode wallet.)
 app.post('/api/add-genesis-sig', (req, res) => {
   try {
     fs.writeFileSync(w('browser_sig.json'), JSON.stringify(req.body));

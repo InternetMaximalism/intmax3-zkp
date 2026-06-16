@@ -35,8 +35,8 @@
 </header>
 <main>
   <section class="panel">
-    <h2>1 · Open a channel</h2>
-    <p class="hint">Generates your keys (Goldilocks signing key + BabyBear hash-sig key + Regev), funds your slot, and the local CLI runs the other two members. All proving/lattice work happens in your browser.</p>
+    <h2>1 · Open a channel (as a delegate)</h2>
+    <p class="hint">You join as a send-only <b>delegate</b>: this generates your keys (Goldilocks + BabyBear hash-sig + Regev) and funds your slot, while the local CLI runs the <b>three co-signing members</b> (slots 0–2). The members sign the channel state; you only sign your own sends. All proving/lattice work happens in your browser.</p>
     <label>Your opening balance</label>
     <input id="openBalance" type="number" value="50" min="0" />
     <button id="btnOpen" disabled>Generate keys & open channel</button>
@@ -49,10 +49,10 @@
   </section>
 
   <section class="panel">
-    <h2>3 · Send</h2>
-    <p class="hint">Builds the Regev E-1 zero-knowledge proof (~3ms) and the sender's BabyBear hash-sig ZK proof in your browser; the ZK proving dominates the time. Then the other members co-sign (each a Goldilocks SingleSig ZK proof).</p>
+    <h2>3 · Send (as the delegate)</h2>
+    <p class="hint">As the delegate you authorize the send with your OWN BabyBear hash-sig (A11) over the Regev E-1 zero-knowledge proof (~3ms) — built in your browser. The three members then co-sign the resulting state (each a Goldilocks SingleSig ZK proof); they will only co-sign a debit you signed.</p>
     <div class="row">
-      <div><label>To member slot</label><input id="toSlot" type="number" value="1" /></div>
+      <div><label>To member slot (0–2)</label><input id="toSlot" type="number" value="0" min="0" max="2" /></div>
       <div><label>Amount</label><input id="amount" type="number" value="7" /></div>
     </div>
     <button id="btnSend" disabled>Send</button>
@@ -107,15 +107,15 @@ $('btnOpen').onclick = async () => {
     $('btnOpen').disabled = true;
     await step('generate keys', () => call('keygen'));
     const contribution = await step('encrypt opening balance', () => call('genesisContribution', { balance: $('openBalance').value }));
-    const genesisToSign = await step('CLI builds channel (other members)', () => api('/api/init', contribution));
-    const sig = await step('sign genesis (Goldilocks SingleSig ZK proof; first call also builds the circuit)', () => call('signState', { slot: 0, stateJson: genesisToSign }));
-    const snapshot = await step('CLI collects signatures', () => api('/api/add-genesis-sig', sig));
-    const r = JSON.parse(await step('import & verify channel', () => call('importChannel', { snapshotJson: snapshot })));
+    // The browser is the DELEGATE: the CLI's three members sign the genesis and return the
+    // fully-signed snapshot directly — the delegate does NOT co-sign state.
+    const snapshot = await step('CLI builds channel + 3 members co-sign genesis', () => api('/api/init', contribution));
+    const r = JSON.parse(await step('import & verify channel (as delegate)', () => call('importChannel', { snapshotJson: snapshot })));
     mySlot = r.slot;
     showBalance(r);
-    $('members').textContent = `You are slot ${r.slot}. Other members: slot 1 (CLI), slot 2 (CLI).`;
+    $('members').textContent = `You are the DELEGATE at slot ${r.slot} (send-only — you do NOT co-sign). Co-signing members: slots 0, 1, 2 (CLI).`;
     $('btnSend').disabled = false;
-    log(`channel open in ${Math.round((Date.now()-t0)/1000)}s. balance ${r.balance}`, 'ok');
+    log(`channel open in ${Math.round((Date.now()-t0)/1000)}s. You are delegate slot ${r.slot}, balance ${r.balance}`, 'ok');
   } catch (e) { log('open failed: '+e.message, 'err'); $('btnOpen').disabled=false; }
   clearInterval(tick);
   $('btnOpen').textContent = 'Generate keys & open channel';
