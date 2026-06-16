@@ -201,6 +201,29 @@ impl ChannelMemberKeys {
         }
     }
 
+    /// Build `ChannelMemberKeys` from REAL wallet `MemberKeys` (Goldilocks + BabyBear + REAL Regev),
+    /// so a channel registered in the validity proof has EXACTLY the same `(pk_g, pk_b,
+    /// regev_pk_digest)` member set as the channel-layer `build_record` (B-2: the small-block
+    /// `bp_pk_g` the validity circuit verifies is a genuine registered member, and the channel's
+    /// `member_pubkeys_root` matches the registration's). Unlike `deterministic`, the Regev keys are
+    /// real keypairs (the secret lives with the wallet, NOT here — validity never decrypts).
+    pub fn from_member_keys(keys: &[crate::wallet_core::MemberKeys]) -> Self {
+        let mut member_tree = MemberTree::init();
+        let (mut secret_keys, mut baby_keys, mut regev_pks) = (Vec::new(), Vec::new(), Vec::new());
+        for k in keys.iter().take(TEST_ACTIVE_MEMBERS) {
+            let pk_b: PoseidonHashOut = k.baby_key.public_key().to_bytes32().reduce_to_hash_out();
+            member_tree.push(MemberLeaf {
+                pk_g: k.signing_key.public_key_hash_out(),
+                pk_b,
+                regev_pk_digest: k.regev_pk.poseidon_digest(),
+            });
+            secret_keys.push(k.signing_key.clone());
+            baby_keys.push(k.baby_key.clone());
+            regev_pks.push(k.regev_pk.clone());
+        }
+        Self { secret_keys, baby_keys, regev_pks, member_tree }
+    }
+
     /// Build the on-chain [`ChannelRegRecord`] for `channel_id` from this member key material.
     ///
     /// SECURITY (R2 cross-binding consistency): each active slot's `pk_g` /
@@ -210,7 +233,7 @@ impl ChannelMemberKeys {
     /// `member_pubkeys_root` it writes equals `member_tree.get_root()` — exactly the root the later
     /// updating-block member-signature binding opens against. The `recipient` is a deterministic
     /// test L1 address; it only enters the keccak preimage, not the Poseidon member tree.
-    fn to_reg_record(&self, channel_id: u32) -> ChannelRegRecord {
+    pub fn to_reg_record(&self, channel_id: u32) -> ChannelRegRecord {
         let mut members: [MemberRegEntry; MAX_CHANNEL_MEMBERS] = Default::default();
         for i in 0..TEST_ACTIVE_MEMBERS {
             let leaf = self.member_tree.get_leaf(i as u64);
@@ -336,6 +359,26 @@ impl BlockWitnessGenerator {
         record
             .validate()
             .expect("deterministic test registration record must be valid");
+        self.channel_registrations.push((record, keys.clone()));
+        self.channel_members.insert(channel, keys.clone());
+        keys
+    }
+
+    /// Register `channel_id` with PROVIDED real member keys (B-2): the same `(pk_g, pk_b, regev_pk)`
+    /// triple the channel-layer `build_record` uses, so the small-block signature the validity proof
+    /// verifies (`bp_pk_g ∈ member_pubkeys_root`) is a genuine registered member and the channel's
+    /// `member_pubkeys_root` equals the registration's.
+    pub fn add_channel_registration_keys(
+        &mut self,
+        channel_id: u32,
+        keys: ChannelMemberKeys,
+    ) -> ChannelMemberKeys {
+        let channel = ChannelId::new(channel_id as u64).expect("channel id");
+        if let Some(existing) = self.channel_members.get(&channel) {
+            return existing.clone();
+        }
+        let record = keys.to_reg_record(channel_id);
+        record.validate().expect("registration record must be valid");
         self.channel_registrations.push((record, keys.clone()));
         self.channel_members.insert(channel, keys.clone());
         keys
