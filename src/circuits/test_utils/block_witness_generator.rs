@@ -308,6 +308,11 @@ pub struct BlockWitnessGenerator {
     /// proof and folds them into one `ListCircuit` proof whose commitment must equal the final
     /// `bp_sig_chain` (decision D3).
     pub bp_sig_events: Vec<(GoldilocksSecretKey, Bytes32)>,
+    /// B-2: the `state_commitment_root` (= post-debit `BalanceState::h1()`, detail2 §C-7) to bind in
+    /// the NEXT updating block's IMSB message, so the bp signs the genuine `hash(H1', tx_tree_root)`
+    /// channelStateSig (structural atomicity D-3) instead of `hash(H1'=0, tx_tree_root)`. Consumed
+    /// by the next `add_block_with_tx_v2`; `None` ⇒ zero (correct for intra/base-layer blocks).
+    pub next_imsb_state_commitment_root: Option<Bytes32>,
 }
 
 impl BlockWitnessGenerator {
@@ -329,6 +334,7 @@ impl BlockWitnessGenerator {
             channel_registrations: Vec::new(),
             block_chain_witness: HashMap::new(),
             bp_sig_events: Vec::new(),
+            next_imsb_state_commitment_root: None,
         }
     }
 
@@ -795,6 +801,9 @@ impl BlockWitnessGenerator {
         // Build the block-level IMSB message fields (`bp_member_slot` = first updating slot). The
         // signed digest is recomputed once and signed by EACH updating member at their own slot.
         let member_keys = channel_opt.and_then(|c| self.channel_members.get(&c).cloned());
+        // B-2: bind the real post-debit H1' (detail2 §C-7) if provided for this block (inter-channel
+        // small block); `None`/zero is correct for intra-channel and base-layer blocks.
+        let imsb_h1 = self.next_imsb_state_commitment_root.take().unwrap_or_default();
         let (msg_fields, signed_digest) = if let Some(bp_slot) = any_update_slot {
             let keys = member_keys.as_ref().ok_or_else(|| {
                 BlockWitnessGeneratorError::InvalidRequest(format!(
@@ -812,7 +821,7 @@ impl BlockWitnessGenerator {
                 bp_pk_g: bp_hash,
                 small_block_number: 0,
                 prev_small_block_root: Bytes32::default(),
-                state_commitment_root: Bytes32::default(),
+                state_commitment_root: imsb_h1,
                 medium_epoch_hint: 0,
                 close_freeze_nonce: 0,
             };
