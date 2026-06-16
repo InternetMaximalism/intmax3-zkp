@@ -68,7 +68,13 @@ const BD: usize = 2;
 
 const LEVEL: RegevSecurityLevel = RegevSecurityLevel::Production;
 const STATE_FILE: &str = "cli_state.json";
-const CHANNEL_ID: u32 = 7;
+// Which channel this CLI process operates. The relay runs ONE process per channel (channels 7 and 8),
+// each in its own working directory, selecting the channel via the `INTMAX_CHANNEL` env var. Defaults
+// to 7 for standalone use. Channel id is part of the deposit recipient + the channel record, so two
+// channels are fully distinct on-chain identities (each backed by its own real deposit).
+fn channel_id_env() -> u32 {
+    std::env::var("INTMAX_CHANNEL").ok().and_then(|s| s.parse().ok()).unwrap_or(7)
+}
 const BP_SLOT: u8 = 0;
 // detail2 §F-1 deposit backing: produced ONCE by `setup-backing`, consumed by the co-sign gate.
 const BACKING_FILE: &str = "channel_backing.json"; // settled_tx_chain / intmax_state_root / fund
@@ -228,8 +234,8 @@ fn cmd_setup_backing(args: &[String]) {
     let bp = BalanceProcessor::<BF, BC, BD>::new(&spend.data.verifier_data());
     let bwgen = BlockWitnessGeneratorHandle::new(BlockWitnessGenerator::new(&[1, 4, 512]));
 
-    let mut rng = DepRng::seed_from_u64(0x00DE_C0DE ^ CHANNEL_ID as u64);
-    let channel_id = ChannelId::new(CHANNEL_ID as u64).unwrap_or_else(|e| die(format!("{e:?}")));
+    let mut rng = DepRng::seed_from_u64(0x00DE_C0DE ^ channel_id_env() as u64);
+    let channel_id = ChannelId::new(channel_id_env() as u64).unwrap_or_else(|e| die(format!("{e:?}")));
     let salt = Salt::rand(&mut rng);
     let mut bwg = BalanceWitnessGenerator::new(channel_id, salt, bwgen.clone(), &bp)
         .unwrap_or_else(|e| die(format!("balance witness generator: {e:?}")));
@@ -321,7 +327,8 @@ fn cmd_setup_backing(args: &[String]) {
         },
     );
     println!(
-        "setup-backing OK: REAL on-chain deposit {fund} to channel {CHANNEL_ID} (IntmaxRollup {rollup}, tx {txhash}); settled_tx_chain={}. Now run `init`.",
+        "setup-backing OK: REAL on-chain deposit {fund} to channel {} (IntmaxRollup {rollup}, tx {txhash}); settled_tx_chain={}. Now run `init`.",
+        channel_id_env(),
         pis.settled_tx_chain.to_hex()
     );
 }
@@ -414,7 +421,7 @@ fn create_channel(
     members.push(nd);
     enc.push((BROWSER_DELEGATE_SLOT, new_ct));
     members.sort_by_key(|m| m.slot);
-    let record = build_record(CHANNEL_ID, &members, BP_SLOT, 1).unwrap_or_else(|e| die(e));
+    let record = build_record(channel_id_env(), &members, BP_SLOT, 1).unwrap_or_else(|e| die(e));
     enc.sort_by_key(|(s, _)| *s);
     let encs: Vec<RegevCiphertext> = enc.into_iter().map(|(_, c)| c).collect();
 
@@ -466,7 +473,7 @@ fn join_delegate(
     members.push(nd);
     members.sort_by_key(|m| m.slot);
     let new_delegate_count = (existing + 1) as u8;
-    let record = build_record(CHANNEL_ID, &members, BP_SLOT, new_delegate_count).unwrap_or_else(|e| die(e));
+    let record = build_record(channel_id_env(), &members, BP_SLOT, new_delegate_count).unwrap_or_else(|e| die(e));
 
     // Membership add: keep the CURRENT balance state (preserving every slot's ciphertext + any sends),
     // add the new delegate's slot, bump delegate_count + state_version, clear sigs, members re-sign.

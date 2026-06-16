@@ -79,12 +79,18 @@ const $ = (id) => document.getElementById(id);
 const log = (m, cls='') => { const l=$('log'); l.innerHTML += `\n<span class="${cls}">${m}</span>`; l.scrollTop=l.scrollHeight; };
 let mySlot = 0;
 let myChannel = null;
+// The channel id every /api/* call targets (the relay routes ?channel=N to that channel's directory).
+// Set when you pick a channel to join, or restored from localStorage; kept in sync with myChannel.
+let activeCh = 7;
 // Parse this channel's id from a snapshot JSON (record.channelId) and remember it for the UI.
 function setChannelFrom(snapJson) {
   try {
     const c = JSON.parse(snapJson).record.channelId;
     myChannel = (c && typeof c === 'object') ? (c.value ?? c.channelId ?? null) : c;
-    if (myChannel != null && $('toChannel')) $('toChannel').value = myChannel; // default = your own channel (intra)
+    if (myChannel != null) {
+      activeCh = myChannel;
+      if ($('toChannel')) $('toChannel').value = myChannel; // default = your own channel (intra)
+    }
   } catch (e) {}
 }
 
@@ -99,6 +105,9 @@ const toBase = (tokens) => String(Math.round(Number(tokens) * TOKEN_UNIT)); // t
 // SAME channel slot on re-import. SECURITY (testnet): this seed controls the account; it is stored
 // in plaintext in this origin's localStorage. Use the "Clear saved account" button to wipe it.
 const SEED_KEY = 'intmax_channel_seed';
+const CH_KEY = 'intmax_channel_id'; // which channel this saved account joined (7 or 8)
+function savedChannel() { return parseInt(localStorage.getItem(CH_KEY) || '', 10) || null; }
+function saveChannel(ch) { localStorage.setItem(CH_KEY, String(ch)); }
 function channelSeed() {
   let s = localStorage.getItem(SEED_KEY);
   if (!s) {
@@ -109,11 +118,13 @@ function channelSeed() {
   return s;
 }
 function hasSavedAccount() { return !!localStorage.getItem(SEED_KEY); }
-function clearSavedAccount() { localStorage.removeItem(SEED_KEY); }
+function clearSavedAccount() { localStorage.removeItem(SEED_KEY); localStorage.removeItem(CH_KEY); }
 
 // On load, if a saved account exists AND the channel still has us as a member, restore the SAME slot.
 async function tryRestore() {
   if (!hasSavedAccount()) return false;
+  // Target the channel this saved account actually joined (so the restore queries the right one).
+  if (savedChannel()) { activeCh = savedChannel(); if ($('joinChannel')) $('joinChannel').value = activeCh; }
   try {
     await call('keygenSeeded', { seed: channelSeed() });
     const snap = await api('/api/snapshot', null, 'GET');
@@ -148,7 +159,11 @@ worker.onerror = (e) => log('worker error: '+e.message, 'err');
 async function api(pathname, body, method='POST') {
   const opts = { method, headers:{'Content-Type':'application/json'} };
   if (method !== 'GET') opts.body = body;
-  const r = await fetch(pathname, opts);
+  // Route every /api/* call to the active channel's relay directory.
+  const url = pathname.startsWith('/api/')
+    ? pathname + (pathname.includes('?') ? '&' : '?') + 'channel=' + activeCh
+    : pathname;
+  const r = await fetch(url, opts);
   const text = await r.text();
   if (!r.ok) throw new Error('relay '+pathname+': '+text);
   return text; // pass JSON text straight back into the wasm calls
@@ -181,6 +196,10 @@ $('btnOpen').onclick = async () => {
   const tick = setInterval(() => { $('btnOpen').textContent = `Opening… ${Math.round((Date.now()-t0)/1000)}s`; }, 250);
   try {
     $('btnOpen').disabled = true;
+    // Join the channel the user picked (default 7). Persist it so a reload restores the right channel.
+    activeCh = parseInt($('joinChannel').value, 10) || 7;
+    saveChannel(activeCh);
+    log(`joining channel ${activeCh}…`);
     // Derive keys from the PERSISTED seed (localStorage) so reloading restores the SAME account/slot.
     await step('generate keys (from your saved account seed)', () => call('keygenSeeded', { seed: channelSeed() }));
     const contribution = await step('encrypt opening balance', () => call('genesisContribution', { balance: toBase($('openBalance').value) }));
