@@ -57,7 +57,7 @@ fn native_json_roundtrip_verifies() {
     let m0 = MemberKeys::generate(&mut rng);
     let m1 = MemberKeys::generate(&mut rng);
     let members = vec![member_info(0, &m0), member_info(1, &m1)];
-    let record = build_record(5, &members, 0).unwrap();
+    let record = build_record(5, &members, 0, 0).unwrap();
     let (bal0, bal1) = (50u64, 30u64);
     let (ct0, w0) = encrypt_amount(&mut rng, &m0.regev_pk, bal0).unwrap();
     let (ct1, _w1) = encrypt_amount(&mut rng, &m1.regev_pk, bal1).unwrap();

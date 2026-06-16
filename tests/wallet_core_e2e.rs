@@ -39,7 +39,7 @@ fn wallet_core_in_channel_send_receive() {
     let m1 = MemberKeys::generate(&mut rng); // "CLI"
     let members = vec![member_info(0, &m0), member_info(1, &m1)];
 
-    let record = build_record(5, &members, 0).expect("record");
+    let record = build_record(5, &members, 0, 0).expect("record");
 
     // Each member encrypts their own genesis balance and KEEPS the witness.
     let (bal0, bal1) = (50u64, 30u64);
@@ -115,7 +115,7 @@ fn p4_1_attacker_pk_b_swap_is_rejected() {
     let m0 = MemberKeys::generate(&mut rng);
     let m1 = MemberKeys::generate(&mut rng);
     let members = vec![member_info(0, &m0), member_info(1, &m1)];
-    let record = build_record(9, &members, 0).expect("record");
+    let record = build_record(9, &members, 0, 0).expect("record");
 
     let (bal0, bal1) = (40u64, 20u64);
     let (ct0, w0) = encrypt_amount(&mut rng, &m0.regev_pk, bal0).expect("enc0");
@@ -204,7 +204,7 @@ fn p4_1_foreign_self_consistent_record_is_rejected() {
     let m1 = MemberKeys::generate(&mut rng);
     let members = vec![member_info(0, &m0), member_info(1, &m1)];
     let channel_id = 9u32;
-    let record = build_record(channel_id, &members, 0).expect("record");
+    let record = build_record(channel_id, &members, 0, 0).expect("record");
 
     let (bal0, bal1) = (40u64, 20u64);
     let (ct0, w0) = encrypt_amount(&mut rng, &m0.regev_pk, bal0).expect("enc0");
@@ -230,7 +230,7 @@ fn p4_1_foreign_self_consistent_record_is_rejected() {
     // SAME channel_id (so member_pubkeys_root recompute over `members` matches `record`).
     let attacker = MemberKeys::generate(&mut rng);
     let foreign_members = vec![member_info(0, &attacker), member_info(1, &m1)];
-    let foreign_record = build_record(channel_id, &foreign_members, 0).expect("foreign record");
+    let foreign_record = build_record(channel_id, &foreign_members, 0, 0).expect("foreign record");
 
     let mut tampered = payload.clone();
     tampered.record = foreign_record;

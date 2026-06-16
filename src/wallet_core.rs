@@ -381,29 +381,45 @@ fn member_pubkeys_root(record: &ChannelRecord, members: &[MemberInfo]) -> WResul
 // Channel construction (CLI assembles the genesis from member contributions)
 // ---------------------------------------------------------------------------
 
-/// Build the `ChannelRecord` for an `n`-member channel from the members' pubkeys.
-/// `members` must cover slots `0..n` exactly. `bp_member_slot` is the block proposer.
+/// Build the `ChannelRecord` for a channel from its ACTIVE participants' pubkeys (delegate account).
+/// `members` covers slots `0..active` (active = co-signing members `0..member_count` followed by
+/// `delegate_count` delegates `member_count..active`), bijectively. `bp_member_slot` is the block
+/// proposer and MUST be a co-signing member (`< member_count`). Pass `delegate_count = 0` for a
+/// classic member-only channel (byte-for-byte the legacy build).
 pub fn build_record(
     channel_id: u32,
     members: &[MemberInfo],
     bp_member_slot: u8,
+    delegate_count: u8,
 ) -> WResult<ChannelRecord> {
-    let n = members.len();
-    if !(2..=MAX_CHANNEL_MEMBERS).contains(&n) {
-        return bail(format!("member_count {n} out of range (2..={MAX_CHANNEL_MEMBERS})"));
+    let active = members.len();
+    let dc = delegate_count as usize;
+    // active = member_count + delegate_count. Require active <= MAX, delegate_count <= active, and
+    // member_count = active - delegate_count >= 2 (the channel must keep >= 2 co-signing members).
+    if active > MAX_CHANNEL_MEMBERS || dc > active || active - dc < 2 {
+        return bail(format!(
+            "invalid active {active} / delegate_count {dc} (need member_count >= 2 and active <= \
+             {MAX_CHANNEL_MEMBERS})"
+        ));
+    }
+    let member_count = active - dc;
+    // bp must be a co-signing member, not a delegate.
+    if bp_member_slot as usize >= member_count {
+        return bail(format!(
+            "bp_member_slot {bp_member_slot} must be a co-signing member (< member_count {member_count})"
+        ));
     }
     let mut hashes: [Bytes32; MAX_CHANNEL_MEMBERS] = std::array::from_fn(|_| Bytes32::default());
-    for (slot, hash) in hashes.iter_mut().enumerate().take(n) {
+    for (slot, hash) in hashes.iter_mut().enumerate().take(active) {
         let m = member_at(members, slot)?;
-        // The member identity = the member's Goldilocks signing public key `pk_g`.
+        // Each active participant's identity = its Goldilocks signing public key `pk_g`.
         *hash = m.pk_g;
     }
     let regev_pks = regev_pks_array(members);
     let mut record = ChannelRecord {
         channel_id: ChannelId::new(channel_id as u64).map_err(|e| WalletError(format!("{e:?}")))?,
-        member_count: n as u8,
-        // Phase 1 delegate account: wallet builds member-only channels (no delegates yet).
-        delegate_count: 0,
+        member_count: member_count as u8,
+        delegate_count,
         member_pk_gs: hashes,
         member_pubkeys_root: Bytes32::default(),
         bp_member_slot,
@@ -417,14 +433,18 @@ pub fn build_record(
     Ok(record)
 }
 
-/// Assemble an UNSIGNED genesis `ChannelState` from per-member genesis ciphertexts (slot order).
+/// Assemble an UNSIGNED genesis `ChannelState` from per-ACTIVE-participant genesis ciphertexts
+/// (slot order: members then delegates). `enc_balances_active` must have one ciphertext per active
+/// slot (`member_count + delegate_count`); with `delegate_count = 0` this equals the legacy
+/// member-only behavior.
 pub fn assemble_genesis_state(
     record: &ChannelRecord,
     enc_balances_active: &[RegevCiphertext],
     fund_amount: u64,
 ) -> WResult<ChannelState> {
-    if enc_balances_active.len() != record.member_count as usize {
-        return bail("genesis ciphertext count must equal member_count");
+    let active = record.member_count as usize + record.delegate_count as usize;
+    if enc_balances_active.len() != active {
+        return bail("genesis ciphertext count must equal member_count + delegate_count");
     }
     let state = ChannelState {
         channel_id: record.channel_id,
@@ -443,7 +463,7 @@ pub fn assemble_genesis_state(
             enc_balances: BalanceState::pad_enc_balances(enc_balances_active),
             settled_tx_chain: Bytes32::default(),
             state_version: 0,
-            pending_adds: BalanceState::pad_pending_adds(&vec![0u32; record.member_count as usize]),
+            pending_adds: BalanceState::pad_pending_adds(&vec![0u32; active]),
         },
         h2_tag: Bytes32::default(),
         shared_native_nullifier_root: Bytes32::default(),
@@ -925,26 +945,11 @@ mod delegate_send_tests {
         assert_eq!(keys.len(), active, "one key per active slot");
         let members: Vec<MemberInfo> =
             keys.iter().enumerate().map(|(i, k)| member_info(i as u8, k)).collect();
-        let mut hashes: [Bytes32; MAX_CHANNEL_MEMBERS] =
-            std::array::from_fn(|_| Bytes32::default());
-        for (slot, h) in hashes.iter_mut().enumerate().take(active) {
-            *h = members[slot].pk_g;
-        }
-        let regev_pks = regev_pks_array(&members);
-        let mut record = ChannelRecord {
-            channel_id: ChannelId::new(channel_id as u64).unwrap(),
-            member_count,
-            delegate_count,
-            member_pk_gs: hashes,
-            member_pubkeys_root: Bytes32::default(),
-            bp_member_slot: 0,
-            special_close_penalty: U256::from(0u32),
-            close_freeze_nonce: 0,
-            status: ChannelStatus::Active,
-            regev_pk_root: regev_pk_root(&regev_pks),
-        };
-        record.member_pubkeys_root = member_pubkeys_root(&record, &members).unwrap();
-        record.validate().unwrap();
+        // Exercise the PUBLIC delegate-aware build path (build_record derives member_count =
+        // active - delegate_count and validates bp is a co-signing member).
+        let record = build_record(channel_id, &members, 0, delegate_count).unwrap();
+        assert_eq!(record.member_count, member_count);
+        assert_eq!(record.delegate_count, delegate_count);
         (record, members)
     }
 
@@ -956,35 +961,42 @@ mod delegate_send_tests {
         enc_balances_active: &[RegevCiphertext],
         fund_amount: u64,
     ) -> ChannelState {
-        let active = record.member_count as usize + record.delegate_count as usize;
-        assert_eq!(enc_balances_active.len(), active);
-        ChannelState {
-            channel_id: record.channel_id,
-            epoch: 1,
-            small_block_number: 0,
-            close_freeze_nonce: 0,
-            channel_fund: ChannelFund {
-                channel_id: record.channel_id,
-                amount: U256::from(fund_amount.min(u32::MAX as u64) as u32),
-                intmax_state_root: Bytes32::default(),
-            },
-            balance_state: BalanceState {
-                channel_id: record.channel_id,
-                member_count: record.member_count,
-                delegate_count: record.delegate_count,
-                enc_balances: BalanceState::pad_enc_balances(enc_balances_active),
-                settled_tx_chain: Bytes32::default(),
-                state_version: 0,
-                pending_adds: BalanceState::pad_pending_adds(&vec![0u32; active]),
-            },
-            h2_tag: Bytes32::default(),
-            shared_native_nullifier_root: Bytes32::default(),
-            unallocated_confirmed_incoming: U256::zero(),
-            prev_digest: Bytes32::default(),
-            digest: Bytes32::default(),
-            member_signatures: Vec::new(),
-        }
-        .with_computed_digest()
+        // Exercise the PUBLIC delegate-aware genesis path (accepts active-length ciphertexts).
+        assemble_genesis_state(record, enc_balances_active, fund_amount).unwrap()
+    }
+
+    /// Delegate account (Phase 4): the PUBLIC wallet build path (`build_record` +
+    /// `assemble_genesis_state`) creates a delegate-bearing channel and enforces the region guards.
+    #[test]
+    fn build_record_delegate_guards() {
+        let mut rng = StdRng::seed_from_u64(0xB11D);
+        let keys: Vec<MemberKeys> = (0..3).map(|_| MemberKeys::generate(&mut rng)).collect();
+        let members: Vec<MemberInfo> =
+            keys.iter().enumerate().map(|(i, k)| member_info(i as u8, k)).collect();
+
+        // 2 co-signing members + 1 delegate (active = 3): OK, member_count derived as active - dc.
+        let r = build_record(77, &members, 0, 1).expect("delegate record");
+        assert_eq!((r.member_count, r.delegate_count), (2, 1));
+        r.validate().expect("delegate record valid");
+
+        // bp in the delegate region (slot 2) is rejected — bp must be a co-signing member.
+        assert!(build_record(77, &members, 2, 1).is_err());
+        // member_count would be 1 (2 active, 1 delegate) — rejected (need >= 2 co-signers).
+        let two: Vec<MemberInfo> = members[..2].to_vec();
+        assert!(build_record(77, &two, 0, 1).is_err());
+        // delegate_count > active — rejected.
+        assert!(build_record(77, &members, 0, 4).is_err());
+
+        // Genesis assembly requires one ciphertext per ACTIVE slot (members + delegates).
+        let encs: Vec<RegevCiphertext> = keys
+            .iter()
+            .map(|k| encrypt_amount(&mut rng, &k.regev_pk, 10).unwrap().0)
+            .collect();
+        let g = assemble_genesis_state(&r, &encs, 30).expect("active genesis");
+        assert_eq!(g.balance_state.delegate_count, 1);
+        g.balance_state.validate().expect("genesis balance valid");
+        // A member_count-only ciphertext count is rejected (must cover the delegate slot too).
+        assert!(assemble_genesis_state(&r, &encs[..2], 30).is_err());
     }
 
     /// A 2-member + 1-delegate channel (delegate in slot 2) with real keys, a genesis with a

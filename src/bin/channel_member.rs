@@ -155,7 +155,7 @@ fn cmd_init(args: &[String]) {
     }
 
     members.sort_by_key(|m| m.slot);
-    let record = build_record(CHANNEL_ID, &members, BP_SLOT).unwrap_or_else(|e| die(e));
+    let record = build_record(CHANNEL_ID, &members, BP_SLOT, 0).unwrap_or_else(|e| die(e)); // CLI: member-only channels
     enc_active.sort_by_key(|(s, _)| *s);
     let enc: Vec<RegevCiphertext> = enc_active.into_iter().map(|(_, c)| c).collect();
     let fund: u64 = CLI_GENESIS.iter().map(|(_, a)| *a).sum::<u64>() + 50; // +browser (unknown plaintext; informational)
