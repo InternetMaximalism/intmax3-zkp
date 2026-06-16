@@ -35,32 +35,27 @@
 </header>
 <main>
   <section class="panel">
-    <h2>1 · Join the Intmax-backed channel (as a delegate)</h2>
-    <p class="hint">This channel is backed by a <b>real Intmax deposit</b> (detail2 §F-1): the local CLI deposited the fund on the base layer and proved it (<code>balanceProof</code>), and the three co-signing members <b>refuse to sign any state whose <code>settled_tx_chain</code> does not match that deposit</b>. You are NOT minting a number — you join with your pre-allocated share of the deposited fund.</p>
-    <div id="backing" class="members">checking the channel's Intmax deposit backing…</div>
-    <label>Your allocation in tokens (your share of the channel's deposited fund · 6 decimals)</label>
-    <input id="openBalance" type="number" value="50" readonly title="Fixed: your delegate allocation out of the channel's real Intmax deposit (so Σ balances == deposited fund)" />
-    <button id="btnOpen" disabled>Generate keys & join channel</button>
-    <button id="btnClear" style="background:#3a2330;color:#f3a8bd;margin-top:8px">Clear saved account (localStorage)</button>
-    <div class="members" id="members"></div>
-  </section>
-
-  <section class="panel">
-    <h2>2 · Your balance</h2>
-    <div class="bal"><span id="balance">—</span> <small id="balMeta"></small></div>
-    <button id="btnRefresh" disabled>Refresh (check for incoming)</button>
-    <p class="hint">Re-imports the latest channel state — click after someone sends you funds to see them arrive. (After receiving, a balance refresh is needed before you can send again.)</p>
-  </section>
-
-  <section class="panel">
-    <h2>3 · Send (as the delegate)</h2>
-    <p class="hint">As the delegate you authorize the send with your OWN BabyBear hash-sig (A11) over the Regev E-1 zero-knowledge proof (~3ms) — built in your browser. The three members then co-sign the resulting state (each a Goldilocks SingleSig ZK proof); they will only co-sign a debit you signed.</p>
+    <h2>1 · Join the Intmax channel</h2>
+    <input id="openBalance" type="number" value="50" readonly />
     <div class="row">
-      <div><label>To slot (members 0–2, delegates 3+)</label><input id="toSlot" type="number" value="0" min="0" /></div>
-      <div><label>Amount (tokens, 6 decimals)</label><input id="amount" type="number" step="0.000001" value="7" /></div>
+      <button id="btnOpen" disabled>Join</button>
+      <button id="btnClear">Clear</button>
+    </div>
+  </section>
+
+  <section class="panel">
+    <h2>2 · Balance</h2>
+    <div class="bal"><span id="balance">—</span> <small id="balMeta"></small></div>
+    <button id="btnRefresh" disabled>Refresh</button>
+  </section>
+
+  <section class="panel">
+    <h2>3 · Send</h2>
+    <div class="row">
+      <input id="toSlot" type="number" value="0" />
+      <input id="amount" type="number" step="0.000001" value="7" />
     </div>
     <button id="btnSend" disabled>Send</button>
-    <p class="hint">The wait is the in-browser ZK proving — the sender's BabyBear Poseidon2 hash-sig proof (Plonky3) plus circuit setup; the Regev STARK itself is ~3ms. The button shows elapsed time.</p>
   </section>
 
   <div id="log"></div>
@@ -103,8 +98,8 @@ async function tryRestore() {
     const r = JSON.parse(await call('importChannel', { snapshotJson: snap }));
     mySlot = r.slot; showBalance(r);
     $('btnSend').disabled = false; $('btnRefresh').disabled = false;
-    $('btnOpen').textContent = 'Re-join (new account)';
-    $('members').textContent = `Restored your saved account at slot ${r.slot} (same key/slot across reloads). Co-signing members: slots 0,1,2 (CLI).`;
+    $('btnOpen').textContent = 'Re-join';
+    log(`restored saved account at slot ${r.slot} (same key/slot across reloads)`);
     log(`restored saved account → slot ${r.slot}, balance ${r.balance}`, 'ok');
     return true;
   } catch (e) {
@@ -141,21 +136,14 @@ function showBalance(r) {
   $('balMeta').textContent = `· slot ${r.slot} · v${r.stateVersion} · ${r.canSend ? 'can send' : 'receive-only (refresh needed)'}`;
 }
 
-// Show the channel's REAL Intmax deposit backing (detail2 §F-1). This is the proof the channel is
-// genuinely funded on the base layer — the members will not co-sign a state that doesn't match it.
+// Log the channel's REAL on-chain deposit backing (detail2 §F-1) — proof it is genuinely funded.
 async function showBacking() {
   try {
     const b = JSON.parse(await api('/api/backing', null, 'GET'));
-    const chain = b.settledTxChain || b.settled_tx_chain || '';
-    const rollup = b.rollup || '';
-    const tx = b.depositTx || b.deposit_tx || '';
-    const onchain = rollup
-      ? ` · <span class="ok" title="the deposit really happened on this local chain — totalEscrowed grew by the deposited ETH">on-chain</span> IntmaxRollup <code>${rollup.slice(0,8)}…</code> tx <code>${tx.slice(0,10)}…</code>`
-      : '';
-    $('backing').innerHTML = `<span class="ok">✓ backed by a REAL on-chain ETH deposit</span> · fund <b>${fmtAmt(b.fund)}</b> · `
-      + `settled_tx_chain <code title="the base-layer balanceProof public input the members reconcile against">${chain.slice(0,10)}…${chain.slice(-6)}</code>${onchain}`;
+    const rollup = b.rollup || '', tx = b.depositTx || b.deposit_tx || '';
+    log(`✓ backed by a REAL on-chain ETH deposit · fund ${fmtAmt(b.fund)}` + (rollup ? ` · IntmaxRollup ${rollup.slice(0,8)}… tx ${tx.slice(0,10)}…` : ''), 'ok');
   } catch (e) {
-    $('backing').innerHTML = `<span class="err">no deposit backing yet</span> — the relay runs <code>setup-backing</code> on first launch (~30s); reload shortly.`;
+    log('no deposit backing yet — the relay runs setup-backing on first launch (~30s); reload shortly.', 'err');
   }
 }
 
@@ -180,13 +168,13 @@ $('btnOpen').onclick = async () => {
     const r = JSON.parse(await step('import & verify channel (as delegate)', () => call('importChannel', { snapshotJson: snapshot })));
     mySlot = r.slot;
     showBalance(r);
-    $('members').textContent = `You are the DELEGATE at slot ${r.slot} (send-only — you do NOT co-sign). Co-signing members: slots 0, 1, 2 (CLI). Open this page in ANOTHER tab to join as a second delegate (slot ${r.slot+1}).`;
+    log(`you are delegate slot ${r.slot} (co-signers: slots 0,1,2). Open another tab to join as slot ${r.slot+1}.`);
     $('btnSend').disabled = false;
     $('btnRefresh').disabled = false;
     log(`joined as delegate slot ${r.slot} in ${Math.round((Date.now()-t0)/1000)}s. balance ${r.balance}. (Open more tabs BEFORE sending — each becomes a new delegate slot.)`, 'ok');
   } catch (e) { log('open failed: '+e.message, 'err'); $('btnOpen').disabled=false; }
   clearInterval(tick);
-  $('btnOpen').textContent = 'Generate keys & open channel';
+  $('btnOpen').textContent = 'Join';
 };
 
 $('btnClear').onclick = () => {
