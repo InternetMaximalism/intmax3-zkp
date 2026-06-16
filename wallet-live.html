@@ -38,7 +38,7 @@
     <h2>1 · Join the Intmax-backed channel (as a delegate)</h2>
     <p class="hint">This channel is backed by a <b>real Intmax deposit</b> (detail2 §F-1): the local CLI deposited the fund on the base layer and proved it (<code>balanceProof</code>), and the three co-signing members <b>refuse to sign any state whose <code>settled_tx_chain</code> does not match that deposit</b>. You are NOT minting a number — you join with your pre-allocated share of the deposited fund.</p>
     <div id="backing" class="members">checking the channel's Intmax deposit backing…</div>
-    <label>Your allocation (your share of the channel's deposited fund)</label>
+    <label>Your allocation in tokens (your share of the channel's deposited fund · 6 decimals)</label>
     <input id="openBalance" type="number" value="50" readonly title="Fixed: your delegate allocation out of the channel's real Intmax deposit (so Σ balances == deposited fund)" />
     <button id="btnOpen" disabled>Generate keys & join channel</button>
     <button id="btnClear" style="background:#3a2330;color:#f3a8bd;margin-top:8px">Clear saved account (localStorage)</button>
@@ -57,7 +57,7 @@
     <p class="hint">As the delegate you authorize the send with your OWN BabyBear hash-sig (A11) over the Regev E-1 zero-knowledge proof (~3ms) — built in your browser. The three members then co-sign the resulting state (each a Goldilocks SingleSig ZK proof); they will only co-sign a debit you signed.</p>
     <div class="row">
       <div><label>To slot (members 0–2, delegates 3+)</label><input id="toSlot" type="number" value="0" min="0" /></div>
-      <div><label>Amount</label><input id="amount" type="number" value="7" /></div>
+      <div><label>Amount (tokens, 6 decimals)</label><input id="amount" type="number" step="0.000001" value="7" /></div>
     </div>
     <button id="btnSend" disabled>Send</button>
     <p class="hint">The wait is the in-browser ZK proving — the sender's BabyBear Poseidon2 hash-sig proof (Plonky3) plus circuit setup; the Regev STARK itself is ~3ms. The button shows elapsed time.</p>
@@ -70,6 +70,11 @@
 const $ = (id) => document.getElementById(id);
 const log = (m, cls='') => { const l=$('log'); l.innerHTML += `\n<span class="${cls}">${m}</span>`; l.scrollTop=l.scrollHeight; };
 let mySlot = 0;
+
+// Amounts: the protocol stores integer BASE UNITS; 1 token = 10^6 (TOKEN_DECIMALS = 6).
+const TOKEN_UNIT = 1000000;
+const fmtAmt = (base) => (Number(base) / TOKEN_UNIT).toFixed(6);            // base units -> "x.xxxxxx"
+const toBase = (tokens) => String(Math.round(Number(tokens) * TOKEN_UNIT)); // tokens -> base-unit string
 
 // ---- Persisted account (localStorage) ----------------------------------------------------------
 // The browser delegate's account = a 32-byte master seed kept in localStorage. The wasm derives all
@@ -132,7 +137,7 @@ async function api(pathname, body, method='POST') {
   return text; // pass JSON text straight back into the wasm calls
 }
 function showBalance(r) {
-  $('balance').textContent = r.balance;
+  $('balance').textContent = fmtAmt(r.balance);
   $('balMeta').textContent = `· slot ${r.slot} · v${r.stateVersion} · ${r.canSend ? 'can send' : 'receive-only (refresh needed)'}`;
 }
 
@@ -147,7 +152,7 @@ async function showBacking() {
     const onchain = rollup
       ? ` · <span class="ok" title="the deposit really happened on this local chain — totalEscrowed grew by the deposited ETH">on-chain</span> IntmaxRollup <code>${rollup.slice(0,8)}…</code> tx <code>${tx.slice(0,10)}…</code>`
       : '';
-    $('backing').innerHTML = `<span class="ok">✓ backed by a REAL on-chain ETH deposit</span> · fund <b>${b.fund}</b> · `
+    $('backing').innerHTML = `<span class="ok">✓ backed by a REAL on-chain ETH deposit</span> · fund <b>${fmtAmt(b.fund)}</b> · `
       + `settled_tx_chain <code title="the base-layer balanceProof public input the members reconcile against">${chain.slice(0,10)}…${chain.slice(-6)}</code>${onchain}`;
   } catch (e) {
     $('backing').innerHTML = `<span class="err">no deposit backing yet</span> — the relay runs <code>setup-backing</code> on first launch (~30s); reload shortly.`;
@@ -168,7 +173,7 @@ $('btnOpen').onclick = async () => {
     $('btnOpen').disabled = true;
     // Derive keys from the PERSISTED seed (localStorage) so reloading restores the SAME account/slot.
     await step('generate keys (from your saved account seed)', () => call('keygenSeeded', { seed: channelSeed() }));
-    const contribution = await step('encrypt opening balance', () => call('genesisContribution', { balance: $('openBalance').value }));
+    const contribution = await step('encrypt opening balance', () => call('genesisContribution', { balance: toBase($('openBalance').value) }));
     // The browser is the DELEGATE: the CLI's three members sign the genesis and return the
     // fully-signed snapshot directly — the delegate does NOT co-sign state.
     const snapshot = await step('CLI builds channel + 3 members co-sign genesis', () => api('/api/init', contribution));
@@ -206,7 +211,7 @@ async function attemptSend(to, amt) {
     log(`  refreshed — balance ${rr.balance}, ready to send`, 'ok');
   }
   // 3. Send.
-  const payload = await call('send', { recipientSlot: to, amount: amt });
+  const payload = await call('send', { recipientSlot: to, amount: toBase(amt) });
   log('other members co-signing…');
   const finalState = await api('/api/cosign', payload);
   return JSON.parse(await call('finalize', { stateJson: finalState }));
@@ -232,7 +237,7 @@ $('btnSend').onclick = async () => {
       } else { throw e; }
     }
     showBalance(r);
-    log(`sent ${amt} to slot ${to} in ${Math.round((Date.now()-t0)/1000)}s. new balance ${r.balance}`, 'ok');
+    log(`sent ${amt} to slot ${to} in ${Math.round((Date.now()-t0)/1000)}s. new balance ${fmtAmt(r.balance)}`, 'ok');
   } catch (e) { log('send failed: '+e.message, 'err'); }
   clearInterval(tick);
   $('btnSend').textContent = 'Send';

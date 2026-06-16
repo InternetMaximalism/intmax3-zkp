@@ -41,7 +41,7 @@ use intmax3_zkp::{
         deposit::Deposit,
         salt::Salt,
     },
-    constants::MAX_CHANNEL_MEMBERS,
+    constants::{MAX_CHANNEL_MEMBERS, TOKEN_UNIT},
     ethereum_types::{
         address::Address, bytes32::Bytes32, u256::U256, u32limb_trait::U32LimbTrait as _,
     },
@@ -77,11 +77,13 @@ const BALANCE_VD_FILE: &str = "balance_vd.bin"; // cached balance verifier data 
 // Delegate demo: slots 0,1,2 = three CLI-controlled CO-SIGNING MEMBERS (with genesis balances);
 // slot 3 = the browser, a send-only DELEGATE (delegate_count = 1).
 const CLI_SLOTS: &[u8] = &[0, 1, 2];
-const CLI_GENESIS: &[(u8, u64)] = &[(0, 40), (1, 30), (2, 20)];
+// Genesis allocations in BASE UNITS (TOKEN_DECIMALS = 6): 40 / 30 / 20 tokens.
+const CLI_GENESIS: &[(u8, u64)] = &[(0, 40 * TOKEN_UNIT), (1, 30 * TOKEN_UNIT), (2, 20 * TOKEN_UNIT)];
 const BROWSER_DELEGATE_SLOT: u8 = 3;
 const DELEGATE_COUNT: u8 = 1;
-// The first browser delegate's genesis allocation out of the deposited fund (so Σ balances == fund).
-const DELEGATE_GENESIS: u64 = 50;
+// The first browser delegate's genesis allocation (BASE UNITS) out of the deposited fund (so
+// Σ balances == fund): 50 tokens.
+const DELEGATE_GENESIS: u64 = 50 * TOKEN_UNIT;
 
 #[derive(Serialize, Deserialize)]
 struct ControlledMember {

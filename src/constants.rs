@@ -1,6 +1,14 @@
 // General constants
 pub const TOKEN_INDEX_BITS: usize = 32;
 
+/// Token decimals (USDC-style). All amounts in the protocol are integer BASE UNITS; one token =
+/// `10^TOKEN_DECIMALS` base units. The protocol/circuits are decimal-agnostic (they operate on
+/// integers); this is the canonical display/representation convention. A balance of `1_000_000`
+/// base units renders as `1.000000`.
+pub const TOKEN_DECIMALS: u32 = 6;
+/// Base units per whole token (`10^TOKEN_DECIMALS`).
+pub const TOKEN_UNIT: u64 = 1_000_000;
+
 // Public State
 pub const BLOCK_NUMBER_BITS: usize = 63;
 pub const PUBLIC_STATE_TREE_HEIGHT: usize = BLOCK_NUMBER_BITS;
