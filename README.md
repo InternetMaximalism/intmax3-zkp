@@ -40,20 +40,18 @@ remaining provably solvent. (Spec: [`architecture-audit/abstract2.md`](architect
 
 ```mermaid
 flowchart TB
-  subgraph CH["Channel layer · members co-sign hash(H1,H2) · Regev-encrypted balances"]
-    direction LR
+  subgraph CH["Channel layer: members co-sign hash(H1,H2), Regev-encrypted balances"]
     A["Channel A"]
     B["Channel B"]
   end
-  subgraph L2["intmax L2 · ZK rollup (validityProof / block · balanceProof / channel)"]
-    BP["Block Producer · tx_tree_root"]
+  subgraph L2["intmax L2: ZK rollup (validityProof per block, balanceProof per channel)"]
+    BP["Block Producer: tx_tree_root"]
   end
-  L1["Ethereum L1 · IntmaxRollup.sol — MLE/WHIR verify · deposits · close game"]
-  A -->|"A · intra-channel (H2=0)"| A
-  A ==>|"B · inter-channel (H2=tx_tree_root)"| BP
-  BP ==>|"settled small block"| B
+  L1["Ethereum L1: IntmaxRollup.sol (MLE/WHIR verify, deposits, close game)"]
+  A -->|"A. intra-channel (H2=0)"| A
+  A -->|"B. inter-channel (H2=tx_tree_root)"| BP
+  BP -->|"settled small block"| B
   L2 --> L1
-  CH ~~~ L2
 ```
 
 **Two transfer types**
@@ -71,19 +69,18 @@ signature** — a signature that authorizes the send but refuses the debit is un
 
 ```mermaid
 sequenceDiagram
-  participant S as Sender (Channel A)
-  participant M as A's other members
-  participant BP as Block Producer (intmax)
+  participant S as Sender in A
+  participant M as A members
+  participant BP as Block Producer
   participant L1 as Ethereum L1
-  participant B as Channel B (receiver)
-  S->>S: build Transfer + channelUpdateZKP (sender−, receiver+, sender≥0)
-  S->>M: post-debit BalanceState' + proof
-  M-->>S: co-sign hash(H1', H2=tx_tree_root)
+  participant B as Channel B
+  S->>M: post-debit BalanceState' + channelUpdateZKP
+  M-->>S: co-sign hash(H1', H2 = tx_tree_root)
   Note over S,M: one atomic signature = debit + authorization
-  S->>BP: tx → TxV2Tree
-  BP->>L1: postBlock(tx_tree_root) ; validityProof binds channelStateSig
-  B->>L1: verify TxV2 inclusion + sender balanceProof (flowReceive3)
-  B->>B: credit receiver ct, co-sign new state (H2=0)
+  S->>BP: tx into TxV2Tree
+  BP->>L1: postBlock(tx_tree_root) + validityProof
+  B->>L1: verify inclusion + sender balanceProof
+  B->>B: credit receiver, co-sign new state (H2=0)
 ```
 
 **Five security properties** (formalized in §4 of the spec and machine‑checked in Lean):
