@@ -850,6 +850,15 @@ fn cmd_cosign_inter_transfer(args: &[String]) {
             channel_id_env()
         ));
     }
+    // The destination MUST be a DIFFERENT channel than the source: dest == source would resolve the
+    // sibling B-state to A's own cli_state, and the B-write would clobber the A spent-ledger entry
+    // (a self-transfer is meaningless here anyway). Reject before any state is loaded/written.
+    if descriptor.destination_channel_id.as_u64() == channel_id_env() as u64 {
+        die(format!(
+            "descriptor.destination_channel_id ({}) == source channel — inter-channel transfer needs a DIFFERENT destination; refusing",
+            descriptor.destination_channel_id.as_u64()
+        ));
+    }
 
     // SPENT LEDGER (A side): refuse a tx_hash already DEBITED out of A (single-use on the source).
     if a_state.spent_tx_hashes.iter().any(|h| *h == descriptor.tx_hash) {
