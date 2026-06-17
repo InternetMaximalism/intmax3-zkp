@@ -148,12 +148,15 @@ const opts = {
   key: fs.readFileSync(path.join(ROOT, 'self_certs', 'key.pem')),
   cert: fs.readFileSync(path.join(ROOT, 'self_certs', 'cert.pem')),
 };
-// Fresh channels per relay process: clear any prior channel state on startup (restart the relay to
-// start brand-new channels). During a run, each channel persists so delegates accumulate.
+// DURABLE membership across restarts (matches the EC2 relay): a restart does NOT wipe registered
+// delegates / their slots. Pass RESET_CHANNELS=1 to deliberately start brand-new channels.
+const RESET = process.env.RESET_CHANNELS === '1';
 for (const ch of CHANNELS) {
   fs.mkdirSync(chDir(ch), { recursive: true });
-  fs.rmSync(wc(ch, 'cli_state.json'), { force: true });
-  fs.rmSync(wc(ch, 'channel_snapshot.json'), { force: true });
+  if (RESET) {
+    fs.rmSync(wc(ch, 'cli_state.json'), { force: true });
+    fs.rmSync(wc(ch, 'channel_snapshot.json'), { force: true });
+  }
 }
 
 // detail2 §F-1 deposit backing, REAL on-chain (no simulation): a local anvil chain really escrows

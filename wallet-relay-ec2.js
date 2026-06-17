@@ -48,6 +48,12 @@ for (const ch of CHANNELS) {
 }
 
 const app = express();
+// Lightweight request log (method + path + content-length) — so a failing POST is visible in the
+// journal. Kept intentionally minimal (no bodies).
+app.use((req, res, next) => {
+  console.log(`REQ ${req.method} ${req.url} len=${req.headers['content-length'] || 0}`);
+  next();
+});
 // gzip the big static assets (the 2.5MB wasm → ~1.2MB) — a real win on mobile networks where the
 // download dominates "initializing". Compress wasm/js/html/json regardless of the default heuristic.
 app.use(compression({
