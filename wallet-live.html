@@ -272,19 +272,20 @@ async function attemptInterChannelSend(toCh, to, amt) {
   const destRecipientJson = JSON.stringify({ regevPk: bMember.regevPk, pkG: bMember.pkG });
   // 3. Build the debit + the cross-channel transfer descriptor (E-2 proof, in your browser).
   const built = JSON.parse(await call('sendInterChannel', { toChannel: toCh, toSlot: to, amount: toBase(amt), destRecipientJson }));
-  // 4. Channel A members co-sign the debit (proof it's real). api() routes ?channel=myCh (activeCh).
-  log(`  channel ${myChannel} members co-signing the debit…`);
-  const aSigned = await api('/api/inter/debit', JSON.stringify(built.debitPayload));
-  // 5. Channel B members verify A's signed debit (pinned record + replay ledger) + credit the slot.
-  log(`  channel ${toCh} members verifying + crediting slot ${to}…`);
-  const creditRes = await fetch(`/api/inter/credit?channel=${toCh}`, {
+  // 4. SINGLE atomic transfer: the relay (which owns BOTH channels) co-signs A's debit against A's
+  //    COMMITTED head AND credits channel B's slot in one command — no request-body aSignedState is
+  //    ever trusted (CRITICAL-1). ?channel=myCh = the SOURCE channel A; the relay resolves B from the
+  //    descriptor's destination id. Returns { aHead, bSnapshot }; nothing persists unless both legs pass.
+  log(`  relay co-signing debit (ch${myChannel}) + crediting slot ${to} (ch${toCh}) atomically…`);
+  const sendRes = await fetch(`/api/inter/send?channel=${myChannel}`, {
     method: 'POST', headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ descriptor: built.transferDescriptor, aSignedState: JSON.parse(aSigned) }),
+    body: JSON.stringify({ debitPayload: built.debitPayload, transferDescriptor: built.transferDescriptor }),
   });
-  const creditTxt = await creditRes.text();
-  if (!creditRes.ok) throw new Error('credit failed: ' + creditTxt);
-  // 6. Commit OUR debit locally (channel A's co-signed new head).
-  return JSON.parse(await call('finalize', { stateJson: aSigned }));
+  const sendTxt = await sendRes.text();
+  if (!sendRes.ok) throw new Error('inter-channel transfer failed: ' + sendTxt);
+  const transfer = JSON.parse(sendTxt);
+  // 5. Commit OUR debit locally (channel A's co-signed new head returned by the relay).
+  return JSON.parse(await call('finalize', { stateJson: JSON.stringify(transfer.aHead) }));
 }
 
 $('btnSend').onclick = async () => {

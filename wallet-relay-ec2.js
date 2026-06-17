@@ -111,31 +111,23 @@ app.post('/api/refresh-cosign', (req, res) => {
   } catch (e) { console.error(e.stderr ? String(e.stderr) : (e.message||e)); res.status(500).json({ error: String(e.stderr || e.message || e) }); }
 });
 
-// Inter-channel send, step 1 (SOURCE channel A): A's members co-sign the post-debit state.
-// Body = InterChannelDebitPayload. Returns A's fully co-signed a_send (proof the debit is real).
-app.post('/api/inter/debit', (req, res) => {
+// Inter-channel send (SINGLE atomic endpoint). `?channel=A` = the SOURCE channel; this box co-signs
+// BOTH channels, so this one command debits A and credits B atomically. There is NO standalone credit
+// endpoint trusting a request-body signed state (CRITICAL-1 value-creation hole, now closed): the only
+// `a_signed_state` the credit gate sees is the debit this command just co-signed by extending A's
+// COMMITTED on-disk head.
+// Body = { debitPayload: InterChannelDebitPayload, transferDescriptor: InterChannelTransferDescriptor }.
+// Returns { aHead: <A's co-signed new state>, bSnapshot: <B's credited snapshot> }.
+app.post('/api/inter/send', (req, res) => {
   try {
     const ch = reqChannel(req); // = source channel A
-    fs.writeFileSync(wc(ch, 'inter_debit_payload.json'), JSON.stringify(req.body));
-    cli(ch, ['cosign-inter-debit', 'inter_debit_payload.json', 'inter_debit_signed.json']);
-    res.json(JSON.parse(fs.readFileSync(wc(ch, 'inter_debit_signed.json'), 'utf8')));
-  } catch (e) { console.error(e.stderr ? String(e.stderr) : (e.message||e)); res.status(500).json({ error: String(e.stderr || e.message || e) }); }
-});
-
-// Inter-channel send, step 2 (DESTINATION channel B): B's members verify A's co-signed debit
-// (pinned A record + replay ledger + the cross-channel gate) and credit the recipient slot.
-// Body = { descriptor: InterChannelTransferDescriptor, aSignedState: <A's co-signed a_send> }.
-// MUST run only AFTER step 1 returned a valid N-of-N A state.
-app.post('/api/inter/credit', (req, res) => {
-  try {
-    const ch = reqChannel(req); // = destination channel B
-    const descriptor = req.body && req.body.descriptor;
-    const aSigned = req.body && req.body.aSignedState;
-    if (!descriptor || !aSigned) throw new Error('inter/credit needs { descriptor, aSignedState }');
+    const debitPayload = req.body && req.body.debitPayload;
+    const descriptor = req.body && req.body.transferDescriptor;
+    if (!debitPayload || !descriptor) throw new Error('inter/send needs { debitPayload, transferDescriptor }');
+    fs.writeFileSync(wc(ch, 'inter_debit_payload.json'), JSON.stringify(debitPayload));
     fs.writeFileSync(wc(ch, 'inter_descriptor.json'), JSON.stringify(descriptor));
-    fs.writeFileSync(wc(ch, 'inter_a_signed.json'), JSON.stringify(aSigned));
-    cli(ch, ['cosign-inter-credit', 'inter_descriptor.json', 'inter_a_signed.json', 'inter_credited.json']);
-    res.json(JSON.parse(fs.readFileSync(wc(ch, 'inter_credited.json'), 'utf8')));
+    cli(ch, ['cosign-inter-transfer', 'inter_debit_payload.json', 'inter_descriptor.json', 'inter_transfer.json']);
+    res.json(JSON.parse(fs.readFileSync(wc(ch, 'inter_transfer.json'), 'utf8')));
   } catch (e) { console.error(e.stderr ? String(e.stderr) : (e.message||e)); res.status(500).json({ error: String(e.stderr || e.message || e) }); }
 });
 

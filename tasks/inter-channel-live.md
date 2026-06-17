@@ -39,6 +39,26 @@ Pinned-record trust: channel B must verify A's signatures against a KNOWN-GOOD c
 6. Local relay E2E, then ship to EC2.
 
 ## Status
-- [x] Machinery mapped + design fixed (see git: subagent report).
-- [ ] wallet_core + local E2E test (in progress, worktree).
-- [ ] CLI subcommands. [ ] wasm + relay + browser. [ ] security review. [ ] deploy.
+- [x] Machinery mapped + design fixed.
+- [x] wallet_core + tests/inter_channel_live.rs (2/2 pass). COMMITTED.
+- [x] CLI cosign-inter-debit/credit + replay ledger + pinned A-record + pk_g dedup. COMMITTED.
+- [x] wasm wallet_send_inter_channel + relay /api/inter + browser. COMMITTED.
+- [x] INDEPENDENT security review → found CRITICAL-1.
+- [ ] FIX in progress (atomic combined command).
+- [ ] re-review. [ ] deploy.
+
+## SECURITY REVIEW — CRITICAL-1 (blocks deploy) — found 2026-06-17
+The credit trusted a REQUEST-BODY `aSignedState`, authenticated only by N-of-N over channel A's
+member set. But A's members (slots 0,1,2) have keys from PUBLIC seeds (`0xC1_0000 + slot`) — anyone
+can forge a valid N-of-N `aSignedState` with NO real debit and POST it to /api/inter/credit → credits
+B from nothing (value creation). Credit never bound to A's committed head / fund decrease; no A-side
+spent ledger. Also: MEDIUM-1 atomicity (debit commits, credit can fail → funds stranded/grief);
+HIGH-1 no A-side spend ledger; LOW conservation u32 truncation; LOW pk_g-only dedup (info).
+
+## FIX (in progress)
+Single ATOMIC combined command `cosign-inter-transfer` (relay owns both channels = one trust domain):
+debit A (extend A's REAL head, fund-=amount, record tx_hash spent on A) + credit B (bind to the
+IN-PROCESS proposed A debit, NOT a request blob; check B replay ledger; fund+=amount) — persist BOTH
+or NEITHER. Drops the request-body `aSignedState` trust entirely. One relay endpoint /api/inter/send.
+Regression test: a forged N-of-N aSignedState with no committed A debit MUST be refused; full
+conservation across A AND B; replay/tamper refused; atomicity (A head unchanged if credit fails).

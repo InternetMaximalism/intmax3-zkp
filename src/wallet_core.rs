@@ -1413,7 +1413,9 @@ pub fn build_inter_channel_send(
     transfer_tree.push(Transfer {
         recipient: destination_recipient_pk_g,
         token_index: 0,
-        amount: U256::from(amount.min(u32::MAX as u64) as u32),
+        // Full u64 precision (no u32 truncation): the transfer leaf binds the EXACT amount into the
+        // TxV2 tree root the descriptor ships + B re-verifies.
+        amount: u64_to_u256(amount),
         aux_data: Bytes32::default(),
     });
     let tx_v2 = TxV2 {
@@ -1457,7 +1459,8 @@ pub fn build_inter_channel_send(
     .with_computed_digest();
     let h1_prime = a_send.balance_state.h1();
 
-    let tx_hash = inter_channel_tx_hash(record.channel_id, tx_tree_root, tx_leaf);
+    let tx_hash =
+        inter_channel_tx_hash(record.channel_id, destination_channel_id, tx_tree_root, tx_leaf);
     let inter_channel_tx = InterChannelTx {
         tx_inclusion_proof: MerkleInclusionProof::default(),
         signed_small_block: SignedSmallBlock {
@@ -1960,7 +1963,11 @@ pub fn verify_inter_channel_credit_transition(
 
 // --- inter-channel helpers ---
 
-fn u64_to_u256(v: u64) -> U256 {
+/// Lossless `u64 → U256` (full 64-bit precision; the high u32 lands in limb 6, the low in limb 7).
+/// SECURITY: use THIS, never `U256::from(v.min(u32::MAX) as u32)`, for any value-conservation
+/// comparison — a u32 truncation would let a >2^32 transfer pass a fund-delta check it does not
+/// actually satisfy.
+pub fn u64_to_u256(v: u64) -> U256 {
     U256::from_u32_slice(&[0, 0, 0, 0, 0, 0, (v >> 32) as u32, v as u32]).unwrap()
 }
 
@@ -1973,19 +1980,31 @@ fn advance_nullifier(prev: Bytes32, tag: Bytes32) -> Bytes32 {
 }
 
 /// `tx_hash` identifier for the inter-channel tx (the L1-settled identifier referenced by the fund
-/// import chain). INTENTIONALLY SIMPLE: a domain-free fold over (channel_id, tx_tree_root, tx_leaf);
-/// it only needs to be a deterministic, collision-resistant identifier bound to this tx.
-fn inter_channel_tx_hash(channel_id: ChannelId, tx_tree_root: Bytes32, tx_leaf: Bytes32) -> Bytes32 {
+/// import chain, and the ledger key for the replay/spent ledgers on BOTH channels). INTENTIONALLY
+/// SIMPLE: a domain-free fold over (source_channel_id, destination_channel_id, tx_tree_root,
+/// tx_leaf); it only needs to be a deterministic, collision-resistant identifier bound to this tx.
+///
+/// SECURITY (HIGH-1, dest binding): the destination channel id is folded in so the ledger key is
+/// DEST-BOUND. Without it, the same (source, tx_tree_root, tx_leaf) tuple would hash identically
+/// regardless of which channel B it is credited into, so a tx already credited into one destination
+/// could not be distinguished from a (distinct) transfer aimed at another destination in a shared
+/// ledger. Binding the dest id makes the ledger key unambiguous per (A→B) pair — defense in depth on
+/// top of the per-channel applied/spent ledgers.
+fn inter_channel_tx_hash(
+    source_channel_id: ChannelId,
+    destination_channel_id: ChannelId,
+    tx_tree_root: Bytes32,
+    tx_leaf: Bytes32,
+) -> Bytes32 {
     let mixed = settled_tx_chain_push(tx_tree_root, tx_leaf);
-    settled_tx_chain_push(
-        Bytes32::from_u32_slice(&{
-            let mut w = [0u32; BYTES32_LEN];
-            w[BYTES32_LEN - 1] = channel_id.as_u64() as u32;
-            w
-        })
-        .unwrap(),
-        mixed,
-    )
+    let ids = Bytes32::from_u32_slice(&{
+        let mut w = [0u32; BYTES32_LEN];
+        w[BYTES32_LEN - 1] = source_channel_id.as_u64() as u32;
+        w[BYTES32_LEN - 2] = destination_channel_id.as_u64() as u32;
+        w
+    })
+    .unwrap();
+    settled_tx_chain_push(ids, mixed)
 }
 
 /// Sign `state` with `keys` IFF `keys` is a co-signing member of `record` (slot < member_count). The
