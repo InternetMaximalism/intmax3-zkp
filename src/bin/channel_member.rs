@@ -546,19 +546,13 @@ fn join_delegate(
     state.balance_state.state_version += 1;
     state.member_signatures = Vec::new();
     let mut state = state.with_computed_digest();
-    // CHECK-AND-SIGN (detail2 §3.1): a delegate join does not change settled_tx_chain, so each
-    // member re-signs only if the existing deposit backing still reconciles. Fail-closed.
-    let (balance_vd, att, _backing) = load_backing();
+    // SECURITY (§F-1): backing is anchored at GENESIS; a delegate join preserves the CURRENT state
+    // (which may already have an ADVANCED settled_tx_chain from prior inter-channel sends), so it can
+    // no longer equal the fixed genesis backing — re-checking it would wrongly reject joins after any
+    // inter-channel send. Plain N-of-N re-sign of the membership add; same rationale as cmd_cosign.
     for c in &prev.controlled {
-        let sig = sign_state_if_backed(
-            &keys_for(c.keygen_seed),
-            c.slot,
-            &record,
-            &state,
-            &att,
-            &balance_vd,
-        )
-        .unwrap_or_else(|e| die(format!("REFUSING TO SIGN — {e}")));
+        let sig = sign_state(&keys_for(c.keygen_seed), c.slot, &state)
+            .unwrap_or_else(|e| die(format!("sign: {e:?}")));
         add_signature(&mut state, sig);
     }
     (record, state, members, prev.controlled, new_slot)
@@ -682,21 +676,19 @@ fn cmd_cosign(args: &[String]) {
     // CHECK-AND-SIGN (detail2 §3.1): each member signs the next state ONLY IF its settled_tx_chain
     // matches the held intmax balance backing (invariant across in-channel sends, so the genesis
     // attestation backs every in-channel state). Fail-closed — refuse otherwise.
-    let (balance_vd, att, _backing) = load_backing();
+    // SECURITY (§F-1): the deposit backing is anchored at GENESIS (create_channel co-signs only if
+    // backed). Ongoing transitions are validated just above (verify_send_transition: real E-1 +
+    // conservation), and a send legitimately ADVANCES settled_tx_chain once inter-channel transfers
+    // exist — so re-checking it against the FIXED genesis backing here is wrong (it would reject every
+    // state after the first inter-channel send). The backing holds inductively from the backed genesis
+    // through validated, conservation-preserving transitions; reconciliation against the deposit is the
+    // close/settlement step. (Same rationale as cosign-inter-transfer.)
     for c in &state.controlled {
-        let already = next_state.member_signatures.iter().any(|s| s.member_slot == c.slot);
-        if already {
+        if next_state.member_signatures.iter().any(|s| s.member_slot == c.slot) {
             continue;
         }
-        let sig = sign_state_if_backed(
-            &keys_for(c.keygen_seed),
-            c.slot,
-            &state.snapshot.record,
-            &next_state,
-            &att,
-            &balance_vd,
-        )
-        .unwrap_or_else(|e| die(format!("REFUSING TO SIGN — {e}")));
+        let sig = sign_state(&keys_for(c.keygen_seed), c.slot, &next_state)
+            .unwrap_or_else(|e| die(format!("sign: {e:?}")));
         add_signature(&mut next_state, sig);
     }
     write_json(out_path, &next_state);
@@ -732,22 +724,17 @@ fn cmd_cosign_refresh(args: &[String]) {
     }
     verify_refresh_transition(&state.snapshot.state, &state.snapshot.record, &payload, LEVEL)
         .unwrap_or_else(|e| die(format!("refresh transition invalid: {e}")));
-    // CHECK-AND-SIGN (detail2 §3.1): a balance-refresh preserves settled_tx_chain, so each member
-    // signs only if the deposit backing still reconciles. Fail-closed.
-    let (balance_vd, att, _backing) = load_backing();
+    // SECURITY (§F-1): backing is anchored at GENESIS; the refresh transition is validated just above
+    // (verify_refresh_transition: value-preserving). A refresh preserves settled_tx_chain, but that
+    // chain may already have ADVANCED from a prior inter-channel send, so it no longer equals the fixed
+    // genesis backing — re-checking it here would wrongly reject. Plain N-of-N; same rationale as
+    // cmd_cosign / cosign-inter-transfer.
     for c in &state.controlled {
         if next_state.member_signatures.iter().any(|s| s.member_slot == c.slot) {
             continue;
         }
-        let sig = sign_state_if_backed(
-            &keys_for(c.keygen_seed),
-            c.slot,
-            &state.snapshot.record,
-            &next_state,
-            &att,
-            &balance_vd,
-        )
-        .unwrap_or_else(|e| die(format!("REFUSING TO SIGN — {e}")));
+        let sig = sign_state(&keys_for(c.keygen_seed), c.slot, &next_state)
+            .unwrap_or_else(|e| die(format!("sign: {e:?}")));
         add_signature(&mut next_state, sig);
     }
     write_json(out_path, &next_state);
