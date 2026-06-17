@@ -22,7 +22,7 @@ settlement contracts (Solidity/Foundry), a machine‑checked safety proof (Lean)
   inside a channel is hidden from the other members, the block producer, and L1 — yet solvency is still
   enforced by ZK range proofs (`channelTxZKP` / `channelUpdateZKP`), so confidentiality and
   "no over‑spend" coexist.
-- **Post‑quantum.** State agreement uses **hash‑based signatures** (SPHINCS+ / Poseidon‑hash sigs) and
+- **Post‑quantum.** State agreement uses **hash‑based signatures** (Poseidon‑hash sigs) and
   balances use **lattice (Regev/LWE)** encryption — both believed secure against quantum adversaries.
 - **Fast finality.** In‑channel transfers finalize the instant the members co‑sign the new state
   (off‑chain, milliseconds of proving) — no on‑chain round‑trip per payment.
@@ -121,7 +121,7 @@ demo to Sepolia + AWS is documented in [`docs/deploy-runbook.md`](docs/deploy-ru
 |---|---|---|
 | **Specification** | [`architecture-audit/detail2.md`](architecture-audit/detail2.md) | the **authoritative implementation spec**; [`abstract2.md`](architecture-audit/abstract2.md) is the minimal spec + the 5 security properties |
 | **Machine‑checked safety** | [`architecture-audit/ChannelSafety.lean`](architecture-audit/ChannelSafety.lean), [`ChannelSafety2.lean`](architecture-audit/ChannelSafety2.lean) | Lean proofs of authorization / no‑double‑spend / solvency / exit safety for abstract(2).md, with crypto primitives modeled by their soundness contracts |
-| **Proof circuits** | `src/circuits/` | `balance/` (account state via IVC), `validity/` (block consensus + SPHINCS+), `withdraw/`, `channel/` (channel state‑update verifiers) |
+| **Proof circuits** | `src/circuits/` | `balance/` (account state via IVC), `validity/` (block consensus + Poseidon signature), `withdraw/`, `channel/` (channel state‑update verifiers) |
 | **Lattice layer** | `src/regev/` | Regev/LWE keygen, encryption, and the channel‑tx / channel‑update STARKs (`channelTxZKP` / `channelUpdateZKP`) |
 | **Signatures** | `src/poseidon_sig/` | Poseidon‑hash ZK signatures used for channel‑state co‑signing |
 | **Core types** | `src/common/`, `src/ethereum_types/` | `BalanceState`, `ChannelTx`, `Block`, `Transfer`, Merkle trees; Ethereum‑compatible field types |
@@ -132,7 +132,7 @@ demo to Sepolia + AWS is documented in [`docs/deploy-runbook.md`](docs/deploy-ru
 **Key dependencies** (pinned to the `polygon-plonky2` submodule via Cargo `[patch]`):
 `plonky2` / `starky` / `plonky2_mle` (FRI‑based STARKs + the multilinear PCS with **WHIR** used for the
 on‑chain wrapper proof), `plonky2_bn254` / `plonky2_keccak` (BN254 + Keccak circuits),
-`regev_plonky3` (the Regev/LWE lattice layer on Plonky3), and `sphincsplus-*` (post‑quantum signatures).
+`regev_plonky3` (the Regev/LWE lattice layer on Plonky3), and post‑quantum signatures.
 Stack: Rust 2024 (nightly) + Solidity 0.8.29 (Foundry, Prague EVM).
 
 ---
