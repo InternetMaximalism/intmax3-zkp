@@ -13,6 +13,10 @@ settlement contracts (Solidity/Foundry), a machine‑checked safety proof (Lean)
 - **L1 security + 1‑of‑N trust.** Every channel ultimately settles on Ethereum L1. Safety needs only
   **one honest party — you**: with the last all‑member‑signed state you can always `close` on‑chain,
   and `withdrawClaimZKP` lets you exit and withdraw **without any other member's cooperation**.
+- **Strong statelessness & minimal block‑space use.** The rollup keeps **almost no per‑user state
+  on‑chain** — users custody their own `balanceProof`s, and each block posts only a `tx_tree_root`
+  (+ deposit hash chain). The on‑chain footprint per transfer is tiny, so throughput scales without
+  bloating L1 state.
 - **Full privacy.** Per‑member balances are **Regev/LWE ciphertexts** decryptable only by their owner;
   intra‑channel transfer amounts are encrypted to the recipient. The breakdown of who holds what
   inside a channel is hidden from the other members, the block producer, and L1 — yet solvency is still
@@ -22,9 +26,9 @@ settlement contracts (Solidity/Foundry), a machine‑checked safety proof (Lean)
   balances use **lattice (Regev/LWE)** encryption — both believed secure against quantum adversaries.
 - **Fast finality.** In‑channel transfers finalize the instant the members co‑sign the new state
   (off‑chain, milliseconds of proving) — no on‑chain round‑trip per payment.
-- **No channel‑capacity problem.** Unlike Lightning‑style networks, channels don't pay along
-  pre‑funded bidirectional routes. **Any channel pays any channel** by routing a transfer through the
-  intmax rollup (`interChannelTransfer`); there is no inbound‑capacity or path‑liquidity constraint.
+- **No capital‑efficiency problem.** Unlike Lightning‑style networks, you don't lock capital into
+  pre‑funded bidirectional route capacity. **Any channel pays any channel** through the intmax rollup
+  (`interChannelTransfer`) — no inbound‑capacity, path‑liquidity, or rebalancing cost.
 
 ---
 
@@ -36,20 +40,20 @@ remaining provably solvent. (Spec: [`architecture-audit/abstract2.md`](architect
 
 ```mermaid
 flowchart TB
-  subgraph L1["Ethereum L1 — IntmaxRollup.sol (MLE/WHIR + Groth16 verify, deposits, close game)"]
-  end
-  subgraph L2["intmax L2 — ZK rollup (validityProof per block, balanceProof per channel)"]
-    BP["Block Producer · builds TxV2Tree → tx_tree_root → postBlock"]
-  end
-  subgraph Ch["Channel layer — N members, Regev-encrypted balances (encBalances)"]
-    A["Channel A<br/>(members co-sign hash(H1,H2))"]
+  subgraph CH["Channel layer · members co-sign hash(H1,H2) · Regev-encrypted balances"]
+    direction LR
+    A["Channel A"]
     B["Channel B"]
   end
-  A -- "A. intra-channel transfer (H2=0)<br/>channelTx + channelTxZKP, instant co-sign" --> A
-  A == "B. inter-channel transfer (H2=tx_tree_root)<br/>Transfer + channelUpdateZKP" ==> BP
-  BP == "settled small block<br/>(receiver verifies inclusion on L1)" ==> B
-  L2 --- L1
-  Ch --- L2
+  subgraph L2["intmax L2 · ZK rollup (validityProof / block · balanceProof / channel)"]
+    BP["Block Producer · tx_tree_root"]
+  end
+  L1["Ethereum L1 · IntmaxRollup.sol — MLE/WHIR verify · deposits · close game"]
+  A -->|"A · intra-channel (H2=0)"| A
+  A ==>|"B · inter-channel (H2=tx_tree_root)"| BP
+  BP ==>|"settled small block"| B
+  L2 --> L1
+  CH ~~~ L2
 ```
 
 **Two transfer types**
