@@ -251,18 +251,19 @@ async function attemptSend(to, amt) {
 
 // Inter-channel send: debit our slot in channel `myCh`, credit slot `to` in channel `toCh`.
 async function attemptInterChannelSend(toCh, to, amt) {
-  // 1. Re-import our (source) channel head; refresh if we're receive-only so we can spend.
+  // 1. Re-import our (source) channel head, then ALWAYS balance-refresh: re-encrypt our own slot so
+  //    the in-session balance witness PROVABLY matches the channel's stored ciphertext. The E-2
+  //    channel-update proof needs that exact match; a genesis/imported witness can be out of sync
+  //    (the import can_send check only compares plaintext), which the refresh deterministically fixes.
   const headSnap = await api('/api/snapshot', null, 'GET'); setChannelFrom(headSnap);
   let rr = JSON.parse(await call('importChannel', { snapshotJson: headSnap }));
   mySlot = rr.slot; showBalance(rr);
-  if (!rr.canSend) {
-    log('  you received funds → balance-refresh first so you can send…');
-    const refreshPayload = await call('refresh');
-    const cosigned = await api('/api/refresh-cosign', refreshPayload);
-    rr = JSON.parse(await call('finalize', { stateJson: cosigned }));
-    mySlot = rr.slot; showBalance(rr);
-    if (!rr.canSend) throw new Error('still receive-only after balance refresh');
-  }
+  log('  syncing your balance witness (refresh) so the cross-channel proof matches…');
+  const refreshPayload = await call('refresh');
+  const cosigned = await api('/api/refresh-cosign', refreshPayload);
+  rr = JSON.parse(await call('finalize', { stateJson: cosigned }));
+  mySlot = rr.slot; showBalance(rr);
+  if (!rr.canSend) throw new Error('could not obtain a spendable balance after refresh');
   // 2. Read the DESTINATION channel B snapshot → the recipient slot's Regev pk + pk_g.
   const bSnapRaw = await fetch(`/api/snapshot?channel=${toCh}`).then(r => r.text());
   if (!bSnapRaw || bSnapRaw[0] !== '{') throw new Error(`destination channel ${toCh} not available`);
