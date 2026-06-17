@@ -874,6 +874,10 @@ pub fn build_send(
         },
         prev_digest: prev.digest,
         member_signatures: Vec::new(),
+        // §C-2 (no small block): the next-state h2_tag MUST be zero. `..prev.clone()` would otherwise
+        // inherit a NON-zero h2_tag left by a preceding inter-channel send (which sets h2_tag =
+        // tx_tree_root), making the very next intra send / refresh fail InvalidH2Tag.
+        h2_tag: Bytes32::default(),
         ..prev.clone()
     }
     .with_computed_digest();
@@ -1111,6 +1115,10 @@ pub fn build_refresh(
         },
         prev_digest: prev.digest,
         member_signatures: Vec::new(),
+        // §C-2 (no small block): the next-state h2_tag MUST be zero. `..prev.clone()` would otherwise
+        // inherit a NON-zero h2_tag left by a preceding inter-channel send (which sets h2_tag =
+        // tx_tree_root), making the very next intra send / refresh fail InvalidH2Tag.
+        h2_tag: Bytes32::default(),
         ..prev.clone()
     }
     .with_computed_digest();
