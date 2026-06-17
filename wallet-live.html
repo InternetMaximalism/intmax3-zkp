@@ -254,9 +254,16 @@ $('btnSend').onclick = async () => {
   const tick = setInterval(() => { $('btnSend').textContent = `Proving… ${Math.round((Date.now()-t0)/1000)}s`; }, 250);
   try {
     $('btnSend').disabled = true;
-    const to = +$('toSlot').value, amt = $('amount').value;
-    if (to === mySlot) throw new Error('cannot send to yourself (slot '+mySlot+')');
-    log(`Regev E-1 proof (~3ms) + your BabyBear hash-sig ZK proof for ${amt} → slot ${to}…`);
+    const toCh = +$('toChannel').value, to = +$('toSlot').value, amt = $('amount').value;
+    const myCh = myChannel ?? activeCh;
+    // Inter-channel (different channel) is a DIFFERENT person even at the same slot number — but the
+    // cross-channel transfer backend is not wired in this demo yet, so be honest instead of doing a
+    // silent intra-channel send. Only same-channel sends actually run here.
+    if (toCh !== myCh) {
+      throw new Error(`inter-channel send (channel ${myCh} → ${toCh}) is not enabled in this demo yet — set the SEND channel ID to ${myCh} to send within your channel`);
+    }
+    if (to === mySlot) throw new Error(`cannot send to yourself (channel ${myCh}, slot ${mySlot})`);
+    log(`Regev E-1 proof (~3ms) + your BabyBear hash-sig ZK proof for ${amt} → channel ${toCh} slot ${to}…`);
     let r;
     try {
       r = await attemptSend(to, amt);
