@@ -1,7 +1,6 @@
 # INTMAX3 — a state-minimized and post‑quantum ZK rollup enshrining payment channels 
 
-INTMAX3 is a multi‑party **payment‑channel** protocol settled by a **ZK (FRI/STARK + MLE/WHIR)
-rollup** on Ethereum. Channels hold **encrypted** balances (Regev/LWE), agree on state with
+INTMAX3 is a confidential, quantum safe, fast, and scalable payment system on Etheruem. Channels hold **encrypted** balances (Regev/LWE), agree on state with
 **post‑quantum** signatures, and pay **any other channel** through the rollup — so there is no
 routing‑liquidity problem. This repository contains the proving circuits (Rust/Plonky2), the L1
 settlement contracts (Solidity/Foundry), a machine‑checked safety proof (Lean), and a browser wallet.
