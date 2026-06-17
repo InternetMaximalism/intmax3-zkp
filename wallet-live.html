@@ -171,7 +171,7 @@ async function api(pathname, body, method='POST') {
 }
 function showBalance(r) {
   $('balance').textContent = fmtAmt(r.balance);
-  $('balMeta').textContent = `· channel ${myChannel ?? '?'} · slot ${r.slot} · v${r.stateVersion} · ${r.canSend ? 'can send' : 'receive-only (refresh needed)'}`;
+  $('balMeta').textContent = `· channel ${myChannel ?? '?'} · slot ${r.slot} · v${r.stateVersion} · ${r.canSend ? 'ready to send' : 'refresh to send'}`;
 }
 
 // Log the channel's REAL on-chain deposit backing (detail2 §F-1) — proof it is genuinely funded.
@@ -234,17 +234,21 @@ async function attemptSend(to, amt) {
   // 2. If we received funds (receive-only), AUTO balance-refresh: re-encrypt our slot to clean digits
   //    (value preserved, proven) + members co-sign, so we can spend again.
   if (!rr.canSend) {
-    log('  you received funds → balance-refresh (re-encrypt your slot) so you can send…');
+    log('  refresh needed (re-encrypt your slot) so you can send…');
+    sendPhase = 'Proving';
     const refreshPayload = await call('refresh');
+    sendPhase = 'Waiting for channel update';
     const cosigned = await api('/api/refresh-cosign', refreshPayload);
     rr = JSON.parse(await call('finalize', { stateJson: cosigned }));
     mySlot = rr.slot; showBalance(rr);
-    if (!rr.canSend) throw new Error('still receive-only after balance refresh');
+    if (!rr.canSend) throw new Error('still cannot send after refresh');
     log(`  refreshed — balance ${rr.balance}, ready to send`, 'ok');
   }
   // 3. Send.
+  sendPhase = 'Proving';
   const payload = await call('send', { recipientSlot: to, amount: toBase(amt) });
   log('other members co-signing…');
+  sendPhase = 'Waiting for channel update';
   const finalState = await api('/api/cosign', payload);
   return JSON.parse(await call('finalize', { stateJson: finalState }));
 }
@@ -259,7 +263,9 @@ async function attemptInterChannelSend(toCh, to, amt) {
   let rr = JSON.parse(await call('importChannel', { snapshotJson: headSnap }));
   mySlot = rr.slot; showBalance(rr);
   log('  syncing your balance witness (refresh) so the cross-channel proof matches…');
+  sendPhase = 'Proving';
   const refreshPayload = await call('refresh');
+  sendPhase = 'Waiting for channel update';
   const cosigned = await api('/api/refresh-cosign', refreshPayload);
   rr = JSON.parse(await call('finalize', { stateJson: cosigned }));
   mySlot = rr.slot; showBalance(rr);
@@ -272,12 +278,14 @@ async function attemptInterChannelSend(toCh, to, amt) {
   if (!bMember) throw new Error(`channel ${toCh} has no member at slot ${to}`);
   const destRecipientJson = JSON.stringify({ regevPk: bMember.regevPk, pkG: bMember.pkG });
   // 3. Build the debit + the cross-channel transfer descriptor (E-2 proof, in your browser).
+  sendPhase = 'Proving';
   const built = JSON.parse(await call('sendInterChannel', { toChannel: toCh, toSlot: to, amount: toBase(amt), destRecipientJson }));
   // 4. SINGLE atomic transfer: the relay (which owns BOTH channels) co-signs A's debit against A's
   //    COMMITTED head AND credits channel B's slot in one command — no request-body aSignedState is
   //    ever trusted (CRITICAL-1). ?channel=myCh = the SOURCE channel A; the relay resolves B from the
   //    descriptor's destination id. Returns { aHead, bSnapshot }; nothing persists unless both legs pass.
   log(`  relay co-signing debit (ch${myChannel}) + crediting slot ${to} (ch${toCh}) atomically…`);
+  sendPhase = 'Waiting for channel update';
   const sendRes = await fetch(`/api/inter/send?channel=${myChannel}`, {
     method: 'POST', headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ debitPayload: built.debitPayload, transferDescriptor: built.transferDescriptor }),
@@ -289,9 +297,13 @@ async function attemptInterChannelSend(toCh, to, amt) {
   return JSON.parse(await call('finalize', { stateJson: JSON.stringify(transfer.aHead) }));
 }
 
+// Button label phase: "Proving" during the in-browser ZK proving, "Waiting for channel update" while
+// the channel members co-sign on the relay — so the label honestly reflects what's happening.
+let sendPhase = 'Proving';
 $('btnSend').onclick = async () => {
   const t0 = Date.now();
-  const tick = setInterval(() => { $('btnSend').textContent = `Proving… ${Math.round((Date.now()-t0)/1000)}s`; }, 250);
+  sendPhase = 'Proving';
+  const tick = setInterval(() => { $('btnSend').textContent = `${sendPhase}… ${Math.round((Date.now()-t0)/1000)}s`; }, 250);
   try {
     $('btnSend').disabled = true;
     const toCh = +$('toChannel').value, to = +$('toSlot').value, amt = $('amount').value;
