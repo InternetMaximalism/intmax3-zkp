@@ -33,11 +33,18 @@ function cli(ch, args) {
 }
 
 // Fail fast if the deposit backing was not shipped — this box must never fabricate a channel.
+// DURABLE membership: the channel state (registered delegates, their slots) PERSISTS across relay
+// restarts so a deploy/restart never churns slot assignments or collides re-joining users — the
+// cosigner is the durable member registry. Pass RESET_CHANNELS=1 to deliberately start fresh.
+const RESET = process.env.RESET_CHANNELS === '1';
 for (const ch of CHANNELS) {
   const ok = ['channel_backing.json', 'channel_attestation.bin', 'balance_vd.bin'].every((f) => fs.existsSync(wc(ch, f)));
   if (!ok) { console.error(`channel ${ch}: missing deposit backing in ${chDir(ch)}`); process.exit(1); }
-  fs.rmSync(wc(ch, 'cli_state.json'), { force: true });
-  fs.rmSync(wc(ch, 'channel_snapshot.json'), { force: true });
+  if (RESET) {
+    fs.rmSync(wc(ch, 'cli_state.json'), { force: true });
+    fs.rmSync(wc(ch, 'channel_snapshot.json'), { force: true });
+    console.log(`channel ${ch}: RESET_CHANNELS=1 → cleared prior membership`);
+  }
 }
 
 const app = express();
