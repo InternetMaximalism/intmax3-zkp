@@ -48,10 +48,13 @@ use intmax3_zkp::{
     regev::{RegevCiphertext, RegevPk, RegevSecurityLevel, encrypt_amount},
     utils::serialize::{deserialize_verifier_data, serialize_verifier_data},
     wallet_core::{
-        BuiltSend, ChannelBalanceAttestation, ChannelSnapshot, MemberInfo, MemberKeys,
+        BuiltInterChannelCredit, BuiltSend, ChannelBalanceAttestation, ChannelSnapshot,
+        InterChannelDebitPayload, InterChannelTransferDescriptor, MemberInfo, MemberKeys,
         RefreshPayload, SendPayload, add_signature, assemble_genesis_state_backed, build_record,
-        build_send, decrypt_balance, sign_state_if_backed, verify_all_signatures,
-        verify_refresh_transition, verify_send_transition, verify_snapshot,
+        build_inter_channel_credit, build_send, decrypt_balance, sign_state, sign_state_if_backed,
+        verify_all_signatures, verify_inter_channel_credit_transition,
+        verify_inter_channel_send_transition, verify_refresh_transition, verify_send_transition,
+        verify_snapshot,
     },
 };
 use plonky2::{
@@ -104,6 +107,13 @@ struct ControlledMember {
 struct CliState {
     controlled: Vec<ControlledMember>,
     snapshot: ChannelSnapshot,
+    /// REPLAY LEDGER (inter-channel invariant 6): the set of inter-channel `tx_hash`es already
+    /// CREDITED into THIS channel. A credit is applied at most once; a descriptor whose `tx_hash` is
+    /// already present is REFUSED (fail-closed). Persisted in `cli_state.json` so the ledger survives
+    /// across CLI invocations (each channel runs as its own process). Defaults to empty for states
+    /// written before this field existed (back-compat with already-deployed cli_state.json files).
+    #[serde(default)]
+    applied_tx_hashes: Vec<Bytes32>,
 }
 
 #[derive(Deserialize)]
@@ -353,11 +363,13 @@ fn main() {
         "send" => cmd_send(&args),
         "cosign" => cmd_cosign(&args),
         "cosign-refresh" => cmd_cosign_refresh(&args),
+        "cosign-inter-debit" => cmd_cosign_inter_debit(&args),
+        "cosign-inter-credit" => cmd_cosign_inter_credit(&args),
         "finalize" => cmd_finalize(&args),
         "balance" => cmd_balance(),
         _ => {
             eprintln!(
-                "usage: channel_member <setup-backing|init|add-genesis-sig|send|cosign|finalize|balance> ..."
+                "usage: channel_member <setup-backing|init|add-genesis-sig|send|cosign|cosign-refresh|cosign-inter-debit|cosign-inter-credit|finalize|balance> ..."
             );
             exit(2);
         }
@@ -384,6 +396,34 @@ fn cmd_init(args: &[String]) {
     };
     let new_ct = contrib.genesis_ct.clone();
 
+    // IDEMPOTENT RE-JOIN (pk_g dedup): if a member with this EXACT pk_g already exists, the join is a
+    // no-op — return that member's existing slot and the CURRENT snapshot UNCHANGED. Re-running `init`
+    // with the same browser contribution (e.g. a retried request, or a browser that lost its local
+    // copy) must NOT allocate a new slot, bump state_version, or grow delegate_count: doing so caused
+    // slot collisions on re-join. Only a genuinely NEW pk_g advances to the next free slot.
+    if std::path::Path::new(STATE_FILE).exists() {
+        let prev = load_state();
+        if let Some(existing) =
+            prev.snapshot.members.iter().find(|m| m.pk_g == new_delegate.pk_g)
+        {
+            let slot = existing.slot;
+            let dc = prev.snapshot.record.delegate_count;
+            let v = prev.snapshot.state.balance_state.state_version;
+            // Re-publish the UNCHANGED snapshot so the caller's out_path is current; cli_state is left
+            // exactly as-is (no state bump, no ledger change).
+            write_json(out_path, &prev.snapshot);
+            println!(
+                "delegate at slot {slot} (idempotent re-join: pk_g already present; member_count=3, delegate_count={dc}, state_version={v}). Browser: wallet_import_channel(<{out_path}>)."
+            );
+            return;
+        }
+    }
+
+    let prior_ledger = if std::path::Path::new(STATE_FILE).exists() {
+        load_state().applied_tx_hashes
+    } else {
+        Vec::new()
+    };
     let (record, state, members, controlled, slot) = if std::path::Path::new(STATE_FILE).exists() {
         join_delegate(new_delegate, new_ct)
     } else {
@@ -395,7 +435,11 @@ fn cmd_init(args: &[String]) {
     let snapshot = ChannelSnapshot { record, state, members };
     let dc = snapshot.record.delegate_count;
     let v = snapshot.state.balance_state.state_version;
-    save_state(&CliState { controlled, snapshot: snapshot.clone() });
+    save_state(&CliState {
+        controlled,
+        snapshot: snapshot.clone(),
+        applied_tx_hashes: prior_ledger,
+    });
     write_json(out_path, &snapshot);
     println!("delegate at slot {slot} (member_count=3, delegate_count={dc}, state_version={v}). Browser: wallet_import_channel(<{out_path}>).");
 }
@@ -703,6 +747,216 @@ fn cmd_cosign_refresh(args: &[String]) {
     save_state(&state);
     write_json("channel_snapshot.json", &state.snapshot);
     println!("balance-refresh co-signed for slot {} (head advanced).", payload.member_index);
+}
+
+// ============================ INTER-CHANNEL CO-SIGNING ============================
+//
+// Two legs of a cross-channel transfer, each co-signed by a DIFFERENT channel's process:
+//   * `cosign-inter-debit`  runs with INTMAX_CHANNEL = SOURCE channel A: it co-signs the post-debit
+//     `a_send` (channel_fund -= amount), producing the N-of-N-signed state that channel B's gate
+//     trusts as the cross-channel root of trust.
+//   * `cosign-inter-credit` runs with INTMAX_CHANNEL = DESTINATION channel B: it pins A's
+//     AUTHORITATIVE record from A's OWN on-disk cli_state (NEVER the attacker-supplied descriptor),
+//     enforces the replay ledger, runs the fail-closed credit gate, then applies the homomorphic
+//     credit and advances B's head.
+//
+// SECURITY — why these paths use `sign_state` (plain N-of-N), not `sign_state_if_backed`:
+// `sign_state_if_backed` reconciles `state.balance_state.settled_tx_chain` against the channel's
+// genesis deposit-backing attestation. That reconciliation holds for IN-channel sends/refreshes
+// (which PRESERVE settled_tx_chain), but an inter-channel debit/credit PUSHES a new tx leaf into
+// settled_tx_chain (detail2 §C-6), so the genesis attestation can never reconcile against the
+// advanced chain — re-proving the channel's balance attestation for the new settle history is a
+// separate §F-1 reconciliation step (out of scope for the wallet wiring layer). The cryptographic
+// soundness of these transitions is instead carried by the inter-channel gates themselves
+// (`verify_inter_channel_{send,credit}_transition`, which re-verify the REAL E-2 STARK + every
+// cross-channel invariant) PLUS the N-of-N member signatures collected here. We DO NOT weaken
+// `verify_channel_backing` to make a stale attestation pass — that would be a silent security
+// workaround. INTENTIONALLY EXPLICIT so a future change cannot conflate the two gates.
+
+/// Locate the sibling SOURCE-channel cli_state on disk and return its AUTHORITATIVE channel record.
+/// The relay lays channels out as `wallet-live-work/ch7`, `wallet-live-work/ch8`, … one cwd per
+/// channel; channel B (this process) resolves channel A as `../ch<source_id>/cli_state.json`
+/// relative to B's cwd. FAIL-CLOSED: if the sibling A state is missing/unreadable, refuse.
+///
+/// SECURITY: this is the trust anchor for the credit gate. B must NEVER trust the record embedded in
+/// the descriptor/payload (the attacker controls those) — it pins A's record from A's own authentic
+/// state file. A forged A record cannot make `verify_all_signatures(a_signed_state)` pass under it.
+fn pinned_source_record(source_channel_id: u64) -> ChannelRecord {
+    let path = format!("../ch{source_channel_id}/{STATE_FILE}");
+    if !std::path::Path::new(&path).exists() {
+        die(format!(
+            "pinned trusted A record not found at {path}: the source channel's cli_state must be \
+             present on disk (relay layout wallet-live-work/ch<id>). Refusing to credit without the \
+             authentic source record."
+        ));
+    }
+    let a_state: CliState = read_json(&path);
+    a_state.snapshot.record
+}
+
+/// LEG A co-sign (testable core). Verifies the inter-channel send transition against the SOURCE
+/// channel's TRUSTED head/record (loaded from `state`), then collects every CLI member's real
+/// Goldilocks signature over the post-debit state, returns the fully co-signed `a_send`, and advances
+/// + persists `state`'s head. `verify_all_signatures` is the authoritative N-of-N gate.
+fn inter_debit_cosign(state: &mut CliState, payload: &InterChannelDebitPayload) -> ChannelState {
+    // Extends the current head (same invariant as cmd_cosign).
+    if payload.proposed_next_state.prev_digest != state.snapshot.state.digest {
+        die("inter-debit payload does not extend the current head");
+    }
+    // FAIL-CLOSED: each co-signer re-verifies the REAL E-2 + the send transition, bound to the
+    // TRUSTED A record, BEFORE signing — never sign a state we did not validate.
+    verify_inter_channel_send_transition(
+        &state.snapshot.state,
+        &state.snapshot.record,
+        payload,
+        LEVEL,
+    )
+    .unwrap_or_else(|e| die(format!("inter-channel send transition invalid: {e}")));
+
+    let mut next_state = payload.proposed_next_state.clone();
+    // Sender-builder's slot may already carry its self-signature (build_inter_channel_send self-signs
+    // the building member if it is a co-signing member). Collect the remaining CLI members' sigs.
+    for c in &state.controlled {
+        if next_state.member_signatures.iter().any(|s| s.member_slot == c.slot) {
+            continue;
+        }
+        let sig = sign_state(&keys_for(c.keygen_seed), c.slot, &next_state)
+            .unwrap_or_else(|e| die(format!("REFUSING TO SIGN inter-debit — {e}")));
+        add_signature(&mut next_state, sig);
+    }
+    // Authoritative N-of-N gate under A's record.
+    verify_all_signatures(&state.snapshot.record, &state.snapshot.members, &next_state)
+        .unwrap_or_else(|e| die(format!("inter-debit a_send not N-of-N co-signed: {e}")));
+
+    // Advance + publish A's head (mirrors cmd_cosign's optimistic single-relay advance).
+    state.snapshot.state = next_state.clone();
+    next_state
+}
+
+/// `cosign-inter-debit <debit_payload.json> <out.json>` (run with INTMAX_CHANNEL = source channel A).
+fn cmd_cosign_inter_debit(args: &[String]) {
+    let in_path = args
+        .get(1)
+        .unwrap_or_else(|| die("cosign-inter-debit <debit_payload.json> <out.json>"));
+    let out_path = args.get(2).map(String::as_str).unwrap_or("a_send.json");
+    let payload: InterChannelDebitPayload = read_json(in_path);
+    let mut state = load_state();
+    let a_send = inter_debit_cosign(&mut state, &payload);
+    save_state(&state);
+    // HEAD SYNC: republish the advanced head (mirrors cmd_cosign) so re-import sources stay current.
+    write_json("channel_snapshot.json", &state.snapshot);
+    write_json(out_path, &a_send);
+    let signed: Vec<u8> = a_send.member_signatures.iter().map(|s| s.member_slot).collect();
+    println!(
+        "inter-channel DEBIT co-signed (sender slot {}, amount {}) → {out_path}. Signatures present for slots {signed:?}. Channel A head advanced.",
+        payload.sender_index, payload.amount
+    );
+}
+
+/// LEG B co-sign (testable core). Pins A's trusted record (parameter — the binary resolves it from
+/// the sibling cli_state; tests pass it directly), enforces the replay ledger, runs the fail-closed
+/// credit gate, builds the homomorphic credit with a CLI member, collects N-of-N signatures over the
+/// bundle-apply state, advances + persists B's head, and records the tx_hash in the ledger. Returns
+/// the credited (bundle-apply) B state.
+fn inter_credit_cosign(
+    state: &mut CliState,
+    descriptor: &InterChannelTransferDescriptor,
+    a_signed_state: &ChannelState,
+    trusted_a_record: &ChannelRecord,
+) -> ChannelState {
+    // REPLAY LEDGER (invariant 6): refuse a tx_hash already credited into THIS channel.
+    if state.applied_tx_hashes.iter().any(|h| *h == descriptor.tx_hash) {
+        die(format!(
+            "REFUSING: inter-channel tx_hash {} already credited (replay) — fail-closed (invariant 6)",
+            descriptor.tx_hash.to_hex()
+        ));
+    }
+
+    // FAIL-CLOSED cross-channel gate. Both trusted records are PARAMETERS (B's from our own head, A's
+    // pinned from A's authentic state) — never read from the descriptor.
+    verify_inter_channel_credit_transition(
+        &state.snapshot.state,
+        &state.snapshot.record,
+        descriptor,
+        a_signed_state,
+        trusted_a_record,
+        LEVEL,
+    )
+    .unwrap_or_else(|e| die(format!("inter-channel credit gate REFUSED: {e}")));
+
+    // Pick a CLI member to APPLY the credit. If the recipient slot is owned by a CLI member, use that
+    // member's keys so build_inter_channel_credit also runs the recipient-decryption == amount check;
+    // otherwise (a delegate recipient) any CLI member may build the homomorphic add.
+    let recipient_slot = descriptor.recipient_slot;
+    let builder = state
+        .controlled
+        .iter()
+        .find(|c| c.slot == recipient_slot)
+        .or_else(|| state.controlled.first())
+        .unwrap_or_else(|| die("channel B has no CLI member to apply the credit"));
+    let builder_keys = keys_for(builder.keygen_seed);
+
+    let fund_before = state.snapshot.state.channel_fund.amount;
+    let mut rng = StdRng::seed_from_u64(0xC2_0000 + recipient_slot as u64);
+    let BuiltInterChannelCredit { bundle_apply_state, .. } =
+        build_inter_channel_credit(&builder_keys, &state.snapshot, descriptor, LEVEL, &mut rng)
+            .unwrap_or_else(|e| die(format!("build_inter_channel_credit failed: {e}")));
+
+    // CONSERVATION sanity: B channel_fund increased by EXACTLY descriptor.amount.
+    let amt = U256::from(descriptor.amount.min(u32::MAX as u64) as u32);
+    if bundle_apply_state.channel_fund.amount != fund_before + amt {
+        die("conservation check FAILED: B channel_fund did not increase by exactly descriptor.amount");
+    }
+
+    // N-of-N co-sign the credited (bundle-apply) B state. build_inter_channel_credit self-signs the
+    // builder's slot; collect the remaining CLI members.
+    let mut next_state = bundle_apply_state;
+    for c in &state.controlled {
+        if next_state.member_signatures.iter().any(|s| s.member_slot == c.slot) {
+            continue;
+        }
+        let sig = sign_state(&keys_for(c.keygen_seed), c.slot, &next_state)
+            .unwrap_or_else(|e| die(format!("REFUSING TO SIGN inter-credit — {e}")));
+        add_signature(&mut next_state, sig);
+    }
+    verify_all_signatures(&state.snapshot.record, &state.snapshot.members, &next_state)
+        .unwrap_or_else(|e| die(format!("inter-credit B state not N-of-N co-signed: {e}")));
+
+    // Advance B's head + record the tx_hash in the replay ledger (so a later replay is refused).
+    state.snapshot.state = next_state.clone();
+    state.applied_tx_hashes.push(descriptor.tx_hash);
+    next_state
+}
+
+/// `cosign-inter-credit <descriptor.json> <a_signed_state.json> <out.json>` (run with INTMAX_CHANNEL
+/// = destination channel B).
+fn cmd_cosign_inter_credit(args: &[String]) {
+    let desc_path = args
+        .get(1)
+        .unwrap_or_else(|| die("cosign-inter-credit <descriptor.json> <a_signed_state.json> <out.json>"));
+    let a_state_path = args
+        .get(2)
+        .unwrap_or_else(|| die("cosign-inter-credit <descriptor.json> <a_signed_state.json> <out.json>"));
+    let out_path = args.get(3).map(String::as_str).unwrap_or("b_credited.json");
+    let descriptor: InterChannelTransferDescriptor = read_json(desc_path);
+    let a_signed_state: ChannelState = read_json(a_state_path);
+
+    // PINNED TRUSTED A RECORD: from A's OWN authentic cli_state on disk (sibling cwd), NEVER the
+    // attacker-supplied descriptor.
+    let trusted_a_record = pinned_source_record(descriptor.source_channel_id.as_u64());
+
+    let mut state = load_state();
+    let credited = inter_credit_cosign(&mut state, &descriptor, &a_signed_state, &trusted_a_record);
+    save_state(&state);
+    write_json("channel_snapshot.json", &state.snapshot);
+    write_json(out_path, &credited);
+    let signed: Vec<u8> = credited.member_signatures.iter().map(|s| s.member_slot).collect();
+    println!(
+        "inter-channel CREDIT applied (recipient slot {}, amount {}) → {out_path}. Signatures present for slots {signed:?}. Channel B head advanced; tx_hash {} recorded in replay ledger.",
+        descriptor.recipient_slot,
+        descriptor.amount,
+        descriptor.tx_hash.to_hex()
+    );
 }
 
 fn cmd_finalize(args: &[String]) {
