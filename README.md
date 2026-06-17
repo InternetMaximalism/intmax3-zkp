@@ -40,18 +40,13 @@ remaining provably solvent. (Spec: [`architecture-audit/abstract2.md`](architect
 
 ```mermaid
 flowchart TB
-  subgraph CH["Channel layer: members co-sign hash(H1,H2), Regev-encrypted balances"]
-    A["Channel A"]
-    B["Channel B"]
-  end
-  subgraph L2["intmax L2: ZK rollup (validityProof per block, balanceProof per channel)"]
-    BP["Block Producer: tx_tree_root"]
-  end
-  L1["Ethereum L1: IntmaxRollup.sol (MLE/WHIR verify, deposits, close game)"]
-  A -->|"A. intra-channel (H2=0)"| A
-  A -->|"B. inter-channel (H2=tx_tree_root)"| BP
+  A["Channel A (members co-sign hash(H1,H2), Regev-encrypted balances)<br/>A. intra-channel transfer (H2=0): off-chain co-sign, stays in-channel"]
+  BP["intmax L2: Block Producer<br/>builds tx_tree_root, postBlock, validityProof"]
+  B["Channel B (receiver)"]
+  L1["Ethereum L1: IntmaxRollup.sol<br/>MLE/WHIR verify, deposits, close game"]
+  A -->|"B. inter-channel transfer (H2=tx_tree_root)"| BP
   BP -->|"settled small block"| B
-  L2 --> L1
+  BP -->|"postBlock"| L1
 ```
 
 **Two transfer types**
