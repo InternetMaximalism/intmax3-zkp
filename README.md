@@ -1,4 +1,4 @@
-# INTMAX3 — confidential, post‑quantum payment channels on a ZK rollup
+# INTMAX3 — a state-minimized and post‑quantum ZK rollup enshrining payment channels 
 
 INTMAX3 is a multi‑party **payment‑channel** protocol settled by a **ZK (FRI/STARK + MLE/WHIR)
 rollup** on Ethereum. Channels hold **encrypted** balances (Regev/LWE), agree on state with
@@ -108,7 +108,6 @@ cargo test --test e2e --release               # end-to-end rollup flow
 
 # Solidity contracts (from contracts/)
 cd contracts && forge install && forge test -vvv
-SKIP_GROTH16=true forge test                  # skip the slow gnark Groth16 fixture
 
 # Browser wallet (proving runs in your browser via WASM + multi-threading)
 bash build-wallet-wasm.sh                      # build the wasm package (needs cdylib at invocation)
@@ -135,7 +134,7 @@ demo to Sepolia + AWS is documented in [`docs/deploy-runbook.md`](docs/deploy-ru
 | **Signatures** | `src/poseidon_sig/` | Poseidon‑hash ZK signatures used for channel‑state co‑signing |
 | **Core types** | `src/common/`, `src/ethereum_types/` | `BalanceState`, `ChannelTx`, `Block`, `Transfer`, Merkle trees; Ethereum‑compatible field types |
 | **Wallet** | `src/wallet_core.rs`, `src/wasm_wallet.rs`, `wallet-live.html`, `wallet-relay*.js` | library + WASM entry points + browser UI + co‑signing relay |
-| **L1 contracts** | `contracts/src/` | `IntmaxRollup.sol` (deposits, `postBlock`, close game), `@mle/MleVerifier.sol` (WHIR PCS, via the `polygon-plonky2` submodule), `ChannelSettlement*.sol`, `Groth16Verifier.sol` |
+| **L1 contracts** | `contracts/src/` | `IntmaxRollup.sol` (deposits, `postBlock`, close game), `@mle/MleVerifier.sol` (WHIR PCS, via the `polygon-plonky2` submodule), `ChannelSettlement*.sol`|
 | **Tests** | `tests/` | e2e rollup (`e2e.rs`), inter‑channel (`inter_channel_{live,cli,e2e,unified_e2e,validity_b2}.rs`), on‑chain (`mle_onchain_e2e.rs`, `onchain_deposit_keystone.rs`), deposit backing (`channel_backing_e2e.rs`) |
 
 **Key dependencies** (pinned to the `polygon-plonky2` submodule via Cargo `[patch]`):
