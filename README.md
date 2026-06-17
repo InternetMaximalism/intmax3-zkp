@@ -1,607 +1,167 @@
-# intmax3-zkp
+# INTMAX3 — confidential, post‑quantum payment channels on a ZK rollup
 
-Zero-knowledge proof circuits and L1 settlement contracts for the INTMAX3 rollup protocol, built with [Plonky2](https://github.com/0xPolygonZero/plonky2) and [Foundry](https://book.getfoundry.sh/).
+INTMAX3 is a multi‑party **payment‑channel** protocol settled by a **ZK (FRI/STARK + MLE/WHIR)
+rollup** on Ethereum. Channels hold **encrypted** balances (Regev/LWE), agree on state with
+**post‑quantum** signatures, and pay **any other channel** through the rollup — so there is no
+routing‑liquidity problem. This repository contains the proving circuits (Rust/Plonky2), the L1
+settlement contracts (Solidity/Foundry), a machine‑checked safety proof (Lean), and a browser wallet.
 
-## System Architecture — Three-Layer Block Model
+---
 
-```
-  Off-chain: Fast Blocks (~5s)              Layer 1.1: Posting Rounds (~5min)   Layer 1: Finalization (~6h)
-  ─────────────────────────────────────     ───────────────────────────────     ──────────────────────────
+## Why INTMAX3
 
-  ┌──────────┐    ┌──────────┐      postBlockAndSubmit(SubBlock[] + proof)     finalize()
-  │  User A  │───▶│Block Producer│              │                                   │
-  │  User B  │    │          │              ▼                                   ▼
-  │  ...     │    └────┬─────┘         ┌──────────────────┐              ┌─────────────────┐
-  └──────────┘         │               │  IntmaxRollup    │              │  Verify:        │
-                       ▼               │                  │              │  KZG + WHIR +   │
-                 ┌─────────────┐       │  Iterate ~60     │              │  Groth16 +      │
-                 │ Fast Block  │       │  sub-blocks:     │              │  state binding  │
-                 │ (5s cycle)  │       │  hash chain ×60  │              │                 │
-                 │ - key_ids │       │  deposit (last)  │              │  Accept new     │
-                 │ - tx_root   │       │  deposit (last)  │              │  stateRoot      │
-                 │ - SPHINCS+  │       │                  │              └─────────────────┘
-                 │ - NO deposit│       │  Store snapshot: │                      ▲
-                 │ - NO forced │       │  blockHashChain  │                      │
-                 └─────────────┘       │  At[lastBlockNo] │            ┌─────────────────┐
-                  × ~60 per round      └──────────────────┘            │  Validity Proof │
-                                              ▲                        │  (Plonky2)      │
-                 ┌─────────────┐              │                        │  → WHIR → Groth16│
-                 │  Depositor  │── deposit()──┘                        │  → EIP-4844 blob│
-                 └─────────────┘                                       └─────────────────┘
-```
+- **L1 security + 1‑of‑N trust.** Every channel ultimately settles on Ethereum L1. Safety needs only
+  **one honest party — you**: with the last all‑member‑signed state you can always `close` on‑chain,
+  and `withdrawClaimZKP` lets you exit and withdraw **without any other member's cooperation**.
+- **Full privacy.** Per‑member balances are **Regev/LWE ciphertexts** decryptable only by their owner;
+  intra‑channel transfer amounts are encrypted to the recipient. The breakdown of who holds what
+  inside a channel is hidden from the other members, the block producer, and L1 — yet solvency is still
+  enforced by ZK range proofs (`channelTxZKP` / `channelUpdateZKP`), so confidentiality and
+  "no over‑spend" coexist.
+- **Post‑quantum.** State agreement uses **hash‑based signatures** (SPHINCS+ / Poseidon‑hash sigs) and
+  balances use **lattice (Regev/LWE)** encryption — both believed secure against quantum adversaries.
+- **Fast finality.** In‑channel transfers finalize the instant the members co‑sign the new state
+  (off‑chain, milliseconds of proving) — no on‑chain round‑trip per payment.
+- **No channel‑capacity problem.** Unlike Lightning‑style networks, channels don't pay along
+  pre‑funded bidirectional routes. **Any channel pays any channel** by routing a transfer through the
+  intmax rollup (`interChannelTransfer`); there is no inbound‑capacity or path‑liquidity constraint.
 
-**Key invariant:** All three layers share the same `Block` structure and `BlockStep` ZK circuit.
-Fast blocks simply have `deposit_hash_chain = 0`.
-The ZK circuit processes every block identically; only the L1 posting frequency differs.
+---
 
-## Proof Pipeline
+## Protocol at a glance
 
-The system produces four independent proof types that work together:
+The protocol is **MECE**: every transfer is exactly one of two kinds, distinguished structurally by an
+`H2` tag in the signed state. Each kind is gated by a ZK range proof so balances stay encrypted while
+remaining provably solvent. (Spec: [`architecture-audit/abstract2.md`](architecture-audit/abstract2.md).)
 
-```
-┌─────────────────────────────────────────────────────────────────────────────┐
-│                          VALIDITY PROOF PIPELINE                            │
-│                                                                             │
-│  Block 1          Block 2          Block N                                  │
-│  ┌──────────┐    ┌──────────┐    ┌──────────┐                               │
-│  │key_ids │    │key_ids │    │key_ids │                               │
-│  │tx_root   │    │tx_root   │    │tx_root   │                               │
-│  │SPHINCS+  │    │SPHINCS+  │    │SPHINCS+  │                               │
-│  │signatures│    │signatures│    │signatures│                               │
-│  └────┬─────┘    └────┬─────┘    └────┬─────┘                               │
-│       │               │               │                                     │
-│       ▼               ▼               ▼                                     │
-│  ┌─────────────────────────────────────────┐                                │
-│  │      Block Hash Chain Circuit           │ ◄── user tree updates       │
-│  │  (UpdateUserTree + SPHINCS+ verify)  │     + signature verification   │
-│  └─────────────────┬───────────────────────┘                                │
-│                    │                                                        │
-│                    ▼                                                        │
-│  ┌─────────────────────────────────────────┐                                │
-│  │         Validity Circuit                │                                │
-│  │  public_input = keccak256(              │                                │
-│  │    initial_block_number,                │                                │
-│  │    initial_block_chain,                 │                                │
-│  │    initial_ext_commitment,  ◄── must == latestFinalizedStateRoot         │
-│  │    final_block_number,                  │                                │
-│  │    final_block_chain,       ◄── must == on-chain blockHashChainAt[n]     │
-│  │    final_ext_commitment,    ◄── becomes new latestFinalizedStateRoot     │
-│  │    prover                               │                                │
-│  │  )                                      │                                │
-│  └─────────────────────────────────────────┘                                │
-└─────────────────────────────────────────────────────────────────────────────┘
-
-┌─────────────────────────────────────────────────────────────────────────────┐
-│                          BALANCE PROOF PIPELINE                             │
-│                                                                             │
-│  ┌──────────┐    ┌──────────┐    ┌──────────┐    ┌──────────┐              │
-│  │  Spend   │    │ Send Tx  │    │ Receive  │    │ Receive  │              │
-│  │  Proof   │───▶│  Proof   │    │ Transfer │    │ Deposit  │              │
-│  │ (solvency│    │ (block   │    │  Proof   │    │  Proof   │              │
-│  │  +nonce) │    │  incl.)  │    │          │    │          │              │
-│  └──────────┘    └──────────┘    └──────────┘    └──────────┘              │
-│       │               │               │               │                    │
-│       └───────────────┴───────────────┴───────────────┘                    │
-│                               │                                            │
-│                               ▼                                            │
-│                    ┌──────────────────────┐                                 │
-│                    │   Balance Proof      │ (recursive IVC)                 │
-│                    │   (private state)    │                                 │
-│                    └──────────────────────┘                                 │
-└─────────────────────────────────────────────────────────────────────────────┘
-
-┌─────────────────────────────────────────────────────────────────────────────┐
-│                         WITHDRAWAL PROOF PIPELINE                           │
-│                                                                             │
-│  Balance Proof ──▶ Single Withdrawal ──▶ Withdrawal Chain ──▶ Final Proof   │
-│  (after send)      (extract transfer)    (aggregate N)        (+ L1 state)  │
-└─────────────────────────────────────────────────────────────────────────────┘
+```mermaid
+flowchart TB
+  subgraph L1["Ethereum L1 — IntmaxRollup.sol (MLE/WHIR + Groth16 verify, deposits, close game)"]
+  end
+  subgraph L2["intmax L2 — ZK rollup (validityProof per block, balanceProof per channel)"]
+    BP["Block Producer · builds TxV2Tree → tx_tree_root → postBlock"]
+  end
+  subgraph Ch["Channel layer — N members, Regev-encrypted balances (encBalances)"]
+    A["Channel A<br/>(members co-sign hash(H1,H2))"]
+    B["Channel B"]
+  end
+  A -- "A. intra-channel transfer (H2=0)<br/>channelTx + channelTxZKP, instant co-sign" --> A
+  A == "B. inter-channel transfer (H2=tx_tree_root)<br/>Transfer + channelUpdateZKP" ==> BP
+  BP == "settled small block<br/>(receiver verifies inclusion on L1)" ==> B
+  L2 --- L1
+  Ch --- L2
 ```
 
-## On-chain Public Input Binding
+**Two transfer types**
 
-Every value in the validity proof's public inputs is bound to on-chain state:
+| | A · intra‑channel (`H2 = 0`) | B · inter‑channel (`H2 = tx_tree_root`) |
+|---|---|---|
+| who | the N members of one channel | channel → channel, via the rollup |
+| proof | `channelTxZKP` (recipient ct valid **and** sender post‑balance ≥ 0) | `channelUpdateZKP` (sender − / receiver + equal amount, sender ≥ 0, cts valid) |
+| settlement | off‑chain co‑signature only (instant) | tx enters an L1 block; receiver verifies inclusion + the sender's `balanceProof` |
 
-```
-┌─ On-chain Storage ───────────────────────────────────────────────────────┐
-│                                                                          │
-│  blockHashChainAt[n]  ◄─── postBlockAndSubmit() computes keccak256 of:  │
-│                              prev_hash ‖ channel_id ‖ timestamp ‖     │
-│                              key_ids ‖ tx_tree_root ‖ deposit_chain   │
-│                                                                          │
-│  depositHashChain     ◄─── deposit() computes keccak256 of:             │
-│                              prev_hash ‖ depositor ‖ recipient ‖         │
-│                              token_index ‖ amount ‖ aux_data             │
-│                                                                          │
-│  blockDepositHash[n]  ◄─── actual deposit_hash_chain used in block n    │
-│  latestFinalizedStateRoot ◄── finalize() sets to final_ext_commitment   │
-│                                                                          │
-└──────────────────────────────────────────────────────────────────────────┘
-                    ▲                                    ▲
-                    │ must match                         │ must match
-                    │                                    │
-┌─ ValidityPublicInputs ──────────────────────────────────────────────────┐
-│                                                                          │
-│  initialBlockNumber ──────── block number at proof start                 │
-│  initialBlockChain  ──────── == blockHashChainAt[initialBlockNumber]     │
-│  initialExtCommitment ────── == latestFinalizedStateRoot (chain link)    │
-│  finalBlockNumber ────────── block number at proof end                   │
-│  finalBlockChain  ────────── == blockHashChainAt[finalBlockNumber]       │
-│  finalExtCommitment ──────── == stateRoot (the value being accepted)     │
-│  prover ──────────────────── address of the proof submitter              │
-│                                                                          │
-└──────────────────────────────────────────────────────────────────────────┘
-                    │
-                    │ keccak256
-                    ▼
-┌─ Plonky2 Proof ──────────────────────────────────────────────────────────┐
-│  public_input = keccak256(ValidityPublicInputs)   (single bytes32)       │
-└────────────────────────────────┬─────────────────────────────────────────┘
-                                 │
-                                 │ must ==
-                                 ▼
-┌─ WHIR Statement ─────────────────────────────────────────────────────────┐
-│  evaluations[0] = keccak256(ValidityPublicInputs)                        │
-│  (binds WHIR proof to the same plonky2 circuit instance)                 │
-└──────────────────────────────────────────────────────────────────────────┘
-                                 │
-                                 │ must ==
-                                 ▼
-┌─ Groth16 Public Inputs ────────────────────────────────────────────────┐
-│  pubInputs[0] = keccak256(ValidityPublicInputs)                        │
-│  (binds Groth16 proof to the same plonky2 circuit instance)            │
-└────────────────────────────────────────────────────────────────────────┘
+**The atomic signature (why a transfer can't grief co‑members).** Members never sign a bare
+`tx_tree_root`; they sign `hash(H1', H2)` where `H1'` is the *post‑subtraction* balance state and `H2`
+is the transfer tag. So "authorize the transfer" and "agree to the debit" are **one inseparable
+signature** — a signature that authorizes the send but refuses the debit is undefined by construction.
+
+```mermaid
+sequenceDiagram
+  participant S as Sender (Channel A)
+  participant M as A's other members
+  participant BP as Block Producer (intmax)
+  participant L1 as Ethereum L1
+  participant B as Channel B (receiver)
+  S->>S: build Transfer + channelUpdateZKP (sender−, receiver+, sender≥0)
+  S->>M: post-debit BalanceState' + proof
+  M-->>S: co-sign hash(H1', H2=tx_tree_root)
+  Note over S,M: one atomic signature = debit + authorization
+  S->>BP: tx → TxV2Tree
+  BP->>L1: postBlock(tx_tree_root) ; validityProof binds channelStateSig
+  B->>L1: verify TxV2 inclusion + sender balanceProof (flowReceive3)
+  B->>B: credit receiver ct, co-sign new state (H2=0)
 ```
 
-## L1 Contract Functions
+**Five security properties** (formalized in §4 of the spec and machine‑checked in Lean):
+1. **Authorization** — all‑member signature over `hash(H1,H2)`; an invalid state is never signed.
+2. **No double‑spend / no illicit mint** — `commonState` + per‑block `validityProof`; close‑time
+   `withdrawCap` caps total withdrawals; `settledTxChain` binds the state to its `balanceProof`.
+3. **Solvency** — encrypted balances stay non‑negative inductively via the mandatory range ZKPs.
+4. **Exit / liveness** — `requestClose → grace → challenge(latest‑version wins) → withdraw`; you exit
+   alone with `withdrawClaimZKP`; late funds recovered via `lateBalanceProof`.
+5. **Balance confidentiality** — Regev encryption hides per‑member balances from everyone.
 
-```
-┌─────────────────────────────────────────────────────────────────────────┐
-│                          IntmaxRollup.sol                                │
-│                                                                         │
-│  ┌────────────────────────┐  Aggregators post blocks + proof blobs      │
-│  │  postBlockAndSubmit()  │  → updates blockHashChain on-chain          │
-│  │  ~160k gas             │  → blockHashChainAt[n], blockDepositHash[n] │
-│  │                        │  → stores commitment (blobHash‖proof‖SR)    │
-│  │                        │  → locks 1 ETH stake until finalize/fraud   │
-│  └────────────────────────┘                                             │
-│                                                                         │
-│  ┌─────────────────┐  Users queue deposits                              │
-│  │  deposit()      │  → updates depositHashChain on-chain               │
-│  │  ~55k gas       │                                                    │
-│  └─────────────────┘                                                    │
-│                                                                         │
-│  ┌─────────────────┐  Anyone can verify and finalize                    │
-│  │  finalize()     │  1. Commitment check                               │
-│  │  ~1.6M gas      │  2. ValidityPIs ↔ on-chain state                  │
-│  │                 │  3. WHIR evaluations[0] == keccak(ValidityPIs)     │
-│  └─────────────────┘  4. KZG blob binding (EIP-2537)                    │
-│                       5. WHIR proof verification                        │
-│                       6. Groth16 proof verification                     │
-│  ┌─────────────────┐                                                    │
-│  │  verify()       │  WHIR + Groth16 (no binding, no KZG)              │
-│  │  ~842k gas      │                                                    │
-│  └─────────────────┘                                                    │
-│                                                                         │
-│  ┌─────────────────┐                                                    │
-│  │  fraudProof()   │  Confirms blob fraud, slashes stake (90/10 split), │
-│  │                 │  clears blockDepositHash and                       │
-│  │                 │  rewinds blockHashChain snapshots + submissions    │
-│  └─────────────────┘                                                    │
-│                                                                         │
-│  Dependencies:                                                          │
-│  ├── BlobKZGVerifier.sol   (EIP-2537 BLS12-381 multi-point KZG opening) │
-│  ├── Groth16Verifier.sol   (BN254 ecPairing-based Groth16 verification) │
-│  └── sol-whir              (WHIR polynomial commitment verification)    │
-└─────────────────────────────────────────────────────────────────────────┘
-```
+---
 
-> **Withdrawals:** `IntmaxRollup.sol` does not expose a `withdraw()` entrypoint. Withdrawals
-> are proven in the recursive circuits and only the resulting `latestFinalizedStateRoot`
-> is accepted via `finalize()`. Any contract that releases L1 funds must read that state root
-> (e.g. via a separate withdrawal bridge) and enforce nullifier checks off-chain.
-
-## SPHINCS+ Post-Quantum Signature Verification
-
-The validity circuit enforces [SPHINCS+](https://github.com/InternetMaximalism/aggregated_SPHINCS_plus) (SPX-128s Poseidon) signatures in the `UpdateUserTree` sub-circuit:
-
-```
-Per user slot i in a block:
-
-  is_active       = (key_id_i ≠ 0)              ── not a padding slot
-  should_update   = is_active AND (prev ≠ block_number)  ── first inclusion this block
-  has_pk_hash     = (pk_hash ≠ [0,0,0,0])         ── user has registered a key
-  should_verify   = should_update AND has_pk_hash
-
-  if should_verify:
-      assert Poseidon(pub_seed ‖ pub_root) == user_leaf.pk_hash
-      assert SPHINCS+_verify(signature_i, M_i, pub_key_i) == true
-
-  Message:  M_i = [block_number ‖ channel_id ‖ key_id_i ‖ tx_tree_root]
-                 = 11 Goldilocks field elements = 88 bytes
-```
-
-**SPHINCS+ parameters (SPX-128s Poseidon):**
-
-| Parameter | Value |
-|-----------|-------|
-| Security level | 128-bit post-quantum |
-| Hash | Poseidon (Goldilocks field) |
-| `N` (byte security) | 16 |
-| Hypertree layers `D` | 7 |
-| FORS trees `k`, height `a` | 14, 12 |
-| WOTS+ chain length | 35 |
-| Signature size | 7 856 bytes |
-| Public key size | 32 bytes |
-
-## Data Structures
-
-### User Tree
-
-```
-AccountTree (sparse Merkle tree, leaf index = user_id)
-
-  UserLeaf {
-      index: u32,             // next empty send leaf index
-      prev: BlockNumber,      // last block that updated this account
-      send_tree_root: Hash,   // root of user's send tree
-      pk_hash: Hash,          // Poseidon(SPHINCS+ pub_seed ‖ pub_root)
-  }                           // pk_hash == 0 means unregistered (no sig required)
-```
-
-### Extended Public State (the "state root")
-
-```
-ExtendedPublicState {
-    inner: PublicState {
-        block_number,
-        timestamp,
-        account_tree_root,     ◄── includes all UserLeaf updates
-        deposit_tree_root,
-        prev_public_state_root,
-    },
-    block_hash_chain,          ◄── keccak chain of all blocks (includes key_ids)
-    deposit_hash_chain,        ◄── keccak chain of all deposits
-    deposit_count,
-}
-
-state_root = Poseidon(ExtendedPublicState)   ← this is final_ext_commitment
-```
-
-### Block Hash Chain
-
-```
-block_hash_chain[n] = keccak256(
-    block_hash_chain[n-1]       (32 bytes)
-    ‖ channel_id             ( 4 bytes)
-    ‖ timestamp                 ( 8 bytes)
-    ‖ key_ids[0..num_users]   ( 4 × num_users bytes)   ◄── the ID list
-    ‖ tx_tree_root              (32 bytes)
-    ‖ deposit_hash_chain        (32 bytes)
-)
-```
-
-## Project Layout
-
-```
-intmax3-zkp/
-├── src/
-│   ├── circuits/
-│   │   ├── balance/               # Balance proof circuits (spend, send, receive, deposit)
-│   │   ├── validity/
-│   │   │   ├── block_hash_chain/  # Block step, update_user_tree (SPHINCS+), validity
-│   │   │   └── deposit_hash_chain/# Deposit step circuit
-│   │   ├── withdraw/              # Single withdrawal, chain, final proof
-│   │   └── test_utils/            # BlockWitnessGenerator, BalanceWitnessGenerator,
-│   │                              # sphincs_sign (native SPHINCS+ for tests)
-│   ├── common/                    # Block, Deposit, Tx, UserId, trees
-│   └── utils/                     # Poseidon, Merkle trees, conversion helpers
-│       ├── whir_wrapper.rs        # WHIR proof wrapping (cargo feature "whir")
-│       └── groth16_wrapper.rs     # Groth16 wrapping via gnark subprocess
-├── gnark/                         # Go gnark-plonky2-verifier wrapper
-│   ├── main.go                    # Plonky2 → Groth16 conversion
-│   └── gnark-wrapper              # Pre-built binary
-├── contracts/                     # Foundry project
-│   ├── src/
-│   │   ├── IntmaxRollup.sol       # Main rollup contract (postBlockAndSubmit, deposit, finalize)
-│   │   ├── BlobKZGVerifier.sol    # EIP-2537 KZG multi-point opening
-│   │   └── Groth16Verifier.sol    # BN254 Groth16 verification (ecAdd/ecMul/ecPairing)
-│   └── test/
-│       └── IntmaxRollup.t.sol     # 16 Foundry tests
-├── tests/
-│   ├── e2e.rs                     # End-to-end: deposit → transfer → withdrawal → validity
-│   ├── wasm_proofs.rs             # WASM browser proof tests
-│   └── fixtures/                  # Pre-serialized circuit binaries (.bin)
-├── index.html                     # Browser test runner UI
-├── test-worker.js                 # Web Worker for WASM proof execution
-├── server.js                      # HTTPS dev server (COEP/COOP headers)
-├── self_certs/                    # Self-signed TLS certificates (generated locally)
-└── .cargo/config.toml             # WASM target flags (atomics, SIMD, memory limits)
-```
-
-## Requirements
-
-- Rust nightly (`nightly-2025-03-23`, managed via `rust-toolchain.toml`)
-- [wasm-pack](https://rustwasm.github.io/wasm-pack/) (for WebAssembly builds and tests)
-- [Node.js](https://nodejs.org/) (for the browser test server)
-- [OpenSSL](https://www.openssl.org/) (for generating self-signed TLS certificates)
-- [Foundry](https://book.getfoundry.sh/) (for Solidity contract tests)
-- Chrome (for browser testing; WebGPU support required for GPU acceleration)
-
-## Build & Test
-
-### Rust (ZKP circuits)
+## Usage
 
 ```bash
+# Rust circuits — tests MUST run in release (debug builds are ignored via cfg_attr)
 cargo build --release
-cargo test --release              # 165 unit tests + e2e integration test
+cargo test --release                          # full suite
+cargo test --test inter_channel_live --release -- --nocapture   # inter-channel send, no facade
+cargo test --test e2e --release               # end-to-end rollup flow
 
-# With WHIR wrapping support
-cargo build --release --features whir
-cargo test --release --features whir
+# Solidity contracts (from contracts/)
+cd contracts && forge install && forge test -vvv
+SKIP_GROTH16=true forge test                  # skip the slow gnark Groth16 fixture
+
+# Browser wallet (proving runs in your browser via WASM + multi-threading)
+bash build-wallet-wasm.sh                      # build the wasm package (needs cdylib at invocation)
+node wallet-relay.js                           # https://localhost:8000/wallet-live.html (2 channels)
 ```
 
-### WASM (Browser)
+The browser wallet does the ZK proving locally; a small relay co‑signs as the other members. Join a
+channel, send intra‑channel (same channel id) or inter‑channel (a different channel id). Deploying the
+demo to Sepolia + AWS is documented in [`docs/deploy-runbook.md`](docs/deploy-runbook.md).
 
-#### 1. Generate circuit fixtures (first time only)
+> Requires Rust nightly (pinned in `rust-toolchain.toml`) and Foundry. Tests use
+> `#[cfg_attr(debug_assertions, ignore)]` — always pass `--release`.
 
-Pre-serializes circuits to `.bin` files so the browser loads them via `from_bytes()` instead of building at runtime.
+---
 
-```bash
-cargo run --release --bin generate_wasm_fixtures
-```
+## Repository layout
 
-This produces `tests/fixtures/*.bin` (~711MB total). Requires 32GB+ RAM.
+| Area | Path | What |
+|---|---|---|
+| **Specification** | [`architecture-audit/detail2.md`](architecture-audit/detail2.md) | the **authoritative implementation spec**; [`abstract2.md`](architecture-audit/abstract2.md) is the minimal spec + the 5 security properties |
+| **Machine‑checked safety** | [`architecture-audit/ChannelSafety.lean`](architecture-audit/ChannelSafety.lean), [`ChannelSafety2.lean`](architecture-audit/ChannelSafety2.lean) | Lean proofs of authorization / no‑double‑spend / solvency / exit safety for abstract(2).md, with crypto primitives modeled by their soundness contracts |
+| **Proof circuits** | `src/circuits/` | `balance/` (account state via IVC), `validity/` (block consensus + SPHINCS+), `withdraw/`, `channel/` (channel state‑update verifiers) |
+| **Lattice layer** | `src/regev/` | Regev/LWE keygen, encryption, and the channel‑tx / channel‑update STARKs (`channelTxZKP` / `channelUpdateZKP`) |
+| **Signatures** | `src/poseidon_sig/` | Poseidon‑hash ZK signatures used for channel‑state co‑signing |
+| **Core types** | `src/common/`, `src/ethereum_types/` | `BalanceState`, `ChannelTx`, `Block`, `Transfer`, Merkle trees; Ethereum‑compatible field types |
+| **Wallet** | `src/wallet_core.rs`, `src/wasm_wallet.rs`, `wallet-live.html`, `wallet-relay*.js` | library + WASM entry points + browser UI + co‑signing relay |
+| **L1 contracts** | `contracts/src/` | `IntmaxRollup.sol` (deposits, `postBlock`, close game), `@mle/MleVerifier.sol` (WHIR PCS, via the `polygon-plonky2` submodule), `ChannelSettlement*.sol`, `Groth16Verifier.sol` |
+| **Tests** | `tests/` | e2e rollup (`e2e.rs`), inter‑channel (`inter_channel_{live,cli,e2e,unified_e2e,validity_b2}.rs`), on‑chain (`mle_onchain_e2e.rs`, `onchain_deposit_keystone.rs`), deposit backing (`channel_backing_e2e.rs`) |
 
-#### 2. Generate self-signed TLS certificates
+**Key dependencies** (pinned to the `polygon-plonky2` submodule via Cargo `[patch]`):
+`plonky2` / `starky` / `plonky2_mle` (FRI‑based STARKs + the multilinear PCS with **WHIR** used for the
+on‑chain wrapper proof), `plonky2_bn254` / `plonky2_keccak` (BN254 + Keccak circuits),
+`regev_plonky3` (the Regev/LWE lattice layer on Plonky3), and `sphincsplus-*` (post‑quantum signatures).
+Stack: Rust 2024 (nightly) + Solidity 0.8.29 (Foundry, Prague EVM).
 
-HTTPS is required for `SharedArrayBuffer` (COEP/COOP headers only work over HTTPS).
-
-```bash
-mkdir -p self_certs
-openssl req -x509 -newkey rsa:2048 \
-  -keyout self_certs/key.pem \
-  -out self_certs/cert.pem \
-  -days 365 -nodes \
-  -subj '/CN=localhost'
-```
-
-#### 3. Build WASM
-
-The WASM build requires recompiling `std` from source with atomics support (`build-std`), because the pre-built WASM `std` does not include atomics — which are needed for `SharedArrayBuffer` and multi-threaded Web Workers (rayon).
-
-
-```bash
-# CPU-only
-CARGO_UNSTABLE_BUILD_STD=std,panic_abort wasm-pack build --release --target web
-
-# With WebGPU acceleration (recommended)
-CARGO_UNSTABLE_BUILD_STD=std,panic_abort wasm-pack build --release --target web -- --features gpu_merkle
-```
-
-We pass `build-std` via the `CARGO_UNSTABLE_BUILD_STD` environment variable rather than putting it in `.cargo/config.toml` because Cargo's `[unstable]` section is **global** — it cannot be scoped to a specific target like `[target.wasm32-unknown-unknown]`. If `build-std` were in `config.toml`, it would also recompile `std` for native builds, causing "duplicate lang item in crate `core`" errors that break `cargo test --release`.
-
-#### 4. Install dependencies and start server
-
-```bash
-npm install
-node server.js
-```
-
-#### 5. Run in browser
-
-Open https://localhost:8000 in Chrome (accept the self-signed certificate).
-
-- **Run Withdrawal Proof** — full withdrawal proof pipeline (deposit, spend, send-tx, single withdrawal, chain step, chain final)
-- **Run Balance Processor Flow** — balance processor flow with deposit, spend, send-tx, and receive-transfer
-
-### Solidity (L1 contracts)
-
-```bash
-cd contracts
-forge install                 # install sol-whir, forge-std dependencies
-forge test -vvv               # 16 tests
-```
-
-## Browser Proving Architecture
-
-The browser proving setup uses three optimization layers on top of WASM:
-
-| Layer | Speedup | How |
-|-------|---------|-----|
-| SIMD128 | ~2-4x | Field arithmetic acceleration via 128-bit vector instructions |
-| Multi-threading | ~4-8x | Web Workers + `wasm-bindgen-rayon` thread pool |
-| WebGPU | ~4-16x | GPU Poseidon hashing for FRI Merkle trees during `prove()` |
-
-Circuits are pre-serialized offline (`generate_wasm_fixtures`) and loaded via `from_bytes()`. This eliminates runtime circuit construction — only `prove()` methods and `WithdrawalProcessor::new()` run at runtime in the browser.
-
-### Key files
-
-| File | Purpose |
-|------|---------|
-| `src/lib.rs` | `#[wasm_bindgen]` entry points: `run_single_withdrawal_proof()`, `run_balance_processor_flow()`, `init_gpu_merkle()` |
-| `.cargo/config.toml` | WASM target flags (atomics, SIMD, 4GB max memory, 16MB stack) |
-| `index.html` | Browser test runner UI |
-| `test-worker.js` | Web Worker: WASM init, thread pool, GPU init, proof dispatch |
-| `server.js` | HTTPS dev server with COEP/COOP headers for SharedArrayBuffer |
-
-### WASM memory constraints
-
-WASM32 has a **4GB hard limit** on linear memory. The proof pipeline uses ~4GB at peak. Key mitigations:
-- **Strategic `drop()` calls** in `src/lib.rs` — circuit data, witnesses, and proofs are freed as soon as no longer needed
-- **Memory-pressure CPU fallback** — GPU Merkle falls back to CPU when WASM memory exceeds 3.5GB
-- **Zero-copy GPU readback** — hashes read on-the-fly from mapped staging buffer instead of allocating intermediate Vecs
-
-## Browser Channel Wallet (Regev send/receive)
-
-A self-contained, in-browser wallet for confidential **in-channel** transfers on the Regev (Ring-LWE)
-channel model. One channel member runs in the browser with real SPHINCS+ + Regev keys and real funds;
-the other members are driven by a CLI companion. The browser does the ZK proving (multithreaded WASM);
-co-signing of each new channel state is N-of-N SPHINCS+ over `ChannelState::signing_digest()`.
-
-```
-  Browser member (wallet.html)            Local relay (wallet-relay.js)         Other members
-  ─────────────────────────────           ─────────────────────────────        ──────────────
-  keygen / open channel                    serves wallet static files           channel_member (CLI):
-  build ChannelTx + E-1 proof   ── /api ──▶ (COEP/COOP for SAB/threads)  ──────▶ native co-sign (SPHINCS+)
-  wasm-bindgen-rayon proving               bridges /api → CLI companion          verify + counter-sign
-  decrypt own balance slot      ◀────────────────────────────────────────────── return co-signed state
-```
-
-| File | Purpose |
-|------|---------|
-| `src/wallet_core.rs` | Target-independent wallet core: SPHINCS+ + Regev key management, channel send/receive, state verification |
-| `src/wasm_wallet.rs` | `wasm-bindgen` session entry points (keygen, genesis, send, receive) |
-| `src/bin/channel_member.rs` | CLI companion that runs the other channel members (native co-signing) |
-| `wallet.html` + `wallet-worker.js` | Standalone browser UI; multithreaded proving via `wasm-bindgen-rayon` |
-| `wallet-live.html` + `wallet-relay.js` | "Live" UI + local HTTPS relay that bridges browser `/api` calls to the CLI companion so a real send runs with just clicks (dev-only, localhost, self-signed TLS) |
-| `build-wallet-wasm.sh` | Builds the wallet WASM package |
-| `wallet-e2e.js` / `wallet-live-smoke.js` / `wallet-live-debug.js` | Playwright end-to-end / smoke / debug drivers (browser sends, receives, verifies) |
-| `wallet-feasibility.html` + `feasibility-*.js` | Browser feasibility probe for the WASM proving stack |
-| `tests/wallet_core_e2e.rs` | Native end-to-end of the wallet core |
-| `tests/regev_timing.rs`, `tests/sphincs_timing.rs` | Regev / SPHINCS+ timing benchmarks |
-
-Security requirements the wallet/CLI must enforce (the library leaves some to the caller — e.g. running
-real SLH-DSA verification, decrypting the wallet's own balance slot, and confirming non-recipient
-ciphertexts are unchanged) are documented in
-[tasks/wallet-threat-model.md](tasks/wallet-threat-model.md) and
-[tasks/wallet-lessons.md](tasks/wallet-lessons.md).
-
-```bash
-./build-wallet-wasm.sh                 # build the wallet WASM package
-node wallet-relay.js                   # serve wallet-live.html + bridge to the CLI companion (HTTPS)
-# open https://localhost:8000/wallet-live.html and click "Open channel" / "Send"
-```
+---
 
 ## Benchmarks
 
-### ZKP Proof Generation (release mode, Apple M-series)
-
-| Proof | Time |
-|-------|------|
-| Deposit balance proof | 1.16 s |
-| Spend proof (internal transfer) | 0.28 s |
-| Send-tx proof (internal transfer) | 1.14 s |
-| Receive-transfer proof | 1.43 s |
-| Spend proof (withdrawal) | 0.26 s |
-| Send-tx proof (withdrawal) | 1.12 s |
-| Single withdrawal proof | 1.50 s |
-| Withdrawal chain proof | 2.68 s |
-| Withdrawal final proof | 2.31 s |
-| Block hash-chain proof (block 1) | 8.06 s |
-| Block hash-chain proof (block 2) | 5.27 s |
-| Block hash-chain proof (block 3) | 5.43 s |
-| Validity proof | 2.28 s |
-| **End-to-end total** | **~83 s** |
-
-### L1 Contract Gas Costs
-
-| Function | Gas | Storage Writes |
-|----------|-----|---------------|
-| `postBlockAndSubmit()` | ~160k | ≥5 slots (blockHashChain, blockHashChainAt[n], blockDepositHash[n], commitment, submitter+finalized) + locks 1 ETH stake |
-| `deposit()` | ~55k | 1 slot (pendingDepositHashChain) |
-| `finalize()` | ~1.6M | 2 slots (finalized flag, latestFinalizedStateRoot) |
-| `verify()` | ~842k | 0 (view) |
-
-> **Note on gas costs:** WHIR, Groth16, and KZG precompiles are currently mocked in Foundry tests
-> (see "Current Limitations" below). Real gas costs will differ once live proofs are integrated.
-
-## Current Limitations and TODO
-
-### Mocked proof verification in tests
-
-The Foundry tests currently **mock** the following precompile / external calls:
-
-| Component | What is mocked | Why |
-|-----------|---------------|-----|
-| **WHIR** | `WhirVerifierWrapper.verify()` returns `true` | The WHIR proof fixture from sol-whir is a standalone test polynomial, not a wrapped Plonky2 proof. For `finalize()` tests we mock the wrapper so that the patched `statement.evaluations[0]` (which carries the plonky2 public input hash) passes without a real WHIR prover. |
-| **Groth16** | BN254 `ecPairing` precompile (0x08) returns `1` | No Groth16 proving key or wrapper circuit exists yet. The `Groth16Verifier.sol` library is correct (standard 4-pairing check using ecAdd/ecMul/ecPairing), but there is no circuit that wraps Plonky2 verification into an R1CS suitable for Groth16 proving. |
-| **KZG** | BLS12-381 precompiles (0x0b, 0x0d, 0x11) return valid | EIP-2537 precompiles are not available in Foundry's EVM. The `BlobKZGVerifier.sol` library is correct but can only be tested on a live Pectra-enabled chain. |
-
-The `verify()` test for a standalone WHIR proof **does use the real WHIR verifier** (not mocked) and passes against the sol-whir test fixture. Only the `finalize()` / `fraudProof()` pipeline mocks WHIR because the statement must carry the plonky2 public input hash.
-
-### Proof wrapping pipeline (integrated from whirtest)
-
-The WHIR and Groth16 wrapping code from [whirtest](https://github.com/leohio/whirtest)
-is now integrated into this repository:
-
-```
-Plonky2 validity proof
-        │
-        ├──▶ WHIR wrapper (src/utils/whir_wrapper.rs, cargo feature "whir")
-        │    └── proof_to_polynomial(): pack proof bytes → Goldilocks field elements
-        │    └── whir_prove(): commit + sumcheck proof generation
-        │    └── verifier: sol-whir on-chain (already integrated)
-        │
-        └──▶ Groth16 wrapper (src/utils/groth16_wrapper.rs + gnark/)
-             └── groth16_wrap(): Plonky2 proof → gnark subprocess → BN254 Groth16 proof
-             └── gnark/main.go: Go binary using gnark-plonky2-verifier
-             └── verifier: Groth16Verifier.sol on-chain (already integrated)
+```bash
+cargo bench --bench proof_bench               # proving time: balance-processor proofs (initial,
+                                              # receive-deposit, send-tx, receive-transfer),
+                                              # deposit-hash-chain step, block-hash-chain step
+cargo bench --bench degree_report             # per-circuit gate counts / degree (complexity report)
+cargo test  --release regev_timing -- --nocapture   # Regev encrypt + channel-tx (E-1) prove/verify timing + proof size
 ```
 
-**Usage:**
+`proof_bench` (Criterion) reports wall‑clock proving time per circuit; `degree_report` prints each
+circuit's size so you can see where the cost is. Indicative figures observed on Apple‑silicon / a small
+arm64 box (orders of magnitude, not a guarantee — run the benches for your hardware):
 
-```rust
-// WHIR wrapping (requires --features whir)
-use intmax3_zkp::utils::whir_wrapper::{wrap_proof, estimate_gas};
-let result = wrap_proof(&plonky2_proof.to_bytes());
-println!("WHIR proof size: {} bytes, gas: ~{}K", result.proof_size, estimate_gas(&result, "keccak") / 1000);
+| Operation | Cost (indicative) |
+|---|---|
+| Regev channel‑tx (E‑1) proof, Production params | a few ms, ~KB‑scale proof |
+| Channel co‑sign of a state update (relay member) | ~seconds, ~200 MB RAM |
+| Full channel `balanceProof` (one‑time prover build) | ~25 s |
+| Browser proving | multi‑threaded WASM (SharedArrayBuffer); needs COEP/COOP + a secure context |
 
-// Groth16 wrapping (requires gnark-wrapper binary)
-use intmax3_zkp::utils::groth16_wrapper::{groth16_wrap, DEFAULT_GNARK_BIN};
-let result = groth16_wrap(&circuit_data, &proof, Path::new(DEFAULT_GNARK_BIN))?;
-```
-
-### Remaining mocks in Foundry tests
-
-The Foundry tests still mock precompiles because fixture generation from real
-validity proofs has not been automated yet:
-
-1. **WHIR:** `_mockWhirVerifierTrue()` — replace with real WHIR proof whose
-   `statement.evaluations[0] == keccak256(ValidityPublicInputs)`.
-2. **Groth16:** `_mockGroth16Pairing()` — replace with real Groth16 proof
-   whose `pubInputs[0] == keccak256(ValidityPublicInputs)`.
-3. **KZG:** `_mockBLSPrecompiles()` — requires Pectra-enabled testnet/mainnet.
-
-No changes to `IntmaxRollup.sol` are required — the contract already enforces
-the full 6-step verification pipeline. Only the test fixtures need to be
-updated with real proofs.
-
-### Parallel signature aggregation orchestrator
-
-The parallel signature aggregation circuits and APIs are implemented
-(`ParallelSigProcessor`, `SigBatch`, `SigMerge`, `UserApplyBlock`, etc.),
-but the **runtime orchestrator using rayon/thread pool is not yet implemented**.
-Currently, callers must manage parallelism externally (e.g., spawning threads
-and calling `prove_batch_step()` / `prove_apply_block()` concurrently).
-
-TODO:
-- Add rayon dependency and implement `ParallelSigProcessor::process_block()`
-  method that automatically partitions users into batches, proves in parallel,
-  and runs the pipelined merge.
-- Add end-to-end benchmark with 1000 users to validate the ~140s target.
-
-See [docs/signature-aggregation.md](docs/signature-aggregation.md) for the full
-architecture and design rationale.
-
-## Documentation
-
-| Document | Description |
-|----------|-------------|
-| [docs/spec.md](docs/spec.md) | Protocol specification (types, circuits, state) |
-| [docs/signature-aggregation.md](docs/signature-aggregation.md) | Multi-sig accounts, parallel proving architecture, benchmarks |
-| [tasks/wallet-threat-model.md](tasks/wallet-threat-model.md) | Browser channel wallet + CLI companion — threat model and must-enforce requirements |
-| [tasks/wallet-lessons.md](tasks/wallet-lessons.md) | Browser channel wallet — implementation lessons |
-
-## Dependencies
-
-| Crate / Library | Purpose |
-|-----------------|---------|
-| [plonky2](https://github.com/InternetMaximalism/Lita-Plonky2) (Lita fork, `wasm-zkp3` branch) | ZK proof system (FRI-based STARK) with WebGPU support |
-| [plonky2_u32](https://github.com/lita-xyz/plonky2-u32), [plonky2_bn254](https://github.com/lita-xyz/plonky2_bn254), [plonky2_keccak](https://github.com/lita-xyz/plonky2_keccak) | Extension circuits (lita-xyz forks) |
-| [sphincsplus-circuits](https://github.com/InternetMaximalism/aggregated_SPHINCS_plus) | In-circuit SPHINCS+ signature verification |
-| [sphincsplus-poseidon](https://github.com/InternetMaximalism/aggregated_SPHINCS_plus) | Native SPHINCS+ hash primitives |
-| [whir](https://github.com/WizardOfMenlo/whir) | Off-chain WHIR polynomial commitment (optional, `--features whir`) |
-| [gnark-plonky2-verifier](https://github.com/succinctlabs/gnark-plonky2-verifier) | Plonky2 → Groth16 conversion (Go, via `gnark/` directory) |
-| [sol-whir](https://github.com/leohio/whirtest) | On-chain WHIR polynomial commitment verification |
-| [forge-std](https://github.com/foundry-rs/forge-std) | Foundry test framework |
+WASM proving uses SIMD128 + a `wasm-bindgen-rayon` thread pool and lives within the wasm32 4 GB linear
+memory limit (strategic `drop()`s keep peak under the cap).
