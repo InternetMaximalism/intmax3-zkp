@@ -34,6 +34,7 @@ const CALLS = {
   importChannel: (a) => wasm.wallet_import_channel(a.snapshotJson),
   balance: () => wasm.wallet_balance(),
   send: (a) => wasm.wallet_send(a.recipientSlot, BigInt(a.amount)),
+  sendInterChannel: (a) => wasm.wallet_send_inter_channel(a.toChannel, a.toSlot, BigInt(a.amount), a.destRecipientJson),
   refresh: () => wasm.wallet_refresh(),
   cosign: (a) => wasm.wallet_cosign(a.payloadJson),
   finalize: (a) => wasm.wallet_finalize(a.stateJson),

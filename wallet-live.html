@@ -249,6 +249,44 @@ async function attemptSend(to, amt) {
   return JSON.parse(await call('finalize', { stateJson: finalState }));
 }
 
+// Inter-channel send: debit our slot in channel `myCh`, credit slot `to` in channel `toCh`.
+async function attemptInterChannelSend(toCh, to, amt) {
+  // 1. Re-import our (source) channel head; refresh if we're receive-only so we can spend.
+  const headSnap = await api('/api/snapshot', null, 'GET'); setChannelFrom(headSnap);
+  let rr = JSON.parse(await call('importChannel', { snapshotJson: headSnap }));
+  mySlot = rr.slot; showBalance(rr);
+  if (!rr.canSend) {
+    log('  you received funds → balance-refresh first so you can send…');
+    const refreshPayload = await call('refresh');
+    const cosigned = await api('/api/refresh-cosign', refreshPayload);
+    rr = JSON.parse(await call('finalize', { stateJson: cosigned }));
+    mySlot = rr.slot; showBalance(rr);
+    if (!rr.canSend) throw new Error('still receive-only after balance refresh');
+  }
+  // 2. Read the DESTINATION channel B snapshot → the recipient slot's Regev pk + pk_g.
+  const bSnapRaw = await fetch(`/api/snapshot?channel=${toCh}`).then(r => r.text());
+  if (!bSnapRaw || bSnapRaw[0] !== '{') throw new Error(`destination channel ${toCh} not available`);
+  const bSnap = JSON.parse(bSnapRaw);
+  const bMember = (bSnap.members || []).find(m => m.slot === to);
+  if (!bMember) throw new Error(`channel ${toCh} has no member at slot ${to}`);
+  const destRecipientJson = JSON.stringify({ regevPk: bMember.regevPk, pkG: bMember.pkG });
+  // 3. Build the debit + the cross-channel transfer descriptor (E-2 proof, in your browser).
+  const built = JSON.parse(await call('sendInterChannel', { toChannel: toCh, toSlot: to, amount: toBase(amt), destRecipientJson }));
+  // 4. Channel A members co-sign the debit (proof it's real). api() routes ?channel=myCh (activeCh).
+  log(`  channel ${myChannel} members co-signing the debit…`);
+  const aSigned = await api('/api/inter/debit', JSON.stringify(built.debitPayload));
+  // 5. Channel B members verify A's signed debit (pinned record + replay ledger) + credit the slot.
+  log(`  channel ${toCh} members verifying + crediting slot ${to}…`);
+  const creditRes = await fetch(`/api/inter/credit?channel=${toCh}`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ descriptor: built.transferDescriptor, aSignedState: JSON.parse(aSigned) }),
+  });
+  const creditTxt = await creditRes.text();
+  if (!creditRes.ok) throw new Error('credit failed: ' + creditTxt);
+  // 6. Commit OUR debit locally (channel A's co-signed new head).
+  return JSON.parse(await call('finalize', { stateJson: aSigned }));
+}
+
 $('btnSend').onclick = async () => {
   const t0 = Date.now();
   const tick = setInterval(() => { $('btnSend').textContent = `Proving… ${Math.round((Date.now()-t0)/1000)}s`; }, 250);
@@ -256,27 +294,28 @@ $('btnSend').onclick = async () => {
     $('btnSend').disabled = true;
     const toCh = +$('toChannel').value, to = +$('toSlot').value, amt = $('amount').value;
     const myCh = myChannel ?? activeCh;
-    // Inter-channel (different channel) is a DIFFERENT person even at the same slot number — but the
-    // cross-channel transfer backend is not wired in this demo yet, so be honest instead of doing a
-    // silent intra-channel send. Only same-channel sends actually run here.
-    if (toCh !== myCh) {
-      throw new Error(`inter-channel send (channel ${myCh} → ${toCh}) is not enabled in this demo yet — set the SEND channel ID to ${myCh} to send within your channel`);
-    }
-    if (to === mySlot) throw new Error(`cannot send to yourself (channel ${myCh}, slot ${mySlot})`);
-    log(`Regev E-1 proof (~3ms) + your BabyBear hash-sig ZK proof for ${amt} → channel ${toCh} slot ${to}…`);
     let r;
-    try {
-      r = await attemptSend(to, amt);
-    } catch (e) {
-      // Lost the head race to another tab (it advanced the head between our re-import and co-sign).
-      // Re-import the new head and rebuild once.
-      if (/does not extend the current head/.test(e.message)) {
-        log('  head moved (another tab sent first) — re-importing + retrying…');
+    if (toCh !== myCh) {
+      // INTER-CHANNEL: a different channel's slot is a different person — debit here, credit there.
+      log(`inter-channel send ${amt} → channel ${toCh} slot ${to} (debit ch${myCh} → credit ch${toCh})…`);
+      r = await attemptInterChannelSend(toCh, to, amt);
+      showBalance(r);
+      log(`sent ${amt} from channel ${myCh} to channel ${toCh} slot ${to} in ${Math.round((Date.now()-t0)/1000)}s. new balance ${fmtAmt(r.balance)}`, 'ok');
+    } else {
+      // INTRA-CHANNEL: same channel.
+      if (to === mySlot) throw new Error(`cannot send to yourself (channel ${myCh}, slot ${mySlot})`);
+      log(`Regev E-1 proof + your BabyBear hash-sig ZK proof for ${amt} → channel ${toCh} slot ${to}…`);
+      try {
         r = await attemptSend(to, amt);
-      } else { throw e; }
+      } catch (e) {
+        if (/does not extend the current head/.test(e.message)) {
+          log('  head moved (another tab sent first) — re-importing + retrying…');
+          r = await attemptSend(to, amt);
+        } else { throw e; }
+      }
+      showBalance(r);
+      log(`sent ${amt} to slot ${to} in ${Math.round((Date.now()-t0)/1000)}s. new balance ${fmtAmt(r.balance)}`, 'ok');
     }
-    showBalance(r);
-    log(`sent ${amt} to slot ${to} in ${Math.round((Date.now()-t0)/1000)}s. new balance ${fmtAmt(r.balance)}`, 'ok');
   } catch (e) { log('send failed: '+e.message, 'err'); }
   clearInterval(tick);
   $('btnSend').textContent = 'Send';

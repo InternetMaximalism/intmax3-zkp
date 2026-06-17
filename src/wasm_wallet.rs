@@ -310,6 +310,82 @@ pub fn wallet_send(recipient_slot: u8, amount: u64) -> Result<String, JsValue> {
     })
 }
 
+/// Inter-channel send: debit `amount` from this wallet's slot and produce the cross-channel transfer
+/// to `to_slot` in `to_channel`. `dest_recipient_json` = `{ "regevPk": <RegevPk>, "pkG": "0x.." }` of
+/// the destination channel's recipient slot (the browser reads it from channel B's snapshot). Returns
+/// `{ "debitPayload": <InterChannelDebitPayload>, "transferDescriptor": <InterChannelTransferDescriptor> }`:
+/// the browser POSTs the debit payload to channel A's `/api/inter/debit` (A members co-sign), then the
+/// descriptor + A's co-signed state to channel B's `/api/inter/credit`. The debit commits on
+/// `wallet_finalize` of A's co-signed state. Mirrors `wallet_send`.
+#[wasm_bindgen]
+pub fn wallet_send_inter_channel(
+    to_channel: u32,
+    to_slot: u8,
+    amount: u64,
+    dest_recipient_json: String,
+) -> Result<String, JsValue> {
+    #[derive(Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct DestRecipient {
+        regev_pk: crate::regev::RegevPk,
+        pk_g: String,
+    }
+    #[derive(Serialize)]
+    #[serde(rename_all = "camelCase")]
+    struct Out<'a> {
+        debit_payload: &'a crate::wallet_core::InterChannelDebitPayload,
+        transfer_descriptor: &'a crate::wallet_core::InterChannelTransferDescriptor,
+    }
+    with_session(|session| {
+        let slot = session.slot.ok_or_else(|| js_err("no channel imported"))?;
+        let snapshot = session
+            .snapshot
+            .clone()
+            .ok_or_else(|| js_err("no channel imported"))?;
+        let (before_amount, before_witness) = session
+            .balance
+            .clone()
+            .ok_or_else(|| js_err("no spendable balance witness (a refresh is required after receiving)"))?;
+        let dest: DestRecipient = serde_json::from_str(&dest_recipient_json).map_err(js_err)?;
+        let dest_pk_g = Bytes32::from_hex(&dest.pk_g).map_err(js_err)?;
+        let dest_channel = crate::common::channel_id::ChannelId::new(to_channel as u64).map_err(js_err)?;
+        let mut rng = rand010::rng();
+        // Fresh shared_native_nullifier_root for this debit (must differ from prev; §C-3).
+        let mut nr = [0u32; 8];
+        for w in nr.iter_mut() {
+            *w = rand010::Rng::next_u32(&mut rng);
+        }
+        let new_nullifier_root = Bytes32::from_u32_slice(&nr).map_err(js_err)?;
+        let built = crate::wallet_core::build_inter_channel_send(
+            &session.keys,
+            &snapshot,
+            slot,
+            dest_channel,
+            to_slot,
+            dest.regev_pk,
+            dest_pk_g,
+            amount,
+            before_amount,
+            &before_witness,
+            new_nullifier_root,
+            LEVEL,
+            &mut rng,
+        )
+        .map_err(js_err)?;
+        // The sender's debit commits when wallet_finalize receives channel A's co-signed state.
+        session.pending_send = Some((
+            built.debit_payload.proposed_next_state.digest,
+            built.new_balance,
+            built.new_balance_witness.clone(),
+        ));
+        let out = Out {
+            debit_payload: &built.debit_payload,
+            transfer_descriptor: &built.transfer_descriptor,
+        };
+        serde_json::to_string(&out).map_err(js_err)
+    })
+}
+
 /// Balance-refresh THIS wallet's own slot: re-encrypt the current balance to clean digits (same
 /// value) so the slot can SEND again after receiving (a received homomorphic credit blocks the next
 /// send until a refresh). Returns the `RefreshPayload` for the members to co-sign; once finalized,

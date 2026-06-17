@@ -111,6 +111,34 @@ app.post('/api/refresh-cosign', (req, res) => {
   } catch (e) { console.error(e.stderr ? String(e.stderr) : (e.message||e)); res.status(500).json({ error: String(e.stderr || e.message || e) }); }
 });
 
+// Inter-channel send, step 1 (SOURCE channel A): A's members co-sign the post-debit state.
+// Body = InterChannelDebitPayload. Returns A's fully co-signed a_send (proof the debit is real).
+app.post('/api/inter/debit', (req, res) => {
+  try {
+    const ch = reqChannel(req); // = source channel A
+    fs.writeFileSync(wc(ch, 'inter_debit_payload.json'), JSON.stringify(req.body));
+    cli(ch, ['cosign-inter-debit', 'inter_debit_payload.json', 'inter_debit_signed.json']);
+    res.json(JSON.parse(fs.readFileSync(wc(ch, 'inter_debit_signed.json'), 'utf8')));
+  } catch (e) { console.error(e.stderr ? String(e.stderr) : (e.message||e)); res.status(500).json({ error: String(e.stderr || e.message || e) }); }
+});
+
+// Inter-channel send, step 2 (DESTINATION channel B): B's members verify A's co-signed debit
+// (pinned A record + replay ledger + the cross-channel gate) and credit the recipient slot.
+// Body = { descriptor: InterChannelTransferDescriptor, aSignedState: <A's co-signed a_send> }.
+// MUST run only AFTER step 1 returned a valid N-of-N A state.
+app.post('/api/inter/credit', (req, res) => {
+  try {
+    const ch = reqChannel(req); // = destination channel B
+    const descriptor = req.body && req.body.descriptor;
+    const aSigned = req.body && req.body.aSignedState;
+    if (!descriptor || !aSigned) throw new Error('inter/credit needs { descriptor, aSignedState }');
+    fs.writeFileSync(wc(ch, 'inter_descriptor.json'), JSON.stringify(descriptor));
+    fs.writeFileSync(wc(ch, 'inter_a_signed.json'), JSON.stringify(aSigned));
+    cli(ch, ['cosign-inter-credit', 'inter_descriptor.json', 'inter_a_signed.json', 'inter_credited.json']);
+    res.json(JSON.parse(fs.readFileSync(wc(ch, 'inter_credited.json'), 'utf8')));
+  } catch (e) { console.error(e.stderr ? String(e.stderr) : (e.message||e)); res.status(500).json({ error: String(e.stderr || e.message || e) }); }
+});
+
 // Static frontend (index.html = wallet-live.html, wallet-worker.js, /pkg/...), same origin as /api.
 app.use(express.static(PUBLIC));
 
