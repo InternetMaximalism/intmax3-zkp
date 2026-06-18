@@ -100,7 +100,11 @@ contract RunClose is Script {
             closeWithdrawalDigest: vm.parseJsonBytes32(j, ".close_withdrawal_digest"),
             snapshotMediumBlockNumber: uint64(vm.parseJsonUint(j, ".snapshot_medium_block_number")),
             finalStateVersion: uint64(vm.parseJsonUint(j, ".final_state_version")),
-            finalSettledTxChain: vm.parseJsonBytes32(j, ".final_settled_tx_chain")
+            finalSettledTxChain: vm.parseJsonBytes32(j, ".final_settled_tx_chain"),
+            // Stage 3: regenerate the close fixture so `.final_settled_tx_accumulator_root` exists.
+            finalSettledTxAccumulatorRoot: vm.parseJsonBytes32(
+                j, ".final_settled_tx_accumulator_root"
+            )
         });
     }
 

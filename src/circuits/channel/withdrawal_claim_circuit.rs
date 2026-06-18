@@ -168,6 +168,8 @@ pub struct WithdrawalClaimFullWitness {
     /// active = `Bytes32::from(regev_pk_i.poseidon_digest())`, padding = `Bytes32::default()`).
     pub regev_pk_digests: [Bytes32; MAX_CHANNEL_MEMBERS],
     pub settled_tx_chain: Bytes32,
+    /// Stage 3: the settled-tx accumulator root of the final balance state (in the signed H1).
+    pub settled_tx_accumulator_root: Bytes32,
     pub state_version: u64,
     pub pending_adds: [u32; MAX_CHANNEL_MEMBERS],
     /// active region size = member_count + delegate_count.
@@ -202,6 +204,7 @@ where
     enc_balance_digests: Vec<Bytes32Target>,
     regev_pk_digests: Vec<Bytes32Target>,
     settled_tx_chain: Bytes32Target,
+    settled_tx_accumulator_root: Bytes32Target,
     state_version: U64Target,
     pending_adds: Vec<Target>,
     /// per-slot one-hot index selector `index_bits[i] = (i == member_index)`.
@@ -241,6 +244,7 @@ where
             .map(|_| Bytes32Target::new(&mut builder, true))
             .collect();
         let settled_tx_chain = Bytes32Target::new(&mut builder, true);
+        let settled_tx_accumulator_root = Bytes32Target::new(&mut builder, true);
         let state_version = U64Target::new(&mut builder, true);
         let pending_adds: Vec<Target> = (0..MAX_CHANNEL_MEMBERS)
             .map(|_| u32_limb(&mut builder))
@@ -255,6 +259,7 @@ where
             &regev_pk_digests,
             &enc_balance_digests,
             &settled_tx_chain,
+            &settled_tx_accumulator_root,
             &state_version,
             &pending_adds,
         );
@@ -399,6 +404,7 @@ where
             enc_balance_digests,
             regev_pk_digests,
             settled_tx_chain,
+            settled_tx_accumulator_root,
             state_version,
             pending_adds,
             index_bits,
@@ -451,6 +457,8 @@ where
         }
         self.settled_tx_chain
             .set_witness(&mut witness, witness_value.settled_tx_chain);
+        self.settled_tx_accumulator_root
+            .set_witness(&mut witness, witness_value.settled_tx_accumulator_root);
         self.state_version
             .set_witness(&mut witness, U64::from(witness_value.state_version));
         for (target, &adds) in self
@@ -635,6 +643,7 @@ pub mod test_fixture {
                 Bytes32::from(pk2.poseidon_digest()),
             ]),
             settled_tx_chain: Bytes32::default(),
+            settled_tx_accumulator_root: Bytes32::default(),
             state_version: 6,
             pending_adds: BalanceState::pad_pending_adds(&[0, 0, 0]),
         };
@@ -710,6 +719,7 @@ pub mod test_fixture {
             enc_balance_digests,
             regev_pk_digests: final_balance_state.regev_pk_digests,
             settled_tx_chain: final_balance_state.settled_tx_chain,
+            settled_tx_accumulator_root: final_balance_state.settled_tx_accumulator_root,
             state_version: final_balance_state.state_version,
             pending_adds: final_balance_state.pending_adds,
             member_count: final_balance_state.member_count,

@@ -12,11 +12,11 @@ import {ChannelSettlementVerifier} from "../src/ChannelSettlementVerifier.sol";
 /// @notice A drop-in stand-in for `@mle/MleVerifier` whose `verify()` returns a CONTROLLABLE bool.
 /// @dev INTENTIONALLY SIMPLE (CLAUDE.md "helper contracts that implement real interfaces with
 ///      simple fixed behavior"): the manager-lifecycle tests exercise the manager's grace /
-///      challenge / finalize / cancel logic and the verifier's REAL 87-limb
+///      challenge / finalize / cancel logic and the verifier's REAL 95-limb
 ///      `_bindCloseLimbsStrict` binding — NOT the WHIR cryptography itself (that is covered
 ///      end-to-end by `CloseLifecycleE2E.t.sol` against the real `MleVerifier` + the real close
 ///      fixture). This mock lets a lifecycle test drive the close path with a hand-built proof
-///      whose `publicInputs` we set to the expected 87 limbs, while still letting us flip the
+///      whose `publicInputs` we set to the expected 95 limbs, while still letting us flip the
 ///      crypto-verdict to `false` to assert the manager rejects a crypto-invalid proof.
 ///
 ///      The verifier holds `closeMleVerifier` typed as `MleVerifier`, so a test passes
@@ -44,7 +44,7 @@ contract MockMleVerifier {
 ///         manager-lifecycle tests. The ONLY proof field the real verifier reads for binding is
 ///         `publicInputs`; everything else is left default and ignored by `MockMleVerifier`.
 library CloseTestLib {
-    /// Build a close `MleProof` carrying the 87 raw close limbs `limbs` as its `publicInputs`.
+    /// Build a close `MleProof` carrying the (95) raw close limbs `limbs` as its `publicInputs`.
     /// All other fields are default — the mock verifier ignores them and the verifier only binds
     /// `publicInputs`.
     function proofWithLimbs(uint256[] memory limbs)

@@ -23,6 +23,10 @@ struct CloseProofFields {
     uint64 snapshotMediumBlockNumber;
     uint64 finalStateVersion;
     bytes32 finalSettledTxChain;
+    /// Stage 3: `settled_tx_accumulator_root` of the final balance state (inserted in the close PI
+    /// vector immediately after `finalSettledTxChain`; rides in the signed H1, NOT in the
+    /// close-intent digest preimage).
+    bytes32 finalSettledTxAccumulatorRoot;
     bytes32 memberSetCommitment;
     /// Packed `(memberCount << 8) | delegateCount` (delegate account).
     uint16 memberAndDelegateCount;
@@ -78,6 +82,8 @@ interface IChannelSettlementVerifier {
         address recipient,
         bytes32 sharedNativeNullifier,
         uint64 amount,
+        bytes32 finalBalanceStateH1,
+        bytes32 finalSettledTxAccumulatorRoot,
         MleVerifier.MleProof calldata mleProof
     ) external view returns (bool);
 
@@ -265,6 +271,11 @@ contract ChannelSettlementManager {
         uint64 finalStateVersion;
         /// `settled_tx_chain` of the final balance state (detail2 §H-2; see the struct doc).
         bytes32 finalSettledTxChain;
+        /// Stage 3: `settled_tx_accumulator_root` of the final balance state. Carried + bound by the
+        /// close proof (it is in the signed H1, hence the close PI vector), but NOT part of the
+        /// close-intent digest preimage (the digest predates Stage 3). `finalizeClose` stores it as
+        /// `finalizedSettledTxAccumulatorRoot`; `submitPostCloseClaim` passes it to the verifier.
+        bytes32 finalSettledTxAccumulatorRoot;
     }
 
     struct SpecialClose {
@@ -364,6 +375,8 @@ contract ChannelSettlementManager {
         uint64 snapshotMediumBlockNumber;
         uint64 finalStateVersion;
         bytes32 finalSettledTxChain;
+        /// Stage 3: the final balance state's settled-tx accumulator root (see `CloseIntent`).
+        bytes32 finalSettledTxAccumulatorRoot;
     }
 
     /// @notice Grace period between `requestClose()` and the first `submitCloseIntent` of the
@@ -431,6 +444,10 @@ contract ChannelSettlementManager {
     bytes32 public finalizedCloseWithdrawalDigest;
     bytes32 public finalizedChannelFundIntmaxStateRoot;
     bytes32 public finalizedSettledTxChain;
+    /// @notice Stage 3: the finalized close's settled-tx accumulator root — the source-tx inclusion
+    /// anchor `submitPostCloseClaim` passes to the verifier (the post-close claim proves a Merkle
+    /// inclusion of `incomingTxHash` against it).
+    bytes32 public finalizedSettledTxAccumulatorRoot;
     uint64 public finalizedEpoch;
     uint64 public finalizedSmallBlockNumber;
     uint64 public finalizedStateVersion;
@@ -727,7 +744,8 @@ contract ChannelSettlementManager {
             closeWithdrawalDigest: intent.closeWithdrawalDigest,
             snapshotMediumBlockNumber: intent.snapshotMediumBlockNumber,
             finalStateVersion: intent.finalStateVersion,
-            finalSettledTxChain: intent.finalSettledTxChain
+            finalSettledTxChain: intent.finalSettledTxChain,
+            finalSettledTxAccumulatorRoot: intent.finalSettledTxAccumulatorRoot
         });
     }
 
@@ -868,6 +886,7 @@ contract ChannelSettlementManager {
         finalizedCloseWithdrawalDigest = pendingClose.closeWithdrawalDigest;
         finalizedChannelFundIntmaxStateRoot = pendingClose.channelFundIntmaxStateRoot;
         finalizedSettledTxChain = pendingClose.finalSettledTxChain;
+        finalizedSettledTxAccumulatorRoot = pendingClose.finalSettledTxAccumulatorRoot;
         finalizedEpoch = pendingClose.finalEpoch;
         finalizedSmallBlockNumber = pendingClose.finalSmallBlockNumber;
         finalizedStateVersion = pendingClose.finalStateVersion;
@@ -972,6 +991,10 @@ contract ChannelSettlementManager {
                 claim.recipient,
                 sharedNativeNullifier,
                 claim.amount,
+                // Stage 3: the finalized receiver-pk-bind anchor (H1) + source-tx inclusion anchor
+                // (accumulator root). The in-circuit recompute + Merkle inclusion are bound to these.
+                finalizedBalanceStateH1,
+                finalizedSettledTxAccumulatorRoot,
                 proof
             )
         ) revert InvalidPostCloseClaimProof();
@@ -1121,6 +1144,9 @@ contract ChannelSettlementManager {
             snapshotMediumBlockNumber: intent.snapshotMediumBlockNumber,
             finalStateVersion: intent.finalStateVersion,
             finalSettledTxChain: intent.finalSettledTxChain,
+            // Stage 3: the accumulator root is a close PI limb (in the signed H1); the close proof's
+            // strict limb bind rejects a submitted value != the real signed one.
+            finalSettledTxAccumulatorRoot: intent.finalSettledTxAccumulatorRoot,
             memberSetCommitment: registeredMemberSetCommitment(),
             // Delegate account: pack the two registered counts into the uint16 the verifier expects.
             memberAndDelegateCount: (uint16(activeMemberCount) << 8) | uint16(activeDelegateCount)

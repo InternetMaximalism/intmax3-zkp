@@ -83,6 +83,12 @@ pub struct ChannelClosePublicInputsTarget {
     pub snapshot_medium_block_number: U64Target,
     pub final_state_version: U64Target,
     pub final_settled_tx_chain: Bytes32Target,
+    /// Stage 3 (post-close source-tx anchoring): the finalized settled-tx accumulator root,
+    /// exposed as a dedicated close PI immediately after `final_settled_tx_chain` (the
+    /// precedent sibling). L1 `finalizeClose` stores it; the post-close claim binds a Merkle
+    /// inclusion of `incoming_tx_hash` against this value. It rides in the signed H1 (so it is
+    /// attested) and is recomputed into the inline H1 below at the matching preimage position.
+    pub final_settled_tx_accumulator_root: Bytes32Target,
     /// F5 binding: keccak commitment over the verified member SPHINCS+ pubkey hashes
     /// (`[IMCM, member_count, h_0..h_15]`, padding zeroed). Computed in-circuit from the signing
     /// keys and matched on L1 against the channel's registered member set.
@@ -126,6 +132,7 @@ impl ChannelClosePublicInputsTarget {
             snapshot_medium_block_number: U64Target::new(builder, true),
             final_state_version: U64Target::new(builder, true),
             final_settled_tx_chain: Bytes32Target::new(builder, true),
+            final_settled_tx_accumulator_root: Bytes32Target::new(builder, true),
             member_set_commitment: Bytes32Target::new(builder, true),
             member_count: u32_limb(builder),
             delegate_count: u32_limb(builder),
@@ -149,6 +156,7 @@ impl ChannelClosePublicInputsTarget {
             self.snapshot_medium_block_number.to_vec(),
             self.final_state_version.to_vec(),
             self.final_settled_tx_chain.to_vec(),
+            self.final_settled_tx_accumulator_root.to_vec(),
             self.member_set_commitment.to_vec(),
             vec![self.member_count],
             vec![self.delegate_count],
@@ -196,6 +204,9 @@ impl ChannelClosePublicInputsTarget {
         let final_settled_tx_chain =
             Bytes32Target::from_slice(&values[cursor..cursor + BYTES32_LEN]);
         cursor += BYTES32_LEN;
+        let final_settled_tx_accumulator_root =
+            Bytes32Target::from_slice(&values[cursor..cursor + BYTES32_LEN]);
+        cursor += BYTES32_LEN;
         let member_set_commitment =
             Bytes32Target::from_slice(&values[cursor..cursor + BYTES32_LEN]);
         cursor += BYTES32_LEN;
@@ -218,6 +229,7 @@ impl ChannelClosePublicInputsTarget {
             snapshot_medium_block_number,
             final_state_version,
             final_settled_tx_chain,
+            final_settled_tx_accumulator_root,
             member_set_commitment,
             member_count,
             delegate_count,
@@ -262,6 +274,8 @@ impl ChannelClosePublicInputsTarget {
             .set_witness(witness, U64::from(value.final_state_version));
         self.final_settled_tx_chain
             .set_witness(witness, value.final_settled_tx_chain);
+        self.final_settled_tx_accumulator_root
+            .set_witness(witness, value.final_settled_tx_accumulator_root);
         self.member_set_commitment
             .set_witness(witness, value.member_set_commitment);
         witness
@@ -464,10 +478,12 @@ where
         // AND `delegate_count` as the unique values inside the signed H1 — the same PI
         // targets feed the H1 preimage, the IMCH/IMCI tails AND the balance-proof equality
         // below, so no two of those bindings can diverge. Preimage limb order matches
-        // `BalanceState::h1()` exactly (pad-to-MAX D6 + delegate account):
-        // [IMBS, channel_id, member_count, delegate_count, d_0..d_{MAX-1}, settled_tx_chain,
-        //  split_u64(state_version), pending_adds[0..MAX]]. `delegate_count` is the single u32 limb
-        // IMMEDIATELY AFTER `member_count`, byte-identical to the off-chain `BalanceState::h1`.
+        // `BalanceState::h1()` exactly (pad-to-MAX D6 + delegate account + decryption Stage 1 +
+        // Stage 3): [IMBS, channel_id, member_count, delegate_count, p_0..p_{MAX-1},
+        //  d_0..d_{MAX-1}, settled_tx_chain, settled_tx_accumulator_root, split_u64(state_version),
+        //  pending_adds[0..MAX]]. `delegate_count` is the single u32 limb IMMEDIATELY AFTER
+        // `member_count`; the Stage-3 `settled_tx_accumulator_root` is the 8 u32 limbs IMMEDIATELY
+        // AFTER `settled_tx_chain` — byte-identical to the off-chain `BalanceState::h1`.
         let h1_inputs = [
             vec![balance_state_domain],
             public_inputs.channel_id.to_vec(),
@@ -484,6 +500,9 @@ where
                 .flat_map(Bytes32Target::to_vec)
                 .collect::<Vec<_>>(),
             public_inputs.final_settled_tx_chain.to_vec(),
+            // Stage 3: the accumulator root sits IMMEDIATELY AFTER settled_tx_chain and BEFORE
+            // state_version, byte-identical to native `BalanceState::h1` and `h1_gadget`.
+            public_inputs.final_settled_tx_accumulator_root.to_vec(),
             public_inputs.final_state_version.to_vec(),
             pending_adds.clone(),
         ]
@@ -990,6 +1009,7 @@ mod tests {
                 enc_balances: BalanceState::pad_enc_balances(&enc),
                 regev_pk_digests: BalanceState::pad_regev_pk_digests(&[]),
                 settled_tx_chain,
+                settled_tx_accumulator_root: Bytes32::default(),
                 state_version: 9,
                 pending_adds: BalanceState::pad_pending_adds(&vec![0u32; member_count]),
             },

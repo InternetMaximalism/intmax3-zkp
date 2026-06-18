@@ -30,7 +30,7 @@ use crate::{
             BalanceRefreshUpdateWitness, ChannelProofVerifier, ChannelStateUpdateError,
             ChannelStateUpdatePublicInputs, InChannelTransferUpdateWitness,
             InterChannelFundImportUpdateWitness, InterChannelSendUpdateWitness,
-            ReceiverBundleApplyUpdateWitness,
+            ReceiverBundleApplyUpdateWitness, require_accumulator_push,
         },
     },
     common::{
@@ -66,8 +66,22 @@ use crate::{
         prove_balance_refresh_witnessed, prove_channel_tx, prove_channel_update, prove_hash_sig,
         regev_pk_root, verify_hash_sig,
     },
-    utils::poseidon_hash_out::PoseidonHashOut,
+    utils::{
+        poseidon_hash_out::PoseidonHashOut, trees::incremental_merkle_tree::IncrementalMerkleTree,
+    },
 };
+
+/// Stage 3: height of the per-channel settled-tx Merkle ACCUMULATOR (`IncrementalMerkleTree<
+/// Bytes32>`). `H = 20` ⇒ up to `2^20 ≈ 1M` settles per channel (far beyond any real channel).
+/// Native `push` asserts `len < 2^H`. Leaves are the `tx_hash` of every settle (uniformly), the
+/// same identifier the post-close claim binds via `incoming_tx_hash`.
+pub const SETTLED_TX_ACCUMULATOR_HEIGHT: usize = 20;
+
+/// The empty (genesis) settled-tx accumulator root: `Bytes32::from(IncrementalMerkleTree::new(H)
+/// .get_root())`, the SAME injective Poseidon→Bytes32 encoding Stage 1 uses. Seeds genesis states.
+pub fn empty_settled_tx_accumulator_root() -> Bytes32 {
+    Bytes32::from(IncrementalMerkleTree::<Bytes32>::new(SETTLED_TX_ACCUMULATOR_HEIGHT).get_root())
+}
 
 /// Wallet errors. Strings are user-facing; no secret material is ever included.
 #[derive(Debug, Clone)]
@@ -348,6 +362,22 @@ pub struct ChannelSnapshot {
     pub record: ChannelRecord,
     pub state: ChannelState,
     pub members: Vec<MemberInfo>,
+    /// Stage 3: the per-channel settled-tx Merkle ACCUMULATOR (`IncrementalMerkleTree<Bytes32>`,
+    /// height [`SETTLED_TX_ACCUMULATOR_HEIGHT`]). Its leaves are the `tx_hash` of every settle the
+    /// channel has absorbed (uniformly), so `Bytes32::from(tree.get_root())` MUST equal
+    /// `state.balance_state.settled_tx_accumulator_root` at all times. The wallet threads it
+    /// through every inter-channel advancement (push `tx_hash`, recompute the root); intra-channel
+    /// transfers / refreshes leave it untouched. Persisting it here is what lets the wallet later
+    /// generate the post-close inclusion proof (the design's "wallet persistence" follow-up). For
+    /// backward compatibility on the wire, it defaults to an empty tree when absent.
+    #[serde(default = "default_settled_tx_accumulator")]
+    pub settled_tx_accumulator: IncrementalMerkleTree<Bytes32>,
+}
+
+/// Default (empty) settled-tx accumulator for serde backward-compat on [`ChannelSnapshot`] and for
+/// seeding a genesis snapshot (the empty tree, matching `empty_settled_tx_accumulator_root()`).
+pub fn default_settled_tx_accumulator() -> IncrementalMerkleTree<Bytes32> {
+    IncrementalMerkleTree::<Bytes32>::new(SETTLED_TX_ACCUMULATOR_HEIGHT)
 }
 
 /// detail2 §F-1 / §3.1 reconciliation, enforced **fail-closed**: returns `Ok` only when the channel
@@ -623,6 +653,9 @@ pub fn assemble_genesis_state_backed(
             enc_balances: BalanceState::pad_enc_balances(enc_balances_active),
             regev_pk_digests: BalanceState::pad_regev_pk_digests(regev_pk_digests_active),
             settled_tx_chain,
+            // Stage 3: genesis seeds the EMPTY-tree accumulator root. Each subsequent inter-channel
+            // advancement pushes `tx_hash` and sets the new root (see the build_* sites below).
+            settled_tx_accumulator_root: empty_settled_tx_accumulator_root(),
             state_version: 0,
             pending_adds: BalanceState::pad_pending_adds(&vec![0u32; active]),
         },
@@ -1264,6 +1297,11 @@ pub struct BuiltInterChannelSend {
     pub transfer_descriptor: InterChannelTransferDescriptor,
     pub new_balance_witness: AmountWitness,
     pub new_balance: u64,
+    /// Stage 3: channel A's settled-tx accumulator AFTER pushing this send's `tx_hash`. Persist it
+    /// as A's new `ChannelSnapshot::settled_tx_accumulator` (root ==
+    /// `proposed_next_state.balance_state.settled_tx_accumulator_root`).
+    pub settled_tx_accumulator:
+        crate::utils::trees::incremental_merkle_tree::IncrementalMerkleTree<Bytes32>,
 }
 
 /// The channel-A-side payload (crosses browser↔relay↔CLI). Mirrors `SendPayload` for the
@@ -1327,6 +1365,13 @@ pub struct InterChannelTransferDescriptor {
 pub struct BuiltInterChannelCredit {
     pub fund_import_state: ChannelState,
     pub bundle_apply_state: ChannelState,
+    /// Stage 3: the per-channel settled-tx accumulator AFTER both settle advancements (the import
+    /// `tx_hash` push and the bundle-apply `tx_hash` push). Persist it as the channel's new
+    /// `ChannelSnapshot::settled_tx_accumulator` — its root equals
+    /// `bundle_apply_state.balance_state.settled_tx_accumulator_root`, and it is what lets the
+    /// wallet later generate the post-close Merkle inclusion proof for an incoming `tx_hash`.
+    pub settled_tx_accumulator:
+        crate::utils::trees::incremental_merkle_tree::IncrementalMerkleTree<Bytes32>,
 }
 
 /// Structural transport verifier: the inter-channel send/import witnesses require a
@@ -1475,6 +1520,27 @@ pub fn build_inter_channel_send(
     let tx_tree_root: Bytes32 = tx_v2_root_h.into(); // = H2
     let tx_v2_merkle_proof = tx_v2_tree.prove(src_id);
 
+    // Stage 3: the inter-channel `tx_hash` — the accumulator leaf (uniformly) AND the L1-settled
+    // identifier. Computed BEFORE the post-debit state so its accumulator root already reflects the
+    // insertion (and so h1() below folds the advanced root).
+    let tx_hash = inter_channel_tx_hash(
+        record.channel_id,
+        destination_channel_id,
+        tx_tree_root,
+        tx_leaf,
+    );
+    // Push `tx_hash` into channel A's settled-tx accumulator and read off the new root.
+    let mut next_accumulator = snapshot.settled_tx_accumulator.clone();
+    next_accumulator.push(tx_hash);
+    let next_accumulator_root = Bytes32::from(next_accumulator.get_root());
+    // Stage 3 native co-signer check: the new root is EXACTLY push(prev_accumulator, tx_hash).
+    require_accumulator_push(
+        &snapshot.settled_tx_accumulator,
+        tx_hash,
+        next_accumulator_root,
+    )
+    .map_err(|e| WalletError(format!("inter-channel send accumulator push: {e:?}")))?;
+
     // a_send = post-debit channel-A state. Its h1() = H1' bound into the small block's
     // state_commitment_root (detail2 §C-7) AND h2_tag = tx_tree_root. The `..prev.*.clone()`
     // spreads preserve member_count, delegate_count, channel_id, and all untouched slots'
@@ -1491,6 +1557,8 @@ pub fn build_inter_channel_send(
         balance_state: BalanceState {
             enc_balances,
             settled_tx_chain: settled_tx_chain_push(prev.balance_state.settled_tx_chain, tx_leaf),
+            // Stage 3: the accumulator advances by inserting `tx_hash` at the prev tree length.
+            settled_tx_accumulator_root: next_accumulator_root,
             state_version: prev.balance_state.state_version + 1,
             ..prev.balance_state.clone()
         },
@@ -1502,13 +1570,6 @@ pub fn build_inter_channel_send(
     }
     .with_computed_digest();
     let h1_prime = a_send.balance_state.h1();
-
-    let tx_hash = inter_channel_tx_hash(
-        record.channel_id,
-        destination_channel_id,
-        tx_tree_root,
-        tx_leaf,
-    );
     let inter_channel_tx = InterChannelTx {
         tx_inclusion_proof: MerkleInclusionProof::default(),
         signed_small_block: SignedSmallBlock {
@@ -1616,6 +1677,7 @@ pub fn build_inter_channel_send(
         },
         new_balance_witness: after_w,
         new_balance: before_amount - amount,
+        settled_tx_accumulator: next_accumulator,
     })
 }
 
@@ -1739,6 +1801,20 @@ pub fn build_inter_channel_credit(
     // ---- Fund import: ChannelFund += amount; unallocated += amount; chain pushes tx_hash. ----
     let import_nullifier =
         advance_nullifier(b_prev.shared_native_nullifier_root, descriptor.tx_hash);
+    // Stage 3: the fund import is a settle advancement on the RECEIVING channel — the accumulator
+    // MUST absorb the incoming `tx_hash` (uniform leaf). This is the insertion a post-close claim
+    // against THIS channel later proves inclusion against, so the receiver side advancing is
+    // load-bearing for Stage 3. Insert and read off the new root BEFORE building the state so h1()
+    // below folds the advanced root.
+    let mut import_accumulator = b_snapshot.settled_tx_accumulator.clone();
+    import_accumulator.push(inter_channel_tx.tx_hash);
+    let import_accumulator_root = Bytes32::from(import_accumulator.get_root());
+    require_accumulator_push(
+        &b_snapshot.settled_tx_accumulator,
+        inter_channel_tx.tx_hash,
+        import_accumulator_root,
+    )
+    .map_err(|e| WalletError(format!("fund import accumulator push: {e:?}")))?;
     let mut fund_import_state = ChannelState {
         epoch: b_prev.epoch + 1,
         small_block_number: b_prev.small_block_number + 1,
@@ -1751,6 +1827,8 @@ pub fn build_inter_channel_credit(
                 b_prev.balance_state.settled_tx_chain,
                 inter_channel_tx.tx_hash,
             ),
+            // Stage 3: the accumulator advances by inserting `tx_hash` at the prev tree length.
+            settled_tx_accumulator_root: import_accumulator_root,
             state_version: b_prev.balance_state.state_version + 1,
             ..b_prev.balance_state.clone()
         },
@@ -1797,6 +1875,18 @@ pub fn build_inter_channel_credit(
     let bundle_leaf = inter_channel_tx
         .tx_leaf_hash()
         .map_err(|e| WalletError(format!("bundle tx_leaf_hash: {e}")))?;
+    // Stage 3 (uniform-leaf decision): the bundle apply is a second settle advancement; the
+    // accumulator absorbs `tx_hash` again here (the CHAIN pushes `bundle_leaf` = tx_leaf, but the
+    // accumulator stores `tx_hash` UNIFORMLY at every advancement). Advance the import-time tree.
+    let mut bundle_accumulator = import_accumulator.clone();
+    bundle_accumulator.push(inter_channel_tx.tx_hash);
+    let bundle_accumulator_root = Bytes32::from(bundle_accumulator.get_root());
+    require_accumulator_push(
+        &import_accumulator,
+        inter_channel_tx.tx_hash,
+        bundle_accumulator_root,
+    )
+    .map_err(|e| WalletError(format!("bundle apply accumulator push: {e:?}")))?;
     let mut bundle_apply_state = ChannelState {
         epoch: fund_import_state.epoch + 1,
         balance_state: BalanceState {
@@ -1805,6 +1895,8 @@ pub fn build_inter_channel_credit(
                 fund_import_state.balance_state.settled_tx_chain,
                 bundle_leaf,
             ),
+            // Stage 3: advance the accumulator by inserting `tx_hash` again (uniform leaf).
+            settled_tx_accumulator_root: bundle_accumulator_root,
             state_version: fund_import_state.balance_state.state_version + 1,
             pending_adds: bundle_pending,
             ..fund_import_state.balance_state.clone()
@@ -1845,6 +1937,7 @@ pub fn build_inter_channel_credit(
     Ok(BuiltInterChannelCredit {
         fund_import_state,
         bundle_apply_state,
+        settled_tx_accumulator: bundle_accumulator,
     })
 }
 
@@ -2315,6 +2408,7 @@ mod delegate_send_tests {
             record: record.clone(),
             state: genesis,
             members: members.clone(),
+            settled_tx_accumulator: default_settled_tx_accumulator(),
         };
         // Both members AND the delegate fully verify the signed genesis (real roots / own-slot
         // decrypt). The delegate verifying its own slot exercises the widened `verify_snapshot`.
@@ -2376,6 +2470,7 @@ mod delegate_send_tests {
             record,
             state: payload.proposed_next_state,
             members,
+            settled_tx_accumulator: default_settled_tx_accumulator(),
         };
         verify_all_signatures(
             &final_snapshot.record,
@@ -2410,6 +2505,7 @@ mod delegate_send_tests {
             record: record.clone(),
             state: genesis,
             members: members.clone(),
+            settled_tx_accumulator: default_settled_tx_accumulator(),
         };
         let amount = 8u64;
         let BuiltSend { payload, .. } = build_send(
@@ -2480,6 +2576,7 @@ mod delegate_send_tests {
             record: record.clone(),
             state: genesis,
             members: members.clone(),
+            settled_tx_accumulator: default_settled_tx_accumulator(),
         };
         let amount = 8u64;
         let BuiltSend { payload, .. } = build_send(
@@ -2544,6 +2641,7 @@ mod delegate_send_tests {
             record: record.clone(),
             state: genesis,
             members: members.clone(),
+            settled_tx_accumulator: default_settled_tx_accumulator(),
         };
         // Honest member-0 -> member-1 send (the delegate at slot 2 is NOT involved).
         let amount = 5u64;
@@ -2615,6 +2713,7 @@ mod delegate_send_tests {
             record: record.clone(),
             state: genesis,
             members: members.clone(),
+            settled_tx_accumulator: default_settled_tx_accumulator(),
         };
         verify_snapshot(&snapshot, Some((&keys[0], 0))).expect("verify genesis (3 members)");
 
@@ -2649,6 +2748,7 @@ mod delegate_send_tests {
             record,
             state: payload.proposed_next_state,
             members,
+            settled_tx_accumulator: default_settled_tx_accumulator(),
         };
         verify_all_signatures(
             &final_snapshot.record,

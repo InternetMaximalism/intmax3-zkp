@@ -264,6 +264,7 @@ mod tests {
                 Bytes32::from(pk2.poseidon_digest()),
             ]),
             settled_tx_chain: Bytes32::default(),
+            settled_tx_accumulator_root: Bytes32::default(),
             state_version: 6,
             pending_adds: BalanceState::pad_pending_adds(&[0, 0, 0]),
         };
@@ -388,6 +389,7 @@ mod tests {
                 Bytes32::from(pk_d.poseidon_digest()),
             ]),
             settled_tx_chain: Bytes32::default(),
+            settled_tx_accumulator_root: Bytes32::default(),
             state_version: 6,
             pending_adds: BalanceState::pad_pending_adds(&[0, 0, 0]),
         };

@@ -25,9 +25,16 @@ use crate::{
 // D6 (pad-to-MAX): `member_count` (1 limb) is APPENDED at the very END of the vector (after
 // `member_set_commitment`) so the legacy 85-limb layout is byte-for-byte unchanged for limbs
 // 0..85. Delegate account: `delegate_count` (1 limb) is APPENDED right AFTER `member_count`, so
-// limbs 0..86 are unchanged; total is now 87 limbs. The Solidity `closePIHash` preimage must
+// limbs 0..86 are unchanged; total was 87 limbs. The Solidity `closePIHash` preimage must
 // append the same `member_count` then `delegate_count` limbs.
-pub const CHANNEL_CLOSE_PUBLIC_INPUTS_LEN: usize = 87;
+//
+// Stage 3 (post-close source-tx anchoring): `final_settled_tx_accumulator_root` (8 limbs) is
+// INSERTED immediately AFTER `final_settled_tx_chain` (limbs 69..77), shifting
+// `member_set_commitment` to 77..85, `member_count` to limb 93 and `delegate_count` to limb 94;
+// total is now 95 limbs. The insertion (not append) keeps the close PI order byte-identical to the
+// H1 preimage order (accumulator root right after the chain). The Solidity mirror is shifted to
+// match.
+pub const CHANNEL_CLOSE_PUBLIC_INPUTS_LEN: usize = 95;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -51,6 +58,12 @@ pub struct ChannelClosePublicInputs {
     /// `settled_tx_chain` of the final balance state (detail2 §H-2). Matched in-circuit against
     /// the final balance proof's `settled_tx_chain` public input and anchored inside H1.
     pub final_settled_tx_chain: Bytes32,
+    /// Stage 3 (post-close source-tx anchoring): `settled_tx_accumulator_root` of the final
+    /// balance state — the root of the per-channel settled-tx Merkle accumulator (height 20,
+    /// leaves = `tx_hash`). Inserted immediately AFTER `final_settled_tx_chain`. Anchored
+    /// inside H1 (so it is member-signed); L1 `finalizeClose` stores it and the post-close
+    /// claim binds a Merkle inclusion of `incoming_tx_hash` against it.
+    pub final_settled_tx_accumulator_root: Bytes32,
     /// F5 binding: `keccak([IMCM, pk_g_0..2])` over the 3 members' SPHINCS+ pubkey
     /// hashes (slot order) whose signatures the close circuit verifies. Computed in-circuit from
     /// the verified signing keys and matched on L1 against the channel's registered member set.
@@ -96,6 +109,7 @@ impl ChannelClosePublicInputs {
             split_u64(self.snapshot_medium_block_number),
             split_u64(self.final_state_version),
             self.final_settled_tx_chain.to_u64_vec(),
+            self.final_settled_tx_accumulator_root.to_u64_vec(),
             self.member_set_commitment.to_u64_vec(),
             vec![self.member_count as u64],
             vec![self.delegate_count as u64],
@@ -136,18 +150,20 @@ impl ChannelClosePublicInputs {
             final_state_version: join_u64(&values[67..69]),
             final_settled_tx_chain: Bytes32::from_u64_slice(&values[69..77])
                 .map_err(|e| ChannelClosePublicInputsError::InvalidField(e.to_string()))?,
-            member_set_commitment: Bytes32::from_u64_slice(&values[77..85])
+            final_settled_tx_accumulator_root: Bytes32::from_u64_slice(&values[77..85])
                 .map_err(|e| ChannelClosePublicInputsError::InvalidField(e.to_string()))?,
-            member_count: u8::try_from(values[85]).map_err(|_| {
+            member_set_commitment: Bytes32::from_u64_slice(&values[85..93])
+                .map_err(|e| ChannelClosePublicInputsError::InvalidField(e.to_string()))?,
+            member_count: u8::try_from(values[93]).map_err(|_| {
                 ChannelClosePublicInputsError::InvalidField(format!(
                     "member_count limb {} does not fit in u8",
-                    values[85]
+                    values[93]
                 ))
             })?,
-            delegate_count: u8::try_from(values[86]).map_err(|_| {
+            delegate_count: u8::try_from(values[94]).map_err(|_| {
                 ChannelClosePublicInputsError::InvalidField(format!(
                     "delegate_count limb {} does not fit in u8",
-                    values[86]
+                    values[94]
                 ))
             })?,
         })
@@ -203,6 +219,12 @@ impl ChannelCloseWitness {
             snapshot_medium_block_number: self.close_intent.snapshot_medium_block_number,
             final_state_version: self.close_intent.final_state_version,
             final_settled_tx_chain: self.close_intent.final_settled_tx_chain,
+            // Stage 3: the accumulator root comes straight from the final balance state (it is part
+            // of the signed H1 the close circuit recomputes; not carried by CloseIntent).
+            final_settled_tx_accumulator_root: self
+                .final_channel_state
+                .balance_state
+                .settled_tx_accumulator_root,
             // F5: the member-set commitment is derived from the verified signing keys, which the
             // close witness alone does not carry. `ChannelCloseCircuit::prove`/`fill_witness`
             // computes it from `member_auth` and overrides this placeholder before proving.
@@ -283,6 +305,8 @@ mod tests {
                 ]),
                 regev_pk_digests: BalanceState::pad_regev_pk_digests(&[]),
                 settled_tx_chain: Bytes32::from_u32_slice(&[1, 0, 0, 0, 0, 0, 0, 0]).unwrap(),
+                settled_tx_accumulator_root: Bytes32::from_u32_slice(&[0, 0, 0, 0, 0, 0, 0, 7])
+                    .unwrap(),
                 state_version: 12,
                 pending_adds: BalanceState::pad_pending_adds(&[0, 0, 0]),
             },
@@ -329,21 +353,31 @@ mod tests {
         assert_eq!(
             limbs.len(),
             CHANNEL_CLOSE_PUBLIC_INPUTS_LEN,
-            "closePIHash preimage is exactly 87 BE u32 words (77 legacy + 8 memberSetCommitment + \
-             1 memberCount + 1 delegateCount)"
+            "closePIHash preimage is exactly 95 BE u32 words (77 legacy + 8 accumulatorRoot + \
+             8 memberSetCommitment + 1 memberCount + 1 delegateCount)"
         );
+        // Stage 3: final_settled_tx_accumulator_root occupies limbs 77..85, shifting the rest +8.
         assert_eq!(
             &limbs[77..85],
+            &witness
+                .final_channel_state
+                .balance_state
+                .settled_tx_accumulator_root
+                .to_u64_vec()[..],
+            "final_settled_tx_accumulator_root occupies limbs 77..85 (Stage 3)"
+        );
+        assert_eq!(
+            &limbs[85..93],
             &public_inputs.member_set_commitment.to_u64_vec()[..],
-            "member_set_commitment occupies limbs 77..85"
+            "member_set_commitment occupies limbs 85..93 (shifted +8 by Stage 3)"
         );
         assert_eq!(
-            limbs[85], public_inputs.member_count as u64,
-            "member_count occupies limb 85 (D6)"
+            limbs[93], public_inputs.member_count as u64,
+            "member_count occupies limb 93 (D6, shifted +8)"
         );
         assert_eq!(
-            limbs[86], public_inputs.delegate_count as u64,
-            "delegate_count occupies the final limb (delegate account)"
+            limbs[94], public_inputs.delegate_count as u64,
+            "delegate_count occupies the final limb (delegate account, shifted +8)"
         );
         // The P8-pinned tail: snapshotMediumBlockNumber(2) | finalStateVersion(2 hi,lo) |
         // finalSettledTxChain(8).

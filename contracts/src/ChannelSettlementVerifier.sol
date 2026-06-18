@@ -47,14 +47,16 @@ contract ChannelSettlementVerifier is IChannelSettlementVerifier {
     /// Number of RAW Goldilocks public-input limbs the close circuit registers (mirrors Rust
     /// `CHANNEL_CLOSE_PUBLIC_INPUTS_LEN`, src/circuits/channel/close_pis.rs). The close
     /// `WrapperCircuit` re-registers them VERBATIM, so a close `MleProof.publicInputs` is this
-    /// raw 87-limb vector — NOT an 8-limb keccak like validity/withdrawal.
-    uint256 internal constant CLOSE_PI_LEN = 87;
+    /// raw 95-limb vector — NOT an 8-limb keccak like validity/withdrawal. Stage 3 inserted
+    /// `finalSettledTxAccumulatorRoot` (8 limbs) after `finalSettledTxChain`, shifting the tail +8.
+    uint256 internal constant CLOSE_PI_LEN = 95;
     /// Phase B-D: RAW Goldilocks PI limb counts for the two new binding circuits (mirror Rust
     /// `WITHDRAWAL_CLAIM_PUBLIC_INPUTS_LEN` / `POST_CLOSE_CLAIM_PUBLIC_INPUTS_LEN`). Their
     /// `WrapperCircuit` re-registers the limbs VERBATIM, so the `MleProof.publicInputs` are these
-    /// raw vectors (NOT a keccak).
+    /// raw vectors (NOT a keccak). Stage 3 appended `finalBalanceStateH1` (8 limbs) and
+    /// `finalSettledTxAccumulatorRoot` (8 limbs) to the post-close claim, 40 -> 56.
     uint256 internal constant WITHDRAWAL_CLAIM_PI_LEN = 48;
-    uint256 internal constant POST_CLOSE_CLAIM_PI_LEN = 40;
+    uint256 internal constant POST_CLOSE_CLAIM_PI_LEN = 56;
     /// 2**32 — every close PI limb is a u32 word, so a canonical limb is strictly below this.
     uint256 internal constant LIMB_BOUND = 0x1_0000_0000;
 
@@ -149,11 +151,12 @@ contract ChannelSettlementVerifier is IChannelSettlementVerifier {
     /// @notice REAL on-chain verification of the channel-close-intent proof (Phase A).
     /// @dev SECURITY: replaces the former tautological `closePIHash`+`_matches` stub. Two checks,
     ///      both mandatory:
-    ///        1. `_bindCloseLimbsStrict` binds ALL 87 raw Goldilocks public-input limbs of the close
+    ///        1. `_bindCloseLimbsStrict` binds ALL 95 raw Goldilocks public-input limbs of the close
     ///           proof, limb-by-limb with STRICT equality (no masking), to the expected vector
     ///           rebuilt from `fields` (`_expectedCloseLimbs`). This binds channelId(0),
-    ///           finalStateVersion(67..68), finalSettledTxChain(69..76), memberSetCommitment(77..84),
-    ///           memberCount(85) and delegateCount(86) — NONE are left free.
+    ///           finalStateVersion(67..68), finalSettledTxChain(69..76),
+    ///           finalSettledTxAccumulatorRoot(77..84), memberSetCommitment(85..92),
+    ///           memberCount(93) and delegateCount(94) — NONE are left free.
     ///        2. `MleVerifier.verify` re-checks the proof against the close VK (circuitDigest absorb,
     ///           preprocessedRoot VK-binding, gatesDigest), blocking cross-circuit replay.
     ///      Reverts (`CloseVkNotSet`) until the VK is set: no verification-disabled window.
@@ -318,9 +321,10 @@ contract ChannelSettlementVerifier is IChannelSettlementVerifier {
     ///        [65..66] snapshotMediumBlockNumber
     ///        [67..68] finalStateVersion
     ///        [69..76] finalSettledTxChain
-    ///        [77..84] memberSetCommitment
-    ///        [85]     memberCount
-    ///        [86]     delegateCount
+    ///        [77..84] finalSettledTxAccumulatorRoot  (Stage 3, inserted here)
+    ///        [85..92] memberSetCommitment            (shifted +8)
+    ///        [93]     memberCount                    (shifted +8)
+    ///        [94]     delegateCount                  (shifted +8)
     function _expectedCloseLimbs(CloseProofFields calldata fields)
         internal
         pure
@@ -344,6 +348,9 @@ contract ChannelSettlementVerifier is IChannelSettlementVerifier {
         c = _putU64(limbs, c, fields.snapshotMediumBlockNumber);
         c = _putU64(limbs, c, fields.finalStateVersion);
         c = _putBytes32(limbs, c, fields.finalSettledTxChain);
+        // Stage 3: the accumulator root is inserted IMMEDIATELY AFTER the chain (byte-identical to
+        // the Rust close-PI order / the H1 preimage), shifting memberSetCommitment / counts +8.
+        c = _putBytes32(limbs, c, fields.finalSettledTxAccumulatorRoot);
         c = _putBytes32(limbs, c, fields.memberSetCommitment);
         limbs[c++] = uint256(fields.memberAndDelegateCount >> 8) & 0xff; // memberCount
         limbs[c++] = uint256(fields.memberAndDelegateCount) & 0xff;      // delegateCount
@@ -545,16 +552,18 @@ contract ChannelSettlementVerifier is IChannelSettlementVerifier {
         require(c == WITHDRAWAL_CLAIM_PI_LEN, "wclaim limb count");
     }
 
-    /// @dev Build the EXPECTED 40-limb post-close-claim PI vector, in the EXACT order of the Rust
+    /// @dev Build the EXPECTED 56-limb post-close-claim PI vector, in the EXACT order of the Rust
     ///      `PostCloseClaimPublicInputs::to_u64_vec()` (pinned by
     ///      `post_close_claim_public_inputs_match_solidity_shared_vector`). Layout:
     ///        [0..8]   closeIntentDigest
-    ///        [8]      receiverChannelId        (u32 value)
+    ///        [8]      receiverChannelId             (u32 value)
     ///        [9..17]  incomingTxHash
     ///        [17..25] receiverPkG
-    ///        [25..30] recipient                (5 BE u32)
+    ///        [25..30] recipient                     (5 BE u32)
     ///        [30..38] sharedNativeNullifier
-    ///        [38..40] amount                   (hi, lo)
+    ///        [38..40] amount                        (hi, lo)
+    ///        [40..48] finalBalanceStateH1           (Stage 3, appended)
+    ///        [48..56] finalSettledTxAccumulatorRoot (Stage 3, appended)
     function _expectedPostCloseClaimLimbs(
         bytes4 channelId,
         bytes32 closeIntentDigest,
@@ -562,7 +571,9 @@ contract ChannelSettlementVerifier is IChannelSettlementVerifier {
         bytes32 receiverPkG,
         address recipient,
         bytes32 sharedNativeNullifier,
-        uint64 amount
+        uint64 amount,
+        bytes32 finalBalanceStateH1,
+        bytes32 finalSettledTxAccumulatorRoot
     ) internal pure returns (uint256[] memory limbs) {
         limbs = new uint256[](POST_CLOSE_CLAIM_PI_LEN);
         uint256 c = 0;
@@ -573,6 +584,9 @@ contract ChannelSettlementVerifier is IChannelSettlementVerifier {
         c = _putAddress(limbs, c, recipient);
         c = _putBytes32(limbs, c, sharedNativeNullifier);
         c = _putU64(limbs, c, amount);
+        // Stage 3: appended after the legacy 40 limbs (receiver-pk bind anchor + source-tx anchor).
+        c = _putBytes32(limbs, c, finalBalanceStateH1);
+        c = _putBytes32(limbs, c, finalSettledTxAccumulatorRoot);
         require(c == POST_CLOSE_CLAIM_PI_LEN, "pcclaim limb count");
     }
 
@@ -720,15 +734,18 @@ contract ChannelSettlementVerifier is IChannelSettlementVerifier {
         );
     }
 
-    /// @notice REAL on-chain verification of the post-close-claim binding proof (Phase B-D).
-    /// @dev SECURITY: replaces the former tautological `postCloseClaimPIHash`+`_matches` stub. Two
-    ///      mandatory checks: (1) `_bindLimbsStrict` binds ALL 40 raw Goldilocks limbs; (2)
+    /// @notice REAL on-chain verification of the post-close-claim binding proof (Phase B-D +
+    ///         Stage 3).
+    /// @dev SECURITY: (1) `_bindLimbsStrict` binds ALL 56 raw Goldilocks limbs; (2)
     ///      `MleVerifier.verify` against the post-close-claim VK. Reverts until the VK is set.
     ///      HAZARD #8: `sharedNativeNullifier` is DERIVED in-circuit from
     ///      keccak(IMCK, closeIntentDigest, incomingTxHash, receiverPkG); the manager passes the
     ///      RECOMPUTED value here (not an opaque claim field), so the binding rejects a
-    ///      freshly-picked nullifier. RESIDUAL: `amount` is not bound to the plaintext (decryption
-    ///      deferred).
+    ///      freshly-picked nullifier. STAGE 3: `finalBalanceStateH1` (the receiver-pk one-hot bind
+    ///      anchor) and `finalSettledTxAccumulatorRoot` (the source-tx Merkle inclusion anchor) are
+    ///      the FINALIZED values the manager passes from `finalizeClose`; the in-circuit recompute +
+    ///      inclusion proof are bound to them. Over-claim is CLOSED (amount == decrypted plaintext)
+    ///      and the claim is anchored to a REAL signed settle (no vacuous inclusion).
     function verifyPostCloseClaim(
         bytes4 channelId,
         bytes32 closeIntentDigest,
@@ -737,6 +754,8 @@ contract ChannelSettlementVerifier is IChannelSettlementVerifier {
         address recipient,
         bytes32 sharedNativeNullifier,
         uint64 amount,
+        bytes32 finalBalanceStateH1,
+        bytes32 finalSettledTxAccumulatorRoot,
         MleVerifier.MleProof calldata mleProof
     ) external view returns (bool) {
         if (!postCloseClaimVkInitialized) revert PostCloseClaimVkNotSet();
@@ -749,7 +768,9 @@ contract ChannelSettlementVerifier is IChannelSettlementVerifier {
                 receiverSphincsPubkeyHash,
                 recipient,
                 sharedNativeNullifier,
-                amount
+                amount,
+                finalBalanceStateH1,
+                finalSettledTxAccumulatorRoot
             )
         );
         return _verifyPostCloseClaimMle(mleProof);
@@ -938,8 +959,8 @@ contract ChannelSettlementVerifier is IChannelSettlementVerifier {
         );
     }
 
-    /// @notice TEST-INTROSPECTION HELPER: public view of the EXPECTED 40-limb post-close-claim PI
-    ///         vector.
+    /// @notice TEST-INTROSPECTION HELPER: public view of the EXPECTED 56-limb post-close-claim PI
+    ///         vector (Stage 3: + finalBalanceStateH1 + finalSettledTxAccumulatorRoot).
     function expectedPostCloseClaimLimbs(
         bytes4 channelId,
         bytes32 closeIntentDigest,
@@ -947,7 +968,9 @@ contract ChannelSettlementVerifier is IChannelSettlementVerifier {
         bytes32 receiverSphincsPubkeyHash,
         address recipient,
         bytes32 sharedNativeNullifier,
-        uint64 amount
+        uint64 amount,
+        bytes32 finalBalanceStateH1,
+        bytes32 finalSettledTxAccumulatorRoot
     ) external pure returns (uint256[] memory) {
         return _expectedPostCloseClaimLimbs(
             channelId,
@@ -956,7 +979,9 @@ contract ChannelSettlementVerifier is IChannelSettlementVerifier {
             receiverSphincsPubkeyHash,
             recipient,
             sharedNativeNullifier,
-            amount
+            amount,
+            finalBalanceStateH1,
+            finalSettledTxAccumulatorRoot
         );
     }
 

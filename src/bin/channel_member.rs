@@ -52,10 +52,10 @@ use intmax3_zkp::{
         BuiltInterChannelCredit, BuiltSend, ChannelBalanceAttestation, ChannelSnapshot,
         InterChannelDebitPayload, InterChannelTransferDescriptor, MemberInfo, MemberKeys,
         RefreshPayload, SendPayload, add_signature, assemble_genesis_state_backed,
-        build_inter_channel_credit, build_record, build_send, decrypt_balance, sign_state,
-        sign_state_if_backed, verify_all_signatures, verify_inter_channel_credit_transition,
-        verify_inter_channel_send_transition, verify_refresh_transition, verify_send_transition,
-        verify_snapshot,
+        build_inter_channel_credit, build_record, build_send, decrypt_balance,
+        default_settled_tx_accumulator, sign_state, sign_state_if_backed, verify_all_signatures,
+        verify_inter_channel_credit_transition, verify_inter_channel_send_transition,
+        verify_refresh_transition, verify_send_transition, verify_snapshot,
     },
 };
 use plonky2::{
@@ -511,6 +511,9 @@ fn cmd_init(args: &[String]) {
         record,
         state,
         members,
+        // Stage 3: genesis threads the EMPTY settled-tx accumulator (its root ==
+        // `empty_settled_tx_accumulator_root()`, which the genesis balance state carries).
+        settled_tx_accumulator: default_settled_tx_accumulator(),
     };
     let dc = snapshot.record.delegate_count;
     let v = snapshot.state.balance_state.state_version;

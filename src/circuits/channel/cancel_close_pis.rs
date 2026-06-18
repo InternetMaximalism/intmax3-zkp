@@ -158,6 +158,7 @@ mod tests {
                 ]),
                 regev_pk_digests: BalanceState::pad_regev_pk_digests(&[]),
                 settled_tx_chain: Bytes32::default(),
+                settled_tx_accumulator_root: Bytes32::default(),
                 state_version: 7,
                 pending_adds: BalanceState::pad_pending_adds(&[0, 0, 0]),
             },

@@ -6,9 +6,11 @@
 //! and to the L1 mirror. The preimage limb order (pad-to-MAX D6 + delegate account + decryption
 //! Stage 1) is:
 //!   `[BALANCE_STATE_DOMAIN, channel_id, member_count, delegate_count,
-//!     p_0 .. p_{MAX-1}, d_0 .. d_{MAX-1}, settled_tx_chain, split_u64(state_version),
-//!     pending_adds[0..MAX]]`
-//! where `p_i = regev_pk_digests[i]` (8 u32 limbs) and `d_i = enc_balances[i].digest()`.
+//!     p_0 .. p_{MAX-1}, d_0 .. d_{MAX-1}, settled_tx_chain, settled_tx_accumulator_root,
+//!     split_u64(state_version), pending_adds[0..MAX]]`
+//! where `p_i = regev_pk_digests[i]` (8 u32 limbs) and `d_i = enc_balances[i].digest()`. The
+//! Stage-3 `settled_tx_accumulator_root` (8 u32 limbs) sits IMMEDIATELY AFTER `settled_tx_chain`
+//! and BEFORE `split_u64(state_version)`.
 //! `delegate_count` is the single u32 limb IMMEDIATELY AFTER `member_count`; the Regev pk digests
 //! `p_i` come IMMEDIATELY AFTER `delegate_count` and BEFORE the ciphertext digests `d_i`
 //! (decryption Stage 1). The keccak gadget does NOT range-check its inputs, so every limb fed here
@@ -39,6 +41,8 @@ use crate::{
 ///   AFTER `delegate_count` and BEFORE the ciphertext digests, mirroring the native order.
 /// - `enc_balance_digests`: exactly `MAX_CHANNEL_MEMBERS` per-slot ciphertext digests `d_i`.
 /// - `settled_tx_chain`: the settle hash-chain Bytes32.
+/// - `settled_tx_accumulator_root`: the Stage-3 settled-tx accumulator root Bytes32. Inserted
+///   IMMEDIATELY AFTER `settled_tx_chain` and BEFORE `state_version`, mirroring the native order.
 /// - `state_version`: the monotone state counter (split into 2 u32 limbs by `U64Target`).
 /// - `pending_adds`: exactly `MAX_CHANNEL_MEMBERS` per-slot homomorphic-add counters.
 ///
@@ -51,6 +55,7 @@ pub(crate) fn recompute_h1<F, C, const D: usize>(
     regev_pk_digests: &[Bytes32Target],
     enc_balance_digests: &[Bytes32Target],
     settled_tx_chain: &Bytes32Target,
+    settled_tx_accumulator_root: &Bytes32Target,
     state_version: &U64Target,
     pending_adds: &[Target],
 ) -> Bytes32Target
@@ -76,6 +81,9 @@ where
             .flat_map(Bytes32Target::to_vec)
             .collect::<Vec<_>>(),
         settled_tx_chain.to_vec(),
+        // Stage 3: the accumulator root sits IMMEDIATELY AFTER settled_tx_chain and BEFORE
+        // state_version, byte-identical to native `BalanceState::h1`.
+        settled_tx_accumulator_root.to_vec(),
         state_version.to_vec(),
         pending_adds.to_vec(),
     ]
@@ -145,6 +153,7 @@ mod tests {
             .map(|_| Bytes32Target::new(&mut builder, true))
             .collect();
         let settled_tx_chain_t = Bytes32Target::new(&mut builder, true);
+        let settled_tx_accumulator_root_t = Bytes32Target::new(&mut builder, true);
         let state_version_t = U64Target::new(&mut builder, true);
         let pending_add_ts: Vec<Target> = (0..MAX_CHANNEL_MEMBERS)
             .map(|_| u32_limb(&mut builder))
@@ -157,6 +166,7 @@ mod tests {
             &regev_pk_digest_ts,
             &enc_digest_ts,
             &settled_tx_chain_t,
+            &settled_tx_accumulator_root_t,
             &state_version_t,
             &pending_add_ts,
         );
@@ -182,6 +192,7 @@ mod tests {
                 enc_balances: BalanceState::pad_enc_balances(&enc_active),
                 regev_pk_digests: BalanceState::pad_regev_pk_digests(&pk_active),
                 settled_tx_chain: Bytes32::rand(&mut rng),
+                settled_tx_accumulator_root: Bytes32::rand(&mut rng),
                 state_version: rng.r#gen(),
                 pending_adds: BalanceState::pad_pending_adds(&adds_active),
             };
@@ -205,6 +216,7 @@ mod tests {
                 t.set_witness(&mut pw, ct.digest());
             }
             settled_tx_chain_t.set_witness(&mut pw, state.settled_tx_chain);
+            settled_tx_accumulator_root_t.set_witness(&mut pw, state.settled_tx_accumulator_root);
             state_version_t.set_witness(&mut pw, U64::from(state.state_version));
             for (t, &a) in pending_add_ts.iter().zip(state.pending_adds.iter()) {
                 pw.set_target(*t, F::from_canonical_u32(a)).unwrap();

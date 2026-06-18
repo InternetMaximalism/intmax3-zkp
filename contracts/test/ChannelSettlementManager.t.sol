@@ -255,6 +255,8 @@ contract ChannelSettlementManagerTest is Test {
         bytes32 snn = _expectedSharedNativeNullifier(
             claim.closeIntentDigest, claim.incomingTxHash, claim.receiverPkG
         );
+        // Stage 3: the proof's H1 + accumulator-root limbs must equal the FINALIZED values
+        // `submitPostCloseClaim` passes to the verifier (else the strict limb bind rejects).
         uint256[] memory limbs = verifier.expectedPostCloseClaimLimbs(
             CHANNEL_ID,
             claim.closeIntentDigest,
@@ -262,7 +264,9 @@ contract ChannelSettlementManagerTest is Test {
             claim.receiverPkG,
             claim.recipient,
             snn,
-            claim.amount
+            claim.amount,
+            manager.finalizedBalanceStateH1(),
+            manager.finalizedSettledTxAccumulatorRoot()
         );
         return CloseTestLib.proofWithLimbs(limbs);
     }
@@ -315,7 +319,8 @@ contract ChannelSettlementManagerTest is Test {
             closeWithdrawalDigest: keccak256("burn_backed_close"),
             snapshotMediumBlockNumber: 77,
             finalStateVersion: finalStateVersion,
-            finalSettledTxChain: keccak256("settled_tx_chain")
+            finalSettledTxChain: keccak256("settled_tx_chain"),
+            finalSettledTxAccumulatorRoot: keccak256("settled_tx_accumulator_root")
         });
     }
 
@@ -361,6 +366,7 @@ contract ChannelSettlementManagerTest is Test {
             snapshotMediumBlockNumber: intent.snapshotMediumBlockNumber,
             finalStateVersion: intent.finalStateVersion,
             finalSettledTxChain: intent.finalSettledTxChain,
+            finalSettledTxAccumulatorRoot: intent.finalSettledTxAccumulatorRoot,
             memberSetCommitment: memberSetCommitment,
             memberAndDelegateCount: memberAndDelegateCount
         }));
@@ -400,7 +406,7 @@ contract ChannelSettlementManagerTest is Test {
         ChannelSettlementManager.CloseIntent memory intent = _intent(1, 9, 22, 1);
         // The close proof now carries the 87 raw close limbs as its MLE publicInputs (not a keccak).
         MleVerifier.MleProof memory closeProof = _closeProof(intent);
-        assertEq(closeProof.publicInputs.length, 87, "close proof carries 87 raw limbs");
+        assertEq(closeProof.publicInputs.length, 95, "close proof carries 95 raw limbs (Stage 3)");
         assertEq(closeProof.publicInputs[0], uint256(uint32(CHANNEL_ID)), "limb[0] == channelId");
 
         assertTrue(
@@ -451,10 +457,12 @@ contract ChannelSettlementManagerTest is Test {
                 USER_B,
                 bob,
                 keccak256("shared_nullifier"),
-                9
+                9,
+                keccak256("final_balance_state_h1"),
+                keccak256("settled_tx_accumulator_root")
             ).length,
-            40,
-            "post-close-claim PI is 40 raw limbs"
+            56,
+            "post-close-claim PI is 56 raw limbs (Stage 3)"
         );
     }
 
@@ -476,7 +484,10 @@ contract ChannelSettlementManagerTest is Test {
             closeWithdrawalDigest: 0x000000290000002a0000002b0000002c0000002d0000002e0000002f00000030,
             snapshotMediumBlockNumber: 0x99999999aaaaaaaa,
             finalStateVersion: 0xbbbbbbbbcccccccc,
-            finalSettledTxChain: 0x0000003100000032000000330000003400000035000000360000003700000038
+            finalSettledTxChain: 0x0000003100000032000000330000003400000035000000360000003700000038,
+            // Stage 3: the accumulator root is NOT part of the IMCI close-intent digest preimage
+            // (the digest predates Stage 3), so its value here does not affect the shared vector.
+            finalSettledTxAccumulatorRoot: keccak256("settled_tx_accumulator_root")
         });
         assertEq(manager.computeCloseIntentDigest(intent), SHARED_VECTOR_DIGEST);
     }
@@ -517,12 +528,13 @@ contract ChannelSettlementManagerTest is Test {
             // (0xbb hi, 0xcc lo).
             finalStateVersion: (uint64(0xbb) << 32) | uint64(0xcc),
             finalSettledTxChain: _sentinelB32(0x8000),
+            finalSettledTxAccumulatorRoot: _sentinelB32(0x8800),
             memberSetCommitment: _sentinelB32(0x9000),
             memberAndDelegateCount: (uint16(3) << 8) | uint16(1)
         });
 
         uint256[] memory v = this._expectedCloseLimbsExt(fields);
-        assertEq(v.length, 87, "87 limbs");
+        assertEq(v.length, 95, "95 limbs (Stage 3: +8 accumulator root)");
         // channelId — limb 0.
         assertEq(v[0], 0x0a0b0c0d);
         // close_nonce — 1..2.
@@ -571,9 +583,11 @@ contract ChannelSettlementManagerTest is Test {
         // final_state_version — 67..68.
         assertEq(v[67], 0xbb); assertEq(v[68], 0xcc);
         _assertSentinelRange(v, 69, 0x8000); // final_settled_tx_chain 69..76
-        _assertSentinelRange(v, 77, 0x9000); // member_set_commitment 77..84
-        // member_count — 85; delegate_count — 86.
-        assertEq(v[85], 3); assertEq(v[86], 1);
+        // Stage 3: final_settled_tx_accumulator_root 77..84 (inserted), shifting the rest +8.
+        _assertSentinelRange(v, 77, 0x8800);
+        _assertSentinelRange(v, 85, 0x9000); // member_set_commitment 85..92
+        // member_count — 93; delegate_count — 94.
+        assertEq(v[93], 3); assertEq(v[94], 1);
     }
 
     /// @dev external passthroughs so `fields` is read from calldata (the verifier's
@@ -1498,6 +1512,7 @@ contract ChannelSettlementManagerTest is Test {
             snapshotMediumBlockNumber: 77,
             finalStateVersion: 12,
             finalSettledTxChain: keccak256("chain"),
+            finalSettledTxAccumulatorRoot: keccak256("settled_tx_accumulator_root"),
             memberSetCommitment: manager.registeredMemberSetCommitment(),
             memberAndDelegateCount: (uint16(manager.activeMemberCount()) << 8)
                 | uint16(manager.activeDelegateCount())
@@ -1639,15 +1654,16 @@ contract ChannelSettlementManagerTest is Test {
         assertEq(v[46], 0x11); assertEq(v[47], 0x22); // amount (hi, lo)
     }
 
-    /// GOLDEN VECTOR mirror for post-close-claim (40 limbs).
+    /// GOLDEN VECTOR mirror for post-close-claim (56 limbs; Stage 3: + finalBalanceStateH1 +
+    /// finalSettledTxAccumulatorRoot appended).
     function test_expectedPostCloseClaimLimbs_goldenVector() external view {
         address rcp = address(uint160((uint256(0x4000) << 128) | (uint256(0x4001) << 96)
             | (uint256(0x4002) << 64) | (uint256(0x4003) << 32) | uint256(0x4004)));
         uint256[] memory v = verifier.expectedPostCloseClaimLimbs(
             hex"0a0b0c0d", _b32(0x1000), _b32(0x2000), _b32(0x3000), rcp, _b32(0x5000),
-            0x0000001100000022
+            0x0000001100000022, _b32(0x7000), _b32(0x8000)
         );
-        assertEq(v.length, 40);
+        assertEq(v.length, 56);
         _assertB32(v, 0, 0x1000);          // close_intent_digest
         assertEq(v[8], 0x0a0b0c0d);        // receiver_channel_id
         _assertB32(v, 9, 0x2000);          // incoming_tx_hash
@@ -1655,6 +1671,8 @@ contract ChannelSettlementManagerTest is Test {
         assertEq(v[25], 0x4000); assertEq(v[29], 0x4004); // recipient ends
         _assertB32(v, 30, 0x5000);         // shared_native_nullifier
         assertEq(v[38], 0x11); assertEq(v[39], 0x22); // amount
+        _assertB32(v, 40, 0x7000);         // final_balance_state_h1 (Stage 3)
+        _assertB32(v, 48, 0x8000);         // final_settled_tx_accumulator_root (Stage 3)
     }
 
     function _b32(uint32 tag) internal pure returns (bytes32) {
@@ -1777,10 +1795,11 @@ contract ChannelSettlementManagerTest is Test {
         ChannelSettlementVerifier fresh = new ChannelSettlementVerifier();
         _initCloseVk(fresh);
         MleVerifier.MleProof memory proof;
-        proof.publicInputs = new uint256[](40);
+        proof.publicInputs = new uint256[](56);
         vm.expectRevert(ChannelSettlementVerifier.PostCloseClaimVkNotSet.selector);
         fresh.verifyPostCloseClaim(
-            CHANNEL_ID, bytes32(0), bytes32(0), USER_B, bob, bytes32(0), 0, proof
+            CHANNEL_ID, bytes32(0), bytes32(0), USER_B, bob, bytes32(0), 0,
+            bytes32(0), bytes32(0), proof
         );
     }
 
@@ -1835,8 +1854,11 @@ contract ChannelSettlementManagerTest is Test {
             amount: 5
         });
         // Build a proof whose shared_native_nullifier limb is a FORGED value (not the IMCK derive).
+        // The Stage-3 H1 + accumulator-root limbs are the finalized ones (so the ONLY mismatch is
+        // the nullifier limb the manager strict-binds).
         uint256[] memory limbs = verifier.expectedPostCloseClaimLimbs(
-            CHANNEL_ID, d, pc.incomingTxHash, USER_B, bob, keccak256("forged"), pc.amount
+            CHANNEL_ID, d, pc.incomingTxHash, USER_B, bob, keccak256("forged"), pc.amount,
+            manager.finalizedBalanceStateH1(), manager.finalizedSettledTxAccumulatorRoot()
         );
         MleVerifier.MleProof memory proof = CloseTestLib.proofWithLimbs(limbs);
         vm.expectRevert(bytes("claim limb mismatch"));

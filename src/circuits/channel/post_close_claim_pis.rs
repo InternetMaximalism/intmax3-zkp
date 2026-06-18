@@ -8,14 +8,28 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::{
-    common::channel::{InterChannelTx, PostCloseIncomingClaim},
+    common::{
+        balance_state::BalanceState,
+        channel::{InterChannelTx, PostCloseIncomingClaim},
+    },
     ethereum_types::{address::Address, bytes32::Bytes32, u32limb_trait::U32LimbTrait},
     regev::{RegevPk, RegevSecurityLevel, verify_withdraw_claim},
 };
 
 // 8 (close intent digest) + 1 (channel id, single u32 limb) + 8 (tx hash) +
-// 8 (receiver sphincs pubkey hash) + 5 (recipient) + 8 (nullifier) + 2 (amount).
-pub const POST_CLOSE_CLAIM_PUBLIC_INPUTS_LEN: usize = 40;
+// 8 (receiver sphincs pubkey hash) + 5 (recipient) + 8 (nullifier) + 2 (amount) +
+// 8 (final_balance_state_h1, Stage 3 receiver-pk bind) +
+// 8 (final_settled_tx_accumulator_root, Stage 3 source-tx anchoring).
+//
+// Stage 3 layout: limbs 0..40 are byte-identical to the pre-Stage-3 layout (less churn / golden
+// stability). `final_balance_state_h1` (40..48) and `final_settled_tx_accumulator_root` (48..56)
+// are APPENDED at the END. H1 is required for the receiver-pk one-hot bind (the witnessed Regev
+// `(a, b)` is bound to the H1-committed `regev_pk_digests[member_index]`, exactly like the
+// withdrawal claim) — WITHOUT it the post-close decryption stays vacuous (threat-model #3). The
+// accumulator root is the dedicated PI the inclusion proof of `incoming_tx_hash` is verified
+// against (threat-model Fork B). L1 `submitPostCloseClaim` passes BOTH the finalized H1 and the
+// finalized accumulator root.
+pub const POST_CLOSE_CLAIM_PUBLIC_INPUTS_LEN: usize = 56;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -28,6 +42,17 @@ pub struct PostCloseClaimPublicInputs {
     pub shared_native_nullifier: Bytes32,
     /// Public claim amount, proven equal to the plaintext of `receiver_amount` by the E-3 proof.
     pub amount: u64,
+    /// Stage 3 (receiver-pk bind): `h1()` of the CLOSED channel's final `BalanceState`. The
+    /// circuit recomputes it from the witnessed final-state slot data and one-hot-selects the
+    /// receiver's `regev_pk_digests[member_index]` to bind the witnessed Regev `(a, b)` —
+    /// closing the post-close over-claim/vacuous-decryption residual (threat-model #3). L1
+    /// passes `finalizedBalanceStateH1`.
+    pub final_balance_state_h1: Bytes32,
+    /// Stage 3 (source-tx anchoring, Fork B): `settled_tx_accumulator_root` of the closed
+    /// channel's final `BalanceState`. The circuit proves a Merkle inclusion of the recomputed
+    /// `incoming_tx_hash` against this root, anchoring the claim to a REAL signed settle the
+    /// channel absorbed. L1 passes `finalizedSettledTxAccumulatorRoot`.
+    pub final_settled_tx_accumulator_root: Bytes32,
 }
 
 #[derive(Debug, Error)]
@@ -56,6 +81,15 @@ pub struct PostCloseClaimWitness {
     pub receiver_pk: RegevPk,
     /// Public claim amount.
     pub amount: u64,
+    /// Stage 3: the CLOSED channel's final `BalanceState`. Its `h1()` is exposed as
+    /// `final_balance_state_h1` (the receiver-pk bind committs `regev_pk_digests`), and its
+    /// `settled_tx_accumulator_root` is exposed as `final_settled_tx_accumulator_root` (the
+    /// source-tx anchor). The circuit recomputes H1 from this state's slot data, so its slots
+    /// are pinned to the members' signed final state.
+    pub final_balance_state: BalanceState,
+    /// Stage 3: the receiver's slot index in the closed channel (`< member_count +
+    /// delegate_count`), for the H1 one-hot pk-digest select.
+    pub receiver_member_index: usize,
 }
 
 impl PostCloseClaimWitness {
@@ -92,6 +126,21 @@ impl PostCloseClaimWitness {
         )
         .map_err(|err| PostCloseClaimWitnessError::InvalidClaimProof(err.to_string()))?;
 
+        // Stage 3 (receiver-pk bind, threat-model #3): the receiver MUST be a registered member of
+        // the CLOSED channel — its slot Regev pk digest must equal the witnessed receiver pk's
+        // Poseidon digest, and the slot must be ACTIVE. This is the native counterpart of the
+        // in-circuit H1 one-hot bind, and it confirms the "receiver-always-a-member" precondition.
+        let active = self.final_balance_state.member_count as usize
+            + self.final_balance_state.delegate_count as usize;
+        if self.receiver_member_index >= active {
+            return Err(PostCloseClaimWitnessError::ReceiverChannelMismatch);
+        }
+        let committed_pk_digest =
+            self.final_balance_state.regev_pk_digests[self.receiver_member_index];
+        if committed_pk_digest != Bytes32::from(self.receiver_pk.poseidon_digest()) {
+            return Err(PostCloseClaimWitnessError::ReceiverDeltaMismatch);
+        }
+
         Ok(PostCloseClaimPublicInputs {
             close_intent_digest: self.close_intent_digest,
             receiver_channel_id: self.closed_channel_id,
@@ -100,6 +149,8 @@ impl PostCloseClaimWitness {
             recipient: self.claim.l1_recipient,
             shared_native_nullifier: self.claim.shared_native_nullifier,
             amount: self.amount,
+            final_balance_state_h1: self.final_balance_state.h1(),
+            final_settled_tx_accumulator_root: self.final_balance_state.settled_tx_accumulator_root,
         })
     }
 }
@@ -114,6 +165,9 @@ impl PostCloseClaimPublicInputs {
             self.recipient.to_u64_vec(),
             self.shared_native_nullifier.to_u64_vec(),
             split_u64(self.amount),
+            // Stage 3: appended after the legacy 40 limbs (limbs 0..40 byte-identical).
+            self.final_balance_state_h1.to_u64_vec(),
+            self.final_settled_tx_accumulator_root.to_u64_vec(),
         ]
         .concat()
     }
@@ -136,6 +190,11 @@ impl PostCloseClaimPublicInputs {
             shared_native_nullifier: Bytes32::from_u64_slice(&values[30..38])
                 .map_err(|e| e.to_string())?,
             amount: join_u64(&values[38..40]),
+            // Stage 3 appended limbs.
+            final_balance_state_h1: Bytes32::from_u64_slice(&values[40..48])
+                .map_err(|e| e.to_string())?,
+            final_settled_tx_accumulator_root: Bytes32::from_u64_slice(&values[48..56])
+                .map_err(|e| e.to_string())?,
         })
     }
 }
@@ -256,6 +315,24 @@ mod tests {
             recipient_memo: vec![5, 6],
             claim_proof,
         };
+        // Stage 3: the closed channel's final balance state. The receiver occupies slot 0; its
+        // committed `regev_pk_digests[0]` is the receiver pk's Poseidon digest (so the receiver-pk
+        // bind passes), and the accumulator root is exposed as a PI.
+        let final_balance_state = BalanceState {
+            channel_id: ChannelId::new(7).unwrap(),
+            member_count: 2,
+            delegate_count: 0,
+            enc_balances: BalanceState::pad_enc_balances(&[ciphertext(1), ciphertext(2)]),
+            regev_pk_digests: BalanceState::pad_regev_pk_digests(&[
+                Bytes32::from(receiver_pk.poseidon_digest()),
+                Bytes32::from(channel_keygen(&mut rng).0.poseidon_digest()),
+            ]),
+            settled_tx_chain: Bytes32::default(),
+            settled_tx_accumulator_root: Bytes32::from_u32_slice(&[0, 0, 0, 0, 0, 0, 0, 42])
+                .unwrap(),
+            state_version: 9,
+            pending_adds: BalanceState::pad_pending_adds(&[0, 0]),
+        };
         let witness = PostCloseClaimWitness {
             close_intent_digest: claim.close_intent_digest,
             closed_channel_id: ChannelId::new(7).unwrap(),
@@ -263,6 +340,8 @@ mod tests {
             claim,
             receiver_pk,
             amount,
+            final_balance_state,
+            receiver_member_index: 0,
         };
 
         let public_inputs = witness.to_public_inputs(RegevSecurityLevel::Test).unwrap();

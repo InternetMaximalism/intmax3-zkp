@@ -308,6 +308,11 @@ impl InChannelTransferUpdateWitness {
         verify_balance_state_common(&self.channel_record, &self.prev_state, &self.next_state)?;
         require_h2_zero(&self.next_state)?;
         require_chain_unchanged(&self.prev_state, &self.next_state)?;
+        // Stage 3: an in-channel transfer is not a settle — the accumulator root is unchanged.
+        require_accumulator_unchanged(
+            self.prev_state.balance_state.settled_tx_accumulator_root,
+            self.next_state.balance_state.settled_tx_accumulator_root,
+        )?;
         ensure_same_channel_fund(&self.prev_state, &self.next_state)?;
         ensure_same_u256(
             "unallocated_confirmed_incoming",
@@ -521,6 +526,13 @@ impl InterChannelSendUpdateWitness {
             .tx_leaf_hash()
             .map_err(|err| ChannelStateUpdateError::InvalidSettledTxChain(err.to_string()))?;
         require_chain_push(&self.prev_state, &self.next_state, leaf)?;
+        // Stage 3: the STRONG tx_hash-binding accumulator insertion check
+        // (`require_accumulator_push`) is run by the WALLET co-signer with the persisted tree in
+        // hand (`build_inter_channel_send`) — the transition witnesses here carry only the
+        // prev/next `BalanceState` scalars, not the accumulator FRONTIER needed to verify
+        // an incremental insertion, so the binding insertion check cannot live here. (The
+        // finalized accumulator root is ultimately attested by the N-of-N signature over
+        // H1.) The transition CIRCUITS do NOT change.
         // Fund decrease by the public amount.
         if self.next_state.channel_fund.amount + u64_to_u256(self.amount)
             != self.prev_state.channel_fund.amount
@@ -645,6 +657,12 @@ impl InterChannelFundImportUpdateWitness {
             &self.next_state,
             self.inter_channel_tx.tx_hash,
         )?;
+        // Stage 3: the fund import is a settle advancement on the RECEIVING channel — its
+        // accumulator MUST absorb the incoming `tx_hash` (this is the insertion a post-close claim
+        // against THIS closed channel proves inclusion against). The STRONG tx_hash-binding push
+        // check runs in the WALLET co-signer (`build_inter_channel_credit`) with the persisted
+        // tree; the witness here lacks the frontier, so it cannot verify the incremental
+        // insertion.
         if self.next_state.channel_fund.amount
             != self.prev_state.channel_fund.amount + u64_to_u256(self.amount)
         {
@@ -778,6 +796,9 @@ impl ReceiverBundleApplyUpdateWitness {
             .tx_leaf_hash()
             .map_err(|err| ChannelStateUpdateError::InvalidSettledTxChain(err.to_string()))?;
         require_chain_push(&self.prev_state, &self.next_state, leaf)?;
+        // Stage 3 (uniform-leaf decision): the bundle apply is a second settle advancement; the
+        // accumulator absorbs `tx_hash` again (the chain pushes tx_leaf, but the accumulator stores
+        // tx_hash uniformly). STRONG tx_hash insertion check is in the WALLET co-signer.
         // Recipient slot: public homomorphic-add recomputation; other slots untouched.
         let expected_recipient_slot = add_ciphertexts(
             &self.prev_state.balance_state.enc_balances[self.recipient_index],
@@ -880,6 +901,11 @@ impl BalanceRefreshUpdateWitness {
         verify_next_state_signatures(&self.channel_record, &self.next_state)?;
         require_h2_zero(&self.next_state)?;
         require_chain_unchanged(&self.prev_state, &self.next_state)?;
+        // Stage 3: a balance refresh is not a settle — the accumulator root is unchanged.
+        require_accumulator_unchanged(
+            self.prev_state.balance_state.settled_tx_accumulator_root,
+            self.next_state.balance_state.settled_tx_accumulator_root,
+        )?;
         ensure_same_channel_fund(&self.prev_state, &self.next_state)?;
         ensure_same_u256(
             "unallocated_confirmed_incoming",
@@ -1073,6 +1099,63 @@ fn require_chain_push(
             "settled_tx_chain must equal push(prev_chain, leaf): expected {expected:?}, got {:?}",
             next_state.balance_state.settled_tx_chain
         )));
+    }
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Stage 3 (post-close source-tx anchoring) — NATIVE off-chain co-signer checks for the settled-tx
+// Merkle ACCUMULATOR. These are PURE NATIVE verification (NOT ZK constraints / circuit targets):
+// the accumulator's faithfulness is attested by the EXISTING N-of-N co-signing — every honest
+// co-signer runs these BEFORE signing the new H1, and the accumulator root rides in the signed H1
+// (folded immediately after `settled_tx_chain`; see `BalanceState::h1`). The close circuit then
+// verifies the N-of-N member signatures over the final H1, so the finalized accumulator root is
+// signature-attested. The settle TRANSITION CIRCUITS do NOT change at all.
+//
+// SECURITY (leaf uniformity): the accumulator stores `tx_hash` UNIFORMLY at EVERY settle
+// advancement (even where the hash CHAIN pushes `tx_leaf`), giving the post-close claim ONE
+// canonical membership predicate (its `incoming_tx_hash`). The accumulator and `settled_tx_chain`
+// are INDEPENDENT commitments storing DIFFERENT leaves.
+// ---------------------------------------------------------------------------
+
+/// Native co-signer check: `next_root` is EXACTLY the root after pushing `tx_hash` onto the prev
+/// accumulator. The prev tree (the frontier) is required to compute an incremental insertion — a
+/// root alone is insufficient. The caller (the wallet co-signer) holds the persisted per-channel
+/// `IncrementalMerkleTree`. Returns `Ok` iff `Bytes32::from(push(prev_tree, tx_hash).get_root()) ==
+/// next_root`.
+///
+/// SECURITY: this binds the inserted leaf to `tx_hash`, so a co-signer cannot be tricked into
+/// signing an H1 whose accumulator root omits (or substitutes) the settle's `tx_hash`. The push
+/// also asserts `len < 2^H` (capacity), inherited from `IncrementalMerkleTree::push`.
+pub fn require_accumulator_push(
+    prev_accumulator: &crate::utils::trees::incremental_merkle_tree::IncrementalMerkleTree<Bytes32>,
+    tx_hash: Bytes32,
+    next_root: Bytes32,
+) -> Result<(), ChannelStateUpdateError> {
+    let mut advanced = prev_accumulator.clone();
+    advanced.push(tx_hash);
+    let expected = Bytes32::from(advanced.get_root());
+    if expected != next_root {
+        return Err(ChannelStateUpdateError::InvalidSettledTxChain(format!(
+            "settled_tx_accumulator_root must equal push(prev_accumulator, tx_hash): expected \
+             {expected:?}, got {next_root:?}"
+        )));
+    }
+    Ok(())
+}
+
+/// Native co-signer check: the accumulator root is UNCHANGED across an in-channel transfer or a
+/// balance refresh (neither advances the settle history). Root-only (no tree needed): these
+/// transitions must not touch the accumulator at all.
+pub fn require_accumulator_unchanged(
+    prev_root: Bytes32,
+    next_root: Bytes32,
+) -> Result<(), ChannelStateUpdateError> {
+    if prev_root != next_root {
+        return Err(ChannelStateUpdateError::InvalidSettledTxChain(
+            "settled_tx_accumulator_root must remain unchanged for this transition kind"
+                .to_string(),
+        ));
     }
     Ok(())
 }
@@ -1431,6 +1514,7 @@ mod tests {
                 ]),
                 regev_pk_digests: BalanceState::pad_regev_pk_digests(&[]),
                 settled_tx_chain: Bytes32::default(),
+                settled_tx_accumulator_root: Bytes32::default(),
                 state_version: 3,
                 pending_adds: BalanceState::pad_pending_adds(&[0, 2, 0]),
             },
@@ -1455,6 +1539,7 @@ mod tests {
                 ]),
                 regev_pk_digests: BalanceState::pad_regev_pk_digests(&[]),
                 settled_tx_chain: Bytes32::default(),
+                settled_tx_accumulator_root: Bytes32::default(),
                 state_version: 4,
                 pending_adds: BalanceState::pad_pending_adds(&[0, 3, 0]),
             },
@@ -1617,5 +1702,84 @@ mod tests {
             fixture.witness.verify(&VERIFIER),
             Err(ChannelStateUpdateError::ProofVerification(_))
         ));
+    }
+
+    // ===================================================================================
+    // Stage 3 — native settled-tx accumulator co-signer checks.
+    // ===================================================================================
+
+    use crate::utils::trees::incremental_merkle_tree::IncrementalMerkleTree;
+
+    const ACC_H: usize = 20;
+
+    /// `require_accumulator_push` ACCEPTS a root that is exactly push(prev_tree, tx_hash), and
+    /// REJECTS a wrong/omitted leaf or a stale root.
+    #[test]
+    fn require_accumulator_push_accepts_correct_advance_rejects_wrong() {
+        let mut tree = IncrementalMerkleTree::<Bytes32>::new(ACC_H);
+        tree.push(pubkey_hash(1));
+        let prev_root = Bytes32::from(tree.get_root());
+
+        let tx_hash = pubkey_hash(42);
+        let mut advanced = tree.clone();
+        advanced.push(tx_hash);
+        let next_root = Bytes32::from(advanced.get_root());
+
+        // Correct advance.
+        require_accumulator_push(&tree, tx_hash, next_root).expect("correct push must accept");
+
+        // Wrong leaf (different tx_hash) produces a different root → reject for the claimed
+        // next_root.
+        assert!(
+            require_accumulator_push(&tree, pubkey_hash(43), next_root).is_err(),
+            "a wrong inserted leaf must be rejected"
+        );
+
+        // Omitted insertion: claiming the prev (unchanged) root as the post-push root is rejected.
+        assert!(
+            require_accumulator_push(&tree, tx_hash, prev_root).is_err(),
+            "an omitted insertion (root unchanged) must be rejected"
+        );
+    }
+
+    /// `require_accumulator_unchanged` ACCEPTS equal roots and REJECTS a changed root.
+    #[test]
+    fn require_accumulator_unchanged_rejects_change() {
+        let root = pubkey_hash(7);
+        require_accumulator_unchanged(root, root).expect("equal roots must accept");
+        assert!(
+            require_accumulator_unchanged(root, pubkey_hash(8)).is_err(),
+            "a changed accumulator root must be rejected for an unchanged transition"
+        );
+    }
+
+    /// Accumulator golden: the native `IncrementalMerkleTree` root over a sequence of `tx_hash`
+    /// leaves, and the `Bytes32::from(get_root())` encoding, round-trips through `prove`/`verify`.
+    /// (The in-circuit `verify` twin is exercised by the post-close-claim circuit test.)
+    #[test]
+    fn accumulator_native_root_and_inclusion_golden() {
+        let mut tree = IncrementalMerkleTree::<Bytes32>::new(ACC_H);
+        let leaves: Vec<Bytes32> = (0..7).map(|i| pubkey_hash(100 + i)).collect();
+        for leaf in &leaves {
+            tree.push(*leaf);
+        }
+        let root = tree.get_root();
+        // Each leaf has a valid inclusion proof at its index; a wrong leaf does not.
+        for (i, leaf) in leaves.iter().enumerate() {
+            let proof = tree.prove(i as u64);
+            proof
+                .verify(leaf, i as u64, root)
+                .expect("native inclusion must verify");
+            assert!(
+                proof.verify(&pubkey_hash(999), i as u64, root).is_err(),
+                "a wrong leaf must fail native inclusion"
+            );
+        }
+        // The Bytes32 encoding of the root is a canonical Poseidon→Bytes32 value (TryFrom
+        // succeeds).
+        let root_b32 = Bytes32::from(root);
+        let recovered = crate::utils::poseidon_hash_out::PoseidonHashOut::try_from(root_b32)
+            .expect("accumulator root Bytes32 must be a canonical poseidon encoding");
+        assert_eq!(recovered, root);
     }
 }

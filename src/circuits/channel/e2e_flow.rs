@@ -242,6 +242,7 @@ fn genesis_state(
             enc_balances: BalanceState::pad_enc_balances(&[ct0, ct1, ct2]),
             regev_pk_digests: BalanceState::pad_regev_pk_digests(&[]),
             settled_tx_chain: Bytes32::default(),
+            settled_tx_accumulator_root: Bytes32::default(),
             state_version: 0,
             pending_adds: BalanceState::pad_pending_adds(&[0; E2E_ACTIVE]),
         },
@@ -362,6 +363,7 @@ fn build_flow() -> FlowFixture {
             ]),
             regev_pk_digests: BalanceState::pad_regev_pk_digests(&[]),
             settled_tx_chain: a0.balance_state.settled_tx_chain,
+            settled_tx_accumulator_root: Bytes32::default(),
             state_version: 1,
             pending_adds: BalanceState::pad_pending_adds(&[0, 1, 0]),
         },
@@ -440,6 +442,7 @@ fn build_flow() -> FlowFixture {
             ]),
             regev_pk_digests: BalanceState::pad_regev_pk_digests(&[]),
             settled_tx_chain: settled_tx_chain_push(a1.balance_state.settled_tx_chain, tx_leaf),
+            settled_tx_accumulator_root: Bytes32::default(),
             state_version: 2,
             pending_adds: a1.balance_state.pending_adds,
         },
@@ -545,6 +548,7 @@ fn build_flow() -> FlowFixture {
             // The receiver chains the SAME tx leaf the sender chained (F3-A multi-layer defense).
             regev_pk_digests: BalanceState::pad_regev_pk_digests(&[]),
             settled_tx_chain: settled_tx_chain_push(b1.balance_state.settled_tx_chain, tx_leaf),
+            settled_tx_accumulator_root: Bytes32::default(),
             state_version: 2,
             pending_adds: BalanceState::pad_pending_adds(&[1, 0, 0]),
             ..b1.balance_state.clone()
@@ -883,6 +887,15 @@ fn channel_native_regev_full_flow_e2e() {
         recipient_memo: f.send.inter_channel_tx.recipient_memo.clone(),
         claim_proof: late_claim_proof,
     };
+    // Stage 3: the closed channel (B) final balance state. Its `regev_pk_digests[0]` is the
+    // receiver's (b_pks[0]) Poseidon digest so the receiver-pk bind validates; the accumulator root
+    // and H1 are exposed as PIs by `to_public_inputs`.
+    let mut closed_b_state = f.bundle.next_state.balance_state.clone();
+    closed_b_state.regev_pk_digests = BalanceState::pad_regev_pk_digests(&[
+        Bytes32::from(f.b_pks[0].poseidon_digest()),
+        Bytes32::from(f.b_pks[1].poseidon_digest()),
+        Bytes32::from(f.b_pks[2].poseidon_digest()),
+    ]);
     let post_close_witness = PostCloseClaimWitness {
         close_intent_digest: close_intent.signing_digest(),
         closed_channel_id: b_id,
@@ -890,6 +903,8 @@ fn channel_native_regev_full_flow_e2e() {
         claim: post_close_claim,
         receiver_pk: f.b_pks[0].clone(),
         amount: INTER_CHANNEL_AMOUNT,
+        final_balance_state: closed_b_state,
+        receiver_member_index: 0,
     };
     let pis = post_close_witness.to_public_inputs(LEVEL).unwrap();
     assert_eq!(pis.amount, INTER_CHANNEL_AMOUNT);

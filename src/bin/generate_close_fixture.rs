@@ -72,11 +72,14 @@ struct CloseIntentDescriptor {
     snapshot_medium_block_number: u64,
     final_state_version: u64,
     final_settled_tx_chain: String,
+    /// Stage 3: `settled_tx_accumulator_root` of the final balance state (PI limbs 77..85). The
+    /// Solidity `CloseLifecycleE2E` parses this into `CloseIntent.finalSettledTxAccumulatorRoot`.
+    final_settled_tx_accumulator_root: String,
     /// Close-intent digest (IMCI), pulled from PI limbs 57..65. The Solidity
     /// `computeCloseIntentDigest` must reproduce this; emitted so the test can assert it.
     close_intent_digest: String,
-    /// The proof's in-circuit `member_set_commitment` (PI limbs 77..85). The channel's
-    /// `registeredMemberSetCommitment()` MUST equal this.
+    /// The proof's in-circuit `member_set_commitment` (PI limbs 85..93, shifted +8 by Stage 3).
+    /// The channel's `registeredMemberSetCommitment()` MUST equal this.
     member_set_commitment: String,
     member_count: u8,
     delegate_count: u8,
@@ -196,6 +199,7 @@ fn main() -> anyhow::Result<()> {
         snapshot_medium_block_number: pis.snapshot_medium_block_number,
         final_state_version: pis.final_state_version,
         final_settled_tx_chain: pis.final_settled_tx_chain.to_string(),
+        final_settled_tx_accumulator_root: pis.final_settled_tx_accumulator_root.to_string(),
         close_intent_digest: pis.close_intent_digest.to_string(),
         member_set_commitment: pis.member_set_commitment.to_string(),
         member_count: pis.member_count,

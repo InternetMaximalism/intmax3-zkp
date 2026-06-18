@@ -81,6 +81,22 @@ pub struct BalanceState {
     pub regev_pk_digests: [Bytes32; MAX_CHANNEL_MEMBERS],
     /// Hash chain over the settles this state has absorbed (genesis = 0x00…00).
     pub settled_tx_chain: Bytes32,
+    /// Stage 3 (post-close source-tx anchoring): the root of the per-channel settled-tx Merkle
+    /// ACCUMULATOR — an `IncrementalMerkleTree<Bytes32>` of height `H = 20` whose leaves are the
+    /// `tx_hash` of every settle this state has absorbed (genesis = the empty-tree root). Encoded
+    /// as `Bytes32::from(IncrementalMerkleTree::get_root())` — the SAME injective
+    /// Poseidon→Bytes32 encoding Stage 1 uses for `regev_pk_digests`.
+    ///
+    /// SECURITY: the accumulator and `settled_tx_chain` are INDEPENDENT commitments storing
+    /// DIFFERENT leaves. The chain stores `tx_leaf` for send/bundle and `tx_hash` for fund-import;
+    /// the accumulator stores `tx_hash` UNIFORMLY at every settle advancement, giving the
+    /// post-close claim ONE canonical membership predicate (`incoming_tx_hash`). Folded into
+    /// [`Self::h1`] (the signed preimage) IMMEDIATELY AFTER `settled_tx_chain`, so the
+    /// accumulator root is attested by the same all-member signatures that bind the chain. The
+    /// close circuit exposes it as a dedicated close PI (`final_settled_tx_accumulator_root`);
+    /// L1 finalizes that value; the post-close claim binds a Merkle inclusion of
+    /// `incoming_tx_hash` against the finalized root.
+    pub settled_tx_accumulator_root: Bytes32,
     /// Monotone state counter, +1 on every in-channel AND inter-channel update. Independent of
     /// `epoch` / `small_block_number` (in-channel transfers produce no small block).
     pub state_version: u64,
@@ -117,10 +133,13 @@ impl BalanceState {
         std::array::from_fn(|i| active.get(i).copied().unwrap_or_default())
     }
 
-    /// H1 (detail2 §C-2 + D3, pad-to-MAX deviation D6, decryption Stage 1): keccak over
-    /// `[BALANCE_STATE_DOMAIN, channel_id, member_count, delegate_count, p_0, …, p_{MAX-1},
-    /// d_0, …, d_{MAX-1}, settled_tx_chain, split_u64(state_version), pending_adds[0..MAX]]` where
-    /// `p_i = regev_pk_digests[i]` (8 u32 limbs) and `d_i = enc_balances[i].digest()`.
+    /// H1 (detail2 §C-2 + D3, pad-to-MAX deviation D6, decryption Stage 1, Stage 3 accumulator):
+    /// keccak over `[BALANCE_STATE_DOMAIN, channel_id, member_count, delegate_count, p_0, …,
+    /// p_{MAX-1}, d_0, …, d_{MAX-1}, settled_tx_chain, settled_tx_accumulator_root,
+    /// split_u64(state_version), pending_adds[0..MAX]]` where `p_i = regev_pk_digests[i]` (8 u32
+    /// limbs) and `d_i = enc_balances[i].digest()`. The Stage-3 `settled_tx_accumulator_root` (8
+    /// u32 limbs) sits IMMEDIATELY AFTER `settled_tx_chain` and BEFORE
+    /// `split_u64(state_version)`.
     ///
     /// PREIMAGE (exact, one u32 word per limb): `member_count` is placed as a single u32 limb
     /// RIGHT AFTER `channel_id`, then `delegate_count` as a single u32 limb RIGHT AFTER
@@ -149,6 +168,10 @@ impl BalanceState {
             words.extend(ct.digest().to_u32_vec());
         }
         words.extend(self.settled_tx_chain.to_u32_vec());
+        // Stage 3: the settled-tx accumulator root sits IMMEDIATELY AFTER settled_tx_chain and
+        // BEFORE state_version. MUST stay byte-identical to the in-circuit
+        // `h1_gadget::recompute_h1` and the close-circuit inline recompute (8 u32 limbs).
+        words.extend(self.settled_tx_accumulator_root.to_u32_vec());
         words.extend(split_u64(self.state_version));
         words.extend_from_slice(&self.pending_adds);
         hash_words(&words)
@@ -345,6 +368,7 @@ mod tests {
             ]),
             regev_pk_digests: BalanceState::pad_regev_pk_digests(&[]),
             settled_tx_chain: Bytes32::default(),
+            settled_tx_accumulator_root: Bytes32::default(),
             state_version: 5,
             pending_adds: BalanceState::pad_pending_adds(&[0, 1, 2]),
         }
@@ -390,6 +414,16 @@ mod tests {
         s.settled_tx_chain = Bytes32::from_u32_slice(&[9, 0, 0, 0, 0, 0, 0, 0]).unwrap();
         assert_ne!(h1, s.h1(), "settled_tx_chain must affect h1");
 
+        // Stage 3: the accumulator root is part of the H1 preimage (signed) and distinct from the
+        // chain — flipping it (while leaving the chain unchanged) must change H1.
+        let mut s = sample_state();
+        s.settled_tx_accumulator_root = Bytes32::from_u32_slice(&[7, 0, 0, 0, 0, 0, 0, 0]).unwrap();
+        assert_ne!(
+            h1,
+            s.h1(),
+            "settled_tx_accumulator_root must affect h1 (Stage 3)"
+        );
+
         let mut s = sample_state();
         s.state_version += 1;
         assert_ne!(h1, s.h1(), "state_version must affect h1");
@@ -412,6 +446,7 @@ mod tests {
             enc_balances: BalanceState::pad_enc_balances(&active),
             regev_pk_digests: BalanceState::pad_regev_pk_digests(&[]),
             settled_tx_chain: Bytes32::default(),
+            settled_tx_accumulator_root: Bytes32::default(),
             state_version: 5,
             pending_adds: BalanceState::pad_pending_adds(&vec![0u32; count as usize]),
         }
