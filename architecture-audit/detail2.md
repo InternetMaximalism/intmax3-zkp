@@ -551,12 +551,62 @@ and `IMKR` (`KEY_RECORD_DOMAIN`) and the threshold / num_keys constants (DA/DC, 
 | §3.5.4 `closeAndWithdraw` | `finalizeClose()` (`:752`) → each member's `submitWithdrawalClaim` (`:785`, claim_proof = withdrawClaimZKP §E-3) → `claimWithdrawalCredit()` (`:905`). **Σ(withdrawals) ≤ withdrawCap** is enforced by the existing `totalWithdrawn + amount ≤ finalizedChannelFundAmount`. `closeBurnTx` is submitted to L1 as `burn_tx_hash` + L2 burn processing (no signature required, §D table row 4) | The contents of claim_proof become Regev-based |
 | §3.5.5 `claimLateTx` | `submitPostCloseClaim` (`:835`). `lateBalanceProof` is verified inside claim_proof, with `usedSharedNativeNullifiers` preventing double receipt | [Keep] |
 
-### H-3. Implementation-specific additional defenses (outside the scope of abstract2.md, retained)
+### H-3. Implementation-specific additional defenses (outside the scope of abstract2.md)
 
-- `submitSpecialClose` (BP censorship slash, `SPECIAL_CLOSE_MEDIUM_BLOCK_WINDOW = 5`)
-- `cancelClose` (close cancellation via a revival tx)
-- `submitLateOutgoingDebitCorrection`
-These are **additive** to abstract2's 5 properties (in the direction of strengthening exit-liveness) and do not contradict them.
+Three challenge primitives sit outside abstract2's 5 properties (they strengthen exit-liveness, not
+fund-custody safety). Status after the A1 settlement-verifier hardening (2026-06; the value-bearing
+`verifyCloseIntent` / `verifyWithdrawalClaim` / `verifyPostCloseClaim` are now REAL MLE/WHIR proofs, not
+`_matches` stubs):
+
+**`cancelClose` (C1) — REAL.** A pending close is cancelled by a ZK proof that the channel's REGISTERED members
+N-of-N signed a channel state at `state_version > pending_close.final_state_version`, in the same close-freeze
+era (`revived.close_freeze_nonce + 1 == close.close_freeze_nonce`). The cancel circuit exposes
+`member_set_commitment`, matched on-chain against `ChannelSettlementManager.registeredMemberSetCommitment()`, so
+ONLY the registered members can cancel — a third party signing a revival block with their own keys is rejected
+(member-set mismatch). NOTE: "a later signed BP small block exists" alone is NOT a sound staleness condition (the
+BP unilaterally produces small blocks and can race a later block after an honest close starts); the sound
+condition is "a strictly-newer N-of-N member-signed state exists", which is what the circuit proves.
+
+**`submitSpecialClose` (C2) — DISABLED (forgeable stub; revert the entry point).** Intended fault: the BP fully
+signed a small block but failed to finalize it within `SPECIAL_CLOSE_MEDIUM_BLOCK_WINDOW = 5` medium blocks
+(censorship); on success it slashes `min(specialClosePenalty, bpBondCredits)` to the caller and freezes the
+channel. A SOUND proof of this fault requires **non-inclusion of the BP-signed block in the finalized
+medium-block chain** — proving a negative (it was never finalized) — and that finalized-chain commitment lives
+in the validity / `IntmaxRollup` layer, not in the settlement contract (a cross-layer commitment, deferred). The
+current `verifySpecialClose` is a tautological `_matches` stub (the "proof" is just `keccak(public inputs)`,
+computable by anyone), so anyone can fabricate the accusation and slash an honest BP. **Disposition: disable
+(revert) `submitSpecialClose`** until the cross-layer non-inclusion commitment exists. **Safety while disabled:**
+the BP-censorship slash is simply unavailable; no member funds move; the BP bond (`bpBondCredits`) is a separate
+pot, and if it is unfunded (= 0) the forged-slash steals nothing — disabling only removes the freeze-grief.
+
+**`submitLateOutgoingDebitCorrection` (C3) — DISABLED (forgeable stub; redundant). The threat it targets is
+already prevented; the conditions are:**
+1. **No double-withdrawal — guaranteed by on-chain nullifier used-sets** (the "non-inclusion list of
+   withdrawals" is a Solidity `mapping(bytes32 => bool)`, O(1), at EVERY payout path):
+   `IntmaxRollup.withdrawalNullifierUsed` (base `withdrawNative`),
+   `ChannelSettlementManager.usedWithdrawalNullifiers` (per-member claim), and `usedSharedNativeNullifiers`
+   (post-close claim). Each nullifier is **derived deterministically in-circuit and bound** to the withdrawal
+   identity (e.g. `keccak(IMCW, close_intent_digest, member_pk_g)`; post-close `keccak(IMCK, close_intent_digest,
+   incoming_tx_hash, receiver_pk_g)`, recomputed by the manager), so re-running the ZKP cannot dodge it. The same
+   tx pays out EXACTLY ONCE (check-then-set CEI). **A ZK proof for one withdrawal cannot be paid twice.**
+2. **A co-signed outgoing debit cannot be silently omitted at the same version**: `H1` commits `settled_tx_chain`
+   AND the (already-debited) `enc_balances` under the SAME N-of-N member signatures, so members never sign an H1
+   whose settle chain contains the tx but whose balance is un-debited.
+3. **Omitting a co-signed debit ⇒ closing on an older `state_version` ⇒ a stale close**, which is rejected by
+   `cancelClose` (C1).
+4. **A merely sender-signed (not co-signed/settled) tx is NOT a committed debit.** The 10-minute close grace
+   (`GRACE_BEFORE_PROCESS_SECS = 600`) lets members settle any pending tx into a block before the close
+   processes; afterwards honest members stop signing. There is **no mid-channel withdrawal** in the protocol
+   (the only L1 exit is channel close: `finalizeClose → submitWithdrawalClaim → claimWithdrawalCredit`), so there
+   is no "in-flight withdrawal" that a close could omit.
+5. **Explicitly out of scope (accepted):** a time-difference grief where a non-settled tx is used to block a
+   close. The only required property — "the same withdrawal cannot be paid more than once" — is met by (1).
+   Therefore C3 is **redundant** with the nullifier used-sets + `cancelClose`. **Disposition: disable (revert)
+   `submitLateOutgoingDebitCorrection`.**
+
+These disables are **safety-neutral**: cross-channel isolation (the `Σ paid ≤ receivedChannelFunds` cap) and the
+no-double-withdraw guarantee (nullifier used-sets) do NOT depend on C2/C3. Disabling only removes the
+forgeable-while-stubbed BP-censorship slash (C2) and the redundant late-debit cancel (C3).
 
 ### H-4. Invariant of the challenge order
 
