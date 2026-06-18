@@ -6,9 +6,10 @@ const { execFileSync } = require('child_process');
 const fs = require('fs');
 const path = require('path');
 
-const ROOT = __dirname;
-const WORK = path.join(ROOT, 'wallet-e2e-work');
-const CLI = path.join(ROOT, 'target', 'release', 'channel_member');
+const ROOT = __dirname; // wallet/
+const REPO = path.join(ROOT, '..'); // repo root — target/, wallet-e2e-work/ live here
+const WORK = path.join(REPO, 'wallet-e2e-work');
+const CLI = path.join(REPO, 'target', 'release', 'channel_member');
 const URL = 'https://localhost:8000/wallet.html';
 
 const w = (name) => path.join(WORK, name);

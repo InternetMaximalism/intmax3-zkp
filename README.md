@@ -102,7 +102,7 @@ cd contracts && forge install && forge test -vvv
 
 # Browser wallet (proving runs in your browser via WASM + multi-threading)
 bash build-wallet-wasm.sh                      # build the wasm package (needs cdylib at invocation)
-node wallet-relay.js                           # https://localhost:8000/wallet-live.html (2 channels)
+node wallet/wallet-relay.js                    # https://localhost:8000/wallet-live.html (2 channels)
 ```
 
 The browser wallet does the ZK proving locally; a small relay co‑signs as the other members. Join a
@@ -124,7 +124,7 @@ demo to Sepolia + AWS is documented in [`docs/deploy-runbook.md`](docs/deploy-ru
 | **Lattice layer** | `src/regev/` | Regev/LWE keygen, encryption, and the channel‑tx / channel‑update STARKs (`channelTxZKP` / `channelUpdateZKP`) |
 | **Signatures** | `src/poseidon_sig/` | Poseidon‑hash ZK signatures used for channel‑state co‑signing |
 | **Core types** | `src/common/`, `src/ethereum_types/` | `BalanceState`, `ChannelTx`, `Block`, `Transfer`, Merkle trees; Ethereum‑compatible field types |
-| **Wallet** | `src/wallet_core.rs`, `src/wasm_wallet.rs`, `wallet-live.html`, `wallet-relay*.js` | library + WASM entry points + browser UI + co‑signing relay |
+| **Wallet** | `src/wallet_core.rs`, `src/wasm_wallet.rs`, `wallet/` (`wallet-live.html`, `wallet-relay*.js`, …) | library + WASM entry points + browser UI + co‑signing relay |
 | **L1 contracts** | `contracts/src/` | `IntmaxRollup.sol` (deposits, `postBlock`, close game), `@mle/MleVerifier.sol` (WHIR PCS, via the `polygon-plonky2` submodule), `ChannelSettlement*.sol`|
 | **Tests** | `tests/` | e2e rollup (`e2e.rs`), inter‑channel (`inter_channel_{live,cli,e2e,unified_e2e,validity_b2}.rs`), on‑chain (`mle_onchain_e2e.rs`, `onchain_deposit_keystone.rs`), deposit backing (`channel_backing_e2e.rs`) |
 

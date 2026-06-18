@@ -15,9 +15,10 @@ const fs = require('fs');
 const path = require('path');
 const { execFileSync, spawn } = require('child_process');
 
-const ROOT = __dirname;
-const WORK = path.join(ROOT, 'wallet-live-work');
-const CLI = path.join(ROOT, 'target', 'release', 'channel_member');
+const ROOT = __dirname; // wallet/ — serves wallet-live.html + wallet-worker.js
+const REPO = path.join(ROOT, '..'); // repo root — target/, self_certs/, contracts/, pkg/, wallet-live-work/ live here
+const WORK = path.join(REPO, 'wallet-live-work');
+const CLI = path.join(REPO, 'target', 'release', 'channel_member');
 const PORT = 8000;
 const CHANNELS = [7, 8];
 
@@ -141,12 +142,14 @@ app.post('/api/inter/send', (req, res) => {
   } catch (e) { console.error(e.stderr ? String(e.stderr) : (e.message||e)); res.status(500).json({ error: String(e.stderr || e.message || e) }); }
 });
 
-// Static wallet files (wallet-live.html, wallet-worker.js, /pkg/...).
+// Static wallet files: wallet-live.html + wallet-worker.js from wallet/ (ROOT), and the built
+// wasm under /pkg from the repo root (pkg/ is produced by build-wallet-wasm.sh at the repo root).
+app.use('/pkg', express.static(path.join(REPO, 'pkg')));
 app.use(express.static(ROOT));
 
 const opts = {
-  key: fs.readFileSync(path.join(ROOT, 'self_certs', 'key.pem')),
-  cert: fs.readFileSync(path.join(ROOT, 'self_certs', 'cert.pem')),
+  key: fs.readFileSync(path.join(REPO, 'self_certs', 'key.pem')),
+  cert: fs.readFileSync(path.join(REPO, 'self_certs', 'cert.pem')),
 };
 // DURABLE membership across restarts (matches the EC2 relay): a restart does NOT wipe registered
 // delegates / their slots. Pass RESET_CHANNELS=1 to deliberately start brand-new channels.
@@ -177,7 +180,7 @@ function ensureAnvil() {
   if (!rpcUp()) { console.error('anvil did not come up on ' + RPC); process.exit(1); }
 }
 function deployRollup() {
-  const out = sh('forge', ['script', 'script/Deploy.s.sol', '--rpc-url', RPC, '--private-key', ANVIL0, '--broadcast'], { cwd: path.join(ROOT, 'contracts') });
+  const out = sh('forge', ['script', 'script/Deploy.s.sol', '--rpc-url', RPC, '--private-key', ANVIL0, '--broadcast'], { cwd: path.join(REPO, 'contracts') });
   const m = out.match(/IntmaxRollup\s*:\s*(0x[0-9a-fA-F]{40})/);
   if (!m) { console.error('could not parse IntmaxRollup address from forge output'); process.exit(1); }
   return m[1];
