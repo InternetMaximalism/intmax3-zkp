@@ -214,7 +214,8 @@ pub struct InChannelTransferUpdateWitness {
     pub sender_index: usize,
     pub recipient_index: usize,
     /// Set when the verifying member IS the recipient: enables the decryption check
-    /// (abstract2 §3.1 "self-component decryption verification"). Must be paired with `expected_amount`.
+    /// (abstract2 §3.1 "self-component decryption verification"). Must be paired with
+    /// `expected_amount`.
     pub recipient_sk: Option<RegevSk>,
     pub expected_amount: Option<u64>,
 }
@@ -340,12 +341,13 @@ impl InChannelTransferUpdateWitness {
                 self.channel_tx.recipient_pk_g, self.recipient_index
             )));
         }
-        // P3: the SENDER authorization is now the BabyBear hash-sig proof. This witness layer checks
-        // it is PRESENT and that the claimed pk_b is canonical; the full hash-sig verification +
-        // A11 two-key membership binding (m == decompose(tx_digest), pk_b PV == sender_pk_b, and
-        // (pk_g, pk_b, regev_pk) ∈ one registered MemberLeaf) is performed by the channel-tx
-        // acceptance path (`wallet_core::verify_channel_tx_sender_hash_sig`), which has the
-        // authenticated channel member set this circuit-statement layer does not carry.
+        // P3: the SENDER authorization is now the BabyBear hash-sig proof. This witness layer
+        // checks it is PRESENT and that the claimed pk_b is canonical; the full hash-sig
+        // verification + A11 two-key membership binding (m == decompose(tx_digest), pk_b PV
+        // == sender_pk_b, and (pk_g, pk_b, regev_pk) ∈ one registered MemberLeaf) is
+        // performed by the channel-tx acceptance path
+        // (`wallet_core::verify_channel_tx_sender_hash_sig`), which has the authenticated
+        // channel member set this circuit-statement layer does not carry.
         if self.channel_tx.sender_hash_sig.is_empty() {
             return Err(ChannelStateUpdateError::InvalidMemberSignatures(
                 "channel_tx sender hash-sig proof must not be empty".to_string(),
@@ -539,10 +541,8 @@ impl InterChannelSendUpdateWitness {
         )?;
         // Sender slot rebind via the mandatory E-2 channelUpdateZKP. Other slots untouched.
         // The sender slot is located by its pubkey hash in the channel's member list.
-        let sender_index = member_slot_index(
-            &self.channel_record,
-            self.inter_channel_tx.source_pk_g,
-        )?;
+        let sender_index =
+            member_slot_index(&self.channel_record, self.inter_channel_tx.source_pk_g)?;
         for index in 0..MAX_CHANNEL_MEMBERS {
             if index != sender_index {
                 ensure_slot_unchanged(&self.prev_state, &self.next_state, index)?;
@@ -1148,15 +1148,11 @@ fn member_index_pubkey_hash(
     record: &ChannelRecord,
     index: usize,
 ) -> Result<Bytes32, ChannelStateUpdateError> {
-    record
-        .member_pk_gs
-        .get(index)
-        .copied()
-        .ok_or_else(|| {
-            ChannelStateUpdateError::InvalidStateLinkage(format!(
-                "member index {index} out of range (members: {MAX_CHANNEL_MEMBERS})"
-            ))
-        })
+    record.member_pk_gs.get(index).copied().ok_or_else(|| {
+        ChannelStateUpdateError::InvalidStateLinkage(format!(
+            "member index {index} out of range (members: {MAX_CHANNEL_MEMBERS})"
+        ))
+    })
 }
 
 fn verify_next_state_signatures(
@@ -1385,11 +1381,7 @@ mod tests {
             channel_id,
             member_count: 3,
             delegate_count: 0,
-            member_pk_gs: pad_hashes(&[
-                pubkey_hash(10),
-                pubkey_hash(20),
-                pubkey_hash(30),
-            ]),
+            member_pk_gs: pad_hashes(&[pubkey_hash(10), pubkey_hash(20), pubkey_hash(30)]),
             member_pubkeys_root: Bytes32::from_u32_slice(&[1, 1, 1, 1, 0, 0, 0, 0]).unwrap(),
             bp_member_slot: 0,
             special_close_penalty: U256::from(7u32),
@@ -1437,6 +1429,7 @@ mod tests {
                     before_r.0.clone(),
                     before_t.0.clone(),
                 ]),
+                regev_pk_digests: BalanceState::pad_regev_pk_digests(&[]),
                 settled_tx_chain: Bytes32::default(),
                 state_version: 3,
                 pending_adds: BalanceState::pad_pending_adds(&[0, 2, 0]),
@@ -1460,6 +1453,7 @@ mod tests {
                     after_r.clone(),
                     before_t.0.clone(),
                 ]),
+                regev_pk_digests: BalanceState::pad_regev_pk_digests(&[]),
                 settled_tx_chain: Bytes32::default(),
                 state_version: 4,
                 pending_adds: BalanceState::pad_pending_adds(&[0, 3, 0]),

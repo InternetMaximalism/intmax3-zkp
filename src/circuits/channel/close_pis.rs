@@ -62,10 +62,10 @@ pub struct ChannelClosePublicInputs {
     /// the close PI vector (single limb). Anchored in-circuit as the unique count inside the
     /// signed H1 preimage and the member_set_commitment.
     pub member_count: u8,
-    /// Delegate account: number of DELEGATE participants. Appended right AFTER `member_count` (final
-    /// limb). Anchored in-circuit as the unique count inside the signed H1 preimage. NOT part of the
-    /// member_set_commitment (delegates do not co-sign), but bound to H1 so the close circuit
-    /// recomputes the now-`delegate_count`-bearing H1 from the same PI limb.
+    /// Delegate account: number of DELEGATE participants. Appended right AFTER `member_count`
+    /// (final limb). Anchored in-circuit as the unique count inside the signed H1 preimage.
+    /// NOT part of the member_set_commitment (delegates do not co-sign), but bound to H1 so
+    /// the close circuit recomputes the now-`delegate_count`-bearing H1 from the same PI limb.
     pub delegate_count: u8,
 }
 
@@ -281,6 +281,7 @@ mod tests {
                     ciphertext(2),
                     ciphertext(3),
                 ]),
+                regev_pk_digests: BalanceState::pad_regev_pk_digests(&[]),
                 settled_tx_chain: Bytes32::from_u32_slice(&[1, 0, 0, 0, 0, 0, 0, 0]).unwrap(),
                 state_version: 12,
                 pending_adds: BalanceState::pad_pending_adds(&[0, 0, 0]),

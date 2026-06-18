@@ -3,7 +3,7 @@ pragma solidity ^0.8.24;
 
 import {Script, console2} from "forge-std/Script.sol";
 import {IntmaxRollup} from "../src/IntmaxRollup.sol";
-import {ChannelSettlementManager, CloseProofFields} from "../src/ChannelSettlementManager.sol";
+import {ChannelSettlementManager} from "../src/ChannelSettlementManager.sol";
 import {ChannelSettlementVerifier} from "../src/ChannelSettlementVerifier.sol";
 import {MleVerifier} from "@mle/MleVerifier.sol";
 import {FixtureLib} from "./FixtureLib.sol";
@@ -21,6 +21,8 @@ contract RunClose is Script {
     function _vmle() internal view returns (string memory) { return vm.readFile(string.concat(vm.projectRoot(), "/test/data/sepolia_lifecycle_validity_mle.json")); }
     function _wmle() internal view returns (string memory) { return vm.readFile(string.concat(vm.projectRoot(), "/test/data/sepolia_withdrawal_mle.json")); }
     function _payout() internal view returns (string memory) { return vm.readFile(string.concat(vm.projectRoot(), "/test/data/sepolia_withdrawal_payout.json")); }
+    function _closeMle() internal view returns (string memory) { return vm.readFile(string.concat(vm.projectRoot(), "/test/data/sepolia_close_intent_mle.json")); }
+    function _closeIntent() internal view returns (string memory) { return vm.readFile(string.concat(vm.projectRoot(), "/test/data/sepolia_close_intent.json")); }
 
     /// finalize the 3-block chain (submission id via SUB_ID env, default 2 = the 3rd posting round).
     function finalizeStep() external {
@@ -65,93 +67,57 @@ contract RunClose is Script {
         console2.log("withdrawNative OK; pendingWithdrawals[manager]:", _rollup().pendingWithdrawals(address(_manager())));
     }
 
-    /// submitCloseIntent (stub intra-channel consensus; channelFundAmount covers the member split).
+    /// submitCloseIntent with the REAL wrapped-close MLE/WHIR proof (Phase A). The CloseIntent fields
+    /// are read from the proved close descriptor (`sepolia_close_intent.json`), and the proof is the
+    /// wrapped close `MleVerifier.MleProof` from `sepolia_close_intent_mle.json` (publicInputs = the
+    /// 87 raw close limbs the manager's `_runCloseVerify` rebinds). The channel MUST be registered
+    /// with the descriptor's `member_pk_gs` so `registeredMemberSetCommitment()` matches the proof.
     function closeIntentStep() external {
-        ChannelSettlementManager.CloseIntent memory intent = ChannelSettlementManager.CloseIntent({
-            closeNonce: 1, finalEpoch: 9, finalSmallBlockNumber: 22, closeFreezeNonce: 1,
-            finalChannelStateDigest: keccak256("final_state"),
-            finalBalanceStateH1: keccak256("balance_state_h1"),
-            channelFundAmount: vm.envOr("FUND", uint256(3)),
-            channelFundIntmaxStateRoot: keccak256("intmax_root"),
-            burnTxHash: keccak256("burn_tx"),
-            closeWithdrawalDigest: keccak256("burn_backed_close"),
-            snapshotMediumBlockNumber: 77, finalStateVersion: 12,
-            finalSettledTxChain: keccak256("settled_tx_chain")
-        });
-        // Build the stub proof in a separate frame (`_closeProofBytes`) so the 16-field
-        // CloseProofFields construction does not share this function's stack with `intent` and the
-        // broadcast locals (via-IR stack budget).
-        bytes memory proof = _closeProofBytes(intent);
+        ChannelSettlementManager.CloseIntent memory intent = _closeIntentFromDescriptor();
+        MleVerifier.MleProof memory proof = FixtureLib.parseProof(_closeMle());
         vm.startBroadcast();
         _manager().submitCloseIntent(intent, proof);
         vm.stopBroadcast();
         console2.log("submitCloseIntent OK; challengeDeadline:", _manager().getPendingClose().challengeDeadline);
     }
 
-    /// Build the stub close proof bytes: abi.encode(closePIHash(fields)). Re-enters via `this` so
-    /// `intent` arrives as CALLDATA in `_closeProofBytesCd` — reading the 14 shared fields from
-    /// calldata (not a memory struct) is what keeps the 16-field CloseProofFields construction
-    /// within the via-IR stack budget, exactly as the manager's `_runCloseVerify` does.
-    function _closeProofBytes(ChannelSettlementManager.CloseIntent memory intent)
-        internal view returns (bytes memory)
+    /// @dev Build the `CloseIntent` from the proved close descriptor JSON (every field is the proved
+    /// close public input — see generate_close_fixture.rs `CloseIntentDescriptor`).
+    function _closeIntentFromDescriptor()
+        internal view returns (ChannelSettlementManager.CloseIntent memory intent)
     {
-        return this._closeProofBytesCd(intent);
-    }
-
-    /// @dev External so `intent` is calldata (see `_closeProofBytes`). Not part of the deploy flow.
-    function _closeProofBytesCd(ChannelSettlementManager.CloseIntent calldata intent)
-        external view returns (bytes memory)
-    {
-        ChannelSettlementManager mgr = _manager();
-        return abi.encode(
-            _sv().closePIHash(
-                CloseProofFields({
-                    channelId: mgr.channelId(),
-                    closeNonce: intent.closeNonce,
-                    finalEpoch: intent.finalEpoch,
-                    finalSmallBlockNumber: intent.finalSmallBlockNumber,
-                    closeFreezeNonce: intent.closeFreezeNonce,
-                    finalChannelStateDigest: intent.finalChannelStateDigest,
-                    finalBalanceStateH1: intent.finalBalanceStateH1,
-                    channelFundAmount: intent.channelFundAmount,
-                    channelFundIntmaxStateRoot: intent.channelFundIntmaxStateRoot,
-                    burnTxHash: intent.burnTxHash,
-                    closeWithdrawalDigest: intent.closeWithdrawalDigest,
-                    snapshotMediumBlockNumber: intent.snapshotMediumBlockNumber,
-                    finalStateVersion: intent.finalStateVersion,
-                    finalSettledTxChain: intent.finalSettledTxChain,
-                    memberSetCommitment: mgr.registeredMemberSetCommitment(),
-                    memberAndDelegateCount:
-                        (uint16(mgr.activeMemberCount()) << 8) | uint16(mgr.activeDelegateCount())
-                })
-            )
-        );
-    }
-
-    /// submitWithdrawalClaim for member slot 0 (recipient = the EOA, per the manager binding).
-    function withdrawalClaimStep() external {
-        string memory lc = _lc();
-        bytes32 memberHash = vm.parseJsonBytes32Array(lc, ".registration.member_pk_gs")[0];
-        address recipient = msg.sender; // member0 recipient was set to the deployer EOA at deploy
-        uint64 amount = uint64(vm.envOr("CLAIM", uint256(3)));
-        bytes32 digest = _manager().finalizedCloseIntentDigest();
-        ChannelSettlementManager.WithdrawalClaim memory claim = ChannelSettlementManager.WithdrawalClaim({
-            closeIntentDigest: digest,
-            memberPkG: memberHash,
-            recipient: recipient,
-            userAmountDigest: keccak256(abi.encodePacked(memberHash, amount)),
-            amount: amount,
-            withdrawalNullifier: keccak256(abi.encodePacked("wd", digest, memberHash))
+        string memory j = _closeIntent();
+        intent = ChannelSettlementManager.CloseIntent({
+            closeNonce: uint64(vm.parseJsonUint(j, ".close_nonce")),
+            finalEpoch: uint64(vm.parseJsonUint(j, ".final_epoch")),
+            finalSmallBlockNumber: uint64(vm.parseJsonUint(j, ".final_small_block_number")),
+            closeFreezeNonce: uint64(vm.parseJsonUint(j, ".close_freeze_nonce")),
+            finalChannelStateDigest: vm.parseJsonBytes32(j, ".final_channel_state_digest"),
+            finalBalanceStateH1: vm.parseJsonBytes32(j, ".final_balance_state_h1"),
+            channelFundAmount: vm.parseJsonUint(j, ".channel_fund_amount"),
+            channelFundIntmaxStateRoot: vm.parseJsonBytes32(j, ".channel_fund_intmax_state_root"),
+            burnTxHash: vm.parseJsonBytes32(j, ".burn_tx_hash"),
+            closeWithdrawalDigest: vm.parseJsonBytes32(j, ".close_withdrawal_digest"),
+            snapshotMediumBlockNumber: uint64(vm.parseJsonUint(j, ".snapshot_medium_block_number")),
+            finalStateVersion: uint64(vm.parseJsonUint(j, ".final_state_version")),
+            finalSettledTxChain: vm.parseJsonBytes32(j, ".final_settled_tx_chain")
         });
-        bytes memory proof = abi.encode(
-            _sv().withdrawalClaimPIHash(
-                _manager().channelId(), digest, _manager().finalizedBalanceStateH1(), memberHash, recipient,
-                claim.userAmountDigest, claim.amount, claim.withdrawalNullifier
-            )
+    }
+
+    /// submitWithdrawalClaim demo step.
+    ///
+    /// Phase B-D: `verifyWithdrawalClaim` is now a REAL MLE/WHIR verification — the former
+    /// stub-proof construction (`withdrawalClaimPIHash` + abi.encode(bytes32)) no longer produces an
+    /// acceptable proof. Driving this step on a live deployment now requires (a) the
+    /// withdrawal-claim VK initialized via `initializeWithdrawalClaimVk` and (b) a real
+    /// `MleVerifier.MleProof` from `generate_withdrawal_claim_fixture`. That fixture-driven flow is
+    /// exercised in `ChannelSettlementManager.t.sol`; this demo script intentionally no longer
+    /// fabricates a stub proof (it would be rejected). Kept as a documented no-op so the deploy
+    /// script still builds.
+    function withdrawalClaimStep() external pure {
+        revert(
+            "withdrawalClaimStep: Phase B-D requires a real withdrawal-claim MleProof "
+            "(initializeWithdrawalClaimVk + generate_withdrawal_claim_fixture); see the test suite"
         );
-        vm.startBroadcast();
-        _manager().submitWithdrawalClaim(claim, proof);
-        vm.stopBroadcast();
-        console2.log("submitWithdrawalClaim OK; withdrawalCredits[recipient]:", _manager().withdrawalCredits(recipient));
     }
 }

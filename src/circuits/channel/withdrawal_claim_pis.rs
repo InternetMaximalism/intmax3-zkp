@@ -94,10 +94,8 @@ impl WithdrawalClaimWitness {
         {
             return Err(WithdrawalClaimWitnessError::RecipientMismatch);
         }
-        let expected_nullifier = WithdrawalClaim::derive_nullifier(
-            self.close_intent.signing_digest(),
-            self.member.pk_g,
-        );
+        let expected_nullifier =
+            WithdrawalClaim::derive_nullifier(self.close_intent.signing_digest(), self.member.pk_g);
         if expected_nullifier != self.claim.withdrawal_nullifier {
             return Err(WithdrawalClaimWitnessError::NullifierMismatch);
         }
@@ -118,8 +116,8 @@ impl WithdrawalClaimWitness {
         }
         // The claimed ciphertext IS the claimant's slot of the H1-bound balance state. Pad-to-MAX
         // D6 + delegate account: the claimant must be an ACTIVE slot — a co-signing MEMBER
-        // (`0..member_count`) OR a DELEGATE (`member_count..member_count+delegate_count`). Both own a
-        // real, withdrawable balance ciphertext; only padding slots
+        // (`0..member_count`) OR a DELEGATE (`member_count..member_count+delegate_count`). Both own
+        // a real, withdrawable balance ciphertext; only padding slots
         // (`>= member_count+delegate_count`) carry the empty ciphertext and are not withdrawable.
         // SECURITY: H1 (checked above) commits BOTH `member_count` and `delegate_count`, so the
         // active/padding boundary — and thus withdrawal eligibility — is fixed under the members'
@@ -199,8 +197,7 @@ impl WithdrawalClaimPublicInputs {
                 .map_err(|e| e.to_string())?,
             final_balance_state_h1: Bytes32::from_u64_slice(&values[9..17])
                 .map_err(|e| e.to_string())?,
-            member_pk_g: Bytes32::from_u64_slice(&values[17..25])
-                .map_err(|e| e.to_string())?,
+            member_pk_g: Bytes32::from_u64_slice(&values[17..25]).map_err(|e| e.to_string())?,
             recipient: Address::from_u64_slice(&values[25..30]).map_err(|e| e.to_string())?,
             user_amount_digest: Bytes32::from_u64_slice(&values[30..38])
                 .map_err(|e| e.to_string())?,
@@ -261,6 +258,11 @@ mod tests {
             member_count: 3,
             delegate_count: 0,
             enc_balances: BalanceState::pad_enc_balances(&[ct0.clone(), ct1, ct2]),
+            regev_pk_digests: BalanceState::pad_regev_pk_digests(&[
+                Bytes32::from(pk0.poseidon_digest()),
+                Bytes32::from(pk1.poseidon_digest()),
+                Bytes32::from(pk2.poseidon_digest()),
+            ]),
             settled_tx_chain: Bytes32::default(),
             state_version: 6,
             pending_adds: BalanceState::pad_pending_adds(&[0, 0, 0]),
@@ -380,6 +382,11 @@ mod tests {
             member_count: 2,
             delegate_count: 1,
             enc_balances: BalanceState::pad_enc_balances(&[ct0, ct1, ct_d.clone()]),
+            regev_pk_digests: BalanceState::pad_regev_pk_digests(&[
+                Bytes32::from(pk0.poseidon_digest()),
+                Bytes32::from(pk1.poseidon_digest()),
+                Bytes32::from(pk_d.poseidon_digest()),
+            ]),
             settled_tx_chain: Bytes32::default(),
             state_version: 6,
             pending_adds: BalanceState::pad_pending_adds(&[0, 0, 0]),
@@ -456,7 +463,8 @@ mod tests {
         let roundtrip = WithdrawalClaimPublicInputs::from_u64_slice(&pis.to_u64_vec()).unwrap();
         assert_eq!(pis, roundtrip);
 
-        // A padding slot (>= member_count + delegate_count = 3) is still rejected as non-withdrawable.
+        // A padding slot (>= member_count + delegate_count = 3) is still rejected as
+        // non-withdrawable.
         let mut padding = witness;
         padding.member_index = 3;
         assert!(matches!(

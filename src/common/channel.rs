@@ -28,6 +28,9 @@ const CLOSE_INTENT_DOMAIN: u32 = 0x494d4349; // "IMCI"
 const SPECIAL_CLOSE_DOMAIN: u32 = 0x494d5343; // "IMSC"
 const CANCEL_CLOSE_DOMAIN: u32 = 0x494d434e; // "IMCN"
 const POST_CLOSE_CLAIM_DOMAIN: u32 = 0x494d4350; // "IMCP"
+// "IMCK" — domain separator for the post-close shared-native nullifier (HAZARD #8 fix). MUST match
+// the in-circuit derivation in `circuits::channel::post_close_claim_circuit` and the L1 mirror.
+const POST_CLOSE_NULLIFIER_DOMAIN: u32 = 0x494d434b; // "IMCK"
 const WITHDRAWAL_CLAIM_DOMAIN: u32 = 0x494d4357; // "IMCW"
 const CHANNEL_BALANCE_LEAF_DOMAIN: u32 = 0x494d5546; // "IMUF"
 const CHANNEL_RECORD_DOMAIN: u32 = 0x494d4352; // "IMCR"
@@ -177,9 +180,10 @@ pub struct ChannelRecord {
     /// SECURITY (delegate account, Phase 1): `delegate_count` is committed into the IMCR
     /// `signing_digest` IMMEDIATELY AFTER `member_count`, so the member/delegate/padding split is
     /// fixed under the members' channel-record signature. Delegate slots carry a real
-    /// `MemberLeaf{pk_g, pk_b, regev_pk}` identity (so the delegate can send and withdraw); they are
-    /// part of `member_pubkeys_root` exactly like members. The only difference is that delegates do
-    /// NOT appear in the N-of-N co-sign set (those loops stay `0..member_count`; later phases).
+    /// `MemberLeaf{pk_g, pk_b, regev_pk}` identity (so the delegate can send and withdraw); they
+    /// are part of `member_pubkeys_root` exactly like members. The only difference is that
+    /// delegates do NOT appear in the N-of-N co-sign set (those loops stay `0..member_count`;
+    /// later phases).
     pub delegate_count: u8,
     /// Ordered member + delegate identities = SPHINCS+ pubkey hashes, slot order
     /// 0..MAX_CHANNEL_MEMBERS. Active slots (`< member_count+delegate_count`) are nonzero and
@@ -248,16 +252,10 @@ impl ChannelRecord {
                         "member_pk_gs[{i}] (active) must be nonzero"
                     )));
                 }
-                for (j, other) in self
-                    .member_pk_gs
-                    .iter()
-                    .enumerate()
-                    .skip(i + 1)
-                {
+                for (j, other) in self.member_pk_gs.iter().enumerate().skip(i + 1) {
                     if j < active && hash == other {
                         return Err(ChannelError::InvalidChannelRecord(
-                            "active member_pk_gs must be pairwise distinct"
-                                .to_string(),
+                            "active member_pk_gs must be pairwise distinct".to_string(),
                         ));
                     }
                 }
@@ -534,9 +532,10 @@ pub struct ChannelTx {
     pub sender_pk_g: Bytes32,
     /// P3 sender authorization: the Poseidon2-BabyBear hash-signature STARK proof bytes over the
     /// IMPA `signing_digest` (replaces the legacy SPHINCS+ `sender_signature`). The proof's public
-    /// values are `[pk_b(8) ‖ m(16)]`; the off-chain verifier binds `m == decompose(signing_digest)`
-    /// and `pk_b == sender_pk_b`, and confirms `(sender_pk_g, sender_pk_b, sender_regev_pk)` is one
-    /// registered `MemberLeaf` (A11). The IMPA `signing_digest` preimage is UNCHANGED.
+    /// values are `[pk_b(8) ‖ m(16)]`; the off-chain verifier binds `m ==
+    /// decompose(signing_digest)` and `pk_b == sender_pk_b`, and confirms `(sender_pk_g,
+    /// sender_pk_b, sender_regev_pk)` is one registered `MemberLeaf` (A11). The IMPA
+    /// `signing_digest` preimage is UNCHANGED.
     pub sender_hash_sig: Vec<u8>,
     /// The sender's BabyBear hash-sig public key `pk_b` (canonical `Bytes32` digest), bound to the
     /// proof's `pk_b` public value and to the sender's registered `MemberLeaf` (A11).
@@ -818,10 +817,7 @@ impl WithdrawalClaim {
     ///
     /// SECURITY: `close_intent_digest` embeds `channel_id`, so the (channel, close, member) tuple
     /// is unique even though a bare pubkey hash is channel-independent (plan §7 collision-freedom).
-    pub fn derive_nullifier(
-        close_intent_digest: Bytes32,
-        member_pk_g: Bytes32,
-    ) -> Bytes32 {
+    pub fn derive_nullifier(close_intent_digest: Bytes32, member_pk_g: Bytes32) -> Bytes32 {
         hash_words(
             &[
                 vec![WITHDRAWAL_CLAIM_DOMAIN],
@@ -945,6 +941,30 @@ pub struct PostCloseIncomingClaim {
 }
 
 impl PostCloseIncomingClaim {
+    /// Shared-native nullifier `keccak([IMCK, close_intent_digest(8), incoming_tx_hash(8),
+    /// receiver_pk_g(8)])` (HAZARD #8 fix). Deriving it deterministically (rather than trusting an
+    /// attacker-chosen claim field) closes the double-claim / cross-channel-replay surface.
+    ///
+    /// SECURITY: MUST stay byte-identical to the in-circuit derivation in
+    /// `circuits::channel::post_close_claim_circuit` and to the L1 `usedSharedNativeNullifiers`
+    /// key. `close_intent_digest` embeds `channel_id` and `incoming_tx_hash` is the unique
+    /// source-tx hash, so the (close, tx, receiver) tuple is collision-free across channels.
+    pub fn derive_shared_native_nullifier(
+        close_intent_digest: Bytes32,
+        incoming_tx_hash: Bytes32,
+        receiver_pk_g: Bytes32,
+    ) -> Bytes32 {
+        hash_words(
+            &[
+                vec![POST_CLOSE_NULLIFIER_DOMAIN],
+                close_intent_digest.to_u32_vec(),
+                incoming_tx_hash.to_u32_vec(),
+                receiver_pk_g.to_u32_vec(),
+            ]
+            .concat(),
+        )
+    }
+
     pub fn signing_digest(&self) -> Bytes32 {
         hash_words(
             &[
@@ -1197,6 +1217,7 @@ mod tests {
                 ciphertext(2),
                 ciphertext(3),
             ]),
+            regev_pk_digests: BalanceState::pad_regev_pk_digests(&[]),
             settled_tx_chain: Bytes32::default(),
             state_version: version,
             pending_adds: BalanceState::pad_pending_adds(&[0, 0, 0]),
@@ -1252,11 +1273,7 @@ mod tests {
             channel_id: sample_channel_id(),
             member_count: 3,
             delegate_count: 0,
-            member_pk_gs: pad_hashes(&[
-                pubkey_hash(10),
-                pubkey_hash(11),
-                pubkey_hash(12),
-            ]),
+            member_pk_gs: pad_hashes(&[pubkey_hash(10), pubkey_hash(11), pubkey_hash(12)]),
             member_pubkeys_root: Bytes32::from_u32_slice(&[7, 7, 7, 7, 0, 0, 0, 0]).unwrap(),
             bp_member_slot: 0,
             special_close_penalty: U256::from(5u32),

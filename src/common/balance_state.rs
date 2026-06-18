@@ -58,14 +58,27 @@ pub struct BalanceState {
     /// padding. Invariant: `member_count + delegate_count <= MAX_CHANNEL_MEMBERS`.
     ///
     /// SECURITY (delegate account, Phase 1): `delegate_count` is part of the H1 preimage (see
-    /// [`Self::h1`]) IMMEDIATELY AFTER `member_count`, so the member/delegate/padding split is fixed
-    /// by the same all-member signatures that bind the balances. A state could not silently
-    /// re-interpret a delegate slot as a member (or vice-versa) or a padding slot as a delegate.
-    /// Delegate slots are ACTIVE balance slots (non-padding ciphertexts) exactly like member slots.
+    /// [`Self::h1`]) IMMEDIATELY AFTER `member_count`, so the member/delegate/padding split is
+    /// fixed by the same all-member signatures that bind the balances. A state could not
+    /// silently re-interpret a delegate slot as a member (or vice-versa) or a padding slot as
+    /// a delegate. Delegate slots are ACTIVE balance slots (non-padding ciphertexts) exactly
+    /// like member slots.
     pub delegate_count: u8,
     /// One balance ciphertext per slot, in member slot order. Slots `>= member_count` are
     /// `RegevCiphertext::padding()`.
     pub enc_balances: [RegevCiphertext; MAX_CHANNEL_MEMBERS],
+    /// Decryption Stage 1: per-slot Regev public-key Poseidon digests, in member slot order.
+    /// Active slots carry `Bytes32::from(RegevPk::poseidon_digest())` (the SAME injective
+    /// encoding as the validity-side `MemberLeaf.regev_pk_digest`, so decryption Stage 2 can
+    /// bind the witnessed `(a, b)` to this committed value via a one-hot select). Padding
+    /// slots (`>= active`) carry `Bytes32::default()`.
+    ///
+    /// SECURITY: folded into [`Self::h1`] (the signed preimage) IMMEDIATELY AFTER `delegate_count`
+    /// and BEFORE the ciphertext digests, so each member's registered Regev pk is bound by the
+    /// same all-member signatures that bind the balances. This is the H1-commitment
+    /// prerequisite that makes the decryption-core pk binding (MUST-FIX #1) satisfiable
+    /// without deployer trust.
+    pub regev_pk_digests: [Bytes32; MAX_CHANNEL_MEMBERS],
     /// Hash chain over the settles this state has absorbed (genesis = 0x00…00).
     pub settled_tx_chain: Bytes32,
     /// Monotone state counter, +1 on every in-channel AND inter-channel update. Independent of
@@ -97,10 +110,17 @@ impl BalanceState {
         std::array::from_fn(|i| active.get(i).copied().unwrap_or(0))
     }
 
-    /// H1 (detail2 §C-2 + D3, pad-to-MAX deviation D6): keccak over
-    /// `[BALANCE_STATE_DOMAIN, channel_id, member_count, delegate_count, d_0, …, d_{MAX-1},
-    /// settled_tx_chain, split_u64(state_version), pending_adds[0..MAX]]` where
-    /// `d_i = enc_balances[i].digest()`.
+    /// Decryption Stage 1: pad `active` Regev pk digests (len = `member_count + delegate_count`,
+    /// each `Bytes32::from(RegevPk::poseidon_digest())`) to a full `MAX_CHANNEL_MEMBERS`-sized
+    /// array, filling padding slots with `Bytes32::default()`.
+    pub fn pad_regev_pk_digests(active: &[Bytes32]) -> [Bytes32; MAX_CHANNEL_MEMBERS] {
+        std::array::from_fn(|i| active.get(i).copied().unwrap_or_default())
+    }
+
+    /// H1 (detail2 §C-2 + D3, pad-to-MAX deviation D6, decryption Stage 1): keccak over
+    /// `[BALANCE_STATE_DOMAIN, channel_id, member_count, delegate_count, p_0, …, p_{MAX-1},
+    /// d_0, …, d_{MAX-1}, settled_tx_chain, split_u64(state_version), pending_adds[0..MAX]]` where
+    /// `p_i = regev_pk_digests[i]` (8 u32 limbs) and `d_i = enc_balances[i].digest()`.
     ///
     /// PREIMAGE (exact, one u32 word per limb): `member_count` is placed as a single u32 limb
     /// RIGHT AFTER `channel_id`, then `delegate_count` as a single u32 limb RIGHT AFTER
@@ -119,6 +139,12 @@ impl BalanceState {
         // delegate_count is committed as a single u32 limb IMMEDIATELY AFTER member_count, fixing
         // the member/delegate/padding region split under the member signatures (delegate account).
         words.push(self.delegate_count as u32);
+        // Decryption Stage 1: the per-slot Regev pk digests come IMMEDIATELY AFTER delegate_count
+        // and BEFORE the ciphertext digests. MUST stay byte-identical to the in-circuit
+        // `h1_gadget::recompute_h1` (8 u32 limbs per slot, member slot order).
+        for d in &self.regev_pk_digests {
+            words.extend(d.to_u32_vec());
+        }
         for ct in &self.enc_balances {
             words.extend(ct.digest().to_u32_vec());
         }
@@ -168,6 +194,19 @@ impl BalanceState {
                 return Err(ChannelError::InvalidBalanceState(format!(
                     "enc_balances[{index}] is a padding slot (>= member_count+delegate_count \
                      {active}) and must be RegevCiphertext::padding()"
+                )));
+            }
+        }
+        // Decryption Stage 1: padding slots (`>= active`) must carry the default (zero) Regev pk
+        // digest, mirroring the padding canonicality of `enc_balances`/`pending_adds`. A
+        // non-default padding digest would be folded into H1 and could smuggle an
+        // unregistered key past the active accounting. Active-slot digests are arbitrary
+        // (the registered member pk digests).
+        for (index, d) in self.regev_pk_digests.iter().enumerate() {
+            if index >= active && *d != Bytes32::default() {
+                return Err(ChannelError::InvalidBalanceState(format!(
+                    "regev_pk_digests[{index}] is a padding slot (>= member_count+delegate_count \
+                     {active}) and must be Bytes32::default()"
                 )));
             }
         }
@@ -304,6 +343,7 @@ mod tests {
                 ciphertext(2),
                 ciphertext(3),
             ]),
+            regev_pk_digests: BalanceState::pad_regev_pk_digests(&[]),
             settled_tx_chain: Bytes32::default(),
             state_version: 5,
             pending_adds: BalanceState::pad_pending_adds(&[0, 1, 2]),
@@ -370,6 +410,7 @@ mod tests {
             member_count: count,
             delegate_count: 0,
             enc_balances: BalanceState::pad_enc_balances(&active),
+            regev_pk_digests: BalanceState::pad_regev_pk_digests(&[]),
             settled_tx_chain: Bytes32::default(),
             state_version: 5,
             pending_adds: BalanceState::pad_pending_adds(&vec![0u32; count as usize]),
@@ -446,7 +487,10 @@ mod tests {
         let mut overflow = state_with_members(16);
         overflow.delegate_count = 1;
         assert!(
-            matches!(overflow.validate(), Err(ChannelError::InvalidBalanceState(_))),
+            matches!(
+                overflow.validate(),
+                Err(ChannelError::InvalidBalanceState(_))
+            ),
             "member_count + delegate_count > MAX must be rejected"
         );
 
@@ -458,7 +502,10 @@ mod tests {
         bad_pad.enc_balances[3] = ciphertext(50); // the single delegate slot
         bad_pad.enc_balances[5] = ciphertext(51); // a padding slot (>= 4) — must be rejected
         assert!(
-            matches!(bad_pad.validate(), Err(ChannelError::InvalidBalanceState(_))),
+            matches!(
+                bad_pad.validate(),
+                Err(ChannelError::InvalidBalanceState(_))
+            ),
             "non-default slot in the padding region (>= member_count+delegate_count) is rejected"
         );
 

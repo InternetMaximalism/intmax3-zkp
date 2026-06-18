@@ -1,10 +1,11 @@
 //! CLI companion for the browser wallet: runs the CO-SIGNING members so a full in-channel send can
 //! complete end-to-end. Regev channel model, E-1 STARK at Production level.
 //!
-//! DELEGATE DEMO LAYOUT: slots 0,1,2 = three CLI-controlled CO-SIGNING MEMBERS; slot 3 = the browser,
-//! a send-only DELEGATE (it has a balance + sends with its own BabyBear A11 hash-sig, but does NOT
-//! co-sign channel state — the N-of-N is the three members). So `init` produces a FULLY-SIGNED
-//! genesis (the 3 members sign; the delegate does not), and the browser imports it directly.
+//! DELEGATE DEMO LAYOUT: slots 0,1,2 = three CLI-controlled CO-SIGNING MEMBERS; slot 3 = the
+//! browser, a send-only DELEGATE (it has a balance + sends with its own BabyBear A11 hash-sig, but
+//! does NOT co-sign channel state — the N-of-N is the three members). So `init` produces a
+//! FULLY-SIGNED genesis (the 3 members sign; the delegate does not), and the browser imports it
+//! directly.
 //!
 //! State (`cli_state.json` in the cwd) stores only reproducible seeds + the public snapshot; the
 //! controlled members' keys and their genesis balance witnesses are regenerated deterministically
@@ -13,8 +14,8 @@
 //!
 //! Commands:
 //!   init <browser_delegate_contribution.json> <out_signed_snapshot.json>
-//!   add-genesis-sig <browser_member_sig.json> <out_snapshot.json>   (legacy member-mode; unused by the delegate demo)
-//!   send <from_slot> <to_slot> <amount> <out_payload.json>
+//!   add-genesis-sig <browser_member_sig.json> <out_snapshot.json>   (legacy member-mode; unused by
+//! the delegate demo)   send <from_slot> <to_slot> <amount> <out_payload.json>
 //!   cosign <payload_or_state.json> <out_state.json>
 //!   finalize <fully_signed_state.json>
 //!   balance
@@ -43,16 +44,16 @@ use intmax3_zkp::{
     },
     constants::{MAX_CHANNEL_MEMBERS, TOKEN_UNIT},
     ethereum_types::{
-        address::Address, bytes32::Bytes32, u256::U256, u32limb_trait::U32LimbTrait as _,
+        address::Address, bytes32::Bytes32, u32limb_trait::U32LimbTrait as _, u256::U256,
     },
     regev::{RegevCiphertext, RegevPk, RegevSecurityLevel, encrypt_amount},
     utils::serialize::{deserialize_verifier_data, serialize_verifier_data},
     wallet_core::{
         BuiltInterChannelCredit, BuiltSend, ChannelBalanceAttestation, ChannelSnapshot,
         InterChannelDebitPayload, InterChannelTransferDescriptor, MemberInfo, MemberKeys,
-        RefreshPayload, SendPayload, add_signature, assemble_genesis_state_backed, build_record,
-        build_inter_channel_credit, build_send, decrypt_balance, sign_state, sign_state_if_backed,
-        verify_all_signatures, verify_inter_channel_credit_transition,
+        RefreshPayload, SendPayload, add_signature, assemble_genesis_state_backed,
+        build_inter_channel_credit, build_record, build_send, decrypt_balance, sign_state,
+        sign_state_if_backed, verify_all_signatures, verify_inter_channel_credit_transition,
         verify_inter_channel_send_transition, verify_refresh_transition, verify_send_transition,
         verify_snapshot,
     },
@@ -71,12 +72,16 @@ const BD: usize = 2;
 
 const LEVEL: RegevSecurityLevel = RegevSecurityLevel::Production;
 const STATE_FILE: &str = "cli_state.json";
-// Which channel this CLI process operates. The relay runs ONE process per channel (channels 7 and 8),
-// each in its own working directory, selecting the channel via the `INTMAX_CHANNEL` env var. Defaults
-// to 7 for standalone use. Channel id is part of the deposit recipient + the channel record, so two
-// channels are fully distinct on-chain identities (each backed by its own real deposit).
+// Which channel this CLI process operates. The relay runs ONE process per channel (channels 7 and
+// 8), each in its own working directory, selecting the channel via the `INTMAX_CHANNEL` env var.
+// Defaults to 7 for standalone use. Channel id is part of the deposit recipient + the channel
+// record, so two channels are fully distinct on-chain identities (each backed by its own real
+// deposit).
 fn channel_id_env() -> u32 {
-    std::env::var("INTMAX_CHANNEL").ok().and_then(|s| s.parse().ok()).unwrap_or(7)
+    std::env::var("INTMAX_CHANNEL")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(7)
 }
 const BP_SLOT: u8 = 0;
 // detail2 §F-1 deposit backing: produced ONCE by `setup-backing`, consumed by the co-sign gate.
@@ -87,7 +92,11 @@ const BALANCE_VD_FILE: &str = "balance_vd.bin"; // cached balance verifier data 
 // slot 3 = the browser, a send-only DELEGATE (delegate_count = 1).
 const CLI_SLOTS: &[u8] = &[0, 1, 2];
 // Genesis allocations in BASE UNITS (TOKEN_DECIMALS = 6): 40 / 30 / 20 tokens.
-const CLI_GENESIS: &[(u8, u64)] = &[(0, 40 * TOKEN_UNIT), (1, 30 * TOKEN_UNIT), (2, 20 * TOKEN_UNIT)];
+const CLI_GENESIS: &[(u8, u64)] = &[
+    (0, 40 * TOKEN_UNIT),
+    (1, 30 * TOKEN_UNIT),
+    (2, 20 * TOKEN_UNIT),
+];
 const BROWSER_DELEGATE_SLOT: u8 = 3;
 const DELEGATE_COUNT: u8 = 1;
 // The first browser delegate's genesis allocation (BASE UNITS) out of the deposited fund (so
@@ -110,15 +119,16 @@ struct CliState {
     /// REPLAY LEDGER (inter-channel invariant 6): the set of inter-channel `tx_hash`es already
     /// CREDITED into THIS channel (the DESTINATION / B side). A credit is applied at most once; a
     /// descriptor whose `tx_hash` is already present is REFUSED (fail-closed). Persisted in
-    /// `cli_state.json` so the ledger survives across CLI invocations (each channel runs as its own
-    /// process). Defaults to empty for states written before this field existed (back-compat with
-    /// already-deployed cli_state.json files).
+    /// `cli_state.json` so the ledger survives across CLI invocations (each channel runs as its
+    /// own process). Defaults to empty for states written before this field existed
+    /// (back-compat with already-deployed cli_state.json files).
     #[serde(default)]
     applied_tx_hashes: Vec<Bytes32>,
-    /// SPENT LEDGER (A side): the set of inter-channel `tx_hash`es already DEBITED out of THIS channel
-    /// as the SOURCE. A debit is applied at most once; if a tx_hash is already present the combined
-    /// `cosign-inter-transfer` REFUSES (fail-closed). This is the A-side counterpart to
-    /// `applied_tx_hashes` — together they make a transfer atomic AND single-use on both ends.
+    /// SPENT LEDGER (A side): the set of inter-channel `tx_hash`es already DEBITED out of THIS
+    /// channel as the SOURCE. A debit is applied at most once; if a tx_hash is already present
+    /// the combined `cosign-inter-transfer` REFUSES (fail-closed). This is the A-side
+    /// counterpart to `applied_tx_hashes` — together they make a transfer atomic AND
+    /// single-use on both ends.
     #[serde(default)]
     spent_tx_hashes: Vec<Bytes32>,
 }
@@ -172,9 +182,11 @@ fn save_state(state: &CliState) {
 /// Backed-genesis parameters produced once by `setup-backing` (detail2 §F-1).
 #[derive(Serialize, Deserialize)]
 struct ChannelBacking {
-    /// hex of the deposit settle-history the channel's balance proof folded in (§F-1 reconciliation).
+    /// hex of the deposit settle-history the channel's balance proof folded in (§F-1
+    /// reconciliation).
     settled_tx_chain: String,
-    /// hex anchor of the channel fund to intmax state (close-time L1 check; NOT the §F-1 co-sign gate).
+    /// hex anchor of the channel fund to intmax state (close-time L1 check; NOT the §F-1 co-sign
+    /// gate).
     intmax_state_root: String,
     /// the deposited native value backing the channel (== Σ genesis balances).
     fund: u64,
@@ -193,10 +205,16 @@ fn backing_exists() -> bool {
 
 /// Load the cached deposit backing: the small `balance_vd` (the gate needs only this — not the
 /// prover), the channel's balance-proof attestation, and the backed-genesis params.
-fn load_backing() -> (VerifierCircuitData<BF, BC, BD>, ChannelBalanceAttestation, ChannelBacking) {
+fn load_backing() -> (
+    VerifierCircuitData<BF, BC, BD>,
+    ChannelBalanceAttestation,
+    ChannelBacking,
+) {
     if !backing_exists() {
-        die("no deposit backing found: run `channel_member setup-backing` first (detail2 §F-1). \
-             Refusing to operate an unbacked channel.");
+        die(
+            "no deposit backing found: run `channel_member setup-backing` first (detail2 §F-1). \
+             Refusing to operate an unbacked channel.",
+        );
     }
     let vd_bytes =
         fs::read(BALANCE_VD_FILE).unwrap_or_else(|e| die(format!("read {BALANCE_VD_FILE}: {e}")));
@@ -205,7 +223,13 @@ fn load_backing() -> (VerifierCircuitData<BF, BC, BD>, ChannelBalanceAttestation
     let proof =
         fs::read(ATTESTATION_FILE).unwrap_or_else(|e| die(format!("read {ATTESTATION_FILE}: {e}")));
     let backing: ChannelBacking = read_json(BACKING_FILE);
-    (balance_vd, ChannelBalanceAttestation { balance_proof: proof }, backing)
+    (
+        balance_vd,
+        ChannelBalanceAttestation {
+            balance_proof: proof,
+        },
+        backing,
+    )
 }
 
 // anvil dev account[0] private key — a PUBLIC throwaway (safe on the CLI; NEVER a real key).
@@ -226,7 +250,10 @@ fn cast(args: &[&str]) -> String {
         .output()
         .unwrap_or_else(|e| die(format!("cast failed to start ({e}); is foundry installed?")));
     if !out.status.success() {
-        die(format!("cast {args:?} failed: {}", String::from_utf8_lossy(&out.stderr)));
+        die(format!(
+            "cast {args:?} failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        ));
     }
     String::from_utf8_lossy(&out.stdout).to_string()
 }
@@ -236,23 +263,23 @@ fn abi_word(data: &str, i: usize) -> &str {
     &data[i * 64..(i + 1) * 64]
 }
 
-/// ONE-TIME setup: fund the channel with a REAL L1 deposit and cache its base-layer balance proof as
-/// the channel's deposit backing (detail2 §F-1). Builds the `BalanceProcessor` (~25s), proves the
-/// deposit, and writes the attestation + verifier data + backed-genesis params. Run BEFORE `init`.
-/// `setup-backing [fund]` (default = Σ CLI member genesis balances).
+/// ONE-TIME setup: fund the channel with a REAL L1 deposit and cache its base-layer balance proof
+/// as the channel's deposit backing (detail2 §F-1). Builds the `BalanceProcessor` (~25s), proves
+/// the deposit, and writes the attestation + verifier data + backed-genesis params. Run BEFORE
+/// `init`. `setup-backing [fund]` (default = Σ CLI member genesis balances).
 fn cmd_setup_backing(args: &[String]) {
     use rand::{SeedableRng as _, rngs::StdRng as DepRng};
-    let rpc = args
-        .get(1)
-        .cloned()
-        .unwrap_or_else(|| die("setup-backing needs <rpc_url> <rollup_addr> [fund] (real on-chain deposit)"));
+    let rpc = args.get(1).cloned().unwrap_or_else(|| {
+        die("setup-backing needs <rpc_url> <rollup_addr> [fund] (real on-chain deposit)")
+    });
     let rollup = args
         .get(2)
         .cloned()
         .unwrap_or_else(|| die("setup-backing needs <rpc_url> <rollup_addr> [fund]"));
-    let fund: u64 = args.get(3).and_then(|s| s.parse().ok()).unwrap_or_else(|| {
-        CLI_GENESIS.iter().map(|(_, a)| *a).sum::<u64>() + DELEGATE_GENESIS
-    });
+    let fund: u64 = args
+        .get(3)
+        .and_then(|s| s.parse().ok())
+        .unwrap_or_else(|| CLI_GENESIS.iter().map(|(_, a)| *a).sum::<u64>() + DELEGATE_GENESIS);
 
     eprintln!("setup-backing: building the balance prover (one-time, ~25s)…");
     let spend = SpendCircuit::<BF, BC, BD>::new();
@@ -260,7 +287,8 @@ fn cmd_setup_backing(args: &[String]) {
     let bwgen = BlockWitnessGeneratorHandle::new(BlockWitnessGenerator::new(&[1, 4, 512]));
 
     let mut rng = DepRng::seed_from_u64(0x00DE_C0DE ^ channel_id_env() as u64);
-    let channel_id = ChannelId::new(channel_id_env() as u64).unwrap_or_else(|e| die(format!("{e:?}")));
+    let channel_id =
+        ChannelId::new(channel_id_env() as u64).unwrap_or_else(|e| die(format!("{e:?}")));
     let salt = Salt::rand(&mut rng);
     let mut bwg = BalanceWitnessGenerator::new(channel_id, salt, bwgen.clone(), &bp)
         .unwrap_or_else(|e| die(format!("balance witness generator: {e:?}")));
@@ -271,14 +299,26 @@ fn cmd_setup_backing(args: &[String]) {
 
     // REAL on-chain ETH deposit (detail2 §F-1 backing ORIGIN — no fabrication): the local chain
     // really escrows the value, and we read the deposit back from the receipt.
-    eprintln!("setup-backing: real ETH deposit on {rpc} → IntmaxRollup {rollup} (amount {amount})…");
+    eprintln!(
+        "setup-backing: real ETH deposit on {rpc} → IntmaxRollup {rollup} (amount {amount})…"
+    );
     let recipient_hex = recipient.to_hex();
     let deposit_key = deposit_key_env();
     let send_out = cast(&[
-        "send", &rollup, "deposit(bytes32,uint32,uint256,bytes32)", &recipient_hex, "0",
+        "send",
+        &rollup,
+        "deposit(bytes32,uint32,uint256,bytes32)",
+        &recipient_hex,
+        "0",
         &amount.to_string(),
         "0x0000000000000000000000000000000000000000000000000000000000000000",
-        "--value", &amount.to_string(), "--private-key", &deposit_key, "--rpc-url", &rpc, "--json",
+        "--value",
+        &amount.to_string(),
+        "--private-key",
+        &deposit_key,
+        "--rpc-url",
+        &rpc,
+        "--json",
     ]);
     let txhash = send_out
         .split("\"transactionHash\":\"")
@@ -299,8 +339,9 @@ fn cmd_setup_backing(args: &[String]) {
     let onchain_chain = Bytes32::from_hex(&format!("0x{}", abi_word(data, 5)))
         .unwrap_or_else(|e| die(format!("parse on-chain depositHashChain: {e:?}")));
 
-    // KEYSTONE (fail-closed): the Rust deposit MUST reproduce the on-chain depositHashChain, else the
-    // witness would not mirror the real deposit. Refuse to back the channel on any mismatch.
+    // KEYSTONE (fail-closed): the Rust deposit MUST reproduce the on-chain depositHashChain, else
+    // the witness would not mirror the real deposit. Refuse to back the channel on any
+    // mismatch.
     let rust_deposit = Deposit {
         deposit_index: Default::default(),
         block_number: Default::default(),
@@ -311,14 +352,25 @@ fn cmd_setup_backing(args: &[String]) {
         aux_data: Bytes32::default(),
     };
     if rust_deposit.hash_with_prev_hash(Bytes32::default()) != onchain_chain {
-        die("on-chain depositHashChain != Rust deposit hash — refusing to back the channel with an unreconciled deposit");
+        die(
+            "on-chain depositHashChain != Rust deposit hash — refusing to back the channel with an unreconciled deposit",
+        );
     }
-    eprintln!("setup-backing: on-chain deposit reconciled (depositHashChain {}).", onchain_chain.to_hex());
+    eprintln!(
+        "setup-backing: on-chain deposit reconciled (depositHashChain {}).",
+        onchain_chain.to_hex()
+    );
 
     // Feed the REAL on-chain deposit fields into the witness generator → real-deposit-backed proof.
     bwgen
         .borrow_mut()
-        .add_deposit(depositor, recipient, 0, U256::from(amount as u32), Bytes32::default())
+        .add_deposit(
+            depositor,
+            recipient,
+            0,
+            U256::from(amount as u32),
+            Bytes32::default(),
+        )
         .unwrap_or_else(|e| die(format!("queue deposit: {e:?}")));
     bwgen
         .borrow_mut()
@@ -326,7 +378,10 @@ fn cmd_setup_backing(args: &[String]) {
         .unwrap_or_else(|e| die(format!("apply deposit block: {e:?}")));
 
     let dw = bwg
-        .receive_deposit_witness(&ReceiveDepositData { receiver: recipient, deposit_salt })
+        .receive_deposit_witness(&ReceiveDepositData {
+            receiver: recipient,
+            deposit_salt,
+        })
         .unwrap_or_else(|e| die(format!("receive deposit witness: {e:?}")));
     eprintln!("setup-backing: proving the deposit…");
     let proof = bp
@@ -334,18 +389,22 @@ fn cmd_setup_backing(args: &[String]) {
         .unwrap_or_else(|e| die(format!("prove deposit: {e:?}")));
     bwg.commit_receive_deposit(&proof, &dw)
         .unwrap_or_else(|e| die(format!("commit deposit: {e:?}")));
-    let pis = bwg.get_public_inputs().unwrap_or_else(|e| die(format!("balance pis: {e:?}")));
+    let pis = bwg
+        .get_public_inputs()
+        .unwrap_or_else(|e| die(format!("balance pis: {e:?}")));
 
     fs::write(ATTESTATION_FILE, proof.to_bytes())
         .unwrap_or_else(|e| die(format!("write {ATTESTATION_FILE}: {e}")));
     let vd_bytes = serialize_verifier_data(&bp.balance_vd())
         .unwrap_or_else(|e| die(format!("serialize balance_vd: {e}")));
-    fs::write(BALANCE_VD_FILE, vd_bytes).unwrap_or_else(|e| die(format!("write {BALANCE_VD_FILE}: {e}")));
+    fs::write(BALANCE_VD_FILE, vd_bytes)
+        .unwrap_or_else(|e| die(format!("write {BALANCE_VD_FILE}: {e}")));
     write_json(
         BACKING_FILE,
         &ChannelBacking {
             settled_tx_chain: pis.settled_tx_chain.to_hex(),
-            // L1-close anchor (registration-time procedure is detail2 §K-4, open); NOT the §F-1 gate.
+            // L1-close anchor (registration-time procedure is detail2 §K-4, open); NOT the §F-1
+            // gate.
             intmax_state_root: Bytes32::default().to_hex(),
             fund,
             rollup: rollup.clone(),
@@ -382,15 +441,20 @@ fn main() {
     }
 }
 
-/// `init` = CREATE-OR-JOIN. The first call CREATES the channel (3 members + this delegate at slot 3,
-/// genesis v0). Each later call JOINS the existing channel as a NEW delegate at the next free slot —
-/// a state-PRESERVING membership add: the CURRENT balances and any sends already made are kept, the
-/// new delegate's slot is added, `state_version` is bumped, and the 3 members re-sign. So joining
-/// AFTER sends does NOT wipe them, and multiple browsers are DISTINCT delegates (slots 3,4,5,…) in
-/// the SAME channel.
+/// `init` = CREATE-OR-JOIN. The first call CREATES the channel (3 members + this delegate at slot
+/// 3, genesis v0). Each later call JOINS the existing channel as a NEW delegate at the next free
+/// slot — a state-PRESERVING membership add: the CURRENT balances and any sends already made are
+/// kept, the new delegate's slot is added, `state_version` is bumped, and the 3 members re-sign. So
+/// joining AFTER sends does NOT wipe them, and multiple browsers are DISTINCT delegates (slots
+/// 3,4,5,…) in the SAME channel.
 fn cmd_init(args: &[String]) {
-    let contrib_path = args.get(1).unwrap_or_else(|| die("init needs <browser_contribution.json>"));
-    let out_path = args.get(2).map(String::as_str).unwrap_or("channel_snapshot.json");
+    let contrib_path = args
+        .get(1)
+        .unwrap_or_else(|| die("init needs <browser_contribution.json>"));
+    let out_path = args
+        .get(2)
+        .map(String::as_str)
+        .unwrap_or("channel_snapshot.json");
     let contrib: BrowserContribution = read_json(contrib_path);
     let new_delegate = MemberInfo {
         slot: 0, // assigned by create/join
@@ -402,21 +466,25 @@ fn cmd_init(args: &[String]) {
     };
     let new_ct = contrib.genesis_ct.clone();
 
-    // IDEMPOTENT RE-JOIN (pk_g dedup): if a member with this EXACT pk_g already exists, the join is a
-    // no-op — return that member's existing slot and the CURRENT snapshot UNCHANGED. Re-running `init`
-    // with the same browser contribution (e.g. a retried request, or a browser that lost its local
-    // copy) must NOT allocate a new slot, bump state_version, or grow delegate_count: doing so caused
-    // slot collisions on re-join. Only a genuinely NEW pk_g advances to the next free slot.
+    // IDEMPOTENT RE-JOIN (pk_g dedup): if a member with this EXACT pk_g already exists, the join is
+    // a no-op — return that member's existing slot and the CURRENT snapshot UNCHANGED.
+    // Re-running `init` with the same browser contribution (e.g. a retried request, or a
+    // browser that lost its local copy) must NOT allocate a new slot, bump state_version, or
+    // grow delegate_count: doing so caused slot collisions on re-join. Only a genuinely NEW
+    // pk_g advances to the next free slot.
     if std::path::Path::new(STATE_FILE).exists() {
         let prev = load_state();
-        if let Some(existing) =
-            prev.snapshot.members.iter().find(|m| m.pk_g == new_delegate.pk_g)
+        if let Some(existing) = prev
+            .snapshot
+            .members
+            .iter()
+            .find(|m| m.pk_g == new_delegate.pk_g)
         {
             let slot = existing.slot;
             let dc = prev.snapshot.record.delegate_count;
             let v = prev.snapshot.state.balance_state.state_version;
-            // Re-publish the UNCHANGED snapshot so the caller's out_path is current; cli_state is left
-            // exactly as-is (no state bump, no ledger change).
+            // Re-publish the UNCHANGED snapshot so the caller's out_path is current; cli_state is
+            // left exactly as-is (no state bump, no ledger change).
             write_json(out_path, &prev.snapshot);
             println!(
                 "delegate at slot {slot} (idempotent re-join: pk_g already present; member_count=3, delegate_count={dc}, state_version={v}). Browser: wallet_import_channel(<{out_path}>)."
@@ -439,7 +507,11 @@ fn cmd_init(args: &[String]) {
 
     verify_all_signatures(&record, &members, &state)
         .unwrap_or_else(|e| die(format!("state not fully/validly member-signed: {e}")));
-    let snapshot = ChannelSnapshot { record, state, members };
+    let snapshot = ChannelSnapshot {
+        record,
+        state,
+        members,
+    };
     let dc = snapshot.record.delegate_count;
     let v = snapshot.state.balance_state.state_version;
     save_state(&CliState {
@@ -449,11 +521,17 @@ fn cmd_init(args: &[String]) {
         spent_tx_hashes: prior_spent,
     });
     write_json(out_path, &snapshot);
-    println!("delegate at slot {slot} (member_count=3, delegate_count={dc}, state_version={v}). Browser: wallet_import_channel(<{out_path}>).");
+    println!(
+        "delegate at slot {slot} (member_count=3, delegate_count={dc}, state_version={v}). Browser: wallet_import_channel(<{out_path}>)."
+    );
 }
 
 /// The three CLI co-signing members (deterministic keys + genesis balances).
-fn cli_members() -> (Vec<MemberInfo>, Vec<(u8, RegevCiphertext)>, Vec<ControlledMember>) {
+fn cli_members() -> (
+    Vec<MemberInfo>,
+    Vec<(u8, RegevCiphertext)>,
+    Vec<ControlledMember>,
+) {
     let mut members = Vec::new();
     let mut enc = Vec::new();
     let mut controlled = Vec::new();
@@ -461,12 +539,26 @@ fn cli_members() -> (Vec<MemberInfo>, Vec<(u8, RegevCiphertext)>, Vec<Controlled
         let keygen_seed = 0xC1_0000 + slot as u64;
         let keys = keys_for(keygen_seed);
         members.push(member_info_for(slot, &keys));
-        let amount = CLI_GENESIS.iter().find(|(s, _)| *s == slot).map(|(_, a)| *a).unwrap();
+        let amount = CLI_GENESIS
+            .iter()
+            .find(|(s, _)| *s == slot)
+            .map(|(_, a)| *a)
+            .unwrap();
         let balance_seed = 0xBA_0000 + slot as u64;
-        let (ct, _w) = encrypt_amount(&mut StdRng::seed_from_u64(balance_seed), &keys.regev_pk, amount)
-            .unwrap_or_else(|e| die(e));
+        let (ct, _w) = encrypt_amount(
+            &mut StdRng::seed_from_u64(balance_seed),
+            &keys.regev_pk,
+            amount,
+        )
+        .unwrap_or_else(|e| die(e));
         enc.push((slot, ct));
-        controlled.push(ControlledMember { slot, keygen_seed, balance_amount: amount, balance_seed, has_witness: true });
+        controlled.push(ControlledMember {
+            slot,
+            keygen_seed,
+            balance_amount: amount,
+            balance_seed,
+            has_witness: true,
+        });
     }
     (members, enc, controlled)
 }
@@ -475,7 +567,13 @@ fn cli_members() -> (Vec<MemberInfo>, Vec<(u8, RegevCiphertext)>, Vec<Controlled
 fn create_channel(
     mut nd: MemberInfo,
     new_ct: RegevCiphertext,
-) -> (ChannelRecord, ChannelState, Vec<MemberInfo>, Vec<ControlledMember>, u8) {
+) -> (
+    ChannelRecord,
+    ChannelState,
+    Vec<MemberInfo>,
+    Vec<ControlledMember>,
+    u8,
+) {
     let _ = DELEGATE_COUNT; // (delegate_count is now dynamic; first channel has 1)
     nd.slot = BROWSER_DELEGATE_SLOT;
     let (mut members, mut enc, controlled) = cli_members();
@@ -487,16 +585,29 @@ fn create_channel(
     let encs: Vec<RegevCiphertext> = enc.into_iter().map(|(_, c)| c).collect();
 
     // detail2 §F-1: the genesis is funded by the REAL L1 deposit backing (no self-minted fund).
-    // `fund` == the deposited native value; `settled_tx_chain` ties the state to that deposit so the
-    // co-sign gate reconciles. Σ(genesis balances) == fund (CLI members + delegate allocation).
+    // `fund` == the deposited native value; `settled_tx_chain` ties the state to that deposit so
+    // the co-sign gate reconciles. Σ(genesis balances) == fund (CLI members + delegate
+    // allocation).
     let (balance_vd, att, backing) = load_backing();
     let settled = Bytes32::from_hex(&backing.settled_tx_chain)
         .unwrap_or_else(|e| die(format!("backing settled_tx_chain: {e:?}")));
     let intmax_root = Bytes32::from_hex(&backing.intmax_state_root)
         .unwrap_or_else(|e| die(format!("backing intmax_state_root: {e:?}")));
-    let mut state =
-        assemble_genesis_state_backed(&record, &encs, backing.fund, settled, intmax_root)
-            .unwrap_or_else(|e| die(e));
+    // Decryption Stage 1: the per-active-slot Regev pk Poseidon digests, in the SAME slot order as
+    // `members`/`encs` (members then delegates), folded into the signed genesis H1.
+    let regev_pk_digests: Vec<Bytes32> = members
+        .iter()
+        .map(|m| Bytes32::from(m.regev_pk.poseidon_digest()))
+        .collect();
+    let mut state = assemble_genesis_state_backed(
+        &record,
+        &encs,
+        &regev_pk_digests,
+        backing.fund,
+        settled,
+        intmax_root,
+    )
+    .unwrap_or_else(|e| die(e));
 
     // CHECK-AND-SIGN (detail2 §3.1, atomic): each member signs the genesis ONLY IF its
     // settled_tx_chain matches the held deposit backing — fail-closed otherwise (never signs).
@@ -515,16 +626,27 @@ fn create_channel(
     (record, state, members, controlled, BROWSER_DELEGATE_SLOT)
 }
 
-/// JOIN the existing channel as a NEW delegate, PRESERVING the current state (balances + sends). The
-/// new delegate's slot is added with its genesis ciphertext, `delegate_count` and `state_version` are
-/// bumped, and the 3 members re-sign the new state. Existing delegates' ciphertexts are untouched, so
-/// their browser send-witnesses stay valid.
+/// JOIN the existing channel as a NEW delegate, PRESERVING the current state (balances + sends).
+/// The new delegate's slot is added with its genesis ciphertext, `delegate_count` and
+/// `state_version` are bumped, and the 3 members re-sign the new state. Existing delegates'
+/// ciphertexts are untouched, so their browser send-witnesses stay valid.
 fn join_delegate(
     mut nd: MemberInfo,
     new_ct: RegevCiphertext,
-) -> (ChannelRecord, ChannelState, Vec<MemberInfo>, Vec<ControlledMember>, u8) {
+) -> (
+    ChannelRecord,
+    ChannelState,
+    Vec<MemberInfo>,
+    Vec<ControlledMember>,
+    u8,
+) {
     let prev = load_state();
-    let existing = prev.snapshot.members.iter().filter(|m| m.slot >= BROWSER_DELEGATE_SLOT).count();
+    let existing = prev
+        .snapshot
+        .members
+        .iter()
+        .filter(|m| m.slot >= BROWSER_DELEGATE_SLOT)
+        .count();
     let new_slot = BROWSER_DELEGATE_SLOT + existing as u8;
     if CLI_SLOTS.len() + existing + 1 > MAX_CHANNEL_MEMBERS {
         die("channel is full (member_count + delegate_count would exceed MAX_CHANNEL_MEMBERS)");
@@ -534,10 +656,12 @@ fn join_delegate(
     members.push(nd);
     members.sort_by_key(|m| m.slot);
     let new_delegate_count = (existing + 1) as u8;
-    let record = build_record(channel_id_env(), &members, BP_SLOT, new_delegate_count).unwrap_or_else(|e| die(e));
+    let record = build_record(channel_id_env(), &members, BP_SLOT, new_delegate_count)
+        .unwrap_or_else(|e| die(e));
 
-    // Membership add: keep the CURRENT balance state (preserving every slot's ciphertext + any sends),
-    // add the new delegate's slot, bump delegate_count + state_version, clear sigs, members re-sign.
+    // Membership add: keep the CURRENT balance state (preserving every slot's ciphertext + any
+    // sends), add the new delegate's slot, bump delegate_count + state_version, clear sigs,
+    // members re-sign.
     let mut state = prev.snapshot.state.clone();
     state.prev_digest = state.digest;
     state.balance_state.delegate_count = new_delegate_count;
@@ -547,9 +671,10 @@ fn join_delegate(
     state.member_signatures = Vec::new();
     let mut state = state.with_computed_digest();
     // SECURITY (§F-1): backing is anchored at GENESIS; a delegate join preserves the CURRENT state
-    // (which may already have an ADVANCED settled_tx_chain from prior inter-channel sends), so it can
-    // no longer equal the fixed genesis backing — re-checking it would wrongly reject joins after any
-    // inter-channel send. Plain N-of-N re-sign of the membership add; same rationale as cmd_cosign.
+    // (which may already have an ADVANCED settled_tx_chain from prior inter-channel sends), so it
+    // can no longer equal the fixed genesis backing — re-checking it would wrongly reject joins
+    // after any inter-channel send. Plain N-of-N re-sign of the membership add; same rationale
+    // as cmd_cosign.
     for c in &prev.controlled {
         let sig = sign_state(&keys_for(c.keygen_seed), c.slot, &state)
             .unwrap_or_else(|e| die(format!("sign: {e:?}")));
@@ -564,11 +689,17 @@ fn join_delegate(
 fn cmd_gen_contribution(args: &[String]) {
     let balance: u64 = args.get(1).and_then(|s| s.parse().ok()).unwrap_or(50);
     let seed: u64 = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(1);
-    let out = args.get(3).map(String::as_str).unwrap_or("contribution.json");
+    let out = args
+        .get(3)
+        .map(String::as_str)
+        .unwrap_or("contribution.json");
     let keys = MemberKeys::generate(&mut StdRng::seed_from_u64(seed));
-    let (ct, _w) =
-        encrypt_amount(&mut StdRng::seed_from_u64(seed ^ 0xA11CE), &keys.regev_pk, balance)
-            .unwrap_or_else(|e| die(e));
+    let (ct, _w) = encrypt_amount(
+        &mut StdRng::seed_from_u64(seed ^ 0xA11CE),
+        &keys.regev_pk,
+        balance,
+    )
+    .unwrap_or_else(|e| die(e));
     #[derive(Serialize)]
     #[serde(rename_all = "camelCase")]
     struct Contribution {
@@ -590,22 +721,40 @@ fn cmd_gen_contribution(args: &[String]) {
 }
 
 fn cmd_add_genesis_sig(args: &[String]) {
-    let sig_path = args.get(1).unwrap_or_else(|| die("needs <browser_sig.json>"));
-    let out_path = args.get(2).map(String::as_str).unwrap_or("channel_snapshot.json");
+    let sig_path = args
+        .get(1)
+        .unwrap_or_else(|| die("needs <browser_sig.json>"));
+    let out_path = args
+        .get(2)
+        .map(String::as_str)
+        .unwrap_or("channel_snapshot.json");
     let sig: MemberSignature = read_json(sig_path);
     let mut state = load_state();
     add_signature(&mut state.snapshot.state, sig);
-    verify_all_signatures(&state.snapshot.record, &state.snapshot.members, &state.snapshot.state)
-        .unwrap_or_else(|e| die(format!("genesis not fully/validly signed: {e}")));
+    verify_all_signatures(
+        &state.snapshot.record,
+        &state.snapshot.members,
+        &state.snapshot.state,
+    )
+    .unwrap_or_else(|e| die(format!("genesis not fully/validly signed: {e}")));
     save_state(&state);
     write_json(out_path, &state.snapshot);
     println!("genesis fully signed → {out_path}. Browser: wallet_import_channel(<{out_path}>).");
 }
 
 fn cmd_send(args: &[String]) {
-    let from: u8 = args.get(1).and_then(|s| s.parse().ok()).unwrap_or_else(|| die("send <from> <to> <amount> <out>"));
-    let to: u8 = args.get(2).and_then(|s| s.parse().ok()).unwrap_or_else(|| die("bad <to>"));
-    let amount: u64 = args.get(3).and_then(|s| s.parse().ok()).unwrap_or_else(|| die("bad <amount>"));
+    let from: u8 = args
+        .get(1)
+        .and_then(|s| s.parse().ok())
+        .unwrap_or_else(|| die("send <from> <to> <amount> <out>"));
+    let to: u8 = args
+        .get(2)
+        .and_then(|s| s.parse().ok())
+        .unwrap_or_else(|| die("bad <to>"));
+    let amount: u64 = args
+        .get(3)
+        .and_then(|s| s.parse().ok())
+        .unwrap_or_else(|| die("bad <amount>"));
     let out_path = args.get(4).map(String::as_str).unwrap_or("payload.json");
     let mut state = load_state();
 
@@ -613,18 +762,38 @@ fn cmd_send(args: &[String]) {
         .controlled
         .iter()
         .find(|c| c.slot == from && c.has_witness)
-        .unwrap_or_else(|| die(format!("slot {from} is not a CLI member with a spendable balance")));
+        .unwrap_or_else(|| {
+            die(format!(
+                "slot {from} is not a CLI member with a spendable balance"
+            ))
+        });
     let keys = keys_for(cm.keygen_seed);
     // Reconstruct the sender's current balance witness deterministically.
-    let (_ct, witness) =
-        encrypt_amount(&mut StdRng::seed_from_u64(cm.balance_seed), &keys.regev_pk, cm.balance_amount)
-            .unwrap_or_else(|e| die(e));
+    let (_ct, witness) = encrypt_amount(
+        &mut StdRng::seed_from_u64(cm.balance_seed),
+        &keys.regev_pk,
+        cm.balance_amount,
+    )
+    .unwrap_or_else(|e| die(e));
     let before_amount = cm.balance_amount;
 
     let mut rng = StdRng::seed_from_u64(0x5E_0000 + from as u64);
     let nonce = intmax3_zkp::ethereum_types::bytes32::Bytes32::default();
-    let BuiltSend { payload, new_balance, .. } = build_send(
-        &keys, &state.snapshot, from, to, amount, before_amount, &witness, nonce, LEVEL, &mut rng,
+    let BuiltSend {
+        payload,
+        new_balance,
+        ..
+    } = build_send(
+        &keys,
+        &state.snapshot,
+        from,
+        to,
+        amount,
+        before_amount,
+        &witness,
+        nonce,
+        LEVEL,
+        &mut rng,
     )
     .unwrap_or_else(|e| die(e));
 
@@ -636,12 +805,19 @@ fn cmd_send(args: &[String]) {
     }
     save_state(&state);
     write_json(out_path, &payload);
-    println!("built send {from}→{to} amount {amount} → {out_path} (proof generated). Now collect co-signatures.");
+    println!(
+        "built send {from}→{to} amount {amount} → {out_path} (proof generated). Now collect co-signatures."
+    );
 }
 
 fn cmd_cosign(args: &[String]) {
-    let in_path = args.get(1).unwrap_or_else(|| die("cosign <payload_or_state.json> <out>"));
-    let out_path = args.get(2).map(String::as_str).unwrap_or("cosigned_state.json");
+    let in_path = args
+        .get(1)
+        .unwrap_or_else(|| die("cosign <payload_or_state.json> <out>"));
+    let out_path = args
+        .get(2)
+        .map(String::as_str)
+        .unwrap_or("cosigned_state.json");
     let mut state = load_state();
 
     // SECURITY: require a SendPayload (which carries the ChannelTx + E-1 proof) so EVERY cosigner
@@ -654,11 +830,15 @@ fn cmd_cosign(args: &[String]) {
     }
 
     // Verify the transition + E-1 proof once (with recipient decryption if a CLI slot receives).
-    let recipient_is_cli = state.controlled.iter().find(|c| c.slot == payload.recipient_index);
+    let recipient_is_cli = state
+        .controlled
+        .iter()
+        .find(|c| c.slot == payload.recipient_index);
     let (sk, expected) = if let Some(c) = recipient_is_cli {
         let keys = keys_for(c.keygen_seed);
-        let amt = intmax3_zkp::regev::decrypt_amount(&keys.regev_sk, &payload.channel_tx.enc_amount)
-            .unwrap_or_else(|e| die(e));
+        let amt =
+            intmax3_zkp::regev::decrypt_amount(&keys.regev_sk, &payload.channel_tx.enc_amount)
+                .unwrap_or_else(|e| die(e));
         (Some(keys.regev_sk), Some(amt))
     } else {
         (None, None)
@@ -679,12 +859,17 @@ fn cmd_cosign(args: &[String]) {
     // SECURITY (§F-1): the deposit backing is anchored at GENESIS (create_channel co-signs only if
     // backed). Ongoing transitions are validated just above (verify_send_transition: real E-1 +
     // conservation), and a send legitimately ADVANCES settled_tx_chain once inter-channel transfers
-    // exist — so re-checking it against the FIXED genesis backing here is wrong (it would reject every
-    // state after the first inter-channel send). The backing holds inductively from the backed genesis
-    // through validated, conservation-preserving transitions; reconciliation against the deposit is the
-    // close/settlement step. (Same rationale as cosign-inter-transfer.)
+    // exist — so re-checking it against the FIXED genesis backing here is wrong (it would reject
+    // every state after the first inter-channel send). The backing holds inductively from the
+    // backed genesis through validated, conservation-preserving transitions; reconciliation
+    // against the deposit is the close/settlement step. (Same rationale as
+    // cosign-inter-transfer.)
     for c in &state.controlled {
-        if next_state.member_signatures.iter().any(|s| s.member_slot == c.slot) {
+        if next_state
+            .member_signatures
+            .iter()
+            .any(|s| s.member_slot == c.slot)
+        {
             continue;
         }
         let sig = sign_state(&keys_for(c.keygen_seed), c.slot, &next_state)
@@ -693,9 +878,15 @@ fn cmd_cosign(args: &[String]) {
     }
     write_json(out_path, &next_state);
 
-    let signed: Vec<u8> = next_state.member_signatures.iter().map(|s| s.member_slot).collect();
-    println!("co-signed → {out_path}. Signatures now present for slots {signed:?} (need 0..{}).",
-        state.snapshot.record.member_count);
+    let signed: Vec<u8> = next_state
+        .member_signatures
+        .iter()
+        .map(|s| s.member_slot)
+        .collect();
+    println!(
+        "co-signed → {out_path}. Signatures now present for slots {signed:?} (need 0..{}).",
+        state.snapshot.record.member_count
+    );
 
     // DEMO: advance this CLI member's stored head to the just-cosigned state so SEQUENTIAL sends
     // work. Without this, cli_state stays at the genesis head and the 2nd send fails "payload does
@@ -710,27 +901,41 @@ fn cmd_cosign(args: &[String]) {
     write_json("channel_snapshot.json", &state.snapshot);
 }
 
-/// Co-sign a balance-REFRESH payload (a delegate/member re-encrypting its own slot to clean digits so
-/// it can send again after receiving). Each member re-verifies the value-preserving refresh transition
-/// before signing; the head advances + is published exactly like cmd_cosign.
+/// Co-sign a balance-REFRESH payload (a delegate/member re-encrypting its own slot to clean digits
+/// so it can send again after receiving). Each member re-verifies the value-preserving refresh
+/// transition before signing; the head advances + is published exactly like cmd_cosign.
 fn cmd_cosign_refresh(args: &[String]) {
-    let in_path = args.get(1).unwrap_or_else(|| die("cosign-refresh <payload.json> <out>"));
-    let out_path = args.get(2).map(String::as_str).unwrap_or("cosigned_state.json");
+    let in_path = args
+        .get(1)
+        .unwrap_or_else(|| die("cosign-refresh <payload.json> <out>"));
+    let out_path = args
+        .get(2)
+        .map(String::as_str)
+        .unwrap_or("cosigned_state.json");
     let mut state = load_state();
     let payload: RefreshPayload = read_json(in_path);
     let mut next_state = payload.proposed_next_state.clone();
     if next_state.prev_digest != state.snapshot.state.digest {
         die("payload does not extend the current head");
     }
-    verify_refresh_transition(&state.snapshot.state, &state.snapshot.record, &payload, LEVEL)
-        .unwrap_or_else(|e| die(format!("refresh transition invalid: {e}")));
-    // SECURITY (§F-1): backing is anchored at GENESIS; the refresh transition is validated just above
-    // (verify_refresh_transition: value-preserving). A refresh preserves settled_tx_chain, but that
-    // chain may already have ADVANCED from a prior inter-channel send, so it no longer equals the fixed
-    // genesis backing — re-checking it here would wrongly reject. Plain N-of-N; same rationale as
-    // cmd_cosign / cosign-inter-transfer.
+    verify_refresh_transition(
+        &state.snapshot.state,
+        &state.snapshot.record,
+        &payload,
+        LEVEL,
+    )
+    .unwrap_or_else(|e| die(format!("refresh transition invalid: {e}")));
+    // SECURITY (§F-1): backing is anchored at GENESIS; the refresh transition is validated just
+    // above (verify_refresh_transition: value-preserving). A refresh preserves
+    // settled_tx_chain, but that chain may already have ADVANCED from a prior inter-channel
+    // send, so it no longer equals the fixed genesis backing — re-checking it here would
+    // wrongly reject. Plain N-of-N; same rationale as cmd_cosign / cosign-inter-transfer.
     for c in &state.controlled {
-        if next_state.member_signatures.iter().any(|s| s.member_slot == c.slot) {
+        if next_state
+            .member_signatures
+            .iter()
+            .any(|s| s.member_slot == c.slot)
+        {
             continue;
         }
         let sig = sign_state(&keys_for(c.keygen_seed), c.slot, &next_state)
@@ -741,14 +946,17 @@ fn cmd_cosign_refresh(args: &[String]) {
     state.snapshot.state = next_state;
     save_state(&state);
     write_json("channel_snapshot.json", &state.snapshot);
-    println!("balance-refresh co-signed for slot {} (head advanced).", payload.member_index);
+    println!(
+        "balance-refresh co-signed for slot {} (head advanced).",
+        payload.member_index
+    );
 }
 
 // ===================== INTER-CHANNEL TRANSFER (single atomic command) =====================
 //
 // CRITICAL-1 FIX. A cross-channel transfer is ONE atomic, synchronous command run by the relay,
-// which OWNS BOTH channels (sibling cwds wallet-live-work/ch7, ch8). It is the single source of truth
-// for both, so it never has to trust a request-body signed state.
+// which OWNS BOTH channels (sibling cwds wallet-live-work/ch7, ch8). It is the single source of
+// truth for both, so it never has to trust a request-body signed state.
 //
 //   `cosign-inter-transfer <debit_payload.json> <descriptor.json> <out.json>`
 //   (cwd = SOURCE channel A, INTMAX_CHANNEL = A; destination B resolved as ../ch<dest_id>/)
@@ -757,14 +965,15 @@ fn cmd_cosign_refresh(args: &[String]) {
 // THIS PROCESS — never an `aSignedState` blob from the request body. This closes the value-creation
 // hole: channel A's co-signing members derive their keys from PUBLIC seeds, so anyone could forge a
 // fully-valid N-of-N `aSignedState` for an arbitrary post-debit state and POST it to a standalone
-// credit endpoint. There is NO such endpoint anymore. The ONLY `a_signed_state` the credit gate ever
-// sees is the one this command just built by extending A's REAL committed head and debiting A's fund.
+// credit endpoint. There is NO such endpoint anymore. The ONLY `a_signed_state` the credit gate
+// ever sees is the one this command just built by extending A's REAL committed head and debiting
+// A's fund.
 //
-// ATOMICITY: nothing is persisted unless BOTH legs validate. The debit leg co-signs A's proposed head
-// IN MEMORY; the credit leg validates + builds B's credited head IN MEMORY; only after both succeed
-// do we persist A's head, B's head (under the resolved ../ch<B>/ paths), and append the tx_hash to
-// A's SPENT ledger and B's APPLIED ledger. If either leg fails, the process `die()`s having written
-// nothing — A's head on disk is unchanged.
+// ATOMICITY: nothing is persisted unless BOTH legs validate. The debit leg co-signs A's proposed
+// head IN MEMORY; the credit leg validates + builds B's credited head IN MEMORY; only after both
+// succeed do we persist A's head, B's head (under the resolved ../ch<B>/ paths), and append the
+// tx_hash to A's SPENT ledger and B's APPLIED ledger. If either leg fails, the process `die()`s
+// having written nothing — A's head on disk is unchanged.
 //
 // SECURITY — why this path uses `sign_state` (plain N-of-N), not `sign_state_if_backed`:
 // `sign_state_if_backed` reconciles `state.balance_state.settled_tx_chain` against the channel's
@@ -777,9 +986,10 @@ fn cmd_cosign_refresh(args: &[String]) {
 // the REAL E-2 STARK + every cross-channel invariant) PLUS the N-of-N member signatures collected
 // here. We DO NOT weaken `verify_channel_backing` to make a stale attestation pass.
 
-/// Load the sibling DESTINATION-channel `CliState` (channel B) from `../ch<dest_id>/cli_state.json`,
-/// relative to A's cwd. FAIL-CLOSED: refuse if it is missing. Returns (B state, B's dir path) so the
-/// caller can persist B's head back under the same resolved paths.
+/// Load the sibling DESTINATION-channel `CliState` (channel B) from
+/// `../ch<dest_id>/cli_state.json`, relative to A's cwd. FAIL-CLOSED: refuse if it is missing.
+/// Returns (B state, B's dir path) so the caller can persist B's head back under the same resolved
+/// paths.
 fn load_sibling_dest_state(dest_channel_id: u64) -> (CliState, std::path::PathBuf) {
     let dir = std::path::PathBuf::from(format!("../ch{dest_channel_id}"));
     let path = dir.join(STATE_FILE);
@@ -791,14 +1001,16 @@ fn load_sibling_dest_state(dest_channel_id: u64) -> (CliState, std::path::PathBu
             path.display()
         ));
     }
-    let s = fs::read_to_string(&path).unwrap_or_else(|e| die(format!("read {}: {e}", path.display())));
-    let st: CliState = serde_json::from_str(&s).unwrap_or_else(|e| die(format!("parse B state: {e}")));
+    let s =
+        fs::read_to_string(&path).unwrap_or_else(|e| die(format!("read {}: {e}", path.display())));
+    let st: CliState =
+        serde_json::from_str(&s).unwrap_or_else(|e| die(format!("parse B state: {e}")));
     (st, dir)
 }
 
 /// Serialize a `CliState` + republish a `ChannelSnapshot` under EXPLICIT paths (used to persist
-/// channel B from channel A's cwd). Mirrors `save_state` + the `channel_snapshot.json` head-sync, but
-/// targets the sibling B directory rather than the cwd.
+/// channel B from channel A's cwd). Mirrors `save_state` + the `channel_snapshot.json` head-sync,
+/// but targets the sibling B directory rather than the cwd.
 fn save_state_at(dir: &std::path::Path, state: &CliState) {
     let cli = serde_json::to_string_pretty(state).unwrap_or_else(|e| die(e));
     fs::write(dir.join(STATE_FILE), cli)
@@ -812,15 +1024,19 @@ fn save_state_at(dir: &std::path::Path, state: &CliState) {
 /// `cosign-inter-transfer <debit_payload.json> <descriptor.json> <out.json>` — the single atomic
 /// cross-channel transfer command. Run with cwd = SOURCE channel A, INTMAX_CHANNEL = A.
 ///
-/// Writes `{ "aHead": <A's co-signed new state>, "bSnapshot": <B's credited snapshot> }` to out.json.
+/// Writes `{ "aHead": <A's co-signed new state>, "bSnapshot": <B's credited snapshot> }` to
+/// out.json.
 fn cmd_cosign_inter_transfer(args: &[String]) {
-    let payload_path = args
-        .get(1)
-        .unwrap_or_else(|| die("cosign-inter-transfer <debit_payload.json> <descriptor.json> <out.json>"));
-    let desc_path = args
-        .get(2)
-        .unwrap_or_else(|| die("cosign-inter-transfer <debit_payload.json> <descriptor.json> <out.json>"));
-    let out_path = args.get(3).map(String::as_str).unwrap_or("inter_transfer.json");
+    let payload_path = args.get(1).unwrap_or_else(|| {
+        die("cosign-inter-transfer <debit_payload.json> <descriptor.json> <out.json>")
+    });
+    let desc_path = args.get(2).unwrap_or_else(|| {
+        die("cosign-inter-transfer <debit_payload.json> <descriptor.json> <out.json>")
+    });
+    let out_path = args
+        .get(3)
+        .map(String::as_str)
+        .unwrap_or("inter_transfer.json");
 
     let payload: InterChannelDebitPayload = read_json(payload_path);
     let descriptor: InterChannelTransferDescriptor = read_json(desc_path);
@@ -848,15 +1064,20 @@ fn cmd_cosign_inter_transfer(args: &[String]) {
     }
 
     // SPENT LEDGER (A side): refuse a tx_hash already DEBITED out of A (single-use on the source).
-    if a_state.spent_tx_hashes.iter().any(|h| *h == descriptor.tx_hash) {
+    if a_state
+        .spent_tx_hashes
+        .iter()
+        .any(|h| *h == descriptor.tx_hash)
+    {
         die(format!(
             "REFUSING: inter-channel tx_hash {} already debited from channel A (replay) — fail-closed",
             descriptor.tx_hash.to_hex()
         ));
     }
 
-    // ================= LEG A (in memory): co-sign the post-debit head, extending A's REAL head. ====
-    // The proposed next state MUST extend A's COMMITTED head digest — not a request-body blob.
+    // ================= LEG A (in memory): co-sign the post-debit head, extending A's REAL head.
+    // ==== The proposed next state MUST extend A's COMMITTED head digest — not a request-body
+    // blob.
     if payload.proposed_next_state.prev_digest != a_state.snapshot.state.digest {
         die("debit payload does not extend channel A's committed head");
     }
@@ -871,7 +1092,11 @@ fn cmd_cosign_inter_transfer(args: &[String]) {
 
     let mut a_head = payload.proposed_next_state.clone();
     for c in &a_state.controlled {
-        if a_head.member_signatures.iter().any(|s| s.member_slot == c.slot) {
+        if a_head
+            .member_signatures
+            .iter()
+            .any(|s| s.member_slot == c.slot)
+        {
             continue;
         }
         let sig = sign_state(&keys_for(c.keygen_seed), c.slot, &a_head)
@@ -886,14 +1111,21 @@ fn cmd_cosign_inter_transfer(args: &[String]) {
     // CONSERVATION (A side, full u64 precision): A.fund decreased by EXACTLY descriptor.amount.
     let amt256 = intmax3_zkp::wallet_core::u64_to_u256(descriptor.amount);
     if a_head.channel_fund.amount + amt256 != a_state.snapshot.state.channel_fund.amount {
-        die("conservation check FAILED: A channel_fund did not decrease by exactly descriptor.amount");
+        die(
+            "conservation check FAILED: A channel_fund did not decrease by exactly descriptor.amount",
+        );
     }
 
-    // ================= LEG B (in memory): validate + build B's credited head. ======================
+    // ================= LEG B (in memory): validate + build B's credited head.
+    // ======================
     let (mut b_state, b_dir) = load_sibling_dest_state(descriptor.destination_channel_id.as_u64());
 
     // REPLAY LEDGER (B side, invariant 6): refuse a tx_hash already credited into B.
-    if b_state.applied_tx_hashes.iter().any(|h| *h == descriptor.tx_hash) {
+    if b_state
+        .applied_tx_hashes
+        .iter()
+        .any(|h| *h == descriptor.tx_hash)
+    {
         die(format!(
             "REFUSING: inter-channel tx_hash {} already credited into channel B (replay) — fail-closed (invariant 6)",
             descriptor.tx_hash.to_hex()
@@ -902,8 +1134,9 @@ fn cmd_cosign_inter_transfer(args: &[String]) {
 
     // The TRUSTED A record is A's OWN committed record (this process). The credit gate's
     // `a_signed_state` is the IN-MEMORY `a_head` we just co-signed — NOT a request-body blob. So a
-    // forged N-of-N state (built from the public member seeds) can never be credited: it would have to
-    // equal `a_head`, which can only be produced by extending A's real head and debiting A's fund.
+    // forged N-of-N state (built from the public member seeds) can never be credited: it would have
+    // to equal `a_head`, which can only be produced by extending A's real head and debiting A's
+    // fund.
     let trusted_a_record = a_state.snapshot.record.clone();
     verify_inter_channel_credit_transition(
         &b_state.snapshot.state,
@@ -929,20 +1162,34 @@ fn cmd_cosign_inter_transfer(args: &[String]) {
 
     let b_fund_before = b_state.snapshot.state.channel_fund.amount;
     let mut rng = StdRng::seed_from_u64(0xC2_0000 + recipient_slot as u64);
-    let BuiltInterChannelCredit { bundle_apply_state, .. } =
-        build_inter_channel_credit(&builder_keys, &b_state.snapshot, &descriptor, LEVEL, &mut rng)
-            .unwrap_or_else(|e| die(format!("build_inter_channel_credit failed: {e}")));
+    let BuiltInterChannelCredit {
+        bundle_apply_state, ..
+    } = build_inter_channel_credit(
+        &builder_keys,
+        &b_state.snapshot,
+        &descriptor,
+        LEVEL,
+        &mut rng,
+    )
+    .unwrap_or_else(|e| die(format!("build_inter_channel_credit failed: {e}")));
 
-    // CONSERVATION (B side, full u64 precision): B channel_fund increased by EXACTLY descriptor.amount.
+    // CONSERVATION (B side, full u64 precision): B channel_fund increased by EXACTLY
+    // descriptor.amount.
     if bundle_apply_state.channel_fund.amount != b_fund_before + amt256 {
-        die("conservation check FAILED: B channel_fund did not increase by exactly descriptor.amount");
+        die(
+            "conservation check FAILED: B channel_fund did not increase by exactly descriptor.amount",
+        );
     }
 
     // N-of-N co-sign the credited (bundle-apply) B state. build_inter_channel_credit self-signs the
     // builder's slot; collect the remaining CLI members.
     let mut b_head = bundle_apply_state;
     for c in &b_state.controlled {
-        if b_head.member_signatures.iter().any(|s| s.member_slot == c.slot) {
+        if b_head
+            .member_signatures
+            .iter()
+            .any(|s| s.member_slot == c.slot)
+        {
             continue;
         }
         let sig = sign_state(&keys_for(c.keygen_seed), c.slot, &b_head)
@@ -952,9 +1199,9 @@ fn cmd_cosign_inter_transfer(args: &[String]) {
     verify_all_signatures(&b_state.snapshot.record, &b_state.snapshot.members, &b_head)
         .unwrap_or_else(|e| die(format!("inter-credit B state not N-of-N co-signed: {e}")));
 
-    // ================= COMMIT (both legs validated): persist A AND B atomically. ====================
-    // Advance + record on BOTH ledgers. Either-or-neither: any failure above already `die()`d before
-    // we got here, so nothing was written.
+    // ================= COMMIT (both legs validated): persist A AND B atomically.
+    // ==================== Advance + record on BOTH ledgers. Either-or-neither: any failure
+    // above already `die()`d before we got here, so nothing was written.
     a_state.snapshot.state = a_head.clone();
     a_state.spent_tx_hashes.push(descriptor.tx_hash);
     save_state(&a_state);
@@ -979,8 +1226,16 @@ fn cmd_cosign_inter_transfer(args: &[String]) {
         },
     );
 
-    let a_signed: Vec<u8> = a_head.member_signatures.iter().map(|s| s.member_slot).collect();
-    let b_signed: Vec<u8> = b_head.member_signatures.iter().map(|s| s.member_slot).collect();
+    let a_signed: Vec<u8> = a_head
+        .member_signatures
+        .iter()
+        .map(|s| s.member_slot)
+        .collect();
+    let b_signed: Vec<u8> = b_head
+        .member_signatures
+        .iter()
+        .map(|s| s.member_slot)
+        .collect();
     println!(
         "inter-channel TRANSFER applied atomically: channel {} → channel {} slot {}, amount {}. \
          A debited (sigs {a_signed:?}, tx recorded in A spent ledger); B credited (sigs {b_signed:?}, \
@@ -994,7 +1249,9 @@ fn cmd_cosign_inter_transfer(args: &[String]) {
 }
 
 fn cmd_finalize(args: &[String]) {
-    let in_path = args.get(1).unwrap_or_else(|| die("finalize <fully_signed_state.json>"));
+    let in_path = args
+        .get(1)
+        .unwrap_or_else(|| die("finalize <fully_signed_state.json>"));
     let next_state: ChannelState = read_json(in_path);
     let mut state = load_state();
     if next_state.prev_digest != state.snapshot.state.digest {
@@ -1016,7 +1273,10 @@ fn cmd_finalize(args: &[String]) {
         }
     }
     save_state(&state);
-    println!("finalized. New state_version = {}.", state.snapshot.state.balance_state.state_version);
+    println!(
+        "finalized. New state_version = {}.",
+        state.snapshot.state.balance_state.state_version
+    );
     cmd_balance();
 }
 
@@ -1025,7 +1285,10 @@ fn cmd_balance() {
     for c in &state.controlled {
         let keys = keys_for(c.keygen_seed);
         match decrypt_balance(&keys, &state.snapshot, c.slot) {
-            Ok(bal) => println!("  slot {} balance = {} (can_send={})", c.slot, bal, c.has_witness),
+            Ok(bal) => println!(
+                "  slot {} balance = {} (can_send={})",
+                c.slot, bal, c.has_witness
+            ),
             Err(e) => println!("  slot {} balance = <decrypt error: {e}>", c.slot),
         }
     }

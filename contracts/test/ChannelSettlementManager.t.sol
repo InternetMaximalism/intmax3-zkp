@@ -9,6 +9,9 @@ import {
     CloseProofFields
 } from "../src/ChannelSettlementManager.sol";
 import {ChannelSettlementVerifier} from "../src/ChannelSettlementVerifier.sol";
+import {MleVerifier} from "@mle/MleVerifier.sol";
+import {SpongefishWhirVerify} from "@mle/spongefish/SpongefishWhirVerify.sol";
+import {MockMleVerifier, CloseTestLib} from "./CloseTestLib.sol";
 
 /// @dev Minimal stand-in for `IntmaxRollup`'s registration surface (Finding E). It records the
 /// SAME close-form IMCM commitment + bp identity the real rollup stores at `registerChannel`,
@@ -81,6 +84,7 @@ contract ChannelSettlementManagerTest is Test {
     );
 
     ChannelSettlementVerifier internal verifier;
+    MockMleVerifier internal mockMle;
     MockChannelRegistry internal registry;
     ChannelSettlementManager internal manager;
 
@@ -109,6 +113,17 @@ contract ChannelSettlementManagerTest is Test {
 
     function setUp() external {
         verifier = new ChannelSettlementVerifier();
+        // Phase A close path: a real `verifyCloseIntent` rebinds the 87-limb close public inputs and
+        // then calls `MleVerifier.verify`. The lifecycle tests exercise the manager + the REAL limb
+        // binding, not the WHIR cryptography, so we wire a controllable mock verifier (verdict=true)
+        // as the close MLE verifier and set the close VK once (set-once). `dummyVkArgs()` carries a
+        // degreeBits=1 VK the mock ignores. (This test deploys ONE verifier — the shared `verifier`.)
+        mockMle = new MockMleVerifier();
+        _initCloseVk(verifier);
+        // Phase B-D: the withdrawal-claim / post-close-claim paths are now REAL MLE verifications
+        // too. Wire the same controllable mock verifier + set each statement's VK once.
+        _initWithdrawalClaimVk(verifier);
+        _initPostCloseClaimVk(verifier);
         registry = new MockChannelRegistry(IChannelSettlementVerifier(address(verifier)));
 
         ChannelSettlementManager.MemberBinding[] memory bindings =
@@ -145,6 +160,124 @@ contract ChannelSettlementManagerTest is Test {
 
     function _proofFor(bytes32 piHash) internal pure returns (bytes memory) {
         return abi.encode(piHash);
+    }
+
+    /// @dev Initialize a verifier's close VK with the shared mock MLE verifier (set-once). Mirrors
+    /// the production `initializeCloseVk(verifier, vk, whir, protocolId, sessionId, kIs, subgroup)`.
+    function _initCloseVk(ChannelSettlementVerifier v) internal {
+        (
+            ChannelSettlementVerifier.CloseVk memory vk,
+            SpongefishWhirVerify.WhirParams memory whir,
+            bytes memory protocolId,
+            bytes memory sessionId,
+            uint256[] memory kIs,
+            uint256[] memory subgroupGenPowers
+        ) = CloseTestLib.dummyVkArgs();
+        v.initializeCloseVk(
+            MleVerifier(address(mockMle)), vk, whir, protocolId, sessionId, kIs, subgroupGenPowers
+        );
+    }
+
+    /// @dev Phase B-D: initialize the withdrawal-claim VK with the shared mock MLE verifier.
+    function _initWithdrawalClaimVk(ChannelSettlementVerifier v) internal {
+        (
+            ChannelSettlementVerifier.StatementVk memory vk,
+            SpongefishWhirVerify.WhirParams memory whir,
+            bytes memory protocolId,
+            bytes memory sessionId,
+            uint256[] memory kIs,
+            uint256[] memory subgroupGenPowers
+        ) = CloseTestLib.dummyStatementVkArgs();
+        v.initializeWithdrawalClaimVk(
+            MleVerifier(address(mockMle)), vk, whir, protocolId, sessionId, kIs, subgroupGenPowers
+        );
+    }
+
+    /// @dev Phase B-D: initialize the post-close-claim VK with the shared mock MLE verifier.
+    function _initPostCloseClaimVk(ChannelSettlementVerifier v) internal {
+        (
+            ChannelSettlementVerifier.StatementVk memory vk,
+            SpongefishWhirVerify.WhirParams memory whir,
+            bytes memory protocolId,
+            bytes memory sessionId,
+            uint256[] memory kIs,
+            uint256[] memory subgroupGenPowers
+        ) = CloseTestLib.dummyStatementVkArgs();
+        v.initializePostCloseClaimVk(
+            MleVerifier(address(mockMle)), vk, whir, protocolId, sessionId, kIs, subgroupGenPowers
+        );
+    }
+
+    /// @dev Build a withdrawal-claim `MleProof` whose `publicInputs` equal the verifier's expected
+    ///      48-limb vector for `claim` — exactly what `_bindLimbsStrict` requires. Uses the channel's
+    ///      finalized H1 (the manager passes it through to the verifier).
+    function _withdrawalClaimProof(ChannelSettlementManager.WithdrawalClaim memory claim)
+        internal view returns (MleVerifier.MleProof memory)
+    {
+        uint256[] memory limbs = verifier.expectedWithdrawalClaimLimbs(
+            CHANNEL_ID,
+            claim.closeIntentDigest,
+            manager.finalizedBalanceStateH1(),
+            claim.memberPkG,
+            claim.recipient,
+            claim.userAmountDigest,
+            claim.amount,
+            claim.withdrawalNullifier
+        );
+        return CloseTestLib.proofWithLimbs(limbs);
+    }
+
+    /// @dev As `_withdrawalClaimProof` but against an explicit manager instance (multi-manager
+    ///      tests) and its finalized H1.
+    function _withdrawalClaimProofFor(
+        ChannelSettlementManager m,
+        ChannelSettlementManager.WithdrawalClaim memory claim
+    ) internal view returns (MleVerifier.MleProof memory) {
+        uint256[] memory limbs = verifier.expectedWithdrawalClaimLimbs(
+            CHANNEL_ID,
+            claim.closeIntentDigest,
+            m.finalizedBalanceStateH1(),
+            claim.memberPkG,
+            claim.recipient,
+            claim.userAmountDigest,
+            claim.amount,
+            claim.withdrawalNullifier
+        );
+        return CloseTestLib.proofWithLimbs(limbs);
+    }
+
+    /// @dev Build a post-close-claim `MleProof` whose `publicInputs` equal the verifier's expected
+    ///      40-limb vector. The `sharedNativeNullifier` is the RECOMPUTED value (hazard #8) —
+    ///      mirroring the manager's `_deriveSharedNativeNullifier`.
+    function _postCloseClaimProof(ChannelSettlementManager.PostCloseClaim memory claim)
+        internal view returns (MleVerifier.MleProof memory)
+    {
+        bytes32 snn = _expectedSharedNativeNullifier(
+            claim.closeIntentDigest, claim.incomingTxHash, claim.receiverPkG
+        );
+        uint256[] memory limbs = verifier.expectedPostCloseClaimLimbs(
+            CHANNEL_ID,
+            claim.closeIntentDigest,
+            claim.incomingTxHash,
+            claim.receiverPkG,
+            claim.recipient,
+            snn,
+            claim.amount
+        );
+        return CloseTestLib.proofWithLimbs(limbs);
+    }
+
+    /// @dev Mirror of the manager's / circuit's IMCK shared-native nullifier derivation.
+    function _expectedSharedNativeNullifier(
+        bytes32 closeIntentDigest,
+        bytes32 incomingTxHash,
+        bytes32 receiverPkG
+    ) internal pure returns (bytes32) {
+        return keccak256(
+            abi.encodePacked(
+                bytes4(uint32(0x494d434b)), closeIntentDigest, incomingTxHash, receiverPkG
+            )
+        );
     }
 
     function _intent(
@@ -186,31 +319,34 @@ contract ChannelSettlementManagerTest is Test {
         });
     }
 
+    /// @dev Build a close `MleVerifier.MleProof` for the default manager whose `publicInputs` equal
+    /// the EXACT 87 expected close limbs the manager's `_runCloseVerify` rebinds (channelId =
+    /// CHANNEL_ID, the channel's registered member-set commitment, and the packed member/delegate
+    /// counts). With the mock MLE verifier returning `true`, this is an ACCEPTING close proof.
     function _closeProof(
         ChannelSettlementManager.CloseIntent memory intent
-    ) internal view returns (bytes memory) {
+    ) internal view returns (MleVerifier.MleProof memory) {
         // F4/F7 + delegate account: the close proof binds the channel's registered member-set
         // commitment (limbs 77..84) AND the packed member/delegate counts (limbs 85,86 → 87 limbs).
-        return _proofFor(
-            this._closePiHashCd(
-                intent,
-                manager.registeredMemberSetCommitment(),
-                (uint16(manager.activeMemberCount()) << 8) | uint16(manager.activeDelegateCount())
-            )
+        return this._closeProofCd(
+            intent,
+            manager.registeredMemberSetCommitment(),
+            (uint16(manager.activeMemberCount()) << 8) | uint16(manager.activeDelegateCount())
         );
     }
 
-    /// @dev Compute the close PI hash. External so `intent` is read from CALLDATA — building the
+    /// @dev Build the close proof. External so `intent` is read from CALLDATA — building the
     /// 16-field `CloseProofFields` from a calldata struct (not a memory one) keeps the construction
     /// within the via-IR stack budget, mirroring the manager's `_runCloseVerify`. `channelId` is the
     /// fixed `CHANNEL_ID`; the member-set commitment and packed member/delegate count vary per
-    /// channel, so they are passed in.
-    function _closePiHashCd(
+    /// channel, so they are passed in. The proof's `publicInputs` are the verifier's own
+    /// `expectedCloseLimbs(fields)` — exactly what `_bindCloseLimbsStrict` requires.
+    function _closeProofCd(
         ChannelSettlementManager.CloseIntent calldata intent,
         bytes32 memberSetCommitment,
         uint16 memberAndDelegateCount
-    ) external view returns (bytes32) {
-        return verifier.closePIHash(CloseProofFields({
+    ) external view returns (MleVerifier.MleProof memory) {
+        uint256[] memory limbs = verifier.expectedCloseLimbs(CloseProofFields({
             channelId: CHANNEL_ID,
             closeNonce: intent.closeNonce,
             finalEpoch: intent.finalEpoch,
@@ -228,6 +364,7 @@ contract ChannelSettlementManagerTest is Test {
             memberSetCommitment: memberSetCommitment,
             memberAndDelegateCount: memberAndDelegateCount
         }));
+        return CloseTestLib.proofWithLimbs(limbs);
     }
 
     function _submitClose(ChannelSettlementManager.CloseIntent memory intent) internal {
@@ -261,12 +398,10 @@ contract ChannelSettlementManagerTest is Test {
 
     function test_hash_helpers_are_stable() external view {
         ChannelSettlementManager.CloseIntent memory intent = _intent(1, 9, 22, 1);
-        bytes32 closePiHash = this._closePiHashCd(
-            intent,
-            manager.registeredMemberSetCommitment(),
-            (uint16(manager.activeMemberCount()) << 8) | uint16(manager.activeDelegateCount())
-        );
-        assertTrue(closePiHash != bytes32(0));
+        // The close proof now carries the 87 raw close limbs as its MLE publicInputs (not a keccak).
+        MleVerifier.MleProof memory closeProof = _closeProof(intent);
+        assertEq(closeProof.publicInputs.length, 87, "close proof carries 87 raw limbs");
+        assertEq(closeProof.publicInputs[0], uint256(uint32(CHANNEL_ID)), "limb[0] == channelId");
 
         assertTrue(
             verifier.specialClosePIHash(
@@ -280,8 +415,10 @@ contract ChannelSettlementManagerTest is Test {
             ) != bytes32(0)
         );
 
-        assertTrue(
-            verifier.withdrawalClaimPIHash(
+        // Phase B-D: the withdrawal-claim / post-close-claim PIs are now RAW limb vectors (48 / 40),
+        // not keccak hashes. Assert the introspection builders produce the right lengths.
+        assertEq(
+            verifier.expectedWithdrawalClaimLimbs(
                 CHANNEL_ID,
                 keccak256("close"),
                 keccak256("root"),
@@ -290,7 +427,9 @@ contract ChannelSettlementManagerTest is Test {
                 keccak256("amount"),
                 9,
                 keccak256("nullifier")
-            ) != bytes32(0)
+            ).length,
+            48,
+            "withdrawal-claim PI is 48 raw limbs"
         );
 
         assertTrue(
@@ -304,8 +443,8 @@ contract ChannelSettlementManagerTest is Test {
             ) != bytes32(0)
         );
 
-        assertTrue(
-            verifier.postCloseClaimPIHash(
+        assertEq(
+            verifier.expectedPostCloseClaimLimbs(
                 CHANNEL_ID,
                 keccak256("close"),
                 keccak256("incoming"),
@@ -313,7 +452,9 @@ contract ChannelSettlementManagerTest is Test {
                 bob,
                 keccak256("shared_nullifier"),
                 9
-            ) != bytes32(0)
+            ).length,
+            40,
+            "post-close-claim PI is 40 raw limbs"
         );
     }
 
@@ -338,6 +479,115 @@ contract ChannelSettlementManagerTest is Test {
             finalSettledTxChain: 0x0000003100000032000000330000003400000035000000360000003700000038
         });
         assertEq(manager.computeCloseIntentDigest(intent), SHARED_VECTOR_DIGEST);
+    }
+
+    /// @dev sentinel bytes32 = the 8 consecutive big-endian u32 words [tag, tag+1, …, tag+7], the
+    /// SAME `b32(tag)` helper the Rust golden test uses.
+    function _sentinelB32(uint32 tag) internal pure returns (bytes32 r) {
+        for (uint256 i = 0; i < 8; i++) {
+            r = bytes32((uint256(r) << 32) | uint256(tag + uint32(i)));
+        }
+    }
+
+    /// GOLDEN VECTOR (Phase A, close-verifier-a1-plan §R2 / §S2): pin the EXACT limb LAYOUT of
+    /// `ChannelSettlementVerifier._expectedCloseLimbs` against the Rust
+    /// `ChannelClosePublicInputs::to_u64_vec()` order. The Rust mirror
+    /// (`src/circuits/channel/close_pis.rs::close_public_inputs_match_solidity_shared_vector`) uses
+    /// the IDENTICAL per-field sentinels, so any drift in either builder fails one of the two tests.
+    ///
+    /// The `closeIntentDigest` (limbs 57..64) is NOT a `CloseProofFields` member — Solidity
+    /// RECOMPUTES it, so this test asserts those 8 limbs equal the split of the recomputed digest
+    /// (the value is pinned cross-language by `test_close_intent_digest_matches_rust_shared_vector`),
+    /// while every OTHER field is asserted against the shared sentinel.
+    function test_expectedCloseLimbs_goldenVector() external view {
+        CloseProofFields memory fields = CloseProofFields({
+            channelId: bytes4(uint32(0x0a0b0c0d)),
+            closeNonce: 0x0000001100000022,
+            finalEpoch: 0x0000003300000044,
+            finalSmallBlockNumber: 0x0000005500000066,
+            closeFreezeNonce: 0x0000007700000088,
+            finalChannelStateDigest: _sentinelB32(0x1000),
+            finalBalanceStateH1: _sentinelB32(0x2000),
+            channelFundAmount: uint256(_sentinelB32(0x3000)),
+            channelFundIntmaxStateRoot: _sentinelB32(0x4000),
+            burnTxHash: _sentinelB32(0x5000),
+            closeWithdrawalDigest: _sentinelB32(0x6000),
+            // (0x99 hi, 0xaa lo) — matches the Rust sentinel 0x0000_0099_0000_00aa.
+            snapshotMediumBlockNumber: (uint64(0x99) << 32) | uint64(0xaa),
+            // (0xbb hi, 0xcc lo).
+            finalStateVersion: (uint64(0xbb) << 32) | uint64(0xcc),
+            finalSettledTxChain: _sentinelB32(0x8000),
+            memberSetCommitment: _sentinelB32(0x9000),
+            memberAndDelegateCount: (uint16(3) << 8) | uint16(1)
+        });
+
+        uint256[] memory v = this._expectedCloseLimbsExt(fields);
+        assertEq(v.length, 87, "87 limbs");
+        // channelId — limb 0.
+        assertEq(v[0], 0x0a0b0c0d);
+        // close_nonce — 1..2.
+        assertEq(v[1], 0x11); assertEq(v[2], 0x22);
+        // final_epoch — 3..4.
+        assertEq(v[3], 0x33); assertEq(v[4], 0x44);
+        // final_small_block_number — 5..6.
+        assertEq(v[5], 0x55); assertEq(v[6], 0x66);
+        // close_freeze_nonce — 7..8.
+        assertEq(v[7], 0x77); assertEq(v[8], 0x88);
+        _assertSentinelRange(v, 9, 0x1000);  // final_channel_state_digest 9..16
+        _assertSentinelRange(v, 17, 0x2000); // final_balance_state_h1 17..24
+        _assertSentinelRange(v, 25, 0x3000); // channel_fund_amount 25..32
+        _assertSentinelRange(v, 33, 0x4000); // channel_fund_intmax_state_root 33..40
+        _assertSentinelRange(v, 41, 0x5000); // burn_tx_hash 41..48
+        _assertSentinelRange(v, 49, 0x6000); // close_withdrawal_digest 49..56
+        // close_intent_digest 57..64 — RECOMPUTED; assert == split of the IMCI digest. We recompute
+        // the SAME inner keccak the verifier's `_closeIntentDigest` uses (IMCI domain 0x494d4349 +
+        // the close-intent fields incl. the second channelId from the fund snapshot and the
+        // finalStateVersion / finalSettledTxChain tail).
+        bytes32 digest = keccak256(
+            abi.encodePacked(
+                bytes4(uint32(0x494d4349)),
+                fields.channelId,
+                fields.closeNonce,
+                fields.finalEpoch,
+                fields.finalSmallBlockNumber,
+                fields.closeFreezeNonce,
+                fields.finalChannelStateDigest,
+                fields.finalBalanceStateH1,
+                fields.channelId,
+                fields.channelFundAmount,
+                fields.channelFundIntmaxStateRoot,
+                fields.burnTxHash,
+                fields.closeWithdrawalDigest,
+                fields.snapshotMediumBlockNumber,
+                fields.finalStateVersion,
+                fields.finalSettledTxChain
+            )
+        );
+        for (uint256 i = 0; i < 8; i++) {
+            assertEq(v[57 + i], (uint256(digest) >> (32 * (7 - i))) & 0xffffffff, "imci limb");
+        }
+        // snapshot_medium_block_number — 65..66.
+        assertEq(v[65], 0x99); assertEq(v[66], 0xaa);
+        // final_state_version — 67..68.
+        assertEq(v[67], 0xbb); assertEq(v[68], 0xcc);
+        _assertSentinelRange(v, 69, 0x8000); // final_settled_tx_chain 69..76
+        _assertSentinelRange(v, 77, 0x9000); // member_set_commitment 77..84
+        // member_count — 85; delegate_count — 86.
+        assertEq(v[85], 3); assertEq(v[86], 1);
+    }
+
+    /// @dev external passthroughs so `fields` is read from calldata (the verifier's
+    /// `_expectedCloseLimbs` / `_closeIntentDigest` take `calldata`).
+    function _expectedCloseLimbsExt(CloseProofFields calldata fields)
+        external view returns (uint256[] memory)
+    {
+        return verifier.expectedCloseLimbs(fields);
+    }
+
+    function _assertSentinelRange(uint256[] memory v, uint256 start, uint32 tag) internal pure {
+        for (uint256 i = 0; i < 8; i++) {
+            assertEq(v[start + i], uint256(tag + uint32(i)), "sentinel limb");
+        }
     }
 
     // Shared Rust<->Solidity test vector for the F4/D6 close-circuit member-set commitment (FIXED
@@ -620,7 +870,7 @@ contract ChannelSettlementManagerTest is Test {
 
     function test_submit_close_intent_reverts_from_active_without_request() external {
         ChannelSettlementManager.CloseIntent memory intent = _intent(1, 9, 22, 1);
-        bytes memory proof = _closeProof(intent);
+        MleVerifier.MleProof memory proof = _closeProof(intent);
         vm.expectRevert(ChannelSettlementManager.CloseNotRequested.selector);
         manager.submitCloseIntent(intent, proof);
     }
@@ -631,7 +881,7 @@ contract ChannelSettlementManagerTest is Test {
         uint256 requestedAt = block.timestamp;
 
         ChannelSettlementManager.CloseIntent memory intent = _intent(1, 9, 22, 1);
-        bytes memory proof = _closeProof(intent);
+        MleVerifier.MleProof memory proof = _closeProof(intent);
 
         // At +599s the grace window has not elapsed.
         vm.warp(requestedAt + GRACE - 1);
@@ -659,14 +909,14 @@ contract ChannelSettlementManagerTest is Test {
 
         // Same epoch, lower version: rejected.
         ChannelSettlementManager.CloseIntent memory lower = _intentWithVersion(3, 9, 24, 1, 5);
-        bytes memory lowerProof = _closeProof(lower);
+        MleVerifier.MleProof memory lowerProof = _closeProof(lower);
         vm.expectRevert(ChannelSettlementManager.CloseNotNewer.selector);
         manager.submitCloseIntent(lower, lowerProof);
 
         // Same epoch, equal version: rejected (strict tiebreak).
         ChannelSettlementManager.CloseIntent memory equalVersion =
             _intentWithVersion(3, 9, 24, 1, 6);
-        bytes memory equalProof = _closeProof(equalVersion);
+        MleVerifier.MleProof memory equalProof = _closeProof(equalVersion);
         vm.expectRevert(ChannelSettlementManager.CloseNotNewer.selector);
         manager.submitCloseIntent(equalVersion, equalProof);
 
@@ -681,19 +931,25 @@ contract ChannelSettlementManagerTest is Test {
         _requestCloseAndElapseGrace();
 
         ChannelSettlementManager.CloseIntent memory intent = _intent(1, 9, 22, 1);
-        bytes memory proof = _closeProof(intent);
+        // Build a VALID proof for the REAL intent (publicInputs == expected limbs for `intent`).
+        MleVerifier.MleProof memory proof = _closeProof(intent);
         bytes32 originalChain = intent.finalSettledTxChain;
         uint64 originalVersion = intent.finalStateVersion;
 
-        // Tampering with finalSettledTxChain after the proof was computed must fail.
+        // SECURITY (Phase A behavior): submitting a TAMPERED intent with the proof built for the
+        // ORIGINAL intent changes the expected limb vector the manager rebuilds in `_runCloseVerify`,
+        // so the proof's `publicInputs` no longer match. The verifier's `_bindCloseLimbsStrict`
+        // REVERTS with "close limb mismatch". That revert happens INSIDE `verifyCloseIntent`, so it
+        // propagates RAW — it is NOT caught and re-wrapped as `InvalidCloseProof` (the manager only
+        // wraps a `false` RETURN, not a revert). We assert the exact propagated string.
         intent.finalSettledTxChain = keccak256("forged_chain");
-        vm.expectRevert(ChannelSettlementManager.InvalidCloseProof.selector);
+        vm.expectRevert(bytes("close limb mismatch"));
         manager.submitCloseIntent(intent, proof);
         intent.finalSettledTxChain = originalChain;
 
-        // Tampering with finalStateVersion must fail too.
+        // Tampering with finalStateVersion must fail too (same raw revert).
         intent.finalStateVersion = originalVersion + 1;
-        vm.expectRevert(ChannelSettlementManager.InvalidCloseProof.selector);
+        vm.expectRevert(bytes("close limb mismatch"));
         manager.submitCloseIntent(intent, proof);
         intent.finalStateVersion = originalVersion;
 
@@ -746,7 +1002,7 @@ contract ChannelSettlementManagerTest is Test {
 
         // Re-closing straight away is barred: the channel is Active again.
         ChannelSettlementManager.CloseIntent memory reclose = _intent(2, 10, 30, 2);
-        bytes memory recloseProof = _closeProof(reclose);
+        MleVerifier.MleProof memory recloseProof = _closeProof(reclose);
         vm.expectRevert(ChannelSettlementManager.CloseNotRequested.selector);
         manager.submitCloseIntent(reclose, recloseProof);
 
@@ -791,21 +1047,7 @@ contract ChannelSettlementManagerTest is Test {
             alice,
             30
         );
-        manager.submitWithdrawalClaim(
-            aliceClaim,
-            _proofFor(
-                verifier.withdrawalClaimPIHash(
-                    CHANNEL_ID,
-                    closeIntentDigest,
-                    manager.finalizedBalanceStateH1(),
-                    USER_A,
-                    alice,
-                    aliceClaim.userAmountDigest,
-                    aliceClaim.amount,
-                    aliceClaim.withdrawalNullifier
-                )
-            )
-        );
+        manager.submitWithdrawalClaim(aliceClaim, _withdrawalClaimProof(aliceClaim));
 
         ChannelSettlementManager.PostCloseClaim memory postCloseClaim = ChannelSettlementManager
             .PostCloseClaim({
@@ -813,23 +1055,9 @@ contract ChannelSettlementManagerTest is Test {
                 incomingTxHash: keccak256("incoming_tx"),
                 receiverPkG: USER_B,
                 recipient: bob,
-                sharedNativeNullifier: keccak256("shared_nullifier"),
                 amount: 5
             });
-        manager.submitPostCloseClaim(
-            postCloseClaim,
-            _proofFor(
-                verifier.postCloseClaimPIHash(
-                    CHANNEL_ID,
-                    closeIntentDigest,
-                    postCloseClaim.incomingTxHash,
-                    USER_B,
-                    bob,
-                    postCloseClaim.sharedNativeNullifier,
-                    postCloseClaim.amount
-                )
-            )
-        );
+        manager.submitPostCloseClaim(postCloseClaim, _postCloseClaimProof(postCloseClaim));
 
         assertEq(manager.withdrawalCredits(alice), 30);
         assertEq(manager.withdrawalCredits(bob), 5);
@@ -888,15 +1116,7 @@ contract ChannelSettlementManagerTest is Test {
         // The DELEGATE withdraws its member-attested balance (40) — accepted.
         ChannelSettlementManager.WithdrawalClaim memory dClaim =
             _withdrawalClaim(cid, USER_D, dave, 40);
-        m.submitWithdrawalClaim(
-            dClaim,
-            _proofFor(
-                verifier.withdrawalClaimPIHash(
-                    CHANNEL_ID, cid, m.finalizedBalanceStateH1(), USER_D, dave,
-                    dClaim.userAmountDigest, dClaim.amount, dClaim.withdrawalNullifier
-                )
-            )
-        );
+        m.submitWithdrawalClaim(dClaim, _withdrawalClaimProofFor(m, dClaim));
         assertEq(m.withdrawalCredits(dave), 40, "delegate withdrawal credited");
 
         // A stranger pk_g (not a member, not a delegate) is rejected. Build the proof args BEFORE
@@ -905,12 +1125,7 @@ contract ChannelSettlementManagerTest is Test {
         bytes32 STRANGER = keccak256("not_in_channel");
         ChannelSettlementManager.WithdrawalClaim memory sClaim =
             _withdrawalClaim(cid, STRANGER, mallory, 1);
-        bytes memory sProof = _proofFor(
-            verifier.withdrawalClaimPIHash(
-                CHANNEL_ID, cid, m.finalizedBalanceStateH1(), STRANGER, mallory,
-                sClaim.userAmountDigest, sClaim.amount, sClaim.withdrawalNullifier
-            )
-        );
+        MleVerifier.MleProof memory sProof = _withdrawalClaimProofFor(m, sClaim);
         vm.expectRevert(ChannelSettlementManager.NotChannelMember.selector);
         m.submitWithdrawalClaim(sClaim, sProof);
     }
@@ -1079,7 +1294,7 @@ contract ChannelSettlementManagerTest is Test {
         );
 
         ChannelSettlementManager.CloseIntent memory intent = _intent(2, 10, 40, 1);
-        bytes memory proof = _closeProof(intent);
+        MleVerifier.MleProof memory proof = _closeProof(intent);
 
         // A special close is a freeze request: the first intent obeys the same grace window.
         vm.expectRevert(ChannelSettlementManager.GracePeriodNotElapsed.selector);
@@ -1110,15 +1325,7 @@ contract ChannelSettlementManagerTest is Test {
 
     function _submitWd(bytes32 d, bytes32 memberHash, address recipient, uint64 amount) internal {
         ChannelSettlementManager.WithdrawalClaim memory c = _withdrawalClaim(d, memberHash, recipient, amount);
-        manager.submitWithdrawalClaim(
-            c,
-            _proofFor(
-                verifier.withdrawalClaimPIHash(
-                    CHANNEL_ID, d, manager.finalizedBalanceStateH1(), memberHash, recipient,
-                    c.userAmountDigest, c.amount, c.withdrawalNullifier
-                )
-            )
-        );
+        manager.submitWithdrawalClaim(c, _withdrawalClaimProof(c));
     }
 
     /// Simulate the rollup paying this manager via a finalized native withdrawal, then pull it in.
@@ -1129,17 +1336,17 @@ contract ChannelSettlementManagerTest is Test {
     }
 
     function _closeProofFor(ChannelSettlementManager m, ChannelSettlementManager.CloseIntent memory intent)
-        internal view returns (bytes memory)
+        internal view returns (MleVerifier.MleProof memory)
     {
-        // Same calldata-reentry as `_closeProof` (via-IR stack budget): `_closePiHashCd` reads the
+        // Same calldata-reentry as `_closeProof` (via-IR stack budget): `_closeProofCd` reads the
         // intent from calldata and uses CHANNEL_ID; the per-channel commitment + packed counts come
-        // from the supplied manager `m`.
-        return _proofFor(
-            this._closePiHashCd(
-                intent,
-                m.registeredMemberSetCommitment(),
-                (uint16(m.activeMemberCount()) << 8) | uint16(m.activeDelegateCount())
-            )
+        // from the supplied manager `m`. All these managers are bound to the shared `verifier`, so
+        // `expectedCloseLimbs` (called inside `_closeProofCd`) uses CHANNEL_ID — the same channelId
+        // every manager in this suite uses.
+        return this._closeProofCd(
+            intent,
+            m.registeredMemberSetCommitment(),
+            (uint16(m.activeMemberCount()) << 8) | uint16(m.activeDelegateCount())
         );
     }
 
@@ -1221,17 +1428,11 @@ contract ChannelSettlementManagerTest is Test {
             incomingTxHash: keccak256("itx"),
             receiverPkG: USER_B,
             recipient: bob,
-            sharedNativeNullifier: keccak256("snn"),
             amount: 10 // 70 + 10 = 80 > 75 -> must revert
         });
         // Precompute the proof BEFORE expectRevert: vm.expectRevert applies to the next external
-        // call, which would otherwise be the argument-side postCloseClaimPIHash() rather than
-        // submitPostCloseClaim().
-        bytes memory proof = _proofFor(
-            verifier.postCloseClaimPIHash(
-                CHANNEL_ID, d, pc.incomingTxHash, USER_B, bob, pc.sharedNativeNullifier, pc.amount
-            )
-        );
+        // call, which would otherwise be the view calls that assemble the proof.
+        MleVerifier.MleProof memory proof = _postCloseClaimProof(pc);
         vm.expectRevert(ChannelSettlementManager.WithdrawalCapExceeded.selector);
         manager.submitPostCloseClaim(pc, proof);
     }
@@ -1253,15 +1454,7 @@ contract ChannelSettlementManagerTest is Test {
         bytes32 d = m.finalizedCloseIntentDigest();
 
         ChannelSettlementManager.WithdrawalClaim memory c = _withdrawalClaim(d, USER_A, address(attacker), 30);
-        m.submitWithdrawalClaim(
-            c,
-            _proofFor(
-                verifier.withdrawalClaimPIHash(
-                    CHANNEL_ID, d, m.finalizedBalanceStateH1(), USER_A, address(attacker),
-                    c.userAmountDigest, c.amount, c.withdrawalNullifier
-                )
-            )
-        );
+        m.submitWithdrawalClaim(c, _withdrawalClaimProofFor(m, c));
 
         vm.deal(address(this), address(this).balance + 75);
         reg.creditWithdrawal{value: 75}(address(m));
@@ -1274,6 +1467,380 @@ contract ChannelSettlementManagerTest is Test {
         assertEq(m.withdrawalCredits(address(attacker)), 30, "credit preserved (no double-pay)");
         assertEq(m.totalCreditedOut(), 0, "nothing paid out");
         assertEq(address(attacker).balance, 0, "no ETH drained");
+    }
+
+    // -----------------------------------------------------------------------
+    // Phase A — direct verifier negative tests (close-verifier-a1-plan §T2)
+    //
+    // These call `verifier.verifyCloseIntent(fields, proof)` directly (the verifier is mock-MLE-
+    // backed in this suite, so a VALID 87-limb proof passes the crypto step) to isolate the binding
+    // and VK-management failure modes. The cross-circuit-replay negative (a validity/withdrawal MLE
+    // proof rejected by the REAL MleVerifier on circuitDigest / gatesDigest) lives in the real-MLE
+    // CloseLifecycleE2E suite, where the genuine verifier runs.
+    // -----------------------------------------------------------------------
+
+    /// @dev Canonical CloseProofFields for the registered channel (channelId / commitment / counts
+    /// match `manager`), with arbitrary-but-fixed close-intent values. `calldata` external so the
+    /// 16-field struct is built once and reused.
+    function _validCloseFields() external view returns (CloseProofFields memory f) {
+        f = CloseProofFields({
+            channelId: CHANNEL_ID,
+            closeNonce: 1,
+            finalEpoch: 9,
+            finalSmallBlockNumber: 22,
+            closeFreezeNonce: 1,
+            finalChannelStateDigest: keccak256("fcsd"),
+            finalBalanceStateH1: keccak256("h1"),
+            channelFundAmount: 123,
+            channelFundIntmaxStateRoot: keccak256("isr"),
+            burnTxHash: keccak256("burn"),
+            closeWithdrawalDigest: keccak256("cwd"),
+            snapshotMediumBlockNumber: 77,
+            finalStateVersion: 12,
+            finalSettledTxChain: keccak256("chain"),
+            memberSetCommitment: manager.registeredMemberSetCommitment(),
+            memberAndDelegateCount: (uint16(manager.activeMemberCount()) << 8)
+                | uint16(manager.activeDelegateCount())
+        });
+    }
+
+    function _proofForFields(CloseProofFields memory f)
+        internal view returns (MleVerifier.MleProof memory)
+    {
+        return CloseTestLib.proofWithLimbs(this._expectedCloseLimbsExt(f));
+    }
+
+    /// Positive control: a valid 87-limb proof for valid fields passes (mock verdict = true).
+    function test_verifyClose_validProof_passes() external {
+        CloseProofFields memory f = this._validCloseFields();
+        assertTrue(verifier.verifyCloseIntent(f, _proofForFields(f)));
+    }
+
+    /// Forged memberSetCommitment (e.g. non-member keys) ⇒ limb 77..84 differ ⇒ reverts.
+    function test_verifyClose_forgedMemberSetCommitment_reverts() external {
+        CloseProofFields memory f = this._validCloseFields();
+        MleVerifier.MleProof memory proof = _proofForFields(f); // proof for the REAL commitment
+        f.memberSetCommitment = keccak256("non-member keys"); // now expected limbs 77..84 change
+        vm.expectRevert(bytes("close limb mismatch"));
+        verifier.verifyCloseIntent(f, proof);
+    }
+
+    /// Wrong channelId ⇒ limb 0 differs ⇒ reverts.
+    function test_verifyClose_wrongChannelId_reverts() external {
+        CloseProofFields memory f = this._validCloseFields();
+        MleVerifier.MleProof memory proof = _proofForFields(f);
+        f.channelId = hex"deadbeef";
+        vm.expectRevert(bytes("close limb mismatch"));
+        verifier.verifyCloseIntent(f, proof);
+    }
+
+    /// publicInputs.length != 87 ⇒ reverts on the length guard.
+    function test_verifyClose_wrongLength_reverts() external {
+        CloseProofFields memory f = this._validCloseFields();
+        uint256[] memory shortPis = new uint256[](86);
+        MleVerifier.MleProof memory proof = CloseTestLib.proofWithLimbs(shortPis);
+        vm.expectRevert(bytes("close pi len"));
+        verifier.verifyCloseIntent(f, proof);
+    }
+
+    /// A limb >= 2**32 ⇒ reverts on the canonical-range guard (even if it would "match" mod nothing).
+    function test_verifyClose_nonCanonicalLimb_reverts() external {
+        CloseProofFields memory f = this._validCloseFields();
+        uint256[] memory pis = this._expectedCloseLimbsExt(f);
+        pis[0] = uint256(1) << 32; // 2**32, the smallest non-canonical u32
+        MleVerifier.MleProof memory proof = CloseTestLib.proofWithLimbs(pis);
+        vm.expectRevert(bytes("close limb range"));
+        verifier.verifyCloseIntent(f, proof);
+    }
+
+    /// The mock verifier returning `false` (crypto-invalid proof) ⇒ verifyCloseIntent returns false
+    /// ⇒ the manager wraps it as `InvalidCloseProof`.
+    function test_verifyClose_cryptoInvalid_returnsFalse() external {
+        CloseProofFields memory f = this._validCloseFields();
+        MleVerifier.MleProof memory proof = _proofForFields(f);
+        mockMle.setVerdict(false);
+        assertTrue(!verifier.verifyCloseIntent(f, proof), "crypto-invalid returns false");
+        mockMle.setVerdict(true);
+    }
+
+    /// verifyCloseIntent reverts (CloseVkNotSet) on a verifier whose close VK is unset.
+    function test_verifyClose_unsetVk_reverts() external {
+        ChannelSettlementVerifier fresh = new ChannelSettlementVerifier();
+        CloseProofFields memory f = this._validCloseFields();
+        MleVerifier.MleProof memory proof = _proofForFields(f);
+        vm.expectRevert(ChannelSettlementVerifier.CloseVkNotSet.selector);
+        fresh.verifyCloseIntent(f, proof);
+    }
+
+    /// initializeCloseVk is deployer-only and set-once, and rejects degreeBits == 0.
+    function test_initializeCloseVk_access_setOnce_and_degreeBitsZero() external {
+        ChannelSettlementVerifier fresh = new ChannelSettlementVerifier(); // deployer = this test
+        (
+            ChannelSettlementVerifier.CloseVk memory vk,
+            SpongefishWhirVerify.WhirParams memory whir,
+            bytes memory protocolId,
+            bytes memory sessionId,
+            uint256[] memory kIs,
+            uint256[] memory subgroupGenPowers
+        ) = CloseTestLib.dummyVkArgs();
+
+        // degreeBits == 0 is rejected. Build an INDEPENDENT zero-degreeBits VK (no aliasing of `vk`).
+        ChannelSettlementVerifier.CloseVk memory zeroVk = ChannelSettlementVerifier.CloseVk({
+            degreeBits: 0,
+            preprocessedRoot: vk.preprocessedRoot,
+            numConstants: vk.numConstants,
+            numRoutedWires: vk.numRoutedWires,
+            gatesDigest: vk.gatesDigest
+        });
+        vm.expectRevert(ChannelSettlementVerifier.CloseVkDegreeBitsZero.selector);
+        fresh.initializeCloseVk(MleVerifier(address(mockMle)), zeroVk, whir, protocolId, sessionId, kIs, subgroupGenPowers);
+
+        // Non-deployer cannot set.
+        vm.prank(address(0xBEEF));
+        vm.expectRevert(bytes("only deployer"));
+        fresh.initializeCloseVk(MleVerifier(address(mockMle)), vk, whir, protocolId, sessionId, kIs, subgroupGenPowers);
+
+        // Deployer sets once…
+        fresh.initializeCloseVk(MleVerifier(address(mockMle)), vk, whir, protocolId, sessionId, kIs, subgroupGenPowers);
+        assertTrue(fresh.closeVkInitialized());
+        // …and cannot set again.
+        vm.expectRevert(bytes("close vk already set"));
+        fresh.initializeCloseVk(MleVerifier(address(mockMle)), vk, whir, protocolId, sessionId, kIs, subgroupGenPowers);
+    }
+
+    // =====================================================================
+    // Phase B-D — withdrawal-claim / post-close-claim REAL verification negatives
+    // =====================================================================
+
+    /// GOLDEN VECTOR mirror: the Solidity `_expectedWithdrawalClaimLimbs` must produce the SAME
+    /// 48-limb vector as the Rust `WithdrawalClaimPublicInputs::to_u64_vec()` golden test
+    /// (`withdrawal_claim_public_inputs_match_solidity_shared_vector`). Same sentinels.
+    function test_expectedWithdrawalClaimLimbs_goldenVector() external view {
+        bytes32 cid = _b32(0x1000);
+        bytes32 h1 = _b32(0x2000);
+        bytes32 pkg = _b32(0x3000);
+        address rcp = address(uint160((uint256(0x4000) << 128) | (uint256(0x4001) << 96)
+            | (uint256(0x4002) << 64) | (uint256(0x4003) << 32) | uint256(0x4004)));
+        bytes32 uad = _b32(0x5000);
+        bytes32 nul = _b32(0x6000);
+        uint64 amount = 0x0000001100000022;
+        uint256[] memory v = verifier.expectedWithdrawalClaimLimbs(
+            hex"0a0b0c0d", cid, h1, pkg, rcp, uad, amount, nul
+        );
+        assertEq(v.length, 48);
+        _assertB32(v, 0, 0x1000);          // close_intent_digest
+        assertEq(v[8], 0x0a0b0c0d);        // channel_id
+        _assertB32(v, 9, 0x2000);          // final_balance_state_h1
+        _assertB32(v, 17, 0x3000);         // member_pk_g
+        assertEq(v[25], 0x4000); assertEq(v[26], 0x4001); assertEq(v[27], 0x4002);
+        assertEq(v[28], 0x4003); assertEq(v[29], 0x4004); // recipient
+        _assertB32(v, 30, 0x5000);         // user_amount_digest
+        _assertB32(v, 38, 0x6000);         // withdrawal_nullifier
+        assertEq(v[46], 0x11); assertEq(v[47], 0x22); // amount (hi, lo)
+    }
+
+    /// GOLDEN VECTOR mirror for post-close-claim (40 limbs).
+    function test_expectedPostCloseClaimLimbs_goldenVector() external view {
+        address rcp = address(uint160((uint256(0x4000) << 128) | (uint256(0x4001) << 96)
+            | (uint256(0x4002) << 64) | (uint256(0x4003) << 32) | uint256(0x4004)));
+        uint256[] memory v = verifier.expectedPostCloseClaimLimbs(
+            hex"0a0b0c0d", _b32(0x1000), _b32(0x2000), _b32(0x3000), rcp, _b32(0x5000),
+            0x0000001100000022
+        );
+        assertEq(v.length, 40);
+        _assertB32(v, 0, 0x1000);          // close_intent_digest
+        assertEq(v[8], 0x0a0b0c0d);        // receiver_channel_id
+        _assertB32(v, 9, 0x2000);          // incoming_tx_hash
+        _assertB32(v, 17, 0x3000);         // receiver_pk_g
+        assertEq(v[25], 0x4000); assertEq(v[29], 0x4004); // recipient ends
+        _assertB32(v, 30, 0x5000);         // shared_native_nullifier
+        assertEq(v[38], 0x11); assertEq(v[39], 0x22); // amount
+    }
+
+    function _b32(uint32 tag) internal pure returns (bytes32) {
+        uint256 v;
+        for (uint256 i = 0; i < 8; i++) {
+            v = (v << 32) | uint256(tag + uint32(i));
+        }
+        return bytes32(v);
+    }
+
+    function _assertB32(uint256[] memory v, uint256 off, uint32 tag) internal pure {
+        for (uint256 i = 0; i < 8; i++) {
+            assertEq(v[off + i], uint256(tag + uint32(i)));
+        }
+    }
+
+    /// Negative — tampered amount limb: an MleProof whose amount PI disagrees with the claim's
+    /// declared amount is rejected by the strict limb bind.
+    function test_wclaim_tamperedAmount_reverts() external {
+        bytes32 d = _finalizeDefault();
+        ChannelSettlementManager.WithdrawalClaim memory c = _withdrawalClaim(d, USER_A, alice, 30);
+        // Build a proof for a DIFFERENT amount (31) than the claim (30) → limb mismatch. NOTE: a
+        // fresh struct (not aliasing `c`, which a `memory` assignment would do).
+        ChannelSettlementManager.WithdrawalClaim memory tampered = _withdrawalClaim(d, USER_A, alice, 30);
+        tampered.amount = 31;
+        MleVerifier.MleProof memory proof = _withdrawalClaimProof(tampered);
+        vm.expectRevert(bytes("claim limb mismatch"));
+        manager.submitWithdrawalClaim(c, proof);
+    }
+
+    /// Negative — wrong user_amount_digest: a proof bound to a different digest than the claim is
+    /// rejected.
+    function test_wclaim_wrongUserAmountDigest_reverts() external {
+        bytes32 d = _finalizeDefault();
+        ChannelSettlementManager.WithdrawalClaim memory c = _withdrawalClaim(d, USER_A, alice, 30);
+        ChannelSettlementManager.WithdrawalClaim memory tampered = _withdrawalClaim(d, USER_A, alice, 30);
+        tampered.userAmountDigest = keccak256("other");
+        MleVerifier.MleProof memory proof = _withdrawalClaimProof(tampered);
+        vm.expectRevert(bytes("claim limb mismatch"));
+        manager.submitWithdrawalClaim(c, proof);
+    }
+
+    /// Negative — non-canonical limb (>= 2**32) is rejected before the crypto check.
+    function test_wclaim_nonCanonicalLimb_reverts() external {
+        bytes32 d = _finalizeDefault();
+        ChannelSettlementManager.WithdrawalClaim memory c = _withdrawalClaim(d, USER_A, alice, 30);
+        MleVerifier.MleProof memory proof = _withdrawalClaimProof(c);
+        proof.publicInputs[0] = uint256(1) << 32; // 2**32, out of u32 range
+        vm.expectRevert(bytes("claim limb range"));
+        manager.submitWithdrawalClaim(c, proof);
+    }
+
+    /// Negative — wrong length publicInputs is rejected.
+    function test_wclaim_wrongLength_reverts() external {
+        bytes32 d = _finalizeDefault();
+        ChannelSettlementManager.WithdrawalClaim memory c = _withdrawalClaim(d, USER_A, alice, 30);
+        MleVerifier.MleProof memory proof;
+        proof.publicInputs = new uint256[](47); // != 48
+        vm.expectRevert(bytes("claim pi len"));
+        manager.submitWithdrawalClaim(c, proof);
+    }
+
+    /// Negative — crypto-invalid (mock verdict false) is rejected even with correct limbs.
+    function test_wclaim_cryptoInvalid_reverts() external {
+        bytes32 d = _finalizeDefault();
+        ChannelSettlementManager.WithdrawalClaim memory c = _withdrawalClaim(d, USER_A, alice, 30);
+        MleVerifier.MleProof memory proof = _withdrawalClaimProof(c);
+        mockMle.setVerdict(false);
+        vm.expectRevert(ChannelSettlementManager.InvalidWithdrawalClaimProof.selector);
+        manager.submitWithdrawalClaim(c, proof);
+        mockMle.setVerdict(true);
+    }
+
+    /// Negative — unset withdrawal-claim VK reverts. Fresh verifier with ONLY the close VK set.
+    function test_wclaim_unsetVk_reverts() external {
+        ChannelSettlementVerifier fresh = new ChannelSettlementVerifier();
+        _initCloseVk(fresh);
+        // withdrawal-claim VK deliberately NOT set.
+        MleVerifier.MleProof memory proof;
+        proof.publicInputs = new uint256[](48);
+        vm.expectRevert(ChannelSettlementVerifier.WithdrawalClaimVkNotSet.selector);
+        fresh.verifyWithdrawalClaim(
+            CHANNEL_ID, bytes32(0), bytes32(0), USER_A, alice, bytes32(0), 0, bytes32(0), proof
+        );
+    }
+
+    /// Negative — withdrawal-claim VK guards: deployer-only, set-once, degreeBits>0.
+    function test_wclaim_vkGuards() external {
+        ChannelSettlementVerifier fresh = new ChannelSettlementVerifier();
+        (
+            ChannelSettlementVerifier.StatementVk memory vk,
+            SpongefishWhirVerify.WhirParams memory whir,
+            bytes memory protocolId,
+            bytes memory sessionId,
+            uint256[] memory kIs,
+            uint256[] memory subgroupGenPowers
+        ) = CloseTestLib.dummyStatementVkArgs();
+
+        // degreeBits == 0 rejected. Build a FRESH zero VK (a `memory` assignment would alias `vk`).
+        (ChannelSettlementVerifier.StatementVk memory zeroVk,,,,,) = CloseTestLib.dummyStatementVkArgs();
+        zeroVk.degreeBits = 0;
+        vm.expectRevert(ChannelSettlementVerifier.StatementVkDegreeBitsZero.selector);
+        fresh.initializeWithdrawalClaimVk(MleVerifier(address(mockMle)), zeroVk, whir, protocolId, sessionId, kIs, subgroupGenPowers);
+
+        // non-deployer rejected.
+        vm.prank(address(0xBEEF));
+        vm.expectRevert(bytes("only deployer"));
+        fresh.initializeWithdrawalClaimVk(MleVerifier(address(mockMle)), vk, whir, protocolId, sessionId, kIs, subgroupGenPowers);
+
+        // set once…
+        fresh.initializeWithdrawalClaimVk(MleVerifier(address(mockMle)), vk, whir, protocolId, sessionId, kIs, subgroupGenPowers);
+        assertTrue(fresh.withdrawalClaimVkInitialized());
+        // …and not again.
+        vm.expectRevert(bytes("withdrawal claim vk already set"));
+        fresh.initializeWithdrawalClaimVk(MleVerifier(address(mockMle)), vk, whir, protocolId, sessionId, kIs, subgroupGenPowers);
+    }
+
+    /// Negative — post-close-claim unset VK reverts.
+    function test_pcclaim_unsetVk_reverts() external {
+        ChannelSettlementVerifier fresh = new ChannelSettlementVerifier();
+        _initCloseVk(fresh);
+        MleVerifier.MleProof memory proof;
+        proof.publicInputs = new uint256[](40);
+        vm.expectRevert(ChannelSettlementVerifier.PostCloseClaimVkNotSet.selector);
+        fresh.verifyPostCloseClaim(
+            CHANNEL_ID, bytes32(0), bytes32(0), USER_B, bob, bytes32(0), 0, proof
+        );
+    }
+
+    /// Negative — post-close-claim VK guards: set-once + already-set message.
+    function test_pcclaim_vkSetOnce() external {
+        ChannelSettlementVerifier fresh = new ChannelSettlementVerifier();
+        (
+            ChannelSettlementVerifier.StatementVk memory vk,
+            SpongefishWhirVerify.WhirParams memory whir,
+            bytes memory protocolId,
+            bytes memory sessionId,
+            uint256[] memory kIs,
+            uint256[] memory subgroupGenPowers
+        ) = CloseTestLib.dummyStatementVkArgs();
+        fresh.initializePostCloseClaimVk(MleVerifier(address(mockMle)), vk, whir, protocolId, sessionId, kIs, subgroupGenPowers);
+        vm.expectRevert(bytes("post close claim vk already set"));
+        fresh.initializePostCloseClaimVk(MleVerifier(address(mockMle)), vk, whir, protocolId, sessionId, kIs, subgroupGenPowers);
+    }
+
+    /// Negative (#8) — double-claim: the SAME derived shared_native_nullifier cannot be used twice.
+    /// The nullifier is RECOMPUTED by the manager from (closeIntentDigest, incomingTxHash,
+    /// receiverPkG), so re-submitting the same (digest, tx, receiver) reverts NullifierAlreadyUsed —
+    /// even though the caller no longer supplies the nullifier.
+    function test_pcclaim_doubleClaim_reverts() external {
+        bytes32 d = _finalizeDefault();
+        ChannelSettlementManager.PostCloseClaim memory pc = ChannelSettlementManager.PostCloseClaim({
+            closeIntentDigest: d,
+            incomingTxHash: keccak256("itx"),
+            receiverPkG: USER_B,
+            recipient: bob,
+            amount: 5
+        });
+        manager.submitPostCloseClaim(pc, _postCloseClaimProof(pc));
+        assertEq(manager.withdrawalCredits(bob), 5);
+
+        // Same claim → same recomputed nullifier → rejected.
+        MleVerifier.MleProof memory proof2 = _postCloseClaimProof(pc);
+        vm.expectRevert(ChannelSettlementManager.NullifierAlreadyUsed.selector);
+        manager.submitPostCloseClaim(pc, proof2);
+    }
+
+    /// Negative (#8) — manager passes the RECOMPUTED nullifier to the verifier: a proof bound to a
+    /// DIFFERENT (attacker-picked) shared_native_nullifier than the recomputed one is rejected by
+    /// the strict limb bind. Confirms the manager cannot be made to bind an opaque nullifier.
+    function test_pcclaim_forgedNullifier_reverts() external {
+        bytes32 d = _finalizeDefault();
+        ChannelSettlementManager.PostCloseClaim memory pc = ChannelSettlementManager.PostCloseClaim({
+            closeIntentDigest: d,
+            incomingTxHash: keccak256("itx"),
+            receiverPkG: USER_B,
+            recipient: bob,
+            amount: 5
+        });
+        // Build a proof whose shared_native_nullifier limb is a FORGED value (not the IMCK derive).
+        uint256[] memory limbs = verifier.expectedPostCloseClaimLimbs(
+            CHANNEL_ID, d, pc.incomingTxHash, USER_B, bob, keccak256("forged"), pc.amount
+        );
+        MleVerifier.MleProof memory proof = CloseTestLib.proofWithLimbs(limbs);
+        vm.expectRevert(bytes("claim limb mismatch"));
+        manager.submitPostCloseClaim(pc, proof);
     }
 }
 

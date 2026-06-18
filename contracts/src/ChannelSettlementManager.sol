@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.24;
 
+import {MleVerifier} from "@mle/MleVerifier.sol";
+
 /// @dev File-scope close-PI field bundle passed across the manager→verifier boundary as ONE
 /// calldata struct. Collapsing the 14 close-intent scalars into a single argument keeps the
 /// `verifyCloseIntent` external call under the via-IR stack-too-deep limit (the delegate-account
@@ -27,10 +29,13 @@ struct CloseProofFields {
 }
 
 interface IChannelSettlementVerifier {
+    /// Phase A: the close intent is verified by a REAL MLE/WHIR proof of the plonky2 close circuit
+    /// (not a stub). The proof is the wrapped close `MleVerifier.MleProof` whose `publicInputs` are
+    /// the 87 raw close limbs the verifier rebinds. `view` (reads the close VK), not `pure`.
     function verifyCloseIntent(
         CloseProofFields calldata fields,
-        bytes calldata proof
-    ) external pure returns (bool);
+        MleVerifier.MleProof calldata proof
+    ) external view returns (bool);
 
     function verifySpecialClose(
         bytes4 channelId,
@@ -52,8 +57,8 @@ interface IChannelSettlementVerifier {
         bytes32 userAmountDigest,
         uint64 amount,
         bytes32 withdrawalNullifier,
-        bytes calldata proof
-    ) external pure returns (bool);
+        MleVerifier.MleProof calldata mleProof
+    ) external view returns (bool);
 
     function verifyCancelClose(
         bytes4 channelId,
@@ -73,8 +78,8 @@ interface IChannelSettlementVerifier {
         address recipient,
         bytes32 sharedNativeNullifier,
         uint64 amount,
-        bytes calldata proof
-    ) external pure returns (bool);
+        MleVerifier.MleProof calldata mleProof
+    ) external view returns (bool);
 
     function verifyLateOutgoingDebit(
         bytes4 channelId,
@@ -295,13 +300,42 @@ contract ChannelSettlementManager {
         bytes32 revivedSeal;
     }
 
+    /// @dev HAZARD #8 (Phase B-D): `sharedNativeNullifier` is NO LONGER a caller-supplied field —
+    ///      the manager RECOMPUTES it from keccak(IMCK, closeIntentDigest, incomingTxHash,
+    ///      receiverPkG) so the double-claim nullifier is a deterministic function of the claimed
+    ///      tx (no attacker-chosen opaque value). The in-circuit derivation produces the SAME value
+    ///      and the proof's PI is strict-bound to it.
     struct PostCloseClaim {
         bytes32 closeIntentDigest;
         bytes32 incomingTxHash;
         bytes32 receiverPkG;
         address recipient;
-        bytes32 sharedNativeNullifier;
         uint64 amount;
+    }
+
+    /// "IMCK" — post-close shared-native nullifier domain. MUST equal Rust
+    /// `POST_CLOSE_NULLIFIER_DOMAIN` (src/common/channel.rs) and the in-circuit constant so the
+    /// recomputed nullifier matches the proof's bound PI byte-for-byte.
+    uint32 internal constant POST_CLOSE_NULLIFIER_DOMAIN = 0x494d434b;
+
+    /// @dev Recompute the post-close shared-native nullifier exactly as the Rust
+    ///      `PostCloseIncomingClaim::derive_shared_native_nullifier` and the in-circuit keccak do:
+    ///      keccak over the IMCK domain word + closeIntentDigest(8 u32) + incomingTxHash(8 u32) +
+    ///      receiverPkG(8 u32). Each bytes32 is 8 big-endian u32 words, so `abi.encodePacked` of the
+    ///      domain (bytes4) + the three bytes32 reproduces the preimage byte stream.
+    function _deriveSharedNativeNullifier(
+        bytes32 closeIntentDigest,
+        bytes32 incomingTxHash,
+        bytes32 receiverPkG
+    ) internal pure returns (bytes32) {
+        return keccak256(
+            abi.encodePacked(
+                bytes4(POST_CLOSE_NULLIFIER_DOMAIN),
+                closeIntentDigest,
+                incomingTxHash,
+                receiverPkG
+            )
+        );
     }
 
     struct LateOutgoingDebitCorrection {
@@ -619,7 +653,7 @@ contract ChannelSettlementManager {
     /// (abstract2 §3.5).
     function submitCloseIntent(
         CloseIntent calldata intent,
-        bytes calldata proof
+        MleVerifier.MleProof calldata proof
     ) external {
         if (channelStatus == ChannelLifecycleStatus.Closed) revert ChannelClosed();
         _checkCloseProof(intent, proof);
@@ -856,7 +890,7 @@ contract ChannelSettlementManager {
 
     function submitWithdrawalClaim(
         WithdrawalClaim calldata claim,
-        bytes calldata proof
+        MleVerifier.MleProof calldata proof
     ) external {
         if (channelStatus != ChannelLifecycleStatus.Closed) revert CloseNotActive();
         if (claim.closeIntentDigest != finalizedCloseIntentDigest) {
@@ -906,7 +940,7 @@ contract ChannelSettlementManager {
 
     function submitPostCloseClaim(
         PostCloseClaim calldata claim,
-        bytes calldata proof
+        MleVerifier.MleProof calldata proof
     ) external {
         if (channelStatus != ChannelLifecycleStatus.Closed) revert CloseNotActive();
         if (claim.closeIntentDigest != finalizedCloseIntentDigest) {
@@ -918,7 +952,15 @@ contract ChannelSettlementManager {
         if (registeredRecipientOf[claim.receiverPkG] != claim.recipient) {
             revert RecipientMismatch();
         }
-        if (usedSharedNativeNullifiers[claim.sharedNativeNullifier]) {
+        // HAZARD #8: RECOMPUTE the shared-native nullifier (it is NOT a caller-supplied field). The
+        // in-circuit derivation uses the SAME keccak preimage and the proof's PI is strict-bound to
+        // it, so the value passed to the verifier is the one the proof actually committed.
+        bytes32 sharedNativeNullifier = _deriveSharedNativeNullifier(
+            claim.closeIntentDigest,
+            claim.incomingTxHash,
+            claim.receiverPkG
+        );
+        if (usedSharedNativeNullifiers[sharedNativeNullifier]) {
             revert NullifierAlreadyUsed();
         }
         if (
@@ -928,7 +970,7 @@ contract ChannelSettlementManager {
                 claim.incomingTxHash,
                 claim.receiverPkG,
                 claim.recipient,
-                claim.sharedNativeNullifier,
+                sharedNativeNullifier,
                 claim.amount,
                 proof
             )
@@ -943,11 +985,11 @@ contract ChannelSettlementManager {
             revert WithdrawalCapExceeded();
         }
         totalWithdrawn = newTotalWithdrawn;
-        usedSharedNativeNullifiers[claim.sharedNativeNullifier] = true;
+        usedSharedNativeNullifiers[sharedNativeNullifier] = true;
         withdrawalCredits[claim.recipient] += claim.amount;
         emit PostCloseClaimAccepted(
             claim.closeIntentDigest,
-            claim.sharedNativeNullifier,
+            sharedNativeNullifier,
             claim.receiverPkG,
             claim.recipient,
             claim.amount
@@ -1046,7 +1088,7 @@ contract ChannelSettlementManager {
 
     function _checkCloseProof(
         CloseIntent calldata intent,
-        bytes calldata proof
+        MleVerifier.MleProof calldata proof
     ) internal view {
         // F4/F7 SECURITY: the close proof's in-circuit `memberSetCommitment` must equal this
         // channel's registered member-set commitment, AND the close proof's `memberCount` /
@@ -1062,7 +1104,7 @@ contract ChannelSettlementManager {
     /// and `submitCloseIntent` under the via-IR stack limit once `delegateCount` is appended).
     function _runCloseVerify(
         CloseIntent calldata intent,
-        bytes calldata proof
+        MleVerifier.MleProof calldata proof
     ) internal view returns (bool) {
         CloseProofFields memory fields = CloseProofFields({
             channelId: channelId,

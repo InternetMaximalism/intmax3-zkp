@@ -24,16 +24,14 @@ use rand010::Rng;
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    circuits::balance::balance_pis::BalanceFullPublicInputs,
-    circuits::channel::state_update_verifier::{
-        BalanceRefreshUpdateWitness, ChannelProofVerifier, ChannelStateUpdateError,
-        ChannelStateUpdatePublicInputs, InChannelTransferUpdateWitness,
-        InterChannelFundImportUpdateWitness, InterChannelSendUpdateWitness,
-        ReceiverBundleApplyUpdateWitness,
-    },
-    poseidon_sig::{
-        GoldilocksSecretKey,
-        circuit::{C, D, F, SingleSigCircuit},
+    circuits::{
+        balance::balance_pis::BalanceFullPublicInputs,
+        channel::state_update_verifier::{
+            BalanceRefreshUpdateWitness, ChannelProofVerifier, ChannelStateUpdateError,
+            ChannelStateUpdatePublicInputs, InChannelTransferUpdateWitness,
+            InterChannelFundImportUpdateWitness, InterChannelSendUpdateWitness,
+            ReceiverBundleApplyUpdateWitness,
+        },
     },
     common::{
         balance_state::{BalanceState, settled_tx_chain_push, tx_leaf_hash},
@@ -54,15 +52,19 @@ use crate::{
     constants::MAX_CHANNEL_MEMBERS,
     ethereum_types::{
         bytes32::{BYTES32_LEN, Bytes32},
-        u256::U256,
         u32limb_trait::U32LimbTrait,
+        u256::U256,
+    },
+    poseidon_sig::{
+        GoldilocksSecretKey,
+        circuit::{C, D, F, SingleSigCircuit},
     },
     regev::{
-        AmountWitness, RegevCiphertext, RegevPk, RegevSecurityLevel, RegevSk, RealRegevProofVerifier,
-        add_ciphertexts, channel_keygen, decrypt_amount, encrypt_amount,
-        prove_balance_refresh_witnessed, prove_channel_tx, prove_channel_update,
-        prove_hash_sig, regev_pk_root, verify_hash_sig,
+        AmountWitness, RealRegevProofVerifier, RegevCiphertext, RegevPk, RegevSecurityLevel,
+        RegevSk, add_ciphertexts, channel_keygen, decrypt_amount, encrypt_amount,
         hash_sig::{BabyBearPublicKey, BabyBearSecretKey, decompose_digest_to_limbs},
+        prove_balance_refresh_witnessed, prove_channel_tx, prove_channel_update, prove_hash_sig,
+        regev_pk_root, verify_hash_sig,
     },
     utils::poseidon_hash_out::PoseidonHashOut,
 };
@@ -120,14 +122,16 @@ pub struct MemberKeys {
     /// Goldilocks Poseidon-preimage signing key (P4-2) — the member's channel-STATE (IMCH)
     /// co-signing key, replacing the prior SPHINCS+ keypair. `sign_state` proves a
     /// `SingleSigCircuit` over the state's IMCH `signing_digest` with this key; the proof IS the
-    /// member's signature. Its public key `pk_g = GoldilocksSecretKey::public_key()` is the member's
-    /// canonical on-chain-anchored identity (the value stored in `ChannelRecord.member_pk_gs` and
-    /// committed in the registered `MemberLeaf`). The validity/close ZK list-proof aggregation over
-    /// these same per-member signatures is the existing P2b path; the wallet's local agreement is
-    /// per-member individual proof verification (`verify_all_signatures`).
+    /// member's signature. Its public key `pk_g = GoldilocksSecretKey::public_key()` is the
+    /// member's canonical on-chain-anchored identity (the value stored in
+    /// `ChannelRecord.member_pk_gs` and committed in the registered `MemberLeaf`). The
+    /// validity/close ZK list-proof aggregation over these same per-member signatures is the
+    /// existing P2b path; the wallet's local agreement is per-member individual proof
+    /// verification (`verify_all_signatures`).
     pub signing_key: GoldilocksSecretKey,
-    /// P3 BabyBear hash-sig secret key — authorizes the channel-tx SENDER (IMPA) over the channel-tx
-    /// `signing_digest`. Its `pk_b` is committed in the member's registered `MemberLeaf` (A11).
+    /// P3 BabyBear hash-sig secret key — authorizes the channel-tx SENDER (IMPA) over the
+    /// channel-tx `signing_digest`. Its `pk_b` is committed in the member's registered
+    /// `MemberLeaf` (A11).
     pub baby_key: BabyBearSecretKey,
     pub regev_pk: RegevPk,
     pub regev_sk: RegevSk,
@@ -142,7 +146,8 @@ impl MemberKeys {
         let signing_key = GoldilocksSecretKey::from_seed(sig_seed);
         // Derive the BabyBear hash-sig key from a fresh 32-byte seed drawn from the wallet RNG.
         // `BabyBearSecretKey::random` is defined over `rand` 0.8 (the regev layer), so we bridge by
-        // seeding a 0.8 `StdRng` from wallet entropy rather than sharing the `rand010` RNG directly.
+        // seeding a 0.8 `StdRng` from wallet entropy rather than sharing the `rand010` RNG
+        // directly.
         let mut baby_seed = [0u8; 32];
         rng.fill_bytes(&mut baby_seed);
         let mut baby_rng = rand::rngs::StdRng::from_seed(baby_seed);
@@ -266,7 +271,8 @@ pub fn verify_channel_tx_sender_hash_sig(
     registered_pk_g: Bytes32,
     registered_pk_b: Bytes32,
 ) -> WResult<()> {
-    // (1) The proof must be present (atomicity: a balance-reduction without an owner sig is rejected).
+    // (1) The proof must be present (atomicity: a balance-reduction without an owner sig is
+    // rejected).
     if channel_tx.sender_hash_sig.is_empty() {
         return bail("channel_tx sender hash-sig proof must not be empty");
     }
@@ -288,8 +294,8 @@ pub fn verify_channel_tx_sender_hash_sig(
     let mut pvs: Vec<_> = Vec::with_capacity(pk_b.digest.len() + m.len());
     pvs.extend_from_slice(&pk_b.digest);
     pvs.extend_from_slice(&m);
-    // (4) Verify the STARK against those bound public values. `verify_hash_sig` absorbs the PVs into
-    // the Fiat-Shamir transcript, so a proof minted for a different (pk_b, m) is rejected.
+    // (4) Verify the STARK against those bound public values. `verify_hash_sig` absorbs the PVs
+    // into the Fiat-Shamir transcript, so a proof minted for a different (pk_b, m) is rejected.
     verify_hash_sig(level, &channel_tx.sender_hash_sig, &pvs).map_err(we)?;
     Ok(())
 }
@@ -301,8 +307,8 @@ pub fn verify_channel_tx_sender_hash_sig(
 /// Public information about one member (no secrets). `pk_g` is the member's Goldilocks
 /// Poseidon-preimage signing public key (`GoldilocksSecretKey::public_key()`, P4-2) — the value
 /// stored at the member's slot in `ChannelRecord.member_pk_gs` and committed in the registered
-/// `MemberLeaf`; it is the public key against which that member's `SingleSigCircuit` state-signature
-/// proofs verify.
+/// `MemberLeaf`; it is the public key against which that member's `SingleSigCircuit`
+/// state-signature proofs verify.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct MemberInfo {
@@ -333,8 +339,9 @@ pub struct ChannelBalanceAttestation {
 }
 
 /// A complete, signed channel snapshot shared between members. The deposit-backing attestation is
-/// NOT embedded here (it is a co-signer-side artifact passed separately to [`verify_channel_backing`])
-/// so the snapshot wire format stays unchanged and the browser delegate need not carry it.
+/// NOT embedded here (it is a co-signer-side artifact passed separately to
+/// [`verify_channel_backing`]) so the snapshot wire format stays unchanged and the browser delegate
+/// need not carry it.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ChannelSnapshot {
@@ -349,7 +356,8 @@ pub struct ChannelSnapshot {
 /// leaves members unable to withdraw real value at close — the user-mandated safety invariant).
 ///
 /// Checks (all required):
-/// 1. the attestation's balance proof VERIFIES against `balance_vd` (a real, validity-backed proof);
+/// 1. the attestation's balance proof VERIFIES against `balance_vd` (a real, validity-backed
+///    proof);
 /// 2. `balanceProof.PI.channel_id == record.channel_id` (the proof is for THIS channel);
 /// 3. `balanceProof.PI.settled_tx_chain == state.balance_state.settled_tx_chain` (detail2 §F-1: the
 ///    signed state's settle history is exactly the one the balance proof absorbed).
@@ -370,14 +378,15 @@ pub fn verify_channel_backing(
                 .into(),
         )
     })?;
-    let proof = ProofWithPublicInputs::<F, C, D>::from_bytes(
-        att.balance_proof.clone(),
-        &balance_vd.common,
-    )
-    .map_err(|e| WalletError(format!("backing balance proof deserialization failed: {e}")))?;
+    let proof =
+        ProofWithPublicInputs::<F, C, D>::from_bytes(att.balance_proof.clone(), &balance_vd.common)
+            .map_err(|e| {
+                WalletError(format!("backing balance proof deserialization failed: {e}"))
+            })?;
 
     // 1. The base-layer balance proof must really verify (it is validity-proof-backed: the balance
-    //    circuit only advances against a proven `PublicState`). A fabricated proof is rejected here.
+    //    circuit only advances against a proven `PublicState`). A fabricated proof is rejected
+    //    here.
     balance_vd
         .verify(proof.clone())
         .map_err(|e| WalletError(format!("backing balance proof verification FAILED: {e}")))?;
@@ -386,8 +395,13 @@ pub fn verify_channel_backing(
     // `[BalancePublicInputs ‖ embedded verifier-data]`. GoldilocksField PIs are stored canonically
     // (`.0 < ORDER`), matching `to_u64_vec`. Parse both halves.
     let pi_u64: Vec<u64> = proof.public_inputs.iter().map(|f| f.0).collect();
-    let full = BalanceFullPublicInputs::<F, C, D>::from_u64_slice(&pi_u64, &balance_vd.common.config)
-        .map_err(|e| WalletError(format!("backing balance proof public-input parse failed: {e}")))?;
+    let full =
+        BalanceFullPublicInputs::<F, C, D>::from_u64_slice(&pi_u64, &balance_vd.common.config)
+            .map_err(|e| {
+                WalletError(format!(
+                    "backing balance proof public-input parse failed: {e}"
+                ))
+            })?;
 
     // Cyclic-recursion binding: the proof's self-referential verifier data must be the EXPECTED
     // balance circuit. Without this a valid proof from a DIFFERENT circuit carrying a look-alike
@@ -409,7 +423,8 @@ pub fn verify_channel_backing(
     }
 
     // 3. detail2 §F-1: the signed BalanceState's settle history must be exactly the one the balance
-    //    proof folded in. This is the seam binding the off-chain channel state to on-chain deposits.
+    //    proof folded in. This is the seam binding the off-chain channel state to on-chain
+    //    deposits.
     if pis.settled_tx_chain != state.balance_state.settled_tx_chain {
         return bail(
             "backing balance proof settled_tx_chain != signed BalanceState.settled_tx_chain \
@@ -492,11 +507,11 @@ fn member_pubkeys_root(record: &ChannelRecord, members: &[MemberInfo]) -> WResul
 // Channel construction (CLI assembles the genesis from member contributions)
 // ---------------------------------------------------------------------------
 
-/// Build the `ChannelRecord` for a channel from its ACTIVE participants' pubkeys (delegate account).
-/// `members` covers slots `0..active` (active = co-signing members `0..member_count` followed by
-/// `delegate_count` delegates `member_count..active`), bijectively. `bp_member_slot` is the block
-/// proposer and MUST be a co-signing member (`< member_count`). Pass `delegate_count = 0` for a
-/// classic member-only channel (byte-for-byte the legacy build).
+/// Build the `ChannelRecord` for a channel from its ACTIVE participants' pubkeys (delegate
+/// account). `members` covers slots `0..active` (active = co-signing members `0..member_count`
+/// followed by `delegate_count` delegates `member_count..active`), bijectively. `bp_member_slot` is
+/// the block proposer and MUST be a co-signing member (`< member_count`). Pass `delegate_count = 0`
+/// for a classic member-only channel (byte-for-byte the legacy build).
 pub fn build_record(
     channel_id: u32,
     members: &[MemberInfo],
@@ -540,7 +555,9 @@ pub fn build_record(
         regev_pk_root: regev_pk_root(&regev_pks),
     };
     record.member_pubkeys_root = member_pubkeys_root(&record, members)?;
-    record.validate().map_err(|e| WalletError(format!("{e:?}")))?;
+    record
+        .validate()
+        .map_err(|e| WalletError(format!("{e:?}")))?;
     Ok(record)
 }
 
@@ -551,6 +568,7 @@ pub fn build_record(
 pub fn assemble_genesis_state(
     record: &ChannelRecord,
     enc_balances_active: &[RegevCiphertext],
+    regev_pk_digests_active: &[Bytes32],
     fund_amount: u64,
 ) -> WResult<ChannelState> {
     // Legacy/UNBACKED genesis: zero settle-chain + zero intmax_state_root. A channel assembled this
@@ -558,6 +576,7 @@ pub fn assemble_genesis_state(
     assemble_genesis_state_backed(
         record,
         enc_balances_active,
+        regev_pk_digests_active,
         fund_amount,
         Bytes32::default(),
         Bytes32::default(),
@@ -565,13 +584,14 @@ pub fn assemble_genesis_state(
 }
 
 /// Genuine deposit-BACKED genesis (detail2 §F-1). `settled_tx_chain` MUST equal the channel's
-/// base-layer `balanceProof.PI.settled_tx_chain` (the deposit settle-history that funds the channel),
-/// and `intmax_state_root` anchors the `ChannelFund` to that intmax state. The resulting genesis
-/// reconciles with the channel's [`ChannelBalanceAttestation`], so co-signers accept it. `fund_amount`
-/// should equal the deposited native value (the close `withdrawCap`).
+/// base-layer `balanceProof.PI.settled_tx_chain` (the deposit settle-history that funds the
+/// channel), and `intmax_state_root` anchors the `ChannelFund` to that intmax state. The resulting
+/// genesis reconciles with the channel's [`ChannelBalanceAttestation`], so co-signers accept it.
+/// `fund_amount` should equal the deposited native value (the close `withdrawCap`).
 pub fn assemble_genesis_state_backed(
     record: &ChannelRecord,
     enc_balances_active: &[RegevCiphertext],
+    regev_pk_digests_active: &[Bytes32],
     fund_amount: u64,
     settled_tx_chain: Bytes32,
     intmax_state_root: Bytes32,
@@ -579,6 +599,12 @@ pub fn assemble_genesis_state_backed(
     let active = record.member_count as usize + record.delegate_count as usize;
     if enc_balances_active.len() != active {
         return bail("genesis ciphertext count must equal member_count + delegate_count");
+    }
+    // Decryption Stage 1: one Regev pk Poseidon digest per ACTIVE slot (members then delegates),
+    // each `Bytes32::from(member.regev_pk.poseidon_digest())`. Folded into the signed H1 so the
+    // claim circuit can bind the witnessed `(a, b)` to the member's registered key.
+    if regev_pk_digests_active.len() != active {
+        return bail("genesis Regev pk digest count must equal member_count + delegate_count");
     }
     let state = ChannelState {
         channel_id: record.channel_id,
@@ -595,6 +621,7 @@ pub fn assemble_genesis_state_backed(
             member_count: record.member_count,
             delegate_count: record.delegate_count,
             enc_balances: BalanceState::pad_enc_balances(enc_balances_active),
+            regev_pk_digests: BalanceState::pad_regev_pk_digests(regev_pk_digests_active),
             settled_tx_chain,
             state_version: 0,
             pending_adds: BalanceState::pad_pending_adds(&vec![0u32; active]),
@@ -625,11 +652,11 @@ pub fn sign_state(keys: &MemberKeys, slot: u8, state: &ChannelState) -> WResult<
     })
 }
 
-/// CHECK-AND-SIGN (detail2 §3.1 `agreeBalanceState`, atomic / non-bypassable): produce this member's
-/// signature over `state` **only if** the `settled_tx_chain` embedded in the state matches the
-/// signer's held intmax balance state — i.e. the channel's native `balanceProof` attestation
-/// reconciles (channel_id + settled_tx_chain, [`verify_channel_backing`]). On any mismatch it returns
-/// an error and produces NO signature.
+/// CHECK-AND-SIGN (detail2 §3.1 `agreeBalanceState`, atomic / non-bypassable): produce this
+/// member's signature over `state` **only if** the `settled_tx_chain` embedded in the state matches
+/// the signer's held intmax balance state — i.e. the channel's native `balanceProof` attestation
+/// reconciles (channel_id + settled_tx_chain, [`verify_channel_backing`]). On any mismatch it
+/// returns an error and produces NO signature.
 ///
 /// This is the single operation a co-signer must use: a member never signs a channel state whose
 /// settle history disagrees with the intmax balance it actually holds. Prefer this over a bare
@@ -650,7 +677,9 @@ pub fn sign_state_if_backed(
 
 /// Insert/replace a member signature in slot order.
 pub fn add_signature(state: &mut ChannelState, sig: MemberSignature) {
-    state.member_signatures.retain(|s| s.member_slot != sig.member_slot);
+    state
+        .member_signatures
+        .retain(|s| s.member_slot != sig.member_slot);
     state.member_signatures.push(sig);
     state.member_signatures.sort_by_key(|s| s.member_slot);
 }
@@ -845,16 +874,21 @@ pub fn build_send(
         level,
         sender_pk,
         recipient_pk,
-        (&prev.balance_state.enc_balances[sender_slot as usize], before_witness),
+        (
+            &prev.balance_state.enc_balances[sender_slot as usize],
+            before_witness,
+        ),
         (&enc_amount, &enc_amount_w),
         (&after_ct, &after_w),
     )
     .map_err(we)?;
 
     // Recipient slot = public homomorphic sum.
-    let recipient_after =
-        add_ciphertexts(&prev.balance_state.enc_balances[recipient_slot as usize], &enc_amount)
-            .map_err(we)?;
+    let recipient_after = add_ciphertexts(
+        &prev.balance_state.enc_balances[recipient_slot as usize],
+        &enc_amount,
+    )
+    .map_err(we)?;
 
     // Proposed next state.
     let mut enc_balances = prev.balance_state.enc_balances.clone();
@@ -874,9 +908,10 @@ pub fn build_send(
         },
         prev_digest: prev.digest,
         member_signatures: Vec::new(),
-        // §C-2 (no small block): the next-state h2_tag MUST be zero. `..prev.clone()` would otherwise
-        // inherit a NON-zero h2_tag left by a preceding inter-channel send (which sets h2_tag =
-        // tx_tree_root), making the very next intra send / refresh fail InvalidH2Tag.
+        // §C-2 (no small block): the next-state h2_tag MUST be zero. `..prev.clone()` would
+        // otherwise inherit a NON-zero h2_tag left by a preceding inter-channel send (which
+        // sets h2_tag = tx_tree_root), making the very next intra send / refresh fail
+        // InvalidH2Tag.
         h2_tag: Bytes32::default(),
         ..prev.clone()
     }
@@ -949,12 +984,12 @@ pub fn verify_send_transition(
     expected_amount: Option<u64>,
 ) -> WResult<()> {
     // SECURITY (P4-1, A11 caller-layer): the peer-supplied `payload` carries its OWN `record` /
-    // `members`. Bind the payload's record to the session's TRUSTED, already-verified channel record
-    // (the member set is immutable for the channel's lifetime) so the A11 membership check runs
-    // against the truly-registered members — NOT an attacker-supplied, self-consistent foreign record.
-    // The IMCR `signing_digest` commits the whole record (member_pk_gs, member_pubkeys_root,
-    // regev_pk_root, …); the downstream member_pubkeys_root recompute then transitively binds
-    // `payload.members` to this trusted set.
+    // `members`. Bind the payload's record to the session's TRUSTED, already-verified channel
+    // record (the member set is immutable for the channel's lifetime) so the A11 membership
+    // check runs against the truly-registered members — NOT an attacker-supplied,
+    // self-consistent foreign record. The IMCR `signing_digest` commits the whole record
+    // (member_pk_gs, member_pubkeys_root, regev_pk_root, …); the downstream member_pubkeys_root
+    // recompute then transitively binds `payload.members` to this trusted set.
     if payload.record.signing_digest() != trusted_record.signing_digest() {
         return bail("A11: payload record is not the channel's registered (trusted) record");
     }
@@ -975,11 +1010,11 @@ pub fn verify_send_transition(
     let active = payload.record.member_count as usize + payload.record.delegate_count as usize;
     check_slot(sender_slot, active)?;
     // SECURITY (P4-1, A11): authenticate the payload's member set BEFORE trusting any `pk_b` /
-    // `regev_pk` it carries. `verify_send_transition` runs on a peer-supplied `SendPayload` that has
-    // its OWN `record` + `members` (it is NOT necessarily the snapshot already passed through
-    // `verify_snapshot`), so we must independently (a) check the member list covers the active
-    // slots `0..member_count+delegate_count` (members + delegates) bijectively and (b) recompute the
-    // canonical Poseidon `MemberTree` root over
+    // `regev_pk` it carries. `verify_send_transition` runs on a peer-supplied `SendPayload` that
+    // has its OWN `record` + `members` (it is NOT necessarily the snapshot already passed
+    // through `verify_snapshot`), so we must independently (a) check the member list covers the
+    // active slots `0..member_count+delegate_count` (members + delegates) bijectively and (b)
+    // recompute the canonical Poseidon `MemberTree` root over
     // `MemberLeaf{pk_g, pk_b, regev_pk_digest}` and bind it to `record.member_pubkeys_root`. Only
     // then are the per-slot `pk_b` and Regev keys authenticated against the registered set, closing
     // the P3-5 gap where `pk_b` was read from the raw payload.
@@ -999,9 +1034,7 @@ pub fn verify_send_transition(
     }
     let recomputed_root = member_pubkeys_root(&payload.record, &payload.members)?;
     if recomputed_root != payload.record.member_pubkeys_root {
-        return bail(
-            "member_pubkeys_root mismatch: payload member set not anchored to the record",
-        );
+        return bail("member_pubkeys_root mismatch: payload member set not anchored to the record");
     }
     // Regev keys consumed by the E-1 statement below (built from `payload.members`, which the
     // member_pubkeys_root recompute bound to the trusted record's set).
@@ -1079,9 +1112,10 @@ pub struct RefreshPayload {
 
 /// Build a balance-refresh for `slot` (this wallet's own slot): re-encrypt the current balance to a
 /// FRESH ciphertext (clean digits, same value), prove `old_ct ≡ new_ct` (RefreshAir), and propose
-/// the next state (slot's ct replaced, its `pending_adds` reset to 0, version++). Returns the payload
-/// for the members to co-sign AND the fresh `AmountWitness` so the wallet can SEND from the slot
-/// afterwards. A DELEGATE slot does NOT co-sign state; a member slot self-signs (it is N-of-N).
+/// the next state (slot's ct replaced, its `pending_adds` reset to 0, version++). Returns the
+/// payload for the members to co-sign AND the fresh `AmountWitness` so the wallet can SEND from the
+/// slot afterwards. A DELEGATE slot does NOT co-sign state; a member slot self-signs (it is
+/// N-of-N).
 pub fn build_refresh(
     keys: &MemberKeys,
     snapshot: &ChannelSnapshot,
@@ -1089,8 +1123,7 @@ pub fn build_refresh(
     level: RegevSecurityLevel,
     rng: &mut impl Rng,
 ) -> WResult<(RefreshPayload, AmountWitness)> {
-    let active =
-        snapshot.record.member_count as usize + snapshot.record.delegate_count as usize;
+    let active = snapshot.record.member_count as usize + snapshot.record.delegate_count as usize;
     check_slot(slot as usize, active)?;
     let prev = &snapshot.state;
     let regev_pks = regev_pks_array(&snapshot.members);
@@ -1115,9 +1148,10 @@ pub fn build_refresh(
         },
         prev_digest: prev.digest,
         member_signatures: Vec::new(),
-        // §C-2 (no small block): the next-state h2_tag MUST be zero. `..prev.clone()` would otherwise
-        // inherit a NON-zero h2_tag left by a preceding inter-channel send (which sets h2_tag =
-        // tx_tree_root), making the very next intra send / refresh fail InvalidH2Tag.
+        // §C-2 (no small block): the next-state h2_tag MUST be zero. `..prev.clone()` would
+        // otherwise inherit a NON-zero h2_tag left by a preceding inter-channel send (which
+        // sets h2_tag = tx_tree_root), making the very next intra send / refresh fail
+        // InvalidH2Tag.
         h2_tag: Bytes32::default(),
         ..prev.clone()
     }
@@ -1145,8 +1179,9 @@ pub fn build_refresh(
 }
 
 /// Verify a proposed balance-refresh against the prev state (a co-signer runs this before signing):
-/// the `BalanceRefreshUpdateWitness` checks only the refreshed slot changes, its counter resets to 0,
-/// and the RefreshAir proof attests `old_ct` and `new_ct` encrypt the SAME hidden value (no inflation).
+/// the `BalanceRefreshUpdateWitness` checks only the refreshed slot changes, its counter resets to
+/// 0, and the RefreshAir proof attests `old_ct` and `new_ct` encrypt the SAME hidden value (no
+/// inflation).
 pub fn verify_refresh_transition(
     prev: &ChannelState,
     record: &ChannelRecord,
@@ -1221,9 +1256,9 @@ pub fn verify_refresh_transition(
 ///
 /// `debit_payload` is everything A's co-signers need to RE-VERIFY the debit (it carries the
 /// proposed post-debit state, the E-2-bearing `inter_channel_tx`, and the trusted-record binding).
-/// `transfer_descriptor` is everything channel B needs to RE-VERIFY and credit. `new_balance_witness`
-/// is the sender's fresh `AmountWitness` for its post-debit ciphertext (kept locally so the sender
-/// can send again without a refresh).
+/// `transfer_descriptor` is everything channel B needs to RE-VERIFY and credit.
+/// `new_balance_witness` is the sender's fresh `AmountWitness` for its post-debit ciphertext (kept
+/// locally so the sender can send again without a refresh).
 pub struct BuiltInterChannelSend {
     pub debit_payload: InterChannelDebitPayload,
     pub transfer_descriptor: InterChannelTransferDescriptor,
@@ -1297,7 +1332,8 @@ pub struct BuiltInterChannelCredit {
 /// Structural transport verifier: the inter-channel send/import witnesses require a
 /// `ChannelProofVerifier` for the (DEPRECATED, abstract2 §3.4) transport proof envelope. The wallet
 /// supplies the same non-empty bytes on both sides, so this only asserts non-emptiness — the real
-/// security comes from the E-2 STARK (`RealRegevProofVerifier`) and the channel-A member signatures.
+/// security comes from the E-2 STARK (`RealRegevProofVerifier`) and the channel-A member
+/// signatures.
 struct WalletStructuralTransport;
 impl ChannelProofVerifier for WalletStructuralTransport {
     fn verify(
@@ -1337,8 +1373,8 @@ fn structural_small_block_sigs(record: &ChannelRecord) -> Vec<MemberSignature> {
 /// settled_tx_chain pushes the tx leaf, `h2_tag = tx_tree_root`; delegate_count + the untouched
 /// slots' pending_adds preserved via the `..prev.balance_state.clone()` spread), the REAL E-2, the
 /// 1-tx `TxV2Tree` (root + inclusion proof computed INTERNALLY), self-signs the building member's
-/// slot if it is a co-signing member, and CALLS `InterChannelSendUpdateWitness::verify` to self-check
-/// before returning.
+/// slot if it is a co-signing member, and CALLS `InterChannelSendUpdateWitness::verify` to
+/// self-check before returning.
 #[allow(clippy::too_many_arguments)]
 pub fn build_inter_channel_send(
     keys: &MemberKeys,
@@ -1440,9 +1476,9 @@ pub fn build_inter_channel_send(
     let tx_v2_merkle_proof = tx_v2_tree.prove(src_id);
 
     // a_send = post-debit channel-A state. Its h1() = H1' bound into the small block's
-    // state_commitment_root (detail2 §C-7) AND h2_tag = tx_tree_root. The `..prev.*.clone()` spreads
-    // preserve member_count, delegate_count, channel_id, and all untouched slots' enc_balances +
-    // pending_adds — only the sender slot's ciphertext changes.
+    // state_commitment_root (detail2 §C-7) AND h2_tag = tx_tree_root. The `..prev.*.clone()`
+    // spreads preserve member_count, delegate_count, channel_id, and all untouched slots'
+    // enc_balances + pending_adds — only the sender slot's ciphertext changes.
     let mut enc_balances = prev.balance_state.enc_balances.clone();
     enc_balances[sender_slot as usize] = after_ct.clone();
     let mut a_send = ChannelState {
@@ -1467,8 +1503,12 @@ pub fn build_inter_channel_send(
     .with_computed_digest();
     let h1_prime = a_send.balance_state.h1();
 
-    let tx_hash =
-        inter_channel_tx_hash(record.channel_id, destination_channel_id, tx_tree_root, tx_leaf);
+    let tx_hash = inter_channel_tx_hash(
+        record.channel_id,
+        destination_channel_id,
+        tx_tree_root,
+        tx_leaf,
+    );
     let inter_channel_tx = InterChannelTx {
         tx_inclusion_proof: MerkleInclusionProof::default(),
         signed_small_block: SignedSmallBlock {
@@ -1519,10 +1559,10 @@ pub fn build_inter_channel_send(
     // it to co-signers. The witness's `verify_next_state_signatures` is STRUCTURAL (one non-empty
     // sig per member slot) — it does NOT run the real SingleSig proofs (that is
     // `verify_all_signatures`, run once the full set is collected). At build time only the building
-    // member (if any) has signed, so fill placeholder structural sigs on a CLONE for the self-check;
-    // the RETURNED `a_send` carries only the building member's REAL signature (co-signers add the
-    // rest). Placeholder sigs do not affect `signing_digest()` (member signatures are excluded from
-    // it), so the digest binding is unchanged.
+    // member (if any) has signed, so fill placeholder structural sigs on a CLONE for the
+    // self-check; the RETURNED `a_send` carries only the building member's REAL signature
+    // (co-signers add the rest). Placeholder sigs do not affect `signing_digest()` (member
+    // signatures are excluded from it), so the digest binding is unchanged.
     let mut next_for_check = a_send.clone();
     fill_placeholder_sigs(record, &mut next_for_check);
     let transport = ChannelProofEnvelope {
@@ -1582,8 +1622,8 @@ pub fn build_inter_channel_send(
 /// LEG A co-signer's pre-sign check: bind `debit_payload.record` to the TRUSTED channel-A record
 /// (like `verify_send_transition`), then re-run `InterChannelSendUpdateWitness::verify` over the
 /// authenticated state. On success the co-signer may `sign_state(a_send)`. NOTE: the witness checks
-/// STRUCTURAL member signatures only; the authoritative N-of-N check is `verify_all_signatures` once
-/// the full signature set is collected.
+/// STRUCTURAL member signatures only; the authoritative N-of-N check is `verify_all_signatures`
+/// once the full signature set is collected.
 pub fn verify_inter_channel_send_transition(
     prev: &ChannelState,
     trusted_record: &ChannelRecord,
@@ -1596,8 +1636,8 @@ pub fn verify_inter_channel_send_transition(
     if debit_payload.record.signing_digest() != trusted_record.signing_digest() {
         return bail("payload record is not the channel's registered (trusted) record");
     }
-    // Authenticate the payload member set against the trusted record before trusting its Regev keys.
-    // The member list covers the ACTIVE region (members + delegates) bijectively.
+    // Authenticate the payload member set against the trusted record before trusting its Regev
+    // keys. The member list covers the ACTIVE region (members + delegates) bijectively.
     let active = trusted_record.member_count as usize + trusted_record.delegate_count as usize;
     if debit_payload.members.len() != active {
         return bail(format!(
@@ -1624,7 +1664,8 @@ pub fn verify_inter_channel_send_transition(
     }
     // STRUCTURAL signature completeness (see build_inter_channel_send): a co-signer validates the
     // transition BEFORE the full real signature set is collected, so fill placeholder structural
-    // sigs. The authoritative N-of-N check is `verify_all_signatures`, run once the set is complete.
+    // sigs. The authoritative N-of-N check is `verify_all_signatures`, run once the set is
+    // complete.
     let mut next_for_check = debit_payload.proposed_next_state.clone();
     fill_placeholder_sigs(trusted_record, &mut next_for_check);
     let transport = ChannelProofEnvelope {
@@ -1653,20 +1694,21 @@ pub fn verify_inter_channel_send_transition(
 ///
 /// Applies `InterChannelFundImportUpdateWitness` (ChannelFund += amount; unallocated += amount;
 /// settled_tx_chain pushes `tx_hash`) then `ReceiverBundleApplyUpdateWitness` (recipient slot +=
-/// delta; unallocated -= amount; settled_tx_chain pushes the same tx leaf as A). The building member
-/// self-signs both states (if it is a co-signing member); both witnesses are CALLED as self-checks.
-/// `b_snapshot` is channel B; `keys` belong to a channel-B member (used for the recipient decryption
-/// check when it owns the slot).
+/// delta; unallocated -= amount; settled_tx_chain pushes the same tx leaf as A). The building
+/// member self-signs both states (if it is a co-signing member); both witnesses are CALLED as
+/// self-checks. `b_snapshot` is channel B; `keys` belong to a channel-B member (used for the
+/// recipient decryption check when it owns the slot).
 ///
 /// SECURITY: this builder's per-channel witness self-checks verify B-LOCAL invariants (fund/unalloc
 /// accounting, the homomorphic credit, the E-2 re-verification against B's recipient key + the
-/// off-chain sender ciphertexts). They CANNOT see the CROSS-channel facts — that A's debit is N-of-N
-/// co-signed under the TRUSTED A record, the channel-id/H1'/tx_tree_root binding, the TxV2 inclusion.
-/// A channel-B co-signer MUST call [`verify_inter_channel_credit_transition`] (the fail-closed gate,
-/// which takes the TRUSTED A + B records) BEFORE accepting/signing the states this builder returns.
-/// The `source_record_placeholder` used for the import witness here is reconstructed from the
-/// descriptor's own small block and is NOT a trust anchor; it can never accept a transfer the gate
-/// rejects, because the gate is the authoritative A-record binding (invariant 1).
+/// off-chain sender ciphertexts). They CANNOT see the CROSS-channel facts — that A's debit is
+/// N-of-N co-signed under the TRUSTED A record, the channel-id/H1'/tx_tree_root binding, the TxV2
+/// inclusion. A channel-B co-signer MUST call [`verify_inter_channel_credit_transition`] (the
+/// fail-closed gate, which takes the TRUSTED A + B records) BEFORE accepting/signing the states
+/// this builder returns. The `source_record_placeholder` used for the import witness here is
+/// reconstructed from the descriptor's own small block and is NOT a trust anchor; it can never
+/// accept a transfer the gate rejects, because the gate is the authoritative A-record binding
+/// (invariant 1).
 pub fn build_inter_channel_credit(
     keys: &MemberKeys,
     b_snapshot: &ChannelSnapshot,
@@ -1750,7 +1792,8 @@ pub fn build_inter_channel_credit(
     let mut bundle_pending = fund_import_state.balance_state.pending_adds;
     bundle_pending[recipient_slot] += 1;
     // The bundle apply chains the SAME tx leaf the sender chained into A (detail2 §C-6; the witness
-    // independently recomputes it via `inter_channel_tx.tx_leaf_hash()` — multi-layer F3-A defense).
+    // independently recomputes it via `inter_channel_tx.tx_leaf_hash()` — multi-layer F3-A
+    // defense).
     let bundle_leaf = inter_channel_tx
         .tx_leaf_hash()
         .map_err(|e| WalletError(format!("bundle tx_leaf_hash: {e}")))?;
@@ -1810,11 +1853,11 @@ pub fn build_inter_channel_credit(
 /// records (A and B) are PARAMETERS — never read from the descriptor/payload.
 ///
 /// Enforces:
-///   (1) A's `a_signed_state` is N-of-N co-signed under `a_trusted_record` (`verify_all_signatures`);
-///   (2) the amount is consistent across descriptor / the re-verified E-2 / the witness inputs;
-///   (3) `receiver_delta.pk_g == B member at recipient_slot` AND decrypts to `amount` (the gate
-///       always checks the pk_g binding; the decryption is checked when this member owns the slot,
-///       via the bundle witness in `build_inter_channel_credit`);
+///   (1) A's `a_signed_state` is N-of-N co-signed under `a_trusted_record`
+/// (`verify_all_signatures`);   (2) the amount is consistent across descriptor / the re-verified
+/// E-2 / the witness inputs;   (3) `receiver_delta.pk_g == B member at recipient_slot` AND decrypts
+/// to `amount` (the gate       always checks the pk_g binding; the decryption is checked when this
+/// member owns the slot,       via the bundle witness in `build_inter_channel_credit`);
 ///   (4) `inter_channel_tx.{source,destination}_channel_id == A/B ids`;
 ///   (5) A's small-block `state_commitment_root == a_signed_state.balance_state.h1()` AND
 ///       `tx_tree_root == descriptor.tx_tree_root` (!= 0); B recomputes the same tx leaf;
@@ -1837,7 +1880,8 @@ pub fn verify_inter_channel_credit_transition(
     // would pass the pk_g binding below while crediting a NON-PARTICIPANT slot (value stranded). An
     // out-of-MAX slot would panic. This is the one defect the delegate adaptation introduced over
     // the pre-delegate reference; closing it here keeps the gate fail-closed.
-    let b_active = b_trusted_record.member_count as usize + b_trusted_record.delegate_count as usize;
+    let b_active =
+        b_trusted_record.member_count as usize + b_trusted_record.delegate_count as usize;
     check_slot(descriptor.recipient_slot as usize, b_active)?;
 
     // (4) Channel-id binding: the tx must be FROM A and TO B (both trusted records), and the
@@ -1854,18 +1898,19 @@ pub fn verify_inter_channel_credit_transition(
         return bail("invariant 4: inter_channel_tx destination channel id != trusted B id");
     }
 
-    // (1) A's signed state is N-of-N co-signed under the TRUSTED A record. This is the cross-channel
-    // root of trust: B credits only because A's members all attested the debit (and thus the E-2 +
-    // the post-debit H1' bound into the small block). This is ALSO what makes the sender-key binding
-    // sound: A's send witness proved the E-2 under A's AUTHENTICATED `regev_pks[sender_index]`, and
-    // here we confirm A's members co-signed exactly that state — so the only E-2 B ever credits is
-    // the one over A's real sender key.
+    // (1) A's signed state is N-of-N co-signed under the TRUSTED A record. This is the
+    // cross-channel root of trust: B credits only because A's members all attested the debit
+    // (and thus the E-2 + the post-debit H1' bound into the small block). This is ALSO what
+    // makes the sender-key binding sound: A's send witness proved the E-2 under A's
+    // AUTHENTICATED `regev_pks[sender_index]`, and here we confirm A's members co-signed
+    // exactly that state — so the only E-2 B ever credits is the one over A's real sender key.
     verify_all_signatures(a_trusted_record, &[], a_signed_state)
         .map_err(|e| WalletError(format!("invariant 1: A state not N-of-N co-signed: {e}")))?;
 
-    // (5) A's small block binds H1' = a_signed_state.h1() and tx_tree_root; both must match what the
-    // descriptor (and thus the credit) is built from. tx_tree_root != 0 (H2=0 is reserved for
-    // in-channel updates — already enforced by the send witness, re-checked here defensively).
+    // (5) A's small block binds H1' = a_signed_state.h1() and tx_tree_root; both must match what
+    // the descriptor (and thus the credit) is built from. tx_tree_root != 0 (H2=0 is reserved
+    // for in-channel updates — already enforced by the send witness, re-checked here
+    // defensively).
     if small_block.state_commitment_root != a_signed_state.balance_state.h1() {
         return bail("invariant 5: small block state_commitment_root != A signed state h1()");
     }
@@ -1917,10 +1962,11 @@ pub fn verify_inter_channel_credit_transition(
     }
 
     // (2 cont.) Re-verify the REAL E-2 over the descriptor's ciphertexts + amount. SECURITY: the
-    // sender key MUST be a channel-A member's key — confirm `source_pk_g` is in the trusted A member
-    // set (binds the leaf used in (5) to a real member). The E-2 transcript binds all four
-    // ciphertexts + both keys; combined with invariant 1 (A co-signed the E-2 over its OWN
-    // authenticated sender key), a forged `source_pk`/amount cannot verify against a state A signed.
+    // sender key MUST be a channel-A member's key — confirm `source_pk_g` is in the trusted A
+    // member set (binds the leaf used in (5) to a real member). The E-2 transcript binds all
+    // four ciphertexts + both keys; combined with invariant 1 (A co-signed the E-2 over its OWN
+    // authenticated sender key), a forged `source_pk`/amount cannot verify against a state A
+    // signed.
     let _a_sender_slot = a_trusted_record
         .member_pk_gs
         .iter()
@@ -1951,7 +1997,9 @@ pub fn verify_inter_channel_credit_transition(
     // (validity-provable) small block (flowReceive3-1). The proof verifies the TxV2 leaf at index
     // A_id against the tx_tree_root committed in A's signed small block.
     let tx_tree_root_h = PoseidonHashOut::try_from(descriptor.tx_tree_root).map_err(|e| {
-        WalletError(format!("invariant 7: tx_tree_root is not a hash out: {e:?}"))
+        WalletError(format!(
+            "invariant 7: tx_tree_root is not a hash out: {e:?}"
+        ))
     })?;
     descriptor
         .tx_v2_merkle_proof
@@ -1980,9 +2028,9 @@ pub fn u64_to_u256(v: u64) -> U256 {
 }
 
 /// A deterministic, prev-bound advance of the shared native nullifier root (detail2 §C-3: the
-/// import and bundle steps each change the root). INTENTIONALLY SIMPLE: a keccak-style fold over the
-/// prev root + a context tag; the only protocol requirement at the wiring layer is that consecutive
-/// states differ (`ensure_different_root`).
+/// import and bundle steps each change the root). INTENTIONALLY SIMPLE: a keccak-style fold over
+/// the prev root + a context tag; the only protocol requirement at the wiring layer is that
+/// consecutive states differ (`ensure_different_root`).
 fn advance_nullifier(prev: Bytes32, tag: Bytes32) -> Bytes32 {
     settled_tx_chain_push(prev, tag)
 }
@@ -1996,8 +2044,8 @@ fn advance_nullifier(prev: Bytes32, tag: Bytes32) -> Bytes32 {
 /// DEST-BOUND. Without it, the same (source, tx_tree_root, tx_leaf) tuple would hash identically
 /// regardless of which channel B it is credited into, so a tx already credited into one destination
 /// could not be distinguished from a (distinct) transfer aimed at another destination in a shared
-/// ledger. Binding the dest id makes the ledger key unambiguous per (A→B) pair — defense in depth on
-/// top of the per-channel applied/spent ledgers.
+/// ledger. Binding the dest id makes the ledger key unambiguous per (A→B) pair — defense in depth
+/// on top of the per-channel applied/spent ledgers.
 fn inter_channel_tx_hash(
     source_channel_id: ChannelId,
     destination_channel_id: ChannelId,
@@ -2015,8 +2063,8 @@ fn inter_channel_tx_hash(
     settled_tx_chain_push(ids, mixed)
 }
 
-/// Sign `state` with `keys` IFF `keys` is a co-signing member of `record` (slot < member_count). The
-/// building member is one of the N-of-N; co-signers add the rest after re-verifying. A delegate
+/// Sign `state` with `keys` IFF `keys` is a co-signing member of `record` (slot < member_count).
+/// The building member is one of the N-of-N; co-signers add the rest after re-verifying. A delegate
 /// builder does NOT co-sign state (it is send-only at the co-sign layer).
 fn sign_member_if_present(
     keys: &MemberKeys,
@@ -2036,13 +2084,14 @@ fn sign_member_if_present(
 }
 
 /// The source channel record stub used for the fund-import small-block validation. The import
-/// witness's `validate_signed_small_block` checks the small block's BP slot/pk_g against THIS record;
-/// the descriptor carries A's signed small block, so we must validate against A's registered record.
-/// Since channel B may not hold A's full record in this wiring layer, we reconstruct the minimal
-/// fields the validator reads (bp_member_slot, member_pk_gs[bp], member_count) FROM the signed small
-/// block itself — but ONLY the structural BP-consistency is checked here; the AUTHORITATIVE A-record
-/// binding (invariant 1) is enforced in `verify_inter_channel_credit_transition` against the TRUSTED
-/// A record. This stub never gates value: it cannot accept a tx that the trusted-A gate rejects.
+/// witness's `validate_signed_small_block` checks the small block's BP slot/pk_g against THIS
+/// record; the descriptor carries A's signed small block, so we must validate against A's
+/// registered record. Since channel B may not hold A's full record in this wiring layer, we
+/// reconstruct the minimal fields the validator reads (bp_member_slot, member_pk_gs[bp],
+/// member_count) FROM the signed small block itself — but ONLY the structural BP-consistency is
+/// checked here; the AUTHORITATIVE A-record binding (invariant 1) is enforced in
+/// `verify_inter_channel_credit_transition` against the TRUSTED A record. This stub never gates
+/// value: it cannot accept a tx that the trusted-A gate rejects.
 fn source_record_placeholder(
     inter_channel_tx: &InterChannelTx,
     fallback: &ChannelRecord,
@@ -2062,9 +2111,9 @@ fn source_record_placeholder(
         channel_id: inter_channel_tx.source_channel_id,
         member_count,
         // This stub's small block carries only co-signing-member signatures (the bp + the N-of-N);
-        // it never references A's delegate region, so delegate_count = 0 is the structurally minimal
-        // and correct value for the fields the import validator reads. It is NOT a trust anchor
-        // (invariant 1 against the TRUSTED A record is authoritative).
+        // it never references A's delegate region, so delegate_count = 0 is the structurally
+        // minimal and correct value for the fields the import validator reads. It is NOT a
+        // trust anchor (invariant 1 against the TRUSTED A record is authoritative).
         delegate_count: 0,
         member_pk_gs,
         member_pubkeys_root: Bytes32::default(),
@@ -2130,8 +2179,11 @@ mod delegate_send_tests {
     ) -> (ChannelRecord, Vec<MemberInfo>) {
         let active = member_count as usize + delegate_count as usize;
         assert_eq!(keys.len(), active, "one key per active slot");
-        let members: Vec<MemberInfo> =
-            keys.iter().enumerate().map(|(i, k)| member_info(i as u8, k)).collect();
+        let members: Vec<MemberInfo> = keys
+            .iter()
+            .enumerate()
+            .map(|(i, k)| member_info(i as u8, k))
+            .collect();
         // Exercise the PUBLIC delegate-aware build path (build_record derives member_count =
         // active - delegate_count and validates bp is a co-signing member).
         let record = build_record(channel_id, &members, 0, delegate_count).unwrap();
@@ -2146,10 +2198,17 @@ mod delegate_send_tests {
     fn assemble_active_genesis(
         record: &ChannelRecord,
         enc_balances_active: &[RegevCiphertext],
+        regev_pk_digests_active: &[Bytes32],
         fund_amount: u64,
     ) -> ChannelState {
         // Exercise the PUBLIC delegate-aware genesis path (accepts active-length ciphertexts).
-        assemble_genesis_state(record, enc_balances_active, fund_amount).unwrap()
+        assemble_genesis_state(
+            record,
+            enc_balances_active,
+            regev_pk_digests_active,
+            fund_amount,
+        )
+        .unwrap()
     }
 
     /// Delegate account (Phase 4): the PUBLIC wallet build path (`build_record` +
@@ -2158,8 +2217,11 @@ mod delegate_send_tests {
     fn build_record_delegate_guards() {
         let mut rng = StdRng::seed_from_u64(0xB11D);
         let keys: Vec<MemberKeys> = (0..3).map(|_| MemberKeys::generate(&mut rng)).collect();
-        let members: Vec<MemberInfo> =
-            keys.iter().enumerate().map(|(i, k)| member_info(i as u8, k)).collect();
+        let members: Vec<MemberInfo> = keys
+            .iter()
+            .enumerate()
+            .map(|(i, k)| member_info(i as u8, k))
+            .collect();
 
         // 2 co-signing members + 1 delegate (active = 3): OK, member_count derived as active - dc.
         let r = build_record(77, &members, 0, 1).expect("delegate record");
@@ -2179,11 +2241,16 @@ mod delegate_send_tests {
             .iter()
             .map(|k| encrypt_amount(&mut rng, &k.regev_pk, 10).unwrap().0)
             .collect();
-        let g = assemble_genesis_state(&r, &encs, 30).expect("active genesis");
+        // Decryption Stage 1: matching per-active-slot Regev pk digests.
+        let pkds: Vec<Bytes32> = keys
+            .iter()
+            .map(|k| Bytes32::from(k.regev_pk.poseidon_digest()))
+            .collect();
+        let g = assemble_genesis_state(&r, &encs, &pkds, 30).expect("active genesis");
         assert_eq!(g.balance_state.delegate_count, 1);
         g.balance_state.validate().expect("genesis balance valid");
         // A member_count-only ciphertext count is rejected (must cover the delegate slot too).
-        assert!(assemble_genesis_state(&r, &encs[..2], 30).is_err());
+        assert!(assemble_genesis_state(&r, &encs[..2], &pkds[..2], 30).is_err());
     }
 
     /// A 2-member + 1-delegate channel (delegate in slot 2) with real keys, a genesis with a
@@ -2213,8 +2280,13 @@ mod delegate_send_tests {
             witnesses.push(w);
             fund += bal;
         }
-        let mut genesis = assemble_active_genesis(&record, &cts, fund);
-        // ONLY the members (slots 0,1) co-sign — the delegate (slot 2) does NOT (N-of-N excludes it).
+        let pkds: Vec<Bytes32> = keys
+            .iter()
+            .map(|k| Bytes32::from(k.regev_pk.poseidon_digest()))
+            .collect();
+        let mut genesis = assemble_active_genesis(&record, &cts, &pkds, fund);
+        // ONLY the members (slots 0,1) co-sign — the delegate (slot 2) does NOT (N-of-N excludes
+        // it).
         let g0 = sign_state(&keys[0], 0, &genesis).unwrap();
         add_signature(&mut genesis, g0);
         let g1 = sign_state(&keys[1], 1, &genesis).unwrap();
@@ -2224,12 +2296,15 @@ mod delegate_send_tests {
     }
 
     /// DA-send-happy: the DELEGATE (slot 2) builds a ChannelTx sending to a member (slot 0), with
-    /// its OWN BabyBear hash-sig (A11) over the IMPA digest and the E-1 channelTxZKP. The transition
-    /// + sender hash-sig MUST verify (the members would then co-sign). Asserts the delegate's slot is
+    /// its OWN BabyBear hash-sig (A11) over the IMPA digest and the E-1 channelTxZKP. The
+    /// transition
+    /// + sender hash-sig MUST verify (the members would then co-sign). Asserts the delegate's slot
+    ///   is
     /// debited and the recipient credited.
     ///
-    /// PROVES: the widened `check_slot` (active region) + `member_pubkeys_root` (members + delegates)
-    /// admit a delegate sender; a delegate sends with the IDENTICAL mechanism as a member.
+    /// PROVES: the widened `check_slot` (active region) + `member_pubkeys_root` (members +
+    /// delegates) admit a delegate sender; a delegate sends with the IDENTICAL mechanism as a
+    /// member.
     #[test]
     fn da_send_happy_delegate_sends_to_member() {
         let mut rng = StdRng::seed_from_u64(0xDADADA);
@@ -2310,8 +2385,14 @@ mod delegate_send_tests {
         .expect("member n-of-n must verify (delegate excluded)");
 
         // The delegate slot is debited; the recipient member is credited.
-        assert_eq!(decrypt_balance(&keys[2], &final_snapshot, 2).unwrap(), bal_d - amount);
-        assert_eq!(decrypt_balance(&keys[0], &final_snapshot, 0).unwrap(), bal0 + amount);
+        assert_eq!(
+            decrypt_balance(&keys[2], &final_snapshot, 2).unwrap(),
+            bal_d - amount
+        );
+        assert_eq!(
+            decrypt_balance(&keys[0], &final_snapshot, 0).unwrap(),
+            bal0 + amount
+        );
     }
 
     /// DA2 (a): the delegate send but with the hash-sig produced by a DIFFERENT key (not the
@@ -2332,7 +2413,15 @@ mod delegate_send_tests {
         };
         let amount = 8u64;
         let BuiltSend { payload, .. } = build_send(
-            &keys[2], &snapshot, 2, 0, amount, 20, &witnesses[2], Bytes32::default(), LEVEL,
+            &keys[2],
+            &snapshot,
+            2,
+            0,
+            amount,
+            20,
+            &witnesses[2],
+            Bytes32::default(),
+            LEVEL,
             &mut rng,
         )
         .expect("delegate build_send");
@@ -2394,7 +2483,15 @@ mod delegate_send_tests {
         };
         let amount = 8u64;
         let BuiltSend { payload, .. } = build_send(
-            &keys[2], &snapshot, 2, 0, amount, 20, &witnesses[2], Bytes32::default(), LEVEL,
+            &keys[2],
+            &snapshot,
+            2,
+            0,
+            amount,
+            20,
+            &witnesses[2],
+            Bytes32::default(),
+            LEVEL,
             &mut rng,
         )
         .expect("delegate build_send");
@@ -2420,7 +2517,8 @@ mod delegate_send_tests {
             record.member_pk_gs[2],
             members[2].pk_b, // the genuinely registered delegate pk_b
         );
-        let err = res.expect_err("DA2: ChannelTx pk_b not matching the registered leaf MUST reject");
+        let err =
+            res.expect_err("DA2: ChannelTx pk_b not matching the registered leaf MUST reject");
         assert!(
             err.to_string().contains("A11"),
             "rejection must be the A11 leaf-binding, got: {err}"
@@ -2450,7 +2548,15 @@ mod delegate_send_tests {
         // Honest member-0 -> member-1 send (the delegate at slot 2 is NOT involved).
         let amount = 5u64;
         let BuiltSend { mut payload, .. } = build_send(
-            &keys[0], &snapshot, 0, 1, amount, 50, &witnesses[0], Bytes32::default(), LEVEL,
+            &keys[0],
+            &snapshot,
+            0,
+            1,
+            amount,
+            50,
+            &witnesses[0],
+            Bytes32::default(),
+            LEVEL,
             &mut rng,
         )
         .expect("member build_send");
@@ -2496,7 +2602,11 @@ mod delegate_send_tests {
             cts.push(ct);
             ws.push(w);
         }
-        let mut genesis = assemble_active_genesis(&record, &cts, b0 + b1 + b2);
+        let pkds: Vec<Bytes32> = keys
+            .iter()
+            .map(|k| Bytes32::from(k.regev_pk.poseidon_digest()))
+            .collect();
+        let mut genesis = assemble_active_genesis(&record, &cts, &pkds, b0 + b1 + b2);
         for i in 0..3 {
             let s = sign_state(&keys[i], i as u8, &genesis).unwrap();
             add_signature(&mut genesis, s);
@@ -2510,7 +2620,16 @@ mod delegate_send_tests {
 
         let amount = 6u64;
         let BuiltSend { mut payload, .. } = build_send(
-            &keys[0], &snapshot, 0, 1, amount, b0, &ws[0], Bytes32::default(), LEVEL, &mut rng,
+            &keys[0],
+            &snapshot,
+            0,
+            1,
+            amount,
+            b0,
+            &ws[0],
+            Bytes32::default(),
+            LEVEL,
+            &mut rng,
         )
         .expect("member build_send");
         verify_send_transition(
@@ -2537,7 +2656,13 @@ mod delegate_send_tests {
             &final_snapshot.state,
         )
         .expect("3-of-3 must verify");
-        assert_eq!(decrypt_balance(&keys[0], &final_snapshot, 0).unwrap(), b0 - amount);
-        assert_eq!(decrypt_balance(&keys[1], &final_snapshot, 1).unwrap(), b1 + amount);
+        assert_eq!(
+            decrypt_balance(&keys[0], &final_snapshot, 0).unwrap(),
+            b0 - amount
+        );
+        assert_eq!(
+            decrypt_balance(&keys[1], &final_snapshot, 1).unwrap(),
+            b1 + amount
+        );
     }
 }

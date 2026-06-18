@@ -91,9 +91,9 @@ pub struct ChannelClosePublicInputsTarget {
     /// to gate per-slot SPHINCS+ verification and the member_set_commitment select. Single limb.
     pub member_count: Target,
     /// Delegate account: number of DELEGATE participants. Single limb, appended at the END of the
-    /// close PI vector (right after `member_count`). Anchored in-circuit ONLY into the H1 recompute
-    /// (immediately after `member_count` in the IMBS preimage); delegates do NOT enter the
-    /// member_set_commitment (they do not co-sign).
+    /// close PI vector (right after `member_count`). Anchored in-circuit ONLY into the H1
+    /// recompute (immediately after `member_count` in the IMBS preimage); delegates do NOT
+    /// enter the member_set_commitment (they do not co-sign).
     pub delegate_count: Target,
 }
 
@@ -353,6 +353,9 @@ where
     /// Per-member Regev balance ciphertext digests `d_i = enc_balances[i].digest()` — the H1
     /// preimage body (detail2 §C-2).
     enc_balance_digests: Vec<Bytes32Target>,
+    /// Decryption Stage 1: per-slot Regev pk Poseidon digests (H1 preimage, between delegate_count
+    /// and the ciphertext digests).
+    regev_pk_digests: Vec<Bytes32Target>,
     /// Per-member homomorphic-add counters (D3), 32-bit range-checked.
     pending_adds: Vec<Target>,
     /// The recursively verified final balance proof.
@@ -405,6 +408,11 @@ where
         let enc_balance_digests: Vec<Bytes32Target> = (0..MAX_CHANNEL_MEMBERS)
             .map(|_| Bytes32Target::new(&mut builder, true))
             .collect();
+        // Decryption Stage 1: per-slot Regev pk digests (range-checked like enc_balance_digests),
+        // folded into H1 IMMEDIATELY AFTER delegate_count (byte-identical to native h1).
+        let regev_pk_digests: Vec<Bytes32Target> = (0..MAX_CHANNEL_MEMBERS)
+            .map(|_| Bytes32Target::new(&mut builder, true))
+            .collect();
         let pending_adds: Vec<Target> = (0..MAX_CHANNEL_MEMBERS)
             .map(|_| u32_limb(&mut builder))
             .collect();
@@ -452,11 +460,11 @@ where
 
         // ── (b) H1 in-circuit recompute (IMBS, detail2 §C-2 + D3) ──────────
         //
-        // SECURITY: this anchors `final_settled_tx_chain`, `final_state_version`, `member_count` AND
-        // `delegate_count` as the unique values inside the signed H1 — the same PI targets feed the
-        // H1 preimage, the IMCH/IMCI tails AND the balance-proof equality below, so no two of those
-        // bindings can diverge. Preimage limb order matches `BalanceState::h1()` exactly (pad-to-MAX
-        // D6 + delegate account):
+        // SECURITY: this anchors `final_settled_tx_chain`, `final_state_version`, `member_count`
+        // AND `delegate_count` as the unique values inside the signed H1 — the same PI
+        // targets feed the H1 preimage, the IMCH/IMCI tails AND the balance-proof equality
+        // below, so no two of those bindings can diverge. Preimage limb order matches
+        // `BalanceState::h1()` exactly (pad-to-MAX D6 + delegate account):
         // [IMBS, channel_id, member_count, delegate_count, d_0..d_{MAX-1}, settled_tx_chain,
         //  split_u64(state_version), pending_adds[0..MAX]]. `delegate_count` is the single u32 limb
         // IMMEDIATELY AFTER `member_count`, byte-identical to the off-chain `BalanceState::h1`.
@@ -465,6 +473,12 @@ where
             public_inputs.channel_id.to_vec(),
             vec![public_inputs.member_count],
             vec![public_inputs.delegate_count],
+            // Decryption Stage 1: Regev pk digests IMMEDIATELY AFTER delegate_count, BEFORE the
+            // ciphertext digests (byte-identical to native `BalanceState::h1`).
+            regev_pk_digests
+                .iter()
+                .flat_map(Bytes32Target::to_vec)
+                .collect::<Vec<_>>(),
             enc_balance_digests
                 .iter()
                 .flat_map(Bytes32Target::to_vec)
@@ -558,13 +572,15 @@ where
             .settled_tx_chain
             .connect(&mut builder, public_inputs.final_settled_tx_chain);
 
-        // ── (f) N-member IMCH signatures via the recursive ListCircuit proof (P2b D3, pad-to-MAX) ─
+        // ── (f) N-member IMCH signatures via the recursive ListCircuit proof (P2b D3, pad-to-MAX)
+        // ─
         //
         // Message = the 8 u32 limbs of the RECOMPUTED `final_channel_state_digest` (IMCH). All N
         // active members sign it (unanimous close; no threshold relaxation). Instead of inline
-        // per-slot signature verification, we recursively verify ONE `ListCircuit` proof and rebuild
-        // the SAME order-sensitive Poseidon list commitment from `(IMCH_digest, pk_g_i)` over the
-        // ACTIVE slots only (select prev on padding, mirroring the member_set_commitment gating).
+        // per-slot signature verification, we recursively verify ONE `ListCircuit` proof and
+        // rebuild the SAME order-sensitive Poseidon list commitment from `(IMCH_digest,
+        // pk_g_i)` over the ACTIVE slots only (select prev on padding, mirroring the
+        // member_set_commitment gating).
         //
         // SECURITY:
         //  - The list proof's commitment `C` (its public output [0..8]) is asserted equal to the
@@ -572,8 +588,8 @@ where
         //    verified Poseidon single-sig (A8: all-required-members-present, exact count/order).
         //  - pk_g distinctness over the active set forbids one key faking N signatures (A5).
         //  - member_set_commitment = keccak([IMCM, member_count, pk_g_0..pk_g_{MAX-1}]) (padding
-        //    zeroed) is exposed and matched on L1 against the registered member set, so the verified
-        //    keys cannot be substituted with non-member keys. Byte-identical to the native
+        //    zeroed) is exposed and matched on L1 against the registered member set, so the
+        //    verified keys cannot be substituted with non-member keys. Byte-identical to the native
         //    `common::channel::close_member_set_commitment`.
         //  - The IMCH digest message domain (IMCH keccak) differs from the validity IMSB digest, so
         //    an IMSB list entry cannot satisfy this close predicate and vice versa (A4).
@@ -596,10 +612,11 @@ where
             }
         }
 
-        // Recursively verify the ListCircuit proof (constant VD, A7). A close always has >= 2 active
-        // members, so the commitment is never the empty (zero) list — verify unconditionally. We
-        // pass a Boolean `_true` so `add_proof_target_and_conditionally_verify` is exercised
-        // uniformly with the validity path.
+        // Recursively verify the ListCircuit proof (constant VD, A7). A close always has >= 2
+        // active members, so the commitment is never the empty (zero) list — verify
+        // unconditionally. We pass a Boolean `_true` so
+        // `add_proof_target_and_conditionally_verify` is exercised uniformly with the
+        // validity path.
         let always = builder._true();
         let list_proof = add_proof_target_and_conditionally_verify(list_vd, &mut builder, always);
         let committed_c = Bytes32Target::from_slice(&list_proof.public_inputs[0..BYTES32_LEN]);
@@ -642,6 +659,7 @@ where
             final_state_prev_digest,
             final_state_h2_tag,
             enc_balance_digests,
+            regev_pk_digests,
             pending_adds,
             final_balance_proof,
             list_proof,
@@ -698,6 +716,14 @@ where
             .zip(state.balance_state.enc_balances.iter())
         {
             target.set_witness(&mut witness, ciphertext.digest());
+        }
+        // Decryption Stage 1: fill the per-slot Regev pk digests (same order as the H1 preimage).
+        for (target, digest) in self
+            .regev_pk_digests
+            .iter()
+            .zip(state.balance_state.regev_pk_digests.iter())
+        {
+            target.set_witness(&mut witness, *digest);
         }
         for (target, &adds) in self
             .pending_adds
@@ -803,9 +829,9 @@ pub(crate) mod test_fixture {
         circuits::balance::{balance_processor::BalanceProcessor, spend_circuit::SpendCircuit},
         ethereum_types::bytes32::Bytes32,
         poseidon_sig::{
-            circuit::SingleSigCircuit,
-            list::{list_commitment, ListCircuit},
             GoldilocksSecretKey,
+            circuit::SingleSigCircuit,
+            list::{ListCircuit, list_commitment},
         },
     };
 
@@ -866,16 +892,16 @@ pub(crate) mod test_fixture {
     }
 
     /// P2b close member auth + the recursive `ListCircuit` proof for `active` members each signing
-    /// the given IMCH `digest`. Returns `(member_auth (slot order), list_proof)`. The list folds the
-    /// `(digest, pk_g_i)` pairs in slot order — exactly the order the close circuit rebuilds C'.
+    /// the given IMCH `digest`. Returns `(member_auth (slot order), list_proof)`. The list folds
+    /// the `(digest, pk_g_i)` pairs in slot order — exactly the order the close circuit
+    /// rebuilds C'.
     pub(crate) fn member_auth_for_digest_n(
         digest: Bytes32,
         seed: u64,
         active: usize,
     ) -> (Vec<MemberCloseAuth>, ProofWithPublicInputs<F, C, D>) {
         let fx = fixture();
-        let sks: Vec<GoldilocksSecretKey> =
-            (0..active).map(|i| close_member_sk(seed, i)).collect();
+        let sks: Vec<GoldilocksSecretKey> = (0..active).map(|i| close_member_sk(seed, i)).collect();
         let member_auth: Vec<MemberCloseAuth> = sks
             .iter()
             .map(|sk| MemberCloseAuth {
@@ -962,6 +988,7 @@ mod tests {
                 member_count: member_count as u8,
                 delegate_count: 0,
                 enc_balances: BalanceState::pad_enc_balances(&enc),
+                regev_pk_digests: BalanceState::pad_regev_pk_digests(&[]),
                 settled_tx_chain,
                 state_version: 9,
                 pending_adds: BalanceState::pad_pending_adds(&vec![0u32; member_count]),
@@ -1111,7 +1138,8 @@ mod tests {
         // member_count = 3, three member pk_g, but the list proof only covers the FIRST TWO.
         let mut witness = full_witness_n(3);
         let digest = witness.close.final_channel_state.digest;
-        // Rebuild the list proof over only the first two members (same seed/keys as full_witness_n).
+        // Rebuild the list proof over only the first two members (same seed/keys as
+        // full_witness_n).
         let (auth2, list2) = member_auth_for_digest_n(digest, 0xc105e, 2);
         // The 3-member auth/commitment is kept (so member_set_commitment is the correct 3-key
         // value); only the list proof is short. Sanity: the first two pk_g match.
@@ -1286,13 +1314,15 @@ mod tests {
     fn channel_close_circuit_rejects_wrong_member_key() {
         let fx = fixture();
         let mut witness = full_witness();
-        // Replace member 1's pk_g with an unrelated key (NOT the one that signed in the list proof).
+        // Replace member 1's pk_g with an unrelated key (NOT the one that signed in the list
+        // proof).
         let imposter = GoldilocksSecretKey::from_seed([0x5a; 32]).public_key();
         assert_ne!(witness.member_auth[1].pk_g, imposter);
         witness.member_auth[1].pk_g = imposter;
 
-        // Use the member_set_commitment the circuit will recompute from the (now-wrong) pk_g set, so
-        // the failure is isolated to the C' == C list-binding (not the commitment keccak).
+        // Use the member_set_commitment the circuit will recompute from the (now-wrong) pk_g set,
+        // so the failure is isolated to the C' == C list-binding (not the commitment
+        // keccak).
         let mut public_inputs = witness.close.to_public_inputs().unwrap();
         public_inputs.member_set_commitment = member_set_commitment_for_auth(&witness.member_auth);
         let pw = fx

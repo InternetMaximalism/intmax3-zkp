@@ -156,6 +156,7 @@ mod tests {
                     ciphertext(2),
                     ciphertext(3),
                 ]),
+                regev_pk_digests: BalanceState::pad_regev_pk_digests(&[]),
                 settled_tx_chain: Bytes32::default(),
                 state_version: 7,
                 pending_adds: BalanceState::pad_pending_adds(&[0, 0, 0]),

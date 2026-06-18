@@ -131,8 +131,7 @@ impl PostCloseClaimPublicInputs {
             receiver_channel_id: crate::common::channel::ChannelId::from_u64_slice(&values[8..9])
                 .map_err(|e| e.to_string())?,
             incoming_tx_hash: Bytes32::from_u64_slice(&values[9..17]).map_err(|e| e.to_string())?,
-            receiver_pk_g: Bytes32::from_u64_slice(&values[17..25])
-                .map_err(|e| e.to_string())?,
+            receiver_pk_g: Bytes32::from_u64_slice(&values[17..25]).map_err(|e| e.to_string())?,
             recipient: Address::from_u64_slice(&values[25..30]).map_err(|e| e.to_string())?,
             shared_native_nullifier: Bytes32::from_u64_slice(&values[30..38])
                 .map_err(|e| e.to_string())?,
