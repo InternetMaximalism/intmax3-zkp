@@ -64,15 +64,18 @@ interface IChannelSettlementVerifier {
         MleVerifier.MleProof calldata mleProof
     ) external view returns (bool);
 
+    /// Phase C1 (CORRECTED): cancelClose is verified by a REAL MLE/WHIR proof of the plonky2
+    /// cancel-close circuit. `memberSetCommitment` is the channel's REGISTERED member-set
+    /// commitment (injected by the manager, NOT a caller field — Finding D fix). `view` (reads the
+    /// cancel VK), not `pure`.
     function verifyCancelClose(
         bytes4 channelId,
         bytes32 closeIntentDigest,
-        bytes32 revivedSmallBlockRoot,
-        bytes32 revivedInterChannelTxDigest,
-        bytes32 revivedTxHash,
-        bytes32 revivedSeal,
-        bytes calldata proof
-    ) external pure returns (bool);
+        bytes32 memberSetCommitment,
+        uint64 revivedStateVersion,
+        bytes32 revivedChannelStateDigest,
+        MleVerifier.MleProof calldata mleProof
+    ) external view returns (bool);
 
     function verifyPostCloseClaim(
         bytes4 channelId,
@@ -206,8 +209,8 @@ contract ChannelSettlementManager {
 
     event CloseCancelled(
         bytes32 indexed closeIntentDigest,
-        bytes32 indexed revivedTxHash,
-        bytes32 revivedSeal
+        bytes32 indexed revivedChannelStateDigest,
+        uint64 revivedStateVersion
     );
 
     event LateOutgoingDebitAccepted(
@@ -303,12 +306,14 @@ contract ChannelSettlementManager {
         bytes32 withdrawalNullifier;
     }
 
+    /// Phase C1 (CORRECTED): a cancel proves the members N-of-N signed a HIGHER-version channel
+    /// state (`revivedChannelStateDigest` at `revivedStateVersion > close.finalStateVersion`), so
+    /// the pending close froze a stale state. The legacy revived-tx fields
+    /// (revivedSmallBlockRoot/revivedInterChannelTxDigest/revivedTxHash/revivedSeal) are dropped.
     struct CancelCloseRequest {
         bytes32 closeIntentDigest;
-        bytes32 revivedSmallBlockRoot;
-        bytes32 revivedInterChannelTxDigest;
-        bytes32 revivedTxHash;
-        bytes32 revivedSeal;
+        uint64 revivedStateVersion;
+        bytes32 revivedChannelStateDigest;
     }
 
     /// @dev HAZARD #8 (Phase B-D): `sharedNativeNullifier` is NO LONGER a caller-supplied field —
@@ -803,20 +808,23 @@ contract ChannelSettlementManager {
 
     function cancelClose(
         CancelCloseRequest calldata request,
-        bytes calldata proof
+        MleVerifier.MleProof calldata proof
     ) external {
         if (!pendingClose.active) revert CloseNotActive();
         if (request.closeIntentDigest != pendingClose.closeIntentDigest) {
             revert CloseIntentDigestMismatch();
         }
+        // SECURITY (Finding D): the manager injects the channel's REGISTERED member-set commitment
+        // (NOT a caller request field), exactly as the close path does via `_runCloseVerify`. The
+        // verifier strict-binds the proof's in-circuit member-set commitment to this value, so the
+        // members who signed the higher-version revived state are the channel's registered members.
         if (
             !verifier.verifyCancelClose(
                 channelId,
                 request.closeIntentDigest,
-                request.revivedSmallBlockRoot,
-                request.revivedInterChannelTxDigest,
-                request.revivedTxHash,
-                request.revivedSeal,
+                registeredMemberSetCommitment(),
+                request.revivedStateVersion,
+                request.revivedChannelStateDigest,
                 proof
             )
         ) revert InvalidCancelProof();
@@ -829,8 +837,8 @@ contract ChannelSettlementManager {
         closeRequestedAt = 0;
         emit CloseCancelled(
             closeIntentDigest,
-            request.revivedTxHash,
-            request.revivedSeal
+            request.revivedChannelStateDigest,
+            request.revivedStateVersion
         );
     }
 

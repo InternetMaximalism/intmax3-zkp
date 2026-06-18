@@ -2,62 +2,139 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::{
-    common::channel::{CancelClose, CloseIntent, InterChannelTx},
+    common::channel::{ChannelId, ChannelState, CloseIntent},
     ethereum_types::{bytes32::Bytes32, u32limb_trait::U32LimbTrait},
 };
 
-// 1 (channel id, single u32 limb) + 5 x 8 (digests/hashes).
-pub const CANCEL_CLOSE_PUBLIC_INPUTS_LEN: usize = 41;
+// CORRECTED cancelClose statement (Phase C1, threat model
+// `tasks/phase-c-challenge-stubs-threat-model.md` "CORRECTED cancelClose statement"):
+//
+//   Prove the registered channel members N-of-N signed a channel state (IMCH) at a
+//   `state_version` STRICTLY GREATER than the pending close's `final_state_version` ⇒ the members
+//   agreed to keep operating ⇒ the pending close froze a stale state ⇒ cancel.
+//
+// This REPLACES the legacy 41-limb revived-tx layout (revived_small_block_root /
+// revived_inter_channel_tx_digest / revived_tx_hash / revived_seal), which Finding D showed was
+// forgeable (no member binding) and Finding B showed had an unsound staleness predicate
+// (bare block-number succession ≠ stale close). The new layout binds:
+//
+//  - `member_set_commitment` (8) — keccak over the revived state's signing member pk_g set (EXACTLY
+//    as `close_circuit.rs` computes/exposes it). L1 (`ChannelSettlementManager`) matches it against
+//    `registeredMemberSetCommitment()` (the SAME mechanism the close path uses), so a third party
+//    cannot forge a cancel with their own keys (Finding D fix).
+//  - `revived_state_version` (2, hi/lo) — proven `> close_intent.final_state_version` in-circuit
+//    (Finding B fix). The version operand is anchored inside the revived IMCH (via H1), and the
+//    close-side operand is anchored inside the recomputed `close_intent_digest`, so neither side
+//    can be tampered independently of the digests the manager binds.
+//  - `revived_channel_state_digest` (8) — the IMCH digest the members signed (the revived state).
+//  - `close_intent_digest` (8) — binds the pending close being cancelled (matched on L1 against
+//    `pendingClose.closeIntentDigest`). The circuit recomputes the FULL IMCI preimage in-circuit,
+//    so `close_intent.final_state_version` and `close_intent.close_freeze_nonce` used in the
+//    comparison / era fence are the SAME wires hashed into this digest.
+//
+// Limb order (pinned by the Solidity `_expectedCancelCloseLimbs`, one BE u32 word per limb):
+//   channelId(1) | closeIntentDigest(8) | memberSetCommitment(8) | revivedStateVersion(2 hi,lo) |
+//   revivedChannelStateDigest(8)
+pub const CANCEL_CLOSE_PUBLIC_INPUTS_LEN: usize = 27;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CancelClosePublicInputs {
-    pub channel_id: crate::common::channel::ChannelId,
+    /// The channel whose pending close is being cancelled. Single u32 limb (channel-id-only base
+    /// identity), equal to `close_intent.channel_id` and to the revived state's `channel_id`
+    /// (both anchored in-circuit via the recomputed digests).
+    pub channel_id: ChannelId,
+    /// IMCI digest of the pending close being cancelled. Recomputed in-circuit from the full
+    /// `CloseIntent` preimage; matched on L1 against `pendingClose.closeIntentDigest`.
     pub close_intent_digest: Bytes32,
-    pub revived_small_block_root: Bytes32,
-    pub revived_inter_channel_tx_digest: Bytes32,
-    pub revived_tx_hash: Bytes32,
-    pub revived_seal: Bytes32,
+    /// `keccak([IMCM, member_count, pk_g_0..pk_g_{MAX-1}])` over the revived state's signing
+    /// members (slot order, padding zeroed) — byte-identical to the close circuit's
+    /// `member_set_commitment`. L1 matches it against the channel's registered member set
+    /// (Finding D fix). Derived by the circuit from `member_auth`, not by the witness alone —
+    /// `CancelCloseWitness::to_public_inputs` leaves it zero as a placeholder.
+    pub member_set_commitment: Bytes32,
+    /// `state_version` of the revived channel state. Proven `> close_intent.final_state_version`
+    /// in-circuit (Finding B fix). Anchored inside the revived IMCH (via the recomputed H1).
+    pub revived_state_version: u64,
+    /// IMCH digest of the revived channel state the members N-of-N signed. Recomputed in-circuit
+    /// (`ChannelState::signing_digest`) and bound to the verified member signatures.
+    pub revived_channel_state_digest: Bytes32,
 }
 
 #[derive(Debug, Error)]
 pub enum CancelCloseWitnessError {
-    #[error("cancel close object mismatch")]
-    CancelCloseMismatch,
-    #[error("revived tx source channel does not match close channel")]
+    #[error("revived state channel does not match close channel")]
     ChannelIdMismatch,
+    #[error(
+        "revived state version {revived} is not strictly greater than close final_state_version {close}"
+    )]
+    StaleRevivedState { revived: u64, close: u64 },
+    #[error(
+        "era fence violated: revived close_freeze_nonce {revived} + 1 != close close_freeze_nonce {close}"
+    )]
+    EraFenceMismatch { revived: u64, close: u64 },
+    #[error("revived channel state digest mismatch (stored digest != recomputed signing digest)")]
+    RevivedDigestMismatch,
 }
 
+/// Witness for the corrected cancelClose statement. The revived `ChannelState` (the state the
+/// members kept operating at a higher version) plus the `CloseIntent` being cancelled. The member
+/// authentication (per-slot `pk_g`) and the recursive `ListCircuit` proof live in the circuit's
+/// `CancelCloseFullWitness` (mirroring `ChannelCloseFullWitness`), not here.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CancelCloseWitness {
+    pub revived_state: ChannelState,
     pub close_intent: CloseIntent,
-    pub revived_tx: InterChannelTx,
-    pub cancel_close: CancelClose,
 }
 
 impl CancelCloseWitness {
     pub fn to_public_inputs(&self) -> Result<CancelClosePublicInputs, CancelCloseWitnessError> {
-        if self.revived_tx.source_channel_id != self.close_intent.channel_id {
+        // Same channel (anchored in-circuit via the recomputed digests; checked natively here for
+        // an early, structured error).
+        if self.revived_state.channel_id != self.close_intent.channel_id {
             return Err(CancelCloseWitnessError::ChannelIdMismatch);
         }
-        let expected = CancelClose::new(
-            &self.close_intent,
-            &self.revived_tx,
-            self.cancel_close.cancel_proof.clone(),
-        );
-        if expected != self.cancel_close {
-            return Err(CancelCloseWitnessError::CancelCloseMismatch);
+        // The revived state's stored digest must equal its signing digest (the in-circuit recompute
+        // is authoritative; this native check surfaces a malformed witness early).
+        if self.revived_state.digest != self.revived_state.signing_digest() {
+            return Err(CancelCloseWitnessError::RevivedDigestMismatch);
+        }
+        let revived_version = self.revived_state.balance_state.state_version;
+        // Finding B (staleness): the revived state must post-date the close snapshot STRICTLY.
+        if !(revived_version > self.close_intent.final_state_version) {
+            return Err(CancelCloseWitnessError::StaleRevivedState {
+                revived: revived_version,
+                close: self.close_intent.final_state_version,
+            });
+        }
+        // Finding C (era fence): the revived state belongs to the SAME operating era as the state
+        // that was closed. `CloseIntent::new` advances `close_freeze_nonce` by +1 off the closing
+        // state, so a continued-operation state from the pre-close era satisfies
+        // `revived.close_freeze_nonce + 1 == close.close_freeze_nonce`. Do NOT relax to `>=`.
+        if self.revived_state.close_freeze_nonce + 1 != self.close_intent.close_freeze_nonce {
+            return Err(CancelCloseWitnessError::EraFenceMismatch {
+                revived: self.revived_state.close_freeze_nonce,
+                close: self.close_intent.close_freeze_nonce,
+            });
         }
         Ok(CancelClosePublicInputs {
             channel_id: self.close_intent.channel_id,
             close_intent_digest: self.close_intent.signing_digest(),
-            revived_small_block_root: self.cancel_close.revived_small_block_root,
-            revived_inter_channel_tx_digest: self.revived_tx.signing_digest(),
-            revived_tx_hash: self.revived_tx.tx_hash,
-            revived_seal: self.revived_tx.seal,
+            // Filled by `CancelCloseCircuit::prove` from `member_auth`; placeholder here.
+            member_set_commitment: Bytes32::default(),
+            revived_state_version: revived_version,
+            revived_channel_state_digest: self.revived_state.signing_digest(),
         })
     }
+}
+
+fn split_u64(value: u64) -> Vec<u64> {
+    vec![value >> 32, value as u32 as u64]
+}
+
+fn join_u64(limbs: &[u64]) -> u64 {
+    (limbs[0] << 32) | limbs[1]
 }
 
 impl CancelClosePublicInputs {
@@ -65,10 +142,9 @@ impl CancelClosePublicInputs {
         [
             self.channel_id.to_u64_vec(),
             self.close_intent_digest.to_u64_vec(),
-            self.revived_small_block_root.to_u64_vec(),
-            self.revived_inter_channel_tx_digest.to_u64_vec(),
-            self.revived_tx_hash.to_u64_vec(),
-            self.revived_seal.to_u64_vec(),
+            self.member_set_commitment.to_u64_vec(),
+            split_u64(self.revived_state_version),
+            self.revived_channel_state_digest.to_u64_vec(),
         ]
         .concat()
     }
@@ -81,16 +157,14 @@ impl CancelClosePublicInputs {
             ));
         }
         Ok(Self {
-            channel_id: crate::common::channel::ChannelId::from_u64_slice(&values[0..1])
-                .map_err(|e| e.to_string())?,
+            channel_id: ChannelId::from_u64_slice(&values[0..1]).map_err(|e| e.to_string())?,
             close_intent_digest: Bytes32::from_u64_slice(&values[1..9])
                 .map_err(|e| e.to_string())?,
-            revived_small_block_root: Bytes32::from_u64_slice(&values[9..17])
+            member_set_commitment: Bytes32::from_u64_slice(&values[9..17])
                 .map_err(|e| e.to_string())?,
-            revived_inter_channel_tx_digest: Bytes32::from_u64_slice(&values[17..25])
+            revived_state_version: join_u64(&values[17..19]),
+            revived_channel_state_digest: Bytes32::from_u64_slice(&values[19..27])
                 .map_err(|e| e.to_string())?,
-            revived_tx_hash: Bytes32::from_u64_slice(&values[25..33]).map_err(|e| e.to_string())?,
-            revived_seal: Bytes32::from_u64_slice(&values[33..41]).map_err(|e| e.to_string())?,
         })
     }
 }
@@ -101,11 +175,7 @@ mod tests {
     use crate::{
         common::{
             balance_state::BalanceState,
-            channel::{
-                ChannelFund, ChannelId, ChannelProofEnvelope, ChannelState, CloseWithdrawal,
-                MemberSignature, MerkleInclusionProof, ProofBackend, ReceiverBalanceDelta,
-                SignedSmallBlock, SmallBlockRootMessage, TransitionProofRole,
-            },
+            channel::{ChannelFund, ChannelId, ChannelState, CloseWithdrawal, MemberSignature},
         },
         ethereum_types::{bytes32::Bytes32, u256::U256},
         regev::{REGEV_N, REGEV_Q, RegevCiphertext},
@@ -136,12 +206,13 @@ mod tests {
         }
     }
 
-    fn sample_close_intent() -> CloseIntent {
-        let state = ChannelState {
+    /// A channel state at `close_freeze_nonce`/`state_version`, with `member_count` active members.
+    fn sample_state(close_freeze_nonce: u64, state_version: u64) -> ChannelState {
+        ChannelState {
             channel_id: ChannelId::new(3).unwrap(),
             epoch: 8,
             small_block_number: 4,
-            close_freeze_nonce: 0,
+            close_freeze_nonce,
             channel_fund: ChannelFund {
                 channel_id: ChannelId::new(3).unwrap(),
                 amount: U256::from(77u32),
@@ -159,7 +230,7 @@ mod tests {
                 regev_pk_digests: BalanceState::pad_regev_pk_digests(&[]),
                 settled_tx_chain: Bytes32::default(),
                 settled_tx_accumulator_root: Bytes32::default(),
-                state_version: 7,
+                state_version,
                 pending_adds: BalanceState::pad_pending_adds(&[0, 0, 0]),
             },
             h2_tag: Bytes32::default(),
@@ -173,77 +244,175 @@ mod tests {
                 signature: vec![1],
             }],
         }
-        .with_computed_digest();
+        .with_computed_digest()
+    }
+
+    /// A close intent built off `closing_state` (its nonce advances +1).
+    fn close_intent_for(closing_state: &ChannelState) -> CloseIntent {
         let close_withdrawal = CloseWithdrawal {
-            channel_id: state.channel_id,
-            final_channel_state_digest: state.digest,
-            final_balance_state_h1: state.balance_state.h1(),
-            intmax_state_root: state.channel_fund.intmax_state_root,
+            channel_id: closing_state.channel_id,
+            final_channel_state_digest: closing_state.digest,
+            final_balance_state_h1: closing_state.balance_state.h1(),
+            intmax_state_root: closing_state.channel_fund.intmax_state_root,
             burn_tx_hash: Bytes32::from_u32_slice(&[7, 0, 0, 0, 0, 0, 0, 0]).unwrap(),
-            burn_amount: state.channel_fund.amount,
+            burn_amount: closing_state.channel_fund.amount,
             zkp: vec![7],
         };
-        CloseIntent::new(5, &state, &close_withdrawal, 123).unwrap()
+        CloseIntent::new(5, closing_state, &close_withdrawal, 123).unwrap()
     }
 
     #[test]
     fn cancel_close_public_inputs_roundtrip() {
-        let close_intent = sample_close_intent();
-        let revived_tx = InterChannelTx {
-            tx_inclusion_proof: MerkleInclusionProof {
-                siblings: vec![],
-                leaf_index: U256::default(),
-            },
-            signed_small_block: SignedSmallBlock {
-                message: SmallBlockRootMessage {
-                    channel_id: close_intent.channel_id,
-                    bp_member_slot: 0,
-                    bp_pk_g: pubkey_hash(10),
-                    small_block_number: 5,
-                    prev_small_block_root: Bytes32::default(),
-                    tx_tree_root: Bytes32::from_u32_slice(&[4, 0, 0, 0, 0, 0, 0, 0]).unwrap(),
-                    state_commitment_root: Bytes32::default(),
-                    medium_epoch_hint: 3,
-                    close_freeze_nonce: 0,
-                },
-                signatures: vec![MemberSignature {
-                    member_slot: 0,
-                    pk_g: pubkey_hash(10),
-                    signature: vec![1],
-                }],
-                aggregated_signature_proof: vec![3],
-                medium_block_number: 3,
-                confirmation_proof: vec![4],
-            },
-            sender_delta_ct: ciphertext(10),
-            source_channel_id: close_intent.channel_id,
-            destination_channel_id: ChannelId::new(4).unwrap(),
-            source_pk_g: pubkey_hash(10),
-            seal: Bytes32::from_u32_slice(&[8, 0, 0, 0, 0, 0, 0, 0]).unwrap(),
-            tx_hash: Bytes32::from_u32_slice(&[9, 0, 0, 0, 0, 0, 0, 0]).unwrap(),
-            intmax_transfer_commitment: Bytes32::default(),
-            recipient_memo: vec![1, 2],
-            receiver_deltas: vec![ReceiverBalanceDelta {
-                receiver_pk_g: pubkey_hash(11),
-                amount: ciphertext(11),
-            }],
-            channel_update_zkp: ChannelProofEnvelope {
-                role: TransitionProofRole::ChannelStateUpdate,
-                backend: ProofBackend::Plonky3,
-                proof: vec![3],
-            },
-            transport_proof: vec![5],
-        };
-        let cancel_close = CancelClose::new(&close_intent, &revived_tx, vec![5, 6]);
+        // Closing state at era nonce 0, version 7. Revived state at the SAME era (nonce 0) but a
+        // higher version (9) — members kept operating.
+        let closing_state = sample_state(0, 7);
+        let close_intent = close_intent_for(&closing_state);
+        let revived_state = sample_state(0, 9);
         let witness = CancelCloseWitness {
+            revived_state,
             close_intent,
-            revived_tx,
-            cancel_close,
         };
 
-        let public_inputs = witness.to_public_inputs().unwrap();
-        let roundtrip =
-            CancelClosePublicInputs::from_u64_slice(&public_inputs.to_u64_vec()).unwrap();
+        let mut public_inputs = witness.to_public_inputs().unwrap();
+        // The witness leaves member_set_commitment zero; set a non-default value so the roundtrip
+        // exercises the 8 limbs (the circuit fills it from member_auth).
+        public_inputs.member_set_commitment =
+            Bytes32::from_u32_slice(&[1, 2, 3, 4, 5, 6, 7, 8]).unwrap();
+        let limbs = public_inputs.to_u64_vec();
+        assert_eq!(
+            limbs.len(),
+            CANCEL_CLOSE_PUBLIC_INPUTS_LEN,
+            "cancel PI is exactly 27 BE u32 words (1 channelId + 8 closeIntentDigest + 8 \
+             memberSetCommitment + 2 revivedStateVersion + 8 revivedChannelStateDigest)"
+        );
+        // Pinned limb offsets (mirrored by Solidity `_expectedCancelCloseLimbs`).
+        assert_eq!(&limbs[0..1], &public_inputs.channel_id.to_u64_vec()[..]);
+        assert_eq!(
+            &limbs[1..9],
+            &public_inputs.close_intent_digest.to_u64_vec()[..]
+        );
+        assert_eq!(
+            &limbs[9..17],
+            &public_inputs.member_set_commitment.to_u64_vec()[..],
+            "member_set_commitment occupies limbs 9..17"
+        );
+        assert_eq!(limbs[17], 0, "revived_state_version hi limb");
+        assert_eq!(limbs[18], 9, "revived_state_version lo limb");
+        assert_eq!(
+            &limbs[19..27],
+            &public_inputs.revived_channel_state_digest.to_u64_vec()[..]
+        );
+        let roundtrip = CancelClosePublicInputs::from_u64_slice(&limbs).unwrap();
         assert_eq!(public_inputs, roundtrip);
+    }
+
+    #[test]
+    fn cancel_close_rejects_stale_revived_state() {
+        // Revived version (5) <= close.final_state_version (7) → staleness rejection.
+        let closing_state = sample_state(0, 7);
+        let close_intent = close_intent_for(&closing_state);
+        let revived_state = sample_state(0, 5);
+        let witness = CancelCloseWitness {
+            revived_state,
+            close_intent,
+        };
+        match witness.to_public_inputs() {
+            Err(CancelCloseWitnessError::StaleRevivedState { revived, close }) => {
+                assert_eq!(revived, 5);
+                assert_eq!(close, 7);
+            }
+            other => panic!("expected StaleRevivedState, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn cancel_close_rejects_equal_revived_version() {
+        // Equal version is NOT strictly greater → rejection (boundary case).
+        let closing_state = sample_state(0, 7);
+        let close_intent = close_intent_for(&closing_state);
+        let revived_state = sample_state(0, 7);
+        let witness = CancelCloseWitness {
+            revived_state,
+            close_intent,
+        };
+        assert!(matches!(
+            witness.to_public_inputs(),
+            Err(CancelCloseWitnessError::StaleRevivedState { .. })
+        ));
+    }
+
+    #[test]
+    fn cancel_close_rejects_wrong_era_fence() {
+        // Revived state from a DIFFERENT era (nonce 1, so +1 = 2 != close nonce 1) → rejection.
+        let closing_state = sample_state(0, 7);
+        let close_intent = close_intent_for(&closing_state); // close_freeze_nonce == 1
+        let revived_state = sample_state(1, 9); // 1 + 1 = 2 != 1
+        let witness = CancelCloseWitness {
+            revived_state,
+            close_intent,
+        };
+        assert!(matches!(
+            witness.to_public_inputs(),
+            Err(CancelCloseWitnessError::EraFenceMismatch { .. })
+        ));
+    }
+
+    /// GOLDEN VECTOR: the Rust `CancelClosePublicInputs::to_u64_vec()` must produce the SAME
+    /// 27-limb vector as the Solidity `_expectedCancelCloseLimbs` (pinned by the Solidity
+    /// `test_expectedCancelCloseLimbs_goldenVector`, same sentinels). One BE u32 word per limb.
+    #[test]
+    fn cancel_close_public_inputs_match_solidity_shared_vector() {
+        // `b32(tag)` = the 8 BE u32 words [tag, tag+1, ..., tag+7] — mirror of Solidity `_b32`.
+        fn b32(tag: u32) -> Bytes32 {
+            Bytes32::from_u32_slice(&[
+                tag,
+                tag + 1,
+                tag + 2,
+                tag + 3,
+                tag + 4,
+                tag + 5,
+                tag + 6,
+                tag + 7,
+            ])
+            .unwrap()
+        }
+        let pis = CancelClosePublicInputs {
+            channel_id: ChannelId::new(0x0a0b_0c0d).unwrap(),
+            close_intent_digest: b32(0x1000),
+            member_set_commitment: b32(0x2000),
+            revived_state_version: 0x0000_0011_0000_0022,
+            revived_channel_state_digest: b32(0x3000),
+        };
+        let v = pis.to_u64_vec();
+        assert_eq!(v.len(), CANCEL_CLOSE_PUBLIC_INPUTS_LEN);
+        assert_eq!(v[0], 0x0a0b_0c0d, "channel_id");
+        for i in 0..8 {
+            assert_eq!(v[1 + i], (0x1000 + i as u64), "close_intent_digest");
+            assert_eq!(v[9 + i], (0x2000 + i as u64), "member_set_commitment");
+            assert_eq!(
+                v[19 + i],
+                (0x3000 + i as u64),
+                "revived_channel_state_digest"
+            );
+        }
+        assert_eq!(v[17], 0x11, "revived_state_version hi");
+        assert_eq!(v[18], 0x22, "revived_state_version lo");
+    }
+
+    #[test]
+    fn cancel_close_rejects_wrong_channel() {
+        let closing_state = sample_state(0, 7);
+        let close_intent = close_intent_for(&closing_state);
+        let mut revived_state = sample_state(0, 9);
+        revived_state.channel_id = ChannelId::new(4).unwrap();
+        revived_state = revived_state.with_computed_digest();
+        let witness = CancelCloseWitness {
+            revived_state,
+            close_intent,
+        };
+        assert!(matches!(
+            witness.to_public_inputs(),
+            Err(CancelCloseWitnessError::ChannelIdMismatch)
+        ));
     }
 }

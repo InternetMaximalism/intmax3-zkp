@@ -148,6 +148,10 @@ close-fixture-bin = []
 # `cargo build`. Same pattern as `close-fixture-bin`: the builders are otherwise `#[cfg(test)]`-only.
 withdrawal-claim-fixture-bin = []
 post-close-claim-fixture-bin = []
+# Phase C1: un-gates the cancel-close circuit witness builders (`cancel_close_circuit::test_fixture`)
+# for its fixture-generator binary WITHOUT pulling them into normal `cargo build`. Same pattern as
+# the other fixture features.
+cancel-close-fixture-bin = []
 
 [dev-dependencies]
 criterion = { version = "0.5", default-features = false }
@@ -172,6 +176,11 @@ required-features = ["withdrawal-claim-fixture-bin"]
 name = "generate_post_close_claim_fixture"
 path = "src/bin/generate_post_close_claim_fixture.rs"
 required-features = ["post-close-claim-fixture-bin"]
+
+[[bin]]
+name = "generate_cancel_close_fixture"
+path = "src/bin/generate_cancel_close_fixture.rs"
+required-features = ["cancel-close-fixture-bin"]
 
 [[bench]]
 name = "proof_bench"

@@ -1,5 +1,24 @@
 # Lessons Learned
 
+## Phase C1 cancelClose — adversarial review caught a forgeable design BEFORE coding, 2026-06
+
+1. **A recursive signature-list proof proves "this key signed", never "this key is a member."**
+   The cancel-close design proposed reusing close's `ListCircuit` to authorize a "revived" small
+   block, but `ListCircuit` (src/poseidon_sig/list.rs) only binds `(message, pk)` pairs to verified
+   single-sigs — member-set membership is a SEPARATE binding. In the codebase it comes from EITHER
+   an on-chain `member_set_commitment` match (close: Manager:592/1116-1154) OR an in-circuit
+   MemberTree inclusion against `member_pubkeys_root` (validity: update_channel_tree.rs:108-130).
+   The cancel PI struct (cancel_close_pis.rs, 41 limbs) had neither ⇒ anyone could fabricate an IMSB
+   with arbitrary keys and forge a cancel. ALWAYS ask "what binds the signer to the authorized set?"
+   separately from "is the signature valid?".
+
+2. **Running the adversarial subagent BEFORE writing code (CLAUDE.md §Adversarial Thinking) paid
+   off.** It surfaced both a total break (no member binding) and a spec-level flaw ("a later block
+   exists" ≠ "the close was stale" — a racing/colluding BP can always produce block final+1) with
+   zero wasted implementation. A pinned PI layout (41 limbs) is NOT evidence the statement is sound;
+   it is just a serialization. When the fix requires changing a pinned spec, that is an escalation,
+   not a silent redesign.
+
 ## detail2.md (SIS → Regev) migration, 2026-06
 
 1. **Spec text and reference code can silently diverge — read the port source, not just the

@@ -1,91 +1,82 @@
-# Phase B (Option D) — real verifyWithdrawalClaim / verifyPostCloseClaim
+# Phase C1 — real verifyCancelClose (cancel-close circuit + on-chain MLE/WHIR)
 
-Authoritative spec: tasks/phase-b-claims-threat-model.md (DECISION = Option D).
-Template: Phase A (tasks/close-verifier-a1-plan.md), mirrored exactly.
+Authoritative: tasks/phase-c-challenge-stubs-threat-model.md (C1).
+Template: close_circuit.rs (ListCircuit member-sig binding) + post_close_claim_circuit.rs
+(Stage-3 in-circuit digest recompute, less_than_u32 helper, test_fixture/fixture-bin) +
+verifyWithdrawalClaim (Solidity strict-limb + set-once VK + MleVerifier).
 
-SCOPE: prove the NON-decryption bindings as two NEW plonky2 binding circuits, MLE/WHIR-wrapped on
-the @mle rail, replacing the two `_matches` stubs. NO Regev decryption (deferred sub-phase).
+## Statement
+A SIGNED `InterChannelTx` from this channel that STRICTLY POST-DATES the close snapshot
+exists ⇒ the close froze a stale state ⇒ cancel is justified.
 
-## RESIDUAL (DOCUMENT LOUDLY — not silently)
-- Over-claim is NOT closed: `amount` is a range-checked u64 PI, NOT bound to the plaintext of the
-  slot/delta ciphertext. A member/receiver can still claim more than their ciphertext holds,
-  bounded only by on-chain `totalWithdrawn <= finalizedChannelFundAmount` + the authoritative
-  `receivedChannelFunds` ETH ceiling. Closing this requires the decryption sub-phase.
+## Soundness obligations the circuit MUST enforce (falsifiable)
+- [ ] revived tx member signatures verified via recursive ListCircuit over single-sigs of the
+      IMSB digest (`SmallBlockRootMessage::signing_digest()`), rebuilding C' over (IMSB, pk_g_i)
+      — same machinery as close_circuit, but the signed message is the IMSB digest (not IMCH).
+- [ ] `revived_small_block_root` == in-circuit IMSB recompute (SmallBlockMessageFieldsTarget),
+      connected to PI. This is the value members sign AND the value ListCircuit folds.
+- [ ] `revived_inter_channel_tx_digest` == in-circuit IMIT recompute, connected to PI.
+- [ ] `revived_tx_hash` == witnessed tx_hash field; embedded in the IMIT preimage so bound by IMIT.
+- [ ] `revived_seal` == witnessed seal field; embedded in the IMIT preimage so bound by IMIT.
+- [ ] `close_intent_digest` == in-circuit IMCI recompute, connected to PI.
+- [ ] Channel binding: revived block channel_id == close_intent.channel_id == channel_id PI.
+- [ ] STALENESS (MUST-FIX): revived.small_block_number > close_intent.final_small_block_number
+      (in-circuit u64 strict-greater, two-limb lexicographic via less_than_u32). assert_one.
+- [ ] close_freeze era consistency: revived.close_freeze_nonce + 1 == close_intent.close_freeze_nonce
+      (CloseIntent::new advances close_freeze_nonce by +1; the revived block must be from the
+      SAME frozen era the close claimed final). assert via U64 add+connect.
 
-## Hazard #8 decision: BIND (safe option)
-Evidence: `PostCloseIncomingClaim.shared_native_nullifier` (the CLAIM field) is DISTINCT from the
-channel-state `shared_native_nullifier_root` (a settle hash-chain). The claim field is
-free-standing — `e2e_flow.rs:878` sets it to an arbitrary placeholder `bytes32_word(801)`; nothing
-in `to_public_inputs` validates it against any tree, and the only consumer is the manager's
-`usedSharedNativeNullifiers` double-claim key. Today it is attacker-chosen → a malicious claimant
-can pick a fresh nullifier to double-claim the SAME tx. Therefore deriving it in-circuit from
-`keccak([IMCK=0x494d434b] ++ close_intent_digest(8) ++ incoming_tx_hash(8) ++ receiver_pk_g(8))`
-(mirroring the withdrawal nullifier) is the SAFE, correct fix. Manager must RECOMPUTE the same
-value. New native helper `PostCloseIncomingClaim::derive_shared_native_nullifier`.
+## Files
+- [ ] src/circuits/channel/cancel_close_circuit.rs (NEW)
+- [ ] src/circuits/channel/mod.rs (register module)
+- [ ] src/bin/generate_cancel_close_fixture.rs (NEW, feature-gated)
+- [ ] Cargo.toml: feature `cancel-close-fixture-bin` + [[bin]]
+- [ ] contracts/src/ChannelSettlementVerifier.sol
+- [ ] contracts/src/ChannelSettlementManager.sol
+- [ ] Tests (Rust + Solidity + golden vector)
 
-## Plan / falsifiable checklist
-- [ ] h1_gadget.rs: extract close H1 keccak recompute; call from BOTH close + withdrawal circuits.
-- [ ] channel.rs: add `PostCloseIncomingClaim::derive_shared_native_nullifier` (IMCK).
-- [ ] withdrawal_claim_circuit.rs: 48-limb PI; H1 recompute; one-hot slot select; member_index <
-      member_count+delegate_count; user_amount_digest == enc[member_index]; derive nullifier; amount u64.
-- [ ] post_close_claim_circuit.rs: 40-limb PI; receiver-delta inclusion; tx_hash bind; derive #8 nullifier.
-- [ ] Golden-vector Rust tests pinning to_u64_vec() to Solidity _expected*Limbs.
-- [ ] Fixture bins + feature gates.
-- [ ] Solidity per-statement VKs, _expected*Limbs, strict bind, rewrite verify*, remove their _matches.
-- [ ] Manager: verify* take MleProof; recompute shared_native_nullifier.
-- [ ] Tests: positives + negatives + golden vectors + double-claim. cargo check, forge build, EIP-170.
+## Security review — RAN FIRST (adversarial subagent, pre-implementation). HALTED.
 
-## Outcome (DONE)
-- Two new plonky2 binding circuits implemented + MLE/WHIR-wrapped on the @mle rail; the two
-  tautological _matches stubs removed and replaced with strict-limb-bind + MleVerifier.verify.
-- Hazard #8: BOUND (safe option). Evidence: PostCloseIncomingClaim.shared_native_nullifier is the
-  CLAIM field, DISTINCT from the channel-state shared_native_nullifier_root tree; it is free-standing
-  (e2e_flow.rs:878 placeholder, no derivation/equality anywhere, only the manager double-claim key).
-  Derived in-circuit + natively + in the manager from keccak(IMCK ++ close_intent_digest ++
-  incoming_tx_hash ++ receiver_pk_g). Manager RECOMPUTES (struct field removed).
-- H1 gadget SHARED (h1_gadget.rs) by close + withdrawal circuits; close circuit still proves (n2 ✓).
-- EIP-170: ChannelSettlementVerifier runtime = 19,218 B (< 24,576; no split).
-- Adversarial review (separate agent): CLEAN, no blocking issues. Added defense-in-depth in-circuit
-  `active <= MAX_CHANNEL_MEMBERS` range-check (O1) + comment clarifications (O2).
-- RESIDUAL stands: over-claim (amount-vs-decryption) NOT closed — deferred decryption sub-phase.
-- Tests: Rust 5 wclaim + 4 pcclaim circuit tests, 3 golden vectors pass; Solidity 55 manager+verifier
-  (Phase B-D negatives + double-claim + golden vectors) pass; full forge suite 122 pass / 1 skip.
-- USER must run (heavy proving) to generate fixtures:
-    cargo run --release --features withdrawal-claim-fixture-bin --bin generate_withdrawal_claim_fixture
-    cargo run --release --features post-close-claim-fixture-bin --bin generate_post_close_claim_fixture
+STATUS: ⛔ IMPLEMENTATION HALTED — escalating to user. The dedicated adversarial review
+(CLAUDE.md §Adversarial Thinking) found TWO blocking issues that the pinned 41-limb spec
+cannot satisfy as written. Per CLAUDE.md ("Escalate, Don't Patch"; "stop and surface to user"),
+no circuit/Solidity code was written. Findings VERIFIED against ground truth:
 
----
+- [D] CRITICAL / TOTAL BREAK — no member-set binding. An IMSB small block is authorized by the
+  block producer's SINGLE signature (`bp_pk_g`/`bp_member_slot` are IN the IMSB preimage,
+  channel.rs:338). The BP's key is bound to the channel's registered members by a MemberTree
+  INCLUSION proof against `member_pubkeys_root` (update_channel_tree.rs:108-130, 218-223) — NOT
+  by the ListCircuit (the list only proves "this key signed", never "this key is a member",
+  list.rs:300-310). The pinned `CancelClosePublicInputs` (41 limbs, cancel_close_pis.rs:14-21)
+  has NO member_set_commitment / member_pubkeys_root field, and `verifyCancelClose` /
+  `cancelClose` pass NO registered-member value (Manager:804-835). ⇒ ANY third party can fabricate
+  an IMSB with arbitrary keys, run the single-sig + ListCircuit over their OWN keys, satisfy every
+  proposed constraint, and forge a cancel → permanent denial of settlement for an honest closer.
+  Compare close (Manager:592,1116-1154 match memberSetCommitment vs registry) — cancel must do the
+  same. FIX REQUIRES CHANGING THE 41-LIMB PI LAYOUT (add a member binding) + threading the
+  registered-member commitment from the manager — a structural change to the pinned spec.
 
-# Sepolia + AWS deployment — two-channel payment-channel demo (DONE)
+- [B] HIGH / SPEC-LEVEL — statement may be unsound. "a signed IMSB strictly post-dating the close
+  exists ⇒ close froze a stale state" does NOT hold: the BP unilaterally produces small blocks, so
+  a colluding/racing BP can always sign block `final_small_block_number + 1` AFTER an honest close
+  is initiated (requestClose→submit is a grace-windowed two-step, Manager:657-723). That later block
+  satisfies `small_block_number > final` + the era fence, yet the honest closer was NOT obligated to
+  include it. The predicate needs a finalization/obligation condition (medium-block confirmation vs
+  `snapshot_medium_block_number`), NOT bare block-number succession. This is a SPECIFICATION decision
+  for the threat-model author — cannot be resolved in implementation.
 
-> Operational/server records (live URL, EC2 instance/IP/SG, on-chain addresses, key paths) are
-> **gitignored** in `.claude/deploy-record.md` — not tracked here.
+- [A] MEDIUM (manager-side: cosmetic; cross-binding: real) — `cancelClose` (Manager:824-834) consumes
+  revivedTxHash/Seal/InterChannelTxDigest ONLY to delete pendingClose + emit an event (no nullifier,
+  no dedup keyed on them), so leaving them witnessed-but-unrecomputed is not a manager soundness hole.
+  BUT without recomputing IMIT/tx_leaf + verifying tx_inclusion_proof against the IMSB tx_tree_root,
+  the circuit proves only "a BLOCK exists", not "a TX exists" — the per-tx evidence is fabricable
+  relative to the signed block. Document as a trust boundary or add the leaf-inclusion binding.
 
-## Architecture (confirmed)
-- **EC2-only hosting** (small instance): one box serves the static frontend AND the /api co-signing
-  from a single origin over HTTPS, with COEP/COOP so the multi-threaded wasm proving works
-  (SharedArrayBuffer needs a secure context + cross-origin isolation). TLS via a nip.io domain +
-  Let's Encrypt. S3+CloudFront was abandoned (IAM has no CloudFront perms; S3 alone cannot set
-  COEP/COOP, and the wasm is a shared-memory build).
-- **Two channels (7 & 8)**, each its OWN IntmaxRollup on Sepolia → each deposit is first on its
-  contract (prev hash 0, keystone simple).
-- **cached backing + relay**: the heavy `setup-backing` (Sepolia deposit + ~4GB balance proof) runs
-  LOCALLY; only the cached artifacts ship to EC2, which only co-signs (verified light: a real init
-  co-sign returned a valid snapshot in 8s using ~210MB on the 4GB box).
+- [C] era fence: `revived.close_freeze_nonce + 1 == close_intent.close_freeze_nonce` is CORRECT
+  (do NOT relax to >=; that allows cross-era replay). Only meaningful once [D] is fixed.
 
-## Code changes (tracked)
-- `channel_member`: channel id from `INTMAX_CHANNEL` env; setup-backing deposit key from
-  `INTMAX_DEPOSIT_KEY` env (default = anvil dev key) so a funded Sepolia key is handed to `cast` by
-  the shell, never hardcoded.
-- `wallet-relay-ec2.js`: EC2 host (frontend + /api, COEP/COOP, HTTPS via TLS_CERT/TLS_KEY env).
-- `Dockerfile.signer` + `.dockerignore`: build the channel_member linux/arm64 binary locally
-  (`.dockerignore` excludes `.claude` (secrets) + target/.git/worktrees).
-
-## Status
-- [x] Sepolia: 2 rollups deployed + 2 real deposits + cached backing (EIP-170 cleared: 24,446 B).
-- [x] EC2: small box, frontend + signer over HTTPS, both channels served, verified server-side.
-- [x] Real co-sign proving validated on the small box (8s, ~210MB).
-- [ ] In-browser click-through (wasm thread init + a full join) — not auto-testable here (no
-      connected browser); all server-side prerequisites are verified correct.
-- [ ] Actual inter-channel SEND logic (`build_inter_channel_send` + wasm wrapper) — only the UI field
-      exists so far.
+## Notes
+- IMSB (BP single-signs) != IMSS (embedded in IMIT) != IMIT (tx digest). Don't conflate.
+- `inter_channel_tx_hash` is NOT a free fn; tx_hash is a stored field. tx_leaf via tx_leaf_hash.
+- EIP-170: IntmaxRollup is 130B under cap; edits would touch only Verifier (5272B margin) + Manager.
+- NO git commands run. NO .rs/.sol files edited. Only this planning file written.

@@ -124,6 +124,9 @@ contract ChannelSettlementManagerTest is Test {
         // too. Wire the same controllable mock verifier + set each statement's VK once.
         _initWithdrawalClaimVk(verifier);
         _initPostCloseClaimVk(verifier);
+        // Phase C1: the cancelClose path is now a REAL MLE verification too. Wire the same mock MLE
+        // verifier + set the cancel VK once.
+        _initCancelCloseVk(verifier);
         registry = new MockChannelRegistry(IChannelSettlementVerifier(address(verifier)));
 
         ChannelSettlementManager.MemberBinding[] memory bindings =
@@ -206,6 +209,38 @@ contract ChannelSettlementManagerTest is Test {
         v.initializePostCloseClaimVk(
             MleVerifier(address(mockMle)), vk, whir, protocolId, sessionId, kIs, subgroupGenPowers
         );
+    }
+
+    /// @dev Phase C1: initialize the cancel-close VK with the shared mock MLE verifier.
+    function _initCancelCloseVk(ChannelSettlementVerifier v) internal {
+        (
+            ChannelSettlementVerifier.StatementVk memory vk,
+            SpongefishWhirVerify.WhirParams memory whir,
+            bytes memory protocolId,
+            bytes memory sessionId,
+            uint256[] memory kIs,
+            uint256[] memory subgroupGenPowers
+        ) = CloseTestLib.dummyStatementVkArgs();
+        v.initializeCancelCloseVk(
+            MleVerifier(address(mockMle)), vk, whir, protocolId, sessionId, kIs, subgroupGenPowers
+        );
+    }
+
+    /// @dev Build a cancel-close `MleProof` whose `publicInputs` equal the verifier's expected
+    ///      27-limb vector for `request`. The `memberSetCommitment` limbs use the channel's
+    ///      REGISTERED member-set commitment (what `cancelClose` injects — Finding D), so the strict
+    ///      bind passes only when the proof claims the registered set.
+    function _cancelCloseProof(ChannelSettlementManager.CancelCloseRequest memory request)
+        internal view returns (MleVerifier.MleProof memory)
+    {
+        uint256[] memory limbs = verifier.expectedCancelCloseLimbs(
+            CHANNEL_ID,
+            request.closeIntentDigest,
+            manager.registeredMemberSetCommitment(),
+            request.revivedStateVersion,
+            request.revivedChannelStateDigest
+        );
+        return CloseTestLib.proofWithLimbs(limbs);
     }
 
     /// @dev Build a withdrawal-claim `MleProof` whose `publicInputs` equal the verifier's expected
@@ -438,15 +473,16 @@ contract ChannelSettlementManagerTest is Test {
             "withdrawal-claim PI is 48 raw limbs"
         );
 
-        assertTrue(
-            verifier.cancelPIHash(
+        assertEq(
+            verifier.expectedCancelCloseLimbs(
                 CHANNEL_ID,
                 keccak256("close"),
-                keccak256("small_block"),
-                keccak256("revived"),
-                keccak256("tx_hash"),
-                keccak256("seal")
-            ) != bytes32(0)
+                keccak256("member_set"),
+                9,
+                keccak256("revived_state")
+            ).length,
+            27,
+            "cancel-close PI is 27 raw limbs"
         );
 
         assertEq(
@@ -991,27 +1027,16 @@ contract ChannelSettlementManagerTest is Test {
         _submitClose(intent);
 
         bytes32 closeIntentDigest = manager.computeCloseIntentDigest(intent);
+        // Revived state version (13) > the close's finalStateVersion (12, from `_intent`). The mock
+        // MLE verifier returns true; the manager-side binding (closeIntentDigest match + the
+        // verifier's strict limb bind to the registered member-set commitment) is what is exercised.
         ChannelSettlementManager.CancelCloseRequest memory request = ChannelSettlementManager
             .CancelCloseRequest({
                 closeIntentDigest: closeIntentDigest,
-                revivedSmallBlockRoot: keccak256("small_block"),
-                revivedInterChannelTxDigest: keccak256("revived_tx"),
-                revivedTxHash: keccak256("tx_hash"),
-                revivedSeal: keccak256("seal")
+                revivedStateVersion: 13,
+                revivedChannelStateDigest: keccak256("revived_state")
             });
-        manager.cancelClose(
-            request,
-            _proofFor(
-                verifier.cancelPIHash(
-                    CHANNEL_ID,
-                    closeIntentDigest,
-                    request.revivedSmallBlockRoot,
-                    request.revivedInterChannelTxDigest,
-                    request.revivedTxHash,
-                    request.revivedSeal
-                )
-            )
-        );
+        manager.cancelClose(request, _cancelCloseProof(request));
         assertEq(manager.closeRequestedAt(), 0);
 
         // Re-closing straight away is barred: the channel is Active again.
@@ -1214,25 +1239,11 @@ contract ChannelSettlementManagerTest is Test {
         ChannelSettlementManager.CancelCloseRequest memory request = ChannelSettlementManager
             .CancelCloseRequest({
                 closeIntentDigest: closeIntentDigest,
-                revivedSmallBlockRoot: keccak256("small_block"),
-                revivedInterChannelTxDigest: keccak256("revived_tx"),
-                revivedTxHash: keccak256("tx_hash"),
-                revivedSeal: keccak256("seal")
+                revivedStateVersion: 13,
+                revivedChannelStateDigest: keccak256("revived_state")
             });
 
-        manager.cancelClose(
-            request,
-            _proofFor(
-                verifier.cancelPIHash(
-                    CHANNEL_ID,
-                    closeIntentDigest,
-                    request.revivedSmallBlockRoot,
-                    request.revivedInterChannelTxDigest,
-                    request.revivedTxHash,
-                    request.revivedSeal
-                )
-            )
-        );
+        manager.cancelClose(request, _cancelCloseProof(request));
 
         assertEq(
             uint256(manager.channelStatus()),
@@ -1241,6 +1252,80 @@ contract ChannelSettlementManagerTest is Test {
         assertEq(manager.currentCloseFreezeNonce(), 1);
         assertEq(manager.closeRequestedAt(), 0);
         assertTrue(manager.isNativeSendAllowed(1));
+    }
+
+    /// Finding D (member binding): a cancel proof whose `memberSetCommitment` limbs do NOT equal the
+    /// channel's REGISTERED member set is rejected. The manager injects
+    /// `registeredMemberSetCommitment()`; a proof built over a different commitment fails the
+    /// verifier's strict limb bind (revert inside `verifyCancelClose`), so the close survives.
+    function test_cancel_close_rejects_non_registered_member_set() external {
+        _requestCloseAndElapseGrace();
+        ChannelSettlementManager.CloseIntent memory intent = _intent(1, 9, 22, 1);
+        _submitClose(intent);
+
+        bytes32 closeIntentDigest = manager.computeCloseIntentDigest(intent);
+        ChannelSettlementManager.CancelCloseRequest memory request = ChannelSettlementManager
+            .CancelCloseRequest({
+                closeIntentDigest: closeIntentDigest,
+                revivedStateVersion: 13,
+                revivedChannelStateDigest: keccak256("revived_state")
+            });
+        // Build a proof over an ATTACKER member-set commitment (not the registered one). The manager
+        // injects the registered commitment into the expected vector, so the strict limb bind sees a
+        // mismatch at the memberSetCommitment limbs and reverts.
+        uint256[] memory forgedLimbs = verifier.expectedCancelCloseLimbs(
+            CHANNEL_ID,
+            closeIntentDigest,
+            keccak256("attacker_member_set"),
+            request.revivedStateVersion,
+            request.revivedChannelStateDigest
+        );
+        MleVerifier.MleProof memory forged = CloseTestLib.proofWithLimbs(forgedLimbs);
+        vm.expectRevert(bytes("claim limb mismatch"));
+        manager.cancelClose(request, forged);
+
+        // The pending close is untouched.
+        assertEq(
+            uint256(manager.channelStatus()),
+            uint256(ChannelSettlementManager.ChannelLifecycleStatus.ClosePending)
+        );
+    }
+
+    /// A cancel whose proof claims a different close intent digest than the pending close is rejected
+    /// (manager guard), and a crypto-invalid proof (mock verdict=false) reverts InvalidCancelProof.
+    function test_cancel_close_rejects_wrong_close_and_invalid_proof() external {
+        _requestCloseAndElapseGrace();
+        ChannelSettlementManager.CloseIntent memory intent = _intent(1, 9, 22, 1);
+        _submitClose(intent);
+
+        bytes32 closeIntentDigest = manager.computeCloseIntentDigest(intent);
+        ChannelSettlementManager.CancelCloseRequest memory request = ChannelSettlementManager
+            .CancelCloseRequest({
+                closeIntentDigest: closeIntentDigest,
+                revivedStateVersion: 13,
+                revivedChannelStateDigest: keccak256("revived_state")
+            });
+
+        // Precompute the proof so the expectRevert arms on the cancelClose call itself (not on the
+        // external view calls inside `_cancelCloseProof`).
+        MleVerifier.MleProof memory validProof = _cancelCloseProof(request);
+
+        // Wrong close intent digest → manager guard. (Fresh struct: `= request` would ALIAS the
+        // memory reference and mutate `request`.)
+        ChannelSettlementManager.CancelCloseRequest memory wrong = ChannelSettlementManager
+            .CancelCloseRequest({
+                closeIntentDigest: keccak256("not_the_pending_close"),
+                revivedStateVersion: request.revivedStateVersion,
+                revivedChannelStateDigest: request.revivedChannelStateDigest
+            });
+        vm.expectRevert(ChannelSettlementManager.CloseIntentDigestMismatch.selector);
+        manager.cancelClose(wrong, validProof);
+
+        // Crypto-invalid proof (limbs correct, but MLE verdict=false) → InvalidCancelProof.
+        mockMle.setVerdict(false);
+        vm.expectRevert(ChannelSettlementManager.InvalidCancelProof.selector);
+        manager.cancelClose(request, validProof);
+        mockMle.setVerdict(true);
     }
 
     function test_late_outgoing_debit_correction_invalidates_pending_close() external {
@@ -1624,6 +1709,142 @@ contract ChannelSettlementManagerTest is Test {
     }
 
     // =====================================================================
+    // Phase C1 — cancel-close REAL verification (verifier-level)
+    // =====================================================================
+
+    /// @dev Build the 27-limb cancel vector + an accepting MleProof for the given args (member-set
+    ///      commitment = the channel's registered set).
+    function _cancelLimbs(
+        bytes32 closeIntentDigest,
+        uint64 revivedStateVersion,
+        bytes32 revivedChannelStateDigest
+    ) internal view returns (uint256[] memory) {
+        return verifier.expectedCancelCloseLimbs(
+            CHANNEL_ID,
+            closeIntentDigest,
+            manager.registeredMemberSetCommitment(),
+            revivedStateVersion,
+            revivedChannelStateDigest
+        );
+    }
+
+    /// GOLDEN- vector length + accepting proof: a proof whose publicInputs == expected 27 limbs
+    /// passes verifyCancelClose (mock verdict=true).
+    function test_verifyCancelClose_validProof_passes() external view {
+        uint256[] memory pis = _cancelLimbs(keccak256("close"), 13, keccak256("revived"));
+        assertEq(pis.length, 27, "cancel PI is 27 raw limbs");
+        MleVerifier.MleProof memory proof = CloseTestLib.proofWithLimbs(pis);
+        assertTrue(
+            verifier.verifyCancelClose(
+                CHANNEL_ID,
+                keccak256("close"),
+                manager.registeredMemberSetCommitment(),
+                13,
+                keccak256("revived"),
+                proof
+            )
+        );
+    }
+
+    /// A tampered limb (wrong revivedChannelStateDigest in the proof vs the expected) ⇒ reverts.
+    function test_verifyCancelClose_tamperedLimb_reverts() external {
+        bytes32 msc = manager.registeredMemberSetCommitment();
+        uint256[] memory pis = _cancelLimbs(keccak256("close"), 13, keccak256("revived"));
+        MleVerifier.MleProof memory proof = CloseTestLib.proofWithLimbs(pis);
+        // Expected vector uses a DIFFERENT revived digest than the proof's limbs.
+        vm.expectRevert(bytes("claim limb mismatch"));
+        verifier.verifyCancelClose(
+            CHANNEL_ID, keccak256("close"), msc, 13, keccak256("OTHER_revived"), proof
+        );
+    }
+
+    /// publicInputs.length != 27 ⇒ reverts on the length guard.
+    function test_verifyCancelClose_wrongLength_reverts() external {
+        bytes32 msc = manager.registeredMemberSetCommitment();
+        uint256[] memory shortPis = new uint256[](26);
+        MleVerifier.MleProof memory proof = CloseTestLib.proofWithLimbs(shortPis);
+        vm.expectRevert(bytes("claim pi len"));
+        verifier.verifyCancelClose(
+            CHANNEL_ID, keccak256("close"), msc, 13, keccak256("revived"), proof
+        );
+    }
+
+    /// A limb >= 2**32 ⇒ reverts on the canonical-range guard.
+    function test_verifyCancelClose_nonCanonicalLimb_reverts() external {
+        bytes32 msc = manager.registeredMemberSetCommitment();
+        uint256[] memory pis = _cancelLimbs(keccak256("close"), 13, keccak256("revived"));
+        pis[0] = uint256(1) << 32; // 2**32, smallest non-canonical u32
+        MleVerifier.MleProof memory proof = CloseTestLib.proofWithLimbs(pis);
+        vm.expectRevert(bytes("claim limb range"));
+        verifier.verifyCancelClose(
+            CHANNEL_ID, keccak256("close"), msc, 13, keccak256("revived"), proof
+        );
+    }
+
+    /// The mock verifier returning `false` (crypto-invalid) ⇒ verifyCancelClose returns false.
+    function test_verifyCancelClose_cryptoInvalid_returnsFalse() external {
+        uint256[] memory pis = _cancelLimbs(keccak256("close"), 13, keccak256("revived"));
+        MleVerifier.MleProof memory proof = CloseTestLib.proofWithLimbs(pis);
+        mockMle.setVerdict(false);
+        assertTrue(
+            !verifier.verifyCancelClose(
+                CHANNEL_ID,
+                keccak256("close"),
+                manager.registeredMemberSetCommitment(),
+                13,
+                keccak256("revived"),
+                proof
+            ),
+            "crypto-invalid returns false"
+        );
+        mockMle.setVerdict(true);
+    }
+
+    /// verifyCancelClose reverts (CancelCloseVkNotSet) on a verifier whose cancel VK is unset.
+    function test_verifyCancelClose_unsetVk_reverts() external {
+        ChannelSettlementVerifier fresh = new ChannelSettlementVerifier();
+        bytes32 msc = manager.registeredMemberSetCommitment();
+        uint256[] memory pis = _cancelLimbs(keccak256("close"), 13, keccak256("revived"));
+        MleVerifier.MleProof memory proof = CloseTestLib.proofWithLimbs(pis);
+        vm.expectRevert(ChannelSettlementVerifier.CancelCloseVkNotSet.selector);
+        fresh.verifyCancelClose(
+            CHANNEL_ID, keccak256("close"), msc, 13, keccak256("revived"), proof
+        );
+    }
+
+    /// initializeCancelCloseVk is deployer-only, set-once, rejects degreeBits == 0.
+    function test_initializeCancelCloseVk_access_setOnce_and_degreeBitsZero() external {
+        ChannelSettlementVerifier fresh = new ChannelSettlementVerifier(); // deployer = this test
+        (
+            ChannelSettlementVerifier.StatementVk memory vk,
+            SpongefishWhirVerify.WhirParams memory whir,
+            bytes memory protocolId,
+            bytes memory sessionId,
+            uint256[] memory kIs,
+            uint256[] memory subgroupGenPowers
+        ) = CloseTestLib.dummyStatementVkArgs();
+
+        ChannelSettlementVerifier.StatementVk memory zeroVk = ChannelSettlementVerifier.StatementVk({
+            degreeBits: 0,
+            preprocessedRoot: vk.preprocessedRoot,
+            numConstants: vk.numConstants,
+            numRoutedWires: vk.numRoutedWires,
+            gatesDigest: vk.gatesDigest
+        });
+        vm.expectRevert(ChannelSettlementVerifier.StatementVkDegreeBitsZero.selector);
+        fresh.initializeCancelCloseVk(MleVerifier(address(mockMle)), zeroVk, whir, protocolId, sessionId, kIs, subgroupGenPowers);
+
+        vm.prank(address(0xBEEF));
+        vm.expectRevert(bytes("only deployer"));
+        fresh.initializeCancelCloseVk(MleVerifier(address(mockMle)), vk, whir, protocolId, sessionId, kIs, subgroupGenPowers);
+
+        fresh.initializeCancelCloseVk(MleVerifier(address(mockMle)), vk, whir, protocolId, sessionId, kIs, subgroupGenPowers);
+        assertTrue(fresh.cancelCloseVkInitialized());
+        vm.expectRevert(bytes("cancel close vk already set"));
+        fresh.initializeCancelCloseVk(MleVerifier(address(mockMle)), vk, whir, protocolId, sessionId, kIs, subgroupGenPowers);
+    }
+
+    // =====================================================================
     // Phase B-D — withdrawal-claim / post-close-claim REAL verification negatives
     // =====================================================================
 
@@ -1673,6 +1894,28 @@ contract ChannelSettlementManagerTest is Test {
         assertEq(v[38], 0x11); assertEq(v[39], 0x22); // amount
         _assertB32(v, 40, 0x7000);         // final_balance_state_h1 (Stage 3)
         _assertB32(v, 48, 0x8000);         // final_settled_tx_accumulator_root (Stage 3)
+    }
+
+    /// GOLDEN VECTOR mirror for cancel-close (27 limbs). The Rust side asserts the SAME constant in
+    /// src/circuits/channel/cancel_close_pis.rs
+    /// (`cancel_close_public_inputs_match_solidity_shared_vector`). Same sentinels.
+    /// Layout: channelId(1) | closeIntentDigest(8) | memberSetCommitment(8) |
+    /// revivedStateVersion(2 hi,lo) | revivedChannelStateDigest(8).
+    function test_expectedCancelCloseLimbs_goldenVector() external view {
+        uint256[] memory v = verifier.expectedCancelCloseLimbs(
+            hex"0a0b0c0d",
+            _b32(0x1000), // closeIntentDigest
+            _b32(0x2000), // memberSetCommitment
+            0x0000001100000022, // revivedStateVersion (hi=0x11, lo=0x22)
+            _b32(0x3000) // revivedChannelStateDigest
+        );
+        assertEq(v.length, 27);
+        assertEq(v[0], 0x0a0b0c0d); // channel_id
+        _assertB32(v, 1, 0x1000); // close_intent_digest
+        _assertB32(v, 9, 0x2000); // member_set_commitment
+        assertEq(v[17], 0x11); // revived_state_version hi
+        assertEq(v[18], 0x22); // revived_state_version lo
+        _assertB32(v, 19, 0x3000); // revived_channel_state_digest
     }
 
     function _b32(uint32 tag) internal pure returns (bytes32) {

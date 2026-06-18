@@ -51,7 +51,7 @@ use crate::{
     common::{
         balance_state::{BalanceState, settled_tx_chain_push, tx_leaf_hash},
         channel::{
-            CancelClose, ChannelFund, ChannelId, ChannelMember, ChannelRecord, ChannelState,
+            ChannelFund, ChannelId, ChannelMember, ChannelRecord, ChannelState,
             ChannelStatus, ChannelTransitionKind, ChannelTx, CloseIntent, CloseWithdrawal,
             InterChannelTx, MemberSignature, MerkleInclusionProof, PostCloseIncomingClaim,
             ProofBackend, ReceiverBalanceDelta, SignedSmallBlock, SmallBlockRootMessage,
@@ -854,15 +854,23 @@ fn channel_native_regev_full_flow_e2e() {
     assert_eq!(pis.amount, final_amount);
     assert_eq!(pis.final_balance_state_h1, final_state.balance_state.h1());
 
-    // (h) CancelClose on channel A: a member who tried to close mid-send is overridden by the
-    // revived inter-channel tx (abstract2 §3.5.3)…
-    let sender_final = f.send.next_state.clone();
-    let sender_close_tx = close_withdrawal_for(&sender_final, 711);
-    let sender_close_intent = CloseIntent::new(2, &sender_final, &sender_close_tx, 4).unwrap();
+    // (h) CancelClose on channel A (CORRECTED statement, Phase C1): a member who tried to close a
+    // STALE state is overridden because the members N-of-N kept operating at a HIGHER
+    // state_version. The close was built off the post-in-channel state `a1` (version 1); the
+    // members signed `f.send.next_state` (version 2 > 1, same era) ⇒ the close is superseded ⇒
+    // cancel. This is a native `to_public_inputs` smoke test (the in-circuit version is exercised
+    // in `cancel_close_circuit::tests`).
+    let revived_state = f.send.next_state.clone();
+    let stale_close_state = f.in_channel.next_state.clone();
+    let stale_close_tx = close_withdrawal_for(&stale_close_state, 711);
+    let stale_close_intent = CloseIntent::new(2, &stale_close_state, &stale_close_tx, 4).unwrap();
+    assert!(
+        revived_state.balance_state.state_version > stale_close_intent.final_state_version,
+        "revived state must post-date the stale close"
+    );
     let cancel_witness = CancelCloseWitness {
-        close_intent: sender_close_intent.clone(),
-        revived_tx: f.send.inter_channel_tx.clone(),
-        cancel_close: CancelClose::new(&sender_close_intent, &f.send.inter_channel_tx, vec![7, 7]),
+        revived_state,
+        close_intent: stale_close_intent,
     };
     cancel_witness.to_public_inputs().unwrap();
 
