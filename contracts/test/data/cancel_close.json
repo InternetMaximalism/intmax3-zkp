@@ -1,0 +1,12 @@
+{
+  "channel_id": 3,
+  "close_intent_digest": "0x80fc078f4551cbf08518ead8bddb79c712d76a5e81589615bb1d8e8cfc882597",
+  "member_set_commitment": "0x32c350ef5c1b35afcd96920ca7618afe84616399e77080b3a90f8083943a4fa9",
+  "revived_state_version": 9,
+  "revived_channel_state_digest": "0xdb3b20bed5e9544a1a9d501b2e99895aa83ffa1aa77d9d4c873e4e6806c122a8",
+  "member_pk_gs": [
+    "0xa801efdf95b35b729ea508ad7d173a4369560d79981d7bf8ac7616e9b3f36b65",
+    "0xf0b9ecd6a20c8b070750c1b05dedfdcb03243792f323ea7f7d56be5536c31755",
+    "0xd2e3c4fcc645a3a0b64ed8d53e6ccbbbce4818a78503822891a56bb86685a736"
+  ]
+}

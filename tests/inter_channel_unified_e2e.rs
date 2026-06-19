@@ -166,7 +166,10 @@ fn unified_inter_channel_transfer_e2e() {
     // ---- genesis A (deposit-backed) + §F-1; retain alice's witness for the E-2 ----
     let (a_ct0, a_w0) = encrypt_amount(&mut crng, &a_pks[0], a_bal[0]).unwrap();
     let a_cts = [a_ct0.clone(), encrypt_amount(&mut crng, &a_pks[1], a_bal[1]).unwrap().0, encrypt_amount(&mut crng, &a_pks[2], a_bal[2]).unwrap().0];
-    let mut a_genesis = assemble_genesis_state_backed(&a_record, &a_cts, a_fund, a_chain, Bytes32::default()).unwrap();
+    // Decryption Stage 1: per-active-slot Regev pk digests, in the SAME slot order as `a_cts`
+    // (mirrors channel_member.rs:601-605).
+    let a_regev_pk_digests: Vec<Bytes32> = a_keys.iter().map(|k| Bytes32::from(k.regev_pk.poseidon_digest())).collect();
+    let mut a_genesis = assemble_genesis_state_backed(&a_record, &a_cts, &a_regev_pk_digests, a_fund, a_chain, Bytes32::default()).unwrap();
     for (slot, k) in a_keys.iter().enumerate() { let s = sign_state_if_backed(k, slot as u8, &a_record, &a_genesis, &a_att, &bp.balance_vd()).expect("genesis sign"); add_signature(&mut a_genesis, s); }
     verify_all_signatures(&a_record, &a_members, &a_genesis).expect("genesis signed");
     verify_channel_backing(&a_record, &a_genesis, Some(&a_att), &bp.balance_vd()).expect("A §F-1");

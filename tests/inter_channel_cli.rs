@@ -40,8 +40,8 @@ use intmax3_zkp::{
     wallet_core::{
         BuiltInterChannelSend, ChannelSnapshot, InterChannelDebitPayload,
         InterChannelTransferDescriptor, MemberInfo, MemberKeys, add_signature,
-        assemble_genesis_state, build_inter_channel_send, build_record, decrypt_balance, sign_state,
-        verify_snapshot,
+        assemble_genesis_state, build_inter_channel_send, build_record, decrypt_balance,
+        default_settled_tx_accumulator, sign_state, verify_snapshot,
     },
 };
 use rand010::{SeedableRng, rngs::StdRng};
@@ -140,7 +140,12 @@ fn build_cli_channel(channel_id: u32, balances: &[u64]) -> ChannelFixture {
         });
     }
     let fund: u64 = balances.iter().sum();
-    let mut genesis = assemble_genesis_state(&record, &cts, fund).expect("genesis");
+    // Per-active-slot Regev pk Poseidon digests, in the SAME slot order as `cts` (mirrors
+    // channel_member.rs:601-605).
+    let regev_pk_digests: Vec<Bytes32> =
+        keys.iter().map(|k| Bytes32::from(k.regev_pk.poseidon_digest())).collect();
+    let mut genesis =
+        assemble_genesis_state(&record, &cts, &regev_pk_digests, fund).expect("genesis");
     for (i, k) in keys.iter().enumerate() {
         let s = sign_state(k, i as u8, &genesis).expect("sign genesis");
         add_signature(&mut genesis, s);
@@ -149,6 +154,8 @@ fn build_cli_channel(channel_id: u32, balances: &[u64]) -> ChannelFixture {
         record: record.clone(),
         state: genesis,
         members,
+        // Genesis seeds the EMPTY accumulator; inter-channel advancement happens inside the binary.
+        settled_tx_accumulator: default_settled_tx_accumulator(),
     };
     verify_snapshot(&snapshot, Some((&keys[0], 0))).expect("verify genesis");
     ChannelFixture {

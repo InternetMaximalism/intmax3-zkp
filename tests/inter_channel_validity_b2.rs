@@ -82,12 +82,21 @@ fn inter_channel_small_block_sig_is_validity_proven() {
     let pks: Vec<_> = keys.iter().map(|k| k.regev_pk.clone()).collect();
     let post_bal = [45u64, 10, 30]; // slot0 50-5
     let enc: Vec<_> = (0..3).map(|i| encrypt_amount(&mut crng, &pks[i], post_bal[i]).unwrap().0).collect();
+    // Decryption Stage 1: the real per-active-slot Regev pk digests (mirrors
+    // channel_member.rs:601-605), so H1' matches what production would commit for these members.
+    let regev_pk_digests: Vec<Bytes32> =
+        keys.iter().map(|k| Bytes32::from(k.regev_pk.poseidon_digest())).collect();
     let post_balance_state = BalanceState {
         channel_id,
         member_count: 3,
         delegate_count: 0,
         enc_balances: BalanceState::pad_enc_balances(&enc),
+        regev_pk_digests: BalanceState::pad_regev_pk_digests(&regev_pk_digests),
         settled_tx_chain: Bytes32::default(),
+        // This synthetic post-debit state carries a genesis-like (default) settle chain, so its
+        // accumulator root is the empty-tree root — keeping H1' internally consistent.
+        settled_tx_accumulator_root:
+            intmax3_zkp::wallet_core::empty_settled_tx_accumulator_root(),
         state_version: 1,
         pending_adds: BalanceState::pad_pending_adds(&[0, 0, 0]),
     };

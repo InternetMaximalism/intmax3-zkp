@@ -1,0 +1,26 @@
+{
+  "channel_id": 5,
+  "close_nonce": 5,
+  "final_epoch": 3,
+  "final_small_block_number": 7,
+  "close_freeze_nonce": 1,
+  "final_channel_state_digest": "0xda070cd5c6bb372156038291fb1eb46acf527fd1318185f1e488f8f9c97c5685",
+  "final_balance_state_h1": "0x58d4964c949bb45defd4cc76a33e0537df0769fb5b789812933db42f7997bfda",
+  "channel_fund_amount": "77",
+  "channel_fund_intmax_state_root": "0x0000000100000002000000030000000400000000000000000000000000000000",
+  "burn_tx_hash": "0x0000000900000008000000070000000600000000000000000000000000000000",
+  "close_withdrawal_digest": "0x65d23a28c5467b20ccca65a3143d46bf5dd982abccf350eaabaf2bdfe5a83de2",
+  "snapshot_medium_block_number": 123,
+  "final_state_version": 9,
+  "final_settled_tx_chain": "0x0000000000000000000000000000000000000000000000000000000000000000",
+  "final_settled_tx_accumulator_root": "0x0000000000000000000000000000000000000000000000000000000000000000",
+  "close_intent_digest": "0xcbdf5ec9b7a3600a7249e5c20188747addfffe6a34109955919cd34c56f293f1",
+  "member_set_commitment": "0x48664f8144b9565f1a6f8d5442e05fe65c70c5695d01ec0983d14a19cf56367c",
+  "member_count": 3,
+  "delegate_count": 0,
+  "member_pk_gs": [
+    "0xc42c6584f2633cf61cf7a13f0a02161712b19031667b3c262ea2b4edda940dab",
+    "0x92ac277cf1d8133870a0d59fe007be7e9cae27bda036e4ad6f87a6a87612f983",
+    "0x6b5b961799eeb50814d5e56138730472a577c2cd1d064228dcc77d063fa5d5d8"
+  ]
+}

@@ -13,8 +13,8 @@ use intmax3_zkp::{
     },
     wallet_core::{
         BuiltSend, ChannelSnapshot, MemberInfo, MemberKeys, add_signature, assemble_genesis_state,
-        build_record, build_send, decrypt_balance, sign_state, verify_all_signatures,
-        verify_send_transition, verify_snapshot,
+        build_record, build_send, decrypt_balance, default_settled_tx_accumulator, sign_state,
+        verify_all_signatures, verify_send_transition, verify_snapshot,
     },
 };
 use rand010::{SeedableRng, rngs::StdRng};
@@ -28,6 +28,12 @@ fn member_info(slot: u8, keys: &MemberKeys) -> MemberInfo {
         pk_b: keys.pk_b(),
         regev_pk: keys.regev_pk.clone(),
     }
+}
+
+/// Per-active-slot Regev pk Poseidon digests, in the SAME slot order as the genesis ciphertexts.
+/// Mirrors channel_member.rs:601-605.
+fn digests(keys: &[&MemberKeys]) -> Vec<Bytes32> {
+    keys.iter().map(|k| Bytes32::from(k.regev_pk.poseidon_digest())).collect()
 }
 
 #[test]
@@ -45,7 +51,8 @@ fn wallet_core_in_channel_send_receive() {
     let (bal0, bal1) = (50u64, 30u64);
     let (ct0, w0) = encrypt_amount(&mut rng, &m0.regev_pk, bal0).expect("enc0");
     let (ct1, _w1) = encrypt_amount(&mut rng, &m1.regev_pk, bal1).expect("enc1");
-    let mut genesis = assemble_genesis_state(&record, &[ct0, ct1], bal0 + bal1).expect("genesis");
+    let mut genesis = assemble_genesis_state(&record, &[ct0, ct1], &digests(&[&m0, &m1]), bal0 + bal1)
+        .expect("genesis");
 
     // Both members co-sign the genesis.
     let g0 = sign_state(&m0, 0, &genesis).expect("sign g0");
@@ -57,6 +64,7 @@ fn wallet_core_in_channel_send_receive() {
         record: record.clone(),
         state: genesis,
         members: members.clone(),
+        settled_tx_accumulator: default_settled_tx_accumulator(),
     };
 
     // Both members fully verify the signed genesis (real SingleSig proofs, roots, own-slot decrypt).
@@ -88,6 +96,7 @@ fn wallet_core_in_channel_send_receive() {
         record,
         state: payload.proposed_next_state,
         members,
+        settled_tx_accumulator: default_settled_tx_accumulator(),
     };
 
     // Both sides verify the finalized state with the full real-signature set.
@@ -120,7 +129,8 @@ fn p4_1_attacker_pk_b_swap_is_rejected() {
     let (bal0, bal1) = (40u64, 20u64);
     let (ct0, w0) = encrypt_amount(&mut rng, &m0.regev_pk, bal0).expect("enc0");
     let (ct1, _w1) = encrypt_amount(&mut rng, &m1.regev_pk, bal1).expect("enc1");
-    let mut genesis = assemble_genesis_state(&record, &[ct0, ct1], bal0 + bal1).expect("genesis");
+    let mut genesis = assemble_genesis_state(&record, &[ct0, ct1], &digests(&[&m0, &m1]), bal0 + bal1)
+        .expect("genesis");
     let g0 = sign_state(&m0, 0, &genesis).expect("sign g0");
     add_signature(&mut genesis, g0);
     let g1 = sign_state(&m1, 1, &genesis).expect("sign g1");
@@ -129,6 +139,7 @@ fn p4_1_attacker_pk_b_swap_is_rejected() {
         record: record.clone(),
         state: genesis,
         members: members.clone(),
+        settled_tx_accumulator: default_settled_tx_accumulator(),
     };
 
     // Sanity: the honest payload verifies.
@@ -209,7 +220,8 @@ fn p4_1_foreign_self_consistent_record_is_rejected() {
     let (bal0, bal1) = (40u64, 20u64);
     let (ct0, w0) = encrypt_amount(&mut rng, &m0.regev_pk, bal0).expect("enc0");
     let (ct1, _w1) = encrypt_amount(&mut rng, &m1.regev_pk, bal1).expect("enc1");
-    let mut genesis = assemble_genesis_state(&record, &[ct0, ct1], bal0 + bal1).expect("genesis");
+    let mut genesis = assemble_genesis_state(&record, &[ct0, ct1], &digests(&[&m0, &m1]), bal0 + bal1)
+        .expect("genesis");
     let g0 = sign_state(&m0, 0, &genesis).expect("g0");
     add_signature(&mut genesis, g0);
     let g1 = sign_state(&m1, 1, &genesis).expect("g1");
@@ -218,6 +230,7 @@ fn p4_1_foreign_self_consistent_record_is_rejected() {
         record: record.clone(),
         state: genesis,
         members: members.clone(),
+        settled_tx_accumulator: default_settled_tx_accumulator(),
     };
 
     let amount = 5u64;

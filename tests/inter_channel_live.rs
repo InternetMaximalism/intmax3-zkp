@@ -47,8 +47,9 @@ use intmax3_zkp::{
         BuiltInterChannelCredit, BuiltInterChannelSend, ChannelSnapshot, InterChannelDebitPayload,
         InterChannelTransferDescriptor, MemberInfo, MemberKeys, add_signature,
         assemble_genesis_state, build_inter_channel_credit, build_inter_channel_send, build_record,
-        decrypt_balance, sign_state, verify_all_signatures, verify_inter_channel_credit_transition,
-        verify_inter_channel_send_transition, verify_snapshot,
+        decrypt_balance, default_settled_tx_accumulator, sign_state, verify_all_signatures,
+        verify_inter_channel_credit_transition, verify_inter_channel_send_transition,
+        verify_snapshot,
     },
 };
 use rand010::{SeedableRng, rngs::StdRng};
@@ -101,7 +102,12 @@ fn build_channel(channel_id: u32, n: usize, balances: &[u64], rng: &mut StdRng) 
         witnesses.push(w);
     }
     let fund: u64 = balances.iter().sum();
-    let mut genesis = assemble_genesis_state(&record, &cts, fund).expect("genesis");
+    // Decryption Stage 1: per-active-slot Regev pk digests, in the SAME slot order as `cts`
+    // (mirrors channel_member.rs:601-605).
+    let regev_pk_digests: Vec<Bytes32> =
+        keys.iter().map(|k| Bytes32::from(k.regev_pk.poseidon_digest())).collect();
+    let mut genesis =
+        assemble_genesis_state(&record, &cts, &regev_pk_digests, fund).expect("genesis");
     for (i, k) in keys.iter().enumerate() {
         let s = sign_state(k, i as u8, &genesis).expect("sign genesis");
         add_signature(&mut genesis, s);
@@ -109,6 +115,8 @@ fn build_channel(channel_id: u32, n: usize, balances: &[u64], rng: &mut StdRng) 
     let snapshot = ChannelSnapshot {
         record: record.clone(),
         state: genesis,
+        // Genesis seeds the EMPTY accumulator (intra-channel ops never advance it).
+        settled_tx_accumulator: default_settled_tx_accumulator(),
         members,
     };
     verify_snapshot(&snapshot, Some((&keys[0], 0))).expect("verify genesis");
@@ -232,6 +240,10 @@ fn inter_channel_live_send_and_credit() {
         record: b.record.clone(),
         state: credit.bundle_apply_state.clone(),
         members: b.snapshot.members.clone(),
+        // The bundle-apply state advanced the accumulator (import tx_hash + bundle tx_hash). Thread
+        // the tree the builder returned so its root matches
+        // bundle_apply_state.balance_state.settled_tx_accumulator_root (wallet invariant).
+        settled_tx_accumulator: credit.settled_tx_accumulator.clone(),
     };
     let recipient_after = decrypt_balance(
         &b.keys[recipient_slot as usize],

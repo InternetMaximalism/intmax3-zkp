@@ -829,8 +829,8 @@ where
     }
 }
 
-#[cfg(test)]
-pub(crate) mod test_fixture {
+#[cfg(any(test, feature = "close-fixture-bin"))]
+pub mod test_fixture {
     //! Shared heavy artifacts for the close-circuit and channel-e2e test suites: ONE balance
     //! circuit family build and ONE close circuit build per test-binary run.
 
@@ -843,15 +843,25 @@ pub(crate) mod test_fixture {
 
     use plonky2::plonk::proof::ProofWithPublicInputs;
 
-    use super::{ChannelCloseCircuit, MemberCloseAuth};
+    use super::{
+        ChannelCloseCircuit, ChannelCloseFullWitness, ChannelCloseWitness, MemberCloseAuth,
+    };
     use crate::{
         circuits::balance::{balance_processor::BalanceProcessor, spend_circuit::SpendCircuit},
-        ethereum_types::bytes32::Bytes32,
+        common::{
+            balance_state::BalanceState,
+            channel::{
+                ChannelFund, ChannelId, ChannelState, CloseIntent, CloseWithdrawal, MemberSignature,
+            },
+            salt::Salt,
+        },
+        ethereum_types::{bytes32::Bytes32, u256::U256, u32limb_trait::U32LimbTrait},
         poseidon_sig::{
             GoldilocksSecretKey,
             circuit::SingleSigCircuit,
             list::{ListCircuit, list_commitment},
         },
+        regev::RegevCiphertext,
     };
 
     pub(crate) const D: usize = 2;
@@ -860,16 +870,16 @@ pub(crate) mod test_fixture {
 
     /// Active member count used by the close-circuit test suite (pad-to-MAX D6: 3 active members,
     /// the remaining `MAX_CHANNEL_MEMBERS - 3` slots are padding).
-    pub(crate) const TEST_ACTIVE_MEMBERS: usize = 3;
+    pub const TEST_ACTIVE_MEMBERS: usize = 3;
 
-    pub(crate) struct CloseCircuitFixture {
+    pub struct CloseCircuitFixture {
         pub balance_processor: BalanceProcessor<F, C, D>,
         pub single_sig: SingleSigCircuit,
         pub list: ListCircuit,
         pub close_circuit: ChannelCloseCircuit<F, C, D>,
     }
 
-    pub(crate) fn fixture() -> &'static CloseCircuitFixture {
+    pub fn fixture() -> &'static CloseCircuitFixture {
         static FIXTURE: OnceLock<CloseCircuitFixture> = OnceLock::new();
         FIXTURE.get_or_init(|| {
             let t0 = std::time::Instant::now();
@@ -949,6 +959,100 @@ pub(crate) mod test_fixture {
         seed: u64,
     ) -> (Vec<MemberCloseAuth>, ProofWithPublicInputs<F, C, D>) {
         member_auth_for_digest_n(digest, seed, TEST_ACTIVE_MEMBERS)
+    }
+
+    /// Deterministic canonical ciphertext for active slot `seed` (test/fixture data).
+    pub(crate) fn ciphertext(seed: u32) -> RegevCiphertext {
+        use crate::regev::{REGEV_N, REGEV_Q};
+        RegevCiphertext {
+            c1: (0..REGEV_N as u32)
+                .map(|i| (seed.wrapping_mul(2_654_435_761).wrapping_add(i)) % REGEV_Q)
+                .collect(),
+            c2: (0..REGEV_N as u32)
+                .map(|i| (seed.wrapping_mul(40_503).wrapping_add(1000 + i)) % REGEV_Q)
+                .collect(),
+        }
+    }
+
+    /// A closable final state for channel 5 with `member_count` ACTIVE members (pad-to-MAX D6);
+    /// `settled_tx_chain` matches the genesis chain (= 0) of a REAL initial balance proof.
+    pub(crate) fn final_state_n(member_count: usize, settled_tx_chain: Bytes32) -> ChannelState {
+        let id = ChannelId::new(5).unwrap();
+        let enc: Vec<_> = (0..member_count as u32).map(|i| ciphertext(1 + i)).collect();
+        ChannelState {
+            channel_id: id,
+            epoch: 3,
+            small_block_number: 7,
+            close_freeze_nonce: 0,
+            channel_fund: ChannelFund {
+                channel_id: id,
+                amount: U256::from(77u32),
+                intmax_state_root: Bytes32::from_u32_slice(&[1, 2, 3, 4, 0, 0, 0, 0]).unwrap(),
+            },
+            balance_state: BalanceState {
+                channel_id: id,
+                member_count: member_count as u8,
+                delegate_count: 0,
+                enc_balances: BalanceState::pad_enc_balances(&enc),
+                regev_pk_digests: BalanceState::pad_regev_pk_digests(&[]),
+                settled_tx_chain,
+                settled_tx_accumulator_root: Bytes32::default(),
+                state_version: 9,
+                pending_adds: BalanceState::pad_pending_adds(&vec![0u32; member_count]),
+            },
+            h2_tag: Bytes32::default(),
+            shared_native_nullifier_root: Bytes32::from_u32_slice(&[3, 0, 0, 0, 0, 0, 0, 0])
+                .unwrap(),
+            unallocated_confirmed_incoming: U256::zero(),
+            prev_digest: Bytes32::from_u32_slice(&[4, 0, 0, 0, 0, 0, 0, 0]).unwrap(),
+            digest: Bytes32::default(),
+            member_signatures: vec![MemberSignature {
+                member_slot: 0,
+                pk_g: Bytes32::from_u32_slice(&[10, 11, 12, 13, 14, 15, 16, 17]).unwrap(),
+                signature: vec![1],
+            }],
+        }
+        .with_computed_digest()
+    }
+
+    pub(crate) fn close_witness_for(state: ChannelState) -> ChannelCloseWitness {
+        let close_tx = CloseWithdrawal {
+            channel_id: state.channel_id,
+            final_channel_state_digest: state.digest,
+            final_balance_state_h1: state.balance_state.h1(),
+            intmax_state_root: state.channel_fund.intmax_state_root,
+            burn_tx_hash: Bytes32::from_u32_slice(&[9, 8, 7, 6, 0, 0, 0, 0]).unwrap(),
+            burn_amount: state.channel_fund.amount,
+            zkp: vec![1, 2, 3],
+        };
+        let close_intent = CloseIntent::new(5, &state, &close_tx, 123).unwrap();
+        ChannelCloseWitness {
+            final_channel_state: state,
+            close_tx,
+            close_intent,
+        }
+    }
+
+    /// Build a full close witness for `member_count` ACTIVE members: the final state, a REAL
+    /// genesis balance proof (settled_tx_chain = 0), and a REAL recursive `ListCircuit` proof over
+    /// the member Poseidon single-sigs. Consumed by `generate_close_fixture` AND the in-tree tests.
+    pub fn build_close_full_witness_n(member_count: usize) -> ChannelCloseFullWitness<F, C, D> {
+        let fx = fixture();
+        let state = final_state_n(member_count, Bytes32::default());
+        let digest = state.digest;
+        let close = close_witness_for(state);
+        let mut rng = rand::thread_rng();
+        let final_balance_proof = fx
+            .balance_processor
+            .prove_initial(ChannelId::new(5).unwrap(), Salt::rand(&mut rng))
+            .expect("initial balance proof");
+        let (member_auth, list_proof) = member_auth_for_digest_n(digest, 0xc105e, member_count);
+        ChannelCloseFullWitness {
+            close,
+            final_balance_proof,
+            member_auth,
+            list_proof,
+        }
     }
 }
 

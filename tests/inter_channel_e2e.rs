@@ -433,7 +433,11 @@ fn build_signed_genesis(
     att: &ChannelBalanceAttestation,
     balance_vd: &VerifierCircuitData<F, C, D>,
 ) -> ChannelState {
-    let mut state = assemble_genesis_state_backed(record, cts, fund, settled_tx_chain, Bytes32::default()).unwrap();
+    // Decryption Stage 1: per-active-slot Regev pk digests, in the SAME slot order as `cts`
+    // (mirrors channel_member.rs:601-605).
+    let regev_pk_digests: Vec<Bytes32> =
+        keys.iter().map(|k| Bytes32::from(k.regev_pk.poseidon_digest())).collect();
+    let mut state = assemble_genesis_state_backed(record, cts, &regev_pk_digests, fund, settled_tx_chain, Bytes32::default()).unwrap();
     for (slot, k) in keys.iter().enumerate() {
         let sig = sign_state_if_backed(k, slot as u8, record, &state, att, balance_vd).expect("genesis check-and-sign");
         add_signature(&mut state, sig);

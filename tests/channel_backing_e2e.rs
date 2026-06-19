@@ -209,11 +209,21 @@ fn deposit_backing_gate_reconciles_and_fails_closed() {
         .iter()
         .map(|k| encrypt_amount(&mut crng, &k.regev_pk, 0).unwrap().0)
         .collect();
+    // Decryption Stage 1: per-active-slot Regev pk digests, in the SAME slot order as `cts`
+    // (mirrors channel_member.rs:601-605).
+    let regev_pk_digests: Vec<Bytes32> =
+        mkeys.iter().map(|k| Bytes32::from(k.regev_pk.poseidon_digest())).collect();
     // BACKED genesis: its BalanceState absorbs the SAME settle history the balance proof folded
     // in (§F-1), so it reconciles with the attestation.
-    let state =
-        assemble_genesis_state_backed(&record, &cts, 50, backing_chain, Bytes32::default())
-            .expect("backed genesis");
+    let state = assemble_genesis_state_backed(
+        &record,
+        &cts,
+        &regev_pk_digests,
+        50,
+        backing_chain,
+        Bytes32::default(),
+    )
+    .expect("backed genesis");
 
     // ---- 3. POSITIVE: genuine deposit backing → the gate accepts (co-sign allowed) -------------
     verify_channel_backing(&record, &state, Some(&attestation), &balance_vd)
@@ -268,7 +278,8 @@ fn deposit_backing_gate_reconciles_and_fails_closed() {
 
     // ---- 6. FAIL-CLOSED at the live gate: an UNBACKED genesis is never signed -------------------
     // Same channel, but assembled WITHOUT deposit backing (settled_tx_chain = 0 ≠ balanceProof's).
-    let unbacked = assemble_genesis_state(&record, &cts, 50).expect("unbacked genesis");
+    let unbacked = assemble_genesis_state(&record, &cts, &regev_pk_digests, 50)
+        .expect("unbacked genesis");
     assert!(
         verify_channel_backing(&record, &unbacked, Some(&attestation), &balance_vd).is_err(),
         "an UNBACKED genesis must fail the gate, so no honest member co-signs it"

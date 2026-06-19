@@ -8,8 +8,8 @@ use intmax3_zkp::{
     regev::{RegevSecurityLevel, encrypt_amount},
     wallet_core::{
         BuiltSend, ChannelSnapshot, MemberInfo, MemberKeys, add_signature, assemble_genesis_state,
-        build_record, build_send, decrypt_balance, sign_state, verify_all_signatures,
-        verify_send_transition, verify_snapshot,
+        build_record, build_send, decrypt_balance, default_settled_tx_accumulator, sign_state,
+        verify_all_signatures, verify_send_transition, verify_snapshot,
     },
 };
 use rand010::{SeedableRng, rngs::StdRng};
@@ -18,6 +18,12 @@ const LEVEL: RegevSecurityLevel = RegevSecurityLevel::Production;
 
 fn info(slot: u8, k: &MemberKeys) -> MemberInfo {
     MemberInfo { slot, pk_g: k.pk_g(), pk_b: k.pk_b(), regev_pk: k.regev_pk.clone() }
+}
+
+/// Per-active-slot Regev pk Poseidon digests (slot order: members then delegates), matching the
+/// `cts` order passed to `assemble_genesis_state`. Mirrors channel_member.rs:601-605.
+fn digests(members: &[MemberInfo]) -> Vec<Bytes32> {
+    members.iter().map(|m| Bytes32::from(m.regev_pk.poseidon_digest())).collect()
 }
 
 #[test]
@@ -46,7 +52,8 @@ fn delegate_demo_three_members_plus_browser_delegate_send() {
         encrypt_amount(&mut rng, &delegate_keys.regev_pk, 50).unwrap();
     cts.push(delegate_ct);
 
-    let mut genesis = assemble_genesis_state(&record, &cts, 140).expect("genesis");
+    let mut genesis =
+        assemble_genesis_state(&record, &cts, &digests(&members), 140).expect("genesis");
 
     // Only the THREE MEMBERS co-sign the genesis (the delegate does NOT).
     for slot in 0..3u8 {
@@ -55,7 +62,7 @@ fn delegate_demo_three_members_plus_browser_delegate_send() {
     }
     verify_all_signatures(&record, &members, &genesis).expect("genesis fully member-signed");
 
-    let snapshot = ChannelSnapshot { record: record.clone(), state: genesis, members: members.clone() };
+    let snapshot = ChannelSnapshot { record: record.clone(), state: genesis, members: members.clone(), settled_tx_accumulator: default_settled_tx_accumulator() };
 
     // --- browser wasm: import as the DELEGATE (slot 3), verify, decrypt own balance ---
     verify_snapshot(&snapshot, Some((&delegate_keys, 3))).expect("delegate imports snapshot");
@@ -85,7 +92,7 @@ fn delegate_demo_three_members_plus_browser_delegate_send() {
     verify_all_signatures(&record, &members, &next).expect("next state fully member-signed");
 
     // --- browser wasm wallet_finalize: adopt the fully member-signed next state ---
-    let final_snapshot = ChannelSnapshot { record, state: next, members };
+    let final_snapshot = ChannelSnapshot { record, state: next, members, settled_tx_accumulator: default_settled_tx_accumulator() };
     assert_eq!(
         decrypt_balance(&delegate_keys, &final_snapshot, 3).unwrap(),
         50 - amount,
@@ -128,13 +135,14 @@ fn two_delegates_in_one_channel_delegate_to_delegate_send() {
     cts.push(c3);
     cts.push(c4);
 
-    let mut genesis = assemble_genesis_state(&record, &cts, 200).expect("genesis");
+    let mut genesis =
+        assemble_genesis_state(&record, &cts, &digests(&members), 200).expect("genesis");
     for slot in 0..3u8 {
         let sig = sign_state(&member_keys[slot as usize], slot, &genesis).unwrap();
         add_signature(&mut genesis, sig);
     }
     verify_all_signatures(&record, &members, &genesis).expect("3 members sign genesis");
-    let snapshot = ChannelSnapshot { record: record.clone(), state: genesis, members: members.clone() };
+    let snapshot = ChannelSnapshot { record: record.clone(), state: genesis, members: members.clone(), settled_tx_accumulator: default_settled_tx_accumulator() };
 
     // Delegate 3 sends 9 to delegate 4.
     let BuiltSend { payload, .. } = build_send(
@@ -152,7 +160,7 @@ fn two_delegates_in_one_channel_delegate_to_delegate_send() {
         add_signature(&mut next, sig);
     }
     verify_all_signatures(&record, &members, &next).expect("3 members co-sign");
-    let fin = ChannelSnapshot { record, state: next, members };
+    let fin = ChannelSnapshot { record, state: next, members, settled_tx_accumulator: default_settled_tx_accumulator() };
     assert_eq!(decrypt_balance(&d3, &fin, 3).unwrap(), 41, "delegate 3 debited");
     assert_eq!(decrypt_balance(&d4, &fin, 4).unwrap(), 69, "delegate 4 credited");
     let signers: Vec<u8> = fin.state.member_signatures.iter().map(|s| s.member_slot).collect();
@@ -179,15 +187,16 @@ fn delegate_join_preserves_send_and_is_importable() {
     }
     let (c3, w3) = encrypt_amount(&mut rng, &d3.regev_pk, 50).unwrap();
     cts.push(c3);
-    let mut state = assemble_genesis_state(&record, &cts, 200).unwrap();
+    let mut state =
+        assemble_genesis_state(&record, &cts, &digests(&members), 200).unwrap();
     for s in 0..3u8 { let g = sign_state(&mk[s as usize], s, &state).unwrap(); add_signature(&mut state, g); }
 
     // Delegate 3 sends 8 to member 0 (v0 -> v1).
-    let snap = ChannelSnapshot { record: record.clone(), state, members: members.clone() };
+    let snap = ChannelSnapshot { record: record.clone(), state, members: members.clone(), settled_tx_accumulator: default_settled_tx_accumulator() };
     let BuiltSend { payload, .. } = build_send(&d3, &snap, 3, 0, 8, 50, &w3, Bytes32::default(), LEVEL, &mut rng).unwrap();
     let mut v1 = payload.proposed_next_state.clone();
     for s in 0..3u8 { let g = sign_state(&mk[s as usize], s, &v1).unwrap(); add_signature(&mut v1, g); }
-    assert_eq!(decrypt_balance(&d3, &ChannelSnapshot{record:record.clone(),state:v1.clone(),members:members.clone()}, 3).unwrap(), 42);
+    assert_eq!(decrypt_balance(&d3, &ChannelSnapshot{record:record.clone(),state:v1.clone(),members:members.clone(),settled_tx_accumulator:default_settled_tx_accumulator()}, 3).unwrap(), 42);
 
     // A 2nd delegate (slot 4) JOINS: state-preserving membership add on top of v1.
     let d4 = MemberKeys::generate(&mut rng);
@@ -204,7 +213,7 @@ fn delegate_join_preserves_send_and_is_importable() {
     let mut v2 = v2.with_computed_digest();
     for s in 0..3u8 { let g = sign_state(&mk[s as usize], s, &v2).unwrap(); add_signature(&mut v2, g); }
 
-    let joined = ChannelSnapshot { record: record2, state: v2, members };
+    let joined = ChannelSnapshot { record: record2, state: v2, members, settled_tx_accumulator: default_settled_tx_accumulator() };
     // BOTH delegates import the joined state; the earlier send is preserved (delegate 3 still 42).
     verify_snapshot(&joined, Some((&d3, 3))).expect("delegate 3 imports joined state");
     verify_snapshot(&joined, Some((&d4, 4))).expect("delegate 4 imports joined state");
@@ -233,15 +242,15 @@ fn delegate_refresh_after_receive_enables_send() {
     let (c3, w3) = encrypt_amount(&mut rng, &d3.regev_pk, 50).unwrap();
     let (c4, _w4) = encrypt_amount(&mut rng, &d4.regev_pk, 60).unwrap();
     cts.push(c3); cts.push(c4);
-    let mut g = assemble_genesis_state(&record, &cts, 200).unwrap();
+    let mut g = assemble_genesis_state(&record, &cts, &digests(&members), 200).unwrap();
     for s in 0..3u8 { let x = sign_state(&mk[s as usize], s, &g).unwrap(); add_signature(&mut g, x); }
-    let snap = ChannelSnapshot { record: record.clone(), state: g, members: members.clone() };
+    let snap = ChannelSnapshot { record: record.clone(), state: g, members: members.clone(), settled_tx_accumulator: default_settled_tx_accumulator() };
 
     // d3 sends 9 to d4 -> d4 now has pending_adds[4]=1 (received).
     let BuiltSend { payload, .. } = build_send(&d3, &snap, 3, 4, 9, 50, &w3, Bytes32::default(), LEVEL, &mut rng).unwrap();
     let mut v1 = payload.proposed_next_state.clone();
     for s in 0..3u8 { let x = sign_state(&mk[s as usize], s, &v1).unwrap(); add_signature(&mut v1, x); }
-    let snap1 = ChannelSnapshot { record: record.clone(), state: v1, members: members.clone() };
+    let snap1 = ChannelSnapshot { record: record.clone(), state: v1, members: members.clone(), settled_tx_accumulator: default_settled_tx_accumulator() };
     assert_eq!(snap1.state.balance_state.pending_adds[4], 1, "d4 received (receive-only)");
     assert_eq!(decrypt_balance(&d4, &snap1, 4).unwrap(), 69);
 
@@ -250,7 +259,7 @@ fn delegate_refresh_after_receive_enables_send() {
     verify_refresh_transition(&snap1.state, &snap1.record, &rpayload, LEVEL).expect("members verify refresh");
     let mut v2 = rpayload.proposed_next_state.clone();
     for s in 0..3u8 { let x = sign_state(&mk[s as usize], s, &v2).unwrap(); add_signature(&mut v2, x); }
-    let snap2 = ChannelSnapshot { record: record.clone(), state: v2, members: members.clone() };
+    let snap2 = ChannelSnapshot { record: record.clone(), state: v2, members: members.clone(), settled_tx_accumulator: default_settled_tx_accumulator() };
     assert_eq!(snap2.state.balance_state.pending_adds[4], 0, "refresh reset d4's counter");
     assert_eq!(decrypt_balance(&d4, &snap2, 4).unwrap(), 69, "refresh preserved d4's value");
     let signers: Vec<u8> = snap2.state.member_signatures.iter().map(|s| s.member_slot).collect();

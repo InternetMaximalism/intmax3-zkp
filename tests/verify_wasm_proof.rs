@@ -9,7 +9,8 @@ use intmax3_zkp::{
     regev::{RegevSecurityLevel, encrypt_amount},
     wallet_core::{
         BuiltSend, ChannelSnapshot, MemberInfo, MemberKeys, SendPayload, add_signature,
-        assemble_genesis_state, build_record, build_send, sign_state, verify_send_transition,
+        assemble_genesis_state, build_record, build_send, default_settled_tx_accumulator,
+        sign_state, verify_send_transition,
     },
 };
 use rand010::{SeedableRng, rngs::StdRng};
@@ -61,12 +62,22 @@ fn native_json_roundtrip_verifies() {
     let (bal0, bal1) = (50u64, 30u64);
     let (ct0, w0) = encrypt_amount(&mut rng, &m0.regev_pk, bal0).unwrap();
     let (ct1, _w1) = encrypt_amount(&mut rng, &m1.regev_pk, bal1).unwrap();
-    let mut genesis = assemble_genesis_state(&record, &[ct0, ct1], bal0 + bal1).unwrap();
+    let digests = [
+        Bytes32::from(m0.regev_pk.poseidon_digest()),
+        Bytes32::from(m1.regev_pk.poseidon_digest()),
+    ];
+    let mut genesis =
+        assemble_genesis_state(&record, &[ct0, ct1], &digests, bal0 + bal1).unwrap();
     let g0 = sign_state(&m0, 0, &genesis).expect("sign g0");
     add_signature(&mut genesis, g0);
     let g1 = sign_state(&m1, 1, &genesis).expect("sign g1");
     add_signature(&mut genesis, g1);
-    let snapshot = ChannelSnapshot { record, state: genesis, members };
+    let snapshot = ChannelSnapshot {
+        record,
+        state: genesis,
+        members,
+        settled_tx_accumulator: default_settled_tx_accumulator(),
+    };
 
     let nonce = Bytes32::default();
     let BuiltSend { payload, .. } = build_send(
