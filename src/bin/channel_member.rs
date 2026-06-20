@@ -48,8 +48,10 @@ use intmax3_zkp::{
     },
     regev::{RegevCiphertext, RegevPk, RegevSecurityLevel, encrypt_amount},
     utils::serialize::{deserialize_verifier_data, serialize_verifier_data},
+    circuits::channel::close_pis::{CHANNEL_CLOSE_PUBLIC_INPUTS_LEN, ChannelClosePublicInputs},
+    utils::conversion::ToU64 as _,
     wallet_core::{
-        BuiltInterChannelCredit, BuiltSend, ChannelBalanceAttestation, ChannelSnapshot,
+        BuiltInterChannelCredit, BuiltSend, ChannelBalanceAttestation, ChannelSnapshot, CloseProver,
         InterChannelDebitPayload, InterChannelTransferDescriptor, MemberInfo, MemberKeys,
         RefreshPayload, SendPayload, add_signature, assemble_genesis_state_backed,
         build_inter_channel_credit, build_record, build_send, decrypt_balance,
@@ -60,7 +62,10 @@ use intmax3_zkp::{
 };
 use plonky2::{
     field::goldilocks_field::GoldilocksField,
-    plonk::{circuit_data::VerifierCircuitData, config::PoseidonGoldilocksConfig},
+    plonk::{
+        circuit_data::VerifierCircuitData, config::PoseidonGoldilocksConfig,
+        proof::ProofWithPublicInputs,
+    },
 };
 use rand010::{SeedableRng, rngs::StdRng};
 use serde::{Deserialize, Serialize};
@@ -98,6 +103,10 @@ const BP_SLOT: u8 = 0;
 const BACKING_FILE: &str = "channel_backing.json"; // settled_tx_chain / intmax_state_root / fund
 const ATTESTATION_FILE: &str = "channel_attestation.bin"; // the channel's base-layer balance proof
 const BALANCE_VD_FILE: &str = "balance_vd.bin"; // cached balance verifier data (the gate needs only this)
+// A-3 P3 close artifacts: the descriptor + wrapped-close MLE proof the on-chain
+// `ChannelSettlementManager.submitCloseIntent` consumes (same schema as generate_close_fixture).
+const CLOSE_INTENT_FILE: &str = "close_intent.json";
+const CLOSE_INTENT_MLE_FILE: &str = "close_intent_mle.json";
 // Delegate demo: slots 0,1,2 = three CLI-controlled CO-SIGNING MEMBERS (with genesis balances);
 // slot 3 = the browser, a send-only DELEGATE (delegate_count = 1).
 const CLI_SLOTS: &[u8] = &[0, 1, 2];
@@ -442,6 +451,165 @@ fn cmd_setup_backing(args: &[String]) {
     );
 }
 
+/// A-3 P3: the close-intent descriptor written to `close_intent.json` — the SAME schema
+/// `generate_close_fixture` produces and `ChannelSettlementManager.submitCloseIntent` consumes
+/// (every field is a PROVED close public input, no fabrication).
+#[derive(Serialize)]
+struct CloseIntentDescriptor {
+    channel_id: u32,
+    close_nonce: u64,
+    final_epoch: u64,
+    final_small_block_number: u64,
+    close_freeze_nonce: u64,
+    final_channel_state_digest: String,
+    final_balance_state_h1: String,
+    channel_fund_amount: String,
+    channel_fund_intmax_state_root: String,
+    burn_tx_hash: String,
+    close_withdrawal_digest: String,
+    snapshot_medium_block_number: u64,
+    final_state_version: u64,
+    final_settled_tx_chain: String,
+    final_settled_tx_accumulator_root: String,
+    close_intent_digest: String,
+    member_set_commitment: String,
+    member_count: u8,
+    delegate_count: u8,
+    member_pk_gs: Vec<String>,
+}
+
+fn env_u64(key: &str, default: u64) -> u64 {
+    std::env::var(key).ok().and_then(|s| s.parse().ok()).unwrap_or(default)
+}
+
+/// A-3 P3: build the channel's REAL close-intent proof from the wallet's final signed state + the N
+/// co-signing members' keys + the base-layer balance proof, write the on-chain artifacts, and submit
+/// the close to L1: `requestClose` (cast) then `submitCloseIntent` (the wrapped-close MLE proof is
+/// large struct calldata, so it goes through the `RunClose` forge step). Usage:
+///   channel_member close <manager_addr> [rpc_url]
+/// env: CLOSE_NONCE, CLOSE_SNAPSHOT_MBN, CLOSE_BURN_TX (members agree), CLOSE_SV (settlement verifier).
+fn cmd_close(args: &[String]) {
+    let manager = args
+        .get(1)
+        .cloned()
+        .unwrap_or_else(|| die("close needs <manager_addr> [rpc_url]"));
+    let rpc = args
+        .get(2)
+        .cloned()
+        .unwrap_or_else(|| "http://localhost:8545".to_string());
+
+    let close_nonce = env_u64("CLOSE_NONCE", 1);
+    let snapshot_mbn = env_u64("CLOSE_SNAPSHOT_MBN", 1);
+    let burn_tx_hash = std::env::var("CLOSE_BURN_TX")
+        .ok()
+        .and_then(|s| Bytes32::from_hex(&s).ok())
+        .unwrap_or_else(|| Bytes32::from_u32_slice(&[9, 8, 7, 6, 0, 0, 0, 0]).unwrap());
+
+    // Load the final signed state, the N ACTIVE co-signing members' keys (CLI controls slots
+    // 0..member_count), and the base-layer balance proof.
+    let st = load_state();
+    let state = st.snapshot.state.clone();
+    let member_count = state.balance_state.member_count as usize;
+    let member_keys: Vec<MemberKeys> = (0..member_count)
+        .map(|slot| keys_for(0xC1_0000 + slot as u64))
+        .collect();
+    let (balance_vd, att, backing) = load_backing();
+    let balance_proof = ProofWithPublicInputs::<BF, BC, BD>::from_bytes(
+        att.balance_proof.clone(),
+        &balance_vd.common,
+    )
+    .unwrap_or_else(|e| die(format!("deserialize balance proof: {e}")));
+
+    eprintln!(
+        "[close] building close witness (member_count={member_count}) + proving close circuit + MLE (HEAVY)…"
+    );
+    let prover = CloseProver::new(&balance_vd);
+    let witness = prover
+        .build_full_witness(&state, &member_keys, balance_proof, close_nonce, burn_tx_hash, snapshot_mbn)
+        .unwrap_or_else(|e| die(format!("build close witness: {}", e.0)));
+    let close_proof = prover
+        .prove(&witness)
+        .unwrap_or_else(|e| die(format!("close proof: {}", e.0)));
+    let mle_json = prover
+        .prove_mle(&close_proof)
+        .unwrap_or_else(|e| die(format!("close MLE: {}", e.0)));
+
+    // Descriptor from the PROVED close public inputs (the 95 raw close limbs the manager re-binds).
+    let pi_limbs = close_proof.public_inputs[..CHANNEL_CLOSE_PUBLIC_INPUTS_LEN].to_u64_vec();
+    let pis = ChannelClosePublicInputs::from_u64_slice(&pi_limbs)
+        .unwrap_or_else(|e| die(format!("decode close PIs: {e:?}")));
+    let member_pk_gs: Vec<String> = witness.member_auth.iter().map(|a| a.pk_g.to_string()).collect();
+    let descriptor = CloseIntentDescriptor {
+        channel_id: pis.channel_id.channel_id(),
+        close_nonce: pis.close_nonce,
+        final_epoch: pis.final_epoch,
+        final_small_block_number: pis.final_small_block_number,
+        close_freeze_nonce: pis.close_freeze_nonce,
+        final_channel_state_digest: pis.final_channel_state_digest.to_string(),
+        final_balance_state_h1: pis.final_balance_state_h1.to_string(),
+        channel_fund_amount: pis.channel_fund_amount.to_string(),
+        channel_fund_intmax_state_root: pis.channel_fund_intmax_state_root.to_string(),
+        burn_tx_hash: pis.burn_tx_hash.to_string(),
+        close_withdrawal_digest: pis.close_withdrawal_digest.to_string(),
+        snapshot_medium_block_number: pis.snapshot_medium_block_number,
+        final_state_version: pis.final_state_version,
+        final_settled_tx_chain: pis.final_settled_tx_chain.to_string(),
+        final_settled_tx_accumulator_root: pis.final_settled_tx_accumulator_root.to_string(),
+        close_intent_digest: pis.close_intent_digest.to_string(),
+        member_set_commitment: pis.member_set_commitment.to_string(),
+        member_count: pis.member_count,
+        delegate_count: pis.delegate_count,
+        member_pk_gs,
+    };
+
+    fs::write(CLOSE_INTENT_MLE_FILE, &mle_json)
+        .unwrap_or_else(|e| die(format!("write {CLOSE_INTENT_MLE_FILE}: {e}")));
+    write_json(CLOSE_INTENT_FILE, &descriptor);
+    println!(
+        "[close] wrote {CLOSE_INTENT_FILE} + {CLOSE_INTENT_MLE_FILE} (close_intent_digest {})",
+        pis.close_intent_digest.to_hex()
+    );
+
+    // ── On-chain: requestClose (freeze) then submitCloseIntent (large calldata → forge step). ──
+    let key = deposit_key_env();
+    eprintln!("[close] requestClose() on manager {manager}…");
+    cast(&[
+        "send", &manager, "requestClose()", "--private-key", &key, "--rpc-url", &rpc,
+    ]);
+
+    // The RunClose forge step reads the close artifacts from `contracts/test/data/sepolia_close_*`
+    // and submits the large-struct calldata. Stage the just-generated artifacts there and run it.
+    let data_dir = std::path::Path::new("contracts/test/data");
+    fs::copy(CLOSE_INTENT_FILE, data_dir.join("sepolia_close_intent.json"))
+        .unwrap_or_else(|e| die(format!("stage close_intent.json: {e}")));
+    fs::copy(CLOSE_INTENT_MLE_FILE, data_dir.join("sepolia_close_intent_mle.json"))
+        .unwrap_or_else(|e| die(format!("stage close_intent_mle.json: {e}")));
+    let sv = std::env::var("CLOSE_SV").unwrap_or_default();
+    eprintln!("[close] submitCloseIntent via forge RunClose step…");
+    let status = std::process::Command::new("forge")
+        .current_dir("contracts")
+        .args([
+            "script",
+            "script/RunClose.s.sol",
+            "--sig",
+            "submitCloseIntentStep()",
+            "--rpc-url",
+            &rpc,
+            "--private-key",
+            &key,
+            "--broadcast",
+        ])
+        .env("ROLLUP", &backing.rollup)
+        .env("MANAGER", &manager)
+        .env("SV", &sv)
+        .status()
+        .unwrap_or_else(|e| die(format!("forge submitCloseIntent failed to start: {e}")));
+    if !status.success() {
+        die("forge submitCloseIntent step failed (set CLOSE_SV to the settlement verifier address; ensure the close VK is initialized)");
+    }
+    println!("[close] close intent submitted on-chain. Wait the challenge period, then run `settle`.");
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let cmd = args.first().map(String::as_str).unwrap_or("");
@@ -456,10 +624,10 @@ fn main() {
         "cosign-inter-transfer" => cmd_cosign_inter_transfer(&args),
         "finalize" => cmd_finalize(&args),
         "balance" => cmd_balance(),
-        // A-3 (IN PROGRESS): the L1 close / withdraw-to-L1 / settle lifecycle is being implemented
-        // phase by phase (tasks/a3-impl-todo.md). Until the CLI wiring lands (P3+), these subcommands
-        // FAIL CLOSED so no caller/script assumes a working close path. P1 (real anchor) is done.
-        "close" | "withdraw" | "settle" => cmd_close_lifecycle_unimplemented(cmd),
+        // A-3 P3: `close` builds the real close proof from wallet state and submits it on-chain.
+        "close" => cmd_close(&args),
+        // P4 (in progress): withdraw-to-L1 / settle still fail closed until their CLI wiring lands.
+        "withdraw" | "settle" => cmd_close_lifecycle_unimplemented(cmd),
         _ => {
             eprintln!(
                 "usage: channel_member <setup-backing|init|add-genesis-sig|send|cosign|cosign-refresh|cosign-inter-transfer|finalize|balance> ..."

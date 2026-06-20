@@ -54,8 +54,10 @@ CloseProver::new(balance_vd: &VerifierCircuitData) -> Self   // list = ListCircu
 - `a3_withdrawal_claim_prover_builds_and_verifies`(14s): slot0 が復号値 77 を主張・検証、padding slot negative。
 
 ## P3 — CLI close + cancel-close
-- [ ] `close <manager>` / `cancel-close` 実装(共署名集約 + on-chain 提出)
-- [ ] anvil で requestClose→submitCloseIntent 確認
+- [x] **`cmd_close <manager> [rpc]` 実装(コンパイル OK)**: load_state + N member 鍵 + balance proof → 検証済み CloseProver で close 証明 + MLE 生成 → `close_intent.json`/`close_intent_mle.json` 出力(generate_close_fixture と同スキーマ、実状態版)→ requestClose(cast)+ submitCloseIntent(RunClose forge step、large calldata)。共署名集約 = CLI 制御 member 全鍵で署名。
+  - 生成は検証済み CloseProver を使用。live(deploy+VK init 要)検証は P5 E2E。
+- [ ] `cancel-close` 実装
+- [ ] anvil で requestClose→submitCloseIntent 確認(P5 E2E)
 
 ## P4 — settle + withdraw + claim
 - [ ] `settle` / `withdraw` / `claim`
