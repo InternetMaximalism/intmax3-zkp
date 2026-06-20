@@ -1007,6 +1007,28 @@ contract ChannelSettlementManagerTest is Test {
         manager.submitCloseIntent(intent, proof);
     }
 
+    /// @notice B-3: these lifecycle tests wire a CONTROLLABLE mock MLE verifier (verdict=true) so
+    ///         they exercise the manager's member/version/limb binding, not the WHIR cryptography.
+    ///         This negative flips the mock to REJECT and asserts the manager actually GATES on the
+    ///         MLE verdict: a close whose proof does not verify is wrapped as `InvalidCloseProof`
+    ///         and cannot be committed. Without this, the whole suite could pass even if the manager
+    ///         never consulted the verifier. (Real proof-soundness lives in `CloseLifecycleE2E`.)
+    function test_close_rejected_when_mle_verdict_false() external {
+        _requestCloseAndElapseGrace();
+        ChannelSettlementManager.CloseIntent memory intent = _intent(1, 9, 22, 1);
+        MleVerifier.MleProof memory proof = _closeProof(intent);
+
+        // MLE verifier says the proof is INVALID → the manager must refuse the close.
+        mockMle.setVerdict(false);
+        vm.expectRevert(ChannelSettlementManager.InvalidCloseProof.selector);
+        manager.submitCloseIntent(intent, proof);
+
+        // Restore the accepting verdict: the SAME intent+proof now goes through, proving the
+        // rejection above was the MLE verdict and not some other gate (no channel state changed).
+        mockMle.setVerdict(true);
+        manager.submitCloseIntent(intent, proof);
+    }
+
     function test_finalize_records_version_chain_and_h1() external {
         _requestCloseAndElapseGrace();
         ChannelSettlementManager.CloseIntent memory intent = _intentWithVersion(1, 9, 22, 1, 41);

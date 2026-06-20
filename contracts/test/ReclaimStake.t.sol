@@ -42,7 +42,8 @@ contract ReclaimStakeTest is Test {
         bytes32 genesis = vm.parseJsonBytes32(lc, ".genesis_state_root");
         rollup = new IntmaxRollup(
             fraudTreasury, vvk, vdd.whirParams, vdd.protocolId, vdd.sessionId,
-            vdd.kIs, vdd.subgroupGenPowers, verifier, genesis
+            vdd.kIs, vdd.subgroupGenPowers, verifier, genesis,
+            true // A-2: test opt-in for the degreeBits==0 bypass
         );
     }
 

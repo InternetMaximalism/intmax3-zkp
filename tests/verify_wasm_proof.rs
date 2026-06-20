@@ -15,13 +15,22 @@ use intmax3_zkp::{
 };
 use rand010::{SeedableRng, rngs::StdRng};
 
+/// B-5a: this is a MANUAL repro diagnostic, not a CI test. It needs `/tmp/repro/*` artifacts from a
+/// prior wasm proving run. It used to `return;` (vacuous green) when those files were absent, so it
+/// passed in every normal CI run WITHOUT verifying anything. It is now `#[ignore]` (excluded from the
+/// default run) AND fails loudly if invoked without the artifacts — so a green result always means a
+/// wasm-generated proof was actually verified natively. Run explicitly with:
+///   cargo test --release --test verify_wasm_proof native_verifies_wasm_e1_proof -- --ignored
 #[test]
+#[ignore = "manual repro diagnostic: requires /tmp/repro/{payload1,channel_snapshot}.json; run with --ignored"]
 fn native_verifies_wasm_e1_proof() {
     let payload_path = "/tmp/repro/payload1.json";
     let snap_path = "/tmp/repro/channel_snapshot.json";
     if !Path::new(payload_path).exists() || !Path::new(snap_path).exists() {
-        eprintln!("repro files absent; skipping");
-        return;
+        panic!(
+            "repro artifacts absent ({payload_path}, {snap_path}). This ignored diagnostic must be \
+             run only after a wasm proving run produced them — refusing to pass vacuously."
+        );
     }
     let payload: SendPayload =
         serde_json::from_str(&std::fs::read_to_string(payload_path).unwrap()).unwrap();

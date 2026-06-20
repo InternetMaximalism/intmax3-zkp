@@ -272,7 +272,7 @@ Retype existing `InterChannelTx` (`channel.rs:541-597`). Map abstract2's `TxAux`
 > `channelStateSig` (`hash(H1', tx_tree_root)`) is verified by the REAL validity proof
 > (`update_channel_tree` / `bp_sig_chain`, §F-2). The `transport_proof` field is retained only as a
 > vestigial carrier and is NOT verified by a dedicated `ChannelProofVerifier` (verified end-to-end in
-> `tests/inter_channel_validity_b2.rs`).
+> `tests/small_block_sig_validity.rs`).
 >
 > Inclusion liveness is handled by member incentive, NOT a proof. Because a channel's members only
 > sign `hash(H1', tx_tree_root)` when they intend the small block to be included on L1:

@@ -34,7 +34,8 @@ contract C2CBlockHashTest is Test {
         IntmaxRollup.MleVk memory vk = FixtureLib.buildMleVk(vkJson, verifier);
         bytes32 genesis = vm.parseJsonBytes32(lc, ".genesis_state_root");
         rollup = new IntmaxRollup(
-            makeAddr("ft"), vk, dd.whirParams, dd.protocolId, dd.sessionId, dd.kIs, dd.subgroupGenPowers, verifier, genesis
+            makeAddr("ft"), vk, dd.whirParams, dd.protocolId, dd.sessionId, dd.kIs, dd.subgroupGenPowers, verifier, genesis,
+            true // A-2: test opt-in for the degreeBits==0 bypass
         );
     }
 

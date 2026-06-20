@@ -213,6 +213,34 @@ fn delegate_join_preserves_send_and_is_importable() {
     let mut v2 = v2.with_computed_digest();
     for s in 0..3u8 { let g = sign_state(&mk[s as usize], s, &v2).unwrap(); add_signature(&mut v2, g); }
 
+    // B-5e: the join above is hand-assembled (there is no library-level join-transition verifier — a
+    // tracked gap; the production path lives in `channel_member.rs::join_delegate`). Rather than
+    // TRUST the hand-built state, assert the v1 -> v2 transition satisfies the state-PRESERVING
+    // membership-add invariants a verifier would enforce: it links to v1, bumps the version by
+    // exactly one, adds exactly one delegate, and leaves EVERY pre-existing slot's encrypted balance
+    // and pending-add untouched (no silent re-mint or balance edit smuggled in under the join).
+    assert_eq!(v2.prev_digest, v1.digest, "join must link prev_digest to v1's digest");
+    assert_eq!(
+        v2.balance_state.state_version,
+        v1.balance_state.state_version + 1,
+        "join must bump state_version by exactly 1"
+    );
+    assert_eq!(
+        v2.balance_state.delegate_count,
+        v1.balance_state.delegate_count + 1,
+        "join must add exactly one delegate"
+    );
+    for slot in 0..4usize {
+        assert_eq!(
+            v2.balance_state.enc_balances[slot], v1.balance_state.enc_balances[slot],
+            "join must preserve pre-existing slot {slot}'s encrypted balance"
+        );
+        assert_eq!(
+            v2.balance_state.pending_adds[slot], v1.balance_state.pending_adds[slot],
+            "join must preserve pre-existing slot {slot}'s pending_adds"
+        );
+    }
+
     let joined = ChannelSnapshot { record: record2, state: v2, members, settled_tx_accumulator: default_settled_tx_accumulator() };
     // BOTH delegates import the joined state; the earlier send is preserved (delegate 3 still 42).
     verify_snapshot(&joined, Some((&d3, 3))).expect("delegate 3 imports joined state");

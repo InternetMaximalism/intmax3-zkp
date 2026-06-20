@@ -51,7 +51,8 @@ contract DeployClose is Script {
         FixtureLib.DeployData memory vdd = FixtureLib.parseDeployData(vkJson);
         IntmaxRollup rollup = new IntmaxRollup(
             fraudTreasury, vvk, vdd.whirParams, vdd.protocolId, vdd.sessionId,
-            vdd.kIs, vdd.subgroupGenPowers, verifier, genesis
+            vdd.kIs, vdd.subgroupGenPowers, verifier, genesis,
+            false // SECURITY (A-2): production — reject a disabled (degreeBits==0) validity VK
         );
 
         ChannelSettlementVerifier sv = new ChannelSettlementVerifier();

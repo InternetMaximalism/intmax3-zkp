@@ -86,6 +86,65 @@ impl ChannelProofVerifier for StructuralTransport {
     }
 }
 
+/// All-zero update PIs — the structural transport gate ignores them, so this is only a placeholder
+/// to satisfy the `verify` signature in the unit negative below.
+fn zero_update_pis() -> ChannelStateUpdatePublicInputs {
+    ChannelStateUpdatePublicInputs {
+        kind: ChannelTransitionKind::InterChannelSend,
+        channel_id: ChannelId::default(),
+        prev_state_digest: Bytes32::default(),
+        next_state_digest: Bytes32::default(),
+        amount: 0,
+        prev_state_version: 0,
+        next_state_version: 0,
+        h2_tag: Bytes32::default(),
+        prev_settled_tx_chain: Bytes32::default(),
+        next_settled_tx_chain: Bytes32::default(),
+        receiver_entry_count: 0,
+        sender_user_id_hash: Bytes32::default(),
+        receiver_user_id_hash: Bytes32::default(),
+        channel_fund_before: U256::default(),
+        channel_fund_after: U256::default(),
+        unallocated_before: U256::default(),
+        unallocated_after: U256::default(),
+        shared_nullifier_before: Bytes32::default(),
+        shared_nullifier_after: Bytes32::default(),
+        transition_digest: Bytes32::default(),
+    }
+}
+
+/// B-5c: this file's main flow is a STRUCTURAL SMOKE E2E — the soundness-bearing parts (real deposit
+/// backing, real E-2 `channelUpdateZKP`, `regev_pk_root`, §F-1) are genuine, but the transport /
+/// small-block validity is a documented base-layer artifact (detail2 §F-2) checked only for
+/// STRUCTURE via `StructuralTransport`, with constant stand-ins like `vec![7,7,7]`. The
+/// soundness-bearing inter-channel negatives (forged N-of-N A-state with no committed debit, tampered
+/// amount, replay, atomicity) live in `tests/inter_channel_live.rs` and `tests/inter_channel_cli.rs`.
+/// This fast unit test at least pins the structural gate itself so it can never silently degrade to a
+/// no-op: an EMPTY transport is rejected (with the expected reason); a non-empty one passes.
+#[test]
+fn structural_transport_rejects_empty_proof() {
+    let pis = zero_update_pis();
+
+    let empty = ChannelProofEnvelope {
+        role: TransitionProofRole::IntmaxTransport,
+        backend: ProofBackend::Plonky2,
+        proof: vec![],
+    };
+    let err = StructuralTransport.verify(&empty, &pis);
+    assert!(err.is_err(), "empty transport MUST be rejected by the structural gate");
+    let msg = format!("{:?}", err.unwrap_err());
+    assert!(msg.contains("empty transport"), "rejection must cite the empty transport, got: {msg}");
+
+    let nonempty = ChannelProofEnvelope {
+        role: TransitionProofRole::IntmaxTransport,
+        backend: ProofBackend::Plonky2,
+        proof: vec![1],
+    };
+    StructuralTransport
+        .verify(&nonempty, &pis)
+        .expect("a non-empty transport passes the structural gate");
+}
+
 struct AnvilGuard(Child);
 impl Drop for AnvilGuard {
     fn drop(&mut self) {

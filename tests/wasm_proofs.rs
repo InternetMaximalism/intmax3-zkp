@@ -321,6 +321,22 @@ fn wasm_balance_processor_flow() {
         .commit_receive_transfer(&receive_proof, &receive_witness)
         .expect("commit receive transfer");
     log_step("Receive transfer committed");
+
+    // B-5b: actually VERIFY the proofs this flow produced. Previously the test only proved and
+    // committed, never calling `.verify()`, so a prover that emitted an UNSOUND balance proof would
+    // still pass. Verify both the sender's balance proof and the recipient's receive-transfer proof
+    // under the balance circuit's verifier data.
+    log_step("Verifying balance proofs (sender + receive transfer)");
+    scenario
+        .balance_processor
+        .balance_vd()
+        .verify(outcome.sender_balance_proof.clone())
+        .expect("sender balance proof verifies");
+    scenario
+        .balance_processor
+        .balance_vd()
+        .verify(receive_proof.clone())
+        .expect("receive transfer proof verifies");
     log_step("=== wasm_balance_processor_flow end ===");
 }
 

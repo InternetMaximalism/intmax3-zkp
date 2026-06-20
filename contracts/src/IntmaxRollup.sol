@@ -85,6 +85,10 @@ contract IntmaxRollup {
     error RegevPkDigestZeroReserved();
     error RecipientZeroReserved();
     error WithdrawalVkDegreeBitsZero();
+    // SECURITY (A-2): a validity MLE VK with degreeBits == 0 disables on-chain proof verification
+    // (`_verifyMle` short-circuits to true). Reject such a VK at deploy time unless the deployer
+    // explicitly opts in via `allowMleDisabled` (test-only). Mirrors the withdrawal VK guard above.
+    error ValidityVkDegreeBitsZero();
     // registerChannel validation (custom errors instead of require-strings — keeps IntmaxRollup
     // under the EIP-170 24,576-byte runtime limit after the delegate-account additions).
     error ChannelAlreadyRegistered();
@@ -266,9 +270,18 @@ contract IntmaxRollup {
     MleVerifier public immutable mleVerifier;
 
     /// @notice MLE verification key — binds the contract to a specific Plonky2 circuit.
-    ///         SECURITY: When mleVk.degreeBits == 0, MLE verification is disabled.
-    ///         Production deployments MUST set degreeBits > 0 with correct VK parameters.
+    ///         SECURITY: When mleVk.degreeBits == 0, MLE verification is disabled. This is only
+    ///         reachable when `allowMleDisabled` is true (a test-only opt-in); production deploys
+    ///         pass `allowMleDisabled == false`, so the constructor rejects a zero validity VK
+    ///         (`ValidityVkDegreeBitsZero`) and `_verifyMle` never short-circuits.
     MleVk public mleVk;
+
+    /// @notice SECURITY (A-2): explicit, immutable opt-in that allows deploying with a disabled
+    ///         validity MLE VK (degreeBits == 0). MUST be false in production; only Solidity tests
+    ///         that exercise the PI-binding path without real proofs set it true. The constructor
+    ///         enforces a non-zero validity VK whenever this is false, and `_verifyMle` only honors
+    ///         the degreeBits==0 bypass when this is true — a two-layer guard against the footgun.
+    bool public immutable allowMleDisabled;
 
     /// @notice WHIR protocol parameters — fixed per circuit, set at deploy time.
     ///         Stored in storage because WhirParams contains dynamic arrays (rounds[]).
@@ -489,8 +502,13 @@ contract IntmaxRollup {
         uint256[] memory _kIs,
         uint256[] memory _subgroupGenPowers,
         MleVerifier _mleVerifier,
-        bytes32 _genesisStateRoot
+        bytes32 _genesisStateRoot,
+        bool _allowMleDisabled
     ) {
+        // SECURITY (A-2): reject a validity VK that disables MLE verification unless the deployer
+        // explicitly opts in (test-only). Symmetric with `initializeWithdrawalVk`'s guard.
+        if (!_allowMleDisabled && _mleVk.degreeBits == 0) revert ValidityVkDegreeBitsZero();
+        allowMleDisabled = _allowMleDisabled;
         fraudTreasury = _fraudTreasury;
         deployer = msg.sender;
         mleVk = _mleVk;
@@ -1466,15 +1484,16 @@ contract IntmaxRollup {
     // -----------------------------------------------------------------------
 
     /// @dev Verify MLE proof using the MleVerifier library.
-    ///      SECURITY: When mleVk.degreeBits == 0, MLE verification is disabled.
-    ///      This is intentional only for test deployments that do not exercise the proof path.
-    ///      Production deployments MUST set degreeBits > 0.
+    ///      SECURITY (A-2): the degreeBits==0 bypass is honored ONLY when `allowMleDisabled` is
+    ///      true (a test-only opt-in enforced at construction). In production `allowMleDisabled` is
+    ///      false and the constructor already rejects a zero validity VK, so this branch is dead and
+    ///      every finalize runs real MLE/WHIR verification. The extra `allowMleDisabled` conjunct is
+    ///      defense-in-depth: even if a zero VK somehow reached storage, it would NOT skip here.
     function _verifyMle(
         MleVerifier.MleProof calldata mleProof
     ) internal view returns (bool) {
-        // SECURITY: Skip MLE verification when not configured.
-        // Production deployments MUST set mleVk.degreeBits > 0.
-        if (mleVk.degreeBits == 0) return true;
+        // SECURITY: Skip MLE verification only on an explicit test-only deployment.
+        if (allowMleDisabled && mleVk.degreeBits == 0) return true;
 
         try this._verifyMleWithVk(mleProof, false) returns (bool v) {
             return v;

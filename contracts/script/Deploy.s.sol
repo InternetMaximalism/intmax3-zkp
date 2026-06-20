@@ -43,7 +43,8 @@ contract Deploy is Script {
             dd.kIs,
             dd.subgroupGenPowers,
             verifier,
-            genesisStateRoot
+            genesisStateRoot,
+            false // SECURITY (A-2): production — reject a disabled (degreeBits==0) validity VK
         );
 
         vm.stopBroadcast();

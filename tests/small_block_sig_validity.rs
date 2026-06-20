@@ -1,5 +1,13 @@
-//! B-2: the inter-channel small-block signature (`channelStateSig`) is verified by a REAL validity
-//! proof — no structural placeholder.
+//! B-2 milestone: the channel small-block signature (`channelStateSig`) is verified by a REAL
+//! validity proof — no structural placeholder.
+//!
+//! SCOPE (B-5d, honest naming): this is NOT a two-channel inter-channel transfer test and there is
+//! NO E-2 transfer proof here. It proves exactly ONE thing over a SINGLE channel (CHANNEL = 1): that
+//! the block-producer's IMSB small-block signature is bound and verified by the validity circuit's
+//! `bp_sig_chain`. The file was previously named `inter_channel_validity_b2.rs`, which read as a
+//! 2-channel ("b2") inter-channel test; it is renamed to `small_block_sig_validity.rs` to match what
+//! it actually proves. Full two-channel inter-channel flows live in `inter_channel_live.rs` /
+//! `inter_channel_cli.rs`.
 //!
 //! detail2 §D / §C-7 / §F-2, abstract2 §3.3.2/§3.3.5. A channel is registered with REAL member keys
 //! (so the bp's `pk_g` is a genuine member of `member_pubkeys_root`), a block carrying the channel's
