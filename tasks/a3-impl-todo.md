@@ -43,8 +43,8 @@ CloseProver::new(balance_vd: &VerifierCircuitData) -> Self   // list = ListCircu
 - [x] **prove_mle(WrapperCircuit + MLE export、generate_close_fixture 同手順)実装、コンパイル OK**(MLE self-verify 込み。ランタイム検証は P3 の close fixture 生成 or 専用テストで)
 - [x] **build_withdrawal_claim(WithdrawalClaimProver)実装、実証明テスト PASS(14.3s)**。slot 復号→amount 導出、E-3 + claim 回路で証明・検証、amount==復号値(over-claim 不可)、padding slot 拒否。wrap+MLE は共有 `wrap_and_export_mle` ヘルパに切り出し(CloseProver も使用)。
 - [x] **build_cancel_close(CancelCloseProver)実装、実証明テスト PASS(12.2s)**。revived state の IMCH に member 署名 + list fold、revived_version > close_version の前提を fail-closed、stale 状態 negative。
-- [ ] build_post_close_claim(最複雑: Stage 3 tx_hash 再計算 + Merkle inclusion + H1 再計算 + receiver-pk 束縛 + 復号)
-- [ ] セキュリティレビュー(別 subagent)— builder 実装後
+- [x] **build_post_close_claim(PostCloseClaimProver)実装、実証明テスト PASS(13.7s)**。source_tx から delta 抽出・復号、accumulator から inclusion proof、Stage-3 FullWitness 構築。**P2 全4ビルダ完了。**
+- [ ] セキュリティレビュー(別 subagent)— builder 実装後(進行中)
 
 ### P2 検証済み(release専用 #[ignore] テスト)
 - `a3_close_prover_builds_and_verifies_real_close_proof`(49s): 実 genesis state + 実 balance proof + 3 member 署名 → close 証明生成・検証。

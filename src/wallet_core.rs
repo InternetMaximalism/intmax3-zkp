@@ -2689,6 +2689,160 @@ impl CancelCloseProver {
     }
 }
 
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+// A-3 P2: real (non-test) post-close-claim proving. A receiver of an inter-channel delta that
+// arrived AFTER the source channel closed claims it: the circuit recomputes the incoming tx hash
+// in-circuit and proves its Merkle inclusion against the CLOSED channel's finalized
+// settled-tx-accumulator root (so the tx is member-signed, not fabricated), binds the receiver's
+// Regev pk to the H1-committed slot digest, and binds the claimed amount to the in-circuit
+// decryption of the receiver's delta ciphertext (no over-claim). The amount is DERIVED here by
+// decryption; the inclusion proof is taken from the closed channel's accumulator the wallet holds.
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+
+use crate::{
+    circuits::channel::post_close_claim_circuit::{
+        PostCloseClaimCircuit, PostCloseClaimFullWitness,
+    },
+    circuits::channel::post_close_claim_pis::PostCloseClaimWitness,
+    common::channel::PostCloseIncomingClaim,
+};
+
+/// Process-built post-close-claim proving context. Self-contained circuit (no balance VD).
+pub struct PostCloseClaimProver {
+    circuit: PostCloseClaimCircuit<F, C, D>,
+}
+
+impl Default for PostCloseClaimProver {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl PostCloseClaimProver {
+    pub fn new() -> Self {
+        Self {
+            circuit: PostCloseClaimCircuit::<F, C, D>::new(),
+        }
+    }
+
+    /// Build the post-close-claim full witness. `source_tx` is the inter-channel transfer that
+    /// delivered the receiver's delta; `accumulator` is the CLOSED channel's settled-tx accumulator
+    /// (so the inclusion proof of the tx hash at `incoming_tx_index` binds it to the finalized
+    /// accumulator root). The amount is derived by decrypting the receiver's delta ciphertext.
+    #[allow(clippy::too_many_arguments)]
+    pub fn build_full_witness(
+        &self,
+        final_balance_state: &BalanceState,
+        receiver_member_index: usize,
+        receiver_pk: &RegevPk,
+        receiver_sk: &RegevSk,
+        receiver_pk_g: Bytes32,
+        recipient: Address,
+        close_intent_digest: Bytes32,
+        source_tx: &InterChannelTx,
+        accumulator: &IncrementalMerkleTree<Bytes32>,
+        incoming_tx_index: u64,
+        level: RegevSecurityLevel,
+    ) -> WResult<PostCloseClaimFullWitness> {
+        let active = final_balance_state.member_count as usize
+            + final_balance_state.delegate_count as usize;
+        if receiver_member_index >= active {
+            return bail(format!(
+                "post-close claim: receiver_member_index {receiver_member_index} >= active {active}"
+            ));
+        }
+        // The receiver's delta ciphertext from the source tx (matched by pk_g).
+        let receiver_delta = source_tx
+            .receiver_deltas
+            .iter()
+            .find(|d| d.receiver_pk_g == receiver_pk_g)
+            .ok_or_else(|| {
+                WalletError("post-close claim: receiver_pk_g not present in source tx".into())
+            })?;
+        let delta_ct = receiver_delta.amount.clone();
+        let amount = decrypt_amount(receiver_sk, &delta_ct).map_err(|e| {
+            WalletError(format!("post-close claim: delta decryption failed: {e:?}"))
+        })?;
+        let claim_proof = prove_withdraw_claim(level, receiver_pk, receiver_sk, &delta_ct, amount)
+            .map_err(|e| WalletError(format!("post-close claim: E-3 proof failed: {e:?}")))?;
+        let tx_hash = source_tx.tx_hash;
+        let shared_native_nullifier = PostCloseIncomingClaim::derive_shared_native_nullifier(
+            close_intent_digest,
+            tx_hash,
+            receiver_pk_g,
+        );
+        let claim = PostCloseIncomingClaim {
+            close_intent_digest,
+            incoming_tx_hash: tx_hash,
+            receiver_pk_g,
+            l1_recipient: recipient,
+            receiver_amount: delta_ct.clone(),
+            shared_native_nullifier,
+            recipient_memo: source_tx.recipient_memo.clone(),
+            claim_proof,
+        };
+        let native = PostCloseClaimWitness {
+            close_intent_digest,
+            closed_channel_id: final_balance_state.channel_id,
+            source_tx: source_tx.clone(),
+            claim,
+            receiver_pk: receiver_pk.clone(),
+            amount,
+            final_balance_state: final_balance_state.clone(),
+            receiver_member_index,
+        };
+        let public_inputs = native
+            .to_public_inputs(level)
+            .map_err(|e| WalletError(format!("post-close claim: public-input build failed: {e:?}")))?;
+        let enc_balance_digests: [Bytes32; MAX_CHANNEL_MEMBERS] =
+            std::array::from_fn(|i| final_balance_state.enc_balances[i].digest());
+        let incoming_tx_inclusion = accumulator.prove(incoming_tx_index);
+
+        Ok(PostCloseClaimFullWitness {
+            public_inputs,
+            source_pk_g: source_tx.source_pk_g,
+            sender_delta_digest: source_tx.sender_delta_ct.digest(),
+            receiver_delta_digest: delta_ct.digest(),
+            tx_tree_root: source_tx.signed_small_block.message.tx_tree_root,
+            source_channel_id: source_tx.source_channel_id.as_u64() as u32,
+            incoming_tx_inclusion,
+            incoming_tx_index,
+            enc_balance_digests,
+            regev_pk_digests: final_balance_state.regev_pk_digests,
+            settled_tx_chain: final_balance_state.settled_tx_chain,
+            state_version: final_balance_state.state_version,
+            pending_adds: final_balance_state.pending_adds,
+            member_count: final_balance_state.member_count,
+            delegate_count: final_balance_state.delegate_count,
+            receiver_member_index,
+            regev_a: receiver_pk.a.clone(),
+            regev_b: receiver_pk.b.clone(),
+            delta_c1: delta_ct.c1.clone(),
+            delta_c2: delta_ct.c2.clone(),
+            regev_s: receiver_sk.s.clone(),
+        })
+    }
+
+    pub fn prove(
+        &self,
+        witness: &PostCloseClaimFullWitness,
+    ) -> WResult<ProofWithPublicInputs<F, C, D>> {
+        self.circuit
+            .prove(witness)
+            .map_err(|e| WalletError(format!("post-close claim proof failed: {e:?}")))
+    }
+
+    /// Wrap + MLE for the on-chain `ChannelSettlementVerifier.verifyPostCloseClaim`.
+    pub fn prove_mle(&self, proof: &ProofWithPublicInputs<F, C, D>) -> WResult<String> {
+        wrap_and_export_mle(&self.circuit.data.verifier_data(), proof)
+    }
+
+    /// Verifier data for the post-close-claim circuit (local verification).
+    pub fn vd(&self) -> VerifierCircuitData<F, C, D> {
+        self.circuit.data.verifier_data()
+    }
+}
+
 #[cfg(test)]
 #[cfg(not(debug_assertions))]
 mod delegate_send_tests {
@@ -3462,5 +3616,122 @@ mod delegate_send_tests {
             .expect("cancel-close witness");
         let proof = prover.prove(&witness).expect("cancel-close proof");
         prover.vd().verify(proof).expect("cancel-close proof verifies");
+    }
+
+    /// Claim an inter-channel delta that arrived after the source channel closed, through
+    /// `PostCloseClaimProver`, and verify it. Builds a real source tx + settled-tx accumulator with
+    /// the tx hash included, so the in-circuit inclusion proof + tx-hash recompute pass. HEAVY.
+    #[cfg_attr(debug_assertions, ignore = "run with --release")]
+    #[test]
+    fn a3_post_close_claim_prover_builds_and_verifies() {
+        use crate::{
+            common::{
+                balance_state::{BalanceState, tx_leaf_hash},
+                channel::{
+                    ChannelProofEnvelope, InterChannelTx, MerkleInclusionProof, ProofBackend,
+                    ReceiverBalanceDelta, SignedSmallBlock, SmallBlockRootMessage,
+                    TransitionProofRole,
+                },
+                channel_id::ChannelId,
+            },
+            ethereum_types::{address::Address, u256::U256},
+            regev::{RegevSecurityLevel, channel_keygen},
+            utils::trees::incremental_merkle_tree::IncrementalMerkleTree,
+        };
+
+        let mut rng = StdRng::seed_from_u64(0x9c105e);
+        let (receiver_pk, receiver_sk) = channel_keygen(&mut rng);
+        let (other_pk, _) = channel_keygen(&mut rng);
+        let (sender_pk, _) = channel_keygen(&mut rng);
+        let amount = 21u64;
+        let (delta_ct, _) = encrypt_amount(&mut rng, &receiver_pk, amount).unwrap();
+        let (sender_delta_ct, _) = encrypt_amount(&mut rng, &sender_pk, 5).unwrap();
+        let (slot1_ct, _) = encrypt_amount(&mut rng, &other_pk, 3).unwrap();
+        let receiver_pk_g = Bytes32::from_u32_slice(&[11, 0, 0, 0, 0, 0, 0, 0]).unwrap();
+        let source_pk_g = Bytes32::from_u32_slice(&[10, 0, 0, 0, 0, 0, 0, 0]).unwrap();
+        let closed_channel_id = ChannelId::new(7).unwrap();
+        let source_channel_id = ChannelId::new(5).unwrap();
+        let close_intent_digest = Bytes32::from_u32_slice(&[1, 0, 0, 0, 0, 0, 0, 0]).unwrap();
+        let tx_tree_root = Bytes32::from_u32_slice(&[4, 0, 0, 0, 0, 0, 0, 0]).unwrap();
+
+        let tx_leaf =
+            tx_leaf_hash(source_pk_g, sender_delta_ct.digest(), receiver_pk_g, delta_ct.digest());
+        let tx_hash =
+            inter_channel_tx_hash(source_channel_id, closed_channel_id, tx_tree_root, tx_leaf);
+
+        let mut accumulator = IncrementalMerkleTree::<Bytes32>::new(SETTLED_TX_ACCUMULATOR_HEIGHT);
+        accumulator.push(tx_hash);
+        accumulator.push(Bytes32::from_u32_slice(&[77, 0, 0, 0, 0, 0, 0, 0]).unwrap());
+        let incoming_tx_index = 0u64;
+        let accumulator_root = Bytes32::from(accumulator.get_root());
+
+        let source_tx = InterChannelTx {
+            tx_inclusion_proof: MerkleInclusionProof {
+                siblings: vec![],
+                leaf_index: U256::default(),
+            },
+            signed_small_block: SignedSmallBlock {
+                message: SmallBlockRootMessage {
+                    channel_id: source_channel_id,
+                    bp_member_slot: 0,
+                    bp_pk_g: source_pk_g,
+                    small_block_number: 1,
+                    prev_small_block_root: Bytes32::default(),
+                    tx_tree_root,
+                    state_commitment_root: Bytes32::default(),
+                    medium_epoch_hint: 3,
+                    close_freeze_nonce: 0,
+                },
+                signatures: vec![],
+                aggregated_signature_proof: vec![1],
+                medium_block_number: 3,
+                confirmation_proof: vec![2],
+            },
+            sender_delta_ct: sender_delta_ct.clone(),
+            source_channel_id,
+            destination_channel_id: closed_channel_id,
+            source_pk_g,
+            seal: Bytes32::default(),
+            tx_hash,
+            intmax_transfer_commitment: Bytes32::default(),
+            recipient_memo: vec![1, 2],
+            receiver_deltas: vec![ReceiverBalanceDelta {
+                receiver_pk_g,
+                amount: delta_ct.clone(),
+            }],
+            channel_update_zkp: ChannelProofEnvelope {
+                role: TransitionProofRole::ChannelStateUpdate,
+                backend: ProofBackend::Plonky3,
+                proof: vec![3],
+            },
+            transport_proof: vec![5],
+        };
+
+        let final_balance_state = BalanceState {
+            channel_id: closed_channel_id,
+            member_count: 2,
+            delegate_count: 0,
+            enc_balances: BalanceState::pad_enc_balances(&[delta_ct.clone(), slot1_ct]),
+            regev_pk_digests: BalanceState::pad_regev_pk_digests(&[
+                Bytes32::from(receiver_pk.poseidon_digest()),
+                Bytes32::from(other_pk.poseidon_digest()),
+            ]),
+            settled_tx_chain: Bytes32::default(),
+            settled_tx_accumulator_root: accumulator_root,
+            state_version: 9,
+            pending_adds: BalanceState::pad_pending_adds(&[0, 0]),
+        };
+
+        let recipient = Address::from_u32_slice(&[1, 2, 3, 4, 5]).unwrap();
+        let prover = PostCloseClaimProver::new();
+        let witness = prover
+            .build_full_witness(
+                &final_balance_state, 0, &receiver_pk, &receiver_sk, receiver_pk_g, recipient,
+                close_intent_digest, &source_tx, &accumulator, incoming_tx_index,
+                RegevSecurityLevel::Test,
+            )
+            .expect("post-close claim witness");
+        let proof = prover.prove(&witness).expect("post-close claim proof");
+        prover.vd().verify(proof).expect("post-close claim proof verifies");
     }
 }
