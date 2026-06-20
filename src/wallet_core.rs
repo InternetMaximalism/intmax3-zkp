@@ -2379,6 +2379,39 @@ impl CloseProver {
             .map_err(|e| WalletError(format!("close proof failed: {e:?}")))
     }
 
+    /// Wrap the close proof and produce its MLE/WHIR proof JSON for the on-chain
+    /// `ChannelSettlementVerifier.verifyCloseIntent` (the SAME pipeline as
+    /// `bin/generate_close_fixture.rs`). The returned JSON is exactly what Solidity's
+    /// `FixtureLib.parseProof` consumes; the 95 raw close PI limbs are embedded as `publicInputs`,
+    /// which the manager's strict limb-bind re-checks. Verifies the MLE proof locally before
+    /// returning (fail-closed): never hand back a proof that does not self-verify.
+    pub fn prove_mle(&self, close_proof: &ProofWithPublicInputs<F, C, D>) -> WResult<String> {
+        use plonky2::iop::witness::{PartialWitness, WitnessWrite};
+
+        use crate::utils::{
+            mle_prover::{export_mle_json, prove_with_mle, setup_mle_vk, verify_mle_proof},
+            wrapper::WrapperCircuit,
+        };
+
+        let wrapper = WrapperCircuit::<F, C, C, D>::new(&self.close_circuit.data.verifier_data());
+        let wrapped = wrapper
+            .prove(close_proof)
+            .map_err(|e| WalletError(format!("close wrap proof failed: {e:?}")))?;
+        wrapper
+            .data
+            .verify(wrapped)
+            .map_err(|e| WalletError(format!("close wrap proof verify failed: {e:?}")))?;
+        let vk = setup_mle_vk::<F, C, D>(&wrapper.data);
+        let mut pw = PartialWitness::new();
+        pw.set_proof_with_pis_target(&wrapper.wrap_proof, close_proof)
+            .map_err(|e| WalletError(format!("close wrap witness binding failed: {e:?}")))?;
+        let mle = prove_with_mle::<F, C, D>(&wrapper.data, pw)
+            .map_err(|e| WalletError(format!("close MLE prove failed: {e:?}")))?;
+        verify_mle_proof(&wrapper.data, &vk, &mle.proof)
+            .map_err(|e| WalletError(format!("close MLE self-verify failed: {e:?}")))?;
+        Ok(export_mle_json(&mle.proof, &wrapper.data.common))
+    }
+
     /// Verifier data for the close circuit (so a caller can verify a close proof locally).
     pub fn close_vd(&self) -> VerifierCircuitData<F, C, D> {
         self.close_circuit.data.verifier_data()
@@ -2907,5 +2940,66 @@ mod delegate_send_tests {
             decrypt_balance(&keys[1], &final_snapshot, 1).unwrap(),
             b1 + amount
         );
+    }
+
+    // ── A-3 P2: real close proving (CloseProver) ───────────────────────────────────────────────
+
+    /// Build a closable genesis channel (member_count=3, no delegates) + a REAL genesis balance
+    /// proof, then prove the close circuit through `CloseProver` and verify it. This exercises the
+    /// whole real-input close path end-to-end (no test_fixture): member single-sigs over the IMCH
+    /// digest, the recursive list fold, the balance-proof binding, and the in-circuit soundness
+    /// gates. HEAVY: builds the balance + close circuits and proves a close (minutes, multi-GB).
+    #[cfg_attr(debug_assertions, ignore = "run with --release")]
+    #[test]
+    fn a3_close_prover_builds_and_verifies_real_close_proof() {
+        use crate::{
+            circuits::balance::{balance_processor::BalanceProcessor, spend_circuit::SpendCircuit},
+            common::{channel_id::ChannelId, salt::Salt},
+        };
+
+        let mut rng = StdRng::seed_from_u64(0x0c105e);
+        let channel = 5u32;
+        let keys: Vec<MemberKeys> = (0..3).map(|_| MemberKeys::generate(&mut rng)).collect();
+        let members: Vec<MemberInfo> =
+            keys.iter().enumerate().map(|(i, k)| member_info(i as u8, k)).collect();
+        let record = build_record(channel, &members, 0, 0).expect("record");
+        let encs: Vec<RegevCiphertext> = keys
+            .iter()
+            .map(|k| encrypt_amount(&mut rng, &k.regev_pk, 10).unwrap().0)
+            .collect();
+        let pkds: Vec<Bytes32> =
+            members.iter().map(|m| Bytes32::from(m.regev_pk.poseidon_digest())).collect();
+        let mut state = assemble_genesis_state(&record, &encs, &pkds, 30).expect("genesis");
+        for (i, k) in keys.iter().enumerate() {
+            let s = sign_state(k, i as u8, &state).expect("sign genesis");
+            add_signature(&mut state, s);
+        }
+
+        // REAL genesis balance proof (settled_tx_chain = 0, matching the genesis state).
+        let spend = SpendCircuit::<F, C, D>::new();
+        let bp = BalanceProcessor::<F, C, D>::new(&spend.data.verifier_data());
+        let balance_proof = bp
+            .prove_initial(
+                ChannelId::new(channel as u64).unwrap(),
+                Salt::rand(&mut rand::thread_rng()),
+            )
+            .expect("genesis balance proof");
+
+        let prover = CloseProver::new(&bp.balance_vd());
+
+        // Negative (fail-closed precondition, no proving): member-key count != member_count.
+        assert!(
+            prover
+                .build_full_witness(&state, &keys[..2], balance_proof.clone(), 1, Bytes32::default(), 1)
+                .is_err(),
+            "close must reject a member-key count != member_count"
+        );
+
+        // Positive: build the full witness, prove, and verify.
+        let witness = prover
+            .build_full_witness(&state, &keys, balance_proof, 1, Bytes32::default(), 1)
+            .expect("close full witness");
+        let proof = prover.prove(&witness).expect("close proof");
+        prover.close_vd().verify(proof).expect("real close proof verifies");
     }
 }

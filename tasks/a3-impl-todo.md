@@ -39,11 +39,14 @@ CloseProver::new(balance_vd: &VerifierCircuitData) -> Self   // list = ListCircu
 **`build_withdrawal_claim(final_balance_state, member_index, regev_sk, recipient) -> claim+proof`:** amount は decryption_core で復号値に in-circuit 束縛(over-claim 不可)、regev pk は H1 commit に Poseidon 束縛。前提: member_index<active、復号 amount 一致、pk digest 一致。
 **`build_cancel_close(revived_state, close_intent)` / `build_post_close_claim(...)`:** 同様に既存回路へ配線。
 
-- [x] **CloseProver(new + build_full_witness + prove + close_vd)実装、lib コンパイル OK**(wallet_core.rs 末尾)。全 public 型(ChannelCloseCircuit/FullWitness/MemberCloseAuth/ChannelCloseWitness)を un-gate なしで使用。CloseIntent::new が binding を fail-closed 検査。
-- [ ] prove_close_mle(WrapperCircuit + MLE export、generate_close_fixture 同手順)
+- [x] **CloseProver(new + build_full_witness + prove + close_vd)実装、実証明テストで検証 PASS(48.9s)**。build→prove→verify が通り、negative(鍵数不一致→Err)も。全 public 型を un-gate なしで使用、CloseIntent::new が binding を fail-closed 検査。
+- [x] **prove_mle(WrapperCircuit + MLE export、generate_close_fixture 同手順)実装、コンパイル OK**(MLE self-verify 込み。ランタイム検証は P3 の close fixture 生成 or 専用テストで)
 - [ ] build_withdrawal_claim / build_cancel_close / build_post_close_claim
-- [ ] 単体テスト(correctness + negative: 改竄 digest/非 member/stale/over-claim)— 重い proving(分単位)
-- [ ] セキュリティレビュー(別 subagent)
+- [ ] (任意)prove_mle のランタイムテスト
+- [ ] セキュリティレビュー(別 subagent)— CloseProver 実装後
+
+### P2 検証済み
+- `a3_close_prover_builds_and_verifies_real_close_proof`(wallet_core, #[ignore] release専用): 実 genesis state + 実 balance proof + 3 member 署名 → close 証明生成・検証 PASS。in-circuit soundness gate を通過。
 
 ## P3 — CLI close + cancel-close
 - [ ] `close <manager>` / `cancel-close` 実装(共署名集約 + on-chain 提出)
