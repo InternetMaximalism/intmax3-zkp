@@ -44,7 +44,10 @@ CloseProver::new(balance_vd: &VerifierCircuitData) -> Self   // list = ListCircu
 - [x] **build_withdrawal_claim(WithdrawalClaimProver)実装、実証明テスト PASS(14.3s)**。slot 復号→amount 導出、E-3 + claim 回路で証明・検証、amount==復号値(over-claim 不可)、padding slot 拒否。wrap+MLE は共有 `wrap_and_export_mle` ヘルパに切り出し(CloseProver も使用)。
 - [x] **build_cancel_close(CancelCloseProver)実装、実証明テスト PASS(12.2s)**。revived state の IMCH に member 署名 + list fold、revived_version > close_version の前提を fail-closed、stale 状態 negative。
 - [x] **build_post_close_claim(PostCloseClaimProver)実装、実証明テスト PASS(13.7s)**。source_tx から delta 抽出・復号、accumulator から inclusion proof、Stage-3 FullWitness 構築。**P2 全4ビルダ完了。**
-- [ ] セキュリティレビュー(別 subagent)— builder 実装後(進行中)
+- [x] **セキュリティレビュー(別 subagent、攻撃者視点)完了 — soundness 欠陥なし**。全5ビルダが検証済み fixture と field-by-field 一致、soundness は in-circuit、秘密鍵は適切スコープ、nullifier 正規導出、amount は復号由来。任意の防御的改善(必須でない、in-circuit で fail-closed):
+  - (任意)CancelCloseProver に era-fence 早期チェック
+  - (任意)PostCloseClaimProver に `incoming_tx_index < accumulator.len()` 早期チェック
+  - (任意)WithdrawalClaim/PostClose の Regev pk 長/canonical 早期検証
 
 ### P2 検証済み(release専用 #[ignore] テスト)
 - `a3_close_prover_builds_and_verifies_real_close_proof`(49s): 実 genesis state + 実 balance proof + 3 member 署名 → close 証明生成・検証。
