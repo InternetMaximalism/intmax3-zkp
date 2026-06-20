@@ -2567,6 +2567,128 @@ impl WithdrawalClaimProver {
     }
 }
 
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+// A-3 P2: real (non-test) cancel-close proving (the challenge primitive). A pending close is
+// cancelled by proving the channel's REGISTERED members N-of-N signed a LATER state (strictly
+// greater state_version, same close-freeze era). Soundness is in-circuit: revived_version >
+// close.final_state_version, the era fence, and the member_set_commitment binding (only registered
+// members can cancel). Structurally identical to the close prover but signs the REVIVED IMCH digest
+// and carries no balance proof.
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+
+use crate::circuits::channel::{
+    cancel_close_circuit::{CancelCloseCircuit, CancelCloseFullWitness, MemberCancelAuth},
+    cancel_close_pis::CancelCloseWitness,
+};
+
+/// Process-built cancel-close proving context (a `ListCircuit` + the `CancelCloseCircuit`).
+pub struct CancelCloseProver {
+    list: ListCircuit,
+    circuit: CancelCloseCircuit<F, C, D>,
+}
+
+impl Default for CancelCloseProver {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl CancelCloseProver {
+    pub fn new() -> Self {
+        let list = ListCircuit::new(&single_sig_circuit().verifier_data());
+        let circuit = CancelCloseCircuit::<F, C, D>::new(&list.verifier_data());
+        Self { list, circuit }
+    }
+
+    /// Build the cancel-close full witness: the REVIVED (later) signed state + the pending close
+    /// intent to cancel, plus the N active members' single-sigs of the revived IMCH digest folded
+    /// into the recursive list proof. The circuit enforces revived_version > close.final_state_version
+    /// and the era fence; these Rust preconditions fail closed early.
+    pub fn build_full_witness(
+        &self,
+        revived_state: &ChannelState,
+        member_keys: &[MemberKeys],
+        close_intent: &CloseIntent,
+    ) -> WResult<CancelCloseFullWitness<F, C, D>> {
+        let member_count = revived_state.balance_state.member_count as usize;
+        if !(2..=MAX_CHANNEL_MEMBERS).contains(&member_count) {
+            return bail(format!(
+                "cancel-close: member_count {member_count} out of [2, {MAX_CHANNEL_MEMBERS}]"
+            ));
+        }
+        if member_keys.len() != member_count {
+            return bail(format!(
+                "cancel-close: need exactly member_count={member_count} signing keys, got {}",
+                member_keys.len()
+            ));
+        }
+        let pk_gs: Vec<Bytes32> = member_keys.iter().map(|k| k.signing_key.public_key()).collect();
+        for i in 0..pk_gs.len() {
+            for j in (i + 1)..pk_gs.len() {
+                if pk_gs[i] == pk_gs[j] {
+                    return bail(format!("cancel-close: duplicate member pk_g at slots {i},{j}"));
+                }
+            }
+        }
+        if revived_state.balance_state.state_version <= close_intent.final_state_version {
+            return bail(format!(
+                "cancel-close: revived state_version {} must be > close final_state_version {}",
+                revived_state.balance_state.state_version, close_intent.final_state_version
+            ));
+        }
+
+        let cancel = CancelCloseWitness {
+            revived_state: revived_state.clone(),
+            close_intent: close_intent.clone(),
+        };
+
+        // Fold the N member single-sigs of the REVIVED IMCH digest (slot order).
+        let digest = revived_state.digest;
+        let pairs: Vec<(Bytes32, Bytes32)> = pk_gs.iter().map(|pk| (digest, *pk)).collect();
+        let mut member_auth: Vec<MemberCancelAuth> = Vec::with_capacity(member_count);
+        let mut prev: Option<ProofWithPublicInputs<F, C, D>> = None;
+        for (i, keys) in member_keys.iter().enumerate() {
+            let sig = single_sig_circuit()
+                .prove(&keys.signing_key, digest)
+                .map_err(|e| WalletError(format!("cancel member {i} single-sig failed: {e}")))?;
+            let prefix = list_commitment(&pairs[0..i]);
+            prev = Some(
+                self.list
+                    .prove_append(&sig, prefix, &prev)
+                    .map_err(|e| WalletError(format!("cancel list fold at {i} failed: {e:?}")))?,
+            );
+            member_auth.push(MemberCancelAuth { pk_g: pk_gs[i] });
+        }
+        let list_proof =
+            prev.ok_or_else(|| WalletError("cancel-close: empty active member set".into()))?;
+
+        Ok(CancelCloseFullWitness {
+            cancel,
+            member_auth,
+            list_proof,
+        })
+    }
+
+    pub fn prove(
+        &self,
+        witness: &CancelCloseFullWitness<F, C, D>,
+    ) -> WResult<ProofWithPublicInputs<F, C, D>> {
+        self.circuit
+            .prove(witness)
+            .map_err(|e| WalletError(format!("cancel-close proof failed: {e:?}")))
+    }
+
+    /// Wrap + MLE for the on-chain `ChannelSettlementVerifier.verifyCancelClose`.
+    pub fn prove_mle(&self, proof: &ProofWithPublicInputs<F, C, D>) -> WResult<String> {
+        wrap_and_export_mle(&self.circuit.data.verifier_data(), proof)
+    }
+
+    /// Verifier data for the cancel-close circuit (local verification).
+    pub fn vd(&self) -> VerifierCircuitData<F, C, D> {
+        self.circuit.data.verifier_data()
+    }
+}
+
 #[cfg(test)]
 #[cfg(not(debug_assertions))]
 mod delegate_send_tests {
@@ -3251,5 +3373,94 @@ mod delegate_send_tests {
         );
         let proof = prover.prove(&witness).expect("withdrawal claim proof");
         prover.vd().verify(proof).expect("withdrawal claim proof verifies");
+    }
+
+    /// Cancel a pending close by proving a strictly-newer member-signed state exists. Builds the
+    /// cancel proof through `CancelCloseProver` and verifies it; asserts a non-newer revived state
+    /// is rejected. HEAVY (builds + proves the cancel circuit).
+    #[cfg_attr(debug_assertions, ignore = "run with --release")]
+    #[test]
+    fn a3_cancel_close_prover_builds_and_verifies() {
+        use crate::{
+            common::{
+                balance_state::BalanceState,
+                channel::{ChannelFund, ChannelState},
+                channel_id::ChannelId,
+            },
+            ethereum_types::u256::U256,
+            regev::channel_keygen,
+        };
+
+        let mut rng = StdRng::seed_from_u64(0xca11);
+        let channel_id = ChannelId::new(3).unwrap();
+        let keys: Vec<MemberKeys> = (0..3).map(|_| MemberKeys::generate(&mut rng)).collect();
+        // 3 distinct slot ciphertexts (content is not load-bearing for cancel — only the IMCH
+        // digest the members sign matters — but keep H1 non-degenerate).
+        let encs: Vec<RegevCiphertext> = (0..3u64)
+            .map(|i| {
+                let (pk, _) = channel_keygen(&mut rng);
+                encrypt_amount(&mut rng, &pk, 10 + i).unwrap().0
+            })
+            .collect();
+        let mk_state = |version: u64, encs: &[RegevCiphertext]| {
+            ChannelState {
+                channel_id,
+                epoch: 8,
+                small_block_number: 4,
+                close_freeze_nonce: 0,
+                channel_fund: ChannelFund {
+                    channel_id,
+                    amount: U256::from(77u32),
+                    intmax_state_root: Bytes32::default(),
+                },
+                balance_state: BalanceState {
+                    channel_id,
+                    member_count: 3,
+                    delegate_count: 0,
+                    enc_balances: BalanceState::pad_enc_balances(encs),
+                    regev_pk_digests: BalanceState::pad_regev_pk_digests(&[]),
+                    settled_tx_chain: Bytes32::default(),
+                    settled_tx_accumulator_root: Bytes32::default(),
+                    state_version: version,
+                    pending_adds: BalanceState::pad_pending_adds(&[0, 0, 0]),
+                },
+                h2_tag: Bytes32::default(),
+                shared_native_nullifier_root: Bytes32::default(),
+                unallocated_confirmed_incoming: U256::zero(),
+                prev_digest: Bytes32::default(),
+                digest: Bytes32::default(),
+                member_signatures: vec![],
+            }
+            .with_computed_digest()
+        };
+
+        let revived_state = mk_state(9, &encs);
+        let closing_state = mk_state(7, &encs);
+        let close_tx = CloseWithdrawal {
+            channel_id,
+            final_channel_state_digest: closing_state.digest,
+            final_balance_state_h1: closing_state.balance_state.h1(),
+            intmax_state_root: closing_state.channel_fund.intmax_state_root,
+            burn_tx_hash: Bytes32::from_u32_slice(&[7, 0, 0, 0, 0, 0, 0, 0]).unwrap(),
+            burn_amount: closing_state.channel_fund.amount,
+            zkp: vec![],
+        };
+        let close_intent = CloseIntent::new(5, &closing_state, &close_tx, 123).unwrap();
+
+        let prover = CancelCloseProver::new();
+
+        // Negative: a revived state whose version is NOT strictly newer than the close is rejected.
+        let stale = mk_state(7, &encs);
+        assert!(
+            prover.build_full_witness(&stale, &keys, &close_intent).is_err(),
+            "a non-newer revived state must be rejected"
+        );
+
+        // Positive: revived version 9 > close final_state_version 7.
+        let witness = prover
+            .build_full_witness(&revived_state, &keys, &close_intent)
+            .expect("cancel-close witness");
+        let proof = prover.prove(&witness).expect("cancel-close proof");
+        prover.vd().verify(proof).expect("cancel-close proof verifies");
     }
 }
