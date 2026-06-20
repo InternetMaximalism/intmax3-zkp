@@ -2386,35 +2386,184 @@ impl CloseProver {
     /// which the manager's strict limb-bind re-checks. Verifies the MLE proof locally before
     /// returning (fail-closed): never hand back a proof that does not self-verify.
     pub fn prove_mle(&self, close_proof: &ProofWithPublicInputs<F, C, D>) -> WResult<String> {
-        use plonky2::iop::witness::{PartialWitness, WitnessWrite};
-
-        use crate::utils::{
-            mle_prover::{export_mle_json, prove_with_mle, setup_mle_vk, verify_mle_proof},
-            wrapper::WrapperCircuit,
-        };
-
-        let wrapper = WrapperCircuit::<F, C, C, D>::new(&self.close_circuit.data.verifier_data());
-        let wrapped = wrapper
-            .prove(close_proof)
-            .map_err(|e| WalletError(format!("close wrap proof failed: {e:?}")))?;
-        wrapper
-            .data
-            .verify(wrapped)
-            .map_err(|e| WalletError(format!("close wrap proof verify failed: {e:?}")))?;
-        let vk = setup_mle_vk::<F, C, D>(&wrapper.data);
-        let mut pw = PartialWitness::new();
-        pw.set_proof_with_pis_target(&wrapper.wrap_proof, close_proof)
-            .map_err(|e| WalletError(format!("close wrap witness binding failed: {e:?}")))?;
-        let mle = prove_with_mle::<F, C, D>(&wrapper.data, pw)
-            .map_err(|e| WalletError(format!("close MLE prove failed: {e:?}")))?;
-        verify_mle_proof(&wrapper.data, &vk, &mle.proof)
-            .map_err(|e| WalletError(format!("close MLE self-verify failed: {e:?}")))?;
-        Ok(export_mle_json(&mle.proof, &wrapper.data.common))
+        wrap_and_export_mle(&self.close_circuit.data.verifier_data(), close_proof)
     }
 
     /// Verifier data for the close circuit (so a caller can verify a close proof locally).
     pub fn close_vd(&self) -> VerifierCircuitData<F, C, D> {
         self.close_circuit.data.verifier_data()
+    }
+}
+
+/// Wrap an inner Plonky2 proof (close / withdrawal-claim / cancel / post-close) with `WrapperCircuit`
+/// and produce its MLE/WHIR proof JSON for the matching on-chain `ChannelSettlementVerifier` entry
+/// point (the SAME pipeline as the `bin/generate_*_fixture.rs` binaries). The inner proof's public
+/// inputs are re-registered verbatim by the wrapper, so the MLE `publicInputs` equal the inner PI
+/// limbs that the on-chain strict-limb-bind rebinds. Self-verifies the MLE proof before returning
+/// (fail-closed): never hand back a proof that does not verify.
+fn wrap_and_export_mle(
+    inner_vd: &VerifierCircuitData<F, C, D>,
+    inner_proof: &ProofWithPublicInputs<F, C, D>,
+) -> WResult<String> {
+    use plonky2::iop::witness::{PartialWitness, WitnessWrite};
+
+    use crate::utils::{
+        mle_prover::{export_mle_json, prove_with_mle, setup_mle_vk, verify_mle_proof},
+        wrapper::WrapperCircuit,
+    };
+
+    let wrapper = WrapperCircuit::<F, C, C, D>::new(inner_vd);
+    let wrapped = wrapper
+        .prove(inner_proof)
+        .map_err(|e| WalletError(format!("wrap proof failed: {e:?}")))?;
+    wrapper
+        .data
+        .verify(wrapped)
+        .map_err(|e| WalletError(format!("wrap proof verify failed: {e:?}")))?;
+    let vk = setup_mle_vk::<F, C, D>(&wrapper.data);
+    let mut pw = PartialWitness::new();
+    pw.set_proof_with_pis_target(&wrapper.wrap_proof, inner_proof)
+        .map_err(|e| WalletError(format!("wrap witness binding failed: {e:?}")))?;
+    let mle = prove_with_mle::<F, C, D>(&wrapper.data, pw)
+        .map_err(|e| WalletError(format!("MLE prove failed: {e:?}")))?;
+    verify_mle_proof(&wrapper.data, &vk, &mle.proof)
+        .map_err(|e| WalletError(format!("MLE self-verify failed: {e:?}")))?;
+    Ok(export_mle_json(&mle.proof, &wrapper.data.common))
+}
+
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+// A-3 P2: real (non-test) withdrawal-claim proving. After a channel is CLOSED, each member claims
+// their slot balance: the circuit binds the claimed amount to the in-circuit decryption of the
+// member's slot ciphertext (no over-claim), and binds the member's Regev pk to the H1-committed
+// per-slot digest (no key substitution). The amount is DERIVED here by decrypting the slot
+// ciphertext under the member's secret key — the member cannot claim more than their slot holds.
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+
+use crate::{
+    circuits::channel::withdrawal_claim_circuit::{
+        WithdrawalClaimCircuit, WithdrawalClaimFullWitness,
+    },
+    circuits::channel::withdrawal_claim_pis::WithdrawalClaimWitness,
+    common::channel::{ChannelMember, WithdrawalClaim},
+    ethereum_types::address::Address,
+    regev::prove_withdraw_claim,
+};
+
+/// Process-built withdrawal-claim proving context. The circuit is self-contained (no balance VD).
+pub struct WithdrawalClaimProver {
+    circuit: WithdrawalClaimCircuit<F, C, D>,
+}
+
+impl Default for WithdrawalClaimProver {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl WithdrawalClaimProver {
+    pub fn new() -> Self {
+        Self {
+            circuit: WithdrawalClaimCircuit::<F, C, D>::new(),
+        }
+    }
+
+    /// Build the withdrawal-claim full witness for `member_index` claiming their slot balance from
+    /// the CLOSED channel's `final_balance_state`. The amount is derived by decrypting the slot
+    /// ciphertext under `regev_sk` (the circuit binds amount == decryption, so the member cannot
+    /// over-claim). `close_intent` / `close_tx` are the channel's finalized close. Fail-closed.
+    #[allow(clippy::too_many_arguments)]
+    pub fn build_full_witness(
+        &self,
+        final_balance_state: &BalanceState,
+        member_index: usize,
+        member_pk_g: Bytes32,
+        user_pk: &RegevPk,
+        regev_sk: &RegevSk,
+        recipient: Address,
+        close_intent: &CloseIntent,
+        close_tx: &CloseWithdrawal,
+        level: RegevSecurityLevel,
+    ) -> WResult<WithdrawalClaimFullWitness> {
+        let active = final_balance_state.member_count as usize
+            + final_balance_state.delegate_count as usize;
+        if member_index >= active {
+            return bail(format!(
+                "withdrawal claim: member_index {member_index} >= active region {active}"
+            ));
+        }
+        let ct = final_balance_state.enc_balances[member_index].clone();
+        // Derive the amount by decryption; the circuit re-derives and binds it, so a member can
+        // only claim exactly what their slot ciphertext decrypts to.
+        let amount = decrypt_amount(regev_sk, &ct).map_err(|e| {
+            WalletError(format!("withdrawal claim: slot-balance decryption failed: {e:?}"))
+        })?;
+        let claim_proof = prove_withdraw_claim(level, user_pk, regev_sk, &ct, amount)
+            .map_err(|e| WalletError(format!("withdrawal claim: E-3 proof failed: {e:?}")))?;
+        let close_intent_digest = close_intent.signing_digest();
+        let member = ChannelMember {
+            pk_g: member_pk_g,
+            member_slot: member_index as u8,
+            l1_withdrawal_recipient: recipient,
+        };
+        let claim = WithdrawalClaim {
+            close_intent_digest,
+            member_pk_g,
+            l1_recipient: recipient,
+            user_amount_ct: ct.clone(),
+            withdrawal_nullifier: WithdrawalClaim::derive_nullifier(close_intent_digest, member_pk_g),
+            claim_proof,
+        };
+        let native = WithdrawalClaimWitness {
+            close_intent: close_intent.clone(),
+            close_tx: close_tx.clone(),
+            member,
+            claim,
+            final_balance_state: final_balance_state.clone(),
+            member_index,
+            user_pk: user_pk.clone(),
+            amount,
+        };
+        let public_inputs = native
+            .to_public_inputs(level)
+            .map_err(|e| WalletError(format!("withdrawal claim: public-input build failed: {e:?}")))?;
+        let enc_balance_digests: [Bytes32; MAX_CHANNEL_MEMBERS] =
+            std::array::from_fn(|i| final_balance_state.enc_balances[i].digest());
+        Ok(WithdrawalClaimFullWitness {
+            public_inputs,
+            enc_balance_digests,
+            regev_pk_digests: final_balance_state.regev_pk_digests,
+            settled_tx_chain: final_balance_state.settled_tx_chain,
+            settled_tx_accumulator_root: final_balance_state.settled_tx_accumulator_root,
+            state_version: final_balance_state.state_version,
+            pending_adds: final_balance_state.pending_adds,
+            member_count: final_balance_state.member_count,
+            delegate_count: final_balance_state.delegate_count,
+            member_index,
+            regev_a: user_pk.a.clone(),
+            regev_b: user_pk.b.clone(),
+            ct_c1: ct.c1.clone(),
+            ct_c2: ct.c2.clone(),
+            regev_s: regev_sk.s.clone(),
+        })
+    }
+
+    pub fn prove(
+        &self,
+        witness: &WithdrawalClaimFullWitness,
+    ) -> WResult<ProofWithPublicInputs<F, C, D>> {
+        self.circuit
+            .prove(witness)
+            .map_err(|e| WalletError(format!("withdrawal claim proof failed: {e:?}")))
+    }
+
+    /// Wrap + MLE for the on-chain `ChannelSettlementVerifier.verifyWithdrawalClaim`.
+    pub fn prove_mle(&self, proof: &ProofWithPublicInputs<F, C, D>) -> WResult<String> {
+        wrap_and_export_mle(&self.circuit.data.verifier_data(), proof)
+    }
+
+    /// Verifier data for the withdrawal-claim circuit (local verification).
+    pub fn vd(&self) -> VerifierCircuitData<F, C, D> {
+        self.circuit.data.verifier_data()
     }
 }
 
@@ -3001,5 +3150,106 @@ mod delegate_send_tests {
             .expect("close full witness");
         let proof = prover.prove(&witness).expect("close proof");
         prover.close_vd().verify(proof).expect("real close proof verifies");
+    }
+
+    /// Build a withdrawal claim for the closed channel's slot 0 through `WithdrawalClaimProver` and
+    /// verify it. The amount is DERIVED by decrypting the slot ciphertext, and the circuit binds
+    /// amount==decryption, so this also checks no over-claim. HEAVY (builds + proves the claim).
+    #[cfg_attr(debug_assertions, ignore = "run with --release")]
+    #[test]
+    fn a3_withdrawal_claim_prover_builds_and_verifies() {
+        use crate::{
+            common::{
+                balance_state::BalanceState,
+                channel::{ChannelFund, ChannelState},
+                channel_id::ChannelId,
+            },
+            ethereum_types::{address::Address, u256::U256},
+            regev::{RegevSecurityLevel, channel_keygen},
+        };
+
+        let mut rng = StdRng::seed_from_u64(0xc1a1);
+        let channel_id = ChannelId::new(3).unwrap();
+        let (pk0, sk0) = channel_keygen(&mut rng);
+        let (pk1, _) = channel_keygen(&mut rng);
+        let (pk2, _) = channel_keygen(&mut rng);
+        let amount = 77u64;
+        let (ct0, _) = encrypt_amount(&mut rng, &pk0, amount).unwrap();
+        let (ct1, _) = encrypt_amount(&mut rng, &pk1, 5).unwrap();
+        let (ct2, _) = encrypt_amount(&mut rng, &pk2, 11).unwrap();
+        let final_balance_state = BalanceState {
+            channel_id,
+            member_count: 3,
+            delegate_count: 0,
+            enc_balances: BalanceState::pad_enc_balances(&[ct0.clone(), ct1, ct2]),
+            regev_pk_digests: BalanceState::pad_regev_pk_digests(&[
+                Bytes32::from(pk0.poseidon_digest()),
+                Bytes32::from(pk1.poseidon_digest()),
+                Bytes32::from(pk2.poseidon_digest()),
+            ]),
+            settled_tx_chain: Bytes32::default(),
+            settled_tx_accumulator_root: Bytes32::default(),
+            state_version: 6,
+            pending_adds: BalanceState::pad_pending_adds(&[0, 0, 0]),
+        };
+        let state = ChannelState {
+            channel_id,
+            epoch: 8,
+            small_block_number: 5,
+            close_freeze_nonce: 0,
+            channel_fund: ChannelFund {
+                channel_id,
+                amount: U256::from(93u32),
+                intmax_state_root: Bytes32::default(),
+            },
+            balance_state: final_balance_state.clone(),
+            h2_tag: Bytes32::default(),
+            shared_native_nullifier_root: Bytes32::default(),
+            unallocated_confirmed_incoming: U256::zero(),
+            prev_digest: Bytes32::default(),
+            digest: Bytes32::default(),
+            member_signatures: vec![],
+        }
+        .with_computed_digest();
+        let close_tx = CloseWithdrawal {
+            channel_id: state.channel_id,
+            final_channel_state_digest: state.digest,
+            final_balance_state_h1: state.balance_state.h1(),
+            intmax_state_root: state.channel_fund.intmax_state_root,
+            burn_tx_hash: Bytes32::from_u32_slice(&[9, 0, 0, 0, 0, 0, 0, 0]).unwrap(),
+            burn_amount: state.channel_fund.amount,
+            zkp: vec![],
+        };
+        let close_intent = CloseIntent::new(5, &state, &close_tx, 123).unwrap();
+
+        let pk_g = Bytes32::from_u32_slice(&[10, 11, 12, 13, 14, 15, 16, 17]).unwrap();
+        let recipient = Address::from_u32_slice(&[1, 2, 3, 4, 5]).unwrap();
+
+        let prover = WithdrawalClaimProver::new();
+
+        // Negative: claiming a padding slot (>= active region) is rejected before proving.
+        assert!(
+            prover
+                .build_full_witness(
+                    &final_balance_state, 3, pk_g, &pk0, &sk0, recipient, &close_intent, &close_tx,
+                    RegevSecurityLevel::Test,
+                )
+                .is_err(),
+            "claiming a padding slot must be rejected"
+        );
+
+        // Positive: slot 0 claims exactly its decrypted balance (77).
+        let witness = prover
+            .build_full_witness(
+                &final_balance_state, 0, pk_g, &pk0, &sk0, recipient, &close_intent, &close_tx,
+                RegevSecurityLevel::Test,
+            )
+            .expect("withdrawal claim witness");
+        assert_eq!(
+            witness.public_inputs.amount, amount,
+            "claimed amount must equal the decrypted slot balance"
+        );
+        let proof = prover.prove(&witness).expect("withdrawal claim proof");
+        prover.vd().verify(proof).expect("withdrawal claim proof verifies");
     }
 }
