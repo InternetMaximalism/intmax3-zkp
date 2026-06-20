@@ -84,6 +84,16 @@ fn channel_id_env() -> u32 {
         .unwrap_or(7)
 }
 const BP_SLOT: u8 = 0;
+// A-3 P1 / detail2 §K-4: the channel's L1-close anchor (`ChannelFund.intmax_state_root`) is the
+// rollup state root the close circuit binds into the members' IMCH/IMCI signatures. `setup-backing`
+// now sources the REAL value by querying `IntmaxRollup.latestFinalizedStateRoot()` (no longer a
+// placeholder). SECURITY: this value is NOT load-bearing for fund custody — the actual exit is gated
+// by the withdrawal proof's `finalizedStateRoots[ext_commitment]` check in IntmaxRollup
+// (IntmaxRollup.sol:1262), which independently proves the funds against a finalized rollup state.
+// The anchor is therefore a channel-internal, member-signed value (adversarial review: a zero or
+// forged anchor is fund-safe). If the rollup has no finalized block yet, the sourced root is the
+// genesis/zero root — fund-safe, but the eventual on-chain close would treat it as a placeholder
+// (liveness caveat, see tasks/a3-close-lifecycle-spec.md threat model Threat 7).
 // detail2 §F-1 deposit backing: produced ONCE by `setup-backing`, consumed by the co-sign gate.
 const BACKING_FILE: &str = "channel_backing.json"; // settled_tx_chain / intmax_state_root / fund
 const ATTESTATION_FILE: &str = "channel_attestation.bin"; // the channel's base-layer balance proof
@@ -399,13 +409,27 @@ fn cmd_setup_backing(args: &[String]) {
         .unwrap_or_else(|e| die(format!("serialize balance_vd: {e}")));
     fs::write(BALANCE_VD_FILE, vd_bytes)
         .unwrap_or_else(|e| die(format!("write {BALANCE_VD_FILE}: {e}")));
+    // A-3 P1: source the REAL L1-close anchor = the rollup's current finalized state root. See the
+    // ChannelFund.intmax_state_root note above for why this is fund-safe regardless of value.
+    let finalized_root_hex = cast(&["call", &rollup, "latestFinalizedStateRoot()", "--rpc-url", &rpc])
+        .trim()
+        .to_string();
+    let intmax_state_root = Bytes32::from_hex(&finalized_root_hex)
+        .unwrap_or_else(|e| die(format!("parse latestFinalizedStateRoot(): {e:?}")));
+    if intmax_state_root == Bytes32::default() {
+        eprintln!(
+            "setup-backing WARNING: IntmaxRollup has no finalized state root yet (genesis/zero). The \
+             channel's L1-close anchor will be zero. This is FUND-SAFE (the withdrawal proof's \
+             finalized-root check gates the actual exit), but the close anchor is a placeholder until \
+             a validity block is finalized (liveness caveat; see a3-close-lifecycle-spec.md Threat 7)."
+        );
+    }
     write_json(
         BACKING_FILE,
         &ChannelBacking {
             settled_tx_chain: pis.settled_tx_chain.to_hex(),
-            // L1-close anchor (registration-time procedure is detail2 §K-4, open); NOT the §F-1
-            // gate.
-            intmax_state_root: Bytes32::default().to_hex(),
+            // A-3 P1: REAL L1-close anchor (rollup latestFinalizedStateRoot at backing time).
+            intmax_state_root: intmax_state_root.to_hex(),
             fund,
             rollup: rollup.clone(),
             deposit_tx: txhash.clone(),
@@ -432,6 +456,10 @@ fn main() {
         "cosign-inter-transfer" => cmd_cosign_inter_transfer(&args),
         "finalize" => cmd_finalize(&args),
         "balance" => cmd_balance(),
+        // A-3 (IN PROGRESS): the L1 close / withdraw-to-L1 / settle lifecycle is being implemented
+        // phase by phase (tasks/a3-impl-todo.md). Until the CLI wiring lands (P3+), these subcommands
+        // FAIL CLOSED so no caller/script assumes a working close path. P1 (real anchor) is done.
+        "close" | "withdraw" | "settle" => cmd_close_lifecycle_unimplemented(cmd),
         _ => {
             eprintln!(
                 "usage: channel_member <setup-backing|init|add-genesis-sig|send|cosign|cosign-refresh|cosign-inter-transfer|finalize|balance> ..."
@@ -439,6 +467,18 @@ fn main() {
             exit(2);
         }
     }
+}
+
+/// A-3 (IN PROGRESS): fail-closed stub for the L1 close / withdraw / settle CLI wiring, which lands
+/// in phases P3+ (tasks/a3-impl-todo.md). P1 (real L1-close anchor sourcing) is done; the on-chain
+/// settlement machinery and close circuits already exist, but the CLI driver does not yet. Refusing
+/// loudly avoids any caller assuming a working close path before the wiring + its threat model land.
+fn cmd_close_lifecycle_unimplemented(cmd: &str) -> ! {
+    die(format!(
+        "`{cmd}` is NOT implemented yet: the L1 close/withdraw/settle CLI wiring is being added in \
+         phases (tasks/a3-impl-todo.md). Deposit backing + real L1-close anchor work; the close path \
+         is not wired yet. Refusing to proceed (fail-closed)."
+    ))
 }
 
 /// `init` = CREATE-OR-JOIN. The first call CREATES the channel (3 members + this delegate at slot

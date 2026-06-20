@@ -2242,6 +2242,149 @@ fn source_record_placeholder(
 //     accepted residual risk against FULLY-COLLUDING members is DLG-2, out of scope here.
 //   * regression — a member_count=3, delegate_count=0 channel behaves exactly as before (the
 //     widened gates are a no-op when active == member_count).
+
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+// A-3 P2: real (non-test) channel-close proving. Wires the wallet's signed `ChannelState` + the N
+// active members' Goldilocks signing keys + the channel's base-layer balance proof into a REAL
+// `ChannelCloseCircuit` proof. SOUNDNESS IS ENFORCED IN-CIRCUIT (A-3 P2 threat model): H1/IMCH
+// recompute + bind, balance-proof channel_id/settled_tx_chain binding, the recursive ListCircuit
+// commitment C'==C over the members' REAL single-sigs, the member_set_commitment keccak, and the
+// active-bit decomposition. `ChannelCloseCircuit::prove` recomputes and overrides
+// `member_set_commitment`, so a tampered commitment is rejected. The Rust-side preconditions below
+// fail CLOSED before any (expensive) proving so a malformed input never produces a proof.
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+
+use crate::{
+    circuits::channel::{
+        close_circuit::{ChannelCloseCircuit, ChannelCloseFullWitness, MemberCloseAuth},
+        close_pis::ChannelCloseWitness,
+    },
+    common::channel::{CloseIntent, CloseWithdrawal},
+    poseidon_sig::list::{ListCircuit, list_commitment},
+};
+
+/// Process-built close-proving context: a `ListCircuit` (over the shared `SingleSigCircuit`) and the
+/// `ChannelCloseCircuit` bound to the channel's balance verifier data. Each circuit is expensive to
+/// build, so construct ONE `CloseProver` per process and reuse it.
+pub struct CloseProver {
+    list: ListCircuit,
+    close_circuit: ChannelCloseCircuit<F, C, D>,
+}
+
+impl CloseProver {
+    /// Build the close-proving circuits. `balance_vd` is the channel's base-layer balance verifier
+    /// data (the same value cached in `balance_vd.bin` / produced by the `BalanceProcessor`).
+    pub fn new(balance_vd: &VerifierCircuitData<F, C, D>) -> Self {
+        let list = ListCircuit::new(&single_sig_circuit().verifier_data());
+        let close_circuit = ChannelCloseCircuit::<F, C, D>::new(balance_vd, &list.verifier_data());
+        Self { list, close_circuit }
+    }
+
+    /// Build the full close witness from the wallet's signed final `ChannelState`, the N ACTIVE
+    /// members' signing keys (slot order), and the channel's base-layer balance proof. The members
+    /// each sign the IMCH digest (`state.digest`) with a real `SingleSigCircuit` proof, folded into
+    /// the recursive `ListCircuit` proof the close circuit re-checks against its rebuilt commitment.
+    ///
+    /// SECURITY: fail-closed preconditions reject malformed inputs early; the in-circuit gates are
+    /// the actual soundness boundary. `CloseIntent::new` additionally fail-closed-checks
+    /// channel_id / digest / H1 / intmax_state_root / burn_amount / unallocated==0 bindings.
+    pub fn build_full_witness(
+        &self,
+        state: &ChannelState,
+        member_keys: &[MemberKeys],
+        balance_proof: ProofWithPublicInputs<F, C, D>,
+        close_nonce: u64,
+        burn_tx_hash: Bytes32,
+        snapshot_medium_block_number: u64,
+    ) -> WResult<ChannelCloseFullWitness<F, C, D>> {
+        let member_count = state.balance_state.member_count as usize;
+        if !(2..=MAX_CHANNEL_MEMBERS).contains(&member_count) {
+            return bail(format!(
+                "close: member_count {member_count} out of [2, {MAX_CHANNEL_MEMBERS}]"
+            ));
+        }
+        if member_keys.len() != member_count {
+            return bail(format!(
+                "close: need exactly member_count={member_count} active-member signing keys, got {}",
+                member_keys.len()
+            ));
+        }
+        // Distinct member pk_g over the active set (the circuit also enforces A5 distinctness; we
+        // fail early for a clearer error and to avoid wasted proving).
+        let pk_gs: Vec<Bytes32> = member_keys.iter().map(|k| k.signing_key.public_key()).collect();
+        for i in 0..pk_gs.len() {
+            for j in (i + 1)..pk_gs.len() {
+                if pk_gs[i] == pk_gs[j] {
+                    return bail(format!("close: duplicate member pk_g at active slots {i} and {j}"));
+                }
+            }
+        }
+
+        // Derive the close-tx and close-intent. `CloseIntent::new` performs the binding checks.
+        let close_tx = CloseWithdrawal {
+            channel_id: state.channel_id,
+            final_channel_state_digest: state.digest,
+            final_balance_state_h1: state.balance_state.h1(),
+            intmax_state_root: state.channel_fund.intmax_state_root,
+            burn_tx_hash,
+            burn_amount: state.channel_fund.amount,
+            zkp: Vec::new(),
+        };
+        let close_intent =
+            CloseIntent::new(close_nonce, state, &close_tx, snapshot_medium_block_number)
+                .map_err(|e| WalletError(format!("close intent binding failed: {e:?}")))?;
+        let close = ChannelCloseWitness {
+            final_channel_state: state.clone(),
+            close_tx,
+            close_intent,
+        };
+
+        // Fold the N member IMCH single-sigs into the recursive ListCircuit proof, in slot order —
+        // exactly the order the close circuit rebuilds C' over (digest, pk_g_i) pairs.
+        let digest = state.digest;
+        let pairs: Vec<(Bytes32, Bytes32)> = pk_gs.iter().map(|pk| (digest, *pk)).collect();
+        let mut member_auth: Vec<MemberCloseAuth> = Vec::with_capacity(member_count);
+        let mut prev: Option<ProofWithPublicInputs<F, C, D>> = None;
+        for (i, keys) in member_keys.iter().enumerate() {
+            let sig = single_sig_circuit()
+                .prove(&keys.signing_key, digest)
+                .map_err(|e| WalletError(format!("member {i} single-sig proving failed: {e}")))?;
+            let prefix = list_commitment(&pairs[0..i]);
+            prev = Some(
+                self.list
+                    .prove_append(&sig, prefix, &prev)
+                    .map_err(|e| WalletError(format!("list fold at member {i} failed: {e:?}")))?,
+            );
+            member_auth.push(MemberCloseAuth { pk_g: pk_gs[i] });
+        }
+        let list_proof =
+            prev.ok_or_else(|| WalletError("close: empty active member set".into()))?;
+
+        Ok(ChannelCloseFullWitness {
+            close,
+            final_balance_proof: balance_proof,
+            member_auth,
+            list_proof,
+        })
+    }
+
+    /// Prove the close circuit. All soundness gates run in-circuit; `prove` overrides the
+    /// member-set commitment with the correct keccak so a tampered commitment cannot pass.
+    pub fn prove(
+        &self,
+        witness: &ChannelCloseFullWitness<F, C, D>,
+    ) -> WResult<ProofWithPublicInputs<F, C, D>> {
+        self.close_circuit
+            .prove(witness)
+            .map_err(|e| WalletError(format!("close proof failed: {e:?}")))
+    }
+
+    /// Verifier data for the close circuit (so a caller can verify a close proof locally).
+    pub fn close_vd(&self) -> VerifierCircuitData<F, C, D> {
+        self.close_circuit.data.verifier_data()
+    }
+}
+
 #[cfg(test)]
 #[cfg(not(debug_assertions))]
 mod delegate_send_tests {
