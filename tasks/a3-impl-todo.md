@@ -60,8 +60,10 @@ CloseProver::new(balance_vd: &VerifierCircuitData) -> Self   // list = ListCircu
 - [ ] anvil で requestClose→submitCloseIntent 確認(P5 E2E)
 
 ## P4 — settle + withdraw + claim
-- [ ] `settle` / `withdraw` / `claim`
-- [ ] anvil で member が実 ETH 受領
+- [x] **`settle <manager> [rpc]` 実装(コンパイル OK)**: finalizeClose()(証明不要)を cast。close→Closed 遷移。
+- [ ] `withdraw`: channel 出金証明(recipient=manager、rollup withdrawal 経路)が必要 = **新ビルダ build_channel_withdrawal**(未実装)。→ withdrawNative + pullChannelFunds。
+- [ ] `claim`: WithdrawalClaimProver(検証済み)で生成 + **動作する forge submitWithdrawalClaim step**(RunClose の現行は revert する no-op、要追加)+ claimWithdrawalCredit。close_intent/member 鍵/final balance の再構築要。
+- [ ] anvil で member が実 ETH 受領(P5 E2E)
 
 ## P5 — relay + 完全 E2E
 - [ ] `/api/close|settle|withdraw|claim`

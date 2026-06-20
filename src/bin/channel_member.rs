@@ -610,6 +610,28 @@ fn cmd_close(args: &[String]) {
     println!("[close] close intent submitted on-chain. Wait the challenge period, then run `settle`.");
 }
 
+/// A-3 P4: finalize the close after the challenge period has elapsed. `finalizeClose()` carries no
+/// proof calldata (the close was already proven at submit time), so it is a plain `cast` call.
+/// Usage: channel_member settle <manager_addr> [rpc_url]
+fn cmd_settle(args: &[String]) {
+    let manager = args
+        .get(1)
+        .cloned()
+        .unwrap_or_else(|| die("settle needs <manager_addr> [rpc_url]"));
+    let rpc = args
+        .get(2)
+        .cloned()
+        .unwrap_or_else(|| "http://localhost:8545".to_string());
+    let key = deposit_key_env();
+    eprintln!(
+        "[settle] finalizeClose() on manager {manager} (the challenge period must have elapsed)…"
+    );
+    cast(&[
+        "send", &manager, "finalizeClose()", "--private-key", &key, "--rpc-url", &rpc,
+    ]);
+    println!("[settle] channel finalized (Closed). Now run `withdraw` (rollup → manager) then `claim`.");
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let cmd = args.first().map(String::as_str).unwrap_or("");
@@ -626,8 +648,10 @@ fn main() {
         "balance" => cmd_balance(),
         // A-3 P3: `close` builds the real close proof from wallet state and submits it on-chain.
         "close" => cmd_close(&args),
-        // P4 (in progress): withdraw-to-L1 / settle still fail closed until their CLI wiring lands.
-        "withdraw" | "settle" => cmd_close_lifecycle_unimplemented(cmd),
+        // A-3 P4: `settle` finalizes the close after the challenge period (no proof calldata).
+        "settle" => cmd_settle(&args),
+        // P4 (in progress): withdraw-to-L1 needs the channel-withdrawal proof; still fail-closed.
+        "withdraw" => cmd_close_lifecycle_unimplemented(cmd),
         _ => {
             eprintln!(
                 "usage: channel_member <setup-backing|init|add-genesis-sig|send|cosign|cosign-refresh|cosign-inter-transfer|finalize|balance> ..."
