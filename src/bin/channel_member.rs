@@ -37,7 +37,7 @@ use intmax3_zkp::{
         },
     },
     common::{
-        channel::{ChannelRecord, ChannelState, MemberSignature},
+        channel::{ChannelRecord, ChannelState, CloseIntent, CloseWithdrawal, MemberSignature},
         channel_id::ChannelId,
         deposit::Deposit,
         salt::Salt,
@@ -48,10 +48,14 @@ use intmax3_zkp::{
     },
     regev::{RegevCiphertext, RegevPk, RegevSecurityLevel, encrypt_amount},
     utils::serialize::{deserialize_verifier_data, serialize_verifier_data},
-    circuits::channel::close_pis::{CHANNEL_CLOSE_PUBLIC_INPUTS_LEN, ChannelClosePublicInputs},
+    circuits::channel::{
+        close_pis::{CHANNEL_CLOSE_PUBLIC_INPUTS_LEN, ChannelClosePublicInputs},
+        withdrawal_claim_pis::{WITHDRAWAL_CLAIM_PUBLIC_INPUTS_LEN, WithdrawalClaimPublicInputs},
+    },
     utils::conversion::ToU64 as _,
     wallet_core::{
         BuiltInterChannelCredit, BuiltSend, ChannelBalanceAttestation, ChannelSnapshot, CloseProver,
+        WithdrawalClaimProver,
         InterChannelDebitPayload, InterChannelTransferDescriptor, MemberInfo, MemberKeys,
         RefreshPayload, SendPayload, add_signature, assemble_genesis_state_backed,
         build_inter_channel_credit, build_record, build_send, decrypt_balance,
@@ -632,6 +636,146 @@ fn cmd_settle(args: &[String]) {
     println!("[settle] channel finalized (Closed). Now run `withdraw` (rollup → manager) then `claim`.");
 }
 
+/// A-3 P4: the withdrawal-claim descriptor (the on-chain `ChannelSettlementManager.WithdrawalClaim`
+/// fields, every value a PROVED withdrawal-claim public input).
+#[derive(Serialize)]
+struct WithdrawalClaimDescriptor {
+    close_intent_digest: String,
+    member_pk_g: String,
+    recipient: String,
+    user_amount_digest: String,
+    amount: u64,
+    withdrawal_nullifier: String,
+}
+
+/// A-3 P4: a member claims their slot balance from the CLOSED channel. Builds the withdrawal-claim
+/// MLE proof via the verified `WithdrawalClaimProver` (the amount is DERIVED by decrypting the
+/// member's own slot ciphertext, so it cannot over-claim), submits it (`submitWithdrawalClaim` via
+/// the forge step), then pulls the credit (`claimWithdrawalCredit`). Usage:
+///   channel_member claim <manager_addr> <member_slot> [rpc_url]
+/// env: CLAIM_RECIPIENT (the member's registered L1 address; also the claimWithdrawalCredit caller),
+///      CLOSE_NONCE / CLOSE_BURN_TX / CLOSE_SNAPSHOT_MBN (MUST equal the values used at `close`).
+fn cmd_claim(args: &[String]) {
+    let manager = args
+        .get(1)
+        .cloned()
+        .unwrap_or_else(|| die("claim needs <manager_addr> <member_slot> [rpc_url]"));
+    let member_slot: u8 = args
+        .get(2)
+        .and_then(|s| s.parse().ok())
+        .unwrap_or_else(|| die("claim needs <member_slot>"));
+    let rpc = args
+        .get(3)
+        .cloned()
+        .unwrap_or_else(|| "http://localhost:8545".to_string());
+    let recipient = std::env::var("CLAIM_RECIPIENT")
+        .ok()
+        .and_then(|s| Address::from_hex(&s).ok())
+        .unwrap_or_else(|| {
+            die("set CLAIM_RECIPIENT=0x<20-byte member L1 recipient> (must equal the registered recipient)")
+        });
+
+    let close_nonce = env_u64("CLOSE_NONCE", 1);
+    let snapshot_mbn = env_u64("CLOSE_SNAPSHOT_MBN", 1);
+    let burn_tx_hash = std::env::var("CLOSE_BURN_TX")
+        .ok()
+        .and_then(|s| Bytes32::from_hex(&s).ok())
+        .unwrap_or_else(|| Bytes32::from_u32_slice(&[9, 8, 7, 6, 0, 0, 0, 0]).unwrap());
+
+    let st = load_state();
+    let state = st.snapshot.state.clone();
+    let final_balance_state = state.balance_state.clone();
+    // Reconstruct the finalized close (MUST match what `close` submitted: same params + state).
+    let close_tx = CloseWithdrawal {
+        channel_id: state.channel_id,
+        final_channel_state_digest: state.digest,
+        final_balance_state_h1: state.balance_state.h1(),
+        intmax_state_root: state.channel_fund.intmax_state_root,
+        burn_tx_hash,
+        burn_amount: state.channel_fund.amount,
+        zkp: Vec::new(),
+    };
+    let close_intent = CloseIntent::new(close_nonce, &state, &close_tx, snapshot_mbn)
+        .unwrap_or_else(|e| die(format!("reconstruct close intent: {e:?}")));
+
+    let keys = keys_for(0xC1_0000 + member_slot as u64);
+    let member_pk_g = keys.signing_key.public_key();
+
+    eprintln!("[claim] building withdrawal claim for slot {member_slot} + proving (HEAVY)…");
+    let prover = WithdrawalClaimProver::new();
+    let witness = prover
+        .build_full_witness(
+            &final_balance_state,
+            member_slot as usize,
+            member_pk_g,
+            &keys.regev_pk,
+            &keys.regev_sk,
+            recipient,
+            &close_intent,
+            &close_tx,
+            RegevSecurityLevel::Production,
+        )
+        .unwrap_or_else(|e| die(format!("build withdrawal claim: {}", e.0)));
+    let proof = prover
+        .prove(&witness)
+        .unwrap_or_else(|e| die(format!("withdrawal claim proof: {}", e.0)));
+    let mle_json = prover
+        .prove_mle(&proof)
+        .unwrap_or_else(|e| die(format!("withdrawal claim MLE: {}", e.0)));
+
+    let pi_limbs = proof.public_inputs[..WITHDRAWAL_CLAIM_PUBLIC_INPUTS_LEN].to_u64_vec();
+    let pis = WithdrawalClaimPublicInputs::from_u64_slice(&pi_limbs)
+        .unwrap_or_else(|e| die(format!("decode withdrawal-claim PIs: {e:?}")));
+    let descriptor = WithdrawalClaimDescriptor {
+        close_intent_digest: pis.close_intent_digest.to_string(),
+        member_pk_g: pis.member_pk_g.to_string(),
+        recipient: pis.recipient.to_hex(),
+        user_amount_digest: pis.user_amount_digest.to_string(),
+        amount: pis.amount,
+        withdrawal_nullifier: pis.withdrawal_nullifier.to_string(),
+    };
+
+    let wc_file = "withdrawal_claim.json";
+    let wc_mle_file = "withdrawal_claim_mle.json";
+    fs::write(wc_mle_file, &mle_json).unwrap_or_else(|e| die(format!("write {wc_mle_file}: {e}")));
+    write_json(wc_file, &descriptor);
+    println!("[claim] wrote {wc_file} + {wc_mle_file} (amount {})", pis.amount);
+
+    // Stage for the forge submit step, submit, then pull the credit (caller MUST be the recipient).
+    let data_dir = std::path::Path::new("contracts/test/data");
+    fs::copy(wc_file, data_dir.join("sepolia_withdrawal_claim.json"))
+        .unwrap_or_else(|e| die(format!("stage withdrawal_claim.json: {e}")));
+    fs::copy(wc_mle_file, data_dir.join("sepolia_withdrawal_claim_mle.json"))
+        .unwrap_or_else(|e| die(format!("stage withdrawal_claim_mle.json: {e}")));
+    let key = deposit_key_env();
+    eprintln!("[claim] submitWithdrawalClaim via forge…");
+    let status = std::process::Command::new("forge")
+        .current_dir("contracts")
+        .args([
+            "script",
+            "script/RunClose.s.sol",
+            "--sig",
+            "submitWithdrawalClaimStep()",
+            "--rpc-url",
+            &rpc,
+            "--private-key",
+            &key,
+            "--broadcast",
+        ])
+        .env("MANAGER", &manager)
+        .status()
+        .unwrap_or_else(|e| die(format!("forge submitWithdrawalClaim failed to start: {e}")));
+    if !status.success() {
+        die("forge submitWithdrawalClaim step failed (ensure the withdrawal-claim VK is initialized and funds were pulled into the manager)");
+    }
+    let recipient_hex = recipient.to_hex();
+    eprintln!("[claim] claimWithdrawalCredit() (caller must be the recipient {recipient_hex})…");
+    cast(&[
+        "send", &manager, "claimWithdrawalCredit()", "--private-key", &key, "--rpc-url", &rpc,
+    ]);
+    println!("[claim] OK: recipient {recipient_hex} received native ETH (amount {}).", pis.amount);
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let cmd = args.first().map(String::as_str).unwrap_or("");
@@ -650,7 +794,9 @@ fn main() {
         "close" => cmd_close(&args),
         // A-3 P4: `settle` finalizes the close after the challenge period (no proof calldata).
         "settle" => cmd_settle(&args),
-        // P4 (in progress): withdraw-to-L1 needs the channel-withdrawal proof; still fail-closed.
+        // A-3 P4: `claim` proves + submits a member's withdrawal claim and pulls the credit.
+        "claim" => cmd_claim(&args),
+        // P4: withdraw-to-L1 needs the channel-withdrawal (rollup withdrawal) proof; still fail-closed.
         "withdraw" => cmd_close_lifecycle_unimplemented(cmd),
         _ => {
             eprintln!(

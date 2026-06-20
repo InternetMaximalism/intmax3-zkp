@@ -61,9 +61,9 @@ CloseProver::new(balance_vd: &VerifierCircuitData) -> Self   // list = ListCircu
 
 ## P4 — settle + withdraw + claim
 - [x] **`settle <manager> [rpc]` 実装(コンパイル OK)**: finalizeClose()(証明不要)を cast。close→Closed 遷移。
-- [ ] `withdraw`: channel 出金証明(recipient=manager、rollup withdrawal 経路)が必要 = **新ビルダ build_channel_withdrawal**(未実装)。→ withdrawNative + pullChannelFunds。
-- [ ] `claim`: WithdrawalClaimProver(検証済み)で生成 + **動作する forge submitWithdrawalClaim step**(RunClose の現行は revert する no-op、要追加)+ claimWithdrawalCredit。close_intent/member 鍵/final balance の再構築要。
-- [ ] anvil で member が実 ETH 受領(P5 E2E)
+- [x] **`claim <manager> <member_slot> [rpc]` 実装(Rust + Solidity コンパイル OK)**: close 再構築 → 検証済み WithdrawalClaimProver で withdrawal-claim MLE + descriptor 生成(amount は復号由来=over-claim 不可)→ RunClose に**動作する `submitWithdrawalClaimStep` を新規追加** → forge submit → claimWithdrawalCredit。env: CLAIM_RECIPIENT + CLOSE_* は close と一致必須。live は P5。
+- [ ] **`withdraw` — 再スコープ判明**: 小ビルダではなく **rollup withdrawal サブシステム全体**(`generate_withdrawal_fixture` 解析: BalanceWitnessGenerator + BlockWitnessGenerator の実 deposit/block 状態 + single_withdrawal_witness + WithdrawalProcessor の prove_step/prove_final + ext_public_state、~700行)。channel の実 deposit に対する出金証明を駆動する大仕事。→ 別腰の作業として要計画。
+- [ ] anvil で member が実 ETH 受領(P5 E2E、withdraw 完成後)
 
 ## P5 — relay + 完全 E2E
 - [ ] `/api/close|settle|withdraw|claim`
