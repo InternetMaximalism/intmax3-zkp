@@ -1216,7 +1216,12 @@ contract ChannelSettlementManagerTest is Test {
         );
     }
 
-    function test_special_close_slashes_bp_and_freezes_channel() external {
+    /// P6-A / detail2 §H-3 (C2): `submitSpecialClose` is permanently DISABLED — any call reverts and
+    /// the channel is left untouched (no freeze, no BP slash). It was gated only by a forgeable
+    /// `_matches` stub, which let anyone freeze the channel and slash an honest BP (freeze-grief).
+    /// SECURITY: this asserts the intended behavior change, not a workaround — the disposition is to
+    /// disable the entry point until a sound cross-layer non-inclusion commitment exists.
+    function test_special_close_disabled_reverts() external {
         ChannelSettlementManager.SpecialClose memory specialClose = ChannelSettlementManager
             .SpecialClose({
                 offendingBpMemberSlot: BP_MEMBER_SLOT,
@@ -1227,29 +1232,18 @@ contract ChannelSettlementManagerTest is Test {
                 latestFinalizedMediumBlockNumber: 15
             });
 
-        manager.submitSpecialClose(
-            specialClose,
-            _proofFor(
-                verifier.specialClosePIHash(
-                    CHANNEL_ID,
-                    specialClose.offendingBpMemberSlot,
-                    specialClose.offendingBpPkG,
-                    specialClose.fullySignedSmallBlockRoot,
-                    specialClose.smallBlockNumber,
-                    specialClose.signedMediumBlockNumber,
-                    specialClose.latestFinalizedMediumBlockNumber
-                )
-            )
-        );
+        // Even with a "valid" stub proof, the entry point is disabled and reverts.
+        vm.expectRevert(ChannelSettlementManager.SpecialCloseDisabled.selector);
+        manager.submitSpecialClose(specialClose, hex"");
 
+        // The channel is untouched: still Active, no freeze, no BP slash, no caller credit.
         assertEq(
             uint256(manager.channelStatus()),
-            uint256(ChannelSettlementManager.ChannelLifecycleStatus.ClosePending)
+            uint256(ChannelSettlementManager.ChannelLifecycleStatus.Active)
         );
-        assertEq(manager.currentCloseFreezeNonce(), 1);
-        assertEq(manager.closeRequestedAt(), uint64(block.timestamp));
-        assertEq(manager.bpBondCredits(), INITIAL_BP_BOND - SPECIAL_CLOSE_PENALTY);
-        assertEq(manager.withdrawalCredits(address(this)), SPECIAL_CLOSE_PENALTY);
+        assertEq(manager.currentCloseFreezeNonce(), 0);
+        assertEq(manager.bpBondCredits(), INITIAL_BP_BOND);
+        assertEq(manager.withdrawalCredits(address(this)), 0);
     }
 
     function test_cancel_close_restores_active_channel() external {
@@ -1350,7 +1344,10 @@ contract ChannelSettlementManagerTest is Test {
         mockMle.setVerdict(true);
     }
 
-    function test_late_outgoing_debit_correction_invalidates_pending_close() external {
+    /// P6-A / detail2 §H-3 (C3): `submitLateOutgoingDebitCorrection` is permanently DISABLED
+    /// (redundant — double-pay is prevented by the in-circuit nullifier used-sets, stale closes by
+    /// cancelClose). A call reverts and the pending close is left untouched (still ClosePending).
+    function test_late_outgoing_debit_correction_disabled_reverts() external {
         _requestCloseAndElapseGrace();
         ChannelSettlementManager.CloseIntent memory intent = _intent(1, 9, 22, 1);
         _submitClose(intent);
@@ -1366,30 +1363,19 @@ contract ChannelSettlementManagerTest is Test {
                 amount: 7
             });
 
-        manager.submitLateOutgoingDebitCorrection(
-            correction,
-            _proofFor(
-                verifier.lateOutgoingDebitPIHash(
-                    CHANNEL_ID,
-                    closeIntentDigest,
-                    correction.sourceTxHash,
-                    USER_C,
-                    correction.senderAmountDigest,
-                    correction.debitNullifier,
-                    correction.amount
-                )
-            )
-        );
+        vm.expectRevert(ChannelSettlementManager.LateOutgoingDebitDisabled.selector);
+        manager.submitLateOutgoingDebitCorrection(correction, hex"");
 
+        // The pending close is untouched — it survives the (disabled) correction attempt.
         assertEq(
             uint256(manager.channelStatus()),
-            uint256(ChannelSettlementManager.ChannelLifecycleStatus.Active)
+            uint256(ChannelSettlementManager.ChannelLifecycleStatus.ClosePending)
         );
         assertEq(manager.currentCloseFreezeNonce(), 1);
-        assertEq(manager.closeRequestedAt(), 0);
     }
 
-    function test_special_close_then_submit_and_finalize_normal_close() external {
+    /// P6-A: disabling special close does not break the normal member-driven close path.
+    function test_normal_close_still_finalizes_after_special_close_disabled() external {
         ChannelSettlementManager.SpecialClose memory specialClose = ChannelSettlementManager
             .SpecialClose({
                 offendingBpMemberSlot: BP_MEMBER_SLOT,
@@ -1399,30 +1385,13 @@ contract ChannelSettlementManagerTest is Test {
                 signedMediumBlockNumber: 10,
                 latestFinalizedMediumBlockNumber: 15
             });
-        manager.submitSpecialClose(
-            specialClose,
-            _proofFor(
-                verifier.specialClosePIHash(
-                    CHANNEL_ID,
-                    specialClose.offendingBpMemberSlot,
-                    specialClose.offendingBpPkG,
-                    specialClose.fullySignedSmallBlockRoot,
-                    specialClose.smallBlockNumber,
-                    specialClose.signedMediumBlockNumber,
-                    specialClose.latestFinalizedMediumBlockNumber
-                )
-            )
-        );
+        vm.expectRevert(ChannelSettlementManager.SpecialCloseDisabled.selector);
+        manager.submitSpecialClose(specialClose, hex"");
 
+        // The honest close lifecycle (request → grace → submit → finalize) still works.
+        _requestCloseAndElapseGrace(); // bumps currentCloseFreezeNonce to 1
         ChannelSettlementManager.CloseIntent memory intent = _intent(2, 10, 40, 1);
-        MleVerifier.MleProof memory proof = _closeProof(intent);
-
-        // A special close is a freeze request: the first intent obeys the same grace window.
-        vm.expectRevert(ChannelSettlementManager.GracePeriodNotElapsed.selector);
-        manager.submitCloseIntent(intent, proof);
-
-        vm.warp(block.timestamp + GRACE);
-        manager.submitCloseIntent(intent, proof);
+        _submitClose(intent);
 
         vm.warp(block.timestamp + CHALLENGE_PERIOD + 1);
         manager.finalizeClose();

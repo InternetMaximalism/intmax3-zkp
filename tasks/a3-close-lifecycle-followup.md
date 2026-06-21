@@ -1,8 +1,15 @@
 # A-3 フォローアップ: channel close / withdraw-to-L1 / settle ライフサイクル(本体実装)
 
-状態: **OPEN(別PR)**。本タスク(監査修正パス)では「安全化のみ」を実施済み。本体は未実装。
+状態: **本体実装ほぼ完了**(2026-06, A-3 P1–P6)。下記「監査パスの安全化」は本実装で**置換済み**(歴史記録)。
+完了詳細は `tasks/a3-impl-todo.md`。残るは **P5-B 完全 CLI E2E**(close 経路の CLI-members ↔
+on-chain-registration 整合 = withdraw パイプラインをチャネルの実 member/deposit に束縛する拡張が必要。
+withdraw 単体は anvil live 検証済。close-intent は CloseLifecycleE2E が member-set 不一致で skip する既存ギャップと同根)。
 
-## 背景 / 現状
+## 完了(本実装、旧スタブを置換)
+- ✅ anchor 実値化(P1)。✅ close/settle/withdraw/claim CLI(P3/P4、withdraw は anvil live 検証済)。
+- ✅ C2/C3 stub revert 化(P6-A、攻撃者レビュー GO)。✅ relay /api/close|settle|withdraw|claim(P5-A)。
+
+## 旧:背景 / 現状(★本実装で解消済み・歴史記録)
 - 入金は実オンチェーン(`setup-backing` が IntmaxRollup へ実 deposit)。
 - しかし **L1 出金経路(close/withdraw/settle)が存在しない**。
 - L1-close anchor(`ChannelFund.intmax_state_root`)は `setup-backing` で全ゼロの

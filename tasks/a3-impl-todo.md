@@ -62,17 +62,84 @@ CloseProver::new(balance_vd: &VerifierCircuitData) -> Self   // list = ListCircu
 ## P4 — settle + withdraw + claim
 - [x] **`settle <manager> [rpc]` 実装(コンパイル OK)**: finalizeClose()(証明不要)を cast。close→Closed 遷移。
 - [x] **`claim <manager> <member_slot> [rpc]` 実装(Rust + Solidity コンパイル OK)**: close 再構築 → 検証済み WithdrawalClaimProver で withdrawal-claim MLE + descriptor 生成(amount は復号由来=over-claim 不可)→ RunClose に**動作する `submitWithdrawalClaimStep` を新規追加** → forge submit → claimWithdrawalCredit。env: CLAIM_RECIPIENT + CLOSE_* は close と一致必須。live は P5。
-- [ ] **`withdraw` — 再スコープ判明**: 小ビルダではなく **rollup withdrawal サブシステム全体**(`generate_withdrawal_fixture` 解析: BalanceWitnessGenerator + BlockWitnessGenerator の実 deposit/block 状態 + single_withdrawal_witness + WithdrawalProcessor の prove_step/prove_final + ext_public_state、~700行)。channel の実 deposit に対する出金証明を駆動する大仕事。→ 別腰の作業として要計画。
-- [ ] anvil で member が実 ETH 受領(P5 E2E、withdraw 完成後)
+- [x] **`withdraw` 完成(全パイプライン内包・anvil live 検証済)** — 決定: Q1=全パイプライン内包 / Q2=ビルダは wallet_core / Q3=anvil 含め全自動。計画+脅威モデルは `tasks/a3-p4-withdraw-plan.md`。
+  - **wallet_core::build_channel_withdrawal**(`ChannelWithdrawalParams`/`ChannelWithdrawalArtifacts`)= `generate_withdrawal_fixture` の全パイプライン(registration→deposit→withdrawal-tx の 3-block 再構築 + balance/single_withdrawal/chain/validity 証明 + wrap+MLE×2 + keccak re-fold + ext_commitment 一致 sanity)を移設。**generate_withdrawal_fixture は委譲化**(1 source of truth)。
+  - **知見**: MLE/WHIR 証明は ZK blinding で **非決定的** → byte-parity 不可。検証は意味的(構造フィールド=committed と一致 + 内部 self-verify + on-chain VK 検証)。記憶 [[project_mle_whir_nondeterministic]]。
+  - **release self-verify テスト** `a3_channel_withdrawal_builds_and_verifies`(94.8s PASS): build→全 proof self-verify、payout amount==要求額(over-claim 不可)、ext_commitment==final state root。
+  - **cmd_withdraw**(`channel_member withdraw <manager> [rpc]`)= build → register(済なら skip)→ deposit(送信元=depositor)→ postBlock×3(`cast send --blob`)→ finalize(forge RunClose, SUB_ID=base+2)→ withdrawNative(forge RunClose)→ pullChannelFunds(cast)。dispatcher 置換 + `cmd_close_lifecycle_unimplemented` 撤去(全コマンド実装済)。
+- [x] **anvil で実 ETH 受領 — 検証済**: DeployClose で deploy → `INTMAX_CHANNEL=1 ROLLUP=… channel_member withdraw <manager>` 完走。manager balance 0→3、pendingWithdrawals 3→0(pull 済)、totalEscrowed=7(=10-3)、receivedChannelFunds=3、latestFinalizedBlockNumber=3。**close→settle→withdraw→claim が CLI で一気通貫可能に。**
 
 ## P5 — relay + 完全 E2E
-- [ ] `/api/close|settle|withdraw|claim`
-- [ ] `tests/close_lifecycle_cli_e2e.rs`(real proof, 強 negative)
+- [x] **P5-A `/api/close|settle|withdraw|claim`(完了)**: `wallet/wallet-relay.js` + `wallet-relay-ec2.js` に追加
+  (`/api/inter/send` と同型、thin wrapper)。manager を body で受け、rollup は channel_backing.json、RPC は
+  local=localhost:8545 / ec2=`process.env.RPC`。close は CLOSE_SV、claim は CLAIM_RECIPIENT、withdraw は ROLLUP を env で渡す。node --check 緑。
+- [x] **P5-B 統合コア(完了・unit+heavy 検証済)**: ユーザー決定=フル統合。`build_channel_withdrawal` を
+  **チャネルの実 member 鍵 + 実 deposit salt** に束縛できるよう拡張(新引数 `cli_member_keys: Option<&[MemberKeys]>`、
+  params に `deposit_salt: Option<Salt>`)。`Some` 時は `ChannelMemberKeys::from_member_keys` +
+  `add_channel_registration_keys` で**実 member で登録**、deposit salt も実値 → 1 つの on-chain registration + deposit が
+  close/withdraw 両方に使える。`None` は従来(fixture parity)。`ChannelBacking` に `deposit_salt` 永続化(S5、`setup-backing`)。
+  `cmd_withdraw` に **integrated 分岐**(backing 有→実 member + 実 deposit、deposit は setup-backing 済なので**再 deposit せず**
+  block だけ post / backing 無→従来 standalone)。
+  - **検証**: 高速 unit `a3_withdraw_registration_matches_close_member_set`(proving 無し)= withdraw registration の
+    member-set commitment が close 経路の `close_member_set_commitment(pk_gs)` と**完全一致**(=1 registration が両立する証明)。
+    heavy `a3_channel_withdrawal_builds_and_verifies`(95.6s)= 実 member で全 proof self-verify + registration が CLI member の
+    pk_g を emit。両 PASS。full build 緑。
+- [~] **P5-B live E2E(着手・2 つの narrow gap で停止)**: ツール完成 — `channel_member export-reg-record`(高速・CLI member
+  reg record 出力)+ `contracts/script/DeployCloseCli.s.sol`(CLI member で registerChannel + manager binding + validity/
+  withdrawal/close VK init)。anvil で deploy(CLI members)→ setup-backing(deposit 140M・deposit_salt 永続)→ **integrated
+  withdraw** を駆動。**判明した残課題2件(どちらも hack せず escalate)**:
+  1. **(訂正)close 経路 freeze-nonce は誤診=健全**: `CloseIntent::new`(channel.rs:763)が
+     `close_freeze_nonce = state.close_freeze_nonce + 1` を計算し、回路も `pis = state+1` を強制。genesis(0)→ intent(1)、
+     requestClose 後の manager(1)と**一致**。`CloseLifecycleE2E` の close-intent skip は **freeze ではなく member-set 不一致**が
+     主因で、**本統合(CLI member 統一)が解消**。**ただし別の本物のギャップ**: `cmd_close` は `requestClose()` 直後に
+     `submitCloseIntent` を呼ぶが、後者は `GRACE_BEFORE_PROCESS_SECS=600` 経過を要求 → 実チェーンで `GracePeriodNotElapsed`。
+     `cmd_close` を request/submit に分割 or E2E で `evm_increaseTime`(soundness 非該当=配線)。
+  2. **integrated withdraw の deposit/registration folding 不一致(本物・真因)**: オンチェーンは「`deposit()`/`registerChannel`
+     で進んだ pending 連鎖を**最初に post するブロック**が吸収」する。standalone(withdraw が block1,2 を出してから deposit→block3 で
+     吸収)は証明モデル(deposit は専用ブロック)と一致したが、integrated は **setup-backing の deposit が全ブロックより前から
+     pending** なので **block1(registration)が deposit を吸収**→ 証明の「block2 で deposit」と構造的にズレ → 連鎖全体が不一致
+     → `blockHashChainAt[3] ≠ final_block_chain` → finalize false。修正案A(推奨): integrated 時 `build_channel_withdrawal` の
+     ブロック構造を「最初のブロックで registration＋deposit を両方折り込む」=オンチェーン吸収順に合わせる(`BlockWitnessGenerator`
+     のブロック生成順の再構成。keystone は保つ)。
+  → **統合コアは検証済**(member-set 共有 unit + 実 member proof の heavy self-verify)。live 全経路 = #2 案A 修正 + close の
+     GRACE 配線。#2 は soundness 非該当(block-hash 整合)だが慎重なモデル再構成が要る。
+
+### P5-B live 着手の進捗(案B採用・2026-06)
+ユーザー決定=**案B**(setup-backing はオンチェーン入金せず、withdraw が標準版の順序で入金。証明/回路/ジェネレータ不変)。
+実施済み・修正したバグ:
+- **案B 実装**: `setup-backing` に `SETUP_BACKING_NO_ONCHAIN_DEPOSIT` モード(off-chain balance proof + params 永続のみ、
+  デフォルト=従来どおり実 deposit=デモ不変)。`cmd_withdraw` は常に入金を作る(skip 撤去)。build OK。
+- **close GRACE 配線(#1)**: `cmd_close` に `CLOSE_ADVANCE_TIME` で requestClose 後に `evm_increaseTime`。
+- **close forge step 名バグ修正**: `cmd_close` が存在しない `submitCloseIntentStep()` を呼んでいた → 正しい `closeIntentStep()` に。
+  (close-intent の live submit は今まで未実行だったため潜在していた。)
+- **live ツール**: `channel_member export-reg-record`(CLI member の reg record 出力)+ `contracts/script/DeployCloseCli.s.sol`
+  (CLI member で registerChannel + manager binding + validity/withdrawal/close VK init)。
+- **anvil 検証で到達したところ**: deploy(CLI members)→ setup-backing(no-deposit)→ init → **close: 証明生成 + requestClose +
+  grace 通過 + closeIntentStep 実行**まで到達。close 証明の **member_set_commitment / channel_id(7)/ close_freeze_nonce(1)
+  はオンチェーンと一致**を確認(Rust↔Solidity の close_member_set_commitment も一致)。
+- **#3 delegate_count 解決済**: init のチャネルは 3 members + 1 delegate。close 証明は delegate_count=1 を束縛するので、
+  登録を **4-active(3 members + 1 delegate)** で統一: 生成器に `to_reg_record_split`/`add_channel_registration_keys_split`
+  (member/delegate split)+ `from_member_keys` を全 active 対応に、`build_channel_withdrawal` は active 数から delegate_count を導出、
+  `channel_member` に `cli_active_keys()`(3 members + delegate seed)、`export-reg-record` は 4-active 出力、`DeployCloseCli` は
+  4-active registerChannel + manager の member/delegate bindings + **withdrawal-claim VK init** 追加。
+- [x] **P5-B 完全 CLI E2E 成功(anvil・real proof・2026-06)** 🎉: `tests`/driver で
+  deploy(DeployCloseCli)→ setup-backing(no-deposit)→ gen-contribution+init → **close**(submitCloseIntent OK=**初の live close 検証**)
+  → evm_increaseTime → **settle**(channelStatus=Closed)→ **withdraw**(integrated: register skip + deposit + postBlock×3 + finalize OK
+  + withdrawNative 140000000 + pullChannelFunds)→ **claim**(member slot 0 が実 ETH 40000000 受領, totalCreditedOut=40000000)。
+  全行程グリーン。soundness は in-circuit + on-chain のまま(案B で deposit fold 整合、回路/コントラクト不変)。
 
 ## P6 — post-close-claim + stub revert 化 + 後始末
-- [ ] post-close-claim CLI/relay
-- [ ] specialClose / lateOutgoingDebit entry point を revert 化(forgeable stub を塞ぐ)
-- [ ] fail-closed スタブを実装へ置換、followup を closed に
+- [ ] post-close-claim CLI/relay(任意・未着手)
+- [x] **P6-A specialClose / lateOutgoingDebit revert 化(完了・攻撃者レビュー GO)**: 両 entry を即 revert
+  (`SpecialCloseDisabled`/`LateOutgoingDebitDisabled`、`external pure`、selector 維持)。影響テスト 3 件を
+  disabled→revert に置換(Manager 全 66 PASS)。Manager bytecode 変更 → 新 CREATE2 manager
+  `0xED5e1c64…1A8FA8`、close_ fixture 再生成、CloseLifecycleE2E PASS。詳細 `tasks/a3-p6a-stub-revert-plan.md`。
+  dead-code 除去は deferred(detail2 §H-3 に明記)。
+- [x] **fail-closed スタブ撤去・followup 更新(完了)**: `cmd_close_lifecycle_unimplemented` は P4 で撤去済。
+  `tasks/a3-close-lifecycle-followup.md` を「ほぼ完了」に更新。detail2 §H-3「IMPLEMENTED」、
+  detail2-implementation-notes.md に **D10**(§K-4 anchor on-chain チェック不採用=承認済み逸脱、C2/C3 disable)追記。
 
 ## 所見ログ
 - (P1着手)
+- **P5-B 統合ブロッカ(2026-06)**: withdraw 自己生成 registration と close の実 member registration が同一 channel で
+  両立不可。完全 E2E には withdraw パイプラインを実 member/deposit へ束縛する拡張が必須(P4 先送り分)。ユーザーに提示。

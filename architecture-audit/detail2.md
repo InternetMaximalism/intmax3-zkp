@@ -567,7 +567,10 @@ ONLY the registered members can cancel — a third party signing a revival block
 BP unilaterally produces small blocks and can race a later block after an honest close starts); the sound
 condition is "a strictly-newer N-of-N member-signed state exists", which is what the circuit proves.
 
-**`submitSpecialClose` (C2) — DISABLED (forgeable stub; revert the entry point).** Intended fault: the BP fully
+**`submitSpecialClose` (C2) — DISABLED (IMPLEMENTED 2026-06, P6-A): the entry point now reverts
+`SpecialCloseDisabled()` unconditionally (`ChannelSettlementManager.sol`); the stub verifier is left in place but
+unreachable. Adversarial-reviewed (no defects; freeze-grief removed, no member funds move). Forgeable stub;
+revert the entry point.** Intended fault: the BP fully
 signed a small block but failed to finalize it within `SPECIAL_CLOSE_MEDIUM_BLOCK_WINDOW = 5` medium blocks
 (censorship); on success it slashes `min(specialClosePenalty, bpBondCredits)` to the caller and freezes the
 channel. A SOUND proof of this fault requires **non-inclusion of the BP-signed block in the finalized
@@ -579,8 +582,10 @@ computable by anyone), so anyone can fabricate the accusation and slash an hones
 the BP-censorship slash is simply unavailable; no member funds move; the BP bond (`bpBondCredits`) is a separate
 pot, and if it is unfunded (= 0) the forged-slash steals nothing — disabling only removes the freeze-grief.
 
-**`submitLateOutgoingDebitCorrection` (C3) — DISABLED (forgeable stub; redundant). The threat it targets is
-already prevented; the conditions are:**
+**`submitLateOutgoingDebitCorrection` (C3) — DISABLED (IMPLEMENTED 2026-06, P6-A): the entry point now reverts
+`LateOutgoingDebitDisabled()` unconditionally; the stub verifier is left in place but unreachable.
+Adversarial-reviewed (no defects; double-pay still prevented by the nullifier used-sets + cancelClose).
+Forgeable stub; redundant. The threat it targets is already prevented; the conditions are:**
 1. **No double-withdrawal — guaranteed by on-chain nullifier used-sets** (the "non-inclusion list of
    withdrawals" is a Solidity `mapping(bytes32 => bool)`, O(1), at EVERY payout path):
    `IntmaxRollup.withdrawalNullifierUsed` (base `withdrawNative`),
@@ -607,6 +612,12 @@ already prevented; the conditions are:**
 These disables are **safety-neutral**: cross-channel isolation (the `Σ paid ≤ receivedChannelFunds` cap) and the
 no-double-withdraw guarantee (nullifier used-sets) do NOT depend on C2/C3. Disabling only removes the
 forgeable-while-stubbed BP-censorship slash (C2) and the redundant late-debit cancel (C3).
+
+FOLLOW-UP (non-security, deferred): with C2/C3 disabled, the symbols only their removed bodies touched are now
+dead — `latestSpecialCloseDigest`, `usedLateOutgoingDebitNullifiers`, the `SpecialCloseSubmitted` /
+`LateOutgoingDebitAccepted` events, and `computeSpecialCloseDigest`. The adversarial review confirmed these are
+harmless (no invariant reads them). They are intentionally LEFT for a future cleanup PR, since removing them
+changes the Manager bytecode again (CREATE2 manager drift → another close-fixture regeneration).
 
 ### H-4. Invariant of the challenge order
 

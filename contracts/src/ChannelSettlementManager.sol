@@ -172,6 +172,14 @@ contract ChannelSettlementManager {
     error NotChannelMember();
     error CloseNotRequested();
     error GracePeriodNotElapsed();
+    /// P6-A / detail2 §H-3: `submitSpecialClose` (C2) is DISABLED — its on-chain verification is a
+    /// forgeable `_matches` stub, so a SOUND proof of BP non-inclusion (a cross-layer commitment in
+    /// the validity/rollup layer) does not yet exist. Re-enable only once that commitment lands.
+    error SpecialCloseDisabled();
+    /// P6-A / detail2 §H-3: `submitLateOutgoingDebitCorrection` (C3) is DISABLED — redundant. Double
+    /// withdrawal is already prevented by the in-circuit nullifier used-sets (check-then-set CEI) at
+    /// every payout path, and stale closes by `cancelClose` (C1); its verifier is also a stub.
+    error LateOutgoingDebitDisabled();
 
     enum ChannelLifecycleStatus {
         Active,
@@ -754,56 +762,19 @@ contract ChannelSettlementManager {
         });
     }
 
-    function submitSpecialClose(
-        SpecialClose calldata specialClose,
-        bytes calldata proof
-    ) external {
-        if (channelStatus != ChannelLifecycleStatus.Active) revert ChannelAlreadyFrozen();
-        // F7: the offending proposer must be this channel's registered block-proposer (slot and
-        // pubkey hash).
-        if (
-            specialClose.offendingBpMemberSlot != bpMemberSlot ||
-            specialClose.offendingBpPkG != bpPkG
-        ) revert InvalidBpForSpecialClose();
-        if (
-            specialClose.latestFinalizedMediumBlockNumber <
-            specialClose.signedMediumBlockNumber + 5
-        ) revert InvalidSpecialCloseWindow();
-        if (
-            !verifier.verifySpecialClose(
-                channelId,
-                specialClose.offendingBpMemberSlot,
-                specialClose.offendingBpPkG,
-                specialClose.fullySignedSmallBlockRoot,
-                specialClose.smallBlockNumber,
-                specialClose.signedMediumBlockNumber,
-                specialClose.latestFinalizedMediumBlockNumber,
-                proof
-            )
-        ) revert InvalidSpecialCloseProof();
-
-        currentCloseFreezeNonce += 1;
-        channelStatus = ChannelLifecycleStatus.ClosePending;
-        // A special close IS a freeze request: the first close intent of this frozen era is
-        // subject to the same grace window as a member-requested close.
-        closeRequestedAt = uint64(block.timestamp);
-        uint256 slashedAmount = specialClosePenalty;
-        if (slashedAmount > bpBondCredits) {
-            slashedAmount = bpBondCredits;
-        }
-        bpBondCredits -= slashedAmount;
-        withdrawalCredits[msg.sender] += slashedAmount;
-
-        latestSpecialCloseDigest = computeSpecialCloseDigest(specialClose);
-        emit SpecialCloseSubmitted(
-            latestSpecialCloseDigest,
-            specialClose.offendingBpPkG,
-            specialClose.fullySignedSmallBlockRoot,
-            specialClose.offendingBpMemberSlot,
-            specialClose.smallBlockNumber,
-            slashedAmount,
-            currentCloseFreezeNonce
-        );
+    /// @notice DISABLED (P6-A / detail2 §H-3, C2). Permanently reverts.
+    /// @dev SECURITY: the BP-censorship special-close was gated only by `verifier.verifySpecialClose`,
+    ///      a tautological `_matches` stub (the "proof" is just `keccak(public inputs)`, computable by
+    ///      anyone), so anyone could fabricate the accusation, slash an honest BP and freeze the
+    ///      channel (freeze-grief). A SOUND proof of the fault requires non-inclusion of the BP-signed
+    ///      block in the finalized medium-block chain — a cross-layer commitment that lives in the
+    ///      validity/`IntmaxRollup` layer and does not exist yet. Until it does, the entry point is
+    ///      reverted. Safety while disabled: only the (stub-gated) slash+freeze is unavailable; no
+    ///      member funds move, and `bpBondCredits` is a separate, possibly-unfunded pot. The stub
+    ///      verifier (`ChannelSettlementVerifier.verifySpecialClose`) is left in place but unreachable.
+    ///      The signature (and ABI selector) is kept so callers fail closed with a clear error.
+    function submitSpecialClose(SpecialClose calldata, bytes calldata) external pure {
+        revert SpecialCloseDisabled();
     }
 
     function cancelClose(
@@ -842,43 +813,21 @@ contract ChannelSettlementManager {
         );
     }
 
-    function submitLateOutgoingDebitCorrection(
-        LateOutgoingDebitCorrection calldata correction,
-        bytes calldata proof
-    ) external {
-        if (!pendingClose.active) revert CloseNotActive();
-        if (correction.closeIntentDigest != pendingClose.closeIntentDigest) {
-            revert CloseIntentDigestMismatch();
-        }
-        if (usedLateOutgoingDebitNullifiers[correction.debitNullifier]) {
-            revert NullifierAlreadyUsed();
-        }
-        if (
-            !verifier.verifyLateOutgoingDebit(
-                channelId,
-                correction.closeIntentDigest,
-                correction.sourceTxHash,
-                correction.senderPkG,
-                correction.senderAmountDigest,
-                correction.debitNullifier,
-                correction.amount,
-                proof
-            )
-        ) revert InvalidLateOutgoingDebitProof();
-
-        usedLateOutgoingDebitNullifiers[correction.debitNullifier] = true;
-        bytes32 closeIntentDigest = pendingClose.closeIntentDigest;
-        delete pendingClose;
-        channelStatus = ChannelLifecycleStatus.Active;
-        // Restoring Active ends the frozen era (see cancelClose).
-        closeRequestedAt = 0;
-
-        emit LateOutgoingDebitAccepted(
-            closeIntentDigest,
-            correction.sourceTxHash,
-            correction.debitNullifier,
-            correction.amount
-        );
+    /// @notice DISABLED (P6-A / detail2 §H-3, C3). Permanently reverts.
+    /// @dev SECURITY: this late-outgoing-debit correction is REDUNDANT. Its sole property — "the same
+    ///      withdrawal cannot be paid more than once" — is already guaranteed by the in-circuit
+    ///      nullifier used-sets enforced (check-then-set CEI) at EVERY payout path
+    ///      (`IntmaxRollup.withdrawalNullifierUsed`, `usedWithdrawalNullifiers`,
+    ///      `usedSharedNativeNullifiers`), and a close on a stale `state_version` is rejected by
+    ///      `cancelClose` (C1). Its on-chain gate was also a forgeable `_matches` stub. The only thing
+    ///      lost by disabling is an accepted, out-of-scope time-difference grief. The stub verifier
+    ///      (`ChannelSettlementVerifier.verifyLateOutgoingDebit`) is left in place but unreachable.
+    ///      The signature (and ABI selector) is kept so callers fail closed with a clear error.
+    function submitLateOutgoingDebitCorrection(LateOutgoingDebitCorrection calldata, bytes calldata)
+        external
+        pure
+    {
+        revert LateOutgoingDebitDisabled();
     }
 
     function finalizeClose() external {

@@ -210,7 +210,13 @@ impl ChannelMemberKeys {
     pub fn from_member_keys(keys: &[crate::wallet_core::MemberKeys]) -> Self {
         let mut member_tree = MemberTree::init();
         let (mut secret_keys, mut baby_keys, mut regev_pks) = (Vec::new(), Vec::new(), Vec::new());
-        for k in keys.iter().take(TEST_ACTIVE_MEMBERS) {
+        // Build the member tree over ALL passed ACTIVE participants (members first, then delegates).
+        // Callers pass exactly the active set: `TEST_ACTIVE_MEMBERS` for a member-only channel, or
+        // `member_count + delegate_count` when a delegate is present (P5-B). The delegate occupies the
+        // contiguous slot(s) after the co-signing members and is committed in the member tree (its
+        // `(pk_g, pk_b, regev_pk_digest)` enters `member_pubkeys_root` and the reg keccak chain) but
+        // is EXCLUDED from the member-set commitment (handled by member_count in `to_reg_record_split`).
+        for k in keys.iter() {
             let pk_b: PoseidonHashOut = k.baby_key.public_key().to_bytes32().reduce_to_hash_out();
             member_tree.push(MemberLeaf {
                 pk_g: k.signing_key.public_key_hash_out(),
@@ -234,10 +240,30 @@ impl ChannelMemberKeys {
     /// updating-block member-signature binding opens against. The `recipient` is a deterministic
     /// test L1 address; it only enters the keccak preimage, not the Poseidon member tree.
     pub fn to_reg_record(&self, channel_id: u32) -> ChannelRegRecord {
+        self.to_reg_record_split(channel_id, TEST_ACTIVE_MEMBERS as u32, 0)
+    }
+
+    /// Like [`Self::to_reg_record`] but with an explicit `member_count` / `delegate_count` split
+    /// (P5-B delegate support). `active = member_count + delegate_count` entries are emitted from the
+    /// member tree (members first, then delegates). The member-set commitment downstream uses only
+    /// the first `member_count` `pk_g`s; the delegate region is registered for the withdrawal path
+    /// but excluded from the close member-set (matches `ChannelSettlementManager`'s
+    /// member/delegate split).
+    pub fn to_reg_record_split(
+        &self,
+        channel_id: u32,
+        member_count: u32,
+        delegate_count: u32,
+    ) -> ChannelRegRecord {
+        let active = (member_count + delegate_count) as usize;
+        assert!(
+            active <= MAX_CHANNEL_MEMBERS,
+            "active participants {active} exceed MAX_CHANNEL_MEMBERS"
+        );
         let mut members: [MemberRegEntry; MAX_CHANNEL_MEMBERS] = Default::default();
-        for i in 0..TEST_ACTIVE_MEMBERS {
+        for (i, entry) in members.iter_mut().enumerate().take(active) {
             let leaf = self.member_tree.get_leaf(i as u64);
-            members[i] = MemberRegEntry {
+            *entry = MemberRegEntry {
                 pk_g: Bytes32::from(leaf.pk_g),
                 pk_b: Bytes32::from(leaf.pk_b),
                 regev_pk_digest: Bytes32::from(leaf.regev_pk_digest),
@@ -255,8 +281,8 @@ impl ChannelMemberKeys {
             // Block proposer is slot 0 by convention (matches the first updating slot the later
             // blocks sign with).
             bp_member_slot: 0,
-            member_count: TEST_ACTIVE_MEMBERS as u32,
-            delegate_count: 0,
+            member_count,
+            delegate_count,
             members,
         }
     }
@@ -379,11 +405,23 @@ impl BlockWitnessGenerator {
         channel_id: u32,
         keys: ChannelMemberKeys,
     ) -> ChannelMemberKeys {
+        self.add_channel_registration_keys_split(channel_id, keys, TEST_ACTIVE_MEMBERS as u32, 0)
+    }
+
+    /// Like [`Self::add_channel_registration_keys`] but with an explicit member/delegate split
+    /// (P5-B). The `keys` member tree must hold `member_count + delegate_count` active leaves.
+    pub fn add_channel_registration_keys_split(
+        &mut self,
+        channel_id: u32,
+        keys: ChannelMemberKeys,
+        member_count: u32,
+        delegate_count: u32,
+    ) -> ChannelMemberKeys {
         let channel = ChannelId::new(channel_id as u64).expect("channel id");
         if let Some(existing) = self.channel_members.get(&channel) {
             return existing.clone();
         }
-        let record = keys.to_reg_record(channel_id);
+        let record = keys.to_reg_record_split(channel_id, member_count, delegate_count);
         record.validate().expect("registration record must be valid");
         self.channel_registrations.push((record, keys.clone()));
         self.channel_members.insert(channel, keys.clone());
