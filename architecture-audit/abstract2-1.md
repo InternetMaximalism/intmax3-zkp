@@ -29,6 +29,7 @@ Items 1–8 of [abstract2.md §"Differences from v1"](./abstract2.md) apply unch
 A transfer (`transfer`) splits into the following 2 exclusively and exhaustively. **Exclusivity and exhaustiveness are structurally guaranteed by the `H2` tag**:
 - **A. Intra-channel transfer** `channelTransfer` (among the 3 people of the same channel) — agreement signature's `H2 = 0`
 - **B. Inter-channel transfer** `interChannelTransfer` (channel → channel(s), via Intmax) — sending-side agreement signature's `H2 = own_small_block_tx_tree_root ≠ 0`
+  - **B-burn. Partial withdrawal (base-layer L1 exit)** — a send-side leg whose `dest_channel_id = BURN_CHANNEL_ID` (§2.6). It is settled as a base-layer L1 `Withdrawal` instead of a destination-channel credit; **the channel stays open**. Same `H2 = tx_tree_root ≠ 0` and the same N-of-N authorization as B (no unilateral path — non-cooperative exit is the close game §3.5).
 
 Security is divided into the following 5 properties (described later in §4):
 1. **Authorization** authorization (all-member signature. Signature target = `hash(H1, H2)`)
@@ -161,6 +162,15 @@ Unchanged from abstract2 §2.4 (`finalBalanceState`, `finalBalanceProof` + `sett
 
 Unchanged: `SIGN_TIMEOUT = 3 min`, `GRACE_BEFORE_PROCESS = 10 min`, `CHALLENGE_PERIOD = 1 day`.
 
+### 2.6 Partial withdrawal (base-layer L1 exit, channel stays open)
+
+A member may exit **part** of the channel balance to L1 **without closing** the channel, by routing a normal inter-channel send leg to a reserved burn channel. This is distinct from close (§2.4): close burns the **whole** `withdrawCap` and freezes the channel; partial withdrawal burns an **arbitrary amount** inside a regular signed small block and the channel continues.
+
+- `BURN_CHANNEL_ID : ChannelId` : a **reserved** channel id that no channel may register (sentinel, e.g. `0xFFFF_FFFF`). A `TransferEntry` (§2.3) with `dest_channel_id = BURN_CHANNEL_ID` is a **burn leg**: it removes value from L2 spendable supply (the `closeBurnTx`/`burnAddress` role of abstract2 §2.4, generalized to a partial, mid-channel leg) and is settled as a base-layer `Withdrawal` rather than crediting a destination channel.
+- **Burn-leg shape:** `TransferEntry { dest_channel_id = BURN_CHANNEL_ID, recipient : Address (L1 payout, ADDRESS_TAG form), amount : U256, recipient_delta = ⊥ }`. A burn leg carries **no `recipient_delta`** — no channel member is credited (value exits L2). Settlement MUST reject `recipient_delta ≠ ⊥` on a burn leg (else a leg could both burn and credit, §6).
+- `Withdrawal { recipient, token_index, amount, nullifier, aux_data }` : the **existing base-layer withdrawal leaf** (pre-channel intmax; `single_withdrawal` → `withdrawal_chain` → `withdrawal_circuit`). For a burn leg: `recipient = leg.recipient`, `amount = leg.amount`, `nullifier = SettledTransfer::nullifier()` (binds source `channel_id`, `block_number`, `transfer_index` — §2.3; gives cross-channel-replay safety and a unique per-leg id), `aux_data` carried through.
+- **L1 consumption is unchanged:** `withdrawNative(Withdrawal[], prover, withdrawalProof)` verifies the withdrawal ZKP, requires `extCommitment ∈ finalizedStateRoots` (anchored to a finalized validity state), checks `withdrawalNullifierUsed[nullifier]` (double-spend), decrements `totalEscrowed` (global solvency cap), credits `pendingWithdrawals[recipient]`. **No new L1 contract surface.**
+
 ---
 
 ## 3. Function definitions (operations)
@@ -268,6 +278,27 @@ Unchanged from abstract2 §3.5 (`requestClose` → grace → `startProcess` → 
 
 **M7 (open):** a state signed under `.txRoot` before L1 inclusion must not be closable without an inclusion witness; see §7.
 
+### 3.6 Partial withdrawal `partialWithdraw` (cooperative; channel stays open)
+
+A partial withdrawal is a normal inter-channel send (§3.4 `flowSend1`/`flowSend2`) whose `BulkInterChannelTx` contains **one or more burn legs** (`dest_channel_id = BURN_CHANNEL_ID`, §2.6). A bulk tx MAY mix normal legs and burn legs. No new signing primitive is introduced — partial withdrawal **reuses** `signSmallBlock`, the validity settlement, and the base-layer withdrawal stack.
+
+- **actor: sender**
+  1. Confirm on L1 that the source channel has no open close request (as §3.4 flowSend1.1; `BURN_CHANNEL_ID` itself is never close-checked — it is not a real channel).
+  2. Build `BulkInterChannelTx`: `sender_delta` encrypts `-(Σ_j amount_j)` over **all** legs (burn + normal); each burn leg sets `recipient_delta = ⊥`. Bulk `channelUpdateZKP` proves: each `amount_j ≥ 0`, sender post-update balance `≥ Σ_j amount_j`, and each normal leg's `recipient_delta_j` encrypts `+amount_j` (burn legs are excluded from the recipient-ciphertext checks since they have none).
+  3. Pass to `member[bp_member_slot]`.
+- **actor: `member[bp_member_slot]`**: `rangeProof` (§3.3.1); prepare the 1-leaf small block (`tx_tree_root`).
+- **actor: all members**: `signSmallBlock` (§3.3.2) over `hash(H1', H2 = tx_tree_root)`. The burn is thereby **N-of-N authorized** and atomically bound to the post-deduction state `H1'`. Partial signatures ⇒ not authorized; a member who cannot obtain co-signatures exits via the close game (§3.5).
+- **actor: global `BP`**: `produceMediumBlock` → `postBlock`; `generateValidityProof` (§3.3.5). For each settled leg in canonical order: if `dest_channel_id = BURN_CHANNEL_ID`, **emit a base-layer `Withdrawal`** into the block's withdrawal commitment and credit **no** destination channel; otherwise credit the destination as in §3.3.5. Debit the **source** channel once at this `BlockNumber` (`ChannelLeaf.prev`); advance `settledTxChain' = hash(settledTxChain, TxLeafHash)` once per tx (bulk included).
+- **actor: `member[bp_member_slot]` (source channel)**: after L1 inclusion + `finalize`, `generateBalanceProof` for the post-send state, then build the withdrawal ZKP over the burn leg(s) via the existing `single_withdrawal_circuit` (it extracts `(recipient, amount, nullifier)` from the settled transfer) and submit `withdrawNative(Withdrawal[], prover, withdrawalProof)` to L1 (§2.6).
+- **Channel continuity:** `stateVersion`/`settledTxChain` advance; members keep transacting. No freeze, no close.
+
+**Security (the 5 properties, for the burn leg):**
+1. **Authorization (§4.1):** the burn leg lives inside the N-of-N `signSmallBlock` over `hash(H1', H2)` — structurally inseparable from the post-deduction state; no unilateral withdrawal.
+2. **No double-spend (§4.2):** `SettledTransfer::nullifier()` (source `channel_id` + `block_number` + `transfer_index`) + on-chain `withdrawalNullifierUsed`; `ChannelLeaf.prev` + `settledTxChain` forbid re-settling the same small block. `transfer_index` disambiguates multiple burn legs in one bulk tx.
+3. **Solvency (§4.3):** `sender_delta = -(Σ_j amount_j)` is range-proven (sender post-balance ≥ total debit, burn included); on L1, `totalEscrowed` underflow caps the global outflow. A burn leg credits **no** channel (`recipient_delta = ⊥`), so value cannot be both burned and credited.
+4. **Exit / liveness (§4.4):** partial withdrawal is the cooperative fast-path; the close game (§3.5) is the non-cooperative fallback.
+5. **Confidentiality (§4.5):** the burn `amount` is plaintext at the base layer (an L1 exit is public by nature; matches the §4.5 per-leg-plaintext boundary); per-member channel balances remain Regev-encrypted.
+
 ---
 
 ## 4. Security mechanisms
@@ -320,6 +351,8 @@ When implementing bulk cross-channel, extend `InterChannelTx`, `channelUpdateZKP
 2. **Retry / version semantics** on failed small-block inclusion (abstract2 finding 12).
 3. **Bulk receive replay:** each destination must ingest each `TxLeafHash` at most once; enforced by `settledTxChain` + `balanceProof` recomputation (A2).
 4. **L2 validity ordering** when one small block settles multiple `dest_channel_id` legs — fixed canonical order in §2.3 (implementation must match).
+5. **Burn-leg canonicality (§2.6/§3.6):** the validity settlement must (a) recognize `dest_channel_id = BURN_CHANNEL_ID` and route the leg to the withdrawal commitment with **no** channel credit, and (b) **reject** `recipient_delta ≠ ⊥` on a burn leg. `BURN_CHANNEL_ID` must be unregisterable (no `ChannelLeaf`), and the channel tree / settlement must never treat it as a creditable destination.
+6. **Mixed bulk + withdrawal extraction:** a bulk tx may mix normal and burn legs under one `TxLeafHash`; the base-layer withdrawal circuit must extract exactly the burn legs (by `dest_channel_id = BURN_CHANNEL_ID`) and bind each to its own `transfer_index` nullifier. Confirm `single_withdrawal_circuit`'s `extract_address_from_recipient` accepts the burn leg's L1 `recipient` form and that non-burn legs are not extractable as withdrawals.
 
 ---
 
