@@ -55,13 +55,32 @@ What is NEW (fund-critical):
 - `cmd_send` (channel_member.rs:1702) is INTRA-channel ONLY — `to` is a member SLOT (0..2), recipient is a member, value stays in the channel. There is NO "burn send" (ADDRESS_TAG / L1 recipient) command. Need a new `cmd_partial_withdraw` (+ `build_burn_send`): a member sends `calculate_recipient_from_address(member_L1_addr)` for a PARTIAL amount, debiting their own Regev encBalance (sender_delta = -amount), crediting NO member, then drive `single_withdrawal` → `withdrawNative` (recipient = member L1 addr, NOT the close manager).
 - N-of-N cosign of the burn send (reuse `cmd_cosign*`), then the channel STAYS OPEN (stateVersion advances; members keep transacting).
 
-THE DESIGN DECISION (fund correctness — needs owner input):
-The base-layer withdrawal debits the `channel_id`'s base TOTAL; the channel-layer model (abstract2-1 §3.6) debits the withdrawing MEMBER's encBalance share. These must reconcile so a member withdraws only their OWN share (not another member's). Options:
-  (a) Full channel-layer: the burn send's `sender_delta` debits the member's encBalance under N-of-N agreement, AND the base withdrawal reduces the channel total by the same amount; the validity/single_withdrawal proof must bind the base withdrawal to the agreed channel-state debit (so a member cannot withdraw more than their proven share). MORE WORK, fully sound.
-  (b) Base-layer-first (MVP): implement the channel→L1 partial withdrawal at the base account first (channel total → L1), with the per-member share enforced only by the N-of-N agreement off the base proof. Simpler, but the base proof alone does not bind WHICH member's share — relies on honest co-signers. Document as an accepted intra-channel trust assumption (same trust class as other channel-state updates).
-Recommendation: confirm (a) vs (b) before writing fund code; (a) for production soundness, (b) acceptable as a first milestone if the intra-channel co-sign trust is acceptable (it matches how every other channel balance update is authorized).
+DECIDED (owner, 2026-06-24): **(a) full channel-layer cryptographic binding.** A member can withdraw
+only their OWN proven share — the burn send's `sender_delta` debits the withdrawing member's encBalance
+under N-of-N agreement, and the base `single_withdrawal` withdrawal is bound to that agreed channel-state
+debit. No reliance on co-signer honesty for the per-member share.
 
-Remaining Phase 3 work after the decision: `build_burn_send` + `cmd_partial_withdraw` (cosign → finalize → single_withdrawal → withdrawNative); Phase 4 heavy E2E (opt-in `INTMAX_RUN_HEAVY_E2E`) + adversarial (double-withdraw, over-withdraw, non-member, post-freeze, register-at-burn-id).
+KEY REUSE INSIGHT (owner): the sender-side cryptographic balance proof for a burn send is ALMOST
+IDENTICAL to a normal inter-channel send — both prove the SAME `sender_delta` debit on the member's
+encBalance; only the destination differs (real channel credit vs L1 exit). So (a) is mostly REUSE, not
+new crypto:
+- Reuse the inter-channel send sender-side machinery (`InterChannelDebitPayload` /
+  `InterChannelTransferDescriptor` / `cmd_cosign_inter_transfer`, channel_member.rs:1986) — the member's
+  range-proven `sender_delta = -amount` debit + N-of-N cosign is unchanged.
+- The ONLY new routing: `recipient = calculate_recipient_from_address(member_L1_addr)` (ADDRESS_TAG)
+  instead of `calculate_recipient_from_user_id(dest_channel)`; `destination_channel_id = BURN_CHANNEL_ID`;
+  NO destination-channel credit (no sibling B-state write — the inter-channel code's B-side step is
+  replaced by the base withdrawal).
+- Then the EXISTING base withdrawal extraction (c2c block-5 recipe: `single_withdrawal_witness` →
+  `SingleWithdawalCircuit` → `WithdrawalProcessor`) → on-chain `withdrawNative` (recipient = member L1
+  addr). The `single_withdrawal` proof binds the SAME settled transfer the cosigned send committed, so the
+  base withdrawal is bound to the agreed member debit — that is the (a) cryptographic binding.
+
+Remaining Phase 3 work: `build_burn_send` (fork the inter-channel debit build: ADDRESS_TAG recipient,
+dest=BURN_CHANNEL_ID, no B-side credit) + `cmd_partial_withdraw` (cosign-inter-transfer reuse → post block
+→ finalize → single_withdrawal → withdrawNative). Phase 4: heavy E2E (opt-in `INTMAX_RUN_HEAVY_E2E`,
+member partial-withdraws real ETH, channel stays open) + adversarial (double-withdraw, over-withdraw, a
+member withdrawing ANOTHER member's share must FAIL, non-member, post-freeze, register-at-burn-id).
 
 ---
 
