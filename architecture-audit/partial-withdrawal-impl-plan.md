@@ -48,6 +48,21 @@ A single sent transfer must be consumed **exactly once**: either RECEIVED by a d
 - Phase 2 LARGELY SUBSUMED: the validity circuit updates the SOURCE `ChannelLeaf` only (no auto-credit of destinations; destination credit is the receiver's voluntary `receive_transfer`, which a burn leg's `ADDRESS_TAG` recipient cannot satisfy). So a burn send is settled normally and extracted by `single_withdrawal` — no new routing circuit. Phase 2 reduces to: verify the validity settlement is unaffected by `dest = BURN_CHANNEL_ID`.
 - Phase 3 (send-path command) + Phase 4 (heavy E2E + adversarial tests) REMAIN. The c2c fixture (`generate_c2c_fixture.rs`) already proves a channel→L1 withdrawal end-to-end (sender-side adaptation needed).
 
+### Phase 3 grounded design (2026-06-23 investigation)
+The withdrawal EXTRACTION recipe is `generate_c2c_fixture.rs` "Block 5" (`spend_witness([Transfer{recipient=calculate_recipient_from_address(L1), amount}]) → prove_send_tx → single_withdrawal_witness → SingleWithdawalCircuit → WithdrawalProcessor`). The base `Tx` here has NO `destination_channel_id` — `BURN_CHANNEL_ID` is a CHANNEL-LAYER (abstract2-1) marker, while the actual fund movement is this BASE-LAYER `ADDRESS_TAG` send. The base "native user IS the channel" (constants.rs): the `channel_id`'s base account holds the channel total; a channel withdrawal debits that base account.
+
+What is NEW (fund-critical):
+- `cmd_send` (channel_member.rs:1702) is INTRA-channel ONLY — `to` is a member SLOT (0..2), recipient is a member, value stays in the channel. There is NO "burn send" (ADDRESS_TAG / L1 recipient) command. Need a new `cmd_partial_withdraw` (+ `build_burn_send`): a member sends `calculate_recipient_from_address(member_L1_addr)` for a PARTIAL amount, debiting their own Regev encBalance (sender_delta = -amount), crediting NO member, then drive `single_withdrawal` → `withdrawNative` (recipient = member L1 addr, NOT the close manager).
+- N-of-N cosign of the burn send (reuse `cmd_cosign*`), then the channel STAYS OPEN (stateVersion advances; members keep transacting).
+
+THE DESIGN DECISION (fund correctness — needs owner input):
+The base-layer withdrawal debits the `channel_id`'s base TOTAL; the channel-layer model (abstract2-1 §3.6) debits the withdrawing MEMBER's encBalance share. These must reconcile so a member withdraws only their OWN share (not another member's). Options:
+  (a) Full channel-layer: the burn send's `sender_delta` debits the member's encBalance under N-of-N agreement, AND the base withdrawal reduces the channel total by the same amount; the validity/single_withdrawal proof must bind the base withdrawal to the agreed channel-state debit (so a member cannot withdraw more than their proven share). MORE WORK, fully sound.
+  (b) Base-layer-first (MVP): implement the channel→L1 partial withdrawal at the base account first (channel total → L1), with the per-member share enforced only by the N-of-N agreement off the base proof. Simpler, but the base proof alone does not bind WHICH member's share — relies on honest co-signers. Document as an accepted intra-channel trust assumption (same trust class as other channel-state updates).
+Recommendation: confirm (a) vs (b) before writing fund code; (a) for production soundness, (b) acceptable as a first milestone if the intra-channel co-sign trust is acceptable (it matches how every other channel balance update is authorized).
+
+Remaining Phase 3 work after the decision: `build_burn_send` + `cmd_partial_withdraw` (cosign → finalize → single_withdrawal → withdrawNative); Phase 4 heavy E2E (opt-in `INTMAX_RUN_HEAVY_E2E`) + adversarial (double-withdraw, over-withdraw, non-member, post-freeze, register-at-burn-id).
+
 ---
 
 ## RELATED FEATURE — Additional deposit (mid-channel top-up). Requested 2026-06-23.
