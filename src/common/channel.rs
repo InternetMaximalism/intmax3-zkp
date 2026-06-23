@@ -215,6 +215,14 @@ impl ChannelRecord {
                     .to_string(),
             ));
         }
+        // SECURITY (abstract2-1 §2.6): BURN_CHANNEL_ID is the reserved partial-withdrawal L1-exit
+        // destination — no real channel may occupy it (mirrors the on-chain `registerChannel` guard).
+        if self.channel_id.channel_id() == crate::constants::BURN_CHANNEL_ID {
+            return Err(ChannelError::InvalidChannelRecord(
+                "channel_id equals reserved BURN_CHANNEL_ID (partial-withdrawal burn destination)"
+                    .to_string(),
+            ));
+        }
         let count = self.member_count as usize;
         if count < 2 || count > MAX_CHANNEL_MEMBERS {
             return Err(ChannelError::InvalidChannelRecord(format!(

@@ -80,6 +80,9 @@ contract IntmaxRollup {
     // string literal duplicated at each use site by via_ir inlining). Behavior is unchanged.
     error ReentrantCall();
     error ChannelIdZeroReserved();
+    /// @notice channelId == BURN_CHANNEL_ID is reserved for the partial-withdrawal L1-exit destination
+    /// (abstract2-1 §2.6) and may not host a real channel.
+    error ChannelIdBurnReserved();
     error BpMemberSlotOutOfRange();
     error MemberPubkeyHashZeroReserved();
     error RegevPkDigestZeroReserved();
@@ -426,6 +429,11 @@ contract IntmaxRollup {
     /// `MIN_CHANNEL_MEMBERS` and `MAX_CHANNEL_MEMBERS` ACTIVE members in slot order.
     uint32 internal constant MAX_CHANNEL_MEMBERS = 16;
     uint32 internal constant MIN_CHANNEL_MEMBERS = 2;
+
+    /// @notice Reserved channel id for the partial-withdrawal burn destination (abstract2-1 §2.6;
+    /// Rust `BURN_CHANNEL_ID`, src/constants.rs). No real channel may register here; a base-layer
+    /// transfer routed to this id is an L1 exit (settled as a `Withdrawal`), never a channel credit.
+    uint32 internal constant BURN_CHANNEL_ID = 0xFFFFFFFF;
 
     /// @notice IMCM domain word ("IMCM" = 0x494d434d) for the close-form member-set commitment.
     /// MUST equal `ChannelSettlementVerifier.CLOSE_MEMBER_SET_DOMAIN` so the commitment recorded by
@@ -830,6 +838,7 @@ contract IntmaxRollup {
         address[] calldata recipients
     ) external {
         if (channelId == 0) revert ChannelIdZeroReserved();
+        if (channelId == BURN_CHANNEL_ID) revert ChannelIdBurnReserved();
         // Finding E: ONE-TIME registration per channel. Matches the validity R5 one-time guard and
         // makes `channelMemberSetCommitment[channelId]` an unambiguous single source of truth that
         // the close-path manager binds to. A nonzero commitment means already registered.
