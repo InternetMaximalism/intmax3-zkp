@@ -146,6 +146,37 @@ over-withdraw (`sender_delta` range-proven + `totalEscrowed` underflow); can't d
 (`channel_id`) balance AND per-member encBalances, updated consistently per send? (c2c spends the base
 balance; the channel layer has encBalances.) Pin the consistency invariant + where a burn send updates both.
 
+### PRE-IMPLEMENTATION FACTS (verified 2026-06-24) — the burn Regev statement is THE soundness crux
+- **FACT 1 (consistency) — RESOLVED:** `wallet_core::build_inter_channel_send` (1548-1554) debits BOTH
+  `enc_balances[sender]` (→ `after_ct`) AND `channel_fund.amount -= amount` in ONE `ChannelState`
+  transition; in-channel sends leave `channel_fund` unchanged (`ensure_same_channel_fund`,
+  state_update_verifier.rs:316). So `build_burn_send` MUST debit both by `amount` in one transition —
+  it is a FORK of `build_inter_channel_send` (the base Transfer recipient becomes
+  `calculate_recipient_from_address(member_L1)` (ADDRESS_TAG) instead of the destination member pk;
+  `destination_channel_id = BURN_CHANNEL_ID`). The SAME `Transfer{ADDRESS_TAG, amount}` is committed in
+  the small block's `tx_tree_root`/H2 AND later extracted by `single_withdrawal` — that IS the bind.
+- **FACT 2 (Regev burn statement) — SOUNDNESS-CRITICAL, NOT trivial reuse:** the E-2 ChannelUpdate AIR
+  FORCES `sender_delta plaintext == receiver_delta plaintext == amount` (transfer_stark.rs:22-24, 97-99;
+  `E2_SHAPE.expose_m=[_,_,true,true]`). `RegevProofPurpose` = {ChannelTx, ChannelUpdate, WithdrawClaim,
+  BalanceRefresh} — NO sender-only/burn variant. So a burn (sender debits `amount`, NO channel receiver)
+  CANNOT reuse E-2 with `receiver_delta=encrypt(0)` (fails the amount check). E-3 WithdrawClaim proves a
+  FULL ct decryption (`ct == amount`), not a partial debit (`after = before − amount`), so it doesn't fit
+  a partial burn either. **The burn needs a protocol-level decision:**
+  - **(i) New `ChannelBurn` Regev AIR** — a variant of E-2 dropping the `receiver_delta` column: prove
+    `before = after + sender_delta`, `sender_delta == amount`, sender-only. Cleanest semantics, but NEW
+    hand-rolled lattice AIR + prover + verifier + a new `RegevProofPurpose` — and per detail2 the hand-
+    rolled lattice constraints are pending independent audit, so adding an AIR carries audit weight.
+  - **(ii) Padding-receiver reuse of E-2** — `receiver_delta = encrypt(amount, RESERVED_BURN_PK)` to a
+    reserved sentinel Regev key no channel may register. E-2 passes (`receiver_delta == amount`); the
+    phantom credit is unclaimable (no channel holds `RESERVED_BURN_PK`); the real fund movement is the
+    base `withdrawNative`. MINIMAL code, but needs an explicit soundness argument: (1) `RESERVED_BURN_PK`
+    is truly unregisterable/unclaimable, (2) the phantom `receiver_delta` cannot be replayed/credited
+    anywhere, (3) the tx_leaf/settled_tx_chain binding stays sound with a sentinel receiver.
+  **ESCALATED (do not pick unilaterally for crypto fund code):** option (i) vs (ii) is a Regev-protocol
+  soundness decision needing lattice review. (ii) is far less code; (i) is cleaner but heavier+audit.
+  Resolve this BEFORE writing `build_burn_send`. Everything else (FACT 1 fork, base withdrawal reuse,
+  cosign, single_withdrawal, withdrawNative) is settled and ready once the Regev statement is chosen.
+
 ---
 
 ## RELATED FEATURE — Additional deposit (mid-channel top-up). Requested 2026-06-23.
