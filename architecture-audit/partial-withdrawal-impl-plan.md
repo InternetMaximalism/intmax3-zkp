@@ -104,6 +104,48 @@ BASE-layer withdrawal extraction (spend ADDRESS_TAG → single_withdrawal → Wi
 - Net: `build_channel_withdrawal` covers the base half; the channel-layer member-debit + the base⇔channel
   binding is the genuinely new fund-critical work. Heavy E2E validation required.
 
+### (a) DESIGN — FINAL (verified against the close-path binding, 2026-06-24)
+Investigated the close binding (`close_circuit.rs` H1/IMCH recompute + balance-proof `settled_tx_chain`
+connect; `withdrawal_claim_circuit.rs` + `decryption_gadget.rs` per-member decrypt; `state_update_verifier.rs`
+inter-channel send). Result: (a) is sound and mostly REUSE. One **single `amount`** is bound at every step:
+
+1. **Channel-layer member debit (per-member attribution — THE soundness crux):**
+   `state_update_verifier.rs:556-582` (InterChannelSend) locates the sender slot by `source_pk_g`, then
+   `ensure_slot_unchanged` on ALL OTHER slots (556-563) — **a member can only debit their OWN encBalance.**
+   The `channel_update_zkp` proves `enc_balances[sender]_after = before + sender_delta` with `sender_delta`
+   encrypting `-amount` (RegevStatement::ChannelUpdate, 569-582), and the channel total decreases by
+   `amount` (540-543). N-of-N agree → new `BalanceState`/`H1'` commits the reduced encBalance + advanced
+   `settled_tx_chain` (same H1 recompute the close proof checks, `h1_gadget.rs`).
+2. **Base settlement of the SAME Transfer:** the burn `Transfer { recipient=calculate_recipient_from_address(member_L1), amount }`
+   folds its `aux_data`=tx_leaf_hash into `settled_tx_chain` (send_tx circuit, gated on valid spend) and
+   spends the base account by `amount`.
+3. **Base withdrawal:** `single_withdrawal` extracts the burn Transfer → `withdrawNative` pays member_L1.
+4. **The bind:** `H1'` (signed) commits BOTH the reduced encBalance share AND the `settled_tx_chain` (the
+   base Transfer). `withdrawNative.amount == Transfer.amount == sender_delta debit == member encBalance
+   reduction`. ⇒ a member withdraws EXACTLY their proven share. Over-claim + cross-member-claim CLOSED at
+   the proof level (same guarantee class as `withdrawClaimZKP`, but mid-channel + partial).
+
+**CORRECTION to the earlier "no extra binding needed" note:** per-member attribution is NOT automatic from
+the base spend (which debits the channel TOTAL); it comes from the channel-layer burn update's `sender_delta`
+on the sender's slot with all other slots fixed. The base withdrawal binds to it via the shared `amount`/
+Transfer + `H1'`/`settled_tx_chain`.
+
+**NEW code (small, channel-layer):** a **"ChannelWithdraw/burn" variant of `InterChannelSend`** that drops the
+RECEIVER side — `sender_delta` debits the sender slot, NO `recipient_pk`/`receiver_delta` (value exits to L1,
+credits no channel), channel total −= `amount`; reuse the Regev verifier + `channel_update_zkp`. Plus the
+burn-update digest (signed like any state update).
+**REUSE (no new crypto):** base withdrawal (`build_channel_withdrawal`/`single_withdrawal`/`WithdrawalProcessor`/
+`withdrawNative`, partial supported); the per-slot Regev update machinery; N-of-N cosign (`cmd_cosign*`).
+
+**Soundness checklist (mirrors close):** can't take another's share (only sender slot changes); can't
+over-withdraw (`sender_delta` range-proven + `totalEscrowed` underflow); can't double-withdraw
+(`SettledTransfer::nullifier` + `withdrawalNullifierUsed`); channel stays open (normal signed state update;
+`stateVersion`/`settled_tx_chain` advance).
+
+**ONE open question before coding `build_burn_send`:** does the channel maintain BOTH a base account
+(`channel_id`) balance AND per-member encBalances, updated consistently per send? (c2c spends the base
+balance; the channel layer has encBalances.) Pin the consistency invariant + where a burn send updates both.
+
 ---
 
 ## RELATED FEATURE — Additional deposit (mid-channel top-up). Requested 2026-06-23.
