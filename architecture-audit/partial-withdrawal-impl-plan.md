@@ -41,3 +41,51 @@ A single sent transfer must be consumed **exactly once**: either RECEIVED by a d
 - Exact `BURN_CHANNEL_ID` value + whether `ChannelId::new` should reject it globally vs only at registration.
 - Whether burn routing keys on `destination_channel_id == BURN_CHANNEL_ID`, on recipient `ADDRESS_TAG`, or BOTH (defense in depth) — resolve in phase 0.
 - Single-leg (current impl is single inter-channel `receiver_deltas[0]`; abstract2-1 bulk is ahead of impl) vs bulk burn legs — start single-leg.
+
+## Status (2026-06-23)
+- Phase 0 DONE (`tests/partial_withdrawal_exclusivity.rs`, committed `e5aa15e`): exclusivity is recipient-tag-driven (receive XOR withdraw); proven disjoint. Build on the existing `single_withdrawal` path.
+- Phase 1 DONE (committed `c53384d`): `BURN_CHANNEL_ID` constant + registration guards (Rust `ChannelRecord::validate` + Solidity `registerChannel`). Both layers compile.
+- Phase 2 LARGELY SUBSUMED: the validity circuit updates the SOURCE `ChannelLeaf` only (no auto-credit of destinations; destination credit is the receiver's voluntary `receive_transfer`, which a burn leg's `ADDRESS_TAG` recipient cannot satisfy). So a burn send is settled normally and extracted by `single_withdrawal` — no new routing circuit. Phase 2 reduces to: verify the validity settlement is unaffected by `dest = BURN_CHANNEL_ID`.
+- Phase 3 (send-path command) + Phase 4 (heavy E2E + adversarial tests) REMAIN. The c2c fixture (`generate_c2c_fixture.rs`) already proves a channel→L1 withdrawal end-to-end (sender-side adaptation needed).
+
+---
+
+## RELATED FEATURE — Additional deposit (mid-channel top-up). Requested 2026-06-23.
+
+Symmetric to partial withdrawal: deposit more ETH to L1 **mid-channel** and add it to the channel
+balance, WITHOUT re-creating the channel. Partial withdrawal is the EXIT half; additional deposit is
+the ENTRY half. Both reuse existing base-layer machinery.
+
+**Mechanism:** a member calls L1 `IntmaxRollup.deposit{value}(recipient, tokenIndex, amount, auxData)`
+(escrows real ETH, `totalEscrowed += amount`, appends to the deposit tree); the channel then folds
+that deposit into its balance state via `receive_deposit_circuit` (Merkle-proves the deposit at
+`deposit_index` against `deposit_tree_root`, mints the amount, marks the deposit nullifier), advancing
+`stateVersion` with N-of-N member agreement. This is exactly what `setup-backing` does at genesis,
+repeated MID-CHANNEL.
+
+**Reuse (do not reinvent):** `IntmaxRollup.deposit`, the deposit tree, `receive_deposit_circuit`
+(C15-verified: deposit nullifier = leaf hash; binds `deposit_index`+`block_number`; double-fold blocked
+by the nullifier tree), `Deposit::nullifier()`.
+
+**Open questions (investigate first):**
+- The channel uses per-member Regev `encBalances`; does a deposit fold into a member's encBalance via a
+  channel-specific (Regev) deposit-fold, or does base `receive_deposit` suffice? Pin where the plaintext
+  L1 deposit amount is added to the (encrypted) channel balance, and which member is credited.
+- Recipient form of a channel deposit (the `recipient` Bytes32) must point to the channel/member identity
+  (USER_ID_TAG form), NOT `ADDRESS_TAG` (which is withdraw-only by the phase-0 exclusivity).
+- N-of-N agreement on the post-deposit state (abstract2 §3.3.2b accepts the deposit mint without a
+  per-deposit signature, but the resulting `BalanceState` update is member-agreed).
+
+**Threat model:**
+
+| Attack | Mitigation |
+|---|---|
+| Fold a deposit not escrowed on L1 | deposit Merkle inclusion vs on-chain `deposit_tree_root`; `deposit()` escrows real ETH. |
+| Double-fold the same deposit (mint 2×) | `Deposit::nullifier()` + nullifier tree (C15 — double-insertion blocked). |
+| Credit a non-depositor / wrong amount | recipient binding + amount folded verbatim from the on-chain deposit. |
+| Top-up racing a close | close freeze; a deposit fold must not race a finalized close. |
+
+**Phases:** A. investigate the channel deposit-fold (Regev) + recipient form + which member is credited.
+B. `channel_member` top-up command (L1 `deposit` → `receive_deposit` fold → N-of-N agree). C. tests
+(happy: channel balance += deposit, channel stays open; adversarial: double-fold reject, unescrowed-
+deposit reject, post-close reject) — happy E2E is heavy (opt-in `INTMAX_RUN_HEAVY_E2E`).
