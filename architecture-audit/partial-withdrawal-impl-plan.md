@@ -82,6 +82,28 @@ dest=BURN_CHANNEL_ID, no B-side credit) + `cmd_partial_withdraw` (cosign-inter-t
 member partial-withdraws real ETH, channel stays open) + adversarial (double-withdraw, over-withdraw, a
 member withdrawing ANOTHER member's share must FAIL, non-member, post-freeze, register-at-burn-id).
 
+### BIG REUSE FINDING (2026-06-24): `build_channel_withdrawal` already exists
+`wallet_core::build_channel_withdrawal(&ChannelWithdrawalParams, ...)` (wallet_core.rs:3034) ALREADY
+builds a complete channel→L1 withdrawal and **already supports a PARTIAL `withdrawal_amount`** (legacy
+fixture: deposit 10, withdraw 3 — doc: "The withdrawal must not exceed it"). Params: `channel_id`,
+`deposit_amount`, `withdrawal_amount` (the partial amount), `withdrawal_recipient` (L1 addr),
+`deposit_salt`. Used by `generate_withdrawal_fixture.rs` and the close-lifecycle `cmd_withdraw`. So the
+BASE-layer withdrawal extraction (spend ADDRESS_TAG → single_withdrawal → WithdrawalProcessor →
+`withdrawNative`) for a partial amount is DONE and tested.
+- For the close path, `withdrawal_recipient` = the settlement manager. For PARTIAL withdrawal,
+  `withdrawal_recipient` = the withdrawing MEMBER's L1 address, and there is NO close/manager — pay the
+  rollup `withdrawNative` straight to the member.
+- WHAT (a) STILL NEEDS on top: the CHANNEL-LAYER binding so the base withdrawal debits the withdrawing
+  MEMBER's encBalance share (not just the channel base total). I.e. couple a cosigned channel-layer burn
+  send (`sender_delta = -amount` on the member's encBalance, reusing the inter-channel send sender proof)
+  to the `build_channel_withdrawal` base withdrawal of the SAME amount, and bind them (the channel
+  BalanceState debit ⇔ the base settled-transfer the `single_withdrawal` proves). This base⇔channel
+  binding is the core remaining design+code (analogous to how the close proof binds the channel balance
+  to the base withdrawal). Investigate how the close path binds `finalBalanceState` ⇔ base withdrawal and
+  mirror it mid-channel.
+- Net: `build_channel_withdrawal` covers the base half; the channel-layer member-debit + the base⇔channel
+  binding is the genuinely new fund-critical work. Heavy E2E validation required.
+
 ---
 
 ## RELATED FEATURE — Additional deposit (mid-channel top-up). Requested 2026-06-23.
