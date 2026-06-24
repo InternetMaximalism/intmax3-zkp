@@ -277,3 +277,23 @@ registration (Rust `ChannelRecord::validate` + Solidity) as defense-in-depth (pr
   base balance proof must reflect the burn send; this base⇔channel reconciliation is the next concrete
   piece) → N-of-N cosign → finalize → `withdrawNative`. **step 5** heavy anvil E2E (the long pole) +
   the dedicated attacker-subagent review (CLAUDE.md) before merge.
+
+### STEP 4 PRECISE SCOPING (2026-06-24) — the (a) binding needs the channel's LIVE base balance proof
+`cmd_withdraw` (channel_member.rs:1017) builds the base withdrawal via `build_channel_withdrawal`
+(wallet_core.rs:3092), which constructs a SELF-CONTAINED lifecycle (its OWN registration + deposit +
+ADDRESS_TAG send + `single_withdrawal`) — it is NOT integrated with the channel's live `ChannelState` nor
+with `build_burn_send`'s burn `Transfer`. So for the (a) cryptographic binding, `cmd_partial_withdraw`
+CANNOT just call `build_burn_send` + `build_channel_withdrawal` side-by-side (that is two independent
+proofs moving the same amount — an attacker could run the base withdrawal WITHOUT the encBalance debit;
+unsound). The (a) flow needs:
+  1. `build_burn_send` → the channel small block (E-2 member debit + the burn `Transfer` in the TxV2),
+     N-of-N cosign, post + the BP validity proof SETTLES the burn `Transfer`.
+  2. A base BALANCE proof of the CHANNEL's LIVE account AFTER that settlement (the burn `Transfer` in its
+     `settled_tx_chain`), then `single_withdrawal` over THAT proof → `withdrawNative`.
+  3. The bind = `H1'` (N-of-N signed) commits the encBalance debit AND the `settled_tx_chain` (the burn
+     `Transfer`); `single_withdrawal` extracts the same `Transfer`. This is exactly how the CLOSE proof
+     binds `finalBalanceState ⇄ base withdrawal`, applied mid-channel.
+This is a DEEP integration (a new base-withdrawal path over the channel's live state, not a fork of the
+standalone `build_channel_withdrawal`), + the heavy anvil E2E (step 5). NOT a trivial fork; needs a fresh
+focused fund-implementation session. The channel-layer half (build_burn_send) is done + validated and is
+the foundation; the base-half integration + E2E is the remaining major work.
