@@ -209,7 +209,25 @@ Unchanged from abstract2 §3.2 (no small block created).
 
 #### 3.3.2b Signature-free exceptions (deposit / close burn)
 
-Unchanged from abstract2 §3.3.2b.
+Unchanged from abstract2 §3.3.2b. Also applies to mid-channel L1 deposit import (§3.3.2c):
+the deposit itself requires no per-deposit signature (accepted by the `receive_deposit` balance
+circuit); the resulting channel state update is N-of-N co-signed.
+
+#### 3.3.2c Mid-channel L1 deposit import (new)
+
+- **actor:** depositing member (generates `receive_deposit` balance proof) + all N-of-N co-signers
+- **precondition:** `channelStatus == Active`; deposit is Merkle-included in finalized `deposit_tree_root`
+- **flow:**
+  1. Member calls `IntmaxRollup.deposit{value}(recipient, tokenIndex, amount, auxData)` on L1, escrowing real ETH.
+  2. Deposit is included in a block by the global BP; `deposit_tree_root` updated.
+  3. Member generates `receive_deposit` balance proof (recursive IVC, `ReceiveDepositCircuit`). Nullifier tree insertion prevents double-fold.
+  4. Two-step channel state transition (mirrors `InterChannelFundImport` + `ReceiverBundleApply`):
+     - **Step 1 (fund import):** `channelFund.amount += amount`, `unallocated += amount`, `settledTxChain' = hash(settledTxChain, deposit_nullifier)`, `shared_native_nullifier_root` advances. All `encBalances` unchanged.
+     - **Step 2 (bundle apply):** `encBalances[recipient_slot] += encrypt(amount, recipient_RegevPk)`, `unallocated -= amount`, `pending_adds[recipient_slot] += 1`.
+  5. All N members co-sign both resulting states (`signSmallBlock`-equivalent).
+- **post-condition:** `channelFund.amount` reflects total (genesis deposits + mid-channel deposits); `settledTxChain` includes all deposit nullifiers; channel remains `Active`.
+- **trust anchor:** `verify_channel_backing` binds the balance proof's `settled_tx_chain` to the channel state's chain (same seam as genesis backing, detail2 §F-1).
+- **threat mitigations:** (T1) unescrowded deposit → Merkle inclusion vs finalized tree; (T2) double-fold → `Deposit::nullifier()` + nullifier tree; (T3) wrong member/amount → recipient binding + N-of-N cosign; (T4) racing close → channel must be `Active`; (T5) fund inflation → `verify_channel_backing` + on-chain `receivedChannelFunds` ceiling.
 
 #### 3.3.3 `produceMediumBlock` — **actor: global `BP`**
 - in: `SubBlock[]` from participating channels (each: `SignedSmallBlock` + `BulkInterChannelTx`)
@@ -327,6 +345,18 @@ Unchanged from abstract2 §4.4 (close game, timeouts, `withdrawClaimZKP`, `lateB
 
 ### 4.5 Balance confidentiality
 Unchanged boundary from abstract2 §4.5: per-leg `amount` plaintext at base layer; intra-channel amounts encrypted; channel total visible via `balanceProof` PI.
+
+### 4.6 Mid-channel deposit safety (§3.3.2c)
+
+All five properties (§4.1–§4.5) are preserved by mid-channel L1 deposit import:
+
+1. **Authorization (§4.1):** The post-deposit channel state is N-of-N co-signed; no unilateral fund injection.
+2. **No double-spend (§4.2):** `Deposit::nullifier()` + nullifier tree insertion (C15 circuit constraint) prevents double-fold. `settledTxChain` advances by the deposit nullifier, making the chain unique.
+3. **Solvency (§4.3):** `channelFund.amount` increases by the deposited amount; `encBalances[recipient]` increases by the same. `provenTotal` in the Lean model tracks `Σ encBal`; both increase equally. On-chain `receivedChannelFunds` (authoritative ceiling) tracks real ETH pulled from `IntmaxRollup`.
+4. **Exit / liveness (§4.4):** The close game captures the post-deposit state; `channelFundAmount` in `CloseIntent` reflects the total (genesis + deposits). If a close races a deposit, the deposited ETH is escrowed in `IntmaxRollup` and recoverable via `submitPostCloseClaim`.
+5. **Confidentiality (§4.5):** The deposit `amount` is plaintext at the base layer (an L1 escrow is public by nature); per-member channel balances remain Regev-encrypted.
+
+Formal proof: `ChannelSafety21.lean` §7a — `l1_deposit_preserves_validity` shows `ValidEncState21` is maintained; `end_to_end_close_safety21` (§7) is unchanged because `L1CloseRule` operates on `provenTotal` (which correctly includes deposits).
 
 ---
 

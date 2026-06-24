@@ -322,6 +322,75 @@ theorem end_to_end_close_safety21
     ∧ final.total = g.cap :=
   end_to_end_close_safety2 M hdisc i hi final.toV2 hconf g hcap hclaims hrule hburn
 
+/-! ## §7a L1 deposit import (mid-channel top-up, abstract2-1 §3.3.2c) -/
+
+/-- L1 deposit import credits a single recipient with a non-negative amount and
+    increases `provenTotal` by the same. Mirrors `applyEntryCredit` but is a
+    standalone state transition (not folded inside a bulk receive). -/
+def applyL1DepositImport (s : EncBalanceState21) (recipient : Member)
+    (amount : Int) (recipientDelta : Ct) : EncBalanceState21 where
+  encBal := updCt s.encBal recipient recipientDelta
+  provenTotal := s.provenTotal + amount
+  version := s.version + 1
+  settledChain := s.settledChain
+
+/-- The deposit amount is non-negative and the ciphertext encrypts exactly that amount. -/
+def L1DepositImportVerified (amount : Int) (recipientDelta : Ct) : Prop :=
+  0 ≤ amount ∧ recipientDelta.pt = amount
+
+theorem applyL1DepositImport_total (s : EncBalanceState21) (recipient : Member)
+    (amount : Int) (recipientDelta : Ct) :
+    (applyL1DepositImport s recipient amount recipientDelta).total
+      = s.total + recipientDelta.pt :=
+  updCt_total s.encBal recipient recipientDelta
+
+theorem l1_deposit_preserves_validity
+    (s : EncBalanceState21) (hvalid : ValidEncState21 s)
+    (recipient : Member) (amount : Int) (recipientDelta : Ct)
+    (hdeposit : L1DepositImportVerified amount recipientDelta) :
+    ValidEncState21 (applyL1DepositImport s recipient amount recipientDelta)
+    ∧ (applyL1DepositImport s recipient amount recipientDelta).provenTotal
+        = s.provenTotal + amount
+    ∧ (applyL1DepositImport s recipient amount recipientDelta).total
+        = s.total + amount := by
+  obtain ⟨hnn, htot⟩ := hvalid
+  obtain ⟨hamtnn, hrd⟩ := hdeposit
+  refine ⟨⟨?_, ?_⟩, ?_, ?_⟩
+  · -- All balances non-negative
+    intro j
+    show 0 ≤ (updCt s.encBal recipient recipientDelta j).pt
+    have hnj : 0 ≤ (s.encBal j).pt := hnn j
+    have hnr : 0 ≤ (s.encBal recipient).pt := hnn recipient
+    by_cases hj : j = recipient
+    · simp [updCt, hj]; omega
+    · simp [updCt, hj]; exact hnj
+  · -- total = provenTotal
+    dsimp [ValidEncState, applyL1DepositImport, EncBalanceState21.toV2]
+    have h1 := updCt_total s.encBal recipient recipientDelta
+    have htot' : (s.encBal .m0).pt + (s.encBal .m1).pt + (s.encBal .m2).pt
+               = s.provenTotal := htot
+    simp only [EncBalanceState.total, EncBalanceState.bal, hrd]
+    omega
+  · -- provenTotal increases by amount (definitional)
+    rfl
+  · -- total increases by amount (via updCt_total)
+    have h := applyL1DepositImport_total s recipient amount recipientDelta
+    rw [hrd] at h; exact h
+
+/-! ### Settled-tx-chain step for L1 deposit import -/
+
+def applyL1DepositImportChain (s : EncBalanceState21) (recipient : Member)
+    (amount : Int) (recipientDelta : Ct) (depositNullifier : Nat)
+    (hash2 : Nat → Nat → Nat) : EncBalanceState21 :=
+  let s' := applyL1DepositImport s recipient amount recipientDelta
+  { s' with settledChain := hash2 s.settledChain depositNullifier }
+
+theorem l1_deposit_chain_step
+    (hash2 : Nat → Nat → Nat) (s : EncBalanceState21) (recipient : Member)
+    (amount : Int) (recipientDelta : Ct) (depositNullifier : Nat) :
+    (applyL1DepositImportChain s recipient amount recipientDelta depositNullifier hash2).settledChain
+      = hash2 s.settledChain depositNullifier := rfl
+
 /-! ## §8 Sanity -/
 
 section Sanity

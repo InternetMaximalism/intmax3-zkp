@@ -175,7 +175,8 @@ where
     /// P2b: the recursive `ListCircuit` proof carrying the bp IMSB single-sig list commitment `C`.
     /// Verified CONDITIONALLY (gated on the computed `final.bp_sig_chain != 0`, decision D3).
     pub list_proof: ProofWithPublicInputsTarget<D>,
-    /// Dummy `ListCircuit` proof for the no-signing-block span (chain == 0 ⇒ verification skipped).
+    /// Dummy `ListCircuit` proof for the no-signing-block span (chain == 0 ⇒ verification
+    /// skipped).
     pub list_dummy: ProofWithPublicInputs<F, C, D>,
     pub prover: AddressTarget,
 }
@@ -224,11 +225,8 @@ where
         }
         let chain_is_zero = final_bp_sig_chain.is_zero::<F, D, Bytes32>(&mut builder);
         let should_verify_list = builder.not(chain_is_zero);
-        let list_proof = add_proof_target_and_conditionally_verify(
-            list_vd,
-            &mut builder,
-            should_verify_list,
-        );
+        let list_proof =
+            add_proof_target_and_conditionally_verify(list_vd, &mut builder, should_verify_list);
         // The list circuit's public output [0..8] is its commitment C. When verifying, assert
         // C == final.bp_sig_chain.
         let list_commitment = Bytes32Target::from_slice(&list_proof.public_inputs[0..BYTES32_LEN]);
@@ -365,7 +363,8 @@ mod tests {
         let single = SingleSigCircuit::new();
         let list = ListCircuit::new(&single.verifier_data());
 
-        let validity_circuit = ValidityCircuit::<F, C, D>::new(&block_chain_vd, &list.verifier_data());
+        let validity_circuit =
+            ValidityCircuit::<F, C, D>::new(&block_chain_vd, &list.verifier_data());
         let prover = Address::default();
         let validity_proof = validity_circuit
             .prove(&block_hash_chain_proof, None, prover)

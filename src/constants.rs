@@ -24,12 +24,12 @@ pub const CHANNEL_TREE_HEIGHT: usize = CHANNEL_ID_BITS;
 // the type is value-preserving on native and portable to wasm.
 pub const MAX_NUM_CHANNELS: u64 = 1u64 << CHANNEL_ID_BITS;
 
-/// SECURITY: reserved channel id for the **partial-withdrawal burn destination** (abstract2-1 §2.6).
-/// A base-layer transfer routed to this id is an L1 exit (settled as a `Withdrawal`), never a channel
-/// credit. No real channel may register here — `ChannelRecord::validate` and the on-chain
-/// `registerChannel` both reject it. The all-ones 32-bit sentinel stays disjoint from any allocatable
-/// channel id. NOTE: the exclusivity that prevents a transfer from being both withdrawn and credited
-/// is enforced by the recipient TAG (`ADDRESS_TAG` ⇔ withdraw-only; see
+/// SECURITY: reserved channel id for the **partial-withdrawal burn destination** (abstract2-1
+/// §2.6). A base-layer transfer routed to this id is an L1 exit (settled as a `Withdrawal`), never
+/// a channel credit. No real channel may register here — `ChannelRecord::validate` and the on-chain
+/// `registerChannel` both reject it. The all-ones 32-bit sentinel stays disjoint from any
+/// allocatable channel id. NOTE: the exclusivity that prevents a transfer from being both withdrawn
+/// and credited is enforced by the recipient TAG (`ADDRESS_TAG` ⇔ withdraw-only; see
 /// `tests/partial_withdrawal_exclusivity.rs`); `BURN_CHANNEL_ID` is the explicit routing marker.
 pub const BURN_CHANNEL_ID: u32 = 0xFFFF_FFFF;
 

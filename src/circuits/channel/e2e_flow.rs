@@ -51,11 +51,11 @@ use crate::{
     common::{
         balance_state::{BalanceState, settled_tx_chain_push, tx_leaf_hash},
         channel::{
-            ChannelFund, ChannelId, ChannelMember, ChannelRecord, ChannelState,
-            ChannelStatus, ChannelTransitionKind, ChannelTx, CloseIntent, CloseWithdrawal,
-            InterChannelTx, MemberSignature, MerkleInclusionProof, PostCloseIncomingClaim,
-            ProofBackend, ReceiverBalanceDelta, SignedSmallBlock, SmallBlockRootMessage,
-            TransitionProofRole, WithdrawalClaim,
+            ChannelFund, ChannelId, ChannelMember, ChannelRecord, ChannelState, ChannelStatus,
+            ChannelTransitionKind, ChannelTx, CloseIntent, CloseWithdrawal, InterChannelTx,
+            MemberSignature, MerkleInclusionProof, PostCloseIncomingClaim, ProofBackend,
+            ReceiverBalanceDelta, SignedSmallBlock, SmallBlockRootMessage, TransitionProofRole,
+            WithdrawalClaim,
         },
     },
     constants::MAX_CHANNEL_MEMBERS,

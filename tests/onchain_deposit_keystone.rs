@@ -1,21 +1,21 @@
 //! KEYSTONE: the Rust deposit witness exactly mirrors a REAL on-chain ETH deposit.
 //!
 //! This pins the values produced by an actual `IntmaxRollup.deposit{value}` call on a local anvil
-//! (real ETH escrowed: `totalEscrowed` 0 -> 140) and asserts the Rust `Deposit::hash_with_prev_hash`
-//! reproduces the on-chain `Deposited.newDepositHashChain` bit-for-bit. If this holds, a Rust
-//! balance proof built from these fields is backed by a deposit that REALLY happened on-chain — not
-//! a `BlockWitnessGenerator` fabrication. (The self-driving anvil version lives in the channel
-//! deposit-backing flow; this fast test locks the contract<->Rust hash equivalence.)
+//! (real ETH escrowed: `totalEscrowed` 0 -> 140) and asserts the Rust
+//! `Deposit::hash_with_prev_hash` reproduces the on-chain `Deposited.newDepositHashChain`
+//! bit-for-bit. If this holds, a Rust balance proof built from these fields is backed by a deposit
+//! that REALLY happened on-chain — not a `BlockWitnessGenerator` fabrication. (The self-driving
+//! anvil version lives in the channel deposit-backing flow; this fast test locks the
+//! contract<->Rust hash equivalence.)
 //!
 //! Captured from anvil (Foundry 1.5.1, IntmaxRollup @ 0xCf7E…0Fc9, tx 0x735a…56ad):
 //!   deposit(recipient=0x1111…1111, tokenIndex=0, amount=140, aux=0) value=140 wei
-//!   Deposited.newDepositHashChain = 0x10e6fb6cab835cddf7de29b5e04d77060ae245ef825d86ab6c07d4ab4518c1cf
+//!   Deposited.newDepositHashChain =
+//! 0x10e6fb6cab835cddf7de29b5e04d77060ae245ef825d86ab6c07d4ab4518c1cf
 
 use intmax3_zkp::{
     common::deposit::Deposit,
-    ethereum_types::{
-        address::Address, bytes32::Bytes32, u256::U256, u32limb_trait::U32LimbTrait,
-    },
+    ethereum_types::{address::Address, bytes32::Bytes32, u32limb_trait::U32LimbTrait, u256::U256},
 };
 use std::{
     path::PathBuf,
@@ -48,7 +48,9 @@ fn tool_present(bin: &str) -> bool {
 }
 
 fn run_capture(cmd: &mut Command, label: &str) -> String {
-    let out = cmd.output().unwrap_or_else(|e| panic!("{label} failed to start: {e}"));
+    let out = cmd
+        .output()
+        .unwrap_or_else(|e| panic!("{label} failed to start: {e}"));
     if !out.status.success() {
         panic!(
             "{label} failed ({:?})\nstdout:\n{}\nstderr:\n{}",
@@ -78,7 +80,9 @@ fn word(data: &str, i: usize) -> &str {
 #[test]
 fn self_driving_real_anvil_deposit_matches_rust() {
     if !(tool_present("anvil") && tool_present("forge") && tool_present("cast")) {
-        eprintln!("[skip] foundry (anvil/forge/cast) not found — skipping on-chain deposit keystone");
+        eprintln!(
+            "[skip] foundry (anvil/forge/cast) not found — skipping on-chain deposit keystone"
+        );
         return;
     }
     // anvil dev account[0] (public throwaway key; NEVER a real key).
@@ -114,14 +118,24 @@ fn self_driving_real_anvil_deposit_matches_rust() {
 
     // Deploy IntmaxRollup (FixtureLib reads contracts/test/data/*.json).
     let deploy_out = run_capture(
-        Command::new("forge")
-            .current_dir(contracts_dir())
-            .args(["script", "script/Deploy.s.sol", "--rpc-url", &rpc, "--private-key", ANVIL0, "--broadcast"]),
+        Command::new("forge").current_dir(contracts_dir()).args([
+            "script",
+            "script/Deploy.s.sol",
+            "--rpc-url",
+            &rpc,
+            "--private-key",
+            ANVIL0,
+            "--broadcast",
+        ]),
         "forge deploy",
     );
     let rollup = deploy_out
         .lines()
-        .find_map(|l| l.split("IntmaxRollup").nth(1).and_then(|s| s.split("0x").nth(1)))
+        .find_map(|l| {
+            l.split("IntmaxRollup")
+                .nth(1)
+                .and_then(|s| s.split("0x").nth(1))
+        })
         .map(|s| format!("0x{}", &s.trim()[..40]))
         .expect("parse IntmaxRollup address from forge output");
     eprintln!("[keystone] IntmaxRollup @ {rollup}");
@@ -129,15 +143,29 @@ fn self_driving_real_anvil_deposit_matches_rust() {
     // REAL ETH deposit: deposit{value:140}(recipient, ETH_TOKEN_INDEX=0, 140, aux=0).
     const RECIP: &str = "0x2222222222222222222222222222222222222222222222222222222222222222";
     const AMOUNT: u64 = 140;
-    let esc_before = cast(&rpc, &["call", &rollup, "totalEscrowed()(uint256)"], "escrow before");
+    let esc_before = cast(
+        &rpc,
+        &["call", &rollup, "totalEscrowed()(uint256)"],
+        "escrow before",
+    );
     assert_eq!(esc_before.trim(), "0", "escrow must start at 0");
 
     let tx_json = run_capture(
         Command::new("cast").args([
-            "send", &rollup, "deposit(bytes32,uint32,uint256,bytes32)", RECIP, "0",
+            "send",
+            &rollup,
+            "deposit(bytes32,uint32,uint256,bytes32)",
+            RECIP,
+            "0",
             &AMOUNT.to_string(),
             "0x0000000000000000000000000000000000000000000000000000000000000000",
-            "--value", &AMOUNT.to_string(), "--private-key", ANVIL0, "--rpc-url", &rpc, "--json",
+            "--value",
+            &AMOUNT.to_string(),
+            "--private-key",
+            ANVIL0,
+            "--rpc-url",
+            &rpc,
+            "--json",
         ]),
         "cast deposit",
     );
@@ -149,8 +177,16 @@ fn self_driving_real_anvil_deposit_matches_rust() {
         .to_string();
 
     // REAL custody: totalEscrowed grew by the deposited ETH.
-    let esc_after = cast(&rpc, &["call", &rollup, "totalEscrowed()(uint256)"], "escrow after");
-    assert_eq!(esc_after.trim(), AMOUNT.to_string(), "deposited ETH must be escrowed");
+    let esc_after = cast(
+        &rpc,
+        &["call", &rollup, "totalEscrowed()(uint256)"],
+        "escrow after",
+    );
+    assert_eq!(
+        esc_after.trim(),
+        AMOUNT.to_string(),
+        "deposited ETH must be escrowed"
+    );
 
     // Read the Deposited event back from the receipt (everything from the live chain).
     let receipt = cast(&rpc, &["receipt", &txhash, "--json"], "receipt");
@@ -165,7 +201,11 @@ fn self_driving_real_anvil_deposit_matches_rust() {
     let recipient = format!("0x{}", word(data, 1));
     let token_index = u32::from_str_radix(word(data, 2).trim_start_matches('0'), 16).unwrap_or(0);
     let amt_hex = word(data, 3).trim_start_matches('0');
-    let amount: u64 = if amt_hex.is_empty() { 0 } else { u64::from_str_radix(amt_hex, 16).unwrap() };
+    let amount: u64 = if amt_hex.is_empty() {
+        0
+    } else {
+        u64::from_str_radix(amt_hex, 16).unwrap()
+    };
     let aux = format!("0x{}", word(data, 4));
     let onchain_chain = format!("0x{}", word(data, 5));
 
@@ -188,7 +228,9 @@ fn self_driving_real_anvil_deposit_matches_rust() {
         onchain_chain,
         "Rust deposit_hash_chain must reproduce the LIVE on-chain depositHashChain (no simulation gap)"
     );
-    eprintln!("[keystone] OK: real ETH deposit escrowed {AMOUNT}; Rust hash == on-chain {onchain_chain}");
+    eprintln!(
+        "[keystone] OK: real ETH deposit escrowed {AMOUNT}; Rust hash == on-chain {onchain_chain}"
+    );
 }
 
 #[test]

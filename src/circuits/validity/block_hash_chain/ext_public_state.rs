@@ -46,16 +46,17 @@ pub struct ExtendedPublicState {
     pub channel_reg_hash_chain: Bytes32,
     /// P2b block-producer IMSB-signature list-commitment accumulator. The order-sensitive Poseidon
     /// hash chain (`poseidon_sig::list`) over every signing block's `(IMSB_digest, bp_pk_g)` pair,
-    /// folded inside `update_channel_tree` for the block-producer slot of each block that applies a
-    /// member signature. Starts at `Bytes32::default()` (the empty list) at the validity span's
-    /// initial state. The validity circuit conditionally verifies the matching `ListCircuit` proof
-    /// and asserts `C == final.bp_sig_chain` (D3) — so every folded pair was a verified Poseidon
-    /// single-sig.
+    /// folded inside `update_channel_tree` for the block-producer slot of each block that applies
+    /// a member signature. Starts at `Bytes32::default()` (the empty list) at the validity
+    /// span's initial state. The validity circuit conditionally verifies the matching
+    /// `ListCircuit` proof and asserts `C == final.bp_sig_chain` (D3) — so every folded pair
+    /// was a verified Poseidon single-sig.
     ///
-    /// SECURITY: this is an ACCUMULATED value (not a prover flag): it is computed from the per-block
-    /// `bp_pk_g`/`signed_digest` wires that are themselves bound to `member_pubkeys_root` /
-    /// `tx_tree_root`. A non-zero final value forces the list-proof verification on (A8 truncation
-    /// guard); a zero final value means no block in the span applied a signature.
+    /// SECURITY: this is an ACCUMULATED value (not a prover flag): it is computed from the
+    /// per-block `bp_pk_g`/`signed_digest` wires that are themselves bound to
+    /// `member_pubkeys_root` / `tx_tree_root`. A non-zero final value forces the list-proof
+    /// verification on (A8 truncation guard); a zero final value means no block in the span
+    /// applied a signature.
     pub bp_sig_chain: Bytes32,
 }
 

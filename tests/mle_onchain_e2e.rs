@@ -88,11 +88,12 @@ fn validity_proof_mle_onchain_e2e() {
     // Step 2: ACTUALLY verify the freshly generated fixture on-chain via Forge.
     //
     // B-1: previously this test asserted only that mle_fixture.json EXISTS, so a broken MLE proof
-    // in the fixture would still pass — the docstring's "verify on-chain via MleVerifier" was a lie.
-    // We now drive the real Solidity `MleVerifier` against the just-generated fixture: a corrupted or
-    // unsound proof makes `forge test` exit non-zero, which `run_checked` turns into a panic (=this
-    // test fails). `MleFinalizeE2ETest` additionally drives the full postBlock→finalize path with
-    // MLE verification ON, so the fixture is exercised through the production finalize entry point.
+    // in the fixture would still pass — the docstring's "verify on-chain via MleVerifier" was a
+    // lie. We now drive the real Solidity `MleVerifier` against the just-generated fixture: a
+    // corrupted or unsound proof makes `forge test` exit non-zero, which `run_checked` turns
+    // into a panic (=this test fails). `MleFinalizeE2ETest` additionally drives the full
+    // postBlock→finalize path with MLE verification ON, so the fixture is exercised through the
+    // production finalize entry point.
     // -----------------------------------------------------------------------
     eprintln!("[e2e] Step 2: on-chain verification via Forge (MleVerifier)");
 

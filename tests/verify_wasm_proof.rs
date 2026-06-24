@@ -17,9 +17,9 @@ use rand010::{SeedableRng, rngs::StdRng};
 
 /// B-5a: this is a MANUAL repro diagnostic, not a CI test. It needs `/tmp/repro/*` artifacts from a
 /// prior wasm proving run. It used to `return;` (vacuous green) when those files were absent, so it
-/// passed in every normal CI run WITHOUT verifying anything. It is now `#[ignore]` (excluded from the
-/// default run) AND fails loudly if invoked without the artifacts — so a green result always means a
-/// wasm-generated proof was actually verified natively. Run explicitly with:
+/// passed in every normal CI run WITHOUT verifying anything. It is now `#[ignore]` (excluded from
+/// the default run) AND fails loudly if invoked without the artifacts — so a green result always
+/// means a wasm-generated proof was actually verified natively. Run explicitly with:
 ///   cargo test --release --test verify_wasm_proof native_verifies_wasm_e1_proof -- --ignored
 #[test]
 #[ignore = "manual repro diagnostic: requires /tmp/repro/{payload1,channel_snapshot}.json; run with --ignored"]
@@ -75,8 +75,7 @@ fn native_json_roundtrip_verifies() {
         Bytes32::from(m0.regev_pk.poseidon_digest()),
         Bytes32::from(m1.regev_pk.poseidon_digest()),
     ];
-    let mut genesis =
-        assemble_genesis_state(&record, &[ct0, ct1], &digests, bal0 + bal1).unwrap();
+    let mut genesis = assemble_genesis_state(&record, &[ct0, ct1], &digests, bal0 + bal1).unwrap();
     let g0 = sign_state(&m0, 0, &genesis).expect("sign g0");
     add_signature(&mut genesis, g0);
     let g1 = sign_state(&m1, 1, &genesis).expect("sign g1");
@@ -90,13 +89,27 @@ fn native_json_roundtrip_verifies() {
 
     let nonce = Bytes32::default();
     let BuiltSend { payload, .. } = build_send(
-        &m0, &snapshot, 0, 1, 7, bal0, &w0, nonce, RegevSecurityLevel::Production, &mut rng,
+        &m0,
+        &snapshot,
+        0,
+        1,
+        7,
+        bal0,
+        &w0,
+        nonce,
+        RegevSecurityLevel::Production,
+        &mut rng,
     )
     .unwrap();
 
     // In-memory verify (control).
     verify_send_transition(
-        &snapshot.state, &snapshot.record, &payload, RegevSecurityLevel::Production, None, None,
+        &snapshot.state,
+        &snapshot.record,
+        &payload,
+        RegevSecurityLevel::Production,
+        None,
+        None,
     )
     .expect("in-memory native verify");
 
@@ -106,7 +119,12 @@ fn native_json_roundtrip_verifies() {
     let snapshot2: ChannelSnapshot = serde_json::from_str(&snap_json).unwrap();
     let payload2: SendPayload = serde_json::from_str(&payload_json).unwrap();
     let res = verify_send_transition(
-        &snapshot2.state, &snapshot2.record, &payload2, RegevSecurityLevel::Production, None, None,
+        &snapshot2.state,
+        &snapshot2.record,
+        &payload2,
+        RegevSecurityLevel::Production,
+        None,
+        None,
     );
     eprintln!("native verify after JSON round-trip: {res:?}");
     res.expect("native verify of a JSON-round-tripped native proof");

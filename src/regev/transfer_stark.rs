@@ -861,9 +861,7 @@ where
 
 /// Prove a bare Poseidon2-BabyBear permutation trace (no public values) through the regev
 /// `test_config()` batch-stark backend. Used by the P3 de-risk PoC only.
-pub fn prove_poseidon2_poc(
-    trace: &RowMajorMatrix<F>,
-) -> Result<Vec<u8>, RegevError> {
+pub fn prove_poseidon2_poc(trace: &RowMajorMatrix<F>) -> Result<Vec<u8>, RegevError> {
     let air = super::hash_sig::NoLookupPoseidon2Air::new();
     prove_one(&test_config(), &air, trace, Vec::new())
 }
@@ -919,7 +917,8 @@ pub fn prove_one_test_hash_sig(
 ///
 /// SECURITY: the public values are caller-supplied (the off-chain verifier recomputes `pk_b` from
 /// the registered `MemberLeaf` and `m` from the channel-tx digest, P3-5). They are absorbed into
-/// the Fiat-Shamir transcript by `verify_batch`, so a proof for a different `(pk_b, m)` is rejected.
+/// the Fiat-Shamir transcript by `verify_batch`, so a proof for a different `(pk_b, m)` is
+/// rejected.
 pub fn verify_hash_sig(
     level: RegevSecurityLevel,
     proof_bytes: &[u8],
@@ -940,8 +939,7 @@ pub fn verify_hash_sig(
     // SECURITY (shape check, mirrors `verify_one`): pin the instance count and trace height BEFORE
     // `verify_batch`, so a malformed-height proof is rejected early rather than reaching FRI-domain
     // construction. The hash-sig trace is exactly `HASH_SIG_HEIGHT` rows (one instance).
-    let expected_db =
-        super::hash_sig::HASH_SIG_HEIGHT.trailing_zeros() as usize + config.is_zk();
+    let expected_db = super::hash_sig::HASH_SIG_HEIGHT.trailing_zeros() as usize + config.is_zk();
     if proof.degree_bits.len() != 1 || proof.degree_bits[0] != expected_db {
         return Err(RegevError::ProofVerification(
             "hash-sig: proof shape: expected one instance with trace height == HASH_SIG_HEIGHT"
@@ -2101,9 +2099,9 @@ pub fn prove_balance_refresh(
     Ok((new_ct, proof))
 }
 
-/// Like [`prove_balance_refresh`] but ALSO returns the fresh `new_ct`'s [`AmountWitness`], so a wallet
-/// can keep spending from the refreshed slot without re-importing a fresh encryption. The witness is
-/// the one the proof was built against, so it matches `new_ct` exactly.
+/// Like [`prove_balance_refresh`] but ALSO returns the fresh `new_ct`'s [`AmountWitness`], so a
+/// wallet can keep spending from the refreshed slot without re-importing a fresh encryption. The
+/// witness is the one the proof was built against, so it matches `new_ct` exactly.
 pub fn prove_balance_refresh_witnessed(
     rng: &mut impl rand010::Rng,
     level: RegevSecurityLevel,

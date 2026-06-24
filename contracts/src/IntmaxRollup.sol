@@ -161,6 +161,9 @@ contract IntmaxRollup {
     event WithdrawalVkInitialized(uint256 degreeBits, bytes32 preprocessedRoot);
 
     /// @notice Emitted per `Withdrawal` leaf paid out by `withdrawNative`.
+    event PartialWithdrawalAuthorized(bytes32 indexed authDigest, address indexed manager);
+    event SettlementManagerRegistered(address indexed manager);
+
     event NativeWithdrawn(
         address indexed recipient,
         uint256 amount,
@@ -175,6 +178,8 @@ contract IntmaxRollup {
     error WithdrawalNullifierUsed();
     error WithdrawalNotEthToken();
     error WithdrawalEmptySet();
+    error PartialWithdrawalNotAuthorized();
+    error NotRegisteredSettlementManager();
 
     // -----------------------------------------------------------------------
     // Types
@@ -343,6 +348,15 @@ contract IntmaxRollup {
     ///           settled transfer, recipient/amount-binding) may be paid out at
     ///           most once. Checked-then-set (CEI) before any value is credited.
     mapping(bytes32 => bool) public withdrawalNullifierUsed;
+
+    /// @notice Authorized partial-withdrawal auth digests.
+    /// SECURITY: a burn withdrawal (auxData != 0) is only paid out if the auth digest
+    ///           keccak256("IMPW" || nullifier || recipient || tokenIndex || amount || auxData)
+    ///           was authorized by a registered settlement manager via a finalized close proof.
+    mapping(bytes32 => bool) public partialWithdrawalAuthorized;
+
+    /// @notice Registered settlement managers that may call `authorizePartialWithdrawal`.
+    mapping(address => bool) public isRegisteredSettlementManager;
 
     uint256 private constant _NOT_ENTERED = 1;
     uint256 private constant _ENTERED = 2;
@@ -602,6 +616,25 @@ contract IntmaxRollup {
             _mleSubgroupGenPowersW.push(_subgroupGenPowers[i]);
         }
         emit WithdrawalVkInitialized(_vk.degreeBits, _vk.preprocessedRoot);
+    }
+
+    /// @notice Register a channel settlement manager that may authorize partial withdrawals.
+    ///         Deployer-only, additive (no removal). A manager earns `authorizePartialWithdrawal`
+    ///         call rights after verifying a finalized close proof (N-of-N channel consent).
+    function registerSettlementManager(address manager) external {
+        require(msg.sender == deployer, "only deployer");
+        isRegisteredSettlementManager[manager] = true;
+        emit SettlementManagerRegistered(manager);
+    }
+
+    /// @notice Authorize a partial-withdrawal auth digest. Only callable by registered settlement
+    ///         managers after a close proof (proving N-of-N channel consent) has been verified and
+    ///         the challenge period has elapsed.
+    /// @param authDigest keccak256("IMPW" || nullifier || recipient || tokenIndex || amount || auxData)
+    function authorizePartialWithdrawal(bytes32 authDigest) external {
+        if (!isRegisteredSettlementManager[msg.sender]) revert NotRegisteredSettlementManager();
+        partialWithdrawalAuthorized[authDigest] = true;
+        emit PartialWithdrawalAuthorized(authDigest, msg.sender);
     }
 
     // postBlock()  —  post a batch of fast blocks (one posting round)
@@ -1289,6 +1322,25 @@ contract IntmaxRollup {
             Withdrawal calldata w = ws[i];
             if (w.tokenIndex != ETH_TOKEN_INDEX) revert WithdrawalNotEthToken(); // v1: ETH only
             if (withdrawalNullifierUsed[w.nullifier]) revert WithdrawalNullifierUsed();
+
+            // GAP2: burn withdrawals (auxData != 0) require a finalized partial-withdrawal
+            // authorization from a registered settlement manager. The auth digest binds ALL
+            // withdrawal fields so an attacker cannot reuse an authorized tx_leaf with
+            // different recipient/amount. Normal withdrawals (auxData == 0) are unaffected.
+            if (w.auxData != bytes32(0)) {
+                bytes32 authDigest = keccak256(
+                    abi.encodePacked(
+                        bytes4(0x494d5057), // "IMPW" domain
+                        w.nullifier,
+                        w.recipient,
+                        w.tokenIndex,
+                        w.amount,
+                        w.auxData
+                    )
+                );
+                if (!partialWithdrawalAuthorized[authDigest]) revert PartialWithdrawalNotAuthorized();
+            }
+
             withdrawalNullifierUsed[w.nullifier] = true;
             // GLOBAL solvency ceiling: Solidity 0.8 underflow reverts if Σ would exceed real escrow.
             totalEscrowed -= w.amount;

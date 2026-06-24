@@ -1,24 +1,26 @@
 //! Partial withdrawal — phase 0 SOUNDNESS GATE: receive-vs-withdraw exclusivity.
 //!
-//! Spec: architecture-audit/abstract2-1.md §2.6/§3.6; plan: partial-withdrawal-impl-plan.md phase 0.
+//! Spec: architecture-audit/abstract2-1.md §2.6/§3.6; plan: partial-withdrawal-impl-plan.md phase
+//! 0.
 //!
 //! INVARIANT UNDER TEST (must hold before any partial-withdrawal fund logic is built):
 //!   a single settled transfer can be consumed AT MOST ONE WAY — either RECEIVED by a destination
-//!   channel (`receive_transfer_circuit`) OR WITHDRAWN to L1 (`single_withdrawal` -> `withdrawNative`)
-//!   — NEVER both. If both were possible (same `SettledTransfer::nullifier`, different on-chain
-//!   used-sets), the value would reach a channel AND L1 = double-spend.
+//!   channel (`receive_transfer_circuit`) OR WITHDRAWN to L1 (`single_withdrawal` ->
+//! `withdrawNative`)   — NEVER both. If both were possible (same `SettledTransfer::nullifier`,
+//! different on-chain   used-sets), the value would reach a channel AND L1 = double-spend.
 //!
 //! The exclusivity is RECIPIENT-TAG-DRIVEN and enforced IN-CIRCUIT:
 //!   - receive_transfer_circuit.rs:426-435 CONNECTS `transfer.recipient ==
 //!     calculate_recipient_from_user_id_circuit(receiver, salt)` — first byte = USER_ID_TAG (1).
-//!   - single_withdrawal_circuit.rs (via extract_address_from_recipient_circuit, recipient.rs:78-87)
-//!     CONNECTS `recipient.bytes[0] == ADDRESS_TAG (2)`.
+//!   - single_withdrawal_circuit.rs (via extract_address_from_recipient_circuit,
+//!     recipient.rs:78-87) CONNECTS `recipient.bytes[0] == ADDRESS_TAG (2)`.
 //! A Bytes32 recipient has exactly one first byte, so it satisfies at most one path.
 //!
-//! These tests pin the NATIVE recipient functions the circuits call verbatim. A regression that made
-//! the withdrawal gate accept a USER_ID_TAG recipient, or the receive gate accept an ADDRESS_TAG
-//! recipient, would break exclusivity and is caught here. This is a soundness check, not a unit test:
-//! it asserts the two consumption paths are provably disjoint over the recipient domain.
+//! These tests pin the NATIVE recipient functions the circuits call verbatim. A regression that
+//! made the withdrawal gate accept a USER_ID_TAG recipient, or the receive gate accept an
+//! ADDRESS_TAG recipient, would break exclusivity and is caught here. This is a soundness check,
+//! not a unit test: it asserts the two consumption paths are provably disjoint over the recipient
+//! domain.
 //!
 //! Run: `cargo test --release --test partial_withdrawal_exclusivity`
 
@@ -51,7 +53,11 @@ fn channel_receive_recipient_is_not_withdrawable() {
     let salt = Salt::rand(&mut rng);
     let recv = calculate_recipient_from_user_id(ChannelId::new(7).unwrap(), salt);
 
-    assert_eq!(recv.to_bytes_be()[0], USER_ID_TAG, "receive recipient must carry USER_ID_TAG");
+    assert_eq!(
+        recv.to_bytes_be()[0],
+        USER_ID_TAG,
+        "receive recipient must carry USER_ID_TAG"
+    );
     assert!(
         extract_address_from_recipient(recv).is_err(),
         "a channel-receive (USER_ID_TAG) recipient MUST NOT be extractable as a withdrawal"
@@ -65,7 +71,11 @@ fn withdrawal_recipient_is_not_a_channel_receive_form() {
     let addr = an_address();
     let wd = calculate_recipient_from_address(addr);
 
-    assert_eq!(wd.to_bytes_be()[0], ADDRESS_TAG, "withdrawal recipient must carry ADDRESS_TAG");
+    assert_eq!(
+        wd.to_bytes_be()[0],
+        ADDRESS_TAG,
+        "withdrawal recipient must carry ADDRESS_TAG"
+    );
     // Withdrawable + decodes to the right L1 address.
     assert_eq!(
         extract_address_from_recipient(wd).expect("ADDRESS_TAG recipient is withdrawable"),
@@ -73,9 +83,14 @@ fn withdrawal_recipient_is_not_a_channel_receive_form() {
         "withdrawal recipient decodes back to the L1 address"
     );
     // Disjoint from EVERY channel-receive form: a USER_ID_TAG (1) recipient can never equal an
-    // ADDRESS_TAG (2) recipient, so receive_transfer's `recipient == calculate_recipient_from_user_id`
-    // constraint can never be satisfied by a withdrawal recipient.
-    assert_ne!(wd.to_bytes_be()[0], USER_ID_TAG, "withdrawal form is not the receive form");
+    // ADDRESS_TAG (2) recipient, so receive_transfer's `recipient ==
+    // calculate_recipient_from_user_id` constraint can never be satisfied by a withdrawal
+    // recipient.
+    assert_ne!(
+        wd.to_bytes_be()[0],
+        USER_ID_TAG,
+        "withdrawal form is not the receive form"
+    );
 }
 
 /// The exclusivity theorem at the recipient-domain level: the two consumption paths' accepted
@@ -100,6 +115,9 @@ fn receive_and_withdraw_recipient_domains_are_disjoint() {
         let wd = calculate_recipient_from_address(addr);
         assert_eq!(wd.to_bytes_be()[0], ADDRESS_TAG);
         // the two forms never coincide
-        assert_ne!(recv, wd, "receive form and withdrawal form must never be equal");
+        assert_ne!(
+            recv, wd,
+            "receive form and withdrawal form must never be equal"
+        );
     }
 }

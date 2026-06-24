@@ -33,7 +33,9 @@ fn member_info(slot: u8, keys: &MemberKeys) -> MemberInfo {
 /// Per-active-slot Regev pk Poseidon digests, in the SAME slot order as the genesis ciphertexts.
 /// Mirrors channel_member.rs:601-605.
 fn digests(keys: &[&MemberKeys]) -> Vec<Bytes32> {
-    keys.iter().map(|k| Bytes32::from(k.regev_pk.poseidon_digest())).collect()
+    keys.iter()
+        .map(|k| Bytes32::from(k.regev_pk.poseidon_digest()))
+        .collect()
 }
 
 #[test]
@@ -51,8 +53,9 @@ fn wallet_core_in_channel_send_receive() {
     let (bal0, bal1) = (50u64, 30u64);
     let (ct0, w0) = encrypt_amount(&mut rng, &m0.regev_pk, bal0).expect("enc0");
     let (ct1, _w1) = encrypt_amount(&mut rng, &m1.regev_pk, bal1).expect("enc1");
-    let mut genesis = assemble_genesis_state(&record, &[ct0, ct1], &digests(&[&m0, &m1]), bal0 + bal1)
-        .expect("genesis");
+    let mut genesis =
+        assemble_genesis_state(&record, &[ct0, ct1], &digests(&[&m0, &m1]), bal0 + bal1)
+            .expect("genesis");
 
     // Both members co-sign the genesis.
     let g0 = sign_state(&m0, 0, &genesis).expect("sign g0");
@@ -67,7 +70,8 @@ fn wallet_core_in_channel_send_receive() {
         settled_tx_accumulator: default_settled_tx_accumulator(),
     };
 
-    // Both members fully verify the signed genesis (real SingleSig proofs, roots, own-slot decrypt).
+    // Both members fully verify the signed genesis (real SingleSig proofs, roots, own-slot
+    // decrypt).
     verify_snapshot(&snapshot, Some((&m0, 0))).expect("m0 verify genesis");
     verify_snapshot(&snapshot, Some((&m1, 1))).expect("m1 verify genesis");
     assert_eq!(decrypt_balance(&m0, &snapshot, 0).unwrap(), bal0);
@@ -80,13 +84,22 @@ fn wallet_core_in_channel_send_receive() {
         mut payload,
         new_balance,
         ..
-    } = build_send(&m0, &snapshot, 0, 1, amount, bal0, &w0, nonce, LEVEL, &mut rng)
-        .expect("build_send");
+    } = build_send(
+        &m0, &snapshot, 0, 1, amount, bal0, &w0, nonce, LEVEL, &mut rng,
+    )
+    .expect("build_send");
     assert_eq!(new_balance, bal0 - amount);
 
     // Member 1 (recipient) verifies the transition + E-1 proof and decrypts the incoming amount.
-    verify_send_transition(&snapshot.state, &snapshot.record, &payload, LEVEL, Some(&m1.regev_sk), Some(amount))
-        .expect("recipient verify transition");
+    verify_send_transition(
+        &snapshot.state,
+        &snapshot.record,
+        &payload,
+        LEVEL,
+        Some(&m1.regev_sk),
+        Some(amount),
+    )
+    .expect("recipient verify transition");
 
     // Co-signing: member 1 adds its signature to complete the set.
     let m1_sig = sign_state(&m1, 1, &payload.proposed_next_state).expect("sign m1");
@@ -100,14 +113,24 @@ fn wallet_core_in_channel_send_receive() {
     };
 
     // Both sides verify the finalized state with the full real-signature set.
-    verify_all_signatures(&final_snapshot.record, &final_snapshot.members, &final_snapshot.state)
-        .expect("all sigs valid");
+    verify_all_signatures(
+        &final_snapshot.record,
+        &final_snapshot.members,
+        &final_snapshot.state,
+    )
+    .expect("all sigs valid");
     verify_snapshot(&final_snapshot, Some((&m0, 0))).expect("m0 verify final");
     verify_snapshot(&final_snapshot, Some((&m1, 1))).expect("m1 verify final");
 
     // Balances reconcile.
-    assert_eq!(decrypt_balance(&m0, &final_snapshot, 0).unwrap(), bal0 - amount);
-    assert_eq!(decrypt_balance(&m1, &final_snapshot, 1).unwrap(), bal1 + amount);
+    assert_eq!(
+        decrypt_balance(&m0, &final_snapshot, 0).unwrap(),
+        bal0 - amount
+    );
+    assert_eq!(
+        decrypt_balance(&m1, &final_snapshot, 1).unwrap(),
+        bal1 + amount
+    );
 }
 
 /// P4-1 (A11 soundness, NEGATIVE): a malicious peer takes a legitimate send payload and swaps in an
@@ -129,8 +152,9 @@ fn p4_1_attacker_pk_b_swap_is_rejected() {
     let (bal0, bal1) = (40u64, 20u64);
     let (ct0, w0) = encrypt_amount(&mut rng, &m0.regev_pk, bal0).expect("enc0");
     let (ct1, _w1) = encrypt_amount(&mut rng, &m1.regev_pk, bal1).expect("enc1");
-    let mut genesis = assemble_genesis_state(&record, &[ct0, ct1], &digests(&[&m0, &m1]), bal0 + bal1)
-        .expect("genesis");
+    let mut genesis =
+        assemble_genesis_state(&record, &[ct0, ct1], &digests(&[&m0, &m1]), bal0 + bal1)
+            .expect("genesis");
     let g0 = sign_state(&m0, 0, &genesis).expect("sign g0");
     add_signature(&mut genesis, g0);
     let g1 = sign_state(&m1, 1, &genesis).expect("sign g1");
@@ -145,19 +169,29 @@ fn p4_1_attacker_pk_b_swap_is_rejected() {
     // Sanity: the honest payload verifies.
     let amount = 5u64;
     let nonce = Bytes32::default();
-    let BuiltSend { payload, .. } =
-        build_send(&m0, &snapshot, 0, 1, amount, bal0, &w0, nonce, LEVEL, &mut rng)
-            .expect("build_send");
-    verify_send_transition(&snapshot.state, &snapshot.record, &payload, LEVEL, Some(&m1.regev_sk), Some(amount))
-        .expect("honest payload must verify");
+    let BuiltSend { payload, .. } = build_send(
+        &m0, &snapshot, 0, 1, amount, bal0, &w0, nonce, LEVEL, &mut rng,
+    )
+    .expect("build_send");
+    verify_send_transition(
+        &snapshot.state,
+        &snapshot.record,
+        &payload,
+        LEVEL,
+        Some(&m1.regev_sk),
+        Some(amount),
+    )
+    .expect("honest payload must verify");
 
-    // ── Attack: substitute the sender slot's pk_b with an attacker key and re-forge the hash-sig. ──
-    // `BabyBearSecretKey::random` lives over `rand` 0.8 (the regev layer), so use a 0.8 `StdRng`.
+    // ── Attack: substitute the sender slot's pk_b with an attacker key and re-forge the hash-sig.
+    // ── `BabyBearSecretKey::random` lives over `rand` 0.8 (the regev layer), so use a 0.8
+    // `StdRng`.
     use rand::SeedableRng as _;
     let attacker_baby = BabyBearSecretKey::random(&mut rand::rngs::StdRng::seed_from_u64(0xA11));
     let attacker_pk_b = attacker_baby.public_key().to_bytes32();
 
-    // Recompute the exact IMPA tx digest the verifier will check (sender->recipient pk_g unchanged).
+    // Recompute the exact IMPA tx digest the verifier will check (sender->recipient pk_g
+    // unchanged).
     let tx_digest = intmax3_zkp::common::channel::ChannelTx::signing_digest(
         snapshot.state.channel_id,
         snapshot.state.digest,
@@ -167,8 +201,8 @@ fn p4_1_attacker_pk_b_swap_is_rejected() {
         payload.channel_tx.recipient_pk_g,
     );
     let m = decompose_digest_to_limbs(&tx_digest);
-    let (attacker_sig, _pvs) =
-        prove_hash_sig(LEVEL, &attacker_baby, &m).expect("attacker forges a self-consistent hash-sig");
+    let (attacker_sig, _pvs) = prove_hash_sig(LEVEL, &attacker_baby, &m)
+        .expect("attacker forges a self-consistent hash-sig");
 
     let mut tampered = payload.clone();
     // The hash-sig itself is internally valid for the attacker's pk_b (so the failure is NOT just a
@@ -203,10 +237,10 @@ fn p4_1_attacker_pk_b_swap_is_rejected() {
 
 /// P4-1 (A11 caller-layer, NEGATIVE): a malicious peer supplies a fully SELF-CONSISTENT but FOREIGN
 /// `payload.record` + `members` (an attacker member set with its own correctly-recomputed
-/// `member_pubkeys_root`, same channel_id). The internal member-root recompute would PASS (the foreign
-/// set is self-consistent), so the only thing that rejects it is binding `payload.record` to the
-/// session's TRUSTED record. Confirms `verify_send_transition` rejects against the trusted record, not
-/// the payload's own record.
+/// `member_pubkeys_root`, same channel_id). The internal member-root recompute would PASS (the
+/// foreign set is self-consistent), so the only thing that rejects it is binding `payload.record`
+/// to the session's TRUSTED record. Confirms `verify_send_transition` rejects against the trusted
+/// record, not the payload's own record.
 #[test]
 fn p4_1_foreign_self_consistent_record_is_rejected() {
     let mut rng = StdRng::seed_from_u64(0xF0E16);
@@ -220,8 +254,9 @@ fn p4_1_foreign_self_consistent_record_is_rejected() {
     let (bal0, bal1) = (40u64, 20u64);
     let (ct0, w0) = encrypt_amount(&mut rng, &m0.regev_pk, bal0).expect("enc0");
     let (ct1, _w1) = encrypt_amount(&mut rng, &m1.regev_pk, bal1).expect("enc1");
-    let mut genesis = assemble_genesis_state(&record, &[ct0, ct1], &digests(&[&m0, &m1]), bal0 + bal1)
-        .expect("genesis");
+    let mut genesis =
+        assemble_genesis_state(&record, &[ct0, ct1], &digests(&[&m0, &m1]), bal0 + bal1)
+            .expect("genesis");
     let g0 = sign_state(&m0, 0, &genesis).expect("g0");
     add_signature(&mut genesis, g0);
     let g1 = sign_state(&m1, 1, &genesis).expect("g1");
@@ -235,7 +270,16 @@ fn p4_1_foreign_self_consistent_record_is_rejected() {
 
     let amount = 5u64;
     let BuiltSend { payload, .. } = build_send(
-        &m0, &snapshot, 0, 1, amount, bal0, &w0, Bytes32::default(), LEVEL, &mut rng,
+        &m0,
+        &snapshot,
+        0,
+        1,
+        amount,
+        bal0,
+        &w0,
+        Bytes32::default(),
+        LEVEL,
+        &mut rng,
     )
     .expect("build_send");
 
@@ -257,7 +301,10 @@ fn p4_1_foreign_self_consistent_record_is_rejected() {
         Some(&m1.regev_sk),
         Some(amount),
     );
-    assert!(res.is_err(), "a foreign self-consistent record MUST be rejected");
+    assert!(
+        res.is_err(),
+        "a foreign self-consistent record MUST be rejected"
+    );
     let msg = format!("{}", res.unwrap_err());
     assert!(
         msg.contains("registered (trusted) record"),

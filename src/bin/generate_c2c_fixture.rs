@@ -5,10 +5,10 @@
 //! `tests/e2e.rs::e2e_deposit_validity_withdrawal()` test FULLY (it keeps the
 //! internal transfer + receive-transfer steps), but differs from it in two
 //! ways:
-//!   1. Channel 2 (the RECEIVER) is also REGISTERED (its own registration
-//!      block), so its member set is committed into the channel tree.
-//!   2. The final WITHDRAWAL is performed by channel 2 (the receiver) directly
-//!      to an L1 address — NOT by channel 1 (the sender) as in e2e.rs.
+//!   1. Channel 2 (the RECEIVER) is also REGISTERED (its own registration block), so its member set
+//!      is committed into the channel tree.
+//!   2. The final WITHDRAWAL is performed by channel 2 (the receiver) directly to an L1 address —
+//!      NOT by channel 1 (the sender) as in e2e.rs.
 //!
 //! Chain built (5 blocks, two channels sharing one block generator):
 //!   1. Registration block (ch1)   -> block 1
@@ -78,7 +78,7 @@ use intmax3_zkp::{
         u63::BlockNumber,
         withdrawal::Withdrawal,
     },
-    ethereum_types::{address::Address, bytes32::Bytes32, u256::U256, u32limb_trait::U32LimbTrait},
+    ethereum_types::{address::Address, bytes32::Bytes32, u32limb_trait::U32LimbTrait, u256::U256},
     utils::{
         conversion::ToU64,
         mle_prover::{export_mle_json, prove_with_mle, setup_mle_vk, verify_mle_proof},
@@ -109,8 +109,8 @@ struct MemberFixture {
     member_pk_gs: Vec<String>,
     /// P3/P4: each active member's BabyBear hash-sig public key `pk_b` (L1/keccak digest form),
     /// in slot order. Consumed by `registerChannel`'s `pkBs` argument and the forge E2E callers
-    /// (`.member_pk_bs`); committed into the keccak registration chain between `pk_g` and the Regev
-    /// digest, matching `MemberRegEntry`.
+    /// (`.member_pk_bs`); committed into the keccak registration chain between `pk_g` and the
+    /// Regev digest, matching `MemberRegEntry`.
     member_pk_bs: Vec<String>,
     regev_pk_digests: Vec<String>,
     recipients: Vec<String>,
@@ -118,10 +118,10 @@ struct MemberFixture {
 
 #[derive(Serialize)]
 struct DepositFixture {
-    /// SECURITY: the on-chain `deposit()` folds `msg.sender` as the depositor into the deposit hash
-    /// (IntmaxRollup `_computeDepositHash`). The Rust `Deposit` uses this exact address, so the
-    /// Solidity test MUST `vm.prank(depositor)` when calling `deposit()` or the deposit hash (and
-    /// hence block 2's hash) will not match the proved chain.
+    /// SECURITY: the on-chain `deposit()` folds `msg.sender` as the depositor into the deposit
+    /// hash (IntmaxRollup `_computeDepositHash`). The Rust `Deposit` uses this exact address,
+    /// so the Solidity test MUST `vm.prank(depositor)` when calling `deposit()` or the deposit
+    /// hash (and hence block 2's hash) will not match the proved chain.
     depositor: String,
     recipient: String,
     token_index: u32,
@@ -314,10 +314,10 @@ fn main() -> anyhow::Result<()> {
     eprintln!("[c2c] Block 2: deposit (channel 1)");
     let deposit_salt = Salt::rand(&mut rng);
     let deposit_recipient = calculate_recipient_from_user_id(user_id, deposit_salt);
-    // The depositor is folded into the on-chain deposit hash (= block 2's hash). On a real chain the
-    // deposit tx's msg.sender IS the depositor, so for a Sepolia run set WD_DEPOSITOR to the EOA
-    // that will send `deposit()`; otherwise a deterministic random address (local-test path uses
-    // vm.prank to match).
+    // The depositor is folded into the on-chain deposit hash (= block 2's hash). On a real chain
+    // the deposit tx's msg.sender IS the depositor, so for a Sepolia run set WD_DEPOSITOR to
+    // the EOA that will send `deposit()`; otherwise a deterministic random address (local-test
+    // path uses vm.prank to match).
     let depositor = match std::env::var("WD_DEPOSITOR") {
         Ok(hex) => parse_address_hex(&hex),
         Err(_) => Address::rand(&mut rng),
@@ -656,9 +656,9 @@ fn main() -> anyhow::Result<()> {
     // statement or the anchored state root — used to keep the ABI-encoded proof calldata under
     // Ethereum's 128 KiB (131072-byte) per-transaction mempool limit. Demo-neutral.
     // Default seed 1 is the value proven (2026-06-14 Sepolia run) to yield a withdrawal proof whose
-    // ABI-encoded `withdrawNative` calldata (130084 B) fits under the 131072-byte tx limit; seed 777
-    // produced 131012 B which the raw tx (131134 B) exceeded. Re-roll via WD_PROVER_SEED if a future
-    // circuit change pushes the size over again.
+    // ABI-encoded `withdrawNative` calldata (130084 B) fits under the 131072-byte tx limit; seed
+    // 777 produced 131012 B which the raw tx (131134 B) exceeded. Re-roll via WD_PROVER_SEED if
+    // a future circuit change pushes the size over again.
     let prover_seed: u64 = std::env::var("WD_PROVER_SEED")
         .ok()
         .and_then(|s| s.parse().ok())
@@ -666,7 +666,11 @@ fn main() -> anyhow::Result<()> {
     let mut prover_rng = StdRng::seed_from_u64(prover_seed);
     let withdrawal_prover = Address::rand(&mut prover_rng);
     let withdrawal_proof = withdrawal_processor
-        .prove_final(&withdrawal_chain_proof, withdrawal_prover, &ext_public_state)
+        .prove_final(
+            &withdrawal_chain_proof,
+            withdrawal_prover,
+            &ext_public_state,
+        )
         .expect("withdrawal proof");
     withdrawal_processor
         .withdrawal_vd()
@@ -716,7 +720,11 @@ fn main() -> anyhow::Result<()> {
     // FIXED validity prover address.
     let validity_prover = Address::default();
     let validity_proof = validity_circuit
-        .prove(&final_block_chain_proof, list_proof.as_ref(), validity_prover)
+        .prove(
+            &final_block_chain_proof,
+            list_proof.as_ref(),
+            validity_prover,
+        )
         .expect("validity proof");
     validity_circuit
         .verify(&validity_proof)
@@ -746,7 +754,11 @@ fn main() -> anyhow::Result<()> {
     let mut wd_pw = PartialWitness::new();
     wd_pw.set_proof_with_pis_target(&withdrawal_wrapper.wrap_proof, &withdrawal_proof);
     let withdrawal_mle = prove_with_mle::<F, C, D>(&withdrawal_wrapper.data, wd_pw)?;
-    verify_mle_proof(&withdrawal_wrapper.data, &withdrawal_vk, &withdrawal_mle.proof)?;
+    verify_mle_proof(
+        &withdrawal_wrapper.data,
+        &withdrawal_vk,
+        &withdrawal_mle.proof,
+    )?;
     let withdrawal_mle_json =
         export_mle_json(&withdrawal_mle.proof, &withdrawal_wrapper.data.common);
 
@@ -809,7 +821,10 @@ fn main() -> anyhow::Result<()> {
     let name = |base: &str| format!("{prefix}{base}");
 
     // 1. <prefix>withdrawal_mle.json
-    fs::write(out_dir.join(name("withdrawal_mle.json")), &withdrawal_mle_json)?;
+    fs::write(
+        out_dir.join(name("withdrawal_mle.json")),
+        &withdrawal_mle_json,
+    )?;
     eprintln!(
         "[c2c] wrote contracts/test/data/{}",
         name("withdrawal_mle.json")

@@ -73,6 +73,12 @@ contract MockChannelRegistry is IChannelRegistry {
         (bool ok, ) = msg.sender.call{value: amount}("");
         require(ok, "withdraw failed");
     }
+
+    mapping(bytes32 => bool) public partialWithdrawalAuthorized;
+
+    function authorizePartialWithdrawal(bytes32 authDigest) external override {
+        partialWithdrawalAuthorized[authDigest] = true;
+    }
 }
 
 contract ChannelSettlementManagerTest is Test {

@@ -6,21 +6,23 @@
 //!   export-reg-record → deploy → setup-backing → init → close → settle → withdraw → claim
 //!
 //! and asserts that REAL native ETH is deposited into the rollup and flows out to a member:
-//!   - `withdraw` escrows `fund` wei via `deposit()`, posts the 3 blocks (EIP-4844 blobs), finalizes,
-//!     `withdrawNative`s the channel's funds to the manager, then `pullChannelFunds` pulls them in;
+//!   - `withdraw` escrows `fund` wei via `deposit()`, posts the 3 blocks (EIP-4844 blobs),
+//!     finalizes, `withdrawNative`s the channel's funds to the manager, then `pullChannelFunds`
+//!     pulls them in;
 //!   - `claim` proves a member's slot balance and pays it out (`claimWithdrawalCredit`).
 //!
-//! This is THE live verification point for the close lifecycle (the fixture-based `CloseLifecycleE2E`
-//! Solidity test skips the close-intent section on a member-set mismatch; this exercises a channel
-//! registered with the CLI's REAL members + delegate, so the close proof actually verifies on-chain).
+//! This is THE live verification point for the close lifecycle (the fixture-based
+//! `CloseLifecycleE2E` Solidity test skips the close-intent section on a member-set mismatch; this
+//! exercises a channel registered with the CLI's REAL members + delegate, so the close proof
+//! actually verifies on-chain).
 //!
 //! HEAVY: deploys + 3 real MLE/WHIR proofs (close, withdrawal, withdrawal-claim) + anvil; several
 //! minutes. Release-only (`#![cfg(not(debug_assertions))]`) AND `#[ignore]` — run explicitly:
 //!   cargo test --release --test close_lifecycle_cli_e2e -- --ignored --nocapture
 //!
-//! SECURITY: this only ORCHESTRATES; soundness is in-circuit + on-chain (the CLI builds real proofs;
-//! finalize / withdrawNative / the close-intent verifier are fail-closed gates). It runs the CLI from
-//! the repo root (the CLI uses relative `contracts/` paths) and STAGES into the shared
+//! SECURITY: this only ORCHESTRATES; soundness is in-circuit + on-chain (the CLI builds real
+//! proofs; finalize / withdrawNative / the close-intent verifier are fail-closed gates). It runs
+//! the CLI from the repo root (the CLI uses relative `contracts/` paths) and STAGES into the shared
 //! `contracts/test/data/sepolia_*`; a Drop guard backs up + restores the clobbered tracked fixtures
 //! and removes all scratch so the working tree is left exactly as found.
 #![cfg(not(debug_assertions))]
@@ -32,8 +34,8 @@ use std::{
     time::Duration,
 };
 
-// anvil dev account[0] — a PUBLIC throwaway key; its address is the broadcasting EOA / member-slot-0
-// payout recipient (bound by DeployCloseCli) and the `claimWithdrawalCredit` caller.
+// anvil dev account[0] — a PUBLIC throwaway key; its address is the broadcasting EOA /
+// member-slot-0 payout recipient (bound by DeployCloseCli) and the `claimWithdrawalCredit` caller.
 const ANVIL0_KEY: &str = "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80";
 const ANVIL0_ADDR: &str = "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266";
 const PORT: u16 = 8554;
@@ -69,8 +71,8 @@ impl Drop for AnvilGuard {
 }
 
 /// Backs up the tracked `sepolia_*` fixtures the CLI clobbers when staging, restores them on drop,
-/// and removes every scratch file the CLI writes to the repo root / data dir — so the test leaves the
-/// working tree exactly as it found it (even on panic unwind).
+/// and removes every scratch file the CLI writes to the repo root / data dir — so the test leaves
+/// the working tree exactly as it found it (even on panic unwind).
 struct WorkspaceGuard {
     backups: Vec<(PathBuf, Option<Vec<u8>>)>,
 }
@@ -188,7 +190,9 @@ fn find_addr(out: &str, label: &str) -> String {
 #[ignore = "heavy (~minutes, real proofs + anvil/forge/cast); run with --ignored"]
 fn close_lifecycle_cli_e2e() {
     if !(tool_present("anvil") && tool_present("forge") && tool_present("cast")) {
-        eprintln!("[skip] foundry (anvil/forge/cast) not found — needed for the live close lifecycle");
+        eprintln!(
+            "[skip] foundry (anvil/forge/cast) not found — needed for the live close lifecycle"
+        );
         return;
     }
     // The deploy reads the (checked-in) close-stack VK fixtures; skip if absent.
@@ -200,7 +204,9 @@ fn close_lifecycle_cli_e2e() {
         "withdrawal_claim_mle.json",
     ] {
         if !data_dir().join(f).exists() {
-            eprintln!("[skip] missing fixture contracts/test/data/{f} — run the close fixture generators first");
+            eprintln!(
+                "[skip] missing fixture contracts/test/data/{f} — run the close fixture generators first"
+            );
             return;
         }
     }
@@ -269,8 +275,16 @@ fn close_lifecycle_cli_e2e() {
         &[("SETUP_BACKING_NO_ONCHAIN_DEPOSIT", "1")],
         "setup-backing",
     );
-    cli(&["gen-contribution", "50", "1", "contribution.json"], &[], "gen-contribution");
-    cli(&["init", "contribution.json", "channel_snapshot.json"], &[], "init");
+    cli(
+        &["gen-contribution", "50", "1", "contribution.json"],
+        &[],
+        "gen-contribution",
+    );
+    cli(
+        &["init", "contribution.json", "channel_snapshot.json"],
+        &[],
+        "init",
+    );
 
     // ── close (advance past the 600s grace) ────────────────────────────────────────────────────
     let close_out = cli(
@@ -295,7 +309,11 @@ fn close_lifecycle_cli_e2e() {
 
     // ── withdraw (deposit real ETH → finalize → withdrawNative → pullChannelFunds) ─────────────
     let escrow_before = cast_u128(&rpc, &rollup, "totalEscrowed()(uint256)");
-    cli(&["withdraw", &manager, &rpc], &[("ROLLUP", &rollup)], "withdraw");
+    cli(
+        &["withdraw", &manager, &rpc],
+        &[("ROLLUP", &rollup)],
+        "withdraw",
+    );
 
     let manager_balance: u128 = cast(&rpc, &["balance", &manager])
         .parse()
@@ -303,9 +321,15 @@ fn close_lifecycle_cli_e2e() {
     let received = cast_u128(&rpc, &manager, "receivedChannelFunds()(uint256)");
     let escrow_after = cast_u128(&rpc, &rollup, "totalEscrowed()(uint256)");
     assert!(received > 0, "manager received nothing from the rollup");
-    assert_eq!(manager_balance, received, "manager balance != receivedChannelFunds");
+    assert_eq!(
+        manager_balance, received,
+        "manager balance != receivedChannelFunds"
+    );
     // withdraw deposits `received` wei then withdrawNatives the same amount → net escrow unchanged.
-    assert_eq!(escrow_after, escrow_before, "escrow should net to its pre-withdraw value");
+    assert_eq!(
+        escrow_after, escrow_before,
+        "escrow should net to its pre-withdraw value"
+    );
 
     // ── claim (member slot 0 → the deploy EOA; pays out real ETH) ──────────────────────────────
     cli(

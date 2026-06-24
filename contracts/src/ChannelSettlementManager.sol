@@ -122,6 +122,9 @@ interface IChannelRegistry {
     ///         the rollup's `pendingWithdrawals[manager]`; `pullChannelFunds` then calls this to
     ///         move that ETH into the manager so it can be split among members.
     function withdraw() external;
+    /// @notice Authorize a partial-withdrawal auth digest on the rollup. Called by the settlement
+    ///         manager after a finalized partial-withdrawal close proof (N-of-N channel consent).
+    function authorizePartialWithdrawal(bytes32 authDigest) external;
 }
 
 contract ChannelSettlementManager {
@@ -180,6 +183,11 @@ contract ChannelSettlementManager {
     /// withdrawal is already prevented by the in-circuit nullifier used-sets (check-then-set CEI) at
     /// every payout path, and stale closes by `cancelClose` (C1); its verifier is also a stub.
     error LateOutgoingDebitDisabled();
+    error PartialWithdrawalNotPending();
+    error PartialWithdrawalChainUsed();
+    error PartialWithdrawalAuxDataZero();
+    error PartialWithdrawalChainMismatch();
+    error PartialWithdrawalNotNewer();
 
     enum ChannelLifecycleStatus {
         Active,
@@ -254,6 +262,21 @@ contract ChannelSettlementManager {
     );
 
     event WithdrawalClaimed(address indexed recipient, uint256 amount);
+
+    event PartialWithdrawalSubmitted(
+        bytes32 indexed authDigest,
+        bytes32 indexed chainKey,
+        uint64 challengeDeadline,
+        uint64 finalStateVersion
+    );
+
+    event PartialWithdrawalFinalized(bytes32 indexed authDigest, bytes32 indexed chainKey);
+
+    event PartialWithdrawalCancelled(
+        bytes32 indexed authDigest,
+        bytes32 indexed revivedChannelStateDigest,
+        uint64 revivedStateVersion
+    );
 
     /// @dev Mirror of Rust `CloseIntent` (src/common/channel.rs), minus the channel id (this
     /// contract is per-channel; `channelId` is the immutable).
@@ -371,6 +394,14 @@ contract ChannelSettlementManager {
         uint64 amount;
     }
 
+    struct AuthorizedWithdrawal {
+        address recipient;
+        uint32 tokenIndex;
+        uint256 amount;
+        bytes32 nullifier;
+        bytes32 auxData;
+    }
+
     struct PendingClose {
         bool active;
         uint64 closeNonce;
@@ -484,6 +515,17 @@ contract ChannelSettlementManager {
     mapping(bytes32 => bool) public usedWithdrawalNullifiers;
     mapping(bytes32 => bool) public usedSharedNativeNullifiers;
     mapping(bytes32 => bool) public usedLateOutgoingDebitNullifiers;
+
+    // --- Partial withdrawal (GAP2: mid-channel burn → L1, channel stays open) ---
+    mapping(bytes32 => bool) public usedPartialWithdrawalChains;
+    bool public partialWithdrawalPending;
+    bytes32 public pendingPartialWithdrawalAuthDigest;
+    bytes32 public pendingPartialWithdrawalChainKey;
+    bytes32 public pendingPartialWithdrawalCloseIntentDigest;
+    uint64 public pendingPartialWithdrawalDeadline;
+    uint64 public pendingPartialWithdrawalStateVersion;
+    uint64 public pendingPartialWithdrawalEpoch;
+
     /// F7: member identity is the SPHINCS+ pubkey hash (bytes32).
     mapping(bytes32 => address) public registeredRecipientOf;
     mapping(bytes32 => uint256) public registeredMemberIndexPlusOne;
@@ -862,6 +904,132 @@ contract ChannelSettlementManager {
         );
 
         delete pendingClose;
+    }
+
+    // -----------------------------------------------------------------------
+    // Partial withdrawal (GAP2): mid-channel burn → L1 authorization
+    // -----------------------------------------------------------------------
+
+    function submitPartialWithdrawalIntent(
+        CloseIntent calldata intent,
+        MleVerifier.MleProof calldata proof,
+        bytes32 prevSettledTxChain,
+        AuthorizedWithdrawal calldata withdrawal
+    ) external {
+        if (channelStatus != ChannelLifecycleStatus.Active) revert ChannelClosed();
+
+        _checkCloseProof(intent, proof);
+
+        if (withdrawal.auxData == bytes32(0)) revert PartialWithdrawalAuxDataZero();
+
+        // SECURITY: verify settled_tx_chain binding — the burn's tx_leaf (withdrawal.auxData)
+        // was the LAST push in the N-of-N-signed chain. push(prev, leaf) == finalSettledTxChain.
+        bytes32 expectedChain = keccak256(
+            abi.encodePacked(uint32(0x494d5443), prevSettledTxChain, withdrawal.auxData)
+        );
+        if (expectedChain != intent.finalSettledTxChain) revert PartialWithdrawalChainMismatch();
+
+        bytes32 chainKey = keccak256(abi.encodePacked(channelId, intent.finalSettledTxChain));
+        if (usedPartialWithdrawalChains[chainKey]) revert PartialWithdrawalChainUsed();
+
+        // Challenge replacement: if a pending intent exists on a DIFFERENT chain key, allow
+        // replacement only if the new state is strictly newer (higher epoch/stateVersion).
+        if (partialWithdrawalPending) {
+            bool newer = intent.finalEpoch > pendingPartialWithdrawalEpoch ||
+                (intent.finalEpoch == pendingPartialWithdrawalEpoch &&
+                 intent.finalStateVersion > pendingPartialWithdrawalStateVersion);
+            if (!newer) revert PartialWithdrawalNotNewer();
+        }
+
+        bytes32 authDigest = keccak256(
+            abi.encodePacked(
+                bytes4(0x494d5057),
+                withdrawal.nullifier,
+                withdrawal.recipient,
+                withdrawal.tokenIndex,
+                withdrawal.amount,
+                withdrawal.auxData
+            )
+        );
+
+        partialWithdrawalPending = true;
+        pendingPartialWithdrawalAuthDigest = authDigest;
+        pendingPartialWithdrawalChainKey = chainKey;
+        pendingPartialWithdrawalCloseIntentDigest = computeCloseIntentDigest(intent);
+        pendingPartialWithdrawalDeadline = uint64(block.timestamp) + challengePeriod;
+        pendingPartialWithdrawalStateVersion = intent.finalStateVersion;
+        pendingPartialWithdrawalEpoch = intent.finalEpoch;
+
+        emit PartialWithdrawalSubmitted(
+            authDigest,
+            chainKey,
+            pendingPartialWithdrawalDeadline,
+            intent.finalStateVersion
+        );
+    }
+
+    function finalizePartialWithdrawal() external {
+        if (!partialWithdrawalPending) revert PartialWithdrawalNotPending();
+        if (block.timestamp <= pendingPartialWithdrawalDeadline) revert ChallengeWindowOpen();
+        // SECURITY (12B fix): NO channelStatus check. If requestClose races during the challenge
+        // period, the partial withdrawal can still finalize — the burned amount is already excluded
+        // from the close's channelFundAmount, so no double-counting.
+
+        usedPartialWithdrawalChains[pendingPartialWithdrawalChainKey] = true;
+        bytes32 authDigest = pendingPartialWithdrawalAuthDigest;
+        bytes32 chainKey = pendingPartialWithdrawalChainKey;
+
+        delete partialWithdrawalPending;
+        delete pendingPartialWithdrawalAuthDigest;
+        delete pendingPartialWithdrawalChainKey;
+        delete pendingPartialWithdrawalCloseIntentDigest;
+        delete pendingPartialWithdrawalDeadline;
+        delete pendingPartialWithdrawalStateVersion;
+        delete pendingPartialWithdrawalEpoch;
+
+        IChannelRegistry(address(registry)).authorizePartialWithdrawal(authDigest);
+
+        emit PartialWithdrawalFinalized(authDigest, chainKey);
+    }
+
+    function cancelPartialWithdrawal(
+        CancelCloseRequest calldata request,
+        MleVerifier.MleProof calldata proof
+    ) external {
+        if (!partialWithdrawalPending) revert PartialWithdrawalNotPending();
+        if (request.closeIntentDigest != pendingPartialWithdrawalCloseIntentDigest) {
+            revert CloseIntentDigestMismatch();
+        }
+
+        // SECURITY: mirrors cancelClose — the N-of-N signed a strictly newer state, proving the
+        // pending partial withdrawal's state is stale. The verifier binds memberSetCommitment to
+        // the registered channel members (same as cancelClose).
+        if (
+            !verifier.verifyCancelClose(
+                channelId,
+                pendingPartialWithdrawalCloseIntentDigest,
+                registeredMemberSetCommitment(),
+                request.revivedStateVersion,
+                request.revivedChannelStateDigest,
+                proof
+            )
+        ) revert InvalidCancelProof();
+
+        bytes32 authDigest = pendingPartialWithdrawalAuthDigest;
+
+        delete partialWithdrawalPending;
+        delete pendingPartialWithdrawalAuthDigest;
+        delete pendingPartialWithdrawalChainKey;
+        delete pendingPartialWithdrawalCloseIntentDigest;
+        delete pendingPartialWithdrawalDeadline;
+        delete pendingPartialWithdrawalStateVersion;
+        delete pendingPartialWithdrawalEpoch;
+
+        emit PartialWithdrawalCancelled(
+            authDigest,
+            request.revivedChannelStateDigest,
+            request.revivedStateVersion
+        );
     }
 
     function submitWithdrawalClaim(

@@ -30,7 +30,8 @@ use crate::{
             BalanceRefreshUpdateWitness, ChannelProofVerifier, ChannelStateUpdateError,
             ChannelStateUpdatePublicInputs, InChannelTransferUpdateWitness,
             InterChannelFundImportUpdateWitness, InterChannelSendUpdateWitness,
-            ReceiverBundleApplyUpdateWitness, require_accumulator_push,
+            L1DepositImportUpdateWitness, ReceiverBundleApplyUpdateWitness,
+            require_accumulator_push,
         },
     },
     common::{
@@ -41,6 +42,7 @@ use crate::{
             ReceiverBalanceDelta, SignedSmallBlock, SmallBlockRootMessage, TransitionProofRole,
         },
         channel_id::ChannelId,
+        deposit::Deposit,
         transfer::Transfer,
         trees::{
             key_tree::{MemberLeaf, MemberTree},
@@ -1499,13 +1501,21 @@ pub fn build_inter_channel_send(
     // The inter-channel tx's small block carries the channel's own 1-tx TxV2 tree (detail2 §A-2).
     // Computed INTERNALLY (root = H2; inclusion proof) so the browser need not.
     let mut transfer_tree = TransferTree::init();
+    // SECURITY: burn sends (dest = BURN_CHANNEL_ID) set aux_data = tx_leaf so the base
+    // send_tx_circuit pushes the SAME leaf into settled_tx_chain as the channel layer (GAP1 fix).
+    // Normal inter-channel sends keep aux_data = 0 — their receiver side also gates on aux_data,
+    // so setting it nonzero here would cause a double-push.
+    let burn_aux =
+        if destination_channel_id.channel_id() == crate::constants::BURN_CHANNEL_ID as u32 {
+            tx_leaf
+        } else {
+            Bytes32::default()
+        };
     transfer_tree.push(Transfer {
         recipient: destination_recipient_pk_g,
         token_index: 0,
-        // Full u64 precision (no u32 truncation): the transfer leaf binds the EXACT amount into the
-        // TxV2 tree root the descriptor ships + B re-verifies.
         amount: u64_to_u256(amount),
-        aux_data: Bytes32::default(),
+        aux_data: burn_aux,
     });
     let tx_v2 = TxV2 {
         tx_class: TxClass::UserTransfer,
@@ -1683,9 +1693,9 @@ pub fn build_inter_channel_send(
 
 /// abstract2-1 §3.6 — channel-layer "burn send" for PARTIAL WITHDRAWAL (channel stays open).
 ///
-/// A member debits ONLY their own encBalance by `amount` (E-2 `channelUpdateZKP`, sender-slot-only —
-/// `state_update_verifier.rs` debits the sender slot and `ensure_slot_unchanged` on all others) toward
-/// the reserved `BURN_CHANNEL_ID` with an `ADDRESS_TAG` L1 recipient, so the base-layer
+/// A member debits ONLY their own encBalance by `amount` (E-2 `channelUpdateZKP`, sender-slot-only
+/// — `state_update_verifier.rs` debits the sender slot and `ensure_slot_unchanged` on all others)
+/// toward the reserved `BURN_CHANNEL_ID` with an `ADDRESS_TAG` L1 recipient, so the base-layer
 /// `single_withdrawal` later pays the member's L1 address `withdrawal_l1_address`. Then the channel
 /// continues: `state_version`/`settled_tx_chain` advance, members keep transacting.
 ///
@@ -1694,15 +1704,16 @@ pub fn build_inter_channel_send(
 /// `RegevPk::padding()` (canonical, NO secret key), so `receiver_delta = encrypt(amount, padding)`
 /// satisfies the E-2 `sender_delta == receiver_delta == amount` constraint. The phantom credit is
 /// UNCLAIMABLE — no channel may register `BURN_CHANNEL_ID` (`ChannelRecord::validate` + on-chain
-/// `registerChannel` guards), so the receive side never credits it. The base `ADDRESS_TAG` Transfer is
-/// WITHDRAW-ONLY (recipient-tag exclusivity, `tests/partial_withdrawal_exclusivity.rs`), so it can
-/// never also be credited to a channel. The withdrawn `amount` equals the member's proven encBalance
-/// debit (over-claim / cross-member-claim closed at the proof level).
+/// `registerChannel` guards), so the receive side never credits it. The base `ADDRESS_TAG` Transfer
+/// is WITHDRAW-ONLY (recipient-tag exclusivity, `tests/partial_withdrawal_exclusivity.rs`), so it
+/// can never also be credited to a channel. The withdrawn `amount` equals the member's proven
+/// encBalance debit (over-claim / cross-member-claim closed at the proof level).
 ///
-/// SECURITY — NOT YET VALIDATED END-TO-END: the E-2 self-check runs at build time, but the full fund
-/// path (this burn send → N-of-N cosign → finalize → `single_withdrawal` → on-chain `withdrawNative`,
-/// channel stays open) requires the opt-in heavy E2E (`INTMAX_RUN_HEAVY_E2E`) AND a dedicated
-/// attacker-subagent review BEFORE merge (CLAUDE.md). Do not ship on a fund path until both pass.
+/// SECURITY — NOT YET VALIDATED END-TO-END: the E-2 self-check runs at build time, but the full
+/// fund path (this burn send → N-of-N cosign → finalize → `single_withdrawal` → on-chain
+/// `withdrawNative`, channel stays open) requires the opt-in heavy E2E (`INTMAX_RUN_HEAVY_E2E`) AND
+/// a dedicated attacker-subagent review BEFORE merge (CLAUDE.md). Do not ship on a fund path until
+/// both pass.
 pub fn build_burn_send(
     keys: &MemberKeys,
     snapshot: &ChannelSnapshot,
@@ -1716,9 +1727,10 @@ pub fn build_burn_send(
     rng: &mut impl Rng,
 ) -> WResult<BuiltInterChannelSend> {
     use crate::circuits::balance::common::recipient::calculate_recipient_from_address;
-    // (ii): base Transfer recipient = the ADDRESS_TAG L1 form (what `build_inter_channel_send` writes
-    // into the tx's transfer leaf → `single_withdrawal` extracts); phantom receiver key =
-    // `RegevPk::padding()`; destination = `BURN_CHANNEL_ID` (unregisterable) ⇒ unclaimable phantom.
+    // (ii): base Transfer recipient = the ADDRESS_TAG L1 form (what `build_inter_channel_send`
+    // writes into the tx's transfer leaf → `single_withdrawal` extracts); phantom receiver key
+    // = `RegevPk::padding()`; destination = `BURN_CHANNEL_ID` (unregisterable) ⇒ unclaimable
+    // phantom.
     let burn_recipient = calculate_recipient_from_address(withdrawal_l1_address);
     let burn_channel = ChannelId::new(crate::constants::BURN_CHANNEL_ID as u64)
         .map_err(|e| WalletError(format!("BURN_CHANNEL_ID is not a valid ChannelId: {e:?}")))?;
@@ -1729,7 +1741,7 @@ pub fn build_burn_send(
         burn_channel,
         0, // destination_recipient_slot: descriptor-only; irrelevant for an L1 burn
         RegevPk::padding(), // (ii) phantom-receiver key (no secret)
-        burn_recipient,     // → base Transfer recipient = ADDRESS_TAG L1 (withdraw-only)
+        burn_recipient, // → base Transfer recipient = ADDRESS_TAG L1 (withdraw-only)
         amount,
         before_amount,
         before_witness,
@@ -1737,6 +1749,30 @@ pub fn build_burn_send(
         level,
         rng,
     )
+}
+
+/// IMPW domain prefix for partial-withdrawal authDigest (matches Solidity `bytes4(0x494d5057)`).
+pub const PARTIAL_WITHDRAWAL_DOMAIN: u32 = 0x494d5057;
+
+/// Compute the `authDigest` that the on-chain `withdrawNative` gate checks for burn withdrawals
+/// (`auxData != 0`). Must be byte-identical to the Solidity encoding:
+/// `keccak256(abi.encodePacked(bytes4(0x494d5057), nullifier, recipient, tokenIndex, amount,
+/// auxData))`.
+pub fn partial_withdrawal_auth_digest(
+    withdrawal: &crate::common::withdrawal::Withdrawal,
+) -> Bytes32 {
+    use crate::ethereum_types::u32limb_trait::U32LimbTrait as _;
+    use plonky2_keccak::utils::solidity_keccak256;
+    let words: Vec<u32> = [PARTIAL_WITHDRAWAL_DOMAIN]
+        .iter()
+        .copied()
+        .chain(withdrawal.nullifier.to_u32_vec())
+        .chain(withdrawal.recipient.to_u32_vec())
+        .chain([withdrawal.token_index])
+        .chain(withdrawal.amount.to_u32_vec())
+        .chain(withdrawal.aux_data.to_u32_vec())
+        .collect();
+    Bytes32::from_u32_slice(&solidity_keccak256(&words)).expect("keccak output must be bytes32")
 }
 
 /// LEG A co-signer's pre-sign check: bind `debit_payload.record` to the TRUSTED channel-A record
@@ -2165,6 +2201,170 @@ pub fn verify_inter_channel_credit_transition(
     if b_prev.channel_id != b_trusted_record.channel_id {
         return bail("b_prev is not the trusted channel-B state");
     }
+    Ok(())
+}
+
+// --- L1 deposit import (mid-channel top-up) ---
+
+pub struct BuiltL1DepositImport {
+    pub fund_import_state: ChannelState,
+    pub bundle_apply_state: ChannelState,
+    pub settled_tx_accumulator: IncrementalMerkleTree<Bytes32>,
+}
+
+/// Build a mid-channel L1 deposit import: fold an L1 deposit into an already-open channel.
+///
+/// Two-step state transition mirroring `build_inter_channel_credit`:
+///   Step 1 (fund import): `channel_fund += amount`, `unallocated += amount`,
+///          `settled_tx_chain` pushes `deposit.nullifier()`.
+///   Step 2 (bundle apply): `enc_balances[recipient_slot] += delta`, `unallocated -= amount`.
+///
+/// Trust anchor: the `receive_deposit` balance proof verified externally via
+/// `verify_channel_backing` — no transport proof needed (unlike inter-channel import).
+pub fn build_l1_deposit_import(
+    keys: &MemberKeys,
+    snapshot: &ChannelSnapshot,
+    deposit: &Deposit,
+    recipient_slot: usize,
+    recipient_delta: &RegevCiphertext,
+    _level: RegevSecurityLevel,
+) -> WResult<BuiltL1DepositImport> {
+    let record = &snapshot.record;
+    let prev = &snapshot.state;
+    let active = record.member_count as usize + record.delegate_count as usize;
+    check_slot(recipient_slot, active)?;
+
+    let amount = deposit.amount.to_u32_vec();
+    let amount_u64 = (amount[BYTES32_LEN - 2] as u64) << 32 | amount[BYTES32_LEN - 1] as u64;
+    let deposit_nullifier = deposit.nullifier();
+
+    // ---- Step 1: Fund import ----
+    let import_nullifier = advance_nullifier(prev.shared_native_nullifier_root, deposit_nullifier);
+    let mut import_accumulator = snapshot.settled_tx_accumulator.clone();
+    import_accumulator.push(deposit_nullifier);
+    let import_accumulator_root = Bytes32::from(import_accumulator.get_root());
+    require_accumulator_push(
+        &snapshot.settled_tx_accumulator,
+        deposit_nullifier,
+        import_accumulator_root,
+    )
+    .map_err(|e| WalletError(format!("l1 deposit fund import accumulator push: {e:?}")))?;
+    let mut fund_import_state = ChannelState {
+        epoch: prev.epoch + 1,
+        small_block_number: prev.small_block_number + 1,
+        channel_fund: ChannelFund {
+            amount: prev.channel_fund.amount + u64_to_u256(amount_u64),
+            ..prev.channel_fund.clone()
+        },
+        balance_state: BalanceState {
+            settled_tx_chain: settled_tx_chain_push(
+                prev.balance_state.settled_tx_chain,
+                deposit_nullifier,
+            ),
+            settled_tx_accumulator_root: import_accumulator_root,
+            state_version: prev.balance_state.state_version + 1,
+            ..prev.balance_state.clone()
+        },
+        unallocated_confirmed_incoming: prev.unallocated_confirmed_incoming
+            + u64_to_u256(amount_u64),
+        shared_native_nullifier_root: import_nullifier,
+        prev_digest: prev.digest,
+        member_signatures: Vec::new(),
+        ..prev.clone()
+    }
+    .with_computed_digest();
+    sign_member_if_present(keys, record, &mut fund_import_state)?;
+    let mut import_for_check = fund_import_state.clone();
+    fill_placeholder_sigs(record, &mut import_for_check);
+    let import_witness = L1DepositImportUpdateWitness {
+        channel_record: record.clone(),
+        prev_state: prev.clone(),
+        next_state: import_for_check,
+        amount: amount_u64,
+        deposit_nullifier,
+        depositor_slot: recipient_slot,
+    };
+    import_witness
+        .verify()
+        .map_err(|e| WalletError(format!("l1 deposit fund import self-check failed: {e:?}")))?;
+
+    // ---- Step 2: Bundle apply ----
+    let recipient_after = add_ciphertexts(
+        &fund_import_state.balance_state.enc_balances[recipient_slot],
+        recipient_delta,
+    )
+    .map_err(we)?;
+    let mut bundle_enc = fund_import_state.balance_state.enc_balances.clone();
+    bundle_enc[recipient_slot] = recipient_after;
+    let mut bundle_pending = fund_import_state.balance_state.pending_adds;
+    bundle_pending[recipient_slot] += 1;
+    let bundle_leaf = deposit_nullifier;
+    let mut bundle_accumulator = import_accumulator.clone();
+    bundle_accumulator.push(deposit_nullifier);
+    let bundle_accumulator_root = Bytes32::from(bundle_accumulator.get_root());
+    require_accumulator_push(
+        &import_accumulator,
+        deposit_nullifier,
+        bundle_accumulator_root,
+    )
+    .map_err(|e| WalletError(format!("l1 deposit bundle apply accumulator push: {e:?}")))?;
+    let mut bundle_apply_state = ChannelState {
+        epoch: fund_import_state.epoch + 1,
+        balance_state: BalanceState {
+            enc_balances: bundle_enc,
+            settled_tx_chain: settled_tx_chain_push(
+                fund_import_state.balance_state.settled_tx_chain,
+                bundle_leaf,
+            ),
+            settled_tx_accumulator_root: bundle_accumulator_root,
+            state_version: fund_import_state.balance_state.state_version + 1,
+            pending_adds: bundle_pending,
+            ..fund_import_state.balance_state.clone()
+        },
+        unallocated_confirmed_incoming: fund_import_state.unallocated_confirmed_incoming
+            - u64_to_u256(amount_u64),
+        prev_digest: fund_import_state.digest,
+        member_signatures: Vec::new(),
+        ..fund_import_state.clone()
+    }
+    .with_computed_digest();
+    sign_member_if_present(keys, record, &mut bundle_apply_state)?;
+
+    Ok(BuiltL1DepositImport {
+        fund_import_state,
+        bundle_apply_state,
+        settled_tx_accumulator: bundle_accumulator,
+    })
+}
+
+/// L1 deposit import co-signer gate: verifies the proposed L1 deposit import transition
+/// before a co-signer adds their signature. Fail-closed.
+pub fn verify_l1_deposit_import_transition(
+    prev: &ChannelState,
+    record: &ChannelRecord,
+    deposit: &Deposit,
+    fund_import_state: &ChannelState,
+    recipient_slot: usize,
+) -> WResult<()> {
+    let active = record.member_count as usize + record.delegate_count as usize;
+    check_slot(recipient_slot, active)?;
+    if prev.channel_id != record.channel_id {
+        return bail("prev state channel_id does not match record");
+    }
+    let amount = deposit.amount.to_u32_vec();
+    let amount_u64 = (amount[BYTES32_LEN - 2] as u64) << 32 | amount[BYTES32_LEN - 1] as u64;
+    let deposit_nullifier = deposit.nullifier();
+    let witness = L1DepositImportUpdateWitness {
+        channel_record: record.clone(),
+        prev_state: prev.clone(),
+        next_state: fund_import_state.clone(),
+        amount: amount_u64,
+        deposit_nullifier,
+        depositor_slot: recipient_slot,
+    };
+    witness
+        .verify()
+        .map_err(|e| WalletError(format!("l1 deposit co-signer gate: {e:?}")))?;
     Ok(())
 }
 
@@ -3085,10 +3285,11 @@ fn fnv1a_bytes32(bytes: &[u8]) -> String {
 /// Build the full channel-withdrawal artifact set. See the module banner for the security argument.
 ///
 /// `member_keys`: `Some(cli_members)` binds the registration to the channel's REAL co-signing
-/// members (P5-B) so the SAME on-chain `registerChannel` serves both the close path and this withdraw
-/// path; the registration block hash and the close member-set commitment then both reproduce these
-/// members. `None` self-generates the deterministic fixture registration (byte-parity with the legacy
-/// fixture binary). When `Some`, pass exactly `TEST_ACTIVE_MEMBERS` members.
+/// members (P5-B) so the SAME on-chain `registerChannel` serves both the close path and this
+/// withdraw path; the registration block hash and the close member-set commitment then both
+/// reproduce these members. `None` self-generates the deterministic fixture registration
+/// (byte-parity with the legacy fixture binary). When `Some`, pass exactly `TEST_ACTIVE_MEMBERS`
+/// members.
 pub fn build_channel_withdrawal(
     params: &ChannelWithdrawalParams,
     cli_member_keys: Option<&[MemberKeys]>,
@@ -3182,12 +3383,15 @@ pub fn build_channel_withdrawal(
     // registration block — and the on-chain `registerChannel` built from the same record below —
     // reproduce the SAME member set the close path signs against). Without them, self-generate the
     // deterministic fixture registration (legacy parity).
-    // P5-B delegate support: `cli_member_keys` is the channel's ACTIVE set (the `TEST_ACTIVE_MEMBERS`
-    // co-signing members FIRST, then any delegates). `delegate_count = active - TEST_ACTIVE_MEMBERS`,
-    // so the registration record / block carry the SAME member/delegate split the channel state and
-    // the on-chain `registerChannel` use (the close member-set commitment stays member-only; the
-    // delegate is registered for the withdrawal path).
-    let active_count = cli_member_keys.map(|mk| mk.len()).unwrap_or(TEST_ACTIVE_MEMBERS);
+    // P5-B delegate support: `cli_member_keys` is the channel's ACTIVE set (the
+    // `TEST_ACTIVE_MEMBERS` co-signing members FIRST, then any delegates). `delegate_count =
+    // active - TEST_ACTIVE_MEMBERS`, so the registration record / block carry the SAME
+    // member/delegate split the channel state and the on-chain `registerChannel` use (the close
+    // member-set commitment stays member-only; the delegate is registered for the withdrawal
+    // path).
+    let active_count = cli_member_keys
+        .map(|mk| mk.len())
+        .unwrap_or(TEST_ACTIVE_MEMBERS);
     let member_keys = {
         let mut generator = block_witness_generator.borrow_mut();
         let keys = match cli_member_keys {
@@ -3241,9 +3445,10 @@ pub fn build_channel_withdrawal(
     }
 
     // ── Phase 2: deposit → block 2 ──────────────────────────────────────────────────────────
-    // P5-B: `Some(deposit_salt)` reproduces `setup-backing`'s exact deposit recipient so this deposit
-    // block matches the on-chain `deposit()` already queued for the channel; `None` draws from the
-    // fixed RNG (legacy parity — drawn at the SAME point as before so the fixture output is stable).
+    // P5-B: `Some(deposit_salt)` reproduces `setup-backing`'s exact deposit recipient so this
+    // deposit block matches the on-chain `deposit()` already queued for the channel; `None`
+    // draws from the fixed RNG (legacy parity — drawn at the SAME point as before so the
+    // fixture output is stable).
     let deposit_salt = params.deposit_salt.unwrap_or_else(|| Salt::rand(&mut rng));
     let deposit_recipient = calculate_recipient_from_user_id(user_id, deposit_salt);
     // The depositor is folded into the on-chain deposit hash (= block 2's hash). The live caller
@@ -4580,8 +4785,10 @@ mod delegate_send_tests {
     #[test]
     #[cfg_attr(debug_assertions, ignore = "run with --release")]
     fn a3_channel_withdrawal_builds_and_verifies() {
-        use crate::circuits::test_utils::block_witness_generator::TEST_ACTIVE_MEMBERS;
-        use crate::ethereum_types::{address::Address, u32limb_trait::U32LimbTrait};
+        use crate::{
+            circuits::test_utils::block_witness_generator::TEST_ACTIVE_MEMBERS,
+            ethereum_types::{address::Address, u32limb_trait::U32LimbTrait},
+        };
 
         // P5-B: exercise the INTEGRATED builder path — bind the channel's REAL co-signing members
         // (the same identities the close path signs with) so this single self-verifying build also
@@ -4604,9 +4811,12 @@ mod delegate_send_tests {
         let artifacts = build_channel_withdrawal(&params, Some(&cli_members))
             .expect("channel withdrawal pipeline self-verifies");
 
-        // The emitted registration must commit EXACTLY the CLI members' pk_gs (the close path's set).
+        // The emitted registration must commit EXACTLY the CLI members' pk_gs (the close path's
+        // set).
         {
-            use crate::{common::channel::close_member_set_commitment, constants::MAX_CHANNEL_MEMBERS};
+            use crate::{
+                common::channel::close_member_set_commitment, constants::MAX_CHANNEL_MEMBERS,
+            };
             let lc: serde_json::Value =
                 serde_json::from_str(&artifacts.lifecycle_json).expect("lifecycle json");
             let mut close_hashes: [Bytes32; MAX_CHANNEL_MEMBERS] =
@@ -4617,7 +4827,11 @@ mod delegate_send_tests {
             let want = close_member_set_commitment(&close_hashes, TEST_ACTIVE_MEMBERS as u8);
             for (i, m) in cli_members.iter().enumerate() {
                 let got = lc["registration"]["member_pk_gs"][i].as_str().unwrap();
-                assert_eq!(got, m.pk_g().to_string(), "registration member {i} pk_g must be the CLI member's");
+                assert_eq!(
+                    got,
+                    m.pk_g().to_string(),
+                    "registration member {i} pk_g must be the CLI member's"
+                );
             }
             let _ = want; // member-set equivalence is asserted exhaustively in the fast unit test.
         }
@@ -4670,20 +4884,22 @@ mod delegate_send_tests {
 
     /// P5-B integration: when `build_channel_withdrawal` is bound to the channel's REAL co-signing
     /// members, the registration it emits (lifecycle.json `.registration.member_pk_gs`) reproduces
-    /// EXACTLY the member-set commitment the CLOSE path binds to. This is the property that lets ONE
-    /// on-chain `registerChannel` serve both close and withdraw on the same channel: the withdraw
-    /// registration block, the on-chain `channelMemberSetCommitment`, and the close proof's
-    /// `member_set_commitment` all equal `close_member_set_commitment(member pk_gs)`.
+    /// EXACTLY the member-set commitment the CLOSE path binds to. This is the property that lets
+    /// ONE on-chain `registerChannel` serve both close and withdraw on the same channel: the
+    /// withdraw registration block, the on-chain `channelMemberSetCommitment`, and the close
+    /// proof's `member_set_commitment` all equal `close_member_set_commitment(member pk_gs)`.
     ///
-    /// This is a pure-arithmetic check (no proving) — fast even in debug — so it is NOT release-gated.
+    /// This is a pure-arithmetic check (no proving) — fast even in debug — so it is NOT
+    /// release-gated.
     #[test]
     fn a3_withdraw_registration_matches_close_member_set() {
         use crate::{
-            common::channel::close_member_set_commitment, constants::MAX_CHANNEL_MEMBERS,
+            circuits::test_utils::block_witness_generator::{
+                ChannelMemberKeys, TEST_ACTIVE_MEMBERS,
+            },
+            common::channel::close_member_set_commitment,
+            constants::MAX_CHANNEL_MEMBERS,
             ethereum_types::address::Address,
-        };
-        use crate::circuits::test_utils::block_witness_generator::{
-            ChannelMemberKeys, TEST_ACTIVE_MEMBERS,
         };
 
         // The SAME identities the CLI close path uses: keys_for(0xC1_0000 + slot) for the members.
@@ -4728,5 +4944,76 @@ mod delegate_send_tests {
         // rejects zero recipients).
         let r0 = Address::from_u32_slice(&[0x3333_0000u32; 5]).unwrap();
         assert_ne!(r0, Address::default());
+    }
+}
+
+#[cfg(test)]
+mod partial_withdrawal_tests {
+    use super::*;
+    use crate::{
+        common::withdrawal::Withdrawal,
+        ethereum_types::{
+            address::Address, bytes32::Bytes32, u32limb_trait::U32LimbTrait, u256::U256,
+        },
+    };
+
+    #[test]
+    fn auth_digest_deterministic() {
+        let w = Withdrawal {
+            recipient: Address::from_u32_slice(&[1, 2, 3, 4, 5]).unwrap(),
+            token_index: 0,
+            amount: U256::from(500u32),
+            nullifier: Bytes32::from_u32_slice(&[0xAA; 8]).unwrap(),
+            aux_data: Bytes32::from_u32_slice(&[0xBB; 8]).unwrap(),
+        };
+        let d1 = partial_withdrawal_auth_digest(&w);
+        let d2 = partial_withdrawal_auth_digest(&w);
+        assert_eq!(d1, d2);
+        assert_ne!(d1, Bytes32::default());
+    }
+
+    #[test]
+    fn auth_digest_changes_on_recipient() {
+        let mut w = Withdrawal {
+            recipient: Address::from_u32_slice(&[1, 2, 3, 4, 5]).unwrap(),
+            token_index: 0,
+            amount: U256::from(100),
+            nullifier: Bytes32::from_u32_slice(&[0xAA; 8]).unwrap(),
+            aux_data: Bytes32::from_u32_slice(&[0xBB; 8]).unwrap(),
+        };
+        let d1 = partial_withdrawal_auth_digest(&w);
+        w.recipient = Address::from_u32_slice(&[9, 9, 9, 9, 9]).unwrap();
+        let d2 = partial_withdrawal_auth_digest(&w);
+        assert_ne!(d1, d2);
+    }
+
+    #[test]
+    fn auth_digest_changes_on_amount() {
+        let mut w = Withdrawal {
+            recipient: Address::from_u32_slice(&[1, 2, 3, 4, 5]).unwrap(),
+            token_index: 0,
+            amount: U256::from(100),
+            nullifier: Bytes32::from_u32_slice(&[0xAA; 8]).unwrap(),
+            aux_data: Bytes32::from_u32_slice(&[0xBB; 8]).unwrap(),
+        };
+        let d1 = partial_withdrawal_auth_digest(&w);
+        w.amount = U256::from(101);
+        let d2 = partial_withdrawal_auth_digest(&w);
+        assert_ne!(d1, d2);
+    }
+
+    #[test]
+    fn auth_digest_changes_on_aux_data() {
+        let mut w = Withdrawal {
+            recipient: Address::from_u32_slice(&[1, 2, 3, 4, 5]).unwrap(),
+            token_index: 0,
+            amount: U256::from(100),
+            nullifier: Bytes32::from_u32_slice(&[0xAA; 8]).unwrap(),
+            aux_data: Bytes32::from_u32_slice(&[0xBB; 8]).unwrap(),
+        };
+        let d1 = partial_withdrawal_auth_digest(&w);
+        w.aux_data = Bytes32::from_u32_slice(&[0xCC; 8]).unwrap();
+        let d2 = partial_withdrawal_auth_digest(&w);
+        assert_ne!(d1, d2);
     }
 }

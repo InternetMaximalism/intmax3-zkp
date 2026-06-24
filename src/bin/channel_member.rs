@@ -186,8 +186,8 @@ fn keys_for(seed: u64) -> MemberKeys {
 
 /// The channel's ACTIVE participant key material in slot order for the close-lifecycle paths: the 3
 /// CLI co-signing members (slots 0..3) FOLLOWED BY the delegate (slot 3). The delegate uses
-/// `keys_for(DELEGATE_SEED)` — the SAME identity `gen-contribution <bal> <DELEGATE_SEED>` produces —
-/// so the on-chain registration (member set + delegate) matches the channel state `init` builds.
+/// `keys_for(DELEGATE_SEED)` — the SAME identity `gen-contribution <bal> <DELEGATE_SEED>` produces
+/// — so the on-chain registration (member set + delegate) matches the channel state `init` builds.
 /// `member_count = TEST_ACTIVE_MEMBERS = 3`, `delegate_count = 1`. Used by `export-reg-record` (the
 /// deploy's `registerChannel`) and `withdraw` (the registration block it posts) so both bind the
 /// SAME 4-active registration the close proof's delegate_count limb requires.
@@ -248,8 +248,8 @@ struct ChannelBacking {
     deposit_tx: String,
     /// A-3 P5-B: the deposit salt used to derive the on-chain deposit recipient
     /// (`calculate_recipient_from_user_id(channel_id, deposit_salt)`). Persisted so `withdraw` can
-    /// reconstruct the SAME deposit block (matching the already-made on-chain `deposit()`), letting
-    /// one channel registration + deposit serve both the close and withdraw paths.
+    /// reconstruct the SAME deposit block (matching the already-made on-chain `deposit()`),
+    /// letting one channel registration + deposit serve both the close and withdraw paths.
     #[serde(default)]
     deposit_salt: Option<Salt>,
 }
@@ -355,14 +355,14 @@ fn cmd_setup_backing(args: &[String]) {
     let amount = fund.min(u32::MAX as u64);
 
     let deposit_key = deposit_key_env();
-    // P5-B 案B: optionally DEFER the on-chain deposit to `withdraw` so the withdraw block chain folds
-    // the deposit in the exact order its proof models (the standalone fold order). The default makes
-    // the REAL on-chain deposit now (detail2 §F-1 backing origin + keystone reconciliation — the
-    // browser demo path). When `SETUP_BACKING_NO_ONCHAIN_DEPOSIT` is set (the close-lifecycle E2E),
-    // we only build the off-chain balance proof + persist the params; the deposit is made by
-    // `withdraw`. SECURITY: fund custody is gated by the withdrawal proof's finalized-root check at
-    // exit (IntmaxRollup.sol:1262) — this only changes WHEN the deposit lands on-chain, not whether
-    // the eventual L1 exit is backed.
+    // P5-B 案B: optionally DEFER the on-chain deposit to `withdraw` so the withdraw block chain
+    // folds the deposit in the exact order its proof models (the standalone fold order). The
+    // default makes the REAL on-chain deposit now (detail2 §F-1 backing origin + keystone
+    // reconciliation — the browser demo path). When `SETUP_BACKING_NO_ONCHAIN_DEPOSIT` is set
+    // (the close-lifecycle E2E), we only build the off-chain balance proof + persist the
+    // params; the deposit is made by `withdraw`. SECURITY: fund custody is gated by the
+    // withdrawal proof's finalized-root check at exit (IntmaxRollup.sol:1262) — this only
+    // changes WHEN the deposit lands on-chain, not whether the eventual L1 exit is backed.
     let no_onchain_deposit = std::env::var("SETUP_BACKING_NO_ONCHAIN_DEPOSIT").is_ok();
     let (depositor, txhash) = if no_onchain_deposit {
         let dep_hex = cast(&["wallet", "address", "--private-key", &deposit_key])
@@ -416,9 +416,9 @@ fn cmd_setup_backing(args: &[String]) {
         let onchain_chain = Bytes32::from_hex(&format!("0x{}", abi_word(data, 5)))
             .unwrap_or_else(|e| die(format!("parse on-chain depositHashChain: {e:?}")));
 
-        // KEYSTONE (fail-closed): the Rust deposit MUST reproduce the on-chain depositHashChain, else
-        // the witness would not mirror the real deposit. Refuse to back the channel on any
-        // mismatch.
+        // KEYSTONE (fail-closed): the Rust deposit MUST reproduce the on-chain depositHashChain,
+        // else the witness would not mirror the real deposit. Refuse to back the channel on
+        // any mismatch.
         let rust_deposit = Deposit {
             deposit_index: Default::default(),
             block_number: Default::default(),
@@ -667,10 +667,13 @@ fn cmd_close(args: &[String]) {
 
     // GRACE: the manager rejects the FIRST close intent until `GRACE_BEFORE_PROCESS_SECS` (600s)
     // after requestClose (so members can settle any pending tx first). In production this is real
-    // wall-clock waiting; on a dev chain set `CLOSE_ADVANCE_TIME=<secs>` to fast-forward via anvil's
-    // evm_increaseTime so `submitCloseIntent` is not rejected with `GracePeriodNotElapsed`.
+    // wall-clock waiting; on a dev chain set `CLOSE_ADVANCE_TIME=<secs>` to fast-forward via
+    // anvil's evm_increaseTime so `submitCloseIntent` is not rejected with
+    // `GracePeriodNotElapsed`.
     if let Ok(secs) = std::env::var("CLOSE_ADVANCE_TIME") {
-        eprintln!("[close] advancing chain time by {secs}s (evm_increaseTime) to pass the close grace window…");
+        eprintln!(
+            "[close] advancing chain time by {secs}s (evm_increaseTime) to pass the close grace window…"
+        );
         cast(&["rpc", "evm_increaseTime", &secs, "--rpc-url", &rpc]);
         cast(&["rpc", "evm_mine", "--rpc-url", &rpc]);
     }
@@ -1044,10 +1047,11 @@ fn cmd_withdraw(args: &[String]) {
         .unwrap_or_else(|e| die(format!("parse manager address {manager}: {e:?}")));
 
     // P5-B: INTEGRATED (a backed channel from `setup-backing`) vs STANDALONE (self-contained P4
-    // path). Integrated binds the withdrawal to the channel's REAL co-signing members + REAL deposit
-    // so ONE on-chain registration + deposit serves both the close and withdraw paths; the deposit
-    // was already made on-chain by `setup-backing`, so we do NOT deposit again here. Standalone keeps
-    // the P4 behavior (self-generated registration + its own deposit, env-tunable amounts).
+    // path). Integrated binds the withdrawal to the channel's REAL co-signing members + REAL
+    // deposit so ONE on-chain registration + deposit serves both the close and withdraw paths;
+    // the deposit was already made on-chain by `setup-backing`, so we do NOT deposit again
+    // here. Standalone keeps the P4 behavior (self-generated registration + its own deposit,
+    // env-tunable amounts).
     let integrated = backing_exists();
     let (deposit_amount, withdrawal_amount, deposit_salt, cli_members): (
         u32,
@@ -1201,11 +1205,11 @@ fn cmd_withdraw(args: &[String]) {
     // 2. Registration block.
     post_block_round(&rollup, &lc, 0, &key, &rpc);
 
-    // 3. Deposit (P5-B 案B: `withdraw` ALWAYS makes the deposit here, between the registration block
-    //    and the deposit block — the standalone fold order the withdrawal proof models. In integrated
-    //    mode `setup-backing` deliberately deferred the on-chain deposit to this point, so there is
-    //    no earlier pending deposit to pollute the registration block. Sent BY the depositor key
-    //    (== the proved depositor), escrowing real native into the rollup.)
+    // 3. Deposit (P5-B 案B: `withdraw` ALWAYS makes the deposit here, between the registration
+    //    block and the deposit block — the standalone fold order the withdrawal proof models. In
+    //    integrated mode `setup-backing` deliberately deferred the on-chain deposit to this point,
+    //    so there is no earlier pending deposit to pollute the registration block. Sent BY the
+    //    depositor key (== the proved depositor), escrowing real native into the rollup.)
     {
         let dep = &lc["deposit"];
         let dep_recipient = dep["recipient"]
@@ -1314,11 +1318,12 @@ fn cmd_withdraw(args: &[String]) {
 }
 
 /// A-3 P5-B: emit the channel's member registration record (the 3 CLI co-signing members), derived
-/// deterministically — NO proving. Writes `cli_reg_record.json` and prints it. A deploy script reads
-/// it to `registerChannel` the channel with these members AND bind the manager to them, so the
-/// member-set commitment the close proof binds and the registration block `withdraw` posts both match
-/// this single on-chain registration. The recipients use the canonical per-(channel, slot) formula
-/// (`ChannelMemberKeys::to_reg_record`) so they equal the recipients `build_channel_withdrawal` emits.
+/// deterministically — NO proving. Writes `cli_reg_record.json` and prints it. A deploy script
+/// reads it to `registerChannel` the channel with these members AND bind the manager to them, so
+/// the member-set commitment the close proof binds and the registration block `withdraw` posts both
+/// match this single on-chain registration. The recipients use the canonical per-(channel, slot)
+/// formula (`ChannelMemberKeys::to_reg_record`) so they equal the recipients
+/// `build_channel_withdrawal` emits.
 fn cmd_export_reg_record() {
     let channel_id = channel_id_env();
     // The channel's ACTIVE set: the 3 CLI co-signing members FIRST, then the delegate (slot 3 — the
@@ -1354,7 +1359,8 @@ fn cmd_export_reg_record() {
         "recipients": recipients,
     });
     let s = serde_json::to_string_pretty(&out).unwrap_or_else(|e| die(e));
-    fs::write("cli_reg_record.json", &s).unwrap_or_else(|e| die(format!("write cli_reg_record.json: {e}")));
+    fs::write("cli_reg_record.json", &s)
+        .unwrap_or_else(|e| die(format!("write cli_reg_record.json: {e}")));
     println!("{s}");
 }
 

@@ -10,19 +10,21 @@
 //!   - public key  `pk  = Poseidon([DOMAIN_PK_G]  ‖ sk)`            → Bytes32 (256-bit digest)
 //!   - signature   `sig = Poseidon([DOMAIN_SIG_G] ‖ sk ‖ m)`       → Bytes32
 //!
-//! The "signature" is **not** a self-checking value: there is no standalone native verifier, because
-//! verifying `sig`/`pk` without `sk` is exactly what the ZK proof (Phase 2 single-sig circuit) does.
-//! This module only computes the deterministic prover-side values that the circuit will reproduce.
+//! The "signature" is **not** a self-checking value: there is no standalone native verifier,
+//! because verifying `sig`/`pk` without `sk` is exactly what the ZK proof (Phase 2 single-sig
+//! circuit) does. This module only computes the deterministic prover-side values that the circuit
+//! will reproduce.
 //!
 //! SECURITY:
-//! - Unforgeability reduces to Poseidon-Goldilocks **preimage** resistance on `sk` (256-bit classical
-//!   / 128-bit quantum under Grover). Do not shrink `SECRET_KEY_LEN` (CLAUDE.md: never weaken an
-//!   approved security parameter silently).
+//! - Unforgeability reduces to Poseidon-Goldilocks **preimage** resistance on `sk` (256-bit
+//!   classical / 128-bit quantum under Grover). Do not shrink `SECRET_KEY_LEN` (CLAUDE.md: never
+//!   weaken an approved security parameter silently).
 //! - `sig` is witness-only by design — it MUST NOT be published (avoids a deterministic per-(key,
 //!   message) tag / PRF-leakage surface). Callers store it only as a private witness.
-//! - `DOMAIN_PK_G != DOMAIN_SIG_G` keeps the pk-oracle and sig-oracle independent (no domain confusion).
-//! - The audited Goldilocks Poseidon (`PoseidonHashOut`, already the member-identity hash) is reused;
-//!   no primitive is implemented from scratch.
+//! - `DOMAIN_PK_G != DOMAIN_SIG_G` keeps the pk-oracle and sig-oracle independent (no domain
+//!   confusion).
+//! - The audited Goldilocks Poseidon (`PoseidonHashOut`, already the member-identity hash) is
+//!   reused; no primitive is implemented from scratch.
 
 pub mod circuit;
 pub mod consumer;
@@ -43,14 +45,16 @@ use crate::{
 /// Non-colliding with every existing IMxx domain (verified by `domain_constants_no_collision`).
 pub const DOMAIN_PK_G: u32 = 0x494d_5047;
 
-/// Domain separator for the Goldilocks message signature: `sig = H(DOMAIN_SIG_G ‖ sk ‖ m)`. ASCII "IMSG".
+/// Domain separator for the Goldilocks message signature: `sig = H(DOMAIN_SIG_G ‖ sk ‖ m)`. ASCII
+/// "IMSG".
 pub const DOMAIN_SIG_G: u32 = 0x494d_5347;
 
 /// Number of Goldilocks limbs in a secret key.
 ///
 /// Each Goldilocks element carries ≈63.99 bits, so 4 limbs ≈ 255.97 bits of entropy — meeting the
 /// D2 target of ≥256-bit classical / ≥128-bit quantum preimage security. The public key is a
-/// `Bytes32` (4 Goldilocks limbs ≈ 256-bit), matching the preimage-security target on the output side.
+/// `Bytes32` (4 Goldilocks limbs ≈ 256-bit), matching the preimage-security target on the output
+/// side.
 pub const SECRET_KEY_LEN: usize = 4;
 
 /// A Goldilocks signing secret key (`sk ∈ Goldilocks^4`, canonical limbs).
@@ -59,12 +63,13 @@ pub const SECRET_KEY_LEN: usize = 4;
 ///
 /// SECURITY: this type intentionally does **not** derive `Serialize`/`Deserialize` (nor `Display`):
 /// a default secret-bearing serialization is a leak-by-default footgun. When wallet persistence is
-/// needed (P2/P3), add an explicit, clearly-named secret-export API guarded by a `// SECURITY:` note
-/// and store it only on gitignored/encrypted storage.
+/// needed (P2/P3), add an explicit, clearly-named secret-export API guarded by a `// SECURITY:`
+/// note and store it only on gitignored/encrypted storage.
 ///
 /// INVARIANT: every `limbs[i]` is a canonical Goldilocks element (`< p`). All constructors enforce
-/// this. Hashing relies on it — `from_canonical_u64`'s non-canonical guard is compiled out in release,
-/// so a non-canonical limb would silently reduce mod `p` and diverge from the in-circuit value.
+/// this. Hashing relies on it — `from_canonical_u64`'s non-canonical guard is compiled out in
+/// release, so a non-canonical limb would silently reduce mod `p` and diverge from the in-circuit
+/// value.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub struct GoldilocksSecretKey {
     /// Canonical Goldilocks elements (`0 <= limb < p`).
@@ -90,7 +95,8 @@ impl GoldilocksSecretKey {
     /// Deterministically derive a key from a 32-byte seed (e.g. a CSPRNG output or a KDF).
     ///
     /// The seed is split into four little-endian u64 words, each reduced into Goldilocks. The full
-    /// 256-bit seed feeds the 4-limb key, so seed entropy maps to key entropy up to the field reduction.
+    /// 256-bit seed feeds the 4-limb key, so seed entropy maps to key entropy up to the field
+    /// reduction.
     pub fn from_seed(seed: [u8; 32]) -> Self {
         let mut limbs = [0u64; SECRET_KEY_LEN];
         for (limb, chunk) in limbs.iter_mut().zip(seed.chunks_exact(8)) {
@@ -116,9 +122,10 @@ impl GoldilocksSecretKey {
     /// The public key `pk = Poseidon([DOMAIN_PK_G] ‖ sk)` as a `PoseidonHashOut`.
     ///
     /// SECURITY (encoding injectivity): the input vector is `[domain(1), sk(SECRET_KEY_LEN)]` — a
-    /// **fixed arity**. The Poseidon sponge here is `hash_no_pad` (no length framing), so injectivity
-    /// of the `(domain, sk)` → input encoding holds ONLY because the arity is compile-time-fixed and
-    /// distinct from `sign`'s arity. Do not feed variable-length inputs without explicit length framing.
+    /// **fixed arity**. The Poseidon sponge here is `hash_no_pad` (no length framing), so
+    /// injectivity of the `(domain, sk)` → input encoding holds ONLY because the arity is
+    /// compile-time-fixed and distinct from `sign`'s arity. Do not feed variable-length inputs
+    /// without explicit length framing.
     pub fn public_key_hash_out(&self) -> PoseidonHashOut {
         let mut inputs = Vec::with_capacity(1 + SECRET_KEY_LEN);
         inputs.push(DOMAIN_PK_G as u64);
@@ -126,7 +133,8 @@ impl GoldilocksSecretKey {
         PoseidonHashOut::hash_inputs_u64(&inputs)
     }
 
-    /// The public key `pk = Poseidon([DOMAIN_PK_G] ‖ sk)` as the canonical `Bytes32` member identity.
+    /// The public key `pk = Poseidon([DOMAIN_PK_G] ‖ sk)` as the canonical `Bytes32` member
+    /// identity.
     pub fn public_key(&self) -> Bytes32 {
         self.public_key_hash_out().into()
     }
@@ -138,9 +146,9 @@ impl GoldilocksSecretKey {
     /// per-`(sk, m)` tag).
     ///
     /// SECURITY (encoding injectivity): the input vector is `[domain(1), sk(SECRET_KEY_LEN),
-    /// m(BYTES32 u32 limbs = 8)]` — a fixed arity, distinct from `public_key_hash_out`'s arity. With
-    /// the no-pad sponge, soundness of this encoding depends on the message being exactly a `Bytes32`
-    /// (8 limbs). A variable-length message MUST introduce explicit length framing.
+    /// m(BYTES32 u32 limbs = 8)]` — a fixed arity, distinct from `public_key_hash_out`'s arity.
+    /// With the no-pad sponge, soundness of this encoding depends on the message being exactly
+    /// a `Bytes32` (8 limbs). A variable-length message MUST introduce explicit length framing.
     pub fn sign(&self, message: Bytes32) -> Bytes32 {
         let msg_limbs = message.to_u32_vec();
         let mut inputs = Vec::with_capacity(1 + SECRET_KEY_LEN + msg_limbs.len());
@@ -155,20 +163,10 @@ impl GoldilocksSecretKey {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rand::{rngs::StdRng, SeedableRng as _};
+    use rand::{SeedableRng as _, rngs::StdRng};
 
     fn sample_message(byte: u8) -> Bytes32 {
-        Bytes32::from_u32_slice(&[
-            0x494d_0000 | byte as u32,
-            1,
-            2,
-            3,
-            4,
-            5,
-            6,
-            7,
-        ])
-        .unwrap()
+        Bytes32::from_u32_slice(&[0x494d_0000 | byte as u32, 1, 2, 3, 4, 5, 6, 7]).unwrap()
     }
 
     #[test]
@@ -203,9 +201,10 @@ mod tests {
 
     #[test]
     fn domain_separation_pk_vs_sig() {
-        // With DOMAIN_PK_G != DOMAIN_SIG_G, the pk-oracle and sig-oracle are independent: even though
-        // `sign` absorbs the same `sk`, no message digest yields `sig == pk`. We additionally check the
-        // raw construction: hashing [DOMAIN_PK_G, sk..] vs [DOMAIN_SIG_G, sk..] differ.
+        // With DOMAIN_PK_G != DOMAIN_SIG_G, the pk-oracle and sig-oracle are independent: even
+        // though `sign` absorbs the same `sk`, no message digest yields `sig == pk`. We
+        // additionally check the raw construction: hashing [DOMAIN_PK_G, sk..] vs
+        // [DOMAIN_SIG_G, sk..] differ.
         let sk = GoldilocksSecretKey::from_seed([3u8; 32]);
         let mut pk_inputs = vec![DOMAIN_PK_G as u64];
         pk_inputs.extend_from_slice(&sk.limbs);
@@ -233,8 +232,8 @@ mod tests {
 
     #[test]
     fn rand_uses_a_csprng() {
-        // `StdRng` is a CSPRNG (implements CryptoRng), so this compiles; the bound rejects non-crypto
-        // RNGs at compile time. Two draws differ with overwhelming probability.
+        // `StdRng` is a CSPRNG (implements CryptoRng), so this compiles; the bound rejects
+        // non-crypto RNGs at compile time. Two draws differ with overwhelming probability.
         let mut rng = StdRng::seed_from_u64(42);
         let a = GoldilocksSecretKey::rand(&mut rng);
         let b = GoldilocksSecretKey::rand(&mut rng);
@@ -251,8 +250,9 @@ mod tests {
         assert_ne!(zero.public_key(), normal.public_key());
         let _ = zero.sign(Bytes32::from_u32_slice(&[0u32; 8]).unwrap());
 
-        // Non-canonical u64 limbs reduce mod p, so from_limbs([u64::MAX;4]) must equal the canonical
-        // reduction. p = 2^64 - 2^32 + 1, so u64::MAX mod p = u64::MAX - p = 2^32 - 2 = 4294967294.
+        // Non-canonical u64 limbs reduce mod p, so from_limbs([u64::MAX;4]) must equal the
+        // canonical reduction. p = 2^64 - 2^32 + 1, so u64::MAX mod p = u64::MAX - p = 2^32
+        // - 2 = 4294967294.
         let from_max = GoldilocksSecretKey::from_limbs([u64::MAX; SECRET_KEY_LEN]);
         let from_reduced = GoldilocksSecretKey::from_limbs([4_294_967_294u64; SECRET_KEY_LEN]);
         assert_eq!(from_max, from_reduced);
@@ -264,17 +264,20 @@ mod tests {
         // A message whose first limb equals a domain word must not collapse pk/sig (cross-protocol
         // confusion pattern, CLAUDE.md §4.4). The fixed arity + distinct domain lane prevent it.
         let sk = GoldilocksSecretKey::from_seed([4u8; 32]);
-        let aliasing = Bytes32::from_u32_slice(&[DOMAIN_PK_G, DOMAIN_SIG_G, 0, 0, 0, 0, 0, 0]).unwrap();
+        let aliasing =
+            Bytes32::from_u32_slice(&[DOMAIN_PK_G, DOMAIN_SIG_G, 0, 0, 0, 0, 0, 0]).unwrap();
         assert_ne!(sk.public_key(), sk.sign(aliasing));
         // And a different message still yields a different signature.
-        let other = Bytes32::from_u32_slice(&[DOMAIN_SIG_G, DOMAIN_PK_G, 0, 0, 0, 0, 0, 0]).unwrap();
+        let other =
+            Bytes32::from_u32_slice(&[DOMAIN_SIG_G, DOMAIN_PK_G, 0, 0, 0, 0, 0, 0]).unwrap();
         assert_ne!(sk.sign(aliasing), sk.sign(other));
     }
 
     #[test]
     fn pk_and_sig_never_coincide_across_arities() {
-        // pk has arity 1+4=5 inputs; sig has arity 1+4+8=13. They share the same sk but never collide
-        // for any message — this is the invariant the no-pad-sponge fixed-arity encoding must preserve.
+        // pk has arity 1+4=5 inputs; sig has arity 1+4+8=13. They share the same sk but never
+        // collide for any message — this is the invariant the no-pad-sponge fixed-arity
+        // encoding must preserve.
         let mut rng = StdRng::seed_from_u64(7);
         for _ in 0..256 {
             let sk = GoldilocksSecretKey::rand(&mut rng);
@@ -302,11 +305,12 @@ mod tests {
         assert_eq!(DOMAIN_PK_G, u32::from_be_bytes(*b"IMPG"));
         assert_eq!(DOMAIN_SIG_G, u32::from_be_bytes(*b"IMSG"));
         assert_ne!(DOMAIN_PK_G, DOMAIN_SIG_G);
-        // Non-collision against the domain constants defined across the codebase as of P1 — channel.rs,
-        // balance_state.rs, close member-set, the Poseidon trees, the regev key/ct domains, the Plonky3
-        // STARK domains, and recipient/user-id. Many of these live in different hash contexts (keccak
-        // trees / BabyBear STARK), so a collision there is lower-impact, but the list is kept explicit so
-        // a future domain addition that collides with IMPG/IMSG trips this test. Values cross-checked by
+        // Non-collision against the domain constants defined across the codebase as of P1 —
+        // channel.rs, balance_state.rs, close member-set, the Poseidon trees, the regev
+        // key/ct domains, the Plonky3 STARK domains, and recipient/user-id. Many of these
+        // live in different hash contexts (keccak trees / BabyBear STARK), so a collision
+        // there is lower-impact, but the list is kept explicit so a future domain addition
+        // that collides with IMPG/IMSG trips this test. Values cross-checked by
         // grep against the source tree.
         const EXISTING: &[u32] = &[
             0x494d_4348, // IMCH CHANNEL_STATE_DOMAIN
@@ -340,8 +344,14 @@ mod tests {
             0x5549_4400, // "UID\0" USER_ID_DOMAIN
         ];
         for &d in EXISTING {
-            assert_ne!(DOMAIN_PK_G, d, "DOMAIN_PK_G collides with existing domain {d:#010x}");
-            assert_ne!(DOMAIN_SIG_G, d, "DOMAIN_SIG_G collides with existing domain {d:#010x}");
+            assert_ne!(
+                DOMAIN_PK_G, d,
+                "DOMAIN_PK_G collides with existing domain {d:#010x}"
+            );
+            assert_ne!(
+                DOMAIN_SIG_G, d,
+                "DOMAIN_SIG_G collides with existing domain {d:#010x}"
+            );
         }
     }
 }
