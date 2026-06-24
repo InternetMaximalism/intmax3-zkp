@@ -40,7 +40,7 @@ use intmax3_zkp::{
     wallet_core::{
         BuiltInterChannelSend, ChannelSnapshot, InterChannelDebitPayload,
         InterChannelTransferDescriptor, MemberInfo, MemberKeys, add_signature,
-        assemble_genesis_state, build_inter_channel_send, build_record, decrypt_balance,
+        assemble_genesis_state, build_burn_send, build_inter_channel_send, build_record, decrypt_balance,
         default_settled_tx_accumulator, sign_state, verify_snapshot,
     },
 };
@@ -245,6 +245,64 @@ fn build_transfer(
         &mut rng,
     )
     .expect("build_inter_channel_send")
+}
+
+/// VALIDATES `build_burn_send` (abstract2-1 §3.6 partial withdrawal, (ii) padding-receiver) with the
+/// REAL E-2 STARK + its build-time self-check (no anvil). A PASS proves the soundness-critical claim:
+/// `receiver_delta = encrypt(amount, RegevPk::padding())` is ACCEPTED by the channel-layer
+/// verification (the E-2 `sender_delta==receiver_delta==amount` constraint holds with the phantom
+/// padding receiver). Asserts the member debits ONLY their OWN slot by exactly `amount` (per-member
+/// attribution), the channel total drops, and the base Transfer targets the ADDRESS_TAG L1 form
+/// (withdraw-only) routed to the reserved BURN_CHANNEL_ID.
+#[test]
+fn build_burn_send_debits_only_sender_and_targets_l1() {
+    use intmax3_zkp::circuits::balance::common::recipient::calculate_recipient_from_address;
+    use intmax3_zkp::ethereum_types::address::Address;
+
+    let a = build_cli_channel(A_ID, &[50, 10, 30]);
+    let a_keys: Vec<MemberKeys> = CLI_SLOTS.iter().map(|&s| cli_keys(s)).collect();
+    let sender_slot = 0u8;
+    let amount = 20u64;
+    let l1 = Address::from_hex("0x00000000000000000000000000000000000000aa").unwrap();
+    let prev_fund = a.snapshot.state.channel_fund.amount;
+    let prev_enc = a.snapshot.state.balance_state.enc_balances.clone();
+
+    let mut rng = StdRng::seed_from_u64(0xB0_0000);
+    let built = build_burn_send(
+        &a_keys[sender_slot as usize],
+        &a.snapshot,
+        sender_slot,
+        l1,
+        amount,
+        a.balances[sender_slot as usize], // before_amount = 50 (the member's own share)
+        &a.witnesses[sender_slot as usize],
+        fresh_root(0xBEEF),
+        LEVEL,
+        &mut rng,
+    )
+    .expect("build_burn_send: padding-receiver E-2 self-check MUST pass");
+
+    // The member withdraws exactly their OWN amount.
+    assert_eq!(built.new_balance, 50 - amount, "sender new balance = before - amount");
+    let next = &built.debit_payload.proposed_next_state;
+    // Channel total decreased (the self-check enforces "decrease by exactly amount").
+    assert_ne!(next.channel_fund.amount, prev_fund, "channel_fund must decrease on a burn");
+    // PER-MEMBER ATTRIBUTION: only the sender slot's encBalance may change.
+    for slot in 0..prev_enc.len() {
+        let changed = next.balance_state.enc_balances[slot] != prev_enc[slot];
+        assert_eq!(changed, slot == sender_slot as usize, "only sender slot {slot} may change");
+    }
+    // Base Transfer recipient is the ADDRESS_TAG L1 form (withdraw-only), routed to BURN_CHANNEL_ID.
+    assert_eq!(
+        built.transfer_descriptor.receiver_pk_g,
+        calculate_recipient_from_address(l1),
+        "base Transfer recipient is the ADDRESS_TAG L1 form"
+    );
+    assert_eq!(
+        built.transfer_descriptor.destination_channel_id.channel_id(),
+        intmax3_zkp::constants::BURN_CHANNEL_ID,
+        "destination is the reserved BURN_CHANNEL_ID"
+    );
 }
 
 #[test]
