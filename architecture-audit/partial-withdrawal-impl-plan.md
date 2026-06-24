@@ -297,3 +297,32 @@ This is a DEEP integration (a new base-withdrawal path over the channel's live s
 standalone `build_channel_withdrawal`), + the heavy anvil E2E (step 5). NOT a trivial fork; needs a fresh
 focused fund-implementation session. The channel-layer half (build_burn_send) is done + validated and is
 the foundation; the base-half integration + E2E is the remaining major work.
+
+### CRITICAL BINDING FINDING (2026-06-24, heavy investigation) — two real gaps for the (a) base half
+Mapped the base-withdrawal recipe (BalanceWitnessGenerator `spend_witness`/`send_tx_witness`/
+`commit_send_tx`/`single_withdrawal_witness` + `BalanceProcessor::prove_send_tx`). Two soundness-critical
+gaps surfaced that make the base half NEW design, not wiring:
+1. **`settled_tx_chain` push mismatch.** The base `send_tx` circuit advances `settled_tx_chain` by
+   `transfer.aux_data` ONLY when `spend_valid && aux_data != 0` (send_tx_circuit.rs:281-297;
+   `settled_tx_chain_push`, balance_state.rs:306-315). But `build_inter_channel_send` sets the burn
+   `Transfer.aux_data = Bytes32::default()` (wallet_core.rs:1508) while pushing the CHANNEL state's
+   `settled_tx_chain` with a SEPARATE `tx_leaf` (line 1559). So a base withdrawal of the burn Transfer
+   would push NOTHING (aux=0) ⇒ its `settled_tx_chain` ≠ the signed channel `H1'` chain ⇒ the binding
+   silently breaks. FIX OPTION: make the burn `Transfer.aux_data = tx_leaf` so the base push matches the
+   channel push (requires a burn-specific path in `build_inter_channel_send`, or a fork; must NOT change
+   normal inter-channel sends, whose receiver-side credit assumes aux semantics).
+2. **No mid-channel binding circuit.** The CLOSE path binds `finalBalanceState ⇄ base withdrawal` via the
+   close circuit + the on-chain manager. There is NO equivalent for a mid-channel withdrawal: the base
+   `single_withdrawal` → `withdrawNative` is NOT cryptographically tied to the signed channel `H1'`. So
+   even with the chains matching (gap 1), nothing on-chain ENFORCES that the withdrawn member actually
+   debited their encBalance under N-of-N. The (a) guarantee requires a NEW binding (a circuit/contract
+   check that the withdrawal's `settled_tx_chain`/H1 equals a finalized, N-of-N-signed channel state that
+   committed the encBalance debit) — modeled on the close `finalBalanceState`/`settledTxChain` match but
+   for mid-channel. This is genuinely new fund/circuit design.
+
+CONCLUSION: the (a) base half is NOT wiring — it is (i) the `aux_data=tx_leaf` consistency fix + (ii) a
+new mid-channel base⇔channel binding (the close-path analogue). Both are fund/circuit-level changes
+needing design + heavy validation + the attacker-subagent review. The channel-layer burn (build_burn_send,
+validated) stands; the base half is a focused new fund-design effort. Pushing it through unvalidated would
+be unsound (per CLAUDE.md) — surfaced here so the next session starts from the exact gaps, not a wrong
+"just wire it together" assumption.
