@@ -249,8 +249,14 @@ registration (Rust `ChannelRecord::validate` + Solidity) as defense-in-depth (pr
    calculate_recipient_from_address(member_L1)` (ADDRESS_TAG), `destination_channel_id = BURN_CHANNEL_ID`;
    debit `enc_balances[sender]` + `channel_fund -= amount` (same as inter-channel send). Reuse
    `prove_channel_update` UNCHANGED.
-3. Burn state-update verification: confirm `InterChannelSend` `state_update_verifier` accepts dest =
-   BURN_CHANNEL_ID + sentinel receiver (or add a thin `PartialWithdrawalBurn` kind). VERIFY, don't assume.
+3. Burn state-update verification — **RESOLVED (verified 2026-06-24): clean fork, NO new circuit code.**
+   `state_update_verifier.rs:511-528` requires exactly 1 `receiver_delta` (burn supplies the phantom) but
+   does NOT validate the receiver's channel membership ("Cross-channel membership of the receiver is the
+   receiving channel's concern", 520-522) and imposes NO transport/delivery requirement on the sender
+   side. The sender-side checks are: 1 receiver_delta, fund −= amount (537-539), sender-slot-only debit
+   (558-563), tx_leaf chain push (524-528), H2/H1' atomicity (499-509). A burn (phantom receiver to
+   `RESERVED_BURN_PK`, dest=`BURN_CHANNEL_ID`) satisfies ALL of these → accepted unchanged. NO new
+   `PartialWithdrawalBurn` kind needed; `build_burn_send` is a pure fork of `build_inter_channel_send`.
 4. `cmd_partial_withdraw`: build_burn_send → N-of-N cosign → post block → finalize → `single_withdrawal`
    over the burn Transfer → `withdrawNative` (recipient = member L1).
 5. Heavy E2E (opt-in `INTMAX_RUN_HEAVY_E2E`): a member partial-withdraws real ETH, channel STAYS OPEN and
