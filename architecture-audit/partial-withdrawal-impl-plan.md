@@ -262,3 +262,18 @@ registration (Rust `ChannelRecord::validate` + Solidity) as defense-in-depth (pr
 5. Heavy E2E (opt-in `INTMAX_RUN_HEAVY_E2E`): a member partial-withdraws real ETH, channel STAYS OPEN and
    keeps transacting; + adversarial (over-withdraw, double-withdraw, withdraw-another's-share FAILS,
    non-member, post-freeze). Needs real proving + ~15min anvil — validation is the long pole.
+
+### STATUS (2026-06-24) — channel-layer burn DONE + VALIDATED
+- Step 1 (`RESERVED_BURN_PK`): reused `RegevPk::padding()` (canonical all-zero, no secret, passes
+  `validate()`/encryptable) — no new constant needed.
+- Step 2 (`build_burn_send`): **DONE + VALIDATED** (commits `9836da4` + `f4b3397`). A thin wrapper over
+  `build_inter_channel_send`. The test `build_burn_send_debits_only_sender_and_targets_l1`
+  (tests/inter_channel_cli.rs) runs the REAL E-2 STARK + self-check and PASSES → the (ii) padding-receiver
+  is SOUND at the channel layer (debits only the sender slot by `amount`, channel total drops, ADDRESS_TAG
+  L1 recipient, dest=BURN_CHANNEL_ID). The hardest/most soundness-critical part is settled.
+- Step 3: RESOLVED (clean fork, no new circuit code).
+- REMAINING: **step 4** `cmd_partial_withdraw` — couple `build_burn_send` (channel layer) to the BASE
+  withdrawal so `single_withdrawal` extracts the SAME burn Transfer (the c2c block-5 / build_channel_withdrawal
+  base balance proof must reflect the burn send; this base⇔channel reconciliation is the next concrete
+  piece) → N-of-N cosign → finalize → `withdrawNative`. **step 5** heavy anvil E2E (the long pole) +
+  the dedicated attacker-subagent review (CLAUDE.md) before merge.
