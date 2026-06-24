@@ -78,7 +78,8 @@ contract MleFinalizeE2ETest is Test {
             dd.kIs,
             dd.subgroupGenPowers,
             verifier,
-            genesisStateRoot
+            genesisStateRoot,
+            true // A-2: test opt-in for the degreeBits==0 bypass (this test uses a real VK anyway)
         );
 
         // Sanity: MLE verification really is ON.
@@ -90,10 +91,20 @@ contract MleFinalizeE2ETest is Test {
     //  Full path
     // ═══════════════════════════════════════════════════════════════════
 
-    function test_fullPath_postBlockThenFinalize() public {
+    /// @dev Shared postBlockAndSubmit setup: reconstructs the exact empty block #1 and posts it.
+    ///      Returns the submissionId, the final state root, the parsed VPIs and the final block
+    ///      number so both the positive and the negative finalize tests reuse one posting path.
+    function _postBlockForFinalize()
+        internal
+        returns (
+            uint256 submissionId,
+            bytes32 finalStateRoot,
+            IntmaxRollup.ValidityPublicInputs memory vpis,
+            uint64 finalBlockNumber
+        )
+    {
         string memory blockJson = _loadBlock();
 
-        // ── 1. postBlockAndSubmit: reconstruct the exact empty block #1. ──
         IntmaxRollup.SubBlock[] memory subBlocks = new IntmaxRollup.SubBlock[](1);
         {
             uint256[] memory keyIdsU = _parseUintArray(blockJson, ".key_ids");
@@ -109,10 +120,10 @@ contract MleFinalizeE2ETest is Test {
             });
         }
 
-        bytes32 finalStateRoot = vm.parseJsonBytes32(blockJson, ".final_state_root");
+        finalStateRoot = vm.parseJsonBytes32(blockJson, ".final_state_root");
         bytes32 proofHash = vm.parseJsonBytes32(blockJson, ".proof_hash");
         uint32 proofLength = uint32(vm.parseJsonUint(blockJson, ".proof_length"));
-        uint64 finalBlockNumber = uint64(vm.parseJsonUint(blockJson, ".final_block_number"));
+        finalBlockNumber = uint64(vm.parseJsonUint(blockJson, ".final_block_number"));
         bytes32 expectedFinalBlockChain = vm.parseJsonBytes32(blockJson, ".final_block_chain");
 
         // postBlockAndSubmit reads blobhash(0); mock a non-zero blob (env setup).
@@ -121,24 +132,33 @@ contract MleFinalizeE2ETest is Test {
         vm.blobhashes(blobs);
 
         vm.deal(poster, 1 ether);
-        uint256 expectedSubmissionId = rollup.nextSubmissionId();
+        submissionId = rollup.nextSubmissionId();
         vm.prank(poster);
         rollup.postBlockAndSubmit{value: 1 ether}(
             subBlocks, proofHash, proofLength, finalStateRoot
         );
 
-        // The on-chain recomputed block hash MUST equal the Rust-proved final block
-        // chain. This is the block-hash byte-equality proof.
+        // The on-chain recomputed block hash MUST equal the Rust-proved final block chain.
         assertEq(
             rollup.blockHashChainAt(finalBlockNumber),
             expectedFinalBlockChain,
             "on-chain block hash != proved final_block_chain (byte-layout mismatch)"
         );
         assertEq(rollup.blockNumber(), finalBlockNumber, "blockNumber advanced wrong");
-        assertEq(expectedSubmissionId, 0, "first submissionId must be 0");
+        assertEq(submissionId, 0, "first submissionId must be 0");
 
-        // ── 2. finalize: real ValidityPublicInputs + real MleProof + real MLE. ──
-        IntmaxRollup.ValidityPublicInputs memory vpis = _parseValidityPIs();
+        vpis = _parseValidityPIs();
+    }
+
+    function test_fullPath_postBlockThenFinalize() public {
+        (
+            uint256 expectedSubmissionId,
+            bytes32 finalStateRoot,
+            IntmaxRollup.ValidityPublicInputs memory vpis,
+            uint64 finalBlockNumber
+        ) = _postBlockForFinalize();
+
+        // ── finalize: real ValidityPublicInputs + real MleProof + real MLE. ──
         MleVerifier.MleProof memory mleProof = _parseProof(_loadMle());
 
         uint256 gasBefore = gasleft();
@@ -155,6 +175,31 @@ contract MleFinalizeE2ETest is Test {
         assertEq(rollup.latestFinalizedStateRoot(), finalStateRoot, "latestFinalizedStateRoot mismatch");
         assertEq(rollup.latestFinalizedBlockNumber(), finalBlockNumber, "latestFinalizedBlockNumber mismatch");
         emit log_named_uint("finalize gas (real MLE ON)", gasUsed);
+    }
+
+    /// @notice B-4: with MLE verification ON, finalize MUST NOT accept a tampered MLE proof. The PI
+    ///         binding still matches (publicInputs untouched), so the rejection is specifically the
+    ///         MLE/WHIR check failing. `finalize` returns false (it does not revert) and the
+    ///         submission stays un-finalized — without this, a garbage proof could finalize any root.
+    function test_finalize_rejects_tamperedMleProof() public {
+        (
+            uint256 submissionId,
+            bytes32 finalStateRoot,
+            IntmaxRollup.ValidityPublicInputs memory vpis,
+
+        ) = _postBlockForFinalize();
+
+        MleVerifier.MleProof memory mleProof = _parseProof(_loadMle());
+        // Corrupt the WHIR transcript: real MLE verification must now fail inside fullVerify.
+        mleProof.whirTranscript = hex"deadbeefdeadbeefdeadbeefdeadbeef";
+
+        bool ok = rollup.finalize(submissionId, finalStateRoot, vpis, mleProof);
+        assertFalse(ok, "finalize MUST reject a tampered MLE proof");
+        assertFalse(rollup.isFinalized(submissionId), "tampered proof MUST NOT finalize the submission");
+        assertTrue(
+            rollup.latestFinalizedStateRoot() != finalStateRoot,
+            "tampered proof MUST NOT advance latestFinalizedStateRoot to the posted root"
+        );
     }
 
     // ═══════════════════════════════════════════════════════════════════

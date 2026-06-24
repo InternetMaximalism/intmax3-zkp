@@ -31,13 +31,20 @@ function reqChannel(req) {
   const c = parseInt((req.query && req.query.channel) || '', 10);
   return CHANNELS.includes(c) ? c : CHANNELS[0];
 }
-function cli(ch, args) {
+function cli(ch, args, extraEnv) {
   console.log(`  $ INTMAX_CHANNEL=${ch} channel_member ${args.join(' ')}`);
   return execFileSync(CLI, args, {
     cwd: chDir(ch),
     encoding: 'utf8',
-    env: { ...process.env, INTMAX_CHANNEL: String(ch) },
+    env: { ...process.env, INTMAX_CHANNEL: String(ch), ...(extraEnv || {}) },
   });
+}
+
+// The rollup address backing channel `ch` (recorded by setup-backing in channel_backing.json).
+function rollupOf(ch) {
+  const b = JSON.parse(fs.readFileSync(wc(ch, 'channel_backing.json'), 'utf8'));
+  if (!b.rollup) throw new Error('channel has no rollup in channel_backing.json (run setup-backing)');
+  return b.rollup;
 }
 
 const app = express();
@@ -139,6 +146,61 @@ app.post('/api/inter/send', (req, res) => {
     fs.writeFileSync(wc(ch, 'inter_descriptor.json'), JSON.stringify(descriptor));
     cli(ch, ['cosign-inter-transfer', 'inter_debit_payload.json', 'inter_descriptor.json', 'inter_transfer.json']);
     res.json(JSON.parse(fs.readFileSync(wc(ch, 'inter_transfer.json'), 'utf8')));
+  } catch (e) { console.error(e.stderr ? String(e.stderr) : (e.message||e)); res.status(500).json({ error: String(e.stderr || e.message || e) }); }
+});
+
+// ─── A-3 close lifecycle (close → settle → withdraw → claim) ────────────────────────────────────
+// Thin wrappers over the CLI, same shape as /api/inter/send: the relay owns all members, so `close`
+// aggregates the N-of-N co-signature in ONE command. The caller supplies the channel's deployed
+// settlement-manager address (and, for close, the settlement-verifier `sv`); the rollup address is
+// taken from the channel's own channel_backing.json. Heavy (real proving) — these block for minutes.
+// SECURITY: wiring only. Soundness is in-circuit + on-chain (the CLI builds real proofs; the manager
+// /rollup gate every payout). The manager/sv/recipient are passed straight to the CLI/forge.
+
+// POST /api/close?channel=N  body: { manager, sv }
+app.post('/api/close', (req, res) => {
+  try {
+    const ch = reqChannel(req);
+    const manager = req.body && req.body.manager;
+    const sv = (req.body && req.body.sv) || '';
+    if (!manager) throw new Error('close needs { manager }');
+    const out = cli(ch, ['close', manager, RPC], { CLOSE_SV: sv });
+    res.json({ ok: true, log: out });
+  } catch (e) { console.error(e.stderr ? String(e.stderr) : (e.message||e)); res.status(500).json({ error: String(e.stderr || e.message || e) }); }
+});
+
+// POST /api/settle?channel=N  body: { manager }
+app.post('/api/settle', (req, res) => {
+  try {
+    const ch = reqChannel(req);
+    const manager = req.body && req.body.manager;
+    if (!manager) throw new Error('settle needs { manager }');
+    const out = cli(ch, ['settle', manager, RPC]);
+    res.json({ ok: true, log: out });
+  } catch (e) { console.error(e.stderr ? String(e.stderr) : (e.message||e)); res.status(500).json({ error: String(e.stderr || e.message || e) }); }
+});
+
+// POST /api/withdraw?channel=N  body: { manager }  (rollup→manager via the full withdrawal pipeline)
+app.post('/api/withdraw', (req, res) => {
+  try {
+    const ch = reqChannel(req);
+    const manager = req.body && req.body.manager;
+    if (!manager) throw new Error('withdraw needs { manager }');
+    const out = cli(ch, ['withdraw', manager, RPC], { ROLLUP: rollupOf(ch) });
+    res.json({ ok: true, log: out });
+  } catch (e) { console.error(e.stderr ? String(e.stderr) : (e.message||e)); res.status(500).json({ error: String(e.stderr || e.message || e) }); }
+});
+
+// POST /api/claim?channel=N  body: { manager, slot, recipient }  (per-member payout)
+app.post('/api/claim', (req, res) => {
+  try {
+    const ch = reqChannel(req);
+    const manager = req.body && req.body.manager;
+    const slot = req.body && req.body.slot;
+    const recipient = req.body && req.body.recipient;
+    if (!manager || slot === undefined || !recipient) throw new Error('claim needs { manager, slot, recipient }');
+    const out = cli(ch, ['claim', manager, String(slot), RPC], { CLAIM_RECIPIENT: recipient });
+    res.json({ ok: true, log: out });
   } catch (e) { console.error(e.stderr ? String(e.stderr) : (e.message||e)); res.status(500).json({ error: String(e.stderr || e.message || e) }); }
 });
 

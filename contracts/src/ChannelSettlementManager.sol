@@ -122,6 +122,9 @@ interface IChannelRegistry {
     ///         the rollup's `pendingWithdrawals[manager]`; `pullChannelFunds` then calls this to
     ///         move that ETH into the manager so it can be split among members.
     function withdraw() external;
+    /// @notice Authorize a partial-withdrawal auth digest on the rollup. Called by the settlement
+    ///         manager after a finalized partial-withdrawal close proof (N-of-N channel consent).
+    function authorizePartialWithdrawal(bytes32 authDigest) external;
 }
 
 contract ChannelSettlementManager {
@@ -172,6 +175,19 @@ contract ChannelSettlementManager {
     error NotChannelMember();
     error CloseNotRequested();
     error GracePeriodNotElapsed();
+    /// P6-A / detail2 §H-3: `submitSpecialClose` (C2) is DISABLED — its on-chain verification is a
+    /// forgeable `_matches` stub, so a SOUND proof of BP non-inclusion (a cross-layer commitment in
+    /// the validity/rollup layer) does not yet exist. Re-enable only once that commitment lands.
+    error SpecialCloseDisabled();
+    /// P6-A / detail2 §H-3: `submitLateOutgoingDebitCorrection` (C3) is DISABLED — redundant. Double
+    /// withdrawal is already prevented by the in-circuit nullifier used-sets (check-then-set CEI) at
+    /// every payout path, and stale closes by `cancelClose` (C1); its verifier is also a stub.
+    error LateOutgoingDebitDisabled();
+    error PartialWithdrawalNotPending();
+    error PartialWithdrawalChainUsed();
+    error PartialWithdrawalAuxDataZero();
+    error PartialWithdrawalChainMismatch();
+    error PartialWithdrawalNotNewer();
 
     enum ChannelLifecycleStatus {
         Active,
@@ -246,6 +262,21 @@ contract ChannelSettlementManager {
     );
 
     event WithdrawalClaimed(address indexed recipient, uint256 amount);
+
+    event PartialWithdrawalSubmitted(
+        bytes32 indexed authDigest,
+        bytes32 indexed chainKey,
+        uint64 challengeDeadline,
+        uint64 finalStateVersion
+    );
+
+    event PartialWithdrawalFinalized(bytes32 indexed authDigest, bytes32 indexed chainKey);
+
+    event PartialWithdrawalCancelled(
+        bytes32 indexed authDigest,
+        bytes32 indexed revivedChannelStateDigest,
+        uint64 revivedStateVersion
+    );
 
     /// @dev Mirror of Rust `CloseIntent` (src/common/channel.rs), minus the channel id (this
     /// contract is per-channel; `channelId` is the immutable).
@@ -363,6 +394,14 @@ contract ChannelSettlementManager {
         uint64 amount;
     }
 
+    struct AuthorizedWithdrawal {
+        address recipient;
+        uint32 tokenIndex;
+        uint256 amount;
+        bytes32 nullifier;
+        bytes32 auxData;
+    }
+
     struct PendingClose {
         bool active;
         uint64 closeNonce;
@@ -476,6 +515,17 @@ contract ChannelSettlementManager {
     mapping(bytes32 => bool) public usedWithdrawalNullifiers;
     mapping(bytes32 => bool) public usedSharedNativeNullifiers;
     mapping(bytes32 => bool) public usedLateOutgoingDebitNullifiers;
+
+    // --- Partial withdrawal (GAP2: mid-channel burn → L1, channel stays open) ---
+    mapping(bytes32 => bool) public usedPartialWithdrawalChains;
+    bool public partialWithdrawalPending;
+    bytes32 public pendingPartialWithdrawalAuthDigest;
+    bytes32 public pendingPartialWithdrawalChainKey;
+    bytes32 public pendingPartialWithdrawalCloseIntentDigest;
+    uint64 public pendingPartialWithdrawalDeadline;
+    uint64 public pendingPartialWithdrawalStateVersion;
+    uint64 public pendingPartialWithdrawalEpoch;
+
     /// F7: member identity is the SPHINCS+ pubkey hash (bytes32).
     mapping(bytes32 => address) public registeredRecipientOf;
     mapping(bytes32 => uint256) public registeredMemberIndexPlusOne;
@@ -754,56 +804,19 @@ contract ChannelSettlementManager {
         });
     }
 
-    function submitSpecialClose(
-        SpecialClose calldata specialClose,
-        bytes calldata proof
-    ) external {
-        if (channelStatus != ChannelLifecycleStatus.Active) revert ChannelAlreadyFrozen();
-        // F7: the offending proposer must be this channel's registered block-proposer (slot and
-        // pubkey hash).
-        if (
-            specialClose.offendingBpMemberSlot != bpMemberSlot ||
-            specialClose.offendingBpPkG != bpPkG
-        ) revert InvalidBpForSpecialClose();
-        if (
-            specialClose.latestFinalizedMediumBlockNumber <
-            specialClose.signedMediumBlockNumber + 5
-        ) revert InvalidSpecialCloseWindow();
-        if (
-            !verifier.verifySpecialClose(
-                channelId,
-                specialClose.offendingBpMemberSlot,
-                specialClose.offendingBpPkG,
-                specialClose.fullySignedSmallBlockRoot,
-                specialClose.smallBlockNumber,
-                specialClose.signedMediumBlockNumber,
-                specialClose.latestFinalizedMediumBlockNumber,
-                proof
-            )
-        ) revert InvalidSpecialCloseProof();
-
-        currentCloseFreezeNonce += 1;
-        channelStatus = ChannelLifecycleStatus.ClosePending;
-        // A special close IS a freeze request: the first close intent of this frozen era is
-        // subject to the same grace window as a member-requested close.
-        closeRequestedAt = uint64(block.timestamp);
-        uint256 slashedAmount = specialClosePenalty;
-        if (slashedAmount > bpBondCredits) {
-            slashedAmount = bpBondCredits;
-        }
-        bpBondCredits -= slashedAmount;
-        withdrawalCredits[msg.sender] += slashedAmount;
-
-        latestSpecialCloseDigest = computeSpecialCloseDigest(specialClose);
-        emit SpecialCloseSubmitted(
-            latestSpecialCloseDigest,
-            specialClose.offendingBpPkG,
-            specialClose.fullySignedSmallBlockRoot,
-            specialClose.offendingBpMemberSlot,
-            specialClose.smallBlockNumber,
-            slashedAmount,
-            currentCloseFreezeNonce
-        );
+    /// @notice DISABLED (P6-A / detail2 §H-3, C2). Permanently reverts.
+    /// @dev SECURITY: the BP-censorship special-close was gated only by `verifier.verifySpecialClose`,
+    ///      a tautological `_matches` stub (the "proof" is just `keccak(public inputs)`, computable by
+    ///      anyone), so anyone could fabricate the accusation, slash an honest BP and freeze the
+    ///      channel (freeze-grief). A SOUND proof of the fault requires non-inclusion of the BP-signed
+    ///      block in the finalized medium-block chain — a cross-layer commitment that lives in the
+    ///      validity/`IntmaxRollup` layer and does not exist yet. Until it does, the entry point is
+    ///      reverted. Safety while disabled: only the (stub-gated) slash+freeze is unavailable; no
+    ///      member funds move, and `bpBondCredits` is a separate, possibly-unfunded pot. The stub
+    ///      verifier (`ChannelSettlementVerifier.verifySpecialClose`) is left in place but unreachable.
+    ///      The signature (and ABI selector) is kept so callers fail closed with a clear error.
+    function submitSpecialClose(SpecialClose calldata, bytes calldata) external pure {
+        revert SpecialCloseDisabled();
     }
 
     function cancelClose(
@@ -842,43 +855,21 @@ contract ChannelSettlementManager {
         );
     }
 
-    function submitLateOutgoingDebitCorrection(
-        LateOutgoingDebitCorrection calldata correction,
-        bytes calldata proof
-    ) external {
-        if (!pendingClose.active) revert CloseNotActive();
-        if (correction.closeIntentDigest != pendingClose.closeIntentDigest) {
-            revert CloseIntentDigestMismatch();
-        }
-        if (usedLateOutgoingDebitNullifiers[correction.debitNullifier]) {
-            revert NullifierAlreadyUsed();
-        }
-        if (
-            !verifier.verifyLateOutgoingDebit(
-                channelId,
-                correction.closeIntentDigest,
-                correction.sourceTxHash,
-                correction.senderPkG,
-                correction.senderAmountDigest,
-                correction.debitNullifier,
-                correction.amount,
-                proof
-            )
-        ) revert InvalidLateOutgoingDebitProof();
-
-        usedLateOutgoingDebitNullifiers[correction.debitNullifier] = true;
-        bytes32 closeIntentDigest = pendingClose.closeIntentDigest;
-        delete pendingClose;
-        channelStatus = ChannelLifecycleStatus.Active;
-        // Restoring Active ends the frozen era (see cancelClose).
-        closeRequestedAt = 0;
-
-        emit LateOutgoingDebitAccepted(
-            closeIntentDigest,
-            correction.sourceTxHash,
-            correction.debitNullifier,
-            correction.amount
-        );
+    /// @notice DISABLED (P6-A / detail2 §H-3, C3). Permanently reverts.
+    /// @dev SECURITY: this late-outgoing-debit correction is REDUNDANT. Its sole property — "the same
+    ///      withdrawal cannot be paid more than once" — is already guaranteed by the in-circuit
+    ///      nullifier used-sets enforced (check-then-set CEI) at EVERY payout path
+    ///      (`IntmaxRollup.withdrawalNullifierUsed`, `usedWithdrawalNullifiers`,
+    ///      `usedSharedNativeNullifiers`), and a close on a stale `state_version` is rejected by
+    ///      `cancelClose` (C1). Its on-chain gate was also a forgeable `_matches` stub. The only thing
+    ///      lost by disabling is an accepted, out-of-scope time-difference grief. The stub verifier
+    ///      (`ChannelSettlementVerifier.verifyLateOutgoingDebit`) is left in place but unreachable.
+    ///      The signature (and ABI selector) is kept so callers fail closed with a clear error.
+    function submitLateOutgoingDebitCorrection(LateOutgoingDebitCorrection calldata, bytes calldata)
+        external
+        pure
+    {
+        revert LateOutgoingDebitDisabled();
     }
 
     function finalizeClose() external {
@@ -913,6 +904,132 @@ contract ChannelSettlementManager {
         );
 
         delete pendingClose;
+    }
+
+    // -----------------------------------------------------------------------
+    // Partial withdrawal (GAP2): mid-channel burn → L1 authorization
+    // -----------------------------------------------------------------------
+
+    function submitPartialWithdrawalIntent(
+        CloseIntent calldata intent,
+        MleVerifier.MleProof calldata proof,
+        bytes32 prevSettledTxChain,
+        AuthorizedWithdrawal calldata withdrawal
+    ) external {
+        if (channelStatus != ChannelLifecycleStatus.Active) revert ChannelClosed();
+
+        _checkCloseProof(intent, proof);
+
+        if (withdrawal.auxData == bytes32(0)) revert PartialWithdrawalAuxDataZero();
+
+        // SECURITY: verify settled_tx_chain binding — the burn's tx_leaf (withdrawal.auxData)
+        // was the LAST push in the N-of-N-signed chain. push(prev, leaf) == finalSettledTxChain.
+        bytes32 expectedChain = keccak256(
+            abi.encodePacked(uint32(0x494d5443), prevSettledTxChain, withdrawal.auxData)
+        );
+        if (expectedChain != intent.finalSettledTxChain) revert PartialWithdrawalChainMismatch();
+
+        bytes32 chainKey = keccak256(abi.encodePacked(channelId, intent.finalSettledTxChain));
+        if (usedPartialWithdrawalChains[chainKey]) revert PartialWithdrawalChainUsed();
+
+        // Challenge replacement: if a pending intent exists on a DIFFERENT chain key, allow
+        // replacement only if the new state is strictly newer (higher epoch/stateVersion).
+        if (partialWithdrawalPending) {
+            bool newer = intent.finalEpoch > pendingPartialWithdrawalEpoch ||
+                (intent.finalEpoch == pendingPartialWithdrawalEpoch &&
+                 intent.finalStateVersion > pendingPartialWithdrawalStateVersion);
+            if (!newer) revert PartialWithdrawalNotNewer();
+        }
+
+        bytes32 authDigest = keccak256(
+            abi.encodePacked(
+                bytes4(0x494d5057),
+                withdrawal.nullifier,
+                withdrawal.recipient,
+                withdrawal.tokenIndex,
+                withdrawal.amount,
+                withdrawal.auxData
+            )
+        );
+
+        partialWithdrawalPending = true;
+        pendingPartialWithdrawalAuthDigest = authDigest;
+        pendingPartialWithdrawalChainKey = chainKey;
+        pendingPartialWithdrawalCloseIntentDigest = computeCloseIntentDigest(intent);
+        pendingPartialWithdrawalDeadline = uint64(block.timestamp) + challengePeriod;
+        pendingPartialWithdrawalStateVersion = intent.finalStateVersion;
+        pendingPartialWithdrawalEpoch = intent.finalEpoch;
+
+        emit PartialWithdrawalSubmitted(
+            authDigest,
+            chainKey,
+            pendingPartialWithdrawalDeadline,
+            intent.finalStateVersion
+        );
+    }
+
+    function finalizePartialWithdrawal() external {
+        if (!partialWithdrawalPending) revert PartialWithdrawalNotPending();
+        if (block.timestamp <= pendingPartialWithdrawalDeadline) revert ChallengeWindowOpen();
+        // SECURITY (12B fix): NO channelStatus check. If requestClose races during the challenge
+        // period, the partial withdrawal can still finalize — the burned amount is already excluded
+        // from the close's channelFundAmount, so no double-counting.
+
+        usedPartialWithdrawalChains[pendingPartialWithdrawalChainKey] = true;
+        bytes32 authDigest = pendingPartialWithdrawalAuthDigest;
+        bytes32 chainKey = pendingPartialWithdrawalChainKey;
+
+        delete partialWithdrawalPending;
+        delete pendingPartialWithdrawalAuthDigest;
+        delete pendingPartialWithdrawalChainKey;
+        delete pendingPartialWithdrawalCloseIntentDigest;
+        delete pendingPartialWithdrawalDeadline;
+        delete pendingPartialWithdrawalStateVersion;
+        delete pendingPartialWithdrawalEpoch;
+
+        IChannelRegistry(address(registry)).authorizePartialWithdrawal(authDigest);
+
+        emit PartialWithdrawalFinalized(authDigest, chainKey);
+    }
+
+    function cancelPartialWithdrawal(
+        CancelCloseRequest calldata request,
+        MleVerifier.MleProof calldata proof
+    ) external {
+        if (!partialWithdrawalPending) revert PartialWithdrawalNotPending();
+        if (request.closeIntentDigest != pendingPartialWithdrawalCloseIntentDigest) {
+            revert CloseIntentDigestMismatch();
+        }
+
+        // SECURITY: mirrors cancelClose — the N-of-N signed a strictly newer state, proving the
+        // pending partial withdrawal's state is stale. The verifier binds memberSetCommitment to
+        // the registered channel members (same as cancelClose).
+        if (
+            !verifier.verifyCancelClose(
+                channelId,
+                pendingPartialWithdrawalCloseIntentDigest,
+                registeredMemberSetCommitment(),
+                request.revivedStateVersion,
+                request.revivedChannelStateDigest,
+                proof
+            )
+        ) revert InvalidCancelProof();
+
+        bytes32 authDigest = pendingPartialWithdrawalAuthDigest;
+
+        delete partialWithdrawalPending;
+        delete pendingPartialWithdrawalAuthDigest;
+        delete pendingPartialWithdrawalChainKey;
+        delete pendingPartialWithdrawalCloseIntentDigest;
+        delete pendingPartialWithdrawalDeadline;
+        delete pendingPartialWithdrawalStateVersion;
+        delete pendingPartialWithdrawalEpoch;
+
+        emit PartialWithdrawalCancelled(
+            authDigest,
+            request.revivedChannelStateDigest,
+            request.revivedStateVersion
+        );
     }
 
     function submitWithdrawalClaim(

@@ -27,9 +27,17 @@ function reqChannel(req) {
   const c = parseInt((req.query && req.query.channel) || '', 10);
   return CHANNELS.includes(c) ? c : CHANNELS[0];
 }
-function cli(ch, args) {
+function cli(ch, args, extraEnv) {
   console.log(`  $ INTMAX_CHANNEL=${ch} channel_member ${args.join(' ')}`);
-  return execFileSync(CLI, args, { cwd: chDir(ch), encoding: 'utf8', env: { ...process.env, INTMAX_CHANNEL: String(ch) } });
+  return execFileSync(CLI, args, { cwd: chDir(ch), encoding: 'utf8', env: { ...process.env, INTMAX_CHANNEL: String(ch), ...(extraEnv || {}) } });
+}
+
+// RPC the close-lifecycle commands talk to (this box targets a real chain — set RPC in the env).
+const RPC = process.env.RPC || 'http://127.0.0.1:8545';
+function rollupOf(ch) {
+  const b = JSON.parse(fs.readFileSync(wc(ch, 'channel_backing.json'), 'utf8'));
+  if (!b.rollup) throw new Error('channel has no rollup in channel_backing.json');
+  return b.rollup;
 }
 
 // Fail fast if the deposit backing was not shipped — this box must never fabricate a channel.
@@ -134,6 +142,38 @@ app.post('/api/inter/send', (req, res) => {
     fs.writeFileSync(wc(ch, 'inter_descriptor.json'), JSON.stringify(descriptor));
     cli(ch, ['cosign-inter-transfer', 'inter_debit_payload.json', 'inter_descriptor.json', 'inter_transfer.json']);
     res.json(JSON.parse(fs.readFileSync(wc(ch, 'inter_transfer.json'), 'utf8')));
+  } catch (e) { console.error(e.stderr ? String(e.stderr) : (e.message||e)); res.status(500).json({ error: String(e.stderr || e.message || e) }); }
+});
+
+// ─── A-3 close lifecycle (close → settle → withdraw → claim) ────────────────────────────────────
+// Same thin wrappers as the local relay. Heavy (real proving); the caller supplies the channel's
+// deployed manager (+ sv for close); the rollup comes from channel_backing.json; RPC from the env.
+app.post('/api/close', (req, res) => {
+  try {
+    const ch = reqChannel(req); const manager = req.body && req.body.manager; const sv = (req.body && req.body.sv) || '';
+    if (!manager) throw new Error('close needs { manager }');
+    res.json({ ok: true, log: cli(ch, ['close', manager, RPC], { CLOSE_SV: sv }) });
+  } catch (e) { console.error(e.stderr ? String(e.stderr) : (e.message||e)); res.status(500).json({ error: String(e.stderr || e.message || e) }); }
+});
+app.post('/api/settle', (req, res) => {
+  try {
+    const ch = reqChannel(req); const manager = req.body && req.body.manager;
+    if (!manager) throw new Error('settle needs { manager }');
+    res.json({ ok: true, log: cli(ch, ['settle', manager, RPC]) });
+  } catch (e) { console.error(e.stderr ? String(e.stderr) : (e.message||e)); res.status(500).json({ error: String(e.stderr || e.message || e) }); }
+});
+app.post('/api/withdraw', (req, res) => {
+  try {
+    const ch = reqChannel(req); const manager = req.body && req.body.manager;
+    if (!manager) throw new Error('withdraw needs { manager }');
+    res.json({ ok: true, log: cli(ch, ['withdraw', manager, RPC], { ROLLUP: rollupOf(ch) }) });
+  } catch (e) { console.error(e.stderr ? String(e.stderr) : (e.message||e)); res.status(500).json({ error: String(e.stderr || e.message || e) }); }
+});
+app.post('/api/claim', (req, res) => {
+  try {
+    const ch = reqChannel(req); const manager = req.body && req.body.manager; const slot = req.body && req.body.slot; const recipient = req.body && req.body.recipient;
+    if (!manager || slot === undefined || !recipient) throw new Error('claim needs { manager, slot, recipient }');
+    res.json({ ok: true, log: cli(ch, ['claim', manager, String(slot), RPC], { CLAIM_RECIPIENT: recipient }) });
   } catch (e) { console.error(e.stderr ? String(e.stderr) : (e.message||e)); res.status(500).json({ error: String(e.stderr || e.message || e) }); }
 });
 

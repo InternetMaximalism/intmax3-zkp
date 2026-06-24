@@ -1,19 +1,23 @@
 //! Plonky2 single-signature circuit for the Goldilocks Poseidon-preimage signature (P2a).
 //!
 //! Statement (public `(pk, m)`, witness `sk`):
-//!   - `pk = Poseidon([DOMAIN_PK_G] ‖ sk)` — proves knowledge of the preimage `sk` of the public key.
+//!   - `pk = Poseidon([DOMAIN_PK_G] ‖ sk)` — proves knowledge of the preimage `sk` of the public
+//!     key.
 //!   - `m` is a **public input**, so the proof is cryptographically bound to exactly this message
 //!     (a proof minted for `m1` does not verify against `m2`). This binding IS the signature.
 //!   - `sig = Poseidon([DOMAIN_SIG_G] ‖ sk ‖ m)` is computed in-circuit as defense-in-depth so the
-//!     message provably flows through the secret key (threat model §1.2). It is **witness-only** — not
-//!     a public input — to avoid exposing a deterministic per-(key, message) tag (A6).
-//!   - `sk` is asserted non-degenerate (not all-zero), the concrete part of the A1 range/format check.
+//!     message provably flows through the secret key (threat model §1.2). It is **witness-only** —
+//!     not a public input — to avoid exposing a deterministic per-(key, message) tag (A6).
+//!   - `sk` is asserted non-degenerate (not all-zero), the concrete part of the A1 range/format
+//!     check.
 //!
-//! Public-input layout: `[ pk : Bytes32 (8 u32 limbs), m : Bytes32 (8 u32 limbs) ]` = 16 field elements.
+//! Public-input layout: `[ pk : Bytes32 (8 u32 limbs), m : Bytes32 (8 u32 limbs) ]` = 16 field
+//! elements.
 //!
 //! The native reference for `(pk, m)` is `GoldilocksSecretKey::public_key()` + the caller-chosen
 //! message; the in-circuit Poseidon (`PoseidonHashOutTarget::hash_inputs`) matches the native
-//! `PoseidonHashOut::hash_inputs_u64` (same `hash_no_pad`, same element order, domain in the first lane).
+//! `PoseidonHashOut::hash_inputs_u64` (same `hash_no_pad`, same element order, domain in the first
+//! lane).
 
 use plonky2::{
     field::{goldilocks_field::GoldilocksField, types::Field as _},
@@ -31,13 +35,13 @@ use plonky2::{
 
 use crate::{
     ethereum_types::{
-        bytes32::{Bytes32, Bytes32Target, BYTES32_LEN},
+        bytes32::{BYTES32_LEN, Bytes32, Bytes32Target},
         u32limb_trait::{U32LimbTargetTrait as _, U32LimbTrait as _},
     },
     utils::poseidon_hash_out::PoseidonHashOutTarget,
 };
 
-use super::{GoldilocksSecretKey, DOMAIN_PK_G, DOMAIN_SIG_G, SECRET_KEY_LEN};
+use super::{DOMAIN_PK_G, DOMAIN_SIG_G, GoldilocksSecretKey, SECRET_KEY_LEN};
 
 pub const D: usize = 2;
 pub type F = GoldilocksField;
@@ -58,16 +62,16 @@ impl SingleSigCircuit {
         let mut builder = CircuitBuilder::<F, D>::new(CircuitConfig::standard_recursion_config());
 
         // Private witness: the 4 secret-key limbs.
-        let sk: [Target; SECRET_KEY_LEN] =
-            core::array::from_fn(|_| builder.add_virtual_target());
+        let sk: [Target; SECRET_KEY_LEN] = core::array::from_fn(|_| builder.add_virtual_target());
 
         // Public message (range-checked so each limb is a genuine u32 — keeps the native/in-circuit
-        // hash inputs identical and prevents a malformed message from diverging from the reference).
+        // hash inputs identical and prevents a malformed message from diverging from the
+        // reference).
         let message = Bytes32Target::new(&mut builder, true);
 
         // A1: reject the degenerate all-zero secret key. `all_zero` is true iff every limb is zero;
-        // asserting it is zero (false) forbids that single low-entropy key. (Broader entropy cannot be
-        // enforced in-circuit; this pins the concrete degenerate case.)
+        // asserting it is zero (false) forbids that single low-entropy key. (Broader entropy cannot
+        // be enforced in-circuit; this pins the concrete degenerate case.)
         let zero = builder.zero();
         let mut all_zero = builder._true();
         for &limb in &sk {
@@ -84,11 +88,12 @@ impl SingleSigCircuit {
         let pk_hash = PoseidonHashOutTarget::hash_inputs(&mut builder, &pk_inputs);
         let pk_bytes = Bytes32Target::from_hash_out(&mut builder, pk_hash);
 
-        // sig = Poseidon([DOMAIN_SIG_G] ‖ sk ‖ m)  (defense-in-depth; witness-only, not registered).
-        // Computing it forces the message limbs through the secret key inside the constraint system.
-        // SECURITY: this is NOT the message-binding mechanism — `m` is bound by being a registered
-        // PUBLIC INPUT (a proof minted for one `m` does not verify against another). Do not delete the
-        // `register_public_inputs(&message...)` below thinking this sig computation covers the binding.
+        // sig = Poseidon([DOMAIN_SIG_G] ‖ sk ‖ m)  (defense-in-depth; witness-only, not
+        // registered). Computing it forces the message limbs through the secret key inside
+        // the constraint system. SECURITY: this is NOT the message-binding mechanism — `m`
+        // is bound by being a registered PUBLIC INPUT (a proof minted for one `m` does not
+        // verify against another). Do not delete the `register_public_inputs(&message...)`
+        // below thinking this sig computation covers the binding.
         let dom_sig = builder.constant(F::from_canonical_u32(DOMAIN_SIG_G));
         let mut sig_inputs = Vec::with_capacity(1 + SECRET_KEY_LEN + BYTES32_LEN);
         sig_inputs.push(dom_sig);
@@ -134,7 +139,7 @@ impl Default for SingleSigCircuit {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rand::{rngs::StdRng, SeedableRng as _};
+    use rand::{SeedableRng as _, rngs::StdRng};
 
     fn message(byte: u8) -> Bytes32 {
         Bytes32::from_u32_slice(&[0x494d_0000 | byte as u32, 1, 2, 3, 4, 5, 6, 7]).unwrap()
@@ -149,15 +154,14 @@ mod tests {
 
         // Public inputs expose the correct (pk, m).
         let pk = sk.public_key();
-        let pi: Vec<u32> = proof
-            .public_inputs
-            .iter()
-            .map(|f| f.0 as u32)
-            .collect();
+        let pi: Vec<u32> = proof.public_inputs.iter().map(|f| f.0 as u32).collect();
         assert_eq!(pi[0..BYTES32_LEN], pk.to_u32_vec()[..]);
         assert_eq!(pi[BYTES32_LEN..], m.to_u32_vec()[..]);
 
-        circuit.data.verify(proof).expect("verification should succeed");
+        circuit
+            .data
+            .verify(proof)
+            .expect("verification should succeed");
     }
 
     #[test]
@@ -197,7 +201,10 @@ mod tests {
         let m = message(0x07);
         let pa = circuit.prove(&sk_a, m).unwrap();
         let pb = circuit.prove(&sk_b, m).unwrap();
-        assert_ne!(pa.public_inputs[0..BYTES32_LEN], pb.public_inputs[0..BYTES32_LEN]);
+        assert_ne!(
+            pa.public_inputs[0..BYTES32_LEN],
+            pb.public_inputs[0..BYTES32_LEN]
+        );
         circuit.data.verify(pa).unwrap();
         circuit.data.verify(pb).unwrap();
     }

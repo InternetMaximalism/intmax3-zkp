@@ -423,7 +423,8 @@ mod tests {
     }
 
     fn digest(byte: u8) -> Bytes32 {
-        Bytes32::from_u32_slice(&[0x0a0b_0c00 | byte as u32, 1, 2, 3, 0xffff_ffff, 5, 6, 7]).unwrap()
+        Bytes32::from_u32_slice(&[0x0a0b_0c00 | byte as u32, 1, 2, 3, 0xffff_ffff, 5, 6, 7])
+            .unwrap()
     }
 
     /// Determinism: the same sk yields the same pk_b.
@@ -584,14 +585,26 @@ mod tests {
             let air = babybear_poseidon2_air();
             let pk_native = s.public_key().digest;
             let pk_row0 = output_from_trace_row(&air, &trace, 0);
-            assert_eq!(&pk_row0[0..DIGEST_LIMBS], &pk_native[..], "row0 output == native pk_b");
-            assert_eq!(&pvs[0..DIGEST_LIMBS], &pk_native[..], "PV pk_b == native pk_b");
+            assert_eq!(
+                &pk_row0[0..DIGEST_LIMBS],
+                &pk_native[..],
+                "row0 output == native pk_b"
+            );
+            assert_eq!(
+                &pvs[0..DIGEST_LIMBS],
+                &pk_native[..],
+                "PV pk_b == native pk_b"
+            );
 
             // sig_b: native vs trace row-SIG_BLOCKS output.
             let sig_native = s.sign_digest_native(&m);
             assert_eq!(sig_b, sig_native, "generate_hash_sig_trace sig_b == native");
             let sig_row = output_from_trace_row(&air, &trace, SIG_BLOCKS);
-            assert_eq!(&sig_row[0..DIGEST_LIMBS], &sig_native[..], "row-N output == native sig_b");
+            assert_eq!(
+                &sig_row[0..DIGEST_LIMBS],
+                &sig_native[..],
+                "row-N output == native sig_b"
+            );
 
             // PV message == the supplied limbs.
             assert_eq!(&pvs[DIGEST_LIMBS..], &m[..], "PV message == m_limbs");
@@ -634,8 +647,8 @@ mod tests {
 
     /// Constraint-level forgery: a malicious prover tampers row-0's permutation OUTPUT column to a
     /// chosen forged pk_b and sets the PVs to match. The inner Poseidon2 permutation constraint
-    /// (`post == permute16(inputs)`) — and the pk-output binding `post[0..8] == pv_pk` — must reject
-    /// this: a valid proof of a pk_b that is NOT `Poseidon2(sk)` cannot exist.
+    /// (`post == permute16(inputs)`) — and the pk-output binding `post[0..8] == pv_pk` — must
+    /// reject this: a valid proof of a pk_b that is NOT `Poseidon2(sk)` cannot exist.
     #[cfg_attr(debug_assertions, ignore = "run with --release")]
     #[test]
     fn hash_sig_forged_pk_output_rejected() {
@@ -651,10 +664,17 @@ mod tests {
         {
             let w = HASH_SIG_COLS;
             let row0 = &trace.values[0..w];
-            let cols: &Poseidon2Cols<F, WIDTH, SBOX_DEGREE, SBOX_REGISTERS, HALF_FULL_ROUNDS, PARTIAL_ROUNDS> =
-                row0[0..POSEIDON2_COLS].borrow();
+            let cols: &Poseidon2Cols<
+                F,
+                WIDTH,
+                SBOX_DEGREE,
+                SBOX_REGISTERS,
+                HALF_FULL_ROUNDS,
+                PARTIAL_ROUNDS,
+            > = row0[0..POSEIDON2_COLS].borrow();
             let base = trace.values.as_ptr() as usize;
-            let field = (&cols.ending_full_rounds[HALF_FULL_ROUNDS - 1].post[0]) as *const F as usize;
+            let field =
+                (&cols.ending_full_rounds[HALF_FULL_ROUNDS - 1].post[0]) as *const F as usize;
             let idx = (field - base) / core::mem::size_of::<F>();
             trace.values[idx] = forged;
         }
@@ -720,7 +740,10 @@ mod tests {
         let s = sk(11);
         let m = msg(0x44);
         let (mut trace, pvs, _sig) = generate_hash_sig_trace(&s, &m);
-        assert!(HASH_SIG_HEIGHT > HASH_SIG_REAL_ROWS, "there is at least one padding row");
+        assert!(
+            HASH_SIG_HEIGHT > HASH_SIG_REAL_ROWS,
+            "there is at least one padding row"
+        );
 
         // Overwrite a PADDING row (row HASH_SIG_REAL_ROWS = 5) with a *foreign* valid permutation
         // whose input is a pk-style preimage for a DIFFERENT secret key. The upstream permutation
@@ -756,8 +779,8 @@ mod tests {
     }
 
     /// Selector tamper: forcing row 0 to PAD (instead of PK) must be rejected. The `when_first_row`
-    /// pin (`lsel(SEL_PK)==1` on row 0) and the `nsel(PK)=0` shift-register rule forbid any reshuffle
-    /// of the pk/sig/pad schedule, so the pk_b binding can never be dodged.
+    /// pin (`lsel(SEL_PK)==1` on row 0) and the `nsel(PK)=0` shift-register rule forbid any
+    /// reshuffle of the pk/sig/pad schedule, so the pk_b binding can never be dodged.
     #[cfg_attr(debug_assertions, ignore = "run with --release")]
     #[test]
     fn hash_sig_selector_tamper_rejected() {
@@ -798,15 +821,16 @@ mod tests {
     }
 
     /// Chaining tamper: corrupting a sponge chaining input cell must be rejected. The cross-row
-    /// `next.inputs == post + block` constraints pin exactly how each message limb is absorbed, so a
-    /// prover cannot absorb a different message than the one committed in the public values.
+    /// `next.inputs == post + block` constraints pin exactly how each message limb is absorbed, so
+    /// a prover cannot absorb a different message than the one committed in the public values.
     #[cfg_attr(debug_assertions, ignore = "run with --release")]
     #[test]
     fn hash_sig_chaining_tamper_rejected() {
         let s = sk(33);
         let m = msg(0x63);
         let (mut trace, pvs, _sig) = generate_hash_sig_trace(&s, &m);
-        // Corrupt row 2's permutation input[0] (the SIG1->SIG2 chaining target; inputs are cols 0..WIDTH).
+        // Corrupt row 2's permutation input[0] (the SIG1->SIG2 chaining target; inputs are cols
+        // 0..WIDTH).
         let idx = 2 * HASH_SIG_COLS; // row 2, Poseidon2Cols.inputs[0] == column 0
         trace.values[idx] += F::ONE;
         match crate::regev::transfer_stark::prove_one_test_hash_sig(&trace, pvs.clone()) {
@@ -863,9 +887,9 @@ pub(crate) fn output_from_trace_row(
 // # Path: COMPOSITION over the vendored upstream `Poseidon2Air` (visibility-only diff)
 //
 // Each trace row is `[Poseidon2Cols | binding_tail]`. The wrapper:
-//   1. borrows the `Poseidon2Cols` PREFIX of the local row and calls the AUDITED upstream
-//      free `p3_poseidon2_air::eval(air, builder, prefix)` — this constrains EVERY row to be a
-//      valid Poseidon2-BabyBear permutation (`post == permute16(inputs)`). NO round constraint is
+//   1. borrows the `Poseidon2Cols` PREFIX of the local row and calls the AUDITED upstream free
+//      `p3_poseidon2_air::eval(air, builder, prefix)` — this constrains EVERY row to be a valid
+//      Poseidon2-BabyBear permutation (`post == permute16(inputs)`). NO round constraint is
 //      hand-authored. The only vendored change is `pub(crate) fn eval -> pub fn eval`.
 //   2. adds CROSS-ROW BINDING constraints referencing only `Poseidon2Cols.inputs` /
 //      `.ending_full_rounds[last].post` and the binding tail, gated by one-hot row selectors.
@@ -873,7 +897,7 @@ pub(crate) fn output_from_trace_row(
 // # Binding tail layout (BIND_TAIL_COLS columns appended after the Poseidon2Cols prefix)
 //   - `sel[0..6]`  one-hot row-kind selector: pk, sig1, sig2, sig3, sig4, pad.
 //   - `sk[0..9]`   the secret key, BROADCAST (held equal) on every row so it is available to both
-//                  the pk-row input binding and the sponge block bindings.
+//     the pk-row input binding and the sponge block bindings.
 //
 // # Why a binding tail / why vendored (composition could not stay "no extra columns")
 //   The 4 sponge blocks absorb DIFFERENT message limbs, so a single uniform transition constraint
@@ -892,13 +916,8 @@ pub(crate) fn output_from_trace_row(
 use p3_poseidon2_air::num_cols as poseidon2_num_cols;
 
 /// Number of `Poseidon2Cols` (permutation) columns per row.
-pub(crate) const POSEIDON2_COLS: usize = poseidon2_num_cols::<
-    WIDTH,
-    SBOX_DEGREE,
-    SBOX_REGISTERS,
-    HALF_FULL_ROUNDS,
-    PARTIAL_ROUNDS,
->();
+pub(crate) const POSEIDON2_COLS: usize =
+    poseidon2_num_cols::<WIDTH, SBOX_DEGREE, SBOX_REGISTERS, HALF_FULL_ROUNDS, PARTIAL_ROUNDS>();
 
 /// One-hot row-kind selector width: pk, sig1, sig2, sig3, sig4, pad.
 pub(crate) const SEL_COLS: usize = 6;
@@ -1096,7 +1115,10 @@ where
                 b.assert_zero(loc.inputs[1 + SK_LIMBS + k]);
             }
             for i in 0..DIGEST_LIMBS {
-                b.assert_eq(loc.ending_full_rounds[HALF_FULL_ROUNDS - 1].post[i], pv_pk(i));
+                b.assert_eq(
+                    loc.ending_full_rounds[HALF_FULL_ROUNDS - 1].post[i],
+                    pv_pk(i),
+                );
             }
         }
 

@@ -80,3 +80,20 @@ no circuit/Solidity code was written. Findings VERIFIED against ground truth:
 - `inter_channel_tx_hash` is NOT a free fn; tx_hash is a stored field. tx_leaf via tx_leaf_hash.
 - EIP-170: IntmaxRollup is 130B under cap; edits would touch only Verifier (5272B margin) + Manager.
 - NO git commands run. NO .rs/.sol files edited. Only this planning file written.
+
+---
+
+# Partial Withdrawal (GAP2) — remaining work (2026-06-24)
+
+GAP2 contract-level gate is DONE (IntmaxRollup + ChannelSettlementManager + tests). Remaining:
+
+- [ ] `cmd_partial_withdraw` CLI command in `channel_member.rs` (mirror `cmd_withdraw` at line 1017 but: withdrawal_recipient = member L1, use `build_burn_send` + bound base withdrawal, NO close/manager)
+- [x] Heavy anvil E2E (`tests/partial_withdrawal_e2e.rs`, port 8553): deposit → build_burn_send → submitPartialWithdrawalIntent → finalizePartialWithdrawal → authDigest cross-boundary parity verified; adversarial double-submit rejected (PartialWithdrawalChainUsed)
+- [ ] `IntmaxRollup.registerSettlementManager` deploy script call (needed for real deployment)
+- [ ] Commit GAP2 changes with pathspec (uncommitted on branch `fix/audit-soundness-and-tests`)
+
+---
+
+# Mid-Channel Deposit (L1 → channel top-up, channel stays open) — 2026-06-24
+
+Status: DESIGN PHASE — reading detail2 + abstract2-1 specs first.

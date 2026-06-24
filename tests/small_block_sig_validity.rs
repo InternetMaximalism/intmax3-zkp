@@ -1,14 +1,22 @@
-//! B-2: the inter-channel small-block signature (`channelStateSig`) is verified by a REAL validity
-//! proof — no structural placeholder.
+//! B-2 milestone: the channel small-block signature (`channelStateSig`) is verified by a REAL
+//! validity proof — no structural placeholder.
+//!
+//! SCOPE (B-5d, honest naming): this is NOT a two-channel inter-channel transfer test and there is
+//! NO E-2 transfer proof here. It proves exactly ONE thing over a SINGLE channel (CHANNEL = 1):
+//! that the block-producer's IMSB small-block signature is bound and verified by the validity
+//! circuit's `bp_sig_chain`. The file was previously named `inter_channel_validity_b2.rs`, which
+//! read as a 2-channel ("b2") inter-channel test; it is renamed to `small_block_sig_validity.rs` to
+//! match what it actually proves. Full two-channel inter-channel flows live in
+//! `inter_channel_live.rs` / `inter_channel_cli.rs`.
 //!
 //! detail2 §D / §C-7 / §F-2, abstract2 §3.3.2/§3.3.5. A channel is registered with REAL member keys
-//! (so the bp's `pk_g` is a genuine member of `member_pubkeys_root`), a block carrying the channel's
-//! small block is posted with the post-debit `state_commitment_root = H1'` (detail2 §C-7) and
-//! `tx_tree_root = H2`, and the validity proof's `bp_sig_chain` (recursive `ListCircuit` over the bp
-//! IMSB single-sigs) VERIFIES the bp's signature over `hash(H1', tx_tree_root)` (the structural
-//! atomicity D-3). The transport_proof is gone (abstract2 §3.4 note: the receiver verifies inclusion
-//! on L1; inclusion liveness is by force-include) — what is verified here is the genuine
-//! channelStateSig, not a `vec![9,9]` stand-in.
+//! (so the bp's `pk_g` is a genuine member of `member_pubkeys_root`), a block carrying the
+//! channel's small block is posted with the post-debit `state_commitment_root = H1'` (detail2 §C-7)
+//! and `tx_tree_root = H2`, and the validity proof's `bp_sig_chain` (recursive `ListCircuit` over
+//! the bp IMSB single-sigs) VERIFIES the bp's signature over `hash(H1', tx_tree_root)` (the
+//! structural atomicity D-3). The transport_proof is gone (abstract2 §3.4 note: the receiver
+//! verifies inclusion on L1; inclusion liveness is by force-include) — what is verified here is the
+//! genuine channelStateSig, not a `vec![9,9]` stand-in.
 //!
 //! (The block's tx payload uses the base TxV2 path for tractability; what B-2 proves is the bp IMSB
 //! signature binding, which the validity circuit verifies regardless of the tx payload class.)
@@ -16,11 +24,8 @@
 
 use intmax3_zkp::{
     circuits::{
-        test_utils::{
-            block_witness_generator::{
-                BlockTxV2Witness, BlockWitnessGenerator, BlockWitnessGeneratorHandle,
-                ChannelMemberKeys,
-            },
+        test_utils::block_witness_generator::{
+            BlockTxV2Witness, BlockWitnessGenerator, BlockWitnessGeneratorHandle, ChannelMemberKeys,
         },
         validity::block_hash_chain::{
             block_hash_chain_processor::BlockHashChainProcessor, validity_circuit::ValidityCircuit,
@@ -47,7 +52,12 @@ type C = PoseidonGoldilocksConfig;
 const CHANNEL: u32 = 1;
 
 fn info(slot: u8, k: &MemberKeys) -> MemberInfo {
-    MemberInfo { slot, pk_g: k.pk_g(), pk_b: k.pk_b(), regev_pk: k.regev_pk.clone() }
+    MemberInfo {
+        slot,
+        pk_g: k.pk_g(),
+        pk_b: k.pk_b(),
+        regev_pk: k.regev_pk.clone(),
+    }
 }
 
 #[test]
@@ -67,7 +77,11 @@ fn inter_channel_small_block_sig_is_validity_proven() {
     // pk_g the validity proof checks is a genuine member of member_pubkeys_root.
     let mut crng = rand010::rngs::StdRng::seed_from_u64(0xB2);
     let keys: Vec<MemberKeys> = (0..3).map(|_| MemberKeys::generate(&mut crng)).collect();
-    let _members: Vec<MemberInfo> = keys.iter().enumerate().map(|(i, k)| info(i as u8, k)).collect();
+    let _members: Vec<MemberInfo> = keys
+        .iter()
+        .enumerate()
+        .map(|(i, k)| info(i as u8, k))
+        .collect();
     let ck = ChannelMemberKeys::from_member_keys(&keys);
 
     // ----- Registration block (block 1): writes member_pubkeys_root into the channel tree -----
@@ -81,11 +95,15 @@ fn inter_channel_small_block_sig_is_validity_proven() {
     // post-debit BalanceState and take its h1(). -----
     let pks: Vec<_> = keys.iter().map(|k| k.regev_pk.clone()).collect();
     let post_bal = [45u64, 10, 30]; // slot0 50-5
-    let enc: Vec<_> = (0..3).map(|i| encrypt_amount(&mut crng, &pks[i], post_bal[i]).unwrap().0).collect();
+    let enc: Vec<_> = (0..3)
+        .map(|i| encrypt_amount(&mut crng, &pks[i], post_bal[i]).unwrap().0)
+        .collect();
     // Decryption Stage 1: the real per-active-slot Regev pk digests (mirrors
     // channel_member.rs:601-605), so H1' matches what production would commit for these members.
-    let regev_pk_digests: Vec<Bytes32> =
-        keys.iter().map(|k| Bytes32::from(k.regev_pk.poseidon_digest())).collect();
+    let regev_pk_digests: Vec<Bytes32> = keys
+        .iter()
+        .map(|k| Bytes32::from(k.regev_pk.poseidon_digest()))
+        .collect();
     let post_balance_state = BalanceState {
         channel_id,
         member_count: 3,
@@ -95,14 +113,14 @@ fn inter_channel_small_block_sig_is_validity_proven() {
         settled_tx_chain: Bytes32::default(),
         // This synthetic post-debit state carries a genesis-like (default) settle chain, so its
         // accumulator root is the empty-tree root — keeping H1' internally consistent.
-        settled_tx_accumulator_root:
-            intmax3_zkp::wallet_core::empty_settled_tx_accumulator_root(),
+        settled_tx_accumulator_root: intmax3_zkp::wallet_core::empty_settled_tx_accumulator_root(),
         state_version: 1,
         pending_adds: BalanceState::pad_pending_adds(&[0, 0, 0]),
     };
     let h1: Bytes32 = post_balance_state.h1();
 
-    // ----- The channel's small block (block 2): tx_tree_root = H2, IMSB state_commitment_root = H1'.
+    // ----- The channel's small block (block 2): tx_tree_root = H2, IMSB state_commitment_root =
+    // H1'.
     let mut brng = RandRng::seed_from_u64(7);
     let mut transfer_tree = TransferTree::init();
     transfer_tree.push(intmax3_zkp::common::transfer::Transfer {
@@ -144,8 +162,16 @@ fn inter_channel_small_block_sig_is_validity_proven() {
         let total = g.block_number.as_u64();
         for idx in 1..=total {
             let bn = BlockNumber::new(idx).unwrap();
-            let witness = g.block_chain_witness.get(&bn).cloned().expect("block witness");
-            let init = if prev_block_proof.is_none() { Some(initial_ext_state.clone()) } else { None };
+            let witness = g
+                .block_chain_witness
+                .get(&bn)
+                .cloned()
+                .expect("block witness");
+            let init = if prev_block_proof.is_none() {
+                Some(initial_ext_state.clone())
+            } else {
+                None
+            };
             let proof = block_hash_chain_processor
                 .prove_block(init, prev_block_proof.clone(), &witness)
                 .expect("block hash chain proof");
@@ -157,7 +183,11 @@ fn inter_channel_small_block_sig_is_validity_proven() {
 
     // The bp IMSB signature must be present (non-zero bp_sig_chain) — the small block was signed.
     let bp_sig_chain = bwgen.borrow().current_bp_sig_chain();
-    assert_ne!(bp_sig_chain, Bytes32::default(), "the small block's bp IMSB signature must be recorded");
+    assert_ne!(
+        bp_sig_chain,
+        Bytes32::default(),
+        "the small block's bp IMSB signature must be recorded"
+    );
 
     let single_sig = SingleSigCircuit::new();
     let list_circuit = ListCircuit::new(&single_sig.verifier_data());
@@ -165,19 +195,26 @@ fn inter_channel_small_block_sig_is_validity_proven() {
         .borrow()
         .build_bp_sig_list_proof(&single_sig, &list_circuit)
         .expect("bp sig list proof");
-    assert!(list_proof.is_some(), "a real bp IMSB signature list proof must exist");
+    assert!(
+        list_proof.is_some(),
+        "a real bp IMSB signature list proof must exist"
+    );
 
-    let validity_circuit = ValidityCircuit::<F, C, D>::new(&block_chain_vd, &list_circuit.verifier_data());
+    let validity_circuit =
+        ValidityCircuit::<F, C, D>::new(&block_chain_vd, &list_circuit.verifier_data());
     let prover = Address::rand(&mut brng);
     let validity_proof = validity_circuit
         .prove(&final_block_chain_proof, list_proof.as_ref(), prover)
         .expect("validity proof");
-    validity_circuit.verify(&validity_proof).expect("verify validity proof");
+    validity_circuit
+        .verify(&validity_proof)
+        .expect("verify validity proof");
 
     // ----- flowReceive3-1 (receiver side): the inter-channel tx is INCLUDED in the small block
     // whose tx_tree_root (= H2) is bound in the validity-proven block — verified DIRECTLY (no
-    // transport_proof; abstract2 §3.4 note). (The E-2 channelUpdateZKP + the sender's balanceProof /
-    // §F-1 reconciliation are covered in tests/inter_channel_e2e.rs / channel_backing_e2e.rs.) -----
+    // transport_proof; abstract2 §3.4 note). (The E-2 channelUpdateZKP + the sender's balanceProof
+    // / §F-1 reconciliation are covered in tests/inter_channel_e2e.rs /
+    // channel_backing_e2e.rs.) -----
     tx_v2_proof
         .verify(&tx_v2, channel_id.as_u64(), tx_v2_root_h)
         .expect("receiver: TxV2 inclusion in the validity-proven small block (flowReceive3-1)");

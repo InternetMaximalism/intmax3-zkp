@@ -6,12 +6,12 @@
 //!
 //! ## Security properties
 //!
-//! * **R2 cross-binding (keccak ↔ Poseidon).** The 16 members' `pk_g` and
-//!   `regev_pk_digest` are witnessed ONCE as `PoseidonHashOutTarget`s. They feed BOTH the keccak
-//!   preimage (split to 32 bytes via `Bytes32Target::from_hash_out`) AND the Poseidon
-//!   `MemberLeaf`s. Reusing the same targets is the binding — no separate equality constraint is
-//!   needed, so the keccak chain the contract recorded and the Poseidon `member_pubkeys_root` the
-//!   circuit writes are guaranteed to commit to the same member set.
+//! * **R2 cross-binding (keccak ↔ Poseidon).** The 16 members' `pk_g` and `regev_pk_digest` are
+//!   witnessed ONCE as `PoseidonHashOutTarget`s. They feed BOTH the keccak preimage (split to 32
+//!   bytes via `Bytes32Target::from_hash_out`) AND the Poseidon `MemberLeaf`s. Reusing the same
+//!   targets is the binding — no separate equality constraint is needed, so the keccak chain the
+//!   contract recorded and the Poseidon `member_pubkeys_root` the circuit writes are guaranteed to
+//!   commit to the same member set.
 //! * **R5 unregistered guard.** The previous `ChannelLeaf` at `channel_id` MUST equal
 //!   `ChannelLeaf::default()` (one-time registration); re-registering an active channel is
 //!   rejected. This is asserted on the FULL default leaf, not just the member root.
@@ -96,8 +96,8 @@ pub fn member_pubkeys_root_for(record: &ChannelRegRecord) -> PoseidonHashOut {
     let mut tree = MemberTree::init();
     // Delegate account: the member tree covers ALL active participants — members
     // (`0..member_count`) AND delegates (`member_count..member_count+delegate_count`). Delegates
-    // carry a real `MemberLeaf` identity so they can send and withdraw. Phase 1 `delegate_count = 0`
-    // makes this identical to the legacy `0..member_count` loop.
+    // carry a real `MemberLeaf` identity so they can send and withdraw. Phase 1 `delegate_count =
+    // 0` makes this identical to the legacy `0..member_count` loop.
     let active = record.member_count as usize + record.delegate_count as usize;
     for i in 0..active {
         let leaf = MemberLeaf {
@@ -375,8 +375,8 @@ impl<const D: usize> ChannelRegStepTarget<D> {
         // `delegate_count >= 0` so `active >= member_count >= 2` holds automatically. The
         // thermometer mask below uses `active` as the threshold, so delegate slots
         // (`member_count..active`) are treated as ACTIVE (non-forced-zero) exactly like members and
-        // padding only begins at `active`. Phase 1 `delegate_count = 0` makes `active == member_count`,
-        // so the mask is byte-for-byte the legacy one.
+        // padding only begins at `active`. Phase 1 `delegate_count = 0` makes `active ==
+        // member_count`, so the mask is byte-for-byte the legacy one.
         let active_count = builder.add(member_count, delegate_count);
         let max_minus_active = builder.sub(max, active_count);
         builder.range_check(max_minus_active, 4); // active in [member_count, 16] ⊆ [0,15] above 16-mc
@@ -538,10 +538,8 @@ impl<const D: usize> ChannelRegStepTarget<D> {
         // Members: split each 32-byte digest to its reduced PoseidonHashOut (the witnessed value).
         for i in 0..MAX_CHANNEL_MEMBERS {
             let m = &value.record.members[i];
-            self.member_pk_ges[i]
-                .set_witness(witness, m.pk_g.reduce_to_hash_out());
-            self.member_pk_bs[i]
-                .set_witness(witness, m.pk_b.reduce_to_hash_out());
+            self.member_pk_ges[i].set_witness(witness, m.pk_g.reduce_to_hash_out());
+            self.member_pk_bs[i].set_witness(witness, m.pk_b.reduce_to_hash_out());
             self.member_regev_pk_digests[i]
                 .set_witness(witness, m.regev_pk_digest.reduce_to_hash_out());
             self.member_recipients[i].set_witness(witness, m.recipient);

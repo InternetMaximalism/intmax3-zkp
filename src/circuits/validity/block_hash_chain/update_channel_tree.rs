@@ -25,7 +25,7 @@ use crate::{
         u32limb_trait::{U32LimbTargetTrait as _, U32LimbTrait as _},
         u64::{U64, U64_LEN, U64Target},
     },
-    poseidon_sig::list::{leaf_target, list_chain_step, list_leaf, chain_step_target},
+    poseidon_sig::list::{chain_step_target, leaf_target, list_chain_step, list_leaf},
     regev::{REGEV_N, REGEV_PK_POSEIDON_DOMAIN, RegevPk},
     utils::{
         cyclic::add_const_gate,
@@ -79,8 +79,8 @@ pub struct UpdateUserPublicInputs {
     /// constrains it equal to the previous ext-state `bp_sig_chain`.
     pub prev_bp_sig_chain: Bytes32,
     /// P2b: the accumulator AFTER folding this block's bp `(IMSB_digest, bp_pk_g)` pair — equal to
-    /// `prev_bp_sig_chain` on a non-signing block, advanced by one Poseidon chain step on a signing
-    /// (base) block. Becomes the new ext-state `bp_sig_chain`.
+    /// `prev_bp_sig_chain` on a non-signing block, advanced by one Poseidon chain step on a
+    /// signing (base) block. Becomes the new ext-state `bp_sig_chain`.
     pub new_bp_sig_chain: Bytes32,
 }
 
@@ -101,26 +101,29 @@ pub struct UpdateUserTree {
     pub send_merkle_proofs: Vec<SendMerkleProof>,
 
     // P2b: the bp IMSB-signature list accumulator BEFORE this block (`Bytes32::default()` at the
-    // validity span's genesis). The block folds the bp's `(IMSB_digest, bp_pk_g)` pair onto it when
-    // a member signature is applied; the resulting value is surfaced as `new_bp_sig_chain`.
+    // validity span's genesis). The block folds the bp's `(IMSB_digest, bp_pk_g)` pair onto it
+    // when a member signature is applied; the resulting value is surfaced as
+    // `new_bp_sig_chain`.
     pub prev_bp_sig_chain: Bytes32,
 
-    // Per-slot MemberTree inclusion proofs binding the bp's signing pubkey to the channel's members.
-    // For the updating bp slot i, `member_merkle_proofs[i]` proves the leaf
+    // Per-slot MemberTree inclusion proofs binding the bp's signing pubkey to the channel's
+    // members. For the updating bp slot i, `member_merkle_proofs[i]` proves the leaf
     // `MemberLeaf { pk_g = msg_fields.bp_pk_g, regev_pk_digest }` is at slot i of
     // `prev_account_leaves[i].member_pubkeys_root`.
     //
     // SECURITY: this binds the folded `bp_pk_g` to slot i of the channel's on-chain-bound member
-    // tree (the channel leaf is itself proven in the account tree), so the `(IMSB_digest, bp_pk_g)`
-    // pair folded into `bp_sig_chain` cannot use a prover-chosen pubkey — it is a registered member.
+    // tree (the channel leaf is itself proven in the account tree), so the `(IMSB_digest,
+    // bp_pk_g)` pair folded into `bp_sig_chain` cannot use a prover-chosen pubkey — it is a
+    // registered member.
     pub member_merkle_proofs: Vec<MemberMerkleProof>,
     // The Regev public key witnessed at each active slot; its Poseidon digest is the third leaf
     // component, so the member leaf binds `pk_g`, `pk_b` AND the Regev pubkey.
     pub member_regev_pks: Vec<RegevPk>,
     // The member's BabyBear hash-sig public key (`pk_b`) witnessed at each active slot (P3). The
     // 3-field `MemberLeaf{pk_g, pk_b, regev_pk}` inclusion requires it so the rebuilt
-    // `member_pubkeys_root` matches the registration leaf (which now commits `pk_b`). `pk_b` is NOT
-    // part of the IMSB signing digest — that signature is the Goldilocks list-proof, unchanged.
+    // `member_pubkeys_root` matches the registration leaf (which now commits `pk_b`). `pk_b` is
+    // NOT part of the IMSB signing digest — that signature is the Goldilocks list-proof,
+    // unchanged.
     pub member_pk_bs: Vec<PoseidonHashOut>,
 
     // Per-block IMSB `SmallBlockRootMessage` preimage fields (detail2 §F-2). The signing
@@ -215,9 +218,10 @@ impl UpdateUserTree {
             // (bp) slot; bind its `bp_pk_g` to the channel's member tree at slot i and fold the
             // `(IMSB_digest, bp_pk_g)` pair into the bp_sig_chain accumulator.
             //
-            // SECURITY: the updating slot MUST be the declared bp slot (`msg_fields.bp_member_slot`).
-            // Only one slot updates per block (all slots reference the same channel leaf), so this
-            // ties the folded bp identity to the slot that actually transitioned.
+            // SECURITY: the updating slot MUST be the declared bp slot
+            // (`msg_fields.bp_member_slot`). Only one slot updates per block (all slots
+            // reference the same channel leaf), so this ties the folded bp identity to
+            // the slot that actually transitioned.
             if self.msg_fields.bp_member_slot as usize != i {
                 return Err(UpdateUserTreeError::InvalidLength(format!(
                     "updating slot {i} must equal msg_fields.bp_member_slot {}",
@@ -225,14 +229,14 @@ impl UpdateUserTree {
                 )));
             }
             // SECURITY: the member identity is `msg_fields.bp_pk_g` — the SAME value bound into the
-            // IMSB signing digest above. Reusing it for the member-leaf inclusion and the chain fold
-            // is what binds the folded pair to a registered member at slot i.
+            // IMSB signing digest above. Reusing it for the member-leaf inclusion and the chain
+            // fold is what binds the folded pair to a registered member at slot i.
             let bp_pk_g = self.msg_fields.bp_pk_g;
-            let pk_g: PoseidonHashOut = bp_pk_g
-                .try_into()
-                .map_err(|e| UpdateUserTreeError::InvalidLength(format!(
+            let pk_g: PoseidonHashOut = bp_pk_g.try_into().map_err(|e| {
+                UpdateUserTreeError::InvalidLength(format!(
                     "bp_pk_g is not a canonical Poseidon hash out: {e}"
-                )))?;
+                ))
+            })?;
             let regev_pk_digest = self.member_regev_pks[i].poseidon_digest();
             let member_leaf = MemberLeaf {
                 pk_g,
@@ -259,11 +263,11 @@ impl UpdateUserTree {
             // P2b: fold `(IMSB_digest, bp_pk_g)` into the bp_sig_chain (order-sensitive Poseidon
             // chain, `poseidon_sig::list`). The matching `ListCircuit` proof — consumed by the
             // validity circuit — proves each folded pair was a verified Poseidon single-sig.
-            let prev_chain: PoseidonHashOut = bp_sig_chain
-                .try_into()
-                .map_err(|e| UpdateUserTreeError::InvalidLength(format!(
+            let prev_chain: PoseidonHashOut = bp_sig_chain.try_into().map_err(|e| {
+                UpdateUserTreeError::InvalidLength(format!(
                     "bp_sig_chain is not a canonical Poseidon hash out: {e}"
-                )))?;
+                ))
+            })?;
             let leaf = list_leaf(signed_digest, bp_pk_g);
             bp_sig_chain = list_chain_step(prev_chain, leaf).into();
 
@@ -961,9 +965,10 @@ impl UpdateUserTreeTarget {
             // signature attributed to a different slot's member.
             // INVARIANT (single-fold soundness): this `bp_sig_chain` design folds AT MOST ONE
             // signature per block and assumes EXACTLY ONE channel-leaf transition per block. If the
-            // block layout is ever changed to permit two distinct channel-leaf updates in one block,
-            // the second signature would go unfolded — this loop must be revisited (fold per updating
-            // leaf) before that change lands. (Flagged in the P2b security review.)
+            // block layout is ever changed to permit two distinct channel-leaf updates in one
+            // block, the second signature would go unfolded — this loop must be
+            // revisited (fold per updating leaf) before that change lands. (Flagged in
+            // the P2b security review.)
             let slot_index = builder.constant(F::from_canonical_u64(i as u64));
             builder.conditional_assert_eq(
                 should_verify_sig.target,
@@ -1245,8 +1250,8 @@ mod tests {
             u63::BlockNumber,
         },
         ethereum_types::bytes32::Bytes32,
-        poseidon_sig::{list::list_commitment, GoldilocksSecretKey},
-        regev::{hash_sig::BabyBearSecretKey, RegevPk},
+        poseidon_sig::{GoldilocksSecretKey, list::list_commitment},
+        regev::{RegevPk, hash_sig::BabyBearSecretKey},
     };
     use plonky2::{
         field::goldilocks_field::GoldilocksField, plonk::config::PoseidonGoldilocksConfig,
@@ -1278,9 +1283,10 @@ mod tests {
         }
     }
 
-    /// A distinct member `pk_b` (BabyBear hash-sig public key), derived deterministically from a seed
-    /// via the real `hash_sig` primitive — mirroring the production fixture
-    /// (`block_witness_generator::ChannelMemberKeys::deterministic`). P3 third `MemberLeaf` component.
+    /// A distinct member `pk_b` (BabyBear hash-sig public key), derived deterministically from a
+    /// seed via the real `hash_sig` primitive — mirroring the production fixture
+    /// (`block_witness_generator::ChannelMemberKeys::deterministic`). P3 third `MemberLeaf`
+    /// component.
     fn member_pk_b(seed: u64) -> PoseidonHashOut {
         let mut baby_rng = StdRng::seed_from_u64(seed.wrapping_mul(0x9e37_79b9).wrapping_add(0xb1));
         let baby = BabyBearSecretKey::random(&mut baby_rng);
@@ -1364,8 +1370,7 @@ mod tests {
         let dummy_send_proof = SendMerkleProof::dummy(SEND_TREE_HEIGHT);
         let dummy_user_merkle_proof = ChannelMerkleProof::dummy(CHANNEL_TREE_HEIGHT);
 
-        let mut prev_account_leaves =
-            vec![prev_channel_leaf.clone(), prev_channel_leaf.clone()];
+        let mut prev_account_leaves = vec![prev_channel_leaf.clone(), prev_channel_leaf.clone()];
         prev_account_leaves.resize(num_users as usize, ChannelLeaf::default());
         let mut send_merkle_proofs = vec![send_proof.clone(), send_proof.clone()];
         send_merkle_proofs.resize(num_users as usize, dummy_send_proof);
@@ -1424,8 +1429,8 @@ mod tests {
         assert_eq!(proof.public_inputs, expected_public_inputs);
     }
 
-    /// Build a real signing block: slot 0 (the bp) updates, the bp's `(IMSB_digest, pk_g)` is folded
-    /// into bp_sig_chain, and the member inclusion of `pk_g` at slot 0 is proven.
+    /// Build a real signing block: slot 0 (the bp) updates, the bp's `(IMSB_digest, pk_g)` is
+    /// folded into bp_sig_chain, and the member inclusion of `pk_g` at slot 0 is proven.
     fn signing_update_tree(
         signer: &GoldilocksSecretKey,
         prev_bp_sig_chain: Bytes32,
@@ -1512,8 +1517,9 @@ mod tests {
             prev_bp_sig_chain,
             member_merkle_proofs: vec![member_merkle_proof],
             member_regev_pks: vec![signer_regev.clone()],
-            // The single updating slot IS the bp (slot 0); its witnessed pk_b must match the leaf at
-            // slot 0 so the 3-field member inclusion against `member_pubkeys_root` holds.
+            // The single updating slot IS the bp (slot 0); its witnessed pk_b must match the leaf
+            // at slot 0 so the 3-field member inclusion against `member_pubkeys_root`
+            // holds.
             member_pk_bs: vec![signer_pk_b],
             msg_fields,
             tx_v2_indices: vec![0],
@@ -1592,4 +1598,3 @@ mod tests {
         );
     }
 }
-

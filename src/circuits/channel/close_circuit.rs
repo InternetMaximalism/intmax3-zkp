@@ -855,7 +855,7 @@ pub mod test_fixture {
             },
             salt::Salt,
         },
-        ethereum_types::{bytes32::Bytes32, u256::U256, u32limb_trait::U32LimbTrait},
+        ethereum_types::{bytes32::Bytes32, u32limb_trait::U32LimbTrait, u256::U256},
         poseidon_sig::{
             GoldilocksSecretKey,
             circuit::SingleSigCircuit,
@@ -978,7 +978,9 @@ pub mod test_fixture {
     /// `settled_tx_chain` matches the genesis chain (= 0) of a REAL initial balance proof.
     pub(crate) fn final_state_n(member_count: usize, settled_tx_chain: Bytes32) -> ChannelState {
         let id = ChannelId::new(5).unwrap();
-        let enc: Vec<_> = (0..member_count as u32).map(|i| ciphertext(1 + i)).collect();
+        let enc: Vec<_> = (0..member_count as u32)
+            .map(|i| ciphertext(1 + i))
+            .collect();
         ChannelState {
             channel_id: id,
             epoch: 3,

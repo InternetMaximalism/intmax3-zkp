@@ -17,7 +17,8 @@ use crate::{
         balance_state::settled_tx_chain_push,
         channel::{
             ChannelId, ChannelRecord, ChannelState, ChannelTransitionKind, ChannelTx,
-            InterChannelTx, ProofBackend, TransitionProofRole, validate_all_member_signatures,
+            InterChannelTx, ProofBackend, TransitionProofRole, l1_deposit_import_digest,
+            validate_all_member_signatures,
         },
     },
     constants::MAX_CHANNEL_MEMBERS,
@@ -247,6 +248,19 @@ pub struct InterChannelFundImportUpdateWitness {
     pub inter_channel_tx: InterChannelTx,
     pub amount: u64,
     pub transport_proof: ChannelProofEnvelope,
+}
+
+/// L1 deposit import into an open channel (mid-channel top-up).
+/// Trust anchor: the `receive_deposit` balance proof verified externally via
+/// `verify_channel_backing`; no transport proof needed (unlike `InterChannelFundImport`).
+#[derive(Clone, Debug)]
+pub struct L1DepositImportUpdateWitness {
+    pub channel_record: ChannelRecord,
+    pub prev_state: ChannelState,
+    pub next_state: ChannelState,
+    pub amount: u64,
+    pub deposit_nullifier: Bytes32,
+    pub depositor_slot: usize,
 }
 
 /// Receiver-side application of a confirmed inbound transfer (abstract2 §3.4 flowReceive3).
@@ -731,6 +745,69 @@ impl InterChannelFundImportUpdateWitness {
             ProofBackend::Plonky2,
             &public_inputs,
         )?;
+        Ok(public_inputs)
+    }
+}
+
+impl L1DepositImportUpdateWitness {
+    pub fn verify(&self) -> Result<ChannelStateUpdatePublicInputs, ChannelStateUpdateError> {
+        verify_state_linkage(&self.prev_state, &self.next_state)?;
+        verify_balance_state_common(&self.channel_record, &self.prev_state, &self.next_state)?;
+        verify_next_state_signatures(&self.channel_record, &self.next_state)?;
+        require_h2_zero(&self.next_state)?;
+        require_chain_push(&self.prev_state, &self.next_state, self.deposit_nullifier)?;
+        if self.next_state.channel_fund.amount
+            != self.prev_state.channel_fund.amount + u64_to_u256(self.amount)
+        {
+            return Err(ChannelStateUpdateError::InvalidAmountRelation(
+                "channel fund must increase by deposited amount".to_string(),
+            ));
+        }
+        if self.next_state.unallocated_confirmed_incoming
+            != self.prev_state.unallocated_confirmed_incoming + u64_to_u256(self.amount)
+        {
+            return Err(ChannelStateUpdateError::InvalidAmountRelation(
+                "unallocated_confirmed_incoming must increase by deposited amount".to_string(),
+            ));
+        }
+        for index in 0..MAX_CHANNEL_MEMBERS {
+            ensure_slot_unchanged(&self.prev_state, &self.next_state, index)?;
+            require_pending_adds_unchanged(&self.prev_state, &self.next_state, index)?;
+        }
+        ensure_different_root(
+            "shared_native_nullifier_root",
+            self.prev_state.shared_native_nullifier_root,
+            self.next_state.shared_native_nullifier_root,
+        )?;
+        let depositor_pk_g = self.channel_record.member_pk_gs[self.depositor_slot];
+        let transition_digest = l1_deposit_import_digest(
+            self.prev_state.channel_id,
+            self.deposit_nullifier,
+            self.amount,
+            self.depositor_slot as u8,
+        );
+        let public_inputs = ChannelStateUpdatePublicInputs {
+            kind: ChannelTransitionKind::L1DepositImport,
+            channel_id: self.prev_state.channel_id,
+            prev_state_digest: self.prev_state.digest,
+            next_state_digest: self.next_state.digest,
+            amount: self.amount,
+            prev_state_version: self.prev_state.balance_state.state_version,
+            next_state_version: self.next_state.balance_state.state_version,
+            h2_tag: self.next_state.h2_tag,
+            prev_settled_tx_chain: self.prev_state.balance_state.settled_tx_chain,
+            next_settled_tx_chain: self.next_state.balance_state.settled_tx_chain,
+            receiver_entry_count: 0,
+            sender_user_id_hash: hash_member(depositor_pk_g),
+            receiver_user_id_hash: hash_member(depositor_pk_g),
+            channel_fund_before: self.prev_state.channel_fund.amount,
+            channel_fund_after: self.next_state.channel_fund.amount,
+            unallocated_before: self.prev_state.unallocated_confirmed_incoming,
+            unallocated_after: self.next_state.unallocated_confirmed_incoming,
+            shared_nullifier_before: self.prev_state.shared_native_nullifier_root,
+            shared_nullifier_after: self.next_state.shared_native_nullifier_root,
+            transition_digest,
+        };
         Ok(public_inputs)
     }
 }
@@ -1781,5 +1858,177 @@ mod tests {
         let recovered = crate::utils::poseidon_hash_out::PoseidonHashOut::try_from(root_b32)
             .expect("accumulator root Bytes32 must be a canonical poseidon encoding");
         assert_eq!(recovered, root);
+    }
+
+    // --- L1 deposit import tests ---
+
+    fn l1_deposit_import_fixture() -> L1DepositImportUpdateWitness {
+        let channel_id = ChannelId::new(7).unwrap();
+        let hashes = pad_hashes(&[pubkey_hash(10), pubkey_hash(20), pubkey_hash(30)]);
+        let record = ChannelRecord {
+            channel_id,
+            member_count: 3,
+            delegate_count: 0,
+            member_pk_gs: hashes,
+            member_pubkeys_root: Bytes32::from_u32_slice(&[2, 2, 2, 2, 0, 0, 0, 0]).unwrap(),
+            bp_member_slot: 0,
+            special_close_penalty: U256::from(0u32),
+            close_freeze_nonce: 0,
+            status: ChannelStatus::Active,
+            regev_pk_root: Bytes32::from_u32_slice(&[3, 3, 3, 3, 0, 0, 0, 0]).unwrap(),
+        };
+        let amount: u64 = 1000;
+        let deposit_nullifier = pubkey_hash(42);
+        let prev_chain = Bytes32::default();
+        let prev_nullifier_root = pubkey_hash(99);
+        let next_chain = settled_tx_chain_push(prev_chain, deposit_nullifier);
+        let next_nullifier_root = settled_tx_chain_push(prev_nullifier_root, deposit_nullifier);
+        let prev_fund = U256::from(5000u32);
+        let next_fund = prev_fund + crate::wallet_core::u64_to_u256(amount);
+        let prev_unalloc = U256::zero();
+        let next_unalloc = prev_unalloc + crate::wallet_core::u64_to_u256(amount);
+        let prev_state = ChannelState {
+            channel_id,
+            epoch: 1,
+            small_block_number: 10,
+            close_freeze_nonce: 0,
+            channel_fund: ChannelFund {
+                channel_id,
+                amount: prev_fund,
+                intmax_state_root: Bytes32::default(),
+            },
+            balance_state: BalanceState {
+                channel_id,
+                member_count: 3,
+                delegate_count: 0,
+                enc_balances: BalanceState::pad_enc_balances(&[]),
+                regev_pk_digests: BalanceState::pad_regev_pk_digests(&[]),
+                settled_tx_chain: prev_chain,
+                settled_tx_accumulator_root: Bytes32::default(),
+                state_version: 5,
+                pending_adds: BalanceState::pad_pending_adds(&[0, 0, 0]),
+            },
+            h2_tag: Bytes32::default(),
+            shared_native_nullifier_root: prev_nullifier_root,
+            unallocated_confirmed_incoming: prev_unalloc,
+            prev_digest: Bytes32::default(),
+            digest: Bytes32::default(),
+            member_signatures: signatures_for(&record),
+        }
+        .with_computed_digest();
+        let mut next_state = ChannelState {
+            epoch: 2,
+            small_block_number: 11,
+            channel_fund: ChannelFund {
+                channel_id,
+                amount: next_fund,
+                intmax_state_root: Bytes32::default(),
+            },
+            balance_state: BalanceState {
+                channel_id,
+                member_count: 3,
+                delegate_count: 0,
+                enc_balances: BalanceState::pad_enc_balances(&[]),
+                regev_pk_digests: BalanceState::pad_regev_pk_digests(&[]),
+                settled_tx_chain: next_chain,
+                settled_tx_accumulator_root: Bytes32::default(),
+                state_version: 6,
+                pending_adds: BalanceState::pad_pending_adds(&[0, 0, 0]),
+            },
+            shared_native_nullifier_root: next_nullifier_root,
+            unallocated_confirmed_incoming: next_unalloc,
+            prev_digest: prev_state.digest,
+            member_signatures: signatures_for(&record),
+            ..prev_state.clone()
+        }
+        .with_computed_digest();
+        L1DepositImportUpdateWitness {
+            channel_record: record,
+            prev_state,
+            next_state,
+            amount,
+            deposit_nullifier,
+            depositor_slot: 0,
+        }
+    }
+
+    #[test]
+    #[cfg_attr(debug_assertions, ignore = "run with --release")]
+    fn l1_deposit_import_happy_path() {
+        let w = l1_deposit_import_fixture();
+        let pis = w.verify().expect("happy path must succeed");
+        assert_eq!(pis.kind, ChannelTransitionKind::L1DepositImport);
+        assert_eq!(pis.amount, 1000);
+    }
+
+    #[test]
+    #[cfg_attr(debug_assertions, ignore = "run with --release")]
+    fn l1_deposit_import_rejects_wrong_fund() {
+        let mut w = l1_deposit_import_fixture();
+        w.next_state.channel_fund.amount = w.prev_state.channel_fund.amount + U256::from(999u32);
+        w.next_state = w.next_state.with_computed_digest();
+        w.next_state.member_signatures = signatures_for(&w.channel_record);
+        w.next_state = w.next_state.with_computed_digest();
+        assert!(w.verify().is_err());
+    }
+
+    #[test]
+    #[cfg_attr(debug_assertions, ignore = "run with --release")]
+    fn l1_deposit_import_rejects_wrong_unallocated() {
+        let mut w = l1_deposit_import_fixture();
+        w.next_state.unallocated_confirmed_incoming =
+            w.prev_state.unallocated_confirmed_incoming + U256::from(999u32);
+        w.next_state = w.next_state.with_computed_digest();
+        w.next_state.member_signatures = signatures_for(&w.channel_record);
+        w.next_state = w.next_state.with_computed_digest();
+        assert!(w.verify().is_err());
+    }
+
+    #[test]
+    #[cfg_attr(debug_assertions, ignore = "run with --release")]
+    fn l1_deposit_import_rejects_balance_change() {
+        let mut rng = SmallRng::seed_from_u64(999);
+        let mut w = l1_deposit_import_fixture();
+        let (pk, _sk) = channel_keygen(&mut rng);
+        let (ct, _witness) = encrypt_amount(&mut rng, &pk, 100).unwrap();
+        w.next_state.balance_state.enc_balances[0] = ct;
+        w.next_state = w.next_state.with_computed_digest();
+        w.next_state.member_signatures = signatures_for(&w.channel_record);
+        w.next_state = w.next_state.with_computed_digest();
+        assert!(w.verify().is_err());
+    }
+
+    #[test]
+    #[cfg_attr(debug_assertions, ignore = "run with --release")]
+    fn l1_deposit_import_rejects_wrong_chain() {
+        let mut w = l1_deposit_import_fixture();
+        w.next_state.balance_state.settled_tx_chain =
+            settled_tx_chain_push(w.prev_state.balance_state.settled_tx_chain, pubkey_hash(77));
+        w.next_state = w.next_state.with_computed_digest();
+        w.next_state.member_signatures = signatures_for(&w.channel_record);
+        w.next_state = w.next_state.with_computed_digest();
+        assert!(w.verify().is_err());
+    }
+
+    #[test]
+    #[cfg_attr(debug_assertions, ignore = "run with --release")]
+    fn l1_deposit_import_rejects_unchanged_nullifier_root() {
+        let mut w = l1_deposit_import_fixture();
+        w.next_state.shared_native_nullifier_root = w.prev_state.shared_native_nullifier_root;
+        w.next_state = w.next_state.with_computed_digest();
+        w.next_state.member_signatures = signatures_for(&w.channel_record);
+        w.next_state = w.next_state.with_computed_digest();
+        assert!(w.verify().is_err());
+    }
+
+    #[test]
+    #[cfg_attr(debug_assertions, ignore = "run with --release")]
+    fn l1_deposit_import_rejects_nonzero_h2() {
+        let mut w = l1_deposit_import_fixture();
+        w.next_state.h2_tag = pubkey_hash(55);
+        w.next_state = w.next_state.with_computed_digest();
+        w.next_state.member_signatures = signatures_for(&w.channel_record);
+        w.next_state = w.next_state.with_computed_digest();
+        assert!(w.verify().is_err());
     }
 }

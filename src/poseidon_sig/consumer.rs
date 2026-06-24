@@ -1,18 +1,22 @@
 //! In-circuit consumer of the recursive single-signature list proof (P2b-0).
 //!
 //! A consumer (the validity / close circuits in P2b-2/3) needs to learn "these exact `(message,
-//! public_key)` pairs were each signed" from a [`ListCircuit`](super::list::ListCircuit) proof. This
-//! gadget provides that check, decoupled from any live circuit so it can be tested in isolation:
+//! public_key)` pairs were each signed" from a [`ListCircuit`](super::list::ListCircuit) proof.
+//! This gadget provides that check, decoupled from any live circuit so it can be tested in
+//! isolation:
 //!
 //!   1. recursively verify the list proof (its commitment `C` is public output `[0..8]`);
 //!   2. rebuild `C'` from the caller-supplied ordered `(m, pk)` pairs using the **same** in-circuit
-//!      gadgets the producer used ([`super::list::leaf_target`] / [`super::list::chain_step_target`]);
-//!   3. assert `C' == C` — this binds the EXACT set, order, and **count** (a different number of pairs
-//!      yields a different commitment), closing the "skip / insert / reorder" gaps (A8);
-//!   4. assert the public keys are pairwise **distinct** — closing the duplicate-key fake-N-of-N gap (A5).
+//!      gadgets the producer used ([`super::list::leaf_target`] /
+//!      [`super::list::chain_step_target`]);
+//!   3. assert `C' == C` — this binds the EXACT set, order, and **count** (a different number of
+//!      pairs yields a different commitment), closing the "skip / insert / reorder" gaps (A8);
+//!   4. assert the public keys are pairwise **distinct** — closing the duplicate-key fake-N-of-N
+//!      gap (A5).
 //!
 //! What this gadget does NOT do (left to each concrete consumer, because it is context-specific):
-//!   - bind each `pk` to the registered member set (`member_pubkeys_root` / `member_set_commitment`, A9);
+//!   - bind each `pk` to the registered member set (`member_pubkeys_root` /
+//!     `member_set_commitment`, A9);
 //!   - bind each `m` to the right per-context message (IMSB digest / IMCH digest) with domain
 //!     separation so a close entry can't satisfy a validity predicate (A4).
 //! The caller supplies the `(m, pk)` targets already derived from those bound sources.
@@ -28,7 +32,7 @@ use plonky2::{
 
 use crate::{
     ethereum_types::{
-        bytes32::{Bytes32, Bytes32Target, BYTES32_LEN},
+        bytes32::{BYTES32_LEN, Bytes32, Bytes32Target},
         u32limb_trait::{U32LimbTargetTrait as _, U32LimbTrait as _},
     },
     utils::{
@@ -98,7 +102,11 @@ impl ListConsumerCircuit {
         list_proof: &ProofWithPublicInputs<F, C, D>,
         pairs: &[(Bytes32, Bytes32)],
     ) -> anyhow::Result<ProofWithPublicInputs<F, C, D>> {
-        assert_eq!(pairs.len(), self.pairs.len(), "pair count must match the circuit");
+        assert_eq!(
+            pairs.len(),
+            self.pairs.len(),
+            "pair count must match the circuit"
+        );
         let mut pw = PartialWitness::<F>::new();
         pw.set_proof_with_pis_target(&self.list_proof, list_proof)?;
         for ((m_t, pk_t), (m, pk)) in self.pairs.iter().zip(pairs.iter()) {
@@ -113,16 +121,17 @@ impl ListConsumerCircuit {
 mod tests {
     use super::*;
     use crate::poseidon_sig::{
-        circuit::SingleSigCircuit,
-        list::{list_commitment, ListCircuit},
         GoldilocksSecretKey,
+        circuit::SingleSigCircuit,
+        list::{ListCircuit, list_commitment},
     };
 
     fn message(byte: u8) -> Bytes32 {
         Bytes32::from_u32_slice(&[0x494d_0000 | byte as u32, 3, 1, 4, 1, 5, 9, 2]).unwrap()
     }
 
-    /// Build a recursive list proof over the given (sk, m) entries and return it with the (m, pk) pairs.
+    /// Build a recursive list proof over the given (sk, m) entries and return it with the (m, pk)
+    /// pairs.
     fn build_list(
         entries: &[(GoldilocksSecretKey, Bytes32)],
     ) -> (
@@ -132,8 +141,10 @@ mod tests {
     ) {
         let single = SingleSigCircuit::new();
         let list = ListCircuit::new(&single.verifier_data());
-        let pairs: Vec<(Bytes32, Bytes32)> =
-            entries.iter().map(|(sk, m)| (*m, sk.public_key())).collect();
+        let pairs: Vec<(Bytes32, Bytes32)> = entries
+            .iter()
+            .map(|(sk, m)| (*m, sk.public_key()))
+            .collect();
         let mut prev: Option<ProofWithPublicInputs<F, C, D>> = None;
         for (i, (sk, m)) in entries.iter().enumerate() {
             let sig = single.prove(sk, *m).unwrap();
@@ -152,7 +163,9 @@ mod tests {
         ];
         let (list, proof, pairs) = build_list(&entries);
         let consumer = ListConsumerCircuit::new(&list.verifier_data(), pairs.len());
-        let p = consumer.prove(&proof, &pairs).expect("exact pairs must verify");
+        let p = consumer
+            .prove(&proof, &pairs)
+            .expect("exact pairs must verify");
         consumer.data.verify(p).unwrap();
     }
 

@@ -99,8 +99,8 @@ pub struct BlockHashChainProcessorWitness {
     /// (empty/dummy) keys are used (valid only for non-updating slots).
     pub member_regev_pks: Option<Vec<RegevPk>>,
     /// Optional per-slot `pk_b` (BabyBear hash-sig public key) accompanying `member_merkle_proofs`
-    /// (P3, third `MemberLeaf` component). If None, default (zero) values are used — valid only for
-    /// non-updating slots (the leaf-inclusion constraint is skipped).
+    /// (P3, third `MemberLeaf` component). If None, default (zero) values are used — valid only
+    /// for non-updating slots (the leaf-inclusion constraint is skipped).
     pub member_pk_bs: Option<Vec<PoseidonHashOut>>,
     /// Optional per-block IMSB `SmallBlockRootMessage` preimage fields accompanying
     /// `sig_witnesses` (detail2 §F-2). If None, default fields are used — valid only when the

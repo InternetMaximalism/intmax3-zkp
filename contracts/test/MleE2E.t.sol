@@ -105,6 +105,89 @@ contract MleE2ETest is Test {
     }
 
     // ═══════════════════════════════════════════════════════════════════
+    //  Negative tests (B-4) — the real MleVerifier MUST reject tampering.
+    //  A silently-broken verifier that accepts a corrupted proof would let a
+    //  garbage validity/close proof finalize on-chain. Each test tampers ONE
+    //  axis and asserts the proof is NOT accepted (verify returns false OR
+    //  reverts — both are rejections; a `true` return is the only failure).
+    // ═══════════════════════════════════════════════════════════════════
+
+    function _vp(E2EData memory d) internal pure returns (MleVerifier.VerifyParams memory vp) {
+        vp = MleVerifier.VerifyParams({
+            degreeBits: d.degreeBits,
+            preprocessedCommitmentRoot: d.preCommitRoot,
+            numConstants: d.numConstants,
+            numRoutedWires: d.numRoutedWires,
+            protocolId: d.protocolId,
+            sessionId: d.sessionId,
+            kIs: d.kIs,
+            subgroupGenPowers: d.subgroupGenPowers
+        });
+    }
+
+    function _gatesDigest(E2EData memory d) internal view returns (bytes32) {
+        return verifier.computeGatesDigest(
+            d.proof.gates,
+            d.proof.witnessIndividualEvalsAtRGateV2.length,
+            d.proof.numSelectors,
+            d.proof.numGateConstraints,
+            d.proof.quotientDegreeFactor
+        );
+    }
+
+    /// @dev Asserts the verifier does NOT accept the proof: a `false` return or a revert both pass;
+    ///      only a `true` return fails. Tampering can trip either an explicit check (→ false) or an
+    ///      out-of-range/transcript inconsistency (→ revert), and both mean "rejected".
+    function _assertRejected(
+        MleVerifier.MleProof memory proof,
+        MleVerifier.VerifyParams memory vp,
+        SpongefishWhirVerify.WhirParams memory wp,
+        bytes32 gatesDigest,
+        string memory why
+    ) internal {
+        try verifier.verify(proof, vp, wp, gatesDigest) returns (bool ok) {
+            assertFalse(ok, why);
+        } catch {
+            // revert == rejection: acceptable
+        }
+    }
+
+    /// @notice Sanity: the UNtampered fixture is accepted (so the negatives below isolate tampering,
+    ///         not a broken fixture).
+    function test_mleVerify_baselineAccepts() public {
+        E2EData memory d = _parseAll(_loadFixture());
+        bool ok = verifier.verify(d.proof, _vp(d), d.whirParams, _gatesDigest(d));
+        assertTrue(ok, "baseline real proof must verify");
+    }
+
+    function test_mleVerify_rejects_tamperedTranscript() public {
+        E2EData memory d = _parseAll(_loadFixture());
+        // Corrupt the WHIR Fiat-Shamir transcript: every MLE challenge is bound to it, so any
+        // single-byte change must break verification.
+        d.proof.whirTranscript = hex"deadbeefdeadbeefdeadbeefdeadbeef";
+        _assertRejected(d.proof, _vp(d), d.whirParams, _gatesDigest(d),
+            "tampered whirTranscript MUST be rejected");
+    }
+
+    function test_mleVerify_rejects_flippedWitnessEval() public {
+        E2EData memory d = _parseAll(_loadFixture());
+        require(d.proof.witnessIndividualEvals.length > 0, "fixture has no witness evals");
+        // Flip one witness evaluation: it no longer matches the committed polynomial opened by WHIR.
+        d.proof.witnessIndividualEvals[0] = d.proof.witnessIndividualEvals[0] ^ 1;
+        _assertRejected(d.proof, _vp(d), d.whirParams, _gatesDigest(d),
+            "flipped witness evaluation MUST be rejected");
+    }
+
+    function test_mleVerify_rejects_wrongGatesDigest() public {
+        E2EData memory d = _parseAll(_loadFixture());
+        // Pass a gatesDigest that does not match the proof's gates: the terminal gate-binding check
+        // (R2-#1) must fail.
+        bytes32 wrong = bytes32(uint256(_gatesDigest(d)) ^ 1);
+        _assertRejected(d.proof, _vp(d), d.whirParams, wrong,
+            "wrong gatesDigest MUST be rejected");
+    }
+
+    // ═══════════════════════════════════════════════════════════════════
     //  Fixture parsing (ported from upstream MleE2ETest.t.sol)
     // ═══════════════════════════════════════════════════════════════════
 

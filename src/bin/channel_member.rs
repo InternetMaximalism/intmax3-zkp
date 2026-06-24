@@ -31,13 +31,22 @@ use intmax3_zkp::{
             balance_processor::BalanceProcessor,
             common::recipient::calculate_recipient_from_user_id, spend_circuit::SpendCircuit,
         },
+        channel::{
+            close_pis::{CHANNEL_CLOSE_PUBLIC_INPUTS_LEN, ChannelClosePublicInputs},
+            withdrawal_claim_pis::{
+                WITHDRAWAL_CLAIM_PUBLIC_INPUTS_LEN, WithdrawalClaimPublicInputs,
+            },
+        },
         test_utils::{
             balance_witness_generator::{BalanceWitnessGenerator, ReceiveDepositData},
-            block_witness_generator::{BlockWitnessGenerator, BlockWitnessGeneratorHandle},
+            block_witness_generator::{
+                BlockWitnessGenerator, BlockWitnessGeneratorHandle, ChannelMemberKeys,
+                TEST_ACTIVE_MEMBERS,
+            },
         },
     },
     common::{
-        channel::{ChannelRecord, ChannelState, MemberSignature},
+        channel::{ChannelRecord, ChannelState, CloseIntent, CloseWithdrawal, MemberSignature},
         channel_id::ChannelId,
         deposit::Deposit,
         salt::Salt,
@@ -47,20 +56,28 @@ use intmax3_zkp::{
         address::Address, bytes32::Bytes32, u32limb_trait::U32LimbTrait as _, u256::U256,
     },
     regev::{RegevCiphertext, RegevPk, RegevSecurityLevel, encrypt_amount},
-    utils::serialize::{deserialize_verifier_data, serialize_verifier_data},
+    utils::{
+        conversion::ToU64 as _,
+        serialize::{deserialize_verifier_data, serialize_verifier_data},
+    },
     wallet_core::{
         BuiltInterChannelCredit, BuiltSend, ChannelBalanceAttestation, ChannelSnapshot,
-        InterChannelDebitPayload, InterChannelTransferDescriptor, MemberInfo, MemberKeys,
-        RefreshPayload, SendPayload, add_signature, assemble_genesis_state_backed,
-        build_inter_channel_credit, build_record, build_send, decrypt_balance,
-        default_settled_tx_accumulator, sign_state, sign_state_if_backed, verify_all_signatures,
-        verify_inter_channel_credit_transition, verify_inter_channel_send_transition,
-        verify_refresh_transition, verify_send_transition, verify_snapshot,
+        ChannelWithdrawalParams, CloseProver, InterChannelDebitPayload,
+        InterChannelTransferDescriptor, MemberInfo, MemberKeys, RefreshPayload, SendPayload,
+        WithdrawalClaimProver, add_signature, assemble_genesis_state_backed,
+        build_channel_withdrawal, build_inter_channel_credit, build_record, build_send,
+        decrypt_balance, default_settled_tx_accumulator, sign_state, sign_state_if_backed,
+        verify_all_signatures, verify_inter_channel_credit_transition,
+        verify_inter_channel_send_transition, verify_refresh_transition, verify_send_transition,
+        verify_snapshot,
     },
 };
 use plonky2::{
     field::goldilocks_field::GoldilocksField,
-    plonk::{circuit_data::VerifierCircuitData, config::PoseidonGoldilocksConfig},
+    plonk::{
+        circuit_data::VerifierCircuitData, config::PoseidonGoldilocksConfig,
+        proof::ProofWithPublicInputs,
+    },
 };
 use rand010::{SeedableRng, rngs::StdRng};
 use serde::{Deserialize, Serialize};
@@ -84,10 +101,24 @@ fn channel_id_env() -> u32 {
         .unwrap_or(7)
 }
 const BP_SLOT: u8 = 0;
+// A-3 P1 / detail2 §K-4: the channel's L1-close anchor (`ChannelFund.intmax_state_root`) is the
+// rollup state root the close circuit binds into the members' IMCH/IMCI signatures. `setup-backing`
+// now sources the REAL value by querying `IntmaxRollup.latestFinalizedStateRoot()` (no longer a
+// placeholder). SECURITY: this value is NOT load-bearing for fund custody — the actual exit is
+// gated by the withdrawal proof's `finalizedStateRoots[ext_commitment]` check in IntmaxRollup
+// (IntmaxRollup.sol:1262), which independently proves the funds against a finalized rollup state.
+// The anchor is therefore a channel-internal, member-signed value (adversarial review: a zero or
+// forged anchor is fund-safe). If the rollup has no finalized block yet, the sourced root is the
+// genesis/zero root — fund-safe, but the eventual on-chain close would treat it as a placeholder
+// (liveness caveat, see tasks/a3-close-lifecycle-spec.md threat model Threat 7).
 // detail2 §F-1 deposit backing: produced ONCE by `setup-backing`, consumed by the co-sign gate.
 const BACKING_FILE: &str = "channel_backing.json"; // settled_tx_chain / intmax_state_root / fund
 const ATTESTATION_FILE: &str = "channel_attestation.bin"; // the channel's base-layer balance proof
 const BALANCE_VD_FILE: &str = "balance_vd.bin"; // cached balance verifier data (the gate needs only this)
+// A-3 P3 close artifacts: the descriptor + wrapped-close MLE proof the on-chain
+// `ChannelSettlementManager.submitCloseIntent` consumes (same schema as generate_close_fixture).
+const CLOSE_INTENT_FILE: &str = "close_intent.json";
+const CLOSE_INTENT_MLE_FILE: &str = "close_intent_mle.json";
 // Delegate demo: slots 0,1,2 = three CLI-controlled CO-SIGNING MEMBERS (with genesis balances);
 // slot 3 = the browser, a send-only DELEGATE (delegate_count = 1).
 const CLI_SLOTS: &[u8] = &[0, 1, 2];
@@ -153,6 +184,26 @@ fn keys_for(seed: u64) -> MemberKeys {
     MemberKeys::generate(&mut StdRng::seed_from_u64(seed))
 }
 
+/// The channel's ACTIVE participant key material in slot order for the close-lifecycle paths: the 3
+/// CLI co-signing members (slots 0..3) FOLLOWED BY the delegate (slot 3). The delegate uses
+/// `keys_for(DELEGATE_SEED)` — the SAME identity `gen-contribution <bal> <DELEGATE_SEED>` produces
+/// — so the on-chain registration (member set + delegate) matches the channel state `init` builds.
+/// `member_count = TEST_ACTIVE_MEMBERS = 3`, `delegate_count = 1`. Used by `export-reg-record` (the
+/// deploy's `registerChannel`) and `withdraw` (the registration block it posts) so both bind the
+/// SAME 4-active registration the close proof's delegate_count limb requires.
+fn cli_active_keys() -> Vec<MemberKeys> {
+    let mut v: Vec<MemberKeys> = CLI_SLOTS
+        .iter()
+        .map(|&slot| keys_for(0xC1_0000 + slot as u64))
+        .collect();
+    let delegate_seed: u64 = std::env::var("DELEGATE_SEED")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(1);
+    v.push(keys_for(delegate_seed));
+    v
+}
+
 fn member_info_for(slot: u8, keys: &MemberKeys) -> MemberInfo {
     MemberInfo {
         slot,
@@ -195,6 +246,12 @@ struct ChannelBacking {
     rollup: String,
     #[serde(default)]
     deposit_tx: String,
+    /// A-3 P5-B: the deposit salt used to derive the on-chain deposit recipient
+    /// (`calculate_recipient_from_user_id(channel_id, deposit_salt)`). Persisted so `withdraw` can
+    /// reconstruct the SAME deposit block (matching the already-made on-chain `deposit()`),
+    /// letting one channel registration + deposit serve both the close and withdraw paths.
+    #[serde(default)]
+    deposit_salt: Option<Salt>,
 }
 
 fn backing_exists() -> bool {
@@ -297,69 +354,91 @@ fn cmd_setup_backing(args: &[String]) {
     let recipient = calculate_recipient_from_user_id(channel_id, deposit_salt);
     let amount = fund.min(u32::MAX as u64);
 
-    // REAL on-chain ETH deposit (detail2 §F-1 backing ORIGIN — no fabrication): the local chain
-    // really escrows the value, and we read the deposit back from the receipt.
-    eprintln!(
-        "setup-backing: real ETH deposit on {rpc} → IntmaxRollup {rollup} (amount {amount})…"
-    );
-    let recipient_hex = recipient.to_hex();
     let deposit_key = deposit_key_env();
-    let send_out = cast(&[
-        "send",
-        &rollup,
-        "deposit(bytes32,uint32,uint256,bytes32)",
-        &recipient_hex,
-        "0",
-        &amount.to_string(),
-        "0x0000000000000000000000000000000000000000000000000000000000000000",
-        "--value",
-        &amount.to_string(),
-        "--private-key",
-        &deposit_key,
-        "--rpc-url",
-        &rpc,
-        "--json",
-    ]);
-    let txhash = send_out
-        .split("\"transactionHash\":\"")
-        .nth(1)
-        .and_then(|s| s.split('"').next())
-        .unwrap_or_else(|| die("deposit tx hash not found in cast output"))
-        .to_string();
-
-    // Read the deposit back from the LIVE receipt: depositor + the on-chain depositHashChain.
-    let receipt = cast(&["receipt", &txhash, "--rpc-url", &rpc, "--json"]);
-    let data = receipt
-        .split("\"data\":\"0x")
-        .nth(1)
-        .and_then(|s| s.split('"').next())
-        .unwrap_or_else(|| die("Deposited log data not found in receipt"));
-    let depositor = Address::from_hex(&format!("0x{}", &abi_word(data, 0)[24..]))
-        .unwrap_or_else(|e| die(format!("parse depositor: {e:?}")));
-    let onchain_chain = Bytes32::from_hex(&format!("0x{}", abi_word(data, 5)))
-        .unwrap_or_else(|e| die(format!("parse on-chain depositHashChain: {e:?}")));
-
-    // KEYSTONE (fail-closed): the Rust deposit MUST reproduce the on-chain depositHashChain, else
-    // the witness would not mirror the real deposit. Refuse to back the channel on any
-    // mismatch.
-    let rust_deposit = Deposit {
-        deposit_index: Default::default(),
-        block_number: Default::default(),
-        depositor,
-        recipient,
-        token_index: 0,
-        amount: U256::from(amount as u32),
-        aux_data: Bytes32::default(),
-    };
-    if rust_deposit.hash_with_prev_hash(Bytes32::default()) != onchain_chain {
-        die(
-            "on-chain depositHashChain != Rust deposit hash — refusing to back the channel with an unreconciled deposit",
+    // P5-B 案B: optionally DEFER the on-chain deposit to `withdraw` so the withdraw block chain
+    // folds the deposit in the exact order its proof models (the standalone fold order). The
+    // default makes the REAL on-chain deposit now (detail2 §F-1 backing origin + keystone
+    // reconciliation — the browser demo path). When `SETUP_BACKING_NO_ONCHAIN_DEPOSIT` is set
+    // (the close-lifecycle E2E), we only build the off-chain balance proof + persist the
+    // params; the deposit is made by `withdraw`. SECURITY: fund custody is gated by the
+    // withdrawal proof's finalized-root check at exit (IntmaxRollup.sol:1262) — this only
+    // changes WHEN the deposit lands on-chain, not whether the eventual L1 exit is backed.
+    let no_onchain_deposit = std::env::var("SETUP_BACKING_NO_ONCHAIN_DEPOSIT").is_ok();
+    let (depositor, txhash) = if no_onchain_deposit {
+        let dep_hex = cast(&["wallet", "address", "--private-key", &deposit_key])
+            .trim()
+            .to_string();
+        let dep = Address::from_hex(&dep_hex)
+            .unwrap_or_else(|e| die(format!("parse depositor address: {e:?}")));
+        eprintln!(
+            "setup-backing: NO on-chain deposit (P5-B: deferred to `withdraw`); depositor = {dep_hex}."
         );
-    }
-    eprintln!(
-        "setup-backing: on-chain deposit reconciled (depositHashChain {}).",
-        onchain_chain.to_hex()
-    );
+        (dep, String::new())
+    } else {
+        // REAL on-chain ETH deposit (detail2 §F-1 backing ORIGIN — no fabrication): the local chain
+        // really escrows the value, and we read the deposit back from the receipt.
+        eprintln!(
+            "setup-backing: real ETH deposit on {rpc} → IntmaxRollup {rollup} (amount {amount})…"
+        );
+        let recipient_hex = recipient.to_hex();
+        let send_out = cast(&[
+            "send",
+            &rollup,
+            "deposit(bytes32,uint32,uint256,bytes32)",
+            &recipient_hex,
+            "0",
+            &amount.to_string(),
+            "0x0000000000000000000000000000000000000000000000000000000000000000",
+            "--value",
+            &amount.to_string(),
+            "--private-key",
+            &deposit_key,
+            "--rpc-url",
+            &rpc,
+            "--json",
+        ]);
+        let txhash = send_out
+            .split("\"transactionHash\":\"")
+            .nth(1)
+            .and_then(|s| s.split('"').next())
+            .unwrap_or_else(|| die("deposit tx hash not found in cast output"))
+            .to_string();
+
+        // Read the deposit back from the LIVE receipt: depositor + the on-chain depositHashChain.
+        let receipt = cast(&["receipt", &txhash, "--rpc-url", &rpc, "--json"]);
+        let data = receipt
+            .split("\"data\":\"0x")
+            .nth(1)
+            .and_then(|s| s.split('"').next())
+            .unwrap_or_else(|| die("Deposited log data not found in receipt"));
+        let depositor = Address::from_hex(&format!("0x{}", &abi_word(data, 0)[24..]))
+            .unwrap_or_else(|e| die(format!("parse depositor: {e:?}")));
+        let onchain_chain = Bytes32::from_hex(&format!("0x{}", abi_word(data, 5)))
+            .unwrap_or_else(|e| die(format!("parse on-chain depositHashChain: {e:?}")));
+
+        // KEYSTONE (fail-closed): the Rust deposit MUST reproduce the on-chain depositHashChain,
+        // else the witness would not mirror the real deposit. Refuse to back the channel on
+        // any mismatch.
+        let rust_deposit = Deposit {
+            deposit_index: Default::default(),
+            block_number: Default::default(),
+            depositor,
+            recipient,
+            token_index: 0,
+            amount: U256::from(amount as u32),
+            aux_data: Bytes32::default(),
+        };
+        if rust_deposit.hash_with_prev_hash(Bytes32::default()) != onchain_chain {
+            die(
+                "on-chain depositHashChain != Rust deposit hash — refusing to back the channel with an unreconciled deposit",
+            );
+        }
+        eprintln!(
+            "setup-backing: on-chain deposit reconciled (depositHashChain {}).",
+            onchain_chain.to_hex()
+        );
+        (depositor, txhash)
+    };
 
     // Feed the REAL on-chain deposit fields into the witness generator → real-deposit-backed proof.
     bwgen
@@ -399,16 +478,37 @@ fn cmd_setup_backing(args: &[String]) {
         .unwrap_or_else(|e| die(format!("serialize balance_vd: {e}")));
     fs::write(BALANCE_VD_FILE, vd_bytes)
         .unwrap_or_else(|e| die(format!("write {BALANCE_VD_FILE}: {e}")));
+    // A-3 P1: source the REAL L1-close anchor = the rollup's current finalized state root. See the
+    // ChannelFund.intmax_state_root note above for why this is fund-safe regardless of value.
+    let finalized_root_hex = cast(&[
+        "call",
+        &rollup,
+        "latestFinalizedStateRoot()",
+        "--rpc-url",
+        &rpc,
+    ])
+    .trim()
+    .to_string();
+    let intmax_state_root = Bytes32::from_hex(&finalized_root_hex)
+        .unwrap_or_else(|e| die(format!("parse latestFinalizedStateRoot(): {e:?}")));
+    if intmax_state_root == Bytes32::default() {
+        eprintln!(
+            "setup-backing WARNING: IntmaxRollup has no finalized state root yet (genesis/zero). The \
+             channel's L1-close anchor will be zero. This is FUND-SAFE (the withdrawal proof's \
+             finalized-root check gates the actual exit), but the close anchor is a placeholder until \
+             a validity block is finalized (liveness caveat; see a3-close-lifecycle-spec.md Threat 7)."
+        );
+    }
     write_json(
         BACKING_FILE,
         &ChannelBacking {
             settled_tx_chain: pis.settled_tx_chain.to_hex(),
-            // L1-close anchor (registration-time procedure is detail2 §K-4, open); NOT the §F-1
-            // gate.
-            intmax_state_root: Bytes32::default().to_hex(),
+            // A-3 P1: REAL L1-close anchor (rollup latestFinalizedStateRoot at backing time).
+            intmax_state_root: intmax_state_root.to_hex(),
             fund,
             rollup: rollup.clone(),
             deposit_tx: txhash.clone(),
+            deposit_salt: Some(deposit_salt),
         },
     );
     println!(
@@ -416,6 +516,852 @@ fn cmd_setup_backing(args: &[String]) {
         channel_id_env(),
         pis.settled_tx_chain.to_hex()
     );
+}
+
+/// A-3 P3: the close-intent descriptor written to `close_intent.json` — the SAME schema
+/// `generate_close_fixture` produces and `ChannelSettlementManager.submitCloseIntent` consumes
+/// (every field is a PROVED close public input, no fabrication).
+#[derive(Serialize)]
+struct CloseIntentDescriptor {
+    channel_id: u32,
+    close_nonce: u64,
+    final_epoch: u64,
+    final_small_block_number: u64,
+    close_freeze_nonce: u64,
+    final_channel_state_digest: String,
+    final_balance_state_h1: String,
+    channel_fund_amount: String,
+    channel_fund_intmax_state_root: String,
+    burn_tx_hash: String,
+    close_withdrawal_digest: String,
+    snapshot_medium_block_number: u64,
+    final_state_version: u64,
+    final_settled_tx_chain: String,
+    final_settled_tx_accumulator_root: String,
+    close_intent_digest: String,
+    member_set_commitment: String,
+    member_count: u8,
+    delegate_count: u8,
+    member_pk_gs: Vec<String>,
+}
+
+fn env_u64(key: &str, default: u64) -> u64 {
+    std::env::var(key)
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(default)
+}
+
+/// A-3 P3: build the channel's REAL close-intent proof from the wallet's final signed state + the N
+/// co-signing members' keys + the base-layer balance proof, write the on-chain artifacts, and
+/// submit the close to L1: `requestClose` (cast) then `submitCloseIntent` (the wrapped-close MLE
+/// proof is large struct calldata, so it goes through the `RunClose` forge step). Usage:
+///   channel_member close <manager_addr> [rpc_url]
+/// env: CLOSE_NONCE, CLOSE_SNAPSHOT_MBN, CLOSE_BURN_TX (members agree), CLOSE_SV (settlement
+/// verifier).
+fn cmd_close(args: &[String]) {
+    let manager = args
+        .get(1)
+        .cloned()
+        .unwrap_or_else(|| die("close needs <manager_addr> [rpc_url]"));
+    let rpc = args
+        .get(2)
+        .cloned()
+        .unwrap_or_else(|| "http://localhost:8545".to_string());
+
+    let close_nonce = env_u64("CLOSE_NONCE", 1);
+    let snapshot_mbn = env_u64("CLOSE_SNAPSHOT_MBN", 1);
+    let burn_tx_hash = std::env::var("CLOSE_BURN_TX")
+        .ok()
+        .and_then(|s| Bytes32::from_hex(&s).ok())
+        .unwrap_or_else(|| Bytes32::from_u32_slice(&[9, 8, 7, 6, 0, 0, 0, 0]).unwrap());
+
+    // Load the final signed state, the N ACTIVE co-signing members' keys (CLI controls slots
+    // 0..member_count), and the base-layer balance proof.
+    let st = load_state();
+    let state = st.snapshot.state.clone();
+    let member_count = state.balance_state.member_count as usize;
+    let member_keys: Vec<MemberKeys> = (0..member_count)
+        .map(|slot| keys_for(0xC1_0000 + slot as u64))
+        .collect();
+    let (balance_vd, att, backing) = load_backing();
+    let balance_proof = ProofWithPublicInputs::<BF, BC, BD>::from_bytes(
+        att.balance_proof.clone(),
+        &balance_vd.common,
+    )
+    .unwrap_or_else(|e| die(format!("deserialize balance proof: {e}")));
+
+    eprintln!(
+        "[close] building close witness (member_count={member_count}) + proving close circuit + MLE (HEAVY)…"
+    );
+    let prover = CloseProver::new(&balance_vd);
+    let witness = prover
+        .build_full_witness(
+            &state,
+            &member_keys,
+            balance_proof,
+            close_nonce,
+            burn_tx_hash,
+            snapshot_mbn,
+        )
+        .unwrap_or_else(|e| die(format!("build close witness: {}", e.0)));
+    let close_proof = prover
+        .prove(&witness)
+        .unwrap_or_else(|e| die(format!("close proof: {}", e.0)));
+    let mle_json = prover
+        .prove_mle(&close_proof)
+        .unwrap_or_else(|e| die(format!("close MLE: {}", e.0)));
+
+    // Descriptor from the PROVED close public inputs (the 95 raw close limbs the manager re-binds).
+    let pi_limbs = close_proof.public_inputs[..CHANNEL_CLOSE_PUBLIC_INPUTS_LEN].to_u64_vec();
+    let pis = ChannelClosePublicInputs::from_u64_slice(&pi_limbs)
+        .unwrap_or_else(|e| die(format!("decode close PIs: {e:?}")));
+    let member_pk_gs: Vec<String> = witness
+        .member_auth
+        .iter()
+        .map(|a| a.pk_g.to_string())
+        .collect();
+    let descriptor = CloseIntentDescriptor {
+        channel_id: pis.channel_id.channel_id(),
+        close_nonce: pis.close_nonce,
+        final_epoch: pis.final_epoch,
+        final_small_block_number: pis.final_small_block_number,
+        close_freeze_nonce: pis.close_freeze_nonce,
+        final_channel_state_digest: pis.final_channel_state_digest.to_string(),
+        final_balance_state_h1: pis.final_balance_state_h1.to_string(),
+        channel_fund_amount: pis.channel_fund_amount.to_string(),
+        channel_fund_intmax_state_root: pis.channel_fund_intmax_state_root.to_string(),
+        burn_tx_hash: pis.burn_tx_hash.to_string(),
+        close_withdrawal_digest: pis.close_withdrawal_digest.to_string(),
+        snapshot_medium_block_number: pis.snapshot_medium_block_number,
+        final_state_version: pis.final_state_version,
+        final_settled_tx_chain: pis.final_settled_tx_chain.to_string(),
+        final_settled_tx_accumulator_root: pis.final_settled_tx_accumulator_root.to_string(),
+        close_intent_digest: pis.close_intent_digest.to_string(),
+        member_set_commitment: pis.member_set_commitment.to_string(),
+        member_count: pis.member_count,
+        delegate_count: pis.delegate_count,
+        member_pk_gs,
+    };
+
+    fs::write(CLOSE_INTENT_MLE_FILE, &mle_json)
+        .unwrap_or_else(|e| die(format!("write {CLOSE_INTENT_MLE_FILE}: {e}")));
+    write_json(CLOSE_INTENT_FILE, &descriptor);
+    println!(
+        "[close] wrote {CLOSE_INTENT_FILE} + {CLOSE_INTENT_MLE_FILE} (close_intent_digest {})",
+        pis.close_intent_digest.to_hex()
+    );
+
+    // ── On-chain: requestClose (freeze) then submitCloseIntent (large calldata → forge step). ──
+    let key = deposit_key_env();
+    eprintln!("[close] requestClose() on manager {manager}…");
+    cast(&[
+        "send",
+        &manager,
+        "requestClose()",
+        "--private-key",
+        &key,
+        "--rpc-url",
+        &rpc,
+    ]);
+
+    // GRACE: the manager rejects the FIRST close intent until `GRACE_BEFORE_PROCESS_SECS` (600s)
+    // after requestClose (so members can settle any pending tx first). In production this is real
+    // wall-clock waiting; on a dev chain set `CLOSE_ADVANCE_TIME=<secs>` to fast-forward via
+    // anvil's evm_increaseTime so `submitCloseIntent` is not rejected with
+    // `GracePeriodNotElapsed`.
+    if let Ok(secs) = std::env::var("CLOSE_ADVANCE_TIME") {
+        eprintln!(
+            "[close] advancing chain time by {secs}s (evm_increaseTime) to pass the close grace window…"
+        );
+        cast(&["rpc", "evm_increaseTime", &secs, "--rpc-url", &rpc]);
+        cast(&["rpc", "evm_mine", "--rpc-url", &rpc]);
+    }
+
+    // The RunClose forge step reads the close artifacts from `contracts/test/data/sepolia_close_*`
+    // and submits the large-struct calldata. Stage the just-generated artifacts there and run it.
+    let data_dir = std::path::Path::new("contracts/test/data");
+    fs::copy(
+        CLOSE_INTENT_FILE,
+        data_dir.join("sepolia_close_intent.json"),
+    )
+    .unwrap_or_else(|e| die(format!("stage close_intent.json: {e}")));
+    fs::copy(
+        CLOSE_INTENT_MLE_FILE,
+        data_dir.join("sepolia_close_intent_mle.json"),
+    )
+    .unwrap_or_else(|e| die(format!("stage close_intent_mle.json: {e}")));
+    let sv = std::env::var("CLOSE_SV").unwrap_or_default();
+    eprintln!("[close] submitCloseIntent via forge RunClose step…");
+    let status = std::process::Command::new("forge")
+        .current_dir("contracts")
+        .args([
+            "script",
+            "script/RunClose.s.sol",
+            "--sig",
+            "closeIntentStep()",
+            "--rpc-url",
+            &rpc,
+            "--private-key",
+            &key,
+            "--broadcast",
+        ])
+        .env("ROLLUP", &backing.rollup)
+        .env("MANAGER", &manager)
+        .env("SV", &sv)
+        .status()
+        .unwrap_or_else(|e| die(format!("forge submitCloseIntent failed to start: {e}")));
+    if !status.success() {
+        die(
+            "forge submitCloseIntent step failed (set CLOSE_SV to the settlement verifier address; ensure the close VK is initialized)",
+        );
+    }
+    println!(
+        "[close] close intent submitted on-chain. Wait the challenge period, then run `settle`."
+    );
+}
+
+/// A-3 P4: finalize the close after the challenge period has elapsed. `finalizeClose()` carries no
+/// proof calldata (the close was already proven at submit time), so it is a plain `cast` call.
+/// Usage: channel_member settle <manager_addr> [rpc_url]
+fn cmd_settle(args: &[String]) {
+    let manager = args
+        .get(1)
+        .cloned()
+        .unwrap_or_else(|| die("settle needs <manager_addr> [rpc_url]"));
+    let rpc = args
+        .get(2)
+        .cloned()
+        .unwrap_or_else(|| "http://localhost:8545".to_string());
+    let key = deposit_key_env();
+    eprintln!(
+        "[settle] finalizeClose() on manager {manager} (the challenge period must have elapsed)…"
+    );
+    cast(&[
+        "send",
+        &manager,
+        "finalizeClose()",
+        "--private-key",
+        &key,
+        "--rpc-url",
+        &rpc,
+    ]);
+    println!(
+        "[settle] channel finalized (Closed). Now run `withdraw` (rollup → manager) then `claim`."
+    );
+}
+
+/// A-3 P4: the withdrawal-claim descriptor (the on-chain `ChannelSettlementManager.WithdrawalClaim`
+/// fields, every value a PROVED withdrawal-claim public input).
+#[derive(Serialize)]
+struct WithdrawalClaimDescriptor {
+    close_intent_digest: String,
+    member_pk_g: String,
+    recipient: String,
+    user_amount_digest: String,
+    amount: u64,
+    withdrawal_nullifier: String,
+}
+
+/// A-3 P4: a member claims their slot balance from the CLOSED channel. Builds the withdrawal-claim
+/// MLE proof via the verified `WithdrawalClaimProver` (the amount is DERIVED by decrypting the
+/// member's own slot ciphertext, so it cannot over-claim), submits it (`submitWithdrawalClaim` via
+/// the forge step), then pulls the credit (`claimWithdrawalCredit`). Usage:
+///   channel_member claim <manager_addr> <member_slot> [rpc_url]
+/// env: CLAIM_RECIPIENT (the member's registered L1 address; also the claimWithdrawalCredit
+/// caller),      CLOSE_NONCE / CLOSE_BURN_TX / CLOSE_SNAPSHOT_MBN (MUST equal the values used at
+/// `close`).
+fn cmd_claim(args: &[String]) {
+    let manager = args
+        .get(1)
+        .cloned()
+        .unwrap_or_else(|| die("claim needs <manager_addr> <member_slot> [rpc_url]"));
+    let member_slot: u8 = args
+        .get(2)
+        .and_then(|s| s.parse().ok())
+        .unwrap_or_else(|| die("claim needs <member_slot>"));
+    let rpc = args
+        .get(3)
+        .cloned()
+        .unwrap_or_else(|| "http://localhost:8545".to_string());
+    let recipient = std::env::var("CLAIM_RECIPIENT")
+        .ok()
+        .and_then(|s| Address::from_hex(&s).ok())
+        .unwrap_or_else(|| {
+            die("set CLAIM_RECIPIENT=0x<20-byte member L1 recipient> (must equal the registered recipient)")
+        });
+
+    let close_nonce = env_u64("CLOSE_NONCE", 1);
+    let snapshot_mbn = env_u64("CLOSE_SNAPSHOT_MBN", 1);
+    let burn_tx_hash = std::env::var("CLOSE_BURN_TX")
+        .ok()
+        .and_then(|s| Bytes32::from_hex(&s).ok())
+        .unwrap_or_else(|| Bytes32::from_u32_slice(&[9, 8, 7, 6, 0, 0, 0, 0]).unwrap());
+
+    let st = load_state();
+    let state = st.snapshot.state.clone();
+    let final_balance_state = state.balance_state.clone();
+    // Reconstruct the finalized close (MUST match what `close` submitted: same params + state).
+    let close_tx = CloseWithdrawal {
+        channel_id: state.channel_id,
+        final_channel_state_digest: state.digest,
+        final_balance_state_h1: state.balance_state.h1(),
+        intmax_state_root: state.channel_fund.intmax_state_root,
+        burn_tx_hash,
+        burn_amount: state.channel_fund.amount,
+        zkp: Vec::new(),
+    };
+    let close_intent = CloseIntent::new(close_nonce, &state, &close_tx, snapshot_mbn)
+        .unwrap_or_else(|e| die(format!("reconstruct close intent: {e:?}")));
+
+    let keys = keys_for(0xC1_0000 + member_slot as u64);
+    let member_pk_g = keys.signing_key.public_key();
+
+    eprintln!("[claim] building withdrawal claim for slot {member_slot} + proving (HEAVY)…");
+    let prover = WithdrawalClaimProver::new();
+    let witness = prover
+        .build_full_witness(
+            &final_balance_state,
+            member_slot as usize,
+            member_pk_g,
+            &keys.regev_pk,
+            &keys.regev_sk,
+            recipient,
+            &close_intent,
+            &close_tx,
+            RegevSecurityLevel::Production,
+        )
+        .unwrap_or_else(|e| die(format!("build withdrawal claim: {}", e.0)));
+    let proof = prover
+        .prove(&witness)
+        .unwrap_or_else(|e| die(format!("withdrawal claim proof: {}", e.0)));
+    let mle_json = prover
+        .prove_mle(&proof)
+        .unwrap_or_else(|e| die(format!("withdrawal claim MLE: {}", e.0)));
+
+    let pi_limbs = proof.public_inputs[..WITHDRAWAL_CLAIM_PUBLIC_INPUTS_LEN].to_u64_vec();
+    let pis = WithdrawalClaimPublicInputs::from_u64_slice(&pi_limbs)
+        .unwrap_or_else(|e| die(format!("decode withdrawal-claim PIs: {e:?}")));
+    let descriptor = WithdrawalClaimDescriptor {
+        close_intent_digest: pis.close_intent_digest.to_string(),
+        member_pk_g: pis.member_pk_g.to_string(),
+        recipient: pis.recipient.to_hex(),
+        user_amount_digest: pis.user_amount_digest.to_string(),
+        amount: pis.amount,
+        withdrawal_nullifier: pis.withdrawal_nullifier.to_string(),
+    };
+
+    let wc_file = "withdrawal_claim.json";
+    let wc_mle_file = "withdrawal_claim_mle.json";
+    fs::write(wc_mle_file, &mle_json).unwrap_or_else(|e| die(format!("write {wc_mle_file}: {e}")));
+    write_json(wc_file, &descriptor);
+    println!(
+        "[claim] wrote {wc_file} + {wc_mle_file} (amount {})",
+        pis.amount
+    );
+
+    // Stage for the forge submit step, submit, then pull the credit (caller MUST be the recipient).
+    let data_dir = std::path::Path::new("contracts/test/data");
+    fs::copy(wc_file, data_dir.join("sepolia_withdrawal_claim.json"))
+        .unwrap_or_else(|e| die(format!("stage withdrawal_claim.json: {e}")));
+    fs::copy(
+        wc_mle_file,
+        data_dir.join("sepolia_withdrawal_claim_mle.json"),
+    )
+    .unwrap_or_else(|e| die(format!("stage withdrawal_claim_mle.json: {e}")));
+    let key = deposit_key_env();
+    eprintln!("[claim] submitWithdrawalClaim via forge…");
+    let status = std::process::Command::new("forge")
+        .current_dir("contracts")
+        .args([
+            "script",
+            "script/RunClose.s.sol",
+            "--sig",
+            "submitWithdrawalClaimStep()",
+            "--rpc-url",
+            &rpc,
+            "--private-key",
+            &key,
+            "--broadcast",
+        ])
+        .env("MANAGER", &manager)
+        .status()
+        .unwrap_or_else(|e| die(format!("forge submitWithdrawalClaim failed to start: {e}")));
+    if !status.success() {
+        die(
+            "forge submitWithdrawalClaim step failed (ensure the withdrawal-claim VK is initialized and funds were pulled into the manager)",
+        );
+    }
+    let recipient_hex = recipient.to_hex();
+    eprintln!("[claim] claimWithdrawalCredit() (caller must be the recipient {recipient_hex})…");
+    cast(&[
+        "send",
+        &manager,
+        "claimWithdrawalCredit()",
+        "--private-key",
+        &key,
+        "--rpc-url",
+        &rpc,
+    ]);
+    println!(
+        "[claim] OK: recipient {recipient_hex} received native ETH (amount {}).",
+        pis.amount
+    );
+}
+
+// ───────────────────────────────────────────────────────────────────────────────────────────────
+// A-3 P4: `withdraw` — move the channel's native funds from the rollup to the manager.
+//
+// Full pipeline (this drives, against a LIVE rollup, the exact sequence proved+verified in
+// `contracts/test/WithdrawNativeE2E.t.sol::_runLifecycleThroughFinalize`):
+//   build_channel_withdrawal (HEAVY proving, recipient = manager)
+//     -> registerChannel (one-time; skipped if already registered)
+//     -> deposit{value} (sent by the depositor = the funding key, so msg.sender matches the proof)
+//     -> postBlockAndSubmit ×3 (EIP-4844 blob txs: registration / deposit / withdrawal blocks)
+//     -> finalize (real validity MLE/WHIR proof; gates `finalizedStateRoots`)
+//     -> withdrawNative (real withdrawal MLE/WHIR proof; credits pendingWithdrawals[manager])
+//     -> pullChannelFunds (manager pulls its escrowed credit out of the rollup)
+//
+// SECURITY: soundness is entirely in-circuit + on-chain. `build_channel_withdrawal` self-verifies
+// every proof and re-folds the withdrawal keccak chain before returning; on-chain, `finalize`
+// re-derives the block-hash chain and verifies the validity proof, and `withdrawNative` re-folds
+// the withdrawal set + gates on `finalizedStateRoots[ext_commitment]`. The CLI cannot choose any
+// payout value — `withdrawal_payout.json` is the proof's committed public inputs. The depositor is
+// pinned to the funding key's address so the on-chain `deposit()` `msg.sender` reproduces block 2's
+// hash; a mismatch makes `finalize` revert (fail-closed). EIP-4844 blobs cannot be attached by a
+// forge script, so `postBlockAndSubmit` is sent via `cast send --blob` (per
+// docs/sepolia-smoke-runbook.md).
+//
+// Requires the rollup to be deployed with the (deterministic) validity VK + genesis and the
+// withdrawal VK initialized; the VK is deterministic (only the proof is randomized by ZK blinding),
+// so a pre-initialized VK accepts the freshly-generated proof.
+//
+// env: ROLLUP (rollup addr; falls back to channel_backing.json), INTMAX_CHANNEL (channel id),
+//      INTMAX_DEPOSIT_KEY (funding/poster key; defaults to the anvil dev key),
+//      WD_DEPOSIT_AMOUNT / WD_AMOUNT (native units; default 10 / 3),
+//      SUB_ID (overrides the finalize submission id; default = the 3rd of our posts).
+const BLOB_FILE: &str = "blob.bin";
+
+/// Render a serde_json array of hex/decimal strings as a cast array literal `[a,b,c]`.
+fn json_str_array(v: &serde_json::Value) -> String {
+    let items: Vec<String> = v
+        .as_array()
+        .unwrap_or_else(|| die("expected JSON array"))
+        .iter()
+        .map(|e| {
+            e.as_str()
+                .unwrap_or_else(|| die("expected JSON string element"))
+                .to_string()
+        })
+        .collect();
+    format!("[{}]", items.join(","))
+}
+
+/// Render a serde_json array of numbers as a cast array literal `[1,2]`.
+fn json_num_array(v: &serde_json::Value) -> String {
+    let items: Vec<String> = v
+        .as_array()
+        .unwrap_or_else(|| die("expected JSON array"))
+        .iter()
+        .map(|e| {
+            e.as_u64()
+                .unwrap_or_else(|| die("expected JSON number element"))
+                .to_string()
+        })
+        .collect();
+    format!("[{}]", items.join(","))
+}
+
+/// Post one block (index `i` into `lifecycle.blocks`) as its own blob submission round.
+fn post_block_round(rollup: &str, lc: &serde_json::Value, i: usize, key: &str, rpc: &str) {
+    let block = &lc["blocks"][i];
+    let channel_id = block["channel_id"]
+        .as_u64()
+        .unwrap_or_else(|| die("block channel_id"));
+    let timestamp = block["timestamp"]
+        .as_u64()
+        .unwrap_or_else(|| die("block timestamp"));
+    let tx_tree_root = block["tx_tree_root"]
+        .as_str()
+        .unwrap_or_else(|| die("block tx_tree_root"));
+    let key_ids = json_num_array(&block["key_ids"]);
+    let sub_block = format!("[({channel_id},{timestamp},{tx_tree_root},{key_ids})]");
+    let proof_hash = lc["proof_hash"]
+        .as_str()
+        .unwrap_or_else(|| die("proof_hash"));
+    let proof_length = lc["proof_length"]
+        .as_u64()
+        .unwrap_or_else(|| die("proof_length"))
+        .to_string();
+    let state_root = lc["final_state_root"]
+        .as_str()
+        .unwrap_or_else(|| die("final_state_root"));
+    eprintln!("[withdraw] postBlockAndSubmit round {i} (blob tx, 1 ETH stake)…");
+    cast(&[
+        "send",
+        rollup,
+        "postBlockAndSubmit((uint32,uint64,bytes32,uint32[])[],bytes32,uint32,bytes32)",
+        &sub_block,
+        proof_hash,
+        &proof_length,
+        state_root,
+        "--value",
+        "1ether",
+        "--blob",
+        "--path",
+        BLOB_FILE,
+        "--private-key",
+        key,
+        "--rpc-url",
+        rpc,
+    ]);
+}
+
+fn cmd_withdraw(args: &[String]) {
+    let manager = args
+        .get(1)
+        .cloned()
+        .unwrap_or_else(|| die("withdraw needs <manager_addr> [rpc_url]"));
+    let rpc = args
+        .get(2)
+        .cloned()
+        .unwrap_or_else(|| "http://localhost:8545".to_string());
+    // Rollup address: explicit ROLLUP env, else the backing record from `setup-backing`.
+    let rollup = std::env::var("ROLLUP")
+        .ok()
+        .filter(|s| !s.is_empty())
+        .or_else(|| backing_exists().then(|| load_backing().2.rollup))
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| die("set ROLLUP=0x<rollup addr> (or run setup-backing first)"));
+    let key = deposit_key_env();
+    let channel_id = channel_id_env();
+
+    // The depositor MUST be the EOA that sends `deposit()` (its address is folded into block 2's
+    // hash). Pin it to the funding key's address so the on-chain msg.sender reproduces the proof.
+    let depositor_hex = cast(&["wallet", "address", "--private-key", &key])
+        .trim()
+        .to_string();
+    let depositor = Address::from_hex(&depositor_hex)
+        .unwrap_or_else(|e| die(format!("parse depositor address: {e:?}")));
+    let manager_addr = Address::from_hex(manager.trim())
+        .unwrap_or_else(|e| die(format!("parse manager address {manager}: {e:?}")));
+
+    // P5-B: INTEGRATED (a backed channel from `setup-backing`) vs STANDALONE (self-contained P4
+    // path). Integrated binds the withdrawal to the channel's REAL co-signing members + REAL
+    // deposit so ONE on-chain registration + deposit serves both the close and withdraw paths;
+    // the deposit was already made on-chain by `setup-backing`, so we do NOT deposit again
+    // here. Standalone keeps the P4 behavior (self-generated registration + its own deposit,
+    // env-tunable amounts).
+    let integrated = backing_exists();
+    let (deposit_amount, withdrawal_amount, deposit_salt, cli_members): (
+        u32,
+        u32,
+        Option<Salt>,
+        Option<Vec<MemberKeys>>,
+    ) = if integrated {
+        let backing = load_backing().2;
+        let fund = backing.fund.min(u32::MAX as u64) as u32;
+        let salt = backing.deposit_salt.unwrap_or_else(|| {
+            die(
+                "channel_backing.json has no deposit_salt — re-run `setup-backing` (P5-B needs it to \
+                 reconstruct the deposit block that matches the on-chain deposit). Fail-closed.",
+            )
+        });
+        // ACTIVE set = 3 members + delegate (the registration block this posts must reproduce the
+        // SAME 4-active registration the deploy registered, so finalize matches; the close proof's
+        // delegate_count limb requires delegate_count = 1).
+        let members = cli_active_keys();
+        eprintln!(
+            "[withdraw] integrated: real members + delegate + real deposit (fund {fund}); withdraw \
+             makes the deposit in standalone fold order."
+        );
+        (fund, fund, Some(salt), Some(members))
+    } else {
+        let da: u32 = std::env::var("WD_DEPOSIT_AMOUNT")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(10);
+        let wa: u32 = std::env::var("WD_AMOUNT")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(3);
+        (da, wa, None, None)
+    };
+    if withdrawal_amount > deposit_amount {
+        die(format!(
+            "withdrawal amount {withdrawal_amount} exceeds deposit amount {deposit_amount}"
+        ));
+    }
+
+    // ── Build the artifacts (HEAVY proving). recipient = manager so the payout credits it. ──
+    eprintln!(
+        "[withdraw] building channel-withdrawal proof set (channel {channel_id}, deposit \
+         {deposit_amount}, withdraw {withdrawal_amount} → manager {manager}) — HEAVY…"
+    );
+    let params = ChannelWithdrawalParams {
+        channel_id,
+        deposit_amount,
+        withdrawal_amount,
+        depositor: Some(depositor),
+        withdrawal_recipient: Some(manager_addr),
+        deposit_salt,
+    };
+    let artifacts = build_channel_withdrawal(&params, cli_members.as_deref())
+        .unwrap_or_else(|e| die(format!("build withdrawal: {e}")));
+
+    // Write the artifacts locally and stage them for the forge finalize / withdrawNative steps
+    // (RunClose reads `contracts/test/data/sepolia_*`). Each step's inputs are staged before it
+    // runs.
+    fs::write("lifecycle.json", &artifacts.lifecycle_json)
+        .unwrap_or_else(|e| die(format!("write lifecycle.json: {e}")));
+    fs::write("lifecycle_validity_mle.json", &artifacts.validity_mle_json)
+        .unwrap_or_else(|e| die(format!("write lifecycle_validity_mle.json: {e}")));
+    fs::write("withdrawal_mle.json", &artifacts.withdrawal_mle_json)
+        .unwrap_or_else(|e| die(format!("write withdrawal_mle.json: {e}")));
+    fs::write("withdrawal_payout.json", &artifacts.payout_json)
+        .unwrap_or_else(|e| die(format!("write withdrawal_payout.json: {e}")));
+    let data_dir = std::path::Path::new("contracts/test/data");
+    let stage = |src: &str, dst: &str| {
+        fs::copy(src, data_dir.join(dst)).unwrap_or_else(|e| die(format!("stage {src}: {e}")));
+    };
+    stage("lifecycle.json", "sepolia_lifecycle.json");
+    stage(
+        "lifecycle_validity_mle.json",
+        "sepolia_lifecycle_validity_mle.json",
+    );
+    stage("withdrawal_mle.json", "sepolia_withdrawal_mle.json");
+    stage("withdrawal_payout.json", "sepolia_withdrawal_payout.json");
+
+    let lc: serde_json::Value = serde_json::from_str(&artifacts.lifecycle_json)
+        .unwrap_or_else(|e| die(format!("parse lifecycle json: {e}")));
+    let reg = &lc["registration"];
+
+    // A 128 KiB blob (content irrelevant — the rollup only checks blobhash(0) is non-zero).
+    fs::write(BLOB_FILE, vec![0u8; 131072])
+        .unwrap_or_else(|e| die(format!("write {BLOB_FILE}: {e}")));
+
+    // 1. registerChannel (one-time per channel; skip if already registered so re-runs are
+    //    idempotent and the close-lifecycle path — where the channel is already registered —
+    //    composes).
+    let existing = cast(&[
+        "call",
+        &rollup,
+        "channelMemberSetCommitment(uint32)(bytes32)",
+        &channel_id.to_string(),
+        "--rpc-url",
+        &rpc,
+    ]);
+    let already_registered = existing
+        .trim()
+        .trim_start_matches("0x")
+        .chars()
+        .any(|c| c != '0');
+    if already_registered {
+        eprintln!("[withdraw] channel {channel_id} already registered — skipping registerChannel");
+    } else {
+        eprintln!("[withdraw] registerChannel({channel_id})…");
+        let bp_slot = reg["bp_member_slot"]
+            .as_u64()
+            .unwrap_or_else(|| die("bp_member_slot"))
+            .to_string();
+        let pk_gs = json_str_array(&reg["member_pk_gs"]);
+        let pk_bs = json_str_array(&reg["member_pk_bs"]);
+        let regev = json_str_array(&reg["regev_pk_digests"]);
+        let recipients = json_str_array(&reg["recipients"]);
+        cast(&[
+            "send",
+            &rollup,
+            "registerChannel(uint32,uint8,uint8,bytes32[],bytes32[],bytes32[],address[])",
+            &channel_id.to_string(),
+            &bp_slot,
+            "0",
+            &pk_gs,
+            &pk_bs,
+            &regev,
+            &recipients,
+            "--private-key",
+            &key,
+            "--rpc-url",
+            &rpc,
+        ]);
+    }
+
+    // Capture the base submission id so we finalize the LAST of our three posts.
+    let base_sub: u64 = {
+        let out = cast(&[
+            "call",
+            &rollup,
+            "nextSubmissionId()(uint256)",
+            "--rpc-url",
+            &rpc,
+        ]);
+        out.trim()
+            .split_whitespace()
+            .next()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or_else(|| die(format!("parse nextSubmissionId: {out:?}")))
+    };
+
+    // 2. Registration block.
+    post_block_round(&rollup, &lc, 0, &key, &rpc);
+
+    // 3. Deposit (P5-B 案B: `withdraw` ALWAYS makes the deposit here, between the registration
+    //    block and the deposit block — the standalone fold order the withdrawal proof models. In
+    //    integrated mode `setup-backing` deliberately deferred the on-chain deposit to this point,
+    //    so there is no earlier pending deposit to pollute the registration block. Sent BY the
+    //    depositor key (== the proved depositor), escrowing real native into the rollup.)
+    {
+        let dep = &lc["deposit"];
+        let dep_recipient = dep["recipient"]
+            .as_str()
+            .unwrap_or_else(|| die("deposit.recipient"));
+        let dep_token = dep["token_index"]
+            .as_u64()
+            .unwrap_or_else(|| die("deposit.token_index"))
+            .to_string();
+        let dep_amount = dep["amount"]
+            .as_str()
+            .unwrap_or_else(|| die("deposit.amount"));
+        let dep_aux = dep["aux_data"]
+            .as_str()
+            .unwrap_or_else(|| die("deposit.aux_data"));
+        eprintln!(
+            "[withdraw] deposit{{value: {dep_amount}}}(recipient,…) as depositor {depositor_hex}…"
+        );
+        cast(&[
+            "send",
+            &rollup,
+            "deposit(bytes32,uint32,uint256,bytes32)",
+            dep_recipient,
+            &dep_token,
+            dep_amount,
+            dep_aux,
+            "--value",
+            dep_amount,
+            "--private-key",
+            &key,
+            "--rpc-url",
+            &rpc,
+        ]);
+    }
+
+    // 4. Deposit block, then 5. Withdrawal block.
+    post_block_round(&rollup, &lc, 1, &key, &rpc);
+    post_block_round(&rollup, &lc, 2, &key, &rpc);
+    let final_sub = std::env::var("SUB_ID").unwrap_or_else(|_| (base_sub + 2).to_string());
+
+    // 6. finalize (forge RunClose step; reads the staged sepolia_lifecycle* files).
+    eprintln!("[withdraw] finalize submission {final_sub} (real validity MLE)…");
+    let status = Command::new("forge")
+        .current_dir("contracts")
+        .args([
+            "script",
+            "script/RunClose.s.sol",
+            "--sig",
+            "finalizeStep()",
+            "--rpc-url",
+            &rpc,
+            "--private-key",
+            &key,
+            "--broadcast",
+        ])
+        .env("ROLLUP", &rollup)
+        .env("SUB_ID", &final_sub)
+        .status()
+        .unwrap_or_else(|e| die(format!("forge finalizeStep failed to start: {e}")));
+    if !status.success() {
+        die(
+            "forge finalizeStep failed (ensure the validity VK + genesis match this rollup, and the 3 blocks posted in order)",
+        );
+    }
+
+    // 7. withdrawNative (forge RunClose step; credits pendingWithdrawals[manager]).
+    eprintln!("[withdraw] withdrawNative (real withdrawal MLE) → manager {manager}…");
+    let status = Command::new("forge")
+        .current_dir("contracts")
+        .args([
+            "script",
+            "script/RunClose.s.sol",
+            "--sig",
+            "withdrawNativeStep()",
+            "--rpc-url",
+            &rpc,
+            "--private-key",
+            &key,
+            "--broadcast",
+        ])
+        .env("ROLLUP", &rollup)
+        .env("MANAGER", &manager)
+        .status()
+        .unwrap_or_else(|e| die(format!("forge withdrawNativeStep failed to start: {e}")));
+    if !status.success() {
+        die(
+            "forge withdrawNativeStep failed (ensure the withdrawal VK is initialized on this rollup)",
+        );
+    }
+
+    // 8. pullChannelFunds (manager pulls its escrowed credit out of the rollup).
+    eprintln!("[withdraw] pullChannelFunds() on manager {manager}…");
+    cast(&[
+        "send",
+        &manager,
+        "pullChannelFunds()",
+        "--private-key",
+        &key,
+        "--rpc-url",
+        &rpc,
+    ]);
+    println!(
+        "[withdraw] OK: {withdrawal_amount} native withdrawn from the rollup into manager {manager} \
+         (now `claim` per member to distribute)."
+    );
+}
+
+/// A-3 P5-B: emit the channel's member registration record (the 3 CLI co-signing members), derived
+/// deterministically — NO proving. Writes `cli_reg_record.json` and prints it. A deploy script
+/// reads it to `registerChannel` the channel with these members AND bind the manager to them, so
+/// the member-set commitment the close proof binds and the registration block `withdraw` posts both
+/// match this single on-chain registration. The recipients use the canonical per-(channel, slot)
+/// formula (`ChannelMemberKeys::to_reg_record`) so they equal the recipients
+/// `build_channel_withdrawal` emits.
+fn cmd_export_reg_record() {
+    let channel_id = channel_id_env();
+    // The channel's ACTIVE set: the 3 CLI co-signing members FIRST, then the delegate (slot 3 — the
+    // SAME identity `gen-contribution <bal> <DELEGATE_SEED>` produces, so the on-chain registration
+    // matches the channel state built by `init`). member_count = 3, delegate_count = 1.
+    let members = cli_active_keys();
+    let delegate_count = members.len() - TEST_ACTIVE_MEMBERS;
+    let active = members.len();
+    let record = ChannelMemberKeys::from_member_keys(&members).to_reg_record_split(
+        channel_id,
+        TEST_ACTIVE_MEMBERS as u32,
+        delegate_count as u32,
+    );
+    let mut member_pk_gs = Vec::new();
+    let mut member_pk_bs = Vec::new();
+    let mut regev_pk_digests = Vec::new();
+    let mut recipients = Vec::new();
+    for i in 0..active {
+        let m = &record.members[i];
+        member_pk_gs.push(m.pk_g.to_string());
+        member_pk_bs.push(m.pk_b.to_string());
+        regev_pk_digests.push(m.regev_pk_digest.to_string());
+        recipients.push(m.recipient.to_hex());
+    }
+    let out = serde_json::json!({
+        "channel_id": channel_id,
+        "bp_member_slot": BP_SLOT,
+        "member_count": TEST_ACTIVE_MEMBERS,
+        "delegate_count": delegate_count,
+        "member_pk_gs": member_pk_gs,
+        "member_pk_bs": member_pk_bs,
+        "regev_pk_digests": regev_pk_digests,
+        "recipients": recipients,
+    });
+    let s = serde_json::to_string_pretty(&out).unwrap_or_else(|e| die(e));
+    fs::write("cli_reg_record.json", &s)
+        .unwrap_or_else(|e| die(format!("write cli_reg_record.json: {e}")));
+    println!("{s}");
 }
 
 fn main() {
@@ -432,6 +1378,20 @@ fn main() {
         "cosign-inter-transfer" => cmd_cosign_inter_transfer(&args),
         "finalize" => cmd_finalize(&args),
         "balance" => cmd_balance(),
+        // A-3 P3: `close` builds the real close proof from wallet state and submits it on-chain.
+        "close" => cmd_close(&args),
+        // A-3 P4: `settle` finalizes the close after the challenge period (no proof calldata).
+        "settle" => cmd_settle(&args),
+        // A-3 P4: `claim` proves + submits a member's withdrawal claim and pulls the credit.
+        "claim" => cmd_claim(&args),
+        // A-3 P4: `withdraw` builds the channel-withdrawal proof set and drives the full on-chain
+        // pipeline (register → deposit → postBlock×3 → finalize → withdrawNative →
+        // pullChannelFunds).
+        "withdraw" => cmd_withdraw(&args),
+        // A-3 P5-B: print/write the channel's member registration record (no proving) so a deploy
+        // script can `registerChannel` + bind the manager to the SAME members the close/withdraw
+        // proofs use (lets one on-chain registration serve the whole close lifecycle).
+        "export-reg-record" => cmd_export_reg_record(),
         _ => {
             eprintln!(
                 "usage: channel_member <setup-backing|init|add-genesis-sig|send|cosign|cosign-refresh|cosign-inter-transfer|finalize|balance> ..."

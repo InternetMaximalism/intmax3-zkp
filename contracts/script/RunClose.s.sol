@@ -118,10 +118,31 @@ contract RunClose is Script {
     /// exercised in `ChannelSettlementManager.t.sol`; this demo script intentionally no longer
     /// fabricates a stub proof (it would be rejected). Kept as a documented no-op so the deploy
     /// script still builds.
-    function withdrawalClaimStep() external pure {
-        revert(
-            "withdrawalClaimStep: Phase B-D requires a real withdrawal-claim MleProof "
-            "(initializeWithdrawalClaimVk + generate_withdrawal_claim_fixture); see the test suite"
-        );
+    function _wclaim() internal view returns (string memory) {
+        return vm.readFile(string.concat(vm.projectRoot(), "/test/data/sepolia_withdrawal_claim.json"));
+    }
+
+    function _wclaimMle() internal view returns (string memory) {
+        return vm.readFile(string.concat(vm.projectRoot(), "/test/data/sepolia_withdrawal_claim_mle.json"));
+    }
+
+    /// A-3 P4: submit a member's withdrawal claim with the REAL withdrawal-claim MLE/WHIR proof
+    /// (produced by the CLI `claim` command via `WithdrawalClaimProver`). Reads the descriptor + the
+    /// wrapped MLE proof staged by the CLI and calls `submitWithdrawalClaim`.
+    function submitWithdrawalClaimStep() external {
+        string memory j = _wclaim();
+        ChannelSettlementManager.WithdrawalClaim memory claim = ChannelSettlementManager.WithdrawalClaim({
+            closeIntentDigest: vm.parseJsonBytes32(j, ".close_intent_digest"),
+            memberPkG: vm.parseJsonBytes32(j, ".member_pk_g"),
+            recipient: vm.parseJsonAddress(j, ".recipient"),
+            userAmountDigest: vm.parseJsonBytes32(j, ".user_amount_digest"),
+            amount: uint64(vm.parseJsonUint(j, ".amount")),
+            withdrawalNullifier: vm.parseJsonBytes32(j, ".withdrawal_nullifier")
+        });
+        MleVerifier.MleProof memory proof = FixtureLib.parseProof(_wclaimMle());
+        vm.startBroadcast();
+        _manager().submitWithdrawalClaim(claim, proof);
+        vm.stopBroadcast();
+        console2.log("submitWithdrawalClaim OK; recipient credit pending claimWithdrawalCredit");
     }
 }

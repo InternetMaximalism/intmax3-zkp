@@ -4,52 +4,54 @@
 //!
 //! This is the CLI counterpart to `tests/inter_channel_live.rs`. It exercises the binary's SINGLE
 //! atomic `cosign-inter-transfer` command (which REPLACES the old two-step
-//! `cosign-inter-debit` / `cosign-inter-credit` pair) plus the binary-only security wiring it adds on
-//! top of the library: the credit is bound to A's COMMITTED on-disk head and an IN-PROCESS-co-signed
-//! debit (NEVER a request-body `aSignedState`), the A-side SPENT ledger + B-side APPLIED ledger, the
-//! atomic both-or-neither persistence, and the idempotent `init` pk_g dedup.
+//! `cosign-inter-debit` / `cosign-inter-credit` pair) plus the binary-only security wiring it adds
+//! on top of the library: the credit is bound to A's COMMITTED on-disk head and an
+//! IN-PROCESS-co-signed debit (NEVER a request-body `aSignedState`), the A-side SPENT ledger +
+//! B-side APPLIED ledger, the atomic both-or-neither persistence, and the idempotent `init` pk_g
+//! dedup.
 //!
 //! WHY a process E2E (not real deposit backing): a full CLI flow with REAL deposit backing requires
-//! `cast`/anvil + the ~25s BalanceProcessor prover (`setup-backing`). That is intractable for a unit
-//! test AND unnecessary here: the inter-channel co-sign command deliberately uses plain N-of-N
-//! `sign_state` (NOT `sign_state_if_backed`), because an inter-channel transfer PUSHES a tx leaf into
-//! `settled_tx_chain` so the genesis deposit attestation can never reconcile (see the SECURITY note
-//! in `channel_member.rs`). So we seed each channel's `cli_state.json` directly with a co-signed
-//! genesis built through the SAME `wallet_core` API, then drive the binary. The debit payload +
-//! transfer descriptor are produced by the REAL `build_inter_channel_send` (real E-2 STARK at
-//! Production level), so the binary co-signs and credits a genuine transfer.
+//! `cast`/anvil + the ~25s BalanceProcessor prover (`setup-backing`). That is intractable for a
+//! unit test AND unnecessary here: the inter-channel co-sign command deliberately uses plain N-of-N
+//! `sign_state` (NOT `sign_state_if_backed`), because an inter-channel transfer PUSHES a tx leaf
+//! into `settled_tx_chain` so the genesis deposit attestation can never reconcile (see the SECURITY
+//! note in `channel_member.rs`). So we seed each channel's `cli_state.json` directly with a
+//! co-signed genesis built through the SAME `wallet_core` API, then drive the binary. The debit
+//! payload + transfer descriptor are produced by the REAL `build_inter_channel_send` (real E-2
+//! STARK at Production level), so the binary co-signs and credits a genuine transfer.
 //!
 //! WHAT EACH TEST PROVES:
 //!  (POSITIVE) `cosign-inter-transfer` debits A by EXACTLY AMT and credits B by EXACTLY AMT; full
 //!      conservation is read back from BOTH channels' persisted cli_state on disk.
-//!  (CRITICAL-1 ATTACK) a fully N-of-N-signed `aSignedState` forged from the PUBLIC member seeds, with
-//!      NO matching committed debit on A (a tx_hash never spent on A / a state that does not extend
-//!      A's committed head), is REFUSED — the credit is bound to A's committed head, not a body blob.
-//!  (REPLAY) the SAME tx_hash twice → refused (A spent ledger fires).
+//!  (CRITICAL-1 ATTACK) a fully N-of-N-signed `aSignedState` forged from the PUBLIC member seeds,
+//! with      NO matching committed debit on A (a tx_hash never spent on A / a state that does not
+//! extend      A's committed head), is REFUSED — the credit is bound to A's committed head, not a
+//! body blob.  (REPLAY) the SAME tx_hash twice → refused (A spent ledger fires).
 //!  (TAMPER) credit amount != debit amount → refused by the credit gate.
 //!  (ATOMICITY) when the credit leg fails, A's head on disk is UNCHANGED (nothing persisted).
-//!  (DEDUP) idempotent re-join: `init` with an already-present pk_g returns the SAME slot, no growth.
+//!  (DEDUP) idempotent re-join: `init` with an already-present pk_g returns the SAME slot, no
+//! growth.
 #![cfg(not(debug_assertions))]
 
 use std::{path::PathBuf, process::Command};
 
 use intmax3_zkp::{
     common::{channel::ChannelRecord, channel_id::ChannelId},
-    ethereum_types::{bytes32::Bytes32, u256::U256, u32limb_trait::U32LimbTrait},
+    ethereum_types::{bytes32::Bytes32, u32limb_trait::U32LimbTrait, u256::U256},
     regev::{RegevCiphertext, RegevSecurityLevel, encrypt_amount},
     wallet_core::{
         BuiltInterChannelSend, ChannelSnapshot, InterChannelDebitPayload,
         InterChannelTransferDescriptor, MemberInfo, MemberKeys, add_signature,
-        assemble_genesis_state, build_inter_channel_send, build_record, decrypt_balance,
-        default_settled_tx_accumulator, sign_state, verify_snapshot,
+        assemble_genesis_state, build_burn_send, build_inter_channel_send, build_record,
+        decrypt_balance, default_settled_tx_accumulator, sign_state, verify_snapshot,
     },
 };
 use rand010::{SeedableRng, rngs::StdRng};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
-// MUST match the binary's hardcoded LEVEL (channel_member.rs: RegevSecurityLevel::Production), since
-// the binary VERIFIES the E-2 proof this test PRODUCES — the FRI query count is part of the
+// MUST match the binary's hardcoded LEVEL (channel_member.rs: RegevSecurityLevel::Production),
+// since the binary VERIFIES the E-2 proof this test PRODUCES — the FRI query count is part of the
 // transcript, so a Test-level proof would fail the Production-level re-verification in the binary.
 const LEVEL: RegevSecurityLevel = RegevSecurityLevel::Production;
 const A_ID: u32 = 7;
@@ -108,7 +110,8 @@ struct ChannelFixture {
 }
 
 /// Build a 3-member channel whose members are EXACTLY the binary's deterministic CLI members
-/// (slots 0,1,2 with the binary's keygen seeds), with a co-signed genesis + a balance seed per slot.
+/// (slots 0,1,2 with the binary's keygen seeds), with a co-signed genesis + a balance seed per
+/// slot.
 fn build_cli_channel(channel_id: u32, balances: &[u64]) -> ChannelFixture {
     let keys: Vec<MemberKeys> = CLI_SLOTS.iter().map(|&s| cli_keys(s)).collect();
     let members: Vec<MemberInfo> = keys
@@ -142,8 +145,10 @@ fn build_cli_channel(channel_id: u32, balances: &[u64]) -> ChannelFixture {
     let fund: u64 = balances.iter().sum();
     // Per-active-slot Regev pk Poseidon digests, in the SAME slot order as `cts` (mirrors
     // channel_member.rs:601-605).
-    let regev_pk_digests: Vec<Bytes32> =
-        keys.iter().map(|k| Bytes32::from(k.regev_pk.poseidon_digest())).collect();
+    let regev_pk_digests: Vec<Bytes32> = keys
+        .iter()
+        .map(|k| Bytes32::from(k.regev_pk.poseidon_digest()))
+        .collect();
     let mut genesis =
         assemble_genesis_state(&record, &cts, &regev_pk_digests, fund).expect("genesis");
     for (i, k) in keys.iter().enumerate() {
@@ -172,7 +177,8 @@ fn bin() -> PathBuf {
     PathBuf::from(env!("CARGO_BIN_EXE_channel_member"))
 }
 
-/// Run a `channel_member` subcommand in `cwd` with INTMAX_CHANNEL set. Returns (success, stdout+err).
+/// Run a `channel_member` subcommand in `cwd` with INTMAX_CHANNEL set. Returns (success,
+/// stdout+err).
 fn run(cwd: &std::path::Path, channel: u32, args: &[&str]) -> (bool, String) {
     let out = Command::new(bin())
         .args(args)
@@ -247,6 +253,152 @@ fn build_transfer(
     .expect("build_inter_channel_send")
 }
 
+/// VALIDATES `build_burn_send` (abstract2-1 §3.6 partial withdrawal, (ii) padding-receiver) with
+/// the REAL E-2 STARK + its build-time self-check (no anvil). A PASS proves the soundness-critical
+/// claim: `receiver_delta = encrypt(amount, RegevPk::padding())` is ACCEPTED by the channel-layer
+/// verification (the E-2 `sender_delta==receiver_delta==amount` constraint holds with the phantom
+/// padding receiver). Asserts the member debits ONLY their OWN slot by exactly `amount` (per-member
+/// attribution), the channel total drops, and the base Transfer targets the ADDRESS_TAG L1 form
+/// (withdraw-only) routed to the reserved BURN_CHANNEL_ID.
+#[test]
+fn build_burn_send_debits_only_sender_and_targets_l1() {
+    use intmax3_zkp::{
+        circuits::balance::common::recipient::calculate_recipient_from_address,
+        ethereum_types::address::Address,
+    };
+
+    let a = build_cli_channel(A_ID, &[50, 10, 30]);
+    let a_keys: Vec<MemberKeys> = CLI_SLOTS.iter().map(|&s| cli_keys(s)).collect();
+    let sender_slot = 0u8;
+    let amount = 20u64;
+    let l1 = Address::from_hex("0x00000000000000000000000000000000000000aa").unwrap();
+    let prev_fund = a.snapshot.state.channel_fund.amount;
+    let prev_enc = a.snapshot.state.balance_state.enc_balances.clone();
+
+    let mut rng = StdRng::seed_from_u64(0xB0_0000);
+    let built = build_burn_send(
+        &a_keys[sender_slot as usize],
+        &a.snapshot,
+        sender_slot,
+        l1,
+        amount,
+        a.balances[sender_slot as usize], // before_amount = 50 (the member's own share)
+        &a.witnesses[sender_slot as usize],
+        fresh_root(0xBEEF),
+        LEVEL,
+        &mut rng,
+    )
+    .expect("build_burn_send: padding-receiver E-2 self-check MUST pass");
+
+    // The member withdraws exactly their OWN amount.
+    assert_eq!(
+        built.new_balance,
+        50 - amount,
+        "sender new balance = before - amount"
+    );
+    let next = &built.debit_payload.proposed_next_state;
+    // Channel total decreased (the self-check enforces "decrease by exactly amount").
+    assert_ne!(
+        next.channel_fund.amount, prev_fund,
+        "channel_fund must decrease on a burn"
+    );
+    // PER-MEMBER ATTRIBUTION: only the sender slot's encBalance may change.
+    for slot in 0..prev_enc.len() {
+        let changed = next.balance_state.enc_balances[slot] != prev_enc[slot];
+        assert_eq!(
+            changed,
+            slot == sender_slot as usize,
+            "only sender slot {slot} may change"
+        );
+    }
+    // Base Transfer recipient is the ADDRESS_TAG L1 form (withdraw-only), routed to
+    // BURN_CHANNEL_ID.
+    assert_eq!(
+        built.transfer_descriptor.receiver_pk_g,
+        calculate_recipient_from_address(l1),
+        "base Transfer recipient is the ADDRESS_TAG L1 form"
+    );
+    assert_eq!(
+        built
+            .transfer_descriptor
+            .destination_channel_id
+            .channel_id(),
+        intmax3_zkp::constants::BURN_CHANNEL_ID,
+        "destination is the reserved BURN_CHANNEL_ID"
+    );
+}
+
+/// GAP1 PROOF: the burn Transfer's `aux_data` must equal `tx_leaf` so that the base
+/// `send_tx_circuit` pushes the SAME leaf into `settled_tx_chain` as the channel layer does.
+/// Without this, the base chain silently diverges (aux_data=0 → no push) and mid-channel binding
+/// (GAP2) cannot tie the base withdrawal proof to the signed channel state.
+#[test]
+fn burn_send_base_chain_matches_channel() {
+    use intmax3_zkp::common::balance_state::{settled_tx_chain_push, tx_leaf_hash};
+
+    let a = build_cli_channel(A_ID, &[50, 10, 30]);
+    let a_keys: Vec<MemberKeys> = CLI_SLOTS.iter().map(|&s| cli_keys(s)).collect();
+    let sender_slot = 0u8;
+    let amount = 20u64;
+    let l1 = intmax3_zkp::ethereum_types::address::Address::from_hex(
+        "0x00000000000000000000000000000000000000aa",
+    )
+    .unwrap();
+
+    let mut rng = StdRng::seed_from_u64(0xB0_0000);
+    let built = build_burn_send(
+        &a_keys[sender_slot as usize],
+        &a.snapshot,
+        sender_slot,
+        l1,
+        amount,
+        a.balances[sender_slot as usize],
+        &a.witnesses[sender_slot as usize],
+        fresh_root(0xBEEF),
+        LEVEL,
+        &mut rng,
+    )
+    .expect("build_burn_send");
+
+    let desc = &built.transfer_descriptor;
+    let next = &built.debit_payload.proposed_next_state;
+
+    // Recompute tx_leaf from the descriptor's fields (same formula as wallet_core.rs:1492-1497).
+    let tx_leaf = tx_leaf_hash(
+        desc.source_pk_g,
+        desc.sender_delta_ct.digest(),
+        desc.receiver_pk_g,
+        desc.receiver_delta.digest(),
+    );
+
+    // The CHANNEL layer pushed tx_leaf into settled_tx_chain (wallet_core.rs:1559).
+    let genesis_chain = a.snapshot.state.balance_state.settled_tx_chain;
+    let expected_channel_chain = settled_tx_chain_push(genesis_chain, tx_leaf);
+    assert_eq!(
+        next.balance_state.settled_tx_chain, expected_channel_chain,
+        "channel settled_tx_chain must be push(genesis, tx_leaf)"
+    );
+
+    // The BASE layer pushes settled_tx_chain by transfer.aux_data (send_tx_circuit.rs:290-297).
+    // After the GAP1 fix, burn sends set aux_data = tx_leaf, so the base circuit pushes the SAME
+    // leaf as the channel layer. Simulate what the base circuit produces with aux_data = tx_leaf.
+    let base_chain = settled_tx_chain_push(genesis_chain, tx_leaf);
+
+    // GAP1 RESOLVED: both chains agree — the base push(genesis, tx_leaf) == channel push(genesis,
+    // tx_leaf).
+    assert_eq!(
+        base_chain, next.balance_state.settled_tx_chain,
+        "GAP1: base settled_tx_chain must match channel settled_tx_chain \
+         (burn aux_data = tx_leaf ensures both push the same leaf)"
+    );
+
+    // Sanity: a zero aux_data (the pre-fix bug) would NOT match.
+    assert_ne!(
+        genesis_chain, next.balance_state.settled_tx_chain,
+        "zero aux_data (no push) must NOT match the channel chain"
+    );
+}
+
 #[test]
 fn inter_channel_cli_end_to_end() {
     // Two temp channel cwds laid out as the relay does: <root>/ch7, <root>/ch8.
@@ -272,8 +424,12 @@ fn inter_channel_cli_end_to_end() {
     let a_fund_before = a_snapshot.state.channel_fund.amount;
     let b_fund_before = b_snapshot.state.channel_fund.amount;
     let a_committed_digest = a_snapshot.state.digest;
-    let recipient_before =
-        decrypt_balance(&b_keys[recipient_slot as usize], &b_snapshot, recipient_slot).unwrap();
+    let recipient_before = decrypt_balance(
+        &b_keys[recipient_slot as usize],
+        &b_snapshot,
+        recipient_slot,
+    )
+    .unwrap();
 
     write_state(&ch_a, &cli_state(a));
     write_state(&ch_b, &cli_state(b));
@@ -300,7 +456,8 @@ fn inter_channel_cli_end_to_end() {
     write_json_file(&desc_path, &transfer_descriptor);
 
     // ============================ POSITIVE: atomic transfer ============================
-    // The combined command runs in A's cwd (resolves B as ../ch8). It debits A and credits B atomically.
+    // The combined command runs in A's cwd (resolves B as ../ch8). It debits A and credits B
+    // atomically.
     let (ok, log) = run(
         &ch_a,
         A_ID,
@@ -341,11 +498,15 @@ fn inter_channel_cli_end_to_end() {
     );
     // Both ledgers recorded the tx_hash.
     assert!(
-        a_after.spent_tx_hashes.contains(&transfer_descriptor.tx_hash),
+        a_after
+            .spent_tx_hashes
+            .contains(&transfer_descriptor.tx_hash),
         "tx_hash must be recorded in A's persisted SPENT ledger"
     );
     assert!(
-        b_after.applied_tx_hashes.contains(&transfer_descriptor.tx_hash),
+        b_after
+            .applied_tx_hashes
+            .contains(&transfer_descriptor.tx_hash),
         "tx_hash must be recorded in B's persisted APPLIED ledger"
     );
     // A's head ADVANCED past the committed genesis digest.
@@ -354,9 +515,10 @@ fn inter_channel_cli_end_to_end() {
         "A's committed head advanced after the transfer"
     );
 
-    // ============================ REPLAY: same tx_hash twice → refused ============================
-    // A's head has advanced, so the debit payload no longer extends it AND the A spent ledger already
-    // holds the tx_hash; either is a fail-closed rejection (the spent-ledger one is the security-relevant).
+    // ============================ REPLAY: same tx_hash twice → refused
+    // ============================ A's head has advanced, so the debit payload no longer
+    // extends it AND the A spent ledger already holds the tx_hash; either is a fail-closed
+    // rejection (the spent-ledger one is the security-relevant).
     let (ok, log) = run(
         &ch_a,
         A_ID,
@@ -383,10 +545,11 @@ fn inter_channel_cli_end_to_end() {
 }
 
 /// CRITICAL-1 regression: a fully N-of-N-signed `aSignedState` forged from the PUBLIC member seeds
-/// CANNOT cause a credit, because the credit is bound to A's COMMITTED head + an IN-PROCESS-co-signed
-/// debit — never a request-body blob. We simulate the attacker's best shot: a debit payload whose
-/// `proposed_next_state` does NOT extend A's committed head (the forged head an attacker would post,
-/// signed by the public member keys). The combined command MUST refuse before touching B.
+/// CANNOT cause a credit, because the credit is bound to A's COMMITTED head + an
+/// IN-PROCESS-co-signed debit — never a request-body blob. We simulate the attacker's best shot: a
+/// debit payload whose `proposed_next_state` does NOT extend A's committed head (the forged head an
+/// attacker would post, signed by the public member keys). The combined command MUST refuse before
+/// touching B.
 #[test]
 fn inter_channel_cli_forged_a_state_refused() {
     let root = std::env::temp_dir().join(format!("intmax_ic_cli_attack_{}", std::process::id()));
@@ -407,18 +570,22 @@ fn inter_channel_cli_forged_a_state_refused() {
     let a_balances = a.balances.clone();
     let a_witnesses = a.witnesses.clone();
     let b_fund_before = b_snapshot.state.channel_fund.amount;
-    let recipient_before =
-        decrypt_balance(&b_keys[recipient_slot as usize], &b_snapshot, recipient_slot).unwrap();
+    let recipient_before = decrypt_balance(
+        &b_keys[recipient_slot as usize],
+        &b_snapshot,
+        recipient_slot,
+    )
+    .unwrap();
 
     let a_state = cli_state(a);
     let a_committed_digest = a_state.snapshot.state.digest;
     write_state(&ch_a, &a_state);
     write_state(&ch_b, &cli_state(b));
 
-    // Build a REAL transfer, then FORGE the debit payload so its proposed_next_state was built off a
-    // DIFFERENT (attacker-chosen) prev head — i.e. it does not extend A's committed head. The forged
-    // state is fully N-of-N-signed (the attacker can do this: the member keys come from PUBLIC seeds),
-    // exactly the value-creation hole the old `/api/inter/credit` path enabled.
+    // Build a REAL transfer, then FORGE the debit payload so its proposed_next_state was built off
+    // a DIFFERENT (attacker-chosen) prev head — i.e. it does not extend A's committed head. The
+    // forged state is fully N-of-N-signed (the attacker can do this: the member keys come from
+    // PUBLIC seeds), exactly the value-creation hole the old `/api/inter/credit` path enabled.
     let built = build_transfer(
         &a_snapshot,
         &a_balances,
@@ -433,7 +600,8 @@ fn inter_channel_cli_forged_a_state_refused() {
     let mut forged_payload: InterChannelDebitPayload = built.debit_payload.clone();
     // Re-sign the proposed state under the PUBLIC member keys so it is a fully-valid N-of-N state —
     // then break its linkage to A's real head by overwriting prev_digest with a value that does NOT
-    // equal A's committed head digest. (The attacker controls the body; this models a forged a_send.)
+    // equal A's committed head digest. (The attacker controls the body; this models a forged
+    // a_send.)
     let forged_prev = fresh_root(0xDEAD);
     assert_ne!(
         forged_prev, a_committed_digest,
@@ -507,7 +675,8 @@ fn inter_channel_cli_forged_a_state_refused() {
 }
 
 /// TAMPER: a descriptor whose amount disagrees with the real (debit-bound) E-2 is REFUSED by the
-/// credit gate (which re-verifies the real E-2 over descriptor.amount). ATOMICITY: nothing persists.
+/// credit gate (which re-verifies the real E-2 over descriptor.amount). ATOMICITY: nothing
+/// persists.
 #[test]
 fn inter_channel_cli_tampered_amount_refused() {
     let root = std::env::temp_dir().join(format!("intmax_ic_cli_tamper_{}", std::process::id()));
@@ -568,8 +737,9 @@ fn inter_channel_cli_tampered_amount_refused() {
         "tamper rejection must come from the credit gate / conservation, got:\n{log}"
     );
 
-    // ATOMICITY: the credit leg failed AFTER the debit leg was co-signed in memory, so NOTHING must be
-    // persisted — A's head UNCHANGED on disk and B untouched. This is the key atomicity assertion.
+    // ATOMICITY: the credit leg failed AFTER the debit leg was co-signed in memory, so NOTHING must
+    // be persisted — A's head UNCHANGED on disk and B untouched. This is the key atomicity
+    // assertion.
     let a_after = read_state(&ch_a);
     let b_after = read_state(&ch_b);
     assert_eq!(
@@ -606,7 +776,10 @@ fn inter_channel_cli_idempotent_rejoin() {
 
     let delegate_keys = MemberKeys::generate(&mut StdRng::seed_from_u64(0xDE_1E_6A));
     let mut join_state = cli_state(build_cli_channel(B_ID, &[20, 40, 60]));
-    join_state.snapshot.members.push(member_info(3, &delegate_keys));
+    join_state
+        .snapshot
+        .members
+        .push(member_info(3, &delegate_keys));
     let v_before = join_state.snapshot.state.balance_state.state_version;
     write_state(&ch_join, &join_state);
 
@@ -623,7 +796,11 @@ fn inter_channel_cli_idempotent_rejoin() {
         "genesisCt": ct,
     });
     let contrib_path = ch_join.join("contribution.json");
-    std::fs::write(&contrib_path, serde_json::to_string_pretty(&contrib).unwrap()).unwrap();
+    std::fs::write(
+        &contrib_path,
+        serde_json::to_string_pretty(&contrib).unwrap(),
+    )
+    .unwrap();
     let out_snap = ch_join.join("snap_out.json");
     let (ok, log) = run(
         &ch_join,

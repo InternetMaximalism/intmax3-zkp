@@ -4,7 +4,8 @@
 //! secret key, balance encryption witnesses) lives ONLY in the in-memory [`Session`] and is never
 //! returned to JS or serialized. The worker drives these in order: `wallet_keygen` →
 //! `wallet_genesis_contribution` → (CLI assembles + sends back genesis) → `wallet_sign_state` →
-//! `wallet_import_channel` → `wallet_balance` / `wallet_send` / `wallet_cosign` / `wallet_finalize`.
+//! `wallet_import_channel` → `wallet_balance` / `wallet_send` / `wallet_cosign` /
+//! `wallet_finalize`.
 //!
 //! SECURITY: `RegevSecurityLevel::Production` is used for all real proving. Keys are session-only
 //! (lost on reload) per the approved threat-model default.
@@ -15,6 +16,7 @@ use serde::{Deserialize, Serialize};
 use wasm_bindgen::prelude::{JsValue, wasm_bindgen};
 
 use crate::{
+    common::channel::{ChannelState, MemberSignature},
     ethereum_types::{bytes32::Bytes32, u32limb_trait::U32LimbTrait},
     regev::{AmountWitness, RegevSecurityLevel, encrypt_amount},
     wallet_core::{
@@ -22,7 +24,6 @@ use crate::{
         build_send, decrypt_balance, sign_state, verify_send_transition, verify_snapshot,
     },
 };
-use crate::common::channel::{ChannelState, MemberSignature};
 
 /// SECURITY: real funds ⇒ Production STARK parameters (≈100-bit), never the fast `Test` level.
 const LEVEL: RegevSecurityLevel = RegevSecurityLevel::Production;
@@ -82,9 +83,9 @@ pub fn wallet_keygen() -> Result<String, JsValue> {
 /// re-import, so the browser can restore the SAME account/slot across reloads.
 ///
 /// SECURITY (testnet only): this relaxes the module's "secrets are session-only, never persisted"
-/// default — the caller (JS) generates and stores the seed (localStorage) and is responsible for it.
-/// The seed deterministically derives the Goldilocks/BabyBear/Regev secret keys, so anyone who reads
-/// the seed controls the account. Do NOT use seed-persistence for mainnet-value keys.
+/// default — the caller (JS) generates and stores the seed (localStorage) and is responsible for
+/// it. The seed deterministically derives the Goldilocks/BabyBear/Regev secret keys, so anyone who
+/// reads the seed controls the account. Do NOT use seed-persistence for mainnet-value keys.
 #[wasm_bindgen]
 pub fn wallet_keygen_seeded(seed_hex: String) -> Result<String, JsValue> {
     use rand010::SeedableRng;
@@ -165,17 +166,23 @@ pub fn wallet_sign_state(slot: u8, state_json: String) -> Result<String, JsValue
     with_session(|session| {
         let state: ChannelState = serde_json::from_str(&state_json).map_err(js_err)?;
         if state.digest != state.signing_digest() {
-            return Err(js_err("state.digest does not match recomputed signing_digest()"));
+            return Err(js_err(
+                "state.digest does not match recomputed signing_digest()",
+            ));
         }
         // SECURITY: this entry signs WITHOUT head/linkage checks, so restrict it to genesis only
         // (epoch 1, version 0). All later states are signed via `wallet_cosign`, which verifies the
         // transition. Bound-check the slot before indexing the fixed-size balance array.
         let mc = state.balance_state.member_count as usize;
         if slot as usize >= mc {
-            return Err(js_err(format!("slot {slot} is not an active member (member_count {mc})")));
+            return Err(js_err(format!(
+                "slot {slot} is not an active member (member_count {mc})"
+            )));
         }
         if !(state.epoch == 1 && state.balance_state.state_version == 0) {
-            return Err(js_err("wallet_sign_state is genesis-only (epoch 1, state_version 0)"));
+            return Err(js_err(
+                "wallet_sign_state is genesis-only (epoch 1, state_version 0)",
+            ));
         }
         // Confirm our slot decrypts (sanity: we are signing a state we can read).
         crate::regev::decrypt_amount(
@@ -274,10 +281,9 @@ pub fn wallet_send(recipient_slot: u8, amount: u64) -> Result<String, JsValue> {
             .snapshot
             .clone()
             .ok_or_else(|| js_err("no channel imported"))?;
-        let (before_amount, before_witness) = session
-            .balance
-            .clone()
-            .ok_or_else(|| js_err("no spendable balance witness (a refresh is required after receiving)"))?;
+        let (before_amount, before_witness) = session.balance.clone().ok_or_else(|| {
+            js_err("no spendable balance witness (a refresh is required after receiving)")
+        })?;
         let mut rng = rand010::rng();
         let mut nonce_bytes = [0u32; 8];
         for w in nonce_bytes.iter_mut() {
@@ -304,19 +310,23 @@ pub fn wallet_send(recipient_slot: u8, amount: u64) -> Result<String, JsValue> {
         // (We do not self-verify the freshly built proof here: it roughly doubles send latency and
         // is redundant — every co-signer verifies the E-1 proof before signing. Portability of
         // wasm-built proofs is covered by tests/verify_wasm_proof.rs.)
-        session.pending_send =
-            Some((payload.proposed_next_state.digest, new_balance, new_balance_witness));
+        session.pending_send = Some((
+            payload.proposed_next_state.digest,
+            new_balance,
+            new_balance_witness,
+        ));
         serde_json::to_string(&payload).map_err(js_err)
     })
 }
 
-/// Inter-channel send: debit `amount` from this wallet's slot and produce the cross-channel transfer
-/// to `to_slot` in `to_channel`. `dest_recipient_json` = `{ "regevPk": <RegevPk>, "pkG": "0x.." }` of
-/// the destination channel's recipient slot (the browser reads it from channel B's snapshot). Returns
-/// `{ "debitPayload": <InterChannelDebitPayload>, "transferDescriptor": <InterChannelTransferDescriptor> }`:
-/// the browser POSTs the debit payload to channel A's `/api/inter/debit` (A members co-sign), then the
-/// descriptor + A's co-signed state to channel B's `/api/inter/credit`. The debit commits on
-/// `wallet_finalize` of A's co-signed state. Mirrors `wallet_send`.
+/// Inter-channel send: debit `amount` from this wallet's slot and produce the cross-channel
+/// transfer to `to_slot` in `to_channel`. `dest_recipient_json` = `{ "regevPk": <RegevPk>, "pkG":
+/// "0x.." }` of the destination channel's recipient slot (the browser reads it from channel B's
+/// snapshot). Returns `{ "debitPayload": <InterChannelDebitPayload>, "transferDescriptor":
+/// <InterChannelTransferDescriptor> }`: the browser POSTs the debit payload to channel A's
+/// `/api/inter/debit` (A members co-sign), then the descriptor + A's co-signed state to channel B's
+/// `/api/inter/credit`. The debit commits on `wallet_finalize` of A's co-signed state. Mirrors
+/// `wallet_send`.
 #[wasm_bindgen]
 pub fn wallet_send_inter_channel(
     to_channel: u32,
@@ -342,13 +352,13 @@ pub fn wallet_send_inter_channel(
             .snapshot
             .clone()
             .ok_or_else(|| js_err("no channel imported"))?;
-        let (before_amount, before_witness) = session
-            .balance
-            .clone()
-            .ok_or_else(|| js_err("no spendable balance witness (a refresh is required after receiving)"))?;
+        let (before_amount, before_witness) = session.balance.clone().ok_or_else(|| {
+            js_err("no spendable balance witness (a refresh is required after receiving)")
+        })?;
         let dest: DestRecipient = serde_json::from_str(&dest_recipient_json).map_err(js_err)?;
         let dest_pk_g = Bytes32::from_hex(&dest.pk_g).map_err(js_err)?;
-        let dest_channel = crate::common::channel_id::ChannelId::new(to_channel as u64).map_err(js_err)?;
+        let dest_channel =
+            crate::common::channel_id::ChannelId::new(to_channel as u64).map_err(js_err)?;
         let mut rng = rand010::rng();
         // Fresh shared_native_nullifier_root for this debit (must differ from prev; §C-3).
         let mut nr = [0u32; 8];
@@ -402,10 +412,9 @@ pub fn wallet_refresh() -> Result<String, JsValue> {
         let mut rng = rand010::rng();
         let (payload, new_witness) =
             build_refresh(&session.keys, &snapshot, slot, LEVEL, &mut rng).map_err(js_err)?;
-        // The refreshed slot holds the SAME value with a fresh witness; commit it on finalize so the
-        // wallet can send again.
-        session.pending_send =
-            Some((payload.proposed_next_state.digest, value, new_witness));
+        // The refreshed slot holds the SAME value with a fresh witness; commit it on finalize so
+        // the wallet can send again.
+        session.pending_send = Some((payload.proposed_next_state.digest, value, new_witness));
         serde_json::to_string(&payload).map_err(js_err)
     })
 }
@@ -429,14 +438,24 @@ pub fn wallet_cosign(payload_json: String) -> Result<String, JsValue> {
         let am_recipient = payload.recipient_index == slot;
         let (sk, expected) = if am_recipient {
             // We learn the amount by decrypting; pass it as the expected check.
-            let amt = crate::regev::decrypt_amount(&session.keys.regev_sk, &payload.channel_tx.enc_amount)
-                .map_err(|e| js_err(format!("cannot decrypt incoming amount: {e}")))?;
+            let amt = crate::regev::decrypt_amount(
+                &session.keys.regev_sk,
+                &payload.channel_tx.enc_amount,
+            )
+            .map_err(|e| js_err(format!("cannot decrypt incoming amount: {e}")))?;
             (Some(&session.keys.regev_sk), Some(amt))
         } else {
             (None, None)
         };
-        verify_send_transition(&snapshot.state, &snapshot.record, &payload, LEVEL, sk, expected)
-            .map_err(js_err)?;
+        verify_send_transition(
+            &snapshot.state,
+            &snapshot.record,
+            &payload,
+            LEVEL,
+            sk,
+            expected,
+        )
+        .map_err(js_err)?;
 
         let mut next = payload.proposed_next_state.clone();
         let sig = sign_state(&session.keys, slot, &next).map_err(js_err)?;
@@ -457,9 +476,12 @@ pub fn wallet_finalize(state_json: String) -> Result<String, JsValue> {
             .clone()
             .ok_or_else(|| js_err("no channel imported"))?;
         if next_state.prev_digest != snapshot.state.digest {
-            return Err(js_err("finalized state does not extend the wallet's current head"));
+            return Err(js_err(
+                "finalized state does not extend the wallet's current head",
+            ));
         }
-        if next_state.balance_state.state_version != snapshot.state.balance_state.state_version + 1 {
+        if next_state.balance_state.state_version != snapshot.state.balance_state.state_version + 1
+        {
             return Err(js_err("state_version must increment by exactly 1"));
         }
         // Adopt, then fully verify (record/root/balance-state validity, every member's REAL
@@ -524,5 +546,8 @@ pub async fn wallet_feasibility_check() -> Result<String, JsValue> {
         &proof,
     )
     .map_err(js_err)?;
-    Ok(format!("E-1 prove+verify OK in wasm; proof = {} bytes", proof.len()))
+    Ok(format!(
+        "E-1 prove+verify OK in wasm; proof = {} bytes",
+        proof.len()
+    ))
 }

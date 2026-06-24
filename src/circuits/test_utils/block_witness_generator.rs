@@ -6,11 +6,9 @@ use crate::{
         },
         validity::block_hash_chain::{
             block_hash_chain_processor::BlockHashChainProcessorWitness,
-            ext_public_state::ExtendedPublicState,
-            small_block_message::SmallBlockMessageFields,
+            ext_public_state::ExtendedPublicState, small_block_message::SmallBlockMessageFields,
         },
     },
-    poseidon_sig::GoldilocksSecretKey,
     common::{
         block::{Block, BlockError},
         channel_id::{ChannelId, ChannelIdError as UserIdError},
@@ -33,6 +31,7 @@ use crate::{
     ethereum_types::{
         address::Address, bytes32::Bytes32, u32limb_trait::U32LimbTrait as _, u256::U256,
     },
+    poseidon_sig::GoldilocksSecretKey,
     regev::{REGEV_N, REGEV_Q, RegevPk, hash_sig::BabyBearSecretKey},
     utils::poseidon_hash_out::PoseidonHashOut,
 };
@@ -174,8 +173,8 @@ impl ChannelMemberKeys {
             seed[8] = 0xa5;
             seed[31] = slot as u8 + 1;
             let sk = GoldilocksSecretKey::from_seed(seed);
-            // Deterministic BabyBear hash-sig key (P3): seed an RNG from the (channel, slot) so pk_b
-            // is stable across re-runs and distinct per member.
+            // Deterministic BabyBear hash-sig key (P3): seed an RNG from the (channel, slot) so
+            // pk_b is stable across re-runs and distinct per member.
             let baby_seed = (channel_id as u64)
                 .wrapping_mul(0x9e37_79b9)
                 .wrapping_add((slot as u64) << 8)
@@ -201,16 +200,24 @@ impl ChannelMemberKeys {
         }
     }
 
-    /// Build `ChannelMemberKeys` from REAL wallet `MemberKeys` (Goldilocks + BabyBear + REAL Regev),
-    /// so a channel registered in the validity proof has EXACTLY the same `(pk_g, pk_b,
+    /// Build `ChannelMemberKeys` from REAL wallet `MemberKeys` (Goldilocks + BabyBear + REAL
+    /// Regev), so a channel registered in the validity proof has EXACTLY the same `(pk_g, pk_b,
     /// regev_pk_digest)` member set as the channel-layer `build_record` (B-2: the small-block
     /// `bp_pk_g` the validity circuit verifies is a genuine registered member, and the channel's
-    /// `member_pubkeys_root` matches the registration's). Unlike `deterministic`, the Regev keys are
-    /// real keypairs (the secret lives with the wallet, NOT here — validity never decrypts).
+    /// `member_pubkeys_root` matches the registration's). Unlike `deterministic`, the Regev keys
+    /// are real keypairs (the secret lives with the wallet, NOT here — validity never
+    /// decrypts).
     pub fn from_member_keys(keys: &[crate::wallet_core::MemberKeys]) -> Self {
         let mut member_tree = MemberTree::init();
         let (mut secret_keys, mut baby_keys, mut regev_pks) = (Vec::new(), Vec::new(), Vec::new());
-        for k in keys.iter().take(TEST_ACTIVE_MEMBERS) {
+        // Build the member tree over ALL passed ACTIVE participants (members first, then
+        // delegates). Callers pass exactly the active set: `TEST_ACTIVE_MEMBERS` for a
+        // member-only channel, or `member_count + delegate_count` when a delegate is
+        // present (P5-B). The delegate occupies the contiguous slot(s) after the co-signing
+        // members and is committed in the member tree (its `(pk_g, pk_b, regev_pk_digest)`
+        // enters `member_pubkeys_root` and the reg keccak chain) but is EXCLUDED from the
+        // member-set commitment (handled by member_count in `to_reg_record_split`).
+        for k in keys.iter() {
             let pk_b: PoseidonHashOut = k.baby_key.public_key().to_bytes32().reduce_to_hash_out();
             member_tree.push(MemberLeaf {
                 pk_g: k.signing_key.public_key_hash_out(),
@@ -221,7 +228,12 @@ impl ChannelMemberKeys {
             baby_keys.push(k.baby_key.clone());
             regev_pks.push(k.regev_pk.clone());
         }
-        Self { secret_keys, baby_keys, regev_pks, member_tree }
+        Self {
+            secret_keys,
+            baby_keys,
+            regev_pks,
+            member_tree,
+        }
     }
 
     /// Build the on-chain [`ChannelRegRecord`] for `channel_id` from this member key material.
@@ -234,10 +246,30 @@ impl ChannelMemberKeys {
     /// updating-block member-signature binding opens against. The `recipient` is a deterministic
     /// test L1 address; it only enters the keccak preimage, not the Poseidon member tree.
     pub fn to_reg_record(&self, channel_id: u32) -> ChannelRegRecord {
+        self.to_reg_record_split(channel_id, TEST_ACTIVE_MEMBERS as u32, 0)
+    }
+
+    /// Like [`Self::to_reg_record`] but with an explicit `member_count` / `delegate_count` split
+    /// (P5-B delegate support). `active = member_count + delegate_count` entries are emitted from
+    /// the member tree (members first, then delegates). The member-set commitment downstream
+    /// uses only the first `member_count` `pk_g`s; the delegate region is registered for the
+    /// withdrawal path but excluded from the close member-set (matches
+    /// `ChannelSettlementManager`'s member/delegate split).
+    pub fn to_reg_record_split(
+        &self,
+        channel_id: u32,
+        member_count: u32,
+        delegate_count: u32,
+    ) -> ChannelRegRecord {
+        let active = (member_count + delegate_count) as usize;
+        assert!(
+            active <= MAX_CHANNEL_MEMBERS,
+            "active participants {active} exceed MAX_CHANNEL_MEMBERS"
+        );
         let mut members: [MemberRegEntry; MAX_CHANNEL_MEMBERS] = Default::default();
-        for i in 0..TEST_ACTIVE_MEMBERS {
+        for (i, entry) in members.iter_mut().enumerate().take(active) {
             let leaf = self.member_tree.get_leaf(i as u64);
-            members[i] = MemberRegEntry {
+            *entry = MemberRegEntry {
                 pk_g: Bytes32::from(leaf.pk_g),
                 pk_b: Bytes32::from(leaf.pk_b),
                 regev_pk_digest: Bytes32::from(leaf.regev_pk_digest),
@@ -255,8 +287,8 @@ impl ChannelMemberKeys {
             // Block proposer is slot 0 by convention (matches the first updating slot the later
             // blocks sign with).
             bp_member_slot: 0,
-            member_count: TEST_ACTIVE_MEMBERS as u32,
-            delegate_count: 0,
+            member_count,
+            delegate_count,
             members,
         }
     }
@@ -308,10 +340,11 @@ pub struct BlockWitnessGenerator {
     /// proof and folds them into one `ListCircuit` proof whose commitment must equal the final
     /// `bp_sig_chain` (decision D3).
     pub bp_sig_events: Vec<(GoldilocksSecretKey, Bytes32)>,
-    /// B-2: the `state_commitment_root` (= post-debit `BalanceState::h1()`, detail2 §C-7) to bind in
-    /// the NEXT updating block's IMSB message, so the bp signs the genuine `hash(H1', tx_tree_root)`
-    /// channelStateSig (structural atomicity D-3) instead of `hash(H1'=0, tx_tree_root)`. Consumed
-    /// by the next `add_block_with_tx_v2`; `None` ⇒ zero (correct for intra/base-layer blocks).
+    /// B-2: the `state_commitment_root` (= post-debit `BalanceState::h1()`, detail2 §C-7) to bind
+    /// in the NEXT updating block's IMSB message, so the bp signs the genuine `hash(H1',
+    /// tx_tree_root)` channelStateSig (structural atomicity D-3) instead of `hash(H1'=0,
+    /// tx_tree_root)`. Consumed by the next `add_block_with_tx_v2`; `None` ⇒ zero (correct for
+    /// intra/base-layer blocks).
     pub next_imsb_state_commitment_root: Option<Bytes32>,
 }
 
@@ -370,21 +403,35 @@ impl BlockWitnessGenerator {
         keys
     }
 
-    /// Register `channel_id` with PROVIDED real member keys (B-2): the same `(pk_g, pk_b, regev_pk)`
-    /// triple the channel-layer `build_record` uses, so the small-block signature the validity proof
-    /// verifies (`bp_pk_g ∈ member_pubkeys_root`) is a genuine registered member and the channel's
-    /// `member_pubkeys_root` equals the registration's.
+    /// Register `channel_id` with PROVIDED real member keys (B-2): the same `(pk_g, pk_b,
+    /// regev_pk)` triple the channel-layer `build_record` uses, so the small-block signature
+    /// the validity proof verifies (`bp_pk_g ∈ member_pubkeys_root`) is a genuine registered
+    /// member and the channel's `member_pubkeys_root` equals the registration's.
     pub fn add_channel_registration_keys(
         &mut self,
         channel_id: u32,
         keys: ChannelMemberKeys,
     ) -> ChannelMemberKeys {
+        self.add_channel_registration_keys_split(channel_id, keys, TEST_ACTIVE_MEMBERS as u32, 0)
+    }
+
+    /// Like [`Self::add_channel_registration_keys`] but with an explicit member/delegate split
+    /// (P5-B). The `keys` member tree must hold `member_count + delegate_count` active leaves.
+    pub fn add_channel_registration_keys_split(
+        &mut self,
+        channel_id: u32,
+        keys: ChannelMemberKeys,
+        member_count: u32,
+        delegate_count: u32,
+    ) -> ChannelMemberKeys {
         let channel = ChannelId::new(channel_id as u64).expect("channel id");
         if let Some(existing) = self.channel_members.get(&channel) {
             return existing.clone();
         }
-        let record = keys.to_reg_record(channel_id);
-        record.validate().expect("registration record must be valid");
+        let record = keys.to_reg_record_split(channel_id, member_count, delegate_count);
+        record
+            .validate()
+            .expect("registration record must be valid");
         self.channel_registrations.push((record, keys.clone()));
         self.channel_members.insert(channel, keys.clone());
         keys
@@ -801,9 +848,13 @@ impl BlockWitnessGenerator {
         // Build the block-level IMSB message fields (`bp_member_slot` = first updating slot). The
         // signed digest is recomputed once and signed by EACH updating member at their own slot.
         let member_keys = channel_opt.and_then(|c| self.channel_members.get(&c).cloned());
-        // B-2: bind the real post-debit H1' (detail2 §C-7) if provided for this block (inter-channel
-        // small block); `None`/zero is correct for intra-channel and base-layer blocks.
-        let imsb_h1 = self.next_imsb_state_commitment_root.take().unwrap_or_default();
+        // B-2: bind the real post-debit H1' (detail2 §C-7) if provided for this block
+        // (inter-channel small block); `None`/zero is correct for intra-channel and
+        // base-layer blocks.
+        let imsb_h1 = self
+            .next_imsb_state_commitment_root
+            .take()
+            .unwrap_or_default();
         let (msg_fields, signed_digest) = if let Some(bp_slot) = any_update_slot {
             let keys = member_keys.as_ref().ok_or_else(|| {
                 BlockWitnessGeneratorError::InvalidRequest(format!(
@@ -811,11 +862,7 @@ impl BlockWitnessGenerator {
                     channel_id
                 ))
             })?;
-            let bp_hash: Bytes32 = keys
-                .member_tree
-                .get_leaf(bp_slot as u64)
-                .pk_g
-                .into();
+            let bp_hash: Bytes32 = keys.member_tree.get_leaf(bp_slot as u64).pk_g.into();
             let fields = SmallBlockMessageFields {
                 bp_member_slot: bp_slot as u32,
                 bp_pk_g: bp_hash,

@@ -207,8 +207,16 @@ library BlobKZGVerifier {
         bytes memory negPi,
         bytes calldata vanishingG2
     ) private view {
-        // Fast path: when vanishingG2 == G2_GENERATOR the bilinear equation
-        // collapses to a single G1 identity check, which only needs G1ADD.
+        // SECURITY (A-5): this fast path is SOUND, not a bypass. The branch is taken ONLY after a
+        // strict keccak equality check that `vanishingG2` IS the G2 generator; under that exact
+        // condition the pairing equation e(lhs,G2_gen)·e(negPi,vanishingG2)=1 is algebraically
+        // identical to e(lhs+negPi,G2_gen)=1 ⇔ lhs+negPi=∞ (the G1 identity), so the cheaper G1ADD
+        // check decides the SAME predicate the general BLS12_PAIRING branch would. A caller cannot
+        // weaken verification by supplying vanishingG2: any value other than the generator falls
+        // through to the real pairing precompile, and forging fieldElements still requires the KZG
+        // trapdoor τ (see the contract-level note above). The fast path exists only because the
+        // BLS12_PAIRING precompile is unavailable in Foundry 1.5.x; PRODUCTION (Pectra) takes the
+        // general branch and uses the real BLS12_PAIRING precompile at 0x11.
         if (keccak256(vanishingG2) == keccak256(G2_GENERATOR)) {
             bytes memory sum = _g1Add(lhs, negPi);
             // Identity point in EIP-2537 format = 128 zero bytes

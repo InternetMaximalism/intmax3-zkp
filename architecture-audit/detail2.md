@@ -272,7 +272,7 @@ Retype existing `InterChannelTx` (`channel.rs:541-597`). Map abstract2's `TxAux`
 > `channelStateSig` (`hash(H1', tx_tree_root)`) is verified by the REAL validity proof
 > (`update_channel_tree` / `bp_sig_chain`, §F-2). The `transport_proof` field is retained only as a
 > vestigial carrier and is NOT verified by a dedicated `ChannelProofVerifier` (verified end-to-end in
-> `tests/inter_channel_validity_b2.rs`).
+> `tests/small_block_sig_validity.rs`).
 >
 > Inclusion liveness is handled by member incentive, NOT a proof. Because a channel's members only
 > sign `hash(H1', tx_tree_root)` when they intend the small block to be included on L1:
@@ -353,6 +353,41 @@ are the registered member set of that channel** (excluding signature substitutio
   (it remains in the block hash preimage). It represents the set of slots of members who signed in that block, not the multisig
   key identity.
 
+### C-10. [New] Mid-Channel L1 Deposit Import
+
+An L1 deposit can be folded into an already-open channel, increasing `channelFund.amount` and
+crediting the depositing member's encrypted balance — the channel stays `Active` throughout
+(the symmetric ENTRY half of partial withdrawal §GAP2).
+
+**Transition kind:** `ChannelTransitionKind::L1DepositImport` (no Plonky3 STARK, no Plonky2 transport
+proof — trust anchor is the `receive_deposit` balance proof verified via `verify_channel_backing`).
+
+**Two-step state transition** (mirrors `InterChannelFundImport` + `ReceiverBundleApply`):
+
+| Step | `channel_fund.amount` | `unallocated` | `enc_balances` | `settledTxChain` | `shared_native_nullifier_root` |
+|------|----------------------|---------------|----------------|-----------------|-------------------------------|
+| 1 (fund import) | `+= amount` | `+= amount` | unchanged | push `deposit.nullifier()` | advances |
+| 2 (bundle apply) | unchanged | `-= amount` | `recipient_slot += delta` | push `deposit.nullifier()` | unchanged |
+
+**Trust anchor:** The `receive_deposit` balance proof (recursive IVC, `ReceiveDepositCircuit`)
+proves Merkle inclusion of the deposit in the finalized `deposit_tree_root` (T1 mitigation) and
+inserts `Deposit::nullifier()` into the nullifier tree (T2 double-fold mitigation, C15 verified).
+`verify_channel_backing` binds the balance proof's `settled_tx_chain` to the channel state's chain.
+
+**Transition digest:** `l1_deposit_import_digest = keccak([IMLD, channel_id, deposit_nullifier,
+amount_lo, amount_hi, depositor_slot])` (domain `0x494d4c44` "IMLD", `channel.rs`).
+
+**Verification (`L1DepositImportUpdateWitness::verify()`):** identical to
+`InterChannelFundImportUpdateWitness::verify()` EXCEPT no transport proof verification — the
+balance proof is the external trust anchor (not an inter-channel transport envelope).
+
+**Co-signer gate:** `verify_l1_deposit_import_transition()` — every N-of-N co-signer MUST call
+this before signing the proposed state. Fail-closed.
+
+**`settledTxChain` update rule** (extending §C-6 line 300): Mid-channel deposit import uses the
+same rule as deposit ingestion: `chain' = hash_words([SETTLED_TX_CHAIN_DOMAIN, chain,
+deposit_nullifier])`.
+
 ---
 
 ## D. Unification of signing targets (abstract2.md §3.1 / §3.3.2)
@@ -363,6 +398,7 @@ are the registered member set of that channel** (excluding signature substitutio
 | Inter-channel transfer (sender side) | `hash(H1', tx_tree_root)` | the small block's `tx_tree_root` | `SmallBlockRootMessage::signing_digest()` (§C-7) |
 | Inter-channel receipt (receiver side) | `hash(H1', 0)` | `0x00…00` | `ChannelState::signing_digest()` (the receiver side does not create a small block) |
 | deposit / closeBurnTx | **No signature required** (abstract2.md §3.3.2b) | — | Accepted within the validity / close circuit |
+| Mid-channel L1 deposit import | `hash(H1', 0)` | `0x00…00` | `ChannelState::signing_digest()` — N-of-N co-sign the post-import state (§C-10) |
 
 - **D-3 (atomicity)**: In an inter-channel transfer, a signature that "authorizes the transfer but refuses the subtraction" **does not exist by definition**, because
   `H1'` (post-subtraction state) and `H2` (tx_tree_root) coexist in a single preimage in the signing target.
@@ -446,6 +482,11 @@ Each time the balance circuit ingests one settle (transfer / deposit), it comput
 input (a new requirement of abstract2.md §2.1). Since `H1` does not include the proof object, the
 state↔proof correspondence can be mechanically verified by the
 **equality reconciliation** "`balanceProof.PI.settled_tx_chain == BalanceState.settled_tx_chain`" (resolving the circularity of "proof not generated at signing time" = audit finding 3).
+
+> **Note (mid-channel deposit):** `verify_channel_backing` (wallet_core.rs) enforces this
+> reconciliation at TWO points: (a) genesis backing (the initial deposit's balance proof) and
+> (b) mid-channel L1 deposit import (§C-10). In both cases the `settled_tx_chain` equality check
+> binds the balance proof to the channel state, preventing unescrowded deposit claims.
 
 ### F-2. validity / confirmation circuit (abstract2.md §3.3.5)
 
@@ -567,7 +608,10 @@ ONLY the registered members can cancel — a third party signing a revival block
 BP unilaterally produces small blocks and can race a later block after an honest close starts); the sound
 condition is "a strictly-newer N-of-N member-signed state exists", which is what the circuit proves.
 
-**`submitSpecialClose` (C2) — DISABLED (forgeable stub; revert the entry point).** Intended fault: the BP fully
+**`submitSpecialClose` (C2) — DISABLED (IMPLEMENTED 2026-06, P6-A): the entry point now reverts
+`SpecialCloseDisabled()` unconditionally (`ChannelSettlementManager.sol`); the stub verifier is left in place but
+unreachable. Adversarial-reviewed (no defects; freeze-grief removed, no member funds move). Forgeable stub;
+revert the entry point.** Intended fault: the BP fully
 signed a small block but failed to finalize it within `SPECIAL_CLOSE_MEDIUM_BLOCK_WINDOW = 5` medium blocks
 (censorship); on success it slashes `min(specialClosePenalty, bpBondCredits)` to the caller and freezes the
 channel. A SOUND proof of this fault requires **non-inclusion of the BP-signed block in the finalized
@@ -579,8 +623,10 @@ computable by anyone), so anyone can fabricate the accusation and slash an hones
 the BP-censorship slash is simply unavailable; no member funds move; the BP bond (`bpBondCredits`) is a separate
 pot, and if it is unfunded (= 0) the forged-slash steals nothing — disabling only removes the freeze-grief.
 
-**`submitLateOutgoingDebitCorrection` (C3) — DISABLED (forgeable stub; redundant). The threat it targets is
-already prevented; the conditions are:**
+**`submitLateOutgoingDebitCorrection` (C3) — DISABLED (IMPLEMENTED 2026-06, P6-A): the entry point now reverts
+`LateOutgoingDebitDisabled()` unconditionally; the stub verifier is left in place but unreachable.
+Adversarial-reviewed (no defects; double-pay still prevented by the nullifier used-sets + cancelClose).
+Forgeable stub; redundant. The threat it targets is already prevented; the conditions are:**
 1. **No double-withdrawal — guaranteed by on-chain nullifier used-sets** (the "non-inclusion list of
    withdrawals" is a Solidity `mapping(bytes32 => bool)`, O(1), at EVERY payout path):
    `IntmaxRollup.withdrawalNullifierUsed` (base `withdrawNative`),
@@ -607,6 +653,12 @@ already prevented; the conditions are:**
 These disables are **safety-neutral**: cross-channel isolation (the `Σ paid ≤ receivedChannelFunds` cap) and the
 no-double-withdraw guarantee (nullifier used-sets) do NOT depend on C2/C3. Disabling only removes the
 forgeable-while-stubbed BP-censorship slash (C2) and the redundant late-debit cancel (C3).
+
+FOLLOW-UP (non-security, deferred): with C2/C3 disabled, the symbols only their removed bodies touched are now
+dead — `latestSpecialCloseDigest`, `usedLateOutgoingDebitNullifiers`, the `SpecialCloseSubmitted` /
+`LateOutgoingDebitAccepted` events, and `computeSpecialCloseDigest`. The adversarial review confirmed these are
+harmless (no invariant reads them). They are intentionally LEFT for a future cleanup PR, since removing them
+changes the Manager bytecode again (CREATE2 manager drift → another close-fixture regeneration).
 
 ### H-4. Invariant of the challenge order
 

@@ -6,15 +6,16 @@
 //!   - `C_i     = Poseidon(C_{i-1} ‖ leaf_i)`   (two-to-one)
 //!
 //! The final `C_N` (a `Bytes32`) commits to the exact ordered multiset of `(m, pk)` pairs that were
-//! each backed by a verified [`SingleSigCircuit`](super::circuit::SingleSigCircuit) proof. A consumer
-//! (validity / close, Phase 2b) recursively verifies the list proof, rebuilds the same chain from the
-//! `(m, pk)` pairs it requires, and asserts equality — so it learns "these messages were signed by
-//! these keys" without re-running any signature check.
+//! each backed by a verified [`SingleSigCircuit`](super::circuit::SingleSigCircuit) proof. A
+//! consumer (validity / close, Phase 2b) recursively verifies the list proof, rebuilds the same
+//! chain from the `(m, pk)` pairs it requires, and asserts equality — so it learns "these messages
+//! were signed by these keys" without re-running any signature check.
 //!
 //! Recursion reuses the in-tree [`CyclicChainCircuit`]: the per-step [`ListStepCircuit`] exposes
-//! `[prev_chain(8), new_chain(8)]`, exactly the `(prev_hash, hash)` shape the cyclic wrapper chains.
-//! The cyclic wrapper enforces `prev_chain_i == C_{i-1}` and `C_0 == 0`, and self-references its own
-//! verifier data (constant-VD) so only proofs from this circuit can extend the list (A7).
+//! `[prev_chain(8), new_chain(8)]`, exactly the `(prev_hash, hash)` shape the cyclic wrapper
+//! chains. The cyclic wrapper enforces `prev_chain_i == C_{i-1}` and `C_0 == 0`, and
+//! self-references its own verifier data (constant-VD) so only proofs from this circuit can extend
+//! the list (A7).
 
 use plonky2::{
     field::{extension::Extendable, types::Field as _},
@@ -29,7 +30,7 @@ use plonky2::{
 
 use crate::{
     ethereum_types::{
-        bytes32::{Bytes32, Bytes32Target, BYTES32_LEN},
+        bytes32::{BYTES32_LEN, Bytes32, Bytes32Target},
         u32limb_trait::{U32LimbTargetTrait as _, U32LimbTrait as _},
     },
     utils::{
@@ -66,7 +67,8 @@ pub fn list_chain_step(prev: PoseidonHashOut, leaf: PoseidonHashOut) -> Poseidon
     PoseidonHashOut::hash_inputs_u64(&inputs)
 }
 
-/// The chain commitment over an ordered list of `(message, public_key)` pairs, folded from `C_0 = 0`.
+/// The chain commitment over an ordered list of `(message, public_key)` pairs, folded from `C_0 =
+/// 0`.
 pub fn list_commitment(pairs: &[(Bytes32, Bytes32)]) -> Bytes32 {
     let mut chain = PoseidonHashOut::default();
     for (message, public_key) in pairs {
@@ -112,8 +114,8 @@ pub(crate) fn chain_step_target<GF: RichField + Extendable<GD>, const GD: usize>
 // In-circuit per-step chain folder. Verifies one SingleSig proof, folds its (m, pk) into the chain.
 // ----------------------------------------------------------------------------------------------
 
-/// One list step: verify a [`SingleSigCircuit`](super::circuit::SingleSigCircuit) proof and fold its
-/// `(m, pk)` into the running chain. Public inputs: `[prev_chain(8), new_chain(8)]`.
+/// One list step: verify a [`SingleSigCircuit`](super::circuit::SingleSigCircuit) proof and fold
+/// its `(m, pk)` into the running chain. Public inputs: `[prev_chain(8), new_chain(8)]`.
 pub struct ListStepCircuit {
     pub data: CircuitData<F, C, D>,
     single_sig_proof: ProofWithPublicInputsTarget<D>,
@@ -125,19 +127,23 @@ impl ListStepCircuit {
         let mut builder = CircuitBuilder::<F, D>::new(CircuitConfig::standard_recursion_config());
 
         // Verify the embedded single-signature proof and read its public (pk, m).
-        // SECURITY (A7): `add_proof_target_and_verify` bakes `single_sig_vd` in as a CONSTANT verifier
-        // data, so only proofs from the genuine SingleSigCircuit can be folded — a proof from any other
-        // circuit (even with the same 16-PI shape) fails verification at build-fixed VK.
+        // SECURITY (A7): `add_proof_target_and_verify` bakes `single_sig_vd` in as a CONSTANT
+        // verifier data, so only proofs from the genuine SingleSigCircuit can be folded — a
+        // proof from any other circuit (even with the same 16-PI shape) fails verification
+        // at build-fixed VK.
         let single_sig_proof = add_proof_target_and_verify(single_sig_vd, &mut builder);
         let pk = Bytes32Target::from_slice(&single_sig_proof.public_inputs[0..BYTES32_LEN]);
-        let message =
-            Bytes32Target::from_slice(&single_sig_proof.public_inputs[BYTES32_LEN..2 * BYTES32_LEN]);
+        let message = Bytes32Target::from_slice(
+            &single_sig_proof.public_inputs[BYTES32_LEN..2 * BYTES32_LEN],
+        );
 
-        // leaf = Poseidon([LIST_LEAF_DOMAIN] ‖ m ‖ pk)  (shared gadget — identical to the consumer).
+        // leaf = Poseidon([LIST_LEAF_DOMAIN] ‖ m ‖ pk)  (shared gadget — identical to the
+        // consumer).
         let leaf = leaf_target(&mut builder, &message, &pk);
 
-        // new_chain = Poseidon(prev_chain ‖ leaf). `to_hash_out` enforces that prev_chain is a valid
-        // hash-out-derived Bytes32 (it always is: 0 on the first step, or a previous new_chain).
+        // new_chain = Poseidon(prev_chain ‖ leaf). `to_hash_out` enforces that prev_chain is a
+        // valid hash-out-derived Bytes32 (it always is: 0 on the first step, or a previous
+        // new_chain).
         let prev_chain = Bytes32Target::new(&mut builder, true);
         let prev_hashout = prev_chain.to_hash_out(&mut builder);
         let new_hashout = chain_step_target(&mut builder, prev_hashout, leaf);
@@ -193,8 +199,8 @@ impl ListCircuit {
     }
 
     /// Append one verified single-signature proof to the list. `prev_chain` is the running native
-    /// commitment over all previously-appended pairs (`Bytes32::zero()` for the first). `prev_cyclic`
-    /// is the previous list proof (`None` for the first).
+    /// commitment over all previously-appended pairs (`Bytes32::zero()` for the first).
+    /// `prev_cyclic` is the previous list proof (`None` for the first).
     pub fn prove_append(
         &self,
         single_sig_proof: &ProofWithPublicInputs<F, C, D>,
@@ -211,7 +217,7 @@ impl ListCircuit {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::poseidon_sig::{circuit::SingleSigCircuit, GoldilocksSecretKey};
+    use crate::poseidon_sig::{GoldilocksSecretKey, circuit::SingleSigCircuit};
 
     fn message(byte: u8) -> Bytes32 {
         Bytes32::from_u32_slice(&[0x494d_0000 | byte as u32, 9, 8, 7, 6, 5, 4, 3]).unwrap()
@@ -241,8 +247,10 @@ mod tests {
             (GoldilocksSecretKey::from_seed([2u8; 32]), message(0xa2)),
             (GoldilocksSecretKey::from_seed([3u8; 32]), message(0xa3)),
         ];
-        let pairs: Vec<(Bytes32, Bytes32)> =
-            entries.iter().map(|(sk, m)| (*m, sk.public_key())).collect();
+        let pairs: Vec<(Bytes32, Bytes32)> = entries
+            .iter()
+            .map(|(sk, m)| (*m, sk.public_key()))
+            .collect();
 
         let mut prev_cyclic: Option<ProofWithPublicInputs<F, C, D>> = None;
         for (i, (sk, m)) in entries.iter().enumerate() {
@@ -282,9 +290,10 @@ mod tests {
     #[test]
     fn first_step_must_start_from_zero_chain() {
         // The cyclic wrapper forces C_0 == 0 (cyclic_chain_circuit.rs:71-73). A first append whose
-        // prev_chain is a valid-but-non-zero commitment must be rejected, so the list cannot be seeded
-        // mid-chain to hide earlier entries. (prev_chain here is a real reducible commitment, so the
-        // ListStep itself proves fine; the cyclic first-step zero-check is what must reject it.)
+        // prev_chain is a valid-but-non-zero commitment must be rejected, so the list cannot be
+        // seeded mid-chain to hide earlier entries. (prev_chain here is a real reducible
+        // commitment, so the ListStep itself proves fine; the cyclic first-step zero-check
+        // is what must reject it.)
         let single = SingleSigCircuit::new();
         let list = ListCircuit::new(&single.verifier_data());
 
@@ -299,35 +308,38 @@ mod tests {
     #[test]
     fn duplicate_entries_are_accepted_at_list_level() {
         // SECURITY (documents the boundary): the list circuit binds the ORDERED pairs but does NOT
-        // enforce pubkey distinctness — appending the same (m, pk) twice yields a well-defined, distinct
-        // commitment. Distinctness / all-members-present / pk-∈-member-set are CONSUMER obligations
-        // (threat model §2.4.3, A5/A8), enforced in P2b, not here.
+        // enforce pubkey distinctness — appending the same (m, pk) twice yields a well-defined,
+        // distinct commitment. Distinctness / all-members-present / pk-∈-member-set are
+        // CONSUMER obligations (threat model §2.4.3, A5/A8), enforced in P2b, not here.
         let sk = GoldilocksSecretKey::from_seed([0x22; 32]);
         let pair = (message(0xd0), sk.public_key());
         assert_ne!(list_commitment(&[pair]), list_commitment(&[pair, pair]));
         // The native fold and the recursive circuit agree on this (covered end-to-end by
-        // `recursive_list_matches_native_commitment`, which is the native↔in-circuit equivalence guard).
+        // `recursive_list_matches_native_commitment`, which is the native↔in-circuit equivalence
+        // guard).
     }
 
     #[test]
     fn list_step_rejects_wrong_prev_chain() {
-        // A step proof whose prev_chain does not match the previous commitment must not let the cyclic
-        // wrapper chain it: the cyclic circuit connects prev_chain to the previous proof's output, so a
-        // mismatched prev_chain breaks the recursion (second append fails).
+        // A step proof whose prev_chain does not match the previous commitment must not let the
+        // cyclic wrapper chain it: the cyclic circuit connects prev_chain to the previous
+        // proof's output, so a mismatched prev_chain breaks the recursion (second append
+        // fails).
         let single = SingleSigCircuit::new();
         let list = ListCircuit::new(&single.verifier_data());
 
         let sk0 = GoldilocksSecretKey::from_seed([7u8; 32]);
         let m0 = message(0xb0);
         let sig0 = single.prove(&sk0, m0).unwrap();
-        let cyclic0 = list
-            .prove_append(&sig0, Bytes32::zero(), &None)
-            .unwrap();
+        let cyclic0 = list.prove_append(&sig0, Bytes32::zero(), &None).unwrap();
 
         // Append a second entry but lie about the running chain (use zero instead of the real C_1).
         let sk1 = GoldilocksSecretKey::from_seed([8u8; 32]);
         let sig1 = single.prove(&sk1, message(0xb1)).unwrap();
         let bad = list.prove_append(&sig1, Bytes32::zero(), &Some(cyclic0));
-        assert!(bad.is_err(), "mismatched prev_chain must break the cyclic chain");
+        assert!(
+            bad.is_err(),
+            "mismatched prev_chain must break the cyclic chain"
+        );
     }
 }

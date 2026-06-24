@@ -332,7 +332,8 @@ contract IntmaxRollupTest is Test {
             _emptyMleArrays(),
             _emptyMleArrays(),
             mleVerifierContract,
-            bytes32(0)
+            bytes32(0),
+            true // A-2: test opt-in for the degreeBits==0 bypass
         );
 
         vm.deal(submitter, 10 ether);
@@ -468,7 +469,8 @@ contract IntmaxRollupTest is Test {
             _emptyMleArrays(),
             _emptyMleArrays(),
             mleVerifierContract,
-            bytes32(0)
+            bytes32(0),
+            true // A-2: test opt-in for the degreeBits==0 bypass
         );
 
         (
@@ -513,7 +515,8 @@ contract IntmaxRollupTest is Test {
             _emptyMleArrays(),
             _emptyMleArrays(),
             new MleVerifier(),
-            bytes32(0)
+            bytes32(0),
+            true // A-2: test opt-in for the degreeBits==0 bypass
         );
     }
 
@@ -606,7 +609,8 @@ contract IntmaxRollupTest is Test {
             _emptyMleArrays(),
             _emptyMleArrays(),
             new MleVerifier(),
-            bytes32(0)
+            bytes32(0),
+            true // A-2: test opt-in for the degreeBits==0 bypass
         );
 
         // Fields IDENTICAL to the Rust test: prev=0x0a*, txRoot=0x0b*, deposit=0x0c*, reg=0x0d*,
@@ -887,7 +891,8 @@ contract IntmaxRollupTest is Test {
             fraudTreasury, enabledVk,
             _emptyWhirParams(), "", "",
             _emptyMleArrays(), _emptyMleArrays(),
-            rollup.mleVerifier(), bytes32(0)
+            rollup.mleVerifier(), bytes32(0),
+            true // A-2: test opt-in (this test uses a real enabled VK anyway)
         );
 
         MleVerifier.MleProof memory mleProof = _defaultMleProof();
@@ -903,18 +908,58 @@ contract IntmaxRollupTest is Test {
     // finalize() tests  —  full pipeline
     // -----------------------------------------------------------------------
 
-    /// @notice Real MLE/WHIR finalize against the regenerated fixture (F6).
-    /// @dev PENDS F6: the Groth16 finalize fixture (e2e_groth16.json) is retired with the Groth16
-    ///      removal; the no-Groth16 finalize path is verified end-to-end by the Rust-driven
-    ///      `tests/mle_onchain_e2e.rs` harness (which regenerates the MLE fixture and drives Forge
-    ///      finalize against it). This in-suite placeholder is intentionally skipped until F6 wires
-    ///      a standalone MLE finalize fixture (mle_fixture.json + vpi_fixture.json) here. The
-    ///      no-Groth16 finalize SIGNATURE and the MLE PI binding are already exercised by
-    ///      `test_finalize_success` below (degreeBits=0, real PI binding via mleProof.publicInputs).
-    function test_finalize_realE2E_PENDS_F6() public pure {
-        // Intentionally empty: see doc comment. Real on-chain MLE finalize coverage lives in
-        // tests/mle_onchain_e2e.rs; F6 regenerates the fixture for the current circuit.
-        return;
+    // NOTE (B-2): the former empty placeholder `test_finalize_realE2E_PENDS_F6` was removed — an
+    // empty body reports as a PASSING test and falsely implies real-MLE finalize coverage here.
+    // Real end-to-end finalize with MLE verification ENABLED (degreeBits=13, real fixture proof) is
+    // covered by `MleFinalizeE2E.t.sol::test_fullPath_postBlockThenFinalize`, and the full
+    // Rust→Forge pipeline is driven by `tests/mle_onchain_e2e.rs` (which regenerates the fixture
+    // and runs the on-chain verifier against it). `test_finalize_success` below intentionally runs
+    // with MLE DISABLED (degreeBits=0) to isolate the finalize SIGNATURE + MLE PI binding
+    // (mleProof.publicInputs) from the crypto verification — it is NOT a proof-soundness test.
+
+    /// @notice SECURITY (A-2): a production deploy (allowMleDisabled=false) MUST reject a validity
+    ///         VK with degreeBits == 0, mirroring the withdrawal VK guard
+    ///         (`initializeWithdrawalVk` → WithdrawalVkDegreeBitsZero). Without this, a zero VK
+    ///         silently disables every finalize-path MLE/WHIR check and any state root could be
+    ///         finalized with a garbage proof.
+    function test_constructor_rejectsZeroValidityVk_inProductionMode() public {
+        // Hoist the MleVerifier creation OUT of the args: with `vm.expectRevert`, the next external
+        // call/creation must be the one that reverts — an inline `new MleVerifier()` arg would be
+        // consumed by expectRevert instead of the IntmaxRollup creation.
+        MleVerifier v = new MleVerifier();
+        vm.expectRevert(IntmaxRollup.ValidityVkDegreeBitsZero.selector);
+        new IntmaxRollup(
+            fraudTreasury,
+            _emptyMleVk(), // degreeBits == 0
+            _emptyWhirParams(),
+            "",
+            "",
+            _emptyMleArrays(),
+            _emptyMleArrays(),
+            v,
+            bytes32(0),
+            false // production mode — no opt-in
+        );
+    }
+
+    /// @notice The zero validity VK is accepted ONLY behind the explicit test opt-in
+    ///         (allowMleDisabled=true). Confirms the flag is the sole gate for the bypass.
+    function test_constructor_allowsZeroValidityVk_withExplicitOptIn() public {
+        IntmaxRollup r = new IntmaxRollup(
+            fraudTreasury,
+            _emptyMleVk(),
+            _emptyWhirParams(),
+            "",
+            "",
+            _emptyMleArrays(),
+            _emptyMleArrays(),
+            new MleVerifier(),
+            bytes32(0),
+            true // explicit test opt-in
+        );
+        assertTrue(r.allowMleDisabled(), "opt-in flag must be recorded");
+        (uint256 db,,,,) = r.mleVk();
+        assertEq(db, 0, "VK stays disabled under the test opt-in");
     }
 
     function test_finalize_success() public {
@@ -1280,7 +1325,8 @@ contract IntmaxRollupTest is Test {
             fraudTreasury, enabledVk,
             _emptyWhirParams(), "", "",
             _emptyMleArrays(), _emptyMleArrays(),
-            mleVerifierContract, bytes32(0)
+            mleVerifierContract, bytes32(0),
+            true // A-2: test opt-in (this test uses a real enabled VK anyway)
         );
 
         MleVerifier.MleProof memory mleProof = _defaultMleProof();
@@ -1337,7 +1383,8 @@ contract IntmaxRollupTest is Test {
             fraudTreasury, enabledVk,
             _emptyWhirParams(), "", "",
             _emptyMleArrays(), _emptyMleArrays(),
-            mleVerifierContract, bytes32(0)
+            mleVerifierContract, bytes32(0),
+            true // A-2: test opt-in (this test uses a real enabled VK anyway)
         );
 
         MleVerifier.MleProof memory mleProof = _defaultMleProof();
@@ -1711,7 +1758,8 @@ contract IntmaxRollupTest is Test {
             "",
             _emptyMleArrays(),
             _emptyMleArrays(),
-            rollup.mleVerifier(), bytes32(0)
+            rollup.mleVerifier(), bytes32(0),
+            true // A-2: test opt-in (this test uses a real enabled VK anyway)
         );
 
         address sub2 = makeAddr("sub2");
@@ -1808,7 +1856,8 @@ contract BlockHashHarness is IntmaxRollup {
         uint256[] memory mleKIs_,
         uint256[] memory mleSubgroupGenPowers_,
         MleVerifier mleVerifier_,
-        bytes32 genesisStateRoot_
+        bytes32 genesisStateRoot_,
+        bool allowMleDisabled_
     )
         IntmaxRollup(
             fraudTreasury_,
@@ -1819,7 +1868,8 @@ contract BlockHashHarness is IntmaxRollup {
             mleKIs_,
             mleSubgroupGenPowers_,
             mleVerifier_,
-            genesisStateRoot_
+            genesisStateRoot_,
+            allowMleDisabled_
         )
     {}
 

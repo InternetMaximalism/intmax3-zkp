@@ -3,11 +3,11 @@
 //!
 //! Two real channels — A (id 7) and B (id 8) — each with REAL `MemberKeys` + a co-signed genesis
 //! MIRRORING `tests/inter_channel_unified_e2e.rs` (delegate_count = 0, handled by `build_record`'s
-//! 4th arg). A member of A sends `AMT` to a member of B. The whole two-leg flow runs through the new
-//! `wallet_core` functions ONLY (no reaching into circuit/test internals beyond key + genesis
+//! 4th arg). A member of A sends `AMT` to a member of B. The whole two-leg flow runs through the
+//! new `wallet_core` functions ONLY (no reaching into circuit/test internals beyond key + genesis
 //! setup):
-//!   LEG A: `build_inter_channel_send` → `verify_inter_channel_send_transition` → A members co-sign.
-//!   LEG B: `verify_inter_channel_credit_transition` (the fail-closed gate) →
+//!   LEG A: `build_inter_channel_send` → `verify_inter_channel_send_transition` → A members
+//! co-sign.   LEG B: `verify_inter_channel_credit_transition` (the fail-closed gate) →
 //!          `build_inter_channel_credit`.
 //!
 //! Runs the REAL E-2 channelUpdate STARK at `Test` level (fast, 8-query) — the SAME prover/verifier
@@ -21,15 +21,16 @@
 //!    -= amount; h2_tag == tx_tree_root != 0; sender slot rebound; nullifier advanced). [inv 5,2]
 //!  * `verify_inter_channel_send_transition` Ok proves an A co-signer, binding the payload to the
 //!    TRUSTED A record, independently re-verifies the same witness before signing. [trusted record]
-//!  * `verify_all_signatures(a_send)` Ok proves the debit is N-of-N co-signed under A's record — the
-//!    cross-channel root of trust B relies on. [inv 1]
+//!  * `verify_all_signatures(a_send)` Ok proves the debit is N-of-N co-signed under A's record —
+//!    the cross-channel root of trust B relies on. [inv 1]
 //!  * `verify_inter_channel_credit_transition` Ok proves the fail-closed gate accepts a GENUINE
 //!    transfer: A is co-signed (1), amount is consistent end-to-end incl. a REAL E-2 re-verify (2),
 //!    receiver pk_g == B's recipient slot (3), channel ids bind A→B (4), A's small-block H1' ==
-//!    a_send.h1() and tx_tree_root matches with the same recomputed tx leaf (5), TxV2 inclusion (7).
-//!  * `build_inter_channel_credit` crediting B's recipient slot by EXACTLY `AMT` (decrypted with the
-//!    recipient sk), with channel_fund conservation (A -= AMT, B += AMT) and the SAME tx leaf on both
-//!    sides, proves the homomorphic credit and the dual-channel chain binding are correct.
+//!    a_send.h1() and tx_tree_root matches with the same recomputed tx leaf (5), TxV2 inclusion
+//!    (7).
+//!  * `build_inter_channel_credit` crediting B's recipient slot by EXACTLY `AMT` (decrypted with
+//!    the recipient sk), with channel_fund conservation (A -= AMT, B += AMT) and the SAME tx leaf
+//!    on both sides, proves the homomorphic credit and the dual-channel chain binding are correct.
 //! NEGATIVE (each MUST be rejected by its OWN invariant — a vacuous gate proves nothing):
 //!  * tampered credit amount (y != x) → E-2 re-verify / amount binding rejects. [inv 2]
 //!  * wrong recipient_slot → receiver pk_g binding rejects. [inv 3]
@@ -104,8 +105,10 @@ fn build_channel(channel_id: u32, n: usize, balances: &[u64], rng: &mut StdRng) 
     let fund: u64 = balances.iter().sum();
     // Decryption Stage 1: per-active-slot Regev pk digests, in the SAME slot order as `cts`
     // (mirrors channel_member.rs:601-605).
-    let regev_pk_digests: Vec<Bytes32> =
-        keys.iter().map(|k| Bytes32::from(k.regev_pk.poseidon_digest())).collect();
+    let regev_pk_digests: Vec<Bytes32> = keys
+        .iter()
+        .map(|k| Bytes32::from(k.regev_pk.poseidon_digest()))
+        .collect();
     let mut genesis =
         assemble_genesis_state(&record, &cts, &regev_pk_digests, fund).expect("genesis");
     for (i, k) in keys.iter().enumerate() {
@@ -226,8 +229,12 @@ fn inter_channel_live_send_and_credit() {
 
     let a_fund_before = a.snapshot.state.channel_fund.amount;
     let b_fund_before = b.snapshot.state.channel_fund.amount;
-    let recipient_before =
-        decrypt_balance(&b.keys[recipient_slot as usize], &b.snapshot, recipient_slot).unwrap();
+    let recipient_before = decrypt_balance(
+        &b.keys[recipient_slot as usize],
+        &b.snapshot,
+        recipient_slot,
+    )
+    .unwrap();
 
     let (descriptor, a_send, credit) =
         run_positive(&a, &b, sender_slot, recipient_slot, AMT, &mut rng);
@@ -280,20 +287,23 @@ fn inter_channel_live_send_and_credit() {
     );
 
     // The SAME tx leaf is chained on both sides (sender chained it into A's settled_tx_chain; B
-    // recomputes it independently and chains it into the bundle-apply state). Proves the dual-channel
-    // chain binding (F3-A multi-layer defense).
+    // recomputes it independently and chains it into the bundle-apply state). Proves the
+    // dual-channel chain binding (F3-A multi-layer defense).
     let a_leaf = descriptor.inter_channel_tx.tx_leaf_hash().expect("tx leaf");
     use intmax3_zkp::common::balance_state::settled_tx_chain_push;
-    let b_bundle_chain_expected =
-        settled_tx_chain_push(credit.fund_import_state.balance_state.settled_tx_chain, a_leaf);
+    let b_bundle_chain_expected = settled_tx_chain_push(
+        credit.fund_import_state.balance_state.settled_tx_chain,
+        a_leaf,
+    );
     assert_eq!(
         credit.bundle_apply_state.balance_state.settled_tx_chain, b_bundle_chain_expected,
         "B bundle-apply chains the SAME tx leaf the sender chained"
     );
 
     // ---- NEGATIVE 1: tampered credit amount (y != x) → gate rejects (inv 2). ----
-    // Proves the gate does not trust the descriptor's scalar amount: it re-verifies the REAL E-2, so
-    // a different claimed public amount than the proof was minted for is rejected by the transcript.
+    // Proves the gate does not trust the descriptor's scalar amount: it re-verifies the REAL E-2,
+    // so a different claimed public amount than the proof was minted for is rejected by the
+    // transcript.
     {
         let mut bad = descriptor.clone();
         bad.amount = AMT + 1;
@@ -305,7 +315,10 @@ fn inter_channel_live_send_and_credit() {
             &a.record,
             LEVEL,
         );
-        assert!(err.is_err(), "tampered credit amount MUST be rejected (inv 2)");
+        assert!(
+            err.is_err(),
+            "tampered credit amount MUST be rejected (inv 2)"
+        );
     }
 
     // ---- NEGATIVE 2: wrong recipient_slot → gate rejects (inv 3). ----
@@ -322,7 +335,10 @@ fn inter_channel_live_send_and_credit() {
             &a.record,
             LEVEL,
         );
-        assert!(err.is_err(), "wrong recipient_slot MUST be rejected (inv 3)");
+        assert!(
+            err.is_err(),
+            "wrong recipient_slot MUST be rejected (inv 3)"
+        );
     }
 
     // ---- NEGATIVE 3: A state with a missing AND a forged signature → credit gate rejects (inv 1).
@@ -330,7 +346,9 @@ fn inter_channel_live_send_and_credit() {
     {
         // (a) missing signature: drop A member 2's signature.
         let mut a_send_missing = a_send.clone();
-        a_send_missing.member_signatures.retain(|s| s.member_slot != 2);
+        a_send_missing
+            .member_signatures
+            .retain(|s| s.member_slot != 2);
         let err = verify_inter_channel_credit_transition(
             &b.snapshot.state,
             &b.record,
@@ -344,7 +362,8 @@ fn inter_channel_live_send_and_credit() {
             "A state missing a co-signature MUST be rejected (inv 1)"
         );
 
-        // (b) forged signature: replace A member 2's proof with member 0's (wrong (pk_g, m) binding).
+        // (b) forged signature: replace A member 2's proof with member 0's (wrong (pk_g, m)
+        // binding).
         let mut a_send_forged = a_send.clone();
         let sig0 = a_send_forged
             .member_signatures
@@ -375,8 +394,8 @@ fn inter_channel_live_send_and_credit() {
     }
 
     // ---- NEGATIVE 4: replayed/zero tx_tree_root → gate rejects (inv 5). ----
-    // Proves the H2=0 reservation: an inter-channel send may not alias the in-channel signing target
-    // (tx_tree_root == 0), and the H1'/tx_tree_root binding is enforced.
+    // Proves the H2=0 reservation: an inter-channel send may not alias the in-channel signing
+    // target (tx_tree_root == 0), and the H1'/tx_tree_root binding is enforced.
     {
         let mut bad = descriptor.clone();
         bad.tx_tree_root = Bytes32::default();
@@ -431,9 +450,9 @@ fn inter_channel_live_send_and_credit() {
         assert!(err.is_err(), "wrong TxV2 leaf MUST be rejected (inv 7)");
     }
 
-    // ---- NEGATIVE 7: the send leg itself rejects a bogus debit payload (sanity on the A gate). ----
-    // Proves the A-side send transition is not vacuous: a debit that does not decrease channel_fund
-    // by amount fails `InterChannelSendUpdateWitness`.
+    // ---- NEGATIVE 7: the send leg itself rejects a bogus debit payload (sanity on the A gate).
+    // ---- Proves the A-side send transition is not vacuous: a debit that does not decrease
+    // channel_fund by amount fails `InterChannelSendUpdateWitness`.
     {
         let _: &InterChannelDebitPayload; // type anchor for clarity
         let dest_id = ChannelId::new(B_ID as u64).unwrap();
@@ -481,8 +500,8 @@ fn inter_channel_live_send_and_credit() {
 #[test]
 fn inter_channel_live_negative_error_provenance() {
     // SECURITY: a negative test that rejects for the WRONG reason proves nothing. This test asserts
-    // each tampered input is rejected by the SPECIFIC invariant it targets (by error substring), so a
-    // future refactor cannot silently turn a real gate into a vacuous one.
+    // each tampered input is rejected by the SPECIFIC invariant it targets (by error substring), so
+    // a future refactor cannot silently turn a real gate into a vacuous one.
     let mut rng = StdRng::seed_from_u64(0xBEEF_77);
     let a = build_channel(A_ID, 3, &[50, 10, 30], &mut rng);
     let b = build_channel(B_ID, 3, &[20, 40, 60], &mut rng);

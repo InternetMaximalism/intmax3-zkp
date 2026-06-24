@@ -96,7 +96,9 @@ pub struct ChannelRegRecord {
 pub enum ChannelRegRecordError {
     #[error("member_count {0} out of range (must be 2..={MAX_CHANNEL_MEMBERS})")]
     MemberCountOutOfRange(u32),
-    #[error("member_count {0} + delegate_count {1} exceeds MAX_CHANNEL_MEMBERS ({MAX_CHANNEL_MEMBERS})")]
+    #[error(
+        "member_count {0} + delegate_count {1} exceeds MAX_CHANNEL_MEMBERS ({MAX_CHANNEL_MEMBERS})"
+    )]
     DelegateCountOutOfRange(u32, u32),
     #[error("active member {0} has a zero pk_g")]
     ZeroActivePkG(usize),
@@ -122,7 +124,8 @@ impl ChannelRegRecord {
         let mc = self.member_count as usize;
         // Delegate account regions: members `0..mc`, delegates `mc..mc+dc`, padding `mc+dc..MAX`.
         // Active = members + delegates; both must be nonzero + pairwise distinct (no shared-key
-        // forgery across the WHOLE active set). `member_count + delegate_count` must not exceed MAX.
+        // forgery across the WHOLE active set). `member_count + delegate_count` must not exceed
+        // MAX.
         let active = mc
             .checked_add(self.delegate_count as usize)
             .filter(|&a| a <= MAX_CHANNEL_MEMBERS)
@@ -160,14 +163,15 @@ impl ChannelRegRecord {
     /// `[ prev(8), channel_id(1), bp_member_slot(1), member_count(1), delegate_count(1),
     ///    for i in 0..16: ( pk_g(8), pk_b(8), regev_pk_digest(8), recipient(5) ) ]`
     /// Total = 8 + 1 + 1 + 1 + 1 + 16*(8+8+8+5) = 12 + 464 = 476 u32. `delegate_count` (delegate
-    /// account) is a single u32 limb IMMEDIATELY AFTER `member_count`. Padding slots hash their zero
-    /// values. `solidity_keccak256` treats each u32 as one big-endian 4-byte word, so this stream
-    /// is byte-identical to the Solidity `abi.encodePacked` preimage in
+    /// account) is a single u32 limb IMMEDIATELY AFTER `member_count`. Padding slots hash their
+    /// zero values. `solidity_keccak256` treats each u32 as one big-endian 4-byte word, so this
+    /// stream is byte-identical to the Solidity `abi.encodePacked` preimage in
     /// `IntmaxRollup.registerChannel` (verified by the differential test).
     ///
     /// SECURITY (P3): `pk_b` enters this preimage between `pk_g` and `regev_pk_digest` so the
-    /// in-circuit 3-field `MemberLeaf` (whose `pk_b` is split from the SAME witnessed Poseidon value)
-    /// is bound to the L1 keccak chain — `pk_b` is NOT a free witness at the validity layer.
+    /// in-circuit 3-field `MemberLeaf` (whose `pk_b` is split from the SAME witnessed Poseidon
+    /// value) is bound to the L1 keccak chain — `pk_b` is NOT a free witness at the validity
+    /// layer.
     pub fn hash_with_prev_hash(&self, prev_hash: Bytes32) -> Bytes32 {
         let mut inputs: Vec<u32> = Vec::with_capacity(CHANNEL_REG_PREIMAGE_U32_LEN);
         inputs.extend(prev_hash.to_u32_vec()); // 8
@@ -257,10 +261,8 @@ impl MemberRegEntryTarget {
         witness: &mut W,
         value: &MemberRegEntry,
     ) {
-        self.pk_g
-            .set_witness(witness, value.pk_g);
-        self.pk_b
-            .set_witness(witness, value.pk_b);
+        self.pk_g.set_witness(witness, value.pk_g);
+        self.pk_b.set_witness(witness, value.pk_b);
         self.regev_pk_digest
             .set_witness(witness, value.regev_pk_digest);
         self.recipient.set_witness(witness, value.recipient);

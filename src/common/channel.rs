@@ -40,6 +40,7 @@ const CHANNEL_RECORD_DOMAIN: u32 = 0x494d4352; // "IMCR"
 // member_pk_gs])` so the 3 verified signing keys are bound to the channel's
 // registered member set (no non-member-key substitution). See `close_member_set_commitment`.
 const CLOSE_MEMBER_SET_DOMAIN: u32 = 0x494d434d; // "IMCM"
+pub const L1_DEPOSIT_IMPORT_DOMAIN: u32 = 0x494d4c44; // "IMLD"
 pub const MAX_CLOSE_TRANSFERS: usize = 16;
 pub const SPECIAL_CLOSE_MEDIUM_BLOCK_WINDOW: u64 = 5;
 // NOTE: `SMALL_BLOCK_SIGNATURE_TIMEOUT_SECS` is superseded by `constants::SIGN_TIMEOUT_SECS`
@@ -104,6 +105,7 @@ pub enum ChannelTransitionKind {
     BalanceRefresh,
     ChannelClose,
     SpecialClose,
+    L1DepositImport,
 }
 
 impl ChannelTransitionKind {
@@ -113,7 +115,10 @@ impl ChannelTransitionKind {
             | Self::InterChannelSend
             | Self::ReceiverBundleApply
             | Self::BalanceRefresh => Some(ProofBackend::Plonky3),
-            Self::InterChannelFundImport | Self::ChannelClose | Self::SpecialClose => None,
+            Self::InterChannelFundImport
+            | Self::ChannelClose
+            | Self::SpecialClose
+            | Self::L1DepositImport => None,
         }
     }
 
@@ -123,7 +128,10 @@ impl ChannelTransitionKind {
             | Self::InterChannelFundImport
             | Self::ChannelClose
             | Self::SpecialClose => Some(ProofBackend::Plonky2),
-            Self::InChannelTransfer | Self::ReceiverBundleApply | Self::BalanceRefresh => None,
+            Self::InChannelTransfer
+            | Self::ReceiverBundleApply
+            | Self::BalanceRefresh
+            | Self::L1DepositImport => None,
         }
     }
 }
@@ -212,6 +220,15 @@ impl ChannelRecord {
         if self.regev_pk_root == Bytes32::default() {
             return Err(ChannelError::InvalidChannelRecord(
                 "regev_pk_root must be set (zero root would unanchor the member Regev keys)"
+                    .to_string(),
+            ));
+        }
+        // SECURITY (abstract2-1 §2.6): BURN_CHANNEL_ID is the reserved partial-withdrawal L1-exit
+        // destination — no real channel may occupy it (mirrors the on-chain `registerChannel`
+        // guard).
+        if self.channel_id.channel_id() == crate::constants::BURN_CHANNEL_ID {
+            return Err(ChannelError::InvalidChannelRecord(
+                "channel_id equals reserved BURN_CHANNEL_ID (partial-withdrawal burn destination)"
                     .to_string(),
             ));
         }
@@ -1157,6 +1174,24 @@ pub fn close_member_set_commitment(
         }
     }
     hash_words(&words)
+}
+
+pub fn l1_deposit_import_digest(
+    channel_id: ChannelId,
+    deposit_nullifier: Bytes32,
+    amount: u64,
+    depositor_slot: u8,
+) -> Bytes32 {
+    hash_words(
+        &[
+            vec![L1_DEPOSIT_IMPORT_DOMAIN],
+            channel_id.to_u32_vec(),
+            deposit_nullifier.to_u32_vec(),
+            vec![amount as u32, (amount >> 32) as u32],
+            vec![depositor_slot as u32],
+        ]
+        .concat(),
+    )
 }
 
 #[cfg(test)]

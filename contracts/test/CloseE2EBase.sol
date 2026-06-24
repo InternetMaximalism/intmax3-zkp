@@ -74,7 +74,10 @@ abstract contract CloseE2EBase is Test {
             type(IntmaxRollup).creationCode,
             abi.encode(
                 FRAUD_TREASURY, vk, dd.whirParams, dd.protocolId, dd.sessionId,
-                dd.kIs, dd.subgroupGenPowers, MleVerifier(mleVerifierAddr), genesis
+                dd.kIs, dd.subgroupGenPowers, MleVerifier(mleVerifierAddr), genesis,
+                // SECURITY (A-2): production-faithful — the close lifecycle uses a REAL validity VK
+                // (degreeBits=13), so MLE verification stays ENABLED (allowMleDisabled=false).
+                false
             )
         );
     }

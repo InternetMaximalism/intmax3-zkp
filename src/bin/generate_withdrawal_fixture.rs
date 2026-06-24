@@ -1,190 +1,34 @@
 //! Generate on-chain test fixtures for a REAL native-ETH withdrawal payout.
 //!
-//! This binary mirrors the proof construction of the passing
-//! `tests/e2e.rs::e2e_deposit_validity_withdrawal()` test, but DROPS the
-//! internal transfer + receive-transfer (user2) steps: a single user
-//! (`channel_id = 1`) registers, deposits, and withdraws DIRECTLY to an L1
-//! address.
-//!
-//! Chain built (3 blocks, single user):
-//!   1. Registration block  -> block 1
-//!   2. Deposit block        -> block 2
-//!   3. Withdrawal tx block  -> block 3
-//!
-//! Two proofs are produced and each is wrapped (WrapperCircuit) + committed via
-//! MLE (mirroring `src/bin/generate_e2e_fixture.rs`):
-//!   - the withdrawal proof   -> contracts/test/data/withdrawal_mle.json
-//!   - the validity proof     -> contracts/test/data/lifecycle_validity_mle.json
-//!
-//! Plus two descriptor JSONs the Solidity test author consumes:
-//!   - contracts/test/data/lifecycle.json        (registration/deposit/blocks/vpis)
-//!   - contracts/test/data/withdrawal_payout.json (the committed Withdrawal + prover)
+//! This binary is now a thin wrapper around `intmax3_zkp::wallet_core::build_channel_withdrawal`
+//! (the single source of truth, shared with the `channel_member withdraw` CLI). It builds the
+//! self-contained 3-block chain — registration → deposit → withdrawal-tx — and writes the 4
+//! artifacts the Solidity tests / the live pipeline consume:
+//!   - contracts/test/data/{prefix}withdrawal_mle.json          (withdrawal proof + VK)
+//!   - contracts/test/data/{prefix}lifecycle_validity_mle.json  (validity proof + VK, for finalize)
+//!   - contracts/test/data/{prefix}lifecycle.json               (registration/deposit/blocks/vpis)
+//!   - contracts/test/data/{prefix}withdrawal_payout.json       (committed Withdrawal + prover)
 //!
 //! Usage:  cargo run --bin generate_withdrawal_fixture --release
 //!
-//! SECURITY: every exported value is pulled programmatically from the proved
-//! objects (Block, ValidityPublicInputs, the single-withdrawal proof's public
-//! inputs, the withdrawal-chain proof's committed hash). Nothing is hardcoded;
-//! the on-chain block-hash recomputation, channel_reg keccak chain, and
-//! withdrawal keccak chain are what actually validate these. A Rust-side sanity
-//! re-fold of the withdrawal keccak chain proves the on-chain fold will match
-//! BEFORE the human spends time on-chain.
+//! Env overrides (all optional):
+//!   - WD_DEPOSITOR=0x<20 bytes>  — pin the depositor (the on-chain `deposit()` msg.sender).
+//!     Default = deterministic RNG address (local-test path uses `vm.prank`).
+//!   - WD_RECIPIENT=0x<20 bytes>  — pin the withdrawal recipient (e.g. the close manager). Default
+//!     = deterministic RNG address.
+//!   - WD_OUT_PREFIX=close_       — filename prefix so a variant set does not overwrite the
+//!     default.
+//!
+//! SECURITY: every exported value is pulled programmatically from the proved objects; the on-chain
+//! block-hash recomputation, channel_reg keccak chain, and withdrawal keccak chain validate them.
+//! `build_channel_withdrawal` performs a Rust-side re-fold sanity check before returning.
 
 use std::{fs, path::Path};
 
 use intmax3_zkp::{
-    circuits::{
-        balance::{
-            balance_processor::BalanceProcessor,
-            common::recipient::{
-                calculate_recipient_from_address, calculate_recipient_from_user_id,
-            },
-            spend_circuit::SpendCircuit,
-        },
-        test_utils::{
-            balance_witness_generator::{
-                BalanceWitnessGenerator, ReceiveDepositData, SendTxData, SingleWithdrawalData,
-            },
-            block_witness_generator::{
-                BlockTxV2Witness, BlockWitnessGenerator, BlockWitnessGeneratorHandle,
-                TEST_ACTIVE_MEMBERS,
-            },
-        },
-        validity::block_hash_chain::{
-            block_chain_pis::BlockChainPublicInputs,
-            block_hash_chain_processor::BlockHashChainProcessor,
-            validity_circuit::{ValidityCircuit, ValidityPublicInputs},
-        },
-        withdraw::{
-            single_withdrawal_circuit::{
-                SINGLE_WITHDRAWAL_PUBLIC_INPUTS_LEN, SingleWithdawalCircuit,
-                SingleWithdawalPublicInputs,
-            },
-            withdrawal_processor::WithdrawalProcessor,
-            withdrawal_step::WithdrawalStepWitness,
-        },
-    },
-    common::{
-        channel_id::ChannelId as UserId,
-        salt::Salt,
-        transfer::Transfer,
-        trees::{transfer_tree::TransferTree, tx_tree::TxTree, tx_v2_tree::TxV2Tree},
-        tx::{Tx, TxClass, TxV2},
-        u63::BlockNumber,
-        withdrawal::Withdrawal,
-    },
-    ethereum_types::{address::Address, bytes32::Bytes32, u256::U256, u32limb_trait::U32LimbTrait},
-    utils::{
-        conversion::ToU64,
-        mle_prover::{export_mle_json, prove_with_mle, setup_mle_vk, verify_mle_proof},
-        poseidon_hash_out::PoseidonHashOut,
-        wrapper::WrapperCircuit,
-    },
+    ethereum_types::{address::Address, u32limb_trait::U32LimbTrait},
+    wallet_core::{ChannelWithdrawalParams, build_channel_withdrawal},
 };
-use plonky2::{
-    field::goldilocks_field::GoldilocksField,
-    iop::witness::{PartialWitness, WitnessWrite},
-    plonk::config::PoseidonGoldilocksConfig,
-};
-use rand::{SeedableRng, rngs::StdRng};
-use serde::Serialize;
-
-const D: usize = 2;
-type F = GoldilocksField;
-type C = PoseidonGoldilocksConfig;
-
-// ---------------------------------------------------------------------------
-// Output JSON schemas
-// ---------------------------------------------------------------------------
-
-#[derive(Serialize)]
-struct MemberFixture {
-    channel_id: u32,
-    bp_member_slot: u8,
-    member_pk_gs: Vec<String>,
-    /// P3/P4: each active member's BabyBear hash-sig public key `pk_b` (L1/keccak digest form),
-    /// in slot order. Consumed by `registerChannel`'s `pkBs` argument and the forge E2E callers
-    /// (`.member_pk_bs`).
-    member_pk_bs: Vec<String>,
-    regev_pk_digests: Vec<String>,
-    recipients: Vec<String>,
-}
-
-#[derive(Serialize)]
-struct DepositFixture {
-    /// SECURITY: the on-chain `deposit()` folds `msg.sender` as the depositor into the deposit hash
-    /// (IntmaxRollup `_computeDepositHash`). The Rust `Deposit` uses this exact address, so the
-    /// Solidity test MUST `vm.prank(depositor)` when calling `deposit()` or the deposit hash (and
-    /// hence block 2's hash) will not match the proved chain.
-    depositor: String,
-    recipient: String,
-    token_index: u32,
-    amount: String,
-    aux_data: String,
-}
-
-#[derive(Serialize)]
-struct BlockFixture {
-    channel_id: u32,
-    timestamp: u64,
-    tx_tree_root: String,
-    key_ids: Vec<u32>,
-    block_number: u64,
-}
-
-#[derive(Serialize)]
-struct VPIFixture {
-    initial_block_number: u64,
-    initial_block_chain: String,
-    initial_ext_commitment: String,
-    final_block_number: u64,
-    final_block_chain: String,
-    final_ext_commitment: String,
-    prover: String,
-}
-
-#[derive(Serialize)]
-struct LifecycleFixture {
-    genesis_state_root: String,
-    final_state_root: String,
-    registration: MemberFixture,
-    deposit: DepositFixture,
-    blocks: Vec<BlockFixture>,
-    vpis: VPIFixture,
-    proof_hash: String,
-    proof_length: u32,
-}
-
-#[derive(Serialize)]
-struct WithdrawalEntryFixture {
-    recipient: String,
-    token_index: u32,
-    amount: String,
-    nullifier: String,
-    aux_data: String,
-}
-
-#[derive(Serialize)]
-struct WithdrawalPayoutFixture {
-    withdrawals: Vec<WithdrawalEntryFixture>,
-    withdrawal_prover: String,
-    block_number: u64,
-    ext_commitment: String,
-}
-
-/// Deterministic, dependency-free FNV-1a digest over a byte slice, placed in
-/// the low 64 bits of a bytes32. Matches `generate_e2e_fixture.rs`. The value
-/// is UNCONSTRAINED on-chain (finalize/fullVerify never re-derive the
-/// submission commitment), so any deterministic value is sound; used only for
-/// reproducibility.
-fn fnv1a_bytes32(bytes: &[u8]) -> String {
-    let mut h: u64 = 0xcbf29ce484222325;
-    for b in bytes {
-        h ^= *b as u64;
-        h = h.wrapping_mul(0x100000001b3);
-    }
-    format!("0x{:064x}", h as u128)
-}
 
 /// Parse a 20-byte hex address ("0x..." or bare) into an `Address` (5 big-endian u32 limbs).
 fn parse_address_hex(hex: &str) -> Address {
@@ -207,512 +51,58 @@ fn parse_address_hex(hex: &str) -> Address {
 }
 
 fn main() -> anyhow::Result<()> {
-    let supported_user_counts = vec![2u32];
-
-    // -----------------------------------------------------------------------
-    // Circuit setup (mirrors e2e.rs lines 51-67)
-    // -----------------------------------------------------------------------
-    eprintln!("[wd] Step 0: circuit setup");
-    let block_hash_chain_processor =
-        BlockHashChainProcessor::<F, C, D>::new(&supported_user_counts);
-    let block_chain_vd = block_hash_chain_processor.block_chain_vd();
-
-    let spend_circuit = SpendCircuit::<F, C, D>::new();
-    let balance_processor = BalanceProcessor::<F, C, D>::new(&spend_circuit.data.verifier_data());
-    let balance_vd = balance_processor.balance_vd();
-
-    let block_witness_generator =
-        BlockWitnessGeneratorHandle::new(BlockWitnessGenerator::new(&supported_user_counts));
-
-    // FIXED rng seed for deterministic / reproducible output.
-    let mut rng = StdRng::seed_from_u64(1);
-    let user_id = UserId::new(1).expect("user id");
-    let salt = Salt::rand(&mut rng);
-
-    let mut balance_witness_generator = BalanceWitnessGenerator::new(
-        user_id,
-        salt,
-        block_witness_generator.clone(),
-        &balance_processor,
-    )
-    .expect("balance witness generator");
-
-    let initial_ext_state = block_witness_generator
-        .borrow()
-        .current_extended_public_state();
-
-    // -----------------------------------------------------------------------
-    // Phase 1: Channel registration (mirrors e2e.rs lines 85-98) -> block 1
-    // -----------------------------------------------------------------------
-    eprintln!("[wd] Step 1: channel registration (block 1)");
-    let member_keys = {
-        let mut generator = block_witness_generator.borrow_mut();
-        let keys = generator.add_channel_registration(user_id.channel_id());
-        generator
-            .add_registration_block(0)
-            .expect("apply channel registration block");
-        keys
+    eprintln!("[wd] building channel withdrawal artifacts (HEAVY proving)…");
+    let params = ChannelWithdrawalParams {
+        channel_id: 1,
+        deposit_amount: 10,
+        withdrawal_amount: 3,
+        depositor: std::env::var("WD_DEPOSITOR")
+            .ok()
+            .map(|h| parse_address_hex(&h)),
+        withdrawal_recipient: std::env::var("WD_RECIPIENT")
+            .ok()
+            .map(|h| parse_address_hex(&h)),
+        deposit_salt: None,
     };
-
-    // Replicate `ChannelMemberKeys::to_reg_record(channel_id)` inline (it is a
-    // private method). The exported sphincs/regev/recipient arrays MUST be the
-    // SAME values the registration record used so the on-chain registerChannel
-    // reproduces the same channel_reg_hash_chain.
-    //
-    // SECURITY: each active slot's pk_g / regev_pk_digest is the
-    // canonical Bytes32::from(PoseidonHashOut) of the SAME Poseidon identity
-    // stored in `member_tree` (the root committed into the channel leaf). The
-    // recipient is the deterministic per-(channel, slot) test L1 address used by
-    // `to_reg_record` (keccak preimage only). bp_member_slot = 0 by convention.
-    let channel_id_u32 = user_id.channel_id();
-    let member_count = TEST_ACTIVE_MEMBERS;
-    let bp_member_slot: u8 = 0;
-    let mut member_pk_gs = Vec::with_capacity(member_count);
-    let mut member_pk_bs = Vec::with_capacity(member_count);
-    let mut regev_pk_digests = Vec::with_capacity(member_count);
-    let mut recipients = Vec::with_capacity(member_count);
-    for i in 0..member_count {
-        let leaf = member_keys.member_tree.get_leaf(i as u64);
-        let pk_g = Bytes32::from(leaf.pk_g);
-        let pk_b = Bytes32::from(leaf.pk_b);
-        let regev_digest = Bytes32::from(leaf.regev_pk_digest);
-        // Deterministic per-(channel, slot) recipient — identical formula to
-        // `ChannelMemberKeys::to_reg_record`.
-        let recipient = Address::from_u32_slice(
-            &[0x3333_0000u32
-                .wrapping_add(channel_id_u32.wrapping_mul(16))
-                .wrapping_add(i as u32); 5],
-        )
-        .expect("address from u32 slice");
-        member_pk_gs.push(pk_g.to_string());
-        member_pk_bs.push(pk_b.to_string());
-        regev_pk_digests.push(regev_digest.to_string());
-        recipients.push(recipient.to_string());
+    if let Some(d) = params.depositor {
+        eprintln!("[wd] depositor = {}", d.to_string());
+    }
+    if let Some(r) = params.withdrawal_recipient {
+        eprintln!("[wd] withdrawal recipient (L1) = {}", r.to_string());
     }
 
-    // -----------------------------------------------------------------------
-    // Phase 2: Deposit (mirrors e2e.rs lines 100-133) -> block 2
-    // -----------------------------------------------------------------------
-    eprintln!("[wd] Step 2: deposit (block 2)");
-    let deposit_salt = Salt::rand(&mut rng);
-    let deposit_recipient = calculate_recipient_from_user_id(user_id, deposit_salt);
-    // The depositor is folded into the on-chain deposit hash (= block 2's hash). On a real chain the
-    // deposit tx's msg.sender IS the depositor, so for the Sepolia run set WD_DEPOSITOR to the EOA
-    // that will send `deposit()`; otherwise a deterministic random address (local-test path uses
-    // vm.prank to match).
-    let depositor = match std::env::var("WD_DEPOSITOR") {
-        Ok(hex) => parse_address_hex(&hex),
-        Err(_) => Address::rand(&mut rng),
-    };
-    eprintln!("[wd] depositor = {}", depositor.to_string());
-    {
-        let mut generator = block_witness_generator.borrow_mut();
-        generator
-            .add_deposit(
-                depositor,
-                deposit_recipient,
-                0,
-                U256::from(10u32),
-                Bytes32::default(),
-            )
-            .expect("queue deposit");
-        generator
-            .add_block(0, &[], 0, Bytes32::default())
-            .expect("apply deposit block");
-    }
+    let artifacts = build_channel_withdrawal(&params, None)?;
 
-    let deposit_data = ReceiveDepositData {
-        receiver: deposit_recipient,
-        deposit_salt,
-    };
-    let deposit_witness = balance_witness_generator
-        .receive_deposit_witness(&deposit_data)
-        .expect("receive deposit witness");
-    let deposit_balance_proof = balance_processor
-        .prove_receive_deposit(&deposit_witness)
-        .expect("deposit proof");
-    balance_witness_generator
-        .commit_receive_deposit(&deposit_balance_proof, &deposit_witness)
-        .expect("commit deposit");
-
-    // -----------------------------------------------------------------------
-    // Phase 3: Withdrawal transaction (mirrors e2e.rs lines 283-451) -> block 3
-    // NOTE: the internal transfer + receive (user2) steps are intentionally
-    // DROPPED. The user withdraws directly.
-    // -----------------------------------------------------------------------
-    eprintln!("[wd] Step 3: withdrawal tx (block 3)");
-    // The withdrawal recipient (an L1 address). For the CLOSE lifecycle e2e it must equal the
-    // `ChannelSettlementManager`'s CREATE2 address so the channel's aggregate withdrawal is paid to
-    // the manager; pass it via `WD_RECIPIENT=0x...20bytes`. Otherwise (the plain P2 fixture) a
-    // deterministic random L1 address is used.
-    let withdrawal_address = match std::env::var("WD_RECIPIENT") {
-        Ok(hex) => parse_address_hex(&hex),
-        Err(_) => Address::rand(&mut rng),
-    };
-    eprintln!("[wd] withdrawal recipient (L1) = {}", withdrawal_address.to_string());
-    let withdrawal_transfer = Transfer {
-        recipient: calculate_recipient_from_address(withdrawal_address),
-        token_index: 0,
-        amount: U256::from(3u32),
-        aux_data: Bytes32::default(),
-    };
-    let withdrawal_spend_witness = balance_witness_generator
-        .spend_witness(&[withdrawal_transfer.clone()])
-        .expect("withdrawal spend witness");
-    let withdrawal_spend_proof = spend_circuit
-        .prove(&withdrawal_spend_witness)
-        .expect("withdrawal spend proof");
-
-    let mut withdrawal_transfer_tree = TransferTree::init();
-    withdrawal_transfer_tree.push(withdrawal_transfer.clone());
-    let withdrawal_transfer_index = 0u32;
-    let withdrawal_transfer_merkle_proof =
-        withdrawal_transfer_tree.prove(withdrawal_transfer_index as u64);
-    let withdrawal_transfer_tree_root = withdrawal_transfer_tree.get_root();
-
-    let withdrawal_tx = Tx {
-        transfer_tree_root: withdrawal_transfer_tree_root,
-        nonce: balance_witness_generator.full_private_state.nonce,
-    };
-
-    // Legacy Tx tree retained only for the legacy Tx merkle proof; the block's
-    // authoritative root is the TxV2Tree root below.
-    let mut withdrawal_tx_tree = TxTree::init();
-    withdrawal_tx_tree.update(user_id.as_u64(), withdrawal_tx.clone());
-    let withdrawal_tx_merkle_proof = withdrawal_tx_tree.prove(user_id.as_u64());
-
-    let withdrawal_tx_v2 = TxV2 {
-        tx_class: TxClass::UserTransfer,
-        transfer_tree_root: withdrawal_transfer_tree_root,
-        nonce: withdrawal_tx.nonce,
-        channel_action_root: PoseidonHashOut::default(),
-    };
-    let mut withdrawal_tx_v2_tree = TxV2Tree::init();
-    withdrawal_tx_v2_tree.update(user_id.as_u64(), withdrawal_tx_v2);
-    let withdrawal_tx_tree_root_bytes: Bytes32 = withdrawal_tx_v2_tree.get_root().into();
-    let withdrawal_tx_v2_merkle_proof = withdrawal_tx_v2_tree.prove(user_id.as_u64());
-
-    let withdrawal_tx_v2_witness = BlockTxV2Witness {
-        tx_v2_indices: vec![user_id.as_u64(), 0],
-        tx_v2s: vec![withdrawal_tx_v2, TxV2::default()],
-        tx_v2_merkle_proofs: vec![
-            withdrawal_tx_v2_merkle_proof.clone(),
-            withdrawal_tx_v2_merkle_proof.clone(),
-        ],
-    };
-
-    {
-        let mut generator = block_witness_generator.borrow_mut();
-        generator
-            .add_block_with_tx_v2(
-                user_id.channel_id(),
-                &[1],
-                2,
-                withdrawal_tx_tree_root_bytes,
-                Some(withdrawal_tx_v2_witness),
-            )
-            .expect("apply withdrawal tx block");
-    }
-
-    let withdrawal_send_tx_data = SendTxData {
-        spend_proof: withdrawal_spend_proof.clone(),
-        tx_tree_root: withdrawal_tx_tree_root_bytes,
-        tx: withdrawal_tx.clone(),
-        tx_merkle_proof: withdrawal_tx_merkle_proof.clone(),
-        tx_v2: Some(withdrawal_tx_v2),
-        tx_v2_merkle_proof: Some(withdrawal_tx_v2_merkle_proof.clone()),
-        transfer: withdrawal_transfer.clone(),
-        transfer_merkle_proof: withdrawal_transfer_merkle_proof.clone(),
-    };
-    let withdrawal_send_tx_witness = balance_witness_generator
-        .send_tx_witness(&withdrawal_send_tx_data)
-        .expect("withdrawal send tx witness");
-    let withdrawal_balance_proof = balance_processor
-        .prove_send_tx(&withdrawal_send_tx_witness)
-        .expect("withdrawal send tx proof");
-    balance_witness_generator
-        .commit_send_tx(
-            &withdrawal_balance_proof,
-            &withdrawal_send_tx_witness,
-            &withdrawal_spend_witness,
-        )
-        .expect("commit send tx");
-
-    // ----- Single withdrawal proof -----
-    let single_withdrawal_data = SingleWithdrawalData {
-        tx_tree_root: withdrawal_tx_tree_root_bytes,
-        tx: withdrawal_tx.clone(),
-        tx_merkle_proof: withdrawal_tx_merkle_proof.clone(),
-        transfer: withdrawal_transfer.clone(),
-        transfer_index: withdrawal_transfer_index,
-        transfer_merkle_proof: withdrawal_transfer_merkle_proof.clone(),
-        tx_v2: Some(withdrawal_tx_v2),
-        tx_v2_merkle_proof: Some(withdrawal_tx_v2_merkle_proof.clone()),
-    };
-    let single_withdrawal_witness = balance_witness_generator
-        .single_withdrawal_witness(&single_withdrawal_data)
-        .expect("single withdrawal witness");
-    let single_withdrawal_circuit = SingleWithdawalCircuit::<F, C, D>::new(&balance_vd);
-    let single_withdrawal_vd = single_withdrawal_circuit.data.verifier_data();
-    let single_withdrawal_proof = single_withdrawal_circuit
-        .prove(&single_withdrawal_witness)
-        .expect("single withdrawal proof");
-    single_withdrawal_circuit
-        .data
-        .verify(single_withdrawal_proof.clone())
-        .expect("verify single withdrawal proof");
-
-    // ----- Withdrawal chain + final proofs -----
-    let withdrawal_processor = WithdrawalProcessor::<F, C, D>::new(&single_withdrawal_vd);
-    let withdrawal_chain_vd = withdrawal_processor.withdrawal_chain_vd();
-    let step_witness = WithdrawalStepWitness::<F, C, D> {
-        prev_withdrawal_chain_proof: None,
-        single_withdrawal_proof: single_withdrawal_proof.clone(),
-        update_public_state: single_withdrawal_witness.update_public_state.clone(),
-    };
-    let withdrawal_chain_proof = withdrawal_processor
-        .prove_step(&step_witness)
-        .expect("withdrawal chain proof");
-    withdrawal_chain_vd
-        .verify(withdrawal_chain_proof.clone())
-        .expect("verify withdrawal chain proof");
-
-    let ext_public_state = block_witness_generator
-        .borrow()
-        .current_extended_public_state();
-    // FIXED seed so the withdrawal prover address is deterministic.
-    let mut prover_rng = StdRng::seed_from_u64(777);
-    let withdrawal_prover = Address::rand(&mut prover_rng);
-    let withdrawal_proof = withdrawal_processor
-        .prove_final(&withdrawal_chain_proof, withdrawal_prover, &ext_public_state)
-        .expect("withdrawal proof");
-    withdrawal_processor
-        .withdrawal_vd()
-        .verify(withdrawal_proof.clone())
-        .expect("verify withdrawal proof");
-
-    // -----------------------------------------------------------------------
-    // Phase 4: Block hash chain + validity proof (mirrors e2e.rs lines 453-495)
-    // -----------------------------------------------------------------------
-    eprintln!("[wd] Step 4: block hash chain + validity proof");
-    let mut prev_block_proof = None;
-    let mut last_block_proof = None;
-    {
-        let guard = block_witness_generator.borrow();
-        let total_blocks = guard.block_number.as_u64();
-        for block_idx in 1..=total_blocks {
-            let block_number = BlockNumber::new(block_idx).expect("block number");
-            let witness = guard
-                .block_chain_witness
-                .get(&block_number)
-                .cloned()
-                .expect("block witness");
-            let initial_state = if prev_block_proof.is_none() {
-                Some(initial_ext_state.clone())
-            } else {
-                None
-            };
-            let proof = block_hash_chain_processor
-                .prove_block(initial_state, prev_block_proof.clone(), &witness)
-                .expect("block hash chain proof");
-            prev_block_proof = Some(proof.clone());
-            last_block_proof = Some(proof);
-        }
-    }
-
-    let final_block_chain_proof = last_block_proof.expect("final block hash chain proof");
-    // P2b: build + verify the bp IMSB-signature ListCircuit proof (decision D3).
-    let single_sig = intmax3_zkp::poseidon_sig::circuit::SingleSigCircuit::new();
-    let list_circuit =
-        intmax3_zkp::poseidon_sig::list::ListCircuit::new(&single_sig.verifier_data());
-    let list_proof = block_witness_generator
-        .borrow()
-        .build_bp_sig_list_proof(&single_sig, &list_circuit)
-        .expect("build bp sig list proof");
-    let validity_circuit =
-        ValidityCircuit::<F, C, D>::new(&block_chain_vd, &list_circuit.verifier_data());
-    // FIXED validity prover address.
-    let validity_prover = Address::default();
-    let validity_proof = validity_circuit
-        .prove(&final_block_chain_proof, list_proof.as_ref(), validity_prover)
-        .expect("validity proof");
-    validity_circuit
-        .verify(&validity_proof)
-        .expect("verify validity proof");
-
-    // Extract ValidityPublicInputs from the FINAL block-hash-chain proof, exactly
-    // like generate_e2e_fixture.rs.
-    let block_chain_inputs = BlockChainPublicInputs::<F, C, D>::from_u64_slice(
-        &final_block_chain_proof.public_inputs.to_u64_vec(),
-        &block_chain_vd.common.config,
-    )?;
-    let vpis = ValidityPublicInputs::from_states(
-        &block_chain_inputs.initial_ext_public_state,
-        &block_chain_inputs.ext_public_state,
-        validity_prover,
-    );
-
-    // -----------------------------------------------------------------------
-    // Wrap + MLE for BOTH the withdrawal proof and the validity proof
-    // (mirrors generate_e2e_fixture.rs steps 2-3).
-    // -----------------------------------------------------------------------
-    eprintln!("[wd] Step 5: wrap + MLE (withdrawal proof)");
-    let withdrawal_wrapper =
-        WrapperCircuit::<F, C, C, D>::new(&withdrawal_processor.withdrawal_vd());
-    let withdrawal_wrapped = withdrawal_wrapper.prove(&withdrawal_proof)?;
-    withdrawal_wrapper.data.verify(withdrawal_wrapped.clone())?;
-    let withdrawal_vk = setup_mle_vk::<F, C, D>(&withdrawal_wrapper.data);
-    let mut wd_pw = PartialWitness::new();
-    wd_pw.set_proof_with_pis_target(&withdrawal_wrapper.wrap_proof, &withdrawal_proof);
-    let withdrawal_mle = prove_with_mle::<F, C, D>(&withdrawal_wrapper.data, wd_pw)?;
-    verify_mle_proof(&withdrawal_wrapper.data, &withdrawal_vk, &withdrawal_mle.proof)?;
-    let withdrawal_mle_json =
-        export_mle_json(&withdrawal_mle.proof, &withdrawal_wrapper.data.common);
-
-    eprintln!("[wd] Step 6: wrap + MLE (validity proof)");
-    let validity_wrapper = WrapperCircuit::<F, C, C, D>::new(&validity_circuit.data.verifier_data());
-    let validity_wrapped = validity_wrapper.prove(&validity_proof)?;
-    validity_wrapper.data.verify(validity_wrapped.clone())?;
-    let validity_vk = setup_mle_vk::<F, C, D>(&validity_wrapper.data);
-    let mut val_pw = PartialWitness::new();
-    val_pw.set_proof_with_pis_target(&validity_wrapper.wrap_proof, &validity_proof);
-    let validity_mle = prove_with_mle::<F, C, D>(&validity_wrapper.data, val_pw)?;
-    verify_mle_proof(&validity_wrapper.data, &validity_vk, &validity_mle.proof)?;
-    let validity_mle_json = export_mle_json(&validity_mle.proof, &validity_wrapper.data.common);
-
-    // -----------------------------------------------------------------------
-    // Extract the EXACT committed Withdrawal from the single-withdrawal proof PIs.
-    // -----------------------------------------------------------------------
-    let single_withdrawal_inputs = SingleWithdawalPublicInputs::from_u64_slice(
-        &single_withdrawal_proof.public_inputs[..SINGLE_WITHDRAWAL_PUBLIC_INPUTS_LEN].to_u64_vec(),
-    )?;
-    let committed_withdrawal: Withdrawal = single_withdrawal_inputs.withdrawal.clone();
-
-    // -----------------------------------------------------------------------
-    // SANITY CHECK: re-fold the withdrawal keccak chain ON THE RUST SIDE the way
-    // the contract will (seed = Bytes32::default() = 0, fold each withdrawal via
-    // Withdrawal::hash_with_prev_hash) and assert it equals the withdrawal_hash
-    // the proof committed. The proof's committed hash is the first BYTES32_LEN(8)
-    // u64 limbs of the withdrawal-chain proof's public inputs
-    // (WithdrawalStepPublicInputs::withdrawal_hash_chain is PI[0..8]).
-    // This proves the on-chain fold will match BEFORE the human goes on-chain.
-    // -----------------------------------------------------------------------
-    let proof_withdrawal_hash = {
-        let pis = withdrawal_chain_proof.public_inputs.to_u64_vec();
-        Bytes32::from_u64_slice(&pis[0..8]).expect("withdrawal_hash_chain limbs")
-    };
-    // Single withdrawal in the chain -> fold over the seed only.
-    let refolded = committed_withdrawal.hash_with_prev_hash(Bytes32::default());
-    assert_eq!(
-        refolded, proof_withdrawal_hash,
-        "withdrawal keccak chain re-fold mismatch: refolded = {refolded:?}, \
-         proof-committed withdrawal_hash = {proof_withdrawal_hash:?}. The on-chain \
-         fold would NOT match the proof."
-    );
-    eprintln!("[wd] withdrawal keccak chain re-fold sanity check PASSED");
-
-    // SANITY: the withdrawal proof's ext_commitment must equal the validity
-    // final state root (both anchored to the same final ExtendedPublicState).
-    assert_eq!(
-        ext_public_state.commitment(),
-        vpis.final_ext_commitment,
-        "withdrawal ext_commitment != validity final_ext_commitment"
-    );
-
-    // -----------------------------------------------------------------------
-    // Write output files.
-    // -----------------------------------------------------------------------
     let out_dir = Path::new("contracts/test/data");
     fs::create_dir_all(out_dir)?;
-
-    // Output filename prefix: set WD_OUT_PREFIX=close_ for the close-lifecycle fixture set so it
-    // does NOT overwrite the plain P2 withdrawal fixtures consumed by WithdrawNativeE2E.t.sol.
     let prefix = std::env::var("WD_OUT_PREFIX").unwrap_or_default();
     let name = |base: &str| format!("{prefix}{base}");
 
-    // 1. withdrawal_mle.json
-    fs::write(out_dir.join(name("withdrawal_mle.json")), &withdrawal_mle_json)?;
-    eprintln!("[wd] wrote contracts/test/data/{}", name("withdrawal_mle.json"));
+    fs::write(
+        out_dir.join(name("withdrawal_mle.json")),
+        &artifacts.withdrawal_mle_json,
+    )?;
+    fs::write(
+        out_dir.join(name("lifecycle_validity_mle.json")),
+        &artifacts.validity_mle_json,
+    )?;
+    fs::write(
+        out_dir.join(name("lifecycle.json")),
+        &artifacts.lifecycle_json,
+    )?;
+    fs::write(
+        out_dir.join(name("withdrawal_payout.json")),
+        &artifacts.payout_json,
+    )?;
 
-    // 2. lifecycle_validity_mle.json
-    fs::write(out_dir.join(name("lifecycle_validity_mle.json")), &validity_mle_json)?;
-    eprintln!("[wd] wrote contracts/test/data/{}", name("lifecycle_validity_mle.json"));
-
-    // 3. lifecycle.json
-    let blocks_fixture: Vec<BlockFixture> = {
-        let guard = block_witness_generator.borrow();
-        let total_blocks = guard.block_number.as_u64();
-        let mut v = Vec::with_capacity(total_blocks as usize);
-        for block_idx in 1..=total_blocks {
-            let block_number = BlockNumber::new(block_idx).expect("block number");
-            let witness = guard
-                .block_chain_witness
-                .get(&block_number)
-                .expect("block witness");
-            let block = &witness.block;
-            v.push(BlockFixture {
-                channel_id: block.channel_id,
-                timestamp: block.timestamp,
-                tx_tree_root: block.tx_tree_root.to_string(),
-                key_ids: block.key_ids.clone(),
-                block_number: block_idx,
-            });
-        }
-        v
-    };
-
-    let lifecycle = LifecycleFixture {
-        genesis_state_root: vpis.initial_ext_commitment.to_string(),
-        final_state_root: vpis.final_ext_commitment.to_string(),
-        registration: MemberFixture {
-            channel_id: channel_id_u32,
-            bp_member_slot,
-            member_pk_gs,
-            member_pk_bs,
-            regev_pk_digests,
-            recipients,
-        },
-        deposit: DepositFixture {
-            depositor: depositor.to_string(),
-            recipient: deposit_recipient.to_string(),
-            token_index: 0,
-            amount: U256::from(10u32).to_string(),
-            aux_data: Bytes32::default().to_string(),
-        },
-        blocks: blocks_fixture,
-        vpis: VPIFixture {
-            initial_block_number: vpis.initial_block_number.as_u64(),
-            initial_block_chain: vpis.initial_block_chain.to_string(),
-            initial_ext_commitment: vpis.initial_ext_commitment.to_string(),
-            final_block_number: vpis.final_block_number.as_u64(),
-            final_block_chain: vpis.final_block_chain.to_string(),
-            final_ext_commitment: vpis.final_ext_commitment.to_string(),
-            prover: vpis.prover.to_string(),
-        },
-        proof_hash: fnv1a_bytes32(validity_mle_json.as_bytes()),
-        proof_length: validity_mle_json.len() as u32,
-    };
-    let lifecycle_json = serde_json::to_string_pretty(&lifecycle)?;
-    fs::write(out_dir.join(name("lifecycle.json")), &lifecycle_json)?;
-    eprintln!("[wd] wrote contracts/test/data/{}", name("lifecycle.json"));
-
-    // 4. withdrawal_payout.json
-    let payout = WithdrawalPayoutFixture {
-        withdrawals: vec![WithdrawalEntryFixture {
-            recipient: committed_withdrawal.recipient.to_string(),
-            token_index: committed_withdrawal.token_index,
-            amount: committed_withdrawal.amount.to_string(),
-            nullifier: committed_withdrawal.nullifier.to_string(),
-            aux_data: committed_withdrawal.aux_data.to_string(),
-        }],
-        withdrawal_prover: withdrawal_prover.to_string(),
-        block_number: ext_public_state.inner.block_number.as_u64(),
-        ext_commitment: ext_public_state.commitment().to_string(),
-    };
-    let payout_json = serde_json::to_string_pretty(&payout)?;
-    fs::write(out_dir.join(name("withdrawal_payout.json")), &payout_json)?;
-    eprintln!("[wd] wrote contracts/test/data/{}", name("withdrawal_payout.json"));
-
+    for f in [
+        "withdrawal_mle.json",
+        "lifecycle_validity_mle.json",
+        "lifecycle.json",
+        "withdrawal_payout.json",
+    ] {
+        eprintln!("[wd] wrote contracts/test/data/{}", name(f));
+    }
     eprintln!("[wd] Done!");
     Ok(())
 }

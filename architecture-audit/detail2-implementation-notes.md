@@ -607,3 +607,36 @@ GREEN: Rust native + circuits, Solidity forge full suite, and a real 2-session b
 the wallet-live delegate demo (open distinct delegate slots → send → receive → balance-refresh → send again).
 Demo: 3 CLI co-signing members + browsers as send-only delegates (`channel_member` / `wallet-relay.js` /
 `wallet-live.html`).
+
+## D10 — A-3 close lifecycle (close / settle / withdraw / claim) + C2/C3 disable (2026-06)
+
+Master: `tasks/a3-close-lifecycle-spec.md` / `tasks/a3-impl-todo.md`. The L1 exit lifecycle is now wired
+end to end from the CLI (`channel_member close|settle|withdraw|claim`) + relay (`/api/close|settle|withdraw|claim`).
+
+### Approved deviation — §K-4 anchor on-chain check NOT adopted (user decision A, P1)
+detail2 §K-4 suggested an OPTIONAL on-chain consistency check in `finalizeClose` (require
+`IntmaxRollup.finalizedStateRoots(channelFundIntmaxStateRoot)` when nonzero). **Disposition: NOT adopted**
+(user-approved). Rationale: (1) it does NOT improve fund safety — the actual custody gate is the withdrawal
+proof's `finalizedStateRoots[ext_commitment]` check in `IntmaxRollup.withdrawNative`, which independently proves
+funds against a finalized rollup state (adversarial review: a zero/forged anchor is fund-safe; the anchor is a
+channel-internal member-signed value only); (2) it would change `ChannelSettlementManager` bytecode (CREATE2
+manager drift → close-fixture regeneration) for a redundant defensive check; (3) EIP-170 margin. The anchor is
+still sourced REAL (`latestFinalizedStateRoot()`) at `setup-backing` for correct semantics + future post-close
+use. The eventual liveness caveat (zero anchor when the rollup has no finalized block yet) is documented in the
+spec threat model (Threat 7).
+
+### C2/C3 disabled (P6-A) — see detail2 §H-3
+`submitSpecialClose` (C2) and `submitLateOutgoingDebitCorrection` (C3) entry points now revert
+(`SpecialCloseDisabled` / `LateOutgoingDebitDisabled`); their on-chain gates were forgeable `_matches` stubs.
+Adversarial-reviewed: no member funds move, freeze-grief removed, double-pay still prevented by the in-circuit
+nullifier used-sets + `cancelClose` (C1). Dead-code removal of the now-unused C2/C3 apparatus is a deferred
+non-security cleanup (changing Manager bytecode again forces a fixture regen).
+
+### Status (D10)
+- `withdraw` full pipeline (register → deposit → postBlock×3 blob → finalize → withdrawNative → pullChannelFunds)
+  verified on anvil (manager received real ETH). MLE/WHIR proofs are nondeterministic (ZK blinding) — fixtures are
+  validated semantically, not by byte-parity.
+- Remaining (P5-B): a full CLI close→settle→withdraw→claim live E2E requires binding the withdraw pipeline to the
+  channel's REAL registered members + deposit (so ONE on-chain registration serves both close and withdraw). The
+  close-intent on-chain step is otherwise blocked by the same member-set mismatch that `CloseLifecycleE2E.t.sol`
+  currently skips. Tracked as the P5-B integration.

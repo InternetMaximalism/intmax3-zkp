@@ -44,8 +44,8 @@ Pinned-record trust: channel B must verify A's signatures against a KNOWN-GOOD c
 - [x] CLI cosign-inter-debit/credit + replay ledger + pinned A-record + pk_g dedup. COMMITTED.
 - [x] wasm wallet_send_inter_channel + relay /api/inter + browser. COMMITTED.
 - [x] INDEPENDENT security review → found CRITICAL-1.
-- [ ] FIX in progress (atomic combined command).
-- [ ] re-review. [ ] deploy.
+- [x] FIX LANDED (atomic combined command). See "RESOLUTION" below.
+- [x] re-review (2026-06-20): CRITICAL-1 verified CLOSED in code. [ ] deploy.
 
 ## SECURITY REVIEW — CRITICAL-1 (blocks deploy) — found 2026-06-17
 The credit trusted a REQUEST-BODY `aSignedState`, authenticated only by N-of-N over channel A's
@@ -62,3 +62,29 @@ IN-PROCESS proposed A debit, NOT a request blob; check B replay ledger; fund+=am
 or NEITHER. Drops the request-body `aSignedState` trust entirely. One relay endpoint /api/inter/send.
 Regression test: a forged N-of-N aSignedState with no committed A debit MUST be refused; full
 conservation across A AND B; replay/tamper refused; atomicity (A head unchanged if credit fails).
+
+## RESOLUTION — CRITICAL-1 CLOSED (verified 2026-06-20)
+The value-creation vector is closed at BOTH the core and the relay layer. The standalone
+`/api/inter/credit` endpoint that trusted a request-body `aSignedState` NO LONGER EXISTS.
+
+Core binding (`src/wallet_core.rs`, `verify_inter_channel_credit_transition`):
+- invariant 1 (~:1994): A's `a_signed_state` MUST be N-of-N co-signed under the TRUSTED channel-A
+  record (session-pinned), not a request blob → a forged N-of-N over public seeds with no real
+  debit fails here (fail-closed).
+- invariant 5 (~:2007): A's small block `state_commitment_root == a_signed_state.h1()` and
+  `tx_tree_root` match → the fund decrease (debit) is pinned into the signed head.
+- invariant 2 (~:2057): the E-2 transfer is re-verified over the descriptor amount + ciphertexts →
+  a forged amount cannot pass the STARK transcript.
+
+Relay atomicity (`wallet/wallet-relay.js` ~:126-143): a SINGLE atomic `cosign-inter-transfer`
+command (relay owns both channels = one trust domain) debits A's REAL head and credits B, persisting
+BOTH or NEITHER. There is no standalone credit endpoint.
+
+Regression coverage:
+- `tests/inter_channel_cli.rs` `inter_channel_cli_forged_n_of_n_a_state_refused` (~:454): a forged
+  N-of-N A-state with no committed debit is refused; A head + B fund/ledgers unchanged on disk.
+- `tests/inter_channel_live.rs` (~:481-535): per-invariant tamper → reject, asserting the error
+  cites the specific invariant.
+
+Remaining: deploy only. (MEDIUM-1 atomicity and HIGH-1 A-side spend ledger are subsumed by the
+atomic command + replay ledger above.)

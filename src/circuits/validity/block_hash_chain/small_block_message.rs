@@ -166,8 +166,7 @@ impl SmallBlockMessageFieldsTarget {
             self.bp_member_slot,
             F::from_canonical_u32(value.bp_member_slot),
         );
-        self.bp_pk_g
-            .set_witness(witness, value.bp_pk_g);
+        self.bp_pk_g.set_witness(witness, value.bp_pk_g);
         for (targets, native) in [
             (&self.small_block_number, value.small_block_number),
             (&self.medium_epoch_hint, value.medium_epoch_hint),
@@ -196,8 +195,7 @@ mod tests {
     #[test]
     fn small_block_message_fields_digest_matches_canonical_message() {
         let channel_id = ChannelId::new(5).unwrap();
-        let bp_pk_g =
-            Bytes32::from_u32_slice(&[101, 102, 103, 104, 105, 106, 107, 108]).unwrap();
+        let bp_pk_g = Bytes32::from_u32_slice(&[101, 102, 103, 104, 105, 106, 107, 108]).unwrap();
         let prev_small_block_root = Bytes32::from_u32_slice(&[1, 2, 3, 4, 5, 6, 7, 8]).unwrap();
         let tx_tree_root =
             Bytes32::from_u32_slice(&[9, 10, 11, 12, 13, 14, 15, 0xffff_ffff]).unwrap();

@@ -1,4 +1,5 @@
-//! Per-channel member identity tree (one Goldilocks signing key per member; no multisig / threshold).
+//! Per-channel member identity tree (one Goldilocks signing key per member; no multisig /
+//! threshold).
 //!
 //! `MemberTree` commits the ordered member set of a single channel. Each leaf binds a member's
 //! Goldilocks public key `pk_g` (the Poseidon-preimage signature public key,
@@ -48,7 +49,8 @@ const MEMBER_LEAF_DOMAIN: u64 = 0x4d424c46;
 /// One channel member's identity leaf.
 ///
 /// * `pk_g` — the member's Goldilocks public key `Poseidon([DOMAIN_PK_G] || sk_g)` (the member's
-///   canonical signing identity, supplied at registration from `GoldilocksSecretKey::public_key()`).
+///   canonical signing identity, supplied at registration from
+///   `GoldilocksSecretKey::public_key()`).
 /// * `pk_b` — the member's BabyBear hash-signature public key (the canonical reduction of the
 ///   `pk_b` digest exposed by the channel-tx sender hash-sig STARK; P3, threat-model D1(b)/A11).
 ///   Bound here so the off-chain channel-tx verifier can confirm that `pk_b`, `pk_g` and the Regev
@@ -129,10 +131,8 @@ impl MemberLeafTarget {
     }
 
     pub fn set_witness<F: Field, W: WitnessWrite<F>>(&self, witness: &mut W, value: &MemberLeaf) {
-        self.pk_g
-            .set_witness(witness, value.pk_g);
-        self.pk_b
-            .set_witness(witness, value.pk_b);
+        self.pk_g.set_witness(witness, value.pk_g);
+        self.pk_b.set_witness(witness, value.pk_b);
         self.regev_pk_digest
             .set_witness(witness, value.regev_pk_digest);
     }

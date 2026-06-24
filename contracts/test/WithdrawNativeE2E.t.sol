@@ -56,7 +56,8 @@ contract WithdrawNativeE2ETest is Test {
         // msg.sender at construction (this test contract) becomes `deployer`.
         rollup = new IntmaxRollup(
             fraudTreasury, vvk, vdd.whirParams, vdd.protocolId, vdd.sessionId,
-            vdd.kIs, vdd.subgroupGenPowers, verifier, genesis
+            vdd.kIs, vdd.subgroupGenPowers, verifier, genesis,
+            true // A-2: test opt-in for the degreeBits==0 bypass
         );
 
         // Set the WITHDRAWAL VK (deployer-only, set-once). deployer == this test contract.
@@ -143,7 +144,8 @@ contract WithdrawNativeE2ETest is Test {
         bytes32 genesis = vm.parseJsonBytes32(lifecycleJson, ".genesis_state_root");
         IntmaxRollup bare = new IntmaxRollup(
             fraudTreasury, vvk, vdd.whirParams, vdd.protocolId, vdd.sessionId,
-            vdd.kIs, vdd.subgroupGenPowers, verifier, genesis
+            vdd.kIs, vdd.subgroupGenPowers, verifier, genesis,
+            true // A-2: test opt-in for the degreeBits==0 bypass
         );
         (IntmaxRollup.Withdrawal[] memory ws, address prover) = _parsePayout();
         MleVerifier.MleProof memory wproof = FixtureLib.parseProof(withdrawalMleJson);
