@@ -218,3 +218,41 @@ by the nullifier tree), `Deposit::nullifier()`.
 B. `channel_member` top-up command (L1 `deposit` → `receive_deposit` fold → N-of-N agree). C. tests
 (happy: channel balance += deposit, channel stays open; adversarial: double-fold reject, unescrowed-
 deposit reject, post-close reject) — happy E2E is heavy (opt-in `INTMAX_RUN_HEAVY_E2E`).
+
+---
+
+## DECIDED: burn Regev statement = (ii) padding-receiver reuse of E-2 (owner, 2026-06-24)
+
+`build_burn_send` reuses E-2 ChannelUpdate UNCHANGED, with `receiver_delta = encrypt(amount, RESERVED_BURN_PK)`
+to a reserved sentinel Regev key. No new lattice AIR/prover/verifier. The E-2 amount check
+(`sender_delta==receiver_delta==amount`) is satisfied because the phantom credit IS `amount`.
+
+### THREAT MODEL (adversarial — must be re-reviewed by a dedicated attacker subagent before merge, CLAUDE.md)
+| Attack | Why blocked |
+|---|---|
+| Claim the phantom `receiver_delta` (credit a channel for the burned value) | PRIMARY: `dest_channel_id = BURN_CHANNEL_ID` is unregisterable (Phase-1 guard) — the receive side filters by `dest_channel_id = D`; no channel D = BURN_CHANNEL_ID exists, so no one credits the entry. DEFENSE-IN-DEPTH: `RESERVED_BURN_PK` has no known secret key, so even a mis-routed entry can't be decrypted/claimed. |
+| Withdraw AND credit the same value (double-spend across layers) | base Transfer recipient is `ADDRESS_TAG` ⇒ withdraw-only (Phase-0 exclusivity, `tests/partial_withdrawal_exclusivity.rs`); never receivable by a channel. |
+| Withdraw more than the member's share | E-2 forces `after = before + sender_delta`, `sender_delta == amount`, range ⇒ `before ≥ amount`; the base `withdrawNative` amount == the SAME Transfer's `amount`; on-chain `totalEscrowed` underflow caps L1. |
+| Withdraw ANOTHER member's share | the E-2 + `InterChannelSend` update debit ONLY the sender slot (`ensure_slot_unchanged` on all others, state_update_verifier.rs:558-563); sender located by `source_pk_g`. |
+| Double-withdraw / replay the burn | `SettledTransfer::nullifier` (channel+block+index) + on-chain `withdrawalNullifierUsed`; `settled_tx_chain`/`ChannelLeaf.prev` forbid re-settling the small block. |
+| Privacy leak from the phantom delta | `amount` is public by design for an L1 exit (same boundary as inter-channel send); publishing the delta `m(z)` leaks nothing new. |
+| Unauthorized burn (no N-of-N) | rides the normal N-of-N `signSmallBlock` over `hash(H1', H2)`. |
+
+**RESERVED_BURN_PK:** a deterministic, well-known sentinel `RegevPk` (no secret); reject it in channel
+registration (Rust `ChannelRecord::validate` + Solidity) as defense-in-depth (primary guard is BURN_CHANNEL_ID).
+
+### Implementation steps (ready; (ii) chosen)
+1. `RESERVED_BURN_PK` (canonical sentinel `RegevPk` + digest) in the regev module + registration guard
+   (defense-in-depth alongside the BURN_CHANNEL_ID guard). Compilable, low-risk — START HERE.
+2. `build_burn_send` = fork of `wallet_core::build_inter_channel_send`: `destination_recipient_pk =
+   RESERVED_BURN_PK`, `receiver_delta = encrypt(amount, RESERVED_BURN_PK)`, base `Transfer.recipient =
+   calculate_recipient_from_address(member_L1)` (ADDRESS_TAG), `destination_channel_id = BURN_CHANNEL_ID`;
+   debit `enc_balances[sender]` + `channel_fund -= amount` (same as inter-channel send). Reuse
+   `prove_channel_update` UNCHANGED.
+3. Burn state-update verification: confirm `InterChannelSend` `state_update_verifier` accepts dest =
+   BURN_CHANNEL_ID + sentinel receiver (or add a thin `PartialWithdrawalBurn` kind). VERIFY, don't assume.
+4. `cmd_partial_withdraw`: build_burn_send → N-of-N cosign → post block → finalize → `single_withdrawal`
+   over the burn Transfer → `withdrawNative` (recipient = member L1).
+5. Heavy E2E (opt-in `INTMAX_RUN_HEAVY_E2E`): a member partial-withdraws real ETH, channel STAYS OPEN and
+   keeps transacting; + adversarial (over-withdraw, double-withdraw, withdraw-another's-share FAILS,
+   non-member, post-freeze). Needs real proving + ~15min anvil — validation is the long pole.
