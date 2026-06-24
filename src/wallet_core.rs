@@ -1681,6 +1681,64 @@ pub fn build_inter_channel_send(
     })
 }
 
+/// abstract2-1 §3.6 — channel-layer "burn send" for PARTIAL WITHDRAWAL (channel stays open).
+///
+/// A member debits ONLY their own encBalance by `amount` (E-2 `channelUpdateZKP`, sender-slot-only —
+/// `state_update_verifier.rs` debits the sender slot and `ensure_slot_unchanged` on all others) toward
+/// the reserved `BURN_CHANNEL_ID` with an `ADDRESS_TAG` L1 recipient, so the base-layer
+/// `single_withdrawal` later pays the member's L1 address `withdrawal_l1_address`. Then the channel
+/// continues: `state_version`/`settled_tx_chain` advance, members keep transacting.
+///
+/// This REUSES [`build_inter_channel_send`] UNCHANGED via the (ii) padding-receiver design
+/// (architecture-audit/partial-withdrawal-impl-plan.md): the channel-layer phantom receiver is
+/// `RegevPk::padding()` (canonical, NO secret key), so `receiver_delta = encrypt(amount, padding)`
+/// satisfies the E-2 `sender_delta == receiver_delta == amount` constraint. The phantom credit is
+/// UNCLAIMABLE — no channel may register `BURN_CHANNEL_ID` (`ChannelRecord::validate` + on-chain
+/// `registerChannel` guards), so the receive side never credits it. The base `ADDRESS_TAG` Transfer is
+/// WITHDRAW-ONLY (recipient-tag exclusivity, `tests/partial_withdrawal_exclusivity.rs`), so it can
+/// never also be credited to a channel. The withdrawn `amount` equals the member's proven encBalance
+/// debit (over-claim / cross-member-claim closed at the proof level).
+///
+/// SECURITY — NOT YET VALIDATED END-TO-END: the E-2 self-check runs at build time, but the full fund
+/// path (this burn send → N-of-N cosign → finalize → `single_withdrawal` → on-chain `withdrawNative`,
+/// channel stays open) requires the opt-in heavy E2E (`INTMAX_RUN_HEAVY_E2E`) AND a dedicated
+/// attacker-subagent review BEFORE merge (CLAUDE.md). Do not ship on a fund path until both pass.
+pub fn build_burn_send(
+    keys: &MemberKeys,
+    snapshot: &ChannelSnapshot,
+    sender_slot: u8,
+    withdrawal_l1_address: crate::ethereum_types::address::Address,
+    amount: u64,
+    before_amount: u64,
+    before_witness: &AmountWitness,
+    new_nullifier_root: Bytes32,
+    level: RegevSecurityLevel,
+    rng: &mut impl Rng,
+) -> WResult<BuiltInterChannelSend> {
+    use crate::circuits::balance::common::recipient::calculate_recipient_from_address;
+    // (ii): base Transfer recipient = the ADDRESS_TAG L1 form (what `build_inter_channel_send` writes
+    // into the tx's transfer leaf → `single_withdrawal` extracts); phantom receiver key =
+    // `RegevPk::padding()`; destination = `BURN_CHANNEL_ID` (unregisterable) ⇒ unclaimable phantom.
+    let burn_recipient = calculate_recipient_from_address(withdrawal_l1_address);
+    let burn_channel = ChannelId::new(crate::constants::BURN_CHANNEL_ID as u64)
+        .map_err(|e| WalletError(format!("BURN_CHANNEL_ID is not a valid ChannelId: {e:?}")))?;
+    build_inter_channel_send(
+        keys,
+        snapshot,
+        sender_slot,
+        burn_channel,
+        0, // destination_recipient_slot: descriptor-only; irrelevant for an L1 burn
+        RegevPk::padding(), // (ii) phantom-receiver key (no secret)
+        burn_recipient,     // → base Transfer recipient = ADDRESS_TAG L1 (withdraw-only)
+        amount,
+        before_amount,
+        before_witness,
+        new_nullifier_root,
+        level,
+        rng,
+    )
+}
+
 /// LEG A co-signer's pre-sign check: bind `debit_payload.record` to the TRUSTED channel-A record
 /// (like `verify_send_transition`), then re-run `InterChannelSendUpdateWitness::verify` over the
 /// authenticated state. On success the co-signer may `sign_state(a_send)`. NOTE: the witness checks
