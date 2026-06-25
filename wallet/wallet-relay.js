@@ -36,8 +36,19 @@ function cli(ch, args, extraEnv) {
   return execFileSync(CLI, args, {
     cwd: chDir(ch),
     encoding: 'utf8',
+    timeout: 600_000,
     env: { ...process.env, INTMAX_CHANNEL: String(ch), ...(extraEnv || {}) },
   });
+}
+
+// Per-channel mutex: serialize all mutating CLI calls to prevent concurrent state corruption.
+const _chLocks = {};
+function withLock(ch, fn) {
+  if (!_chLocks[ch]) _chLocks[ch] = Promise.resolve();
+  const prev = _chLocks[ch];
+  const next = prev.then(fn, fn);
+  _chLocks[ch] = next.catch(() => {});
+  return next;
 }
 
 // The rollup address backing channel `ch` (recorded by setup-backing in channel_backing.json).
@@ -69,13 +80,13 @@ app.get('/api/channels', (req, res) => res.json({ channels: CHANNELS }));
 // the genesis). CREATE-OR-JOIN: the first browser creates channel N; each later browser JOINS the
 // SAME channel N as a distinct delegate. cli_state.json is reset only on relay startup.
 app.post('/api/init', (req, res) => {
-  try {
-    const ch = reqChannel(req);
+  const ch = reqChannel(req);
+  withLock(ch, () => {
     fs.mkdirSync(chDir(ch), { recursive: true });
     fs.writeFileSync(wc(ch, 'contribution.json'), JSON.stringify(req.body));
     cli(ch, ['init', 'contribution.json', 'channel_snapshot.json']);
     res.json(JSON.parse(fs.readFileSync(wc(ch, 'channel_snapshot.json'), 'utf8')));
-  } catch (e) { console.error(e.stderr ? String(e.stderr) : (e.message||e)); res.status(500).json({ error: String(e.stderr || e.message || e) }); }
+  }).catch((e) => { console.error(e.stderr ? String(e.stderr) : (e.message||e)); res.status(500).json({ error: String(e.stderr || e.message || e) }); });
 });
 
 // Latest fully-signed channel snapshot — browsers re-import this before sending so they pick up any
@@ -111,23 +122,23 @@ app.post('/api/add-genesis-sig', (req, res) => {
 // Step 3: browser sends a transfer payload → CLI co-signs (other members) → returns the
 // fully-signed next state for the browser to finalize.
 app.post('/api/cosign', (req, res) => {
-  try {
-    const ch = reqChannel(req);
+  const ch = reqChannel(req);
+  withLock(ch, () => {
     fs.writeFileSync(wc(ch, 'payload.json'), JSON.stringify(req.body));
     cli(ch, ['cosign', 'payload.json', 'cosigned.json']);
     res.json(JSON.parse(fs.readFileSync(wc(ch, 'cosigned.json'), 'utf8')));
-  } catch (e) { console.error(e.stderr ? String(e.stderr) : (e.message||e)); res.status(500).json({ error: String(e.stderr || e.message || e) }); }
+  }).catch((e) => { console.error(e.stderr ? String(e.stderr) : (e.message||e)); res.status(500).json({ error: String(e.stderr || e.message || e) }); });
 });
 
 // Balance-refresh: browser re-encrypts its own slot (RefreshPayload) → CLI members co-sign → returns
 // the fully-signed next state for the browser to finalize. Lets a delegate send again after receiving.
 app.post('/api/refresh-cosign', (req, res) => {
-  try {
-    const ch = reqChannel(req);
+  const ch = reqChannel(req);
+  withLock(ch, () => {
     fs.writeFileSync(wc(ch, 'refresh_payload.json'), JSON.stringify(req.body));
     cli(ch, ['cosign-refresh', 'refresh_payload.json', 'refresh_cosigned.json']);
     res.json(JSON.parse(fs.readFileSync(wc(ch, 'refresh_cosigned.json'), 'utf8')));
-  } catch (e) { console.error(e.stderr ? String(e.stderr) : (e.message||e)); res.status(500).json({ error: String(e.stderr || e.message || e) }); }
+  }).catch((e) => { console.error(e.stderr ? String(e.stderr) : (e.message||e)); res.status(500).json({ error: String(e.stderr || e.message || e) }); });
 });
 
 // Inter-channel send (SINGLE atomic endpoint). `?channel=A` = the SOURCE channel; the relay OWNS both
@@ -137,8 +148,8 @@ app.post('/api/refresh-cosign', (req, res) => {
 // `cosign-inter-transfer` co-signs A's debit (extending A's COMMITTED head), validates + credits B
 // (resolved as ../ch<dest>/), and persists both only if both legs pass. Returns { aHead, bSnapshot }.
 app.post('/api/inter/send', (req, res) => {
-  try {
-    const ch = reqChannel(req); // = source channel A
+  const ch = reqChannel(req); // = source channel A
+  withLock(ch, () => {
     const debitPayload = req.body && req.body.debitPayload;
     const descriptor = req.body && req.body.transferDescriptor;
     if (!debitPayload || !descriptor) throw new Error('inter/send needs { debitPayload, transferDescriptor }');
@@ -146,7 +157,7 @@ app.post('/api/inter/send', (req, res) => {
     fs.writeFileSync(wc(ch, 'inter_descriptor.json'), JSON.stringify(descriptor));
     cli(ch, ['cosign-inter-transfer', 'inter_debit_payload.json', 'inter_descriptor.json', 'inter_transfer.json']);
     res.json(JSON.parse(fs.readFileSync(wc(ch, 'inter_transfer.json'), 'utf8')));
-  } catch (e) { console.error(e.stderr ? String(e.stderr) : (e.message||e)); res.status(500).json({ error: String(e.stderr || e.message || e) }); }
+  }).catch((e) => { console.error(e.stderr ? String(e.stderr) : (e.message||e)); res.status(500).json({ error: String(e.stderr || e.message || e) }); });
 });
 
 // ─── A-3 close lifecycle (close → settle → withdraw → claim) ────────────────────────────────────
@@ -255,8 +266,8 @@ app.post('/api/l1-deposit', (req, res) => {
 // If depositor+amount are provided (MetaMask flow), uses those directly.
 // Otherwise reads from pending_deposit.json (fallback relay-deposit flow).
 app.post('/api/import-deposit', (req, res) => {
-  try {
-    const ch = reqChannel(req);
+  const ch = reqChannel(req);
+  withLock(ch, () => {
     const slot = (req.body && req.body.recipientSlot) || 0;
     let depositor, amount;
     if (req.body && req.body.depositor && req.body.amount) {
@@ -270,34 +281,34 @@ app.post('/api/import-deposit', (req, res) => {
     cli(ch, ['cosign-l1-deposit-import', String(slot), String(amount), depositor, 'l1_import_cosigned.json']);
     const snap = JSON.parse(fs.readFileSync(wc(ch, 'channel_snapshot.json'), 'utf8'));
     res.json(snap);
-  } catch (e) { console.error(e.stderr ? String(e.stderr) : (e.message||e)); res.status(500).json({ error: String(e.stderr || e.message || e) }); }
+  }).catch((e) => { console.error(e.stderr ? String(e.stderr) : (e.message||e)); res.status(500).json({ error: String(e.stderr || e.message || e) }); });
 });
 
 // POST /api/cosign-burn?channel=N  body: { debitPayload, transferDescriptor }
 // Co-sign a burn send (partial withdrawal debit leg).
 app.post('/api/cosign-burn', (req, res) => {
-  try {
-    const ch = reqChannel(req);
+  const ch = reqChannel(req);
+  withLock(ch, () => {
     const { debitPayload, transferDescriptor } = req.body || {};
     if (!debitPayload || !transferDescriptor) throw new Error('cosign-burn needs { debitPayload, transferDescriptor }');
     fs.writeFileSync(wc(ch, 'burn_payload.json'), JSON.stringify(debitPayload));
     fs.writeFileSync(wc(ch, 'burn_descriptor.json'), JSON.stringify(transferDescriptor));
     cli(ch, ['cosign-burn-send', 'burn_payload.json', 'burn_descriptor.json', 'burn_cosigned.json']);
     res.json(JSON.parse(fs.readFileSync(wc(ch, 'burn_cosigned.json'), 'utf8')));
-  } catch (e) { console.error(e.stderr ? String(e.stderr) : (e.message||e)); res.status(500).json({ error: String(e.stderr || e.message || e) }); }
+  }).catch((e) => { console.error(e.stderr ? String(e.stderr) : (e.message||e)); res.status(500).json({ error: String(e.stderr || e.message || e) }); });
 });
 
 // POST /api/deploy-settlement?channel=N   (idempotent)
 // Deploy ChannelSettlementManager + ChannelSettlementVerifier on anvil for this channel.
 app.post('/api/deploy-settlement', (req, res) => {
-  try {
-    const ch = reqChannel(req);
+  const ch = reqChannel(req);
+  withLock(ch, () => {
     if (fs.existsSync(wc(ch, 'settlement.json'))) {
       return res.json(JSON.parse(fs.readFileSync(wc(ch, 'settlement.json'), 'utf8')));
     }
     cli(ch, ['deploy-settlement', RPC]);
     res.json(JSON.parse(fs.readFileSync(wc(ch, 'settlement.json'), 'utf8')));
-  } catch (e) { console.error(e.stderr ? String(e.stderr) : (e.message||e)); res.status(500).json({ error: String(e.stderr || e.message || e) }); }
+  }).catch((e) => { console.error(e.stderr ? String(e.stderr) : (e.message||e)); res.status(500).json({ error: String(e.stderr || e.message || e) }); });
 });
 
 // GET /api/settlement?channel=N
@@ -311,9 +322,8 @@ app.get('/api/settlement', (req, res) => {
 // POST /api/pw-submit?channel=N
 // Submit partial withdrawal intent on-chain.
 app.post('/api/pw-submit', (req, res) => {
-  try {
-    const ch = reqChannel(req);
-    // Ensure settlement is deployed first.
+  const ch = reqChannel(req);
+  withLock(ch, () => {
     if (!fs.existsSync(wc(ch, 'settlement.json'))) {
       cli(ch, ['deploy-settlement', RPC]);
     }
@@ -321,18 +331,18 @@ app.post('/api/pw-submit', (req, res) => {
     const extra = pwRecipient ? { PW_RECIPIENT: pwRecipient } : {};
     cli(ch, ['pw-submit', RPC], extra);
     res.json(JSON.parse(fs.readFileSync(wc(ch, 'pw_auth.json'), 'utf8')));
-  } catch (e) { console.error(e.stderr ? String(e.stderr) : (e.message||e)); res.status(500).json({ error: String(e.stderr || e.message || e) }); }
+  }).catch((e) => { console.error(e.stderr ? String(e.stderr) : (e.message||e)); res.status(500).json({ error: String(e.stderr || e.message || e) }); });
 });
 
 // POST /api/pw-finalize?channel=N
 // Finalize partial withdrawal (advance time + finalize on-chain).
 app.post('/api/pw-finalize', (req, res) => {
-  try {
-    const ch = reqChannel(req);
+  const ch = reqChannel(req);
+  withLock(ch, () => {
     cli(ch, ['pw-finalize', RPC]);
     const auth = JSON.parse(fs.readFileSync(wc(ch, 'pw_auth.json'), 'utf8'));
     res.json({ ok: true, authDigest: auth.auth_digest });
-  } catch (e) { console.error(e.stderr ? String(e.stderr) : (e.message||e)); res.status(500).json({ error: String(e.stderr || e.message || e) }); }
+  }).catch((e) => { console.error(e.stderr ? String(e.stderr) : (e.message||e)); res.status(500).json({ error: String(e.stderr || e.message || e) }); });
 });
 
 // Static wallet files: wallet-live.html + wallet-worker.js from wallet/ (ROOT), and the built

@@ -35,6 +35,7 @@ const CALLS = {
   balance: () => wasm.wallet_balance(),
   send: (a) => wasm.wallet_send(a.recipientSlot, BigInt(a.amount)),
   sendInterChannel: (a) => wasm.wallet_send_inter_channel(a.toChannel, a.toSlot, BigInt(a.amount), a.destRecipientJson),
+  burnSend: (a) => wasm.wallet_burn_send(BigInt(a.amount), a.withdrawalAddress),
   refresh: () => wasm.wallet_refresh(),
   cosign: (a) => wasm.wallet_cosign(a.payloadJson),
   finalize: (a) => wasm.wallet_finalize(a.stateJson),
@@ -53,8 +54,8 @@ self.onmessage = async (e) => {
     const t0 = performance.now();
     const result = await fn(e.data);
     const ms = (performance.now() - t0).toFixed(0);
-    post('result', { action, result: result ?? '', ms });
+    post('result', { action, _callId: e.data._callId, result: result ?? '', ms });
   } catch (err) {
-    post('error', { action, message: String((err && err.message) || err) });
+    post('error', { action, _callId: e.data._callId, message: String((err && err.message) || err) });
   }
 };

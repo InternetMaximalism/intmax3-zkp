@@ -201,7 +201,8 @@ $('depositModal').onclick = (e) => { if (e.target === $('depositModal')) $('depo
 // ---- Log -----------------------------------------------------------------------------------
 function log(m, cls='') {
   const el = currentView === 'withdraw' ? $('wdLog') : $('log');
-  el.innerHTML += '\n<span class="' + cls + '">' + m + '</span>';
+  const span = document.createElement('span'); span.className = cls; span.textContent = m;
+  el.appendChild(document.createTextNode('\n')); el.appendChild(span);
   el.scrollTop = el.scrollHeight;
 }
 
@@ -432,18 +433,31 @@ function setChannelFrom(snapJson) {
 // ---- Worker plumbing -----------------------------------------------------------------------
 const worker = new Worker('./wallet-worker.js', { type: 'module' });
 const handlers = {};
+let _callId = 0;
 function call(action, payload={}) {
-  return new Promise((resolve, reject) => { handlers[action] = { resolve, reject }; worker.postMessage({ action, ...payload }); });
+  const id = ++_callId;
+  return new Promise((resolve, reject) => { handlers[id] = { resolve, reject }; worker.postMessage({ action, _callId: id, ...payload }); });
 }
 worker.onmessage = (e) => {
   const d = e.data;
   if (d.type === 'progress') { const s=$('status'); s.dataset.base = d.msg; s.textContent = d.msg + ' ' + (s.dataset.elapsed||''); return; }
   if (d.type === 'ready') { try { clearInterval(_initTick); } catch(e){} $('status').textContent='ready'; $('status').className='ready'; $('threads').textContent=d.threads; $('btnOpen').disabled=false; tryRestore(); return; }
   if (d.type === 'log') { return; }
-  if (d.type === 'result') handlers[d.action]?.resolve(d.result);
-  else if (d.type === 'error') handlers[d.action]?.reject(new Error(d.message));
+  const cid = d._callId;
+  if (cid && handlers[cid]) {
+    if (d.type === 'result') handlers[cid].resolve(d.result);
+    else if (d.type === 'error') handlers[cid].reject(new Error(d.message));
+    delete handlers[cid];
+  } else {
+    if (d.type === 'result') handlers[d.action]?.resolve(d.result);
+    else if (d.type === 'error') handlers[d.action]?.reject(new Error(d.message));
+  }
 };
-worker.onerror = (e) => log('worker error: '+e.message, 'err');
+worker.onerror = (e) => {
+  log('worker error: '+e.message, 'err');
+  try { clearInterval(_initTick); } catch(_){}
+  for (const id of Object.keys(handlers)) { handlers[id].reject(new Error('worker crashed: '+e.message)); delete handlers[id]; }
+};
 
 // ---- API -----------------------------------------------------------------------------------
 async function api(pathname, body, method='POST') {
@@ -641,6 +655,7 @@ $('btnSend').onclick = async () => {
     $('btnSend').disabled = true;
     const dest = parseAddr($('toAddr').value);
     const amt = $('amount').value;
+    if (!amt || isNaN(Number(amt)) || Number(amt) <= 0) throw new Error('enter a valid positive amount');
     const myCh = myChannel ?? activeCh;
     let r;
     if (dest.channel !== myCh) {
@@ -675,6 +690,7 @@ $('btnDeposit').onclick = async () => {
   const tick = setInterval(() => { $('btnDeposit').textContent = phase + '... ' + Math.round((Date.now()-t0)/1000) + 's'; }, 250);
   try {
     $('btnDeposit').disabled = true;
+    if (!$('depositAmount').value || isNaN(Number($('depositAmount').value)) || Number($('depositAmount').value) <= 0) throw new Error('enter a valid positive deposit amount');
     const amt = toBase($('depositAmount').value);
     log('sending L1 deposit via wallet (' + $('depositAmount').value + ' ETH)...');
     const dr = await sendDepositViaWallet(amt);
@@ -714,7 +730,9 @@ $('btnBurnSend').onclick = async () => {
   try {
     $('btnBurnSend').disabled = true;
     const amt = $('pwAmount').value;
-    const addr = $('pwAddress').value;
+    if (!amt || isNaN(Number(amt)) || Number(amt) <= 0) throw new Error('enter a valid positive burn amount');
+    const addr = $('pwAddress').value.trim();
+    if (!addr || !addr.startsWith('0x') || addr.length !== 42) throw new Error('enter a valid L1 recipient address (0x + 40 hex chars)');
     const headSnap = await api('/api/snapshot', null, 'GET'); setChannelFrom(headSnap);
     let rr = JSON.parse(await call('importChannel', { snapshotJson: headSnap }));
     mySlot = rr.slot; showBalance(rr);
@@ -751,7 +769,7 @@ $('btnPwSettle').onclick = async () => {
   try {
     $('btnPwSettle').disabled = true;
     const recipient = $('pwAddress').value.trim();
-    if (!recipient || !recipient.startsWith('0x')) { log('enter a valid L1 recipient address', 'err'); return; }
+    if (!recipient || !recipient.startsWith('0x')) { log('enter a valid L1 recipient address', 'err'); throw new Error('invalid recipient'); }
     log('submitting partial withdrawal...');
     const submit = JSON.parse(await api('/api/pw-submit', JSON.stringify({ recipient })));
     log('  submitted -- authDigest = ' + (submit.auth_digest || '?'), 'ok');
