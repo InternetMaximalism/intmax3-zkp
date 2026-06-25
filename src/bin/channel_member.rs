@@ -46,10 +46,12 @@ use intmax3_zkp::{
         },
     },
     common::{
+        balance_state::tx_leaf_hash,
         channel::{ChannelRecord, ChannelState, CloseIntent, CloseWithdrawal, MemberSignature},
         channel_id::ChannelId,
         deposit::Deposit,
         salt::Salt,
+        withdrawal::Withdrawal,
     },
     constants::{MAX_CHANNEL_MEMBERS, TOKEN_UNIT},
     ethereum_types::{
@@ -65,10 +67,11 @@ use intmax3_zkp::{
         ChannelWithdrawalParams, CloseProver, InterChannelDebitPayload,
         InterChannelTransferDescriptor, MemberInfo, MemberKeys, RefreshPayload, SendPayload,
         WithdrawalClaimProver, add_signature, assemble_genesis_state_backed,
-        build_channel_withdrawal, build_inter_channel_credit, build_record, build_send,
-        decrypt_balance, default_settled_tx_accumulator, sign_state, sign_state_if_backed,
-        verify_all_signatures, verify_inter_channel_credit_transition,
-        verify_inter_channel_send_transition, verify_refresh_transition, verify_send_transition,
+        build_channel_withdrawal, build_inter_channel_credit, build_l1_deposit_import,
+        build_record, build_send, decrypt_balance, default_settled_tx_accumulator,
+        partial_withdrawal_auth_digest, sign_state, sign_state_if_backed, verify_all_signatures,
+        verify_inter_channel_credit_transition, verify_inter_channel_send_transition,
+        verify_l1_deposit_import_transition, verify_refresh_transition, verify_send_transition,
         verify_snapshot,
     },
 };
@@ -122,17 +125,18 @@ const CLOSE_INTENT_MLE_FILE: &str = "close_intent_mle.json";
 // Delegate demo: slots 0,1,2 = three CLI-controlled CO-SIGNING MEMBERS (with genesis balances);
 // slot 3 = the browser, a send-only DELEGATE (delegate_count = 1).
 const CLI_SLOTS: &[u8] = &[0, 1, 2];
-// Genesis allocations in BASE UNITS (TOKEN_DECIMALS = 6): 40 / 30 / 20 tokens.
+// Genesis allocations in BASE UNITS (= wei). With TOKEN_DECIMALS=18, 1 token = 1 ETH.
+// 0.04 + 0.03 + 0.02 = 0.09 ETH total — fits comfortably in u64 (max ~18.4 ETH).
 const CLI_GENESIS: &[(u8, u64)] = &[
-    (0, 40 * TOKEN_UNIT),
-    (1, 30 * TOKEN_UNIT),
-    (2, 20 * TOKEN_UNIT),
+    (0, TOKEN_UNIT / 25),  // 0.04 ETH
+    (1, TOKEN_UNIT / 100 * 3), // 0.03 ETH
+    (2, TOKEN_UNIT / 50),  // 0.02 ETH
 ];
 const BROWSER_DELEGATE_SLOT: u8 = 3;
 const DELEGATE_COUNT: u8 = 1;
 // The first browser delegate's genesis allocation (BASE UNITS) out of the deposited fund (so
 // Σ balances == fund): 50 tokens.
-const DELEGATE_GENESIS: u64 = 50 * TOKEN_UNIT;
+const DELEGATE_GENESIS: u64 = 0;
 
 #[derive(Serialize, Deserialize)]
 struct ControlledMember {
@@ -252,6 +256,10 @@ struct ChannelBacking {
     /// letting one channel registration + deposit serve both the close and withdraw paths.
     #[serde(default)]
     deposit_salt: Option<Salt>,
+    /// The on-chain deposit recipient (hex of `calculate_recipient_from_user_id(channel_id,
+    /// deposit_salt)`). Persisted so the relay can call `deposit()` without Rust recomputation.
+    #[serde(default)]
+    deposit_recipient: String,
 }
 
 fn backing_exists() -> bool {
@@ -352,7 +360,7 @@ fn cmd_setup_backing(args: &[String]) {
 
     let deposit_salt = Salt::rand(&mut rng);
     let recipient = calculate_recipient_from_user_id(channel_id, deposit_salt);
-    let amount = fund.min(u32::MAX as u64);
+    let amount = fund;
 
     let deposit_key = deposit_key_env();
     // P5-B 案B: optionally DEFER the on-chain deposit to `withdraw` so the withdraw block chain
@@ -425,7 +433,7 @@ fn cmd_setup_backing(args: &[String]) {
             depositor,
             recipient,
             token_index: 0,
-            amount: U256::from(amount as u32),
+            amount: U256::from(amount),
             aux_data: Bytes32::default(),
         };
         if rust_deposit.hash_with_prev_hash(Bytes32::default()) != onchain_chain {
@@ -447,7 +455,7 @@ fn cmd_setup_backing(args: &[String]) {
             depositor,
             recipient,
             0,
-            U256::from(amount as u32),
+            U256::from(amount),
             Bytes32::default(),
         )
         .unwrap_or_else(|e| die(format!("queue deposit: {e:?}")));
@@ -509,6 +517,7 @@ fn cmd_setup_backing(args: &[String]) {
             rollup: rollup.clone(),
             deposit_tx: txhash.clone(),
             deposit_salt: Some(deposit_salt),
+            deposit_recipient: recipient.to_hex(),
         },
     );
     println!(
@@ -1054,13 +1063,13 @@ fn cmd_withdraw(args: &[String]) {
     // env-tunable amounts).
     let integrated = backing_exists();
     let (deposit_amount, withdrawal_amount, deposit_salt, cli_members): (
-        u32,
-        u32,
+        u64,
+        u64,
         Option<Salt>,
         Option<Vec<MemberKeys>>,
     ) = if integrated {
         let backing = load_backing().2;
-        let fund = backing.fund.min(u32::MAX as u64) as u32;
+        let fund = backing.fund;
         let salt = backing.deposit_salt.unwrap_or_else(|| {
             die(
                 "channel_backing.json has no deposit_salt — re-run `setup-backing` (P5-B needs it to \
@@ -1077,11 +1086,11 @@ fn cmd_withdraw(args: &[String]) {
         );
         (fund, fund, Some(salt), Some(members))
     } else {
-        let da: u32 = std::env::var("WD_DEPOSIT_AMOUNT")
+        let da: u64 = std::env::var("WD_DEPOSIT_AMOUNT")
             .ok()
             .and_then(|s| s.parse().ok())
             .unwrap_or(10);
-        let wa: u32 = std::env::var("WD_AMOUNT")
+        let wa: u64 = std::env::var("WD_AMOUNT")
             .ok()
             .and_then(|s| s.parse().ok())
             .unwrap_or(3);
@@ -1376,6 +1385,7 @@ fn main() {
         "cosign" => cmd_cosign(&args),
         "cosign-refresh" => cmd_cosign_refresh(&args),
         "cosign-inter-transfer" => cmd_cosign_inter_transfer(&args),
+        "cosign-burn-send" => cmd_cosign_burn_send(&args),
         "finalize" => cmd_finalize(&args),
         "balance" => cmd_balance(),
         // A-3 P3: `close` builds the real close proof from wallet state and submits it on-chain.
@@ -1392,9 +1402,13 @@ fn main() {
         // script can `registerChannel` + bind the manager to the SAME members the close/withdraw
         // proofs use (lets one on-chain registration serve the whole close lifecycle).
         "export-reg-record" => cmd_export_reg_record(),
+        "deploy-settlement" => cmd_deploy_settlement(&args),
+        "cosign-l1-deposit-import" => cmd_cosign_l1_deposit_import(&args),
+        "pw-submit" => cmd_pw_submit(&args),
+        "pw-finalize" => cmd_pw_finalize(&args),
         _ => {
             eprintln!(
-                "usage: channel_member <setup-backing|init|add-genesis-sig|send|cosign|cosign-refresh|cosign-inter-transfer|finalize|balance> ..."
+                "usage: channel_member <setup-backing|init|send|cosign|cosign-burn-send|deploy-settlement|cosign-l1-deposit-import|pw-submit|pw-finalize|...> ..."
             );
             exit(2);
         }
@@ -2211,6 +2225,117 @@ fn cmd_cosign_inter_transfer(args: &[String]) {
     );
 }
 
+/// Burn-send co-sign: the DEBIT leg of an inter-channel transfer to `BURN_CHANNEL_ID` (partial
+/// withdrawal). Identical to the first half of `cmd_cosign_inter_transfer` but with NO credit leg
+/// (the burn channel is unregisterable → the phantom credit is unclaimable). Persists
+/// `last_burn.json` so `pw-submit` can reconstruct the `Withdrawal` struct.
+fn cmd_cosign_burn_send(args: &[String]) {
+    let payload_path = args
+        .get(1)
+        .unwrap_or_else(|| die("cosign-burn-send <debit_payload.json> <descriptor.json> <out.json>"));
+    let desc_path = args
+        .get(2)
+        .unwrap_or_else(|| die("cosign-burn-send <debit_payload.json> <descriptor.json> <out.json>"));
+    let out_path = args
+        .get(3)
+        .map(String::as_str)
+        .unwrap_or("burn_cosigned.json");
+
+    let payload: InterChannelDebitPayload = read_json(payload_path);
+    let descriptor: InterChannelTransferDescriptor = read_json(desc_path);
+
+    let mut a_state = load_state();
+
+    if descriptor.source_channel_id.as_u64() != channel_id_env() as u64 {
+        die(format!(
+            "descriptor.source_channel_id ({}) != this channel {} — refusing",
+            descriptor.source_channel_id.as_u64(),
+            channel_id_env()
+        ));
+    }
+
+    if a_state
+        .spent_tx_hashes
+        .iter()
+        .any(|h| *h == descriptor.tx_hash)
+    {
+        die(format!(
+            "REFUSING: burn tx_hash {} already debited (replay) — fail-closed",
+            descriptor.tx_hash.to_hex()
+        ));
+    }
+
+    if payload.proposed_next_state.prev_digest != a_state.snapshot.state.digest {
+        die("burn debit payload does not extend channel's committed head");
+    }
+
+    verify_inter_channel_send_transition(
+        &a_state.snapshot.state,
+        &a_state.snapshot.record,
+        &payload,
+        LEVEL,
+    )
+    .unwrap_or_else(|e| die(format!("burn send transition invalid: {e}")));
+
+    let mut a_head = payload.proposed_next_state.clone();
+    for c in &a_state.controlled {
+        if a_head
+            .member_signatures
+            .iter()
+            .any(|s| s.member_slot == c.slot)
+        {
+            continue;
+        }
+        let sig = sign_state(&keys_for(c.keygen_seed), c.slot, &a_head)
+            .unwrap_or_else(|e| die(format!("REFUSING TO SIGN burn debit — {e}")));
+        add_signature(&mut a_head, sig);
+    }
+    verify_all_signatures(&a_state.snapshot.record, &a_state.snapshot.members, &a_head)
+        .unwrap_or_else(|e| die(format!("burn debit not N-of-N co-signed: {e}")));
+
+    let amt256 = intmax3_zkp::wallet_core::u64_to_u256(descriptor.amount);
+    if a_head.channel_fund.amount + amt256 != a_state.snapshot.state.channel_fund.amount {
+        die(
+            "conservation check FAILED: channel_fund did not decrease by exactly descriptor.amount",
+        );
+    }
+
+    let pre_burn_settled_tx_chain = a_state.snapshot.state.balance_state.settled_tx_chain;
+    a_state.snapshot.state = a_head.clone();
+    a_state.spent_tx_hashes.push(descriptor.tx_hash);
+    save_state(&a_state);
+    write_json("channel_snapshot.json", &a_state.snapshot);
+
+    // Persist burn metadata for `pw-submit` to reconstruct the Withdrawal.
+    write_json(
+        "last_burn.json",
+        &serde_json::json!({
+            "tx_hash": descriptor.tx_hash.to_hex(),
+            "amount": descriptor.amount,
+            "source_pk_g": descriptor.source_pk_g.to_hex(),
+            "receiver_pk_g": descriptor.receiver_pk_g.to_hex(),
+            "sender_delta_ct_digest": payload.inter_channel_tx.sender_delta_ct.digest().to_hex(),
+            "receiver_delta_ct_digest": descriptor.receiver_delta.digest().to_hex(),
+            "pre_burn_settled_tx_chain": pre_burn_settled_tx_chain.to_hex(),
+        }),
+    );
+
+    write_json(out_path, &a_head);
+    let signed: Vec<u8> = a_head
+        .member_signatures
+        .iter()
+        .map(|s| s.member_slot)
+        .collect();
+    println!(
+        "burn-send co-signed: channel {} debited {} (sigs {signed:?}). Fund: {} → {}. \
+         Burn metadata written to last_burn.json.",
+        channel_id_env(),
+        descriptor.amount,
+        a_state.snapshot.state.channel_fund.amount + amt256,
+        a_state.snapshot.state.channel_fund.amount,
+    );
+}
+
 fn cmd_finalize(args: &[String]) {
     let in_path = args
         .get(1)
@@ -2255,4 +2380,518 @@ fn cmd_balance() {
             Err(e) => println!("  slot {} balance = <decrypt error: {e}>", c.slot),
         }
     }
+}
+
+// ─── Wallet testnet UX: settlement deploy + L1 deposit import + partial withdrawal ────────
+
+/// Deploy the settlement infrastructure on anvil: MockMleVerifier + ChannelSettlementVerifier +
+/// ChannelSettlementManager, with the LIVE channel member set from the snapshot (including any
+/// runtime-joined delegates). Usage:
+///   channel_member deploy-settlement <rpc_url>
+fn cmd_deploy_settlement(args: &[String]) {
+    let rpc = args
+        .get(1)
+        .cloned()
+        .unwrap_or_else(|| die("deploy-settlement needs <rpc_url>"));
+
+    let state = load_state();
+    let (_, _, backing) = load_backing();
+    let rollup = &backing.rollup;
+    if rollup.is_empty() {
+        die("no rollup address in channel_backing.json — run setup-backing first");
+    }
+
+    let channel_id = channel_id_env();
+    let members = &state.snapshot.members;
+    let record = &state.snapshot.record;
+    let member_count = record.member_count as usize;
+    let delegate_count = record.delegate_count as usize;
+    let active = member_count + delegate_count;
+
+    let mut pk_gs = Vec::new();
+    let mut pk_bs = Vec::new();
+    let mut regev_digests = Vec::new();
+    let mut recipients = Vec::new();
+    for m in members.iter().take(active) {
+        pk_gs.push(m.pk_g.to_hex());
+        pk_bs.push(m.pk_b.to_hex());
+        regev_digests.push(m.regev_pk.digest().to_hex());
+        let recipient_addr = Address::from_u32_slice(
+            &[0xAAAA_0000u32
+                .wrapping_add(channel_id.wrapping_mul(16))
+                .wrapping_add(m.slot as u32); 5],
+        )
+        .expect("address from u32 slice");
+        recipients.push(format!("0x{}", hex::encode(recipient_addr.to_bytes_be())));
+    }
+
+    let reg = serde_json::json!({
+        "channel_id": channel_id,
+        "bp_member_slot": BP_SLOT,
+        "member_count": member_count,
+        "delegate_count": delegate_count,
+        "member_pk_gs": pk_gs,
+        "member_pk_bs": pk_bs,
+        "regev_pk_digests": regev_digests,
+        "recipients": recipients,
+    });
+    let contracts_dir = std::env::var("CONTRACTS_DIR")
+        .unwrap_or_else(|_| {
+            let exe = std::env::current_exe().unwrap_or_default();
+            let repo = exe
+                .ancestors()
+                .find(|p| p.join("contracts").is_dir())
+                .unwrap_or_else(|| die("cannot find contracts/ dir"))
+                .to_path_buf();
+            repo.join("contracts").to_string_lossy().to_string()
+        });
+    let data_path = format!("{contracts_dir}/test/data/pw_reg.json");
+    fs::write(
+        &data_path,
+        serde_json::to_string_pretty(&reg).unwrap_or_else(|e| die(e)),
+    )
+    .unwrap_or_else(|e| die(format!("write {data_path}: {e}")));
+    eprintln!("deploy-settlement: wrote {data_path}");
+
+    let deploy_key = deposit_key_env();
+    let forge_out = Command::new("forge")
+        .current_dir(&contracts_dir)
+        .args([
+            "script",
+            "script/DeployWalletSettlement.s.sol",
+            "--tc",
+            "DeployWalletSettlement",
+            "--rpc-url",
+            &rpc,
+            "--private-key",
+            &deploy_key,
+            "--broadcast",
+            "--code-size-limit",
+            "50000",
+        ])
+        .env("ROLLUP", rollup)
+        .output()
+        .unwrap_or_else(|e| die(format!("forge script failed to start: {e}")));
+    let out = String::from_utf8_lossy(&forge_out.stdout);
+    let err = String::from_utf8_lossy(&forge_out.stderr);
+    if !forge_out.status.success() {
+        die(format!(
+            "forge deploy-settlement FAILED:\nstdout: {out}\nstderr: {err}"
+        ));
+    }
+
+    let manager = out
+        .lines()
+        .chain(err.lines())
+        .find_map(|l| {
+            l.contains("MANAGER:").then(|| {
+                l.split("MANAGER:")
+                    .nth(1)
+                    .unwrap_or("")
+                    .trim()
+                    .to_string()
+            })
+        })
+        .unwrap_or_else(|| die(format!("could not parse MANAGER from forge output:\n{out}\n{err}")));
+    let verifier = out
+        .lines()
+        .chain(err.lines())
+        .find_map(|l| {
+            l.contains("VERIFIER:").then(|| {
+                l.split("VERIFIER:")
+                    .nth(1)
+                    .unwrap_or("")
+                    .trim()
+                    .to_string()
+            })
+        })
+        .unwrap_or_else(|| {
+            die(format!(
+                "could not parse VERIFIER from forge output:\n{out}\n{err}"
+            ))
+        });
+
+    write_json(
+        "settlement.json",
+        &serde_json::json!({
+            "manager": manager,
+            "verifier": verifier,
+            "rollup": rollup,
+        }),
+    );
+    println!(
+        "deploy-settlement OK: manager={manager}, verifier={verifier}, rollup={rollup}"
+    );
+}
+
+/// Co-sign an L1 deposit import (mid-channel deposit): fold the deposit into the channel's balance
+/// without closing. Usage:
+///   channel_member cosign-l1-deposit-import <recipient_slot> <amount> <depositor_hex> <out.json>
+fn cmd_cosign_l1_deposit_import(args: &[String]) {
+    let recipient_slot: usize = args
+        .get(1)
+        .and_then(|s| s.parse().ok())
+        .unwrap_or_else(|| die("cosign-l1-deposit-import <recipient_slot> <amount> <depositor_hex> [out.json]"));
+    let amount: u64 = args
+        .get(2)
+        .and_then(|s| s.parse().ok())
+        .unwrap_or_else(|| die("cosign-l1-deposit-import needs <amount>"));
+    let depositor_hex = args
+        .get(3)
+        .unwrap_or_else(|| die("cosign-l1-deposit-import needs <depositor_hex>"));
+    let out_path = args
+        .get(4)
+        .map(String::as_str)
+        .unwrap_or("l1_import_cosigned.json");
+
+    let depositor = Address::from_hex(depositor_hex)
+        .unwrap_or_else(|e| die(format!("parse depositor address: {e:?}")));
+    let (_, _, backing) = load_backing();
+    let deposit_recipient = Bytes32::from_hex(&backing.deposit_recipient)
+        .unwrap_or_else(|e| die(format!("parse deposit_recipient from backing: {e:?}")));
+
+    let deposit = Deposit {
+        deposit_index: Default::default(),
+        block_number: Default::default(),
+        depositor,
+        recipient: deposit_recipient,
+        token_index: 0,
+        amount: U256::from(amount),
+        aux_data: Bytes32::default(),
+    };
+
+    let mut state = load_state();
+    let snapshot = &state.snapshot;
+    let bp_keys = keys_for(state.controlled[0].keygen_seed);
+
+    let recipient_regev_pk = &snapshot.members[recipient_slot].regev_pk;
+    let mut rng = StdRng::seed_from_u64(0xDE_0517 ^ channel_id_env() as u64);
+    let (recipient_delta, _) = encrypt_amount(&mut rng, recipient_regev_pk, amount)
+        .unwrap_or_else(|e| die(format!("encrypt deposit amount: {e:?}")));
+
+    let built = build_l1_deposit_import(&bp_keys, snapshot, &deposit, recipient_slot, &recipient_delta, LEVEL)
+        .unwrap_or_else(|e| die(format!("build_l1_deposit_import: {e}")));
+
+    let mut fund_state = built.fund_import_state.clone();
+    let mut bundle_state = built.bundle_apply_state.clone();
+
+    for c in &state.controlled {
+        let k = keys_for(c.keygen_seed);
+        if !fund_state
+            .member_signatures
+            .iter()
+            .any(|s| s.member_slot == c.slot)
+        {
+            let sig = sign_state(&k, c.slot, &fund_state)
+                .unwrap_or_else(|e| die(format!("sign fund_import: {e}")));
+            add_signature(&mut fund_state, sig);
+        }
+        if !bundle_state
+            .member_signatures
+            .iter()
+            .any(|s| s.member_slot == c.slot)
+        {
+            let sig = sign_state(&k, c.slot, &bundle_state)
+                .unwrap_or_else(|e| die(format!("sign bundle_apply: {e}")));
+            add_signature(&mut bundle_state, sig);
+        }
+    }
+
+    verify_l1_deposit_import_transition(
+        &state.snapshot.state,
+        &state.snapshot.record,
+        &deposit,
+        &fund_state,
+        recipient_slot,
+    )
+    .unwrap_or_else(|e| die(format!("L1 deposit import transition invalid: {e}")));
+
+    state.snapshot.state = bundle_state.clone();
+    save_state(&state);
+    write_json("channel_snapshot.json", &state.snapshot);
+
+    let result = serde_json::json!({
+        "fundImportState": fund_state,
+        "bundleApplyState": bundle_state,
+    });
+    write_json(out_path, &result);
+    println!(
+        "cosign-l1-deposit-import OK: slot {} received {} deposit import. New state_version = {}.",
+        recipient_slot,
+        amount,
+        bundle_state.balance_state.state_version
+    );
+}
+
+/// Submit a partial withdrawal intent on-chain. Reads the burn metadata from `last_burn.json`
+/// (written by `cosign-burn-send`) and the settlement addresses from `settlement.json`.
+/// Usage:
+///   channel_member pw-submit <rpc_url>
+fn cmd_pw_submit(args: &[String]) {
+    let rpc = args
+        .get(1)
+        .cloned()
+        .unwrap_or_else(|| die("pw-submit needs <rpc_url>"));
+
+    let settlement: serde_json::Value = read_json("settlement.json");
+    let manager = settlement["manager"]
+        .as_str()
+        .unwrap_or_else(|| die("settlement.json missing manager"));
+    let verifier = settlement["verifier"]
+        .as_str()
+        .unwrap_or_else(|| die("settlement.json missing verifier"));
+
+    let burn: serde_json::Value = read_json("last_burn.json");
+    let burn_amount: u64 = burn["amount"]
+        .as_u64()
+        .unwrap_or_else(|| die("last_burn.json missing amount"));
+    let _burn_tx_hash = burn["tx_hash"]
+        .as_str()
+        .unwrap_or_else(|| die("last_burn.json missing tx_hash"));
+    let source_pk_g = Bytes32::from_hex(
+        burn["source_pk_g"]
+            .as_str()
+            .unwrap_or_else(|| die("last_burn.json missing source_pk_g")),
+    )
+    .unwrap_or_else(|e| die(format!("parse source_pk_g: {e:?}")));
+    let receiver_pk_g = Bytes32::from_hex(
+        burn["receiver_pk_g"]
+            .as_str()
+            .unwrap_or_else(|| die("last_burn.json missing receiver_pk_g")),
+    )
+    .unwrap_or_else(|e| die(format!("parse receiver_pk_g: {e:?}")));
+
+    let pre_burn_chain = Bytes32::from_hex(
+        burn["pre_burn_settled_tx_chain"]
+            .as_str()
+            .unwrap_or_else(|| die("last_burn.json missing pre_burn_settled_tx_chain")),
+    )
+    .unwrap_or_else(|e| die(format!("parse pre_burn_settled_tx_chain: {e:?}")));
+
+    let state = load_state();
+    let head = &state.snapshot.state;
+
+    let sender_delta_digest = Bytes32::from_hex(
+        burn["sender_delta_ct_digest"]
+            .as_str()
+            .unwrap_or_else(|| die("last_burn.json missing sender_delta_ct_digest")),
+    )
+    .unwrap_or_else(|e| die(format!("parse sender_delta_ct_digest: {e:?}")));
+    let receiver_delta_digest = Bytes32::from_hex(
+        burn["receiver_delta_ct_digest"]
+            .as_str()
+            .unwrap_or_else(|| die("last_burn.json missing receiver_delta_ct_digest")),
+    )
+    .unwrap_or_else(|e| die(format!("parse receiver_delta_ct_digest: {e:?}")));
+
+    let tx_leaf = tx_leaf_hash(source_pk_g, sender_delta_digest, receiver_pk_g, receiver_delta_digest);
+
+    let withdrawal_addr_hex = std::env::var("PW_RECIPIENT")
+        .unwrap_or_else(|_| die("PW_RECIPIENT env var required (L1 withdrawal address)"));
+    let withdrawal_addr = Address::from_hex(&withdrawal_addr_hex)
+        .unwrap_or_else(|e| die(format!("parse withdrawal address: {e:?}")));
+
+    let nullifier = {
+        let mut data = Vec::with_capacity(32 + 32);
+        data.extend_from_slice(&tx_leaf.to_bytes_be());
+        data.extend_from_slice(&pre_burn_chain.to_bytes_be());
+        let hash = keccak_hash::keccak(&data);
+        Bytes32::from_bytes_be(hash.as_bytes()).expect("nullifier from keccak")
+    };
+    let withdrawal = Withdrawal {
+        recipient: withdrawal_addr,
+        token_index: 0,
+        amount: U256::from(burn_amount),
+        nullifier,
+        aux_data: tx_leaf,
+    };
+    let auth_digest = partial_withdrawal_auth_digest(&withdrawal);
+    eprintln!("pw-submit: authDigest = {}", auth_digest.to_hex());
+
+    let post_fund = {
+        let limbs = head.channel_fund.amount.to_u32_vec();
+        limbs[7] as u64 | ((limbs[6] as u64) << 32)
+    };
+    let submit = serde_json::json!({
+        "manager": manager,
+        "verifier": verifier,
+        "close_nonce": 1u64,
+        "final_epoch": head.epoch,
+        "final_small_block_number": head.small_block_number,
+        "close_freeze_nonce": 0u64,
+        "final_channel_state_digest": head.digest.to_hex(),
+        "final_balance_state_h1": head.balance_state.h1().to_hex(),
+        "channel_fund_amount": post_fund,
+        "channel_fund_intmax_state_root": head.channel_fund.intmax_state_root.to_hex(),
+        "burn_tx_hash": Bytes32::default().to_hex(),
+        "close_withdrawal_digest": Bytes32::default().to_hex(),
+        "snapshot_medium_block_number": 0u64,
+        "final_state_version": head.balance_state.state_version,
+        "final_settled_tx_chain": head.balance_state.settled_tx_chain.to_hex(),
+        "final_settled_tx_acc_root": head.balance_state.settled_tx_accumulator_root.to_hex(),
+        "prev_settled_tx_chain": pre_burn_chain.to_hex(),
+        "withdrawal_recipient": format!("0x{}", hex::encode(withdrawal_addr.to_bytes_be())),
+        "withdrawal_token_index": 0u32,
+        "withdrawal_amount": burn_amount,
+        "withdrawal_nullifier": nullifier.to_hex(),
+        "withdrawal_aux_data": tx_leaf.to_hex(),
+    });
+    let contracts_dir = std::env::var("CONTRACTS_DIR")
+        .unwrap_or_else(|_| {
+            let exe = std::env::current_exe().unwrap_or_default();
+            let repo = exe
+                .ancestors()
+                .find(|p| p.join("contracts").is_dir())
+                .unwrap_or_else(|| die("cannot find contracts/ dir"))
+                .to_path_buf();
+            repo.join("contracts").to_string_lossy().to_string()
+        });
+    let data_path = format!("{contracts_dir}/test/data/pw_submit.json");
+    fs::write(
+        &data_path,
+        serde_json::to_string_pretty(&submit).unwrap_or_else(|e| die(e)),
+    )
+    .unwrap_or_else(|e| die(format!("write {data_path}: {e}")));
+
+    let deploy_key = deposit_key_env();
+    let forge_out = Command::new("forge")
+        .current_dir(&contracts_dir)
+        .args([
+            "script",
+            "script/SubmitPartialWithdrawal.s.sol",
+            "--rpc-url",
+            &rpc,
+            "--private-key",
+            &deploy_key,
+            "--broadcast",
+            "--code-size-limit",
+            "50000",
+        ])
+        .output()
+        .unwrap_or_else(|e| die(format!("forge pw-submit failed: {e}")));
+    let out = String::from_utf8_lossy(&forge_out.stdout);
+    let err = String::from_utf8_lossy(&forge_out.stderr);
+    if !forge_out.status.success() {
+        die(format!("forge pw-submit FAILED:\nstdout: {out}\nstderr: {err}"));
+    }
+
+    let onchain_auth = out
+        .lines()
+        .chain(err.lines())
+        .skip_while(|l| !l.contains("AUTH_DIGEST:"))
+        .nth(1)
+        .map(|l| l.trim().to_string())
+        .unwrap_or_else(|| die(format!("could not parse AUTH_DIGEST from forge output:\n{out}\n{err}")));
+
+    write_json(
+        "pw_auth.json",
+        &serde_json::json!({
+            "auth_digest": onchain_auth,
+            "manager": manager,
+            "verifier": verifier,
+            "withdrawal_recipient": format!("0x{}", hex::encode(withdrawal_addr.to_bytes_be())),
+            "withdrawal_token_index": 0u32,
+            "withdrawal_amount": burn_amount,
+            "withdrawal_nullifier": nullifier.to_hex(),
+            "withdrawal_aux_data": tx_leaf.to_hex(),
+        }),
+    );
+    println!(
+        "pw-submit OK: authDigest = {onchain_auth}, Rust = {}",
+        auth_digest.to_hex()
+    );
+}
+
+/// Finalize a partial withdrawal: advance anvil time, finalize on-chain, and check authorization.
+/// Usage:
+///   channel_member pw-finalize <rpc_url>
+fn cmd_pw_finalize(args: &[String]) {
+    let rpc = args
+        .get(1)
+        .cloned()
+        .unwrap_or_else(|| die("pw-finalize needs <rpc_url>"));
+
+    let auth: serde_json::Value = read_json("pw_auth.json");
+    let manager = auth["manager"]
+        .as_str()
+        .unwrap_or_else(|| die("pw_auth.json missing manager"));
+    let auth_digest = auth["auth_digest"]
+        .as_str()
+        .unwrap_or_else(|| die("pw_auth.json missing auth_digest"));
+
+    let deploy_key = deposit_key_env();
+
+    cast(&["rpc", "evm_increaseTime", "2", "--rpc-url", &rpc]);
+    cast(&["rpc", "evm_mine", "--rpc-url", &rpc]);
+
+    cast(&[
+        "send",
+        manager,
+        "finalizePartialWithdrawal()",
+        "--private-key",
+        &deploy_key,
+        "--rpc-url",
+        &rpc,
+    ]);
+
+    let settlement: serde_json::Value = read_json("settlement.json");
+    let rollup = settlement["rollup"]
+        .as_str()
+        .unwrap_or_else(|| die("settlement.json missing rollup"));
+
+    let check = cast(&[
+        "call",
+        rollup,
+        "partialWithdrawalAuthorized(bytes32)",
+        auth_digest,
+        "--rpc-url",
+        &rpc,
+    ]);
+    let authorized = check.trim().ends_with("1");
+    if !authorized {
+        die("on-chain partialWithdrawalAuthorized returned false");
+    }
+    eprintln!("pw-finalize: authorized on-chain. Claiming ETH…");
+
+    let recipient = auth["withdrawal_recipient"]
+        .as_str()
+        .unwrap_or_else(|| die("pw_auth.json missing withdrawal_recipient"));
+    let token_index = auth["withdrawal_token_index"]
+        .as_u64()
+        .unwrap_or(0);
+    let amount = auth["withdrawal_amount"]
+        .as_u64()
+        .unwrap_or_else(|| die("pw_auth.json missing withdrawal_amount"));
+    let nullifier = auth["withdrawal_nullifier"]
+        .as_str()
+        .unwrap_or_else(|| die("pw_auth.json missing withdrawal_nullifier"));
+    let aux_data = auth["withdrawal_aux_data"]
+        .as_str()
+        .unwrap_or_else(|| die("pw_auth.json missing withdrawal_aux_data"));
+
+    let sig = format!(
+        "claimAuthorizedWithdrawal(({},{},{},{},{}))",
+        "address", "uint32", "uint256", "bytes32", "bytes32"
+    );
+    let arg = format!(
+        "({},{},{},{},{})",
+        recipient, token_index, amount, nullifier, aux_data
+    );
+
+    let before = cast(&["balance", recipient, "--rpc-url", &rpc]);
+    cast(&[
+        "send",
+        rollup,
+        &sig,
+        &arg,
+        "--private-key",
+        &deploy_key,
+        "--rpc-url",
+        &rpc,
+    ]);
+    let after = cast(&["balance", recipient, "--rpc-url", &rpc]);
+    println!(
+        "pw-finalize OK: {} claimed {} wei. Balance: {} → {}",
+        recipient, amount, before.trim(), after.trim()
+    );
 }

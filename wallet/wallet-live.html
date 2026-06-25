@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>INTMAX3 Channel Wallet — Live</title>
+<title>INTMAX3 Channel Wallet</title>
 <style>
   :root { --bg:#0f1419; --panel:#1a2129; --fg:#e6edf3; --muted:#8b949e; --accent:#2f81f7; --ok:#3fb950; --err:#f85149; --border:#30363d; }
   * { box-sizing:border-box; }
@@ -11,6 +11,9 @@
   header { padding:16px 22px; border-bottom:1px solid var(--border); display:flex; gap:16px; align-items:baseline; flex-wrap:wrap; }
   h1 { font-size:17px; margin:0; }
   #status { color:var(--muted); } #status.ready { color:var(--ok); }
+  nav { margin-left:auto; display:flex; gap:8px; }
+  .nav-btn { background:transparent; border:1px solid var(--border); color:var(--fg); border-radius:7px; padding:6px 14px; font:13px/1 inherit; cursor:pointer; margin:0; width:auto; }
+  .nav-btn:hover { border-color:var(--accent); color:var(--accent); }
   main { max-width:760px; margin:0 auto; padding:20px; display:flex; flex-direction:column; gap:16px; }
   .panel { background:var(--panel); border:1px solid var(--border); border-radius:10px; padding:18px; }
   .panel h2 { font-size:13px; margin:0 0 12px; color:var(--accent); text-transform:uppercase; letter-spacing:.06em; }
@@ -21,91 +24,217 @@
   .row { display:flex; gap:12px; } .row > * { flex:1; }
   button { background:var(--accent); color:#fff; border:0; border-radius:7px; padding:11px 18px; font:inherit; font-weight:600; cursor:pointer; margin-top:12px; width:100%; }
   button:disabled { opacity:.45; cursor:not-allowed; }
-  .members { color:var(--muted); font-size:13px; margin-top:8px; }
-  #log { background:#0d1117; border:1px solid var(--border); border-radius:10px; padding:12px; height:200px; overflow:auto; white-space:pre-wrap; font-size:13px; }
+  .log { background:#0d1117; border:1px solid var(--border); border-radius:10px; padding:12px; height:200px; overflow:auto; white-space:pre-wrap; font-size:13px; }
   .hint { color:var(--muted); font-size:13px; }
   .ok { color:var(--ok); } .err { color:var(--err); }
+
+  .addr-display { display:flex; align-items:center; gap:8px; margin:6px 0; }
+  .addr-value { font-size:20px; font-weight:600; color:var(--accent); cursor:pointer; letter-spacing:.05em; }
+  .addr-value:hover { text-decoration:underline; }
+  .copy-hint { color:var(--muted); font-size:11px; opacity:0; transition:opacity .3s; }
+  .copy-hint.show { opacity:1; }
+
+  .view-header { display:flex; align-items:center; gap:12px; margin-bottom:8px; }
+  .view-header h2 { margin:0; font-size:17px; color:var(--fg); }
+  .back-btn { background:transparent; border:1px solid var(--border); color:var(--muted); border-radius:7px; padding:6px 12px; font:13px/1 inherit; cursor:pointer; margin:0; width:auto; }
+  .back-btn:hover { color:var(--fg); border-color:var(--fg); }
+
+  .modal-overlay { position:fixed; inset:0; background:rgba(0,0,0,.6); display:flex; align-items:center; justify-content:center; z-index:100; }
+  .modal { background:var(--panel); border:1px solid var(--border); border-radius:12px; padding:24px; width:420px; max-width:90vw; position:relative; }
+  .modal h2 { font-size:15px; margin:0 0 16px; color:var(--accent); }
+  .modal-close { position:absolute; top:12px; right:16px; background:none; border:none; color:var(--muted); font-size:20px; cursor:pointer; padding:0; margin:0; width:auto; }
+  .modal-close:hover { color:var(--fg); }
+  .hidden { display:none !important; }
+  .wallet-connected { color:var(--ok); border-color:var(--ok); }
+
+  .wallet-list { list-style:none; padding:0; margin:0; }
+  .wallet-item { display:flex; align-items:center; gap:12px; padding:12px; border:1px solid var(--border); border-radius:8px; margin-bottom:8px; cursor:pointer; background:var(--bg); transition:border-color .15s; }
+  .wallet-item:hover { border-color:var(--accent); }
+  .wallet-icon { width:32px; height:32px; border-radius:6px; }
+  .wallet-name { font-weight:600; font-size:14px; }
+  .wallet-rdns { color:var(--muted); font-size:11px; }
+  .wallet-fallback { color:var(--muted); font-size:13px; text-align:center; padding:16px 0; }
 </style>
 </head>
 <body>
 <header>
-  <h1>INTMAX3 Channel Wallet</h1>
-  <span id="status">initializing…</span>
-  <span class="hint">threads <span id="threads">?</span> · proving runs in your browser</span>
+  <h1>INTMAX3 Wallet</h1>
+  <span id="status">initializing...</span>
+  <span class="hint">threads <span id="threads">?</span></span>
+  <nav id="navBar" class="hidden">
+    <button class="nav-btn" id="navDeposit">Deposit</button>
+    <button class="nav-btn" id="navWithdraw">Withdraw</button>
+  </nav>
+  <button class="nav-btn" id="btnWallet" style="margin-left:8px">Connect Wallet</button>
 </header>
-<main>
-  <section class="panel">
-    <h2>1 · Join the Intmax channel</h2>
+
+<!-- ═══════ MAIN VIEW ═══════ -->
+<main id="mainView">
+  <section class="panel" id="panelJoin">
+    <h2>Join Channel</h2>
     <div class="row" style="margin-bottom:3px">
       <span class="hint">channel ID</span>
-      <span class="hint">faucet (tokens)</span>
+      <span class="hint">initial deposit (ETH)</span>
     </div>
     <div class="row">
-      <input id="joinChannel" type="number" value="7" title="which channel to join" />
-      <input id="openBalance" type="number" value="50" readonly title="faucet: the tokens you join with (your share of the channel's deposit-backed fund)" />
+      <input id="joinChannel" type="number" value="7" />
+      <input id="joinDeposit" type="number" step="0.000001" value="0.05" />
     </div>
     <div class="row">
-      <button id="btnOpen" disabled>Join</button>
-      <button id="btnClear">Clear</button>
+      <button id="btnOpen" disabled>Join & Deposit</button>
+      <button id="btnClear" style="background:transparent;border:1px solid var(--border);color:var(--muted)">Clear</button>
     </div>
   </section>
 
-  <section class="panel">
-    <h2>2 · Balance</h2>
-    <div class="bal"><span id="balance">—</span> <small id="balMeta"></small></div>
+  <section class="panel hidden" id="panelBalance">
+    <h2>Balance</h2>
+    <div class="bal"><span id="balance">--</span> <small>ETH</small></div>
+    <div class="addr-display">
+      <span class="hint">your address:</span>
+      <span class="addr-value" id="myAddress" title="click to copy">--</span>
+      <span class="copy-hint" id="copyHint">copied!</span>
+    </div>
+    <div class="addr-meta" id="balMeta" style="color:var(--muted);font-size:13px"></div>
     <button id="btnRefresh" disabled>Refresh</button>
   </section>
 
-  <section class="panel">
-    <h2>3 · Send</h2>
+  <section class="panel hidden" id="panelSend">
+    <h2>Send</h2>
     <div class="row" style="margin-bottom:3px">
-      <span class="hint">channel ID</span>
-      <span class="hint">slot</span>
-      <span class="hint">amount (tokens)</span>
+      <span class="hint">to (address, e.g. 7-0)</span>
+      <span class="hint">amount (ETH)</span>
     </div>
     <div class="row">
-      <input id="toChannel" type="number" value="7" title="destination channel ID (same as this channel = intra-channel; different = inter-channel)" />
-      <input id="toSlot" type="number" value="0" />
-      <input id="amount" type="number" step="0.000001" value="7" />
+      <input id="toAddr" type="text" value="7-0" placeholder="channel-slot" />
+      <input id="amount" type="number" step="0.000001" value="0.005" />
     </div>
     <button id="btnSend" disabled>Send</button>
   </section>
 
-  <div id="log"></div>
+  <div class="log" id="log"></div>
 </main>
+
+<!-- ═══════ WITHDRAW VIEW ═══════ -->
+<div id="withdrawView" class="hidden" style="max-width:760px;margin:0 auto;padding:20px">
+  <div class="view-header">
+    <button class="back-btn" id="btnBack">Back</button>
+    <h2>Withdraw</h2>
+  </div>
+
+  <section class="panel">
+    <h2>Partial Withdrawal (burn & settle on L1)</h2>
+    <div class="row" style="margin-bottom:3px">
+      <span class="hint">amount (ETH)</span>
+      <span class="hint">L1 recipient address</span>
+    </div>
+    <div class="row">
+      <input id="pwAmount" type="number" step="0.000001" value="0.005" />
+      <input id="pwAddress" type="text" placeholder="0x..." />
+    </div>
+    <button id="btnBurnSend" disabled>Step 1 -- Burn Send</button>
+    <button id="btnPwSettle" disabled>Step 2 -- Settle on L1</button>
+  </section>
+
+  <section class="panel hidden" id="panelFullWithdraw" style="margin-top:16px">
+    <h2>Full Withdrawal (close channel)</h2>
+    <p class="hint">Close the channel, settle, build the full withdrawal proof, and claim. Each step may take minutes. Only co-signing members can close.</p>
+    <button id="btnFwDeploySettlement" disabled>1 -- Deploy Settlement</button>
+    <button id="btnFwClose" disabled>2 -- Close Channel</button>
+    <button id="btnFwSettle" disabled>3 -- Settle</button>
+    <button id="btnFwWithdraw" disabled>4 -- Withdraw</button>
+    <div class="row" style="margin-top:8px">
+      <input id="fwClaimSlot" type="number" value="0" title="slot to claim" />
+      <input id="fwClaimRecipient" type="text" placeholder="0x..." style="flex:3" />
+    </div>
+    <button id="btnFwClaim" disabled>5 -- Claim</button>
+  </section>
+
+  <div class="log" id="wdLog" style="margin-top:16px"></div>
+</div>
+
+<!-- ═══════ DEPOSIT MODAL ═══════ -->
+<div id="depositModal" class="modal-overlay hidden">
+  <div class="modal">
+    <button class="modal-close" id="depositClose">&times;</button>
+    <h2>Deposit to Channel</h2>
+    <label>amount (ETH)</label>
+    <input id="depositAmount" type="number" step="0.000001" value="0.01" />
+    <button id="btnDeposit">Deposit</button>
+  </div>
+</div>
+
+<!-- ═══════ WALLET PICKER MODAL ═══════ -->
+<div id="walletModal" class="modal-overlay hidden">
+  <div class="modal">
+    <button class="modal-close" id="walletClose">&times;</button>
+    <h2>Connect Wallet</h2>
+    <ul class="wallet-list" id="walletList"></ul>
+  </div>
+</div>
 
 <script type="module">
 const $ = (id) => document.getElementById(id);
-const log = (m, cls='') => { const l=$('log'); l.innerHTML += `\n<span class="${cls}">${m}</span>`; l.scrollTop=l.scrollHeight; };
-let mySlot = 0;
-let myChannel = null;
-// The channel id every /api/* call targets (the relay routes ?channel=N to that channel's directory).
-// Set when you pick a channel to join, or restored from localStorage; kept in sync with myChannel.
-let activeCh = 7;
-// Parse this channel's id from a snapshot JSON (record.channelId) and remember it for the UI.
-function setChannelFrom(snapJson) {
-  try {
-    const c = JSON.parse(snapJson).record.channelId;
-    myChannel = (c && typeof c === 'object') ? (c.value ?? c.channelId ?? null) : c;
-    if (myChannel != null) {
-      activeCh = myChannel;
-      if ($('toChannel')) $('toChannel').value = myChannel; // default = your own channel (intra)
-    }
-  } catch (e) {}
+
+// ---- Address helpers -----------------------------------------------------------------------
+function formatAddr(channel, slot) { return channel + '-' + slot; }
+function parseAddr(addr) {
+  const m = String(addr).trim().match(/^(\d+)-(\d+)$/);
+  if (!m) throw new Error('invalid address "' + addr + '" -- use format channel-slot (e.g. 7-0)');
+  return { channel: parseInt(m[1], 10), slot: parseInt(m[2], 10) };
 }
 
-// Amounts: the protocol stores integer BASE UNITS; 1 token = 10^6 (TOKEN_DECIMALS = 6).
-const TOKEN_UNIT = 1000000;
-const fmtAmt = (base) => (Number(base) / TOKEN_UNIT).toFixed(6);            // base units -> "x.xxxxxx"
-const toBase = (tokens) => String(Math.round(Number(tokens) * TOKEN_UNIT)); // tokens -> base-unit string
+// ---- View switching ------------------------------------------------------------------------
+let currentView = 'main';
+function showView(name) {
+  currentView = name;
+  $('mainView').classList.toggle('hidden', name !== 'main');
+  $('withdrawView').classList.toggle('hidden', name !== 'withdraw');
+}
+$('navWithdraw').onclick = () => showView('withdraw');
+$('btnBack').onclick = () => showView('main');
 
-// ---- Persisted account (localStorage) ----------------------------------------------------------
-// The browser delegate's account = a 32-byte master seed kept in localStorage. The wasm derives all
-// keys deterministically from it (wallet_keygen_seeded), so reloading restores the SAME account →
-// SAME channel slot on re-import. SECURITY (testnet): this seed controls the account; it is stored
-// in plaintext in this origin's localStorage. Use the "Clear saved account" button to wipe it.
+// ---- Deposit modal -------------------------------------------------------------------------
+$('navDeposit').onclick = () => $('depositModal').classList.remove('hidden');
+$('depositClose').onclick = () => $('depositModal').classList.add('hidden');
+$('depositModal').onclick = (e) => { if (e.target === $('depositModal')) $('depositModal').classList.add('hidden'); };
+
+// ---- Log -----------------------------------------------------------------------------------
+function log(m, cls='') {
+  const el = currentView === 'withdraw' ? $('wdLog') : $('log');
+  el.innerHTML += '\n<span class="' + cls + '">' + m + '</span>';
+  el.scrollTop = el.scrollHeight;
+}
+
+// ---- Amounts (18 decimals, 1 token = 1 ETH = 10^18 wei) ------------------------------------
+const TOKEN_DECIMALS = 18;
+const TOKEN_UNIT = 10n ** 18n; // BigInt
+
+function fmtAmt(base) {
+  const b = BigInt(base);
+  const neg = b < 0n;
+  const abs = neg ? -b : b;
+  const whole = abs / TOKEN_UNIT;
+  const frac = abs % TOKEN_UNIT;
+  const fracStr = frac.toString().padStart(TOKEN_DECIMALS, '0').replace(/0+$/, '') || '0';
+  return (neg ? '-' : '') + whole.toString() + '.' + fracStr;
+}
+
+function toBase(tokens) {
+  const s = String(tokens).trim();
+  if (s === '' || s === '0') return '0';
+  const neg = s.startsWith('-');
+  const abs = neg ? s.slice(1) : s;
+  const [wholePart, fracPart] = abs.split('.');
+  const w = BigInt(wholePart || '0') * TOKEN_UNIT;
+  if (!fracPart) return (neg ? -w : w).toString();
+  const padded = fracPart.padEnd(TOKEN_DECIMALS, '0').slice(0, TOKEN_DECIMALS);
+  const f = BigInt(padded);
+  return (neg ? -(w + f) : w + f).toString();
+}
+
+// ---- LocalStorage --------------------------------------------------------------------------
 const SEED_KEY = 'intmax_channel_seed';
-const CH_KEY = 'intmax_channel_id'; // which channel this saved account joined (7 or 8)
+const CH_KEY = 'intmax_channel_id';
 function savedChannel() { return parseInt(localStorage.getItem(CH_KEY) || '', 10) || null; }
 function saveChannel(ch) { localStorage.setItem(CH_KEY, String(ch)); }
 function channelSeed() {
@@ -120,28 +249,187 @@ function channelSeed() {
 function hasSavedAccount() { return !!localStorage.getItem(SEED_KEY); }
 function clearSavedAccount() { localStorage.removeItem(SEED_KEY); localStorage.removeItem(CH_KEY); }
 
-// On load, if a saved account exists AND the channel still has us as a member, restore the SAME slot.
-async function tryRestore() {
-  if (!hasSavedAccount()) return false;
-  // Target the channel this saved account actually joined (so the restore queries the right one).
-  if (savedChannel()) { activeCh = savedChannel(); if ($('joinChannel')) $('joinChannel').value = activeCh; }
-  try {
-    await call('keygenSeeded', { seed: channelSeed() });
-    const snap = await api('/api/snapshot', null, 'GET');
-    setChannelFrom(snap);
-    const r = JSON.parse(await call('importChannel', { snapshotJson: snap }));
-    mySlot = r.slot; showBalance(r);
-    $('btnSend').disabled = false; $('btnRefresh').disabled = false;
-    $('btnOpen').textContent = 'Re-join';
-    log(`restored saved account → channel ${myChannel ?? '?'}, slot ${r.slot}, balance ${fmtAmt(r.balance)} (same key/slot across reloads)`, 'ok');
-    return true;
-  } catch (e) {
-    log('saved account present but no matching channel to restore (relay reset or not yet joined) — click join to (re)create.', '');
-    return false;
+// ---- Wallet connection (EIP-6963 multi-provider) -------------------------------------------
+let walletAccount = null;
+let walletProvider = null; // the selected EIP-1193 provider
+let walletName = '';
+const discoveredWallets = []; // { info, provider } from EIP-6963
+
+const ZERO_B32 = '0x0000000000000000000000000000000000000000000000000000000000000000';
+const DEPOSIT_SELECTOR = '0x48b8027b'; // deposit(bytes32,uint32,uint256,bytes32)
+
+function hasWallet() { return walletProvider !== null || discoveredWallets.length > 0 || typeof window.ethereum !== 'undefined'; }
+
+// EIP-6963: listen for wallet announcements
+window.addEventListener('eip6963:announceProvider', (e) => {
+  const { info, provider } = e.detail;
+  if (discoveredWallets.some(w => w.info.uuid === info.uuid)) return;
+  discoveredWallets.push({ info, provider });
+});
+window.dispatchEvent(new Event('eip6963:requestProvider'));
+
+function renderWalletList() {
+  const ul = $('walletList');
+  ul.innerHTML = '';
+  const wallets = discoveredWallets.length > 0 ? discoveredWallets : [];
+  if (wallets.length === 0 && typeof window.ethereum !== 'undefined') {
+    wallets.push({
+      info: { name: 'Browser Wallet', icon: '', rdns: 'window.ethereum', uuid: '_legacy' },
+      provider: window.ethereum,
+    });
+  }
+  if (wallets.length === 0) {
+    ul.innerHTML = '<li class="wallet-fallback">No wallet detected.<br>Install MetaMask, Coinbase Wallet, Brave Wallet, etc.</li>';
+    return;
+  }
+  for (const w of wallets) {
+    const li = document.createElement('li');
+    li.className = 'wallet-item';
+    li.innerHTML = (w.info.icon
+      ? '<img class="wallet-icon" src="' + w.info.icon + '" alt="" />'
+      : '<div class="wallet-icon" style="background:var(--border);border-radius:6px"></div>')
+      + '<div><div class="wallet-name">' + w.info.name + '</div>'
+      + '<div class="wallet-rdns">' + (w.info.rdns || '') + '</div></div>';
+    li.onclick = () => selectWallet(w);
+    ul.appendChild(li);
   }
 }
 
-// ---- worker plumbing (same protocol as wallet-worker.js) ----
+async function selectWallet(w) {
+  $('walletModal').classList.add('hidden');
+  walletProvider = w.provider;
+  walletName = w.info.name;
+  try {
+    const accounts = await walletProvider.request({ method: 'eth_requestAccounts' });
+    if (!accounts || !accounts.length) throw new Error('wallet connection rejected');
+    walletAccount = accounts[0];
+    updateWalletButton();
+    fillRecipientFields();
+    watchAccountChanges();
+    log('connected ' + walletName + ': ' + walletAccount, 'ok');
+  } catch (e) {
+    walletProvider = null; walletAccount = null; walletName = '';
+    log('wallet connection failed: ' + e.message, 'err');
+  }
+}
+
+function fillRecipientFields() {
+  if (walletAccount) {
+    if (!$('pwAddress').value) $('pwAddress').value = walletAccount;
+    if (!$('fwClaimRecipient').value) $('fwClaimRecipient').value = walletAccount;
+  }
+}
+
+function updateWalletButton() {
+  if (walletAccount) {
+    $('btnWallet').textContent = walletAccount.slice(0,6) + '...' + walletAccount.slice(-4);
+    $('btnWallet').classList.add('wallet-connected');
+    $('btnWallet').title = walletName + ' — click to switch';
+  } else {
+    $('btnWallet').textContent = 'Connect Wallet';
+    $('btnWallet').classList.remove('wallet-connected');
+    $('btnWallet').title = '';
+  }
+}
+
+$('btnWallet').onclick = () => { renderWalletList(); $('walletModal').classList.remove('hidden'); };
+$('walletClose').onclick = () => $('walletModal').classList.add('hidden');
+$('walletModal').onclick = (e) => { if (e.target === $('walletModal')) $('walletModal').classList.add('hidden'); };
+
+// Track account changes on the active provider
+function watchAccountChanges() {
+  if (walletProvider && walletProvider.on) {
+    walletProvider.on('accountsChanged', (accs) => {
+      walletAccount = accs[0] || null;
+      updateWalletButton();
+      fillRecipientFields();
+      if (!walletAccount) { walletProvider = null; walletName = ''; }
+    });
+  }
+}
+
+async function ensureWallet() {
+  if (walletProvider && walletAccount) return;
+  renderWalletList();
+  $('walletModal').classList.remove('hidden');
+  await new Promise((resolve, reject) => {
+    const check = setInterval(() => {
+      if (walletProvider && walletAccount) { clearInterval(check); resolve(); }
+      if ($('walletModal').classList.contains('hidden') && !walletAccount) { clearInterval(check); reject(new Error('wallet not selected')); }
+    }, 200);
+  });
+}
+
+function padHex(hex, bytes) {
+  const h = hex.startsWith('0x') ? hex.slice(2) : hex;
+  return h.padStart(bytes * 2, '0');
+}
+
+function encodeDepositCall(recipient, tokenIndex, amount, auxData) {
+  const recipientHex = padHex(recipient, 32);
+  const tokenHex = padHex(tokenIndex.toString(16), 32);
+  const amountHex = padHex(BigInt(amount).toString(16), 32);
+  const auxHex = padHex(auxData, 32);
+  return DEPOSIT_SELECTOR + recipientHex + tokenHex + amountHex + auxHex;
+}
+
+async function sendDepositViaWallet(amount) {
+  await ensureWallet();
+  const info = JSON.parse(await api('/api/deposit-info', null, 'GET'));
+  const currentChainId = await walletProvider.request({ method: 'eth_chainId' });
+  const targetChainId = '0x' + info.chainId.toString(16);
+  if (currentChainId !== targetChainId) {
+    try {
+      await walletProvider.request({ method: 'wallet_switchEthereumChain', params: [{ chainId: targetChainId }] });
+    } catch (switchErr) {
+      if (switchErr.code === 4902) {
+        await walletProvider.request({
+          method: 'wallet_addEthereumChain',
+          params: [{ chainId: targetChainId, chainName: 'Anvil Local', rpcUrls: [info.rpc], nativeCurrency: { name: 'ETH', symbol: 'ETH', decimals: 18 } }],
+        });
+      } else { throw switchErr; }
+    }
+  }
+  const data = encodeDepositCall(info.depositRecipient, 0, amount, ZERO_B32);
+  const txHash = await walletProvider.request({
+    method: 'eth_sendTransaction',
+    params: [{
+      from: walletAccount,
+      to: info.rollup,
+      value: '0x' + BigInt(amount).toString(16),
+      data: data,
+    }],
+  });
+  log('deposit tx sent via ' + walletName + ': ' + txHash, 'ok');
+  log('waiting for confirmation...');
+  let receipt = null;
+  for (let i = 0; i < 60; i++) {
+    receipt = await walletProvider.request({ method: 'eth_getTransactionReceipt', params: [txHash] });
+    if (receipt) break;
+    await new Promise(r => setTimeout(r, 1000));
+  }
+  if (!receipt) throw new Error('tx not confirmed after 60s');
+  if (receipt.status === '0x0') throw new Error('deposit tx reverted');
+  log('deposit confirmed in block ' + parseInt(receipt.blockNumber, 16), 'ok');
+  return { txHash, depositor: walletAccount };
+}
+
+// ---- State ---------------------------------------------------------------------------------
+let mySlot = 0;
+let myChannel = null;
+let activeCh = 7;
+let sendPhase = 'Proving';
+let fwSettlement = null;
+
+function setChannelFrom(snapJson) {
+  try {
+    const c = JSON.parse(snapJson).record.channelId;
+    myChannel = (c && typeof c === 'object') ? (c.value ?? c.channelId ?? null) : c;
+    if (myChannel != null) activeCh = myChannel;
+  } catch (e) {}
+}
+
+// ---- Worker plumbing -----------------------------------------------------------------------
 const worker = new Worker('./wallet-worker.js', { type: 'module' });
 const handlers = {};
 function call(action, payload={}) {
@@ -149,7 +437,7 @@ function call(action, payload={}) {
 }
 worker.onmessage = (e) => {
   const d = e.data;
-  if (d.type === 'progress') { const s=$('status'); s.dataset.base = d.msg; s.textContent = `${d.msg} ${s.dataset.elapsed||''}`; return; }
+  if (d.type === 'progress') { const s=$('status'); s.dataset.base = d.msg; s.textContent = d.msg + ' ' + (s.dataset.elapsed||''); return; }
   if (d.type === 'ready') { try { clearInterval(_initTick); } catch(e){} $('status').textContent='ready'; $('status').className='ready'; $('threads').textContent=d.threads; $('btnOpen').disabled=false; tryRestore(); return; }
   if (d.type === 'log') { return; }
   if (d.type === 'result') handlers[d.action]?.resolve(d.result);
@@ -157,178 +445,222 @@ worker.onmessage = (e) => {
 };
 worker.onerror = (e) => log('worker error: '+e.message, 'err');
 
+// ---- API -----------------------------------------------------------------------------------
 async function api(pathname, body, method='POST') {
   const opts = { method, headers:{'Content-Type':'application/json'} };
   if (method !== 'GET') opts.body = body;
-  // Route every /api/* call to the active channel's relay directory.
   const url = pathname.startsWith('/api/')
     ? pathname + (pathname.includes('?') ? '&' : '?') + 'channel=' + activeCh
     : pathname;
   const r = await fetch(url, opts);
   const text = await r.text();
   if (!r.ok) throw new Error('relay '+pathname+': '+text);
-  return text; // pass JSON text straight back into the wasm calls
-}
-function showBalance(r) {
-  $('balance').textContent = fmtAmt(r.balance);
-  $('balMeta').textContent = `· channel ${myChannel ?? '?'} · slot ${r.slot} · v${r.stateVersion} · ${r.canSend ? 'ready to send' : 'refresh to send'}`;
+  return text;
 }
 
-// Log the channel's REAL on-chain deposit backing (detail2 §F-1) — proof it is genuinely funded.
+// ---- UI updates ----------------------------------------------------------------------------
+function showBalance(r) {
+  $('balance').textContent = fmtAmt(r.balance);
+  const addr = formatAddr(myChannel ?? activeCh, r.slot);
+  $('myAddress').textContent = addr;
+  $('balMeta').textContent = 'channel ' + (myChannel ?? '?') + ' / slot ' + r.slot + ' / v' + r.stateVersion + ' / ' + (r.canSend ? 'ready' : 'refresh to send');
+}
+
+function showJoined() {
+  $('panelJoin').classList.add('hidden');
+  $('panelBalance').classList.remove('hidden');
+  $('panelSend').classList.remove('hidden');
+  $('navBar').classList.remove('hidden');
+  $('btnSend').disabled = false;
+  $('btnRefresh').disabled = false;
+  $('btnBurnSend').disabled = false;
+  const isCoSigner = mySlot < 3;
+  if (isCoSigner) {
+    $('panelFullWithdraw').classList.remove('hidden');
+    $('btnFwDeploySettlement').disabled = false;
+  }
+  fillRecipientFields();
+}
+
+$('myAddress').onclick = async () => {
+  try {
+    await navigator.clipboard.writeText($('myAddress').textContent);
+    $('copyHint').classList.add('show');
+    setTimeout(() => $('copyHint').classList.remove('show'), 1500);
+  } catch(e) {}
+};
+
+async function step(label, fn) {
+  const t = Date.now();
+  log(label + '...');
+  const r = await fn();
+  log('  ' + label + ' done (' + ((Date.now()-t)/1000).toFixed(1) + 's)');
+  return r;
+}
+
+// ---- Backing info --------------------------------------------------------------------------
 async function showBacking() {
   try {
     const b = JSON.parse(await api('/api/backing', null, 'GET'));
     const rollup = b.rollup || '', tx = b.depositTx || b.deposit_tx || '';
-    log(`✓ backed by a REAL on-chain ETH deposit · fund ${fmtAmt(b.fund)}` + (rollup ? ` · IntmaxRollup ${rollup.slice(0,8)}… tx ${tx.slice(0,10)}…` : ''), 'ok');
+    log('backed by real on-chain ETH deposit / fund ' + fmtAmt(b.fund) + (rollup ? ' / rollup ' + rollup.slice(0,8) + '...' : ''), 'ok');
   } catch (e) {
-    log('no deposit backing yet — the relay runs setup-backing on first launch (~30s); reload shortly.', 'err');
+    log('no deposit backing yet -- relay runs setup-backing on first launch (~30s); reload shortly.', 'err');
   }
 }
 
-async function step(label, fn) {
-  const t = Date.now();
-  log(label + '…');
-  const r = await fn();
-  log(`  ${label} done (${((Date.now()-t)/1000).toFixed(1)}s)`);
-  return r;
+// ---- Try restore ---------------------------------------------------------------------------
+async function tryRestore() {
+  if (!hasSavedAccount()) return false;
+  if (savedChannel()) { activeCh = savedChannel(); if ($('joinChannel')) $('joinChannel').value = activeCh; }
+  try {
+    await call('keygenSeeded', { seed: channelSeed() });
+    const snap = await api('/api/snapshot', null, 'GET');
+    setChannelFrom(snap);
+    const r = JSON.parse(await call('importChannel', { snapshotJson: snap }));
+    mySlot = r.slot; showBalance(r);
+    showJoined();
+    log('restored account ' + formatAddr(myChannel ?? activeCh, r.slot) + ' / balance ' + fmtAmt(r.balance), 'ok');
+    return true;
+  } catch (e) {
+    log('saved account present but channel not found -- click Join to create.', '');
+    return false;
+  }
 }
+
+// ---- JOIN ----------------------------------------------------------------------------------
 $('btnOpen').onclick = async () => {
   const t0 = Date.now();
-  const tick = setInterval(() => { $('btnOpen').textContent = `Opening… ${Math.round((Date.now()-t0)/1000)}s`; }, 250);
+  let tick = setInterval(() => { $('btnOpen').textContent = 'Joining... ' + Math.round((Date.now()-t0)/1000) + 's'; }, 250);
   try {
     $('btnOpen').disabled = true;
-    // Join the channel the user picked (default 7). Persist it so a reload restores the right channel.
     activeCh = parseInt($('joinChannel').value, 10) || 7;
     saveChannel(activeCh);
-    log(`joining channel ${activeCh}…`);
-    // Derive keys from the PERSISTED seed (localStorage) so reloading restores the SAME account/slot.
-    await step('generate keys (from your saved account seed)', () => call('keygenSeeded', { seed: channelSeed() }));
-    const contribution = await step('encrypt opening balance', () => call('genesisContribution', { balance: toBase($('openBalance').value) }));
-    // The browser is the DELEGATE: the CLI's three members sign the genesis and return the
-    // fully-signed snapshot directly — the delegate does NOT co-sign state.
-    const snapshot = await step('CLI builds channel + 3 members co-sign genesis', () => api('/api/init', contribution));
+    const depositTokens = parseFloat($('joinDeposit').value) || 0;
+
+    log('joining channel ' + activeCh + '...');
+    await step('generate keys', () => call('keygenSeeded', { seed: channelSeed() }));
+    const contribution = await step('genesis contribution (balance 0)', () => call('genesisContribution', { balance: toBase('0') }));
+    const snapshot = await step('CLI co-signs genesis', () => api('/api/init', contribution));
     setChannelFrom(snapshot);
-    const r = JSON.parse(await step('import & verify channel (as delegate)', () => call('importChannel', { snapshotJson: snapshot })));
+    const r = JSON.parse(await step('import channel', () => call('importChannel', { snapshotJson: snapshot })));
     mySlot = r.slot;
     showBalance(r);
-    log(`you are delegate slot ${r.slot} (co-signers: slots 0,1,2). Open another tab to join as slot ${r.slot+1}.`);
-    $('btnSend').disabled = false;
-    $('btnRefresh').disabled = false;
-    log(`joined as delegate slot ${r.slot} in ${Math.round((Date.now()-t0)/1000)}s. balance ${fmtAmt(r.balance)}. (Open more tabs BEFORE sending — each becomes a new delegate slot.)`, 'ok');
-  } catch (e) { log('open failed: '+e.message, 'err'); $('btnOpen').disabled=false; }
+    showJoined();
+    log('joined as ' + formatAddr(myChannel ?? activeCh, r.slot) + ' (balance 0)', 'ok');
+
+    const depositAmt = toBase(String(depositTokens || '0.01'));
+    clearInterval(tick);
+    tick = setInterval(() => { $('btnOpen').textContent = 'Depositing... ' + Math.round((Date.now()-t0)/1000) + 's'; }, 250);
+    log('sending L1 deposit via wallet (' + fmtAmt(depositAmt) + ' ETH)...');
+    const dr = await sendDepositViaWallet(depositAmt);
+
+    clearInterval(tick);
+    tick = setInterval(() => { $('btnOpen').textContent = 'Importing... ' + Math.round((Date.now()-t0)/1000) + 's'; }, 250);
+    log('importing deposit into channel...');
+    const snap2 = await api('/api/import-deposit', JSON.stringify({ recipientSlot: mySlot, depositor: dr.depositor, amount: depositAmt }));
+    setChannelFrom(snap2);
+    const r2 = JSON.parse(await call('importChannel', { snapshotJson: snap2 }));
+    mySlot = r2.slot; showBalance(r2);
+    log('deposit imported -- balance ' + fmtAmt(r2.balance), 'ok');
+
+    log('ready! address ' + formatAddr(myChannel ?? activeCh, mySlot) + ' (' + Math.round((Date.now()-t0)/1000) + 's)', 'ok');
+  } catch (e) { log('join failed: '+e.message, 'err'); $('btnOpen').disabled=false; }
   clearInterval(tick);
-  $('btnOpen').textContent = 'Join';
+  $('btnOpen').textContent = 'Join & Deposit';
+  $('btnOpen').disabled = false;
 };
 
 $('btnClear').onclick = () => {
   clearSavedAccount();
-  log('cleared saved account from localStorage — reloading for a fresh account/slot.', '');
+  log('cleared saved account -- reloading...', '');
   setTimeout(() => location.reload(), 400);
 };
 
+// ---- SEND ----------------------------------------------------------------------------------
 async function attemptSend(to, amt) {
-  // 1. Re-import the CURRENT channel head (picks up other tabs' sends + any joined delegates).
   const headSnap = await api('/api/snapshot', null, 'GET'); setChannelFrom(headSnap);
   let rr = JSON.parse(await call('importChannel', { snapshotJson: headSnap }));
   mySlot = rr.slot; showBalance(rr);
-  // 2. If we received funds (receive-only), AUTO balance-refresh: re-encrypt our slot to clean digits
-  //    (value preserved, proven) + members co-sign, so we can spend again.
   if (!rr.canSend) {
-    log('  refresh needed (re-encrypt your slot) so you can send…');
+    log('  refresh needed before sending...');
     sendPhase = 'Proving';
     const refreshPayload = await call('refresh');
-    sendPhase = 'Waiting for channel update';
+    sendPhase = 'Waiting for co-sign';
     const cosigned = await api('/api/refresh-cosign', refreshPayload);
     rr = JSON.parse(await call('finalize', { stateJson: cosigned }));
     mySlot = rr.slot; showBalance(rr);
     if (!rr.canSend) throw new Error('still cannot send after refresh');
-    log(`  refreshed — balance ${rr.balance}, ready to send`, 'ok');
+    log('  refreshed -- ready to send', 'ok');
   }
-  // 3. Send.
   sendPhase = 'Proving';
   const payload = await call('send', { recipientSlot: to, amount: toBase(amt) });
-  log('other members co-signing…');
-  sendPhase = 'Waiting for channel update';
+  log('  co-signing...');
+  sendPhase = 'Waiting for co-sign';
   const finalState = await api('/api/cosign', payload);
   return JSON.parse(await call('finalize', { stateJson: finalState }));
 }
 
-// Inter-channel send: debit our slot in channel `myCh`, credit slot `to` in channel `toCh`.
 async function attemptInterChannelSend(toCh, to, amt) {
-  // 1. Re-import our (source) channel head, then ALWAYS balance-refresh: re-encrypt our own slot so
-  //    the in-session balance witness PROVABLY matches the channel's stored ciphertext. The E-2
-  //    channel-update proof needs that exact match; a genesis/imported witness can be out of sync
-  //    (the import can_send check only compares plaintext), which the refresh deterministically fixes.
   const headSnap = await api('/api/snapshot', null, 'GET'); setChannelFrom(headSnap);
   let rr = JSON.parse(await call('importChannel', { snapshotJson: headSnap }));
   mySlot = rr.slot; showBalance(rr);
-  log('  syncing your balance witness (refresh) so the cross-channel proof matches…');
+  log('  syncing balance witness (refresh)...');
   sendPhase = 'Proving';
   const refreshPayload = await call('refresh');
-  sendPhase = 'Waiting for channel update';
+  sendPhase = 'Waiting for co-sign';
   const cosigned = await api('/api/refresh-cosign', refreshPayload);
   rr = JSON.parse(await call('finalize', { stateJson: cosigned }));
   mySlot = rr.slot; showBalance(rr);
-  if (!rr.canSend) throw new Error('could not obtain a spendable balance after refresh');
-  // 2. Read the DESTINATION channel B snapshot → the recipient slot's Regev pk + pk_g.
-  const bSnapRaw = await fetch(`/api/snapshot?channel=${toCh}`).then(r => r.text());
-  if (!bSnapRaw || bSnapRaw[0] !== '{') throw new Error(`destination channel ${toCh} not available`);
+  if (!rr.canSend) throw new Error('could not obtain spendable balance after refresh');
+  const bSnapRaw = await fetch('/api/snapshot?channel=' + toCh).then(r => r.text());
+  if (!bSnapRaw || bSnapRaw[0] !== '{') throw new Error('destination channel ' + toCh + ' not available');
   const bSnap = JSON.parse(bSnapRaw);
   const bMember = (bSnap.members || []).find(m => m.slot === to);
-  if (!bMember) throw new Error(`channel ${toCh} has no member at slot ${to}`);
+  if (!bMember) throw new Error('channel ' + toCh + ' has no member at slot ' + to);
   const destRecipientJson = JSON.stringify({ regevPk: bMember.regevPk, pkG: bMember.pkG });
-  // 3. Build the debit + the cross-channel transfer descriptor (E-2 proof, in your browser).
   sendPhase = 'Proving';
   const built = JSON.parse(await call('sendInterChannel', { toChannel: toCh, toSlot: to, amount: toBase(amt), destRecipientJson }));
-  // 4. SINGLE atomic transfer: the relay (which owns BOTH channels) co-signs A's debit against A's
-  //    COMMITTED head AND credits channel B's slot in one command — no request-body aSignedState is
-  //    ever trusted (CRITICAL-1). ?channel=myCh = the SOURCE channel A; the relay resolves B from the
-  //    descriptor's destination id. Returns { aHead, bSnapshot }; nothing persists unless both legs pass.
-  log(`  relay co-signing debit (ch${myChannel}) + crediting slot ${to} (ch${toCh}) atomically…`);
-  sendPhase = 'Waiting for channel update';
-  const sendRes = await fetch(`/api/inter/send?channel=${myChannel}`, {
+  log('  relay co-signing debit + credit atomically...');
+  sendPhase = 'Waiting for co-sign';
+  const sendRes = await fetch('/api/inter/send?channel=' + (myChannel ?? activeCh), {
     method: 'POST', headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ debitPayload: built.debitPayload, transferDescriptor: built.transferDescriptor }),
   });
   const sendTxt = await sendRes.text();
   if (!sendRes.ok) throw new Error('inter-channel transfer failed: ' + sendTxt);
   const transfer = JSON.parse(sendTxt);
-  // 5. Commit OUR debit locally (channel A's co-signed new head returned by the relay).
   return JSON.parse(await call('finalize', { stateJson: JSON.stringify(transfer.aHead) }));
 }
 
-// Button label phase: "Proving" during the in-browser ZK proving, "Waiting for channel update" while
-// the channel members co-sign on the relay — so the label honestly reflects what's happening.
-let sendPhase = 'Proving';
 $('btnSend').onclick = async () => {
   const t0 = Date.now();
   sendPhase = 'Proving';
-  const tick = setInterval(() => { $('btnSend').textContent = `${sendPhase}… ${Math.round((Date.now()-t0)/1000)}s`; }, 250);
+  const tick = setInterval(() => { $('btnSend').textContent = sendPhase + '... ' + Math.round((Date.now()-t0)/1000) + 's'; }, 250);
   try {
     $('btnSend').disabled = true;
-    const toCh = +$('toChannel').value, to = +$('toSlot').value, amt = $('amount').value;
+    const dest = parseAddr($('toAddr').value);
+    const amt = $('amount').value;
     const myCh = myChannel ?? activeCh;
     let r;
-    if (toCh !== myCh) {
-      // INTER-CHANNEL: a different channel's slot is a different person — debit here, credit there.
-      log(`inter-channel send ${amt} → channel ${toCh} slot ${to} (debit ch${myCh} → credit ch${toCh})…`);
-      r = await attemptInterChannelSend(toCh, to, amt);
+    if (dest.channel !== myCh) {
+      log('send ' + amt + ' -> ' + formatAddr(dest.channel, dest.slot) + ' (inter-channel)...');
+      r = await attemptInterChannelSend(dest.channel, dest.slot, amt);
       showBalance(r);
-      log(`sent ${amt} from channel ${myCh} to channel ${toCh} slot ${to} in ${Math.round((Date.now()-t0)/1000)}s. new balance ${fmtAmt(r.balance)}`, 'ok');
+      log('sent ' + amt + ' to ' + formatAddr(dest.channel, dest.slot) + ' (' + Math.round((Date.now()-t0)/1000) + 's) -- balance ' + fmtAmt(r.balance), 'ok');
     } else {
-      // INTRA-CHANNEL: same channel.
-      if (to === mySlot) throw new Error(`cannot send to yourself (channel ${myCh}, slot ${mySlot})`);
-      log(`Regev E-1 proof + your BabyBear hash-sig ZK proof for ${amt} → channel ${toCh} slot ${to}…`);
+      if (dest.slot === mySlot) throw new Error('cannot send to yourself (' + formatAddr(myCh, mySlot) + ')');
+      log('send ' + amt + ' -> ' + formatAddr(dest.channel, dest.slot) + '...');
       try {
-        r = await attemptSend(to, amt);
+        r = await attemptSend(dest.slot, amt);
       } catch (e) {
         if (/does not extend the current head/.test(e.message)) {
-          log('  head moved (another tab sent first) — re-importing + retrying…');
-          r = await attemptSend(to, amt);
+          log('  head moved -- retrying...');
+          r = await attemptSend(dest.slot, amt);
         } else { throw e; }
       }
       showBalance(r);
-      log(`sent ${amt} to slot ${to} in ${Math.round((Date.now()-t0)/1000)}s. new balance ${fmtAmt(r.balance)}`, 'ok');
+      log('sent ' + amt + ' to ' + formatAddr(dest.channel, dest.slot) + ' (' + Math.round((Date.now()-t0)/1000) + 's) -- balance ' + fmtAmt(r.balance), 'ok');
     }
   } catch (e) { log('send failed: '+e.message, 'err'); }
   clearInterval(tick);
@@ -336,35 +668,191 @@ $('btnSend').onclick = async () => {
   $('btnSend').disabled = false;
 };
 
+// ---- DEPOSIT MODAL -------------------------------------------------------------------------
+$('btnDeposit').onclick = async () => {
+  const t0 = Date.now();
+  let phase = 'Depositing';
+  const tick = setInterval(() => { $('btnDeposit').textContent = phase + '... ' + Math.round((Date.now()-t0)/1000) + 's'; }, 250);
+  try {
+    $('btnDeposit').disabled = true;
+    const amt = toBase($('depositAmount').value);
+    log('sending L1 deposit via wallet (' + $('depositAmount').value + ' ETH)...');
+    const dr = await sendDepositViaWallet(amt);
+
+    phase = 'Importing';
+    log('importing deposit into channel (slot ' + mySlot + ')...');
+    const snap = await api('/api/import-deposit', JSON.stringify({ recipientSlot: mySlot, depositor: dr.depositor, amount: amt }));
+    setChannelFrom(snap);
+    const r = JSON.parse(await call('importChannel', { snapshotJson: snap }));
+    mySlot = r.slot; showBalance(r);
+    log('deposit imported -- balance ' + fmtAmt(r.balance), 'ok');
+    $('depositModal').classList.add('hidden');
+  } catch (e) { log('deposit failed: '+e.message, 'err'); }
+  clearInterval(tick);
+  $('btnDeposit').textContent = 'Deposit';
+  $('btnDeposit').disabled = false;
+};
+
+// ---- REFRESH -------------------------------------------------------------------------------
 $('btnRefresh').onclick = async () => {
   try {
     $('btnRefresh').disabled = true;
     const latest = await api('/api/snapshot', null, 'GET');
     setChannelFrom(latest);
     const r = JSON.parse(await call('importChannel', { snapshotJson: latest }));
-    mySlot = r.slot;
-    showBalance(r);
-    log(`refreshed: you are slot ${r.slot}, balance ${fmtAmt(r.balance)}` + (r.canSend ? '' : ' (you received funds — a balance refresh is needed before you can send again)'), 'ok');
+    mySlot = r.slot; showBalance(r);
+    log('refreshed: ' + formatAddr(myChannel ?? activeCh, r.slot) + ' / balance ' + fmtAmt(r.balance) + (r.canSend ? '' : ' (received funds -- refresh needed before next send)'), 'ok');
   } catch (e) { log('refresh failed: '+e.message, 'err'); }
   $('btnRefresh').disabled = false;
 };
 
-// Thread count: each rayon thread spawns a Web Worker that re-instantiates the wasm, so on a phone
-// (weaker CPU + tighter memory) a high core count makes "initializing" drag. Cap it — fewer threads
-// = much faster init; proving is a bit slower but mobile proving is the secondary path anyway.
+// ---- PARTIAL WITHDRAWAL (withdraw view) ----------------------------------------------------
+$('btnBurnSend').onclick = async () => {
+  const t0 = Date.now();
+  sendPhase = 'Proving burn';
+  const tick = setInterval(() => { $('btnBurnSend').textContent = sendPhase + '... ' + Math.round((Date.now()-t0)/1000) + 's'; }, 250);
+  try {
+    $('btnBurnSend').disabled = true;
+    const amt = $('pwAmount').value;
+    const addr = $('pwAddress').value;
+    const headSnap = await api('/api/snapshot', null, 'GET'); setChannelFrom(headSnap);
+    let rr = JSON.parse(await call('importChannel', { snapshotJson: headSnap }));
+    mySlot = rr.slot; showBalance(rr);
+    if (!rr.canSend) {
+      log('  refresh needed before burn...');
+      sendPhase = 'Refreshing';
+      const refreshPayload = await call('refresh');
+      const cosigned = await api('/api/refresh-cosign', refreshPayload);
+      rr = JSON.parse(await call('finalize', { stateJson: cosigned }));
+      mySlot = rr.slot; showBalance(rr);
+    }
+    log('burn send ' + amt + ' ETH -> ' + addr + '...');
+    sendPhase = 'Proving burn';
+    const built = JSON.parse(await call('burnSend', { amount: toBase(amt), withdrawalAddress: addr }));
+    log('  burn proved -- co-signing...');
+    sendPhase = 'Co-signing';
+    const cosigned = await api('/api/cosign-burn', JSON.stringify({
+      debitPayload: built.debitPayload,
+      transferDescriptor: built.transferDescriptor,
+    }));
+    const r = JSON.parse(await call('finalize', { stateJson: cosigned }));
+    mySlot = r.slot; showBalance(r);
+    log('burn complete -- balance ' + fmtAmt(r.balance) + '. Click "Settle on L1" to finalize.', 'ok');
+    $('btnPwSettle').disabled = false;
+  } catch (e) { log('burn send failed: '+e.message, 'err'); }
+  clearInterval(tick);
+  $('btnBurnSend').textContent = 'Step 1 -- Burn Send';
+  $('btnBurnSend').disabled = false;
+};
+
+$('btnPwSettle').onclick = async () => {
+  const t0 = Date.now();
+  const tick = setInterval(() => { $('btnPwSettle').textContent = 'Settling... ' + Math.round((Date.now()-t0)/1000) + 's'; }, 250);
+  try {
+    $('btnPwSettle').disabled = true;
+    const recipient = $('pwAddress').value.trim();
+    if (!recipient || !recipient.startsWith('0x')) { log('enter a valid L1 recipient address', 'err'); return; }
+    log('submitting partial withdrawal...');
+    const submit = JSON.parse(await api('/api/pw-submit', JSON.stringify({ recipient })));
+    log('  submitted -- authDigest = ' + (submit.auth_digest || '?'), 'ok');
+    log('finalizing...');
+    const fin = JSON.parse(await api('/api/pw-finalize', '{}'));
+    log('partial withdrawal finalized -- authDigest ' + (fin.authDigest || '?'), 'ok');
+  } catch (e) { log('pw-settle failed: '+e.message, 'err'); }
+  clearInterval(tick);
+  $('btnPwSettle').textContent = 'Step 2 -- Settle on L1';
+  $('btnPwSettle').disabled = false;
+};
+
+// ---- FULL WITHDRAWAL (withdraw view) -------------------------------------------------------
+$('btnFwDeploySettlement').onclick = async () => {
+  const t0 = Date.now();
+  const tick = setInterval(() => { $('btnFwDeploySettlement').textContent = 'Deploying... ' + Math.round((Date.now()-t0)/1000) + 's'; }, 250);
+  try {
+    $('btnFwDeploySettlement').disabled = true;
+    log('deploying settlement infrastructure...');
+    fwSettlement = JSON.parse(await api('/api/deploy-settlement', '{}'));
+    log('settlement deployed -- manager=' + fwSettlement.manager + ', verifier=' + fwSettlement.verifier, 'ok');
+    $('btnFwClose').disabled = false;
+  } catch (e) { log('deploy settlement failed: '+e.message, 'err'); }
+  clearInterval(tick);
+  $('btnFwDeploySettlement').textContent = '1 -- Deploy Settlement';
+  $('btnFwDeploySettlement').disabled = false;
+};
+
+$('btnFwClose').onclick = async () => {
+  const t0 = Date.now();
+  const tick = setInterval(() => { $('btnFwClose').textContent = 'Closing... ' + Math.round((Date.now()-t0)/1000) + 's'; }, 250);
+  try {
+    $('btnFwClose').disabled = true;
+    if (!fwSettlement) { try { fwSettlement = JSON.parse(await api('/api/settlement', null, 'GET')); } catch(e) { throw new Error('deploy settlement first'); } }
+    log('closing channel (real proving -- may take minutes)...');
+    const r = JSON.parse(await api('/api/close', JSON.stringify({ manager: fwSettlement.manager, sv: fwSettlement.verifier })));
+    log('channel closed.', 'ok');
+    $('btnFwSettle').disabled = false;
+  } catch (e) { log('close failed: '+e.message, 'err'); }
+  clearInterval(tick);
+  $('btnFwClose').textContent = '2 -- Close Channel';
+  $('btnFwClose').disabled = false;
+};
+
+$('btnFwSettle').onclick = async () => {
+  const t0 = Date.now();
+  const tick = setInterval(() => { $('btnFwSettle').textContent = 'Settling... ' + Math.round((Date.now()-t0)/1000) + 's'; }, 250);
+  try {
+    $('btnFwSettle').disabled = true;
+    log('settling (finalize close after challenge period)...');
+    await api('/api/settle', JSON.stringify({ manager: fwSettlement.manager }));
+    log('settled.', 'ok');
+    $('btnFwWithdraw').disabled = false;
+  } catch (e) { log('settle failed: '+e.message, 'err'); }
+  clearInterval(tick);
+  $('btnFwSettle').textContent = '3 -- Settle';
+  $('btnFwSettle').disabled = false;
+};
+
+$('btnFwWithdraw').onclick = async () => {
+  const t0 = Date.now();
+  const tick = setInterval(() => { $('btnFwWithdraw').textContent = 'Withdrawing... ' + Math.round((Date.now()-t0)/1000) + 's'; }, 250);
+  try {
+    $('btnFwWithdraw').disabled = true;
+    log('building withdrawal proof + on-chain pipeline (minutes)...');
+    await api('/api/withdraw', JSON.stringify({ manager: fwSettlement.manager }));
+    log('withdrawal complete.', 'ok');
+    $('btnFwClaim').disabled = false;
+  } catch (e) { log('withdraw failed: '+e.message, 'err'); }
+  clearInterval(tick);
+  $('btnFwWithdraw').textContent = '4 -- Withdraw';
+  $('btnFwWithdraw').disabled = false;
+};
+
+$('btnFwClaim').onclick = async () => {
+  const t0 = Date.now();
+  const tick = setInterval(() => { $('btnFwClaim').textContent = 'Claiming... ' + Math.round((Date.now()-t0)/1000) + 's'; }, 250);
+  try {
+    $('btnFwClaim').disabled = true;
+    const slot = $('fwClaimSlot').value;
+    const recipient = $('fwClaimRecipient').value;
+    log('claiming slot ' + slot + ' to ' + recipient + '...');
+    await api('/api/claim', JSON.stringify({ manager: fwSettlement.manager, slot: Number(slot), recipient }));
+    log('claimed slot ' + slot + ' funds to ' + recipient + '.', 'ok');
+  } catch (e) { log('claim failed: '+e.message, 'err'); }
+  clearInterval(tick);
+  $('btnFwClaim').textContent = '5 -- Claim';
+  $('btnFwClaim').disabled = false;
+};
+
+// ---- Thread count + init -------------------------------------------------------------------
 function pickThreads() {
   const hwc = navigator.hardwareConcurrency || 4;
   const isMobile = (navigator.userAgentData && navigator.userAgentData.mobile) || /Mobi|Android|iPhone|iPad|iPod/i.test(navigator.userAgent);
-  // Desktop: use ALL cores (proving speed matters). Mobile: cap so "initializing" (per-thread worker
-  // spawn) doesn't drag and memory stays bounded.
   return isMobile ? Math.max(1, Math.min(hwc, 4)) : hwc;
 }
-// Live elapsed timer next to the status while initializing (so the wait is legible on mobile).
 const _initT0 = Date.now();
 const _initTick = setInterval(() => {
   const s = $('status');
-  if (s && s.className !== 'ready') s.dataset.elapsed = `(${Math.round((Date.now()-_initT0)/1000)}s)`;
-  if (s && s.className !== 'ready' && s.dataset.base) s.textContent = `${s.dataset.base} ${s.dataset.elapsed}`;
+  if (s && s.className !== 'ready') s.dataset.elapsed = '(' + Math.round((Date.now()-_initT0)/1000) + 's)';
+  if (s && s.className !== 'ready' && s.dataset.base) s.textContent = s.dataset.base + ' ' + s.dataset.elapsed;
 }, 500);
 worker.postMessage({ action: 'init', threads: pickThreads() });
 showBacking();

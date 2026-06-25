@@ -637,6 +637,33 @@ contract IntmaxRollup {
         emit PartialWithdrawalAuthorized(authDigest, msg.sender);
     }
 
+    /// @notice Claim an authorized partial withdrawal — sends ETH directly to the recipient.
+    ///         Anyone may call; the recipient is fixed in the authorized Withdrawal struct.
+    function claimAuthorizedWithdrawal(Withdrawal calldata w) external nonReentrant {
+        if (w.tokenIndex != ETH_TOKEN_INDEX) revert WithdrawalNotEthToken();
+        if (w.auxData == bytes32(0)) revert PartialWithdrawalNotAuthorized();
+        if (withdrawalNullifierUsed[w.nullifier]) revert WithdrawalNullifierUsed();
+
+        bytes32 authDigest = keccak256(
+            abi.encodePacked(
+                bytes4(0x494d5057),
+                w.nullifier,
+                w.recipient,
+                w.tokenIndex,
+                w.amount,
+                w.auxData
+            )
+        );
+        if (!partialWithdrawalAuthorized[authDigest]) revert PartialWithdrawalNotAuthorized();
+
+        withdrawalNullifierUsed[w.nullifier] = true;
+        totalEscrowed -= w.amount;
+
+        (bool ok, ) = w.recipient.call{value: w.amount}("");
+        require(ok, "ETH transfer failed");
+        emit NativeWithdrawn(w.recipient, w.amount, w.nullifier, 0);
+    }
+
     // postBlock()  —  post a batch of fast blocks (one posting round)
     // -----------------------------------------------------------------------
 

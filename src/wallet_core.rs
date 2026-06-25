@@ -645,7 +645,7 @@ pub fn assemble_genesis_state_backed(
         close_freeze_nonce: 0,
         channel_fund: ChannelFund {
             channel_id: record.channel_id,
-            amount: U256::from(fund_amount.min(u32::MAX as u64) as u32),
+            amount: U256::from(fund_amount),
             intmax_state_root,
         },
         balance_state: BalanceState {
@@ -2270,6 +2270,7 @@ pub fn build_l1_deposit_import(
         shared_native_nullifier_root: import_nullifier,
         prev_digest: prev.digest,
         member_signatures: Vec::new(),
+        h2_tag: Bytes32::default(),
         ..prev.clone()
     }
     .with_computed_digest();
@@ -2652,6 +2653,7 @@ impl CloseProver {
     /// `FixtureLib.parseProof` consumes; the 95 raw close PI limbs are embedded as `publicInputs`,
     /// which the manager's strict limb-bind re-checks. Verifies the MLE proof locally before
     /// returning (fail-closed): never hand back a proof that does not self-verify.
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn prove_mle(&self, close_proof: &ProofWithPublicInputs<F, C, D>) -> WResult<String> {
         wrap_and_export_mle(&self.close_circuit.data.verifier_data(), close_proof)
     }
@@ -2662,6 +2664,7 @@ impl CloseProver {
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 /// Wrap an inner Plonky2 proof (close / withdrawal-claim / cancel / post-close) with
 /// `WrapperCircuit` and produce its MLE/WHIR proof JSON for the matching on-chain
 /// `ChannelSettlementVerifier` entry point (the SAME pipeline as the `bin/generate_*_fixture.rs`
@@ -2832,6 +2835,7 @@ impl WithdrawalClaimProver {
     }
 
     /// Wrap + MLE for the on-chain `ChannelSettlementVerifier.verifyWithdrawalClaim`.
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn prove_mle(&self, proof: &ProofWithPublicInputs<F, C, D>) -> WResult<String> {
         wrap_and_export_mle(&self.circuit.data.verifier_data(), proof)
     }
@@ -2959,6 +2963,7 @@ impl CancelCloseProver {
     }
 
     /// Wrap + MLE for the on-chain `ChannelSettlementVerifier.verifyCancelClose`.
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn prove_mle(&self, proof: &ProofWithPublicInputs<F, C, D>) -> WResult<String> {
         wrap_and_export_mle(&self.circuit.data.verifier_data(), proof)
     }
@@ -3115,6 +3120,7 @@ impl PostCloseClaimProver {
     }
 
     /// Wrap + MLE for the on-chain `ChannelSettlementVerifier.verifyPostCloseClaim`.
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn prove_mle(&self, proof: &ProofWithPublicInputs<F, C, D>) -> WResult<String> {
         wrap_and_export_mle(&self.circuit.data.verifier_data(), proof)
     }
@@ -3162,9 +3168,9 @@ pub struct ChannelWithdrawalParams {
     /// Channel id the registration / withdrawal bind to (legacy fixture = 1).
     pub channel_id: u32,
     /// Deposited native amount (legacy fixture = 10). The withdrawal must not exceed it.
-    pub deposit_amount: u32,
+    pub deposit_amount: u64,
     /// Withdrawn native amount paid to `withdrawal_recipient` (legacy fixture = 3).
-    pub withdrawal_amount: u32,
+    pub withdrawal_amount: u64,
     /// L1 depositor. `Some` = pinned (must equal the on-chain `deposit()` sender); `None` = RNG.
     pub depositor: Option<Address>,
     /// L1 withdrawal recipient (the settlement manager for the close lifecycle). `None` = RNG.
@@ -3290,6 +3296,7 @@ fn fnv1a_bytes32(bytes: &[u8]) -> String {
 /// reproduce these members. `None` self-generates the deterministic fixture registration
 /// (byte-parity with the legacy fixture binary). When `Some`, pass exactly `TEST_ACTIVE_MEMBERS`
 /// members.
+#[cfg(not(target_arch = "wasm32"))]
 pub fn build_channel_withdrawal(
     params: &ChannelWithdrawalParams,
     cli_member_keys: Option<&[MemberKeys]>,

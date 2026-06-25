@@ -204,6 +204,137 @@ app.post('/api/claim', (req, res) => {
   } catch (e) { console.error(e.stderr ? String(e.stderr) : (e.message||e)); res.status(500).json({ error: String(e.stderr || e.message || e) }); }
 });
 
+// ─── L1 deposit + mid-channel import + partial withdrawal ─────────────────────────────────────
+
+// GET /api/deposit-info?channel=N
+// Returns the on-chain addresses and ABI info needed for the browser to send a deposit tx via MetaMask.
+app.get('/api/deposit-info', (req, res) => {
+  try {
+    const ch = reqChannel(req);
+    const backing = JSON.parse(fs.readFileSync(wc(ch, 'channel_backing.json'), 'utf8'));
+    if (!backing.rollup) throw new Error('no rollup in channel_backing.json');
+    if (!backing.deposit_recipient) throw new Error('no deposit_recipient in channel_backing.json');
+    res.json({
+      rollup: backing.rollup,
+      depositRecipient: backing.deposit_recipient,
+      rpc: RPC,
+      chainId: 31337,
+    });
+  } catch (e) { res.status(500).json({ error: String(e.message || e) }); }
+});
+
+// POST /api/l1-deposit?channel=N  body: { amount } (base units)
+// Fallback: sends a deposit via the relay's anvil dev key (for non-MetaMask testing).
+app.post('/api/l1-deposit', (req, res) => {
+  try {
+    const ch = reqChannel(req);
+    const amount = req.body && req.body.amount;
+    if (!amount) throw new Error('l1-deposit needs { amount }');
+    const backing = JSON.parse(fs.readFileSync(wc(ch, 'channel_backing.json'), 'utf8'));
+    if (!backing.rollup) throw new Error('no rollup in channel_backing.json');
+    if (!backing.deposit_recipient) throw new Error('no deposit_recipient in channel_backing.json');
+    const out = sh('cast', [
+      'send', backing.rollup,
+      'deposit(bytes32,uint32,uint256,bytes32)',
+      backing.deposit_recipient, '0', String(amount),
+      '0x0000000000000000000000000000000000000000000000000000000000000000',
+      '--value', String(amount),
+      '--private-key', ANVIL0, '--rpc-url', RPC, '--json',
+    ], { stdio: 'pipe' });
+    const txHash = (out.match(/"transactionHash"\s*:\s*"(0x[0-9a-fA-F]+)"/) || [])[1] || '';
+    const depositor = sh('cast', ['wallet', 'address', '--private-key', ANVIL0], { stdio: 'pipe' }).trim();
+    fs.writeFileSync(wc(ch, 'pending_deposit.json'), JSON.stringify({
+      depositor, amount: String(amount), txHash,
+    }));
+    res.json({ ok: true, txHash, depositor });
+  } catch (e) { console.error(e.stderr ? String(e.stderr) : (e.message||e)); res.status(500).json({ error: String(e.stderr || e.message || e) }); }
+});
+
+// POST /api/import-deposit?channel=N  body: { recipientSlot, depositor?, amount? }
+// Fold a pending L1 deposit into the channel's balance (mid-channel deposit).
+// If depositor+amount are provided (MetaMask flow), uses those directly.
+// Otherwise reads from pending_deposit.json (fallback relay-deposit flow).
+app.post('/api/import-deposit', (req, res) => {
+  try {
+    const ch = reqChannel(req);
+    const slot = (req.body && req.body.recipientSlot) || 0;
+    let depositor, amount;
+    if (req.body && req.body.depositor && req.body.amount) {
+      depositor = req.body.depositor;
+      amount = req.body.amount;
+    } else {
+      const dep = JSON.parse(fs.readFileSync(wc(ch, 'pending_deposit.json'), 'utf8'));
+      depositor = dep.depositor;
+      amount = dep.amount;
+    }
+    cli(ch, ['cosign-l1-deposit-import', String(slot), String(amount), depositor, 'l1_import_cosigned.json']);
+    const snap = JSON.parse(fs.readFileSync(wc(ch, 'channel_snapshot.json'), 'utf8'));
+    res.json(snap);
+  } catch (e) { console.error(e.stderr ? String(e.stderr) : (e.message||e)); res.status(500).json({ error: String(e.stderr || e.message || e) }); }
+});
+
+// POST /api/cosign-burn?channel=N  body: { debitPayload, transferDescriptor }
+// Co-sign a burn send (partial withdrawal debit leg).
+app.post('/api/cosign-burn', (req, res) => {
+  try {
+    const ch = reqChannel(req);
+    const { debitPayload, transferDescriptor } = req.body || {};
+    if (!debitPayload || !transferDescriptor) throw new Error('cosign-burn needs { debitPayload, transferDescriptor }');
+    fs.writeFileSync(wc(ch, 'burn_payload.json'), JSON.stringify(debitPayload));
+    fs.writeFileSync(wc(ch, 'burn_descriptor.json'), JSON.stringify(transferDescriptor));
+    cli(ch, ['cosign-burn-send', 'burn_payload.json', 'burn_descriptor.json', 'burn_cosigned.json']);
+    res.json(JSON.parse(fs.readFileSync(wc(ch, 'burn_cosigned.json'), 'utf8')));
+  } catch (e) { console.error(e.stderr ? String(e.stderr) : (e.message||e)); res.status(500).json({ error: String(e.stderr || e.message || e) }); }
+});
+
+// POST /api/deploy-settlement?channel=N   (idempotent)
+// Deploy ChannelSettlementManager + ChannelSettlementVerifier on anvil for this channel.
+app.post('/api/deploy-settlement', (req, res) => {
+  try {
+    const ch = reqChannel(req);
+    if (fs.existsSync(wc(ch, 'settlement.json'))) {
+      return res.json(JSON.parse(fs.readFileSync(wc(ch, 'settlement.json'), 'utf8')));
+    }
+    cli(ch, ['deploy-settlement', RPC]);
+    res.json(JSON.parse(fs.readFileSync(wc(ch, 'settlement.json'), 'utf8')));
+  } catch (e) { console.error(e.stderr ? String(e.stderr) : (e.message||e)); res.status(500).json({ error: String(e.stderr || e.message || e) }); }
+});
+
+// GET /api/settlement?channel=N
+app.get('/api/settlement', (req, res) => {
+  try {
+    const ch = reqChannel(req);
+    res.json(JSON.parse(fs.readFileSync(wc(ch, 'settlement.json'), 'utf8')));
+  } catch (e) { res.status(404).json({ error: 'no settlement deployed yet' }); }
+});
+
+// POST /api/pw-submit?channel=N
+// Submit partial withdrawal intent on-chain.
+app.post('/api/pw-submit', (req, res) => {
+  try {
+    const ch = reqChannel(req);
+    // Ensure settlement is deployed first.
+    if (!fs.existsSync(wc(ch, 'settlement.json'))) {
+      cli(ch, ['deploy-settlement', RPC]);
+    }
+    const pwRecipient = (req.body && req.body.recipient) || '';
+    const extra = pwRecipient ? { PW_RECIPIENT: pwRecipient } : {};
+    cli(ch, ['pw-submit', RPC], extra);
+    res.json(JSON.parse(fs.readFileSync(wc(ch, 'pw_auth.json'), 'utf8')));
+  } catch (e) { console.error(e.stderr ? String(e.stderr) : (e.message||e)); res.status(500).json({ error: String(e.stderr || e.message || e) }); }
+});
+
+// POST /api/pw-finalize?channel=N
+// Finalize partial withdrawal (advance time + finalize on-chain).
+app.post('/api/pw-finalize', (req, res) => {
+  try {
+    const ch = reqChannel(req);
+    cli(ch, ['pw-finalize', RPC]);
+    const auth = JSON.parse(fs.readFileSync(wc(ch, 'pw_auth.json'), 'utf8'));
+    res.json({ ok: true, authDigest: auth.auth_digest });
+  } catch (e) { console.error(e.stderr ? String(e.stderr) : (e.message||e)); res.status(500).json({ error: String(e.stderr || e.message || e) }); }
+});
+
 // Static wallet files: wallet-live.html + wallet-worker.js from wallet/ (ROOT), and the built
 // wasm under /pkg from the repo root (pkg/ is produced by build-wallet-wasm.sh at the repo root).
 app.use('/pkg', express.static(path.join(REPO, 'pkg')));
@@ -221,6 +352,10 @@ for (const ch of CHANNELS) {
   if (RESET) {
     fs.rmSync(wc(ch, 'cli_state.json'), { force: true });
     fs.rmSync(wc(ch, 'channel_snapshot.json'), { force: true });
+    fs.rmSync(wc(ch, 'settlement.json'), { force: true });
+    fs.rmSync(wc(ch, 'last_burn.json'), { force: true });
+    fs.rmSync(wc(ch, 'pw_auth.json'), { force: true });
+    fs.rmSync(wc(ch, 'pw_submit.json'), { force: true });
   }
 }
 
@@ -237,12 +372,12 @@ const rpcUp = () => { try { sh('cast', ['block-number', '--rpc-url', RPC], { std
 function ensureAnvil() {
   if (rpcUp()) return;
   console.log('  starting local anvil (Prague)…');
-  spawn('anvil', ['--hardfork', 'prague'], { stdio: 'ignore', detached: true }).unref();
+  spawn('anvil', ['--hardfork', 'prague', '--code-size-limit', '50000'], { stdio: 'ignore', detached: true }).unref();
   for (let i = 0; i < 60 && !rpcUp(); i++) { try { sh('sleep', ['0.5']); } catch (e) {} }
   if (!rpcUp()) { console.error('anvil did not come up on ' + RPC); process.exit(1); }
 }
 function deployRollup() {
-  const out = sh('forge', ['script', 'script/Deploy.s.sol', '--rpc-url', RPC, '--private-key', ANVIL0, '--broadcast'], { cwd: path.join(REPO, 'contracts') });
+  const out = sh('forge', ['script', 'script/Deploy.s.sol', '--rpc-url', RPC, '--private-key', ANVIL0, '--broadcast', '--code-size-limit', '50000'], { cwd: path.join(REPO, 'contracts') });
   const m = out.match(/IntmaxRollup\s*:\s*(0x[0-9a-fA-F]{40})/);
   if (!m) { console.error('could not parse IntmaxRollup address from forge output'); process.exit(1); }
   return m[1];

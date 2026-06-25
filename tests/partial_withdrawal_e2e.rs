@@ -543,6 +543,51 @@ fn partial_withdrawal_e2e_anvil() {
     );
     eprintln!("[PW E2E] finalize + authorize OK");
 
+    // ── Phase F2: Claim authorized withdrawal — actual ETH transfer ────────────────────────
+    {
+        let before = cast(
+            &rpc,
+            &["balance", &format!("0x{}", hex::encode(withdrawal_addr.to_bytes_be()))],
+            "balance before claim",
+        );
+        let before_wei: u128 = before.trim().parse().unwrap_or(0);
+
+        let sig = "claimAuthorizedWithdrawal((address,uint32,uint256,bytes32,bytes32))";
+        let arg = format!(
+            "(0x{},{},{},{},{})",
+            hex::encode(withdrawal_addr.to_bytes_be()),
+            0u32,
+            burn_amount,
+            withdrawal.nullifier.to_hex(),
+            withdrawal.aux_data.to_hex()
+        );
+        run_capture(
+            Command::new("cast").args([
+                "send", &rollup, sig, &arg,
+                "--private-key", ANVIL0,
+                "--rpc-url", &rpc,
+            ]),
+            "claim authorized withdrawal",
+        );
+
+        let after = cast(
+            &rpc,
+            &["balance", &format!("0x{}", hex::encode(withdrawal_addr.to_bytes_be()))],
+            "balance after claim",
+        );
+        let after_wei: u128 = after.trim().parse().unwrap_or(0);
+        assert_eq!(
+            after_wei - before_wei,
+            burn_amount as u128,
+            "recipient must receive exactly burn_amount ETH"
+        );
+        eprintln!(
+            "[PW E2E] claim OK: {} received {} wei",
+            hex::encode(withdrawal_addr.to_bytes_be()),
+            burn_amount
+        );
+    }
+
     // ── Phase G: Adversarial — double-submit same chain key ─────────────────────────────────
     {
         // Re-submitting with the same finalSettledTxChain must revert with PartialWithdrawalChainUsed.

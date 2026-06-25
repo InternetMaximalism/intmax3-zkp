@@ -93,3 +93,4 @@ signer-bin/
 deploy-record*.md
 **/deploy-record.md
 DEPLOYMENT.md
+CLAUDE.md
