@@ -60,6 +60,10 @@ function rollupOf(ch) {
 
 const app = express();
 app.use(express.json({ limit: '64mb' }));
+app.use((err, req, res, next) => {
+  if (err.type === 'entity.parse.failed') return res.status(400).json({ error: 'invalid JSON: ' + err.message });
+  next(err);
+});
 // Cross-origin isolation (SharedArrayBuffer) + correct wasm mime.
 app.use((req, res, next) => {
   res.setHeader('Cross-Origin-Embedder-Policy', 'require-corp');
@@ -409,4 +413,9 @@ if (needBacking.length) {
 
 https.createServer(opts, app).listen(PORT, '0.0.0.0', () => {
   console.log(`wallet relay on https://localhost:${PORT}/wallet-live.html  (channels ${CHANNELS.join(', ')})`);
+});
+const http = require('http');
+const HTTP_PORT = PORT + 1;
+http.createServer(app).listen(HTTP_PORT, '0.0.0.0', () => {
+  console.log(`wallet relay (HTTP) on http://localhost:${HTTP_PORT}/wallet-live.html`);
 });

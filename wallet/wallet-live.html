@@ -77,8 +77,8 @@
       <span class="hint">initial deposit (ETH)</span>
     </div>
     <div class="row">
-      <input id="joinChannel" type="number" value="7" />
-      <input id="joinDeposit" type="number" step="0.000001" value="0.05" />
+      <input id="joinChannel" type="number" value="7" min="1" />
+      <input id="joinDeposit" type="number" step="any" value="0.05" min="0" />
     </div>
     <div class="row">
       <button id="btnOpen" disabled>Join & Deposit</button>
@@ -106,7 +106,7 @@
     </div>
     <div class="row">
       <input id="toAddr" type="text" value="7-0" placeholder="channel-slot" />
-      <input id="amount" type="number" step="0.000001" value="0.005" />
+      <input id="amount" type="number" step="any" value="0.005" min="0" />
     </div>
     <button id="btnSend" disabled>Send</button>
   </section>
@@ -128,7 +128,7 @@
       <span class="hint">L1 recipient address</span>
     </div>
     <div class="row">
-      <input id="pwAmount" type="number" step="0.000001" value="0.005" />
+      <input id="pwAmount" type="number" step="any" value="0.005" min="0" />
       <input id="pwAddress" type="text" placeholder="0x..." />
     </div>
     <button id="btnBurnSend" disabled>Step 1 -- Burn Send</button>
@@ -143,7 +143,7 @@
     <button id="btnFwSettle" disabled>3 -- Settle</button>
     <button id="btnFwWithdraw" disabled>4 -- Withdraw</button>
     <div class="row" style="margin-top:8px">
-      <input id="fwClaimSlot" type="number" value="0" title="slot to claim" />
+      <input id="fwClaimSlot" type="number" value="0" min="0" title="slot to claim" />
       <input id="fwClaimRecipient" type="text" placeholder="0x..." style="flex:3" />
     </div>
     <button id="btnFwClaim" disabled>5 -- Claim</button>
@@ -158,7 +158,7 @@
     <button class="modal-close" id="depositClose">&times;</button>
     <h2>Deposit to Channel</h2>
     <label>amount (ETH)</label>
-    <input id="depositAmount" type="number" step="0.000001" value="0.01" />
+    <input id="depositAmount" type="number" step="any" value="0.01" min="0" />
     <button id="btnDeposit">Deposit</button>
   </div>
 </div>
@@ -221,11 +221,14 @@ function fmtAmt(base) {
 }
 
 function toBase(tokens) {
-  const s = String(tokens).trim();
+  let s = String(tokens).trim();
   if (s === '' || s === '0') return '0';
+  if (/[eE]/.test(s)) s = Number(s).toFixed(TOKEN_DECIMALS);
   const neg = s.startsWith('-');
   const abs = neg ? s.slice(1) : s;
-  const [wholePart, fracPart] = abs.split('.');
+  const parts = abs.split('.');
+  if (parts.length > 2) throw new Error('invalid amount: multiple decimal points');
+  const [wholePart, fracPart] = parts;
   const w = BigInt(wholePart || '0') * TOKEN_UNIT;
   if (!fracPart) return (neg ? -w : w).toString();
   const padded = fracPart.padEnd(TOKEN_DECIMALS, '0').slice(0, TOKEN_DECIMALS);
@@ -286,11 +289,18 @@ function renderWalletList() {
   for (const w of wallets) {
     const li = document.createElement('li');
     li.className = 'wallet-item';
-    li.innerHTML = (w.info.icon
-      ? '<img class="wallet-icon" src="' + w.info.icon + '" alt="" />'
-      : '<div class="wallet-icon" style="background:var(--border);border-radius:6px"></div>')
-      + '<div><div class="wallet-name">' + w.info.name + '</div>'
-      + '<div class="wallet-rdns">' + (w.info.rdns || '') + '</div></div>';
+    if (w.info.icon) {
+      const img = document.createElement('img'); img.className = 'wallet-icon'; img.src = w.info.icon; img.alt = '';
+      li.appendChild(img);
+    } else {
+      const ph = document.createElement('div'); ph.className = 'wallet-icon'; ph.style.cssText = 'background:var(--border);border-radius:6px';
+      li.appendChild(ph);
+    }
+    const info = document.createElement('div');
+    const nameDiv = document.createElement('div'); nameDiv.className = 'wallet-name'; nameDiv.textContent = w.info.name;
+    const rdnsDiv = document.createElement('div'); rdnsDiv.className = 'wallet-rdns'; rdnsDiv.textContent = w.info.rdns || '';
+    info.appendChild(nameDiv); info.appendChild(rdnsDiv);
+    li.appendChild(info);
     li.onclick = () => selectWallet(w);
     ul.appendChild(li);
   }
@@ -546,11 +556,14 @@ async function tryRestore() {
 $('btnOpen').onclick = async () => {
   const t0 = Date.now();
   let tick = setInterval(() => { $('btnOpen').textContent = 'Joining... ' + Math.round((Date.now()-t0)/1000) + 's'; }, 250);
+  let joined = false;
   try {
     $('btnOpen').disabled = true;
     activeCh = parseInt($('joinChannel').value, 10) || 7;
+    if (activeCh < 1) throw new Error('channel ID must be at least 1');
     saveChannel(activeCh);
-    const depositTokens = parseFloat($('joinDeposit').value) || 0;
+    const depositTokens = parseFloat($('joinDeposit').value);
+    if (isNaN(depositTokens) || depositTokens < 0) throw new Error('deposit must be zero or positive');
 
     log('joining channel ' + activeCh + '...');
     await step('generate keys', () => call('keygenSeeded', { seed: channelSeed() }));
@@ -561,28 +574,37 @@ $('btnOpen').onclick = async () => {
     mySlot = r.slot;
     showBalance(r);
     showJoined();
+    joined = true;
     log('joined as ' + formatAddr(myChannel ?? activeCh, r.slot) + ' (balance 0)', 'ok');
 
-    const depositAmt = toBase(String(depositTokens || '0.01'));
-    clearInterval(tick);
-    tick = setInterval(() => { $('btnOpen').textContent = 'Depositing... ' + Math.round((Date.now()-t0)/1000) + 's'; }, 250);
-    log('sending L1 deposit via wallet (' + fmtAmt(depositAmt) + ' ETH)...');
-    const dr = await sendDepositViaWallet(depositAmt);
+    if (depositTokens > 0) {
+      const depositAmt = toBase(String(depositTokens));
+      clearInterval(tick);
+      tick = setInterval(() => { $('btnOpen').textContent = 'Depositing... ' + Math.round((Date.now()-t0)/1000) + 's'; }, 250);
+      log('sending L1 deposit via wallet (' + fmtAmt(depositAmt) + ' ETH)...');
+      const dr = await sendDepositViaWallet(depositAmt);
 
-    clearInterval(tick);
-    tick = setInterval(() => { $('btnOpen').textContent = 'Importing... ' + Math.round((Date.now()-t0)/1000) + 's'; }, 250);
-    log('importing deposit into channel...');
-    const snap2 = await api('/api/import-deposit', JSON.stringify({ recipientSlot: mySlot, depositor: dr.depositor, amount: depositAmt }));
-    setChannelFrom(snap2);
-    const r2 = JSON.parse(await call('importChannel', { snapshotJson: snap2 }));
-    mySlot = r2.slot; showBalance(r2);
-    log('deposit imported -- balance ' + fmtAmt(r2.balance), 'ok');
+      clearInterval(tick);
+      tick = setInterval(() => { $('btnOpen').textContent = 'Importing... ' + Math.round((Date.now()-t0)/1000) + 's'; }, 250);
+      log('importing deposit into channel...');
+      const snap2 = await api('/api/import-deposit', JSON.stringify({ recipientSlot: mySlot, depositor: dr.depositor, amount: depositAmt }));
+      setChannelFrom(snap2);
+      const r2 = JSON.parse(await call('importChannel', { snapshotJson: snap2 }));
+      mySlot = r2.slot; showBalance(r2);
+      log('deposit imported -- balance ' + fmtAmt(r2.balance), 'ok');
+    }
 
     log('ready! address ' + formatAddr(myChannel ?? activeCh, mySlot) + ' (' + Math.round((Date.now()-t0)/1000) + 's)', 'ok');
-  } catch (e) { log('join failed: '+e.message, 'err'); $('btnOpen').disabled=false; }
+  } catch (e) {
+    if (joined) {
+      log('deposit failed (channel joined with 0 balance): ' + e.message + ' -- use the Deposit button to retry.', 'err');
+    } else {
+      log('join failed: '+e.message, 'err');
+      $('btnOpen').disabled=false;
+    }
+  }
   clearInterval(tick);
   $('btnOpen').textContent = 'Join & Deposit';
-  $('btnOpen').disabled = false;
 };
 
 $('btnClear').onclick = () => {
@@ -757,10 +779,9 @@ $('btnBurnSend').onclick = async () => {
     mySlot = r.slot; showBalance(r);
     log('burn complete -- balance ' + fmtAmt(r.balance) + '. Click "Settle on L1" to finalize.', 'ok');
     $('btnPwSettle').disabled = false;
-  } catch (e) { log('burn send failed: '+e.message, 'err'); }
+  } catch (e) { log('burn send failed: '+e.message, 'err'); $('btnBurnSend').disabled = false; }
   clearInterval(tick);
   $('btnBurnSend').textContent = 'Step 1 -- Burn Send';
-  $('btnBurnSend').disabled = false;
 };
 
 $('btnPwSettle').onclick = async () => {
@@ -776,10 +797,10 @@ $('btnPwSettle').onclick = async () => {
     log('finalizing...');
     const fin = JSON.parse(await api('/api/pw-finalize', '{}'));
     log('partial withdrawal finalized -- authDigest ' + (fin.authDigest || '?'), 'ok');
-  } catch (e) { log('pw-settle failed: '+e.message, 'err'); }
+    $('btnBurnSend').disabled = false;
+  } catch (e) { log('pw-settle failed: '+e.message, 'err'); $('btnPwSettle').disabled = false; }
   clearInterval(tick);
   $('btnPwSettle').textContent = 'Step 2 -- Settle on L1';
-  $('btnPwSettle').disabled = false;
 };
 
 // ---- FULL WITHDRAWAL (withdraw view) -------------------------------------------------------

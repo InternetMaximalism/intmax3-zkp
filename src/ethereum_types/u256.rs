@@ -112,6 +112,14 @@ impl From<u32> for U256 {
     }
 }
 
+impl From<u64> for U256 {
+    fn from(value: u64) -> Self {
+        Self {
+            limbs: [0, 0, 0, 0, 0, 0, (value >> 32) as u32, value as u32],
+        }
+    }
+}
+
 impl TryFrom<BigUint> for U256 {
     type Error = EthereumTypeError;
 

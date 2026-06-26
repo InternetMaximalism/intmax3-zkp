@@ -396,6 +396,63 @@ pub fn wallet_send_inter_channel(
     })
 }
 
+/// Burn `amount` from this wallet's slot for a partial withdrawal to `withdrawal_address_hex`
+/// (an L1 Ethereum address, hex with 0x prefix). Internally calls `build_burn_send` which wraps
+/// `build_inter_channel_send` with `BURN_CHANNEL_ID` + `RegevPk::padding()` (architecture-audit
+/// /partial-withdrawal-impl-plan.md). Returns `{ debitPayload, transferDescriptor }` — the
+/// browser POSTs `debitPayload` to `/api/cosign-burn` for N-of-N co-signing, then finalizes.
+/// Mirrors `wallet_send_inter_channel`.
+#[wasm_bindgen]
+pub fn wallet_burn_send(amount: u64, withdrawal_address_hex: String) -> Result<String, JsValue> {
+    #[derive(Serialize)]
+    #[serde(rename_all = "camelCase")]
+    struct Out<'a> {
+        debit_payload: &'a crate::wallet_core::InterChannelDebitPayload,
+        transfer_descriptor: &'a crate::wallet_core::InterChannelTransferDescriptor,
+    }
+    with_session(|session| {
+        let slot = session.slot.ok_or_else(|| js_err("no channel imported"))?;
+        let snapshot = session
+            .snapshot
+            .clone()
+            .ok_or_else(|| js_err("no channel imported"))?;
+        let (before_amount, before_witness) = session.balance.clone().ok_or_else(|| {
+            js_err("no spendable balance witness (a refresh is required after receiving)")
+        })?;
+        let address = crate::ethereum_types::address::Address::from_hex(&withdrawal_address_hex)
+            .map_err(js_err)?;
+        let mut rng = rand010::rng();
+        let mut nr = [0u32; 8];
+        for w in nr.iter_mut() {
+            *w = rand010::Rng::next_u32(&mut rng);
+        }
+        let new_nullifier_root = Bytes32::from_u32_slice(&nr).map_err(js_err)?;
+        let built = crate::wallet_core::build_burn_send(
+            &session.keys,
+            &snapshot,
+            slot,
+            address,
+            amount,
+            before_amount,
+            &before_witness,
+            new_nullifier_root,
+            LEVEL,
+            &mut rng,
+        )
+        .map_err(js_err)?;
+        session.pending_send = Some((
+            built.debit_payload.proposed_next_state.digest,
+            built.new_balance,
+            built.new_balance_witness.clone(),
+        ));
+        let out = Out {
+            debit_payload: &built.debit_payload,
+            transfer_descriptor: &built.transfer_descriptor,
+        };
+        serde_json::to_string(&out).map_err(js_err)
+    })
+}
+
 /// Balance-refresh THIS wallet's own slot: re-encrypt the current balance to clean digits (same
 /// value) so the slot can SEND again after receiving (a received homomorphic credit blocks the next
 /// send until a refresh). Returns the `RefreshPayload` for the members to co-sign; once finalized,
