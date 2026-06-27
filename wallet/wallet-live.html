@@ -98,6 +98,11 @@
     <button id="btnRefresh" disabled>Refresh</button>
   </section>
 
+  <section class="panel hidden" id="panelResume">
+    <h2 style="color:var(--err)">Pending Operations</h2>
+    <div id="resumeList"></div>
+  </section>
+
   <section class="panel hidden" id="panelSend">
     <h2>Send</h2>
     <div class="row" style="margin-bottom:3px">
@@ -533,6 +538,113 @@ async function showBacking() {
   }
 }
 
+// ---- Ticket management ---------------------------------------------------------------------
+let activeTickets = [];
+const _inflight = new Set();
+
+async function fetchTickets() {
+  try {
+    activeTickets = JSON.parse(await api('/api/tickets', null, 'GET'));
+  } catch (e) { activeTickets = []; }
+}
+
+function ticketOfType(type) {
+  return activeTickets.find(t => t.type === type && !['settle_done','import_done','claim_done'].includes(t.status));
+}
+
+function guard(key, fn) {
+  return async (...args) => {
+    if (_inflight.has(key)) return;
+    _inflight.add(key);
+    try { await fn(...args); } finally { _inflight.delete(key); }
+  };
+}
+
+function applyTicketState() {
+  const panel = $('panelResume');
+  const list = $('resumeList');
+  list.innerHTML = '';
+  const pending = activeTickets.filter(t => !['settle_done','import_done','claim_done'].includes(t.status));
+  if (pending.length === 0) { panel.classList.add('hidden'); return; }
+  panel.classList.remove('hidden');
+
+  for (const t of pending) {
+    const div = document.createElement('div');
+    div.style.cssText = 'padding:8px 0;border-bottom:1px solid var(--border);display:flex;align-items:center;gap:12px';
+
+    if (t.type === 'partial_withdrawal') {
+      const amt = t.params && t.params.amount ? fmtAmt(t.params.amount) : '?';
+      const recip = t.params && t.params.recipient ? t.params.recipient.slice(0,8) + '...' : '?';
+      const info = document.createElement('span');
+      info.style.cssText = 'flex:1;font-size:13px';
+      info.textContent = 'Partial withdrawal ' + amt + ' ETH -> ' + recip + ' [' + t.status + ']';
+      div.appendChild(info);
+      if (t.status === 'burn_done') {
+        const btn = document.createElement('button');
+        btn.textContent = 'Resume Settle';
+        btn.style.cssText = 'margin:0;width:auto;padding:6px 14px;font-size:13px';
+        btn.onclick = () => {
+          showView('withdraw');
+          if (t.params.recipient) $('pwAddress').value = t.params.recipient;
+          $('btnBurnSend').disabled = true;
+          $('btnPwSettle').disabled = false;
+          log('resumed: burn complete for ' + amt + ' ETH, click Settle', 'ok');
+        };
+        div.appendChild(btn);
+      }
+    } else if (t.type === 'deposit') {
+      const amt = t.params && t.params.amount ? fmtAmt(t.params.amount) : '?';
+      const info = document.createElement('span');
+      info.style.cssText = 'flex:1;font-size:13px';
+      info.textContent = 'Deposit ' + amt + ' ETH [' + t.status + ']';
+      div.appendChild(info);
+      if (t.status === 'l1_done') {
+        const btn = document.createElement('button');
+        btn.textContent = 'Resume Import';
+        btn.style.cssText = 'margin:0;width:auto;padding:6px 14px;font-size:13px';
+        btn.onclick = async () => {
+          btn.disabled = true;
+          try {
+            log('importing deposit into channel...');
+            const snap = await api('/api/import-deposit', JSON.stringify({
+              recipientSlot: t.params.recipientSlot || mySlot,
+              depositor: t.params.depositor,
+              amount: t.params.amount,
+            }));
+            setChannelFrom(snap);
+            const r = JSON.parse(await call('importChannel', { snapshotJson: snap }));
+            mySlot = r.slot; showBalance(r);
+            log('deposit imported -- balance ' + fmtAmt(r.balance), 'ok');
+            await fetchTickets(); applyTicketState();
+          } catch (e) { log('import failed: ' + e.message, 'err'); btn.disabled = false; }
+        };
+        div.appendChild(btn);
+      }
+    } else if (t.type === 'full_withdrawal') {
+      const info = document.createElement('span');
+      info.style.cssText = 'flex:1;font-size:13px';
+      info.textContent = 'Full withdrawal [' + t.status + ']';
+      div.appendChild(info);
+      const btn = document.createElement('button');
+      btn.textContent = 'Resume';
+      btn.style.cssText = 'margin:0;width:auto;padding:6px 14px;font-size:13px';
+      btn.onclick = () => {
+        showView('withdraw');
+        if (t.params && t.params.manager) {
+          fwSettlement = { manager: t.params.manager, verifier: t.params.verifier || '' };
+        }
+        const steps = ['deploy_done','close_done','settle_done','withdraw_done'];
+        const idx = steps.indexOf(t.status);
+        const btns = [$('btnFwClose'), $('btnFwSettle'), $('btnFwWithdraw'), $('btnFwClaim')];
+        for (let i = 0; i <= idx && i < btns.length; i++) btns[i].disabled = false;
+        log('resumed full withdrawal at step: ' + t.status, 'ok');
+      };
+      div.appendChild(btn);
+    }
+    list.appendChild(div);
+  }
+}
+
 // ---- Try restore ---------------------------------------------------------------------------
 async function tryRestore() {
   if (!hasSavedAccount()) return false;
@@ -545,6 +657,8 @@ async function tryRestore() {
     mySlot = r.slot; showBalance(r);
     showJoined();
     log('restored account ' + formatAddr(myChannel ?? activeCh, r.slot) + ' / balance ' + fmtAmt(r.balance), 'ok');
+    await fetchTickets();
+    applyTicketState();
     return true;
   } catch (e) {
     log('saved account present but channel not found -- click Join to create.', '');
@@ -584,6 +698,10 @@ $('btnOpen').onclick = async () => {
       log('sending L1 deposit via wallet (' + fmtAmt(depositAmt) + ' ETH)...');
       const dr = await sendDepositViaWallet(depositAmt);
 
+      try {
+        await api('/api/ticket/deposit', JSON.stringify({ amount: depositAmt, depositor: dr.depositor, txHash: dr.txHash, recipientSlot: mySlot }));
+      } catch (e) { log('ticket save failed (continuing): ' + e.message, ''); }
+
       clearInterval(tick);
       tick = setInterval(() => { $('btnOpen').textContent = 'Importing... ' + Math.round((Date.now()-t0)/1000) + 's'; }, 250);
       log('importing deposit into channel...');
@@ -592,6 +710,7 @@ $('btnOpen').onclick = async () => {
       const r2 = JSON.parse(await call('importChannel', { snapshotJson: snap2 }));
       mySlot = r2.slot; showBalance(r2);
       log('deposit imported -- balance ' + fmtAmt(r2.balance), 'ok');
+      await fetchTickets(); applyTicketState();
     }
 
     log('ready! address ' + formatAddr(myChannel ?? activeCh, mySlot) + ' (' + Math.round((Date.now()-t0)/1000) + 's)', 'ok');
@@ -706,7 +825,7 @@ $('btnSend').onclick = async () => {
 };
 
 // ---- DEPOSIT MODAL -------------------------------------------------------------------------
-$('btnDeposit').onclick = async () => {
+$('btnDeposit').onclick = guard('deposit', async () => {
   const t0 = Date.now();
   let phase = 'Depositing';
   const tick = setInterval(() => { $('btnDeposit').textContent = phase + '... ' + Math.round((Date.now()-t0)/1000) + 's'; }, 250);
@@ -717,6 +836,10 @@ $('btnDeposit').onclick = async () => {
     log('sending L1 deposit via wallet (' + $('depositAmount').value + ' ETH)...');
     const dr = await sendDepositViaWallet(amt);
 
+    try {
+      await api('/api/ticket/deposit', JSON.stringify({ amount: amt, depositor: dr.depositor, txHash: dr.txHash, recipientSlot: mySlot }));
+    } catch (e) { log('ticket save failed (continuing): ' + e.message, ''); }
+
     phase = 'Importing';
     log('importing deposit into channel (slot ' + mySlot + ')...');
     const snap = await api('/api/import-deposit', JSON.stringify({ recipientSlot: mySlot, depositor: dr.depositor, amount: amt }));
@@ -725,11 +848,12 @@ $('btnDeposit').onclick = async () => {
     mySlot = r.slot; showBalance(r);
     log('deposit imported -- balance ' + fmtAmt(r.balance), 'ok');
     $('depositModal').classList.add('hidden');
+    await fetchTickets(); applyTicketState();
   } catch (e) { log('deposit failed: '+e.message, 'err'); }
   clearInterval(tick);
   $('btnDeposit').textContent = 'Deposit';
   $('btnDeposit').disabled = false;
-};
+});
 
 // ---- REFRESH -------------------------------------------------------------------------------
 $('btnRefresh').onclick = async () => {
@@ -745,12 +869,18 @@ $('btnRefresh').onclick = async () => {
 };
 
 // ---- PARTIAL WITHDRAWAL (withdraw view) ----------------------------------------------------
-$('btnBurnSend').onclick = async () => {
+$('btnBurnSend').onclick = guard('burn', async () => {
   const t0 = Date.now();
   sendPhase = 'Proving burn';
   const tick = setInterval(() => { $('btnBurnSend').textContent = sendPhase + '... ' + Math.round((Date.now()-t0)/1000) + 's'; }, 250);
   try {
     $('btnBurnSend').disabled = true;
+    const existing = ticketOfType('partial_withdrawal');
+    if (existing && existing.status === 'burn_done') {
+      log('burn already complete -- settle first before burning again', 'err');
+      $('btnPwSettle').disabled = false;
+      clearInterval(tick); $('btnBurnSend').textContent = 'Step 1 -- Burn Send'; return;
+    }
     const amt = $('pwAmount').value;
     if (!amt || isNaN(Number(amt)) || Number(amt) <= 0) throw new Error('enter a valid positive burn amount');
     const addr = $('pwAddress').value.trim();
@@ -774,23 +904,30 @@ $('btnBurnSend').onclick = async () => {
     const cosigned = await api('/api/cosign-burn', JSON.stringify({
       debitPayload: built.debitPayload,
       transferDescriptor: built.transferDescriptor,
+      amount: toBase(amt),
+      recipient: addr,
     }));
     const r = JSON.parse(await call('finalize', { stateJson: cosigned }));
     mySlot = r.slot; showBalance(r);
     log('burn complete -- balance ' + fmtAmt(r.balance) + '. Click "Settle on L1" to finalize.', 'ok');
     $('btnPwSettle').disabled = false;
+    await fetchTickets(); applyTicketState();
   } catch (e) { log('burn send failed: '+e.message, 'err'); $('btnBurnSend').disabled = false; }
   clearInterval(tick);
   $('btnBurnSend').textContent = 'Step 1 -- Burn Send';
-};
+});
 
-$('btnPwSettle').onclick = async () => {
+$('btnPwSettle').onclick = guard('settle', async () => {
   const t0 = Date.now();
   const tick = setInterval(() => { $('btnPwSettle').textContent = 'Settling... ' + Math.round((Date.now()-t0)/1000) + 's'; }, 250);
   try {
     $('btnPwSettle').disabled = true;
-    const recipient = $('pwAddress').value.trim();
-    if (!recipient || !recipient.startsWith('0x')) { log('enter a valid L1 recipient address', 'err'); throw new Error('invalid recipient'); }
+    let recipient = $('pwAddress').value.trim();
+    if (!recipient || !recipient.startsWith('0x')) {
+      const pwTicket = ticketOfType('partial_withdrawal');
+      if (pwTicket && pwTicket.params && pwTicket.params.recipient) recipient = pwTicket.params.recipient;
+      else { log('enter a valid L1 recipient address', 'err'); throw new Error('invalid recipient'); }
+    }
     log('submitting partial withdrawal...');
     const submit = JSON.parse(await api('/api/pw-submit', JSON.stringify({ recipient })));
     log('  submitted -- authDigest = ' + (submit.auth_digest || '?'), 'ok');
@@ -798,13 +935,14 @@ $('btnPwSettle').onclick = async () => {
     const fin = JSON.parse(await api('/api/pw-finalize', '{}'));
     log('partial withdrawal finalized -- authDigest ' + (fin.authDigest || '?'), 'ok');
     $('btnBurnSend').disabled = false;
+    await fetchTickets(); applyTicketState();
   } catch (e) { log('pw-settle failed: '+e.message, 'err'); $('btnPwSettle').disabled = false; }
   clearInterval(tick);
   $('btnPwSettle').textContent = 'Step 2 -- Settle on L1';
-};
+});
 
 // ---- FULL WITHDRAWAL (withdraw view) -------------------------------------------------------
-$('btnFwDeploySettlement').onclick = async () => {
+$('btnFwDeploySettlement').onclick = guard('fwDeploy', async () => {
   const t0 = Date.now();
   const tick = setInterval(() => { $('btnFwDeploySettlement').textContent = 'Deploying... ' + Math.round((Date.now()-t0)/1000) + 's'; }, 250);
   try {
@@ -813,13 +951,14 @@ $('btnFwDeploySettlement').onclick = async () => {
     fwSettlement = JSON.parse(await api('/api/deploy-settlement', '{}'));
     log('settlement deployed -- manager=' + fwSettlement.manager + ', verifier=' + fwSettlement.verifier, 'ok');
     $('btnFwClose').disabled = false;
+    await fetchTickets(); applyTicketState();
   } catch (e) { log('deploy settlement failed: '+e.message, 'err'); }
   clearInterval(tick);
   $('btnFwDeploySettlement').textContent = '1 -- Deploy Settlement';
   $('btnFwDeploySettlement').disabled = false;
-};
+});
 
-$('btnFwClose').onclick = async () => {
+$('btnFwClose').onclick = guard('fwClose', async () => {
   const t0 = Date.now();
   const tick = setInterval(() => { $('btnFwClose').textContent = 'Closing... ' + Math.round((Date.now()-t0)/1000) + 's'; }, 250);
   try {
@@ -829,13 +968,14 @@ $('btnFwClose').onclick = async () => {
     const r = JSON.parse(await api('/api/close', JSON.stringify({ manager: fwSettlement.manager, sv: fwSettlement.verifier })));
     log('channel closed.', 'ok');
     $('btnFwSettle').disabled = false;
+    await fetchTickets(); applyTicketState();
   } catch (e) { log('close failed: '+e.message, 'err'); }
   clearInterval(tick);
   $('btnFwClose').textContent = '2 -- Close Channel';
   $('btnFwClose').disabled = false;
-};
+});
 
-$('btnFwSettle').onclick = async () => {
+$('btnFwSettle').onclick = guard('fwSettle', async () => {
   const t0 = Date.now();
   const tick = setInterval(() => { $('btnFwSettle').textContent = 'Settling... ' + Math.round((Date.now()-t0)/1000) + 's'; }, 250);
   try {
@@ -844,13 +984,14 @@ $('btnFwSettle').onclick = async () => {
     await api('/api/settle', JSON.stringify({ manager: fwSettlement.manager }));
     log('settled.', 'ok');
     $('btnFwWithdraw').disabled = false;
+    await fetchTickets(); applyTicketState();
   } catch (e) { log('settle failed: '+e.message, 'err'); }
   clearInterval(tick);
   $('btnFwSettle').textContent = '3 -- Settle';
   $('btnFwSettle').disabled = false;
-};
+});
 
-$('btnFwWithdraw').onclick = async () => {
+$('btnFwWithdraw').onclick = guard('fwWithdraw', async () => {
   const t0 = Date.now();
   const tick = setInterval(() => { $('btnFwWithdraw').textContent = 'Withdrawing... ' + Math.round((Date.now()-t0)/1000) + 's'; }, 250);
   try {
@@ -859,13 +1000,14 @@ $('btnFwWithdraw').onclick = async () => {
     await api('/api/withdraw', JSON.stringify({ manager: fwSettlement.manager }));
     log('withdrawal complete.', 'ok');
     $('btnFwClaim').disabled = false;
+    await fetchTickets(); applyTicketState();
   } catch (e) { log('withdraw failed: '+e.message, 'err'); }
   clearInterval(tick);
   $('btnFwWithdraw').textContent = '4 -- Withdraw';
   $('btnFwWithdraw').disabled = false;
-};
+});
 
-$('btnFwClaim').onclick = async () => {
+$('btnFwClaim').onclick = guard('fwClaim', async () => {
   const t0 = Date.now();
   const tick = setInterval(() => { $('btnFwClaim').textContent = 'Claiming... ' + Math.round((Date.now()-t0)/1000) + 's'; }, 250);
   try {
@@ -875,11 +1017,12 @@ $('btnFwClaim').onclick = async () => {
     log('claiming slot ' + slot + ' to ' + recipient + '...');
     await api('/api/claim', JSON.stringify({ manager: fwSettlement.manager, slot: Number(slot), recipient }));
     log('claimed slot ' + slot + ' funds to ' + recipient + '.', 'ok');
+    await fetchTickets(); applyTicketState();
   } catch (e) { log('claim failed: '+e.message, 'err'); }
   clearInterval(tick);
   $('btnFwClaim').textContent = '5 -- Claim';
   $('btnFwClaim').disabled = false;
-};
+});
 
 // ---- Thread count + init -------------------------------------------------------------------
 function pickThreads() {

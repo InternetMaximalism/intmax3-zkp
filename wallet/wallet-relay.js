@@ -51,6 +51,34 @@ function withLock(ch, fn) {
   return next;
 }
 
+// ---- Ticket persistence (one JSON array per channel) ----------------------------------------
+const TICKET_FILE = 'tickets.json';
+const TICKET_TTL = 3600_000;
+const TERMINAL = { partial_withdrawal: 'settle_done', deposit: 'import_done', full_withdrawal: 'claim_done' };
+
+function readTickets(ch) {
+  try { return JSON.parse(fs.readFileSync(wc(ch, TICKET_FILE), 'utf8')); }
+  catch (e) { return []; }
+}
+function writeTickets(ch, tickets) {
+  fs.writeFileSync(wc(ch, TICKET_FILE), JSON.stringify(tickets, null, 2));
+}
+function findActiveTicket(ch, type) {
+  return readTickets(ch).find(t => t.type === type && t.status !== TERMINAL[type]);
+}
+function upsertTicket(ch, ticket) {
+  const tickets = readTickets(ch);
+  const idx = tickets.findIndex(t => t.id === ticket.id);
+  ticket.updatedAt = Date.now();
+  if (idx >= 0) tickets[idx] = ticket; else tickets.push(ticket);
+  const now = Date.now();
+  const kept = tickets.filter(t =>
+    !Object.values(TERMINAL).includes(t.status) || (now - t.updatedAt) < TICKET_TTL
+  );
+  writeTickets(ch, kept);
+  return ticket;
+}
+
 // The rollup address backing channel `ch` (recorded by setup-backing in channel_backing.json).
 function rollupOf(ch) {
   const b = JSON.parse(fs.readFileSync(wc(ch, 'channel_backing.json'), 'utf8'));
@@ -179,7 +207,10 @@ app.post('/api/close', (req, res) => {
     const manager = req.body && req.body.manager;
     const sv = (req.body && req.body.sv) || '';
     if (!manager) throw new Error('close needs { manager }');
+    const ticket = findActiveTicket(ch, 'full_withdrawal');
+    if (ticket) { ticket.status = 'close_pending'; upsertTicket(ch, ticket); }
     const out = cli(ch, ['close', manager, RPC], { CLOSE_SV: sv });
+    if (ticket) { ticket.status = 'close_done'; ticket.steps.close = { completedAt: Date.now() }; upsertTicket(ch, ticket); }
     res.json({ ok: true, log: out });
   } catch (e) { console.error(e.stderr ? String(e.stderr) : (e.message||e)); res.status(500).json({ error: String(e.stderr || e.message || e) }); }
 });
@@ -190,7 +221,10 @@ app.post('/api/settle', (req, res) => {
     const ch = reqChannel(req);
     const manager = req.body && req.body.manager;
     if (!manager) throw new Error('settle needs { manager }');
+    const ticket = findActiveTicket(ch, 'full_withdrawal');
+    if (ticket) { ticket.status = 'settle_pending'; upsertTicket(ch, ticket); }
     const out = cli(ch, ['settle', manager, RPC]);
+    if (ticket) { ticket.status = 'settle_done'; ticket.steps.settle = { completedAt: Date.now() }; upsertTicket(ch, ticket); }
     res.json({ ok: true, log: out });
   } catch (e) { console.error(e.stderr ? String(e.stderr) : (e.message||e)); res.status(500).json({ error: String(e.stderr || e.message || e) }); }
 });
@@ -201,7 +235,10 @@ app.post('/api/withdraw', (req, res) => {
     const ch = reqChannel(req);
     const manager = req.body && req.body.manager;
     if (!manager) throw new Error('withdraw needs { manager }');
+    const ticket = findActiveTicket(ch, 'full_withdrawal');
+    if (ticket) { ticket.status = 'withdraw_pending'; upsertTicket(ch, ticket); }
     const out = cli(ch, ['withdraw', manager, RPC], { ROLLUP: rollupOf(ch) });
+    if (ticket) { ticket.status = 'withdraw_done'; ticket.steps.withdraw = { completedAt: Date.now() }; upsertTicket(ch, ticket); }
     res.json({ ok: true, log: out });
   } catch (e) { console.error(e.stderr ? String(e.stderr) : (e.message||e)); res.status(500).json({ error: String(e.stderr || e.message || e) }); }
 });
@@ -214,7 +251,10 @@ app.post('/api/claim', (req, res) => {
     const slot = req.body && req.body.slot;
     const recipient = req.body && req.body.recipient;
     if (!manager || slot === undefined || !recipient) throw new Error('claim needs { manager, slot, recipient }');
+    const ticket = findActiveTicket(ch, 'full_withdrawal');
+    if (ticket) { ticket.status = 'claim_pending'; upsertTicket(ch, ticket); }
     const out = cli(ch, ['claim', manager, String(slot), RPC], { CLAIM_RECIPIENT: recipient });
+    if (ticket) { ticket.status = 'claim_done'; ticket.steps.claim = { completedAt: Date.now() }; upsertTicket(ch, ticket); }
     res.json({ ok: true, log: out });
   } catch (e) { console.error(e.stderr ? String(e.stderr) : (e.message||e)); res.status(500).json({ error: String(e.stderr || e.message || e) }); }
 });
@@ -283,22 +323,39 @@ app.post('/api/import-deposit', (req, res) => {
       amount = dep.amount;
     }
     cli(ch, ['cosign-l1-deposit-import', String(slot), String(amount), depositor, 'l1_import_cosigned.json']);
+    const depTicket = findActiveTicket(ch, 'deposit');
+    if (depTicket) { depTicket.status = 'import_done'; depTicket.steps.import = { completedAt: Date.now() }; upsertTicket(ch, depTicket); }
     const snap = JSON.parse(fs.readFileSync(wc(ch, 'channel_snapshot.json'), 'utf8'));
     res.json(snap);
   }).catch((e) => { console.error(e.stderr ? String(e.stderr) : (e.message||e)); res.status(500).json({ error: String(e.stderr || e.message || e) }); });
 });
 
-// POST /api/cosign-burn?channel=N  body: { debitPayload, transferDescriptor }
+// POST /api/cosign-burn?channel=N  body: { debitPayload, transferDescriptor, amount?, recipient? }
 // Co-sign a burn send (partial withdrawal debit leg).
 app.post('/api/cosign-burn', (req, res) => {
   const ch = reqChannel(req);
   withLock(ch, () => {
+    const active = findActiveTicket(ch, 'partial_withdrawal');
+    if (active && active.status === 'burn_done') {
+      res.status(409).json({ error: 'settle pending burn first', ticket: active });
+      return;
+    }
     const { debitPayload, transferDescriptor } = req.body || {};
     if (!debitPayload || !transferDescriptor) throw new Error('cosign-burn needs { debitPayload, transferDescriptor }');
     fs.writeFileSync(wc(ch, 'burn_payload.json'), JSON.stringify(debitPayload));
     fs.writeFileSync(wc(ch, 'burn_descriptor.json'), JSON.stringify(transferDescriptor));
     cli(ch, ['cosign-burn-send', 'burn_payload.json', 'burn_descriptor.json', 'burn_cosigned.json']);
-    res.json(JSON.parse(fs.readFileSync(wc(ch, 'burn_cosigned.json'), 'utf8')));
+    const ticket = upsertTicket(ch, {
+      id: 'pw_' + Date.now(),
+      type: 'partial_withdrawal',
+      status: 'burn_done',
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+      params: { amount: String(req.body.amount || ''), recipient: req.body.recipient || '' },
+      steps: { burn: { completedAt: Date.now() }, settle: null },
+    });
+    const cosigned = JSON.parse(fs.readFileSync(wc(ch, 'burn_cosigned.json'), 'utf8'));
+    res.json({ ...cosigned, _ticket: ticket });
   }).catch((e) => { console.error(e.stderr ? String(e.stderr) : (e.message||e)); res.status(500).json({ error: String(e.stderr || e.message || e) }); });
 });
 
@@ -311,7 +368,18 @@ app.post('/api/deploy-settlement', (req, res) => {
       return res.json(JSON.parse(fs.readFileSync(wc(ch, 'settlement.json'), 'utf8')));
     }
     cli(ch, ['deploy-settlement', RPC]);
-    res.json(JSON.parse(fs.readFileSync(wc(ch, 'settlement.json'), 'utf8')));
+    const s = JSON.parse(fs.readFileSync(wc(ch, 'settlement.json'), 'utf8'));
+    let ticket = findActiveTicket(ch, 'full_withdrawal');
+    if (!ticket) {
+      ticket = { id: 'fw_' + Date.now(), type: 'full_withdrawal', status: 'deploy_done', createdAt: Date.now(), updatedAt: Date.now(),
+        params: { manager: s.manager, verifier: s.verifier },
+        steps: { deploy: { completedAt: Date.now(), manager: s.manager, verifier: s.verifier }, close: null, settle: null, withdraw: null, claim: null } };
+    } else {
+      ticket.status = 'deploy_done'; ticket.params.manager = s.manager; ticket.params.verifier = s.verifier;
+      ticket.steps.deploy = { completedAt: Date.now(), manager: s.manager, verifier: s.verifier };
+    }
+    upsertTicket(ch, ticket);
+    res.json(s);
   }).catch((e) => { console.error(e.stderr ? String(e.stderr) : (e.message||e)); res.status(500).json({ error: String(e.stderr || e.message || e) }); });
 });
 
@@ -328,10 +396,12 @@ app.get('/api/settlement', (req, res) => {
 app.post('/api/pw-submit', (req, res) => {
   const ch = reqChannel(req);
   withLock(ch, () => {
+    const ticket = findActiveTicket(ch, 'partial_withdrawal');
+    if (ticket) { ticket.status = 'settle_pending'; upsertTicket(ch, ticket); }
     if (!fs.existsSync(wc(ch, 'settlement.json'))) {
       cli(ch, ['deploy-settlement', RPC]);
     }
-    const pwRecipient = (req.body && req.body.recipient) || '';
+    const pwRecipient = (req.body && req.body.recipient) || (ticket && ticket.params.recipient) || '';
     const extra = pwRecipient ? { PW_RECIPIENT: pwRecipient } : {};
     cli(ch, ['pw-submit', RPC], extra);
     res.json(JSON.parse(fs.readFileSync(wc(ch, 'pw_auth.json'), 'utf8')));
@@ -345,8 +415,35 @@ app.post('/api/pw-finalize', (req, res) => {
   withLock(ch, () => {
     cli(ch, ['pw-finalize', RPC]);
     const auth = JSON.parse(fs.readFileSync(wc(ch, 'pw_auth.json'), 'utf8'));
+    const ticket = findActiveTicket(ch, 'partial_withdrawal');
+    if (ticket) { ticket.status = 'settle_done'; ticket.steps.settle = { completedAt: Date.now(), authDigest: auth.auth_digest }; upsertTicket(ch, ticket); }
     res.json({ ok: true, authDigest: auth.auth_digest });
   }).catch((e) => { console.error(e.stderr ? String(e.stderr) : (e.message||e)); res.status(500).json({ error: String(e.stderr || e.message || e) }); });
+});
+
+// ─── Ticket endpoints ────────────────────────────────────────────────────────────────────────
+
+app.get('/api/tickets', (req, res) => {
+  const ch = reqChannel(req);
+  res.json(readTickets(ch));
+});
+
+app.post('/api/ticket/deposit', (req, res) => {
+  const ch = reqChannel(req);
+  const { amount, depositor, txHash, recipientSlot } = req.body || {};
+  if (!amount || !depositor || !txHash) return res.status(400).json({ error: 'needs { amount, depositor, txHash, recipientSlot }' });
+  const existing = findActiveTicket(ch, 'deposit');
+  if (existing) return res.status(409).json({ error: 'deposit already pending', ticket: existing });
+  const ticket = upsertTicket(ch, {
+    id: 'dep_' + Date.now(),
+    type: 'deposit',
+    status: 'l1_done',
+    createdAt: Date.now(),
+    updatedAt: Date.now(),
+    params: { amount: String(amount), depositor, recipientSlot: recipientSlot || 0, txHash },
+    steps: { l1: { completedAt: Date.now(), txHash }, import: null },
+  });
+  res.json(ticket);
 });
 
 // Static wallet files: wallet-live.html + wallet-worker.js from wallet/ (ROOT), and the built
@@ -370,6 +467,7 @@ for (const ch of CHANNELS) {
     fs.rmSync(wc(ch, 'last_burn.json'), { force: true });
     fs.rmSync(wc(ch, 'pw_auth.json'), { force: true });
     fs.rmSync(wc(ch, 'pw_submit.json'), { force: true });
+    fs.rmSync(wc(ch, TICKET_FILE), { force: true });
   }
 }
 
