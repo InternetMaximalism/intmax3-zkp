@@ -1,0 +1,11 @@
+name = "Zkp"
+defaultTargets = ["Zkp"]
+
+# Self-contained: no mathlib dependency, so `lake build` is fast and reproducible.
+# The algebraic core (Core/Field.lean) axiomatizes exactly the field/ring
+# properties the circuit-soundness proofs rely on. If deeper number-theoretic
+# facts about the Goldilocks prime become necessary, a mathlib-backed concrete
+# instance can be added later under Core/Goldilocks.lean without changing specs.
+
+[[lean_lib]]
+name = "Zkp"
