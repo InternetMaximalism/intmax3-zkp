@@ -26,3 +26,11 @@ import Zkp.Circuits.Validity.DepositStep
 import Zkp.Circuits.Validity.BlockStep
 import Zkp.Circuits.Validity.SmallBlockMessage
 import Zkp.Circuits.Plumbing
+import Zkp.Contracts.Evm
+import Zkp.Contracts.IntmaxRollupWithdraw
+import Zkp.Contracts.IntmaxRollupSolvency
+import Zkp.Contracts.IntmaxRollupStake
+import Zkp.Contracts.IntmaxRollupDeposit
+import Zkp.Contracts.IntmaxRollupOptimistic
+import Zkp.Contracts.ChannelSettlementManager
+import Zkp.Contracts.Coverage

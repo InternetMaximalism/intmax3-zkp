@@ -37,3 +37,19 @@
   provided `is_checked=true` (all in-scope callers pass it).
 - `is_valid`-style flags are consumed downstream as no-op selectors, not
   asserted at the producing circuit — check the CONSUMER before flagging.
+
+## Contract modeling lessons
+- `omega` failed to ingest hypotheses typed `U256` (an `abbrev` for `Nat`)
+  with "no usable constraints found" — it did not unfold the abbrev in the
+  hypothesis/goal atoms. Workaround: discharge with explicit `Nat` lemmas
+  (`Nat.sub_add_cancel`, `Nat.add_le_add_left`, `Nat.add_assoc/comm`) or a
+  `calc`. (Alternatively use `Nat` directly in storage structs.)
+- Model Solidity-0.8 checked arithmetic as `Option` (none = revert):
+  `checkedSub`/`checkedAdd`. The underflow-revert on `totalEscrowed -= amount`
+  IS the global solvency invariant — never model it with saturating ℕ sub.
+- External functions = `State → ... → Option State` (none = revert). `require`
+  becomes guard `if ¬cond then none`. Decompose a successful call with a
+  `*_some` lemma (guards-false + the post-state) and reuse it across proofs.
+- Crypto verifiers (Groth16/KZG/MLE) are uninterpreted `... → Bool` oracles,
+  exactly как Poseidon/keccak in the circuit model — contract reasoning is
+  about accounting / access-control / replay / CEI, not the primitives.
