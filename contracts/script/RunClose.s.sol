@@ -145,4 +145,60 @@ contract RunClose is Script {
         vm.stopBroadcast();
         console2.log("submitWithdrawalClaim OK; recipient credit pending claimWithdrawalCredit");
     }
+
+    function _cancelClose() internal view returns (string memory) {
+        return vm.readFile(string.concat(vm.projectRoot(), "/test/data/sepolia_cancel_close.json"));
+    }
+
+    function _cancelCloseMle() internal view returns (string memory) {
+        return vm.readFile(string.concat(vm.projectRoot(), "/test/data/sepolia_cancel_close_mle.json"));
+    }
+
+    /// A30 (H-3 C1): cancel a PENDING close with the REAL cancel-close MLE/WHIR proof (produced by
+    /// the CLI `cancel-close` command via `CancelCloseProver`). The manager injects the registered
+    /// member-set commitment and matches `request.closeIntentDigest` to the pending close, so the
+    /// only caller fields are the close-intent digest + the revived (higher) state version/digest.
+    function cancelCloseStep() external {
+        string memory j = _cancelClose();
+        ChannelSettlementManager.CancelCloseRequest memory request = ChannelSettlementManager
+            .CancelCloseRequest({
+            closeIntentDigest: vm.parseJsonBytes32(j, ".close_intent_digest"),
+            revivedStateVersion: uint64(vm.parseJsonUint(j, ".revived_state_version")),
+            revivedChannelStateDigest: vm.parseJsonBytes32(j, ".revived_channel_state_digest")
+        });
+        MleVerifier.MleProof memory proof = FixtureLib.parseProof(_cancelCloseMle());
+        vm.startBroadcast();
+        _manager().cancelClose(request, proof);
+        vm.stopBroadcast();
+        console2.log("cancelClose OK; channel status restored to Active");
+    }
+
+    function _postCloseClaim() internal view returns (string memory) {
+        return vm.readFile(string.concat(vm.projectRoot(), "/test/data/sepolia_post_close_claim.json"));
+    }
+
+    function _postCloseClaimMle() internal view returns (string memory) {
+        return vm.readFile(string.concat(vm.projectRoot(), "/test/data/sepolia_post_close_claim_mle.json"));
+    }
+
+    /// A34 (H-2 §3.5.5): claim a late inter-channel delta on a CLOSED channel with the REAL
+    /// post-close-claim MLE/WHIR proof (produced by the CLI `post-close-claim` command via
+    /// `PostCloseClaimProver`). The manager RECOMPUTES `sharedNativeNullifier` (HAZARD #8), so it is
+    /// NOT a caller field; the claim carries only the close-intent digest, the incoming tx hash, the
+    /// receiver pk_g, the recipient, and the (in-circuit decrypted) amount.
+    function submitPostCloseClaimStep() external {
+        string memory j = _postCloseClaim();
+        ChannelSettlementManager.PostCloseClaim memory claim = ChannelSettlementManager.PostCloseClaim({
+            closeIntentDigest: vm.parseJsonBytes32(j, ".close_intent_digest"),
+            incomingTxHash: vm.parseJsonBytes32(j, ".incoming_tx_hash"),
+            receiverPkG: vm.parseJsonBytes32(j, ".receiver_pk_g"),
+            recipient: vm.parseJsonAddress(j, ".recipient"),
+            amount: uint64(vm.parseJsonUint(j, ".amount"))
+        });
+        MleVerifier.MleProof memory proof = FixtureLib.parseProof(_postCloseClaimMle());
+        vm.startBroadcast();
+        _manager().submitPostCloseClaim(claim, proof);
+        vm.stopBroadcast();
+        console2.log("submitPostCloseClaim OK; recipient credit pending claimWithdrawalCredit");
+    }
 }
