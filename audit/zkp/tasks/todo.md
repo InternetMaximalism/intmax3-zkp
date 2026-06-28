@@ -45,7 +45,7 @@ Legend: [ ] todo · [x] in progress · [x] modeled+proved · [!] finding open
 - [x] `balance_processor.rs`    → orchestration only (no new constraints; documented in BalanceCircuit.lean)
 
 ## Phase 3 — withdraw — COMPLETE ✅ (chain/processor = documented cyclic wrappers)
-- [x] `withdrawal_circuit.rs`        → Circuits/Withdraw/WithdrawalCircuit.lean  **[! F-WITHDRAW-1 = C-M2]**
+- [x] `withdrawal_circuit.rs`        → Circuits/Withdraw/WithdrawalCircuit.lean  **[F-WITHDRAW-1 = C-M2 — CLOSED, contract re-pins]**
 - [x] `single_withdrawal_circuit.rs` → Circuits/Withdraw/SingleWithdrawalCircuit.lean (provenance+nullifier; proper cyclic ⇒ C-M3 n/a)
 - [x] `withdrawal_step.rs`           → Circuits/Withdraw/WithdrawalStep.lean (faithful fold + WDR-CRIT-001 state-threading)
 - [x] `withdrawal_chain_circuit.rs`  → cyclic wrapper (documented in WithdrawalStep.lean; no new leaf constraints)
@@ -162,17 +162,38 @@ asserts `public_state.block_number ≥ new_block_r` (proved `blockR_bounded`);
 receive paths close it. Remaining: confirm send_tx's `tx_block_number ≤
 new public_state.block_number` (tx_block came from account send_leaf.cur).
 
-### F-WITHDRAW-1 (= audit622 C-M2) — partial ExtendedPublicState binding  [OPEN / MEDIUM]
+### F-WITHDRAW-1 (= audit622 C-M2) — partial ExtendedPublicState binding  [CLOSED — SAFE, contract re-pins]
 `withdrawal_circuit.rs:190-194`. Only `ext_public_state.inner` is
 `connect`-ed to the verified chain proof; the 5 extended fields
 (block_hash_chain, deposit_hash_chain, deposit_count, channel_reg_hash_chain,
 bp_sig_chain) are FREE witnesses, yet `ext_public_state_commitment` (an
 on-chain PI) commits to all of them. Lean: `Constraints` has no conjunct
-binding the extended fields; `ext_is_genuine` is unprovable. EXPLOITABILITY
-contingent on `IntmaxRollup.sol`: safe IFF the contract compares
-`ext_public_state_commitment` to the stored block commitment and never
-trusts an extended field decoded from the withdrawal PI. ACTION: verify
-contract-side (separate task spawned). Reproduces audit622 C-M2 formally.
+binding the extended fields; `ext_is_genuine` is unprovable.
+
+CONTRACT-SIDE VERDICT (task_cae4b173): case (a) — SAFE. The contract NEVER
+decodes an individual extended field; it requires the FULL commitment to be a
+member of the validity-finalized root set, which re-pins all 5 fields.
+  1. `withdrawNative` checks `finalizedStateRoots[extCommitment]`
+     (IntmaxRollup.sol:1330-1331, `WithdrawalExtCommitmentMismatch`). No
+     extended field is ever read out of the withdrawal PI.
+  2. `finalizedStateRoots` is written only by `finalize()` (:1122) with
+     `stateRoot`, and `fullVerify` forces `validityPIs.finalExtCommitment ==
+     stateRoot` (:1469) + binds validityPIs to a verified validity MLE proof via
+     piHash (:1480). So every member is a validity-proof `final_ext_commitment`.
+  3. Validity circuit computes that commitment with the SAME
+     `ExtendedPublicStateTarget::commitment` over the SAME 13-field `to_vec()`
+     (validity_circuit.rs:242), with the 5 fields CONSTRAINED to true values
+     (D3 bp_sig_chain + A8 guard, R4 channel_reg_chain, deposit chain).
+  4. Poseidon is collision-resistant ⇒ the only preimage landing in
+     `finalizedStateRoots` is the genuine (inner, ext5) tuple. Forging any field
+     yields a commitment absent from the set → revert.
+The circuit's partial binding is INTENTIONAL and completed contract-side. The
+membership check also anchors `inner` to a finalized state; `block_number`
+(pi[16]) is independently bound to `inner.block_number` (:195) and folded into
+pis_hash. Residual external dependency: the validity circuit truly constrains the
+5 fields (its own invariant, separate scope; documented D3/A8/R4). Reproduces +
+resolves audit622 C-M2 formally. Full line-referenced argument:
+`audit/zkp/tasks/F-WITHDRAW-1-verdict.md`.
 
 ## Assessment (FINAL — substantive audit complete)
 - 20 circuit files + 6 core modules; 57 machine-checked theorems; 3254 LOC;
@@ -182,8 +203,11 @@ contract-side (separate task spawned). Reproduces audit622 C-M2 formally.
   or its gap is surfaced+adjudicated. The complete fund flow (deposit→spend→
   send→receive→withdraw) + validity-top + on-chain binding + nullifier
   non-membership is formally established.
-- Findings: ONLY F-WITHDRAW-1 (=audit622 C-M2) open — MEDIUM, contract-layer,
-  task_cae4b173 spawned to verify IntmaxRollup.sol. F-NULL-1 discharged;
+- Findings: F-WITHDRAW-1 (=audit622 C-M2) now CLOSED — contract-side verify
+  (task_cae4b173) confirmed case (a) SAFE: `withdrawNative` requires the full
+  ext commitment ∈ `finalizedStateRoots` (validity-finalized roots), re-pinning
+  all 5 extended fields; no extended field is trusted from the withdrawal PI.
+  NO open circuit-level findings remain. F-NULL-1 discharged;
   F-RECIP-1 informational; F-SPEND-1/F-ACCT-1 closed; F-BLKR-1 mostly resolved;
   F-AUX-1 documented residual. NO new exploitable circuit-level vulnerability
   found beyond the known C-M2 residual.
