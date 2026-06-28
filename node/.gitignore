@@ -1,0 +1,5 @@
+node_modules/
+config.json
+*.log
+node-cosigner-state.json
+node-delegate-*.json

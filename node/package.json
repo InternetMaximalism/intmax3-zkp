@@ -1,0 +1,15 @@
+{
+  "name": "intmax3-node",
+  "version": "0.1.0",
+  "private": true,
+  "description": "INTMAX3 co-signer node + delegate account programs",
+  "type": "commonjs",
+  "scripts": {
+    "cosigner": "node cosigner/index.js",
+    "delegate": "node delegate/index.js",
+    "test": "node --test \"test/*.test.js\""
+  },
+  "dependencies": {
+    "ethers": "^6.13.0"
+  }
+}

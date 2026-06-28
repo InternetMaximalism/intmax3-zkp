@@ -1,0 +1,23 @@
+{
+  "role": "cosigner",
+  "rpcUrl": "http://127.0.0.1:8545",
+  "chainId": 31337,
+  "confirmations": 2,
+  "pollIntervalMs": 4000,
+  "apiBaseUrl": "http://127.0.0.1:8100",
+  "channels": [
+    { "id": 7, "rollup": "0x0000000000000000000000000000000000000000", "manager": "0x0000000000000000000000000000000000000000", "verifier": "0x0000000000000000000000000000000000000000", "workDir": "../wallet-live-work/ch7" }
+  ],
+  "policy": {
+    "maxInFlightPerChannel": 8,
+    "invalidScoreThreshold": 5,
+    "invalidScoreWindowMs": 60000,
+    "maxCosignRetries": 3,
+    "cosignTimeoutMs": 600000,
+    "amountCapWei": "100000000000000000000",
+    "staleCloseResponse": "cancel"
+  },
+  "keys": {
+    "seedSource": "env:DELEGATE_SEED"
+  }
+}
