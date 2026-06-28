@@ -32,7 +32,11 @@ use intmax3_zkp::{
             common::recipient::calculate_recipient_from_user_id, spend_circuit::SpendCircuit,
         },
         channel::{
+            cancel_close_pis::{CANCEL_CLOSE_PUBLIC_INPUTS_LEN, CancelClosePublicInputs},
             close_pis::{CHANNEL_CLOSE_PUBLIC_INPUTS_LEN, ChannelClosePublicInputs},
+            post_close_claim_pis::{
+                POST_CLOSE_CLAIM_PUBLIC_INPUTS_LEN, PostCloseClaimPublicInputs,
+            },
             withdrawal_claim_pis::{
                 WITHDRAWAL_CLAIM_PUBLIC_INPUTS_LEN, WithdrawalClaimPublicInputs,
             },
@@ -47,7 +51,10 @@ use intmax3_zkp::{
     },
     common::{
         balance_state::tx_leaf_hash,
-        channel::{ChannelRecord, ChannelState, CloseIntent, CloseWithdrawal, MemberSignature},
+        channel::{
+            ChannelRecord, ChannelState, CloseIntent, CloseWithdrawal, InterChannelTx,
+            MemberSignature,
+        },
         channel_id::ChannelId,
         deposit::Deposit,
         salt::Salt,
@@ -63,9 +70,10 @@ use intmax3_zkp::{
         serialize::{deserialize_verifier_data, serialize_verifier_data},
     },
     wallet_core::{
-        BuiltInterChannelCredit, BuiltSend, ChannelBalanceAttestation, ChannelSnapshot,
-        ChannelWithdrawalParams, CloseProver, InterChannelDebitPayload,
-        InterChannelTransferDescriptor, MemberInfo, MemberKeys, RefreshPayload, SendPayload,
+        BuiltInterChannelCredit, BuiltSend, CancelCloseProver, ChannelBalanceAttestation,
+        ChannelSnapshot, ChannelWithdrawalParams, CloseProver, InterChannelDebitPayload,
+        InterChannelTransferDescriptor, MemberInfo, MemberKeys, PostCloseClaimProver,
+        RefreshPayload, SendPayload,
         WithdrawalClaimProver, add_signature, assemble_genesis_state_backed,
         build_channel_withdrawal, build_inter_channel_credit, build_l1_deposit_import,
         build_record, build_send, decrypt_balance, default_settled_tx_accumulator,
@@ -122,6 +130,17 @@ const BALANCE_VD_FILE: &str = "balance_vd.bin"; // cached balance verifier data 
 // `ChannelSettlementManager.submitCloseIntent` consumes (same schema as generate_close_fixture).
 const CLOSE_INTENT_FILE: &str = "close_intent.json";
 const CLOSE_INTENT_MLE_FILE: &str = "close_intent_mle.json";
+// A-3 H-3 C1 (A30 cancelClose): the EXACT pending `CloseIntent` (serde, camelCase) persisted by
+// `close` so `cancel-close` can reconstruct the same close_intent_digest the manager froze on-chain
+// — a lossless round-trip (NOT the hex-string descriptor), so the cancel proof's close_intent_digest
+// PI matches `pendingClose.closeIntentDigest` or the manager fail-closes (CloseIntentDigestMismatch).
+const CLOSE_INTENT_FULL_FILE: &str = "close_intent_full.json";
+const CANCEL_CLOSE_FILE: &str = "cancel_close.json";
+const CANCEL_CLOSE_MLE_FILE: &str = "cancel_close_mle.json";
+// A-3 H-2 §3.5.5 (A34 submitPostCloseClaim): a member claims a late inter-channel delta that landed
+// AFTER the channel was finalized.
+const POST_CLOSE_CLAIM_FILE: &str = "post_close_claim.json";
+const POST_CLOSE_CLAIM_MLE_FILE: &str = "post_close_claim_mle.json";
 // Delegate demo: slots 0,1,2 = three CLI-controlled CO-SIGNING MEMBERS (with genesis balances);
 // slot 3 = the browser, a send-only DELEGATE (delegate_count = 1).
 const CLI_SLOTS: &[u8] = &[0, 1, 2];
@@ -578,6 +597,37 @@ fn cmd_close(args: &[String]) {
         .cloned()
         .unwrap_or_else(|| "http://localhost:8545".to_string());
 
+    // Phase control (opt-in; default = the combined requestClose + submitCloseIntent flow):
+    //   CLOSE_REQUEST_ONLY=1 → A26 requestClose-only (freeze + grace), NO proving, return early.
+    //   CLOSE_SKIP_REQUEST=1 → A28 submit-intent / A29 challenge: skip requestClose (the channel is
+    //     already ClosePending), build the proof and submit the (possibly higher-version) intent.
+    // SECURITY: pure on-chain call-sequence control; the proof + the manager/verifier gate every
+    // soundness property. Skipping requestClose cannot weaken the close — submitCloseIntent still
+    // verifies the wrapped MLE proof and the manager enforces challenge ordering (epoch, version).
+    let skip_request = std::env::var("CLOSE_SKIP_REQUEST").is_ok();
+    if std::env::var("CLOSE_REQUEST_ONLY").is_ok() {
+        let key = deposit_key_env();
+        eprintln!("[close] requestClose() on manager {manager} (A26 request-only phase, no proving)…");
+        cast(&[
+            "send",
+            &manager,
+            "requestClose()",
+            "--private-key",
+            &key,
+            "--rpc-url",
+            &rpc,
+        ]);
+        if let Ok(secs) = std::env::var("CLOSE_ADVANCE_TIME") {
+            eprintln!("[close] advancing chain time by {secs}s (evm_increaseTime) to pass the grace window…");
+            cast(&["rpc", "evm_increaseTime", &secs, "--rpc-url", &rpc]);
+            cast(&["rpc", "evm_mine", "--rpc-url", &rpc]);
+        }
+        println!(
+            "[close] requestClose submitted; channel ClosePending. Run submit-intent (CLOSE_SKIP_REQUEST=1) after the grace window."
+        );
+        return;
+    }
+
     let close_nonce = env_u64("CLOSE_NONCE", 1);
     let snapshot_mbn = env_u64("CLOSE_SNAPSHOT_MBN", 1);
     let burn_tx_hash = std::env::var("CLOSE_BURN_TX")
@@ -656,30 +706,56 @@ fn cmd_close(args: &[String]) {
     fs::write(CLOSE_INTENT_MLE_FILE, &mle_json)
         .unwrap_or_else(|e| die(format!("write {CLOSE_INTENT_MLE_FILE}: {e}")));
     write_json(CLOSE_INTENT_FILE, &descriptor);
+
+    // A30 prerequisite: persist the EXACT pending `CloseIntent` (lossless serde) so a later
+    // `cancel-close` reconstructs the same close_intent_digest the manager just froze on-chain.
+    // Reconstructed identically to `cmd_claim` (same close params + the state that was closed); the
+    // `CloseIntent::new` binding checks fail closed if the params disagree with the state.
+    let close_tx = CloseWithdrawal {
+        channel_id: state.channel_id,
+        final_channel_state_digest: state.digest,
+        final_balance_state_h1: state.balance_state.h1(),
+        intmax_state_root: state.channel_fund.intmax_state_root,
+        burn_tx_hash,
+        burn_amount: state.channel_fund.amount,
+        zkp: Vec::new(),
+    };
+    let close_intent = CloseIntent::new(close_nonce, &state, &close_tx, snapshot_mbn)
+        .unwrap_or_else(|e| die(format!("reconstruct close intent for persistence: {e:?}")));
+    write_json(CLOSE_INTENT_FULL_FILE, &close_intent);
     println!(
-        "[close] wrote {CLOSE_INTENT_FILE} + {CLOSE_INTENT_MLE_FILE} (close_intent_digest {})",
+        "[close] wrote {CLOSE_INTENT_FILE} + {CLOSE_INTENT_MLE_FILE} + {CLOSE_INTENT_FULL_FILE} (close_intent_digest {})",
         pis.close_intent_digest.to_hex()
     );
 
     // ── On-chain: requestClose (freeze) then submitCloseIntent (large calldata → forge step). ──
+    // When CLOSE_SKIP_REQUEST is set (A28 submit-after-request / A29 challenge), the channel is
+    // ALREADY ClosePending — skip requestClose (it would revert) and go straight to the intent.
     let key = deposit_key_env();
-    eprintln!("[close] requestClose() on manager {manager}…");
-    cast(&[
-        "send",
-        &manager,
-        "requestClose()",
-        "--private-key",
-        &key,
-        "--rpc-url",
-        &rpc,
-    ]);
+    if skip_request {
+        eprintln!(
+            "[close] CLOSE_SKIP_REQUEST set: skipping requestClose (submit-intent / challenge on an already-pending close)…"
+        );
+    } else {
+        eprintln!("[close] requestClose() on manager {manager}…");
+        cast(&[
+            "send",
+            &manager,
+            "requestClose()",
+            "--private-key",
+            &key,
+            "--rpc-url",
+            &rpc,
+        ]);
+    }
 
     // GRACE: the manager rejects the FIRST close intent until `GRACE_BEFORE_PROCESS_SECS` (600s)
     // after requestClose (so members can settle any pending tx first). In production this is real
     // wall-clock waiting; on a dev chain set `CLOSE_ADVANCE_TIME=<secs>` to fast-forward via
     // anvil's evm_increaseTime so `submitCloseIntent` is not rejected with
-    // `GracePeriodNotElapsed`.
-    if let Ok(secs) = std::env::var("CLOSE_ADVANCE_TIME") {
+    // `GracePeriodNotElapsed`. (A challenge replaces an existing intent, so no new grace applies.)
+    if !skip_request && std::env::var("CLOSE_ADVANCE_TIME").is_ok() {
+        let secs = std::env::var("CLOSE_ADVANCE_TIME").unwrap();
         eprintln!(
             "[close] advancing chain time by {secs}s (evm_increaseTime) to pass the close grace window…"
         );
@@ -800,6 +876,26 @@ fn cmd_claim(args: &[String]) {
             die("set CLAIM_RECIPIENT=0x<20-byte member L1 recipient> (must equal the registered recipient)")
         });
 
+    // A33 pull-only phase (opt-in): the claim proof was already submitted (totalWithdrawn credited);
+    // just pull the ETH credit to the recipient. No proving. SECURITY: claimWithdrawalCredit pays
+    // only the caller's previously-credited amount (caller MUST be the recipient), so this is inert.
+    if std::env::var("CLAIM_PULL_ONLY").is_ok() {
+        let key = deposit_key_env();
+        let recipient_hex = recipient.to_hex();
+        eprintln!("[claim] claimWithdrawalCredit() pull-only (caller must be the recipient {recipient_hex})…");
+        cast(&[
+            "send",
+            &manager,
+            "claimWithdrawalCredit()",
+            "--private-key",
+            &key,
+            "--rpc-url",
+            &rpc,
+        ]);
+        println!("[claim] pull-only OK: recipient {recipient_hex} pulled its withdrawal credit.");
+        return;
+    }
+
     let close_nonce = env_u64("CLOSE_NONCE", 1);
     let snapshot_mbn = env_u64("CLOSE_SNAPSHOT_MBN", 1);
     let burn_tx_hash = std::env::var("CLOSE_BURN_TX")
@@ -914,6 +1010,312 @@ fn cmd_claim(args: &[String]) {
     ]);
     println!(
         "[claim] OK: recipient {recipient_hex} received native ETH (amount {}).",
+        pis.amount
+    );
+}
+
+/// A30 cancelClose descriptor — the on-chain `ChannelSettlementManager.CancelCloseRequest` fields
+/// plus the member pk_g set (so the manager/forge step can confirm the registered member-set
+/// commitment matches the proven one). Every value is a PROVED cancel-close public input.
+#[derive(Serialize)]
+struct CancelCloseDescriptor {
+    channel_id: u32,
+    close_intent_digest: String,
+    member_set_commitment: String,
+    revived_state_version: u64,
+    revived_channel_state_digest: String,
+    member_pk_gs: Vec<String>,
+}
+
+/// A-3 H-3 C1 (A30): cancel a PENDING on-chain close by proving the N members kept operating at a
+/// strictly HIGHER `state_version` than the close froze. Builds the REAL cancel-close MLE/WHIR proof
+/// via `CancelCloseProver` (revived head + the persisted pending `CloseIntent`), writes the
+/// artifacts, and submits `cancelClose(request, proof)` via the forge `RunClose` step. Usage:
+///   channel_member cancel-close <manager_addr> [rpc_url]
+/// env: CANCEL_SV (settlement verifier address, forwarded to the forge step).
+///
+/// PRECONDITION: a prior `close` persisted `close_intent_full.json` AND the channel head has since
+/// advanced to a strictly higher `state_version` (the revived state the members co-signed). The
+/// circuit + manager enforce both: revived_version > close.final_state_version, the era fence
+/// (revived.close_freeze_nonce + 1 == close.close_freeze_nonce), and `close_intent_digest` ==
+/// `pendingClose.closeIntentDigest`. Any mismatch fails closed (no fund movement in cancelClose).
+fn cmd_cancel_close(args: &[String]) {
+    let manager = args
+        .get(1)
+        .cloned()
+        .unwrap_or_else(|| die("cancel-close needs <manager_addr> [rpc_url]"));
+    let rpc = args
+        .get(2)
+        .cloned()
+        .unwrap_or_else(|| "http://localhost:8545".to_string());
+
+    // The REVIVED (later) signed state is the current committed head; the N co-signing members'
+    // keys are derived deterministically (slots 0..member_count), exactly as `close` does.
+    let st = load_state();
+    let revived_state = st.snapshot.state.clone();
+    let member_count = revived_state.balance_state.member_count as usize;
+    let member_keys: Vec<MemberKeys> = (0..member_count)
+        .map(|slot| keys_for(0xC1_0000 + slot as u64))
+        .collect();
+
+    // The PENDING close being cancelled — the EXACT `CloseIntent` `close` froze on-chain, read back
+    // losslessly (NOT a hex-string descriptor round-trip), so the proof's `close_intent_digest`
+    // matches `pendingClose.closeIntentDigest` or the manager rejects (CloseIntentDigestMismatch).
+    let close_intent: CloseIntent = read_json(CLOSE_INTENT_FULL_FILE);
+    if revived_state.balance_state.state_version <= close_intent.final_state_version {
+        die(format!(
+            "cancel-close: head state_version {} must be STRICTLY > the pending close final_state_version {} \
+             (the channel head must have advanced past the close before cancelling)",
+            revived_state.balance_state.state_version, close_intent.final_state_version
+        ));
+    }
+
+    eprintln!(
+        "[cancel-close] building cancel witness (member_count={member_count}, revived v{} > close v{}) + proving + MLE (HEAVY)…",
+        revived_state.balance_state.state_version, close_intent.final_state_version
+    );
+    let prover = CancelCloseProver::new();
+    let witness = prover
+        .build_full_witness(&revived_state, &member_keys, &close_intent)
+        .unwrap_or_else(|e| die(format!("build cancel-close witness: {}", e.0)));
+    let cancel_proof = prover
+        .prove(&witness)
+        .unwrap_or_else(|e| die(format!("cancel-close proof: {}", e.0)));
+    let mle_json = prover
+        .prove_mle(&cancel_proof)
+        .unwrap_or_else(|e| die(format!("cancel-close MLE: {}", e.0)));
+
+    let pi_limbs = cancel_proof.public_inputs[..CANCEL_CLOSE_PUBLIC_INPUTS_LEN].to_u64_vec();
+    let pis = CancelClosePublicInputs::from_u64_slice(&pi_limbs)
+        .unwrap_or_else(|e| die(format!("decode cancel-close PIs: {e:?}")));
+    let member_pk_gs: Vec<String> = witness
+        .member_auth
+        .iter()
+        .map(|a| a.pk_g.to_string())
+        .collect();
+    let descriptor = CancelCloseDescriptor {
+        channel_id: pis.channel_id.channel_id(),
+        close_intent_digest: pis.close_intent_digest.to_string(),
+        member_set_commitment: pis.member_set_commitment.to_string(),
+        revived_state_version: pis.revived_state_version,
+        revived_channel_state_digest: pis.revived_channel_state_digest.to_string(),
+        member_pk_gs,
+    };
+
+    fs::write(CANCEL_CLOSE_MLE_FILE, &mle_json)
+        .unwrap_or_else(|e| die(format!("write {CANCEL_CLOSE_MLE_FILE}: {e}")));
+    write_json(CANCEL_CLOSE_FILE, &descriptor);
+    println!(
+        "[cancel-close] wrote {CANCEL_CLOSE_FILE} + {CANCEL_CLOSE_MLE_FILE} (close_intent_digest {})",
+        pis.close_intent_digest.to_hex()
+    );
+
+    // ── On-chain: cancelClose (large struct calldata → forge step). ──
+    let key = deposit_key_env();
+    let data_dir = std::path::Path::new("contracts/test/data");
+    fs::copy(CANCEL_CLOSE_FILE, data_dir.join("sepolia_cancel_close.json"))
+        .unwrap_or_else(|e| die(format!("stage cancel_close.json: {e}")));
+    fs::copy(
+        CANCEL_CLOSE_MLE_FILE,
+        data_dir.join("sepolia_cancel_close_mle.json"),
+    )
+    .unwrap_or_else(|e| die(format!("stage cancel_close_mle.json: {e}")));
+    let sv = std::env::var("CANCEL_SV").unwrap_or_default();
+    eprintln!("[cancel-close] cancelClose via forge RunClose step…");
+    let status = Command::new("forge")
+        .current_dir("contracts")
+        .args([
+            "script",
+            "script/RunClose.s.sol",
+            "--sig",
+            "cancelCloseStep()",
+            "--rpc-url",
+            &rpc,
+            "--private-key",
+            &key,
+            "--broadcast",
+        ])
+        .env("MANAGER", &manager)
+        .env("SV", &sv)
+        .status()
+        .unwrap_or_else(|e| die(format!("forge cancelClose failed to start: {e}")));
+    if !status.success() {
+        die(
+            "forge cancelClose step failed (set CANCEL_SV to the settlement verifier; ensure the cancel-close VK is initialized and a close is pending)",
+        );
+    }
+    println!("[cancel-close] cancelClose submitted on-chain; channel status restored to Active.");
+}
+
+/// A34 submitPostCloseClaim descriptor — the on-chain `ChannelSettlementManager.PostCloseClaim`
+/// fields. `shared_native_nullifier` is advisory only (the manager RECOMPUTES it, HAZARD #8);
+/// `recipient` is emitted as `to_hex()` so the forge `vm.parseJsonAddress` matches the tested
+/// withdrawal-claim path. Every value is a PROVED post-close-claim public input.
+#[derive(Serialize)]
+struct PostCloseClaimDescriptor {
+    receiver_channel_id: u32,
+    close_intent_digest: String,
+    incoming_tx_hash: String,
+    receiver_pk_g: String,
+    recipient: String,
+    shared_native_nullifier: String,
+    amount: u64,
+}
+
+/// A-3 H-2 §3.5.5 (A34): claim a late inter-channel delta that landed on THIS (now CLOSED) channel
+/// after finalization. Builds the REAL post-close-claim MLE/WHIR proof via `PostCloseClaimProver`
+/// (the receiver decrypts its own delta ciphertext from the persisted source `InterChannelTx`, and
+/// the circuit proves the tx's inclusion in the finalized settled-tx accumulator), submits
+/// `submitPostCloseClaim(claim, proof)` via the forge step, then pulls the credit
+/// (`claimWithdrawalCredit`). Usage:
+///   channel_member post-close-claim <manager_addr> <receiver_slot> <incoming_tx_index> [rpc_url]
+/// env: CLAIM_RECIPIENT (the member's registered L1 address; also the claimWithdrawalCredit caller),
+///      POST_CLOSE_SOURCE_TX (path to the persisted source InterChannelTransferDescriptor JSON;
+///      default `inter_descriptor.json`).
+/// The finalized close digest is read from `close_intent_full.json` (persisted by `close`), so no
+/// CLOSE_NONCE/CLOSE_BURN_TX re-derivation is needed (and no env-var footgun).
+fn cmd_post_close_claim(args: &[String]) {
+    let manager = args
+        .get(1)
+        .cloned()
+        .unwrap_or_else(|| die("post-close-claim needs <manager_addr> <receiver_slot> <incoming_tx_index> [rpc_url]"));
+    let receiver_slot: u8 = args
+        .get(2)
+        .and_then(|s| s.parse().ok())
+        .unwrap_or_else(|| die("post-close-claim needs <receiver_slot>"));
+    let incoming_tx_index: u64 = args
+        .get(3)
+        .and_then(|s| s.parse().ok())
+        .unwrap_or_else(|| die("post-close-claim needs <incoming_tx_index> (leaf index in the settled-tx accumulator)"));
+    let rpc = args
+        .get(4)
+        .cloned()
+        .unwrap_or_else(|| "http://localhost:8545".to_string());
+    let recipient = std::env::var("CLAIM_RECIPIENT")
+        .ok()
+        .and_then(|s| Address::from_hex(&s).ok())
+        .unwrap_or_else(|| {
+            die("set CLAIM_RECIPIENT=0x<20-byte member L1 recipient> (must equal the registered recipient)")
+        });
+
+    // The CLOSED channel's finalized state + its settled-tx accumulator (the inclusion anchor).
+    let st = load_state();
+    let final_balance_state = st.snapshot.state.balance_state.clone();
+    let accumulator = st.snapshot.settled_tx_accumulator.clone();
+
+    // The finalized close's digest — read from the EXACT pending `CloseIntent` persisted by `close`
+    // (`close_intent_full.json`), the SAME lossless source `cancel-close` uses, so the proof's
+    // `close_intent_digest` PI equals on-chain `finalizedCloseIntentDigest`. (No env-var re-derivation
+    // footgun: a digest from differing CLOSE_NONCE/CLOSE_BURN_TX would silently fail-close on-chain.)
+    let close_intent: CloseIntent = read_json(CLOSE_INTENT_FULL_FILE);
+    let close_intent_digest = close_intent.signing_digest();
+
+    // The late inter-channel transfer that delivered the receiver's delta. The wallet persists the
+    // source `InterChannelTransferDescriptor` (its `inter_channel_tx` carries the receiver deltas).
+    let source_path =
+        std::env::var("POST_CLOSE_SOURCE_TX").unwrap_or_else(|_| "inter_descriptor.json".to_string());
+    let source_desc: InterChannelTransferDescriptor = read_json(&source_path);
+    let source_tx: InterChannelTx = source_desc.inter_channel_tx.clone();
+
+    let keys = keys_for(0xC1_0000 + receiver_slot as u64);
+    let receiver_pk_g = keys.signing_key.public_key();
+
+    eprintln!(
+        "[post-close-claim] building claim for slot {receiver_slot} (tx index {incoming_tx_index}) + proving + MLE (HEAVY)…"
+    );
+    let prover = PostCloseClaimProver::new();
+    let witness = prover
+        .build_full_witness(
+            &final_balance_state,
+            receiver_slot as usize,
+            &keys.regev_pk,
+            &keys.regev_sk,
+            receiver_pk_g,
+            recipient,
+            close_intent_digest,
+            &source_tx,
+            &accumulator,
+            incoming_tx_index,
+            RegevSecurityLevel::Production,
+        )
+        .unwrap_or_else(|e| die(format!("build post-close claim: {}", e.0)));
+    let proof = prover
+        .prove(&witness)
+        .unwrap_or_else(|e| die(format!("post-close claim proof: {}", e.0)));
+    let mle_json = prover
+        .prove_mle(&proof)
+        .unwrap_or_else(|e| die(format!("post-close claim MLE: {}", e.0)));
+
+    let pi_limbs = proof.public_inputs[..POST_CLOSE_CLAIM_PUBLIC_INPUTS_LEN].to_u64_vec();
+    let pis = PostCloseClaimPublicInputs::from_u64_slice(&pi_limbs)
+        .unwrap_or_else(|e| die(format!("decode post-close-claim PIs: {e:?}")));
+    let descriptor = PostCloseClaimDescriptor {
+        receiver_channel_id: pis.receiver_channel_id.channel_id(),
+        close_intent_digest: pis.close_intent_digest.to_string(),
+        incoming_tx_hash: pis.incoming_tx_hash.to_string(),
+        receiver_pk_g: pis.receiver_pk_g.to_string(),
+        // Emit as 0x-hex so the forge `vm.parseJsonAddress` matches the tested claim path.
+        recipient: pis.recipient.to_hex(),
+        shared_native_nullifier: pis.shared_native_nullifier.to_string(),
+        amount: pis.amount,
+    };
+
+    fs::write(POST_CLOSE_CLAIM_MLE_FILE, &mle_json)
+        .unwrap_or_else(|e| die(format!("write {POST_CLOSE_CLAIM_MLE_FILE}: {e}")));
+    write_json(POST_CLOSE_CLAIM_FILE, &descriptor);
+    println!(
+        "[post-close-claim] wrote {POST_CLOSE_CLAIM_FILE} + {POST_CLOSE_CLAIM_MLE_FILE} (amount {})",
+        pis.amount
+    );
+
+    // ── On-chain: submitPostCloseClaim (large struct calldata → forge step), then pull credit. ──
+    let data_dir = std::path::Path::new("contracts/test/data");
+    fs::copy(
+        POST_CLOSE_CLAIM_FILE,
+        data_dir.join("sepolia_post_close_claim.json"),
+    )
+    .unwrap_or_else(|e| die(format!("stage post_close_claim.json: {e}")));
+    fs::copy(
+        POST_CLOSE_CLAIM_MLE_FILE,
+        data_dir.join("sepolia_post_close_claim_mle.json"),
+    )
+    .unwrap_or_else(|e| die(format!("stage post_close_claim_mle.json: {e}")));
+    let key = deposit_key_env();
+    eprintln!("[post-close-claim] submitPostCloseClaim via forge RunClose step…");
+    let status = Command::new("forge")
+        .current_dir("contracts")
+        .args([
+            "script",
+            "script/RunClose.s.sol",
+            "--sig",
+            "submitPostCloseClaimStep()",
+            "--rpc-url",
+            &rpc,
+            "--private-key",
+            &key,
+            "--broadcast",
+        ])
+        .env("MANAGER", &manager)
+        .status()
+        .unwrap_or_else(|e| die(format!("forge submitPostCloseClaim failed to start: {e}")));
+    if !status.success() {
+        die(
+            "forge submitPostCloseClaim step failed (ensure the post-close-claim VK is initialized and the channel is finalized)",
+        );
+    }
+    let recipient_hex = recipient.to_hex();
+    eprintln!("[post-close-claim] claimWithdrawalCredit() (caller must be the recipient {recipient_hex})…");
+    cast(&[
+        "send",
+        &manager,
+        "claimWithdrawalCredit()",
+        "--private-key",
+        &key,
+        "--rpc-url",
+        &rpc,
+    ]);
+    println!(
+        "[post-close-claim] OK: recipient {recipient_hex} received native ETH (amount {}).",
         pis.amount
     );
 }
@@ -1406,9 +1808,11 @@ fn main() {
         "cosign-l1-deposit-import" => cmd_cosign_l1_deposit_import(&args),
         "pw-submit" => cmd_pw_submit(&args),
         "pw-finalize" => cmd_pw_finalize(&args),
+        "cancel-close" => cmd_cancel_close(&args),
+        "post-close-claim" => cmd_post_close_claim(&args),
         _ => {
             eprintln!(
-                "usage: channel_member <setup-backing|init|send|cosign|cosign-burn-send|deploy-settlement|cosign-l1-deposit-import|pw-submit|pw-finalize|...> ..."
+                "usage: channel_member <setup-backing|init|send|cosign|cosign-burn-send|deploy-settlement|cosign-l1-deposit-import|pw-submit|pw-finalize|close|settle|withdraw|claim|cancel-close|post-close-claim|...> ..."
             );
             exit(2);
         }
