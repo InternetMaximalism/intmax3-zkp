@@ -40,17 +40,21 @@ use crate::{
         CancelCloseWitnessError,
     },
     common::{balance_state::BALANCE_STATE_DOMAIN, channel::close_member_set_commitment},
-    constants::MAX_CHANNEL_MEMBERS,
+    constants::{MAX_CHANNEL_MEMBERS, MEMBER_DISTINCTNESS_TREE_HEIGHT},
     ethereum_types::{
         bytes32::{BYTES32_LEN, Bytes32, Bytes32Target},
         u32limb_trait::U32LimbTargetTrait,
         u64::{U64, U64Target},
-        u256::U256Target,
+        u256::{U256, U256Target},
     },
     poseidon_sig::list::{chain_step_target, leaf_target},
     utils::{
         poseidon_hash_out::{PoseidonHashOut, PoseidonHashOutTarget},
         recursively_verifiable::add_proof_target_and_conditionally_verify,
+        trees::indexed_merkle_tree::{
+            IndexedMerkleTree,
+            insertion::{IndexedInsertionProof, IndexedInsertionProofTarget},
+        },
     },
 };
 
@@ -212,6 +216,10 @@ where
     list_proof: ProofWithPublicInputsTarget<D>,
     member_pk_g_targets: Vec<Bytes32Target>,
     active_bits: Vec<plonky2::iop::target::BoolTarget>,
+    /// A5 pk_g distinctness: per-slot indexed-Merkle insertion proofs (length MAX_CHANNEL_MEMBERS).
+    /// Filled in `fill_witness` by inserting active pk_g in slot order into a fresh tree (padding
+    /// slots get a dummy proof). The in-circuit chain asserts each active key's non-membership.
+    member_insertion_proofs: Vec<IndexedInsertionProofTarget>,
 }
 
 impl<F, C, const D: usize> CancelCloseCircuit<F, C, D>
@@ -441,14 +449,42 @@ where
         let rebuilt_c = Bytes32Target::from_hash_out(&mut builder, chain);
         rebuilt_c.connect(&mut builder, committed_c);
 
-        // pk_g distinctness over the ACTIVE set (one key cannot fake N signatures).
-        for i in 0..MAX_CHANNEL_MEMBERS {
-            for j in (i + 1)..MAX_CHANNEL_MEMBERS {
-                let both_active = builder.and(active_bits[i], active_bits[j]);
-                let eq = member_pk_g_targets[i].is_equal(&mut builder, &member_pk_g_targets[j]);
-                let conflict = builder.and(both_active, eq);
-                builder.assert_zero(conflict.target);
-            }
+        // ── pk_g distinctness over the ACTIVE set (A5: one key cannot fake N signatures) ──
+        //
+        // Replaces the former O(MAX^2) all-pairs equality loop with an O(MAX·height) indexed-Merkle
+        // insertion chain proving the SAME property (no two active slots share a pk_g). See the
+        // matching block in `close_circuit.rs` for the full rationale; identical mechanism here.
+        //
+        // SECURITY: the inserted keys are EXACTLY `member_pk_g_targets` (the same targets used by
+        // the member_set_commitment keccak and the C' fold), converted limb-for-limb to a
+        // `U256Target` (both are `[Target; 8]`, no `remove_3bits` masking). The active gating uses
+        // the SAME `active_bits`; padding slots are skipped. The insertion gadget asserts
+        // `prev_low.key < key < next_key (or 0)` per active insert = non-membership = distinctness,
+        // so a duplicate active pk_g is UNSATISFIABLE. The final root is intentionally discarded.
+        // INTENTIONALLY SIMPLE: inserted `value` is a constant 1 (irrelevant to distinctness).
+        let member_insertion_proofs: Vec<IndexedInsertionProofTarget> = (0..MAX_CHANNEL_MEMBERS)
+            .map(|_| {
+                IndexedInsertionProofTarget::new::<F, D>(
+                    &mut builder,
+                    MEMBER_DISTINCTNESS_TREE_HEIGHT,
+                    true,
+                )
+            })
+            .collect();
+        let distinctness_value = builder.one();
+        let empty_distinctness_root =
+            IndexedMerkleTree::new(MEMBER_DISTINCTNESS_TREE_HEIGHT).get_root();
+        let mut distinctness_root =
+            PoseidonHashOutTarget::constant(&mut builder, empty_distinctness_root);
+        for (i, is_active) in active_bits.iter().enumerate() {
+            let key_i = U256Target::from_slice(&member_pk_g_targets[i].to_vec());
+            distinctness_root = member_insertion_proofs[i].conditional_get_new_root::<F, C, D>(
+                &mut builder,
+                *is_active,
+                key_i,
+                distinctness_value,
+                distinctness_root,
+            );
         }
 
         let member_set_commitment =
@@ -493,6 +529,7 @@ where
             list_proof,
             member_pk_g_targets,
             active_bits,
+            member_insertion_proofs,
         }
     }
 
@@ -630,6 +667,35 @@ where
                 Bytes32::default()
             };
             pk_g_target.set_witness(&mut witness, pk_g);
+        }
+
+        // A5 pk_g distinctness witness: insert each ACTIVE pk_g IN SLOT ORDER into a fresh
+        // IndexedMerkleTree (same order/values as `member_pk_g_targets` / member_set_commitment /
+        // C' fold). A DUPLICATE active pk_g makes `prove_and_insert` return `Err(KeyAlreadyExists)`
+        // (no valid low-leaf) → surfaced as a proving failure; there is no witness satisfying the
+        // in-circuit non-membership bound for a repeated key. Padding slots get a dummy proof whose
+        // gated assertions are skipped in-circuit.
+        let mut distinctness_tree = IndexedMerkleTree::new(MEMBER_DISTINCTNESS_TREE_HEIGHT);
+        for (slot, insertion_target) in self.member_insertion_proofs.iter().enumerate() {
+            let insertion_proof: IndexedInsertionProof = if slot < member_count {
+                let pk_g = witness_value.member_auth[slot].pk_g;
+                let key: U256 = pk_g.into();
+                // value MUST equal the circuit-side `distinctness_value` (constant 1, ~line 474):
+                // the native leaf hash folds `value`, so any other value desyncs the witnessed
+                // merkle root from the in-circuit recomputation ("Wire set twice"). Irrelevant to
+                // distinctness (only the KEY matters), so 1 on both sides.
+                distinctness_tree
+                    .prove_and_insert(key, 1u64)
+                    .map_err(|e| {
+                        CancelCloseCircuitError::InvalidMemberAuth(format!(
+                            "pk_g distinctness (A5): slot {slot} pk_g {pk_g} is a duplicate of an \
+                             earlier active member — cannot insert: {e}"
+                        ))
+                    })?
+            } else {
+                distinctness_tree.prove_dummy()
+            };
+            insertion_target.set_witness(&mut witness, &insertion_proof);
         }
         Ok(witness)
     }
@@ -1007,6 +1073,31 @@ mod tests {
             proof.is_err(),
             "member_set_commitment over non-registered (honest) keys while signing with attacker \
              keys must be rejected (Finding D binding)"
+        );
+    }
+
+    /// Negative — A5 pk_g distinctness (indexed-Merkle insertion, replacing the former O(MAX²)
+    /// all-pairs loop). Two ACTIVE slots sharing a pk_g would let one key satisfy two of the
+    /// N-of-N signatures. Duplicate slot 0's full identity (pk_g + valid single-sig) into slot 1 —
+    /// isolating distinctness — and confirm the cancel is UNPROVABLE (the repeated key has no valid
+    /// low-leaf for insertion).
+    #[cfg_attr(debug_assertions, ignore = "run with --release")]
+    #[test]
+    fn cancel_close_circuit_rejects_duplicate_member_pk_g() {
+        let fx = fixture();
+        let mut witness = build_full_witness();
+        assert!(witness.member_auth.len() >= 2, "need >=2 active members");
+        assert_ne!(
+            witness.member_auth[0].pk_g, witness.member_auth[1].pk_g,
+            "precondition: slots 0 and 1 start distinct"
+        );
+        witness.member_auth[1] = witness.member_auth[0].clone();
+        let pis = witness.cancel.to_public_inputs().unwrap();
+        let result = fx.cancel_circuit.fill_witness(&pis, &witness);
+        assert!(
+            matches!(&result, Err(super::CancelCloseCircuitError::InvalidMemberAuth(m)) if m.contains("distinctness")),
+            "duplicate active pk_g must be rejected by the A5 indexed-insertion distinctness check, got: {:?}",
+            result.as_ref().err()
         );
     }
 

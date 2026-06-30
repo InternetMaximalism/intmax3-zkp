@@ -58,6 +58,39 @@ pub const MEMBER_TREE_HEIGHT: usize = 4;
 /// SPHINCS+ slots, gating padding slots off). Deviation D6 from abstract2 §2.1 (which fixes 3
 /// members) — see detail2-implementation-notes.md.
 pub const MAX_CHANNEL_MEMBERS: usize = 16;
+
+/// Height of the in-circuit indexed-Merkle tree used to prove A5 pk_g distinctness over the active
+/// member set (close / cancel-close circuits). The close/cancel circuits insert each ACTIVE
+/// member's `pk_g` (as a U256 key) IN SLOT ORDER into an initially-empty `IndexedMerkleTree`; the
+/// existing audited insertion gadget proves `prev_low.key < key < next_key` per insert =
+/// non-membership = distinctness, so a duplicate key makes an insertion UNSATISFIABLE. This
+/// replaces the former O(MAX_CHANNEL_MEMBERS^2) all-pairs equality loop with an O(MAX·height)
+/// chain that proves the SAME property (no two active slots share a pk_g) without touching slot
+/// order, the member_set_commitment, or the C' signature fold.
+///
+/// SIZING: the tree starts with ONE sentinel leaf (`IndexedMerkleTree::new` pushes
+/// `IndexedMerkleLeaf::default()` at index 0) and then pushes up to `MAX_CHANNEL_MEMBERS` active
+/// leaves, for at most `MAX_CHANNEL_MEMBERS + 1` occupied leaf slots. `IncrementalMerkleTree::push`
+/// asserts `index < 2^height`, so we need `2^height >= MAX_CHANNEL_MEMBERS + 1`, i.e.
+/// `height >= ceil(log2(MAX_CHANNEL_MEMBERS + 1))`. Derived from `MAX_CHANNEL_MEMBERS` so a later
+/// MAX bump stays correct without a manual edit. For MAX=16: `ceil(log2(17)) = 5` → 32 leaf slots.
+///
+/// SECURITY: the height only bounds tree CAPACITY; it does not affect WHICH keys are checked
+/// (the active gating and key sourcing do). Over-sizing the tree is sound (it only adds unused
+/// capacity); under-sizing it would panic at witness-generation time (`push` assert), never
+/// silently skip a check.
+pub const MEMBER_DISTINCTNESS_TREE_HEIGHT: usize = {
+    // ceil(log2(MAX_CHANNEL_MEMBERS + 1)): smallest `height` with `2^height >= MAX+1`.
+    let needed_leaves = (MAX_CHANNEL_MEMBERS + 1) as u64;
+    let mut height = 0usize;
+    let mut capacity = 1u64;
+    while capacity < needed_leaves {
+        capacity <<= 1;
+        height += 1;
+    }
+    height
+};
+
 /// Co-signing timeout (abstract2 §2.5: 3 minutes). Replaces the retired
 /// `SMALL_BLOCK_SIGNATURE_TIMEOUT_SECS = 60`.
 pub const SIGN_TIMEOUT_SECS: u64 = 180;

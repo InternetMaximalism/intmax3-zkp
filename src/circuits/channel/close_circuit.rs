@@ -40,12 +40,12 @@ use crate::{
         },
     },
     common::{balance_state::BALANCE_STATE_DOMAIN, channel::close_member_set_commitment},
-    constants::MAX_CHANNEL_MEMBERS,
+    constants::{MAX_CHANNEL_MEMBERS, MEMBER_DISTINCTNESS_TREE_HEIGHT},
     ethereum_types::{
         bytes32::{BYTES32_LEN, Bytes32, Bytes32Target},
         u32limb_trait::U32LimbTargetTrait,
         u64::{U64, U64Target},
-        u256::{U256_LEN, U256Target},
+        u256::{U256, U256_LEN, U256Target},
     },
     poseidon_sig::list::{chain_step_target, leaf_target},
     utils::{
@@ -53,6 +53,10 @@ use crate::{
         poseidon_hash_out::{PoseidonHashOut, PoseidonHashOutTarget},
         recursively_verifiable::{
             add_proof_target_and_conditionally_verify, add_proof_target_and_verify_cyclic,
+        },
+        trees::indexed_merkle_tree::{
+            IndexedMerkleTree,
+            insertion::{IndexedInsertionProof, IndexedInsertionProofTarget},
         },
     },
 };
@@ -382,6 +386,11 @@ where
     /// D6 per-slot activeness flags `active_bits[i] = (i < member_count)`. Set from member_count
     /// in `fill_witness`.
     active_bits: Vec<plonky2::iop::target::BoolTarget>,
+    /// A5 pk_g distinctness: per-slot indexed-Merkle insertion proofs (length MAX_CHANNEL_MEMBERS).
+    /// In `fill_witness` the active slots' pk_g are inserted IN SLOT ORDER into a fresh
+    /// `IndexedMerkleTree`; padding slots get a dummy (non-inserting) proof. The in-circuit
+    /// `conditional_get_new_root` chain asserts each active key's non-membership = distinctness.
+    member_insertion_proofs: Vec<IndexedInsertionProofTarget>,
 }
 
 impl<F, C, const D: usize> ChannelCloseCircuit<F, C, D>
@@ -652,15 +661,58 @@ where
         let rebuilt_c = Bytes32Target::from_hash_out(&mut builder, chain);
         rebuilt_c.connect(&mut builder, committed_c);
 
-        // pk_g distinctness over the ACTIVE set (A5: one key cannot fake N signatures). Only
-        // enforced for pairs where BOTH slots are active.
-        for i in 0..MAX_CHANNEL_MEMBERS {
-            for j in (i + 1)..MAX_CHANNEL_MEMBERS {
-                let both_active = builder.and(active_bits[i], active_bits[j]);
-                let eq = member_pk_g_targets[i].is_equal(&mut builder, &member_pk_g_targets[j]);
-                let conflict = builder.and(both_active, eq);
-                builder.assert_zero(conflict.target);
-            }
+        // ── pk_g distinctness over the ACTIVE set (A5: one key cannot fake N signatures) ──
+        //
+        // Replaces the former O(MAX^2) all-pairs equality loop with an O(MAX·height) indexed-Merkle
+        // insertion chain that proves the SAME property: no two ACTIVE member slots share a pk_g.
+        //
+        // MECHANISM: starting from a fresh (empty) IndexedMerkleTree root, we insert each slot's
+        // pk_g IN SLOT ORDER, gated by the SAME `active_bits` that gate the member_set_commitment
+        // select and the C' fold. The audited insertion gadget
+        // (`IndexedInsertionProofTarget::conditional_get_new_root`) asserts, for every active
+        // insert, that `prev_low.key < key < next_key (or next_key == 0)` = NON-MEMBERSHIP =
+        // the key is not already present. A duplicate active pk_g therefore makes one of the
+        // inserts UNSATISFIABLE (the low-leaf bound fails). Padding slots (condition = false) are
+        // skipped: the gadget returns the previous root and gates off the bound assertions, so
+        // padding pk_g (which the witness sets to `Bytes32::default()` = 0) never enters the tree
+        // and never masks a real collision.
+        //
+        // SECURITY:
+        //  - The keys checked here are EXACTLY `member_pk_g_targets` — the same targets used by the
+        //    member_set_commitment keccak (above) and the C' signature fold — converted limb-for-
+        //    limb to a `U256Target` (Bytes32Target and U256Target are both `[Target; 8]`). No fresh
+        //    key vector is witnessed, so distinctness binds the verified signing keys, not a
+        //    prover-chosen aside.
+        //  - pk_g is compared as the canonical full 256-bit value: the conversion copies all 8
+        //    32-bit limbs unchanged (no `remove_3bits` masking is applied), so the ordering used by
+        //    the insertion bound (`U256Target::is_lt`) sees the same value the keccak/C' fold see.
+        //  - The tree only enforces distinctness; the final root is INTENTIONALLY discarded (not a
+        //    PI, not connected anywhere). The per-insert bound assertions are the whole point.
+        // INTENTIONALLY SIMPLE: the inserted `value` is a constant 1 (the leaf value is irrelevant
+        // to distinctness — only the KEY's non-membership matters).
+        let member_insertion_proofs: Vec<IndexedInsertionProofTarget> = (0..MAX_CHANNEL_MEMBERS)
+            .map(|_| {
+                IndexedInsertionProofTarget::new::<F, D>(
+                    &mut builder,
+                    MEMBER_DISTINCTNESS_TREE_HEIGHT,
+                    true,
+                )
+            })
+            .collect();
+        let distinctness_value = builder.one();
+        let empty_distinctness_root = IndexedMerkleTree::new(MEMBER_DISTINCTNESS_TREE_HEIGHT)
+            .get_root();
+        let mut distinctness_root =
+            PoseidonHashOutTarget::constant(&mut builder, empty_distinctness_root);
+        for (i, is_active) in active_bits.iter().enumerate() {
+            let key_i = U256Target::from_slice(&member_pk_g_targets[i].to_vec());
+            distinctness_root = member_insertion_proofs[i].conditional_get_new_root::<F, C, D>(
+                &mut builder,
+                *is_active,
+                key_i,
+                distinctness_value,
+                distinctness_root,
+            );
         }
 
         let member_set_commitment =
@@ -684,6 +736,7 @@ where
             list_proof,
             member_pk_g_targets,
             active_bits,
+            member_insertion_proofs,
         }
     }
 
@@ -776,6 +829,38 @@ where
                 Bytes32::default()
             };
             pk_g_target.set_witness(&mut witness, pk_g);
+        }
+
+        // A5 pk_g distinctness witness: build a fresh IndexedMerkleTree and insert each ACTIVE
+        // member's pk_g IN SLOT ORDER (the SAME order/values used for `member_pk_g_targets`,
+        // member_set_commitment and the C' fold). `prove_and_insert` proves non-membership of the
+        // key against the current tree, then inserts it; a DUPLICATE active pk_g makes
+        // `prove_and_insert` return `Err(KeyAlreadyExists)` (the duplicate has no valid low-leaf),
+        // which we surface as a proving failure — there is NO witness that satisfies the in-circuit
+        // insertion bound for a repeated key. Padding slots get a dummy (non-inserting) proof whose
+        // gated assertions are skipped in-circuit (condition = active_bits[slot] = false).
+        let mut distinctness_tree = IndexedMerkleTree::new(MEMBER_DISTINCTNESS_TREE_HEIGHT);
+        for (slot, insertion_target) in self.member_insertion_proofs.iter().enumerate() {
+            let insertion_proof: IndexedInsertionProof = if slot < member_count {
+                let pk_g = witness_value.member_auth[slot].pk_g;
+                let key: U256 = pk_g.into();
+                // value MUST equal the circuit-side `distinctness_value` (a constant 1, close_circuit
+                // ~702): the native leaf hash folds `value`, so inserting with any other value makes
+                // the witnessed merkle root disagree with the in-circuit `get_new_root`
+                // recomputation ("Wire set twice"). The value is irrelevant to distinctness (only the
+                // KEY's non-membership matters), so 1 on both sides is the canonical choice.
+                distinctness_tree
+                    .prove_and_insert(key, 1u64)
+                    .map_err(|e| {
+                        ChannelCloseCircuitError::InvalidMemberAuth(format!(
+                            "pk_g distinctness (A5): slot {slot} pk_g {pk_g} is a duplicate of an \
+                             earlier active member — cannot insert: {e}"
+                        ))
+                    })?
+            } else {
+                distinctness_tree.prove_dummy()
+            };
+            insertion_target.set_witness(&mut witness, &insertion_proof);
         }
         Ok(witness)
     }
@@ -1468,6 +1553,33 @@ mod tests {
             fx.close_circuit.prove(&witness),
             Err(ChannelCloseCircuitError::InvalidMemberAuth(_))
         ));
+    }
+
+    /// Negative — A5 pk_g distinctness (the indexed-Merkle insertion replacement for the former
+    /// O(MAX²) all-pairs loop). Two ACTIVE member slots sharing a pk_g would let ONE key satisfy
+    /// two of the N-of-N close signatures. We duplicate slot 0's FULL identity (pk_g + its valid
+    /// single-sig) into slot 1 — an otherwise self-consistent "one key signs two slots" witness, so
+    /// the ONLY violated invariant is distinctness, not signature validity or C' binding — and
+    /// confirm the close is UNPROVABLE: the second insertion of the repeated key has no valid
+    /// low-leaf (`prev_low.key < key < next_key` cannot hold for a key already in the tree), so the
+    /// in-circuit insertion bound is unsatisfiable and witness generation refuses it.
+    #[cfg_attr(debug_assertions, ignore = "run with --release")]
+    #[test]
+    fn channel_close_circuit_rejects_duplicate_member_pk_g() {
+        let fx = fixture();
+        let mut witness = full_witness();
+        assert!(witness.member_auth.len() >= 2, "need >=2 active members");
+        assert_ne!(
+            witness.member_auth[0].pk_g, witness.member_auth[1].pk_g,
+            "precondition: slots 0 and 1 start distinct"
+        );
+        // Verbatim-copy slot 0 into slot 1: same pk_g AND same valid signature.
+        witness.member_auth[1] = witness.member_auth[0].clone();
+        let result = fx.close_circuit.prove(&witness);
+        assert!(
+            matches!(&result, Err(ChannelCloseCircuitError::InvalidMemberAuth(m)) if m.contains("distinctness")),
+            "duplicate active pk_g must be rejected by the A5 indexed-insertion distinctness check, got: {result:?}"
+        );
     }
 
     /// Negative (iii) — H1/version anchoring: claiming a `final_state_version` PI different

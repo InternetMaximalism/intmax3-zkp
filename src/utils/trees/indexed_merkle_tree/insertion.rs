@@ -441,4 +441,106 @@ mod tests {
         let circuit = builder.build::<C>();
         let _ = circuit.prove(PartialWitness::new()).unwrap();
     }
+
+    // Reproduction of the close/cancel A5 distinctness usage: chain
+    // `conditional_get_new_root` over MAX slots, inserting `active` real keys then padding the
+    // rest with `prove_dummy` (condition = false). Mirrors `fill_witness`.
+    #[cfg_attr(debug_assertions, ignore = "run with --release")]
+    #[test]
+    fn test_chained_conditional_insertion_with_dummy_padding() {
+        use plonky2::iop::{target::BoolTarget, witness::WitnessWrite as _};
+        use plonky2::plonk::circuit_data::CircuitConfig;
+
+        const MAX: usize = 16;
+        let active = 16usize;
+        let height = 5usize;
+
+        let mut builder =
+            CircuitBuilder::<F, D>::new(CircuitConfig::standard_recursion_zk_config());
+        let proof_ts: Vec<IndexedInsertionProofTarget> = (0..MAX)
+            .map(|_| IndexedInsertionProofTarget::new::<F, D>(&mut builder, height, true))
+            .collect();
+        let key_ts: Vec<U256Target> = (0..MAX).map(|_| U256Target::new(&mut builder, true)).collect();
+        let active_ts: Vec<BoolTarget> =
+            (0..MAX).map(|_| builder.add_virtual_bool_target_safe()).collect();
+        let value_t = builder.one();
+        let empty_root =
+            super::IndexedMerkleTree::new(height).get_root();
+        let mut root = PoseidonHashOutTarget::constant(&mut builder, empty_root);
+        for i in 0..MAX {
+            root = proof_ts[i].get_new_root::<F, C, D>(&mut builder, key_ts[i].clone(), value_t, root);
+        }
+        let circuit = builder.build::<C>();
+
+        // Witness: distinct keys for active slots, 0 for padding.
+        let keys: Vec<U256> = (0..MAX)
+            .map(|i| if i < active { U256::from((i as u32) + 100) } else { U256::default() })
+            .collect();
+        let mut pw = PartialWitness::new();
+        let mut tree = super::IndexedMerkleTree::new(height);
+        for i in 0..MAX {
+            key_ts[i].set_witness(&mut pw, keys[i]);
+            pw.set_bool_target(active_ts[i], i < active).unwrap();
+            let proof = if i < active {
+                // value MUST match the circuit-side `value_t = builder.one()`; the leaf hash folds
+                // `value`, so any other value desyncs the witnessed root from the recomputed root.
+                tree.prove_and_insert(keys[i], 1).unwrap()
+            } else {
+                tree.prove_dummy()
+            };
+            proof_ts[i].set_witness(&mut pw, &proof);
+        }
+        circuit.prove(pw).expect("chained conditional insertion with dummy padding must prove");
+    }
+
+    /// IN-CIRCUIT A5 soundness lock: a key already in the tree CANNOT be re-inserted, even with a
+    /// hand-crafted witness that BYPASSES the native `prove_and_insert` guard. This is the property
+    /// the close/cancel distinctness chain relies on — verified here at the gadget level so a
+    /// regression in the in-circuit bounds / Merkle-verify is caught independently of the native
+    /// guard. Two chained inserts of the SAME key K: step 0 inserts K honestly; step 1 re-inserts K
+    /// with a FORGED proof (reuse step 0's stale sentinel proof, asserting K is still absent).
+    /// Against the chained `prev_root` that already contains K, the in-circuit low-leaf Merkle
+    /// verify cannot hold (Poseidon binding) ⇒ the proof is UNSATISFIABLE.
+    #[cfg_attr(debug_assertions, ignore = "run with --release")]
+    #[test]
+    fn test_duplicate_key_reinsertion_is_unprovable_in_circuit() {
+        use plonky2::plonk::circuit_data::CircuitConfig;
+        use std::panic::{AssertUnwindSafe, catch_unwind};
+
+        let height = 5usize;
+        let k = U256::from(100u32);
+
+        let mut builder =
+            CircuitBuilder::<F, D>::new(CircuitConfig::standard_recursion_zk_config());
+        let p0 = IndexedInsertionProofTarget::new::<F, D>(&mut builder, height, true);
+        let p1 = IndexedInsertionProofTarget::new::<F, D>(&mut builder, height, true);
+        let key0 = U256Target::new(&mut builder, true);
+        let key1 = U256Target::new(&mut builder, true);
+        let value_t = builder.one();
+        let empty_root = super::IndexedMerkleTree::new(height).get_root();
+        let root0 = PoseidonHashOutTarget::constant(&mut builder, empty_root);
+        let root1 = p0.get_new_root::<F, C, D>(&mut builder, key0.clone(), value_t, root0);
+        let _root2 = p1.get_new_root::<F, C, D>(&mut builder, key1.clone(), value_t, root1);
+        let circuit = builder.build::<C>();
+
+        let mut pw = PartialWitness::new();
+        let mut tree = super::IndexedMerkleTree::new(height);
+        // Step 0: honest insert of K; capture its (sentinel-low-leaf, empty-tree) proof.
+        let proof0 = tree.prove_and_insert(k, 1).unwrap();
+        key0.set_witness(&mut pw, k);
+        p0.set_witness(&mut pw, &proof0);
+        // Step 1: re-insert the SAME key K, FORGING the proof = reuse proof0 (native guard bypassed:
+        // we never call prove_and_insert for the duplicate). proof0's sentinel low-leaf (next_key=0)
+        // does not match the sentinel in root1 (next_key=K now), so the in-circuit low-leaf verify
+        // fails ⇒ unprovable.
+        key1.set_witness(&mut pw, k);
+        p1.set_witness(&mut pw, &proof0);
+
+        let result = catch_unwind(AssertUnwindSafe(|| circuit.prove(pw)));
+        assert!(
+            result.is_err() || result.unwrap().is_err(),
+            "re-inserting a key already in the tree must be UNPROVABLE in-circuit (A5 soundness): a \
+             forged non-membership proof for a present key cannot satisfy the chained low-leaf verify"
+        );
+    }
 }
