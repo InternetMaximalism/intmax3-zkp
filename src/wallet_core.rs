@@ -4984,7 +4984,7 @@ mod partial_withdrawal_tests {
         let mut w = Withdrawal {
             recipient: Address::from_u32_slice(&[1, 2, 3, 4, 5]).unwrap(),
             token_index: 0,
-            amount: U256::from(100),
+            amount: U256::from(100u64),
             nullifier: Bytes32::from_u32_slice(&[0xAA; 8]).unwrap(),
             aux_data: Bytes32::from_u32_slice(&[0xBB; 8]).unwrap(),
         };
@@ -4999,12 +4999,12 @@ mod partial_withdrawal_tests {
         let mut w = Withdrawal {
             recipient: Address::from_u32_slice(&[1, 2, 3, 4, 5]).unwrap(),
             token_index: 0,
-            amount: U256::from(100),
+            amount: U256::from(100u64),
             nullifier: Bytes32::from_u32_slice(&[0xAA; 8]).unwrap(),
             aux_data: Bytes32::from_u32_slice(&[0xBB; 8]).unwrap(),
         };
         let d1 = partial_withdrawal_auth_digest(&w);
-        w.amount = U256::from(101);
+        w.amount = U256::from(101u64);
         let d2 = partial_withdrawal_auth_digest(&w);
         assert_ne!(d1, d2);
     }
@@ -5014,7 +5014,7 @@ mod partial_withdrawal_tests {
         let mut w = Withdrawal {
             recipient: Address::from_u32_slice(&[1, 2, 3, 4, 5]).unwrap(),
             token_index: 0,
-            amount: U256::from(100),
+            amount: U256::from(100u64),
             nullifier: Bytes32::from_u32_slice(&[0xAA; 8]).unwrap(),
             aux_data: Bytes32::from_u32_slice(&[0xBB; 8]).unwrap(),
         };
