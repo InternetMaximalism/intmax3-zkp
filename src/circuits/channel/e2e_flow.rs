@@ -803,7 +803,7 @@ fn channel_native_regev_full_flow_e2e() {
         )
         .unwrap();
     println!("[e2e] initial balance proof: {:?}", t_balance.elapsed());
-    let (a1_member_auth, a1_list_proof) = close_fixture::member_auth_for_digest(a1.digest, 0xe2ec);
+    let (a1_member_auth, a1_agg_proof) = close_fixture::member_auth_for_digest(a1.digest, 0xe2ec);
     let close_witness: ChannelCloseFullWitness<F, C, D> = ChannelCloseFullWitness {
         close: ChannelCloseWitness {
             final_channel_state: a1.clone(),
@@ -812,7 +812,7 @@ fn channel_native_regev_full_flow_e2e() {
         },
         final_balance_proof: initial_balance_proof,
         member_auth: a1_member_auth,
-        list_proof: a1_list_proof,
+        agg_proof: a1_agg_proof,
     };
     let t_close = std::time::Instant::now();
     let close_proof = close_fx.close_circuit.prove(&close_witness).unwrap();

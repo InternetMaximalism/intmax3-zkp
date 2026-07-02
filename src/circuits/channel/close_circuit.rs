@@ -10,7 +10,9 @@
 //!    h2_tag + state_version appended) and the IMCL / IMCI digests derived from it;
 //! 3. a recursively verified final BALANCE proof whose `settled_tx_chain` and `channel_id` public
 //!    inputs equal the close PIs (detail2 §H-2 chain binding);
-//! 4. three member SPHINCS+ signatures over the recomputed `final_channel_state_digest` (all-member
+//! 4. the N active members' Poseidon single-sigs over the recomputed `final_channel_state_digest`,
+//!    carried by ONE recursively verified level-`AGG_LEVELS` aggregated sign-zkp proof
+//!    (`poseidon_sig::aggregate`) whose message/count/pk-list PIs are bound in-circuit (all-member
 //!    unanimity; no threshold relaxation).
 
 use plonky2::{
@@ -47,13 +49,14 @@ use crate::{
         u64::{U64, U64Target},
         u256::{U256, U256_LEN, U256Target},
     },
-    poseidon_sig::list::{chain_step_target, leaf_target},
+    poseidon_sig::aggregate::{
+        AGG_COUNT_OFFSET, AGG_LEVELS, AGG_MSG_OFFSET, AGG_PK_LIST_OFFSET, MAX_AGG_SIGNERS,
+        agg_public_inputs_len,
+    },
     utils::{
         conversion::ToU64 as _,
-        poseidon_hash_out::{PoseidonHashOut, PoseidonHashOutTarget},
-        recursively_verifiable::{
-            add_proof_target_and_conditionally_verify, add_proof_target_and_verify_cyclic,
-        },
+        poseidon_hash_out::PoseidonHashOutTarget,
+        recursively_verifiable::{add_proof_target_and_verify, add_proof_target_and_verify_cyclic},
         trees::indexed_merkle_tree::{
             IndexedMerkleTree,
             insertion::{IndexedInsertionProof, IndexedInsertionProofTarget},
@@ -313,20 +316,22 @@ pub enum ChannelCloseCircuitError {
 /// `member_set_commitment = keccak([IMCM, member_count, pk_g_0..pk_g_{MAX-1}])`, an exposed public
 /// input. L1 (`ChannelSettlementManager`) matches this commitment against `keccak([IMCM, registered
 /// member_pk_gs])` from the channel's `ChannelRecord`, so a prover cannot substitute non-member
-/// keys. The signatures themselves are proven by the recursive `ListCircuit` proof (decision D3):
-/// the close circuit rebuilds the SAME list commitment from `(IMCH_digest, pk_g_i)` over the active
-/// slots and asserts it equals the verified list's commitment, so all N active members signed the
-/// final IMCH digest (unanimous close; no threshold relaxation).
+/// keys. The signatures themselves are proven by the recursively verified level-`AGG_LEVELS`
+/// `AggLevelCircuit` proof (binary-tree aggregated sign-zkp): its exposed pk list IS the in-circuit
+/// member key vector (no re-witnessing), its `message` is bound to the recomputed IMCH digest and
+/// its `signer_count` to `member_count`, so all N active members signed the final IMCH digest
+/// (unanimous close; no threshold relaxation).
 #[derive(Clone, Debug)]
 pub struct MemberCloseAuth {
     /// The member's Goldilocks signing public key `pk_g` (`GoldilocksSecretKey::public_key()`),
-    /// the registered member identity. Drives both the member_set_commitment and the C' rebuild.
+    /// the registered member identity. Native mirror of slot `i` of the aggregated proof's pk
+    /// list; drives the native member_set_commitment and the A5 distinctness insertion witness.
     pub pk_g: Bytes32,
 }
 
 /// Full prover witness for [`ChannelCloseCircuit`]: the close data trio, the recursive balance
-/// proof, the per-member `pk_g`s, and the recursive `ListCircuit` proof over the N member IMCH
-/// single-sigs (D4: the close circuit verifies everything).
+/// proof, the per-member `pk_g`s, and the level-`AGG_LEVELS` aggregated sign-zkp proof over the N
+/// member IMCH single-sigs (D4: the close circuit verifies everything).
 #[derive(Clone, Debug)]
 pub struct ChannelCloseFullWitness<F, C, const D: usize>
 where
@@ -341,10 +346,12 @@ where
     /// Exactly `member_count` ACTIVE entries, one per active member slot (pad-to-MAX D6) — ALL
     /// active members sign the final channel state digest (unanimous close).
     pub member_auth: Vec<MemberCloseAuth>,
-    /// The recursive `poseidon_sig::list::ListCircuit` proof over the N member single-sigs of the
-    /// final IMCH digest (slot order). Its commitment `C` must equal the close circuit's rebuilt
-    /// `C'` over `(IMCH_digest, pk_g_i)`.
-    pub list_proof: ProofWithPublicInputs<F, C, D>,
+    /// The level-`AGG_LEVELS` `poseidon_sig::aggregate::AggLevelCircuit` proof over the N member
+    /// single-sigs of the final IMCH digest (slot order, left-packed; build via
+    /// `SigAggregator::aggregate_to_level(sigs, AGG_LEVELS)`). Its `message` PI must equal the
+    /// recomputed IMCH digest, its `signer_count` must equal `member_count`, and its pk list IS
+    /// the circuit's member key vector.
+    pub agg_proof: ProofWithPublicInputs<F, C, D>,
 }
 
 /// Native mirror of the in-circuit member-set commitment: take each ACTIVE cosigner's `pk_g` (slot
@@ -379,11 +386,11 @@ where
     pending_adds: Vec<Target>,
     /// The recursively verified final balance proof.
     final_balance_proof: ProofWithPublicInputsTarget<D>,
-    /// The recursively verified `ListCircuit` proof over the N member IMCH single-sigs (P2b D3).
-    list_proof: ProofWithPublicInputsTarget<D>,
-    /// Per-slot COSIGNER `pk_g` targets (length MAX_COSIGNERS). Drive both the member_set
-    /// commitment keccak and the C' rebuild; padding slots are forced to the registered-set zero.
-    member_pk_g_targets: Vec<Bytes32Target>,
+    /// The recursively verified level-`AGG_LEVELS` aggregated sign-zkp proof over the N member
+    /// IMCH single-sigs. Its pk-list PI slices ARE the in-circuit member key vector (no separate
+    /// witnessed `pk_g` targets), its `message` is connected to the recomputed IMCH digest and its
+    /// `signer_count` to the `member_count` PI.
+    agg_proof: ProofWithPublicInputsTarget<D>,
     /// Per-slot cosigner activeness flags `active_bits[i] = (i < member_count)` (length
     /// MAX_COSIGNERS). Set from member_count in `fill_witness`.
     active_bits: Vec<plonky2::iop::target::BoolTarget>,
@@ -410,12 +417,23 @@ where
     /// inner self-reference points elsewhere. This is the strongest binding pattern available
     /// in-repo (`utils::recursively_verifiable::add_proof_target_and_verify_cyclic`).
     ///
-    /// `list_vd` is the `poseidon_sig::list::ListCircuit` verifier data (baked in as a build-time
-    /// constant, A7) — its proof carries the N member IMCH single-sigs (decision D3).
+    /// `agg_vd` is the LEVEL-`AGG_LEVELS` `poseidon_sig::aggregate::AggLevelCircuit` verifier
+    /// data (baked in as a build-time constant, A7) — its proof carries the N member IMCH
+    /// single-sigs as a binary aggregation tree whose exposed pk list is provably left-packed and
+    /// backed one-for-one by verified signatures.
     pub fn new(
         balance_vd: &VerifierCircuitData<F, C, D>,
-        list_vd: &VerifierCircuitData<F, C, D>,
+        agg_vd: &VerifierCircuitData<F, C, D>,
     ) -> Self {
+        // The close circuit reads MAX_COSIGNERS pk slots out of the aggregated proof, so the two
+        // capacities must agree, and `agg_vd` must be the level-AGG_LEVELS circuit (build-time
+        // arity check; the security binding is the constant VK below).
+        const { assert!(MAX_COSIGNERS == MAX_AGG_SIGNERS) };
+        assert_eq!(
+            agg_vd.common.num_public_inputs,
+            agg_public_inputs_len(AGG_LEVELS),
+            "agg_vd must be the level-{AGG_LEVELS} AggLevelCircuit verifier data"
+        );
         let mut builder =
             CircuitBuilder::<F, D>::new(CircuitConfig::standard_recursion_zk_config());
         let public_inputs = ChannelClosePublicInputsTarget::new(&mut builder);
@@ -606,67 +624,76 @@ where
             .settled_tx_chain
             .connect(&mut builder, public_inputs.final_settled_tx_chain);
 
-        // ── (f) N-member IMCH signatures via the recursive ListCircuit proof (P2b D3, pad-to-MAX)
-        // ─
+        // ── (f) N-member IMCH signatures via the aggregated sign-zkp proof (binary tree) ──
         //
         // Message = the 8 u32 limbs of the RECOMPUTED `final_channel_state_digest` (IMCH). All N
-        // active members sign it (unanimous close; no threshold relaxation). Instead of inline
-        // per-slot signature verification, we recursively verify ONE `ListCircuit` proof and
-        // rebuild the SAME order-sensitive Poseidon list commitment from `(IMCH_digest,
-        // pk_g_i)` over the ACTIVE slots only (select prev on padding, mirroring the
-        // member_set_commitment gating).
+        // active members sign it (unanimous close; no threshold relaxation). We recursively verify
+        // ONE level-AGG_LEVELS `AggLevelCircuit` proof at a CONSTANT VK and consume its exposed
+        // statement `[message(8), signer_count(1), pk_0..pk_{MAX_AGG_SIGNERS-1}]` directly.
         //
-        // SECURITY:
-        //  - The list proof's commitment `C` (its public output [0..8]) is asserted equal to the
-        //    rebuilt `C'`, so each active member's `(IMCH_digest, pk_g_i)` pair was backed by a
-        //    verified Poseidon single-sig (A8: all-required-members-present, exact count/order).
-        //  - pk_g distinctness over the active set forbids one key faking N signatures (A5).
+        // SECURITY (consumer obligations of the aggregation circuit, see its module doc):
+        //  - MESSAGE binding: the agg proof's message PI is connected to the recomputed IMCH
+        //    `state_digest` — the SAME wires as the `final_channel_state_digest` PI — so every
+        //    aggregated signature is over exactly this close's final state (A4: the IMCH keccak
+        //    domain differs from the validity IMSB digest, so cross-protocol reuse fails).
+        //  - COUNT binding: the agg proof's `signer_count` is connected to the `member_count` PI
+        //    (single limb). By the aggregator's padding soundness, `signer_count` equals the number
+        //    of GENUINELY VERIFIED leaf signatures, so a prover cannot under-sign (A8:
+        //    all-required-members-present).
+        //  - LIST binding (no re-witnessing): `member_pk_g_targets` below are SLICES of the
+        //    verified agg proof's pk-list PIs — wired functions of the verified children, with no
+        //    witnessed freedom. Left-packing (enforced in-circuit by the aggregator) guarantees the
+        //    nonzero pks are exactly the first `signer_count` slots and the zero padding is
+        //    strictly a suffix, so the `active_bits` gating (i < member_count) aligns with the real
+        //    signer prefix.
+        //  - pk_g distinctness over the active set forbids one key faking N signatures (A5) — the
+        //    aggregator deliberately ACCEPTS duplicate leaves; the insertion chain below is the
+        //    consumer-side rejection.
         //  - member_set_commitment = keccak([IMCM, member_count, pk_g_0..pk_g_{MAX-1}]) (padding
         //    zeroed) is exposed and matched on L1 against the registered member set, so the
         //    verified keys cannot be substituted with non-member keys. Byte-identical to the native
         //    `common::channel::close_member_set_commitment`.
-        //  - The IMCH digest message domain (IMCH keccak) differs from the validity IMSB digest, so
-        //    an IMSB list entry cannot satisfy this close predicate and vice versa (A4).
+        //  - RANGE: every limb read from the agg proof is u32 by construction inside the verified
+        //    proof chain (leaf pk limbs come from `Bytes32Target::from_hash_out`'s safe 32-bit
+        //    split, messages are range-checked in the leaf circuit, and aggregation only copies or
+        //    boolean-gates them), so feeding them to the keccak gadget (which does NOT range-check)
+        //    is sound without re-checking.
+        let agg_proof = add_proof_target_and_verify(agg_vd, &mut builder);
+
+        // (f-i) message == recomputed IMCH digest (the same digest the members must sign).
+        let agg_message = Bytes32Target::from_slice(
+            &agg_proof.public_inputs[AGG_MSG_OFFSET..AGG_MSG_OFFSET + BYTES32_LEN],
+        );
+        agg_message.connect(&mut builder, state_digest);
+
+        // (f-ii) signer_count == member_count.
+        builder.connect(
+            agg_proof.public_inputs[AGG_COUNT_OFFSET],
+            public_inputs.member_count,
+        );
+
+        // (f-iii) the member key vector := the verified pk-list PI slices, slot for slot.
+        let member_pk_g_targets: Vec<Bytes32Target> = (0..MAX_COSIGNERS)
+            .map(|i| {
+                let start = AGG_PK_LIST_OFFSET + i * BYTES32_LEN;
+                Bytes32Target::from_slice(&agg_proof.public_inputs[start..start + BYTES32_LEN])
+            })
+            .collect();
+
         let close_member_set_domain =
             builder.constant(F::from_canonical_u32(CLOSE_MEMBER_SET_DOMAIN));
         let mut member_set_inputs: Vec<Target> =
             vec![close_member_set_domain, public_inputs.member_count];
 
-        // Per-slot COSIGNER pk_g targets (range-checked), length MAX_COSIGNERS — only cosigners
-        // sign the close; delegates never enter the member set. Padding slots are not used in C'
-        // (select prev) and are forced to zero in the keccak preimage.
-        let member_pk_g_targets: Vec<Bytes32Target> = (0..MAX_COSIGNERS)
-            .map(|_| Bytes32Target::new(&mut builder, true))
-            .collect();
-
-        // member_set_commitment preimage: each slot's pk_g, zeroed on padding.
+        // member_set_commitment preimage: each slot's pk_g, zeroed on padding. (Left-packing
+        // already makes the padding slots zero in the agg PIs; the select keeps the preimage
+        // definition independent of that property and byte-identical to the native helper.)
         for (i, is_active) in active_bits.iter().enumerate() {
             for &limb in &member_pk_g_targets[i].to_vec() {
                 let selected = builder.select(*is_active, limb, zero_t);
                 member_set_inputs.push(selected);
             }
         }
-
-        // Recursively verify the ListCircuit proof (constant VD, A7). A close always has >= 2
-        // active members, so the commitment is never the empty (zero) list — verify
-        // unconditionally. We pass a Boolean `_true` so
-        // `add_proof_target_and_conditionally_verify` is exercised uniformly with the
-        // validity path.
-        let always = builder._true();
-        let list_proof = add_proof_target_and_conditionally_verify(list_vd, &mut builder, always);
-        let committed_c = Bytes32Target::from_slice(&list_proof.public_inputs[0..BYTES32_LEN]);
-
-        // Rebuild C' = fold (state_digest, pk_g_i) over ACTIVE slots only (select prev on padding),
-        // using the SHARED poseidon_sig::list gadgets so it matches the producer bit-for-bit.
-        let mut chain = PoseidonHashOutTarget::constant(&mut builder, PoseidonHashOut::default());
-        for (i, is_active) in active_bits.iter().enumerate() {
-            let leaf = leaf_target(&mut builder, &state_digest, &member_pk_g_targets[i]);
-            let stepped = chain_step_target(&mut builder, chain.clone(), leaf);
-            // On padding slots keep the previous chain (only active members contribute, in order).
-            chain = PoseidonHashOutTarget::select(&mut builder, *is_active, stepped, chain);
-        }
-        let rebuilt_c = Bytes32Target::from_hash_out(&mut builder, chain);
-        rebuilt_c.connect(&mut builder, committed_c);
 
         // ── pk_g distinctness over the ACTIVE set (A5: one key cannot fake N signatures) ──
         //
@@ -675,24 +702,24 @@ where
         //
         // MECHANISM: starting from a fresh (empty) IndexedMerkleTree root, we insert each slot's
         // pk_g IN SLOT ORDER, gated by the SAME `active_bits` that gate the member_set_commitment
-        // select and the C' fold. The audited insertion gadget
+        // select. The audited insertion gadget
         // (`IndexedInsertionProofTarget::conditional_get_new_root`) asserts, for every active
         // insert, that `prev_low.key < key < next_key (or next_key == 0)` = NON-MEMBERSHIP =
         // the key is not already present. A duplicate active pk_g therefore makes one of the
         // inserts UNSATISFIABLE (the low-leaf bound fails). Padding slots (condition = false) are
         // skipped: the gadget returns the previous root and gates off the bound assertions, so
-        // padding pk_g (which the witness sets to `Bytes32::default()` = 0) never enters the tree
-        // and never masks a real collision.
+        // padding pk_g (provably zero in the agg proof's left-packed suffix) never enters the
+        // tree and never masks a real collision.
         //
         // SECURITY:
-        //  - The keys checked here are EXACTLY `member_pk_g_targets` — the same targets used by the
-        //    member_set_commitment keccak (above) and the C' signature fold — converted limb-for-
-        //    limb to a `U256Target` (Bytes32Target and U256Target are both `[Target; 8]`). No fresh
-        //    key vector is witnessed, so distinctness binds the verified signing keys, not a
-        //    prover-chosen aside.
+        //  - The keys checked here are EXACTLY `member_pk_g_targets` — the pk-list PI slices of the
+        //    VERIFIED aggregated sign-zkp proof, the same targets the member_set_commitment keccak
+        //    (above) consumes — converted limb-for-limb to a `U256Target` (Bytes32Target and
+        //    U256Target are both `[Target; 8]`). No fresh key vector is witnessed, so distinctness
+        //    binds the verified signing keys, not a prover-chosen aside.
         //  - pk_g is compared as the canonical full 256-bit value: the conversion copies all 8
         //    32-bit limbs unchanged (no `remove_3bits` masking is applied), so the ordering used by
-        //    the insertion bound (`U256Target::is_lt`) sees the same value the keccak/C' fold see.
+        //    the insertion bound (`U256Target::is_lt`) sees the same value the keccak sees.
         //  - The tree only enforces distinctness; the final root is INTENTIONALLY discarded (not a
         //    PI, not connected anywhere). The per-insert bound assertions are the whole point.
         // INTENTIONALLY SIMPLE: the inserted `value` is a constant 1 (the leaf value is irrelevant
@@ -707,8 +734,8 @@ where
             })
             .collect();
         let distinctness_value = builder.one();
-        let empty_distinctness_root = IndexedMerkleTree::new(MEMBER_DISTINCTNESS_TREE_HEIGHT)
-            .get_root();
+        let empty_distinctness_root =
+            IndexedMerkleTree::new(MEMBER_DISTINCTNESS_TREE_HEIGHT).get_root();
         let mut distinctness_root =
             PoseidonHashOutTarget::constant(&mut builder, empty_distinctness_root);
         for (i, is_active) in active_bits.iter().enumerate() {
@@ -740,8 +767,7 @@ where
             regev_pk_digests,
             pending_adds,
             final_balance_proof,
-            list_proof,
-            member_pk_g_targets,
+            agg_proof,
             active_bits,
             member_insertion_proofs,
         }
@@ -821,26 +847,18 @@ where
             )
             .map_err(|e| ChannelCloseCircuitError::FailedToProve(e.to_string()))?;
 
-        // P2b: the recursive ListCircuit proof over the N member IMCH single-sigs (D3).
+        // The level-AGG_LEVELS aggregated sign-zkp proof over the N member IMCH single-sigs. The
+        // in-circuit member key vector is sliced from THIS proof's pk-list PIs, so there are no
+        // per-slot pk_g targets to fill — `member_auth` must mirror the aggregation leaf order
+        // (slot order) or the member_set_commitment / distinctness constraints become
+        // unsatisfiable.
         witness
-            .set_proof_with_pis_target(&self.list_proof, &witness_value.list_proof)
+            .set_proof_with_pis_target(&self.agg_proof, &witness_value.agg_proof)
             .map_err(|e| ChannelCloseCircuitError::FailedToProve(e.to_string()))?;
 
-        // Per-slot member pk_g: ACTIVE slots get the member's registered pk_g; PADDING slots get
-        // `Bytes32::default()` (zeroed in the keccak preimage and excluded from C' by the active
-        // gating, so the value is inert).
-        for (slot, pk_g_target) in self.member_pk_g_targets.iter().enumerate() {
-            let pk_g = if slot < member_count {
-                witness_value.member_auth[slot].pk_g
-            } else {
-                Bytes32::default()
-            };
-            pk_g_target.set_witness(&mut witness, pk_g);
-        }
-
         // A5 pk_g distinctness witness: build a fresh IndexedMerkleTree and insert each ACTIVE
-        // member's pk_g IN SLOT ORDER (the SAME order/values used for `member_pk_g_targets`,
-        // member_set_commitment and the C' fold). `prove_and_insert` proves non-membership of the
+        // member's pk_g IN SLOT ORDER (the SAME order/values the aggregated proof exposes and the
+        // member_set_commitment keccak consumes). `prove_and_insert` proves non-membership of the
         // key against the current tree, then inserts it; a DUPLICATE active pk_g makes
         // `prove_and_insert` return `Err(KeyAlreadyExists)` (the duplicate has no valid low-leaf),
         // which we surface as a proving failure — there is NO witness that satisfies the in-circuit
@@ -851,19 +869,18 @@ where
             let insertion_proof: IndexedInsertionProof = if slot < member_count {
                 let pk_g = witness_value.member_auth[slot].pk_g;
                 let key: U256 = pk_g.into();
-                // value MUST equal the circuit-side `distinctness_value` (a constant 1, close_circuit
-                // ~702): the native leaf hash folds `value`, so inserting with any other value makes
-                // the witnessed merkle root disagree with the in-circuit `get_new_root`
-                // recomputation ("Wire set twice"). The value is irrelevant to distinctness (only the
+                // value MUST equal the circuit-side `distinctness_value` (a constant 1,
+                // close_circuit ~702): the native leaf hash folds `value`, so
+                // inserting with any other value makes the witnessed merkle root
+                // disagree with the in-circuit `get_new_root` recomputation ("Wire
+                // set twice"). The value is irrelevant to distinctness (only the
                 // KEY's non-membership matters), so 1 on both sides is the canonical choice.
-                distinctness_tree
-                    .prove_and_insert(key, 1u64)
-                    .map_err(|e| {
-                        ChannelCloseCircuitError::InvalidMemberAuth(format!(
-                            "pk_g distinctness (A5): slot {slot} pk_g {pk_g} is a duplicate of an \
+                distinctness_tree.prove_and_insert(key, 1u64).map_err(|e| {
+                    ChannelCloseCircuitError::InvalidMemberAuth(format!(
+                        "pk_g distinctness (A5): slot {slot} pk_g {pk_g} is a duplicate of an \
                              earlier active member — cannot insert: {e}"
-                        ))
-                    })?
+                    ))
+                })?
             } else {
                 distinctness_tree.prove_dummy()
             };
@@ -950,8 +967,8 @@ pub mod test_fixture {
         ethereum_types::{bytes32::Bytes32, u32limb_trait::U32LimbTrait, u256::U256},
         poseidon_sig::{
             GoldilocksSecretKey,
+            aggregate::{AGG_LEVELS, SigAggregator},
             circuit::SingleSigCircuit,
-            list::{ListCircuit, list_commitment},
         },
         regev::RegevCiphertext,
     };
@@ -967,7 +984,7 @@ pub mod test_fixture {
     pub struct CloseCircuitFixture {
         pub balance_processor: BalanceProcessor<F, C, D>,
         pub single_sig: SingleSigCircuit,
-        pub list: ListCircuit,
+        pub aggregator: SigAggregator,
         pub close_circuit: ChannelCloseCircuit<F, C, D>,
     }
 
@@ -983,11 +1000,11 @@ pub mod test_fixture {
                 t0.elapsed()
             );
             let single_sig = SingleSigCircuit::new();
-            let list = ListCircuit::new(&single_sig.verifier_data());
+            let aggregator = SigAggregator::new(&single_sig.verifier_data());
             let t1 = std::time::Instant::now();
             let close_circuit = ChannelCloseCircuit::<F, C, D>::new(
                 &balance_processor.balance_vd(),
-                &list.verifier_data(),
+                &aggregator.levels[AGG_LEVELS - 1].verifier_data(),
             );
             println!(
                 "[close fixture] close circuit build: {:?} (degree bits {})",
@@ -997,7 +1014,7 @@ pub mod test_fixture {
             CloseCircuitFixture {
                 balance_processor,
                 single_sig,
-                list,
+                aggregator,
                 close_circuit,
             }
         })
@@ -1012,40 +1029,48 @@ pub mod test_fixture {
         GoldilocksSecretKey::from_seed(s)
     }
 
-    /// P2b close member auth + the recursive `ListCircuit` proof for `active` members each signing
-    /// the given IMCH `digest`. Returns `(member_auth (slot order), list_proof)`. The list folds
-    /// the `(digest, pk_g_i)` pairs in slot order — exactly the order the close circuit
-    /// rebuilds C'.
-    pub(crate) fn member_auth_for_digest_n(
+    /// Close member auth + the LEVEL-`AGG_LEVELS` aggregated sign-zkp proof for the given signing
+    /// keys, each signing the IMCH `digest` (leaf order = slot order). The aggregator itself
+    /// accepts DUPLICATE keys by design (distinctness is the close circuit's consumer obligation),
+    /// so tests can pass a duplicated `sks` list to build an otherwise-valid forged tree.
+    pub(crate) fn member_auth_for_sks(
         digest: Bytes32,
-        seed: u64,
-        active: usize,
+        sks: &[GoldilocksSecretKey],
     ) -> (Vec<MemberCloseAuth>, ProofWithPublicInputs<F, C, D>) {
         let fx = fixture();
-        let sks: Vec<GoldilocksSecretKey> = (0..active).map(|i| close_member_sk(seed, i)).collect();
         let member_auth: Vec<MemberCloseAuth> = sks
             .iter()
             .map(|sk| MemberCloseAuth {
                 pk_g: sk.public_key(),
             })
             .collect();
-        let pairs: Vec<(Bytes32, Bytes32)> =
-            sks.iter().map(|sk| (digest, sk.public_key())).collect();
-        // Build the list proof by folding one SingleSig proof per member, in slot order.
-        let mut prev: Option<ProofWithPublicInputs<F, C, D>> = None;
-        for (i, sk) in sks.iter().enumerate() {
-            let sig = fx.single_sig.prove(sk, digest).expect("single sig proof");
-            let prefix = list_commitment(&pairs[0..i]);
-            prev = Some(
-                fx.list
-                    .prove_append(&sig, prefix, &prev)
-                    .expect("list append"),
-            );
-        }
-        (member_auth, prev.expect("at least one member"))
+        let leaves: Vec<ProofWithPublicInputs<F, C, D>> = sks
+            .iter()
+            .map(|sk| fx.single_sig.prove(sk, digest).expect("single sig proof"))
+            .collect();
+        let agg_proof = fx
+            .aggregator
+            .aggregate_to_level(&leaves, AGG_LEVELS)
+            .expect("aggregate to level 4");
+        (member_auth, agg_proof)
     }
 
-    /// P2b close member auth + list proof for `TEST_ACTIVE_MEMBERS` members signing `digest`.
+    /// Deterministic signing keys for `active` close-test members under `seed` (slot order).
+    pub(crate) fn close_member_sks(seed: u64, active: usize) -> Vec<GoldilocksSecretKey> {
+        (0..active).map(|i| close_member_sk(seed, i)).collect()
+    }
+
+    /// Close member auth + aggregated sign-zkp proof for `active` deterministic members signing
+    /// `digest`. Returns `(member_auth (slot order), level-AGG_LEVELS agg proof)`.
+    pub(crate) fn member_auth_for_digest_n(
+        digest: Bytes32,
+        seed: u64,
+        active: usize,
+    ) -> (Vec<MemberCloseAuth>, ProofWithPublicInputs<F, C, D>) {
+        member_auth_for_sks(digest, &close_member_sks(seed, active))
+    }
+
+    /// Close member auth + agg proof for `TEST_ACTIVE_MEMBERS` members signing `digest`.
     pub(crate) fn member_auth_for_digest(
         digest: Bytes32,
         seed: u64,
@@ -1128,8 +1153,9 @@ pub mod test_fixture {
     }
 
     /// Build a full close witness for `member_count` ACTIVE members: the final state, a REAL
-    /// genesis balance proof (settled_tx_chain = 0), and a REAL recursive `ListCircuit` proof over
-    /// the member Poseidon single-sigs. Consumed by `generate_close_fixture` AND the in-tree tests.
+    /// genesis balance proof (settled_tx_chain = 0), and a REAL level-`AGG_LEVELS` aggregated
+    /// sign-zkp proof over the member Poseidon single-sigs. Consumed by `generate_close_fixture`
+    /// AND the in-tree tests.
     pub fn build_close_full_witness_n(member_count: usize) -> ChannelCloseFullWitness<F, C, D> {
         let fx = fixture();
         let state = final_state_n(member_count, Bytes32::default());
@@ -1140,12 +1166,12 @@ pub mod test_fixture {
             .balance_processor
             .prove_initial(ChannelId::new(5).unwrap(), Salt::rand(&mut rng))
             .expect("initial balance proof");
-        let (member_auth, list_proof) = member_auth_for_digest_n(digest, 0xc105e, member_count);
+        let (member_auth, agg_proof) = member_auth_for_digest_n(digest, 0xc105e, member_count);
         ChannelCloseFullWitness {
             close,
             final_balance_proof,
             member_auth,
-            list_proof,
+            agg_proof,
         }
     }
 }
@@ -1250,9 +1276,9 @@ mod tests {
     }
 
     /// Build a full close witness for `member_count` ACTIVE members (pad-to-MAX D6 multi-N): the
-    /// final state, a REAL genesis balance proof (settled_tx_chain = 0), and a REAL recursive
-    /// `ListCircuit` proof over the `member_count` Poseidon single-sigs of the recomputed IMCH
-    /// digest.
+    /// final state, a REAL genesis balance proof (settled_tx_chain = 0), and a REAL
+    /// level-`AGG_LEVELS` aggregated sign-zkp proof over the `member_count` Poseidon single-sigs
+    /// of the recomputed IMCH digest.
     fn full_witness_n(member_count: usize) -> ChannelCloseFullWitness<F, C, D> {
         let fx = fixture();
         // settled_tx_chain = 0: the channel never settled an inter-channel tx, so the genesis
@@ -1265,12 +1291,12 @@ mod tests {
             .balance_processor
             .prove_initial(ChannelId::new(5).unwrap(), Salt::rand(&mut rng))
             .expect("initial balance proof");
-        let (member_auth, list_proof) = member_auth_for_digest_n(digest, 0xc105e, member_count);
+        let (member_auth, agg_proof) = member_auth_for_digest_n(digest, 0xc105e, member_count);
         ChannelCloseFullWitness {
             close,
             final_balance_proof,
             member_auth,
-            list_proof,
+            agg_proof,
         }
     }
 
@@ -1344,25 +1370,25 @@ mod tests {
         prove_and_verify_close_for(MAX_COSIGNERS);
     }
 
-    /// Negative — under-signed active set (A8): claim member_count = 3 but supply a `ListCircuit`
-    /// proof over only 2 of the 3 members. The close circuit rebuilds `C'` by folding `(IMCH,
-    /// pk_g_i)` over ALL 3 active slots, so `C' != C` (the verified list's commitment over 2
-    /// entries) → the close proof is rejected. This binds member_count to the genuinely-signing
-    /// active slots: a prover cannot under-sign an active slot.
+    /// Negative — under-signed active set (A8): claim member_count = 3 but supply an aggregated
+    /// sign-zkp proof over only 2 of the 3 members. The agg proof's `signer_count` PI (provably
+    /// the number of genuinely verified leaf signatures) is connected to the `member_count` PI,
+    /// so 2 != 3 makes the close proof unsatisfiable. This binds member_count to the
+    /// genuinely-signing active slots: a prover cannot under-sign an active slot.
     #[cfg_attr(debug_assertions, ignore = "run with --release")]
     #[test]
     fn channel_close_circuit_rejects_undersigned_active_slot() {
         let fx = fixture();
-        // member_count = 3, three member pk_g, but the list proof only covers the FIRST TWO.
+        // member_count = 3, three member pk_g, but the agg proof only covers the FIRST TWO.
         let mut witness = full_witness_n(3);
         let digest = witness.close.final_channel_state.digest;
-        // Rebuild the list proof over only the first two members (same seed/keys as
+        // Rebuild the agg proof over only the first two members (same seed/keys as
         // full_witness_n).
-        let (auth2, list2) = member_auth_for_digest_n(digest, 0xc105e, 2);
+        let (auth2, agg2) = member_auth_for_digest_n(digest, 0xc105e, 2);
         // The 3-member auth/commitment is kept (so member_set_commitment is the correct 3-key
-        // value); only the list proof is short. Sanity: the first two pk_g match.
+        // value); only the agg proof is short. Sanity: the first two pk_g match.
         assert_eq!(witness.member_auth[0].pk_g, auth2[0].pk_g);
-        witness.list_proof = list2;
+        witness.agg_proof = agg2;
 
         let mut public_inputs = witness.close.to_public_inputs().unwrap();
         public_inputs.member_set_commitment = member_set_commitment_for_auth(&witness.member_auth);
@@ -1374,7 +1400,8 @@ mod tests {
         let result = catch_unwind(AssertUnwindSafe(|| fx.close_circuit.data.prove(pw)));
         assert!(
             result.is_err() || result.unwrap().is_err(),
-            "a list proof missing an active member's signature must be rejected (C' != C)"
+            "an agg proof missing an active member's signature must be rejected \
+             (signer_count != member_count)"
         );
     }
 
@@ -1499,9 +1526,9 @@ mod tests {
             Bytes32::from_u32_slice(&[6, 6, 6, 0, 0, 0, 0, 0]).unwrap(),
         );
         let state = final_state(pushed);
-        let (member_auth, list_proof) = member_auth_for_digest(state.digest, 0xbad0);
+        let (member_auth, agg_proof) = member_auth_for_digest(state.digest, 0xbad0);
         witness.member_auth = member_auth;
-        witness.list_proof = list_proof;
+        witness.agg_proof = agg_proof;
         witness.close = close_witness_for(state);
 
         // Native mirror fires first…
@@ -1524,23 +1551,25 @@ mod tests {
     }
 
     /// Negative (ii) — unanimity / wrong key: if ANY single member's `pk_g` in the close auth does
-    /// not match the key that actually signed in the list proof, the rebuilt `C'` diverges from the
-    /// verified list commitment `C` → the close statement is unprovable; there is no 2-of-3
-    /// fallback. This exercises both the C'==C binding and the member_set_commitment binding.
+    /// not match the key that actually signed in the aggregated proof, the close statement is
+    /// unprovable; there is no 2-of-3 fallback. The in-circuit member key vector IS the verified
+    /// agg proof's pk list, so a substituted auth key desyncs the member_set_commitment PI (native
+    /// keccak over the imposter set vs in-circuit keccak over the real signers) AND the A5
+    /// distinctness insertion witness — either mismatch is unsatisfiable.
     #[cfg_attr(debug_assertions, ignore = "run with --release")]
     #[test]
     fn channel_close_circuit_rejects_wrong_member_key() {
         let fx = fixture();
         let mut witness = full_witness();
-        // Replace member 1's pk_g with an unrelated key (NOT the one that signed in the list
+        // Replace member 1's pk_g with an unrelated key (NOT the one that signed in the agg
         // proof).
         let imposter = GoldilocksSecretKey::from_seed([0x5a; 32]).public_key();
         assert_ne!(witness.member_auth[1].pk_g, imposter);
         witness.member_auth[1].pk_g = imposter;
 
-        // Use the member_set_commitment the circuit will recompute from the (now-wrong) pk_g set,
-        // so the failure is isolated to the C' == C list-binding (not the commitment
-        // keccak).
+        // Use the member_set_commitment computed from the (now-wrong) pk_g set — the forgery a
+        // prover would attempt: claim the imposter set on L1 while the verified signatures came
+        // from the real keys.
         let mut public_inputs = witness.close.to_public_inputs().unwrap();
         public_inputs.member_set_commitment = member_set_commitment_for_auth(&witness.member_auth);
         let pw = fx
@@ -1550,7 +1579,7 @@ mod tests {
         let result = catch_unwind(AssertUnwindSafe(|| fx.close_circuit.data.prove(pw)));
         assert!(
             result.is_err() || result.unwrap().is_err(),
-            "a member pk_g not matching the list-proof signer must make the close proof fail (C' != C)"
+            "a member pk_g not matching the agg-proof signer must make the close proof fail"
         );
 
         // A wrong auth length is refused structurally before proving.
@@ -1562,14 +1591,16 @@ mod tests {
         ));
     }
 
-    /// Negative — A5 pk_g distinctness (the indexed-Merkle insertion replacement for the former
-    /// O(MAX²) all-pairs loop). Two ACTIVE member slots sharing a pk_g would let ONE key satisfy
-    /// two of the N-of-N close signatures. We duplicate slot 0's FULL identity (pk_g + its valid
-    /// single-sig) into slot 1 — an otherwise self-consistent "one key signs two slots" witness, so
-    /// the ONLY violated invariant is distinctness, not signature validity or C' binding — and
-    /// confirm the close is UNPROVABLE: the second insertion of the repeated key has no valid
-    /// low-leaf (`prev_low.key < key < next_key` cannot hold for a key already in the tree), so the
-    /// in-circuit insertion bound is unsatisfiable and witness generation refuses it.
+    /// Negative — A5 pk_g distinctness (the indexed-Merkle insertion chain). Two ACTIVE member
+    /// slots sharing a pk_g would let ONE key satisfy two of the N-of-N close signatures. The
+    /// aggregation circuit ACCEPTS duplicate leaves BY DESIGN (each slot is backed by its own
+    /// verified signature; dedup is an explicit consumer obligation), so we build a REAL forged
+    /// aggregation tree with the same leaf key in slots 0 and 1 — an otherwise fully
+    /// self-consistent "one key signs two slots" witness whose ONLY violated invariant is
+    /// distinctness — and confirm the close is UNPROVABLE: the second insertion of the repeated
+    /// key has no valid low-leaf (`prev_low.key < key < next_key` cannot hold for a key already in
+    /// the tree), so the in-circuit insertion bound is unsatisfiable and witness generation
+    /// refuses it.
     #[cfg_attr(debug_assertions, ignore = "run with --release")]
     #[test]
     fn channel_close_circuit_rejects_duplicate_member_pk_g() {
@@ -1580,8 +1611,25 @@ mod tests {
             witness.member_auth[0].pk_g, witness.member_auth[1].pk_g,
             "precondition: slots 0 and 1 start distinct"
         );
-        // Verbatim-copy slot 0 into slot 1: same pk_g AND same valid signature.
-        witness.member_auth[1] = witness.member_auth[0].clone();
+        // Forge the aggregation tree: duplicate slot 0's signing key into slot 1 and rebuild the
+        // REAL agg proof over [sk0, sk0, sk2] — the aggregator accepts this (boundary check
+        // below), the close circuit must not.
+        let digest = witness.close.final_channel_state.digest;
+        let mut sks = close_member_sks(0xc105e, witness.member_auth.len());
+        sks[1] = sks[0];
+        let (dup_auth, dup_agg) = member_auth_for_sks(digest, &sks);
+        assert_eq!(
+            dup_auth[0].pk_g, dup_auth[1].pk_g,
+            "slots 0/1 now duplicated"
+        );
+        // Boundary: the aggregated proof itself VERIFIES — distinctness is not its job.
+        fx.aggregator.levels[crate::poseidon_sig::aggregate::AGG_LEVELS - 1]
+            .verifier_data()
+            .verify(dup_agg.clone())
+            .expect("the aggregator accepts duplicate leaves by design");
+        witness.member_auth = dup_auth;
+        witness.agg_proof = dup_agg;
+
         let result = fx.close_circuit.prove(&witness);
         assert!(
             matches!(&result, Err(ChannelCloseCircuitError::InvalidMemberAuth(m)) if m.contains("distinctness")),

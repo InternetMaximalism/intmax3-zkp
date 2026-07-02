@@ -79,7 +79,7 @@ pub enum CancelCloseWitnessError {
 
 /// Witness for the corrected cancelClose statement. The revived `ChannelState` (the state the
 /// members kept operating at a higher version) plus the `CloseIntent` being cancelled. The member
-/// authentication (per-slot `pk_g`) and the recursive `ListCircuit` proof live in the circuit's
+/// authentication (per-slot `pk_g`) and the aggregated sign-zkp proof live in the circuit's
 /// `CancelCloseFullWitness` (mirroring `ChannelCloseFullWitness`), not here.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]

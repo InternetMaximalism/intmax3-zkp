@@ -381,6 +381,39 @@ impl SigAggregator {
         debug_assert_eq!(nodes.len(), 1);
         Ok((nodes.pop().unwrap(), top_level))
     }
+
+    /// Aggregate `leaf_proofs` and then LIFT the result to the FIXED `level` (a consumer that
+    /// verifies aggregated proofs at a build-time CONSTANT verifier key — e.g. the channel
+    /// close/cancel-close circuits, which need the level-`AGG_LEVELS` (16-slot) layout regardless
+    /// of `n` — cannot accept the minimal level, which varies with `n`).
+    ///
+    /// Each lift step is `level_k.prove(node, None)`: the lifted node becomes a lone LEFT child
+    /// with the right subtree ABSENT. This is explicitly allowed by the left-packing rule ("right
+    /// present ⇒ left child full" is vacuous when the right is absent), and it preserves the
+    /// exposed statement exactly: `message` and `signer_count` are copied from the left child, the
+    /// pk list keeps the left-packed prefix, and the new right-half slots are PROVABLY zero
+    /// padding (gated by `is_right_present = 0`). So the level-`level` proof carries the same
+    /// `[message, n, pk_0..pk_{n-1}, 0...]` claim as the minimal-level one — see the lift test.
+    pub fn aggregate_to_level(
+        &self,
+        leaf_proofs: &[ProofWithPublicInputs<F, C, D>],
+        level: usize,
+    ) -> anyhow::Result<ProofWithPublicInputs<F, C, D>> {
+        assert!((1..=AGG_LEVELS).contains(&level), "level out of range");
+        anyhow::ensure!(
+            leaf_proofs.len() <= (1 << level),
+            "more signers ({}) than slots at level {level}",
+            leaf_proofs.len()
+        );
+        let (mut node, mut node_level) = self.aggregate(leaf_proofs)?;
+        // `aggregate` picks the MINIMAL level for n, so node_level <= level here (the slot-count
+        // ensure above guarantees it).
+        while node_level < level {
+            node_level += 1;
+            node = self.levels[node_level - 1].prove(&node, None)?;
+        }
+        Ok(node)
+    }
 }
 
 #[cfg(test)]
@@ -451,6 +484,45 @@ mod tests {
                 "n={n}: top public inputs must be [m, n, pk_0..pk_{{n-1}}, 0...]"
             );
         }
+    }
+
+    /// Fixed-level lift (`aggregate_to_level`): n = 2 aggregated at its minimal level (1) and then
+    /// lifted to level 4 must verify against the LEVEL-4 verifier data and expose the SAME
+    /// statement — same message, same `signer_count = 2`, same left-packed pk list, all 14 new
+    /// slots zero. This is the exact shape the close/cancel circuits consume at a constant VK.
+    #[test]
+    #[cfg_attr(debug_assertions, ignore = "run with --release")]
+    fn lifting_n2_to_level4_preserves_message_count_and_list() {
+        let single = SingleSigCircuit::new();
+        let agg = SigAggregator::new(&single.verifier_data());
+
+        let m = message(0x42);
+        let sks: Vec<GoldilocksSecretKey> = (0..2).map(secret_key).collect();
+        let leaves: Vec<ProofWithPublicInputs<F, C, D>> =
+            sks.iter().map(|sk| single.prove(sk, m).unwrap()).collect();
+
+        let top = agg
+            .aggregate_to_level(&leaves, AGG_LEVELS)
+            .expect("lift to level 4");
+        agg.levels[AGG_LEVELS - 1]
+            .verifier_data()
+            .verify(top.clone())
+            .expect("lifted proof must verify at the LEVEL-4 verifier data");
+
+        // Identical statement at level 4: [m(8), 2, pk0(8), pk1(8), 0 * 14 slots].
+        let pks: Vec<Bytes32> = sks.iter().map(|sk| sk.public_key()).collect();
+        let expected = agg_expected_public_inputs(AGG_LEVELS, m, &pks);
+        assert_eq!(top.public_inputs, expected);
+        assert_eq!(
+            top.public_inputs[AGG_COUNT_OFFSET],
+            F::from_canonical_u64(2)
+        );
+        assert!(
+            top.public_inputs[AGG_PK_LIST_OFFSET + 2 * BYTES32_LEN..]
+                .iter()
+                .all(|&limb| limb == F::ZERO),
+            "all lifted slots must be zero padding"
+        );
     }
 
     /// Two children signing DIFFERENT messages cannot be aggregated: the gated message-equality

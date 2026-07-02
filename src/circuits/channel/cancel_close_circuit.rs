@@ -5,9 +5,10 @@
 //! agreed to keep operating ⇒ the pending close froze a stale state ⇒ cancel. See
 //! `tasks/phase-c-challenge-stubs-threat-model.md` ("CORRECTED cancelClose statement") and
 //! `cancel_close_pis.rs` for the layout/security rationale. This mirrors `close_circuit.rs`'s
-//! proven machinery (IMCH/H1 recompute, recursive `ListCircuit` member-sig verification,
-//! `member_set_commitment` keccak with pad-to-MAX + active-bits + pk_g distinctness) and fixes the
-//! two findings the legacy 41-limb design failed on:
+//! proven machinery (IMCH/H1 recompute, recursive verification of ONE level-`AGG_LEVELS`
+//! aggregated sign-zkp proof carrying the N member single-sigs, `member_set_commitment` keccak
+//! with pad-to-MAX + active-bits + pk_g distinctness) and fixes the two findings the legacy
+//! 41-limb design failed on:
 //!
 //!  - Finding D (member binding): `member_set_commitment` is exposed and matched on L1 against the
 //!    channel's registered member set, so a third party cannot forge a cancel with their own keys.
@@ -47,10 +48,13 @@ use crate::{
         u64::{U64, U64Target},
         u256::{U256, U256Target},
     },
-    poseidon_sig::list::{chain_step_target, leaf_target},
+    poseidon_sig::aggregate::{
+        AGG_COUNT_OFFSET, AGG_LEVELS, AGG_MSG_OFFSET, AGG_PK_LIST_OFFSET, MAX_AGG_SIGNERS,
+        agg_public_inputs_len,
+    },
     utils::{
-        poseidon_hash_out::{PoseidonHashOut, PoseidonHashOutTarget},
-        recursively_verifiable::add_proof_target_and_conditionally_verify,
+        poseidon_hash_out::PoseidonHashOutTarget,
+        recursively_verifiable::add_proof_target_and_verify,
         trees::indexed_merkle_tree::{
             IndexedMerkleTree,
             insertion::{IndexedInsertionProof, IndexedInsertionProofTarget},
@@ -147,7 +151,8 @@ pub struct MemberCancelAuth {
 }
 
 /// Full prover witness: the cancel witness (revived state + close intent), the per-member `pk_g`s,
-/// and the recursive `ListCircuit` proof over the N member single-sigs of the revived IMCH digest.
+/// and the level-`AGG_LEVELS` aggregated sign-zkp proof over the N member single-sigs of the
+/// revived IMCH digest.
 #[derive(Clone, Debug)]
 pub struct CancelCloseFullWitness<F, C, const D: usize>
 where
@@ -158,9 +163,12 @@ where
     /// Exactly `member_count` ACTIVE entries (slot order) — ALL active members sign the revived
     /// IMCH digest (unanimous; mirrors the close path).
     pub member_auth: Vec<MemberCancelAuth>,
-    /// The recursive `poseidon_sig::list::ListCircuit` proof over the N member single-sigs of the
-    /// revived IMCH digest. Its commitment `C` must equal the circuit's rebuilt `C'`.
-    pub list_proof: ProofWithPublicInputs<F, C, D>,
+    /// The level-`AGG_LEVELS` `poseidon_sig::aggregate::AggLevelCircuit` proof over the N member
+    /// single-sigs of the revived IMCH digest (slot order, left-packed; build via
+    /// `SigAggregator::aggregate_to_level(sigs, AGG_LEVELS)`). Its `message` PI must equal the
+    /// recomputed revived IMCH digest, its `signer_count` the revived `member_count`, and its pk
+    /// list IS the circuit's member key vector.
+    pub agg_proof: ProofWithPublicInputs<F, C, D>,
 }
 
 /// Native mirror of the in-circuit member-set commitment (byte-identical to the close path).
@@ -213,9 +221,10 @@ where
     close_final_state_version: U64Target,
     close_final_settled_tx_chain: Bytes32Target,
 
-    // ── member auth / list proof ──
-    list_proof: ProofWithPublicInputsTarget<D>,
-    member_pk_g_targets: Vec<Bytes32Target>,
+    // ── member auth / aggregated sign-zkp proof ──
+    /// The recursively verified level-`AGG_LEVELS` aggregated sign-zkp proof. Its pk-list PI
+    /// slices ARE the in-circuit member key vector (no separate witnessed `pk_g` targets).
+    agg_proof: ProofWithPublicInputsTarget<D>,
     active_bits: Vec<plonky2::iop::target::BoolTarget>,
     /// A5 pk_g distinctness: per-slot indexed-Merkle insertion proofs (length MAX_COSIGNERS).
     /// Filled in `fill_witness` by inserting active pk_g in slot order into a fresh tree (padding
@@ -229,11 +238,20 @@ where
     C: GenericConfig<D, F = F> + 'static,
     <C as GenericConfig<D>>::Hasher: AlgebraicHasher<F>,
 {
-    /// Builds the cancel-close circuit against a FIXED `ListCircuit` verifier key (`list_vd`),
-    /// baked in as a build-time constant. No balance proof is verified — the revived IMCH digest
-    /// (which hashes H1, which hashes `state_version`) is what the members sign, and that is the
-    /// sole anchor the staleness predicate needs.
-    pub fn new(list_vd: &VerifierCircuitData<F, C, D>) -> Self {
+    /// Builds the cancel-close circuit against a FIXED level-`AGG_LEVELS`
+    /// `poseidon_sig::aggregate::AggLevelCircuit` verifier key (`agg_vd`), baked in as a
+    /// build-time constant (A7). No balance proof is verified — the revived IMCH digest (which
+    /// hashes H1, which hashes `state_version`) is what the members sign, and that is the sole
+    /// anchor the staleness predicate needs.
+    pub fn new(agg_vd: &VerifierCircuitData<F, C, D>) -> Self {
+        // Mirror of the close circuit's build-time arity check (the security binding is the
+        // constant VK below).
+        const { assert!(MAX_COSIGNERS == MAX_AGG_SIGNERS) };
+        assert_eq!(
+            agg_vd.common.num_public_inputs,
+            agg_public_inputs_len(AGG_LEVELS),
+            "agg_vd must be the level-{AGG_LEVELS} AggLevelCircuit verifier data"
+        );
         let mut builder =
             CircuitBuilder::<F, D>::new(CircuitConfig::standard_recursion_zk_config());
         let public_inputs = CancelClosePublicInputsTarget::new(&mut builder);
@@ -423,14 +441,39 @@ where
         let revived_nonce_plus_one = revived_close_freeze_nonce.add(&mut builder, &one_u64);
         revived_nonce_plus_one.connect(&mut builder, close_freeze_nonce);
 
-        // ── (g) N-member revived-IMCH signatures via the recursive ListCircuit proof ──
+        // ── (g) N-member revived-IMCH signatures via the aggregated sign-zkp proof ──
+        //
+        // Message = the RECOMPUTED revived IMCH digest; all N active members sign it. We verify
+        // ONE level-AGG_LEVELS `AggLevelCircuit` proof at a CONSTANT VK and consume its exposed
+        // `[message(8), signer_count(1), pk list]` directly — see the matching block in
+        // `close_circuit.rs` for the full consumer-obligation rationale (message binding, count
+        // binding, wired pk list with left-packed zero-suffix padding, u32 range provenance of the
+        // PI limbs); identical mechanism here with the REVIVED digest as the message.
+        let agg_proof = add_proof_target_and_verify(agg_vd, &mut builder);
+
+        // (g-i) message == recomputed revived IMCH digest.
+        let agg_message = Bytes32Target::from_slice(
+            &agg_proof.public_inputs[AGG_MSG_OFFSET..AGG_MSG_OFFSET + BYTES32_LEN],
+        );
+        agg_message.connect(&mut builder, revived_state_digest);
+
+        // (g-ii) signer_count == revived member_count (a prover cannot under-sign: signer_count
+        // provably equals the number of genuinely verified leaf signatures).
+        builder.connect(
+            agg_proof.public_inputs[AGG_COUNT_OFFSET],
+            revived_member_count,
+        );
+
+        // (g-iii) the member key vector := the verified pk-list PI slices, slot for slot.
+        let member_pk_g_targets: Vec<Bytes32Target> = (0..MAX_COSIGNERS)
+            .map(|i| {
+                let start = AGG_PK_LIST_OFFSET + i * BYTES32_LEN;
+                Bytes32Target::from_slice(&agg_proof.public_inputs[start..start + BYTES32_LEN])
+            })
+            .collect();
+
         let member_set_domain = builder.constant(F::from_canonical_u32(CANCEL_MEMBER_SET_DOMAIN));
         let mut member_set_inputs: Vec<Target> = vec![member_set_domain, revived_member_count];
-
-        // COSIGNER pk_g targets, length MAX_COSIGNERS (delegates never enter the member set).
-        let member_pk_g_targets: Vec<Bytes32Target> = (0..MAX_COSIGNERS)
-            .map(|_| Bytes32Target::new(&mut builder, true))
-            .collect();
 
         for (i, is_active) in active_bits.iter().enumerate() {
             for &limb in &member_pk_g_targets[i].to_vec() {
@@ -439,28 +482,15 @@ where
             }
         }
 
-        let always = builder._true();
-        let list_proof = add_proof_target_and_conditionally_verify(list_vd, &mut builder, always);
-        let committed_c = Bytes32Target::from_slice(&list_proof.public_inputs[0..BYTES32_LEN]);
-
-        // Rebuild C' = fold (revived_state_digest, pk_g_i) over ACTIVE slots only.
-        let mut chain = PoseidonHashOutTarget::constant(&mut builder, PoseidonHashOut::default());
-        for (i, is_active) in active_bits.iter().enumerate() {
-            let leaf = leaf_target(&mut builder, &revived_state_digest, &member_pk_g_targets[i]);
-            let stepped = chain_step_target(&mut builder, chain.clone(), leaf);
-            chain = PoseidonHashOutTarget::select(&mut builder, *is_active, stepped, chain);
-        }
-        let rebuilt_c = Bytes32Target::from_hash_out(&mut builder, chain);
-        rebuilt_c.connect(&mut builder, committed_c);
-
         // ── pk_g distinctness over the ACTIVE set (A5: one key cannot fake N signatures) ──
         //
         // Replaces the former O(MAX^2) all-pairs equality loop with an O(MAX·height) indexed-Merkle
         // insertion chain proving the SAME property (no two active slots share a pk_g). See the
         // matching block in `close_circuit.rs` for the full rationale; identical mechanism here.
         //
-        // SECURITY: the inserted keys are EXACTLY `member_pk_g_targets` (the same targets used by
-        // the member_set_commitment keccak and the C' fold), converted limb-for-limb to a
+        // SECURITY: the inserted keys are EXACTLY `member_pk_g_targets` (the pk-list PI slices of
+        // the VERIFIED aggregated sign-zkp proof — the same targets the member_set_commitment
+        // keccak consumes), converted limb-for-limb to a
         // `U256Target` (both are `[Target; 8]`, no `remove_3bits` masking). The active gating uses
         // the SAME `active_bits`; padding slots are skipped. The insertion gadget asserts
         // `prev_low.key < key < next_key (or 0)` per active insert = non-membership = distinctness,
@@ -530,8 +560,7 @@ where
             close_snapshot_medium_block_number,
             close_final_state_version,
             close_final_settled_tx_chain,
-            list_proof,
-            member_pk_g_targets,
+            agg_proof,
             active_bits,
             member_insertion_proofs,
         }
@@ -658,27 +687,21 @@ where
         self.close_final_settled_tx_chain
             .set_witness(&mut witness, close.final_settled_tx_chain);
 
-        // list proof.
+        // The level-AGG_LEVELS aggregated sign-zkp proof. The in-circuit member key vector is
+        // sliced from THIS proof's pk-list PIs — `member_auth` must mirror the aggregation leaf
+        // order (slot order) or the member_set_commitment / distinctness constraints become
+        // unsatisfiable.
         witness
-            .set_proof_with_pis_target(&self.list_proof, &witness_value.list_proof)
+            .set_proof_with_pis_target(&self.agg_proof, &witness_value.agg_proof)
             .map_err(|e| CancelCloseCircuitError::FailedToProve(e.to_string()))?;
 
-        // per-slot member pk_g (active slots = the member's pk_g; padding slots = default).
-        for (slot, pk_g_target) in self.member_pk_g_targets.iter().enumerate() {
-            let pk_g = if slot < member_count {
-                witness_value.member_auth[slot].pk_g
-            } else {
-                Bytes32::default()
-            };
-            pk_g_target.set_witness(&mut witness, pk_g);
-        }
-
         // A5 pk_g distinctness witness: insert each ACTIVE pk_g IN SLOT ORDER into a fresh
-        // IndexedMerkleTree (same order/values as `member_pk_g_targets` / member_set_commitment /
-        // C' fold). A DUPLICATE active pk_g makes `prove_and_insert` return `Err(KeyAlreadyExists)`
-        // (no valid low-leaf) → surfaced as a proving failure; there is no witness satisfying the
-        // in-circuit non-membership bound for a repeated key. Padding slots get a dummy proof whose
-        // gated assertions are skipped in-circuit.
+        // IndexedMerkleTree (same order/values as the aggregated proof's pk list /
+        // member_set_commitment). A DUPLICATE active pk_g makes `prove_and_insert` return
+        // `Err(KeyAlreadyExists)` (no valid low-leaf) → surfaced as a proving failure;
+        // there is no witness satisfying the in-circuit non-membership bound for a repeated
+        // key. Padding slots get a dummy proof whose gated assertions are skipped
+        // in-circuit.
         let mut distinctness_tree = IndexedMerkleTree::new(MEMBER_DISTINCTNESS_TREE_HEIGHT);
         for (slot, insertion_target) in self.member_insertion_proofs.iter().enumerate() {
             let insertion_proof: IndexedInsertionProof = if slot < member_count {
@@ -688,14 +711,12 @@ where
                 // the native leaf hash folds `value`, so any other value desyncs the witnessed
                 // merkle root from the in-circuit recomputation ("Wire set twice"). Irrelevant to
                 // distinctness (only the KEY matters), so 1 on both sides.
-                distinctness_tree
-                    .prove_and_insert(key, 1u64)
-                    .map_err(|e| {
-                        CancelCloseCircuitError::InvalidMemberAuth(format!(
-                            "pk_g distinctness (A5): slot {slot} pk_g {pk_g} is a duplicate of an \
+                distinctness_tree.prove_and_insert(key, 1u64).map_err(|e| {
+                    CancelCloseCircuitError::InvalidMemberAuth(format!(
+                        "pk_g distinctness (A5): slot {slot} pk_g {pk_g} is a duplicate of an \
                              earlier active member — cannot insert: {e}"
-                        ))
-                    })?
+                    ))
+                })?
             } else {
                 distinctness_tree.prove_dummy()
             };
@@ -735,7 +756,7 @@ where
 #[cfg(any(test, feature = "cancel-close-fixture-bin"))]
 pub mod test_fixture {
     //! Shared heavy artifacts for the cancel-close-circuit tests and the fixture-gen binary: ONE
-    //! `SingleSigCircuit` + `ListCircuit` + `CancelCloseCircuit` build per test-binary run.
+    //! `SingleSigCircuit` + `SigAggregator` + `CancelCloseCircuit` build per test-binary run.
 
     use std::sync::OnceLock;
 
@@ -756,8 +777,8 @@ pub mod test_fixture {
         ethereum_types::{bytes32::Bytes32, u32limb_trait::U32LimbTrait as _, u256::U256},
         poseidon_sig::{
             GoldilocksSecretKey,
+            aggregate::{AGG_LEVELS, SigAggregator},
             circuit::SingleSigCircuit,
-            list::{ListCircuit, list_commitment},
         },
         regev::{REGEV_N, REGEV_Q, RegevCiphertext},
     };
@@ -771,7 +792,7 @@ pub mod test_fixture {
 
     pub struct CancelCloseCircuitFixture {
         pub single_sig: SingleSigCircuit,
-        pub list: ListCircuit,
+        pub aggregator: SigAggregator,
         pub cancel_circuit: CancelCloseCircuit<F, C, D>,
     }
 
@@ -779,11 +800,13 @@ pub mod test_fixture {
         static FIXTURE: OnceLock<CancelCloseCircuitFixture> = OnceLock::new();
         FIXTURE.get_or_init(|| {
             let single_sig = SingleSigCircuit::new();
-            let list = ListCircuit::new(&single_sig.verifier_data());
-            let cancel_circuit = CancelCloseCircuit::<F, C, D>::new(&list.verifier_data());
+            let aggregator = SigAggregator::new(&single_sig.verifier_data());
+            let cancel_circuit = CancelCloseCircuit::<F, C, D>::new(
+                &aggregator.levels[AGG_LEVELS - 1].verifier_data(),
+            );
             CancelCloseCircuitFixture {
                 single_sig,
-                list,
+                aggregator,
                 cancel_circuit,
             }
         })
@@ -814,35 +837,45 @@ pub mod test_fixture {
         }
     }
 
-    /// Member auth + the recursive `ListCircuit` proof for `active` members each signing the given
-    /// revived IMCH `digest` (slot order). Mirrors the close-circuit helper.
-    pub fn member_auth_for_digest_n(
+    /// Member auth + the LEVEL-`AGG_LEVELS` aggregated sign-zkp proof for the given signing keys,
+    /// each signing the revived IMCH `digest` (leaf order = slot order). The aggregator accepts
+    /// DUPLICATE keys by design (distinctness is the cancel circuit's consumer obligation), so
+    /// tests can pass a duplicated `sks` list to build an otherwise-valid forged tree.
+    pub fn member_auth_for_sks(
         digest: Bytes32,
-        seed: u64,
-        active: usize,
+        sks: &[GoldilocksSecretKey],
     ) -> (Vec<MemberCancelAuth>, ProofWithPublicInputs<F, C, D>) {
         let fx = fixture();
-        let sks: Vec<GoldilocksSecretKey> =
-            (0..active).map(|i| cancel_member_sk(seed, i)).collect();
         let member_auth: Vec<MemberCancelAuth> = sks
             .iter()
             .map(|sk| MemberCancelAuth {
                 pk_g: sk.public_key(),
             })
             .collect();
-        let pairs: Vec<(Bytes32, Bytes32)> =
-            sks.iter().map(|sk| (digest, sk.public_key())).collect();
-        let mut prev: Option<ProofWithPublicInputs<F, C, D>> = None;
-        for (i, sk) in sks.iter().enumerate() {
-            let sig = fx.single_sig.prove(sk, digest).expect("single sig proof");
-            let prefix = list_commitment(&pairs[0..i]);
-            prev = Some(
-                fx.list
-                    .prove_append(&sig, prefix, &prev)
-                    .expect("list append"),
-            );
-        }
-        (member_auth, prev.expect("at least one member"))
+        let leaves: Vec<ProofWithPublicInputs<F, C, D>> = sks
+            .iter()
+            .map(|sk| fx.single_sig.prove(sk, digest).expect("single sig proof"))
+            .collect();
+        let agg_proof = fx
+            .aggregator
+            .aggregate_to_level(&leaves, AGG_LEVELS)
+            .expect("aggregate to level 4");
+        (member_auth, agg_proof)
+    }
+
+    /// Deterministic signing keys for `active` cancel-test members under `seed` (slot order).
+    pub fn cancel_member_sks(seed: u64, active: usize) -> Vec<GoldilocksSecretKey> {
+        (0..active).map(|i| cancel_member_sk(seed, i)).collect()
+    }
+
+    /// Member auth + aggregated sign-zkp proof for `active` deterministic members each signing the
+    /// given revived IMCH `digest` (slot order). Mirrors the close-circuit helper.
+    pub fn member_auth_for_digest_n(
+        digest: Bytes32,
+        seed: u64,
+        active: usize,
+    ) -> (Vec<MemberCancelAuth>, ProofWithPublicInputs<F, C, D>) {
+        member_auth_for_sks(digest, &cancel_member_sks(seed, active))
     }
 
     /// Builds a revived `ChannelState` at `(revived_era_nonce, revived_version)` whose member set
@@ -924,7 +957,7 @@ pub mod test_fixture {
         };
         let close_intent = CloseIntent::new(5, &closing_state, &close_withdrawal, 123).unwrap();
 
-        let (member_auth, list_proof) =
+        let (member_auth, agg_proof) =
             member_auth_for_digest_n(revived_state.signing_digest(), seed_for(active), active);
 
         CancelCloseFullWitness {
@@ -933,7 +966,7 @@ pub mod test_fixture {
                 close_intent,
             },
             member_auth,
-            list_proof,
+            agg_proof,
         }
     }
 
@@ -1046,7 +1079,7 @@ mod tests {
         // a member_set_commitment over DIFFERENT keys. The in-circuit member-set keccak binds the
         // commitment to the keys that actually signed, so a mismatched commitment is rejected.
         //
-        // Concretely: build a valid witness, then replace the list_proof + member_auth with proofs
+        // Concretely: build a valid witness, then replace the agg_proof + member_auth with proofs
         // over attacker keys while keeping the (now-wrong) member_set_commitment PI from the
         // honest auth. The circuit's keccak(attacker pk_g) != claimed commitment → reject.
         let fx = fixture();
@@ -1058,9 +1091,9 @@ mod tests {
         };
         // Re-sign the SAME revived digest with a different attacker seed.
         let digest = witness.cancel.revived_state.signing_digest();
-        let (attacker_auth, attacker_list) = member_auth_for_digest_n(digest, 0xdead_beef, 3);
+        let (attacker_auth, attacker_agg) = member_auth_for_digest_n(digest, 0xdead_beef, 3);
         witness.member_auth = attacker_auth;
-        witness.list_proof = attacker_list;
+        witness.agg_proof = attacker_agg;
 
         // Force the public inputs to keep the HONEST member_set_commitment (the forgery target):
         // attacker keys sign, but the commitment claims the registered (honest) set.
@@ -1080,14 +1113,18 @@ mod tests {
         );
     }
 
-    /// Negative — A5 pk_g distinctness (indexed-Merkle insertion, replacing the former O(MAX²)
-    /// all-pairs loop). Two ACTIVE slots sharing a pk_g would let one key satisfy two of the
-    /// N-of-N signatures. Duplicate slot 0's full identity (pk_g + valid single-sig) into slot 1 —
-    /// isolating distinctness — and confirm the cancel is UNPROVABLE (the repeated key has no valid
-    /// low-leaf for insertion).
+    /// Negative — A5 pk_g distinctness (indexed-Merkle insertion chain). Two ACTIVE slots sharing
+    /// a pk_g would let one key satisfy two of the N-of-N signatures. The aggregation circuit
+    /// ACCEPTS duplicate leaves BY DESIGN (dedup is an explicit consumer obligation), so we build
+    /// a REAL forged aggregation tree with the same leaf key in slots 0 and 1 — isolating
+    /// distinctness as the only violated invariant — and confirm the cancel is UNPROVABLE (the
+    /// repeated key has no valid low-leaf for insertion).
     #[cfg_attr(debug_assertions, ignore = "run with --release")]
     #[test]
     fn cancel_close_circuit_rejects_duplicate_member_pk_g() {
+        use super::test_fixture::{cancel_member_sks, member_auth_for_sks};
+        use crate::poseidon_sig::aggregate::AGG_LEVELS;
+
         let fx = fixture();
         let mut witness = build_full_witness();
         assert!(witness.member_auth.len() >= 2, "need >=2 active members");
@@ -1095,7 +1132,24 @@ mod tests {
             witness.member_auth[0].pk_g, witness.member_auth[1].pk_g,
             "precondition: slots 0 and 1 start distinct"
         );
-        witness.member_auth[1] = witness.member_auth[0].clone();
+        // Forge the aggregation tree: duplicate slot 0's signing key into slot 1 and rebuild the
+        // REAL agg proof (the seed matches build_full_witness's member set).
+        let digest = witness.cancel.revived_state.signing_digest();
+        let mut sks = cancel_member_sks(0xca_1107, witness.member_auth.len());
+        sks[1] = sks[0];
+        let (dup_auth, dup_agg) = member_auth_for_sks(digest, &sks);
+        assert_eq!(
+            dup_auth[0].pk_g, dup_auth[1].pk_g,
+            "slots 0/1 now duplicated"
+        );
+        // Boundary: the aggregated proof itself VERIFIES — distinctness is not its job.
+        fx.aggregator.levels[AGG_LEVELS - 1]
+            .verifier_data()
+            .verify(dup_agg.clone())
+            .expect("the aggregator accepts duplicate leaves by design");
+        witness.member_auth = dup_auth;
+        witness.agg_proof = dup_agg;
+
         let pis = witness.cancel.to_public_inputs().unwrap();
         let result = fx.cancel_circuit.fill_witness(&pis, &witness);
         assert!(
