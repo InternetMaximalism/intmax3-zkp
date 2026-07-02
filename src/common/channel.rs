@@ -1533,9 +1533,11 @@ mod tests {
             Err(ChannelError::InvalidChannelRecord(_))
         ));
 
-        // member_count > MAX_CHANNEL_MEMBERS is rejected.
+        // member_count > MAX_COSIGNERS is rejected (the old `(MAX_CHANNEL_MEMBERS + 1) as u8`
+        // truncated to 1 at MAX=1024 and passed for the wrong reason — count 1 fails the `>= 2`
+        // check, not the cap).
         let mut too_many = record_with_members(16);
-        too_many.member_count = (MAX_CHANNEL_MEMBERS + 1) as u8;
+        too_many.member_count = (MAX_COSIGNERS + 1) as u8;
         assert!(matches!(
             too_many.validate(),
             Err(ChannelError::InvalidChannelRecord(_))
