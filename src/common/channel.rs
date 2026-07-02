@@ -7,7 +7,7 @@ use thiserror::Error;
 pub use crate::common::channel_id::ChannelId;
 use crate::{
     common::balance_state::{BalanceState, tx_leaf_hash},
-    constants::MAX_CHANNEL_MEMBERS,
+    constants::{MAX_CHANNEL_MEMBERS, MAX_COSIGNERS},
     ethereum_types::{
         address::Address, bytes32::Bytes32, u32limb_trait::U32LimbTrait as _, u256::U256,
     },
@@ -196,6 +196,8 @@ pub struct ChannelRecord {
     /// Ordered member + delegate identities = SPHINCS+ pubkey hashes, slot order
     /// 0..MAX_CHANNEL_MEMBERS. Active slots (`< member_count+delegate_count`) are nonzero and
     /// pairwise-distinct; padding slots are `Bytes32::default()`.
+    // MAX_CHANNEL_MEMBERS > 32: std serde only derives arrays up to 32, so use serde-big-array.
+    #[serde(with = "serde_big_array::BigArray")]
     pub member_pk_gs: [Bytes32; MAX_CHANNEL_MEMBERS],
     /// L1/keccak digest form of the channel's member tree root. The in-circuit
     /// `ChannelLeaf.member_pubkeys_root` is a Poseidon root (different representation, DB); this
@@ -232,10 +234,13 @@ impl ChannelRecord {
                     .to_string(),
             ));
         }
+        // member_count = COSIGNERS (N-of-N close signers), capped at MAX_COSIGNERS. The total
+        // active participants (members + delegates) are separately bounded by MAX_CHANNEL_MEMBERS
+        // below.
         let count = self.member_count as usize;
-        if count < 2 || count > MAX_CHANNEL_MEMBERS {
+        if count < 2 || count > MAX_COSIGNERS {
             return Err(ChannelError::InvalidChannelRecord(format!(
-                "member_count {count} out of range (must be 2..={MAX_CHANNEL_MEMBERS})"
+                "member_count {count} out of range (must be 2..={MAX_COSIGNERS})"
             )));
         }
         if (self.bp_member_slot as usize) >= count {
@@ -1137,32 +1142,40 @@ pub(crate) fn hash_words(words: &[u32]) -> Bytes32 {
 
 /// Close-circuit member-set commitment (detail2 §F-3, F5 soundness binding; pad-to-MAX D6).
 ///
-/// `member_set_commitment = keccak([IMCM, member_count, h_0(8), …, h_{MAX-1}(8)])` over
-/// `member_count` (single u32 limb right after the domain) and ALL `MAX_CHANNEL_MEMBERS` SPHINCS+
-/// pubkey hashes in SLOT ORDER, where PADDING slots (`>= member_count`) contribute their
+/// `member_set_commitment = keccak([IMCM, member_count, h_0(8), …, h_{MAX_COSIGNERS-1}(8)])` over
+/// `member_count` (single u32 limb right after the domain) and ALL `MAX_COSIGNERS` COSIGNER pubkey
+/// hashes in SLOT ORDER, where PADDING slots (`>= member_count`) contribute their
 /// `Bytes32::default()` (zero) limbs. This preimage is FIXED-LENGTH.
 ///
-/// SECURITY: this commits the active set INJECTIVELY — `member_count` fixes the active/padding
-/// boundary and padding hashes are zero (the close circuit selects zero for `slot >= member_count`
-/// and `ChannelRecord::validate` rejects nonzero padding hashes), so two different active sets
-/// cannot collide. The full channel-close circuit recomputes this commitment in-circuit from the
-/// SAME pubkeys whose SPHINCS+ signatures it verifies, and exposes it as a public input; L1 matches
-/// it against the channel's registered member set, so a prover cannot substitute non-member signing
-/// keys.
+/// SECURITY: this commits the active COSIGNER set INJECTIVELY — `member_count` fixes the
+/// active/padding boundary and padding hashes are zero (the close circuit selects zero for `slot >=
+/// member_count` and `ChannelRecord::validate` rejects nonzero padding hashes), so two different
+/// active sets cannot collide. The full channel-close circuit recomputes this commitment in-circuit
+/// from the SAME pubkeys whose SPHINCS+ signatures it verifies, and exposes it as a public input;
+/// L1 matches it against the channel's registered cosigner set, so a prover cannot substitute
+/// non-member signing keys.
 ///
-/// DESIGN NOTE (D6, forced): the preimage is fixed-length (member_count + all 16 hashes, padding
-/// zeroed) rather than the "active-only" variable-length form, because the in-circuit keccak gadget
-/// takes a build-time-fixed input length and cannot hash a `member_count`-dependent number of
-/// words. The fixed form is cryptographically equivalent (member_count + zeroed padding is
-/// injective on the active set). This native helper MUST agree byte-for-byte with the in-circuit
-/// keccak (`ChannelCloseCircuit::new`) and the L1 mirror — all use the canonical big-endian
-/// `solidity_keccak256` over one u32 word per limb.
+/// SIZING (cosigner cap): the array holds the COSIGNERS only (`MAX_COSIGNERS`), NOT the full balance
+/// slot capacity (`MAX_CHANNEL_MEMBERS`). Delegates hold balances but do NOT co-sign the close, so
+/// they never enter this commitment.
+///
+/// DESIGN NOTE (D6, forced): the preimage is fixed-length (member_count + all MAX_COSIGNERS hashes,
+/// padding zeroed) rather than the "active-only" variable-length form, because the in-circuit
+/// keccak gadget takes a build-time-fixed input length and cannot hash a `member_count`-dependent
+/// number of words. The fixed form is cryptographically equivalent (member_count + zeroed padding
+/// is injective on the active set). This native helper MUST agree byte-for-byte with the in-circuit
+/// keccak (`ChannelCloseCircuit::new`).
+///
+/// PENDING PHASE-2 CONTRACT MAX_COSIGNERS SPLIT: the L1 Solidity mirror
+/// (`ChannelSettlementVerifier.sol`) still pads to `MAX_CHANNEL_MEMBERS`, so this now MISMATCHES the
+/// contract. The coordinated contract-side split is a separate follow-up task; until then the
+/// Rust↔Solidity cross-check vector is `#[ignore]`d.
 pub fn close_member_set_commitment(
-    hashes: &[Bytes32; MAX_CHANNEL_MEMBERS],
+    hashes: &[Bytes32; MAX_COSIGNERS],
     member_count: u8,
 ) -> Bytes32 {
     let count = member_count as usize;
-    let mut words = Vec::with_capacity(2 + MAX_CHANNEL_MEMBERS * 8);
+    let mut words = Vec::with_capacity(2 + MAX_COSIGNERS * 8);
     words.push(CLOSE_MEMBER_SET_DOMAIN);
     words.push(member_count as u32);
     for (i, hash) in hashes.iter().enumerate() {
@@ -1299,8 +1312,15 @@ mod tests {
         .with_computed_digest()
     }
 
-    /// Pad an active prefix of member pubkey hashes to the full MAX_CHANNEL_MEMBERS array.
+    /// Pad an active prefix of member pubkey hashes to the full MAX_CHANNEL_MEMBERS array
+    /// (the balance-slot capacity, used for `ChannelRecord.member_pk_gs`).
     fn pad_hashes(active: &[Bytes32]) -> [Bytes32; MAX_CHANNEL_MEMBERS] {
+        std::array::from_fn(|i| active.get(i).copied().unwrap_or_default())
+    }
+
+    /// Pad an active prefix of COSIGNER pubkey hashes to the MAX_COSIGNERS array (the cosigner cap,
+    /// used for `close_member_set_commitment`).
+    fn pad_cosigner_hashes(active: &[Bytes32]) -> [Bytes32; MAX_COSIGNERS] {
         std::array::from_fn(|i| active.get(i).copied().unwrap_or_default())
     }
 
@@ -1413,7 +1433,7 @@ mod tests {
             Bytes32::from_u32_slice(&words(9)).unwrap(),
             Bytes32::from_u32_slice(&words(17)).unwrap(),
         ];
-        let hashes = pad_hashes(&active);
+        let hashes = pad_cosigner_hashes(&active);
         let committed = close_member_set_commitment(&hashes, 3);
         let expected =
             Bytes32::from_hex("0x12450612c5f67b7ff613b705f6e5efccf4bdd43e647570fcb207076f447236cc")
@@ -1556,7 +1576,7 @@ mod tests {
     /// preimage (not ignored), so two active sets that share a hash prefix cannot collide.
     #[test]
     fn close_member_set_commitment_binds_member_count() {
-        let hashes = pad_hashes(&[
+        let hashes = pad_cosigner_hashes(&[
             pubkey_hash(10),
             pubkey_hash(20),
             pubkey_hash(30),
@@ -1568,8 +1588,11 @@ mod tests {
             c2, c3,
             "member_count must be bound into close_member_set_commitment (count=2 vs count=3)"
         );
-        // And across the full supported range every adjacent count is distinct on the same array.
-        for count in 2u8..MAX_CHANNEL_MEMBERS as u8 {
+        // And across the full supported COSIGNER range every adjacent count is distinct on the same
+        // array. `hashes` above only fills 4 active slots, so counts beyond 4 hash extra zero
+        // slots — still distinct preimages because `member_count` (the limb after the domain)
+        // differs.
+        for count in 2u8..MAX_COSIGNERS as u8 {
             assert_ne!(
                 close_member_set_commitment(&hashes, count),
                 close_member_set_commitment(&hashes, count + 1),

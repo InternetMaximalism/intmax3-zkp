@@ -26,7 +26,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     common::channel_id::{ChannelId, ChannelIdTarget},
-    constants::MAX_CHANNEL_MEMBERS,
+    constants::{MAX_CHANNEL_MEMBERS, MAX_COSIGNERS},
     ethereum_types::{
         address::{Address, AddressTarget},
         bytes32::{Bytes32, Bytes32Target},
@@ -89,12 +89,14 @@ pub struct ChannelRegRecord {
     /// MAX_CHANNEL_MEMBERS`. Committed into the reg-chain keccak preimage IMMEDIATELY AFTER
     /// `member_count` so the member/delegate/padding split is bound to the L1 registration chain.
     pub delegate_count: u32,
+    // MAX_CHANNEL_MEMBERS > 32: std serde only derives arrays up to 32, so use serde-big-array.
+    #[serde(with = "serde_big_array::BigArray")]
     pub members: [MemberRegEntry; MAX_CHANNEL_MEMBERS],
 }
 
 #[derive(Debug, thiserror::Error)]
 pub enum ChannelRegRecordError {
-    #[error("member_count {0} out of range (must be 2..={MAX_CHANNEL_MEMBERS})")]
+    #[error("member_count {0} out of range (must be 2..={MAX_COSIGNERS})")]
     MemberCountOutOfRange(u32),
     #[error(
         "member_count {0} + delegate_count {1} exceeds MAX_CHANNEL_MEMBERS ({MAX_CHANNEL_MEMBERS})"
@@ -116,7 +118,10 @@ impl ChannelRegRecord {
     /// chain binds the exact bytes); this native helper keeps the same checks so test fixtures and
     /// the witness builder cannot silently construct an invalid record.
     pub fn validate(&self) -> Result<(), ChannelRegRecordError> {
-        if self.member_count < 2 || self.member_count as usize > MAX_CHANNEL_MEMBERS {
+        // member_count = COSIGNERS (N-of-N close signers), capped at MAX_COSIGNERS. The total
+        // active balance participants (members + delegates) are separately bounded by
+        // MAX_CHANNEL_MEMBERS below.
+        if self.member_count < 2 || self.member_count as usize > MAX_COSIGNERS {
             return Err(ChannelRegRecordError::MemberCountOutOfRange(
                 self.member_count,
             ));
@@ -277,7 +282,9 @@ mod tests {
     /// Build a deterministic test record with `member_count` active members. The pinned-constant
     /// differential test (Rust ↔ Solidity) uses these exact values.
     fn make_record(member_count: u32) -> ChannelRegRecord {
-        let mut members: [MemberRegEntry; MAX_CHANNEL_MEMBERS] = Default::default();
+        // MAX_CHANNEL_MEMBERS > 32 exceeds the std array `Default` arity; build elementwise.
+        let mut members: [MemberRegEntry; MAX_CHANNEL_MEMBERS] =
+            std::array::from_fn(|_| MemberRegEntry::default());
         for i in 0..(member_count as usize) {
             // pk_g = 0x11..11 * (i+1) pattern, regev = 0x22.., recipient = 0x33..
             let s = (i as u32) + 1;

@@ -266,7 +266,9 @@ impl ChannelMemberKeys {
             active <= MAX_CHANNEL_MEMBERS,
             "active participants {active} exceed MAX_CHANNEL_MEMBERS"
         );
-        let mut members: [MemberRegEntry; MAX_CHANNEL_MEMBERS] = Default::default();
+        // MAX_CHANNEL_MEMBERS > 32 exceeds the std array `Default` arity; build elementwise.
+        let mut members: [MemberRegEntry; MAX_CHANNEL_MEMBERS] =
+            std::array::from_fn(|_| MemberRegEntry::default());
         for (i, entry) in members.iter_mut().enumerate().take(active) {
             let leaf = self.member_tree.get_leaf(i as u64);
             *entry = MemberRegEntry {

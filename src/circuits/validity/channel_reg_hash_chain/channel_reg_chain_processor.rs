@@ -112,8 +112,9 @@ mod tests {
     type C = PoseidonGoldilocksConfig;
 
     fn make_record(channel_id: u32, member_count: u32) -> ChannelRegRecord {
+        // MAX_CHANNEL_MEMBERS > 32 exceeds the std array `Default` arity; build elementwise.
         let mut members: [MemberRegEntry; crate::constants::MAX_CHANNEL_MEMBERS] =
-            Default::default();
+            std::array::from_fn(|_| MemberRegEntry::default());
         for i in 0..(member_count as usize) {
             let s = (i as u32) + 1;
             members[i] = MemberRegEntry {

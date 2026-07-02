@@ -40,7 +40,7 @@ use crate::{
         },
     },
     common::{balance_state::BALANCE_STATE_DOMAIN, channel::close_member_set_commitment},
-    constants::{MAX_CHANNEL_MEMBERS, MEMBER_DISTINCTNESS_TREE_HEIGHT},
+    constants::{MAX_CHANNEL_MEMBERS, MAX_COSIGNERS, MEMBER_DISTINCTNESS_TREE_HEIGHT},
     ethereum_types::{
         bytes32::{BYTES32_LEN, Bytes32, Bytes32Target},
         u32limb_trait::U32LimbTargetTrait,
@@ -97,8 +97,9 @@ pub struct ChannelClosePublicInputsTarget {
     /// (`[IMCM, member_count, h_0..h_15]`, padding zeroed). Computed in-circuit from the signing
     /// keys and matched on L1 against the channel's registered member set.
     pub member_set_commitment: Bytes32Target,
-    /// D6 (pad-to-MAX): number of ACTIVE members, range-checked `< MAX_CHANNEL_MEMBERS+1` and used
-    /// to gate per-slot SPHINCS+ verification and the member_set_commitment select. Single limb.
+    /// Number of ACTIVE cosigners, range-checked `2..=MAX_COSIGNERS` (enforced in-circuit by the
+    /// MAX_COSIGNERS-bit unary decomposition) and used to gate per-slot signature verification and
+    /// the member_set_commitment select. Single limb. Cosigners only — delegates never sign.
     pub member_count: Target,
     /// Delegate account: number of DELEGATE participants. Single limb, appended at the END of the
     /// close PI vector (right after `member_count`). Anchored in-circuit ONLY into the H1
@@ -346,12 +347,12 @@ where
     pub list_proof: ProofWithPublicInputs<F, C, D>,
 }
 
-/// Native mirror of the in-circuit member-set commitment: take each ACTIVE member's `pk_g` (slot
-/// order), pad to MAX_CHANNEL_MEMBERS (padding = `Bytes32::default()`), and keccak `[IMCM,
-/// member_count, pk_g_0..pk_g_{MAX-1}]`. MUST agree byte-for-byte with the in-circuit keccak in
-/// [`ChannelCloseCircuit::new`].
+/// Native mirror of the in-circuit member-set commitment: take each ACTIVE cosigner's `pk_g` (slot
+/// order), pad to MAX_COSIGNERS (padding = `Bytes32::default()`), and keccak `[IMCM,
+/// member_count, pk_g_0..pk_g_{MAX_COSIGNERS-1}]`. MUST agree byte-for-byte with the in-circuit
+/// keccak in [`ChannelCloseCircuit::new`]. Cosigners only — delegates never enter the member set.
 fn member_set_commitment_for_auth(member_auth: &[MemberCloseAuth]) -> Bytes32 {
-    let hashes: [Bytes32; MAX_CHANNEL_MEMBERS] =
+    let hashes: [Bytes32; MAX_COSIGNERS] =
         std::array::from_fn(|i| member_auth.get(i).map(|a| a.pk_g).unwrap_or_default());
     close_member_set_commitment(&hashes, member_auth.len() as u8)
 }
@@ -380,13 +381,13 @@ where
     final_balance_proof: ProofWithPublicInputsTarget<D>,
     /// The recursively verified `ListCircuit` proof over the N member IMCH single-sigs (P2b D3).
     list_proof: ProofWithPublicInputsTarget<D>,
-    /// Per-slot member `pk_g` targets (length MAX_CHANNEL_MEMBERS). Drive both the member_set
+    /// Per-slot COSIGNER `pk_g` targets (length MAX_COSIGNERS). Drive both the member_set
     /// commitment keccak and the C' rebuild; padding slots are forced to the registered-set zero.
     member_pk_g_targets: Vec<Bytes32Target>,
-    /// D6 per-slot activeness flags `active_bits[i] = (i < member_count)`. Set from member_count
-    /// in `fill_witness`.
+    /// Per-slot cosigner activeness flags `active_bits[i] = (i < member_count)` (length
+    /// MAX_COSIGNERS). Set from member_count in `fill_witness`.
     active_bits: Vec<plonky2::iop::target::BoolTarget>,
-    /// A5 pk_g distinctness: per-slot indexed-Merkle insertion proofs (length MAX_CHANNEL_MEMBERS).
+    /// A5 pk_g distinctness: per-slot indexed-Merkle insertion proofs (length MAX_COSIGNERS).
     /// In `fill_witness` the active slots' pk_g are inserted IN SLOT ORDER into a fresh
     /// `IndexedMerkleTree`; padding slots get a dummy (non-inserting) proof. The in-circuit
     /// `conditional_get_new_root` chain asserts each active key's non-membership = distinctness.
@@ -440,14 +441,19 @@ where
             .map(|_| u32_limb(&mut builder))
             .collect();
 
-        // D6: per-slot activeness flags `slot_is_active[i] = (i < member_count)`. Built from a
+        // Per-slot COSIGNER activeness flags `slot_is_active[i] = (i < member_count)`. Built from a
         // unary decomposition: `member_count = Σ_i active_bits[i]` with each bit Boolean and the
         // sequence monotonically non-increasing (1*…1*0*…). This forces `active_bits[i] = (i <
-        // member_count)` for member_count in 0..=MAX_CHANNEL_MEMBERS. These flags gate the
-        // per-slot SPHINCS+ verification and the member_set_commitment select below.
+        // member_count)` for member_count in 0..=MAX_COSIGNERS. These flags gate the per-slot
+        // signature verification and the member_set_commitment select below.
+        //
+        // SECURITY (cosigner/delegate split): sized to MAX_COSIGNERS (16), NOT the balance-slot
+        // capacity MAX_CHANNEL_MEMBERS — only COSIGNERS sign the close, delegates hold balances
+        // without signing. The sum-binding below then also enforces `member_count <= MAX_COSIGNERS`
+        // IN-CIRCUIT (a sum of MAX_COSIGNERS bits cannot exceed MAX_COSIGNERS).
         let mut active_bits: Vec<plonky2::iop::target::BoolTarget> =
-            Vec::with_capacity(MAX_CHANNEL_MEMBERS);
-        for _ in 0..MAX_CHANNEL_MEMBERS {
+            Vec::with_capacity(MAX_COSIGNERS);
+        for _ in 0..MAX_COSIGNERS {
             active_bits.push(builder.add_virtual_bool_target_safe());
         }
         // Monotonicity: active_bits[i+1] => active_bits[i] (no active slot after a padding slot).
@@ -455,7 +461,7 @@ where
         // active_bits[i+1]*(1-active_bits[i]) == 0.
         let one = builder.one();
         let zero_t = builder.zero();
-        for i in 0..MAX_CHANNEL_MEMBERS - 1 {
+        for i in 0..MAX_COSIGNERS - 1 {
             let one_minus_prev = builder.sub(one, active_bits[i].target);
             let prod = builder.mul(active_bits[i + 1].target, one_minus_prev);
             builder.connect(prod, zero_t);
@@ -626,9 +632,10 @@ where
         let mut member_set_inputs: Vec<Target> =
             vec![close_member_set_domain, public_inputs.member_count];
 
-        // Per-slot member pk_g targets (range-checked). Padding slots are not used in C' (select
-        // prev) and are forced to zero in the keccak preimage.
-        let member_pk_g_targets: Vec<Bytes32Target> = (0..MAX_CHANNEL_MEMBERS)
+        // Per-slot COSIGNER pk_g targets (range-checked), length MAX_COSIGNERS — only cosigners
+        // sign the close; delegates never enter the member set. Padding slots are not used in C'
+        // (select prev) and are forced to zero in the keccak preimage.
+        let member_pk_g_targets: Vec<Bytes32Target> = (0..MAX_COSIGNERS)
             .map(|_| Bytes32Target::new(&mut builder, true))
             .collect();
 
@@ -690,7 +697,7 @@ where
         //    PI, not connected anywhere). The per-insert bound assertions are the whole point.
         // INTENTIONALLY SIMPLE: the inserted `value` is a constant 1 (the leaf value is irrelevant
         // to distinctness — only the KEY's non-membership matters).
-        let member_insertion_proofs: Vec<IndexedInsertionProofTarget> = (0..MAX_CHANNEL_MEMBERS)
+        let member_insertion_proofs: Vec<IndexedInsertionProofTarget> = (0..MAX_COSIGNERS)
             .map(|_| {
                 IndexedInsertionProofTarget::new::<F, D>(
                     &mut builder,
@@ -750,9 +757,9 @@ where
     ) -> Result<PartialWitness<F>, ChannelCloseCircuitError> {
         let state = &witness_value.close.final_channel_state;
         let member_count = state.balance_state.member_count as usize;
-        if !(2..=MAX_CHANNEL_MEMBERS).contains(&member_count) {
+        if !(2..=MAX_COSIGNERS).contains(&member_count) {
             return Err(ChannelCloseCircuitError::InvalidMemberAuth(format!(
-                "member_count {member_count} out of range (must be 2..={MAX_CHANNEL_MEMBERS})"
+                "member_count {member_count} out of range (must be 2..={MAX_COSIGNERS} cosigners)"
             )));
         }
         if witness_value.member_auth.len() != member_count {
@@ -1305,7 +1312,7 @@ mod tests {
 
         // The exposed member_set_commitment must equal the NATIVE close_member_set_commitment over
         // the active member pk_g (padding zeroed) for THIS member_count.
-        let hashes: [Bytes32; MAX_CHANNEL_MEMBERS] = std::array::from_fn(|i| {
+        let hashes: [Bytes32; MAX_COSIGNERS] = std::array::from_fn(|i| {
             witness
                 .member_auth
                 .get(i)
@@ -1328,13 +1335,13 @@ mod tests {
         prove_and_verify_close_for(2);
     }
 
-    /// Multi-N happy path (D6 pad-to-MAX): full close for member_count = MAX_CHANNEL_MEMBERS = 16
-    /// (all slots active, NO padding — every gated SPHINCS+ slot is a real active signature).
+    /// Multi-N happy path: full close for member_count = MAX_COSIGNERS = 16 (all COSIGNER slots
+    /// active, NO padding — every gated signature slot is a real active cosigner signature).
     #[cfg_attr(debug_assertions, ignore = "run with --release")]
     #[test]
     fn channel_close_circuit_proves_full_close_statement_n16() {
-        assert_eq!(MAX_CHANNEL_MEMBERS, 16);
-        prove_and_verify_close_for(MAX_CHANNEL_MEMBERS);
+        assert_eq!(MAX_COSIGNERS, 16);
+        prove_and_verify_close_for(MAX_COSIGNERS);
     }
 
     /// Negative — under-signed active set (A8): claim member_count = 3 but supply a `ListCircuit`

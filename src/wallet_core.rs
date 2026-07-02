@@ -4826,7 +4826,7 @@ mod delegate_send_tests {
             };
             let lc: serde_json::Value =
                 serde_json::from_str(&artifacts.lifecycle_json).expect("lifecycle json");
-            let mut close_hashes: [Bytes32; MAX_CHANNEL_MEMBERS] =
+            let mut close_hashes: [Bytes32; crate::constants::MAX_COSIGNERS] =
                 std::array::from_fn(|_| Bytes32::default());
             for (i, m) in cli_members.iter().enumerate() {
                 close_hashes[i] = m.pk_g();
@@ -4915,8 +4915,8 @@ mod delegate_send_tests {
             .map(|slot| MemberKeys::generate(&mut Rng010::seed_from_u64(0xC1_0000 + slot as u64)))
             .collect();
 
-        // What the CLOSE path commits to (close_member_set_commitment over the members' pk_g).
-        let mut close_hashes: [Bytes32; MAX_CHANNEL_MEMBERS] =
+        // What the CLOSE path commits to (close_member_set_commitment over the COSIGNERS' pk_g).
+        let mut close_hashes: [Bytes32; crate::constants::MAX_COSIGNERS] =
             std::array::from_fn(|_| Bytes32::default());
         for (i, m) in cli_members.iter().enumerate() {
             close_hashes[i] = m.pk_g();
@@ -4927,7 +4927,7 @@ mod delegate_send_tests {
         // What the WITHDRAW registration emits: the reg record built from the same members via
         // ChannelMemberKeys::from_member_keys (the exact path build_channel_withdrawal takes).
         let cmk = ChannelMemberKeys::from_member_keys(&cli_members);
-        let mut reg_hashes: [Bytes32; MAX_CHANNEL_MEMBERS] =
+        let mut reg_hashes: [Bytes32; crate::constants::MAX_COSIGNERS] =
             std::array::from_fn(|_| Bytes32::default());
         for i in 0..TEST_ACTIVE_MEMBERS {
             reg_hashes[i] = Bytes32::from(cmk.member_tree.get_leaf(i as u64).pk_g);

@@ -66,6 +66,8 @@ pub struct BalanceState {
     pub delegate_count: u8,
     /// One balance ciphertext per slot, in member slot order. Slots `>= member_count` are
     /// `RegevCiphertext::padding()`.
+    // MAX_CHANNEL_MEMBERS > 32: std serde only derives arrays up to 32, so use serde-big-array.
+    #[serde(with = "serde_big_array::BigArray")]
     pub enc_balances: [RegevCiphertext; MAX_CHANNEL_MEMBERS],
     /// Decryption Stage 1: per-slot Regev public-key Poseidon digests, in member slot order.
     /// Active slots carry `Bytes32::from(RegevPk::poseidon_digest())` (the SAME injective
@@ -78,6 +80,7 @@ pub struct BalanceState {
     /// same all-member signatures that bind the balances. This is the H1-commitment
     /// prerequisite that makes the decryption-core pk binding (MUST-FIX #1) satisfiable
     /// without deployer trust.
+    #[serde(with = "serde_big_array::BigArray")]
     pub regev_pk_digests: [Bytes32; MAX_CHANNEL_MEMBERS],
     /// Hash chain over the settles this state has absorbed (genesis = 0x00…00).
     pub settled_tx_chain: Bytes32,
@@ -103,6 +106,7 @@ pub struct BalanceState {
     /// Homomorphic-add counters per member slot since that member's last fresh re-encryption
     /// (approved deviation D3 from detail2 §C-2; closes the noise/digit-flooding exit-liveness
     /// DoS). Co-signers must refuse adds at `MAX_HOMO_ADDS_BEFORE_REFRESH`. Padding slots are 0.
+    #[serde(with = "serde_big_array::BigArray")]
     pub pending_adds: [u32; MAX_CHANNEL_MEMBERS],
 }
 
