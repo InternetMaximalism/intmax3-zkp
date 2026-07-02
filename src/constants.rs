@@ -65,6 +65,24 @@ pub const MEMBER_TREE_HEIGHT: usize = 10;
 /// members) — see detail2-implementation-notes.md.
 pub const MAX_CHANNEL_MEMBERS: usize = 1024;
 
+/// Height of the per-channel BALANCE-SLOT Poseidon Merkle tree: the tree whose 1024 leaves are
+/// `balance_slot_leaf_hash(regev_pk_digests[i], enc_balances[i].digest(), pending_adds[i])`
+/// (member slot order) and whose ROOT rides in the `BalanceState::h1()` header. This is the
+/// H1-commitment tree (see `tasks/h1-poseidon-root-threat-model.md`) — DISTINCT from
+/// [`MEMBER_TREE_HEIGHT`] (the validity-side member pubkey tree), which merely happens to share
+/// the same height because both are indexed by the slot space `0..MAX_CHANNEL_MEMBERS`.
+///
+/// SECURITY/INVARIANT: `1 << BALANCE_SLOT_TREE_HEIGHT == MAX_CHANNEL_MEMBERS` (const-asserted
+/// below). The claim circuits allocate inclusion proofs of exactly this height and
+/// `split_le(index, height)` bounds the opened slot index to `< MAX_CHANNEL_MEMBERS`; the native
+/// `BalanceState::slot_tree()` populates ALL `MAX_CHANNEL_MEMBERS` leaves, so the root — and
+/// hence H1 — remains a function of the FULL slot array exactly like the retired flat keccak.
+pub const BALANCE_SLOT_TREE_HEIGHT: usize = 10;
+const _: () = assert!(
+    1 << BALANCE_SLOT_TREE_HEIGHT == MAX_CHANNEL_MEMBERS,
+    "BALANCE_SLOT_TREE_HEIGHT must be log2(MAX_CHANNEL_MEMBERS)"
+);
+
 /// Cosigner cap = the N-of-N close SIGNERS. A channel closes / cancels-close via `member_count`
 /// UNANIMOUS SPHINCS+ cosigner signatures; these are the ONLY participants whose `pk_g` feed the
 /// close/cancel SIGNATURE work (member_set_commitment keccak, C' signature fold, A5 pk_g

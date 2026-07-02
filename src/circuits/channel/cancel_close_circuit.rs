@@ -36,12 +36,15 @@ use plonky2_keccak::builder::BuilderKeccak256 as _;
 use thiserror::Error;
 
 use crate::{
-    circuits::channel::cancel_close_pis::{
-        CANCEL_CLOSE_PUBLIC_INPUTS_LEN, CancelClosePublicInputs, CancelCloseWitness,
-        CancelCloseWitnessError,
+    circuits::channel::{
+        cancel_close_pis::{
+            CANCEL_CLOSE_PUBLIC_INPUTS_LEN, CancelClosePublicInputs, CancelCloseWitness,
+            CancelCloseWitnessError,
+        },
+        h1_gadget::recompute_h1,
     },
-    common::{balance_state::BALANCE_STATE_DOMAIN, channel::close_member_set_commitment},
-    constants::{MAX_CHANNEL_MEMBERS, MAX_COSIGNERS, MEMBER_DISTINCTNESS_TREE_HEIGHT},
+    common::channel::close_member_set_commitment,
+    constants::{MAX_COSIGNERS, MEMBER_DISTINCTNESS_TREE_HEIGHT},
     ethereum_types::{
         bytes32::{BYTES32_LEN, Bytes32, Bytes32Target},
         u32limb_trait::U32LimbTargetTrait,
@@ -202,9 +205,11 @@ where
     revived_h2_tag: Bytes32Target,
     revived_settled_tx_chain: Bytes32Target,
     revived_settled_tx_accumulator_root: Bytes32Target,
-    revived_enc_balance_digests: Vec<Bytes32Target>,
-    revived_regev_pk_digests: Vec<Bytes32Target>,
-    revived_pending_adds: Vec<Target>,
+    /// The revived state's balance-slot Poseidon Merkle root (H1 Poseidon-root form). Witnessed
+    /// directly — SOUND because it rides INSIDE the signed revived H1 header (the cosigner
+    /// signatures over the revived IMCH attest it); the cancel statement never opens individual
+    /// slots. Replaces the retired MAX_CHANNEL_MEMBERS-wide slot target vectors.
+    revived_slot_tree_root: PoseidonHashOutTarget,
 
     // ── close CloseIntent auxiliary fields (drive the IMCI recompute) ──
     close_nonce: U64Target,
@@ -275,15 +280,9 @@ where
         let revived_h2_tag = Bytes32Target::new(&mut builder, true);
         let revived_settled_tx_chain = Bytes32Target::new(&mut builder, true);
         let revived_settled_tx_accumulator_root = Bytes32Target::new(&mut builder, true);
-        let revived_enc_balance_digests: Vec<Bytes32Target> = (0..MAX_CHANNEL_MEMBERS)
-            .map(|_| Bytes32Target::new(&mut builder, true))
-            .collect();
-        let revived_regev_pk_digests: Vec<Bytes32Target> = (0..MAX_CHANNEL_MEMBERS)
-            .map(|_| Bytes32Target::new(&mut builder, true))
-            .collect();
-        let revived_pending_adds: Vec<Target> = (0..MAX_CHANNEL_MEMBERS)
-            .map(|_| u32_limb(&mut builder))
-            .collect();
+        // The revived balance-slot tree root (H1 Poseidon-root form): 4 raw Goldilocks elements,
+        // witnessed directly — attested by the cosigner signatures over the revived H1.
+        let revived_slot_tree_root = PoseidonHashOutTarget::new(&mut builder);
 
         // ── close CloseIntent auxiliary targets ──
         let close_nonce = U64Target::new(&mut builder, true);
@@ -326,39 +325,29 @@ where
         // a non-zero value (it is not a close), so we DO NOT force it to zero here (unlike the
         // close circuit). It is hashed into the IMCH as-is.
 
-        let balance_state_domain = builder.constant(F::from_canonical_u32(BALANCE_STATE_DOMAIN));
         let channel_state_domain = builder.constant(F::from_canonical_u32(CHANNEL_STATE_DOMAIN));
         let close_intent_domain = builder.constant(F::from_canonical_u32(CLOSE_INTENT_DOMAIN));
         let close_withdrawal_domain =
             builder.constant(F::from_canonical_u32(CLOSE_WITHDRAWAL_DOMAIN));
 
-        // ── (a) revived H1 recompute (IMBS) — byte-identical to `BalanceState::h1` ──
+        // ── (a) revived H1 recompute (Poseidon-root form; SHARED `h1_gadget`) ──
         //
         // SECURITY: anchors `revived_state_version` and the member/delegate counts as the unique
         // values inside the signed H1. The SAME `revived_state_version` PI target feeds the H1
-        // preimage AND the strict-greater comparison below, so the version proven newer is exactly
-        // the one the members signed.
-        let revived_h1_inputs = [
-            vec![balance_state_domain],
-            public_inputs.channel_id.to_vec(),
-            vec![revived_member_count],
-            vec![revived_delegate_count],
-            revived_regev_pk_digests
-                .iter()
-                .flat_map(Bytes32Target::to_vec)
-                .collect::<Vec<_>>(),
-            revived_enc_balance_digests
-                .iter()
-                .flat_map(Bytes32Target::to_vec)
-                .collect::<Vec<_>>(),
-            revived_settled_tx_chain.to_vec(),
-            revived_settled_tx_accumulator_root.to_vec(),
-            public_inputs.revived_state_version.to_vec(),
-            revived_pending_adds.clone(),
-        ]
-        .concat();
-        let revived_balance_state_h1 =
-            Bytes32Target::from_slice(&builder.keccak256::<C>(&revived_h1_inputs));
+        // header AND the strict-greater comparison below, so the version proven newer is exactly
+        // the one the members signed. The per-slot data is committed by the witnessed
+        // `revived_slot_tree_root` (inside the signed H1; the cancel statement never opens
+        // individual slots) — see `tasks/h1-poseidon-root-threat-model.md` §4/A4.
+        let revived_balance_state_h1 = recompute_h1::<F, D>(
+            &mut builder,
+            public_inputs.channel_id[0],
+            revived_member_count,
+            revived_delegate_count,
+            revived_slot_tree_root,
+            &revived_settled_tx_chain,
+            &revived_settled_tx_accumulator_root,
+            &public_inputs.revived_state_version,
+        );
 
         // ── (b) revived IMCH recompute (`ChannelState::signing_digest`) ──
         let revived_state_digest_inputs = [
@@ -544,9 +533,7 @@ where
             revived_h2_tag,
             revived_settled_tx_chain,
             revived_settled_tx_accumulator_root,
-            revived_enc_balance_digests,
-            revived_regev_pk_digests,
-            revived_pending_adds,
+            revived_slot_tree_root,
             close_nonce,
             close_final_epoch,
             close_final_small_block_number,
@@ -632,32 +619,13 @@ where
             &mut witness,
             revived.balance_state.settled_tx_accumulator_root,
         );
-        // `revived_balance_state_h1` is a derived (keccak-output) target — not a virtual input — so
-        // it is not set here; it is computed by the circuit.
+        // `revived_balance_state_h1` is a derived (Poseidon-header-output) target — not a virtual
+        // input — so it is not set here; it is computed by the circuit.
         let _ = &self.revived_balance_state_h1;
-        for (target, ciphertext) in self
-            .revived_enc_balance_digests
-            .iter()
-            .zip(revived.balance_state.enc_balances.iter())
-        {
-            target.set_witness(&mut witness, ciphertext.digest());
-        }
-        for (target, digest) in self
-            .revived_regev_pk_digests
-            .iter()
-            .zip(revived.balance_state.regev_pk_digests.iter())
-        {
-            target.set_witness(&mut witness, *digest);
-        }
-        for (target, &adds) in self
-            .revived_pending_adds
-            .iter()
-            .zip(revived.balance_state.pending_adds.iter())
-        {
-            witness
-                .set_target(*target, F::from_canonical_u32(adds))
-                .unwrap();
-        }
+        // H1 Poseidon-root form: the slot data enters the statement ONLY through the slot-tree
+        // root inside the signed H1 header (recomputed natively here, exactly as `h1()` does).
+        self.revived_slot_tree_root
+            .set_witness(&mut witness, revived.balance_state.slot_tree_root());
 
         // close CloseIntent fields.
         self.close_nonce

@@ -19,13 +19,16 @@
 //!    residual: a claimant can no longer fabricate a delta that was never in a signed inter-channel
 //!    tx the closed channel received.
 //! 3. STAGE 3 RECEIVER-PK BIND (threat-model #3). The circuit recomputes the closed channel's
-//!    `h1()` from the witnessed final-state slot data (SHARED `h1_gadget`, byte-identical to close
-//!    + native), connects it to the `final_balance_state_h1` PI, and ALSO connects the
-//!    accumulator-root inside that H1 to the dedicated `final_settled_tx_accumulator_root` PI (so
+//!    `h1()` Poseidon-root header from the witnessed scalars + slot-tree root (SHARED
+//!    `h1_gadget::recompute_h1`, element-identical to close + native; see
+//!    `tasks/h1-poseidon-root-threat-model.md`), connects it to the `final_balance_state_h1` PI,
+//!    and ALSO feeds the dedicated `final_settled_tx_accumulator_root` PI into that header (so
 //!    the inclusion root equals the one in the signed H1). It then binds the witnessed receiver
-//!    Regev `(a, b)` to the H1-committed `regev_pk_digests[receiver_member_index]` via the SAME
-//!    one-hot select the withdrawal claim uses (poseidon_digest(a,b) == selected digest, slot
-//!    ACTIVE). This makes the decryption NON-vacuous.
+//!    Regev `(a, b)` to the H1-committed slot leaf at `receiver_member_index` via a height-
+//!    `BALANCE_SLOT_TREE_HEIGHT` Merkle inclusion of
+//!    `balance_slot_leaf_hash(poseidon_digest(a,b), slot enc digest, slot pending_adds)` against
+//!    the slot-tree root (slot ACTIVE) — replacing the retired 1024-slot one-hot select. This
+//!    makes the decryption NON-vacuous.
 //! 4. HAZARD #8: `shared_native_nullifier = keccak([POST_CLOSE_NULLIFIER_DOMAIN] ++
 //!    close_intent_digest ++ incoming_tx_hash ++ receiver_pk_g)` is derived IN-CIRCUIT and
 //!    connected to the PI (the L1 manager recomputes the SAME value as the
@@ -58,11 +61,11 @@ use crate::{
             decryption_core, fill_decryption_core, regev_ct_digest_gadget,
             regev_pk_poseidon_digest_gadget,
         },
-        h1_gadget::recompute_h1,
+        h1_gadget::{balance_slot_leaf_hash_circuit, recompute_h1},
         post_close_claim_pis::{POST_CLOSE_CLAIM_PUBLIC_INPUTS_LEN, PostCloseClaimPublicInputs},
     },
     common::balance_state::{TX_LEAF_DOMAIN, settled_tx_chain_push_circuit},
-    constants::MAX_CHANNEL_MEMBERS,
+    constants::{BALANCE_SLOT_TREE_HEIGHT, MAX_CHANNEL_MEMBERS},
     ethereum_types::{
         address::AddressTarget,
         bytes32::{BYTES32_LEN, Bytes32, Bytes32Target},
@@ -70,7 +73,10 @@ use crate::{
         u64::{U64, U64Target},
     },
     regev::REGEV_N,
-    utils::trees::incremental_merkle_tree::{IncrementalMerkleProof, IncrementalMerkleProofTarget},
+    utils::{
+        poseidon_hash_out::{PoseidonHashOut, PoseidonHashOutTarget},
+        trees::incremental_merkle_tree::{IncrementalMerkleProof, IncrementalMerkleProofTarget},
+    },
     wallet_core::SETTLED_TX_ACCUMULATOR_HEIGHT,
 };
 
@@ -194,16 +200,24 @@ pub struct PostCloseClaimFullWitness {
     pub incoming_tx_inclusion: IncrementalMerkleProof<Bytes32>,
     /// The leaf index of `tx_hash` in the accumulator.
     pub incoming_tx_index: u64,
-    // --- Stage 3 H1 recompute (closed channel final balance state slot data). ---
-    pub enc_balance_digests: [Bytes32; MAX_CHANNEL_MEMBERS],
-    pub regev_pk_digests: [Bytes32; MAX_CHANNEL_MEMBERS],
+    // --- Stage 3 H1 recompute (closed channel final balance state; Poseidon-root form). ---
+    /// The closed channel's balance-slot tree root (`BalanceState::slot_tree_root()`, committed
+    /// inside the signed H1 header).
+    pub slot_tree_root: PoseidonHashOut,
+    /// Merkle inclusion proof of the receiver's slot leaf at `receiver_member_index` in the slot
+    /// tree (`BalanceState::slot_tree().prove(receiver_member_index)`).
+    pub slot_inclusion: IncrementalMerkleProof<PoseidonHashOut>,
+    /// The receiver slot's balance ciphertext digest `enc_balances[receiver_member_index]
+    /// .digest()` (leaf field; free witness, bound by the leaf hash + root + signed H1).
+    pub slot_enc_balance_digest: Bytes32,
+    /// The receiver slot's `pending_adds[receiver_member_index]` (leaf field).
+    pub slot_pending_adds: u32,
     pub settled_tx_chain: Bytes32,
     pub state_version: u64,
-    pub pending_adds: [u32; MAX_CHANNEL_MEMBERS],
     pub member_count: u8,
     pub delegate_count: u8,
-    /// Receiver slot index in the closed channel (`< member_count + delegate_count`) — the one-hot
-    /// pk-digest select index.
+    /// Receiver slot index in the closed channel (`< member_count + delegate_count`) — the Merkle
+    /// position of the opened slot leaf.
     pub receiver_member_index: usize,
     // --- Decryption Stage 2: receiver Regev pk (a, b) + the delta ct (c1, c2) + secret s. ---
     pub regev_a: Vec<u32>,
@@ -229,15 +243,21 @@ where
     // Stage 3 inclusion proof handles.
     incoming_tx_inclusion: IncrementalMerkleProofTarget<Bytes32Target>,
     incoming_tx_index: Target,
-    // Stage 3 H1 recompute handles.
+    // Stage 3 H1 recompute handles (Poseidon-root form).
     member_count: Target,
     delegate_count: Target,
-    enc_balance_digests: Vec<Bytes32Target>,
-    regev_pk_digests: Vec<Bytes32Target>,
+    /// The H1-committed balance-slot tree root (4 raw Goldilocks elements).
+    slot_tree_root: PoseidonHashOutTarget,
     settled_tx_chain: Bytes32Target,
     state_version: U64Target,
-    pending_adds: Vec<Target>,
-    index_bits: Vec<BoolTarget>,
+    /// Receiver slot index (Merkle position; bounded `< MAX_CHANNEL_MEMBERS` by the inclusion
+    /// verify's `split_le`).
+    receiver_member_index: Target,
+    /// Receiver slot leaf fields (enc digest is a free witness; pk digest is the gadget output).
+    slot_enc_balance_digest: Bytes32Target,
+    slot_pending_adds: Target,
+    /// Height-`BALANCE_SLOT_TREE_HEIGHT` inclusion proof of the receiver's slot leaf.
+    slot_inclusion: IncrementalMerkleProofTarget<PoseidonHashOutTarget>,
     // Decryption Stage 2 handles.
     regev_a: Vec<Target>,
     regev_b: Vec<Target>,
@@ -328,74 +348,52 @@ where
             accumulator_root_hash,
         );
 
-        // ── Stage 3: H1 recompute (SHARED gadget) + receiver-pk one-hot bind. ──
+        // ── Stage 3: H1 header recompute (SHARED gadget; Poseidon-root form) + receiver-pk
+        // slot-leaf bind. ──
         let member_count = u32_limb(&mut builder);
         let delegate_count = u32_limb(&mut builder);
-        let enc_balance_digests: Vec<Bytes32Target> = (0..MAX_CHANNEL_MEMBERS)
-            .map(|_| Bytes32Target::new(&mut builder, true))
-            .collect();
-        let regev_pk_digests: Vec<Bytes32Target> = (0..MAX_CHANNEL_MEMBERS)
-            .map(|_| Bytes32Target::new(&mut builder, true))
-            .collect();
+        // The H1-committed balance-slot tree root (4 raw Goldilocks elements).
+        let slot_tree_root = PoseidonHashOutTarget::new(&mut builder);
         let settled_tx_chain = Bytes32Target::new(&mut builder, true);
         let state_version = U64Target::new(&mut builder, true);
-        let pending_adds: Vec<Target> = (0..MAX_CHANNEL_MEMBERS)
-            .map(|_| u32_limb(&mut builder))
-            .collect();
+        // Receiver slot index + the witnessed leaf fields (the pk digest field is the gadget
+        // output below; the enc digest and pending_adds are free witnesses bound by the leaf).
+        let receiver_member_index = builder.add_virtual_target();
+        let slot_enc_balance_digest = Bytes32Target::new(&mut builder, true);
+        let slot_pending_adds = u32_limb(&mut builder);
 
-        let recomputed_h1 = recompute_h1::<F, C, D>(
+        let recomputed_h1 = recompute_h1::<F, D>(
             &mut builder,
             public_inputs.receiver_channel_id[0],
             member_count,
             delegate_count,
-            &regev_pk_digests,
-            &enc_balance_digests,
+            slot_tree_root,
             &settled_tx_chain,
             &public_inputs.final_settled_tx_accumulator_root,
             &state_version,
-            &pending_adds,
         );
-        // H1 == the final_balance_state_h1 PI (so the slot data is pinned to the signed final
-        // state, AND the accumulator root fed to recompute_h1 == the dedicated
+        // H1 == the final_balance_state_h1 PI (so the slot-tree root is pinned to the signed
+        // final state, AND the accumulator root fed to recompute_h1 == the dedicated
         // inclusion-root PI: the inclusion proof is verified against the SAME root that
         // rides in the signed H1).
         recomputed_h1.connect(&mut builder, public_inputs.final_balance_state_h1);
 
-        // One-hot index select over the 16 slots (exactly-one-hot, active-region check) — the SAME
-        // construction the withdrawal claim uses, here selecting the receiver's slot pk digest.
-        let mut index_bits: Vec<BoolTarget> = Vec::with_capacity(MAX_CHANNEL_MEMBERS);
-        for _ in 0..MAX_CHANNEL_MEMBERS {
-            index_bits.push(builder.add_virtual_bool_target_safe());
-        }
-        let mut onehot_sum = builder.zero();
-        for bit in &index_bits {
-            onehot_sum = builder.add(onehot_sum, bit.target);
-        }
+        // Active-region check: receiver_member_index < member_count + delegate_count (both header
+        // scalars, so the active/padding boundary is fixed under the signed final state). The
+        // index itself is bounded `< MAX_CHANNEL_MEMBERS` by the inclusion verify's `split_le`.
         let one = builder.one();
-        builder.connect(onehot_sum, one);
-
         let active = builder.add(member_count, delegate_count);
         {
             let max_active = builder.constant(F::from_canonical_usize(MAX_CHANNEL_MEMBERS));
-            builder.range_check(active, 8);
+            // 11 bits: MAX_CHANNEL_MEMBERS = 1024 (the former 8-bit check was a stale MAX = 16
+            // leftover — completeness, not soundness).
+            builder.range_check(active, 11);
             let max_plus_one = builder.add_const(max_active, F::ONE);
             let active_le_max = less_than_u32(&mut builder, active, max_plus_one);
             builder.assert_one(active_le_max.target);
         }
-
-        let zero_b32 = Bytes32Target::constant(&mut builder, Bytes32::default());
-        let mut selected_regev_pk_digest = zero_b32;
-        let mut selected_active = builder.zero();
-        for (i, bit) in index_bits.iter().enumerate() {
-            let masked_pk = regev_pk_digests[i].mul_bool(&mut builder, *bit);
-            selected_regev_pk_digest =
-                add_bytes32(&mut builder, &selected_regev_pk_digest, &masked_pk);
-            let i_const = builder.constant(F::from_canonical_usize(i));
-            let is_active_i = less_than_u32(&mut builder, i_const, active);
-            let contrib = builder.mul(bit.target, is_active_i.target);
-            selected_active = builder.add(selected_active, contrib);
-        }
-        builder.connect(selected_active, one);
+        let is_active = less_than_u32(&mut builder, receiver_member_index, active);
+        builder.connect(is_active.target, one);
 
         // ── Decryption Stage 2 (closes post-close over-claim): bind amount to the delta plaintext.
         let regev_a: Vec<Target> = (0..REGEV_N).map(|_| builder.add_virtual_target()).collect();
@@ -403,9 +401,26 @@ where
         let delta_c1: Vec<Target> = (0..REGEV_N).map(|_| builder.add_virtual_target()).collect();
         let delta_c2: Vec<Target> = (0..REGEV_N).map(|_| builder.add_virtual_target()).collect();
 
-        // (pk binding, MUST-FIX #1) poseidon_digest(a, b) == one-hot-selected H1 regev_pk_digest.
+        // (pk binding, MUST-FIX #1) poseidon_digest(a, b) is a FIELD of the receiver's slot leaf,
+        // which MUST be included at `receiver_member_index` in the H1-committed slot-tree root —
+        // replacing the retired 1024-slot one-hot select with a height-10 Merkle inclusion.
         let pk_digest = regev_pk_poseidon_digest_gadget::<F, D>(&mut builder, &regev_a, &regev_b);
-        pk_digest.connect(&mut builder, selected_regev_pk_digest);
+        let slot_leaf = balance_slot_leaf_hash_circuit::<F, D>(
+            &mut builder,
+            &pk_digest,
+            &slot_enc_balance_digest,
+            slot_pending_adds,
+        );
+        let slot_inclusion = IncrementalMerkleProofTarget::<PoseidonHashOutTarget>::new(
+            &mut builder,
+            BALANCE_SLOT_TREE_HEIGHT,
+        );
+        slot_inclusion.verify::<F, C, D>(
+            &mut builder,
+            &slot_leaf,
+            receiver_member_index,
+            slot_tree_root,
+        );
 
         // (ct binding) IMRC_digest(c1, c2) == the signed receiver-delta ct digest; AND the receiver
         // delta digest is the tx_leaf receiver wing input — so the SAME ciphertext is anchored in
@@ -454,12 +469,13 @@ where
             incoming_tx_index,
             member_count,
             delegate_count,
-            enc_balance_digests,
-            regev_pk_digests,
+            slot_tree_root,
             settled_tx_chain,
             state_version,
-            pending_adds,
-            index_bits,
+            receiver_member_index,
+            slot_enc_balance_digest,
+            slot_pending_adds,
+            slot_inclusion,
             regev_a,
             regev_b,
             delta_c1,
@@ -520,38 +536,30 @@ where
                 F::from_canonical_u8(witness_value.delegate_count),
             )
             .unwrap();
-        for (target, digest) in self
-            .enc_balance_digests
-            .iter()
-            .zip(witness_value.enc_balance_digests.iter())
-        {
-            target.set_witness(&mut witness, *digest);
-        }
-        for (target, digest) in self
-            .regev_pk_digests
-            .iter()
-            .zip(witness_value.regev_pk_digests.iter())
-        {
-            target.set_witness(&mut witness, *digest);
-        }
+        // H1 Poseidon-root form: the slot tree root + the receiver slot's inclusion proof and
+        // witnessed leaf fields (the pk-digest leaf field is derived in-circuit).
+        self.slot_tree_root
+            .set_witness(&mut witness, witness_value.slot_tree_root);
+        self.slot_inclusion
+            .set_witness(&mut witness, &witness_value.slot_inclusion);
+        witness
+            .set_target(
+                self.receiver_member_index,
+                F::from_canonical_usize(witness_value.receiver_member_index),
+            )
+            .unwrap();
+        self.slot_enc_balance_digest
+            .set_witness(&mut witness, witness_value.slot_enc_balance_digest);
+        witness
+            .set_target(
+                self.slot_pending_adds,
+                F::from_canonical_u32(witness_value.slot_pending_adds),
+            )
+            .unwrap();
         self.settled_tx_chain
             .set_witness(&mut witness, witness_value.settled_tx_chain);
         self.state_version
             .set_witness(&mut witness, U64::from(witness_value.state_version));
-        for (target, &adds) in self
-            .pending_adds
-            .iter()
-            .zip(witness_value.pending_adds.iter())
-        {
-            witness
-                .set_target(*target, F::from_canonical_u32(adds))
-                .unwrap();
-        }
-        for (i, bit) in self.index_bits.iter().enumerate() {
-            witness
-                .set_bool_target(*bit, i == witness_value.receiver_member_index)
-                .unwrap();
-        }
 
         // Decryption Stage 2.
         let set_poly = |witness: &mut PartialWitness<F>, targets: &[Target], vals: &[u32]| {
@@ -603,24 +611,9 @@ where
     }
 }
 
-/// Limb-wise add of two `Bytes32Target`s (one-hot digest accumulation; see the withdrawal claim's
-/// twin for the no-overflow argument: the EXACTLY-one-hot `index_bits` masks all-but-one term).
-fn add_bytes32<F: RichField + Extendable<D>, const D: usize>(
-    builder: &mut CircuitBuilder<F, D>,
-    a: &Bytes32Target,
-    b: &Bytes32Target,
-) -> Bytes32Target {
-    let limbs: Vec<Target> = a
-        .to_vec()
-        .iter()
-        .zip(b.to_vec().iter())
-        .map(|(x, y)| builder.add(*x, *y))
-        .collect();
-    Bytes32Target::from_slice(&limbs)
-}
-
-/// Strict less-than on two SMALL u32-range targets (mirror of the withdrawal claim's helper). Both
-/// operands are `<= MAX_CHANNEL_MEMBERS` here. Returns `a < b`.
+/// Strict less-than on two SMALL u32-range targets (mirror of the withdrawal claim's helper).
+/// Here `receiver_member_index < MAX_CHANNEL_MEMBERS` (inclusion-verify `split_le`) and `active
+/// <= MAX_CHANNEL_MEMBERS` (11-bit range check). Returns `a < b`.
 fn less_than_u32<F: RichField + Extendable<D>, const D: usize>(
     builder: &mut CircuitBuilder<F, D>,
     a: Target,
@@ -664,7 +657,6 @@ pub mod test_fixture {
                 SmallBlockRootMessage, TransitionProofRole,
             },
         },
-        constants::MAX_CHANNEL_MEMBERS,
         ethereum_types::{
             address::Address, bytes32::Bytes32, u32limb_trait::U32LimbTrait, u256::U256,
         },
@@ -856,8 +848,9 @@ pub mod test_fixture {
         let public_inputs: PostCloseClaimPublicInputs =
             native.to_public_inputs(RegevSecurityLevel::Test).unwrap();
 
-        let enc_balance_digests: [Bytes32; MAX_CHANNEL_MEMBERS] =
-            std::array::from_fn(|i| final_balance_state.enc_balances[i].digest());
+        // H1 Poseidon-root form: the slot tree + the receiver's (slot 0) inclusion proof.
+        let slot_tree = final_balance_state.slot_tree();
+        let receiver_member_index = 0usize;
 
         PostCloseClaimFullWitness {
             public_inputs,
@@ -868,14 +861,16 @@ pub mod test_fixture {
             source_channel_id: source_channel_id.as_u64() as u32,
             incoming_tx_inclusion,
             incoming_tx_index,
-            enc_balance_digests,
-            regev_pk_digests: final_balance_state.regev_pk_digests,
+            slot_tree_root: slot_tree.get_root(),
+            slot_inclusion: slot_tree.prove(receiver_member_index as u64),
+            slot_enc_balance_digest: final_balance_state.enc_balances[receiver_member_index]
+                .digest(),
+            slot_pending_adds: final_balance_state.pending_adds[receiver_member_index],
             settled_tx_chain: final_balance_state.settled_tx_chain,
             state_version: final_balance_state.state_version,
-            pending_adds: final_balance_state.pending_adds,
             member_count: final_balance_state.member_count,
             delegate_count: final_balance_state.delegate_count,
-            receiver_member_index: 0,
+            receiver_member_index,
             regev_a: receiver_pk.a.clone(),
             regev_b: receiver_pk.b.clone(),
             delta_c1: delta_ct.c1.clone(),
@@ -891,7 +886,7 @@ mod tests {
 
     use plonky2::field::types::PrimeField64;
 
-    use super::{test_fixture::*, *};
+    use super::test_fixture::*;
     use crate::circuits::channel::post_close_claim_pis::POST_CLOSE_CLAIM_PUBLIC_INPUTS_LEN;
 
     /// Happy path: a real post-close-claim binding proves and the exposed limbs equal the

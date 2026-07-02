@@ -36,13 +36,16 @@ use thiserror::Error;
 use crate::{
     circuits::{
         balance::balance_pis::{BALANCE_PUBLIC_INPUTS_LEN, BalancePublicInputsTarget},
-        channel::close_pis::{
-            CHANNEL_CLOSE_PUBLIC_INPUTS_LEN, ChannelClosePublicInputs, ChannelCloseWitness,
-            ChannelCloseWitnessError,
+        channel::{
+            close_pis::{
+                CHANNEL_CLOSE_PUBLIC_INPUTS_LEN, ChannelClosePublicInputs, ChannelCloseWitness,
+                ChannelCloseWitnessError,
+            },
+            h1_gadget::recompute_h1,
         },
     },
-    common::{balance_state::BALANCE_STATE_DOMAIN, channel::close_member_set_commitment},
-    constants::{MAX_CHANNEL_MEMBERS, MAX_COSIGNERS, MEMBER_DISTINCTNESS_TREE_HEIGHT},
+    common::channel::close_member_set_commitment,
+    constants::{MAX_COSIGNERS, MEMBER_DISTINCTNESS_TREE_HEIGHT},
     ethereum_types::{
         bytes32::{BYTES32_LEN, Bytes32, Bytes32Target},
         u32limb_trait::U32LimbTargetTrait,
@@ -376,14 +379,11 @@ where
     final_state_unallocated_confirmed_incoming: U256Target,
     final_state_prev_digest: Bytes32Target,
     final_state_h2_tag: Bytes32Target,
-    /// Per-member Regev balance ciphertext digests `d_i = enc_balances[i].digest()` — the H1
-    /// preimage body (detail2 §C-2).
-    enc_balance_digests: Vec<Bytes32Target>,
-    /// Decryption Stage 1: per-slot Regev pk Poseidon digests (H1 preimage, between delegate_count
-    /// and the ciphertext digests).
-    regev_pk_digests: Vec<Bytes32Target>,
-    /// Per-member homomorphic-add counters (D3), 32-bit range-checked.
-    pending_adds: Vec<Target>,
+    /// The balance-slot Poseidon Merkle root committed inside H1 (Poseidon-root form). Witnessed
+    /// directly — SOUND because it rides INSIDE the signed H1 header (the cosigner signatures
+    /// over IMCH attest it); the close statement never opens individual slots. Replaces the
+    /// retired MAX_CHANNEL_MEMBERS-wide enc-digest/pk-digest/pending-adds target vectors.
+    slot_tree_root: PoseidonHashOutTarget,
     /// The recursively verified final balance proof.
     final_balance_proof: ProofWithPublicInputsTarget<D>,
     /// The recursively verified level-`AGG_LEVELS` aggregated sign-zkp proof over the N member
@@ -437,27 +437,14 @@ where
         let mut builder =
             CircuitBuilder::<F, D>::new(CircuitConfig::standard_recursion_zk_config());
         let public_inputs = ChannelClosePublicInputsTarget::new(&mut builder);
-        let u32_limb = |builder: &mut CircuitBuilder<F, D>| {
-            let t = builder.add_virtual_target();
-            builder.range_check(t, 32);
-            t
-        };
         let final_state_close_freeze_nonce = U64Target::new(&mut builder, true);
         let final_state_shared_native_nullifier_root = Bytes32Target::new(&mut builder, true);
         let final_state_unallocated_confirmed_incoming = U256Target::new(&mut builder, true);
         let final_state_prev_digest = Bytes32Target::new(&mut builder, true);
         let final_state_h2_tag = Bytes32Target::new(&mut builder, true);
-        let enc_balance_digests: Vec<Bytes32Target> = (0..MAX_CHANNEL_MEMBERS)
-            .map(|_| Bytes32Target::new(&mut builder, true))
-            .collect();
-        // Decryption Stage 1: per-slot Regev pk digests (range-checked like enc_balance_digests),
-        // folded into H1 IMMEDIATELY AFTER delegate_count (byte-identical to native h1).
-        let regev_pk_digests: Vec<Bytes32Target> = (0..MAX_CHANNEL_MEMBERS)
-            .map(|_| Bytes32Target::new(&mut builder, true))
-            .collect();
-        let pending_adds: Vec<Target> = (0..MAX_CHANNEL_MEMBERS)
-            .map(|_| u32_limb(&mut builder))
-            .collect();
+        // The balance-slot tree root (H1 Poseidon-root form): 4 raw Goldilocks elements,
+        // witnessed directly — attested by the cosigner signatures over H1 (see the field doc).
+        let slot_tree_root = PoseidonHashOutTarget::new(&mut builder);
 
         // Per-slot COSIGNER activeness flags `slot_is_active[i] = (i < member_count)`. Built from a
         // unary decomposition: `member_count = Σ_i active_bits[i]` with each bit Boolean and the
@@ -500,47 +487,29 @@ where
             builder.connect(limb, zero);
         }
 
-        let balance_state_domain = builder.constant(F::from_canonical_u32(BALANCE_STATE_DOMAIN));
         let channel_state_domain = builder.constant(F::from_canonical_u32(CHANNEL_STATE_DOMAIN));
         let close_tx_domain = builder.constant(F::from_canonical_u32(CLOSE_TX_DOMAIN));
         let close_intent_domain = builder.constant(F::from_canonical_u32(CLOSE_INTENT_DOMAIN));
 
-        // ── (b) H1 in-circuit recompute (IMBS, detail2 §C-2 + D3) ──────────
+        // ── (b) H1 in-circuit recompute (Poseidon-root form; SHARED `h1_gadget`) ──────────
         //
-        // SECURITY: this anchors `final_settled_tx_chain`, `final_state_version`, `member_count`
-        // AND `delegate_count` as the unique values inside the signed H1 — the same PI
-        // targets feed the H1 preimage, the IMCH/IMCI tails AND the balance-proof equality
-        // below, so no two of those bindings can diverge. Preimage limb order matches
-        // `BalanceState::h1()` exactly (pad-to-MAX D6 + delegate account + decryption Stage 1 +
-        // Stage 3): [IMBS, channel_id, member_count, delegate_count, p_0..p_{MAX-1},
-        //  d_0..d_{MAX-1}, settled_tx_chain, settled_tx_accumulator_root, split_u64(state_version),
-        //  pending_adds[0..MAX]]. `delegate_count` is the single u32 limb IMMEDIATELY AFTER
-        // `member_count`; the Stage-3 `settled_tx_accumulator_root` is the 8 u32 limbs IMMEDIATELY
-        // AFTER `settled_tx_chain` — byte-identical to the off-chain `BalanceState::h1`.
-        let h1_inputs = [
-            vec![balance_state_domain],
-            public_inputs.channel_id.to_vec(),
-            vec![public_inputs.member_count],
-            vec![public_inputs.delegate_count],
-            // Decryption Stage 1: Regev pk digests IMMEDIATELY AFTER delegate_count, BEFORE the
-            // ciphertext digests (byte-identical to native `BalanceState::h1`).
-            regev_pk_digests
-                .iter()
-                .flat_map(Bytes32Target::to_vec)
-                .collect::<Vec<_>>(),
-            enc_balance_digests
-                .iter()
-                .flat_map(Bytes32Target::to_vec)
-                .collect::<Vec<_>>(),
-            public_inputs.final_settled_tx_chain.to_vec(),
-            // Stage 3: the accumulator root sits IMMEDIATELY AFTER settled_tx_chain and BEFORE
-            // state_version, byte-identical to native `BalanceState::h1` and `h1_gadget`.
-            public_inputs.final_settled_tx_accumulator_root.to_vec(),
-            public_inputs.final_state_version.to_vec(),
-            pending_adds.clone(),
-        ]
-        .concat();
-        let recomputed_h1 = Bytes32Target::from_slice(&builder.keccak256::<C>(&h1_inputs));
+        // SECURITY: this anchors `final_settled_tx_chain`, `final_settled_tx_accumulator_root`,
+        // `final_state_version`, `member_count` AND `delegate_count` as the unique values inside
+        // the signed H1 — the same PI targets feed the O(1) H1 header, the IMCH/IMCI tails AND
+        // the balance-proof equality below, so no two of those bindings can diverge. The
+        // per-slot data is committed by the witnessed `slot_tree_root` (inside the signed H1;
+        // the close statement never opens individual slots) — see
+        // `tasks/h1-poseidon-root-threat-model.md` §4/A4 and the shared gadget doc.
+        let recomputed_h1 = recompute_h1::<F, D>(
+            &mut builder,
+            public_inputs.channel_id[0],
+            public_inputs.member_count,
+            public_inputs.delegate_count,
+            slot_tree_root,
+            &public_inputs.final_settled_tx_chain,
+            &public_inputs.final_settled_tx_accumulator_root,
+            &public_inputs.final_state_version,
+        );
         recomputed_h1.connect(&mut builder, public_inputs.final_balance_state_h1);
 
         // ── (c) IMCH recompute (`ChannelState::signing_digest()`) ───────────
@@ -763,9 +732,7 @@ where
             final_state_unallocated_confirmed_incoming,
             final_state_prev_digest,
             final_state_h2_tag,
-            enc_balance_digests,
-            regev_pk_digests,
-            pending_adds,
+            slot_tree_root,
             final_balance_proof,
             agg_proof,
             active_bits,
@@ -815,30 +782,10 @@ where
             .set_witness(&mut witness, state.prev_digest);
         self.final_state_h2_tag
             .set_witness(&mut witness, state.h2_tag);
-        for (target, ciphertext) in self
-            .enc_balance_digests
-            .iter()
-            .zip(state.balance_state.enc_balances.iter())
-        {
-            target.set_witness(&mut witness, ciphertext.digest());
-        }
-        // Decryption Stage 1: fill the per-slot Regev pk digests (same order as the H1 preimage).
-        for (target, digest) in self
-            .regev_pk_digests
-            .iter()
-            .zip(state.balance_state.regev_pk_digests.iter())
-        {
-            target.set_witness(&mut witness, *digest);
-        }
-        for (target, &adds) in self
-            .pending_adds
-            .iter()
-            .zip(state.balance_state.pending_adds.iter())
-        {
-            witness
-                .set_target(*target, F::from_canonical_u32(adds))
-                .unwrap();
-        }
+        // H1 Poseidon-root form: the slot data enters the statement ONLY through the slot-tree
+        // root inside the signed H1 header (recomputed natively here, exactly as `h1()` does).
+        self.slot_tree_root
+            .set_witness(&mut witness, state.balance_state.slot_tree_root());
 
         witness
             .set_proof_with_pis_target(

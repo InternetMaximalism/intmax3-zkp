@@ -1,94 +1,117 @@
-//! Shared in-circuit `BalanceState::h1()` recompute (IMBS keccak), extracted so the channel-close
-//! circuit (`close_circuit.rs`) and the withdrawal-claim circuit (`withdrawal_claim_circuit.rs`)
-//! share ONE definition of the H1 preimage — no drift.
+//! Shared in-circuit `BalanceState::h1()` recompute (Poseidon-root form), extracted so the
+//! channel-close, cancel-close, withdrawal-claim and post-close-claim circuits share ONE
+//! definition of the H1 header — no drift. See `tasks/h1-poseidon-root-threat-model.md`.
 //!
-//! SECURITY: this MUST stay byte-identical to the native `common::balance_state::BalanceState::h1`
-//! and to the L1 mirror. The preimage limb order (pad-to-MAX D6 + delegate account + decryption
-//! Stage 1) is:
+//! SECURITY: this MUST stay element-identical to the native
+//! `common::balance_state::BalanceState::h1`. The header is the FIXED-width (26-element) Poseidon
+//! preimage
+//!
 //!   `[BALANCE_STATE_DOMAIN, channel_id, member_count, delegate_count,
-//!     p_0 .. p_{MAX-1}, d_0 .. d_{MAX-1}, settled_tx_chain, settled_tx_accumulator_root,
-//!     split_u64(state_version), pending_adds[0..MAX]]`
-//! where `p_i = regev_pk_digests[i]` (8 u32 limbs) and `d_i = enc_balances[i].digest()`. The
-//! Stage-3 `settled_tx_accumulator_root` (8 u32 limbs) sits IMMEDIATELY AFTER `settled_tx_chain`
-//! and BEFORE `split_u64(state_version)`.
-//! `delegate_count` is the single u32 limb IMMEDIATELY AFTER `member_count`; the Regev pk digests
-//! `p_i` come IMMEDIATELY AFTER `delegate_count` and BEFORE the ciphertext digests `d_i`
-//! (decryption Stage 1). The keccak gadget does NOT range-check its inputs, so every limb fed here
-//! must be 32-bit range-checked by the caller (the PI allocators already do this).
+//!     slot_tree_root (4 Goldilocks elements), settled_tx_chain (8 u32 limbs),
+//!     settled_tx_accumulator_root (8 u32 limbs), state_version (hi, lo u32 limbs)]`
+//!
+//! and the exposed H1 is the canonical `PoseidonHashOut → Bytes32` encoding of its hash
+//! (`Bytes32Target::from_hash_out`, whose `safe_split_lo_and_hi` forbids the non-canonical
+//! decomposition — exactly ONE Bytes32 encodes a given header hash). The per-slot data
+//! (regev pk digest, ciphertext digest, pending adds) is NO LONGER hashed here: it is committed
+//! by `slot_tree_root`, the height-`BALANCE_SLOT_TREE_HEIGHT` Poseidon Merkle root over the
+//! `MAX_CHANNEL_MEMBERS` slot leaves ([`balance_slot_leaf_hash_circuit`]). Circuits that must
+//! OPEN a slot (the claim circuits) prove a Merkle inclusion of that slot's leaf against the
+//! root; circuits that only pin the signed scalars (close/cancel) witness the root directly —
+//! it is attested by the cosigner signatures over H1.
+//!
+//! Poseidon inputs are FIELD elements (no keccak-style byte decomposition), so a non-canonical
+//! witness limb simply produces a different hash rather than an alias; the u32 range checks the
+//! callers keep on these limbs are load-bearing for the OTHER (keccak) preimages the same wires
+//! feed, and defense-in-depth here.
 
 use plonky2::{
     field::extension::Extendable,
     hash::hash_types::RichField,
     iop::target::Target,
-    plonk::{circuit_builder::CircuitBuilder, config::GenericConfig},
+    plonk::circuit_builder::CircuitBuilder,
 };
-use plonky2_keccak::builder::BuilderKeccak256 as _;
 
 use crate::{
-    common::balance_state::BALANCE_STATE_DOMAIN,
+    common::balance_state::{BALANCE_SLOT_LEAF_DOMAIN, BALANCE_STATE_DOMAIN},
     ethereum_types::{
         bytes32::Bytes32Target, u32limb_trait::U32LimbTargetTrait as _, u64::U64Target,
     },
+    utils::poseidon_hash_out::PoseidonHashOutTarget,
 };
 
-/// Recompute `BalanceState::h1()` in-circuit from the witnessed slot data and PI-bound scalars.
+/// Recompute `BalanceState::h1()` in-circuit from the witnessed slot-tree root and the
+/// PI/witness-bound scalars.
 ///
-/// Inputs (all caller-allocated, all 32-bit range-checked):
+/// Inputs (all caller-allocated; the u32 limbs 32-bit range-checked by the callers):
 /// - `channel_id`: the single base-identity u32 limb.
 /// - `member_count`, `delegate_count`: single u32 limbs (the active/padding split).
-/// - `regev_pk_digests`: exactly `MAX_CHANNEL_MEMBERS` per-slot Regev pk Poseidon digests `p_i`
-///   (encoded as `Bytes32Target` = 8 u32 limbs each), decryption Stage 1. Inserted IMMEDIATELY
-///   AFTER `delegate_count` and BEFORE the ciphertext digests, mirroring the native order.
-/// - `enc_balance_digests`: exactly `MAX_CHANNEL_MEMBERS` per-slot ciphertext digests `d_i`.
-/// - `settled_tx_chain`: the settle hash-chain Bytes32.
-/// - `settled_tx_accumulator_root`: the Stage-3 settled-tx accumulator root Bytes32. Inserted
-///   IMMEDIATELY AFTER `settled_tx_chain` and BEFORE `state_version`, mirroring the native order.
-/// - `state_version`: the monotone state counter (split into 2 u32 limbs by `U64Target`).
-/// - `pending_adds`: exactly `MAX_CHANNEL_MEMBERS` per-slot homomorphic-add counters.
+/// - `slot_tree_root`: the balance-slot Poseidon Merkle root (4 raw Goldilocks elements). For
+///   close/cancel this is a free witness — SOUND because the root rides INSIDE the signed H1
+///   (the cosigner signatures attest it); the claim circuits additionally open one leaf against
+///   it via a Merkle inclusion proof.
+/// - `settled_tx_chain`, `settled_tx_accumulator_root`: 8 u32 limbs each (accumulator root
+///   IMMEDIATELY AFTER the chain, mirroring the native order).
+/// - `state_version`: the monotone state counter (2 u32 limbs, `U64Target` `[hi, lo]` order =
+///   native `split_u64`).
 ///
-/// Returns the recomputed H1 as a `Bytes32Target`. The caller `connect`s it to the H1 PI.
-pub(crate) fn recompute_h1<F, C, const D: usize>(
+/// Returns the recomputed H1 as a `Bytes32Target` (canonical Poseidon→Bytes32 encoding). The
+/// caller `connect`s it to the H1 PI.
+pub(crate) fn recompute_h1<F, const D: usize>(
     builder: &mut CircuitBuilder<F, D>,
     channel_id: Target,
     member_count: Target,
     delegate_count: Target,
-    regev_pk_digests: &[Bytes32Target],
-    enc_balance_digests: &[Bytes32Target],
+    slot_tree_root: PoseidonHashOutTarget,
     settled_tx_chain: &Bytes32Target,
     settled_tx_accumulator_root: &Bytes32Target,
     state_version: &U64Target,
-    pending_adds: &[Target],
 ) -> Bytes32Target
 where
     F: RichField + Extendable<D>,
-    C: GenericConfig<D, F = F> + 'static,
-    <C as GenericConfig<D>>::Hasher: plonky2::plonk::config::AlgebraicHasher<F>,
 {
     let balance_state_domain = builder.constant(F::from_canonical_u32(BALANCE_STATE_DOMAIN));
     let h1_inputs = [
-        vec![balance_state_domain],
-        vec![channel_id],
-        vec![member_count],
-        vec![delegate_count],
-        // Decryption Stage 1: the per-slot Regev pk digests come IMMEDIATELY AFTER delegate_count
-        // and BEFORE the ciphertext digests, byte-identical to native `BalanceState::h1`.
-        regev_pk_digests
-            .iter()
-            .flat_map(Bytes32Target::to_vec)
-            .collect::<Vec<_>>(),
-        enc_balance_digests
-            .iter()
-            .flat_map(Bytes32Target::to_vec)
-            .collect::<Vec<_>>(),
+        vec![balance_state_domain, channel_id, member_count, delegate_count],
+        slot_tree_root.to_vec(),
         settled_tx_chain.to_vec(),
         // Stage 3: the accumulator root sits IMMEDIATELY AFTER settled_tx_chain and BEFORE
-        // state_version, byte-identical to native `BalanceState::h1`.
+        // state_version, element-identical to native `BalanceState::h1`.
         settled_tx_accumulator_root.to_vec(),
         state_version.to_vec(),
-        pending_adds.to_vec(),
     ]
     .concat();
-    Bytes32Target::from_slice(&builder.keccak256::<C>(&h1_inputs))
+    let header_hash = PoseidonHashOutTarget::hash_inputs(builder, &h1_inputs);
+    Bytes32Target::from_hash_out(builder, header_hash)
+}
+
+/// In-circuit twin of `common::balance_state::balance_slot_leaf_hash`: the per-slot leaf of the
+/// H1 balance-slot tree,
+/// `Poseidon([BALANCE_SLOT_LEAF_DOMAIN, regev_pk_digest (8), enc_balance_digest (8),
+/// pending_adds (1)])` — FIXED 18-element width, injective on the slot triple.
+///
+/// The claim circuits hash the slot they open with this gadget and verify a height-
+/// `BALANCE_SLOT_TREE_HEIGHT` `IncrementalMerkleProofTarget<PoseidonHashOutTarget>` inclusion of
+/// the result (leaf value = leaf hash; `LeafableTarget::hash` is the identity for
+/// `PoseidonHashOutTarget`) against the `slot_tree_root` fed to [`recompute_h1`].
+pub(crate) fn balance_slot_leaf_hash_circuit<F, const D: usize>(
+    builder: &mut CircuitBuilder<F, D>,
+    regev_pk_digest: &Bytes32Target,
+    enc_balance_digest: &Bytes32Target,
+    pending_adds: Target,
+) -> PoseidonHashOutTarget
+where
+    F: RichField + Extendable<D>,
+{
+    let leaf_domain = builder.constant(F::from_canonical_u32(BALANCE_SLOT_LEAF_DOMAIN));
+    let leaf_inputs = [
+        vec![leaf_domain],
+        regev_pk_digest.to_vec(),
+        enc_balance_digest.to_vec(),
+        vec![pending_adds],
+    ]
+    .concat();
+    PoseidonHashOutTarget::hash_inputs(builder, &leaf_inputs)
 }
 
 #[cfg(test)]
@@ -99,13 +122,19 @@ mod tests {
             types::{Field as _, PrimeField64},
         },
         iop::witness::{PartialWitness, WitnessWrite as _},
-        plonk::{circuit_data::CircuitConfig, config::PoseidonGoldilocksConfig},
+        plonk::{
+            circuit_builder::CircuitBuilder, circuit_data::CircuitConfig,
+            config::PoseidonGoldilocksConfig,
+        },
     };
     use rand::Rng;
 
     use super::*;
     use crate::{
-        common::{balance_state::BalanceState, channel::ChannelId},
+        common::{
+            balance_state::{BalanceState, balance_slot_leaf_hash},
+            channel::ChannelId,
+        },
         constants::MAX_CHANNEL_MEMBERS,
         ethereum_types::{bytes32::Bytes32, u32limb_trait::U32LimbTrait as _, u64::U64},
         regev::{REGEV_N, REGEV_Q, RegevCiphertext},
@@ -124,19 +153,18 @@ mod tests {
         }
     }
 
-    /// Decryption Stage 1 — the soundness anchor for the per-slot Regev pk digest commitment: for a
-    /// RANDOM `BalanceState` (random `regev_pk_digests`, random ciphertexts, random scalars), the
-    /// native `BalanceState::h1()` MUST equal the in-circuit `recompute_h1` over the same witnessed
-    /// slot data. If the native and circuit preimage orders (or the
-    /// `Bytes32::from(poseidon_digest)` → 8-u32-limb encoding) ever drift, every signed H1 PI
-    /// would disagree with any provable close/withdrawal proof — so this catches encoding/order
+    /// The soundness anchor for the Poseidon-root H1: for a RANDOM `BalanceState` (random
+    /// regev pk digests, ciphertexts, adds, scalars), the native `BalanceState::h1()` MUST equal
+    /// the in-circuit `recompute_h1` over the natively computed `slot_tree_root()`, AND the
+    /// in-circuit leaf gadget must equal the native `balance_slot_leaf_hash` for every active
+    /// slot. If the native and circuit header/leaf encodings ever drift, every signed H1 PI
+    /// would disagree with any provable close/cancel/claim proof — this catches encoding/order
     /// drift before it ships.
     #[cfg_attr(debug_assertions, ignore = "run with --release")]
     #[test]
     fn recompute_h1_matches_native_balance_state_h1_randomized() {
-        use plonky2::plonk::circuit_builder::CircuitBuilder;
-
-        // Build a tiny circuit: witness all H1 inputs, recompute H1, register it as the PI.
+        // Build a tiny circuit: witness the header inputs, recompute H1, register it as the PI,
+        // and additionally recompute ONE slot leaf with the leaf gadget.
         let mut builder = CircuitBuilder::<F, D>::new(CircuitConfig::standard_recursion_config());
         let u32_limb = |builder: &mut CircuitBuilder<F, D>| {
             let t = builder.add_virtual_target();
@@ -146,40 +174,36 @@ mod tests {
         let channel_id_t = u32_limb(&mut builder);
         let member_count_t = u32_limb(&mut builder);
         let delegate_count_t = u32_limb(&mut builder);
-        let regev_pk_digest_ts: Vec<Bytes32Target> = (0..MAX_CHANNEL_MEMBERS)
-            .map(|_| Bytes32Target::new(&mut builder, true))
-            .collect();
-        let enc_digest_ts: Vec<Bytes32Target> = (0..MAX_CHANNEL_MEMBERS)
-            .map(|_| Bytes32Target::new(&mut builder, true))
-            .collect();
+        let slot_tree_root_t = PoseidonHashOutTarget::new(&mut builder);
         let settled_tx_chain_t = Bytes32Target::new(&mut builder, true);
         let settled_tx_accumulator_root_t = Bytes32Target::new(&mut builder, true);
         let state_version_t = U64Target::new(&mut builder, true);
-        let pending_add_ts: Vec<Target> = (0..MAX_CHANNEL_MEMBERS)
-            .map(|_| u32_limb(&mut builder))
-            .collect();
-        let recomputed = recompute_h1::<F, C, D>(
+        let recomputed = recompute_h1::<F, D>(
             &mut builder,
             channel_id_t,
             member_count_t,
             delegate_count_t,
-            &regev_pk_digest_ts,
-            &enc_digest_ts,
+            slot_tree_root_t,
             &settled_tx_chain_t,
             &settled_tx_accumulator_root_t,
             &state_version_t,
-            &pending_add_ts,
         );
+        // Leaf gadget twin: leaf over witnessed slot data.
+        let leaf_pk_t = Bytes32Target::new(&mut builder, true);
+        let leaf_enc_t = Bytes32Target::new(&mut builder, true);
+        let leaf_adds_t = u32_limb(&mut builder);
+        let leaf_t =
+            balance_slot_leaf_hash_circuit::<F, D>(&mut builder, &leaf_pk_t, &leaf_enc_t, leaf_adds_t);
         builder.register_public_inputs(&recomputed.to_vec());
+        builder.register_public_inputs(&leaf_t.to_vec());
         let data = builder.build::<C>();
 
         let mut rng = rand::thread_rng();
         for _ in 0..3 {
-            // member_count in 2..=MAX, delegate_count in 0..=(MAX-member_count). Active prefix
-            // (members + delegates) carries random ciphertexts + random pk digests; padding slots
-            // use the canonical padding values (so the state is a `validate()`-legal one).
-            let member_count = rng.gen_range(2..=MAX_CHANNEL_MEMBERS);
-            let delegate_count = rng.gen_range(0..=(MAX_CHANNEL_MEMBERS - member_count));
+            // member_count in 2..=8, delegate_count in 0..=8: small ACTIVE prefixes keep the
+            // native tree build fast; the padding suffix exercises the memoized padding leaf.
+            let member_count = rng.gen_range(2usize..=8);
+            let delegate_count = rng.gen_range(0usize..=8);
             let active = member_count + delegate_count;
             let enc_active: Vec<RegevCiphertext> =
                 (0..active).map(|_| rand_ciphertext(&mut rng)).collect();
@@ -198,6 +222,13 @@ mod tests {
             };
             state.validate().expect("constructed state must be valid");
             let expected = state.h1();
+            let root = state.slot_tree_root();
+            let slot = rng.gen_range(0..active);
+            let expected_leaf = balance_slot_leaf_hash(
+                state.regev_pk_digests[slot],
+                state.enc_balances[slot].digest(),
+                state.pending_adds[slot],
+            );
 
             let mut pw = PartialWitness::<F>::new();
             pw.set_target(
@@ -209,32 +240,42 @@ mod tests {
                 .unwrap();
             pw.set_target(delegate_count_t, F::from_canonical_u8(state.delegate_count))
                 .unwrap();
-            for (t, d) in regev_pk_digest_ts.iter().zip(state.regev_pk_digests.iter()) {
-                t.set_witness(&mut pw, *d);
-            }
-            for (t, ct) in enc_digest_ts.iter().zip(state.enc_balances.iter()) {
-                t.set_witness(&mut pw, ct.digest());
-            }
+            slot_tree_root_t.set_witness(&mut pw, root);
             settled_tx_chain_t.set_witness(&mut pw, state.settled_tx_chain);
             settled_tx_accumulator_root_t.set_witness(&mut pw, state.settled_tx_accumulator_root);
             state_version_t.set_witness(&mut pw, U64::from(state.state_version));
-            for (t, &a) in pending_add_ts.iter().zip(state.pending_adds.iter()) {
-                pw.set_target(*t, F::from_canonical_u32(a)).unwrap();
-            }
+            leaf_pk_t.set_witness(&mut pw, state.regev_pk_digests[slot]);
+            leaf_enc_t.set_witness(&mut pw, state.enc_balances[slot].digest());
+            pw.set_target(leaf_adds_t, F::from_canonical_u32(state.pending_adds[slot]))
+                .unwrap();
 
             let proof = data.prove(pw).expect("h1 recompute proof");
             data.verify(proof.clone()).expect("h1 recompute verify");
 
-            let actual_limbs = proof
+            let limbs = proof
                 .public_inputs
                 .iter()
-                .map(|x| u32::try_from(x.to_canonical_u64()).expect("PI limb must be u32"))
+                .map(|x| x.to_canonical_u64())
                 .collect::<Vec<_>>();
-            let actual = Bytes32::from_u32_slice(&actual_limbs).unwrap();
+            let actual = Bytes32::from_u32_slice(
+                &limbs[0..8]
+                    .iter()
+                    .map(|&x| u32::try_from(x).expect("H1 PI limb must be u32"))
+                    .collect::<Vec<_>>(),
+            )
+            .unwrap();
             assert_eq!(
                 actual, expected,
-                "in-circuit recompute_h1 must equal native BalanceState::h1 (Stage 1 encoding/order)"
+                "in-circuit recompute_h1 must equal native BalanceState::h1 (header encoding/order)"
             );
+            assert_eq!(
+                &limbs[8..12],
+                &expected_leaf.elements[..],
+                "in-circuit leaf gadget must equal native balance_slot_leaf_hash"
+            );
+
+            // Sanity: MAX_CHANNEL_MEMBERS stays in sync with the tree the native root builds.
+            assert_eq!(state.slot_leaf_hashes().len(), MAX_CHANNEL_MEMBERS);
         }
     }
 }

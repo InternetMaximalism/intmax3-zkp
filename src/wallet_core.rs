@@ -2805,16 +2805,16 @@ impl WithdrawalClaimProver {
                 "withdrawal claim: public-input build failed: {e:?}"
             ))
         })?;
-        let enc_balance_digests: [Bytes32; MAX_CHANNEL_MEMBERS] =
-            std::array::from_fn(|i| final_balance_state.enc_balances[i].digest());
+        // H1 Poseidon-root form: the slot tree + the claimant's inclusion proof.
+        let slot_tree = final_balance_state.slot_tree();
         Ok(WithdrawalClaimFullWitness {
             public_inputs,
-            enc_balance_digests,
-            regev_pk_digests: final_balance_state.regev_pk_digests,
+            slot_tree_root: slot_tree.get_root(),
+            slot_inclusion: slot_tree.prove(member_index as u64),
+            slot_pending_adds: final_balance_state.pending_adds[member_index],
             settled_tx_chain: final_balance_state.settled_tx_chain,
             settled_tx_accumulator_root: final_balance_state.settled_tx_accumulator_root,
             state_version: final_balance_state.state_version,
-            pending_adds: final_balance_state.pending_adds,
             member_count: final_balance_state.member_count,
             delegate_count: final_balance_state.delegate_count,
             member_index,
@@ -3083,9 +3083,9 @@ impl PostCloseClaimProver {
                 "post-close claim: public-input build failed: {e:?}"
             ))
         })?;
-        let enc_balance_digests: [Bytes32; MAX_CHANNEL_MEMBERS] =
-            std::array::from_fn(|i| final_balance_state.enc_balances[i].digest());
         let incoming_tx_inclusion = accumulator.prove(incoming_tx_index);
+        // H1 Poseidon-root form: the slot tree + the receiver's inclusion proof.
+        let slot_tree = final_balance_state.slot_tree();
 
         Ok(PostCloseClaimFullWitness {
             public_inputs,
@@ -3096,11 +3096,13 @@ impl PostCloseClaimProver {
             source_channel_id: source_tx.source_channel_id.as_u64() as u32,
             incoming_tx_inclusion,
             incoming_tx_index,
-            enc_balance_digests,
-            regev_pk_digests: final_balance_state.regev_pk_digests,
+            slot_tree_root: slot_tree.get_root(),
+            slot_inclusion: slot_tree.prove(receiver_member_index as u64),
+            slot_enc_balance_digest: final_balance_state.enc_balances[receiver_member_index]
+                .digest(),
+            slot_pending_adds: final_balance_state.pending_adds[receiver_member_index],
             settled_tx_chain: final_balance_state.settled_tx_chain,
             state_version: final_balance_state.state_version,
-            pending_adds: final_balance_state.pending_adds,
             member_count: final_balance_state.member_count,
             delegate_count: final_balance_state.delegate_count,
             receiver_member_index,
