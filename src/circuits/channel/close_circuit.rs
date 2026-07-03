@@ -1605,4 +1605,50 @@ mod tests {
             "a version PI not matching the signed H1 preimage must be rejected"
         );
     }
+
+    /// Negative — slot_tree_root anchoring (H1 = Poseidon balance-slot tree root): the root is
+    /// WITNESSED in the close circuit (not recomputed from the 1024 slots), justified because it
+    /// rides inside the signed H1. This test pins that justification: mutate ONE balance slot
+    /// AFTER the cosigners signed (so the witnessed `slot_tree_root()` diverges from the root
+    /// inside the signed H1 / the honest PIs) and confirm the close is UNPROVABLE — the in-circuit
+    /// `recompute_h1(witnessed_root, …)` no longer matches the `final_balance_state_h1` PI / the
+    /// IMCH digest the aggregated sign-zkp attests.
+    #[cfg_attr(debug_assertions, ignore = "run with --release")]
+    #[test]
+    fn channel_close_circuit_rejects_tampered_slot_tree_root() {
+        let fx = fixture();
+        let mut witness = full_witness();
+        // PIs derived from the HONEST (signed) state.
+        let public_inputs = witness.close.to_public_inputs().unwrap();
+        // Post-signing mutation of one balance slot => different slot_tree_root at witness time.
+        let honest_root = witness
+            .close
+            .final_channel_state
+            .balance_state
+            .slot_tree_root();
+        witness.close.final_channel_state.balance_state.enc_balances[1] =
+            witness.close.final_channel_state.balance_state.enc_balances[0].clone();
+        assert_ne!(
+            honest_root,
+            witness
+                .close
+                .final_channel_state
+                .balance_state
+                .slot_tree_root(),
+            "precondition: the mutation must change the slot tree root"
+        );
+
+        let result = fx
+            .close_circuit
+            .fill_witness(&public_inputs, &witness)
+            .map(|pw| {
+                catch_unwind(AssertUnwindSafe(|| fx.close_circuit.data.prove(pw)))
+                    .map_err(|_| ())
+                    .and_then(|r| r.map(|_| ()).map_err(|_| ()))
+            });
+        assert!(
+            !matches!(result, Ok(Ok(()))),
+            "a witnessed slot_tree_root diverging from the signed H1 must make the close unprovable"
+        );
+    }
 }

@@ -199,18 +199,23 @@ mod tests {
         let data = builder.build::<C>();
 
         let mut rng = rand::thread_rng();
-        for _ in 0..3 {
-            // member_count in 2..=8, delegate_count in 0..=8: small ACTIVE prefixes keep the
-            // native tree build fast; the padding suffix exercises the memoized padding leaf.
-            let member_count = rng.gen_range(2usize..=8);
-            let delegate_count = rng.gen_range(0usize..=8);
+        for _ in 0..5 {
+            // member_count over the FULL cosigner range 2..=MAX_COSIGNERS; delegate_count 0..=16.
+            // The padding suffix exercises the memoized padding leaf. pending_adds over the full
+            // VALID budget 0..=MAX_HOMO_ADDS_BEFORE_REFRESH (validate() rejects larger); the leaf
+            // encoding is a single limb so the budget max exercises the whole live range.
+            // channel_id over the full u32 range.
+            let member_count = rng.gen_range(2usize..=crate::constants::MAX_COSIGNERS);
+            let delegate_count = rng.gen_range(0usize..=16);
             let active = member_count + delegate_count;
             let enc_active: Vec<RegevCiphertext> =
                 (0..active).map(|_| rand_ciphertext(&mut rng)).collect();
             let pk_active: Vec<Bytes32> = (0..active).map(|_| Bytes32::rand(&mut rng)).collect();
-            let adds_active: Vec<u32> = (0..active).map(|_| rng.gen_range(0..4)).collect();
+            let adds_active: Vec<u32> = (0..active)
+                .map(|_| rng.gen_range(0..=crate::regev::MAX_HOMO_ADDS_BEFORE_REFRESH))
+                .collect();
             let state = BalanceState {
-                channel_id: ChannelId::new(rng.gen_range(1..1_000)).unwrap(),
+                channel_id: ChannelId::new(rng.gen_range(1..u32::MAX as u64)).unwrap(),
                 member_count: member_count as u8,
                 delegate_count: delegate_count as u8,
                 enc_balances: BalanceState::pad_enc_balances(&enc_active),

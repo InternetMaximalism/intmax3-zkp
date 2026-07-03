@@ -733,7 +733,9 @@ mod tests {
     }
 
     /// Negative — wrong member_index: claiming a slot whose digest is not the PI
-    /// `user_amount_digest` is rejected by the one-hot select binding.
+    /// `user_amount_digest` is rejected by the balance-slot-tree Merkle inclusion binding (the
+    /// leaf opened at `member_index` fixes that slot's digests; a mismatching index breaks the
+    /// root equality).
     #[cfg_attr(debug_assertions, ignore = "run with --release")]
     #[test]
     fn withdrawal_claim_circuit_rejects_wrong_member_index() {
