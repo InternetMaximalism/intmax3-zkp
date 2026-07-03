@@ -57,12 +57,22 @@ The member signatures this spec describes as SPHINCS+ (§B-4, §C, §D, §F) wer
 Poseidon-preimage ZK signature** (a ZK proof of knowledge of `sk` with `pk = Poseidon(sk)`, message
 bound as a public input), and SPHINCS+ was removed entirely. Two keys per member, each native to its
 proof system: a **Goldilocks** key `pk_g` (Plonky2 — channel-state agreement / close / small-block,
-via `SingleSigCircuit` aggregated by a recursive `ListCircuit`) and a **BabyBear** key `pk_b` (Plonky3
-— the in-channel channel-tx sender authorization, via `Poseidon2HashSigAir`). The member identity
-`pk_g` occupies the same `Bytes32` slot the SPHINCS+ pubkey hash did; `pk_b` is added to `MemberLeaf`.
-The full delta (validity `bp_sig_chain` accumulator, close list-proof consumer, two-key A11 binding,
-wallet Goldilocks co-signing, SPHINCS+ removal) is **D8 in detail2-implementation-notes.md**; threat
-model in `tasks/poseidon-signature-threat-model.md`.
+via `SingleSigCircuit`) and a **BabyBear** key `pk_b` (Plonky3 — the in-channel channel-tx sender
+authorization, via `Poseidon2HashSigAir`). The member identity `pk_g` occupies the same `Bytes32`
+slot the SPHINCS+ pubkey hash did; `pk_b` is added to `MemberLeaf`. The full delta (validity
+`bp_sig_chain` accumulator, close list-proof consumer, two-key A11 binding, wallet Goldilocks
+co-signing, SPHINCS+ removal) is **D8 in detail2-implementation-notes.md**; threat model in
+`tasks/poseidon-signature-threat-model.md`.
+
+**Aggregation shape (updated by D13):** the `SingleSigCircuit` proofs feed two aggregators, one per
+consumer path. The **validity** `bp_sig_chain` path keeps the linear recursive hash-chain
+**`ListCircuit`** (`src/poseidon_sig/list.rs`, D8). The **close / cancel-close** path no longer
+consumes the `ListCircuit`: cosigner single-sig proofs are aggregated PAIRWISE per level by the
+**binary-tree aggregated sign-zkp** (`src/poseidon_sig/aggregate.rs`, `AggLevelCircuit` ×
+`AGG_LEVELS = 4`, pk-slot widths 2 → 4 → 8 → 16) whose public inputs expose
+`[message(8), signer_count(1), pk list (2^k × 8)]`; the close/cancel circuits recursively verify ONE
+level-4 proof and wire the cosigner key vector directly from its PI signer list (§F-3, D13 in
+detail2-implementation-notes.md).
 
 ---
 
@@ -99,7 +109,7 @@ pub struct RegevCiphertext {
 |---|---|
 | `RegevPk` | 2 × 128 × 4 = **1,024 bytes** |
 | `RegevCiphertext` | 2 × 128 × 4 = **1,024 bytes** |
-| `encBalances` (per member) | **1,024 bytes** (× `member_count`, max 16 = 16,384 bytes, D6) |
+| `encBalances` (per slot) | **1,024 bytes** (one per balance slot; slot capacity `MAX_CHANNEL_MEMBERS` = 1024, D6 → D12 — cosigners ≤ 16, the rest delegates + padding) |
 | Decryption key `RegevSk { s: Vec<i8> }` | 128 bytes (held only by the owner. Does not appear in any struct) |
 
 `RegevCiphertext::digest() = hash_words([REGEV_CT_DOMAIN, c1.len() as u32, c1…, c2…]) → Bytes32`
@@ -132,7 +142,7 @@ pub struct RegevCiphertext {
 | `withdrawClaimZKP` | Plonky3 STARK | A degenerate form of the above ("the plaintext of my own ct = the public withdrawal amount") |
 | `balanceProof` / `validityProof` | Plonky2 (existing) | `src/circuits/balance/`, `src/circuits/validity/` (changes are in §F) |
 | close / claim PI binding | Plonky2 (existing) | `src/circuits/channel/close_circuit.rs` and others |
-| Signature | ~~SPHINCS+ (Poseidon)~~ → **Poseidon-preimage ZK sig (two-key)** | **SUPERSEDED — see D8** in detail2-implementation-notes.md. Goldilocks `pk_g` (Plonky2 `SingleSigCircuit` + recursive `ListCircuit`) for state/close/IMSB; BabyBear `pk_b` (Plonky3 `Poseidon2HashSigAir`) for the channel-tx sender. SPHINCS+ fully removed. |
+| Signature | ~~SPHINCS+ (Poseidon)~~ → **Poseidon-preimage ZK sig (two-key)** | **SUPERSEDED — see D8 (+ D13)** in detail2-implementation-notes.md. Goldilocks `pk_g` (Plonky2 `SingleSigCircuit`; validity path aggregated by the recursive `ListCircuit`, close/cancel path by the binary-tree `AggLevelCircuit` sign-zkp, D13) for state/close/IMSB; BabyBear `pk_b` (Plonky3 `Poseidon2HashSigAir`) for the channel-tx sender. SPHINCS+ fully removed. |
 
 `ChannelProofEnvelope { role, backend, proof }` (`state_update_verifier.rs:20-24`) is retained, and
 `ProofBackend::Plonky3` is used to carry the lattice STARKs (as in the existing design).
@@ -157,21 +167,34 @@ Legend: **[New]** = new type / **[Chg]** = change to existing type / **[Keep]** 
 /// abstract2.md: BalanceState { encBalances, settledTxChain, stateVersion }
 pub struct BalanceState {
     pub channel_id: ChannelId,
-    pub member_count: u8,                                  // co-signing MEMBERS = slot 0..member_count (2..=16, D6)
+    pub member_count: u8,                                  // co-signing COSIGNERS = slot 0..member_count (2..=MAX_COSIGNERS = 16, D6/D12)
     pub delegate_count: u8,                                // DELEGATES = slot member_count..member_count+delegate_count (§L, D9)
-    pub enc_balances: [RegevCiphertext; MAX_CHANNEL_MEMBERS],   // 16 slots; active = members+delegates, padding default/zero
+    pub enc_balances: [RegevCiphertext; MAX_CHANNEL_MEMBERS],   // 1024 balance slots; active = cosigners+delegates, padding default/zero
+    pub regev_pk_digests: [Bytes32; MAX_CHANNEL_MEMBERS],  // per-slot Regev pk Poseidon digests (decryption Stage 1); padding = default
     pub settled_tx_chain: Bytes32,                          // genesis = 0x00…00
+    pub settled_tx_accumulator_root: Bytes32,               // Stage 3: settled-tx Merkle accumulator root (post-close source-tx anchoring)
     pub state_version: u64,                                 // +1 on both intra- and inter-channel updates
+    pub pending_adds: [u32; MAX_CHANNEL_MEMBERS],           // per-slot homomorphic-add counters (D3); padding = 0
 }
 impl BalanceState {
-    /// H1 = hash(BalanceState). Does not include the proof object (all components known at signing time)
-    pub fn h1(&self) -> Bytes32 {
-        // order: [BALANCE_STATE_DOMAIN, channel_id, member_count, delegate_count,
-        //        enc_balances[0..16].digest(), settled_tx_chain,
-        //        split_u64(state_version), pending_adds[0..16]]   // fixed 16 slots (D6)
-        //        delegate_count = ONE u32 limb IMMEDIATELY AFTER member_count (§L, D9).
-        //        → keccak256 (src/common/balance_state.rs)
-    }
+    /// H1 = hash(BalanceState). Does not include the proof object (all components known at signing time).
+    /// D14 ("tree in storage, root in state"): H1 is a FIXED-width 26-element Poseidon header over the
+    /// ROOT of the balance-slot Poseidon Merkle tree — the flat keccak over all slots is retired:
+    ///
+    ///   leaf_i = Poseidon([BALANCE_SLOT_LEAF_DOMAIN "IMSL", regev_pk_digests[i] (8 u32 limbs),
+    ///                      enc_balances[i].digest() (8 u32 limbs), pending_adds[i] (1 u32 limb)])
+    ///            // 18 elements, fixed width; leaf INDEX i = Merkle position (slot order bound structurally)
+    ///   slot_tree_root = height-BALANCE_SLOT_TREE_HEIGHT (= 10 = log2(1024), const-asserted)
+    ///                    IncrementalMerkleTree<PoseidonHashOut> root over ALL 1024 leaves
+    ///   H1 = Bytes32::from(Poseidon([BALANCE_STATE_DOMAIN "IMBS", channel_id, member_count, delegate_count,
+    ///                                slot_tree_root (4 Goldilocks elements), settled_tx_chain (8),
+    ///                                settled_tx_accumulator_root (8), split_u64(state_version) (hi, lo)]))
+    ///
+    /// delegate_count sits IMMEDIATELY AFTER member_count (§L, D9). Semantics unchanged — the same
+    /// values are bound and H1 keeps the same signing role; only the commitment STRUCTURE became a
+    /// tree root, O(1) in-circuit regardless of slot capacity (src/common/balance_state.rs;
+    /// threat model tasks/h1-poseidon-root-threat-model.md; D14).
+    pub fn h1(&self) -> Bytes32 { … }
 }
 /// Agreement / signing target (abstract2.md: balanceStateHash = hash(H1, H2))
 pub fn balance_state_hash(h1: Bytes32, h2: Bytes32) -> Bytes32 {
@@ -179,19 +202,24 @@ pub fn balance_state_hash(h1: Bytes32, h2: Bytes32) -> Bytes32 {
 }
 ```
 
-- **N members (`MAX_CHANNEL_MEMBERS = 16`, pad-to-MAX, §G, D6).** The member count is variable per channel via
-  `member_count: u8` (`2 <= member_count <= 16`). The circuit does not branch and always processes 16 slots, with
-  active = slot `0..member_count` and padding slots default/zero. All member arrays are `[_; 16]`.
-  `member_count` is added to `BalanceState` / `ChannelRecord`, and `h1()` / IMCR hash all 16 components +
-  `member_count` (D6). A member is referenced by **slot** as the array index into `enc_balances` /
-  `pending_adds` (D3). **A member's identity is the SPHINCS+ public-key hash
-  (`Bytes32`)** (DA), and the slot is merely an array position. `ChannelRecord::validate()`
-  requires that active slots be **distinct non-zero hashes**, that padding slots be default, and that
-  `bp_member_slot < member_count`. The channel→member binding tree is the new `MemberTree`
-  (`src/common/trees/key_tree.rs`, height `MEMBER_TREE_HEIGHT = 4` = 16 leaves), whose root is
-  `ChannelLeaf.member_pubkeys_root` (§G, DB).
+- **Balance-slot capacity vs cosigners (`MAX_CHANNEL_MEMBERS = 1024`, `MAX_COSIGNERS = 16`; pad-to-MAX,
+  §G, D6 → D12).** The two roles D6's single `MAX_CHANNEL_MEMBERS = 16` conflated are now separate
+  constants: `MAX_CHANNEL_MEMBERS = 1024` is the BALANCE-SLOT capacity (cosigners + delegates +
+  padding) sizing `enc_balances` / `regev_pk_digests` / `pending_adds` / `ChannelRecord.member_pk_gs`
+  (`[_; 1024]`, serde-big-array), while `MAX_COSIGNERS = 16` caps the N-of-N close SIGNERS:
+  `member_count: u8` (`2 <= member_count <= MAX_COSIGNERS`) counts cosigners only, and
+  `member_count + delegate_count <= MAX_CHANNEL_MEMBERS`. The circuit does not branch — balance/H1
+  work covers all 1024 slots (via the D14 slot-tree root), and all close/cancel SIGNATURE work
+  (member_set_commitment, aggregated sign-zkp pk slots, A5 distinctness, active-bits gating) is sized
+  `MAX_COSIGNERS`. A participant is referenced by **slot** as the array index into `enc_balances` /
+  `pending_adds` (D3). **A member's identity is the `pk_g` pubkey (`Bytes32`)** (DA → D8), and the
+  slot is merely an array position. `ChannelRecord::validate()` requires that active slots be
+  **distinct non-zero hashes**, that padding slots be default, and that
+  `bp_member_slot < member_count`. The channel→member binding tree is the `MemberTree`
+  (`src/common/trees/key_tree.rs`, height `MEMBER_TREE_HEIGHT = 10` = 1024 leaves =
+  `MAX_CHANNEL_MEMBERS`), whose root is `ChannelLeaf.member_pubkeys_root` (§G, DB).
   *(abstract2.md §2.1's `[(Address,RegevPk);3]` is fixed at 3 people, so N members is a spec deviation.
-  The authoritative delta is D6 in detail2-implementation-notes.md.)*
+  The authoritative deltas are D6 and D12 in detail2-implementation-notes.md.)*
 - Range of `H2`: `0x00…00` (intra-channel) / one's own small block's `tx_tree_root` (inter-channel, §A-2).
   **Reservation of `H2 = 0`**: on the inter-channel path, `tx_tree_root == 0` is rejected at verification (guaranteeing that the
   empty-tree root does not become 0 via the keccak-based tree. The implementation answer to v2 audit finding 4).
@@ -331,14 +359,20 @@ The preimage of `signing_digest()` (domain `0x494d5342` "IMSB") updates only the
 | `PostCloseIncomingClaim` (`channel.rs:856-`) | [Chg] make `receiver_amount` a `RegevCiphertext`. Member identification `receiver_user_id: UserId` → **`receiver_sphincs_pubkey_hash: Bytes32`** (DA). Implementation of abstract2.md §3.5.5 `claimLateTx`. `lateBalanceProof` is verified inside `claim_proof`, and is managed as a **separate variable** from `finalBalanceProof` (also separated in contract storage via the `usedSharedNativeNullifiers` family). |
 | `SpecialClose` / `CancelClose` | [Chg] hash only the member identifiers to pubkey hashes (`SpecialClose`'s censorship BP designation = `offending_bp_member_slot: u8` + `offending_bp_sphincs_pubkey_hash: Bytes32`, DA). Otherwise [Keep] (additional defenses outside the scope of abstract2.md. Retained since they are additions that do not weaken the safety properties. §I-3) |
 
-**[New] close PI's `member_set_commitment` (F5 SECURITY, DB; D6)**: the full channel-close circuit
-**exposes `member_set_commitment = keccak([CLOSE_MEMBER_SET_DOMAIN, member_count(1), sphincs_pk_hash_0(8) …
-sphincs_pk_hash_15(8)])`** (fixed 16-slot keccak, padding slots zeroed, D6; `close_member_set_commitment`,
-domain `CLOSE_MEMBER_SET_DOMAIN = 0x494d434d` "IMCM") (code: `src/common/channel.rs:1079-1097`). It
-**occupies close-PI limbs 78–85**, and `member_count` (1 limb) is appended last (limb 86)
-(`close_pis.rs:24-27`). L1 (`ChannelSettlementManager`) recomputes the same keccak from the registered
-`member_sphincs_pubkey_hashes` + `member_count` and reconciles, **binding that the keys whose N-of-N signatures were verified inside the circuit
+**[New] close PI's `member_set_commitment` (F5 SECURITY, DB; D6/D12)**: the full channel-close circuit
+**exposes `member_set_commitment = keccak([CLOSE_MEMBER_SET_DOMAIN, member_count(1), pk_g_0(8) …
+pk_g_15(8)])`** — a fixed **`MAX_COSIGNERS` = 16-slot** keccak (2 + 16×8 = 130 u32 words, padding
+slots zeroed, D6; `close_member_set_commitment`, domain `CLOSE_MEMBER_SET_DOMAIN = 0x494d434d`
+"IMCM") over the **COSIGNERS only** — the array is sized by the cosigner cap, NOT the 1024
+balance-slot capacity; delegates never enter it (D12) (code: `src/common/channel.rs`,
+`close_member_set_commitment`). In the current 95-limb close-PI layout it **occupies limbs 85–92**,
+with `member_count` at limb 93 and `delegate_count` at limb 94 (`close_pis.rs`, §F-3). L1
+(`ChannelSettlementManager`) recomputes the same keccak from the registered cosigner `pk_g`s +
+`member_count` and reconciles, **binding that the keys whose N-of-N signatures were verified inside the circuit
 are the registered member set of that channel** (excluding signature substitution by non-member keys).
+The Solidity mirror's internal 16-slot form is byte-identical to the Rust `MAX_COSIGNERS` form
+(shared vector `close_member_set_commitment_matches_solidity_shared_vector`), so this commitment
+survives the D12 split unchanged.
 
 ### C-9. [Keep/Del] base-layer types
 
@@ -404,6 +438,19 @@ deposit_nullifier])`.
   `H1'` (post-subtraction state) and `H2` (tx_tree_root) coexist in a single preimage in the signing target.
   The validity / confirmation circuit verifies this signature as a **substitute** for a signature over tx_tree_root
   (constraining that the `H2` component = the `tx_tree_root` of the posted small block. §F-2).
+- **D-4 (cosigner aggregation shape, D13)**: each cosigner produces ONE `SingleSigCircuit` sign-zkp
+  over the common message (the recomputed IMCH digest for close/cancel); the proofs are aggregated
+  PAIRWISE per level by `poseidon_sig::aggregate::AggLevelCircuit` (one circuit per level,
+  `AGG_LEVELS = 4`, pk-slot widths 2 → 4 → 8 → 16 = `MAX_AGG_SIGNERS`), each level's PI layout being
+  `[message(8), signer_count(1), pk_0..pk_{2^k−1} (8 each)]` — combining two aggregated proofs
+  concatenates their signer lists. Left-packing is enforced **in-circuit** (a present right child
+  forces the left child FULL, so zero-pk padding is provably a suffix) and `signer_count` counts
+  exactly the verified leaf signatures. The close / cancel-close circuits recursively verify ONE
+  level-`AGG_LEVELS` proof at constant VK, bind `message == recomputed IMCH digest` and
+  `signer_count == member_count`, and WIRE the cosigner key vector from the proof's PI signer list
+  (zero witnessed freedom) into the `member_set_commitment` keccak and the A5 distinctness chain
+  (§F-3). The validity `bp_sig_chain` path keeps the linear `ListCircuit` (D8) — only close/cancel
+  moved to the tree aggregator.
 
 ---
 
@@ -501,20 +548,38 @@ state↔proof correspondence can be mechanically verified by the
 ### F-3. ChannelClosePublicInputs (`close_pis.rs`)
 
 Added fields: `final_state_version: u64` (2 limbs), `final_settled_tx_chain: Bytes32` (8 limbs),
-**`member_set_commitment: Bytes32` (8 limbs, §C-8) + `member_count` (1 limb, appended last, D6)**.
+**`member_set_commitment: Bytes32` (8 limbs, §C-8) + `member_count` (1 limb, D6)**.
 `final_channel_balance_root` is renamed to `final_balance_state_h1`.
-**`CHANNEL_CLOSE_PUBLIC_INPUTS_LEN = 77 → 86`** (adds `member_set_commitment` as 8 limbs plus a trailing
-`member_count` limb, D6; code: `close_pis.rs:28 = 86`, `ChannelSettlementVerifier.sol:217` "Total = 86 limbs".
-Since the existing layout of the 77 limbs is unchanged, the close-intent shared vector is preserved).
+**`CHANNEL_CLOSE_PUBLIC_INPUTS_LEN` = 77 → 86 (D6) → 87 (D9) → 95 (current)**: the Stage-3
+`final_settled_tx_accumulator_root` (8 limbs, §C-2) sits at limbs 77..85, shifting
+`member_set_commitment` to 85..93; `member_count` is limb 93 and `delegate_count` limb 94
+(code: `close_pis.rs:37 = 95`). The original 77-limb prefix is unchanged.
 
-Other close PIs (the 2→8 limbs expansion of member identifiers accompanying DA):
+Other close PIs. (The D5 values — withdrawal claim 42→48, post-close 34→40, cancel 41 — were further
+changed by the subsequent close-game hardening / Stage-3 work; the table shows the CURRENT pinned
+constants in `src/circuits/channel/*_pis.rs`.)
 
-| Circuit | PI length | Change |
+| Circuit | PI length (current) | Note |
 |---|---|---|
-| close (`close_pis.rs`) | **77 → 86** | append `member_set_commitment` (8) + `member_count` (1) at the end (D6) |
-| withdrawal claim (`withdrawal_claim_pis.rs`) | **42 → 48** | `user_id` (2) → `member_sphincs_pubkey_hash` (8) |
-| post-close claim (`post_close_claim_pis.rs`) | **34 → 40** | `receiver_user_id` (2) → `receiver_pubkey_hash` (8) |
-| cancel close (`cancel_close_pis.rs`) | **41** (unchanged) | The PI is channel_id only. Only removal of `UserId`/`KeyId` on the witness side |
+| close (`close_pis.rs`) | **95** | 77-limb legacy prefix + `final_settled_tx_accumulator_root` (8) + `member_set_commitment` (8) + `member_count` (1) + `delegate_count` (1) |
+| withdrawal claim (`withdrawal_claim_pis.rs`) | **48** | member identifier is the 8-limb `pk_g` (DA → D8); claimant slot opened via a height-10 Merkle inclusion against the H1 slot-tree root (D14) |
+| post-close claim (`post_close_claim_pis.rs`) | **56** | 40 (D5) + Stage-3 accumulator-anchored source-tx binding; claimed slot opened via the same height-10 inclusion (D14) |
+| cancel close (`cancel_close_pis.rs`) | **27** | CORRECTED C1 statement: `channelId(1) \| closeIntentDigest(8) \| memberSetCommitment(8) \| revivedStateVersion(2) \| revivedChannelStateDigest(8)` (replaces the forgeable legacy 41-limb revived-tx layout) |
+
+**Close/cancel-circuit machinery (current, D11–D14):** the close and cancel-close circuits each
+recursively verify **one level-`AGG_LEVELS` (16-slot) aggregated sign-zkp proof** (§D D-4, D13) at a
+constant baked VK (`const`-asserted `MAX_COSIGNERS == MAX_AGG_SIGNERS`); the cosigner `pk_g` vector
+is **wired from the verified proof's PI signer list** (the former per-slot signature verification /
+in-circuit C' `ListCircuit` fold is deleted), with `message == recomputed IMCH digest` and
+`signer_count == member_count` enforced in-circuit. `member_count` is range-checked
+`2..=MAX_COSIGNERS` via the 16-bit unary active-bits decomposition. **A5 pk_g distinctness** is an
+indexed-Merkle **insertion chain** (D11): each active cosigner `pk_g` is inserted in slot order into
+a fresh `IndexedMerkleTree` of height `MEMBER_DISTINCTNESS_TREE_HEIGHT = 5` via the audited
+`conditional_get_new_root` gadget — a duplicate key has no valid low-leaf, so it is unprovable
+(replaces the O(N²) all-pairs loop). `member_set_commitment` stays the **fixed `MAX_COSIGNERS` =
+16-slot keccak over the COSIGNERS** (§C-8). The in-circuit H1 recompute is the O(1) D14 header: the
+slot-tree root is witnessed (bound by the cosigner signatures over H1), and the 1024-slot target
+vectors + flat keccak are deleted.
 
 **Soundness binding**: validity (`update_channel_tree`) proves, via a slot inclusion proof, that the **signing pubkey ∈ the channel's Poseidon
 `member_pubkeys_root`** (bound to the `ChannelLeaf` under `account_tree_root`) (DB). close exposes `member_set_commitment`, and L1 keccak-reconciles it against the registered member set
@@ -528,8 +593,12 @@ Other close PIs (the 2→8 limbs expansion of member identifiers accompanying DA
 
 | Constant | Value | Rationale |
 |---|---|---|
-| `MAX_CHANNEL_MEMBERS` | **16** | N members (pad-to-MAX, D6). The active count is determined by the per-channel variable `member_count: u8` (`2..=16`). A spec deviation from abstract2.md §2.1's fixed 3 people (replaces old `CHANNEL_MEMBERS = 3`) |
-| `MEMBER_TREE_HEIGHT` | **4** (= 16 leaves) | The Poseidon Merkle height of the new `MemberTree` (16 leaves = `MAX_CHANNEL_MEMBERS`) (DB / D6). **Replaces and deletes** old `KEY_TREE_HEIGHT` / `KEY_SET_TREE_HEIGHT` / `MEMBER_KEY_TREE_HEIGHT` / `KEY_ID_BITS` |
+| `MAX_CHANNEL_MEMBERS` | **1024** | BALANCE-SLOT capacity (cosigners + delegates + padding; pad-to-MAX, D6 → D12). Sizes `BalanceState.enc_balances` / `regev_pk_digests` / `pending_adds` and `ChannelRecord.member_pk_gs` (`[_; 1024]`). A spec deviation from abstract2.md §2.1's fixed 3 people (replaces old `CHANNEL_MEMBERS = 3`; was 16 before D12) |
+| `MAX_COSIGNERS` | **16** (NEW, D12) | Cap on the N-of-N close SIGNERS. `member_count: u8` is range-checked `2..=MAX_COSIGNERS` (native + in-circuit via the 16-bit unary active-bits sum); all close/cancel SIGNATURE-side arrays/circuits (member_set_commitment, aggregated sign-zkp pk slots, A5 chain, activeness gating) are sized by this, keeping the close/cancel degree tractable while balance/H1 arrays stay 1024 |
+| `MEMBER_TREE_HEIGHT` | **10** (= log2(1024) leaves = `MAX_CHANNEL_MEMBERS`) | The Poseidon Merkle height of the validity-side `MemberTree` (DB / D6 / D12; invariant `1 << height == MAX_CHANNEL_MEMBERS`). **Replaces and deletes** old `KEY_TREE_HEIGHT` / `KEY_SET_TREE_HEIGHT` / `MEMBER_KEY_TREE_HEIGHT` / `KEY_ID_BITS` |
+| `BALANCE_SLOT_TREE_HEIGHT` | **10** (const-asserted `1 << height == MAX_CHANNEL_MEMBERS`) | Height of the H1 balance-slot Poseidon Merkle tree (D14, §C-2). Distinct from `MEMBER_TREE_HEIGHT` (the validity-side pubkey tree) — same value only because both are indexed by the slot space `0..MAX_CHANNEL_MEMBERS` |
+| `MEMBER_DISTINCTNESS_TREE_HEIGHT` | **5** (= ceil(log2(`MAX_COSIGNERS` + 1)), derived const) | Height of the in-circuit indexed-Merkle tree of the A5 pk_g distinctness insertion chain in close/cancel (D11): one sentinel leaf + up to 16 cosigner keys ⇒ 2^5 = 32 leaf slots |
+| `AGG_LEVELS` / `MAX_AGG_SIGNERS` | **4** / **16** (= `1 << AGG_LEVELS`) | Binary-tree aggregated sign-zkp (`src/poseidon_sig/aggregate.rs`, D13): one `AggLevelCircuit` per level, top-level pk list = 16 slots; `const`-asserted `MAX_AGG_SIGNERS == MAX_COSIGNERS` at the close-circuit consumer |
 | `SIGN_TIMEOUT_SECS` | **180** | abstract2.md §2.5 (3 min). Replaces old `SMALL_BLOCK_SIGNATURE_TIMEOUT_SECS = 60` |
 | `GRACE_BEFORE_PROCESS_SECS` | **600** | abstract2.md §2.5 (10 min). §H-2 |
 | `CHALLENGE_PERIOD_SECS` | **86,400** | abstract2.md §2.5 (1 day). Set to the immutable `challengePeriod` of `ChannelSettlementManager` |
@@ -550,10 +619,16 @@ Other close PIs (the 2→8 limbs expansion of member identifiers accompanying DA
 | `CLOSE_MEMBER_SET_DOMAIN` | `0x494d434d` | "IMCM" (keccak, §C-8 close PI `member_set_commitment`. L1 reconciliation) |
 | `MEMBER_LEAF_DOMAIN` | `0x4d424c46` | "MBLF" (**Poseidon**. Leaf domain separation of `MemberTree`, `key_tree.rs`, DB) |
 | `REGEV_PK_POSEIDON_DOMAIN` | `0x494d5250` | "IMRP" (**Poseidon**. The member-tree leaf's `regev_pk_digest = Poseidon([IMRP, n, a…, b…])`, `regev/keys.rs`) |
+| `BALANCE_SLOT_LEAF_DOMAIN` | `0x494d534c` | "IMSL" (**Poseidon**. Per-slot leaf of the H1 balance-slot Merkle tree, `src/common/balance_state.rs`, D14. Distinct from every existing IMxx domain — covered by the repo-wide domain non-collision test in `poseidon_sig`) |
+| `LIST_LEAF_DOMAIN` | `0x494d4c4c` | "IMLL" (**Poseidon**. Sign-zkp list leaf `Poseidon([IMLL] ‖ m ‖ pk)`, `src/poseidon_sig/list.rs`, D8 — the validity `bp_sig_chain` aggregation path; close/cancel moved to the tree aggregator, which introduces NO new domain of its own — the aggregation statement is carried by recursive proof PIs, not a hash chain, D13) |
 
 > Note: `MEMBER_LEAF_DOMAIN` / `REGEV_PK_POSEIDON_DOMAIN` are domains of **in-circuit Poseidon** (member-tree binding, DB).
 > `CLOSE_MEMBER_SET_DOMAIN` is a domain of **L1 keccak** (close PI reconciliation). It is the design of DB that the same member set is represented by
 > two systems: in-circuit (Poseidon) / L1 boundary (keccak). `regev_pk_root` (keccak "IMRR" `0x494d5252`) is for the L1 anchor of §H-1.
+>
+> **D14 update:** `BALANCE_STATE_DOMAIN` "IMBS" is now a **Poseidon** domain — the H1 header is
+> `Poseidon([IMBS, …])` (keccak is retired from H1; §C-2). `BALANCE_STATE_HASH_DOMAIN` "IMBH" and the
+> other chain/L1 domains remain keccak.
 
 ### G-3. Existing (unchanged, reference)
 
@@ -572,7 +647,7 @@ and `IMKR` (`KEY_RECORD_DOMAIN`) and the threshold / num_keys constants (DA/DC, 
 
 | abstract2.md | Implementation (updated version) |
 |---|---|
-| §3.0 `publishRegevPk` | At channel creation, `registerChannel` fixes a per-channel variable of **2..16 members** `(sphincs_pubkey_hash, regev_pk, l1_recipient)` + `member_count` (per-key_id threshold / key-set registration is abolished, DA/DC). `ChannelSettlementManager` stores `bytes32[16]` + `activeMemberCount` (pad-to-MAX, D6). `memberKeys[channel_id]` is a spec deviation generalizing abstract2 §1's `Map<ChannelId,[(Address,RegevPk);3]>` to N members (D6). L1 anchor: take `ChannelRecord`'s `member_sphincs_pubkey_hashes` (16 slots) + `member_count` + `member_pubkeys_root` + `regev_pk_root` (keccak "IMRR") into the IMCR `signing_digest`. The in-circuit binding is the Poseidon `MemberTree` assembled from the same members (DB) |
+| §3.0 `publishRegevPk` | At channel creation, `registerChannel` fixes a per-channel variable of **2..16 cosigners** (+ optional delegates up to the 1024-slot capacity, §L) `(pk_g, pk_b, regev_pk, l1_recipient)` + `member_count` (per-key_id threshold / key-set registration is abolished, DA/DC). `ChannelSettlementManager` stores the registered cosigner set + `activeMemberCount` (its internal mirror is the 16-slot cosigner form, byte-identical to the Rust `MAX_COSIGNERS` commitment; **the contract-side alignment to the 1024 balance-slot capacity — registration reg-chain preimage, H1 slot mirrors — is PENDING, D12**). `memberKeys[channel_id]` is a spec deviation generalizing abstract2 §1's `Map<ChannelId,[(Address,RegevPk);3]>` to N members (D6/D12). L1 anchor: take `ChannelRecord`'s `member_pk_gs` (all `MAX_CHANNEL_MEMBERS` = 1024 slots) + `member_count` + `member_pubkeys_root` + `regev_pk_root` (keccak "IMRR") into the IMCR `signing_digest`. The in-circuit binding is the Poseidon `MemberTree` assembled from the same members (DB) |
 | §3.1 `agreeBalanceState` | Collect active-member (`0..member_count`) signatures over `ChannelState::signing_digest()` (= embeds hash(H1,H2)). Verification items are as in abstract2 §3.1 (version+1 / chain consistency / own-component decryption verification / `channelTxZKP` / `channelUpdateZKP` + inclusion proof) |
 | §3.2 `channelTransfer` | Build `ChannelTx` (§C-5) → generate `channelTxZKP` (§E-1) → propagate → co-sign. `ChannelTransition::InChannelTransfer` |
 | §3.3.1 `rangeProof` | The member designated by `bp_member_slot` verifies `channelUpdateZKP` with `RegevProofVerifier` |
@@ -695,7 +770,7 @@ Thereby "the all-signed state of the highest version is uniquely determined" (co
 | `src/circuits/channel/withdrawal_claim_pis.rs` | Change the meaning of `user_amount_digest` to `RegevCiphertext::digest()` |
 | `contracts/src/ChannelSettlementManager.sol` | Add `requestClose()` / enforce GRACE / chain reconciliation / `final_state_version` comparison (§H-2) |
 | `contracts/src/ChannelSettlementVerifier.sol` | Add `final_state_version` / `final_settled_tx_chain` to the close PI hash |
-| `src/constants.rs` | Add the §G constants, `MAX_CHANNEL_MEMBERS = 16` (variable `member_count`, D6) |
+| `src/constants.rs` | Add the §G constants; `MAX_CHANNEL_MEMBERS = 1024` (balance-slot capacity) split from `MAX_COSIGNERS = 16` (variable `member_count`, D6 → D12) |
 | `src/circuits/channel/e2e_flow.rs` | Make E2E Regev-based (remove opening hand-off, make ZKP mandatory) |
 
 ### I-3. Unchanged
@@ -776,15 +851,17 @@ N-of-N multisig that co-signs channel-state updates. It relies on the co-signing
 maintenance. Not in abstract2.md; authoritative delta = **D9** in detail2-implementation-notes.md.
 Threat model + adversarial review: `tasks/delegate-account-threat-model.md` (DA1–DA6).
 
-### L-1. Slot regions (one fixed-16 array, contiguous regions)
+### L-1. Slot regions (one fixed-`MAX_CHANNEL_MEMBERS` array, contiguous regions)
 `delegate_count: u8` is added alongside `member_count: u8` on `BalanceState`, `ChannelRecord`, and the
-registration record. With `active = member_count + delegate_count`:
-- slots `0 .. member_count`            → **co-signing members** (balance + send/receive + N-of-N co-sign).
+registration record. With `active = member_count + delegate_count` (slot capacity
+`MAX_CHANNEL_MEMBERS` = **1024** since D12; it was 16 when this section was written):
+- slots `0 .. member_count`            → **co-signing members** (balance + send/receive + N-of-N co-sign; `member_count <= MAX_COSIGNERS = 16`, D12).
 - slots `member_count .. active`       → **delegates** (balance + send/receive/withdraw; **NO** co-sign).
-- slots `active .. 16`                 → padding (canonical empty ciphertext, `pending_adds = 0`).
+- slots `active .. MAX_CHANNEL_MEMBERS` → padding (canonical empty ciphertext, `pending_adds = 0`).
 
-Invariants (enforced natively + in-circuit + Solidity): `2 <= member_count`, `active <= 16` (overflow-safe
-`checked_add`), active slots non-padding and pairwise-distinct `pk_g`, padding slots canonical,
+Invariants (enforced natively + in-circuit + Solidity): `2 <= member_count <= MAX_COSIGNERS`,
+`active <= MAX_CHANNEL_MEMBERS` (overflow-safe `checked_add`), active slots non-padding and
+pairwise-distinct `pk_g`, padding slots canonical,
 `bp_member_slot < member_count` (the block proposer must be a co-signing member, never a delegate).
 
 ### L-2. Trust model (DLG-1 / DLG-2 / DLG-3)
@@ -814,7 +891,8 @@ in every "twin" preimage so the member/delegate/padding split is fixed under the
   `channel_reg_step` (`channel_reg_hash_with_prev_hash_circuit`) + Solidity `IntmaxRollup.registerChannel`.
   `CHANNEL_REG_PREIMAGE_U32_LEN`: **475 → 476**. (Re-pinned differentials `PINNED_MC2/8/16`.)
 - Close PI vector: `delegate_count` appended at the END (limb 86, after `member_count` at 85);
-  `CHANNEL_CLOSE_PUBLIC_INPUTS_LEN`: **86 → 87**; Solidity `closePIHash` appends it (packed
+  `CHANNEL_CLOSE_PUBLIC_INPUTS_LEN`: **86 → 87** *(now 95: the Stage-3 accumulator insertion shifted
+  `member_count`/`delegate_count` to limbs 93/94 — §F-3)*; Solidity `closePIHash` appends it (packed
   `(memberCount<<8)|delegateCount` into one uint16 in `CloseProofFields`).
 - **IMCM** close member-set commitment (`close_member_set_commitment`) STAYS **member-only**
   (`0..member_count`) — delegates do not co-sign, so they are excluded.
