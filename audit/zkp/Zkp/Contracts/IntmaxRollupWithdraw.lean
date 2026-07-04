@@ -24,17 +24,22 @@ import Zkp.Contracts.Evm
   `Σ withdrawals ≤ Σ deposits` — the rollup can never pay out more ETH
   than was deposited. We prove this directly from the checked subtraction.
 
-  ## withdrawNative checks (IntmaxRollup.sol:1307-1383)
+  ## withdrawNative checks (IntmaxRollup.sol:1307-1377)
 
-  | step | line     | check                                                  |
-  |------|----------|--------------------------------------------------------|
-  | 1    | :1316    | `_verifyMleWithdrawal(mleProof)` — proof verifies      |
-  | 2a   | :1331    | `finalizedStateRoots[extCommitment]` — anchored        |
-  | 3    | :1349    | `pisHash` recomputed == proof PI — binds `ws` to proof |
-  | 4a   | :1356    | per leaf: ETH token only                               |
-  | 4b   | :1357    | per leaf: `!withdrawalNullifierUsed[nullifier]`        |
-  | 4c   | :1361-72 | per leaf: burn (auxData≠0) ⇒ authorized                |
-  | 4d   | :1372-74 | set nullifier; `totalEscrowed -= amount`; credit       |
+  | step | line       | check                                                  |
+  |------|------------|--------------------------------------------------------|
+  | 1    | :1316      | `_verifyMleWithdrawal(mleProof)` — proof verifies      |
+  | 2a   | :1331      | `finalizedStateRoots[extCommitment]` — anchored        |
+  | 3    | :1345      | `pisHash` recomputed == proof PI — binds `ws` to proof |
+  | 4a   | :1350      | per leaf: ETH token only                               |
+  | 4b   | :1351      | per leaf: `!withdrawalNullifierUsed[nullifier]`        |
+  | 4c   | :1357-1368 | per leaf: burn (auxData≠0) ⇒ authorized                |
+  | 4d   | :1371-1374 | set nullifier; `totalEscrowed -= amount`; credit       |
+
+  Named trust/modeling assumptions for the theorems below live in
+  `Zkp.Contracts.Assumptions`: `BurnAuthorizationsLegitimate` (burn
+  path), `MleVerificationEnabled` (finalize gate), `SingleCallAtomicity`
+  and `EthSendFailureReverts` (model semantics).
 -/
 
 namespace Zkp
@@ -77,16 +82,16 @@ def deposit (s : RollupState) (amount : U256) : Call RollupState :=
 
 /-! ### withdrawNative() — funds out -/
 
-/-- One leaf of the `withdrawNative` loop (:1355-1376), AFTER the call-
+/-- One leaf of the `withdrawNative` loop (:1348-1376), AFTER the call-
     level checks (proof verified, anchored, pis-bound) have passed. -/
 def withdrawLeaf (s : RollupState) (w : Withdrawal) : Call RollupState :=
-  if w.isEth = false then none                                    -- :1356
-  else if s.nullifierUsed.get w.nullifier = true then none        -- :1357 no double-withdraw
+  if w.isEth = false then none                                    -- :1350
+  else if s.nullifierUsed.get w.nullifier = true then none        -- :1351 no double-withdraw
   else if w.auxData ≠ 0 ∧ s.partialWithdrawalAuthorized.get (authDigest w) = false
-       then none                                                  -- :1361-1372 burn needs auth
+       then none                                                  -- :1357-1368 burn needs auth
   else (checkedSub s.totalEscrowed w.amount).map (fun te =>       -- :1373 solvency ceiling
          { s with
-           nullifierUsed := s.nullifierUsed.set w.nullifier true  -- :1372
+           nullifierUsed := s.nullifierUsed.set w.nullifier true  -- :1371
            totalEscrowed := te
            pendingWithdrawals :=
              s.pendingWithdrawals.set w.recipient
@@ -104,7 +109,7 @@ structure WithdrawPre (s : RollupState)
     (mleVerified pisBound : Prop) (extCommitment : Word) : Prop where
   proof   : mleVerified                                   -- :1316
   anchored : s.finalizedStateRoots.get extCommitment = true  -- :1331
-  bound   : pisBound                                      -- :1349
+  bound   : pisBound                                      -- :1345
 
 /-! ### Sum of leaf amounts -/
 
@@ -218,8 +223,9 @@ theorem withdrawLeaf_consumes {s s' : RollupState} {w : Withdrawal}
 
 /-! ### finalize() — the only writer of finalizedStateRoots -/
 
-/-- `finalize()` (:1102-1126): on a verified validity proof
-    (`fullVerify`), records the state root as permanently finalized.
+/-- `finalize()` (:1102-1128): on a verified validity proof
+    (`fullVerify`), records the state root as permanently finalized
+    (`finalizedStateRoots[stateRoot] = true`, :1122).
     Modeled: success requires `valid`, and the ONLY state change to
     `finalizedStateRoots` is setting `stateRoot ↦ true`. -/
 def finalize (s : RollupState) (stateRoot : Word) (valid : Bool) : Call RollupState :=
@@ -231,7 +237,15 @@ def finalize (s : RollupState) (stateRoot : Word) (valid : Bool) : Call RollupSt
 /-- `finalize` adds a root to `finalizedStateRoots` ONLY when the
     validity proof verified. So a value passing `withdrawNative`'s
     `anchored` check (`finalizedStateRoots[ext]=true`) must have been
-    finalized by a verified validity proof — never set arbitrarily. -/
+    finalized by a verified validity proof — never set arbitrarily.
+
+    ASSUMPTION: `valid` here is the OUTPUT of `_verifyMle`'s gate. That
+    output means "an MLE/WHIR validity proof verified" only under
+    `Assumptions.MleVerificationEnabled` (`allowMleDisabled = false`,
+    constructor-enforced with a nonzero VK at IntmaxRollup.sol:532); on
+    a test deployment with the :1584 short-circuit live, `valid = true`
+    carries no cryptographic meaning (see
+    `Assumptions.mle_gate_real_when_enabled`). -/
 theorem finalize_only_on_valid {s s' : RollupState} {root : Word} {valid : Bool}
     (h : finalize s root valid = some s')
     (hnew : s'.finalizedStateRoots.get root = true)
@@ -284,8 +298,14 @@ theorem withdrawNative_solvency {s s' : RollupState} {ws : List Withdrawal}
     be a finalized validity state. Together with the circuit theorems
     (`SingleWithdrawalCircuit.withdrawal_sound`: each withdrawal is a real
     sent transfer; `WithdrawalCircuit` + finalize re-pin the ext-state —
-    F-WITHDRAW-1 closed), every L1 payout corresponds to a circuit-proven
-    withdrawal of a genuinely-spent balance. No payout without a proof. -/
+    F-WITHDRAW-1 closed), every payout THROUGH THIS PATH corresponds to a
+    circuit-proven withdrawal of a genuinely-spent balance.
+
+    SCOPE: "no payout without a proof" holds for `withdrawNative` only.
+    The burn path (`claimAuthorized`) has no rollup-side proof check —
+    see `Assumptions.BurnAuthorizationsLegitimate`. And `anchored` means
+    "validity-proof-finalized" only under
+    `Assumptions.MleVerificationEnabled` (via `finalize_only_on_valid`). -/
 theorem withdrawNative_requires_proof {s s' : RollupState} {ws : List Withdrawal}
     {mleVerified pisBound : Prop} [Decidable mleVerified] [Decidable pisBound]
     {extCommitment : Word}
@@ -298,18 +318,24 @@ theorem withdrawNative_requires_proof {s s' : RollupState} {ws : List Withdrawal
 
 /-! ### claimAuthorizedWithdrawal() — burn (partial) withdrawal payout -/
 
-/-- `claimAuthorizedWithdrawal(w)` (:642): a direct-transfer payout for a
-    burn withdrawal (auxData ≠ 0), gated by a settlement-manager
+/-- `claimAuthorizedWithdrawal(w)` (:642-665): a direct-transfer payout
+    for a burn withdrawal (auxData ≠ 0), gated by a settlement-manager
     authorization of `authDigest(w)`. Same single-use nullifier (CEI) and
-    `totalEscrowed -= amount` solvency ceiling as `withdrawNative`. -/
+    `totalEscrowed -= amount` solvency ceiling as `withdrawNative`.
+
+    NOTE this is the ONE payout path with NO proof check on the rollup
+    side: the authorization flag is its whole gate. Its legitimacy rests
+    on `Assumptions.BurnAuthorizationsLegitimate` (deployer + registered
+    settlement managers trusted); the ETH push failure reverts the call
+    (`require(ok)`, :662-663 — `Assumptions.EthSendFailureReverts`). -/
 def claimAuthorized (s : RollupState) (w : Withdrawal) : Call RollupState :=
-  if w.isEth = false then none                                   -- :644
-  else if w.auxData = 0 then none                                -- :645 must be a burn
-  else if s.nullifierUsed.get w.nullifier = true then none       -- :646 single-use
-  else if s.partialWithdrawalAuthorized.get (authDigest w) = false then none  -- :656 authorized
-  else (checkedSub s.totalEscrowed w.amount).map (fun te =>      -- :659 solvency ceiling
+  if w.isEth = false then none                                   -- :643
+  else if w.auxData = 0 then none                                -- :644 must be a burn
+  else if s.nullifierUsed.get w.nullifier = true then none       -- :645 single-use
+  else if s.partialWithdrawalAuthorized.get (authDigest w) = false then none  -- :657 authorized
+  else (checkedSub s.totalEscrowed w.amount).map (fun te =>      -- :660 solvency ceiling
          { s with
-           nullifierUsed := s.nullifierUsed.set w.nullifier true
+           nullifierUsed := s.nullifierUsed.set w.nullifier true -- :659
            totalEscrowed := te })
 
 theorem claimAuthorized_some {s s' : RollupState} {w : Withdrawal}
@@ -347,7 +373,17 @@ theorem claimAuthorized_some {s s' : RollupState} {w : Withdrawal}
     the nullifier, and only succeeds with a manager authorization for
     `authDigest(w)` (which binds ALL fields, so it can't be reused with a
     different recipient/amount). Same global-solvency guarantee as the
-    main path. -/
+    main path.
+
+    HONESTY CARVE-OUT: "authorization-required" is an ACCESS-CONTROL
+    property, not a proof property. Unlike `withdrawNative_requires_proof`,
+    NOTHING here ties the authorization to a verified circuit proof — a
+    deployer-registered manager can mint it at will
+    (`Assumptions.burn_drain_satisfiable` exhibits the resulting drain).
+    That every authorized digest comes from the proof-gated
+    `finalizePartialWithdrawal` flow is exactly
+    `Assumptions.BurnAuthorizationsLegitimate` (see
+    `Assumptions.claim_backed_by_trust` for the composition). -/
 theorem claimAuthorized_safe {s s' : RollupState} {w : Withdrawal}
     (h : claimAuthorized s w = some s') :
     w.amount ≤ s.totalEscrowed
@@ -389,7 +425,14 @@ theorem claimWithdraw_zeroes_and_pays {s s' : RollupState} {sender : Addr} {amt 
     exact ⟨hamt.symm, by simp [Mapping.get_set_eq]⟩
 
 /-- After a claim, an immediate second claim by the same caller REVERTS
-    (the pending balance is now 0). -/
+    (the pending balance is now 0).
+
+    ASSUMPTIONS: "immediate second claim" is a second ATOMIC call — the
+    model cannot represent a reentrant frame inside the first call; that
+    is excluded in Solidity by `nonReentrant` + the zero-before-send CEI
+    order (`Assumptions.SingleCallAtomicity`). A failed ETH send reverts
+    the whole call including the zeroing (`require(ok)`, :1216-1217 —
+    `Assumptions.EthSendFailureReverts`), so no credit is ever lost. -/
 theorem claimWithdraw_no_double {s s' : RollupState} {sender : Addr} {amt : U256}
     (h : claimWithdraw s sender = some (s', amt)) :
     claimWithdraw s' sender = none := by
@@ -401,33 +444,60 @@ theorem claimWithdraw_no_double {s s' : RollupState} {sender : Addr} {amt : U256
   ## COMBINED-SYSTEM SAFETY (circuits + contract)
 
   Putting the contract theorems together with the circuit theorems
-  (audit/zkp/Zkp/Circuits/...) yields the end-to-end fund-safety story:
+  (audit/zkp/Zkp/Circuits/...) yields the end-to-end fund-safety story.
+  The named assumptions each claim rests on are in
+  `Zkp.Contracts.Assumptions`; the burn path is carved out explicitly.
 
-  1. **No payout without a valid proof** (`withdrawNative_requires_proof`):
-     every withdrawal is bound (pisHash) to a verified WithdrawalCircuit
+  1. **No payout without a valid proof — `withdrawNative` path**
+     (`withdrawNative_requires_proof`): every withdrawal through
+     `withdrawNative` is bound (pisHash) to a verified WithdrawalCircuit
      proof, anchored to a finalized validity state. By the circuit's
      `SingleWithdrawalCircuit.withdrawal_sound`, that withdrawal is a real
      transfer the user actually SENT (in their sent-tx tree, in a settled
      block), and by `SpendCircuit.deducts_solvent` it was covered by a
      real balance deduction.
 
+     **CARVE-OUT — the burn path is NOT proof-backed on the rollup.**
+     `claimAuthorizedWithdrawal` (:642-665) pays escrow against a bare
+     `partialWithdrawalAuthorized` flag (:657) that any
+     deployer-registered settlement manager can set unconditionally
+     (:634); `registerSettlementManager` (:624) is deployer-only but
+     additive forever (no removal, no timelock). "Every burn payout is
+     backed by a proof-verified, challenge-surviving channel close"
+     is therefore a TRUST statement about the deployer and its
+     registered managers — `Assumptions.BurnAuthorizationsLegitimate` —
+     not a theorem; `Assumptions.burn_drain_satisfiable` shows the model
+     admits a full-escrow drain when it is violated. The honest manager
+     flow that discharges it operationally is modeled in
+     `ChannelSettlementManager.lean` (`submitPartialIntent_requires_proof`
+     + `finalizePartial_authorizes`).
+
   2. **No double payout** (`withdrawLeaf_nullifier_once` +
-     `withdrawLeaf_consumes`): the per-transfer nullifier (proved
-     collision-distinct and one-shot in `IndexedMerkle.key_absent`) is
-     consumed atomically (CEI), so the same withdrawal pays once.
+     `withdrawLeaf_consumes`; `claimAuthorized_safe` for the burn path —
+     both paths share ONE `withdrawalNullifierUsed` set, so a leaf paid
+     by either can never be paid again by either): the per-transfer
+     nullifier (proved collision-distinct and one-shot in
+     `IndexedMerkle.key_absent`) is consumed atomically (CEI, under
+     `Assumptions.SingleCallAtomicity`).
 
-  3. **Global solvency** (`withdrawNative_solvency`): Σ payouts ≤ Σ
-     deposits, enforced by the underflow-revert ceiling, independent of
-     the proofs.
+  3. **Global solvency** (`withdrawNative_solvency`, and
+     `IntmaxRollupSolvency.global_solvency` over full traces including
+     burn claims): Σ payouts ≤ Σ deposits, enforced by the
+     underflow-revert ceiling, independent of the proofs AND of the
+     burn-path trust assumption — a rogue manager can steal escrow, but
+     cannot mint it.
 
-  4. **Genuine anchoring** (`finalize_only_on_valid`): the finalized
+  4. **Genuine anchoring** (`finalize_only_on_valid`, under
+     `Assumptions.MleVerificationEnabled`): the finalized
      ext-commitments a withdrawal anchors to are written ONLY by verified
      validity proofs (`signatures_not_skippable` ⇒ no forged blocks),
      closing F-WITHDRAW-1 inside the formal model.
 
-  Net: L1 ETH out ≤ L1 ETH in, and every unit out is backed by a
-  circuit-proven, single-use, validly-finalized withdrawal. No new
-  exploitable gap at the circuit↔contract boundary.
+  Net: L1 ETH out ≤ L1 ETH in unconditionally; every unit out through
+  `withdrawNative` is backed by a circuit-proven, single-use,
+  validly-finalized withdrawal; every unit out through the burn path is
+  single-use and solvency-capped, with its LEGITIMACY resting on the
+  named deployer/manager trust assumption rather than on a proof.
 -/
 
 end IntmaxRollup

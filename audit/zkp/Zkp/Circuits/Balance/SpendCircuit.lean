@@ -56,16 +56,44 @@ structure TransferStep (F : Type) [CField F] where
   tokenIndex : F
   sib : List (HashOut F)
 
-/-- One read-deduct-write step along a shared Merkle path: reads
+/-- One read-deduct-write step over the SAME proof object: reads
     `before` at `tokenIndex` under `rootIn`, deducts `amount` (no
-    underflow), writes `newBal` giving `rootOut`. The shared `bits`
-    guarantee only the `tokenIndex` leaf changes. -/
+    underflow), writes `newBal` giving `rootOut`.
+
+    MODELING NOTE: Rust's `verify` (:366-371) and `get_root`
+    (:373-374) are called on the same `asset_merkle_proofs[i]`, so
+    they share ONE sibling vector and ONE `token_index` wire — but
+    each call runs its OWN `split_le(token_index, 32)`
+    (utils/trees/merkle_tree.rs:227): two INDEPENDENT boolean
+    decompositions, mirrored here as the separate `bitsR`/`bitsW`
+    existentials. Their identification (which is what yields "only
+    the `tokenIndex` leaf changes") is available to a consumer ONLY
+    from the named characteristic hypothesis `Merkle.PowTwoInj F 32`
+    (Goldilocks-true up to 63 bits; see Core/Merkle.lean and
+    `deductStep_toPathUpdate` below) — it is not baked into the
+    structure. Same pattern as `UpdatePrivateState.AssetUpdate` and
+    `SentTxRecord` below. -/
 def DeductStep (rootIn rootOut : HashOut F) (s : TransferStep F) : Prop :=
-  (∃ bits : List Bool, bits.length = ASSET_TREE_HEIGHT ∧
-      s.tokenIndex = bitsValue bits ∧
-      fold (u256Leaf s.before) bits s.sib = rootIn ∧
-      fold (u256Leaf s.newBal) bits s.sib = rootOut)
+  ((∃ bitsR : List Bool, bitsR.length = ASSET_TREE_HEIGHT ∧
+      s.tokenIndex = bitsValue bitsR ∧
+      fold (u256Leaf s.before) bitsR s.sib = rootIn)
+   ∧ (∃ bitsW : List Bool, bitsW.length = ASSET_TREE_HEIGHT ∧
+      s.tokenIndex = bitsValue bitsW ∧
+      fold (u256Leaf s.newBal) bitsW s.sib = rootOut))
   ∧ SubSpec s.before s.amount s.newBal
+
+/-- Under `PowTwoInj F 32`, a deduct step's two decompositions of the
+    one index wire coincide, giving the shared-path `PathUpdate` shape
+    (single-leaf-change consequences then follow from the CR theorems
+    in Core/Merkle.lean). -/
+theorem deductStep_toPathUpdate (hpow : PowTwoInj F ASSET_TREE_HEIGHT)
+    {rootIn rootOut : HashOut F} {s : TransferStep F}
+    (h : DeductStep rootIn rootOut s) :
+    PathUpdate ASSET_TREE_HEIGHT (u256Leaf s.before) (u256Leaf s.newBal)
+      s.tokenIndex s.sib rootIn rootOut := by
+  obtain ⟨⟨⟨bitsR, hbR, hivR, hfR⟩, ⟨bitsW, hbW, hivW, hfW⟩⟩, -⟩ := h
+  have hbits : bitsR = bitsW := hpow bitsR bitsW hbR hbW (by rw [← hivR, ← hivW])
+  exact ⟨bitsR, hbR, hivR, hfR, by rw [hbits]; exact hfW⟩
 
 /-- The threaded chain of deductions over all transfers, starting at
     the sender's `asset_tree_root` and ending at the post-spend root. -/
@@ -92,15 +120,22 @@ theorem deducts_solvent {rootIn rootOut : HashOut F} :
       · exact ih hrest s htl
 
 /-- The sent-tx replay guard: the slot at `nonce` was EMPTY before
-    (`verify(empty_tx, nonce, prevRoot)`), and recording the tx there
-    yields `newRoot`. Emptiness is what prevents reusing a nonce to
-    replay a spend. -/
+    (`verify(empty_tx, nonce, prevRoot)`, :389-394), and recording the
+    tx there (`get_root(tx, nonce)`, :395-398) yields `newRoot`.
+    Emptiness is what prevents reusing a nonce to replay a spend.
+    Both calls use the same `sent_tx_merkle_proof` object (shared
+    siblings and nonce wire) but run independent
+    `split_le(nonce, 32)` decompositions (merkle_tree.rs:227) —
+    mirrored as `bitsR`/`bitsW`, identified only under
+    `Merkle.PowTwoInj F 32` (same pattern as `DeductStep`). -/
 def SentTxRecord (prevRoot newRoot : HashOut F)
     (emptyLeaf txLeaf : HashOut F) (nonce : F) (sib : List (HashOut F)) : Prop :=
-  ∃ bits : List Bool, bits.length = SENT_TX_TREE_HEIGHT ∧
-    nonce = bitsValue bits ∧
-    fold emptyLeaf bits sib = prevRoot ∧
-    fold txLeaf bits sib = newRoot
+  (∃ bitsR : List Bool, bitsR.length = SENT_TX_TREE_HEIGHT ∧
+    nonce = bitsValue bitsR ∧
+    fold emptyLeaf bitsR sib = prevRoot)
+  ∧ (∃ bitsW : List Bool, bitsW.length = SENT_TX_TREE_HEIGHT ∧
+    nonce = bitsValue bitsW ∧
+    fold txLeaf bitsW sib = newRoot)
 
 /-- **Spend soundness (top level).** Bundles solvency of all transfers
     with the replay guard. `prevAssetRoot/finalAssetRoot` are the
@@ -116,7 +151,7 @@ theorem spend_sound
     (∃ bits, bits.length = SENT_TX_TREE_HEIGHT ∧ nonce = bitsValue bits ∧
        fold emptyLeaf bits sentSib = prevSentRoot) := by
   refine ⟨deducts_solvent hded, ?_⟩
-  obtain ⟨bits, hlen, hnonce, hempty, _⟩ := hsent
+  obtain ⟨⟨bits, hlen, hnonce, hempty⟩, -⟩ := hsent
   exact ⟨bits, hlen, hnonce, hempty⟩
 
 /-!

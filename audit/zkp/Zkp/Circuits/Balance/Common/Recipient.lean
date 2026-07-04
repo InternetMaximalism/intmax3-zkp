@@ -128,6 +128,23 @@ theorem extractAddr_complete (recipient : Bytes32 F)
       (addressFromBytesBE ((toBytesBE recipient).drop 12)) := by
   refine ⟨htag, rfl⟩
 
+/-- **Tag separation (F-RECIP-1 adjudication, leg 3 — now a
+    conditional theorem).** Under the named faithfulness hypothesis
+    `Builder.ReprFaithful` (true of the Goldilocks
+    `from_canonical_u64` embedding), the two recipient domain tags are
+    DISTINCT field elements: a recipient the extractor accepts
+    (`bytes[0] = ADDRESS_TAG`) can never simultaneously carry the
+    USER_ID construction's forced tag byte, and vice-versa. Since
+    `natLit` is uninterpreted, this is NOT provable without the named
+    hypothesis — which is exactly why the hypothesis must appear in
+    the signature rather than in prose. -/
+theorem tag_separation (h : ReprFaithful F) :
+    USER_ID_TAG F ≠ ADDRESS_TAG F := by
+  intro he
+  unfold USER_ID_TAG ADDRESS_TAG at he
+  have h12 : (1 : Nat) = 2 := h.natLit_inj (by decide) (by decide) he
+  exact absurd h12 (by decide)
+
 /-!
   ## SECURITY FINDING (binding gap) — bytes[1..12] are unconstrained
 
@@ -176,7 +193,10 @@ theorem extractAddr_complete (recipient : Bytes32 F)
     3. Tag separation: `extract_address` requires `bytes[0]==ADDRESS_TAG(2)`
        while the intmax receive path matches `recipientFromUserId`
        (USER_ID_TAG=1) — so an address recipient cannot be cross-replayed
-       into a receive, and vice-versa.
+       into a receive, and vice-versa. This leg is no longer prose: it is
+       the conditional theorem `tag_separation` above, under the named
+       hypothesis `Builder.ReprFaithful F` (without which the two
+       uninterpreted `natLit` tags are NOT provably distinct).
 
     Net effect = a non-canonical recipient encoding (≈2^88 recipients map
     to one L1 address), with NO fund-safety, double-spend, or inflation

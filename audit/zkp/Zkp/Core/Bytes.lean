@@ -51,9 +51,48 @@ abbrev HashOut (F : Type) := List F  -- length 4 by convention
 opaque poseidon : List F → HashOut F
 
 /-- Collision-resistance assumption, stated explicitly so any proof
-    depending on "distinct preimages ⇒ distinct digests" must name it. -/
+    depending on "distinct preimages ⇒ distinct digests" must name it.
+    NOTE: this covers the LIST-input leaf/commitment hash only. The
+    Merkle fold uses a different opaque, the 2-to-1 compression
+    `Merkle.compress`; its CR is the separate named hypothesis
+    `Merkle.CompressCR`, consumed by the binding theorems in
+    Core/Merkle.lean (`fold_inj`, `merkleVerify_binding`,
+    `pathUpdate_preserves_other`). Both share the same idealization
+    caveat documented on `Merkle.CompressCR`: injectivity is the
+    symbolic "no collision occurred" model, unsatisfiable literally
+    for a compressing hash. -/
 def PoseidonCR (F : Type) [CField F] : Prop :=
   ∀ xs ys : List F, poseidon xs = poseidon ys → xs = ys
+
+/-! ### NAMED OBSERVATION — cross-domain hash separation
+
+The audit models many struct-leaf digests as DISTINCT opaque symbols
+(`transferLeaf`, `txLeafHash`, `sendLeafHash`, `channelLeafHash`,
+`memberLeafHash`, `psLeaf`, `privateCommitment`/`commitment`, ...),
+but in Rust most of them are UNTAGGED `hash_n_to_hash_no_pad` /
+Poseidon calls over the struct's `to_vec()` — there is generally no
+per-struct domain-separation tag (the channel leaf's "CHLF" tag,
+channel_tree.rs:92, is the exception). Consequences, stated so nobody
+over-reads the per-symbol CR hypotheses:
+
+  * Per-symbol collision resistance (a `PoseidonCR`-style hypothesis
+    on ONE opaque) says nothing about CROSS-STRUCT collisions: a
+    struct whose `to_vec()` coincides with a DIFFERENT struct's
+    `to_vec()` hashes identically in Rust, yet the Lean model — with
+    two unrelated opaque symbols — cannot even express that
+    collision. Treating the symbols as independent is therefore PART
+    OF THE IDEALIZATION: it silently assumes the preimage encodings
+    never collide across struct types (often true via distinct input
+    lengths, but NOT checked pair-by-pair in Lean).
+  * Any future theorem that needs "this digest can only open to a
+    leaf of THIS struct type" must either verify a genuine tag /
+    length separation in the Rust and cite it, or take an explicit
+    cross-domain separation hypothesis — never derive it from the
+    per-symbol CR alone.
+
+This is the leaf-hash analogue of the `Merkle.CompressCR`
+idealization caveat and shares its "no colliding instance exhibited"
+symbolic reading. -/
 
 /-- 32-byte big-endian value. Modeled as its byte list (length 32). -/
 abbrev Bytes32 (F : Type) := List F
