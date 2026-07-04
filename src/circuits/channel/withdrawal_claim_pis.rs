@@ -94,8 +94,15 @@ impl WithdrawalClaimWitness {
         {
             return Err(WithdrawalClaimWitnessError::RecipientMismatch);
         }
-        let expected_nullifier =
-            WithdrawalClaim::derive_nullifier(self.close_intent.signing_digest(), self.member.pk_g);
+        // SECURITY (B-2 blocker fix): the nullifier keys on the slot's LEAF-BOUND Regev pk digest
+        // (`Bytes32::from(user_pk.poseidon_digest())`), NOT the slot-free `member_pk_g`, so a slot
+        // owner cannot grind `member_pk_g` for distinct nullifiers. See
+        // `WithdrawalClaim::derive_nullifier`.
+        let slot_regev_pk_digest = Bytes32::from(self.user_pk.poseidon_digest());
+        let expected_nullifier = WithdrawalClaim::derive_nullifier(
+            self.close_intent.signing_digest(),
+            slot_regev_pk_digest,
+        );
         if expected_nullifier != self.claim.withdrawal_nullifier {
             return Err(WithdrawalClaimWitnessError::NullifierMismatch);
         }
@@ -332,7 +339,7 @@ mod tests {
             user_amount_ct: ct0,
             withdrawal_nullifier: WithdrawalClaim::derive_nullifier(
                 close_intent.signing_digest(),
-                member.pk_g,
+                Bytes32::from(pk0.poseidon_digest()),
             ),
             claim_proof,
         };
@@ -477,7 +484,7 @@ mod tests {
             user_amount_ct: ct_d,
             withdrawal_nullifier: WithdrawalClaim::derive_nullifier(
                 close_intent.signing_digest(),
-                delegate.pk_g,
+                Bytes32::from(pk_d.poseidon_digest()),
             ),
             claim_proof,
         };

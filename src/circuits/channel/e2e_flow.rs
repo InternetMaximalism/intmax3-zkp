@@ -840,7 +840,10 @@ fn channel_native_regev_full_flow_e2e() {
     let dave_member = ChannelMember {
         pk_g: user(b_id, 21),
         member_slot: 0,
-        l1_withdrawal_recipient: address_word(91),
+        // B-1b: the claim recipient MUST equal the cosigner-signed leaf-bound recipient at the
+        // claimed slot (withdrawal_claim_pis fail-closes on a mismatch). Dave withdraws to the
+        // address bound in his own signed slot-0 leaf, not an arbitrary one.
+        l1_withdrawal_recipient: final_state.balance_state.recipients[0],
     };
     let dave_slot = final_state.balance_state.enc_balances[0].clone();
     let claim_proof =
@@ -852,7 +855,7 @@ fn channel_native_regev_full_flow_e2e() {
         user_amount_ct: dave_slot,
         withdrawal_nullifier: WithdrawalClaim::derive_nullifier(
             close_intent.signing_digest(),
-            dave_member.pk_g,
+            Bytes32::from(f.b_pks[0].poseidon_digest()),
         ),
         claim_proof,
     };
@@ -905,7 +908,10 @@ fn channel_native_regev_full_flow_e2e() {
         close_intent_digest: close_intent.signing_digest(),
         incoming_tx_hash: f.send.inter_channel_tx.tx_hash,
         receiver_pk_g: user(b_id, 21),
-        l1_recipient: address_word(91),
+        // B-1b: the claim recipient MUST equal the cosigner-signed leaf-bound recipient at the
+        // receiver's slot (post_close_claim_pis fail-closes on a mismatch). Slot 0's leaf recipient
+        // is carried from the bundle's final state into `closed_b_state` below.
+        l1_recipient: f.bundle.next_state.balance_state.recipients[0],
         receiver_amount: late_delta_ct,
         shared_native_nullifier: bytes32_word(801),
         recipient_memo: f.send.inter_channel_tx.recipient_memo.clone(),

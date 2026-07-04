@@ -2807,6 +2807,9 @@ impl WithdrawalClaimProver {
             member_slot: member_index as u8,
             l1_withdrawal_recipient: recipient,
         };
+        // SECURITY (B-2 blocker fix): the nullifier is keyed on the slot's LEAF-BOUND Regev pk
+        // digest, not the slot-free `member_pk_g` — see `WithdrawalClaim::derive_nullifier`.
+        let slot_regev_pk_digest = Bytes32::from(user_pk.poseidon_digest());
         let claim = WithdrawalClaim {
             close_intent_digest,
             member_pk_g,
@@ -2814,7 +2817,7 @@ impl WithdrawalClaimProver {
             user_amount_ct: ct.clone(),
             withdrawal_nullifier: WithdrawalClaim::derive_nullifier(
                 close_intent_digest,
-                member_pk_g,
+                slot_regev_pk_digest,
             ),
             claim_proof,
         };

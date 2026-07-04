@@ -19,9 +19,11 @@
 //!    digest AND WHICH L1 exit address (`recipient` PI — B-1b) the claim is against — replacing the
 //!    retired 1024-slot one-hot select.
 //! 4. `withdrawal_nullifier = keccak([WITHDRAWAL_CLAIM_DOMAIN] ++ close_intent_digest ++
-//!    member_pk_g)` is derived in-circuit and connected to the PI (mirrors
+//!    pk_digest)` — keyed on the LEAF-BOUND slot Regev pk digest (B-2 blocker fix), NOT the
+//!    slot-free `member_pk_g` — is derived in-circuit and connected to the PI (mirrors
 //!    `WithdrawalClaim::derive_nullifier`).
-//! 5. `channel_id`, `member_pk_g`, `recipient`, `close_intent_digest` are bound as PI limbs.
+//! 5. `channel_id`, `member_pk_g` (informational; inert — NOT the nullifier key), `recipient`,
+//!    `close_intent_digest` are bound as PI limbs.
 //!
 //! DECRYPTION STAGE 2 (over-claim CLOSED for withdrawal): `amount` is bound in-circuit to the
 //! plaintext of `user_amount_ct`. The claimant's Regev pk `(a, b)` is (1) bound to the H1-committed
@@ -381,12 +383,20 @@ where
         builder.connect(amount_pi[0], amount_hi);
         builder.connect(amount_pi[1], amount_lo);
 
-        // ── (4) withdrawal_nullifier = keccak([IMCW, close_intent_digest, member_pk_g]) ──
+        // ── (4) withdrawal_nullifier = keccak([IMCW, close_intent_digest, pk_digest]) ──
+        //
+        // SECURITY (B-2 blocker fix): the nullifier is keyed on the LEAF-BOUND slot Regev pk digest
+        // `pk_digest` (bound at `member_index` in `slot_tree_root` via the inclusion at step (3)),
+        // NOT the slot-free `member_pk_g` PI. This makes the nullifier slot-unique: a slot owner
+        // cannot grind `member_pk_g` to mint distinct nullifiers and multi-withdraw the same slot
+        // once the Manager admits delegate claims (B-2). `member_pk_g` remains an informational PI
+        // and MUST NOT be trusted as the nullifier key on-chain. Mirrors the native
+        // `WithdrawalClaim::derive_nullifier` (now keyed on `slot_regev_pk_digest`) byte-for-byte.
         let withdrawal_domain = builder.constant(F::from_canonical_u32(WITHDRAWAL_CLAIM_DOMAIN));
         let nullifier_inputs = [
             vec![withdrawal_domain],
             public_inputs.close_intent_digest.to_vec(),
-            public_inputs.member_pk_g.to_vec(),
+            pk_digest.to_vec(),
         ]
         .concat();
         let withdrawal_nullifier =
@@ -677,7 +687,7 @@ pub mod test_fixture {
             user_amount_ct: ct0.clone(),
             withdrawal_nullifier: WithdrawalClaim::derive_nullifier(
                 close_intent.signing_digest(),
-                member.pk_g,
+                Bytes32::from(pk0.poseidon_digest()),
             ),
             claim_proof,
         };
@@ -874,8 +884,30 @@ mod tests {
         );
     }
 
+    /// Security (B-2 blocker fix): the withdrawal nullifier keys on the LEAF-BOUND slot Regev pk
+    /// digest, NOT the slot-free `member_pk_g` PI. Flipping `member_pk_g` (leaving the pk_digest-
+    /// keyed nullifier intact) must NOT break the proof — otherwise a slot owner could grind
+    /// `member_pk_g` to mint distinct nullifiers and multi-withdraw the same slot up to the fund
+    /// cap once the Manager admits delegate claims (B-2). This locks that `member_pk_g` is inert.
+    #[cfg_attr(debug_assertions, ignore = "run with --release")]
+    #[test]
+    fn withdrawal_nullifier_independent_of_member_pk_g() {
+        use crate::ethereum_types::{bytes32::Bytes32, u32limb_trait::U32LimbTrait};
+        let circuit = circuit();
+        let mut witness = build_full_witness();
+        // Arbitrary different member_pk_g; the (pk_digest-keyed) nullifier PI is left unchanged.
+        witness.public_inputs.member_pk_g =
+            Bytes32::from_u32_slice(&[42, 42, 42, 42, 42, 42, 42, 42]).unwrap();
+        let pw = circuit.fill_witness(&witness).unwrap();
+        let proof = circuit
+            .data
+            .prove(pw)
+            .expect("member_pk_g is inert — flipping it must NOT break the proof");
+        circuit.data.verify(proof).expect("proof must verify");
+    }
+
     /// Negative — forged nullifier: a withdrawal_nullifier PI not equal to keccak(IMCW,
-    /// close_intent_digest, member_pk_g) is rejected by the in-circuit derivation.
+    /// close_intent_digest, pk_digest) is rejected by the in-circuit derivation.
     #[cfg_attr(debug_assertions, ignore = "run with --release")]
     #[test]
     fn withdrawal_claim_circuit_rejects_forged_nullifier() {

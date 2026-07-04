@@ -840,16 +840,27 @@ pub struct WithdrawalClaim {
 }
 
 impl WithdrawalClaim {
-    /// Nullifier `[IMCW, close_intent_digest(8), member_pk_g(8)]`.
+    /// Nullifier `[IMCW, close_intent_digest(8), slot_regev_pk_digest(8)]`.
     ///
-    /// SECURITY: `close_intent_digest` embeds `channel_id`, so the (channel, close, member) tuple
-    /// is unique even though a bare pubkey hash is channel-independent (plan §7 collision-freedom).
-    pub fn derive_nullifier(close_intent_digest: Bytes32, member_pk_g: Bytes32) -> Bytes32 {
+    /// SECURITY (B-2 blocker fix, tasks/reg-chain-1024-threat-model.md): the nullifier is keyed on
+    /// the slot's LEAF-BOUND Regev pk digest (`Bytes32::from(RegevPk::poseidon_digest())`), NOT the
+    /// slot-free `member_pk_g`. Under Option B a delegate has no L1 registration, so once the Manager
+    /// admits delegate claims (B-2) `member_pk_g` is no longer tied to a registered cosigner; if it
+    /// still keyed the nullifier, a slot owner could grind `member_pk_g` to mint unlimited distinct
+    /// nullifiers and multi-withdraw the same slot up to the fund cap. `regev_pk_digest` is a field
+    /// of the cosigner-signed slot leaf opened at `member_index` in the withdrawal-claim proof, so
+    /// each signed slot yields EXACTLY ONE nullifier and only the slot owner (who needs the Regev
+    /// secret to decrypt) can produce it. Duplicate Regev keys across slots collapse to one
+    /// withdrawal (self-loss, symmetric to the accepted duplicate-pk_g risk).
+    ///
+    /// `close_intent_digest` embeds `channel_id`, so the (channel, close, slot-identity) tuple is
+    /// unique even though a bare digest is channel-independent (plan §7 collision-freedom).
+    pub fn derive_nullifier(close_intent_digest: Bytes32, slot_regev_pk_digest: Bytes32) -> Bytes32 {
         hash_words(
             &[
                 vec![WITHDRAWAL_CLAIM_DOMAIN],
                 close_intent_digest.to_u32_vec(),
-                member_pk_g.to_u32_vec(),
+                slot_regev_pk_digest.to_u32_vec(),
             ]
             .concat(),
         )
@@ -1830,11 +1841,21 @@ mod tests {
     }
 
     #[test]
-    fn withdrawal_nullifier_depends_on_member_pubkey_hash() {
+    fn withdrawal_nullifier_depends_on_slot_regev_digest() {
+        // B-2 blocker fix: the nullifier now keys on the slot's LEAF-BOUND Regev pk digest (here
+        // stood in by distinct 32-byte values), NOT the slot-free member_pk_g. Distinct slot
+        // identities ⇒ distinct nullifiers; a shared identity ⇒ the SAME nullifier (double-spend
+        // guard) — see `WithdrawalClaim::derive_nullifier`. The `member_pk_g` argument no longer
+        // exists, so grinding it provably cannot change the nullifier (type-level guarantee).
         let close_digest = Bytes32::from_u32_slice(&[7, 0, 0, 0, 0, 0, 0, 0]).unwrap();
         let a = WithdrawalClaim::derive_nullifier(close_digest, pubkey_hash(10));
         let b = WithdrawalClaim::derive_nullifier(close_digest, pubkey_hash(11));
         assert_ne!(a, b);
+        // Same slot identity + same close ⇒ identical nullifier (one withdrawal per slot).
+        assert_eq!(
+            a,
+            WithdrawalClaim::derive_nullifier(close_digest, pubkey_hash(10))
+        );
         // The close-intent digest (which embeds channel_id) is part of the nullifier preimage.
         let other_close = Bytes32::from_u32_slice(&[8, 0, 0, 0, 0, 0, 0, 0]).unwrap();
         assert_ne!(
