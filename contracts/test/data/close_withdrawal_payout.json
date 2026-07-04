@@ -1,14 +1,14 @@
 {
   "withdrawals": [
     {
-      "recipient": "0xed5e1c643d4726735cc564effa5d6ac2cc1a8fa8",
+      "recipient": "0x1b176cc7fa31642ee9ece93d8854ae7b37790f5b",
       "token_index": 0,
       "amount": "3",
-      "nullifier": "0x900b414090ef2c8ee6b4fdc9a1590159fc2a56a7d7e227a3d805830158df9a4d",
+      "nullifier": "0xc1d75e17872092775fa29a057f52993bb48f1527d5da0f86588af4517ed733fc",
       "aux_data": "0x0000000000000000000000000000000000000000000000000000000000000000"
     }
   ],
   "withdrawal_prover": "0x09637b2ba62a2a5e9695b1e9ffa8d8f9fba63816",
   "block_number": 3,
-  "ext_commitment": "0x552cd014dbf771ee0a0f86aa0ac9525ec370c10d721ec098016a392152d46b06"
+  "ext_commitment": "0xb856a675d8dc276e6a6a79aa02924a378fac42edeec3297c05f4f6998f544c94"
 }
