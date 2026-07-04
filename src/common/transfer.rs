@@ -1,8 +1,5 @@
 use crate::{
-    common::{
-        channel_id::{ChannelId, ChannelIdTarget},
-        u63::{BlockNumber, BlockNumberTarget},
-    },
+    common::channel_id::{ChannelId, ChannelIdTarget},
     ethereum_types::{
         bytes32::{BYTES32_LEN, Bytes32, Bytes32Target},
         u32limb_trait::{U32LimbTargetTrait as _, U32LimbTrait as _},
@@ -39,13 +36,21 @@ pub struct Transfer {
 }
 
 /// Transfer that is already settled in the chain, which is used to derive nullifier
+///
+/// SECURITY (F-WD-2): the nullifier preimage binds the sender's `nonce` (a
+/// one-time, sequential, settlement-INDEPENDENT identifier of the deduction),
+/// NOT the settlement block. Settling the same sender tx into two blocks now
+/// yields the SAME nullifier, so a double-settlement is caught by the on-chain
+/// `withdrawalNullifierUsed` set (withdrawal) and the recipient's indexed
+/// nullifier merkle (receive), instead of producing two distinct nullifiers for
+/// one balance deduction.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SettledTransfer {
     pub inner: Transfer,
     pub from: ChannelId,
     pub transfer_index: u32,
-    pub block_number: BlockNumber,
+    pub nonce: u32,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -61,7 +66,7 @@ pub struct SettledTransferTarget {
     pub inner: TransferTarget,
     pub from: ChannelIdTarget,
     pub transfer_index: Target,
-    pub block_number: BlockNumberTarget,
+    pub nonce: Target,
 }
 
 impl Transfer {
@@ -93,17 +98,12 @@ impl Transfer {
 }
 
 impl SettledTransfer {
-    pub fn new(
-        inner: Transfer,
-        from: ChannelId,
-        transfer_index: u32,
-        block_number: BlockNumber,
-    ) -> Self {
+    pub fn new(inner: Transfer, from: ChannelId, transfer_index: u32, nonce: u32) -> Self {
         Self {
             inner,
             from,
             transfer_index,
-            block_number,
+            nonce,
         }
     }
 
@@ -112,7 +112,7 @@ impl SettledTransfer {
             self.inner.to_u64_vec(),
             self.from.to_u64_vec(),
             vec![self.transfer_index as u64],
-            self.block_number.to_u64_vec(),
+            vec![self.nonce as u64],
         ]
         .concat()
     }
@@ -199,7 +199,13 @@ impl SettledTransferTarget {
             inner: TransferTarget::new(builder, is_checked),
             from: ChannelIdTarget::new(builder, is_checked),
             transfer_index: builder.add_virtual_target(),
-            block_number: BlockNumberTarget::new(builder, is_checked),
+            // SECURITY (F-WD-2): `nonce` is treated exactly like the sibling
+            // `transfer_index` — an unchecked virtual target here; the range /
+            // binding to the deduction is imposed by every caller (the tx nonce
+            // is range-checked and merkle-verified at index=nonce, or connected
+            // to the spend proof's tx). Do NOT range-check here to avoid
+            // over-constraining relative to transfer_index.
+            nonce: builder.add_virtual_target(),
         }
     }
 
@@ -211,7 +217,7 @@ impl SettledTransferTarget {
             inner: TransferTarget::constant(builder, value.inner.clone()),
             from: ChannelIdTarget::constant(builder, value.from),
             transfer_index: builder.constant(F::from_canonical_u32(value.transfer_index)),
-            block_number: BlockNumberTarget::constant(builder, value.block_number),
+            nonce: builder.constant(F::from_canonical_u32(value.nonce)),
         }
     }
 
@@ -220,7 +226,7 @@ impl SettledTransferTarget {
             self.inner.to_vec(),
             self.from.to_vec(),
             vec![self.transfer_index],
-            self.block_number.to_vec(),
+            vec![self.nonce],
         ]
         .concat()
     }
@@ -244,7 +250,7 @@ impl SettledTransferTarget {
             self.transfer_index,
             F::from_canonical_u32(value.transfer_index),
         );
-        self.block_number.set_witness(witness, value.block_number);
+        witness.set_target(self.nonce, F::from_canonical_u32(value.nonce));
     }
 }
 

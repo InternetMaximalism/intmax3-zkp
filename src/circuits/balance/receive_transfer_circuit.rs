@@ -274,13 +274,17 @@ where
         }
 
         // private state update
-        let tx_block_number = self.tx_settlement.tx_block_number();
+        // SECURITY (F-WD-2): nullifier binds the sender `nonce` (settlement-
+        // independent), not tx_block_number. `tx_settlement.tx.nonce` is bound
+        // to the deduction: tx_settlement checks `spend_pis.tx == tx` and
+        // `spend_pis.is_valid`, so the tx (incl. nonce) equals the deduction's
+        // spend proof tx.
         let transfer = &self.transfer_witness.transfer;
         let settled_transfer = SettledTransfer::new(
             transfer.clone(),
             sender_user_id,
             self.transfer_witness.transfer_index,
-            tx_block_number,
+            self.tx_settlement.tx.nonce,
         );
         let nullifier = settled_transfer.nullifier();
         if self.update_private_state.token_index != transfer.token_index {
@@ -466,11 +470,16 @@ impl<const D: usize> ReceiveTransferTarget<D> {
             .connect(builder, sender_prev_pis.private_commitment.clone());
         builder.assert_one(spend_pis.is_valid.target);
 
+        // SECURITY (F-WD-2): nullifier binds the sender `nonce` (settlement-
+        // independent), not tx_block_number. `tx.nonce` (tx = &tx_settlement.tx)
+        // is bound to the deduction: tx_settlement connects `tx` to the spend
+        // proof's tx (tx.connect(&spend_public_inputs.tx)) and asserts
+        // spend_pis.is_valid, so the nonce equals the deduction's spend tx nonce.
         let settled_transfer = SettledTransferTarget {
             inner: transfer_witness.transfer.clone(),
             from: tx_settlement.channel_id.clone(),
             transfer_index: transfer_witness.transfer_index,
-            block_number: tx_block_number.clone(),
+            nonce: tx.nonce,
         };
         let settled_nullifier = settled_transfer.nullifier(builder);
 
@@ -963,12 +972,12 @@ mod tests {
             receiver_asset_tree.prove(transfer_witness.transfer.token_index as u64);
 
         let mut receiver_nullifier_tree = receiver_full_state.nullifier_tree.clone();
-        let tx_block_number = tx_settlement.tx_block_number();
+        // SECURITY (F-WD-2): settlement-independent nonce, matching the circuit.
         let settled_transfer = SettledTransfer::new(
             transfer_witness.transfer.clone(),
             sender_user_id,
             transfer_witness.transfer_index,
-            tx_block_number,
+            tx_settlement.tx.nonce,
         );
         let nullifier = settled_transfer.nullifier();
         let nullifier_proof = receiver_nullifier_tree
