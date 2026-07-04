@@ -118,3 +118,31 @@ via **B1** (balance-slot leaf extended with `recipient`).
   no uint16 surgery needed on-chain (delegateCount stays off-chain/in-state; the close PI
   delegate_count limb still exists — widen ONLY that if >255 delegates must appear in a close).
 - **B-3 — fixtures/VKs regen + full-suite + redeploy.**
+
+## ⚠️ B-2 BLOCKER (found 2026-07-04, pre-implementation trace): the withdrawal nullifier is keyed on a SLOT-FREE `member_pk_g`
+Tracing `withdrawal_claim_circuit.rs` before touching the contract: `member_pk_g` is a PI that is
+used ONLY to key `withdrawal_nullifier = keccak([IMCW] ++ close_intent_digest ++ member_pk_g)`
+(:384-394) and is **NEVER bound to the claimant's slot**. The signed slot leaf binds the *Regev* key
+digest `pk_digest = poseidon(a,b)` (:333,358), the amount digest, and the recipient — NOT `pk_g`.
+Today this is sound ONLY because the Manager gates on `registeredMemberIndexPlusOne[memberPkG]` +
+`registeredRecipientOf[memberPkG]` (Manager:1045-1050), which tie `member_pk_g` to a registered
+cosigner (one registered pkG ⇒ one nullifier ⇒ one withdrawal).
+
+**If B-2 merely relaxes those on-chain gates to admit delegates (obligation-3 as written),
+`member_pk_g` becomes fully free for delegates ⇒ NULLIFIER-GRINDING theft:** a delegate who owns
+slot i (knows its Regev secret, so can produce valid proofs) submits N proofs varying `member_pk_g`
+→ N distinct nullifiers → slot i's amount paid N times to its (leaf-bound) recipient, up to the fund
+cap → **drains other members' funds.** (Cosigner path unaffected; post-close path is NOT affected —
+its `receiver_pk_g` is bound into the settled-tx `tx_hash` accumulator inclusion, :11-12,27-28.)
+
+**⇒ B-2 is NOT contract-only.** Enabling delegate withdrawal safely requires re-binding the
+withdrawal nullifier to a LEAF-COMMITTED slot identity. RECOMMENDED: key it on the already-computed,
+leaf-bound `pk_digest` (the slot's Regev pk digest) instead of the free `member_pk_g`. Then each
+signed slot ⇒ exactly one nullifier; only the slot owner (needs the Regev secret) can mint it;
+duplicate-Regev-key across slots collapses to one withdrawal (self-loss, symmetric to the accepted
+duplicate-pk_g risk). This is a CIRCUIT change (withdrawal_claim VK + fixtures regen — folds into
+B-3) plus the Manager derives/checks the nullifier over the same leaf-bound value. `member_pk_g` may
+stay as an informational PI but MUST NOT be the nullifier key.
+Alternative (rejected): bind `pk_g` into the leaf (re-widen H1 leaf again) — delegates' `pk_g` has
+no other on-chain role under Option B, so this adds a field for nothing; `pk_digest` re-key is
+strictly cheaper.
