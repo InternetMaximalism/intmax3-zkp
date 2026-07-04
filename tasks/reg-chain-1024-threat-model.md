@@ -146,3 +146,35 @@ stay as an informational PI but MUST NOT be the nullifier key.
 Alternative (rejected): bind `pk_g` into the leaf (re-widen H1 leaf again) — delegates' `pk_g` has
 no other on-chain role under Option B, so this adds a field for nothing; `pk_digest` re-key is
 strictly cheaper.
+
+### BLOCKER RESOLVED (2026-07-04, commit fbcf448 — owner chose the recommended pk_digest re-key)
+`WithdrawalClaim::derive_nullifier` + the in-circuit keccak now key on the leaf-bound
+`Bytes32::from(RegevPk::poseidon_digest())`; `member_pk_g` stays as an INERT informational PI (new
+circuit test `withdrawal_nullifier_independent_of_member_pk_g` locks it). PI LAYOUT UNCHANGED ⇒ no
+Verifier.sol signature change; only the withdrawal-claim VK DIGEST + fixtures change (B-3). Full lib
+suite 377/377. Independent adversarial review of the re-key: IN FLIGHT.
+
+## B-2 scope (Solidity Manager) — READY once the re-key review clears
+Traced `ChannelSettlementManager.submitWithdrawalClaim` (:1043-1050) and `submitPostCloseClaim`
+(:1093-1098): both gate on `registeredMemberIndexPlusOne[pkG] != 0` (membership) AND
+`registeredRecipientOf[pkG] == claim.recipient` (recipient). Under Option B + B-1b BOTH are now
+**subsumed by the proof** and BLOCK delegates (who are never registered):
+- **Membership** = the proof's `slot_inclusion.verify` of the claimant slot leaf against
+  `slot_tree_root` committed in the signed `finalizedBalanceStateH1` — only slots in the cosigner-
+  signed final state can be claimed; an attacker cannot add themselves without cosigner sigs, and
+  needs the Regev secret to decrypt the amount. The on-chain membership map is redundant.
+- **Recipient** = B-1b leaf binding: the circuit connects `claim.recipient` to the signed slot
+  leaf's `recipient` field, so `claim.recipient` provably equals the cosigner-signed exit address
+  (cosigners' genesis recipients are set identically to their reg-record recipients, so dropping the
+  map does not change their payout).
+- **Withdrawal nullifier** is caller-supplied and the Manager only records it
+  (`usedWithdrawalNullifiers`); after fbcf448 the PROOF binds it to the leaf-bound `pk_digest`, so
+  the Manager MUST NOT recompute it from `member_pk_g` (it doesn't today) and MUST keep trusting the
+  proof-committed value. Post-close keeps its on-chain `_deriveSharedNativeNullifier` recompute
+  (unchanged; receiver_pk_g is tx_hash-bound).
+**B-2 change = REMOVE the two gates (`NotChannelMember` + `RecipientMismatch`) from BOTH claim
+functions.** Keep the registration writes for now (harmless; cosigner-only registration cleanup is
+optional). `withdrawalCredits` keys on `claim.recipient` (leaf-bound) and the fund cap is unchanged
+⇒ value conservation preserved. This needs its OWN independent adversarial review (removing an
+on-chain authZ gate is value-flow-critical) + B-3 VK re-pin + fixture regen + redeploy. Do NOT
+implement until the fbcf448 re-key review returns SOUND.
