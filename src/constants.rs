@@ -38,19 +38,49 @@ pub const ASSET_TREE_HEIGHT: usize = TOKEN_INDEX_BITS;
 pub const NULLIFIER_TREE_HEIGHT: usize = 32;
 pub const SENT_TX_TREE_HEIGHT: usize = 32;
 
-// Per-channel member tree (one SPHINCS+ key per member, no multisig/threshold).
+// Per-channel REGISTERED member tree (one Goldilocks signing key per member).
 // `ChannelLeaf.member_pubkeys_root` commits the ordered member leaves
-// `MemberLeaf { pk_g, regev_pk_digest }`, indexed by member slot
-// 0..MAX_CHANNEL_MEMBERS. The tree MUST hold MAX_CHANNEL_MEMBERS leaf slots, so its height is
-// log2(MAX_CHANNEL_MEMBERS): a channel's `member_count` active members occupy slots
-// 0..member_count and the remaining slots are empty leaves.
+// `MemberLeaf { pk_g, pk_b, regev_pk_digest }`, indexed by member slot 0..MAX_COSIGNERS.
 //
-// SECURITY/INVARIANT: 1 << MEMBER_TREE_HEIGHT == MAX_CHANNEL_MEMBERS. Genesis (`create_channel`)
-// inserts every padded slot index (0..MAX_CHANNEL_MEMBERS) into this tree, and `channel_reg_step`
-// asserts `leaf_hashes.len() == 1 << MEMBER_TREE_HEIGHT`. If this height is smaller than log2(MAX),
-// the incremental Merkle tree panics on the first slot index >= 2^height
-// (incremental_merkle_tree.rs:72). MAX=1024 => height 10.
-pub const MEMBER_TREE_HEIGHT: usize = 10;
+// SECURITY (Option B, tasks/reg-chain-1024-threat-model.md): L1 registration covers ONLY the
+// <= MAX_COSIGNERS cosigners, so this tree — the root written at `channel_reg_step` and the root
+// the validity `update_channel_tree` bp-slot inclusion opens against — holds exactly the
+// MAX_COSIGNERS cosigner slots. A channel's `member_count` active COSIGNERS occupy slots
+// 0..member_count; the remaining slots are empty leaves. Delegates are NOT in this tree: they are
+// authenticated by the cosigner-signed H1 balance-slot tree (BALANCE_SLOT_TREE_HEIGHT), never by
+// prior L1 registration. The bp is always a cosigner (`bp_member_slot < member_count`), so the
+// validity-side inclusion never needs a delegate slot.
+//
+// This tree is DISTINCT from the wallet's LIVE-membership tree (see
+// [`WALLET_MEMBER_TREE_HEIGHT`]) — do not conflate them: their roots are equal only for a channel
+// with zero delegates.
+//
+// SECURITY/INVARIANT: 1 << MEMBER_TREE_HEIGHT == MAX_COSIGNERS (const-asserted below).
+// `channel_reg_step` asserts `leaf_hashes.len() == 1 << MEMBER_TREE_HEIGHT`. If this height were
+// smaller than log2(MAX_COSIGNERS), the incremental Merkle tree panics on the first slot index
+// >= 2^height (incremental_merkle_tree.rs:72) — it never silently truncates.
+pub const MEMBER_TREE_HEIGHT: usize = 4;
+const _: () = assert!(
+    1 << MEMBER_TREE_HEIGHT == MAX_COSIGNERS,
+    "MEMBER_TREE_HEIGHT must be log2(MAX_COSIGNERS)"
+);
+
+/// Height of the WALLET-side LIVE membership tree (`wallet_core::member_pubkeys_root`): the
+/// off-chain P4-1/A11 anchoring over ALL active participants — cosigners AND delegates — up to
+/// `MAX_CHANNEL_MEMBERS` slots. This root lives in the member-signed `ChannelRecord` and EVOLVES
+/// with every delegate join.
+///
+/// SECURITY (Option B divergence — INTENTIONAL): this is a DIFFERENT tree from the registered
+/// member tree ([`MEMBER_TREE_HEIGHT`], cosigners-only, written once at registration). The wallet
+/// root is never compared to the registered root anywhere; it anchors the off-chain member set
+/// that peers verify (`verify_snapshot` / payload checks), while the registered root authenticates
+/// the block producer in the validity circuit. Keeping the heights different (10 vs 4) makes
+/// accidental conflation fail loudly (root mismatch / proof length mismatch) instead of silently.
+pub const WALLET_MEMBER_TREE_HEIGHT: usize = 10;
+const _: () = assert!(
+    1 << WALLET_MEMBER_TREE_HEIGHT == MAX_CHANNEL_MEMBERS,
+    "WALLET_MEMBER_TREE_HEIGHT must be log2(MAX_CHANNEL_MEMBERS)"
+);
 
 // Payment channels (detail2 §G-1 / abstract2 §2.1, §2.5)
 /// Maximum channel membership under the pad-to-MAX (N-member) model. Every channel uses

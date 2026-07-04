@@ -498,16 +498,25 @@ fn member_at(members: &[MemberInfo], slot: usize) -> WResult<&MemberInfo> {
         .ok_or_else(|| WalletError(format!("no member at slot {slot}")))
 }
 
-/// The canonical Poseidon `MemberTree` root over the channel's registered member leaves
+/// The wallet's LIVE-membership Poseidon `MemberTree` root over the channel's member leaves
 /// `MemberLeaf{pk_g, pk_b, regev_pk_digest}`, in slot order (active slots
-/// `0..member_count+delegate_count`; padding slots are empty leaves, pad-to-MAX D6).
+/// `0..member_count+delegate_count`; padding slots are empty leaves, pad-to-MAX D6). Built over
+/// the height-`WALLET_MEMBER_TREE_HEIGHT` wallet tree (`MAX_CHANNEL_MEMBERS` slots).
 ///
-/// SECURITY (P4-1, A11): this is the SAME root the validity / registration circuits commit
-/// (`block_witness_generator::ChannelMemberKeys::member_tree.get_root()`,
-/// `channel_reg_step`). Anchoring the wallet's `ChannelRecord.member_pubkeys_root` to this root
+/// SECURITY (P4-1, A11): anchoring the wallet's `ChannelRecord.member_pubkeys_root` to this root
 /// (instead of the previous keccak-over-`pk_g`-only) commits the FULL `(pk_g, pk_b, regev_pk)`
 /// triple jointly, so a peer cannot substitute one member's `pk_b` (or Regev key) independently of
 /// their `pk_g`. The off-chain channel-tx A11 check then reads `pk_b` from this AUTHENTICATED set.
+///
+/// SECURITY (Option B divergence — INTENTIONAL, tasks/reg-chain-1024-threat-model.md): this is
+/// NOT the on-chain REGISTERED root. The registered root (`channel_reg_step`'s
+/// `member_pubkeys_root_for`, height `MEMBER_TREE_HEIGHT`) covers ONLY the genesis cosigners and
+/// never changes; THIS root covers the LIVE membership (cosigners + delegates) and evolves with
+/// every `join_delegate`. The two roots are equal for no channel with a delegate and are NEVER
+/// compared anywhere: this one anchors the off-chain member set peers verify
+/// (`verify_snapshot` / payload checks), the registered one authenticates the block producer in
+/// the validity circuit. Delegates are authenticated by the cosigner-signed H1 slot tree, not by
+/// L1 registration.
 ///
 /// `members` MUST cover slots `0..member_count+delegate_count` bijectively (the caller checks this
 /// via `verify_snapshot` / `check_slot`); `pk_g` for each slot is taken from the record (the value
@@ -515,14 +524,12 @@ fn member_at(members: &[MemberInfo], slot: usize) -> WResult<&MemberInfo> {
 /// `MemberInfo`.
 ///
 /// SECURITY (delegate account): the loop covers ACTIVE participants = members
-/// (`0..member_count`) AND delegates (`member_count..member_count+delegate_count`). Delegates carry
-/// a real `MemberLeaf{pk_g, pk_b, regev_pk_digest}` identity so they can send (A11) and withdraw at
-/// close, distinguished from members ONLY by slot index. This MUST match the Phase-1 native
-/// `member_pubkeys_root_for` (channel_reg_step.rs, loops `0..member_count+delegate_count`) and the
-/// keccak reg-chain, so the wallet's `member_pubkeys_root` equals the registered root. With
-/// `delegate_count = 0` this is byte-for-byte the legacy `0..member_count` loop.
+/// (`0..member_count`) AND delegates (`member_count..member_count+delegate_count`). Delegates
+/// carry a real `MemberLeaf{pk_g, pk_b, regev_pk_digest}` identity so they can send (A11) and
+/// withdraw at close, distinguished from members ONLY by slot index. With `delegate_count = 0`
+/// this is byte-for-byte the legacy `0..member_count` loop.
 fn member_pubkeys_root(record: &ChannelRecord, members: &[MemberInfo]) -> WResult<Bytes32> {
-    let mut tree = MemberTree::init();
+    let mut tree = MemberTree::init_wallet_membership();
     let active = record.member_count as usize + record.delegate_count as usize;
     for slot in 0..active {
         let m = member_at(members, slot)?;
@@ -3394,15 +3401,14 @@ pub fn build_channel_withdrawal(
     // registration block — and the on-chain `registerChannel` built from the same record below —
     // reproduce the SAME member set the close path signs against). Without them, self-generate the
     // deterministic fixture registration (legacy parity).
-    // P5-B delegate support: `cli_member_keys` is the channel's ACTIVE set (the
-    // `TEST_ACTIVE_MEMBERS` co-signing members FIRST, then any delegates). `delegate_count =
-    // active - TEST_ACTIVE_MEMBERS`, so the registration record / block carry the SAME
-    // member/delegate split the channel state and the on-chain `registerChannel` use (the close
-    // member-set commitment stays member-only; the delegate is registered for the withdrawal
-    // path).
-    let active_count = cli_member_keys
-        .map(|mk| mk.len())
-        .unwrap_or(TEST_ACTIVE_MEMBERS);
+    //
+    // SECURITY (Option B, tasks/reg-chain-1024-threat-model.md): L1 registration is
+    // COSIGNERS-ONLY. `cli_member_keys` may carry the channel's full ACTIVE set (the
+    // `TEST_ACTIVE_MEMBERS` co-signing members FIRST, then any delegates); only the leading
+    // cosigner slice enters the registration record/block (`delegate_count = 0`). Delegates are
+    // authenticated by the cosigner-signed H1 balance-slot tree, never by prior L1 registration
+    // (their claim-recipient binding is B-1c).
+    let active_count = TEST_ACTIVE_MEMBERS;
     let member_keys = {
         let mut generator = block_witness_generator.borrow_mut();
         let keys = match cli_member_keys {
@@ -3412,12 +3418,9 @@ pub fn build_channel_withdrawal(
                     "build_channel_withdrawal: expected at least {TEST_ACTIVE_MEMBERS} active keys, got {}",
                     mk.len()
                 );
-                let delegate_count = (mk.len() - TEST_ACTIVE_MEMBERS) as u32;
-                generator.add_channel_registration_keys_split(
+                generator.add_channel_registration_keys(
                     user_id.channel_id(),
-                    ChannelMemberKeys::from_member_keys(mk),
-                    TEST_ACTIVE_MEMBERS as u32,
-                    delegate_count,
+                    ChannelMemberKeys::from_member_keys(&mk[..TEST_ACTIVE_MEMBERS]),
                 )
             }
             None => generator.add_channel_registration(user_id.channel_id()),
@@ -3432,6 +3435,8 @@ pub fn build_channel_withdrawal(
     // regev_pk_digest is the canonical Bytes32 of the SAME Poseidon identity in `member_tree`; the
     // recipient is the deterministic per-(channel, slot) test L1 address. These EXACT values feed
     // the on-chain `registerChannel`, so the channel_reg keccak chain reproduces on-chain.
+    // Option B: `active_count = TEST_ACTIVE_MEMBERS` — the emitted arrays carry the COSIGNERS
+    // only (registration never carries delegates).
     let channel_id_u32 = user_id.channel_id();
     let bp_member_slot: u8 = 0;
     let mut member_pk_gs = Vec::with_capacity(active_count);

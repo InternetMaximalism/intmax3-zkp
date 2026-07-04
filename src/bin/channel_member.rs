@@ -211,9 +211,10 @@ fn keys_for(seed: u64) -> MemberKeys {
 /// CLI co-signing members (slots 0..3) FOLLOWED BY the delegate (slot 3). The delegate uses
 /// `keys_for(DELEGATE_SEED)` — the SAME identity `gen-contribution <bal> <DELEGATE_SEED>` produces
 /// — so the on-chain registration (member set + delegate) matches the channel state `init` builds.
-/// `member_count = TEST_ACTIVE_MEMBERS = 3`, `delegate_count = 1`. Used by `export-reg-record` (the
-/// deploy's `registerChannel`) and `withdraw` (the registration block it posts) so both bind the
-/// SAME 4-active registration the close proof's delegate_count limb requires.
+/// `member_count = TEST_ACTIVE_MEMBERS = 3`, `delegate_count = 1` in the CHANNEL STATE. Used by
+/// `export-reg-record` and `withdraw`, which under Option B register the COSIGNER slice only (L1
+/// registration never carries delegates; the delegate is authenticated by the cosigner-signed H1
+/// slot tree).
 fn cli_active_keys() -> Vec<MemberKeys> {
     let mut v: Vec<MemberKeys> = CLI_SLOTS
         .iter()
@@ -1478,9 +1479,11 @@ fn cmd_withdraw(args: &[String]) {
                  reconstruct the deposit block that matches the on-chain deposit). Fail-closed.",
             )
         });
-        // ACTIVE set = 3 members + delegate (the registration block this posts must reproduce the
-        // SAME 4-active registration the deploy registered, so finalize matches; the close proof's
-        // delegate_count limb requires delegate_count = 1).
+        // ACTIVE set = 3 members + delegate. Option B: `build_channel_withdrawal` registers the
+        // COSIGNER slice only (delegate_count = 0), matching `export-reg-record`'s cosigner-only
+        // deploy registration, so finalize matches. NOTE (B-2 dependency): an on-chain CLOSE of a
+        // delegate-bearing channel still exposes its live delegate_count in the close PI — the
+        // Manager-side count reconciliation moves to the B-2 contract change.
         let members = cli_active_keys();
         eprintln!(
             "[withdraw] integrated: real members + delegate + real deposit (fund {fund}); withdraw \
@@ -1737,11 +1740,16 @@ fn cmd_withdraw(args: &[String]) {
 /// `build_channel_withdrawal` emits.
 fn cmd_export_reg_record() {
     let channel_id = channel_id_env();
-    // The channel's ACTIVE set: the 3 CLI co-signing members FIRST, then the delegate (slot 3 — the
-    // SAME identity `gen-contribution <bal> <DELEGATE_SEED>` produces, so the on-chain registration
-    // matches the channel state built by `init`). member_count = 3, delegate_count = 1.
-    let members = cli_active_keys();
-    let delegate_count = members.len() - TEST_ACTIVE_MEMBERS;
+    // SECURITY (Option B, tasks/reg-chain-1024-threat-model.md): L1 registration is
+    // COSIGNERS-ONLY — the record carries the 3 CLI co-signing members with `delegate_count = 0`.
+    // Delegates (the browser slots >= TEST_ACTIVE_MEMBERS) are authenticated by the
+    // cosigner-signed H1 balance-slot tree, never by prior L1 registration; their claim-recipient
+    // binding is the B-1c leaf `recipient` field (NOT `registeredRecipientOf`).
+    let members: Vec<MemberKeys> = cli_active_keys()
+        .into_iter()
+        .take(TEST_ACTIVE_MEMBERS)
+        .collect();
+    let delegate_count = 0usize;
     let active = members.len();
     let record = ChannelMemberKeys::from_member_keys(&members).to_reg_record_split(
         channel_id,

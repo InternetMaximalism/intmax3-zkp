@@ -199,9 +199,14 @@ pub struct ChannelRecord {
     // MAX_CHANNEL_MEMBERS > 32: std serde only derives arrays up to 32, so use serde-big-array.
     #[serde(with = "serde_big_array::BigArray")]
     pub member_pk_gs: [Bytes32; MAX_CHANNEL_MEMBERS],
-    /// L1/keccak digest form of the channel's member tree root. The in-circuit
-    /// `ChannelLeaf.member_pubkeys_root` is a Poseidon root (different representation, DB); this
-    /// keccak form anchors the same member set at the L1 boundary.
+    /// Bytes32 form of the wallet's LIVE-membership tree root
+    /// (`wallet_core::member_pubkeys_root`, height `WALLET_MEMBER_TREE_HEIGHT`, cosigners +
+    /// delegates — evolves with delegate joins).
+    ///
+    /// SECURITY (Option B divergence — INTENTIONAL): this is NOT the on-chain REGISTERED root.
+    /// `ChannelLeaf.member_pubkeys_root` (validity side, height `MEMBER_TREE_HEIGHT`) covers only
+    /// the genesis COSIGNERS and never changes; the two are different trees and are never
+    /// compared. This root anchors the off-chain P4-1/A11 member set that peers verify.
     pub member_pubkeys_root: Bytes32,
     /// The slot whose member acts as block-proposer (replaces `bp_key_id`). Must be `<
     /// member_count`.

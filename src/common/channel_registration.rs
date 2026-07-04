@@ -26,7 +26,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     common::channel_id::{ChannelId, ChannelIdTarget},
-    constants::{MAX_CHANNEL_MEMBERS, MAX_COSIGNERS},
+    constants::MAX_COSIGNERS,
     ethereum_types::{
         address::{Address, AddressTarget},
         bytes32::{Bytes32, Bytes32Target},
@@ -77,30 +77,34 @@ pub struct MemberRegEntryTarget {
 
 /// A single on-chain channel registration: a channel id, the bp member slot, the active member
 /// count, and a FIXED 16-slot member array (active first, padding zeroed).
+///
+/// SECURITY (Option B, tasks/reg-chain-1024-threat-model.md): L1 registration covers ONLY the
+/// <= [`MAX_COSIGNERS`] cosigners, so the record has exactly `MAX_COSIGNERS` slots — matching the
+/// DEPLOYED contract's fixed-16 `_channelRegHashChain` byte-for-byte. Delegates are authenticated
+/// by the cosigner-signed H1 balance-slot tree, never by prior L1 registration; registration-
+/// producing paths emit `delegate_count = 0`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ChannelRegRecord {
     pub channel_id: ChannelId,
     pub bp_member_slot: u32,
     pub member_count: u32,
-    /// Number of DELEGATE participants registered after the members (delegate account). Delegates
-    /// occupy slots `member_count..member_count+delegate_count`; padding is
-    /// `member_count+delegate_count..MAX`. Invariant: `member_count + delegate_count <=
-    /// MAX_CHANNEL_MEMBERS`. Committed into the reg-chain keccak preimage IMMEDIATELY AFTER
-    /// `member_count` so the member/delegate/padding split is bound to the L1 registration chain.
+    /// Number of DELEGATE participants registered after the members. Under Option B registration
+    /// is cosigners-only, so new registrations emit `delegate_count = 0`. The field STAYS in the
+    /// record and the keccak preimage because the DEPLOYED contract hashes it (byte-compat), and
+    /// nonzero values remain accepted for legacy 16-slot channels — bounded by the record's
+    /// capacity: `member_count + delegate_count <= MAX_COSIGNERS` (the record only HAS 16 slots).
+    /// Committed into the reg-chain keccak preimage IMMEDIATELY AFTER `member_count` so the
+    /// member/delegate/padding split is bound to the L1 registration chain.
     pub delegate_count: u32,
-    // MAX_CHANNEL_MEMBERS > 32: std serde only derives arrays up to 32, so use serde-big-array.
-    #[serde(with = "serde_big_array::BigArray")]
-    pub members: [MemberRegEntry; MAX_CHANNEL_MEMBERS],
+    pub members: [MemberRegEntry; MAX_COSIGNERS],
 }
 
 #[derive(Debug, thiserror::Error)]
 pub enum ChannelRegRecordError {
     #[error("member_count {0} out of range (must be 2..={MAX_COSIGNERS})")]
     MemberCountOutOfRange(u32),
-    #[error(
-        "member_count {0} + delegate_count {1} exceeds MAX_CHANNEL_MEMBERS ({MAX_CHANNEL_MEMBERS})"
-    )]
+    #[error("member_count {0} + delegate_count {1} exceeds MAX_COSIGNERS ({MAX_COSIGNERS})")]
     DelegateCountOutOfRange(u32, u32),
     #[error("active member {0} has a zero pk_g")]
     ZeroActivePkG(usize),
@@ -127,13 +131,14 @@ impl ChannelRegRecord {
             ));
         }
         let mc = self.member_count as usize;
-        // Delegate account regions: members `0..mc`, delegates `mc..mc+dc`, padding `mc+dc..MAX`.
-        // Active = members + delegates; both must be nonzero + pairwise distinct (no shared-key
-        // forgery across the WHOLE active set). `member_count + delegate_count` must not exceed
-        // MAX.
+        // Regions: members `0..mc`, delegates `mc..mc+dc` (legacy 16-slot channels only; Option B
+        // registrations emit dc = 0), padding `mc+dc..MAX_COSIGNERS`. Active = members +
+        // delegates; both must be nonzero + pairwise distinct (no shared-key forgery across the
+        // WHOLE active set). Under Option B the record only HAS `MAX_COSIGNERS` slots, so
+        // `member_count + delegate_count <= MAX_COSIGNERS` bounds the active region.
         let active = mc
             .checked_add(self.delegate_count as usize)
-            .filter(|&a| a <= MAX_CHANNEL_MEMBERS)
+            .filter(|&a| a <= MAX_COSIGNERS)
             .ok_or(ChannelRegRecordError::DelegateCountOutOfRange(
                 self.member_count,
                 self.delegate_count,
@@ -148,7 +153,7 @@ impl ChannelRegRecord {
                 }
             }
         }
-        for i in active..MAX_CHANNEL_MEMBERS {
+        for i in active..MAX_COSIGNERS {
             if self.members[i] != MemberRegEntry::default() {
                 return Err(ChannelRegRecordError::NonZeroPaddingSlot(i));
             }
@@ -167,11 +172,12 @@ impl ChannelRegRecord {
     /// Preimage u32-limb stream (each whole-word):
     /// `[ prev(8), channel_id(1), bp_member_slot(1), member_count(1), delegate_count(1),
     ///    for i in 0..16: ( pk_g(8), pk_b(8), regev_pk_digest(8), recipient(5) ) ]`
-    /// Total = 8 + 1 + 1 + 1 + 1 + 16*(8+8+8+5) = 12 + 464 = 476 u32. `delegate_count` (delegate
-    /// account) is a single u32 limb IMMEDIATELY AFTER `member_count`. Padding slots hash their
-    /// zero values. `solidity_keccak256` treats each u32 as one big-endian 4-byte word, so this
-    /// stream is byte-identical to the Solidity `abi.encodePacked` preimage in
-    /// `IntmaxRollup.registerChannel` (verified by the differential test).
+    /// Total = 8 + 1 + 1 + 1 + 1 + 16*(8+8+8+5) = 12 + 464 = 476 u32. `delegate_count` is a
+    /// single u32 limb IMMEDIATELY AFTER `member_count`. Padding slots hash their zero values.
+    /// `solidity_keccak256` treats each u32 as one big-endian 4-byte word, so this stream is
+    /// byte-identical to the DEPLOYED Solidity `abi.encodePacked` preimage in
+    /// `IntmaxRollup._channelRegHashChain` (fixed 16-slot loop; verified by the pinned
+    /// differential test below + the Foundry counterpart — Option B restores this exact form).
     ///
     /// SECURITY (P3): `pk_b` enters this preimage between `pk_g` and `regev_pk_digest` so the
     /// in-circuit 3-field `MemberLeaf` (whose `pk_b` is split from the SAME witnessed Poseidon
@@ -197,8 +203,7 @@ impl ChannelRegRecord {
 
 /// Word count of the R3 registration preimage (excluding the keccak output): see
 /// [`ChannelRegRecord::hash_with_prev_hash`].
-pub const CHANNEL_REG_PREIMAGE_U32_LEN: usize =
-    8 + 1 + 1 + 1 + 1 + MAX_CHANNEL_MEMBERS * (8 + 8 + 8 + 5);
+pub const CHANNEL_REG_PREIMAGE_U32_LEN: usize = 8 + 1 + 1 + 1 + 1 + MAX_COSIGNERS * (8 + 8 + 8 + 5);
 
 impl MemberRegEntryTarget {
     /// The u32-limb stream for one member slot: pk_g(8) || pk_b(8) || regev_pk_digest(8) ||
@@ -228,7 +233,7 @@ pub fn channel_reg_hash_with_prev_hash_circuit<F, C, const D: usize>(
     bp_member_slot: Target,
     member_count: Target,
     delegate_count: Target,
-    members: &[MemberRegEntryTarget; MAX_CHANNEL_MEMBERS],
+    members: &[MemberRegEntryTarget; MAX_COSIGNERS],
 ) -> Bytes32Target
 where
     F: RichField + Extendable<D>,
@@ -282,8 +287,7 @@ mod tests {
     /// Build a deterministic test record with `member_count` active members. The pinned-constant
     /// differential test (Rust ↔ Solidity) uses these exact values.
     fn make_record(member_count: u32) -> ChannelRegRecord {
-        // MAX_CHANNEL_MEMBERS > 32 exceeds the std array `Default` arity; build elementwise.
-        let mut members: [MemberRegEntry; MAX_CHANNEL_MEMBERS] =
+        let mut members: [MemberRegEntry; MAX_COSIGNERS] =
             std::array::from_fn(|_| MemberRegEntry::default());
         for i in 0..(member_count as usize) {
             // pk_g = 0x11..11 * (i+1) pattern, regev = 0x22.., recipient = 0x33..
