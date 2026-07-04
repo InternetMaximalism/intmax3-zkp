@@ -241,3 +241,30 @@ active recipients + zero padding recipients).
 
 **Invalidation.** The leaf change flips every H1 ⇒ all baked close/cancel/claim fixtures, VKs and
 demo states are invalidated (same class as §7); regen is part of B-3.
+
+### 8.1 Adversarial review verdict (2026-07-04): SOUND-UNDER-CONDITION → conditions resolved/tracked
+An independent adversarial review of 6c345eb found the ZK binding airtight (leaf injectivity,
+native↔circuit twin, recipient→PI connection CONNECTED not re-witnessed, transition immutability,
+fail-closed `validate()`, duplicate-delegate-pk = self-loss not theft; 72/72 targeted tests green).
+Three off-circuit conditions:
+- **Obligation 1 (RESOLVED, this commit).** A joining delegate had no cross-check that the
+  cosigner-signed leaf bound the recipient it submitted — a malicious relay could substitute the
+  exit address between contribution and signing (cosigners can't detect it; they don't know the
+  delegate's intended address). FIX: `wasm_wallet::assert_own_recipient_bound` — the delegate wallet
+  remembers its submitted `expected_recipient` (set in `wallet_genesis_contribution`) and, on EVERY
+  import/finalize (`wallet_import_channel`, finalize), asserts `recipients[my_slot] == expected`,
+  refusing the import fail-closed on mismatch. Enforced on the delegate's OWN device — the only
+  party that knows the intended address.
+- **Obligation 2 (DOCUMENTED, trust-model).** `join_delegate` re-signs via plain N-of-N `sign_state`,
+  NOT a transition verifier, so recipient-immutability of EXISTING slots during a join rests on
+  honest cosigner behavior — within the stated N-of-N trust model (colluding cosigners can drain the
+  channel regardless). `verify_balance_state_common`'s recipient-immutability guarantee therefore
+  does not cover the join path; existing importers still detect a flip of THEIR own recipient via
+  Obligation-1's guard.
+- **Obligation 3 (DEFERRED to B-2, Solidity).** The Manager still gates delegate claims on
+  `registeredRecipientOf[pkG] == recipient`, empty for delegates ⇒ delegates currently cannot
+  withdraw on L1 (RecipientMismatch). B-2 MUST switch delegate gating to the proof-bound
+  `claim.recipient` PI (the verifier already checks the proof against it) and MUST NOT retain any
+  `registeredRecipientOf` override that could pay an address different from the proof-bound
+  recipient. For cosigners the two agree by construction, so the switch only changes which is
+  authoritative.

@@ -39,6 +39,13 @@ struct Session {
     balance: Option<(u64, AmountWitness)>,
     /// A send awaiting finalization: (next_state_digest, new_balance, new_witness).
     pending_send: Option<(Bytes32, u64, AmountWitness)>,
+    /// SECURITY (B-1b, obligation 1): the L1 exit address this wallet SUBMITTED in its genesis
+    /// contribution. Under Option B a joining delegate has no on-chain registration to cross-check
+    /// its recipient, so a malicious relay could substitute a different address between the
+    /// contribution and cosigner signing. We remember what we asked for and, on every import,
+    /// assert `recipients[my_slot]` equals it — fail-closed. `None` until a contribution is made
+    /// (e.g. a pure importer with no contribution of its own).
+    expected_recipient: Option<crate::ethereum_types::address::Address>,
 }
 
 thread_local! {
@@ -109,6 +116,7 @@ fn keygen_with_rng(rng: &mut impl rand010::Rng) -> Result<String, JsValue> {
             snapshot: None,
             balance: None,
             pending_send: None,
+            expected_recipient: None,
         });
     });
     Ok(json)
@@ -168,6 +176,9 @@ pub fn wallet_genesis_contribution(balance: u64, recipient: String) -> Result<St
         let (ct, witness) =
             encrypt_amount(&mut rng, &session.keys.regev_pk, balance).map_err(js_err)?;
         session.balance = Some((balance, witness));
+        // SECURITY (B-1b, obligation 1): remember the exact address we asked to be paid, so import
+        // can prove the cosigner-signed leaf binds THIS address and not a relay-substituted one.
+        session.expected_recipient = Some(recipient_addr);
         let out = GenesisContribution {
             regev_pk: session.keys.regev_pk.clone(),
             pk_g: session.keys.pk_g().to_hex(),
@@ -225,6 +236,30 @@ struct BalanceReport {
     state_version: u64,
 }
 
+/// SECURITY (B-1b, obligation 1 from the recipient-binding adversarial review): a joining delegate
+/// has no L1 registration cross-checking its exit address, so a malicious relay could substitute a
+/// different `recipient` between the delegate's contribution and cosigner signing. The cosigners
+/// cannot detect it (they don't know the delegate's intended address). This is the delegate's own
+/// fail-closed guard: if we submitted a contribution (`expected_recipient` is set), the imported,
+/// cosigner-signed leaf at our slot MUST bind exactly that address. A mismatch means our funds
+/// would exit to someone else — refuse the import rather than adopt a poisoned head.
+fn assert_own_recipient_bound(
+    session: &Session,
+    snapshot: &ChannelSnapshot,
+    slot: u8,
+) -> Result<(), JsValue> {
+    if let Some(expected) = session.expected_recipient {
+        let bound = snapshot.state.balance_state.recipients[slot as usize];
+        if bound != expected {
+            return Err(js_err(
+                "SECURITY: my slot's cosigner-signed L1 recipient does not match the address I \
+                 submitted — the relay may have substituted my exit address; refusing import",
+            ));
+        }
+    }
+    Ok(())
+}
+
 /// Import a fully-signed channel snapshot, verify it end-to-end (real signatures, roots, own-slot
 /// decryption), adopt it as the wallet's head, and report the balance.
 #[wasm_bindgen]
@@ -239,6 +274,7 @@ pub fn wallet_import_channel(snapshot_json: String) -> Result<String, JsValue> {
             .map(|m| m.slot)
             .ok_or_else(|| js_err("this wallet's key is not a member of the imported channel"))?;
         verify_snapshot(&snapshot, Some((&session.keys, slot))).map_err(js_err)?;
+        assert_own_recipient_bound(session, &snapshot, slot)?;
         let balance = decrypt_balance(&session.keys, &snapshot, slot).map_err(js_err)?;
 
         // Keep the witness only if the imported slot ciphertext is exactly the one we encrypted
@@ -568,6 +604,7 @@ pub fn wallet_finalize(state_json: String) -> Result<String, JsValue> {
         // SingleSig proof verifications and roughly double finalize latency).
         snapshot.state = next_state;
         verify_snapshot(&snapshot, Some((&session.keys, slot))).map_err(js_err)?;
+        assert_own_recipient_bound(session, &snapshot, slot)?;
         let balance = decrypt_balance(&session.keys, &snapshot, slot).map_err(js_err)?;
 
         // Commit the pending send witness if this finalized state is the one we proposed.
