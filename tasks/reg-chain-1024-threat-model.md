@@ -100,6 +100,23 @@ member-tree root); delegates are authenticated by the cosigner-signed H1 slot tr
 via **B1** (balance-slot leaf extended with `recipient`).
 
 ## Implementation phases (each: tests green + adversarial review before the next)
+### STATUS (2026-07-04)
+- ✅ **B-1a** (046a51c) — reg record → cosigners; "Common data mismatch" fixed; a3 gate green.
+- ✅ **B-1b** (6c345eb) — recipient into the 23-element leaf; claim recipient→PI connection.
+  Adversarial review SOUND-UNDER-CONDITION.
+- ✅ **B-1b obligation 1** (ff3af59) — delegate asserts its own leaf-bound recipient on import.
+- ✅ **B-2 blocker** (fbcf448) — withdrawal nullifier re-keyed on the leaf-bound Regev pk digest
+  (member_pk_g was slot-free → grinding theft under naive B-2). Adversarial review **SOUND**.
+- ✅ **B-2** (6d2b9d8) — removed the proof-subsumed `NotChannelMember`/`RecipientMismatch` claim
+  gates so delegates can withdraw. Foundry Manager 66/66, Adversarial 10/10, Invariant 6/6.
+  Independent adversarial review: IN FLIGHT.
+- ⏳ **B-3** — fixtures/VKs regen (withdrawal-claim nullifier + B-1b leaf changed every H1; stale
+  baked close fixture already breaks CloseLifecycleE2E setUp) + full Rust+Foundry suite + redeploy.
+  NOTE: B-1c folded into B-1b (claims already open + pay the leaf-bound recipient; the Manager now
+  pays `claim.recipient` which the proof binds to the leaf). registerChannel cosigners-only-arrays
+  cleanup is optional and NOT required for delegate withdrawal (deferred).
+
+### Original phase plan (for reference)
 - **B-1a — reg record shrinks to cosigners**: `ChannelRegRecord.members` -> `[MemberRegEntry;
   MAX_COSIGNERS]`; the reg keccak preimage returns to the small fixed form (~476 u32 words) so the
   reg-step circuit shrinks back and the pinned 2^12 wrapper CD fits (fixes "Common data mismatch" /
