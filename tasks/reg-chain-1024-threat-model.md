@@ -199,6 +199,43 @@ cosigner could already do. **`RecipientMismatch` becomes unused** (only these 2 
 declaration; `NotChannelMember` stays (still used by the `withdrawNative` member-recipient gate).
 Foundry tests asserting these reverts must flip to delegate-claim POSITIVE tests.
 
+### B-2 ADVERSARIAL REVIEW (2026-07-04): VERDICT SOUND-UNDER-CONDITION
+Independent Solidity/protocol audit of 6d2b9d8 found NO reachable theft/replay/conservation attack
+through the removed gates. All removed authZ is subsumed by `_bindLimbsStrict` (every claim field —
+finalBalanceStateH1, channelId, closeIntentDigest, memberPkG, recipient, userAmountDigest,
+withdrawalNullifier, amount — is limb-bound to the proof) + `MleVerifier.verify` against the distinct
+withdrawal/post-close VKs (cross-function replay blocked by gatesDigest) + the fund cap + nullifier
+one-shot. `finalizedBalanceStateH1` is the cosigner-signed value from finalizeClose (close proof
+forced its in-circuit member_set_commitment == the registered COSIGNER set), so membership is
+genuinely proof-enforced. Recipient is a strict-bound limb == the paid `withdrawalCredits` key.
+Conditions = the B-3 residuals below. Foundry: Manager 66/66, Adversarial+Invariant 16/16.
+
+### Residual dispositions (from both B-2 reviews)
+- **R4 — withdrawal `amount`↔ciphertext binding: ALREADY CLOSED at the circuit level.** The reviewer
+  (Solidity-only) read a STALE `ChannelSettlementVerifier` comment claiming decryption is deferred.
+  In fact `withdrawal_claim_circuit.rs` binds `amount` via `decryption_core(expose_amount=true)` →
+  `connect(amount_pi, amount_lo/hi)` — a member can claim ONLY what their signed slot ciphertext
+  decrypts to. Over-claim is prevented at the proof level, not merely fund-capped. Stale Solidity
+  comment corrected in this change.
+- **R3 — close proof does NOT bind Σ(signed-slot amounts) ≤ channel_fund_amount.** CONFIRMED (balances
+  are Regev-encrypted; the close circuit binds `channel_fund_amount` as a PI but never sums the
+  slots). This is PRE-EXISTING and NOT introduced by Option B. It is a LIVENESS/griefing risk within
+  the N-of-N trust model (colluding/erring cosigners could sign an over-inflated state, letting early
+  claimants over-draw and starving late ones), NOT a solvency/theft breach — the hard ETH backstop
+  `totalCreditedOut <= receivedChannelFunds` (Manager:1168) means the manager can never pay out more
+  ETH than it actually received. FLAGGED for the owner/circuit auditor as a separate item; out of
+  Option B scope.
+- **R5 — test coverage shift.** The Foundry mock verifier cannot model ZK slot-inclusion, so on-chain
+  membership rejection is no longer Foundry-testable; that property now lives ONLY in the Rust
+  circuit tests (`withdrawal_claim` rejects a non-included slot / fake pk). Foundry still covers the
+  strict limb bind, fund cap, and nullifier one-shot. B-3 must regenerate the CloseLifecycleE2E baked
+  fixture so the full close→finalize→delegate-withdraw→stranger-reject lifecycle runs against a REAL
+  proof end-to-end.
+- **B-3 MUST preserve** the complete strict-bound limb set (finalBalanceStateH1, recipient, amount,
+  nullifier, channelId, closeIntentDigest) byte-exact vs the Rust `*PublicInputs::to_u64_vec()`
+  pinning tests when VKs regenerate; the circuit-side B-1b recipient binding + fbcf448 pk_digest
+  nullifier are the linchpin the on-chain layer cannot re-check.
+
 ## B-2 scope (Solidity Manager) — READY once the re-key review clears
 Traced `ChannelSettlementManager.submitWithdrawalClaim` (:1043-1050) and `submitPostCloseClaim`
 (:1093-1098): both gate on `registeredMemberIndexPlusOne[pkG] != 0` (membership) AND
