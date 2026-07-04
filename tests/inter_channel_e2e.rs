@@ -699,6 +699,7 @@ fn build_signed_genesis(
         record,
         cts,
         &regev_pk_digests,
+        &test_recipients_b1b(cts.len()),
         fund,
         settled_tx_chain,
         Bytes32::default(),
@@ -736,6 +737,20 @@ fn structural_smallblock_sigs(record: &ChannelRecord) -> Vec<MemberSignature> {
             member_slot: i,
             pk_g: record.member_pk_gs[i as usize],
             signature: vec![1 + i],
+        })
+        .collect()
+}
+
+/// B-1b: deterministic NONZERO per-slot L1 exit addresses for test genesis states
+/// (`BalanceState::validate()` rejects zero active recipients).
+fn test_recipients_b1b(n: usize) -> Vec<intmax3_zkp::ethereum_types::address::Address> {
+    use intmax3_zkp::ethereum_types::u32limb_trait::U32LimbTrait as _;
+    (0..n)
+        .map(|i| {
+            intmax3_zkp::ethereum_types::address::Address::from_u32_slice(
+                &[0x7E57_0000u32.wrapping_add(i as u32); 5],
+            )
+            .unwrap()
         })
         .collect()
 }

@@ -137,13 +137,33 @@ struct GenesisContribution {
     /// P3: the member's BabyBear hash-sig public key `pk_b` (canonical Bytes32 hex, A11).
     pk_b: String,
     genesis_ct: crate::regev::RegevCiphertext,
+    /// B-1b: this member's L1 exit address (canonical 0x-hex). Leaf-bound into the
+    /// cosigner-signed H1 balance slot — a delegate's ONLY payout binding under Option B.
+    recipient: String,
 }
 
 /// Encrypt this member's own genesis balance to their own Regev key, retaining the witness so the
 /// member can later send. Returns the ciphertext (to hand to the CLI assembling the channel).
+///
+/// B-1b API CHANGE (minimal, documented): `recipient` is the member's L1 exit address (hex,
+/// 0x-prefixed 20 bytes — the browser passes the user's MetaMask address). It is REQUIRED and
+/// must be NONZERO: this address is folded into the cosigner-signed H1 balance-slot leaf and is
+/// the ONLY thing binding a delegate's L1 payout (no L1 registration for delegates under
+/// Option B). Fail-closed: a malformed or zero address is rejected here, before any contribution
+/// leaves the wallet.
 #[wasm_bindgen]
-pub fn wallet_genesis_contribution(balance: u64) -> Result<String, JsValue> {
+pub fn wallet_genesis_contribution(balance: u64, recipient: String) -> Result<String, JsValue> {
     with_session(|session| {
+        // SECURITY (B-1b fail-closed): parse + reject the zero address BEFORE emitting a
+        // contribution the cosigners could sign.
+        let recipient_addr =
+            crate::ethereum_types::address::Address::from_hex(&recipient).map_err(js_err)?;
+        if recipient_addr == crate::ethereum_types::address::Address::default() {
+            return Err(js_err(
+                "recipient must be a NONZERO L1 address (B-1b: the leaf-bound exit address is \
+                 this slot's only payout binding; address(0) could never exit)",
+            ));
+        }
         let mut rng = rand010::rng();
         let (ct, witness) =
             encrypt_amount(&mut rng, &session.keys.regev_pk, balance).map_err(js_err)?;
@@ -153,6 +173,7 @@ pub fn wallet_genesis_contribution(balance: u64) -> Result<String, JsValue> {
             pk_g: session.keys.pk_g().to_hex(),
             pk_b: session.keys.pk_b().to_hex(),
             genesis_ct: ct,
+            recipient: recipient_addr.to_hex(),
         };
         serde_json::to_string(&out).map_err(js_err)
     })

@@ -45,7 +45,7 @@ use intmax3_zkp::{
             balance_witness_generator::{BalanceWitnessGenerator, ReceiveDepositData},
             block_witness_generator::{
                 BlockWitnessGenerator, BlockWitnessGeneratorHandle, ChannelMemberKeys,
-                TEST_ACTIVE_MEMBERS,
+                TEST_ACTIVE_MEMBERS, test_recipient_for,
             },
         },
     },
@@ -73,14 +73,13 @@ use intmax3_zkp::{
         BuiltInterChannelCredit, BuiltSend, CancelCloseProver, ChannelBalanceAttestation,
         ChannelSnapshot, ChannelWithdrawalParams, CloseProver, InterChannelDebitPayload,
         InterChannelTransferDescriptor, MemberInfo, MemberKeys, PostCloseClaimProver,
-        RefreshPayload, SendPayload,
-        WithdrawalClaimProver, add_signature, assemble_genesis_state_backed,
-        build_channel_withdrawal, build_inter_channel_credit, build_l1_deposit_import,
-        build_record, build_send, decrypt_balance, default_settled_tx_accumulator,
-        partial_withdrawal_auth_digest, sign_state, sign_state_if_backed, verify_all_signatures,
-        verify_inter_channel_credit_transition, verify_inter_channel_send_transition,
-        verify_l1_deposit_import_transition, verify_refresh_transition, verify_send_transition,
-        verify_snapshot,
+        RefreshPayload, SendPayload, WithdrawalClaimProver, add_signature,
+        assemble_genesis_state_backed, build_channel_withdrawal, build_inter_channel_credit,
+        build_l1_deposit_import, build_record, build_send, decrypt_balance,
+        default_settled_tx_accumulator, partial_withdrawal_auth_digest, sign_state,
+        sign_state_if_backed, verify_all_signatures, verify_inter_channel_credit_transition,
+        verify_inter_channel_send_transition, verify_l1_deposit_import_transition,
+        verify_refresh_transition, verify_send_transition, verify_snapshot,
     },
 };
 use plonky2::{
@@ -132,8 +131,9 @@ const CLOSE_INTENT_FILE: &str = "close_intent.json";
 const CLOSE_INTENT_MLE_FILE: &str = "close_intent_mle.json";
 // A-3 H-3 C1 (A30 cancelClose): the EXACT pending `CloseIntent` (serde, camelCase) persisted by
 // `close` so `cancel-close` can reconstruct the same close_intent_digest the manager froze on-chain
-// — a lossless round-trip (NOT the hex-string descriptor), so the cancel proof's close_intent_digest
-// PI matches `pendingClose.closeIntentDigest` or the manager fail-closes (CloseIntentDigestMismatch).
+// — a lossless round-trip (NOT the hex-string descriptor), so the cancel proof's
+// close_intent_digest PI matches `pendingClose.closeIntentDigest` or the manager fail-closes
+// (CloseIntentDigestMismatch).
 const CLOSE_INTENT_FULL_FILE: &str = "close_intent_full.json";
 const CANCEL_CLOSE_FILE: &str = "cancel_close.json";
 const CANCEL_CLOSE_MLE_FILE: &str = "cancel_close_mle.json";
@@ -147,9 +147,9 @@ const CLI_SLOTS: &[u8] = &[0, 1, 2];
 // Genesis allocations in BASE UNITS (= wei). With TOKEN_DECIMALS=18, 1 token = 1 ETH.
 // 0.04 + 0.03 + 0.02 = 0.09 ETH total — fits comfortably in u64 (max ~18.4 ETH).
 const CLI_GENESIS: &[(u8, u64)] = &[
-    (0, TOKEN_UNIT / 25),  // 0.04 ETH
+    (0, TOKEN_UNIT / 25),      // 0.04 ETH
     (1, TOKEN_UNIT / 100 * 3), // 0.03 ETH
-    (2, TOKEN_UNIT / 50),  // 0.02 ETH
+    (2, TOKEN_UNIT / 50),      // 0.02 ETH
 ];
 const BROWSER_DELEGATE_SLOT: u8 = 3;
 const DELEGATE_COUNT: u8 = 1;
@@ -196,6 +196,27 @@ struct BrowserContribution {
     /// P3: the browser member's BabyBear hash-sig public key `pk_b` (canonical Bytes32 hex, A11).
     pk_b: String,
     genesis_ct: RegevCiphertext,
+    /// B-1b: the joining delegate's L1 exit address (hex, 0x-prefixed 20 bytes; the browser
+    /// passes the user's MetaMask address). REQUIRED and NONZERO — serde has no default, so an
+    /// absent field fails deserialization, and `parse_contribution_recipient` rejects the zero
+    /// address (fail-closed: under Option B this leaf-bound address is the delegate's ONLY
+    /// payout binding; a zero recipient could never exit).
+    recipient: String,
+}
+
+/// Parse + fail-closed-validate a contribution's B-1b recipient: must parse as a 20-byte L1
+/// address and must be NONZERO. The cosigners REFUSE to assemble/sign a state otherwise.
+fn parse_contribution_recipient(recipient_hex: &str) -> Address {
+    let recipient = Address::from_hex(recipient_hex)
+        .unwrap_or_else(|e| die(format!("parse browser recipient: {e:?}")));
+    if recipient == Address::default() {
+        die(
+            "REFUSING contribution: recipient is the zero address (B-1b fail-closed — the \
+             delegate's leaf-bound L1 exit address is its only payout binding and address(0) \
+             could never exit)",
+        );
+    }
+    recipient
 }
 
 fn die(msg: impl std::fmt::Display) -> ! {
@@ -608,7 +629,9 @@ fn cmd_close(args: &[String]) {
     let skip_request = std::env::var("CLOSE_SKIP_REQUEST").is_ok();
     if std::env::var("CLOSE_REQUEST_ONLY").is_ok() {
         let key = deposit_key_env();
-        eprintln!("[close] requestClose() on manager {manager} (A26 request-only phase, no proving)…");
+        eprintln!(
+            "[close] requestClose() on manager {manager} (A26 request-only phase, no proving)…"
+        );
         cast(&[
             "send",
             &manager,
@@ -619,7 +642,9 @@ fn cmd_close(args: &[String]) {
             &rpc,
         ]);
         if let Ok(secs) = std::env::var("CLOSE_ADVANCE_TIME") {
-            eprintln!("[close] advancing chain time by {secs}s (evm_increaseTime) to pass the grace window…");
+            eprintln!(
+                "[close] advancing chain time by {secs}s (evm_increaseTime) to pass the grace window…"
+            );
             cast(&["rpc", "evm_increaseTime", &secs, "--rpc-url", &rpc]);
             cast(&["rpc", "evm_mine", "--rpc-url", &rpc]);
         }
@@ -877,13 +902,16 @@ fn cmd_claim(args: &[String]) {
             die("set CLAIM_RECIPIENT=0x<20-byte member L1 recipient> (must equal the registered recipient)")
         });
 
-    // A33 pull-only phase (opt-in): the claim proof was already submitted (totalWithdrawn credited);
-    // just pull the ETH credit to the recipient. No proving. SECURITY: claimWithdrawalCredit pays
-    // only the caller's previously-credited amount (caller MUST be the recipient), so this is inert.
+    // A33 pull-only phase (opt-in): the claim proof was already submitted (totalWithdrawn
+    // credited); just pull the ETH credit to the recipient. No proving. SECURITY:
+    // claimWithdrawalCredit pays only the caller's previously-credited amount (caller MUST be
+    // the recipient), so this is inert.
     if std::env::var("CLAIM_PULL_ONLY").is_ok() {
         let key = deposit_key_env();
         let recipient_hex = recipient.to_hex();
-        eprintln!("[claim] claimWithdrawalCredit() pull-only (caller must be the recipient {recipient_hex})…");
+        eprintln!(
+            "[claim] claimWithdrawalCredit() pull-only (caller must be the recipient {recipient_hex})…"
+        );
         cast(&[
             "send",
             &manager,
@@ -1029,8 +1057,8 @@ struct CancelCloseDescriptor {
 }
 
 /// A-3 H-3 C1 (A30): cancel a PENDING on-chain close by proving the N members kept operating at a
-/// strictly HIGHER `state_version` than the close froze. Builds the REAL cancel-close MLE/WHIR proof
-/// via `CancelCloseProver` (revived head + the persisted pending `CloseIntent`), writes the
+/// strictly HIGHER `state_version` than the close froze. Builds the REAL cancel-close MLE/WHIR
+/// proof via `CancelCloseProver` (revived head + the persisted pending `CloseIntent`), writes the
 /// artifacts, and submits `cancelClose(request, proof)` via the forge `RunClose` step. Usage:
 ///   channel_member cancel-close <manager_addr> [rpc_url]
 /// env: CANCEL_SV (settlement verifier address, forwarded to the forge step).
@@ -1114,8 +1142,11 @@ fn cmd_cancel_close(args: &[String]) {
     // ── On-chain: cancelClose (large struct calldata → forge step). ──
     let key = deposit_key_env();
     let data_dir = std::path::Path::new("contracts/test/data");
-    fs::copy(CANCEL_CLOSE_FILE, data_dir.join("sepolia_cancel_close.json"))
-        .unwrap_or_else(|e| die(format!("stage cancel_close.json: {e}")));
+    fs::copy(
+        CANCEL_CLOSE_FILE,
+        data_dir.join("sepolia_cancel_close.json"),
+    )
+    .unwrap_or_else(|e| die(format!("stage cancel_close.json: {e}")));
     fs::copy(
         CANCEL_CLOSE_MLE_FILE,
         data_dir.join("sepolia_cancel_close_mle.json"),
@@ -1170,24 +1201,22 @@ struct PostCloseClaimDescriptor {
 /// `submitPostCloseClaim(claim, proof)` via the forge step, then pulls the credit
 /// (`claimWithdrawalCredit`). Usage:
 ///   channel_member post-close-claim <manager_addr> <receiver_slot> <incoming_tx_index> [rpc_url]
-/// env: CLAIM_RECIPIENT (the member's registered L1 address; also the claimWithdrawalCredit caller),
-///      POST_CLOSE_SOURCE_TX (path to the persisted source InterChannelTransferDescriptor JSON;
-///      default `inter_descriptor.json`).
+/// env: CLAIM_RECIPIENT (the member's registered L1 address; also the claimWithdrawalCredit
+/// caller),      POST_CLOSE_SOURCE_TX (path to the persisted source InterChannelTransferDescriptor
+/// JSON;      default `inter_descriptor.json`).
 /// The finalized close digest is read from `close_intent_full.json` (persisted by `close`), so no
 /// CLOSE_NONCE/CLOSE_BURN_TX re-derivation is needed (and no env-var footgun).
 fn cmd_post_close_claim(args: &[String]) {
-    let manager = args
-        .get(1)
-        .cloned()
-        .unwrap_or_else(|| die("post-close-claim needs <manager_addr> <receiver_slot> <incoming_tx_index> [rpc_url]"));
+    let manager = args.get(1).cloned().unwrap_or_else(|| {
+        die("post-close-claim needs <manager_addr> <receiver_slot> <incoming_tx_index> [rpc_url]")
+    });
     let receiver_slot: u8 = args
         .get(2)
         .and_then(|s| s.parse().ok())
         .unwrap_or_else(|| die("post-close-claim needs <receiver_slot>"));
-    let incoming_tx_index: u64 = args
-        .get(3)
-        .and_then(|s| s.parse().ok())
-        .unwrap_or_else(|| die("post-close-claim needs <incoming_tx_index> (leaf index in the settled-tx accumulator)"));
+    let incoming_tx_index: u64 = args.get(3).and_then(|s| s.parse().ok()).unwrap_or_else(|| {
+        die("post-close-claim needs <incoming_tx_index> (leaf index in the settled-tx accumulator)")
+    });
     let rpc = args
         .get(4)
         .cloned()
@@ -1206,15 +1235,16 @@ fn cmd_post_close_claim(args: &[String]) {
 
     // The finalized close's digest — read from the EXACT pending `CloseIntent` persisted by `close`
     // (`close_intent_full.json`), the SAME lossless source `cancel-close` uses, so the proof's
-    // `close_intent_digest` PI equals on-chain `finalizedCloseIntentDigest`. (No env-var re-derivation
-    // footgun: a digest from differing CLOSE_NONCE/CLOSE_BURN_TX would silently fail-close on-chain.)
+    // `close_intent_digest` PI equals on-chain `finalizedCloseIntentDigest`. (No env-var
+    // re-derivation footgun: a digest from differing CLOSE_NONCE/CLOSE_BURN_TX would silently
+    // fail-close on-chain.)
     let close_intent: CloseIntent = read_json(CLOSE_INTENT_FULL_FILE);
     let close_intent_digest = close_intent.signing_digest();
 
     // The late inter-channel transfer that delivered the receiver's delta. The wallet persists the
     // source `InterChannelTransferDescriptor` (its `inter_channel_tx` carries the receiver deltas).
-    let source_path =
-        std::env::var("POST_CLOSE_SOURCE_TX").unwrap_or_else(|_| "inter_descriptor.json".to_string());
+    let source_path = std::env::var("POST_CLOSE_SOURCE_TX")
+        .unwrap_or_else(|_| "inter_descriptor.json".to_string());
     let source_desc: InterChannelTransferDescriptor = read_json(&source_path);
     let source_tx: InterChannelTx = source_desc.inter_channel_tx.clone();
 
@@ -1305,7 +1335,9 @@ fn cmd_post_close_claim(args: &[String]) {
         );
     }
     let recipient_hex = recipient.to_hex();
-    eprintln!("[post-close-claim] claimWithdrawalCredit() (caller must be the recipient {recipient_hex})…");
+    eprintln!(
+        "[post-close-claim] claimWithdrawalCredit() (caller must be the recipient {recipient_hex})…"
+    );
     cast(&[
         "send",
         &manager,
@@ -1851,6 +1883,9 @@ fn cmd_init(args: &[String]) {
         regev_pk: contrib.regev_pk.clone(),
     };
     let new_ct = contrib.genesis_ct.clone();
+    // B-1b fail-closed: the delegate's L1 exit address must be present and nonzero BEFORE any
+    // channel state is assembled or signed.
+    let new_recipient = parse_contribution_recipient(&contrib.recipient);
 
     // IDEMPOTENT RE-JOIN (pk_g dedup): if a member with this EXACT pk_g already exists, the join is
     // a no-op — return that member's existing slot and the CURRENT snapshot UNCHANGED.
@@ -1886,9 +1921,9 @@ fn cmd_init(args: &[String]) {
         (Vec::new(), Vec::new())
     };
     let (record, state, members, controlled, slot) = if std::path::Path::new(STATE_FILE).exists() {
-        join_delegate(new_delegate, new_ct)
+        join_delegate(new_delegate, new_ct, new_recipient)
     } else {
-        create_channel(new_delegate, new_ct)
+        create_channel(new_delegate, new_ct, new_recipient)
     };
 
     verify_all_signatures(&record, &members, &state)
@@ -1953,9 +1988,11 @@ fn cli_members() -> (
 }
 
 /// CREATE the channel: 3 members + this delegate at slot 3, genesis (v0), 3 members sign.
+/// `new_recipient` (B-1b) is the delegate's NONZERO L1 exit address, leaf-bound in the genesis H1.
 fn create_channel(
     mut nd: MemberInfo,
     new_ct: RegevCiphertext,
+    new_recipient: Address,
 ) -> (
     ChannelRecord,
     ChannelState,
@@ -1988,10 +2025,27 @@ fn create_channel(
         .iter()
         .map(|m| Bytes32::from(m.regev_pk.poseidon_digest()))
         .collect();
+    // B-1b: per-active-slot L1 exit addresses, in slot order. The CLI COSIGNERS reuse the SAME
+    // deterministic per-(channel, slot) recipients their on-chain registration record carries
+    // (`test_recipient_for` — one formula for registeredRecipientOf AND the leaf binding), and
+    // the browser DELEGATE's slot carries its contribution recipient (already fail-closed
+    // nonzero). All folded into the cosigner-signed genesis H1 via the slot leaves.
+    let channel_id = channel_id_env();
+    let recipients: Vec<Address> = members
+        .iter()
+        .map(|m| {
+            if m.slot == BROWSER_DELEGATE_SLOT {
+                new_recipient
+            } else {
+                test_recipient_for(channel_id, m.slot as usize)
+            }
+        })
+        .collect();
     let mut state = assemble_genesis_state_backed(
         &record,
         &encs,
         &regev_pk_digests,
+        &recipients,
         backing.fund,
         settled,
         intmax_root,
@@ -2019,9 +2073,13 @@ fn create_channel(
 /// The new delegate's slot is added with its genesis ciphertext, `delegate_count` and
 /// `state_version` are bumped, and the 3 members re-sign the new state. Existing delegates'
 /// ciphertexts are untouched, so their browser send-witnesses stay valid.
+/// `new_recipient` (B-1b) is the joining delegate's NONZERO L1 exit address — written into the
+/// new slot's `recipients` entry so it enters the cosigner-signed H1 (the delegate's ONLY payout
+/// binding under Option B; the caller has already rejected zero/absent recipients fail-closed).
 fn join_delegate(
     mut nd: MemberInfo,
     new_ct: RegevCiphertext,
+    new_recipient: Address,
 ) -> (
     ChannelRecord,
     ChannelState,
@@ -2056,6 +2114,8 @@ fn join_delegate(
     state.balance_state.delegate_count = new_delegate_count;
     state.balance_state.enc_balances[new_slot as usize] = new_ct;
     state.balance_state.pending_adds[new_slot as usize] = 0;
+    // B-1b: bind the new delegate's L1 exit address into its slot leaf (cosigner-signed H1).
+    state.balance_state.recipients[new_slot as usize] = new_recipient;
     state.balance_state.state_version += 1;
     state.member_signatures = Vec::new();
     let mut state = state.with_computed_digest();
@@ -2096,7 +2156,13 @@ fn cmd_gen_contribution(args: &[String]) {
         pk_g: String,
         pk_b: String,
         genesis_ct: RegevCiphertext,
+        /// B-1b: the simulated delegate's L1 exit address (nonzero, seed-derived).
+        recipient: String,
     }
+    // B-1b: deterministic NONZERO per-seed exit address (a real browser passes the user's
+    // MetaMask address here).
+    let recipient = Address::from_u32_slice(&[0xDE1E_0000u32.wrapping_add(seed as u32); 5])
+        .unwrap_or_else(|e| die(format!("derive contribution recipient: {e:?}")));
     write_json(
         out,
         &Contribution {
@@ -2104,6 +2170,7 @@ fn cmd_gen_contribution(args: &[String]) {
             pk_g: keys.pk_g().to_hex(),
             pk_b: keys.pk_b().to_hex(),
             genesis_ct: ct,
+            recipient: recipient.to_hex(),
         },
     );
     println!("wrote {out} (delegate balance {balance}, seed {seed})");
@@ -2642,12 +2709,12 @@ fn cmd_cosign_inter_transfer(args: &[String]) {
 /// (the burn channel is unregisterable → the phantom credit is unclaimable). Persists
 /// `last_burn.json` so `pw-submit` can reconstruct the `Withdrawal` struct.
 fn cmd_cosign_burn_send(args: &[String]) {
-    let payload_path = args
-        .get(1)
-        .unwrap_or_else(|| die("cosign-burn-send <debit_payload.json> <descriptor.json> <out.json>"));
-    let desc_path = args
-        .get(2)
-        .unwrap_or_else(|| die("cosign-burn-send <debit_payload.json> <descriptor.json> <out.json>"));
+    let payload_path = args.get(1).unwrap_or_else(|| {
+        die("cosign-burn-send <debit_payload.json> <descriptor.json> <out.json>")
+    });
+    let desc_path = args.get(2).unwrap_or_else(|| {
+        die("cosign-burn-send <debit_payload.json> <descriptor.json> <out.json>")
+    });
     let out_path = args
         .get(3)
         .map(String::as_str)
@@ -2847,16 +2914,15 @@ fn cmd_deploy_settlement(args: &[String]) {
         "regev_pk_digests": regev_digests,
         "recipients": recipients,
     });
-    let contracts_dir = std::env::var("CONTRACTS_DIR")
-        .unwrap_or_else(|_| {
-            let exe = std::env::current_exe().unwrap_or_default();
-            let repo = exe
-                .ancestors()
-                .find(|p| p.join("contracts").is_dir())
-                .unwrap_or_else(|| die("cannot find contracts/ dir"))
-                .to_path_buf();
-            repo.join("contracts").to_string_lossy().to_string()
-        });
+    let contracts_dir = std::env::var("CONTRACTS_DIR").unwrap_or_else(|_| {
+        let exe = std::env::current_exe().unwrap_or_default();
+        let repo = exe
+            .ancestors()
+            .find(|p| p.join("contracts").is_dir())
+            .unwrap_or_else(|| die("cannot find contracts/ dir"))
+            .to_path_buf();
+        repo.join("contracts").to_string_lossy().to_string()
+    });
     let data_path = format!("{contracts_dir}/test/data/pw_reg.json");
     fs::write(
         &data_path,
@@ -2896,26 +2962,20 @@ fn cmd_deploy_settlement(args: &[String]) {
         .lines()
         .chain(err.lines())
         .find_map(|l| {
-            l.contains("MANAGER:").then(|| {
-                l.split("MANAGER:")
-                    .nth(1)
-                    .unwrap_or("")
-                    .trim()
-                    .to_string()
-            })
+            l.contains("MANAGER:")
+                .then(|| l.split("MANAGER:").nth(1).unwrap_or("").trim().to_string())
         })
-        .unwrap_or_else(|| die(format!("could not parse MANAGER from forge output:\n{out}\n{err}")));
+        .unwrap_or_else(|| {
+            die(format!(
+                "could not parse MANAGER from forge output:\n{out}\n{err}"
+            ))
+        });
     let verifier = out
         .lines()
         .chain(err.lines())
         .find_map(|l| {
-            l.contains("VERIFIER:").then(|| {
-                l.split("VERIFIER:")
-                    .nth(1)
-                    .unwrap_or("")
-                    .trim()
-                    .to_string()
-            })
+            l.contains("VERIFIER:")
+                .then(|| l.split("VERIFIER:").nth(1).unwrap_or("").trim().to_string())
         })
         .unwrap_or_else(|| {
             die(format!(
@@ -2931,19 +2991,16 @@ fn cmd_deploy_settlement(args: &[String]) {
             "rollup": rollup,
         }),
     );
-    println!(
-        "deploy-settlement OK: manager={manager}, verifier={verifier}, rollup={rollup}"
-    );
+    println!("deploy-settlement OK: manager={manager}, verifier={verifier}, rollup={rollup}");
 }
 
 /// Co-sign an L1 deposit import (mid-channel deposit): fold the deposit into the channel's balance
 /// without closing. Usage:
 ///   channel_member cosign-l1-deposit-import <recipient_slot> <amount> <depositor_hex> <out.json>
 fn cmd_cosign_l1_deposit_import(args: &[String]) {
-    let recipient_slot: usize = args
-        .get(1)
-        .and_then(|s| s.parse().ok())
-        .unwrap_or_else(|| die("cosign-l1-deposit-import <recipient_slot> <amount> <depositor_hex> [out.json]"));
+    let recipient_slot: usize = args.get(1).and_then(|s| s.parse().ok()).unwrap_or_else(|| {
+        die("cosign-l1-deposit-import <recipient_slot> <amount> <depositor_hex> [out.json]")
+    });
     let amount: u64 = args
         .get(2)
         .and_then(|s| s.parse().ok())
@@ -2981,8 +3038,15 @@ fn cmd_cosign_l1_deposit_import(args: &[String]) {
     let (recipient_delta, _) = encrypt_amount(&mut rng, recipient_regev_pk, amount)
         .unwrap_or_else(|e| die(format!("encrypt deposit amount: {e:?}")));
 
-    let built = build_l1_deposit_import(&bp_keys, snapshot, &deposit, recipient_slot, &recipient_delta, LEVEL)
-        .unwrap_or_else(|e| die(format!("build_l1_deposit_import: {e}")));
+    let built = build_l1_deposit_import(
+        &bp_keys,
+        snapshot,
+        &deposit,
+        recipient_slot,
+        &recipient_delta,
+        LEVEL,
+    )
+    .unwrap_or_else(|e| die(format!("build_l1_deposit_import: {e}")));
 
     let mut fund_state = built.fund_import_state.clone();
     let mut bundle_state = built.bundle_apply_state.clone();
@@ -3029,9 +3093,7 @@ fn cmd_cosign_l1_deposit_import(args: &[String]) {
     write_json(out_path, &result);
     println!(
         "cosign-l1-deposit-import OK: slot {} received {} deposit import. New state_version = {}.",
-        recipient_slot,
-        amount,
-        bundle_state.balance_state.state_version
+        recipient_slot, amount, bundle_state.balance_state.state_version
     );
 }
 
@@ -3096,7 +3158,12 @@ fn cmd_pw_submit(args: &[String]) {
     )
     .unwrap_or_else(|e| die(format!("parse receiver_delta_ct_digest: {e:?}")));
 
-    let tx_leaf = tx_leaf_hash(source_pk_g, sender_delta_digest, receiver_pk_g, receiver_delta_digest);
+    let tx_leaf = tx_leaf_hash(
+        source_pk_g,
+        sender_delta_digest,
+        receiver_pk_g,
+        receiver_delta_digest,
+    );
 
     let withdrawal_addr_hex = std::env::var("PW_RECIPIENT")
         .unwrap_or_else(|_| die("PW_RECIPIENT env var required (L1 withdrawal address)"));
@@ -3148,16 +3215,15 @@ fn cmd_pw_submit(args: &[String]) {
         "withdrawal_nullifier": nullifier.to_hex(),
         "withdrawal_aux_data": tx_leaf.to_hex(),
     });
-    let contracts_dir = std::env::var("CONTRACTS_DIR")
-        .unwrap_or_else(|_| {
-            let exe = std::env::current_exe().unwrap_or_default();
-            let repo = exe
-                .ancestors()
-                .find(|p| p.join("contracts").is_dir())
-                .unwrap_or_else(|| die("cannot find contracts/ dir"))
-                .to_path_buf();
-            repo.join("contracts").to_string_lossy().to_string()
-        });
+    let contracts_dir = std::env::var("CONTRACTS_DIR").unwrap_or_else(|_| {
+        let exe = std::env::current_exe().unwrap_or_default();
+        let repo = exe
+            .ancestors()
+            .find(|p| p.join("contracts").is_dir())
+            .unwrap_or_else(|| die("cannot find contracts/ dir"))
+            .to_path_buf();
+        repo.join("contracts").to_string_lossy().to_string()
+    });
     let data_path = format!("{contracts_dir}/test/data/pw_submit.json");
     fs::write(
         &data_path,
@@ -3184,7 +3250,9 @@ fn cmd_pw_submit(args: &[String]) {
     let out = String::from_utf8_lossy(&forge_out.stdout);
     let err = String::from_utf8_lossy(&forge_out.stderr);
     if !forge_out.status.success() {
-        die(format!("forge pw-submit FAILED:\nstdout: {out}\nstderr: {err}"));
+        die(format!(
+            "forge pw-submit FAILED:\nstdout: {out}\nstderr: {err}"
+        ));
     }
 
     let onchain_auth = out
@@ -3193,7 +3261,11 @@ fn cmd_pw_submit(args: &[String]) {
         .skip_while(|l| !l.contains("AUTH_DIGEST:"))
         .nth(1)
         .map(|l| l.trim().to_string())
-        .unwrap_or_else(|| die(format!("could not parse AUTH_DIGEST from forge output:\n{out}\n{err}")));
+        .unwrap_or_else(|| {
+            die(format!(
+                "could not parse AUTH_DIGEST from forge output:\n{out}\n{err}"
+            ))
+        });
 
     write_json(
         "pw_auth.json",
@@ -3268,9 +3340,7 @@ fn cmd_pw_finalize(args: &[String]) {
     let recipient = auth["withdrawal_recipient"]
         .as_str()
         .unwrap_or_else(|| die("pw_auth.json missing withdrawal_recipient"));
-    let token_index = auth["withdrawal_token_index"]
-        .as_u64()
-        .unwrap_or(0);
+    let token_index = auth["withdrawal_token_index"].as_u64().unwrap_or(0);
     let amount = auth["withdrawal_amount"]
         .as_u64()
         .unwrap_or_else(|| die("pw_auth.json missing withdrawal_amount"));
@@ -3304,6 +3374,9 @@ fn cmd_pw_finalize(args: &[String]) {
     let after = cast(&["balance", recipient, "--rpc-url", &rpc]);
     println!(
         "pw-finalize OK: {} claimed {} wei. Balance: {} → {}",
-        recipient, amount, before.trim(), after.trim()
+        recipient,
+        amount,
+        before.trim(),
+        after.trim()
     );
 }

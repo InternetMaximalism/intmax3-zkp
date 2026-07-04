@@ -241,6 +241,18 @@ fn genesis_state(
             delegate_count: 0,
             enc_balances: BalanceState::pad_enc_balances(&[ct0, ct1, ct2]),
             regev_pk_digests: BalanceState::pad_regev_pk_digests(&[]),
+            // B-1b: nonzero per-active-slot exit addresses (validate() rejects zero actives);
+            // carried UNCHANGED by every later state in this flow.
+            recipients: BalanceState::pad_recipients(
+                &(0..E2E_ACTIVE)
+                    .map(|i| {
+                        crate::ethereum_types::address::Address::from_u32_slice(
+                            &[0x7E57_0000u32.wrapping_add(i as u32); 5],
+                        )
+                        .unwrap()
+                    })
+                    .collect::<Vec<_>>(),
+            ),
             settled_tx_chain: Bytes32::default(),
             settled_tx_accumulator_root: Bytes32::default(),
             state_version: 0,
@@ -362,6 +374,8 @@ fn build_flow() -> FlowFixture {
                 a0.balance_state.enc_balances[2].clone(),
             ]),
             regev_pk_digests: BalanceState::pad_regev_pk_digests(&[]),
+            // B-1b: recipients are carried UNCHANGED across a transition.
+            recipients: a0.balance_state.recipients,
             settled_tx_chain: a0.balance_state.settled_tx_chain,
             settled_tx_accumulator_root: Bytes32::default(),
             state_version: 1,
@@ -441,6 +455,8 @@ fn build_flow() -> FlowFixture {
                 a1.balance_state.enc_balances[2].clone(),
             ]),
             regev_pk_digests: BalanceState::pad_regev_pk_digests(&[]),
+            // B-1b: recipients are carried UNCHANGED across a transition.
+            recipients: a1.balance_state.recipients,
             settled_tx_chain: settled_tx_chain_push(a1.balance_state.settled_tx_chain, tx_leaf),
             settled_tx_accumulator_root: Bytes32::default(),
             state_version: 2,

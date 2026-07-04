@@ -884,6 +884,17 @@ pub mod test_fixture {
                         .collect::<Vec<_>>(),
                 ),
                 regev_pk_digests: BalanceState::pad_regev_pk_digests(&[]),
+                // B-1b: nonzero per-active-slot exit addresses (validate() rejects zero actives).
+                recipients: BalanceState::pad_recipients(
+                    &(0..active)
+                        .map(|i| {
+                            crate::ethereum_types::address::Address::from_u32_slice(
+                                &[0x7E57_0000u32.wrapping_add(i as u32); 5],
+                            )
+                            .unwrap()
+                        })
+                        .collect::<Vec<_>>(),
+                ),
                 settled_tx_chain: Bytes32::default(),
                 settled_tx_accumulator_root: Bytes32::default(),
                 state_version: revived_version,

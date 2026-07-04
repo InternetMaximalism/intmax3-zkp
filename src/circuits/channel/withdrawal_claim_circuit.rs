@@ -5,18 +5,19 @@
 //! `tasks/phase-b-claims-threat-model.md` RESIDUAL). Concretely it constrains, in one plonky2
 //! statement that is MLE/WHIR-wrapped and verified on-chain by `@mle/MleVerifier.sol`:
 //!
-//! 1. `final_balance_state_h1` is the Poseidon-root H1 header of the witnessed final balance
-//!    state (the SHARED `h1_gadget::recompute_h1`, element-identical to the close circuit and to
-//!    native `BalanceState::h1`; see `tasks/h1-poseidon-root-threat-model.md`). The manager
-//!    supplies the FINALIZED H1 as the PI, so the header scalars AND the `slot_tree_root` the
-//!    claim opens against are pinned to the members' signed final state.
+//! 1. `final_balance_state_h1` is the Poseidon-root H1 header of the witnessed final balance state
+//!    (the SHARED `h1_gadget::recompute_h1`, element-identical to the close circuit and to native
+//!    `BalanceState::h1`; see `tasks/h1-poseidon-root-threat-model.md`). The manager supplies the
+//!    FINALIZED H1 as the PI, so the header scalars AND the `slot_tree_root` the claim opens
+//!    against are pinned to the members' signed final state.
 //! 2. the claimant occupies an ACTIVE slot: `member_index < member_count + delegate_count` (members
 //!    AND delegates own a withdrawable balance; padding slots do not).
 //! 3. the claimant's slot leaf `balance_slot_leaf_hash(regev_pk_digest, user_amount_digest,
-//!    pending_adds)` is INCLUDED at `member_index` in the H1-committed `slot_tree_root` (a
-//!    height-`BALANCE_SLOT_TREE_HEIGHT` Merkle inclusion; the Merkle POSITION is the slot index).
-//!    This binds WHICH ciphertext (`user_amount_digest` PI) and WHICH registered Regev pk digest
-//!    the claim is against — replacing the retired 1024-slot one-hot select.
+//!    pending_adds, recipient)` is INCLUDED at `member_index` in the H1-committed `slot_tree_root`
+//!    (a height-`BALANCE_SLOT_TREE_HEIGHT` Merkle inclusion; the Merkle POSITION is the slot
+//!    index). This binds WHICH ciphertext (`user_amount_digest` PI), WHICH registered Regev pk
+//!    digest AND WHICH L1 exit address (`recipient` PI — B-1b) the claim is against — replacing the
+//!    retired 1024-slot one-hot select.
 //! 4. `withdrawal_nullifier = keccak([WITHDRAWAL_CLAIM_DOMAIN] ++ close_intent_digest ++
 //!    member_pk_g)` is derived in-circuit and connected to the PI (mirrors
 //!    `WithdrawalClaim::derive_nullifier`).
@@ -315,12 +316,11 @@ where
         //
         // 1. Witness the claimant's Regev pk (a, b) and the slot ct (c1, c2). `decryption_core`
         //    pins all four to canonical `< q` and rejects a == 0 / c1 == 0.
-        // 2. (CRITICAL pk-binding, MUST-FIX #1) `poseidon_digest(a, b)` is a FIELD of the slot
-        //    leaf opened at `member_index` below (H1-committed, signed). This forces (a, b) to be
-        //    the member's REGISTERED key, so the key-binding gate ties `s` to the registered
-        //    secret.
-        // 3. `IMRC_digest(c1, c2)` == `user_amount_digest` (the PI that is ALSO a field of the
-        //    same slot leaf) — ties the decryption to the finalized slot ciphertext.
+        // 2. (CRITICAL pk-binding, MUST-FIX #1) `poseidon_digest(a, b)` is a FIELD of the slot leaf
+        //    opened at `member_index` below (H1-committed, signed). This forces (a, b) to be the
+        //    member's REGISTERED key, so the key-binding gate ties `s` to the registered secret.
+        // 3. `IMRC_digest(c1, c2)` == `user_amount_digest` (the PI that is ALSO a field of the same
+        //    slot leaf) — ties the decryption to the finalized slot ciphertext.
         // 4. `decryption_core(..., expose_amount = true)` recomputes the plaintext `v = c2 − c1·s`
         //    under the key-bound `s`, decodes the 64-bit amount, and exposes (lo, hi) limbs; we
         //    connect them to the `amount` PI U64. After this, `amount` is NO LONGER free.
@@ -338,18 +338,27 @@ where
 
         // ── (3) slot-leaf Merkle inclusion (replaces the retired 1024-slot one-hot select) ──
         //
-        // leaf = Poseidon([IMSL, pk_digest, user_amount_digest, pending_adds]) MUST be included
-        // at `member_index` in the H1-committed `slot_tree_root`. ONE leaf binds all three slot
-        // fields to the SAME index (the Merkle position IS the slot index), so the claimed
+        // leaf = Poseidon([IMSL, pk_digest, user_amount_digest, pending_adds, recipient]) MUST be
+        // included at `member_index` in the H1-committed `slot_tree_root`. ONE leaf binds all four
+        // slot fields to the SAME index (the Merkle position IS the slot index), so the claimed
         // ciphertext digest (`user_amount_digest` PI), the registered Regev pk digest (via the
-        // gadget output — THE pk binding, MUST-FIX #1) and the slot's add counter are exactly the
-        // signed slot-`member_index` values. `pk_digest`'s limbs are u32 by construction
-        // (`Bytes32Target::from_hash_out` safe split); `user_amount_digest` is a range-checked PI.
+        // gadget output — THE pk binding, MUST-FIX #1), the slot's add counter AND the slot's L1
+        // exit address are exactly the signed slot-`member_index` values. `pk_digest`'s limbs are
+        // u32 by construction (`Bytes32Target::from_hash_out` safe split); `user_amount_digest`
+        // and `recipient` are range-checked PIs.
+        //
+        // SECURITY (B-1b — THE delegate recipient binding): the leaf's recipient field IS the
+        // claim's `recipient` PI (`public_inputs.recipient` is fed directly into the leaf hash),
+        // so a proof only exists when the exposed recipient equals the cosigner-signed per-slot
+        // exit address inside H1. Under Option B delegates have no `registeredRecipientOf` entry
+        // on L1, so this connection is the ONLY thing preventing a delegate payout redirection.
+        // (The Manager-side switch from `registeredRecipientOf` to this PI is B-2.)
         let slot_leaf = balance_slot_leaf_hash_circuit::<F, D>(
             &mut builder,
             &pk_digest,
             &public_inputs.user_amount_digest,
             slot_pending_adds,
+            &public_inputs.recipient,
         );
         let slot_inclusion = IncrementalMerkleProofTarget::<PoseidonHashOutTarget>::new(
             &mut builder,
@@ -384,10 +393,11 @@ where
             Bytes32Target::from_slice(&builder.keccak256::<C>(&nullifier_inputs));
         withdrawal_nullifier.connect(&mut builder, public_inputs.withdrawal_nullifier);
 
-        // (5) channel_id / member_pk_g / recipient / close_intent_digest are bound as PI limbs by
-        // construction (they are the registered PI targets, re-registered verbatim below). `amount`
-        // is range-checked to u64 by `U64Target::new(builder, true)` (NOT decryption-bound — see
-        // module SECURITY note).
+        // (5) channel_id / member_pk_g / close_intent_digest are bound as PI limbs by
+        // construction (they are the registered PI targets, re-registered verbatim below);
+        // `recipient` is additionally LEAF-BOUND (B-1b, step (3) above) — it is no longer a free
+        // PI. `amount` is range-checked to u64 by `U64Target::new(builder, true)` and
+        // decryption-bound above.
 
         builder.register_public_inputs(&public_inputs.to_vec());
         let data = builder.build::<C>();
@@ -608,6 +618,13 @@ pub mod test_fixture {
                 Bytes32::from(pk1.poseidon_digest()),
                 Bytes32::from(pk2.poseidon_digest()),
             ]),
+            // B-1b: each active slot's cosigner-signed L1 exit address. Slot 0 (the claimant) is
+            // the SAME address the claim exposes as its `recipient` PI below.
+            recipients: BalanceState::pad_recipients(&[
+                Address::from_u32_slice(&[1, 2, 3, 4, 5]).unwrap(),
+                Address::from_u32_slice(&[21, 22, 23, 24, 25]).unwrap(),
+                Address::from_u32_slice(&[31, 32, 33, 34, 35]).unwrap(),
+            ]),
             settled_tx_chain: Bytes32::default(),
             settled_tx_accumulator_root: Bytes32::default(),
             state_version: 6,
@@ -750,6 +767,29 @@ mod tests {
         );
     }
 
+    /// Negative — B-1b recipient redirection: a `recipient` PI that differs from the
+    /// cosigner-signed per-slot exit address (the leaf's recipient field) is UNPROVABLE: the
+    /// recipient PI is fed directly into the slot leaf hash, so a redirected recipient changes
+    /// the leaf and the Merkle inclusion against the H1-committed slot-tree root fails. This is
+    /// THE binding that protects delegates, which have no L1 `registeredRecipientOf` entry under
+    /// Option B.
+    #[cfg_attr(debug_assertions, ignore = "run with --release")]
+    #[test]
+    fn withdrawal_claim_circuit_rejects_redirected_recipient() {
+        use crate::ethereum_types::{address::Address, u32limb_trait::U32LimbTrait};
+        let circuit = circuit();
+        let mut witness = build_full_witness();
+        // The leaf-bound recipient is [1,2,3,4,5]; expose a DIFFERENT (attacker) address.
+        witness.public_inputs.recipient =
+            Address::from_u32_slice(&[0xBAD, 0xBAD, 0xBAD, 0xBAD, 0xBAD]).unwrap();
+        let pw = circuit.fill_witness(&witness).unwrap();
+        let result = catch_unwind(AssertUnwindSafe(|| circuit.data.prove(pw)));
+        assert!(
+            result.is_err() || result.unwrap().is_err(),
+            "a recipient PI != the leaf-bound (cosigner-signed) recipient must be UNPROVABLE"
+        );
+    }
+
     /// Decryption Stage 2 — CRITICAL-1 over-claim: an `amount` PI that is NOT the slot ciphertext's
     /// plaintext is rejected by the decryption-core amount binding. This is the residual the whole
     /// sub-phase closes: before Stage 2 the amount was a free PI bounded only by the on-chain fund
@@ -819,6 +859,7 @@ mod tests {
         state.regev_pk_digests[5] = state.regev_pk_digests[0];
         state.enc_balances[5] = state.enc_balances[0].clone();
         state.pending_adds[5] = state.pending_adds[0];
+        state.recipients[5] = state.recipients[0];
         let tree = state.slot_tree();
         witness.member_index = 5;
         witness.slot_tree_root = tree.get_root();

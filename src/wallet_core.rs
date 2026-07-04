@@ -603,11 +603,13 @@ pub fn build_record(
 /// Assemble an UNSIGNED genesis `ChannelState` from per-ACTIVE-participant genesis ciphertexts
 /// (slot order: members then delegates). `enc_balances_active` must have one ciphertext per active
 /// slot (`member_count + delegate_count`); with `delegate_count = 0` this equals the legacy
-/// member-only behavior.
+/// member-only behavior. `recipients_active` (B-1b) must carry one NONZERO L1 exit address per
+/// active slot — `BalanceState::validate()` refuses a zero active recipient fail-closed.
 pub fn assemble_genesis_state(
     record: &ChannelRecord,
     enc_balances_active: &[RegevCiphertext],
     regev_pk_digests_active: &[Bytes32],
+    recipients_active: &[Address],
     fund_amount: u64,
 ) -> WResult<ChannelState> {
     // Legacy/UNBACKED genesis: zero settle-chain + zero intmax_state_root. A channel assembled this
@@ -616,6 +618,7 @@ pub fn assemble_genesis_state(
         record,
         enc_balances_active,
         regev_pk_digests_active,
+        recipients_active,
         fund_amount,
         Bytes32::default(),
         Bytes32::default(),
@@ -631,6 +634,7 @@ pub fn assemble_genesis_state_backed(
     record: &ChannelRecord,
     enc_balances_active: &[RegevCiphertext],
     regev_pk_digests_active: &[Bytes32],
+    recipients_active: &[Address],
     fund_amount: u64,
     settled_tx_chain: Bytes32,
     intmax_state_root: Bytes32,
@@ -644,6 +648,22 @@ pub fn assemble_genesis_state_backed(
     // claim circuit can bind the witnessed `(a, b)` to the member's registered key.
     if regev_pk_digests_active.len() != active {
         return bail("genesis Regev pk digest count must equal member_count + delegate_count");
+    }
+    // B-1b: one NONZERO L1 exit address per ACTIVE slot (members then delegates), folded into the
+    // signed H1 via the slot leaves. FAIL-CLOSED here (before the state is even assembled): a
+    // zero/missing recipient must never enter a signable genesis — for delegates this leaf field
+    // is the ONLY payout binding under Option B.
+    if recipients_active.len() != active {
+        return bail("genesis recipient count must equal member_count + delegate_count (B-1b)");
+    }
+    if let Some(i) = recipients_active
+        .iter()
+        .position(|r| *r == Address::default())
+    {
+        return bail(format!(
+            "genesis recipient for active slot {i} is the zero address — refusing (B-1b \
+             fail-closed: the slot could never exit on L1)"
+        ));
     }
     let state = ChannelState {
         channel_id: record.channel_id,
@@ -661,6 +681,7 @@ pub fn assemble_genesis_state_backed(
             delegate_count: record.delegate_count,
             enc_balances: BalanceState::pad_enc_balances(enc_balances_active),
             regev_pk_digests: BalanceState::pad_regev_pk_digests(regev_pk_digests_active),
+            recipients: BalanceState::pad_recipients(recipients_active),
             settled_tx_chain,
             // Stage 3: genesis seeds the EMPTY-tree accumulator root. Each subsequent inter-channel
             // advancement pushes `tx_hash` and sets the new root (see the build_* sites below).
@@ -3448,12 +3469,10 @@ pub fn build_channel_withdrawal(
         let pk_g = Bytes32::from(leaf.pk_g);
         let pk_b = Bytes32::from(leaf.pk_b);
         let regev_digest = Bytes32::from(leaf.regev_pk_digest);
-        let recipient = Address::from_u32_slice(
-            &[0x3333_0000u32
-                .wrapping_add(channel_id_u32.wrapping_mul(16))
-                .wrapping_add(i as u32); 5],
-        )
-        .expect("address from u32 slice");
+        let recipient = crate::circuits::test_utils::block_witness_generator::test_recipient_for(
+            channel_id_u32,
+            i,
+        );
         member_pk_gs.push(pk_g.to_string());
         member_pk_bs.push(pk_b.to_string());
         regev_pk_digests.push(regev_digest.to_string());
@@ -3887,6 +3906,13 @@ mod delegate_send_tests {
     /// Assemble a genesis `ChannelState` over the FULL active set (members + delegates). Mirrors
     /// `assemble_genesis_state`, but accepts `active`-length ciphertext / pending-add vectors so a
     /// delegate's genesis balance slot is populated.
+    /// Deterministic NONZERO per-slot test recipients (B-1b: validate() rejects zero actives).
+    fn test_recipients(n: usize) -> Vec<Address> {
+        (0..n)
+            .map(|i| Address::from_u32_slice(&[0x7E57_0000u32.wrapping_add(i as u32); 5]).unwrap())
+            .collect()
+    }
+
     fn assemble_active_genesis(
         record: &ChannelRecord,
         enc_balances_active: &[RegevCiphertext],
@@ -3898,6 +3924,7 @@ mod delegate_send_tests {
             record,
             enc_balances_active,
             regev_pk_digests_active,
+            &test_recipients(enc_balances_active.len()),
             fund_amount,
         )
         .unwrap()
@@ -3938,11 +3965,19 @@ mod delegate_send_tests {
             .iter()
             .map(|k| Bytes32::from(k.regev_pk.poseidon_digest()))
             .collect();
-        let g = assemble_genesis_state(&r, &encs, &pkds, 30).expect("active genesis");
+        let recips = test_recipients(3);
+        let g = assemble_genesis_state(&r, &encs, &pkds, &recips, 30).expect("active genesis");
         assert_eq!(g.balance_state.delegate_count, 1);
         g.balance_state.validate().expect("genesis balance valid");
         // A member_count-only ciphertext count is rejected (must cover the delegate slot too).
-        assert!(assemble_genesis_state(&r, &encs[..2], &pkds[..2], 30).is_err());
+        assert!(assemble_genesis_state(&r, &encs[..2], &pkds[..2], &recips[..2], 30).is_err());
+        // B-1b fail-closed: a ZERO recipient for an active slot is rejected at genesis assembly.
+        let mut zero_recips = recips.clone();
+        zero_recips[2] = Address::default();
+        assert!(
+            assemble_genesis_state(&r, &encs, &pkds, &zero_recips, 30).is_err(),
+            "a zero active recipient must be refused at genesis assembly (B-1b)"
+        );
     }
 
     /// A 2-member + 1-delegate channel (delegate in slot 2) with real keys, a genesis with a
@@ -4397,7 +4432,8 @@ mod delegate_send_tests {
             .iter()
             .map(|m| Bytes32::from(m.regev_pk.poseidon_digest()))
             .collect();
-        let mut state = assemble_genesis_state(&record, &encs, &pkds, 30).expect("genesis");
+        let mut state = assemble_genesis_state(&record, &encs, &pkds, &test_recipients(3), 30)
+            .expect("genesis");
         for (i, k) in keys.iter().enumerate() {
             let s = sign_state(k, i as u8, &state).expect("sign genesis");
             add_signature(&mut state, s);
@@ -4475,6 +4511,12 @@ mod delegate_send_tests {
                 Bytes32::from(pk0.poseidon_digest()),
                 Bytes32::from(pk1.poseidon_digest()),
                 Bytes32::from(pk2.poseidon_digest()),
+            ]),
+            // B-1b: slot 0 (the claimant) carries the SAME exit address passed to the prover.
+            recipients: BalanceState::pad_recipients(&[
+                Address::from_u32_slice(&[1, 2, 3, 4, 5]).unwrap(),
+                Address::from_u32_slice(&[21, 22, 23, 24, 25]).unwrap(),
+                Address::from_u32_slice(&[31, 32, 33, 34, 35]).unwrap(),
             ]),
             settled_tx_chain: Bytes32::default(),
             settled_tx_accumulator_root: Bytes32::default(),
@@ -4603,6 +4645,7 @@ mod delegate_send_tests {
                     delegate_count: 0,
                     enc_balances: BalanceState::pad_enc_balances(encs),
                     regev_pk_digests: BalanceState::pad_regev_pk_digests(&[]),
+                    recipients: BalanceState::pad_recipients(&test_recipients(3)),
                     settled_tx_chain: Bytes32::default(),
                     settled_tx_accumulator_root: Bytes32::default(),
                     state_version: version,
@@ -4754,6 +4797,11 @@ mod delegate_send_tests {
             regev_pk_digests: BalanceState::pad_regev_pk_digests(&[
                 Bytes32::from(receiver_pk.poseidon_digest()),
                 Bytes32::from(other_pk.poseidon_digest()),
+            ]),
+            // B-1b: the receiver's (slot 0) leaf-bound exit address = the claim recipient below.
+            recipients: BalanceState::pad_recipients(&[
+                Address::from_u32_slice(&[1, 2, 3, 4, 5]).unwrap(),
+                Address::from_u32_slice(&[21, 22, 23, 24, 25]).unwrap(),
             ]),
             settled_tx_chain: Bytes32::default(),
             settled_tx_accumulator_root: accumulator_root,

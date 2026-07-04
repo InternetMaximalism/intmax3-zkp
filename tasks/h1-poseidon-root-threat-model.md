@@ -187,3 +187,57 @@ signers themselves — equivalent to signing garbage ciphertexts under the old s
   ✓(header), state_version ✓(header). Slot ORDER ✓ (Merkle position). Active/padding split ✓
   (member_count+delegate_count in header + active-region checks in claims + native
   `validate()` padding canonicality, all unchanged).
+
+## 8. B-1b addendum (2026-07-04): `recipient` enters the slot leaf (Option B1)
+
+Per the owner decision in `tasks/reg-chain-1024-threat-model.md` (Option B, recipient binding B1),
+the balance-slot leaf is WIDENED from 18 to 23 fixed elements:
+
+```
+leaf_i = Poseidon([BALANCE_SLOT_LEAF_DOMAIN,
+                   regev_pk_digests[i]      (8 u32 limbs),
+                   enc_balances[i].digest() (8 u32 limbs),
+                   pending_adds[i]          (1 u32 limb),
+                   recipients[i]            (5 u32 limbs)])   -- 23 field elements, FIXED width
+```
+
+`BalanceState` gains `recipients: [Address; MAX_CHANNEL_MEMBERS]` (padding slots =
+`Address::default()`). The 26-element H1 HEADER is UNCHANGED — only the leaf widens.
+
+**Rationale (the whole point of B-1b).** Under Option B, delegates have NO L1 registration:
+`registeredRecipientOf` never covers them. The per-slot `recipient` riding inside the
+cosigner-signed H1 slot tree is therefore the ONLY binding that prevents a delegate's L1 payout
+from being redirected at claim time. Both claim circuits feed their (range-checked) `recipient`
+PI DIRECTLY into the leaf hash they open by inclusion
+(`withdrawal_claim_circuit.rs` step (3), `post_close_claim_circuit.rs` receiver-leaf bind), so a
+proof exists only when the exposed recipient equals the signed per-slot exit address. The
+Manager-side switch from `registeredRecipientOf` to the claim's recipient PI is B-2 (out of
+scope here; for cosigners the two agree by construction — one recipient formula feeds both the
+reg record and the leaf).
+
+**Fixed-width discipline (re-check of §3 T2/T3/T4).** The leaf width changes 18 → 23 for ALL
+leaves simultaneously (padding leaves hash the zero address); no variable-length data enters any
+Poseidon call. 23 ≠ 8 (node) ≠ 26 (header), so the cross-domain analysis of T3 is preserved; the
+leading `BALANCE_SLOT_LEAF_DOMAIN` and canonical u32 limbs keep the leaf injective on the now
+QUADRUPLE `(pk_digest, enc_digest, pending_adds, recipient)` (T2). The native and in-circuit
+encodings remain element-identical (`h1_gadget` randomized equivalence test extended to random
+active recipients + zero padding recipients).
+
+**Fail-closed rules added.**
+- `BalanceState::validate()`: ACTIVE slots MUST carry a NONZERO recipient (a zero recipient could
+  never exit — refuse at signing time); PADDING slots MUST carry the zero recipient (no routing
+  smuggling past the active accounting).
+- `assemble_genesis_state(_backed)`: takes per-active-slot recipients; rejects count mismatch and
+  any zero active recipient BEFORE assembling a signable state.
+- Joins: the browser contribution now REQUIRES a `recipient` (serde: absent ⇒ reject); CLI
+  `parse_contribution_recipient` and wasm `wallet_genesis_contribution(balance, recipient)`
+  reject the zero address before anything is emitted/signed.
+- Transitions: `state_update_verifier::verify_balance_state_common` REJECTS any `recipients`
+  mutation (recipient changes are NOT a supported transition in B-1b) — this runs in every
+  transition verifier, so cosigners cannot be tricked into signing a redirected next state; an
+  already-signed state cannot be reinterpreted because the leaf change flips the slot root and H1.
+- Native claim builders (`withdrawal_claim_pis`, `post_close_claim_pis`) mirror the circuit
+  binding: claim recipient != `recipients[slot]` ⇒ error before proving.
+
+**Invalidation.** The leaf change flips every H1 ⇒ all baked close/cancel/claim fixtures, VKs and
+demo states are invalidated (same class as §7); regen is part of B-3.

@@ -26,16 +26,15 @@
 //! feed, and defense-in-depth here.
 
 use plonky2::{
-    field::extension::Extendable,
-    hash::hash_types::RichField,
-    iop::target::Target,
+    field::extension::Extendable, hash::hash_types::RichField, iop::target::Target,
     plonk::circuit_builder::CircuitBuilder,
 };
 
 use crate::{
     common::balance_state::{BALANCE_SLOT_LEAF_DOMAIN, BALANCE_STATE_DOMAIN},
     ethereum_types::{
-        bytes32::Bytes32Target, u32limb_trait::U32LimbTargetTrait as _, u64::U64Target,
+        address::AddressTarget, bytes32::Bytes32Target, u32limb_trait::U32LimbTargetTrait as _,
+        u64::U64Target,
     },
     utils::poseidon_hash_out::PoseidonHashOutTarget,
 };
@@ -47,9 +46,9 @@ use crate::{
 /// - `channel_id`: the single base-identity u32 limb.
 /// - `member_count`, `delegate_count`: single u32 limbs (the active/padding split).
 /// - `slot_tree_root`: the balance-slot Poseidon Merkle root (4 raw Goldilocks elements). For
-///   close/cancel this is a free witness — SOUND because the root rides INSIDE the signed H1
-///   (the cosigner signatures attest it); the claim circuits additionally open one leaf against
-///   it via a Merkle inclusion proof.
+///   close/cancel this is a free witness — SOUND because the root rides INSIDE the signed H1 (the
+///   cosigner signatures attest it); the claim circuits additionally open one leaf against it via a
+///   Merkle inclusion proof.
 /// - `settled_tx_chain`, `settled_tx_accumulator_root`: 8 u32 limbs each (accumulator root
 ///   IMMEDIATELY AFTER the chain, mirroring the native order).
 /// - `state_version`: the monotone state counter (2 u32 limbs, `U64Target` `[hi, lo]` order =
@@ -72,7 +71,12 @@ where
 {
     let balance_state_domain = builder.constant(F::from_canonical_u32(BALANCE_STATE_DOMAIN));
     let h1_inputs = [
-        vec![balance_state_domain, channel_id, member_count, delegate_count],
+        vec![
+            balance_state_domain,
+            channel_id,
+            member_count,
+            delegate_count,
+        ],
         slot_tree_root.to_vec(),
         settled_tx_chain.to_vec(),
         // Stage 3: the accumulator root sits IMMEDIATELY AFTER settled_tx_chain and BEFORE
@@ -88,17 +92,23 @@ where
 /// In-circuit twin of `common::balance_state::balance_slot_leaf_hash`: the per-slot leaf of the
 /// H1 balance-slot tree,
 /// `Poseidon([BALANCE_SLOT_LEAF_DOMAIN, regev_pk_digest (8), enc_balance_digest (8),
-/// pending_adds (1)])` — FIXED 18-element width, injective on the slot triple.
+/// pending_adds (1), recipient (5)])` — FIXED 23-element width, injective on the slot quadruple.
 ///
 /// The claim circuits hash the slot they open with this gadget and verify a height-
 /// `BALANCE_SLOT_TREE_HEIGHT` `IncrementalMerkleProofTarget<PoseidonHashOutTarget>` inclusion of
 /// the result (leaf value = leaf hash; `LeafableTarget::hash` is the identity for
 /// `PoseidonHashOutTarget`) against the `slot_tree_root` fed to [`recompute_h1`].
+///
+/// SECURITY (B-1b): `recipient` is the slot's cosigner-signed L1 exit address (5 u32 limbs; the
+/// claim circuits pass their range-checked `recipient` PI `AddressTarget` here, which CONNECTS
+/// the leaf-opened recipient to the claim's exposed recipient — the payout-redirection defense
+/// for delegates, which have no L1 registration under Option B).
 pub(crate) fn balance_slot_leaf_hash_circuit<F, const D: usize>(
     builder: &mut CircuitBuilder<F, D>,
     regev_pk_digest: &Bytes32Target,
     enc_balance_digest: &Bytes32Target,
     pending_adds: Target,
+    recipient: &AddressTarget,
 ) -> PoseidonHashOutTarget
 where
     F: RichField + Extendable<D>,
@@ -109,6 +119,7 @@ where
         regev_pk_digest.to_vec(),
         enc_balance_digest.to_vec(),
         vec![pending_adds],
+        recipient.to_vec(),
     ]
     .concat();
     PoseidonHashOutTarget::hash_inputs(builder, &leaf_inputs)
@@ -136,7 +147,9 @@ mod tests {
             channel::ChannelId,
         },
         constants::MAX_CHANNEL_MEMBERS,
-        ethereum_types::{bytes32::Bytes32, u32limb_trait::U32LimbTrait as _, u64::U64},
+        ethereum_types::{
+            address::Address, bytes32::Bytes32, u32limb_trait::U32LimbTrait as _, u64::U64,
+        },
         regev::{REGEV_N, REGEV_Q, RegevCiphertext},
     };
 
@@ -188,12 +201,19 @@ mod tests {
             &settled_tx_accumulator_root_t,
             &state_version_t,
         );
-        // Leaf gadget twin: leaf over witnessed slot data.
+        // Leaf gadget twin: leaf over witnessed slot data (B-1b: recipient limbs range-checked,
+        // exactly as the claim circuits' recipient PI is).
         let leaf_pk_t = Bytes32Target::new(&mut builder, true);
         let leaf_enc_t = Bytes32Target::new(&mut builder, true);
         let leaf_adds_t = u32_limb(&mut builder);
-        let leaf_t =
-            balance_slot_leaf_hash_circuit::<F, D>(&mut builder, &leaf_pk_t, &leaf_enc_t, leaf_adds_t);
+        let leaf_recipient_t = AddressTarget::new(&mut builder, true);
+        let leaf_t = balance_slot_leaf_hash_circuit::<F, D>(
+            &mut builder,
+            &leaf_pk_t,
+            &leaf_enc_t,
+            leaf_adds_t,
+            &leaf_recipient_t,
+        );
         builder.register_public_inputs(&recomputed.to_vec());
         builder.register_public_inputs(&leaf_t.to_vec());
         let data = builder.build::<C>();
@@ -214,12 +234,18 @@ mod tests {
             let adds_active: Vec<u32> = (0..active)
                 .map(|_| rng.gen_range(0..=crate::regev::MAX_HOMO_ADDS_BEFORE_REFRESH))
                 .collect();
+            // B-1b: RANDOM nonzero recipients for the active slots (padding slots stay zero via
+            // pad_recipients — exercising both leaf forms). Address::rand is 160 random bits, so
+            // a zero draw is negligible; validate() below would catch it fail-closed anyway.
+            let recipients_active: Vec<Address> =
+                (0..active).map(|_| Address::rand(&mut rng)).collect();
             let state = BalanceState {
                 channel_id: ChannelId::new(rng.gen_range(1..u32::MAX as u64)).unwrap(),
                 member_count: member_count as u8,
                 delegate_count: delegate_count as u8,
                 enc_balances: BalanceState::pad_enc_balances(&enc_active),
                 regev_pk_digests: BalanceState::pad_regev_pk_digests(&pk_active),
+                recipients: BalanceState::pad_recipients(&recipients_active),
                 settled_tx_chain: Bytes32::rand(&mut rng),
                 settled_tx_accumulator_root: Bytes32::rand(&mut rng),
                 state_version: rng.r#gen(),
@@ -228,11 +254,19 @@ mod tests {
             state.validate().expect("constructed state must be valid");
             let expected = state.h1();
             let root = state.slot_tree_root();
-            let slot = rng.gen_range(0..active);
+            // Alternate between an ACTIVE slot (random nonzero recipient) and a PADDING slot
+            // (zero recipient, padding ciphertext) so the circuit leaf gadget is exercised on
+            // BOTH leaf forms of the widened 23-element encoding.
+            let slot = if rng.r#gen::<bool>() {
+                rng.gen_range(0..active)
+            } else {
+                MAX_CHANNEL_MEMBERS - 1 // always padding: active <= MAX_COSIGNERS + 16 < 1023
+            };
             let expected_leaf = balance_slot_leaf_hash(
                 state.regev_pk_digests[slot],
                 state.enc_balances[slot].digest(),
                 state.pending_adds[slot],
+                state.recipients[slot],
             );
 
             let mut pw = PartialWitness::<F>::new();
@@ -253,6 +287,7 @@ mod tests {
             leaf_enc_t.set_witness(&mut pw, state.enc_balances[slot].digest());
             pw.set_target(leaf_adds_t, F::from_canonical_u32(state.pending_adds[slot]))
                 .unwrap();
+            leaf_recipient_t.set_witness(&mut pw, state.recipients[slot]);
 
             let proof = data.prove(pw).expect("h1 recompute proof");
             data.verify(proof.clone()).expect("h1 recompute verify");

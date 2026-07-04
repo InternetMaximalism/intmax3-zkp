@@ -97,3 +97,61 @@ GAP2 contract-level gate is DONE (IntmaxRollup + ChannelSettlementManager + test
 # Mid-Channel Deposit (L1 → channel top-up, channel stays open) — 2026-06-24
 
 Status: DESIGN PHASE — reading detail2 + abstract2-1 specs first.
+
+---
+
+# B-1a — reg record shrinks to cosigners (Option B, 2026-07-03)
+
+Scope: tasks/reg-chain-1024-threat-model.md Phase B-1a ONLY (no B-1b/c, no Solidity).
+
+## Member-tree scope trace (pre-implementation)
+Comparison sites of wallet root vs registered root:
+1. block_witness_generator::add_registration_block — generator ChannelLeaf root :=
+   ChannelMemberKeys.member_tree.get_root(), must equal channel_reg_step's
+   member_pubkeys_root_for(record). Load-bearing AT REGISTRATION only; root preserved forever after
+   (update_channel_tree keeps member_pubkeys_root across transitions).
+2. update_channel_tree bp slot inclusion — forever load-bearing, but ONLY for cosigner slots
+   (bp_member_slot < member_count <= 16), against the REGISTERED root; proofs sourced from the
+   same ChannelMemberKeys.member_tree.
+3. wallet_core::member_pubkeys_root (ChannelRecord.member_pubkeys_root) — wallet-INTERNAL P4-1/A11
+   anchoring (recomputed vs record); NEVER equated to the ChannelLeaf/registered root in code (the
+   doc comment claiming equality is documentation only).
+4. No close/cancel/claim circuit consumes member_pubkeys_root.
+=> Equality is registration-genesis-load-bearing only. DECISION: registered/validity tree =
+   cosigner height 4 (1<<4 == MAX_COSIGNERS); wallet live-membership tree stays height 10
+   (WALLET_MEMBER_TREE_HEIGHT), documented as a DIFFERENT tree.
+
+## Plan (falsifiable)
+- [x] constants.rs: MEMBER_TREE_HEIGHT 10 -> 4 + const assert == log2(MAX_COSIGNERS); add
+      WALLET_MEMBER_TREE_HEIGHT = 10 + const assert == log2(MAX_CHANNEL_MEMBERS)
+- [x] key_tree.rs: MemberTree::init_wallet_membership(); docs split the two trees
+- [x] channel_registration.rs: members [MemberRegEntry; MAX_COSIGNERS] (plain serde);
+      preimage back to 476 u32; validate: member_count + delegate_count <= MAX_COSIGNERS;
+      pinned differential constants UNCHANGED (byte-compat gate vs deployed Solidity fixed-16)
+      -> test_channel_reg_preimage_pinned_differential PASSES with the pre-1024 constants; the
+      Foundry test pins the IDENTICAL three constants (IntmaxRollup.t.sol:447/449/451), and the
+      Solidity header+slot layout (IntmaxRollup.sol registerChannel + _channelRegHashChain) was
+      re-read and matches the Rust u32 stream field-for-field.
+- [x] channel_reg_step.rs: arrays -> MAX_COSIGNERS; range-check max = MAX_COSIGNERS (the 1024 max
+      made mc unsatisfiable: mc-2 in [0,15] AND 1024-mc in [0,15] has no solution); root over 16
+      leaves (height 4). degree_bits back to 16.
+- [x] block_witness_generator.rs: from_member_keys = cosigners only (assert <= MAX_COSIGNERS);
+      to_reg_record_split capacity = MAX_COSIGNERS
+- [x] wallet_core.rs: member_pubkeys_root -> wallet tree (height 10, values unchanged);
+      build_channel_withdrawal registers cosigner-only record (delegate_count = 0, arrays over
+      TEST_ACTIVE_MEMBERS)
+- [x] channel_member.rs: cmd_export_reg_record emits cosigner-only record (delegate_count = 0)
+- [x] wrapper CD: existing 2^12 noop padding fits — the `Common data mismatch` assert passes
+      inside test_channel_reg_chain_processor; NO padding re-derivation needed
+- [x] tests (all release):
+      channel_reg filter (step + processor + preimage + block differential): 6 passed
+      update_channel_tree: 3 passed / block_step: 1 passed / block_hash_chain_processor: 1 passed
+      close_circuit: 18 passed (untouched-green) / h1_gadget: 1 passed (untouched-green)
+      delegate_send_tests (whole module incl. THE GATE a3_channel_withdrawal_builds_and_verifies,
+      also re-run --exact: ok, 112s): 12 passed
+      full `--lib` suite: running (result recorded below when done)
+
+## Known deferred dependency (report, do not hack)
+On-chain close of a DELEGATE-bearing channel compares the close PI delegate_count limb against the
+Manager-registered counts; under B the registration emits delegate_count = 0, so that lifecycle
+needs B-2 (Solidity) — out of B-1a scope. a3 uses 0 delegates and is unaffected.

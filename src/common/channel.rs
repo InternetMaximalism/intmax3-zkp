@@ -1160,9 +1160,9 @@ pub(crate) fn hash_words(words: &[u32]) -> Bytes32 {
 /// L1 matches it against the channel's registered cosigner set, so a prover cannot substitute
 /// non-member signing keys.
 ///
-/// SIZING (cosigner cap): the array holds the COSIGNERS only (`MAX_COSIGNERS`), NOT the full balance
-/// slot capacity (`MAX_CHANNEL_MEMBERS`). Delegates hold balances but do NOT co-sign the close, so
-/// they never enter this commitment.
+/// SIZING (cosigner cap): the array holds the COSIGNERS only (`MAX_COSIGNERS`), NOT the full
+/// balance slot capacity (`MAX_CHANNEL_MEMBERS`). Delegates hold balances but do NOT co-sign the
+/// close, so they never enter this commitment.
 ///
 /// DESIGN NOTE (D6, forced): the preimage is fixed-length (member_count + all MAX_COSIGNERS hashes,
 /// padding zeroed) rather than the "active-only" variable-length form, because the in-circuit
@@ -1172,13 +1172,10 @@ pub(crate) fn hash_words(words: &[u32]) -> Bytes32 {
 /// keccak (`ChannelCloseCircuit::new`).
 ///
 /// PENDING PHASE-2 CONTRACT MAX_COSIGNERS SPLIT: the L1 Solidity mirror
-/// (`ChannelSettlementVerifier.sol`) still pads to `MAX_CHANNEL_MEMBERS`, so this now MISMATCHES the
-/// contract. The coordinated contract-side split is a separate follow-up task; until then the
+/// (`ChannelSettlementVerifier.sol`) still pads to `MAX_CHANNEL_MEMBERS`, so this now MISMATCHES
+/// the contract. The coordinated contract-side split is a separate follow-up task; until then the
 /// Rust↔Solidity cross-check vector is `#[ignore]`d.
-pub fn close_member_set_commitment(
-    hashes: &[Bytes32; MAX_COSIGNERS],
-    member_count: u8,
-) -> Bytes32 {
+pub fn close_member_set_commitment(hashes: &[Bytes32; MAX_COSIGNERS], member_count: u8) -> Bytes32 {
     let count = member_count as usize;
     let mut words = Vec::with_capacity(2 + MAX_COSIGNERS * 8);
     words.push(CLOSE_MEMBER_SET_DOMAIN);
@@ -1271,6 +1268,12 @@ mod tests {
                 ciphertext(3),
             ]),
             regev_pk_digests: BalanceState::pad_regev_pk_digests(&[]),
+            // B-1b: nonzero per-active-slot L1 exit addresses (validate() rejects zero actives).
+            recipients: BalanceState::pad_recipients(&[
+                Address::from_u32_slice(&[11, 12, 13, 14, 15]).unwrap(),
+                Address::from_u32_slice(&[21, 22, 23, 24, 25]).unwrap(),
+                Address::from_u32_slice(&[31, 32, 33, 34, 35]).unwrap(),
+            ]),
             settled_tx_chain: Bytes32::default(),
             settled_tx_accumulator_root: Bytes32::default(),
             state_version: version,

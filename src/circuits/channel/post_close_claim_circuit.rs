@@ -22,13 +22,13 @@
 //!    `h1()` Poseidon-root header from the witnessed scalars + slot-tree root (SHARED
 //!    `h1_gadget::recompute_h1`, element-identical to close + native; see
 //!    `tasks/h1-poseidon-root-threat-model.md`), connects it to the `final_balance_state_h1` PI,
-//!    and ALSO feeds the dedicated `final_settled_tx_accumulator_root` PI into that header (so
-//!    the inclusion root equals the one in the signed H1). It then binds the witnessed receiver
-//!    Regev `(a, b)` to the H1-committed slot leaf at `receiver_member_index` via a height-
-//!    `BALANCE_SLOT_TREE_HEIGHT` Merkle inclusion of
-//!    `balance_slot_leaf_hash(poseidon_digest(a,b), slot enc digest, slot pending_adds)` against
-//!    the slot-tree root (slot ACTIVE) — replacing the retired 1024-slot one-hot select. This
-//!    makes the decryption NON-vacuous.
+//!    and ALSO feeds the dedicated `final_settled_tx_accumulator_root` PI into that header (so the
+//!    inclusion root equals the one in the signed H1). It then binds the witnessed receiver Regev
+//!    `(a, b)` to the H1-committed slot leaf at `receiver_member_index` via a height-
+//!    `BALANCE_SLOT_TREE_HEIGHT` Merkle inclusion of `balance_slot_leaf_hash(poseidon_digest(a,b),
+//!    slot enc digest, slot pending_adds, recipient PI)` against the slot-tree root (slot ACTIVE) —
+//!    replacing the retired 1024-slot one-hot select. This makes the decryption NON-vacuous, and
+//!    (B-1b) binds the claim's exposed `recipient` to the cosigner-signed per-slot L1 exit address.
 //! 4. HAZARD #8: `shared_native_nullifier = keccak([POST_CLOSE_NULLIFIER_DOMAIN] ++
 //!    close_intent_digest ++ incoming_tx_hash ++ receiver_pk_g)` is derived IN-CIRCUIT and
 //!    connected to the PI (the L1 manager recomputes the SAME value as the
@@ -404,12 +404,19 @@ where
         // (pk binding, MUST-FIX #1) poseidon_digest(a, b) is a FIELD of the receiver's slot leaf,
         // which MUST be included at `receiver_member_index` in the H1-committed slot-tree root —
         // replacing the retired 1024-slot one-hot select with a height-10 Merkle inclusion.
+        //
+        // SECURITY (B-1b — delegate recipient binding): the leaf's recipient field IS the claim's
+        // `recipient` PI, so the exposed L1 payout address must equal the cosigner-signed per-slot
+        // exit address inside the finalized H1. Receivers may be delegates, which have no
+        // `registeredRecipientOf` entry under Option B — this connection is their only recipient
+        // binding. (The Manager-side switch to paying this PI is B-2.)
         let pk_digest = regev_pk_poseidon_digest_gadget::<F, D>(&mut builder, &regev_a, &regev_b);
         let slot_leaf = balance_slot_leaf_hash_circuit::<F, D>(
             &mut builder,
             &pk_digest,
             &slot_enc_balance_digest,
             slot_pending_adds,
+            &public_inputs.recipient,
         );
         let slot_inclusion = IncrementalMerkleProofTarget::<PoseidonHashOutTarget>::new(
             &mut builder,
@@ -829,6 +836,11 @@ pub mod test_fixture {
                 Bytes32::from(receiver_pk.poseidon_digest()),
                 Bytes32::from(other_pk.poseidon_digest()),
             ]),
+            // B-1b: the receiver's (slot 0) leaf-bound exit address = the claim's l1_recipient.
+            recipients: BalanceState::pad_recipients(&[
+                Address::from_u32_slice(&[1, 2, 3, 4, 5]).unwrap(),
+                Address::from_u32_slice(&[21, 22, 23, 24, 25]).unwrap(),
+            ]),
             settled_tx_chain: Bytes32::default(),
             settled_tx_accumulator_root: accumulator_root,
             state_version: 9,
@@ -972,6 +984,30 @@ mod tests {
         assert!(
             result.is_err() || result.unwrap().is_err(),
             "a fake receiver pk must fail the H1-committed pk-digest one-hot binding"
+        );
+    }
+
+    /// Negative — B-1b recipient redirection: a `recipient` PI different from the
+    /// cosigner-signed per-slot exit address (the receiver slot's leaf field) is UNPROVABLE —
+    /// the recipient PI feeds the leaf hash, so the Merkle inclusion against the H1-committed
+    /// slot-tree root fails. Receivers may be delegates with no L1 registration (Option B), so
+    /// this is their only recipient binding.
+    #[cfg_attr(debug_assertions, ignore = "run with --release")]
+    #[test]
+    fn post_close_claim_circuit_rejects_redirected_recipient() {
+        use crate::ethereum_types::{address::Address, u32limb_trait::U32LimbTrait};
+        let circuit = circuit();
+        let mut witness = build_full_witness();
+        // The leaf-bound recipient is [1,2,3,4,5]; expose a DIFFERENT (attacker) address.
+        witness.public_inputs.recipient =
+            Address::from_u32_slice(&[0xBAD, 0xBAD, 0xBAD, 0xBAD, 0xBAD]).unwrap();
+        let result = match circuit.fill_witness(&witness) {
+            Ok(pw) => catch_unwind(AssertUnwindSafe(|| circuit.data.prove(pw))),
+            Err(_) => Ok(Err(anyhow::anyhow!("fill_witness rejected"))),
+        };
+        assert!(
+            result.is_err() || result.unwrap().is_err(),
+            "a recipient PI != the leaf-bound (cosigner-signed) recipient must be UNPROVABLE"
         );
     }
 

@@ -65,6 +65,10 @@ pub enum PostCloseClaimWitnessError {
     ReceiverChannelMismatch,
     #[error("post-close claim receiver delta does not match imported tx bundle")]
     ReceiverDeltaMismatch,
+    #[error(
+        "post-close claim recipient does not match the cosigner-signed per-slot exit address (B-1b)"
+    )]
+    RecipientMismatch,
     #[error("invalid post-close claim proof: {0}")]
     InvalidClaimProof(String),
 }
@@ -139,6 +143,15 @@ impl PostCloseClaimWitness {
             self.final_balance_state.regev_pk_digests[self.receiver_member_index];
         if committed_pk_digest != Bytes32::from(self.receiver_pk.poseidon_digest()) {
             return Err(PostCloseClaimWitnessError::ReceiverDeltaMismatch);
+        }
+        // SECURITY (B-1b): the claim's L1 payout address MUST be the cosigner-signed per-slot
+        // exit address (the leaf field the circuit opens by inclusion). Native mirror of the
+        // circuit's leaf-recipient connect — fail-closed BEFORE any proving. Receivers may be
+        // delegates with no L1 registration under Option B.
+        if self.claim.l1_recipient
+            != self.final_balance_state.recipients[self.receiver_member_index]
+        {
+            return Err(PostCloseClaimWitnessError::RecipientMismatch);
         }
 
         Ok(PostCloseClaimPublicInputs {
@@ -327,6 +340,11 @@ mod tests {
                 Bytes32::from(receiver_pk.poseidon_digest()),
                 Bytes32::from(channel_keygen(&mut rng).0.poseidon_digest()),
             ]),
+            // B-1b: the receiver's (slot 0) leaf-bound exit address = the claim's l1_recipient.
+            recipients: BalanceState::pad_recipients(&[
+                Address::from_u32_slice(&[1, 2, 3, 4, 5]).unwrap(),
+                Address::from_u32_slice(&[21, 22, 23, 24, 25]).unwrap(),
+            ]),
             settled_tx_chain: Bytes32::default(),
             settled_tx_accumulator_root: Bytes32::from_u32_slice(&[0, 0, 0, 0, 0, 0, 0, 42])
                 .unwrap(),
@@ -350,11 +368,20 @@ mod tests {
         assert_eq!(public_inputs, roundtrip);
 
         // A wrong public amount must fail the E-3 verification.
-        let mut wrong = witness;
+        let mut wrong = witness.clone();
         wrong.amount += 1;
         assert!(matches!(
             wrong.to_public_inputs(RegevSecurityLevel::Test),
             Err(PostCloseClaimWitnessError::InvalidClaimProof(_))
+        ));
+
+        // B-1b: a claim whose l1_recipient differs from the cosigner-signed per-slot exit
+        // address (recipients[receiver_member_index]) is rejected fail-closed.
+        let mut redirected = witness;
+        redirected.claim.l1_recipient = Address::from_u32_slice(&[9, 9, 9, 9, 9]).unwrap();
+        assert!(matches!(
+            redirected.to_public_inputs(RegevSecurityLevel::Test),
+            Err(PostCloseClaimWitnessError::RecipientMismatch)
         ));
     }
 }

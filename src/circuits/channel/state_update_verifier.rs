@@ -1120,6 +1120,21 @@ fn verify_balance_state_common(
             prev_state.balance_state.state_version, next_state.balance_state.state_version
         )));
     }
+    // SECURITY (B-1b): per-slot L1 exit addresses are IMMUTABLE across EVERY supported state
+    // transition — recipient changes are NOT a supported transition. This runs in every
+    // transition verifier (send / refresh / inter-channel send / fund import / bundle apply /
+    // L1-deposit import all call verify_balance_state_common), so a proposed next state that
+    // mutates ANY slot's recipient (including the proposer's own) is rejected fail-closed BEFORE
+    // any cosigner signs it. A mutation would also flip that slot's leaf → slot-tree root → H1,
+    // so an already-signed state cannot be reinterpreted either; this check closes the
+    // remaining window (tricking cosigners into signing a redirected NEXT state).
+    if prev_state.balance_state.recipients != next_state.balance_state.recipients {
+        return Err(ChannelStateUpdateError::InvalidStateLinkage(
+            "recipients must remain unchanged across a state transition (B-1b: recipient \
+             changes are not a supported transition)"
+                .to_string(),
+        ));
+    }
     Ok(())
 }
 
@@ -1473,11 +1488,17 @@ mod tests {
             balance_state::BalanceState,
             channel::{ChannelFund, ChannelStatus, MemberSignature},
         },
-        ethereum_types::u256::U256,
+        ethereum_types::{address::Address, u256::U256},
         regev::{
             RegevSecurityLevel, channel_keygen, encrypt_amount, prove_channel_tx, regev_pk_root,
         },
     };
+
+    /// A distinct NONZERO per-slot L1 exit address per seed (B-1b: validate() rejects zero
+    /// active recipients).
+    fn recipient(seed: u32) -> Address {
+        Address::from_u32_slice(&[seed + 1, seed + 2, seed + 3, seed + 4, seed + 5]).unwrap()
+    }
 
     /// A distinct, canonical member SPHINCS+ pubkey hash (Bytes32) per seed.
     fn pubkey_hash(seed: u32) -> Bytes32 {
@@ -1590,6 +1611,11 @@ mod tests {
                     before_t.0.clone(),
                 ]),
                 regev_pk_digests: BalanceState::pad_regev_pk_digests(&[]),
+                recipients: BalanceState::pad_recipients(&[
+                    recipient(10),
+                    recipient(20),
+                    recipient(30),
+                ]),
                 settled_tx_chain: Bytes32::default(),
                 settled_tx_accumulator_root: Bytes32::default(),
                 state_version: 3,
@@ -1615,6 +1641,11 @@ mod tests {
                     before_t.0.clone(),
                 ]),
                 regev_pk_digests: BalanceState::pad_regev_pk_digests(&[]),
+                recipients: BalanceState::pad_recipients(&[
+                    recipient(10),
+                    recipient(20),
+                    recipient(30),
+                ]),
                 settled_tx_chain: Bytes32::default(),
                 settled_tx_accumulator_root: Bytes32::default(),
                 state_version: 4,
@@ -1723,6 +1754,32 @@ mod tests {
         assert!(matches!(
             fixture.witness.verify(&VERIFIER),
             Err(ChannelStateUpdateError::InvalidCiphertextTransition(_))
+        ));
+    }
+
+    /// B-1b: a transition that mutates ANY slot's L1 exit address is rejected fail-closed by
+    /// every transition verifier (recipient changes are NOT a supported transition). This is the
+    /// co-signer-side guard: without it a malicious proposer could trick the cosigners into
+    /// signing a next state whose (otherwise valid-looking) recipients redirect a victim slot's
+    /// payout. Covers both a VICTIM slot's recipient and the SENDER's own recipient.
+    #[test]
+    fn in_channel_transfer_rejects_recipients_mutation() {
+        // Victim slot (recipient_index = 1): redirect its exit address.
+        let mut fixture = in_channel_fixture();
+        fixture.witness.next_state.balance_state.recipients[1] = recipient(666);
+        fixture.witness.next_state = fixture.witness.next_state.clone().with_computed_digest();
+        assert!(matches!(
+            fixture.witness.verify(&VERIFIER),
+            Err(ChannelStateUpdateError::InvalidStateLinkage(_))
+        ));
+
+        // The sender's OWN recipient is equally immutable in B-1b.
+        let mut fixture = in_channel_fixture();
+        fixture.witness.next_state.balance_state.recipients[0] = recipient(667);
+        fixture.witness.next_state = fixture.witness.next_state.clone().with_computed_digest();
+        assert!(matches!(
+            fixture.witness.verify(&VERIFIER),
+            Err(ChannelStateUpdateError::InvalidStateLinkage(_))
         ));
     }
 
@@ -1903,6 +1960,11 @@ mod tests {
                 delegate_count: 0,
                 enc_balances: BalanceState::pad_enc_balances(&[]),
                 regev_pk_digests: BalanceState::pad_regev_pk_digests(&[]),
+                recipients: BalanceState::pad_recipients(&[
+                    recipient(10),
+                    recipient(20),
+                    recipient(30),
+                ]),
                 settled_tx_chain: prev_chain,
                 settled_tx_accumulator_root: Bytes32::default(),
                 state_version: 5,
@@ -1930,6 +1992,11 @@ mod tests {
                 delegate_count: 0,
                 enc_balances: BalanceState::pad_enc_balances(&[]),
                 regev_pk_digests: BalanceState::pad_regev_pk_digests(&[]),
+                recipients: BalanceState::pad_recipients(&[
+                    recipient(10),
+                    recipient(20),
+                    recipient(30),
+                ]),
                 settled_tx_chain: next_chain,
                 settled_tx_accumulator_root: Bytes32::default(),
                 state_version: 6,

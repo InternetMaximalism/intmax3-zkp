@@ -110,6 +110,18 @@ fn inter_channel_small_block_sig_is_validity_proven() {
         delegate_count: 0,
         enc_balances: BalanceState::pad_enc_balances(&enc),
         regev_pk_digests: BalanceState::pad_regev_pk_digests(&regev_pk_digests),
+        // B-1b: nonzero per-active-slot L1 exit addresses (validate() rejects zero actives).
+        recipients: BalanceState::pad_recipients(
+            &(0..3u32)
+                .map(|i| {
+                    use intmax3_zkp::ethereum_types::u32limb_trait::U32LimbTrait as _;
+                    intmax3_zkp::ethereum_types::address::Address::from_u32_slice(
+                        &[0x7E57_0000u32 + i; 5],
+                    )
+                    .unwrap()
+                })
+                .collect::<Vec<_>>(),
+        ),
         settled_tx_chain: Bytes32::default(),
         // This synthetic post-debit state carries a genesis-like (default) settle chain, so its
         // accumulator root is the empty-tree root — keeping H1' internally consistent.

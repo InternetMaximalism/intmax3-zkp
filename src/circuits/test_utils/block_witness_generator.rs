@@ -281,12 +281,7 @@ impl ChannelMemberKeys {
                 pk_b: Bytes32::from(leaf.pk_b),
                 regev_pk_digest: Bytes32::from(leaf.regev_pk_digest),
                 // Deterministic per-(channel, slot) test recipient (keccak preimage only).
-                recipient: Address::from_u32_slice(
-                    &[0x3333_0000u32
-                        .wrapping_add(channel_id.wrapping_mul(16))
-                        .wrapping_add(i as u32); 5],
-                )
-                .expect("address from u32 slice"),
+                recipient: test_recipient_for(channel_id, i),
             };
         }
         ChannelRegRecord {
@@ -299,6 +294,25 @@ impl ChannelMemberKeys {
             members,
         }
     }
+}
+
+/// The canonical deterministic per-(channel, slot) TEST L1 recipient — the SINGLE formula used by
+/// the reg record (`to_reg_record_split`), the withdraw-pipeline registration
+/// (`wallet_core::build_channel_withdrawal`), and the CLI cosigners' B-1b balance-slot recipients
+/// (`channel_member` genesis). Always NONZERO (0x3333_0000-based), so it passes the
+/// `BalanceState::validate()` / `registerChannel` zero-recipient rejections.
+///
+/// SECURITY (B-1b): keeping the reg-record recipient and the balance-slot leaf recipient equal for
+/// cosigners means `registeredRecipientOf[pk_g]` (the current Manager check) and the leaf-bound
+/// claim recipient agree — the B-2 Manager switch changes WHICH one is authoritative without
+/// changing the paid address for cosigners.
+pub fn test_recipient_for(channel_id: u32, slot: usize) -> Address {
+    Address::from_u32_slice(
+        &[0x3333_0000u32
+            .wrapping_add(channel_id.wrapping_mul(16))
+            .wrapping_add(slot as u32); 5],
+    )
+    .expect("address from u32 slice")
 }
 
 /// A distinct canonical Regev pubkey of the correct length, derived deterministically (coeffs < q).

@@ -286,6 +286,7 @@ fn deposit_backing_gate_reconciles_and_fails_closed() {
         &record,
         &cts,
         &regev_pk_digests,
+        &test_recipients_b1b(cts.len()),
         50,
         backing_chain,
         Bytes32::default(),
@@ -350,8 +351,14 @@ fn deposit_backing_gate_reconciles_and_fails_closed() {
 
     // ---- 6. FAIL-CLOSED at the live gate: an UNBACKED genesis is never signed -------------------
     // Same channel, but assembled WITHOUT deposit backing (settled_tx_chain = 0 ≠ balanceProof's).
-    let unbacked =
-        assemble_genesis_state(&record, &cts, &regev_pk_digests, 50).expect("unbacked genesis");
+    let unbacked = assemble_genesis_state(
+        &record,
+        &cts,
+        &regev_pk_digests,
+        &test_recipients_b1b(cts.len()),
+        50,
+    )
+    .expect("unbacked genesis");
     assert!(
         verify_channel_backing(&record, &unbacked, Some(&attestation), &balance_vd).is_err(),
         "an UNBACKED genesis must fail the gate, so no honest member co-signs it"
@@ -368,4 +375,18 @@ fn deposit_backing_gate_reconciles_and_fails_closed() {
         sign_state_if_backed(&mkeys[0], 0, &record, &unbacked, &attestation, &balance_vd).is_err(),
         "check-and-sign must REFUSE (no signature) when settled_tx_chain does not match the backing"
     );
+}
+
+/// B-1b: deterministic NONZERO per-slot L1 exit addresses for test genesis states
+/// (`BalanceState::validate()` rejects zero active recipients).
+fn test_recipients_b1b(n: usize) -> Vec<intmax3_zkp::ethereum_types::address::Address> {
+    use intmax3_zkp::ethereum_types::u32limb_trait::U32LimbTrait as _;
+    (0..n)
+        .map(|i| {
+            intmax3_zkp::ethereum_types::address::Address::from_u32_slice(
+                &[0x7E57_0000u32.wrapping_add(i as u32); 5],
+            )
+            .unwrap()
+        })
+        .collect()
 }

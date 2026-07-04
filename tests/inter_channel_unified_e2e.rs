@@ -338,6 +338,7 @@ fn unified_inter_channel_transfer_e2e() {
         &a_record,
         &a_cts,
         &a_regev_pk_digests,
+        &test_recipients_b1b(a_cts.len()),
         a_fund,
         a_chain,
         Bytes32::default(),
@@ -570,4 +571,18 @@ fn unified_inter_channel_transfer_e2e() {
         h1_prime.to_hex(),
         tx_tree_root.to_hex()
     );
+}
+
+/// B-1b: deterministic NONZERO per-slot L1 exit addresses for test genesis states
+/// (`BalanceState::validate()` rejects zero active recipients).
+fn test_recipients_b1b(n: usize) -> Vec<intmax3_zkp::ethereum_types::address::Address> {
+    use intmax3_zkp::ethereum_types::u32limb_trait::U32LimbTrait as _;
+    (0..n)
+        .map(|i| {
+            intmax3_zkp::ethereum_types::address::Address::from_u32_slice(
+                &[0x7E57_0000u32.wrapping_add(i as u32); 5],
+            )
+            .unwrap()
+        })
+        .collect()
 }

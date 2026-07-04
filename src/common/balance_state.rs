@@ -23,6 +23,7 @@ use crate::{
     common::channel::{ChannelError, ChannelId, hash_words, split_u64},
     constants::{BALANCE_SLOT_TREE_HEIGHT, MAX_CHANNEL_MEMBERS, MAX_COSIGNERS},
     ethereum_types::{
+        address::Address,
         bytes32::{Bytes32, Bytes32Target},
         u32limb_trait::{U32LimbTargetTrait as _, U32LimbTrait as _},
     },
@@ -90,6 +91,20 @@ pub struct BalanceState {
     /// makes the decryption-core pk binding (MUST-FIX #1) satisfiable without deployer trust.
     #[serde(with = "serde_big_array::BigArray")]
     pub regev_pk_digests: [Bytes32; MAX_CHANNEL_MEMBERS],
+    /// B-1b (Option B1, tasks/reg-chain-1024-threat-model.md): the per-slot L1 EXIT ADDRESS, in
+    /// member slot order. Active slots carry the slot owner's L1 withdrawal recipient; padding
+    /// slots (`>= member_count + delegate_count`) carry `Address::default()` (zero).
+    ///
+    /// SECURITY: committed into [`Self::h1`] via slot leaf i of the balance-slot Poseidon tree
+    /// (`balance_slot_leaf_hash`), so each slot's payout address is bound under the SAME cosigner
+    /// N-of-N signatures that bind the balances. Under Option B delegates have NO L1 registration
+    /// (`registeredRecipientOf` never covers them), so this leaf binding is the ONLY thing that
+    /// prevents a delegate's L1 payout from being redirected at claim time: the claim circuits
+    /// open this field by slot-tree inclusion and connect it to the claim's `recipient` PI.
+    /// Recipient changes are NOT a supported state transition — every transition verifier
+    /// enforces `recipients` unchanged (see `state_update_verifier::verify_balance_state_common`).
+    #[serde(with = "serde_big_array::BigArray")]
+    pub recipients: [Address; MAX_CHANNEL_MEMBERS],
     /// Hash chain over the settles this state has absorbed (genesis = 0x00…00).
     pub settled_tx_chain: Bytes32,
     /// Stage 3 (post-close source-tx anchoring): the root of the per-channel settled-tx Merkle
@@ -145,22 +160,32 @@ impl BalanceState {
         std::array::from_fn(|i| active.get(i).copied().unwrap_or_default())
     }
 
+    /// B-1b: pad `active` per-slot L1 exit addresses (len = `member_count + delegate_count`, each
+    /// NONZERO) to a full `MAX_CHANNEL_MEMBERS`-sized array, filling padding slots with
+    /// `Address::default()` (zero). Mirrors the other `pad_*` helpers; [`Self::validate`] enforces
+    /// the nonzero-active / zero-padding split fail-closed.
+    pub fn pad_recipients(active: &[Address]) -> [Address; MAX_CHANNEL_MEMBERS] {
+        std::array::from_fn(|i| active.get(i).copied().unwrap_or_default())
+    }
+
     /// The per-slot leaf hashes of the H1 balance-slot Poseidon Merkle tree, in member slot
     /// order (ALL `MAX_CHANNEL_MEMBERS` slots — the tree, and hence H1, is a function of the
     /// FULL slot array, exactly like the retired flat keccak).
     ///
-    /// PERF: padding slots share one canonical `(default pk digest, padding ct digest, 0)` leaf,
-    /// so the padding leaf hash (and the padding ciphertext's keccak digest) is computed once and
-    /// reused. This is a pure memoization: the reused value equals the per-slot recompute.
+    /// PERF: padding slots share one canonical `(default pk digest, padding ct digest, 0 adds,
+    /// zero recipient)` leaf, so the padding leaf hash (and the padding ciphertext's keccak
+    /// digest) is computed once and reused. This is a pure memoization: the reused value equals
+    /// the per-slot recompute.
     pub fn slot_leaf_hashes(&self) -> Vec<PoseidonHashOut> {
         let padding_ct = RegevCiphertext::padding();
         let padding_ct_digest = padding_ct.digest();
         let padding_leaf =
-            balance_slot_leaf_hash(Bytes32::default(), padding_ct_digest, 0);
+            balance_slot_leaf_hash(Bytes32::default(), padding_ct_digest, 0, Address::default());
         (0..MAX_CHANNEL_MEMBERS)
             .map(|i| {
                 let is_padding_slot = self.regev_pk_digests[i] == Bytes32::default()
                     && self.pending_adds[i] == 0
+                    && self.recipients[i] == Address::default()
                     && self.enc_balances[i] == padding_ct;
                 if is_padding_slot {
                     padding_leaf
@@ -169,6 +194,7 @@ impl BalanceState {
                         self.regev_pk_digests[i],
                         self.enc_balances[i].digest(),
                         self.pending_adds[i],
+                        self.recipients[i],
                     )
                 }
             })
@@ -213,7 +239,9 @@ impl BalanceState {
     ///
     /// where `slot_tree_root` is the height-[`BALANCE_SLOT_TREE_HEIGHT`] Poseidon Merkle root
     /// over ALL `MAX_CHANNEL_MEMBERS` per-slot leaves
-    /// `balance_slot_leaf_hash(regev_pk_digests[i], enc_balances[i].digest(), pending_adds[i])`.
+    /// `balance_slot_leaf_hash(regev_pk_digests[i], enc_balances[i].digest(), pending_adds[i],
+    /// recipients[i])` (B-1b: the per-slot L1 exit address rides in the same cosigner-signed
+    /// leaf).
     /// This must stay element-identical to the in-circuit recompute in
     /// `circuits::channel::h1_gadget::recompute_h1` (the L1 mirror only pins/compares the value).
     ///
@@ -307,6 +335,28 @@ impl BalanceState {
                 )));
             }
         }
+        // B-1b recipient split (fail-closed on BOTH sides):
+        // - ACTIVE slots (`< member_count + delegate_count`) MUST carry a NONZERO recipient. Under
+        //   Option B a delegate has NO L1 registration, so a zero recipient would make the slot
+        //   permanently unexitable (the Manager cannot pay address(0)) — refuse at signing time,
+        //   not at claim time.
+        // - PADDING slots MUST carry the zero recipient, mirroring the ciphertext/pk-digest/adds
+        //   padding canonicality: a nonzero padding recipient would smuggle routing data into H1
+        //   past the active accounting.
+        for (index, r) in self.recipients.iter().enumerate() {
+            if index < active && *r == Address::default() {
+                return Err(ChannelError::InvalidBalanceState(format!(
+                    "recipients[{index}] is an ACTIVE slot (< member_count+delegate_count \
+                     {active}) and must be a NONZERO L1 exit address (B-1b)"
+                )));
+            }
+            if index >= active && *r != Address::default() {
+                return Err(ChannelError::InvalidBalanceState(format!(
+                    "recipients[{index}] is a padding slot (>= member_count+delegate_count \
+                     {active}) and must be Address::default()"
+                )));
+            }
+        }
         for (index, &adds) in self.pending_adds.iter().enumerate() {
             if adds > MAX_HOMO_ADDS_BEFORE_REFRESH {
                 return Err(ChannelError::InvalidBalanceState(format!(
@@ -329,21 +379,32 @@ impl BalanceState {
 /// INDEX is the Merkle position, so slot order is bound structurally):
 ///
 /// `leaf_i = Poseidon([BALANCE_SLOT_LEAF_DOMAIN, regev_pk_digest (8 u32 limbs),
-///                     enc_balance_digest (8 u32 limbs), pending_adds (1 u32 limb)])`
+///                     enc_balance_digest (8 u32 limbs), pending_adds (1 u32 limb),
+///                     recipient (5 u32 limbs)])`
 ///
-/// SECURITY: FIXED 18-element width with a leading domain constant and canonical u32 payload
-/// limbs — injective on the `(regev_pk_digest, enc_balance_digest, pending_adds)` triple.
-/// MUST stay element-identical to the in-circuit twin
+/// SECURITY: FIXED 23-element width with a leading domain constant and canonical u32 payload
+/// limbs — injective on the `(regev_pk_digest, enc_balance_digest, pending_adds, recipient)`
+/// quadruple. The fixed-width discipline of the H1 threat model (T2/T3/T4,
+/// tasks/h1-poseidon-root-threat-model.md) is preserved: the leaf width changes 18 → 23 for ALL
+/// leaves simultaneously (padding included), so no variable-length ambiguity and no cross-width
+/// aliasing against the 8-element node or 26-element header hashes is introduced.
+///
+/// SECURITY (B-1b recipient binding): `recipient` is the slot's L1 exit address. Hashing it here
+/// puts it under the cosigner N-of-N signatures via the slot-tree root inside H1 — the ONLY
+/// binding that prevents payout redirection for delegates, which have no L1 registration under
+/// Option B. MUST stay element-identical to the in-circuit twin
 /// `circuits::channel::h1_gadget::balance_slot_leaf_hash_circuit`.
 pub fn balance_slot_leaf_hash(
     regev_pk_digest: Bytes32,
     enc_balance_digest: Bytes32,
     pending_adds: u32,
+    recipient: Address,
 ) -> PoseidonHashOut {
     let mut inputs = vec![BALANCE_SLOT_LEAF_DOMAIN];
     inputs.extend(regev_pk_digest.to_u32_vec());
     inputs.extend(enc_balance_digest.to_u32_vec());
     inputs.push(pending_adds);
+    inputs.extend(recipient.to_u32_vec());
     PoseidonHashOut::hash_inputs_u32(&inputs)
 }
 
@@ -452,6 +513,11 @@ mod tests {
         }
     }
 
+    /// A distinct NONZERO L1 recipient per seed (validate() rejects zero active recipients).
+    fn recipient(seed: u32) -> Address {
+        Address::from_u32_slice(&[seed + 1, seed + 2, seed + 3, seed + 4, seed + 5]).unwrap()
+    }
+
     fn sample_state() -> BalanceState {
         BalanceState {
             channel_id: ChannelId::new(7).unwrap(),
@@ -463,6 +529,7 @@ mod tests {
                 ciphertext(3),
             ]),
             regev_pk_digests: BalanceState::pad_regev_pk_digests(&[]),
+            recipients: BalanceState::pad_recipients(&[recipient(1), recipient(2), recipient(3)]),
             settled_tx_chain: Bytes32::default(),
             settled_tx_accumulator_root: Bytes32::default(),
             state_version: 5,
@@ -529,18 +596,28 @@ mod tests {
             s.pending_adds[slot] += 1;
             assert_ne!(h1, s.h1(), "pending_adds[{slot}] must affect h1 (D3)");
         }
+
+        // B-1b: each ACTIVE slot's L1 exit address rides in that slot's leaf — flipping it must
+        // flip H1 (this is the whole recipient-redirection defense for delegates).
+        for slot in 0..sample_state().member_count as usize {
+            let mut s = sample_state();
+            s.recipients[slot] = recipient(900 + slot as u32);
+            assert_ne!(h1, s.h1(), "recipients[{slot}] must affect h1 (B-1b)");
+        }
     }
 
     /// Build a `BalanceState` with `count` ACTIVE members (distinct canonical ciphertexts in
     /// slots 0..count, padding = `RegevCiphertext::padding()`) for multi-N coverage below.
     fn state_with_members(count: u8) -> BalanceState {
         let active: Vec<RegevCiphertext> = (0..count as u32).map(|i| ciphertext(1 + i)).collect();
+        let recipients: Vec<Address> = (0..count as u32).map(|i| recipient(1 + i)).collect();
         BalanceState {
             channel_id: ChannelId::new(7).unwrap(),
             member_count: count,
             delegate_count: 0,
             enc_balances: BalanceState::pad_enc_balances(&active),
             regev_pk_digests: BalanceState::pad_regev_pk_digests(&[]),
+            recipients: BalanceState::pad_recipients(&recipients),
             settled_tx_chain: Bytes32::default(),
             settled_tx_accumulator_root: Bytes32::default(),
             state_version: 5,
@@ -592,6 +669,24 @@ mod tests {
             nonzero_add.validate(),
             Err(ChannelError::InvalidBalanceState(_))
         ));
+
+        // B-1b fail-closed: a ZERO recipient in an ACTIVE slot is rejected (the slot could never
+        // exit on L1 — refuse at signing time).
+        let mut zero_active_recipient = state_with_members(8);
+        zero_active_recipient.recipients[3] = Address::default();
+        assert!(matches!(
+            zero_active_recipient.validate(),
+            Err(ChannelError::InvalidBalanceState(_))
+        ));
+
+        // B-1b fail-closed: a NONZERO recipient in a PADDING slot is rejected (routing smuggling
+        // past the active accounting).
+        let mut nonzero_pad_recipient = state_with_members(8);
+        nonzero_pad_recipient.recipients[8] = recipient(99);
+        assert!(matches!(
+            nonzero_pad_recipient.validate(),
+            Err(ChannelError::InvalidBalanceState(_))
+        ));
     }
 
     /// Delegate account (Phase 1): `delegate_count` is part of the H1 preimage AND drives the
@@ -611,6 +706,8 @@ mod tests {
         with_delegate.delegate_count = 2;
         with_delegate.enc_balances[3] = ciphertext(100);
         with_delegate.enc_balances[4] = ciphertext(101);
+        with_delegate.recipients[3] = recipient(100);
+        with_delegate.recipients[4] = recipient(101);
         assert_ne!(base_h1, with_delegate.h1(), "delegate_count must affect h1");
         with_delegate
             .validate()
@@ -636,6 +733,7 @@ mod tests {
         let mut full_members = state_with_members(16);
         full_members.delegate_count = 1;
         full_members.enc_balances[16] = ciphertext(60);
+        full_members.recipients[16] = recipient(60);
         full_members
             .validate()
             .expect("16 cosigners + 1 active delegate must validate at MAX=1024 slots");
@@ -646,6 +744,7 @@ mod tests {
         let mut bad_pad = state_with_members(3);
         bad_pad.delegate_count = 1; // active region = 0..4
         bad_pad.enc_balances[3] = ciphertext(50); // the single delegate slot
+        bad_pad.recipients[3] = recipient(50);
         bad_pad.enc_balances[5] = ciphertext(51); // a padding slot (>= 4) — must be rejected
         assert!(
             matches!(
@@ -661,6 +760,7 @@ mod tests {
         split_a.delegate_count = 2;
         for s in 0..4u32 {
             split_a.enc_balances[s as usize] = ciphertext(200 + s);
+            split_a.recipients[s as usize] = recipient(200 + s);
         }
         let mut split_b = split_a.clone();
         split_b.member_count = 3;
@@ -711,6 +811,7 @@ mod tests {
                     state.regev_pk_digests[i],
                     state.enc_balances[i].digest(),
                     state.pending_adds[i],
+                    state.recipients[i],
                 )
             })
             .collect();
@@ -735,20 +836,25 @@ mod tests {
         assert_eq!(Bytes32::from(decoded), h1);
     }
 
-    /// Leaf-encoding injectivity: each component of the slot leaf triple is binding, and the
+    /// Leaf-encoding injectivity: each component of the slot leaf quadruple is binding, and the
     /// leaf carries its own domain constant (distinct from the header hash on identical-prefix
-    /// inputs).
+    /// inputs). B-1b: the recipient (the slot's L1 exit address) is a binding component — an
+    /// attacker cannot open the same leaf under a different payout address.
     #[test]
     fn balance_slot_leaf_hash_binds_every_component() {
         let pk = pubkey_hash(1);
         let enc = pubkey_hash(100);
-        let leaf = balance_slot_leaf_hash(pk, enc, 3);
-        assert_eq!(leaf, balance_slot_leaf_hash(pk, enc, 3));
-        assert_ne!(leaf, balance_slot_leaf_hash(pubkey_hash(2), enc, 3));
-        assert_ne!(leaf, balance_slot_leaf_hash(pk, pubkey_hash(101), 3));
-        assert_ne!(leaf, balance_slot_leaf_hash(pk, enc, 4));
+        let r = recipient(7);
+        let leaf = balance_slot_leaf_hash(pk, enc, 3, r);
+        assert_eq!(leaf, balance_slot_leaf_hash(pk, enc, 3, r));
+        assert_ne!(leaf, balance_slot_leaf_hash(pubkey_hash(2), enc, 3, r));
+        assert_ne!(leaf, balance_slot_leaf_hash(pk, pubkey_hash(101), 3, r));
+        assert_ne!(leaf, balance_slot_leaf_hash(pk, enc, 4, r));
+        // B-1b: flipping the recipient must flip the leaf (payout-redirection defense).
+        assert_ne!(leaf, balance_slot_leaf_hash(pk, enc, 3, recipient(8)));
+        assert_ne!(leaf, balance_slot_leaf_hash(pk, enc, 3, Address::default()));
         // Swapping the pk/enc positions must change the leaf (fixed-position encoding).
-        assert_ne!(leaf, balance_slot_leaf_hash(enc, pk, 3));
+        assert_ne!(leaf, balance_slot_leaf_hash(enc, pk, 3, r));
     }
 
     #[test]
