@@ -152,7 +152,35 @@ strictly cheaper.
 `Bytes32::from(RegevPk::poseidon_digest())`; `member_pk_g` stays as an INERT informational PI (new
 circuit test `withdrawal_nullifier_independent_of_member_pk_g` locks it). PI LAYOUT UNCHANGED ⇒ no
 Verifier.sol signature change; only the withdrawal-claim VK DIGEST + fixtures change (B-3). Full lib
-suite 377/377. Independent adversarial review of the re-key: IN FLIGHT.
+suite 377/377. Independent adversarial review of the re-key: **VERDICT SOUND** (2026-07-04) — native↔
+circuit byte-match confirmed, `pk_digest` a single leaf-bound target, `member_pk_g` proven inert,
+(a,b) pinned via decryption_core key-binding gate, cross-close replay safe (close_intent_digest embeds
+channel_id), post-close unaffected (receiver_pk_g tx_hash-bound). ⇒ B-2 unblocked.
+
+## B-2 THREAT MODEL (removing the two on-chain claim gates)
+**Change:** delete `NotChannelMember` (`registeredMemberIndexPlusOne == 0`) + `RecipientMismatch`
+(`registeredRecipientOf != recipient`) from `submitWithdrawalClaim` and `submitPostCloseClaim`.
+**Adversary goals & why each fails post-change:**
+- *Claim a slot not in the signed final state (steal from a channel you're not in):* the proof's
+  slot/receiver inclusion is verified against `finalizedBalanceStateH1` (signed N-of-N by cosigners);
+  no witness exists for a slot absent from the signed tree, and the claimant needs the Regev secret
+  to decrypt `amount`. Membership is proof-enforced, not map-enforced.
+- *Redirect a delegate's payout:* `claim.recipient` is leaf-bound (B-1b) and connected in-circuit;
+  `withdrawalCredits[claim.recipient]` pays exactly the signed exit address. The removed
+  `registeredRecipientOf` map was empty for delegates anyway (the very thing that blocked them).
+- *Double-withdraw one slot:* nullifier is leaf-`pk_digest`-bound (fbcf448) + `usedWithdrawalNullifiers`
+  / `usedSharedNativeNullifiers` one-shot; grinding neutralized.
+- *Over-withdraw the channel:* `totalWithdrawn <= finalizedChannelFundAmount` cap UNCHANGED; every
+  accepted claim (cosigner or delegate) is a signed-state slot amount ⇒ Σ claims ≤ fund. Value
+  conservation does NOT depend on the removed gates.
+- *Affect close/cancel:* those read `registeredMemberSetCommitment` (cosigners), a DIFFERENT map,
+  untouched. The registration writes to `registeredMemberIndexPlusOne`/`registeredRecipientOf` stay
+  (harmless, now unread by the claim path).
+**Invariant preserved:** the two removed gates were an EARLIER (pre-B1b) recipient/membership
+authZ that the proof now subsumes; removing them ADMITS delegates (the goal) without widening what a
+cosigner could already do. **`RecipientMismatch` becomes unused** (only these 2 sites) ⇒ remove its
+declaration; `NotChannelMember` stays (still used by the `withdrawNative` member-recipient gate).
+Foundry tests asserting these reverts must flip to delegate-claim POSITIVE tests.
 
 ## B-2 scope (Solidity Manager) — READY once the re-key review clears
 Traced `ChannelSettlementManager.submitWithdrawalClaim` (:1043-1050) and `submitPostCloseClaim`

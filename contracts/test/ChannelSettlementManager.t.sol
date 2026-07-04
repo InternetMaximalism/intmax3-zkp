@@ -1186,15 +1186,27 @@ contract ChannelSettlementManagerTest is Test {
         m.submitWithdrawalClaim(dClaim, _withdrawalClaimProofFor(m, dClaim));
         assertEq(m.withdrawalCredits(dave), 40, "delegate withdrawal credited");
 
-        // A stranger pk_g (not a member, not a delegate) is rejected. Build the proof args BEFORE
-        // expectRevert so the cheatcode targets ONLY the submitWithdrawalClaim call (not the view
-        // calls that assemble the proof).
+        // B-2 (Option B): membership is now PROOF-ENFORCED, not gate-enforced. There is NO on-chain
+        // delegate registry to gate a claim against — a claimant's membership is established SOLELY
+        // by the withdrawal proof's slot-inclusion against the signed `finalizedBalanceStateH1`. A
+        // stranger not in the signed state cannot produce a verifying proof; that ZK slot-inclusion
+        // rejection is covered by the Rust circuit tests (`withdrawal_claim` rejects a non-included
+        // slot / fake pk). On-chain it surfaces as `InvalidWithdrawalClaimProof`: a claim whose
+        // public inputs the verifier does not accept is rejected. Model the stranger with a claim
+        // whose proof binds a DIFFERENT (the delegate's) claim — its limbs cannot match, standing in
+        // for "no valid slot-inclusion witness exists". Build proof args BEFORE `expectRevert` so the
+        // cheatcode targets ONLY the `submitWithdrawalClaim` call.
         bytes32 STRANGER = keccak256("not_in_channel");
         ChannelSettlementManager.WithdrawalClaim memory sClaim =
             _withdrawalClaim(cid, STRANGER, mallory, 1);
+        // The stranger's limbs are self-consistent, but a stranger cannot produce a cryptographically
+        // valid slot-inclusion proof against the signed state — simulate the ZK verdict = false. The
+        // manager rejects with `InvalidWithdrawalClaimProof`. (Reset the verdict afterwards.)
         MleVerifier.MleProof memory sProof = _withdrawalClaimProofFor(m, sClaim);
-        vm.expectRevert(ChannelSettlementManager.NotChannelMember.selector);
+        mockMle.setVerdict(false);
+        vm.expectRevert(ChannelSettlementManager.InvalidWithdrawalClaimProof.selector);
         m.submitWithdrawalClaim(sClaim, sProof);
+        mockMle.setVerdict(true);
     }
 
     /// Delegate account: a delegate pk_g that collides with a MEMBER pk_g is rejected at
