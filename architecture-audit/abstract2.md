@@ -72,8 +72,9 @@ Security is divided into the following 5 properties (described later in §4):
   Genesis is 0. Each time an inter-channel transfer (send/receive) is taken in,
   `settledTxChain' = hash(settledTxChain, TxLeafHash)`; taking in a deposit updates it similarly with the deposit hash.
   Invariant for intra-channel transfers. **`TxLeafHash` is known at signing time (flowSend1 step 6)**, so the post-subtraction state's
-  chain can be computed on the spot. The nullifier includes `block_number`, so it cannot be computed at signing time and
-  cannot be used for this purpose (double-settle prevention via `block_number` binding continues to be handled by the base-layer nullifier).
+  chain can be computed on the spot. `TxLeafHash` is the canonical settle/tx identity used by the chain; double-settle prevention is a
+  separate concern handled by the base-layer nullifier, which now binds `nonce` (settlement-independent — F-WD-2), so re-settling the same
+  deduction yields the identical nullifier and is caught by the on-chain used-set.
 - `BalancePublicInputs` : the **public input** of `balanceProof` (separate from the proof).
   **New requirement: the circuit exposes the `settledTxChain` of the settle history it took in as a public input.**
 - `stateVersion` : the version number of the balance state (channel layer, new).
@@ -115,7 +116,7 @@ Security is divided into the following 5 properties (described later in §4):
   1. `senderDelta` and `recipientDelta` correspond to the same `amount` (equal quantity, opposite sign).
   2. The sender's balance remains non-negative after applying `senderDelta` (the range constraint **balance ≥ transfer amount**).
   3. Each delta is a correct ciphertext for its respective `RegevPk`.
-- `SettledTransfer::nullifier()` : tx hash / nullifier (existing). Binds `TxLeafHash`, `from`, `transfer_index`, `block_number`. Used for double-spend prevention.
+- `SettledTransfer::nullifier()` : tx hash / nullifier (existing). Binds `TxLeafHash`, `from`, `transfer_index`, `nonce`. Used for double-spend prevention.
 - `TxV2 { tx_class, transfer_tree_root, nonce, channel_action_root }` (`src/common/tx.rs`): the leaf of the tx tree.
 - `TxV2Tree = SparseMerkleTree<TxV2>` (`src/common/trees/tx_v2_tree.rs`): the Merkle tree of txs that the BP collected from multiple senders (channels).
 - `tx_tree_root` : the root of `TxV2Tree` (`Block.tx_tree_root`).

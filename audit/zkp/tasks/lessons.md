@@ -53,3 +53,22 @@
 - Crypto verifiers (Groth16/KZG/MLE) are uninterpreted `... → Bool` oracles,
   exactly как Poseidon/keccak in the circuit model — contract reasoning is
   about accounting / access-control / replay / CEI, not the primitives.
+
+## Meta-audit remediation (2026-07-02)
+- The satisfiability-lemma guard WORKS: the adversarial re-review of our own
+  remediation caught three unsatisfiable/over-strong artifacts (unbounded
+  NatLitInj, truncation-false NullifierRootBinding, 3-vs-5-field PublicState).
+  Rule confirmed: every ∀-shaped named hypothesis must be checked against a
+  cardinality/pigeonhole argument at the intended instantiation BEFORE use.
+- "Named hypothesis" discipline needs a truth audit, not just naming: a named
+  Prop that is false at the real field is worse than prose, because it looks
+  machine-checked. Bounded quantifiers by default.
+- Exclusion labels must be verified against what the file DOES, not its path:
+  update_channel_tree.rs carried base-layer obligations under a "channel" name.
+- Shared-bits modeling: when Rust runs two independent split_le calls, model
+  two existentials and identify them under PowTwoInj in the THEOREM — baking
+  the identification into Constraints hides a char-dependent assumption.
+- Composition value: writing EndToEnd.lean forced every English arrow into a
+  field with a justification — two undisclosed boundaries (amount-only
+  binding, settle-twice) surfaced only because the composition would not
+  type-check without naming them.

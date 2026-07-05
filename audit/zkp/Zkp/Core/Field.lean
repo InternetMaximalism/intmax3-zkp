@@ -18,14 +18,52 @@
   particular Goldilocks), and never accidentally relies on a
   property the real circuit cannot guarantee.
 
-  SECURITY: the axioms below are the *entire* trusted algebraic
-  base. Goldilocks is a field (commutative, every nonzero element
-  invertible), hence an integral domain, so `mul_eq_zero` holds.
+  SECURITY — the ACTUAL trusted base of this development. The
+  `CField` axioms below are the trusted *algebraic* core (Goldilocks
+  is a field, hence an integral domain, so `mul_eq_zero` holds), but
+  they are NOT the whole trusted base. A reader auditing what is
+  assumed rather than proved must also count:
+
+    1. **Opaque primitives**, trusted for determinism only:
+       `Bytes.poseidon`, `Merkle.compress`, `Builder.natLit`,
+       `Builder.repr`, `Bytes.fromHashOut`, `U256.uval`/`u256Leaf`,
+       the per-circuit commitment/root functions (`commitment`,
+       `nullifierRoot`, `nullifierKey`, ...), and the contract-side
+       `keccak` (Contracts/Coverage.lean).
+    2. **Spec-level ℕ-arithmetic relations** standing in for verified
+       gate chains: `U256.AddSpec` / `U256.SubSpec`. The limb/carry
+       argument justifying them is Rust-side (u256.rs:277-292 add,
+       :304-321 sub) and lives OUTSIDE Lean — see the trusted-base
+       note in Core/U256.lean.
+    3. **`Builder.rangeCheck` semantics**: `repr a < 2^bits` models
+       `builder.range_check`; it carries force only together with the
+       `Builder.ReprFaithful` facts.
+    4. **Named hypothesis families** — never axioms, always explicit
+       theorem parameters, so each use is visible in a signature:
+         * collision resistance / binding: `Bytes.PoseidonCR`,
+           `Merkle.CompressCR`, `Contracts.*` `KeccakCR`,
+           `Circuits.UpdatePrivateState.NullifierRootBinding`;
+         * numeral / representative faithfulness: `Builder.NatLitInj`
+           (BOUNDED numeral injectivity — the unbounded form is
+           pigeonhole-false at any finite field), `Builder.ReprFaithful`;
+         * characteristic facts: `Merkle.PowTwoInj F k` (uniqueness of
+           k-bit boolean decompositions — Goldilocks-true for k ≤ 63;
+           load-bearing wherever the two independent per-call
+           `split_le` decompositions of one index wire are identified,
+           see Core/Merkle.lean), and the char(F) > 4 reading of the
+           one-hot sum (Circuits/Balance/SwitchBoard.lean);
+         * Poseidon accumulator idealizations `AccumulateNoFixpoint` /
+           `AccumulateNeverEmpty` (Circuits/Validity/UpdateUser.lean) —
+           NOT structural facts of the concrete hash: both are
+           literally unsatisfiable-by-counting for real Poseidon and
+           are read symbolically ("no such instance exhibited"), same
+           status as the CR family; see their docstrings.
+
   We deliberately do NOT axiomatize the characteristic / specific
   prime here; any soundness argument that needs `2^32 < p`,
-  canonical-form uniqueness, or range bounds must make that
-  dependency explicit at its use site rather than smuggle it in
-  through the field axioms.
+  canonical-form uniqueness, or range bounds must take the relevant
+  NAMED hypothesis explicitly at its use site rather than smuggle it
+  in through the field axioms.
 -/
 
 namespace Zkp

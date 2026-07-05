@@ -238,3 +238,98 @@ resolves audit622 C-M2 formally. Full line-referenced argument:
   closed (receive_transfer asserts is_valid==true). Remaining Phase 2:
   balance_circuit + balance_processor (thin IVC wrappers). Then Phase 3
   withdraw — where F-RECIP-1 gets its verdict.
+
+---
+
+# META-AUDIT REMEDIATION (2026-07-02)
+
+A four-track adversarial meta-audit of this artifact found that the per-layer
+theorems are honest but several HEADLINE claims exceed what is machine-checked.
+This phase closes those gaps. Threat model for the remediation itself: the
+adversary is (a) a malicious prover exploiting a constraint the Lean model
+*added* that the Rust circuit does not enforce (over-constraint — the GapEmpty
+lesson), and (b) the transcription process itself claiming composition that is
+only prose. Rules: every NEW conjunct must cite a real `source.rs:line`; every
+inter-layer arrow becomes a NAMED Lean hypothesis, never silent; zero `sorry`;
+unprovable strengthenings stay findings.
+
+## Work packages (implementer ≠ reviewer; separate adversarial review pass)
+
+### Wave 1 (file-disjoint, parallel)
+- [ ] **WP-WD** Strengthen `SingleWithdrawalCircuit.lean`: add the real Rust
+  conjuncts privCommit↔sentTxRoot (`:441-442,456-461`) and
+  txLeaf↔(txTransferTreeRoot,nonce) (`:463-465`); model or explicitly scope the
+  settled-block leg (`:444-501`); re-prove `withdrawal_sound` with the repaired
+  provenance chain; satisfiability lemma; fix stale citations; align docstring.
+- [ ] **WP-NULL** Rework `Core/IndexedMerkle.lean`: REMOVE the `gap` hypothesis
+  from `InsertConstraints` (no Rust counterpart — a genuine over-constraint);
+  model the splice (`insertion.rs:302-309`) + empty-slot check (`:310-312`);
+  PROVE the GapEmpty preservation induction from genesis; re-derive
+  `key_absent` from invariant + circuit constraints; connect
+  `UpdatePrivateState.NullifierInsert` to it; refresh the wholesale-stale
+  citation table; honest F-NULL-1 status.
+- [ ] **WP-CT** Contracts: extend solvency trace `Op` with `claimAuthorized`
+  (real escrow outflow, `IntmaxRollup.sol:660`) and re-prove
+  `solvent_from_genesis`; model `reclaimStake` (`:1269-1283`, fund-bearing —
+  currently misclassified "no escrow effect") + both-order no-double-payout
+  theorems; fix `Coverage.lean` honesty gaps (manager-vs-verifier nullifiers,
+  disabled stubs ≠ oracles, manager close-lifecycle categorization incl.
+  `finalizePartialWithdrawal`); NAMED trust assumptions (deployer→manager
+  no-proof burn path, `allowMleDisabled=false`, single-call atomicity /
+  no-reentrancy modeling limit, send-failure=revert).
+- [ ] **WP-UU** New `Circuits/Validity/UpdateUser.lean` modeling the two
+  load-bearing obligations of the mislabeled-as-channel
+  `update_channel_tree.rs` (1600 LOC): (1) signing-block ⇒ `bp_sig_chain`
+  advancement (premise of `signatures_not_skippable`); (2) the channel_reg
+  branch account-tree-root rewrite (`:314,:609-646`) — bind what is bound,
+  surface what is not as a finding.
+- [ ] **WP-GADGET** Discharge F-PUBST-1 (`public_state.rs:307-330` is_equal
+  ANDs all fields — new `Circuits/Common/PublicStateEq.lean`); model
+  `hash_chain/cyclic_chain_circuit.rs:71-73` base-case pinning (new
+  `Circuits/Common/HashChain.lean`); produce the missing gadget-layer
+  inventory (33 CircuitBuilder files in src/common+src/utils) →
+  `tasks/gadget-inventory.md`.
+
+### Wave 2 (Core layer, sequential after Wave 1)
+- [ ] **WP-CORE** `CompressCR` (the Merkle fold hash has NO CR hypothesis
+  today); Merkle binding/uniqueness theorem under it; plumb CR into the
+  load-bearing sites so `PoseidonCR`/`KeccakCR` stop being decoration;
+  minimal named `repr`/`natLit` faithfulness so tag distinctness
+  (F-RECIP-1 leg 3) is in-model; document AddSpec/SubSpec as trusted-base;
+  SwitchBoard "one place" claim fix (shared-bits char>2^32 reliance).
+
+### Wave 3 (composition)
+- [ ] **WP-E2E** New `Zkp/EndToEnd.lean`: a `BridgeAssumptions` record naming
+  every currently-English arrow (recursion oracle `Verified i ⇒ inner
+  Constraints`, circuit↔contract layout equality, F↔U256 encoding), then a
+  REAL composed theorem: accepted L1 payout ⇒ backed, deducted, anchored,
+  single-use — conditional on the named record, not on prose.
+
+### Wave 4 (adversarial review, separate agents) + docs
+- [x] Adversarial review of every new conjunct vs Rust/Solidity (anti-GapEmpty
+  check) and vacuity check of every new theorem.
+- [x] Root `Zkp.lean` imports, clean `lake build`, updated SUMMARY.md /
+  audit report addendum with honest headline scope; lessons.md.
+
+## Remediation outcome (2026-07-02) — ALL WAVES COMPLETE
+
+- [x] WP-WD, WP-NULL, WP-CT, WP-UU, WP-GADGET, WP-CORE, WP-E2E all landed.
+- Final artifact: 41 files, 225 theorems (141 circuit + 62 contract + 22
+  end-to-end), 10,522 LOC, zero sorry/axiom, `lake build` green.
+- Adversarial re-review (implementer ≠ reviewer): contracts+E2E track ALL
+  CLEAN (composition non-circular — proof term consumes per-layer theorems);
+  circuit track found 3 BLOCKERs + 2 MAJORs in the remediation itself
+  (B-1 3-vs-5-field PublicState; B-2 NullifierRootBinding false-by-truncation;
+  B-3 NatLitInj pigeonhole-unsatisfiable; M-1 shared-bits over-constraint;
+  M-2 settle-twice disclosure) — ALL FIXED and re-verified.
+- NEW findings surfaced by the completion: **F-UPDU-1** (OPEN — registration
+  account roots conditional on excluded channel_reg circuit; base-layer fund
+  exposure), **F-WD-2** (OPEN — settle-twice nullifier boundary; validity-side
+  settlement-uniqueness invariant not yet established in Lean),
+  gadget-inventory **TODO-2** (reduce_to_hash_out canonicity, MEDIUM-HIGH
+  check item). F-NULL-1 now GENUINELY discharged (preservation induction);
+  F-PUBST-1 discharged; F-RECIP-1 leg 3 upgraded to conditional theorem.
+- Report: `audit/audit02-07-2026.md`; honest headline in SUMMARY.md.
+- Next candidates (not started): model `channel_reg_step.rs` to close
+  F-UPDU-1; model the send sub-update (`update_channel_tree.rs:852-914`) to
+  adjudicate F-WD-2; adjudicate TODO-2 canonicity.

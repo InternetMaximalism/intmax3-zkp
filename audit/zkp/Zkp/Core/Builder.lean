@@ -167,11 +167,71 @@ def IsEqualSpecG {α : Type} (a b : α) (e : F) : Prop :=
     canonical representative is below `2^bits`. The actual bound is
     a property of the Goldilocks embedding into ℕ; we keep it
     abstract here and make any reliance explicit at the use site.
-    `repr a` is the canonical ℕ representative of the field value. -/
+    `repr a` is the canonical ℕ representative of the field value.
+    On its own `repr` is propertyless — see `ReprFaithful` below for
+    the named facts that make it (and `rangeCheck`) meaningful. -/
 opaque repr : F → Nat
 
 /-- Range assertion: canonical representative fits in `bits` bits. -/
 def rangeCheck (bits : Nat) (a : F) : Prop := repr a < 2 ^ bits
+
+/-! ### Named faithfulness hypotheses for `natLit` / `repr`
+
+`natLit` and `repr` are opaque, so without SOME stated fact the tag
+constants (`natLit` values) are not provably distinct and every
+`rangeCheck` conclusion is inert (an inequality about an arbitrary
+function). The facts below are true of the concrete Goldilocks
+embedding (`F::from_canonical_u64` and `to_canonical_u64`); following
+the `Bytes.PoseidonCR` discipline they are NAMED hypotheses — explicit
+parameters of any theorem that needs them, never axioms. -/
+
+/-- BOUNDED injectivity of the numeral embedding `natLit`: naturals
+    below `bound` embed injectively. The unbounded statement
+    (`∀ m n, natLit F m = natLit F n → m = n`) is FALSE at every finite
+    field by pigeonhole (`natLit F p = natLit F 0` in Goldilocks), so
+    it must never be assumed; the bounded form at `bound = 2^63` is
+    genuinely TRUE in Goldilocks (`p = 2^64 − 2^32 + 1 > 2^63`) and is
+    derivable from `ReprFaithful` (`ReprFaithful.toNatLitInj` below).
+    Every use in this development applies it only to small literals
+    (domain tags, slot indices `< MAX_CHANNEL_MEMBERS = 16`), so the
+    `m, n < bound` side conditions are dischargeable at each use site.
+    Centralized here from Circuits/Validity/UpdateUser.lean, which
+    re-exports the `bound = 2^63` instance under its original name. -/
+def NatLitInj (F : Type) [CField F] (bound : Nat) : Prop :=
+  ∀ m n : Nat, m < bound → n < bound → natLit F m = natLit F n → m = n
+
+/-- Minimal faithfulness of the `repr`/`natLit` pair: embedding a
+    natural below `2^63` and taking the canonical representative
+    round-trips. (Any bound `< p` would do; `2^63` comfortably covers
+    every literal the circuits embed and is safely under Goldilocks'
+    `p > 2^63`.) This single fact makes range checks on embedded
+    constants meaningful (`rangeCheck_natLit`) and the domain tags
+    provably distinct (`Circuits.Recipient.tag_separation`). -/
+structure ReprFaithful (F : Type) [CField F] : Prop where
+  repr_natLit : ∀ n : Nat, n < 2 ^ 63 → repr (natLit F n) = n
+
+/-- Faithfulness makes `natLit` injective below `2^63` — the bounded
+    form of `NatLitInj`, derived rather than separately assumed. -/
+theorem ReprFaithful.natLit_inj (h : ReprFaithful F)
+    {m n : Nat} (hm : m < 2 ^ 63) (hn : n < 2 ^ 63)
+    (he : natLit F m = natLit F n) : m = n := by
+  have hm' := h.repr_natLit m hm
+  rw [he, h.repr_natLit n hn] at hm'
+  exact hm'.symm
+
+/-- `ReprFaithful` packages the same fact as the `NatLitInj F (2^63)`
+    hypothesis the consumers take — so a development that assumes
+    `ReprFaithful` gets bounded numeral injectivity for free. -/
+theorem ReprFaithful.toNatLitInj (h : ReprFaithful F) : NatLitInj F (2 ^ 63) :=
+  fun _ _ hm hn he => h.natLit_inj hm hn he
+
+/-- Under faithfulness, a range check on an embedded literal states
+    EXACTLY the ℕ bound — the check is no longer decoration. -/
+theorem rangeCheck_natLit (h : ReprFaithful F)
+    {bits n : Nat} (hn : n < 2 ^ 63) :
+    rangeCheck bits (natLit F n) ↔ n < 2 ^ bits := by
+  unfold rangeCheck
+  rw [h.repr_natLit n hn]
 
 /-! ### Lemmas about deterministic gates -/
 

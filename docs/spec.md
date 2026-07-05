@@ -35,7 +35,7 @@ struct Transfer {
 
 - `recipient` encodes either a withdrawal address or the hashed receiver identifier.
 - `aux_data` typically commits to a memo; if unused, supply a random nonce-sized value.
-- `transfer_nullifier` = `hash(transfer, from, transfer_index, settled_block_number)` where `from` is the sender's user ID and `transfer_index` is the index of the transfer in the tx tree, and `settled_block_number` is the block number where the tx was included.
+- `transfer_nullifier` = `hash(transfer, from, transfer_index, nonce)` where `from` is the sender's user ID, `transfer_index` is the index of the transfer in the tx tree, and `nonce` is the sender's tx nonce (the one-time deduction slot in the sender's sent-tx tree, enforced empty-before-write by the spend circuit). Because the preimage no longer carries the settlement block number, the nullifier is settlement-independent: two settlements of the same deduction produce the identical nullifier and are caught by the on-chain used-set (double-settle safe).
 
 ### 1.2 Deposit
 

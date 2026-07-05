@@ -44,8 +44,29 @@ import Zkp.Core.Builder
   Goldilocks (else two 1's could sum to 1). We surface this as the
   `OneHot` semantic predicate and note the dependency rather than
   re-deriving it from `Σ = 1` (which the deliberately char-agnostic
-  field axioms cannot prove). This is the one place the Goldilocks
-  characteristic is load-bearing in the balance stack.
+  field axioms cannot prove).
+
+  CORRECTION (meta-audit): this is NOT the only place the Goldilocks
+  characteristic is load-bearing in the balance stack. Rust runs an
+  independent `split_le` per `verify`/`get_root` call
+  (utils/trees/merkle_tree.rs:227); the read/write Merkle models —
+  `SpendCircuit.DeductStep`, `SpendCircuit.SentTxRecord`,
+  `UpdatePrivateState.AssetUpdate` (and `UpdateUser.treeUpdate` on the
+  validity side) — carry the two decompositions as SEPARATE
+  existential bit lists, and every "single leaf changed"
+  identification of them is proved in the consumers from the named
+  hypothesis `Merkle.PowTwoInj F 32` (uniqueness of 32-bit
+  decompositions, i.e. char(F) > 2^32; Core/Merkle.lean,
+  Goldilocks-true up to 63 bits). The IndexedMerkle splice shadows
+  absorb the same identification into their documented root↔map
+  boundary.
+
+  FAITHFULNESS NOTE (genesis branch): `Constraints.condVerify`
+  quantifies over ALL four branches, but Rust conditionally verifies
+  only branches 1-3 (:243/:251/:259); branch 0 — the IVC base case —
+  has NO sub-proof and no verification. The model is faithful only
+  under the instantiation `Verified 0 := True`, made explicit below as
+  `IntendedVerified` / `routing_sound_genesis`.
 -/
 
 namespace Zkp
@@ -70,6 +91,8 @@ structure Constraints {α : Type} (b : Fin 4 → F)
     (candidates : Fin 4 → α) (Verified : Fin 4 → Prop) (output : α) : Prop where
   oneHot : OneHot b
   -- :243/:251/:259 — a branch is verified when its selector is set.
+  -- Rust verifies ONLY branches 1-3; the quantification over branch 0
+  -- is faithful solely under `Verified 0 := True` (`IntendedVerified`).
   condVerify : ∀ i, b i = 1 → Verified i
   -- :271-275 — select_vec + connect: output equals the active candidate.
   outSel : ∀ i, b i = 1 → output = candidates i
@@ -93,6 +116,34 @@ theorem routing_sound {α : Type} {b : Fin 4 → F}
     rw [hz] at hj
     exact absurd hj.symm one_ne_zero
 
+/-- The INTENDED instantiation of `Verified`: branch 0 (genesis / IVC
+    base) is `True` — Rust performs no verification there
+    (switch_board.rs conditionally verifies only :243/:251/:259) —
+    and branches 1-3 are the respective sub-proof verifications.
+    Instantiating `Constraints` with anything stronger at index 0
+    would over-constrain the prover and hide the real soundness
+    shape of the genesis case. -/
+def IntendedVerified (V₁ V₂ V₃ : Prop) (i : Fin 4) : Prop :=
+  match i.val with
+  | 0 => True
+  | 1 => V₁
+  | 2 => V₂
+  | _ => V₃
+
+/-- **Genesis routing gives ONLY the candidate PIs.** Under the
+    intended instantiation, routing through branch 0 yields no
+    verified sub-proof — `routing_sound`'s `Verified` conjunct is
+    trivially `True` there. Genesis-case soundness therefore rests
+    entirely on `candidates 0` being pinned to the genuine genesis
+    public inputs (an obligation OUTSIDE this file, at the switch
+    board's caller). Stated explicitly so the `Verified 0 := True`
+    faithfulness choice cannot silently masquerade as a guarantee. -/
+theorem routing_sound_genesis {α : Type} {b : Fin 4 → F}
+    {candidates : Fin 4 → α} {V₁ V₂ V₃ : Prop} {output : α}
+    (h : Constraints b candidates (IntendedVerified V₁ V₂ V₃) output)
+    (h0 : b 0 = 1) : output = candidates 0 :=
+  h.outSel 0 h0
+
 /-!
   ## SECURITY OBSERVATIONS
 
@@ -108,6 +159,13 @@ theorem routing_sound {α : Type} {b : Fin 4 → F}
     and `condVerify` agree on the active index — the output cannot come
     from a different branch than the one verified. Were they driven by
     independent selectors, routing soundness would break.
+
+  * **Genesis branch carries no verification.** Rust never verifies a
+    sub-proof for branch 0; `IntendedVerified` fixes `Verified 0 :=
+    True` and `routing_sound_genesis` records that routing through it
+    proves nothing beyond `output = candidates 0`. Any soundness story
+    for the base case must come from the caller pinning `candidates 0`
+    to the genuine genesis PIs — not from this dispatch.
 
   * **C-M3 (cyclic VD wiring).** audit622 notes balance sub-circuits use
     `verify_proof` / conditional verify with VD threaded from PIs rather

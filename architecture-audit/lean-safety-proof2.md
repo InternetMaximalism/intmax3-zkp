@@ -118,9 +118,10 @@ We resolved audit finding 3 (H1 proof cycle) and finding 5 (missing in-channel r
 2. **state↔balanceProof binding via `settledTxChain`** — `H1` commits not to the proof object but to the
    hash chain of settle history (`TxLeafHash` / deposit hash). The balance circuit exposes the same chain
    in its public input, and L1 cross-checks for agreement at close/challenge (abstract2.md §2.1 / §3.5).
-   - **Why a nullifier cannot be used**: the nullifier's preimage includes `block_number`, so it cannot be computed at
-     signing time (flowSend1 step 6, before block posting). `TxLeafHash` is known, so there is no
-     timing problem. Double-settle prevention via `block_number` binding is continued by the base-layer nullifier.
+   - **Why `TxLeafHash` and not the nullifier**: the nullifier now binds `nonce` (settlement-independent — F-WD-2),
+     which IS computable at signing time, so this is a design choice rather than a timing necessity — `TxLeafHash` is
+     the canonical settle identity the chain commits to. Double-settle prevention stays with the base-layer nullifier;
+     under the new scheme it is settlement-independent (two settlements of one deduction collide to the same nullifier).
    - Lean §9: `chainOf_injective` (A1 collision resistance ⇒ chain agreement ⇒ same settle history) and
      `chain_binding_resolves_attachment` (a proof whose chain agrees proves exactly the total amount of the history that the state
      presupposes) machine-verify the soundness of the binding.

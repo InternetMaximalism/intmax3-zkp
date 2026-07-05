@@ -26,11 +26,15 @@ import Zkp.Core.Bytes
   THREADING — each step pins `update.prev_bp_sig_chain ==
   prev.bp_sig_chain` and outputs `update.new_bp_sig_chain` — so the
   accumulator is an unbroken chain; the per-signing-block ADVANCEMENT
-  lives inside the (verified) `update_user` sub-proof.
+  is proved in `Zkp/Circuits/Validity/UpdateUser.lean`
+  (`UpdateUser.signing_block_advances`).
 
-  NOTE: the `channel_reg` branch (lines :261-318) is CHANNEL-scope and
-  excluded from this audit; its threading is structurally identical to
-  the deposit branch modeled below.
+  NOTE: the `channel_reg` branch (block_step.rs :261-338 native /
+  :507-670 target) REPLACES the account tree root on registration
+  blocks — it is BASE-LAYER, not channel scope. It is modeled in
+  `Zkp/Circuits/Validity/UpdateUser.lean` (`UpdateUser.RegBranch`),
+  with the residual dependence on the still-excluded channel_reg chain
+  circuit recorded there as finding F-UPDU-1.
 
   ## Constraint inventory (block_step.rs:129-200, mirrored in Target::new)
 
@@ -104,24 +108,30 @@ theorem block_chain_threaded {prev new : ExtState F} {upd : UpdateUser F}
   * **Discharges `signatures_not_skippable`'s premise.**
     `bp_sig_chain_threaded` proves the cross-block continuity; combined
     with the `update_user` sub-proof advancing `new_bp_sig_chain` on any
-    signing block (its internal, in-scope-as-verified obligation), the
-    span's final `bp_sig_chain` is nonzero iff some block signed — which
-    is exactly the COMPUTED gate ValidityCircuit keys signature
-    verification on. Dropping `sigCont` (:195-197) would let a prover
-    splice a fresh zero accumulator after signing blocks, defeating the
-    gate — so this continuity constraint is load-bearing.
+    signing block — now machine-checked as
+    `UpdateUser.signing_block_advances` / `signing_block_nonempty` in
+    `Zkp/Circuits/Validity/UpdateUser.lean` — the span's final
+    `bp_sig_chain` is nonzero iff some block signed — which is exactly
+    the COMPUTED gate ValidityCircuit keys signature verification on.
+    Dropping `sigCont` (:195-197) would let a prover splice a fresh
+    zero accumulator after signing blocks, defeating the gate — so this
+    continuity constraint is load-bearing.
 
   * **Sequentiality** (`block_chain_threaded`) prevents block reordering
     / skipping within a span; the deposit chain branch threads its own
     accumulators identically (and was proved gap-free in DepositStep).
 
-  * **Out of scope (treated as verified sub-proofs / excluded):** the
-    `update_user` internals (SPHINCS+/Poseidon signature gates, user-tree
-    Merkle updates) and the `channel_reg` branch (channel scope). The
-    remaining block-chain files (`small_block_message`, `ext_public_state`,
-    `block_chain_pis`, `block_hash_chain_circuit`/`_processor`) are
-    message-encoding / PI-layout / cyclic-wrapper / orchestration with no
-    new soundness-critical leaf constraints.
+  * **Update_user internals and the channel_reg branch are now IN
+    scope:** both are modeled in `Zkp/Circuits/Validity/UpdateUser.lean`
+    (the account-tree update, the bp_sig_chain fold, member-set
+    immutability, and the registration-block root swap with finding
+    F-UPDU-1 for the still-excluded channel_reg chain circuit).
+    Signature-primitive gates (Poseidon/Regev single-sig proofs)
+    remain uninterpreted primitives. The remaining block-chain files
+    (`small_block_message`, `ext_public_state`, `block_chain_pis`,
+    `block_hash_chain_circuit`/`_processor`) are message-encoding /
+    PI-layout / cyclic-wrapper / orchestration with no new
+    soundness-critical leaf constraints.
 -/
 
 end Circuits.BlockStep

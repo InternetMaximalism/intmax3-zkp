@@ -299,9 +299,10 @@ pub fn tx_leaf_hash(tx: &InterChannelTx) -> Bytes32 {
 - Inter-channel transfer (both send and receive): `chain' = hash_words([SETTLED_TX_CHAIN_DOMAIN, chain, tx_leaf_hash])`
 - Deposit ingestion: `chain' = hash_words([SETTLED_TX_CHAIN_DOMAIN, chain, deposit_hash])`
 - Intra-channel transfer: unchanged.
-- `TxLeafHash` is known at signing time (flowSend1 step 6 = small block signing time) — the nullifier
-  (`SettledTransfer::nullifier()` includes `block_number`) **cannot be used** for this purpose.
-  The nullifier remains, as before, exclusively for double-settle prevention in the base layer (as in the note of abstract2.md §2.1).
+- `TxLeafHash` is known at signing time (flowSend1 step 6 = small block signing time) and is the canonical
+  settle/tx identity the chain uses. The base-layer nullifier (`SettledTransfer::nullifier()`, now binding
+  `nonce` — settlement-independent, F-WD-2) remains dedicated to double-settle / anti-replay prevention in the
+  base layer: two settlements of one deduction now collide to the same nullifier (as in the note of abstract2.md §2.1).
 
 ### C-7. [Chg] SmallBlockRootMessage (the carrier of H1/H2)
 
