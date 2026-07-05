@@ -30,12 +30,13 @@ identifiers (EC2 IP, instance id, domain/URL, on-chain addresses, key paths) are
 ## Build
 ```bash
 # 1) signer binary for EC2 (linux/arm64) — native on Apple silicon, no emulation:
-docker buildx build --platform linux/arm64 -f Dockerfile.signer --target bin \
+#    (build context stays the repo root `.`; the Dockerfile now lives under hosting/)
+docker buildx build --platform linux/arm64 -f hosting/Dockerfile.signer --target bin \
   --output type=local,dest=./signer-bin .            # → signer-bin/channel_member (aarch64 ELF)
 
 # 2) browser wasm — MUST use this script, NOT `wasm-pack` directly (Cargo.toml keeps crate-type rlib;
-#    the script appends --crate-type cdylib at invocation). Output → pkg/
-bash build-wallet-wasm.sh
+#    the script appends --crate-type cdylib at invocation). Output → pkg/ (run from repo root)
+bash hosting/build-wallet-wasm.sh
 
 # 3) local CLI (for the local relay) — the relay exec's it fresh each call, no relay restart needed:
 cargo build --release --bins
@@ -51,9 +52,9 @@ O="-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null"
 # ship whatever changed:
 scp -i $PEM ${=O} signer-bin/channel_member       ${H}:relay/bin/channel_member   # if Rust changed
 scp -i $PEM ${=O} pkg/intmax3_zkp.js pkg/intmax3_zkp_bg.wasm ${H}:relay/public/pkg/ # if wasm changed
-scp -i $PEM ${=O} wallet-live.html                ${H}:relay/public/index.html     # if frontend changed
-scp -i $PEM ${=O} wallet-worker.js                ${H}:relay/public/
-scp -i $PEM ${=O} wallet-relay-ec2.js             ${H}:relay/
+scp -i $PEM ${=O} hosting/wallet/wallet-live.html ${H}:relay/public/index.html     # if frontend changed
+scp -i $PEM ${=O} hosting/wallet/wallet-worker.js ${H}:relay/public/
+scp -i $PEM ${=O} hosting/wallet/wallet-relay-ec2.js ${H}:relay/
 ssh -i $PEM ${=O} $H 'chmod +x ~/relay/bin/channel_member; sudo systemctl restart intmax-relay'
 ```
 Notes:
@@ -75,7 +76,7 @@ curl -s -o /dev/null -w "%{http_code}\n" -X POST -H 'content-type: application/j
 
 ## Local relay (fast iteration, no AWS)
 ```bash
-node wallet-relay.js          # https://localhost:8000/wallet-live.html  (channels 7,8)
+node hosting/wallet/wallet-relay.js   # https://localhost:8000/wallet-live.html  (channels 7,8)
 ```
 - First launch only: starts anvil (Prague) + `forge script script/Deploy.s.sol` (2 rollups) +
   `channel_member setup-backing` per channel (~90s). Cached backing in `wallet-live-work/ch{7,8}/`

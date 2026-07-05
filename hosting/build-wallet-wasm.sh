@@ -7,7 +7,9 @@
 # lets us append `--crate-type cdylib` at INVOCATION time (exactly what the Cargo.toml comment
 # describes) without touching the manifest, then we run `wasm-bindgen` directly to emit the JS glue.
 set -euo pipefail
-cd "$(dirname "$0")"
+# Run from the repo root: this script lives in hosting/, but target/ and the output
+# pkg/ live at the repo root (one level up).
+cd "$(dirname "$0")/.."
 
 OUT_DIR="pkg"
 TARGET="wasm32-unknown-unknown"
