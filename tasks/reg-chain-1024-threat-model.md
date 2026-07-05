@@ -110,11 +110,22 @@ via **B1** (balance-slot leaf extended with `recipient`).
 - ✅ **B-2** (6d2b9d8) — removed the proof-subsumed `NotChannelMember`/`RecipientMismatch` claim
   gates so delegates can withdraw. Foundry Manager 66/66, Adversarial 10/10, Invariant 6/6.
   Independent adversarial review: IN FLIGHT.
-- ⏳ **B-3** — fixtures/VKs regen (withdrawal-claim nullifier + B-1b leaf changed every H1; stale
-  baked close fixture already breaks CloseLifecycleE2E setUp) + full Rust+Foundry suite + redeploy.
+- ✅ **B-3 (local)** (63323dd, b200729, e820fe9) — ALL settlement/validity fixtures regenerated on
+  the Option B circuits; EIP-170 relief (BlobKZGVerifierExt satellite, IntmaxRollup 21,443B /
+  3,133B headroom); integration invariants updated to Option B semantics (the record-root vs
+  registered-root equality assert in inter_channel_unified_e2e was the one comparison site the
+  B-1a trace missed — now leaf-set equality). VERIFIED: Foundry 175/175 (real-proof
+  CloseLifecycleE2E included), Rust lib 377/377, integration 19/19 binaries.
   NOTE: B-1c folded into B-1b (claims already open + pay the leaf-bound recipient; the Manager now
   pays `claim.recipient` which the proof binds to the leaf). registerChannel cosigners-only-arrays
   cleanup is optional and NOT required for delegate withdrawal (deferred).
+  KNOWN-SKIP (pre-existing): CloseLifecycleE2E's close-intent section self-skips because the close
+  fixture is channel 5 while the lifecycle registration is channel 1 (member_set_commitment
+  mismatch) — true in the PREVIOUS baked pair too (d3b7106); aligning the two generators to one
+  channel is a separate follow-up.
+- ⏳ **B-3 (redeploy)** — Sepolia contracts + arm64 binary/wasm rebuild + v3testnet update + state
+  reset (owner scoped this out of the local phase; also fixes the currently-broken testnet
+  withdraw from the earlier MAX mismatch).
 
 ### Original phase plan (for reference)
 - **B-1a — reg record shrinks to cosigners**: `ChannelRegRecord.members` -> `[MemberRegEntry;
