@@ -15,8 +15,8 @@ const fs = require('fs');
 const path = require('path');
 const { execFileSync, spawn } = require('child_process');
 
-const ROOT = __dirname; // wallet/ — serves wallet-live.html + wallet-worker.js
-const REPO = path.join(ROOT, '..'); // repo root — target/, self_certs/, contracts/, pkg/, wallet-live-work/ live here
+const ROOT = __dirname; // hosting/wallet/ — serves wallet-live.html + wallet-worker.js
+const REPO = path.join(ROOT, '..', '..'); // repo root — target/, self_certs/, contracts/, pkg/, wallet-live-work/ live here (two levels up from hosting/wallet/)
 const WORK = path.join(REPO, 'wallet-live-work');
 const CLI = path.join(REPO, 'target', 'release', 'channel_member');
 const PORT = 8000;

@@ -50,10 +50,10 @@ wasm-pack build --release --target web
 # WASM (with WebGPU acceleration) — pending the v2 MleVerifier migration; see "Known follow-up" below
 # wasm-pack build --release --target web -- --features gpu_merkle
 
-# Browser testing
-npm install           # First time only
-node server.js        # Serves at https://localhost:8000
-# Open https://localhost:8000 in Chrome, click "Run Withdrawal Proof" or "Run Balance Processor Flow"
+# Browser testing (server + browser assets live under hosting/; run from repo root)
+npm install --prefix hosting   # First time only (package.json is in hosting/)
+node hosting/server.js         # Serves at https://localhost:8000
+# Open https://localhost:8000/hosting/index.html in Chrome, click "Run Withdrawal Proof" or "Run Balance Processor Flow"
 ```
 
 **Important:** All Rust tests use `#[cfg_attr(debug_assertions, ignore = "run with --release")]` — they will be skipped in debug mode.
@@ -149,9 +149,9 @@ The browser proving setup runs against the same `polygon-plonky2` submodule pin 
 - `src/lib.rs` — `#[wasm_bindgen]` entry points: `run_single_withdrawal_proof()`, `run_balance_processor_flow()`, `init_gpu_merkle()`
 - `src/wasm_demo.rs` — Browser proving entry implementations
 - `.cargo/config.toml` — WASM target flags (atomics, SIMD, 4GB max memory, 16MB stack)
-- `index.html` — Browser test runner UI
-- `test-worker.js` — Web Worker that initializes WASM, thread pool, GPU, and dispatches proof actions
-- `server.js` — HTTPS dev server with COEP/COOP headers for SharedArrayBuffer
+- `hosting/index.html` — Browser test runner UI
+- `hosting/test-worker.js` — Web Worker that initializes WASM, thread pool, GPU, and dispatches proof actions
+- `hosting/server.js` — HTTPS dev server with COEP/COOP headers for SharedArrayBuffer (run `node hosting/server.js` from repo root; serves the root dir, so the entry URL is `/hosting/index.html`)
 
 ### WASM memory constraints
 

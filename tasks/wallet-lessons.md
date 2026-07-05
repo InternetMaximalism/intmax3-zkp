@@ -13,7 +13,7 @@
   `wasm_js` feature for wasm only (target-scoped renamed dep in Cargo.toml).
 - **`crate-type = ["cdylib","rlib"]` breaks native bin linking** (undefined-symbol errors in
   src/bin/*) — the documented E0463-class collision. Keep `["rlib"]` and build wasm via
-  `cargo rustc --crate-type cdylib` + `wasm-bindgen` (see `build-wallet-wasm.sh`); wasm-pack can't
+  `cargo rustc --crate-type cdylib` + `wasm-bindgen` (see `hosting/build-wallet-wasm.sh`); wasm-pack can't
   do this because it pre-checks the manifest for cdylib.
 - **`wasm_demo.rs` is already broken on this branch** (calls `*_async` methods removed in the
   SIS→Regev migration; missing generated fixtures). Gated behind off-by-default `legacy_wasm_demo`.
@@ -65,7 +65,7 @@
   (e.g. a Node-based CLI that uses the same wasm module for verification). Escalated to the user.
 
 ## Multithreading (final)
-- Built wasm with `--features regev-parallel` (`build-wallet-wasm.sh`). The Regev STARK then proves
+- Built wasm with `--features regev-parallel` (`hosting/build-wallet-wasm.sh`). The Regev STARK then proves
   on the wasm-bindgen-rayon global pool (worker calls `initThreadPool(N)` first; regev's gated
   `pool.rs` `build_global()` is a harmless no-op). Confirmed: multithreaded e2e passes and the
   browser proof still verifies natively (50→43→48). This is the requested in-browser speedup.
