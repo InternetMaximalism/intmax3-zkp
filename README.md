@@ -35,7 +35,7 @@ settlement contracts (Solidity/Foundry), a machine‑checked safety proof (Lean)
 
 The protocol is **MECE**: every transfer is exactly one of two kinds, distinguished structurally by an
 `H2` tag in the signed state. Each kind is gated by a ZK range proof so balances stay encrypted while
-remaining provably solvent. (Spec: [`architecture-audit/abstract2.md`](architecture-audit/abstract2.md).)
+remaining provably solvent. (Spec: [`doc/architecture-audit/abstract2.md`](doc/architecture-audit/abstract2.md).)
 
 ```mermaid
 flowchart TB
@@ -107,7 +107,7 @@ node hosting/wallet/wallet-relay.js            # https://localhost:8000/wallet-l
 
 The browser wallet does the ZK proving locally; a small relay co‑signs as the other members. Join a
 channel, send intra‑channel (same channel id) or inter‑channel (a different channel id). Deploying the
-demo to Sepolia + AWS is documented in [`docs/deploy-runbook.md`](docs/deploy-runbook.md).
+demo to Sepolia + AWS is documented in [`doc/docs/deploy-runbook.md`](doc/docs/deploy-runbook.md).
 
 > Requires Rust nightly (pinned in `rust-toolchain.toml`) and Foundry. Tests use
 > `#[cfg_attr(debug_assertions, ignore)]` — always pass `--release`.
@@ -118,8 +118,8 @@ demo to Sepolia + AWS is documented in [`docs/deploy-runbook.md`](docs/deploy-ru
 
 | Area | Path | What |
 |---|---|---|
-| **Specification** | [`architecture-audit/detail2.md`](architecture-audit/detail2.md) | the **authoritative implementation spec**; [`abstract2.md`](architecture-audit/abstract2.md) is the minimal spec + the 5 security properties |
-| **Machine‑checked safety** | [`architecture-audit/ChannelSafety.lean`](architecture-audit/ChannelSafety.lean), [`ChannelSafety2.lean`](architecture-audit/ChannelSafety2.lean) | Lean proofs of authorization / no‑double‑spend / solvency / exit safety for abstract(2).md, with crypto primitives modeled by their soundness contracts |
+| **Specification** | [`doc/architecture-audit/detail2.md`](doc/architecture-audit/detail2.md) | the **authoritative implementation spec**; [`abstract2.md`](doc/architecture-audit/abstract2.md) is the minimal spec + the 5 security properties |
+| **Machine‑checked safety** | [`doc/architecture-audit/ChannelSafety.lean`](doc/architecture-audit/ChannelSafety.lean), [`ChannelSafety2.lean`](doc/architecture-audit/ChannelSafety2.lean) | Lean proofs of authorization / no‑double‑spend / solvency / exit safety for abstract(2).md, with crypto primitives modeled by their soundness contracts |
 | **Proof circuits** | `src/circuits/` | `balance/` (account state via IVC), `validity/` (block consensus + Poseidon signature), `withdraw/`, `channel/` (channel state‑update verifiers) |
 | **Lattice layer** | `src/regev/` | Regev/LWE keygen, encryption, and the channel‑tx / channel‑update STARKs (`channelTxZKP` / `channelUpdateZKP`) |
 | **Signatures** | `src/poseidon_sig/` | Poseidon‑hash ZK signatures used for channel‑state co‑signing |

@@ -94,3 +94,7 @@ deploy-record*.md
 **/deploy-record.md
 DEPLOYMENT.md
 CLAUDE.md
+
+# Local project instructions + vestigial gnark (Go Groth16 prover; removed from the
+# active MLE pipeline, excluded from the Cargo workspace — kept locally, not tracked)
+gnark/
