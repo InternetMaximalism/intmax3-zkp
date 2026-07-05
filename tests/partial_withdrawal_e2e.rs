@@ -3,7 +3,8 @@
 //!
 //! Cross-boundary parity: the test's primary value is verifying that Rust-computed
 //! `settled_tx_chain_push`, `partial_withdrawal_auth_digest`, and `build_burn_send` outputs feed
-//! correctly into the deployed Solidity contracts (same hash chains, same authDigest, same encoding).
+//! correctly into the deployed Solidity contracts (same hash chains, same authDigest, same
+//! encoding).
 //!
 //! Skips gracefully if foundry (anvil/forge/cast) is not installed.
 #![cfg(not(debug_assertions))]
@@ -27,9 +28,7 @@ use intmax3_zkp::{
         salt::Salt,
         withdrawal::Withdrawal,
     },
-    ethereum_types::{
-        address::Address, bytes32::Bytes32, u32limb_trait::U32LimbTrait, u256::U256,
-    },
+    ethereum_types::{address::Address, bytes32::Bytes32, u32limb_trait::U32LimbTrait, u256::U256},
     regev::{RegevCiphertext, RegevPk, RegevSecurityLevel, encrypt_amount},
     wallet_core::{
         ChannelBalanceAttestation, MemberInfo, MemberKeys, add_signature,
@@ -191,6 +190,7 @@ fn build_signed_genesis(
         record,
         cts,
         &regev_pk_digests,
+        &test_recipients_b1b(cts.len()),
         fund,
         settled_tx_chain,
         Bytes32::default(),
@@ -231,9 +231,12 @@ fn partial_withdrawal_e2e_anvil() {
     let rpc = format!("http://127.0.0.1:{PORT}");
     let anvil = Command::new("anvil")
         .args([
-            "--hardfork", "prague",
-            "--port", &PORT.to_string(),
-            "--code-size-limit", "50000",
+            "--hardfork",
+            "prague",
+            "--port",
+            &PORT.to_string(),
+            "--code-size-limit",
+            "50000",
         ])
         .stdout(Stdio::null())
         .stderr(Stdio::null())
@@ -301,8 +304,11 @@ fn partial_withdrawal_e2e_anvil() {
             "regev_pk_digests": regev_digests,
             "recipients": recipients,
         });
-        std::fs::write(data_dir.join("pw_reg.json"), serde_json::to_string_pretty(&reg).unwrap())
-            .unwrap();
+        std::fs::write(
+            data_dir.join("pw_reg.json"),
+            serde_json::to_string_pretty(&reg).unwrap(),
+        )
+        .unwrap();
     }
 
     let deploy = run_capture(
@@ -366,20 +372,26 @@ fn partial_withdrawal_e2e_anvil() {
 
     // Build genesis ciphertexts, retaining alice's witness (slot 0).
     let (ct0, w0) = encrypt_amount(&mut crng, &all_pks[0], balances[0]).unwrap();
-    let ct1 = encrypt_amount(&mut crng, &all_pks[1], balances[1]).unwrap().0;
-    let ct2 = encrypt_amount(&mut crng, &all_pks[2], balances[2]).unwrap().0;
+    let ct1 = encrypt_amount(&mut crng, &all_pks[1], balances[1])
+        .unwrap()
+        .0;
+    let ct2 = encrypt_amount(&mut crng, &all_pks[2], balances[2])
+        .unwrap()
+        .0;
     let cts = [ct0.clone(), ct1, ct2];
 
     let genesis = build_signed_genesis(&record, &keys, &cts, fund, chain, &att, &balance_vd);
     verify_channel_backing(&record, &genesis, Some(&att), &balance_vd).expect("§F-1 backing OK");
     let genesis_chain = genesis.balance_state.settled_tx_chain;
-    eprintln!("[PW E2E] genesis OK, fund={fund}, chain={}", genesis_chain.to_hex());
+    eprintln!(
+        "[PW E2E] genesis OK, fund={fund}, chain={}",
+        genesis_chain.to_hex()
+    );
 
     // ── Phase D: build_burn_send (alice burns 5 ETH) ────────────────────────────────────────
     let burn_amount = 5u64;
     let withdrawal_addr = Address::from_hex("0x70997970C51812dc3A010C7d01b50e0d17dc79C8").unwrap();
-    let nullifier_root =
-        Bytes32::from_u32_slice(&[0, 0, 0, 0, 0, 0, 0, 0xBE01]).unwrap();
+    let nullifier_root = Bytes32::from_u32_slice(&[0, 0, 0, 0, 0, 0, 0, 0xBE01]).unwrap();
 
     let snapshot = ChannelSnapshot {
         record: record.clone(),
@@ -413,7 +425,11 @@ fn partial_withdrawal_e2e_anvil() {
         let limbs = a.to_u32_vec();
         limbs[7] as u64 | ((limbs[6] as u64) << 32)
     };
-    assert_eq!(post_fund, fund - burn_amount, "channel fund must decrease by burn amount");
+    assert_eq!(
+        post_fund,
+        fund - burn_amount,
+        "channel fund must decrease by burn amount"
+    );
     eprintln!("[PW E2E] build_burn_send OK, post_fund={post_fund}");
 
     // Compute tx_leaf (the burn's settled_tx_chain leaf) = aux_data for the on-chain binding.
@@ -500,13 +516,16 @@ fn partial_withdrawal_e2e_anvil() {
         .and_then(|l| l.trim().strip_prefix("0x").or_else(|| Some(l.trim())))
         .map(|s| format!("0x{}", s.trim_start_matches("0x")))
         .unwrap_or_else(|| panic!("could not parse AUTH_DIGEST from:\n{submit_out}"));
-    let onchain_digest = Bytes32::from_hex(&onchain_auth)
-        .unwrap_or_else(|_| panic!("bad hex: {onchain_auth}"));
+    let onchain_digest =
+        Bytes32::from_hex(&onchain_auth).unwrap_or_else(|_| panic!("bad hex: {onchain_auth}"));
     assert_eq!(
         rust_auth_digest, onchain_digest,
         "CRITICAL: Rust authDigest != Solidity authDigest — cross-boundary hash mismatch"
     );
-    eprintln!("[PW E2E] authDigest PARITY OK: {}", rust_auth_digest.to_hex());
+    eprintln!(
+        "[PW E2E] authDigest PARITY OK: {}",
+        rust_auth_digest.to_hex()
+    );
 
     // ── Phase F: Advance time + finalize ────────────────────────────────────────────────────
     cast(&rpc, &["rpc", "evm_increaseTime", "2"], "increase time");
@@ -547,7 +566,10 @@ fn partial_withdrawal_e2e_anvil() {
     {
         let before = cast(
             &rpc,
-            &["balance", &format!("0x{}", hex::encode(withdrawal_addr.to_bytes_be()))],
+            &[
+                "balance",
+                &format!("0x{}", hex::encode(withdrawal_addr.to_bytes_be())),
+            ],
             "balance before claim",
         );
         let before_wei: u128 = before.trim().parse().unwrap_or(0);
@@ -563,16 +585,24 @@ fn partial_withdrawal_e2e_anvil() {
         );
         run_capture(
             Command::new("cast").args([
-                "send", &rollup, sig, &arg,
-                "--private-key", ANVIL0,
-                "--rpc-url", &rpc,
+                "send",
+                &rollup,
+                sig,
+                &arg,
+                "--private-key",
+                ANVIL0,
+                "--rpc-url",
+                &rpc,
             ]),
             "claim authorized withdrawal",
         );
 
         let after = cast(
             &rpc,
-            &["balance", &format!("0x{}", hex::encode(withdrawal_addr.to_bytes_be()))],
+            &[
+                "balance",
+                &format!("0x{}", hex::encode(withdrawal_addr.to_bytes_be())),
+            ],
             "balance after claim",
         );
         let after_wei: u128 = after.trim().parse().unwrap_or(0);
@@ -590,7 +620,8 @@ fn partial_withdrawal_e2e_anvil() {
 
     // ── Phase G: Adversarial — double-submit same chain key ─────────────────────────────────
     {
-        // Re-submitting with the same finalSettledTxChain must revert with PartialWithdrawalChainUsed.
+        // Re-submitting with the same finalSettledTxChain must revert with
+        // PartialWithdrawalChainUsed.
         let out = Command::new("forge")
             .current_dir(&contracts)
             .args([
@@ -620,4 +651,18 @@ fn partial_withdrawal_e2e_anvil() {
         "[PW E2E] ALL PASSED: deposit → burn → submit → finalize → authorize, \
          authDigest cross-boundary parity verified, double-submit rejected."
     );
+}
+
+/// B-1b: deterministic NONZERO per-slot L1 exit addresses for test genesis states
+/// (`BalanceState::validate()` rejects zero active recipients).
+fn test_recipients_b1b(n: usize) -> Vec<intmax3_zkp::ethereum_types::address::Address> {
+    use intmax3_zkp::ethereum_types::u32limb_trait::U32LimbTrait as _;
+    (0..n)
+        .map(|i| {
+            intmax3_zkp::ethereum_types::address::Address::from_u32_slice(
+                &[0x7E57_0000u32.wrapping_add(i as u32); 5],
+            )
+            .unwrap()
+        })
+        .collect()
 }

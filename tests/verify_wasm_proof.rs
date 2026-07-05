@@ -75,7 +75,14 @@ fn native_json_roundtrip_verifies() {
         Bytes32::from(m0.regev_pk.poseidon_digest()),
         Bytes32::from(m1.regev_pk.poseidon_digest()),
     ];
-    let mut genesis = assemble_genesis_state(&record, &[ct0, ct1], &digests, bal0 + bal1).unwrap();
+    let mut genesis = assemble_genesis_state(
+        &record,
+        &[ct0, ct1],
+        &digests,
+        &test_recipients_b1b(2),
+        bal0 + bal1,
+    )
+    .unwrap();
     let g0 = sign_state(&m0, 0, &genesis).expect("sign g0");
     add_signature(&mut genesis, g0);
     let g1 = sign_state(&m1, 1, &genesis).expect("sign g1");
@@ -128,4 +135,18 @@ fn native_json_roundtrip_verifies() {
     );
     eprintln!("native verify after JSON round-trip: {res:?}");
     res.expect("native verify of a JSON-round-tripped native proof");
+}
+
+/// B-1b: deterministic NONZERO per-slot L1 exit addresses for test genesis states
+/// (`BalanceState::validate()` rejects zero active recipients).
+fn test_recipients_b1b(n: usize) -> Vec<intmax3_zkp::ethereum_types::address::Address> {
+    use intmax3_zkp::ethereum_types::u32limb_trait::U32LimbTrait as _;
+    (0..n)
+        .map(|i| {
+            intmax3_zkp::ethereum_types::address::Address::from_u32_slice(
+                &[0x7E57_0000u32.wrapping_add(i as u32); 5],
+            )
+            .unwrap()
+        })
+        .collect()
 }

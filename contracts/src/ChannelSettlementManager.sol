@@ -163,7 +163,6 @@ contract ChannelSettlementManager {
     error NullifierAlreadyUsed();
     error WithdrawalCapExceeded();
     error NoWithdrawalCredit();
-    error RecipientMismatch();
     /// Only the bound rollup (`registry`) may send native ETH to this manager (via its `withdraw`).
     error OnlyRollup();
     /// A native ETH transfer out of the manager failed.
@@ -1040,14 +1039,14 @@ contract ChannelSettlementManager {
         if (claim.closeIntentDigest != finalizedCloseIntentDigest) {
             revert CloseIntentDigestMismatch();
         }
-        // F7: the claiming member's pubkey hash must be a registered channel member, and the
-        // recipient must match the registration.
-        if (registeredMemberIndexPlusOne[claim.memberPkG] == 0) {
-            revert NotChannelMember();
-        }
-        if (registeredRecipientOf[claim.memberPkG] != claim.recipient) {
-            revert RecipientMismatch();
-        }
+        // B-2 (Option B): membership + recipient are PROOF-ENFORCED, not map-enforced. The
+        // withdrawal-claim proof verifies the claimant's slot leaf (carrying the leaf-bound
+        // `recipient`, B-1b) is included at `member_index` in the cosigner-signed
+        // `finalizedBalanceStateH1` slot tree, and the nullifier is keyed on that same leaf's Regev
+        // pk digest (fbcf448). This ADMITS delegates (never L1-registered under Option B) while a
+        // non-member has no witness for a slot absent from the signed state, and the leaf-bound
+        // recipient cannot be redirected. The former `registeredMemberIndexPlusOne` /
+        // `registeredRecipientOf` gates were the pre-B1b authZ the proof now subsumes.
         if (usedWithdrawalNullifiers[claim.withdrawalNullifier]) {
             revert NullifierAlreadyUsed();
         }
@@ -1090,12 +1089,11 @@ contract ChannelSettlementManager {
         if (claim.closeIntentDigest != finalizedCloseIntentDigest) {
             revert CloseIntentDigestMismatch();
         }
-        if (registeredMemberIndexPlusOne[claim.receiverPkG] == 0) {
-            revert NotChannelMember();
-        }
-        if (registeredRecipientOf[claim.receiverPkG] != claim.recipient) {
-            revert RecipientMismatch();
-        }
+        // B-2 (Option B): membership + recipient are PROOF-ENFORCED (see submitWithdrawalClaim). The
+        // post-close proof verifies the receiver's slot leaf (leaf-bound `recipient`, B-1b) is
+        // included at `receiver_member_index` in the signed `finalizedBalanceStateH1`, and binds
+        // `receiver_pk_g` into the settled-tx `tx_hash` accumulator inclusion — so a delegate
+        // receiver is admitted while a non-member has no witness and the payout cannot be redirected.
         // HAZARD #8: RECOMPUTE the shared-native nullifier (it is NOT a caller-supplied field). The
         // in-circuit derivation uses the SAME keccak preimage and the proof's PI is strict-bound to
         // it, so the value passed to the verifier is the one the proof actually committed.

@@ -498,16 +498,25 @@ fn member_at(members: &[MemberInfo], slot: usize) -> WResult<&MemberInfo> {
         .ok_or_else(|| WalletError(format!("no member at slot {slot}")))
 }
 
-/// The canonical Poseidon `MemberTree` root over the channel's registered member leaves
+/// The wallet's LIVE-membership Poseidon `MemberTree` root over the channel's member leaves
 /// `MemberLeaf{pk_g, pk_b, regev_pk_digest}`, in slot order (active slots
-/// `0..member_count+delegate_count`; padding slots are empty leaves, pad-to-MAX D6).
+/// `0..member_count+delegate_count`; padding slots are empty leaves, pad-to-MAX D6). Built over
+/// the height-`WALLET_MEMBER_TREE_HEIGHT` wallet tree (`MAX_CHANNEL_MEMBERS` slots).
 ///
-/// SECURITY (P4-1, A11): this is the SAME root the validity / registration circuits commit
-/// (`block_witness_generator::ChannelMemberKeys::member_tree.get_root()`,
-/// `channel_reg_step`). Anchoring the wallet's `ChannelRecord.member_pubkeys_root` to this root
+/// SECURITY (P4-1, A11): anchoring the wallet's `ChannelRecord.member_pubkeys_root` to this root
 /// (instead of the previous keccak-over-`pk_g`-only) commits the FULL `(pk_g, pk_b, regev_pk)`
 /// triple jointly, so a peer cannot substitute one member's `pk_b` (or Regev key) independently of
 /// their `pk_g`. The off-chain channel-tx A11 check then reads `pk_b` from this AUTHENTICATED set.
+///
+/// SECURITY (Option B divergence — INTENTIONAL, tasks/reg-chain-1024-threat-model.md): this is
+/// NOT the on-chain REGISTERED root. The registered root (`channel_reg_step`'s
+/// `member_pubkeys_root_for`, height `MEMBER_TREE_HEIGHT`) covers ONLY the genesis cosigners and
+/// never changes; THIS root covers the LIVE membership (cosigners + delegates) and evolves with
+/// every `join_delegate`. The two roots are equal for no channel with a delegate and are NEVER
+/// compared anywhere: this one anchors the off-chain member set peers verify
+/// (`verify_snapshot` / payload checks), the registered one authenticates the block producer in
+/// the validity circuit. Delegates are authenticated by the cosigner-signed H1 slot tree, not by
+/// L1 registration.
 ///
 /// `members` MUST cover slots `0..member_count+delegate_count` bijectively (the caller checks this
 /// via `verify_snapshot` / `check_slot`); `pk_g` for each slot is taken from the record (the value
@@ -515,14 +524,12 @@ fn member_at(members: &[MemberInfo], slot: usize) -> WResult<&MemberInfo> {
 /// `MemberInfo`.
 ///
 /// SECURITY (delegate account): the loop covers ACTIVE participants = members
-/// (`0..member_count`) AND delegates (`member_count..member_count+delegate_count`). Delegates carry
-/// a real `MemberLeaf{pk_g, pk_b, regev_pk_digest}` identity so they can send (A11) and withdraw at
-/// close, distinguished from members ONLY by slot index. This MUST match the Phase-1 native
-/// `member_pubkeys_root_for` (channel_reg_step.rs, loops `0..member_count+delegate_count`) and the
-/// keccak reg-chain, so the wallet's `member_pubkeys_root` equals the registered root. With
-/// `delegate_count = 0` this is byte-for-byte the legacy `0..member_count` loop.
+/// (`0..member_count`) AND delegates (`member_count..member_count+delegate_count`). Delegates
+/// carry a real `MemberLeaf{pk_g, pk_b, regev_pk_digest}` identity so they can send (A11) and
+/// withdraw at close, distinguished from members ONLY by slot index. With `delegate_count = 0`
+/// this is byte-for-byte the legacy `0..member_count` loop.
 fn member_pubkeys_root(record: &ChannelRecord, members: &[MemberInfo]) -> WResult<Bytes32> {
-    let mut tree = MemberTree::init();
+    let mut tree = MemberTree::init_wallet_membership();
     let active = record.member_count as usize + record.delegate_count as usize;
     for slot in 0..active {
         let m = member_at(members, slot)?;
@@ -596,11 +603,13 @@ pub fn build_record(
 /// Assemble an UNSIGNED genesis `ChannelState` from per-ACTIVE-participant genesis ciphertexts
 /// (slot order: members then delegates). `enc_balances_active` must have one ciphertext per active
 /// slot (`member_count + delegate_count`); with `delegate_count = 0` this equals the legacy
-/// member-only behavior.
+/// member-only behavior. `recipients_active` (B-1b) must carry one NONZERO L1 exit address per
+/// active slot — `BalanceState::validate()` refuses a zero active recipient fail-closed.
 pub fn assemble_genesis_state(
     record: &ChannelRecord,
     enc_balances_active: &[RegevCiphertext],
     regev_pk_digests_active: &[Bytes32],
+    recipients_active: &[Address],
     fund_amount: u64,
 ) -> WResult<ChannelState> {
     // Legacy/UNBACKED genesis: zero settle-chain + zero intmax_state_root. A channel assembled this
@@ -609,6 +618,7 @@ pub fn assemble_genesis_state(
         record,
         enc_balances_active,
         regev_pk_digests_active,
+        recipients_active,
         fund_amount,
         Bytes32::default(),
         Bytes32::default(),
@@ -624,6 +634,7 @@ pub fn assemble_genesis_state_backed(
     record: &ChannelRecord,
     enc_balances_active: &[RegevCiphertext],
     regev_pk_digests_active: &[Bytes32],
+    recipients_active: &[Address],
     fund_amount: u64,
     settled_tx_chain: Bytes32,
     intmax_state_root: Bytes32,
@@ -637,6 +648,22 @@ pub fn assemble_genesis_state_backed(
     // claim circuit can bind the witnessed `(a, b)` to the member's registered key.
     if regev_pk_digests_active.len() != active {
         return bail("genesis Regev pk digest count must equal member_count + delegate_count");
+    }
+    // B-1b: one NONZERO L1 exit address per ACTIVE slot (members then delegates), folded into the
+    // signed H1 via the slot leaves. FAIL-CLOSED here (before the state is even assembled): a
+    // zero/missing recipient must never enter a signable genesis — for delegates this leaf field
+    // is the ONLY payout binding under Option B.
+    if recipients_active.len() != active {
+        return bail("genesis recipient count must equal member_count + delegate_count (B-1b)");
+    }
+    if let Some(i) = recipients_active
+        .iter()
+        .position(|r| *r == Address::default())
+    {
+        return bail(format!(
+            "genesis recipient for active slot {i} is the zero address — refusing (B-1b \
+             fail-closed: the slot could never exit on L1)"
+        ));
     }
     let state = ChannelState {
         channel_id: record.channel_id,
@@ -654,6 +681,7 @@ pub fn assemble_genesis_state_backed(
             delegate_count: record.delegate_count,
             enc_balances: BalanceState::pad_enc_balances(enc_balances_active),
             regev_pk_digests: BalanceState::pad_regev_pk_digests(regev_pk_digests_active),
+            recipients: BalanceState::pad_recipients(recipients_active),
             settled_tx_chain,
             // Stage 3: genesis seeds the EMPTY-tree accumulator root. Each subsequent inter-channel
             // advancement pushes `tx_hash` and sets the new root (see the build_* sites below).
@@ -2506,8 +2534,9 @@ fn source_record_placeholder(
 // A-3 P2: real (non-test) channel-close proving. Wires the wallet's signed `ChannelState` + the N
 // active members' Goldilocks signing keys + the channel's base-layer balance proof into a REAL
 // `ChannelCloseCircuit` proof. SOUNDNESS IS ENFORCED IN-CIRCUIT (A-3 P2 threat model): H1/IMCH
-// recompute + bind, balance-proof channel_id/settled_tx_chain binding, the recursive ListCircuit
-// commitment C'==C over the members' REAL single-sigs, the member_set_commitment keccak, and the
+// recompute + bind, balance-proof channel_id/settled_tx_chain binding, the recursively verified
+// level-4 aggregated sign-zkp proof over the members' REAL single-sigs (message/count/pk-list
+// bound in-circuit), the member_set_commitment keccak, and the
 // active-bit decomposition. `ChannelCloseCircuit::prove` recomputes and overrides
 // `member_set_commitment`, so a tampered commitment is rejected. The Rust-side preconditions below
 // fail CLOSED before any (expensive) proving so a malformed input never produces a proof.
@@ -2519,14 +2548,15 @@ use crate::{
         close_pis::ChannelCloseWitness,
     },
     common::channel::{CloseIntent, CloseWithdrawal},
-    poseidon_sig::list::{ListCircuit, list_commitment},
+    poseidon_sig::aggregate::{AGG_LEVELS, SigAggregator},
 };
 
-/// Process-built close-proving context: a `ListCircuit` (over the shared `SingleSigCircuit`) and
-/// the `ChannelCloseCircuit` bound to the channel's balance verifier data. Each circuit is
-/// expensive to build, so construct ONE `CloseProver` per process and reuse it.
+/// Process-built close-proving context: a `SigAggregator` (the binary-tree aggregated sign-zkp
+/// over the shared `SingleSigCircuit`) and the `ChannelCloseCircuit` bound to the channel's
+/// balance verifier data. Each circuit is expensive to build, so construct ONE `CloseProver` per
+/// process and reuse it.
 pub struct CloseProver {
-    list: ListCircuit,
+    aggregator: SigAggregator,
     close_circuit: ChannelCloseCircuit<F, C, D>,
 }
 
@@ -2534,19 +2564,22 @@ impl CloseProver {
     /// Build the close-proving circuits. `balance_vd` is the channel's base-layer balance verifier
     /// data (the same value cached in `balance_vd.bin` / produced by the `BalanceProcessor`).
     pub fn new(balance_vd: &VerifierCircuitData<F, C, D>) -> Self {
-        let list = ListCircuit::new(&single_sig_circuit().verifier_data());
-        let close_circuit = ChannelCloseCircuit::<F, C, D>::new(balance_vd, &list.verifier_data());
+        let aggregator = SigAggregator::new(&single_sig_circuit().verifier_data());
+        let close_circuit = ChannelCloseCircuit::<F, C, D>::new(
+            balance_vd,
+            &aggregator.levels[AGG_LEVELS - 1].verifier_data(),
+        );
         Self {
-            list,
+            aggregator,
             close_circuit,
         }
     }
 
     /// Build the full close witness from the wallet's signed final `ChannelState`, the N ACTIVE
     /// members' signing keys (slot order), and the channel's base-layer balance proof. The members
-    /// each sign the IMCH digest (`state.digest`) with a real `SingleSigCircuit` proof, folded into
-    /// the recursive `ListCircuit` proof the close circuit re-checks against its rebuilt
-    /// commitment.
+    /// each sign the IMCH digest (`state.digest`) with a real `SingleSigCircuit` proof, aggregated
+    /// into the level-4 binary-tree sign-zkp proof whose message/count/pk-list PIs the close
+    /// circuit binds in-circuit.
     ///
     /// SECURITY: fail-closed preconditions reject malformed inputs early; the in-circuit gates are
     /// the actual soundness boundary. `CloseIntent::new` additionally fail-closed-checks
@@ -2607,32 +2640,28 @@ impl CloseProver {
             close_intent,
         };
 
-        // Fold the N member IMCH single-sigs into the recursive ListCircuit proof, in slot order —
-        // exactly the order the close circuit rebuilds C' over (digest, pk_g_i) pairs.
+        // Aggregate the N member IMCH single-sigs into ONE level-4 binary-tree sign-zkp proof, in
+        // slot order — the leaf order IS the pk-list slot order the close circuit consumes.
         let digest = state.digest;
-        let pairs: Vec<(Bytes32, Bytes32)> = pk_gs.iter().map(|pk| (digest, *pk)).collect();
         let mut member_auth: Vec<MemberCloseAuth> = Vec::with_capacity(member_count);
-        let mut prev: Option<ProofWithPublicInputs<F, C, D>> = None;
+        let mut leaves: Vec<ProofWithPublicInputs<F, C, D>> = Vec::with_capacity(member_count);
         for (i, keys) in member_keys.iter().enumerate() {
             let sig = single_sig_circuit()
                 .prove(&keys.signing_key, digest)
                 .map_err(|e| WalletError(format!("member {i} single-sig proving failed: {e}")))?;
-            let prefix = list_commitment(&pairs[0..i]);
-            prev = Some(
-                self.list
-                    .prove_append(&sig, prefix, &prev)
-                    .map_err(|e| WalletError(format!("list fold at member {i} failed: {e:?}")))?,
-            );
+            leaves.push(sig);
             member_auth.push(MemberCloseAuth { pk_g: pk_gs[i] });
         }
-        let list_proof =
-            prev.ok_or_else(|| WalletError("close: empty active member set".into()))?;
+        let agg_proof = self
+            .aggregator
+            .aggregate_to_level(&leaves, AGG_LEVELS)
+            .map_err(|e| WalletError(format!("close signature aggregation failed: {e:?}")))?;
 
         Ok(ChannelCloseFullWitness {
             close,
             final_balance_proof: balance_proof,
             member_auth,
-            list_proof,
+            agg_proof,
         })
     }
 
@@ -2778,6 +2807,9 @@ impl WithdrawalClaimProver {
             member_slot: member_index as u8,
             l1_withdrawal_recipient: recipient,
         };
+        // SECURITY (B-2 blocker fix): the nullifier is keyed on the slot's LEAF-BOUND Regev pk
+        // digest, not the slot-free `member_pk_g` — see `WithdrawalClaim::derive_nullifier`.
+        let slot_regev_pk_digest = Bytes32::from(user_pk.poseidon_digest());
         let claim = WithdrawalClaim {
             close_intent_digest,
             member_pk_g,
@@ -2785,7 +2817,7 @@ impl WithdrawalClaimProver {
             user_amount_ct: ct.clone(),
             withdrawal_nullifier: WithdrawalClaim::derive_nullifier(
                 close_intent_digest,
-                member_pk_g,
+                slot_regev_pk_digest,
             ),
             claim_proof,
         };
@@ -2804,16 +2836,16 @@ impl WithdrawalClaimProver {
                 "withdrawal claim: public-input build failed: {e:?}"
             ))
         })?;
-        let enc_balance_digests: [Bytes32; MAX_CHANNEL_MEMBERS] =
-            std::array::from_fn(|i| final_balance_state.enc_balances[i].digest());
+        // H1 Poseidon-root form: the slot tree + the claimant's inclusion proof.
+        let slot_tree = final_balance_state.slot_tree();
         Ok(WithdrawalClaimFullWitness {
             public_inputs,
-            enc_balance_digests,
-            regev_pk_digests: final_balance_state.regev_pk_digests,
+            slot_tree_root: slot_tree.get_root(),
+            slot_inclusion: slot_tree.prove(member_index as u64),
+            slot_pending_adds: final_balance_state.pending_adds[member_index],
             settled_tx_chain: final_balance_state.settled_tx_chain,
             settled_tx_accumulator_root: final_balance_state.settled_tx_accumulator_root,
             state_version: final_balance_state.state_version,
-            pending_adds: final_balance_state.pending_adds,
             member_count: final_balance_state.member_count,
             delegate_count: final_balance_state.delegate_count,
             member_index,
@@ -2860,9 +2892,9 @@ use crate::circuits::channel::{
     cancel_close_pis::CancelCloseWitness,
 };
 
-/// Process-built cancel-close proving context (a `ListCircuit` + the `CancelCloseCircuit`).
+/// Process-built cancel-close proving context (a `SigAggregator` + the `CancelCloseCircuit`).
 pub struct CancelCloseProver {
-    list: ListCircuit,
+    aggregator: SigAggregator,
     circuit: CancelCloseCircuit<F, C, D>,
 }
 
@@ -2874,15 +2906,20 @@ impl Default for CancelCloseProver {
 
 impl CancelCloseProver {
     pub fn new() -> Self {
-        let list = ListCircuit::new(&single_sig_circuit().verifier_data());
-        let circuit = CancelCloseCircuit::<F, C, D>::new(&list.verifier_data());
-        Self { list, circuit }
+        let aggregator = SigAggregator::new(&single_sig_circuit().verifier_data());
+        let circuit =
+            CancelCloseCircuit::<F, C, D>::new(&aggregator.levels[AGG_LEVELS - 1].verifier_data());
+        Self {
+            aggregator,
+            circuit,
+        }
     }
 
     /// Build the cancel-close full witness: the REVIVED (later) signed state + the pending close
-    /// intent to cancel, plus the N active members' single-sigs of the revived IMCH digest folded
-    /// into the recursive list proof. The circuit enforces revived_version >
-    /// close.final_state_version and the era fence; these Rust preconditions fail closed early.
+    /// intent to cancel, plus the N active members' single-sigs of the revived IMCH digest
+    /// aggregated into the level-4 binary-tree sign-zkp proof. The circuit enforces
+    /// revived_version > close.final_state_version and the era fence; these Rust preconditions
+    /// fail closed early.
     pub fn build_full_witness(
         &self,
         revived_state: &ChannelState,
@@ -2926,30 +2963,26 @@ impl CancelCloseProver {
             close_intent: close_intent.clone(),
         };
 
-        // Fold the N member single-sigs of the REVIVED IMCH digest (slot order).
+        // Aggregate the N member single-sigs of the REVIVED IMCH digest (slot order = leaf order).
         let digest = revived_state.digest;
-        let pairs: Vec<(Bytes32, Bytes32)> = pk_gs.iter().map(|pk| (digest, *pk)).collect();
         let mut member_auth: Vec<MemberCancelAuth> = Vec::with_capacity(member_count);
-        let mut prev: Option<ProofWithPublicInputs<F, C, D>> = None;
+        let mut leaves: Vec<ProofWithPublicInputs<F, C, D>> = Vec::with_capacity(member_count);
         for (i, keys) in member_keys.iter().enumerate() {
             let sig = single_sig_circuit()
                 .prove(&keys.signing_key, digest)
                 .map_err(|e| WalletError(format!("cancel member {i} single-sig failed: {e}")))?;
-            let prefix = list_commitment(&pairs[0..i]);
-            prev = Some(
-                self.list
-                    .prove_append(&sig, prefix, &prev)
-                    .map_err(|e| WalletError(format!("cancel list fold at {i} failed: {e:?}")))?,
-            );
+            leaves.push(sig);
             member_auth.push(MemberCancelAuth { pk_g: pk_gs[i] });
         }
-        let list_proof =
-            prev.ok_or_else(|| WalletError("cancel-close: empty active member set".into()))?;
+        let agg_proof = self
+            .aggregator
+            .aggregate_to_level(&leaves, AGG_LEVELS)
+            .map_err(|e| WalletError(format!("cancel signature aggregation failed: {e:?}")))?;
 
         Ok(CancelCloseFullWitness {
             cancel,
             member_auth,
-            list_proof,
+            agg_proof,
         })
     }
 
@@ -3081,9 +3114,9 @@ impl PostCloseClaimProver {
                 "post-close claim: public-input build failed: {e:?}"
             ))
         })?;
-        let enc_balance_digests: [Bytes32; MAX_CHANNEL_MEMBERS] =
-            std::array::from_fn(|i| final_balance_state.enc_balances[i].digest());
         let incoming_tx_inclusion = accumulator.prove(incoming_tx_index);
+        // H1 Poseidon-root form: the slot tree + the receiver's inclusion proof.
+        let slot_tree = final_balance_state.slot_tree();
 
         Ok(PostCloseClaimFullWitness {
             public_inputs,
@@ -3094,11 +3127,13 @@ impl PostCloseClaimProver {
             source_channel_id: source_tx.source_channel_id.as_u64() as u32,
             incoming_tx_inclusion,
             incoming_tx_index,
-            enc_balance_digests,
-            regev_pk_digests: final_balance_state.regev_pk_digests,
+            slot_tree_root: slot_tree.get_root(),
+            slot_inclusion: slot_tree.prove(receiver_member_index as u64),
+            slot_enc_balance_digest: final_balance_state.enc_balances[receiver_member_index]
+                .digest(),
+            slot_pending_adds: final_balance_state.pending_adds[receiver_member_index],
             settled_tx_chain: final_balance_state.settled_tx_chain,
             state_version: final_balance_state.state_version,
-            pending_adds: final_balance_state.pending_adds,
             member_count: final_balance_state.member_count,
             delegate_count: final_balance_state.delegate_count,
             receiver_member_index,
@@ -3390,15 +3425,14 @@ pub fn build_channel_withdrawal(
     // registration block — and the on-chain `registerChannel` built from the same record below —
     // reproduce the SAME member set the close path signs against). Without them, self-generate the
     // deterministic fixture registration (legacy parity).
-    // P5-B delegate support: `cli_member_keys` is the channel's ACTIVE set (the
-    // `TEST_ACTIVE_MEMBERS` co-signing members FIRST, then any delegates). `delegate_count =
-    // active - TEST_ACTIVE_MEMBERS`, so the registration record / block carry the SAME
-    // member/delegate split the channel state and the on-chain `registerChannel` use (the close
-    // member-set commitment stays member-only; the delegate is registered for the withdrawal
-    // path).
-    let active_count = cli_member_keys
-        .map(|mk| mk.len())
-        .unwrap_or(TEST_ACTIVE_MEMBERS);
+    //
+    // SECURITY (Option B, tasks/reg-chain-1024-threat-model.md): L1 registration is
+    // COSIGNERS-ONLY. `cli_member_keys` may carry the channel's full ACTIVE set (the
+    // `TEST_ACTIVE_MEMBERS` co-signing members FIRST, then any delegates); only the leading
+    // cosigner slice enters the registration record/block (`delegate_count = 0`). Delegates are
+    // authenticated by the cosigner-signed H1 balance-slot tree, never by prior L1 registration
+    // (their claim-recipient binding is B-1c).
+    let active_count = TEST_ACTIVE_MEMBERS;
     let member_keys = {
         let mut generator = block_witness_generator.borrow_mut();
         let keys = match cli_member_keys {
@@ -3408,12 +3442,9 @@ pub fn build_channel_withdrawal(
                     "build_channel_withdrawal: expected at least {TEST_ACTIVE_MEMBERS} active keys, got {}",
                     mk.len()
                 );
-                let delegate_count = (mk.len() - TEST_ACTIVE_MEMBERS) as u32;
-                generator.add_channel_registration_keys_split(
+                generator.add_channel_registration_keys(
                     user_id.channel_id(),
-                    ChannelMemberKeys::from_member_keys(mk),
-                    TEST_ACTIVE_MEMBERS as u32,
-                    delegate_count,
+                    ChannelMemberKeys::from_member_keys(&mk[..TEST_ACTIVE_MEMBERS]),
                 )
             }
             None => generator.add_channel_registration(user_id.channel_id()),
@@ -3428,6 +3459,8 @@ pub fn build_channel_withdrawal(
     // regev_pk_digest is the canonical Bytes32 of the SAME Poseidon identity in `member_tree`; the
     // recipient is the deterministic per-(channel, slot) test L1 address. These EXACT values feed
     // the on-chain `registerChannel`, so the channel_reg keccak chain reproduces on-chain.
+    // Option B: `active_count = TEST_ACTIVE_MEMBERS` — the emitted arrays carry the COSIGNERS
+    // only (registration never carries delegates).
     let channel_id_u32 = user_id.channel_id();
     let bp_member_slot: u8 = 0;
     let mut member_pk_gs = Vec::with_capacity(active_count);
@@ -3439,12 +3472,10 @@ pub fn build_channel_withdrawal(
         let pk_g = Bytes32::from(leaf.pk_g);
         let pk_b = Bytes32::from(leaf.pk_b);
         let regev_digest = Bytes32::from(leaf.regev_pk_digest);
-        let recipient = Address::from_u32_slice(
-            &[0x3333_0000u32
-                .wrapping_add(channel_id_u32.wrapping_mul(16))
-                .wrapping_add(i as u32); 5],
-        )
-        .expect("address from u32 slice");
+        let recipient = crate::circuits::test_utils::block_witness_generator::test_recipient_for(
+            channel_id_u32,
+            i,
+        );
         member_pk_gs.push(pk_g.to_string());
         member_pk_bs.push(pk_b.to_string());
         regev_pk_digests.push(regev_digest.to_string());
@@ -3878,6 +3909,13 @@ mod delegate_send_tests {
     /// Assemble a genesis `ChannelState` over the FULL active set (members + delegates). Mirrors
     /// `assemble_genesis_state`, but accepts `active`-length ciphertext / pending-add vectors so a
     /// delegate's genesis balance slot is populated.
+    /// Deterministic NONZERO per-slot test recipients (B-1b: validate() rejects zero actives).
+    fn test_recipients(n: usize) -> Vec<Address> {
+        (0..n)
+            .map(|i| Address::from_u32_slice(&[0x7E57_0000u32.wrapping_add(i as u32); 5]).unwrap())
+            .collect()
+    }
+
     fn assemble_active_genesis(
         record: &ChannelRecord,
         enc_balances_active: &[RegevCiphertext],
@@ -3889,6 +3927,7 @@ mod delegate_send_tests {
             record,
             enc_balances_active,
             regev_pk_digests_active,
+            &test_recipients(enc_balances_active.len()),
             fund_amount,
         )
         .unwrap()
@@ -3929,11 +3968,19 @@ mod delegate_send_tests {
             .iter()
             .map(|k| Bytes32::from(k.regev_pk.poseidon_digest()))
             .collect();
-        let g = assemble_genesis_state(&r, &encs, &pkds, 30).expect("active genesis");
+        let recips = test_recipients(3);
+        let g = assemble_genesis_state(&r, &encs, &pkds, &recips, 30).expect("active genesis");
         assert_eq!(g.balance_state.delegate_count, 1);
         g.balance_state.validate().expect("genesis balance valid");
         // A member_count-only ciphertext count is rejected (must cover the delegate slot too).
-        assert!(assemble_genesis_state(&r, &encs[..2], &pkds[..2], 30).is_err());
+        assert!(assemble_genesis_state(&r, &encs[..2], &pkds[..2], &recips[..2], 30).is_err());
+        // B-1b fail-closed: a ZERO recipient for an active slot is rejected at genesis assembly.
+        let mut zero_recips = recips.clone();
+        zero_recips[2] = Address::default();
+        assert!(
+            assemble_genesis_state(&r, &encs, &pkds, &zero_recips, 30).is_err(),
+            "a zero active recipient must be refused at genesis assembly (B-1b)"
+        );
     }
 
     /// A 2-member + 1-delegate channel (delegate in slot 2) with real keys, a genesis with a
@@ -4388,7 +4435,8 @@ mod delegate_send_tests {
             .iter()
             .map(|m| Bytes32::from(m.regev_pk.poseidon_digest()))
             .collect();
-        let mut state = assemble_genesis_state(&record, &encs, &pkds, 30).expect("genesis");
+        let mut state = assemble_genesis_state(&record, &encs, &pkds, &test_recipients(3), 30)
+            .expect("genesis");
         for (i, k) in keys.iter().enumerate() {
             let s = sign_state(k, i as u8, &state).expect("sign genesis");
             add_signature(&mut state, s);
@@ -4466,6 +4514,12 @@ mod delegate_send_tests {
                 Bytes32::from(pk0.poseidon_digest()),
                 Bytes32::from(pk1.poseidon_digest()),
                 Bytes32::from(pk2.poseidon_digest()),
+            ]),
+            // B-1b: slot 0 (the claimant) carries the SAME exit address passed to the prover.
+            recipients: BalanceState::pad_recipients(&[
+                Address::from_u32_slice(&[1, 2, 3, 4, 5]).unwrap(),
+                Address::from_u32_slice(&[21, 22, 23, 24, 25]).unwrap(),
+                Address::from_u32_slice(&[31, 32, 33, 34, 35]).unwrap(),
             ]),
             settled_tx_chain: Bytes32::default(),
             settled_tx_accumulator_root: Bytes32::default(),
@@ -4594,6 +4648,7 @@ mod delegate_send_tests {
                     delegate_count: 0,
                     enc_balances: BalanceState::pad_enc_balances(encs),
                     regev_pk_digests: BalanceState::pad_regev_pk_digests(&[]),
+                    recipients: BalanceState::pad_recipients(&test_recipients(3)),
                     settled_tx_chain: Bytes32::default(),
                     settled_tx_accumulator_root: Bytes32::default(),
                     state_version: version,
@@ -4746,6 +4801,11 @@ mod delegate_send_tests {
                 Bytes32::from(receiver_pk.poseidon_digest()),
                 Bytes32::from(other_pk.poseidon_digest()),
             ]),
+            // B-1b: the receiver's (slot 0) leaf-bound exit address = the claim recipient below.
+            recipients: BalanceState::pad_recipients(&[
+                Address::from_u32_slice(&[1, 2, 3, 4, 5]).unwrap(),
+                Address::from_u32_slice(&[21, 22, 23, 24, 25]).unwrap(),
+            ]),
             settled_tx_chain: Bytes32::default(),
             settled_tx_accumulator_root: accumulator_root,
             state_version: 9,
@@ -4826,7 +4886,7 @@ mod delegate_send_tests {
             };
             let lc: serde_json::Value =
                 serde_json::from_str(&artifacts.lifecycle_json).expect("lifecycle json");
-            let mut close_hashes: [Bytes32; MAX_CHANNEL_MEMBERS] =
+            let mut close_hashes: [Bytes32; crate::constants::MAX_COSIGNERS] =
                 std::array::from_fn(|_| Bytes32::default());
             for (i, m) in cli_members.iter().enumerate() {
                 close_hashes[i] = m.pk_g();
@@ -4915,8 +4975,8 @@ mod delegate_send_tests {
             .map(|slot| MemberKeys::generate(&mut Rng010::seed_from_u64(0xC1_0000 + slot as u64)))
             .collect();
 
-        // What the CLOSE path commits to (close_member_set_commitment over the members' pk_g).
-        let mut close_hashes: [Bytes32; MAX_CHANNEL_MEMBERS] =
+        // What the CLOSE path commits to (close_member_set_commitment over the COSIGNERS' pk_g).
+        let mut close_hashes: [Bytes32; crate::constants::MAX_COSIGNERS] =
             std::array::from_fn(|_| Bytes32::default());
         for (i, m) in cli_members.iter().enumerate() {
             close_hashes[i] = m.pk_g();
@@ -4927,7 +4987,7 @@ mod delegate_send_tests {
         // What the WITHDRAW registration emits: the reg record built from the same members via
         // ChannelMemberKeys::from_member_keys (the exact path build_channel_withdrawal takes).
         let cmk = ChannelMemberKeys::from_member_keys(&cli_members);
-        let mut reg_hashes: [Bytes32; MAX_CHANNEL_MEMBERS] =
+        let mut reg_hashes: [Bytes32; crate::constants::MAX_COSIGNERS] =
             std::array::from_fn(|_| Bytes32::default());
         for i in 0..TEST_ACTIVE_MEMBERS {
             reg_hashes[i] = Bytes32::from(cmk.member_tree.get_leaf(i as u64).pk_g);
@@ -4984,7 +5044,7 @@ mod partial_withdrawal_tests {
         let mut w = Withdrawal {
             recipient: Address::from_u32_slice(&[1, 2, 3, 4, 5]).unwrap(),
             token_index: 0,
-            amount: U256::from(100),
+            amount: U256::from(100u64),
             nullifier: Bytes32::from_u32_slice(&[0xAA; 8]).unwrap(),
             aux_data: Bytes32::from_u32_slice(&[0xBB; 8]).unwrap(),
         };
@@ -4999,12 +5059,12 @@ mod partial_withdrawal_tests {
         let mut w = Withdrawal {
             recipient: Address::from_u32_slice(&[1, 2, 3, 4, 5]).unwrap(),
             token_index: 0,
-            amount: U256::from(100),
+            amount: U256::from(100u64),
             nullifier: Bytes32::from_u32_slice(&[0xAA; 8]).unwrap(),
             aux_data: Bytes32::from_u32_slice(&[0xBB; 8]).unwrap(),
         };
         let d1 = partial_withdrawal_auth_digest(&w);
-        w.amount = U256::from(101);
+        w.amount = U256::from(101u64);
         let d2 = partial_withdrawal_auth_digest(&w);
         assert_ne!(d1, d2);
     }
@@ -5014,7 +5074,7 @@ mod partial_withdrawal_tests {
         let mut w = Withdrawal {
             recipient: Address::from_u32_slice(&[1, 2, 3, 4, 5]).unwrap(),
             token_index: 0,
-            amount: U256::from(100),
+            amount: U256::from(100u64),
             nullifier: Bytes32::from_u32_slice(&[0xAA; 8]).unwrap(),
             aux_data: Bytes32::from_u32_slice(&[0xBB; 8]).unwrap(),
         };

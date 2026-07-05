@@ -242,3 +242,56 @@ library BlobKZGVerifier {
         if (abi.decode(result, (uint256)) != 1) revert BKV_PairingFailed();
     }
 }
+
+/// @title BlobKZGVerifierExt
+/// @notice Standalone EXTERNAL wrapper around the internal `BlobKZGVerifier` library, deployed as
+///         its own satellite contract (mirroring the `MleVerifier` pattern) so the large EIP-2537
+///         verification bytecode does not count against `IntmaxRollup`'s EIP-170 budget.
+/// @dev SECURITY: this contract is stateless and `view`-only — it holds no authority. The caller
+///      (`IntmaxRollup._verifyFraud`) keeps ALL state decisions (commitment checks, rollback,
+///      slashing); this satellite only answers "does this KZG multi-point opening bind
+///      `proofBytes` to `blobVersionedHash`?" by reverting on failure. It carries the same trust
+///      class as the pinned `MleVerifier`: the deployer pins it once via
+///      `IntmaxRollup.setKzgVerifier` and it can never be swapped.
+contract BlobKZGVerifierExt {
+    /// @dev Top-3-bits mask so each 32-byte chunk is a canonical BLS12-381 scalar field element
+    ///      (moved verbatim from `IntmaxRollup.FIELD_MASK`; MUST match the Rust blob encoder).
+    uint256 internal constant FIELD_MASK = type(uint256).max >> 3;
+
+    /// @notice Verify that `proofBytes` (split into field elements exactly as the Rust blob encoder
+    ///         does) is the data committed in the blob `blobVersionedHash` via the KZG multi-point
+    ///         opening `kzg`. Reverts on any failure; returns silently on success.
+    function verify(
+        bytes32 blobVersionedHash,
+        KZGProof calldata kzg,
+        bytes calldata proofBytes
+    ) external view {
+        BlobKZGVerifier.verify(blobVersionedHash, kzg, _toFieldElements(proofBytes));
+    }
+
+    /// @dev Split raw bytes into BLS12-381 field elements (top 3 bits cleared). Moved VERBATIM from
+    ///      `IntmaxRollup._toFieldElements` — byte-identical chunking is what binds the fraud
+    ///      prover's `proofBytes` to the blob contents.
+    function _toFieldElements(bytes calldata data)
+        internal pure returns (bytes32[] memory elems)
+    {
+        uint256 N = (data.length + 31) / 32;
+        elems = new bytes32[](N);
+        for (uint256 i = 0; i < N; i++) {
+            uint256 start = i * 32;
+            uint256 end = start + 32;
+            bytes32 chunk;
+            if (end <= data.length) {
+                chunk = bytes32(data[start:end]);
+            } else {
+                bytes memory padded = new bytes(32);
+                uint256 remaining = data.length - start;
+                for (uint256 j = 0; j < remaining; j++) {
+                    padded[j] = data[start + j];
+                }
+                assembly { chunk := mload(add(padded, 32)) }
+            }
+            elems[i] = bytes32(uint256(chunk) & FIELD_MASK);
+        }
+    }
+}

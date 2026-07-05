@@ -26,6 +26,7 @@
 //! - The audited Goldilocks Poseidon (`PoseidonHashOut`, already the member-identity hash) is
 //!   reused; no primitive is implemented from scratch.
 
+pub mod aggregate;
 pub mod circuit;
 pub mod consumer;
 pub mod list;
@@ -328,6 +329,7 @@ mod tests {
             0x494d_4352, // IMCR CHANNEL_RECORD_DOMAIN
             0x494d_434d, // IMCM CLOSE_MEMBER_SET_DOMAIN
             0x494d_4253, // IMBS BALANCE_STATE_DOMAIN
+            0x494d_534c, // IMSL BALANCE_SLOT_LEAF_DOMAIN
             0x494d_4248, // IMBH BALANCE_STATE_HASH_DOMAIN
             0x494d_544c, // IMTL TX_LEAF_DOMAIN
             0x494d_5443, // IMTC SETTLED_TX_CHAIN_DOMAIN

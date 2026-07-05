@@ -35,8 +35,10 @@ class Wallet {
     const w = this._load();
     return JSON.parse(seedHex ? w.wallet_keygen_seeded(seedHex) : w.wallet_keygen());
   }
-  genesisContribution(balance) {
-    return JSON.parse(this._load().wallet_genesis_contribution(BigInt(balance)));
+  // B-1b: `recipient` (the user's L1 address, 0x-hex) is REQUIRED - it becomes the slot's
+  // cosigner-signed leaf-bound exit address (the delegate's only payout binding).
+  genesisContribution(balance, recipient) {
+    return JSON.parse(this._load().wallet_genesis_contribution(BigInt(balance), recipient));
   }
   importChannel(snapshotJson, slot) {
     this._load().wallet_import_channel(JSON.stringify(snapshotJson), slot);

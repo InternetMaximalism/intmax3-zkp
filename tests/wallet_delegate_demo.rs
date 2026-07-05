@@ -67,8 +67,14 @@ fn delegate_demo_three_members_plus_browser_delegate_send() {
         encrypt_amount(&mut rng, &delegate_keys.regev_pk, 50).unwrap();
     cts.push(delegate_ct);
 
-    let mut genesis =
-        assemble_genesis_state(&record, &cts, &digests(&members), 140).expect("genesis");
+    let mut genesis = assemble_genesis_state(
+        &record,
+        &cts,
+        &digests(&members),
+        &test_recipients_b1b(cts.len()),
+        140,
+    )
+    .expect("genesis");
 
     // Only the THREE MEMBERS co-sign the genesis (the delegate does NOT).
     for slot in 0..3u8 {
@@ -187,8 +193,14 @@ fn two_delegates_in_one_channel_delegate_to_delegate_send() {
     cts.push(c3);
     cts.push(c4);
 
-    let mut genesis =
-        assemble_genesis_state(&record, &cts, &digests(&members), 200).expect("genesis");
+    let mut genesis = assemble_genesis_state(
+        &record,
+        &cts,
+        &digests(&members),
+        &test_recipients_b1b(cts.len()),
+        200,
+    )
+    .expect("genesis");
     for slot in 0..3u8 {
         let sig = sign_state(&member_keys[slot as usize], slot, &genesis).unwrap();
         add_signature(&mut genesis, sig);
@@ -284,7 +296,14 @@ fn delegate_join_preserves_send_and_is_importable() {
     }
     let (c3, w3) = encrypt_amount(&mut rng, &d3.regev_pk, 50).unwrap();
     cts.push(c3);
-    let mut state = assemble_genesis_state(&record, &cts, &digests(&members), 200).unwrap();
+    let mut state = assemble_genesis_state(
+        &record,
+        &cts,
+        &digests(&members),
+        &test_recipients_b1b(cts.len()),
+        200,
+    )
+    .unwrap();
     for s in 0..3u8 {
         let g = sign_state(&mk[s as usize], s, &state).unwrap();
         add_signature(&mut state, g);
@@ -340,6 +359,9 @@ fn delegate_join_preserves_send_and_is_importable() {
     v2.balance_state.delegate_count = 2;
     v2.balance_state.enc_balances[4] = c4;
     v2.balance_state.pending_adds[4] = 0;
+    // B-1b: a join MUST bind the new delegate's L1 exit address into its slot leaf (mirrors
+    // channel_member::join_delegate; validate() fail-closes on a zero active recipient).
+    v2.balance_state.recipients[4] = test_recipients_b1b(5)[4];
     v2.balance_state.state_version += 1;
     v2.member_signatures.clear();
     let mut v2 = v2.with_computed_digest();
@@ -432,7 +454,14 @@ fn delegate_refresh_after_receive_enables_send() {
     let (c4, _w4) = encrypt_amount(&mut rng, &d4.regev_pk, 60).unwrap();
     cts.push(c3);
     cts.push(c4);
-    let mut g = assemble_genesis_state(&record, &cts, &digests(&members), 200).unwrap();
+    let mut g = assemble_genesis_state(
+        &record,
+        &cts,
+        &digests(&members),
+        &test_recipients_b1b(cts.len()),
+        200,
+    )
+    .unwrap();
     for s in 0..3u8 {
         let x = sign_state(&mk[s as usize], s, &g).unwrap();
         add_signature(&mut g, x);
@@ -534,4 +563,18 @@ fn delegate_refresh_after_receive_enables_send() {
         Some(5),
     )
     .expect("d4 post-refresh send verifies");
+}
+
+/// B-1b: deterministic NONZERO per-slot L1 exit addresses for test genesis states
+/// (`BalanceState::validate()` rejects zero active recipients).
+fn test_recipients_b1b(n: usize) -> Vec<intmax3_zkp::ethereum_types::address::Address> {
+    use intmax3_zkp::ethereum_types::u32limb_trait::U32LimbTrait as _;
+    (0..n)
+        .map(|i| {
+            intmax3_zkp::ethereum_types::address::Address::from_u32_slice(
+                &[0x7E57_0000u32.wrapping_add(i as u32); 5],
+            )
+            .unwrap()
+        })
+        .collect()
 }

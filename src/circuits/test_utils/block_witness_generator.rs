@@ -27,7 +27,7 @@ use crate::{
         tx::TxV2,
         u63::{BlockNumber, BlockNumberError, U63},
     },
-    constants::{CHANNEL_TREE_HEIGHT, MAX_CHANNEL_MEMBERS, SEND_TREE_HEIGHT},
+    constants::{CHANNEL_TREE_HEIGHT, MAX_COSIGNERS, SEND_TREE_HEIGHT},
     ethereum_types::{
         address::Address, bytes32::Bytes32, u32limb_trait::U32LimbTrait as _, u256::U256,
     },
@@ -130,7 +130,7 @@ pub enum BlockWitnessGeneratorError {
 }
 
 /// Active member count for test channels (pad-to-MAX D6): these fixtures register 3 active members
-/// per channel; the member tree is height MEMBER_TREE_HEIGHT (MAX_CHANNEL_MEMBERS = 16 slots) with
+/// per channel; the member tree is height MEMBER_TREE_HEIGHT (MAX_COSIGNERS = 16 slots) with
 /// slots 3..16 left as empty leaves (padding). Kept at 3 so existing validity/balance tests are
 /// unchanged.
 pub const TEST_ACTIVE_MEMBERS: usize = 3;
@@ -210,13 +210,17 @@ impl ChannelMemberKeys {
     pub fn from_member_keys(keys: &[crate::wallet_core::MemberKeys]) -> Self {
         let mut member_tree = MemberTree::init();
         let (mut secret_keys, mut baby_keys, mut regev_pks) = (Vec::new(), Vec::new(), Vec::new());
-        // Build the member tree over ALL passed ACTIVE participants (members first, then
-        // delegates). Callers pass exactly the active set: `TEST_ACTIVE_MEMBERS` for a
-        // member-only channel, or `member_count + delegate_count` when a delegate is
-        // present (P5-B). The delegate occupies the contiguous slot(s) after the co-signing
-        // members and is committed in the member tree (its `(pk_g, pk_b, regev_pk_digest)`
-        // enters `member_pubkeys_root` and the reg keccak chain) but is EXCLUDED from the
-        // member-set commitment (handled by member_count in `to_reg_record_split`).
+        // SECURITY (Option B): this is the REGISTERED member tree — cosigners only, at most
+        // `MAX_COSIGNERS` slots. Callers MUST pass exactly the co-signing member set (delegates
+        // are NOT registered on L1; they are authenticated by the cosigner-signed H1 slot tree
+        // and never enter this tree). The `MemberTree::init()` height caps at `MAX_COSIGNERS`
+        // leaves, so passing more panics loudly rather than silently truncating.
+        assert!(
+            keys.len() <= MAX_COSIGNERS,
+            "from_member_keys: {} keys exceed the cosigner-only registered tree capacity \
+             ({MAX_COSIGNERS}); delegates must not be registered (Option B)",
+            keys.len()
+        );
         for k in keys.iter() {
             let pk_b: PoseidonHashOut = k.baby_key.public_key().to_bytes32().reduce_to_hash_out();
             member_tree.push(MemberLeaf {
@@ -249,12 +253,13 @@ impl ChannelMemberKeys {
         self.to_reg_record_split(channel_id, TEST_ACTIVE_MEMBERS as u32, 0)
     }
 
-    /// Like [`Self::to_reg_record`] but with an explicit `member_count` / `delegate_count` split
-    /// (P5-B delegate support). `active = member_count + delegate_count` entries are emitted from
-    /// the member tree (members first, then delegates). The member-set commitment downstream
-    /// uses only the first `member_count` `pk_g`s; the delegate region is registered for the
-    /// withdrawal path but excluded from the close member-set (matches
-    /// `ChannelSettlementManager`'s member/delegate split).
+    /// Like [`Self::to_reg_record`] but with an explicit `member_count` / `delegate_count` split.
+    /// `active = member_count + delegate_count` entries are emitted from the member tree.
+    ///
+    /// SECURITY (Option B): the reg record has only `MAX_COSIGNERS` slots — registration is
+    /// cosigners-only, and registration-producing paths emit `delegate_count = 0`. A nonzero
+    /// `delegate_count` is accepted only within the 16-slot capacity (legacy 16-slot channels);
+    /// anything beyond is rejected here (and by `ChannelRegRecord::validate`).
     pub fn to_reg_record_split(
         &self,
         channel_id: u32,
@@ -263,10 +268,12 @@ impl ChannelMemberKeys {
     ) -> ChannelRegRecord {
         let active = (member_count + delegate_count) as usize;
         assert!(
-            active <= MAX_CHANNEL_MEMBERS,
-            "active participants {active} exceed MAX_CHANNEL_MEMBERS"
+            active <= MAX_COSIGNERS,
+            "active participants {active} exceed the reg record's MAX_COSIGNERS slots (Option B: \
+             registration carries cosigners only)"
         );
-        let mut members: [MemberRegEntry; MAX_CHANNEL_MEMBERS] = Default::default();
+        let mut members: [MemberRegEntry; MAX_COSIGNERS] =
+            std::array::from_fn(|_| MemberRegEntry::default());
         for (i, entry) in members.iter_mut().enumerate().take(active) {
             let leaf = self.member_tree.get_leaf(i as u64);
             *entry = MemberRegEntry {
@@ -274,12 +281,7 @@ impl ChannelMemberKeys {
                 pk_b: Bytes32::from(leaf.pk_b),
                 regev_pk_digest: Bytes32::from(leaf.regev_pk_digest),
                 // Deterministic per-(channel, slot) test recipient (keccak preimage only).
-                recipient: Address::from_u32_slice(
-                    &[0x3333_0000u32
-                        .wrapping_add(channel_id.wrapping_mul(16))
-                        .wrapping_add(i as u32); 5],
-                )
-                .expect("address from u32 slice"),
+                recipient: test_recipient_for(channel_id, i),
             };
         }
         ChannelRegRecord {
@@ -292,6 +294,25 @@ impl ChannelMemberKeys {
             members,
         }
     }
+}
+
+/// The canonical deterministic per-(channel, slot) TEST L1 recipient — the SINGLE formula used by
+/// the reg record (`to_reg_record_split`), the withdraw-pipeline registration
+/// (`wallet_core::build_channel_withdrawal`), and the CLI cosigners' B-1b balance-slot recipients
+/// (`channel_member` genesis). Always NONZERO (0x3333_0000-based), so it passes the
+/// `BalanceState::validate()` / `registerChannel` zero-recipient rejections.
+///
+/// SECURITY (B-1b): keeping the reg-record recipient and the balance-slot leaf recipient equal for
+/// cosigners means `registeredRecipientOf[pk_g]` (the current Manager check) and the leaf-bound
+/// claim recipient agree — the B-2 Manager switch changes WHICH one is authoritative without
+/// changing the paid address for cosigners.
+pub fn test_recipient_for(channel_id: u32, slot: usize) -> Address {
+    Address::from_u32_slice(
+        &[0x3333_0000u32
+            .wrapping_add(channel_id.wrapping_mul(16))
+            .wrapping_add(slot as u32); 5],
+    )
+    .expect("address from u32 slice")
 }
 
 /// A distinct canonical Regev pubkey of the correct length, derived deterministically (coeffs < q).

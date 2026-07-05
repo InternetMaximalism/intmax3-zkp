@@ -5,12 +5,20 @@
 //! Goldilocks public key `pk_g` (the Poseidon-preimage signature public key,
 //! `poseidon_sig::GoldilocksSecretKey::public_key()`), the member's BabyBear hash-signature public
 //! key `pk_b` (P3, channel-tx sender authorization — A11 two-key binding), to that member's Regev
-//! public-key digest at the slot
-//! (0..MAX_CHANNEL_MEMBERS). Active members occupy slots `0..member_count`; slots
-//! `member_count..MAX_CHANNEL_MEMBERS` are empty leaves (pad-to-MAX D6). Its root is stored in
-//! `ChannelLeaf.member_pubkeys_root` and is the trusted on-chain-bound root against which the
-//! validity circuit proves slot inclusion of the signing pubkey (see
-//! `circuits::validity::block_hash_chain::update_channel_tree`).
+//! public-key digest at the slot.
+//!
+//! Two DISTINCT instantiations share this leaf type (Option B,
+//! tasks/reg-chain-1024-threat-model.md) — do not conflate them:
+//! * [`MemberTree::init`] — the REGISTERED tree (height `MEMBER_TREE_HEIGHT`, `MAX_COSIGNERS`
+//!   slots). Active COSIGNERS occupy slots `0..member_count`; the rest are empty leaves. Its root
+//!   is stored in `ChannelLeaf.member_pubkeys_root` and is the trusted on-chain-bound root against
+//!   which the validity circuit proves bp-slot inclusion of the signing pubkey (see
+//!   `circuits::validity::block_hash_chain::update_channel_tree`). Delegates are NEVER in this tree
+//!   — they are authenticated by the cosigner-signed H1 balance-slot tree.
+//! * [`MemberTree::init_wallet_membership`] — the wallet's LIVE membership tree (height
+//!   `WALLET_MEMBER_TREE_HEIGHT`, `MAX_CHANNEL_MEMBERS` slots): cosigners AND delegates, evolving
+//!   with delegate joins. Its root lives in the member-signed `ChannelRecord`
+//!   (`wallet_core::member_pubkeys_root`) and is never compared to the registered root.
 //!
 //! SECURITY: the leaf is domain-separated (leading `MEMBER_LEAF_DOMAIN` tag) so a leaf of this
 //! tree can never be reinterpreted as a leaf of another tree (cross-tree confusion). The tree is
@@ -28,7 +36,7 @@ use plonky2::{
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    constants::MEMBER_TREE_HEIGHT,
+    constants::{MEMBER_TREE_HEIGHT, WALLET_MEMBER_TREE_HEIGHT},
     utils::{
         leafable::{Leafable, LeafableTarget},
         leafable_hasher::PoseidonLeafableHasher,
@@ -166,7 +174,17 @@ pub type MemberMerkleProof = IncrementalMerkleProof<MemberLeaf>;
 pub type MemberMerkleProofTarget = IncrementalMerkleProofTarget<MemberLeafTarget>;
 
 impl MemberTree {
+    /// The REGISTERED member tree: `MAX_COSIGNERS` slots (Option B — registration covers only the
+    /// cosigners). This is the tree whose root `channel_reg_step` writes into
+    /// `ChannelLeaf.member_pubkeys_root` and `update_channel_tree` opens the bp slot against.
     pub fn init() -> Self {
         Self::new(MEMBER_TREE_HEIGHT)
+    }
+
+    /// The wallet's LIVE membership tree: `MAX_CHANNEL_MEMBERS` slots (cosigners + delegates,
+    /// evolving with joins). Off-chain P4-1/A11 anchoring only — its root is NEVER compared to the
+    /// registered root. INTENTIONALLY a different height so conflation fails loudly.
+    pub fn init_wallet_membership() -> Self {
+        Self::new(WALLET_MEMBER_TREE_HEIGHT)
     }
 }

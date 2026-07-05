@@ -79,7 +79,7 @@ pub enum CancelCloseWitnessError {
 
 /// Witness for the corrected cancelClose statement. The revived `ChannelState` (the state the
 /// members kept operating at a higher version) plus the `CloseIntent` being cancelled. The member
-/// authentication (per-slot `pk_g`) and the recursive `ListCircuit` proof live in the circuit's
+/// authentication (per-slot `pk_g`) and the aggregated sign-zkp proof live in the circuit's
 /// `CancelCloseFullWitness` (mirroring `ChannelCloseFullWitness`), not here.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -228,6 +228,17 @@ mod tests {
                     ciphertext(3),
                 ]),
                 regev_pk_digests: BalanceState::pad_regev_pk_digests(&[]),
+                // B-1b: nonzero per-active-slot exit addresses (validate() rejects zero actives).
+                recipients: BalanceState::pad_recipients(
+                    &(0..3)
+                        .map(|i| {
+                            crate::ethereum_types::address::Address::from_u32_slice(
+                                &[0x7E57_0000u32 + i; 5],
+                            )
+                            .unwrap()
+                        })
+                        .collect::<Vec<_>>(),
+                ),
                 settled_tx_chain: Bytes32::default(),
                 settled_tx_accumulator_root: Bytes32::default(),
                 state_version,

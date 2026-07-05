@@ -3,6 +3,7 @@ pragma solidity ^0.8.24;
 
 import {Script, console2} from "forge-std/Script.sol";
 import {IntmaxRollup} from "../src/IntmaxRollup.sol";
+import {BlobKZGVerifierExt} from "../src/BlobKZGVerifier.sol";
 import {MleVerifier} from "@mle/MleVerifier.sol";
 import {FixtureLib} from "./FixtureLib.sol";
 
@@ -41,6 +42,8 @@ contract DeployC2C is Script {
             vdd.kIs, vdd.subgroupGenPowers, verifier, genesis,
             false // SECURITY (A-2): production — reject a disabled (degreeBits==0) validity VK
         );
+        // Pin the KZG blob-binding satellite (EIP-170 relief; fraudProof binding is fail-closed until set).
+        rollup.setKzgVerifier(new BlobKZGVerifierExt());
 
         {
             string memory wJson = _wJson();

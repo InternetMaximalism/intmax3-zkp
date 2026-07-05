@@ -161,11 +161,11 @@ contract WithdrawNativeE2ETest is Test {
 
         // Non-deployer rejected.
         vm.prank(makeAddr("attacker"));
-        vm.expectRevert(bytes("only deployer"));
+        vm.expectRevert(IntmaxRollup.OnlyDeployer.selector);
         rollup.initializeWithdrawalVk(wvk, wdd.whirParams, wdd.protocolId, wdd.sessionId, wdd.kIs, wdd.subgroupGenPowers);
 
         // Deployer second call rejected (set-once latch; rollup VK already set in setUp).
-        vm.expectRevert(bytes("withdrawal vk already set"));
+        vm.expectRevert(IntmaxRollup.WithdrawalVkAlreadySet.selector);
         rollup.initializeWithdrawalVk(wvk, wdd.whirParams, wdd.protocolId, wdd.sessionId, wdd.kIs, wdd.subgroupGenPowers);
     }
 

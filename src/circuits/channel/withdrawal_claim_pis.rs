@@ -94,8 +94,15 @@ impl WithdrawalClaimWitness {
         {
             return Err(WithdrawalClaimWitnessError::RecipientMismatch);
         }
-        let expected_nullifier =
-            WithdrawalClaim::derive_nullifier(self.close_intent.signing_digest(), self.member.pk_g);
+        // SECURITY (B-2 blocker fix): the nullifier keys on the slot's LEAF-BOUND Regev pk digest
+        // (`Bytes32::from(user_pk.poseidon_digest())`), NOT the slot-free `member_pk_g`, so a slot
+        // owner cannot grind `member_pk_g` for distinct nullifiers. See
+        // `WithdrawalClaim::derive_nullifier`.
+        let slot_regev_pk_digest = Bytes32::from(self.user_pk.poseidon_digest());
+        let expected_nullifier = WithdrawalClaim::derive_nullifier(
+            self.close_intent.signing_digest(),
+            slot_regev_pk_digest,
+        );
         if expected_nullifier != self.claim.withdrawal_nullifier {
             return Err(WithdrawalClaimWitnessError::NullifierMismatch);
         }
@@ -142,6 +149,15 @@ impl WithdrawalClaimWitness {
                 "user_amount_ct must equal final_balance_state.enc_balances[member_index]"
                     .to_string(),
             ));
+        }
+        // SECURITY (B-1b): the exposed recipient MUST be the cosigner-signed per-slot L1 exit
+        // address (the leaf field the circuit opens by inclusion). Native mirror of the circuit's
+        // leaf-recipient connect — fail-closed BEFORE any proving. Without this, a delegate's
+        // payout (no L1 registration under Option B) could be redirected.
+        if self.member.l1_withdrawal_recipient
+            != self.final_balance_state.recipients[self.member_index]
+        {
+            return Err(WithdrawalClaimWitnessError::RecipientMismatch);
         }
 
         // E-3 withdrawClaimZKP: user_amount_ct decrypts to the public amount under user_pk.
@@ -263,6 +279,12 @@ mod tests {
                 Bytes32::from(pk1.poseidon_digest()),
                 Bytes32::from(pk2.poseidon_digest()),
             ]),
+            // B-1b: slot 0 (the claimant) carries the SAME L1 exit address the claim exposes.
+            recipients: BalanceState::pad_recipients(&[
+                Address::from_u32_slice(&[1, 2, 3, 4, 5]).unwrap(),
+                Address::from_u32_slice(&[21, 22, 23, 24, 25]).unwrap(),
+                Address::from_u32_slice(&[31, 32, 33, 34, 35]).unwrap(),
+            ]),
             settled_tx_chain: Bytes32::default(),
             settled_tx_accumulator_root: Bytes32::default(),
             state_version: 6,
@@ -317,7 +339,7 @@ mod tests {
             user_amount_ct: ct0,
             withdrawal_nullifier: WithdrawalClaim::derive_nullifier(
                 close_intent.signing_digest(),
-                member.pk_g,
+                Bytes32::from(pk0.poseidon_digest()),
             ),
             claim_proof,
         };
@@ -350,6 +372,18 @@ mod tests {
         assert!(matches!(
             wrong_slot.to_public_inputs(RegevSecurityLevel::Test),
             Err(WithdrawalClaimWitnessError::MemberSlotMismatch(_))
+        ));
+
+        // B-1b: a claim whose recipient differs from the cosigner-signed per-slot exit address
+        // (recipients[member_index]) is rejected fail-closed (native mirror of the circuit's
+        // leaf-recipient binding).
+        let mut wrong_recipient = witness.clone();
+        let redirected = Address::from_u32_slice(&[9, 9, 9, 9, 9]).unwrap();
+        wrong_recipient.member.l1_withdrawal_recipient = redirected;
+        wrong_recipient.claim.l1_recipient = redirected;
+        assert!(matches!(
+            wrong_recipient.to_public_inputs(RegevSecurityLevel::Test),
+            Err(WithdrawalClaimWitnessError::RecipientMismatch)
         ));
 
         // A tampered balance state no longer matches the close intent's H1.
@@ -387,6 +421,13 @@ mod tests {
                 Bytes32::from(pk0.poseidon_digest()),
                 Bytes32::from(pk1.poseidon_digest()),
                 Bytes32::from(pk_d.poseidon_digest()),
+            ]),
+            // B-1b: the DELEGATE's (slot 2) leaf-bound exit address is the one the claim exposes
+            // — under Option B this is the delegate's ONLY recipient binding.
+            recipients: BalanceState::pad_recipients(&[
+                Address::from_u32_slice(&[11, 12, 13, 14, 15]).unwrap(),
+                Address::from_u32_slice(&[21, 22, 23, 24, 25]).unwrap(),
+                Address::from_u32_slice(&[2, 3, 4, 5, 6]).unwrap(),
             ]),
             settled_tx_chain: Bytes32::default(),
             settled_tx_accumulator_root: Bytes32::default(),
@@ -443,7 +484,7 @@ mod tests {
             user_amount_ct: ct_d,
             withdrawal_nullifier: WithdrawalClaim::derive_nullifier(
                 close_intent.signing_digest(),
-                delegate.pk_g,
+                Bytes32::from(pk_d.poseidon_digest()),
             ),
             claim_proof,
         };

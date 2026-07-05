@@ -213,6 +213,14 @@ fully removing Groth16. abstract2.md is unchanged (N members is recorded as a sp
 
 ### Change A — N members (pad-to-MAX=16)
 
+> **Partially SUPERSEDED by D11–D14 (2026-07):** the single `MAX_CHANNEL_MEMBERS = 16` was split into
+> `MAX_COSIGNERS = 16` (close signers = `member_count`) and `MAX_CHANNEL_MEMBERS = 1024` (balance-slot
+> capacity), with `MEMBER_TREE_HEIGHT` 4 → 10 (D12); the 16-slot SPHINCS+/sign-zkp gating became the
+> binary-tree aggregated sign-zkp (D13); the flat-keccak H1 became the Poseidon slot-tree-root form
+> (D14); and the degree-2^19 measurement is superseded (close is 2^17 after D14). The pad-to-MAX
+> scheme, the fixed-length IMCM commitment form (now sized `MAX_COSIGNERS`), and the `validate()`
+> constraint pattern STAND.
+
 **spec deviation:** abstract2.md §2.1's `[(Address,RegevPk);3]` is fixed at 3, so N-member generalization is
 a deviation from abstract2. detail2.md §C-2 / §G constants / §H-1 are updated with N-member notes (the authoritative delta is
 this D6).
@@ -508,6 +516,12 @@ to `member_pubkeys_root` and `tx_tree_root`. `validity_circuit` **conditionally*
 `C == final.bp_sig_chain` and `initial == 0`. `bp_sig_chain` is bound into `ValidityPublicInputs`.
 
 ### Close (§F-3) — supersedes D4's "3/3 (→ N-of-N) SPHINCS+ signatures"
+
+> **SUPERSEDED by D13 (2026-07) for the close/cancel path:** the `ListCircuit` verification + the
+> in-circuit `C'` fold described below were replaced by ONE recursively verified level-`AGG_LEVELS`
+> binary-tree aggregated sign-zkp proof whose PI signer list IS the cosigner key vector. The
+> `ListCircuit` itself STANDS on the validity `bp_sig_chain` path (previous subsection).
+
 `close_circuit` removes per-slot SPHINCS+ verify; it recursively verifies a `ListCircuit` proof,
 rebuilds `C'` over ACTIVE member slots `(IMCH_digest, pk_g_i)` (select prev on padding), asserts
 `C' == C` + pubkey distinctness, and keeps `member_set_commitment` (IMCM keccak) over `pk_g_i` only.
@@ -565,9 +579,10 @@ from the "must co-sign" role.
 
 ### What changed (authoritative)
 - **`delegate_count: u8`** added next to `member_count` on `BalanceState` / `ChannelRecord` /
-  `ChannelRegRecord`. Regions (in the one fixed-16 array): members `0..member_count`, delegates
-  `member_count..member_count+delegate_count`, padding the rest. `active = member_count + delegate_count`,
-  `2 <= member_count`, `active <= 16`.
+  `ChannelRegRecord`. Regions (in the one fixed-MAX array — 16 slots at the time of D9, **1024 since
+  D12**): members `0..member_count`, delegates `member_count..member_count+delegate_count`, padding
+  the rest. `active = member_count + delegate_count`, `2 <= member_count` (`<= MAX_COSIGNERS = 16`
+  since D12), `active <= MAX_CHANNEL_MEMBERS`.
 - **Committed IMMEDIATELY AFTER `member_count`** (one u32 limb) in `BalanceState::h1` (IMBS) + close-circuit
   H1 recompute, `ChannelRecord::signing_digest` (IMCR, native-only), and the registration reg-chain keccak
   preimage (native + `channel_reg_step` circuit twin + Solidity `registerChannel`); `CHANNEL_REG_PREIMAGE_U32_LEN`
@@ -641,7 +656,169 @@ non-security cleanup (changing Manager bytecode again forces a fixture regen).
   close-intent on-chain step is otherwise blocked by the same member-set mismatch that `CloseLifecycleE2E.t.sol`
   currently skips. Tracked as the P5-B integration.
 
-## D11 — `SettledTransfer` nullifier re-keyed `block_number` → `nonce` (F-WD-2 settle-twice fix, 2026-07-04)
+---
+
+## D11 — A5 pk_g distinctness: indexed-Merkle insertion chain (replaces the O(N²) all-pairs loop; commit `ca1f8c6`, branch `feat/channel-api-impl`, 2026-07)
+
+**Spec text superseded:** D6/D8's close-circuit distinctness ("asserts … pubkey distinctness") was an
+O(MAX²) all-pairs `pk_g` equality loop over the member slots in the close and cancel-close circuits.
+
+**What changed:** the close/cancel circuits now insert each ACTIVE slot's `pk_g` (as a U256 key, in
+slot order, gated by the SAME `active_bits` used by `member_set_commitment`) into a fresh in-circuit
+`IndexedMerkleTree` via the existing audited `IndexedInsertionProofTarget::conditional_get_new_root`
+gadget — an O(MAX·height) insertion chain. A duplicate key has no valid low-leaf
+(`prev_low.key < key < next_key` is unsatisfiable), so a duplicate identity is UNPROVABLE. New
+derived constant `MEMBER_DISTINCTNESS_TREE_HEIGHT = ceil(log2(MAX + 1))` (MAX-agnostic; = 5 for
+`MAX_COSIGNERS = 16` after D12 — one sentinel leaf + up to 16 inserts ⇒ 32 leaf slots).
+`member_set_commitment`, the (then-current) C' fold, slot order, and the PI layouts are unchanged.
+
+**Why:** linearize the distinctness cost so a member-cap bump does not blow up circuit size — the
+enabling step for the D12 capacity split.
+
+**Security argument:** proves the SAME A5 property (no two ACTIVE slots share a `pk_g`, so one key
+cannot satisfy two of the N-of-N close signatures). The tree height only bounds CAPACITY, never which
+keys are checked; under-sizing panics at witness generation (fail-closed), over-sizing is sound.
+Independent adversarial review verdict: **SOUND**. Tests: per-circuit duplicate-identity rejection +
+a gadget-level in-circuit lock that a forged non-membership proof for a present key is unprovable.
+
+**Status:** implemented (all close/cancel suites green). The close/cancel circuit VKs changed —
+**VK re-pin + fixture regeneration PENDING** (batched with D12–D14 before deploy).
+
+---
+
+## D12 — `MAX_COSIGNERS = 16` split from `MAX_CHANNEL_MEMBERS = 1024` (commits `3b5a9f1`, `2c2c5fb`)
+
+**Spec text superseded:** D6's single `MAX_CHANNEL_MEMBERS = 16` conflated the N-of-N close SIGNERS
+(cosigners) with the balance-slot capacity (cosigners + delegates), and sized the close/cancel
+SIGNATURE work (member pk slots, active-bits unary decomposition, `member_set_commitment` keccak,
+signature fold, A5 distinctness) to the full slot capacity.
+
+**What changed (authoritative for detail2 §C-2/§G-1/§F-3/§L):**
+- New `MAX_COSIGNERS = 16`: `member_count` is capped `2..=MAX_COSIGNERS` — natively
+  (`BalanceState::validate` / `ChannelRecord::validate` / `ChannelRegRecord::validate`), by witness
+  guards, and IN-CIRCUIT via the 16-bit unary active-bits sum. All close/cancel signature-side
+  arrays/circuits are sized `MAX_COSIGNERS`.
+- `MAX_CHANNEL_MEMBERS` raised to **1024** (delegate capacity): the balance/H1 arrays
+  (`enc_balances`, `regev_pk_digests`, `pending_adds`, `ChannelRecord.member_pk_gs`) stay `[_; 1024]`
+  (serde-big-array on `[T; MAX > 32]` fields; `std::array::from_fn` at array-Default sites) —
+  delegates hold balances but never sign. `MEMBER_TREE_HEIGHT = 10` (invariant
+  `1 << height == MAX_CHANNEL_MEMBERS`).
+- `member_set_commitment` stays the FIXED 16-slot keccak, now sized `MAX_COSIGNERS`
+  (`keccak([IMCM, member_count, h_0..h_15])`, 2 + 16×8 = 130 u32 words) — byte-identical to the
+  deployed Solidity mirror (whose internal constant is 16); the Rust↔Solidity shared-vector
+  cross-check (`close_member_set_commitment_matches_solidity_shared_vector`) passes unchanged.
+- Follow-up fix (`2c2c5fb`): `BalanceState::validate` still capped `member_count` at
+  `MAX_CHANNEL_MEMBERS` (unreachable with a `u8` field) — aligned to `MAX_COSIGNERS`; three boundary
+  tests that silently degenerated at MAX = 1024 (u8 truncation, empty loop range, unreachable
+  delegate-overflow assertion) were repaired.
+
+**Why (measured, 2-member close):** degree bits 19 → 18, peak RSS ~14.5 GB → ~9.6 GB, proof
+43 s → 21 s. Sizing the signature work to 16 rather than 1024 is what keeps close/cancel tractable;
+the H1/balance work legitimately stays 1024 (delegates have balances) and is addressed by D14.
+
+**Security argument:** the cosigner cap is enforced in-circuit (unary sum), not just natively;
+`member_count + delegate_count <= MAX_CHANNEL_MEMBERS` still bounds the total active balance
+participants; the D11 distinctness chain and the IMCM member-set binding are unchanged in mechanism.
+All 17 close/cancel tests pass (honest proves, A5 duplicate rejection, Phase-1 in-circuit locks).
+
+**Status:** Rust native + circuits implemented. **PENDING (Phase 2c — Solidity 1024 alignment):**
+the on-chain registration reg-hash-chain preimage and the H1 slot mirrors still assume 16 balance
+slots (the Rust `CHANNEL_REG_PREIMAGE_U32_LEN` now scales with `MAX_CHANNEL_MEMBERS = 1024`);
+contract-side alignment is a coordinated follow-up before on-chain settlement works at 1024.
+Fixture/VK regeneration PENDING (batched).
+
+---
+
+## D13 — binary-tree aggregated sign-zkp; close/cancel consume it (commits `683b4bc`, `76a4dd0`)
+
+**Spec text superseded:** D8's close/cancel consumption — recursive verification of ONE linear
+`ListCircuit` proof plus the in-circuit `C'` hash-chain fold over active slots. The `ListCircuit`
+itself STANDS on the validity `bp_sig_chain` path (D8); only close/cancel moved.
+
+**What changed (authoritative for detail2 §A-3/§D D-4/§F-3):**
+- New `src/poseidon_sig/aggregate.rs` (owner-specified design): cosigner sign-zkps
+  (`SingleSigCircuit` proofs) are aggregated PAIRWISE per level — combining two aggregated proofs
+  yields one whose PI signer list is the CONCATENATION of the children's lists (2 → 4 → 8 → 16), all
+  over one common message. One circuit per level (`AggLevelCircuit` × `AGG_LEVELS = 4`; plonky2 PIs
+  are fixed-length), PI layout `[message(8), signer_count(1), pk_0..pk_{2^k−1} (8 each)]`. Each level
+  bakes the child VK as a CONSTANT (A7). Absent right children: `is_right_present` boolean +
+  conditional verify + dummy proof; every right-side read is gated. `aggregate_to_level` lifts any
+  aggregation to the fixed level 4 the consumers need. All aggregation circuits are degree 13.
+- Close/cancel: the `ListCircuit` verification + `C'` fold are REPLACED by ONE recursively verified
+  level-`AGG_LEVELS` (16-slot) proof at constant VK (`const`-asserted
+  `MAX_COSIGNERS == MAX_AGG_SIGNERS`). The cosigner key vector is WIRED from the verified proof's PI
+  signer list (zero witnessed freedom) and feeds the unchanged `member_set_commitment` keccak and the
+  D11 A5 distinctness chain.
+- Consumer obligations from the aggregation adversarial review, enforced in-circuit at the consumer:
+  `message == recomputed IMCH state digest`; `signer_count == member_count`; distinctness via the A5
+  insertion chain (the aggregator deliberately ACCEPTS duplicate leaves — a duplicate-signer tree is
+  rejected HERE); member-set binding via the registered-commitment keccak; pinned top-level VK. Close
+  PI layout (95 limbs) unchanged.
+
+**Why (measured, 2-member close):** degree 18, proof 18.7 s (from 21 s); constant-VK consumption
+independent of N, and the aggregation tree is parallelizable/incremental off-circuit.
+
+**Security argument:** independent adversarial review verdict **SOUND-UNDER-CONDITION**; its one
+finding — left-packing not enforced, allowing a zero pk in a NON-suffix slot via two half-full
+nodes — is FIXED in-circuit: a present right child forces the left child FULL
+(`count_l == 2^{level−1}`), so by induction padding is provably a suffix; regression test
+`non_left_packed_aggregation_is_unprovable`. `signer_count` counts exactly the verified leaf
+signatures; a zero pk cannot be a real signer (it would need a Poseidon preimage of `pk = 0`). The
+review's consumer conditions are all discharged in the close/cancel circuits (list above).
+
+**Status:** implemented; aggregation suite + all close/cancel suites green. VK re-pin + fixture
+regeneration PENDING (batched with D11/D12/D14).
+
+---
+
+## D14 — H1 = Poseidon balance-slot tree root (replaces the flat keccak over all slots; commit `a43e16f`)
+
+**Spec text superseded:** detail2 §C-2's `h1()` as amended by D3/D6/D9 — a flat keccak over the
+header AND all `MAX_CHANNEL_MEMBERS` slot components (`enc_balances[*].digest()`, `regev_pk_digests`,
+`pending_adds`), recomputed in-circuit by all four settlement circuits.
+
+**What changed (authoritative for detail2 §C-2/§F-3/§G-2; owner directive "the tree lives in
+storage, state carries only the root"):**
+- Per-slot leaf: `balance_slot_leaf_hash = Poseidon([BALANCE_SLOT_LEAF_DOMAIN "IMSL" 0x494d534c,
+  regev_pk_digest (8 u32 limbs), enc_balance_digest (8), pending_adds (1)])` — 18 elements, fixed
+  width; the leaf INDEX is the Merkle position, so slot order is bound structurally.
+- Slot tree: height-`BALANCE_SLOT_TREE_HEIGHT = 10` (const-asserted `== log2(MAX_CHANNEL_MEMBERS)`)
+  `IncrementalMerkleTree<PoseidonHashOut>`, ALL 1024 leaves populated (padding slots hash their
+  canonical padding values — the root is a function of the FULL slot array, exactly like the retired
+  flat keccak).
+- `H1 = Bytes32::from(Poseidon([IMBS, channel_id, member_count, delegate_count, slot_tree_root
+  (4 Goldilocks elements), settled_tx_chain (8), settled_tx_accumulator_root (8),
+  split_u64(state_version) (hi, lo)]))` — a FIXED 26-element header, O(1) in-circuit regardless of
+  slot capacity. NOTE: H1's outer hash moved keccak → Poseidon ("IMBS" is now a Poseidon domain);
+  `balance_state_hash` (IMBH) and the L1-boundary keccaks are unchanged.
+- Consumers: close/cancel delete the 1024-slot target vectors + giant keccak; the `slot_tree_root`
+  is witnessed (bound by the cosigner signatures over H1) and the O(1) header is recomputed
+  in-circuit (`h1_gadget::recompute_h1`). withdrawal-claim/post-close-claim replace the 1024-wide
+  one-hot slot select with a height-10 Merkle INCLUSION proof of the claimed slot against
+  `slot_tree_root` (`split_le(index, height)` bounds the opened index `< MAX_CHANNEL_MEMBERS`).
+- Semantics unchanged: the same values are bound (per-slot triples via the root, scalars via the
+  header) and H1 keeps the same signing/anchoring role everywhere (IMCH/IMCL/IMCI,
+  `state_commitment_root`, L1 `finalizedBalanceStateH1`) — only the commitment STRUCTURE became a
+  tree root.
+
+**Why (measured, 2-member close):** the flat keccak (~17×1024 u32 words) was the sole remaining
+degree-18 driver after D12/D13. Degree bits 18 → 17, proof 18.7 s → 8.7 s, peak RSS ~9.1 GB.
+Cumulative D11–D14 (2-member close): degree 19 → 17, proof 43 s → 8.7 s.
+
+**Security argument:** full threat model in `tasks/h1-poseidon-root-threat-model.md` (leaf/header
+injectivity — fixed widths, leading domain constants, canonical limb encodings; slot-index binding
+via Merkle position; cross-channel/version reuse; every H1 consumer enumerated). Native ↔ circuit
+randomized equivalence test for the h1 gadget; all settlement suites green (close/cancel degree 17,
+withdrawal-claim 7, post-close 7).
+
+**Status:** implemented. Solidity only pins/compares H1 VALUES (no on-chain slot recompute), so no
+immediate contract change from D14 itself — but fixture/VK regeneration is PENDING (regenerated
+together with the D11–D13 settlement artifacts), and the D12 Solidity 1024-slot alignment
+(registration reg-chain / H1 slot mirrors) remains a separate PENDING follow-up.
+
+---
+
+## D15 — `SettledTransfer` nullifier re-keyed `block_number` → `nonce` (F-WD-2 settle-twice fix, 2026-07-04)
 
 **Change (authoritative):** the `SettledTransfer` nullifier preimage's last field was changed from the settlement
 `block_number` to the sender tx `nonce` (`u32`). The nullifier is now
@@ -669,3 +846,5 @@ its used-sets, so re-keying the preimage needed no contract change.
 **Verification:** threat-modeled + attacker-red-teamed + adversarially reviewed (separate reviewer), Lean-closed
 in the doc/audit/zkp project (`SingleWithdrawalCircuit.lean`, `wNul`), and verified by proof-generation E2E (`e2e` +
 `mle_onchain_e2e`) plus forge 174/175. See commit `f0cad35` and `doc/audit/audit02-07-2026.md` §5.
+
+*(Numbering note: this landed on `main` as “D11” concurrently with D11–D14 on `feat/channel-api-impl`; renumbered to D15 at merge — the fix itself is unchanged.)*

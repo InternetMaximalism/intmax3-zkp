@@ -780,8 +780,12 @@ contract ChannelSettlementVerifier is IChannelSettlementVerifier {
     ///      (strict eq, <2**32, no mask) to the expected vector; (2) `MleVerifier.verify` re-checks
     ///      the proof against the withdrawal-claim VK (circuitDigest/preprocessedRoot/gatesDigest →
     ///      cross-circuit replay blocked). Reverts until the VK is set.
-    ///      RESIDUAL: `amount` is bound as a PI limb but NOT to the ciphertext plaintext (decryption
-    ///      deferred); over-claim is bounded only by the manager's fund caps.
+    ///      `amount` is bound as a PI limb AND, in-circuit, to the slot ciphertext plaintext: the
+    ///      withdrawal claim circuit's `decryption_core(expose_amount = true)` recomputes
+    ///      `v = c2 - c1*s` under the leaf-bound Regev key and `connect`s the decoded 64-bit amount to
+    ///      the `amount` PI (withdrawal_claim_circuit.rs), so a member can only claim exactly what
+    ///      their signed slot ciphertext decrypts to — over-claim is prevented at the proof level, not
+    ///      merely bounded by the manager's fund caps.
     function verifyWithdrawalClaim(
         bytes4 channelId,
         bytes32 closeIntentDigest,

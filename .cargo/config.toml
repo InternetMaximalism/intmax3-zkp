@@ -1,3 +1,11 @@
+# MAX_CHANNEL_MEMBERS=1024 makes the pad-to-MAX value types large ([RegevCiphertext; 1024] alone is
+# ~1MB; a BalanceState ~1.3MB), so by-value moves/clones overflow the 2MB default stack of Rust TEST
+# threads (main threads get 8MB). Raise the spawned-thread stack for cargo-launched processes
+# (tests, bins). wasm has its own 16MB stack via link-args below. A deeper fix (Box the big arrays)
+# is tracked in tasks/reg-chain-1024-restructure.md.
+[env]
+RUST_MIN_STACK = "33554432"
+
 [target.wasm32-unknown-unknown]
 rustflags = [
     "-C", "target-feature=+atomics,+bulk-memory",  # Required for multi-threading (SharedArrayBuffer)

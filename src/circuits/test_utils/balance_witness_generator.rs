@@ -749,7 +749,7 @@ mod tests {
                 Address::rand(&mut rng),
                 recipient,
                 0,
-                U256::from(10),
+                U256::from(10u64),
                 Bytes32::rand(&mut rng),
             )
             .unwrap();
@@ -806,7 +806,7 @@ mod tests {
         let inter_channel_tx_leaf = Bytes32::rand(&mut rng);
         let transfer = Transfer {
             token_index: 0,
-            amount: U256::from(3),
+            amount: U256::from(3u64),
             recipient: calculate_recipient_from_user_id(user_id2, transfer_salt),
             aux_data: inter_channel_tx_leaf,
         };
@@ -936,7 +936,7 @@ mod tests {
                 Address::rand(&mut rng),
                 recipient,
                 0,
-                U256::from(10),
+                U256::from(10u64),
                 Bytes32::rand(&mut rng),
             )
             .unwrap();
@@ -971,7 +971,7 @@ mod tests {
         let transfer_salt = Salt::rand(&mut rng);
         let transfer = Transfer {
             token_index: 0,
-            amount: U256::from(3),
+            amount: U256::from(3u64),
             recipient: calculate_recipient_from_user_id(user_id2, transfer_salt),
             aux_data: Bytes32::default(),
         };

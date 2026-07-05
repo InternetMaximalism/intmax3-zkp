@@ -55,7 +55,7 @@ use crate::{
         },
         u63::{BlockNumber, BlockNumberTarget, U63, U63Target},
     },
-    constants::{CHANNEL_TREE_HEIGHT, MAX_CHANNEL_MEMBERS, MEMBER_TREE_HEIGHT},
+    constants::{CHANNEL_TREE_HEIGHT, MAX_COSIGNERS, MEMBER_TREE_HEIGHT},
     ethereum_types::{
         bytes32::{Bytes32, Bytes32Target},
         u32limb_trait::{U32LimbTargetTrait as _, U32LimbTrait as _},
@@ -90,14 +90,17 @@ pub enum ChannelRegStepError {
     ChannelRegChainPublicInputsError(#[from] ChannelRegChainPublicInputsError),
 }
 
-/// Build the native `MemberTree` root for `record`'s active members (slots
-/// `0..member_count`), with the remaining slots empty. Mirrors the in-circuit root computation.
+/// Build the native REGISTERED `MemberTree` root for `record`'s active slots, with the remaining
+/// slots empty. Mirrors the in-circuit root computation.
+///
+/// SECURITY (Option B): this is the COSIGNER-scoped registered root (`MAX_COSIGNERS` slots,
+/// height `MEMBER_TREE_HEIGHT`). Registration-producing paths emit `delegate_count = 0`; legacy
+/// 16-slot records may carry delegates within the same 16 slots (`validate` bounds
+/// `member_count + delegate_count <= MAX_COSIGNERS`). This root is NOT the wallet's live
+/// membership root (`wallet_core::member_pubkeys_root`, height `WALLET_MEMBER_TREE_HEIGHT`),
+/// which evolves with delegate joins and is never compared to this one.
 pub fn member_pubkeys_root_for(record: &ChannelRegRecord) -> PoseidonHashOut {
     let mut tree = MemberTree::init();
-    // Delegate account: the member tree covers ALL active participants — members
-    // (`0..member_count`) AND delegates (`member_count..member_count+delegate_count`). Delegates
-    // carry a real `MemberLeaf` identity so they can send and withdraw. Phase 1 `delegate_count =
-    // 0` makes this identical to the legacy `0..member_count` loop.
     let active = record.member_count as usize + record.delegate_count as usize;
     for i in 0..active {
         let leaf = MemberLeaf {
@@ -238,12 +241,12 @@ pub struct ChannelRegStepTarget<const D: usize> {
     pub delegate_count: Target,
     /// The 16 members' Poseidon identity components, witnessed ONCE and reused for both the keccak
     /// preimage and the Poseidon member-tree leaves (R2 cross-binding).
-    pub member_pk_ges: [PoseidonHashOutTarget; MAX_CHANNEL_MEMBERS],
+    pub member_pk_ges: [PoseidonHashOutTarget; MAX_COSIGNERS],
     /// The 16 members' BabyBear hash-sig public keys (`pk_b`), witnessed once and reused for both
     /// the keccak preimage and the 3-field Poseidon member-tree leaves (R2 cross-binding, P3).
-    pub member_pk_bs: [PoseidonHashOutTarget; MAX_CHANNEL_MEMBERS],
-    pub member_regev_pk_digests: [PoseidonHashOutTarget; MAX_CHANNEL_MEMBERS],
-    pub member_recipients: [crate::ethereum_types::address::AddressTarget; MAX_CHANNEL_MEMBERS],
+    pub member_pk_bs: [PoseidonHashOutTarget; MAX_COSIGNERS],
+    pub member_regev_pk_digests: [PoseidonHashOutTarget; MAX_COSIGNERS],
+    pub member_recipients: [crate::ethereum_types::address::AddressTarget; MAX_COSIGNERS],
     pub channel_merkle_proof: ChannelMerkleProofTarget,
     pub block_number: BlockNumberTarget,
 
@@ -279,16 +282,16 @@ impl<const D: usize> ChannelRegStepTarget<D> {
         builder.range_check(delegate_count, 32);
 
         // -- Member identity components (witnessed once; R2 cross-binding) --
-        let member_pk_ges: [PoseidonHashOutTarget; MAX_CHANNEL_MEMBERS] =
+        let member_pk_ges: [PoseidonHashOutTarget; MAX_COSIGNERS] =
             std::array::from_fn(|_| PoseidonHashOutTarget::new(builder));
-        let member_pk_bs: [PoseidonHashOutTarget; MAX_CHANNEL_MEMBERS] =
+        let member_pk_bs: [PoseidonHashOutTarget; MAX_COSIGNERS] =
             std::array::from_fn(|_| PoseidonHashOutTarget::new(builder));
-        let member_regev_pk_digests: [PoseidonHashOutTarget; MAX_CHANNEL_MEMBERS] =
+        let member_regev_pk_digests: [PoseidonHashOutTarget; MAX_COSIGNERS] =
             std::array::from_fn(|_| PoseidonHashOutTarget::new(builder));
-        let member_recipients: [crate::ethereum_types::address::AddressTarget;
-            MAX_CHANNEL_MEMBERS] = std::array::from_fn(|_| {
-            crate::ethereum_types::address::AddressTarget::new(builder, true)
-        });
+        let member_recipients: [crate::ethereum_types::address::AddressTarget; MAX_COSIGNERS] =
+            std::array::from_fn(|_| {
+                crate::ethereum_types::address::AddressTarget::new(builder, true)
+            });
 
         let channel_merkle_proof = ChannelMerkleProofTarget::new(builder, CHANNEL_TREE_HEIGHT);
 
@@ -358,7 +361,7 @@ impl<const D: usize> ChannelRegStepTarget<D> {
         // ── member_count ∈ [2, 16] range check ──
         // member_count - 2 in [0, 14] and 16 - member_count in [0, 14].
         let two = builder.constant(F::from_canonical_u64(2));
-        let max = builder.constant(F::from_canonical_u64(MAX_CHANNEL_MEMBERS as u64));
+        let max = builder.constant(F::from_canonical_u64(MAX_COSIGNERS as u64));
         let mc_minus_two = builder.sub(member_count, two);
         builder.range_check(mc_minus_two, 4); // [0, 15] ⊇ [0, 14]
         let max_minus_mc = builder.sub(max, member_count);
@@ -371,7 +374,7 @@ impl<const D: usize> ChannelRegStepTarget<D> {
         builder.range_check(slot_diff, 4);
 
         // ── delegate account: active = member_count + delegate_count, with active ∈ [2, 16] ──
-        // SECURITY: `active <= MAX_CHANNEL_MEMBERS` (no over-allocation past the fixed 16 slots);
+        // SECURITY: `active <= MAX_COSIGNERS` (no over-allocation past the fixed 16 slots);
         // `delegate_count >= 0` so `active >= member_count >= 2` holds automatically. The
         // thermometer mask below uses `active` as the threshold, so delegate slots
         // (`member_count..active`) are treated as ACTIVE (non-forced-zero) exactly like members and
@@ -384,16 +387,16 @@ impl<const D: usize> ChannelRegStepTarget<D> {
         // ── is_active thermometer mask: is_active[i] = (i < active_count) ──
         // `active_count` is a single threshold, so the mask is monotonic non-increasing by
         // construction; `lt_const_threshold` pins each bit uniquely against the range-checked
-        // `active_count` (range [2, MAX_CHANNEL_MEMBERS]).
-        let is_active: Vec<BoolTarget> = (0..MAX_CHANNEL_MEMBERS)
+        // `active_count` (range [2, MAX_COSIGNERS]).
+        let is_active: Vec<BoolTarget> = (0..MAX_COSIGNERS)
             .map(|i| lt_const_threshold(builder, i, active_count))
             .collect();
 
         // ── Build MemberLeaf targets + member_pubkeys_root (Poseidon) ──
         // Padding slots forced empty: when !is_active, sphincs==0 && regev==0.
         let zero_hash = PoseidonHashOutTarget::constant(builder, PoseidonHashOut::default());
-        let mut leaf_hashes: Vec<PoseidonHashOutTarget> = Vec::with_capacity(MAX_CHANNEL_MEMBERS);
-        for i in 0..MAX_CHANNEL_MEMBERS {
+        let mut leaf_hashes: Vec<PoseidonHashOutTarget> = Vec::with_capacity(MAX_COSIGNERS);
+        for i in 0..MAX_COSIGNERS {
             let not_active = builder.not(is_active[i]);
             // Force pk_g == 0, pk_b == 0 and regev == 0 on inactive slots (empty-leaf padding).
             member_pk_ges[i].conditional_assert_eq(builder, zero_hash, not_active);
@@ -410,7 +413,7 @@ impl<const D: usize> ChannelRegStepTarget<D> {
         let member_pubkeys_root = compute_member_tree_root::<F, C, D>(builder, &leaf_hashes);
 
         // ── keccak preimage: build 32-byte forms from the SAME Poseidon targets (R2) ──
-        let members_reg_entries: [MemberRegEntryTarget; MAX_CHANNEL_MEMBERS] =
+        let members_reg_entries: [MemberRegEntryTarget; MAX_COSIGNERS] =
             std::array::from_fn(|i| MemberRegEntryTarget {
                 pk_g: Bytes32Target::from_hash_out(builder, member_pk_ges[i]),
                 pk_b: Bytes32Target::from_hash_out(builder, member_pk_bs[i]),
@@ -536,7 +539,7 @@ impl<const D: usize> ChannelRegStepTarget<D> {
             F::from_canonical_u32(value.record.delegate_count),
         );
         // Members: split each 32-byte digest to its reduced PoseidonHashOut (the witnessed value).
-        for i in 0..MAX_CHANNEL_MEMBERS {
+        for i in 0..MAX_COSIGNERS {
             let m = &value.record.members[i];
             self.member_pk_ges[i].set_witness(witness, m.pk_g.reduce_to_hash_out());
             self.member_pk_bs[i].set_witness(witness, m.pk_b.reduce_to_hash_out());
@@ -553,20 +556,21 @@ impl<const D: usize> ChannelRegStepTarget<D> {
 }
 
 /// `is_active = (i < member_count)` as a BoolTarget, for the small constant `i` and a
-/// range-checked `member_count` (in `[2, MAX_CHANNEL_MEMBERS]`).
+/// range-checked `member_count` (in `[2, MAX_COSIGNERS]`).
 ///
 /// DETERMINISTIC (no free witness): `member_count` takes exactly one value in
-/// `[2, MAX_CHANNEL_MEMBERS]`, so `is_active[i] = Σ_{t = i+1..=MAX} is_equal(member_count, t)`.
+/// `[2, MAX_COSIGNERS]`, so `is_active[i] = Σ_{t = i+1..=MAX} is_equal(member_count, t)`.
 /// Exactly one `is_equal` fires (when `member_count == t`), and it is in the sum iff `t > i`, i.e.
 /// iff `i < member_count`. The sum is therefore 0 or 1 and has standard generators (no unfilled
-/// witness). INTENTIONALLY SIMPLE: the constant range is tiny (<= 16), so unrolling is cheap.
+/// witness). INTENTIONALLY SIMPLE: the constant range is tiny (<= MAX_COSIGNERS = 16), so
+/// unrolling is cheap.
 fn lt_const_threshold<F: RichField + Extendable<D>, const D: usize>(
     builder: &mut CircuitBuilder<F, D>,
     i: usize,
     member_count: Target,
 ) -> BoolTarget {
     let mut sum = builder.zero();
-    for t in (i + 1)..=MAX_CHANNEL_MEMBERS {
+    for t in (i + 1)..=MAX_COSIGNERS {
         let t_const = builder.constant(F::from_canonical_u64(t as u64));
         let eq = builder.is_equal(member_count, t_const);
         sum = builder.add(sum, eq.target);
@@ -684,7 +688,8 @@ mod tests {
     type C = PoseidonGoldilocksConfig;
 
     fn make_record(channel_id: u32, member_count: u32) -> ChannelRegRecord {
-        let mut members: [MemberRegEntry; MAX_CHANNEL_MEMBERS] = Default::default();
+        let mut members: [MemberRegEntry; MAX_COSIGNERS] =
+            std::array::from_fn(|_| MemberRegEntry::default());
         for i in 0..(member_count as usize) {
             let s = (i as u32) + 1;
             members[i] = MemberRegEntry {

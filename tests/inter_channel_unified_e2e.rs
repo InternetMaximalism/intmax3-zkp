@@ -229,12 +229,28 @@ fn unified_inter_channel_transfer_e2e() {
     let a_record = build_record(A_ID, &a_members, 0, 0).expect("A record");
     let a_pks = pks_array(&a_keys);
     let ck = ChannelMemberKeys::from_member_keys(&a_keys);
-    // The channel record's member set IS the registered member set (B-2 stitch).
-    assert_eq!(
-        a_record.member_pubkeys_root,
-        ck.member_tree.get_root().into(),
-        "record root == registration root"
-    );
+    // The channel record's member SET is the registered member set (B-2 stitch). Under Option B
+    // (tasks/reg-chain-1024-threat-model.md) the record's root is the WALLET membership tree
+    // (height WALLET_MEMBER_TREE_HEIGHT, evolves with delegate joins) while `ck.member_tree` is the
+    // REGISTERED cosigner tree (height MEMBER_TREE_HEIGHT, written once at registration) — the two
+    // ROOTS intentionally differ (tree heights), so assert leaf-set equality by rebuilding the
+    // wallet-height tree over the SAME registered leaves.
+    {
+        use intmax3_zkp::common::trees::key_tree::{MemberLeaf, MemberTree};
+        let mut wallet_tree = MemberTree::init_wallet_membership();
+        for k in &a_keys {
+            wallet_tree.push(MemberLeaf {
+                pk_g: k.signing_key.public_key_hash_out(),
+                pk_b: k.baby_key.public_key().to_bytes32().reduce_to_hash_out(),
+                regev_pk_digest: k.regev_pk.poseidon_digest(),
+            });
+        }
+        assert_eq!(
+            a_record.member_pubkeys_root,
+            Bytes32::from(wallet_tree.get_root()),
+            "record (wallet) root == wallet tree over the registered member leaves"
+        );
+    }
 
     // ---- block 1: registration; block 2: REAL on-chain deposit funding channel A ----
     {
@@ -338,6 +354,7 @@ fn unified_inter_channel_transfer_e2e() {
         &a_record,
         &a_cts,
         &a_regev_pk_digests,
+        &test_recipients_b1b(a_cts.len()),
         a_fund,
         a_chain,
         Bytes32::default(),
@@ -570,4 +587,18 @@ fn unified_inter_channel_transfer_e2e() {
         h1_prime.to_hex(),
         tx_tree_root.to_hex()
     );
+}
+
+/// B-1b: deterministic NONZERO per-slot L1 exit addresses for test genesis states
+/// (`BalanceState::validate()` rejects zero active recipients).
+fn test_recipients_b1b(n: usize) -> Vec<intmax3_zkp::ethereum_types::address::Address> {
+    use intmax3_zkp::ethereum_types::u32limb_trait::U32LimbTrait as _;
+    (0..n)
+        .map(|i| {
+            intmax3_zkp::ethereum_types::address::Address::from_u32_slice(
+                &[0x7E57_0000u32.wrapping_add(i as u32); 5],
+            )
+            .unwrap()
+        })
+        .collect()
 }

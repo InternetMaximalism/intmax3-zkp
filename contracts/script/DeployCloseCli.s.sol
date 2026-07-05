@@ -3,6 +3,7 @@ pragma solidity ^0.8.24;
 
 import {Script, console2} from "forge-std/Script.sol";
 import {IntmaxRollup} from "../src/IntmaxRollup.sol";
+import {BlobKZGVerifierExt} from "../src/BlobKZGVerifier.sol";
 import {ChannelSettlementManager, IChannelSettlementVerifier, IChannelRegistry} from "../src/ChannelSettlementManager.sol";
 import {ChannelSettlementVerifier} from "../src/ChannelSettlementVerifier.sol";
 import {MleVerifier} from "@mle/MleVerifier.sol";
@@ -47,6 +48,8 @@ contract DeployCloseCli is Script {
             fraudTreasury, vvk, vdd.whirParams, vdd.protocolId, vdd.sessionId,
             vdd.kIs, vdd.subgroupGenPowers, verifier, genesis, false
         );
+        // Pin the KZG blob-binding satellite (EIP-170 relief; fraudProof binding is fail-closed until set).
+        rollup.setKzgVerifier(new BlobKZGVerifierExt());
 
         // 2. Withdrawal VK (deployer == EOA == msg.sender).
         {

@@ -53,9 +53,14 @@ fn wallet_core_in_channel_send_receive() {
     let (bal0, bal1) = (50u64, 30u64);
     let (ct0, w0) = encrypt_amount(&mut rng, &m0.regev_pk, bal0).expect("enc0");
     let (ct1, _w1) = encrypt_amount(&mut rng, &m1.regev_pk, bal1).expect("enc1");
-    let mut genesis =
-        assemble_genesis_state(&record, &[ct0, ct1], &digests(&[&m0, &m1]), bal0 + bal1)
-            .expect("genesis");
+    let mut genesis = assemble_genesis_state(
+        &record,
+        &[ct0, ct1],
+        &digests(&[&m0, &m1]),
+        &test_recipients_b1b(2),
+        bal0 + bal1,
+    )
+    .expect("genesis");
 
     // Both members co-sign the genesis.
     let g0 = sign_state(&m0, 0, &genesis).expect("sign g0");
@@ -152,9 +157,14 @@ fn p4_1_attacker_pk_b_swap_is_rejected() {
     let (bal0, bal1) = (40u64, 20u64);
     let (ct0, w0) = encrypt_amount(&mut rng, &m0.regev_pk, bal0).expect("enc0");
     let (ct1, _w1) = encrypt_amount(&mut rng, &m1.regev_pk, bal1).expect("enc1");
-    let mut genesis =
-        assemble_genesis_state(&record, &[ct0, ct1], &digests(&[&m0, &m1]), bal0 + bal1)
-            .expect("genesis");
+    let mut genesis = assemble_genesis_state(
+        &record,
+        &[ct0, ct1],
+        &digests(&[&m0, &m1]),
+        &test_recipients_b1b(2),
+        bal0 + bal1,
+    )
+    .expect("genesis");
     let g0 = sign_state(&m0, 0, &genesis).expect("sign g0");
     add_signature(&mut genesis, g0);
     let g1 = sign_state(&m1, 1, &genesis).expect("sign g1");
@@ -254,9 +264,14 @@ fn p4_1_foreign_self_consistent_record_is_rejected() {
     let (bal0, bal1) = (40u64, 20u64);
     let (ct0, w0) = encrypt_amount(&mut rng, &m0.regev_pk, bal0).expect("enc0");
     let (ct1, _w1) = encrypt_amount(&mut rng, &m1.regev_pk, bal1).expect("enc1");
-    let mut genesis =
-        assemble_genesis_state(&record, &[ct0, ct1], &digests(&[&m0, &m1]), bal0 + bal1)
-            .expect("genesis");
+    let mut genesis = assemble_genesis_state(
+        &record,
+        &[ct0, ct1],
+        &digests(&[&m0, &m1]),
+        &test_recipients_b1b(2),
+        bal0 + bal1,
+    )
+    .expect("genesis");
     let g0 = sign_state(&m0, 0, &genesis).expect("g0");
     add_signature(&mut genesis, g0);
     let g1 = sign_state(&m1, 1, &genesis).expect("g1");
@@ -310,4 +325,18 @@ fn p4_1_foreign_self_consistent_record_is_rejected() {
         msg.contains("registered (trusted) record"),
         "rejection must come from the trusted-record binding, got: {msg}"
     );
+}
+
+/// B-1b: deterministic NONZERO per-slot L1 exit addresses for test genesis states
+/// (`BalanceState::validate()` rejects zero active recipients).
+fn test_recipients_b1b(n: usize) -> Vec<intmax3_zkp::ethereum_types::address::Address> {
+    use intmax3_zkp::ethereum_types::u32limb_trait::U32LimbTrait as _;
+    (0..n)
+        .map(|i| {
+            intmax3_zkp::ethereum_types::address::Address::from_u32_slice(
+                &[0x7E57_0000u32.wrapping_add(i as u32); 5],
+            )
+            .unwrap()
+        })
+        .collect()
 }

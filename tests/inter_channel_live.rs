@@ -109,8 +109,14 @@ fn build_channel(channel_id: u32, n: usize, balances: &[u64], rng: &mut StdRng) 
         .iter()
         .map(|k| Bytes32::from(k.regev_pk.poseidon_digest()))
         .collect();
-    let mut genesis =
-        assemble_genesis_state(&record, &cts, &regev_pk_digests, fund).expect("genesis");
+    let mut genesis = assemble_genesis_state(
+        &record,
+        &cts,
+        &regev_pk_digests,
+        &test_recipients_b1b(cts.len()),
+        fund,
+    )
+    .expect("genesis");
     for (i, k) in keys.iter().enumerate() {
         let s = sign_state(k, i as u8, &genesis).expect("sign genesis");
         add_signature(&mut genesis, s);
@@ -551,4 +557,18 @@ fn inter_channel_live_negative_error_provenance() {
     eprintln!(
         "[inter_channel_live] negative provenance OK: each tamper rejected by its own invariant."
     );
+}
+
+/// B-1b: deterministic NONZERO per-slot L1 exit addresses for test genesis states
+/// (`BalanceState::validate()` rejects zero active recipients).
+fn test_recipients_b1b(n: usize) -> Vec<intmax3_zkp::ethereum_types::address::Address> {
+    use intmax3_zkp::ethereum_types::u32limb_trait::U32LimbTrait as _;
+    (0..n)
+        .map(|i| {
+            intmax3_zkp::ethereum_types::address::Address::from_u32_slice(
+                &[0x7E57_0000u32.wrapping_add(i as u32); 5],
+            )
+            .unwrap()
+        })
+        .collect()
 }
