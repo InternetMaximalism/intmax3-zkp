@@ -186,10 +186,13 @@ required-features = ["cancel-close-fixture-bin"]
 [[bench]]
 name = "proof_bench"
 harness = false
+# benches live under doc/benches/ (not the default benches/), so the path is explicit.
+path = "doc/benches/proof_bench.rs"
 
 [[bench]]
 name = "degree_report"
 harness = false
+path = "doc/benches/degree_report.rs"
 
 # Pin all transitive polygon-plonky2 deps to the local submodule. The
 # submodule is updated to a post-PR#11 commit so it carries: (a) MLE PCS with

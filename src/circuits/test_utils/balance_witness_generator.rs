@@ -271,11 +271,12 @@ where
             data.transfer_merkle_proof.clone(),
         )?;
 
+        // SECURITY (F-WD-2): settlement-independent nonce, matching the circuit.
         let nullifier = SettledTransfer::new(
             transfer_witness.transfer.clone(),
             sender_balance_pis.channel_id,
             transfer_witness.transfer_index,
-            tx_block_number,
+            tx_settlement.tx.nonce,
         )
         .nullifier();
         let mut nullifier_tree = self.full_private_state.nullifier_tree.clone();

@@ -320,7 +320,6 @@ where
             .send_leaf
             .tx_tree_root
             .reduce_to_hash_out();
-        let tx_block_number = self.account_state.send_leaf.cur;
 
         // verify that the tx is included in the tx tree root
         match (&self.tx_v2, &self.tx_v2_merkle_proof) {
@@ -370,11 +369,15 @@ where
         let recipient = extract_address_from_recipient(transfer.recipient)
             .map_err(|e| SingleWithdawalWitnessError::InvalidRecipient(e.to_string()))?;
 
+        // SECURITY (F-WD-2): nullifier binds the sender `nonce` (settlement-
+        // independent), not tx_block_number. `self.tx.nonce` is bound to the
+        // deduction: the tx is verified in the sent-tx tree at index=nonce
+        // (self.sent_tx_merkle_proof.verify(&self.tx, self.tx.nonce, ..) above).
         let settled_transfer = SettledTransfer::new(
             transfer.clone(),
             channel_id,
             self.transfer_witness.transfer_index,
-            tx_block_number,
+            self.tx.nonce,
         );
 
         // construct the withdrawal
@@ -503,11 +506,16 @@ impl<const D: usize> SingleWithdawalTarget<D> {
         let recipient =
             extract_address_from_recipient_circuit(builder, &transfer_witness.transfer.recipient);
 
+        // SECURITY (F-WD-2): nullifier binds the sender `nonce` (settlement-
+        // independent), not send_leaf.cur. `tx.nonce` is bound to the deduction:
+        // range-checked (:433) and merkle-verified in the sent-tx tree at
+        // index=nonce (sent_tx_merkle_proof.verify(&tx, tx.nonce, ..) above);
+        // tx_v2.nonce == tx.nonce is asserted at :501.
         let settled_transfer = SettledTransferTarget {
             inner: transfer_witness.transfer.clone(),
             from: balance_pis.channel_id.clone(),
             transfer_index: transfer_witness.transfer_index,
-            block_number: account_state.send_leaf.cur.clone(),
+            nonce: tx.nonce,
         };
         let nullifier = settled_transfer.nullifier(builder);
 
