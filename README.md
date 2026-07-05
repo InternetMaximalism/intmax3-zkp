@@ -119,6 +119,7 @@ demo to Sepolia + AWS is documented in [`doc/docs/deploy-runbook.md`](doc/docs/d
 | Area | Path | What |
 |---|---|---|
 | **Specification** | [`doc/architecture-audit/detail2.md`](doc/architecture-audit/detail2.md) | the **authoritative implementation spec**; [`abstract2.md`](doc/architecture-audit/abstract2.md) is the minimal spec + the 5 security properties |
+| **Audit** | [`doc/audit/zkp/`](doc/audit/zkp/) ([SUMMARY](doc/audit/zkp/SUMMARY.md)) | an **implementation‑level** Lean formalization of the actual Plonky2 circuits **and** L1 contracts (each gate/`require` transcribed line‑by‑line to a machine‑checked soundness theorem) — 225 theorems, zero `sorry`/`axiom`, `lake build` green — plus an **additional adversarial audit by Opus 4.8** built on top of it (meta‑audit + remediation; [report](doc/audit/audit02-07-2026.md)) |
 | **Machine‑checked safety** | [`doc/architecture-audit/ChannelSafety.lean`](doc/architecture-audit/ChannelSafety.lean), [`ChannelSafety2.lean`](doc/architecture-audit/ChannelSafety2.lean) | Lean proofs of authorization / no‑double‑spend / solvency / exit safety for abstract(2).md, with crypto primitives modeled by their soundness contracts |
 | **Proof circuits** | `src/circuits/` | `balance/` (account state via IVC), `validity/` (block consensus + Poseidon signature), `withdraw/`, `channel/` (channel state‑update verifiers) |
 | **Lattice layer** | `src/regev/` | Regev/LWE keygen, encryption, and the channel‑tx / channel‑update STARKs (`channelTxZKP` / `channelUpdateZKP`) |
