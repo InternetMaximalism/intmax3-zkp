@@ -6,7 +6,7 @@
 ## Code grounding (what already exists — reuse, do not reinvent)
 
 - Base-layer withdrawal stack is COMPLETE + tested: `src/circuits/withdraw/single_withdrawal_circuit.rs` (Transfer→`Withdrawal`, recipient via `extract_address_from_recipient`, `ADDRESS_TAG=0x02`), → `withdrawal_step` → `withdrawal_chain_circuit` → `withdrawal_circuit`; on-chain `IntmaxRollup.withdrawNative(Withdrawal[], prover, MleProof)` (MLE verify + `extCommitment ∈ finalizedStateRoots` + `withdrawalNullifierUsed` + `totalEscrowed` underflow + `pendingWithdrawals` credit). `withdrawNative` is UNCHANGED.
-- Withdrawal nullifier = `SettledTransfer::nullifier()` (binds source `channel_id`+`block_number`+`transfer_index`) — verified canonical/position-bound (C14 test).
+- Withdrawal nullifier = `SettledTransfer::nullifier()` (binds source `channel_id`+`nonce`+`transfer_index`) — verified canonical/position-bound (C14 test).
 - `Tx` carries `destination_channel_id: ChannelId` (`src/common/tx.rs:229`); `ChannelId::new` already reserves `0` (=`dummy`).
 - `generate_c2c_fixture.rs` already proves a channel→L1 withdrawal (the c2c RECEIVER channel withdraws via `single_withdrawal`). Inter-channel receive credit: `src/circuits/balance/receive_transfer_circuit.rs`.
 

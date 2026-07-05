@@ -545,7 +545,16 @@ theorem exec_stamp_gt {L L'' : Ledger} {sops : List (Op × Nat)}
     NOTE (M1): this holds because the abstract ledger settles exactly one op
     per block. The real system batches many transfers per block (`TxV2Tree`);
     there, intra-block nullifier uniqueness must come from the
-    `transfer_index` / `from` fields, which are outside this model. -/
+    `transfer_index` / `from` fields, which are outside this model.
+
+    NOTE (F-WD-2, 2026-07-04): the real system re-keyed the nullifier preimage
+    from `block_number` to the sender tx `nonce`, making double-settle
+    prevention SETTLEMENT-INDEPENDENT — two settlements of the same deduction
+    now produce the IDENTICAL nullifier (caught by the on-chain used-set),
+    rather than distinct per-block nullifiers. So the real property no longer
+    relies on the unrealistic "at most one settlement per block" assumption
+    that M1 flagged; this model's block-number argument is now strictly weaker
+    than the deployed scheme. -/
 theorem no_double_settlement {L L'' : Ledger} {sops : List (Op × Nat)}
     (h : Exec L sops L'') :
     ∀ p ∈ sops, ∀ q ∈ sops, p.2 = q.2 → p = q := by

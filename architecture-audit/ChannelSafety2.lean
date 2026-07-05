@@ -714,9 +714,11 @@ The signed `H1` cannot contain the post-send `balanceProof` (it does not
 exist yet at signing time). Instead the state commits to `settledTxChain` —
 a hash chain over the identifiers of the base-layer settlements the state
 accounts for (`TxLeafHash` for transfers, deposit hashes for deposits). The
-`TxLeafHash` IS known at signing time, unlike the nullifier (whose preimage
-includes the not-yet-known `block_number` — which is why the nullifier
-cannot serve this role directly; it keeps its base-layer anti-replay duty).
+`TxLeafHash` IS known at signing time and is the canonical settle identity the
+chain commits to. The nullifier now binds `nonce` (F-WD-2) rather than
+`block_number`, so it too is computable at signing time; using `TxLeafHash` here
+is a design choice, and the nullifier keeps its (now settlement-independent)
+base-layer anti-replay duty.
 The balance circuit exposes the chain of settlements it incorporated as a
 public input (A2), and L1 accepts a submitted proof only if the two chains
 match (§3.5.2 step 2). -/

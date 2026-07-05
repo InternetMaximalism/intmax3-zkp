@@ -640,3 +640,32 @@ non-security cleanup (changing Manager bytecode again forces a fixture regen).
   channel's REAL registered members + deposit (so ONE on-chain registration serves both close and withdraw). The
   close-intent on-chain step is otherwise blocked by the same member-set mismatch that `CloseLifecycleE2E.t.sol`
   currently skips. Tracked as the P5-B integration.
+
+## D11 — `SettledTransfer` nullifier re-keyed `block_number` → `nonce` (F-WD-2 settle-twice fix, 2026-07-04)
+
+**Change (authoritative):** the `SettledTransfer` nullifier preimage's last field was changed from the settlement
+`block_number` to the sender tx `nonce` (`u32`). The nullifier is now
+`Poseidon(inner_transfer ‖ from(channel_id) ‖ transfer_index ‖ nonce)` (source of truth:
+`src/common/transfer.rs`, `SettledTransfer::to_u64_vec`).
+
+**Reason (F-WD-2 settle-twice double-withdrawal):** the old block-scoped nullifier let a single deduction settle
+into two different blocks, producing two *different* nullifiers → the same deduction could be withdrawn twice
+(each passing the on-chain used-set), capped only by global solvency (`totalEscrowed`). The block-number binding
+was the vulnerability, not the defence.
+
+**Why `nonce` is safe:** the nullifier is now a settlement-INDEPENDENT, one-time identifier bound to the
+*deduction*, not to any settlement block. `nonce` is the sender's tx nonce — the slot at index=nonce in the
+sender's sent-tx tree, which `spend_circuit` enforces empty-before-write, so each deduction has exactly one
+nonce. Two settlements of the same deduction therefore produce the IDENTICAL nullifier and are caught by the
+on-chain used-sets (`withdrawalNullifierUsed` / recipient indexed-merkle). This is strictly stronger than the old
+scheme and needs no "one settlement per block" assumption. `nonce` is also known at signing time, so any doc
+rationale that claimed the nullifier "cannot be computed at signing time" is obsolete (the settledTxChain still
+uses `TxLeafHash` as its canonical identity — that is a design choice, not a timing necessity; see abstract2 §2.1,
+detail2 §C-6).
+
+**No Solidity change required:** the nullifier is an opaque 32-byte value on-chain; L1 only compares it against
+its used-sets, so re-keying the preimage needed no contract change.
+
+**Verification:** threat-modeled + attacker-red-teamed + adversarially reviewed (separate reviewer), Lean-closed
+in the audit/zkp project (`SingleWithdrawalCircuit.lean`, `wNul`), and verified by proof-generation E2E (`e2e` +
+`mle_onchain_e2e`) plus forge 174/175. See commit `f0cad35` and `audit/audit02-07-2026.md` §5.
