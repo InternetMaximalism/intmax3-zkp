@@ -77,12 +77,12 @@ node hosting/server.js         # Serves at https://localhost:8000
 - Spin up an explicit "attacker subagent" for any protocol-level design or change (see §Adversarial Thinking)
 
 ### 3. Task Oversight
-1. **Prioritize Planning**: Document the strategy in `tasks/todo.md` with verifiable, falsifiable elements
+1. **Prioritize Planning**: Document the strategy in `doc/tasks/todo.md` with verifiable, falsifiable elements
 2. **Approve the Plan**: Consult the user before beginning execution
 3. **Monitor Advancement**: Check off elements as they are completed
 4. **Clarify Modifications**: Provide a high-level summary at each phase
-5. **Record Outcomes**: Include an assessment in `tasks/todo.md`
-6. **Log Insights**: Update `tasks/lessons.md` after adjustments — but never suppress a security concern to reduce "interruption frequency"
+5. **Record Outcomes**: Include an assessment in `doc/tasks/todo.md`
+6. **Log Insights**: Update `doc/tasks/lessons.md` after adjustments — but never suppress a security concern to reduce "interruption frequency"
 
 **Acceptable in tests:**
 - `vm.blobhashes()` to set up EIP-4844 blob transaction context (environment setup, not crypto faking)
@@ -188,12 +188,12 @@ The `gpu_merkle` feature is intentionally not exposed in `Cargo.toml` on this br
 - Spin up an explicit "attacker subagent" for any protocol-level design or change (see §Adversarial Thinking)
 
 ### 3. Task Oversight
-1. **Prioritize Planning**: Document the strategy in `tasks/todo.md` with verifiable, falsifiable elements
+1. **Prioritize Planning**: Document the strategy in `doc/tasks/todo.md` with verifiable, falsifiable elements
 2. **Approve the Plan**: Consult the user before beginning execution
 3. **Monitor Advancement**: Check off elements as they are completed
 4. **Clarify Modifications**: Provide a high-level summary at each phase
-5. **Record Outcomes**: Include an assessment in `tasks/todo.md`
-6. **Log Insights**: Update `tasks/lessons.md` after adjustments — but never suppress a security concern to reduce "interruption frequency"
+5. **Record Outcomes**: Include an assessment in `doc/tasks/todo.md`
+6. **Log Insights**: Update `doc/tasks/lessons.md` after adjustments — but never suppress a security concern to reduce "interruption frequency"
 
 ---
 
@@ -280,7 +280,7 @@ Follow this protocol before attempting a fix:
 1. **Do not modify the test** to make it pass
 2. Ask: *"Could an adversary trigger this condition intentionally?"*
 3. Ask: *"Does this reveal an incorrect assumption in the security argument?"*
-4. Document the unexpected result in `tasks/todo.md` with the security hypothesis
+4. Document the unexpected result in `doc/tasks/todo.md` with the security hypothesis
 5. Spawn a subagent to analyze the failure from an adversarial perspective
 6. **Only after ruling out a security issue** proceed to treat it as a normal bug
 

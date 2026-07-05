@@ -14,7 +14,7 @@ CLI, the WASM wallet, and the L1 contracts into autonomous agents:
 Both are structured as a single **supervisory event loop with explicit branches** for three
 regimes: **normal flow**, **own-transaction flow**, and **abnormal flow**.
 
-Spec references: `architecture-audit/design2.md` (design2), `architecture-audit/abstract2-1.md`
+Spec references: `doc/architecture-audit/design2.md` (design2), `doc/architecture-audit/abstract2-1.md`
 (abstract2-1), `api/API-DESIGN.md` (the REST surface this composes).
 
 ---

@@ -2,7 +2,7 @@
 
 All operations for the INTMAX3 payment channel protocol. Each entry covers what the operation does, its inputs/outputs, current implementation status, and what needs to be built for the public API.
 
-Spec references: `architecture-audit/detail2.md` (detail2), `architecture-audit/abstract2-1.md` (abstract2-1).
+Spec references: `doc/architecture-audit/detail2.md` (detail2), `doc/architecture-audit/abstract2-1.md` (abstract2-1).
 
 ---
 
