@@ -4,6 +4,7 @@ pragma solidity ^0.8.24;
 import {Test, console, stdStorage, StdStorage} from "forge-std/Test.sol";
 import {Vm} from "forge-std/Vm.sol";
 import {IntmaxRollup} from "../src/IntmaxRollup.sol";
+import {BlobKZGVerifierExt} from "../src/BlobKZGVerifier.sol";
 import {ChannelSettlementVerifier} from "../src/ChannelSettlementVerifier.sol";
 import {KZGProof} from "../src/BlobKZGVerifier.sol";
 import {MleVerifier} from "@mle/MleVerifier.sol";
@@ -335,6 +336,8 @@ contract IntmaxRollupTest is Test {
             bytes32(0),
             true // A-2: test opt-in for the degreeBits==0 bypass
         );
+        // Pin the KZG blob-binding satellite (EIP-170 relief) so the fraud path's binding check runs.
+        rollup.setKzgVerifier(new BlobKZGVerifierExt());
 
         vm.deal(submitter, 10 ether);
         vm.deal(blockProducer, 10 ether);
@@ -768,12 +771,12 @@ contract IntmaxRollupTest is Test {
 
         // value < amount
         vm.prank(depositor);
-        vm.expectRevert(bytes("ETH deposit value mismatch"));
+        vm.expectRevert(IntmaxRollup.EthDepositValueMismatch.selector);
         rollup.deposit{value: 99}(bytes32(uint256(0x1)), 0, 100, bytes32(0));
 
         // value > amount
         vm.prank(depositor);
-        vm.expectRevert(bytes("ETH deposit value mismatch"));
+        vm.expectRevert(IntmaxRollup.EthDepositValueMismatch.selector);
         rollup.deposit{value: 101}(bytes32(uint256(0x1)), 0, 100, bytes32(0));
 
         assertEq(rollup.totalEscrowed(), 0, "no escrow recorded on revert");
@@ -786,7 +789,7 @@ contract IntmaxRollupTest is Test {
         vm.deal(depositor, 5 ether);
 
         vm.prank(depositor);
-        vm.expectRevert(bytes("non-ETH deposit must not carry ETH"));
+        vm.expectRevert(IntmaxRollup.NonEthDepositMustNotCarryEth.selector);
         rollup.deposit{value: 1}(bytes32(uint256(0x2)), 7, 100, bytes32(0));
 
         assertEq(rollup.totalEscrowed(), 0, "non-ETH deposit never escrows");
@@ -894,6 +897,7 @@ contract IntmaxRollupTest is Test {
             rollup.mleVerifier(), bytes32(0),
             true // A-2: test opt-in (this test uses a real enabled VK anyway)
         );
+        mleRollup.setKzgVerifier(new BlobKZGVerifierExt());
 
         MleVerifier.MleProof memory mleProof = _defaultMleProof();
         mleProof.whirTranscript = hex"DEADBEEF";
@@ -1328,6 +1332,7 @@ contract IntmaxRollupTest is Test {
             mleVerifierContract, bytes32(0),
             true // A-2: test opt-in (this test uses a real enabled VK anyway)
         );
+        mleRollup.setKzgVerifier(new BlobKZGVerifierExt());
 
         MleVerifier.MleProof memory mleProof = _defaultMleProof();
 
@@ -1386,6 +1391,7 @@ contract IntmaxRollupTest is Test {
             mleVerifierContract, bytes32(0),
             true // A-2: test opt-in (this test uses a real enabled VK anyway)
         );
+        mleRollup.setKzgVerifier(new BlobKZGVerifierExt());
 
         MleVerifier.MleProof memory mleProof = _defaultMleProof();
 
@@ -1761,6 +1767,7 @@ contract IntmaxRollupTest is Test {
             rollup.mleVerifier(), bytes32(0),
             true // A-2: test opt-in (this test uses a real enabled VK anyway)
         );
+        rollup2.setKzgVerifier(new BlobKZGVerifierExt());
 
         address sub2 = makeAddr("sub2");
         vm.deal(sub2, 10 ether);

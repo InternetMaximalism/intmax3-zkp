@@ -4,7 +4,7 @@ pragma solidity ^0.8.24;
 import {MleVerifier} from "@mle/MleVerifier.sol";
 import {SpongefishWhirVerify} from "@mle/spongefish/SpongefishWhirVerify.sol";
 import {GoldilocksExt3} from "@mle/spongefish/GoldilocksExt3.sol";
-import {BlobKZGVerifier, KZGProof} from "./BlobKZGVerifier.sol";
+import {BlobKZGVerifier, BlobKZGVerifierExt, KZGProof} from "./BlobKZGVerifier.sol";
 
 /// @title IntmaxRollup
 /// @notice INTMAX3 validity proof rollup contract.
@@ -69,6 +69,15 @@ contract IntmaxRollup {
     error InitialStateMismatch();
     error BlockChainMismatch();
     error MleVerificationFailed();
+    // EIP-170 size relief: former string requires, converted to custom errors (semantics identical).
+    error OnlyDeployer();
+    error WithdrawalVkAlreadySet();
+    error EthTransferFailed();
+    error EthDepositValueMismatch();
+    error NonEthDepositMustNotCarryEth();
+    error WithdrawTransferFailed();
+    error KzgVerifierAlreadySet();
+    error KzgVerifierNotAContract();
     error EmptyBatch();
     error InvalidStakeAmount();
     error NothingToWithdraw();
@@ -510,7 +519,6 @@ contract IntmaxRollup {
 
     /// @notice Mask to clear top 3 bits so a 256-bit value fits in the
     ///         BLS12-381 scalar field (used for KZG blob field elements).
-    uint256 internal constant FIELD_MASK = type(uint256).max >> 3;
 
     // -----------------------------------------------------------------------
     // Constructor
@@ -601,8 +609,8 @@ contract IntmaxRollup {
         uint256[] memory _kIs,
         uint256[] memory _subgroupGenPowers
     ) external {
-        require(msg.sender == deployer, "only deployer");
-        require(!withdrawalVkInitialized, "withdrawal vk already set");
+        if (msg.sender != deployer) revert OnlyDeployer();
+        if (withdrawalVkInitialized) revert WithdrawalVkAlreadySet();
         if (_vk.degreeBits == 0) revert WithdrawalVkDegreeBitsZero();
         withdrawalVkInitialized = true;
         withdrawalMleVk = _vk;
@@ -622,9 +630,27 @@ contract IntmaxRollup {
     ///         Deployer-only, additive (no removal). A manager earns `authorizePartialWithdrawal`
     ///         call rights after verifying a finalized close proof (N-of-N channel consent).
     function registerSettlementManager(address manager) external {
-        require(msg.sender == deployer, "only deployer");
+        if (msg.sender != deployer) revert OnlyDeployer();
         isRegisteredSettlementManager[manager] = true;
         emit SettlementManagerRegistered(manager);
+    }
+
+    /// @notice The pinned KZG blob-binding satellite used by `fraudProof` (EIP-170 relief: the
+    ///         large EIP-2537 verification bytecode lives in its own contract, mirroring the
+    ///         `MleVerifier` pattern). Deployer-only, set EXACTLY ONCE — behaviorally immutable.
+    BlobKZGVerifierExt public kzgVerifier;
+
+    /// @notice Pin the KZG blob-binding satellite. Deployer-only, set EXACTLY ONCE.
+    /// @dev SECURITY: must be a deployed CONTRACT — a call to an address with no code succeeds
+    ///      vacuously, which would turn the fraud path's KZG binding check into a no-op and allow
+    ///      false fraud confirmations (rollback griefing). Until set, the KZG-binding branch of
+    ///      `fraudProof` FAILS CLOSED (no fraud confirmation; the no-ZKP timeout-removal branch is
+    ///      unaffected) — same deploy-then-initialize trust as `initializeWithdrawalVk`.
+    function setKzgVerifier(BlobKZGVerifierExt v) external {
+        if (msg.sender != deployer) revert OnlyDeployer();
+        if (address(kzgVerifier) != address(0)) revert KzgVerifierAlreadySet();
+        if (address(v).code.length == 0) revert KzgVerifierNotAContract();
+        kzgVerifier = v;
     }
 
     /// @notice Authorize a partial-withdrawal auth digest. Only callable by registered settlement
@@ -660,7 +686,7 @@ contract IntmaxRollup {
         totalEscrowed -= w.amount;
 
         (bool ok, ) = w.recipient.call{value: w.amount}("");
-        require(ok, "ETH transfer failed");
+        if (!ok) revert EthTransferFailed();
         emit NativeWithdrawn(w.recipient, w.amount, w.nullifier, 0);
     }
 
@@ -825,12 +851,12 @@ contract IntmaxRollup {
         // to reorder. Stray ETH on a non-ETH deposit is rejected (no value sink), and plain ETH
         // transfers revert because the contract exposes no receive()/fallback().
         if (tokenIndex == ETH_TOKEN_INDEX) {
-            require(msg.value == amount, "ETH deposit value mismatch");
+            if (msg.value != amount) revert EthDepositValueMismatch();
             totalEscrowed += amount;
         } else {
             // Non-ETH tokens are out of scope for v1: accounting is preserved below, but no real
             // value is custodied, so the call must not carry ETH.
-            require(msg.value == 0, "non-ETH deposit must not carry ETH");
+            if (msg.value != 0) revert NonEthDepositMustNotCarryEth();
         }
 
         uint64 idx = depositCount++;
@@ -1214,7 +1240,7 @@ contract IntmaxRollup {
         if (amount == 0) revert NothingToWithdraw();
         pendingWithdrawals[msg.sender] = 0;
         (bool ok, ) = msg.sender.call{value: amount}("");
-        require(ok, "Withdraw failed");
+        if (!ok) revert WithdrawTransferFailed();
     }
 
     /// @notice Reclaim a POST_BLOCK_STAKE bond once its submission's batch is part of canonical
@@ -1518,8 +1544,12 @@ contract IntmaxRollup {
             if (commitment != _submissions[submissionId].commitment) return false;
         }
 
-        // 2. KZG blob binding
-        try this._verifyKZG(blobVersionedHash, kzg, proofBytes) {
+        // 2. KZG blob binding (external satellite, see `setKzgVerifier`).
+        //    SECURITY (fail-closed): when the satellite is unset, the binding is NOT provable, so
+        //    no fraud can be confirmed — never vacuously pass (a call to an empty address would
+        //    succeed and enable false fraud confirmations / rollback griefing).
+        if (address(kzgVerifier) == address(0)) return false;
+        try kzgVerifier.verify(blobVersionedHash, kzg, proofBytes) {
         } catch {
             return false;
         }
@@ -1552,19 +1582,6 @@ contract IntmaxRollup {
         if (!_verifyMle(mleProof)) return true;
 
         return false;
-    }
-
-    /// @dev External helper so _fullVerify/_verifyFraud can try/catch on KZG verification.
-    function _verifyKZG(
-        bytes32 blobVersionedHash,
-        KZGProof calldata kzg,
-        bytes calldata proofBytes
-    ) external view {
-        BlobKZGVerifier.verify(
-            blobVersionedHash,
-            kzg,
-            _toFieldElements(proofBytes)
-        );
     }
 
     // -----------------------------------------------------------------------
@@ -1863,27 +1880,4 @@ contract IntmaxRollup {
         );
     }
 
-    /// @dev Split raw bytes into BLS12-381 field elements (top 3 bits cleared).
-    function _toFieldElements(bytes calldata data)
-        internal pure returns (bytes32[] memory elems)
-    {
-        uint256 N = (data.length + 31) / 32;
-        elems = new bytes32[](N);
-        for (uint256 i = 0; i < N; i++) {
-            uint256 start = i * 32;
-            uint256 end = start + 32;
-            bytes32 chunk;
-            if (end <= data.length) {
-                chunk = bytes32(data[start:end]);
-            } else {
-                bytes memory padded = new bytes(32);
-                uint256 remaining = data.length - start;
-                for (uint256 j = 0; j < remaining; j++) {
-                    padded[j] = data[start + j];
-                }
-                assembly { chunk := mload(add(padded, 32)) }
-            }
-            elems[i] = bytes32(uint256(chunk) & FIELD_MASK);
-        }
-    }
 }
