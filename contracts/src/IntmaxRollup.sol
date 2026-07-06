@@ -81,6 +81,7 @@ contract IntmaxRollup {
     error EmptyBatch();
     error InvalidStakeAmount();
     error NotAuthorizedBlockProducer();
+    error NotBlockProducerManager();
     error NothingToWithdraw();
     error SubmissionAlreadyFinalized();
     error SubmissionBeforeFinalizedBlock();
@@ -174,6 +175,7 @@ contract IntmaxRollup {
     event PartialWithdrawalAuthorized(bytes32 indexed authDigest, address indexed manager);
     event SettlementManagerRegistered(address indexed manager);
     event BlockProducerSet(address indexed producer, bool allowed);
+    event BlockProducerAdminSet(address indexed admin);
 
     event NativeWithdrawn(
         address indexed recipient,
@@ -371,11 +373,18 @@ contract IntmaxRollup {
 
     /// @notice Whitelisted block producers that may call `postBlockAndSubmit`.
     /// SECURITY: block posting is permissioned. The set is empty at deploy (fail-closed —
-    ///           nobody can post until the deployer authorizes at least one producer), and is
-    ///           managed exclusively by the deployer via `setBlockProducer`. This prevents an
-    ///           anonymous party from flooding the posting layer with spam/invalid submissions
-    ///           (the fraud path is a recovery mechanism, not a spam-prevention gate).
+    ///           nobody can post until a producer is authorized), and is managed by the deployer
+    ///           OR the `blockProducerAdmin` via `setBlockProducer`. This prevents an anonymous
+    ///           party from flooding the posting layer with spam/invalid submissions (the fraud
+    ///           path is a recovery mechanism, not a spam-prevention gate).
     mapping(address => bool) public isBlockProducer;
+
+    /// @notice The block-production authority. It may itself post (without being in the
+    ///         whitelist) AND may designate other producers via `setBlockProducer`. This
+    ///         decouples block-production governance from the deployer/admin key: block posting
+    ///         is restricted to `blockProducerAdmin` or the addresses it designates.
+    /// SECURITY: set/rotated only by the deployer (`setBlockProducerAdmin`); zero until set.
+    address public blockProducerAdmin;
 
     uint256 private constant _NOT_ENTERED = 1;
     uint256 private constant _ENTERED = 2;
@@ -646,15 +655,30 @@ contract IntmaxRollup {
     }
 
     /// @notice Authorize (or revoke) a block-producer address for `postBlockAndSubmit`.
-    ///         Deployer-only. Rotatable: pass `allowed = false` to revoke a compromised key.
+    ///         Callable by the deployer OR the `blockProducerAdmin`. Rotatable: pass
+    ///         `allowed = false` to revoke a compromised key.
     /// @dev SECURITY: the whitelist is empty at deploy, so `postBlockAndSubmit` is fail-closed
-    ///      until the deployer authorizes a producer here. Same deployer trust as the VK/KZG
-    ///      initializers. Deliberately does NOT auto-authorize the deployer, so the operational
-    ///      block-producer key can be kept distinct from the (cold) deployer/admin key.
+    ///      until a producer is authorized here. Designation is the `blockProducerAdmin`'s power
+    ///      (so block posting is restricted to the admin or the addresses IT designates), with the
+    ///      deployer retained as a break-glass manager. Deliberately does NOT auto-authorize the
+    ///      deployer as a producer — the operational posting key stays distinct from the cold key.
     function setBlockProducer(address producer, bool allowed) external {
-        if (msg.sender != deployer) revert OnlyDeployer();
+        if (msg.sender != deployer && msg.sender != blockProducerAdmin) {
+            revert NotBlockProducerManager();
+        }
         isBlockProducer[producer] = allowed;
         emit BlockProducerSet(producer, allowed);
+    }
+
+    /// @notice Set (or rotate) the block-production authority. Deployer-only.
+    /// @dev SECURITY: `blockProducerAdmin` may itself post and may designate other producers via
+    ///      `setBlockProducer`. Setting it to `address(0)` disables the admin role (leaving only
+    ///      the explicit whitelist, deployer-managed). This is the address block posting is
+    ///      restricted to (together with its designees).
+    function setBlockProducerAdmin(address admin) external {
+        if (msg.sender != deployer) revert OnlyDeployer();
+        blockProducerAdmin = admin;
+        emit BlockProducerAdminSet(admin);
     }
 
     /// @notice The pinned KZG blob-binding satellite used by `fraudProof` (EIP-170 relief: the
@@ -729,15 +753,18 @@ contract IntmaxRollup {
     ///
     /// @notice Post a batch of fast blocks and submit the proof commitment in
     ///         a single transaction.
-    /// @dev SECURITY: permissioned — only a deployer-authorized block producer
-    ///      (`setBlockProducer`) may post. Fail-closed: the whitelist is empty at deploy.
+    /// @dev SECURITY: permissioned — posting is restricted to the `blockProducerAdmin` or the
+    ///      producers it designates (`setBlockProducer`). Fail-closed: with no admin set and an
+    ///      empty whitelist, nobody can post.
     function postBlockAndSubmit(
         SubBlock[] calldata subBlocks,
         bytes32 proofHash,
         uint32 proofLength,
         bytes32 stateRoot
     ) external payable nonReentrant {
-        if (!isBlockProducer[msg.sender]) revert NotAuthorizedBlockProducer();
+        if (!isBlockProducer[msg.sender] && msg.sender != blockProducerAdmin) {
+            revert NotAuthorizedBlockProducer();
+        }
         if (msg.value != POST_BLOCK_STAKE) revert InvalidStakeAmount();
         BatchMetadata memory meta = _postBlock(subBlocks);
         uint256 submissionId = _submit(proofHash, proofLength, stateRoot);
