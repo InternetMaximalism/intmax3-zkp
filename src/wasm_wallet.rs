@@ -632,7 +632,11 @@ pub fn wallet_finalize(state_json: String) -> Result<String, JsValue> {
 
 // --- Phase-0 feasibility probe (kept for diagnostics) ----------------------------------------
 
-/// SECURITY: `Test` level — NOT secure; diagnostic probe only.
+/// SECURITY: `Test` level — NOT secure; diagnostic probe only. Gated behind the
+/// `diagnostics` cargo feature (off by default) so it is NOT exported in the
+/// production wallet WASM — a shipped Test-level prover would be a misuse footgun.
+/// Build the diagnostic page with `--features diagnostics`.
+#[cfg(feature = "diagnostics")]
 #[wasm_bindgen]
 pub async fn wallet_feasibility_check() -> Result<String, JsValue> {
     use crate::regev::{channel_keygen, prove_channel_tx, verify_channel_tx};

@@ -213,6 +213,7 @@ contract IntmaxRollupTest is Test {
         bytes32[] memory hs = new bytes32[](1);
         hs[0] = blobHash;
         vm.blobhashes(hs);
+        target.setBlockProducer(poster, true); // permissioned posting (deployer == this test contract)
         vm.prank(poster);
         target.postBlockAndSubmit{value: 1 ether}(
             batch, keccak256(proofBytes), uint32(proofBytes.length), stateRoot
@@ -338,6 +339,11 @@ contract IntmaxRollupTest is Test {
         );
         // Pin the KZG blob-binding satellite (EIP-170 relief) so the fraud path's binding check runs.
         rollup.setKzgVerifier(new BlobKZGVerifierExt());
+        // Permissioned posting: authorize every address that posts to `rollup` in this suite
+        // (this contract for un-pranked helper posts, plus the two module-level poster identities).
+        rollup.setBlockProducer(address(this), true);
+        rollup.setBlockProducer(submitter, true);
+        rollup.setBlockProducer(blockProducer, true);
 
         vm.deal(submitter, 10 ether);
         vm.deal(blockProducer, 10 ether);
@@ -865,6 +871,63 @@ contract IntmaxRollupTest is Test {
         vm.prank(submitter);
         vm.expectRevert(IntmaxRollup.NoBlobAttached.selector);
         rollup.postBlockAndSubmit{value: 1 ether}(batch, bytes32(0), uint32(0), bytes32(0));
+    }
+
+    // -----------------------------------------------------------------------
+    // Block-producer access control (permissioned posting)
+    // -----------------------------------------------------------------------
+
+    function test_postBlockAndSubmit_revert_unauthorizedProducer() public {
+        address rando = makeAddr("rando");
+        vm.deal(rando, 10 ether);
+        uint32[] memory ids = new uint32[](1);
+        ids[0] = 1;
+        IntmaxRollup.SubBlock[] memory batch = _singleBlockBatch(
+            1, ids, uint64(block.timestamp), bytes32(uint256(0xabc))
+        );
+        _mockBlob();
+        vm.prank(rando); // rando is NOT on the block-producer whitelist
+        vm.expectRevert(IntmaxRollup.NotAuthorizedBlockProducer.selector);
+        rollup.postBlockAndSubmit{value: 1 ether}(
+            batch, keccak256("p"), 1, keccak256("s")
+        );
+    }
+
+    function test_postBlockAndSubmit_succeeds_afterAuthorization() public {
+        address newProducer = makeAddr("newProducer");
+        vm.deal(newProducer, 10 ether);
+        uint32[] memory ids = new uint32[](1);
+        ids[0] = 1;
+        IntmaxRollup.SubBlock[] memory batch = _singleBlockBatch(
+            1, ids, uint64(block.timestamp), bytes32(uint256(0xabc))
+        );
+
+        // Before authorization: rejected.
+        _mockBlob();
+        vm.prank(newProducer);
+        vm.expectRevert(IntmaxRollup.NotAuthorizedBlockProducer.selector);
+        rollup.postBlockAndSubmit{value: 1 ether}(batch, keccak256("p"), 1, keccak256("s"));
+
+        // Deployer authorizes, then the same producer succeeds.
+        rollup.setBlockProducer(newProducer, true);
+        _mockBlob();
+        vm.prank(newProducer);
+        rollup.postBlockAndSubmit{value: 1 ether}(batch, keccak256("p"), 1, keccak256("s"));
+        assertEq(rollup.nextSubmissionId(), 1, "authorized post recorded");
+
+        // Deployer can revoke; the producer is rejected again.
+        rollup.setBlockProducer(newProducer, false);
+        _mockBlob();
+        vm.prank(newProducer);
+        vm.expectRevert(IntmaxRollup.NotAuthorizedBlockProducer.selector);
+        rollup.postBlockAndSubmit{value: 1 ether}(batch, keccak256("p2"), 1, keccak256("s2"));
+    }
+
+    function test_setBlockProducer_revert_notDeployer() public {
+        address rando = makeAddr("rando");
+        vm.prank(rando);
+        vm.expectRevert(IntmaxRollup.OnlyDeployer.selector);
+        rollup.setBlockProducer(rando, true);
     }
 
     // -----------------------------------------------------------------------
@@ -1771,6 +1834,7 @@ contract IntmaxRollupTest is Test {
 
         address sub2 = makeAddr("sub2");
         vm.deal(sub2, 10 ether);
+        rollup2.setBlockProducer(sub2, true); // permissioned posting
         bytes32 stateRoot = keccak256("bad_state");
 
         // Build vpis BEFORE posting (rollup2 initial state: all zeros)

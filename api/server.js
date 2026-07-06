@@ -1,9 +1,26 @@
 const express = require('express');
 const fs = require('fs');
 const { CHANNELS, WORK, chDir, validChannel } = require('./lib/cli');
+const { cors, auth, rateLimit, startupWarnings } = require('./lib/security');
 
 const app = express();
 const PORT = parseInt(process.env.API_PORT || '8100', 10);
+
+// If deployed behind a reverse proxy / load balancer, trust it so req.ip is the
+// real client (needed for correct rate limiting). Enable via INTMAX_TRUST_PROXY.
+if (process.env.INTMAX_TRUST_PROXY) {
+  app.set('trust proxy', process.env.INTMAX_TRUST_PROXY);
+}
+
+// Security pipeline (order matters):
+//   1. rate limit  — cap request volume per IP before doing any work
+//   2. CORS        — sets isolation headers + answers OPTIONS preflight (pre-auth)
+//   3. auth        — bearer token on state-mutating requests to /api/v1
+// Auth runs BEFORE body parsing so unauthenticated POSTs are rejected without
+// buffering a (possibly 64 MB) body.
+app.use(rateLimit);
+app.use(cors);
+app.use('/api/v1', auth);
 
 app.use(express.json({ limit: '64mb' }));
 
@@ -12,17 +29,6 @@ app.use((err, req, res, next) => {
     return res.status(400).json({ error: 'invalid JSON: ' + err.message });
   }
   next(err);
-});
-
-// CORS isolation headers (SharedArrayBuffer support for WASM clients)
-app.use((req, res, next) => {
-  res.setHeader('Cross-Origin-Embedder-Policy', 'require-corp');
-  res.setHeader('Cross-Origin-Opener-Policy', 'same-origin');
-  res.setHeader('Access-Control-Allow-Origin', '*');
-  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
-  res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
-  if (req.method === 'OPTIONS') return res.sendStatus(204);
-  next();
 });
 
 // Channel ID validation middleware for /api/v1/channel/:ch/*
@@ -66,6 +72,7 @@ for (const ch of CHANNELS) {
 
 app.listen(PORT, '0.0.0.0', () => {
   console.log(`INTMAX3 Channel API on http://localhost:${PORT}  (channels: ${CHANNELS.join(', ')})`);
+  startupWarnings();
   console.log('Endpoints:');
   console.log('  GET  /api/v1/channels');
   console.log('  POST /api/v1/keys/generate');

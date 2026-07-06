@@ -467,10 +467,14 @@ impl<const D: usize> SingleWithdawalTarget<D> {
             .transfer_tree_root
             .connect(builder, tx.transfer_tree_root.clone());
 
-        let tx_tree_root = account_state
-            .send_leaf
-            .tx_tree_root
-            .reduce_to_hash_out(builder);
+        // SECURITY (TODO-2): use the canonicity-enforcing `to_hash_out`, NOT the bare
+        // `reduce_to_hash_out`. `send_leaf.tx_tree_root` is a prover-supplied `Bytes32`; the bare
+        // reduction is many-to-one (a non-canonical `Bytes32` = value+p aliases to the same
+        // `HashOut`), so a prover could verify a withdrawal's tx against a tx-tree root that
+        // differs, byte-for-byte, from the committed one. `to_hash_out` forces the
+        // canonical representation, matching the native `TryFrom<Bytes32>` and the sibling
+        // `tx_settlement` conversion.
+        let tx_tree_root = account_state.send_leaf.tx_tree_root.to_hash_out(builder);
         // Two-layer identity: the block tx tree is indexed by channel_id
         // (TX_TREE_HEIGHT == CHANNEL_ID_BITS).
         let tx_index = balance_pis.channel_id.channel_id(builder);

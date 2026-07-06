@@ -300,6 +300,17 @@ impl Bytes32Target {
         Self::from_slice(&limbs)
     }
 
+    /// Interpret this `Bytes32` as four Goldilocks field elements (`high*2^32 + low` per pair of
+    /// 32-bit limbs), WITHOUT a canonicity constraint.
+    ///
+    /// SECURITY: this map is many-to-one — a non-canonical `Bytes32` whose per-element value is in
+    /// `[p, 2^64)` reduces (mod p) to the SAME `HashOut` as a distinct canonical `Bytes32`. When
+    /// the `Bytes32` is prover-supplied and its byte identity matters (e.g. a Merkle root that
+    /// must equal a committed value), callers MUST use [`Self::to_hash_out`] instead, which
+    /// round-trips through the unique 32/32 split and `connect`s to force the canonical
+    /// representation (matching the native `TryFrom<Bytes32>`). Bare `reduce_to_hash_out` is
+    /// only safe when the `Bytes32` is already constrained canonical upstream, or is
+    /// `connect`ed back to bytes by the caller.
     pub fn reduce_to_hash_out<F: RichField + Extendable<D>, const D: usize>(
         &self,
         builder: &mut CircuitBuilder<F, D>,

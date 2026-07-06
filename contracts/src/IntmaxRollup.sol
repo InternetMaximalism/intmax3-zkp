@@ -80,6 +80,7 @@ contract IntmaxRollup {
     error KzgVerifierNotAContract();
     error EmptyBatch();
     error InvalidStakeAmount();
+    error NotAuthorizedBlockProducer();
     error NothingToWithdraw();
     error SubmissionAlreadyFinalized();
     error SubmissionBeforeFinalizedBlock();
@@ -172,6 +173,7 @@ contract IntmaxRollup {
     /// @notice Emitted per `Withdrawal` leaf paid out by `withdrawNative`.
     event PartialWithdrawalAuthorized(bytes32 indexed authDigest, address indexed manager);
     event SettlementManagerRegistered(address indexed manager);
+    event BlockProducerSet(address indexed producer, bool allowed);
 
     event NativeWithdrawn(
         address indexed recipient,
@@ -366,6 +368,14 @@ contract IntmaxRollup {
 
     /// @notice Registered settlement managers that may call `authorizePartialWithdrawal`.
     mapping(address => bool) public isRegisteredSettlementManager;
+
+    /// @notice Whitelisted block producers that may call `postBlockAndSubmit`.
+    /// SECURITY: block posting is permissioned. The set is empty at deploy (fail-closed —
+    ///           nobody can post until the deployer authorizes at least one producer), and is
+    ///           managed exclusively by the deployer via `setBlockProducer`. This prevents an
+    ///           anonymous party from flooding the posting layer with spam/invalid submissions
+    ///           (the fraud path is a recovery mechanism, not a spam-prevention gate).
+    mapping(address => bool) public isBlockProducer;
 
     uint256 private constant _NOT_ENTERED = 1;
     uint256 private constant _ENTERED = 2;
@@ -635,6 +645,18 @@ contract IntmaxRollup {
         emit SettlementManagerRegistered(manager);
     }
 
+    /// @notice Authorize (or revoke) a block-producer address for `postBlockAndSubmit`.
+    ///         Deployer-only. Rotatable: pass `allowed = false` to revoke a compromised key.
+    /// @dev SECURITY: the whitelist is empty at deploy, so `postBlockAndSubmit` is fail-closed
+    ///      until the deployer authorizes a producer here. Same deployer trust as the VK/KZG
+    ///      initializers. Deliberately does NOT auto-authorize the deployer, so the operational
+    ///      block-producer key can be kept distinct from the (cold) deployer/admin key.
+    function setBlockProducer(address producer, bool allowed) external {
+        if (msg.sender != deployer) revert OnlyDeployer();
+        isBlockProducer[producer] = allowed;
+        emit BlockProducerSet(producer, allowed);
+    }
+
     /// @notice The pinned KZG blob-binding satellite used by `fraudProof` (EIP-170 relief: the
     ///         large EIP-2537 verification bytecode lives in its own contract, mirroring the
     ///         `MleVerifier` pattern). Deployer-only, set EXACTLY ONCE — behaviorally immutable.
@@ -707,13 +729,15 @@ contract IntmaxRollup {
     ///
     /// @notice Post a batch of fast blocks and submit the proof commitment in
     ///         a single transaction.
-    // TODO: Add access control (blockProducer whitelist) before mainnet.
+    /// @dev SECURITY: permissioned — only a deployer-authorized block producer
+    ///      (`setBlockProducer`) may post. Fail-closed: the whitelist is empty at deploy.
     function postBlockAndSubmit(
         SubBlock[] calldata subBlocks,
         bytes32 proofHash,
         uint32 proofLength,
         bytes32 stateRoot
     ) external payable nonReentrant {
+        if (!isBlockProducer[msg.sender]) revert NotAuthorizedBlockProducer();
         if (msg.value != POST_BLOCK_STAKE) revert InvalidStakeAmount();
         BatchMetadata memory meta = _postBlock(subBlocks);
         uint256 submissionId = _submit(proofHash, proofLength, stateRoot);

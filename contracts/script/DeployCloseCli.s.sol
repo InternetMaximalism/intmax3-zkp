@@ -36,7 +36,12 @@ contract DeployCloseCli is Script {
         string memory cJson = _read("close_intent_mle.json");
         string memory reg = _read("cli_reg_record.json"); // staged into test/data/ by the driver
         bytes32 genesis = vm.parseJsonBytes32(lcJson, ".genesis_state_root");
-        address fraudTreasury = vm.envOr("FRAUD_TREASURY", msg.sender);
+        // SECURITY (#6): require FRAUD_TREASURY on real chains; anvil (31337) may default it.
+        address fraudTreasury = vm.envOr("FRAUD_TREASURY", address(0));
+        if (fraudTreasury == address(0)) {
+            require(block.chainid == 31337, "FRAUD_TREASURY must be set for non-local deploys");
+            fraudTreasury = msg.sender;
+        }
 
         vm.startBroadcast();
 
@@ -50,6 +55,9 @@ contract DeployCloseCli is Script {
         );
         // Pin the KZG blob-binding satellite (EIP-170 relief; fraudProof binding is fail-closed until set).
         rollup.setKzgVerifier(new BlobKZGVerifierExt());
+        // Authorize the block producer used by the CLI withdraw flow (posts via INTMAX_DEPOSIT_KEY).
+        // Defaults to the broadcaster; set BLOCK_PRODUCER to the CLI poster address when they differ.
+        rollup.setBlockProducer(vm.envOr("BLOCK_PRODUCER", msg.sender), true);
 
         // 2. Withdrawal VK (deployer == EOA == msg.sender).
         {

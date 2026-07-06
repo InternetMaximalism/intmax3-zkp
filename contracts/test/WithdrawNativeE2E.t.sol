@@ -59,6 +59,7 @@ contract WithdrawNativeE2ETest is Test {
             vdd.kIs, vdd.subgroupGenPowers, verifier, genesis,
             true // A-2: test opt-in for the degreeBits==0 bypass
         );
+        rollup.setBlockProducer(poster, true); // permissioned posting
 
         // Set the WITHDRAWAL VK (deployer-only, set-once). deployer == this test contract.
         FixtureLib.DeployData memory wdd = FixtureLib.parseDeployData(withdrawalMleJson);

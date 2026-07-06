@@ -75,6 +75,9 @@ contract CloseLifecycleE2ETest is CloseE2EBase {
         IntmaxRollup.MleVk memory wvk = FixtureLib.buildMleVk(_withdrawalJson(), verifier);
         vm.prank(FACTORY);
         rollup.initializeWithdrawalVk(wvk, wdd.whirParams, wdd.protocolId, wdd.sessionId, wdd.kIs, wdd.subgroupGenPowers);
+        // Permissioned posting: authorize the poster. deployer == FACTORY (CREATE2), so prank it.
+        vm.prank(FACTORY);
+        rollup.setBlockProducer(poster, true);
 
         // 5. Set the REAL close VK on the settlement verifier from the close fixture. deployer ==
         //    FACTORY (CREATE2), so prank the factory. The close VK is the close circuit's OWN
