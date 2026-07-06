@@ -45,6 +45,7 @@ contract ReclaimStakeTest is Test {
             vdd.kIs, vdd.subgroupGenPowers, verifier, genesis,
             true // A-2: test opt-in for the degreeBits==0 bypass
         );
+        rollup.setBlockProducer(poster, true); // permissioned posting
     }
 
     // ── Main fix: every stranded postBlock bond is recoverable after the aggregate finalize. ──

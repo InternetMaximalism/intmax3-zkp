@@ -24,6 +24,7 @@ import Zkp.Circuits.Withdraw.WithdrawalStep
 import Zkp.Circuits.Validity.ValidityCircuit
 import Zkp.Circuits.Validity.DepositStep
 import Zkp.Circuits.Validity.BlockStep
+import Zkp.Circuits.Validity.ChannelRegStep
 import Zkp.Circuits.Validity.SmallBlockMessage
 import Zkp.Circuits.Validity.UpdateUser
 import Zkp.Circuits.Common.PublicStateEq

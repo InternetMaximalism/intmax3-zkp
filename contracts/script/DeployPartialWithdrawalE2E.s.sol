@@ -55,6 +55,8 @@ contract DeployPartialWithdrawalE2E is Script {
         );
         // Pin the KZG blob-binding satellite (EIP-170 relief; fraudProof binding is fail-closed until set).
         rollup.setKzgVerifier(new BlobKZGVerifierExt());
+        // Authorize the block producer (posting is permissioned; the whitelist is empty until set).
+        rollup.setBlockProducer(vm.envOr("BLOCK_PRODUCER", msg.sender), true);
 
         // 2. Mock MLE verifier for the settlement side (always returns true).
         E2EMockMleVerifier mockMle = new E2EMockMleVerifier();

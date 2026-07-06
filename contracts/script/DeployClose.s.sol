@@ -43,7 +43,12 @@ contract DeployClose is Script {
         string memory vkJson = _vJson();
         string memory lcJson = _lcJson();
         bytes32 genesis = vm.parseJsonBytes32(lcJson, ".genesis_state_root");
-        address fraudTreasury = vm.envOr("FRAUD_TREASURY", msg.sender);
+        // SECURITY (#6): require FRAUD_TREASURY on real chains; anvil (31337) may default it.
+        address fraudTreasury = vm.envOr("FRAUD_TREASURY", address(0));
+        if (fraudTreasury == address(0)) {
+            require(block.chainid == 31337, "FRAUD_TREASURY must be set for non-local deploys");
+            fraudTreasury = msg.sender;
+        }
 
         vm.startBroadcast();
 
@@ -57,6 +62,8 @@ contract DeployClose is Script {
         );
         // Pin the KZG blob-binding satellite (EIP-170 relief; fraudProof binding is fail-closed until set).
         rollup.setKzgVerifier(new BlobKZGVerifierExt());
+        // Authorize the block producer (posting is permissioned; the whitelist is empty until set).
+        rollup.setBlockProducer(vm.envOr("BLOCK_PRODUCER", msg.sender), true);
 
         ChannelSettlementVerifier sv = new ChannelSettlementVerifier();
 

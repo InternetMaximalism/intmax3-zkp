@@ -40,8 +40,18 @@ starky = { git = "https://github.com/InternetMaximalism/polygon-plonky2.git", pa
     "std",
 ] }
 plonky2_mle = { git = "https://github.com/InternetMaximalism/polygon-plonky2.git", branch = "main" }
-# Sibling crates use `wasm-main` (Result-returning PartialWitness::set_target,
-# matches polygon-plonky2 main HEAD which now includes PR #11 wasm-webgpu-merkle).
+# Sibling crates on the `wasm-main` branch (Result-returning
+# PartialWitness::set_target, matches polygon-plonky2 main HEAD incl. PR #11
+# wasm-webgpu-merkle).
+#
+# REPRODUCIBILITY (#14): these stay on `branch` DELIBERATELY. `plonky2_bn254` and
+# `plonky2_keccak` depend on `plonky2_u32` via `branch = "wasm-main"` in THEIR own
+# manifests; pinning our direct dep to `rev` makes Cargo see `?rev=…` and
+# `?branch=…#…` as two distinct sources and duplicates `plonky2_u32` (crate-collision
+# / E0463, the exact hazard the [workspace] note above fights). The reproducibility
+# anchor is therefore `Cargo.lock`, which pins the EXACT commits
+# (u32 d0b3bfd…, bn254 18044f3…, keccak 2507786…). Release/CI builds MUST pass
+# `--locked` (or `--frozen`) so the pin is enforced and `cargo update` cannot drift.
 plonky2_u32 = { git = "https://github.com/InternetMaximalism/plonky2-u32.git", branch = "wasm-main", default-features = false }
 plonky2_bn254 = { git = "https://github.com/InternetMaximalism/plonky2_bn254", branch = "wasm-main", default-features = false }
 plonky2_keccak = { git = "https://github.com/InternetMaximalism/plonky2_keccak", branch = "wasm-main", default-features = false }
@@ -131,6 +141,12 @@ getrandom_v04 = { package = "getrandom", version = "0.4", features = ["wasm_js"]
 
 [features]
 default = []
+# Diagnostic-only WASM exports that must NOT ship in the production wallet build.
+# Currently gates `wallet_feasibility_check` (a Phase-0 probe that proves at the
+# WEAK `RegevSecurityLevel::Test` level). Off by default so the shipped wallet
+# surface never exposes a Test-level prover; build the diagnostic page with
+# `--features diagnostics`.
+diagnostics = []
 # Legacy plonky2 balance-processor browser demo (`src/wasm_demo.rs`). Off by default because the
 # module is stale on this branch (removed `*_async` APIs, missing generated fixtures). See lib.rs.
 legacy_wasm_demo = []

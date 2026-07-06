@@ -1,6 +1,6 @@
 const { Router } = require('express');
 const fs = require('fs');
-const { cli, wc, RPC, ANVIL0, sh, readJson, writeJson } = require('../lib/cli');
+const { cli, wc, RPC, depositKey, sh, readJson, writeJson } = require('../lib/cli');
 const { withLock } = require('../lib/lock');
 const { findActiveTicket, upsertTicket } = require('../lib/tickets');
 
@@ -24,10 +24,10 @@ router.post('/l1-send', (req, res) => {
       backing.deposit_recipient, '0', String(amount),
       '0x0000000000000000000000000000000000000000000000000000000000000000',
       '--value', String(amount),
-      '--private-key', ANVIL0, '--rpc-url', RPC, '--json',
+      '--private-key', depositKey(), '--rpc-url', RPC, '--json',
     ], { stdio: 'pipe' });
     const txHash = (out.match(/"transactionHash"\s*:\s*"(0x[0-9a-fA-F]+)"/) || [])[1] || '';
-    const depositor = sh('cast', ['wallet', 'address', '--private-key', ANVIL0], { stdio: 'pipe' }).trim();
+    const depositor = sh('cast', ['wallet', 'address', '--private-key', depositKey()], { stdio: 'pipe' }).trim();
     writeJson(wc(ch, 'pending_deposit.json'), { depositor, amount: String(amount), txHash });
     res.json({ txHash, depositor });
   } catch (e) {
@@ -85,9 +85,9 @@ router.post('/', (req, res) => {
         backing.deposit_recipient, '0', String(amt),
         '0x0000000000000000000000000000000000000000000000000000000000000000',
         '--value', String(amt),
-        '--private-key', ANVIL0, '--rpc-url', RPC, '--json',
+        '--private-key', depositKey(), '--rpc-url', RPC, '--json',
       ], { stdio: 'pipe' });
-      dep = sh('cast', ['wallet', 'address', '--private-key', ANVIL0], { stdio: 'pipe' }).trim();
+      dep = sh('cast', ['wallet', 'address', '--private-key', depositKey()], { stdio: 'pipe' }).trim();
     }
 
     cli(ch, ['cosign-l1-deposit-import', String(slot), String(amt), dep, 'l1_import_cosigned.json']);

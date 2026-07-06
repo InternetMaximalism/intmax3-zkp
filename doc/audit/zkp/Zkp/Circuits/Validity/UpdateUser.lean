@@ -1001,15 +1001,22 @@ structure Constraints
   `member_pubkeys_root` recomputed from the SAME member keys the keccak
   chain (and hence the L1 contract) committed (R2 cross-binding), with
   re-registration of an active channel rejected (R5). Those constraints
-  live INSIDE the excluded `channel_reg_hash_chain/channel_reg_step.rs`
+  live INSIDE the `channel_reg_hash_chain/channel_reg_step.rs` circuit
   (leaf write :432-447, R5 guard :433-437, R2 shared-target binding per
-  its module header). Until that circuit is brought into audit scope,
-  the account root on registration blocks — and therefore EVERY
-  balance/withdrawal theorem anchored to a post-registration root — is
-  sound only conditional on channel_reg_step.rs being sound. This is a
-  BASE-LAYER fund-risk dependency, not a channel-scoped one.
+  its module header).
 
-  Closing constraint (to be modeled when the circuit enters scope):
+  **STATUS: DISCHARGED (2026-07-06).** That circuit is now in scope —
+  `Circuits.ChannelRegStep` (Zkp/Circuits/Validity/ChannelRegStep.lean).
+  `tree_and_chain_share_member_set` proves the closing constraint below
+  (all three conjuncts, by construction — one shared `members` list feeds
+  both the tree leaf's `memberRoot` and the chain's `regDigest`), and
+  `chain_determines_tree` proves the anti-tamper direction: the
+  L1-committed `channel_reg_hash_chain` PINS the Poseidon `channel_tree_root`
+  the account root is swapped to (under the two named keccak-CR hypotheses
+  + `PowTwoInj F 32`). The base-layer registration-root exposure is thus
+  closed to standard, Goldilocks-true assumptions.
+
+  Closing constraint (now MODELED AND PROVED in `Circuits.ChannelRegStep`):
   `channel_reg_step.rs` per-step soundness
     `regTreeRoot' = writeLeaf regTreeRoot channelId
         (freshLeaf memberRoot)  ∧

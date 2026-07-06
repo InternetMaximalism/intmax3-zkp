@@ -283,10 +283,15 @@ impl<const D: usize> TxSettlementTarget<D> {
             .account_tree_root
             .connect(builder, public_state.account_tree_root);
 
-        let tx_tree_root = account_state
-            .send_leaf
-            .tx_tree_root
-            .reduce_to_hash_out(builder);
+        // SECURITY (TODO-2): use the canonicity-enforcing `to_hash_out`, NOT the bare
+        // `reduce_to_hash_out`. `send_leaf.tx_tree_root` is a prover-supplied `Bytes32`; the bare
+        // reduction is many-to-one (a non-canonical `Bytes32` = value+p aliases to the same
+        // `HashOut` as the canonical one), which would let a prover verify a tx against a tx-tree
+        // root that differs, byte-for-byte, from the committed one. `to_hash_out` round-trips
+        // through the unique 32/32 split and `connect`s, forcing the canonical representation —
+        // matching the native `TryFrom<Bytes32>` (which rejects non-canonical) and the sibling
+        // `update_channel_tree` conversion of the same tx-tree root.
+        let tx_tree_root = account_state.send_leaf.tx_tree_root.to_hash_out(builder);
         // Two-layer identity: the block tx tree is indexed by channel_id
         // (TX_TREE_HEIGHT == CHANNEL_ID_BITS).
         let tx_index = channel_id.channel_id(builder);

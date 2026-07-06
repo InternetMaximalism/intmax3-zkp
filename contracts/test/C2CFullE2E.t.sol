@@ -52,6 +52,7 @@ contract C2CFullE2ETest is Test {
             vdd.kIs, vdd.subgroupGenPowers, verifier, genesis,
             true // A-2: test opt-in for the degreeBits==0 bypass
         );
+        rollup.setBlockProducer(poster, true); // permissioned posting
         FixtureLib.DeployData memory wdd = FixtureLib.parseDeployData(withdrawalMleJson);
         IntmaxRollup.MleVk memory wvk = FixtureLib.buildMleVk(withdrawalMleJson, verifier);
         rollup.initializeWithdrawalVk(wvk, wdd.whirParams, wdd.protocolId, wdd.sessionId, wdd.kIs, wdd.subgroupGenPowers);
