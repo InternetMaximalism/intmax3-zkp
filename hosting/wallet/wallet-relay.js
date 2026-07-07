@@ -52,9 +52,16 @@ function withLock(ch, fn) {
 }
 
 // ---- Ticket persistence (one JSON array per channel) ----------------------------------------
+// tickets.json     = ACTIVE tickets (+ terminal ones for a short TTL, so an in-flight UI can react).
+// ticket_history.json = DURABLE log of every ticket that reached its terminal state (deposits AND
+//                       withdrawals), never TTL-pruned, capped at HISTORY_CAP. This is what the
+//                       "Processed" list reads.
 const TICKET_FILE = 'tickets.json';
+const HISTORY_FILE = 'ticket_history.json';
 const TICKET_TTL = 3600_000;
+const HISTORY_CAP = 200;
 const TERMINAL = { partial_withdrawal: 'settle_done', deposit: 'import_done', full_withdrawal: 'claim_done' };
+const isTerminal = (t) => TERMINAL[t.type] === t.status;
 
 function readTickets(ch) {
   try { return JSON.parse(fs.readFileSync(wc(ch, TICKET_FILE), 'utf8')); }
@@ -62,6 +69,18 @@ function readTickets(ch) {
 }
 function writeTickets(ch, tickets) {
   fs.writeFileSync(wc(ch, TICKET_FILE), JSON.stringify(tickets, null, 2));
+}
+function readHistory(ch) {
+  try { return JSON.parse(fs.readFileSync(wc(ch, HISTORY_FILE), 'utf8')); }
+  catch (e) { return []; }
+}
+// Record a terminal ticket in the durable history (upsert by id so re-terminal writes don't dup).
+function archiveTicket(ch, ticket) {
+  const hist = readHistory(ch);
+  const idx = hist.findIndex(t => t.id === ticket.id);
+  const entry = { ...ticket, archivedAt: Date.now() };
+  if (idx >= 0) hist[idx] = entry; else hist.push(entry);
+  fs.writeFileSync(wc(ch, HISTORY_FILE), JSON.stringify(hist.slice(-HISTORY_CAP), null, 2));
 }
 function findActiveTicket(ch, type) {
   return readTickets(ch).find(t => t.type === type && t.status !== TERMINAL[type]);
@@ -76,6 +95,7 @@ function upsertTicket(ch, ticket) {
     !Object.values(TERMINAL).includes(t.status) || (now - t.updatedAt) < TICKET_TTL
   );
   writeTickets(ch, kept);
+  if (isTerminal(ticket)) archiveTicket(ch, ticket); // durable "processed" record (deposits + withdrawals)
   return ticket;
 }
 
@@ -128,6 +148,29 @@ app.get('/api/snapshot', (req, res) => {
     const ch = reqChannel(req);
     res.json(JSON.parse(fs.readFileSync(wc(ch, 'channel_snapshot.json'), 'utf8')));
   } catch (e) { res.status(404).json({ error: 'no channel yet' }); }
+});
+
+// GET /api/poll?channel=N&since=<stateVersion>
+// Cheap change-check for the browser's balance poller. Reads the channel state_version WITHOUT any
+// decryption/proving and returns the full snapshot ONLY if the channel advanced past `since` (a
+// deposit/send/receive changed balances); otherwise 204 (no body). The browser then re-decrypts
+// ONLY when a snapshot comes back. Deliberately NOT withLock: a poll must never queue behind a
+// minutes-long proving CLI call, and a transient read during a CLI write just returns 204 (the next
+// tick succeeds). Any balance change bumps state_version, so `since === current` ⇒ balance unchanged.
+app.get('/api/poll', (req, res) => {
+  const ch = reqChannel(req);
+  const since = parseInt((req.query && req.query.since) || '', 10);
+  let snap;
+  try {
+    snap = JSON.parse(fs.readFileSync(wc(ch, 'channel_snapshot.json'), 'utf8'));
+  } catch (e) {
+    return res.status(204).end(); // no channel yet / mid-write → treat as "no change"
+  }
+  const st = snap && (snap.state || snap.State) || {};
+  const bs = st.balanceState || st.balance_state || {};
+  const sv = (bs.stateVersion != null) ? bs.stateVersion : bs.state_version;
+  if (Number.isInteger(since) && sv === since) return res.status(204).end();
+  res.json(snap);
 });
 
 // The channel's REAL Intmax deposit backing (detail2 §F-1): { fund, settledTxChain,
@@ -426,6 +469,17 @@ app.post('/api/pw-finalize', (req, res) => {
 app.get('/api/tickets', (req, res) => {
   const ch = reqChannel(req);
   res.json(readTickets(ch));
+});
+
+// Processed (terminal) tickets — deposits AND withdrawals — most recent first. Merges the durable
+// history log with any terminal tickets still lingering in tickets.json (within TTL), deduped by id.
+app.get('/api/tickets/history', (req, res) => {
+  const ch = reqChannel(req);
+  const hist = readHistory(ch);
+  const seen = new Set(hist.map(t => t.id));
+  const recent = readTickets(ch).filter(t => isTerminal(t) && !seen.has(t.id));
+  const merged = hist.concat(recent).sort((a, b) => (a.archivedAt || a.updatedAt || 0) - (b.archivedAt || b.updatedAt || 0));
+  res.json(merged.reverse());
 });
 
 app.post('/api/ticket/deposit', (req, res) => {

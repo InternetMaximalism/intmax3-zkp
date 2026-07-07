@@ -64,6 +64,7 @@
   <nav id="navBar" class="hidden">
     <button class="nav-btn" id="navDeposit">Deposit</button>
     <button class="nav-btn" id="navWithdraw">Withdraw</button>
+    <button class="nav-btn" id="navHistory">History</button>
   </nav>
   <button class="nav-btn" id="btnWallet" style="margin-left:8px">Connect Wallet</button>
 </header>
@@ -177,6 +178,15 @@
   </div>
 </div>
 
+<!-- ═══════ PROCESSED / HISTORY MODAL ═══════ -->
+<div id="historyModal" class="modal-overlay hidden">
+  <div class="modal">
+    <button class="modal-close" id="historyClose">&times;</button>
+    <h2>Processed</h2>
+    <div id="historyList" style="max-height:60vh;overflow-y:auto"></div>
+  </div>
+</div>
+
 <script type="module">
 const $ = (id) => document.getElementById(id);
 
@@ -202,6 +212,55 @@ $('btnBack').onclick = () => showView('main');
 $('navDeposit').onclick = () => $('depositModal').classList.remove('hidden');
 $('depositClose').onclick = () => $('depositModal').classList.add('hidden');
 $('depositModal').onclick = (e) => { if (e.target === $('depositModal')) $('depositModal').classList.add('hidden'); };
+
+// ---- Processed / history modal --------------------------------------------------------------
+const TYPE_LABEL = { deposit: 'Deposit', partial_withdrawal: 'Partial withdrawal', full_withdrawal: 'Full withdrawal' };
+async function fetchHistory() {
+  try { return JSON.parse(await api('/api/tickets/history', null, 'GET')); }
+  catch (e) { return []; }
+}
+function fmtTime(ms) { try { return ms ? new Date(ms).toLocaleString() : ''; } catch (e) { return ''; } }
+function renderHistory(items) {
+  const list = $('historyList');
+  list.innerHTML = '';
+  if (!items || items.length === 0) {
+    const empty = document.createElement('div');
+    empty.style.cssText = 'padding:12px 0;color:var(--muted);font-size:13px';
+    empty.textContent = 'No processed operations yet.';
+    list.appendChild(empty);
+    return;
+  }
+  for (const t of items) {
+    const row = document.createElement('div');
+    row.style.cssText = 'padding:10px 0;border-bottom:1px solid var(--border);font-size:13px';
+    const label = TYPE_LABEL[t.type] || t.type;
+    const amt = (t.params && t.params.amount) ? fmtAmt(t.params.amount) + ' ETH' : '';
+    const top = document.createElement('div');
+    top.style.cssText = 'display:flex;justify-content:space-between;gap:12px';
+    const left = document.createElement('span');
+    left.innerHTML = '<b>' + label + '</b>' + (amt ? ' — ' + amt : '');
+    const right = document.createElement('span');
+    right.style.cssText = 'color:var(--muted)';
+    right.textContent = fmtTime(t.archivedAt || t.updatedAt);
+    top.appendChild(left); top.appendChild(right);
+    row.appendChild(top);
+    const meta = document.createElement('div');
+    meta.style.cssText = 'color:var(--muted);margin-top:2px';
+    const bits = ['status: ' + t.status];
+    if (t.params && t.params.recipient) bits.push('to ' + String(t.params.recipient).slice(0, 10) + '...');
+    if (t.params && t.params.txHash) bits.push('tx ' + String(t.params.txHash).slice(0, 10) + '...');
+    meta.textContent = bits.join('  ·  ');
+    row.appendChild(meta);
+    list.appendChild(row);
+  }
+}
+$('navHistory').onclick = async () => {
+  $('historyList').innerHTML = '<div style="padding:12px 0;color:var(--muted);font-size:13px">Loading…</div>';
+  $('historyModal').classList.remove('hidden');
+  renderHistory(await fetchHistory());
+};
+$('historyClose').onclick = () => $('historyModal').classList.add('hidden');
+$('historyModal').onclick = (e) => { if (e.target === $('historyModal')) $('historyModal').classList.add('hidden'); };
 
 // ---- Log -----------------------------------------------------------------------------------
 function log(m, cls='') {
@@ -435,6 +494,11 @@ let mySlot = 0;
 let myChannel = null;
 let activeCh = 7;
 let sendPhase = 'Proving';
+// Balance auto-refresh: the last state_version we've decrypted+rendered. The poller asks the relay
+// "changed since this?" and only re-decrypts when a newer snapshot comes back.
+let mySeenVersion = null;
+let _pollTimer = null;
+let _polling = false;
 let fwSettlement = null;
 
 function setChannelFrom(snapJson) {
@@ -489,11 +553,34 @@ async function api(pathname, body, method='POST') {
 
 // ---- UI updates ----------------------------------------------------------------------------
 function showBalance(r) {
+  mySeenVersion = r.stateVersion; // remember what we've rendered, so the poller only reacts to newer
   $('balance').textContent = fmtAmt(r.balance);
   const addr = formatAddr(myChannel ?? activeCh, r.slot);
   $('myAddress').textContent = addr;
   $('balMeta').textContent = 'channel ' + (myChannel ?? '?') + ' / slot ' + r.slot + ' / v' + r.stateVersion + ' / ' + (r.canSend ? 'ready' : 'refresh to send');
 }
+
+// ---- Balance auto-refresh (efficient poll) -------------------------------------------------
+// Cheap ping: /api/poll returns 204 (nothing) when the channel state_version is unchanged, or the
+// full snapshot when it advanced. We re-decrypt (importChannel) ONLY on a change, and never while a
+// multi-step op is running (_inflight guards join/send/deposit/etc — importing mid-op would corrupt
+// the wasm session state).
+async function pollBalanceOnce() {
+  if (_polling || mySeenVersion == null || _inflight.size > 0) return;
+  _polling = true;
+  try {
+    const snap = await api('/api/poll?since=' + mySeenVersion, null, 'GET');
+    if (!snap) return;              // 204 → no change, no work
+    if (_inflight.size > 0) return; // an op started during the await — let it own the session
+    setChannelFrom(snap);
+    const r = JSON.parse(await call('importChannel', { snapshotJson: snap }));
+    mySlot = r.slot; showBalance(r);
+    log('balance updated (v' + r.stateVersion + '): ' + fmtAmt(r.balance) + (r.canSend ? '' : ' (refresh to send)'), 'ok');
+  } catch (e) { /* transient (mid-write / offline) — next tick retries */ }
+  finally { _polling = false; }
+}
+function startBalancePolling() { if (!_pollTimer) _pollTimer = setInterval(pollBalanceOnce, 4000); }
+function stopBalancePolling() { if (_pollTimer) { clearInterval(_pollTimer); _pollTimer = null; } }
 
 function showJoined() {
   $('panelJoin').classList.add('hidden');
@@ -509,6 +596,7 @@ function showJoined() {
     $('btnFwDeploySettlement').disabled = false;
   }
   fillRecipientFields();
+  startBalancePolling(); // auto-refresh balance while the channel is open
 }
 
 $('myAddress').onclick = async () => {
@@ -667,7 +755,7 @@ async function tryRestore() {
 }
 
 // ---- JOIN ----------------------------------------------------------------------------------
-$('btnOpen').onclick = async () => {
+$('btnOpen').onclick = guard('join', async () => {
   const t0 = Date.now();
   let tick = setInterval(() => { $('btnOpen').textContent = 'Joining... ' + Math.round((Date.now()-t0)/1000) + 's'; }, 250);
   let joined = false;
@@ -680,8 +768,12 @@ $('btnOpen').onclick = async () => {
     if (isNaN(depositTokens) || depositTokens < 0) throw new Error('deposit must be zero or positive');
 
     log('joining channel ' + activeCh + '...');
+    // B-1b: the genesis contribution binds the member's L1 exit address into the cosigner-signed
+    // balance-slot leaf (the delegate's only payout binding), so a connected wallet is required and
+    // its address is passed as the recipient.
+    await ensureWallet();
     await step('generate keys', () => call('keygenSeeded', { seed: channelSeed() }));
-    const contribution = await step('genesis contribution (balance 0)', () => call('genesisContribution', { balance: toBase('0') }));
+    const contribution = await step('genesis contribution (balance 0)', () => call('genesisContribution', { balance: toBase('0'), recipient: walletAccount }));
     const snapshot = await step('CLI co-signs genesis', () => api('/api/init', contribution));
     setChannelFrom(snapshot);
     const r = JSON.parse(await step('import channel', () => call('importChannel', { snapshotJson: snapshot })));
@@ -724,9 +816,10 @@ $('btnOpen').onclick = async () => {
   }
   clearInterval(tick);
   $('btnOpen').textContent = 'Join & Deposit';
-};
+});
 
 $('btnClear').onclick = () => {
+  stopBalancePolling();
   clearSavedAccount();
   log('cleared saved account -- reloading...', '');
   setTimeout(() => location.reload(), 400);
@@ -788,7 +881,7 @@ async function attemptInterChannelSend(toCh, to, amt) {
   return JSON.parse(await call('finalize', { stateJson: JSON.stringify(transfer.aHead) }));
 }
 
-$('btnSend').onclick = async () => {
+$('btnSend').onclick = guard('send', async () => {
   const t0 = Date.now();
   sendPhase = 'Proving';
   const tick = setInterval(() => { $('btnSend').textContent = sendPhase + '... ' + Math.round((Date.now()-t0)/1000) + 's'; }, 250);
@@ -822,7 +915,7 @@ $('btnSend').onclick = async () => {
   clearInterval(tick);
   $('btnSend').textContent = 'Send';
   $('btnSend').disabled = false;
-};
+});
 
 // ---- DEPOSIT MODAL -------------------------------------------------------------------------
 $('btnDeposit').onclick = guard('deposit', async () => {
