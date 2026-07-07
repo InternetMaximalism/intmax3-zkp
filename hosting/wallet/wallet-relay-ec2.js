@@ -136,7 +136,11 @@ app.use((req, res, next) => {
   res.setHeader('Cross-Origin-Opener-Policy', 'same-origin');
   res.setHeader('Cross-Origin-Resource-Policy', 'same-origin');
   if (req.path.endsWith('.wasm')) res.setHeader('Content-Type', 'application/wasm');
-  if (req.path.startsWith('/pkg/')) res.setHeader('Cache-Control', 'public, max-age=3600');
+  // `no-cache` = the browser MAY cache but MUST revalidate (conditional GET) every load. After a
+  // redeploy the wasm's ETag changes, so the browser fetches the new bytes; when unchanged it gets a
+  // cheap 304 (no re-download). This avoids the stale-wasm/worker mismatch that `max-age=3600` caused
+  // (an old 1-arg genesis wasm vs a new recipient-requiring CLI → "missing field `recipient`").
+  if (req.path.startsWith('/pkg/')) res.setHeader('Cache-Control', 'no-cache');
   else res.setHeader('Cache-Control', 'no-store');
   next();
 });
