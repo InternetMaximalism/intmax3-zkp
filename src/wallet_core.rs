@@ -4025,6 +4025,69 @@ mod delegate_send_tests {
         (record, keys, members, genesis, witnesses)
     }
 
+    /// REPRO (browser deposit-display bug): two consecutive L1 deposit imports must reflect the
+    /// RUNNING balance after EACH import. Mirrors the relay CLI `cosign-l1-deposit-import`
+    /// (including its deterministic per-call encryption seed) with REAL wei amounts
+    /// (0.05 then 0.01 ETH), depositing into the delegate slot (the browser member).
+    #[test]
+    fn deposit_import_reflects_running_balance_each_step() {
+        let mut rng = StdRng::seed_from_u64(0x0DEB17);
+        let channel_id = 7u32;
+        let (record, keys, members, genesis, _w) =
+            setup_delegate_channel(&mut rng, channel_id, [0, 0, 0]);
+        let mut snapshot = ChannelSnapshot {
+            record,
+            state: genesis,
+            members,
+            settled_tx_accumulator: default_settled_tx_accumulator(),
+        };
+
+        let recipient_slot = 2usize; // delegate = the browser member
+        let deposits = [50_000_000_000_000_000u64, 10_000_000_000_000_000u64];
+        let mut expected = 0u64;
+        for (i, &amount) in deposits.iter().enumerate() {
+            expected += amount;
+            let deposit = Deposit {
+                deposit_index: Default::default(),
+                block_number: Default::default(),
+                depositor: Address::default(),
+                recipient: Bytes32::default(),
+                token_index: 0,
+                amount: U256::from(amount),
+                aux_data: Bytes32::default(),
+            };
+            // MIRROR the relay CLI exactly: the SAME deterministic seed on every call.
+            let mut drng = StdRng::seed_from_u64(0xDE_0517 ^ channel_id as u64);
+            let (delta, _) =
+                encrypt_amount(&mut drng, &keys[recipient_slot].regev_pk, amount).unwrap();
+            let built = build_l1_deposit_import(
+                &keys[0],
+                &snapshot,
+                &deposit,
+                recipient_slot,
+                &delta,
+                LEVEL,
+            )
+            .unwrap();
+            let mut bundle = built.bundle_apply_state.clone();
+            let s0 = sign_state(&keys[0], 0, &bundle).unwrap();
+            add_signature(&mut bundle, s0);
+            let s1 = sign_state(&keys[1], 1, &bundle).unwrap();
+            add_signature(&mut bundle, s1);
+            snapshot.state = bundle;
+            let bal =
+                decrypt_balance(&keys[recipient_slot], &snapshot, recipient_slot as u8).unwrap();
+            assert_eq!(
+                bal, expected,
+                "after deposit #{} (+{} wei) balance should be {} but was {}",
+                i + 1,
+                amount,
+                expected,
+                bal
+            );
+        }
+    }
+
     /// DA-send-happy: the DELEGATE (slot 2) builds a ChannelTx sending to a member (slot 0), with
     /// its OWN BabyBear hash-sig (A11) over the IMPA digest and the E-1 channelTxZKP. The
     /// transition

@@ -923,11 +923,85 @@ contract IntmaxRollupTest is Test {
         rollup.postBlockAndSubmit{value: 1 ether}(batch, keccak256("p2"), 1, keccak256("s2"));
     }
 
-    function test_setBlockProducer_revert_notDeployer() public {
+    function test_setBlockProducer_revert_notManager() public {
         address rando = makeAddr("rando");
-        vm.prank(rando);
-        vm.expectRevert(IntmaxRollup.OnlyDeployer.selector);
+        vm.prank(rando); // not deployer and not blockProducerAdmin
+        vm.expectRevert(IntmaxRollup.NotBlockProducerManager.selector);
         rollup.setBlockProducer(rando, true);
+    }
+
+    // -----------------------------------------------------------------------
+    // Block-producer admin (posting authority = admin or its designees)
+    // -----------------------------------------------------------------------
+
+    function _singleBlockBatchFor(uint32 id) internal view returns (IntmaxRollup.SubBlock[] memory) {
+        uint32[] memory ids = new uint32[](1);
+        ids[0] = 1;
+        return _singleBlockBatch(id, ids, uint64(block.timestamp), bytes32(uint256(0xabc)));
+    }
+
+    function test_blockProducerAdmin_canPostDirectly() public {
+        address admin = makeAddr("bpAdmin");
+        vm.deal(admin, 10 ether);
+        IntmaxRollup.SubBlock[] memory batch = _singleBlockBatchFor(1);
+
+        // Before being admin: rejected.
+        _mockBlob();
+        vm.prank(admin);
+        vm.expectRevert(IntmaxRollup.NotAuthorizedBlockProducer.selector);
+        rollup.postBlockAndSubmit{value: 1 ether}(batch, keccak256("p"), 1, keccak256("s"));
+
+        // Deployer sets the admin; the admin can now post WITHOUT being in the whitelist.
+        rollup.setBlockProducerAdmin(admin);
+        assertEq(rollup.blockProducerAdmin(), admin);
+        assertFalse(rollup.isBlockProducer(admin), "admin posts without whitelist entry");
+        _mockBlob();
+        vm.prank(admin);
+        rollup.postBlockAndSubmit{value: 1 ether}(batch, keccak256("p"), 1, keccak256("s"));
+        assertEq(rollup.nextSubmissionId(), 1, "admin post recorded");
+    }
+
+    function test_blockProducerAdmin_canDesignateProducer() public {
+        address admin = makeAddr("bpAdmin");
+        address designee = makeAddr("designee");
+        vm.deal(designee, 10 ether);
+        rollup.setBlockProducerAdmin(admin);
+
+        // A non-manager cannot designate.
+        vm.prank(makeAddr("rando"));
+        vm.expectRevert(IntmaxRollup.NotBlockProducerManager.selector);
+        rollup.setBlockProducer(designee, true);
+
+        // The admin designates the producer, who can then post.
+        vm.prank(admin);
+        rollup.setBlockProducer(designee, true);
+        assertTrue(rollup.isBlockProducer(designee));
+        IntmaxRollup.SubBlock[] memory batch = _singleBlockBatchFor(1);
+        _mockBlob();
+        vm.prank(designee);
+        rollup.postBlockAndSubmit{value: 1 ether}(batch, keccak256("p"), 1, keccak256("s"));
+        assertEq(rollup.nextSubmissionId(), 1, "designee post recorded");
+    }
+
+    function test_setBlockProducerAdmin_onlyDeployer_and_rotatable() public {
+        address admin = makeAddr("bpAdmin");
+        address other = makeAddr("other");
+        vm.deal(admin, 10 ether);
+        // Non-deployer cannot set the admin (even a current admin cannot rotate itself).
+        rollup.setBlockProducerAdmin(admin);
+        vm.prank(admin);
+        vm.expectRevert(IntmaxRollup.OnlyDeployer.selector);
+        rollup.setBlockProducerAdmin(other);
+
+        // Deployer rotates; the old admin loses posting rights.
+        address admin2 = makeAddr("bpAdmin2");
+        rollup.setBlockProducerAdmin(admin2);
+        assertEq(rollup.blockProducerAdmin(), admin2);
+        IntmaxRollup.SubBlock[] memory batch = _singleBlockBatchFor(1);
+        _mockBlob();
+        vm.prank(admin);
+        vm.expectRevert(IntmaxRollup.NotAuthorizedBlockProducer.selector);
+        rollup.postBlockAndSubmit{value: 1 ether}(batch, keccak256("p"), 1, keccak256("s"));
     }
 
     // -----------------------------------------------------------------------
