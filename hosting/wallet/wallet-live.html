@@ -793,6 +793,10 @@ $('btnOpen').onclick = guard('join', async () => {
       try {
         await api('/api/ticket/deposit', JSON.stringify({ amount: depositAmt, depositor: dr.depositor, txHash: dr.txHash, recipientSlot: mySlot }));
       } catch (e) { log('ticket save failed (continuing): ' + e.message, ''); }
+      // Surface the initial deposit as a PENDING ticket now (l1_done), so it is tracked until the
+      // import below reflects it in the balance (then it moves to Processed/History). If the import
+      // fails, this pending ticket stays with a "Resume Import" button — the deposit is not lost.
+      await fetchTickets(); applyTicketState();
 
       clearInterval(tick);
       tick = setInterval(() => { $('btnOpen').textContent = 'Importing... ' + Math.round((Date.now()-t0)/1000) + 's'; }, 250);
