@@ -391,7 +391,280 @@ theorem l1_deposit_chain_step
     (applyL1DepositImportChain s recipient amount recipientDelta depositNullifier hash2).settledChain
       = hash2 s.settledChain depositNullifier := rfl
 
-/-! ## §8 Sanity -/
+/-! ## §8 Batched intra-channel transfer (abstract2-1 §2.2b / §3.2b / §4.2b)
+
+One state transition applies K txs: all debits against the ANCHOR state, then
+all credits (canonical fold, R3). Soundness rests on the single-debit rule R1
+(`sendersDistinct`): each tx's channelTxZKP is stated against the anchor
+ciphertext of its own sender slot, and the K debited slots are disjoint.
+
+  `batch_preserves_validity` — ValidEncState21 is maintained and the channel
+      total (= provenTotal) is conserved for ANY proven batch (sender-as-
+      recipient allowed).
+  `batch_step_eq_seq` — when additionally no debiting slot is credited in the
+      same batch, the fold is extensionally equal to the sequential per-tx
+      application (the abstract2 §3.2 chain); with sender-as-recipient the
+      batch equals the debit-before-credit order, and validity/conservation
+      are covered directly by `batch_preserves_validity`. -/
+
+structure BatchTx where
+  sender : Member
+  recipient : Member
+  amount : Int
+  encAmount : Ct
+  afterCt : Ct
+
+/-- channelTxZKP statement of one batch tx against the ANCHOR state `s`
+    (abstract2-1 §2.2 binding refinement): `encAmount` encrypts a non-negative
+    `amount`; `afterCt` encrypts `s.bal sender − amount`, non-negative. -/
+def BatchTxProven (s : EncBalanceState21) (t : BatchTx) : Prop :=
+  0 ≤ t.amount
+  ∧ t.encAmount.pt = t.amount
+  ∧ t.afterCt.pt = s.bal t.sender - t.amount
+  ∧ 0 ≤ t.afterCt.pt
+
+/-- R1 (single-debit rule): sender slots pairwise distinct. -/
+def sendersDistinct : List BatchTx → Prop
+  | [] => True
+  | t :: rest => (∀ u ∈ rest, u.sender ≠ t.sender) ∧ sendersDistinct rest
+
+/-- What every co-signer checks before signing a batch (§3.2b.3). -/
+def BatchProven (s : EncBalanceState21) (txs : List BatchTx) : Prop :=
+  (∀ t ∈ txs, BatchTxProven s t) ∧ sendersDistinct txs
+
+/-- Replace one slot's ciphertext (a debit installs the fresh `after` ct). -/
+def setCt (f : Member → Ct) (m : Member) (c : Ct) : Member → Ct :=
+  fun j => if j = m then c else f j
+
+def debitFold (f : Member → Ct) : List BatchTx → (Member → Ct)
+  | [] => f
+  | t :: rest => debitFold (setCt f t.sender t.afterCt) rest
+
+def creditFold (f : Member → Ct) : List BatchTx → (Member → Ct)
+  | [] => f
+  | t :: rest => creditFold (updCt f t.recipient t.encAmount) rest
+
+/-- §3.2b.2 canonical fold: debits first (against the anchor), then credits.
+    ONE version bump for the whole batch; `settledChain` invariant (`H2 = 0`);
+    `provenTotal` unchanged (intra-channel). -/
+def applyBatch (s : EncBalanceState21) (txs : List BatchTx) : EncBalanceState21 where
+  encBal := creditFold (debitFold s.encBal txs) txs
+  provenTotal := s.provenTotal
+  version := s.version + 1
+  settledChain := s.settledChain
+
+def mapTotal (f : Member → Ct) : Int :=
+  (f .m0).pt + (f .m1).pt + (f .m2).pt
+
+def amtSum : List BatchTx → Int
+  | [] => 0
+  | t :: rest => t.amount + amtSum rest
+
+theorem setCt_total (f : Member → Ct) (m : Member) (c : Ct) :
+    mapTotal (setCt f m c) = mapTotal f - (f m).pt + c.pt := by
+  cases m <;> simp [mapTotal, setCt] <;> omega
+
+theorem updCt_mapTotal (f : Member → Ct) (m : Member) (d : Ct) :
+    mapTotal (updCt f m d) = mapTotal f + d.pt := by
+  have h := updCt_total f m d
+  simpa [mapTotal] using h
+
+/-- Credits add exactly the encrypted amounts. -/
+theorem creditFold_total (txs : List BatchTx) (f : Member → Ct)
+    (hprf : ∀ t ∈ txs, t.encAmount.pt = t.amount) :
+    mapTotal (creditFold f txs) = mapTotal f + amtSum txs := by
+  induction txs generalizing f with
+  | nil => simp [creditFold, amtSum]
+  | cons t rest ih =>
+    have ht := hprf t (List.mem_cons_self _ _)
+    have ihr := ih (updCt f t.recipient t.encAmount)
+      (fun u hu => hprf u (List.mem_cons_of_mem _ hu))
+    simp only [creditFold, amtSum]
+    rw [ihr, updCt_mapTotal, ht]
+    omega
+
+/-- Debits remove exactly the amounts, provided each debit still sees the
+    ANCHOR ciphertext of its sender slot (guaranteed by R1: earlier debits in
+    the fold touch other slots only). -/
+theorem debitFold_total (s : EncBalanceState21) (txs : List BatchTx)
+    (f : Member → Ct)
+    (hagree : ∀ t ∈ txs, f t.sender = s.encBal t.sender)
+    (hdist : sendersDistinct txs)
+    (hprf : ∀ t ∈ txs, BatchTxProven s t) :
+    mapTotal (debitFold f txs) = mapTotal f - amtSum txs := by
+  induction txs generalizing f with
+  | nil => simp [debitFold, amtSum]
+  | cons t rest ih =>
+    obtain ⟨hhead, hrest⟩ := hdist
+    obtain ⟨_, _, hafter, _⟩ := hprf t (List.mem_cons_self _ _)
+    have hat : f t.sender = s.encBal t.sender := hagree t (List.mem_cons_self _ _)
+    have hat' : (f t.sender).pt = (s.encBal t.sender).pt := by rw [hat]
+    have hagree' : ∀ u ∈ rest,
+        (setCt f t.sender t.afterCt) u.sender = s.encBal u.sender := by
+      intro u hu
+      have hne : u.sender ≠ t.sender := hhead u hu
+      simp only [setCt, if_neg hne]
+      exact hagree u (List.mem_cons_of_mem _ hu)
+    have ihr := ih (setCt f t.sender t.afterCt) hagree' hrest
+      (fun u hu => hprf u (List.mem_cons_of_mem _ hu))
+    have hbal : (s.encBal t.sender).pt = s.bal t.sender := rfl
+    simp only [debitFold, amtSum]
+    rw [ihr, setCt_total]
+    omega
+
+/-- Pointwise: credits never decrease a slot. -/
+theorem creditFold_ge (txs : List BatchTx) (f : Member → Ct)
+    (hnn : ∀ t ∈ txs, 0 ≤ t.encAmount.pt) (j : Member) :
+    (f j).pt ≤ (creditFold f txs j).pt := by
+  induction txs generalizing f with
+  | nil => simp [creditFold]
+  | cons t rest ih =>
+    have ht := hnn t (List.mem_cons_self _ _)
+    have h2 := ih (updCt f t.recipient t.encAmount)
+      (fun u hu => hnn u (List.mem_cons_of_mem _ hu))
+    have step : (f j).pt ≤ (updCt f t.recipient t.encAmount j).pt := by
+      by_cases hj : j = t.recipient
+      · simp [updCt, hj]; omega
+      · simp [updCt, hj]
+    simp only [creditFold]
+    omega
+
+/-- Pointwise: after all debits every slot is still non-negative. -/
+theorem debitFold_nonneg (s : EncBalanceState21) (txs : List BatchTx)
+    (f : Member → Ct)
+    (hf : ∀ j, 0 ≤ (f j).pt)
+    (hprf : ∀ t ∈ txs, BatchTxProven s t) (j : Member) :
+    0 ≤ (debitFold f txs j).pt := by
+  induction txs generalizing f with
+  | nil => exact hf j
+  | cons t rest ih =>
+    obtain ⟨_, _, _, hpos⟩ := hprf t (List.mem_cons_self _ _)
+    have hf' : ∀ k, 0 ≤ ((setCt f t.sender t.afterCt) k).pt := by
+      intro k
+      by_cases hk : k = t.sender
+      · simp [setCt, hk]; exact hpos
+      · simp [setCt, hk]; exact hf k
+    exact ih (setCt f t.sender t.afterCt) hf'
+      (fun u hu => hprf u (List.mem_cons_of_mem _ hu))
+
+/-- §4.2b (3): a proven batch conserves the channel total. -/
+theorem batch_conserves_total (s : EncBalanceState21) (txs : List BatchTx)
+    (h : BatchProven s txs) :
+    (applyBatch s txs).total = s.total := by
+  obtain ⟨hprf, hdist⟩ := h
+  have henc : ∀ t ∈ txs, t.encAmount.pt = t.amount := fun t ht => (hprf t ht).2.1
+  have hd := debitFold_total s txs s.encBal (fun _ _ => rfl) hdist hprf
+  have hc := creditFold_total txs (debitFold s.encBal txs) henc
+  show mapTotal (creditFold (debitFold s.encBal txs) txs) = mapTotal s.encBal
+  omega
+
+/-- §4.2b main theorem: a proven batch (R1; sender-as-recipient allowed)
+    preserves the inductive channel invariant, conserves `provenTotal`, and
+    leaves `settledTxChain` untouched. -/
+theorem batch_preserves_validity (s : EncBalanceState21) (txs : List BatchTx)
+    (hvalid : ValidEncState21 s) (h : BatchProven s txs) :
+    ValidEncState21 (applyBatch s txs)
+    ∧ (applyBatch s txs).provenTotal = s.provenTotal
+    ∧ (applyBatch s txs).settledChain = s.settledChain := by
+  obtain ⟨hnn, htot⟩ := hvalid
+  obtain ⟨hprf, hdist⟩ := h
+  refine ⟨⟨?_, ?_⟩, rfl, rfl⟩
+  · -- every component non-negative: mid ≥ 0, credits only add
+    intro j
+    have hmid := debitFold_nonneg s txs s.encBal (fun k => hnn k) hprf j
+    have hge := creditFold_ge txs (debitFold s.encBal txs)
+      (fun t ht => by
+        obtain ⟨hpos, henc, _, _⟩ := hprf t ht
+        omega) j
+    show 0 ≤ (creditFold (debitFold s.encBal txs) txs j).pt
+    omega
+  · -- total = provenTotal
+    have hcons := batch_conserves_total s txs ⟨hprf, hdist⟩
+    have h1 : EncBalanceState.total (EncBalanceState21.toV2 (applyBatch s txs))
+        = (applyBatch s txs).total := rfl
+    show EncBalanceState.total (EncBalanceState21.toV2 (applyBatch s txs))
+        = (EncBalanceState21.toV2 (applyBatch s txs)).provenTotal
+    rw [h1, hcons]
+    exact htot
+
+/-! ### Sequential equivalence (§4.2b (1)) -/
+
+/-- One tx applied the abstract2 §3.2 way: install the sender's fresh `after`
+    ct, then credit the recipient homomorphically. -/
+def seqStep (f : Member → Ct) (t : BatchTx) : Member → Ct :=
+  updCt (setCt f t.sender t.afterCt) t.recipient t.encAmount
+
+def seqFold (f : Member → Ct) : List BatchTx → (Member → Ct)
+  | [] => f
+  | t :: rest => seqFold (seqStep f t) rest
+
+theorem setCt_updCt_comm (f : Member → Ct) (m r : Member) (c d : Ct)
+    (hne : m ≠ r) :
+    setCt (updCt f r d) m c = updCt (setCt f m c) r d := by
+  funext j
+  by_cases hjm : j = m
+  · subst hjm; simp [setCt, updCt, hne]
+  · by_cases hjr : j = r
+    · subst hjr; simp [setCt, updCt, hjm]
+    · simp [setCt, updCt, hjm, hjr]
+
+theorem debitFold_updCt_comm (rest : List BatchTx) (f : Member → Ct)
+    (r : Member) (d : Ct)
+    (hne : ∀ u ∈ rest, u.sender ≠ r) :
+    updCt (debitFold f rest) r d = debitFold (updCt f r d) rest := by
+  induction rest generalizing f with
+  | nil => rfl
+  | cons u tail ih =>
+    have hu : u.sender ≠ r := hne u (List.mem_cons_self _ _)
+    simp only [debitFold]
+    rw [ih (setCt f u.sender u.afterCt)
+        (fun v hv => hne v (List.mem_cons_of_mem _ hv))]
+    rw [setCt_updCt_comm f u.sender r u.afterCt d hu]
+
+private theorem creditDebit_eq_seq (txs : List BatchTx) :
+    ∀ (f : Member → Ct), sendersDistinct txs →
+      (∀ t ∈ txs, ∀ u ∈ txs, t.sender ≠ u.recipient) →
+      creditFold (debitFold f txs) txs = seqFold f txs := by
+  induction txs with
+  | nil => intro f _ _; rfl
+  | cons t rest ih =>
+    intro f hdist hdisj
+    obtain ⟨_hhead, hrest⟩ := hdist
+    have hdisj' : ∀ a ∈ rest, ∀ b ∈ rest, a.sender ≠ b.recipient :=
+      fun a ha b hb =>
+        hdisj a (List.mem_cons_of_mem _ ha) b (List.mem_cons_of_mem _ hb)
+    have hcredit_t : ∀ u ∈ rest, u.sender ≠ t.recipient :=
+      fun u hu =>
+        hdisj u (List.mem_cons_of_mem _ hu) t (List.mem_cons_self _ _)
+    simp only [debitFold, creditFold, seqFold]
+    rw [debitFold_updCt_comm rest (setCt f t.sender t.afterCt)
+        t.recipient t.encAmount hcredit_t]
+    exact ih (updCt (setCt f t.sender t.afterCt) t.recipient t.encAmount)
+      hrest hdisj'
+
+/-- §4.2b (1): when no debiting slot is also credited in the batch, the
+    canonical fold equals the sequential per-tx application — the batch is
+    literally a compressed run of K abstract2 §3.2 steps sharing one
+    agreement round. -/
+theorem batch_step_eq_seq (s : EncBalanceState21) (txs : List BatchTx)
+    (hdist : sendersDistinct txs)
+    (hdisj : ∀ t ∈ txs, ∀ u ∈ txs, t.sender ≠ u.recipient) :
+    (applyBatch s txs).encBal = seqFold s.encBal txs :=
+  creditDebit_eq_seq txs s.encBal hdist hdisj
+
+/-- K = 1 degenerates to the single-tx transition (sender ≠ recipient). -/
+theorem batch_singleton_eq_single (s : EncBalanceState21) (t : BatchTx)
+    (hne : t.sender ≠ t.recipient) :
+    (applyBatch s [t]).encBal = seqStep s.encBal t := by
+  have hdist : sendersDistinct [t] := by simp [sendersDistinct]
+  have hdisj : ∀ a ∈ [t], ∀ b ∈ [t], a.sender ≠ b.recipient := by
+    intro a ha b hb
+    simp at ha hb
+    subst ha; subst hb; exact hne
+  have h := batch_step_eq_seq s [t] hdist hdisj
+  simpa [seqFold] using h
+
+/-! ## §9 Sanity -/
 
 section Sanity
 
@@ -435,6 +708,36 @@ theorem sample_bulk_conservation_dest1 :
   bulk_interChannel_conservation_dest sampleEnc21 sampleEnc21 .m0 1 sampleBulkDest1
     (by intro e he; simp [sampleBulkDest1, entryAonly] at he; subst he; rfl)
     sampleBulkDest1_proven
+
+/-- Batch sanity: m0→m1 (5) and m1→m2 (3) in ONE transition. m1 both debits
+    and receives (allowed by R2); senders {m0, m1} distinct (R1). -/
+def batchTx1 : BatchTx := ⟨.m0, .m1, 5, ⟨5⟩, ⟨5⟩⟩
+def batchTx2 : BatchTx := ⟨.m1, .m2, 3, ⟨3⟩, ⟨7⟩⟩
+
+theorem sampleBatch_proven :
+    BatchProven sampleEnc21 [batchTx1, batchTx2] := by
+  constructor
+  · intro t ht
+    simp [batchTx1, batchTx2] at ht
+    rcases ht with h | h
+    · subst h
+      exact ⟨by show (0:Int) ≤ 5; omega, rfl,
+             by show (5:Int) = 10 - 5; omega,
+             by show (0:Int) ≤ 5; omega⟩
+    · subst h
+      exact ⟨by show (0:Int) ≤ 3; omega, rfl,
+             by show (7:Int) = 10 - 3; omega,
+             by show (0:Int) ≤ 7; omega⟩
+  · simp [sendersDistinct, batchTx1, batchTx2]
+
+theorem sampleBatch_valid :
+    ValidEncState21 (applyBatch sampleEnc21 [batchTx1, batchTx2]) :=
+  (batch_preserves_validity sampleEnc21 [batchTx1, batchTx2]
+    sampleEnc21_valid sampleBatch_proven).1
+
+theorem sampleBatch_total_conserved :
+    (applyBatch sampleEnc21 [batchTx1, batchTx2]).total = sampleEnc21.total :=
+  batch_conserves_total sampleEnc21 [batchTx1, batchTx2] sampleBatch_proven
 
 def oneHonestModel21 : SigModel2 :=
   oneHonestModel2

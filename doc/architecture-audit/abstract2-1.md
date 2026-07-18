@@ -425,8 +425,11 @@ A partial withdrawal is a normal inter-channel send (§3.4 `flowSend1`/`flowSend
 - `withdrawCap`, `closeBurnTx`, `settledTxChain` binding: unchanged from abstract2 §4.2.
 
 **4.2b Batch soundness (§2.2b/§3.2b).** The batch preserves the inductive invariant of §3.1
-("every component non-negative, total sum constant") for the same reason the single tx does,
-because a batch is **extensionally equal to a sequential application** of its K txs:
+("every component non-negative, total sum constant") for the same reason the single tx does.
+When no debiting slot is also credited in the batch, the fold is **extensionally equal to a
+sequential application** of its K txs (`batch_step_eq_seq`); in the sender-as-recipient case the
+debit-before-credit fold order is normative and the invariant is proven directly
+(`batch_preserves_validity`):
 
 1. **Debits are independent and individually proven.** Each `channelTxZKP` proves conservation and
    non-negativity for its own slot against `before_i = S.encBalances[i]`. By R1 the K debited slots
