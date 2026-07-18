@@ -55,6 +55,7 @@ function withLock(ch, fn) {
 // and folded into ONE co-signed state transition. Payloads anchored at a stale head are rejected
 // up-front (they could never co-sign — same as today's behavior for the 2nd of two racing sends).
 // If a batch fails (one bad payload poisons it), fall back to solo cosigns so honest txs survive.
+const COALESCE_MS = parseInt(process.env.COSIGN_COALESCE_MS || '150', 10);
 const _sendQueues = {};   // ch -> [{ payload, resolve, reject }]
 const _draining = {};
 function enqueueCosign(ch, payload) {
@@ -72,12 +73,18 @@ function drainCosigns(ch) {
   _draining[ch] = true;
   withLock(ch, async () => {
     while ((_sendQueues[ch] || []).length) {
+      // COALESCE window: requests that arrive within this window (or during the previous
+      // proving) fold into one batch. Negligible vs 1-8s proving, but it turns "K simultaneous
+      // sends on an idle channel" into a real batch. 150ms default: multi-MB payloads take tens
+      // of ms each just to upload+JSON-parse, so 40ms proved too tight for 3 concurrent senders
+      // (measured on the stress clone: 40ms → batch of 2 + 1 stale; 150ms → batch of 3).
+      await new Promise((r) => setTimeout(r, COALESCE_MS));
       const taken = _sendQueues[ch].splice(0);
-      // Pre-filter stale anchors (state.digest is snake_case; SendPayload wrapper is camelCase).
+      // Pre-filter stale anchors (ChannelState serializes camelCase: prevDigest / digest).
       const head = headDigestOf(ch);
       const batch = [];
       for (const item of taken) {
-        const anchor = item.payload && item.payload.proposedNextState && item.payload.proposedNextState.prev_digest;
+        const anchor = item.payload && item.payload.proposedNextState && item.payload.proposedNextState.prevDigest;
         if (head && anchor && anchor !== head) {
           item.reject(new Error('stale anchor: channel head advanced; re-import the snapshot and rebuild the send'));
         } else batch.push(item);
