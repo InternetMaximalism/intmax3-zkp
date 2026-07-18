@@ -148,7 +148,8 @@ $('btnKeygen').onclick = async () => {
   o.dataset.status = 'ok';
 };
 $('btnGenesis').onclick = async () => {
-  const j = await call('genesisContribution', { balance: $('genBalance').value });
+  // B-1b: dev page uses a fixed NONZERO dev recipient (real flows pass the user's wallet address).
+  const j = await call('genesisContribution', { balance: $('genBalance').value, recipient: '0x00000000000000000000000000000000deadbeef' });
   $('outGenesis').value = j;
 };
 $('btnSign').onclick = async () => {

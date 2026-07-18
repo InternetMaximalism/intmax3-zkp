@@ -29,7 +29,9 @@ async function init(threads) {
 const CALLS = {
   keygen: () => wasm.wallet_keygen(),
   keygenSeeded: (a) => wasm.wallet_keygen_seeded(a.seed),
-  genesisContribution: (a) => wasm.wallet_genesis_contribution(BigInt(a.balance)),
+  // B-1b: `recipient` (the user's L1/MetaMask address) is REQUIRED - it becomes the slot's
+  // cosigner-signed leaf-bound exit address (the delegate's only payout binding).
+  genesisContribution: (a) => wasm.wallet_genesis_contribution(BigInt(a.balance), a.recipient),
   signState: (a) => wasm.wallet_sign_state(a.slot, a.stateJson),
   importChannel: (a) => wasm.wallet_import_channel(a.snapshotJson),
   balance: () => wasm.wallet_balance(),
