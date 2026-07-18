@@ -62,8 +62,9 @@ use crate::{
         circuit::{C, D, F, SingleSigCircuit},
     },
     regev::{
-        AmountWitness, RealRegevProofVerifier, RegevCiphertext, RegevPk, RegevSecurityLevel,
-        RegevSk, add_ciphertexts, channel_keygen, decrypt_amount, encrypt_amount,
+        AmountWitness, MAX_HOMO_ADDS_BEFORE_REFRESH, RealRegevProofVerifier, RegevCiphertext,
+        RegevPk, RegevSecurityLevel, RegevSk, add_ciphertexts, channel_keygen, decrypt_amount,
+        encrypt_amount,
         hash_sig::{BabyBearPublicKey, BabyBearSecretKey, decompose_digest_to_limbs},
         prove_balance_refresh_witnessed, prove_channel_tx, prove_channel_update, prove_hash_sig,
         regev_pk_root, verify_hash_sig,
@@ -1139,6 +1140,87 @@ pub fn verify_send_transition(
         .verify(&verifier)
         .map_err(|e| WalletError(format!("in-channel transition invalid: {e:?}")))?;
     Ok(())
+}
+
+/// Batched intra-channel co-sign (abstract2-1 §2.2b/§3.2b): build the canonical batch next state
+/// from K solo-built `SendPayload`s anchored at the SAME `prev` state.
+///
+/// SECURITY: every payload MUST have been individually verified with
+/// `verify_send_transition(prev, ..)` FIRST (E-1 proof against the anchor ciphertext, sender A11
+/// hash-sig, solo-fold structural checks). Those K verifications are mutually independent
+/// (disjoint debit slots by R1 below) and may run in parallel. This function then performs only
+/// the BATCH-level soundness checks and the canonical fold:
+///   R1  single-debit rule — at most one debit per sender slot per batch (two debits would spend
+///       the same `before` ciphertext witness twice);
+///   R3  debits first (install each sender's fresh `after` ct, whose correctness the tx's own E-1
+///       proof pinned against the anchor), then credits (public homomorphic adds of each
+///       `enc_amount`) — the order makes sender-as-recipient sound;
+///   D3  post-fold `pending_adds` budget (abstract2-1 §6 item 8).
+/// The result advances the digest chain by ONE link (`state_version`/`epoch` +1, `h2_tag = 0`,
+/// `settled_tx_chain` untouched) and carries NO signatures — the caller runs the N-of-N round.
+/// For K = 1 the produced state is field-identical to the solo `proposed_next_state`
+/// (same digest), so the sender's browser can still commit its pending witness on finalize.
+/// Machine-checked model: ChannelSafety21.lean §8 (`batch_preserves_validity`).
+pub fn build_batch_next_state(
+    prev: &ChannelState,
+    payloads: &[SendPayload],
+) -> WResult<ChannelState> {
+    if payloads.is_empty() {
+        return bail("empty batch");
+    }
+    let mut debited = [false; MAX_CHANNEL_MEMBERS];
+    for p in payloads {
+        if p.proposed_next_state.prev_digest != prev.digest {
+            return bail("batch payload does not extend the anchor state");
+        }
+        let s = p.sender_index as usize;
+        check_slot(s, MAX_CHANNEL_MEMBERS)?;
+        check_slot(p.recipient_index as usize, MAX_CHANNEL_MEMBERS)?;
+        if debited[s] {
+            return bail(format!(
+                "R1 single-debit rule: two debits from sender slot {s} in one batch"
+            ));
+        }
+        debited[s] = true;
+    }
+
+    let mut enc_balances = prev.balance_state.enc_balances.clone();
+    let mut pending_adds = prev.balance_state.pending_adds;
+    // Debits: each sender slot takes the fresh `after` ciphertext from its OWN solo proposal —
+    // the slot the tx's E-1 proof bound as `after` against the anchor `before`.
+    for p in payloads {
+        let s = p.sender_index as usize;
+        enc_balances[s] = p.proposed_next_state.balance_state.enc_balances[s].clone();
+        pending_adds[s] = 0;
+    }
+    // Credits: fold the homomorphic adds over the debited map (sender-as-recipient lands on the
+    // fresh `after` ct, exactly the §3.2b canonical order).
+    for p in payloads {
+        let r = p.recipient_index as usize;
+        enc_balances[r] = add_ciphertexts(&enc_balances[r], &p.channel_tx.enc_amount).map_err(we)?;
+        if pending_adds[r] >= MAX_HOMO_ADDS_BEFORE_REFRESH {
+            return bail(format!(
+                "D3 budget: slot {r} would exceed MAX_HOMO_ADDS_BEFORE_REFRESH post-fold; shrink the batch"
+            ));
+        }
+        pending_adds[r] += 1;
+    }
+
+    Ok(ChannelState {
+        epoch: prev.epoch + 1,
+        balance_state: BalanceState {
+            enc_balances,
+            state_version: prev.balance_state.state_version + 1,
+            pending_adds,
+            ..prev.balance_state.clone()
+        },
+        prev_digest: prev.digest,
+        member_signatures: Vec::new(),
+        // §C-2: intra-channel batch is H2 = 0 (same rationale as build_send).
+        h2_tag: Bytes32::default(),
+        ..prev.clone()
+    }
+    .with_computed_digest())
 }
 
 /// Fill every active slot with a placeholder (correctly-tagged, non-empty) signature so the

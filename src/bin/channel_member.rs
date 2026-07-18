@@ -74,8 +74,9 @@ use intmax3_zkp::{
         ChannelSnapshot, ChannelWithdrawalParams, CloseProver, InterChannelDebitPayload,
         InterChannelTransferDescriptor, MemberInfo, MemberKeys, PostCloseClaimProver,
         RefreshPayload, SendPayload, WithdrawalClaimProver, add_signature,
-        assemble_genesis_state_backed, build_channel_withdrawal, build_inter_channel_credit,
-        build_l1_deposit_import, build_record, build_send, decrypt_balance,
+        assemble_genesis_state_backed, build_batch_next_state, build_channel_withdrawal,
+        build_inter_channel_credit, build_l1_deposit_import, build_record, build_send,
+        decrypt_balance,
         default_settled_tx_accumulator, partial_withdrawal_auth_digest, sign_state,
         sign_state_if_backed, verify_all_signatures, verify_inter_channel_credit_transition,
         verify_inter_channel_send_transition, verify_l1_deposit_import_transition,
@@ -1825,6 +1826,7 @@ fn main() {
         "add-genesis-sig" => cmd_add_genesis_sig(&args),
         "send" => cmd_send(&args),
         "cosign" => cmd_cosign(&args),
+        "cosign-batch" => cmd_cosign_batch(&args),
         "cosign-refresh" => cmd_cosign_refresh(&args),
         "cosign-inter-transfer" => cmd_cosign_inter_transfer(&args),
         "cosign-burn-send" => cmd_cosign_burn_send(&args),
@@ -1852,7 +1854,7 @@ fn main() {
         "post-close-claim" => cmd_post_close_claim(&args),
         _ => {
             eprintln!(
-                "usage: channel_member <setup-backing|init|send|cosign|cosign-burn-send|deploy-settlement|cosign-l1-deposit-import|pw-submit|pw-finalize|close|settle|withdraw|claim|cancel-close|post-close-claim|...> ..."
+                "usage: channel_member <setup-backing|init|send|cosign|cosign-batch|cosign-burn-send|deploy-settlement|cosign-l1-deposit-import|pw-submit|pw-finalize|close|settle|withdraw|claim|cancel-close|post-close-claim|...> ..."
             );
             exit(2);
         }
@@ -2354,6 +2356,98 @@ fn cmd_cosign(args: &[String]) {
     // HEAD SYNC: publish the advanced head so `/api/snapshot` (the browsers' re-import source) is
     // current — otherwise a later re-import returns the stale init snapshot and the next send fails
     // "payload does not extend the current head".
+    write_json("channel_snapshot.json", &state.snapshot);
+}
+
+/// Batched co-sign (abstract2-1 §3.2b): `cosign-batch <batch_payloads.json> <out>` where the input
+/// is a JSON ARRAY of `SendPayload`s all anchored at the CURRENT head. Every payload is verified
+/// with the full solo pipeline (`verify_send_transition`: E-1 proof, A11 sender sig, structural
+/// fold) — IN PARALLEL, since the K verifications are independent — then the canonical batch state
+/// is built (`build_batch_next_state`: R1 single-debit, debits-then-credits fold, D3 budget) and
+/// co-signed once. ONE state_version bump for K transfers.
+fn cmd_cosign_batch(args: &[String]) {
+    let in_path = args
+        .get(1)
+        .unwrap_or_else(|| die("cosign-batch <batch_payloads.json> <out>"));
+    let out_path = args
+        .get(2)
+        .map(String::as_str)
+        .unwrap_or("batch_cosigned.json");
+    let mut state = load_state();
+    let payloads: Vec<SendPayload> = read_json(in_path);
+    if payloads.is_empty() {
+        die("cosign-batch: empty batch");
+    }
+    let head = state.snapshot.state.clone();
+
+    // Parallel per-tx verification: each payload is an independent solo transition against the
+    // SAME anchor head (disjoint sender slots are enforced right after in build_batch_next_state;
+    // a duplicate sender would still verify here but the batch build rejects it).
+    use rayon::prelude::*;
+    let errors: Vec<String> = payloads
+        .par_iter()
+        .enumerate()
+        .filter_map(|(i, p)| {
+            // Own-slot decryption check when a CLI-controlled slot is the recipient (same
+            // belt-and-braces accounting check cmd_cosign runs).
+            let (sk, expected) = match state
+                .controlled
+                .iter()
+                .find(|c| c.slot == p.recipient_index)
+            {
+                Some(c) => {
+                    let keys = keys_for(c.keygen_seed);
+                    match intmax3_zkp::regev::decrypt_amount(
+                        &keys.regev_sk,
+                        &p.channel_tx.enc_amount,
+                    ) {
+                        Ok(amt) => (Some(keys.regev_sk), Some(amt)),
+                        Err(e) => return Some(format!("payload[{i}]: decrypt enc_amount: {e}")),
+                    }
+                }
+                None => (None, None),
+            };
+            verify_send_transition(&head, &state.snapshot.record, p, LEVEL, sk.as_ref(), expected)
+                .err()
+                .map(|e| format!("payload[{i}]: transition invalid: {e}"))
+        })
+        .collect();
+    if !errors.is_empty() {
+        die(format!("cosign-batch rejected: {}", errors.join("; ")));
+    }
+
+    let mut next_state =
+        build_batch_next_state(&head, &payloads).unwrap_or_else(|e| die(format!("batch build: {e}")));
+    // K = 1 fast-path: the batch state is field-identical to the solo proposal, so carry over the
+    // sender's partial state signature (a member-sender pre-signs only its OWN solo digest).
+    if payloads.len() == 1 && payloads[0].proposed_next_state.digest == next_state.digest {
+        next_state.member_signatures = payloads[0].proposed_next_state.member_signatures.clone();
+    }
+
+    // N-of-N co-sign for all CLI-controlled slots (same §F-1 rationale as cmd_cosign: backing is
+    // anchored at genesis; per-state re-checks would wrongly reject post-inter-channel states).
+    for c in &state.controlled {
+        if next_state
+            .member_signatures
+            .iter()
+            .any(|s| s.member_slot == c.slot)
+        {
+            continue;
+        }
+        let sig = sign_state(&keys_for(c.keygen_seed), c.slot, &next_state)
+            .unwrap_or_else(|e| die(format!("sign: {e:?}")));
+        add_signature(&mut next_state, sig);
+    }
+    write_json(out_path, &next_state);
+    println!(
+        "batch co-signed {} txs in ONE state transition → {out_path} (state_version {})",
+        payloads.len(),
+        next_state.balance_state.state_version
+    );
+
+    // Advance + republish head (same head-sync rationale as cmd_cosign).
+    state.snapshot.state = next_state;
+    save_state(&state);
     write_json("channel_snapshot.json", &state.snapshot);
 }
 
