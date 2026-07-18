@@ -19,6 +19,7 @@ Machine-checked safety proofs: [ChannelSafety21.lean](./ChannelSafety21.lean) / 
 4. **Cross-channel bulk transfer** — one `BulkInterChannelTx` may contain **`transfer_entries[]`**: multiple `(destChannelId, recipient, amount, recipientDelta)` legs, possibly across **different destination channels**. The sender debits once: `senderDelta` encrypts `-(Σ_j amount_j)`.
 5. **`TxLeafHash` generalization** — binds the sender wing and **all** receiver wings via a canonical Merkle/hash commitment. `settledTxChain` advances **once per tx** (one `TxLeafHash`), even for bulk.
 6. **Safety unchanged** — as in detail2 §A-2: removing the aggregation tree does not weaken the five properties; `hash(H1,H2)` atomicity, `settledTxChain` binding, and `withdrawCap` enforcement are preserved.
+7. **Batched intra-channel transfers (v2.1b)** — one intra-channel state transition (`H2 = 0`) may apply **K ≥ 1** `ChannelTx`s at once under a **single** agreement round (§2.2b, §3.2b). Each tx keeps its own mandatory `channelTxZKP`; the K proofs are mutually independent and verifiable **in parallel**. Soundness pivots on the **single-debit rule** (at most one debit per member slot per batch) and on the debit-then-credit canonical fold (§4.2b).
 
 ## Differences from v1 (inherited from abstract2)
 
@@ -74,6 +75,41 @@ Security is divided into the following 5 properties (described later in §4):
 ### 2.2 Intra-channel tx (channel layer)
 
 Unchanged from abstract2 §2.2: `ChannelTx { recipient, encAmount, nonce }` + mandatory `channelTxZKP`.
+
+**Binding refinement (normative, matches implementation E-1):** `channelTxZKP`'s statement binds
+the sender's **current stored ciphertext**: it proves, over public inputs
+`(before = encBalances[sender], encAmount, after)`,
+1. `encAmount` is a correct ciphertext to the recipient's `RegevPk` of a non-negative amount,
+2. `plaintext(before) = plaintext(after) + amount` with all components non-negative n-bit integers (no borrow ⇒ sender post-update balance ≥ 0),
+3. `after` is a well-formed fresh encryption to the sender's `RegevPk`.
+
+Because `before` is read from the anchor state by the **verifier** (never supplied by the prover),
+a `ChannelTx` is applicable **only** while the sender's slot ciphertext is unchanged since proof
+generation. Applying the debit replaces that ciphertext, so **a tx can be applied at most once,
+ever** — the `before`-binding acts as a natural nullifier (no separate spent-list is needed for
+intra-channel txs). A tx that misses its batch simply remains valid for a later batch anchored at
+any state where the sender's ciphertext is still the same (retry-friendly).
+
+### 2.2b Intra-channel tx batch (channel layer, new in v2.1b)
+
+```
+ChannelTxBatch {
+  anchor_digest : Hash,               -- digest of the BalanceState S the batch extends
+  txs           : [SignedChannelTx; K]  -- K ≥ 1, canonical order (sorted by (sender_slot, nonce))
+}
+SignedChannelTx = ChannelTx + channelTxZKP + sender's tx signature
+```
+
+- **Single-debit rule (R1):** all `sender_slot`s in `txs` are **pairwise distinct**. Two debits from
+  one slot in one batch would both prove against the same `before` ciphertext — accepting both
+  applies one witness twice (double-spend). Verifiers MUST reject such a batch outright.
+- **Sender-as-recipient is allowed (R2):** a slot may debit once *and* receive any number of
+  credits in the same batch (fold order §3.2b).
+- Every tx carries its own `channelTxZKP` bound to the **same** anchor state `S`
+  (`before_i = S.encBalances[sender_i]`), so the K verifications share no state and are
+  **embarrassingly parallel**.
+- The batch is a **channel-layer construct only**: `H2 = 0`, no small block, `settledTxChain`
+  invariant, and the base layer never sees it (nothing in §2.3 changes).
 
 ### 2.3 Intmax (base layer — small-block + bulk)
 
@@ -190,7 +226,62 @@ Unchanged logic from abstract2 §3.1, with these substitutions in verification i
 
 ### 3.2 Intra-channel transfer `channelTransfer` (`H2 = 0`)
 
-Unchanged from abstract2 §3.2 (no small block created).
+Unchanged from abstract2 §3.2 (no small block created). A single transfer is the `K = 1` special
+case of §3.2b (the flows coincide; §3.2b adds no obligation for `K = 1`).
+
+### 3.2b Batched intra-channel transfer `channelTransferBatch` (`H2 = 0`, new in v2.1b)
+
+Motivation: abstract2 §3.2 advances the state chain by **one link per tx**, forcing one full
+agreement (co-sign) round per transfer. Since a credit is a **public homomorphic addition**
+(commutative, requiring no secret), and each debit is justified by its own independent
+`channelTxZKP`, K transfers can share **one** state transition and **one** agreement round, with
+the K proof verifications running **in parallel**.
+
+#### 3.2b.1 `buildChannelTx` — **actor: each sender**
+- in: anchor `BalanceState S` (current finalized state), `recipient`, `amount`
+1. As abstract2 §3.2.1 steps 1–2: encrypt `encAmount`, generate `channelTxZKP` with
+   `before = S.encBalances[self]`, fresh `after` ct (+ retain its witness).
+2. Sign `ChannelTx` (tx-level authorization). **Do not** build `BalanceState'` and do not sign any
+   state hash — the sender cannot know the rest of the batch.
+- out: `SignedChannelTx` (handed to the batch assembler).
+
+#### 3.2b.2 `assembleBatch` — **actor: any member (or an untrusted coordinator)**
+- in: pending `SignedChannelTx`s anchored at the same `S`
+1. Select ≤ 1 tx **per sender slot** (R1; excess txs wait for the next batch).
+2. Order canonically; set `anchor_digest = digest(S)`.
+3. Compute the **canonical fold** (debits first, then credits — R3):
+
+```
+mid[i]   = if slot i debits in the batch then after_i else S.encBalances[i]
+final[i] = mid[i] + Σ_{j : recipient_j = i} encAmount_j        -- homomorphic adds
+BalanceState' = { encBalances = final, settledTxChain (invariant), stateVersion + 1 }
+```
+
+- out: `(ChannelTxBatch, BalanceState')` propagated to all members.
+
+> The assembler is **untrusted**: every member re-verifies everything in §3.2b.3; a malicious
+> assembler can at worst censor or delay txs (same liveness position as abstract2's sender-driven
+> propagation — the close game §3.5 remains the exit).
+
+#### 3.2b.3 `coSignBatch` — **actor: all members** (one agreement round)
+- in: `ChannelTxBatch`, `BalanceState'`
+1. `anchor_digest = digest(current head S)`; `stateVersion' = stateVersion + 1`; `H2 = 0`;
+   `settledTxChain` unchanged.
+2. **R1**: sender slots pairwise distinct; each tx's sender signature valid.
+3. For each tx **in parallel**: verify `channelTxZKP` with `before_i` read from `S` (never from the
+   payload).
+4. Recompute the canonical fold (R3) and require `BalanceState'.encBalances = final` **exactly**;
+   slots neither debiting nor credited must be bit-identical to `S`.
+5. The recipient of any credit additionally decrypts its `encAmount`s (own-slot check, abstract2
+   §3.1).
+6. If all pass, sign `hash(H1', H2 = 0)`. All-member signatures finalize `BalanceState'`.
+- out: finalized `BalanceState'` (one chain link for K transfers).
+
+#### 3.2b.4 Witness invalidation (refresh interaction)
+A slot that was **credited** in the batch no longer holds the encryption-randomness witness for its
+new ciphertext (`final[i] ≠ mid[i]`): before that slot can debit it must refresh, exactly as in the
+single-tx flow (detail2 D2/D3; out of scope here, §5). A slot that only **debited** keeps its fresh
+`after` witness and can send again in the very next batch.
 
 ### 3.3 Intmax foundational primitives
 
@@ -333,6 +424,29 @@ A partial withdrawal is a normal inter-channel send (§3.4 `flowSend1`/`flowSend
 - Medium block is a **sequence of independent SubBlocks**; signature and `prev` updates are **per-channel**, not aggregated-tree dependent.
 - `withdrawCap`, `closeBurnTx`, `settledTxChain` binding: unchanged from abstract2 §4.2.
 
+**4.2b Batch soundness (§2.2b/§3.2b).** The batch preserves the inductive invariant of §3.1
+("every component non-negative, total sum constant") for the same reason the single tx does,
+because a batch is **extensionally equal to a sequential application** of its K txs:
+
+1. **Debits are independent and individually proven.** Each `channelTxZKP` proves conservation and
+   non-negativity for its own slot against `before_i = S.encBalances[i]`. By R1 the K debited slots
+   are distinct, so the K proofs talk about **disjoint** slots of the same anchor `S` — verifying
+   them against `S` is equivalent to verifying them sequentially in any order.
+2. **Credits are public homomorphic additions of non-negative amounts** (each `encAmount_j`'s
+   non-negativity is inside tx j's ZKP). Additions commute and never decrease a component, so the
+   canonical fold order (R3) is a mere encoding choice, not a soundness assumption.
+3. **Conservation:** Σ final = Σ mid + Σ_j amount_j = (Σ S − Σ_j amount_j) + Σ_j amount_j = Σ S.
+4. **No double-debit:** within a batch by R1; **across** batches by the `before`-binding natural
+   nullifier (§2.2): once a debit is applied the sender's stored ciphertext changes, so the same
+   (or any stale) `channelTxZKP` can never verify against a later state.
+5. **Nothing else moves:** step §3.2b.3-4 pins every uninvolved slot bit-identical, and
+   `settledTxChain`/`H2 = 0` keep the batch invisible to close/settlement accounting.
+
+Consequently the five properties of §0 are unaffected: authorization is the unchanged all-member
+signature over `hash(H1', 0)` (§4.1); solvency and confidentiality arguments are per-tx and carry
+over verbatim (§4.3, §4.5); exit/liveness is untouched (§4.4). Formal statement + proof:
+`ChannelSafety21.lean` §8 (`batch_step_eq_seq`, `batch_preserves_validity`).
+
 ### 4.3 Solvency
 - Mandatory `balanceProof` on propagation; recipients ignore senders without it.
 - Bulk `rangeProof` / `channelUpdateZKP`: sender solvency for **total** `Σ amount_j`.
@@ -367,6 +481,7 @@ Formal proof: `ChannelSafety21.lean` §7a — `l1_deposit_preserves_validity` sh
 | Small-block model | §2.3, §3.3.3–4 | §A-2, §C-7, §H-1 | Aligned |
 | `bp_member_slot` | §2.1, §3.3.1 | §A-2 consequence 3 | Aligned |
 | Cross-channel bulk | §2.3 `transfer_entries[]` | Single `receiver_deltas[0]` only | **abstract2-1 ahead of implementation** |
+| Intra-channel batch | §2.2b `ChannelTxBatch`, §3.2b | Single `SendPayload` (one `ChannelTx` + full `proposed_next_state`); `InChannelTransferUpdateWitness` pins exactly one sender/recipient pair | **abstract2-1 ahead of implementation** — needs `BatchSendPayload`, a batch update witness (fold recompute, R1 check, `pending_adds[i] += #credits`), parallel E-1 verification, and a browser `buildChannelTx` that does **not** pre-build the next state |
 | Member count | 3 fixed | N ≤ 16 (D6) | detail2 extension; see detail2 |
 | Signatures | `SpxSigWitness` abstract | Poseidon ZK two-key (§A-3, D8) | detail2 extension |
 | Delegates / refresh | Out of scope here | §L, §B-3, D2/D3 | detail2 extensions |
@@ -383,6 +498,8 @@ When implementing bulk cross-channel, extend `InterChannelTx`, `channelUpdateZKP
 4. **L2 validity ordering** when one small block settles multiple `dest_channel_id` legs — fixed canonical order in §2.3 (implementation must match).
 5. **Burn-leg canonicality (§2.6/§3.6):** the validity settlement must (a) recognize `dest_channel_id = BURN_CHANNEL_ID` and route the leg to the withdrawal commitment with **no** channel credit, and (b) **reject** `recipient_delta ≠ ⊥` on a burn leg. `BURN_CHANNEL_ID` must be unregisterable (no `ChannelLeaf`), and the channel tree / settlement must never treat it as a creditable destination.
 6. **Mixed bulk + withdrawal extraction:** a bulk tx may mix normal and burn legs under one `TxLeafHash`; the base-layer withdrawal circuit must extract exactly the burn legs (by `dest_channel_id = BURN_CHANNEL_ID`) and bind each to its own `transfer_index` nullifier. Confirm `single_withdrawal_circuit`'s `extract_address_from_recipient` accepts the burn leg's L1 `recipient` form and that non-burn legs are not extractable as withdrawals.
+7. **Batch assembler fairness (§3.2b):** the assembler can censor/reorder txs within a batch. Ordering inside a batch has no value effect (§4.2b R3), and censorship is bounded by the existing liveness story (retry next batch; close game as exit), but a per-sender inclusion-latency policy (e.g. oldest-anchor-first) should be fixed at the implementation layer.
+8. **Credit-budget interaction (detail2 D3):** a batch may push a slot's homomorphic-add counter (`pending_adds[i] += #credits_in_batch`) toward `MAX_HOMO_ADDS_BEFORE_REFRESH` in one step. The batch verifier must enforce the budget **post-fold** (reject batches that overflow it), and the implementation should cap credits-per-slot-per-batch so one batch cannot force an immediate refresh storm.
 
 ---
 
