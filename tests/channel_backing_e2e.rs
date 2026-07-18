@@ -48,7 +48,7 @@ const CHANNEL: u32 = 1; // base-layer user id == channel id (detail2 §A-2)
 // anvil dev account[0] (public throwaway key; NEVER a real key).
 const ANVIL0: &str = "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80";
 
-fn info(slot: u8, k: &MemberKeys) -> MemberInfo {
+fn info(slot: u16, k: &MemberKeys) -> MemberInfo {
     MemberInfo {
         slot,
         pk_g: k.pk_g(),
@@ -267,7 +267,7 @@ fn deposit_backing_gate_reconciles_and_fails_closed() {
     let members: Vec<MemberInfo> = mkeys
         .iter()
         .enumerate()
-        .map(|(i, k)| info(i as u8, k))
+        .map(|(i, k)| info(i as u16, k))
         .collect();
     let record = build_record(CHANNEL, &members, 0, 0).expect("record");
     let cts: Vec<_> = mkeys
@@ -309,7 +309,7 @@ fn deposit_backing_gate_reconciles_and_fails_closed() {
     let foreign_members: Vec<MemberInfo> = mkeys
         .iter()
         .enumerate()
-        .map(|(i, k)| info(i as u8, k))
+        .map(|(i, k)| info(i as u16, k))
         .collect();
     let foreign_record = build_record(CHANNEL + 1, &foreign_members, 0, 0).expect("foreign record");
     assert!(

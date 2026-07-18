@@ -329,7 +329,9 @@ pub fn verify_channel_tx_sender_hash_sig(
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct MemberInfo {
-    pub slot: u8,
+    /// BALANCE-SLOT index (`0..member_count+delegate_count`, up to `MAX_CHANNEL_MEMBERS = 1024`):
+    /// u16 — u8 capped joins at 256 slots (2026-07-18 storm).
+    pub slot: u16,
     /// The member's Goldilocks signing public key `pk_g` (canonical `Bytes32`).
     pub pk_g: Bytes32,
     /// P3: the member's BabyBear hash-sig public key `pk_b` (canonical `Bytes32` digest). Used for
@@ -473,8 +475,9 @@ pub fn verify_channel_backing(
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SendPayload {
-    pub sender_index: u8,
-    pub recipient_index: u8,
+    /// BALANCE-SLOT indices (member OR delegate, `0..1024`) — u16, see `MemberInfo::slot`.
+    pub sender_index: u16,
+    pub recipient_index: u16,
     pub channel_tx: ChannelTx,
     pub proposed_next_state: ChannelState,
     pub members: Vec<MemberInfo>,
@@ -556,7 +559,7 @@ pub fn build_record(
     channel_id: u32,
     members: &[MemberInfo],
     bp_member_slot: u8,
-    delegate_count: u8,
+    delegate_count: u16,
 ) -> WResult<ChannelRecord> {
     let active = members.len();
     let dc = delegate_count as usize;
@@ -569,6 +572,16 @@ pub fn build_record(
         ));
     }
     let member_count = active - dc;
+    // Cosigner cap: member_count must fit the N-of-N close signer space. Checked EXPLICITLY here
+    // (before the `as u8` narrowing below) so an oversized cosigner count fails loudly instead of
+    // truncating — e.g. 258 would otherwise wrap to 2 and pass `record.validate()`.
+    if member_count > crate::constants::MAX_COSIGNERS {
+        return bail(format!(
+            "member_count {member_count} exceeds MAX_COSIGNERS ({}); extra participants must join \
+             as delegates",
+            crate::constants::MAX_COSIGNERS
+        ));
+    }
     // bp must be a co-signing member, not a delegate.
     if bp_member_slot as usize >= member_count {
         return bail(format!(
@@ -707,6 +720,9 @@ pub fn assemble_genesis_state_backed(
 
 /// Produce this member's `MemberSignature` over `state.signing_digest()` (P4-2: a Goldilocks
 /// `SingleSigCircuit` proof over the IMCH digest — the proof bytes are the signature).
+///
+/// WIDTH: `slot` is a COSIGNER slot (`< member_count <= MAX_COSIGNERS = 16`), so u8 is
+/// sufficient — delegates never co-sign state (audited 2026-07-18, u16 slot widening).
 pub fn sign_state(keys: &MemberKeys, slot: u8, state: &ChannelState) -> WResult<MemberSignature> {
     let digest = state.signing_digest();
     Ok(MemberSignature {
@@ -790,7 +806,8 @@ pub fn verify_all_signatures(
 /// validity, and (if `my_slot`/`my_keys` given) own-slot decryption sanity.
 pub fn verify_snapshot(
     snapshot: &ChannelSnapshot,
-    my_keys: Option<(&MemberKeys, u8)>,
+    // Own BALANCE-SLOT (member OR delegate, `0..1024`) — u16, see `MemberInfo::slot`.
+    my_keys: Option<(&MemberKeys, u16)>,
 ) -> WResult<()> {
     snapshot
         .record
@@ -860,7 +877,7 @@ pub fn verify_snapshot(
 }
 
 /// Decrypt this member's hidden balance from a snapshot.
-pub fn decrypt_balance(keys: &MemberKeys, snapshot: &ChannelSnapshot, slot: u8) -> WResult<u64> {
+pub fn decrypt_balance(keys: &MemberKeys, snapshot: &ChannelSnapshot, slot: u16) -> WResult<u64> {
     // Delegates own a balance slot too; admit the full active region (members + delegates).
     let bs = &snapshot.state.balance_state;
     let active = bs.member_count as usize + bs.delegate_count as usize;
@@ -894,8 +911,8 @@ pub struct BuiltSend {
 pub fn build_send(
     keys: &MemberKeys,
     snapshot: &ChannelSnapshot,
-    sender_slot: u8,
-    recipient_slot: u8,
+    sender_slot: u16,
+    recipient_slot: u16,
     amount: u64,
     before_amount: u64,
     before_witness: &AmountWitness,
@@ -1015,7 +1032,8 @@ pub fn build_send(
     // co-sign the resulting state. (A delegate signature would be ignored by verify_all_signatures
     // anyway, but emitting it would contradict the send-only model and waste a proof.)
     if (sender_slot as usize) < prev.balance_state.member_count as usize {
-        let sender_sig = sign_state(keys, sender_slot, &proposed)?;
+        // Cosigner space (guarded above): slot < member_count <= MAX_COSIGNERS, so u8 fits.
+        let sender_sig = sign_state(keys, sender_slot as u8, &proposed)?;
         add_signature(&mut proposed, sender_sig);
     }
 
@@ -1248,7 +1266,8 @@ fn fill_placeholder_sigs(record: &ChannelRecord, state: &mut ChannelState) {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RefreshPayload {
-    pub member_index: u8,
+    /// BALANCE-SLOT index (member OR delegate, `0..1024`) — u16, see `MemberInfo::slot`.
+    pub member_index: u16,
     pub refresh_proof: ChannelProofEnvelope,
     pub proposed_next_state: ChannelState,
     pub members: Vec<MemberInfo>,
@@ -1264,7 +1283,7 @@ pub struct RefreshPayload {
 pub fn build_refresh(
     keys: &MemberKeys,
     snapshot: &ChannelSnapshot,
-    slot: u8,
+    slot: u16,
     level: RegevSecurityLevel,
     rng: &mut impl Rng,
 ) -> WResult<(RefreshPayload, AmountWitness)> {
@@ -1305,7 +1324,8 @@ pub fn build_refresh(
     let mut proposed = next_state;
     if (slot as usize) < prev.balance_state.member_count as usize {
         // A co-signing MEMBER self-signs (N-of-N). A DELEGATE is send-only — no state signature.
-        let sig = sign_state(keys, slot, &proposed)?;
+        // Cosigner space (guarded above): slot < member_count <= MAX_COSIGNERS, so u8 fits.
+        let sig = sign_state(keys, slot as u8, &proposed)?;
         add_signature(&mut proposed, sig);
     }
 
@@ -1422,7 +1442,8 @@ pub struct BuiltInterChannelSend {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct InterChannelDebitPayload {
-    pub sender_index: u8,
+    /// BALANCE-SLOT index (member OR delegate, `0..1024`) — u16, see `MemberInfo::slot`.
+    pub sender_index: u16,
     pub proposed_next_state: ChannelState,
     pub inter_channel_tx: InterChannelTx,
     pub amount: u64,
@@ -1446,7 +1467,8 @@ pub struct InterChannelDebitPayload {
 pub struct InterChannelTransferDescriptor {
     pub source_channel_id: ChannelId,
     pub destination_channel_id: ChannelId,
-    pub recipient_slot: u8,
+    /// BALANCE-SLOT index (member OR delegate, `0..1024`) — u16, see `MemberInfo::slot`.
+    pub recipient_slot: u16,
     pub amount: u64,
     pub tx_hash: Bytes32,
     /// `H2` = the 1-tx `TxV2Tree` root, computed inside `build_inter_channel_send`.
@@ -1536,9 +1558,9 @@ fn structural_small_block_sigs(record: &ChannelRecord) -> Vec<MemberSignature> {
 pub fn build_inter_channel_send(
     keys: &MemberKeys,
     snapshot: &ChannelSnapshot,
-    sender_slot: u8,
+    sender_slot: u16,
     destination_channel_id: ChannelId,
-    destination_recipient_slot: u8,
+    destination_recipient_slot: u16,
     destination_recipient_pk: RegevPk,
     destination_recipient_pk_g: Bytes32,
     amount: u64,
@@ -1732,7 +1754,8 @@ pub fn build_inter_channel_send(
     // If the building participant is a co-signing MEMBER (slot < member_count) it self-signs the
     // post-debit state (one of the N-of-N). A DELEGATE sender does NOT co-sign state.
     if (sender_slot as usize) < record.member_count as usize {
-        let sender_sig = sign_state(keys, sender_slot, &a_send)?;
+        // Cosigner space (guarded above): slot < member_count <= MAX_COSIGNERS, so u8 fits.
+        let sender_sig = sign_state(keys, sender_slot as u8, &a_send)?;
         add_signature(&mut a_send, sender_sig);
     }
 
@@ -1827,7 +1850,7 @@ pub fn build_inter_channel_send(
 pub fn build_burn_send(
     keys: &MemberKeys,
     snapshot: &ChannelSnapshot,
-    sender_slot: u8,
+    sender_slot: u16,
     withdrawal_l1_address: crate::ethereum_types::address::Address,
     amount: u64,
     before_amount: u64,
@@ -2886,7 +2909,7 @@ impl WithdrawalClaimProver {
         let close_intent_digest = close_intent.signing_digest();
         let member = ChannelMember {
             pk_g: member_pk_g,
-            member_slot: member_index as u8,
+            member_slot: member_index as u16,
             l1_withdrawal_recipient: recipient,
         };
         // SECURITY (B-2 blocker fix): the nullifier is keyed on the slot's LEAF-BOUND Regev pk
@@ -3955,7 +3978,7 @@ mod delegate_send_tests {
 
     const LEVEL: RegevSecurityLevel = RegevSecurityLevel::Test;
 
-    fn member_info(slot: u8, keys: &MemberKeys) -> MemberInfo {
+    fn member_info(slot: u16, keys: &MemberKeys) -> MemberInfo {
         MemberInfo {
             slot,
             pk_g: keys.pk_g(),
@@ -3971,14 +3994,14 @@ mod delegate_send_tests {
         channel_id: u32,
         keys: &[MemberKeys],
         member_count: u8,
-        delegate_count: u8,
+        delegate_count: u16,
     ) -> (ChannelRecord, Vec<MemberInfo>) {
         let active = member_count as usize + delegate_count as usize;
         assert_eq!(keys.len(), active, "one key per active slot");
         let members: Vec<MemberInfo> = keys
             .iter()
             .enumerate()
-            .map(|(i, k)| member_info(i as u8, k))
+            .map(|(i, k)| member_info(i as u16, k))
             .collect();
         // Exercise the PUBLIC delegate-aware build path (build_record derives member_count =
         // active - delegate_count and validates bp is a co-signing member).
@@ -4024,7 +4047,7 @@ mod delegate_send_tests {
         let members: Vec<MemberInfo> = keys
             .iter()
             .enumerate()
-            .map(|(i, k)| member_info(i as u8, k))
+            .map(|(i, k)| member_info(i as u16, k))
             .collect();
 
         // 2 co-signing members + 1 delegate (active = 3): OK, member_count derived as active - dc.
@@ -4506,7 +4529,7 @@ mod delegate_send_tests {
         let members: Vec<MemberInfo> = keys
             .iter()
             .enumerate()
-            .map(|(i, k)| member_info(i as u8, k))
+            .map(|(i, k)| member_info(i as u16, k))
             .collect();
         let record = build_record(channel, &members, 0, 0).expect("record");
         let encs: Vec<RegevCiphertext> = keys
@@ -5164,5 +5187,108 @@ mod partial_withdrawal_tests {
         w.aux_data = Bytes32::from_u32_slice(&[0xCC; 8]).unwrap();
         let d2 = partial_withdrawal_auth_digest(&w);
         assert_ne!(d1, d2);
+    }
+}
+
+/// REGRESSION (2026-07-18 1000-connection storm): with u8 slot typing, joins hard-stopped at 256
+/// active slots ("no member at slot 256") even though Option B promises MAX_CHANNEL_MEMBERS =
+/// 1024. These tests walk the native join/assemble path PAST slot 256 with u16 slots — no
+/// proving, fabricated identities only (build_record never validates key material, just slot
+/// structure), so they run at ordinary unit-test cost.
+#[cfg(test)]
+mod slot_capacity_tests {
+    use super::*;
+    use crate::{
+        common::balance_state::BalanceState,
+        ethereum_types::address::Address,
+        regev::{REGEV_N, RegevCiphertext, RegevPk},
+    };
+
+    /// Fabricated distinct nonzero identity for `slot`. `build_record` /
+    /// `member_pubkeys_root` only hash these values — no key validity is checked — so
+    /// synthetic pk_g/pk_b keep the test cheap enough to cover 300 slots natively.
+    fn fake_member(slot: u16) -> MemberInfo {
+        let tag = slot as u32 + 1;
+        MemberInfo {
+            slot,
+            pk_g: Bytes32::from_u32_slice(&[0xA0, 0, 0, 0, 0, 0, 0, tag]).unwrap(),
+            pk_b: Bytes32::from_u32_slice(&[0xB0, 0, 0, 0, 0, 0, 0, tag]).unwrap(),
+            regev_pk: RegevPk::padding(),
+        }
+    }
+
+    /// The storm's exact failure boundary: 3 cosigners + 253 delegates joined (256 slots), and
+    /// the 254th delegate — slot 256 — failed with "no member at slot 256". Repeatedly
+    /// re-assemble the record as delegates join across that boundary and beyond.
+    #[test]
+    fn join_path_reaches_slot_256_and_beyond() {
+        const COSIGNERS: usize = 3;
+        let members: Vec<MemberInfo> = (0..300u16).map(fake_member).collect();
+
+        // Checkpoints: 256 active (the last size the u8 code reached), 257 (the first size it
+        // could NOT), and 300 (comfortable margin past the boundary).
+        for active in [256usize, 257, 300] {
+            let dc = (active - COSIGNERS) as u16;
+            let record = build_record(7, &members[..active], 0, dc)
+                .unwrap_or_else(|e| panic!("build_record with {active} active slots failed: {e}"));
+            assert_eq!(record.member_count, COSIGNERS as u8);
+            assert_eq!(record.delegate_count, dc);
+            // Every active slot — including 256+ — carries its member's pk_g.
+            let last = active - 1;
+            assert_eq!(record.member_pk_gs[last], members[last].pk_g);
+            assert_eq!(record.member_pk_gs[active], Bytes32::default());
+        }
+
+        // The storm's exact failing lookup: slot 256 must resolve.
+        let m256 = member_at(&members, 256).expect("slot 256 must be reachable with u16 slots");
+        assert_eq!(m256.slot, 256);
+
+        // Wire format: a slot > 255 survives the JSON round-trip (browser <-> relay <-> CLI).
+        let json = serde_json::to_string(&members[299]).unwrap();
+        let back: MemberInfo = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.slot, 299);
+    }
+
+    /// The signed balance state also crosses the 256-slot boundary: delegate_count > 253 (u16)
+    /// must validate and produce an H1 that depends on the count.
+    #[test]
+    fn balance_state_validates_past_256_active_slots() {
+        const MEMBER_COUNT: usize = 3;
+        const DELEGATE_COUNT: usize = 254; // active = 257 > 256
+        let active = MEMBER_COUNT + DELEGATE_COUNT;
+
+        let nonzero_ct = RegevCiphertext {
+            c1: vec![1u32; REGEV_N],
+            c2: vec![2u32; REGEV_N],
+        };
+        let cts: Vec<RegevCiphertext> = vec![nonzero_ct; active];
+        let digests: Vec<Bytes32> = (0..active as u32)
+            .map(|i| Bytes32::from_u32_slice(&[0xD0, 0, 0, 0, 0, 0, 0, i + 1]).unwrap())
+            .collect();
+        let recipients: Vec<Address> = (0..active as u32)
+            .map(|i| Address::from_u32_slice(&[0xE0, 0, 0, 0, i + 1]).unwrap())
+            .collect();
+
+        let state = BalanceState {
+            channel_id: ChannelId::new(7).unwrap(),
+            member_count: MEMBER_COUNT as u8,
+            delegate_count: DELEGATE_COUNT as u16,
+            enc_balances: BalanceState::pad_enc_balances(&cts),
+            regev_pk_digests: BalanceState::pad_regev_pk_digests(&digests),
+            recipients: BalanceState::pad_recipients(&recipients),
+            settled_tx_chain: Bytes32::default(),
+            settled_tx_accumulator_root: empty_settled_tx_accumulator_root(),
+            state_version: 1,
+            pending_adds: BalanceState::pad_pending_adds(&vec![0u32; active]),
+        };
+        state
+            .validate()
+            .expect("257 active slots must validate with u16 delegate_count");
+
+        // H1 commits the (u16) delegate_count: shrinking the active region changes it.
+        let h1 = state.h1();
+        let mut smaller = state.clone();
+        smaller.delegate_count -= 1;
+        assert_ne!(h1, smaller.h1(), "delegate_count must be committed in H1");
     }
 }
