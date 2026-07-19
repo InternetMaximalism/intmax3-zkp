@@ -12,19 +12,24 @@ settlement contracts (Solidity/Foundry), a machine‑checked safety proof (Lean)
 - **L1 security + 1‑of‑N trust.** Every channel ultimately settles on Ethereum L1. Safety needs only
   **one honest party — you**: with the last all‑member‑signed state you can always `close` on‑chain,
   and `withdrawClaimZKP` lets you exit and withdraw **without any other member's cooperation**.
+  
 - **Strong statelessness & minimal block‑space use.** The rollup keeps **almost no per‑user state
   on‑chain** — users custody their own `balanceProof`s, and each block posts only a `tx_tree_root`
   (+ deposit hash chain). The on‑chain footprint per transfer is tiny, so throughput scales without
   bloating L1 state.
+  
 - **Full privacy.** Per‑member balances are **Regev/LWE ciphertexts** decryptable only by their owner;
   intra‑channel transfer amounts are encrypted to the recipient. The breakdown of who holds what
   inside a channel is hidden from the other members, the block producer, and L1 — yet solvency is still
   enforced by ZK range proofs (`channelTxZKP` / `channelUpdateZKP`), so confidentiality and
   "no over‑spend" coexist.
+  
 - **Post‑quantum.** State agreement uses **hash‑based signatures** (Poseidon‑hash sigs) and
   balances use **lattice (Regev/LWE)** encryption — both believed secure against quantum adversaries.
+  
 - **Fast finality.** In‑channel transfers finalize the instant the members co‑sign the new state
   (off‑chain, milliseconds of proving) — no on‑chain round‑trip per payment.
+  
 - **No capital‑efficiency problem.** Unlike Lightning‑style networks, you don't lock capital into
   pre‑funded bidirectional route capacity. **Any channel pays any channel** through the intmax rollup
   (`interChannelTransfer`) — no inbound‑capacity, path‑liquidity, or rebalancing cost.
