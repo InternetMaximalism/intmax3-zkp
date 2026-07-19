@@ -192,7 +192,11 @@ pub struct ChannelRecord {
     /// are part of `member_pubkeys_root` exactly like members. The only difference is that
     /// delegates do NOT appear in the N-of-N co-sign set (those loops stay `0..member_count`;
     /// later phases).
-    pub delegate_count: u8,
+    ///
+    /// WIDTH: `u16` — delegates occupy BALANCE-SLOT space (up to `MAX_CHANNEL_MEMBERS = 1024 -
+    /// member_count`), which does not fit in u8 (the 2026-07-18 storm capped joins at 256). The
+    /// IMCR digest encodes this as a u32 limb, so the widening is digest-transparent.
+    pub delegate_count: u16,
     /// Ordered member + delegate identities = SPHINCS+ pubkey hashes, slot order
     /// 0..MAX_CHANNEL_MEMBERS. Active slots (`< member_count+delegate_count`) are nonzero and
     /// pairwise-distinct; padding slots are `Bytes32::default()`.
@@ -210,6 +214,9 @@ pub struct ChannelRecord {
     pub member_pubkeys_root: Bytes32,
     /// The slot whose member acts as block-proposer (replaces `bp_key_id`). Must be `<
     /// member_count`.
+    ///
+    /// WIDTH: u8 is sufficient — this is COSIGNER-slot space (`< member_count <= MAX_COSIGNERS =
+    /// 16`), never a delegate/balance slot (audited 2026-07-18, u16 slot widening).
     pub bp_member_slot: u8,
     pub special_close_penalty: U256,
     pub close_freeze_nonce: u64,
@@ -385,6 +392,9 @@ impl SmallBlockRootMessage {
 #[serde(rename_all = "camelCase")]
 pub struct MemberSignature {
     /// Member slot (0..member_count) — array index into the channel's active member list.
+    ///
+    /// WIDTH: u8 is sufficient — state co-signing is COSIGNER-only (`member_count <=
+    /// MAX_COSIGNERS = 16`); delegates never produce a `MemberSignature` (audited 2026-07-18).
     pub member_slot: u8,
     /// The signing member's SPHINCS+ pubkey hash (their identity).
     pub pk_g: Bytes32,
@@ -452,7 +462,9 @@ pub struct ChannelBalance {
 #[serde(rename_all = "camelCase")]
 pub struct ChannelMember {
     pub pk_g: Bytes32,
-    pub member_slot: u8,
+    /// BALANCE-SLOT index (`0..member_count+delegate_count`, up to `MAX_CHANNEL_MEMBERS = 1024`) —
+    /// delegates withdraw at close too, so this is NOT bounded by `MAX_COSIGNERS`; u16.
+    pub member_slot: u16,
     pub l1_withdrawal_recipient: Address,
 }
 
@@ -1206,7 +1218,7 @@ pub fn l1_deposit_import_digest(
     channel_id: ChannelId,
     deposit_nullifier: Bytes32,
     amount: u64,
-    depositor_slot: u8,
+    depositor_slot: u16,
 ) -> Bytes32 {
     hash_words(
         &[

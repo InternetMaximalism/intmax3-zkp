@@ -592,7 +592,7 @@ where
         witness
             .set_target(
                 self.revived_delegate_count,
-                F::from_canonical_u8(revived.balance_state.delegate_count),
+                F::from_canonical_u16(revived.balance_state.delegate_count),
             )
             .unwrap();
         self.revived_epoch

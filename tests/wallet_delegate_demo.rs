@@ -16,7 +16,7 @@ use rand010::{SeedableRng, rngs::StdRng};
 
 const LEVEL: RegevSecurityLevel = RegevSecurityLevel::Production;
 
-fn info(slot: u8, k: &MemberKeys) -> MemberInfo {
+fn info(slot: u16, k: &MemberKeys) -> MemberInfo {
     MemberInfo {
         slot,
         pk_g: k.pk_g(),
@@ -45,7 +45,7 @@ fn delegate_demo_three_members_plus_browser_delegate_send() {
     let mut members: Vec<MemberInfo> = member_keys
         .iter()
         .enumerate()
-        .map(|(i, k)| info(i as u8, k))
+        .map(|(i, k)| info(i as u16, k))
         .collect();
     members.push(info(3, &delegate_keys));
 
@@ -172,7 +172,7 @@ fn two_delegates_in_one_channel_delegate_to_delegate_send() {
     let mut members: Vec<MemberInfo> = member_keys
         .iter()
         .enumerate()
-        .map(|(i, k)| info(i as u8, k))
+        .map(|(i, k)| info(i as u16, k))
         .collect();
     members.push(info(3, &d3));
     members.push(info(4, &d4));
@@ -286,7 +286,7 @@ fn delegate_join_preserves_send_and_is_importable() {
     let mut members: Vec<MemberInfo> = mk
         .iter()
         .enumerate()
-        .map(|(i, k)| info(i as u8, k))
+        .map(|(i, k)| info(i as u16, k))
         .collect();
     members.push(info(3, &d3));
     let record = build_record(7, &members, 0, 1).unwrap();
@@ -441,7 +441,7 @@ fn delegate_refresh_after_receive_enables_send() {
     let mut members: Vec<MemberInfo> = mk
         .iter()
         .enumerate()
-        .map(|(i, k)| info(i as u8, k))
+        .map(|(i, k)| info(i as u16, k))
         .collect();
     members.push(info(3, &d3));
     members.push(info(4, &d4));

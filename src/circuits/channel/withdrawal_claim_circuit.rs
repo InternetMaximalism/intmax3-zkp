@@ -190,7 +190,8 @@ pub struct WithdrawalClaimFullWitness {
     pub state_version: u64,
     /// active region size = member_count + delegate_count.
     pub member_count: u8,
-    pub delegate_count: u8,
+    /// WIDTH: u16 — delegate slots span the full 1024 balance-slot space (Option B).
+    pub delegate_count: u16,
     /// claimant slot index (`< member_count + delegate_count`).
     pub member_index: usize,
     /// Decryption Stage 2: the claimant's Regev public key `(a, b)` coefficients (canonical `< q`,
@@ -452,7 +453,7 @@ where
         witness
             .set_target(
                 self.delegate_count,
-                F::from_canonical_u8(witness_value.delegate_count),
+                F::from_canonical_u16(witness_value.delegate_count),
             )
             .unwrap();
         // H1 Poseidon-root form: the slot tree root + the claimant slot's inclusion proof

@@ -188,7 +188,7 @@ fn cast(rpc: &str, args: &[&str], label: &str) -> String {
 fn abi_word(data: &str, i: usize) -> &str {
     &data[i * 64..(i + 1) * 64]
 }
-fn info(slot: u8, k: &MemberKeys) -> MemberInfo {
+fn info(slot: u16, k: &MemberKeys) -> MemberInfo {
     MemberInfo {
         slot,
         pk_g: k.pk_g(),
@@ -333,12 +333,12 @@ fn inter_channel_transfer_real_deposit_backed() {
     let a_members: Vec<MemberInfo> = a_keys
         .iter()
         .enumerate()
-        .map(|(i, k)| info(i as u8, k))
+        .map(|(i, k)| info(i as u16, k))
         .collect();
     let b_members: Vec<MemberInfo> = b_keys
         .iter()
         .enumerate()
-        .map(|(i, k)| info(i as u8, k))
+        .map(|(i, k)| info(i as u16, k))
         .collect();
     let a_record = build_record(5, &a_members, 0, 0).expect("A record");
     let b_record = build_record(7, &b_members, 0, 0).expect("B record");
@@ -719,7 +719,7 @@ fn record_members(record: &ChannelRecord, keys: &[MemberKeys]) -> Vec<MemberInfo
     let _ = record;
     keys.iter()
         .enumerate()
-        .map(|(i, k)| info(i as u8, k))
+        .map(|(i, k)| info(i as u16, k))
         .collect()
 }
 

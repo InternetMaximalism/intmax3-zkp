@@ -73,7 +73,11 @@ pub struct BalanceState {
     /// silently re-interpret a delegate slot as a member (or vice-versa) or a padding slot as
     /// a delegate. Delegate slots are ACTIVE balance slots (non-padding ciphertexts) exactly
     /// like member slots.
-    pub delegate_count: u8,
+    ///
+    /// WIDTH: `u16` — delegates occupy BALANCE-SLOT space (up to `MAX_CHANNEL_MEMBERS = 1024 -
+    /// member_count`), which does not fit in u8. The H1 preimage encodes this as a u64 field
+    /// input, so the widening is digest-transparent.
+    pub delegate_count: u16,
     /// One balance ciphertext per slot, in member slot order. Slots `>= member_count` are
     /// `RegevCiphertext::padding()`.
     // MAX_CHANNEL_MEMBERS > 32: std serde only derives arrays up to 32, so use serde-big-array.
@@ -714,10 +718,6 @@ mod tests {
             .expect("members + delegates + padding must validate");
 
         // The cosigner cap binds: member_count > MAX_COSIGNERS is rejected even with delegates.
-        // (The old assertion targeted `member_count + delegate_count > MAX_CHANNEL_MEMBERS`, which
-        // is unreachable with u8 counts at MAX=1024 — 16 cosigners + up to 255 delegates = 271
-        // slots, far under 1024. The slot-capacity check remains in validate() as defense in
-        // depth; the live boundary is the cosigner cap.)
         let mut overflow = state_with_members(16);
         overflow.member_count = (MAX_COSIGNERS + 1) as u8;
         overflow.delegate_count = 1;
@@ -727,6 +727,18 @@ mod tests {
                 Err(ChannelError::InvalidBalanceState(_))
             ),
             "member_count > MAX_COSIGNERS must be rejected"
+        );
+        // Slot-capacity check: with u16 delegate_count (2026-07-18 slot widening) the
+        // `member_count + delegate_count > MAX_CHANNEL_MEMBERS` boundary is now REACHABLE
+        // (it was dead code with u8 counts: 16 + 255 = 271 < 1024). Exercise it.
+        let mut over_capacity = state_with_members(16);
+        over_capacity.delegate_count = (MAX_CHANNEL_MEMBERS - MAX_COSIGNERS + 1) as u16;
+        assert!(
+            matches!(
+                over_capacity.validate(),
+                Err(ChannelError::InvalidBalanceState(_))
+            ),
+            "member_count + delegate_count > MAX_CHANNEL_MEMBERS must be rejected"
         );
         // 16 cosigners + 1 active delegate is well within the 1024 balance slots and must
         // validate (the delegate slot 16 carries an active ciphertext).

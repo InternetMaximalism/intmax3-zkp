@@ -89,7 +89,7 @@ fn cast(rpc: &str, args: &[&str], label: &str) -> String {
 fn abi_word(data: &str, i: usize) -> &str {
     &data[i * 64..(i + 1) * 64]
 }
-fn info(slot: u8, k: &MemberKeys) -> MemberInfo {
+fn info(slot: u16, k: &MemberKeys) -> MemberInfo {
     MemberInfo {
         slot,
         pk_g: k.pk_g(),
@@ -204,7 +204,7 @@ fn build_signed_genesis(
     let members: Vec<MemberInfo> = keys
         .iter()
         .enumerate()
-        .map(|(i, k)| info(i as u8, k))
+        .map(|(i, k)| info(i as u16, k))
         .collect();
     verify_all_signatures(record, &members, &state).expect("genesis fully signed");
     state
@@ -272,7 +272,7 @@ fn partial_withdrawal_e2e_anvil() {
     let members: Vec<MemberInfo> = keys
         .iter()
         .enumerate()
-        .map(|(i, k)| info(i as u8, k))
+        .map(|(i, k)| info(i as u16, k))
         .collect();
     let record = build_record(42, &members, 0, 0).expect("channel record");
     let all_pks = pks_array(&keys);
