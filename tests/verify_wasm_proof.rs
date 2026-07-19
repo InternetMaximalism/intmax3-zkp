@@ -48,7 +48,7 @@ fn native_verifies_wasm_e1_proof() {
     res.expect("native verification of a wasm-generated E-1 proof");
 }
 
-fn member_info(slot: u8, keys: &MemberKeys) -> MemberInfo {
+fn member_info(slot: u16, keys: &MemberKeys) -> MemberInfo {
     MemberInfo {
         slot,
         pk_g: keys.pk_g(),

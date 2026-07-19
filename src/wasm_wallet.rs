@@ -31,7 +31,8 @@ const LEVEL: RegevSecurityLevel = RegevSecurityLevel::Production;
 /// In-memory wallet session (single member). Holds all secrets; never serialized.
 struct Session {
     keys: MemberKeys,
-    slot: Option<u8>,
+    /// BALANCE-SLOT index (member OR delegate, `0..MAX_CHANNEL_MEMBERS = 1024`) — u16.
+    slot: Option<u16>,
     snapshot: Option<ChannelSnapshot>,
     /// The member's current balance + its encryption witness, present only when this wallet
     /// freshly encrypted the slot (genesis contribution or a completed send). `None` after a
@@ -194,7 +195,7 @@ pub fn wallet_genesis_contribution(balance: u64, recipient: String) -> Result<St
 /// Returns this member's `MemberSignature`. Requires the slot to be known (via a prior import) or
 /// inferable; here the caller passes the slot explicitly.
 #[wasm_bindgen]
-pub fn wallet_sign_state(slot: u8, state_json: String) -> Result<String, JsValue> {
+pub fn wallet_sign_state(slot: u16, state_json: String) -> Result<String, JsValue> {
     with_session(|session| {
         let state: ChannelState = serde_json::from_str(&state_json).map_err(js_err)?;
         if state.digest != state.signing_digest() {
@@ -222,7 +223,9 @@ pub fn wallet_sign_state(slot: u8, state_json: String) -> Result<String, JsValue
             &state.balance_state.enc_balances[slot as usize],
         )
         .map_err(|e| js_err(format!("cannot decrypt own slot {slot}: {e}")))?;
-        let sig: MemberSignature = sign_state(&session.keys, slot, &state).map_err(js_err)?;
+        // Cosigner space: slot < member_count <= MAX_COSIGNERS (checked above), so u8 fits.
+        let sig: MemberSignature =
+            sign_state(&session.keys, slot as u8, &state).map_err(js_err)?;
         serde_json::to_string(&sig).map_err(js_err)
     })
 }
@@ -230,7 +233,7 @@ pub fn wallet_sign_state(slot: u8, state_json: String) -> Result<String, JsValue
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct BalanceReport {
-    slot: u8,
+    slot: u16,
     balance: u64,
     can_send: bool,
     state_version: u64,
@@ -246,7 +249,7 @@ struct BalanceReport {
 fn assert_own_recipient_bound(
     session: &Session,
     snapshot: &ChannelSnapshot,
-    slot: u8,
+    slot: u16,
 ) -> Result<(), JsValue> {
     if let Some(expected) = session.expected_recipient {
         let bound = snapshot.state.balance_state.recipients[slot as usize];
@@ -331,7 +334,7 @@ pub fn wallet_balance() -> Result<String, JsValue> {
 /// next state, and returns the `SendPayload` for the co-signers. The new balance is committed only
 /// once `wallet_finalize` receives the fully-signed state.
 #[wasm_bindgen]
-pub fn wallet_send(recipient_slot: u8, amount: u64) -> Result<String, JsValue> {
+pub fn wallet_send(recipient_slot: u16, amount: u64) -> Result<String, JsValue> {
     with_session(|session| {
         let slot = session.slot.ok_or_else(|| js_err("no channel imported"))?;
         let snapshot = session
@@ -387,7 +390,7 @@ pub fn wallet_send(recipient_slot: u8, amount: u64) -> Result<String, JsValue> {
 #[wasm_bindgen]
 pub fn wallet_send_inter_channel(
     to_channel: u32,
-    to_slot: u8,
+    to_slot: u16,
     amount: u64,
     dest_recipient_json: String,
 ) -> Result<String, JsValue> {
@@ -572,7 +575,15 @@ pub fn wallet_cosign(payload_json: String) -> Result<String, JsValue> {
         .map_err(js_err)?;
 
         let mut next = payload.proposed_next_state.clone();
-        let sig = sign_state(&session.keys, slot, &next).map_err(js_err)?;
+        // Co-signing is COSIGNER-only: a delegate session must not emit a state signature
+        // (send-only model; a delegate sig would be structurally ignored anyway).
+        let mc = snapshot.record.member_count;
+        if slot >= mc as u16 {
+            return Err(js_err(format!(
+                "slot {slot} is a delegate (member_count {mc}); delegates do not co-sign state"
+            )));
+        }
+        let sig = sign_state(&session.keys, slot as u8, &next).map_err(js_err)?;
         add_signature(&mut next, sig);
         serde_json::to_string(&next).map_err(js_err)
     })

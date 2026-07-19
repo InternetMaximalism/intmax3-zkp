@@ -51,7 +51,7 @@ type F = GoldilocksField;
 type C = PoseidonGoldilocksConfig;
 const CHANNEL: u32 = 1;
 
-fn info(slot: u8, k: &MemberKeys) -> MemberInfo {
+fn info(slot: u16, k: &MemberKeys) -> MemberInfo {
     MemberInfo {
         slot,
         pk_g: k.pk_g(),
@@ -80,7 +80,7 @@ fn inter_channel_small_block_sig_is_validity_proven() {
     let _members: Vec<MemberInfo> = keys
         .iter()
         .enumerate()
-        .map(|(i, k)| info(i as u8, k))
+        .map(|(i, k)| info(i as u16, k))
         .collect();
     let ck = ChannelMemberKeys::from_member_keys(&keys);
 

@@ -122,7 +122,7 @@ fn cast(rpc: &str, a: &[&str], l: &str) -> String {
 fn word(d: &str, i: usize) -> &str {
     &d[i * 64..(i + 1) * 64]
 }
-fn info(slot: u8, k: &MemberKeys) -> MemberInfo {
+fn info(slot: u16, k: &MemberKeys) -> MemberInfo {
     MemberInfo {
         slot,
         pk_g: k.pk_g(),
@@ -224,7 +224,7 @@ fn unified_inter_channel_transfer_e2e() {
     let a_members: Vec<MemberInfo> = a_keys
         .iter()
         .enumerate()
-        .map(|(i, k)| info(i as u8, k))
+        .map(|(i, k)| info(i as u16, k))
         .collect();
     let a_record = build_record(A_ID, &a_members, 0, 0).expect("A record");
     let a_pks = pks_array(&a_keys);

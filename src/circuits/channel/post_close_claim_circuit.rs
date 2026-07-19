@@ -215,7 +215,8 @@ pub struct PostCloseClaimFullWitness {
     pub settled_tx_chain: Bytes32,
     pub state_version: u64,
     pub member_count: u8,
-    pub delegate_count: u8,
+    /// WIDTH: u16 — delegate slots span the full 1024 balance-slot space (Option B).
+    pub delegate_count: u16,
     /// Receiver slot index in the closed channel (`< member_count + delegate_count`) — the Merkle
     /// position of the opened slot leaf.
     pub receiver_member_index: usize,
@@ -540,7 +541,7 @@ where
         witness
             .set_target(
                 self.delegate_count,
-                F::from_canonical_u8(witness_value.delegate_count),
+                F::from_canonical_u16(witness_value.delegate_count),
             )
             .unwrap();
         // H1 Poseidon-root form: the slot tree root + the receiver slot's inclusion proof and

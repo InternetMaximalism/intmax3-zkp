@@ -52,7 +52,7 @@ function mergeSigs(stateAJson, stateBJson) {
   console.log('→ [browser] keygen');
   await W('keygen', {});
   console.log('→ [browser] genesis contribution (balance 50)');
-  writeJson('contribution.json', await W('genesisContribution', { balance: '50' }));
+  writeJson('contribution.json', await W('genesisContribution', { balance: '50', recipient: '0x00000000000000000000000000000000deadbeef' })); // B-1b: nonzero dev exit address
 
   console.log('→ [CLI] init channel');
   cli('init', 'contribution.json', 'genesis_to_sign.json');

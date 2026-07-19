@@ -79,7 +79,8 @@ pub struct ChannelClosePublicInputs {
     /// (final limb). Anchored in-circuit as the unique count inside the signed H1 preimage.
     /// NOT part of the member_set_commitment (delegates do not co-sign), but bound to H1 so
     /// the close circuit recomputes the now-`delegate_count`-bearing H1 from the same PI limb.
-    pub delegate_count: u8,
+    /// WIDTH: u16 — delegate slots span the full 1024 balance-slot space (Option B).
+    pub delegate_count: u16,
 }
 
 #[derive(Debug, Error)]
@@ -160,9 +161,9 @@ impl ChannelClosePublicInputs {
                     values[93]
                 ))
             })?,
-            delegate_count: u8::try_from(values[94]).map_err(|_| {
+            delegate_count: u16::try_from(values[94]).map_err(|_| {
                 ChannelClosePublicInputsError::InvalidField(format!(
-                    "delegate_count limb {} does not fit in u8",
+                    "delegate_count limb {} does not fit in u16",
                     values[94]
                 ))
             })?,

@@ -74,8 +74,9 @@ use intmax3_zkp::{
         ChannelSnapshot, ChannelWithdrawalParams, CloseProver, InterChannelDebitPayload,
         InterChannelTransferDescriptor, MemberInfo, MemberKeys, PostCloseClaimProver,
         RefreshPayload, SendPayload, WithdrawalClaimProver, add_signature,
-        assemble_genesis_state_backed, build_channel_withdrawal, build_inter_channel_credit,
-        build_l1_deposit_import, build_record, build_send, decrypt_balance,
+        assemble_genesis_state_backed, build_batch_next_state, build_channel_withdrawal,
+        build_inter_channel_credit, build_l1_deposit_import, build_record, build_send,
+        decrypt_balance,
         default_settled_tx_accumulator, partial_withdrawal_auth_digest, sign_state,
         sign_state_if_backed, verify_all_signatures, verify_inter_channel_credit_transition,
         verify_inter_channel_send_transition, verify_l1_deposit_import_transition,
@@ -143,23 +144,23 @@ const POST_CLOSE_CLAIM_FILE: &str = "post_close_claim.json";
 const POST_CLOSE_CLAIM_MLE_FILE: &str = "post_close_claim_mle.json";
 // Delegate demo: slots 0,1,2 = three CLI-controlled CO-SIGNING MEMBERS (with genesis balances);
 // slot 3 = the browser, a send-only DELEGATE (delegate_count = 1).
-const CLI_SLOTS: &[u8] = &[0, 1, 2];
+const CLI_SLOTS: &[u16] = &[0, 1, 2];
 // Genesis allocations in BASE UNITS (= wei). With TOKEN_DECIMALS=18, 1 token = 1 ETH.
 // 0.04 + 0.03 + 0.02 = 0.09 ETH total — fits comfortably in u64 (max ~18.4 ETH).
-const CLI_GENESIS: &[(u8, u64)] = &[
+const CLI_GENESIS: &[(u16, u64)] = &[
     (0, TOKEN_UNIT / 25),      // 0.04 ETH
     (1, TOKEN_UNIT / 100 * 3), // 0.03 ETH
     (2, TOKEN_UNIT / 50),      // 0.02 ETH
 ];
-const BROWSER_DELEGATE_SLOT: u8 = 3;
-const DELEGATE_COUNT: u8 = 1;
+const BROWSER_DELEGATE_SLOT: u16 = 3;
+const DELEGATE_COUNT: u16 = 1;
 // The first browser delegate's genesis allocation (BASE UNITS) out of the deposited fund (so
 // Σ balances == fund): 50 tokens.
 const DELEGATE_GENESIS: u64 = 0;
 
 #[derive(Serialize, Deserialize)]
 struct ControlledMember {
-    slot: u8,
+    slot: u16,
     keygen_seed: u64,
     balance_amount: u64,
     balance_seed: u64,
@@ -249,7 +250,7 @@ fn cli_active_keys() -> Vec<MemberKeys> {
     v
 }
 
-fn member_info_for(slot: u8, keys: &MemberKeys) -> MemberInfo {
+fn member_info_for(slot: u16, keys: &MemberKeys) -> MemberInfo {
     MemberInfo {
         slot,
         pk_g: keys.pk_g(),
@@ -591,7 +592,7 @@ struct CloseIntentDescriptor {
     close_intent_digest: String,
     member_set_commitment: String,
     member_count: u8,
-    delegate_count: u8,
+    delegate_count: u16,
     member_pk_gs: Vec<String>,
 }
 
@@ -887,7 +888,7 @@ fn cmd_claim(args: &[String]) {
         .get(1)
         .cloned()
         .unwrap_or_else(|| die("claim needs <manager_addr> <member_slot> [rpc_url]"));
-    let member_slot: u8 = args
+    let member_slot: u16 = args
         .get(2)
         .and_then(|s| s.parse().ok())
         .unwrap_or_else(|| die("claim needs <member_slot>"));
@@ -1210,7 +1211,7 @@ fn cmd_post_close_claim(args: &[String]) {
     let manager = args.get(1).cloned().unwrap_or_else(|| {
         die("post-close-claim needs <manager_addr> <receiver_slot> <incoming_tx_index> [rpc_url]")
     });
-    let receiver_slot: u8 = args
+    let receiver_slot: u16 = args
         .get(2)
         .and_then(|s| s.parse().ok())
         .unwrap_or_else(|| die("post-close-claim needs <receiver_slot>"));
@@ -1825,6 +1826,7 @@ fn main() {
         "add-genesis-sig" => cmd_add_genesis_sig(&args),
         "send" => cmd_send(&args),
         "cosign" => cmd_cosign(&args),
+        "cosign-batch" => cmd_cosign_batch(&args),
         "cosign-refresh" => cmd_cosign_refresh(&args),
         "cosign-inter-transfer" => cmd_cosign_inter_transfer(&args),
         "cosign-burn-send" => cmd_cosign_burn_send(&args),
@@ -1852,7 +1854,7 @@ fn main() {
         "post-close-claim" => cmd_post_close_claim(&args),
         _ => {
             eprintln!(
-                "usage: channel_member <setup-backing|init|send|cosign|cosign-burn-send|deploy-settlement|cosign-l1-deposit-import|pw-submit|pw-finalize|close|settle|withdraw|claim|cancel-close|post-close-claim|...> ..."
+                "usage: channel_member <setup-backing|init|send|cosign|cosign-batch|cosign-burn-send|deploy-settlement|cosign-l1-deposit-import|pw-submit|pw-finalize|close|settle|withdraw|claim|cancel-close|post-close-claim|...> ..."
             );
             exit(2);
         }
@@ -1953,7 +1955,7 @@ fn cmd_init(args: &[String]) {
 /// The three CLI co-signing members (deterministic keys + genesis balances).
 fn cli_members() -> (
     Vec<MemberInfo>,
-    Vec<(u8, RegevCiphertext)>,
+    Vec<(u16, RegevCiphertext)>,
     Vec<ControlledMember>,
 ) {
     let mut members = Vec::new();
@@ -1998,7 +2000,7 @@ fn create_channel(
     ChannelState,
     Vec<MemberInfo>,
     Vec<ControlledMember>,
-    u8,
+    u16,
 ) {
     let _ = DELEGATE_COUNT; // (delegate_count is now dynamic; first channel has 1)
     nd.slot = BROWSER_DELEGATE_SLOT;
@@ -2057,7 +2059,7 @@ fn create_channel(
     for c in &controlled {
         let sig = sign_state_if_backed(
             &keys_for(c.keygen_seed),
-            c.slot,
+            c.slot as u8, // CLI cosigners occupy slots 0..2 (cosigner space, fits u8)
             &record,
             &state,
             &att,
@@ -2085,7 +2087,7 @@ fn join_delegate(
     ChannelState,
     Vec<MemberInfo>,
     Vec<ControlledMember>,
-    u8,
+    u16,
 ) {
     let prev = load_state();
     let existing = prev
@@ -2094,15 +2096,17 @@ fn join_delegate(
         .iter()
         .filter(|m| m.slot >= BROWSER_DELEGATE_SLOT)
         .count();
-    let new_slot = BROWSER_DELEGATE_SLOT + existing as u8;
+    // Check capacity BEFORE computing the slot (u16 arithmetic; the old `as u8` add wrapped at
+    // slot 256 — the 2026-07-18 storm bug).
     if CLI_SLOTS.len() + existing + 1 > MAX_CHANNEL_MEMBERS {
         die("channel is full (member_count + delegate_count would exceed MAX_CHANNEL_MEMBERS)");
     }
+    let new_slot = BROWSER_DELEGATE_SLOT + existing as u16;
     nd.slot = new_slot;
     let mut members = prev.snapshot.members.clone();
     members.push(nd);
     members.sort_by_key(|m| m.slot);
-    let new_delegate_count = (existing + 1) as u8;
+    let new_delegate_count = (existing + 1) as u16;
     let record = build_record(channel_id_env(), &members, BP_SLOT, new_delegate_count)
         .unwrap_or_else(|e| die(e));
 
@@ -2125,7 +2129,7 @@ fn join_delegate(
     // after any inter-channel send. Plain N-of-N re-sign of the membership add; same rationale
     // as cmd_cosign.
     for c in &prev.controlled {
-        let sig = sign_state(&keys_for(c.keygen_seed), c.slot, &state)
+        let sig = sign_state(&keys_for(c.keygen_seed), c.slot as u8, &state)
             .unwrap_or_else(|e| die(format!("sign: {e:?}")));
         add_signature(&mut state, sig);
     }
@@ -2199,11 +2203,11 @@ fn cmd_add_genesis_sig(args: &[String]) {
 }
 
 fn cmd_send(args: &[String]) {
-    let from: u8 = args
+    let from: u16 = args
         .get(1)
         .and_then(|s| s.parse().ok())
         .unwrap_or_else(|| die("send <from> <to> <amount> <out>"));
-    let to: u8 = args
+    let to: u16 = args
         .get(2)
         .and_then(|s| s.parse().ok())
         .unwrap_or_else(|| die("bad <to>"));
@@ -2324,11 +2328,11 @@ fn cmd_cosign(args: &[String]) {
         if next_state
             .member_signatures
             .iter()
-            .any(|s| s.member_slot == c.slot)
+            .any(|s| s.member_slot as u16 == c.slot)
         {
             continue;
         }
-        let sig = sign_state(&keys_for(c.keygen_seed), c.slot, &next_state)
+        let sig = sign_state(&keys_for(c.keygen_seed), c.slot as u8, &next_state)
             .unwrap_or_else(|e| die(format!("sign: {e:?}")));
         add_signature(&mut next_state, sig);
     }
@@ -2354,6 +2358,98 @@ fn cmd_cosign(args: &[String]) {
     // HEAD SYNC: publish the advanced head so `/api/snapshot` (the browsers' re-import source) is
     // current — otherwise a later re-import returns the stale init snapshot and the next send fails
     // "payload does not extend the current head".
+    write_json("channel_snapshot.json", &state.snapshot);
+}
+
+/// Batched co-sign (abstract2-1 §3.2b): `cosign-batch <batch_payloads.json> <out>` where the input
+/// is a JSON ARRAY of `SendPayload`s all anchored at the CURRENT head. Every payload is verified
+/// with the full solo pipeline (`verify_send_transition`: E-1 proof, A11 sender sig, structural
+/// fold) — IN PARALLEL, since the K verifications are independent — then the canonical batch state
+/// is built (`build_batch_next_state`: R1 single-debit, debits-then-credits fold, D3 budget) and
+/// co-signed once. ONE state_version bump for K transfers.
+fn cmd_cosign_batch(args: &[String]) {
+    let in_path = args
+        .get(1)
+        .unwrap_or_else(|| die("cosign-batch <batch_payloads.json> <out>"));
+    let out_path = args
+        .get(2)
+        .map(String::as_str)
+        .unwrap_or("batch_cosigned.json");
+    let mut state = load_state();
+    let payloads: Vec<SendPayload> = read_json(in_path);
+    if payloads.is_empty() {
+        die("cosign-batch: empty batch");
+    }
+    let head = state.snapshot.state.clone();
+
+    // Parallel per-tx verification: each payload is an independent solo transition against the
+    // SAME anchor head (disjoint sender slots are enforced right after in build_batch_next_state;
+    // a duplicate sender would still verify here but the batch build rejects it).
+    use rayon::prelude::*;
+    let errors: Vec<String> = payloads
+        .par_iter()
+        .enumerate()
+        .filter_map(|(i, p)| {
+            // Own-slot decryption check when a CLI-controlled slot is the recipient (same
+            // belt-and-braces accounting check cmd_cosign runs).
+            let (sk, expected) = match state
+                .controlled
+                .iter()
+                .find(|c| c.slot == p.recipient_index)
+            {
+                Some(c) => {
+                    let keys = keys_for(c.keygen_seed);
+                    match intmax3_zkp::regev::decrypt_amount(
+                        &keys.regev_sk,
+                        &p.channel_tx.enc_amount,
+                    ) {
+                        Ok(amt) => (Some(keys.regev_sk), Some(amt)),
+                        Err(e) => return Some(format!("payload[{i}]: decrypt enc_amount: {e}")),
+                    }
+                }
+                None => (None, None),
+            };
+            verify_send_transition(&head, &state.snapshot.record, p, LEVEL, sk.as_ref(), expected)
+                .err()
+                .map(|e| format!("payload[{i}]: transition invalid: {e}"))
+        })
+        .collect();
+    if !errors.is_empty() {
+        die(format!("cosign-batch rejected: {}", errors.join("; ")));
+    }
+
+    let mut next_state =
+        build_batch_next_state(&head, &payloads).unwrap_or_else(|e| die(format!("batch build: {e}")));
+    // K = 1 fast-path: the batch state is field-identical to the solo proposal, so carry over the
+    // sender's partial state signature (a member-sender pre-signs only its OWN solo digest).
+    if payloads.len() == 1 && payloads[0].proposed_next_state.digest == next_state.digest {
+        next_state.member_signatures = payloads[0].proposed_next_state.member_signatures.clone();
+    }
+
+    // N-of-N co-sign for all CLI-controlled slots (same §F-1 rationale as cmd_cosign: backing is
+    // anchored at genesis; per-state re-checks would wrongly reject post-inter-channel states).
+    for c in &state.controlled {
+        if next_state
+            .member_signatures
+            .iter()
+            .any(|s| s.member_slot as u16 == c.slot)
+        {
+            continue;
+        }
+        let sig = sign_state(&keys_for(c.keygen_seed), c.slot as u8, &next_state)
+            .unwrap_or_else(|e| die(format!("sign: {e:?}")));
+        add_signature(&mut next_state, sig);
+    }
+    write_json(out_path, &next_state);
+    println!(
+        "batch co-signed {} txs in ONE state transition → {out_path} (state_version {})",
+        payloads.len(),
+        next_state.balance_state.state_version
+    );
+
+    // Advance + republish head (same head-sync rationale as cmd_cosign).
+    state.snapshot.state = next_state;
+    save_state(&state);
     write_json("channel_snapshot.json", &state.snapshot);
 }
 
@@ -2390,11 +2486,11 @@ fn cmd_cosign_refresh(args: &[String]) {
         if next_state
             .member_signatures
             .iter()
-            .any(|s| s.member_slot == c.slot)
+            .any(|s| s.member_slot as u16 == c.slot)
         {
             continue;
         }
-        let sig = sign_state(&keys_for(c.keygen_seed), c.slot, &next_state)
+        let sig = sign_state(&keys_for(c.keygen_seed), c.slot as u8, &next_state)
             .unwrap_or_else(|e| die(format!("sign: {e:?}")));
         add_signature(&mut next_state, sig);
     }
@@ -2551,11 +2647,11 @@ fn cmd_cosign_inter_transfer(args: &[String]) {
         if a_head
             .member_signatures
             .iter()
-            .any(|s| s.member_slot == c.slot)
+            .any(|s| s.member_slot as u16 == c.slot)
         {
             continue;
         }
-        let sig = sign_state(&keys_for(c.keygen_seed), c.slot, &a_head)
+        let sig = sign_state(&keys_for(c.keygen_seed), c.slot as u8, &a_head)
             .unwrap_or_else(|e| die(format!("REFUSING TO SIGN inter-debit — {e}")));
         add_signature(&mut a_head, sig);
     }
@@ -2644,11 +2740,11 @@ fn cmd_cosign_inter_transfer(args: &[String]) {
         if b_head
             .member_signatures
             .iter()
-            .any(|s| s.member_slot == c.slot)
+            .any(|s| s.member_slot as u16 == c.slot)
         {
             continue;
         }
-        let sig = sign_state(&keys_for(c.keygen_seed), c.slot, &b_head)
+        let sig = sign_state(&keys_for(c.keygen_seed), c.slot as u8, &b_head)
             .unwrap_or_else(|e| die(format!("REFUSING TO SIGN inter-credit — {e}")));
         add_signature(&mut b_head, sig);
     }
@@ -2761,11 +2857,11 @@ fn cmd_cosign_burn_send(args: &[String]) {
         if a_head
             .member_signatures
             .iter()
-            .any(|s| s.member_slot == c.slot)
+            .any(|s| s.member_slot as u16 == c.slot)
         {
             continue;
         }
-        let sig = sign_state(&keys_for(c.keygen_seed), c.slot, &a_head)
+        let sig = sign_state(&keys_for(c.keygen_seed), c.slot as u8, &a_head)
             .unwrap_or_else(|e| die(format!("REFUSING TO SIGN burn debit — {e}")));
         add_signature(&mut a_head, sig);
     }
@@ -3058,18 +3154,18 @@ fn cmd_cosign_l1_deposit_import(args: &[String]) {
         if !fund_state
             .member_signatures
             .iter()
-            .any(|s| s.member_slot == c.slot)
+            .any(|s| s.member_slot as u16 == c.slot)
         {
-            let sig = sign_state(&k, c.slot, &fund_state)
+            let sig = sign_state(&k, c.slot as u8, &fund_state)
                 .unwrap_or_else(|e| die(format!("sign fund_import: {e}")));
             add_signature(&mut fund_state, sig);
         }
         if !bundle_state
             .member_signatures
             .iter()
-            .any(|s| s.member_slot == c.slot)
+            .any(|s| s.member_slot as u16 == c.slot)
         {
-            let sig = sign_state(&k, c.slot, &bundle_state)
+            let sig = sign_state(&k, c.slot as u8, &bundle_state)
                 .unwrap_or_else(|e| die(format!("sign bundle_apply: {e}")));
             add_signature(&mut bundle_state, sig);
         }

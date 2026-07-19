@@ -26,6 +26,7 @@ Lean 4.10.0 / core only. No `sorry` / `axiom`.
 |---|---|
 | **Reuse (import ChannelSafety2)** | `Ct`, `Tag`, `SigModel2`, `ValidEncState`, intra-channel theorems, single-leg `ChannelUpdate`, `challenge_latest_wins2`, `end_to_end_close_safety2`, `chain_binding_resolves_attachment`, base-layer ledger (via ChannelSafety) |
 | **New (v2.1)** | `EncBalanceState21` (+ `settledChain`), `BulkChannelUpdate` / `TransferEntry`, `BulkUpdateProven`, `applyBulkSend` / `applyBulkReceive`, bulk solvency + conservation, `bulk_send_chain_step`, `TransferAuthorized21`, `end_to_end_close_safety21` (projection) |
+| **New (v2.1b batch)** | `BatchTx` / `BatchTxProven` / `BatchProven` (`sendersDistinct` = R1), `applyBatch` (debits-then-credits canonical fold, one version bump), `batch_conserves_total`, `batch_preserves_validity`, `batch_step_eq_seq` / `batch_singleton_eq_single` (sequential equivalence) |
 
 ## What v2.1 newly proves
 
@@ -42,6 +43,26 @@ Lean 4.10.0 / core only. No `sorry` / `axiom`.
 5. **Small-block authorization** — `TransferAuthorized21` (= v2
    `TransferAuthorized2` on projected state); per-channel `tx_root` semantics
    documented in the file header (M1').
+6. **Batched intra-channel transfer (v2.1b, abstract2-1 §2.2b/§3.2b/§4.2b)** —
+   `applyBatch` applies K txs in ONE state transition: every debit is checked
+   against the ANCHOR state (`BatchTxProven`: `after = before − amount`, both
+   non-negative, `encAmount = amount`), all debited slots distinct
+   (`sendersDistinct` = single-debit rule R1), then all credits fold as
+   homomorphic adds. Proven:
+   - `batch_preserves_validity`: `ValidEncState21` is maintained,
+     `provenTotal` conserved, `settledChain` untouched — for ANY proven batch,
+     **including sender-as-recipient** (R2).
+   - `batch_conserves_total`: Σ balances invariant (illicit-mint impossibility
+     for the whole batch).
+   - `batch_step_eq_seq`: when no debiting slot is also credited, the batch
+     fold is **extensionally equal** to the sequential per-tx application
+     (`seqFold` of abstract2 §3.2 steps) — the batch is a compressed run of K
+     ordinary transfers under one agreement round. `batch_singleton_eq_single`
+     recovers K = 1 exactly.
+   The cross-batch double-spend argument (a debit's `before`-ct binding acts
+   as a natural nullifier) lives at the spec level (abstract2-1 §2.2, §4.2b(4));
+   in the model it corresponds to `BatchTxProven` failing against any state
+   whose sender ciphertext differs from the anchor.
 
 ## Theorem ↔ specification correspondence
 
@@ -57,7 +78,11 @@ Lean 4.10.0 / core only. No `sorry` / `axiom`.
 | §3.1 / §4.1 | authorization (intra / single-leg) | *(reuse)* `authorization2`, … |
 | §3.5.2–3 | stale close | *(reuse)* `challenge_latest_wins2` |
 | §2.1 chain binding | proof attachment | *(reuse)* `chain_binding_resolves_attachment` |
-| — | non-vacuity | §8 Sanity (`sampleBulkDest1_proven`, `sample_bulk_conservation_dest1`) |
+| §2.2b / §3.2b R1 | batch single-debit rule | `sendersDistinct` hypothesis of `batch_preserves_validity` |
+| §4.2b (1) sequential equivalence | batch = K compressed §3.2 steps | `batch_step_eq_seq`, `batch_singleton_eq_single` |
+| §4.2b (3) conservation | batch total invariant | `batch_conserves_total` |
+| §4.2b main | batch validity | `batch_preserves_validity` |
+| — | non-vacuity | §9 Sanity (`sampleBulkDest1_proven`, `sample_bulk_conservation_dest1`, `sampleBatch_proven`, `sampleBatch_valid`, `sampleBatch_total_conserved`) |
 
 Base-layer no-double-spend / conservation: v1 theorems via import (unchanged).
 
@@ -85,6 +110,7 @@ in for that binding.
 | **M6'** | `TransferAuthorized21` binds deducted state to bare `tx_root`; bulk entry ↔ ledger `amount` still `hcircuit` (A2). |
 | **M7** | Signed-but-unsettled `.txRoot` state at close — spec open (abstract2-1 §6). |
 | **M8** | Multi-destination bulk: conservation theorem proved for **one `dest` at a time** (`honly : ∀ e ∈ entries, e.dest = dest`). Cross-channel multi-dest conservation is by iterating per-dest channels + global `BulkUpdateProven` (not a single closed-form lemma). |
+| **M9** | Batch (v2.1b): `batch_step_eq_seq` requires no debiting slot to be credited in the same batch; the sender-as-recipient case is covered by `batch_preserves_validity` directly (the fold order debit-before-credit is then normative, not derived). The D3 `pending_adds` budget and witness invalidation (refresh) are implementation-layer concerns, not modeled — the model's `BatchTxProven`-against-anchor stands in for "the E-1 proof matches the current stored ciphertext". |
 
 ## Relationship to abstract2 / ChannelSafety2
 

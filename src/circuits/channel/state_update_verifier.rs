@@ -784,7 +784,7 @@ impl L1DepositImportUpdateWitness {
             self.prev_state.channel_id,
             self.deposit_nullifier,
             self.amount,
-            self.depositor_slot as u8,
+            self.depositor_slot as u16,
         );
         let public_inputs = ChannelStateUpdatePublicInputs {
             kind: ChannelTransitionKind::L1DepositImport,

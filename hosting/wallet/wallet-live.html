@@ -26,7 +26,7 @@
   button:disabled { opacity:.45; cursor:not-allowed; }
   .log { background:#0d1117; border:1px solid var(--border); border-radius:10px; padding:12px; height:200px; overflow:auto; white-space:pre-wrap; font-size:13px; }
   .hint { color:var(--muted); font-size:13px; }
-  .ok { color:var(--ok); } .err { color:var(--err); }
+  .ok { color:var(--ok); } .err { color:var(--err); } .zk { color:var(--accent); }
 
   .addr-display { display:flex; align-items:center; gap:8px; margin:6px 0; }
   .addr-value { font-size:20px; font-weight:600; color:var(--accent); cursor:pointer; letter-spacing:.05em; }
@@ -837,6 +837,7 @@ async function attemptSend(to, amt) {
   if (!rr.canSend) {
     log('  refresh needed before sending...');
     sendPhase = 'Proving';
+    log('  re-encrypting balance (秘匿化)...', 'zk');
     const refreshPayload = await call('refresh');
     sendPhase = 'Waiting for co-sign';
     const cosigned = await api('/api/refresh-cosign', refreshPayload);
@@ -846,7 +847,9 @@ async function attemptSend(to, amt) {
     log('  refreshed -- ready to send', 'ok');
   }
   sendPhase = 'Proving';
+  log('  generating ZKP (zero-knowledge proof)...', 'zk');
   const payload = await call('send', { recipientSlot: to, amount: toBase(amt) });
+  log('  ZKP generated · amount encrypted (秘匿化)', 'zk');
   log('  co-signing...');
   sendPhase = 'Waiting for co-sign';
   const finalState = await api('/api/cosign', payload);
@@ -859,6 +862,7 @@ async function attemptInterChannelSend(toCh, to, amt) {
   mySlot = rr.slot; showBalance(rr);
   log('  syncing balance witness (refresh)...');
   sendPhase = 'Proving';
+  log('  re-encrypting balance (秘匿化)...', 'zk');
   const refreshPayload = await call('refresh');
   sendPhase = 'Waiting for co-sign';
   const cosigned = await api('/api/refresh-cosign', refreshPayload);
@@ -872,7 +876,9 @@ async function attemptInterChannelSend(toCh, to, amt) {
   if (!bMember) throw new Error('channel ' + toCh + ' has no member at slot ' + to);
   const destRecipientJson = JSON.stringify({ regevPk: bMember.regevPk, pkG: bMember.pkG });
   sendPhase = 'Proving';
+  log('  generating ZKP · encrypting amount for recipient (秘匿化)...', 'zk');
   const built = JSON.parse(await call('sendInterChannel', { toChannel: toCh, toSlot: to, amount: toBase(amt), destRecipientJson }));
+  log('  ZKP generated · transfer encrypted', 'zk');
   log('  relay co-signing debit + credit atomically...');
   sendPhase = 'Waiting for co-sign';
   const sendRes = await fetch('/api/inter/send?channel=' + (myChannel ?? activeCh), {
@@ -988,6 +994,7 @@ $('btnBurnSend').onclick = guard('burn', async () => {
     if (!rr.canSend) {
       log('  refresh needed before burn...');
       sendPhase = 'Refreshing';
+      log('  re-encrypting balance (秘匿化)...', 'zk');
       const refreshPayload = await call('refresh');
       const cosigned = await api('/api/refresh-cosign', refreshPayload);
       rr = JSON.parse(await call('finalize', { stateJson: cosigned }));
@@ -995,7 +1002,9 @@ $('btnBurnSend').onclick = guard('burn', async () => {
     }
     log('burn send ' + amt + ' ETH -> ' + addr + '...');
     sendPhase = 'Proving burn';
+    log('  generating burn ZKP (zero-knowledge proof)...', 'zk');
     const built = JSON.parse(await call('burnSend', { amount: toBase(amt), withdrawalAddress: addr }));
+    log('  burn ZKP generated · amount encrypted (秘匿化)', 'zk');
     log('  burn proved -- co-signing...');
     sendPhase = 'Co-signing';
     const cosigned = await api('/api/cosign-burn', JSON.stringify({
@@ -1062,7 +1071,9 @@ $('btnFwClose').onclick = guard('fwClose', async () => {
     $('btnFwClose').disabled = true;
     if (!fwSettlement) { try { fwSettlement = JSON.parse(await api('/api/settlement', null, 'GET')); } catch(e) { throw new Error('deploy settlement first'); } }
     log('closing channel (real proving -- may take minutes)...');
+    log('  generating close ZKP (full validity proof)...', 'zk');
     const r = JSON.parse(await api('/api/close', JSON.stringify({ manager: fwSettlement.manager, sv: fwSettlement.verifier })));
+    log('  close ZKP generated', 'zk');
     log('channel closed.', 'ok');
     $('btnFwSettle').disabled = false;
     await fetchTickets(); applyTicketState();

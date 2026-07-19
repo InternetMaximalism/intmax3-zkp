@@ -295,7 +295,7 @@ impl ChannelClosePublicInputsTarget {
         witness
             .set_target(
                 self.delegate_count,
-                F::from_canonical_u8(value.delegate_count),
+                F::from_canonical_u16(value.delegate_count),
             )
             .unwrap();
     }

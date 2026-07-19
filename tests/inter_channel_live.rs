@@ -60,7 +60,7 @@ const A_ID: u32 = 7;
 const B_ID: u32 = 8;
 const AMT: u64 = 5;
 
-fn member_info(slot: u8, keys: &MemberKeys) -> MemberInfo {
+fn member_info(slot: u16, keys: &MemberKeys) -> MemberInfo {
     MemberInfo {
         slot,
         pk_g: keys.pk_g(),
@@ -90,7 +90,7 @@ fn build_channel(channel_id: u32, n: usize, balances: &[u64], rng: &mut StdRng) 
     let members: Vec<MemberInfo> = keys
         .iter()
         .enumerate()
-        .map(|(i, k)| member_info(i as u8, k))
+        .map(|(i, k)| member_info(i as u16, k))
         .collect();
     // 4th arg = delegate_count = 0 (this branch's `build_record` signature).
     let record = build_record(channel_id, &members, 0, 0).expect("record");
@@ -156,8 +156,8 @@ fn co_sign_all(mut state: ChannelState, keys: &[MemberKeys]) -> ChannelState {
 fn run_positive(
     a: &ChannelFixture,
     b: &ChannelFixture,
-    sender_slot: u8,
-    recipient_slot: u8,
+    sender_slot: u16,
+    recipient_slot: u16,
     amount: u64,
     rng: &mut StdRng,
 ) -> (
@@ -230,8 +230,8 @@ fn inter_channel_live_send_and_credit() {
     // member 1 (a non-trivial slot, to prove slot routing).
     let a = build_channel(A_ID, 3, &[50, 10, 30], &mut rng);
     let b = build_channel(B_ID, 3, &[20, 40, 60], &mut rng);
-    let sender_slot = 0u8;
-    let recipient_slot = 1u8;
+    let sender_slot = 0u16;
+    let recipient_slot = 1u16;
 
     let a_fund_before = a.snapshot.state.channel_fund.amount;
     let b_fund_before = b.snapshot.state.channel_fund.amount;

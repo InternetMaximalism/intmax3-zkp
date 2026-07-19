@@ -10,7 +10,9 @@ const https = require('https');
 const http = require('http');
 const fs = require('fs');
 const path = require('path');
-const { execFileSync } = require('child_process');
+const { execFile } = require('child_process');
+const { promisify } = require('util');
+const pExecFile = promisify(execFile);
 
 const ROOT = __dirname;
 const WORK = path.join(ROOT, 'wallet-live-work');
@@ -27,9 +29,14 @@ function reqChannel(req) {
   const c = parseInt((req.query && req.query.channel) || '', 10);
   return CHANNELS.includes(c) ? c : CHANNELS[0];
 }
-function cli(ch, args, extraEnv) {
+async function cli(ch, args, extraEnv) {
   console.log(`  $ INTMAX_CHANNEL=${ch} channel_member ${args.join(' ')}`);
-  return execFileSync(CLI, args, { cwd: chDir(ch), encoding: 'utf8', timeout: 600_000, env: { ...process.env, INTMAX_CHANNEL: String(ch), ...(extraEnv || {}) } });
+  // ASYNC exec: execFileSync blocked the WHOLE node event loop for the duration of every proving
+  // call, serializing even independent channels (measured: throughput pinned at ~1.6 req/s flat
+  // from conc=1..8 while CPU sat ~65% idle). execFile keeps the loop free; per-channel ordering
+  // is still enforced by withLock.
+  const { stdout } = await pExecFile(CLI, args, { cwd: chDir(ch), encoding: 'utf8', timeout: 600_000, maxBuffer: 256 * 1024 * 1024, env: { ...process.env, INTMAX_CHANNEL: String(ch), ...(extraEnv || {}) } });
+  return stdout;
 }
 
 // Per-channel mutex: serialize all mutating CLI calls to prevent concurrent state corruption.
@@ -40,6 +47,79 @@ function withLock(ch, fn) {
   const next = prev.then(fn, fn);
   _chLocks[ch] = next.catch(() => {});
   return next;
+}
+
+// ---- Batched co-sign queue (abstract2-1 §3.2b) -----------------------------------------------
+// Concurrent /api/cosign requests for the SAME channel coalesce into ONE `cosign-batch` CLI call:
+// K solo-built SendPayloads anchored at the same head are verified in parallel by the CLI (rayon)
+// and folded into ONE co-signed state transition. Payloads anchored at a stale head are rejected
+// up-front (they could never co-sign — same as today's behavior for the 2nd of two racing sends).
+// If a batch fails (one bad payload poisons it), fall back to solo cosigns so honest txs survive.
+const COALESCE_MS = parseInt(process.env.COSIGN_COALESCE_MS || '150', 10);
+const _sendQueues = {};   // ch -> [{ payload, resolve, reject }]
+const _draining = {};
+function enqueueCosign(ch, payload) {
+  return new Promise((resolve, reject) => {
+    (_sendQueues[ch] = _sendQueues[ch] || []).push({ payload, resolve, reject });
+    drainCosigns(ch);
+  });
+}
+function headDigestOf(ch) {
+  try { return JSON.parse(fs.readFileSync(wc(ch, 'channel_snapshot.json'), 'utf8')).state.digest; }
+  catch (e) { return null; }
+}
+function drainCosigns(ch) {
+  if (_draining[ch]) return;
+  _draining[ch] = true;
+  withLock(ch, async () => {
+    while ((_sendQueues[ch] || []).length) {
+      // COALESCE window: requests that arrive within this window (or during the previous
+      // proving) fold into one batch. Negligible vs 1-8s proving, but it turns "K simultaneous
+      // sends on an idle channel" into a real batch. 150ms default: multi-MB payloads take tens
+      // of ms each just to upload+JSON-parse, so 40ms proved too tight for 3 concurrent senders
+      // (measured on the stress clone: 40ms → batch of 2 + 1 stale; 150ms → batch of 3).
+      await new Promise((r) => setTimeout(r, COALESCE_MS));
+      const taken = _sendQueues[ch].splice(0);
+      // Pre-filter stale anchors (ChannelState serializes camelCase: prevDigest / digest).
+      const head = headDigestOf(ch);
+      const batch = [];
+      for (const item of taken) {
+        const anchor = item.payload && item.payload.proposedNextState && item.payload.proposedNextState.prevDigest;
+        if (head && anchor && anchor !== head) {
+          item.reject(new Error('stale anchor: channel head advanced; re-import the snapshot and rebuild the send'));
+        } else batch.push(item);
+      }
+      if (!batch.length) continue;
+      try {
+        let outFile;
+        if (batch.length === 1) {
+          fs.writeFileSync(wc(ch, 'payload.json'), JSON.stringify(batch[0].payload));
+          await cli(ch, ['cosign', 'payload.json', 'cosigned.json']);
+          outFile = 'cosigned.json';
+        } else {
+          console.log(`  batch co-sign: ${batch.length} sends in ONE transition (channel ${ch})`);
+          fs.writeFileSync(wc(ch, 'batch_payloads.json'), JSON.stringify(batch.map(b => b.payload)));
+          await cli(ch, ['cosign-batch', 'batch_payloads.json', 'batch_cosigned.json']);
+          outFile = 'batch_cosigned.json';
+        }
+        const out = fs.readFileSync(wc(ch, outFile), 'utf8');
+        for (const b of batch) b.resolve(out);
+      } catch (e) {
+        if (batch.length === 1) { batch[0].reject(e); continue; }
+        console.error(`batch of ${batch.length} rejected (${String(e.stderr || e.message || e).slice(0, 200)}); falling back to solo cosigns`);
+        for (const b of batch) {
+          try {
+            fs.writeFileSync(wc(ch, 'payload.json'), JSON.stringify(b.payload));
+            await cli(ch, ['cosign', 'payload.json', 'cosigned.json']);
+            b.resolve(fs.readFileSync(wc(ch, 'cosigned.json'), 'utf8'));
+          } catch (e2) { b.reject(e2); }
+        }
+      }
+    }
+  }).finally(() => {
+    _draining[ch] = false;
+    if ((_sendQueues[ch] || []).length) drainCosigns(ch);
+  });
 }
 
 // ---- Ticket persistence (one JSON array per channel) ----------------------------------------
@@ -150,10 +230,10 @@ app.get('/api/channels', (req, res) => res.json({ channels: CHANNELS }));
 
 app.post('/api/init', (req, res) => {
   const ch = reqChannel(req);
-  withLock(ch, () => {
+  withLock(ch, async () => {
     fs.mkdirSync(chDir(ch), { recursive: true });
     fs.writeFileSync(wc(ch, 'contribution.json'), JSON.stringify(req.body));
-    cli(ch, ['init', 'contribution.json', 'channel_snapshot.json']);
+    await cli(ch, ['init', 'contribution.json', 'channel_snapshot.json']);
     res.json(JSON.parse(fs.readFileSync(wc(ch, 'channel_snapshot.json'), 'utf8')));
   }).catch((e) => { console.error(e.stderr ? String(e.stderr) : (e.message||e)); res.status(500).json({ error: String(e.stderr || e.message || e) }); });
 });
@@ -195,39 +275,41 @@ app.get('/api/deposit-info', (req, res) => {
 
 app.post('/api/cosign', (req, res) => {
   const ch = reqChannel(req);
-  withLock(ch, () => {
-    fs.writeFileSync(wc(ch, 'payload.json'), JSON.stringify(req.body));
-    cli(ch, ['cosign', 'payload.json', 'cosigned.json']);
-    res.json(JSON.parse(fs.readFileSync(wc(ch, 'cosigned.json'), 'utf8')));
-  }).catch((e) => { console.error(e.stderr ? String(e.stderr) : (e.message||e)); res.status(500).json({ error: String(e.stderr || e.message || e) }); });
+  enqueueCosign(ch, req.body)
+    .then((finalStateJson) => res.type('application/json').send(finalStateJson))
+    .catch((e) => { console.error(e.stderr ? String(e.stderr) : (e.message||e)); res.status(500).json({ error: String(e.stderr || e.message || e) }); });
 });
 
 app.post('/api/refresh-cosign', (req, res) => {
   const ch = reqChannel(req);
-  withLock(ch, () => {
+  withLock(ch, async () => {
     fs.writeFileSync(wc(ch, 'refresh_payload.json'), JSON.stringify(req.body));
-    cli(ch, ['cosign-refresh', 'refresh_payload.json', 'refresh_cosigned.json']);
+    await cli(ch, ['cosign-refresh', 'refresh_payload.json', 'refresh_cosigned.json']);
     res.json(JSON.parse(fs.readFileSync(wc(ch, 'refresh_cosigned.json'), 'utf8')));
   }).catch((e) => { console.error(e.stderr ? String(e.stderr) : (e.message||e)); res.status(500).json({ error: String(e.stderr || e.message || e) }); });
 });
 
 app.post('/api/inter/send', (req, res) => {
-  try {
-    const ch = reqChannel(req);
+  const ch = reqChannel(req);
+  // Previously an unlocked handler — safe only because execFileSync serialized the whole process.
+  // With async exec the per-channel lock must be explicit (cosign-inter-transfer mutates BOTH
+  // channels' state from channel A's dir; A's lock serializes it against A's other mutations,
+  // matching the old effective ordering).
+  withLock(ch, async () => {
     const debitPayload = req.body && req.body.debitPayload;
     const descriptor = req.body && req.body.transferDescriptor;
     if (!debitPayload || !descriptor) throw new Error('inter/send needs { debitPayload, transferDescriptor }');
     fs.writeFileSync(wc(ch, 'inter_debit_payload.json'), JSON.stringify(debitPayload));
     fs.writeFileSync(wc(ch, 'inter_descriptor.json'), JSON.stringify(descriptor));
-    cli(ch, ['cosign-inter-transfer', 'inter_debit_payload.json', 'inter_descriptor.json', 'inter_transfer.json']);
+    await cli(ch, ['cosign-inter-transfer', 'inter_debit_payload.json', 'inter_descriptor.json', 'inter_transfer.json']);
     res.json(JSON.parse(fs.readFileSync(wc(ch, 'inter_transfer.json'), 'utf8')));
-  } catch (e) { console.error(e.stderr ? String(e.stderr) : (e.message||e)); res.status(500).json({ error: String(e.stderr || e.message || e) }); }
+  }).catch((e) => { console.error(e.stderr ? String(e.stderr) : (e.message||e)); res.status(500).json({ error: String(e.stderr || e.message || e) }); });
 });
 
 // ─── Deposit import ────────────────────────────────────────────────────────────────────────
 app.post('/api/import-deposit', (req, res) => {
   const ch = reqChannel(req);
-  withLock(ch, () => {
+  withLock(ch, async () => {
     let slot = req.body && req.body.recipientSlot;
     let depositor = req.body && req.body.depositor;
     let amount = req.body && req.body.amount;
@@ -237,7 +319,7 @@ app.post('/api/import-deposit', (req, res) => {
       const dep = JSON.parse(fs.readFileSync(pf, 'utf8'));
       slot = dep.recipientSlot; depositor = dep.depositor; amount = dep.amount;
     }
-    cli(ch, ['cosign-l1-deposit-import', String(slot), String(amount), depositor, 'l1_import_cosigned.json']);
+    await cli(ch, ['cosign-l1-deposit-import', String(slot), String(amount), depositor, 'l1_import_cosigned.json']);
     const depTicket = findActiveTicket(ch, 'deposit');
     if (depTicket) { depTicket.status = 'import_done'; depTicket.steps.import = { completedAt: Date.now() }; upsertTicket(ch, depTicket); }
     const snap = JSON.parse(fs.readFileSync(wc(ch, 'channel_snapshot.json'), 'utf8'));
@@ -248,7 +330,7 @@ app.post('/api/import-deposit', (req, res) => {
 // ─── Partial withdrawal (burn + settle) ────────────────────────────────────────────────────
 app.post('/api/cosign-burn', (req, res) => {
   const ch = reqChannel(req);
-  withLock(ch, () => {
+  withLock(ch, async () => {
     const active = findActiveTicket(ch, 'partial_withdrawal');
     if (active && active.status === 'burn_done') {
       res.status(409).json({ error: 'settle pending burn first', ticket: active });
@@ -258,7 +340,7 @@ app.post('/api/cosign-burn', (req, res) => {
     if (!debitPayload || !transferDescriptor) throw new Error('cosign-burn needs { debitPayload, transferDescriptor }');
     fs.writeFileSync(wc(ch, 'burn_payload.json'), JSON.stringify(debitPayload));
     fs.writeFileSync(wc(ch, 'burn_descriptor.json'), JSON.stringify(transferDescriptor));
-    cli(ch, ['cosign-burn-send', 'burn_payload.json', 'burn_descriptor.json', 'burn_cosigned.json']);
+    await cli(ch, ['cosign-burn-send', 'burn_payload.json', 'burn_descriptor.json', 'burn_cosigned.json']);
     const ticket = upsertTicket(ch, {
       id: 'pw_' + Date.now(), type: 'partial_withdrawal', status: 'burn_done',
       createdAt: Date.now(), updatedAt: Date.now(),
@@ -272,11 +354,11 @@ app.post('/api/cosign-burn', (req, res) => {
 
 app.post('/api/deploy-settlement', (req, res) => {
   const ch = reqChannel(req);
-  withLock(ch, () => {
+  withLock(ch, async () => {
     if (fs.existsSync(wc(ch, 'settlement.json'))) {
       return res.json(JSON.parse(fs.readFileSync(wc(ch, 'settlement.json'), 'utf8')));
     }
-    cli(ch, ['deploy-settlement', RPC]);
+    await cli(ch, ['deploy-settlement', RPC]);
     const s = JSON.parse(fs.readFileSync(wc(ch, 'settlement.json'), 'utf8'));
     let ticket = findActiveTicket(ch, 'full_withdrawal');
     if (!ticket) {
@@ -301,23 +383,23 @@ app.get('/api/settlement', (req, res) => {
 
 app.post('/api/pw-submit', (req, res) => {
   const ch = reqChannel(req);
-  withLock(ch, () => {
+  withLock(ch, async () => {
     const ticket = findActiveTicket(ch, 'partial_withdrawal');
     if (ticket) { ticket.status = 'settle_pending'; upsertTicket(ch, ticket); }
     if (!fs.existsSync(wc(ch, 'settlement.json'))) {
-      cli(ch, ['deploy-settlement', RPC]);
+      await cli(ch, ['deploy-settlement', RPC]);
     }
     const pwRecipient = (req.body && req.body.recipient) || (ticket && ticket.params.recipient) || '';
     const extra = pwRecipient ? { PW_RECIPIENT: pwRecipient } : {};
-    cli(ch, ['pw-submit', RPC], extra);
+    await cli(ch, ['pw-submit', RPC], extra);
     res.json(JSON.parse(fs.readFileSync(wc(ch, 'pw_auth.json'), 'utf8')));
   }).catch((e) => { console.error(e.stderr ? String(e.stderr) : (e.message||e)); res.status(500).json({ error: String(e.stderr || e.message || e) }); });
 });
 
 app.post('/api/pw-finalize', (req, res) => {
   const ch = reqChannel(req);
-  withLock(ch, () => {
-    cli(ch, ['pw-finalize', RPC]);
+  withLock(ch, async () => {
+    await cli(ch, ['pw-finalize', RPC]);
     const auth = JSON.parse(fs.readFileSync(wc(ch, 'pw_auth.json'), 'utf8'));
     const ticket = findActiveTicket(ch, 'partial_withdrawal');
     if (ticket) { ticket.status = 'settle_done'; ticket.steps.settle = { completedAt: Date.now(), authDigest: auth.auth_digest }; upsertTicket(ch, ticket); }
@@ -327,48 +409,56 @@ app.post('/api/pw-finalize', (req, res) => {
 
 // ─── Close lifecycle (close → settle → withdraw → claim) ──────────────────────────────────
 app.post('/api/close', (req, res) => {
-  try {
-    const ch = reqChannel(req); const manager = req.body && req.body.manager; const sv = (req.body && req.body.sv) || '';
+  const ch = reqChannel(req);
+  // Locked + async (was an unlocked sync handler; execFileSync used to serialize implicitly).
+  withLock(ch, async () => {
+ const manager = req.body && req.body.manager; const sv = (req.body && req.body.sv) || '';
     if (!manager) throw new Error('close needs { manager }');
     const ticket = findActiveTicket(ch, 'full_withdrawal');
     if (ticket) { ticket.status = 'close_pending'; upsertTicket(ch, ticket); }
-    const out = cli(ch, ['close', manager, RPC], { CLOSE_SV: sv });
+    const out = await cli(ch, ['close', manager, RPC], { CLOSE_SV: sv });
     if (ticket) { ticket.status = 'close_done'; ticket.steps.close = { completedAt: Date.now() }; upsertTicket(ch, ticket); }
     res.json({ ok: true, log: out });
-  } catch (e) { console.error(e.stderr ? String(e.stderr) : (e.message||e)); res.status(500).json({ error: String(e.stderr || e.message || e) }); }
+  }).catch((e) => { console.error(e.stderr ? String(e.stderr) : (e.message||e)); res.status(500).json({ error: String(e.stderr || e.message || e) }); });
 });
 app.post('/api/settle', (req, res) => {
-  try {
-    const ch = reqChannel(req); const manager = req.body && req.body.manager;
+  const ch = reqChannel(req);
+  // Locked + async (was an unlocked sync handler; execFileSync used to serialize implicitly).
+  withLock(ch, async () => {
+ const manager = req.body && req.body.manager;
     if (!manager) throw new Error('settle needs { manager }');
     const ticket = findActiveTicket(ch, 'full_withdrawal');
     if (ticket) { ticket.status = 'settle_pending'; upsertTicket(ch, ticket); }
-    const out = cli(ch, ['settle', manager, RPC]);
+    const out = await cli(ch, ['settle', manager, RPC]);
     if (ticket) { ticket.status = 'settle_done'; ticket.steps.settle = { completedAt: Date.now() }; upsertTicket(ch, ticket); }
     res.json({ ok: true, log: out });
-  } catch (e) { console.error(e.stderr ? String(e.stderr) : (e.message||e)); res.status(500).json({ error: String(e.stderr || e.message || e) }); }
+  }).catch((e) => { console.error(e.stderr ? String(e.stderr) : (e.message||e)); res.status(500).json({ error: String(e.stderr || e.message || e) }); });
 });
 app.post('/api/withdraw', (req, res) => {
-  try {
-    const ch = reqChannel(req); const manager = req.body && req.body.manager;
+  const ch = reqChannel(req);
+  // Locked + async (was an unlocked sync handler; execFileSync used to serialize implicitly).
+  withLock(ch, async () => {
+ const manager = req.body && req.body.manager;
     if (!manager) throw new Error('withdraw needs { manager }');
     const ticket = findActiveTicket(ch, 'full_withdrawal');
     if (ticket) { ticket.status = 'withdraw_pending'; upsertTicket(ch, ticket); }
-    const out = cli(ch, ['withdraw', manager, RPC], { ROLLUP: rollupOf(ch) });
+    const out = await cli(ch, ['withdraw', manager, RPC], { ROLLUP: rollupOf(ch) });
     if (ticket) { ticket.status = 'withdraw_done'; ticket.steps.withdraw = { completedAt: Date.now() }; upsertTicket(ch, ticket); }
     res.json({ ok: true, log: out });
-  } catch (e) { console.error(e.stderr ? String(e.stderr) : (e.message||e)); res.status(500).json({ error: String(e.stderr || e.message || e) }); }
+  }).catch((e) => { console.error(e.stderr ? String(e.stderr) : (e.message||e)); res.status(500).json({ error: String(e.stderr || e.message || e) }); });
 });
 app.post('/api/claim', (req, res) => {
-  try {
-    const ch = reqChannel(req); const manager = req.body && req.body.manager; const slot = req.body && req.body.slot; const recipient = req.body && req.body.recipient;
+  const ch = reqChannel(req);
+  // Locked + async (was an unlocked sync handler; execFileSync used to serialize implicitly).
+  withLock(ch, async () => {
+ const manager = req.body && req.body.manager; const slot = req.body && req.body.slot; const recipient = req.body && req.body.recipient;
     if (!manager || slot === undefined || !recipient) throw new Error('claim needs { manager, slot, recipient }');
     const ticket = findActiveTicket(ch, 'full_withdrawal');
     if (ticket) { ticket.status = 'claim_pending'; upsertTicket(ch, ticket); }
-    const out = cli(ch, ['claim', manager, String(slot), RPC], { CLAIM_RECIPIENT: recipient });
+    const out = await cli(ch, ['claim', manager, String(slot), RPC], { CLAIM_RECIPIENT: recipient });
     if (ticket) { ticket.status = 'claim_done'; ticket.steps.claim = { completedAt: Date.now() }; upsertTicket(ch, ticket); }
     res.json({ ok: true, log: out });
-  } catch (e) { console.error(e.stderr ? String(e.stderr) : (e.message||e)); res.status(500).json({ error: String(e.stderr || e.message || e) }); }
+  }).catch((e) => { console.error(e.stderr ? String(e.stderr) : (e.message||e)); res.status(500).json({ error: String(e.stderr || e.message || e) }); });
 });
 
 // ─── Ticket endpoints ────────────────────────────────────────────────────────────────────────
