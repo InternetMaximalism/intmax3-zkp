@@ -194,7 +194,7 @@ Per-step in-circuit:
   signature verification uses it). `channel_tree_root` is already in ext state.
 - Expose, as TOP-LEVEL ValidityPublicInputs fields (so the contract can match its own records):
   `initial_key_reg_chain, final_key_reg_chain, initial_channel_reg_chain, final_channel_reg_chain`.
-- Update `_computeValidityPIHash` (Rust + Solidity) and the Groth16 public-input limb count to
+- Update `_computeValidityPIHash` (Rust + Solidity) and the Groth16 public-input limb count _(deprecated: Groth16 removed — MLE/WHIR only, PI binding via `_mlePublicInputsMatch`)_ to
   include these (keccak preimage grows; keep both sides in lockstep — see CLAUDE.md FS checklist).
 
 ### 6.5 Contract finalize() binding
@@ -218,6 +218,6 @@ T8 dummy/threshold=0 → assert key_id≠0, threshold∈[1,num_keys], num_keys�
 1. ExtendedPublicState: add `key_tree_root`; thread through ext_commitment.
 2. registration_chain/ module (step + cyclic + processor + pis), mirroring deposit_hash_chain/.
 3. Order phase A (registration) before phase B (blocks) on the shared ChannelTree.
-4. ValidityPublicInputs + Solidity struct + _computeValidityPIHash + Groth16 limb count (lockstep).
+4. ValidityPublicInputs + Solidity struct + _computeValidityPIHash + Groth16 limb count _(deprecated: Groth16 removed)_ (lockstep).
 5. finalize() reg-chain binding + applied pointers.
 6. Tests T1–T8 + happy/boundary/property.

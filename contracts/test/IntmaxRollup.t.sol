@@ -213,6 +213,7 @@ contract IntmaxRollupTest is Test {
         bytes32[] memory hs = new bytes32[](1);
         hs[0] = blobHash;
         vm.blobhashes(hs);
+        target.setBlockProducer(poster, true); // permissioned posting (deployer == this test contract)
         vm.prank(poster);
         target.postBlockAndSubmit{value: 1 ether}(
             batch, keccak256(proofBytes), uint32(proofBytes.length), stateRoot
@@ -338,6 +339,11 @@ contract IntmaxRollupTest is Test {
         );
         // Pin the KZG blob-binding satellite (EIP-170 relief) so the fraud path's binding check runs.
         rollup.setKzgVerifier(new BlobKZGVerifierExt());
+        // Permissioned posting: authorize every address that posts to `rollup` in this suite
+        // (this contract for un-pranked helper posts, plus the two module-level poster identities).
+        rollup.setBlockProducer(address(this), true);
+        rollup.setBlockProducer(submitter, true);
+        rollup.setBlockProducer(blockProducer, true);
 
         vm.deal(submitter, 10 ether);
         vm.deal(blockProducer, 10 ether);
@@ -865,6 +871,137 @@ contract IntmaxRollupTest is Test {
         vm.prank(submitter);
         vm.expectRevert(IntmaxRollup.NoBlobAttached.selector);
         rollup.postBlockAndSubmit{value: 1 ether}(batch, bytes32(0), uint32(0), bytes32(0));
+    }
+
+    // -----------------------------------------------------------------------
+    // Block-producer access control (permissioned posting)
+    // -----------------------------------------------------------------------
+
+    function test_postBlockAndSubmit_revert_unauthorizedProducer() public {
+        address rando = makeAddr("rando");
+        vm.deal(rando, 10 ether);
+        uint32[] memory ids = new uint32[](1);
+        ids[0] = 1;
+        IntmaxRollup.SubBlock[] memory batch = _singleBlockBatch(
+            1, ids, uint64(block.timestamp), bytes32(uint256(0xabc))
+        );
+        _mockBlob();
+        vm.prank(rando); // rando is NOT on the block-producer whitelist
+        vm.expectRevert(IntmaxRollup.NotAuthorizedBlockProducer.selector);
+        rollup.postBlockAndSubmit{value: 1 ether}(
+            batch, keccak256("p"), 1, keccak256("s")
+        );
+    }
+
+    function test_postBlockAndSubmit_succeeds_afterAuthorization() public {
+        address newProducer = makeAddr("newProducer");
+        vm.deal(newProducer, 10 ether);
+        uint32[] memory ids = new uint32[](1);
+        ids[0] = 1;
+        IntmaxRollup.SubBlock[] memory batch = _singleBlockBatch(
+            1, ids, uint64(block.timestamp), bytes32(uint256(0xabc))
+        );
+
+        // Before authorization: rejected.
+        _mockBlob();
+        vm.prank(newProducer);
+        vm.expectRevert(IntmaxRollup.NotAuthorizedBlockProducer.selector);
+        rollup.postBlockAndSubmit{value: 1 ether}(batch, keccak256("p"), 1, keccak256("s"));
+
+        // Deployer authorizes, then the same producer succeeds.
+        rollup.setBlockProducer(newProducer, true);
+        _mockBlob();
+        vm.prank(newProducer);
+        rollup.postBlockAndSubmit{value: 1 ether}(batch, keccak256("p"), 1, keccak256("s"));
+        assertEq(rollup.nextSubmissionId(), 1, "authorized post recorded");
+
+        // Deployer can revoke; the producer is rejected again.
+        rollup.setBlockProducer(newProducer, false);
+        _mockBlob();
+        vm.prank(newProducer);
+        vm.expectRevert(IntmaxRollup.NotAuthorizedBlockProducer.selector);
+        rollup.postBlockAndSubmit{value: 1 ether}(batch, keccak256("p2"), 1, keccak256("s2"));
+    }
+
+    function test_setBlockProducer_revert_notManager() public {
+        address rando = makeAddr("rando");
+        vm.prank(rando); // not deployer and not blockProducerAdmin
+        vm.expectRevert(IntmaxRollup.NotBlockProducerManager.selector);
+        rollup.setBlockProducer(rando, true);
+    }
+
+    // -----------------------------------------------------------------------
+    // Block-producer admin (posting authority = admin or its designees)
+    // -----------------------------------------------------------------------
+
+    function _singleBlockBatchFor(uint32 id) internal view returns (IntmaxRollup.SubBlock[] memory) {
+        uint32[] memory ids = new uint32[](1);
+        ids[0] = 1;
+        return _singleBlockBatch(id, ids, uint64(block.timestamp), bytes32(uint256(0xabc)));
+    }
+
+    function test_blockProducerAdmin_canPostDirectly() public {
+        address admin = makeAddr("bpAdmin");
+        vm.deal(admin, 10 ether);
+        IntmaxRollup.SubBlock[] memory batch = _singleBlockBatchFor(1);
+
+        // Before being admin: rejected.
+        _mockBlob();
+        vm.prank(admin);
+        vm.expectRevert(IntmaxRollup.NotAuthorizedBlockProducer.selector);
+        rollup.postBlockAndSubmit{value: 1 ether}(batch, keccak256("p"), 1, keccak256("s"));
+
+        // Deployer sets the admin; the admin can now post WITHOUT being in the whitelist.
+        rollup.setBlockProducerAdmin(admin);
+        assertEq(rollup.blockProducerAdmin(), admin);
+        assertFalse(rollup.isBlockProducer(admin), "admin posts without whitelist entry");
+        _mockBlob();
+        vm.prank(admin);
+        rollup.postBlockAndSubmit{value: 1 ether}(batch, keccak256("p"), 1, keccak256("s"));
+        assertEq(rollup.nextSubmissionId(), 1, "admin post recorded");
+    }
+
+    function test_blockProducerAdmin_canDesignateProducer() public {
+        address admin = makeAddr("bpAdmin");
+        address designee = makeAddr("designee");
+        vm.deal(designee, 10 ether);
+        rollup.setBlockProducerAdmin(admin);
+
+        // A non-manager cannot designate.
+        vm.prank(makeAddr("rando"));
+        vm.expectRevert(IntmaxRollup.NotBlockProducerManager.selector);
+        rollup.setBlockProducer(designee, true);
+
+        // The admin designates the producer, who can then post.
+        vm.prank(admin);
+        rollup.setBlockProducer(designee, true);
+        assertTrue(rollup.isBlockProducer(designee));
+        IntmaxRollup.SubBlock[] memory batch = _singleBlockBatchFor(1);
+        _mockBlob();
+        vm.prank(designee);
+        rollup.postBlockAndSubmit{value: 1 ether}(batch, keccak256("p"), 1, keccak256("s"));
+        assertEq(rollup.nextSubmissionId(), 1, "designee post recorded");
+    }
+
+    function test_setBlockProducerAdmin_onlyDeployer_and_rotatable() public {
+        address admin = makeAddr("bpAdmin");
+        address other = makeAddr("other");
+        vm.deal(admin, 10 ether);
+        // Non-deployer cannot set the admin (even a current admin cannot rotate itself).
+        rollup.setBlockProducerAdmin(admin);
+        vm.prank(admin);
+        vm.expectRevert(IntmaxRollup.OnlyDeployer.selector);
+        rollup.setBlockProducerAdmin(other);
+
+        // Deployer rotates; the old admin loses posting rights.
+        address admin2 = makeAddr("bpAdmin2");
+        rollup.setBlockProducerAdmin(admin2);
+        assertEq(rollup.blockProducerAdmin(), admin2);
+        IntmaxRollup.SubBlock[] memory batch = _singleBlockBatchFor(1);
+        _mockBlob();
+        vm.prank(admin);
+        vm.expectRevert(IntmaxRollup.NotAuthorizedBlockProducer.selector);
+        rollup.postBlockAndSubmit{value: 1 ether}(batch, keccak256("p"), 1, keccak256("s"));
     }
 
     // -----------------------------------------------------------------------
@@ -1771,6 +1908,7 @@ contract IntmaxRollupTest is Test {
 
         address sub2 = makeAddr("sub2");
         vm.deal(sub2, 10 ether);
+        rollup2.setBlockProducer(sub2, true); // permissioned posting
         bytes32 stateRoot = keccak256("bad_state");
 
         // Build vpis BEFORE posting (rollup2 initial state: all zeros)

@@ -81,6 +81,7 @@ contract MleFinalizeE2ETest is Test {
             genesisStateRoot,
             true // A-2: test opt-in for the degreeBits==0 bypass (this test uses a real VK anyway)
         );
+        rollup.setBlockProducer(poster, true); // permissioned posting
 
         // Sanity: MLE verification really is ON.
         (uint256 db,,,, ) = rollup.mleVk();

@@ -2,12 +2,12 @@
 
 **Scope:** Plonky2 ZKP circuits + L1 Solidity contracts, excluding
 cryptographic-primitive internals (Poseidon/SPHINCS+/Regev/MLE-WHIR —
-uninterpreted) and the channel-registration chain circuit internals
-(`channel_reg_hash_chain/` proof bodies; see F-UPDU-1 for the residual this
-leaves). The formerly-excluded `update_channel_tree.rs` (base-layer per-block
-update circuit, mislabeled "channel") is now IN scope and modeled.
-**Artifact:** `doc/audit/zkp/` — 41 Lean files, **225 machine-checked theorems**
-(141 circuit + 62 contract + 22 end-to-end composition), 10,522 LOC,
+uninterpreted). The channel-registration chain circuit
+(`channel_reg_hash_chain/channel_reg_step.rs`) is now IN scope
+(`Circuits.ChannelRegStep`), closing the former F-UPDU-1 residual. The
+`update_channel_tree.rs` base-layer per-block update circuit is likewise modeled.
+**Artifact:** `doc/audit/zkp/` — 42 Lean files, **228 machine-checked theorems**
+(144 circuit + 62 contract + 22 end-to-end composition), 10,522 LOC,
 **zero `sorry` / zero `axiom`**, clean `lake build` from scratch.
 
 **Method:** each circuit is a predicate `Constraints → Prop` (one conjunct per
@@ -29,10 +29,11 @@ by `EndToEnd.end_to_end_payout_sound`: a single machine-checked theorem,
 conditional on the explicit `BridgeAssumptions` record (proof-system oracle,
 recursion oracle, PI-layout equality, CR/characteristic idealizations — every
 field named and justified in `Zkp/EndToEnd.lean`). What is NOT covered is
-enumerated in the RESIDUAL TRUST SURFACE block there — most notably
-**F-UPDU-1** (registration-block account roots are conditional on the excluded
-channel_reg chain circuit). **F-WD-2** (settle-twice nullifier) is now
-**CLOSED** by a circuit fix (Option B, see below).
+enumerated in the RESIDUAL TRUST SURFACE block there. **F-UPDU-1**
+(registration-block account roots conditional on the channel_reg chain circuit)
+is now **CLOSED** — that circuit is modeled in `Circuits.ChannelRegStep`
+(`tree_and_chain_share_member_set` + `chain_determines_tree`). **F-WD-2**
+(settle-twice nullifier) is also **CLOSED** by a circuit fix (Option B, see below).
 
 ## Soundness theorems (selected)
 
@@ -102,7 +103,7 @@ theorems; no proved conclusion is restated as an assumption field.
 
 | ID | Severity | Status | Summary |
 |---|---|---|---|
-| **F-UPDU-1** | MEDIUM | **OPEN (residual)** | Registration-block account roots: `block_step` binds continuity/block-number/R6/G6 around the root swap, but `reg.channelTreeRoot ↔ reg.channelRegHashChain` is internal to the excluded channel_reg chain circuit. Every balance/withdrawal theorem anchored to a post-registration root is conditional on it. **Base-layer fund exposure, not channel-scoped.** Exact closing constraint stated in `UpdateUser.lean`. |
+| **F-UPDU-1** | MEDIUM | **CLOSED (2026-07-06)** | Registration-block account roots: `block_step` binds continuity/block-number/R6/G6 around the root swap; the remaining `reg.channelTreeRoot ↔ reg.channelRegHashChain` relation lived in the channel_reg chain circuit. That circuit is now modeled in `Circuits.ChannelRegStep`: `tree_and_chain_share_member_set` discharges the closing constraint (one shared `members` list feeds both the tree leaf's `memberRoot` and the chain's `regDigest`; R5 freshness; index=channel_id), and `chain_determines_tree` proves the L1-committed reg-hash chain PINS the Poseidon channel_tree_root the account root swaps to (keccak-CR + `PowTwoInj F 32`). Base-layer exposure closed to named standard assumptions. |
 | **F-WD-2** | MEDIUM | **CLOSED (fix, Option B)** | Settle-twice nullifier: the nullifier preimage keyed on the settlement `block_number` (`send_leaf.cur`), so a tx settled into two blocks yielded two distinct nullifiers for one deduction (double withdrawal / double receive-credit, capped by global solvency). **Fixed** by re-keying the `SettledTransfer` preimage from `block_number` to the sender `tx.nonce` (`transfer.rs`), a settlement-independent one-time identifier bound to the deduction (sent-tx tree slot at index=nonce, spend_circuit empty-slot check). Two settlements now yield the IDENTICAL nullifier → caught by the on-chain `withdrawalNullifierUsed` set / recipient indexed merkle. Threat-modeled + attacker-red-teamed (GO) + adversarially reviewed (GO); Lean single-use re-derived from nonce-binding; **verified end-to-end by real proof generation** (`e2e_deposit_validity_withdrawal` ok 129s, `validity_proof_mle_onchain_e2e` ok 60s, forge 174/175). Corrected-Option-A (per-channel settled-nonce SET — NOT strict-increase, which the red-team found is a liveness bug) recorded as optional defense-in-depth, not required for the fund-safety closure. |
 | F-WITHDRAW-1 (=C-M2) | Medium | **Closed** | 5 free extended fields re-pinned contract-side (`finalizedStateRoots` membership); the composition consumes only the re-pinned commitment, never a free field. |
 | F-NULL-1 | — | **Discharged (genuinely, 2026-07-02)** | Preservation induction now PROVED: `genesis_inv` + `insert_preserves_inv` + `reachable_key_absent`. The former `gap`-as-hypothesis over-constraint is removed; `InsertConstraints` is circuit-gates-only. Key-injectivity found necessary (gap-emptiness alone is not inductive). |

@@ -37,6 +37,7 @@ contract C2CBlockHashTest is Test {
             makeAddr("ft"), vk, dd.whirParams, dd.protocolId, dd.sessionId, dd.kIs, dd.subgroupGenPowers, verifier, genesis,
             true // A-2: test opt-in for the degreeBits==0 bypass
         );
+        rollup.setBlockProducer(poster, true); // permissioned posting
     }
 
     function test_c2c_blockHashChain_matchesProof() public {

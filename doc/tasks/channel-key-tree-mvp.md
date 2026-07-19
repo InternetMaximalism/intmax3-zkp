@@ -64,7 +64,7 @@ genesis. Re-enabled by the full design's registration-application circuit.
 ## 4. Scope OUT (post-MVP)
 
 Registration consumption + binding; registration-application circuit; ValidityPublicInputs additions
-& Groth16 limb changes; contract `finalize()` reg-chain binding; mutability; FULL integration into
+& Groth16 limb changes _(deprecated: Groth16 removed — MLE/WHIR only)_; contract `finalize()` reg-chain binding; mutability; FULL integration into
 the recursive validity pipeline (block_step / block_hash_chain) and greening the whole crate; the
 remaining in-place W1/W3 compile-error sites in the existing flow (those are tracked in doc/tasks/todo.md
 and are NOT a prerequisite for the standalone MVP circuit).

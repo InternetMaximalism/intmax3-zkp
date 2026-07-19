@@ -402,7 +402,7 @@ the collision for single-target builds); (2) is needed specifically for integrat
 
 After both changes: `cargo build --release --tests --benches` is clean, and integration tests
 run (e.g. `nullifier_duplicate_insertion_poc`: 2 passed). e2e.rs / mle_onchain_e2e.rs exercise
-the MLE/WHIR/Groth16 wrapper pipeline (separate-PR scope per CLAUDE.md) but now compile.
+the MLE/WHIR wrapper pipeline (Groth16 since removed — deprecated; separate-PR scope per CLAUDE.md) but now compile.
 
 ---
 

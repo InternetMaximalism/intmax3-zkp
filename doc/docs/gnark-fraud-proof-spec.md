@@ -1,5 +1,13 @@
 # Fraud Proof Architecture — WHIR-only Design
 
+> **⚠️ DEPRECATED (Groth16/gnark removed).** This document describes the legacy
+> `finalize()` = WHIR + Groth16 architecture. Groth16 (and the gnark Go prover)
+> have been **removed** from the active pipeline: on-chain verification is now
+> **MLE/WHIR only**, and the validity-PI binding the Groth16 PI-hash once carried
+> is replaced by `_mlePublicInputsMatch(mleProof.publicInputs, keccak256(ValidityPublicInputs))`.
+> See `doc/architecture-audit/detail2.md` (D6, Change B) for the current design.
+> Kept for historical reference only — the WHIR-specific sections below still apply.
+
 ## Overview
 
 INTMAX3 uses a **dual verification** architecture for finalize and a **WHIR-only** architecture for fraud proofs:

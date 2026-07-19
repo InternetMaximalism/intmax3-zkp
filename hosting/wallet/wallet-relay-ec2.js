@@ -123,9 +123,14 @@ function drainCosigns(ch) {
 }
 
 // ---- Ticket persistence (one JSON array per channel) ----------------------------------------
+// tickets.json     = ACTIVE tickets (+ terminal ones for a short TTL). ticket_history.json =
+// DURABLE log of every ticket that reached terminal (deposits AND withdrawals), TTL-exempt, capped.
 const TICKET_FILE = 'tickets.json';
+const HISTORY_FILE = 'ticket_history.json';
 const TICKET_TTL = 3600_000;
+const HISTORY_CAP = 200;
 const TERMINAL = { partial_withdrawal: 'settle_done', deposit: 'import_done', full_withdrawal: 'claim_done' };
+const isTerminal = (t) => TERMINAL[t.type] === t.status;
 
 function readTickets(ch) {
   try { return JSON.parse(fs.readFileSync(wc(ch, TICKET_FILE), 'utf8')); }
@@ -133,6 +138,17 @@ function readTickets(ch) {
 }
 function writeTickets(ch, tickets) {
   fs.writeFileSync(wc(ch, TICKET_FILE), JSON.stringify(tickets, null, 2));
+}
+function readHistory(ch) {
+  try { return JSON.parse(fs.readFileSync(wc(ch, HISTORY_FILE), 'utf8')); }
+  catch (e) { return []; }
+}
+function archiveTicket(ch, ticket) {
+  const hist = readHistory(ch);
+  const idx = hist.findIndex(t => t.id === ticket.id);
+  const entry = { ...ticket, archivedAt: Date.now() };
+  if (idx >= 0) hist[idx] = entry; else hist.push(entry);
+  fs.writeFileSync(wc(ch, HISTORY_FILE), JSON.stringify(hist.slice(-HISTORY_CAP), null, 2));
 }
 function findActiveTicket(ch, type) {
   return readTickets(ch).find(t => t.type === type && t.status !== TERMINAL[type]);
@@ -147,6 +163,7 @@ function upsertTicket(ch, ticket) {
     !Object.values(TERMINAL).includes(t.status) || (now - t.updatedAt) < TICKET_TTL
   );
   writeTickets(ch, kept);
+  if (isTerminal(ticket)) archiveTicket(ch, ticket); // durable "processed" record
   return ticket;
 }
 
@@ -199,7 +216,11 @@ app.use((req, res, next) => {
   res.setHeader('Cross-Origin-Opener-Policy', 'same-origin');
   res.setHeader('Cross-Origin-Resource-Policy', 'same-origin');
   if (req.path.endsWith('.wasm')) res.setHeader('Content-Type', 'application/wasm');
-  if (req.path.startsWith('/pkg/')) res.setHeader('Cache-Control', 'public, max-age=3600');
+  // `no-cache` = the browser MAY cache but MUST revalidate (conditional GET) every load. After a
+  // redeploy the wasm's ETag changes, so the browser fetches the new bytes; when unchanged it gets a
+  // cheap 304 (no re-download). This avoids the stale-wasm/worker mismatch that `max-age=3600` caused
+  // (an old 1-arg genesis wasm vs a new recipient-requiring CLI → "missing field `recipient`").
+  if (req.path.startsWith('/pkg/')) res.setHeader('Cache-Control', 'no-cache');
   else res.setHeader('Cache-Control', 'no-store');
   next();
 });
@@ -220,6 +241,22 @@ app.post('/api/init', (req, res) => {
 app.get('/api/snapshot', (req, res) => {
   try { const ch = reqChannel(req); res.json(JSON.parse(fs.readFileSync(wc(ch, 'channel_snapshot.json'), 'utf8'))); }
   catch (e) { res.status(404).json({ error: 'no channel yet' }); }
+});
+
+// GET /api/poll?channel=N&since=<stateVersion> — cheap change-check for the browser balance poller.
+// 204 (no body) when the channel state_version is unchanged; the snapshot when it advanced. No lock
+// (must not queue behind proving); a mid-write read falls through to 204 and the next tick succeeds.
+app.get('/api/poll', (req, res) => {
+  const ch = reqChannel(req);
+  const since = parseInt((req.query && req.query.since) || '', 10);
+  let snap;
+  try { snap = JSON.parse(fs.readFileSync(wc(ch, 'channel_snapshot.json'), 'utf8')); }
+  catch (e) { return res.status(204).end(); }
+  const st = (snap && (snap.state || snap.State)) || {};
+  const bs = st.balanceState || st.balance_state || {};
+  const sv = (bs.stateVersion != null) ? bs.stateVersion : bs.state_version;
+  if (Number.isInteger(since) && sv === since) return res.status(204).end();
+  res.json(snap);
 });
 
 app.get('/api/backing', (req, res) => {
@@ -428,6 +465,17 @@ app.post('/api/claim', (req, res) => {
 app.get('/api/tickets', (req, res) => {
   const ch = reqChannel(req);
   res.json(readTickets(ch));
+});
+
+// Processed (terminal) tickets — deposits AND withdrawals — most recent first. Merges durable history
+// with terminal tickets still in tickets.json (within TTL), deduped by id.
+app.get('/api/tickets/history', (req, res) => {
+  const ch = reqChannel(req);
+  const hist = readHistory(ch);
+  const seen = new Set(hist.map(t => t.id));
+  const recent = readTickets(ch).filter(t => isTerminal(t) && !seen.has(t.id));
+  const merged = hist.concat(recent).sort((a, b) => (a.archivedAt || a.updatedAt || 0) - (b.archivedAt || b.updatedAt || 0));
+  res.json(merged.reverse());
 });
 
 app.post('/api/ticket/deposit', (req, res) => {

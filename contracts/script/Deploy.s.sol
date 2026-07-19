@@ -27,8 +27,14 @@ contract Deploy is Script {
         bytes32 genesisStateRoot = vm.parseJsonBytes32(blockJson, ".genesis_state_root");
         FixtureLib.DeployData memory dd = FixtureLib.parseDeployData(mleJson);
 
-        // FRAUD_TREASURY env override; default to the broadcaster.
-        address fraudTreasury = vm.envOr("FRAUD_TREASURY", msg.sender);
+        // FRAUD_TREASURY env override. SECURITY (#6): require it explicitly on real chains; only
+        // fall back to the broadcaster EOA on local anvil (chainid 31337), so a Sepolia/mainnet
+        // deploy never silently makes the deployer the sole fraud-treasury claimant.
+        address fraudTreasury = vm.envOr("FRAUD_TREASURY", address(0));
+        if (fraudTreasury == address(0)) {
+            require(block.chainid == 31337, "FRAUD_TREASURY must be set for non-local deploys");
+            fraudTreasury = msg.sender;
+        }
 
         vm.startBroadcast();
 
@@ -49,6 +55,9 @@ contract Deploy is Script {
         );
         // Pin the KZG blob-binding satellite (EIP-170 relief; fraudProof binding is fail-closed until set).
         rollup.setKzgVerifier(new BlobKZGVerifierExt());
+        // Authorize the block producer (posting is permissioned; the whitelist is empty until set).
+        // Defaults to the broadcaster; set BLOCK_PRODUCER when the posting key differs from the deployer.
+        rollup.setBlockProducer(vm.envOr("BLOCK_PRODUCER", msg.sender), true);
 
         vm.stopBroadcast();
 

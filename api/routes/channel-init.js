@@ -1,6 +1,6 @@
 const { Router } = require('express');
 const fs = require('fs');
-const { cli, wc, RPC, ANVIL0, sh, rollupOf, readJson, writeJson } = require('../lib/cli');
+const { cli, wc, RPC, depositKey, sh, rollupOf, readJson, writeJson } = require('../lib/cli');
 const { withLock } = require('../lib/lock');
 const { findActiveTicket, upsertTicket } = require('../lib/tickets');
 
@@ -61,10 +61,10 @@ router.post('/join-and-deposit', (req, res) => {
           backing.deposit_recipient, '0', String(depositAmount),
           '0x0000000000000000000000000000000000000000000000000000000000000000',
           '--value', String(depositAmount),
-          '--private-key', ANVIL0, '--rpc-url', RPC, '--json',
+          '--private-key', depositKey(), '--rpc-url', RPC, '--json',
         ], { stdio: 'pipe' });
         depositTxHash = (out.match(/"transactionHash"\s*:\s*"(0x[0-9a-fA-F]+)"/) || [])[1] || '';
-        const depositor = sh('cast', ['wallet', 'address', '--private-key', ANVIL0], { stdio: 'pipe' }).trim();
+        const depositor = sh('cast', ['wallet', 'address', '--private-key', depositKey()], { stdio: 'pipe' }).trim();
 
         cli(ch, ['cosign-l1-deposit-import', String(slot), String(depositAmount), depositor, 'l1_import_cosigned.json']);
         snapshot = readJson(wc(ch, 'channel_snapshot.json'));

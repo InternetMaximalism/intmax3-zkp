@@ -3015,7 +3015,9 @@ fn cmd_deploy_settlement(args: &[String]) {
         let repo = exe
             .ancestors()
             .find(|p| p.join("contracts").is_dir())
-            .unwrap_or_else(|| die("cannot find contracts/ dir"))
+            .unwrap_or_else(|| {
+                die("cannot find contracts/ dir near the executable — set CONTRACTS_DIR=<path to the foundry contracts checkout>")
+            })
             .to_path_buf();
         repo.join("contracts").to_string_lossy().to_string()
     });
@@ -3316,7 +3318,9 @@ fn cmd_pw_submit(args: &[String]) {
         let repo = exe
             .ancestors()
             .find(|p| p.join("contracts").is_dir())
-            .unwrap_or_else(|| die("cannot find contracts/ dir"))
+            .unwrap_or_else(|| {
+                die("cannot find contracts/ dir near the executable — set CONTRACTS_DIR=<path to the foundry contracts checkout>")
+            })
             .to_path_buf();
         repo.join("contracts").to_string_lossy().to_string()
     });
@@ -3401,23 +3405,77 @@ fn cmd_pw_finalize(args: &[String]) {
 
     let deploy_key = deposit_key_env();
 
-    cast(&["rpc", "evm_increaseTime", "2", "--rpc-url", &rpc]);
-    cast(&["rpc", "evm_mine", "--rpc-url", &rpc]);
-
-    cast(&[
-        "send",
-        manager,
-        "finalizePartialWithdrawal()",
-        "--private-key",
-        &deploy_key,
-        "--rpc-url",
-        &rpc,
-    ]);
-
     let settlement: serde_json::Value = read_json("settlement.json");
     let rollup = settlement["rollup"]
         .as_str()
         .unwrap_or_else(|| die("settlement.json missing rollup"));
+
+    // Idempotency: if a previous run already finalized (the rollup has the authorization) skip
+    // straight to the claim — a second finalizePartialWithdrawal() would revert
+    // PartialWithdrawalNotPending and wedge the retry.
+    let already = cast(&[
+        "call",
+        rollup,
+        "partialWithdrawalAuthorized(bytes32)",
+        auth_digest,
+        "--rpc-url",
+        &rpc,
+    ]);
+    // Exact ABI bool word — a loose suffix match could misread unexpected RPC output.
+    const TRUE_WORD: &str = "0x0000000000000000000000000000000000000000000000000000000000000001";
+    if already.trim() == TRUE_WORD {
+        eprintln!("pw-finalize: already authorized on-chain; skipping finalize call");
+    } else {
+        // finalizePartialWithdrawal requires block.timestamp > pendingPartialWithdrawalDeadline
+        // (ChannelSettlementManager). Anvil needs explicit time travel to pass the window; a real
+        // chain (e.g. Sepolia) passes it by simply waiting for a later block — evm_increaseTime
+        // does not exist there.
+        let chain_id = cast(&["chain-id", "--rpc-url", &rpc]);
+        if chain_id.trim() == "31337" {
+            cast(&["rpc", "evm_increaseTime", "2", "--rpc-url", &rpc]);
+            cast(&["rpc", "evm_mine", "--rpc-url", &rpc]);
+        } else {
+            let deadline_hex = cast(&[
+                "call",
+                manager,
+                "pendingPartialWithdrawalDeadline()",
+                "--rpc-url",
+                &rpc,
+            ]);
+            let deadline = u128::from_str_radix(deadline_hex.trim().trim_start_matches("0x"), 16)
+                .unwrap_or_else(|e| die(format!("parse pendingPartialWithdrawalDeadline: {e}")));
+            let mut waited = 0u64;
+            loop {
+                let ts: u128 = cast(&["block", "latest", "-f", "timestamp", "--rpc-url", &rpc])
+                    .trim()
+                    .parse()
+                    .unwrap_or_else(|e| die(format!("parse latest block timestamp: {e}")));
+                if ts > deadline {
+                    break;
+                }
+                if waited >= 300 {
+                    die(format!(
+                        "challenge window still open after {waited}s (block ts {ts} <= deadline {deadline}) — aborting"
+                    ));
+                }
+                eprintln!(
+                    "pw-finalize: challenge window open (block ts {ts} <= deadline {deadline}); waiting for the next block…"
+                );
+                std::thread::sleep(std::time::Duration::from_secs(6));
+                waited += 6;
+            }
+        }
+
+        cast(&[
+            "send",
+            manager,
+            "finalizePartialWithdrawal()",
+            "--private-key",
+            &deploy_key,
+            "--rpc-url",
+            &rpc,
+        ]);
+    }
 
     let check = cast(&[
         "call",
@@ -3427,7 +3485,7 @@ fn cmd_pw_finalize(args: &[String]) {
         "--rpc-url",
         &rpc,
     ]);
-    let authorized = check.trim().ends_with("1");
+    let authorized = check.trim() == TRUE_WORD;
     if !authorized {
         die("on-chain partialWithdrawalAuthorized returned false");
     }

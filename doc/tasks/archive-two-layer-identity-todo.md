@@ -75,7 +75,7 @@ transition = the registration sequence → the root is bound on-chain. ← the p
 ### IN (required)
 - **The base identity two-layering of §1** (channel_id-ification).
 - **base L1 user withdrawal payout (new)**:
-  - On-chain verification of the aggregated withdrawal proof (reusing IntmaxRollup's existing MLE/WHIR+Groth16).
+  - On-chain verification of the aggregated withdrawal proof (reusing IntmaxRollup's existing MLE/WHIR — Groth16 removed, deprecated).
     The proof is bound to `IntmaxRollup.latestFinalizedStateRoot`.
   - Native transfer to the recipient (pull-payment / `pendingWithdrawals` scheme).
   - **base withdrawal nullifier mapping** (`mapping(bytes32=>bool)`) to prevent double withdrawal.
