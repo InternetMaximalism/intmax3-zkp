@@ -18,7 +18,14 @@ const ROOT = __dirname;
 const WORK = path.join(ROOT, 'wallet-live-work');
 const PUBLIC = path.join(ROOT, 'public');
 const CLI = process.env.CHANNEL_MEMBER_BIN || path.join(ROOT, 'bin', 'channel_member');
-const CHANNELS = [7, 8];
+// Channel list is env-overridable (stress boxes run many channels); default = the live pair.
+const CHANNELS = (process.env.CHANNELS || '7,8').split(',').map((s) => parseInt(s, 10));
+// STRESS-ONLY knob: force every CLI invocation's INTMAX_CHANNEL to one fixed id, so N channel
+// DIRS can share copies of one channel's deposit backing (the backing attestation is bound to the
+// channel id — see verify_channel_backing). NEVER set on a live box: all channels would produce
+// states claiming the same channel_id.
+const FORCE_CHANNEL_ID = process.env.FORCE_CHANNEL_ID || null;
+if (FORCE_CHANNEL_ID) console.warn(`⚠ FORCE_CHANNEL_ID=${FORCE_CHANNEL_ID} — every channel dir runs as channel ${FORCE_CHANNEL_ID} (stress mode)`);
 const TLS_CERT = process.env.TLS_CERT; // fullchain.pem
 const TLS_KEY = process.env.TLS_KEY;   // privkey.pem
 const PORT = parseInt(process.env.PORT || (TLS_CERT ? '443' : '8000'), 10);
@@ -30,12 +37,12 @@ function reqChannel(req) {
   return CHANNELS.includes(c) ? c : CHANNELS[0];
 }
 async function cli(ch, args, extraEnv) {
-  console.log(`  $ INTMAX_CHANNEL=${ch} channel_member ${args.join(' ')}`);
+  console.log(`  $ INTMAX_CHANNEL=${FORCE_CHANNEL_ID || ch} channel_member ${args.join(' ')}`);
   // ASYNC exec: execFileSync blocked the WHOLE node event loop for the duration of every proving
   // call, serializing even independent channels (measured: throughput pinned at ~1.6 req/s flat
   // from conc=1..8 while CPU sat ~65% idle). execFile keeps the loop free; per-channel ordering
   // is still enforced by withLock.
-  const { stdout } = await pExecFile(CLI, args, { cwd: chDir(ch), encoding: 'utf8', timeout: 600_000, maxBuffer: 256 * 1024 * 1024, env: { ...process.env, INTMAX_CHANNEL: String(ch), ...(extraEnv || {}) } });
+  const { stdout } = await pExecFile(CLI, args, { cwd: chDir(ch), encoding: 'utf8', timeout: 600_000, maxBuffer: 256 * 1024 * 1024, env: { ...process.env, INTMAX_CHANNEL: String(FORCE_CHANNEL_ID || ch), ...(extraEnv || {}) } });
   return stdout;
 }
 

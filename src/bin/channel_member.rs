@@ -60,7 +60,7 @@ use intmax3_zkp::{
         salt::Salt,
         withdrawal::Withdrawal,
     },
-    constants::{MAX_CHANNEL_MEMBERS, TOKEN_UNIT},
+    constants::{MAX_CHANNEL_MEMBERS, MAX_COSIGNERS, TOKEN_UNIT},
     ethereum_types::{
         address::Address, bytes32::Bytes32, u32limb_trait::U32LimbTrait as _, u256::U256,
     },
@@ -142,18 +142,39 @@ const CANCEL_CLOSE_MLE_FILE: &str = "cancel_close_mle.json";
 // AFTER the channel was finalized.
 const POST_CLOSE_CLAIM_FILE: &str = "post_close_claim.json";
 const POST_CLOSE_CLAIM_MLE_FILE: &str = "post_close_claim_mle.json";
-// Delegate demo: slots 0,1,2 = three CLI-controlled CO-SIGNING MEMBERS (with genesis balances);
-// slot 3 = the browser, a send-only DELEGATE (delegate_count = 1).
-const CLI_SLOTS: &[u16] = &[0, 1, 2];
+// Delegate demo: slots 0..cli_cosigner_count() = CLI-controlled CO-SIGNING MEMBERS (with genesis
+// balances); the next slot = the browser, a send-only DELEGATE (delegate_count = 1).
+//
+// The cosigner count is env-configurable (`INTMAX_CLI_COSIGNERS`, default 3, max MAX_COSIGNERS) so
+// a stress box can exercise a full 16-of-16 co-sign round. Slots 0..2 keep their historical
+// genesis balances and any EXTRA cosigner slot holds 0, so Σ(genesis balances) — and therefore the
+// deposit-backing `fund` reconciliation — is IDENTICAL for every cosigner count.
+fn cli_cosigner_count() -> u16 {
+    let n: u16 = std::env::var("INTMAX_CLI_COSIGNERS")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(3);
+    if n < 1 || n as usize > MAX_COSIGNERS {
+        die(format!("INTMAX_CLI_COSIGNERS must be 1..={MAX_COSIGNERS}"));
+    }
+    n
+}
+fn cli_slots() -> Vec<u16> {
+    (0..cli_cosigner_count()).collect()
+}
 // Genesis allocations in BASE UNITS (= wei). With TOKEN_DECIMALS=18, 1 token = 1 ETH.
 // 0.04 + 0.03 + 0.02 = 0.09 ETH total — fits comfortably in u64 (max ~18.4 ETH).
-const CLI_GENESIS: &[(u16, u64)] = &[
-    (0, TOKEN_UNIT / 25),      // 0.04 ETH
-    (1, TOKEN_UNIT / 100 * 3), // 0.03 ETH
-    (2, TOKEN_UNIT / 50),      // 0.02 ETH
-];
-const BROWSER_DELEGATE_SLOT: u16 = 3;
-const DELEGATE_COUNT: u16 = 1;
+fn genesis_amount(slot: u16) -> u64 {
+    match slot {
+        0 => TOKEN_UNIT / 25,      // 0.04 ETH
+        1 => TOKEN_UNIT / 100 * 3, // 0.03 ETH
+        2 => TOKEN_UNIT / 50,      // 0.02 ETH
+        _ => 0,                    // extra stress cosigners co-sign but hold no balance
+    }
+}
+fn first_delegate_slot() -> u16 {
+    cli_cosigner_count()
+}
 // The first browser delegate's genesis allocation (BASE UNITS) out of the deposited fund (so
 // Σ balances == fund): 50 tokens.
 const DELEGATE_GENESIS: u64 = 0;
@@ -238,9 +259,9 @@ fn keys_for(seed: u64) -> MemberKeys {
 /// registration never carries delegates; the delegate is authenticated by the cosigner-signed H1
 /// slot tree).
 fn cli_active_keys() -> Vec<MemberKeys> {
-    let mut v: Vec<MemberKeys> = CLI_SLOTS
-        .iter()
-        .map(|&slot| keys_for(0xC1_0000 + slot as u64))
+    let mut v: Vec<MemberKeys> = cli_slots()
+        .into_iter()
+        .map(|slot| keys_for(0xC1_0000 + slot as u64))
         .collect();
     let delegate_seed: u64 = std::env::var("DELEGATE_SEED")
         .ok()
@@ -386,7 +407,9 @@ fn cmd_setup_backing(args: &[String]) {
     let fund: u64 = args
         .get(3)
         .and_then(|s| s.parse().ok())
-        .unwrap_or_else(|| CLI_GENESIS.iter().map(|(_, a)| *a).sum::<u64>() + DELEGATE_GENESIS);
+        .unwrap_or_else(|| {
+            cli_slots().iter().map(|&s| genesis_amount(s)).sum::<u64>() + DELEGATE_GENESIS
+        });
 
     eprintln!("setup-backing: building the balance prover (one-time, ~25s)…");
     let spend = SpendCircuit::<BF, BC, BD>::new();
@@ -1823,6 +1846,7 @@ fn main() {
         "setup-backing" => cmd_setup_backing(&args),
         "init" => cmd_init(&args),
         "gen-contribution" => cmd_gen_contribution(&args), // dev/test: simulate a browser delegate
+        "gen-send" => cmd_gen_send(&args), // dev/test: simulate a browser delegate SENDING
         "add-genesis-sig" => cmd_add_genesis_sig(&args),
         "send" => cmd_send(&args),
         "cosign" => cmd_cosign(&args),
@@ -1854,7 +1878,7 @@ fn main() {
         "post-close-claim" => cmd_post_close_claim(&args),
         _ => {
             eprintln!(
-                "usage: channel_member <setup-backing|init|send|cosign|cosign-batch|cosign-burn-send|deploy-settlement|cosign-l1-deposit-import|pw-submit|pw-finalize|close|settle|withdraw|claim|cancel-close|post-close-claim|...> ..."
+                "usage: channel_member <setup-backing|init|gen-contribution|gen-send|send|cosign|cosign-batch|cosign-burn-send|deploy-settlement|cosign-l1-deposit-import|pw-submit|pw-finalize|close|settle|withdraw|claim|cancel-close|post-close-claim|...> ..."
             );
             exit(2);
         }
@@ -1909,8 +1933,9 @@ fn cmd_init(args: &[String]) {
             // Re-publish the UNCHANGED snapshot so the caller's out_path is current; cli_state is
             // left exactly as-is (no state bump, no ledger change).
             write_json(out_path, &prev.snapshot);
+            let mc = prev.snapshot.record.member_count;
             println!(
-                "delegate at slot {slot} (idempotent re-join: pk_g already present; member_count=3, delegate_count={dc}, state_version={v}). Browser: wallet_import_channel(<{out_path}>)."
+                "delegate at slot {slot} (idempotent re-join: pk_g already present; member_count={mc}, delegate_count={dc}, state_version={v}). Browser: wallet_import_channel(<{out_path}>)."
             );
             return;
         }
@@ -1939,6 +1964,7 @@ fn cmd_init(args: &[String]) {
         settled_tx_accumulator: default_settled_tx_accumulator(),
     };
     let dc = snapshot.record.delegate_count;
+    let mc = snapshot.record.member_count;
     let v = snapshot.state.balance_state.state_version;
     save_state(&CliState {
         controlled,
@@ -1948,7 +1974,7 @@ fn cmd_init(args: &[String]) {
     });
     write_json(out_path, &snapshot);
     println!(
-        "delegate at slot {slot} (member_count=3, delegate_count={dc}, state_version={v}). Browser: wallet_import_channel(<{out_path}>)."
+        "delegate at slot {slot} (member_count={mc}, delegate_count={dc}, state_version={v}). Browser: wallet_import_channel(<{out_path}>)."
     );
 }
 
@@ -1961,15 +1987,11 @@ fn cli_members() -> (
     let mut members = Vec::new();
     let mut enc = Vec::new();
     let mut controlled = Vec::new();
-    for &slot in CLI_SLOTS {
+    for slot in cli_slots() {
         let keygen_seed = 0xC1_0000 + slot as u64;
         let keys = keys_for(keygen_seed);
         members.push(member_info_for(slot, &keys));
-        let amount = CLI_GENESIS
-            .iter()
-            .find(|(s, _)| *s == slot)
-            .map(|(_, a)| *a)
-            .unwrap();
+        let amount = genesis_amount(slot);
         let balance_seed = 0xBA_0000 + slot as u64;
         let (ct, _w) = encrypt_amount(
             &mut StdRng::seed_from_u64(balance_seed),
@@ -1989,7 +2011,8 @@ fn cli_members() -> (
     (members, enc, controlled)
 }
 
-/// CREATE the channel: 3 members + this delegate at slot 3, genesis (v0), 3 members sign.
+/// CREATE the channel: `cli_cosigner_count()` members + this delegate at the first delegate slot,
+/// genesis (v0), all cosigners sign.
 /// `new_recipient` (B-1b) is the delegate's NONZERO L1 exit address, leaf-bound in the genesis H1.
 fn create_channel(
     mut nd: MemberInfo,
@@ -2002,11 +2025,11 @@ fn create_channel(
     Vec<ControlledMember>,
     u16,
 ) {
-    let _ = DELEGATE_COUNT; // (delegate_count is now dynamic; first channel has 1)
-    nd.slot = BROWSER_DELEGATE_SLOT;
+    let delegate_slot = first_delegate_slot();
+    nd.slot = delegate_slot;
     let (mut members, mut enc, controlled) = cli_members();
     members.push(nd);
-    enc.push((BROWSER_DELEGATE_SLOT, new_ct));
+    enc.push((delegate_slot, new_ct));
     members.sort_by_key(|m| m.slot);
     let record = build_record(channel_id_env(), &members, BP_SLOT, 1).unwrap_or_else(|e| die(e));
     enc.sort_by_key(|(s, _)| *s);
@@ -2036,7 +2059,7 @@ fn create_channel(
     let recipients: Vec<Address> = members
         .iter()
         .map(|m| {
-            if m.slot == BROWSER_DELEGATE_SLOT {
+            if m.slot == delegate_slot {
                 new_recipient
             } else {
                 test_recipient_for(channel_id, m.slot as usize)
@@ -2059,7 +2082,7 @@ fn create_channel(
     for c in &controlled {
         let sig = sign_state_if_backed(
             &keys_for(c.keygen_seed),
-            c.slot as u8, // CLI cosigners occupy slots 0..2 (cosigner space, fits u8)
+            c.slot as u8, // CLI cosigners occupy slots 0..cli_cosigner_count() ≤ 16 (fits u8)
             &record,
             &state,
             &att,
@@ -2068,7 +2091,7 @@ fn create_channel(
         .unwrap_or_else(|e| die(format!("REFUSING TO SIGN genesis — {e}")));
         add_signature(&mut state, sig);
     }
-    (record, state, members, controlled, BROWSER_DELEGATE_SLOT)
+    (record, state, members, controlled, delegate_slot)
 }
 
 /// JOIN the existing channel as a NEW delegate, PRESERVING the current state (balances + sends).
@@ -2090,18 +2113,19 @@ fn join_delegate(
     u16,
 ) {
     let prev = load_state();
+    let delegate_slot = first_delegate_slot();
     let existing = prev
         .snapshot
         .members
         .iter()
-        .filter(|m| m.slot >= BROWSER_DELEGATE_SLOT)
+        .filter(|m| m.slot >= delegate_slot)
         .count();
     // Check capacity BEFORE computing the slot (u16 arithmetic; the old `as u8` add wrapped at
     // slot 256 — the 2026-07-18 storm bug).
-    if CLI_SLOTS.len() + existing + 1 > MAX_CHANNEL_MEMBERS {
+    if delegate_slot as usize + existing + 1 > MAX_CHANNEL_MEMBERS {
         die("channel is full (member_count + delegate_count would exceed MAX_CHANNEL_MEMBERS)");
     }
-    let new_slot = BROWSER_DELEGATE_SLOT + existing as u16;
+    let new_slot = delegate_slot + existing as u16;
     nd.slot = new_slot;
     let mut members = prev.snapshot.members.clone();
     members.push(nd);
@@ -2178,6 +2202,88 @@ fn cmd_gen_contribution(args: &[String]) {
         },
     );
     println!("wrote {out} (delegate balance {balance}, seed {seed})");
+}
+
+/// dev/test: simulate a browser delegate SENDING — the send-side counterpart of
+/// `gen-contribution`. Rebuilds the delegate identity AND its genesis balance witness
+/// deterministically from `(balance, seed)` (the exact randomness `gen-contribution` used), finds
+/// the delegate's slot in the given snapshot by `pk_g`, and builds a complete `SendPayload`
+/// (E-1 proof included) WITHOUT touching `cli_state.json` — stateless, so payload generation can
+/// run in parallel and against any snapshot copy.
+///
+/// SOUNDNESS OF THE SIMULATION: valid only while the delegate's slot ciphertext is still its
+/// GENESIS ct (it has neither sent nor received since joining) — exactly the join-storm scenario.
+/// The ct is recomputed and compared against the snapshot fail-closed, so a stale witness can
+/// never produce a payload that would waste a co-sign round.
+///
+/// usage: gen-send <balance> <seed> <to_slot> <amount> <snapshot.json> <out.json>
+fn cmd_gen_send(args: &[String]) {
+    let balance: u64 = args
+        .get(1)
+        .and_then(|s| s.parse().ok())
+        .unwrap_or_else(|| die("gen-send <balance> <seed> <to_slot> <amount> <snapshot> <out>"));
+    let seed: u64 = args
+        .get(2)
+        .and_then(|s| s.parse().ok())
+        .unwrap_or_else(|| die("bad <seed>"));
+    let to: u16 = args
+        .get(3)
+        .and_then(|s| s.parse().ok())
+        .unwrap_or_else(|| die("bad <to_slot>"));
+    let amount: u64 = args
+        .get(4)
+        .and_then(|s| s.parse().ok())
+        .unwrap_or_else(|| die("bad <amount>"));
+    let snapshot_path = args.get(5).map(String::as_str).unwrap_or("channel_snapshot.json");
+    let out = args.get(6).map(String::as_str).unwrap_or("send_payload.json");
+
+    // Reconstruct the delegate exactly as gen-contribution created it.
+    let keys = MemberKeys::generate(&mut StdRng::seed_from_u64(seed));
+    let (genesis_ct, witness) = encrypt_amount(
+        &mut StdRng::seed_from_u64(seed ^ 0xA11CE),
+        &keys.regev_pk,
+        balance,
+    )
+    .unwrap_or_else(|e| die(e));
+
+    let snapshot: ChannelSnapshot = read_json(snapshot_path);
+    let from = snapshot
+        .members
+        .iter()
+        .find(|m| m.pk_g == keys.pk_g())
+        .map(|m| m.slot)
+        .unwrap_or_else(|| die(format!("seed {seed}: pk_g not found in snapshot members — join first")));
+    // Fail-closed: the witness is only valid for the delegate's UNTOUCHED genesis ciphertext.
+    if snapshot.state.balance_state.enc_balances[from as usize] != genesis_ct {
+        die(format!(
+            "slot {from}: ciphertext is no longer the genesis ct (sent or received since join) — \
+             the deterministic witness is stale; gen-send cannot build this payload"
+        ));
+    }
+
+    let nonce = intmax3_zkp::ethereum_types::bytes32::Bytes32::default();
+    let mut rng = StdRng::seed_from_u64(seed ^ 0x5E4D_0000);
+    let BuiltSend {
+        payload,
+        new_balance,
+        ..
+    } = build_send(
+        &keys,
+        &snapshot,
+        from,
+        to,
+        amount,
+        balance,
+        &witness,
+        nonce,
+        LEVEL,
+        &mut rng,
+    )
+    .unwrap_or_else(|e| die(e));
+    write_json(out, &payload);
+    println!(
+        "built send {from}→{to} amount {amount} (new balance {new_balance}) → {out} (proof generated, stateless)"
+    );
 }
 
 fn cmd_add_genesis_sig(args: &[String]) {
