@@ -112,6 +112,20 @@ in for that binding.
 | **M8** | Multi-destination bulk: conservation theorem proved for **one `dest` at a time** (`honly : ∀ e ∈ entries, e.dest = dest`). Cross-channel multi-dest conservation is by iterating per-dest channels + global `BulkUpdateProven` (not a single closed-form lemma). |
 | **M9** | Batch (v2.1b): `batch_step_eq_seq` requires no debiting slot to be credited in the same batch; the sender-as-recipient case is covered by `batch_preserves_validity` directly (the fold order debit-before-credit is then normative, not derived). The D3 `pending_adds` budget and witness invalidation (refresh) are implementation-layer concerns, not modeled — the model's `BatchTxProven`-against-anchor stands in for "the E-1 proof matches the current stored ciphertext". |
 
+## Slim wire format (detail2 §M, 2026-07-23) — no proof change needed
+
+The v2.1b slim batch wire (`SlimSendPayload {anchor_digest, sender, recipient, channel_tx,
+after_ct}`) carries EXACTLY the information content of the modeled `BatchTx {sender, recipient,
+amount, encAmount, afterCt}` — the Lean batch theorems (`batch_preserves_validity`,
+`batch_conserves_total`, `batch_step_eq_seq`) were always stated over the slim content and never
+referenced the fat `SendPayload`'s `proposed_next_state`/`members`/`record` (the implementation
+re-derives those; the model's `applyBatch` computes the next state as a function of the anchor
+state and the txs, which is precisely what the slim verifier now does). Consequently the wire
+change requires NO Lean update. The one implementation divergence — exact anchor binding in the
+sender's A11 tx signature (detail2 §M-3, stricter than abstract2-1 §2.2's before-ct-only
+nullifier) — only SHRINKS the set of applicable txs, so every proved invariant carries over a
+fortiori.
+
 ## Relationship to abstract2 / ChannelSafety2
 
 ```

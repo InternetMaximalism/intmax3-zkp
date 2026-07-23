@@ -955,3 +955,103 @@ circuits, Solidity forge full suite, and a real 2-session browser test (Playwrig
 delegate demo (open as distinct delegate slots → send → receive → refresh → send again). A wallet-live demo
 runs 3 CLI co-signing members + browsers as send-only delegates (`channel_member` / `wallet-relay.js` /
 `wallet-live.html`).
+
+---
+
+## M. v2.1b batched co-sign: slim wire format + streaming verification (2026-07-23)
+
+Implements abstract2-1 §2.2b/§3.2b at scale. The first batch implementation (2026-07-19) transported
+K full `SendPayload`s; a 1000-sender storm showed that format is the scalability wall, NOT the batch
+design: at 1016 active slots one `SendPayload` is ~16.8 MB (≈ 4.8 MB padded `proposed_next_state` +
+~8 MB `members` list + E-1/A11 proofs), so K×16.8 MB hits, in order, the express JSON.parse
+serialization stall, the V8 max-string (~512 MB ⇒ K ≤ 30), and the relay heap (core-dump at
+K ≈ 1000). This section replaces the batch transport with the spec's own slim shape and bounds every
+memory use independently of K.
+
+### M-1. Wire types (slim)
+
+```rust
+/// One sender's contribution to a batch — abstract2-1 §2.2b `SignedChannelTx` (+ the E-1 `after`
+/// ciphertext, which the fold installs). Serialized camelCase; `anchor_digest` FIRST so a
+/// transport can extract it from the head of the byte stream without a full parse.
+pub struct SlimSendPayload {
+    pub anchor_digest: Bytes32,       // digest(S) the tx extends (== ChannelTx signing anchor)
+    pub sender_index: u16,            // balance slot (member OR delegate)
+    pub recipient_index: u16,
+    pub channel_tx: ChannelTx,        // enc_amount, nonce, E-1 zkp, sender pk_g/pk_b + A11 hash-sig
+    pub after_ct: RegevCiphertext,    // sender's fresh post-debit ct (the E-1 `after`)
+}
+```
+
+- **Batch file (relay → CLI): NDJSON** — line 1 a `{"anchorDigest": …, "k": …}` header, then one
+  `SlimSendPayload` per line. No single JSON document ever aggregates the batch (kills the V8
+  512 MB stringify cap and lets the CLI parse line-at-a-time).
+- Dropped vs the fat `SendPayload`: `proposed_next_state`, `members`, `record`. **Every dropped
+  field is data the verifier must already hold** (its own head state and its own
+  verified-at-import member set / record). One slim tx ≈ the two ciphertexts + the E-1 + A11
+  proofs (~4 MB at Production level today; proof size is the remaining wire weight).
+
+### M-2. Verification obligations (unchanged model, stronger posture)
+
+Per abstract2-1 §3.2b.3, the co-signer recomputes everything from its OWN authenticated context:
+
+1. `anchor_digest == digest(own head S)` — batch-level; additionally each tx's A11 sender
+   hash-sig already binds the anchor (M-3), so a mismatched tx also fails its signature.
+2. R1: sender slots pairwise distinct (reject batch).
+3. Per tx (bounded-parallel): rebuild the solo next-state from S
+   (`enc[sender] = after_ct`, `enc[recipient] += enc_amount`, `pending_adds` update, version+1)
+   and run the EXISTING hardened `InChannelTransferUpdateWitness::verify` + A11 sender-sig check
+   against it — **`members`/`record` come from the verifier's own snapshot, never from the wire.**
+   The fat path's P4-1/A11 re-authentication of a peer-supplied member list becomes moot on the
+   slim path (there is no peer-supplied member list at all); the trusted-record binding is the
+   verifier's own.
+4. Canonical fold R3 (debits install `after_ct`, then homomorphic credits), D3 `pending_adds`
+   budget post-fold, uninvolved slots untouched by construction.
+5. N-of-N signing round over `hash(H1', 0)` as before. K = 1 slim fold is field-identical to the
+   solo `proposed_next_state` (same digest), preserving the browser witness-commit fast path.
+
+### M-3. Anchor binding is exact (intentional divergence from abstract2-1 §2.2 "retry-friendly")
+
+The IMPA `ChannelTx::signing_digest` preimage contains `prev_state_digest` (§C-5), so a sender's
+tx authorizes application at EXACTLY one anchor. abstract2-1 §2.2 would allow re-applying at any
+later state whose sender ct is unchanged (the before-binding nullifier alone); the implementation
+is STRICTER: a tx that misses its batch must be re-signed (the wallet redoes the cheap A11 sig; the
+E-1 proof itself is anchor-independent — its statement binds `(before-ct, encAmount, after)` — but
+the implementation regenerates the payload wholesale today). Strictly-tighter authorization ⇒ no
+soundness impact; noted for spec fidelity.
+
+### M-4. Memory plan (every bound K-independent)
+
+| Stage | Mechanism | Bound |
+|---|---|---|
+| relay ingest (`/api/cosign2`) | stream request body straight to a per-request spool file (no express.json); stale-filter reads `anchorDigest` from the first bytes | O(1) heap per request |
+| relay queue | holds `{file, anchorDigest}` tuples only | O(K) tuples, ~100 B each |
+| batch handoff | concat spool files into NDJSON (streamed append) | O(1) heap |
+| CLI `cosign-batch` | read NDJSON line-at-a-time; verify with bounded rayon parallelism (chunks); after a tx verifies, RETAIN only `(sender, recipient, enc_amount, after_ct)` (~8 KB) and DROP the proofs | O(chunk) proofs + O(K×8 KB) retained |
+| fold + sign | over retained ciphertexts | as today |
+
+Legacy paths kept: `/api/cosign` (fat solo, browser) is unchanged — including the K = 1
+sender-state-sig carry-over; when the relay coalesces K > 1 requests it CONVERTS each fat payload
+to slim at enqueue (extract `after_ct = proposedNextState.encBalances[senderIndex]`, drop the
+rest) and routes through the slim batch path. Browser member-senders inside a K > 1 batch remain
+a known limitation (their Goldilocks state sig cannot be minted by the relay) — same as the
+2026-07-19 implementation; live-demo browser users are delegates, which never state-sign.
+
+### M-5. Relay hardening (from the 2026-07-22/23 storm findings)
+
+- `MAX_BATCH_K` cap (default 1024) — a batch never exceeds it; overflow waits (stale-filtered
+  against the post-batch head as today).
+- HTTP listen backlog raised (default 511 dropped ~5% of 10,000 simultaneous connects); pair with
+  kernel `somaxconn`.
+- Spool directory bounded by disk, not heap; spool files unlinked after batch consumption.
+
+### M-6. Security summary
+
+The five properties are those of abstract2-1 §4.2b verbatim — the slim wire carries exactly the
+information content of the Lean batch model (`ChannelSafety21.lean` §8 `BatchTx {sender,
+recipient, amount, encAmount, afterCt}`), which is what `batch_preserves_validity` /
+`batch_conserves_total` / `batch_step_eq_seq` are proven over. Nothing security-relevant moved:
+`before` never comes from the wire; the signature target `hash(H1', 0)` is derived by each
+verifier from its own verified inputs; R1/R3/D3 and the before-binding cross-batch nullifier are
+unchanged. What changed is WHERE redundant copies of already-held data are (no longer on the
+wire) and how memory scales (streaming, K-independent bounds).

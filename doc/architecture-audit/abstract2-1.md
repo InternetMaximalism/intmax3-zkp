@@ -484,7 +484,7 @@ Formal proof: `ChannelSafety21.lean` §7a — `l1_deposit_preserves_validity` sh
 | Small-block model | §2.3, §3.3.3–4 | §A-2, §C-7, §H-1 | Aligned |
 | `bp_member_slot` | §2.1, §3.3.1 | §A-2 consequence 3 | Aligned |
 | Cross-channel bulk | §2.3 `transfer_entries[]` | Single `receiver_deltas[0]` only | **abstract2-1 ahead of implementation** |
-| Intra-channel batch | §2.2b `ChannelTxBatch`, §3.2b | Single `SendPayload` (one `ChannelTx` + full `proposed_next_state`); `InChannelTransferUpdateWitness` pins exactly one sender/recipient pair | **abstract2-1 ahead of implementation** — needs `BatchSendPayload`, a batch update witness (fold recompute, R1 check, `pending_adds[i] += #credits`), parallel E-1 verification, and a browser `buildChannelTx` that does **not** pre-build the next state |
+| Intra-channel batch | §2.2b `ChannelTxBatch`, §3.2b | `SlimSendPayload` + NDJSON `cosign-batch` (detail2 §M): fold recompute, R1, D3 post-fold, bounded-parallel E-1 verification, verifier-side member set | **Aligned** (CLI/relay path). Remaining gap: the browser `buildChannelTx` still pre-builds the full solo `proposed_next_state` (fat `SendPayload`, converted to slim at the relay); anchor binding is exact (stricter than §2.2 retry-friendly — detail2 §M-3) |
 | Member count | 3 fixed | N ≤ 16 (D6) | detail2 extension; see detail2 |
 | Signatures | `SpxSigWitness` abstract | Poseidon ZK two-key (§A-3, D8) | detail2 extension |
 | Delegates / refresh | Out of scope here | §L, §B-3, D2/D3 | detail2 extensions |
