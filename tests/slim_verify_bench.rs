@@ -11,8 +11,8 @@ use intmax3_zkp::{
     regev::{RegevSecurityLevel, encrypt_amount},
     wallet_core::{
         BuiltSend, ChannelSnapshot, MemberInfo, MemberKeys, add_signature, assemble_genesis_state,
-        build_record, build_send, default_settled_tx_accumulator, sign_state, solo_next_state,
-        verify_slim_send_tx,
+        build_record, build_send, default_settled_tx_accumulator, regev_pks_array, sign_state,
+        solo_next_state, verify_slim_send_tx,
     },
 };
 use rand010::{SeedableRng, rngs::StdRng};
@@ -93,12 +93,17 @@ fn slim_verify_timing_breakdown() {
     .expect("solo_next_state");
     let t_next = t.elapsed();
 
-    // 4) full slim verification (includes 3 again + A11 + E-1 STARK verify + witness checks)
+    // 4) full slim verification — FAST path (direct checks, no solo-state rebuild); regev_pks
+    //    built once per batch (its cost shown separately)
+    let t = Instant::now();
+    let regev_pks = regev_pks_array(&snapshot.members);
+    let t_pks = t.elapsed();
     let t = Instant::now();
     verify_slim_send_tx(
         &snapshot.state,
         &snapshot.record,
         &snapshot.members,
+        &regev_pks,
         &slim2,
         LEVEL,
         None,
@@ -106,16 +111,19 @@ fn slim_verify_timing_breakdown() {
     )
     .expect("verify");
     let t_verify = t.elapsed();
+    println!("regev_pks_array (ONCE per batch): {:?}", t_pks);
 
     println!("== slim tx timing (Production level, padded 1024-slot state) ==");
     println!("proof generation (build_send): {:?}", t_gen);
     println!("slim JSON size: {:.2} MB", json.len() as f64 / 1e6);
     println!("serde serialize: {:?}   parse: {:?}", t_ser, t_de);
-    println!("solo_next_state (1024-slot clone + full digest): {:?}", t_next);
-    println!("verify_slim_send_tx TOTAL: {:?}", t_verify);
     println!(
-        "  -> of which next-state rebuild ~{:?}, rest (A11 + E-1 STARK verify + witness checks) ~{:?}",
-        t_next,
-        t_verify.saturating_sub(t_next)
+        "solo_next_state (1024-slot clone + full digest — NOT on the fast verify path; \
+         paid once per batch inside build_batch_next_state): {:?}",
+        t_next
+    );
+    println!(
+        "verify_slim_send_tx TOTAL (direct per-tx checks: A11 + E-1 STARK + bindings): {:?}",
+        t_verify
     );
 }

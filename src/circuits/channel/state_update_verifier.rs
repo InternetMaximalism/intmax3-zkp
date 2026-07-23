@@ -1138,7 +1138,7 @@ fn verify_balance_state_common(
     Ok(())
 }
 
-fn verify_regev_pk_root(
+pub fn verify_regev_pk_root(
     record: &ChannelRecord,
     regev_pks: &[RegevPk; MAX_CHANNEL_MEMBERS],
 ) -> Result<(), ChannelStateUpdateError> {

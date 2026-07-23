@@ -543,8 +543,8 @@ impl From<&SlimSendPayload> for BatchTxApply {
     }
 }
 
-/// Build the full 16-slot Regev pk array from a member list (padding = `RegevPk::padding()`).
-fn regev_pks_array(members: &[MemberInfo]) -> [RegevPk; MAX_CHANNEL_MEMBERS] {
+/// Build the full padded Regev pk array from a member list (padding = `RegevPk::padding()`).
+pub fn regev_pks_array(members: &[MemberInfo]) -> [RegevPk; MAX_CHANNEL_MEMBERS] {
     let mut arr: [RegevPk; MAX_CHANNEL_MEMBERS] = std::array::from_fn(|_| RegevPk::padding());
     for m in members {
         if (m.slot as usize) < MAX_CHANNEL_MEMBERS {
@@ -1261,41 +1261,121 @@ fn verify_send_core(
     Ok(())
 }
 
-/// Verify one SLIM batch tx (detail2 §M-2): reconstruct the solo next state from the verifier's
-/// OWN head (`solo_next_state`) and run the identical hardened core as the fat path — with
-/// `members`/`record` from the verifier's OWN verified snapshot, never from the wire.
+/// Verify one SLIM batch tx (detail2 §M-2) — the DIRECT per-tx check set of abstract2-1 §3.2b.3,
+/// with `members`/`record`/`regev_pks` from the verifier's OWN verified snapshot, never from the
+/// wire.
+///
+/// PERF (why this does NOT reuse `verify_send_core`): the fat/solo path routes through
+/// `InChannelTransferUpdateWitness::verify`, which re-derives and re-checks a full 1024-slot solo
+/// next state per tx (two full-state clones + full-state digests → O(K·MAX) hashing across a
+/// batch). In a batch every state-shaped invariant the witness checks (linkage, h2=0, chain/fund
+/// invariance, untouched slots, pending_adds shape) is a property of the SINGLE folded state that
+/// `build_batch_next_state` CONSTRUCTS deterministically — re-deriving it per tx checks nothing
+/// extra (Lean: `batch_preserves_validity`). What must (and does) remain per tx:
+///   1. anchor binding — `anchor_digest == prev.digest`;
+///   2. slot validity — sender/recipient in the active region, sender ≠ recipient;
+///   3. MVP refresh gate — `prev.pending_adds[sender] == 0` (same rule as `build_send` and the
+///      solo witness; the E-1 `before`-binding already enforces it cryptographically);
+///   4. party binding — the tx's `sender_pk_g`/`recipient_pk_g` equal the REGISTERED keys at the
+///      claimed slots (`record.member_pk_gs`);
+///   5. sender authorization — the full A11 BabyBear hash-sig over the IMPA tx digest (whose
+///      preimage binds `prev.digest`, so a stale tx cannot carry a valid signature);
+///   6. the mandatory E-1 STARK, statement rebuilt from the verifier's own data
+///      (`before = prev.enc_balances[sender]` — never wire-supplied);
+///   7. (recipient co-signer only) the own-slot `enc_amount` decryption check.
+/// `regev_pks` is built ONCE per batch by the caller (`regev_pks_array` clones ~1024 keys — do
+/// not pay that per tx).
 #[allow(clippy::too_many_arguments)]
 pub fn verify_slim_send_tx(
     prev: &ChannelState,
     trusted_record: &ChannelRecord,
     own_members: &[MemberInfo],
+    regev_pks: &[RegevPk; MAX_CHANNEL_MEMBERS],
     slim: &SlimSendPayload,
     level: RegevSecurityLevel,
     recipient_sk: Option<&RegevSk>,
     expected_amount: Option<u64>,
 ) -> WResult<()> {
+    // 1. Anchor binding.
     if slim.anchor_digest != prev.digest {
         return bail("slim tx does not extend the current head (stale anchor)");
     }
-    let next_for_check = solo_next_state(
-        prev,
-        slim.sender_index,
-        slim.recipient_index,
-        &slim.after_ct,
+    // 2. Slot validity.
+    let sender = slim.sender_index as usize;
+    let recipient = slim.recipient_index as usize;
+    let active = trusted_record.member_count as usize + trusted_record.delegate_count as usize;
+    check_slot(sender, active)?;
+    check_slot(recipient, active)?;
+    if sender == recipient {
+        return bail("sender and recipient must differ");
+    }
+    // 3. MVP refresh gate (parity with build_send / the solo witness).
+    if prev.balance_state.pending_adds[sender] != 0 {
+        return bail("sender slot has pending homomorphic adds; refresh required before sending");
+    }
+    // 4. Party binding to the registered member keys.
+    let registered_sender_pk_g = trusted_record.member_pk_gs[sender];
+    let registered_recipient_pk_g = trusted_record.member_pk_gs[recipient];
+    if slim.channel_tx.sender_pk_g != registered_sender_pk_g {
+        return bail(format!(
+            "channel_tx.sender_pk_g does not match the registered member at slot {sender}"
+        ));
+    }
+    if slim.channel_tx.recipient_pk_g != registered_recipient_pk_g {
+        return bail(format!(
+            "channel_tx.recipient_pk_g does not match the registered member at slot {recipient}"
+        ));
+    }
+    // 5. Sender A11 authorization (binds prev.digest via the IMPA preimage — detail2 §M-3).
+    let tx_digest = ChannelTx::signing_digest(
+        prev.channel_id,
+        prev.digest,
         &slim.channel_tx.enc_amount,
-    )?;
-    verify_send_core(
-        prev,
-        trusted_record,
-        own_members,
-        slim.sender_index,
-        slim.recipient_index,
+        slim.channel_tx.nonce,
+        slim.channel_tx.sender_pk_g,
+        slim.channel_tx.recipient_pk_g,
+    );
+    let sender_member = member_at(own_members, sender)?;
+    verify_channel_tx_sender_hash_sig(
         &slim.channel_tx,
-        next_for_check,
+        &tx_digest,
         level,
-        recipient_sk,
-        expected_amount,
+        registered_sender_pk_g,
+        sender_member.pk_b,
+    )?;
+    // 6. Mandatory E-1 channelTxZKP, statement rebuilt from verifier-owned data.
+    let statement = crate::regev::RegevStatement::ChannelTx {
+        sender_pk: regev_pks[sender].clone(),
+        recipient_pk: regev_pks[recipient].clone(),
+        before: prev.balance_state.enc_balances[sender].clone(),
+        enc_amount: slim.channel_tx.enc_amount.clone(),
+        after: slim.after_ct.clone(),
+    };
+    let verifier = RealRegevProofVerifier { level };
+    use crate::circuits::channel::state_update_verifier::{
+        RegevProofPurpose, RegevProofVerifier as RegevProofVerifierTrait,
+    };
+    // Explicit trait call: `RealRegevProofVerifier` also has an inherent `verify` with a
+    // different signature.
+    RegevProofVerifierTrait::verify(
+        &verifier,
+        &slim.channel_tx.channel_tx_zkp,
+        RegevProofPurpose::ChannelTx,
+        &statement,
     )
+    .map_err(|e| WalletError(format!("E-1 channelTxZKP invalid: {e:?}")))?;
+    // 7. Recipient-only decryption check.
+    if let Some(sk) = recipient_sk {
+        let expected = expected_amount
+            .ok_or_else(|| WalletError("recipient_sk requires expected_amount".into()))?;
+        let decrypted = decrypt_amount(sk, &slim.channel_tx.enc_amount).map_err(we)?;
+        if decrypted != expected {
+            return bail(format!(
+                "enc_amount decrypts to {decrypted}, expected {expected}"
+            ));
+        }
+    }
+    Ok(())
 }
 
 /// Batched intra-channel co-sign (abstract2-1 §2.2b/§3.2b): build the canonical batch next state

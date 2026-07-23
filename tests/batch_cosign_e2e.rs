@@ -13,7 +13,7 @@ use intmax3_zkp::{
         BatchTxApply, BuiltSend, ChannelSnapshot, MemberInfo, MemberKeys, add_signature,
         assemble_genesis_state, build_batch_next_state, build_record, build_send, decrypt_balance,
         default_settled_tx_accumulator, sign_state, verify_all_signatures, verify_send_transition,
-        verify_slim_send_tx, verify_snapshot,
+        regev_pks_array, verify_slim_send_tx, verify_snapshot,
     },
 };
 use rand010::{SeedableRng, rngs::StdRng};
@@ -108,6 +108,7 @@ fn batched_cosign_two_sends_one_transition() {
             &snapshot.state,
             &snapshot.record,
             &snapshot.members,
+            &regev_pks_array(&snapshot.members),
             &p.to_slim(),
             LEVEL,
             sk,
@@ -219,6 +220,7 @@ fn batch_rejects_double_debit_and_k1_matches_solo() {
         &snapshot.state,
         &snapshot.record,
         &snapshot.members,
+        &regev_pks_array(&snapshot.members),
         &stale,
         LEVEL,
         None,

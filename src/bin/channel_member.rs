@@ -81,8 +81,10 @@ use intmax3_zkp::{
         default_settled_tx_accumulator, partial_withdrawal_auth_digest, sign_state,
         sign_state_if_backed, verify_all_signatures, verify_inter_channel_credit_transition,
         verify_inter_channel_send_transition, verify_l1_deposit_import_transition,
-        verify_refresh_transition, verify_send_transition, verify_slim_send_tx, verify_snapshot,
+        regev_pks_array, verify_refresh_transition, verify_send_transition, verify_slim_send_tx,
+        verify_snapshot,
     },
+    circuits::channel::state_update_verifier::verify_regev_pk_root,
 };
 use plonky2::{
     field::goldilocks_field::GoldilocksField,
@@ -286,8 +288,11 @@ fn read_json<T: for<'de> Deserialize<'de>>(path: &str) -> T {
     serde_json::from_str(&s).unwrap_or_else(|e| die(format!("parse {path}: {e}")))
 }
 
+// COMPACT (not pretty) on purpose: these files are wire/state artifacts, not human documents.
+// Pretty-printing inflated a SlimSendPayload 1.41 MB → 4.5 MB (3.2×) and the 1016-member
+// snapshot/cli_state ~3× — paid on EVERY upload, JSON parse, and CLI state load.
 fn write_json<T: Serialize>(path: &str, value: &T) {
-    let s = serde_json::to_string_pretty(value).unwrap_or_else(|e| die(e));
+    let s = serde_json::to_string(value).unwrap_or_else(|e| die(e));
     fs::write(path, s).unwrap_or_else(|e| die(format!("write {path}: {e}")));
 }
 
@@ -2498,6 +2503,12 @@ fn cmd_cosign_batch(args: &[String]) {
     }
 
     use rayon::prelude::*;
+    // Per-BATCH one-time work (do NOT pay per tx): the 1024-entry Regev pk array (one clone per
+    // member) and its authenticity check against the record's regev_pk_root (F9-A). Our snapshot's
+    // member set was verified when it was written, but the root re-check is cheap once per batch.
+    let regev_pks = regev_pks_array(&state.snapshot.members);
+    verify_regev_pk_root(&state.snapshot.record, &regev_pks)
+        .unwrap_or_else(|e| die(format!("regev_pk_root mismatch: {e:?}")));
     // Verify one slim tx against the head, with the CLI-recipient decryption check (same
     // belt-and-braces accounting check cmd_cosign runs) — members/record are OUR OWN snapshot's.
     let verify_one = |tag: &str, slim: &SlimSendPayload| -> Result<(), String> {
@@ -2520,6 +2531,7 @@ fn cmd_cosign_batch(args: &[String]) {
             &head,
             &state.snapshot.record,
             &state.snapshot.members,
+            &regev_pks,
             slim,
             LEVEL,
             sk.as_ref(),
@@ -2528,36 +2540,31 @@ fn cmd_cosign_batch(args: &[String]) {
         .map_err(|e| format!("{tag}: transition invalid: {e}"))
     };
 
-    // Bounded parallelism: enough chunks in flight to keep rayon busy without ever holding more
-    // than PAR parsed proofs (~a few MB each) in memory at once.
-    const PAR: usize = 8;
+    // Barrier-free pipeline: one flat par_iter over the manifest. Rayon runs at most
+    // `num_threads` tasks at once and each task holds ONE parsed payload at a time, so peak
+    // memory stays O(threads × payload) with no idle cores at chunk boundaries (the old
+    // chunks-of-8 join let the fast core drain and wait on the slow one every chunk).
     let raw = fs::read_to_string(in_path).unwrap_or_else(|e| die(format!("read {in_path}: {e}")));
-    let mut applies: Vec<BatchTxApply> = Vec::new();
+    let applies: Vec<BatchTxApply>;
     let k: usize;
     if let Ok(manifest) = serde_json::from_str::<BatchManifest>(&raw) {
         if manifest.files.is_empty() {
             die("cosign-batch: empty batch");
         }
         k = manifest.files.len();
-        for chunk in manifest.files.chunks(PAR) {
-            let chunk_results: Vec<Result<BatchTxApply, String>> = chunk
-                .par_iter()
-                .map(|f| {
-                    let s = fs::read_to_string(f).map_err(|e| format!("{f}: read: {e}"))?;
-                    let slim: SlimSendPayload =
-                        serde_json::from_str(&s).map_err(|e| format!("{f}: parse: {e}"))?;
-                    verify_one(f, &slim)?;
-                    Ok(BatchTxApply::from(&slim))
-                })
-                .collect();
-            for r in chunk_results {
-                match r {
-                    Ok(a) => applies.push(a),
-                    Err(e) => die(format!("cosign-batch rejected: {e}")),
-                }
-            }
-            // parsed SlimSendPayloads (and their proofs) drop here; only residues are retained
-        }
+        let result: Result<Vec<BatchTxApply>, String> = manifest
+            .files
+            .par_iter()
+            .map(|f| {
+                let s = fs::read_to_string(f).map_err(|e| format!("{f}: read: {e}"))?;
+                let slim: SlimSendPayload =
+                    serde_json::from_str(&s).map_err(|e| format!("{f}: parse: {e}"))?;
+                verify_one(f, &slim)?;
+                Ok(BatchTxApply::from(&slim))
+                // the parsed SlimSendPayload (and its proofs) drops here; only the residue survives
+            })
+            .collect();
+        applies = result.unwrap_or_else(|e| die(format!("cosign-batch rejected: {e}")));
     } else {
         // LEGACY: a JSON array of fat SendPayloads.
         let payloads: Vec<SendPayload> = read_json(in_path);
