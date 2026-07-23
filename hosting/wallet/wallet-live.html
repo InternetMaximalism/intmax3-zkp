@@ -852,8 +852,39 @@ async function attemptSend(to, amt) {
   log('  ZKP generated · amount encrypted (秘匿化)', 'zk');
   log('  co-signing...');
   sendPhase = 'Waiting for co-sign';
-  const finalState = await api('/api/cosign', payload);
-  return JSON.parse(await call('finalize', { stateJson: finalState }));
+  // SLIM wire (detail2 §M-1): project the solo payload down to {anchor, indices, tx, afterCt} —
+  // everything dropped is data the co-signers re-derive themselves. ~4x smaller upload, and it
+  // lets the relay fold many concurrent senders into ONE co-signed transition. /api/cosign2
+  // responds with a compact ACK (not the multi-MB state), so we then fetch the state to finalize.
+  const p = JSON.parse(payload);
+  const slim = JSON.stringify({
+    anchorDigest: p.proposedNextState.prevDigest,
+    senderIndex: p.senderIndex,
+    recipientIndex: p.recipientIndex,
+    channelTx: p.channelTx,
+    afterCt: p.proposedNextState.balanceState.encBalances[p.senderIndex],
+  });
+  const r2 = await fetch('/api/cosign2?channel=' + activeCh, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: slim,
+  });
+  if (r2.status === 404 || r2.status === 405) {
+    // Relay without /api/cosign2 (e.g. the local dev harness): legacy fat solo path.
+    const finalState = await api('/api/cosign', payload);
+    return JSON.parse(await call('finalize', { stateJson: finalState }));
+  }
+  const ackTxt = await r2.text();
+  if (!r2.ok) throw new Error('relay /api/cosign2: ' + ackTxt);
+  const ack = JSON.parse(ackTxt);
+  if (ack.applied > 1) log('  co-signed in a batch of ' + ack.applied + ' sends (one transition, v' + ack.stateVersion + ')', 'ok');
+  // The relay republished the snapshot before ACKing, so the first fetch normally has it.
+  for (let i = 0; i < 120; i++) {
+    const snap = JSON.parse(await api('/api/snapshot', null, 'GET'));
+    if (snap.state.balanceState.stateVersion >= ack.stateVersion) {
+      return JSON.parse(await call('finalize', { stateJson: JSON.stringify(snap.state) }));
+    }
+    await new Promise((res) => setTimeout(res, 1000));
+  }
+  throw new Error('co-signed (v' + ack.stateVersion + ') but the snapshot did not catch up');
 }
 
 async function attemptInterChannelSend(toCh, to, amt) {
