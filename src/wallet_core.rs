@@ -484,6 +484,65 @@ pub struct SendPayload {
     pub record: ChannelRecord,
 }
 
+impl SendPayload {
+    /// Project the fat solo payload down to the slim batch wire shape (detail2 §M-1): everything
+    /// dropped (`proposed_next_state`, `members`, `record`) is data the verifier already holds
+    /// and re-derives. The sender's fresh `after` ciphertext is extracted from the solo proposal
+    /// (the slot its own E-1 proof pinned against the anchor).
+    pub fn to_slim(&self) -> SlimSendPayload {
+        SlimSendPayload {
+            anchor_digest: self.proposed_next_state.prev_digest,
+            sender_index: self.sender_index,
+            recipient_index: self.recipient_index,
+            channel_tx: self.channel_tx.clone(),
+            after_ct: self.proposed_next_state.balance_state.enc_balances
+                [self.sender_index as usize]
+                .clone(),
+        }
+    }
+}
+
+/// One sender's contribution to a batched co-sign round — abstract2-1 §2.2b `SignedChannelTx`
+/// plus the E-1 `after` ciphertext the fold installs (detail2 §M-1). This is the ENTIRE wire
+/// object: no state, no member list, no record. `anchor_digest` is the FIRST field so a transport
+/// can extract it from the head of the byte stream without a full JSON parse.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SlimSendPayload {
+    /// Digest of the anchor state `S` this tx extends (== the digest the sender's A11 tx
+    /// signature binds — detail2 §M-3 exact-anchor rule).
+    pub anchor_digest: Bytes32,
+    /// BALANCE-SLOT indices (member OR delegate, `0..1024`) — u16, see `MemberInfo::slot`.
+    pub sender_index: u16,
+    pub recipient_index: u16,
+    /// `enc_amount`, `nonce`, the mandatory E-1 proof, and the sender's pk_g/pk_b + A11 hash-sig.
+    pub channel_tx: ChannelTx,
+    /// The sender's fresh post-debit ciphertext (the E-1 statement's `after`).
+    pub after_ct: RegevCiphertext,
+}
+
+/// The retained residue of a VERIFIED slim tx — exactly what the canonical fold needs (mirrors
+/// the Lean model's `BatchTx`). The streaming batch verifier keeps one of these (~8 KB) per tx
+/// and DROPS the proofs, so batch memory is K-independent of proof size (detail2 §M-4).
+#[derive(Clone, Debug)]
+pub struct BatchTxApply {
+    pub sender_index: u16,
+    pub recipient_index: u16,
+    pub enc_amount: RegevCiphertext,
+    pub after_ct: RegevCiphertext,
+}
+
+impl From<&SlimSendPayload> for BatchTxApply {
+    fn from(s: &SlimSendPayload) -> Self {
+        BatchTxApply {
+            sender_index: s.sender_index,
+            recipient_index: s.recipient_index,
+            enc_amount: s.channel_tx.enc_amount.clone(),
+            after_ct: s.after_ct.clone(),
+        }
+    }
+}
+
 /// Build the full 16-slot Regev pk array from a member list (padding = `RegevPk::padding()`).
 fn regev_pks_array(members: &[MemberInfo]) -> [RegevPk; MAX_CHANNEL_MEMBERS] {
     let mut arr: [RegevPk; MAX_CHANNEL_MEMBERS] = std::array::from_fn(|_| RegevPk::padding());
@@ -964,39 +1023,8 @@ pub fn build_send(
     )
     .map_err(we)?;
 
-    // Recipient slot = public homomorphic sum.
-    let recipient_after = add_ciphertexts(
-        &prev.balance_state.enc_balances[recipient_slot as usize],
-        &enc_amount,
-    )
-    .map_err(we)?;
-
-    // Proposed next state.
-    let mut enc_balances = prev.balance_state.enc_balances.clone();
-    enc_balances[sender_slot as usize] = after_ct;
-    enc_balances[recipient_slot as usize] = recipient_after;
-    let mut pending_adds = prev.balance_state.pending_adds;
-    pending_adds[sender_slot as usize] = 0;
-    pending_adds[recipient_slot as usize] += 1;
-
-    let next_state = ChannelState {
-        epoch: prev.epoch + 1,
-        balance_state: BalanceState {
-            enc_balances,
-            state_version: prev.balance_state.state_version + 1,
-            pending_adds,
-            ..prev.balance_state.clone()
-        },
-        prev_digest: prev.digest,
-        member_signatures: Vec::new(),
-        // §C-2 (no small block): the next-state h2_tag MUST be zero. `..prev.clone()` would
-        // otherwise inherit a NON-zero h2_tag left by a preceding inter-channel send (which
-        // sets h2_tag = tx_tree_root), making the very next intra send / refresh fail
-        // InvalidH2Tag.
-        h2_tag: Bytes32::default(),
-        ..prev.clone()
-    }
-    .with_computed_digest();
+    // Proposed next state (shared with the slim-batch verifier, detail2 §M-2).
+    let next_state = solo_next_state(prev, sender_slot, recipient_slot, &after_ct, &enc_amount)?;
 
     let sender_hash = record.member_pk_gs[sender_slot as usize];
     let recipient_hash = record.member_pk_gs[recipient_slot as usize];
@@ -1051,6 +1079,51 @@ pub fn build_send(
     })
 }
 
+/// The canonical SOLO next state for one in-channel transfer: install the sender's fresh `after`
+/// ciphertext, homomorphically credit the recipient, reset/bump `pending_adds`, `state_version`+1,
+/// `h2_tag = 0`. Used by `build_send` (the sender's proposal) AND by the slim-batch verifier
+/// (detail2 §M-2), which reconstructs this state itself instead of trusting a wire copy.
+pub fn solo_next_state(
+    prev: &ChannelState,
+    sender_slot: u16,
+    recipient_slot: u16,
+    after_ct: &RegevCiphertext,
+    enc_amount: &RegevCiphertext,
+) -> WResult<ChannelState> {
+    // Recipient slot = public homomorphic sum.
+    let recipient_after = add_ciphertexts(
+        &prev.balance_state.enc_balances[recipient_slot as usize],
+        enc_amount,
+    )
+    .map_err(we)?;
+
+    let mut enc_balances = prev.balance_state.enc_balances.clone();
+    enc_balances[sender_slot as usize] = after_ct.clone();
+    enc_balances[recipient_slot as usize] = recipient_after;
+    let mut pending_adds = prev.balance_state.pending_adds;
+    pending_adds[sender_slot as usize] = 0;
+    pending_adds[recipient_slot as usize] += 1;
+
+    Ok(ChannelState {
+        epoch: prev.epoch + 1,
+        balance_state: BalanceState {
+            enc_balances,
+            state_version: prev.balance_state.state_version + 1,
+            pending_adds,
+            ..prev.balance_state.clone()
+        },
+        prev_digest: prev.digest,
+        member_signatures: Vec::new(),
+        // §C-2 (no small block): the next-state h2_tag MUST be zero. `..prev.clone()` would
+        // otherwise inherit a NON-zero h2_tag left by a preceding inter-channel send (which
+        // sets h2_tag = tx_tree_root), making the very next intra send / refresh fail
+        // InvalidH2Tag.
+        h2_tag: Bytes32::default(),
+        ..prev.clone()
+    }
+    .with_computed_digest())
+}
+
 /// Verify a proposed in-channel transfer against the prev state, using the hardened
 /// `InChannelTransferUpdateWitness::verify` (rebuilds the E-1 statement from authenticated state)
 /// PLUS the sender's REAL BabyBear hash-sig (P3). `recipient_sk`/`expected_amount` enable the
@@ -1075,22 +1148,6 @@ pub fn verify_send_transition(
     if payload.record.signing_digest() != trusted_record.signing_digest() {
         return bail("A11: payload record is not the channel's registered (trusted) record");
     }
-    // The sender's REAL authorization over the ChannelTx digest (P3: BabyBear hash-sig, replaces
-    // the SPHINCS+ sender signature). The IMPA `signing_digest` preimage is UNCHANGED.
-    let tx_digest = ChannelTx::signing_digest(
-        prev.channel_id,
-        prev.digest,
-        &payload.channel_tx.enc_amount,
-        payload.channel_tx.nonce,
-        payload.channel_tx.sender_pk_g,
-        payload.channel_tx.recipient_pk_g,
-    );
-    let sender_slot = payload.sender_index as usize;
-    // The sender may be a member OR a delegate (delegate account): a delegate sends with the
-    // identical E-1 + A11 mechanism, distinguished only by slot region. Admit the full active
-    // region (`member_count + delegate_count`); co-signing (`0..member_count`) is unaffected.
-    let active = payload.record.member_count as usize + payload.record.delegate_count as usize;
-    check_slot(sender_slot, active)?;
     // SECURITY (P4-1, A11): authenticate the payload's member set BEFORE trusting any `pk_b` /
     // `regev_pk` it carries. `verify_send_transition` runs on a peer-supplied `SendPayload` that
     // has its OWN `record` + `members` (it is NOT necessarily the snapshot already passed
@@ -1100,6 +1157,7 @@ pub fn verify_send_transition(
     // `MemberLeaf{pk_g, pk_b, regev_pk_digest}` and bind it to `record.member_pubkeys_root`. Only
     // then are the per-slot `pk_b` and Regev keys authenticated against the registered set, closing
     // the P3-5 gap where `pk_b` was read from the raw payload.
+    let active = payload.record.member_count as usize + payload.record.delegate_count as usize;
     if payload.members.len() != active {
         return bail(format!(
             "members list has {} entries but active participants (member_count + delegate_count) is {active}",
@@ -1118,20 +1176,63 @@ pub fn verify_send_transition(
     if recomputed_root != payload.record.member_pubkeys_root {
         return bail("member_pubkeys_root mismatch: payload member set not anchored to the record");
     }
-    // Regev keys consumed by the E-1 statement below (built from `payload.members`, which the
-    // member_pubkeys_root recompute bound to the trusted record's set).
-    let regev_pks = regev_pks_array(&payload.members);
-    let sender = member_at(&payload.members, sender_slot)?;
-    // A11: the sender slot's REGISTERED (pk_g, pk_b) — authenticated, since `payload.record` is the
-    // trusted record and `payload.members` is bound to its `member_pubkeys_root`.
-    let registered_pk_g = payload.record.member_pk_gs[sender_slot];
-    verify_channel_tx_sender_hash_sig(
+    verify_send_core(
+        prev,
+        &payload.record,
+        &payload.members,
+        payload.sender_index,
+        payload.recipient_index,
         &payload.channel_tx,
-        &tx_digest,
+        payload.proposed_next_state.clone(),
         level,
-        registered_pk_g,
-        sender.pk_b,
-    )?;
+        recipient_sk,
+        expected_amount,
+    )
+}
+
+/// Shared verification core for one in-channel transfer: the sender's A11 hash-sig over the IMPA
+/// tx digest + the hardened `InChannelTransferUpdateWitness::verify` (E-1 rebuilt from `prev` —
+/// the `before` ciphertext is ALWAYS `prev.enc_balances[sender]`, never wire-supplied).
+/// `record`/`members` MUST already be authenticated by the caller: the fat path re-authenticates
+/// the wire-carried set against the trusted record; the slim path passes the verifier's OWN
+/// verified snapshot set (detail2 §M-2 — no peer-supplied member set exists at all).
+#[allow(clippy::too_many_arguments)]
+fn verify_send_core(
+    prev: &ChannelState,
+    record: &ChannelRecord,
+    members: &[MemberInfo],
+    sender_index: u16,
+    recipient_index: u16,
+    channel_tx: &ChannelTx,
+    next_for_check: ChannelState,
+    level: RegevSecurityLevel,
+    recipient_sk: Option<&RegevSk>,
+    expected_amount: Option<u64>,
+) -> WResult<()> {
+    // The sender's REAL authorization over the ChannelTx digest (P3: BabyBear hash-sig, replaces
+    // the SPHINCS+ sender signature). The IMPA `signing_digest` preimage is UNCHANGED — it binds
+    // `prev.digest`, so the tx authorizes application at EXACTLY this anchor (detail2 §M-3).
+    let tx_digest = ChannelTx::signing_digest(
+        prev.channel_id,
+        prev.digest,
+        &channel_tx.enc_amount,
+        channel_tx.nonce,
+        channel_tx.sender_pk_g,
+        channel_tx.recipient_pk_g,
+    );
+    let sender_slot = sender_index as usize;
+    // The sender may be a member OR a delegate (delegate account): a delegate sends with the
+    // identical E-1 + A11 mechanism, distinguished only by slot region. Admit the full active
+    // region (`member_count + delegate_count`); co-signing (`0..member_count`) is unaffected.
+    let active = record.member_count as usize + record.delegate_count as usize;
+    check_slot(sender_slot, active)?;
+    check_slot(recipient_index as usize, active)?;
+    // Regev keys consumed by the E-1 statement below (from the caller-authenticated member set).
+    let regev_pks = regev_pks_array(members);
+    let sender = member_at(members, sender_slot)?;
+    // A11: the sender slot's REGISTERED (pk_g, pk_b) from the authenticated record/member set.
+    let registered_pk_g = record.member_pk_gs[sender_slot];
+    verify_channel_tx_sender_hash_sig(channel_tx, &tx_digest, level, registered_pk_g, sender.pk_b)?;
 
     // `InChannelTransferUpdateWitness::verify` requires a STRUCTURALLY complete signature set
     // (one non-empty sig per active slot with the right pubkey hash). A co-signer validates the
@@ -1139,17 +1240,17 @@ pub fn verify_send_transition(
     // here — they do not affect `signing_digest()` (member signatures are excluded from it). The
     // REAL multi-signature check (per-member SingleSig proofs) is `verify_all_signatures`, run once
     // the set is complete.
-    let mut next_for_check = payload.proposed_next_state.clone();
-    fill_placeholder_sigs(&payload.record, &mut next_for_check);
+    let mut next_for_check = next_for_check;
+    fill_placeholder_sigs(record, &mut next_for_check);
 
     let witness = InChannelTransferUpdateWitness {
-        channel_record: payload.record.clone(),
+        channel_record: record.clone(),
         regev_pks,
         prev_state: prev.clone(),
         next_state: next_for_check,
-        channel_tx: payload.channel_tx.clone(),
-        sender_index: payload.sender_index as usize,
-        recipient_index: payload.recipient_index as usize,
+        channel_tx: channel_tx.clone(),
+        sender_index: sender_index as usize,
+        recipient_index: recipient_index as usize,
         recipient_sk: recipient_sk.cloned(),
         expected_amount,
     };
@@ -1160,14 +1261,53 @@ pub fn verify_send_transition(
     Ok(())
 }
 
+/// Verify one SLIM batch tx (detail2 §M-2): reconstruct the solo next state from the verifier's
+/// OWN head (`solo_next_state`) and run the identical hardened core as the fat path — with
+/// `members`/`record` from the verifier's OWN verified snapshot, never from the wire.
+#[allow(clippy::too_many_arguments)]
+pub fn verify_slim_send_tx(
+    prev: &ChannelState,
+    trusted_record: &ChannelRecord,
+    own_members: &[MemberInfo],
+    slim: &SlimSendPayload,
+    level: RegevSecurityLevel,
+    recipient_sk: Option<&RegevSk>,
+    expected_amount: Option<u64>,
+) -> WResult<()> {
+    if slim.anchor_digest != prev.digest {
+        return bail("slim tx does not extend the current head (stale anchor)");
+    }
+    let next_for_check = solo_next_state(
+        prev,
+        slim.sender_index,
+        slim.recipient_index,
+        &slim.after_ct,
+        &slim.channel_tx.enc_amount,
+    )?;
+    verify_send_core(
+        prev,
+        trusted_record,
+        own_members,
+        slim.sender_index,
+        slim.recipient_index,
+        &slim.channel_tx,
+        next_for_check,
+        level,
+        recipient_sk,
+        expected_amount,
+    )
+}
+
 /// Batched intra-channel co-sign (abstract2-1 §2.2b/§3.2b): build the canonical batch next state
-/// from K solo-built `SendPayload`s anchored at the SAME `prev` state.
+/// from K verified tx residues anchored at the SAME `prev` state.
 ///
-/// SECURITY: every payload MUST have been individually verified with
-/// `verify_send_transition(prev, ..)` FIRST (E-1 proof against the anchor ciphertext, sender A11
-/// hash-sig, solo-fold structural checks). Those K verifications are mutually independent
-/// (disjoint debit slots by R1 below) and may run in parallel. This function then performs only
-/// the BATCH-level soundness checks and the canonical fold:
+/// SECURITY: every tx MUST have been individually verified FIRST — `verify_slim_send_tx(prev, ..)`
+/// on the slim path (or `verify_send_transition` on the legacy fat path): E-1 proof against the
+/// anchor ciphertext, sender A11 hash-sig (which binds `prev.digest`, so a stale-anchor tx cannot
+/// even carry a valid signature), solo-fold structural checks. Those K verifications are mutually
+/// independent (disjoint debit slots by R1 below) and may run in parallel; after each one the
+/// caller keeps only the `BatchTxApply` residue and may DROP the proofs (detail2 §M-4). This
+/// function then performs only the BATCH-level soundness checks and the canonical fold:
 ///   R1  single-debit rule — at most one debit per sender slot per batch (two debits would spend
 ///       the same `before` ciphertext witness twice);
 ///   R3  debits first (install each sender's fresh `after` ct, whose correctness the tx's own E-1
@@ -1178,22 +1318,20 @@ pub fn verify_send_transition(
 /// `settled_tx_chain` untouched) and carries NO signatures — the caller runs the N-of-N round.
 /// For K = 1 the produced state is field-identical to the solo `proposed_next_state`
 /// (same digest), so the sender's browser can still commit its pending witness on finalize.
-/// Machine-checked model: ChannelSafety21.lean §8 (`batch_preserves_validity`).
+/// Machine-checked model: ChannelSafety21.lean §8 (`batch_preserves_validity` — `BatchTxApply`
+/// mirrors the modeled `BatchTx`).
 pub fn build_batch_next_state(
     prev: &ChannelState,
-    payloads: &[SendPayload],
+    txs: &[BatchTxApply],
 ) -> WResult<ChannelState> {
-    if payloads.is_empty() {
+    if txs.is_empty() {
         return bail("empty batch");
     }
     let mut debited = [false; MAX_CHANNEL_MEMBERS];
-    for p in payloads {
-        if p.proposed_next_state.prev_digest != prev.digest {
-            return bail("batch payload does not extend the anchor state");
-        }
-        let s = p.sender_index as usize;
+    for t in txs {
+        let s = t.sender_index as usize;
         check_slot(s, MAX_CHANNEL_MEMBERS)?;
-        check_slot(p.recipient_index as usize, MAX_CHANNEL_MEMBERS)?;
+        check_slot(t.recipient_index as usize, MAX_CHANNEL_MEMBERS)?;
         if debited[s] {
             return bail(format!(
                 "R1 single-debit rule: two debits from sender slot {s} in one batch"
@@ -1204,18 +1342,18 @@ pub fn build_batch_next_state(
 
     let mut enc_balances = prev.balance_state.enc_balances.clone();
     let mut pending_adds = prev.balance_state.pending_adds;
-    // Debits: each sender slot takes the fresh `after` ciphertext from its OWN solo proposal —
-    // the slot the tx's E-1 proof bound as `after` against the anchor `before`.
-    for p in payloads {
-        let s = p.sender_index as usize;
-        enc_balances[s] = p.proposed_next_state.balance_state.enc_balances[s].clone();
+    // Debits: each sender slot takes the fresh `after` ciphertext its tx's E-1 proof bound as
+    // `after` against the anchor `before`.
+    for t in txs {
+        let s = t.sender_index as usize;
+        enc_balances[s] = t.after_ct.clone();
         pending_adds[s] = 0;
     }
     // Credits: fold the homomorphic adds over the debited map (sender-as-recipient lands on the
     // fresh `after` ct, exactly the §3.2b canonical order).
-    for p in payloads {
-        let r = p.recipient_index as usize;
-        enc_balances[r] = add_ciphertexts(&enc_balances[r], &p.channel_tx.enc_amount).map_err(we)?;
+    for t in txs {
+        let r = t.recipient_index as usize;
+        enc_balances[r] = add_ciphertexts(&enc_balances[r], &t.enc_amount).map_err(we)?;
         if pending_adds[r] >= MAX_HOMO_ADDS_BEFORE_REFRESH {
             return bail(format!(
                 "D3 budget: slot {r} would exceed MAX_HOMO_ADDS_BEFORE_REFRESH post-fold; shrink the batch"

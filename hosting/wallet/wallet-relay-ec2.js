@@ -56,18 +56,26 @@ function withLock(ch, fn) {
   return next;
 }
 
-// ---- Batched co-sign queue (abstract2-1 §3.2b) -----------------------------------------------
-// Concurrent /api/cosign requests for the SAME channel coalesce into ONE `cosign-batch` CLI call:
-// K solo-built SendPayloads anchored at the same head are verified in parallel by the CLI (rayon)
-// and folded into ONE co-signed state transition. Payloads anchored at a stale head are rejected
-// up-front (they could never co-sign — same as today's behavior for the 2nd of two racing sends).
-// If a batch fails (one bad payload poisons it), fall back to solo cosigns so honest txs survive.
+// ---- Batched co-sign queue (abstract2-1 §3.2b, slim wire detail2 §M) -------------------------
+// Concurrent cosign requests for the SAME channel coalesce into ONE `cosign-batch` CLI call.
+// Two ingest paths feed one queue:
+//   /api/cosign  (legacy, browser): fat SendPayload parsed by express.json. K = 1 keeps the exact
+//                old solo path (incl. the sender-state-sig carry-over); inside a K > 1 batch the
+//                fat payload is CONVERTED to slim at drain time.
+//   /api/cosign2 (slim, scalable): the body streams straight to a per-request SPOOL FILE — the
+//                relay never buffers or parses it (the 2026-07-22 storm core-dumped the relay at
+//                ~1000 buffered 16.8MB bodies). The anchor digest is extracted from the first
+//                bytes (slim serializes anchorDigest FIRST). Responds with a compact ACK, not the
+//                full state (browsers poll /api/poll anyway).
+// The batch handoff to the CLI is a tiny MANIFEST of spool file paths — no K-sized JSON string is
+// ever built (V8's ~512MB max-string killed K > 30 at fat sizes).
 const COALESCE_MS = parseInt(process.env.COSIGN_COALESCE_MS || '150', 10);
-const _sendQueues = {};   // ch -> [{ payload, resolve, reject }]
+const MAX_BATCH_K = parseInt(process.env.MAX_BATCH_K || '1024', 10);
+const _sendQueues = {};   // ch -> [{ kind:'fat', payload } | { kind:'slim', file, anchor }, resolve, reject]
 const _draining = {};
-function enqueueCosign(ch, payload) {
+function enqueueCosign(ch, entry) {
   return new Promise((resolve, reject) => {
-    (_sendQueues[ch] = _sendQueues[ch] || []).push({ payload, resolve, reject });
+    (_sendQueues[ch] = _sendQueues[ch] || []).push({ ...entry, resolve, reject });
     drainCosigns(ch);
   });
 }
@@ -75,52 +83,92 @@ function headDigestOf(ch) {
   try { return JSON.parse(fs.readFileSync(wc(ch, 'channel_snapshot.json'), 'utf8')).state.digest; }
   catch (e) { return null; }
 }
+function spoolDir(ch) { const d = wc(ch, 'spool'); fs.mkdirSync(d, { recursive: true }); return d; }
+let _spoolSeq = 0;
+function spoolPath(ch) { return path.join(spoolDir(ch), `s_${process.pid}_${++_spoolSeq}.json`); }
+function entryAnchor(item) {
+  return item.kind === 'slim'
+    ? item.anchor
+    : item.payload && item.payload.proposedNextState && item.payload.proposedNextState.prevDigest;
+}
 function drainCosigns(ch) {
   if (_draining[ch]) return;
   _draining[ch] = true;
   withLock(ch, async () => {
     while ((_sendQueues[ch] || []).length) {
-      // COALESCE window: requests that arrive within this window (or during the previous
-      // proving) fold into one batch. Negligible vs 1-8s proving, but it turns "K simultaneous
-      // sends on an idle channel" into a real batch. 150ms default: multi-MB payloads take tens
-      // of ms each just to upload+JSON-parse, so 40ms proved too tight for 3 concurrent senders
-      // (measured on the stress clone: 40ms → batch of 2 + 1 stale; 150ms → batch of 3).
+      // COALESCE window: requests arriving within this window (or during the previous proving)
+      // fold into one batch. With slim spooled ingest the arrival stagger is network-bound, not
+      // parse-bound, so the default window catches genuinely-simultaneous senders.
       await new Promise((r) => setTimeout(r, COALESCE_MS));
-      const taken = _sendQueues[ch].splice(0);
+      const taken = _sendQueues[ch].splice(0, MAX_BATCH_K);
       // Pre-filter stale anchors (ChannelState serializes camelCase: prevDigest / digest).
       const head = headDigestOf(ch);
       const batch = [];
       for (const item of taken) {
-        const anchor = item.payload && item.payload.proposedNextState && item.payload.proposedNextState.prevDigest;
+        const anchor = entryAnchor(item);
         if (head && anchor && anchor !== head) {
+          if (item.kind === 'slim') fs.rm(item.file, { force: true }, () => {});
           item.reject(new Error('stale anchor: channel head advanced; re-import the snapshot and rebuild the send'));
         } else batch.push(item);
       }
       if (!batch.length) continue;
+      const spooled = [];   // conversion files owned by this round (cleaned up after)
       try {
         let outFile;
-        if (batch.length === 1) {
+        if (batch.length === 1 && batch[0].kind === 'fat') {
+          // Legacy solo path — byte-identical behavior (sender state-sig carry-over intact).
           fs.writeFileSync(wc(ch, 'payload.json'), JSON.stringify(batch[0].payload));
           await cli(ch, ['cosign', 'payload.json', 'cosigned.json']);
           outFile = 'cosigned.json';
         } else {
           console.log(`  batch co-sign: ${batch.length} sends in ONE transition (channel ${ch})`);
-          fs.writeFileSync(wc(ch, 'batch_payloads.json'), JSON.stringify(batch.map(b => b.payload)));
-          await cli(ch, ['cosign-batch', 'batch_payloads.json', 'batch_cosigned.json']);
+          const files = [];
+          for (const b of batch) {
+            if (b.kind === 'slim') { files.push(path.relative(chDir(ch), b.file)); continue; }
+            // fat -> slim conversion (detail2 §M-1): keep only what the fold needs.
+            const p = b.payload;
+            const slim = {
+              anchorDigest: p.proposedNextState.prevDigest,
+              senderIndex: p.senderIndex,
+              recipientIndex: p.recipientIndex,
+              channelTx: p.channelTx,
+              afterCt: p.proposedNextState.balanceState.encBalances[p.senderIndex],
+            };
+            const f = spoolPath(ch);
+            fs.writeFileSync(f, JSON.stringify(slim));
+            spooled.push(f);
+            files.push(path.relative(chDir(ch), f));
+          }
+          fs.writeFileSync(wc(ch, 'batch_manifest.json'), JSON.stringify({ files }));
+          await cli(ch, ['cosign-batch', 'batch_manifest.json', 'batch_cosigned.json']);
           outFile = 'batch_cosigned.json';
         }
         const out = fs.readFileSync(wc(ch, outFile), 'utf8');
-        for (const b of batch) b.resolve(out);
-      } catch (e) {
-        if (batch.length === 1) { batch[0].reject(e); continue; }
-        console.error(`batch of ${batch.length} rejected (${String(e.stderr || e.message || e).slice(0, 200)}); falling back to solo cosigns`);
+        // Slim clients get a compact ACK; fat (browser) clients get the full co-signed state.
+        let ack = null;
         for (const b of batch) {
+          if (b.kind === 'slim') {
+            if (!ack) {
+              const st = JSON.parse(out);
+              ack = JSON.stringify({ ok: true, applied: batch.length, stateVersion: st.balanceState.stateVersion, digest: st.digest });
+            }
+            b.resolve(ack);
+          } else b.resolve(out);
+        }
+      } catch (e) {
+        console.error(`batch of ${batch.length} rejected (${String(e.stderr || e.message || e).slice(0, 200)})${batch.some(b => b.kind === 'fat') ? '; falling back to solo cosigns for fat payloads' : ''}`);
+        for (const b of batch) {
+          if (b.kind !== 'fat') { b.reject(e); continue; }
+          // Fat fallback: honest solo txs survive a poisoned batch (legacy behavior).
           try {
             fs.writeFileSync(wc(ch, 'payload.json'), JSON.stringify(b.payload));
             await cli(ch, ['cosign', 'payload.json', 'cosigned.json']);
             b.resolve(fs.readFileSync(wc(ch, 'cosigned.json'), 'utf8'));
           } catch (e2) { b.reject(e2); }
         }
+      } finally {
+        for (const b of batch) if (b.kind === 'slim') fs.rm(b.file, { force: true }, () => {});
+        for (const f of spooled) fs.rm(f, { force: true }, () => {});
       }
     }
   }).finally(() => {
@@ -206,6 +254,44 @@ app.use((req, res, next) => {
   console.log(`REQ ${req.method} ${req.url} len=${req.headers['content-length'] || 0}`);
   next();
 });
+
+// SLIM co-sign ingest (detail2 §M-4). Registered BEFORE express.json so the multi-MB body is
+// NEVER buffered or parsed in relay heap — it streams straight to a per-request spool file
+// (the 2026-07-22 storm core-dumped the relay at ~1000 buffered fat bodies). The anchor digest
+// is read from the first bytes (SlimSendPayload serializes anchorDigest FIRST). Responds with a
+// compact ACK {ok, applied, stateVersion, digest} — NOT the multi-MB state (poll /api/poll).
+const MAX_SLIM_BODY = 64 * 1024 * 1024;
+app.post('/api/cosign2', (req, res) => {
+  const ch = reqChannel(req);
+  const file = spoolPath(ch);
+  const ws = fs.createWriteStream(file);
+  let bytes = 0; let firstChunk = null; let aborted = false;
+  req.on('data', (c) => {
+    bytes += c.length;
+    if (!firstChunk) firstChunk = c;
+    if (bytes > MAX_SLIM_BODY && !aborted) {
+      aborted = true; ws.destroy(); fs.rm(file, { force: true }, () => {});
+      res.status(413).json({ error: 'body too large' }); req.destroy();
+    }
+  });
+  req.pipe(ws);
+  ws.on('error', (e) => { if (!aborted) { aborted = true; fs.rm(file, { force: true }, () => {}); res.status(500).json({ error: 'spool: ' + e.message }); } });
+  ws.on('finish', () => {
+    if (aborted) return;
+    const m = /"anchorDigest"\s*:\s*"([^"]+)"/.exec(String(firstChunk).slice(0, 4096));
+    if (!m) {
+      fs.rm(file, { force: true }, () => {});
+      return res.status(400).json({ error: 'anchorDigest not found at head of body (SlimSendPayload required)' });
+    }
+    enqueueCosign(ch, { kind: 'slim', file, anchor: m[1] })
+      .then((ackJson) => res.type('application/json').send(ackJson))
+      .catch((e) => {
+        const msg = String(e.stderr || e.message || e);
+        res.status(/stale anchor/.test(msg) ? 409 : 500).json({ error: msg });
+      });
+  });
+});
+
 app.use(compression({
   filter: (req, res) => {
     const ct = String(res.getHeader('Content-Type') || '');
@@ -282,7 +368,7 @@ app.get('/api/deposit-info', (req, res) => {
 
 app.post('/api/cosign', (req, res) => {
   const ch = reqChannel(req);
-  enqueueCosign(ch, req.body)
+  enqueueCosign(ch, { kind: 'fat', payload: req.body })
     .then((finalStateJson) => res.type('application/json').send(finalStateJson))
     .catch((e) => { console.error(e.stderr ? String(e.stderr) : (e.message||e)); res.status(500).json({ error: String(e.stderr || e.message || e) }); });
 });
@@ -503,12 +589,16 @@ app.post('/api/ticket/deposit', (req, res) => {
 // Static frontend (index.html = wallet-live.html, wallet-worker.js, /pkg/...), same origin as /api.
 app.use(express.static(PUBLIC));
 
+// Listen BACKLOG: node's default 511 dropped ~5% of 10,000 truly-simultaneous connects
+// (2026-07-22 join storm — instant client-side resets). 8192 covers the bursts we test; the
+// kernel caps it at net.core.somaxconn (raise via sysctl on stress boxes if needed).
+const BACKLOG = parseInt(process.env.LISTEN_BACKLOG || '8192', 10);
 if (TLS_CERT && TLS_KEY) {
   const opts = { cert: fs.readFileSync(TLS_CERT), key: fs.readFileSync(TLS_KEY) };
-  https.createServer(opts, app).listen(PORT, '0.0.0.0', () =>
+  https.createServer(opts, app).listen(PORT, '0.0.0.0', BACKLOG, () =>
     console.log(`intmax demo (HTTPS) on :${PORT}  channels ${CHANNELS.join(', ')}`));
   http.createServer((req, res) => { res.writeHead(301, { Location: 'https://' + req.headers.host + req.url }); res.end(); }).listen(80, '0.0.0.0');
 } else {
-  http.createServer(app).listen(PORT, '0.0.0.0', () =>
+  http.createServer(app).listen(PORT, '0.0.0.0', BACKLOG, () =>
     console.log(`intmax demo (HTTP) on :${PORT}  channels ${CHANNELS.join(', ')}`));
 }

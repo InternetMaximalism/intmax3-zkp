@@ -73,14 +73,15 @@ use intmax3_zkp::{
         BuiltInterChannelCredit, BuiltSend, CancelCloseProver, ChannelBalanceAttestation,
         ChannelSnapshot, ChannelWithdrawalParams, CloseProver, InterChannelDebitPayload,
         InterChannelTransferDescriptor, MemberInfo, MemberKeys, PostCloseClaimProver,
-        RefreshPayload, SendPayload, WithdrawalClaimProver, add_signature,
-        assemble_genesis_state_backed, build_batch_next_state, build_channel_withdrawal,
+        BatchTxApply, RefreshPayload, SendPayload, SlimSendPayload, WithdrawalClaimProver,
+        add_signature, assemble_genesis_state_backed, build_batch_next_state,
+        build_channel_withdrawal,
         build_inter_channel_credit, build_l1_deposit_import, build_record, build_send,
         decrypt_balance,
         default_settled_tx_accumulator, partial_withdrawal_auth_digest, sign_state,
         sign_state_if_backed, verify_all_signatures, verify_inter_channel_credit_transition,
         verify_inter_channel_send_transition, verify_l1_deposit_import_transition,
-        verify_refresh_transition, verify_send_transition, verify_snapshot,
+        verify_refresh_transition, verify_send_transition, verify_slim_send_tx, verify_snapshot,
     },
 };
 use plonky2::{
@@ -2280,9 +2281,11 @@ fn cmd_gen_send(args: &[String]) {
         &mut rng,
     )
     .unwrap_or_else(|e| die(e));
-    write_json(out, &payload);
+    // Emit the SLIM wire shape (detail2 §M-1) — the batch path's native format; ~50-100x smaller
+    // than the fat SendPayload at high membership (no state / member list / record).
+    write_json(out, &payload.to_slim());
     println!(
-        "built send {from}→{to} amount {amount} (new balance {new_balance}) → {out} (proof generated, stateless)"
+        "built SLIM send {from}→{to} amount {amount} (new balance {new_balance}) → {out} (proof generated, stateless)"
     );
 }
 
@@ -2473,64 +2476,108 @@ fn cmd_cosign(args: &[String]) {
 /// fold) — IN PARALLEL, since the K verifications are independent — then the canonical batch state
 /// is built (`build_batch_next_state`: R1 single-debit, debits-then-credits fold, D3 budget) and
 /// co-signed once. ONE state_version bump for K transfers.
+/// Input formats (detail2 §M-1/§M-4):
+///   - MANIFEST (streaming, K-independent memory): `{"files": ["spool/a.json", …]}` — each file
+///     one `SlimSendPayload`. Parsed + verified in bounded-size chunks; after a chunk verifies,
+///     only the ~8 KB `BatchTxApply` residues are retained and the proofs are dropped.
+///   - LEGACY array of fat `SendPayload`s — converted to slim in memory (small-K back-compat).
 fn cmd_cosign_batch(args: &[String]) {
     let in_path = args
         .get(1)
-        .unwrap_or_else(|| die("cosign-batch <batch_payloads.json> <out>"));
+        .unwrap_or_else(|| die("cosign-batch <manifest.json|batch_payloads.json> <out>"));
     let out_path = args
         .get(2)
         .map(String::as_str)
         .unwrap_or("batch_cosigned.json");
     let mut state = load_state();
-    let payloads: Vec<SendPayload> = read_json(in_path);
-    if payloads.is_empty() {
-        die("cosign-batch: empty batch");
-    }
     let head = state.snapshot.state.clone();
 
-    // Parallel per-tx verification: each payload is an independent solo transition against the
-    // SAME anchor head (disjoint sender slots are enforced right after in build_batch_next_state;
-    // a duplicate sender would still verify here but the batch build rejects it).
+    #[derive(Deserialize)]
+    struct BatchManifest {
+        files: Vec<String>,
+    }
+
     use rayon::prelude::*;
-    let errors: Vec<String> = payloads
-        .par_iter()
-        .enumerate()
-        .filter_map(|(i, p)| {
-            // Own-slot decryption check when a CLI-controlled slot is the recipient (same
-            // belt-and-braces accounting check cmd_cosign runs).
-            let (sk, expected) = match state
-                .controlled
-                .iter()
-                .find(|c| c.slot == p.recipient_index)
-            {
-                Some(c) => {
-                    let keys = keys_for(c.keygen_seed);
-                    match intmax3_zkp::regev::decrypt_amount(
-                        &keys.regev_sk,
-                        &p.channel_tx.enc_amount,
-                    ) {
-                        Ok(amt) => (Some(keys.regev_sk), Some(amt)),
-                        Err(e) => return Some(format!("payload[{i}]: decrypt enc_amount: {e}")),
-                    }
+    // Verify one slim tx against the head, with the CLI-recipient decryption check (same
+    // belt-and-braces accounting check cmd_cosign runs) — members/record are OUR OWN snapshot's.
+    let verify_one = |tag: &str, slim: &SlimSendPayload| -> Result<(), String> {
+        let (sk, expected) = match state
+            .controlled
+            .iter()
+            .find(|c| c.slot == slim.recipient_index)
+        {
+            Some(c) => {
+                let keys = keys_for(c.keygen_seed);
+                match intmax3_zkp::regev::decrypt_amount(&keys.regev_sk, &slim.channel_tx.enc_amount)
+                {
+                    Ok(amt) => (Some(keys.regev_sk), Some(amt)),
+                    Err(e) => return Err(format!("{tag}: decrypt enc_amount: {e}")),
                 }
-                None => (None, None),
-            };
-            verify_send_transition(&head, &state.snapshot.record, p, LEVEL, sk.as_ref(), expected)
-                .err()
-                .map(|e| format!("payload[{i}]: transition invalid: {e}"))
-        })
-        .collect();
-    if !errors.is_empty() {
-        die(format!("cosign-batch rejected: {}", errors.join("; ")));
+            }
+            None => (None, None),
+        };
+        verify_slim_send_tx(
+            &head,
+            &state.snapshot.record,
+            &state.snapshot.members,
+            slim,
+            LEVEL,
+            sk.as_ref(),
+            expected,
+        )
+        .map_err(|e| format!("{tag}: transition invalid: {e}"))
+    };
+
+    // Bounded parallelism: enough chunks in flight to keep rayon busy without ever holding more
+    // than PAR parsed proofs (~a few MB each) in memory at once.
+    const PAR: usize = 8;
+    let raw = fs::read_to_string(in_path).unwrap_or_else(|e| die(format!("read {in_path}: {e}")));
+    let mut applies: Vec<BatchTxApply> = Vec::new();
+    let k: usize;
+    if let Ok(manifest) = serde_json::from_str::<BatchManifest>(&raw) {
+        if manifest.files.is_empty() {
+            die("cosign-batch: empty batch");
+        }
+        k = manifest.files.len();
+        for chunk in manifest.files.chunks(PAR) {
+            let chunk_results: Vec<Result<BatchTxApply, String>> = chunk
+                .par_iter()
+                .map(|f| {
+                    let s = fs::read_to_string(f).map_err(|e| format!("{f}: read: {e}"))?;
+                    let slim: SlimSendPayload =
+                        serde_json::from_str(&s).map_err(|e| format!("{f}: parse: {e}"))?;
+                    verify_one(f, &slim)?;
+                    Ok(BatchTxApply::from(&slim))
+                })
+                .collect();
+            for r in chunk_results {
+                match r {
+                    Ok(a) => applies.push(a),
+                    Err(e) => die(format!("cosign-batch rejected: {e}")),
+                }
+            }
+            // parsed SlimSendPayloads (and their proofs) drop here; only residues are retained
+        }
+    } else {
+        // LEGACY: a JSON array of fat SendPayloads.
+        let payloads: Vec<SendPayload> = read_json(in_path);
+        if payloads.is_empty() {
+            die("cosign-batch: empty batch");
+        }
+        k = payloads.len();
+        let errors: Vec<String> = payloads
+            .par_iter()
+            .enumerate()
+            .filter_map(|(i, p)| verify_one(&format!("payload[{i}]"), &p.to_slim()).err())
+            .collect();
+        if !errors.is_empty() {
+            die(format!("cosign-batch rejected: {}", errors.join("; ")));
+        }
+        applies = payloads.iter().map(|p| BatchTxApply::from(&p.to_slim())).collect();
     }
 
     let mut next_state =
-        build_batch_next_state(&head, &payloads).unwrap_or_else(|e| die(format!("batch build: {e}")));
-    // K = 1 fast-path: the batch state is field-identical to the solo proposal, so carry over the
-    // sender's partial state signature (a member-sender pre-signs only its OWN solo digest).
-    if payloads.len() == 1 && payloads[0].proposed_next_state.digest == next_state.digest {
-        next_state.member_signatures = payloads[0].proposed_next_state.member_signatures.clone();
-    }
+        build_batch_next_state(&head, &applies).unwrap_or_else(|e| die(format!("batch build: {e}")));
 
     // N-of-N co-sign for all CLI-controlled slots (same §F-1 rationale as cmd_cosign: backing is
     // anchored at genesis; per-state re-checks would wrongly reject post-inter-channel states).
@@ -2548,8 +2595,7 @@ fn cmd_cosign_batch(args: &[String]) {
     }
     write_json(out_path, &next_state);
     println!(
-        "batch co-signed {} txs in ONE state transition → {out_path} (state_version {})",
-        payloads.len(),
+        "batch co-signed {k} txs in ONE state transition → {out_path} (state_version {})",
         next_state.balance_state.state_version
     );
 

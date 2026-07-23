@@ -10,10 +10,10 @@ use intmax3_zkp::{
     ethereum_types::bytes32::Bytes32,
     regev::{RegevSecurityLevel, encrypt_amount},
     wallet_core::{
-        BuiltSend, ChannelSnapshot, MemberInfo, MemberKeys, add_signature, assemble_genesis_state,
-        build_batch_next_state, build_record, build_send, decrypt_balance,
+        BatchTxApply, BuiltSend, ChannelSnapshot, MemberInfo, MemberKeys, add_signature,
+        assemble_genesis_state, build_batch_next_state, build_record, build_send, decrypt_balance,
         default_settled_tx_accumulator, sign_state, verify_all_signatures, verify_send_transition,
-        verify_snapshot,
+        verify_slim_send_tx, verify_snapshot,
     },
 };
 use rand010::{SeedableRng, rngs::StdRng};
@@ -94,19 +94,36 @@ fn batched_cosign_two_sends_one_transition() {
     )
     .expect("build m1→m0");
 
-    // Every co-signer verifies each tx with the FULL solo pipeline against the anchor
-    // (independent proofs — the parallelizable step; here sequential for determinism).
+    // Every co-signer verifies each tx against the anchor — through BOTH pipelines: the legacy
+    // fat path (wire-supplied state + member set, re-authenticated) and the SLIM path (detail2
+    // §M-2: the verifier reconstructs the solo next state and uses its OWN member set). The two
+    // must agree — the slim wire drops only redundant data.
     for (p, sk, expected) in [
         (&pa, Some(&m2.regev_sk), Some(amt_a)),
         (&pb, Some(&m0.regev_sk), Some(amt_b)),
     ] {
         verify_send_transition(&snapshot.state, &snapshot.record, p, LEVEL, sk, expected)
-            .expect("solo verification against the anchor");
+            .expect("fat solo verification against the anchor");
+        verify_slim_send_tx(
+            &snapshot.state,
+            &snapshot.record,
+            &snapshot.members,
+            &p.to_slim(),
+            LEVEL,
+            sk,
+            expected,
+        )
+        .expect("slim verification against the anchor (own member set)");
     }
 
-    // Canonical batch fold: ONE state transition for both txs.
-    let mut batch_state = build_batch_next_state(&snapshot.state, &[pa.clone(), pb.clone()])
-        .expect("batch build");
+    // Canonical batch fold: ONE state transition for both txs (from the slim residues — the
+    // proofs are already dropped at this point, detail2 §M-4).
+    let applies: Vec<BatchTxApply> = [&pa, &pb]
+        .iter()
+        .map(|p| BatchTxApply::from(&p.to_slim()))
+        .collect();
+    let mut batch_state =
+        build_batch_next_state(&snapshot.state, &applies).expect("batch build");
     assert_eq!(
         batch_state.balance_state.state_version,
         snapshot.state.balance_state.state_version + 1,
@@ -179,7 +196,8 @@ fn batch_rejects_double_debit_and_k1_matches_solo() {
     .expect("build_send");
 
     // R1: the same sender slot twice in one batch MUST be rejected (double-spend of one witness).
-    let err = build_batch_next_state(&snapshot.state, &[payload.clone(), payload.clone()])
+    let apply = BatchTxApply::from(&payload.to_slim());
+    let err = build_batch_next_state(&snapshot.state, &[apply.clone(), apply.clone()])
         .expect_err("double debit must be rejected");
     assert!(
         format!("{err}").contains("R1"),
@@ -188,9 +206,24 @@ fn batch_rejects_double_debit_and_k1_matches_solo() {
 
     // K = 1: the batch state is field-identical to the solo proposal (same digest), so the
     // sender's pending witness still commits on finalize.
-    let solo = build_batch_next_state(&snapshot.state, &[payload.clone()]).expect("K=1 batch");
+    let solo = build_batch_next_state(&snapshot.state, &[apply]).expect("K=1 batch");
     assert_eq!(
         solo.digest, payload.proposed_next_state.digest,
         "K=1 batch must reproduce the solo digest exactly"
     );
+
+    // Slim verification rejects a stale anchor outright (detail2 §M-3 exact-anchor rule).
+    let mut stale = payload.to_slim();
+    stale.anchor_digest = Bytes32::default();
+    let err = verify_slim_send_tx(
+        &snapshot.state,
+        &snapshot.record,
+        &snapshot.members,
+        &stale,
+        LEVEL,
+        None,
+        None,
+    )
+    .expect_err("stale anchor must be rejected");
+    assert!(format!("{err}").contains("stale anchor"), "got: {err}");
 }
