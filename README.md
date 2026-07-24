@@ -178,8 +178,8 @@ arm64 box (orders of magnitude, not a guarantee — run the benches for your har
 
 | Operation | Cost (indicative) |
 |---|---|
-| Regev channel‑tx (E‑1) proof, Production params | a few ms, ~KB‑scale proof |
-| Channel co‑sign of a state update (relay member) | ~seconds, ~200 MB RAM |
+| Regev channel‑tx (E‑1) proof, Production params | ~11 ms proof **verify** / ~27 ms **prove**, per core; 1.4 MB slim payload |
+| Batched intra‑channel transfer **throughput** (relay, per channel) | **45 tx/s @1 core → 546 @16 → 1,089 @48 → 1,310 @96** (Graviton4); aggregate = N channels × this |
 | Full channel `balanceProof` (one‑time prover build) | ~25 s |
 | Browser proving | multi‑threaded WASM (SharedArrayBuffer); needs COEP/COOP + a secure context |
 
