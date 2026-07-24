@@ -144,6 +144,26 @@ Stack: Rust 2024 (nightly) + Solidity 0.8.29 (Foundry, Prague EVM).
 
 ## Benchmarks
 
+### Batched transfer throughput
+
+On a single 96-vCPU arm64 box, **one payment channel co-signs ≈ 1,310 confidential transfers per
+second** into a single state transition (K same-anchor transfers verified in parallel, folded into
+one N-of-N round). This rate is **per channel** — channels are fully independent (separate lock,
+fold, signing, and snapshot), so **N channels ≈ N × the per-channel throughput**, shardable across
+boxes with no coordination.
+
+Thread scaling (Graviton4, K = 1,000, RAM-backed) is near-linear to ~4 cores and peaks around 96:
+
+| cores | 1 | 16 | 32 | 48 | 64 | 96 | 192 |
+|---|---|---|---|---|---|---|---|
+| tx/s | 45 | 546 | 869 | 1,089 | 1,202 | **1,310** | 873 |
+
+Past ~96 cores the per-batch serial tail (N-of-N signing + snapshot write) dominates and
+throughput regresses. Full method, code, and analysis:
+[`doc/benches/batch-cosign-throughput.md`](doc/benches/batch-cosign-throughput.md).
+
+### Proving / verification microbenchmarks
+
 ```bash
 cargo bench --bench proof_bench               # proving time: balance-processor proofs (initial,
                                               # receive-deposit, send-tx, receive-transfer),
