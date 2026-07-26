@@ -43,6 +43,18 @@ build/
 self_certs/
 
 # =============================================================================
+# Lean 4 / Lake build output (proof sources live in doc/architecture-audit/ and doc/audit/)
+# =============================================================================
+.lake/
+*.olean
+*.ilean
+
+# Stale pre-consolidation Lean project roots: the sources moved under doc/ (2026-07-05),
+# but invoking `lake` from the old paths recreates these build-only trees.
+/architecture-audit/
+/audit/
+
+# =============================================================================
 # OS / editor noise
 # =============================================================================
 .DS_Store
