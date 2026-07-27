@@ -233,8 +233,8 @@ fn inter_channel_live_send_and_credit() {
     let sender_slot = 0u16;
     let recipient_slot = 1u16;
 
-    let a_fund_before = a.snapshot.state.channel_fund.amount;
-    let b_fund_before = b.snapshot.state.channel_fund.amount;
+    let a_fund_before = a.snapshot.state.channel_fund.amounts[0];
+    let b_fund_before = b.snapshot.state.channel_fund.amounts[0];
     let recipient_before = decrypt_balance(
         &b.keys[recipient_slot as usize],
         &b.snapshot,
@@ -277,18 +277,19 @@ fn inter_channel_live_send_and_credit() {
         U256::from(AMT as u32)
     };
     assert_eq!(
-        a_send.channel_fund.amount + amt_u256,
+        a_send.channel_fund.amounts[0] + amt_u256,
         a_fund_before,
         "A channel_fund decreased by AMT"
     );
     assert_eq!(
-        credit.bundle_apply_state.channel_fund.amount,
+        credit.bundle_apply_state.channel_fund.amounts[0],
         b_fund_before + amt_u256,
         "B channel_fund increased by AMT"
     );
     // The fund import leg is exactly the +AMT step; the bundle leg leaves the fund unchanged.
     assert_eq!(
-        credit.fund_import_state.channel_fund.amount, credit.bundle_apply_state.channel_fund.amount,
+        credit.fund_import_state.channel_fund.amounts[0],
+        credit.bundle_apply_state.channel_fund.amounts[0],
         "bundle apply does not change channel_fund"
     );
 
@@ -482,7 +483,8 @@ fn inter_channel_live_send_and_credit() {
         .expect("build send for tamper base");
         let mut bad_payload = built.debit_payload;
         // Corrupt the proposed next state so channel_fund no longer decreases by amount.
-        bad_payload.proposed_next_state.channel_fund.amount = a.snapshot.state.channel_fund.amount;
+        bad_payload.proposed_next_state.channel_fund.amounts[0] =
+            a.snapshot.state.channel_fund.amounts[0];
         bad_payload.proposed_next_state = bad_payload
             .proposed_next_state
             .clone()

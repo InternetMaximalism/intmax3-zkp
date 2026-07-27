@@ -448,8 +448,10 @@ mod tests {
     #[cfg_attr(debug_assertions, ignore = "run with --release")]
     #[test]
     fn test_chained_conditional_insertion_with_dummy_padding() {
-        use plonky2::iop::{target::BoolTarget, witness::WitnessWrite as _};
-        use plonky2::plonk::circuit_data::CircuitConfig;
+        use plonky2::{
+            iop::{target::BoolTarget, witness::WitnessWrite as _},
+            plonk::circuit_data::CircuitConfig,
+        };
 
         const MAX: usize = 16;
         let active = 16usize;
@@ -460,21 +462,30 @@ mod tests {
         let proof_ts: Vec<IndexedInsertionProofTarget> = (0..MAX)
             .map(|_| IndexedInsertionProofTarget::new::<F, D>(&mut builder, height, true))
             .collect();
-        let key_ts: Vec<U256Target> = (0..MAX).map(|_| U256Target::new(&mut builder, true)).collect();
-        let active_ts: Vec<BoolTarget> =
-            (0..MAX).map(|_| builder.add_virtual_bool_target_safe()).collect();
+        let key_ts: Vec<U256Target> = (0..MAX)
+            .map(|_| U256Target::new(&mut builder, true))
+            .collect();
+        let active_ts: Vec<BoolTarget> = (0..MAX)
+            .map(|_| builder.add_virtual_bool_target_safe())
+            .collect();
         let value_t = builder.one();
-        let empty_root =
-            super::IndexedMerkleTree::new(height).get_root();
+        let empty_root = super::IndexedMerkleTree::new(height).get_root();
         let mut root = PoseidonHashOutTarget::constant(&mut builder, empty_root);
         for i in 0..MAX {
-            root = proof_ts[i].get_new_root::<F, C, D>(&mut builder, key_ts[i].clone(), value_t, root);
+            root =
+                proof_ts[i].get_new_root::<F, C, D>(&mut builder, key_ts[i].clone(), value_t, root);
         }
         let circuit = builder.build::<C>();
 
         // Witness: distinct keys for active slots, 0 for padding.
         let keys: Vec<U256> = (0..MAX)
-            .map(|i| if i < active { U256::from((i as u32) + 100) } else { U256::default() })
+            .map(|i| {
+                if i < active {
+                    U256::from((i as u32) + 100)
+                } else {
+                    U256::default()
+                }
+            })
             .collect();
         let mut pw = PartialWitness::new();
         let mut tree = super::IndexedMerkleTree::new(height);
@@ -490,7 +501,9 @@ mod tests {
             };
             proof_ts[i].set_witness(&mut pw, &proof);
         }
-        circuit.prove(pw).expect("chained conditional insertion with dummy padding must prove");
+        circuit
+            .prove(pw)
+            .expect("chained conditional insertion with dummy padding must prove");
     }
 
     /// IN-CIRCUIT A5 soundness lock: a key already in the tree CANNOT be re-inserted, even with a
@@ -529,10 +542,10 @@ mod tests {
         let proof0 = tree.prove_and_insert(k, 1).unwrap();
         key0.set_witness(&mut pw, k);
         p0.set_witness(&mut pw, &proof0);
-        // Step 1: re-insert the SAME key K, FORGING the proof = reuse proof0 (native guard bypassed:
-        // we never call prove_and_insert for the duplicate). proof0's sentinel low-leaf (next_key=0)
-        // does not match the sentinel in root1 (next_key=K now), so the in-circuit low-leaf verify
-        // fails ⇒ unprovable.
+        // Step 1: re-insert the SAME key K, FORGING the proof = reuse proof0 (native guard
+        // bypassed: we never call prove_and_insert for the duplicate). proof0's sentinel
+        // low-leaf (next_key=0) does not match the sentinel in root1 (next_key=K now), so
+        // the in-circuit low-leaf verify fails ⇒ unprovable.
         key1.set_witness(&mut pw, k);
         p1.set_witness(&mut pw, &proof0);
 

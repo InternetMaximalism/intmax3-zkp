@@ -31,7 +31,7 @@ use crate::{
             ChannelStateUpdatePublicInputs, InChannelTransferUpdateWitness,
             InterChannelFundImportUpdateWitness, InterChannelSendUpdateWitness,
             L1DepositImportUpdateWitness, ReceiverBundleApplyUpdateWitness,
-            require_accumulator_push,
+            TokenRegisterUpdateWitness, require_accumulator_push,
         },
     },
     common::{
@@ -51,7 +51,7 @@ use crate::{
         },
         tx::{TxClass, TxV2},
     },
-    constants::MAX_CHANNEL_MEMBERS,
+    constants::{MAX_CHANNEL_MEMBERS, MAX_CHANNEL_TOKENS},
     ethereum_types::{
         bytes32::{BYTES32_LEN, Bytes32},
         u32limb_trait::U32LimbTrait,
@@ -495,8 +495,12 @@ impl SendPayload {
             sender_index: self.sender_index,
             recipient_index: self.recipient_index,
             channel_tx: self.channel_tx.clone(),
+            // Multi-token: the slim wire carries the single transferred ciphertext — the
+            // sender row's position at the tx's SIGNED token_slot (TM-2 leg 4: the verifier
+            // re-selects the same position from its own state when rebuilding the E-1
+            // statement).
             after_ct: self.proposed_next_state.balance_state.enc_balances
-                [self.sender_index as usize]
+                [self.sender_index as usize][self.channel_tx.token_slot as usize]
                 .clone(),
         }
     }
@@ -528,6 +532,10 @@ pub struct SlimSendPayload {
 pub struct BatchTxApply {
     pub sender_index: u16,
     pub recipient_index: u16,
+    /// LOCAL token slot this tx moves (TM-14): copied from the SIGNED
+    /// `channel_tx.token_slot` of the verified slim payload — the fold debits/credits at
+    /// exactly this position of each involved row.
+    pub token_slot: u8,
     pub enc_amount: RegevCiphertext,
     pub after_ct: RegevCiphertext,
 }
@@ -537,6 +545,7 @@ impl From<&SlimSendPayload> for BatchTxApply {
         BatchTxApply {
             sender_index: s.sender_index,
             recipient_index: s.recipient_index,
+            token_slot: s.channel_tx.token_slot,
             enc_amount: s.channel_tx.enc_amount.clone(),
             after_ct: s.after_ct.clone(),
         }
@@ -745,14 +754,15 @@ pub fn assemble_genesis_state_backed(
         close_freeze_nonce: 0,
         channel_fund: ChannelFund {
             channel_id: record.channel_id,
-            amount: U256::from(fund_amount),
+            // Genesis funds live at token slot 0 (the genesis token; registry = [ETH]).
+            amounts: ChannelFund::single_token_amounts(U256::from(fund_amount)),
             intmax_state_root,
         },
         balance_state: BalanceState {
             channel_id: record.channel_id,
             member_count: record.member_count,
             delegate_count: record.delegate_count,
-            enc_balances: BalanceState::pad_enc_balances(enc_balances_active),
+            enc_balances: BalanceState::pad_enc_balances_token0(enc_balances_active),
             regev_pk_digests: BalanceState::pad_regev_pk_digests(regev_pk_digests_active),
             recipients: BalanceState::pad_recipients(recipients_active),
             settled_tx_chain,
@@ -760,7 +770,11 @@ pub fn assemble_genesis_state_backed(
             // advancement pushes `tx_hash` and sets the new root (see the build_* sites below).
             settled_tx_accumulator_root: empty_settled_tx_accumulator_root(),
             state_version: 0,
-            pending_adds: BalanceState::pad_pending_adds(&vec![0u32; active]),
+            pending_adds: BalanceState::pad_pending_adds_token0(&vec![0u32; active]),
+            // detail2 §N owner decision 5: a fresh channel is definitionally single-token —
+            // registry = [genesis token 0 (ETH)], all balances at token slot 0.
+            token_registry: BalanceState::single_token_registry(0),
+            token_count: 1,
         },
         h2_tag: Bytes32::default(),
         shared_native_nullifier_root: Bytes32::default(),
@@ -925,25 +939,54 @@ pub fn verify_snapshot(
         if snapshot.record.member_pk_gs[slot as usize] != keys.pk_g() {
             return bail("my slot's pk_g in the record does not match my key");
         }
-        // Confirm we can decrypt our own balance slot (no panic / valid ciphertext).
-        decrypt_amount(
-            &keys.regev_sk,
-            &snapshot.state.balance_state.enc_balances[slot as usize],
-        )
-        .map_err(|e| WalletError(format!("own balance slot does not decrypt: {e}")))?;
+        // Confirm we can decrypt our own balance slot (no panic / valid ciphertext) at EVERY
+        // active token position (multitoken §N-2: unused positions are the canonical zero
+        // ciphertext, which decrypts to 0 under any key — so this cannot false-negative on a
+        // token the member simply does not hold).
+        for token_slot in 0..snapshot.state.balance_state.token_count as usize {
+            decrypt_amount(
+                &keys.regev_sk,
+                &snapshot.state.balance_state.enc_balances[slot as usize][token_slot],
+            )
+            .map_err(|e| {
+                WalletError(format!(
+                    "own balance slot does not decrypt at token position {token_slot}: {e}"
+                ))
+            })?;
+        }
     }
     Ok(())
 }
 
-/// Decrypt this member's hidden balance from a snapshot.
+/// Decrypt this member's hidden GENESIS-token (local token slot 0) balance from a snapshot —
+/// the wire-compat single-token view kept for existing callers/API shapes; the per-token query
+/// is [`decrypt_balance_token`].
 pub fn decrypt_balance(keys: &MemberKeys, snapshot: &ChannelSnapshot, slot: u16) -> WResult<u64> {
+    decrypt_balance_token(keys, snapshot, slot, 0)
+}
+
+/// Decrypt this member's hidden balance at LOCAL token position `token_slot` (multitoken §N-2).
+/// Fail-closed on an inactive position (`token_slot >= token_count`, TM-8) — an active position
+/// the member does not hold is the canonical zero ciphertext and decrypts to 0.
+pub fn decrypt_balance_token(
+    keys: &MemberKeys,
+    snapshot: &ChannelSnapshot,
+    slot: u16,
+    token_slot: u8,
+) -> WResult<u64> {
     // Delegates own a balance slot too; admit the full active region (members + delegates).
     let bs = &snapshot.state.balance_state;
     let active = bs.member_count as usize + bs.delegate_count as usize;
     check_slot(slot as usize, active)?;
+    if token_slot as usize >= bs.token_count as usize {
+        return bail(format!(
+            "token_slot {token_slot} out of range (>= token_count {}, TM-8)",
+            bs.token_count
+        ));
+    }
     decrypt_amount(
         &keys.regev_sk,
-        &snapshot.state.balance_state.enc_balances[slot as usize],
+        &bs.enc_balances[slot as usize][token_slot as usize],
     )
     .map_err(we)
 }
@@ -960,18 +1003,52 @@ pub struct BuiltSend {
     pub new_balance: u64,
 }
 
-/// Build an in-channel transfer of `amount` from `sender_slot` to `recipient_slot`.
-///
-/// `before_witness` is the sender's `AmountWitness` for their CURRENT balance ciphertext (held
-/// locally since genesis/last refresh). `before_amount` is the sender's current plaintext balance.
-/// Produces the E-1 proof, the signed `ChannelTx`, and the proposed next state carrying only the
-/// sender's signature.
+/// Build an in-channel transfer of the GENESIS token (local token slot 0) — the wire-compat
+/// single-token entry; the per-token builder is [`build_send_token`].
 #[allow(clippy::too_many_arguments)]
 pub fn build_send(
     keys: &MemberKeys,
     snapshot: &ChannelSnapshot,
     sender_slot: u16,
     recipient_slot: u16,
+    amount: u64,
+    before_amount: u64,
+    before_witness: &AmountWitness,
+    nonce: Bytes32,
+    level: RegevSecurityLevel,
+    rng: &mut impl Rng,
+) -> WResult<BuiltSend> {
+    build_send_token(
+        keys,
+        snapshot,
+        sender_slot,
+        recipient_slot,
+        0,
+        amount,
+        before_amount,
+        before_witness,
+        nonce,
+        level,
+        rng,
+    )
+}
+
+/// Build an in-channel transfer of `amount` of LOCAL token position `token_slot` from
+/// `sender_slot` to `recipient_slot` (multitoken §N-3 — the Phase 4 per-token build path;
+/// `token_slot` is signed into the IMPA-v2 digest and the verifier paths enforce the full
+/// TM-2 binding triple at exactly that position).
+///
+/// `before_witness` is the sender's `AmountWitness` for their CURRENT balance ciphertext AT
+/// `token_slot` (held locally since genesis/last refresh of that position). `before_amount` is
+/// the sender's current plaintext balance at that position. Produces the E-1 proof, the signed
+/// `ChannelTx`, and the proposed next state carrying only the sender's signature.
+#[allow(clippy::too_many_arguments)]
+pub fn build_send_token(
+    keys: &MemberKeys,
+    snapshot: &ChannelSnapshot,
+    sender_slot: u16,
+    recipient_slot: u16,
+    token_slot: u8,
     amount: u64,
     before_amount: u64,
     before_witness: &AmountWitness,
@@ -992,9 +1069,19 @@ pub fn build_send(
     let record = &snapshot.record;
     let members = &snapshot.members;
     let prev = &snapshot.state;
-    if prev.balance_state.pending_adds[sender_slot as usize] != 0 {
+    // TM-8: bound the SIGNED token position before any fixed-width row indexing (solo_next_state
+    // re-checks; the verifier paths enforce it adversarially).
+    let ts = token_slot as usize;
+    if ts >= MAX_CHANNEL_TOKENS || ts >= prev.balance_state.token_count as usize {
+        return bail(format!(
+            "token_slot {ts} out of range (token_count {}, TM-8)",
+            prev.balance_state.token_count
+        ));
+    }
+    // D3/TM-13: the refresh gate is per (slot, token) — only the SENT position must be clean.
+    if prev.balance_state.pending_adds[sender_slot as usize][ts] != 0 {
         return bail(
-            "sender slot has pending homomorphic adds; refresh required before sending (not yet implemented in MVP)",
+            "sender (slot, token) position has pending homomorphic adds; refresh required before sending (not yet implemented in MVP)",
         );
     }
     if before_amount < amount {
@@ -1009,13 +1096,14 @@ pub fn build_send(
     let new_balance = before_amount - amount;
     let (after_ct, after_w) = encrypt_amount(rng, sender_pk, new_balance).map_err(we)?;
 
-    // E-1 channelTxZKP over (before, enc_amount, after).
+    // E-1 channelTxZKP over (before, enc_amount, after) — the `before` ciphertext is the
+    // sender's position at the SIGNED token_slot (TM-2 leg 4).
     let proof = prove_channel_tx(
         level,
         sender_pk,
         recipient_pk,
         (
-            &prev.balance_state.enc_balances[sender_slot as usize],
+            &prev.balance_state.enc_balances[sender_slot as usize][ts],
             before_witness,
         ),
         (&enc_amount, &enc_amount_w),
@@ -1024,7 +1112,14 @@ pub fn build_send(
     .map_err(we)?;
 
     // Proposed next state (shared with the slim-batch verifier, detail2 §M-2).
-    let next_state = solo_next_state(prev, sender_slot, recipient_slot, &after_ct, &enc_amount)?;
+    let next_state = solo_next_state(
+        prev,
+        sender_slot,
+        recipient_slot,
+        token_slot,
+        &after_ct,
+        &enc_amount,
+    )?;
 
     let sender_hash = record.member_pk_gs[sender_slot as usize];
     let recipient_hash = record.member_pk_gs[recipient_slot as usize];
@@ -1033,6 +1128,7 @@ pub fn build_send(
         prev.digest,
         &enc_amount,
         nonce,
+        token_slot,
         sender_hash,
         recipient_hash,
     );
@@ -1040,6 +1136,7 @@ pub fn build_send(
     let sender_hash_sig = sign_channel_tx_sender(keys, &tx_digest, level)?;
     let channel_tx = ChannelTx {
         recipient_pk_g: recipient_hash,
+        token_slot,
         enc_amount,
         nonce,
         channel_tx_zkp: ChannelProofEnvelope {
@@ -1079,30 +1176,42 @@ pub fn build_send(
     })
 }
 
-/// The canonical SOLO next state for one in-channel transfer: install the sender's fresh `after`
-/// ciphertext, homomorphically credit the recipient, reset/bump `pending_adds`, `state_version`+1,
+/// The canonical SOLO next state for one in-channel transfer of `token_slot`: install the
+/// sender's fresh `after` ciphertext, homomorphically credit the recipient, reset/bump
+/// `pending_adds` — all at EXACTLY position `(row, token_slot)` — `state_version`+1,
 /// `h2_tag = 0`. Used by `build_send` (the sender's proposal) AND by the slim-batch verifier
 /// (detail2 §M-2), which reconstructs this state itself instead of trusting a wire copy.
+///
+/// TM-2 "others unchanged" by construction: every other token position of every row is carried
+/// over bit-identical by the clones below, and re-CHECKED adversarially in
+/// `InChannelTransferUpdateWitness::verify`.
 pub fn solo_next_state(
     prev: &ChannelState,
     sender_slot: u16,
     recipient_slot: u16,
+    token_slot: u8,
     after_ct: &RegevCiphertext,
     enc_amount: &RegevCiphertext,
 ) -> WResult<ChannelState> {
-    // Recipient slot = public homomorphic sum.
+    let ts = token_slot as usize;
+    if ts >= MAX_CHANNEL_TOKENS || ts >= prev.balance_state.token_count as usize {
+        return bail(format!(
+            "token_slot {ts} out of range (token_count {}, TM-8)",
+            prev.balance_state.token_count
+        ));
+    }
     let recipient_after = add_ciphertexts(
-        &prev.balance_state.enc_balances[recipient_slot as usize],
+        &prev.balance_state.enc_balances[recipient_slot as usize][ts],
         enc_amount,
     )
     .map_err(we)?;
 
     let mut enc_balances = prev.balance_state.enc_balances.clone();
-    enc_balances[sender_slot as usize] = after_ct.clone();
-    enc_balances[recipient_slot as usize] = recipient_after;
-    let mut pending_adds = prev.balance_state.pending_adds;
-    pending_adds[sender_slot as usize] = 0;
-    pending_adds[recipient_slot as usize] += 1;
+    enc_balances[sender_slot as usize][ts] = after_ct.clone();
+    enc_balances[recipient_slot as usize][ts] = recipient_after;
+    let mut pending_adds = prev.balance_state.pending_adds.clone();
+    pending_adds[sender_slot as usize][ts] = 0;
+    pending_adds[recipient_slot as usize][ts] += 1;
 
     Ok(ChannelState {
         epoch: prev.epoch + 1,
@@ -1217,6 +1326,7 @@ fn verify_send_core(
         prev.digest,
         &channel_tx.enc_amount,
         channel_tx.nonce,
+        channel_tx.token_slot,
         channel_tx.sender_pk_g,
         channel_tx.recipient_pk_g,
     );
@@ -1274,14 +1384,14 @@ fn verify_send_core(
 /// extra (Lean: `batch_preserves_validity`). What must (and does) remain per tx:
 ///   1. anchor binding — `anchor_digest == prev.digest`;
 ///   2. slot validity — sender/recipient in the active region, sender ≠ recipient;
-///   3. MVP refresh gate — `prev.pending_adds[sender] == 0` (same rule as `build_send` and the
-///      solo witness; the E-1 `before`-binding already enforces it cryptographically);
+///   3. MVP refresh gate — `prev.pending_adds[sender] == 0` (same rule as `build_send` and the solo
+///      witness; the E-1 `before`-binding already enforces it cryptographically);
 ///   4. party binding — the tx's `sender_pk_g`/`recipient_pk_g` equal the REGISTERED keys at the
 ///      claimed slots (`record.member_pk_gs`);
 ///   5. sender authorization — the full A11 BabyBear hash-sig over the IMPA tx digest (whose
 ///      preimage binds `prev.digest`, so a stale tx cannot carry a valid signature);
-///   6. the mandatory E-1 STARK, statement rebuilt from the verifier's own data
-///      (`before = prev.enc_balances[sender]` — never wire-supplied);
+///   6. the mandatory E-1 STARK, statement rebuilt from the verifier's own data (`before =
+///      prev.enc_balances[sender]` — never wire-supplied);
 ///   7. (recipient co-signer only) the own-slot `enc_amount` decryption check.
 /// `regev_pks` is built ONCE per batch by the caller (`regev_pks_array` clones ~1024 keys — do
 /// not pay that per tx).
@@ -1309,8 +1419,26 @@ pub fn verify_slim_send_tx(
     if sender == recipient {
         return bail("sender and recipient must differ");
     }
-    // 3. MVP refresh gate (parity with build_send / the solo witness).
-    if prev.balance_state.pending_adds[sender] != 0 {
+    // 3. TM-8/TM-14 token-slot bounds + MVP refresh gate at the tx's SIGNED position. The
+    // token_slot used everywhere below is the one bound into the IMPA-v2 digest (step 5), so a
+    // tampered wire echo cannot survive the sender's A11 signature; the fold then debits at
+    // exactly this position (the TM-2 binding triple's "signed == mutated" leg holds by
+    // construction of `build_batch_next_state`, whose per-(row, token) writes leave every other
+    // position bit-identical — TM-14's all-10-positions obligation).
+    let token_slot = slim.channel_tx.token_slot as usize;
+    if token_slot >= MAX_CHANNEL_TOKENS {
+        return bail(format!(
+            "token_slot {token_slot} out of layout range (>= MAX_CHANNEL_TOKENS = \
+             {MAX_CHANNEL_TOKENS}, TM-8)"
+        ));
+    }
+    if token_slot >= prev.balance_state.token_count as usize {
+        return bail(format!(
+            "token_slot {token_slot} out of range (>= token_count {}, TM-8)",
+            prev.balance_state.token_count
+        ));
+    }
+    if prev.balance_state.pending_adds[sender][token_slot] != 0 {
         return bail("sender slot has pending homomorphic adds; refresh required before sending");
     }
     // 4. Party binding to the registered member keys.
@@ -1332,6 +1460,7 @@ pub fn verify_slim_send_tx(
         prev.digest,
         &slim.channel_tx.enc_amount,
         slim.channel_tx.nonce,
+        slim.channel_tx.token_slot,
         slim.channel_tx.sender_pk_g,
         slim.channel_tx.recipient_pk_g,
     );
@@ -1343,11 +1472,13 @@ pub fn verify_slim_send_tx(
         registered_sender_pk_g,
         sender_member.pk_b,
     )?;
-    // 6. Mandatory E-1 channelTxZKP, statement rebuilt from verifier-owned data.
+    // 6. Mandatory E-1 channelTxZKP, statement rebuilt from verifier-owned data. TM-2 leg 4:
+    // `before` is the verifier's OWN anchor ciphertext at the SIGNED token position — never
+    // wire-supplied, and never a different position's ciphertext.
     let statement = crate::regev::RegevStatement::ChannelTx {
         sender_pk: regev_pks[sender].clone(),
         recipient_pk: regev_pks[recipient].clone(),
-        before: prev.balance_state.enc_balances[sender].clone(),
+        before: prev.balance_state.enc_balances[sender][token_slot].clone(),
         enc_amount: slim.channel_tx.enc_amount.clone(),
         after: slim.after_ct.clone(),
     };
@@ -1388,58 +1519,74 @@ pub fn verify_slim_send_tx(
 /// independent (disjoint debit slots by R1 below) and may run in parallel; after each one the
 /// caller keeps only the `BatchTxApply` residue and may DROP the proofs (detail2 §M-4). This
 /// function then performs only the BATCH-level soundness checks and the canonical fold:
-///   R1  single-debit rule — at most one debit per sender slot per batch (two debits would spend
-///       the same `before` ciphertext witness twice);
-///   R3  debits first (install each sender's fresh `after` ct, whose correctness the tx's own E-1
-///       proof pinned against the anchor), then credits (public homomorphic adds of each
-///       `enc_amount`) — the order makes sender-as-recipient sound;
-///   D3  post-fold `pending_adds` budget (abstract2-1 §6 item 8).
+///   R1  single-debit rule, PER (sender slot, token slot) PAIR (TM-14, mirroring the Lean
+///       `sendersDistinctMT`): at most one debit per (slot, token) per batch — two debits at the
+///       same pair would spend the same `before` ciphertext witness twice, while the SAME member
+///       MAY debit two DIFFERENT tokens in one batch (each pinned by its own E-1 against its own
+///       position's anchor ciphertext);
+///   R3  debits first (install each sender's fresh `after` ct at ITS token position, whose
+///       correctness the tx's own E-1 proof pinned against the anchor), then credits (public
+///       homomorphic adds of each `enc_amount` at the tx's token position) — the order makes
+///       sender-as-recipient sound per token;
+///   D3  post-fold `pending_adds` budget, per (slot, token) (abstract2-1 §6 item 8, TM-13).
+/// The fold writes ONLY position `(row, tx.token_slot)` per debit/credit; every other token
+/// position of every row rides the row clones bit-identical — this is the constructive TM-14
+/// "all 10 positions" obligation (Lean: `batchMT_frame`), and for K = 1 the produced state is
+/// field-identical to the solo `proposed_next_state` at ANY token (same digest), so the sender's
+/// browser can still commit its pending witness on finalize.
 /// The result advances the digest chain by ONE link (`state_version`/`epoch` +1, `h2_tag = 0`,
 /// `settled_tx_chain` untouched) and carries NO signatures — the caller runs the N-of-N round.
-/// For K = 1 the produced state is field-identical to the solo `proposed_next_state`
-/// (same digest), so the sender's browser can still commit its pending witness on finalize.
-/// Machine-checked model: ChannelSafety21.lean §8 (`batch_preserves_validity` — `BatchTxApply`
-/// mirrors the modeled `BatchTx`).
-pub fn build_batch_next_state(
-    prev: &ChannelState,
-    txs: &[BatchTxApply],
-) -> WResult<ChannelState> {
+/// Machine-checked model: ChannelSafetyMT.lean (`batchMT_preserves_validity` — `BatchTxApply`
+/// mirrors the modeled `BatchTxMT` incl. `tokenSlot`).
+pub fn build_batch_next_state(prev: &ChannelState, txs: &[BatchTxApply]) -> WResult<ChannelState> {
     if txs.is_empty() {
         return bail("empty batch");
     }
-    let mut debited = [false; MAX_CHANNEL_MEMBERS];
+    let token_count = prev.balance_state.token_count as usize;
+    let mut debited = vec![[false; MAX_CHANNEL_TOKENS]; MAX_CHANNEL_MEMBERS];
     for t in txs {
         let s = t.sender_index as usize;
         check_slot(s, MAX_CHANNEL_MEMBERS)?;
         check_slot(t.recipient_index as usize, MAX_CHANNEL_MEMBERS)?;
-        if debited[s] {
+        // TM-8 fail-closed: the fold must never write an inactive (or out-of-layout) token
+        // position, even if an upstream verifier was skipped.
+        let ts = t.token_slot as usize;
+        if ts >= MAX_CHANNEL_TOKENS || ts >= token_count {
             return bail(format!(
-                "R1 single-debit rule: two debits from sender slot {s} in one batch"
+                "token_slot {ts} out of range (token_count {token_count}, TM-8)"
             ));
         }
-        debited[s] = true;
+        if debited[s][ts] {
+            return bail(format!(
+                "R1 single-debit rule: two debits from (sender slot {s}, token slot {ts}) in \
+                 one batch"
+            ));
+        }
+        debited[s][ts] = true;
     }
 
     let mut enc_balances = prev.balance_state.enc_balances.clone();
-    let mut pending_adds = prev.balance_state.pending_adds;
-    // Debits: each sender slot takes the fresh `after` ciphertext its tx's E-1 proof bound as
-    // `after` against the anchor `before`.
+    let mut pending_adds = prev.balance_state.pending_adds.clone();
+    // Debits: each (sender, token) position takes the fresh `after` ciphertext its tx's E-1
+    // proof bound as `after` against that position's anchor `before`.
     for t in txs {
         let s = t.sender_index as usize;
-        enc_balances[s] = t.after_ct.clone();
-        pending_adds[s] = 0;
+        let ts = t.token_slot as usize;
+        enc_balances[s][ts] = t.after_ct.clone();
+        pending_adds[s][ts] = 0;
     }
-    // Credits: fold the homomorphic adds over the debited map (sender-as-recipient lands on the
-    // fresh `after` ct, exactly the §3.2b canonical order).
+    // Credits: fold the homomorphic adds per (recipient, token) (sender-as-recipient lands on
+    // the fresh `after` ct at the same position, exactly the §3.2b canonical order per token).
     for t in txs {
         let r = t.recipient_index as usize;
-        enc_balances[r] = add_ciphertexts(&enc_balances[r], &t.enc_amount).map_err(we)?;
-        if pending_adds[r] >= MAX_HOMO_ADDS_BEFORE_REFRESH {
+        let ts = t.token_slot as usize;
+        enc_balances[r][ts] = add_ciphertexts(&enc_balances[r][ts], &t.enc_amount).map_err(we)?;
+        if pending_adds[r][ts] >= MAX_HOMO_ADDS_BEFORE_REFRESH {
             return bail(format!(
-                "D3 budget: slot {r} would exceed MAX_HOMO_ADDS_BEFORE_REFRESH post-fold; shrink the batch"
+                "D3 budget: (slot {r}, token {ts}) would exceed MAX_HOMO_ADDS_BEFORE_REFRESH post-fold; shrink the batch"
             ));
         }
-        pending_adds[r] += 1;
+        pending_adds[r][ts] += 1;
     }
 
     Ok(ChannelState {
@@ -1486,6 +1633,10 @@ fn fill_placeholder_sigs(record: &ChannelRecord, state: &mut ChannelState) {
 pub struct RefreshPayload {
     /// BALANCE-SLOT index (member OR delegate, `0..1024`) — u16, see `MemberInfo::slot`.
     pub member_index: u16,
+    /// LOCAL token position being refreshed (TM-13: refreshes are per (member, token)). The
+    /// co-signer's `BalanceRefreshUpdateWitness` proves the replacement + counter reset happen
+    /// at exactly this position and every other position of the row is frozen.
+    pub token_slot: u8,
     pub refresh_proof: ChannelProofEnvelope,
     pub proposed_next_state: ChannelState,
     pub members: Vec<MemberInfo>,
@@ -1502,24 +1653,34 @@ pub fn build_refresh(
     keys: &MemberKeys,
     snapshot: &ChannelSnapshot,
     slot: u16,
+    token_slot: u8,
     level: RegevSecurityLevel,
     rng: &mut impl Rng,
 ) -> WResult<(RefreshPayload, AmountWitness)> {
     let active = snapshot.record.member_count as usize + snapshot.record.delegate_count as usize;
     check_slot(slot as usize, active)?;
     let prev = &snapshot.state;
+    // TM-13/TM-8: refreshes are per (member, token); the selector must be an ACTIVE registry
+    // position.
+    let ts = token_slot as usize;
+    if ts >= MAX_CHANNEL_TOKENS || ts >= prev.balance_state.token_count as usize {
+        return bail(format!(
+            "refresh token_slot {ts} out of range (token_count {}, TM-8)",
+            prev.balance_state.token_count
+        ));
+    }
     let regev_pks = regev_pks_array(&snapshot.members);
     let pk = &regev_pks[slot as usize];
-    let old_ct = &prev.balance_state.enc_balances[slot as usize];
+    let old_ct = &prev.balance_state.enc_balances[slot as usize][ts];
 
     // Value-preserving re-encryption + proof (also returns the fresh ct's witness so we can send).
     let (new_ct, new_witness, proof) =
         prove_balance_refresh_witnessed(rng, level, pk, &keys.regev_sk, old_ct).map_err(we)?;
 
     let mut enc_balances = prev.balance_state.enc_balances.clone();
-    enc_balances[slot as usize] = new_ct;
-    let mut pending_adds = prev.balance_state.pending_adds;
-    pending_adds[slot as usize] = 0;
+    enc_balances[slot as usize][ts] = new_ct;
+    let mut pending_adds = prev.balance_state.pending_adds.clone();
+    pending_adds[slot as usize][ts] = 0;
     let next_state = ChannelState {
         epoch: prev.epoch + 1,
         balance_state: BalanceState {
@@ -1549,6 +1710,7 @@ pub fn build_refresh(
 
     let payload = RefreshPayload {
         member_index: slot,
+        token_slot,
         refresh_proof: ChannelProofEnvelope {
             role: TransitionProofRole::ChannelStateUpdate,
             backend: ProofBackend::Plonky3,
@@ -1587,6 +1749,7 @@ pub fn verify_refresh_transition(
         prev_state: prev.clone(),
         next_state: next_for_check,
         member_index: payload.member_index as usize,
+        token_slot: payload.token_slot as usize,
         refresh_proof: payload.refresh_proof.clone(),
     };
     let verifier = RealRegevProofVerifier { level };
@@ -1761,17 +1924,8 @@ fn structural_small_block_sigs(record: &ChannelRecord) -> Vec<MemberSignature> {
         .collect()
 }
 
-/// LEG A — build the inter-channel debit on the SOURCE channel.
-///
-/// `snapshot` is channel A; `sender_slot` is a channel-A ACTIVE participant (member OR delegate,
-/// located by its `pk_g`). `before_*` are the sender's CURRENT plaintext balance + `AmountWitness`
-/// (held locally). `new_nullifier_root` advances the shared native nullifier (detail2 §C-3: a send
-/// MUST change it). Produces the post-debit `a_send` (state_version+1, channel_fund -= amount,
-/// settled_tx_chain pushes the tx leaf, `h2_tag = tx_tree_root`; delegate_count + the untouched
-/// slots' pending_adds preserved via the `..prev.balance_state.clone()` spread), the REAL E-2, the
-/// 1-tx `TxV2Tree` (root + inclusion proof computed INTERNALLY), self-signs the building member's
-/// slot if it is a co-signing member, and CALLS `InterChannelSendUpdateWitness::verify` to
-/// self-check before returning.
+/// LEG A — build the inter-channel debit of the GENESIS token (`registry[0]`, the wire-compat
+/// single-token entry; the per-token builder is [`build_inter_channel_send_token`]).
 #[allow(clippy::too_many_arguments)]
 pub fn build_inter_channel_send(
     keys: &MemberKeys,
@@ -1781,6 +1935,58 @@ pub fn build_inter_channel_send(
     destination_recipient_slot: u16,
     destination_recipient_pk: RegevPk,
     destination_recipient_pk_g: Bytes32,
+    amount: u64,
+    before_amount: u64,
+    before_witness: &AmountWitness,
+    new_nullifier_root: Bytes32,
+    level: RegevSecurityLevel,
+    rng: &mut impl Rng,
+) -> WResult<BuiltInterChannelSend> {
+    let genesis_token_index = snapshot.state.balance_state.token_registry[0];
+    build_inter_channel_send_token(
+        keys,
+        snapshot,
+        sender_slot,
+        destination_channel_id,
+        destination_recipient_slot,
+        destination_recipient_pk,
+        destination_recipient_pk_g,
+        genesis_token_index,
+        amount,
+        before_amount,
+        before_witness,
+        new_nullifier_root,
+        level,
+        rng,
+    )
+}
+
+/// LEG A — build the inter-channel debit on the SOURCE channel, moving BASE token `token_index`
+/// (multitoken §N-4, TM-6 — the Phase 4 per-token build path).
+///
+/// `snapshot` is channel A; `sender_slot` is a channel-A ACTIVE participant (member OR delegate,
+/// located by its `pk_g`). `token_index` is the BASE-layer token index (never a local slot —
+/// source and destination registries map it to different local slots); it must resolve against
+/// A's OWN active registry (unregistered ⇒ refused fail-closed, and the verifier paths re-check
+/// on both sides). `before_*` are the sender's CURRENT plaintext balance + `AmountWitness` at
+/// the RESOLVED local position (held locally). `new_nullifier_root` advances the shared native
+/// nullifier (detail2 §C-3: a send MUST change it). Produces the post-debit `a_send`
+/// (state_version+1, `channel_fund.amounts[resolved slot]` -= amount, settled_tx_chain pushes
+/// the tx leaf, `h2_tag = tx_tree_root`; delegate_count + the untouched positions'
+/// enc_balances/pending_adds preserved via the `..prev.balance_state.clone()` spread), the REAL
+/// E-2 (whose IMU2 PVs bind `token_index`), the 1-tx `TxV2Tree` (root + inclusion proof
+/// computed INTERNALLY), self-signs the building member's slot if it is a co-signing member, and
+/// CALLS `InterChannelSendUpdateWitness::verify` to self-check before returning.
+#[allow(clippy::too_many_arguments)]
+pub fn build_inter_channel_send_token(
+    keys: &MemberKeys,
+    snapshot: &ChannelSnapshot,
+    sender_slot: u16,
+    destination_channel_id: ChannelId,
+    destination_recipient_slot: u16,
+    destination_recipient_pk: RegevPk,
+    destination_recipient_pk_g: Bytes32,
+    token_index: u32,
     amount: u64,
     before_amount: u64,
     before_witness: &AmountWitness,
@@ -1798,8 +2004,14 @@ pub fn build_inter_channel_send(
     if record.member_pk_gs[sender_slot as usize] != keys.pk_g() {
         return bail("sender_slot pk_g does not match the building member's key");
     }
-    if prev.balance_state.pending_adds[sender_slot as usize] != 0 {
-        return bail("sender slot has pending homomorphic adds; refresh required before sending");
+    // TM-6 (source-side registry resolution): the SIGNED base token_index must resolve against
+    // A's OWN active registry; the resolved LOCAL slot is the only position debited below.
+    let token_slot = resolve_local_token_slot(&prev.balance_state, token_index)?;
+    // D3/TM-13: the refresh gate is per (slot, token) — only the DEBITED position must be clean.
+    if prev.balance_state.pending_adds[sender_slot as usize][token_slot] != 0 {
+        return bail(
+            "sender (slot, token) position has pending homomorphic adds; refresh required before sending",
+        );
     }
     if before_amount < amount {
         return bail("insufficient balance");
@@ -1815,9 +2027,9 @@ pub fn build_inter_channel_send(
     let sender_pk_g = record.member_pk_gs[sender_slot as usize];
 
     // E-2 statement ciphertexts. `before` MUST be the exact ciphertext the verifier reads from
-    // `prev_state.enc_balances[sender_slot]` (so `before_witness` is the witness for THAT
-    // ciphertext).
-    let before_ct = prev.balance_state.enc_balances[sender_slot as usize].clone();
+    // `prev_state.enc_balances[sender_slot][resolved token_slot]` (so `before_witness` is the
+    // witness for THAT ciphertext).
+    let before_ct = prev.balance_state.enc_balances[sender_slot as usize][token_slot].clone();
     let (after_ct, after_w) =
         encrypt_amount(rng, &sender_pk, before_amount - amount).map_err(we)?;
     let (sender_delta_ct, sender_delta_w) = encrypt_amount(rng, &sender_pk, amount).map_err(we)?;
@@ -1836,6 +2048,7 @@ pub fn build_inter_channel_send(
         (&sender_delta_ct, &sender_delta_w),
         (&receiver_delta_ct, &receiver_delta_w),
         amount,
+        token_index,
     )
     .map_err(we)?;
 
@@ -1863,7 +2076,9 @@ pub fn build_inter_channel_send(
         };
     transfer_tree.push(Transfer {
         recipient: destination_recipient_pk_g,
-        token_index: 0,
+        // The base-layer transfer settles the SAME base token the channel-layer descriptor
+        // moves (identical to the legacy hardcoded 0 for ETH-genesis channels).
+        token_index,
         amount: u64_to_u256(amount),
         aux_data: burn_aux,
     });
@@ -1903,15 +2118,21 @@ pub fn build_inter_channel_send(
 
     // a_send = post-debit channel-A state. Its h1() = H1' bound into the small block's
     // state_commitment_root (detail2 §C-7) AND h2_tag = tx_tree_root. The `..prev.*.clone()`
-    // spreads preserve member_count, delegate_count, channel_id, and all untouched slots'
-    // enc_balances + pending_adds — only the sender slot's ciphertext changes.
+    // spreads preserve member_count, delegate_count, channel_id, and all untouched positions'
+    // enc_balances + pending_adds — only the sender's ciphertext AT THE RESOLVED token position
+    // changes, and only `amounts[token_slot]` is debited (TM-6 binding; the verifier freezes
+    // every other position via `ensure_funds_unchanged_except`).
     let mut enc_balances = prev.balance_state.enc_balances.clone();
-    enc_balances[sender_slot as usize] = after_ct.clone();
+    enc_balances[sender_slot as usize][token_slot] = after_ct.clone();
     let mut a_send = ChannelState {
         epoch: prev.epoch + 1,
         small_block_number: prev.small_block_number + 1,
         channel_fund: ChannelFund {
-            amount: prev.channel_fund.amount - u64_to_u256(amount),
+            amounts: {
+                let mut amounts = prev.channel_fund.amounts;
+                amounts[token_slot] -= u64_to_u256(amount);
+                amounts
+            },
             ..prev.channel_fund.clone()
         },
         balance_state: BalanceState {
@@ -1952,6 +2173,7 @@ pub fn build_inter_channel_send(
         sender_delta_ct: sender_delta_ct.clone(),
         source_channel_id: record.channel_id,
         destination_channel_id,
+        token_index,
         source_pk_g: sender_pk_g,
         seal: Bytes32::default(),
         tx_hash,
@@ -2077,6 +2299,41 @@ pub fn build_burn_send(
     level: RegevSecurityLevel,
     rng: &mut impl Rng,
 ) -> WResult<BuiltInterChannelSend> {
+    let genesis_token_index = snapshot.state.balance_state.token_registry[0];
+    build_burn_send_token(
+        keys,
+        snapshot,
+        sender_slot,
+        withdrawal_l1_address,
+        genesis_token_index,
+        amount,
+        before_amount,
+        before_witness,
+        new_nullifier_root,
+        level,
+        rng,
+    )
+}
+
+/// [`build_burn_send`] generalized to BASE token `token_index` (multitoken Phase 4): the burn
+/// debits the sender's balance + the channel fund at the LOCAL slot A's registry resolves for
+/// `token_index`, and the base `Transfer` (→ the burn `Withdrawal`) carries that SAME base
+/// index, so the L1 leg pays out via `withdrawERC20`/`withdrawNative` in the burned asset (the
+/// IMPW authDigest already binds `tokenIndex`).
+#[allow(clippy::too_many_arguments)]
+pub fn build_burn_send_token(
+    keys: &MemberKeys,
+    snapshot: &ChannelSnapshot,
+    sender_slot: u16,
+    withdrawal_l1_address: crate::ethereum_types::address::Address,
+    token_index: u32,
+    amount: u64,
+    before_amount: u64,
+    before_witness: &AmountWitness,
+    new_nullifier_root: Bytes32,
+    level: RegevSecurityLevel,
+    rng: &mut impl Rng,
+) -> WResult<BuiltInterChannelSend> {
     use crate::circuits::balance::common::recipient::calculate_recipient_from_address;
     // (ii): base Transfer recipient = the ADDRESS_TAG L1 form (what `build_inter_channel_send`
     // writes into the tx's transfer leaf → `single_withdrawal` extracts); phantom receiver key
@@ -2085,7 +2342,7 @@ pub fn build_burn_send(
     let burn_recipient = calculate_recipient_from_address(withdrawal_l1_address);
     let burn_channel = ChannelId::new(crate::constants::BURN_CHANNEL_ID as u64)
         .map_err(|e| WalletError(format!("BURN_CHANNEL_ID is not a valid ChannelId: {e:?}")))?;
-    build_inter_channel_send(
+    build_inter_channel_send_token(
         keys,
         snapshot,
         sender_slot,
@@ -2093,6 +2350,7 @@ pub fn build_burn_send(
         0, // destination_recipient_slot: descriptor-only; irrelevant for an L1 burn
         RegevPk::padding(), // (ii) phantom-receiver key (no secret)
         burn_recipient, // → base Transfer recipient = ADDRESS_TAG L1 (withdraw-only)
+        token_index,
         amount,
         before_amount,
         before_witness,
@@ -2237,6 +2495,10 @@ pub fn build_inter_channel_credit(
     }
     let amount = descriptor.amount;
     let inter_channel_tx = &descriptor.inter_channel_tx;
+    // TM-6 (destination-side registry resolution): the SIGNED base token_index must resolve
+    // against THIS channel's own registry; unregistered ⇒ refuse fail-closed before building
+    // anything. The witness self-checks below re-run the same resolution adversarially.
+    let token_slot = resolve_local_token_slot(&b_prev.balance_state, inter_channel_tx.token_index)?;
     let transport = ChannelProofEnvelope {
         role: TransitionProofRole::IntmaxTransport,
         backend: ProofBackend::Plonky2,
@@ -2264,7 +2526,13 @@ pub fn build_inter_channel_credit(
         epoch: b_prev.epoch + 1,
         small_block_number: b_prev.small_block_number + 1,
         channel_fund: ChannelFund {
-            amount: b_prev.channel_fund.amount + u64_to_u256(amount),
+            // TM-6: the fund grows at the REGISTRY-RESOLVED local position; the other 9
+            // positions ride the spread unchanged (P2 per-token conservation).
+            amounts: {
+                let mut amounts = b_prev.channel_fund.amounts;
+                amounts[token_slot] += u64_to_u256(amount);
+                amounts
+            },
             ..b_prev.channel_fund.clone()
         },
         balance_state: BalanceState {
@@ -2305,15 +2573,17 @@ pub fn build_inter_channel_credit(
 
     // ---- Bundle apply: recipient slot += delta; unallocated -= amount; chain pushes tx leaf. ----
     let receiver_delta = &inter_channel_tx.receiver_deltas[0];
+    // TM-6: the inbound credit lands at the REGISTRY-RESOLVED local position of the recipient
+    // row (the same slot the fund grew at); other positions ride the row clone unchanged.
     let recipient_after = add_ciphertexts(
-        &fund_import_state.balance_state.enc_balances[recipient_slot],
+        &fund_import_state.balance_state.enc_balances[recipient_slot][token_slot],
         &receiver_delta.amount,
     )
     .map_err(we)?;
     let mut bundle_enc = fund_import_state.balance_state.enc_balances.clone();
-    bundle_enc[recipient_slot] = recipient_after;
-    let mut bundle_pending = fund_import_state.balance_state.pending_adds;
-    bundle_pending[recipient_slot] += 1;
+    bundle_enc[recipient_slot][token_slot] = recipient_after;
+    let mut bundle_pending = fund_import_state.balance_state.pending_adds.clone();
+    bundle_pending[recipient_slot][token_slot] += 1;
     // The bundle apply chains the SAME tx leaf the sender chained into A (detail2 §C-6; the witness
     // independently recomputes it via `inter_channel_tx.tx_leaf_hash()` — multi-layer F3-A
     // defense).
@@ -2510,6 +2780,11 @@ pub fn verify_inter_channel_credit_transition(
         .iter()
         .position(|m| *m == descriptor.source_pk_g)
         .ok_or_else(|| WalletError("invariant 2: source_pk_g is not a channel-A member".into()))?;
+    // TM-6 (gate-level, destination side): the SIGNED base token_index must be registered in
+    // channel B's own registry — refuse fail-closed before re-verifying the E-2 (the
+    // fund-import/bundle witnesses re-run the same resolution on the proposed states).
+    let _b_token_slot =
+        resolve_local_token_slot(&b_prev.balance_state, inter_channel_tx.token_index)?;
     let statement = crate::regev::RegevStatement::ChannelUpdate {
         sender_pk: descriptor.source_pk.clone(),
         recipient_pk: descriptor.receiver_pk.clone(),
@@ -2518,6 +2793,9 @@ pub fn verify_inter_channel_credit_transition(
         sender_delta: descriptor.sender_delta_ct.clone(),
         receiver_delta: descriptor.receiver_delta.clone(),
         amount,
+        // TM-6: the E-2 re-verification binds the SIGNED token_index — a tampered descriptor
+        // token (with the real proof) diverges the "IMU2" transcript and is rejected.
+        token_index: inter_channel_tx.token_index,
     };
     let regev_verifier = RealRegevProofVerifier { level };
     use crate::circuits::channel::state_update_verifier::RegevProofVerifier as RegevProofVerifierTrait;
@@ -2588,6 +2866,11 @@ pub fn build_l1_deposit_import(
     let amount = deposit.amount.to_u32_vec();
     let amount_u64 = (amount[BYTES32_LEN - 2] as u64) << 32 | amount[BYTES32_LEN - 1] as u64;
     let deposit_nullifier = deposit.nullifier();
+    // TM-7 (general registry resolution, §N-5): the base deposit's token_index resolves against
+    // the SIGNED registry to the local slot whose fund grows AND whose leaf position is
+    // credited; an unregistered token_index is refused fail-closed (never silently credited to
+    // token 0). The witness self-check below re-runs the same resolution adversarially.
+    let token_slot = resolve_local_token_slot(&prev.balance_state, deposit.token_index)?;
 
     // ---- Step 1: Fund import ----
     let import_nullifier = advance_nullifier(prev.shared_native_nullifier_root, deposit_nullifier);
@@ -2604,7 +2887,13 @@ pub fn build_l1_deposit_import(
         epoch: prev.epoch + 1,
         small_block_number: prev.small_block_number + 1,
         channel_fund: ChannelFund {
-            amount: prev.channel_fund.amount + u64_to_u256(amount_u64),
+            // TM-7: the fund grows at the REGISTRY-RESOLVED local position; the other 9
+            // positions ride the spread unchanged (P2 per-token conservation).
+            amounts: {
+                let mut amounts = prev.channel_fund.amounts;
+                amounts[token_slot] += u64_to_u256(amount_u64);
+                amounts
+            },
             ..prev.channel_fund.clone()
         },
         balance_state: BalanceState {
@@ -2634,23 +2923,16 @@ pub fn build_l1_deposit_import(
         next_state: import_for_check,
         amount: amount_u64,
         deposit_nullifier,
+        // TM-7: the base deposit's token_index is no longer dropped — it rides into the IMLD-v2
+        // digest and the witness verify enforces its registry resolution.
+        token_index: deposit.token_index,
         depositor_slot: recipient_slot,
     };
     import_witness
         .verify()
         .map_err(|e| WalletError(format!("l1 deposit fund import self-check failed: {e:?}")))?;
 
-    // ---- Step 2: Bundle apply ----
-    let recipient_after = add_ciphertexts(
-        &fund_import_state.balance_state.enc_balances[recipient_slot],
-        recipient_delta,
-    )
-    .map_err(we)?;
-    let mut bundle_enc = fund_import_state.balance_state.enc_balances.clone();
-    bundle_enc[recipient_slot] = recipient_after;
-    let mut bundle_pending = fund_import_state.balance_state.pending_adds;
-    bundle_pending[recipient_slot] += 1;
-    let bundle_leaf = deposit_nullifier;
+    // ---- Step 2: Bundle apply (shared deterministic step — see `l1_deposit_bundle_state`) ----
     let mut bundle_accumulator = import_accumulator.clone();
     bundle_accumulator.push(deposit_nullifier);
     let bundle_accumulator_root = Bytes32::from(bundle_accumulator.get_root());
@@ -2660,7 +2942,60 @@ pub fn build_l1_deposit_import(
         bundle_accumulator_root,
     )
     .map_err(|e| WalletError(format!("l1 deposit bundle apply accumulator push: {e:?}")))?;
-    let mut bundle_apply_state = ChannelState {
+    let mut bundle_apply_state = l1_deposit_bundle_state(
+        &fund_import_state,
+        recipient_slot,
+        token_slot,
+        recipient_delta,
+        deposit_nullifier,
+        amount_u64,
+        bundle_accumulator_root,
+    )?;
+    sign_member_if_present(keys, record, &mut bundle_apply_state)?;
+
+    Ok(BuiltL1DepositImport {
+        fund_import_state,
+        bundle_apply_state,
+        settled_tx_accumulator: bundle_accumulator,
+    })
+}
+
+/// The CANONICAL deposit bundle-apply state (TM-7 leg b): starting from the verified
+/// post-import state, credit the depositor leaf at EXACTLY the registry-resolved
+/// `(recipient_slot, token_slot)` position (`+= recipient_delta`, `pending_adds += 1`),
+/// `unallocated -= amount`, chain pushes the deposit nullifier, `state_version`/`epoch` +1.
+/// Every other (row, token) position rides the clones bit-identical.
+///
+/// SECURITY (TM-7 leg b, Phase 2b review MAJOR 1): this is the SINGLE definition of the bundle
+/// step, used by BOTH `build_l1_deposit_import` (the proposer) and
+/// `verify_l1_deposit_import_transition` (the co-signer gate, which REBUILDS this state and
+/// requires digest equality with the proposal — the `verify_token_register_transition`
+/// pattern). A proposer-supplied bundle state crediting any other (row, token) position, a
+/// doctored delta/amount, or any other field divergence therefore fails the gate.
+/// `bundle_accumulator_root` is taken as an input: the accumulator-push faithfulness is the
+/// caller's Stage-3 persisted-tree obligation (`require_accumulator_push`), exactly as on every
+/// other settle advancement — it is NOT re-derived here.
+#[allow(clippy::too_many_arguments)]
+fn l1_deposit_bundle_state(
+    fund_import_state: &ChannelState,
+    recipient_slot: usize,
+    token_slot: usize,
+    recipient_delta: &RegevCiphertext,
+    deposit_nullifier: Bytes32,
+    amount_u64: u64,
+    bundle_accumulator_root: Bytes32,
+) -> WResult<ChannelState> {
+    let recipient_after = add_ciphertexts(
+        &fund_import_state.balance_state.enc_balances[recipient_slot][token_slot],
+        recipient_delta,
+    )
+    .map_err(we)?;
+    let mut bundle_enc = fund_import_state.balance_state.enc_balances.clone();
+    bundle_enc[recipient_slot][token_slot] = recipient_after;
+    let mut bundle_pending = fund_import_state.balance_state.pending_adds.clone();
+    bundle_pending[recipient_slot][token_slot] += 1;
+    let bundle_leaf = deposit_nullifier;
+    Ok(ChannelState {
         epoch: fund_import_state.epoch + 1,
         balance_state: BalanceState {
             enc_balances: bundle_enc,
@@ -2679,24 +3014,38 @@ pub fn build_l1_deposit_import(
         member_signatures: Vec::new(),
         ..fund_import_state.clone()
     }
-    .with_computed_digest();
-    sign_member_if_present(keys, record, &mut bundle_apply_state)?;
-
-    Ok(BuiltL1DepositImport {
-        fund_import_state,
-        bundle_apply_state,
-        settled_tx_accumulator: bundle_accumulator,
-    })
+    .with_computed_digest())
 }
 
-/// L1 deposit import co-signer gate: verifies the proposed L1 deposit import transition
-/// before a co-signer adds their signature. Fail-closed.
+/// L1 deposit import co-signer gate: verifies BOTH steps of the proposed L1 deposit import
+/// transition before a co-signer signs EITHER state. Fail-closed.
+///
+/// The two-step obligation (TM-7, Phase 2b review MAJOR 1):
+///   Step 1 (fund import) — verified by `L1DepositImportUpdateWitness::verify`: registry
+///     resolution of the deposit's base `token_index`, fund growth at exactly the resolved
+///     position (others frozen), all leaves bit-identical, chain push, signatures.
+///   Step 2 (bundle apply) — verified by REBUILD-EQUALITY: the gate reconstructs the CANONICAL
+///     bundle state from the verified post-import state via `l1_deposit_bundle_state` (the SAME
+///     code path the proposer's `build_l1_deposit_import` uses, crediting the depositor leaf at
+///     exactly the registry-resolved `(recipient_slot, token_slot)` position) and requires
+///     digest equality with the proposal — the `verify_token_register_transition` pattern. A
+///     proposer-supplied bundle state crediting any other (row, token) position, carrying a
+///     doctored delta/amount, or diverging in ANY other field is rejected. The leg-(b) leaf
+///     binding therefore does NOT rely on the proposer and the co-signers sharing a process.
+///
+/// `recipient_delta` is the co-signer's OWN derivation of the deposit's delta ciphertext (the
+/// CLI derives it from the shared deterministic seed) — never a wire-trusted copy; the digest
+/// equality binds the proposal to it. The bundle state's `settled_tx_accumulator_root` is taken
+/// from the PROPOSAL and its push-faithfulness remains the caller's Stage-3 persisted-tree
+/// obligation (`require_accumulator_push`), as on every settle advancement.
 pub fn verify_l1_deposit_import_transition(
     prev: &ChannelState,
     record: &ChannelRecord,
     deposit: &Deposit,
     fund_import_state: &ChannelState,
+    bundle_apply_state: &ChannelState,
     recipient_slot: usize,
+    recipient_delta: &RegevCiphertext,
 ) -> WResult<()> {
     let active = record.member_count as usize + record.delegate_count as usize;
     check_slot(recipient_slot, active)?;
@@ -2706,21 +3055,122 @@ pub fn verify_l1_deposit_import_transition(
     let amount = deposit.amount.to_u32_vec();
     let amount_u64 = (amount[BYTES32_LEN - 2] as u64) << 32 | amount[BYTES32_LEN - 1] as u64;
     let deposit_nullifier = deposit.nullifier();
+    // Step 1: the fund-import witness (registry resolution, per-token fund delta, frozen
+    // leaves, chain push, structural signatures).
     let witness = L1DepositImportUpdateWitness {
         channel_record: record.clone(),
         prev_state: prev.clone(),
         next_state: fund_import_state.clone(),
         amount: amount_u64,
         deposit_nullifier,
+        // TM-7: the co-signer gate hands the deposit's base token_index to the witness verify,
+        // which enforces its general registry resolution (unregistered ⇒ reject fail-closed).
+        token_index: deposit.token_index,
         depositor_slot: recipient_slot,
     };
     witness
         .verify()
-        .map_err(|e| WalletError(format!("l1 deposit co-signer gate: {e:?}")))?;
+        .map_err(|e| WalletError(format!("l1 deposit co-signer gate (fund import): {e:?}")))?;
+    // Step 2 (TM-7 leg b): rebuild-equality against the canonical bundle step. The resolution
+    // runs on the SIGNED prev registry (immutable across the import per
+    // verify_balance_state_common, so prev and post-import registries agree).
+    let token_slot = resolve_local_token_slot(&prev.balance_state, deposit.token_index)?;
+    let expected = l1_deposit_bundle_state(
+        fund_import_state,
+        recipient_slot,
+        token_slot,
+        recipient_delta,
+        deposit_nullifier,
+        amount_u64,
+        bundle_apply_state.balance_state.settled_tx_accumulator_root,
+    )?;
+    // `signing_digest()` covers every field except `member_signatures` (and is recomputed here,
+    // so a doctored stored `digest` cannot mask a divergence).
+    if bundle_apply_state.signing_digest() != expected.digest {
+        return bail(
+            "l1 deposit co-signer gate (bundle apply): proposed bundle state is not the \
+             canonical bundle step over the verified import state (TM-7 leg b — wrong credit \
+             position, doctored delta/amount, or field divergence) — refusing to sign",
+        );
+    }
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// TokenRegister (detail2 §N-1 — append-only cosigned token registration)
+// ---------------------------------------------------------------------------
+
+/// Build the proposed next state for a cosigned `TokenRegister(token_index)` transition
+/// (detail2 §N-1): the CANONICAL `token_register_next_state` (registry append + epoch/
+/// state_version bump, everything else frozen) with the building member's own state signature
+/// attached when it is a co-signing member. No ZKP is generated — a registration mutates no
+/// ciphertext (`ChannelTransitionKind::TokenRegister::required_state_backend()` is `None`); the
+/// gate is [`verify_token_register_state_transition`] + the N-of-N signatures.
+pub fn build_token_register(
+    keys: &MemberKeys,
+    snapshot: &ChannelSnapshot,
+    builder_slot: u16,
+    token_index: u32,
+) -> WResult<ChannelState> {
+    let prev = &snapshot.state;
+    let record = &snapshot.record;
+    let mut proposed =
+        crate::common::channel::token_register_next_state(prev, token_index).map_err(we)?;
+    // Self-check through the SAME gate every cosigner runs (structural sigs on a clone).
+    verify_token_register_state_transition(prev, record, &proposed, token_index)?;
+    if (builder_slot as usize) < record.member_count as usize
+        && record.member_pk_gs[builder_slot as usize] == keys.pk_g()
+    {
+        let sig = sign_state(keys, builder_slot as u8, &proposed)?;
+        add_signature(&mut proposed, sig);
+    }
+    Ok(proposed)
+}
+
+/// Cosigner gate for a proposed `TokenRegister` transition: runs
+/// [`TokenRegisterUpdateWitness::verify`] (append-exactness + full freeze + rebuild-equality,
+/// TM-1/TM-9) against the TRUSTED record and prev head. The witness's signature check is
+/// STRUCTURAL (placeholder-filled here, like the other pre-sign gates); the authoritative
+/// N-of-N check is `verify_all_signatures` once the full set is collected.
+pub fn verify_token_register_state_transition(
+    prev: &ChannelState,
+    trusted_record: &ChannelRecord,
+    proposed_next: &ChannelState,
+    token_index: u32,
+) -> WResult<()> {
+    let mut next_for_check = proposed_next.clone();
+    fill_placeholder_sigs(trusted_record, &mut next_for_check);
+    let witness = TokenRegisterUpdateWitness {
+        channel_record: trusted_record.clone(),
+        prev_state: prev.clone(),
+        next_state: next_for_check,
+        token_index,
+    };
+    witness
+        .verify()
+        .map_err(|e| WalletError(format!("token register transition invalid: {e:?}")))?;
     Ok(())
 }
 
 // --- inter-channel helpers ---
+
+/// TM-6/TM-7 (fail-closed registry resolution): the unique ACTIVE local token slot t with
+/// `token_registry[t] == token_index && t < token_count`. Unique because `validate()` enforces
+/// active-prefix injectivity (TM-1); an unregistered base token_index is refused — value for a
+/// token this channel has not cosigned into its registry must never move. Wallet-side twin of
+/// `state_update_verifier::resolve_token_slot` (the witnesses re-run the check adversarially).
+pub fn resolve_local_token_slot(balance_state: &BalanceState, token_index: u32) -> WResult<usize> {
+    let token_count = (balance_state.token_count as usize).min(MAX_CHANNEL_TOKENS);
+    balance_state.token_registry[..token_count]
+        .iter()
+        .position(|&index| index == token_index)
+        .ok_or_else(|| {
+            WalletError(format!(
+                "base token_index {token_index} is not registered in this channel's active \
+                 registry (token_count {token_count}) — refusing fail-closed (TM-6/TM-7)"
+            ))
+        })
+}
 
 /// Lossless `u64 → U256` (full 64-bit precision; the high u32 lands in limb 6, the low in limb 7).
 /// SECURITY: use THIS, never `U256::from(v.min(u32::MAX) as u32)`, for any value-conservation
@@ -2951,7 +3401,7 @@ impl CloseProver {
             final_balance_state_h1: state.balance_state.h1(),
             intmax_state_root: state.channel_fund.intmax_state_root,
             burn_tx_hash,
-            burn_amount: state.channel_fund.amount,
+            burn_amount: state.channel_fund.amounts[0],
             zkp: Vec::new(),
         };
         let close_intent =
@@ -3090,15 +3540,18 @@ impl WithdrawalClaimProver {
         }
     }
 
-    /// Build the withdrawal-claim full witness for `member_index` claiming their slot balance from
-    /// the CLOSED channel's `final_balance_state`. The amount is derived by decrypting the slot
-    /// ciphertext under `regev_sk` (the circuit binds amount == decryption, so the member cannot
-    /// over-claim). `close_intent` / `close_tx` are the channel's finalized close. Fail-closed.
+    /// Build the withdrawal-claim full witness for `member_index` claiming their
+    /// `(member_index, token_slot)` balance from the CLOSED channel's `final_balance_state`
+    /// (per-(slot, token) claims, detail2 §N-6). The amount is derived by decrypting that
+    /// position's ciphertext under `regev_sk` (the circuit binds amount == decryption, so the
+    /// member cannot over-claim). `close_intent` / `close_tx` are the channel's finalized close.
+    /// Fail-closed: `token_slot` must be an ACTIVE position (`< token_count`, TM-8).
     #[allow(clippy::too_many_arguments)]
     pub fn build_full_witness(
         &self,
         final_balance_state: &BalanceState,
         member_index: usize,
+        token_slot: u8,
         member_pk_g: Bytes32,
         user_pk: &RegevPk,
         regev_sk: &RegevSk,
@@ -3114,7 +3567,15 @@ impl WithdrawalClaimProver {
                 "withdrawal claim: member_index {member_index} >= active region {active}"
             ));
         }
-        let ct = final_balance_state.enc_balances[member_index].clone();
+        // TM-8 fail-closed: only ACTIVE token positions are claimable (the circuit enforces the
+        // same bound in-circuit against the H1-committed token_count).
+        if token_slot as usize >= final_balance_state.token_count as usize {
+            return bail(format!(
+                "withdrawal claim: token_slot {token_slot} >= token_count {}",
+                final_balance_state.token_count
+            ));
+        }
+        let ct = final_balance_state.enc_balances[member_index][token_slot as usize].clone();
         // Derive the amount by decryption; the circuit re-derives and binds it, so a member can
         // only claim exactly what their slot ciphertext decrypts to.
         let amount = decrypt_amount(regev_sk, &ct).map_err(|e| {
@@ -3136,11 +3597,13 @@ impl WithdrawalClaimProver {
         let claim = WithdrawalClaim {
             close_intent_digest,
             member_pk_g,
+            token_slot,
             l1_recipient: recipient,
             user_amount_ct: ct.clone(),
             withdrawal_nullifier: WithdrawalClaim::derive_nullifier(
                 close_intent_digest,
                 slot_regev_pk_digest,
+                token_slot,
             ),
             claim_proof,
         };
@@ -3165,7 +3628,14 @@ impl WithdrawalClaimProver {
             public_inputs,
             slot_tree_root: slot_tree.get_root(),
             slot_inclusion: slot_tree.prove(member_index as u64),
+            // Multi-token (v2): the FULL per-token leaf fields of the claimant slot + the
+            // signed token header scalars (the circuit one-hot-selects position `token_slot`).
+            slot_ct_digests: BalanceState::token_ct_digests(
+                &final_balance_state.enc_balances[member_index],
+            ),
             slot_pending_adds: final_balance_state.pending_adds[member_index],
+            token_count: final_balance_state.token_count,
+            token_registry: final_balance_state.token_registry,
             settled_tx_chain: final_balance_state.settled_tx_chain,
             settled_tx_accumulator_root: final_balance_state.settled_tx_accumulator_root,
             state_version: final_balance_state.state_version,
@@ -3452,9 +3922,14 @@ impl PostCloseClaimProver {
             incoming_tx_index,
             slot_tree_root: slot_tree.get_root(),
             slot_inclusion: slot_tree.prove(receiver_member_index as u64),
-            slot_enc_balance_digest: final_balance_state.enc_balances[receiver_member_index]
-                .digest(),
+            // Multi-token (v2): the FULL per-token leaf fields of the receiver slot + the
+            // signed token header scalars (v2 104-element leaf / 37-element header).
+            slot_enc_balance_digests: BalanceState::token_ct_digests(
+                &final_balance_state.enc_balances[receiver_member_index],
+            ),
             slot_pending_adds: final_balance_state.pending_adds[receiver_member_index],
+            token_count: final_balance_state.token_count,
+            token_registry: final_balance_state.token_registry,
             settled_tx_chain: final_balance_state.settled_tx_chain,
             state_version: final_balance_state.state_version,
             member_count: final_balance_state.member_count,
@@ -4401,7 +4876,8 @@ mod delegate_send_tests {
             let bal =
                 decrypt_balance(&keys[recipient_slot], &snapshot, recipient_slot as u16).unwrap();
             assert_eq!(
-                bal, expected,
+                bal,
+                expected,
                 "after deposit #{} (+{} wei) balance should be {} but was {}",
                 i + 1,
                 amount,
@@ -4472,6 +4948,7 @@ mod delegate_send_tests {
             snapshot.state.digest,
             &payload.channel_tx.enc_amount,
             payload.channel_tx.nonce,
+            payload.channel_tx.token_slot,
             payload.channel_tx.sender_pk_g,
             payload.channel_tx.recipient_pk_g,
         );
@@ -4554,6 +5031,7 @@ mod delegate_send_tests {
             snapshot.state.digest,
             &payload.channel_tx.enc_amount,
             payload.channel_tx.nonce,
+            payload.channel_tx.token_slot,
             payload.channel_tx.sender_pk_g,
             payload.channel_tx.recipient_pk_g,
         );
@@ -4621,6 +5099,7 @@ mod delegate_send_tests {
             snapshot.state.digest,
             &payload.channel_tx.enc_amount,
             payload.channel_tx.nonce,
+            payload.channel_tx.token_slot,
             payload.channel_tx.sender_pk_g,
             payload.channel_tx.recipient_pk_g,
         );
@@ -4687,7 +5166,7 @@ mod delegate_send_tests {
         // and the transition verifier rejects it because slot 2 is uninvolved yet changed.
         let (forged_lower, _w) = encrypt_amount(&mut rng, &keys[2].regev_pk, 1u64).unwrap();
         let mut tampered_state = payload.proposed_next_state.clone();
-        tampered_state.balance_state.enc_balances[2] = forged_lower;
+        tampered_state.balance_state.enc_balances[2][0] = forged_lower;
         let tampered_state = tampered_state.with_computed_digest();
         payload.proposed_next_state = tampered_state;
 
@@ -4895,7 +5374,7 @@ mod delegate_send_tests {
             channel_id,
             member_count: 3,
             delegate_count: 0,
-            enc_balances: BalanceState::pad_enc_balances(&[ct0.clone(), ct1, ct2]),
+            enc_balances: BalanceState::pad_enc_balances_token0(&[ct0.clone(), ct1, ct2]),
             regev_pk_digests: BalanceState::pad_regev_pk_digests(&[
                 Bytes32::from(pk0.poseidon_digest()),
                 Bytes32::from(pk1.poseidon_digest()),
@@ -4910,7 +5389,9 @@ mod delegate_send_tests {
             settled_tx_chain: Bytes32::default(),
             settled_tx_accumulator_root: Bytes32::default(),
             state_version: 6,
-            pending_adds: BalanceState::pad_pending_adds(&[0, 0, 0]),
+            pending_adds: BalanceState::pad_pending_adds_token0(&[0, 0, 0]),
+            token_registry: BalanceState::single_token_registry(0),
+            token_count: 1,
         };
         let state = ChannelState {
             channel_id,
@@ -4919,7 +5400,7 @@ mod delegate_send_tests {
             close_freeze_nonce: 0,
             channel_fund: ChannelFund {
                 channel_id,
-                amount: U256::from(93u32),
+                amounts: ChannelFund::single_token_amounts(U256::from(93u32)),
                 intmax_state_root: Bytes32::default(),
             },
             balance_state: final_balance_state.clone(),
@@ -4937,7 +5418,7 @@ mod delegate_send_tests {
             final_balance_state_h1: state.balance_state.h1(),
             intmax_state_root: state.channel_fund.intmax_state_root,
             burn_tx_hash: Bytes32::from_u32_slice(&[9, 0, 0, 0, 0, 0, 0, 0]).unwrap(),
-            burn_amount: state.channel_fund.amount,
+            burn_amount: state.channel_fund.amounts[0],
             zkp: vec![],
         };
         let close_intent = CloseIntent::new(5, &state, &close_tx, 123).unwrap();
@@ -4953,6 +5434,7 @@ mod delegate_send_tests {
                 .build_full_witness(
                     &final_balance_state,
                     3,
+                    0,
                     pk_g,
                     &pk0,
                     &sk0,
@@ -4965,10 +5447,31 @@ mod delegate_send_tests {
             "claiming a padding slot must be rejected"
         );
 
-        // Positive: slot 0 claims exactly its decrypted balance (77).
+        // Negative (TM-8): claiming an INACTIVE token position (token_slot >= token_count) is
+        // rejected before proving.
+        assert!(
+            prover
+                .build_full_witness(
+                    &final_balance_state,
+                    0,
+                    final_balance_state.token_count,
+                    pk_g,
+                    &pk0,
+                    &sk0,
+                    recipient,
+                    &close_intent,
+                    &close_tx,
+                    RegevSecurityLevel::Test,
+                )
+                .is_err(),
+            "claiming an inactive token position must be rejected (TM-8)"
+        );
+
+        // Positive: slot 0 claims exactly its decrypted token-0 balance (77).
         let witness = prover
             .build_full_witness(
                 &final_balance_state,
+                0,
                 0,
                 pk_g,
                 &pk0,
@@ -5025,20 +5528,22 @@ mod delegate_send_tests {
                 close_freeze_nonce: 0,
                 channel_fund: ChannelFund {
                     channel_id,
-                    amount: U256::from(77u32),
+                    amounts: ChannelFund::single_token_amounts(U256::from(77u32)),
                     intmax_state_root: Bytes32::default(),
                 },
                 balance_state: BalanceState {
                     channel_id,
                     member_count: 3,
                     delegate_count: 0,
-                    enc_balances: BalanceState::pad_enc_balances(encs),
+                    enc_balances: BalanceState::pad_enc_balances_token0(encs),
                     regev_pk_digests: BalanceState::pad_regev_pk_digests(&[]),
                     recipients: BalanceState::pad_recipients(&test_recipients(3)),
                     settled_tx_chain: Bytes32::default(),
                     settled_tx_accumulator_root: Bytes32::default(),
                     state_version: version,
-                    pending_adds: BalanceState::pad_pending_adds(&[0, 0, 0]),
+                    pending_adds: BalanceState::pad_pending_adds_token0(&[0, 0, 0]),
+                    token_registry: BalanceState::single_token_registry(0),
+                    token_count: 1,
                 },
                 h2_tag: Bytes32::default(),
                 shared_native_nullifier_root: Bytes32::default(),
@@ -5058,7 +5563,7 @@ mod delegate_send_tests {
             final_balance_state_h1: closing_state.balance_state.h1(),
             intmax_state_root: closing_state.channel_fund.intmax_state_root,
             burn_tx_hash: Bytes32::from_u32_slice(&[7, 0, 0, 0, 0, 0, 0, 0]).unwrap(),
-            burn_amount: closing_state.channel_fund.amount,
+            burn_amount: closing_state.channel_fund.amounts[0],
             zkp: vec![],
         };
         let close_intent = CloseIntent::new(5, &closing_state, &close_tx, 123).unwrap();
@@ -5161,6 +5666,7 @@ mod delegate_send_tests {
             sender_delta_ct: sender_delta_ct.clone(),
             source_channel_id,
             destination_channel_id: closed_channel_id,
+            token_index: 0,
             source_pk_g,
             seal: Bytes32::default(),
             tx_hash,
@@ -5182,7 +5688,7 @@ mod delegate_send_tests {
             channel_id: closed_channel_id,
             member_count: 2,
             delegate_count: 0,
-            enc_balances: BalanceState::pad_enc_balances(&[delta_ct.clone(), slot1_ct]),
+            enc_balances: BalanceState::pad_enc_balances_token0(&[delta_ct.clone(), slot1_ct]),
             regev_pk_digests: BalanceState::pad_regev_pk_digests(&[
                 Bytes32::from(receiver_pk.poseidon_digest()),
                 Bytes32::from(other_pk.poseidon_digest()),
@@ -5195,7 +5701,9 @@ mod delegate_send_tests {
             settled_tx_chain: Bytes32::default(),
             settled_tx_accumulator_root: accumulator_root,
             state_version: 9,
-            pending_adds: BalanceState::pad_pending_adds(&[0, 0]),
+            pending_adds: BalanceState::pad_pending_adds_token0(&[0, 0]),
+            token_registry: BalanceState::single_token_registry(0),
+            token_count: 1,
         };
 
         let recipient = Address::from_u32_slice(&[1, 2, 3, 4, 5]).unwrap();
@@ -5398,6 +5906,745 @@ mod delegate_send_tests {
         let r0 = Address::from_u32_slice(&[0x3333_0000u32; 5]).unwrap();
         assert_ne!(r0, Address::default());
     }
+
+    // ===============================================================================
+    // TM-14 (multitoken Phase 2b) — mixed-token slim/batch co-sign path.
+    // ===============================================================================
+
+    /// Base token_index registered at local slot 1 in the two-token batch fixtures.
+    const T1_INDEX: u32 = 55;
+
+    /// A 2-member + 1-delegate channel whose genesis ALSO registers base token 55 at local slot
+    /// 1 and funds token-1 balances for slots 0 and 1. Returns the token-1 `AmountWitness`es
+    /// alongside the token-0 ones.
+    #[allow(clippy::type_complexity)]
+    fn setup_two_token_channel(
+        rng: &mut StdRng,
+        channel_id: u32,
+        balances_t0: [u64; 3],
+        balances_t1: [u64; 2],
+    ) -> (
+        ChannelRecord,
+        Vec<MemberKeys>,
+        Vec<MemberInfo>,
+        ChannelState,
+        Vec<AmountWitness>,
+        Vec<AmountWitness>,
+    ) {
+        let (record, keys, members, mut genesis, w_t0) =
+            setup_delegate_channel(rng, channel_id, balances_t0);
+        genesis
+            .balance_state
+            .apply_token_register(T1_INDEX)
+            .expect("register token 55");
+        let mut w_t1 = Vec::new();
+        for (slot, &bal) in balances_t1.iter().enumerate() {
+            let (ct, w) = encrypt_amount(rng, &keys[slot].regev_pk, bal).unwrap();
+            genesis.balance_state.enc_balances[slot][1] = ct;
+            w_t1.push(w);
+        }
+        genesis
+            .balance_state
+            .validate()
+            .expect("2-token genesis valid");
+        genesis.member_signatures = Vec::new();
+        let mut genesis = genesis.with_computed_digest();
+        let g0 = sign_state(&keys[0], 0, &genesis).unwrap();
+        add_signature(&mut genesis, g0);
+        let g1 = sign_state(&keys[1], 1, &genesis).unwrap();
+        add_signature(&mut genesis, g1);
+        (record, keys, members, genesis, w_t0, w_t1)
+    }
+
+    /// Build a SLIM in-channel send of `amount` at `token_slot` through the REAL Phase 4
+    /// per-token build path (`build_send_token` → `to_slim`), so the TM-14 batch suite ALSO
+    /// exercises the production builder at non-genesis positions.
+    #[allow(clippy::too_many_arguments)]
+    fn build_slim_send_at(
+        rng: &mut StdRng,
+        keys: &MemberKeys,
+        snapshot: &ChannelSnapshot,
+        sender_slot: u16,
+        recipient_slot: u16,
+        token_slot: u8,
+        amount: u64,
+        before_amount: u64,
+        before_witness: &AmountWitness,
+        nonce_seed: u32,
+    ) -> (SlimSendPayload, AmountWitness) {
+        let nonce = Bytes32::from_u32_slice(&[nonce_seed, 0, 0, 0, 0, 0, 0, 1]).unwrap();
+        let BuiltSend {
+            payload,
+            new_balance_witness,
+            ..
+        } = build_send_token(
+            keys,
+            snapshot,
+            sender_slot,
+            recipient_slot,
+            token_slot,
+            amount,
+            before_amount,
+            before_witness,
+            nonce,
+            LEVEL,
+            rng,
+        )
+        .expect("build_send_token");
+        (payload.to_slim(), new_balance_witness)
+    }
+
+    /// TM-14 completeness: a mixed-token batch where the SAME member debits TWO different
+    /// tokens (token 0 -> slot 1, token 1 -> slot 1) verifies per tx and folds correctly per
+    /// (slot, token) — both recipients decrypt their running balances, all bystander positions
+    /// bit-identical.
+    #[test]
+    fn mixed_token_batch_same_member_two_debits() {
+        let mut rng = StdRng::seed_from_u64(0x2b70b1);
+        let (record, keys, members, genesis, w_t0, w_t1) =
+            setup_two_token_channel(&mut rng, 21, [50, 30, 20], [40, 25]);
+        let snapshot = ChannelSnapshot {
+            record: record.clone(),
+            state: genesis,
+            members,
+            settled_tx_accumulator: default_settled_tx_accumulator(),
+        };
+        let regev_pks = regev_pks_array(&snapshot.members);
+
+        // Member 0 debits token 0 (7 -> slot 1) AND token 1 (5 -> slot 1) in ONE batch.
+        let (slim_a, _wa) = build_slim_send_at(
+            &mut rng, &keys[0], &snapshot, 0, 1, 0, 7, 50, &w_t0[0], 0xA1,
+        );
+        let (slim_b, _wb) = build_slim_send_at(
+            &mut rng, &keys[0], &snapshot, 0, 1, 1, 5, 40, &w_t1[0], 0xB2,
+        );
+        for slim in [&slim_a, &slim_b] {
+            verify_slim_send_tx(
+                &snapshot.state,
+                &record,
+                &snapshot.members,
+                &regev_pks,
+                slim,
+                LEVEL,
+                None,
+                None,
+            )
+            .expect("mixed-token slim tx must verify");
+        }
+        let applies: Vec<BatchTxApply> = [&slim_a, &slim_b]
+            .iter()
+            .map(|s| BatchTxApply::from(*s))
+            .collect();
+        let batch = build_batch_next_state(&snapshot.state, &applies)
+            .expect("same member may debit two DIFFERENT tokens in one batch (R1 per pair)");
+
+        // Fold correctness per (slot, token): debits installed, credits homomorphically added.
+        let bs = &batch.balance_state;
+        assert_eq!(
+            decrypt_amount(&keys[0].regev_sk, &bs.enc_balances[0][0]).unwrap(),
+            43
+        );
+        assert_eq!(
+            decrypt_amount(&keys[0].regev_sk, &bs.enc_balances[0][1]).unwrap(),
+            35
+        );
+        assert_eq!(
+            decrypt_amount(&keys[1].regev_sk, &bs.enc_balances[1][0]).unwrap(),
+            37
+        );
+        assert_eq!(
+            decrypt_amount(&keys[1].regev_sk, &bs.enc_balances[1][1]).unwrap(),
+            30
+        );
+        // Bystanders frozen: the delegate row and every untouched (slot, token) position.
+        assert_eq!(
+            bs.enc_balances[2], snapshot.state.balance_state.enc_balances[2],
+            "uninvolved row must be bit-identical"
+        );
+        assert_eq!(bs.pending_adds[1][0], 1);
+        assert_eq!(bs.pending_adds[1][1], 1);
+        assert_eq!(
+            bs.pending_adds[2],
+            snapshot.state.balance_state.pending_adds[2]
+        );
+
+        // R1 per (sender, token) PAIR: the SAME pair twice is still rejected.
+        let err =
+            build_batch_next_state(&snapshot.state, &[applies[1].clone(), applies[1].clone()])
+                .unwrap_err();
+        assert!(err.0.contains("R1"), "expected R1 rejection, got: {err}");
+    }
+
+    /// TM-14 adversarial: (a) a doctored `token_slot` echo (signed token 1, wire claims 0)
+    /// fails the per-tx verification — the IMPA-v2 digest binds the slot, so the A11 hash-sig
+    /// no longer verifies; (b) a swapped `after_ct` (the only wire field that could smuggle a
+    /// bystander-position mutation into the fold) fails the E-1 statement rebuild.
+    #[test]
+    fn mixed_token_batch_rejects_doctored_slot_and_after_ct() {
+        let mut rng = StdRng::seed_from_u64(0x2b70b2);
+        let (record, keys, members, genesis, _w_t0, w_t1) =
+            setup_two_token_channel(&mut rng, 22, [50, 30, 20], [40, 25]);
+        let snapshot = ChannelSnapshot {
+            record: record.clone(),
+            state: genesis,
+            members,
+            settled_tx_accumulator: default_settled_tx_accumulator(),
+        };
+        let regev_pks = regev_pks_array(&snapshot.members);
+        let (slim, _w) = build_slim_send_at(
+            &mut rng, &keys[0], &snapshot, 0, 1, 1, 5, 40, &w_t1[0], 0xC3,
+        );
+
+        // (a) Doctored token_slot echo.
+        let mut doctored = slim.clone();
+        doctored.channel_tx.token_slot = 0;
+        assert!(
+            verify_slim_send_tx(
+                &snapshot.state,
+                &record,
+                &snapshot.members,
+                &regev_pks,
+                &doctored,
+                LEVEL,
+                None,
+                None,
+            )
+            .is_err(),
+            "a doctored token_slot echo must fail the signed-digest binding"
+        );
+
+        // (b) Swapped after_ct (bystander-mutation smuggling vector).
+        let mut doctored = slim.clone();
+        doctored.after_ct = snapshot.state.balance_state.enc_balances[0][0].clone();
+        assert!(
+            verify_slim_send_tx(
+                &snapshot.state,
+                &record,
+                &snapshot.members,
+                &regev_pks,
+                &doctored,
+                LEVEL,
+                None,
+                None,
+            )
+            .is_err(),
+            "a swapped after_ct must fail the E-1 statement rebuild"
+        );
+
+        // (c) TM-8 bounds: an inactive (and an out-of-layout) token_slot is refused by the slim
+        // verifier AND by the fold itself.
+        for bad in [2u8, MAX_CHANNEL_TOKENS as u8] {
+            let mut doctored = slim.clone();
+            doctored.channel_tx.token_slot = bad;
+            assert!(
+                verify_slim_send_tx(
+                    &snapshot.state,
+                    &record,
+                    &snapshot.members,
+                    &regev_pks,
+                    &doctored,
+                    LEVEL,
+                    None,
+                    None,
+                )
+                .is_err(),
+                "token_slot {bad} must be refused (TM-8)"
+            );
+            let mut apply = BatchTxApply::from(&slim);
+            apply.token_slot = bad;
+            assert!(
+                build_batch_next_state(&snapshot.state, &[apply]).is_err(),
+                "the fold must refuse token_slot {bad} fail-closed (TM-8)"
+            );
+        }
+    }
+
+    /// TM-7 (builder side): an L1 deposit of base token 55 credits the depositor leaf at the
+    /// REGISTRY-RESOLVED local position 1 (fund AND ciphertext), leaves token 0 untouched, and
+    /// an UNREGISTERED base token_index is refused fail-closed.
+    #[test]
+    fn l1_deposit_import_resolves_token_position_and_rejects_unregistered() {
+        let mut rng = StdRng::seed_from_u64(0x2b70b4);
+        let (record, keys, members, genesis, _w_t0, _w_t1) =
+            setup_two_token_channel(&mut rng, 24, [0, 0, 0], [0, 0]);
+        let snapshot = ChannelSnapshot {
+            record,
+            state: genesis,
+            members,
+            settled_tx_accumulator: default_settled_tx_accumulator(),
+        };
+        let amount = 12_345u64;
+        let deposit = |token_index: u32| Deposit {
+            deposit_index: Default::default(),
+            block_number: Default::default(),
+            depositor: Address::default(),
+            recipient: Bytes32::default(),
+            token_index,
+            amount: U256::from(amount),
+            aux_data: Bytes32::default(),
+        };
+        let (delta, _) = encrypt_amount(&mut rng, &keys[1].regev_pk, amount).unwrap();
+
+        // Unregistered base token: refuse before building anything.
+        let err = match build_l1_deposit_import(&keys[0], &snapshot, &deposit(77), 1, &delta, LEVEL)
+        {
+            Err(e) => e,
+            Ok(_) => panic!("an unregistered token_index must be refused (TM-7)"),
+        };
+        assert!(err.0.contains("not registered"), "wrong rejection: {err}");
+
+        // Registered token 55 -> local slot 1: fund at amounts[1], leaf credit at [1][1].
+        let built =
+            build_l1_deposit_import(&keys[0], &snapshot, &deposit(T1_INDEX), 1, &delta, LEVEL)
+                .expect("token-55 deposit import");
+        let prev = &snapshot.state;
+        let bundle = &built.bundle_apply_state;
+        assert_eq!(
+            bundle.channel_fund.amounts[1],
+            prev.channel_fund.amounts[1] + u64_to_u256(amount)
+        );
+        assert_eq!(bundle.channel_fund.amounts[0], prev.channel_fund.amounts[0]);
+        assert_eq!(
+            decrypt_amount(&keys[1].regev_sk, &bundle.balance_state.enc_balances[1][1]).unwrap(),
+            amount
+        );
+        assert_eq!(
+            bundle.balance_state.enc_balances[1][0], prev.balance_state.enc_balances[1][0],
+            "token 0 of the depositor row must be untouched"
+        );
+        assert_eq!(bundle.balance_state.pending_adds[1][1], 1);
+        assert_eq!(bundle.balance_state.pending_adds[1][0], 0);
+
+        // Co-signer gate accepts BOTH steps for the resolved non-genesis token (the fund-import
+        // witness takes a fully-signed state, so add the second member's signature first; the
+        // bundle rebuild-equality ignores signatures by construction).
+        let mut signed_import = built.fund_import_state.clone();
+        let s1 = sign_state(&keys[1], 1, &signed_import).unwrap();
+        add_signature(&mut signed_import, s1);
+        verify_l1_deposit_import_transition(
+            prev,
+            &snapshot.record,
+            &deposit(T1_INDEX),
+            &signed_import,
+            &built.bundle_apply_state,
+            1,
+            &delta,
+        )
+        .expect("co-signer gate must accept the resolved-token two-step import");
+    }
+
+    /// TM-7 leg (b) — Phase 2b review MAJOR 1: the co-signer gate REBUILDS the bundle-apply
+    /// step and rejects any proposed bundle state that diverges from the canonical credit at
+    /// the registry-resolved (row, token) position: (a) right slot / WRONG token position, (b)
+    /// a DIFFERENT slot, (c) a doctored amount (double credit). A distributed co-signer
+    /// therefore never signs a proposer-crafted cross-token/cross-slot credit.
+    #[test]
+    fn l1_deposit_gate_rejects_divergent_bundle_state() {
+        let mut rng = StdRng::seed_from_u64(0x2b70b5);
+        let (record, keys, members, genesis, _w_t0, _w_t1) =
+            setup_two_token_channel(&mut rng, 25, [0, 0, 0], [0, 0]);
+        let snapshot = ChannelSnapshot {
+            record,
+            state: genesis,
+            members,
+            settled_tx_accumulator: default_settled_tx_accumulator(),
+        };
+        let amount = 9_999u64;
+        let deposit = Deposit {
+            deposit_index: Default::default(),
+            block_number: Default::default(),
+            depositor: Address::default(),
+            recipient: Bytes32::default(),
+            token_index: T1_INDEX, // resolves to local token slot 1
+            amount: U256::from(amount),
+            aux_data: Bytes32::default(),
+        };
+        let (delta, _) = encrypt_amount(&mut rng, &keys[1].regev_pk, amount).unwrap();
+        let built = build_l1_deposit_import(&keys[0], &snapshot, &deposit, 1, &delta, LEVEL)
+            .expect("token-55 deposit import");
+        let mut signed_import = built.fund_import_state.clone();
+        let s1 = sign_state(&keys[1], 1, &signed_import).unwrap();
+        add_signature(&mut signed_import, s1);
+        let gate = |bundle: &ChannelState| {
+            verify_l1_deposit_import_transition(
+                &snapshot.state,
+                &snapshot.record,
+                &deposit,
+                &signed_import,
+                bundle,
+                1,
+                &delta,
+            )
+        };
+        // Sanity: the canonical bundle passes.
+        gate(&built.bundle_apply_state).expect("canonical bundle must pass the gate");
+
+        // (a) Right slot, WRONG token position: credit lands at [1][0] instead of [1][1].
+        let mut wrong_token = built.bundle_apply_state.clone();
+        wrong_token.balance_state.enc_balances[1] =
+            built.fund_import_state.balance_state.enc_balances[1].clone();
+        wrong_token.balance_state.enc_balances[1][0] = add_ciphertexts(
+            &built.fund_import_state.balance_state.enc_balances[1][0],
+            &delta,
+        )
+        .unwrap();
+        wrong_token.balance_state.pending_adds[1] = [0; MAX_CHANNEL_TOKENS];
+        wrong_token.balance_state.pending_adds[1][0] = 1;
+        let wrong_token = wrong_token.with_computed_digest();
+        assert!(
+            gate(&wrong_token).is_err(),
+            "a cross-token credit (right slot, wrong position) must be rejected (TM-7 leg b)"
+        );
+
+        // (b) A DIFFERENT slot: credit lands at [0][1] instead of [1][1].
+        let mut wrong_slot = built.bundle_apply_state.clone();
+        wrong_slot.balance_state.enc_balances[1] =
+            built.fund_import_state.balance_state.enc_balances[1].clone();
+        wrong_slot.balance_state.pending_adds[1] = [0; MAX_CHANNEL_TOKENS];
+        wrong_slot.balance_state.enc_balances[0][1] = add_ciphertexts(
+            &built.fund_import_state.balance_state.enc_balances[0][1],
+            &delta,
+        )
+        .unwrap();
+        wrong_slot.balance_state.pending_adds[0][1] = 1;
+        let wrong_slot = wrong_slot.with_computed_digest();
+        assert!(
+            gate(&wrong_slot).is_err(),
+            "a cross-slot credit must be rejected (TM-7 leg b)"
+        );
+
+        // (c) Doctored amount: the delta credited TWICE (double credit at the right position).
+        let mut double_credit = built.bundle_apply_state.clone();
+        double_credit.balance_state.enc_balances[1][1] = add_ciphertexts(
+            &built.bundle_apply_state.balance_state.enc_balances[1][1],
+            &delta,
+        )
+        .unwrap();
+        let double_credit = double_credit.with_computed_digest();
+        assert!(
+            gate(&double_credit).is_err(),
+            "a double credit (doctored amount) must be rejected (TM-7 leg b)"
+        );
+    }
+
+    /// TM-14 / §M-2 invariant, per token: for K = 1 the batch fold is FIELD-IDENTICAL (same
+    /// digest) to the canonical solo next state at the tx's token slot — for token 0 AND for
+    /// token 1.
+    #[test]
+    fn k1_batch_fold_identical_to_solo_per_token() {
+        let mut rng = StdRng::seed_from_u64(0x2b70b3);
+        let (record, keys, members, genesis, w_t0, w_t1) =
+            setup_two_token_channel(&mut rng, 23, [50, 30, 20], [40, 25]);
+        let snapshot = ChannelSnapshot {
+            record,
+            state: genesis,
+            members,
+            settled_tx_accumulator: default_settled_tx_accumulator(),
+        };
+        for (token_slot, amount, before, witness) in
+            [(0u8, 7u64, 50u64, &w_t0[0]), (1u8, 5u64, 40u64, &w_t1[0])]
+        {
+            let (slim, _w) = build_slim_send_at(
+                &mut rng,
+                &keys[0],
+                &snapshot,
+                0,
+                1,
+                token_slot,
+                amount,
+                before,
+                witness,
+                0xD0 + token_slot as u32,
+            );
+            let solo = solo_next_state(
+                &snapshot.state,
+                0,
+                1,
+                token_slot,
+                &slim.after_ct,
+                &slim.channel_tx.enc_amount,
+            )
+            .unwrap();
+            let batch =
+                build_batch_next_state(&snapshot.state, &[BatchTxApply::from(&slim)]).unwrap();
+            assert_eq!(
+                solo.digest, batch.digest,
+                "K=1 fold must be field-identical to solo at token {token_slot}"
+            );
+        }
+    }
+
+    // ===============================================================================
+    // Multitoken Phase 4 — build-path token parameters, TokenRegister dispatch, and the
+    // per-token close/claim path (gate lift).
+    // ===============================================================================
+
+    /// Re-sign a mutated head with the two co-signing members (fixture helper: fund edits
+    /// invalidate the genesis signatures).
+    fn resign_two_members(mut state: ChannelState, keys: &[MemberKeys]) -> ChannelState {
+        state.member_signatures = Vec::new();
+        let mut state = state.with_computed_digest();
+        let s0 = sign_state(&keys[0], 0, &state).unwrap();
+        add_signature(&mut state, s0);
+        let s1 = sign_state(&keys[1], 1, &state).unwrap();
+        add_signature(&mut state, s1);
+        state
+    }
+
+    /// §N-1 TokenRegister via the cosign gate, end-to-end: member 0 proposes through
+    /// `build_token_register` (canonical builder + self-check + own REAL signature), member 1
+    /// re-runs the gate and co-signs, and the fully-signed head passes the authoritative
+    /// `verify_all_signatures` N-of-N check with the new registry committed. Negatives: a
+    /// registration bundling a balance touch is refused by the gate; a duplicate base index is
+    /// refused by the builder (TM-1).
+    #[test]
+    fn token_register_cosign_gate_end_to_end() {
+        let mut rng = StdRng::seed_from_u64(0x70CE);
+        let (record, keys, members, genesis, _w) =
+            setup_delegate_channel(&mut rng, 31, [50, 30, 20]);
+        let snapshot = ChannelSnapshot {
+            record: record.clone(),
+            state: genesis,
+            members: members.clone(),
+            settled_tx_accumulator: default_settled_tx_accumulator(),
+        };
+
+        let mut proposed =
+            build_token_register(&keys[0], &snapshot, 0, 777).expect("build token register");
+        // Cosigner 1: gate FIRST, then sign (the CLAUDE.md check-and-sign discipline).
+        verify_token_register_state_transition(&snapshot.state, &record, &proposed, 777)
+            .expect("cosigner gate must accept the canonical registration");
+        let s1 = sign_state(&keys[1], 1, &proposed).unwrap();
+        add_signature(&mut proposed, s1);
+        verify_all_signatures(&record, &members, &proposed)
+            .expect("N-of-N over the registered head");
+        assert_eq!(proposed.balance_state.token_count, 2);
+        assert_eq!(proposed.balance_state.token_registry[1], 777);
+        assert_eq!(
+            proposed.balance_state.state_version,
+            snapshot.state.balance_state.state_version + 1
+        );
+
+        // Negative: a registration that ALSO touches a balance ciphertext is refused.
+        let mut doctored = proposed.clone();
+        doctored.balance_state.enc_balances[2][0] =
+            doctored.balance_state.enc_balances[0][0].clone();
+        let doctored = doctored.with_computed_digest();
+        assert!(
+            verify_token_register_state_transition(&snapshot.state, &record, &doctored, 777)
+                .is_err(),
+            "a balance touch under a TokenRegister must be refused (full freeze, TM-1)"
+        );
+        // Negative: re-registering the genesis base index is refused (registry injectivity).
+        assert!(
+            build_token_register(
+                &keys[0],
+                &snapshot,
+                0,
+                snapshot.state.balance_state.token_registry[0]
+            )
+            .is_err(),
+            "duplicate base token_index must be refused (TM-1)"
+        );
+    }
+
+    /// TM-8 (build path): the per-token send builder refuses an INACTIVE token position.
+    #[test]
+    fn build_send_token_rejects_inactive_position() {
+        let mut rng = StdRng::seed_from_u64(0x8ba9);
+        let (record, keys, members, genesis, witnesses) =
+            setup_delegate_channel(&mut rng, 32, [50, 30, 20]);
+        let snapshot = ChannelSnapshot {
+            record,
+            state: genesis,
+            members,
+            settled_tx_accumulator: default_settled_tx_accumulator(),
+        };
+        assert!(
+            build_send_token(
+                &keys[0],
+                &snapshot,
+                0,
+                1,
+                1, // token_count is 1 — position 1 is inactive
+                5,
+                50,
+                &witnesses[0],
+                Bytes32::default(),
+                LEVEL,
+                &mut rng,
+            )
+            .is_err(),
+            "sending an inactive token position must be refused (TM-8)"
+        );
+    }
+
+    /// §N-6 per-token close (the Phase 4 gate lift, landed WITH the per-token claim builders):
+    /// a channel holding funds in TWO tokens closes with the burn denominating ONLY the genesis
+    /// leg (`burn_amount == amounts[0]`); the intent snapshots the full vector; withdrawal
+    /// claims build for BOTH tokens against the SAME close intent with DISTINCT per-(slot,
+    /// token) nullifiers and the correct resolved base token_index PIs; the non-genesis claim
+    /// proof verifies end-to-end.
+    #[test]
+    fn two_token_close_intent_builds_per_token_claims() {
+        let mut rng = StdRng::seed_from_u64(0x2C105E);
+        let (record, keys, _members, genesis, _w0, _w1) =
+            setup_two_token_channel(&mut rng, 41, [50, 30, 20], [40, 25]);
+        // Fund the token-1 leg (the fixture's genesis fund covers token 0 only) and re-sign.
+        let mut state = genesis;
+        state.channel_fund.amounts[1] = u64_to_u256(65);
+        let state = resign_two_members(state, &keys);
+
+        let close_tx = CloseWithdrawal {
+            channel_id: state.channel_id,
+            final_channel_state_digest: state.digest,
+            final_balance_state_h1: state.balance_state.h1(),
+            intmax_state_root: state.channel_fund.intmax_state_root,
+            burn_tx_hash: Bytes32::from_u32_slice(&[9, 8, 7, 6, 0, 0, 0, 0]).unwrap(),
+            // The burn denominates the GENESIS token fund ONLY (§N-6); the token-1 fund
+            // settles via per-token claims, never the burn.
+            burn_amount: state.channel_fund.amounts[0],
+            zkp: vec![],
+        };
+        let close_intent =
+            CloseIntent::new(1, &state, &close_tx, 7).expect("two-token close intent must build");
+        assert_eq!(
+            close_intent.channel_fund_snapshot.amounts[1],
+            u64_to_u256(65),
+            "the intent must snapshot the full per-token fund vector (TFD/IMCI source)"
+        );
+
+        let prover = WithdrawalClaimProver::new();
+        let recipient = state.balance_state.recipients[0];
+        let pk_g = record.member_pk_gs[0];
+        let w_t0 = prover
+            .build_full_witness(
+                &state.balance_state,
+                0,
+                0,
+                pk_g,
+                &keys[0].regev_pk,
+                &keys[0].regev_sk,
+                recipient,
+                &close_intent,
+                &close_tx,
+                LEVEL,
+            )
+            .expect("token-0 claim witness");
+        let w_t1 = prover
+            .build_full_witness(
+                &state.balance_state,
+                0,
+                1,
+                pk_g,
+                &keys[0].regev_pk,
+                &keys[0].regev_sk,
+                recipient,
+                &close_intent,
+                &close_tx,
+                LEVEL,
+            )
+            .expect("token-1 claim witness");
+        assert_eq!(w_t0.public_inputs.amount, 50);
+        assert_eq!(w_t1.public_inputs.amount, 40);
+        assert_eq!(w_t0.public_inputs.token_slot, 0);
+        assert_eq!(w_t1.public_inputs.token_slot, 1);
+        assert_eq!(w_t0.public_inputs.token_index, 0);
+        assert_eq!(
+            w_t1.public_inputs.token_index, T1_INDEX,
+            "the claim PI must expose the H1-committed registry resolution (m8)"
+        );
+        assert_ne!(
+            w_t0.public_inputs.withdrawal_nullifier, w_t1.public_inputs.withdrawal_nullifier,
+            "per-(slot, token) claims must carry distinct nullifiers (TM-5)"
+        );
+        // Prove + verify the NON-genesis claim end-to-end (the new Phase 4 path).
+        let proof = prover.prove(&w_t1).expect("token-1 claim proof");
+        prover
+            .vd()
+            .verify(proof)
+            .expect("token-1 claim proof verifies");
+    }
+
+    /// TM-6 (Phase 4 build path): `build_inter_channel_send_token` debits the RESOLVED local
+    /// slot of a NON-genesis base token — fund moves at amounts[1] only, the descriptor and the
+    /// base Transfer carry base index 55 — and the built payload passes the co-signer gate. An
+    /// unregistered base index is refused fail-closed before anything is built.
+    #[test]
+    fn inter_channel_send_token_debits_resolved_slot() {
+        let mut rng = StdRng::seed_from_u64(0x1C2C);
+        let (record, keys, members, genesis, _w0, w1) =
+            setup_two_token_channel(&mut rng, 51, [50, 30, 20], [40, 25]);
+        let mut state = genesis;
+        state.channel_fund.amounts[1] = u64_to_u256(65);
+        let state = resign_two_members(state, &keys);
+        let snapshot = ChannelSnapshot {
+            record: record.clone(),
+            state,
+            members,
+            settled_tx_accumulator: default_settled_tx_accumulator(),
+        };
+        let dest_keys = MemberKeys::generate(&mut rng);
+        let dest_channel = crate::common::channel_id::ChannelId::new(99).unwrap();
+        let nullifier_root = Bytes32::from_u32_slice(&[1, 2, 3, 4, 5, 6, 7, 8]).unwrap();
+
+        // Unregistered base index: refused before any proof work.
+        assert!(
+            build_inter_channel_send_token(
+                &keys[0],
+                &snapshot,
+                0,
+                dest_channel,
+                0,
+                dest_keys.regev_pk.clone(),
+                dest_keys.pk_g(),
+                77,
+                5,
+                40,
+                &w1[0],
+                nullifier_root,
+                LEVEL,
+                &mut rng,
+            )
+            .is_err(),
+            "an unregistered base token_index must be refused (TM-6)"
+        );
+
+        let built = build_inter_channel_send_token(
+            &keys[0],
+            &snapshot,
+            0,
+            dest_channel,
+            0,
+            dest_keys.regev_pk.clone(),
+            dest_keys.pk_g(),
+            T1_INDEX,
+            5,
+            40,
+            &w1[0],
+            nullifier_root,
+            LEVEL,
+            &mut rng,
+        )
+        .expect("token-1 C2C debit builds");
+        let a_send = &built.debit_payload.proposed_next_state;
+        assert_eq!(
+            a_send.channel_fund.amounts[1] + u64_to_u256(5),
+            snapshot.state.channel_fund.amounts[1],
+            "the debit must land at the RESOLVED local slot (1)"
+        );
+        assert_eq!(
+            a_send.channel_fund.amounts[0], snapshot.state.channel_fund.amounts[0],
+            "the genesis-token fund must be untouched"
+        );
+        assert_eq!(
+            built.transfer_descriptor.inter_channel_tx.token_index,
+            T1_INDEX
+        );
+        // The co-signer gate accepts the built payload (Phase 2b general resolution).
+        verify_inter_channel_send_transition(&snapshot.state, &record, &built.debit_payload, LEVEL)
+            .expect("token-1 C2C debit passes the co-signer gate");
+    }
 }
 
 #[cfg(test)]
@@ -5554,13 +6801,15 @@ mod slot_capacity_tests {
             channel_id: ChannelId::new(7).unwrap(),
             member_count: MEMBER_COUNT as u8,
             delegate_count: DELEGATE_COUNT as u16,
-            enc_balances: BalanceState::pad_enc_balances(&cts),
+            enc_balances: BalanceState::pad_enc_balances_token0(&cts),
             regev_pk_digests: BalanceState::pad_regev_pk_digests(&digests),
             recipients: BalanceState::pad_recipients(&recipients),
             settled_tx_chain: Bytes32::default(),
             settled_tx_accumulator_root: empty_settled_tx_accumulator_root(),
             state_version: 1,
-            pending_adds: BalanceState::pad_pending_adds(&vec![0u32; active]),
+            pending_adds: BalanceState::pad_pending_adds_token0(&vec![0u32; active]),
+            token_registry: BalanceState::single_token_registry(0),
+            token_count: 1,
         };
         state
             .validate()

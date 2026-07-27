@@ -45,7 +45,10 @@ use crate::{
         },
     },
     common::channel::close_member_set_commitment,
-    constants::{MAX_COSIGNERS, MEMBER_DISTINCTNESS_TREE_HEIGHT},
+    constants::{
+        MAX_CHANNEL_TOKENS, MAX_COSIGNERS, MEMBER_DISTINCTNESS_TREE_HEIGHT,
+        TOKEN_FUNDS_DIGEST_DOMAIN,
+    },
     ethereum_types::{
         bytes32::{BYTES32_LEN, Bytes32, Bytes32Target},
         u32limb_trait::U32LimbTargetTrait,
@@ -107,11 +110,18 @@ pub struct ChannelClosePublicInputsTarget {
     /// MAX_COSIGNERS-bit unary decomposition) and used to gate per-slot signature verification and
     /// the member_set_commitment select. Single limb. Cosigners only — delegates never sign.
     pub member_count: Target,
-    /// Delegate account: number of DELEGATE participants. Single limb, appended at the END of the
-    /// close PI vector (right after `member_count`). Anchored in-circuit ONLY into the H1
-    /// recompute (immediately after `member_count` in the IMBS preimage); delegates do NOT
-    /// enter the member_set_commitment (they do not co-sign).
+    /// Delegate account: number of DELEGATE participants. Single limb, appended after
+    /// `member_count`. Anchored in-circuit ONLY into the H1 recompute (immediately after
+    /// `member_count` in the header preimage); delegates do NOT enter the member_set_commitment
+    /// (they do not co-sign).
     pub delegate_count: Target,
+    /// Multi-token (detail2 §N-6, TM-11): the fixed 92-word `keccak([IMTF, registry(10),
+    /// token_count, amounts(80)])` commitment to the per-token fund vector. Appended at the very
+    /// END of the close PI vector (limbs 95..103). Recomputed IN-CIRCUIT from the witnessed
+    /// registry/count/amounts — the SAME wires that feed the signed H1 header (registry + count,
+    /// TM-9) and the IMCH/IMCI digests (amounts), so the exposed digest cannot diverge from the
+    /// member-signed state.
+    pub token_funds_digest: Bytes32Target,
 }
 
 impl ChannelClosePublicInputsTarget {
@@ -147,6 +157,7 @@ impl ChannelClosePublicInputsTarget {
             member_set_commitment: Bytes32Target::new(builder, true),
             member_count: u32_limb(builder),
             delegate_count: u32_limb(builder),
+            token_funds_digest: Bytes32Target::new(builder, true),
         }
     }
 
@@ -171,6 +182,7 @@ impl ChannelClosePublicInputsTarget {
             self.member_set_commitment.to_vec(),
             vec![self.member_count],
             vec![self.delegate_count],
+            self.token_funds_digest.to_vec(),
         ]
         .concat();
         debug_assert_eq!(v.len(), CHANNEL_CLOSE_PUBLIC_INPUTS_LEN);
@@ -224,6 +236,8 @@ impl ChannelClosePublicInputsTarget {
         let member_count = values[cursor];
         cursor += 1;
         let delegate_count = values[cursor];
+        cursor += 1;
+        let token_funds_digest = Bytes32Target::from_slice(&values[cursor..cursor + BYTES32_LEN]);
         Self {
             channel_id,
             close_nonce,
@@ -244,6 +258,7 @@ impl ChannelClosePublicInputsTarget {
             member_set_commitment,
             member_count,
             delegate_count,
+            token_funds_digest,
         }
     }
 
@@ -298,6 +313,8 @@ impl ChannelClosePublicInputsTarget {
                 F::from_canonical_u16(value.delegate_count),
             )
             .unwrap();
+        self.token_funds_digest
+            .set_witness(witness, value.token_funds_digest);
     }
 }
 
@@ -384,6 +401,22 @@ where
     /// over IMCH attest it); the close statement never opens individual slots. Replaces the
     /// retired MAX_CHANNEL_MEMBERS-wide enc-digest/pk-digest/pending-adds target vectors.
     slot_tree_root: PoseidonHashOutTarget,
+    /// Multi-token (§N-1/§N-6): the signed `token_count` (single u32 limb). Witnessed; bound as
+    /// the unique count inside the signed H1 header (the same wire feeds the H1 recompute, the
+    /// TFD keccak and the token-activeness gating of the registry injectivity check).
+    token_count: Target,
+    /// Multi-token (§N-1): the FULL zero-padded `token_registry` (10 u32 limbs). Witnessed;
+    /// bound inside the signed H1 header and re-hashed into the TFD keccak.
+    token_registry: [Target; MAX_CHANNEL_TOKENS],
+    /// Multi-token (§N-6): the FULL per-token fund vector `channel_fund.amounts` (10 U256
+    /// targets). Witnessed; hashed into the IMCH + IMCI digests (widened v2 preimages) and the
+    /// TFD keccak; `amounts[0]` is connected to the `channel_fund_amount` PI (the genesis-token
+    /// burn denomination).
+    channel_fund_amounts: [U256Target; MAX_CHANNEL_TOKENS],
+    /// Per-token-slot activeness flags `token_active_bits[t] = (t < token_count)` (length
+    /// MAX_CHANNEL_TOKENS, unary decomposition of `token_count`). Gate the TM-1 registry
+    /// injectivity re-check. Set from token_count in `fill_witness`.
+    token_active_bits: Vec<plonky2::iop::target::BoolTarget>,
     /// The recursively verified final balance proof.
     final_balance_proof: ProofWithPublicInputsTarget<D>,
     /// The recursively verified level-`AGG_LEVELS` aggregated sign-zkp proof over the N member
@@ -445,6 +478,20 @@ where
         // The balance-slot tree root (H1 Poseidon-root form): 4 raw Goldilocks elements,
         // witnessed directly — attested by the cosigner signatures over H1 (see the field doc).
         let slot_tree_root = PoseidonHashOutTarget::new(&mut builder);
+        // Multi-token witnesses (§N): the signed token_count + full zero-padded registry (both
+        // ride in the H1 header, TM-9) and the full per-token fund vector (hashed into
+        // IMCH/IMCI/TFD, TM-11). Every limb is 32-bit range-checked — they feed keccak preimages
+        // and the keccak gadget does NOT range-check its inputs.
+        let u32_limb = |builder: &mut CircuitBuilder<F, D>| {
+            let t = builder.add_virtual_target();
+            builder.range_check(t, 32);
+            t
+        };
+        let token_count = u32_limb(&mut builder);
+        let token_registry: [Target; MAX_CHANNEL_TOKENS] =
+            std::array::from_fn(|_| u32_limb(&mut builder));
+        let channel_fund_amounts: [U256Target; MAX_CHANNEL_TOKENS] =
+            std::array::from_fn(|_| U256Target::new(&mut builder, true));
 
         // Per-slot COSIGNER activeness flags `slot_is_active[i] = (i < member_count)`. Built from a
         // unary decomposition: `member_count = Σ_i active_bits[i]` with each bit Boolean and the
@@ -478,6 +525,53 @@ where
         }
         builder.connect(count_sum, public_inputs.member_count);
 
+        // ── Multi-token: token-slot activeness flags + TM-1 registry injectivity re-check ──
+        //
+        // `token_active_bits[t] = (t < token_count)` via the SAME unary-decomposition discipline
+        // as the cosigner active_bits above: each bit Boolean, monotonically non-increasing,
+        // Σ bits == token_count. This forces the flags to be exactly the active-prefix indicator
+        // for token_count in 0..=MAX_CHANNEL_TOKENS (and enforces token_count <=
+        // MAX_CHANNEL_TOKENS in-circuit — a sum of 10 bits cannot exceed 10). TM-8: bit 0 is
+        // additionally asserted 1, so token_count >= 1 (a channel always has its genesis token).
+        let mut token_active_bits: Vec<plonky2::iop::target::BoolTarget> =
+            Vec::with_capacity(MAX_CHANNEL_TOKENS);
+        for _ in 0..MAX_CHANNEL_TOKENS {
+            token_active_bits.push(builder.add_virtual_bool_target_safe());
+        }
+        for t in 0..MAX_CHANNEL_TOKENS - 1 {
+            let one_minus_prev = builder.sub(one, token_active_bits[t].target);
+            let prod = builder.mul(token_active_bits[t + 1].target, one_minus_prev);
+            builder.connect(prod, zero_t);
+        }
+        let mut token_count_sum = builder.zero();
+        for bit in &token_active_bits {
+            token_count_sum = builder.add(token_count_sum, bit.target);
+        }
+        builder.connect(token_count_sum, token_count);
+        builder.assert_one(token_active_bits[0].target);
+
+        // SECURITY (TM-1, close-side registry injectivity re-check): the ACTIVE registry prefix
+        // `token_registry[0..token_count)` must be pairwise distinct on base token_index — a
+        // duplicate would let one L1 escrow back two local slots, and the close is the last
+        // in-circuit gate before per-token L1 settlement. For every pair i < j:
+        // `token_active_bits[j] == 1` (which implies i < j < token_count by monotonicity) forbids
+        // `registry[i] == registry[j]`. 45 gated comparisons at MAX_CHANNEL_TOKENS = 10.
+        // Inactive positions are unconstrained here — they are zero-padded by construction and
+        // bound (as zeros) inside the signed H1.
+        for i in 0..MAX_CHANNEL_TOKENS {
+            for j in (i + 1)..MAX_CHANNEL_TOKENS {
+                let is_eq = builder.is_equal(token_registry[i], token_registry[j]);
+                let dup_active = builder.and(is_eq, token_active_bits[j]);
+                builder.connect(dup_active.target, zero_t);
+            }
+        }
+
+        // The `channel_fund_amount` PI is the GENESIS-token fund (`amounts[0]`, the L2 close-burn
+        // denomination — `CloseIntent::new` binds burn_amount == amounts[0] natively). Connecting
+        // it here makes the PI and the witnessed vector one wire, so the IMCL burn segment, the
+        // IMCH/IMCI amount vectors and the TFD all agree on token 0.
+        channel_fund_amounts[0].connect(&mut builder, public_inputs.channel_fund_amount);
+
         let one = U64Target::constant(&mut builder, U64::from(1u64));
         let incremented_close_freeze_nonce = final_state_close_freeze_nonce.add(&mut builder, &one);
         incremented_close_freeze_nonce.connect(&mut builder, public_inputs.close_freeze_nonce);
@@ -505,6 +599,8 @@ where
             public_inputs.channel_id[0],
             public_inputs.member_count,
             public_inputs.delegate_count,
+            token_count,
+            &token_registry,
             slot_tree_root,
             &public_inputs.final_settled_tx_chain,
             &public_inputs.final_settled_tx_accumulator_root,
@@ -516,7 +612,13 @@ where
         //
         // The legacy balance-root slot carries the RECOMPUTED h1 (same wire as the
         // `final_balance_state_h1` PI after the connection above); the v2 tail appends
-        // h2_tag + split_u64(state_version) (detail2 §C-3).
+        // h2_tag + split_u64(state_version) (detail2 §C-3). Multi-token (TM-11): the fund
+        // segment is the FULL 80-limb `amounts[0..10]` vector (native `signing_digest` widened
+        // it in place), whose slot 0 is the `channel_fund_amount` PI wire.
+        let channel_fund_amounts_flat: Vec<Target> = channel_fund_amounts
+            .iter()
+            .flat_map(|amount| amount.to_vec())
+            .collect();
         let state_digest_inputs = [
             vec![channel_state_domain],
             public_inputs.channel_id.to_vec(),
@@ -524,7 +626,7 @@ where
             public_inputs.final_small_block_number.to_vec(),
             final_state_close_freeze_nonce.to_vec(),
             public_inputs.channel_id.to_vec(),
-            public_inputs.channel_fund_amount.to_vec(),
+            channel_fund_amounts_flat.clone(),
             public_inputs.channel_fund_intmax_state_root.to_vec(),
             recomputed_h1.to_vec(),
             final_state_shared_native_nullifier_root.to_vec(),
@@ -568,7 +670,9 @@ where
             public_inputs.final_channel_state_digest.to_vec(),
             public_inputs.final_balance_state_h1.to_vec(),
             public_inputs.channel_id.to_vec(),
-            public_inputs.channel_fund_amount.to_vec(),
+            // Multi-token (TM-11): the IMCI fund segment is the FULL 80-limb amounts vector,
+            // element-identical to native `CloseIntent::signing_digest`.
+            channel_fund_amounts_flat.clone(),
             public_inputs.channel_fund_intmax_state_root.to_vec(),
             public_inputs.burn_tx_hash.to_vec(),
             public_inputs.close_withdrawal_digest.to_vec(),
@@ -580,6 +684,26 @@ where
         let close_intent_digest =
             Bytes32Target::from_slice(&builder.keccak256::<C>(&close_intent_inputs));
         close_intent_digest.connect(&mut builder, public_inputs.close_intent_digest);
+
+        // ── (d') token_funds_digest recompute (detail2 §N-6, TM-11) ────────
+        //
+        // `keccak([IMTF, registry (10 canonical u32 limbs, zero-padded), token_count,
+        // amounts (10 x U256 = 80 limbs, zero-padded)])` — the FIXED 92-word preimage,
+        // byte-identical to native `common::channel::token_funds_digest`. The registry and
+        // token_count wires are the SAME targets hashed into the signed H1 header above (TM-9),
+        // and the amounts wires are the SAME targets hashed into IMCH/IMCI — so the exposed
+        // per-token commitment cannot diverge from the member-signed state on any coordinate.
+        let token_funds_domain = builder.constant(F::from_canonical_u32(TOKEN_FUNDS_DIGEST_DOMAIN));
+        let token_funds_inputs = [
+            vec![token_funds_domain],
+            token_registry.to_vec(),
+            vec![token_count],
+            channel_fund_amounts_flat.clone(),
+        ]
+        .concat();
+        let recomputed_token_funds_digest =
+            Bytes32Target::from_slice(&builder.keccak256::<C>(&token_funds_inputs));
+        recomputed_token_funds_digest.connect(&mut builder, public_inputs.token_funds_digest);
 
         // ── (e) Recursive final balance proof verification (detail2 §H-2) ──
         let final_balance_proof = add_proof_target_and_verify_cyclic(balance_vd, &mut builder);
@@ -733,6 +857,10 @@ where
             final_state_prev_digest,
             final_state_h2_tag,
             slot_tree_root,
+            token_count,
+            token_registry,
+            channel_fund_amounts,
+            token_active_bits,
             final_balance_proof,
             agg_proof,
             active_bits,
@@ -786,6 +914,27 @@ where
         // root inside the signed H1 header (recomputed natively here, exactly as `h1()` does).
         self.slot_tree_root
             .set_witness(&mut witness, state.balance_state.slot_tree_root());
+        // Multi-token witnesses: the signed token_count/registry (H1 header) + the full
+        // per-token fund vector (IMCH/IMCI/TFD) + the token-slot activeness flags.
+        witness
+            .set_target(
+                self.token_count,
+                F::from_canonical_u8(state.balance_state.token_count),
+            )
+            .unwrap();
+        for (t, &limb) in state.balance_state.token_registry.iter().enumerate() {
+            witness
+                .set_target(self.token_registry[t], F::from_canonical_u32(limb))
+                .unwrap();
+        }
+        for (t, amount) in state.channel_fund.amounts.iter().enumerate() {
+            self.channel_fund_amounts[t].set_witness(&mut witness, *amount);
+        }
+        for (t, bit) in self.token_active_bits.iter().enumerate() {
+            witness
+                .set_bool_target(*bit, t < state.balance_state.token_count as usize)
+                .unwrap();
+        }
 
         witness
             .set_proof_with_pis_target(
@@ -895,7 +1044,6 @@ pub mod test_fixture {
     use plonky2::{
         field::goldilocks_field::GoldilocksField, plonk::config::PoseidonGoldilocksConfig,
     };
-    use rand::{Rng as _, SeedableRng as _, rngs::StdRng};
 
     use plonky2::plonk::proof::ProofWithPublicInputs;
 
@@ -957,6 +1105,14 @@ pub mod test_fixture {
                 "[close fixture] close circuit build: {:?} (degree bits {})",
                 t1.elapsed(),
                 close_circuit.data.common.degree_bits()
+            );
+            // Phase 2a review MINOR (multitoken): pin the built circuit's degree so a silent
+            // blow-up from a future preimage/witness widening is caught here, not discovered in
+            // production proving times. Informational print above; THIS is the claim.
+            assert_eq!(
+                close_circuit.data.common.degree_bits(),
+                17,
+                "close circuit degree drifted from the reviewed 2^17 (widened v2 preimages)"
             );
             CloseCircuitFixture {
                 balance_processor,
@@ -1052,14 +1208,14 @@ pub mod test_fixture {
             close_freeze_nonce: 0,
             channel_fund: ChannelFund {
                 channel_id: id,
-                amount: U256::from(77u32),
+                amounts: ChannelFund::single_token_amounts(U256::from(77u32)),
                 intmax_state_root: Bytes32::from_u32_slice(&[1, 2, 3, 4, 0, 0, 0, 0]).unwrap(),
             },
             balance_state: BalanceState {
                 channel_id: id,
                 member_count: member_count as u8,
                 delegate_count: 0,
-                enc_balances: BalanceState::pad_enc_balances(&enc),
+                enc_balances: BalanceState::pad_enc_balances_token0(&enc),
                 regev_pk_digests: BalanceState::pad_regev_pk_digests(&[]),
                 // B-1b: nonzero per-active-slot exit addresses (validate() rejects zero actives).
                 recipients: BalanceState::pad_recipients(
@@ -1075,7 +1231,9 @@ pub mod test_fixture {
                 settled_tx_chain,
                 settled_tx_accumulator_root: Bytes32::default(),
                 state_version: 9,
-                pending_adds: BalanceState::pad_pending_adds(&vec![0u32; member_count]),
+                pending_adds: BalanceState::pad_pending_adds_token0(&vec![0u32; member_count]),
+                token_registry: BalanceState::single_token_registry(0),
+                token_count: 1,
             },
             h2_tag: Bytes32::default(),
             shared_native_nullifier_root: Bytes32::from_u32_slice(&[3, 0, 0, 0, 0, 0, 0, 0])
@@ -1099,7 +1257,7 @@ pub mod test_fixture {
             final_balance_state_h1: state.balance_state.h1(),
             intmax_state_root: state.channel_fund.intmax_state_root,
             burn_tx_hash: Bytes32::from_u32_slice(&[9, 8, 7, 6, 0, 0, 0, 0]).unwrap(),
-            burn_amount: state.channel_fund.amount,
+            burn_amount: state.channel_fund.amounts[0],
             zkp: vec![1, 2, 3],
         };
         let close_intent = CloseIntent::new(5, &state, &close_tx, 123).unwrap();
@@ -1136,6 +1294,10 @@ pub mod test_fixture {
 
 #[cfg(test)]
 mod tests {
+
+    // Multitoken Phase 2: the close/claim circuits now compute the v2 H1 header (37 elems,
+    // "IMB2") and slot leaf (104 elems, "IMS2"), so the tests below run against v2-signed
+    // states (the Phase 1 #[ignore] gates are lifted; assertions unchanged).
     use std::panic::{AssertUnwindSafe, catch_unwind};
 
     use plonky2::field::types::PrimeField64;
@@ -1181,14 +1343,14 @@ mod tests {
             close_freeze_nonce: 0,
             channel_fund: ChannelFund {
                 channel_id: id,
-                amount: U256::from(77u32),
+                amounts: ChannelFund::single_token_amounts(U256::from(77u32)),
                 intmax_state_root: Bytes32::from_u32_slice(&[1, 2, 3, 4, 0, 0, 0, 0]).unwrap(),
             },
             balance_state: BalanceState {
                 channel_id: id,
                 member_count: member_count as u8,
                 delegate_count: 0,
-                enc_balances: BalanceState::pad_enc_balances(&enc),
+                enc_balances: BalanceState::pad_enc_balances_token0(&enc),
                 regev_pk_digests: BalanceState::pad_regev_pk_digests(&[]),
                 // B-1b: nonzero per-active-slot exit addresses (validate() rejects zero actives).
                 recipients: BalanceState::pad_recipients(
@@ -1204,7 +1366,9 @@ mod tests {
                 settled_tx_chain,
                 settled_tx_accumulator_root: Bytes32::default(),
                 state_version: 9,
-                pending_adds: BalanceState::pad_pending_adds(&vec![0u32; member_count]),
+                pending_adds: BalanceState::pad_pending_adds_token0(&vec![0u32; member_count]),
+                token_registry: BalanceState::single_token_registry(0),
+                token_count: 1,
             },
             h2_tag: Bytes32::default(),
             shared_native_nullifier_root: Bytes32::from_u32_slice(&[3, 0, 0, 0, 0, 0, 0, 0])
@@ -1233,7 +1397,7 @@ mod tests {
             final_balance_state_h1: state.balance_state.h1(),
             intmax_state_root: state.channel_fund.intmax_state_root,
             burn_tx_hash: Bytes32::from_u32_slice(&[9, 8, 7, 6, 0, 0, 0, 0]).unwrap(),
-            burn_amount: state.channel_fund.amount,
+            burn_amount: state.channel_fund.amounts[0],
             zkp: vec![1, 2, 3],
         };
         let close_intent = CloseIntent::new(5, &state, &close_tx, 123).unwrap();
@@ -1435,7 +1599,7 @@ mod tests {
         assert_eq!(
             expected.len(),
             CHANNEL_CLOSE_PUBLIC_INPUTS_LEN,
-            "close PI is 87 limbs (incl. member_count + delegate_count)"
+            "close PI is 103 limbs (incl. member_count + delegate_count + token_funds_digest)"
         );
     }
 
@@ -1671,6 +1835,133 @@ mod tests {
         assert!(
             !matches!(result, Ok(Ok(()))),
             "a witnessed slot_tree_root diverging from the signed H1 must make the close unprovable"
+        );
+    }
+
+    /// A 3-member closable final state whose token header is MULTI-token: `token_count = 2`,
+    /// `registry = [0 (ETH), registry1]`. Balances stay at token position 0 and the non-genesis
+    /// fund amount is ZERO (per-token L1 settlement is Phase 3; `CloseIntent::new` fail-closes
+    /// nonzero non-genesis funds), so the state is closable while exercising the widened
+    /// header/TFD paths. NOTE: `registry1 == 0` deliberately produces a DUPLICATE registry —
+    /// `validate()` would reject it, but `h1()`/`signing_digest()` are pure functions, which is
+    /// exactly the adversarial state a colluding cosigner set could sign.
+    fn multitoken_final_state(registry1: u32, token_count: u8) -> ChannelState {
+        let mut state = final_state_n(TEST_ACTIVE_MEMBERS, Bytes32::default());
+        state.balance_state.token_registry[1] = registry1;
+        state.balance_state.token_count = token_count;
+        state.with_computed_digest()
+    }
+
+    /// Full close witness (REAL balance + agg-sig proofs) for an arbitrary final state whose
+    /// `settled_tx_chain` is genesis (= 0).
+    fn full_witness_for_state(state: ChannelState, seed: u64) -> ChannelCloseFullWitness<F, C, D> {
+        let fx = fixture();
+        let digest = state.digest;
+        let member_count = state.balance_state.member_count as usize;
+        let close = close_witness_for(state);
+        let mut rng = rand::thread_rng();
+        let final_balance_proof = fx
+            .balance_processor
+            .prove_initial(ChannelId::new(5).unwrap(), Salt::rand(&mut rng))
+            .expect("initial balance proof");
+        let (member_auth, agg_proof) = member_auth_for_digest_n(digest, seed, member_count);
+        ChannelCloseFullWitness {
+            close,
+            final_balance_proof,
+            member_auth,
+            agg_proof,
+        }
+    }
+
+    /// Multi-token happy path + TFD binding (detail2 §N-6, TM-11): a close over a 2-token state
+    /// (registry [ETH, 7]) proves, and the exposed `token_funds_digest` limbs (95..103) equal
+    /// the native fixed-width `token_funds_digest` over the SIGNED registry/count/amounts.
+    /// Then the negative direction: a tampered `token_funds_digest` PI is rejected by the
+    /// in-circuit keccak recompute (the digest is not a free PI).
+    #[cfg_attr(debug_assertions, ignore = "run with --release")]
+    #[test]
+    fn channel_close_circuit_multitoken_tfd_binding() {
+        use crate::common::channel::token_funds_digest;
+        let fx = fixture();
+        let witness = full_witness_for_state(multitoken_final_state(7, 2), 0xc105e);
+        let proof = fx.close_circuit.prove(&witness).unwrap();
+        fx.close_circuit.data.verify(proof.clone()).unwrap();
+
+        let bs = &witness.close.final_channel_state.balance_state;
+        let expected_tfd = token_funds_digest(
+            &bs.token_registry,
+            bs.token_count,
+            &witness.close.final_channel_state.channel_fund.amounts,
+        );
+        let actual: Vec<u64> = proof
+            .public_inputs
+            .iter()
+            .map(|f| f.to_canonical_u64())
+            .collect();
+        assert_eq!(
+            &actual[95..103],
+            &expected_tfd.to_u64_vec()[..],
+            "exposed token_funds_digest must equal the native fixed-width TFD over the signed \
+             registry/count/amounts"
+        );
+
+        // Negative — TFD mismatch: a token_funds_digest PI that does not equal the in-circuit
+        // keccak over the witnessed (registry, token_count, amounts) must be UNPROVABLE. An
+        // attacker who could detach this PI could settle per-token funds L1-side against a
+        // vector the members never signed.
+        let mut tampered_pis = witness.close.to_public_inputs().unwrap();
+        tampered_pis.member_set_commitment = member_set_commitment_for_auth(&witness.member_auth);
+        tampered_pis.token_funds_digest =
+            Bytes32::from_u32_slice(&[9, 9, 9, 9, 9, 9, 9, 9]).unwrap();
+        let pw = fx
+            .close_circuit
+            .fill_witness(&tampered_pis, &witness)
+            .unwrap();
+        let result = catch_unwind(AssertUnwindSafe(|| fx.close_circuit.data.prove(pw)));
+        assert!(
+            result.is_err() || result.unwrap().is_err(),
+            "a token_funds_digest PI not matching the witnessed (registry, count, amounts) must \
+             be rejected"
+        );
+    }
+
+    /// Negative — TM-1 registry injectivity re-check: a final state whose ACTIVE registry prefix
+    /// contains a DUPLICATE base token_index (here [0, 0] with token_count = 2) must be
+    /// UNPROVABLE, even though every digest/H1/signature is self-consistent (a fully colluding
+    /// cosigner set CAN sign such a state — `validate()` is not in its way; the close circuit is
+    /// the in-circuit gate). A duplicate would let one L1 escrow back two local slots
+    /// (`amounts[t1] + amounts[t2]` drawn against one base-token pool, TM-1).
+    #[cfg_attr(debug_assertions, ignore = "run with --release")]
+    #[test]
+    fn channel_close_circuit_rejects_duplicate_registry() {
+        let fx = fixture();
+        let witness = full_witness_for_state(multitoken_final_state(0, 2), 0xd0b1e);
+        assert_eq!(
+            witness
+                .close
+                .final_channel_state
+                .balance_state
+                .token_registry[0],
+            witness
+                .close
+                .final_channel_state
+                .balance_state
+                .token_registry[1],
+            "precondition: active registry positions 0 and 1 are duplicates"
+        );
+        let public_inputs = {
+            let mut pis = witness.close.to_public_inputs().unwrap();
+            pis.member_set_commitment = member_set_commitment_for_auth(&witness.member_auth);
+            pis
+        };
+        let pw = fx
+            .close_circuit
+            .fill_witness(&public_inputs, &witness)
+            .unwrap();
+        let result = catch_unwind(AssertUnwindSafe(|| fx.close_circuit.data.prove(pw)));
+        assert!(
+            result.is_err() || result.unwrap().is_err(),
+            "a duplicate ACTIVE registry entry must fail the in-circuit TM-1 injectivity re-check"
         );
     }
 }

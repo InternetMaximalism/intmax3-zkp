@@ -421,7 +421,7 @@ fn partial_withdrawal_e2e_anvil() {
 
     // Verify fund decreased.
     let post_fund = {
-        let a = next_state.channel_fund.amount;
+        let a = next_state.channel_fund.amounts[0];
         let limbs = a.to_u32_vec();
         limbs[7] as u64 | ((limbs[6] as u64) << 32)
     };

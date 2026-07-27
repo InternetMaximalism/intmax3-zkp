@@ -294,6 +294,7 @@ mod tests {
             sender_delta_ct: ciphertext(1),
             source_channel_id: ChannelId::new(5).unwrap(),
             destination_channel_id: ChannelId::new(7).unwrap(),
+            token_index: 0,
             source_pk_g: pubkey_hash(10),
             seal: Bytes32::default(),
             tx_hash: Bytes32::from_u32_slice(&[9, 0, 0, 0, 0, 0, 0, 0]).unwrap(),
@@ -335,7 +336,7 @@ mod tests {
             channel_id: ChannelId::new(7).unwrap(),
             member_count: 2,
             delegate_count: 0,
-            enc_balances: BalanceState::pad_enc_balances(&[ciphertext(1), ciphertext(2)]),
+            enc_balances: BalanceState::pad_enc_balances_token0(&[ciphertext(1), ciphertext(2)]),
             regev_pk_digests: BalanceState::pad_regev_pk_digests(&[
                 Bytes32::from(receiver_pk.poseidon_digest()),
                 Bytes32::from(channel_keygen(&mut rng).0.poseidon_digest()),
@@ -349,7 +350,9 @@ mod tests {
             settled_tx_accumulator_root: Bytes32::from_u32_slice(&[0, 0, 0, 0, 0, 0, 0, 42])
                 .unwrap(),
             state_version: 9,
-            pending_adds: BalanceState::pad_pending_adds(&[0, 0]),
+            pending_adds: BalanceState::pad_pending_adds_token0(&[0, 0]),
+            token_registry: BalanceState::single_token_registry(0),
+            token_count: 1,
         };
         let witness = PostCloseClaimWitness {
             close_intent_digest: claim.close_intent_digest,

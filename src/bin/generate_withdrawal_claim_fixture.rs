@@ -104,7 +104,7 @@ fn main() -> anyhow::Result<()> {
             };
             assert_eq!(got_u64, *want, "MLE publicInputs[{i}] != proved limb");
         }
-        eprintln!("[wclaim] MLE publicInputs == 48 raw limbs (sanity OK)");
+        eprintln!("[wclaim] MLE publicInputs == 50 raw limbs (sanity OK)");
     }
 
     let out_dir = Path::new("contracts/test/data");

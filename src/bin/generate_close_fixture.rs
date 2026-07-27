@@ -16,10 +16,11 @@
 //!     `registeredMemberSetCommitment()` equals the proof's in-circuit `member_set_commitment`.
 //!
 //! SECURITY: every exported value is pulled PROGRAMMATICALLY from the PROVED close-circuit public
-//! inputs (`ChannelClosePublicInputs::from_u64_slice` over the 87 raw Goldilocks limbs the close
-//! circuit registers — `WrapperCircuit` re-registers them verbatim). Nothing is hardcoded. The
-//! 87-limb public-input vector is what the on-chain `_bindCloseLimbsStrict` will re-bind
-//! limb-by-limb, and `MleVerifier.verify` then re-checks the proof against the close VK.
+//! inputs (`ChannelClosePublicInputs::from_u64_slice` over the CHANNEL_CLOSE_PUBLIC_INPUTS_LEN
+//! (103) raw Goldilocks limbs the close circuit registers — `WrapperCircuit` re-registers them
+//! verbatim). Nothing is hardcoded. The 103-limb public-input vector is what the on-chain
+//! `_bindCloseLimbsStrict` will re-bind limb-by-limb, and `MleVerifier.verify` then re-checks the
+//! proof against the close VK.
 //!
 //! Usage:  cargo run --release --features close-fixture-bin --bin generate_close_fixture
 //!
@@ -82,7 +83,9 @@ struct CloseIntentDescriptor {
     /// The channel's `registeredMemberSetCommitment()` MUST equal this.
     member_set_commitment: String,
     member_count: u8,
-    delegate_count: u8,
+    // u16: delegate slots span the full 1024 balance-slot space (Option B) — matches the
+    // `ChannelClosePublicInputs.delegate_count` width.
+    delegate_count: u16,
     /// The active members' `pk_g` hashes (slot order) that the close proof verified signatures
     /// for. The Solidity test registers the channel with EXACTLY these so its member-set
     /// commitment matches the proof's. Padding slots (>= member_count) are NOT emitted (zeroed
@@ -111,7 +114,7 @@ fn main() -> anyhow::Result<()> {
     );
 
     // -----------------------------------------------------------------------
-    // Step 2: reconstruct the 87-limb public inputs from the PROVED proof and decode them.
+    // Step 2: reconstruct the 103-limb public inputs from the PROVED proof and decode them.
     // The close circuit registers exactly `CHANNEL_CLOSE_PUBLIC_INPUTS_LEN` raw Goldilocks limbs
     // (see ChannelClosePublicInputsTarget::to_vec); these are what the on-chain verifier re-binds.
     // -----------------------------------------------------------------------
@@ -127,7 +130,7 @@ fn main() -> anyhow::Result<()> {
     // -----------------------------------------------------------------------
     // Step 3: wrap (WrapperCircuit) + MLE/WHIR commit-open + verify. Mirrors
     // generate_withdrawal_fixture.rs "Step 5" exactly. WrapperCircuit re-registers the inner PIs
-    // verbatim, so the wrapped proof's MLE `publicInputs` equal the 87 close limbs above.
+    // verbatim, so the wrapped proof's MLE `publicInputs` equal the 103 close limbs above.
     // -----------------------------------------------------------------------
     eprintln!("[close] Step 3: wrap + MLE (close proof)");
     let close_wrapper = WrapperCircuit::<F, C, C, D>::new(&fx.close_circuit.data.verifier_data());
@@ -140,7 +143,7 @@ fn main() -> anyhow::Result<()> {
     verify_mle_proof(&close_wrapper.data, &close_vk, &close_mle.proof)?;
     let close_mle_json = export_mle_json(&close_mle.proof, &close_wrapper.data.common);
 
-    // SANITY: the MLE proof's exported publicInputs must equal the 87 raw close limbs (this is the
+    // SANITY: the MLE proof's exported publicInputs must equal the 103 raw close limbs (this is the
     // exact vector the on-chain `_bindCloseLimbsStrict` rebinds). A mismatch here means the
     // on-chain bind would never match the proof, so fail loudly BEFORE the user spends gas.
     {
@@ -166,7 +169,7 @@ fn main() -> anyhow::Result<()> {
             };
             assert_eq!(got_u64, *want, "MLE publicInputs[{i}] != proved close limb");
         }
-        eprintln!("[close] MLE publicInputs == 87 raw close limbs (sanity OK)");
+        eprintln!("[close] MLE publicInputs == 103 raw close limbs (sanity OK)");
     }
 
     // -----------------------------------------------------------------------

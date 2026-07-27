@@ -357,8 +357,8 @@ fn delegate_join_preserves_send_and_is_importable() {
     let mut v2: ChannelState = v1.clone();
     v2.prev_digest = v2.digest;
     v2.balance_state.delegate_count = 2;
-    v2.balance_state.enc_balances[4] = c4;
-    v2.balance_state.pending_adds[4] = 0;
+    v2.balance_state.enc_balances[4][0] = c4;
+    v2.balance_state.pending_adds[4][0] = 0;
     // B-1b: a join MUST bind the new delegate's L1 exit address into its slot leaf (mirrors
     // channel_member::join_delegate; validate() fail-closes on a zero active recipient).
     v2.balance_state.recipients[4] = test_recipients_b1b(5)[4];
@@ -393,11 +393,11 @@ fn delegate_join_preserves_send_and_is_importable() {
     );
     for slot in 0..4usize {
         assert_eq!(
-            v2.balance_state.enc_balances[slot], v1.balance_state.enc_balances[slot],
+            v2.balance_state.enc_balances[slot][0], v1.balance_state.enc_balances[slot][0],
             "join must preserve pre-existing slot {slot}'s encrypted balance"
         );
         assert_eq!(
-            v2.balance_state.pending_adds[slot], v1.balance_state.pending_adds[slot],
+            v2.balance_state.pending_adds[slot][0], v1.balance_state.pending_adds[slot][0],
             "join must preserve pre-existing slot {slot}'s pending_adds"
         );
     }
@@ -499,13 +499,13 @@ fn delegate_refresh_after_receive_enables_send() {
         settled_tx_accumulator: default_settled_tx_accumulator(),
     };
     assert_eq!(
-        snap1.state.balance_state.pending_adds[4], 1,
+        snap1.state.balance_state.pending_adds[4][0], 1,
         "d4 received (receive-only)"
     );
     assert_eq!(decrypt_balance(&d4, &snap1, 4).unwrap(), 69);
 
     // d4 REFRESHES its slot (receive -> refresh). Members verify + co-sign.
-    let (rpayload, new_w4) = build_refresh(&d4, &snap1, 4, LEVEL, &mut rng).unwrap();
+    let (rpayload, new_w4) = build_refresh(&d4, &snap1, 4, 0, LEVEL, &mut rng).unwrap();
     verify_refresh_transition(&snap1.state, &snap1.record, &rpayload, LEVEL)
         .expect("members verify refresh");
     let mut v2 = rpayload.proposed_next_state.clone();
@@ -520,7 +520,7 @@ fn delegate_refresh_after_receive_enables_send() {
         settled_tx_accumulator: default_settled_tx_accumulator(),
     };
     assert_eq!(
-        snap2.state.balance_state.pending_adds[4], 0,
+        snap2.state.balance_state.pending_adds[4][0], 0,
         "refresh reset d4's counter"
     );
     assert_eq!(

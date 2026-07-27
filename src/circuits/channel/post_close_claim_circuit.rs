@@ -65,7 +65,7 @@ use crate::{
         post_close_claim_pis::{POST_CLOSE_CLAIM_PUBLIC_INPUTS_LEN, PostCloseClaimPublicInputs},
     },
     common::balance_state::{TX_LEAF_DOMAIN, settled_tx_chain_push_circuit},
-    constants::{BALANCE_SLOT_TREE_HEIGHT, MAX_CHANNEL_MEMBERS},
+    constants::{BALANCE_SLOT_TREE_HEIGHT, MAX_CHANNEL_MEMBERS, MAX_CHANNEL_TOKENS},
     ethereum_types::{
         address::AddressTarget,
         bytes32::{BYTES32_LEN, Bytes32, Bytes32Target},
@@ -207,11 +207,21 @@ pub struct PostCloseClaimFullWitness {
     /// Merkle inclusion proof of the receiver's slot leaf at `receiver_member_index` in the slot
     /// tree (`BalanceState::slot_tree().prove(receiver_member_index)`).
     pub slot_inclusion: IncrementalMerkleProof<PoseidonHashOut>,
-    /// The receiver slot's balance ciphertext digest `enc_balances[receiver_member_index]
-    /// .digest()` (leaf field; free witness, bound by the leaf hash + root + signed H1).
-    pub slot_enc_balance_digest: Bytes32,
-    /// The receiver slot's `pending_adds[receiver_member_index]` (leaf field).
-    pub slot_pending_adds: u32,
+    /// The receiver slot's FULL per-token ciphertext digest row (v2 leaf fields, §N-2:
+    /// `BalanceState::token_ct_digests(&enc_balances[receiver_member_index])`; free witnesses,
+    /// bound by the leaf hash + root + signed H1). NOTE: unlike the withdrawal claim, the
+    /// post-close claim decrypts the TX DELTA ciphertext (anchored via the accumulator), not a
+    /// slot position, so no token one-hot select is needed here — the slot leaf is opened only
+    /// for the receiver-pk / recipient binding. The tx's credited token follows the C2C
+    /// descriptor (base token_index end-to-end, §N-4 — Phase 2b/3; the native path pins the
+    /// genesis token).
+    pub slot_enc_balance_digests: [Bytes32; MAX_CHANNEL_TOKENS],
+    /// The receiver slot's FULL per-token `pending_adds[receiver_member_index]` (leaf fields).
+    pub slot_pending_adds: [u32; MAX_CHANNEL_TOKENS],
+    /// The closed channel's signed `token_count` (v2 H1 header scalar, TM-9).
+    pub token_count: u8,
+    /// The closed channel's signed `token_registry` (v2 H1 header limbs, TM-9).
+    pub token_registry: [u32; MAX_CHANNEL_TOKENS],
     pub settled_tx_chain: Bytes32,
     pub state_version: u64,
     pub member_count: u8,
@@ -244,9 +254,13 @@ where
     // Stage 3 inclusion proof handles.
     incoming_tx_inclusion: IncrementalMerkleProofTarget<Bytes32Target>,
     incoming_tx_index: Target,
-    // Stage 3 H1 recompute handles (Poseidon-root form).
+    // Stage 3 H1 recompute handles (Poseidon-root form, v2 multi-token header).
     member_count: Target,
     delegate_count: Target,
+    /// The closed channel's signed `token_count` + full zero-padded `token_registry` (v2 H1
+    /// header scalars, TM-9).
+    token_count: Target,
+    token_registry: [Target; MAX_CHANNEL_TOKENS],
     /// The H1-committed balance-slot tree root (4 raw Goldilocks elements).
     slot_tree_root: PoseidonHashOutTarget,
     settled_tx_chain: Bytes32Target,
@@ -254,9 +268,10 @@ where
     /// Receiver slot index (Merkle position; bounded `< MAX_CHANNEL_MEMBERS` by the inclusion
     /// verify's `split_le`).
     receiver_member_index: Target,
-    /// Receiver slot leaf fields (enc digest is a free witness; pk digest is the gadget output).
-    slot_enc_balance_digest: Bytes32Target,
-    slot_pending_adds: Target,
+    /// Receiver slot leaf fields (v2 104-element leaf: 10 enc digests + 10 counters are free
+    /// witnesses; the pk digest is the gadget output).
+    slot_enc_balance_digests: [Bytes32Target; MAX_CHANNEL_TOKENS],
+    slot_pending_adds: [Target; MAX_CHANNEL_TOKENS],
     /// Height-`BALANCE_SLOT_TREE_HEIGHT` inclusion proof of the receiver's slot leaf.
     slot_inclusion: IncrementalMerkleProofTarget<PoseidonHashOutTarget>,
     // Decryption Stage 2 handles.
@@ -353,21 +368,31 @@ where
         // slot-leaf bind. ──
         let member_count = u32_limb(&mut builder);
         let delegate_count = u32_limb(&mut builder);
+        // Multi-token header scalars (§N-1, TM-9): the signed token_count + full zero-padded
+        // registry, bound inside the recomputed v2 H1 header below.
+        let token_count = u32_limb(&mut builder);
+        let token_registry: [Target; MAX_CHANNEL_TOKENS] =
+            std::array::from_fn(|_| u32_limb(&mut builder));
         // The H1-committed balance-slot tree root (4 raw Goldilocks elements).
         let slot_tree_root = PoseidonHashOutTarget::new(&mut builder);
         let settled_tx_chain = Bytes32Target::new(&mut builder, true);
         let state_version = U64Target::new(&mut builder, true);
         // Receiver slot index + the witnessed leaf fields (the pk digest field is the gadget
-        // output below; the enc digest and pending_adds are free witnesses bound by the leaf).
+        // output below; the 10 enc digests and 10 pending_adds counters are free witnesses
+        // bound by the v2 leaf).
         let receiver_member_index = builder.add_virtual_target();
-        let slot_enc_balance_digest = Bytes32Target::new(&mut builder, true);
-        let slot_pending_adds = u32_limb(&mut builder);
+        let slot_enc_balance_digests: [Bytes32Target; MAX_CHANNEL_TOKENS] =
+            std::array::from_fn(|_| Bytes32Target::new(&mut builder, true));
+        let slot_pending_adds: [Target; MAX_CHANNEL_TOKENS] =
+            std::array::from_fn(|_| u32_limb(&mut builder));
 
         let recomputed_h1 = recompute_h1::<F, D>(
             &mut builder,
             public_inputs.receiver_channel_id[0],
             member_count,
             delegate_count,
+            token_count,
+            &token_registry,
             slot_tree_root,
             &settled_tx_chain,
             &public_inputs.final_settled_tx_accumulator_root,
@@ -415,8 +440,8 @@ where
         let slot_leaf = balance_slot_leaf_hash_circuit::<F, D>(
             &mut builder,
             &pk_digest,
-            &slot_enc_balance_digest,
-            slot_pending_adds,
+            &slot_enc_balance_digests,
+            &slot_pending_adds,
             &public_inputs.recipient,
         );
         let slot_inclusion = IncrementalMerkleProofTarget::<PoseidonHashOutTarget>::new(
@@ -477,11 +502,13 @@ where
             incoming_tx_index,
             member_count,
             delegate_count,
+            token_count,
+            token_registry,
             slot_tree_root,
             settled_tx_chain,
             state_version,
             receiver_member_index,
-            slot_enc_balance_digest,
+            slot_enc_balance_digests,
             slot_pending_adds,
             slot_inclusion,
             regev_a,
@@ -544,8 +571,20 @@ where
                 F::from_canonical_u16(witness_value.delegate_count),
             )
             .unwrap();
+        // Multi-token (v2): the signed token_count/registry (H1 header scalars).
+        witness
+            .set_target(
+                self.token_count,
+                F::from_canonical_u8(witness_value.token_count),
+            )
+            .unwrap();
+        for (t, &limb) in witness_value.token_registry.iter().enumerate() {
+            witness
+                .set_target(self.token_registry[t], F::from_canonical_u32(limb))
+                .unwrap();
+        }
         // H1 Poseidon-root form: the slot tree root + the receiver slot's inclusion proof and
-        // witnessed leaf fields (the pk-digest leaf field is derived in-circuit).
+        // witnessed v2 leaf fields (the pk-digest leaf field is derived in-circuit).
         self.slot_tree_root
             .set_witness(&mut witness, witness_value.slot_tree_root);
         self.slot_inclusion
@@ -556,14 +595,14 @@ where
                 F::from_canonical_usize(witness_value.receiver_member_index),
             )
             .unwrap();
-        self.slot_enc_balance_digest
-            .set_witness(&mut witness, witness_value.slot_enc_balance_digest);
-        witness
-            .set_target(
-                self.slot_pending_adds,
-                F::from_canonical_u32(witness_value.slot_pending_adds),
-            )
-            .unwrap();
+        for (t, digest) in witness_value.slot_enc_balance_digests.iter().enumerate() {
+            self.slot_enc_balance_digests[t].set_witness(&mut witness, *digest);
+        }
+        for (t, &adds) in witness_value.slot_pending_adds.iter().enumerate() {
+            witness
+                .set_target(self.slot_pending_adds[t], F::from_canonical_u32(adds))
+                .unwrap();
+        }
         self.settled_tx_chain
             .set_witness(&mut witness, witness_value.settled_tx_chain);
         self.state_version
@@ -787,6 +826,7 @@ pub mod test_fixture {
             sender_delta_ct: sender_delta_ct.clone(),
             source_channel_id,
             destination_channel_id: closed_channel_id,
+            token_index: 0,
             source_pk_g,
             seal: Bytes32::default(),
             tx_hash,
@@ -832,7 +872,7 @@ pub mod test_fixture {
             channel_id: closed_channel_id,
             member_count: 2,
             delegate_count: 0,
-            enc_balances: BalanceState::pad_enc_balances(&[delta_ct.clone(), ciphertext(2)]),
+            enc_balances: BalanceState::pad_enc_balances_token0(&[delta_ct.clone(), ciphertext(2)]),
             regev_pk_digests: BalanceState::pad_regev_pk_digests(&[
                 Bytes32::from(receiver_pk.poseidon_digest()),
                 Bytes32::from(other_pk.poseidon_digest()),
@@ -845,7 +885,9 @@ pub mod test_fixture {
             settled_tx_chain: Bytes32::default(),
             settled_tx_accumulator_root: accumulator_root,
             state_version: 9,
-            pending_adds: BalanceState::pad_pending_adds(&[0, 0]),
+            pending_adds: BalanceState::pad_pending_adds_token0(&[0, 0]),
+            token_registry: BalanceState::single_token_registry(0),
+            token_count: 1,
         };
 
         let native = PostCloseClaimWitness {
@@ -876,9 +918,14 @@ pub mod test_fixture {
             incoming_tx_index,
             slot_tree_root: slot_tree.get_root(),
             slot_inclusion: slot_tree.prove(receiver_member_index as u64),
-            slot_enc_balance_digest: final_balance_state.enc_balances[receiver_member_index]
-                .digest(),
+            // Multi-token (v2): the FULL per-token leaf fields of the receiver slot + the
+            // signed token header scalars.
+            slot_enc_balance_digests: BalanceState::token_ct_digests(
+                &final_balance_state.enc_balances[receiver_member_index],
+            ),
             slot_pending_adds: final_balance_state.pending_adds[receiver_member_index],
+            token_count: final_balance_state.token_count,
+            token_registry: final_balance_state.token_registry,
             settled_tx_chain: final_balance_state.settled_tx_chain,
             state_version: final_balance_state.state_version,
             member_count: final_balance_state.member_count,
@@ -895,6 +942,10 @@ pub mod test_fixture {
 
 #[cfg(test)]
 mod tests {
+
+    // Multitoken Phase 2: the close/claim circuits now compute the v2 H1 header (37 elems,
+    // "IMB2") and slot leaf (104 elems, "IMS2"), so the tests below run against v2-signed
+    // states (the Phase 1 #[ignore] gates are lifted; assertions unchanged).
     use std::panic::{AssertUnwindSafe, catch_unwind};
 
     use plonky2::field::types::PrimeField64;

@@ -7,7 +7,11 @@ use thiserror::Error;
 pub use crate::common::channel_id::ChannelId;
 use crate::{
     common::balance_state::{BalanceState, tx_leaf_hash},
-    constants::{MAX_CHANNEL_MEMBERS, MAX_COSIGNERS},
+    constants::{
+        INTER_CHANNEL_TX_DOMAIN_V2, L1_DEPOSIT_IMPORT_DOMAIN_V2, MAX_CHANNEL_MEMBERS,
+        MAX_CHANNEL_TOKENS, MAX_COSIGNERS, PAY_DOMAIN_V2, TOKEN_FUNDS_DIGEST_DOMAIN,
+        WITHDRAWAL_CLAIM_DOMAIN_V2,
+    },
     ethereum_types::{
         address::Address, bytes32::Bytes32, u32limb_trait::U32LimbTrait as _, u256::U256,
     },
@@ -17,12 +21,20 @@ use crate::{
 pub type SignatureBytes = Vec<u8>;
 
 const CHANNEL_STATE_DOMAIN: u32 = 0x494d4348; // "IMCH"
-const PAY_DOMAIN: u32 = 0x494d5041; // "IMPA"
+// "IMPA" (0x494d5041), the v1 in-channel pay domain, is DELETED: `ChannelTx::signing_digest` is
+// fully superseded by the IMPA-v2 preimage under `PAY_DOMAIN_V2` ("IMP2", detail2 §N-3), and no
+// in-circuit recompute referenced it. Its value stays pinned (as a retired literal) in the
+// repo-wide domain non-collision test so no future tag can collide with historic v1 digests.
 // pub(crate): the validity circuits recompute the IMSB signing digest in-circuit
 // (`circuits::validity::block_hash_chain::small_block_message`) and must use the SAME domain limb.
 pub(crate) const SMALL_BLOCK_DOMAIN: u32 = 0x494d5342; // "IMSB"
 const SIGNED_SMALL_BLOCK_DOMAIN: u32 = 0x494d5353; // "IMSS"
-const INTER_CHANNEL_TX_DOMAIN: u32 = 0x494d4954; // "IMIT"
+// "IMIT" (0x494d4954), the v1 inter-channel tx domain, is DELETED: `InterChannelTx::
+// signing_digest` is fully superseded by the IMI2 preimage under `INTER_CHANNEL_TX_DOMAIN_V2`
+// ("IMI2", detail2 §N-4 — the digest gains the base `token_index` as its own limb), and no
+// in-circuit recompute referenced it (the legacy cancel-close IMIT recompute was retired by the
+// Finding-D statement correction). Its value stays pinned (as a retired literal) in the
+// repo-wide domain non-collision test.
 const CLOSE_TX_DOMAIN: u32 = 0x494d434c; // "IMCL"
 const CLOSE_INTENT_DOMAIN: u32 = 0x494d4349; // "IMCI"
 const SPECIAL_CLOSE_DOMAIN: u32 = 0x494d5343; // "IMSC"
@@ -40,7 +52,10 @@ const CHANNEL_RECORD_DOMAIN: u32 = 0x494d4352; // "IMCR"
 // member_pk_gs])` so the 3 verified signing keys are bound to the channel's
 // registered member set (no non-member-key substitution). See `close_member_set_commitment`.
 const CLOSE_MEMBER_SET_DOMAIN: u32 = 0x494d434d; // "IMCM"
-pub const L1_DEPOSIT_IMPORT_DOMAIN: u32 = 0x494d4c44; // "IMLD"
+// "IMLD" (0x494d4c44), the v1 L1 deposit-import domain, is DELETED: `l1_deposit_import_digest`
+// is fully superseded by the IMLD-v2 preimage under `L1_DEPOSIT_IMPORT_DOMAIN_V2` ("IML2",
+// detail2 §N-5), and no in-circuit recompute referenced it. Its value stays pinned (as a retired
+// literal) in the repo-wide domain non-collision test.
 pub const MAX_CLOSE_TRANSFERS: usize = 16;
 pub const SPECIAL_CLOSE_MEDIUM_BLOCK_WINDOW: u64 = 5;
 // NOTE: `SMALL_BLOCK_SIGNATURE_TIMEOUT_SECS` is superseded by `constants::SIGN_TIMEOUT_SECS`
@@ -106,6 +121,10 @@ pub enum ChannelTransitionKind {
     ChannelClose,
     SpecialClose,
     L1DepositImport,
+    /// detail2 §N-1 (TM-1): append-only cosigned registration of a new BASE `token_index` at
+    /// local token slot `token_count`. Header-only state change (all 10 ciphertext positions
+    /// exist from genesis as canonical zeros); N-of-N cosigned like any transition.
+    TokenRegister,
 }
 
 impl ChannelTransitionKind {
@@ -115,10 +134,14 @@ impl ChannelTransitionKind {
             | Self::InterChannelSend
             | Self::ReceiverBundleApply
             | Self::BalanceRefresh => Some(ProofBackend::Plonky3),
+            // TokenRegister carries no balance-state ZKP: it mutates no ciphertext (header-only,
+            // §N-1); its safety argument is the cosigners' native
+            // `BalanceState::verify_token_register_transition` check + the N-of-N signatures.
             Self::InterChannelFundImport
             | Self::ChannelClose
             | Self::SpecialClose
-            | Self::L1DepositImport => None,
+            | Self::L1DepositImport
+            | Self::TokenRegister => None,
         }
     }
 
@@ -131,7 +154,8 @@ impl ChannelTransitionKind {
             Self::InChannelTransfer
             | Self::ReceiverBundleApply
             | Self::BalanceRefresh
-            | Self::L1DepositImport => None,
+            | Self::L1DepositImport
+            | Self::TokenRegister => None,
         }
     }
 }
@@ -445,8 +469,50 @@ impl SignedSmallBlock {
 #[serde(rename_all = "camelCase")]
 pub struct ChannelFund {
     pub channel_id: ChannelId,
-    pub amount: U256,
+    /// Per-token channel funds (detail2 §N-6), ALIGNED TO the channel's `token_registry`:
+    /// `amounts[t]` is the fund denominated in the base token `token_registry[t]`. Positions
+    /// `t >= token_count` are zero. ALWAYS full `MAX_CHANNEL_TOKENS` width in memory and in
+    /// every digest (TM-11).
+    ///
+    /// SECURITY (P2/P3): funds are NEVER summed across positions — each `amounts[t]` conserves
+    /// and settles independently against its own base-token escrow.
+    pub amounts: [U256; MAX_CHANNEL_TOKENS],
     pub intmax_state_root: Bytes32,
+}
+
+impl ChannelFund {
+    /// Single-token convenience: `amount` at token slot 0 (the genesis token), zero elsewhere —
+    /// the exact v1-state embedding of detail2 §N (owner decision 5).
+    pub fn single_token_amounts(amount: U256) -> [U256; MAX_CHANNEL_TOKENS] {
+        let mut amounts = [U256::zero(); MAX_CHANNEL_TOKENS];
+        amounts[0] = amount;
+        amounts
+    }
+}
+
+/// `token_funds_digest` (detail2 §N-6, TM-11): the close-side commitment to the per-token fund
+/// vector and its registry alignment,
+///
+/// `keccak([TOKEN_FUNDS_DIGEST_DOMAIN, token_registry (10 canonical u32 limbs, zero-padded),
+///          token_count (1 limb), amounts (10 x U256 = 80 limbs, zero-padded)])`
+///
+/// — a FIXED 92-word preimage. ALWAYS full width regardless of `token_count`: omitting unused
+/// entries would make the preimage variable-length and alias distinct `(registry, amounts)`
+/// pairs (TM-11). Pinned byte-for-byte by `token_funds_digest_golden_vector`; the Solidity
+/// recompute (`ChannelSettlementVerifier`, Phase 3) must match it exactly.
+pub fn token_funds_digest(
+    registry: &[u32; MAX_CHANNEL_TOKENS],
+    token_count: u8,
+    amounts: &[U256; MAX_CHANNEL_TOKENS],
+) -> Bytes32 {
+    let mut words = Vec::with_capacity(2 + MAX_CHANNEL_TOKENS * 9);
+    words.push(TOKEN_FUNDS_DIGEST_DOMAIN);
+    words.extend_from_slice(registry);
+    words.push(token_count as u32);
+    for amount in amounts {
+        words.extend(amount.to_u32_vec());
+    }
+    hash_words(&words)
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -501,6 +567,15 @@ impl ChannelState {
     /// this digest ARE the three-member `hash(H1, H2)` signatures of abstract2 §3.1 (detail2
     /// §C-3/§D). There is no signing target that covers H1 without H2 or vice versa, which is the
     /// structural atomicity argument of detail2 §D-3.
+    ///
+    /// SECURITY (multitoken, TM-11): the former single 8-limb `channel_fund.amount` segment is
+    /// widened IN PLACE to the flat, ALWAYS-full-width 80-limb `amounts[0..10]` vector (10 x
+    /// U256, zero-padded). The preimage stays fixed-width injective; the registry alignment of
+    /// the vector is bound through `balance_state.h1()` (which commits `token_registry` +
+    /// `token_count`, TM-9) inside this same preimage. detail2 §N/§G-2 fix the new-domain set to
+    /// the six changed leaf/nullifier/pay/import/header/TFD preimages and do NOT re-version
+    /// IMCH; keccak collision resistance over the differing fixed widths rules out v1<->v2
+    /// preimage aliasing, and the v3 reset retires all v1-signed digests.
     pub fn signing_digest(&self) -> Bytes32 {
         hash_words(
             &[
@@ -510,7 +585,11 @@ impl ChannelState {
                 split_u64(self.small_block_number),
                 split_u64(self.close_freeze_nonce),
                 self.channel_fund.channel_id.to_u32_vec(),
-                self.channel_fund.amount.to_u32_vec(),
+                self.channel_fund
+                    .amounts
+                    .iter()
+                    .flat_map(U256::to_u32_vec)
+                    .collect(),
                 self.channel_fund.intmax_state_root.to_u32_vec(),
                 self.balance_state.h1().to_u32_vec(),
                 self.shared_native_nullifier_root.to_u32_vec(),
@@ -562,6 +641,14 @@ pub enum RejectReason {
 #[serde(rename_all = "camelCase")]
 pub struct ChannelTx {
     pub recipient_pk_g: Bytes32,
+    /// LOCAL token slot this transfer moves (detail2 §N-3): index into the channel's
+    /// `token_registry`, `< token_count`. Travels in cleartext (accepted privacy deviation
+    /// TM-12/§N-8).
+    ///
+    /// SECURITY (TM-2, P1 binding triple): this field is bound into the IMPA-v2 signing digest
+    /// as its OWN canonical limb; the Phase 2 transition verifier must force it equal to the
+    /// leaf one-hot select and to the ONLY mutated ciphertext position on both leaves.
+    pub token_slot: u8,
     /// Transfer amount encrypted to the recipient's `RegevPk`.
     pub enc_amount: RegevCiphertext,
     /// One-time random value, making otherwise-identical transfers distinguishable.
@@ -582,28 +669,38 @@ pub struct ChannelTx {
 }
 
 impl ChannelTx {
-    /// IMPA signing digest (detail2 §C-5):
-    /// `[PAY_DOMAIN, channel_id, prev_state_digest, enc_amount.digest(), nonce,
-    /// sender_pubkey_hash(8), recipient_pubkey_hash(8)]`.
+    /// IMPA-v2 signing digest (detail2 §C-5 + §N-3). EXACT LIMB LAYOUT (43 u32 words):
+    /// `[PAY_DOMAIN_V2 (1), channel_id (1), prev_state_digest (8), enc_amount.digest() (8),
+    /// nonce (8), token_slot (1), sender_pubkey_hash (8), recipient_pubkey_hash (8)]`.
+    /// Pinned byte-for-byte by `impa_v2_digest_layout_golden` below.
+    ///
+    /// SECURITY (TM-2/TM-15): `token_slot` occupies its OWN canonical u32 limb between `nonce`
+    /// and `sender_pk_g` — NEVER bit-packed into an existing word (e.g. NOT
+    /// `(token_slot << 16) | x`), which would alias distinct pairs. Under the new "IMP2" domain
+    /// no v1 IMPA digest can be replayed as a v2 one.
     ///
     /// SECURITY: the ZKP envelope is deliberately NOT part of this digest — the sender authorizes
-    /// the transfer (prev state, hidden amount ciphertext, parties); the proof object is
-    /// transport material that each co-signer verifies independently against the same statement.
+    /// the transfer (prev state, hidden amount ciphertext, token slot, parties); the proof object
+    /// is transport material that each co-signer verifies independently against the same
+    /// statement.
+    #[allow(clippy::too_many_arguments)]
     pub fn signing_digest(
         channel_id: ChannelId,
         prev_state_digest: Bytes32,
         enc_amount: &RegevCiphertext,
         nonce: Bytes32,
+        token_slot: u8,
         sender_pk_g: Bytes32,
         recipient_pk_g: Bytes32,
     ) -> Bytes32 {
         hash_words(
             &[
-                vec![PAY_DOMAIN],
+                vec![PAY_DOMAIN_V2],
                 channel_id.to_u32_vec(),
                 prev_state_digest.to_u32_vec(),
                 enc_amount.digest().to_u32_vec(),
                 nonce.to_u32_vec(),
+                vec![token_slot as u32],
                 sender_pk_g.to_u32_vec(),
                 recipient_pk_g.to_u32_vec(),
             ]
@@ -630,6 +727,22 @@ pub struct InterChannelTx {
     pub sender_delta_ct: RegevCiphertext,
     pub source_channel_id: ChannelId,
     pub destination_channel_id: ChannelId,
+    /// BASE-layer `token_index` this transfer moves (detail2 §N-4, TM-6) — NEVER a channel-local
+    /// slot: source and destination registries map it to (possibly different) local slots, each
+    /// side resolving against its OWN H1-committed registry (`registry[t] == token_index && t <
+    /// token_count`, unregistered ⇒ reject fail-closed).
+    ///
+    /// SECURITY (TM-6/TM-15): bound into the IMI2 signing digest as its OWN canonical u32 limb
+    /// (below) AND into the E-2 channelUpdateZKP transcript as its own public value under the
+    /// "IMU2" domain — so neither the descriptor nor the proof can be replayed for a different
+    /// token.
+    ///
+    /// SECURITY (IMCK structural re-check, Phase 1 carried obligation): ONE descriptor carries
+    /// exactly ONE `token_index` (this scalar field) and exactly one receiver delta (`detail2
+    /// §A-2`), so a C2C tx moves exactly one token — the type makes multi-token bundles
+    /// structurally inexpressible. See `derive_shared_native_nullifier` for why the unversioned
+    /// IMCK nullifier stays sound under this invariant.
+    pub token_index: u32,
     pub source_pk_g: Bytes32,
     pub seal: Bytes32,
     pub tx_hash: Bytes32,
@@ -643,14 +756,21 @@ pub struct InterChannelTx {
 }
 
 impl InterChannelTx {
+    /// IMI2 signing digest (detail2 §C-6 + §N-4). `token_index` occupies its OWN canonical u32
+    /// limb between `destination_channel_id` and `source_pk_g` (TM-15: no bit-packing). The
+    /// domain was re-versioned "IMIT" → "IMI2" — see the rationale at
+    /// `constants::INTER_CHANNEL_TX_DOMAIN_V2` (variable-length tails make an in-place widening
+    /// rest on the v3 reset for the equal-total-length realignment case; a fresh domain removes
+    /// that reliance and no in-circuit/Solidity recompute of this preimage exists).
     pub fn signing_digest(&self) -> Bytes32 {
         hash_words(
             &[
-                vec![INTER_CHANNEL_TX_DOMAIN],
+                vec![INTER_CHANNEL_TX_DOMAIN_V2],
                 self.signed_small_block.signing_digest().to_u32_vec(),
                 self.sender_delta_ct.digest().to_u32_vec(),
                 self.source_channel_id.to_u32_vec(),
                 self.destination_channel_id.to_u32_vec(),
+                vec![self.token_index],
                 self.source_pk_g.to_u32_vec(),
                 self.seal.to_u32_vec(),
                 self.tx_hash.to_u32_vec(),
@@ -783,10 +903,24 @@ impl CloseIntent {
                 close_withdrawal.intmax_state_root
             )));
         }
-        if final_channel_state.channel_fund.amount != close_withdrawal.burn_amount {
+        // SECURITY (multitoken §N-6, TM-3/TM-11 — per-token close semantics): the L2 close BURN
+        // leg denominates ONLY the GENESIS token position (local slot 0): `burn_amount` must
+        // equal `amounts[0]` exactly, and the close circuit connects `amounts[0]` to the
+        // `channel_fund_amount` PI (Phase 2a). Non-genesis token funds (`amounts[1..]`) are NOT
+        // burned — they settle via per-(member, token) withdrawal claims against the Manager's
+        // per-base-token accounting: the FULL `amounts[0..10]` vector rides in this intent
+        // (IMCI, 80 limbs) and is bound — with the registry and token_count — to the
+        // member-signed close PI `token_funds_digest` by the verifier's on-chain recompute;
+        // `finalizeClose` accrues `finalizedChannelFundAmount[registry[t]] += amounts[t]` per
+        // token and `pullChannelTokenFunds(t)` moves the ERC-20 escrow (Phase 3, landed). The
+        // former Phase-1/3 fail-closed refusal of nonzero non-genesis funds is LIFTED here
+        // (Phase 4) together with the per-token claim builders, per the Phase 3 review's
+        // condition ("lift the CloseIntent non-genesis-funds gate only WITH the per-token claim
+        // builders").
+        if final_channel_state.channel_fund.amounts[0] != close_withdrawal.burn_amount {
             return Err(ChannelError::InvalidCloseBinding(format!(
-                "final channel fund amount {:?} != close withdrawal burn_amount {:?}",
-                final_channel_state.channel_fund.amount, close_withdrawal.burn_amount
+                "final channel fund amounts[0] {:?} != close withdrawal burn_amount {:?}",
+                final_channel_state.channel_fund.amounts[0], close_withdrawal.burn_amount
             )));
         }
         if final_channel_state.unallocated_confirmed_incoming != U256::zero() {
@@ -813,6 +947,14 @@ impl CloseIntent {
 
     /// IMCI signing digest. `final_state_version` and `final_settled_tx_chain` are appended at
     /// the END of the legacy preimage (detail2 §C-8).
+    ///
+    /// SECURITY (multitoken, TM-11): the former single 8-limb `channel_fund_snapshot.amount`
+    /// segment is widened IN PLACE to the flat, ALWAYS-full-width 80-limb `amounts[0..10]`
+    /// vector — same rationale as `ChannelState::signing_digest` (fixed-width injective; the
+    /// registry alignment is bound via `final_balance_state_h1` in this same preimage; §N/§G-2
+    /// do not re-version IMCI). The Solidity mirror (`computeCloseIntentDigest`) is updated in
+    /// Phase 3; until then the shared-vector cross-check is `#[ignore]`d (see
+    /// `close_intent_digest_matches_solidity_shared_vector`).
     pub fn signing_digest(&self) -> Bytes32 {
         hash_words(
             &[
@@ -825,7 +967,11 @@ impl CloseIntent {
                 self.final_channel_state_digest.to_u32_vec(),
                 self.final_balance_state_h1.to_u32_vec(),
                 self.channel_fund_snapshot.channel_id.to_u32_vec(),
-                self.channel_fund_snapshot.amount.to_u32_vec(),
+                self.channel_fund_snapshot
+                    .amounts
+                    .iter()
+                    .flat_map(U256::to_u32_vec)
+                    .collect(),
                 self.channel_fund_snapshot.intmax_state_root.to_u32_vec(),
                 self.burn_tx_hash.to_u32_vec(),
                 self.close_withdrawal_digest.to_u32_vec(),
@@ -843,47 +989,83 @@ impl CloseIntent {
 pub struct WithdrawalClaim {
     pub close_intent_digest: Bytes32,
     pub member_pk_g: Bytes32,
+    /// LOCAL token slot this claim withdraws (detail2 §N-6): withdrawal claims are per
+    /// (member slot, token slot). Bound into the claim's nullifier as its own limb.
+    pub token_slot: u8,
     pub l1_recipient: Address,
-    /// The member's final balance ciphertext (their slot of the final `BalanceState`); the
-    /// `claim_proof` (E-3 withdrawClaimZKP) proves it decrypts to the public withdrawal amount.
+    /// The member's final balance ciphertext at `token_slot` (that position of their slot row in
+    /// the final `BalanceState`); the `claim_proof` (E-3 withdrawClaimZKP) proves it decrypts to
+    /// the public withdrawal amount.
     pub user_amount_ct: RegevCiphertext,
     pub withdrawal_nullifier: Bytes32,
     pub claim_proof: Vec<u8>,
 }
 
 impl WithdrawalClaim {
-    /// Nullifier `[IMCW, close_intent_digest(8), slot_regev_pk_digest(8)]`.
+    /// Nullifier v2 `[IMW2, close_intent_digest(8), slot_regev_pk_digest(8), token_slot(1)]`
+    /// (18 limbs; detail2 §N-6, TM-5).
     ///
     /// SECURITY (B-2 blocker fix, tasks/reg-chain-1024-threat-model.md): the nullifier is keyed on
     /// the slot's LEAF-BOUND Regev pk digest (`Bytes32::from(RegevPk::poseidon_digest())`), NOT the
-    /// slot-free `member_pk_g`. Under Option B a delegate has no L1 registration, so once the Manager
-    /// admits delegate claims (B-2) `member_pk_g` is no longer tied to a registered cosigner; if it
-    /// still keyed the nullifier, a slot owner could grind `member_pk_g` to mint unlimited distinct
-    /// nullifiers and multi-withdraw the same slot up to the fund cap. `regev_pk_digest` is a field
-    /// of the cosigner-signed slot leaf opened at `member_index` in the withdrawal-claim proof, so
-    /// each signed slot yields EXACTLY ONE nullifier and only the slot owner (who needs the Regev
-    /// secret to decrypt) can produce it. Duplicate Regev keys across slots collapse to one
-    /// withdrawal (self-loss, symmetric to the accepted duplicate-pk_g risk).
+    /// slot-free `member_pk_g`. Under Option B a delegate has no L1 registration, so once the
+    /// Manager admits delegate claims (B-2) `member_pk_g` is no longer tied to a registered
+    /// cosigner; if it still keyed the nullifier, a slot owner could grind `member_pk_g` to
+    /// mint unlimited distinct nullifiers and multi-withdraw the same slot up to the fund cap.
+    /// `regev_pk_digest` is a field of the cosigner-signed slot leaf opened at `member_index`
+    /// in the withdrawal-claim proof, so each signed slot yields EXACTLY ONE nullifier PER
+    /// TOKEN SLOT and only the slot owner (who needs the Regev secret to decrypt) can produce
+    /// it. Duplicate Regev keys across slots collapse to one withdrawal (self-loss, symmetric
+    /// to the accepted duplicate-pk_g risk).
     ///
-    /// `close_intent_digest` embeds `channel_id`, so the (channel, close, slot-identity) tuple is
-    /// unique even though a bare digest is channel-independent (plan §7 collision-freedom).
-    pub fn derive_nullifier(close_intent_digest: Bytes32, slot_regev_pk_digest: Bytes32) -> Bytes32 {
+    /// SECURITY (TM-5, multitoken): `token_slot` is bound as its OWN canonical limb so each
+    /// (slot, token) pair yields exactly one nullifier — WITHOUT it, one member's 10 per-token
+    /// claims would collapse to a single nullifier (completeness break: only one token claimable
+    /// per member); keyed on the grindable `member_pk_g` instead of the leaf-bound Regev pk
+    /// digest, the B-2 multi-withdraw grinding attack would return x10. Both regression
+    /// directions are covered by `withdrawal_nullifier_depends_on_slot_regev_digest`. The v2
+    /// domain ("IMW2") makes v1 nullifiers unreplayable (TM-15).
+    ///
+    /// `close_intent_digest` embeds `channel_id`, so the (channel, close, slot-identity, token)
+    /// tuple is unique even though a bare digest is channel-independent (plan §7
+    /// collision-freedom).
+    pub fn derive_nullifier(
+        close_intent_digest: Bytes32,
+        slot_regev_pk_digest: Bytes32,
+        token_slot: u8,
+    ) -> Bytes32 {
         hash_words(
             &[
-                vec![WITHDRAWAL_CLAIM_DOMAIN],
+                vec![WITHDRAWAL_CLAIM_DOMAIN_V2],
                 close_intent_digest.to_u32_vec(),
                 slot_regev_pk_digest.to_u32_vec(),
+                vec![token_slot as u32],
             ]
             .concat(),
         )
     }
 
+    /// IMCW claim signing digest. Multi-token (Phase 2, closing security-review MINOR 7 from
+    /// Phase 1): `token_slot` occupies its OWN canonical u32 limb IMMEDIATELY AFTER
+    /// `member_pk_g` (mirroring the struct field order), in addition to its transitive binding
+    /// through the `withdrawal_nullifier` limbs — TM-15 own-limb discipline, no bit-packing.
+    ///
+    /// SECURITY (domain handling): the "IMCW" domain is RETAINED for this digest per detail2
+    /// §G-2 ("IMCW remains for the claim signing_digest"; only the NULLIFIER re-versioned to
+    /// "IMW2"). The in-place widening is sound by the same argument the Phase 1 review ACCEPTED
+    /// for IMCH/IMCI: exactly one message type hashes under this domain, keccak collision
+    /// resistance covers the differing fixed prefix widths, and the v3 reset retires every
+    /// v1-signed claim digest. PRECISION (Phase 2a review note): because this preimage ends in a
+    /// variable-length, length-prefixed `claim_proof` tail, a v1 and a v2 preimage CAN have
+    /// equal total length (the v2 limb consuming one tail word under a realigned parse); for
+    /// that equal-total-length realignment case the non-aliasing argument rests on the v3 reset
+    /// ALONE, not on keccak collision resistance.
     pub fn signing_digest(&self) -> Bytes32 {
         hash_words(
             &[
                 vec![WITHDRAWAL_CLAIM_DOMAIN],
                 self.close_intent_digest.to_u32_vec(),
                 self.member_pk_g.to_u32_vec(),
+                vec![self.token_slot as u32],
                 self.l1_recipient.to_u32_vec(),
                 self.user_amount_ct.digest().to_u32_vec(),
                 self.withdrawal_nullifier.to_u32_vec(),
@@ -999,6 +1181,24 @@ impl PostCloseIncomingClaim {
     /// `circuits::channel::post_close_claim_circuit` and to the L1 `usedSharedNativeNullifiers`
     /// key. `close_intent_digest` embeds `channel_id` and `incoming_tx_hash` is the unique
     /// source-tx hash, so the (close, tx, receiver) tuple is collision-free across channels.
+    ///
+    /// SECURITY (multitoken, TM-5 scope note): unlike `WithdrawalClaim::derive_nullifier`, this
+    /// nullifier does NOT gain a `token_slot` limb in the §N change — it is keyed per late
+    /// inbound TX (`incoming_tx_hash`), and one tx moves exactly one token (§N-3), so per-token
+    /// separation is already implied by tx uniqueness: there is no per-(slot, token) collapse to
+    /// fix and no completeness break.
+    ///
+    /// SECURITY (IMCK structural re-check, multitoken Phase 2b — closing the Phase 1 carried
+    /// obligation): "one tx = one token" is now STRUCTURAL, not conventional. The C2C descriptor
+    /// (`InterChannelTx`) carries exactly ONE scalar `token_index: u32` field (bound into the
+    /// signed IMI2 digest and the E-2 "IMU2" transcript) and exactly one receiver delta (§A-2,
+    /// enforced by every consuming verifier), and the receiver-side transition verifier proves
+    /// the other 9 token positions of the credited row bit-identical — so a single
+    /// `incoming_tx_hash` can never credit two token positions, and this unversioned per-tx
+    /// nullifier cannot collapse a multi-token bundle (none is expressible). Covered by
+    /// `receiver_bundle_apply_rejects_second_token_position_credit` in `state_update_verifier`.
+    /// (The token dimension of post-close claim PAYOUTS — which base token the Manager pays — is
+    /// Phase 3 work, per doc/tasks/multitoken-todo.md.)
     pub fn derive_shared_native_nullifier(
         close_intent_digest: Bytes32,
         incoming_tx_hash: Bytes32,
@@ -1035,6 +1235,54 @@ impl PostCloseIncomingClaim {
     }
 }
 
+/// detail2 §N-1: the payload of a cosigned `TokenRegister` transition — the BASE-layer
+/// `token_index` to append at local token slot `token_count`.
+///
+/// SECURITY (TM-1): the apply/verify path is `BalanceState::apply_token_register` /
+/// `BalanceState::verify_token_register_transition`, which enforce append-at-`token_count`,
+/// `token_count + 1 <= MAX_CHANNEL_TOKENS`, injectivity of the new index against the active
+/// registry, `state_version + 1`, and that balances/counters are UNTOUCHED. Cosigners MUST run
+/// the verify check before signing the proposed post-state (whose H1 header commits the new
+/// registry, TM-9).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TokenRegister {
+    pub token_index: u32,
+}
+
+/// The CANONICAL next `ChannelState` for a `TokenRegister(token_index)` transition (detail2
+/// §N-1): `balance_state.apply_token_register` (append-at-`token_count`, injectivity,
+/// `state_version`+1), `epoch`+1, `prev_digest` linkage, `h2_tag = 0` (no small block — a
+/// registration is a header-only state change), signatures cleared for collection. EVERYTHING
+/// ELSE — `channel_fund`, `small_block_number`, `close_freeze_nonce`,
+/// `shared_native_nullifier_root`, `unallocated_confirmed_incoming`, every ciphertext/counter/
+/// recipient, `settled_tx_chain`, `settled_tx_accumulator_root` — is carried over UNCHANGED by
+/// the spreads.
+///
+/// SECURITY (TM-1/TM-9): this deterministic builder is shared by the proposer
+/// (`wallet_core::build_token_register`) AND the cosigner gate
+/// (`TokenRegisterUpdateWitness::verify` rebuild-equality), so a proposed registration that
+/// touches ANYTHING beyond the registry append is refused by digest inequality — the
+/// `l1_deposit_bundle_state` / `verify_token_register_transition` rebuild pattern.
+pub fn token_register_next_state(
+    prev: &ChannelState,
+    token_index: u32,
+) -> Result<ChannelState, ChannelError> {
+    let mut balance_state = prev.balance_state.clone();
+    balance_state.apply_token_register(token_index)?;
+    Ok(ChannelState {
+        epoch: prev.epoch + 1,
+        balance_state,
+        // §C-2: h2_tag = 0 for every non-small-block transition kind; `..prev.clone()` would
+        // otherwise inherit a nonzero tag left by a preceding inter-channel send.
+        h2_tag: Bytes32::default(),
+        prev_digest: prev.digest,
+        member_signatures: Vec::new(),
+        ..prev.clone()
+    }
+    .with_computed_digest())
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum ChannelTransition {
@@ -1047,6 +1295,8 @@ pub enum ChannelTransition {
     BalanceRefresh(ChannelProofEnvelope),
     ChannelClose(CloseWithdrawal),
     SpecialClose(SpecialClose),
+    /// detail2 §N-1: append-only cosigned token registration (see [`TokenRegister`]).
+    TokenRegister(TokenRegister),
 }
 
 impl ChannelTransition {
@@ -1059,6 +1309,7 @@ impl ChannelTransition {
             Self::BalanceRefresh(_) => ChannelTransitionKind::BalanceRefresh,
             Self::ChannelClose(_) => ChannelTransitionKind::ChannelClose,
             Self::SpecialClose(_) => ChannelTransitionKind::SpecialClose,
+            Self::TokenRegister(_) => ChannelTransitionKind::TokenRegister,
         }
     }
 
@@ -1214,17 +1465,31 @@ pub fn close_member_set_commitment(hashes: &[Bytes32; MAX_COSIGNERS], member_cou
     hash_words(&words)
 }
 
+/// IMLD-v2 L1 deposit-import digest (detail2 §N-5, TM-7). EXACT LIMB LAYOUT (14 u32 words):
+/// `[L1_DEPOSIT_IMPORT_DOMAIN_V2 (1), channel_id (1), deposit_nullifier (8), token_index (1),
+/// amount_lo (1), amount_hi (1), depositor_slot (1)]`.
+/// Pinned byte-for-byte by `imld_v2_digest_layout_golden`.
+///
+/// SECURITY (TM-7/TM-15): the base deposit's `token_index` (spec.md §1.2 — no longer dropped)
+/// occupies its OWN canonical limb between the nullifier and the amount — never bit-packed with
+/// `depositor_slot` (packing would alias distinct `(token_index, slot)` pairs). The new "IML2"
+/// domain makes v1 import digests unreplayable. The Phase 2 import transition must additionally
+/// bind, in-circuit: `token_index ∈ registry` resolving to local slot t, `channel_fund.
+/// amounts[t] += amount`, and the credited ciphertext being the depositor leaf's position-t
+/// ciphertext (the three-way binding).
 pub fn l1_deposit_import_digest(
     channel_id: ChannelId,
     deposit_nullifier: Bytes32,
+    token_index: u32,
     amount: u64,
     depositor_slot: u16,
 ) -> Bytes32 {
     hash_words(
         &[
-            vec![L1_DEPOSIT_IMPORT_DOMAIN],
+            vec![L1_DEPOSIT_IMPORT_DOMAIN_V2],
             channel_id.to_u32_vec(),
             deposit_nullifier.to_u32_vec(),
+            vec![token_index],
             vec![amount as u32, (amount >> 32) as u32],
             vec![depositor_slot as u32],
         ]
@@ -1285,7 +1550,7 @@ mod tests {
             channel_id: sample_channel_id(),
             member_count: 3,
             delegate_count: 0,
-            enc_balances: BalanceState::pad_enc_balances(&[
+            enc_balances: BalanceState::pad_enc_balances_token0(&[
                 ciphertext(1),
                 ciphertext(2),
                 ciphertext(3),
@@ -1300,7 +1565,9 @@ mod tests {
             settled_tx_chain: Bytes32::default(),
             settled_tx_accumulator_root: Bytes32::default(),
             state_version: version,
-            pending_adds: BalanceState::pad_pending_adds(&[0, 0, 0]),
+            pending_adds: BalanceState::pad_pending_adds_token0(&[0, 0, 0]),
+            token_registry: BalanceState::single_token_registry(0),
+            token_count: 1,
         }
     }
 
@@ -1312,7 +1579,7 @@ mod tests {
             close_freeze_nonce: 0,
             channel_fund: ChannelFund {
                 channel_id: sample_channel_id(),
-                amount: U256::from(15u32),
+                amounts: ChannelFund::single_token_amounts(U256::from(15u32)),
                 intmax_state_root: Bytes32::default(),
             },
             balance_state: sample_balance_state(4),
@@ -1377,7 +1644,7 @@ mod tests {
             final_balance_state_h1: state.balance_state.h1(),
             intmax_state_root: state.channel_fund.intmax_state_root,
             burn_tx_hash: Bytes32::from_u32_slice(&[9, 1, 0, 0, 0, 0, 0, 0]).unwrap(),
-            burn_amount: state.channel_fund.amount,
+            burn_amount: state.channel_fund.amounts[0],
             zkp: vec![1, 2, 3],
         }
     }
@@ -1415,6 +1682,13 @@ mod tests {
     /// (`test_close_intent_digest_matches_rust_shared_vector`) and MUST produce the same
     /// constant. If the two sides disagree, the Solidity `abi.encodePacked` mirror of the IMCI
     /// preimage is stale — fix Solidity, not this digest.
+    ///
+    /// MULTITOKEN PHASE 3 RE-PIN (2026-07-27): the IMCI preimage carries the 80-limb
+    /// `amounts[0..10]` vector (detail2 §N-6, in-place widening) and the Solidity mirror
+    /// (`ChannelSettlementManager.computeCloseIntentDigest` /
+    /// `ChannelSettlementVerifier._closeIntentDigest`) was updated to match. The constant below
+    /// was REGENERATED FROM THIS RUST SIDE (the native layout is the source of truth) and is
+    /// asserted by the Solidity twin — never re-pin by copying a Solidity result here.
     #[test]
     fn close_intent_digest_matches_solidity_shared_vector() {
         let words = |base: u32| -> Vec<u32> { (base..base + 8).collect() };
@@ -1428,7 +1702,9 @@ mod tests {
             final_balance_state_h1: Bytes32::from_u32_slice(&words(9)).unwrap(),
             channel_fund_snapshot: ChannelFund {
                 channel_id: ChannelId::new(9).unwrap(),
-                amount: U256::from_u32_slice(&words(17)).unwrap(),
+                amounts: ChannelFund::single_token_amounts(
+                    U256::from_u32_slice(&words(17)).unwrap(),
+                ),
                 intmax_state_root: Bytes32::from_u32_slice(&words(25)).unwrap(),
             },
             burn_tx_hash: Bytes32::from_u32_slice(&words(33)).unwrap(),
@@ -1438,7 +1714,7 @@ mod tests {
             final_settled_tx_chain: Bytes32::from_u32_slice(&words(49)).unwrap(),
         };
         let expected =
-            Bytes32::from_hex("0xa2679bf7c2d9c08c45b6fdd39202456707cbdcf3e1667a45fb493a717b37d264")
+            Bytes32::from_hex("0x9fc3ced58e9f82428e4b8a20f6e7755e1c0145facd2824f57d112cef86be42fb")
                 .unwrap();
         assert_eq!(intent.signing_digest(), expected);
     }
@@ -1677,10 +1953,10 @@ mod tests {
 
         // H1 components are binding through balance_state.h1().
         let mut s = state.clone();
-        s.balance_state.enc_balances[1] = ciphertext(42);
+        s.balance_state.enc_balances[1][0] = ciphertext(42);
         assert_ne!(s.signing_digest(), digest);
         let mut s = state.clone();
-        s.balance_state.pending_adds[0] += 1;
+        s.balance_state.pending_adds[0][0] += 1;
         assert_ne!(s.signing_digest(), digest);
 
         // The appended H2 tag and state_version are binding.
@@ -1719,6 +1995,7 @@ mod tests {
             sender_delta_ct: ciphertext(31),
             source_channel_id: sample_channel_id(),
             destination_channel_id: ChannelId::new(8).unwrap(),
+            token_index: 0,
             source_pk_g: pubkey_hash(10),
             seal: Bytes32::default(),
             tx_hash: Bytes32::from_u32_slice(&[3, 0, 0, 0, 0, 0, 0, 0]).unwrap(),
@@ -1769,6 +2046,36 @@ mod tests {
         assert_ne!(tampered.signing_digest(), digest);
     }
 
+    /// TM-6/TM-15 (multitoken Phase 2b): the IMI2 digest binds the base `token_index` in its own
+    /// canonical limb — descriptors differing only in token_index have distinct digests, and the
+    /// limb cannot alias its neighbors (own-limb discipline: swapping content between the
+    /// token_index limb and an adjacent word changes the digest).
+    #[test]
+    fn inter_channel_tx_digest_binds_token_index_own_limb() {
+        let state = sample_state();
+        let tx = sample_inter_channel_tx(&state);
+        let digest = tx.signing_digest();
+
+        // token_index is digest-binding.
+        let mut tampered = tx.clone();
+        tampered.token_index = 5;
+        assert_ne!(tampered.signing_digest(), digest);
+
+        // Own-limb non-aliasing: moving the value into the adjacent source_pk_g word while
+        // zeroing token_index (a bit-packing-style confusion) must NOT reproduce the digest.
+        let mut aliased = tx.clone();
+        aliased.token_index = 0;
+        let mut pk_words = aliased.source_pk_g.to_u32_vec();
+        pk_words[0] = 5;
+        aliased.source_pk_g = Bytes32::from_u32_slice(&pk_words).unwrap();
+        let mut original_with_token5 = tx.clone();
+        original_with_token5.token_index = 5;
+        assert_ne!(
+            aliased.signing_digest(),
+            original_with_token5.signing_digest()
+        );
+    }
+
     #[test]
     fn inter_channel_tx_leaf_hash_requires_a_receiver() {
         let state = sample_state();
@@ -1802,6 +2109,7 @@ mod tests {
             state.digest,
             &enc_amount,
             nonce,
+            1,
             pubkey_hash(10),
             pubkey_hash(11),
         );
@@ -1813,6 +2121,7 @@ mod tests {
                 state.digest,
                 &ciphertext(51),
                 nonce,
+                1,
                 pubkey_hash(10),
                 pubkey_hash(11),
             )
@@ -1824,6 +2133,7 @@ mod tests {
                 state.digest,
                 &enc_amount,
                 Bytes32::default(),
+                1,
                 pubkey_hash(10),
                 pubkey_hash(11),
             )
@@ -1835,6 +2145,7 @@ mod tests {
                 state.digest,
                 &enc_amount,
                 nonce,
+                1,
                 pubkey_hash(11),
                 pubkey_hash(10),
             )
@@ -1846,6 +2157,7 @@ mod tests {
                 Bytes32::default(),
                 &enc_amount,
                 nonce,
+                1,
                 pubkey_hash(10),
                 pubkey_hash(11),
             )
@@ -1854,25 +2166,371 @@ mod tests {
 
     #[test]
     fn withdrawal_nullifier_depends_on_slot_regev_digest() {
-        // B-2 blocker fix: the nullifier now keys on the slot's LEAF-BOUND Regev pk digest (here
-        // stood in by distinct 32-byte values), NOT the slot-free member_pk_g. Distinct slot
-        // identities ⇒ distinct nullifiers; a shared identity ⇒ the SAME nullifier (double-spend
-        // guard) — see `WithdrawalClaim::derive_nullifier`. The `member_pk_g` argument no longer
-        // exists, so grinding it provably cannot change the nullifier (type-level guarantee).
+        // B-2 blocker fix (regression direction 1): the nullifier keys on the slot's LEAF-BOUND
+        // Regev pk digest (here stood in by distinct 32-byte values), NOT the slot-free
+        // member_pk_g. Distinct slot identities ⇒ distinct nullifiers; a shared identity ⇒ the
+        // SAME nullifier (double-spend guard) — see `WithdrawalClaim::derive_nullifier`.
+        //
+        // REGRESSION (TM-5): the preimage does NOT include `member_pk_g` — the function takes no
+        // such argument, so grinding member_pk_g provably cannot mint fresh nullifiers
+        // (type-level guarantee; any future signature change reintroducing a pk_g argument must
+        // trip this comment in review).
         let close_digest = Bytes32::from_u32_slice(&[7, 0, 0, 0, 0, 0, 0, 0]).unwrap();
-        let a = WithdrawalClaim::derive_nullifier(close_digest, pubkey_hash(10));
-        let b = WithdrawalClaim::derive_nullifier(close_digest, pubkey_hash(11));
+        let a = WithdrawalClaim::derive_nullifier(close_digest, pubkey_hash(10), 0);
+        let b = WithdrawalClaim::derive_nullifier(close_digest, pubkey_hash(11), 0);
         assert_ne!(a, b);
-        // Same slot identity + same close ⇒ identical nullifier (one withdrawal per slot).
+        // Same slot identity + same close + same token ⇒ identical nullifier (one withdrawal
+        // per (slot, token)).
         assert_eq!(
             a,
-            WithdrawalClaim::derive_nullifier(close_digest, pubkey_hash(10))
+            WithdrawalClaim::derive_nullifier(close_digest, pubkey_hash(10), 0)
         );
         // The close-intent digest (which embeds channel_id) is part of the nullifier preimage.
         let other_close = Bytes32::from_u32_slice(&[8, 0, 0, 0, 0, 0, 0, 0]).unwrap();
         assert_ne!(
             a,
-            WithdrawalClaim::derive_nullifier(other_close, pubkey_hash(10))
+            WithdrawalClaim::derive_nullifier(other_close, pubkey_hash(10), 0)
         );
+    }
+
+    /// TM-5 (regression direction 2, per-(slot, token) separation): the SAME slot with two
+    /// different token slots yields DISTINCT nullifiers (without this, only one of a member's 10
+    /// tokens would be claimable per close — completeness break), and two different slots with
+    /// the SAME token slot yield distinct nullifiers. Every token slot 0..10 is pairwise
+    /// distinct for a fixed identity.
+    #[cfg_attr(debug_assertions, ignore = "run with --release")]
+    #[test]
+    fn withdrawal_nullifier_distinct_per_slot_and_token() {
+        let close_digest = Bytes32::from_u32_slice(&[7, 0, 0, 0, 0, 0, 0, 0]).unwrap();
+        // Same slot identity, two tokens ⇒ distinct.
+        let t0 = WithdrawalClaim::derive_nullifier(close_digest, pubkey_hash(10), 0);
+        let t1 = WithdrawalClaim::derive_nullifier(close_digest, pubkey_hash(10), 1);
+        assert_ne!(t0, t1, "same slot, different token must differ");
+        // Two slots, same token ⇒ distinct.
+        let other_slot = WithdrawalClaim::derive_nullifier(close_digest, pubkey_hash(11), 1);
+        assert_ne!(t1, other_slot, "different slot, same token must differ");
+        // All 10 token slots pairwise distinct for one identity.
+        let all: Vec<Bytes32> = (0..MAX_CHANNEL_TOKENS as u8)
+            .map(|t| WithdrawalClaim::derive_nullifier(close_digest, pubkey_hash(10), t))
+            .collect();
+        for i in 0..all.len() {
+            for j in (i + 1)..all.len() {
+                assert_ne!(all[i], all[j], "token slots {i} and {j} must differ");
+            }
+        }
+        // Exact 18-limb preimage layout: [IMW2, close(8), regev_pk_digest(8), token_slot].
+        let expected = hash_words(
+            &[
+                vec![WITHDRAWAL_CLAIM_DOMAIN_V2],
+                close_digest.to_u32_vec(),
+                pubkey_hash(10).to_u32_vec(),
+                vec![1u32],
+            ]
+            .concat(),
+        );
+        assert_eq!(t1, expected, "IMW2 nullifier preimage layout");
+    }
+
+    /// TM-15 own-limb discipline for the IMCW claim SIGNING digest (multitoken Phase 2, closing
+    /// Phase 1 review MINOR 7): `token_slot` occupies its own canonical limb immediately after
+    /// `member_pk_g`, so two claims differing ONLY in token_slot (identical nullifier field
+    /// included — the adversarial aliasing shape) sign DIFFERENT digests, and the exact preimage
+    /// layout is pinned.
+    #[cfg_attr(debug_assertions, ignore = "run with --release")]
+    #[test]
+    fn withdrawal_claim_signing_digest_binds_token_slot_own_limb() {
+        let claim = |token_slot: u8| WithdrawalClaim {
+            close_intent_digest: pubkey_hash(1),
+            member_pk_g: pubkey_hash(2),
+            token_slot,
+            l1_recipient: Address::from_u32_slice(&[5, 6, 7, 8, 9]).unwrap(),
+            user_amount_ct: ciphertext(3),
+            // Deliberately the SAME nullifier bytes in both claims: token_slot must separate the
+            // digests through its OWN limb, not merely transitively via the nullifier.
+            withdrawal_nullifier: pubkey_hash(4),
+            claim_proof: vec![1, 2, 3],
+        };
+        let d0 = claim(0).signing_digest();
+        let d1 = claim(1).signing_digest();
+        assert_ne!(
+            d0, d1,
+            "token_slot must alter the IMCW signing digest via its own limb"
+        );
+        // Exact preimage layout: [IMCW, close_intent(8), member_pk_g(8), token_slot(1),
+        // l1_recipient(5), ct_digest(8), nullifier(8), proof_len, proof words].
+        let c = claim(1);
+        let expected = hash_words(
+            &[
+                vec![WITHDRAWAL_CLAIM_DOMAIN],
+                c.close_intent_digest.to_u32_vec(),
+                c.member_pk_g.to_u32_vec(),
+                vec![1u32],
+                c.l1_recipient.to_u32_vec(),
+                c.user_amount_ct.digest().to_u32_vec(),
+                c.withdrawal_nullifier.to_u32_vec(),
+                vec![3u32],
+                bytes_to_u32_words(&[1, 2, 3]),
+            ]
+            .concat(),
+        );
+        assert_eq!(d1, expected, "IMCW v2 signing-digest preimage layout");
+    }
+
+    /// GOLDEN (detail2 §N-3, TM-2/TM-15): IMPA-v2 exact 43-word preimage layout
+    /// `[IMP2, channel_id, prev_state_digest(8), enc_amount.digest()(8), nonce(8),
+    /// token_slot(1), sender_pk(8), recipient_pk(8)]`, and the own-limb aliasing negative: two
+    /// distinct token_slot values produce distinct digests with everything else fixed.
+    #[cfg_attr(debug_assertions, ignore = "run with --release")]
+    #[test]
+    fn impa_v2_digest_layout_golden() {
+        let channel_id = sample_channel_id();
+        let prev = pubkey_hash(40);
+        let enc = ciphertext(50);
+        let nonce = Bytes32::from_u32_slice(&[6, 0, 0, 0, 0, 0, 0, 0]).unwrap();
+        let sender = pubkey_hash(10);
+        let recipient_pk = pubkey_hash(11);
+
+        let expected_words = [
+            vec![u32::from_be_bytes(*b"IMP2")],
+            channel_id.to_u32_vec(),
+            prev.to_u32_vec(),
+            enc.digest().to_u32_vec(),
+            nonce.to_u32_vec(),
+            vec![3u32], // token_slot: its OWN limb, directly after the nonce
+            sender.to_u32_vec(),
+            recipient_pk.to_u32_vec(),
+        ]
+        .concat();
+        assert_eq!(expected_words.len(), 43, "IMPA-v2 preimage is 43 u32 words");
+        assert_eq!(
+            ChannelTx::signing_digest(channel_id, prev, &enc, nonce, 3, sender, recipient_pk),
+            hash_words(&expected_words),
+            "IMPA-v2 layout must match the documented preimage exactly"
+        );
+
+        // Aliasing negative (TM-15): token_slot is binding on its own limb.
+        let d3 = ChannelTx::signing_digest(channel_id, prev, &enc, nonce, 3, sender, recipient_pk);
+        let d4 = ChannelTx::signing_digest(channel_id, prev, &enc, nonce, 4, sender, recipient_pk);
+        assert_ne!(
+            d3, d4,
+            "distinct token_slot values must produce distinct digests"
+        );
+        // All 10 slots pairwise distinct.
+        let all: Vec<Bytes32> = (0..MAX_CHANNEL_TOKENS as u8)
+            .map(|t| {
+                ChannelTx::signing_digest(channel_id, prev, &enc, nonce, t, sender, recipient_pk)
+            })
+            .collect();
+        for i in 0..all.len() {
+            for j in (i + 1)..all.len() {
+                assert_ne!(all[i], all[j]);
+            }
+        }
+    }
+
+    /// GOLDEN (detail2 §N-5, TM-7/TM-15): IMLD-v2 exact 13-word preimage layout
+    /// `[IML2, channel_id, deposit_nullifier(8), token_index, amount_lo, amount_hi,
+    /// depositor_slot]`, plus the own-limb aliasing negatives: distinct `(token_index, slot)`
+    /// pairs — including the swapped pair a bit-packed encoding would alias — produce distinct
+    /// digests.
+    #[cfg_attr(debug_assertions, ignore = "run with --release")]
+    #[test]
+    fn imld_v2_digest_layout_golden() {
+        let channel_id = sample_channel_id();
+        let nullifier = pubkey_hash(60);
+        let amount: u64 = 0x1234_5678_9abc_def0;
+
+        let expected_words = [
+            vec![u32::from_be_bytes(*b"IML2")],
+            channel_id.to_u32_vec(),
+            nullifier.to_u32_vec(),
+            vec![7u32],                                 // token_index: its OWN limb
+            vec![amount as u32, (amount >> 32) as u32], // amount_lo, amount_hi
+            vec![2u32],                                 // depositor_slot
+        ]
+        .concat();
+        assert_eq!(expected_words.len(), 14, "IMLD-v2 preimage is 14 u32 words");
+        assert_eq!(
+            l1_deposit_import_digest(channel_id, nullifier, 7, amount, 2),
+            hash_words(&expected_words),
+            "IMLD-v2 layout must match the documented preimage exactly"
+        );
+
+        // Aliasing negatives (TM-15): (token_index, depositor_slot) pairs are bound on separate
+        // limbs — the swapped pair (2, 7) vs (7, 2), which `(token << 16) | slot`-style packing
+        // could confuse with reordered fields, and single-coordinate changes, all differ.
+        let base = l1_deposit_import_digest(channel_id, nullifier, 7, amount, 2);
+        assert_ne!(
+            base,
+            l1_deposit_import_digest(channel_id, nullifier, 2, amount, 7),
+            "swapped (token_index, slot) must differ"
+        );
+        assert_ne!(
+            base,
+            l1_deposit_import_digest(channel_id, nullifier, 8, amount, 2),
+            "token_index is binding"
+        );
+        assert_ne!(
+            base,
+            l1_deposit_import_digest(channel_id, nullifier, 7, amount, 3),
+            "depositor_slot is binding"
+        );
+    }
+
+    /// GOLDEN (detail2 §N-6, TM-11): `token_funds_digest` exact 92-word preimage layout
+    /// `[IMTF, registry(10), token_count, amounts(10 x 8)]`, ALWAYS full width — the omission
+    /// negatives prove positions beyond `token_count` are still bound (no variable-length
+    /// truncation), and registry/count/amounts are each binding.
+    #[cfg_attr(debug_assertions, ignore = "run with --release")]
+    #[test]
+    fn token_funds_digest_golden_vector() {
+        let registry: [u32; MAX_CHANNEL_TOKENS] = std::array::from_fn(|t| 100 + t as u32);
+        let amounts: [U256; MAX_CHANNEL_TOKENS] =
+            std::array::from_fn(|t| U256::from(1000 + t as u32));
+        let token_count = 4u8;
+
+        let mut expected_words = vec![u32::from_be_bytes(*b"IMTF")];
+        expected_words.extend_from_slice(&registry);
+        expected_words.push(token_count as u32);
+        for amount in &amounts {
+            expected_words.extend(amount.to_u32_vec());
+        }
+        assert_eq!(expected_words.len(), 92, "TFD preimage is 92 u32 words");
+        let digest = token_funds_digest(&registry, token_count, &amounts);
+        assert_eq!(
+            digest,
+            hash_words(&expected_words),
+            "TFD layout must match the documented preimage exactly"
+        );
+        // Rust<->Solidity shared vector (multitoken Phase 3, TM-11): the SAME (registry, count,
+        // amounts) are hashed by `ChannelSettlementVerifier.tokenFundsDigest` in
+        // contracts/test/MultiTokenSettlement.t.sol
+        // (`test_tokenFundsDigest_matchesRustSharedVector`) and MUST produce this constant.
+        // Generated FROM THIS RUST SIDE — if the two sides disagree, fix Solidity, not this
+        // digest.
+        assert_eq!(
+            digest,
+            Bytes32::from_hex("0x44987e3ca1c57257dfd4e9f5d6cc165f341cc4a9e5e0de7b6c06595105d27278")
+                .unwrap(),
+            "TFD Rust<->Solidity shared-vector constant"
+        );
+
+        // OMISSION NEGATIVE (TM-11): with token_count = 4, positions >= 4 are STILL hashed —
+        // changing an "unused" registry limb or amount changes the digest (full-width preimage;
+        // a variable-length encoding would ignore them and alias).
+        let mut registry_tail = registry;
+        registry_tail[7] = 9999;
+        assert_ne!(
+            digest,
+            token_funds_digest(&registry_tail, token_count, &amounts),
+            "registry position beyond token_count must still be bound (full width)"
+        );
+        let mut amounts_tail = amounts;
+        amounts_tail[9] = U256::from(1u32);
+        assert_ne!(
+            digest,
+            token_funds_digest(&registry, token_count, &amounts_tail),
+            "amount position beyond token_count must still be bound (full width)"
+        );
+        // token_count itself is binding (same arrays, different active boundary).
+        assert_ne!(digest, token_funds_digest(&registry, 5, &amounts));
+        // And each active coordinate is binding.
+        let mut registry_head = registry;
+        registry_head[0] = 1;
+        assert_ne!(
+            digest,
+            token_funds_digest(&registry_head, token_count, &amounts)
+        );
+        let mut amounts_head = amounts;
+        amounts_head[0] = U256::from(1u32);
+        assert_ne!(
+            digest,
+            token_funds_digest(&registry, token_count, &amounts_head)
+        );
+    }
+
+    /// Multi-token close (§N-6, Phase 4 gate lift): `CloseIntent::new` now ACCEPTS a state
+    /// carrying nonzero non-genesis-token funds — those settle via per-token withdrawal claims
+    /// (Manager per-base-token accounting, Phase 3), NOT the burn leg. The intent must still
+    /// (a) bind the burn amount to `amounts[0]` (the genesis-token burn denomination) and
+    /// (b) snapshot the FULL fund vector into the IMCI preimage (TFD-bound on-chain).
+    #[cfg_attr(debug_assertions, ignore = "run with --release")]
+    #[test]
+    fn close_intent_accepts_nonzero_non_genesis_funds_and_binds_the_full_vector() {
+        let mut state = sample_state();
+        // Register a second token so amounts[1] is a REGISTERED position (§N-1 semantics).
+        state.balance_state.apply_token_register(55).unwrap();
+        state.channel_fund.amounts[1] = U256::from(5u32);
+        let state = state.with_computed_digest();
+        let close_tx = sample_close_withdrawal(&state);
+        let intent = CloseIntent::new(9, &state, &close_tx, 123)
+            .expect("multi-token close intent must build (per-token settlement landed, Phase 3)");
+        // The full per-token vector is snapshotted (TFD/IMCI binding source).
+        assert_eq!(
+            intent.channel_fund_snapshot.amounts,
+            state.channel_fund.amounts
+        );
+        // The burn leg still denominates EXACTLY amounts[0]: a burn_amount covering the non-
+        // genesis fund too must be refused (the non-ETH funds are claim-settled, never burned).
+        let mut bad_burn = sample_close_withdrawal(&state);
+        bad_burn.burn_amount = state.channel_fund.amounts[0] + state.channel_fund.amounts[1];
+        assert!(matches!(
+            CloseIntent::new(9, &state, &bad_burn, 123),
+            Err(ChannelError::InvalidCloseBinding(_))
+        ));
+        // And the two intents over different non-genesis funds hash differently (IMCI binds the
+        // widened 80-limb vector).
+        let mut state_b = sample_state();
+        state_b.balance_state.apply_token_register(55).unwrap();
+        state_b.channel_fund.amounts[1] = U256::from(6u32);
+        let state_b = state_b.with_computed_digest();
+        let close_tx_b = sample_close_withdrawal(&state_b);
+        let intent_b = CloseIntent::new(9, &state_b, &close_tx_b, 123).unwrap();
+        assert_ne!(intent.signing_digest(), intent_b.signing_digest());
+    }
+
+    /// detail2 §N-1: `token_register_next_state` is the canonical header-only registration step —
+    /// registry append + `state_version`/`epoch` bump with EVERYTHING else frozen; duplicate and
+    /// overflow registrations are refused by the underlying `apply_token_register` (TM-1).
+    #[cfg_attr(debug_assertions, ignore = "run with --release")]
+    #[test]
+    fn token_register_next_state_is_header_only_and_fail_closed() {
+        let prev = sample_state();
+        let next = token_register_next_state(&prev, 55).unwrap();
+        assert_eq!(
+            next.balance_state.token_count,
+            prev.balance_state.token_count + 1
+        );
+        assert_eq!(
+            next.balance_state.token_registry[prev.balance_state.token_count as usize],
+            55
+        );
+        assert_eq!(next.epoch, prev.epoch + 1);
+        assert_eq!(
+            next.balance_state.state_version,
+            prev.balance_state.state_version + 1
+        );
+        assert_eq!(next.prev_digest, prev.digest);
+        assert_eq!(next.digest, next.signing_digest());
+        assert!(next.member_signatures.is_empty());
+        // Full freeze of everything else.
+        assert_eq!(next.channel_fund, prev.channel_fund);
+        assert_eq!(
+            next.balance_state.enc_balances,
+            prev.balance_state.enc_balances
+        );
+        assert_eq!(
+            next.balance_state.pending_adds,
+            prev.balance_state.pending_adds
+        );
+        assert_eq!(next.balance_state.recipients, prev.balance_state.recipients);
+        assert_eq!(
+            next.balance_state.settled_tx_chain,
+            prev.balance_state.settled_tx_chain
+        );
+        assert_eq!(next.small_block_number, prev.small_block_number);
+        assert_eq!(next.h2_tag, Bytes32::default());
+        // Duplicate base index refused (the genesis registry already holds token 0).
+        assert!(token_register_next_state(&prev, 0).is_err());
     }
 }

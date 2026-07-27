@@ -21,7 +21,8 @@ use crate::{
     regev::{AmountWitness, RegevSecurityLevel, encrypt_amount},
     wallet_core::{
         BuiltSend, ChannelSnapshot, MemberKeys, SendPayload, add_signature, build_refresh,
-        build_send, decrypt_balance, sign_state, verify_send_transition, verify_snapshot,
+        build_send_token, decrypt_balance_token, resolve_local_token_slot, sign_state,
+        verify_send_transition, verify_snapshot,
     },
 };
 
@@ -34,12 +35,15 @@ struct Session {
     /// BALANCE-SLOT index (member OR delegate, `0..MAX_CHANNEL_MEMBERS = 1024`) — u16.
     slot: Option<u16>,
     snapshot: Option<ChannelSnapshot>,
-    /// The member's current balance + its encryption witness, present only when this wallet
-    /// freshly encrypted the slot (genesis contribution or a completed send). `None` after a
-    /// homomorphic receive (a refresh — not yet in this MVP — would restore it).
-    balance: Option<(u64, AmountWitness)>,
-    /// A send awaiting finalization: (next_state_digest, new_balance, new_witness).
-    pending_send: Option<(Bytes32, u64, AmountWitness)>,
+    /// The member's current balance + its encryption witness AT ONE token position (multitoken
+    /// §N-2 — the witness backs exactly one `(slot, token)` ciphertext):
+    /// `(token_slot, amount, witness)`. Present only when this wallet freshly encrypted that
+    /// position (genesis contribution at token 0, a completed send, or a refresh of the
+    /// position). `None` after a homomorphic receive (a refresh restores it).
+    balance: Option<(u8, u64, AmountWitness)>,
+    /// A send/refresh awaiting finalization:
+    /// (next_state_digest, token_slot, new_balance, new_witness).
+    pending_send: Option<(Bytes32, u8, u64, AmountWitness)>,
     /// SECURITY (B-1b, obligation 1): the L1 exit address this wallet SUBMITTED in its genesis
     /// contribution. Under Option B a joining delegate has no on-chain registration to cross-check
     /// its recipient, so a malicious relay could substitute a different address between the
@@ -176,7 +180,8 @@ pub fn wallet_genesis_contribution(balance: u64, recipient: String) -> Result<St
         let mut rng = rand010::rng();
         let (ct, witness) =
             encrypt_amount(&mut rng, &session.keys.regev_pk, balance).map_err(js_err)?;
-        session.balance = Some((balance, witness));
+        // Genesis contributions fund the GENESIS token position (0).
+        session.balance = Some((0, balance, witness));
         // SECURITY (B-1b, obligation 1): remember the exact address we asked to be paid, so import
         // can prove the cosigner-signed leaf binds THIS address and not a relay-substituted one.
         session.expected_recipient = Some(recipient_addr);
@@ -217,26 +222,73 @@ pub fn wallet_sign_state(slot: u16, state_json: String) -> Result<String, JsValu
                 "wallet_sign_state is genesis-only (epoch 1, state_version 0)",
             ));
         }
-        // Confirm our slot decrypts (sanity: we are signing a state we can read).
-        crate::regev::decrypt_amount(
-            &session.keys.regev_sk,
-            &state.balance_state.enc_balances[slot as usize],
-        )
-        .map_err(|e| js_err(format!("cannot decrypt own slot {slot}: {e}")))?;
+        // Confirm our slot decrypts at EVERY active token position (sanity: we are signing a
+        // state we can read; unused positions are the canonical zero ct — decrypts to 0 under
+        // any key, so this cannot false-negative on a token we do not hold).
+        for t in 0..state.balance_state.token_count as usize {
+            crate::regev::decrypt_amount(
+                &session.keys.regev_sk,
+                &state.balance_state.enc_balances[slot as usize][t],
+            )
+            .map_err(|e| js_err(format!("cannot decrypt own slot {slot} token {t}: {e}")))?;
+        }
         // Cosigner space: slot < member_count <= MAX_COSIGNERS (checked above), so u8 fits.
-        let sig: MemberSignature =
-            sign_state(&session.keys, slot as u8, &state).map_err(js_err)?;
+        let sig: MemberSignature = sign_state(&session.keys, slot as u8, &state).map_err(js_err)?;
         serde_json::to_string(&sig).map_err(js_err)
     })
+}
+
+/// One active token position's decrypted balance (multitoken §N-2).
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct TokenBalanceEntry {
+    /// LOCAL token slot (position in this channel's registry).
+    token_slot: u8,
+    /// BASE-layer token index the slot is registered for (`registry[token_slot]`).
+    token_index: u32,
+    balance: u64,
 }
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct BalanceReport {
     slot: u16,
+    /// GENESIS-token (local slot 0) balance — the wire-compat scalar kept for existing callers;
+    /// the per-token view is `balances`.
     balance: u64,
     can_send: bool,
     state_version: u64,
+    /// Per-token balances over ALL active registry positions (multitoken Phase 4).
+    balances: Vec<TokenBalanceEntry>,
+    /// The token position the held send-witness backs (None ⇒ cannot send any token until a
+    /// refresh). `can_send` refers to THIS position.
+    witness_token_slot: Option<u8>,
+}
+
+/// Build the standard per-token balance report for `slot` from a verified snapshot.
+fn balance_report(
+    session: &Session,
+    snapshot: &ChannelSnapshot,
+    slot: u16,
+) -> Result<BalanceReport, JsValue> {
+    let bs = &snapshot.state.balance_state;
+    let mut balances = Vec::with_capacity(bs.token_count as usize);
+    for t in 0..bs.token_count {
+        balances.push(TokenBalanceEntry {
+            token_slot: t,
+            token_index: bs.token_registry[t as usize],
+            balance: decrypt_balance_token(&session.keys, snapshot, slot, t).map_err(js_err)?,
+        });
+    }
+    let balance = balances.first().map(|b| b.balance).unwrap_or(0);
+    Ok(BalanceReport {
+        slot,
+        balance,
+        can_send: session.balance.is_some(),
+        state_version: bs.state_version,
+        balances,
+        witness_token_slot: session.balance.as_ref().map(|(t, _, _)| *t),
+    })
 }
 
 /// SECURITY (B-1b, obligation 1 from the recipient-binding adversarial review): a joining delegate
@@ -278,72 +330,83 @@ pub fn wallet_import_channel(snapshot_json: String) -> Result<String, JsValue> {
             .ok_or_else(|| js_err("this wallet's key is not a member of the imported channel"))?;
         verify_snapshot(&snapshot, Some((&session.keys, slot))).map_err(js_err)?;
         assert_own_recipient_bound(session, &snapshot, slot)?;
-        let balance = decrypt_balance(&session.keys, &snapshot, slot).map_err(js_err)?;
 
-        // Keep the witness only if the imported slot ciphertext is exactly the one we encrypted
-        // (genesis contribution / completed send). Otherwise we cannot send until a refresh.
-        let our_ct = &snapshot.state.balance_state.enc_balances[slot as usize];
+        // Keep the witness only if the imported (slot, token) ciphertext is exactly the one we
+        // encrypted (genesis contribution / completed send / refresh of that position).
+        // Otherwise we cannot send that token until a refresh.
         let can_send = match &session.balance {
-            Some((amt, w)) if *amt == balance => {
-                // Re-derive the ciphertext digest match by re-encrypting is not possible
+            Some((token_slot, amt, w)) => {
+                let ts = *token_slot as usize;
+                let bal_at = decrypt_balance_token(&session.keys, &snapshot, slot, *token_slot)
+                    .map_err(js_err)?;
+                // Re-deriving the ciphertext digest by re-encrypting is not possible
                 // (randomness differs); instead trust the witness iff the plaintext matches and
-                // the slot has no pending homomorphic adds.
-                snapshot.state.balance_state.pending_adds[slot as usize] == 0 && {
-                    let _ = w;
-                    true
-                }
+                // the position has no pending homomorphic adds.
+                *amt == bal_at
+                    && snapshot.state.balance_state.pending_adds[slot as usize][ts] == 0
+                    && {
+                        let _ = w;
+                        true
+                    }
             }
-            _ => false,
+            None => false,
         };
         if !can_send {
             session.balance = None;
         }
-        let report = BalanceReport {
-            slot,
-            balance,
-            can_send,
-            state_version: snapshot.state.balance_state.state_version,
-        };
+        let report = balance_report(session, &snapshot, slot)?;
         session.slot = Some(slot);
         session.snapshot = Some(snapshot);
         serde_json::to_string(&report).map_err(js_err)
     })
 }
 
-/// Report the current decrypted balance of this member's slot.
+/// Report the current decrypted balances of this member's slot: the token-0 scalar (wire
+/// compat) plus the per-token `balances` array over all active registry positions.
 #[wasm_bindgen]
 pub fn wallet_balance() -> Result<String, JsValue> {
     with_session(|session| {
         let slot = session.slot.ok_or_else(|| js_err("no channel imported"))?;
         let snapshot = session
             .snapshot
-            .as_ref()
+            .clone()
             .ok_or_else(|| js_err("no channel imported"))?;
-        let balance = decrypt_balance(&session.keys, snapshot, slot).map_err(js_err)?;
-        let report = BalanceReport {
-            slot,
-            balance,
-            can_send: session.balance.is_some(),
-            state_version: snapshot.state.balance_state.state_version,
-        };
+        let report = balance_report(session, &snapshot, slot)?;
         serde_json::to_string(&report).map_err(js_err)
     })
 }
 
-/// Send `amount` to `recipient_slot`: builds the E-1 proof, signs the `ChannelTx` and the proposed
-/// next state, and returns the `SendPayload` for the co-signers. The new balance is committed only
-/// once `wallet_finalize` receives the fully-signed state.
+/// Send `amount` of LOCAL token position `token_slot` (OPTIONAL — `undefined`/omitted = 0, the
+/// genesis token; multitoken §N-3) to `recipient_slot`: builds the E-1 proof, signs the
+/// `ChannelTx` (IMPA-v2 binds the token slot) and the proposed next state, and returns the
+/// `SendPayload` for the co-signers. The held witness must back exactly this token position
+/// (fail-closed otherwise — a refresh of the position restores it). The new balance is
+/// committed only once `wallet_finalize` receives the fully-signed state.
 #[wasm_bindgen]
-pub fn wallet_send(recipient_slot: u16, amount: u64) -> Result<String, JsValue> {
+pub fn wallet_send(
+    recipient_slot: u16,
+    amount: u64,
+    token_slot: Option<u8>,
+) -> Result<String, JsValue> {
+    let token_slot = token_slot.unwrap_or(0);
     with_session(|session| {
         let slot = session.slot.ok_or_else(|| js_err("no channel imported"))?;
         let snapshot = session
             .snapshot
             .clone()
             .ok_or_else(|| js_err("no channel imported"))?;
-        let (before_amount, before_witness) = session.balance.clone().ok_or_else(|| {
-            js_err("no spendable balance witness (a refresh is required after receiving)")
-        })?;
+        let (witness_token, before_amount, before_witness) =
+            session.balance.clone().ok_or_else(|| {
+                js_err("no spendable balance witness (a refresh is required after receiving)")
+            })?;
+        // The witness backs exactly ONE (slot, token) ciphertext — never sign an E-1 statement
+        // over a position the witness does not open.
+        if witness_token != token_slot {
+            return Err(js_err(format!(
+                "held balance witness is for token position {witness_token}, not {token_slot} — \
+                 refresh token {token_slot} first"
+            )));
+        }
         let mut rng = rand010::rng();
         let mut nonce_bytes = [0u32; 8];
         for w in nonce_bytes.iter_mut() {
@@ -354,11 +417,12 @@ pub fn wallet_send(recipient_slot: u16, amount: u64) -> Result<String, JsValue> 
             payload,
             new_balance_witness,
             new_balance,
-        } = build_send(
+        } = build_send_token(
             &session.keys,
             &snapshot,
             slot,
             recipient_slot,
+            token_slot,
             amount,
             before_amount,
             &before_witness,
@@ -372,6 +436,7 @@ pub fn wallet_send(recipient_slot: u16, amount: u64) -> Result<String, JsValue> 
         // wasm-built proofs is covered by tests/verify_wasm_proof.rs.)
         session.pending_send = Some((
             payload.proposed_next_state.digest,
+            token_slot,
             new_balance,
             new_balance_witness,
         ));
@@ -387,12 +452,17 @@ pub fn wallet_send(recipient_slot: u16, amount: u64) -> Result<String, JsValue> 
 /// `/api/inter/debit` (A members co-sign), then the descriptor + A's co-signed state to channel B's
 /// `/api/inter/credit`. The debit commits on `wallet_finalize` of A's co-signed state. Mirrors
 /// `wallet_send`.
+/// `token_index` (OPTIONAL — `undefined`/omitted = this channel's genesis `registry[0]`) is the
+/// BASE-layer token index to move (multitoken §N-4, TM-6): it must be registered in the SOURCE
+/// channel's registry (fail-closed otherwise), the held witness must back the resolved local
+/// position, and the destination channel resolves the same base index against its OWN registry.
 #[wasm_bindgen]
 pub fn wallet_send_inter_channel(
     to_channel: u32,
     to_slot: u16,
     amount: u64,
     dest_recipient_json: String,
+    token_index: Option<u32>,
 ) -> Result<String, JsValue> {
     #[derive(Deserialize)]
     #[serde(rename_all = "camelCase")]
@@ -412,9 +482,20 @@ pub fn wallet_send_inter_channel(
             .snapshot
             .clone()
             .ok_or_else(|| js_err("no channel imported"))?;
-        let (before_amount, before_witness) = session.balance.clone().ok_or_else(|| {
-            js_err("no spendable balance witness (a refresh is required after receiving)")
-        })?;
+        let (witness_token, before_amount, before_witness) =
+            session.balance.clone().ok_or_else(|| {
+                js_err("no spendable balance witness (a refresh is required after receiving)")
+            })?;
+        let token_index = token_index.unwrap_or(snapshot.state.balance_state.token_registry[0]);
+        // The held witness must back the LOCAL position this base token resolves to (TM-6).
+        let local_slot =
+            resolve_local_token_slot(&snapshot.state.balance_state, token_index).map_err(js_err)?;
+        if witness_token as usize != local_slot {
+            return Err(js_err(format!(
+                "held balance witness is for token position {witness_token}, but base token \
+                 {token_index} resolves to position {local_slot} — refresh that position first"
+            )));
+        }
         let dest: DestRecipient = serde_json::from_str(&dest_recipient_json).map_err(js_err)?;
         let dest_pk_g = Bytes32::from_hex(&dest.pk_g).map_err(js_err)?;
         let dest_channel =
@@ -426,7 +507,7 @@ pub fn wallet_send_inter_channel(
             *w = rand010::Rng::next_u32(&mut rng);
         }
         let new_nullifier_root = Bytes32::from_u32_slice(&nr).map_err(js_err)?;
-        let built = crate::wallet_core::build_inter_channel_send(
+        let built = crate::wallet_core::build_inter_channel_send_token(
             &session.keys,
             &snapshot,
             slot,
@@ -434,6 +515,7 @@ pub fn wallet_send_inter_channel(
             to_slot,
             dest.regev_pk,
             dest_pk_g,
+            token_index,
             amount,
             before_amount,
             &before_witness,
@@ -445,6 +527,7 @@ pub fn wallet_send_inter_channel(
         // The sender's debit commits when wallet_finalize receives channel A's co-signed state.
         session.pending_send = Some((
             built.debit_payload.proposed_next_state.digest,
+            witness_token,
             built.new_balance,
             built.new_balance_witness.clone(),
         ));
@@ -462,8 +545,15 @@ pub fn wallet_send_inter_channel(
 /// /partial-withdrawal-impl-plan.md). Returns `{ debitPayload, transferDescriptor }` — the
 /// browser POSTs `debitPayload` to `/api/cosign-burn` for N-of-N co-signing, then finalizes.
 /// Mirrors `wallet_send_inter_channel`.
+/// `token_index` (OPTIONAL — `undefined`/omitted = the genesis `registry[0]`) is the BASE token
+/// to burn (multitoken §N): the debit lands at the local position the source registry resolves,
+/// and the resulting L1 partial withdrawal pays out in that asset (IMPW binds `tokenIndex`).
 #[wasm_bindgen]
-pub fn wallet_burn_send(amount: u64, withdrawal_address_hex: String) -> Result<String, JsValue> {
+pub fn wallet_burn_send(
+    amount: u64,
+    withdrawal_address_hex: String,
+    token_index: Option<u32>,
+) -> Result<String, JsValue> {
     #[derive(Serialize)]
     #[serde(rename_all = "camelCase")]
     struct Out<'a> {
@@ -476,9 +566,19 @@ pub fn wallet_burn_send(amount: u64, withdrawal_address_hex: String) -> Result<S
             .snapshot
             .clone()
             .ok_or_else(|| js_err("no channel imported"))?;
-        let (before_amount, before_witness) = session.balance.clone().ok_or_else(|| {
-            js_err("no spendable balance witness (a refresh is required after receiving)")
-        })?;
+        let (witness_token, before_amount, before_witness) =
+            session.balance.clone().ok_or_else(|| {
+                js_err("no spendable balance witness (a refresh is required after receiving)")
+            })?;
+        let token_index = token_index.unwrap_or(snapshot.state.balance_state.token_registry[0]);
+        let local_slot =
+            resolve_local_token_slot(&snapshot.state.balance_state, token_index).map_err(js_err)?;
+        if witness_token as usize != local_slot {
+            return Err(js_err(format!(
+                "held balance witness is for token position {witness_token}, but base token \
+                 {token_index} resolves to position {local_slot} — refresh that position first"
+            )));
+        }
         let address = crate::ethereum_types::address::Address::from_hex(&withdrawal_address_hex)
             .map_err(js_err)?;
         let mut rng = rand010::rng();
@@ -487,11 +587,12 @@ pub fn wallet_burn_send(amount: u64, withdrawal_address_hex: String) -> Result<S
             *w = rand010::Rng::next_u32(&mut rng);
         }
         let new_nullifier_root = Bytes32::from_u32_slice(&nr).map_err(js_err)?;
-        let built = crate::wallet_core::build_burn_send(
+        let built = crate::wallet_core::build_burn_send_token(
             &session.keys,
             &snapshot,
             slot,
             address,
+            token_index,
             amount,
             before_amount,
             &before_witness,
@@ -502,6 +603,7 @@ pub fn wallet_burn_send(amount: u64, withdrawal_address_hex: String) -> Result<S
         .map_err(js_err)?;
         session.pending_send = Some((
             built.debit_payload.proposed_next_state.digest,
+            witness_token,
             built.new_balance,
             built.new_balance_witness.clone(),
         ));
@@ -513,25 +615,36 @@ pub fn wallet_burn_send(amount: u64, withdrawal_address_hex: String) -> Result<S
     })
 }
 
-/// Balance-refresh THIS wallet's own slot: re-encrypt the current balance to clean digits (same
-/// value) so the slot can SEND again after receiving (a received homomorphic credit blocks the next
-/// send until a refresh). Returns the `RefreshPayload` for the members to co-sign; once finalized,
-/// the slot is spendable again. Identical for a member or a delegate slot.
+/// Balance-refresh THIS wallet's own (slot, token) position: re-encrypt the current balance to
+/// clean digits (same value) so the position can SEND again after receiving (a received
+/// homomorphic credit blocks the next send until a refresh). `token_slot` (OPTIONAL —
+/// `undefined`/omitted = 0, the genesis token) selects the LOCAL token position (multitoken
+/// §B-3 × §N, TM-13 — refreshes are per (member, token); the verifier enforces any active
+/// selector). Returns the `RefreshPayload` for the members to co-sign; once finalized, the
+/// position is spendable again. Identical for a member or a delegate slot.
 #[wasm_bindgen]
-pub fn wallet_refresh() -> Result<String, JsValue> {
+pub fn wallet_refresh(token_slot: Option<u8>) -> Result<String, JsValue> {
+    let token_slot = token_slot.unwrap_or(0);
     with_session(|session| {
         let slot = session.slot.ok_or_else(|| js_err("no channel imported"))?;
         let snapshot = session
             .snapshot
             .clone()
             .ok_or_else(|| js_err("no channel imported"))?;
-        let value = decrypt_balance(&session.keys, &snapshot, slot).map_err(js_err)?;
+        let value =
+            decrypt_balance_token(&session.keys, &snapshot, slot, token_slot).map_err(js_err)?;
         let mut rng = rand010::rng();
         let (payload, new_witness) =
-            build_refresh(&session.keys, &snapshot, slot, LEVEL, &mut rng).map_err(js_err)?;
-        // The refreshed slot holds the SAME value with a fresh witness; commit it on finalize so
-        // the wallet can send again.
-        session.pending_send = Some((payload.proposed_next_state.digest, value, new_witness));
+            build_refresh(&session.keys, &snapshot, slot, token_slot, LEVEL, &mut rng)
+                .map_err(js_err)?;
+        // The refreshed position holds the SAME value with a fresh witness; commit it on
+        // finalize so the wallet can send that token again.
+        session.pending_send = Some((
+            payload.proposed_next_state.digest,
+            token_slot,
+            value,
+            new_witness,
+        ));
         serde_json::to_string(&payload).map_err(js_err)
     })
 }
@@ -616,12 +729,12 @@ pub fn wallet_finalize(state_json: String) -> Result<String, JsValue> {
         snapshot.state = next_state;
         verify_snapshot(&snapshot, Some((&session.keys, slot))).map_err(js_err)?;
         assert_own_recipient_bound(session, &snapshot, slot)?;
-        let balance = decrypt_balance(&session.keys, &snapshot, slot).map_err(js_err)?;
 
-        // Commit the pending send witness if this finalized state is the one we proposed.
+        // Commit the pending send/refresh witness (with its token position) if this finalized
+        // state is the one we proposed.
         let committed = match session.pending_send.take() {
-            Some((digest, new_balance, witness)) if digest == snapshot.state.digest => {
-                session.balance = Some((new_balance, witness));
+            Some((digest, token_slot, new_balance, witness)) if digest == snapshot.state.digest => {
+                session.balance = Some((token_slot, new_balance, witness));
                 true
             }
             _ => false,
@@ -630,12 +743,7 @@ pub fn wallet_finalize(state_json: String) -> Result<String, JsValue> {
             // We were recipient/uninvolved: our slot may now be a homomorphic sum → witness stale.
             session.balance = None;
         }
-        let report = BalanceReport {
-            slot,
-            balance,
-            can_send: session.balance.is_some(),
-            state_version: snapshot.state.balance_state.state_version,
-        };
+        let report = balance_report(session, &snapshot, slot)?;
         session.snapshot = Some(snapshot);
         serde_json::to_string(&report).map_err(js_err)
     })

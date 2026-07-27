@@ -14,14 +14,14 @@ use thiserror::Error;
 pub use crate::{common::channel::ChannelProofEnvelope, regev::RegevProofPurpose};
 use crate::{
     common::{
-        balance_state::settled_tx_chain_push,
+        balance_state::{BalanceState, settled_tx_chain_push},
         channel::{
             ChannelId, ChannelRecord, ChannelState, ChannelTransitionKind, ChannelTx,
             InterChannelTx, ProofBackend, TransitionProofRole, l1_deposit_import_digest,
-            validate_all_member_signatures,
+            token_register_next_state, validate_all_member_signatures,
         },
     },
-    constants::MAX_CHANNEL_MEMBERS,
+    constants::{MAX_CHANNEL_MEMBERS, MAX_CHANNEL_TOKENS},
     ethereum_types::{bytes32::Bytes32, u32limb_trait::U32LimbTrait as _, u256::U256},
     regev::{
         BALANCE_REFRESH_ZKP_DOMAIN, MAX_HOMO_ADDS_BEFORE_REFRESH, RealRegevProofVerifier,
@@ -48,8 +48,13 @@ pub struct ChannelStateUpdatePublicInputs {
     pub receiver_entry_count: u64,
     pub sender_user_id_hash: Bytes32,
     pub receiver_user_id_hash: Bytes32,
-    pub channel_fund_before: U256,
-    pub channel_fund_after: U256,
+    /// Per-token fund view (multitoken Phase 2b, TM-6/TM-7): the FULL `ChannelFund.amounts`
+    /// vector before/after the transition, aligned to the H1-committed `token_registry` (local
+    /// slot t = amounts\[t\]). ALWAYS full `MAX_CHANNEL_TOKENS` width — both in memory and in
+    /// `digest()` (10 × 8 = 80 fixed u32 limbs per side; TM-11 fixed-width discipline), matching
+    /// how the transition verifiers now move funds per token.
+    pub channel_fund_before: [U256; MAX_CHANNEL_TOKENS],
+    pub channel_fund_after: [U256; MAX_CHANNEL_TOKENS],
     pub unallocated_before: U256,
     pub unallocated_after: U256,
     pub shared_nullifier_before: Bytes32,
@@ -58,6 +63,13 @@ pub struct ChannelStateUpdatePublicInputs {
 }
 
 impl ChannelStateUpdatePublicInputs {
+    /// Keccak digest of the PI word stream. LAYOUT (multitoken Phase 2b): the two former 8-limb
+    /// `channel_fund_{before,after}` scalars are widened IN PLACE to the flat, ALWAYS-full-width
+    /// 80-limb `amounts[0..10]` vectors (before at the former before position, after at the
+    /// former after position) — same fixed-width injective discipline as the IMCH/IMCI amount
+    /// segment widening (each field keeps its own fixed-width slot; no length prefixes, so the
+    /// stream stays prefix-free per field). This digest has no domain word and is not signed —
+    /// it is the transport-proof PI hash rebuilt by both sides from independently checked data.
     pub fn digest(&self) -> Bytes32 {
         let words = [
             vec![self.kind as u32],
@@ -73,8 +85,14 @@ impl ChannelStateUpdatePublicInputs {
             split_u64(self.receiver_entry_count),
             self.sender_user_id_hash.to_u32_vec(),
             self.receiver_user_id_hash.to_u32_vec(),
-            self.channel_fund_before.to_u32_vec(),
-            self.channel_fund_after.to_u32_vec(),
+            self.channel_fund_before
+                .iter()
+                .flat_map(U256::to_u32_vec)
+                .collect(),
+            self.channel_fund_after
+                .iter()
+                .flat_map(U256::to_u32_vec)
+                .collect(),
             self.unallocated_before.to_u32_vec(),
             self.unallocated_after.to_u32_vec(),
             self.shared_nullifier_before.to_u32_vec(),
@@ -260,6 +278,9 @@ pub struct L1DepositImportUpdateWitness {
     pub next_state: ChannelState,
     pub amount: u64,
     pub deposit_nullifier: Bytes32,
+    /// BASE-layer `token_index` of the imported L1 deposit (spec.md §1.2 — no longer dropped;
+    /// detail2 §N-5, TM-7). Bound into the IMLD-v2 transition digest as its own limb.
+    pub token_index: u32,
     pub depositor_slot: usize,
 }
 
@@ -300,7 +321,29 @@ pub struct BalanceRefreshUpdateWitness {
     pub prev_state: ChannelState,
     pub next_state: ChannelState,
     pub member_index: usize,
+    /// LOCAL token position being refreshed (detail2 §B-3 × §N — TM-13: refreshes are per
+    /// (member, token)). Must be an ACTIVE registry position (`< token_count`); the verify
+    /// proves the ct replacement + counter reset happen at EXACTLY this position and every
+    /// other position of the member's row (ciphertexts AND counters) is frozen.
+    pub token_slot: usize,
     pub refresh_proof: ChannelProofEnvelope,
+}
+
+/// Witness for a `ChannelTransition::TokenRegister` (detail2 §N-1, TM-1/TM-9 — Phase 4
+/// dispatch): append the BASE `token_index` at local position `token_count`. Carries NO
+/// balance-state ZKP (`ChannelTransitionKind::required_state_backend()` is `None`): a
+/// registration mutates no ciphertext — the registry lives only in the H1 header, so the
+/// soundness gate is this witness verify (rebuild-equality against the canonical
+/// `token_register_next_state`) plus the N-of-N member signatures over the next state, whose H1
+/// commits the new registry.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TokenRegisterUpdateWitness {
+    pub channel_record: ChannelRecord,
+    pub prev_state: ChannelState,
+    pub next_state: ChannelState,
+    /// The BASE token_index being registered (the `TokenRegister` transition payload).
+    pub token_index: u32,
 }
 
 // ---------------------------------------------------------------------------
@@ -377,49 +420,102 @@ impl InChannelTransferUpdateWitness {
             self.prev_state.digest,
             &self.channel_tx.enc_amount,
             self.channel_tx.nonce,
+            self.channel_tx.token_slot,
             self.channel_tx.sender_pk_g,
             self.channel_tx.recipient_pk_g,
         );
-        // (e) Public ciphertext recomputation: the recipient slot is the homomorphic sum, the
-        // uninvolved member's slot is bit-identical.
-        let expected_recipient_slot = add_ciphertexts(
-            &self.prev_state.balance_state.enc_balances[self.recipient_index],
+        // (e-0) TM-8: the SIGNED token slot must be an active registry position of the signed
+        // prev state. Defense in depth: the layout bound (< MAX_CHANNEL_TOKENS) is checked
+        // explicitly BEFORE the token_count bound, even though `validate()` already forces
+        // `token_count <= MAX_CHANNEL_TOKENS` — the slot indexes fixed-width rows below and must
+        // never rely on a transitive argument for its range.
+        let token_slot = self.channel_tx.token_slot as usize;
+        if token_slot >= MAX_CHANNEL_TOKENS {
+            return Err(ChannelStateUpdateError::InvalidCiphertextTransition(
+                format!(
+                    "token_slot {token_slot} out of layout range (>= MAX_CHANNEL_TOKENS = \
+                     {MAX_CHANNEL_TOKENS}, TM-8)"
+                ),
+            ));
+        }
+        if token_slot >= self.prev_state.balance_state.token_count as usize {
+            return Err(ChannelStateUpdateError::InvalidCiphertextTransition(
+                format!(
+                    "token_slot {token_slot} out of range (>= token_count {}, TM-8)",
+                    self.prev_state.balance_state.token_count
+                ),
+            ));
+        }
+        // (e) Public ciphertext recomputation at the SIGNED token position (TM-2 binding triple,
+        // legs 2+3 natively): the recipient's `token_slot` position is the homomorphic sum;
+        // every other position of BOTH involved rows and every uninvolved slot row is
+        // bit-identical.
+        let expected_recipient_ct = add_ciphertexts(
+            &self.prev_state.balance_state.enc_balances[self.recipient_index][token_slot],
             &self.channel_tx.enc_amount,
         )
         .map_err(|err| ChannelStateUpdateError::InvalidCiphertextTransition(err.to_string()))?;
-        if self.next_state.balance_state.enc_balances[self.recipient_index]
-            != expected_recipient_slot
+        if self.next_state.balance_state.enc_balances[self.recipient_index][token_slot]
+            != expected_recipient_ct
         {
             return Err(ChannelStateUpdateError::InvalidCiphertextTransition(
-                "recipient slot must equal add_ciphertexts(prev_recipient_slot, enc_amount)"
+                "recipient position must equal add_ciphertexts(prev_recipient_ct, enc_amount)"
                     .to_string(),
             ));
         }
+        ensure_row_unchanged_except(
+            &self.prev_state,
+            &self.next_state,
+            self.recipient_index,
+            token_slot,
+        )?;
+        ensure_row_unchanged_except(
+            &self.prev_state,
+            &self.next_state,
+            self.sender_index,
+            token_slot,
+        )?;
         for index in 0..MAX_CHANNEL_MEMBERS {
             if index != self.sender_index && index != self.recipient_index {
                 ensure_slot_unchanged(&self.prev_state, &self.next_state, index)?;
             }
         }
-        // (f) D3 add counters: recipient +1 under the refresh budget, sender reset (fresh
-        // re-encryption), third member unchanged.
-        require_pending_add_increment(&self.prev_state, &self.next_state, self.recipient_index)?;
-        if self.next_state.balance_state.pending_adds[self.sender_index] != 0 {
+        // (f) D3 add counters per (slot, token) — TM-13: recipient position +1 under the refresh
+        // budget (its row otherwise frozen), sender position reset (fresh re-encryption, its row
+        // otherwise frozen), uninvolved slots' rows unchanged.
+        require_pending_add_increment(
+            &self.prev_state,
+            &self.next_state,
+            self.recipient_index,
+            token_slot,
+        )?;
+        if self.next_state.balance_state.pending_adds[self.sender_index][token_slot] != 0 {
             return Err(ChannelStateUpdateError::InvalidPendingAdds(
-                "sender slot is freshly re-encrypted; its pending_adds must reset to 0".to_string(),
+                "sender position is freshly re-encrypted; its pending_adds must reset to 0"
+                    .to_string(),
             ));
         }
+        require_pending_adds_unchanged_except(
+            &self.prev_state,
+            &self.next_state,
+            self.sender_index,
+            token_slot,
+        )?;
         for index in 0..MAX_CHANNEL_MEMBERS {
             if index != self.sender_index && index != self.recipient_index {
                 require_pending_adds_unchanged(&self.prev_state, &self.next_state, index)?;
             }
         }
-        // (g) Mandatory E-1 channelTxZKP, statement rebuilt from checked data.
+        // (g) Mandatory E-1 channelTxZKP, statement rebuilt from checked data. TM-2 leg 4: E-1
+        // is handed exactly the (prev, after) ciphertexts selected by the SIGNED token_slot.
         let statement = RegevStatement::ChannelTx {
             sender_pk: self.regev_pks[self.sender_index].clone(),
             recipient_pk: self.regev_pks[self.recipient_index].clone(),
-            before: self.prev_state.balance_state.enc_balances[self.sender_index].clone(),
+            before: self.prev_state.balance_state.enc_balances[self.sender_index][token_slot]
+                .clone(),
             enc_amount: self.channel_tx.enc_amount.clone(),
-            after: self.next_state.balance_state.enc_balances[self.sender_index].clone(),
+            after: self.next_state.balance_state.enc_balances[self.sender_index][token_slot]
+                .clone(),
         };
         regev_verifier.verify(
             &self.channel_tx.channel_tx_zkp,
@@ -442,11 +538,11 @@ impl InChannelTransferUpdateWitness {
             }
             decrypt_amount(
                 sk,
-                &self.next_state.balance_state.enc_balances[self.recipient_index],
+                &self.next_state.balance_state.enc_balances[self.recipient_index][token_slot],
             )
             .map_err(|err| {
                 ChannelStateUpdateError::InvalidDecryption(format!(
-                    "next recipient balance slot does not decrypt: {err}"
+                    "next recipient balance position does not decrypt: {err}"
                 ))
             })?;
         }
@@ -466,8 +562,10 @@ impl InChannelTransferUpdateWitness {
             receiver_entry_count: 1,
             sender_user_id_hash: hash_member(self.channel_tx.sender_pk_g),
             receiver_user_id_hash: hash_member(self.channel_tx.recipient_pk_g),
-            channel_fund_before: self.prev_state.channel_fund.amount,
-            channel_fund_after: self.next_state.channel_fund.amount,
+            // Per-token PI view (Phase 2b): the FULL fund vectors, registry-aligned (see the
+            // field doc on `ChannelStateUpdatePublicInputs`).
+            channel_fund_before: self.prev_state.channel_fund.amounts,
+            channel_fund_after: self.next_state.channel_fund.amounts,
             unallocated_before: self.prev_state.unallocated_confirmed_incoming,
             unallocated_after: self.next_state.unallocated_confirmed_incoming,
             shared_nullifier_before: self.prev_state.shared_native_nullifier_root,
@@ -547,14 +645,24 @@ impl InterChannelSendUpdateWitness {
         // an incremental insertion, so the binding insertion check cannot live here. (The
         // finalized accumulator root is ultimately attested by the N-of-N signature over
         // H1.) The transition CIRCUITS do NOT change.
-        // Fund decrease by the public amount.
-        if self.next_state.channel_fund.amount + u64_to_u256(self.amount)
-            != self.prev_state.channel_fund.amount
+        // TM-6 (source-side registry resolution, §N-4): the SIGNED descriptor carries the BASE
+        // token_index; resolve it against THIS channel's OWN H1-committed registry
+        // (`registry[ts] == token_index && ts < token_count`; unregistered ⇒ reject
+        // fail-closed). The fund decreases by the public amount at EXACTLY that local position;
+        // every other fund position is proven frozen.
+        let token_slot = resolve_token_slot(
+            &self.prev_state.balance_state,
+            self.inter_channel_tx.token_index,
+        )?;
+        if self.next_state.channel_fund.amounts[token_slot] + u64_to_u256(self.amount)
+            != self.prev_state.channel_fund.amounts[token_slot]
         {
             return Err(ChannelStateUpdateError::InvalidAmountRelation(
-                "channel fund must decrease by transfer amount".to_string(),
+                "channel fund must decrease by transfer amount at the resolved token position"
+                    .to_string(),
             ));
         }
+        ensure_funds_unchanged_except(&self.prev_state, &self.next_state, token_slot)?;
         ensure_same_u256(
             "unallocated_confirmed_incoming",
             self.prev_state.unallocated_confirmed_incoming,
@@ -569,25 +677,39 @@ impl InterChannelSendUpdateWitness {
         // The sender slot is located by its pubkey hash in the channel's member list.
         let sender_index =
             member_slot_index(&self.channel_record, self.inter_channel_tx.source_pk_g)?;
+        // TM-2/TM-6: the sender rebind happens at the REGISTRY-RESOLVED token position; all
+        // other positions of the sender row are frozen (the "others unchanged" leg), and every
+        // uninvolved row is bit-identical.
         for index in 0..MAX_CHANNEL_MEMBERS {
             if index != sender_index {
                 ensure_slot_unchanged(&self.prev_state, &self.next_state, index)?;
                 require_pending_adds_unchanged(&self.prev_state, &self.next_state, index)?;
             }
         }
-        if self.next_state.balance_state.pending_adds[sender_index] != 0 {
+        ensure_row_unchanged_except(&self.prev_state, &self.next_state, sender_index, token_slot)?;
+        if self.next_state.balance_state.pending_adds[sender_index][token_slot] != 0 {
             return Err(ChannelStateUpdateError::InvalidPendingAdds(
-                "sender slot is freshly re-encrypted; its pending_adds must reset to 0".to_string(),
+                "sender position is freshly re-encrypted; its pending_adds must reset to 0"
+                    .to_string(),
             ));
         }
+        require_pending_adds_unchanged_except(
+            &self.prev_state,
+            &self.next_state,
+            sender_index,
+            token_slot,
+        )?;
         let statement = RegevStatement::ChannelUpdate {
             sender_pk: self.regev_pks[sender_index].clone(),
             recipient_pk: self.destination_recipient_pk.clone(),
-            before: self.prev_state.balance_state.enc_balances[sender_index].clone(),
-            after: self.next_state.balance_state.enc_balances[sender_index].clone(),
+            before: self.prev_state.balance_state.enc_balances[sender_index][token_slot].clone(),
+            after: self.next_state.balance_state.enc_balances[sender_index][token_slot].clone(),
             sender_delta: self.inter_channel_tx.sender_delta_ct.clone(),
             receiver_delta: receiver_delta.amount.clone(),
             amount: self.amount,
+            // TM-6: the E-2 transcript binds the SAME signed base token_index the registry
+            // resolution above admitted.
+            token_index: self.inter_channel_tx.token_index,
         };
         regev_verifier.verify(
             &self.inter_channel_tx.channel_update_zkp,
@@ -613,8 +735,10 @@ impl InterChannelSendUpdateWitness {
             receiver_entry_count: 1,
             sender_user_id_hash: hash_member(self.inter_channel_tx.source_pk_g),
             receiver_user_id_hash: hash_member(receiver_delta.receiver_pk_g),
-            channel_fund_before: self.prev_state.channel_fund.amount,
-            channel_fund_after: self.next_state.channel_fund.amount,
+            // Per-token PI view (Phase 2b): the FULL fund vectors, registry-aligned (see the
+            // field doc on `ChannelStateUpdatePublicInputs`).
+            channel_fund_before: self.prev_state.channel_fund.amounts,
+            channel_fund_after: self.next_state.channel_fund.amounts,
             unallocated_before: self.prev_state.unallocated_confirmed_incoming,
             unallocated_after: self.next_state.unallocated_confirmed_incoming,
             shared_nullifier_before: self.prev_state.shared_native_nullifier_root,
@@ -677,13 +801,23 @@ impl InterChannelFundImportUpdateWitness {
         // check runs in the WALLET co-signer (`build_inter_channel_credit`) with the persisted
         // tree; the witness here lacks the frontier, so it cannot verify the incremental
         // insertion.
-        if self.next_state.channel_fund.amount
-            != self.prev_state.channel_fund.amount + u64_to_u256(self.amount)
+        // TM-6 (destination-side registry resolution, §N-4): the signed descriptor's BASE
+        // token_index must resolve against the DESTINATION channel's OWN H1-committed registry
+        // (unregistered ⇒ reject fail-closed), and the fund grows at exactly that local
+        // position; every other fund position is proven frozen.
+        let token_slot = resolve_token_slot(
+            &self.prev_state.balance_state,
+            self.inter_channel_tx.token_index,
+        )?;
+        if self.next_state.channel_fund.amounts[token_slot]
+            != self.prev_state.channel_fund.amounts[token_slot] + u64_to_u256(self.amount)
         {
             return Err(ChannelStateUpdateError::InvalidAmountRelation(
-                "channel fund must increase by imported amount".to_string(),
+                "channel fund must increase by imported amount at the resolved token position"
+                    .to_string(),
             ));
         }
+        ensure_funds_unchanged_except(&self.prev_state, &self.next_state, token_slot)?;
         if self.next_state.unallocated_confirmed_incoming
             != self.prev_state.unallocated_confirmed_incoming + u64_to_u256(self.amount)
         {
@@ -730,8 +864,10 @@ impl InterChannelFundImportUpdateWitness {
             receiver_entry_count: self.inter_channel_tx.receiver_deltas.len() as u64,
             sender_user_id_hash: hash_member(self.inter_channel_tx.source_pk_g),
             receiver_user_id_hash: hash_member(receiver_user_id),
-            channel_fund_before: self.prev_state.channel_fund.amount,
-            channel_fund_after: self.next_state.channel_fund.amount,
+            // Per-token PI view (Phase 2b): the FULL fund vectors, registry-aligned (see the
+            // field doc on `ChannelStateUpdatePublicInputs`).
+            channel_fund_before: self.prev_state.channel_fund.amounts,
+            channel_fund_after: self.next_state.channel_fund.amounts,
             unallocated_before: self.prev_state.unallocated_confirmed_incoming,
             unallocated_after: self.next_state.unallocated_confirmed_incoming,
             shared_nullifier_before: self.prev_state.shared_native_nullifier_root,
@@ -756,13 +892,25 @@ impl L1DepositImportUpdateWitness {
         verify_next_state_signatures(&self.channel_record, &self.next_state)?;
         require_h2_zero(&self.next_state)?;
         require_chain_push(&self.prev_state, &self.next_state, self.deposit_nullifier)?;
-        if self.next_state.channel_fund.amount
-            != self.prev_state.channel_fund.amount + u64_to_u256(self.amount)
+        // TM-7 (three-way binding, general resolution — §N-5): the deposit's base token_index
+        // must resolve via the SIGNED registry (`registry[t] == token_index && t < token_count`)
+        // to the local slot whose fund grows; an unregistered token_index is REJECTED
+        // fail-closed (never silently credited to token 0). Every other fund position is proven
+        // frozen. Leg (b) of the binding — the depositor leaf's position-t ciphertext being the
+        // credited one — is enforced by the co-signer gate's REBUILD-EQUALITY over the bundle
+        // step (`wallet_core::verify_l1_deposit_import_transition` reconstructs the canonical
+        // `l1_deposit_bundle_state` at the SAME resolved t and requires digest equality with
+        // the proposal); THIS fund-import step leaves every leaf bit-identical (checked below).
+        let token_slot = resolve_token_slot(&self.prev_state.balance_state, self.token_index)?;
+        if self.next_state.channel_fund.amounts[token_slot]
+            != self.prev_state.channel_fund.amounts[token_slot] + u64_to_u256(self.amount)
         {
             return Err(ChannelStateUpdateError::InvalidAmountRelation(
-                "channel fund must increase by deposited amount".to_string(),
+                "channel fund must increase by deposited amount at the resolved token position"
+                    .to_string(),
             ));
         }
+        ensure_funds_unchanged_except(&self.prev_state, &self.next_state, token_slot)?;
         if self.next_state.unallocated_confirmed_incoming
             != self.prev_state.unallocated_confirmed_incoming + u64_to_u256(self.amount)
         {
@@ -783,6 +931,7 @@ impl L1DepositImportUpdateWitness {
         let transition_digest = l1_deposit_import_digest(
             self.prev_state.channel_id,
             self.deposit_nullifier,
+            self.token_index,
             self.amount,
             self.depositor_slot as u16,
         );
@@ -800,8 +949,10 @@ impl L1DepositImportUpdateWitness {
             receiver_entry_count: 0,
             sender_user_id_hash: hash_member(depositor_pk_g),
             receiver_user_id_hash: hash_member(depositor_pk_g),
-            channel_fund_before: self.prev_state.channel_fund.amount,
-            channel_fund_after: self.next_state.channel_fund.amount,
+            // Per-token PI view (Phase 2b): the FULL fund vectors, registry-aligned (see the
+            // field doc on `ChannelStateUpdatePublicInputs`).
+            channel_fund_before: self.prev_state.channel_fund.amounts,
+            channel_fund_after: self.next_state.channel_fund.amounts,
             unallocated_before: self.prev_state.unallocated_confirmed_incoming,
             unallocated_after: self.next_state.unallocated_confirmed_incoming,
             shared_nullifier_before: self.prev_state.shared_native_nullifier_root,
@@ -876,27 +1027,49 @@ impl ReceiverBundleApplyUpdateWitness {
         // Stage 3 (uniform-leaf decision): the bundle apply is a second settle advancement; the
         // accumulator absorbs `tx_hash` again (the chain pushes tx_leaf, but the accumulator stores
         // tx_hash uniformly). STRONG tx_hash insertion check is in the WALLET co-signer.
-        // Recipient slot: public homomorphic-add recomputation; other slots untouched.
-        let expected_recipient_slot = add_ciphertexts(
-            &self.prev_state.balance_state.enc_balances[self.recipient_index],
+        // Recipient position: public homomorphic-add recomputation; other positions and slots
+        // untouched.
+        // TM-6 (destination-side registry resolution, §N-4): the credit lands at EXACTLY the
+        // local position this channel's OWN H1-committed registry maps the signed base
+        // token_index to (unregistered ⇒ reject fail-closed); all other positions of the
+        // recipient row are proven frozen (TM-2 "others unchanged" leg), which is also what
+        // makes the unversioned per-tx IMCK nullifier sound (one descriptor can never credit
+        // two token positions — see `PostCloseIncomingClaim::derive_shared_native_nullifier`).
+        let token_slot = resolve_token_slot(
+            &self.prev_state.balance_state,
+            self.inter_channel_tx.token_index,
+        )?;
+        let expected_recipient_ct = add_ciphertexts(
+            &self.prev_state.balance_state.enc_balances[self.recipient_index][token_slot],
             &receiver_delta.amount,
         )
         .map_err(|err| ChannelStateUpdateError::InvalidCiphertextTransition(err.to_string()))?;
-        if self.next_state.balance_state.enc_balances[self.recipient_index]
-            != expected_recipient_slot
+        if self.next_state.balance_state.enc_balances[self.recipient_index][token_slot]
+            != expected_recipient_ct
         {
             return Err(ChannelStateUpdateError::InvalidCiphertextTransition(
-                "recipient slot must equal add_ciphertexts(prev_recipient_slot, receiver_delta)"
+                "recipient position must equal add_ciphertexts(prev_recipient_ct, receiver_delta)"
                     .to_string(),
             ));
         }
+        ensure_row_unchanged_except(
+            &self.prev_state,
+            &self.next_state,
+            self.recipient_index,
+            token_slot,
+        )?;
         for index in 0..MAX_CHANNEL_MEMBERS {
             if index != self.recipient_index {
                 ensure_slot_unchanged(&self.prev_state, &self.next_state, index)?;
                 require_pending_adds_unchanged(&self.prev_state, &self.next_state, index)?;
             }
         }
-        require_pending_add_increment(&self.prev_state, &self.next_state, self.recipient_index)?;
+        require_pending_add_increment(
+            &self.prev_state,
+            &self.next_state,
+            self.recipient_index,
+            token_slot,
+        )?;
         // Re-verify the E-2 proof that was signed into the IMIT digest (flowReceive3). The
         // sender-side before/after ciphertexts come from the off-chain witness share — the STARK
         // transcript binds them, so a forged pair cannot verify.
@@ -908,6 +1081,9 @@ impl ReceiverBundleApplyUpdateWitness {
             sender_delta: self.inter_channel_tx.sender_delta_ct.clone(),
             receiver_delta: receiver_delta.amount.clone(),
             amount: self.amount,
+            // TM-6: the E-2 transcript binds the SAME signed base token_index this side's
+            // registry resolution admitted.
+            token_index: self.inter_channel_tx.token_index,
         };
         regev_verifier.verify(
             &self.inter_channel_tx.channel_update_zkp,
@@ -930,11 +1106,11 @@ impl ReceiverBundleApplyUpdateWitness {
             }
             decrypt_amount(
                 sk,
-                &self.next_state.balance_state.enc_balances[self.recipient_index],
+                &self.next_state.balance_state.enc_balances[self.recipient_index][token_slot],
             )
             .map_err(|err| {
                 ChannelStateUpdateError::InvalidDecryption(format!(
-                    "next recipient balance slot does not decrypt: {err}"
+                    "next recipient balance position does not decrypt: {err}"
                 ))
             })?;
         }
@@ -953,8 +1129,10 @@ impl ReceiverBundleApplyUpdateWitness {
             receiver_entry_count: 1,
             sender_user_id_hash: hash_member(self.inter_channel_tx.source_pk_g),
             receiver_user_id_hash: hash_member(receiver_delta.receiver_pk_g),
-            channel_fund_before: self.prev_state.channel_fund.amount,
-            channel_fund_after: self.next_state.channel_fund.amount,
+            // Per-token PI view (Phase 2b): the FULL fund vectors, registry-aligned (see the
+            // field doc on `ChannelStateUpdatePublicInputs`).
+            channel_fund_before: self.prev_state.channel_fund.amounts,
+            channel_fund_after: self.next_state.channel_fund.amounts,
             unallocated_before: self.prev_state.unallocated_confirmed_incoming,
             unallocated_after: self.next_state.unallocated_confirmed_incoming,
             shared_nullifier_before: self.prev_state.shared_native_nullifier_root,
@@ -1002,14 +1180,46 @@ impl BalanceRefreshUpdateWitness {
                 require_pending_adds_unchanged(&self.prev_state, &self.next_state, index)?;
             }
         }
-        // D3: the refresh resets the member's add counter (any value -> 0).
-        if self.next_state.balance_state.pending_adds[self.member_index] != 0 {
+        // D3 × TM-13: the refresh resets the member's add counter (any value -> 0) at the
+        // SELECTED token position; the other 9 positions of the member's row are frozen
+        // fail-closed (ciphertexts AND counters). TM-8: the selector must be an active registry
+        // position (layout bound checked first — see the in-channel path rationale).
+        let token_slot = self.token_slot;
+        if token_slot >= MAX_CHANNEL_TOKENS {
+            return Err(ChannelStateUpdateError::InvalidCiphertextTransition(
+                format!(
+                    "refresh token_slot {token_slot} out of layout range (>= MAX_CHANNEL_TOKENS \
+                     = {MAX_CHANNEL_TOKENS}, TM-8)"
+                ),
+            ));
+        }
+        if token_slot >= self.prev_state.balance_state.token_count as usize {
+            return Err(ChannelStateUpdateError::InvalidCiphertextTransition(
+                format!(
+                    "refresh token_slot {token_slot} out of range (>= token_count {}, TM-8)",
+                    self.prev_state.balance_state.token_count
+                ),
+            ));
+        }
+        if self.next_state.balance_state.pending_adds[self.member_index][token_slot] != 0 {
             return Err(ChannelStateUpdateError::InvalidPendingAdds(
                 "refresh must reset the member's pending_adds to 0".to_string(),
             ));
         }
-        let old_ct = &self.prev_state.balance_state.enc_balances[self.member_index];
-        let new_ct = &self.next_state.balance_state.enc_balances[self.member_index];
+        require_pending_adds_unchanged_except(
+            &self.prev_state,
+            &self.next_state,
+            self.member_index,
+            token_slot,
+        )?;
+        ensure_row_unchanged_except(
+            &self.prev_state,
+            &self.next_state,
+            self.member_index,
+            token_slot,
+        )?;
+        let old_ct = &self.prev_state.balance_state.enc_balances[self.member_index][token_slot];
+        let new_ct = &self.next_state.balance_state.enc_balances[self.member_index][token_slot];
         let statement = RegevStatement::BalanceRefresh {
             pk: self.regev_pks[self.member_index].clone(),
             old_ct: old_ct.clone(),
@@ -1021,9 +1231,18 @@ impl BalanceRefreshUpdateWitness {
             &statement,
         )?;
 
+        // Transition-digest preimage (multitoken Phase 2b): `token_slot` is appended as its OWN
+        // canonical u32 limb after `member_index` (TM-15 own-limb discipline). In-place widening
+        // under the retained IMRF word is sound here: this fixed-width preimage has exactly this
+        // one hashing site, is never signed, and is never recomputed in-circuit or on L1 — it
+        // only feeds the PI `transition_digest` both sides rebuild from checked data.
         let transition_digest = Bytes32::from_u32_slice(&solidity_keccak256(
             &[
-                vec![BALANCE_REFRESH_ZKP_DOMAIN, self.member_index as u32],
+                vec![
+                    BALANCE_REFRESH_ZKP_DOMAIN,
+                    self.member_index as u32,
+                    token_slot as u32,
+                ],
                 old_ct.digest().to_u32_vec(),
                 new_ct.digest().to_u32_vec(),
             ]
@@ -1044,8 +1263,10 @@ impl BalanceRefreshUpdateWitness {
             receiver_entry_count: 0,
             sender_user_id_hash: hash_member(member),
             receiver_user_id_hash: hash_member(member),
-            channel_fund_before: self.prev_state.channel_fund.amount,
-            channel_fund_after: self.next_state.channel_fund.amount,
+            // Per-token PI view (Phase 2b): the FULL fund vectors, registry-aligned (see the
+            // field doc on `ChannelStateUpdatePublicInputs`).
+            channel_fund_before: self.prev_state.channel_fund.amounts,
+            channel_fund_after: self.next_state.channel_fund.amounts,
             unallocated_before: self.prev_state.unallocated_confirmed_incoming,
             unallocated_after: self.next_state.unallocated_confirmed_incoming,
             shared_nullifier_before: self.prev_state.shared_native_nullifier_root,
@@ -1058,6 +1279,116 @@ impl BalanceRefreshUpdateWitness {
 // ---------------------------------------------------------------------------
 // Shared checks
 // ---------------------------------------------------------------------------
+
+impl TokenRegisterUpdateWitness {
+    /// Cosigner-side gate for a proposed `TokenRegister` transition (detail2 §N-1). MUST pass
+    /// before ANY member signs the proposed next state.
+    ///
+    /// SECURITY (TM-1/TM-9): this kind — and ONLY this kind — bypasses the registry/token_count
+    /// immutability equality of `verify_balance_state_common` (see the SECURITY comment there);
+    /// in exchange it enforces (c) the exact append semantics via
+    /// `BalanceState::verify_token_register_transition` (a single rebuild-equality covering
+    /// EVERY BalanceState field: balances, counters, recipients, chain, accumulator,
+    /// member/delegate counts, channel id), (d) an explicit freeze of every non-balance-state
+    /// channel field, and (e) a whole-`ChannelState` rebuild-equality against the canonical
+    /// deterministic builder `token_register_next_state` — the same
+    /// builder-shared-with-the-gate pattern as the deposit-import bundle step. N-of-N member
+    /// signatures over the next state (whose H1 header commits the new registry + token_count,
+    /// TM-9) authorize the registration like any other transition.
+    pub fn verify(&self) -> Result<ChannelStateUpdatePublicInputs, ChannelStateUpdateError> {
+        // (a) State linkage (digest self-consistency both sides, prev_digest chaining, epoch+1).
+        verify_state_linkage(&self.prev_state, &self.next_state)?;
+        // (b) Registry-agnostic common checks: `validate()` on both sides (canonical
+        //     ciphertexts, D3 budgets, TM-8 fail-close), channel-id consistency, strict
+        //     state_version+1, recipients immutability (B-1b).
+        verify_balance_state_shared(&self.channel_record, &self.prev_state, &self.next_state)?;
+        // (c) The registry append itself (TM-1): next.balance_state is EXACTLY prev +
+        //     apply_token_register(token_index) — append at prev.token_count only, injectivity
+        //     of the new base index against the active prefix, count+1, everything else
+        //     untouched (one rebuild-equality covers all fields).
+        BalanceState::verify_token_register_transition(
+            &self.prev_state.balance_state,
+            &self.next_state.balance_state,
+            self.token_index,
+        )
+        .map_err(|err| ChannelStateUpdateError::InvalidStateLinkage(err.to_string()))?;
+        // (d) FULL FREEZE of every non-balance-state channel field: a registration is a
+        //     header-only state change (§N-1) — no fund movement, no settle, no small block.
+        require_h2_zero(&self.next_state)?;
+        require_chain_unchanged(&self.prev_state, &self.next_state)?;
+        require_accumulator_unchanged(
+            self.prev_state.balance_state.settled_tx_accumulator_root,
+            self.next_state.balance_state.settled_tx_accumulator_root,
+        )?;
+        ensure_same_channel_fund(&self.prev_state, &self.next_state)?;
+        ensure_same_u256(
+            "unallocated_confirmed_incoming",
+            self.prev_state.unallocated_confirmed_incoming,
+            self.next_state.unallocated_confirmed_incoming,
+        )?;
+        ensure_same_root(
+            "shared_native_nullifier_root",
+            self.prev_state.shared_native_nullifier_root,
+            self.next_state.shared_native_nullifier_root,
+        )?;
+        if self.next_state.small_block_number != self.prev_state.small_block_number {
+            return Err(ChannelStateUpdateError::InvalidStateLinkage(
+                "small_block_number must remain unchanged across a TokenRegister transition"
+                    .to_string(),
+            ));
+        }
+        if self.next_state.close_freeze_nonce != self.prev_state.close_freeze_nonce {
+            return Err(ChannelStateUpdateError::InvalidStateLinkage(
+                "close_freeze_nonce must remain unchanged across a TokenRegister transition"
+                    .to_string(),
+            ));
+        }
+        // (e) Whole-state rebuild-equality against the canonical builder (defense in depth: any
+        //     residual field the explicit checks above might miss diverges the recomputed
+        //     signing digest — signatures are collected on top of the canonical state, so they
+        //     are excluded from the comparison).
+        let mut expected = token_register_next_state(&self.prev_state, self.token_index)
+            .map_err(|err| ChannelStateUpdateError::InvalidStateLinkage(err.to_string()))?;
+        expected.member_signatures = self.next_state.member_signatures.clone();
+        if expected != self.next_state {
+            return Err(ChannelStateUpdateError::InvalidStateLinkage(
+                "TokenRegister next state is not the canonical token_register_next_state(prev, \
+                 token_index) (full-freeze rebuild-equality, TM-1)"
+                    .to_string(),
+            ));
+        }
+        // (f) All-member signatures on the next state (structural completeness; the REAL
+        //     SingleSig verification is `verify_all_signatures` once the set is collected).
+        verify_next_state_signatures(&self.channel_record, &self.next_state)?;
+
+        Ok(ChannelStateUpdatePublicInputs {
+            kind: ChannelTransitionKind::TokenRegister,
+            channel_id: self.prev_state.channel_id,
+            prev_state_digest: self.prev_state.digest,
+            next_state_digest: self.next_state.digest,
+            amount: 0,
+            prev_state_version: self.prev_state.balance_state.state_version,
+            next_state_version: self.next_state.balance_state.state_version,
+            h2_tag: self.next_state.h2_tag,
+            prev_settled_tx_chain: self.prev_state.balance_state.settled_tx_chain,
+            next_settled_tx_chain: self.next_state.balance_state.settled_tx_chain,
+            receiver_entry_count: 0,
+            sender_user_id_hash: Bytes32::default(),
+            receiver_user_id_hash: Bytes32::default(),
+            channel_fund_before: self.prev_state.channel_fund.amounts,
+            channel_fund_after: self.next_state.channel_fund.amounts,
+            unallocated_before: self.prev_state.unallocated_confirmed_incoming,
+            unallocated_after: self.next_state.unallocated_confirmed_incoming,
+            shared_nullifier_before: self.prev_state.shared_native_nullifier_root,
+            shared_nullifier_after: self.next_state.shared_native_nullifier_root,
+            // A TokenRegister has no independently-signed transition message: the payload
+            // (token_index) is fully determined by the prev→next registry diff verified in (c),
+            // and the H1 header of the SIGNED next state commits the new registry (TM-9). Bind
+            // the PI to that signed digest.
+            transition_digest: self.next_state.digest,
+        })
+    }
+}
 
 fn verify_state_linkage(
     prev_state: &ChannelState,
@@ -1092,8 +1423,11 @@ fn verify_state_linkage(
 }
 
 /// Common balance-state checks for every transition: canonical ciphertexts and D3 budgets on
-/// both sides, channel-id consistency, and the strict `state_version` increment.
-fn verify_balance_state_common(
+/// both sides, channel-id consistency, and the strict `state_version` increment. This is the
+/// registry-agnostic core shared by ALL transition kinds INCLUDING `TokenRegister`; the
+/// registry/token_count immutability equality lives in [`verify_balance_state_common`] (every
+/// kind except `TokenRegister`) — see the SECURITY comment there.
+fn verify_balance_state_shared(
     record: &ChannelRecord,
     prev_state: &ChannelState,
     next_state: &ChannelState,
@@ -1132,6 +1466,40 @@ fn verify_balance_state_common(
         return Err(ChannelStateUpdateError::InvalidStateLinkage(
             "recipients must remain unchanged across a state transition (B-1b: recipient \
              changes are not a supported transition)"
+                .to_string(),
+        ));
+    }
+    Ok(())
+}
+
+/// [`verify_balance_state_shared`] PLUS the registry/token_count immutability equality — the
+/// common path called by every transition verifier EXCEPT [`TokenRegisterUpdateWitness`].
+///
+/// SECURITY (TM-1/TM-9, security-review MAJOR 1): the token registry and token_count are
+/// IMMUTABLE across every ordinary transition kind — the ONLY sanctioned way to change them is
+/// the dedicated `TokenRegister` transition, dispatched through
+/// [`TokenRegisterUpdateWitness::verify`] (Phase 4), which — and ONLY which — bypasses this
+/// equality and instead enforces `BalanceState::verify_token_register_transition`
+/// (append-at-token_count, injectivity, count+1) PLUS a full freeze of everything else
+/// (balances, counters, funds, chain, accumulator, recipients — rebuild-equality against the
+/// canonical `token_register_next_state`). Without this equality (mirroring the
+/// recipients-immutability check above), a malicious proposer could bundle a registry remap or a
+/// token_count bump into the next-state of any ordinary transfer/refresh/import and every
+/// cosigner would sign it — re-pointing local token slots at a different base token's L1 escrow
+/// under existing balances. Enforced unconditionally in this common path, which every transition
+/// verifier other than TokenRegister calls.
+fn verify_balance_state_common(
+    record: &ChannelRecord,
+    prev_state: &ChannelState,
+    next_state: &ChannelState,
+) -> Result<(), ChannelStateUpdateError> {
+    verify_balance_state_shared(record, prev_state, next_state)?;
+    if prev_state.balance_state.token_registry != next_state.balance_state.token_registry
+        || prev_state.balance_state.token_count != next_state.balance_state.token_count
+    {
+        return Err(ChannelStateUpdateError::InvalidStateLinkage(
+            "token_registry/token_count must remain unchanged across a state transition (TM-1/\
+             TM-9: only a dedicated TokenRegister transition may change them)"
                 .to_string(),
         ));
     }
@@ -1252,6 +1620,9 @@ pub fn require_accumulator_unchanged(
     Ok(())
 }
 
+/// The whole slot ROW (all `MAX_CHANNEL_TOKENS` ciphertext positions) must be bit-identical
+/// prev -> next. Multi-token note: rows are full 10-wide vectors, so this single equality covers
+/// every token position of an uninvolved slot (part of the TM-2 "others unchanged" obligation).
 fn ensure_slot_unchanged(
     prev_state: &ChannelState,
     next_state: &ChannelState,
@@ -1266,28 +1637,60 @@ fn ensure_slot_unchanged(
     Ok(())
 }
 
-/// D3 enforcement at the application point: the receiving slot's counter must be strictly below
-/// the refresh budget BEFORE the add, and must increment by exactly 1.
-fn require_pending_add_increment(
+/// TM-2 (binding triple, "other 9 unchanged" leg): every ciphertext position of slot `index`
+/// EXCEPT `token_slot` must be bit-identical prev -> next. Run on BOTH involved slots (sender and
+/// recipient) so a transition signed for one token cannot smuggle a mutation into another
+/// token's ciphertext of the same slot.
+fn ensure_row_unchanged_except(
     prev_state: &ChannelState,
     next_state: &ChannelState,
     index: usize,
+    token_slot: usize,
 ) -> Result<(), ChannelStateUpdateError> {
-    let before = prev_state.balance_state.pending_adds[index];
-    let after = next_state.balance_state.pending_adds[index];
-    if before >= MAX_HOMO_ADDS_BEFORE_REFRESH {
-        return Err(ChannelStateUpdateError::InvalidPendingAdds(format!(
-            "slot {index} has {before} pending adds; refresh required before another add (D3)"
-        )));
-    }
-    if after != before + 1 {
-        return Err(ChannelStateUpdateError::InvalidPendingAdds(format!(
-            "slot {index} pending_adds must increment by 1 (before {before}, after {after})"
-        )));
+    for t in 0..MAX_CHANNEL_TOKENS {
+        if t != token_slot
+            && prev_state.balance_state.enc_balances[index][t]
+                != next_state.balance_state.enc_balances[index][t]
+        {
+            return Err(ChannelStateUpdateError::InvalidCiphertextTransition(
+                format!(
+                    "balance slot {index} token position {t} must remain bit-identical (only \
+                 token_slot {token_slot} may change, TM-2)"
+                ),
+            ));
+        }
     }
     Ok(())
 }
 
+/// D3 enforcement at the application point, PER (slot, token) — TM-13: the receiving position's
+/// counter must be strictly below the refresh budget BEFORE the add, must increment by exactly
+/// 1, and every OTHER token position of the same slot must keep its counter (TM-2: pending_adds
+/// increments only at `(recipient, token_slot)`).
+fn require_pending_add_increment(
+    prev_state: &ChannelState,
+    next_state: &ChannelState,
+    index: usize,
+    token_slot: usize,
+) -> Result<(), ChannelStateUpdateError> {
+    let before = prev_state.balance_state.pending_adds[index][token_slot];
+    let after = next_state.balance_state.pending_adds[index][token_slot];
+    if before >= MAX_HOMO_ADDS_BEFORE_REFRESH {
+        return Err(ChannelStateUpdateError::InvalidPendingAdds(format!(
+            "slot {index} token {token_slot} has {before} pending adds; refresh required before \
+             another add (D3)"
+        )));
+    }
+    if after != before + 1 {
+        return Err(ChannelStateUpdateError::InvalidPendingAdds(format!(
+            "slot {index} token {token_slot} pending_adds must increment by 1 (before {before}, \
+             after {after})"
+        )));
+    }
+    require_pending_adds_unchanged_except(prev_state, next_state, index, token_slot)
+}
+
+/// The whole per-token counter ROW of slot `index` must be unchanged (all 10 positions).
 fn require_pending_adds_unchanged(
     prev_state: &ChannelState,
     next_state: &ChannelState,
@@ -1298,6 +1701,69 @@ fn require_pending_adds_unchanged(
         return Err(ChannelStateUpdateError::InvalidPendingAdds(format!(
             "pending_adds[{index}] must remain unchanged"
         )));
+    }
+    Ok(())
+}
+
+/// Every counter position of slot `index` EXCEPT `token_slot` must be unchanged (TM-2/TM-13).
+fn require_pending_adds_unchanged_except(
+    prev_state: &ChannelState,
+    next_state: &ChannelState,
+    index: usize,
+    token_slot: usize,
+) -> Result<(), ChannelStateUpdateError> {
+    for t in 0..MAX_CHANNEL_TOKENS {
+        if t != token_slot
+            && prev_state.balance_state.pending_adds[index][t]
+                != next_state.balance_state.pending_adds[index][t]
+        {
+            return Err(ChannelStateUpdateError::InvalidPendingAdds(format!(
+                "pending_adds[{index}][{t}] must remain unchanged (only token_slot {token_slot} \
+                 may change)"
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// TM-6/TM-7 (fail-closed registry resolution, §N-4/§N-5): the unique ACTIVE local token slot t
+/// with `token_registry[t] == token_index && t < token_count`. Uniqueness holds because
+/// `validate()` (run by `verify_balance_state_common` before any resolution) enforces
+/// injectivity of the active registry prefix (TM-1). An unregistered `token_index` is REJECTED —
+/// value for a token this channel has not cosigned into its registry must never move.
+fn resolve_token_slot(
+    balance_state: &crate::common::balance_state::BalanceState,
+    token_index: u32,
+) -> Result<usize, ChannelStateUpdateError> {
+    let token_count = (balance_state.token_count as usize).min(MAX_CHANNEL_TOKENS);
+    balance_state.token_registry[..token_count]
+        .iter()
+        .position(|&index| index == token_index)
+        .ok_or_else(|| {
+            ChannelStateUpdateError::InvalidAmountRelation(format!(
+                "base token_index {token_index} is not registered in this channel's active \
+                 registry (token_count {token_count}) — rejecting fail-closed (TM-6/TM-7)"
+            ))
+        })
+}
+
+/// P2 (per-token conservation): every fund position EXCEPT the registry-resolved `token_slot`
+/// must be unchanged across a transition that moves value in exactly one token (TM-2's
+/// "others unchanged" leg, applied to the fund vector).
+fn ensure_funds_unchanged_except(
+    prev_state: &ChannelState,
+    next_state: &ChannelState,
+    token_slot: usize,
+) -> Result<(), ChannelStateUpdateError> {
+    for t in 0..MAX_CHANNEL_TOKENS {
+        if t != token_slot
+            && prev_state.channel_fund.amounts[t] != next_state.channel_fund.amounts[t]
+        {
+            return Err(ChannelStateUpdateError::InvalidAmountRelation(format!(
+                "channel_fund.amounts[{t}] must remain unchanged (only the resolved token \
+                 position {token_slot} may change, P2)"
+            )));
+        }
     }
     Ok(())
 }
@@ -1592,7 +2058,7 @@ mod tests {
 
         let fund = ChannelFund {
             channel_id,
-            amount: U256::from(100u32),
+            amounts: ChannelFund::single_token_amounts(U256::from(100u32)),
             intmax_state_root: Bytes32::default(),
         };
         let prev_state = ChannelState {
@@ -1605,7 +2071,7 @@ mod tests {
                 channel_id,
                 member_count: 3,
                 delegate_count: 0,
-                enc_balances: BalanceState::pad_enc_balances(&[
+                enc_balances: BalanceState::pad_enc_balances_token0(&[
                     before_s.0.clone(),
                     before_r.0.clone(),
                     before_t.0.clone(),
@@ -1619,7 +2085,9 @@ mod tests {
                 settled_tx_chain: Bytes32::default(),
                 settled_tx_accumulator_root: Bytes32::default(),
                 state_version: 3,
-                pending_adds: BalanceState::pad_pending_adds(&[0, 2, 0]),
+                pending_adds: BalanceState::pad_pending_adds_token0(&[0, 2, 0]),
+                token_registry: BalanceState::single_token_registry(0),
+                token_count: 1,
             },
             h2_tag: Bytes32::default(),
             shared_native_nullifier_root: Bytes32::default(),
@@ -1635,7 +2103,7 @@ mod tests {
                 channel_id,
                 member_count: 3,
                 delegate_count: 0,
-                enc_balances: BalanceState::pad_enc_balances(&[
+                enc_balances: BalanceState::pad_enc_balances_token0(&[
                     after_s.0.clone(),
                     after_r.clone(),
                     before_t.0.clone(),
@@ -1649,7 +2117,9 @@ mod tests {
                 settled_tx_chain: Bytes32::default(),
                 settled_tx_accumulator_root: Bytes32::default(),
                 state_version: 4,
-                pending_adds: BalanceState::pad_pending_adds(&[0, 3, 0]),
+                pending_adds: BalanceState::pad_pending_adds_token0(&[0, 3, 0]),
+                token_registry: BalanceState::single_token_registry(0),
+                token_count: 1,
             },
             prev_digest: prev_state.digest,
             ..prev_state.clone()
@@ -1657,6 +2127,7 @@ mod tests {
         .with_computed_digest();
 
         let channel_tx = ChannelTx {
+            token_slot: 0,
             recipient_pk_g: pubkey_hash(20),
             enc_amount: enc_amount.0,
             nonce: Bytes32::from_u32_slice(&[7, 7, 7, 7, 0, 0, 0, 0]).unwrap(),
@@ -1745,11 +2216,11 @@ mod tests {
         let mut fixture = in_channel_fixture();
         // Re-add the amount a second time (double credit) — public recomputation catches it.
         let double = add_ciphertexts(
-            &fixture.witness.next_state.balance_state.enc_balances[1],
+            &fixture.witness.next_state.balance_state.enc_balances[1][0],
             &fixture.witness.channel_tx.enc_amount,
         )
         .unwrap();
-        fixture.witness.next_state.balance_state.enc_balances[1] = double;
+        fixture.witness.next_state.balance_state.enc_balances[1][0] = double;
         fixture.witness.next_state = fixture.witness.next_state.clone().with_computed_digest();
         assert!(matches!(
             fixture.witness.verify(&VERIFIER),
@@ -1783,13 +2254,44 @@ mod tests {
         ));
     }
 
+    /// TM-1/TM-9 (security-review MAJOR 1): the token registry and token_count are IMMUTABLE
+    /// across every current transition kind — an otherwise-valid transfer whose next-state
+    /// remaps a registry entry (re-pointing a local token slot at a DIFFERENT base token's L1
+    /// escrow) or bumps token_count (activating a token position without a cosigned
+    /// TokenRegister) MUST be rejected by `verify_balance_state_common` before any cosigner
+    /// signs. Both mutations keep the next state `validate()`-clean, so this pins the dedicated
+    /// immutability equality (InvalidStateLinkage), not an incidental canonicality rejection.
+    #[test]
+    fn in_channel_transfer_rejects_token_registry_remap_and_count_bump() {
+        // Registry remap: local token slot 0 re-pointed from base token 0 to base token 42.
+        let mut fixture = in_channel_fixture();
+        fixture.witness.next_state.balance_state.token_registry[0] = 42;
+        fixture.witness.next_state = fixture.witness.next_state.clone().with_computed_digest();
+        assert!(matches!(
+            fixture.witness.verify(&VERIFIER),
+            Err(ChannelStateUpdateError::InvalidStateLinkage(_))
+        ));
+
+        // token_count bump (with a fresh injective registry entry, so next.validate() passes and
+        // the immutability equality is what fires).
+        let mut fixture = in_channel_fixture();
+        fixture.witness.next_state.balance_state.token_registry[1] = 42;
+        fixture.witness.next_state.balance_state.token_count = 2;
+        fixture.witness.next_state = fixture.witness.next_state.clone().with_computed_digest();
+        assert!(matches!(
+            fixture.witness.verify(&VERIFIER),
+            Err(ChannelStateUpdateError::InvalidStateLinkage(_))
+        ));
+    }
+
     #[test]
     fn in_channel_transfer_rejects_pending_adds_at_budget() {
         let mut fixture = in_channel_fixture();
         // Recipient slot already at the refresh budget: the add MUST be refused (D3).
-        fixture.witness.prev_state.balance_state.pending_adds[1] = MAX_HOMO_ADDS_BEFORE_REFRESH;
+        fixture.witness.prev_state.balance_state.pending_adds[1][0] = MAX_HOMO_ADDS_BEFORE_REFRESH;
         fixture.witness.prev_state = fixture.witness.prev_state.clone().with_computed_digest();
-        fixture.witness.next_state.balance_state.pending_adds[1] = MAX_HOMO_ADDS_BEFORE_REFRESH + 1;
+        fixture.witness.next_state.balance_state.pending_adds[1][0] =
+            MAX_HOMO_ADDS_BEFORE_REFRESH + 1;
         fixture.witness.next_state.prev_digest = fixture.witness.prev_state.digest;
         fixture.witness.next_state = fixture.witness.next_state.clone().with_computed_digest();
         // Either the budget gate or the next-state validate() (pending_adds > MAX) must fire.
@@ -1835,6 +2337,531 @@ mod tests {
         assert!(matches!(
             fixture.witness.verify(&VERIFIER),
             Err(ChannelStateUpdateError::ProofVerification(_))
+        ));
+    }
+
+    // ===================================================================================
+    // TM-2 (multitoken Phase 2b) — the token binding triple on the generalized (non-genesis)
+    // in-channel path. Every test documents WHICH leg of the triple it proves an adversary
+    // cannot break; the fixture transfers TOKEN SLOT 1 of a 2-token channel so a missing
+    // binding cannot hide behind the genesis default.
+    // ===================================================================================
+
+    /// Base token_index registered at local slot 1 of the two-token fixture (nonzero on
+    /// purpose).
+    const TOKEN1_BASE_INDEX: u32 = 55;
+
+    /// Two-token fixture: registry `[0, 55]`, `token_count = 2`; members hold independent
+    /// balances at BOTH token positions; the built transfer moves 7 of TOKEN SLOT 1 from
+    /// member 0 to member 1 with a real position-1 E-1 proof.
+    struct TwoTokenFixture {
+        witness: InChannelTransferUpdateWitness,
+        sks: Vec<RegevSk>,
+        /// A spare, REAL token-0 E-1 proof + its (enc_amount, after) ciphertexts over the SAME
+        /// sender/recipient keys (for the cross-position proof-substitution negative).
+        token0_proof: Vec<u8>,
+        token0_enc_amount: RegevCiphertext,
+        token0_after: RegevCiphertext,
+    }
+
+    fn two_token_registry() -> [u32; MAX_CHANNEL_TOKENS] {
+        let mut registry = [0u32; MAX_CHANNEL_TOKENS];
+        registry[1] = TOKEN1_BASE_INDEX;
+        registry
+    }
+
+    fn two_token_fixture() -> TwoTokenFixture {
+        let mut rng = SmallRng::seed_from_u64(20262);
+        let channel_id = ChannelId::new(6).unwrap();
+        let (pk0, sk0) = channel_keygen(&mut rng);
+        let (pk1, sk1) = channel_keygen(&mut rng);
+        let (pk2, sk2) = channel_keygen(&mut rng);
+        let pks = pad_pks(&[pk0, pk1, pk2]);
+
+        let record = ChannelRecord {
+            channel_id,
+            member_count: 3,
+            delegate_count: 0,
+            member_pk_gs: pad_hashes(&[pubkey_hash(10), pubkey_hash(20), pubkey_hash(30)]),
+            member_pubkeys_root: Bytes32::from_u32_slice(&[1, 1, 1, 1, 0, 0, 0, 0]).unwrap(),
+            bp_member_slot: 0,
+            special_close_penalty: U256::from(7u32),
+            close_freeze_nonce: 0,
+            status: ChannelStatus::Active,
+            regev_pk_root: regev_pk_root(&pks),
+        };
+
+        // Token 0 balances (bystanders for this transfer).
+        let s0 = encrypt_amount(&mut rng, &pks[0], 50).unwrap();
+        let r0 = encrypt_amount(&mut rng, &pks[1], 10).unwrap();
+        let t0 = encrypt_amount(&mut rng, &pks[2], 30).unwrap();
+        // Token 1 balances: member 0 holds 40, member 1 holds 5, member 2 holds nothing
+        // (canonical zero position).
+        let s1 = encrypt_amount(&mut rng, &pks[0], 40).unwrap();
+        let r1 = encrypt_amount(&mut rng, &pks[1], 5).unwrap();
+
+        // The token-1 transfer: 7 from member 0 to member 1.
+        let enc_amount1 = encrypt_amount(&mut rng, &pks[1], 7).unwrap();
+        let after_s1 = encrypt_amount(&mut rng, &pks[0], 33).unwrap();
+        let after_r1 = add_ciphertexts(&r1.0, &enc_amount1.0).unwrap();
+        let proof1 = prove_channel_tx(
+            RegevSecurityLevel::Test,
+            &pks[0],
+            &pks[1],
+            (&s1.0, &s1.1),
+            (&enc_amount1.0, &enc_amount1.1),
+            (&after_s1.0, &after_s1.1),
+        )
+        .unwrap();
+
+        // A REAL spare token-0 E-1 (same parties) for the proof-substitution negative.
+        let enc_amount0 = encrypt_amount(&mut rng, &pks[1], 7).unwrap();
+        let after_s0 = encrypt_amount(&mut rng, &pks[0], 43).unwrap();
+        let proof0 = prove_channel_tx(
+            RegevSecurityLevel::Test,
+            &pks[0],
+            &pks[1],
+            (&s0.0, &s0.1),
+            (&enc_amount0.0, &enc_amount0.1),
+            (&after_s0.0, &after_s0.1),
+        )
+        .unwrap();
+
+        let row = |a: &RegevCiphertext,
+                   b: &RegevCiphertext|
+         -> crate::common::balance_state::TokenCiphertexts {
+            let mut row = crate::common::balance_state::zero_token_row();
+            row[0] = a.clone();
+            row[1] = b.clone();
+            row
+        };
+        let zero1 = crate::regev::RegevCiphertext::padding();
+
+        let fund = ChannelFund {
+            channel_id,
+            amounts: {
+                let mut amounts = ChannelFund::single_token_amounts(U256::from(90u32));
+                amounts[1] = U256::from(45u32);
+                amounts
+            },
+            intmax_state_root: Bytes32::default(),
+        };
+        let prev_state = ChannelState {
+            channel_id,
+            epoch: 1,
+            small_block_number: 0,
+            close_freeze_nonce: 0,
+            channel_fund: fund.clone(),
+            balance_state: BalanceState {
+                channel_id,
+                member_count: 3,
+                delegate_count: 0,
+                enc_balances: BalanceState::pad_enc_balances(&[
+                    row(&s0.0, &s1.0),
+                    row(&r0.0, &r1.0),
+                    row(&t0.0, &zero1),
+                ]),
+                regev_pk_digests: BalanceState::pad_regev_pk_digests(&[]),
+                recipients: BalanceState::pad_recipients(&[
+                    recipient(10),
+                    recipient(20),
+                    recipient(30),
+                ]),
+                settled_tx_chain: Bytes32::default(),
+                settled_tx_accumulator_root: Bytes32::default(),
+                state_version: 3,
+                pending_adds: {
+                    let mut rows = BalanceState::pad_pending_adds_token0(&[0, 0, 0]);
+                    rows[1][1] = 2; // recipient's token-1 counter has prior credits
+                    rows
+                },
+                token_registry: two_token_registry(),
+                token_count: 2,
+            },
+            h2_tag: Bytes32::default(),
+            shared_native_nullifier_root: Bytes32::default(),
+            unallocated_confirmed_incoming: U256::zero(),
+            prev_digest: Bytes32::default(),
+            digest: Bytes32::default(),
+            member_signatures: signatures_for(&record),
+        }
+        .with_computed_digest();
+        let next_state = ChannelState {
+            epoch: 2,
+            balance_state: BalanceState {
+                enc_balances: BalanceState::pad_enc_balances(&[
+                    row(&s0.0, &after_s1.0),
+                    row(&r0.0, &after_r1),
+                    row(&t0.0, &zero1),
+                ]),
+                state_version: 4,
+                pending_adds: {
+                    let mut rows = BalanceState::pad_pending_adds_token0(&[0, 0, 0]);
+                    rows[1][1] = 3; // +1 at exactly (recipient, token 1)
+                    rows
+                },
+                ..prev_state.balance_state.clone()
+            },
+            prev_digest: prev_state.digest,
+            ..prev_state.clone()
+        }
+        .with_computed_digest();
+
+        let channel_tx = ChannelTx {
+            token_slot: 1,
+            recipient_pk_g: pubkey_hash(20),
+            enc_amount: enc_amount1.0,
+            nonce: Bytes32::from_u32_slice(&[7, 7, 7, 7, 0, 0, 0, 0]).unwrap(),
+            channel_tx_zkp: ChannelProofEnvelope {
+                role: TransitionProofRole::ChannelStateUpdate,
+                backend: ProofBackend::Plonky3,
+                proof: proof1,
+            },
+            sender_pk_g: pubkey_hash(10),
+            sender_hash_sig: vec![1, 2, 3],
+            sender_pk_b: pubkey_hash(40),
+        };
+
+        TwoTokenFixture {
+            witness: InChannelTransferUpdateWitness {
+                channel_record: record,
+                regev_pks: pks,
+                prev_state,
+                next_state,
+                channel_tx,
+                sender_index: 0,
+                recipient_index: 1,
+                recipient_sk: None,
+                expected_amount: None,
+            },
+            sks: vec![sk0, sk1, sk2],
+            token0_proof: proof0,
+            token0_enc_amount: enc_amount0.0,
+            token0_after: after_s0.0,
+        }
+    }
+
+    /// Completeness of the LIFTED gate: a token-slot-1 transfer with a real position-1 E-1 and a
+    /// correctly-folded next state VERIFIES, the recipient decrypts the amount at position 1,
+    /// and the transition digest binds token_slot 1 (differs from the same tx signed for slot
+    /// 0).
+    #[test]
+    fn in_channel_transfer_token1_happy_path() {
+        let fixture = two_token_fixture();
+        let pis = fixture
+            .witness
+            .verify(&VERIFIER)
+            .expect("token-1 transfer must verify");
+        assert_eq!(pis.kind, ChannelTransitionKind::InChannelTransfer);
+        // The transition digest commits token_slot in its own IMPA-v2 limb.
+        let tx = &fixture.witness.channel_tx;
+        let slot0_digest = ChannelTx::signing_digest(
+            fixture.witness.prev_state.channel_id,
+            fixture.witness.prev_state.digest,
+            &tx.enc_amount,
+            tx.nonce,
+            0,
+            tx.sender_pk_g,
+            tx.recipient_pk_g,
+        );
+        assert_ne!(pis.transition_digest, slot0_digest);
+
+        // Recipient decryption at position 1.
+        let mut fixture = two_token_fixture();
+        fixture.witness.recipient_sk = Some(fixture.sks[1].clone());
+        fixture.witness.expected_amount = Some(7);
+        fixture.witness.verify(&VERIFIER).unwrap();
+    }
+
+    /// TM-2 leg 2 (signed slot == mutated position), direction "sign token A, apply token B": a
+    /// state fold that moves TOKEN 1 while the SIGNED `token_slot` says 0 must be rejected — the
+    /// public recomputation runs at the signed position and finds it untouched.
+    #[test]
+    fn in_channel_transfer_rejects_signed_token_a_applied_token_b() {
+        let mut fixture = two_token_fixture();
+        fixture.witness.channel_tx.token_slot = 0;
+        assert!(matches!(
+            fixture.witness.verify(&VERIFIER),
+            Err(ChannelStateUpdateError::InvalidCiphertextTransition(_))
+        ));
+    }
+
+    /// TM-2 leg 2, complementary direction: a tx SIGNED for token 1 whose next state instead
+    /// mutates token 0 of the involved rows is rejected (the signed position's recomputation
+    /// fails; the token-0 mutation additionally trips the "others unchanged" leg).
+    #[test]
+    fn in_channel_transfer_rejects_apply_at_unsigned_position() {
+        let mut fixture = two_token_fixture();
+        // Craft a next state that leaves token 1 untouched and instead installs the spare
+        // token-0 transfer at position 0.
+        let prev = &fixture.witness.prev_state;
+        let mut enc_balances = prev.balance_state.enc_balances.clone();
+        enc_balances[0][0] = fixture.token0_after.clone();
+        enc_balances[1][0] = add_ciphertexts(
+            &prev.balance_state.enc_balances[1][0],
+            &fixture.token0_enc_amount,
+        )
+        .unwrap();
+        fixture.witness.next_state.balance_state.enc_balances = enc_balances;
+        fixture.witness.next_state = fixture.witness.next_state.clone().with_computed_digest();
+        assert!(matches!(
+            fixture.witness.verify(&VERIFIER),
+            Err(ChannelStateUpdateError::InvalidCiphertextTransition(_))
+        ));
+    }
+
+    /// TM-2 leg 2 ("the ONLY position of 10 whose ct changes"): a bystander-ciphertext mutation
+    /// at ANOTHER token position — on the SENDER row and on the RECIPIENT row — is rejected even
+    /// when the signed position's fold is perfectly valid.
+    #[test]
+    fn in_channel_transfer_rejects_bystander_ciphertext_mutation() {
+        // Sender row, token 0 (a valid-looking fresh ciphertext, not garbage).
+        let mut fixture = two_token_fixture();
+        fixture.witness.next_state.balance_state.enc_balances[0][0] = fixture.token0_after.clone();
+        fixture.witness.next_state = fixture.witness.next_state.clone().with_computed_digest();
+        assert!(matches!(
+            fixture.witness.verify(&VERIFIER),
+            Err(ChannelStateUpdateError::InvalidCiphertextTransition(_))
+        ));
+
+        // Recipient row, token 0 (a plausible homomorphic credit at the WRONG position).
+        let mut fixture = two_token_fixture();
+        let smuggled = add_ciphertexts(
+            &fixture.witness.prev_state.balance_state.enc_balances[1][0],
+            &fixture.token0_enc_amount,
+        )
+        .unwrap();
+        fixture.witness.next_state.balance_state.enc_balances[1][0] = smuggled;
+        fixture.witness.next_state = fixture.witness.next_state.clone().with_computed_digest();
+        assert!(matches!(
+            fixture.witness.verify(&VERIFIER),
+            Err(ChannelStateUpdateError::InvalidCiphertextTransition(_))
+        ));
+    }
+
+    /// TM-2 leg 3 (`pending_adds` increments only at `(recipient, token_slot)`): an extra
+    /// counter bump at another token position of the recipient row, or at an uninvolved slot's
+    /// row, is rejected.
+    #[test]
+    fn in_channel_transfer_rejects_pending_adds_at_wrong_position() {
+        // Wrong token position of the recipient row.
+        let mut fixture = two_token_fixture();
+        fixture.witness.next_state.balance_state.pending_adds[1][0] += 1;
+        fixture.witness.next_state = fixture.witness.next_state.clone().with_computed_digest();
+        assert!(matches!(
+            fixture.witness.verify(&VERIFIER),
+            Err(ChannelStateUpdateError::InvalidPendingAdds(_))
+        ));
+
+        // Uninvolved slot's row (member 2), signed token position.
+        let mut fixture = two_token_fixture();
+        fixture.witness.next_state.balance_state.pending_adds[2][1] += 1;
+        fixture.witness.next_state = fixture.witness.next_state.clone().with_computed_digest();
+        assert!(matches!(
+            fixture.witness.verify(&VERIFIER),
+            Err(ChannelStateUpdateError::InvalidPendingAdds(_))
+        ));
+
+        // Missing increment at the signed position (recipient counter frozen).
+        let mut fixture = two_token_fixture();
+        fixture.witness.next_state.balance_state.pending_adds[1][1] -= 1;
+        fixture.witness.next_state = fixture.witness.next_state.clone().with_computed_digest();
+        assert!(matches!(
+            fixture.witness.verify(&VERIFIER),
+            Err(ChannelStateUpdateError::InvalidPendingAdds(_))
+        ));
+    }
+
+    /// TM-2 leg 4 (E-1 handed exactly the ciphertexts selected by the SIGNED token_slot): a REAL
+    /// E-1 proof generated over the token-0 ciphertexts must NOT verify a token-1 transfer —
+    /// the statement is rebuilt from the position the signed slot selects, so the transcript
+    /// diverges.
+    #[test]
+    fn in_channel_transfer_rejects_cross_position_e1_proof() {
+        let mut fixture = two_token_fixture();
+        fixture.witness.channel_tx.channel_tx_zkp.proof = fixture.token0_proof.clone();
+        assert!(matches!(
+            fixture.witness.verify(&VERIFIER),
+            Err(ChannelStateUpdateError::ProofVerification(_))
+        ));
+    }
+
+    /// TM-8, signed-bound variant: a SIGNED `token_slot >= token_count` is rejected before any
+    /// position is touched (both the first inactive position and the layout bound).
+    #[test]
+    fn in_channel_transfer_rejects_token_slot_beyond_token_count() {
+        // token_slot = 2 with token_count = 2 (first inactive position).
+        let mut fixture = two_token_fixture();
+        fixture.witness.channel_tx.token_slot = 2;
+        match fixture.witness.verify(&VERIFIER) {
+            Err(ChannelStateUpdateError::InvalidCiphertextTransition(msg)) => {
+                assert!(msg.contains("token_count"), "wrong rejection: {msg}");
+            }
+            other => panic!("expected token_count range rejection, got {other:?}"),
+        }
+
+        // token_slot = 10 and 255 (layout bound, TM-8 defense in depth).
+        for bad in [MAX_CHANNEL_TOKENS as u8, u8::MAX] {
+            let mut fixture = two_token_fixture();
+            fixture.witness.channel_tx.token_slot = bad;
+            match fixture.witness.verify(&VERIFIER) {
+                Err(ChannelStateUpdateError::InvalidCiphertextTransition(msg)) => {
+                    assert!(msg.contains("MAX_CHANNEL_TOKENS"), "wrong rejection: {msg}");
+                }
+                other => panic!("expected layout-bound rejection, got {other:?}"),
+            }
+        }
+    }
+
+    /// TM-8, doctored-header variant: an adversary shrinking BOTH states' `token_count` to 1
+    /// (trying to reinterpret the active/inactive boundary under the same balances) is rejected
+    /// fail-closed — `validate()` refuses nonzero ciphertexts beyond the claimed count before
+    /// any position logic runs.
+    #[test]
+    fn in_channel_transfer_rejects_doctored_token_count_header() {
+        let mut fixture = two_token_fixture();
+        fixture.witness.prev_state.balance_state.token_count = 1;
+        fixture.witness.prev_state.balance_state.token_registry = [0u32; MAX_CHANNEL_TOKENS];
+        fixture.witness.prev_state = fixture.witness.prev_state.clone().with_computed_digest();
+        fixture.witness.next_state.balance_state.token_count = 1;
+        fixture.witness.next_state.balance_state.token_registry = [0u32; MAX_CHANNEL_TOKENS];
+        fixture.witness.next_state.prev_digest = fixture.witness.prev_state.digest;
+        fixture.witness.next_state = fixture.witness.next_state.clone().with_computed_digest();
+        assert!(matches!(
+            fixture.witness.verify(&VERIFIER),
+            Err(ChannelStateUpdateError::InvalidCiphertextTransition(_))
+        ));
+    }
+
+    /// TM-13 at the generalized position: the D3 budget gate applies per (slot, token) — a
+    /// recipient whose TOKEN-1 counter is at the budget refuses another token-1 credit.
+    #[test]
+    fn in_channel_transfer_rejects_budget_exhaustion_at_token1() {
+        let mut fixture = two_token_fixture();
+        fixture.witness.prev_state.balance_state.pending_adds[1][1] = MAX_HOMO_ADDS_BEFORE_REFRESH;
+        fixture.witness.prev_state = fixture.witness.prev_state.clone().with_computed_digest();
+        fixture.witness.next_state.balance_state.pending_adds[1][1] =
+            MAX_HOMO_ADDS_BEFORE_REFRESH + 1;
+        fixture.witness.next_state.prev_digest = fixture.witness.prev_state.digest;
+        fixture.witness.next_state = fixture.witness.next_state.clone().with_computed_digest();
+        assert!(matches!(
+            fixture.witness.verify(&VERIFIER),
+            Err(ChannelStateUpdateError::InvalidPendingAdds(_)
+                | ChannelStateUpdateError::InvalidCiphertextTransition(_))
+        ));
+    }
+
+    // ===================================================================================
+    // TM-13 (multitoken Phase 2b) — refresh per (member, token): the token selector picks
+    // EXACTLY one position; every other position's ciphertext AND counter is frozen.
+    // ===================================================================================
+
+    /// A refresh witness over the two-token fixture: member 1 refreshes TOKEN SLOT 1 (counter 2
+    /// -> 0) while their token-0 counter (set to 1) and ciphertext must stay untouched.
+    fn two_token_refresh_fixture() -> BalanceRefreshUpdateWitness {
+        let mut rng = SmallRng::seed_from_u64(20263);
+        let base = two_token_fixture();
+        let mut prev_state = base.witness.prev_state.clone();
+        // Token-0 credits pending on the refreshing member's row — must survive the refresh.
+        prev_state.balance_state.pending_adds[1][0] = 1;
+        let prev_state = prev_state.with_computed_digest();
+
+        let old_ct = prev_state.balance_state.enc_balances[1][1].clone();
+        let (new_ct, proof) = crate::regev::prove_balance_refresh(
+            &mut rng,
+            RegevSecurityLevel::Test,
+            &base.witness.regev_pks[1],
+            &base.sks[1],
+            &old_ct,
+        )
+        .unwrap();
+
+        let mut next_state = ChannelState {
+            epoch: prev_state.epoch + 1,
+            balance_state: BalanceState {
+                state_version: prev_state.balance_state.state_version + 1,
+                ..prev_state.balance_state.clone()
+            },
+            prev_digest: prev_state.digest,
+            ..prev_state.clone()
+        };
+        next_state.balance_state.enc_balances[1][1] = new_ct;
+        next_state.balance_state.pending_adds[1][1] = 0;
+        let next_state = next_state.with_computed_digest();
+
+        BalanceRefreshUpdateWitness {
+            channel_record: base.witness.channel_record.clone(),
+            regev_pks: base.witness.regev_pks.clone(),
+            prev_state,
+            next_state,
+            member_index: 1,
+            token_slot: 1,
+            refresh_proof: ChannelProofEnvelope {
+                role: TransitionProofRole::ChannelStateUpdate,
+                backend: ProofBackend::Plonky3,
+                proof,
+            },
+        }
+    }
+
+    /// TM-13 completeness: refreshing (member 1, token 1) verifies, and token 0 of the same row
+    /// (ciphertext AND counter) is untouched by construction — pinned by explicit equality.
+    #[test]
+    fn balance_refresh_token1_happy_path_leaves_token0_untouched() {
+        let w = two_token_refresh_fixture();
+        let pis = w.verify(&VERIFIER).expect("token-1 refresh must verify");
+        assert_eq!(pis.kind, ChannelTransitionKind::BalanceRefresh);
+        assert_eq!(
+            w.prev_state.balance_state.enc_balances[1][0],
+            w.next_state.balance_state.enc_balances[1][0],
+        );
+        assert_eq!(w.next_state.balance_state.pending_adds[1][0], 1);
+        assert_eq!(w.next_state.balance_state.pending_adds[1][1], 0);
+    }
+
+    /// TM-13: a refresh that ALSO resets the counter at an unselected position (token 0) is
+    /// rejected — the reset happens at exactly (member, token_slot).
+    #[test]
+    fn balance_refresh_rejects_counter_reset_at_unselected_position() {
+        let mut w = two_token_refresh_fixture();
+        w.next_state.balance_state.pending_adds[1][0] = 0;
+        w.next_state = w.next_state.with_computed_digest();
+        assert!(matches!(
+            w.verify(&VERIFIER),
+            Err(ChannelStateUpdateError::InvalidPendingAdds(_))
+        ));
+    }
+
+    /// TM-13/TM-2: a refresh that replaces the ciphertext at an unselected position of the
+    /// member's row is rejected.
+    #[test]
+    fn balance_refresh_rejects_ciphertext_swap_at_unselected_position() {
+        let mut w = two_token_refresh_fixture();
+        // Move the refreshed ct into token 0 as well (a plausible-looking fresh ciphertext).
+        w.next_state.balance_state.enc_balances[1][0] =
+            w.next_state.balance_state.enc_balances[1][1].clone();
+        w.next_state = w.next_state.with_computed_digest();
+        assert!(matches!(
+            w.verify(&VERIFIER),
+            Err(ChannelStateUpdateError::InvalidCiphertextTransition(_))
+        ));
+    }
+
+    /// TM-8: a refresh selector beyond the active registry (or the layout) is rejected before
+    /// any position is touched.
+    #[test]
+    fn balance_refresh_rejects_out_of_range_token_slot() {
+        let mut w = two_token_refresh_fixture();
+        w.token_slot = 2;
+        assert!(matches!(
+            w.verify(&VERIFIER),
+            Err(ChannelStateUpdateError::InvalidCiphertextTransition(_))
+        ));
+        let mut w = two_token_refresh_fixture();
+        w.token_slot = MAX_CHANNEL_TOKENS;
+        assert!(matches!(
+            w.verify(&VERIFIER),
+            Err(ChannelStateUpdateError::InvalidCiphertextTransition(_))
         ));
     }
 
@@ -1951,14 +2978,14 @@ mod tests {
             close_freeze_nonce: 0,
             channel_fund: ChannelFund {
                 channel_id,
-                amount: prev_fund,
+                amounts: ChannelFund::single_token_amounts(prev_fund),
                 intmax_state_root: Bytes32::default(),
             },
             balance_state: BalanceState {
                 channel_id,
                 member_count: 3,
                 delegate_count: 0,
-                enc_balances: BalanceState::pad_enc_balances(&[]),
+                enc_balances: BalanceState::pad_enc_balances_token0(&[]),
                 regev_pk_digests: BalanceState::pad_regev_pk_digests(&[]),
                 recipients: BalanceState::pad_recipients(&[
                     recipient(10),
@@ -1968,7 +2995,9 @@ mod tests {
                 settled_tx_chain: prev_chain,
                 settled_tx_accumulator_root: Bytes32::default(),
                 state_version: 5,
-                pending_adds: BalanceState::pad_pending_adds(&[0, 0, 0]),
+                pending_adds: BalanceState::pad_pending_adds_token0(&[0, 0, 0]),
+                token_registry: BalanceState::single_token_registry(0),
+                token_count: 1,
             },
             h2_tag: Bytes32::default(),
             shared_native_nullifier_root: prev_nullifier_root,
@@ -1983,14 +3012,14 @@ mod tests {
             small_block_number: 11,
             channel_fund: ChannelFund {
                 channel_id,
-                amount: next_fund,
+                amounts: ChannelFund::single_token_amounts(next_fund),
                 intmax_state_root: Bytes32::default(),
             },
             balance_state: BalanceState {
                 channel_id,
                 member_count: 3,
                 delegate_count: 0,
-                enc_balances: BalanceState::pad_enc_balances(&[]),
+                enc_balances: BalanceState::pad_enc_balances_token0(&[]),
                 regev_pk_digests: BalanceState::pad_regev_pk_digests(&[]),
                 recipients: BalanceState::pad_recipients(&[
                     recipient(10),
@@ -2000,7 +3029,9 @@ mod tests {
                 settled_tx_chain: next_chain,
                 settled_tx_accumulator_root: Bytes32::default(),
                 state_version: 6,
-                pending_adds: BalanceState::pad_pending_adds(&[0, 0, 0]),
+                pending_adds: BalanceState::pad_pending_adds_token0(&[0, 0, 0]),
+                token_registry: BalanceState::single_token_registry(0),
+                token_count: 1,
             },
             shared_native_nullifier_root: next_nullifier_root,
             unallocated_confirmed_incoming: next_unalloc,
@@ -2015,6 +3046,8 @@ mod tests {
             next_state,
             amount,
             deposit_nullifier,
+            // Genesis token (registry[0] = 0): the only importable token until Phase 2.
+            token_index: 0,
             depositor_slot: 0,
         }
     }
@@ -2032,7 +3065,8 @@ mod tests {
     #[cfg_attr(debug_assertions, ignore = "run with --release")]
     fn l1_deposit_import_rejects_wrong_fund() {
         let mut w = l1_deposit_import_fixture();
-        w.next_state.channel_fund.amount = w.prev_state.channel_fund.amount + U256::from(999u32);
+        w.next_state.channel_fund.amounts[0] =
+            w.prev_state.channel_fund.amounts[0] + U256::from(999u32);
         w.next_state = w.next_state.with_computed_digest();
         w.next_state.member_signatures = signatures_for(&w.channel_record);
         w.next_state = w.next_state.with_computed_digest();
@@ -2058,7 +3092,7 @@ mod tests {
         let mut w = l1_deposit_import_fixture();
         let (pk, _sk) = channel_keygen(&mut rng);
         let (ct, _witness) = encrypt_amount(&mut rng, &pk, 100).unwrap();
-        w.next_state.balance_state.enc_balances[0] = ct;
+        w.next_state.balance_state.enc_balances[0][0] = ct;
         w.next_state = w.next_state.with_computed_digest();
         w.next_state.member_signatures = signatures_for(&w.channel_record);
         w.next_state = w.next_state.with_computed_digest();
@@ -2097,5 +3131,203 @@ mod tests {
         w.next_state.member_signatures = signatures_for(&w.channel_record);
         w.next_state = w.next_state.with_computed_digest();
         assert!(w.verify().is_err());
+    }
+
+    // --- TM-7 (multitoken Phase 2b): general registry resolution for deposit imports ---
+
+    /// Rebuild the single-token fixture as a 2-token channel (registry `[0, 55]`) whose deposit
+    /// carries base token_index 55 and whose fund grows at LOCAL POSITION 1.
+    fn l1_deposit_import_two_token_fixture() -> L1DepositImportUpdateWitness {
+        let mut w = l1_deposit_import_fixture();
+        let register = |state: &mut ChannelState| {
+            state.balance_state.token_registry = two_token_registry();
+            state.balance_state.token_count = 2;
+        };
+        register(&mut w.prev_state);
+        w.prev_state = w.prev_state.clone().with_computed_digest();
+        register(&mut w.next_state);
+        // Move the fund delta from position 0 to position 1 (the resolved slot for index 55).
+        let amount = w.next_state.channel_fund.amounts[0] - w.prev_state.channel_fund.amounts[0];
+        w.next_state.channel_fund.amounts[0] = w.prev_state.channel_fund.amounts[0];
+        w.next_state.channel_fund.amounts[1] = w.prev_state.channel_fund.amounts[1] + amount;
+        w.next_state.prev_digest = w.prev_state.digest;
+        w.next_state = w.next_state.clone().with_computed_digest();
+        w.token_index = TOKEN1_BASE_INDEX;
+        w
+    }
+
+    /// TM-7 completeness: a deposit of a registered NON-genesis token resolves to its local slot
+    /// and credits `channel_fund.amounts[1]`.
+    #[test]
+    #[cfg_attr(debug_assertions, ignore = "run with --release")]
+    fn l1_deposit_import_token1_happy_path() {
+        let w = l1_deposit_import_two_token_fixture();
+        let pis = w.verify().expect("token-1 deposit import must verify");
+        assert_eq!(pis.kind, ChannelTransitionKind::L1DepositImport);
+        assert_eq!(
+            pis.channel_fund_after[1],
+            pis.channel_fund_before[1] + u64_to_u256(w.amount)
+        );
+        assert_eq!(pis.channel_fund_after[0], pis.channel_fund_before[0]);
+    }
+
+    /// TM-7 fail-closed: a deposit whose base token_index is NOT in the channel's active
+    /// registry is rejected — never silently credited to any position.
+    #[test]
+    #[cfg_attr(debug_assertions, ignore = "run with --release")]
+    fn l1_deposit_import_rejects_unregistered_token_index() {
+        let mut w = l1_deposit_import_two_token_fixture();
+        w.token_index = 77;
+        match w.verify() {
+            Err(ChannelStateUpdateError::InvalidAmountRelation(msg)) => {
+                assert!(msg.contains("not registered"), "wrong rejection: {msg}");
+            }
+            other => panic!("expected unregistered-token rejection, got {other:?}"),
+        }
+    }
+
+    /// TM-7 (P2 cross-token leg): a token-55 deposit whose next state bumps the fund at the
+    /// WRONG position (the genesis token instead of the resolved slot 1) is rejected — both the
+    /// resolved-position delta check and the others-frozen check refuse it.
+    #[test]
+    #[cfg_attr(debug_assertions, ignore = "run with --release")]
+    fn l1_deposit_import_rejects_fund_bump_at_wrong_token() {
+        let mut w = l1_deposit_import_two_token_fixture();
+        // Move the fund delta back to position 0 while still declaring token_index 55.
+        let amount = w.next_state.channel_fund.amounts[1] - w.prev_state.channel_fund.amounts[1];
+        w.next_state.channel_fund.amounts[1] = w.prev_state.channel_fund.amounts[1];
+        w.next_state.channel_fund.amounts[0] = w.prev_state.channel_fund.amounts[0] + amount;
+        w.next_state = w.next_state.with_computed_digest();
+        w.next_state.member_signatures = signatures_for(&w.channel_record);
+        w.next_state = w.next_state.with_computed_digest();
+        assert!(matches!(
+            w.verify(),
+            Err(ChannelStateUpdateError::InvalidAmountRelation(_))
+        ));
+    }
+
+    // ===================================================================================
+    // TM-1/TM-9 (multitoken Phase 4) — the dedicated TokenRegister dispatch. The ONLY kind
+    // allowed to change the registry, under a full freeze of everything else. Each negative
+    // documents which freeze leg it proves an adversary cannot break.
+    // ===================================================================================
+
+    /// A well-formed TokenRegister witness over the in-channel fixture's prev state: registry
+    /// `[0]` → `[0, 55]` via the canonical builder, N structural signatures.
+    fn token_register_fixture() -> TokenRegisterUpdateWitness {
+        let fixture = in_channel_fixture();
+        let prev_state = fixture.witness.prev_state.clone();
+        let record = fixture.witness.channel_record.clone();
+        let mut next_state =
+            token_register_next_state(&prev_state, 55).expect("canonical register step");
+        next_state.member_signatures = signatures_for(&record);
+        TokenRegisterUpdateWitness {
+            channel_record: record,
+            prev_state,
+            next_state,
+            token_index: 55,
+        }
+    }
+
+    /// Happy path: the canonical append verifies and exposes the registration through the PIs.
+    #[test]
+    fn token_register_happy_path() {
+        let w = token_register_fixture();
+        let pis = w.verify().expect("canonical TokenRegister must verify");
+        assert_eq!(pis.kind, ChannelTransitionKind::TokenRegister);
+        assert_eq!(pis.amount, 0);
+        assert_eq!(pis.next_state_version, pis.prev_state_version + 1);
+        assert_eq!(pis.channel_fund_before, pis.channel_fund_after);
+        assert_eq!(w.next_state.balance_state.token_count, 2);
+        assert_eq!(w.next_state.balance_state.token_registry[1], 55);
+        assert_eq!(pis.transition_digest, w.next_state.digest);
+    }
+
+    /// Freeze leg: a registration that ALSO touches a balance ciphertext (bundling a hidden
+    /// balance edit under the registration's cosign round) must be rejected — the
+    /// `verify_token_register_transition` rebuild-equality covers every ciphertext.
+    #[test]
+    fn token_register_rejects_balance_touch() {
+        let mut w = token_register_fixture();
+        w.next_state.balance_state.enc_balances[2][0] =
+            w.next_state.balance_state.enc_balances[0][0].clone();
+        w.next_state = w.next_state.with_computed_digest();
+        assert!(matches!(
+            w.verify(),
+            Err(ChannelStateUpdateError::InvalidStateLinkage(_))
+        ));
+    }
+
+    /// Freeze leg: a registration that touches a pending_adds counter (D3 budget grooming) must
+    /// be rejected.
+    #[test]
+    fn token_register_rejects_pending_adds_touch() {
+        let mut w = token_register_fixture();
+        w.next_state.balance_state.pending_adds[1][0] += 1;
+        w.next_state = w.next_state.with_computed_digest();
+        assert!(matches!(
+            w.verify(),
+            Err(ChannelStateUpdateError::InvalidStateLinkage(_))
+        ));
+    }
+
+    /// Freeze leg: a registration that moves channel funds (value smuggled into a header-only
+    /// transition) must be rejected.
+    #[test]
+    fn token_register_rejects_fund_touch() {
+        let mut w = token_register_fixture();
+        w.next_state.channel_fund.amounts[0] += U256::from(1u32);
+        w.next_state = w.next_state.with_computed_digest();
+        assert!(matches!(
+            w.verify(),
+            Err(ChannelStateUpdateError::InvalidStateLinkage(_)
+                | ChannelStateUpdateError::InvalidRootTransition(_))
+        ));
+    }
+
+    /// Append semantics (TM-1): a write at the WRONG position, a duplicate base index, and a
+    /// count skip are each rejected — the registry is append-only at exactly
+    /// `prev.token_count`, injective over the active prefix, `count + 1`.
+    #[test]
+    fn token_register_rejects_wrong_append() {
+        // (a) Append at position 2 instead of 1 (leaving a zero hole at 1).
+        let mut w = token_register_fixture();
+        w.next_state.balance_state.token_registry[1] = 0;
+        w.next_state.balance_state.token_registry[2] = 55;
+        w.next_state = w.next_state.with_computed_digest();
+        assert!(
+            w.verify().is_err(),
+            "wrong-position append must be rejected"
+        );
+
+        // (b) Duplicate base index (55 declared, but the next registry re-registers 0).
+        let mut w = token_register_fixture();
+        w.next_state.balance_state.token_registry[1] = 0;
+        w.next_state = w.next_state.with_computed_digest();
+        assert!(w.verify().is_err(), "duplicate base index must be rejected");
+
+        // (c) Count skip: two positions activated by one transition.
+        let mut w = token_register_fixture();
+        w.next_state.balance_state.token_registry[2] = 66;
+        w.next_state.balance_state.token_count = 3;
+        w.next_state = w.next_state.with_computed_digest();
+        assert!(w.verify().is_err(), "count skip must be rejected");
+
+        // (d) Declared token_index disagreeing with the appended one.
+        let mut w = token_register_fixture();
+        w.token_index = 77;
+        assert!(matches!(
+            w.verify(),
+            Err(ChannelStateUpdateError::InvalidStateLinkage(_))
+        ));
+    }
+
+    /// Linkage: a version skip (or an unchained prev_digest) is rejected like any transition.
+    #[test]
+    fn token_register_rejects_version_skip() {
+        let mut w = token_register_fixture();
+        w.next_state.balance_state.state_version += 1;
+        w.next_state = w.next_state.with_computed_digest();
+        assert!(w.verify().is_err(), "state_version skip must be rejected");
     }
 }
