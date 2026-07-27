@@ -65,7 +65,7 @@ function mergeSigs(stateAJson, stateBJson) {
 
   console.log('→ [browser] import channel');
   let r = JSON.parse(await W('importChannel', { snapshotJson: readJson('channel_snapshot.json') }));
-  assert(r.balance === 50, `import balance ${r.balance} != 50`);
+  assert(BigInt(r.balance) === 50n, `import balance ${r.balance} != 50`);
   console.log(`   browser balance = ${r.balance} ✓`);
 
   // ---- ROUND 1: browser (slot 0) sends 7 to CLI member (slot 1) ----
@@ -75,7 +75,7 @@ function mergeSigs(stateAJson, stateBJson) {
   cli('cosign', 'payload1.json', 'cosigned1.json');
   console.log('→ [browser] finalize');
   r = JSON.parse(await W('finalize', { stateJson: readJson('cosigned1.json') }));
-  assert(r.balance === 43, `after send balance ${r.balance} != 43`);
+  assert(BigInt(r.balance) === 43n, `after send balance ${r.balance} != 43`);
   console.log(`   browser balance = ${r.balance} ✓ (sent 7)`);
   cli('finalize', 'cosigned1.json'); // advance CLI head
 
@@ -91,7 +91,7 @@ function mergeSigs(stateAJson, stateBJson) {
   writeJson('final2.json', mergeSigs(browserCosign2, readJson('cli_cosign2.json')));
   console.log('→ [browser] finalize (receive)');
   r = JSON.parse(await W('finalize', { stateJson: readJson('final2.json') }));
-  assert(r.balance === 48, `after receive balance ${r.balance} != 48`);
+  assert(BigInt(r.balance) === 48n, `after receive balance ${r.balance} != 48`);
   console.log(`   browser balance = ${r.balance} ✓ (received 5)`);
   cli('finalize', 'final2.json');
 

@@ -308,12 +308,16 @@ function fmtAmt(base) { return fmtUnits(base, TOKEN_DECIMALS); }
 // Best-effort BigInt coercion for wire values. Returns null rather than throwing so one malformed
 // entry can never blank the whole balance panel.
 //
-// NOTE (pre-existing, unchanged by this feature): serde serializes the u64 balances as JSON
-// *numbers*, so any value above 2^53 has already lost precision inside JSON.parse before we see it
-// — and real wei balances routinely exceed 2^53 (0.05 ETH = 5e16). We therefore accept every
-// integer-valued Number, exactly matching what the legacy `BigInt(r.balance)` path has always done;
-// rejecting them would drop real balances outright. A string wire value (if the relay/wasm ever
-// emits one) is exact and is preferred.
+// The wasm now serializes u64 balances as decimal STRINGS (`ser_u64_dec_string` in
+// src/wasm_wallet.rs), which cross the boundary exactly and are parsed here with BigInt. That is
+// the preferred path.
+//
+// Numbers are still accepted for compatibility with an older wasm build: serde used to emit these
+// as JSON *numbers*, and any value above 2^53 has then already lost precision inside JSON.parse
+// before we see it (real wei balances routinely exceed 2^53 — 0.05 ETH = 5e16). Against such a
+// build we accept every integer-valued Number, exactly as the legacy `BigInt(r.balance)` path
+// always did: rejecting them would drop real balances outright, which is worse than trailing-digit
+// imprecision.
 function toBigOrNull(v) {
   try {
     if (typeof v === 'bigint') return v;

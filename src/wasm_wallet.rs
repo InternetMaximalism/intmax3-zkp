@@ -238,6 +238,22 @@ pub fn wallet_sign_state(slot: u16, state_json: String) -> Result<String, JsValu
     })
 }
 
+/// Serialize a `u64` amount as a DECIMAL STRING rather than a JSON number.
+///
+/// CORRECTNESS: these reports cross the wasm → JavaScript boundary as JSON text, and `JSON.parse`
+/// coerces every JSON number to an IEEE-754 double — so any integer above 2^53 (≈9.007e15) is
+/// silently rounded at PARSE time, before a single line of wallet code runs. Real wei balances
+/// routinely exceed that (0.05 ETH = 5e16 wei), so a numeric wire value cannot carry a real
+/// balance exactly and the browser would display a value off by a few wei. A decimal string
+/// crosses exactly and the page parses it with `BigInt`.
+///
+/// INTENTIONALLY SIMPLE: this is a display-only DTO. These fields are never re-signed, re-proved,
+/// or fed back into a co-sign payload (send/burn amounts are re-derived from user input), so this
+/// is a wire-format fix, not a protocol change.
+fn ser_u64_dec_string<S: serde::Serializer>(v: &u64, s: S) -> Result<S::Ok, S::Error> {
+    s.serialize_str(&v.to_string())
+}
+
 /// One active token position's decrypted balance (multitoken §N-2).
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -246,6 +262,8 @@ struct TokenBalanceEntry {
     token_slot: u8,
     /// BASE-layer token index the slot is registered for (`registry[token_slot]`).
     token_index: u32,
+    /// Base units, wire-encoded as a decimal string — see [`ser_u64_dec_string`].
+    #[serde(serialize_with = "ser_u64_dec_string")]
     balance: u64,
 }
 
@@ -254,7 +272,9 @@ struct TokenBalanceEntry {
 struct BalanceReport {
     slot: u16,
     /// GENESIS-token (local slot 0) balance — the wire-compat scalar kept for existing callers;
-    /// the per-token view is `balances`.
+    /// the per-token view is `balances`. Base units, wire-encoded as a decimal string — see
+    /// [`ser_u64_dec_string`].
+    #[serde(serialize_with = "ser_u64_dec_string")]
     balance: u64,
     can_send: bool,
     state_version: u64,
