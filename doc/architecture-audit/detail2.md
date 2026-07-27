@@ -616,12 +616,20 @@ vectors + flat keccak are deleted.
 | `SETTLED_TX_CHAIN_DOMAIN` | `0x494d5443` | "IMTC" |
 | `REGEV_CT_DOMAIN` | `0x494d5243` | "IMRC" |
 | `CHANNEL_TX_ZKP_DOMAIN` | `0x494d435a` | "IMCZ" |
-| `CHANNEL_UPDATE_ZKP_DOMAIN` | `0x494d555a` | "IMUZ" |
+| `CHANNEL_UPDATE_ZKP_DOMAIN` (v1, retired) | `0x494d555a` | "IMUZ" (retired in multitoken Phase 2b — superseded by "IMU2" when the E-2 public values gained `token_index`; value stays pinned in the non-collision test) |
 | `CLOSE_MEMBER_SET_DOMAIN` | `0x494d434d` | "IMCM" (keccak, §C-8 close PI `member_set_commitment`. L1 reconciliation) |
 | `MEMBER_LEAF_DOMAIN` | `0x4d424c46` | "MBLF" (**Poseidon**. Leaf domain separation of `MemberTree`, `key_tree.rs`, DB) |
 | `REGEV_PK_POSEIDON_DOMAIN` | `0x494d5250` | "IMRP" (**Poseidon**. The member-tree leaf's `regev_pk_digest = Poseidon([IMRP, n, a…, b…])`, `regev/keys.rs`) |
 | `BALANCE_SLOT_LEAF_DOMAIN` | `0x494d534c` | "IMSL" (**Poseidon**. Per-slot leaf of the H1 balance-slot Merkle tree, `src/common/balance_state.rs`, D14. Distinct from every existing IMxx domain — covered by the repo-wide domain non-collision test in `poseidon_sig`) |
 | `LIST_LEAF_DOMAIN` | `0x494d4c4c` | "IMLL" (**Poseidon**. Sign-zkp list leaf `Poseidon([IMLL] ‖ m ‖ pk)`, `src/poseidon_sig/list.rs`, D8 — the validity `bp_sig_chain` aggregation path; close/cancel moved to the tree aggregator, which introduces NO new domain of its own — the aggregation statement is carried by recursive proof PIs, not a hash chain, D13) |
+| `BALANCE_STATE_DOMAIN_V2` | `0x494d4232` | "IMB2" (**Poseidon**. §N-1 multi-token v2 H1 header — 37 elems, commits `token_count` + `token_registry(10)`; supersedes "IMBS" for the native `h1()`; `src/constants.rs`. TM-9/TM-15) |
+| `BALANCE_SLOT_LEAF_DOMAIN_V2` | `0x494d5332` | "IMS2" (**Poseidon**. §N-2 multi-token v2 balance-slot leaf — 104 elems: `[IMS2, pk_digest(8), ct_digest[0..10](80), pending_adds[0..10](10), recipient(5)]`; the §N-2 "103" figure counted the recipient as 4 limbs, but the canonical `Address` encoding is 5 — flagged Phase 1 deviation. Supersedes "IMSL" for the native leaf; TM-8/TM-15) |
+| `PAY_DOMAIN_V2` | `0x494d5032` | "IMP2" (keccak. §N-3 IMPA-v2 `ChannelTx` signing digest — 43 words, `token_slot` its own limb after `nonce`. Replaces "IMPA" (v1 constant deleted; value stays pinned in the non-collision test). TM-2/TM-15) |
+| `L1_DEPOSIT_IMPORT_DOMAIN_V2` | `0x494d4c32` | "IML2" (keccak. §N-5 IMLD-v2 deposit-import digest — 14 words, `token_index` its own limb. Replaces "IMLD" (v1 constant deleted; value pinned in the non-collision test). TM-7/TM-15) |
+| `WITHDRAWAL_CLAIM_DOMAIN_V2` | `0x494d5732` | "IMW2" (keccak. §N-6 per-(slot, token) claim nullifier — 18 limbs `[IMW2, close_intent(8), slot_regev_pk_digest(8), token_slot]`. "IMCW" remains for the claim `signing_digest`. TM-5/TM-15) |
+| `CHANNEL_UPDATE_ZKP_DOMAIN_V2` | `0x494d5532` | "IMU2" (WIRED in Phase 2b: the §N-4 E-2 public values gain the base `token_index` as their own extra PV (`e2_extra_pvs`, `transfer_stark.rs`); replaces "IMUZ". TM-6/TM-15) |
+| `INTER_CHANNEL_TX_DOMAIN_V2` | `0x494d4932` | "IMI2" (keccak. §N-4 `InterChannelTx` signing digest — base `token_index` its own limb after `destination_channel_id`. Replaces "IMIT" (Phase 2b; value pinned in the non-collision test). NEW domain rather than in-place widening: the preimage has three variable-length length-prefixed tails, so the equal-total-length v1↔v2 realignment case would otherwise rest on the v3 reset alone; exactly one hashing site, no in-circuit/Solidity mirror. TM-6/TM-15) |
+| `TOKEN_FUNDS_DIGEST_DOMAIN` | `0x494d5446` | "IMTF" (keccak. §N-6 `token_funds_digest = keccak([IMTF, registry(10×u32), token_count, amounts(10×U256)])` — fixed 92-word preimage, always full width. TM-11) |
 
 > Note: `MEMBER_LEAF_DOMAIN` / `REGEV_PK_POSEIDON_DOMAIN` are domains of **in-circuit Poseidon** (member-tree binding, DB).
 > `CLOSE_MEMBER_SET_DOMAIN` is a domain of **L1 keccak** (close PI reconciliation). It is the design of DB that the same member set is represented by
@@ -1055,3 +1063,165 @@ recipient, amount, encAmount, afterCt}`), which is what `batch_preserves_validit
 verifier from its own verified inputs; R1/R3/D3 and the before-binding cross-batch nullifier are
 unchanged. What changed is WHERE redundant copies of already-held data are (no longer on the
 wire) and how memory scales (streaming, K-independent bounds).
+
+---
+
+## N. Multi-token channels: up to 10 currencies per channel (2026-07-27; design fixed, implementation pending)
+
+Extends the channel layer from one balance scalar per slot to up to `MAX_CHANNEL_TOKENS = 10`
+independent per-token balances, funded by and settled against the base layer's existing
+`token_index: u32` machinery (spec.md §1.1–1.2), including REAL ERC-20 escrow on L1.
+Owner decisions fixed 2026-07-27: (1) L1 scope includes ERC-20 escrow; (2) balance representation
+is the fixed in-leaf token vector; (3) token set = init + append-only cosigned adds; (4)
+in-channel cross-token swap is OUT OF SCOPE for v1 — every tx conserves within exactly one token;
+(5) no live migration — v3 testnet resets (a v1 state is definitionally `registry=[ETH]`, all
+balances at token slot 0). Threat model: `doc/tasks/multitoken-threat-model.md` (TM-1..TM-15);
+every obligation below cites its TM id. Implementation plan: `doc/tasks/multitoken-todo.md`.
+
+### N-1. Token registry (channel-local, inside the signed H1 header)
+
+```rust
+pub const MAX_CHANNEL_TOKENS: usize = 10;
+
+// In BalanceState (§C-2):
+pub token_registry: [u32; MAX_CHANNEL_TOKENS], // local token slot t -> BASE token_index; zero-padded
+pub token_count: u8,                           // 1 <= token_count <= 10 (TM-8)
+```
+
+- BOTH fields ride in the H1 header preimage (26 → 37 elems: `+ token_count (1) + registry (10
+  canonical u32 limbs, always full width, zero-padded)`), new header domain constant. Mirrors the
+  `member_count`/`delegate_count` discipline exactly — an unsigned active/unused token boundary is
+  reinterpretable under existing signatures (TM-9).
+- Registry is injective on base `token_index` over `[0..token_count)` — enforced IN-CIRCUIT in the
+  `TokenRegister` transition and re-checked in the close circuit (TM-1). No removal, no reorder:
+  local index stability is what gives every historical ciphertext a stable meaning.
+- `ChannelTransitionKind::TokenRegister` (new): appends `token_index` at position `token_count`,
+  increments `token_count`, `state_version`+1, N-of-N cosigned like any transition. Leaves are
+  UNTOUCHED (all 10 ciphertext positions exist from genesis as canonical zeros; the registry lives
+  only in the header), so registering a token is a header-only state change.
+- A channel MAY register a token_index with no L1 ERC-20 registration; it is inert (imports
+  require L1 deposits, so `fund[t]` stays 0 and claims decrypt to 0). See threat model residual #4.
+
+### N-2. Balance-slot leaf v2 (fixed 10-wide ciphertext vector)
+
+```
+leaf_i = Poseidon([ SLOT_LEAF_DOMAIN_V2,
+  regev_pk_digests[i]      (8),
+  ct_digest[i][0..10]      (80),   // 10 independent RegevCiphertexts, one per token slot
+  pending_adds[i][0..10]   (10),   // per-(slot, token) homomorphic-add counters (D3, TM-13)
+  recipient[i]             (5) ])  // 104 elems total (was 23; Address is canonically 5 u32 limbs)
+```
+
+- Each token position is an independent Regev ciphertext: D1 encoding (u64, 1 bit × 64 coeffs),
+  the 64-add refresh budget, and RefreshAir all apply per (slot, token) unchanged. The
+  cryptographic layer does not change.
+- Unused positions (`t >= token_count`, and any token a member does not hold) use the canonical
+  zero ciphertext (`RegevCiphertext::padding()`, all-zero coeffs — decrypts to 0 under ANY key, so
+  unused-position claims provably yield 0; TM-8). Its digest is a precomputed constant; storage
+  MAY be sparse (materialize nonzero balances only), the hash layout is always full width.
+- `validate()` fail-closes per (slot, token): positions `t >= token_count` MUST equal the
+  canonical zero digest with `pending_adds == 0`; all 10 counters range-checked against
+  `MAX_HOMO_ADDS_BEFORE_REFRESH` (TM-8, TM-13).
+- The widening applies to ALL leaves (padding slots included) simultaneously under the new leaf
+  domain — same fixed-width injective discipline as the D14 18→23 change (TM-9, TM-15).
+
+### N-3. Intra-channel transfer: IMPA-v2 + the token binding triple (TM-2)
+
+- `ChannelTx` gains `token_slot: u8`, occupying its OWN canonical limb in a NEW-domain IMPA-v2
+  preimage (no bit-packing into existing words, TM-15):
+  `[IMPA_V2, channel_id, prev_state_digest, enc_amount.digest, nonce, token_slot,
+  sender_pk(8), recipient_pk(8)]`.
+- E-1 (`DualKeyTransferAir`) is UNCHANGED internally. The transition verifier
+  (`InChannelTransferUpdateWitness::verify` generalization) enforces the binding triple as
+  connected constraints — this wrapper is the soundness-critical seam:
+  1. `token_slot < token_count` (and < 10) — TM-8;
+  2. signed `token_slot` == leaf one-hot select == the ONLY position of 10 whose ct digest
+     changes, on the sender leaf (prev → `after_ct`) AND the recipient leaf (`+= enc_amount`);
+     the other 9 positions proven identical prev→next on both leaves;
+  3. `pending_adds` increments only at `(recipient, token_slot)`;
+  4. E-1 is handed exactly the (prev, after) ciphertexts selected by `token_slot`.
+- One tx = one token. Cross-token conservation is structural: no transition mutates two token
+  positions (swap is a future feature with its own two-leg signed transition; out of scope v1).
+- Slim wire (§M-1): `SlimSendPayload` gains `token_slot` (echo of the signed field; the verifier
+  trusts only the digest-bound copy). v2.1b batch obligations (§M-2 step 3) generalize per token:
+  the per-tx solo-rebuild + verify covers the FULL binding triple over all 10 positions for every
+  tx — never only the tokens with nonzero delta (TM-14). Mixed-token batches are allowed; the
+  canonical fold (§M-2 step 4) is per-(slot, token).
+
+### N-4. Inter-channel transfer (C2C): base token_index end-to-end (TM-6)
+
+- The transfer descriptor carries the BASE `token_index: u32` (never a local slot — source and
+  destination registries map it to different local slots).
+- E-2 (`ChannelUpdateAir`) unchanged internally; its PI gains `token_index`. BOTH sides'
+  transition verifiers constrain, against their OWN H1-committed registries:
+  `registry[local_slot] == token_index ∧ local_slot < token_count`, and apply the delta at that
+  local position only (binding triple as in N-3). Unregistered on either side ⇒ reject in-circuit.
+
+### N-5. Mid-channel L1 deposit import (§C-10 v2): three-way binding (TM-7)
+
+- `l1_deposit_import_digest` v2 (new IMLD-v2 domain): gains `token_index` as its own limb:
+  `keccak([IMLD_V2, channel_id, deposit_nullifier, token_index, amount_lo, amount_hi,
+  depositor_slot])`.
+- The import transition constrains, in-circuit: the base deposit's `token_index` (already present
+  in the base `Deposit`, spec.md §1.2 — no longer dropped) resolves via the registry to local
+  slot t; `channel_fund[t] += amount`; the credited ciphertext is the depositor leaf's position-t
+  ciphertext; binding triple for the other 9 positions as in N-3.
+
+### N-6. Close, claims, settlement: per-token funds (TM-1/3/5/8/11)
+
+- `ChannelFund` → `amounts: [U256; MAX_CHANNEL_TOKENS]` aligned to the registry; `withdrawCap` is
+  per token.
+- Close PI: `+ token_funds_digest (8 limbs)` where
+  `token_funds_digest = keccak([TFD_DOMAIN, registry (10×u32, zero-padded), token_count,
+  amounts (10×U256, zero-padded)])` — ALWAYS full width (variable-length preimages alias, TM-11).
+  `CHANNEL_CLOSE_PUBLIC_INPUTS_LEN` 95 → 103; Rust↔Solidity byte-for-byte differential test
+  re-pins the `closePIHash` preimage.
+- Withdrawal claims are per (member slot, token slot). E-3 (`DecryptionAir`) unchanged; the claim
+  circuit opens the leaf, one-hot selects `ct_digest[token_slot]` bound to the PI `token_slot`,
+  and exposes the resolved BASE `token_index` (`registry[token_slot]`, with
+  `token_slot < token_count`) so L1 pays the right asset.
+- Nullifier v2: `[IMCW_V2, close_intent_digest (8), slot_regev_pk_digest (8), token_slot]` —
+  keyed on the LEAF-BOUND Regev pk digest exactly as today (B-2 grinding fix preserved, see
+  channel.rs:857-870), plus the token slot. Exactly one nullifier per (slot, token). NEVER keyed
+  on `member_pk_g` (TM-5).
+- `ChannelSettlementManager`: EVERY accounting variable becomes per-base-token —
+  `finalizedChannelFundAmount[t]`, `totalWithdrawn[t]`, `receivedChannelFunds[t]`,
+  `totalCreditedOut[t]`, `withdrawalCredits[t][addr]` — with per-token CapInv
+  `totalCreditedOut[t] + amount <= receivedChannelFunds[t]` and payout dispatch by t
+  (t == 0 → ETH; else ERC-20 at the L1-registered address). Token-t claims are paid ONLY from
+  token-t funds (TM-3). Post-close claims gain the same token dimension.
+
+### N-7. L1: real ERC-20 escrow in IntmaxRollup (TM-1/4/10)
+
+- Append-only, set-once `tokenIndex → IERC20` registry (immutable per index once set; a
+  remappable index converts token-A escrow into token-B withdrawals, TM-10b). Index 0 remains
+  native ETH.
+- `deposit(tokenIndex != 0)`: `nonReentrant`; measure `balanceOf(this)` delta around
+  `safeTransferFrom`; REVERT unless delta == stated amount (the deposit hash chain must never
+  record unreceived value). Fee-on-transfer / rebasing / hook-reentrant tokens are UNSUPPORTED
+  and fail closed (TM-4). The "accounting-only nonzero tokenIndex" regime is retired.
+- Per-token escrow ceiling: `escrowed[tokenIndex] -= amount` with underflow-revert on every
+  withdrawal — the per-token analogue of today's global `totalEscrowed` solvency backstop.
+- `withdrawERC20` mirrors `withdrawNative` (same authDigest binding, which already includes
+  `tokenIndex`), gated on `tokenIndex != 0` with a registered address; `withdrawNative` keeps its
+  `tokenIndex == 0` guard.
+
+### N-8. Privacy deviation (ACCEPTED, TM-12)
+
+`token_slot` travels in cleartext (IMPA-v2, slim wire), and per-(member, token) close claims
+reveal each member's holdings DISTRIBUTION at close. Amounts remain hidden; asset identity does
+not. Accepted for v1; revisit only if a future version encrypts the token selector.
+
+### N-9. Formal model + security summary
+
+- Lean: `EncBalanceState` generalizes `Member → Ct` to `Member → Fin 10 → Ct`; `ValidEncState`,
+  `TransferProven`/`BulkUpdateProven`, and all conservation theorems become per-token
+  (`ChannelSafety2/21.lean`); the Manager's `CapInv` is re-proven PER BASE TOKEN (not per local
+  slot — TM-1).
+- Domain constants: every changed preimage gets a NEW constant (slot leaf, H1 header, IMPA, IMLD,
+  IMCW, E-2 PI, TFD), registered in §G-2 with the non-collision check at implementation time;
+  new fields always occupy their own canonical limb (TM-15).
+- The three load-bearing properties (threat model): P1 the token binding triple (N-3), P2
+  per-token conservation on every path (N-3/4/5/6), P3 L1 per-token isolation with no residual
+  single-asset variable (N-6/7). A fresh attacker-subagent pass over the actual diffs is REQUIRED
+  before each implementation phase merges.

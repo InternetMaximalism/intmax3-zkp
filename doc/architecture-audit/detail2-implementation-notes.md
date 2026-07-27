@@ -848,3 +848,60 @@ in the doc/audit/zkp project (`SingleWithdrawalCircuit.lean`, `wNul`), and verif
 `mle_onchain_e2e`) plus forge 174/175. See commit `f0cad35` and `doc/audit/audit02-07-2026.md` §5.
 
 *(Numbering note: this landed on `main` as “D11” concurrently with D11–D14 on `feat/channel-api-impl`; renumbered to D15 at merge — the fix itself is unchanged.)*
+
+## D16 — Multi-token channels (§N) implementation deviations, Phases 0–3 (2026-07-27)
+
+Umbrella record for the §N (≤10 currencies per channel) implementation. Each item was flagged by
+the implementing agent, adversarially reviewed by a SEPARATE security-review agent, and accepted;
+per-item detail lives in `doc/tasks/multitoken-todo.md` (phase status blocks) and the threat
+model `doc/tasks/multitoken-threat-model.md` (TM-1..TM-15). Implementation is on the working
+branch, NOT yet merged/deployed; fixtures/VKs regenerate in Phase 5 (v3 testnet resets).
+
+**D16-1 — Balance-slot leaf v2 is 104 elems, not §N-2's original "103".** The canonical
+`Address` encoding is 5 u32 limbs (as in the D14 23-elem leaf), not 4; packing to 4 would
+bit-pack across words (TM-15). §N-2 corrected in place. Layout:
+`[IMS2, pk_digest(8), ct_digest[0..10](80), pending_adds[0..10](10), recipient(5)]`.
+
+**D16-2 — IMCH / IMCI / IMCW preimages widened IN PLACE (no new domains).** The 8-limb fund
+segment became the always-full-width 80-limb `amounts[0..10]` vector (IMCH/IMCI), and the claim
+signing digest gained a `token_slot` limb (IMCW). Accepted because each domain covers exactly one
+live message type, fixed-width injectivity holds within v2, and cross-width collisions fall to
+keccak CR — except the IMCW equal-total-length v1↔v2 realignment case (variable-length proof
+tail), which rests on the v3 reset alone (documented at the constant). Contrast D16-3.
+
+**D16-3 — `InterChannelTx` re-domained to IMI2 (v1 IMIT retired) rather than widened.** The
+preimage has three variable-length tails, so in-place widening would have made the equal-length
+realignment case reset-reliant; a fresh domain removes that reliance. Exactly one live IMIT site
+existed (the native signing digest — the cancel-close circuit's in-circuit IMIT recompute had
+already been retired by Finding-D). Also new: IMU2 (E-2 transcript PV domain; v1 IMUZ retired),
+IMB2/IMS2/IMP2/IML2/IMW2/IMTF per §G-2. Retired constants stay value-pinned in the
+non-collision tests.
+
+**D16-4 — Close PI 95 → 103; claim PI 48 → 50.** `token_funds_digest` (8 limbs, in-circuit
+92-word IMTF keccak recompute) appended to the close PI; `token_slot`(48)/`token_index`(49)
+appended to the withdrawal-claim PI with `token_index == registry[token_slot]` circuit-enforced.
+Post-close claim PI stays 56 (no token limb): credits pin to `finalizedTokenRegistry[0]` with a
+documented pointer — a token limb is a future symmetric change.
+
+**D16-5 — Claim nullifier v2 keyed on the LEAF-BOUND `regev_pk_digest` + `token_slot` (IMW2),
+never `member_pk_g`** — preserves the B-2 grinding fix; token_slot limb prevents per-token
+nullifier collapse. IMCK (post-close) deliberately NOT re-versioned: one descriptor carries
+exactly one `token_index` (structural), so per-tx uniqueness suffices; guarded by a test.
+
+**D16-6 — L1: ETH escrow stays on `totalEscrowed`; ERC-20 escrow is per-token
+(`escrowedByToken`).** Minimal-diff split, documented in `IntmaxRollup.sol`. ERC-20 deposits
+require a set-once `tokenIndex → IERC20` registration and measured `balanceOf`-delta equality
+(fee-on-transfer/rebasing fail closed); the pre-§N "accounting-only nonzero tokenIndex" regime
+is retired. The Manager resolves payout addresses through the rollup's single set-once registry.
+
+**D16-7 — `CloseIntent::new` fail-closes on nonzero non-genesis funds until the Phase 4/5
+build path can construct multi-token closes end-to-end** (reviewer-ruled: prevents
+funds-stuck-by-unclaimable-finalization, cannot introduce unsoundness). Lift is scheduled with
+the per-token claim builders + e2e coverage.
+
+**Verification state (as of 2026-07-27):** Lean MT models (ChannelSafetyMT,
+ChannelSettlementManagerMT) build clean, zero sorry, kernel axioms only; Rust targeted suites
+green incl. the full TM-2/6/7/8/14 adversarial sets; Foundry 210/210 (SKIP_GROTH16) with 30 new
+multi-token adversarial tests; Rust↔Solidity shared vectors (IMCI v2, TFD) re-pinned
+Rust→Solidity and cross-checked independently; every phase diff passed a separate
+attacker/security review before being marked complete.
