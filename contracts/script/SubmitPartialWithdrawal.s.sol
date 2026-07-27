@@ -30,7 +30,11 @@ contract SubmitPartialWithdrawal is Script {
         intent.closeFreezeNonce = uint64(vm.parseJsonUint(j, ".close_freeze_nonce"));
         intent.finalChannelStateDigest = vm.parseJsonBytes32(j, ".final_channel_state_digest");
         intent.finalBalanceStateH1 = vm.parseJsonBytes32(j, ".final_balance_state_h1");
-        intent.channelFundAmount = vm.parseJsonUint(j, ".channel_fund_amount");
+        // Multitoken Phase 3: genesis-token embedding until the Phase 5 descriptor regeneration
+        // emits per-token vectors (registry=[ETH], all funds at token slot 0).
+        intent.channelFundAmounts[0] = vm.parseJsonUint(j, ".channel_fund_amount");
+        intent.tokenRegistry[0] = 0;
+        intent.tokenCount = 1;
         intent.channelFundIntmaxStateRoot = vm.parseJsonBytes32(j, ".channel_fund_intmax_state_root");
         intent.burnTxHash = vm.parseJsonBytes32(j, ".burn_tx_hash");
         intent.closeWithdrawalDigest = vm.parseJsonBytes32(j, ".close_withdrawal_digest");
@@ -58,7 +62,9 @@ contract SubmitPartialWithdrawal is Script {
             closeFreezeNonce: intent.closeFreezeNonce,
             finalChannelStateDigest: intent.finalChannelStateDigest,
             finalBalanceStateH1: intent.finalBalanceStateH1,
-            channelFundAmount: intent.channelFundAmount,
+            channelFundAmounts: intent.channelFundAmounts,
+            tokenRegistry: intent.tokenRegistry,
+            tokenCount: intent.tokenCount,
             channelFundIntmaxStateRoot: intent.channelFundIntmaxStateRoot,
             burnTxHash: intent.burnTxHash,
             closeWithdrawalDigest: intent.closeWithdrawalDigest,

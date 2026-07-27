@@ -802,16 +802,15 @@ contract IntmaxRollupTest is Test {
         assertEq(rollup.depositCount(), 0, "no deposit recorded on revert");
     }
 
-    /// Non-ETH deposit with zero value succeeds (accounting-only) and does not change totalEscrowed.
-    function test_deposit_nonEth_zeroValue_succeeds() public {
-        uint256 escrowBefore = rollup.totalEscrowed();
-        uint256 balBefore = address(rollup).balance;
-
+    /// Multitoken Phase 3 (§N-7): the "accounting-only nonzero tokenIndex" regime is RETIRED — a
+    /// nonzero-index deposit with no registered ERC-20 REVERTS instead of recording unbacked value
+    /// in the deposit hash chain. (Registered-token deposits are covered in MultiTokenEscrow.t.sol.)
+    function test_deposit_nonEth_unregistered_reverts() public {
+        vm.expectRevert(IntmaxRollup.TokenIndexNotRegistered.selector);
         rollup.deposit(bytes32(uint256(0x3)), 7, 100, bytes32(0));
 
-        assertEq(rollup.depositCount(), 1, "non-ETH deposit accounting advances");
-        assertEq(rollup.totalEscrowed(), escrowBefore, "totalEscrowed unchanged for non-ETH");
-        assertEq(address(rollup).balance, balBefore, "no ETH custodied for non-ETH deposit");
+        assertEq(rollup.depositCount(), 0, "no deposit recorded");
+        assertEq(rollup.totalEscrowed(), 0, "no escrow recorded");
     }
 
     /// Plain ETH transfer (no calldata) to the rollup must revert: no receive()/fallback() exists,
@@ -1949,13 +1948,11 @@ contract IntmaxRollupTest is Test {
     // -----------------------------------------------------------------------
 
     function test_fraudProof_rollbackGasWithManyDeposits() public {
-        // Queue many deposits
+        // Queue many deposits. All ETH (tokenIndex 0): the multitoken change retired unbacked
+        // nonzero-index deposits, and this test only measures rollback gas vs deposit COUNT.
         for (uint256 i = 0; i < 200; i++) {
-            uint32 tokenIndex = uint32(i % 10);
             uint256 amount = 100 + i;
-            // ETH deposits (tokenIndex == 0) must forward exactly `amount`; non-ETH must send 0.
-            uint256 depositValue = tokenIndex == 0 ? amount : 0;
-            rollup.deposit{value: depositValue}(bytes32(uint256(i + 1)), tokenIndex, amount, bytes32(uint256(i)));
+            rollup.deposit{value: amount}(bytes32(uint256(i + 1)), 0, amount, bytes32(uint256(i)));
         }
 
         MleVerifier.MleProof memory mleProof = _defaultMleProof();

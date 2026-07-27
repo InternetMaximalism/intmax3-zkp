@@ -81,6 +81,15 @@ contract RunClose is Script {
         console2.log("submitCloseIntent OK; challengeDeadline:", _manager().getPendingClose().challengeDeadline);
     }
 
+    /// Single-token helpers (multitoken Phase 3 genesis embedding).
+    function _singleAmounts(uint256 amount) internal pure returns (uint256[10] memory a) {
+        a[0] = amount;
+    }
+
+    function _singleRegistry() internal pure returns (uint32[10] memory r) {
+        r[0] = 0;
+    }
+
     /// @dev Build the `CloseIntent` from the proved close descriptor JSON (every field is the proved
     /// close public input — see generate_close_fixture.rs `CloseIntentDescriptor`).
     function _closeIntentFromDescriptor()
@@ -94,7 +103,12 @@ contract RunClose is Script {
             closeFreezeNonce: uint64(vm.parseJsonUint(j, ".close_freeze_nonce")),
             finalChannelStateDigest: vm.parseJsonBytes32(j, ".final_channel_state_digest"),
             finalBalanceStateH1: vm.parseJsonBytes32(j, ".final_balance_state_h1"),
-            channelFundAmount: vm.parseJsonUint(j, ".channel_fund_amount"),
+            // Multitoken Phase 3: genesis-token embedding until the Phase 5 close-fixture
+            // regeneration emits per-token vectors (registry=[ETH], funds at slot 0). A regenerated
+            // descriptor with real multi-token funds must populate all three fields from JSON.
+            channelFundAmounts: _singleAmounts(vm.parseJsonUint(j, ".channel_fund_amount")),
+            tokenRegistry: _singleRegistry(),
+            tokenCount: 1,
             channelFundIntmaxStateRoot: vm.parseJsonBytes32(j, ".channel_fund_intmax_state_root"),
             burnTxHash: vm.parseJsonBytes32(j, ".burn_tx_hash"),
             closeWithdrawalDigest: vm.parseJsonBytes32(j, ".close_withdrawal_digest"),
@@ -137,6 +151,10 @@ contract RunClose is Script {
             recipient: vm.parseJsonAddress(j, ".recipient"),
             userAmountDigest: vm.parseJsonBytes32(j, ".user_amount_digest"),
             amount: uint64(vm.parseJsonUint(j, ".amount")),
+            // Multitoken Phase 3: genesis-token claim until the Phase 5 claim-fixture regeneration
+            // emits `.token_slot` / `.token_index`.
+            tokenSlot: 0,
+            tokenIndex: 0,
             withdrawalNullifier: vm.parseJsonBytes32(j, ".withdrawal_nullifier")
         });
         MleVerifier.MleProof memory proof = FixtureLib.parseProof(_wclaimMle());

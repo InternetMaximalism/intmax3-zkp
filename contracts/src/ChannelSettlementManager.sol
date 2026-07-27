@@ -2,6 +2,7 @@
 pragma solidity ^0.8.24;
 
 import {MleVerifier} from "@mle/MleVerifier.sol";
+import {IERC20, SafeERC20Lib} from "./SafeERC20.sol";
 
 /// @dev File-scope close-PI field bundle passed across the manager→verifier boundary as ONE
 /// calldata struct. Collapsing the 14 close-intent scalars into a single argument keeps the
@@ -16,7 +17,12 @@ struct CloseProofFields {
     uint64 closeFreezeNonce;
     bytes32 finalChannelStateDigest;
     bytes32 finalBalanceStateH1;
-    uint256 channelFundAmount;
+    /// Multi-token (§N-6, TM-11): the full registry-aligned per-token fund vector, ALWAYS full
+    /// width (zero-padded past `tokenCount`). Replaces the single `channelFundAmount`; slot 0 (the
+    /// genesis token) is the burn denomination and feeds the `channelFundAmount` close-PI limbs.
+    /// The 80-word segment enters the IMCI preimage, and together with `tokenRegistry` /
+    /// `tokenCount` it is bound to the close PI's `tokenFundsDigest` limbs (verifier recompute).
+    uint256[10] channelFundAmounts;
     bytes32 channelFundIntmaxStateRoot;
     bytes32 burnTxHash;
     bytes32 closeWithdrawalDigest;
@@ -30,12 +36,19 @@ struct CloseProofFields {
     bytes32 memberSetCommitment;
     /// Packed `(memberCount << 8) | delegateCount` (delegate account).
     uint16 memberAndDelegateCount;
+    /// Multi-token (§N-6): channel-local slot t → BASE token index, zero-padded past `tokenCount`.
+    /// Bound (with `tokenCount` and `channelFundAmounts`) to the member-signed close PI
+    /// `tokenFundsDigest` limbs by the verifier's on-chain recompute (TM-11), so the per-token
+    /// settlement keys the Manager stores are proof-enforced, not caller-declared.
+    uint32[10] tokenRegistry;
+    /// Multi-token (§N-6): number of ACTIVE token slots (1..=10; in-circuit bounded).
+    uint8 tokenCount;
 }
 
 interface IChannelSettlementVerifier {
     /// Phase A: the close intent is verified by a REAL MLE/WHIR proof of the plonky2 close circuit
     /// (not a stub). The proof is the wrapped close `MleVerifier.MleProof` whose `publicInputs` are
-    /// the 87 raw close limbs the verifier rebinds. `view` (reads the close VK), not `pure`.
+    /// the 103 raw close limbs the verifier rebinds. `view` (reads the close VK), not `pure`.
     function verifyCloseIntent(
         CloseProofFields calldata fields,
         MleVerifier.MleProof calldata proof
@@ -60,6 +73,8 @@ interface IChannelSettlementVerifier {
         address recipient,
         bytes32 userAmountDigest,
         uint64 amount,
+        uint8 tokenSlot,
+        uint32 tokenIndex,
         bytes32 withdrawalNullifier,
         MleVerifier.MleProof calldata mleProof
     ) external view returns (bool);
@@ -122,6 +137,14 @@ interface IChannelRegistry {
     ///         the rollup's `pendingWithdrawals[manager]`; `pullChannelFunds` then calls this to
     ///         move that ETH into the manager so it can be split among members.
     function withdraw() external;
+    /// @notice Pull-payment ERC-20 claim (multitoken §N-7): the ERC-20 mirror of `withdraw()`.
+    ///         `IntmaxRollup.withdrawERC20` credits `pendingTokenWithdrawals[t][manager]`;
+    ///         `pullChannelTokenFunds(t)` calls this to move the tokens into the manager.
+    function withdrawToken(uint32 tokenIndex) external;
+    /// @notice The rollup's SET-ONCE `tokenIndex → ERC-20` registry (multitoken §N-7, TM-10b).
+    ///         SECURITY: the manager resolves payout token addresses through THIS single registry —
+    ///         it deliberately keeps NO second (potentially divergent/mutable) copy of the mapping.
+    function tokenAddressOf(uint32 tokenIndex) external view returns (IERC20);
     /// @notice Authorize a partial-withdrawal auth digest on the rollup. Called by the settlement
     ///         manager after a finalized partial-withdrawal close proof (N-of-N channel consent).
     function authorizePartialWithdrawal(bytes32 authDigest) external;
@@ -187,6 +210,19 @@ contract ChannelSettlementManager {
     error PartialWithdrawalAuxDataZero();
     error PartialWithdrawalChainMismatch();
     error PartialWithdrawalNotNewer();
+    // --- Multi-token settlement (multitoken Phase 3, §N-6, TM-3/TM-8) ---
+    /// A claim's `tokenSlot` must address an ACTIVE slot of the finalized registry (TM-8:
+    /// `token_slot < token_count` is enforced at the circuit, the verifier bind AND here at the
+    /// Manager cap lookup — fail-closed at every layer).
+    error TokenSlotOutOfRange();
+    /// The claim's base `tokenIndex` must equal the finalized registry at its `tokenSlot`
+    /// (defense-in-depth: the circuit already enforces `token_index == registry[token_slot]`
+    /// against the H1-committed registry; this re-checks against the TFD-bound finalized copy).
+    error TokenRegistryMismatch();
+    /// The close intent's supplied token metadata is malformed (tokenCount outside 1..=10).
+    error TokenCountOutOfRange();
+    /// ERC-20 fund pulling / payout needs an L1-registered token address for the index.
+    error TokenIndexNotRegisteredOnRollup();
 
     enum ChannelLifecycleStatus {
         Active,
@@ -249,7 +285,8 @@ contract ChannelSettlementManager {
         bytes32 indexed withdrawalNullifier,
         bytes32 indexed memberPkG,
         address recipient,
-        uint256 amount
+        uint256 amount,
+        uint32 tokenIndex
     );
 
     event PostCloseClaimAccepted(
@@ -260,7 +297,7 @@ contract ChannelSettlementManager {
         uint256 amount
     );
 
-    event WithdrawalClaimed(address indexed recipient, uint256 amount);
+    event WithdrawalClaimed(address indexed recipient, uint32 indexed tokenIndex, uint256 amount);
 
     event PartialWithdrawalSubmitted(
         bytes32 indexed authDigest,
@@ -294,7 +331,19 @@ contract ChannelSettlementManager {
         /// `h1()` of the final hidden `BalanceState` (rename of the legacy
         /// `finalChannelBalanceRoot`; detail2 §C-3).
         bytes32 finalBalanceStateH1;
-        uint256 channelFundAmount;
+        /// Multi-token (§N-6): registry-aligned per-token channel funds (Rust
+        /// `ChannelFund.amounts`), ALWAYS full 10-wide (zero-padded). Slot 0 = the genesis-token
+        /// burn denomination. SECURITY: bound — together with `tokenRegistry`/`tokenCount` — to
+        /// the close proof's `tokenFundsDigest` PI by the verifier's on-chain recompute (TM-11),
+        /// and the full 80-word vector enters the IMCI digest preimage.
+        uint256[10] channelFundAmounts;
+        /// Multi-token (§N-6): channel-local slot → BASE token index (Rust
+        /// `BalanceState.token_registry`), zero-padded past `tokenCount`. NOT part of the IMCI
+        /// preimage — bound through the `tokenFundsDigest` PI recompute (and, in-circuit, through
+        /// the signed H1).
+        uint32[10] tokenRegistry;
+        /// Multi-token (§N-6): number of ACTIVE token slots (1..=10).
+        uint8 tokenCount;
         bytes32 channelFundIntmaxStateRoot;
         bytes32 burnTxHash;
         bytes32 closeWithdrawalDigest;
@@ -333,6 +382,16 @@ contract ChannelSettlementManager {
         address recipient;
         bytes32 userAmountDigest;
         uint64 amount;
+        /// Multi-token (§N-6): the claimed LOCAL token slot (per-(member, token) claims). Strict-
+        /// bound to PI limb 48; in-circuit it one-hot selects the claimed ciphertext position and
+        /// is a limb of the IMW2 nullifier (TM-5).
+        uint8 tokenSlot;
+        /// Multi-token (§N-6): the BASE token index this claim pays in. SECURITY: the effective
+        /// value is the PROOF's — the verifier strict-binds this field to PI limb 49, which the
+        /// circuit forces equal to the H1-committed `registry[tokenSlot]` — so a caller supplying
+        /// any other value fails the bind (never a caller choice, review m8). The Manager
+        /// additionally re-checks it against the TFD-bound finalized registry.
+        uint32 tokenIndex;
         bytes32 withdrawalNullifier;
     }
 
@@ -411,7 +470,14 @@ contract ChannelSettlementManager {
         bytes32 closeIntentDigest;
         bytes32 finalChannelStateDigest;
         bytes32 finalBalanceStateH1;
-        uint256 channelFundAmount;
+        /// Multi-token (§N-6, TM-3): the PROOF-BOUND per-token fund vector + registry + count (the
+        /// strict limb bind at `submitCloseIntent` forced their TFD recompute to equal the close
+        /// PI's member-signed `tokenFundsDigest`, TM-11). `finalizeClose` converts these into the
+        /// per-BASE-token `finalizedChannelFundAmount` accrual caps. Replaces the single
+        /// `channelFundAmount` (residual single-asset variable, TM-3).
+        uint256[10] channelFundAmounts;
+        uint32[10] tokenRegistry;
+        uint8 tokenCount;
         bytes32 channelFundIntmaxStateRoot;
         bytes32 burnTxHash;
         bytes32 closeWithdrawalDigest;
@@ -494,23 +560,47 @@ contract ChannelSettlementManager {
     uint64 public finalizedEpoch;
     uint64 public finalizedSmallBlockNumber;
     uint64 public finalizedStateVersion;
-    /// @notice The channel-fund amount DECLARED by the finalized close intent. SECURITY: this is a
-    ///         non-authoritative hint / secondary accrual bound only. The AUTHORITATIVE solvency cap
-    ///         is `receivedChannelFunds` (real ETH pulled from the rollup), enforced at payout.
-    uint256 public finalizedChannelFundAmount;
-    /// @notice Σ of accepted withdrawal/post-close claim amounts (intent-level accrual bound).
-    uint256 public totalWithdrawn;
 
-    /// @notice Real native ETH this manager has pulled from the rollup for this channel's close
-    ///         (cumulative `pullChannelFunds` balance deltas). SECURITY: this — NOT the intent's
-    ///         declared `finalizedChannelFundAmount` — is the authoritative cross-channel solvency
-    ///         ceiling: `claimWithdrawalCredit` enforces Σ paid out ≤ receivedChannelFunds, so the
-    ///         manager can never pay members more ETH than the channel actually received on L1.
-    uint256 public receivedChannelFunds;
-    /// @notice Σ native ETH actually paid out via `claimWithdrawalCredit` (the payout-side cap base).
-    uint256 public totalCreditedOut;
+    // -----------------------------------------------------------------------
+    // Multi-token settlement accounting (multitoken Phase 3, §N-6, TM-3).
+    //
+    // SECURITY (TM-3, P3): EVERY accounting variable below is keyed by the BASE token index
+    // (never a channel-local slot) — no residual single-asset variable remains. Token-t claims are
+    // accrued against token-t funds and paid ONLY from token-t received value; the per-token
+    // CapInv `totalCreditedOut[t] + amount <= receivedChannelFunds[t]` at the payout site is the
+    // Solidity image of `ChannelSettlementManagerMT.lean`'s `execMT_payout_ceiling` machine (the
+    // Lean op-to-site table maps claimMT→submit*Claim accrual, pullMT→pullChannel*Funds,
+    // pullCreditMT→claimWithdrawalCredit — the cap lives at the payout site, as deployed).
+    // -----------------------------------------------------------------------
 
-    mapping(address => uint256) public withdrawalCredits;
+    /// @notice Per-BASE-token channel-fund amounts DECLARED by the finalized close intent (set in
+    ///         `finalizeClose` from the TFD-bound (registry, amounts) vectors). SECURITY: a
+    ///         non-authoritative accrual bound only — the AUTHORITATIVE per-token solvency cap is
+    ///         `receivedChannelFunds[t]` (real value pulled from the rollup), enforced at payout.
+    mapping(uint32 => uint256) public finalizedChannelFundAmount;
+    /// @notice Σ accepted withdrawal/post-close claim amounts per base token (accrual bound).
+    mapping(uint32 => uint256) public totalWithdrawn;
+
+    /// @notice Real value this manager has pulled from the rollup per base token (cumulative
+    ///         `pullChannelFunds` / `pullChannelTokenFunds` balance deltas; index 0 = native ETH).
+    ///         SECURITY: this — NOT the intent-declared `finalizedChannelFundAmount[t]` — is the
+    ///         authoritative cross-channel/cross-token solvency ceiling: `claimWithdrawalCredit`
+    ///         enforces Σ token-t payouts ≤ receivedChannelFunds[t], so the manager can never pay
+    ///         members more of ANY asset than the channel actually received on L1 in THAT asset
+    ///         (no cross-token draw, TM-3).
+    mapping(uint32 => uint256) public receivedChannelFunds;
+    /// @notice Σ value actually paid out per base token via `claimWithdrawalCredit`.
+    mapping(uint32 => uint256) public totalCreditedOut;
+
+    /// @notice Accrued member credits per (base token, recipient).
+    mapping(uint32 => mapping(address => uint256)) public withdrawalCredits;
+
+    /// @notice The finalized close's token registry (channel-local slot → base token index) and
+    ///         active count, stored TFD-bound at `finalizeClose`. `finalizedTokenRegistry` is
+    ///         exposed via the auto-getter (per-index).
+    uint32[10] public finalizedTokenRegistry;
+    uint8 public finalizedTokenCount;
+
     mapping(bytes32 => bool) public usedWithdrawalNullifiers;
     mapping(bytes32 => bool) public usedSharedNativeNullifiers;
     mapping(bytes32 => bool) public usedLateOutgoingDebitNullifiers;
@@ -531,8 +621,9 @@ contract ChannelSettlementManager {
     mapping(address => bool) public isMemberRecipient;
     bytes32[] public registeredMemberPkGs;
 
-    /// @notice Emitted when real native ETH is pulled from the rollup into this manager.
-    event ChannelFundsPulled(uint256 amount, uint256 totalReceived);
+    /// @notice Emitted when real value (ETH: tokenIndex 0; else ERC-20) is pulled from the rollup
+    /// into this manager.
+    event ChannelFundsPulled(uint32 indexed tokenIndex, uint256 amount, uint256 totalReceived);
 
     // --- Reentrancy guard (the manager moves native ETH in pullChannelFunds/claimWithdrawalCredit) ---
     uint256 private constant _NOT_ENTERED = 1;
@@ -727,6 +818,10 @@ contract ChannelSettlementManager {
         MleVerifier.MleProof calldata proof
     ) external {
         if (channelStatus == ChannelLifecycleStatus.Closed) revert ChannelClosed();
+        // Multi-token: cheap structural bound BEFORE the proof check (defense-in-depth; the
+        // strict TFD limb bind would reject an out-of-range count anyway, since the in-circuit
+        // token_count is constrained to 1..=10 and keccak is collision-resistant).
+        if (intent.tokenCount == 0 || intent.tokenCount > 10) revert TokenCountOutOfRange();
         _checkCloseProof(intent, proof);
 
         if (pendingClose.active) {
@@ -769,7 +864,8 @@ contract ChannelSettlementManager {
             intent.closeNonce,
             intent.finalEpoch,
             intent.closeFreezeNonce,
-            intent.channelFundAmount,
+            // Genesis-token (slot 0) fund = the burn denomination; the full vector is TFD-bound.
+            intent.channelFundAmounts[0],
             pendingClose.challengeDeadline,
             intent.finalStateVersion,
             intent.finalSettledTxChain
@@ -792,7 +888,10 @@ contract ChannelSettlementManager {
             closeIntentDigest: closeIntentDigest,
             finalChannelStateDigest: intent.finalChannelStateDigest,
             finalBalanceStateH1: intent.finalBalanceStateH1,
-            channelFundAmount: intent.channelFundAmount,
+            // Multi-token (TM-3/TM-11): the full TFD-bound settlement vectors.
+            channelFundAmounts: intent.channelFundAmounts,
+            tokenRegistry: intent.tokenRegistry,
+            tokenCount: intent.tokenCount,
             channelFundIntmaxStateRoot: intent.channelFundIntmaxStateRoot,
             burnTxHash: intent.burnTxHash,
             closeWithdrawalDigest: intent.closeWithdrawalDigest,
@@ -888,8 +987,30 @@ contract ChannelSettlementManager {
         finalizedEpoch = pendingClose.finalEpoch;
         finalizedSmallBlockNumber = pendingClose.finalSmallBlockNumber;
         finalizedStateVersion = pendingClose.finalStateVersion;
-        finalizedChannelFundAmount = pendingClose.channelFundAmount;
-        totalWithdrawn = 0;
+
+        // Multi-token (TM-3): convert the TFD-bound (registry, amounts) vectors into per-BASE-token
+        // accrual caps. `finalizeClose` runs at most once per manager lifetime (status becomes
+        // Closed; a new close intent can never be submitted), so the mappings start from zero and
+        // the legacy `totalWithdrawn = 0` reset is unnecessary. `+=` (not `=`) so that even in the
+        // circuit-excluded duplicate-base-index case the cap degrades to the correct per-token
+        // AGGREGATE rather than dropping a component (the in-circuit registry injectivity re-check
+        // — TM-1 layer a — makes duplicates unreachable; the rollup's `escrowedByToken` ceiling —
+        // layer b — bounds any residue independently).
+        uint8 tc = pendingClose.tokenCount;
+        finalizedTokenCount = tc;
+        for (uint256 t = 0; t < tc; t++) {
+            uint32 baseToken = pendingClose.tokenRegistry[t];
+            finalizedTokenRegistry[t] = baseToken;
+            finalizedChannelFundAmount[baseToken] += pendingClose.channelFundAmounts[t];
+        }
+
+        // NOTE (Phase 2b review MINOR 3, examined for Phase 3): the Rust-side
+        // `unallocated_confirmed_incoming` scalar is NOT consumed anywhere in this Manager (it is
+        // not a close PI and not part of any L1 accounting variable); the close path additionally
+        // requires it to be ZERO (`CloseIntent::new` fail-closes on a nonzero residue). A per-token
+        // unallocated vector is therefore NOT required for the Manager's per-token settlement
+        // soundness; whether the Rust channel layer wants one for mid-life P2 bookkeeping is a
+        // channel-layer (Phase 4+) question, out of L1 scope.
         channelStatus = ChannelLifecycleStatus.Closed;
         closeRequestedAt = 0;
 
@@ -897,7 +1018,7 @@ contract ChannelSettlementManager {
             pendingClose.closeIntentDigest,
             pendingClose.burnTxHash,
             pendingClose.finalEpoch,
-            pendingClose.channelFundAmount,
+            pendingClose.channelFundAmounts[0],
             pendingClose.finalStateVersion,
             pendingClose.finalSettledTxChain
         );
@@ -1047,6 +1168,19 @@ contract ChannelSettlementManager {
         // non-member has no witness for a slot absent from the signed state, and the leaf-bound
         // recipient cannot be redirected. The former `registeredMemberIndexPlusOne` /
         // `registeredRecipientOf` gates were the pre-B1b authZ the proof now subsumes.
+        // Multi-token (TM-8): the claimed slot must be ACTIVE in the finalized registry, and the
+        // claim's base token must be the finalized registry's resolution of that slot. Both are
+        // ALSO proof-enforced (circuit: token_slot < token_count, token_index ==
+        // registry[token_slot] on the H1-committed registry; verifier: strict limbs 48/49) — this
+        // re-check pins them against the TFD-bound finalized copy at the cap-lookup site too.
+        if (claim.tokenSlot >= finalizedTokenCount) revert TokenSlotOutOfRange();
+        if (finalizedTokenRegistry[claim.tokenSlot] != claim.tokenIndex) {
+            revert TokenRegistryMismatch();
+        }
+        // Nullifier v2 (TM-5): [IMW2, close_intent(8), slot_regev_pk_digest(8), token_slot] —
+        // derived IN-CIRCUIT from the leaf-bound Regev pk digest (never the grindable
+        // member_pk_g) plus the token slot, so exactly one nullifier exists per (slot, token).
+        // Consumption below is unchanged check-then-set CEI.
         if (usedWithdrawalNullifiers[claim.withdrawalNullifier]) {
             revert NullifierAlreadyUsed();
         }
@@ -1059,25 +1193,29 @@ contract ChannelSettlementManager {
                 claim.recipient,
                 claim.userAmountDigest,
                 claim.amount,
+                claim.tokenSlot,
+                claim.tokenIndex,
                 claim.withdrawalNullifier,
                 proof
             )
         ) revert InvalidWithdrawalClaimProof();
 
-        uint256 newTotalWithdrawn = totalWithdrawn + claim.amount;
-        if (newTotalWithdrawn > finalizedChannelFundAmount) {
+        // Per-token accrual cap (TM-3): token-t claims accrue ONLY against token-t funds.
+        uint256 newTotalWithdrawn = totalWithdrawn[claim.tokenIndex] + claim.amount;
+        if (newTotalWithdrawn > finalizedChannelFundAmount[claim.tokenIndex]) {
             revert WithdrawalCapExceeded();
         }
-        totalWithdrawn = newTotalWithdrawn;
+        totalWithdrawn[claim.tokenIndex] = newTotalWithdrawn;
         usedWithdrawalNullifiers[claim.withdrawalNullifier] = true;
-        withdrawalCredits[claim.recipient] += claim.amount;
+        withdrawalCredits[claim.tokenIndex][claim.recipient] += claim.amount;
 
         emit WithdrawalClaimAccepted(
             claim.closeIntentDigest,
             claim.withdrawalNullifier,
             claim.memberPkG,
             claim.recipient,
-            claim.amount
+            claim.amount,
+            claim.tokenIndex
         );
     }
 
@@ -1122,17 +1260,29 @@ contract ChannelSettlementManager {
             )
         ) revert InvalidPostCloseClaimProof();
 
-        // Cap accrual against the (intent-declared) channel fund, mirroring submitWithdrawalClaim.
-        // SECURITY: post-close claims share the SAME accrual budget as withdrawal claims — without
-        // this, post-close claims could mint unbounded credits past the channel fund. (The
-        // authoritative ETH ceiling is still `receivedChannelFunds`, enforced at payout.)
-        uint256 newTotalWithdrawn = totalWithdrawn + claim.amount;
-        if (newTotalWithdrawn > finalizedChannelFundAmount) {
+        // Multi-token (§N-6, GENESIS-TOKEN PIN): the post-close-claim PI vector (56 limbs) carries
+        // NO token limb — the Rust post-close claim circuit credits the NATIVE path, i.e. the
+        // channel's GENESIS token (post_close_claim_circuit.rs, Phase 2a: "credited token follows
+        // the native path (genesis token)"). Pin the credited base token to the finalized
+        // registry[0] accordingly. Fail-closed: `finalizeClose` guarantees tokenCount >= 1
+        // (submit-time TokenCountOutOfRange bound), so slot 0 is always active. A per-token
+        // post-close claim (token PI limb) is a LATER-PHASE circuit change — when the Rust PI
+        // gains a token limb, this pin must be replaced by a strict-bound claim field (tracked in
+        // doc/tasks/multitoken-todo.md, Phase 3 status).
+        uint32 genesisToken = finalizedTokenRegistry[0];
+
+        // Cap accrual against the (intent-declared) per-token channel fund, mirroring
+        // submitWithdrawalClaim. SECURITY: post-close claims share the SAME per-token accrual
+        // budget as withdrawal claims — without this, post-close claims could mint unbounded
+        // credits past the channel fund. (The authoritative ceiling is still
+        // `receivedChannelFunds[t]`, enforced at payout.)
+        uint256 newTotalWithdrawn = totalWithdrawn[genesisToken] + claim.amount;
+        if (newTotalWithdrawn > finalizedChannelFundAmount[genesisToken]) {
             revert WithdrawalCapExceeded();
         }
-        totalWithdrawn = newTotalWithdrawn;
+        totalWithdrawn[genesisToken] = newTotalWithdrawn;
         usedSharedNativeNullifiers[sharedNativeNullifier] = true;
-        withdrawalCredits[claim.recipient] += claim.amount;
+        withdrawalCredits[genesisToken][claim.recipient] += claim.amount;
         emit PostCloseClaimAccepted(
             claim.closeIntentDigest,
             sharedNativeNullifier,
@@ -1145,32 +1295,72 @@ contract ChannelSettlementManager {
     /// @notice Pull this channel's native ETH from the rollup into the manager. Permissionless: it
     ///         only moves the manager's own `pendingWithdrawals[manager]` (credited when the close
     ///         paid this manager via `IntmaxRollup.withdrawNative`). The balance delta is added to
-    ///         `receivedChannelFunds` — the authoritative payout ceiling.
+    ///         `receivedChannelFunds[0]` (ETH = base token 0) — the authoritative payout ceiling.
     /// @dev nonReentrant; measures balance before/after the external `registry.withdraw()` call.
     function pullChannelFunds() external nonReentrant returns (uint256 pulled) {
         uint256 balBefore = address(this).balance;
         registry.withdraw(); // rollup pays pendingWithdrawals[manager] to this contract (receive())
         pulled = address(this).balance - balBefore;
-        receivedChannelFunds += pulled;
-        emit ChannelFundsPulled(pulled, receivedChannelFunds);
+        receivedChannelFunds[0] += pulled;
+        emit ChannelFundsPulled(0, pulled, receivedChannelFunds[0]);
     }
 
-    /// @notice Claim a member's accrued credit as real native ETH (pull-payment).
-    /// @dev SECURITY: the GLOBAL cross-channel solvency invariant is enforced HERE —
-    ///      `totalCreditedOut + amount <= receivedChannelFunds` — so the manager can never pay out
-    ///      more ETH than it actually received from the rollup for this channel, regardless of any
-    ///      inflated intent or intra-channel mis-accounting (those are accepted intra-channel risks).
-    ///      CEI: credit zeroed + paid-out accumulator bumped BEFORE the external transfer;
-    ///      nonReentrant for defense in depth.
-    function claimWithdrawalCredit() external nonReentrant returns (uint256 amount) {
-        amount = withdrawalCredits[msg.sender];
+    /// @notice Pull this channel's ERC-20 funds for one base token from the rollup (multitoken
+    ///         §N-7): the ERC-20 mirror of `pullChannelFunds`. The channel's ERC-20 settlement
+    ///         arrives as `IntmaxRollup.withdrawERC20` credits (recipient == this manager); this
+    ///         moves them in via the rollup's `withdrawToken` pull and records the MEASURED
+    ///         balance delta as token-t payout capacity.
+    /// @dev SECURITY: `nonReentrant` (the token is untrusted code); the delta measurement counts
+    ///      ONLY value received during this pull — a fee-skimming token under-credits (self-harm,
+    ///      fail-safe direction) and unsolicited donations are not counted (they merely sit in the
+    ///      contract, exactly like SELFDESTRUCT-forced ETH on the native path). The token address
+    ///      resolves through the rollup's SET-ONCE registry (TM-10b) — the manager keeps no second
+    ///      mutable copy.
+    function pullChannelTokenFunds(uint32 tokenIndex) external nonReentrant returns (uint256 pulled) {
+        IERC20 token = registry.tokenAddressOf(tokenIndex);
+        if (address(token) == address(0)) revert TokenIndexNotRegisteredOnRollup();
+        uint256 balBefore = token.balanceOf(address(this));
+        registry.withdrawToken(tokenIndex); // rollup pays pendingTokenWithdrawals[t][manager]
+        pulled = token.balanceOf(address(this)) - balBefore;
+        receivedChannelFunds[tokenIndex] += pulled;
+        emit ChannelFundsPulled(tokenIndex, pulled, receivedChannelFunds[tokenIndex]);
+    }
+
+    /// @notice Claim a member's accrued native-ETH credit (pull-payment). Convenience alias for
+    ///         `claimWithdrawalCredit(0)` — keeps the pre-multitoken ETH call sites unchanged.
+    function claimWithdrawalCredit() external returns (uint256 amount) {
+        return claimWithdrawalCredit(0);
+    }
+
+    /// @notice Claim a member's accrued credit in ONE base token as real value (pull-payment).
+    ///         `tokenIndex == 0` pays native ETH; any other index pays the L1-registered ERC-20.
+    /// @dev SECURITY (TM-3, per-token CapInv — the Lean `execMT_payout_ceiling` site): the
+    ///      cross-channel/cross-token solvency invariant is enforced HERE, PER BASE TOKEN —
+    ///      `totalCreditedOut[t] + amount <= receivedChannelFunds[t]` — so the manager can never
+    ///      pay out more of ANY asset than it actually received from the rollup in THAT asset,
+    ///      regardless of inflated intents or intra-channel mis-accounting (accepted intra-channel
+    ///      risks). Token-t credits can NEVER draw on token-t' (or ETH) capacity. Payout dispatch:
+    ///      t == 0 → ETH transfer (existing pattern); else safeTransfer of the token resolved via
+    ///      the rollup's SET-ONCE registry (the SAME registry the escrow used — no second copy,
+    ///      TM-10b). CEI: credit zeroed + paid-out accumulator bumped BEFORE the external
+    ///      transfer; nonReentrant for defense in depth.
+    function claimWithdrawalCredit(uint32 tokenIndex) public nonReentrant returns (uint256 amount) {
+        amount = withdrawalCredits[tokenIndex][msg.sender];
         if (amount == 0) revert NoWithdrawalCredit();
-        if (totalCreditedOut + amount > receivedChannelFunds) revert WithdrawalCapExceeded();
-        withdrawalCredits[msg.sender] = 0;
-        totalCreditedOut += amount;
-        emit WithdrawalClaimed(msg.sender, amount);
-        (bool ok, ) = msg.sender.call{value: amount}("");
-        if (!ok) revert TransferFailed();
+        if (totalCreditedOut[tokenIndex] + amount > receivedChannelFunds[tokenIndex]) {
+            revert WithdrawalCapExceeded();
+        }
+        withdrawalCredits[tokenIndex][msg.sender] = 0;
+        totalCreditedOut[tokenIndex] += amount;
+        emit WithdrawalClaimed(msg.sender, tokenIndex, amount);
+        if (tokenIndex == 0) {
+            (bool ok, ) = msg.sender.call{value: amount}("");
+            if (!ok) revert TransferFailed();
+        } else {
+            IERC20 token = registry.tokenAddressOf(tokenIndex);
+            if (address(token) == address(0)) revert TokenIndexNotRegisteredOnRollup();
+            SafeERC20Lib.safeTransfer(token, msg.sender, amount);
+        }
     }
 
     function getPendingClose() external view returns (PendingClose memory) {
@@ -1183,6 +1373,12 @@ contract ChannelSettlementManager {
     /// `channelId` is the Rust `channel_fund_snapshot.channel_id` slot (this contract pins both
     /// to its own channel). `finalStateVersion` and `finalSettledTxChain` are appended at the
     /// END of the legacy preimage (detail2 §C-8). F7: unchanged (not member-bearing).
+    ///
+    /// Multi-token (§N-6, TM-11): the former single 8-word amount segment is widened IN PLACE to
+    /// the ALWAYS-full-width 80-word `channelFundAmounts[0..10]` vector, byte-identical to the
+    /// Rust preimage (`abi.encodePacked(uint256[10])` = 10 x 32 BE bytes; shared vector:
+    /// `close_intent_digest_matches_solidity_shared_vector`). `tokenRegistry`/`tokenCount` are NOT
+    /// part of the IMCI preimage (they bind through the tokenFundsDigest PI and the signed H1).
     function computeCloseIntentDigest(
         CloseIntent memory intent
     ) public view returns (bytes32) {
@@ -1203,7 +1399,7 @@ contract ChannelSettlementManager {
                 ),
                 abi.encodePacked(
                     channelId,
-                    intent.channelFundAmount,
+                    intent.channelFundAmounts,
                     intent.channelFundIntmaxStateRoot,
                     intent.burnTxHash,
                     intent.closeWithdrawalDigest,
@@ -1241,8 +1437,8 @@ contract ChannelSettlementManager {
         // `delegateCount` limbs must equal this channel's `activeMemberCount` / `activeDelegateCount`,
         // so a close can only finalize with the channel's registered SPHINCS+ members at the
         // registered member/delegate split (no non-member-key substitution, no active/padding- or
-        // member/delegate-boundary forgery). All are part of the close-proof public inputs
-        // (closePIHash, 87 limbs incl. the appended delegateCount).
+        // member/delegate-boundary forgery). All are part of the close-proof public inputs (103 raw
+        // limbs incl. the appended delegateCount and the multi-token tokenFundsDigest).
         if (!_runCloseVerify(intent, proof)) revert InvalidCloseProof();
     }
 
@@ -1260,7 +1456,12 @@ contract ChannelSettlementManager {
             closeFreezeNonce: intent.closeFreezeNonce,
             finalChannelStateDigest: intent.finalChannelStateDigest,
             finalBalanceStateH1: intent.finalBalanceStateH1,
-            channelFundAmount: intent.channelFundAmount,
+            // Multi-token (TM-11): the supplied settlement vectors. The verifier RECOMPUTES the
+            // tokenFundsDigest over exactly these and strict-binds it to PI limbs 95..102, so a
+            // close can only be recorded with the member-signed (registry, count, amounts).
+            channelFundAmounts: intent.channelFundAmounts,
+            tokenRegistry: intent.tokenRegistry,
+            tokenCount: intent.tokenCount,
             channelFundIntmaxStateRoot: intent.channelFundIntmaxStateRoot,
             burnTxHash: intent.burnTxHash,
             closeWithdrawalDigest: intent.closeWithdrawalDigest,

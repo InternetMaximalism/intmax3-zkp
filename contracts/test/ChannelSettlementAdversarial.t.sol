@@ -59,7 +59,7 @@ contract ChannelSettlementAdversarialTest is CloseSettlementBase {
         uint256 paid = manager.claimWithdrawalCredit();
         assertEq(paid, 40, "pays the accrued credit after pull");
         assertEq(alice.balance - balBefore, 40, "alice received real ETH");
-        assertEq(manager.totalCreditedOut(), 40, "totalCreditedOut tracks the payout");
+        assertEq(manager.totalCreditedOut(0), 40, "totalCreditedOut tracks the payout");
     }
 
     // ─────────────────────────────────────────────────────────────────────────
@@ -75,7 +75,7 @@ contract ChannelSettlementAdversarialTest is CloseSettlementBase {
         bytes32 d = _finalizeWithFund(100);
         _submitWd(d, USER_A, alice, 40);
         _submitWd(d, USER_B, bob, 40);
-        assertEq(manager.totalWithdrawn(), 80, "both claims accrue under the 100 cap");
+        assertEq(manager.totalWithdrawn(0), 80, "both claims accrue under the 100 cap");
 
         _fundAndPull(registry, manager, 50); // intent said 100, reality is 50
 
@@ -87,8 +87,8 @@ contract ChannelSettlementAdversarialTest is CloseSettlementBase {
         vm.expectRevert(ChannelSettlementManager.WithdrawalCapExceeded.selector);
         manager.claimWithdrawalCredit();
 
-        assertLe(manager.totalCreditedOut(), manager.receivedChannelFunds(), "solvency: out <= received");
-        assertEq(manager.totalCreditedOut(), 40, "only 40 of the 50 was claimable by the first mover");
+        assertLe(manager.totalCreditedOut(0), manager.receivedChannelFunds(0), "solvency: out <= received");
+        assertEq(manager.totalCreditedOut(0), 40, "only 40 of the 50 was claimable by the first mover");
         assertEq(address(manager).balance, 10, "10 received ETH remains, owed to bob but capped");
     }
 
@@ -102,7 +102,7 @@ contract ChannelSettlementAdversarialTest is CloseSettlementBase {
     function test_shared_accrual_budget_withdrawal_plus_postclose() external {
         bytes32 d = _finalizeDefault(); // fund = 75
         _submitWd(d, USER_A, alice, 40); // totalWithdrawn = 40
-        assertEq(manager.totalWithdrawn(), 40);
+        assertEq(manager.totalWithdrawn(0), 40);
 
         // Post-close claim to member B for 40 → 40 + 40 = 80 > 75 → reverts. Build the proof BEFORE
         // expectRevert (proof building does view calls that would otherwise consume the expectation).
@@ -114,14 +114,14 @@ contract ChannelSettlementAdversarialTest is CloseSettlementBase {
 
         // 35 fits (40 + 35 == 75 exactly).
         _submitPc(d, keccak256("incoming_tx_1"), USER_B, bob, 35);
-        assertEq(manager.totalWithdrawn(), 75, "shared budget filled exactly to the fund cap");
+        assertEq(manager.totalWithdrawn(0), 75, "shared budget filled exactly to the fund cap");
     }
 
     /// Boundary: accrual is allowed up to EXACTLY the fund and one wei more reverts.
     function test_accrual_cap_exact_boundary() external {
         bytes32 d = _finalizeDefault(); // fund = 75
         _submitWd(d, USER_A, alice, 75);
-        assertEq(manager.totalWithdrawn(), 75, "accrue exactly the fund");
+        assertEq(manager.totalWithdrawn(0), 75, "accrue exactly the fund");
 
         ChannelSettlementManager.WithdrawalClaim memory c = _withdrawalClaim(d, USER_B, bob, 1);
         MleVerifier.MleProof memory proof = _withdrawalClaimProof(c);
@@ -150,8 +150,8 @@ contract ChannelSettlementAdversarialTest is CloseSettlementBase {
         vm.expectRevert(ChannelSettlementManager.WithdrawalCapExceeded.selector);
         manager.claimWithdrawalCredit();
 
-        assertEq(manager.totalCreditedOut(), 25, "aggregate out is bounded by received (30)");
-        assertLe(manager.totalCreditedOut(), manager.receivedChannelFunds(), "solvency holds");
+        assertEq(manager.totalCreditedOut(0), 25, "aggregate out is bounded by received (30)");
+        assertLe(manager.totalCreditedOut(0), manager.receivedChannelFunds(0), "solvency holds");
     }
 
     // ─────────────────────────────────────────────────────────────────────────
@@ -177,7 +177,7 @@ contract ChannelSettlementAdversarialTest is CloseSettlementBase {
 
         // All accrued credit (75) is paid; nobody can claim the surplus 25 — accrual is capped at
         // the declared fund, so the extra ETH is stranded in the manager with no extraction path.
-        assertEq(manager.totalCreditedOut(), 75, "only the declared fund is ever paid out");
+        assertEq(manager.totalCreditedOut(0), 75, "only the declared fund is ever paid out");
         assertEq(address(manager).balance, 25, "surplus 25 ETH locked in the manager (no admin path)");
 
         // No further credit exists, so any further claim reverts.
@@ -194,7 +194,7 @@ contract ChannelSettlementAdversarialTest is CloseSettlementBase {
     function test_pull_works_before_close_but_claims_gated_on_closed() external {
         // Pull funds while still Active (permissionless, only moves pendingWithdrawals[manager]).
         _fundAndPull(registry, manager, 40);
-        assertEq(manager.receivedChannelFunds(), 40, "funds pullable pre-close");
+        assertEq(manager.receivedChannelFunds(0), 40, "funds pullable pre-close");
 
         // A withdrawal claim before any finalize → CloseNotActive (status != Closed).
         ChannelSettlementManager.WithdrawalClaim memory c =
@@ -222,12 +222,12 @@ contract ChannelSettlementAdversarialTest is CloseSettlementBase {
         accepted += _tryAccrue(d, USER_B, bob, a1, 1);
         accepted += _tryAccrue(d, USER_C, carol, a2, 2);
 
-        assertEq(manager.totalWithdrawn(), accepted, "accrual == sum of accepted amounts");
-        assertLe(manager.totalWithdrawn(), DEFAULT_FUND_AMOUNT, "accrual never exceeds the fund");
+        assertEq(manager.totalWithdrawn(0), accepted, "accrual == sum of accepted amounts");
+        assertLe(manager.totalWithdrawn(0), DEFAULT_FUND_AMOUNT, "accrual never exceeds the fund");
         // Conservation (no payouts): totalWithdrawn == Σ credits across the three recipients.
-        uint256 sumCredits = manager.withdrawalCredits(alice)
-            + manager.withdrawalCredits(bob) + manager.withdrawalCredits(carol);
-        assertEq(manager.totalWithdrawn(), sumCredits, "conservation: accrual == sum credits");
+        uint256 sumCredits = manager.withdrawalCredits(0, alice)
+            + manager.withdrawalCredits(0, bob) + manager.withdrawalCredits(0, carol);
+        assertEq(manager.totalWithdrawn(0), sumCredits, "conservation: accrual == sum credits");
     }
 
     // ─────────────────────────────────────────────────────────────────────────
@@ -256,14 +256,14 @@ contract ChannelSettlementAdversarialTest is CloseSettlementBase {
         );
         // ...but it moved no ETH and changed no fund-affecting accounting.
         assertEq(address(manager).balance, managerEthBefore, "fundBpBondCredits escrows no ETH");
-        assertEq(manager.receivedChannelFunds(), 25, "received funds unaffected by bond inflation");
-        assertEq(manager.totalWithdrawn(), 25, "accrual unaffected by bond inflation");
+        assertEq(manager.receivedChannelFunds(0), 25, "received funds unaffected by bond inflation");
+        assertEq(manager.totalWithdrawn(0), 25, "accrual unaffected by bond inflation");
 
         // The legitimate claim path is unchanged: alice still gets exactly her 25, capped by the
         // 25 received — the inflated bond does NOT raise the payout ceiling.
         vm.prank(alice);
         assertEq(manager.claimWithdrawalCredit(), 25, "payout still capped by received, not by bond");
-        assertLe(manager.totalCreditedOut(), manager.receivedChannelFunds(), "solvency holds");
+        assertLe(manager.totalCreditedOut(0), manager.receivedChannelFunds(0), "solvency holds");
     }
 
     /// Submit one salted withdrawal claim; return the amount if accepted, 0 if the cap rejected it.

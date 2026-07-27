@@ -5,6 +5,7 @@ import {MleVerifier} from "@mle/MleVerifier.sol";
 import {SpongefishWhirVerify} from "@mle/spongefish/SpongefishWhirVerify.sol";
 import {GoldilocksExt3} from "@mle/spongefish/GoldilocksExt3.sol";
 import {BlobKZGVerifier, BlobKZGVerifierExt, KZGProof} from "./BlobKZGVerifier.sol";
+import {IERC20, SafeERC20Lib} from "./SafeERC20.sol";
 
 /// @title IntmaxRollup
 /// @notice INTMAX3 validity proof rollup contract.
@@ -193,6 +194,28 @@ contract IntmaxRollup {
     error WithdrawalEmptySet();
     error PartialWithdrawalNotAuthorized();
     error NotRegisteredSettlementManager();
+    // --- Multi-token ERC-20 escrow (multitoken Phase 3, detail2 §N-7, TM-1/4/10) ---
+    /// Token index 0 is permanently reserved for native ETH and can never map to an ERC-20.
+    error TokenIndexZeroReservedForEth();
+    /// The token address for an index is SET-ONCE (TM-10b: a remappable index would convert
+    /// token-A escrow into token-B withdrawals; channels' H1-frozen registries reference these
+    /// indices forever).
+    error TokenIndexAlreadyRegistered();
+    error TokenAddressZeroReserved();
+    /// A registered token must be a deployed contract (a no-code address makes every token call a
+    /// vacuous success, silently voiding the escrow).
+    error TokenNotAContract();
+    /// A nonzero tokenIndex deposit/withdrawal requires the index to be registered on L1. The old
+    /// "accounting-only nonzero tokenIndex" regime is RETIRED (§N-7): unregistered-index deposits
+    /// would record value in the deposit hash chain that no escrow backs.
+    error TokenIndexNotRegistered();
+    /// TM-4 (fee-on-transfer / rebasing / hook-skimming): the measured balanceOf delta of a
+    /// deposit did not equal the stated amount. The deposit hash chain must never record
+    /// unreceived value — such tokens are UNSUPPORTED and fail closed.
+    error TokenDepositAmountMismatch();
+    /// `withdrawERC20` pays ERC-20 leaves only; ETH leaves go through `withdrawNative`.
+    error WithdrawalNotErc20Token();
+    error NothingToWithdrawForToken();
 
     // -----------------------------------------------------------------------
     // Types
@@ -494,7 +517,60 @@ contract IntmaxRollup {
     ///           escrowed here. It is intentionally kept disjoint from the `POST_BLOCK_STAKE` ETH
     ///           tracked by `stakeInfo`/`pendingWithdrawals` (fraud-stake accounting), which is NOT
     ///           part of this balance.
+    /// @dev Multi-token (§N-7): ETH escrow accounting DELIBERATELY stays on `totalEscrowed` (not
+    ///      `escrowedByToken[0]`) — minimal diff, and every existing ETH invariant/test keeps its
+    ///      exact semantics. `escrowedByToken` is ERC-20-only (`tokenIndex != 0`); no path reads or
+    ///      writes `escrowedByToken[0]`.
     uint256 public totalEscrowed;
+
+    // -----------------------------------------------------------------------
+    // Multi-token ERC-20 escrow (multitoken Phase 3, detail2 §N-7, TM-1/4/10)
+    // -----------------------------------------------------------------------
+
+    /// @notice APPEND-ONLY, SET-ONCE `tokenIndex → ERC-20 address` registry. Index 0 is native ETH
+    ///         (never mapped). SECURITY (TM-10b): an index is IMMUTABLE once set — a remappable
+    ///         index would turn token-A escrow into token-B withdrawals, and channels' H1-frozen
+    ///         `token_registry` entries reference these base indices forever.
+    mapping(uint32 => IERC20) public tokenAddressOf;
+
+    /// @notice Per-token escrow ceiling (TM-1 layer b): Σ token-t payouts ≤ Σ token-t deposits,
+    ///         enforced by Solidity-0.8 underflow-revert on every `withdrawERC20` decrement — the
+    ///         per-base-token analogue of the global `totalEscrowed` ETH backstop. This holds even
+    ///         if a colluding cosigner set registers duplicate base indices in a channel registry
+    ///         (the in-circuit injectivity check is layer a; NEITHER layer alone suffices, TM-1).
+    mapping(uint32 => uint256) public escrowedByToken;
+
+    /// @notice Pull-payment ERC-20 credits per (token, recipient) — the ERC-20 mirror of the ETH
+    ///         `pendingWithdrawals` pattern. `withdrawERC20` credits here (CEI, no token call in
+    ///         the verification loop); recipients (incl. the ChannelSettlementManager) pull via
+    ///         `withdrawToken`, so a reverting/hooking token transfer cannot block the payout of
+    ///         other leaves and the manager's receiving path mirrors the ETH `withdraw()` pull.
+    mapping(uint32 => mapping(address => uint256)) public pendingTokenWithdrawals;
+
+    event TokenRegistered(uint32 indexed tokenIndex, address indexed token);
+    event Erc20Withdrawn(
+        address indexed recipient,
+        uint32 indexed tokenIndex,
+        uint256 amount,
+        bytes32 indexed nullifier,
+        uint64 blockNumber
+    );
+    event TokenWithdrawalClaimed(address indexed recipient, uint32 indexed tokenIndex, uint256 amount);
+
+    /// @notice Register an ERC-20 for a base token index. Deployer-only (the contract's existing
+    ///         admin pattern), APPEND-ONLY and SET-ONCE per index (TM-10b).
+    /// @dev SECURITY: index 0 is reserved for native ETH; address(0) is rejected; the address must
+    ///      be a deployed contract (a no-code address turns every token call into a vacuous
+    ///      success, silently voiding the escrow). Once set, an index can NEVER be remapped.
+    function registerToken(uint32 tokenIndex, address token) external {
+        if (msg.sender != deployer) revert OnlyDeployer();
+        if (tokenIndex == ETH_TOKEN_INDEX) revert TokenIndexZeroReservedForEth();
+        if (token == address(0)) revert TokenAddressZeroReserved();
+        if (address(tokenAddressOf[tokenIndex]) != address(0)) revert TokenIndexAlreadyRegistered();
+        if (token.code.length == 0) revert TokenNotAContract();
+        tokenAddressOf[tokenIndex] = IERC20(token);
+        emit TokenRegistered(tokenIndex, token);
+    }
 
     mapping(uint256 => Submission) internal _submissions;
     uint256 public nextSubmissionId;
@@ -716,17 +792,9 @@ contract IntmaxRollup {
         if (w.auxData == bytes32(0)) revert PartialWithdrawalNotAuthorized();
         if (withdrawalNullifierUsed[w.nullifier]) revert WithdrawalNullifierUsed();
 
-        bytes32 authDigest = keccak256(
-            abi.encodePacked(
-                bytes4(0x494d5057),
-                w.nullifier,
-                w.recipient,
-                w.tokenIndex,
-                w.amount,
-                w.auxData
-            )
-        );
-        if (!partialWithdrawalAuthorized[authDigest]) revert PartialWithdrawalNotAuthorized();
+        if (!partialWithdrawalAuthorized[_withdrawalAuthDigest(w)]) {
+            revert PartialWithdrawalNotAuthorized();
+        }
 
         withdrawalNullifierUsed[w.nullifier] = true;
         totalEscrowed -= w.amount;
@@ -889,25 +957,47 @@ contract IntmaxRollup {
 
     /// @notice Queue a deposit.  The deposit hash chain is updated immediately;
     ///         the deposit is associated with the next block.
+    /// @dev Multi-token (§N-7): a nonzero `tokenIndex` now escrows REAL ERC-20 value. The former
+    ///      "accounting-only nonzero tokenIndex" regime is RETIRED — an unregistered nonzero index
+    ///      reverts instead of recording unbacked value in the deposit hash chain.
     function deposit(
         bytes32 recipient,
         uint32 tokenIndex,
         uint256 amount,
         bytes32 auxData
-    ) external payable {
+    ) external payable nonReentrant {
         // --- Native-ETH escrow (Phase 1) ---
         // SECURITY: For ETH deposits the caller MUST forward exactly `amount` wei; we then grow
         // `totalEscrowed`, the global ceiling for all future native payouts. CEI: this is a pure
-        // effect on our own balance/storage — there is no external call here, so there is nothing
-        // to reorder. Stray ETH on a non-ETH deposit is rejected (no value sink), and plain ETH
-        // transfers revert because the contract exposes no receive()/fallback().
+        // effect on our own balance/storage — there is no external call on the ETH path, so there
+        // is nothing to reorder. Stray ETH on a non-ETH deposit is rejected (no value sink), and
+        // plain ETH transfers revert because the contract exposes no receive()/fallback().
         if (tokenIndex == ETH_TOKEN_INDEX) {
             if (msg.value != amount) revert EthDepositValueMismatch();
             totalEscrowed += amount;
         } else {
-            // Non-ETH tokens are out of scope for v1: accounting is preserved below, but no real
-            // value is custodied, so the call must not carry ETH.
+            // --- ERC-20 escrow (multitoken Phase 3, §N-7, TM-4/TM-10a) ---
+            // SECURITY: the index must be L1-registered (set-once address, TM-10b) and the call
+            // must not carry ETH. `safeTransferFrom` is an external call into UNTRUSTED token code
+            // (ERC-777-style hooks) — `nonReentrant` (on this function) blocks reentry into every
+            // guarded entry point, and the deposit hash chain / escrow effects below only run
+            // AFTER the measured transfer.
             if (msg.value != 0) revert NonEthDepositMustNotCarryEth();
+            IERC20 token = tokenAddressOf[tokenIndex];
+            if (address(token) == address(0)) revert TokenIndexNotRegistered();
+            // SECURITY (TM-4): measure the balanceOf(this) delta around the transfer and REVERT
+            // unless delta == the stated amount. The deposit hash chain must NEVER record an
+            // amount that was not actually received: fee-on-transfer / rebasing / hook-skimming
+            // tokens are UNSUPPORTED and fail closed here rather than under-collateralizing the
+            // escrow. (A hook that re-enters to inflate our balance mid-transfer can only make
+            // delta LARGER, which also fails the strict equality.)
+            uint256 balBefore = token.balanceOf(address(this));
+            SafeERC20Lib.safeTransferFrom(token, msg.sender, address(this), amount);
+            if (token.balanceOf(address(this)) - balBefore != amount) {
+                revert TokenDepositAmountMismatch();
+            }
+            // Per-token escrow ceiling grows only by the VERIFIED-received amount (TM-1 layer b).
+            escrowedByToken[tokenIndex] += amount;
         }
 
         uint64 idx = depositCount++;
@@ -1386,6 +1476,123 @@ contract IntmaxRollup {
         address withdrawalProver,
         MleVerifier.MleProof calldata mleProof
     ) external nonReentrant {
+        uint64 wdBlockNumber = _verifyWithdrawalSet(ws, withdrawalProver, mleProof);
+
+        // 4. Pay out each leaf (CEI: all checks/effects precede any value movement; pull-payment).
+        for (uint256 i = 0; i < ws.length; i++) {
+            Withdrawal calldata w = ws[i];
+            // ETH leaves only; ERC-20 leaves go through `withdrawERC20` (multitoken §N-7). A chain
+            // mixing ETH and ERC-20 leaves is not payable by either entry point (the chain binds as
+            // a whole) — the withdrawal prover emits single-asset-class chains.
+            if (w.tokenIndex != ETH_TOKEN_INDEX) revert WithdrawalNotEthToken();
+            if (withdrawalNullifierUsed[w.nullifier]) revert WithdrawalNullifierUsed();
+
+            // GAP2: burn withdrawals (auxData != 0) require a finalized partial-withdrawal
+            // authorization from a registered settlement manager. The auth digest binds ALL
+            // withdrawal fields so an attacker cannot reuse an authorized tx_leaf with
+            // different recipient/amount. Normal withdrawals (auxData == 0) are unaffected.
+            if (w.auxData != bytes32(0)) {
+                if (!partialWithdrawalAuthorized[_withdrawalAuthDigest(w)]) {
+                    revert PartialWithdrawalNotAuthorized();
+                }
+            }
+
+            withdrawalNullifierUsed[w.nullifier] = true;
+            // GLOBAL solvency ceiling: Solidity 0.8 underflow reverts if Σ would exceed real escrow.
+            totalEscrowed -= w.amount;
+            pendingWithdrawals[w.recipient] += w.amount;
+            emit NativeWithdrawn(w.recipient, w.amount, w.nullifier, wdBlockNumber);
+        }
+    }
+
+    /// @notice Pay out ERC-20 leaves for a wrapped `WithdrawalCircuit` proof (multitoken Phase 3,
+    ///         §N-7). MIRRORS `withdrawNative` exactly — the SAME withdrawal-set verification
+    ///         (`_verifyWithdrawalSet`: real MLE/WHIR under the withdrawal VK, finalized-root
+    ///         anchor, chain re-fold → pis_hash binding), the SAME per-leaf nullifier single-use,
+    ///         and the SAME IMPW partial-withdrawal authorization gate (the auth digest already
+    ///         binds `tokenIndex`) — only the asset dispatch differs.
+    ///
+    /// SECURITY:
+    ///   • Per leaf: `tokenIndex != 0` AND registered (TM-10b) — the ETH guard in `withdrawNative`
+    ///     stays untouched, so no leaf is payable by both entry points.
+    ///   • Per-token escrow ceiling (TM-1 layer b): `escrowedByToken[t] -= amount` underflow-reverts
+    ///     the whole call if Σ token-t payouts would exceed Σ token-t verified deposits — even
+    ///     across channels sharing the token, and even if a channel-local registry duplicated the
+    ///     index (the in-circuit injectivity check is the other, independent layer).
+    ///   • Pull-payment (CEI): credits `pendingTokenWithdrawals[t][recipient]`; NO token code runs
+    ///     inside this loop. Recipients pull via `withdrawToken`, where `nonReentrant` guards the
+    ///     single external token call.
+    function withdrawERC20(
+        Withdrawal[] calldata ws,
+        address withdrawalProver,
+        MleVerifier.MleProof calldata mleProof
+    ) external nonReentrant {
+        uint64 wdBlockNumber = _verifyWithdrawalSet(ws, withdrawalProver, mleProof);
+
+        for (uint256 i = 0; i < ws.length; i++) {
+            Withdrawal calldata w = ws[i];
+            if (w.tokenIndex == ETH_TOKEN_INDEX) revert WithdrawalNotErc20Token();
+            if (address(tokenAddressOf[w.tokenIndex]) == address(0)) revert TokenIndexNotRegistered();
+            if (withdrawalNullifierUsed[w.nullifier]) revert WithdrawalNullifierUsed();
+
+            // GAP2 mirror: burn withdrawals need a finalized IMPW authorization (digest binds
+            // tokenIndex, so an ETH authorization can never authorize an ERC-20 payout).
+            if (w.auxData != bytes32(0)) {
+                if (!partialWithdrawalAuthorized[_withdrawalAuthDigest(w)]) {
+                    revert PartialWithdrawalNotAuthorized();
+                }
+            }
+
+            withdrawalNullifierUsed[w.nullifier] = true;
+            // PER-TOKEN solvency ceiling (TM-1 layer b): underflow-revert on over-release.
+            escrowedByToken[w.tokenIndex] -= w.amount;
+            pendingTokenWithdrawals[w.tokenIndex][w.recipient] += w.amount;
+            emit Erc20Withdrawn(w.recipient, w.tokenIndex, w.amount, w.nullifier, wdBlockNumber);
+        }
+    }
+
+    /// @notice Pull-payment: claim accrued ERC-20 credits for one token (the ERC-20 mirror of
+    ///         `withdraw()`). The ChannelSettlementManager receives its channel's ERC-20 funds
+    ///         through this call (measuring its own balance delta), exactly as it pulls ETH via
+    ///         `withdraw()`.
+    /// @dev SECURITY: CEI (credit zeroed before the token call) + `nonReentrant` — the token is
+    ///      untrusted code (ERC-777-style hooks) but re-entering any guarded entry point reverts,
+    ///      and the credit is already zero on reentry regardless.
+    function withdrawToken(uint32 tokenIndex) external nonReentrant {
+        IERC20 token = tokenAddressOf[tokenIndex];
+        if (address(token) == address(0)) revert TokenIndexNotRegistered();
+        uint256 amount = pendingTokenWithdrawals[tokenIndex][msg.sender];
+        if (amount == 0) revert NothingToWithdrawForToken();
+        pendingTokenWithdrawals[tokenIndex][msg.sender] = 0;
+        emit TokenWithdrawalClaimed(msg.sender, tokenIndex, amount);
+        SafeERC20Lib.safeTransfer(token, msg.sender, amount);
+    }
+
+    /// @dev IMPW partial-withdrawal auth digest over ALL withdrawal fields (incl. tokenIndex).
+    ///      Shared by the ETH and ERC-20 payout paths and `claimAuthorizedWithdrawal`.
+    function _withdrawalAuthDigest(Withdrawal calldata w) private pure returns (bytes32) {
+        return keccak256(
+            abi.encodePacked(
+                bytes4(0x494d5057), // "IMPW" domain
+                w.nullifier,
+                w.recipient,
+                w.tokenIndex,
+                w.amount,
+                w.auxData
+            )
+        );
+    }
+
+    /// @dev Shared verification core of `withdrawNative` / `withdrawERC20` (steps 1–3): real
+    ///      MLE/WHIR proof under the withdrawal VK, finalized-state-root anchor, and the keccak
+    ///      chain re-fold binding `ws` to the proof's pis_hash. Returns the proof's block number.
+    ///      SECURITY: identical checks for both asset paths — factoring shares (never weakens)
+    ///      the audited `withdrawNative` pipeline.
+    function _verifyWithdrawalSet(
+        Withdrawal[] calldata ws,
+        address withdrawalProver,
+        MleVerifier.MleProof calldata mleProof
+    ) internal view returns (uint64 wdBlockNumber) {
         if (!withdrawalVkInitialized) revert WithdrawalVkNotSet();
         if (ws.length == 0) revert WithdrawalEmptySet();
 
@@ -1410,7 +1617,7 @@ contract IntmaxRollup {
         // 2b. block_number PI (single limb 16 = the u63 value). Used in the pis_hash recomputation
         //     below (re-split into 2 big-endian u32 words there); no separate equality check is
         //     needed — the pis_hash binding (step 3) already forces it to equal the circuit's value.
-        uint64 blockNumber = uint64(pi[16]);
+        wdBlockNumber = uint64(pi[16]);
 
         // 3. Re-fold the keccak withdrawal chain (seed 0) → withdrawal_hash, recompute pis_hash, and
         //    require it equals the proof's pis_hash PI (limbs 0..8). Binds `ws` to the verified proof.
@@ -1418,39 +1625,9 @@ contract IntmaxRollup {
         for (uint256 i = 0; i < ws.length; i++) {
             withdrawalHash = _foldWithdrawalLeaf(withdrawalHash, ws[i]);
         }
-        bytes32 pisHash = _withdrawalPisHash(withdrawalHash, withdrawalProver, extCommitment, blockNumber);
+        bytes32 pisHash =
+            _withdrawalPisHash(withdrawalHash, withdrawalProver, extCommitment, wdBlockNumber);
         if (!_limbsMatchBytes32(pi, 0, pisHash)) revert WithdrawalPublicInputsMismatch();
-
-        // 4. Pay out each leaf (CEI: all checks/effects precede any value movement; pull-payment).
-        for (uint256 i = 0; i < ws.length; i++) {
-            Withdrawal calldata w = ws[i];
-            if (w.tokenIndex != ETH_TOKEN_INDEX) revert WithdrawalNotEthToken(); // v1: ETH only
-            if (withdrawalNullifierUsed[w.nullifier]) revert WithdrawalNullifierUsed();
-
-            // GAP2: burn withdrawals (auxData != 0) require a finalized partial-withdrawal
-            // authorization from a registered settlement manager. The auth digest binds ALL
-            // withdrawal fields so an attacker cannot reuse an authorized tx_leaf with
-            // different recipient/amount. Normal withdrawals (auxData == 0) are unaffected.
-            if (w.auxData != bytes32(0)) {
-                bytes32 authDigest = keccak256(
-                    abi.encodePacked(
-                        bytes4(0x494d5057), // "IMPW" domain
-                        w.nullifier,
-                        w.recipient,
-                        w.tokenIndex,
-                        w.amount,
-                        w.auxData
-                    )
-                );
-                if (!partialWithdrawalAuthorized[authDigest]) revert PartialWithdrawalNotAuthorized();
-            }
-
-            withdrawalNullifierUsed[w.nullifier] = true;
-            // GLOBAL solvency ceiling: Solidity 0.8 underflow reverts if Σ would exceed real escrow.
-            totalEscrowed -= w.amount;
-            pendingWithdrawals[w.recipient] += w.amount;
-            emit NativeWithdrawn(w.recipient, w.amount, w.nullifier, blockNumber);
-        }
     }
 
     /// @dev Fold one Withdrawal leaf into the keccak chain. Byte-identical to Rust

@@ -12,6 +12,7 @@ import {ChannelSettlementVerifier} from "../src/ChannelSettlementVerifier.sol";
 import {MleVerifier} from "@mle/MleVerifier.sol";
 import {SpongefishWhirVerify} from "@mle/spongefish/SpongefishWhirVerify.sol";
 import {MockMleVerifier, CloseTestLib} from "./CloseTestLib.sol";
+import {IERC20} from "../src/SafeERC20.sol";
 
 /// @dev Minimal stand-in for `IntmaxRollup`'s registration + native-payout surface, byte-identical
 ///      to the one in `ChannelSettlementManager.t.sol`. Copied (not imported) so this base does not
@@ -58,12 +59,33 @@ contract MockRollupRegistry is IChannelRegistry {
     function authorizePartialWithdrawal(bytes32 authDigest) external override {
         partialWithdrawalAuthorized[authDigest] = true;
     }
+
+    // --- Multi-token (multitoken Phase 3): ERC-20 pull-payment + set-once registry mirror ---
+    mapping(uint32 => IERC20) public tokenAddressOf;
+    mapping(uint32 => mapping(address => uint256)) public pendingTokenWithdrawals;
+
+    function setToken(uint32 tokenIndex, IERC20 token) external {
+        tokenAddressOf[tokenIndex] = token;
+    }
+
+    /// Credit a recipient's ERC-20 pull balance (tests transfer/mint the tokens into this registry
+    /// first), simulating a finalized `IntmaxRollup.withdrawERC20` credit.
+    function creditTokenWithdrawal(uint32 tokenIndex, address recipient, uint256 amount) external {
+        pendingTokenWithdrawals[tokenIndex][recipient] += amount;
+    }
+
+    function withdrawToken(uint32 tokenIndex) external override {
+        uint256 amount = pendingTokenWithdrawals[tokenIndex][msg.sender];
+        require(amount > 0, "nothing to withdraw");
+        pendingTokenWithdrawals[tokenIndex][msg.sender] = 0;
+        require(tokenAddressOf[tokenIndex].transfer(msg.sender, amount), "token transfer failed");
+    }
 }
 
 /// @title CloseSettlementBase
 /// @notice Shared harness for the close-settlement adversarial / invariant suites. Mirrors the
 ///         deployment + proof-builder helpers in `ChannelSettlementManager.t.sol` (mock MLE
-///         verdict=true, real 95/48/56-limb strict binding), but carries NO test functions so the
+///         verdict=true, real 103/50/56-limb strict binding), but carries NO test functions so the
 ///         existing suite is not re-run when these new suites compile.
 abstract contract CloseSettlementBase is Test {
     ChannelSettlementVerifier internal verifier;
@@ -204,13 +226,40 @@ abstract contract CloseSettlementBase is Test {
         intent = _intentWithFund(closeNonce, finalEpoch, finalSmallBlockNumber, closeFreezeNonce, DEFAULT_FUND_AMOUNT);
     }
 
-    /// Intent with a custom declared channel-fund amount (the accrual cap once finalized).
+    /// Single-token (genesis ETH) fund vector: amount at slot 0, zero elsewhere.
+    function _singleAmounts(uint256 amount) internal pure returns (uint256[10] memory a) {
+        a[0] = amount;
+    }
+
+    /// Single-token registry: base token 0 (ETH) at slot 0.
+    function _singleRegistry() internal pure returns (uint32[10] memory r) {
+        r[0] = 0;
+    }
+
+    /// Intent with a custom declared genesis-token channel-fund amount (single-token close — the
+    /// v1-state embedding: registry=[ETH], all funds at token slot 0).
     function _intentWithFund(
         uint64 closeNonce,
         uint64 finalEpoch,
         uint64 finalSmallBlockNumber,
         uint64 closeFreezeNonce,
         uint256 channelFundAmount
+    ) internal pure returns (ChannelSettlementManager.CloseIntent memory intent) {
+        intent = _intentWithTokens(
+            closeNonce, finalEpoch, finalSmallBlockNumber, closeFreezeNonce,
+            _singleAmounts(channelFundAmount), _singleRegistry(), 1
+        );
+    }
+
+    /// Multi-token intent: full (amounts, registry, count) vectors (multitoken Phase 3).
+    function _intentWithTokens(
+        uint64 closeNonce,
+        uint64 finalEpoch,
+        uint64 finalSmallBlockNumber,
+        uint64 closeFreezeNonce,
+        uint256[10] memory channelFundAmounts,
+        uint32[10] memory tokenRegistry,
+        uint8 tokenCount
     ) internal pure returns (ChannelSettlementManager.CloseIntent memory intent) {
         intent = ChannelSettlementManager.CloseIntent({
             closeNonce: closeNonce,
@@ -219,7 +268,9 @@ abstract contract CloseSettlementBase is Test {
             closeFreezeNonce: closeFreezeNonce,
             finalChannelStateDigest: keccak256("final_state"),
             finalBalanceStateH1: keccak256("balance_state_h1"),
-            channelFundAmount: channelFundAmount,
+            channelFundAmounts: channelFundAmounts,
+            tokenRegistry: tokenRegistry,
+            tokenCount: tokenCount,
             channelFundIntmaxStateRoot: keccak256("intmax_root"),
             burnTxHash: keccak256("burn_tx"),
             closeWithdrawalDigest: keccak256("burn_backed_close"),
@@ -265,7 +316,9 @@ abstract contract CloseSettlementBase is Test {
             closeFreezeNonce: intent.closeFreezeNonce,
             finalChannelStateDigest: intent.finalChannelStateDigest,
             finalBalanceStateH1: intent.finalBalanceStateH1,
-            channelFundAmount: intent.channelFundAmount,
+            channelFundAmounts: intent.channelFundAmounts,
+            tokenRegistry: intent.tokenRegistry,
+            tokenCount: intent.tokenCount,
             channelFundIntmaxStateRoot: intent.channelFundIntmaxStateRoot,
             burnTxHash: intent.burnTxHash,
             closeWithdrawalDigest: intent.closeWithdrawalDigest,
@@ -281,12 +334,26 @@ abstract contract CloseSettlementBase is Test {
 
     // ── withdrawal-claim builders ──
 
-    /// Build a withdrawal claim with the canonical per-member nullifier (one slot per member).
+    /// Build a withdrawal claim with the canonical per-member nullifier (one slot per member),
+    /// genesis token (slot 0 / base token 0).
     function _withdrawalClaim(
         bytes32 closeIntentDigest,
         bytes32 memberPkG,
         address recipient,
         uint64 amount
+    ) internal pure returns (ChannelSettlementManager.WithdrawalClaim memory claim) {
+        claim = _withdrawalClaimToken(closeIntentDigest, memberPkG, recipient, amount, 0, 0);
+    }
+
+    /// Per-(member, token) withdrawal claim (multitoken §N-6): the mock nullifier mirrors the IMW2
+    /// shape's KEYING — unique per (member, token slot) — without faking the real keccak preimage.
+    function _withdrawalClaimToken(
+        bytes32 closeIntentDigest,
+        bytes32 memberPkG,
+        address recipient,
+        uint64 amount,
+        uint8 tokenSlot,
+        uint32 tokenIndex
     ) internal pure returns (ChannelSettlementManager.WithdrawalClaim memory claim) {
         claim = ChannelSettlementManager.WithdrawalClaim({
             closeIntentDigest: closeIntentDigest,
@@ -294,7 +361,11 @@ abstract contract CloseSettlementBase is Test {
             recipient: recipient,
             userAmountDigest: keccak256(abi.encodePacked(memberPkG, amount)),
             amount: amount,
-            withdrawalNullifier: keccak256(abi.encodePacked("withdraw", closeIntentDigest, memberPkG))
+            tokenSlot: tokenSlot,
+            tokenIndex: tokenIndex,
+            withdrawalNullifier: keccak256(
+                abi.encodePacked("withdraw", closeIntentDigest, memberPkG, tokenSlot)
+            )
         });
     }
 
@@ -314,6 +385,8 @@ abstract contract CloseSettlementBase is Test {
             recipient: recipient,
             userAmountDigest: keccak256(abi.encodePacked(memberPkG, amount, salt)),
             amount: amount,
+            tokenSlot: 0,
+            tokenIndex: 0,
             withdrawalNullifier: keccak256(abi.encodePacked("withdraw", closeIntentDigest, memberPkG, salt))
         });
     }
@@ -330,6 +403,8 @@ abstract contract CloseSettlementBase is Test {
             claim.recipient,
             claim.userAmountDigest,
             claim.amount,
+            claim.tokenSlot,
+            claim.tokenIndex,
             claim.withdrawalNullifier
         );
         return CloseTestLib.proofWithLimbs(limbs);

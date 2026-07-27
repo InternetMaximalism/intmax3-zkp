@@ -47,15 +47,24 @@ contract ChannelSettlementVerifier is IChannelSettlementVerifier {
     /// Number of RAW Goldilocks public-input limbs the close circuit registers (mirrors Rust
     /// `CHANNEL_CLOSE_PUBLIC_INPUTS_LEN`, src/circuits/channel/close_pis.rs). The close
     /// `WrapperCircuit` re-registers them VERBATIM, so a close `MleProof.publicInputs` is this
-    /// raw 95-limb vector — NOT an 8-limb keccak like validity/withdrawal. Stage 3 inserted
-    /// `finalSettledTxAccumulatorRoot` (8 limbs) after `finalSettledTxChain`, shifting the tail +8.
-    uint256 internal constant CLOSE_PI_LEN = 95;
+    /// raw 103-limb vector — NOT an 8-limb keccak like validity/withdrawal. Stage 3 inserted
+    /// `finalSettledTxAccumulatorRoot` (8 limbs) after `finalSettledTxChain`, shifting the tail +8;
+    /// multi-token (§N-6, TM-11) appended `tokenFundsDigest` (8 limbs) at the very end (95..103).
+    uint256 internal constant CLOSE_PI_LEN = 103;
+    /// "IMTF" — token-funds digest domain (multitoken §N-6, TM-11). MUST equal Rust
+    /// `TOKEN_FUNDS_DIGEST_DOMAIN` (src/constants.rs) so the on-chain recompute is byte-identical
+    /// to `src/common/channel.rs::token_funds_digest`.
+    uint32 internal constant TOKEN_FUNDS_DIGEST_DOMAIN = 0x494d5446;
+    /// Fixed per-channel token capacity (mirrors Rust `MAX_CHANNEL_TOKENS`, src/constants.rs).
+    uint256 internal constant MAX_CHANNEL_TOKENS = 10;
     /// Phase B-D: RAW Goldilocks PI limb counts for the two new binding circuits (mirror Rust
     /// `WITHDRAWAL_CLAIM_PUBLIC_INPUTS_LEN` / `POST_CLOSE_CLAIM_PUBLIC_INPUTS_LEN`). Their
     /// `WrapperCircuit` re-registers the limbs VERBATIM, so the `MleProof.publicInputs` are these
     /// raw vectors (NOT a keccak). Stage 3 appended `finalBalanceStateH1` (8 limbs) and
     /// `finalSettledTxAccumulatorRoot` (8 limbs) to the post-close claim, 40 -> 56.
-    uint256 internal constant WITHDRAWAL_CLAIM_PI_LEN = 48;
+    /// Multi-token (§N-6): 48 → 50 — `token_slot` (limb 48) and the resolved BASE `token_index`
+    /// (limb 49, circuit-enforced == the H1-committed `registry[token_slot]`) appended at the END.
+    uint256 internal constant WITHDRAWAL_CLAIM_PI_LEN = 50;
     uint256 internal constant POST_CLOSE_CLAIM_PI_LEN = 56;
     /// Phase C1: RAW Goldilocks PI limb count for the CORRECTED cancel-close circuit (mirror Rust
     /// `CANCEL_CLOSE_PUBLIC_INPUTS_LEN`, src/circuits/channel/cancel_close_pis.rs). Its
@@ -94,6 +103,10 @@ contract ChannelSettlementVerifier is IChannelSettlementVerifier {
 
     error CloseVkNotSet();
     error CloseVkDegreeBitsZero();
+    /// Multi-token (§N-6, review MINOR 2): `tokenFundsDigest` rejects a token count outside the
+    /// in-circuit-enforced 1..=MAX_CHANNEL_TOKENS range, making the Verifier self-contained
+    /// defense-in-depth (not reliant on the Manager's structural check + the transitive TFD bind).
+    error TokenCountOutOfRange();
 
     event CloseVkInitialized(uint256 degreeBits, bytes32 preprocessedRoot);
 
@@ -157,12 +170,15 @@ contract ChannelSettlementVerifier is IChannelSettlementVerifier {
     /// @notice REAL on-chain verification of the channel-close-intent proof (Phase A).
     /// @dev SECURITY: replaces the former tautological `closePIHash`+`_matches` stub. Two checks,
     ///      both mandatory:
-    ///        1. `_bindCloseLimbsStrict` binds ALL 95 raw Goldilocks public-input limbs of the close
-    ///           proof, limb-by-limb with STRICT equality (no masking), to the expected vector
+    ///        1. `_bindCloseLimbsStrict` binds ALL 103 raw Goldilocks public-input limbs of the
+    ///           close proof, limb-by-limb with STRICT equality (no masking), to the expected vector
     ///           rebuilt from `fields` (`_expectedCloseLimbs`). This binds channelId(0),
     ///           finalStateVersion(67..68), finalSettledTxChain(69..76),
     ///           finalSettledTxAccumulatorRoot(77..84), memberSetCommitment(85..92),
-    ///           memberCount(93) and delegateCount(94) — NONE are left free.
+    ///           memberCount(93), delegateCount(94) and tokenFundsDigest(95..102) — NONE are left
+    ///           free. The tokenFundsDigest limbs are a RECOMPUTE over the supplied
+    ///           (tokenRegistry, tokenCount, channelFundAmounts) — see `_expectedCloseLimbs` — so
+    ///           the per-token settlement vectors the Manager stores are proof-bound (TM-11).
     ///        2. `MleVerifier.verify` re-checks the proof against the close VK (circuitDigest absorb,
     ///           preprocessedRoot VK-binding, gatesDigest), blocking cross-circuit replay.
     ///      Reverts (`CloseVkNotSet`) until the VK is set: no verification-disabled window.
@@ -176,8 +192,9 @@ contract ChannelSettlementVerifier is IChannelSettlementVerifier {
     }
 
     /// @dev Bind the proof's public-input limbs to the expected close vector. `pi` MUST be exactly
-    ///      87 limbs; each limb MUST equal the expected limb (strict equality, no masking) AND be a
-    ///      canonical u32 (`< 2**32`). Reverts on any violation — there is no partial / masked match.
+    ///      `CLOSE_PI_LEN` (103) limbs; each limb MUST equal the expected limb (strict equality, no
+    ///      masking) AND be a canonical u32 (`< 2**32`). Reverts on any violation — there is no
+    ///      partial / masked match.
     function _bindCloseLimbsStrict(
         uint256[] calldata pi,
         uint256[] memory expected
@@ -288,13 +305,12 @@ contract ChannelSettlementVerifier is IChannelSettlementVerifier {
         }
     }
 
-    /// @notice TEST-INTROSPECTION HELPER: public view passthrough exposing the EXPECTED 87-limb
+    /// @notice TEST-INTROSPECTION HELPER: public view passthrough exposing the EXPECTED 103-limb
     ///         close public-input vector for `fields`. Lets the manager-lifecycle tests build a
     ///         close `MleVerifier.MleProof` whose `publicInputs` equal exactly what
     ///         `verifyCloseIntent`'s `_bindCloseLimbsStrict` will require. It is a pure view of the
-    ///         same `_expectedCloseLimbs` the binding uses (no security impact — it reveals nothing a
-    ///         caller cannot already recompute from `fields`, analogous to the existing public
-    ///         `closePIHash`).
+    ///         same `_expectedCloseLimbs` the binding uses (no security impact — it reveals nothing
+    ///         a caller cannot already recompute from `fields`).
     function expectedCloseLimbs(CloseProofFields calldata fields)
         external
         pure
@@ -303,13 +319,48 @@ contract ChannelSettlementVerifier is IChannelSettlementVerifier {
         return _expectedCloseLimbs(fields);
     }
 
-    /// @dev Build the EXPECTED 87-limb close public-input vector from `fields`, in the EXACT order
-    ///      of the Rust `ChannelClosePublicInputs::to_u64_vec()` (pinned by the Rust↔Solidity golden
-    ///      vector: Rust `close_public_inputs_match_solidity_shared_vector`, Solidity
+    /// @notice Byte-exact Solidity mirror of the Rust `token_funds_digest`
+    ///         (src/common/channel.rs; multitoken §N-6, TM-11): a single keccak over the FIXED
+    ///         92-word preimage `[IMTF, registry (10 x u32), token_count (1 x u32),
+    ///         amounts (10 x U256 = 80 words)]` — ALWAYS full width regardless of `tokenCount`
+    ///         (omitting unused entries would make the preimage variable-length and alias distinct
+    ///         `(registry, amounts)` pairs). `abi.encodePacked` emits each uint32 as 4 BE bytes and
+    ///         each uint256 as 32 BE bytes, reproducing the Rust u32-word stream exactly (pinned by
+    ///         the Rust↔Solidity shared vector `test_tokenFundsDigest_matchesRustSharedVector`).
+    function tokenFundsDigest(
+        uint32[10] memory tokenRegistry,
+        uint8 tokenCount,
+        uint256[10] memory amounts
+    ) public pure returns (bytes32) {
+        // SECURITY (review MINOR 2, TM-8): the close circuit constrains token_count to 1..=10
+        // in-circuit, so no legitimate TFD preimage exists outside that range — reject here so
+        // this recompute (and every `_expectedCloseLimbs` caller) is self-contained defense-in-
+        // depth rather than relying on the Manager's structural check.
+        if (tokenCount == 0 || tokenCount > MAX_CHANNEL_TOKENS) revert TokenCountOutOfRange();
+        // NOTE: abi.encodePacked(uint32[10] memory) would pad each element to 32 bytes, which does
+        // NOT match the Rust 4-byte-per-u32 packing — the registry words are packed manually.
+        bytes memory pre = abi.encodePacked(bytes4(TOKEN_FUNDS_DIGEST_DOMAIN));
+        for (uint256 t = 0; t < MAX_CHANNEL_TOKENS; t++) {
+            pre = abi.encodePacked(pre, tokenRegistry[t]);
+        }
+        pre = abi.encodePacked(pre, uint32(tokenCount));
+        for (uint256 t = 0; t < MAX_CHANNEL_TOKENS; t++) {
+            pre = abi.encodePacked(pre, amounts[t]);
+        }
+        return keccak256(pre);
+    }
+
+    /// @dev Build the EXPECTED 103-limb close public-input vector from `fields`, in the EXACT order
+    ///      of the Rust `ChannelClosePublicInputs::to_u64_vec()` (layout pinned by the Rust
+    ///      `close_public_inputs_roundtrip` limb-index assertions and the Solidity
     ///      `test_expectedCloseLimbs_goldenVector`). Each multi-limb field is split into big-endian
-    ///      u32 words; each u64 scalar is split into (hi, lo). The `closeIntentDigest` (limbs 57..64)
-    ///      is RECOMPUTED here via `_closeIntentDigest` (it is not a `CloseProofFields` member), and
-    ///      `memberSetCommitment` (limbs 77..84) is the channel-registered value the manager passes.
+    ///      u32 words; each u64 scalar is split into (hi, lo). The `closeIntentDigest` (limbs
+    ///      57..64) is RECOMPUTED here via `_closeIntentDigest`, and the `tokenFundsDigest` (limbs
+    ///      95..102) is RECOMPUTED via `tokenFundsDigest` from the supplied
+    ///      (tokenRegistry, tokenCount, channelFundAmounts) — neither is a caller-suppliable digest,
+    ///      so the strict bind forces the proof's in-circuit digests to equal recomputes over the
+    ///      vectors the Manager will settle with (TM-11). `memberSetCommitment` (limbs 85..92) is
+    ///      the channel-registered value the manager passes.
     ///
     ///      Layout (limb index → field):
     ///        [0]      channelId
@@ -319,11 +370,13 @@ contract ChannelSettlementVerifier is IChannelSettlementVerifier {
     ///        [7..8]   closeFreezeNonce
     ///        [9..16]  finalChannelStateDigest (8 BE u32)
     ///        [17..24] finalBalanceStateH1
-    ///        [25..32] channelFundAmount (uint256, 8 BE u32)
+    ///        [25..32] channelFundAmount = channelFundAmounts[0] (uint256, 8 BE u32; the close
+    ///                 burn is denominated in the genesis token — Phase 2a wired amounts[0] to
+    ///                 this PI)
     ///        [33..40] channelFundIntmaxStateRoot
     ///        [41..48] burnTxHash
     ///        [49..56] closeWithdrawalDigest
-    ///        [57..64] closeIntentDigest (RECOMPUTED)
+    ///        [57..64] closeIntentDigest (RECOMPUTED; preimage carries ALL 10 amounts)
     ///        [65..66] snapshotMediumBlockNumber
     ///        [67..68] finalStateVersion
     ///        [69..76] finalSettledTxChain
@@ -331,6 +384,7 @@ contract ChannelSettlementVerifier is IChannelSettlementVerifier {
     ///        [85..92] memberSetCommitment            (shifted +8)
     ///        [93]     memberCount                    (shifted +8)
     ///        [94]     delegateCount                  (shifted +8)
+    ///        [95..102] tokenFundsDigest              (multi-token §N-6, RECOMPUTED, appended)
     function _expectedCloseLimbs(CloseProofFields calldata fields)
         internal
         pure
@@ -346,7 +400,7 @@ contract ChannelSettlementVerifier is IChannelSettlementVerifier {
         c = _putU64(limbs, c, fields.closeFreezeNonce);
         c = _putBytes32(limbs, c, fields.finalChannelStateDigest);
         c = _putBytes32(limbs, c, fields.finalBalanceStateH1);
-        c = _putUint256(limbs, c, fields.channelFundAmount);
+        c = _putUint256(limbs, c, fields.channelFundAmounts[0]);
         c = _putBytes32(limbs, c, fields.channelFundIntmaxStateRoot);
         c = _putBytes32(limbs, c, fields.burnTxHash);
         c = _putBytes32(limbs, c, fields.closeWithdrawalDigest);
@@ -360,6 +414,14 @@ contract ChannelSettlementVerifier is IChannelSettlementVerifier {
         c = _putBytes32(limbs, c, fields.memberSetCommitment);
         limbs[c++] = uint256(fields.memberAndDelegateCount >> 8) & 0xff; // memberCount
         limbs[c++] = uint256(fields.memberAndDelegateCount) & 0xff;      // delegateCount
+        // Multi-token (§N-6, TM-11): RECOMPUTED over the supplied settlement vectors, appended at
+        // the very end. The strict bind then forces the proof's member-signed in-circuit TFD to
+        // equal this recompute, proof-binding the (registry, count, amounts) the Manager stores.
+        c = _putBytes32(
+            limbs,
+            c,
+            tokenFundsDigest(fields.tokenRegistry, fields.tokenCount, fields.channelFundAmounts)
+        );
         require(c == CLOSE_PI_LEN, "close limb count");
     }
 
@@ -387,21 +449,34 @@ contract ChannelSettlementVerifier is IChannelSettlementVerifier {
     /// @dev Recompute the close-intent digest (IMCI) exactly as the Rust `CloseIntent::signing_digest`
     ///      / the in-circuit IMCI keccak / the manager's `computeCloseIntentDigest` do: a single
     ///      keccak over the IMCI domain word + the close-intent fields (incl. the second `channelId`
-    ///      from `channel_fund_snapshot` and the finalStateVersion / finalSettledTxChain tail). This
-    ///      is the SAME preimage the former `closePIHash` inner keccak used.
+    ///      from `channel_fund_snapshot` and the finalStateVersion / finalSettledTxChain tail).
+    ///
+    ///      Multi-token (§N-6, TM-11): the former single 8-word `channel_fund_amount` segment is
+    ///      widened IN PLACE to the ALWAYS-full-width 80-word `channelFundAmounts[0..10]` vector
+    ///      (each uint256 = 8 BE u32 words), byte-identical to the Rust preimage (shared vector:
+    ///      `close_intent_digest_matches_solidity_shared_vector`). Built in two concatenated chunks
+    ///      for the via-IR stack budget; the byte stream equals one flat encodePacked.
     function _closeIntentDigest(CloseProofFields calldata fields) internal pure returns (bytes32) {
+        bytes memory head = abi.encodePacked(
+            bytes4(CLOSE_INTENT_DOMAIN),
+            fields.channelId,
+            fields.closeNonce,
+            fields.finalEpoch,
+            fields.finalSmallBlockNumber,
+            fields.closeFreezeNonce,
+            fields.finalChannelStateDigest,
+            fields.finalBalanceStateH1,
+            fields.channelId
+        );
+        // amounts[0..10]: abi.encodePacked emits each uint256 as its 32 big-endian bytes, exactly
+        // the Rust `U256::to_u32_vec` 8-word stream per amount (80 words total, zero-padded slots
+        // included — fixed-width injective, TM-11).
+        for (uint256 t = 0; t < MAX_CHANNEL_TOKENS; t++) {
+            head = abi.encodePacked(head, fields.channelFundAmounts[t]);
+        }
         return keccak256(
             abi.encodePacked(
-                bytes4(CLOSE_INTENT_DOMAIN),
-                fields.channelId,
-                fields.closeNonce,
-                fields.finalEpoch,
-                fields.finalSmallBlockNumber,
-                fields.closeFreezeNonce,
-                fields.finalChannelStateDigest,
-                fields.finalBalanceStateH1,
-                fields.channelId,
-                fields.channelFundAmount,
+                head,
                 fields.channelFundIntmaxStateRoot,
                 fields.burnTxHash,
                 fields.closeWithdrawalDigest,
@@ -616,9 +691,9 @@ contract ChannelSettlementVerifier is IChannelSettlementVerifier {
         );
     }
 
-    /// @dev Build the EXPECTED 48-limb withdrawal-claim PI vector, in the EXACT order of the Rust
-    ///      `WithdrawalClaimPublicInputs::to_u64_vec()` (pinned by the Rust↔Solidity golden vector
-    ///      `withdrawal_claim_public_inputs_match_solidity_shared_vector`). Layout:
+    /// @dev Build the EXPECTED 50-limb withdrawal-claim PI vector, in the EXACT order of the Rust
+    ///      `WithdrawalClaimPublicInputs::to_u64_vec()`
+    ///      (src/circuits/channel/withdrawal_claim_pis.rs). Layout:
     ///        [0..8]   closeIntentDigest        (8 BE u32)
     ///        [8]      channelId                (u32 value)
     ///        [9..17]  finalBalanceStateH1
@@ -627,6 +702,12 @@ contract ChannelSettlementVerifier is IChannelSettlementVerifier {
     ///        [30..38] userAmountDigest
     ///        [38..46] withdrawalNullifier
     ///        [46..48] amount                   (hi, lo)
+    ///        [48]     tokenSlot                (multi-token §N-6: the claimed LOCAL slot; drives
+    ///                 the in-circuit one-hot ct select, the `< token_count` bound and the IMW2
+    ///                 nullifier limb — TM-5/TM-8)
+    ///        [49]     tokenIndex               (multi-token §N-6, review m8: the resolved BASE
+    ///                 token, circuit-enforced == the H1-committed `registry[tokenSlot]` — NEVER a
+    ///                 prover/caller choice; the asset L1 pays this claim in)
     function _expectedWithdrawalClaimLimbs(
         bytes4 channelId,
         bytes32 closeIntentDigest,
@@ -635,7 +716,9 @@ contract ChannelSettlementVerifier is IChannelSettlementVerifier {
         address recipient,
         bytes32 userAmountDigest,
         bytes32 withdrawalNullifier,
-        uint64 amount
+        uint64 amount,
+        uint8 tokenSlot,
+        uint32 tokenIndex
     ) internal pure returns (uint256[] memory limbs) {
         limbs = new uint256[](WITHDRAWAL_CLAIM_PI_LEN);
         uint256 c = 0;
@@ -647,6 +730,8 @@ contract ChannelSettlementVerifier is IChannelSettlementVerifier {
         c = _putBytes32(limbs, c, userAmountDigest);
         c = _putBytes32(limbs, c, withdrawalNullifier);
         c = _putU64(limbs, c, amount);
+        limbs[c++] = uint256(tokenSlot);
+        limbs[c++] = uint256(tokenIndex);
         require(c == WITHDRAWAL_CLAIM_PI_LEN, "wclaim limb count");
     }
 
@@ -776,7 +861,7 @@ contract ChannelSettlementVerifier is IChannelSettlementVerifier {
 
     /// @notice REAL on-chain verification of the withdrawal-claim binding proof (Phase B-D).
     /// @dev SECURITY: replaces the former tautological `withdrawalClaimPIHash`+`_matches` stub. Two
-    ///      mandatory checks: (1) `_bindLimbsStrict` binds ALL 48 raw Goldilocks limbs limb-by-limb
+    ///      mandatory checks: (1) `_bindLimbsStrict` binds ALL 50 raw Goldilocks limbs limb-by-limb
     ///      (strict eq, <2**32, no mask) to the expected vector; (2) `MleVerifier.verify` re-checks
     ///      the proof against the withdrawal-claim VK (circuitDigest/preprocessedRoot/gatesDigest →
     ///      cross-circuit replay blocked). Reverts until the VK is set.
@@ -786,6 +871,10 @@ contract ChannelSettlementVerifier is IChannelSettlementVerifier {
     ///      the `amount` PI (withdrawal_claim_circuit.rs), so a member can only claim exactly what
     ///      their signed slot ciphertext decrypts to — over-claim is prevented at the proof level, not
     ///      merely bounded by the manager's fund caps.
+    ///      Multi-token (§N-6): `tokenSlot` (limb 48) and `tokenIndex` (limb 49) are strict-bound
+    ///      too. In-circuit, `tokenSlot` selects the claimed ciphertext position (one-hot, `<
+    ///      token_count`) and `tokenIndex == registry[tokenSlot]` of the H1-committed registry — so
+    ///      the ASSET this claim pays in is proof-enforced, never a caller choice (TM-2/TM-8, m8).
     function verifyWithdrawalClaim(
         bytes4 channelId,
         bytes32 closeIntentDigest,
@@ -794,6 +883,8 @@ contract ChannelSettlementVerifier is IChannelSettlementVerifier {
         address recipient,
         bytes32 userAmountDigest,
         uint64 amount,
+        uint8 tokenSlot,
+        uint32 tokenIndex,
         bytes32 withdrawalNullifier,
         MleVerifier.MleProof calldata mleProof
     ) external view returns (bool) {
@@ -808,7 +899,9 @@ contract ChannelSettlementVerifier is IChannelSettlementVerifier {
                 recipient,
                 userAmountDigest,
                 withdrawalNullifier,
-                amount
+                amount,
+                tokenSlot,
+                tokenIndex
             )
         );
         return _verifyWithdrawalClaimMle(mleProof);
@@ -940,81 +1033,11 @@ contract ChannelSettlementVerifier is IChannelSettlementVerifier {
         );
     }
 
-    /// @dev OUTER keccak mirror of the 87-limb `ChannelClosePublicInputs.to_u64_vec()`
-    /// (src/circuits/channel/close_pis.rs, post-F4/D6 + delegate account): the legacy 67 limbs —
-    /// channelId(1), closeNonce(2), finalEpoch(2), finalSmallBlockNumber(2), closeFreezeNonce(2),
-    /// finalChannelStateDigest(8), finalBalanceStateH1(8), channelFundAmount(8),
-    /// channelFundIntmaxStateRoot(8), burnTxHash(8), closeWithdrawalDigest(8),
-    /// closeIntentDigest(8), snapshotMediumBlockNumber(2) — followed by
-    /// split_u64(finalStateVersion)(2), finalSettledTxChain(8), memberSetCommitment(8), the
-    /// appended memberCount(1) and then delegateCount(1) at the very END. Each limb is one
-    /// big-endian u32 word, so `abi.encodePacked` of the typed fields (memberCount/delegateCount as
-    /// uint32) reproduces the byte stream exactly. Total = 87 limbs.
-    ///
-    /// The INNER keccak (`closeIntentDigest`) mirrors the Rust IMCI preimage
-    /// (`CloseIntent::signing_digest()`, src/common/channel.rs) including the
-    /// `channel_fund_snapshot.channel_id` slot (second `channelId`) and the appended
-    /// finalStateVersion / finalSettledTxChain tail (detail2 §C-8). It is NOT member-bearing, so
-    /// it is byte-for-byte unchanged by F4/D6 (the shared close-intent vector is preserved).
-    /// Delegate account / via-IR: takes the `CloseProofFields` struct (memory) rather than 16 loose
-    /// scalars. Passing one struct pointer (members read by `mload`) instead of marshaling 16
-    /// stack arguments is what keeps every caller — and this function's own two keccak encodes —
-    /// within the via-IR 16-slot stack budget once the trailing limb count grew from 1
-    /// (`memberCount`) to 2 (`memberCount`, `delegateCount`). `fields.memberAndDelegateCount` is the
-    /// packed `(memberCount << 8) | delegateCount` (see verifyCloseIntent).
-    function closePIHash(CloseProofFields memory fields) public pure returns (bytes32) {
-        bytes32 closeIntentDigest = keccak256(
-            abi.encodePacked(
-                bytes4(CLOSE_INTENT_DOMAIN),
-                fields.channelId,
-                fields.closeNonce,
-                fields.finalEpoch,
-                fields.finalSmallBlockNumber,
-                fields.closeFreezeNonce,
-                fields.finalChannelStateDigest,
-                fields.finalBalanceStateH1,
-                fields.channelId,
-                fields.channelFundAmount,
-                fields.channelFundIntmaxStateRoot,
-                fields.burnTxHash,
-                fields.closeWithdrawalDigest,
-                fields.snapshotMediumBlockNumber,
-                fields.finalStateVersion,
-                fields.finalSettledTxChain
-            )
-        );
-        // Outer 87-limb preimage. The heavy field marshaling is a SINGLE 16-item `abi.encodePacked`
-        // into `pre`, then the two count limbs are appended in a TINY second encode where only
-        // `pre` + the packed count are live. The trailing limbs are memberCount(1) then
-        // delegateCount(1), each a u32 limb unpacked from `memberAndDelegateCount` — byte-identical
-        // to the Rust `ChannelClosePublicInputs.to_u64_vec()` tail. The result equals a single
-        // abi.encodePacked of all 87 limbs in order.
-        bytes memory pre = abi.encodePacked(
-            fields.channelId,
-            fields.closeNonce,
-            fields.finalEpoch,
-            fields.finalSmallBlockNumber,
-            fields.closeFreezeNonce,
-            fields.finalChannelStateDigest,
-            fields.finalBalanceStateH1,
-            fields.channelFundAmount,
-            fields.channelFundIntmaxStateRoot,
-            fields.burnTxHash,
-            fields.closeWithdrawalDigest,
-            closeIntentDigest,
-            fields.snapshotMediumBlockNumber,
-            fields.finalStateVersion,
-            fields.finalSettledTxChain,
-            fields.memberSetCommitment
-        );
-        return keccak256(
-            abi.encodePacked(
-                pre,
-                uint32(fields.memberAndDelegateCount >> 8),   // memberCount
-                uint32(fields.memberAndDelegateCount & 0xff)  // delegateCount
-            )
-        );
-    }
+    // NOTE (multitoken Phase 3): the legacy `closePIHash` outer-keccak mirror was REMOVED. It had
+    // no remaining caller (the live close path strict-binds the 103 raw limbs via
+    // `_bindCloseLimbsStrict`, never a keccak of them), and keeping a second, parallel preimage
+    // mirror in sync with every PI-layout change is exactly the stale-mirror hazard class TM-11
+    // warns about. The IMCI inner keccak lives on as `_closeIntentDigest`.
 
     /// @dev F4/D6 member-set commitment (pad-to-MAX): FIXED-length keccak over
     /// `[IMCM, memberCount, h_0..h_{MAX-1}]` — the domain word, the `memberCount` u32 limb, and
@@ -1074,7 +1097,7 @@ contract ChannelSettlementVerifier is IChannelSettlementVerifier {
         );
     }
 
-    /// @notice TEST-INTROSPECTION HELPER: public view of the EXPECTED 48-limb withdrawal-claim PI
+    /// @notice TEST-INTROSPECTION HELPER: public view of the EXPECTED 50-limb withdrawal-claim PI
     ///         vector (lets tests build an `MleProof` whose `publicInputs` match the strict bind).
     ///         No security impact (reveals nothing a caller cannot recompute).
     function expectedWithdrawalClaimLimbs(
@@ -1085,6 +1108,8 @@ contract ChannelSettlementVerifier is IChannelSettlementVerifier {
         address recipient,
         bytes32 userAmountDigest,
         uint64 amount,
+        uint8 tokenSlot,
+        uint32 tokenIndex,
         bytes32 withdrawalNullifier
     ) external pure returns (uint256[] memory) {
         return _expectedWithdrawalClaimLimbs(
@@ -1095,7 +1120,9 @@ contract ChannelSettlementVerifier is IChannelSettlementVerifier {
             recipient,
             userAmountDigest,
             withdrawalNullifier,
-            amount
+            amount,
+            tokenSlot,
+            tokenIndex
         );
     }
 
