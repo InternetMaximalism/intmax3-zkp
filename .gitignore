@@ -48,6 +48,7 @@ self_certs/
 .lake/
 *.olean
 *.ilean
+doc/architecture-audit/lake-manifest.json
 
 # Stale pre-consolidation Lean project roots: the sources moved under doc/ (2026-07-05),
 # but invoking `lake` from the old paths recreates these build-only trees.
