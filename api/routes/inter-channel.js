@@ -5,12 +5,21 @@ const { withLock } = require('../lib/lock');
 const router = Router({ mergeParams: true });
 
 // POST /api/v1/channel/:ch/inter-channel/send (A16/W4)
+// body: { debitPayload, transferDescriptor, tokenIndex? } — the moved BASE token rides INSIDE
+// the signed descriptor (interChannelTx.tokenIndex, multi-token §N-4); the optional top-level
+// tokenIndex is a client-intent cross-check only: when present it must match the descriptor
+// (fail-closed 400 on mismatch — catches a client wiring bug before any proving/cosigning).
 router.post('/send', (req, res) => {
   const ch = Number(req.params.ch);
   withLock(ch, () => {
-    const { debitPayload, transferDescriptor } = req.body || {};
+    const { debitPayload, transferDescriptor, tokenIndex } = req.body || {};
     if (!debitPayload || !transferDescriptor) {
-      res.status(400).json({ error: 'needs { debitPayload, transferDescriptor }' });
+      res.status(400).json({ error: 'needs { debitPayload, transferDescriptor, tokenIndex? }' });
+      return;
+    }
+    const descTok = transferDescriptor.interChannelTx && transferDescriptor.interChannelTx.tokenIndex;
+    if (tokenIndex !== undefined && tokenIndex !== null && String(tokenIndex) !== String(descTok)) {
+      res.status(400).json({ error: `tokenIndex mismatch: body says ${tokenIndex}, signed descriptor says ${descTok}` });
       return;
     }
     writeJson(wc(ch, 'inter_debit_payload.json'), debitPayload);

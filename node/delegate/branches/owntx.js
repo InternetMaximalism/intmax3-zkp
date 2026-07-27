@@ -20,7 +20,9 @@ async function doRefresh(event, ctx) {
   if (!wallet.available()) { log.warn({ event: 'WASM_UNAVAILABLE_REFRESH', channel: ch.id }); return; }
   sm.signal(dsm.SIGNALS.START_PROVE);
   const prev = store.get('acceptedHead');
-  const rp = wallet.refresh(ctx.slot);
+  // Multi-token (§N, TM-13): refreshes are per (member, token) — an intent may name the
+  // token position (undefined = genesis token 0).
+  const rp = wallet.refresh(ctx.slot, event && event.tokenSlot);
   sm.signal(dsm.SIGNALS.SENT);
   let resp;
   try {
@@ -44,13 +46,15 @@ async function doRefresh(event, ctx) {
 
 async function doSend(event, ctx) {
   const { api, wallet, ch, store, log, sm, raiseSignal } = ctx;
-  const { toSlot, amount } = event;
+  const { toSlot, amount, tokenSlot } = event;
   if (!wallet.available()) { log.warn({ event: 'WASM_UNAVAILABLE_SEND', channel: ch.id }); return; }
   if (!(await ensureSendable(ctx))) return;
   sm.signal(dsm.SIGNALS.START_PROVE);
   const prev = store.get('acceptedHead');
   const nonce = '0x' + crypto.randomBytes(32).toString('hex');
-  const payload = wallet.send(ctx.slot, toSlot, amount, nonce);
+  // Multi-token (§N-3): tokenSlot (undefined = genesis) selects the moved token position; the
+  // WASM wallet signs it into the IMPA-v2 digest and refuses a witness/token mismatch.
+  const payload = wallet.send(ctx.slot, toSlot, amount, nonce, tokenSlot);
   sm.signal(dsm.SIGNALS.SENT);
   let resp;
   try { resp = await api.cosign(ch.id, payload); }
@@ -66,20 +70,22 @@ async function doSend(event, ctx) {
   sm.signal(dsm.SIGNALS.COSIGN_OK);
   store.set('acceptedHead', headOf({ state: resp.state || resp }));
   sm.signal(dsm.SIGNALS.SYNCED);
-  log.info({ event: 'SEND_FINALIZED', channel: ch.id, toSlot, amount: String(amount) });
+  log.info({ event: 'SEND_FINALIZED', channel: ch.id, toSlot, amount: String(amount), tokenSlot: tokenSlot === undefined ? 0 : tokenSlot });
 }
 
 async function doInterChannelSend(event, ctx) {
   const { api, wallet, ch, store, log, sm, raiseSignal } = ctx;
-  const { toChannel, toSlot, amount, destRecipient } = event;
+  const { toChannel, toSlot, amount, destRecipient, tokenIndex, tokenSlot } = event;
   if (!wallet.available()) { log.warn({ event: 'WASM_UNAVAILABLE_INTER', channel: ch.id }); return; }
-  // Inter-channel ALWAYS requires a refresh first (W4).
-  await doRefresh({ source: 'api', kind: 'refresh' }, ctx);
+  // Inter-channel ALWAYS requires a refresh first (W4) — of the position being sent (§N/TM-13).
+  await doRefresh({ source: 'api', kind: 'refresh', tokenSlot }, ctx);
   sm.signal(dsm.SIGNALS.START_PROVE);
-  const built = wallet.sendInterChannel(toChannel, toSlot, amount, destRecipient);
+  // Multi-token (§N-4): tokenIndex is the BASE token index (undefined = the source channel's
+  // genesis registry[0]); the WASM wallet resolves it against the source registry fail-closed.
+  const built = wallet.sendInterChannel(toChannel, toSlot, amount, destRecipient, tokenIndex);
   sm.signal(dsm.SIGNALS.SENT);
   let resp;
-  try { resp = await api.interChannelSend(ch.id, { debitPayload: built.debit_payload || built.debitPayload, transferDescriptor: built.transfer_descriptor || built.transferDescriptor }); }
+  try { resp = await api.interChannelSend(ch.id, { debitPayload: built.debit_payload || built.debitPayload, transferDescriptor: built.transfer_descriptor || built.transferDescriptor, tokenIndex }); }
   catch (e) { return onWithholdingLike(e, ctx, 'inter'); }
   // Verify the source head returned extends ours; the destination snapshot is informational.
   const v = verifyCosignedStructural(null, { state: resp.sourceHead }, store.get('acceptedHead'));
@@ -100,14 +106,16 @@ async function doInterChannelSend(event, ctx) {
 
 async function doBurn(event, ctx) {
   const { api, wallet, ch, store, log, sm, raiseSignal } = ctx;
-  const { amount, l1Address } = event;
+  const { amount, l1Address, tokenIndex } = event;
   if (!wallet.available()) { log.warn({ event: 'WASM_UNAVAILABLE_BURN', channel: ch.id }); return; }
   await ensureSendable(ctx);
   sm.signal(dsm.SIGNALS.START_PROVE);
-  const built = wallet.burnSend(amount, l1Address);
+  // Multi-token (§N): tokenIndex is the burned BASE token (undefined = genesis registry[0]);
+  // the resulting L1 partial withdrawal pays out in that asset (IMPW binds tokenIndex).
+  const built = wallet.burnSend(amount, l1Address, tokenIndex);
   sm.signal(dsm.SIGNALS.SENT);
   let resp;
-  try { resp = await api.pwBurn(ch.id, { debitPayload: built.debit_payload || built.debitPayload, transferDescriptor: built.transfer_descriptor || built.transferDescriptor, amount: String(amount), recipient: l1Address }); }
+  try { resp = await api.pwBurn(ch.id, { debitPayload: built.debit_payload || built.debitPayload, transferDescriptor: built.transfer_descriptor || built.transferDescriptor, amount: String(amount), recipient: l1Address, tokenIndex }); }
   catch (e) { return onWithholdingLike(e, ctx, 'burn'); }
   const v = verifyCosignedStructural(null, resp, store.get('acceptedHead'));
   if (!v.ok) {
@@ -121,7 +129,7 @@ async function doBurn(event, ctx) {
   }
   sm.signal(dsm.SIGNALS.COSIGN_OK);
   store.set('acceptedHead', headOf({ state: resp.state }));
-  store.upsertTicket({ id: 'pw_' + Date.now(), type: 'partial_withdrawal', status: 'burn_done', params: { amount: String(amount), recipient: l1Address } });
+  store.upsertTicket({ id: 'pw_' + Date.now(), type: 'partial_withdrawal', status: 'burn_done', params: { amount: String(amount), recipient: l1Address, tokenIndex: tokenIndex === undefined ? '0' : String(tokenIndex) } });
   sm.signal(dsm.SIGNALS.SYNCED);
   log.info({ event: 'BURN_FINALIZED', channel: ch.id, amount: String(amount) });
 }

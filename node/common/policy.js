@@ -10,7 +10,12 @@ const DEFAULTS = {
   invalidScoreWindowMs: 60_000,
   maxCosignRetries: 3,
   cosignTimeoutMs: 600_000,
-  amountCapWei: '100000000000000000000', // 100 ETH sanity cap
+  amountCapWei: '100000000000000000000', // 100 ETH sanity cap (the default / token-0 cap)
+  // Multi-token (detail2 §N): optional per-BASE-token caps, keyed by decimal token_index
+  // string, e.g. { '0': '100000000000000000000', '55': '5000000000000000000000' }. A token
+  // without an entry falls back to amountCapWei (so existing configs keep exactly their old
+  // behavior).
+  amountCapWeiByToken: {},
   staleCloseResponse: 'cancel', // 'cancel' (A30) | 'challenge' (A29)
 };
 
@@ -18,11 +23,17 @@ function withDefaults(policy = {}) {
   return { ...DEFAULTS, ...policy };
 }
 
-// Amount sanity (NOT a balance check — the circuit proves solvency). Rejects absurd/overflow values.
-function amountWithinCap(amountWei, policy) {
+// Amount sanity (NOT a balance check — the circuit proves solvency). Rejects absurd/overflow
+// values. `tokenIndex` (optional, default 0) selects the per-token cap when the policy defines
+// one (amountCapWeiByToken), else the global amountCapWei — so 2-arg callers keep exactly the
+// pre-multi-token behavior.
+function amountWithinCap(amountWei, policy, tokenIndex) {
   const p = withDefaults(policy);
   try {
-    return BigInt(amountWei) > 0n && BigInt(amountWei) <= BigInt(p.amountCapWei);
+    const key = tokenIndex === undefined || tokenIndex === null ? '0' : String(tokenIndex);
+    const byToken = p.amountCapWeiByToken || {};
+    const cap = Object.prototype.hasOwnProperty.call(byToken, key) ? byToken[key] : p.amountCapWei;
+    return BigInt(amountWei) > 0n && BigInt(amountWei) <= BigInt(cap);
   } catch (e) {
     return false;
   }

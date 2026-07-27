@@ -369,8 +369,9 @@ deferrals below.
   close-intent section + manager-address assert now SELF-SKIP with explicit logs pending fixture
   regeneration; scripts parse the legacy scalar descriptor into the genesis-token embedding until
   the regenerated descriptors emit per-token fields. The Rust `CloseIntent::new` non-genesis-funds
-  fail-closed gate (`SECURITY(multitoken-phase3)` marker) is deliberately LEFT IN PLACE until the
-  Phase 4/5 build-path + fixtures wire multi-token closes end-to-end.
+  fail-closed gate (`SECURITY(multitoken-phase3)` marker) was deliberately left in place at
+  Phase 3 close, and has since been LIFTED in Phase 4 per its stated condition (together with
+  the per-token claim builders + a native two-token close test — see the Phase 4 status block).
 
 - [x] Attacker/security review (2026-07-27): TFD binding chain SOUND end-to-end (member-signed
       PI → Verifier recompute over intent vectors → PendingClose → finalize → per-token accrual
@@ -391,14 +392,113 @@ per-token claim builders + e2e coverage.
 
 ## Phase 4 — CLI / WASM / JS plumbing
 
-- [ ] `channel_member.rs` + `wallet_core.rs` + WASM entry points: token_slot / token_index
+- [x] `channel_member.rs` + `wallet_core.rs` + WASM entry points: token_slot / token_index
       parameters end-to-end (send, cosign, batch, import, claim); slim wire `SlimSendPayload`
-      += token_slot.
-- [ ] api/: `deposit.js` + `channel-init.js` un-hardcode tokenIndex '0'; routes gain `token`
+      += token_slot *(the slim-wire field itself landed in Phase 2b; Phase 4 wired the builders)*.
+- [x] api/: `deposit.js` + `channel-init.js` un-hardcode tokenIndex '0'; routes gain `token`
       params (send, close claims, partial/full withdrawal, inter-channel); `chain-watcher.js`
       stop discarding `args.tokenIndex`; API-DESIGN.md types updated (also fix stale `slot: u8`).
-- [ ] node/: `wallet.js` signatures gain token arg; `policy.js` per-token caps; delegate/cosigner
+- [x] node/: `wallet.js` signatures gain token arg; `policy.js` per-token caps; delegate/cosigner
       branch plumbing.
+
+### Phase 4 status (2026-07-27) — CLI / WASM / JS plumbing + TokenRegister dispatch + close-gate lift
+
+- [x] Build paths per token (`SECURITY(multitoken-phase4)` markers ALL discharged — zero left
+      repo-wide): `build_send` → `build_send_token(token_slot)` (legacy fn = token-0 wrapper;
+      per-(slot,token) pending_adds gate; E-1 handed the SIGNED position's ct); C2C
+      `build_inter_channel_send{,_token}(token_index)` + `build_burn_send{,_token}` (source-side
+      registry resolution fail-closed; fund debit + ct swap at exactly the resolved slot; base
+      Transfer + descriptor carry the base index; burn records token_index into last_burn.json →
+      pw-submit Withdrawal/IMPW); `decrypt_balance` → token-0 wrapper over
+      `decrypt_balance_token` (TM-8-bounded); `verify_snapshot` self-check decrypts ALL active
+      positions; `resolve_local_token_slot` made pub (CLI/WASM twins of the verifier check).
+- [x] TokenRegister dispatch (carried Phase 1 obligation): canonical
+      `token_register_next_state` builder (channel.rs) shared by proposer
+      (`wallet_core::build_token_register`) and gate; NEW `TokenRegisterUpdateWitness::verify`
+      (state_update_verifier.rs) = state linkage + `verify_balance_state_shared` (the factored
+      registry-agnostic core; `verify_balance_state_common` = shared + the M1 registry equality,
+      unchanged for all other kinds) + `BalanceState::verify_token_register_transition` +
+      explicit full freeze (h2 zero, chain, accumulator, fund, unallocated, shared nullifier,
+      small_block_number, close_freeze_nonce) + whole-state rebuild-equality + N-of-N
+      signatures. CLI `register-token <base_token_index>` (check-and-sign per controlled member,
+      authoritative `verify_all_signatures` before the head advances); API route
+      `POST /channel/:ch/register-token`.
+- [x] CloseIntent non-genesis gate LIFTED (carried Phase 3 obligation, WITH the per-token claim
+      builders as conditioned): semantics DETERMINATION against §N-6 + the Manager — the burn
+      leg denominates ONLY `amounts[0]` (close circuit pins it to the `channel_fund_amount` PI;
+      Manager `finalizeClose` reads `channelFundAmounts[0]` as the burn denomination); non-
+      genesis funds settle via per-token claims against `finalizedChannelFundAmount[registry[t]]`
+      accrual + `pullChannelTokenFunds(t)` — NO burn. `burn_amount == amounts[0]` and
+      `unallocated == 0` checks kept; the refusal loop removed with a SECURITY comment citing
+      the chain of custody (IMCI 80-limb vector → TFD PI recompute → per-token accrual).
+- [x] WASM: session witness is now `(token_slot, amount, witness)` (a witness backs exactly one
+      position; sends/burns refuse a token/witness mismatch fail-closed); `wallet_send(+token_
+      slot?)`, `wallet_refresh(token_slot?)`, `wallet_send_inter_channel(+token_index?)`,
+      `wallet_burn_send(+token_index?)` (all Option-typed → JS-optional, default genesis);
+      balance reports keep the token-0 scalar and add `balances[]` + `witnessTokenSlot`;
+      genesis-sign self-check decrypts all active positions.
+- [x] CLI: `send`/`gen-send` `[token_slot]`; `claim` `[token_slot]` (descriptor +
+      tokenSlot/tokenIndex from the proved PIs); `cosign-l1-deposit-import` `[token_index]`
+      (deposit's REAL base index, no longer pinned 0); `balance` prints per-token;
+      inter-transfer/burn cosign conservation checks generalized to per-position (resolved slot
+      moves exactly amount, all other 9 positions frozen — belt-and-braces over the witness).
+- [x] api/: deposit routes accept `tokenIndex` (validated decimal u32; ERC-20 path omits
+      `--value` per §N-7 and forwards the index to the CLI import); close/full-withdrawal claim
+      routes take `tokenSlot`; inter-channel/burn/pw routes cross-check an optional top-level
+      token param against the SIGNED descriptor field (400 on mismatch — never an override);
+      `GET /tokens` + `POST /register-token`; API-DESIGN.md multi-token section + stale
+      `slot: u8` → u16 fixes.
+- [x] node/: `chain-watcher.js` gains the exact `TokenRegistered`/`Erc20Withdrawn`/
+      `TokenWithdrawalClaimed` fragments (verified against IntmaxRollup.sol); cosigner deposit
+      branch validates + forwards the Deposited `tokenIndex` (was discarded); delegate branches
+      forward tokenSlot/tokenIndex through send/refresh/inter/burn; classify maps the ERC-20
+      credit events to CHAIN_CREDIT (delegate) / CHAIN_OBSERVE (cosigner); token-aware exit
+      confirm (recipient match unchanged; tokenIndex recorded); `policy.amountWithinCap` gains
+      per-token caps (`amountCapWeiByToken` map, default = legacy `amountCapWei`); `wallet.js`
+      wrappers gain trailing token args AND were aligned to the real wasm-bindgen signatures
+      (the old wrappers passed extra positional args that shifted parameters — flagged as a
+      latent-bug fix in the Phase 4 report).
+- [x] New tests (all green): state_update_verifier 43 (TokenRegister happy path + balance/
+      pending/fund-touch + wrong-append(4 variants) + version-skip negatives); common::channel
+      30 (multi-token close-intent acceptance + burn-mismatch negative + IMCI vector binding;
+      token_register_next_state golden); wallet_core delegate_send_tests 22 (TokenRegister
+      cosign-gate e2e w/ REAL sigs + doctored-balance + duplicate-index negatives; two-token
+      close intent + per-token claims — distinct TM-5 nullifiers, token-1 claim PROVED +
+      verified; token-1 C2C debit at the resolved slot + unregistered-index refusal + cosigner
+      gate; TM-8 inactive-position send refusal; TM-14 batch helper now drives the REAL
+      `build_send_token`); balance_state 19; e2e_flow 16. wasm32 lib check green; fmt/clippy
+      clean on changed lines; node/ suite 45/45; `node --check` on every changed JS file.
+- OPEN (unchanged, deliberate): the transfer-tree rebuild obligation (Phase 2b review MINOR 2 —
+  C2C cosign gate must rebuild the 1-Transfer TxV2 tree once REAL small-block cosigning replaces
+  the structural sig stub). The e2e PROVING fixtures + CloseLifecycleE2E re-enable stay Phase 5;
+  post-close claims remain genesis-pinned (no token PI limb yet — Phase 3 carry-forward).
+- [x] Security review (2026-07-27): M1 factoring FAITHFUL (bypass provably confined to
+      TokenRegister — `verify_balance_state_shared` file-private, single call site); cross-kind
+      signature replay EXCLUDED (token_count increment is the structural discriminator vs the M1
+      equality on all six ordinary kinds; transport PI is kind-tagged); TokenRegister three-layer
+      freeze COMPLETE (all 12 ChannelState fields enumerated); close-gate lift semantics CORRECT
+      (burn = genesis leg only; no residual genesis-zero assumption found); burn token chain
+      bound via withdrawal-chain fold + IMPW (last_burn.json is transport-only); wrapper pattern
+      defaults-only with TM-8 inside the _token variants; API cross-check-not-override verified;
+      wallet.js pre-existing bug assessed FAIL-NOISY (no silent live-funds exposure). One MAJOR
+      (stale Manager event fragments) + one MINOR (todo prose).
+- [x] Review MAJOR 1 fix (2026-07-27): three STALE Manager fragments in `chain-watcher.js`
+      (topic0 mismatch ⇒ silent never-match) corrected field-for-field against the committed
+      `ChannelSettlementManager.sol` — `WithdrawalClaimAccepted` + trailing `uint32 tokenIndex`
+      (:283), `WithdrawalClaimed` + `uint32 indexed tokenIndex` (2nd position, :300),
+      `ChannelFundsPulled` + LEADING `uint32 indexed tokenIndex` (:626); all other Manager
+      fragments re-verified unchanged. Downstream: cosigner CHAIN_OBSERVE log now surfaces the
+      decoded `tokenIndex`; the delegate credit-confirm already read `args.tokenIndex`
+      generically (comments corrected — the Manager's `WithdrawalClaimed` now decodes it).
+      Review MINOR 2 fix: the Phase 3 status prose about the phase3 gate marker updated to
+      reflect the Phase 4 lift. `node --check` + node suite 45/45 green after both.
+- [x] MAJOR 1 fix verified by the orchestrator directly (fragments diffed field-for-field,
+      indexed-ness included, against the contract declarations — mechanical scope).
+
+**PHASE 4 COMPLETE (2026-07-27).** Verdict: fit to close. Phase 5 carry-forwards: fixture/VK
+regeneration + CloseLifecycleE2E re-enable at the new CREATE2 manager address; post-close-claim
+genesis pin → strict-bound token PI limb; transfer-tree rebuild obligation at real small-block
+cosigning (OPEN); two-token full E2E on anvil; final full-suite attacker pass before deploy.
 
 ## Phase 5 — Fixtures, VKs, E2E, deploy
 
@@ -413,6 +513,23 @@ per-token claim builders + e2e coverage.
 ## Assessment log
 
 (append per-phase outcomes here; unexpected results follow the CLAUDE.md security-first protocol)
+
+- **Phase 4 (2026-07-27)**: CLI/WASM/JS plumbing complete (see Phase 4 status above). All
+  `SECURITY(multitoken-phase4)` markers discharged (repo-wide grep: zero phase markers remain);
+  the TokenRegister ChannelState-level dispatch and the CloseIntent gate lift landed WITH their
+  test suites in the same change-unit; no existing test was weakened (the one REPLACED test —
+  `close_intent_rejects_nonzero_non_genesis_funds` — asserted the temporary fail-close that this
+  phase's specified deliverable removes; its replacement asserts the new per-token semantics
+  PLUS the burn-mismatch rejection). The close-gate semantics determination was made against
+  §N-6 + the Phase 3 Manager code (burn = amounts[0] only; per-token claims for the rest) — not
+  ambiguous, so no stop-and-report was needed. Suites: state_update_verifier 43,
+  common::channel 30, balance_state 19, delegate_send_tests 22, e2e_flow 16,
+  partial_withdrawal 4, slot_capacity 2 — all green; `cargo build --release` green; wasm32 lib
+  check green; all test targets compile; node/ 45/45; `node --check` clean on every changed JS
+  file. Flagged during the work: node/common/wallet.js wrappers were calling the wasm-bindgen
+  entries with extra positional args (senderSlot/nonce/slot), silently shifting parameters —
+  aligned to the real signatures as part of the token-arg change (behavioral fix, disclosed).
+  Awaiting the mandatory separate security-review / attacker pass over the diff before merge.
 
 - **Phase 3 (2026-07-27)**: L1 Solidity escrow + per-token settlement complete (see Phase 3
   status above). Full Foundry suite (SKIP_GROTH16): 208 passed / 0 failed / 1 self-skip (the

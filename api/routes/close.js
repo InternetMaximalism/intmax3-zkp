@@ -131,12 +131,21 @@ router.post('/finalize', (req, res) => {
 });
 
 // POST /api/v1/channel/:ch/close/claim (A32)
+// body: { manager, slot, recipient, tokenSlot? } — tokenSlot optional, default 0 (genesis
+// token). Withdrawal claims are per (member slot, token slot) (multi-token §N-6); the CLI
+// forwards the slot to the per-token claim prover, which resolves + proves the base
+// token_index the Manager pays.
 router.post('/claim', (req, res) => {
   const ch = Number(req.params.ch);
   withLock(ch, () => {
-    const { manager, slot, recipient } = req.body || {};
+    const { manager, slot, recipient, tokenSlot } = req.body || {};
     if (!manager || slot === undefined || !recipient) {
-      res.status(400).json({ error: 'needs { manager, slot, recipient }' });
+      res.status(400).json({ error: 'needs { manager, slot, recipient, tokenSlot? }' });
+      return;
+    }
+    const ts = tokenSlot === undefined || tokenSlot === null ? '0' : String(tokenSlot);
+    if (!/^[0-9]$/.test(ts)) {
+      res.status(400).json({ error: 'tokenSlot must be 0..9' });
       return;
     }
     const ticket = findActiveTicket(ch, 'full_withdrawal');
@@ -144,7 +153,7 @@ router.post('/claim', (req, res) => {
       ticket.status = 'claim_pending';
       upsertTicket(ch, ticket);
     }
-    const out = cli(ch, ['claim', manager, String(slot), RPC], { CLAIM_RECIPIENT: recipient });
+    const out = cli(ch, ['claim', manager, String(slot), RPC, ts], { CLAIM_RECIPIENT: recipient });
     if (ticket) {
       ticket.status = 'claim_done';
       ticket.steps.claim = { completedAt: Date.now() };

@@ -31,6 +31,35 @@ router.get('/status', (req, res) => {
   }
 });
 
+// GET /api/v1/channel/:ch/tokens (multi-token §N)
+// Per-token channel view derived from the cosigned snapshot: the active registry
+// (local slot -> base tokenIndex) and the per-token channel-fund amounts. Balance-bearing
+// responses stay backward compatible elsewhere (scalar = token 0); this route is the additive
+// per-token surface. Hidden per-member balances are NOT here — they only decrypt client-side
+// (wallet_balance returns a per-token `balances` array).
+router.get('/tokens', (req, res) => {
+  try {
+    const ch = Number(req.params.ch);
+    const snapshot = readJson(wc(ch, 'channel_snapshot.json'));
+    const bs = (snapshot.state && snapshot.state.balanceState) || {};
+    const fund = (snapshot.state && snapshot.state.channelFund) || {};
+    const tokenCount = bs.tokenCount || 1;
+    const registry = bs.tokenRegistry || [];
+    const amounts = fund.amounts || [];
+    const tokens = [];
+    for (let t = 0; t < tokenCount; t++) {
+      tokens.push({
+        tokenSlot: t,
+        tokenIndex: registry[t] !== undefined ? registry[t] : 0,
+        fundAmount: amounts[t] !== undefined ? String(amounts[t]) : '0',
+      });
+    }
+    res.json({ tokenCount, tokens });
+  } catch (e) {
+    res.status(404).json({ error: 'no channel yet' });
+  }
+});
+
 // GET /api/v1/channel/:ch/backing (A43)
 router.get('/backing', (req, res) => {
   try {

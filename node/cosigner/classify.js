@@ -60,6 +60,10 @@ const CHAIN_KIND_TO_BRANCH = {
   WithdrawalCredited: BRANCHES.CHAIN_OBSERVE,
   PartialWithdrawalAuthorized: BRANCHES.CHAIN_OBSERVE,
   NativeWithdrawn: BRANCHES.CHAIN_OBSERVE,
+  // Multi-token (§N-7): informational token lifecycle events.
+  TokenRegistered: BRANCHES.CHAIN_OBSERVE,
+  Erc20Withdrawn: BRANCHES.CHAIN_OBSERVE,
+  TokenWithdrawalClaimed: BRANCHES.CHAIN_OBSERVE,
   CloseCancelled: BRANCHES.CHAIN_OBSERVE,
   CloseFinalized: BRANCHES.CHAIN_OBSERVE,
   WithdrawalClaimAccepted: BRANCHES.CHAIN_OBSERVE,

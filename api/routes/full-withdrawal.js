@@ -165,21 +165,28 @@ router.post('/finalize', (req, res) => {
 });
 
 // POST /api/v1/channel/:ch/full-withdrawal/claim (W10 step 5)
+// body: { manager?, slot, recipient, tokenSlot? } — tokenSlot optional, default 0 (multi-token
+// §N-6: withdrawal claims are per (member slot, token slot); run once per held token).
 router.post('/claim', (req, res) => {
   const ch = Number(req.params.ch);
   withLock(ch, () => {
     const ticket = findActiveTicket(ch, 'full_withdrawal');
-    const { manager, slot, recipient } = req.body || {};
+    const { manager, slot, recipient, tokenSlot } = req.body || {};
     const mgr = manager || (ticket && ticket.params.manager);
     if (!mgr || slot === undefined || !recipient) {
-      res.status(400).json({ error: 'needs { manager, slot, recipient }' });
+      res.status(400).json({ error: 'needs { manager, slot, recipient, tokenSlot? }' });
+      return;
+    }
+    const ts = tokenSlot === undefined || tokenSlot === null ? '0' : String(tokenSlot);
+    if (!/^[0-9]$/.test(ts)) {
+      res.status(400).json({ error: 'tokenSlot must be 0..9' });
       return;
     }
     if (ticket) {
       ticket.status = 'claim_pending';
       upsertTicket(ch, ticket);
     }
-    const out = cli(ch, ['claim', mgr, String(slot), RPC], { CLAIM_RECIPIENT: recipient });
+    const out = cli(ch, ['claim', mgr, String(slot), RPC, ts], { CLAIM_RECIPIENT: recipient });
     if (ticket) {
       ticket.status = 'claim_done';
       ticket.steps.claim = { completedAt: Date.now() };

@@ -13,23 +13,28 @@ async function handleDepositImport(event, ctx) {
   }
   // Defense-in-depth (review L1): these become positional CLI argv. Validate shapes and reject any
   // value that could be read as a flag (leading '-'), even though chain args are ABI-decoded/trusted.
+  // Multi-token (detail2 §N-5): the Deposited event's tokenIndex is NO LONGER discarded — it is
+  // validated (decimal u32) and forwarded to the CLI, which resolves it against the channel's
+  // cosigned registry (an unregistered index is refused fail-closed by the CLI, TM-7).
   const slot = dep.recipientSlot != null ? Number(dep.recipientSlot) : 0;
   const amount = String(dep.amount);
   const depositor = String(dep.depositor);
+  const tokenIndex = dep.tokenIndex != null ? String(dep.tokenIndex) : '0';
   if (!Number.isInteger(slot) || slot < 0 || slot > 255 ||
-      !/^[0-9]+$/.test(amount) || !/^0x[0-9a-fA-F]{40}$/.test(depositor)) {
-    return alert.raise('warn', ch.id, 'DEPOSIT_BAD_ARGS', 'deposit args failed shape validation', { slot, amount, depositor });
+      !/^[0-9]+$/.test(amount) || !/^0x[0-9a-fA-F]{40}$/.test(depositor) ||
+      !/^[0-9]{1,10}$/.test(tokenIndex) || Number(tokenIndex) > 0xFFFFFFFF) {
+    return alert.raise('warn', ch.id, 'DEPOSIT_BAD_ARGS', 'deposit args failed shape validation', { slot, amount, depositor, tokenIndex });
   }
   const actionId = `deposit-import:${event.txHash || dep.txHash || ''}`;
   if (!store.claimAction(actionId)) return; // already imported
   try {
     await cli.run(ch.id, ch.workDir, [
-      'cosign-l1-deposit-import', String(slot), amount, depositor, 'l1_import_cosigned.json',
+      'cosign-l1-deposit-import', String(slot), amount, depositor, 'l1_import_cosigned.json', tokenIndex,
     ]);
     const t = store.findTicket((x) => x.type === 'deposit' && x.status !== 'import_done');
     if (t) store.upsertTicket({ ...t, status: 'import_done' });
     store.completeAction(actionId, 'ok');
-    log.info({ event: 'DEPOSIT_IMPORTED', channel: ch.id, actionId, slot });
+    log.info({ event: 'DEPOSIT_IMPORTED', channel: ch.id, actionId, slot, tokenIndex });
   } catch (e) {
     store.releaseAction(actionId); // allow a later retry (review M6); not necessarily an attack
     // (e.g. nullifier reuse is a legit refusal); alert as a fault so an operator can inspect.

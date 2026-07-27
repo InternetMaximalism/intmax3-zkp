@@ -44,7 +44,10 @@ function makeRuntime(ch, deps) {
         case BRANCHES.SNAPSHOT_POLL: return await cosignB.publishSnapshot(event, ctx);
         case BRANCHES.CHAIN_DEPOSITED: return await depositB.handleDepositImport(event, ctx);
         case BRANCHES.CHAIN_BLOCK_FINALIZED: return await depositB.refreshAnchors(event, ctx);
-        case BRANCHES.CHAIN_OBSERVE: log.info({ event: 'CHAIN_OBSERVE', channel: ch.id, kind: event.kind, txHash: event.txHash }); return;
+        // Multi-token (§N): surface the decoded tokenIndex on observed events that carry one
+        // (WithdrawalClaimAccepted / WithdrawalClaimed / ChannelFundsPulled / TokenRegistered /
+        // Erc20Withdrawn / TokenWithdrawalClaimed), so operator reconciliation sees WHICH asset.
+        case BRANCHES.CHAIN_OBSERVE: log.info({ event: 'CHAIN_OBSERVE', channel: ch.id, kind: event.kind, tokenIndex: event.args && event.args.tokenIndex != null ? String(event.args.tokenIndex) : undefined, txHash: event.txHash }); return;
         case BRANCHES.TIMER_SETTLE_DUE: return await closeB.driveCloseStep(event, ctx);
         case BRANCHES.TIMER_PW_FINALIZE_DUE: return await closeB.drivePwFinalize(event, ctx);
         case BRANCHES.INVALID_REQUEST: return await abnormalB.rejectAndScore({ ...event, reason: event.reason || 'classified invalid' }, ctx);

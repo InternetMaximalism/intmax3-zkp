@@ -15,6 +15,35 @@ Spec references: `doc/architecture-audit/detail2.md` (detail2), `doc/architectur
 | **BP** | Block Proposer. Posts blocks to L1, generates validity proofs. |
 | **L1** | Ethereum (or testnet). Smart contracts hold escrow and verify proofs. |
 | **BURN_CHANNEL_ID** | Sentinel channel ID for partial withdrawal burn legs. |
+| **tokenIndex** | BASE-layer token index (`u32`). 0 = native ETH; nonzero = an ERC-20 registered on `IntmaxRollup.registerToken` (detail2 §N-7). |
+| **tokenSlot** | Channel-LOCAL token position (`u8`, 0..9). Maps to a base tokenIndex via the channel's cosigned `tokenRegistry` (detail2 §N-1). Slot 0 is the genesis token. |
+
+---
+
+## Multi-token channels (detail2 §N, Phase 4 — 2026-07-27)
+
+Channels hold up to 10 independent per-token balances. API conventions:
+
+- Every token parameter is OPTIONAL and defaults to the genesis token (`tokenSlot 0` /
+  `tokenIndex '0'`), so all pre-multi-token requests behave exactly as before.
+- `tokenIndex` (BASE index) appears wherever the operation touches L1 or crosses channels
+  (deposit, deposit import, inter-channel send, burn); `tokenSlot` (LOCAL position) appears for
+  intra-channel operations (send, refresh, withdrawal claims).
+- Signed payloads/descriptors carry the token field INSIDE the signed bytes
+  (`payload.channelTx.tokenSlot`, `transferDescriptor.interChannelTx.tokenIndex`); where a route
+  also accepts a top-level token param it is a client-intent CROSS-CHECK only (400 on mismatch),
+  never an override.
+- Balance responses keep the scalar `balance` field (token 0) for wire compat and add a
+  `balances: [{ tokenSlot, tokenIndex, balance }]` array over all active registry positions,
+  plus `witnessTokenSlot` (the position the held send-witness backs; `canSend` refers to it).
+- `POST /api/v1/channel/{ch}/register-token { tokenIndex }` appends a base token to the
+  channel's cosigned registry (append-only, N-of-N cosigned, fail-closed on duplicates —
+  detail2 §N-1/TM-1). `GET /api/v1/channel/{ch}/tokens` returns
+  `{ tokenCount, tokens: [{ tokenSlot, tokenIndex, fundAmount }] }`.
+- ERC-20 deposits (`tokenIndex != 0`) send NO ETH value; the depositor must have approved the
+  rollup for the amount beforehand (`safeTransferFrom` pull, balance-delta checked — §N-7).
+- Withdrawal claims are per `(member slot, tokenSlot)` — run the claim once per held token; the
+  proof exposes the resolved base tokenIndex the Manager pays (§N-6).
 
 ---
 
@@ -122,7 +151,7 @@ Idempotent for the same member (re-join returns existing snapshot). Creates chan
 **Overview:** Import the latest channel snapshot into the client's local state. Decrypts own balance, checks signature validity, and updates internal state. (implicit in all flows)
 
 **Inputs:** `snapshot: ChannelSnapshot`
-**Outputs:** `{ balance: u64, slot: u8, state_version: u32, canSend: bool }`
+**Outputs:** `{ balance: u64, slot: u16, stateVersion: u64, canSend: bool, balances: [{ tokenSlot: u8, tokenIndex: u32, balance: u64 }], witnessTokenSlot: u8|null }`
 
 **Current status:**
 - WASM: `wallet_import_channel(snapshot_json)` — implemented
@@ -142,7 +171,7 @@ Client imports the snapshot locally via WASM. Not a server-side operation.
 
 **Overview:** Build an intra-channel transfer. Constructs a `ChannelTx` with Regev-encrypted amount and a `channelTxZKP` (Plonky3 STARK) proving sender solvency and ciphertext well-formedness. (detail2 C-5, abstract2-1 §3.2)
 
-**Inputs:** `recipient_slot: u8`, `amount: u64`
+**Inputs:** `recipient_slot: u16`, `amount: u64`, `token_slot?: u8` (default 0)
 **Outputs:** `SendPayload { channel_tx, zkp, proposed_state }`
 
 **Preconditions:** `canSend == true` (if false, must refresh first). Sender balance >= amount.
@@ -182,7 +211,7 @@ Response: <ChannelSnapshot JSON>  (with signatures)
 **Overview:** Finalize a co-signed state update. The client imports the fully-signed state, verifies all N signatures, and updates its internal balance. (implicit)
 
 **Inputs:** `state_json: string` (co-signed state)
-**Outputs:** `{ balance: u64, slot: u8, state_version: u32, canSend: bool }`
+**Outputs:** `{ balance: u64, slot: u16, stateVersion: u64, canSend: bool, balances: [{ tokenSlot: u8, tokenIndex: u32, balance: u64 }], witnessTokenSlot: u8|null }`
 
 **Current status:**
 - WASM: `wallet_finalize(state_json)` — implemented
@@ -265,7 +294,7 @@ Internal to `cosignInterTransfer` and `cosignBurn`. Not a standalone endpoint.
 
 **Overview:** Build a single-destination inter-channel transfer. Constructs the debit payload and transfer descriptor with `channelUpdateZKP`. (abstract2-1 §3.4)
 
-**Inputs:** `to_channel: u32`, `to_slot: u8`, `amount: u64`, `dest_recipient_json: string`
+**Inputs:** `to_channel: u32`, `to_slot: u16`, `amount: u64`, `dest_recipient_json: string`, `token_index?: u32` (default: the source channel's genesis `registry[0]`)
 **Outputs:** `{ debitPayload, transferDescriptor }`
 
 **Current status:**
@@ -355,8 +384,8 @@ Response: <ChannelSnapshot JSON>
 **API implementation:**
 ```
 POST /api/v1/channel/{ch}/deposit/l1-send
-Request:  { amount: string, depositor?: string }
-Response: { txHash: string, depositor: string }
+Request:  { amount: string, depositor?: string, tokenIndex?: string }   # default '0' (ETH); nonzero = registered ERC-20 (no ETH value; requires prior approve)
+Response: { txHash: string, depositor: string, tokenIndex: string }
 ```
 Or expose deposit info so the client can submit via their own wallet:
 ```
@@ -636,7 +665,7 @@ Response: { ok: true }
 
 **Overview:** Submit a per-member withdrawal claim after channel finalization. Each member proves "the plaintext of my Regev ciphertext = claimed amount" via `withdrawClaimZKP`. No cooperation of other members needed (exit-liveness). (detail2 H-2 §3.5.4, E-3)
 
-**Inputs:** `{ manager: address, slot: u8, recipient: address }`
+**Inputs:** `{ manager: address, slot: u16, recipient: address, tokenSlot?: u8 }` (default 0; one claim per held token)
 **Outputs:** L1 tx confirmation
 
 **Preconditions:** Channel finalized. Valid `withdrawClaimZKP`. `totalWithdrawn + amount <= finalizedChannelFundAmount`.
@@ -763,7 +792,7 @@ Internal to BP/co-signer. No standalone endpoint.
 **Overview:** Get the current decrypted balance for the authenticated member.
 
 **Inputs:** (uses current state)
-**Outputs:** `{ balance: u64, slot: u8, canSend: bool }`
+**Outputs:** `{ balance: u64, slot: u16, canSend: bool, balances: [{ tokenSlot: u8, tokenIndex: u32, balance: u64 }], witnessTokenSlot: u8|null }`
 
 **Current status:**
 - WASM: `wallet_balance()` — implemented

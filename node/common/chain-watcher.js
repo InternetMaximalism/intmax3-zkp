@@ -21,8 +21,18 @@ const ROLLUP_FRAGMENTS = [
   'event PartialWithdrawalAuthorized(bytes32 indexed authDigest, address indexed manager)',
   'event SettlementManagerRegistered(address indexed manager)',
   'event NativeWithdrawn(address indexed recipient, uint256 amount, bytes32 indexed nullifier, uint64 blockNumber)',
+  // Multi-token (detail2 §N-7) — verified against contracts/src/IntmaxRollup.sol:
+  'event TokenRegistered(uint32 indexed tokenIndex, address indexed token)',
+  'event Erc20Withdrawn(address indexed recipient, uint32 indexed tokenIndex, uint256 amount, bytes32 indexed nullifier, uint64 blockNumber)',
+  'event TokenWithdrawalClaimed(address indexed recipient, uint32 indexed tokenIndex, uint256 amount)',
 ];
 
+// Multi-token (§N-6, Phase 3): WithdrawalClaimAccepted gained a trailing `uint32 tokenIndex`,
+// WithdrawalClaimed gained `uint32 indexed tokenIndex` (2nd, indexed), and ChannelFundsPulled
+// gained a LEADING `uint32 indexed tokenIndex` — a stale fragment changes topic0 and silently
+// never matches (the exact failure class this file's header warns about), so each fragment
+// below was re-verified field-for-field (indexed-ness included) against the committed
+// ChannelSettlementManager.sol.
 const MANAGER_FRAGMENTS = [
   'event CloseRequested(address indexed requester, uint64 closeRequestedAt, uint64 closeFreezeNonce)',
   'event CloseSubmitted(bytes32 indexed closeIntentDigest, bytes32 indexed burnTxHash, uint64 indexed closeNonce, uint64 finalEpoch, uint64 closeFreezeNonce, uint256 channelFundAmount, uint64 challengeDeadline, uint64 finalStateVersion, bytes32 finalSettledTxChain)',
@@ -30,13 +40,13 @@ const MANAGER_FRAGMENTS = [
   'event CloseCancelled(bytes32 indexed closeIntentDigest, bytes32 indexed revivedChannelStateDigest, uint64 revivedStateVersion)',
   'event LateOutgoingDebitAccepted(bytes32 indexed closeIntentDigest, bytes32 indexed sourceTxHash, bytes32 indexed debitNullifier, uint64 amount)',
   'event CloseFinalized(bytes32 indexed closeIntentDigest, bytes32 indexed burnTxHash, uint64 indexed finalEpoch, uint256 channelFundAmount, uint64 finalStateVersion, bytes32 finalSettledTxChain)',
-  'event WithdrawalClaimAccepted(bytes32 indexed closeIntentDigest, bytes32 indexed withdrawalNullifier, bytes32 indexed memberPkG, address recipient, uint256 amount)',
+  'event WithdrawalClaimAccepted(bytes32 indexed closeIntentDigest, bytes32 indexed withdrawalNullifier, bytes32 indexed memberPkG, address recipient, uint256 amount, uint32 tokenIndex)',
   'event PostCloseClaimAccepted(bytes32 indexed closeIntentDigest, bytes32 indexed sharedNativeNullifier, bytes32 indexed receiverPkG, address recipient, uint256 amount)',
-  'event WithdrawalClaimed(address indexed recipient, uint256 amount)',
+  'event WithdrawalClaimed(address indexed recipient, uint32 indexed tokenIndex, uint256 amount)',
   'event PartialWithdrawalSubmitted(bytes32 indexed authDigest, bytes32 indexed chainKey, uint64 challengeDeadline, uint64 finalStateVersion)',
   'event PartialWithdrawalFinalized(bytes32 indexed authDigest, bytes32 indexed chainKey)',
   'event PartialWithdrawalCancelled(bytes32 indexed authDigest, bytes32 indexed revivedChannelStateDigest, uint64 revivedStateVersion)',
-  'event ChannelFundsPulled(uint256 amount, uint256 totalReceived)',
+  'event ChannelFundsPulled(uint32 indexed tokenIndex, uint256 amount, uint256 totalReceived)',
 ];
 
 // Getter ABI for authoritative reconciliation (DESIGN.md §3.7). MUST match the EXACT PendingClose
