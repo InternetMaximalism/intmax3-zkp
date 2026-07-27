@@ -168,6 +168,116 @@ served with `null` metadata and the wallet falls back to the raw base index. A m
 CONTRADICTS the chain (address/chainId/rollup mismatch) is a hard startup failure by design; fix
 the file rather than working around it. See `node/DESIGN.md` §2.5 for the full policy table.
 
+### Step 3c — testnet $ITX faucet (OPTIONAL; anvil + public testnets only)
+
+Gives new browser users an in-channel balance of a test ERC-20 (`$ITX`) so they can try a transfer
+without funding anything. Runs **after** 3b (the faucet token is just another registered base
+token) and **after** the channel exists (`init`). Skip the whole step on any deployment that should
+not dispense value — the relay endpoint is off unless explicitly enabled.
+
+**Model.** A designated CLI **faucet member** holds an in-channel `$ITX` balance and the relay
+sends new users an ordinary in-channel transfer at the ITX token position. No new protocol path.
+The supply is ONE real L1 deposit imported once, so the faucet **cannot mint**: it can only run
+dry, and every dripped balance stays backed by `channel_fund.amounts[t]` and stays claimable.
+
+**Scale.** In-channel balances are **u64 base units**, so a position tops out at
+`u64::MAX / 10**decimals` whole tokens. `$ITX` uses **6 decimals** precisely for this: the ceiling
+is ~18.4 trillion ITX (it would be ~18.44 at 18 decimals). The contract constant, the manifest
+`decimals`, the faucet env and the E2E constants must move TOGETHER — the relay/node read
+`decimals()` back from the token at startup and **refuse to run on a mismatch**.
+
+```bash
+export RPC_URL=http://127.0.0.1:8545       # or "$SEPOLIA_RPC_URL"
+export CHANNEL=7
+export ROLLUP=0x…                          # this channel's IntmaxRollup (channel_backing.json .rollup)
+export ITX_TOKEN_INDEX=1                   # base index reserved for $ITX — MUST be nonzero
+export ITX_SUPPLY=1000000000000000         # L1 supply: 1,000,000,000 ITX @ 6dp (uint256, unconstrained)
+export FAUCET_SUPPLY=1000000000000         # imported into the channel: 1,000,000 ITX  (< 2^64!)
+export FAUCET_SLOT=2                       # a CLI CO-SIGNING member slot (0..INTMAX_CLI_COSIGNERS-1);
+                                           # avoid slot 0, which is the BP/builder slot
+WORK=wallet-live-work/ch$CHANNEL           # on the EC2 box: ~/relay/wallet-live-work/ch$CHANNEL
+CLI=$PWD/target/release/channel_member
+
+# 1) deploy $ITX. TESTNET-ONLY contract — it lives under contracts/test/ on purpose and must never
+#    be referenced from contracts/src/ or a mainnet script. Fixed supply, no mint entry point.
+( cd contracts && forge create test/tokens/IntmaxTestTokenITX.sol:IntmaxTestTokenITX \
+    --rpc-url "$RPC_URL" --private-key "$(cat "$PRIV")" --broadcast \
+    --constructor-args "$ITX_SUPPLY" )     # prints `Deployed to: 0x…`   # NEVER echo/print the key
+export ITX=0x…
+
+# 2) register it on the rollup's SET-ONCE registry, through the manifest (Step 3b machinery).
+#    Add to deploy-staging/ch$CHANNEL/tokens.json (template: node/tokens.example.json):
+#      { "tokenIndex": 1, "symbol": "ITX", "name": "Intmax Test Token", "decimals": 6,
+#        "address": "<ITX>" }
+( cd contracts && TOKENS_MANIFEST=../deploy-staging/ch$CHANNEL/tokens.json \
+    forge script script/RegisterTokens.s.sol --rpc-url "$RPC_URL" \
+    --private-key "$(cat "$PRIV")" --broadcast --slow )
+cast call "$ROLLUP" "tokenAddressOf(uint32)(address)" "$ITX_TOKEN_INDEX" --rpc-url "$RPC_URL"
+
+# 3) give ITX a LOCAL slot in the channel: an append-only, N-of-N-cosigned TokenRegister.
+#    Prints "registered at local slot <t>". The relay resolves <t> itself from the SIGNED
+#    snapshot at request time — it is not configured anywhere.
+( cd $WORK && INTMAX_CHANNEL=$CHANNEL "$CLI" register-token "$ITX_TOKEN_INDEX" token_register.json )
+
+# 4) escrow the faucet supply on L1. msg.value MUST be 0 for a nonzero tokenIndex; the rollup
+#    credits a MEASURED balanceOf delta (fee-on-transfer tokens fail closed here).
+DEPOSIT_RECIPIENT=$(jq -r .deposit_recipient $WORK/channel_backing.json)
+DEPOSITOR=$(cast wallet address --private-key "$(cat "$PRIV")")
+cast send "$ITX" "approve(address,uint256)" "$ROLLUP" "$FAUCET_SUPPLY" \
+  --rpc-url "$RPC_URL" --private-key "$(cat "$PRIV")"
+cast send "$ROLLUP" "deposit(bytes32,uint32,uint256,bytes32)" \
+  "$DEPOSIT_RECIPIENT" "$ITX_TOKEN_INDEX" "$FAUCET_SUPPLY" \
+  0x0000000000000000000000000000000000000000000000000000000000000000 \
+  --value 0 --rpc-url "$RPC_URL" --private-key "$(cat "$PRIV")"
+
+# 5) import the deposit to the FAUCET member (cosigned; the base token_index resolves against the
+#    channel's signed registry — an unregistered index is refused fail-closed, TM-7).
+( cd $WORK && INTMAX_CHANNEL=$CHANNEL "$CLI" cosign-l1-deposit-import \
+    "$FAUCET_SLOT" "$FAUCET_SUPPLY" "$DEPOSITOR" itx_import.json "$ITX_TOKEN_INDEX" )
+
+# 6) sanity: make the faucet position spendable once, up front. A homomorphically credited
+#    position (which is what an import produces) has pending_adds > 0 and no local encryption
+#    witness — `refresh` re-encrypts it value-preservingly (RefreshAir, re-verified by every
+#    co-signer). The relay ALSO runs this before every drip, so this is only a smoke check.
+( cd $WORK && INTMAX_CHANNEL=$CHANNEL "$CLI" refresh "$FAUCET_SLOT" <t> )
+
+# 7) enable the relay endpoint (systemd Environment= on EC2). ALL of these are required —
+#    the faucet stays off, and POST /api/faucet 404s, unless the whole set is coherent.
+FAUCET_ENABLED=1 \
+FAUCET_SLOT=$FAUCET_SLOT \
+ITX_TOKEN_INDEX=$ITX_TOKEN_INDEX \
+FAUCET_DRIP=100000000 \
+FAUCET_CHANNEL_CAP=100000000000 \
+FAUCET_COOLDOWN_MS=5000 \
+  node hosting/wallet/wallet-relay.js       # (EC2: wallet-relay-ec2.js under systemd)
+```
+
+Verify: `curl -s https://<host>/api/faucet` → `{"enabled":true,"tokenIndex":1,"amount":"100000000",…}`
+(and `{"enabled":false}` when it is off). A browser join then logs `faucet: received 100 ITX` and
+the per-token balance row appears once the manifest entry is chain-verified (address AND
+`decimals()` both read back equal — a `decimals` disagreement is a hard startup failure, and a
+token with no readable `decimals()` is shown in raw base units rather than a guessed scale).
+
+**Security notes for the operator** (see `hosting/wallet/wallet-relay*.js` and
+`node/common/faucet-policy.js` for the enforced rules):
+- The endpoint is **public and unauthenticated**. It is off by default; `FAUCET_ENABLED=1` without
+  a valid `FAUCET_SLOT`/`ITX_TOKEN_INDEX` logs a warning and stays off. `ITX_TOKEN_INDEX=0` is
+  rejected outright — index 0 is native ETH, i.e. the channel's own deposit backing.
+- One drip per balance slot, **for ever**, plus a per-channel cap and a cooldown. The record is
+  written BEFORE the transfer, so a crash costs a drip instead of paying twice; a failed drip is
+  NOT retried automatically. Ledger: `wallet-live-work/ch<N>/faucet_state.json` — a corrupt file
+  makes the endpoint fail closed (500), and deleting it **re-opens the faucet to everyone who
+  already drank**. Treat it as state, not cache.
+- The recipient slot is the only request-controlled value and is checked against the channel's own
+  signed `member_count + delegate_count`; the amount and token are server-side config only. There
+  is **no ownership proof** on that slot — an anonymous caller may request a drip for any active
+  account, which lands with the legitimate owner but consumes the channel allowance (residual risk
+  R-1 in `doc/tasks/itx-faucet-threat-model.md`).
+- **DEPLOYMENT INVARIANT: run exactly ONE relay process per channel directory.** The mutex that
+  makes check→reserve→transfer atomic is in-process JS state, not a file lock; two processes
+  sharing one `wallet-live-work/ch<N>/` could double-drip a slot. If the relay is ever clustered,
+  the ledger needs a real file lock before the faucet is re-enabled.
+
 ## Step 4 — Option B (1024-slot) redeploy (#12)
 Option B circuits/fixtures are already present on this branch (constants
 `MAX_COSIGNERS=16`, `MAX_CHANNEL_MEMBERS=1024`). The LIVE network still runs

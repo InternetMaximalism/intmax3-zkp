@@ -6399,6 +6399,170 @@ mod delegate_send_tests {
         }
     }
 
+    /// TESTNET FAUCET MECHANISM (multitoken §N × detail2 §B-3, TM-13). A position that was
+    /// credited HOMOMORPHICALLY cannot be spent — this pins BOTH halves of that rule and the
+    /// value-preserving way out, which is exactly the sequence the `channel_member refresh` +
+    /// `send <token_slot>` faucet leg runs:
+    ///
+    ///   1. a homomorphic credit at (slot 0, token 1) raises `pending_adds` and installs a
+    ///      ciphertext the holder has no encryption witness for;
+    ///   2. a send from that position is REFUSED fail-closed (the D3/TM-13 refresh gate), and it is
+    ///      refused BEFORE the stale pre-credit witness could be used;
+    ///   3. `build_refresh` re-encrypts the position to a fresh, locally-witnessed ciphertext whose
+    ///      plaintext is the CREDITED total — no inflation, no loss — and the co-signer gate
+    ///      (`verify_refresh_transition`, real RefreshAir) accepts it;
+    ///   4. the position sends again, and the recipient decrypts exactly the sent amount.
+    ///
+    /// Step 3 additionally pins the invariant the CLI's on-disk witness store depends on: driving
+    /// `build_refresh` from a SEEDED `StdRng` makes the refreshed ciphertext reproducible by
+    /// replaying `encrypt_amount` with the same seed (the refresh prover's first and only RNG
+    /// consumption). If upstream ever consumes randomness earlier, this assertion fails here
+    /// rather than as a confusing E-1 failure on a later send.
+    #[test]
+    fn refresh_unblocks_a_homomorphically_credited_token_position() {
+        let mut rng = StdRng::seed_from_u64(0x2b70fa);
+        // Slot 0 = the "faucet" member (40 at token 1), slot 1 = a funder, slot 2 = a delegate.
+        let (record, keys, members, genesis, _w_t0, w_t1) =
+            setup_two_token_channel(&mut rng, 27, [50, 30, 20], [40, 25]);
+        let mut snapshot = ChannelSnapshot {
+            record: record.clone(),
+            state: genesis,
+            members,
+            settled_tx_accumulator: default_settled_tx_accumulator(),
+        };
+
+        // (1) Homomorphic credit into slot 0's token-1 position (slot 1 sends it 10).
+        let credit = build_send_token(
+            &keys[1],
+            &snapshot,
+            1,
+            0,
+            1,
+            10,
+            25,
+            &w_t1[1],
+            Bytes32::default(),
+            LEVEL,
+            &mut rng,
+        )
+        .expect("credit send builds");
+        let mut credited = credit.payload.proposed_next_state.clone();
+        let sig0 = sign_state(&keys[0], 0, &credited).expect("slot 0 co-signs");
+        add_signature(&mut credited, sig0);
+        verify_all_signatures(&record, &snapshot.members, &credited)
+            .expect("credited head is N-of-N signed");
+        snapshot.state = credited;
+        assert_eq!(
+            snapshot.state.balance_state.pending_adds[0][1], 1,
+            "a homomorphic credit must raise the recipient's (slot, token) counter"
+        );
+
+        // (2) Fail-closed: the credited position cannot send, even with the pre-credit witness.
+        let blocked = build_send_token(
+            &keys[0],
+            &snapshot,
+            0,
+            1,
+            1,
+            7,
+            40,
+            &w_t1[0],
+            Bytes32::default(),
+            LEVEL,
+            &mut rng,
+        );
+        match blocked {
+            Ok(_) => panic!("a position with pending adds must not be spendable"),
+            Err(e) => assert!(
+                e.0.contains("pending homomorphic adds"),
+                "expected the D3/TM-13 refresh gate, got: {e}"
+            ),
+        }
+
+        // (3) Refresh from a RECORDED seed — the CLI's witness-store model.
+        let seed = [0x5Au8; 32];
+        let (payload, witness) = build_refresh(
+            &keys[0],
+            &snapshot,
+            0,
+            1,
+            LEVEL,
+            &mut StdRng::from_seed(seed),
+        )
+        .expect("refresh builds");
+        assert_eq!(
+            witness.amount, 50,
+            "the refresh must preserve the CREDITED value (40 + 10), never mint or lose"
+        );
+        verify_refresh_transition(&snapshot.state, &record, &payload, LEVEL)
+            .expect("co-signer gate accepts the refresh");
+        // Seed replay reproduces the installed ciphertext exactly (the CLI self-check).
+        let (replayed, _) = encrypt_amount(
+            &mut StdRng::from_seed(seed),
+            &keys[0].regev_pk,
+            witness.amount,
+        )
+        .expect("replay encrypt");
+        assert_eq!(
+            replayed, payload.proposed_next_state.balance_state.enc_balances[0][1],
+            "a recorded seed must reproduce the refreshed ciphertext"
+        );
+
+        let mut refreshed = payload.proposed_next_state.clone();
+        let sig1 = sign_state(&keys[1], 1, &refreshed).expect("slot 1 co-signs");
+        add_signature(&mut refreshed, sig1);
+        verify_all_signatures(&record, &snapshot.members, &refreshed)
+            .expect("refreshed head is N-of-N signed");
+        assert_eq!(
+            refreshed.balance_state.pending_adds[0][1], 0,
+            "the refresh must clear the position's counter"
+        );
+        snapshot.state = refreshed;
+
+        // (4) The faucet drip: the refreshed position sends, and the recipient decrypts it.
+        let drip = build_send_token(
+            &keys[0],
+            &snapshot,
+            0,
+            2,
+            1,
+            7,
+            witness.amount,
+            &witness,
+            Bytes32::default(),
+            LEVEL,
+            &mut rng,
+        )
+        .expect("the refreshed position must be spendable again");
+        verify_send_transition(
+            &snapshot.state,
+            &record,
+            &drip.payload,
+            LEVEL,
+            Some(&keys[2].regev_sk),
+            Some(7),
+        )
+        .expect("the drip transition verifies with the recipient's decryption check");
+        assert_eq!(drip.new_balance, 43, "50 - 7");
+        assert_eq!(
+            decrypt_amount(
+                &keys[2].regev_sk,
+                &drip.payload.proposed_next_state.balance_state.enc_balances[2][1],
+            )
+            .unwrap(),
+            7,
+            "the recipient's token-1 position must hold exactly the drip"
+        );
+        // Bystander: token 0 of every row is bit-identical across the whole sequence.
+        for row in 0..3 {
+            assert_eq!(
+                drip.payload.proposed_next_state.balance_state.enc_balances[row][0],
+                snapshot.state.balance_state.enc_balances[row][0],
+                "row {row} token 0 must be untouched by the token-1 faucet flow"
+            );
+        }
+    }
+
     /// TM-7 (builder side): an L1 deposit of base token 55 credits the depositor leaf at the
     /// REGISTRY-RESOLVED local position 1 (fund AND ciphertext), leaves token 0 untouched, and
     /// an UNREGISTERED base token_index is refused fail-closed.

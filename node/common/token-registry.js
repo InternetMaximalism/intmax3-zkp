@@ -51,6 +51,9 @@ const ROOT_KEYS = new Set(['chainId', 'rollup', 'tokens']);
 // `IntmaxRollup.registerToken` reverts `TokenIndexZeroReservedForEth` for index 0 and
 // `withdrawNative` is gated on `tokenIndex == 0`. So index 0 needs (and admits) no registry read.
 const ETH_TOKEN_INDEX = 0;
+// ETH's decimals are fixed by the protocol, so the native entry cannot claim anything else — see
+// the pin in `validateManifest` (there is no contract at index 0 to verify it against).
+const ETH_DECIMALS = 18;
 
 // The ONLY authoritative getter. Kept as an ethers-style human-readable fragment mirroring
 // `chain-watcher.js`'s `MANAGER_GETTER_ABI` discipline (a fragment that disagrees with the
@@ -61,6 +64,19 @@ const ETH_TOKEN_INDEX = 0;
 const TOKEN_ADDRESS_OF_SIG = 'tokenAddressOf(uint32)';
 const TOKEN_ADDRESS_OF_SELECTOR = '0x4b55982f';
 const ROLLUP_TOKEN_GETTER_ABI = ['function tokenAddressOf(uint32) view returns (address)'];
+
+// `decimals()` on the TOKEN itself (not the rollup).
+//
+// SECURITY: verifying the ADDRESS does not constrain `decimals` at all, yet a wrong `decimals`
+// misrenders a balance by orders of magnitude — the exact user-funds failure this whole module
+// exists to prevent. So the manifest's claimed `decimals` is read back from the token contract and
+// held to the same standard as the address: a CONTRADICTION is fatal, ABSENCE of information only
+// degrades to `decimals: null` (the wallet then shows raw base units, never a guessed 18).
+// Same drift guard as above: the raw selector is pinned against the ethers fragment in
+// node/test/token-registry.test.js.
+const DECIMALS_SIG = 'decimals()';
+const DECIMALS_SELECTOR = '0x313ce567';
+const ERC20_DECIMALS_ABI = ['function decimals() view returns (uint8)'];
 
 /** Structural / fail-closed manifest rejection. The FILE is rejected, never a single entry. */
 class TokenManifestError extends Error {
@@ -128,6 +144,11 @@ function validateManifest(raw, source) {
       if (nativeCount > 1) at('more than one entry has native: true (exactly one is allowed)');
       if (t.tokenIndex !== ETH_TOKEN_INDEX) at(`native entry must be tokenIndex ${ETH_TOKEN_INDEX}`);
       if (t.address !== null && t.address !== undefined) at('native entry must have address: null');
+      // SECURITY: the native entry is marked `decimalsVerified` WITHOUT a chain read (there is no
+      // contract at index 0 to ask), so its decimals must be pinned here or it would be served as
+      // verified on the operator's word alone — the one metadata field this file is not allowed to
+      // take on trust. ETH is 18 by protocol, not by declaration.
+      if (t.decimals !== ETH_DECIMALS) at(`native entry must declare decimals: ${ETH_DECIMALS}`);
     } else if (t.tokenIndex === ETH_TOKEN_INDEX) {
       at('tokenIndex 0 is native ETH on-chain and MUST be declared native: true with address: null');
     }
@@ -176,6 +197,12 @@ function validateManifest(raw, source) {
       verified: false,
       onChainAddress: null,
       verifyNote: 'not yet verified against chain',
+      // Decimals verification is SEPARATE from address verification: the address read-back says
+      // nothing about `decimals`, and a token may not implement `decimals()` at all. Only
+      // `verifyAgainstChain` may set this true; a merely address-verified entry keeps
+      // `decimals: null`, which the wallet renders as raw base units.
+      decimalsVerified: false,
+      onChainDecimals: null,
     });
   });
 
@@ -232,6 +259,32 @@ function makeRpcReader(rpcUrl, rollupAddress) {
   };
 }
 
+/**
+ * Decode a `decimals()` return.
+ *
+ * Returns an integer in [0, 255] for a well-formed uint8-in-a-word, or NULL for anything else:
+ * an empty return (the token has no `decimals()` and the call fell through), a short/odd-length
+ * return, or a value that cannot be a uint8. NULL means "no information", which the caller turns
+ * into `decimals: null` — it must NEVER be turned into a guess. A value out of uint8 range is
+ * also NULL rather than a contradiction: it means the thing we called is not an ERC-20 `decimals`,
+ * not that the operator lied.
+ */
+function decodeDecimalsWord(hex) {
+  const h = String(hex || '').replace(/^0x/, '');
+  if (h.length !== 64 || !/^[0-9a-fA-F]{64}$/.test(h)) return null;
+  let v;
+  try { v = BigInt('0x' + h); } catch (e) { return null; }
+  if (v > 255n) return null;
+  return Number(v);
+}
+
+function makeDecimalsReader(rpcUrl) {
+  return async (tokenAddress) => {
+    const out = await rpcCall(rpcUrl, 'eth_call', [{ to: tokenAddress, data: DECIMALS_SELECTOR }, 'latest']);
+    return decodeDecimalsWord(out);
+  };
+}
+
 const noopLog = { info() {}, warn() {}, error() {} };
 
 /**
@@ -260,10 +313,17 @@ class TokenRegistry {
   /**
    * THE ONLY sanctioned way to expose token metadata in a response body.
    *
-   * SECURITY: `symbol`/`name`/`decimals` are non-null ONLY when `verified === true` (the manifest
-   * address was read back equal from the on-chain set-once registry). `address` may be non-null
-   * while unverified — reporting what the manifest/chain said is fine; asserting a NAME for it is
-   * not. `native` is true only for base index 0 (contract-reserved ETH).
+   * SECURITY: `symbol`/`name` are non-null ONLY when `verified === true` (the manifest address was
+   * read back equal from the on-chain set-once registry). `address` may be non-null while
+   * unverified — reporting what the manifest/chain said is fine; asserting a NAME for it is not.
+   * `native` is true only for base index 0 (contract-reserved ETH).
+   *
+   * `decimals` carries its OWN gate (`decimalsVerified`) on top of that: the address read-back
+   * says nothing about the decimal place, and a wrong one misrenders a balance by orders of
+   * magnitude. So an entry whose token has no readable `decimals()` is served with a symbol but
+   * `decimals: null`; consumers must then show raw base units. (The wallet's `sanitizeTokenMeta`
+   * already treats a null/malformed `decimals` as "not verified" and falls back to the raw base
+   * index — so this degrades safely with no client change.)
    */
   metadataFor(tokenIndex) {
     const e = this._byIndex.get(tokenIndex);
@@ -281,7 +341,7 @@ class TokenRegistry {
     return {
       symbol: e.symbol,
       name: e.name,
-      decimals: e.decimals,
+      decimals: e.decimalsVerified ? e.decimals : null,
       address: e.address,
       native,
       verified: true,
@@ -290,7 +350,11 @@ class TokenRegistry {
 
   /** Fail-safe kill switch: drop every entry back to unverified (metadata stops being served). */
   markAllUnverified(reason) {
-    for (const e of this._byIndex.values()) { e.verified = false; e.verifyNote = reason || 'unverified'; }
+    for (const e of this._byIndex.values()) {
+      e.verified = false;
+      e.decimalsVerified = false;
+      e.verifyNote = reason || 'unverified';
+    }
     this.verifiedAt = null;
   }
 
@@ -305,9 +369,18 @@ class TokenRegistry {
    *   on-chain address === 0 (index not registered yet)         → verified: false + warn
    *   read failed (RPC down / bad response)                     → verified: false + warn
    *
+   * DECIMALS (only reached once the address verified — same contradiction/absence split):
+   *   token decimals() === manifest decimals                    → decimalsVerified: true
+   *   token decimals() !== manifest decimals                    → THROW  (a 10^k misrender is the
+   *                                                                       very hazard this gates)
+   *   decimals() reverts / absent / not a uint8                 → decimalsVerified: false + warn
+   *                                                               (served as null, NEVER guessed)
+   *   read failed (RPC down)                                    → decimalsVerified: false + warn
+   *   native index 0                                            → exempt (no contract to read)
+   *
    * @param {string} rpcUrl
    * @param {string} rollupAddress  the rollup this node/relay actually talks to
-   * @param {{ logger?: object, readTokenAddress?: (i:number)=>Promise<string>, readChainId?: ()=>Promise<number> }} [opts]
+   * @param {{ logger?: object, readTokenAddress?: (i:number)=>Promise<string>, readDecimals?: (a:string)=>Promise<number|null>, readChainId?: ()=>Promise<number> }} [opts]
    */
   async verifyAgainstChain(rpcUrl, rollupAddress, opts) {
     const o = opts || {};
@@ -344,12 +417,16 @@ class TokenRegistry {
 
     // (3) Per-entry set-once registry read.
     const read = o.readTokenAddress || makeRpcReader(rpcUrl, rollupAddress);
+    const readDecimals = o.readDecimals || makeDecimalsReader(rpcUrl);
     for (const e of this._byIndex.values()) {
       if (e.native) {
         // Index 0 is native ETH by contract construction (registerToken rejects it) — nothing to
-        // read, and nothing an operator file could contradict.
+        // read, and nothing an operator file could contradict. There is likewise no contract to
+        // ask for `decimals()`; ETH's 18 is protocol-fixed, not an operator claim.
         e.verified = true;
+        e.decimalsVerified = true;
         e.onChainAddress = null;
+        e.onChainDecimals = e.decimals;
         e.verifyNote = 'native ETH (base token index 0, contract-reserved)';
         continue;
       }
@@ -358,6 +435,7 @@ class TokenRegistry {
         onChain = await read(e.tokenIndex);
       } catch (err) {
         e.verified = false;
+        e.decimalsVerified = false;
         e.onChainAddress = null;
         e.verifyNote = `read failed: ${String((err && err.message) || err)}`;
         log.warn({ event: 'TOKEN_VERIFY_READ_FAILED', tokenIndex: e.tokenIndex, error: e.verifyNote, note: 'served without metadata' });
@@ -366,6 +444,7 @@ class TokenRegistry {
       onChain = lc(onChain);
       if (onChain === ZERO_ADDRESS) {
         e.verified = false;
+        e.decimalsVerified = false;
         e.onChainAddress = null;
         e.verifyNote = 'tokenIndex not registered on-chain yet';
         log.warn({ event: 'TOKEN_UNREGISTERED', tokenIndex: e.tokenIndex, manifestAddress: e.address, note: 'served without metadata until registerToken lands' });
@@ -380,6 +459,38 @@ class TokenRegistry {
       e.verified = true;
       e.onChainAddress = onChain;
       e.verifyNote = 'address read back equal from tokenAddressOf';
+
+      // (4) DECIMALS read-back against the TOKEN. Verifying the address constrains nothing about
+      // the decimal place, and a wrong one misrenders a balance by 10^k — the same class of
+      // user-funds attack as a wrong symbol. A CONTRADICTION is therefore fatal, exactly like an
+      // address mismatch; ABSENCE (no `decimals()`, revert, RPC down, non-uint8 return) keeps the
+      // address verification but serves `decimals: null`. We never invent 18.
+      let onChainDecimals;
+      try {
+        onChainDecimals = await readDecimals(e.address);
+      } catch (err) {
+        e.decimalsVerified = false;
+        e.onChainDecimals = null;
+        e.verifyNote = `address verified; decimals() read failed: ${String((err && err.message) || err)}`;
+        log.warn({ event: 'TOKEN_DECIMALS_READ_FAILED', tokenIndex: e.tokenIndex, address: e.address, error: String((err && err.message) || err), note: 'decimals served as null (raw base units)' });
+        continue;
+      }
+      if (onChainDecimals === null || onChainDecimals === undefined) {
+        e.decimalsVerified = false;
+        e.onChainDecimals = null;
+        e.verifyNote = 'address verified; token exposes no readable decimals()';
+        log.warn({ event: 'TOKEN_DECIMALS_ABSENT', tokenIndex: e.tokenIndex, address: e.address, manifestDecimals: e.decimals, note: 'decimals served as null (raw base units) — never guessed' });
+        continue;
+      }
+      if (onChainDecimals !== e.decimals) {
+        throw new TokenChainMismatchError(
+          `tokens manifest says token ${e.tokenIndex} (${e.address}) has ${e.decimals} decimals but the token reports ${onChainDecimals}`,
+          { tokenIndex: e.tokenIndex, address: e.address, manifestDecimals: e.decimals, onChainDecimals, source: this.source }
+        );
+      }
+      e.decimalsVerified = true;
+      e.onChainDecimals = onChainDecimals;
+      e.verifyNote = 'address and decimals read back equal from chain';
     }
     this.verifiedAt = Date.now();
     return this.summary();
@@ -421,6 +532,7 @@ class TokenRegistry {
       // The contract cannot emit this for index 0; if it did, our world model is wrong.
       log.error({ event: 'TOKEN_REGISTRY_CONTRADICTION', tokenIndex, token, reason: 'TokenRegistered for the native ETH index' });
       e.verified = false;
+      e.decimalsVerified = false;
       e.verifyNote = 'contradicted: TokenRegistered emitted for the native index';
       return 'contradiction';
     }
@@ -434,15 +546,19 @@ class TokenRegistry {
         note: 'set-once violation or wrong rollup — metadata for this index is now withheld',
       });
       e.verified = false;
+      e.decimalsVerified = false;
       e.onChainAddress = token;
       e.verifyNote = `contradicted by TokenRegistered(${token})`;
       return 'contradiction';
     }
     if (!e.verified) {
+      // Address confirmed by the event. `decimalsVerified` deliberately stays FALSE: this path is
+      // observational and cannot make an RPC call, so the decimal place is still unattested and
+      // must be served as null until a `verifyAgainstChain` pass reads it back.
       e.verified = true;
       e.onChainAddress = token;
-      e.verifyNote = 'confirmed by observed TokenRegistered';
-      log.info({ event: 'TOKEN_REGISTERED_CONFIRMED', tokenIndex, token });
+      e.verifyNote = 'address confirmed by observed TokenRegistered (decimals still unverified)';
+      log.info({ event: 'TOKEN_REGISTERED_CONFIRMED', tokenIndex, token, note: 'decimals remain unverified until the next chain verification' });
       return 'confirmed';
     }
     return 'match';
@@ -460,6 +576,8 @@ class TokenRegistry {
         address: e.address,
         native: e.native,
         verified: e.verified,
+        decimals: e.decimals,
+        decimalsVerified: e.decimalsVerified,
         note: e.verifyNote,
       })),
     };
@@ -520,7 +638,10 @@ async function bootstrapTokenRegistry(cfg, opts) {
   }
 
   const readTokenAddress = o.readTokenAddress ? (i) => o.readTokenAddress(registry.rollup, i) : undefined;
-  await registry.verifyAgainstChain(o.rpcUrl, registry.rollup, { logger: log, readTokenAddress });
+  // `readDecimals` is left to the default raw-eth_call reader even when the caller supplied an
+  // ethers-backed address reader: the decimals call targets the TOKEN, not the rollup, so the
+  // node's rollup-scoped ChainWatcher getter does not cover it.
+  await registry.verifyAgainstChain(o.rpcUrl, registry.rollup, { logger: log, readTokenAddress, readDecimals: o.readDecimals });
   log.info({ event: 'TOKEN_REGISTRY_READY', ...registry.summary() });
   return registry;
 }
@@ -534,12 +655,17 @@ module.exports = {
   loadManifest,
   resolveManifestPath,
   makeRpcReader,
+  makeDecimalsReader,
   encodeTokenAddressOf,
   decodeAddressWord,
+  decodeDecimalsWord,
   ETH_TOKEN_INDEX,
   ROLLUP_TOKEN_GETTER_ABI,
   TOKEN_ADDRESS_OF_SIG,
   TOKEN_ADDRESS_OF_SELECTOR,
+  ERC20_DECIMALS_ABI,
+  DECIMALS_SIG,
+  DECIMALS_SELECTOR,
   MAX_TOKENS,
   MAX_DECIMALS,
 };

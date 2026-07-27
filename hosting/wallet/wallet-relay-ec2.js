@@ -319,6 +319,100 @@ function channelTokens(ch) {
   return { tokenCount, tokens };
 }
 
+// ── Testnet $ITX faucet (multi-token §N) ─────────────────────────────────────────────────────
+//
+// SECURITY CONTRACT. `POST /api/faucet` is UNAUTHENTICATED and moves REAL escrowed value: the
+// faucet member holds an in-channel balance backed by one ERC-20 deposit that was made on L1 and
+// imported once. It therefore cannot MINT (every dripped balance stays covered by
+// `channel_fund.amounts[t]` and remains claimable) — the realistic attack is DRAINING it. The
+// defences, in order:
+//   1. OFF BY DEFAULT. Live only with FAUCET_ENABLED=1 + FAUCET_SLOT + a NON-ZERO
+//      ITX_TOKEN_INDEX; anything missing/malformed leaves it disabled and POST answers 404. A
+//      production box that simply does not set these can never dispense.
+//   2. NOTHING FROM THE REQUEST BUT THE RECIPIENT SLOT — amount, token and limits are config, and
+//      the slot is checked against the CHANNEL'S OWN SIGNED membership + registry, never a body.
+//   3. ONE DRIP PER SLOT FOR EVER, plus a per-channel cap and a cooldown, recorded per channel.
+//   4. RESERVE BEFORE TRANSFER: a crash between the ledger write and the co-signed transfer costs
+//      a drip, it never pays one twice.
+// DEPLOYMENT INVARIANT: exactly ONE relay process per channel directory. `withLock` is in-process
+// JS state, not an flock, so two processes sharing one wallet-live-work/ch<N>/ could both pass the
+// eligibility check before either reserves. No clustering exists today (and every other mutating
+// endpoint already relies on the same mutex); if the relay is ever clustered, the ledger needs a
+// real file lock BEFORE the faucet is re-enabled.
+// The eligibility policy itself lives in ONE shared, unit-tested module (node/common/
+// faucet-policy.js) so the dev relay and this box cannot drift; if it cannot be loaded the faucet
+// stays disabled rather than being re-implemented inline.
+let faucetPolicy = null;
+(function loadFaucetPolicy() {
+  const candidates = [
+    process.env.FAUCET_POLICY_MODULE,
+    path.join(ROOT, 'faucet-policy.js'),                              // shipped next to the relay
+    path.join(ROOT, '..', '..', 'node', 'common', 'faucet-policy.js'), // repo layout
+  ].filter(Boolean);
+  for (const c of candidates) {
+    try { if (fs.existsSync(c)) { faucetPolicy = require(c); return; } } catch (e) { /* try next */ }
+  }
+})();
+const FAUCET = faucetPolicy
+  ? faucetPolicy.faucetConfig(process.env)
+  : { enabled: false, reason: 'faucet-policy module not found' };
+if (FAUCET.enabled) {
+  console.log(`faucet ENABLED: slot ${FAUCET.faucetSlot} drips ${FAUCET.dripAmount} of base token ${FAUCET.tokenIndex} (channel cap ${FAUCET.channelCap}, cooldown ${FAUCET.cooldownMs}ms)`);
+} else if (String(process.env.FAUCET_ENABLED || '') === '1') {
+  // Requested but not coherent — say so loudly. Never "best effort enable".
+  console.warn(`⚠ faucet requested but DISABLED: ${FAUCET.reason}`);
+}
+
+const FAUCET_FILE = 'faucet_state.json';
+/**
+ * Read the per-channel faucet ledger. THROWS on a corrupt file (fail closed — see the module).
+ *
+ * SECURITY: only a MISSING file is an absent ledger. A file that parses to `null` or to any
+ * non-object is CORRUPTION and must not be read as "nobody has drunk yet" — that would re-open
+ * the faucet to every slot already recorded. Deliberately unlike the sibling `readTickets`, which
+ * swallows errors: tickets are display state, this is the drain guard.
+ */
+function readFaucetState(ch) {
+  const p = wc(ch, FAUCET_FILE);
+  if (!fs.existsSync(p)) return faucetPolicy.emptyState();
+  const parsed = JSON.parse(fs.readFileSync(p, 'utf8'));
+  if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    throw new Error(`faucet ledger ${p} is corrupt (not a JSON object) — refusing to start from empty`);
+  }
+  return faucetPolicy.normalizeState(parsed);
+}
+/**
+ * Persist the ledger ATOMICALLY: temp file + rename (same crash-safety pattern as
+ * node/common/store.js). A bare writeFileSync that is interrupted mid-write leaves a truncated
+ * ledger, which `readFaucetState` correctly refuses — safe, but it bricks that channel's faucet
+ * until an operator intervenes. Rename on the same filesystem is atomic, so a reader ever only
+ * sees the whole old file or the whole new one.
+ */
+function writeFaucetState(ch, st) {
+  const p = wc(ch, FAUCET_FILE);
+  const tmp = p + '.tmp';
+  fs.writeFileSync(tmp, JSON.stringify(st, null, 2));
+  fs.renameSync(tmp, p);
+}
+/**
+ * The LOCAL position of the faucet's base token in THIS channel, from the channel's own COSIGNED
+ * registry (`channelTokens` reads the signed snapshot). Deliberately NOT the tokens.json manifest:
+ * display metadata carries zero authority, and the position is what the transfer is signed over.
+ */
+function faucetLocalTokenSlot(ch) {
+  const t = channelTokens(ch).tokens.find((x) => x.tokenIndex === FAUCET.tokenIndex);
+  return t ? t.tokenSlot : null;
+}
+/** `member_count + delegate_count` from the SIGNED snapshot — the only authority on who exists. */
+function activeSlotCount(ch) {
+  const snap = JSON.parse(fs.readFileSync(wc(ch, 'channel_snapshot.json'), 'utf8'));
+  const st = (snap && (snap.state || snap.State)) || {};
+  const bs = st.balanceState || st.balance_state || {};
+  const mc = bs.memberCount != null ? bs.memberCount : bs.member_count;
+  const dc = bs.delegateCount != null ? bs.delegateCount : bs.delegate_count;
+  return Number.isInteger(mc) && Number.isInteger(dc) ? mc + dc : null;
+}
+
 // Fail fast if the deposit backing was not shipped — this box must never fabricate a channel.
 // DURABLE membership: the channel state (registered delegates, their slots) PERSISTS across relay
 // restarts so a deploy/restart never churns slot assignments or collides re-joining users — the
@@ -515,6 +609,66 @@ app.post('/api/import-deposit', (req, res) => {
     if (depTicket) { depTicket.status = 'import_done'; depTicket.steps.import = { completedAt: Date.now() }; upsertTicket(ch, depTicket); }
     const snap = JSON.parse(fs.readFileSync(wc(ch, 'channel_snapshot.json'), 'utf8'));
     res.json(snap);
+  }).catch((e) => { console.error(e.stderr ? String(e.stderr) : (e.message||e)); res.status(500).json({ error: String(e.stderr || e.message || e) }); });
+});
+
+// ─── Testnet $ITX faucet ───────────────────────────────────────────────────────────────────
+// GET  /api/faucet            → { enabled } (+ tokenIndex/amount/cooldownMs when enabled).
+//                               Always 200 so the wallet can ask without generating errors.
+// POST /api/faucet { slot }   → the fresh snapshot (+ `_faucet`), or 404 when disabled.
+app.get('/api/faucet', (req, res) => {
+  res.json(faucetPolicy ? faucetPolicy.publicInfo(FAUCET) : { enabled: false });
+});
+
+app.post('/api/faucet', (req, res) => {
+  // Disabled ⇒ the endpoint does not exist. No hints, no partial behaviour.
+  if (!FAUCET.enabled) return res.status(404).json({ error: 'faucet not available' });
+  const ch = reqChannel(req);
+  withLock(ch, async () => {
+    const slot = req.body && req.body.slot;
+    const amount = FAUCET.dripAmount.toString();
+    const localTokenSlot = faucetLocalTokenSlot(ch);
+    // A corrupt ledger THROWS here and the request 500s — never "start from empty", which would
+    // re-open the faucet to every slot that already drank.
+    const state = readFaucetState(ch);
+    const verdict = faucetPolicy.checkEligibility({
+      config: FAUCET,
+      slot,
+      activeSlots: activeSlotCount(ch),
+      localTokenSlot,
+      state,
+      now: Date.now(),
+    });
+    if (!verdict.ok) {
+      if (verdict.alreadyFunded) {
+        // Idempotent: same answer, no value moved.
+        const snap = JSON.parse(fs.readFileSync(wc(ch, 'channel_snapshot.json'), 'utf8'));
+        return res.json({ ...snap, _faucet: { funded: true, alreadyFunded: true, amount, tokenIndex: FAUCET.tokenIndex, tokenSlot: localTokenSlot } });
+      }
+      const status = verdict.code === 'cooldown' || verdict.code === 'cap_reached' ? 429 : 400;
+      return res.status(status).json({ error: verdict.reason, code: verdict.code, retryAfterMs: verdict.retryAfterMs });
+    }
+
+    // RESERVE FIRST (see the security contract above), then move the value.
+    writeFaucetState(ch, faucetPolicy.reserveDrip(state, slot, amount, Date.now()));
+    console.log(`[faucet] channel ${ch}: drip reserved — ${amount} of base token ${FAUCET.tokenIndex} (local slot ${localTokenSlot}) from slot ${FAUCET.faucetSlot} → slot ${slot}`);
+    try {
+      // `refresh` re-encrypts the faucet's own position to a locally-witnessed ciphertext and
+      // clears its `pending_adds`. A position credited homomorphically (the L1 deposit import
+      // that seeded the faucet) or just spent by the previous drip is otherwise UNSPENDABLE —
+      // the refresh proof is value-preserving (RefreshAir) and every co-signer re-verifies it.
+      await cli(ch, ['refresh', String(FAUCET.faucetSlot), String(localTokenSlot), 'faucet_refresh.json']);
+      await cli(ch, ['send', String(FAUCET.faucetSlot), String(slot), amount, 'faucet_payload.json', String(localTokenSlot)]);
+      await cli(ch, ['cosign', 'faucet_payload.json', 'faucet_cosigned.json']);
+    } catch (e) {
+      writeFaucetState(ch, faucetPolicy.settleDrip(readFaucetState(ch), slot, 'failed'));
+      console.error(`[faucet] channel ${ch}: drip to slot ${slot} FAILED (reservation kept): ${String(e.stderr || e.message || e).slice(0, 200)}`);
+      throw e;
+    }
+    writeFaucetState(ch, faucetPolicy.settleDrip(readFaucetState(ch), slot, 'done'));
+    console.log(`[faucet] channel ${ch}: DRIPPED ${amount} of base token ${FAUCET.tokenIndex} to slot ${slot}`);
+    const snap = JSON.parse(fs.readFileSync(wc(ch, 'channel_snapshot.json'), 'utf8'));
+    res.json({ ...snap, _faucet: { funded: true, alreadyFunded: false, amount, tokenIndex: FAUCET.tokenIndex, tokenSlot: localTokenSlot } });
   }).catch((e) => { console.error(e.stderr ? String(e.stderr) : (e.message||e)); res.status(500).json({ error: String(e.stderr || e.message || e) }); });
 });
 

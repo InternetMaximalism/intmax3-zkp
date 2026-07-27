@@ -127,6 +127,50 @@ cast call <rollup7> "tokenAddressOf(uint32)(address)" 5 --rpc-url "$SEPOLIA_RPC_
   contradicts the chain makes the relay **refuse to start** — fix the file, never bypass the check.
   Full policy table: `node/DESIGN.md` §2.5.
 
+### Testnet $ITX faucet (OPTIONAL) — AFTER the token registration above, AFTER `init`
+New browser accounts join with balance 0. The faucet gives them an in-channel balance of a test
+ERC-20 (`$ITX`) so they can immediately try a transfer. A designated CLI **faucet member** holds
+the supply and the relay sends an ordinary in-channel transfer at the ITX token position — no new
+protocol path. The supply is ONE real L1 deposit imported once, so the faucet **cannot mint**: it
+can only run dry, and every dripped balance stays backed by `channel_fund` and stays claimable.
+
+Full step-by-step (deploy → register → channel `register-token` → approve+deposit → import →
+enable): **`doc/tasks/regen-and-redeploy-runbook.md` Step 3c**. Summary of what this box needs:
+
+```bash
+# systemd Environment= for the relay unit. ALL of these are required; anything missing or
+# incoherent leaves the faucet OFF and POST /api/faucet answering 404.
+FAUCET_ENABLED=1
+FAUCET_SLOT=2                      # a CLI CO-SIGNING member slot (not 0, the BP/builder slot)
+ITX_TOKEN_INDEX=1                  # the registered base index of $ITX — MUST be nonzero
+FAUCET_DRIP=100000000              # 100 ITX per account (base units; $ITX has 6 decimals)
+FAUCET_CHANNEL_CAP=100000000000    # 100,000 ITX total per channel
+FAUCET_COOLDOWN_MS=5000
+```
+- `curl -s https://<host>/api/faucet` → `{"enabled":true,…}` / `{"enabled":false}`. The wallet
+  hides the faucet notice + button entirely when it is off (no console noise, no broken UI).
+- **In-channel balances are u64 base units** — a position tops out at `u64::MAX / 10**decimals`
+  whole tokens. `$ITX` uses **6 decimals** so that ceiling is ~18.4 trillion (it would be ~18.44 at
+  18). The relay refuses a drip or cap above the u64 ceiling at startup. The contract's `decimals`
+  and the manifest's must agree: both relays and the node now read `decimals()` BACK from the token
+  and **refuse to start on a mismatch** (an unreadable `decimals()` degrades to raw base units in
+  the UI, never a guessed 18).
+- SECURITY: the endpoint is public and hands out real escrowed value. It is off by default; one
+  drip per balance slot **for ever** (recorded BEFORE the transfer, in
+  `wallet-live-work/ch<N>/faucet_state.json`), plus a per-channel cap and a cooldown; the request
+  body supplies ONLY the recipient slot, which is checked against the channel's own signed
+  membership — but there is **no ownership proof** on it, so an anonymous caller can consume the
+  channel allowance on behalf of other accounts (value still lands with the legitimate owners;
+  residual risk R-1). **Deleting `faucet_state.json` re-opens the faucet to every account that
+  already drank** — it is state, not cache. A corrupt ledger (including one that parses to `null`)
+  fails closed (500) rather than resetting; writes are temp-file + atomic rename.
+- **DEPLOYMENT INVARIANT: exactly ONE relay process per channel directory.** The per-channel mutex
+  is in-process JS state, not a file lock — two processes sharing one work dir could double-drip.
+  No clustering exists today; if that changes, the ledger needs a file lock first.
+- $ITX lives at `contracts/test/tokens/IntmaxTestTokenITX.sol` — deliberately under `test/`,
+  TESTNET-ONLY, 6 decimals, fixed supply, **no mint entry point at all** (asserted over the
+  compiled ABI). Never reference it from `contracts/src/`.
+
 ## AWS infra (how it was provisioned — eu-north-1, account in deploy-record)
 ```bash
 set -a; . ./.claude/.apikey; set +a

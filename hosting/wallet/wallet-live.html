@@ -91,6 +91,10 @@
       <input id="joinChannel" type="number" value="7" min="1" />
       <input id="joinDeposit" type="number" step="any" value="0.05" min="0" />
     </div>
+    <!-- Testnet faucet notice. Hidden unless the relay says the faucet is enabled; the text is
+         built from the relay's advertised grant under the SAME trust rules as every other token
+         label (raw base units + #index unless the token metadata is chain-verified). -->
+    <div class="hint hidden" id="joinFaucetNote" style="margin-top:6px"></div>
     <div class="row">
       <button id="btnOpen" disabled>Join & Deposit</button>
       <button id="btnClear" style="background:transparent;border:1px solid var(--border);color:var(--muted)">Clear</button>
@@ -110,6 +114,9 @@
     </div>
     <div class="addr-meta" id="balMeta" style="color:var(--muted);font-size:13px"></div>
     <button id="btnRefresh" disabled>Refresh</button>
+    <!-- Testnet faucet: hidden unless the relay says it is enabled. One drip per account; the
+         relay decides the amount, the token and the eligibility — this button only asks. -->
+    <button id="btnFaucet" class="hidden" style="background:transparent;border:1px solid var(--border);color:var(--muted)">Get test tokens</button>
   </section>
 
   <section class="panel hidden" id="panelResume">
@@ -646,7 +653,9 @@ function call(action, payload={}) {
 worker.onmessage = (e) => {
   const d = e.data;
   if (d.type === 'progress') { const s=$('status'); s.dataset.base = d.msg; s.textContent = d.msg + ' ' + (s.dataset.elapsed||''); return; }
-  if (d.type === 'ready') { try { clearInterval(_initTick); } catch(e){} $('status').textContent='ready'; $('status').className='ready'; $('threads').textContent=d.threads; $('btnOpen').disabled=false; tryRestore(); return; }
+  // Faucet discovery is fire-and-forget and never blocks the wallet: a relay without the feature
+  // simply leaves the join-panel notice and the button hidden (see loadFaucetInfo).
+  if (d.type === 'ready') { try { clearInterval(_initTick); } catch(e){} $('status').textContent='ready'; $('status').className='ready'; $('threads').textContent=d.threads; $('btnOpen').disabled=false; loadTokenMeta(true).then(loadFaucetInfo).then(renderFaucetUi).catch(()=>{}); tryRestore(); return; }
   if (d.type === 'log') { return; }
   const cid = d._callId;
   if (cid && handlers[cid]) {
@@ -854,6 +863,87 @@ async function showBacking() {
   }
 }
 
+// ---- Testnet faucet ------------------------------------------------------------------------
+// The relay decides EVERYTHING about a drip: the token, the amount, who is eligible, and how
+// often. This page only asks for one and re-renders from the snapshot that comes back — it never
+// proposes an amount or a recipient other than its own slot (and the relay re-checks that against
+// the channel's signed membership anyway).
+//
+// GRACEFUL ABSENCE: a relay without the feature 404s `GET /api/faucet` and an older one has no
+// route at all. Both are treated as "no faucet": `faucetInfo` stays null, nothing is rendered and
+// nothing is logged. The wallet must work unchanged against any relay.
+//
+// TRUST: `tokenIndex`/`amount` are DISPLAY inputs with no authority, sanitized like every other
+// relay-supplied token value — the amount is shown in raw base units under the raw `#index` label
+// unless that token's metadata is chain-verified (`describeToken`). Guessing 18 decimals for an
+// unknown token would misstate the grant by orders of magnitude.
+let faucetInfo = null;
+
+async function loadFaucetInfo() {
+  try {
+    const j = JSON.parse(await api('/api/faucet', null, 'GET'));
+    if (!j || j.enabled !== true) { faucetInfo = null; return null; }
+    const amount = toBigOrNull(j.amount);
+    // A faucet for the NATIVE index would be dispensing the channel's ETH backing; the relay
+    // refuses to configure that, and the page refuses to advertise it either.
+    if (!Number.isInteger(j.tokenIndex) || j.tokenIndex <= NATIVE_TOKEN_INDEX
+        || amount === null || amount <= 0n) { faucetInfo = null; return null; }
+    faucetInfo = { tokenIndex: j.tokenIndex, amount: amount.toString() };
+  } catch (e) { faucetInfo = null; }
+  return faucetInfo;
+}
+
+/** Human text for the advertised grant, or null when there is no faucet. */
+function faucetGrantText() {
+  if (!faucetInfo) return null;
+  const d = describeToken(faucetInfo.tokenIndex);
+  return d.trusted
+    ? fmtUnits(faucetInfo.amount, d.decimals) + ' ' + d.label
+    : faucetInfo.amount + ' base units of #' + faucetInfo.tokenIndex;
+}
+
+function renderFaucetUi() {
+  const note = $('joinFaucetNote');
+  const btn = $('btnFaucet');
+  const grant = faucetGrantText();
+  if (!grant) {
+    note.classList.add('hidden');
+    btn.classList.add('hidden');
+    return;
+  }
+  note.textContent = 'faucet: joining also sends you ' + grant
+    + ' of test tokens, backed by this channel\'s on-chain deposit (one per account)';
+  note.classList.remove('hidden');
+  btn.textContent = 'Get ' + grant;
+  btn.classList.remove('hidden');
+}
+
+/**
+ * Ask the relay for this account's drip and re-render from the returned snapshot.
+ * `quiet` suppresses failure logs for the automatic post-join call (a faucet that is dry, capped
+ * or cooling down must never look like a broken join).
+ */
+async function claimFaucet(quiet) {
+  if (!faucetInfo || mySlot === null || mySlot === undefined) return false;
+  try {
+    const snapJson = await api('/api/faucet', JSON.stringify({ slot: mySlot }));
+    let already = false;
+    try { already = JSON.parse(snapJson)._faucet.alreadyFunded === true; } catch (e) {}
+    setChannelFrom(snapJson);
+    await loadTokenMeta(true); // the drip may be the first time this token position exists
+    const r = JSON.parse(await call('importChannel', { snapshotJson: snapJson }));
+    mySlot = r.slot; showBalance(r);
+    renderFaucetUi();
+    log(already
+      ? 'faucet: this account already received its test tokens'
+      : 'faucet: received ' + (faucetGrantText() || 'test tokens'), 'ok');
+    return true;
+  } catch (e) {
+    if (!quiet) log('faucet unavailable: ' + e.message, '');
+    return false;
+  }
+}
+
 // ---- Ticket management ---------------------------------------------------------------------
 let activeTickets = [];
 const _inflight = new Set();
@@ -973,6 +1063,7 @@ async function tryRestore() {
     await loadTokenMeta(true); // decorate the first render; never throws, tolerates an old relay
     mySlot = r.slot; showBalance(r);
     showJoined();
+    await loadFaucetInfo(); renderFaucetUi(); // offer the drip to an account that never took one
     log('restored account ' + formatAddr(myChannel ?? activeCh, r.slot) + ' / balance ' + fmtAmt(r.balance), 'ok');
     await fetchTickets();
     applyTicketState();
@@ -1012,6 +1103,16 @@ $('btnOpen').onclick = guard('join', async () => {
     showJoined();
     joined = true;
     log('joined as ' + formatAddr(myChannel ?? activeCh, r.slot) + ' (balance 0)', 'ok');
+
+    // FAUCET: a browser account joins with balance 0, so hand it the test-token drip right away
+    // (the relay enforces one per account and every limit). `quiet` — a dry/capped/absent faucet
+    // must never look like a failed join, and the L1 deposit below still runs either way.
+    if (await loadFaucetInfo()) {
+      renderFaucetUi();
+      clearInterval(tick);
+      tick = setInterval(() => { $('btnOpen').textContent = 'Funding... ' + Math.round((Date.now()-t0)/1000) + 's'; }, 250);
+      await claimFaucet(true);
+    }
 
     if (depositTokens > 0) {
       const depositAmt = toBase(String(depositTokens));
@@ -1232,6 +1333,20 @@ $('btnRefresh').onclick = async () => {
   } catch (e) { log('refresh failed: '+e.message, 'err'); }
   $('btnRefresh').disabled = false;
 };
+
+// ---- FAUCET (manual, for an account that joined before the faucet existed) ------------------
+$('btnFaucet').onclick = guard('faucet', async () => {
+  const label = $('btnFaucet').textContent;
+  const t0 = Date.now();
+  const tick = setInterval(() => { $('btnFaucet').textContent = 'Requesting... ' + Math.round((Date.now()-t0)/1000) + 's'; }, 250);
+  $('btnFaucet').disabled = true;
+  try { await claimFaucet(false); }
+  finally {
+    clearInterval(tick);
+    $('btnFaucet').textContent = label;
+    $('btnFaucet').disabled = false;
+  }
+});
 
 // ---- PARTIAL WITHDRAWAL (withdraw view) ----------------------------------------------------
 $('btnBurnSend').onclick = guard('burn', async () => {

@@ -3,6 +3,7 @@
   "rollup": "0x5FbDB2315678afecb367f032d93F642f64180aa3",
   "tokens": [
     { "tokenIndex": 0, "symbol": "ETH", "name": "Ether", "decimals": 18, "address": null, "native": true },
+    { "tokenIndex": 1, "symbol": "ITX", "name": "Intmax Test Token", "decimals": 6, "address": "0x0165878A594ca255338adfa4d48449f69242Eb8F" },
     { "tokenIndex": 5, "symbol": "USDC", "name": "USD Coin", "decimals": 6, "address": "0x1c7D4B196Cb0C7B01d743Fbc6116a902379C7238" }
   ]
 }
