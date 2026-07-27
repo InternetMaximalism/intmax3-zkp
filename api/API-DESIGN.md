@@ -38,12 +38,49 @@ Channels hold up to 10 independent per-token balances. API conventions:
   plus `witnessTokenSlot` (the position the held send-witness backs; `canSend` refers to it).
 - `POST /api/v1/channel/{ch}/register-token { tokenIndex }` appends a base token to the
   channel's cosigned registry (append-only, N-of-N cosigned, fail-closed on duplicates —
-  detail2 §N-1/TM-1). `GET /api/v1/channel/{ch}/tokens` returns
-  `{ tokenCount, tokens: [{ tokenSlot, tokenIndex, fundAmount }] }`.
+  detail2 §N-1/TM-1). `GET /api/v1/channel/{ch}/tokens` returns the channel's per-token view
+  enriched with **chain-verified** display metadata — see "Token metadata" below.
 - ERC-20 deposits (`tokenIndex != 0`) send NO ETH value; the depositor must have approved the
   rollup for the amount beforehand (`safeTransferFrom` pull, balance-delta checked — §N-7).
 - Withdrawal claims are per `(member slot, tokenSlot)` — run the claim once per held token; the
   proof exposes the resolved base tokenIndex the Manager pays (§N-6).
+
+### Token metadata — `GET /api/v1/channel/{ch}/tokens` (detail2 §N-1/§N-7, TM-10b)
+
+```json
+{
+  "tokenCount": 2,
+  "tokens": [
+    { "tokenSlot": 0, "tokenIndex": 0, "symbol": "ETH", "name": "Ether", "decimals": 18,
+      "address": null, "native": true, "verified": true, "fundAmount": "1000000000000000000" },
+    { "tokenSlot": 1, "tokenIndex": 5, "symbol": null, "name": null, "decimals": null,
+      "address": "0x…", "native": false, "verified": false, "fundAmount": "0" }
+  ]
+}
+```
+
+The identical body is served by the wallet relay at `GET /api/tokens?channel=N`.
+
+- `tokenSlot` / `tokenIndex` / `fundAmount` come from the **CHANNEL's own cosigned snapshot**
+  (`state.balanceState.{tokenRegistry,tokenCount}`, `state.channelFund.amounts`) — the channel's
+  signed registry decides which local slots exist and which BASE index each maps to. `fundAmount`
+  is a decimal **string**. `404 {"error":"no channel yet"}` while the channel has no snapshot.
+- `symbol` / `name` / `decimals` come from the deployment's `tokens.json` manifest (shipped
+  alongside `channel_backing.json`) and are **non-null ONLY when `verified === true`**.
+- **`verified === true` means:** the manifest's address for that base index was read back EQUAL
+  from the rollup's set-once `tokenAddressOf(tokenIndex)` — or, for `tokenIndex 0`, that it is the
+  contract-reserved native ETH index. Nothing else sets it.
+- `address` MAY be non-null while `verified === false` (reporting what the manifest or the chain
+  said is fine); a **name** for it is not. `native: true` only for `tokenIndex 0`.
+- **SECURITY (why the gate exists).** Display metadata carries **ZERO authority**: the
+  authoritative token identity is the base `token_index`, proof-bound in the circuits and set-once
+  on-chain. Rendering an attacker- or typo-supplied "USDC" over a worthless token is a user-funds
+  attack, so unverified / unknown / contradicted entries are served with `null` metadata and the
+  client MUST fall back to displaying the raw `tokenIndex`. Clients must never treat `symbol` as
+  an identifier, and must never re-derive a label from `address` on their own.
+- Unverified is a normal state (index not registered on-chain yet, RPC unreachable, no manifest
+  shipped). A manifest that CONTRADICTS the chain is fatal for the node/relay; the api service
+  degrades to serving no metadata at all. Full policy table: `node/DESIGN.md` §2.5.
 
 ---
 

@@ -55,6 +55,7 @@ scp -i $PEM ${=O} pkg/intmax3_zkp.js pkg/intmax3_zkp_bg.wasm ${H}:relay/public/p
 scp -i $PEM ${=O} hosting/wallet/wallet-live.html ${H}:relay/public/index.html     # if frontend changed
 scp -i $PEM ${=O} hosting/wallet/wallet-worker.js ${H}:relay/public/
 scp -i $PEM ${=O} hosting/wallet/wallet-relay-ec2.js ${H}:relay/
+scp -i $PEM ${=O} node/common/token-registry.js   ${H}:relay/token-registry.js  # token metadata (§N)
 ssh -i $PEM ${=O} $H 'chmod +x ~/relay/bin/channel_member; sudo systemctl restart intmax-relay'
 ```
 Notes:
@@ -98,10 +99,33 @@ cd .. && mkdir -p deploy-staging/ch7 deploy-staging/ch8
     ../../target/release/channel_member setup-backing "$SEPOLIA_RPC_URL" <rollup7> )   # real Sepolia deposit + balance proof
 ( cd deploy-staging/ch8 && INTMAX_CHANNEL=8 INTMAX_DEPOSIT_KEY="$(cat "$PRIV")" \
     ../../target/release/channel_member setup-backing "$SEPOLIA_RPC_URL" <rollup8> )
-# ship deploy-staging/ch{7,8}/{channel_backing.json,channel_attestation.bin,balance_vd.bin} → EC2 ~/relay/wallet-live-work/ch{7,8}/
+# ship deploy-staging/ch{7,8}/{channel_backing.json,channel_attestation.bin,balance_vd.bin,tokens.json} → EC2 ~/relay/wallet-live-work/ch{7,8}/
 ```
 - `INTMAX_CHANNEL` selects the channel; `INTMAX_DEPOSIT_KEY` is the funded deposit key (default = anvil
   dev key for local). EIP-170 is NOT a blocker: IntmaxRollup runtime ≈ 24,446 B (fits the 24,576 cap).
+
+### ERC-20 token registration (multi-token §N-7) — AFTER the rollup deploy, BEFORE any ERC-20 deposit
+The base `tokenIndex → ERC-20` registry is **set-once per index** (TM-10b) and `deposit()` reverts
+for an unregistered nonzero index, so this runs between the `Deploy.s.sol` above and the first
+ERC-20 deposit. Standalone — no existing deploy script runs it.
+```bash
+$EDITOR deploy-staging/ch7/tokens.json            # template: node/tokens.example.json
+                                                  # `rollup` = the address just deployed, `chainId` = 11155111
+cd contracts && TOKENS_MANIFEST=../deploy-staging/ch7/tokens.json \
+  forge script script/RegisterTokens.s.sol --rpc-url "$SEPOLIA_RPC_URL" \
+  --private-key "$(cat "$PRIV")" --broadcast --slow     # NEVER echo/print the key
+cast call <rollup7> "tokenAddressOf(uint32)(address)" 5 --rpc-url "$SEPOLIA_RPC_URL"
+```
+- Idempotent: a re-run with the same manifest is a no-op. A manifest disagreeing with an
+  already-set index **reverts** — set-once is never an "update" (a remappable index would turn
+  token-A escrow into token-B withdrawals).
+- **`tokens.json` ships alongside `channel_backing.json`** (see the scp line above) and the relay
+  serves it at `GET /api/tokens?channel=N`.
+- SECURITY: symbol/name/decimals carry **zero** authority — the base `token_index` does. The relay
+  verifies every manifest entry against on-chain `tokenAddressOf` at startup and serves metadata
+  ONLY for verified entries (otherwise `null`, and the wallet shows the raw index). A manifest that
+  contradicts the chain makes the relay **refuse to start** — fix the file, never bypass the check.
+  Full policy table: `node/DESIGN.md` §2.5.
 
 ## AWS infra (how it was provisioned — eu-north-1, account in deploy-record)
 ```bash

@@ -130,6 +130,44 @@ block producer if the posting key differs from the deployer:
 `BLOCK_PRODUCER=0x<poster-addr>` (deploy reads it) — the whitelist is otherwise
 empty (fail-closed).
 
+### Step 3b — register the ERC-20 tokens (AFTER the rollup deploy, BEFORE any ERC-20 deposit)
+
+The base `tokenIndex → ERC-20` registry is **set-once per index** (§N-7 / TM-10b) and
+`deposit()` reverts for an unregistered nonzero index, so this step must run **after** the rollup
+exists and **before** any ERC-20 deposit (incl. the `WD_ERC20_*` withdrawal lane above and the
+two-token E2E). It is a standalone script — it does **not** run from `Deploy*.s.sol`.
+
+```bash
+# 1) write the per-deployment manifest (template: node/tokens.example.json). `rollup` MUST be the
+#    address just deployed and `chainId` the target chain — the script and the node both refuse to
+#    proceed when either disagrees.
+$EDITOR deploy-staging/ch7/tokens.json
+
+# 2) register (idempotent: a re-run with the same manifest is a no-op; a manifest that disagrees
+#    with an already-set index REVERTS — set-once is never an "update")
+cd contracts && TOKENS_MANIFEST=../deploy-staging/ch7/tokens.json \
+  forge script script/RegisterTokens.s.sol --rpc-url "$RPC_URL" \
+  --private-key "$(cat "$PRIV")" --broadcast --slow      # NEVER echo/print the key
+
+# 3) confirm (the script also reads back `tokenAddressOf` itself and reverts on a mismatch)
+cast call <rollup> "tokenAddressOf(uint32)(address)" 5 --rpc-url "$RPC_URL"
+```
+
+**Ship `tokens.json` alongside `channel_backing.json`** — same propagation as the rest of the
+backing artifacts, into each channel's work dir on the relay/api box:
+
+```bash
+# deploy-staging/ch{7,8}/{channel_backing.json,channel_attestation.bin,balance_vd.bin,tokens.json}
+#   → <box>:~/relay/wallet-live-work/ch{7,8}/
+```
+
+The relay / api / node programs then load it and **verify every entry against the on-chain
+`tokenAddressOf`** before serving any symbol. Display metadata (symbol/name/decimals) carries ZERO
+authority — a mislabelled token is a user-funds attack — so an unverified or unregistered entry is
+served with `null` metadata and the wallet falls back to the raw base index. A manifest that
+CONTRADICTS the chain (address/chainId/rollup mismatch) is a hard startup failure by design; fix
+the file rather than working around it. See `node/DESIGN.md` §2.5 for the full policy table.
+
 ## Step 4 — Option B (1024-slot) redeploy (#12)
 Option B circuits/fixtures are already present on this branch (constants
 `MAX_COSIGNERS=16`, `MAX_CHANNEL_MEMBERS=1024`). The LIVE network still runs
@@ -145,3 +183,8 @@ follow-up (tracked with the Option B work).
 - [ ] Post-deploy: `isBlockProducer[poster] == true`, `allowMleDisabled == false`,
       all VKs initialized (`degreeBits > 0`).
 - [ ] A real close/withdraw lifecycle passes on the target network.
+- [ ] `RegisterTokens.s.sol` run for every ERC-20 the deployment will accept, BEFORE the first
+      ERC-20 deposit; `tokenAddressOf(idx)` reads back the expected address for each.
+- [ ] `tokens.json` shipped alongside `channel_backing.json` into every channel work dir, and the
+      relay/api logged every entry as `verified` (an unverified entry silently degrades the UI to
+      raw base indices; a contradicting entry refuses to start).

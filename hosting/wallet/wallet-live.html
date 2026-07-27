@@ -54,6 +54,16 @@
   .wallet-name { font-weight:600; font-size:14px; }
   .wallet-rdns { color:var(--muted); font-size:11px; }
   .wallet-fallback { color:var(--muted); font-size:13px; text-align:center; padding:16px 0; }
+
+  /* Per-token balance list (multitoken). One row per ACTIVE registry position of the channel. */
+  .token-list { margin:10px 0 2px; display:flex; flex-direction:column; }
+  .token-row { display:flex; align-items:baseline; gap:8px; padding:7px 0; border-top:1px solid var(--border); font-size:14px; }
+  .token-sym { font-weight:600; }
+  .token-id { color:var(--muted); font-size:11px; }
+  .token-amt { margin-left:auto; font-weight:600; }
+  .tag { font-size:10px; line-height:1.5; border-radius:4px; padding:0 5px; border:1px solid var(--border); color:var(--muted); text-transform:uppercase; letter-spacing:.05em; }
+  .tag-raw { border-color:var(--muted); }
+  .tag-ready { border-color:var(--ok); color:var(--ok); }
 </style>
 </head>
 <body>
@@ -89,7 +99,10 @@
 
   <section class="panel hidden" id="panelBalance">
     <h2>Balance</h2>
-    <div class="bal"><span id="balance">--</span> <small>ETH</small></div>
+    <!-- #balance stays the native / token-0 headline amount (Playwright harnesses read it). -->
+    <div class="bal"><span id="balance">--</span> <small id="balanceUnit">ETH</small></div>
+    <!-- Per-token rows (one per active registry position); hidden for plain single-token channels. -->
+    <div class="token-list hidden" id="tokenList"></div>
     <div class="addr-display">
       <span class="hint">your address:</span>
       <span class="addr-value" id="myAddress" title="click to copy">--</span>
@@ -274,14 +287,40 @@ function log(m, cls='') {
 const TOKEN_DECIMALS = 18;
 const TOKEN_UNIT = 10n ** 18n; // BigInt
 
-function fmtAmt(base) {
+// Generic base-units → decimal string. `fmtAmt` below is the unchanged 18-dp wrapper that every
+// pre-existing ETH-denominated call site keeps using; only the per-token rows pass other decimals,
+// and they only ever do so for VERIFIED metadata (see the SECURITY note at renderTokenList).
+function fmtUnits(base, decimals) {
   const b = BigInt(base);
+  const unit = 10n ** BigInt(decimals);
   const neg = b < 0n;
   const abs = neg ? -b : b;
-  const whole = abs / TOKEN_UNIT;
-  const frac = abs % TOKEN_UNIT;
-  const fracStr = frac.toString().padStart(TOKEN_DECIMALS, '0').replace(/0+$/, '') || '0';
+  const whole = abs / unit;
+  const frac = abs % unit;
+  const fracStr = decimals === 0
+    ? '0'
+    : (frac.toString().padStart(decimals, '0').replace(/0+$/, '') || '0');
   return (neg ? '-' : '') + whole.toString() + '.' + fracStr;
+}
+
+function fmtAmt(base) { return fmtUnits(base, TOKEN_DECIMALS); }
+
+// Best-effort BigInt coercion for wire values. Returns null rather than throwing so one malformed
+// entry can never blank the whole balance panel.
+//
+// NOTE (pre-existing, unchanged by this feature): serde serializes the u64 balances as JSON
+// *numbers*, so any value above 2^53 has already lost precision inside JSON.parse before we see it
+// — and real wei balances routinely exceed 2^53 (0.05 ETH = 5e16). We therefore accept every
+// integer-valued Number, exactly matching what the legacy `BigInt(r.balance)` path has always done;
+// rejecting them would drop real balances outright. A string wire value (if the relay/wasm ever
+// emits one) is exact and is preferred.
+function toBigOrNull(v) {
+  try {
+    if (typeof v === 'bigint') return v;
+    if (typeof v === 'number') return Number.isInteger(v) ? BigInt(v) : null;
+    if (typeof v === 'string' && /^-?\d+$/.test(v.trim())) return BigInt(v.trim());
+    return null;
+  } catch (e) { return null; }
 }
 
 function toBase(tokens) {
@@ -298,6 +337,88 @@ function toBase(tokens) {
   const padded = fracPart.padEnd(TOKEN_DECIMALS, '0').slice(0, TOKEN_DECIMALS);
   const f = BigInt(padded);
   return (neg ? -(w + f) : w + f).toString();
+}
+
+// ---- Token metadata (UNTRUSTED DECORATION) --------------------------------------------------
+// SECURITY: token metadata carries ZERO authority. The authoritative identity of a token is the
+// BASE-layer `tokenIndex` that the channel's registry position is bound to; `symbol` / `name` /
+// `decimals` are relay-supplied display sugar and are honoured ONLY when the relay marks the entry
+// `verified === true` AND every field we would rely on is well-formed. When metadata is missing,
+// unverified, or malformed we render the raw identity `#<tokenIndex>` and the RAW base-unit amount:
+//   - guessing 18 decimals for an unknown token misstates a balance by orders of magnitude;
+//   - inventing/echoing an unverified symbol lets a worthless token masquerade as a valuable one.
+// The ONLY exception is tokenIndex 0, which is the native asset by protocol construction (the
+// deposit path hardcodes tokenIndex 0 and pays msg.value) — not by anything the relay told us.
+const NATIVE_TOKEN_INDEX = 0;
+const SYMBOL_MAX = 12;
+const NAME_MAX = 40;
+
+let tokenMeta = new Map();       // tokenIndex -> sanitized record
+let tokenMetaChannel = null;     // channel the map was fetched for (never reuse across channels)
+let _tokenMetaInflight = null;
+let _tokenMetaLastTry = 0;
+
+// Strip control characters and bidi overrides: both can reorder/hide neighbouring text in the DOM
+// and are a cheap way to spoof a label. Then hard-cap the length.
+function clampLabel(s, max) {
+  const t = String(s).replace(/[\u0000-\u001f\u007f\u200e\u200f\u202a-\u202e\u2066-\u2069]/g, '').trim();
+  return t.length > max ? t.slice(0, max) + '…' : t;
+}
+
+function sanitizeTokenMeta(t) {
+  if (!t || typeof t !== 'object') return null;
+  const idx = t.tokenIndex;
+  if (!Number.isInteger(idx) || idx < 0) return null;
+  const sym = typeof t.symbol === 'string' ? clampLabel(t.symbol, SYMBOL_MAX) : '';
+  const verified = t.verified === true
+    && sym !== ''
+    && Number.isInteger(t.decimals) && t.decimals >= 0 && t.decimals <= 36;
+  return {
+    tokenIndex: idx,
+    verified,
+    symbol: verified ? sym : null,
+    name: verified && typeof t.name === 'string' ? clampLabel(t.name, NAME_MAX) : null,
+    decimals: verified ? t.decimals : null,
+  };
+}
+
+// Fetch + cache the channel's token map. Tolerates 404 / absent endpoint (older relay) by falling
+// back to the empty map, i.e. the "no metadata" mode described above. Never throws, never blocks
+// the wallet.
+async function loadTokenMeta(force) {
+  const ch = myChannel ?? activeCh;
+  if (_tokenMetaInflight) return _tokenMetaInflight;
+  if (!force && tokenMetaChannel === ch && tokenMeta.size > 0) return tokenMeta;
+  _tokenMetaLastTry = Date.now();
+  _tokenMetaInflight = (async () => {
+    const m = new Map();
+    try {
+      const j = JSON.parse(await api('/api/tokens', null, 'GET'));
+      for (const t of (Array.isArray(j && j.tokens) ? j.tokens : [])) {
+        const s = sanitizeTokenMeta(t);
+        if (s) m.set(s.tokenIndex, s);
+      }
+    } catch (e) { /* no endpoint / offline → no-metadata mode (raw rendering) */ }
+    tokenMeta = m;
+    tokenMetaChannel = ch;
+    return m;
+  })();
+  try { return await _tokenMetaInflight; } finally { _tokenMetaInflight = null; }
+}
+
+// Rate-limited lazy refetch: the poller can surface a token position we have no metadata for.
+function maybeRefreshTokenMeta() {
+  if (_tokenMetaInflight || Date.now() - _tokenMetaLastTry < 30000) return;
+  loadTokenMeta(true).then((m) => { if (m.size > 0 && _lastReport) showBalance(_lastReport); });
+}
+
+// Resolve how a token position should be displayed. `trusted:false` ⇒ raw base units, `#index`.
+function describeToken(tokenIndex) {
+  if (tokenIndex === NATIVE_TOKEN_INDEX) return { label: 'ETH', decimals: TOKEN_DECIMALS, trusted: true, name: null };
+  const ch = myChannel ?? activeCh;
+  const m = tokenMetaChannel === ch ? tokenMeta.get(tokenIndex) : null;
+  if (m && m.verified) return { label: m.symbol, decimals: m.decimals, trusted: true, name: m.name };
+  return { label: '#' + tokenIndex, decimals: null, trusted: false, name: null };
 }
 
 // ---- LocalStorage --------------------------------------------------------------------------
@@ -500,6 +621,7 @@ let mySeenVersion = null;
 let _pollTimer = null;
 let _polling = false;
 let fwSettlement = null;
+let _lastReport = null; // last BalanceReport rendered, so late-arriving token metadata can re-render
 
 function setChannelFrom(snapJson) {
   try {
@@ -552,9 +674,111 @@ async function api(pathname, body, method='POST') {
 }
 
 // ---- UI updates ----------------------------------------------------------------------------
+// Normalize `r.balances` (absent on a pre-multitoken wasm build) into validated entries. An entry
+// with a malformed tokenIndex/balance is DROPPED rather than rendered with guessed values.
+function activePositions(r) {
+  if (!Array.isArray(r && r.balances)) return [];
+  const out = [];
+  for (const e of r.balances) {
+    if (!e || typeof e !== 'object') continue;
+    const bal = toBigOrNull(e.balance);
+    if (!Number.isInteger(e.tokenIndex) || e.tokenIndex < 0 || bal === null) continue;
+    out.push({ tokenSlot: Number.isInteger(e.tokenSlot) ? e.tokenSlot : null, tokenIndex: e.tokenIndex, balance: bal });
+  }
+  return out;
+}
+
+function tagEl(text, cls, title) {
+  const s = document.createElement('span');
+  s.className = 'tag ' + cls;
+  s.textContent = text;            // untrusted-adjacent text: textContent only, never innerHTML
+  if (title) s.title = title;
+  return s;
+}
+
+// SECURITY (see the "Token metadata (UNTRUSTED DECORATION)" block above): this is the render site
+// that enforces the rule. A row is labelled with a symbol and scaled by per-token `decimals` ONLY
+// when describeToken() returns trusted:true (native tokenIndex 0, or relay metadata explicitly
+// marked verified with a well-formed symbol+decimals). Otherwise the row shows the raw base-layer
+// identity `#<tokenIndex>` and the UNSCALED base-unit integer, tagged "raw". No symbol is ever
+// guessed and 18 decimals are never assumed for an unknown token. All label text — including
+// relay-supplied symbol/name — is inserted via textContent/createTextNode, never innerHTML.
+function renderTokenList(r, positions) {
+  const list = $('tokenList');
+  list.textContent = '';
+
+  // Single plain-ETH channel: the headline .bal line already says everything, so keep the
+  // original ETH-only UX rather than adding a redundant row.
+  const trivial = positions.length === 0
+    || (positions.length === 1 && positions[0].tokenIndex === NATIVE_TOKEN_INDEX);
+  if (trivial) { list.classList.add('hidden'); return; }
+  list.classList.remove('hidden');
+
+  let sawUnknown = false;
+  for (const p of positions) {
+    const d = describeToken(p.tokenIndex);
+    if (!d.trusted) sawUnknown = true;
+
+    const row = document.createElement('div');
+    row.className = 'token-row';
+
+    const sym = document.createElement('span');
+    sym.className = 'token-sym';
+    sym.textContent = d.label;
+    if (d.name) sym.title = d.name;
+    row.appendChild(sym);
+
+    // The authoritative identity is always shown, even for verified tokens.
+    const id = document.createElement('span');
+    id.className = 'token-id';
+    id.textContent = '#' + p.tokenIndex + (p.tokenSlot === null ? '' : ' · pos ' + p.tokenSlot);
+    row.appendChild(id);
+
+    // canSend refers to the witness position ONLY — mark exactly that row.
+    if (r.canSend && p.tokenSlot !== null && p.tokenSlot === r.witnessTokenSlot) {
+      row.appendChild(tagEl('send-ready', 'tag-ready', 'the held send-witness backs this token position'));
+    }
+
+    const amt = document.createElement('span');
+    amt.className = 'token-amt';
+    amt.textContent = d.trusted ? fmtUnits(p.balance, d.decimals) : p.balance.toString();
+    row.appendChild(amt);
+
+    if (!d.trusted) {
+      row.appendChild(tagEl('raw', 'tag-raw', 'no verified metadata for token #' + p.tokenIndex + ' — showing raw base units, not scaled by any assumed decimals'));
+    }
+    list.appendChild(row);
+  }
+  if (sawUnknown) maybeRefreshTokenMeta();
+}
+
 function showBalance(r) {
+  _lastReport = r;
   mySeenVersion = r.stateVersion; // remember what we've rendered, so the poller only reacts to newer
-  $('balance').textContent = fmtAmt(r.balance);
+  const positions = activePositions(r);
+
+  // #balance keeps its existing meaning: the native / token-0 amount. Prefer the tokenIndex-0
+  // position; fall back to the legacy scalar when `balances` is absent (older wasm build).
+  const native = positions.find((p) => p.tokenIndex === NATIVE_TOKEN_INDEX);
+  if (native) {
+    $('balance').textContent = fmtAmt(native.balance);
+    $('balanceUnit').textContent = 'ETH';
+    $('balanceUnit').title = '';
+  } else if (positions.length === 0) {
+    $('balance').textContent = fmtAmt(r.balance);
+    $('balanceUnit').textContent = 'ETH';
+    $('balanceUnit').title = '';
+  } else {
+    // No native position in this channel. The legacy scalar is registry position 0, whose token is
+    // NOT the native asset — so it must not be scaled as ETH or labelled with a guessed symbol.
+    const d = describeToken(positions[0].tokenIndex);
+    $('balance').textContent = d.trusted ? fmtUnits(positions[0].balance, d.decimals) : positions[0].balance.toString();
+    $('balanceUnit').textContent = d.trusted ? d.label : '#' + positions[0].tokenIndex + ' (raw)';
+    $('balanceUnit').title = d.trusted ? '' : 'raw base units — no verified metadata for this token';
+  }
+
+  renderTokenList(r, positions);
+
   const addr = formatAddr(myChannel ?? activeCh, r.slot);
   $('myAddress').textContent = addr;
   $('balMeta').textContent = 'channel ' + (myChannel ?? '?') + ' / slot ' + r.slot + ' / v' + r.stateVersion + ' / ' + (r.canSend ? 'ready' : 'refresh to send');
@@ -742,6 +966,7 @@ async function tryRestore() {
     const snap = await api('/api/snapshot', null, 'GET');
     setChannelFrom(snap);
     const r = JSON.parse(await call('importChannel', { snapshotJson: snap }));
+    await loadTokenMeta(true); // decorate the first render; never throws, tolerates an old relay
     mySlot = r.slot; showBalance(r);
     showJoined();
     log('restored account ' + formatAddr(myChannel ?? activeCh, r.slot) + ' / balance ' + fmtAmt(r.balance), 'ok');
@@ -777,6 +1002,7 @@ $('btnOpen').onclick = guard('join', async () => {
     const snapshot = await step('CLI co-signs genesis', () => api('/api/init', contribution));
     setChannelFrom(snapshot);
     const r = JSON.parse(await step('import channel', () => call('importChannel', { snapshotJson: snapshot })));
+    await loadTokenMeta(true); // per-channel token map for the per-token balance rows
     mySlot = r.slot;
     showBalance(r);
     showJoined();
@@ -996,6 +1222,7 @@ $('btnRefresh').onclick = async () => {
     const latest = await api('/api/snapshot', null, 'GET');
     setChannelFrom(latest);
     const r = JSON.parse(await call('importChannel', { snapshotJson: latest }));
+    await loadTokenMeta(true); // manual refresh re-pulls the token map too
     mySlot = r.slot; showBalance(r);
     log('refreshed: ' + formatAddr(myChannel ?? activeCh, r.slot) + ' / balance ' + fmtAmt(r.balance) + (r.canSend ? '' : ' (received funds -- refresh needed before next send)'), 'ok');
   } catch (e) { log('refresh failed: '+e.message, 'err'); }

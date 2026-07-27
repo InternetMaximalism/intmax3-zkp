@@ -11,6 +11,7 @@ const { makeCli } = require('../common/cli');
 const { ApiClient } = require('../common/api-client');
 const { ChainWatcher } = require('../common/chain-watcher');
 const { Store } = require('../common/store');
+const { bootstrapTokenRegistry } = require('../common/token-registry');
 const log = require('../common/log');
 const alert = require('../common/alert');
 const { makeRuntime, makeLock } = require('./loop');
@@ -35,11 +36,31 @@ async function main() {
   const watcher = new ChainWatcher({ rpcUrl: cfg.rpcUrl, channels: cfg.channels, confirmations: cfg.confirmations, pollIntervalMs: cfg.pollIntervalMs });
   const getPendingClose = (managerAddr) => watcher.getPendingClose(managerAddr);
 
+  // Token DISPLAY metadata (multi-token §N-1/§N-7). The mapping is HELD by the running node and
+  // verified against the rollup's set-once `tokenAddressOf` registry before anything is served.
+  // SECURITY: a manifest that CONTRADICTS a live deployment is a hard startup failure — showing a
+  // wrong symbol for a real token is a user-funds attack (TM-10b), so we refuse to run instead.
+  // Absent information (index not registered yet, RPC unreachable) only warns: those entries stay
+  // unverified and are served with null metadata.
+  let tokenRegistry = null;
+  try {
+    tokenRegistry = await bootstrapTokenRegistry(cfg, {
+      baseDir: path.join(__dirname, '..'),
+      rpcUrl: cfg.rpcUrl,
+      channels: cfg.channels,
+      readTokenAddress: (rollup, idx) => watcher.getTokenAddress(rollup, idx),
+      logger: log,
+    });
+  } catch (e) {
+    log.error({ event: 'TOKEN_MANIFEST_FATAL', error: String((e && e.message) || e), note: 'refusing to start: the token manifest is invalid or contradicts the chain' });
+    process.exit(1);
+  }
+
   const runtimes = new Map(); // channelId -> { runtime, lock }
   for (const ch of cfg.channels) {
     fs.mkdirSync(ch.workDir, { recursive: true });
     const store = new Store(path.join(ch.workDir, 'node-cosigner-state.json'));
-    const runtime = makeRuntime(ch, { cli, api, store, log, alert, rpc: cfg.rpcUrl, policyCfg: cfg.policy || {}, getPendingClose });
+    const runtime = makeRuntime(ch, { cli, api, store, log, alert, rpc: cfg.rpcUrl, policyCfg: cfg.policy || {}, getPendingClose, tokenRegistry });
     runtimes.set(ch.id, { runtime, lock: makeLock(), ch, store });
   }
 

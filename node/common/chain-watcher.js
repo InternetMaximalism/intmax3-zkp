@@ -51,6 +51,14 @@ const MANAGER_FRAGMENTS = [
   'event ChannelFundsPulled(uint32 indexed tokenIndex, uint256 amount, uint256 totalReceived)',
 ];
 
+// Rollup getter ABI. `tokenAddressOf` is the AUTHORITATIVE, set-once base-token registry
+// (detail2 §N-7 / TM-10b) — the only thing a display symbol may ever be verified against. Same
+// discipline as MANAGER_GETTER_ABI: a fragment that disagrees with the contract decodes garbage.
+// Verified against contracts/src/IntmaxRollup.sol (`mapping(uint32 => IERC20) public tokenAddressOf`).
+const ROLLUP_GETTER_ABI = [
+  'function tokenAddressOf(uint32) view returns (address)',
+];
+
 // Getter ABI for authoritative reconciliation (DESIGN.md §3.7). MUST match the EXACT PendingClose
 // struct field order in ChannelSettlementManager.sol (review MED-1: a wrong tuple decodes
 // positionally → garbage values → C1 silently degrades). Verified field-by-field against the
@@ -199,7 +207,17 @@ class ChainWatcher {
     };
   }
 
+  // Read the set-once base-token registry entry (detail2 §N-7). Returns a lowercase address;
+  // the zero address means "index not registered". SECURITY: this is the ONLY authority a token
+  // DISPLAY symbol may be verified against (see common/token-registry.js).
+  async getTokenAddress(rollupAddr, tokenIndex) {
+    this._init();
+    const c = new this._ethers.Contract(rollupAddr, ROLLUP_GETTER_ABI, this._provider);
+    const a = await c.tokenAddressOf(tokenIndex);
+    return String(a).toLowerCase();
+  }
+
   provider() { this._init(); return this._provider; }
 }
 
-module.exports = { ChainWatcher, ROLLUP_FRAGMENTS, MANAGER_FRAGMENTS };
+module.exports = { ChainWatcher, ROLLUP_FRAGMENTS, MANAGER_FRAGMENTS, ROLLUP_GETTER_ABI };

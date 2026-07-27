@@ -230,6 +230,95 @@ function rollupOf(ch) {
   return b.rollup;
 }
 
+// ── Token DISPLAY metadata (multi-token detail2 §N-1/§N-7, threat model TM-10b) ───────────────
+//
+// SECURITY CONTRACT: symbol / name / decimals carry ZERO authority. The authoritative token
+// identity is the base `token_index` — proof-bound in the circuits and set-once on-chain in
+// `IntmaxRollup.tokenAddressOf(uint32)`. Showing "USDC" over a worthless token is a user-funds
+// attack, so metadata is served ONLY for entries whose manifest address was read back EQUAL from
+// the on-chain registry. Everything else is served as null and the wallet falls back to the raw
+// base index.
+//
+// The validation + verification logic is SHARED with the node programs (one implementation, one
+// place to review). This box ships only the relay, so the module is resolved from a few known
+// locations; if it cannot be loaded, metadata is disabled entirely — never re-implemented inline.
+let tokenRegistryModule = null;
+(function loadTokenRegistryModule() {
+  const candidates = [
+    process.env.TOKEN_REGISTRY_MODULE,
+    path.join(ROOT, 'token-registry.js'),                              // shipped next to the relay
+    path.join(ROOT, '..', '..', 'node', 'common', 'token-registry.js'), // repo layout
+  ].filter(Boolean);
+  for (const c of candidates) {
+    try { if (fs.existsSync(c)) { tokenRegistryModule = require(c); return; } } catch (e) { /* try next */ }
+  }
+  console.warn('⚠ token-registry module not found — /api/tokens serves raw base indices with null metadata');
+})();
+
+const TOKEN_REGISTRIES = {}; // ch -> TokenRegistry (verified asynchronously at startup)
+function loadTokenManifests() {
+  if (!tokenRegistryModule) return;
+  for (const ch of CHANNELS) {
+    const p = process.env.TOKENS_MANIFEST || wc(ch, 'tokens.json');
+    if (!fs.existsSync(p)) { console.log(`channel ${ch}: no tokens.json — raw base indices`); continue; }
+    let reg;
+    try {
+      reg = tokenRegistryModule.TokenRegistry.fromFile(p);
+    } catch (e) {
+      // Fail closed and LOUD: a malformed manifest is an operator error on a live box, and this
+      // box already refuses to start without its deposit backing.
+      console.error(`channel ${ch}: invalid token manifest ${p}: ${e.message}`);
+      process.exit(1);
+    }
+    TOKEN_REGISTRIES[ch] = reg;
+    // Verify against the rollup's set-once registry. A CONTRADICTION (manifest address != chain)
+    // is fatal — that is exactly the mislabelling hazard. Absent information (unregistered index,
+    // RPC down) only warns and leaves those entries without metadata.
+    (async () => {
+      try {
+        await reg.verifyAgainstChain(RPC, rollupOf(ch), { logger: console });
+        console.log(`channel ${ch}: tokens ${JSON.stringify(reg.summary())}`);
+      } catch (e) {
+        console.error(`channel ${ch}: token manifest contradicts the chain: ${e.message}`);
+        process.exit(1);
+      }
+    })();
+  }
+}
+
+// Per-token channel view for the wallet. The slots and their base indices come from the CHANNEL's
+// OWN signed registry (the cosigned snapshot) — the manifest only answers "what may this base
+// index be CALLED", and only when chain-verified.
+function channelTokens(ch) {
+  const snap = JSON.parse(fs.readFileSync(wc(ch, 'channel_snapshot.json'), 'utf8'));
+  const st = (snap && (snap.state || snap.State)) || {};
+  const bs = st.balanceState || st.balance_state || {};
+  const fund = st.channelFund || st.channel_fund || {};
+  const tokenCount = bs.tokenCount != null ? bs.tokenCount : (bs.token_count != null ? bs.token_count : 1);
+  const registry = bs.tokenRegistry || bs.token_registry || [];
+  const amounts = fund.amounts || [];
+  const meta = TOKEN_REGISTRIES[ch] || null;
+  const tokens = [];
+  for (let t = 0; t < tokenCount; t++) {
+    const tokenIndex = registry[t] !== undefined ? registry[t] : 0;
+    const md = meta
+      ? meta.metadataFor(tokenIndex)
+      : { symbol: null, name: null, decimals: null, address: null, native: tokenIndex === 0, verified: false };
+    tokens.push({
+      tokenSlot: t,
+      tokenIndex,
+      symbol: md.symbol,
+      name: md.name,
+      decimals: md.decimals,
+      address: md.address,
+      native: md.native,
+      verified: md.verified,
+      fundAmount: amounts[t] !== undefined ? String(amounts[t]) : '0',
+    });
+  }
+  return { tokenCount, tokens };
+}
+
 // Fail fast if the deposit backing was not shipped — this box must never fabricate a channel.
 // DURABLE membership: the channel state (registered delegates, their slots) PERSISTS across relay
 // restarts so a deploy/restart never churns slot assignments or collides re-joining users — the
@@ -248,6 +337,7 @@ for (const ch of CHANNELS) {
     console.log(`channel ${ch}: RESET_CHANNELS=1 → cleared prior membership`);
   }
 }
+loadTokenManifests(); // after the backing check (verification needs channel_backing.json's rollup)
 
 const app = express();
 app.use((req, res, next) => {
@@ -355,6 +445,14 @@ app.get('/api/poll', (req, res) => {
 app.get('/api/backing', (req, res) => {
   try { const ch = reqChannel(req); res.json(JSON.parse(fs.readFileSync(wc(ch, 'channel_backing.json'), 'utf8'))); }
   catch (e) { res.status(404).json({ error: 'no deposit backing yet' }); }
+});
+
+// GET /api/tokens?channel=N — per-token channel view + VERIFIED display metadata (§N).
+// symbol/name/decimals are non-null ONLY when `verified` is true; `address` may be reported while
+// unverified, a NAME may not. 404 while the channel has no snapshot (matches /api/snapshot).
+app.get('/api/tokens', (req, res) => {
+  try { res.json(channelTokens(reqChannel(req))); }
+  catch (e) { res.status(404).json({ error: 'no channel yet' }); }
 });
 
 app.get('/api/deposit-info', (req, res) => {

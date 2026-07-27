@@ -122,6 +122,71 @@ Both programs build on the same modules.
   timers) and the **decision functions** the branches consult.
 - `log.js` / `alert.js` — structured logging + an alert sink (stderr + optional webhook) for
   abnormal-flow escalations. Security alerts are never silently swallowed.
+- `token-registry.js` — multi-token DISPLAY metadata (detail2 §N-1/§N-7). Loads + validates the
+  per-deployment `tokens.json` manifest, verifies every entry against the rollup's set-once
+  `tokenAddressOf(uint32)` getter, and consumes observed `TokenRegistered` events. See §2.5.
+
+### 2.5 Token display metadata (`tokens.json`, detail2 §N-1/§N-7, TM-10b)
+
+**Security contract.** Symbol / name / decimals carry **ZERO authority**. The authoritative token
+identity is the BASE `token_index` — proof-bound in the circuits (the H1-signed `token_registry`,
+TM-9) and set-once on-chain in `IntmaxRollup.tokenAddressOf(uint32)` (TM-10b). Mislabelling a
+worthless token "USDC" is a **user-funds attack**, so metadata is served **only** for entries whose
+manifest address was read back equal from `tokenAddressOf`. Everything else is served with `null`
+metadata and the UI falls back to the raw base index.
+
+**Manifest** (`node/tokens.example.json` is the template; the live copy ships alongside
+`channel_backing.json`, one per deployment):
+
+```json
+{
+  "chainId": 11155111,
+  "rollup": "0x…",
+  "tokens": [
+    { "tokenIndex": 0, "symbol": "ETH",  "name": "Ether",    "decimals": 18, "address": null, "native": true },
+    { "tokenIndex": 5, "symbol": "USDC", "name": "USD Coin", "decimals": 6,  "address": "0x…" }
+  ]
+}
+```
+
+**Validation is fail-closed and rejects the WHOLE FILE** (never "skip the bad entry" — a
+partially-accepted file is exactly how a mislabelled token slips through):
+
+| Rule | Rejects |
+| --- | --- |
+| root keys ⊆ {chainId, rollup, tokens}; entry keys ⊆ {tokenIndex, symbol, name, decimals, address, native} | typo'd keys silently defaulting |
+| `chainId` positive integer; `rollup` non-zero 20-byte hex | a manifest not pinned to a deployment |
+| `tokens` non-empty, ≤ 64 entries | unbounded operator input |
+| `tokenIndex` integer in `[0, 2^32-1]`, **unique** | two entries claiming one base index |
+| at most one `native: true`, and it must be `tokenIndex 0` with `address: null` | a fake "native" asset |
+| `tokenIndex 0` **must** be `native: true` | an ERC-20 label on the contract-reserved ETH index |
+| non-native `address`: 20-byte hex (checksummed or lowercase), **not** the zero address, unique | a zero address spuriously "matching" an unregistered index |
+| `decimals` integer in `[0, 36]` | amounts misrendered by orders of magnitude |
+| `symbol` `^[A-Za-z0-9][A-Za-z0-9._+-]{0,15}$`, `name` `^[A-Za-z0-9][A-Za-z0-9 ._+()-]{0,63}$`, no leading/trailing space | control chars, whitespace-only, homoglyph/RTL and `< > & " ' \` \\` injection into the wallet UI |
+| duplicate `symbol` (case-insensitive) | two entries both claiming to be "USDC" |
+
+**Verification policy** (`verifyAgainstChain(rpcUrl, rollupAddress)` — a CONTRADICTION is fatal, a
+mere ABSENCE of information is not):
+
+| Observation | Outcome |
+| --- | --- |
+| manifest `rollup` ≠ the rollup this node talks to | **throw** — refuse to start |
+| manifest `chainId` ≠ `eth_chainId` | **throw** — refuse to start |
+| `tokenAddressOf(idx)` == manifest address | `verified: true` — metadata served |
+| `tokenAddressOf(idx)` ≠ manifest address (both non-zero) | **throw** — refuse to start (the mislabelling hazard itself) |
+| `tokenAddressOf(idx)` == 0 (not registered yet) | `verified: false` + `TOKEN_UNREGISTERED` warn |
+| read failure (RPC down / malformed) | `verified: false` + `TOKEN_VERIFY_READ_FAILED` warn |
+| `tokenIndex 0` (native) | `verified: true` with no read — index 0 is native ETH by contract construction (`registerToken` reverts `TokenIndexZeroReservedForEth`) |
+
+**Observed `TokenRegistered`** (co-signer `CHAIN_OBSERVE`, delegate pre-branch hook) is
+**observational only** — no write path, no new entries, never throws (a throw would wedge the
+watcher cursor). Event from a different rollup → ignored; matches an unverified entry → promoted to
+verified; contradicts an entry → `TOKEN_REGISTRY_CONTRADICTION` at **error** level and that entry's
+metadata is withdrawn (a contradiction means a set-once violation on-chain or the wrong rollup).
+
+**Config:** `tokensManifest` (path, relative to `node/`) or an inline `tokens` object;
+`TOKENS_MANIFEST` in the env overrides both. Nothing configured is a valid state — the node then
+holds no metadata and everything is served as raw base indices.
 
 ### 2.3 Persistence & idempotency
 - Every externally-visible action (cosign, on-chain submit) is keyed by a **deterministic action
@@ -132,7 +197,8 @@ Both programs build on the same modules.
 
 ### 2.4 Configuration (`node/config.example.json`)
 `{ rpcUrl, chainId, channels:[{id, rollup, manager, verifier, workDir}], confirmations,
-role:"cosigner"|"delegate", apiBaseUrl, pollIntervalMs, policy:{...}, keys:{seedSource} }`.
+role:"cosigner"|"delegate", apiBaseUrl, pollIntervalMs, tokensManifest, policy:{...},
+keys:{seedSource} }` (`tokensManifest` → §2.5).
 Secrets (deposit key, delegate seed) come from env / gitignored files, never from this file —
 consistent with the repo's key-handling rules.
 
