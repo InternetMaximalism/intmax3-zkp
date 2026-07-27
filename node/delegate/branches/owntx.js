@@ -9,10 +9,40 @@ const { headOf } = require('./sync');
 const dsm = require('../state-machine');
 const crypto = require('crypto');
 
-async function ensureSendable(ctx) {
-  if (ctx.store.get('canSend')) return true;
-  await doRefresh({ source: 'api', kind: 'refresh' }, ctx);
-  return ctx.store.get('canSend');
+// `undefined`/`null` means the GENESIS position (§N-3) — the same default the WASM `Option<u8>`
+// token arguments take.
+const GENESIS_TOKEN_SLOT = 0;
+function normTokenSlot(t) { return (t === undefined || t === null) ? GENESIS_TOKEN_SLOT : Number(t); }
+
+// SECURITY (§N, TM-13): sendability is per (member, TOKEN). The wallet holds at most one send
+// witness, for the position named by `witnessTokenSlot`, and the report's `canSend` refers to THAT
+// position only — a genesis-token witness must never be read as authorization to send token 1, or
+// the pre-send refresh is skipped and the WASM refuses the send outright. Missing/legacy store
+// state counts as NOT sendable: the cost is one extra refresh, and it can never authorize a send
+// the wallet would reject.
+function witnessBacks(store, tokenSlot) {
+  if (store.get('canSend') !== true) return false;
+  const w = store.get('witnessTokenSlot');
+  if (w === undefined || w === null) return false;
+  return Number(w) === normTokenSlot(tokenSlot);
+}
+
+// Resolve a BASE token index to this channel's LOCAL position from the last balance report's
+// registry view (`balances[] = {tokenSlot, tokenIndex}`). Unknown ⇒ genesis: the WASM resolves the
+// base index against the signed registry itself and fails closed on an unregistered token, so this
+// only picks which witness to pre-refresh.
+function localSlotForTokenIndex(store, tokenIndex) {
+  if (tokenIndex === undefined || tokenIndex === null) return GENESIS_TOKEN_SLOT;
+  const bal = store.get('balance');
+  const rows = (bal && Array.isArray(bal.balances)) ? bal.balances : [];
+  const hit = rows.find((e) => e && Number(e.tokenIndex) === Number(tokenIndex));
+  return hit ? Number(hit.tokenSlot) : GENESIS_TOKEN_SLOT;
+}
+
+async function ensureSendable(ctx, tokenSlot) {
+  if (witnessBacks(ctx.store, tokenSlot)) return true;
+  await doRefresh({ source: 'api', kind: 'refresh', tokenSlot }, ctx);
+  return witnessBacks(ctx.store, tokenSlot);
 }
 
 async function doRefresh(event, ctx) {
@@ -39,6 +69,8 @@ async function doRefresh(event, ctx) {
   if (wallet.available()) { wallet.cosignVerify(ctx.slot, resp.state || resp); wallet.finalize(resp); }
   sm.signal(dsm.SIGNALS.COSIGN_OK);
   store.set('canSend', true);
+  // The refreshed witness backs exactly the position we refreshed (§N/TM-13).
+  store.set('witnessTokenSlot', normTokenSlot(event && event.tokenSlot));
   store.set('acceptedHead', headOf({ state: resp.state || resp }));
   sm.signal(dsm.SIGNALS.SYNCED);
   log.info({ event: 'REFRESH_FINALIZED', channel: ch.id });
@@ -48,7 +80,7 @@ async function doSend(event, ctx) {
   const { api, wallet, ch, store, log, sm, raiseSignal } = ctx;
   const { toSlot, amount, tokenSlot } = event;
   if (!wallet.available()) { log.warn({ event: 'WASM_UNAVAILABLE_SEND', channel: ch.id }); return; }
-  if (!(await ensureSendable(ctx))) return;
+  if (!(await ensureSendable(ctx, tokenSlot))) return;
   sm.signal(dsm.SIGNALS.START_PROVE);
   const prev = store.get('acceptedHead');
   const nonce = '0x' + crypto.randomBytes(32).toString('hex');
@@ -108,7 +140,8 @@ async function doBurn(event, ctx) {
   const { api, wallet, ch, store, log, sm, raiseSignal } = ctx;
   const { amount, l1Address, tokenIndex } = event;
   if (!wallet.available()) { log.warn({ event: 'WASM_UNAVAILABLE_BURN', channel: ch.id }); return; }
-  await ensureSendable(ctx);
+  // The burn debits the LOCAL position registered for this BASE token index (§N).
+  await ensureSendable(ctx, localSlotForTokenIndex(store, tokenIndex));
   sm.signal(dsm.SIGNALS.START_PROVE);
   // Multi-token (§N): tokenIndex is the burned BASE token (undefined = genesis registry[0]);
   // the resulting L1 partial withdrawal pays out in that asset (IMPW binds tokenIndex).
@@ -153,4 +186,4 @@ async function onWithholdingLike(err, ctx, op) {
   log.warn({ event: 'COSIGN_TRANSIENT', channel: ch.id, op, retries, reason: msg });
 }
 
-module.exports = { doSend, doRefresh, doInterChannelSend, doBurn, ensureSendable };
+module.exports = { doSend, doRefresh, doInterChannelSend, doBurn, ensureSendable, witnessBacks, localSlotForTokenIndex };
