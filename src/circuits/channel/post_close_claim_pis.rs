@@ -19,17 +19,21 @@ use crate::{
 // 8 (close intent digest) + 1 (channel id, single u32 limb) + 8 (tx hash) +
 // 8 (receiver sphincs pubkey hash) + 5 (recipient) + 8 (nullifier) + 2 (amount) +
 // 8 (final_balance_state_h1, Stage 3 receiver-pk bind) +
-// 8 (final_settled_tx_accumulator_root, Stage 3 source-tx anchoring).
+// 8 (final_settled_tx_accumulator_root, Stage 3 source-tx anchoring) +
+// 1 (token_index, TM-16 multi-token §N-6).
 //
-// Stage 3 layout: limbs 0..40 are byte-identical to the pre-Stage-3 layout (less churn / golden
-// stability). `final_balance_state_h1` (40..48) and `final_settled_tx_accumulator_root` (48..56)
-// are APPENDED at the END. H1 is required for the receiver-pk one-hot bind (the witnessed Regev
+// Layout (append-at-end discipline): limbs 0..40 are byte-identical to the pre-Stage-3 layout.
+// `final_balance_state_h1` (40..48) and `final_settled_tx_accumulator_root` (48..56) are the
+// Stage 3 appends. `token_index` (limb 56, TM-16 / multitoken Phase 5a) is appended after them:
+// the BASE token the anchored incoming tx moved, wired in-circuit from ids limb 5 of the
+// `incoming_tx_hash` recompute (see `inter_channel_tx_hash` in common::channel) — NEVER an
+// independent witness. H1 is required for the receiver-pk one-hot bind (the witnessed Regev
 // `(a, b)` is bound to the H1-committed `regev_pk_digests[member_index]`, exactly like the
 // withdrawal claim) — WITHOUT it the post-close decryption stays vacuous (threat-model #3). The
 // accumulator root is the dedicated PI the inclusion proof of `incoming_tx_hash` is verified
 // against (threat-model Fork B). L1 `submitPostCloseClaim` passes BOTH the finalized H1 and the
-// finalized accumulator root.
-pub const POST_CLOSE_CLAIM_PUBLIC_INPUTS_LEN: usize = 56;
+// finalized accumulator root, and credits `withdrawalCredits[token_index]` (strict-bound limb).
+pub const POST_CLOSE_CLAIM_PUBLIC_INPUTS_LEN: usize = 57;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -53,6 +57,13 @@ pub struct PostCloseClaimPublicInputs {
     /// `incoming_tx_hash` against this root, anchoring the claim to a REAL signed settle the
     /// channel absorbed. L1 passes `finalizedSettledTxAccumulatorRoot`.
     pub final_settled_tx_accumulator_root: Bytes32,
+    /// TM-16 (multi-token §N-6, Phase 5a): the BASE `token_index` the anchored incoming tx moved
+    /// — the asset L1 credits this claim in. In-circuit it is the SAME wire as ids limb 5 of the
+    /// `incoming_tx_hash` recompute (the accumulator leaf commits it; see
+    /// `common::channel::inter_channel_tx_hash`), so it is descriptor-bound, never a
+    /// prover/caller choice. Natively it is copied from `source_tx.token_index` AFTER the
+    /// fail-closed `compute_tx_hash()` equality check below. NEVER a channel-local slot.
+    pub token_index: u32,
 }
 
 #[derive(Debug, Error)]
@@ -61,6 +72,10 @@ pub enum PostCloseClaimWitnessError {
     CloseIntentDigestMismatch,
     #[error("post-close claim tx hash mismatch")]
     IncomingTxHashMismatch,
+    #[error(
+        "post-close claim source tx_hash != token-bearing recompute over its own fields (TM-16)"
+    )]
+    TxHashRecomputeMismatch,
     #[error("post-close claim receiver channel mismatch")]
     ReceiverChannelMismatch,
     #[error("post-close claim receiver delta does not match imported tx bundle")]
@@ -109,6 +124,18 @@ impl PostCloseClaimWitness {
         }
         if self.source_tx.destination_channel_id != self.closed_channel_id {
             return Err(PostCloseClaimWitnessError::ReceiverChannelMismatch);
+        }
+        // SECURITY (TM-16): the source tx's carried `tx_hash` must equal the token-bearing
+        // recompute over its OWN fields (ids limb 5 = `source_tx.token_index`) — the native
+        // mirror of the circuit's ids/token wiring, fail-closed BEFORE any proving. Only after
+        // this does copying `source_tx.token_index` into the PI expose the token the ANCHORED
+        // accumulator leaf actually commits.
+        let recomputed_tx_hash = self
+            .source_tx
+            .compute_tx_hash()
+            .map_err(|_| PostCloseClaimWitnessError::TxHashRecomputeMismatch)?;
+        if recomputed_tx_hash != self.source_tx.tx_hash {
+            return Err(PostCloseClaimWitnessError::TxHashRecomputeMismatch);
         }
 
         // The claimed ciphertext must be the receiver's delta of the signed source tx.
@@ -164,6 +191,9 @@ impl PostCloseClaimWitness {
             amount: self.amount,
             final_balance_state_h1: self.final_balance_state.h1(),
             final_settled_tx_accumulator_root: self.final_balance_state.settled_tx_accumulator_root,
+            // TM-16: descriptor-derived (the recompute equality above binds it to the anchored
+            // tx_hash) — the builder offers no caller choice.
+            token_index: self.source_tx.token_index,
         })
     }
 }
@@ -181,6 +211,8 @@ impl PostCloseClaimPublicInputs {
             // Stage 3: appended after the legacy 40 limbs (limbs 0..40 byte-identical).
             self.final_balance_state_h1.to_u64_vec(),
             self.final_settled_tx_accumulator_root.to_u64_vec(),
+            // TM-16 (Phase 5a): the base token_index, appended at limb 56.
+            vec![self.token_index as u64],
         ]
         .concat()
     }
@@ -208,6 +240,9 @@ impl PostCloseClaimPublicInputs {
                 .map_err(|e| e.to_string())?,
             final_settled_tx_accumulator_root: Bytes32::from_u64_slice(&values[48..56])
                 .map_err(|e| e.to_string())?,
+            // TM-16 appended limb (base token_index, canonical u32).
+            token_index: u32::try_from(values[56])
+                .map_err(|_| "post-close-claim token_index limb exceeds u32".to_string())?,
         })
     }
 }
@@ -269,7 +304,10 @@ mod tests {
         let (delta_ct, _) = encrypt_amount(&mut rng, &receiver_pk, amount).unwrap();
 
         let receiver_pk_g = pubkey_hash(11);
-        let source_tx = InterChannelTx {
+        // TM-16: a NON-GENESIS base token; the carried tx_hash must be the token-bearing
+        // recompute (set below), else `to_public_inputs` fail-closes.
+        let token_index = 5u32;
+        let mut source_tx = InterChannelTx {
             tx_inclusion_proof: MerkleInclusionProof {
                 siblings: vec![],
                 leaf_index: U256::default(),
@@ -294,10 +332,10 @@ mod tests {
             sender_delta_ct: ciphertext(1),
             source_channel_id: ChannelId::new(5).unwrap(),
             destination_channel_id: ChannelId::new(7).unwrap(),
-            token_index: 0,
+            token_index,
             source_pk_g: pubkey_hash(10),
             seal: Bytes32::default(),
-            tx_hash: Bytes32::from_u32_slice(&[9, 0, 0, 0, 0, 0, 0, 0]).unwrap(),
+            tx_hash: Bytes32::default(), // set to the real recompute below (TM-16)
             intmax_transfer_commitment: Bytes32::default(),
             recipient_memo: vec![1, 2],
             receiver_deltas: vec![ReceiverBalanceDelta {
@@ -311,6 +349,7 @@ mod tests {
             },
             transport_proof: vec![5],
         };
+        source_tx.tx_hash = source_tx.compute_tx_hash().unwrap();
         let claim_proof = prove_withdraw_claim(
             RegevSecurityLevel::Test,
             &receiver_pk,
@@ -369,6 +408,9 @@ mod tests {
         let roundtrip =
             PostCloseClaimPublicInputs::from_u64_slice(&public_inputs.to_u64_vec()).unwrap();
         assert_eq!(public_inputs, roundtrip);
+        // TM-16: the exposed token is the DESCRIPTOR's base token (limb 56), no caller choice.
+        assert_eq!(public_inputs.token_index, 5);
+        assert_eq!(public_inputs.to_u64_vec()[56], 5);
 
         // A wrong public amount must fail the E-3 verification.
         let mut wrong = witness.clone();
@@ -376,6 +418,17 @@ mod tests {
         assert!(matches!(
             wrong.to_public_inputs(RegevSecurityLevel::Test),
             Err(PostCloseClaimWitnessError::InvalidClaimProof(_))
+        ));
+
+        // TM-16 negative: a doctored descriptor token (with the original carried tx_hash) fails
+        // the token-bearing recompute equality fail-closed — the native mirror of the circuit's
+        // ids/token wiring. A second claim attempt re-labeling the same absorbed tx under a
+        // different token is therefore unbuildable.
+        let mut relabeled = witness.clone();
+        relabeled.source_tx.token_index = 0;
+        assert!(matches!(
+            relabeled.to_public_inputs(RegevSecurityLevel::Test),
+            Err(PostCloseClaimWitnessError::TxHashRecomputeMismatch)
         ));
 
         // B-1b: a claim whose l1_recipient differs from the cosigner-signed per-slot exit

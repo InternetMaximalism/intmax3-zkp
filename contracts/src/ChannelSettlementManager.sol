@@ -102,6 +102,7 @@ interface IChannelSettlementVerifier {
         uint64 amount,
         bytes32 finalBalanceStateH1,
         bytes32 finalSettledTxAccumulatorRoot,
+        uint32 tokenIndex,
         MleVerifier.MleProof calldata mleProof
     ) external view returns (bool);
 
@@ -294,7 +295,8 @@ contract ChannelSettlementManager {
         bytes32 indexed sharedNativeNullifier,
         bytes32 indexed receiverPkG,
         address recipient,
-        uint256 amount
+        uint256 amount,
+        uint32 tokenIndex
     );
 
     event WithdrawalClaimed(address indexed recipient, uint32 indexed tokenIndex, uint256 amount);
@@ -416,6 +418,10 @@ contract ChannelSettlementManager {
         bytes32 receiverPkG;
         address recipient;
         uint64 amount;
+        /// TM-16 (§N-6): the BASE token the anchored incoming tx moved. PROOF-BOUND (PI limb 56,
+        /// strict-bound by the Verifier; in-circuit it IS ids limb 5 of the `incomingTxHash`
+        /// recompute) — a caller lying here fails the limb bind. Replaces the genesis-token pin.
+        uint32 tokenIndex;
     }
 
     /// "IMCK" — post-close shared-native nullifier domain. MUST equal Rust
@@ -1243,6 +1249,21 @@ contract ChannelSettlementManager {
         if (usedSharedNativeNullifiers[sharedNativeNullifier]) {
             revert NullifierAlreadyUsed();
         }
+        // TM-16 defense in depth (mirrors submitWithdrawalClaim's TM-8 re-check): the claimed
+        // base token must be one of the TFD-bound finalized registry entries — the channel can
+        // only owe tokens it cosigned into its registry. The token is ALSO proof-enforced
+        // (in-circuit: PI limb 56 IS ids limb 5 of the anchored `incomingTxHash` recompute;
+        // verifier: strict limb bind below), and an unregistered token would fail the accrual
+        // cap anyway (`finalizedChannelFundAmount[t] == 0`); this re-check pins it against the
+        // finalized copy at the cap-lookup site too, with a precise error.
+        bool tokenRegistered = false;
+        for (uint256 i = 0; i < finalizedTokenCount; i++) {
+            if (finalizedTokenRegistry[i] == claim.tokenIndex) {
+                tokenRegistered = true;
+                break;
+            }
+        }
+        if (!tokenRegistered) revert TokenRegistryMismatch();
         if (
             !verifier.verifyPostCloseClaim(
                 channelId,
@@ -1256,39 +1277,34 @@ contract ChannelSettlementManager {
                 // (accumulator root). The in-circuit recompute + Merkle inclusion are bound to these.
                 finalizedBalanceStateH1,
                 finalizedSettledTxAccumulatorRoot,
+                // TM-16 (§N-6): the PROOF-BOUND base token (PI limb 56) — committed by the
+                // anchored accumulator leaf, replacing the former genesis-registry[0] pin.
+                claim.tokenIndex,
                 proof
             )
         ) revert InvalidPostCloseClaimProof();
 
-        // Multi-token (§N-6, GENESIS-TOKEN PIN): the post-close-claim PI vector (56 limbs) carries
-        // NO token limb — the Rust post-close claim circuit credits the NATIVE path, i.e. the
-        // channel's GENESIS token (post_close_claim_circuit.rs, Phase 2a: "credited token follows
-        // the native path (genesis token)"). Pin the credited base token to the finalized
-        // registry[0] accordingly. Fail-closed: `finalizeClose` guarantees tokenCount >= 1
-        // (submit-time TokenCountOutOfRange bound), so slot 0 is always active. A per-token
-        // post-close claim (token PI limb) is a LATER-PHASE circuit change — when the Rust PI
-        // gains a token limb, this pin must be replaced by a strict-bound claim field (tracked in
-        // doc/tasks/multitoken-todo.md, Phase 3 status).
-        uint32 genesisToken = finalizedTokenRegistry[0];
-
         // Cap accrual against the (intent-declared) per-token channel fund, mirroring
-        // submitWithdrawalClaim. SECURITY: post-close claims share the SAME per-token accrual
-        // budget as withdrawal claims — without this, post-close claims could mint unbounded
-        // credits past the channel fund. (The authoritative ceiling is still
+        // submitWithdrawalClaim (TM-3: token-t claims accrue ONLY against token-t funds).
+        // SECURITY: post-close claims share the SAME per-token accrual budget as withdrawal
+        // claims — without this, post-close claims could mint unbounded credits past the channel
+        // fund. An unfunded-but-registered token fails closed here for any nonzero amount
+        // (`finalizedChannelFundAmount[t] == 0`). (The authoritative ceiling is still
         // `receivedChannelFunds[t]`, enforced at payout.)
-        uint256 newTotalWithdrawn = totalWithdrawn[genesisToken] + claim.amount;
-        if (newTotalWithdrawn > finalizedChannelFundAmount[genesisToken]) {
+        uint256 newTotalWithdrawn = totalWithdrawn[claim.tokenIndex] + claim.amount;
+        if (newTotalWithdrawn > finalizedChannelFundAmount[claim.tokenIndex]) {
             revert WithdrawalCapExceeded();
         }
-        totalWithdrawn[genesisToken] = newTotalWithdrawn;
+        totalWithdrawn[claim.tokenIndex] = newTotalWithdrawn;
         usedSharedNativeNullifiers[sharedNativeNullifier] = true;
-        withdrawalCredits[genesisToken][claim.recipient] += claim.amount;
+        withdrawalCredits[claim.tokenIndex][claim.recipient] += claim.amount;
         emit PostCloseClaimAccepted(
             claim.closeIntentDigest,
             sharedNativeNullifier,
             claim.receiverPkG,
             claim.recipient,
-            claim.amount
+            claim.amount,
+            claim.tokenIndex
         );
     }
 

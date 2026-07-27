@@ -64,8 +64,11 @@ contract ChannelSettlementVerifier is IChannelSettlementVerifier {
     /// `finalSettledTxAccumulatorRoot` (8 limbs) to the post-close claim, 40 -> 56.
     /// Multi-token (§N-6): 48 → 50 — `token_slot` (limb 48) and the resolved BASE `token_index`
     /// (limb 49, circuit-enforced == the H1-committed `registry[token_slot]`) appended at the END.
+    /// TM-16 (§N-6, Phase 5a): post-close claim 56 → 57 — the BASE `token_index` (limb 56,
+    /// circuit-enforced == ids limb 5 of the anchored `incoming_tx_hash` recompute) appended at
+    /// the END; it replaces the Manager's genesis-token pin.
     uint256 internal constant WITHDRAWAL_CLAIM_PI_LEN = 50;
-    uint256 internal constant POST_CLOSE_CLAIM_PI_LEN = 56;
+    uint256 internal constant POST_CLOSE_CLAIM_PI_LEN = 57;
     /// Phase C1: RAW Goldilocks PI limb count for the CORRECTED cancel-close circuit (mirror Rust
     /// `CANCEL_CLOSE_PUBLIC_INPUTS_LEN`, src/circuits/channel/cancel_close_pis.rs). Its
     /// `WrapperCircuit` re-registers the limbs VERBATIM, so the `MleProof.publicInputs` is this raw
@@ -735,7 +738,7 @@ contract ChannelSettlementVerifier is IChannelSettlementVerifier {
         require(c == WITHDRAWAL_CLAIM_PI_LEN, "wclaim limb count");
     }
 
-    /// @dev Build the EXPECTED 56-limb post-close-claim PI vector, in the EXACT order of the Rust
+    /// @dev Build the EXPECTED 57-limb post-close-claim PI vector, in the EXACT order of the Rust
     ///      `PostCloseClaimPublicInputs::to_u64_vec()` (pinned by
     ///      `post_close_claim_public_inputs_match_solidity_shared_vector`). Layout:
     ///        [0..8]   closeIntentDigest
@@ -747,6 +750,10 @@ contract ChannelSettlementVerifier is IChannelSettlementVerifier {
     ///        [38..40] amount                        (hi, lo)
     ///        [40..48] finalBalanceStateH1           (Stage 3, appended)
     ///        [48..56] finalSettledTxAccumulatorRoot (Stage 3, appended)
+    ///        [56]     tokenIndex                    (TM-16 §N-6: the BASE token the anchored
+    ///                 incoming tx moved — in-circuit it IS ids limb 5 of the `incomingTxHash`
+    ///                 recompute, so the accumulator leaf commits it; never a prover/caller
+    ///                 choice. The Manager credits `withdrawalCredits[tokenIndex]` with this.)
     function _expectedPostCloseClaimLimbs(
         bytes4 channelId,
         bytes32 closeIntentDigest,
@@ -756,7 +763,8 @@ contract ChannelSettlementVerifier is IChannelSettlementVerifier {
         bytes32 sharedNativeNullifier,
         uint64 amount,
         bytes32 finalBalanceStateH1,
-        bytes32 finalSettledTxAccumulatorRoot
+        bytes32 finalSettledTxAccumulatorRoot,
+        uint32 tokenIndex
     ) internal pure returns (uint256[] memory limbs) {
         limbs = new uint256[](POST_CLOSE_CLAIM_PI_LEN);
         uint256 c = 0;
@@ -770,6 +778,8 @@ contract ChannelSettlementVerifier is IChannelSettlementVerifier {
         // Stage 3: appended after the legacy 40 limbs (receiver-pk bind anchor + source-tx anchor).
         c = _putBytes32(limbs, c, finalBalanceStateH1);
         c = _putBytes32(limbs, c, finalSettledTxAccumulatorRoot);
+        // TM-16: the base token limb, strict-bound like every other limb.
+        limbs[c++] = uint256(tokenIndex);
         require(c == POST_CLOSE_CLAIM_PI_LEN, "pcclaim limb count");
     }
 
@@ -979,6 +989,9 @@ contract ChannelSettlementVerifier is IChannelSettlementVerifier {
     ///      the FINALIZED values the manager passes from `finalizeClose`; the in-circuit recompute +
     ///      inclusion proof are bound to them. Over-claim is CLOSED (amount == decrypted plaintext)
     ///      and the claim is anchored to a REAL signed settle (no vacuous inclusion).
+    ///      TM-16 (§N-6): `tokenIndex` (limb 56) is strict-bound too — in-circuit it is the SAME
+    ///      wire as ids limb 5 of the anchored `incomingTxHash` recompute, so the token the
+    ///      Manager credits is exactly the one the absorbed accumulator leaf commits.
     function verifyPostCloseClaim(
         bytes4 channelId,
         bytes32 closeIntentDigest,
@@ -989,6 +1002,7 @@ contract ChannelSettlementVerifier is IChannelSettlementVerifier {
         uint64 amount,
         bytes32 finalBalanceStateH1,
         bytes32 finalSettledTxAccumulatorRoot,
+        uint32 tokenIndex,
         MleVerifier.MleProof calldata mleProof
     ) external view returns (bool) {
         if (!postCloseClaimVkInitialized) revert PostCloseClaimVkNotSet();
@@ -1003,7 +1017,8 @@ contract ChannelSettlementVerifier is IChannelSettlementVerifier {
                 sharedNativeNullifier,
                 amount,
                 finalBalanceStateH1,
-                finalSettledTxAccumulatorRoot
+                finalSettledTxAccumulatorRoot,
+                tokenIndex
             )
         );
         return _verifyPostCloseClaimMle(mleProof);
@@ -1126,8 +1141,9 @@ contract ChannelSettlementVerifier is IChannelSettlementVerifier {
         );
     }
 
-    /// @notice TEST-INTROSPECTION HELPER: public view of the EXPECTED 56-limb post-close-claim PI
-    ///         vector (Stage 3: + finalBalanceStateH1 + finalSettledTxAccumulatorRoot).
+    /// @notice TEST-INTROSPECTION HELPER: public view of the EXPECTED 57-limb post-close-claim PI
+    ///         vector (Stage 3: + finalBalanceStateH1 + finalSettledTxAccumulatorRoot; TM-16:
+    ///         + tokenIndex at limb 56).
     function expectedPostCloseClaimLimbs(
         bytes4 channelId,
         bytes32 closeIntentDigest,
@@ -1137,7 +1153,8 @@ contract ChannelSettlementVerifier is IChannelSettlementVerifier {
         bytes32 sharedNativeNullifier,
         uint64 amount,
         bytes32 finalBalanceStateH1,
-        bytes32 finalSettledTxAccumulatorRoot
+        bytes32 finalSettledTxAccumulatorRoot,
+        uint32 tokenIndex
     ) external pure returns (uint256[] memory) {
         return _expectedPostCloseClaimLimbs(
             channelId,
@@ -1148,7 +1165,8 @@ contract ChannelSettlementVerifier is IChannelSettlementVerifier {
             sharedNativeNullifier,
             amount,
             finalBalanceStateH1,
-            finalSettledTxAccumulatorRoot
+            finalSettledTxAccumulatorRoot,
+            tokenIndex
         );
     }
 

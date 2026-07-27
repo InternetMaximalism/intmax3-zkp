@@ -10,7 +10,9 @@
 //! 2. STAGE 3 SOURCE-TX ANCHORING (Fork B). The `incoming_tx_hash` is NO LONGER a free witness: the
 //!    circuit recomputes `tx_leaf` (keccak `tx_leaf_hash`) and `tx_hash` (`inter_channel_tx_hash`)
 //!    IN-CIRCUIT from the witnessed delta (src_pk_g, sender-delta digest, receiver_pk_g,
-//!    receiver-delta digest, tx_tree_root, source/destination channel ids), connects the recomputed
+//!    receiver-delta digest, tx_tree_root, source/destination channel ids, and — TM-16 — the BASE
+//!    `token_index` in ids limb 5, which IS the `token_index` PI: a single wire, so the exposed
+//!    token is exactly the one the anchored accumulator leaf commits), connects the recomputed
 //!    `tx_hash` to the `incoming_tx_hash` PI, and proves a Merkle INCLUSION of that `tx_hash`
 //!    against the closed channel's `final_settled_tx_accumulator_root`
 //!    (`IncrementalMerkleProofTarget::verify`, height [`SETTLED_TX_ACCUMULATOR_HEIGHT`]). The
@@ -98,6 +100,11 @@ pub struct PostCloseClaimPublicInputsTarget {
     pub final_balance_state_h1: Bytes32Target,
     /// Stage 3: closed channel settled-tx accumulator root (source-tx inclusion anchor).
     pub final_settled_tx_accumulator_root: Bytes32Target,
+    /// TM-16 (multi-token §N-6): the BASE token_index of the anchored incoming tx. This PI limb
+    /// IS ids limb 5 of the in-circuit `incoming_tx_hash` recompute (single wire — no separate
+    /// witness), so the exposed token is exactly the one the accumulator leaf commits.
+    /// Range-checked to a canonical u32 in `new()` (TM-16 obligation 4).
+    pub token_index: [Target; 1],
 }
 
 impl PostCloseClaimPublicInputsTarget {
@@ -119,13 +126,14 @@ impl PostCloseClaimPublicInputsTarget {
             amount: U64Target::new(builder, true),
             final_balance_state_h1: Bytes32Target::new(builder, true),
             final_settled_tx_accumulator_root: Bytes32Target::new(builder, true),
+            token_index: [u32_limb(builder)],
         }
     }
 
     /// PI limb vector in EXACT `PostCloseClaimPublicInputs::to_u64_vec()` order
     /// (close_intent_digest, receiver_channel_id, incoming_tx_hash, receiver_pk_g, recipient,
     /// shared_native_nullifier, split_u64(amount), final_balance_state_h1,
-    /// final_settled_tx_accumulator_root).
+    /// final_settled_tx_accumulator_root, token_index).
     pub fn to_vec(&self) -> Vec<Target> {
         let v = [
             self.close_intent_digest.to_vec(),
@@ -137,6 +145,7 @@ impl PostCloseClaimPublicInputsTarget {
             self.amount.to_vec(),
             self.final_balance_state_h1.to_vec(),
             self.final_settled_tx_accumulator_root.to_vec(),
+            self.token_index.to_vec(),
         ]
         .concat();
         debug_assert_eq!(v.len(), POST_CLOSE_CLAIM_PUBLIC_INPUTS_LEN);
@@ -167,6 +176,12 @@ impl PostCloseClaimPublicInputsTarget {
             .set_witness(witness, value.final_balance_state_h1);
         self.final_settled_tx_accumulator_root
             .set_witness(witness, value.final_settled_tx_accumulator_root);
+        witness
+            .set_target(
+                self.token_index[0],
+                F::from_canonical_u32(value.token_index),
+            )
+            .unwrap();
     }
 }
 
@@ -212,9 +227,10 @@ pub struct PostCloseClaimFullWitness {
     /// bound by the leaf hash + root + signed H1). NOTE: unlike the withdrawal claim, the
     /// post-close claim decrypts the TX DELTA ciphertext (anchored via the accumulator), not a
     /// slot position, so no token one-hot select is needed here — the slot leaf is opened only
-    /// for the receiver-pk / recipient binding. The tx's credited token follows the C2C
-    /// descriptor (base token_index end-to-end, §N-4 — Phase 2b/3; the native path pins the
-    /// genesis token).
+    /// for the receiver-pk / recipient binding. The tx's credited token is the C2C descriptor's
+    /// BASE token_index, committed by the anchored `tx_hash` (ids limb 5, TM-16) and exposed as
+    /// the `token_index` PI — no registry resolution happens in this circuit (L1 accounting is
+    /// per BASE token; the Manager re-checks registry membership as defense in depth).
     pub slot_enc_balance_digests: [Bytes32; MAX_CHANNEL_TOKENS],
     /// The receiver slot's FULL per-token `pending_adds[receiver_member_index]` (leaf fields).
     pub slot_pending_adds: [u32; MAX_CHANNEL_TOKENS],
@@ -331,13 +347,18 @@ where
 
         // mixed = push(tx_tree_root, tx_leaf).
         let mixed = settled_tx_chain_push_circuit::<F, C, D>(&mut builder, tx_tree_root, tx_leaf);
-        // ids = [0,0,0,0,0,0, destination_channel_id, source_channel_id]. The native helper writes
-        // source into the LSW (limb 7) and destination into limb 6; destination == the
-        // receiver_channel_id PI.
+        // ids = [0,0,0,0,0, token_index, destination_channel_id, source_channel_id]. The native
+        // helper (`common::channel::inter_channel_tx_hash`) writes source into the LSW (limb 7),
+        // destination into limb 6, and — TM-16 — the BASE token_index into limb 5 (its own
+        // canonical u32 limb, TM-15). Destination == the receiver_channel_id PI (which excludes
+        // the source channel's own outgoing accumulator entries), and the token limb IS the
+        // `token_index` PI — a single wire, so the exposed token is EXACTLY the one committed by
+        // the anchored accumulator leaf. No independent token witness exists in this circuit.
         let zero = builder.zero();
         let mut ids_limbs = vec![zero; BYTES32_LEN];
         ids_limbs[BYTES32_LEN - 1] = source_channel_id;
         ids_limbs[BYTES32_LEN - 2] = public_inputs.receiver_channel_id[0];
+        ids_limbs[BYTES32_LEN - 3] = public_inputs.token_index[0];
         let ids = Bytes32Target::from_slice(&ids_limbs);
         let recomputed_tx_hash = settled_tx_chain_push_circuit::<F, C, D>(&mut builder, ids, mixed);
         // (2) incoming_tx_hash == the recomputed tx_hash (REPLACES the old free connect).
@@ -701,7 +722,7 @@ pub mod test_fixture {
             channel::{
                 ChannelId, ChannelProofEnvelope, InterChannelTx, MerkleInclusionProof,
                 PostCloseIncomingClaim, ProofBackend, ReceiverBalanceDelta, SignedSmallBlock,
-                SmallBlockRootMessage, TransitionProofRole,
+                SmallBlockRootMessage, TransitionProofRole, inter_channel_tx_hash,
             },
         },
         ethereum_types::{
@@ -749,22 +770,10 @@ pub mod test_fixture {
         }
     }
 
-    /// `inter_channel_tx_hash` mirror (native), kept private to the fixture so the recompute the
-    /// circuit performs is checked against a known-good value.
-    fn inter_channel_tx_hash(
-        source: ChannelId,
-        destination: ChannelId,
-        tx_tree_root: Bytes32,
-        tx_leaf: Bytes32,
-    ) -> Bytes32 {
-        use crate::common::balance_state::settled_tx_chain_push;
-        let mixed = settled_tx_chain_push(tx_tree_root, tx_leaf);
-        let mut w = [0u32; 8];
-        w[7] = source.as_u64() as u32;
-        w[6] = destination.as_u64() as u32;
-        let ids = Bytes32::from_u32_slice(&w).unwrap();
-        settled_tx_chain_push(ids, mixed)
-    }
+    /// TM-16 (Phase 5a): the fixture's incoming tx moves a NON-GENESIS base token (55, at the
+    /// closed channel's registry slot 1) — the anchored `tx_hash` carries it in ids limb 5 and
+    /// the claim exposes it as the `token_index` PI (limb 56).
+    pub const FIXTURE_TOKEN_INDEX: u32 = 55;
 
     /// Build a REAL, self-consistent post-close-claim witness (single receiver delta, real receiver
     /// key, the recomputed tx_hash inserted into a real accumulator) and the matching
@@ -783,15 +792,21 @@ pub mod test_fixture {
         let tx_tree_root = Bytes32::from_u32_slice(&[4, 0, 0, 0, 0, 0, 0, 0]).unwrap();
         let sender_delta_ct = ciphertext(1);
 
-        // The REAL tx_leaf / tx_hash (the circuit recomputes the same).
+        // The REAL tx_leaf / tx_hash (the circuit recomputes the same). TM-16: the canonical
+        // token-bearing fold from `common::channel` — the token limb rides in ids limb 5.
         let tx_leaf = tx_leaf_hash(
             source_pk_g,
             sender_delta_ct.digest(),
             receiver_pk_g,
             delta_ct.digest(),
         );
-        let tx_hash =
-            inter_channel_tx_hash(source_channel_id, closed_channel_id, tx_tree_root, tx_leaf);
+        let tx_hash = inter_channel_tx_hash(
+            source_channel_id,
+            closed_channel_id,
+            FIXTURE_TOKEN_INDEX,
+            tx_tree_root,
+            tx_leaf,
+        );
 
         // Insert tx_hash into a real accumulator at index 0 (a few extra leaves around it).
         let mut accumulator = IncrementalMerkleTree::<Bytes32>::new(SETTLED_TX_ACCUMULATOR_HEIGHT);
@@ -826,7 +841,7 @@ pub mod test_fixture {
             sender_delta_ct: sender_delta_ct.clone(),
             source_channel_id,
             destination_channel_id: closed_channel_id,
-            token_index: 0,
+            token_index: FIXTURE_TOKEN_INDEX,
             source_pk_g,
             seal: Bytes32::default(),
             tx_hash,
@@ -886,8 +901,13 @@ pub mod test_fixture {
             settled_tx_accumulator_root: accumulator_root,
             state_version: 9,
             pending_adds: BalanceState::pad_pending_adds_token0(&[0, 0]),
-            token_registry: BalanceState::single_token_registry(0),
-            token_count: 1,
+            // TM-16: two-token registry — the incoming tx's base token (55) at local slot 1.
+            token_registry: {
+                let mut registry = BalanceState::single_token_registry(0);
+                registry[1] = FIXTURE_TOKEN_INDEX;
+                registry
+            },
+            token_count: 2,
         };
 
         let native = PostCloseClaimWitness {
@@ -954,7 +974,9 @@ mod tests {
     use crate::circuits::channel::post_close_claim_pis::POST_CLOSE_CLAIM_PUBLIC_INPUTS_LEN;
 
     /// Happy path: a real post-close-claim binding proves and the exposed limbs equal the
-    /// `PostCloseClaimPublicInputs::to_u64_vec()` layout (56 limbs).
+    /// `PostCloseClaimPublicInputs::to_u64_vec()` layout (57 limbs). TM-16: the fixture's
+    /// incoming tx moves a NON-GENESIS base token (55) and the proof exposes it at limb 56 —
+    /// bound to ids limb 5 of the anchored tx_hash, never a free witness.
     #[cfg_attr(debug_assertions, ignore = "run with --release")]
     #[test]
     fn post_close_claim_circuit_proves_and_exposes_pis() {
@@ -971,6 +993,78 @@ mod tests {
             .map(|f| f.to_canonical_u64())
             .collect();
         assert_eq!(expected, actual);
+        // TM-16: the token PI (limb 56) is the descriptor's base token, proven from the anchor.
+        assert_eq!(actual[56], FIXTURE_TOKEN_INDEX as u64);
+    }
+
+    /// Negative (TM-16 obligation 4) — tampered token limb: a `token_index` PI different from
+    /// the token committed by the anchored tx_hash (ids limb 5) makes the in-circuit tx_hash
+    /// recompute diverge from the `incoming_tx_hash` PI — UNPROVABLE. This is also the
+    /// "second submission with a different token" negative: the token PI is a single wire with
+    /// the ids limb, so no witness exists for the same anchored tx under another token.
+    #[cfg_attr(debug_assertions, ignore = "run with --release")]
+    #[test]
+    fn post_close_claim_circuit_rejects_tampered_token_limb() {
+        let circuit = circuit();
+        let mut witness = build_full_witness();
+        assert_eq!(witness.public_inputs.token_index, FIXTURE_TOKEN_INDEX);
+        witness.public_inputs.token_index = 0; // claim the genesis token instead of 55
+        let result = match circuit.fill_witness(&witness) {
+            Ok(pw) => catch_unwind(AssertUnwindSafe(|| circuit.data.prove(pw))),
+            Err(_) => Ok(Err(anyhow::anyhow!("fill_witness rejected"))),
+        };
+        assert!(
+            result.is_err() || result.unwrap().is_err(),
+            "a token_index PI != the anchored ids token limb must be UNPROVABLE"
+        );
+    }
+
+    /// Negative (TM-16 obligation 4) — cross-artifact mix-and-match: the deltas of the REAL
+    /// absorbed tx re-hashed under a DIFFERENT token (a consistent "token-7 variant" of the same
+    /// debit: PI tx_hash, token limb, and nullifier all recomputed for token 7, so the tx_hash
+    /// recompute and the nullifier derivation both PASS in-circuit). The claim still fails: that
+    /// token-variant leaf was never absorbed, so the accumulator Merkle inclusion has no witness.
+    /// This isolates the anchoring layer as the binding that defeats cross-token re-labeling.
+    #[cfg_attr(debug_assertions, ignore = "run with --release")]
+    #[test]
+    fn post_close_claim_circuit_rejects_cross_token_variant_of_absorbed_tx() {
+        use crate::common::{
+            balance_state::tx_leaf_hash,
+            channel::{PostCloseIncomingClaim, inter_channel_tx_hash},
+        };
+        let circuit = circuit();
+        let mut witness = build_full_witness();
+        let other_token = 7u32;
+        let tx_leaf = tx_leaf_hash(
+            witness.source_pk_g,
+            witness.sender_delta_digest,
+            witness.public_inputs.receiver_pk_g,
+            witness.receiver_delta_digest,
+        );
+        let variant_hash = inter_channel_tx_hash(
+            crate::common::channel::ChannelId::new(witness.source_channel_id as u64).unwrap(),
+            witness.public_inputs.receiver_channel_id,
+            other_token,
+            witness.tx_tree_root,
+            tx_leaf,
+        );
+        witness.public_inputs.token_index = other_token;
+        witness.public_inputs.incoming_tx_hash = variant_hash;
+        witness.public_inputs.shared_native_nullifier =
+            PostCloseIncomingClaim::derive_shared_native_nullifier(
+                witness.public_inputs.close_intent_digest,
+                variant_hash,
+                witness.public_inputs.receiver_pk_g,
+            );
+        let result = match circuit.fill_witness(&witness) {
+            Ok(pw) => catch_unwind(AssertUnwindSafe(|| circuit.data.prove(pw))),
+            Err(_) => Ok(Err(anyhow::anyhow!("fill_witness rejected"))),
+        };
+        assert!(
+            result.is_err() || result.unwrap().is_err(),
+            "a token-variant of the absorbed tx (consistent hash/nullifier, wrong token) must \
+             fail the accumulator inclusion"
+        );
     }
 
     /// Negative — forged incoming_tx_hash NOT in the accumulator: tamper the PI tx hash (and the

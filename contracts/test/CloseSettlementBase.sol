@@ -428,6 +428,8 @@ abstract contract CloseSettlementBase is Test {
         );
     }
 
+    /// @dev Genesis-token (ETH, tokenIndex 0) convenience overload — the single-token test
+    ///      channels' registry is [0], so 0 is the registered base token.
     function _postCloseClaim(
         bytes32 closeIntentDigest,
         bytes32 incomingTxHash,
@@ -435,12 +437,25 @@ abstract contract CloseSettlementBase is Test {
         address recipient,
         uint64 amount
     ) internal pure returns (ChannelSettlementManager.PostCloseClaim memory claim) {
+        claim = _postCloseClaim(closeIntentDigest, incomingTxHash, receiverPkG, recipient, amount, 0);
+    }
+
+    /// @dev TM-16: full form with the PROOF-bound base tokenIndex (PI limb 56).
+    function _postCloseClaim(
+        bytes32 closeIntentDigest,
+        bytes32 incomingTxHash,
+        bytes32 receiverPkG,
+        address recipient,
+        uint64 amount,
+        uint32 tokenIndex
+    ) internal pure returns (ChannelSettlementManager.PostCloseClaim memory claim) {
         claim = ChannelSettlementManager.PostCloseClaim({
             closeIntentDigest: closeIntentDigest,
             incomingTxHash: incomingTxHash,
             receiverPkG: receiverPkG,
             recipient: recipient,
-            amount: amount
+            amount: amount,
+            tokenIndex: tokenIndex
         });
     }
 
@@ -460,7 +475,8 @@ abstract contract CloseSettlementBase is Test {
             snn,
             claim.amount,
             m.finalizedBalanceStateH1(),
-            m.finalizedSettledTxAccumulatorRoot()
+            m.finalizedSettledTxAccumulatorRoot(),
+            claim.tokenIndex
         );
         return CloseTestLib.proofWithLimbs(limbs);
     }

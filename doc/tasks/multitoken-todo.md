@@ -502,6 +502,71 @@ cosigning (OPEN); two-token full E2E on anvil; final full-suite attacker pass be
 
 ## Phase 5 — Fixtures, VKs, E2E, deploy
 
+### Phase 5a status (2026-07-27) — post-close claim token binding (TM-16)
+
+Premise correction first: the Phase 3 carry-forward assumed the claim circuit opens an
+IMIT/IMI2-committed token field — it does NOT (it recomputes the IMTL/IMTC chain, whose
+preimages never carried the token). The implementation agent STOPPED per instruction; the gap
+analysis became **TM-16** (threat model) and the approved fix is the IMTC ids-limb design below.
+
+- [x] **Anchored token limb (TM-16 fix):** `inter_channel_tx_hash` moved to `common::channel`
+      as the canonical single source and gained the BASE `token_index` at ids limb 5
+      (`[0,0,0,0,0, token, dest, src]` — own canonical limb, TM-15; IMTC domain retained, shape
+      unchanged — §G-2 note). Token-free v1 fold preserved as
+      `InterChannelTx::replay_identity()`. `InterChannelTx::compute_tx_hash()` = the recompute
+      every gate runs.
+- [x] **Obligation 1 (MATERIAL — replay ledgers token-free):** CLI `applied_tx_hashes` /
+      `spent_tx_hashes` → `applied_tx_identities` / `spent_tx_identities`, keyed on
+      `replay_identity()` at all six sites (cosign-inter-transfer both legs + burn-send); a
+      second token-variant of a credited debit is refused as a replay. Pre-TM-16 ledger entries
+      drop via serde default — v3-reset-covered, documented at the field.
+- [x] **Obligations 2/5 (gate recompute, single-sourced):** `require_token_bearing_tx_hash` in
+      state_update_verifier — descriptor `tx_hash` must equal the recompute over the
+      descriptor's OWN `token_index` (the SAME field the registry resolution + E-2 statement
+      read) — run by the source send witness (obligation 5, symmetry) AND both destination
+      witnesses (fund import + bundle apply) before the chain/accumulator absorb; also invariant
+      5b in `verify_inter_channel_credit_transition` (+ descriptor-vs-embedded tx_hash equality).
+- [x] **Claim circuit + PI (obligation "single wire"):** post-close claim PI 56 → 57 —
+      `token_index` appended at limb 56, range-checked canonical u32, and wired as the SAME
+      target as ids limb 5 of the in-circuit `incoming_tx_hash` recompute (no independent
+      witness). Native mirror: `PostCloseClaimWitness::to_public_inputs` fail-closes on
+      `compute_tx_hash() != source_tx.tx_hash` and copies the descriptor's token (no caller
+      choice). IMCK nullifier stays unversioned — now transitively token-bound via the tx_hash
+      (comment at `derive_shared_native_nullifier`).
+- [x] **Solidity (obligation 3):** Verifier `POST_CLOSE_CLAIM_PI_LEN` 56 → 57, token limb
+      strict-bound (layout doc at `_expectedPostCloseClaimLimbs`); Manager `PostCloseClaim.tokenIndex`
+      (proof-bound), genesis-registry[0] pin REPLACED by per-token accrual
+      (`totalWithdrawn[t]` vs `finalizedChannelFundAmount[t]`, credit
+      `withdrawalCredits[t][recipient]` — same semantics as withdrawal claims, shared budget per
+      token) + finalized-registry membership re-check (defense in depth; zero cap backstops);
+      `PostCloseClaimAccepted` + trailing `uint32 tokenIndex` (chain-watcher.js fragment updated
+      in the SAME change — the Phase 4 stale-fragment lesson); RunClose.s.sol parses the CLI
+      descriptor's new `token_index`.
+- [x] **Builders/CLI:** `PostCloseClaimProver` exposes the descriptor-derived token (asserted in
+      the a3 prover test, now at a NON-GENESIS token 55); CLI post-close descriptor JSON gains
+      the proved `token_index`.
+- [x] **Tests (obligation 4):** Rust — circuit happy path at non-genesis token 55 (limb 56
+      asserted); `rejects_tampered_token_limb` (PI token != anchored ids limb → unprovable; also
+      the "second submission, different token" negative);
+      `rejects_cross_token_variant_of_absorbed_tx` (consistent token-7 re-label of the real
+      absorbed tx: hash+nullifier recomputed, fails ONLY the accumulator inclusion — isolates
+      the anchor); pis-level `TxHashRecomputeMismatch` negative; channel.rs
+      `inter_channel_tx_hash_binds_token_and_replay_identity_strips_it` (token binds hash,
+      identity strips it, v1-formula pin, own-limb non-alias, HIGH-1 dest binding);
+      e2e_flow `c2c_rejects_token_relabeled_descriptor_on_all_gates` (REGISTERED-token relabel —
+      resolution would accept, the TM-16 recompute rejects at all three gates). Foundry —
+      genesis-pin test REPLACED by `test_postCloseClaim_proofBoundToken` (token-A credit/accrual,
+      ETH lane frame) + `tamperedTokenLimb_reverts` (limb-56-only mismatch) +
+      `unregisteredToken_reverts` + `perTokenCap_noCrossTokenDraw` (cap isolation + real-token
+      payout); PI-length/golden-vector tests updated to 57 limbs.
+- [x] Verification: `cargo build --release` green; post_close_claim 12/12 (incl. heavy proving),
+      common::channel 31, state_update_verifier + e2e_flow + _pis suites green (see assessment
+      log); `SKIP_GROTH16=true forge test` 213 passed / 0 failed / 1 documented self-skip; sizes
+      Manager 18,035 B / Verifier 22,418 B / IntmaxRollup 23,877 B (all under EIP-170); wasm32
+      lib check green; fmt/clippy clean on changed lines.
+- Fixture note: the PI length change invalidates the baked post-close fixtures — EXPECTED,
+  regenerated in Phase 5b with everything else. detail2 §N-6 + §G-2 updated (TM-16).
+
 - [ ] Regenerate ALL baked fixtures + re-pin VKs (every preimage/PI change invalidates them —
       known gotcha from the delegate-account work; batch with the pending D12–D14 regeneration).
 - [ ] E2E: 2-token channel lifecycle (init ETH+ERC20 → sends both tokens incl. mixed batch →
@@ -513,6 +578,29 @@ cosigning (OPEN); two-token full E2E on anvil; final full-suite attacker pass be
 ## Assessment log
 
 (append per-phase outcomes here; unexpected results follow the CLAUDE.md security-first protocol)
+
+- **Phase 5a (2026-07-27)**: post-close claim token binding complete (see Phase 5a status
+  above). The phase began with a STOP-and-report: the tasked premise (claim circuit opens an
+  IMI2 token field) was wrong — no anchored preimage carried the token, and an IMI2 in-circuit
+  recompute would have been VACUOUS (no anchor to compare against). The gap analysis became
+  TM-16; the approved ids-limb design (near-zero constraint cost, protocol-level change to the
+  accumulator-leaf fold) was implemented WITH its obligations: token-free replay-ledger
+  re-keying (MATERIAL — defeats the cross-token double-credit that the token-bearing hash would
+  otherwise enable), absorb-time tx_hash recompute at all three gates (single-sourced token),
+  single-wire PI binding, strict Solidity limb bind + per-token accrual. No existing assertion
+  was weakened: the one REPLACED Foundry test (`test_postCloseClaim_genesisTokenPin`) asserted
+  the temporary pin this phase's specified deliverable removes; its replacement asserts the
+  proof-bound per-token semantics plus three new negatives. Setup-only updates: test fixtures
+  that carried FAKE `tx_hash` values (e2e_flow harness, pis unit test) now compute the real
+  fold — required by the new fail-closed recompute checks, assertions unchanged. Suites:
+  post_close_claim 12 (incl. 2 new circuit negatives + non-genesis happy path),
+  state_update_verifier 43, e2e_flow 17 (+1 new relabel-gate test), common::channel 31 (+1
+  identity/binding test), delegate_send_tests 22, cancel_close 15, _pis roundtrips green;
+  `cargo build --release`, wasm32 lib check, fixture-bin feature check green; clippy warning
+  count identical pre/post (302 — no new warnings); Foundry 213/0/1 (SKIP_GROTH16);
+  node/ 45/45 (`chain-watcher` fragment updated with the event change, per the Phase 4 lesson);
+  all contracts under EIP-170. Post-close fixtures invalidated as expected (Phase 5b).
+  Awaiting the mandatory separate security-review / attacker pass over the diff before merge.
 
 - **Phase 4 (2026-07-27)**: CLI/WASM/JS plumbing complete (see Phase 4 status above). All
   `SECURITY(multitoken-phase4)` markers discharged (repo-wide grep: zero phase markers remain);

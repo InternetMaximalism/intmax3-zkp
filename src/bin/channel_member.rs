@@ -194,21 +194,31 @@ struct ControlledMember {
 struct CliState {
     controlled: Vec<ControlledMember>,
     snapshot: ChannelSnapshot,
-    /// REPLAY LEDGER (inter-channel invariant 6): the set of inter-channel `tx_hash`es already
-    /// CREDITED into THIS channel (the DESTINATION / B side). A credit is applied at most once; a
-    /// descriptor whose `tx_hash` is already present is REFUSED (fail-closed). Persisted in
-    /// `cli_state.json` so the ledger survives across CLI invocations (each channel runs as its
-    /// own process). Defaults to empty for states written before this field existed
-    /// (back-compat with already-deployed cli_state.json files).
+    /// REPLAY LEDGER (inter-channel invariant 6): the set of inter-channel REPLAY IDENTITIES
+    /// (`InterChannelTx::replay_identity()` — the token-FREE fold over
+    /// `(source, dest, tx_tree_root, tx_leaf)`) already CREDITED into THIS channel (the
+    /// DESTINATION / B side). A credit is applied at most once; a descriptor whose identity is
+    /// already present is REFUSED (fail-closed). Persisted in `cli_state.json` so the ledger
+    /// survives across CLI invocations (each channel runs as its own process).
+    ///
+    /// SECURITY (TM-16 obligation 1, MATERIAL): the ledger keys on the token-FREE identity,
+    /// NEVER on the token-bearing `tx_hash`. Since TM-16 the `tx_hash` commits the descriptor's
+    /// base `token_index` (ids limb 5), so a malicious sender could prove E-2 twice (token X and
+    /// token Y) over the SAME deltas and present two IMI2-signed descriptors with DIFFERENT
+    /// tx_hashes — a tx_hash-keyed set would credit the same debit twice across two tokens. The
+    /// identity strips the token limb, so the second variant is refused as a replay. (Pre-TM-16
+    /// entries under the old field name are dropped by the serde default — acceptable ONLY
+    /// because of the v3 reset; do not mix pre/post-TM-16 state files.)
     #[serde(default)]
-    applied_tx_hashes: Vec<Bytes32>,
-    /// SPENT LEDGER (A side): the set of inter-channel `tx_hash`es already DEBITED out of THIS
-    /// channel as the SOURCE. A debit is applied at most once; if a tx_hash is already present
-    /// the combined `cosign-inter-transfer` REFUSES (fail-closed). This is the A-side
-    /// counterpart to `applied_tx_hashes` — together they make a transfer atomic AND
-    /// single-use on both ends.
+    applied_tx_identities: Vec<Bytes32>,
+    /// SPENT LEDGER (A side): the set of inter-channel REPLAY IDENTITIES already DEBITED out of
+    /// THIS channel as the SOURCE. A debit is applied at most once; if the identity is already
+    /// present the combined `cosign-inter-transfer` REFUSES (fail-closed). This is the A-side
+    /// counterpart to `applied_tx_identities` — together they make a transfer atomic AND
+    /// single-use on both ends. Same TM-16 token-free keying as `applied_tx_identities` (the
+    /// A-side leg of the cross-token double-debit defense).
     #[serde(default)]
-    spent_tx_hashes: Vec<Bytes32>,
+    spent_tx_identities: Vec<Bytes32>,
 }
 
 #[derive(Deserialize)]
@@ -1237,6 +1247,9 @@ struct PostCloseClaimDescriptor {
     recipient: String,
     shared_native_nullifier: String,
     amount: u64,
+    /// TM-16 (multi-token §N-6): the PROVED base token_index (PI limb 56) — the asset the
+    /// Manager credits. Descriptor-derived by the prover, never a caller choice.
+    token_index: u32,
 }
 
 /// A-3 H-2 §3.5.5 (A34): claim a late inter-channel delta that landed on THIS (now CLOSED) channel
@@ -1334,6 +1347,7 @@ fn cmd_post_close_claim(args: &[String]) {
         recipient: pis.recipient.to_hex(),
         shared_native_nullifier: pis.shared_native_nullifier.to_string(),
         amount: pis.amount,
+        token_index: pis.token_index,
     };
 
     fs::write(POST_CLOSE_CLAIM_MLE_FILE, &mle_json)
@@ -1966,7 +1980,7 @@ fn cmd_init(args: &[String]) {
 
     let (prior_applied, prior_spent) = if std::path::Path::new(STATE_FILE).exists() {
         let prev = load_state();
-        (prev.applied_tx_hashes, prev.spent_tx_hashes)
+        (prev.applied_tx_identities, prev.spent_tx_identities)
     } else {
         (Vec::new(), Vec::new())
     };
@@ -1992,8 +2006,8 @@ fn cmd_init(args: &[String]) {
     save_state(&CliState {
         controlled,
         snapshot: snapshot.clone(),
-        applied_tx_hashes: prior_applied,
-        spent_tx_hashes: prior_spent,
+        applied_tx_identities: prior_applied,
+        spent_tx_identities: prior_spent,
     });
     write_json(out_path, &snapshot);
     println!(
@@ -2826,15 +2840,21 @@ fn cmd_cosign_inter_transfer(args: &[String]) {
         ));
     }
 
-    // SPENT LEDGER (A side): refuse a tx_hash already DEBITED out of A (single-use on the source).
+    // SPENT LEDGER (A side, TM-16 obligation 1): refuse a debit whose token-FREE replay identity
+    // was already debited out of A (single-use on the source, across ALL token relabelings of the
+    // same deltas — see `CliState::spent_tx_identities`).
+    let replay_identity = descriptor
+        .inter_channel_tx
+        .replay_identity()
+        .unwrap_or_else(|e| die(format!("descriptor replay_identity: {e}")));
     if a_state
-        .spent_tx_hashes
+        .spent_tx_identities
         .iter()
-        .any(|h| *h == descriptor.tx_hash)
+        .any(|h| *h == replay_identity)
     {
         die(format!(
-            "REFUSING: inter-channel tx_hash {} already debited from channel A (replay) — fail-closed",
-            descriptor.tx_hash.to_hex()
+            "REFUSING: inter-channel tx identity {} already debited from channel A (replay) — fail-closed",
+            replay_identity.to_hex()
         ));
     }
 
@@ -2904,15 +2924,18 @@ fn cmd_cosign_inter_transfer(args: &[String]) {
     // ======================
     let (mut b_state, b_dir) = load_sibling_dest_state(descriptor.destination_channel_id.as_u64());
 
-    // REPLAY LEDGER (B side, invariant 6): refuse a tx_hash already credited into B.
+    // REPLAY LEDGER (B side, invariant 6 + TM-16 obligation 1): refuse a credit whose token-FREE
+    // replay identity was already credited into B. Keying on the identity (never the
+    // token-bearing tx_hash) is what refuses a SECOND, fully-consistent token-Y variant of an
+    // already-credited debit — the cross-token double-credit is structurally a replay here.
     if b_state
-        .applied_tx_hashes
+        .applied_tx_identities
         .iter()
-        .any(|h| *h == descriptor.tx_hash)
+        .any(|h| *h == replay_identity)
     {
         die(format!(
-            "REFUSING: inter-channel tx_hash {} already credited into channel B (replay) — fail-closed (invariant 6)",
-            descriptor.tx_hash.to_hex()
+            "REFUSING: inter-channel tx identity {} already credited into channel B (replay) — fail-closed (invariant 6)",
+            replay_identity.to_hex()
         ));
     }
 
@@ -3004,12 +3027,13 @@ fn cmd_cosign_inter_transfer(args: &[String]) {
     // ==================== Advance + record on BOTH ledgers. Either-or-neither: any failure
     // above already `die()`d before we got here, so nothing was written.
     a_state.snapshot.state = a_head.clone();
-    a_state.spent_tx_hashes.push(descriptor.tx_hash);
+    // TM-16 obligation 1: both ledgers record the token-FREE replay identity.
+    a_state.spent_tx_identities.push(replay_identity);
     save_state(&a_state);
     write_json("channel_snapshot.json", &a_state.snapshot);
 
     b_state.snapshot.state = b_head.clone();
-    b_state.applied_tx_hashes.push(descriptor.tx_hash);
+    b_state.applied_tx_identities.push(replay_identity);
     save_state_at(&b_dir, &b_state);
 
     // out.json = { aHead, bSnapshot }.
@@ -3078,14 +3102,20 @@ fn cmd_cosign_burn_send(args: &[String]) {
         ));
     }
 
+    // TM-16 obligation 1: the burn spent ledger keys on the token-FREE replay identity too (a
+    // burn is the debit leg of an inter-channel send; same cross-token relabel surface).
+    let burn_replay_identity = descriptor
+        .inter_channel_tx
+        .replay_identity()
+        .unwrap_or_else(|e| die(format!("burn descriptor replay_identity: {e}")));
     if a_state
-        .spent_tx_hashes
+        .spent_tx_identities
         .iter()
-        .any(|h| *h == descriptor.tx_hash)
+        .any(|h| *h == burn_replay_identity)
     {
         die(format!(
-            "REFUSING: burn tx_hash {} already debited (replay) — fail-closed",
-            descriptor.tx_hash.to_hex()
+            "REFUSING: burn tx identity {} already debited (replay) — fail-closed",
+            burn_replay_identity.to_hex()
         ));
     }
 
@@ -3146,7 +3176,7 @@ fn cmd_cosign_burn_send(args: &[String]) {
 
     let pre_burn_settled_tx_chain = a_state.snapshot.state.balance_state.settled_tx_chain;
     a_state.snapshot.state = a_head.clone();
-    a_state.spent_tx_hashes.push(descriptor.tx_hash);
+    a_state.spent_tx_identities.push(burn_replay_identity);
     save_state(&a_state);
     write_json("channel_snapshot.json", &a_state.snapshot);
 

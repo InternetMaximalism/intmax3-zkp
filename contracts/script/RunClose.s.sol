@@ -211,7 +211,9 @@ contract RunClose is Script {
             incomingTxHash: vm.parseJsonBytes32(j, ".incoming_tx_hash"),
             receiverPkG: vm.parseJsonBytes32(j, ".receiver_pk_g"),
             recipient: vm.parseJsonAddress(j, ".recipient"),
-            amount: uint64(vm.parseJsonUint(j, ".amount"))
+            amount: uint64(vm.parseJsonUint(j, ".amount")),
+            // TM-16: the PROVED base token (PI limb 56) emitted by the CLI descriptor.
+            tokenIndex: uint32(vm.parseJsonUint(j, ".token_index"))
         });
         MleVerifier.MleProof memory proof = FixtureLib.parseProof(_postCloseClaimMle());
         vm.startBroadcast();

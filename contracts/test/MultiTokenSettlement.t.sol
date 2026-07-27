@@ -12,8 +12,9 @@ import {SimpleERC20, ReentrantHookERC20} from "./tokens/TestTokens.sol";
 /// @title Multi-token settlement adversarial suite (multitoken Phase 3, detail2 §N-6, TM-3/TM-11).
 /// @notice Per-base-token Manager accounting: the TFD binding chain (close PI → finalization →
 ///         per-token caps), the no-cross-token frame at accrual AND payout, per-token cap
-///         exhaustion, the token registry re-checks (TM-8), the genesis pin for post-close claims,
-///         the Rust↔Solidity token_funds_digest shared vector, and ERC-20 payout reentrancy.
+///         exhaustion, the token registry re-checks (TM-8), the proof-bound post-close claim
+///         token (TM-16), the Rust↔Solidity token_funds_digest shared vector, and ERC-20 payout
+///         reentrancy.
 /// @dev Mock-MLE-verified (verdict=true) like the main manager suite: these tests exercise the
 ///      REAL 103/50-limb strict binding + the manager's per-token accounting, not the WHIR crypto.
 contract MultiTokenSettlementTest is CloseSettlementBase {
@@ -280,16 +281,67 @@ contract MultiTokenSettlementTest is CloseSettlementBase {
         manager.submitWithdrawalClaim(ethClaim, tokProof);
     }
 
-    /// Post-close claims are pinned to the channel's GENESIS token (= finalizedTokenRegistry[0])
-    /// until the post-close PI gains a token limb: the credit and accrual land on registry[0].
-    function test_postCloseClaim_genesisTokenPin() external {
+    /// TM-16 (§N-6, Phase 5a): the post-close claim's credited token is the PROOF-BOUND base
+    /// tokenIndex (PI limb 56, committed by the anchored incoming tx_hash) — the genesis pin is
+    /// retired. A TOKEN_A claim credits and accrues in TOKEN_A only; the ETH lane is untouched
+    /// (cross-token isolation frame, TM-3).
+    function test_postCloseClaim_proofBoundToken() external {
         bytes32 d = _finalizeTwoToken(75, 40);
         ChannelSettlementManager.PostCloseClaim memory pc =
-            _postCloseClaim(d, keccak256("itx"), USER_B, bob, 10);
+            _postCloseClaim(d, keccak256("itx"), USER_B, bob, 10, TOKEN_A);
         manager.submitPostCloseClaim(pc, _postCloseClaimProof(pc));
-        assertEq(manager.withdrawalCredits(0, bob), 10, "credited in the genesis token (ETH)");
-        assertEq(manager.totalWithdrawn(0), 10, "accrued against the genesis-token budget");
-        assertEq(manager.withdrawalCredits(TOKEN_A, bob), 0, "no token-A credit");
+        assertEq(manager.withdrawalCredits(TOKEN_A, bob), 10, "credited in the PROVED token");
+        assertEq(manager.totalWithdrawn(TOKEN_A), 10, "accrued against the token-A budget");
+        assertEq(manager.withdrawalCredits(0, bob), 0, "ETH lane untouched");
+        assertEq(manager.totalWithdrawn(0), 0, "ETH budget untouched");
+    }
+
+    /// TM-16 negative: a tampered token limb — the claim states TOKEN_A but the proof's PI
+    /// limb 56 carries 0 (genesis) — fails the strict limb bind. Only limb 56 differs.
+    function test_postCloseClaim_tamperedTokenLimb_reverts() external {
+        bytes32 d = _finalizeTwoToken(75, 40);
+        ChannelSettlementManager.PostCloseClaim memory genesisVariant =
+            _postCloseClaim(d, keccak256("itx"), USER_B, bob, 10, 0);
+        // Proof limbs built for tokenIndex 0; the submitted claim says TOKEN_A.
+        MleVerifier.MleProof memory proofToken0 = _postCloseClaimProof(genesisVariant);
+        ChannelSettlementManager.PostCloseClaim memory claimTokenA =
+            _postCloseClaim(d, keccak256("itx"), USER_B, bob, 10, TOKEN_A);
+        vm.expectRevert(bytes("claim limb mismatch"));
+        manager.submitPostCloseClaim(claimTokenA, proofToken0);
+    }
+
+    /// TM-16 defense-in-depth: a token the channel never cosigned into its registry is refused
+    /// BEFORE proof verification (the channel can only owe registered tokens) — and would fail
+    /// the zero accrual cap anyway.
+    function test_postCloseClaim_unregisteredToken_reverts() external {
+        bytes32 d = _finalizeTwoToken(75, 40);
+        ChannelSettlementManager.PostCloseClaim memory pc =
+            _postCloseClaim(d, keccak256("itx"), USER_B, bob, 10, 999);
+        MleVerifier.MleProof memory proof = _postCloseClaimProof(pc);
+        vm.expectRevert(ChannelSettlementManager.TokenRegistryMismatch.selector);
+        manager.submitPostCloseClaim(pc, proof);
+    }
+
+    /// TM-16 cross-token isolation at the accrual cap: a TOKEN_A post-close claim above the
+    /// TOKEN_A fund (40) reverts even though the ETH fund (75) has plenty of headroom — token-t
+    /// claims accrue ONLY against token-t funds (TM-3), and the payout ceiling stays per token.
+    function test_postCloseClaim_perTokenCap_noCrossTokenDraw() external {
+        bytes32 d = _finalizeTwoToken(75, 40);
+        ChannelSettlementManager.PostCloseClaim memory over =
+            _postCloseClaim(d, keccak256("itx"), USER_B, bob, 41, TOKEN_A);
+        MleVerifier.MleProof memory overProof = _postCloseClaimProof(over);
+        vm.expectRevert(ChannelSettlementManager.WithdrawalCapExceeded.selector);
+        manager.submitPostCloseClaim(over, overProof);
+
+        // Exactly the token fund fits; the payout is then paid in REAL tokens only.
+        ChannelSettlementManager.PostCloseClaim memory pc =
+            _postCloseClaim(d, keccak256("itx"), USER_B, bob, 40, TOKEN_A);
+        manager.submitPostCloseClaim(pc, _postCloseClaimProof(pc));
+        _fundAndPullToken(40);
+        vm.prank(bob);
+        assertEq(manager.claimWithdrawalCredit(TOKEN_A), 40);
+        assertEq(tokenA.balanceOf(bob), 40, "bob received real tokens");
+        assertEq(manager.totalCreditedOut(0), 0, "no ETH left the manager");
     }
 
     // ═══════════════════════════════════════════════════════════════════════

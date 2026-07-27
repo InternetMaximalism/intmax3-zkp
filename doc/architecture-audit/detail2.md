@@ -638,6 +638,14 @@ vectors + flat keccak are deleted.
 > **D14 update:** `BALANCE_STATE_DOMAIN` "IMBS" is now a **Poseidon** domain — the H1 header is
 > `Poseidon([IMBS, …])` (keccak is retired from H1; §C-2). `BALANCE_STATE_HASH_DOMAIN` "IMBH" and the
 > other chain/L1 domains remain keccak.
+>
+> **TM-16 note (Phase 5a, no new domain):** the inter-channel `tx_hash` fold's IMTC ids word
+> gained the base `token_index` at limb 5 (`[0,0,0,0,0, token_index, dest_id, src_id]`, §N-6).
+> The IMTC push domain is RETAINED: the preimage SHAPE is unchanged (two Bytes32 words per fold);
+> a previously constant-zero limb of a data word gained meaning, occupying its own canonical u32
+> limb (TM-15 — no bit-packing). v1 leaves read as token 0 = ETH (backward-consistent; moot under
+> the v3 reset). The token-free v1 fold lives on as `InterChannelTx::replay_identity` — the
+> replay/consumed-ledger key (TM-16 obligation 1).
 
 ### G-3. Existing (unchanged, reference)
 
@@ -1190,6 +1198,21 @@ leaf_i = Poseidon([ SLOT_LEAF_DOMAIN_V2,
   `totalCreditedOut[t] + amount <= receivedChannelFunds[t]` and payout dispatch by t
   (t == 0 → ETH; else ERC-20 at the L1-registered address). Token-t claims are paid ONLY from
   token-t funds (TM-3). Post-close claims gain the same token dimension.
+- **Post-close claim token binding (TM-16, Phase 5a):** the inter-channel `tx_hash` fold — the
+  settled-tx-accumulator leaf and the only artifact of an absorbed incoming tx that the closed
+  channel's signed final state anchors — gains the descriptor's BASE `token_index` as its own
+  canonical limb in the IMTC ids word: `ids = [0,0,0,0,0, token_index, dest_id, src_id]`
+  (`common::channel::inter_channel_tx_hash`; before TM-16 no anchored preimage carried the
+  token, which forced the L1 genesis-registry[0] pin). Post-close claim PI 56 → 57: `token_index`
+  appended at limb 56, wired in-circuit as the SAME wire as ids limb 5 of the `incoming_tx_hash`
+  recompute (never an independent witness); the Manager credits
+  `withdrawalCredits[tokenIndex]` / accrues `totalWithdrawn[tokenIndex]` against
+  `finalizedChannelFundAmount[tokenIndex]` from the strict-bound limb, with a registry-membership
+  re-check (defense in depth over the zero cap). Soundness obligations (threat model TM-16):
+  every absorb-time gate recomputes the token-bearing `tx_hash` from the descriptor's OWN
+  `token_index` before chaining/accumulating it, and the replay/consumed ledgers key on the
+  token-FREE identity (`InterChannelTx::replay_identity` — the v1 fold) so a second token-variant
+  of the same debit is refused as a replay.
 
 ### N-7. L1: real ERC-20 escrow in IntmaxRollup (TM-1/4/10)
 

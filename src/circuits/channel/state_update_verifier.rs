@@ -654,6 +654,9 @@ impl InterChannelSendUpdateWitness {
             &self.prev_state.balance_state,
             self.inter_channel_tx.token_index,
         )?;
+        // TM-16 obligation 5 (source-side symmetry): the descriptor's tx_hash must be the
+        // token-bearing recompute over the SAME signed token_index the resolution above admitted.
+        require_token_bearing_tx_hash(&self.inter_channel_tx)?;
         if self.next_state.channel_fund.amounts[token_slot] + u64_to_u256(self.amount)
             != self.prev_state.channel_fund.amounts[token_slot]
         {
@@ -809,6 +812,11 @@ impl InterChannelFundImportUpdateWitness {
             &self.prev_state.balance_state,
             self.inter_channel_tx.token_index,
         )?;
+        // TM-16 obligation 1 (destination gate leg): the chained/accumulated `tx_hash` above must
+        // be the token-bearing recompute from the descriptor's own fields — this is what makes
+        // the accumulator leaf (the post-close-claim anchor) commit the token this import
+        // credits (the SAME signed token_index the resolution above admitted).
+        require_token_bearing_tx_hash(&self.inter_channel_tx)?;
         if self.next_state.channel_fund.amounts[token_slot]
             != self.prev_state.channel_fund.amounts[token_slot] + u64_to_u256(self.amount)
         {
@@ -1039,6 +1047,10 @@ impl ReceiverBundleApplyUpdateWitness {
             &self.prev_state.balance_state,
             self.inter_channel_tx.token_index,
         )?;
+        // TM-16 obligation 1 (destination gate leg, bundle-apply advancement): the accumulator
+        // absorbs `tx_hash` again here — it must be the token-bearing recompute over the SAME
+        // signed token_index that resolved the credited position above.
+        require_token_bearing_tx_hash(&self.inter_channel_tx)?;
         let expected_recipient_ct = add_ciphertexts(
             &self.prev_state.balance_state.enc_balances[self.recipient_index][token_slot],
             &receiver_delta.amount,
@@ -1722,6 +1734,32 @@ fn require_pending_adds_unchanged_except(
                  may change)"
             )));
         }
+    }
+    Ok(())
+}
+
+/// SECURITY (TM-16 obligations 1/2/5): the descriptor-carried `tx_hash` — the settled-tx chain /
+/// accumulator leaf and the post-close-claim anchor — must equal the token-bearing recompute
+/// from the descriptor's OWN fields: `fold(ids(source, dest, token_index), fold(tx_tree_root,
+/// tx_leaf))`. The token is single-sourced from `inter_channel_tx.token_index` (the SAME field
+/// the registry resolutions and the E-2 IMU2 statement bind — obligation 2, no second wire
+/// copy). Run by the SOURCE send witness (obligation 5, hygiene/symmetry) and by BOTH
+/// destination witnesses (fund import + bundle apply) BEFORE their chain/accumulator absorb the
+/// hash (obligation 1's gate leg): a source builder anchoring token X while the descriptor
+/// resolves/credits token Y is rejected at absorb time, so the anchored leaf always commits the
+/// token the destination actually credited.
+fn require_token_bearing_tx_hash(
+    inter_channel_tx: &InterChannelTx,
+) -> Result<(), ChannelStateUpdateError> {
+    let recomputed = inter_channel_tx
+        .compute_tx_hash()
+        .map_err(|err| ChannelStateUpdateError::InvalidSettledTxChain(err.to_string()))?;
+    if recomputed != inter_channel_tx.tx_hash {
+        return Err(ChannelStateUpdateError::InvalidSettledTxChain(
+            "descriptor tx_hash != token-bearing recompute from (ids(src, dest, token_index), \
+             tx_tree_root, tx_leaf) — rejecting fail-closed (TM-16)"
+                .to_string(),
+        ));
     }
     Ok(())
 }

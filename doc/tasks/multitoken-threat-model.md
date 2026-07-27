@@ -182,3 +182,66 @@ the new domains close v1-observed nullifier/digest reuse.
 4. A channel may register a token_index with no L1 ERC-20 registration; its fund[t] can never be
    funded via L1 deposits, so claims are 0 — inert by construction (no obligation beyond TM-7's
    import-side registry check).
+
+## TM-16 (added 2026-07-27, Phase 5a) — Post-close claim token binding: the anchored artifact
+carries no token
+
+Found by the Phase 5a implementation agent (correctly STOPPING instead of improvising): the
+post-close claim circuit anchors the incoming C2C tx via the IMTL/IMTC chain
+(`tx_leaf`/`tx_hash` → settled-tx accumulator → H1), and NONE of those preimages contains
+`token_index` in any version. The three places the descriptor's token_index IS committed are
+unreachable or unsound for the claim circuit: (a) the IMI2 signing digest is anchored nowhere
+the circuit can reach — an in-circuit IMI2 recompute would be VACUOUS (no reference value; a
+claimant can witness any token_index around the real anchored tx_hash); (b) the E-2 IMU2
+transcript is Plonky3-side; (c) the base `Transfer.token_index` inside `tx_tree_root` is
+anchored but builder-trusted (the OPEN transfer-tree rebuild obligation) and can diverge from
+the descriptor the destination actually credited. Consequence: "which base token did this
+absorbed tx move" is not provable in-circuit from the finalized state — the L1 genesis pin was
+the only honest option.
+
+**Fix (protocol change, this addendum is its threat model):** put `token_index` into the
+anchored artifact — the IMTC ids word has six spare zero limbs; it becomes
+`ids = [0,0,0,0,0, token_index, dest_channel_id, src_channel_id]` (own canonical limb, TM-15).
+Soundness obligations:
+1. The DESTINATION cosigner gate must recompute
+   `inter_channel_tx_hash(tx_tree_root, tx_leaf, ids-with-token)` from its OWN resolved
+   descriptor token_index and require equality with `descriptor.tx_hash` BEFORE absorbing it
+   into the accumulator (today the gate recomputes only `tx_leaf` and absorbs
+   `descriptor.tx_hash` unchecked — closing that seam is required for this fix to be sound, and
+   is a strengthening independently: a source builder anchoring token X while the descriptor
+   says Y is rejected at absorb time).
+2. The claim circuit wires the ids token limb (already inside the recomputed preimage) to the
+   new PI — near-zero constraint cost, no new witnessed structure.
+3. The source-side signer binds tx_hash in IMI2, so the signed descriptor and the anchored ids
+   token agree by construction on the honest path; v1 leaves had ids[5] == 0 == genesis token
+   (backward-consistent reading; moot anyway under the v3 reset).
+4. UNCHANGED/OPEN: the base-layer `Transfer.token_index` inside tx_tree_root remains
+   builder-trusted until the transfer-tree rebuild obligation closes (recorded OPEN in the
+   todo); the credit, the anchor, and the claim all now follow the SAME descriptor token, so
+   they cannot diverge from each other.
+Rejected alternative: opening the TxV2 tree in-circuit (~40 poseidon perms, imports base-layer
+tree formats, and binds the WRONG value until the rebuild obligation closes).
+
+### TM-16 obligations (design attacker pass, 2026-07-27 — approved for implementation with these)
+
+1. **(MATERIAL)** The destination's replay/consumed ledger — and the cosigner refuse-if-seen
+   rule — must key on the TOKEN-FREE tx identity (`mixed = push(tx_tree_root, tx_leaf)` or the
+   (src, dest, tx_tree_root, tx_leaf) tuple), NEVER on the token-bearing `tx_hash`. Otherwise a
+   malicious sender proves E-2 twice (token X and token Y) over the same deltas, presents two
+   IMI2-signed descriptors, and double-credits one debit across two tokens (different tx_hashes
+   defeat a tx_hash-keyed consumed set).
+2. Single-sourcing: the gate's ids recompute and the E-2 statement token must BOTH read the same
+   `inter_channel_tx.token_index` field — no second wire copy of the token in the gate.
+3. The claim PI token limb is strict-bound in the Verifier limb bind and consumed by the Manager
+   for the per-token accrual cap (replacing the genesis pin); unknown tokens fail closed via the
+   zero `finalizedChannelFundAmount[t]` cap.
+4. Tests: cross-artifact mix-and-match negative (delta of tx1 + token witness of tx2 →
+   unprovable); cross-token double-credit negative (same tx_leaf, two tokens → second credit
+   refused at the gate); tampered ids-limb claim unprovable; the ids limb is a range-checked
+   canonical u32 in-circuit.
+5. (Hygiene) The source-side cosign path runs the same tx_hash recompute for symmetry.
+6. Notes from the review: the ids limb is the BASE token_index (never a local slot); v1
+   `ids[5]==0` reads as token 0 = ETH (backward-consistent; moot under the v3 reset); the
+   source's own accumulator needs no check for claim soundness (the claim pins ids limb 6 to the
+   closed channel's id, excluding outgoing txs) — item 5 is hygiene, not soundness; burn txs get
+   the limb automatically via `build_burn_send_token` delegation and have no post-close claims.

@@ -41,7 +41,9 @@ const MANAGER_FRAGMENTS = [
   'event LateOutgoingDebitAccepted(bytes32 indexed closeIntentDigest, bytes32 indexed sourceTxHash, bytes32 indexed debitNullifier, uint64 amount)',
   'event CloseFinalized(bytes32 indexed closeIntentDigest, bytes32 indexed burnTxHash, uint64 indexed finalEpoch, uint256 channelFundAmount, uint64 finalStateVersion, bytes32 finalSettledTxChain)',
   'event WithdrawalClaimAccepted(bytes32 indexed closeIntentDigest, bytes32 indexed withdrawalNullifier, bytes32 indexed memberPkG, address recipient, uint256 amount, uint32 tokenIndex)',
-  'event PostCloseClaimAccepted(bytes32 indexed closeIntentDigest, bytes32 indexed sharedNativeNullifier, bytes32 indexed receiverPkG, address recipient, uint256 amount)',
+  // TM-16 (multitoken Phase 5a): trailing `uint32 tokenIndex` — MUST stay field-for-field
+  // identical to ChannelSettlementManager.sol (a stale fragment silently never matches).
+  'event PostCloseClaimAccepted(bytes32 indexed closeIntentDigest, bytes32 indexed sharedNativeNullifier, bytes32 indexed receiverPkG, address recipient, uint256 amount, uint32 tokenIndex)',
   'event WithdrawalClaimed(address indexed recipient, uint32 indexed tokenIndex, uint256 amount)',
   'event PartialWithdrawalSubmitted(bytes32 indexed authDigest, bytes32 indexed chainKey, uint64 challengeDeadline, uint64 finalStateVersion)',
   'event PartialWithdrawalFinalized(bytes32 indexed authDigest, bytes32 indexed chainKey)',

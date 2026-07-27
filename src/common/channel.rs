@@ -6,7 +6,7 @@ use thiserror::Error;
 // share ONE channel identifier type with identical keccak digest semantics.
 pub use crate::common::channel_id::ChannelId;
 use crate::{
-    common::balance_state::{BalanceState, tx_leaf_hash},
+    common::balance_state::{BalanceState, settled_tx_chain_push, tx_leaf_hash},
     constants::{
         INTER_CHANNEL_TX_DOMAIN_V2, L1_DEPOSIT_IMPORT_DOMAIN_V2, MAX_CHANNEL_MEMBERS,
         MAX_CHANNEL_TOKENS, MAX_COSIGNERS, PAY_DOMAIN_V2, TOKEN_FUNDS_DIGEST_DOMAIN,
@@ -813,6 +813,98 @@ impl InterChannelTx {
             receiver.amount.digest(),
         ))
     }
+
+    /// The CANONICAL token-bearing `tx_hash` recompute from this descriptor's OWN fields
+    /// (detail2 §C-6 + §N-6, TM-16): `token_index` is single-sourced from `self.token_index` —
+    /// the SAME field the registry resolutions and the E-2 IMU2 statement read (TM-16
+    /// obligation 2, no second wire copy). Every absorb-time gate requires
+    /// `self.tx_hash == self.compute_tx_hash()?` BEFORE chaining/accumulating it, so the
+    /// accumulator leaf a post-close claim later opens commits the SAME base token the
+    /// destination actually resolved and credited.
+    pub fn compute_tx_hash(&self) -> Result<Bytes32, ChannelError> {
+        Ok(inter_channel_tx_hash(
+            self.source_channel_id,
+            self.destination_channel_id,
+            self.token_index,
+            self.signed_small_block.message.tx_tree_root,
+            self.tx_leaf_hash()?,
+        ))
+    }
+
+    /// The token-FREE replay/consumed-ledger identity of this tx (TM-16 obligation 1,
+    /// MATERIAL): `keccak-fold(ids_without_token, fold(tx_tree_root, tx_leaf))` — byte-identical
+    /// to the pre-TM-16 v1 `tx_hash` formula. The A-side spent ledger and the B-side applied
+    /// ledger MUST key on THIS value, never on the token-bearing `tx_hash`: a malicious sender
+    /// can prove E-2 twice (token X and token Y) over the SAME deltas and present two IMI2-signed
+    /// descriptors whose token-bearing hashes differ, so a `tx_hash`-keyed consumed set would
+    /// double-credit one debit across two tokens. The identity strips the token limb, making the
+    /// two descriptors collide in the ledger (second one refused fail-closed). Dest-binding
+    /// (HIGH-1) is preserved: both channel ids stay in the fold.
+    pub fn replay_identity(&self) -> Result<Bytes32, ChannelError> {
+        Ok(inter_channel_tx_identity(
+            self.source_channel_id,
+            self.destination_channel_id,
+            self.signed_small_block.message.tx_tree_root,
+            self.tx_leaf_hash()?,
+        ))
+    }
+}
+
+/// `tx_hash` identifier for an inter-channel tx (the L1-settled identifier referenced by the fund
+/// import chain, the settled-tx-accumulator leaf, and the `PostCloseIncomingClaim` anchor).
+/// INTENTIONALLY SIMPLE: a domain-free keccak fold over
+/// `(source_channel_id, destination_channel_id, token_index, tx_tree_root, tx_leaf)`.
+///
+/// SECURITY (TM-16, multi-token §N-6): the ids word is
+/// `[0, 0, 0, 0, 0, token_index, destination_channel_id, source_channel_id]` — the descriptor's
+/// BASE `token_index` (NEVER a channel-local slot) occupies its OWN canonical u32 limb (limb 5,
+/// TM-15: no bit-packing). This is what makes the credited token PROVABLE post-close: the
+/// accumulator leaf (this hash) is the only artifact of an absorbed incoming tx that the closed
+/// channel's signed final state anchors, and before TM-16 none of its preimages carried the
+/// token. The post-close claim circuit recomputes this exact fold and exposes the ids token limb
+/// as the `token_index` public input. v1 leaves had ids limb 5 == 0, which reads as base token 0
+/// (ETH) — backward-consistent, and moot under the v3 reset. The IMTC push domain is retained:
+/// the preimage SHAPE is unchanged (two Bytes32 words per fold); a previously constant-zero limb
+/// of the ids word gained meaning (documented here and in detail2 §G-2/§N-6).
+///
+/// SECURITY (HIGH-1, dest binding): the destination channel id is folded in so the identifier is
+/// DEST-BOUND — the same (source, tx_tree_root, tx_leaf) tuple aimed at a different destination
+/// hashes differently. The post-close claim additionally pins ids limb 6 to the CLOSED channel's
+/// id, which excludes the source channel's own (outgoing) accumulator entries.
+pub fn inter_channel_tx_hash(
+    source_channel_id: ChannelId,
+    destination_channel_id: ChannelId,
+    token_index: u32,
+    tx_tree_root: Bytes32,
+    tx_leaf: Bytes32,
+) -> Bytes32 {
+    let mixed = settled_tx_chain_push(tx_tree_root, tx_leaf);
+    let mut w = [0u32; 8];
+    w[7] = source_channel_id.as_u64() as u32;
+    w[6] = destination_channel_id.as_u64() as u32;
+    // TM-16: the base token_index in its own canonical limb (see the doc comment above).
+    w[5] = token_index;
+    let ids = Bytes32::from_u32_slice(&w).expect("8 u32 limbs are a valid Bytes32");
+    settled_tx_chain_push(ids, mixed)
+}
+
+/// Token-FREE inter-channel tx identity for the replay/consumed ledgers (TM-16 obligation 1) —
+/// the same fold as [`inter_channel_tx_hash`] with the token limb at ZERO, i.e. byte-identical
+/// to the pre-TM-16 v1 `tx_hash`. See [`InterChannelTx::replay_identity`] for why ledgers MUST
+/// key on this and never on the token-bearing hash.
+pub fn inter_channel_tx_identity(
+    source_channel_id: ChannelId,
+    destination_channel_id: ChannelId,
+    tx_tree_root: Bytes32,
+    tx_leaf: Bytes32,
+) -> Bytes32 {
+    inter_channel_tx_hash(
+        source_channel_id,
+        destination_channel_id,
+        0,
+        tx_tree_root,
+        tx_leaf,
+    )
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -1197,8 +1289,15 @@ impl PostCloseIncomingClaim {
     /// `incoming_tx_hash` can never credit two token positions, and this unversioned per-tx
     /// nullifier cannot collapse a multi-token bundle (none is expressible). Covered by
     /// `receiver_bundle_apply_rejects_second_token_position_credit` in `state_update_verifier`.
-    /// (The token dimension of post-close claim PAYOUTS — which base token the Manager pays — is
-    /// Phase 3 work, per doc/tasks/multitoken-todo.md.)
+    ///
+    /// SECURITY (TM-16, Phase 5a — post-close token binding): `incoming_tx_hash` now commits the
+    /// descriptor's base `token_index` (ids limb 5 of [`inter_channel_tx_hash`]), so this
+    /// unversioned per-tx nullifier is TRANSITIVELY token-bound. A second post-close submission
+    /// for the same absorbed tx with a DIFFERENT token cannot exist: its token-bearing hash
+    /// differs, so it is a different accumulator leaf that was never absorbed (the identity-keyed
+    /// replay ledger, TM-16 obligation 1, guarantees at most one token variant per debit is ever
+    /// credited) — the claim fails the in-circuit accumulator inclusion, not merely the
+    /// nullifier check. Covered by `post_close_claim_circuit_rejects_tampered_token_limb`.
     pub fn derive_shared_native_nullifier(
         close_intent_digest: Bytes32,
         incoming_tx_hash: Bytes32,
@@ -2073,6 +2172,72 @@ mod tests {
         assert_ne!(
             aliased.signing_digest(),
             original_with_token5.signing_digest()
+        );
+    }
+
+    /// TM-16 (multitoken Phase 5a): the token-bearing `tx_hash` binds the base `token_index` in
+    /// ids limb 5 (own canonical limb), while the replay-ledger identity is token-FREE — two
+    /// descriptors over the SAME debit that differ only in token_index have DISTINCT anchored
+    /// hashes (so a post-close claim proves the absorbed token) but the SAME ledger identity (so
+    /// the second one is refused at the gate; the cross-token double-credit is structurally a
+    /// replay). Also pins identity == hash-with-token-0 == the pre-TM-16 v1 formula (backward-
+    /// consistent reading of v1 leaves, TM-16 note 6).
+    #[test]
+    fn inter_channel_tx_hash_binds_token_and_replay_identity_strips_it() {
+        let state = sample_state();
+        let mut tx = sample_inter_channel_tx(&state);
+        tx.token_index = 55;
+        let mut other_token = tx.clone();
+        other_token.token_index = 7;
+
+        // Token limb is hash-binding (the post-close claim's anchored token).
+        let hash_55 = tx.compute_tx_hash().unwrap();
+        let hash_7 = other_token.compute_tx_hash().unwrap();
+        assert_ne!(hash_55, hash_7, "token_index must be tx_hash-binding");
+
+        // The replay identity is token-free: both variants collide in the consumed ledger
+        // (TM-16 obligation 1 — the double-credit across tokens is refused as a replay).
+        assert_eq!(
+            tx.replay_identity().unwrap(),
+            other_token.replay_identity().unwrap(),
+            "replay identity must be identical across token variants of the same debit"
+        );
+
+        // Identity == the token-0 hash == the v1 formula (limb 5 was constant zero in v1).
+        let mut token0 = tx.clone();
+        token0.token_index = 0;
+        assert_eq!(
+            tx.replay_identity().unwrap(),
+            token0.compute_tx_hash().unwrap()
+        );
+
+        // Own-limb placement: the token limb (ids[5]) must not alias the destination id limb
+        // (ids[6]) — a token value moved into the dest limb hashes differently.
+        let leaf = tx.tx_leaf_hash().unwrap();
+        let root = tx.signed_small_block.message.tx_tree_root;
+        let confused = inter_channel_tx_hash(
+            tx.source_channel_id,
+            ChannelId::new(55).unwrap(),
+            0,
+            root,
+            leaf,
+        );
+        assert_ne!(
+            inter_channel_tx_hash(
+                tx.source_channel_id,
+                tx.destination_channel_id,
+                55,
+                root,
+                leaf
+            ),
+            confused,
+            "token limb must not alias the destination-id limb"
+        );
+
+        // Dest binding (HIGH-1) preserved in the identity.
+        assert_ne!(
+            inter_channel_tx_identity(tx.source_channel_id, tx.destination_channel_id, root, leaf),
+            inter_channel_tx_identity(tx.source_channel_id, ChannelId::new(9).unwrap(), root, leaf),
         );
     }
 

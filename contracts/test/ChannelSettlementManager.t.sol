@@ -333,7 +333,8 @@ contract ChannelSettlementManagerTest is Test {
             snn,
             claim.amount,
             manager.finalizedBalanceStateH1(),
-            manager.finalizedSettledTxAccumulatorRoot()
+            manager.finalizedSettledTxAccumulatorRoot(),
+            claim.tokenIndex
         );
         return CloseTestLib.proofWithLimbs(limbs);
     }
@@ -549,10 +550,11 @@ contract ChannelSettlementManagerTest is Test {
                 keccak256("shared_nullifier"),
                 9,
                 keccak256("final_balance_state_h1"),
-                keccak256("settled_tx_accumulator_root")
+                keccak256("settled_tx_accumulator_root"),
+                0
             ).length,
-            56,
-            "post-close-claim PI is 56 raw limbs (Stage 3)"
+            57,
+            "post-close-claim PI is 57 raw limbs (Stage 3 + TM-16 tokenIndex)"
         );
     }
 
@@ -1200,7 +1202,8 @@ contract ChannelSettlementManagerTest is Test {
                 incomingTxHash: keccak256("incoming_tx"),
                 receiverPkG: USER_B,
                 recipient: bob,
-                amount: 5
+                amount: 5,
+                tokenIndex: 0
             });
         manager.submitPostCloseClaim(postCloseClaim, _postCloseClaimProof(postCloseClaim));
 
@@ -1614,7 +1617,8 @@ contract ChannelSettlementManagerTest is Test {
             incomingTxHash: keccak256("itx"),
             receiverPkG: USER_B,
             recipient: bob,
-            amount: 10 // 70 + 10 = 80 > 75 -> must revert
+            amount: 10, // 70 + 10 = 80 > 75 -> must revert
+            tokenIndex: 0
         });
         // Precompute the proof BEFORE expectRevert: vm.expectRevert applies to the next external
         // call, which would otherwise be the view calls that assemble the proof.
@@ -1967,16 +1971,16 @@ contract ChannelSettlementManagerTest is Test {
         assertEq(v[49], 0xdeadbeef);       // token_index (resolved base token)
     }
 
-    /// GOLDEN VECTOR mirror for post-close-claim (56 limbs; Stage 3: + finalBalanceStateH1 +
-    /// finalSettledTxAccumulatorRoot appended).
+    /// GOLDEN VECTOR mirror for post-close-claim (57 limbs; Stage 3: + finalBalanceStateH1 +
+    /// finalSettledTxAccumulatorRoot appended; TM-16: + tokenIndex at limb 56).
     function test_expectedPostCloseClaimLimbs_goldenVector() external view {
         address rcp = address(uint160((uint256(0x4000) << 128) | (uint256(0x4001) << 96)
             | (uint256(0x4002) << 64) | (uint256(0x4003) << 32) | uint256(0x4004)));
         uint256[] memory v = verifier.expectedPostCloseClaimLimbs(
             hex"0a0b0c0d", _b32(0x1000), _b32(0x2000), _b32(0x3000), rcp, _b32(0x5000),
-            0x0000001100000022, _b32(0x7000), _b32(0x8000)
+            0x0000001100000022, _b32(0x7000), _b32(0x8000), 0xdeadbeef
         );
-        assertEq(v.length, 56);
+        assertEq(v.length, 57);
         _assertB32(v, 0, 0x1000);          // close_intent_digest
         assertEq(v[8], 0x0a0b0c0d);        // receiver_channel_id
         _assertB32(v, 9, 0x2000);          // incoming_tx_hash
@@ -1986,6 +1990,7 @@ contract ChannelSettlementManagerTest is Test {
         assertEq(v[38], 0x11); assertEq(v[39], 0x22); // amount
         _assertB32(v, 40, 0x7000);         // final_balance_state_h1 (Stage 3)
         _assertB32(v, 48, 0x8000);         // final_settled_tx_accumulator_root (Stage 3)
+        assertEq(v[56], 0xdeadbeef);       // token_index (TM-16, anchored base token)
     }
 
     /// GOLDEN VECTOR mirror for cancel-close (27 limbs). The Rust side asserts the SAME constant in
@@ -2130,11 +2135,11 @@ contract ChannelSettlementManagerTest is Test {
         ChannelSettlementVerifier fresh = new ChannelSettlementVerifier();
         _initCloseVk(fresh);
         MleVerifier.MleProof memory proof;
-        proof.publicInputs = new uint256[](56);
+        proof.publicInputs = new uint256[](57);
         vm.expectRevert(ChannelSettlementVerifier.PostCloseClaimVkNotSet.selector);
         fresh.verifyPostCloseClaim(
             CHANNEL_ID, bytes32(0), bytes32(0), USER_B, bob, bytes32(0), 0,
-            bytes32(0), bytes32(0), proof
+            bytes32(0), bytes32(0), 0, proof
         );
     }
 
@@ -2165,7 +2170,8 @@ contract ChannelSettlementManagerTest is Test {
             incomingTxHash: keccak256("itx"),
             receiverPkG: USER_B,
             recipient: bob,
-            amount: 5
+            amount: 5,
+            tokenIndex: 0
         });
         manager.submitPostCloseClaim(pc, _postCloseClaimProof(pc));
         assertEq(manager.withdrawalCredits(0, bob), 5);
@@ -2186,14 +2192,15 @@ contract ChannelSettlementManagerTest is Test {
             incomingTxHash: keccak256("itx"),
             receiverPkG: USER_B,
             recipient: bob,
-            amount: 5
+            amount: 5,
+            tokenIndex: 0
         });
         // Build a proof whose shared_native_nullifier limb is a FORGED value (not the IMCK derive).
         // The Stage-3 H1 + accumulator-root limbs are the finalized ones (so the ONLY mismatch is
         // the nullifier limb the manager strict-binds).
         uint256[] memory limbs = verifier.expectedPostCloseClaimLimbs(
             CHANNEL_ID, d, pc.incomingTxHash, USER_B, bob, keccak256("forged"), pc.amount,
-            manager.finalizedBalanceStateH1(), manager.finalizedSettledTxAccumulatorRoot()
+            manager.finalizedBalanceStateH1(), manager.finalizedSettledTxAccumulatorRoot(), 0
         );
         MleVerifier.MleProof memory proof = CloseTestLib.proofWithLimbs(limbs);
         vm.expectRevert(bytes("claim limb mismatch"));

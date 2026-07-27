@@ -80,9 +80,11 @@ Spec references: `doc/architecture-audit/design2.md` (design2), `doc/architectur
 Before any signature the co-signer re-verifies, fail-closed: `verify_send_transition`,
 `verify_refresh_transition`, `verify_inter_channel_send_transition`,
 `verify_inter_channel_credit_transition`, `verify_l1_deposit_import_transition`,
-`verify_all_signatures`, plus the replay ledgers `applied_tx_hashes` (B-side double-credit) and
-`spent_tx_hashes` (A-side double-debit). The node loop wraps these with policy (rate limits,
-quotas, alerting) but never weakens them.
+`verify_all_signatures`, plus the replay ledgers `applied_tx_identities` (B-side double-credit)
+and `spent_tx_identities` (A-side double-debit) — keyed on the token-FREE
+`InterChannelTx::replay_identity()` (TM-16 obligation 1: a token-relabel of an already-credited
+debit is refused as a replay). The node loop wraps these with policy (rate limits, quotas,
+alerting) but never weakens them.
 
 ---
 

@@ -513,7 +513,15 @@ fn build_flow() -> FlowFixture {
         token_index: 0,
         source_pk_g: user(a_id, 10),
         seal: bytes32_word(501),
-        tx_hash: bytes32_word(502),
+        // TM-16: the REAL token-bearing tx_hash (the witnesses now refuse a descriptor whose
+        // carried hash is not the recompute over its own fields).
+        tx_hash: crate::common::channel::inter_channel_tx_hash(
+            a_id,
+            b_id,
+            0,
+            tx_tree_root,
+            tx_leaf,
+        ),
         intmax_transfer_commitment: bytes32_word(503),
         recipient_memo: vec![1, 2, 3],
         receiver_deltas: vec![ReceiverBalanceDelta {
@@ -1110,6 +1118,70 @@ fn receiver_bundle_apply_rejects_second_token_position_credit() {
     assert!(matches!(
         witness.verify(&VERIFIER),
         Err(ChannelStateUpdateError::InvalidCiphertextTransition(_))
+    ));
+}
+
+/// TM-16 (obligations 1/2/5, multitoken Phase 5a): a token-RELABELED descriptor — the carried
+/// `tx_hash` was anchored under token 0 but the descriptor's `token_index` says a DIFFERENT
+/// (registered!) token 55 — is rejected by the source send witness AND both destination
+/// witnesses via the token-bearing tx_hash recompute. Registry resolution alone would ACCEPT it
+/// (55 is registered), so this isolates the TM-16 binding: the absorbed accumulator leaf can
+/// never commit a different token than the one the gates resolved/credited. This is also the
+/// gate leg of the cross-token double-credit defense: a SECOND, fully-consistent token-55
+/// variant of the same debit (token-55 anchored hash) shares the token-free
+/// `InterChannelTx::replay_identity` with the first credit, so the CLI/cosigner consumed ledger
+/// (keyed on that identity) refuses it as a replay.
+#[test]
+#[cfg_attr(debug_assertions, ignore = "run with --release")]
+fn c2c_rejects_token_relabeled_descriptor_on_all_gates() {
+    // Source side: register 55 on the SOURCE channel so resolution succeeds, then relabel.
+    let mut witness = flow().send.clone();
+    for state in [&mut witness.prev_state, &mut witness.next_state] {
+        state.balance_state.token_registry[1] = 55;
+        state.balance_state.token_count = 2;
+    }
+    witness.prev_state = witness.prev_state.clone().with_computed_digest();
+    witness.next_state.prev_digest = witness.prev_state.digest;
+    witness.next_state = witness.next_state.clone().with_computed_digest();
+    // Keep the §C-7 structural-atomicity binding intact (state_commitment_root == next h1), so
+    // the failure isolates to the TM-16 tx_hash recompute.
+    witness
+        .inter_channel_tx
+        .signed_small_block
+        .message
+        .state_commitment_root = witness.next_state.balance_state.h1();
+    witness.inter_channel_tx.token_index = 55;
+    assert!(matches!(
+        witness.verify(&StructuralTransportVerifier, &VERIFIER),
+        Err(ChannelStateUpdateError::InvalidSettledTxChain(_))
+    ));
+    // Destination fund import.
+    let mut witness = flow().import.clone();
+    for state in [&mut witness.prev_state, &mut witness.next_state] {
+        state.balance_state.token_registry[1] = 55;
+        state.balance_state.token_count = 2;
+    }
+    witness.prev_state = witness.prev_state.clone().with_computed_digest();
+    witness.next_state.prev_digest = witness.prev_state.digest;
+    witness.next_state = witness.next_state.clone().with_computed_digest();
+    witness.inter_channel_tx.token_index = 55;
+    assert!(matches!(
+        witness.verify(&StructuralTransportVerifier),
+        Err(ChannelStateUpdateError::InvalidSettledTxChain(_))
+    ));
+    // Destination bundle apply.
+    let mut witness = flow().bundle.clone();
+    for state in [&mut witness.prev_state, &mut witness.next_state] {
+        state.balance_state.token_registry[1] = 55;
+        state.balance_state.token_count = 2;
+    }
+    witness.prev_state = witness.prev_state.clone().with_computed_digest();
+    witness.next_state.prev_digest = witness.prev_state.digest;
+    witness.next_state = witness.next_state.clone().with_computed_digest();
+    witness.inter_channel_tx.token_index = 55;
+    assert!(matches!(
+        witness.verify(&VERIFIER),
+        Err(ChannelStateUpdateError::InvalidSettledTxChain(_))
     ));
 }
 

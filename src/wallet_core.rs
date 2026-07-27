@@ -40,6 +40,7 @@ use crate::{
             ChannelFund, ChannelProofEnvelope, ChannelRecord, ChannelState, ChannelStatus,
             ChannelTx, InterChannelTx, MemberSignature, MerkleInclusionProof, ProofBackend,
             ReceiverBalanceDelta, SignedSmallBlock, SmallBlockRootMessage, TransitionProofRole,
+            inter_channel_tx_hash,
         },
         channel_id::ChannelId,
         deposit::Deposit,
@@ -2097,10 +2098,14 @@ pub fn build_inter_channel_send_token(
 
     // Stage 3: the inter-channel `tx_hash` — the accumulator leaf (uniformly) AND the L1-settled
     // identifier. Computed BEFORE the post-debit state so its accumulator root already reflects the
-    // insertion (and so h1() below folds the advanced root).
+    // insertion (and so h1() below folds the advanced root). TM-16: the fold carries the SIGNED
+    // base `token_index` in ids limb 5 (canonical `common::channel::inter_channel_tx_hash`), so
+    // the anchored accumulator leaf commits the token this send moves — provable by a post-close
+    // claim on the destination side.
     let tx_hash = inter_channel_tx_hash(
         record.channel_id,
         destination_channel_id,
+        token_index,
         tx_tree_root,
         tx_leaf,
     );
@@ -2768,6 +2773,26 @@ pub fn verify_inter_channel_credit_transition(
     if recomputed_leaf != tx_leaf_from_tx {
         return bail("invariant 5: B-recomputed tx leaf != inter_channel_tx leaf");
     }
+    // (5b) SECURITY (TM-16 obligation 1/2): B recomputes the FULL token-bearing `tx_hash` from
+    // the descriptor's OWN fields — ids(source, dest, `inter_channel_tx.token_index`) over the
+    // signed tx_tree_root + the just-recomputed tx_leaf — and refuses a descriptor whose carried
+    // `tx_hash` differs, BEFORE anything absorbs it into the chain/accumulator. The token is
+    // single-sourced from `inter_channel_tx.token_index` (the SAME field the registry resolution
+    // below and the E-2 statement read — no second wire copy), so a source builder anchoring
+    // token X while the descriptor resolves/credits token Y is rejected at absorb time, and the
+    // accumulator leaf a post-close claim later opens commits the token B actually credited.
+    let recomputed_tx_hash = inter_channel_tx
+        .compute_tx_hash()
+        .map_err(|e| WalletError(format!("invariant 5b: compute_tx_hash: {e}")))?;
+    if recomputed_tx_hash != inter_channel_tx.tx_hash {
+        return bail(
+            "invariant 5b: descriptor tx_hash != recomputed token-bearing tx_hash (TM-16)",
+        );
+    }
+    // The descriptor's top-level convenience copy must agree with the embedded (IMI2-signed) tx.
+    if descriptor.tx_hash != inter_channel_tx.tx_hash {
+        return bail("invariant 5b: descriptor.tx_hash != embedded inter_channel_tx.tx_hash");
+    }
 
     // (2 cont.) Re-verify the REAL E-2 over the descriptor's ciphertexts + amount. SECURITY: the
     // sender key MUST be a channel-A member's key — confirm `source_pk_g` is in the trusted A
@@ -3188,33 +3213,10 @@ fn advance_nullifier(prev: Bytes32, tag: Bytes32) -> Bytes32 {
     settled_tx_chain_push(prev, tag)
 }
 
-/// `tx_hash` identifier for the inter-channel tx (the L1-settled identifier referenced by the fund
-/// import chain, and the ledger key for the replay/spent ledgers on BOTH channels). INTENTIONALLY
-/// SIMPLE: a domain-free fold over (source_channel_id, destination_channel_id, tx_tree_root,
-/// tx_leaf); it only needs to be a deterministic, collision-resistant identifier bound to this tx.
-///
-/// SECURITY (HIGH-1, dest binding): the destination channel id is folded in so the ledger key is
-/// DEST-BOUND. Without it, the same (source, tx_tree_root, tx_leaf) tuple would hash identically
-/// regardless of which channel B it is credited into, so a tx already credited into one destination
-/// could not be distinguished from a (distinct) transfer aimed at another destination in a shared
-/// ledger. Binding the dest id makes the ledger key unambiguous per (A→B) pair — defense in depth
-/// on top of the per-channel applied/spent ledgers.
-fn inter_channel_tx_hash(
-    source_channel_id: ChannelId,
-    destination_channel_id: ChannelId,
-    tx_tree_root: Bytes32,
-    tx_leaf: Bytes32,
-) -> Bytes32 {
-    let mixed = settled_tx_chain_push(tx_tree_root, tx_leaf);
-    let ids = Bytes32::from_u32_slice(&{
-        let mut w = [0u32; BYTES32_LEN];
-        w[BYTES32_LEN - 1] = source_channel_id.as_u64() as u32;
-        w[BYTES32_LEN - 2] = destination_channel_id.as_u64() as u32;
-        w
-    })
-    .unwrap();
-    settled_tx_chain_push(ids, mixed)
-}
+// NOTE (TM-16): the former private `inter_channel_tx_hash` moved to `common::channel` as the
+// canonical single source (it gained the base `token_index` ids limb, and the gates/claim circuit
+// must recompute the SAME fold). The token-free replay-ledger identity lives beside it
+// (`inter_channel_tx_identity` / `InterChannelTx::replay_identity`).
 
 /// Sign `state` with `keys` IFF `keys` is a co-signing member of `record` (slot < member_count).
 /// The building member is one of the N-of-N; co-signers add the rest after re-verifying. A delegate
@@ -5632,8 +5634,16 @@ mod delegate_send_tests {
             receiver_pk_g,
             delta_ct.digest(),
         );
-        let tx_hash =
-            inter_channel_tx_hash(source_channel_id, closed_channel_id, tx_tree_root, tx_leaf);
+        // TM-16 / Phase 5a: a NON-GENESIS token (base 55, destination registry slot 1) — the
+        // anchored tx_hash carries the token in ids limb 5 and the claim PI must expose it.
+        let claim_token_index = 55u32;
+        let tx_hash = inter_channel_tx_hash(
+            source_channel_id,
+            closed_channel_id,
+            claim_token_index,
+            tx_tree_root,
+            tx_leaf,
+        );
 
         let mut accumulator = IncrementalMerkleTree::<Bytes32>::new(SETTLED_TX_ACCUMULATOR_HEIGHT);
         accumulator.push(tx_hash);
@@ -5666,7 +5676,7 @@ mod delegate_send_tests {
             sender_delta_ct: sender_delta_ct.clone(),
             source_channel_id,
             destination_channel_id: closed_channel_id,
-            token_index: 0,
+            token_index: claim_token_index,
             source_pk_g,
             seal: Bytes32::default(),
             tx_hash,
@@ -5702,8 +5712,14 @@ mod delegate_send_tests {
             settled_tx_accumulator_root: accumulator_root,
             state_version: 9,
             pending_adds: BalanceState::pad_pending_adds_token0(&[0, 0]),
-            token_registry: BalanceState::single_token_registry(0),
-            token_count: 1,
+            // TM-16: two-token destination registry — the incoming tx's base token (55) sits at
+            // local slot 1 (non-genesis).
+            token_registry: {
+                let mut registry = BalanceState::single_token_registry(0);
+                registry[1] = claim_token_index;
+                registry
+            },
+            token_count: 2,
         };
 
         let recipient = Address::from_u32_slice(&[1, 2, 3, 4, 5]).unwrap();
@@ -5723,6 +5739,8 @@ mod delegate_send_tests {
                 RegevSecurityLevel::Test,
             )
             .expect("post-close claim witness");
+        // TM-16: the builder exposes the DESCRIPTOR's base token (no caller choice).
+        assert_eq!(witness.public_inputs.token_index, claim_token_index);
         let proof = prover.prove(&witness).expect("post-close claim proof");
         prover
             .vd()

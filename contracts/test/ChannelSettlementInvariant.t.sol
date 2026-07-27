@@ -98,14 +98,15 @@ contract SettlementHandler {
         bytes32 snn = keccak256(abi.encodePacked(bytes4(uint32(0x494d434b)), digest, incomingTx, members[i]));
         uint256[] memory limbs = verifier.expectedPostCloseClaimLimbs(
             channelId, digest, incomingTx, members[i], recipients[i], snn, amt,
-            manager.finalizedBalanceStateH1(), manager.finalizedSettledTxAccumulatorRoot()
+            manager.finalizedBalanceStateH1(), manager.finalizedSettledTxAccumulatorRoot(), 0
         );
         ChannelSettlementManager.PostCloseClaim memory c = ChannelSettlementManager.PostCloseClaim({
             closeIntentDigest: digest,
             incomingTxHash: incomingTx,
             receiverPkG: members[i],
             recipient: recipients[i],
-            amount: amt
+            amount: amt,
+            tokenIndex: 0
         });
         try manager.submitPostCloseClaim(c, CloseTestLib.proofWithLimbs(limbs)) {} catch {}
     }
