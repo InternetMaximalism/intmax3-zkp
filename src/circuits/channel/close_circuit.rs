@@ -1290,6 +1290,112 @@ pub mod test_fixture {
             agg_proof,
         }
     }
+
+    /// Multitoken Phase 5b: build a full close witness over a TWO-TOKEN final state for
+    /// `channel_id`, signed by the CALLER-SUPPLIED Goldilocks keys (slot order).
+    ///
+    /// Used by `generate_close_fixture` with
+    /// `ChannelMemberKeys::deterministic(channel_id).secret_keys` so the proof's
+    /// `member_set_commitment` equals the member set `generate_withdrawal_fixture` registers for
+    /// the same channel (co-generation — the gate `CloseLifecycleE2E` asserts). The state is the
+    /// `final_state_n` shape with a multi-token header: `token_registry = [0 (ETH), registry1]`,
+    /// `token_count = 2`, and `channel_fund.amounts = [77, amount1, 0..]` — BOTH the genesis burn
+    /// leg (`amounts[0]`, connected to the `channel_fund_amount` PI) and a nonzero non-genesis
+    /// per-token settlement leg (`amounts[1]`, settled L1-side against the `token_funds_digest`
+    /// PI accrual) are exercised.
+    pub fn build_close_full_witness_two_token(
+        channel_id: u32,
+        sks: &[crate::poseidon_sig::GoldilocksSecretKey],
+        registry1: u32,
+        amount1: U256,
+    ) -> ChannelCloseFullWitness<F, C, D> {
+        let fx = fixture();
+        let member_count = sks.len();
+        let id = ChannelId::new(channel_id as u64).unwrap();
+        let enc: Vec<_> = (0..member_count as u32)
+            .map(|i| ciphertext(1 + i))
+            .collect();
+        let mut token_registry = BalanceState::single_token_registry(0);
+        token_registry[1] = registry1;
+        let mut amounts = ChannelFund::single_token_amounts(U256::from(77u32));
+        amounts[1] = amount1;
+        let state = ChannelState {
+            channel_id: id,
+            epoch: 3,
+            small_block_number: 7,
+            close_freeze_nonce: 0,
+            channel_fund: ChannelFund {
+                channel_id: id,
+                amounts,
+                intmax_state_root: Bytes32::from_u32_slice(&[1, 2, 3, 4, 0, 0, 0, 0]).unwrap(),
+            },
+            balance_state: BalanceState {
+                channel_id: id,
+                member_count: member_count as u8,
+                delegate_count: 0,
+                enc_balances: BalanceState::pad_enc_balances_token0(&enc),
+                regev_pk_digests: BalanceState::pad_regev_pk_digests(&[]),
+                recipients: BalanceState::pad_recipients(
+                    &(0..member_count)
+                        .map(|i| {
+                            crate::ethereum_types::address::Address::from_u32_slice(
+                                &[0x7E57_0000u32.wrapping_add(i as u32); 5],
+                            )
+                            .unwrap()
+                        })
+                        .collect::<Vec<_>>(),
+                ),
+                settled_tx_chain: Bytes32::default(),
+                settled_tx_accumulator_root: Bytes32::default(),
+                state_version: 9,
+                pending_adds: BalanceState::pad_pending_adds_token0(&vec![0u32; member_count]),
+                token_registry,
+                token_count: 2,
+            },
+            h2_tag: Bytes32::default(),
+            shared_native_nullifier_root: Bytes32::from_u32_slice(&[3, 0, 0, 0, 0, 0, 0, 0])
+                .unwrap(),
+            unallocated_confirmed_incoming: U256::zero(),
+            prev_digest: Bytes32::from_u32_slice(&[4, 0, 0, 0, 0, 0, 0, 0]).unwrap(),
+            digest: Bytes32::default(),
+            member_signatures: vec![MemberSignature {
+                member_slot: 0,
+                pk_g: Bytes32::from_u32_slice(&[10, 11, 12, 13, 14, 15, 16, 17]).unwrap(),
+                signature: vec![1],
+            }],
+        }
+        .with_computed_digest();
+        let digest = state.digest;
+
+        let close_tx = CloseWithdrawal {
+            channel_id: state.channel_id,
+            final_channel_state_digest: state.digest,
+            final_balance_state_h1: state.balance_state.h1(),
+            intmax_state_root: state.channel_fund.intmax_state_root,
+            burn_tx_hash: Bytes32::from_u32_slice(&[9, 8, 7, 6, 0, 0, 0, 0]).unwrap(),
+            burn_amount: state.channel_fund.amounts[0],
+            zkp: vec![1, 2, 3],
+        };
+        let close_intent = CloseIntent::new(5, &state, &close_tx, 123).unwrap();
+        let close = ChannelCloseWitness {
+            final_channel_state: state,
+            close_tx,
+            close_intent,
+        };
+
+        let mut rng = rand::thread_rng();
+        let final_balance_proof = fx
+            .balance_processor
+            .prove_initial(id, Salt::rand(&mut rng))
+            .expect("initial balance proof");
+        let (member_auth, agg_proof) = member_auth_for_sks(digest, sks);
+        ChannelCloseFullWitness {
+            close,
+            final_balance_proof,
+            member_auth,
+            agg_proof,
+        }
+    }
 }
 
 #[cfg(test)]

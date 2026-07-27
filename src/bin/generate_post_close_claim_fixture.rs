@@ -49,6 +49,9 @@ struct PostCloseClaimDescriptor {
     recipient: String,
     shared_native_nullifier: String,
     amount: u64,
+    /// TM-16 (multi-token §N-6): the PROVED base token_index (PI limb 56) — the asset the
+    /// Manager credits. Anchored to ids limb 5 of the in-circuit `incoming_tx_hash` recompute.
+    token_index: u32,
 }
 
 fn main() -> anyhow::Result<()> {
@@ -113,6 +116,7 @@ fn main() -> anyhow::Result<()> {
         recipient: pis.recipient.to_string(),
         shared_native_nullifier: pis.shared_native_nullifier.to_string(),
         amount: pis.amount,
+        token_index: pis.token_index,
     };
     fs::write(
         out_dir.join("post_close_claim.json"),

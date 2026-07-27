@@ -567,17 +567,155 @@ analysis became **TM-16** (threat model) and the approved fix is the IMTC ids-li
 - Fixture note: the PI length change invalidates the baked post-close fixtures — EXPECTED,
   regenerated in Phase 5b with everything else. detail2 §N-6 + §G-2 updated (TM-16).
 
-- [ ] Regenerate ALL baked fixtures + re-pin VKs (every preimage/PI change invalidates them —
+- [x] Regenerate ALL baked fixtures + re-pin VKs (every preimage/PI change invalidates them —
       known gotcha from the delegate-account work; batch with the pending D12–D14 regeneration).
-- [ ] E2E: 2-token channel lifecycle (init ETH+ERC20 → sends both tokens incl. mixed batch →
-      TokenRegister mid-life → C2C cross-registry → import ERC-20 → close → per-token claims →
-      L1 payouts in both assets); anvil first.
+      *(Phase 5b, 2026-07-27 — see the status block below)*
+- [x] E2E: 2-token channel lifecycle on anvil — `tests/two_token_cli_e2e.rs` (see the Phase 5b
+      status block for the exact coverage and the disclosed CLI-witness-store deviations).
 - [ ] Full-suite attacker-subagent pass over the integrated feature before deploy.
 - [ ] v3 testnet reset + redeploy (regen-and-redeploy-runbook.md); update live demo.
+
+### Phase 5b status (2026-07-27) — fixture/VK regeneration + E2E integration
+
+- [x] **Full fixture regeneration** (one batch, consistent circuit set — MLE/WHIR proofs are
+      ZK-blinded/non-deterministic, so every fixture was validated SEMANTICALLY by its consuming
+      test, never by byte diff):
+      `generate_e2e_fixture` (mle/vpi/block fixtures → MleE2E + MleFinalizeE2E + IntmaxRollup
+      suites), `generate_withdrawal_fixture` plain set (WithdrawNativeE2E), `close_` set at the
+      NEW manager CREATE2 address `0x1B5d05406197D5db3c43eBA9064188b968B03e62`
+      (CloseLifecycleE2E), `generate_close_fixture` (co-generated TWO-token close intent — see
+      below), claim/post-close/cancel fixture pairs (VK sources for DeployCloseCli + RunClose),
+      `generate_c2c_fixture` (C2CFullE2E/C2CBlockHash/ReclaimStake), `generate_wasm_fixtures`
+      (tests/fixtures/*.bin). All VK pins are read from the fixture JSONs at runtime
+      (FixtureLib/DeployCloseCli/CloseLifecycleE2E `_initRealCloseVk`) — regeneration IS the
+      re-pin; repo-wide check found NO hardcoded real VK constants (the CloseTestLib dummy VKs
+      drive a MockMleVerifier and are intentionally fake). `e2e_groth16.json` is managed
+      separately (legacy, no active generator) and untouched; the tracked `sepolia_*` staged
+      copies are runtime-overwritten by the CLI and left as-is.
+- [x] **CloseLifecycleE2E close section RE-ENABLED and green end-to-end for the first time**
+      (it had ALWAYS self-skipped on the member-set mismatch): `generate_close_fixture` now
+      derives its signing keys from `ChannelMemberKeys::deterministic(1)` — the same derivation
+      `generate_withdrawal_fixture` registers — via the new
+      `test_fixture::build_close_full_witness_two_token(channel, sks, registry1, amount1)`
+      (channel 1, registry `[ETH, 7]`, amounts `[77, 55]`). The descriptor (fixture bin AND the
+      CLI `close`) gains `channel_fund_amounts[10]`/`token_registry[10]`/`token_count`;
+      CloseLifecycleE2E + RunClose parse them verbatim (genesis-token embedding retired); the
+      claim step parses `.token_slot`/`.token_index`; all stale-fixture self-skips converted to
+      HARD assertions; new per-token accrual asserts (`finalizedChannelFundAmount(0)==77`,
+      `(7)==55`) after finalizeClose.
+- [x] **CREATE2 gotcha discovered + fixed (runbook updated):** the manager address printer gave a
+      DIFFERENT address than the lifecycle test's own `_deployAll` with IDENTICAL fixture inputs —
+      `type(MleVerifier).creationCode` embeds linked external-library addresses and Foundry links
+      PER TEST CONTRACT. The printer (`test_printCloseManagerAddress`) moved INTO
+      `CloseLifecycleE2ETest`; `CloseManagerAddr.t.sol` is now a pointer stub. If the lifecycle
+      test file is edited after baking, re-run the printer (address can shift with the bytecode).
+- [x] **ERC-20 withdrawal lane (new, for the two-token E2E):**
+      `ChannelWithdrawalParams.erc20_lane: Option<Erc20LaneParams>` — a second deposit (token t,
+      own recipient salt) in the SAME deposit block + a second transfer in the SAME withdrawal tx
+      + its OWN single-leaf withdrawal chain/wrapped MLE (chains are single-asset-class on L1),
+      verified by the SAME withdrawal VK; `None` keeps byte-parity. CLI `withdraw` gains
+      `WD_ERC20_TOKEN/WD_ERC20_AMOUNT/WD_ERC20_TOKEN_ADDR` (approve + ERC-20 `deposit()`
+      balanceOf-delta branch on-chain, `RunClose.withdrawErc20Step` → `withdrawERC20`,
+      `pullChannelTokenFunds`); CLI `claim` pulls via `claimWithdrawalCredit(uint32)` for
+      non-genesis tokens. `close_lifecycle_cli_e2e` accessors fixed to the per-token getters
+      (they still read the retired scalar getters — latent breakage since Phase 3).
+- [x] **Two-token anvil E2E** — `tests/two_token_cli_e2e.rs` (ignored/heavy, CLI-driven; GREEN,
+      946s): DeployCloseCli + SimpleERC20 + set-once `registerToken` → init (ETH genesis) → CLI
+      `register-token` (mid-life cosigned TokenRegister, token_count 2) → ETH send → REAL
+      two-token close proof built and submitted, REFUSED by the Manager's strict 103-limb bind at
+      the delegate-count limb (the pre-existing B-2 fence, pinned as an EXPECTED negative — see
+      the E2E findings below) → withdraw BOTH lanes with REAL value (real ETH deposit + real
+      balanceOf-delta ERC-20 deposit in ONE deposit block, finalize, real withdrawNative +
+      the NEW real-proof withdrawERC20 chain — the FIRST real-MLE ERC-20 withdrawal —
+      pullChannelFunds + pullChannelTokenFunds: 0.09 ETH + 40 real tokens land in the manager)
+      → per-token conservation with no finalized close (both `claimWithdrawalCredit` entry
+      points refuse, `totalCreditedOut[t] == 0`, both asset pools intact, no cross-token
+      movement).
+      **E2E FINDINGS (stop-and-report, both PRE-EXISTING fences working fail-closed as designed;
+      neither weakened nor bypassed):**
+      1. *P1 re-attestation fence:* a close AFTER `cosign-l1-deposit-import` is refused by the
+         close circuit's balance binding (`BalanceBindingMismatch`) — the import pushes
+         `settled_tx_chain`, and the CLI cannot yet regenerate a base-layer attestation covering
+         the imported deposit. So a LIVE close with nonzero amounts[1] (and a nonzero live
+         per-token claim payout) awaits that follow-up; the on-chain two-token close accrual is
+         validated by CloseLifecycleE2E (real proof, amounts [77, 55]) and per-token claims by
+         MultiTokenSettlement.t.sol (:288, incl. nonzero-token submitPostCloseClaim) + the
+         native claim-proving suites.
+      2. *B-2 delegate-close fence (Option B R3):* `init` always joins a browser delegate
+         (close PI delegate_count = 1) while Option B's cosigners-only registration deploys the
+         Manager with activeDelegateCount = 0 — limb 94 strict-bind refuses EVERY live CLI close
+         since Option B (also affects `close_lifecycle_cli_e2e`'s close section, which predates
+         that change). Offline limb-by-limb reproduction confirmed all OTHER 102 limbs (incl.
+         the IMCI and TFD recomputes over the two-token vectors) match exactly.
+      **DEVIATIONS (disclosed, not silently skipped):** in-channel token-1 SENDS, the TM-14
+      mixed-token batch, the C2C ERC-20 leg and the TM-16 post-close claim are NOT driven by this
+      anvil E2E — the CLI's deterministic balance-witness store is genesis-token-scoped (a
+      token-1 E-1 witness exists only after a refresh of that position; the CLI has no
+      refresh-payload builder yet). Those paths are proof-covered by the native suites
+      (`wallet_core` mixed_token_batch_* / two_token_close_intent_builds_per_token_claims /
+      inter-channel token tests; post_close_claim TM-16 suite; e2e_flow relabel-gate test) and
+      the Foundry proof-bound-token tests. Follow-ups: a CLI `gen-refresh` + per-token witness
+      store; the P1 re-attestation; the B-2 Manager-side delegate-count reconciliation.
+      Orchestration note: with foundry 1.5.1, anvil automine reproducibly leaves one tx of the
+      VK-init burst stuck pending (interval mining outright DROPS it); the E2E runs a txpool
+      unsticker thread that force-mines when anything sits pending.
+- [x] **Phase 5a review MINORs:** (a) regen runbook gains the explicit "do not reuse pre-TM-16
+      cli_state.json / delete stale state" warning (Step 0); (b) the CLI replay ledgers
+      (`applied_tx_identities`/`spent_tx_identities`) converted from unbounded Vec + linear scan
+      to `HashSet` (O(1) membership; JSON stays an array; rationale documented at the fields).
+- Verification (see assessment log): full Foundry suite 214/0/0 incl. the re-enabled
+  CloseLifecycleE2E close section (previous suites carried 1 documented skip; the run WITHOUT
+  SKIP_GROTH16 is identical — the Groth16-gated test no longer exists since the MLE-only
+  switch, `grep -r SKIP_GROTH16 contracts/` is empty and the CLAUDE.md note is stale);
+  `cargo test --test e2e --release` 1/1 (132.6s) + `--test mle_onchain_e2e --release` 1/1
+  (40.9s) — base layer unchanged, no security signal; two-token anvil E2E 1/1 (946s);
+  node/ 45/45; wasm32 lib check green; fmt applied; clippy: no new warnings on changed lines
+  (one new clone_on_copy in the ERC-20 lane fixed).
+- [x] Security review (2026-07-27): skip→hard-assert conversion strictly STRENGTHENS (close
+      section now runs the member-set binding + strict 103-limb bind + real MLE verify that were
+      previously skipped); co-generation ruled honest-flow-faithful (papers over nothing — the
+      old mismatch was genuine two-generator staleness, future divergence hard-fails); BOTH stop
+      fences verified pre-existing on main (P1 re-attestation at close_circuit.rs:867-875;
+      B-2/R3 delegate limb-94); deviation coverage claims all verified against real un-ignored
+      tests; txpool unsticker ruled inert (evm_mine only, never re-broadcasts/retries; all E2E
+      asserts terminal-state). One MAJOR: lib test target compile break (missing erc20_lane in
+      one test initializer) — fixed, all targeted suites re-run green on the compiling tree.
+      MINORs: E2E claim-refusal asserts strengthened to the NoWithdrawalCredit selector
+      (0xe10881ae); coverage attribution corrected to MultiTokenSettlement.t.sol; stale
+      SKIP_GROTH16 mention fixed in CLAUDE.md (historical docs left as records); token-1
+      destination-credit positive added post-verdict (MINOR 3).
+
+**PHASE 5b COMPLETE (2026-07-27).** Remaining Phase 5: integrated full-suite attacker pass over
+the whole feature (must include: exercising the strengthened E2E asserts; the B-2/R3 and P1
+fence follow-ups as pre-existing tracked items); then the OWNER decision on v3 reset + redeploy
+(regen-and-redeploy-runbook.md). Follow-ups surfaced (pre-existing, tracked, NOT multitoken
+regressions): P1 re-attestation after deposit import blocks live close-after-import; B-2/R3
+delegate-count reconciliation blocks every live CLI close since Option B; CLI per-token witness
+store (gen-refresh); transfer-tree rebuild at real small-block cosigning (OPEN).
 
 ## Assessment log
 
 (append per-phase outcomes here; unexpected results follow the CLAUDE.md security-first protocol)
+
+- **Phase 5b (2026-07-27)**: fixture/VK regeneration + E2E integration complete (see the Phase 5b
+  status block). All baked fixtures regenerated in ONE batch and validated SEMANTICALLY
+  (consuming tests green; never byte-compared — MLE/WHIR is ZK-blinded). CloseLifecycleE2E's
+  close-intent section ran end-to-end ON-CHAIN for the FIRST TIME (co-generated member sets +
+  the two-token close fixture; all stale-fixture self-skips are now hard assertions).
+  Security-first protocol was applied to three unexpected results, none of which was a
+  soundness bug and none of which was worked around: (1) the per-test-contract MleVerifier
+  library-linking divergence (CREATE2 address printer moved into the lifecycle test contract;
+  runbook updated); (2) the P1 re-attestation fence — close-after-import correctly refused by
+  the close circuit's `BalanceBindingMismatch` (adversarially, this refusal is exactly what
+  prevents closing against a stale balance attestation); (3) the B-2 delegate-close fence —
+  the Manager's strict limb bind refuses every live delegate-bearing close since Option B's
+  cosigners-only registration (offline reproduction matched all other 102 limbs, incl. the IMCI
+  and TFD recomputes, confirming the refusal is exactly the delegate-count reconciliation gap
+  and nothing else). Fences (2) and (3) were pinned as EXPECTED negatives in the anvil E2E and
+  left in force. Suites: Foundry 214/0/0 (twice; SKIP_GROTH16 irrelevant — gate no longer
+  exists), base e2e 1/1, mle_onchain_e2e 1/1, two-token anvil E2E 1/1, node 45/45, wasm32 lib
+  check green. Awaiting the mandatory full-suite attacker pass before deploy (next Phase 5
+  item).
 
 - **Phase 5a (2026-07-27)**: post-close claim token binding complete (see Phase 5a status
   above). The phase began with a STOP-and-report: the tasked premise (claim circuit opens an

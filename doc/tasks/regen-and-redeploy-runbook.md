@@ -1,10 +1,41 @@
-# Fixture/VK regeneration + redeploy runbook (#11/#12)
+# Fixture/VK regeneration + redeploy runbook (#11/#12, multitoken Phase 5b)
 
-Written 2026-07-06. This is the critical path that makes the mainnet-blocker
-fixes (#1 block-producer whitelist, #2b `to_hash_out` canonicity) actually
-effective on-chain. Heavy (hours of real proof generation) + needs a target
-network — a maintainer-run step. Fixtures are NOT byte-reproducible (MLE/WHIR ZK
-blinding); verify by MEANING (tests pass), not by diff.
+Written 2026-07-06; extended 2026-07-27 for the multitoken (§N) regeneration.
+This is the critical path that makes the mainnet-blocker fixes (#1
+block-producer whitelist, #2b `to_hash_out` canonicity) and the §N multi-token
+preimage/PI changes actually effective on-chain. Heavy (hours of real proof
+generation) + needs a target network — a maintainer-run step. Fixtures are NOT
+byte-reproducible (MLE/WHIR ZK blinding); verify by MEANING (tests pass), not
+by diff.
+
+## Multitoken (§N) additions — what changed in the flow (2026-07-27)
+
+- **Every close/claim fixture predating §N is invalid** (close PI 95→103 w/
+  `token_funds_digest`; claim PI 48→50 w/ tokenSlot/tokenIndex; post-close PI
+  56→57 w/ tokenIndex; IMCH/IMCI/IMW2/IMB2/IMS2 preimage widenings; IMI2/TFD new
+  domains) and the `IntmaxRollup`/`ChannelSettlementManager` initcode changed →
+  NEW CREATE2 manager address baked into the close fixtures.
+- **Descriptors are per-token now.** `close_intent.json` (fixture bin AND the
+  CLI `close`) carries `channel_fund_amounts[10]` / `token_registry[10]` /
+  `token_count` (+ the legacy `channel_fund_amount` scalar); the claim
+  descriptor carries `token_slot`/`token_index`; the post-close descriptor
+  carries `token_index`. `RunClose.s.sol` / `CloseLifecycleE2E` parse them
+  verbatim (the Phase-3 genesis-token embedding is retired).
+- **Close fixture co-generation.** `generate_close_fixture` now derives its
+  signing keys from `ChannelMemberKeys::deterministic(1)` — the SAME derivation
+  `generate_withdrawal_fixture` registers — and proves a TWO-token final state
+  (registry `[0, 7]`, amounts `[77, 55]`). `CloseLifecycleE2E`'s close-intent
+  section therefore RUNS (member-set commitment matches) and HARD-FAILS on any
+  stale/mixed fixture set: always regenerate the unprefixed set, the `close_`
+  set and the close/claim fixtures in ONE batch.
+- **ERC-20 withdrawal lane.** `build_channel_withdrawal` (and the CLI
+  `withdraw`) can add a second, ERC-20 lane: `WD_ERC20_TOKEN` /
+  `WD_ERC20_AMOUNT` / `WD_ERC20_TOKEN_ADDR` env → a second deposit in the
+  deposit block (on-chain: approve + `deposit()` ERC-20 branch, balanceOf-delta
+  checked) and a SECOND single-leaf withdrawal chain paid via `withdrawERC20`
+  (`RunClose.withdrawErc20Step`), then `pullChannelTokenFunds(t)`.
+- **Two-token anvil E2E:** after regenerating the close-stack fixtures, run
+  `cargo test --release --test two_token_cli_e2e -- --ignored --nocapture`.
 
 ## Why regen is needed — what each change invalidated
 
@@ -24,6 +55,14 @@ blinding); verify by MEANING (tests pass), not by diff.
   regen). No VK changes from #1 (VKs are circuit-, not contract-, derived).
 
 ## Step 0 — preconditions
+- **STALE CLI STATE (TM-16): do NOT reuse pre-TM-16 `cli_state.json` files.** The
+  TM-16 change re-keyed the CLI replay ledgers (`applied_tx_identities` /
+  `spent_tx_identities`, token-free replay identities) and the descriptor wire
+  format gained token fields; old state files deserialize with EMPTY ledgers
+  (serde default), silently losing replay protection for previously-credited
+  transfers. Delete every stale per-channel state directory (`cli_state.json`
+  and siblings) before driving any post-TM-16 flow — the v3 reset assumes fresh
+  state everywhere.
 - Build native release once: `cargo build --release --locked`.
 - Contracts build: `cd contracts && forge build`.
 - Decide the target network + set `.env` (see `contracts/.env.example` and
@@ -36,7 +75,10 @@ Run from repo root. Feature-gated generators un-gate the shared witness builders
 # Balance/withdrawal + validity (base pipeline)
 cargo run --release --bin generate_e2e_fixture
 cargo run --release --bin generate_withdrawal_fixture
-# Close family (bake the manager CREATE2 recipient — see below)
+# Compute the manager CREATE2 address from the JUST-regenerated plain set:
+cd contracts && forge build && \
+  forge test --match-test test_printCloseManagerAddress -vv && cd ..
+# Close family (bake the manager CREATE2 recipient printed above)
 WD_RECIPIENT=0x<close-manager-addr> WD_OUT_PREFIX=close_ \
   cargo run --release --bin generate_withdrawal_fixture
 cargo run --release --features close-fixture-bin            --bin generate_close_fixture
@@ -48,10 +90,19 @@ cargo run --release --bin generate_c2c_fixture
 cargo run --release --bin generate_wasm_fixtures
 ```
 Outputs land in `contracts/test/data/`. The CLOSE fixtures bake the manager's
-CREATE2 address — compute it in a TEST context (`CloseManagerAddr.t.sol` /
-`CloseE2EBase._deployAll`), because the `MleVerifier` library link differs
-between forge script and test. See `project_p2_native_withdrawal` / the CREATE2
-lessons before regenerating close fixtures.
+CREATE2 address — compute it with
+`CloseLifecycleE2ETest.test_printCloseManagerAddress` (in
+`CloseLifecycleE2E.t.sol`; moved there in Phase 5b), because the `MleVerifier`
+external-library link differs not only between forge script and test but PER
+TEST CONTRACT — only a printer inside the lifecycle test contract shares its
+linking context (`CloseManagerAddr.t.sol` is now a pointer stub). NOTE the
+ORDER: the plain (unprefixed) set must be regenerated BEFORE the printer runs
+(its prediction reads `lifecycle*.json`, valid because registration/VK/genesis
+are identical between the plain and `close_` sets — both use the deterministic
+channel-1 member keys), and `generate_close_fixture` must run in the SAME batch
+(co-generated member set, see the §N additions above). If
+`CloseLifecycleE2E.t.sol` itself is EDITED after baking, re-run the printer and
+confirm the address is unchanged (library linking can shift with the contract).
 
 ## Step 2 — verify by meaning (must be green before deploy)
 ```

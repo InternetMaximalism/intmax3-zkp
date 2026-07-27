@@ -4015,6 +4015,28 @@ pub struct ChannelWithdrawalParams {
     /// withdraw deposit block matches the on-chain `deposit()` already made by `setup-backing`.
     /// `None` = draw from the fixed RNG (byte-parity with the legacy fixture).
     pub deposit_salt: Option<crate::common::salt::Salt>,
+    /// Multitoken Phase 5b: optional SECOND settlement lane in a registered ERC-20 base token.
+    /// `Some` adds a second deposit (token `token_index`, its own recipient salt) to the deposit
+    /// block and a second transfer to the withdrawal tx, and produces a SECOND, independent
+    /// single-leaf withdrawal chain + wrapped MLE proof over the SAME finalized state root — the
+    /// artifact `IntmaxRollup.withdrawERC20` consumes (a chain must be single-asset-class: ETH
+    /// leaves pay via `withdrawNative`, ERC-20 leaves via `withdrawERC20`, so the two lanes are
+    /// two separate chains by construction). `None` = the legacy single-lane (ETH) behavior,
+    /// byte-identical output (no extra RNG draws).
+    pub erc20_lane: Option<Erc20LaneParams>,
+}
+
+/// Parameters of the optional ERC-20 settlement lane (multitoken Phase 5b, §N-7).
+#[derive(Debug, Clone, Copy)]
+pub struct Erc20LaneParams {
+    /// The L1-registered base token index (MUST be != 0; index 0 is ETH).
+    pub token_index: u32,
+    /// Deposited ERC-20 amount (the on-chain `deposit()` ERC-20 branch escrows this).
+    pub deposit_amount: u64,
+    /// Withdrawn ERC-20 amount paid to `withdrawal_recipient` (<= deposit_amount).
+    pub withdrawal_amount: u64,
+    /// `Some` reproduces the exact on-chain ERC-20 deposit recipient (live path); `None` = RNG.
+    pub deposit_salt: Option<crate::common::salt::Salt>,
 }
 
 impl Default for ChannelWithdrawalParams {
@@ -4027,6 +4049,7 @@ impl Default for ChannelWithdrawalParams {
             depositor: None,
             withdrawal_recipient: None,
             deposit_salt: None,
+            erc20_lane: None,
         }
     }
 }
@@ -4039,6 +4062,11 @@ pub struct ChannelWithdrawalArtifacts {
     pub validity_mle_json: String,
     pub withdrawal_mle_json: String,
     pub payout_json: String,
+    /// Multitoken Phase 5b: the ERC-20 lane's wrapped withdrawal MLE proof (its OWN single-leaf
+    /// chain over the same finalized root) — `Some` iff `params.erc20_lane` was set.
+    pub erc20_withdrawal_mle_json: Option<String>,
+    /// Multitoken Phase 5b: the ERC-20 lane's committed payout descriptor (`withdrawERC20` input).
+    pub erc20_payout_json: Option<String>,
 }
 
 // ── Output JSON schemas (moved verbatim from generate_withdrawal_fixture.rs) ──────────────────
@@ -4088,6 +4116,11 @@ struct LifecycleFixture {
     final_state_root: String,
     registration: MemberFixture,
     deposit: DepositFixture,
+    /// Multitoken Phase 5b: the ERC-20 lane's deposit (folds into the SAME deposit block,
+    /// immediately AFTER `deposit` — the on-chain `deposit()` calls must run in that order so the
+    /// deposit hash chain reproduces). Omitted for the legacy single-lane fixture.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    deposit_erc20: Option<DepositFixture>,
     blocks: Vec<BlockFixture>,
     vpis: VPIFixture,
     proof_hash: String,
@@ -4295,6 +4328,22 @@ pub fn build_channel_withdrawal(
         Some(a) => a,
         None => Address::rand(&mut rng),
     };
+    // Multitoken Phase 5b: the optional ERC-20 lane's deposit — its OWN recipient salt (a deposit
+    // is located per recipient), queued into the SAME deposit block immediately AFTER the ETH
+    // deposit (the on-chain `deposit()` calls must run in this order to reproduce the fold).
+    let erc20_deposit = params.erc20_lane.map(|lane| {
+        assert_ne!(
+            lane.token_index, 0,
+            "erc20_lane.token_index must be a non-ETH base token"
+        );
+        assert!(
+            lane.withdrawal_amount <= lane.deposit_amount,
+            "erc20 withdrawal amount exceeds its deposit amount"
+        );
+        let salt2 = lane.deposit_salt.unwrap_or_else(|| Salt::rand(&mut rng));
+        let recipient2 = calculate_recipient_from_user_id(user_id, salt2);
+        (lane, salt2, recipient2)
+    });
     {
         let mut generator = block_witness_generator.borrow_mut();
         generator
@@ -4306,6 +4355,17 @@ pub fn build_channel_withdrawal(
                 Bytes32::default(),
             )
             .expect("queue deposit");
+        if let Some((lane, _, recipient2)) = &erc20_deposit {
+            generator
+                .add_deposit(
+                    depositor,
+                    *recipient2,
+                    lane.token_index,
+                    U256::from(lane.deposit_amount),
+                    Bytes32::default(),
+                )
+                .expect("queue erc20 deposit");
+        }
         generator
             .add_block(0, &[], 0, Bytes32::default())
             .expect("apply deposit block");
@@ -4325,6 +4385,24 @@ pub fn build_channel_withdrawal(
         .commit_receive_deposit(&deposit_balance_proof, &deposit_witness)
         .expect("commit deposit");
 
+    // Receive the ERC-20 lane's deposit into the SAME balance history (second receive-deposit
+    // transition; the asset tree tracks per-token leaves, so both balances coexist).
+    if let Some((_, salt2, recipient2)) = &erc20_deposit {
+        let deposit_data2 = ReceiveDepositData {
+            receiver: *recipient2,
+            deposit_salt: *salt2,
+        };
+        let deposit_witness2 = balance_witness_generator
+            .receive_deposit_witness(&deposit_data2)
+            .expect("receive erc20 deposit witness");
+        let deposit_balance_proof2 = balance_processor
+            .prove_receive_deposit(&deposit_witness2)
+            .expect("erc20 deposit proof");
+        balance_witness_generator
+            .commit_receive_deposit(&deposit_balance_proof2, &deposit_witness2)
+            .expect("commit erc20 deposit");
+    }
+
     // ── Phase 3: withdrawal tx → block 3 ────────────────────────────────────────────────────
     // The withdrawal recipient (an L1 address). For the close lifecycle it MUST equal the
     // ChannelSettlementManager so the channel's aggregate withdrawal is paid to the manager.
@@ -4338,18 +4416,36 @@ pub fn build_channel_withdrawal(
         amount: U256::from(params.withdrawal_amount),
         aux_data: Bytes32::default(),
     };
+    // Multitoken Phase 5b: the ERC-20 lane's transfer rides in the SAME withdrawal tx (transfer
+    // index 1) — ONE spend debits both token leaves; the two L1 payout chains are built
+    // separately below (single-asset-class chains, §N-7).
+    let erc20_transfer = erc20_deposit.as_ref().map(|(lane, _, _)| Transfer {
+        recipient: calculate_recipient_from_address(withdrawal_address),
+        token_index: lane.token_index,
+        amount: U256::from(lane.withdrawal_amount),
+        aux_data: Bytes32::default(),
+    });
+    let spend_transfers: Vec<Transfer> = match &erc20_transfer {
+        Some(t1) => vec![withdrawal_transfer.clone(), t1.clone()],
+        None => vec![withdrawal_transfer.clone()],
+    };
     let withdrawal_spend_witness = balance_witness_generator
-        .spend_witness(&[withdrawal_transfer.clone()])
+        .spend_witness(&spend_transfers)
         .expect("withdrawal spend witness");
     let withdrawal_spend_proof = spend_circuit
         .prove(&withdrawal_spend_witness)
         .expect("withdrawal spend proof");
 
     let mut withdrawal_transfer_tree = TransferTree::init();
-    withdrawal_transfer_tree.push(withdrawal_transfer.clone());
+    for t in &spend_transfers {
+        withdrawal_transfer_tree.push(t.clone());
+    }
     let withdrawal_transfer_index = 0u32;
     let withdrawal_transfer_merkle_proof =
         withdrawal_transfer_tree.prove(withdrawal_transfer_index as u64);
+    let erc20_transfer_merkle_proof = erc20_transfer
+        .as_ref()
+        .map(|_| withdrawal_transfer_tree.prove(1));
     let withdrawal_transfer_tree_root = withdrawal_transfer_tree.get_root();
 
     let withdrawal_tx = Tx {
@@ -4442,6 +4538,32 @@ pub fn build_channel_withdrawal(
         .verify(single_withdrawal_proof.clone())
         .expect("verify single withdrawal proof");
 
+    // Multitoken Phase 5b: the ERC-20 lane's single-withdrawal proof (transfer index 1 of the
+    // SAME withdrawal tx).
+    let erc20_single = erc20_transfer.as_ref().map(|t1| {
+        let data = SingleWithdrawalData {
+            tx_tree_root: withdrawal_tx_tree_root_bytes,
+            tx: withdrawal_tx,
+            tx_merkle_proof: withdrawal_tx_merkle_proof.clone(),
+            transfer: t1.clone(),
+            transfer_index: 1,
+            transfer_merkle_proof: erc20_transfer_merkle_proof.clone().expect("erc20 merkle"),
+            tx_v2: Some(withdrawal_tx_v2),
+            tx_v2_merkle_proof: Some(withdrawal_tx_v2_merkle_proof.clone()),
+        };
+        let witness = balance_witness_generator
+            .single_withdrawal_witness(&data)
+            .expect("erc20 single withdrawal witness");
+        let proof = single_withdrawal_circuit
+            .prove(&witness)
+            .expect("erc20 single withdrawal proof");
+        single_withdrawal_circuit
+            .data
+            .verify(proof.clone())
+            .expect("verify erc20 single withdrawal proof");
+        (witness, proof)
+    });
+
     // ── Withdrawal chain + final proofs ─────────────────────────────────────────────────────
     let withdrawal_processor = WithdrawalProcessor::<F, C, D>::new(&single_withdrawal_vd);
     let withdrawal_chain_vd = withdrawal_processor.withdrawal_chain_vd();
@@ -4456,6 +4578,23 @@ pub fn build_channel_withdrawal(
     withdrawal_chain_vd
         .verify(withdrawal_chain_proof.clone())
         .expect("verify withdrawal chain proof");
+
+    // Multitoken Phase 5b: the ERC-20 lane gets its OWN single-leaf chain (chains are
+    // single-asset-class on L1: `withdrawNative` pays ETH leaves, `withdrawERC20` ERC-20 leaves).
+    let erc20_chain_proof = erc20_single.as_ref().map(|(witness, proof)| {
+        let step = WithdrawalStepWitness::<F, C, D> {
+            prev_withdrawal_chain_proof: None,
+            single_withdrawal_proof: proof.clone(),
+            update_public_state: witness.update_public_state.clone(),
+        };
+        let chain = withdrawal_processor
+            .prove_step(&step)
+            .expect("erc20 withdrawal chain proof");
+        withdrawal_chain_vd
+            .verify(chain.clone())
+            .expect("verify erc20 withdrawal chain proof");
+        chain
+    });
 
     let ext_public_state = block_witness_generator
         .borrow()
@@ -4474,6 +4613,17 @@ pub fn build_channel_withdrawal(
         .withdrawal_vd()
         .verify(withdrawal_proof.clone())
         .expect("verify withdrawal proof");
+
+    let erc20_withdrawal_proof = erc20_chain_proof.as_ref().map(|chain| {
+        let proof = withdrawal_processor
+            .prove_final(chain, withdrawal_prover, &ext_public_state)
+            .expect("erc20 withdrawal proof");
+        withdrawal_processor
+            .withdrawal_vd()
+            .verify(proof.clone())
+            .expect("verify erc20 withdrawal proof");
+        proof
+    });
 
     // ── Phase 4: block hash chain + validity proof ──────────────────────────────────────────
     let mut prev_block_proof = None;
@@ -4549,6 +4699,21 @@ pub fn build_channel_withdrawal(
     let withdrawal_mle_json =
         export_mle_json(&withdrawal_mle.proof, &withdrawal_wrapper.data.common);
 
+    // Multitoken Phase 5b: wrap + MLE the ERC-20 lane's withdrawal proof (same wrapper circuit —
+    // both lanes are WithdrawalCircuit proofs, so the ONE withdrawal VK verifies both on-chain).
+    let erc20_withdrawal_mle_json = erc20_withdrawal_proof
+        .as_ref()
+        .map(|proof| -> anyhow::Result<String> {
+            let wrapped = withdrawal_wrapper.prove(proof)?;
+            withdrawal_wrapper.data.verify(wrapped.clone())?;
+            let mut pw = PartialWitness::new();
+            pw.set_proof_with_pis_target(&withdrawal_wrapper.wrap_proof, proof)?;
+            let mle = prove_with_mle::<F, C, D>(&withdrawal_wrapper.data, pw)?;
+            verify_mle_proof(&withdrawal_wrapper.data, &withdrawal_vk, &mle.proof)?;
+            Ok(export_mle_json(&mle.proof, &withdrawal_wrapper.data.common))
+        })
+        .transpose()?;
+
     let validity_wrapper =
         WrapperCircuit::<F, C, C, D>::new(&validity_circuit.data.verifier_data());
     let validity_wrapped = validity_wrapper.prove(&validity_proof)?;
@@ -4578,6 +4743,32 @@ pub fn build_channel_withdrawal(
         refolded == proof_withdrawal_hash,
         "withdrawal keccak chain re-fold mismatch: refolded = {refolded:?}, proof-committed = {proof_withdrawal_hash:?}"
     );
+
+    // Multitoken Phase 5b: the ERC-20 lane's committed Withdrawal + the same re-fold sanity.
+    let erc20_committed: Option<Withdrawal> = erc20_single
+        .as_ref()
+        .map(|(_, proof)| -> anyhow::Result<Withdrawal> {
+            let inputs = SingleWithdawalPublicInputs::from_u64_slice(
+                &proof.public_inputs[..SINGLE_WITHDRAWAL_PUBLIC_INPUTS_LEN].to_u64_vec(),
+            )?;
+            let committed = inputs.withdrawal.clone();
+            let chain = erc20_chain_proof.as_ref().expect("erc20 chain");
+            let proof_hash = {
+                let pis = chain.public_inputs.to_u64_vec();
+                Bytes32::from_u64_slice(&pis[0..8]).expect("erc20 withdrawal_hash_chain limbs")
+            };
+            let refolded2 = committed.hash_with_prev_hash(Bytes32::default());
+            anyhow::ensure!(
+                refolded2 == proof_hash,
+                "erc20 withdrawal keccak chain re-fold mismatch"
+            );
+            anyhow::ensure!(
+                committed.token_index != 0,
+                "erc20 lane committed withdrawal must carry a non-ETH token index"
+            );
+            Ok(committed)
+        })
+        .transpose()?;
 
     // SANITY: the withdrawal proof's ext_commitment must equal the validity final state root.
     anyhow::ensure!(
@@ -4626,6 +4817,15 @@ pub fn build_channel_withdrawal(
             amount: U256::from(params.deposit_amount).to_string(),
             aux_data: Bytes32::default().to_string(),
         },
+        deposit_erc20: erc20_deposit
+            .as_ref()
+            .map(|(lane, _, recipient2)| DepositFixture {
+                depositor: depositor.to_string(),
+                recipient: recipient2.to_string(),
+                token_index: lane.token_index,
+                amount: U256::from(lane.deposit_amount).to_string(),
+                aux_data: Bytes32::default().to_string(),
+            }),
         blocks: blocks_fixture,
         vpis: VPIFixture {
             initial_block_number: vpis.initial_block_number.as_u64(),
@@ -4655,11 +4855,32 @@ pub fn build_channel_withdrawal(
     };
     let payout_json = serde_json::to_string_pretty(&payout)?;
 
+    let erc20_payout_json = erc20_committed
+        .as_ref()
+        .map(|w| -> anyhow::Result<String> {
+            let p = WithdrawalPayoutFixture {
+                withdrawals: vec![WithdrawalEntryFixture {
+                    recipient: w.recipient.to_string(),
+                    token_index: w.token_index,
+                    amount: w.amount.to_string(),
+                    nullifier: w.nullifier.to_string(),
+                    aux_data: w.aux_data.to_string(),
+                }],
+                withdrawal_prover: withdrawal_prover.to_string(),
+                block_number: ext_public_state.inner.block_number.as_u64(),
+                ext_commitment: ext_public_state.commitment().to_string(),
+            };
+            Ok(serde_json::to_string_pretty(&p)?)
+        })
+        .transpose()?;
+
     Ok(ChannelWithdrawalArtifacts {
         lifecycle_json,
         validity_mle_json,
         withdrawal_mle_json,
         payout_json,
+        erc20_withdrawal_mle_json,
+        erc20_payout_json,
     })
 }
 
@@ -5786,6 +6007,7 @@ mod delegate_send_tests {
             depositor: None,
             withdrawal_recipient: Some(manager),
             deposit_salt: None,
+            erc20_lane: None,
         };
         let artifacts = build_channel_withdrawal(&params, Some(&cli_members))
             .expect("channel withdrawal pipeline self-verifies");

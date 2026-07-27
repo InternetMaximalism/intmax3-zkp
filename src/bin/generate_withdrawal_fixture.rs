@@ -63,6 +63,7 @@ fn main() -> anyhow::Result<()> {
             .ok()
             .map(|h| parse_address_hex(&h)),
         deposit_salt: None,
+        erc20_lane: None,
     };
     if let Some(d) = params.depositor {
         eprintln!("[wd] depositor = {}", d.to_string());

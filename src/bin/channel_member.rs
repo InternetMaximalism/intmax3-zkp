@@ -21,6 +21,7 @@
 //!   balance
 
 use std::{
+    collections::HashSet,
     fs,
     process::{Command, exit},
 };
@@ -73,16 +74,17 @@ use intmax3_zkp::{
     wallet_core::{
         BatchTxApply, BuiltInterChannelCredit, BuiltSend, CancelCloseProver,
         ChannelBalanceAttestation, ChannelSnapshot, ChannelWithdrawalParams, CloseProver,
-        InterChannelDebitPayload, InterChannelTransferDescriptor, MemberInfo, MemberKeys,
-        PostCloseClaimProver, RefreshPayload, SendPayload, SlimSendPayload, WithdrawalClaimProver,
-        add_signature, assemble_genesis_state_backed, build_batch_next_state,
-        build_channel_withdrawal, build_inter_channel_credit, build_l1_deposit_import,
-        build_record, build_send_token, build_token_register, decrypt_balance_token,
-        default_settled_tx_accumulator, partial_withdrawal_auth_digest, regev_pks_array,
-        resolve_local_token_slot, sign_state, sign_state_if_backed, verify_all_signatures,
-        verify_inter_channel_credit_transition, verify_inter_channel_send_transition,
-        verify_l1_deposit_import_transition, verify_refresh_transition, verify_send_transition,
-        verify_slim_send_tx, verify_snapshot, verify_token_register_state_transition,
+        Erc20LaneParams, InterChannelDebitPayload, InterChannelTransferDescriptor, MemberInfo,
+        MemberKeys, PostCloseClaimProver, RefreshPayload, SendPayload, SlimSendPayload,
+        WithdrawalClaimProver, add_signature, assemble_genesis_state_backed,
+        build_batch_next_state, build_channel_withdrawal, build_inter_channel_credit,
+        build_l1_deposit_import, build_record, build_send_token, build_token_register,
+        decrypt_balance_token, default_settled_tx_accumulator, partial_withdrawal_auth_digest,
+        regev_pks_array, resolve_local_token_slot, sign_state, sign_state_if_backed,
+        verify_all_signatures, verify_inter_channel_credit_transition,
+        verify_inter_channel_send_transition, verify_l1_deposit_import_transition,
+        verify_refresh_transition, verify_send_transition, verify_slim_send_tx, verify_snapshot,
+        verify_token_register_state_transition,
     },
 };
 use plonky2::{
@@ -209,16 +211,22 @@ struct CliState {
     /// identity strips the token limb, so the second variant is refused as a replay. (Pre-TM-16
     /// entries under the old field name are dropped by the serde default — acceptable ONLY
     /// because of the v3 reset; do not mix pre/post-TM-16 state files.)
+    ///
+    /// Stored as a `HashSet` (Phase 5a review MINOR): membership checks are O(1) instead of a
+    /// linear scan over an unbounded Vec; the ledger only ever grows for the channel's lifetime
+    /// (pruned implicitly by the channel close — a closed channel's state dir is retired). JSON
+    /// serialization stays an array (element order is not meaningful and not relied upon).
     #[serde(default)]
-    applied_tx_identities: Vec<Bytes32>,
+    applied_tx_identities: HashSet<Bytes32>,
     /// SPENT LEDGER (A side): the set of inter-channel REPLAY IDENTITIES already DEBITED out of
     /// THIS channel as the SOURCE. A debit is applied at most once; if the identity is already
     /// present the combined `cosign-inter-transfer` REFUSES (fail-closed). This is the A-side
     /// counterpart to `applied_tx_identities` — together they make a transfer atomic AND
     /// single-use on both ends. Same TM-16 token-free keying as `applied_tx_identities` (the
-    /// A-side leg of the cross-token double-debit defense).
+    /// A-side leg of the cross-token double-debit defense). Same `HashSet` rationale as
+    /// `applied_tx_identities`.
     #[serde(default)]
-    spent_tx_identities: Vec<Bytes32>,
+    spent_tx_identities: HashSet<Bytes32>,
 }
 
 #[derive(Deserialize)]
@@ -629,6 +637,15 @@ struct CloseIntentDescriptor {
     member_count: u8,
     delegate_count: u16,
     member_pk_gs: Vec<String>,
+    /// Multi-token (§N-6, Phase 5b): the FULL per-token fund vector of the proved final state
+    /// (10 x 0x-hex U256, registry-aligned; `[0]` == the legacy `channel_fund_amount` burn leg).
+    /// The on-chain verifier RECOMPUTES `token_funds_digest` over exactly these three fields and
+    /// binds it to the member-signed PI (limbs 95..103) — RunClose parses them verbatim.
+    channel_fund_amounts: Vec<String>,
+    /// Multi-token: the final state's base-token registry (10 x u32, active prefix).
+    token_registry: Vec<u32>,
+    /// Multi-token: number of ACTIVE registry slots (1..=10).
+    token_count: u8,
 }
 
 fn env_u64(key: &str, default: u64) -> u64 {
@@ -764,6 +781,16 @@ fn cmd_close(args: &[String]) {
         member_count: pis.member_count,
         delegate_count: pis.delegate_count,
         member_pk_gs,
+        // Multi-token (§N-6): the SAME signed state the close witness proved — the verifier's
+        // tokenFundsDigest recompute over these must equal the proof's PI limbs 95..103.
+        channel_fund_amounts: state
+            .channel_fund
+            .amounts
+            .iter()
+            .map(|a| a.to_string())
+            .collect(),
+        token_registry: state.balance_state.token_registry.to_vec(),
+        token_count: state.balance_state.token_count,
     };
 
     fs::write(CLOSE_INTENT_MLE_FILE, &mle_json)
@@ -1082,20 +1109,47 @@ fn cmd_claim(args: &[String]) {
         );
     }
     let recipient_hex = recipient.to_hex();
-    eprintln!("[claim] claimWithdrawalCredit() (caller must be the recipient {recipient_hex})…");
-    cast(&[
-        "send",
-        &manager,
-        "claimWithdrawalCredit()",
-        "--private-key",
-        &key,
-        "--rpc-url",
-        &rpc,
-    ]);
-    println!(
-        "[claim] OK: recipient {recipient_hex} received native ETH (amount {}).",
-        pis.amount
-    );
+    // Multitoken Phase 5b: pull the credit in the PROVED base token — `claimWithdrawalCredit()`
+    // (ETH) for token 0, `claimWithdrawalCredit(uint32)` (safeTransfer of the registered ERC-20)
+    // otherwise. The per-token CapInv (`totalCreditedOut[t] + amount <= receivedChannelFunds[t]`)
+    // is enforced at this payout site.
+    if pis.token_index == 0 {
+        eprintln!(
+            "[claim] claimWithdrawalCredit() (caller must be the recipient {recipient_hex})…"
+        );
+        cast(&[
+            "send",
+            &manager,
+            "claimWithdrawalCredit()",
+            "--private-key",
+            &key,
+            "--rpc-url",
+            &rpc,
+        ]);
+        println!(
+            "[claim] OK: recipient {recipient_hex} received native ETH (amount {}).",
+            pis.amount
+        );
+    } else {
+        eprintln!(
+            "[claim] claimWithdrawalCredit({}) (ERC-20; caller must be the recipient {recipient_hex})…",
+            pis.token_index
+        );
+        cast(&[
+            "send",
+            &manager,
+            "claimWithdrawalCredit(uint32)",
+            &pis.token_index.to_string(),
+            "--private-key",
+            &key,
+            "--rpc-url",
+            &rpc,
+        ]);
+        println!(
+            "[claim] OK: recipient {recipient_hex} received token {} (amount {}).",
+            pis.token_index, pis.amount
+        );
+    }
 }
 
 /// A30 cancelClose descriptor — the on-chain `ChannelSettlementManager.CancelCloseRequest` fields
@@ -1598,6 +1652,25 @@ fn cmd_withdraw(args: &[String]) {
         ));
     }
 
+    // Multitoken Phase 5b: optional ERC-20 settlement lane. WD_ERC20_TOKEN (registered base
+    // token index) + WD_ERC20_AMOUNT (deposited == withdrawn amount) + WD_ERC20_TOKEN_ADDR (the
+    // ERC-20 contract, for the on-chain approve + deposit calls). The lane adds a second deposit
+    // to the deposit block and produces a second withdrawal chain paid to the manager via
+    // `withdrawERC20` → `pullChannelTokenFunds`.
+    let erc20_env: Option<(u32, u64, String)> = match (
+        std::env::var("WD_ERC20_TOKEN").ok(),
+        std::env::var("WD_ERC20_AMOUNT").ok(),
+        std::env::var("WD_ERC20_TOKEN_ADDR").ok(),
+    ) {
+        (Some(t), Some(a), Some(addr)) => Some((
+            t.parse().unwrap_or_else(|_| die("bad WD_ERC20_TOKEN")),
+            a.parse().unwrap_or_else(|_| die("bad WD_ERC20_AMOUNT")),
+            addr,
+        )),
+        (None, None, None) => None,
+        _ => die("set ALL of WD_ERC20_TOKEN / WD_ERC20_AMOUNT / WD_ERC20_TOKEN_ADDR, or none"),
+    };
+
     // ── Build the artifacts (HEAVY proving). recipient = manager so the payout credits it. ──
     eprintln!(
         "[withdraw] building channel-withdrawal proof set (channel {channel_id}, deposit \
@@ -1610,6 +1683,12 @@ fn cmd_withdraw(args: &[String]) {
         depositor: Some(depositor),
         withdrawal_recipient: Some(manager_addr),
         deposit_salt,
+        erc20_lane: erc20_env.as_ref().map(|(t, a, _)| Erc20LaneParams {
+            token_index: *t,
+            deposit_amount: *a,
+            withdrawal_amount: *a,
+            deposit_salt: None,
+        }),
     };
     let artifacts = build_channel_withdrawal(&params, cli_members.as_deref())
         .unwrap_or_else(|e| die(format!("build withdrawal: {e}")));
@@ -1636,6 +1715,23 @@ fn cmd_withdraw(args: &[String]) {
     );
     stage("withdrawal_mle.json", "sepolia_withdrawal_mle.json");
     stage("withdrawal_payout.json", "sepolia_withdrawal_payout.json");
+    if let (Some(mle), Some(payout)) = (
+        &artifacts.erc20_withdrawal_mle_json,
+        &artifacts.erc20_payout_json,
+    ) {
+        fs::write("erc20_withdrawal_mle.json", mle)
+            .unwrap_or_else(|e| die(format!("write erc20_withdrawal_mle.json: {e}")));
+        fs::write("erc20_withdrawal_payout.json", payout)
+            .unwrap_or_else(|e| die(format!("write erc20_withdrawal_payout.json: {e}")));
+        stage(
+            "erc20_withdrawal_mle.json",
+            "sepolia_erc20_withdrawal_mle.json",
+        );
+        stage(
+            "erc20_withdrawal_payout.json",
+            "sepolia_erc20_withdrawal_payout.json",
+        );
+    }
 
     let lc: serde_json::Value = serde_json::from_str(&artifacts.lifecycle_json)
         .unwrap_or_else(|e| die(format!("parse lifecycle json: {e}")));
@@ -1748,6 +1844,54 @@ fn cmd_withdraw(args: &[String]) {
             "--rpc-url",
             &rpc,
         ]);
+
+        // Multitoken Phase 5b: the ERC-20 lane's deposit — SECOND in the block, matching the
+        // proof's fold order. `deposit()`'s ERC-20 branch pulls via transferFrom (balanceOf-delta
+        // checked on-chain, TM-4), so approve first; no --value.
+        if let Some((_, _, token_addr)) = &erc20_env {
+            let dep2 = &lc["deposit_erc20"];
+            let dep2_recipient = dep2["recipient"]
+                .as_str()
+                .unwrap_or_else(|| die("deposit_erc20.recipient"));
+            let dep2_token = dep2["token_index"]
+                .as_u64()
+                .unwrap_or_else(|| die("deposit_erc20.token_index"))
+                .to_string();
+            let dep2_amount = dep2["amount"]
+                .as_str()
+                .unwrap_or_else(|| die("deposit_erc20.amount"));
+            let dep2_aux = dep2["aux_data"]
+                .as_str()
+                .unwrap_or_else(|| die("deposit_erc20.aux_data"));
+            eprintln!(
+                "[withdraw] approve + ERC-20 deposit (token {dep2_token}, amount {dep2_amount}) as \
+                 depositor {depositor_hex}…"
+            );
+            cast(&[
+                "send",
+                token_addr,
+                "approve(address,uint256)",
+                &rollup,
+                dep2_amount,
+                "--private-key",
+                &key,
+                "--rpc-url",
+                &rpc,
+            ]);
+            cast(&[
+                "send",
+                &rollup,
+                "deposit(bytes32,uint32,uint256,bytes32)",
+                dep2_recipient,
+                &dep2_token,
+                dep2_amount,
+                dep2_aux,
+                "--private-key",
+                &key,
+                "--rpc-url",
+                &rpc,
+            ]);
+        }
     }
 
     // 4. Deposit block, then 5. Withdrawal block.
@@ -1805,6 +1949,36 @@ fn cmd_withdraw(args: &[String]) {
         );
     }
 
+    // 7b. Multitoken Phase 5b: the ERC-20 lane — withdrawERC20 (its own chain + the SAME
+    //     withdrawal VK) credits pendingTokenWithdrawals[t][manager].
+    if let Some((token_index, ..)) = &erc20_env {
+        eprintln!(
+            "[withdraw] withdrawERC20 (real withdrawal MLE, token {token_index}) → manager {manager}…"
+        );
+        let status = Command::new("forge")
+            .current_dir("contracts")
+            .args([
+                "script",
+                "script/RunClose.s.sol",
+                "--sig",
+                "withdrawErc20Step()",
+                "--rpc-url",
+                &rpc,
+                "--private-key",
+                &key,
+                "--broadcast",
+            ])
+            .env("ROLLUP", &rollup)
+            .env("MANAGER", &manager)
+            .status()
+            .unwrap_or_else(|e| die(format!("forge withdrawErc20Step failed to start: {e}")));
+        if !status.success() {
+            die(
+                "forge withdrawErc20Step failed (ensure the token index is registered and the ERC-20 deposit escrowed)",
+            );
+        }
+    }
+
     // 8. pullChannelFunds (manager pulls its escrowed credit out of the rollup).
     eprintln!("[withdraw] pullChannelFunds() on manager {manager}…");
     cast(&[
@@ -1816,6 +1990,20 @@ fn cmd_withdraw(args: &[String]) {
         "--rpc-url",
         &rpc,
     ]);
+    // 8b. pullChannelTokenFunds(t) — the ERC-20 mirror (measured balanceOf delta).
+    if let Some((token_index, ..)) = &erc20_env {
+        eprintln!("[withdraw] pullChannelTokenFunds({token_index}) on manager {manager}…");
+        cast(&[
+            "send",
+            &manager,
+            "pullChannelTokenFunds(uint32)",
+            &token_index.to_string(),
+            "--private-key",
+            &key,
+            "--rpc-url",
+            &rpc,
+        ]);
+    }
     println!(
         "[withdraw] OK: {withdrawal_amount} native withdrawn from the rollup into manager {manager} \
          (now `claim` per member to distribute)."
@@ -1982,7 +2170,7 @@ fn cmd_init(args: &[String]) {
         let prev = load_state();
         (prev.applied_tx_identities, prev.spent_tx_identities)
     } else {
-        (Vec::new(), Vec::new())
+        (HashSet::new(), HashSet::new())
     };
     let (record, state, members, controlled, slot) = if std::path::Path::new(STATE_FILE).exists() {
         join_delegate(new_delegate, new_ct, new_recipient)
@@ -2847,11 +3035,7 @@ fn cmd_cosign_inter_transfer(args: &[String]) {
         .inter_channel_tx
         .replay_identity()
         .unwrap_or_else(|e| die(format!("descriptor replay_identity: {e}")));
-    if a_state
-        .spent_tx_identities
-        .iter()
-        .any(|h| *h == replay_identity)
-    {
+    if a_state.spent_tx_identities.contains(&replay_identity) {
         die(format!(
             "REFUSING: inter-channel tx identity {} already debited from channel A (replay) — fail-closed",
             replay_identity.to_hex()
@@ -2928,11 +3112,7 @@ fn cmd_cosign_inter_transfer(args: &[String]) {
     // replay identity was already credited into B. Keying on the identity (never the
     // token-bearing tx_hash) is what refuses a SECOND, fully-consistent token-Y variant of an
     // already-credited debit — the cross-token double-credit is structurally a replay here.
-    if b_state
-        .applied_tx_identities
-        .iter()
-        .any(|h| *h == replay_identity)
-    {
+    if b_state.applied_tx_identities.contains(&replay_identity) {
         die(format!(
             "REFUSING: inter-channel tx identity {} already credited into channel B (replay) — fail-closed (invariant 6)",
             replay_identity.to_hex()
@@ -3028,12 +3208,12 @@ fn cmd_cosign_inter_transfer(args: &[String]) {
     // above already `die()`d before we got here, so nothing was written.
     a_state.snapshot.state = a_head.clone();
     // TM-16 obligation 1: both ledgers record the token-FREE replay identity.
-    a_state.spent_tx_identities.push(replay_identity);
+    a_state.spent_tx_identities.insert(replay_identity);
     save_state(&a_state);
     write_json("channel_snapshot.json", &a_state.snapshot);
 
     b_state.snapshot.state = b_head.clone();
-    b_state.applied_tx_identities.push(replay_identity);
+    b_state.applied_tx_identities.insert(replay_identity);
     save_state_at(&b_dir, &b_state);
 
     // out.json = { aHead, bSnapshot }.
@@ -3108,11 +3288,7 @@ fn cmd_cosign_burn_send(args: &[String]) {
         .inter_channel_tx
         .replay_identity()
         .unwrap_or_else(|e| die(format!("burn descriptor replay_identity: {e}")));
-    if a_state
-        .spent_tx_identities
-        .iter()
-        .any(|h| *h == burn_replay_identity)
-    {
+    if a_state.spent_tx_identities.contains(&burn_replay_identity) {
         die(format!(
             "REFUSING: burn tx identity {} already debited (replay) — fail-closed",
             burn_replay_identity.to_hex()
@@ -3176,7 +3352,7 @@ fn cmd_cosign_burn_send(args: &[String]) {
 
     let pre_burn_settled_tx_chain = a_state.snapshot.state.balance_state.settled_tx_chain;
     a_state.snapshot.state = a_head.clone();
-    a_state.spent_tx_identities.push(burn_replay_identity);
+    a_state.spent_tx_identities.insert(burn_replay_identity);
     save_state(&a_state);
     write_json("channel_snapshot.json", &a_state.snapshot);
 

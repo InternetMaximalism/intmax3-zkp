@@ -158,7 +158,13 @@ impl ChannelMemberKeys {
     /// id so the same channel always yields the same members (stable across re-runs). Active
     /// members occupy slots `0..TEST_ACTIVE_MEMBERS`; the remaining `MemberTree` slots stay empty
     /// (pad-to-MAX D6).
-    fn deterministic(channel_id: u32) -> Self {
+    ///
+    /// `pub` (multitoken Phase 5b): `generate_close_fixture` derives the CLOSE fixture's signing
+    /// keys from THIS function so the close proof's `member_set_commitment` equals the member set
+    /// that `generate_withdrawal_fixture` registers (both fixture generators share the single
+    /// deterministic derivation — the co-generation `CloseLifecycleE2E` requires to run its
+    /// close-intent section).
+    pub fn deterministic(channel_id: u32) -> Self {
         let mut secret_keys = Vec::with_capacity(TEST_ACTIVE_MEMBERS);
         let mut baby_keys = Vec::with_capacity(TEST_ACTIVE_MEMBERS);
         let mut regev_pks = Vec::with_capacity(TEST_ACTIVE_MEMBERS);

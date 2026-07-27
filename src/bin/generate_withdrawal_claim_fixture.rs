@@ -55,6 +55,11 @@ struct WithdrawalClaimDescriptor {
     user_amount_digest: String,
     withdrawal_nullifier: String,
     amount: u64,
+    /// Multi-token (§N-6): the claimed LOCAL token slot (claim PI limb 48).
+    token_slot: u8,
+    /// Multi-token (§N-6, m8): the PROVED base `token_index = registry[token_slot]` (claim PI
+    /// limb 49) — the asset the Manager pays this claim in.
+    token_index: u32,
 }
 
 fn main() -> anyhow::Result<()> {
@@ -121,6 +126,8 @@ fn main() -> anyhow::Result<()> {
         user_amount_digest: pis.user_amount_digest.to_string(),
         withdrawal_nullifier: pis.withdrawal_nullifier.to_string(),
         amount: pis.amount,
+        token_slot: pis.token_slot,
+        token_index: pis.token_index,
     };
     fs::write(
         out_dir.join("withdrawal_claim.json"),
