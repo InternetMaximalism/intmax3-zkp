@@ -113,6 +113,17 @@ const NOISE_LO_BITS: usize = 19;
 const NOISE_HI_HALF_BITS: usize = 3;
 /// Normalization carry width (tight bound 254; see the STARK carry-bound analysis).
 const CARRY_BITS: usize = 8;
+/// Bit width of the shifted ring-product quotient `κ + n ∈ [0, 2n]`, i.e. `ceil(log2(2n + 1))`
+/// = `bit_length(2n)`. Derived from [`REGEV_N`] so it tracks the ring dimension automatically.
+const KAPPA_BITS: usize = (usize::BITS - (2 * REGEV_N).leading_zeros()) as usize;
+
+// SECURITY: pin the derived width at compile time. `2^KAPPA_BITS` must strictly exceed `2n` (so
+// every honest κ decomposes) while `2^(KAPPA_BITS-1)` must not (so the width is not loose enough
+// to admit κ outside the bound).
+const _: () = {
+    assert!((1usize << KAPPA_BITS) > 2 * REGEV_N);
+    assert!((1usize << (KAPPA_BITS - 1)) <= 2 * REGEV_N);
+};
 
 // SECURITY: the digit-extraction soundness argument is arithmetic on these EXACT values; pin them
 // at compile time so a parameter change cannot silently invalidate it (mirrors transfer_stark.rs).
@@ -295,16 +306,24 @@ pub fn decryption_core<F: RichField + Extendable<D>, const D: usize>(
         }
     }
 
-    // κ range: κ ∈ [−n, n] ⇔ κ + n ∈ [0, 2n] decomposes in `ceil(log2(2n+1))` bits and ≤ 2n.
-    // n = 128 ⇒ 2n = 256 ⇒ 9 bits; we range-check κ + n to 9 bits then assert κ + n ≤ 2n.
+    // κ range: κ ∈ [−n, n] ⇔ κ + n ∈ [0, 2n] decomposes in `KAPPA_BITS = ceil(log2(2n+1))` bits
+    // and ≤ 2n.
+    //
+    // SECURITY: the width MUST be derived from `REGEV_N`, never written as a literal. It was
+    // hardcoded to 9 (correct only for n = 128, where 2n = 256 < 512) and silently became wrong
+    // when the ring dimension moved to 2048: an honest κ near ±n no longer fits 9 bits, and
+    // plonky2's `split_le` decomposition then contradicts itself ("wire set twice with different
+    // values") instead of reporting an out-of-range witness. A width that is too *large* is the
+    // more dangerous direction — it would admit κ outside [−n, n] and reopen the mod-q aliasing
+    // the bound exists to close.
     let kappa_shift = builder.constant(F::from_canonical_usize(n));
     let two_n = builder.constant(F::from_canonical_usize(2 * n));
     let bound_kappa = |builder: &mut CircuitBuilder<F, D>, k: Target| {
         let shifted = builder.add(k, kappa_shift);
-        builder.range_check(shifted, 9); // 0 ≤ κ + n < 512
-        // κ + n ≤ 2n  ⇔  2n − (κ + n) ∈ [0, 2n] ⊂ [0, 512), 9-bit decomposable.
+        builder.range_check(shifted, KAPPA_BITS); // 0 ≤ κ + n < 2^KAPPA_BITS
+        // κ + n ≤ 2n  ⇔  2n − (κ + n) ∈ [0, 2n], same width.
         let comp = builder.sub(two_n, shifted);
-        builder.range_check(comp, 9);
+        builder.range_check(comp, KAPPA_BITS);
     };
 
     // --- Per-coefficient ring products, reductions, digit extraction. -----------------------

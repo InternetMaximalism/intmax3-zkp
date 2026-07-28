@@ -78,7 +78,9 @@ postcard = { version = "1.1.3", features = ["alloc"] }
 # side by side). Pinned to the same rev the SIS-lattice-paymentchannel port
 # source uses. `default-features = false` drops `parallel` for wasm safety;
 # enable the `regev-parallel` feature for native proving speed.
-regev_plonky3 = { git = "https://github.com/leohio/regv-plonky3.git", rev = "3b17b8e", default-features = false }
+# TODO(before merge): push `fix/hiding-config-csprng` to the remote and pin its rev here.
+# Local path is a DEVELOPMENT-ONLY pointer so this branch can build against the CSPRNG fix.
+regev_plonky3 = { path = "/Users/plasma/repos/regv-plonky3", default-features = false }
 rand010 = { package = "rand", version = "0.10" }
 p3-air-05 = { package = "p3-air", version = "0.5.3" }
 p3-field-05 = { package = "p3-field", version = "0.5.3" }

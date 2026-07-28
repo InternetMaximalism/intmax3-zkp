@@ -120,8 +120,8 @@ use p3_lookup::{
 };
 use p3_matrix_05::dense::RowMajorMatrix;
 use regev_plonky3::{
-    Challenge, RegevStarkConfig,
-    config::{default_config, test_config},
+    Challenge, RegevZkStarkConfig,
+    config::{zk_config, zk_test_config},
     regev::{
         Ciphertext as UpstreamCiphertext, EncryptionWitness, F, PublicKey as UpstreamPublicKey,
         centered_to_field, field_to_centered,
@@ -185,10 +185,20 @@ impl RegevProofPurpose {
 
 /// STARK parameter strength.
 ///
-/// SECURITY: `Test` uses the upstream `test_config()` (8 FRI queries, 1-bit grinding) and is
-/// NOT secure — it exists so the test suite stays fast. `Production` uses `default_config()`
-/// (84 queries, 16-bit grinding, ~100-bit conjectured security). The level is chosen by the
-/// verifier, never read from the proof.
+/// SECURITY: both levels use the **hiding** (zero-knowledge) config — they differ only in FRI
+/// query count. `Test` uses `zk_test_config()` (8 queries, 1-bit grinding) and is NOT secure; it
+/// exists so the suite stays fast while still exercising the same hiding machinery as production.
+/// `Production` uses `zk_config()` (42 queries at rate 1/4, 16-bit grinding, ~100-bit conjectured
+/// security). The level is chosen by the verifier, never read from the proof.
+///
+/// SECURITY (why hiding at all): plain FRI is **not** zero-knowledge. Each query opens a full row
+/// of the committed LDE, so a proof with `Q` queries publishes `Q` evaluations of every trace
+/// column — including `DEC_S` (the secret key) and `DEC_BIT` (the secret balance). `DEC_BIT` has
+/// only 64 unknown entries (the amount bits; the remaining coefficients are zero under the D1
+/// encoding), so any `Q > 64` makes the system overdetermined and the balance falls out by linear
+/// algebra. That holds at every ring dimension, so it cannot be fixed by tuning `REGEV_N`. Keeping
+/// the secret columns `Kind::Local` (see the module docs) stops them being *published* as
+/// evaluations but does nothing about the query openings; only a hiding PCS closes it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RegevSecurityLevel {
     Test,
@@ -196,10 +206,10 @@ pub enum RegevSecurityLevel {
 }
 
 impl RegevSecurityLevel {
-    fn config(self) -> RegevStarkConfig {
+    fn config(self) -> RegevZkStarkConfig {
         match self {
-            Self::Test => test_config(),
-            Self::Production => default_config(),
+            Self::Test => zk_test_config(),
+            Self::Production => zk_config(),
         }
     }
 }
@@ -782,7 +792,7 @@ fn ring_identity_holds(key: &[F], r: &[F], addend: &[F], ct: &[F], k: &[F]) -> b
 // ---------------------------------------------------------------------------
 
 fn prove_one<A>(
-    config: &RegevStarkConfig,
+    config: &RegevZkStarkConfig,
     air: &A,
     trace: &RowMajorMatrix<F>,
     public_values: Vec<F>,
@@ -791,7 +801,7 @@ where
     A: Clone
         + LookupAir<F>
         + Air<SymbolicAirBuilder<F, Challenge>>
-        + for<'a> Air<ProverConstraintFolderWithLookups<'a, RegevStarkConfig>>
+        + for<'a> Air<ProverConstraintFolderWithLookups<'a, RegevZkStarkConfig>>
         + for<'a> Air<DebugConstraintBuilder<'a, F, Challenge>>,
 {
     regev_plonky3::init_thread_pool();
@@ -813,20 +823,20 @@ where
 /// Shape checks (`degree_bits`, published-evaluation count) run BEFORE `verify_batch` so an
 /// adversarial proof cannot reach huge-domain construction or out-of-bounds indexing.
 fn verify_one<A>(
-    config: &RegevStarkConfig,
+    config: &RegevZkStarkConfig,
     mut air: A,
     proof_bytes: &[u8],
     public_values: Vec<F>,
     num_published: usize,
-) -> Result<(Challenge, BatchProof<RegevStarkConfig>), RegevError>
+) -> Result<(Challenge, BatchProof<RegevZkStarkConfig>), RegevError>
 where
     A: Clone
         + LookupAir<F>
         + Air<SymbolicAirBuilder<F, Challenge>>
-        + for<'a> Air<VerifierConstraintFolderWithLookups<'a, RegevStarkConfig>>,
+        + for<'a> Air<VerifierConstraintFolderWithLookups<'a, RegevZkStarkConfig>>,
 {
     regev_plonky3::init_thread_pool();
-    let proof: BatchProof<RegevStarkConfig> =
+    let proof: BatchProof<RegevZkStarkConfig> =
         postcard::from_bytes(proof_bytes).map_err(|e| RegevError::ProofCodec(e.to_string()))?;
 
     // SECURITY: the Horner argument identifies "the polynomial" with "the trace column", so the
@@ -863,7 +873,7 @@ where
 /// `test_config()` batch-stark backend. Used by the P3 de-risk PoC only.
 pub fn prove_poseidon2_poc(trace: &RowMajorMatrix<F>) -> Result<Vec<u8>, RegevError> {
     let air = super::hash_sig::NoLookupPoseidon2Air::new();
-    prove_one(&test_config(), &air, trace, Vec::new())
+    prove_one(&zk_test_config(), &air, trace, Vec::new())
 }
 
 /// Verify a PoC Poseidon2 permutation proof. The shape check inside `verify_one` is specific to
@@ -871,13 +881,13 @@ pub fn prove_poseidon2_poc(trace: &RowMajorMatrix<F>) -> Result<Vec<u8>, RegevEr
 pub fn verify_poseidon2_poc(proof_bytes: &[u8]) -> Result<(), RegevError> {
     regev_plonky3::init_thread_pool();
     let mut air = super::hash_sig::NoLookupPoseidon2Air::new();
-    let proof: BatchProof<RegevStarkConfig> =
+    let proof: BatchProof<RegevZkStarkConfig> =
         postcard::from_bytes(proof_bytes).map_err(|e| RegevError::ProofCodec(e.to_string()))?;
     let lookups = air.get_lookups();
     let airs = vec![air];
     let common = CommonData::new(None, vec![lookups]);
     let pvs: Vec<Vec<F>> = vec![Vec::new()];
-    stark::verify_batch(&test_config(), &airs, &proof, &pvs, &common)
+    stark::verify_batch(&zk_test_config(), &airs, &proof, &pvs, &common)
         .map_err(|e| RegevError::ProofVerification(format!("{e:?}")))?;
     Ok(())
 }
@@ -910,7 +920,7 @@ pub fn prove_one_test_hash_sig(
     public_values: Vec<F>,
 ) -> Result<Vec<u8>, RegevError> {
     let air = super::hash_sig::Poseidon2HashSigAir::new();
-    prove_one(&test_config(), &air, trace, public_values)
+    prove_one(&zk_test_config(), &air, trace, public_values)
 }
 
 /// Verify a Poseidon2 hash-signature proof against the supplied public values `[pk_b ‖ m]`.
@@ -934,7 +944,7 @@ pub fn verify_hash_sig(
     }
     let config = level.config();
     let mut air = super::hash_sig::Poseidon2HashSigAir::new();
-    let proof: BatchProof<RegevStarkConfig> =
+    let proof: BatchProof<RegevZkStarkConfig> =
         postcard::from_bytes(proof_bytes).map_err(|e| RegevError::ProofCodec(e.to_string()))?;
     // SECURITY (shape check, mirrors `verify_one`): pin the instance count and trace height BEFORE
     // `verify_batch`, so a malformed-height proof is rejected early rather than reaching FRI-domain
@@ -996,7 +1006,7 @@ fn expected_published_evals(
 /// (the j-th published value is pinned in-circuit to the j-th global lookup's running
 /// evaluation, so positional matching is sound — same argument as upstream `verify_transfers`).
 fn check_published_evals(
-    proof: &BatchProof<RegevStarkConfig>,
+    proof: &BatchProof<RegevZkStarkConfig>,
     expected: &[Challenge],
 ) -> Result<(), RegevError> {
     let data = &proof.global_lookup_data[0];
