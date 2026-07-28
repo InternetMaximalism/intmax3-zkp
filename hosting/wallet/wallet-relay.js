@@ -19,7 +19,19 @@ const ROOT = __dirname; // hosting/wallet/ — serves wallet-live.html + wallet-
 const REPO = path.join(ROOT, '..', '..'); // repo root — target/, self_certs/, contracts/, pkg/, wallet-live-work/ live here (two levels up from hosting/wallet/)
 const WORK = path.join(REPO, 'wallet-live-work');
 const CLI = path.join(REPO, 'target', 'release', 'channel_member');
-const PORT = 8000;
+// Dev port. Defaults to 8000 (HTTPS) + 8001 (HTTP); override with RELAY_PORT to run a second relay
+// alongside an existing one. Validated: a malformed/out-of-range value is a hard startup error
+// rather than a silent fall back to a port another process may already own.
+const PORT = (() => {
+  const raw = process.env.RELAY_PORT;
+  if (raw === undefined || raw === '') return 8000;
+  const n = Number(raw);
+  if (!Number.isInteger(n) || n < 1 || n > 65534) {
+    console.error(`RELAY_PORT must be an integer in 1..65534 (got ${JSON.stringify(raw)})`);
+    process.exit(1);
+  }
+  return n;
+})();
 const CHANNELS = [7, 8];
 
 fs.mkdirSync(WORK, { recursive: true });
