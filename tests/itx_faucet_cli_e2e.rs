@@ -14,6 +14,11 @@
 //!   → [drip 1] refresh FAUCET_SLOT 1 ; send FAUCET_SLOT → DELEGATE ; cosign
 //!   → [drip 2] refresh FAUCET_SLOT 1 ; send FAUCET_SLOT → COSIGNER 1 ; cosign
 //!   → verify by DECRYPTION, not bookkeeping.
+//!   → [bring your own $ITX — the BROWSER-SHAPED path] a MEMBER, signing from its own bound (B-1b)
+//!     exit address, does approve(rollup, amt) → deposit(recipient, ITX_INDEX, amt, 0) with
+//!     msg.value 0 → `cosign-l1-deposit-import <slot> <tx> <rpc> l1_import_cosigned.json` with the
+//!     EXACT argv `/api/import-deposit` builds and NO `--allow-unbound-depositor`. The depositor's
+//!     in-channel balance and the channel's per-token fund must each rise by exactly the deposit.
 //!
 //! WHAT IT IS MEANT TO PROVE
 //!   1. THE MECHANISM EXISTS AT ALL. A homomorphically credited (the import) or just-spent (the
@@ -119,6 +124,11 @@ impl Drop for WorkspaceGuard {
             "probe_refresh.json",
             "gen_send_a.json",
             "gen_send_b.json",
+            "byo_import.json",
+            "byo_refresh.json",
+            "l1_import_cosigned.json",
+            "bad_import.json",
+            "replay_import.json",
         ] {
             let _ = std::fs::remove_file(repo_root().join(f));
         }
@@ -886,6 +896,230 @@ fn itx_faucet_cli_e2e() {
         cast_uint(&rpc, &itx, "balanceOf(address)(uint256)", &[&rollup]),
         FAUCET_SUPPLY as u128,
         "the L1 escrow must be untouched by in-channel drips"
+    );
+
+    // ── BRING YOUR OWN $ITX: the BROWSER-SHAPED ERC-20 deposit ──────────────────────────────
+    //
+    // Everything above escrows the faucet's supply with the OPERATOR's key, which is bound to no
+    // slot and therefore needs `--allow-unbound-depositor`. This block is the other path — the one
+    // `wallet-live.html` drives from MetaMask:
+    //
+    //   approve(rollup, amount)  →  deposit(recipient, ITX_INDEX, amount, 0) with msg.value 0
+    //   →  cosign-l1-deposit-import <slot> <txHash> <rpc> l1_import_cosigned.json
+    //
+    // and it is signed by the MEMBER'S OWN address, i.e. the slot's bound (B-1b) exit address. So
+    // the argv below is EXACTLY what `/api/import-deposit` builds (wallet-relay.js /
+    // wallet-relay-ec2.js): five positionals and NO flag. That is the point of the test — the
+    // browser path must work with the credit binding fully armed. The browser sends only
+    // { recipientSlot, txHash }; amount / depositor / token_index come from the `Deposited` log.
+    //
+    // The depositing slot is a CLI-controlled cosigner purely so the credited plaintext can be read
+    // back with `refresh` (the browser delegate's key lives in the browser). Its bound recipient is
+    // impersonated on anvil, which is what makes the depositor the slot's own address.
+    const BYO_DEPOSIT: u64 = 250_000_000; // 250 ITX, in a token with 6 decimals
+
+    let member_addr = {
+        let text = std::fs::read_to_string(repo_root().join("channel_snapshot.json"))
+            .expect("read channel_snapshot.json");
+        let v: serde_json::Value = serde_json::from_str(&text).expect("parse snapshot");
+        v["state"]["balanceState"]["recipients"][COSIGNER_RECIPIENT_SLOT as usize]
+            .as_str()
+            .expect("recipients[COSIGNER_RECIPIENT_SLOT]")
+            .to_string()
+    };
+    let fund_before = fund_amount(ITX_LOCAL_SLOT as usize);
+    let eth_fund_before = fund_amount(0);
+    let escrow_before = cast_uint(
+        &rpc,
+        &rollup,
+        "escrowedByToken(uint32)(uint256)",
+        &[&ITX_INDEX.to_string()],
+    );
+    // The member's in-channel ITX balance right now, DECRYPTED from the co-signed state (this is
+    // the `refresh (recipient probe)` above: exactly one drip).
+    let balance_before = DRIP;
+
+    // Give the member gas and the ITX it is about to bring in.
+    cast(
+        &rpc,
+        &["rpc", "anvil_setBalance", &member_addr, "0xde0b6b3a7640000"],
+    );
+    cast(
+        &rpc,
+        &[
+            "send",
+            &itx,
+            "transfer(address,uint256)",
+            &member_addr,
+            &BYO_DEPOSIT.to_string(),
+            "--private-key",
+            ANVIL0_KEY,
+        ],
+    );
+    cast(&rpc, &["rpc", "anvil_impersonateAccount", &member_addr]);
+    // Step 1 (browser: `approve` with spender = the ROLLUP, read from /api/deposit-info).
+    cast(
+        &rpc,
+        &[
+            "send",
+            &itx,
+            "approve(address,uint256)",
+            &rollup,
+            &BYO_DEPOSIT.to_string(),
+            "--from",
+            &member_addr,
+            "--unlocked",
+        ],
+    );
+    assert_eq!(
+        cast_uint(
+            &rpc,
+            &itx,
+            "allowance(address,address)(uint256)",
+            &[&member_addr, &rollup]
+        ),
+        BYO_DEPOSIT as u128,
+        "the approve must have set exactly the deposit allowance for the rollup"
+    );
+    // Step 2 (browser: `deposit` with tokenIndex != 0 and value 0 — the rollup credits a MEASURED
+    // balanceOf delta and reverts on stray ETH).
+    let byo_send = cast(
+        &rpc,
+        &[
+            "send",
+            &rollup,
+            "deposit(bytes32,uint32,uint256,bytes32)",
+            &deposit_recipient,
+            &ITX_INDEX.to_string(),
+            &BYO_DEPOSIT.to_string(),
+            "0x0000000000000000000000000000000000000000000000000000000000000000",
+            "--value",
+            "0",
+            "--from",
+            &member_addr,
+            "--unlocked",
+            "--json",
+        ],
+    );
+    let byo_tx = byo_send
+        .split("\"transactionHash\":\"")
+        .nth(1)
+        .and_then(|s| s.split('"').next())
+        .unwrap_or_else(|| panic!("no transactionHash in BYO deposit output:\n{byo_send}"))
+        .to_string();
+    cast(
+        &rpc,
+        &["rpc", "anvil_stopImpersonatingAccount", &member_addr],
+    );
+    assert_eq!(
+        cast_uint(
+            &rpc,
+            &rollup,
+            "escrowedByToken(uint32)(uint256)",
+            &[&ITX_INDEX.to_string()]
+        ),
+        escrow_before + BYO_DEPOSIT as u128,
+        "the per-token escrow must have grown by exactly the member's deposit"
+    );
+    // The allowance was consumed by the transfer — nothing stays approved after the deposit.
+    assert_eq!(
+        cast_uint(
+            &rpc,
+            &itx,
+            "allowance(address,address)(uint256)",
+            &[&member_addr, &rollup]
+        ),
+        0,
+        "the deposit must have consumed the whole allowance"
+    );
+
+    // A deposit made BY a bound address may not be credited anywhere else — no flag can override
+    // this, and the browser never passes one. (The faucet slot is a different active slot.)
+    let (ok, out) = cli_allow_fail(&[
+        "cosign-l1-deposit-import",
+        &FAUCET_SLOT.to_string(),
+        &byo_tx,
+        &rpc,
+        "byo_import.json",
+        "--allow-unbound-depositor",
+    ]);
+    assert!(
+        !ok && out.contains("CREDIT MISDIRECTION REFUSED"),
+        "a member's own ERC-20 deposit must not be creditable to another slot:\n{out}"
+    );
+
+    // Step 3 — the import, with the EXACT argv `/api/import-deposit` builds. No flag: the binding
+    // must resolve on its own because the depositor IS the slot's bound recipient.
+    let byo_import = cli(
+        &[
+            "cosign-l1-deposit-import",
+            &COSIGNER_RECIPIENT_SLOT.to_string(),
+            &byo_tx,
+            &rpc,
+            "l1_import_cosigned.json",
+        ],
+        &[],
+        "cosign-l1-deposit-import (browser-shaped ERC-20)",
+    );
+    assert!(
+        byo_import.to_lowercase().contains(&member_addr.to_lowercase()),
+        "the import must report the on-chain depositor it read from the log:\n{byo_import}"
+    );
+    assert!(
+        byo_import.contains(&format!("token_index {ITX_INDEX}")),
+        "the token index must have been read from the Deposited log:\n{byo_import}"
+    );
+
+    // The channel's per-token FUND rose by exactly the deposit …
+    assert_eq!(
+        fund_amount(ITX_LOCAL_SLOT as usize),
+        fund_before + BYO_DEPOSIT as u128,
+        "the channel's ITX fund must rise by exactly the member's deposit"
+    );
+    // … and so did the DEPOSITOR's own in-channel balance, read by DECRYPTION of the co-signed
+    // state rather than from any bookkeeping. This is the end-to-end claim: my ERC-20 went in, and
+    // it landed on MY slot, at the right magnitude (6-decimal base units, not 18).
+    let byo_balance = cli(
+        &[
+            "refresh",
+            &COSIGNER_RECIPIENT_SLOT.to_string(),
+            &ITX_LOCAL_SLOT.to_string(),
+            "byo_refresh.json",
+        ],
+        &[],
+        "refresh (BYO depositor probe)",
+    );
+    assert_eq!(
+        refresh_value(&byo_balance),
+        balance_before + BYO_DEPOSIT,
+        "the depositor's in-channel ITX balance must rise by exactly the deposited amount"
+    );
+    // The ETH lane is untouched by an ERC-20 deposit.
+    assert_eq!(
+        fund_amount(0),
+        eth_fund_before,
+        "an ERC-20 deposit must not move the native position"
+    );
+    // And the same deposit cannot be imported twice.
+    let (ok, out) = cli_allow_fail(&[
+        "cosign-l1-deposit-import",
+        &COSIGNER_RECIPIENT_SLOT.to_string(),
+        &byo_tx,
+        &rpc,
+        "byo_import.json",
+    ]);
+    assert!(
+        !ok && out.contains("REPLAY REFUSED"),
+        "a member's ERC-20 deposit must not be importable twice:\n{out}"
+    );
+
+    eprintln!(
+        "[itx-faucet-e2e] browser-shaped ERC-20 deposit OK: slot {COSIGNER_RECIPIENT_SLOT} \
+         approved + deposited {BYO_DEPOSIT} base units of $ITX (msg.value 0) from its OWN bound \
+         address {member_addr}; imported with the relay's exact argv (no \
+         --allow-unbound-depositor); balance {balance_before} -> {}, fund {fund_before} -> {}.",
+        balance_before + BYO_DEPOSIT,
+        fund_before + BYO_DEPOSIT as u128
     );
 
     eprintln!(

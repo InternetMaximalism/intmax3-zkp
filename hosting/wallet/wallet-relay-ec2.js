@@ -549,12 +549,32 @@ app.get('/api/tokens', (req, res) => {
   catch (e) { res.status(404).json({ error: 'no channel yet' }); }
 });
 
+// The reorg depth `cosign-l1-deposit-import` will require for a deposit on `chainId`.
+//
+// SECURITY: DISPLAY ONLY, and deliberately a MIRROR rather than a control. The enforcing check is
+// `min_confirmations_for` in src/bin/channel_member.rs (floor/default 0 on anvil 31337, floor 1 and
+// default 12 elsewhere), which reads the chain itself. This relay never passes a
+// `min_confirmations` argument to the CLI, and the CLI clamps any explicit value UP to the floor —
+// so nothing served here can lower the depth actually enforced. It exists only so the wallet can
+// render "confirming (n/12)" instead of an error while a fresh deposit matures.
+// Keep in sync with wallet-relay.js.
+function minConfirmationsForDisplay(chainId) {
+  return chainId === 31337 ? 0 : 12;
+}
+
+// `rollup` is both the deposit target and the ERC-20 approve spender the browser must use.
 app.get('/api/deposit-info', (req, res) => {
   try {
     const ch = reqChannel(req);
     const b = JSON.parse(fs.readFileSync(wc(ch, 'channel_backing.json'), 'utf8'));
     const chainId = parseInt(process.env.CHAIN_ID || '31337', 10);
-    res.json({ rollup: b.rollup, depositRecipient: b.deposit_recipient || b.rollup, rpc: RPC, chainId });
+    res.json({
+      rollup: b.rollup,
+      depositRecipient: b.deposit_recipient || b.rollup,
+      rpc: RPC,
+      chainId,
+      minConfirmations: minConfirmationsForDisplay(chainId),
+    });
   } catch (e) { res.status(404).json({ error: 'no deposit backing yet' }); }
 });
 
@@ -843,16 +863,23 @@ app.get('/api/tickets/history', (req, res) => {
   res.json(merged.reverse());
 });
 
+// A deposit TICKET is a client-side recovery note, not an authority. Its `amount`/`depositor`/
+// `tokenIndex` are DISPLAY ONLY and are never forwarded anywhere: `/api/import-deposit` accepts
+// exactly { recipientSlot, txHash } and the CLI reads the real economics from the transaction's
+// on-chain `Deposited` log. `tokenIndex` is normalized to a small non-negative integer (or dropped)
+// purely so the pending/history UI can label an ERC-20 deposit instead of assuming ETH.
 app.post('/api/ticket/deposit', (req, res) => {
   const ch = reqChannel(req);
-  const { amount, depositor, txHash, recipientSlot } = req.body || {};
+  const { amount, depositor, txHash, recipientSlot, tokenIndex } = req.body || {};
   if (!amount || !depositor || !txHash) return res.status(400).json({ error: 'needs { amount, depositor, txHash, recipientSlot }' });
   const existing = findActiveTicket(ch, 'deposit');
   if (existing) return res.status(409).json({ error: 'deposit already pending', ticket: existing });
+  const params = { amount: String(amount), depositor, recipientSlot: recipientSlot || 0, txHash };
+  if (Number.isInteger(tokenIndex) && tokenIndex >= 0 && tokenIndex <= 0xffffffff) params.tokenIndex = tokenIndex;
   const ticket = upsertTicket(ch, {
     id: 'dep_' + Date.now(), type: 'deposit', status: 'l1_done',
     createdAt: Date.now(), updatedAt: Date.now(),
-    params: { amount: String(amount), depositor, recipientSlot: recipientSlot || 0, txHash },
+    params,
     steps: { l1: { completedAt: Date.now(), txHash }, import: null },
   });
   res.json(ticket);

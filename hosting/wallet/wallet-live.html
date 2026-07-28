@@ -20,7 +20,7 @@
   .bal { font-size:34px; font-weight:600; }
   .bal small { font-size:13px; color:var(--muted); font-weight:400; }
   label { color:var(--muted); font-size:13px; display:block; margin:10px 0 3px; }
-  input { width:100%; background:#0d1117; color:var(--fg); border:1px solid var(--border); border-radius:7px; padding:9px; font:inherit; }
+  input, select { width:100%; background:#0d1117; color:var(--fg); border:1px solid var(--border); border-radius:7px; padding:9px; font:inherit; }
   .row { display:flex; gap:12px; } .row > * { flex:1; }
   button { background:var(--accent); color:#fff; border:0; border-radius:7px; padding:11px 18px; font:inherit; font-weight:600; cursor:pointer; margin-top:12px; width:100%; }
   button:disabled { opacity:.45; cursor:not-allowed; }
@@ -183,8 +183,16 @@
   <div class="modal">
     <button class="modal-close" id="depositClose">&times;</button>
     <h2>Deposit to Channel</h2>
-    <label>amount (ETH)</label>
+    <!-- Token selector. Populated ONLY with tokens this channel can actually accept AND whose
+         metadata is chain-verified (see depositableTokens): an unverified entry has null decimals,
+         so its amount cannot be safely denominated, and its symbol is untrusted. -->
+    <label>token</label>
+    <select id="depositToken"></select>
+    <label id="depositAmountLabel">amount (ETH)</label>
     <input id="depositAmount" type="number" step="any" value="0.01" min="0" />
+    <!-- Pre-signature disclosure: exactly what will be approved and deposited, and to whom. -->
+    <div class="hint" id="depositPreview" style="margin-top:10px;word-break:break-all"></div>
+    <div class="hint hidden" id="depositPending" style="margin-top:8px"></div>
     <button id="btnDeposit">Deposit</button>
   </div>
 </div>
@@ -229,7 +237,16 @@ $('navWithdraw').onclick = () => showView('withdraw');
 $('btnBack').onclick = () => showView('main');
 
 // ---- Deposit modal -------------------------------------------------------------------------
-$('navDeposit').onclick = () => $('depositModal').classList.remove('hidden');
+// (renderDepositTokens / refreshDepositInfoCache are hoisted function declarations defined with
+// the rest of the deposit flow further down.)
+$('navDeposit').onclick = async () => {
+  $('depositPending').classList.add('hidden');
+  $('depositModal').classList.remove('hidden');
+  renderDepositTokens();                       // render immediately from what we already have
+  try { await loadTokenMeta(true); } catch (e) {}
+  await refreshDepositInfoCache();             // so the spender can be shown before signing
+  renderDepositTokens();
+};
 $('depositClose').onclick = () => $('depositModal').classList.add('hidden');
 $('depositModal').onclick = (e) => { if (e.target === $('depositModal')) $('depositModal').classList.add('hidden'); };
 
@@ -254,7 +271,9 @@ function renderHistory(items) {
     const row = document.createElement('div');
     row.style.cssText = 'padding:10px 0;border-bottom:1px solid var(--border);font-size:13px';
     const label = TYPE_LABEL[t.type] || t.type;
-    const amt = (t.params && t.params.amount) ? fmtAmt(t.params.amount) + ' ETH' : '';
+    // Token-aware (a deposit ticket may be an ERC-20); falls back to raw base units when the
+    // token's metadata is not chain-verified.
+    const amt = (t.params && t.params.amount) ? ticketAmountLabel(t) : '';
     const top = document.createElement('div');
     top.style.cssText = 'display:flex;justify-content:space-between;gap:12px';
     const left = document.createElement('span');
@@ -290,9 +309,40 @@ function log(m, cls='') {
   el.scrollTop = el.scrollHeight;
 }
 
+// ══════════════════════════════════════════════════════════════════════════════════════════════
+// TESTABLE-BEGIN: deposit-ui
+//
+// Everything between the TESTABLE-BEGIN / TESTABLE-END markers is PURE: no DOM, no network, no
+// module-scope mutable state. `node/test/deposit-ui.test.js` EXTRACTS THIS EXACT REGION out of
+// this file and evaluates it in a `node:vm` sandbox, so the unit tests run against the source that
+// actually ships rather than a copy that can drift.
+//
+// DEVIATION (deliberate): the natural alternative is a separate ES module imported by this page,
+// but `wallet-live.html` is scp'd to the EC2 relay as a SINGLE file (`doc/docs/deploy-runbook.md`)
+// and a missed second file would break the whole inline module, not just deposits. Extraction keeps
+// one-file deployment while still testing the shipped bytes. Keep the markers on their own lines
+// and keep this region free of anything that needs a browser.
+// ══════════════════════════════════════════════════════════════════════════════════════════════
+
 // ---- Amounts (18 decimals, 1 token = 1 ETH = 10^18 wei) ------------------------------------
 const TOKEN_DECIMALS = 18;
-const TOKEN_UNIT = 10n ** 18n; // BigInt
+const NATIVE_TOKEN_INDEX = 0;
+const SYMBOL_MAX = 12;
+const NAME_MAX = 40;
+const MAX_DECIMALS = 36;
+// In-channel balances are u64 base units: `cosign-l1-deposit-import` refuses a wider
+// `Deposited.amount` rather than truncating it, which would leave the L1 escrow stranded with no
+// way to credit it. Refuse BEFORE anything is signed.
+const MAX_U64 = 18446744073709551615n;
+
+const HEX20_RE = /^0x[0-9a-fA-F]{40}$/;
+const HEX32_RE = /^0x[0-9a-fA-F]{64}$/;
+const ZERO_ADDRESS_20 = '0x0000000000000000000000000000000000000000';
+const ZERO_B32 = '0x0000000000000000000000000000000000000000000000000000000000000000';
+
+const DEPOSIT_SELECTOR = '0x48b8027b';   // deposit(bytes32,uint32,uint256,bytes32)
+const APPROVE_SELECTOR = '0x095ea7b3';   // approve(address,uint256)
+const ALLOWANCE_SELECTOR = '0xdd62ed3e'; // allowance(address,address)
 
 // Generic base-units → decimal string. `fmtAmt` below is the unchanged 18-dp wrapper that every
 // pre-existing ETH-denominated call site keeps using; only the per-token rows pass other decimals,
@@ -311,6 +361,215 @@ function fmtUnits(base, decimals) {
 }
 
 function fmtAmt(base) { return fmtUnits(base, TOKEN_DECIMALS); }
+
+// Strip control characters and bidi overrides: both can reorder/hide neighbouring text in the DOM
+// and are a cheap way to spoof a label. Then hard-cap the length.
+function clampLabel(s, max) {
+  const t = String(s).replace(/[\u0000-\u001f\u007f\u200e\u200f\u202a-\u202e\u2066-\u2069]/g, '').trim();
+  return t.length > max ? t.slice(0, max) + '…' : t;
+}
+
+// EXACT decimal normalization. Accepts `123`, `1.5`, `.5`, `1e-7`, `1.5E+3`; returns a plain
+// decimal string with the point shifted by the exponent, or null when the input is not a number.
+// SECURITY: exact string math only — routing through Number() would round a user-typed amount
+// before it ever reached BigInt, so the signed transaction could differ from what was displayed.
+function normalizeDecimalString(input) {
+  const s = String(input).trim();
+  const m = s.match(/^([+-]?)(\d*)(?:\.(\d*))?(?:[eE]([+-]?\d+))?$/);
+  if (!m) return null;
+  const whole = m[2] || '';
+  const frac = m[3] || '';
+  if (whole === '' && frac === '') return null; // "", ".", "e5", "+"
+  const exp = m[4] === undefined ? 0 : parseInt(m[4], 10);
+  if (!Number.isFinite(exp) || Math.abs(exp) > 1000) return null;
+  let digits = whole + frac;
+  let point = whole.length + exp;
+  if (point <= 0) { digits = '0'.repeat(1 - point) + digits; point = 1; }
+  if (point >= digits.length) { digits = digits + '0'.repeat(point - digits.length); }
+  const w = digits.slice(0, point).replace(/^0+(?=\d)/, '');
+  const f = digits.slice(point).replace(/0+$/, '');
+  const body = f === '' ? w : w + '.' + f;
+  return (m[1] === '-' && /[1-9]/.test(digits) ? '-' : '') + body;
+}
+
+// Decimal string → base units, for a token with EXACTLY `decimals` decimals.
+// SECURITY: this is the inverse of fmtUnits and the ONLY way an amount is denominated for a
+// non-native token. It refuses rather than rounds:
+//   * unknown/unverified decimals  → refuse (guessing 18 for $ITX's 6 is a 10^12 error);
+//   * more fractional digits than the token supports → refuse (slicing would sign a DIFFERENT
+//     amount than the one shown to the user).
+function toUnits(amountStr, decimals) {
+  if (!Number.isInteger(decimals) || decimals < 0 || decimals > MAX_DECIMALS) {
+    throw new Error('refusing to denominate an amount without verified token decimals');
+  }
+  const norm = normalizeDecimalString(amountStr);
+  if (norm === null) throw new Error('invalid amount "' + String(amountStr) + '"');
+  if (norm.startsWith('-')) throw new Error('amount must not be negative');
+  const dot = norm.indexOf('.');
+  const w = dot < 0 ? norm : norm.slice(0, dot);
+  const f = dot < 0 ? '' : norm.slice(dot + 1);
+  if (f.length > decimals) {
+    throw new Error('this token has ' + decimals + ' decimals — "' + String(amountStr)
+      + '" is more precise than it can represent');
+  }
+  const padded = f.padEnd(decimals, '0');
+  const base = BigInt(w) * (10n ** BigInt(decimals)) + BigInt(padded === '' ? '0' : padded);
+  return base.toString();
+}
+
+/** 18-dp wrapper kept for every pre-existing ETH-denominated call site (send/burn/join). */
+function toBase(tokens) { return toUnits(tokens, TOKEN_DECIMALS); }
+
+/**
+ * Parse + range-check a deposit amount for one token. Throws with a user-facing message.
+ * Returns the amount in that token's base units, as a decimal string.
+ */
+function parseDepositAmount(amountStr, decimals) {
+  const base = toUnits(amountStr, decimals);
+  const b = BigInt(base);
+  if (b <= 0n) throw new Error('enter a positive deposit amount');
+  if (b > MAX_U64) throw new Error('amount exceeds the u64 in-channel limit for this token');
+  return base;
+}
+
+// ---- Depositable token set -------------------------------------------------------------------
+// SECURITY (this is the gate the whole ERC-20 deposit path hangs off):
+//   * tokenIndex 0 is the native asset BY PROTOCOL CONSTRUCTION (the contract pays it from
+//     msg.value), so it is depositable with decimals 18 and NO metadata trust at all.
+//   * every other index is depositable ONLY when the relay marked it `verified === true` — i.e.
+//     the manifest address was read back EQUAL from the rollup's set-once `tokenAddressOf` — AND
+//     it carries a well-formed symbol, integer decimals and a non-zero 20-byte address.
+//     `verified === true` alone is NOT enough: TokenRegistry.metadataFor can return verified with
+//     `decimals: null` when the ERC-20 `decimals()` read-back failed, and an amount that cannot be
+//     denominated must not be depositable.
+//   * anything else NEVER appears in the selector: offering it would invite depositing the wrong
+//     asset (untrusted symbol) or the wrong magnitude (guessed decimals).
+// The returned `address` is the ONLY address the page will ever hand to an ERC-20 call, and it is
+// never used as an approve spender (that is always the rollup).
+function depositableTokens(payload) {
+  const raw = Array.isArray(payload && payload.tokens) ? payload.tokens
+    : (Array.isArray(payload) ? payload : []);
+  const out = [];
+  const seen = new Set();
+  for (const t of raw) {
+    if (!t || typeof t !== 'object') continue;
+    const idx = t.tokenIndex;
+    if (!Number.isInteger(idx) || idx < 0) continue;
+    if (seen.has(idx)) continue; // one entry per base index; a duplicate registry position adds nothing
+    const tokenSlot = Number.isInteger(t.tokenSlot) ? t.tokenSlot : null;
+    if (idx === NATIVE_TOKEN_INDEX) {
+      seen.add(idx);
+      out.push({ tokenIndex: idx, tokenSlot, label: 'ETH', name: null, decimals: TOKEN_DECIMALS, address: null, native: true });
+      continue;
+    }
+    if (t.verified !== true) continue;
+    if (t.native === true) continue; // "native" at a non-zero index contradicts the protocol — refuse
+    const label = typeof t.symbol === 'string' ? clampLabel(t.symbol, SYMBOL_MAX) : '';
+    if (label === '') continue;
+    if (!Number.isInteger(t.decimals) || t.decimals < 0 || t.decimals > MAX_DECIMALS) continue;
+    const address = typeof t.address === 'string' ? t.address.trim() : '';
+    if (!HEX20_RE.test(address) || address.toLowerCase() === ZERO_ADDRESS_20) continue;
+    seen.add(idx);
+    out.push({
+      tokenIndex: idx,
+      tokenSlot,
+      label,
+      name: typeof t.name === 'string' ? clampLabel(t.name, NAME_MAX) : null,
+      decimals: t.decimals,
+      address,
+      native: false,
+    });
+  }
+  return out;
+}
+
+// ---- ABI encoding ----------------------------------------------------------------------------
+function padHex(hex, bytes) {
+  const h = hex.startsWith('0x') ? hex.slice(2) : hex;
+  return h.padStart(bytes * 2, '0');
+}
+
+/**
+ * `deposit(bytes32 recipient, uint32 tokenIndex, uint256 amount, bytes32 auxData)`.
+ *
+ * Guards mirror the approve/allowance encoders below. `padHex` uses padStart, so an over-long
+ * input is never TRUNCATED into a valid-looking call to a different recipient — it stays
+ * over-long and produces malformed calldata. That is the safe direction, but relying on it means
+ * relying on every caller validating first; an encoder that throws is one that cannot be eroded
+ * by a future caller that forgets.
+ */
+function encodeDepositCall(recipient, tokenIndex, amount, auxData) {
+  if (!HEX32_RE.test(String(recipient))) throw new Error('deposit recipient is not a 32-byte value');
+  if (!HEX32_RE.test(String(auxData))) throw new Error('deposit auxData is not a 32-byte value');
+  if (!Number.isInteger(tokenIndex) || tokenIndex < 0 || tokenIndex > 0xffffffff) {
+    throw new Error('deposit tokenIndex is not a u32');
+  }
+  const amt = BigInt(amount);
+  if (amt < 0n || amt > MAX_U64) throw new Error('deposit amount is out of the u64 base-unit range');
+  const recipientHex = padHex(recipient, 32);
+  const tokenHex = padHex(tokenIndex.toString(16), 32);
+  const amountHex = padHex(amt.toString(16), 32);
+  const auxHex = padHex(auxData, 32);
+  return DEPOSIT_SELECTOR + recipientHex + tokenHex + amountHex + auxHex;
+}
+
+/** ERC-20 `approve(spender, amount)`. `spender` is ALWAYS the rollup — never a token-list value. */
+function encodeApproveCall(spender, amount) {
+  if (!HEX20_RE.test(String(spender))) throw new Error('approve spender is not a 20-byte address');
+  return APPROVE_SELECTOR + padHex(spender, 32) + padHex(BigInt(amount).toString(16), 32);
+}
+
+/** ERC-20 `allowance(owner, spender)` (read-only `eth_call`). */
+function encodeAllowanceCall(owner, spender) {
+  if (!HEX20_RE.test(String(owner))) throw new Error('allowance owner is not a 20-byte address');
+  if (!HEX20_RE.test(String(spender))) throw new Error('allowance spender is not a 20-byte address');
+  return ALLOWANCE_SELECTOR + padHex(owner, 32) + padHex(spender, 32);
+}
+
+/** One 32-byte ABI word → decimal string, or null when the reply is not exactly one word. */
+function decodeUint256Word(hex) {
+  const s = String(hex == null ? '' : hex).trim();
+  if (!/^0x[0-9a-fA-F]{64}$/.test(s)) return null; // '0x' (no code at the address) included
+  return BigInt(s).toString();
+}
+
+/**
+ * Is the current allowance enough to cover `neededBase`?
+ * FAIL CLOSED: an unreadable/absent allowance answers `false`, i.e. "approve first" — the
+ * conservative direction. It must never answer `true` on a value it could not parse.
+ */
+function allowanceSufficient(currentAllowance, neededBase) {
+  const need = BigInt(neededBase);
+  if (currentAllowance === null || currentAllowance === undefined) return false;
+  let cur;
+  try { cur = BigInt(currentAllowance); } catch (e) { return false; }
+  if (cur < 0n) return false;
+  return cur >= need;
+}
+
+/**
+ * Recognise the CLI's SPECIFIC under-confirmation refusal and read its progress out of the
+ * message: `deposit tx 0x… has 3 confirmation(s), need 12 on chain 11155111 …`.
+ * Returns { have, need } or null.
+ *
+ * SECURITY: the import is retried ONLY when this returns non-null. A loose /confirmation/i match
+ * would swallow unrelated failures into an endless "pending" spinner; every other error must
+ * surface to the user immediately. This is display + retry-gating only — the enforcing check runs
+ * in the CLI against the chain, and nothing here can lower it.
+ */
+function parseConfirmationProgress(message) {
+  const m = String(message == null ? '' : message)
+    .match(/has\s+(\d+)\s+confirmation\(s\),\s*need\s+(\d+)/);
+  if (!m) return null;
+  const have = parseInt(m[1], 10);
+  const need = parseInt(m[2], 10);
+  if (!Number.isInteger(have) || !Number.isInteger(need)) return null;
+  return { have, need };
+}
+
+// ══════════════════════════════════════════════════════════════════════════════════════════════
+// TESTABLE-END: deposit-ui
+// ══════════════════════════════════════════════════════════════════════════════════════════════
 
 // Best-effort BigInt coercion for wire values. Returns null rather than throwing so one malformed
 // entry can never blank the whole balance panel.
@@ -334,22 +593,6 @@ function toBigOrNull(v) {
   } catch (e) { return null; }
 }
 
-function toBase(tokens) {
-  let s = String(tokens).trim();
-  if (s === '' || s === '0') return '0';
-  if (/[eE]/.test(s)) s = Number(s).toFixed(TOKEN_DECIMALS);
-  const neg = s.startsWith('-');
-  const abs = neg ? s.slice(1) : s;
-  const parts = abs.split('.');
-  if (parts.length > 2) throw new Error('invalid amount: multiple decimal points');
-  const [wholePart, fracPart] = parts;
-  const w = BigInt(wholePart || '0') * TOKEN_UNIT;
-  if (!fracPart) return (neg ? -w : w).toString();
-  const padded = fracPart.padEnd(TOKEN_DECIMALS, '0').slice(0, TOKEN_DECIMALS);
-  const f = BigInt(padded);
-  return (neg ? -(w + f) : w + f).toString();
-}
-
 // ---- Token metadata (UNTRUSTED DECORATION) --------------------------------------------------
 // SECURITY: token metadata carries ZERO authority. The authoritative identity of a token is the
 // BASE-layer `tokenIndex` that the channel's registry position is bound to; `symbol` / `name` /
@@ -359,22 +602,14 @@ function toBase(tokens) {
 //   - guessing 18 decimals for an unknown token misstates a balance by orders of magnitude;
 //   - inventing/echoing an unverified symbol lets a worthless token masquerade as a valuable one.
 // The ONLY exception is tokenIndex 0, which is the native asset by protocol construction (the
-// deposit path hardcodes tokenIndex 0 and pays msg.value) — not by anything the relay told us.
-const NATIVE_TOKEN_INDEX = 0;
-const SYMBOL_MAX = 12;
-const NAME_MAX = 40;
+// deposit path pays msg.value for it) — not by anything the relay told us.
+// (NATIVE_TOKEN_INDEX / SYMBOL_MAX / NAME_MAX / clampLabel live in the TESTABLE region above.)
 
 let tokenMeta = new Map();       // tokenIndex -> sanitized record
 let tokenMetaChannel = null;     // channel the map was fetched for (never reuse across channels)
+let tokenListRaw = null;         // last raw /api/tokens payload (the deposit selector's ONLY source)
 let _tokenMetaInflight = null;
 let _tokenMetaLastTry = 0;
-
-// Strip control characters and bidi overrides: both can reorder/hide neighbouring text in the DOM
-// and are a cheap way to spoof a label. Then hard-cap the length.
-function clampLabel(s, max) {
-  const t = String(s).replace(/[\u0000-\u001f\u007f\u200e\u200f\u202a-\u202e\u2066-\u2069]/g, '').trim();
-  return t.length > max ? t.slice(0, max) + '…' : t;
-}
 
 function sanitizeTokenMeta(t) {
   if (!t || typeof t !== 'object') return null;
@@ -403,14 +638,20 @@ async function loadTokenMeta(force) {
   _tokenMetaLastTry = Date.now();
   _tokenMetaInflight = (async () => {
     const m = new Map();
+    let raw = null;
     try {
       const j = JSON.parse(await api('/api/tokens', null, 'GET'));
+      raw = j;
       for (const t of (Array.isArray(j && j.tokens) ? j.tokens : [])) {
         const s = sanitizeTokenMeta(t);
         if (s) m.set(s.tokenIndex, s);
       }
     } catch (e) { /* no endpoint / offline → no-metadata mode (raw rendering) */ }
     tokenMeta = m;
+    // The deposit selector reads `tokenListRaw` through depositableTokens(), which re-applies the
+    // verification gate itself. A failed fetch leaves it null ⇒ native-ETH-only selector, i.e.
+    // exactly the pre-multitoken behaviour. It is NEVER left stale from another channel.
+    tokenListRaw = raw;
     tokenMetaChannel = ch;
     return m;
   })();
@@ -455,8 +696,7 @@ let walletProvider = null; // the selected EIP-1193 provider
 let walletName = '';
 const discoveredWallets = []; // { info, provider } from EIP-6963
 
-const ZERO_B32 = '0x0000000000000000000000000000000000000000000000000000000000000000';
-const DEPOSIT_SELECTOR = '0x48b8027b'; // deposit(bytes32,uint32,uint256,bytes32)
+// (ZERO_B32 / DEPOSIT_SELECTOR / padHex / encodeDepositCall live in the TESTABLE region above.)
 
 function hasWallet() { return walletProvider !== null || discoveredWallets.length > 0 || typeof window.ethereum !== 'undefined'; }
 
@@ -567,58 +807,179 @@ async function ensureWallet() {
   });
 }
 
-function padHex(hex, bytes) {
-  const h = hex.startsWith('0x') ? hex.slice(2) : hex;
-  return h.padStart(bytes * 2, '0');
-}
-
-function encodeDepositCall(recipient, tokenIndex, amount, auxData) {
-  const recipientHex = padHex(recipient, 32);
-  const tokenHex = padHex(tokenIndex.toString(16), 32);
-  const amountHex = padHex(BigInt(amount).toString(16), 32);
-  const auxHex = padHex(auxData, 32);
-  return DEPOSIT_SELECTOR + recipientHex + tokenHex + amountHex + auxHex;
-}
-
-async function sendDepositViaWallet(amount) {
-  await ensureWallet();
+/**
+ * `/api/deposit-info`, SHAPE-CHECKED.
+ *
+ * SECURITY: `rollup` is both the deposit target AND the ERC-20 approve spender, and
+ * `depositRecipient` is the channel binding the on-chain `Deposited` log is matched against — so
+ * both are validated here rather than being padded blindly by `padHex` (which would silently
+ * produce a garbage word from a malformed value). `minConfirmations` is DISPLAY ONLY: the enforcing
+ * depth check lives in `cosign-l1-deposit-import`, which reads the chain itself and clamps any
+ * explicit value UP to the per-chain floor. Nothing here can lower it.
+ */
+async function fetchDepositInfo() {
   const info = JSON.parse(await api('/api/deposit-info', null, 'GET'));
+  if (!HEX20_RE.test(String(info && info.rollup))) throw new Error('relay returned a malformed rollup address');
+  if (String(info.rollup).toLowerCase() === ZERO_ADDRESS_20) throw new Error('relay returned the zero rollup address');
+  if (!HEX32_RE.test(String(info.depositRecipient))) throw new Error('relay returned a malformed deposit recipient');
+  if (!Number.isInteger(info.chainId) || info.chainId <= 0) throw new Error('relay returned a malformed chainId');
+  const minConf = Number.isInteger(info.minConfirmations) && info.minConfirmations >= 0
+    ? info.minConfirmations : null;
+  return { rollup: info.rollup, depositRecipient: info.depositRecipient, rpc: info.rpc, chainId: info.chainId, minConfirmations: minConf };
+}
+
+async function ensureChain(info) {
   const currentChainId = await walletProvider.request({ method: 'eth_chainId' });
   const targetChainId = '0x' + info.chainId.toString(16);
-  if (currentChainId !== targetChainId) {
-    try {
-      await walletProvider.request({ method: 'wallet_switchEthereumChain', params: [{ chainId: targetChainId }] });
-    } catch (switchErr) {
-      if (switchErr.code === 4902) {
-        await walletProvider.request({
-          method: 'wallet_addEthereumChain',
-          params: [{ chainId: targetChainId, chainName: 'Anvil Local', rpcUrls: [info.rpc], nativeCurrency: { name: 'ETH', symbol: 'ETH', decimals: 18 } }],
-        });
-      } else { throw switchErr; }
-    }
+  if (currentChainId === targetChainId) return;
+  try {
+    await walletProvider.request({ method: 'wallet_switchEthereumChain', params: [{ chainId: targetChainId }] });
+  } catch (switchErr) {
+    if (switchErr.code === 4902) {
+      await walletProvider.request({
+        method: 'wallet_addEthereumChain',
+        params: [{ chainId: targetChainId, chainName: 'Anvil Local', rpcUrls: [info.rpc], nativeCurrency: { name: 'ETH', symbol: 'ETH', decimals: 18 } }],
+      });
+    } else { throw switchErr; }
   }
-  const data = encodeDepositCall(info.depositRecipient, 0, amount, ZERO_B32);
-  const txHash = await walletProvider.request({
-    method: 'eth_sendTransaction',
-    params: [{
-      from: walletAccount,
-      to: info.rollup,
-      value: '0x' + BigInt(amount).toString(16),
-      data: data,
-    }],
-  });
-  log('deposit tx sent via ' + walletName + ': ' + txHash, 'ok');
-  log('waiting for confirmation...');
-  let receipt = null;
-  for (let i = 0; i < 60; i++) {
-    receipt = await walletProvider.request({ method: 'eth_getTransactionReceipt', params: [txHash] });
-    if (receipt) break;
+}
+
+/** Poll for a receipt; throws on revert or timeout. */
+async function awaitReceipt(txHash, what, timeoutSec = 120) {
+  for (let i = 0; i < timeoutSec; i++) {
+    const receipt = await walletProvider.request({ method: 'eth_getTransactionReceipt', params: [txHash] });
+    if (receipt) {
+      if (receipt.status === '0x0') throw new Error(what + ' tx reverted');
+      return receipt;
+    }
     await new Promise(r => setTimeout(r, 1000));
   }
-  if (!receipt) throw new Error('tx not confirmed after 60s');
-  if (receipt.status === '0x0') throw new Error('deposit tx reverted');
-  log('deposit confirmed in block ' + parseInt(receipt.blockNumber, 16), 'ok');
-  return { txHash, depositor: walletAccount };
+  throw new Error(what + ' tx not mined after ' + timeoutSec + 's');
+}
+
+/**
+ * Bring `amountBase` of ONE token into the channel from the connected wallet.
+ *
+ * `token` MUST come from `depositableTokens()` — see the gate there. Native (tokenIndex 0) keeps
+ * the original behaviour exactly: `value: amount`, no approve. Every other index is an ERC-20:
+ * read `allowance(owner, rollup)`, `approve(rollup, amount)` when short, then `deposit(...)` with
+ * `value: '0x0'`.
+ *
+ * SECURITY, stated at the call sites they govern:
+ *   * the approve SPENDER is always `info.rollup` from /api/deposit-info — never a token-list
+ *     field, never user input;
+ *   * the token CONTRACT address is always `token.address`, which came from the chain-VERIFIED
+ *     /api/tokens entry for this exact `tokenIndex`;
+ *   * `value` is explicitly zero for a non-native deposit (the contract also reverts on stray ETH,
+ *     but we do not lean on that);
+ *   * the exact token, amount and spender are logged BEFORE each signature request.
+ */
+async function sendDepositViaWallet(amountBase, token) {
+  if (!token || !Number.isInteger(token.tokenIndex) || token.tokenIndex < 0) {
+    throw new Error('no depositable token selected');
+  }
+  await ensureWallet();
+  const info = await fetchDepositInfo();
+  await ensureChain(info);
+
+  const shown = fmtUnits(amountBase, token.decimals) + ' ' + token.label;
+
+  if (token.tokenIndex !== NATIVE_TOKEN_INDEX) {
+    // SECURITY: refuse anything that did not come through the verified-token gate. `address` is
+    // null for the native asset and for every entry depositableTokens() rejected, so a non-native
+    // deposit without a well-formed address is a bug, not a user error.
+    if (!HEX20_RE.test(String(token.address)) || String(token.address).toLowerCase() === ZERO_ADDRESS_20) {
+      throw new Error('refusing an ERC-20 deposit without a chain-verified token address');
+    }
+    // SECURITY: spender = the ROLLUP from /api/deposit-info. This is the same address the deposit
+    // transaction is sent to, and it is the only address this page ever approves.
+    const spender = info.rollup;
+    let allowance = null;
+    try {
+      allowance = decodeUint256Word(await walletProvider.request({
+        method: 'eth_call',
+        params: [{ to: token.address, data: encodeAllowanceCall(walletAccount, spender) }, 'latest'],
+      }));
+    } catch (e) {
+      log('  could not read the current allowance (' + e.message + ') — will approve', '');
+    }
+    if (!allowanceSufficient(allowance, amountBase)) {
+      // Some ERC-20s (USDT-style) refuse a non-zero → non-zero approve. Reset first, only in that
+      // exact case, so a partially-approved allowance cannot wedge the flow.
+      if (allowance !== null && BigInt(allowance) > 0n) {
+        log('  resetting the existing allowance to 0 first (spender ' + spender + ')...');
+        const resetHash = await walletProvider.request({
+          method: 'eth_sendTransaction',
+          params: [{ from: walletAccount, to: token.address, value: '0x0', data: encodeApproveCall(spender, '0') }],
+        });
+        await awaitReceipt(resetHash, 'approve-reset');
+      }
+      log('APPROVE: ' + shown + ' (' + amountBase + ' base units) of ' + token.label
+        + ' at ' + token.address + ' — spender ' + spender + ' (the rollup)', 'zk');
+      const approveHash = await walletProvider.request({
+        method: 'eth_sendTransaction',
+        params: [{ from: walletAccount, to: token.address, value: '0x0', data: encodeApproveCall(spender, amountBase) }],
+      });
+      log('  approve tx sent: ' + approveHash);
+      await awaitReceipt(approveHash, 'approve');
+      log('  approve confirmed', 'ok');
+    } else {
+      log('  existing allowance already covers this deposit — no approve needed');
+    }
+  }
+
+  const data = encodeDepositCall(info.depositRecipient, token.tokenIndex, amountBase, ZERO_B32);
+  // NON-NATIVE ⇒ value MUST be zero. Passed explicitly; the contract's
+  // `NonEthDepositMustNotCarryEth` is the second line of defence, not the first.
+  const value = token.tokenIndex === NATIVE_TOKEN_INDEX ? '0x' + BigInt(amountBase).toString(16) : '0x0';
+  log('DEPOSIT: ' + shown + ' (' + amountBase + ' base units, token #' + token.tokenIndex
+    + ') → rollup ' + info.rollup + ', value ' + value, 'zk');
+  const txHash = await walletProvider.request({
+    method: 'eth_sendTransaction',
+    params: [{ from: walletAccount, to: info.rollup, value, data }],
+  });
+  log('deposit tx sent via ' + walletName + ': ' + txHash, 'ok');
+  log('waiting for the deposit to be mined...');
+  const receipt = await awaitReceipt(txHash, 'deposit');
+  const blockNumber = parseInt(receipt.blockNumber, 16);
+  log('deposit mined in block ' + blockNumber, 'ok');
+  return { txHash, depositor: walletAccount, blockNumber, minConfirmations: info.minConfirmations };
+}
+
+// ---- Deposit import, confirmation-aware -----------------------------------------------------
+// `cosign-l1-deposit-import` requires the deposit to be REORG-SAFE before it credits anything:
+// 12 confirmations on a real chain (0 on anvil, which has no reorg model). A mined-but-young
+// deposit therefore gets REFUSED, which is correct — and used to surface as "deposit failed".
+//
+// SECURITY: this waits; it does NOT relax anything. The page never passes a `min_confirmations`
+// argument (the relay does not accept one either), so the depth enforced is always the CLI's own
+// per-chain default, and an explicit value would in any case be clamped UP to the floor. Retrying
+// is gated on `parseConfirmationProgress` matching the CLI's SPECIFIC refusal text — every other
+// error, including a refusal to credit at all, aborts immediately instead of spinning forever.
+const IMPORT_RETRY_MS = 5000;
+const IMPORT_TIMEOUT_MS = 20 * 60 * 1000; // ~100 blocks of headroom over the 12-confirmation default
+
+async function importDepositAwaitingConfirmations(recipientSlot, txHash, onPending) {
+  const t0 = Date.now();
+  let announced = false;
+  for (;;) {
+    try {
+      // The ONLY fields the import accepts: the economics are read from the on-chain Deposited log.
+      return await api('/api/import-deposit', JSON.stringify({ recipientSlot, txHash }));
+    } catch (e) {
+      const prog = parseConfirmationProgress(e.message);
+      if (!prog) throw e;                       // a real failure — surface it, do not hide it
+      if (Date.now() - t0 > IMPORT_TIMEOUT_MS) {
+        throw new Error('still waiting for confirmations after '
+          + Math.round(IMPORT_TIMEOUT_MS / 60000) + ' min (' + prog.have + '/' + prog.need
+          + '). The deposit is safe on L1 — reopen the wallet and use "Resume Import".');
+      }
+      const text = 'confirming on L1 (' + prog.have + '/' + prog.need + ' confirmations)…';
+      if (onPending) onPending(text, prog);
+      if (!announced) { log('deposit mined — ' + text + ' the import runs automatically.', ''); announced = true; }
+      await new Promise((r) => setTimeout(r, IMPORT_RETRY_MS));
+    }
+  }
 }
 
 // ---- State ---------------------------------------------------------------------------------
@@ -954,6 +1315,26 @@ async function fetchTickets() {
   } catch (e) { activeTickets = []; }
 }
 
+/**
+ * Human label for a ticket's amount.
+ *
+ * SECURITY: `params.tokenIndex` is DISPLAY-only metadata the page recorded when it created the
+ * ticket — it never reaches the import, which reads the token from the on-chain `Deposited` log.
+ * It is rendered through `describeToken`, so an unverified/unknown token degrades to raw base
+ * units + `#index` exactly like the balance rows, never to a guessed 18-dp figure. A ticket
+ * written before this field existed has no tokenIndex and was, by construction, native ETH.
+ */
+function ticketAmountLabel(t) {
+  const p = (t && t.params) || {};
+  if (p.amount === undefined || p.amount === null) return '?';
+  const idx = Number.isInteger(p.tokenIndex) && p.tokenIndex >= 0 ? p.tokenIndex : NATIVE_TOKEN_INDEX;
+  const d = describeToken(idx);
+  try {
+    return d.trusted ? fmtUnits(p.amount, d.decimals) + ' ' + d.label
+      : String(p.amount) + ' base units of #' + idx;
+  } catch (e) { return String(p.amount) + ' base units of #' + idx; }
+}
+
 function ticketOfType(type) {
   return activeTickets.find(t => t.type === type && !['settle_done','import_done','claim_done'].includes(t.status));
 }
@@ -999,10 +1380,9 @@ function applyTicketState() {
         div.appendChild(btn);
       }
     } else if (t.type === 'deposit') {
-      const amt = t.params && t.params.amount ? fmtAmt(t.params.amount) : '?';
       const info = document.createElement('span');
       info.style.cssText = 'flex:1;font-size:13px';
-      info.textContent = 'Deposit ' + amt + ' ETH [' + t.status + ']';
+      info.textContent = 'Deposit ' + ticketAmountLabel(t) + ' [' + t.status + ']';
       div.appendChild(info);
       if (t.status === 'l1_done') {
         const btn = document.createElement('button');
@@ -1010,20 +1390,25 @@ function applyTicketState() {
         btn.style.cssText = 'margin:0;width:auto;padding:6px 14px;font-size:13px';
         btn.onclick = async () => {
           btn.disabled = true;
+          const label = btn.textContent;
           try {
             log('importing deposit into channel...');
             // The ticket carries the L1 txHash; the relay/CLI reads the deposit's economics from
-            // that transaction's on-chain Deposited log (depositor/amount are no longer sent).
-            const snap = await api('/api/import-deposit', JSON.stringify({
-              recipientSlot: t.params.recipientSlot || mySlot,
-              txHash: t.params.txHash,
-            }));
+            // that transaction's on-chain Deposited log (depositor/amount/tokenIndex are not sent).
+            // Token-agnostic: an ERC-20 deposit resumes through exactly this path.
+            const snap = await importDepositAwaitingConfirmations(
+              t.params.recipientSlot || mySlot,
+              t.params.txHash,
+              (text) => { btn.textContent = text; },
+            );
+            btn.textContent = label;
             setChannelFrom(snap);
+            await loadTokenMeta(true);
             const r = JSON.parse(await call('importChannel', { snapshotJson: snap }));
             mySlot = r.slot; showBalance(r);
-            log('deposit imported -- balance ' + fmtAmt(r.balance), 'ok');
+            log('deposit imported -- ' + ticketAmountLabel(t) + ' credited to slot ' + mySlot, 'ok');
             await fetchTickets(); applyTicketState();
-          } catch (e) { log('import failed: ' + e.message, 'err'); btn.disabled = false; }
+          } catch (e) { btn.textContent = label; log('import failed: ' + e.message, 'err'); btn.disabled = false; }
         };
         div.appendChild(btn);
       }
@@ -1116,14 +1501,18 @@ $('btnOpen').onclick = guard('join', async () => {
     }
 
     if (depositTokens > 0) {
-      const depositAmt = toBase(String(depositTokens));
+      // The join panel's initial deposit is NATIVE ETH by construction (tokenIndex 0) — bringing
+      // your own ERC-20 in is the Deposit modal's job, once the channel exists and its token
+      // registry is known.
+      const nativeToken = { tokenIndex: NATIVE_TOKEN_INDEX, tokenSlot: null, label: 'ETH', name: null, decimals: TOKEN_DECIMALS, address: null, native: true };
+      const depositAmt = parseDepositAmount(String(depositTokens), TOKEN_DECIMALS);
       clearInterval(tick);
       tick = setInterval(() => { $('btnOpen').textContent = 'Depositing... ' + Math.round((Date.now()-t0)/1000) + 's'; }, 250);
       log('sending L1 deposit via wallet (' + fmtAmt(depositAmt) + ' ETH)...');
-      const dr = await sendDepositViaWallet(depositAmt);
+      const dr = await sendDepositViaWallet(depositAmt, nativeToken);
 
       try {
-        await api('/api/ticket/deposit', JSON.stringify({ amount: depositAmt, depositor: dr.depositor, txHash: dr.txHash, recipientSlot: mySlot }));
+        await api('/api/ticket/deposit', JSON.stringify({ amount: depositAmt, depositor: dr.depositor, txHash: dr.txHash, recipientSlot: mySlot, tokenIndex: NATIVE_TOKEN_INDEX }));
       } catch (e) { log('ticket save failed (continuing): ' + e.message, ''); }
       // Surface the initial deposit as a PENDING ticket now (l1_done), so it is tracked until the
       // import below reflects it in the balance (then it moves to Processed/History). If the import
@@ -1131,9 +1520,15 @@ $('btnOpen').onclick = guard('join', async () => {
       await fetchTickets(); applyTicketState();
 
       clearInterval(tick);
-      tick = setInterval(() => { $('btnOpen').textContent = 'Importing... ' + Math.round((Date.now()-t0)/1000) + 's'; }, 250);
+      // While the deposit is under-confirmed the button shows the live "confirming (n/12)" count
+      // instead of an error — the import keeps retrying underneath (see
+      // importDepositAwaitingConfirmations; the confirmation depth itself is NOT relaxed).
+      let importPhase = 'Importing';
+      tick = setInterval(() => { $('btnOpen').textContent = importPhase + '... ' + Math.round((Date.now()-t0)/1000) + 's'; }, 250);
       log('importing deposit into channel...');
-      const snap2 = await api('/api/import-deposit', JSON.stringify({ recipientSlot: mySlot, txHash: dr.txHash }));
+      const snap2 = await importDepositAwaitingConfirmations(mySlot, dr.txHash, (text, prog) => {
+        importPhase = 'Confirming ' + prog.have + '/' + prog.need;
+      });
       setChannelFrom(snap2);
       const r2 = JSON.parse(await call('importChannel', { snapshotJson: snap2 }));
       mySlot = r2.slot; showBalance(r2);
@@ -1291,31 +1686,118 @@ $('btnSend').onclick = guard('send', async () => {
 });
 
 // ---- DEPOSIT MODAL -------------------------------------------------------------------------
+// SECURITY: `depositableTokens()` (TESTABLE region) is the ONE gate deciding what may be
+// deposited. Only tokenIndex 0 (native, by protocol construction) and chain-VERIFIED entries with
+// a well-formed symbol, integer decimals and a non-zero contract address get an <option> — so an
+// unverified or unknown token cannot be selected, and no amount is ever denominated with guessed
+// decimals. The rendered label is relay-supplied text and goes in via textContent, next to the
+// authoritative `#<tokenIndex>`.
+let depositTokenOptions = [];
+let _depositInfo = null; // cached /api/deposit-info, for showing the spender before signing
+
+async function refreshDepositInfoCache() {
+  try { _depositInfo = await fetchDepositInfo(); }
+  catch (e) { _depositInfo = null; }
+  return _depositInfo;
+}
+
+function selectedDepositToken() {
+  const idx = parseInt($('depositToken').value, 10);
+  if (!Number.isInteger(idx)) return null;
+  return depositTokenOptions.find((t) => t.tokenIndex === idx) || null;
+}
+
+function renderDepositTokens() {
+  const sel = $('depositToken');
+  const prev = sel.value;
+  depositTokenOptions = depositableTokens(tokenListRaw);
+  if (depositTokenOptions.length === 0) {
+    // No token list at all (older relay, offline, or channel not created yet). The native asset is
+    // depositable by protocol construction, so fall back to exactly the pre-multitoken behaviour
+    // rather than blocking deposits. This is NOT a metadata guess: index 0 is native by definition.
+    depositTokenOptions = [{ tokenIndex: NATIVE_TOKEN_INDEX, tokenSlot: null, label: 'ETH', name: null, decimals: TOKEN_DECIMALS, address: null, native: true }];
+  }
+  sel.textContent = '';
+  for (const t of depositTokenOptions) {
+    const o = document.createElement('option');
+    o.value = String(t.tokenIndex);
+    o.textContent = t.label + '  ·  #' + t.tokenIndex + (t.native ? ' (native)' : '');
+    if (t.name) o.title = t.name;
+    sel.appendChild(o);
+  }
+  if (prev && depositTokenOptions.some((t) => String(t.tokenIndex) === prev)) sel.value = prev;
+  renderDepositPreview();
+}
+
+// Pre-signature disclosure (SECURITY RULE: the user must see exactly what they approve and
+// deposit). Shows the verified label, the amount in both human and base units, the token contract
+// and — for an ERC-20 — the approve SPENDER, which is always the rollup from /api/deposit-info.
+function renderDepositPreview() {
+  const el = $('depositPreview');
+  const t = selectedDepositToken();
+  $('depositAmountLabel').textContent = 'amount (' + (t ? t.label : '—') + ')';
+  el.style.whiteSpace = 'pre-wrap';
+  if (!t) { el.className = 'hint'; el.textContent = ''; return; }
+  let base;
+  try { base = parseDepositAmount($('depositAmount').value, t.decimals); }
+  catch (e) { el.className = 'hint err'; el.textContent = e.message; return; }
+  el.className = 'hint';
+  const rollup = _depositInfo ? _depositInfo.rollup : null;
+  const lines = ['deposit ' + fmtUnits(base, t.decimals) + ' ' + t.label
+    + '  (' + base + ' base units · token #' + t.tokenIndex + ' · ' + t.decimals + ' decimals)'];
+  if (t.native) {
+    lines.push('native ETH, sent as msg.value' + (rollup ? ' to rollup ' + rollup : ''));
+  } else {
+    lines.push('token contract: ' + t.address);
+    lines.push('approve spender: ' + (rollup ? rollup + '  (the rollup)' : 'loading…'));
+    lines.push('msg.value: 0');
+  }
+  el.textContent = lines.join('\n');
+}
+
+$('depositToken').onchange = renderDepositPreview;
+$('depositAmount').oninput = renderDepositPreview;
+
 $('btnDeposit').onclick = guard('deposit', async () => {
   const t0 = Date.now();
   let phase = 'Depositing';
   const tick = setInterval(() => { $('btnDeposit').textContent = phase + '... ' + Math.round((Date.now()-t0)/1000) + 's'; }, 250);
+  const pend = $('depositPending');
   try {
     $('btnDeposit').disabled = true;
-    if (!$('depositAmount').value || isNaN(Number($('depositAmount').value)) || Number($('depositAmount').value) <= 0) throw new Error('enter a valid positive deposit amount');
-    const amt = toBase($('depositAmount').value);
-    log('sending L1 deposit via wallet (' + $('depositAmount').value + ' ETH)...');
-    const dr = await sendDepositViaWallet(amt);
+    const token = selectedDepositToken();
+    if (!token) throw new Error('select a token to deposit');
+    // Denominated with THIS token's verified decimals — never the global 18-dp toBase().
+    const amt = parseDepositAmount($('depositAmount').value, token.decimals);
+    log('sending L1 deposit via wallet (' + fmtUnits(amt, token.decimals) + ' ' + token.label
+      + ', token #' + token.tokenIndex + ')...');
+    const dr = await sendDepositViaWallet(amt, token);
 
+    // The ticket is the recovery handle: saved BEFORE the (possibly long) import, so an
+    // interrupted/abandoned import is resumable from "Resume Import". `tokenIndex` is carried for
+    // DISPLAY only — the import itself sends nothing but { recipientSlot, txHash }.
     try {
-      await api('/api/ticket/deposit', JSON.stringify({ amount: amt, depositor: dr.depositor, txHash: dr.txHash, recipientSlot: mySlot }));
+      await api('/api/ticket/deposit', JSON.stringify({ amount: amt, depositor: dr.depositor, txHash: dr.txHash, recipientSlot: mySlot, tokenIndex: token.tokenIndex }));
     } catch (e) { log('ticket save failed (continuing): ' + e.message, ''); }
+    await fetchTickets(); applyTicketState();
 
     phase = 'Importing';
     log('importing deposit into channel (slot ' + mySlot + ')...');
-    const snap = await api('/api/import-deposit', JSON.stringify({ recipientSlot: mySlot, txHash: dr.txHash }));
+    const snap = await importDepositAwaitingConfirmations(mySlot, dr.txHash, (text) => {
+      phase = 'Confirming';
+      pend.textContent = text;
+      pend.classList.remove('hidden');
+    });
+    pend.classList.add('hidden');
     setChannelFrom(snap);
+    await loadTokenMeta(true);           // the deposit may be this channel's first position for the token
     const r = JSON.parse(await call('importChannel', { snapshotJson: snap }));
     mySlot = r.slot; showBalance(r);
-    log('deposit imported -- balance ' + fmtAmt(r.balance), 'ok');
+    log('deposit imported -- ' + fmtUnits(amt, token.decimals) + ' ' + token.label
+      + ' credited to slot ' + mySlot, 'ok');
     $('depositModal').classList.add('hidden');
     await fetchTickets(); applyTicketState();
-  } catch (e) { log('deposit failed: '+e.message, 'err'); }
+  } catch (e) { pend.classList.add('hidden'); log('deposit failed: '+e.message, 'err'); }
   clearInterval(tick);
   $('btnDeposit').textContent = 'Deposit';
   $('btnDeposit').disabled = false;
