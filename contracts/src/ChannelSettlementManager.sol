@@ -158,6 +158,10 @@ contract ChannelSettlementManager {
     /// Rust `MAX_CHANNEL_MEMBERS` constant (src/constants.rs).
     uint256 internal constant MAX_MEMBER_COUNT = 16;
     uint256 internal constant MIN_MEMBER_COUNT = 2;
+    /// Fixed per-channel token capacity — the width of every `channelFundAmounts` / `tokenRegistry`
+    /// array here. MUST equal Rust `MAX_CHANNEL_TOKENS` (src/constants.rs) and
+    /// `ChannelSettlementVerifier.MAX_CHANNEL_TOKENS`, or the TFD recompute would disagree.
+    uint256 internal constant MAX_CHANNEL_TOKENS = 10;
 
     error InvalidChannelId();
     error InvalidBpMemberSlot();
@@ -211,6 +215,12 @@ contract ChannelSettlementManager {
     error PartialWithdrawalAuxDataZero();
     error PartialWithdrawalChainMismatch();
     error PartialWithdrawalNotNewer();
+    /// The claimed burn amount exceeds the channel's PROOF-BOUND fund vector for that token slot
+    /// (defence in depth — see `submitPartialWithdrawalIntent`).
+    error PartialWithdrawalAmountExceedsFund();
+    /// The claimed payout address is not a registered participant (member or delegate) of this
+    /// channel (defence in depth — see `submitPartialWithdrawalIntent`).
+    error PartialWithdrawalRecipientNotParticipant();
     // --- Multi-token settlement (multitoken Phase 3, §N-6, TM-3/TM-8) ---
     /// A claim's `tokenSlot` must address an ACTIVE slot of the finalized registry (TM-8:
     /// `token_slot < token_count` is enforced at the circuit, the verifier bind AND here at the
@@ -798,9 +808,19 @@ contract ChannelSettlementManager {
             suppliedCloseFreezeNonce == currentCloseFreezeNonce;
     }
 
-    function fundBpBondCredits(uint256 amount) external {
-        bpBondCredits += amount;
-    }
+    // REMOVED: `fundBpBondCredits(uint256)`.
+    //
+    // SECURITY: it was `external`, NON-payable and UNGATED — anyone could inflate `bpBondCredits`
+    // by an arbitrary amount for free, with no value ever transferred. It was harmless only
+    // because nothing reads that variable on a payout path (its sole consumer, the special-close
+    // slash, is permanently reverted), i.e. an unauthenticated writer to an accounting variable
+    // that was one wiring change away from becoming a free over-credit.
+    //
+    // Removed rather than gated, for the same reason `claimAuthorizedWithdrawal` was removed:
+    // delete the capability instead of constraining it. If the special-close path is ever
+    // implemented, the bond pot must be funded by a function that is BOTH access-controlled AND
+    // `payable` with `msg.value == amount`, so the credited number is backed by real ETH — a
+    // non-payable "fund" function can never be that.
 
     /// @notice Step 1 of the two-step close (abstract2 §3.5): a registered member freezes the
     /// channel. The first close intent can only be processed after
@@ -1054,6 +1074,62 @@ contract ChannelSettlementManager {
             abi.encodePacked(uint32(0x494d5443), prevSettledTxChain, withdrawal.auxData)
         );
         if (expectedChain != intent.finalSettledTxChain) revert PartialWithdrawalChainMismatch();
+
+        // ── Defence in depth (2026-07-28, doc/tasks/pw-auth-threat-model.md §4) ──────────────
+        //
+        // SECURITY — read this before trusting the two checks below. ONLY `withdrawal.auxData` is
+        // bound to the cosigned state (the chain recompute above). `amount`, `recipient` and
+        // `nullifier` are CALLER-SUPPLIED and there is NOTHING on this contract that could derive
+        // them: `auxData` is a tx_leaf over Regev CIPHERTEXT digests (the amount is computationally
+        // hidden, and the receiver wing carries the phantom padding key, not an L1 address), and the
+        // 103-limb close PI carries no burn amount or recipient. The ONLY artifact that jointly
+        // commits (recipient, tokenIndex, amount, nullifier, auxData) is the base-layer withdrawal
+        // leaf, verified by `IntmaxRollup._verifyWithdrawalSet`.
+        //
+        // So these checks BOUND the claim; they do NOT derive it. They are containment, not
+        // soundness. Soundness comes from the payout side: every burn payout must go through
+        // `withdrawNative` / `withdrawERC20`, where the leaf is proof-verified and this
+        // authorization is only a SECOND FACTOR (channel consent) that can veto, never supply, a
+        // field. The proof-free `claimAuthorizedWithdrawal` was REMOVED for exactly this reason.
+        // These checks would NOT make a proof-free payout safe.
+
+        // (a) Amount cap against the PROOF-BOUND per-token fund vector.
+        //     `_checkCloseProof` above recomputed `tokenFundsDigest(tokenRegistry, tokenCount,
+        //     channelFundAmounts)` and strict-bound it to close PI limbs 95..102 (TM-11), so this
+        //     triple is MEMBER-SIGNED, not caller-declared. The Verifier also rejects
+        //     `tokenCount` outside 1..=10 (ChannelSettlementVerifier:342), so the slot scan below
+        //     is well-formed and cannot index past the fixed 10-wide arrays.
+        //     FAIL CLOSED: a token the channel never cosigned into its registry has no cap to
+        //     check against, so it is rejected outright rather than defaulting to slot 0.
+        {
+            bool tokenFound = false;
+            uint256 activeSlots = uint256(intent.tokenCount);
+            if (activeSlots > MAX_CHANNEL_TOKENS) activeSlots = MAX_CHANNEL_TOKENS;
+            for (uint256 t = 0; t < activeSlots; t++) {
+                if (intent.tokenRegistry[t] == withdrawal.tokenIndex) {
+                    if (withdrawal.amount > intent.channelFundAmounts[t]) {
+                        revert PartialWithdrawalAmountExceedsFund();
+                    }
+                    tokenFound = true;
+                    break;
+                }
+            }
+            // NOTE: the first matching slot wins. In-circuit registry injectivity makes a duplicate
+            // base token impossible in a legitimate registry; even if one existed, the cap taken is
+            // a real cosigned slot for that token, which is all this bound claims.
+            if (!tokenFound) revert TokenRegistryMismatch();
+        }
+
+        // (b) The payout address must be a registered participant of THIS channel.
+        //     `isMemberRecipient` is written ONLY in the constructor — at :715-720 for the N-of-N
+        //     members and :775-778 for delegates (whose recipients are registered precisely FOR the
+        //     withdrawal path, :757) — and has no setter, so it is exactly "an L1 address bound to a
+        //     registered participant of this channel at construction". An honest partial withdrawal
+        //     always pays the burning member's own registered L1 address, so this rejects nothing
+        //     legitimate. It does NOT establish entitlement BETWEEN participants.
+        if (!isMemberRecipient[withdrawal.recipient]) {
+            revert PartialWithdrawalRecipientNotParticipant();
+        }
 
         bytes32 chainKey = keccak256(abi.encodePacked(channelId, intent.finalSettledTxChain));
         if (usedPartialWithdrawalChains[chainKey]) revert PartialWithdrawalChainUsed();

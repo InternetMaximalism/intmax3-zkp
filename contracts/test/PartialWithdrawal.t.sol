@@ -11,9 +11,20 @@ contract PartialWithdrawalTest is CloseSettlementBase {
     bytes32 constant AUX_DATA = keccak256("burn_tx_leaf");
     bytes32 constant PREV_CHAIN = keccak256("prev_settled_tx_chain");
     bytes32 constant NULLIFIER = keccak256("partial_withdrawal_nullifier");
-    address constant RECIPIENT = address(0xBEEF);
+    /// A NON-participant address — used only by the negative recipient test.
+    address constant OUTSIDER = address(0xBEEF);
     uint32 constant TOKEN_INDEX = 0;
-    uint256 constant AMOUNT = 5 ether;
+    /// The channel's declared genesis-token fund in `_partialIntentAtVersion` (the proof-bound cap).
+    uint256 constant CHANNEL_FUND = 50;
+    /// A claim strictly inside the cap. Was `5 ether` against a 50-wei fund — nonsensical, and only
+    /// possible because no check ever compared the two (doc/tasks/pw-auth-threat-model.md §4.1).
+    uint256 constant AMOUNT = 5;
+
+    /// The payout address for the happy paths: `alice` is `bindings[0].recipient`, i.e. a REGISTERED
+    /// participant of this channel (`isMemberRecipient[alice] == true`, set in the constructor).
+    function _recipient() internal view returns (address) {
+        return alice;
+    }
 
     function _settledTxChainPush(bytes32 prev, bytes32 leaf) internal pure returns (bytes32) {
         return keccak256(abi.encodePacked(uint32(0x494d5443), prev, leaf));
@@ -33,7 +44,7 @@ contract PartialWithdrawalTest is CloseSettlementBase {
             closeFreezeNonce: 0,
             finalChannelStateDigest: keccak256("partial_state"),
             finalBalanceStateH1: keccak256("partial_h1"),
-            channelFundAmounts: _singleAmounts(50),
+            channelFundAmounts: _singleAmounts(CHANNEL_FUND),
             tokenRegistry: _singleRegistry(),
             tokenCount: 1,
             channelFundIntmaxStateRoot: keccak256("intmax_root"),
@@ -46,9 +57,9 @@ contract PartialWithdrawalTest is CloseSettlementBase {
         });
     }
 
-    function _authorizedWithdrawal() internal pure returns (ChannelSettlementManager.AuthorizedWithdrawal memory) {
+    function _authorizedWithdrawal() internal view returns (ChannelSettlementManager.AuthorizedWithdrawal memory) {
         return ChannelSettlementManager.AuthorizedWithdrawal({
-            recipient: RECIPIENT,
+            recipient: _recipient(),
             tokenIndex: TOKEN_INDEX,
             amount: AMOUNT,
             nullifier: NULLIFIER,
@@ -334,6 +345,15 @@ contract PartialWithdrawalTest is CloseSettlementBase {
     }
 
     // ── Cross-field tamper: different amount → different authDigest ──
+    //
+    // SECURITY SCOPE (corrected 2026-07-28, doc/tasks/pw-auth-threat-model.md §7): these two tests
+    // establish ONLY that keccak over the IMPW preimage is injective in `amount` / `recipient` —
+    // i.e. REPLAY binding: one authorization cannot be re-read as a different tuple. They say
+    // NOTHING about whether those fields are correct, and they must never be read as economic
+    // coverage. Historically they were the closest thing to a test of the burn path's economics,
+    // and they contributed to the misconception that the digest "binds" the payout. The claim's
+    // legitimacy is established ONLY by the base-layer proof on the payout side
+    // (`IntmaxRollup._verifyWithdrawalSet`); see `PartialWithdrawalPayout.t.sol`.
 
     function test_crossFieldTamper_differentAmountDifferentDigest() public {
         ChannelSettlementManager.AuthorizedWithdrawal memory w1 = _authorizedWithdrawal();
@@ -351,6 +371,121 @@ contract PartialWithdrawalTest is CloseSettlementBase {
         w2.recipient = address(0xDEAD);
 
         assertTrue(_expectedAuthDigest(w1) != _expectedAuthDigest(w2));
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════════════════════
+    //  Defence in depth (2026-07-28) — doc/tasks/pw-auth-threat-model.md §4
+    //
+    //  These BOUND the claim; they do NOT derive it. Passing them does not make an authorization
+    //  legitimate — it only means it is not absurd.
+    // ═══════════════════════════════════════════════════════════════════════════════════════
+
+    // ── (a) Amount cap: over-claiming the proof-bound per-token fund vector is rejected ──
+    //
+    // Proves: the caller-chosen `amount` can no longer exceed what the channel's own N-of-N members
+    // cosigned into that token slot. `channelFundAmounts` is trustworthy because the close proof's
+    // `tokenFundsDigest` (PI limbs 95..102) is recomputed and strict-bound over it.
+
+    function test_submitPartialWithdrawal_reverts_amountExceedsChannelFund() public {
+        ChannelSettlementManager.CloseIntent memory intent = _partialIntent();
+        MleVerifier.MleProof memory proof = _closeProof(intent);
+        ChannelSettlementManager.AuthorizedWithdrawal memory w = _authorizedWithdrawal();
+        w.amount = CHANNEL_FUND + 1;
+
+        vm.expectRevert(ChannelSettlementManager.PartialWithdrawalAmountExceedsFund.selector);
+        manager.submitPartialWithdrawalIntent(intent, proof, PREV_CHAIN, w);
+    }
+
+    /// The pre-fix drain shape, scaled down: an amount wildly beyond the channel's entire declared
+    /// balance (this is what used to reach `claimAuthorizedWithdrawal` and hit the GLOBAL escrow).
+    function test_submitPartialWithdrawal_reverts_absurdOverClaim() public {
+        ChannelSettlementManager.CloseIntent memory intent = _partialIntent();
+        MleVerifier.MleProof memory proof = _closeProof(intent);
+        ChannelSettlementManager.AuthorizedWithdrawal memory w = _authorizedWithdrawal();
+        w.amount = type(uint256).max;
+
+        vm.expectRevert(ChannelSettlementManager.PartialWithdrawalAmountExceedsFund.selector);
+        manager.submitPartialWithdrawalIntent(intent, proof, PREV_CHAIN, w);
+    }
+
+    /// Boundary: claiming EXACTLY the cap is allowed (the check is `>`, not `>=`) — the cap must not
+    /// be off-by-one against an honest full-balance burn.
+    function test_submitPartialWithdrawal_allowsExactlyChannelFund() public {
+        ChannelSettlementManager.CloseIntent memory intent = _partialIntent();
+        MleVerifier.MleProof memory proof = _closeProof(intent);
+        ChannelSettlementManager.AuthorizedWithdrawal memory w = _authorizedWithdrawal();
+        w.amount = CHANNEL_FUND;
+
+        manager.submitPartialWithdrawalIntent(intent, proof, PREV_CHAIN, w);
+        assertTrue(manager.partialWithdrawalPending());
+    }
+
+    /// Fail-closed: a base token the channel never cosigned into its registry has no cap to check
+    /// against, so it is rejected outright rather than silently defaulting to slot 0.
+    function test_submitPartialWithdrawal_reverts_tokenNotInRegistry() public {
+        ChannelSettlementManager.CloseIntent memory intent = _partialIntent();
+        MleVerifier.MleProof memory proof = _closeProof(intent);
+        ChannelSettlementManager.AuthorizedWithdrawal memory w = _authorizedWithdrawal();
+        w.tokenIndex = 7; // registry is [0] with tokenCount 1
+
+        vm.expectRevert(ChannelSettlementManager.TokenRegistryMismatch.selector);
+        manager.submitPartialWithdrawalIntent(intent, proof, PREV_CHAIN, w);
+    }
+
+    /// A slot PAST `tokenCount` is padding, not a registration: token 0 sits at slot 0 with
+    /// tokenCount 1, so a second token present only in the zero-padding must not be honoured.
+    function test_submitPartialWithdrawal_reverts_tokenOnlyInPaddingSlot() public {
+        ChannelSettlementManager.CloseIntent memory intent = _partialIntent();
+        // Slot 1 is beyond tokenCount==1 — pure padding. Give it a token index and a huge fund.
+        intent.tokenRegistry[1] = 42;
+        intent.channelFundAmounts[1] = type(uint256).max;
+        MleVerifier.MleProof memory proof = _closeProof(intent);
+        ChannelSettlementManager.AuthorizedWithdrawal memory w = _authorizedWithdrawal();
+        w.tokenIndex = 42;
+        w.amount = 1_000_000;
+
+        vm.expectRevert(ChannelSettlementManager.TokenRegistryMismatch.selector);
+        manager.submitPartialWithdrawalIntent(intent, proof, PREV_CHAIN, w);
+    }
+
+    // ── (b) Recipient must be a registered participant of THIS channel ──
+    //
+    // Proves: payout can no longer be directed to an arbitrary external address. Does NOT prove
+    // entitlement between participants — any member may still name any member's address.
+
+    function test_submitPartialWithdrawal_reverts_recipientNotParticipant() public {
+        ChannelSettlementManager.CloseIntent memory intent = _partialIntent();
+        MleVerifier.MleProof memory proof = _closeProof(intent);
+        ChannelSettlementManager.AuthorizedWithdrawal memory w = _authorizedWithdrawal();
+        w.recipient = OUTSIDER;
+
+        vm.expectRevert(ChannelSettlementManager.PartialWithdrawalRecipientNotParticipant.selector);
+        manager.submitPartialWithdrawalIntent(intent, proof, PREV_CHAIN, w);
+    }
+
+    /// `mallory` is a funded EOA in the harness but NOT a member binding — being an active address
+    /// is not membership.
+    function test_submitPartialWithdrawal_reverts_recipientNonMemberEoa() public {
+        ChannelSettlementManager.CloseIntent memory intent = _partialIntent();
+        MleVerifier.MleProof memory proof = _closeProof(intent);
+        ChannelSettlementManager.AuthorizedWithdrawal memory w = _authorizedWithdrawal();
+        w.recipient = mallory;
+
+        vm.expectRevert(ChannelSettlementManager.PartialWithdrawalRecipientNotParticipant.selector);
+        manager.submitPartialWithdrawalIntent(intent, proof, PREV_CHAIN, w);
+    }
+
+    /// Every registered member recipient is accepted (bob and carol, not just the default alice) —
+    /// confirms the gate reads the constructor bindings and is not accidentally pinned to one slot.
+    function test_submitPartialWithdrawal_allowsOtherRegisteredMembers() public {
+        ChannelSettlementManager.CloseIntent memory intent = _partialIntent();
+        MleVerifier.MleProof memory proof = _closeProof(intent);
+        ChannelSettlementManager.AuthorizedWithdrawal memory w = _authorizedWithdrawal();
+        w.recipient = bob;
+
+        manager.submitPartialWithdrawalIntent(intent, proof, PREV_CHAIN, w);
+        assertTrue(manager.partialWithdrawalPending());
+        assertTrue(manager.isMemberRecipient(carol));
     }
 }
 

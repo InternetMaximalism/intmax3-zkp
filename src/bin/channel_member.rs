@@ -4359,48 +4359,48 @@ fn cmd_pw_finalize(args: &[String]) {
     if !authorized {
         die("on-chain partialWithdrawalAuthorized returned false");
     }
-    eprintln!("pw-finalize: authorized on-chain. Claiming ETH…");
+    eprintln!("pw-finalize: authorization recorded on-chain.");
 
-    let recipient = auth["withdrawal_recipient"]
-        .as_str()
-        .unwrap_or_else(|| die("pw_auth.json missing withdrawal_recipient"));
-    let token_index = auth["withdrawal_token_index"].as_u64().unwrap_or(0);
-    let amount = auth["withdrawal_amount"]
-        .as_u64()
-        .unwrap_or_else(|| die("pw_auth.json missing withdrawal_amount"));
-    let nullifier = auth["withdrawal_nullifier"]
-        .as_str()
-        .unwrap_or_else(|| die("pw_auth.json missing withdrawal_nullifier"));
-    let aux_data = auth["withdrawal_aux_data"]
-        .as_str()
-        .unwrap_or_else(|| die("pw_auth.json missing withdrawal_aux_data"));
-
-    let sig = format!(
-        "claimAuthorizedWithdrawal(({},{},{},{},{}))",
-        "address", "uint32", "uint256", "bytes32", "bytes32"
+    // FAIL CLOSED (2026-07-28, doc/tasks/pw-auth-threat-model.md).
+    //
+    // This used to call `IntmaxRollup.claimAuthorizedWithdrawal(...)`, which paid native ETH out of
+    // the GLOBAL escrow against the authorization ALONE — no withdrawal proof. Because
+    // `submitPartialWithdrawalIntent` binds only `auxData` to the cosigned state, `amount` and
+    // `recipient` were caller-chosen, so one valid close proof for one's OWN channel was enough to
+    // drain every channel's ETH. That function has been REMOVED.
+    //
+    // The replacement is `withdrawNative` / `withdrawERC20`, where the leaf comes from a VERIFIED
+    // withdrawal proof and this authorization is only a second factor. Building that proof is
+    // `cmd_partial_withdraw`, which was never implemented (doc/tasks/todo.md:90).
+    //
+    // DELIBERATELY NOT rerouted to `withdrawNative` here: without the base-layer proof that call
+    // would fail with an opaque proof-binding error and hide the real cause. Two known blockers
+    // beyond the missing command: this CLI invents `nullifier = keccak(tx_leaf ‖ pre_burn_chain)`
+    // (see `cmd_pw_submit`) whereas a provable leaf must use `settled_transfer.nullifier()`; and
+    // base `Transfer.amount == the channel-layer debit` is still only a co-signer assumption
+    // (audit F-AUX-1), not an in-circuit equality.
+    let recipient = auth["withdrawal_recipient"].as_str().unwrap_or("<unknown>");
+    let amount = auth["withdrawal_amount"].as_u64().unwrap_or(0);
+    eprintln!(
+        "\n\
+         pw-finalize: STOPPING BEFORE PAYOUT — the partial-withdrawal payout is not available.\n\
+         \n\
+         The authorization for {recipient} ({amount} wei) IS finalized on-chain; nothing was lost.\n\
+         What is missing is the payout leg:\n\
+         \n\
+           • `IntmaxRollup.claimAuthorizedWithdrawal` was REMOVED (2026-07-28). It paid the GLOBAL\n\
+             ETH escrow against this authorization alone, with NO withdrawal proof. Since the\n\
+             settlement manager binds only `auxData`, the amount and recipient were caller-chosen —\n\
+             one valid close proof for your own channel could drain every channel's ETH.\n\
+             See doc/tasks/pw-auth-threat-model.md.\n\
+           • Payout must now go through `withdrawNative` / `withdrawERC20`, which require a VERIFIED\n\
+             base-layer withdrawal proof whose leaf commits (recipient, tokenIndex, amount,\n\
+             nullifier, auxData). This authorization is then only a second factor on that leaf.\n\
+           • The command that builds that proof — `cmd_partial_withdraw` — is NOT IMPLEMENTED.\n\
+             Tracked as the unchecked box at doc/tasks/todo.md:90.\n\
+         \n\
+         Until it lands, partial withdrawal is intentionally non-functional end to end. This is a\n\
+         deliberate fail-closed state, not a bug in this run."
     );
-    let arg = format!(
-        "({},{},{},{},{})",
-        recipient, token_index, amount, nullifier, aux_data
-    );
-
-    let before = cast(&["balance", recipient, "--rpc-url", &rpc]);
-    cast(&[
-        "send",
-        rollup,
-        &sig,
-        &arg,
-        "--private-key",
-        &deploy_key,
-        "--rpc-url",
-        &rpc,
-    ]);
-    let after = cast(&["balance", recipient, "--rpc-url", &rpc]);
-    println!(
-        "pw-finalize OK: {} claimed {} wei. Balance: {} → {}",
-        recipient,
-        amount,
-        before.trim(),
-        after.trim()
-    );
+    exit(1);
 }

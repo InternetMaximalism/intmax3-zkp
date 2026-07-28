@@ -231,38 +231,38 @@ contract ChannelSettlementAdversarialTest is CloseSettlementBase {
     }
 
     // ─────────────────────────────────────────────────────────────────────────
-    // A6 — fundBpBondCredits: the BP bond pot is INERT and the mutator is a footgun.
-    // `fundBpBondCredits(uint256)` is named "fund", takes an amount, yet is NON-payable and
-    // UNGATED — anyone can inflate `bpBondCredits` to any value for free. This pins that the value
-    // (a) escrows no ETH and (b) feeds no payout/cap path, so the free inflation is harmless while
-    // the special-close (C2) path is disabled. A regression that wired bpBondCredits into solvency
-    // would turn this into a free over-credit — these asserts would then fail.
+    // A6 — the free bond-pot mutator is GONE, and the pot stays inert.
+    // `fundBpBondCredits(uint256)` was `external`, NON-payable and UNGATED: anyone could inflate
+    // `bpBondCredits` for free. It has been REMOVED (capability deleted, not constrained). This
+    // pins both halves: (a) the selector no longer exists, so the free-inflation path is closed at
+    // the ABI level and cannot be re-added innocently; (b) the pot still feeds no payout or cap,
+    // so a regression that wired it into solvency would surface here.
     // ─────────────────────────────────────────────────────────────────────────
 
-    function test_A6_bpBondCredits_is_inert_and_freely_inflatable() external {
+    function test_A6_bpBondCredits_mutator_removed_and_pot_still_inert() external {
         bytes32 d = _finalizeDefault();
         _submitWd(d, USER_A, alice, 25);
         _fundAndPull(registry, manager, 25);
 
         uint256 bondBefore = manager.bpBondCredits();
-
-        // A non-member inflates the bond pot by a huge amount for FREE (no ETH attached, no gate).
         uint256 managerEthBefore = address(manager).balance;
-        vm.prank(mallory);
-        manager.fundBpBondCredits(type(uint128).max);
-        assertEq(
-            manager.bpBondCredits(), bondBefore + type(uint128).max,
-            "bpBondCredits is freely inflatable by anyone"
-        );
-        // ...but it moved no ETH and changed no fund-affecting accounting.
-        assertEq(address(manager).balance, managerEthBefore, "fundBpBondCredits escrows no ETH");
-        assertEq(manager.receivedChannelFunds(0), 25, "received funds unaffected by bond inflation");
-        assertEq(manager.totalWithdrawn(0), 25, "accrual unaffected by bond inflation");
 
-        // The legitimate claim path is unchanged: alice still gets exactly her 25, capped by the
-        // 25 received — the inflated bond does NOT raise the payout ceiling.
+        // (a) The free mutator is gone at the ABI level: a raw call on the old selector hits no
+        //     function and (with no receive/fallback for calldata) reverts.
+        vm.prank(mallory);
+        (bool ok, ) = address(manager).call(
+            abi.encodeWithSignature("fundBpBondCredits(uint256)", type(uint128).max)
+        );
+        assertFalse(ok, "fundBpBondCredits must no longer exist");
+        assertEq(manager.bpBondCredits(), bondBefore, "bond pot unchanged by the removed mutator");
+        assertEq(address(manager).balance, managerEthBefore, "no ETH moved");
+
+        // (b) The pot still feeds nothing: the legitimate claim is capped by funds RECEIVED, and
+        //     the constructor-seeded bond does not raise that ceiling.
+        assertEq(manager.receivedChannelFunds(0), 25, "received funds unaffected by the bond pot");
+        assertEq(manager.totalWithdrawn(0), 25, "accrual unaffected by the bond pot");
         vm.prank(alice);
-        assertEq(manager.claimWithdrawalCredit(), 25, "payout still capped by received, not by bond");
+        assertEq(manager.claimWithdrawalCredit(), 25, "payout capped by received, not by bond");
         assertLe(manager.totalCreditedOut(0), manager.receivedChannelFunds(0), "solvency holds");
     }
 

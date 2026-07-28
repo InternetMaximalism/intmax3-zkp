@@ -19,7 +19,8 @@ import Zkp.Contracts.IntmaxRollupWithdraw
 
   | name                            | kind      | what breaks if violated              |
   |---------------------------------|-----------|--------------------------------------|
-  | `BurnAuthorizationsLegitimate`  | TRUST     | full escrow drain, no proof needed   |
+  | `BurnAuthorizationsLegitimate`  | HISTORIC  | (moot: its claim path was DELETED    |
+  |                                 |           |  2026-07-28; see its docstring)      |
   | `MleVerificationEnabled`        | DEPLOY    | `finalize` accepts unverified roots  |
   | `SingleCallAtomicity`           | MODELING  | reentrancy invisible to the model    |
   | `EthSendFailureReverts`         | MODELING  | send-failure states unrepresentable  |
@@ -34,7 +35,31 @@ open Zkp.Contracts.IntmaxRollup
 
 /-! ## (i) Burn-path trust: deployer + registered settlement managers -/
 
-/-- **TRUST ASSUMPTION (burn / partial-withdrawal path).**
+/-- **TRUST ASSUMPTION (burn / partial-withdrawal path) — HISTORICAL.**
+
+    ⚠ SUPERSEDED 2026-07-28 (doc/tasks/pw-auth-threat-model.md). The
+    function this assumption existed to cover,
+    `IntmaxRollup.claimAuthorizedWithdrawal`, has been DELETED. Every
+    remaining payout path (`withdrawNative`, `withdrawERC20`) verifies a
+    withdrawal proof, so no payout rests on this assumption any more.
+    Two corrections to the analysis below, kept for the record:
+
+    * IT UNDERSTATED THE RISK. It framed the danger as a malicious or
+      key-compromised DEPLOYER registering an attacker contract. The real
+      precondition was far weaker: the honest, audited
+      `ChannelSettlementManager` binds only `withdrawal.auxData` to the
+      cosigned close state, passing `amount`, `recipient` and `nullifier`
+      through untouched. So an HONEST manager already minted digests for
+      caller-chosen economics, and one valid close proof for one's OWN
+      channel drained the global escrow. Under its intended reading
+      ("this digest was minted by a flow that establishes the
+      economics"), `legit` was FALSE BY CONSTRUCTION, not merely
+      unproved.
+    * The honest-flow model referenced at the end
+      (`ChannelSettlementManager.lean`) treats `authDigest` as opaque
+      too, so it never established the economics either.
+
+    Original text follows.
 
     `claimAuthorizedWithdrawal` (IntmaxRollup.sol:642-665) pays escrow ETH
     directly to `w.recipient` and its ONLY rollup-side gate is
@@ -74,11 +99,15 @@ def BurnAuthorizationsLegitimate (legit : Word → Prop) (s : RollupState) : Pro
 
 /-- Under `BurnAuthorizationsLegitimate`, every successful burn claim was
     for a legitimately-minted digest — this is exactly how the named
-    trust assumption plugs into `claimAuthorized_safe`. -/
+    trust assumption plugged into `claimAuthorized_escrow_conservation`
+    (renamed 2026-07-28 from `claimAuthorized_safe`). NOTE the composition
+    is only as strong as `legit`, which the honest manager flow did NOT
+    establish — see the SUPERSEDED banner on
+    `BurnAuthorizationsLegitimate`. -/
 theorem claim_backed_by_trust {legit : Word → Prop} {s s' : RollupState} {w : Withdrawal}
     (hA : BurnAuthorizationsLegitimate legit s)
     (h : claimAuthorized s w = some s') : legit (authDigest w) :=
-  hA _ (claimAuthorized_safe h).2.2.2
+  hA _ (claimAuthorized_escrow_conservation h).2.2.2
 
 /-- The state reached after a rogue manager authorizes EVERY digest:
     escrow holds `w.amount`, nothing else is set. INTENTIONALLY SIMPLE:
@@ -90,13 +119,17 @@ def rogueAuthState (w : Withdrawal) : RollupState :=
     finalizedStateRoots := fun _ => false
     partialWithdrawalAuthorized := fun _ => true }
 
-/-- **The drain is real (satisfiability of the trust violation).** For any
-    ETH burn leaf `w`, once `partialWithdrawalAuthorized[authDigest w]`
-    is set (which a deployer-registered manager can do unconditionally,
-    :634-:637), `claimAuthorizedWithdrawal` SUCCEEDS with no proof, no
-    finalized root, no anything — paying `w.amount` (here: the whole
-    escrow). This is why `BurnAuthorizationsLegitimate` must be assumed,
-    not proved. -/
+/-- **The drain was real (satisfiability of the trust violation).** For
+    any ETH burn leaf `w`, once `partialWithdrawalAuthorized[authDigest w]`
+    is set (which a registered manager could do unconditionally, and which
+    the HONEST manager did for caller-chosen amounts/recipients),
+    `claimAuthorizedWithdrawal` SUCCEEDS with no proof, no finalized root,
+    no anything — paying `w.amount` (here: the whole escrow).
+
+    ⚠ NO LONGER REACHABLE ON-CHAIN: `claimAuthorizedWithdrawal` was
+    DELETED 2026-07-28 (doc/tasks/pw-auth-threat-model.md). This theorem is
+    retained as the formal record of exactly what the removed function
+    admitted, and as the reason it must never be re-added. -/
 theorem burn_drain_satisfiable (w : Withdrawal)
     (hEth : w.isEth = true) (hburn : w.auxData ≠ 0) :
     ∃ s', claimAuthorized (rogueAuthState w) w = some s' := by

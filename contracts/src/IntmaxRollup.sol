@@ -73,7 +73,11 @@ contract IntmaxRollup {
     // EIP-170 size relief: former string requires, converted to custom errors (semantics identical).
     error OnlyDeployer();
     error WithdrawalVkAlreadySet();
-    error EthTransferFailed();
+    // `EthTransferFailed` removed with `claimAuthorizedWithdrawal` (2026-07-28) — it was that
+    // function's transfer-failure case and had no other use. It was the only native payout that
+    // PUSHED to a caller-named third-party address; every remaining native payout is pull-payment
+    // (`withdrawNative` credits `pendingWithdrawals`, the recipient then pulls via `withdraw()`,
+    // which sends to `msg.sender` and reverts with `WithdrawTransferFailed`).
     error EthDepositValueMismatch();
     error NonEthDepositMustNotCarryEth();
     error WithdrawTransferFailed();
@@ -785,24 +789,26 @@ contract IntmaxRollup {
         emit PartialWithdrawalAuthorized(authDigest, msg.sender);
     }
 
-    /// @notice Claim an authorized partial withdrawal — sends ETH directly to the recipient.
-    ///         Anyone may call; the recipient is fixed in the authorized Withdrawal struct.
-    function claimAuthorizedWithdrawal(Withdrawal calldata w) external nonReentrant {
-        if (w.tokenIndex != ETH_TOKEN_INDEX) revert WithdrawalNotEthToken();
-        if (w.auxData == bytes32(0)) revert PartialWithdrawalNotAuthorized();
-        if (withdrawalNullifierUsed[w.nullifier]) revert WithdrawalNullifierUsed();
-
-        if (!partialWithdrawalAuthorized[_withdrawalAuthDigest(w)]) {
-            revert PartialWithdrawalNotAuthorized();
-        }
-
-        withdrawalNullifierUsed[w.nullifier] = true;
-        totalEscrowed -= w.amount;
-
-        (bool ok, ) = w.recipient.call{value: w.amount}("");
-        if (!ok) revert EthTransferFailed();
-        emit NativeWithdrawn(w.recipient, w.amount, w.nullifier, 0);
-    }
+    // REMOVED (2026-07-28, doc/tasks/pw-auth-threat-model.md): `claimAuthorizedWithdrawal(Withdrawal)`.
+    //
+    // SECURITY (why it is gone, so it is never re-added): it paid native ETH out of the GLOBAL
+    // `totalEscrowed` after checking ONLY `partialWithdrawalAuthorized[_withdrawalAuthDigest(w)]`.
+    // It never called `_verifyWithdrawalSet`, so NOTHING proved the withdrawal's economics. The
+    // authorization it consumed is minted by `ChannelSettlementManager.submitPartialWithdrawalIntent`,
+    // which binds ONLY `withdrawal.auxData` to the cosigned close state — `amount`, `recipient` and
+    // `nullifier` were caller-supplied and flowed untouched into the digest. Net effect: anyone able
+    // to produce one valid close proof for their OWN channel could name an arbitrary amount and
+    // recipient and drain the ETH escrow of ALL channels.
+    //
+    // The IMPW authorization is a SECOND FACTOR (channel consent), not a payout authority. It is
+    // used correctly in `withdrawNative` / `withdrawERC20`, where the economics come from the
+    // VERIFIED withdrawal proof and the flag can only veto, never supply, a field. Burn payouts must
+    // go through those entry points. Consequently a forged authorization is inert — exactly as it
+    // already was for ERC-20, which never had a proof-free door.
+    //
+    // CONSEQUENCE, ACCEPTED: the proof-backed base half of partial withdrawal was never built
+    // (`cmd_partial_withdraw`, doc/tasks/todo.md:90), so PW payout is NOT functional end to end
+    // until it lands. A correct incomplete implementation beats an incorrect complete one.
 
     // postBlock()  —  post a batch of fast blocks (one posting round)
     // -----------------------------------------------------------------------
@@ -1488,9 +1494,21 @@ contract IntmaxRollup {
             if (withdrawalNullifierUsed[w.nullifier]) revert WithdrawalNullifierUsed();
 
             // GAP2: burn withdrawals (auxData != 0) require a finalized partial-withdrawal
-            // authorization from a registered settlement manager. The auth digest binds ALL
-            // withdrawal fields so an attacker cannot reuse an authorized tx_leaf with
-            // different recipient/amount. Normal withdrawals (auxData == 0) are unaffected.
+            // authorization from a registered settlement manager — a SECOND FACTOR (channel
+            // consent) on top of the proof. Normal withdrawals (auxData == 0) are unaffected.
+            //
+            // SECURITY — what the auth digest does and does NOT do (corrected 2026-07-28,
+            // doc/tasks/pw-auth-threat-model.md; the previous wording overstated this):
+            //   • REPLAY binding (TRUE): the digest is a keccak over ALL of
+            //     (nullifier, recipient, tokenIndex, amount, auxData), so ONE authorization cannot
+            //     be re-read as a different (recipient, amount) tuple.
+            //   • DERIVATION (FALSE — never claim this): the digest does NOT establish that those
+            //     fields are correct. The Manager binds only `auxData` to the cosigned state; the
+            //     other fields are whatever its caller supplied. The economics come EXCLUSIVELY
+            //     from `_verifyWithdrawalSet` above, which re-folds `ws` into the proof's pis_hash,
+            //     so `w` here IS the proof's leaf, not a caller declaration. The flag can only
+            //     VETO a proven leaf; it can never supply a field. That is why this must stay a
+            //     conjunction with the proof and must never become a standalone payout gate.
             if (w.auxData != bytes32(0)) {
                 if (!partialWithdrawalAuthorized[_withdrawalAuthDigest(w)]) {
                     revert PartialWithdrawalNotAuthorized();
@@ -1535,8 +1553,10 @@ contract IntmaxRollup {
             if (address(tokenAddressOf[w.tokenIndex]) == address(0)) revert TokenIndexNotRegistered();
             if (withdrawalNullifierUsed[w.nullifier]) revert WithdrawalNullifierUsed();
 
-            // GAP2 mirror: burn withdrawals need a finalized IMPW authorization (digest binds
-            // tokenIndex, so an ETH authorization can never authorize an ERC-20 payout).
+            // GAP2 mirror: burn withdrawals need a finalized IMPW authorization (the digest commits
+            // tokenIndex, so an ETH authorization can never authorize an ERC-20 payout). SAME
+            // second-factor semantics as `withdrawNative` — see the SECURITY note there: this is a
+            // veto on a proof-verified leaf, NOT a derivation of the leaf's fields.
             if (w.auxData != bytes32(0)) {
                 if (!partialWithdrawalAuthorized[_withdrawalAuthDigest(w)]) {
                     revert PartialWithdrawalNotAuthorized();
@@ -1569,7 +1589,10 @@ contract IntmaxRollup {
     }
 
     /// @dev IMPW partial-withdrawal auth digest over ALL withdrawal fields (incl. tokenIndex).
-    ///      Shared by the ETH and ERC-20 payout paths and `claimAuthorizedWithdrawal`.
+    ///      Shared by the ETH and ERC-20 payout paths. SECURITY: committing every field gives
+    ///      REPLAY binding only (one authorization cannot be re-read as a different tuple); it does
+    ///      NOT make the fields trustworthy — see the note in `withdrawNative`. The proof-free
+    ///      consumer of this digest (`claimAuthorizedWithdrawal`) was removed 2026-07-28.
     function _withdrawalAuthDigest(Withdrawal calldata w) private pure returns (bytes32) {
         return keccak256(
             abi.encodePacked(
