@@ -39,6 +39,9 @@ const CHAIN_TO_BRANCH = {
   WithdrawalClaimed: BRANCHES.CHAIN_CREDIT,
   NativeWithdrawn: BRANCHES.CHAIN_CREDIT,
   WithdrawalCredited: BRANCHES.CHAIN_CREDIT,
+  // Multi-token (§N-7): ERC-20 credit/pull events confirm an exit exactly like their ETH twins.
+  Erc20Withdrawn: BRANCHES.CHAIN_CREDIT,
+  TokenWithdrawalClaimed: BRANCHES.CHAIN_CREDIT,
   FraudConfirmed: BRANCHES.EQUIVOCATION,
 };
 

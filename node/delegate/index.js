@@ -11,6 +11,7 @@ const { ApiClient } = require('../common/api-client');
 const { ChainWatcher } = require('../common/chain-watcher');
 const { Wallet } = require('../common/wallet');
 const { Store } = require('../common/store');
+const { bootstrapTokenRegistry } = require('../common/token-registry');
 const log = require('../common/log');
 const alert = require('../common/alert');
 const { makeRuntime } = require('./loop');
@@ -43,13 +44,31 @@ async function main() {
     log.warn({ event: 'WASM_UNAVAILABLE', note: 'build pkg-node to enable proving; control loop still runs' });
   }
 
-  const rt = makeRuntime(account, { api, wallet, store, log, alert, policyCfg: cfg.policy || {} });
+  // --- chain watcher (constructed early: the token-manifest verification reads through it) ---
+  const watcher = new ChainWatcher({ rpcUrl: cfg.rpcUrl, channels: [account], confirmations: cfg.confirmations, pollIntervalMs: cfg.pollIntervalMs });
+
+  // Token DISPLAY metadata (multi-token §N-1/§N-7), verified against the rollup's set-once
+  // `tokenAddressOf` registry. SECURITY: a manifest contradicting a live deployment is fatal —
+  // a wrong symbol on a real token is a user-funds attack (TM-10b). Absent information
+  // (unregistered index, RPC down) only warns and leaves that entry without metadata.
+  let tokenRegistry = null;
+  try {
+    tokenRegistry = await bootstrapTokenRegistry(cfg, {
+      baseDir: path.join(__dirname, '..'),
+      rpcUrl: cfg.rpcUrl,
+      channels: [account],
+      readTokenAddress: (rollup, idx) => watcher.getTokenAddress(rollup, idx),
+      logger: log,
+    });
+  } catch (e) {
+    log.error({ event: 'TOKEN_MANIFEST_FATAL', error: String((e && e.message) || e), note: 'refusing to start: the token manifest is invalid or contradicts the chain' });
+    process.exit(1);
+  }
+
+  const rt = makeRuntime(account, { api, wallet, store, log, alert, policyCfg: cfg.policy || {}, tokenRegistry });
 
   // Initial sync.
   try { await rt.submit({ source: 'api', kind: 'snapshot' }); } catch (e) { log.warn({ event: 'INITIAL_SYNC_FAILED', error: String(e && e.message || e) }); }
-
-  // --- chain watcher ---
-  const watcher = new ChainWatcher({ rpcUrl: cfg.rpcUrl, channels: [account], confirmations: cfg.confirmations, pollIntervalMs: cfg.pollIntervalMs });
   let pollFailures = 0;
   async function pollChain() {
     try {

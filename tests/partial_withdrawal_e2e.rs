@@ -421,7 +421,7 @@ fn partial_withdrawal_e2e_anvil() {
 
     // Verify fund decreased.
     let post_fund = {
-        let a = next_state.channel_fund.amount;
+        let a = next_state.channel_fund.amounts[0];
         let limbs = a.to_u32_vec();
         limbs[7] as u64 | ((limbs[6] as u64) << 32)
     };
@@ -562,18 +562,24 @@ fn partial_withdrawal_e2e_anvil() {
     );
     eprintln!("[PW E2E] finalize + authorize OK");
 
-    // ── Phase F2: Claim authorized withdrawal — actual ETH transfer ────────────────────────
+    // ── Phase F2: the proof-free claim must FAIL CLOSED ────────────────────────────────────
+    //
+    // REWRITTEN 2026-07-28 (doc/tasks/pw-auth-threat-model.md). This phase used to assert that
+    // `claimAuthorizedWithdrawal` paid `burn_amount` ETH. That function has been REMOVED: it paid
+    // the GLOBAL escrow against the authorization ALONE, with no withdrawal proof, and since
+    // `submitPartialWithdrawalIntent` binds only `auxData`, the amount and recipient were
+    // caller-chosen — one valid close proof for one's OWN channel drained every channel's ETH.
+    //
+    // Coverage is KEPT, not deleted: the phase now proves the payout is unreachable and, crucially,
+    // that the escrow does not move. It is the E2E-level twin of
+    // `contracts/test/PartialWithdrawalPayout.t.sol::test_authorizationAlone_cannotDrainEscrow`.
     {
-        let before = cast(
-            &rpc,
-            &[
-                "balance",
-                &format!("0x{}", hex::encode(withdrawal_addr.to_bytes_be())),
-            ],
-            "balance before claim",
-        );
+        let recipient_hex = format!("0x{}", hex::encode(withdrawal_addr.to_bytes_be()));
+        let before = cast(&rpc, &["balance", &recipient_hex], "balance before claim");
         let before_wei: u128 = before.trim().parse().unwrap_or(0);
+        let escrow_before = cast(&rpc, &["call", &rollup, "totalEscrowed()"], "escrow before");
 
+        // 1. The selector is gone — a raw call hits the (absent) fallback and reverts.
         let sig = "claimAuthorizedWithdrawal((address,uint32,uint256,bytes32,bytes32))";
         let arg = format!(
             "(0x{},{},{},{},{})",
@@ -583,8 +589,8 @@ fn partial_withdrawal_e2e_anvil() {
             withdrawal.nullifier.to_hex(),
             withdrawal.aux_data.to_hex()
         );
-        run_capture(
-            Command::new("cast").args([
+        let out = Command::new("cast")
+            .args([
                 "send",
                 &rollup,
                 sig,
@@ -593,28 +599,37 @@ fn partial_withdrawal_e2e_anvil() {
                 ANVIL0,
                 "--rpc-url",
                 &rpc,
-            ]),
-            "claim authorized withdrawal",
+            ])
+            .output()
+            .expect("spawn cast send (claim must fail)");
+        assert!(
+            !out.status.success(),
+            "SECURITY REGRESSION: claimAuthorizedWithdrawal succeeded. The proof-free partial-\n\
+             withdrawal payout was removed because it drained the GLOBAL escrow against a\n\
+             caller-chosen amount/recipient. If this call works, the hole is back.\n\
+             stdout: {}",
+            String::from_utf8_lossy(&out.stdout)
         );
 
-        let after = cast(
-            &rpc,
-            &[
-                "balance",
-                &format!("0x{}", hex::encode(withdrawal_addr.to_bytes_be())),
-            ],
-            "balance after claim",
-        );
+        // 2. Nothing moved: neither the recipient's balance nor the global escrow.
+        let after = cast(&rpc, &["balance", &recipient_hex], "balance after claim");
         let after_wei: u128 = after.trim().parse().unwrap_or(0);
         assert_eq!(
-            after_wei - before_wei,
-            burn_amount as u128,
-            "recipient must receive exactly burn_amount ETH"
+            after_wei, before_wei,
+            "recipient balance must be unchanged — no proof-free payout may occur"
         );
+        let escrow_after = cast(&rpc, &["call", &rollup, "totalEscrowed()"], "escrow after");
+        assert_eq!(
+            escrow_before.trim(),
+            escrow_after.trim(),
+            "totalEscrowed must be unchanged — the authorization alone must buy nothing"
+        );
+
         eprintln!(
-            "[PW E2E] claim OK: {} received {} wei",
-            hex::encode(withdrawal_addr.to_bytes_be()),
-            burn_amount
+            "[PW E2E] claim correctly FAILED CLOSED: {} received nothing, escrow unchanged.\n\
+             [PW E2E] The proof-backed payout (withdrawNative/withdrawERC20) needs\n\
+             [PW E2E] `cmd_partial_withdraw`, which is not implemented (doc/tasks/todo.md:90).",
+            hex::encode(withdrawal_addr.to_bytes_be())
         );
     }
 

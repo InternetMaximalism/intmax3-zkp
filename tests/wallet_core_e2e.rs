@@ -207,6 +207,7 @@ fn p4_1_attacker_pk_b_swap_is_rejected() {
         snapshot.state.digest,
         &payload.channel_tx.enc_amount,
         payload.channel_tx.nonce,
+        payload.channel_tx.token_slot,
         payload.channel_tx.sender_pk_g,
         payload.channel_tx.recipient_pk_g,
     );

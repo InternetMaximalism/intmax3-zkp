@@ -341,6 +341,17 @@ mod tests {
             0x494d_555a, // IMUZ CHANNEL_UPDATE_ZKP_DOMAIN
             0x494d_575a, // IMWZ WITHDRAW_CLAIM_ZKP_DOMAIN
             0x494d_5246, // IMRF BALANCE_REFRESH_ZKP_DOMAIN
+            // Multi-token v2 domains (detail2 §N-9 / §G-2, constants.rs). The FULL pairwise
+            // non-collision check over old + new lives in
+            // `constants::tests::all_domain_constants_pairwise_distinct`.
+            0x494d_4232, // IMB2 BALANCE_STATE_DOMAIN_V2
+            0x494d_5332, // IMS2 BALANCE_SLOT_LEAF_DOMAIN_V2
+            0x494d_5032, // IMP2 PAY_DOMAIN_V2
+            0x494d_4c32, // IML2 L1_DEPOSIT_IMPORT_DOMAIN_V2
+            0x494d_5732, // IMW2 WITHDRAWAL_CLAIM_DOMAIN_V2
+            0x494d_5532, // IMU2 CHANNEL_UPDATE_ZKP_DOMAIN_V2
+            0x494d_4932, // IMI2 INTER_CHANNEL_TX_DOMAIN_V2
+            0x494d_5446, // IMTF TOKEN_FUNDS_DIGEST_DOMAIN
             0x4d42_4c46, // MBLF MEMBER_LEAF_DOMAIN
             0x4348_4c46, // CHLF CHANNEL_LEAF_DOMAIN
             0x5549_4400, // "UID\0" USER_ID_DOMAIN

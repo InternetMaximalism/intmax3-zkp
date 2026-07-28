@@ -165,6 +165,15 @@ fn cast_u128(rpc: &str, addr: &str, sig: &str) -> u128 {
         .unwrap_or_else(|| panic!("parse uint from `{out}`"))
 }
 
+/// Like `cast_u128` but with one call argument (e.g. the per-token accounting getters).
+fn cast_u128_arg(rpc: &str, addr: &str, sig: &str, arg: &str) -> u128 {
+    let out = cast(rpc, &["call", addr, sig, arg]);
+    out.split_whitespace()
+        .next()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or_else(|| panic!("parse uint from `{out}`"))
+}
+
 /// Run the `channel_member` CLI from the repo root (it uses relative `contracts/` paths), with the
 /// given extra env. Panics on failure with the captured output.
 fn cli(args: &[&str], env: &[(&str, &str)], what: &str) -> String {
@@ -318,7 +327,8 @@ fn close_lifecycle_cli_e2e() {
     let manager_balance: u128 = cast(&rpc, &["balance", &manager])
         .parse()
         .expect("manager balance");
-    let received = cast_u128(&rpc, &manager, "receivedChannelFunds()(uint256)");
+    // Multitoken Phase 3: the manager's accounting is per BASE token — ETH is lane 0.
+    let received = cast_u128_arg(&rpc, &manager, "receivedChannelFunds(uint32)(uint256)", "0");
     let escrow_after = cast_u128(&rpc, &rollup, "totalEscrowed()(uint256)");
     assert!(received > 0, "manager received nothing from the rollup");
     assert_eq!(
@@ -337,7 +347,7 @@ fn close_lifecycle_cli_e2e() {
         &[("CLAIM_RECIPIENT", ANVIL0_ADDR)],
         "claim",
     );
-    let credited = cast_u128(&rpc, &manager, "totalCreditedOut()(uint256)");
+    let credited = cast_u128_arg(&rpc, &manager, "totalCreditedOut(uint32)(uint256)", "0");
     assert!(credited > 0, "no credit was paid out to the member");
     assert!(
         credited <= received,

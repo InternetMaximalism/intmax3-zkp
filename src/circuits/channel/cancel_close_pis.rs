@@ -215,14 +215,14 @@ mod tests {
             close_freeze_nonce,
             channel_fund: ChannelFund {
                 channel_id: ChannelId::new(3).unwrap(),
-                amount: U256::from(77u32),
+                amounts: ChannelFund::single_token_amounts(U256::from(77u32)),
                 intmax_state_root: Bytes32::default(),
             },
             balance_state: BalanceState {
                 channel_id: ChannelId::new(3).unwrap(),
                 member_count: 3,
                 delegate_count: 0,
-                enc_balances: BalanceState::pad_enc_balances(&[
+                enc_balances: BalanceState::pad_enc_balances_token0(&[
                     ciphertext(1),
                     ciphertext(2),
                     ciphertext(3),
@@ -242,7 +242,9 @@ mod tests {
                 settled_tx_chain: Bytes32::default(),
                 settled_tx_accumulator_root: Bytes32::default(),
                 state_version,
-                pending_adds: BalanceState::pad_pending_adds(&[0, 0, 0]),
+                pending_adds: BalanceState::pad_pending_adds_token0(&[0, 0, 0]),
+                token_registry: BalanceState::single_token_registry(0),
+                token_count: 1,
             },
             h2_tag: Bytes32::default(),
             shared_native_nullifier_root: Bytes32::default(),
@@ -266,7 +268,7 @@ mod tests {
             final_balance_state_h1: closing_state.balance_state.h1(),
             intmax_state_root: closing_state.channel_fund.intmax_state_root,
             burn_tx_hash: Bytes32::from_u32_slice(&[7, 0, 0, 0, 0, 0, 0, 0]).unwrap(),
-            burn_amount: closing_state.channel_fund.amount,
+            burn_amount: closing_state.channel_fund.amounts[0],
             zkp: vec![7],
         };
         CloseIntent::new(5, closing_state, &close_withdrawal, 123).unwrap()

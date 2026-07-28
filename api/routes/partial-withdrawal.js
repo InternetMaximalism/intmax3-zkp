@@ -16,9 +16,18 @@ router.post('/burn', (req, res) => {
       res.status(409).json({ error: 'settle pending burn first', ticket: active });
       return;
     }
-    const { debitPayload, transferDescriptor } = req.body || {};
+    const { debitPayload, transferDescriptor, tokenIndex } = req.body || {};
     if (!debitPayload || !transferDescriptor) {
-      res.status(400).json({ error: 'needs { debitPayload, transferDescriptor, amount, recipient }' });
+      res.status(400).json({ error: 'needs { debitPayload, transferDescriptor, amount, recipient, tokenIndex? }' });
+      return;
+    }
+    // Multi-token (§N): the burned BASE token rides inside the signed descriptor
+    // (interChannelTx.tokenIndex → last_burn.json → the pw-submit Withdrawal/IMPW authDigest);
+    // an optional top-level tokenIndex is a client-intent cross-check (fail-closed on
+    // mismatch).
+    const descTok = transferDescriptor.interChannelTx && transferDescriptor.interChannelTx.tokenIndex;
+    if (tokenIndex !== undefined && tokenIndex !== null && String(tokenIndex) !== String(descTok)) {
+      res.status(400).json({ error: `tokenIndex mismatch: body says ${tokenIndex}, signed descriptor says ${descTok}` });
       return;
     }
     writeJson(wc(ch, 'burn_payload.json'), debitPayload);
@@ -30,7 +39,7 @@ router.post('/burn', (req, res) => {
       status: 'burn_done',
       createdAt: Date.now(),
       updatedAt: Date.now(),
-      params: { amount: String(req.body.amount || ''), recipient: req.body.recipient || '' },
+      params: { amount: String(req.body.amount || ''), recipient: req.body.recipient || '', tokenIndex: descTok !== undefined ? String(descTok) : '0' },
       steps: { burn: { completedAt: Date.now() }, settle: null },
     });
     const cosigned = readJson(wc(ch, 'burn_cosigned.json'));

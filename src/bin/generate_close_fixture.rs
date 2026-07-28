@@ -16,10 +16,11 @@
 //!     `registeredMemberSetCommitment()` equals the proof's in-circuit `member_set_commitment`.
 //!
 //! SECURITY: every exported value is pulled PROGRAMMATICALLY from the PROVED close-circuit public
-//! inputs (`ChannelClosePublicInputs::from_u64_slice` over the 87 raw Goldilocks limbs the close
-//! circuit registers — `WrapperCircuit` re-registers them verbatim). Nothing is hardcoded. The
-//! 87-limb public-input vector is what the on-chain `_bindCloseLimbsStrict` will re-bind
-//! limb-by-limb, and `MleVerifier.verify` then re-checks the proof against the close VK.
+//! inputs (`ChannelClosePublicInputs::from_u64_slice` over the CHANNEL_CLOSE_PUBLIC_INPUTS_LEN
+//! (103) raw Goldilocks limbs the close circuit registers — `WrapperCircuit` re-registers them
+//! verbatim). Nothing is hardcoded. The 103-limb public-input vector is what the on-chain
+//! `_bindCloseLimbsStrict` will re-bind limb-by-limb, and `MleVerifier.verify` then re-checks the
+//! proof against the close VK.
 //!
 //! Usage:  cargo run --release --features close-fixture-bin --bin generate_close_fixture
 //!
@@ -30,10 +31,14 @@
 use std::{fs, path::Path};
 
 use intmax3_zkp::{
-    circuits::channel::{
-        close_circuit::test_fixture,
-        close_pis::{CHANNEL_CLOSE_PUBLIC_INPUTS_LEN, ChannelClosePublicInputs},
+    circuits::{
+        channel::{
+            close_circuit::test_fixture,
+            close_pis::{CHANNEL_CLOSE_PUBLIC_INPUTS_LEN, ChannelClosePublicInputs},
+        },
+        test_utils::block_witness_generator::ChannelMemberKeys,
     },
+    ethereum_types::u256::U256,
     utils::{
         conversion::ToU64,
         mle_prover::{export_mle_json, prove_with_mle, setup_mle_vk, verify_mle_proof},
@@ -82,12 +87,28 @@ struct CloseIntentDescriptor {
     /// The channel's `registeredMemberSetCommitment()` MUST equal this.
     member_set_commitment: String,
     member_count: u8,
-    delegate_count: u8,
+    // u16: delegate slots span the full 1024 balance-slot space (Option B) — matches the
+    // `ChannelClosePublicInputs.delegate_count` width.
+    delegate_count: u16,
     /// The active members' `pk_g` hashes (slot order) that the close proof verified signatures
     /// for. The Solidity test registers the channel with EXACTLY these so its member-set
     /// commitment matches the proof's. Padding slots (>= member_count) are NOT emitted (zeroed
     /// on-chain).
     member_pk_gs: Vec<String>,
+    /// Multi-token (§N-6, Phase 5b): the FULL per-token fund vector of the proved final state
+    /// (10 x 0x-hex U256, registry-aligned). These are the values the on-chain
+    /// `ChannelSettlementVerifier.tokenFundsDigest` recompute binds to the member-signed
+    /// `token_funds_digest` PI (limbs 95..103); `amounts[0]` equals the legacy
+    /// `channel_fund_amount` scalar (the genesis burn leg).
+    channel_fund_amounts: Vec<String>,
+    /// Multi-token: the proved final state's base-token registry (10 x u32, active prefix =
+    /// `token_count`).
+    token_registry: Vec<u32>,
+    /// Multi-token: number of ACTIVE registry slots (1..=10).
+    token_count: u8,
+    /// The proved `token_funds_digest` PI (limbs 95..103) — emitted for reference/assertions;
+    /// the verifier RECOMPUTES it from the three fields above (never trusts this value).
+    token_funds_digest: String,
 }
 
 fn main() -> anyhow::Result<()> {
@@ -96,13 +117,36 @@ fn main() -> anyhow::Result<()> {
 
     // -----------------------------------------------------------------------
     // Step 1: build a REAL self-consistent close witness and prove the close circuit.
-    // Uses the SAME canonical builder the in-tree close-circuit tests exercise
-    // (`test_fixture::build_close_full_witness_n`), un-gated for this binary via the
-    // `close-fixture-bin` feature — so the fixture is the exact closable state the tests prove.
+    //
+    // Multitoken Phase 5b (CO-GENERATION): the witness is built by
+    // `test_fixture::build_close_full_witness_two_token` over
+    //   - channel 1, signed by `ChannelMemberKeys::deterministic(1).secret_keys` — the SAME
+    //     deterministic member derivation `generate_withdrawal_fixture` registers (via
+    //     `add_channel_registration`), so the proof's `member_set_commitment` equals the channel's
+    //     `registeredMemberSetCommitment()` and `CloseLifecycleE2E` can submit the REAL close
+    //     intent (previously that section self-skipped on the member-set mismatch);
+    //   - a TWO-token final state (registry [ETH, 7], amounts [77, 55]) so the fixture exercises
+    //     the per-token settlement path (nonzero non-genesis fund), not just genesis.
     // -----------------------------------------------------------------------
+    const CLOSE_FIXTURE_CHANNEL_ID: u32 = 1;
+    const NON_GENESIS_TOKEN_INDEX: u32 = 7;
+    let member_keys = ChannelMemberKeys::deterministic(CLOSE_FIXTURE_CHANNEL_ID);
     let member_count = test_fixture::TEST_ACTIVE_MEMBERS;
-    eprintln!("[close] Step 1: build close witness (member_count = {member_count}) + prove");
-    let witness = test_fixture::build_close_full_witness_n(member_count);
+    assert_eq!(
+        member_keys.secret_keys.len(),
+        member_count,
+        "deterministic member keys must cover exactly the active cosigner slots"
+    );
+    eprintln!(
+        "[close] Step 1: build two-token close witness (channel {CLOSE_FIXTURE_CHANNEL_ID}, \
+         member_count = {member_count}, registry [0, {NON_GENESIS_TOKEN_INDEX}]) + prove"
+    );
+    let witness = test_fixture::build_close_full_witness_two_token(
+        CLOSE_FIXTURE_CHANNEL_ID,
+        &member_keys.secret_keys,
+        NON_GENESIS_TOKEN_INDEX,
+        U256::from(55u32),
+    );
     let close_proof = fx.close_circuit.prove(&witness)?;
     fx.close_circuit.data.verify(close_proof.clone())?;
     eprintln!(
@@ -111,7 +155,7 @@ fn main() -> anyhow::Result<()> {
     );
 
     // -----------------------------------------------------------------------
-    // Step 2: reconstruct the 87-limb public inputs from the PROVED proof and decode them.
+    // Step 2: reconstruct the 103-limb public inputs from the PROVED proof and decode them.
     // The close circuit registers exactly `CHANNEL_CLOSE_PUBLIC_INPUTS_LEN` raw Goldilocks limbs
     // (see ChannelClosePublicInputsTarget::to_vec); these are what the on-chain verifier re-binds.
     // -----------------------------------------------------------------------
@@ -127,7 +171,7 @@ fn main() -> anyhow::Result<()> {
     // -----------------------------------------------------------------------
     // Step 3: wrap (WrapperCircuit) + MLE/WHIR commit-open + verify. Mirrors
     // generate_withdrawal_fixture.rs "Step 5" exactly. WrapperCircuit re-registers the inner PIs
-    // verbatim, so the wrapped proof's MLE `publicInputs` equal the 87 close limbs above.
+    // verbatim, so the wrapped proof's MLE `publicInputs` equal the 103 close limbs above.
     // -----------------------------------------------------------------------
     eprintln!("[close] Step 3: wrap + MLE (close proof)");
     let close_wrapper = WrapperCircuit::<F, C, C, D>::new(&fx.close_circuit.data.verifier_data());
@@ -140,7 +184,7 @@ fn main() -> anyhow::Result<()> {
     verify_mle_proof(&close_wrapper.data, &close_vk, &close_mle.proof)?;
     let close_mle_json = export_mle_json(&close_mle.proof, &close_wrapper.data.common);
 
-    // SANITY: the MLE proof's exported publicInputs must equal the 87 raw close limbs (this is the
+    // SANITY: the MLE proof's exported publicInputs must equal the 103 raw close limbs (this is the
     // exact vector the on-chain `_bindCloseLimbsStrict` rebinds). A mismatch here means the
     // on-chain bind would never match the proof, so fail loudly BEFORE the user spends gas.
     {
@@ -166,7 +210,7 @@ fn main() -> anyhow::Result<()> {
             };
             assert_eq!(got_u64, *want, "MLE publicInputs[{i}] != proved close limb");
         }
-        eprintln!("[close] MLE publicInputs == 87 raw close limbs (sanity OK)");
+        eprintln!("[close] MLE publicInputs == 103 raw close limbs (sanity OK)");
     }
 
     // -----------------------------------------------------------------------
@@ -183,6 +227,19 @@ fn main() -> anyhow::Result<()> {
         .iter()
         .map(|a| a.pk_g.to_string())
         .collect();
+
+    // Per-token descriptor fields from the PROVED final state (the SAME witnessed
+    // registry/count/amounts the in-circuit token_funds_digest recompute — PI limbs 95..103 —
+    // was computed over; the on-chain verifier re-binds them by recomputing the digest).
+    let final_state = &witness.close.final_channel_state;
+    let channel_fund_amounts: Vec<String> = final_state
+        .channel_fund
+        .amounts
+        .iter()
+        .map(|a| a.to_string())
+        .collect();
+    let token_registry: Vec<u32> = final_state.balance_state.token_registry.to_vec();
+    let token_count = final_state.balance_state.token_count;
 
     let descriptor = CloseIntentDescriptor {
         channel_id: pis.channel_id.channel_id(),
@@ -205,6 +262,10 @@ fn main() -> anyhow::Result<()> {
         member_count: pis.member_count,
         delegate_count: pis.delegate_count,
         member_pk_gs,
+        channel_fund_amounts,
+        token_registry,
+        token_count,
+        token_funds_digest: pis.token_funds_digest.to_string(),
     };
     let descriptor_json = serde_json::to_string_pretty(&descriptor)?;
     fs::write(out_dir.join("close_intent.json"), &descriptor_json)?;

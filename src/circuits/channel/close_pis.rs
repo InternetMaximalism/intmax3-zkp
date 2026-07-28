@@ -2,7 +2,9 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::{
-    common::channel::{ChannelError, ChannelId, ChannelState, CloseIntent, CloseWithdrawal},
+    common::channel::{
+        ChannelError, ChannelId, ChannelState, CloseIntent, CloseWithdrawal, token_funds_digest,
+    },
     ethereum_types::{bytes32::Bytes32, u32limb_trait::U32LimbTrait, u256::U256},
 };
 
@@ -31,10 +33,19 @@ use crate::{
 // Stage 3 (post-close source-tx anchoring): `final_settled_tx_accumulator_root` (8 limbs) is
 // INSERTED immediately AFTER `final_settled_tx_chain` (limbs 69..77), shifting
 // `member_set_commitment` to 77..85, `member_count` to limb 93 and `delegate_count` to limb 94;
-// total is now 95 limbs. The insertion (not append) keeps the close PI order byte-identical to the
-// H1 preimage order (accumulator root right after the chain). The Solidity mirror is shifted to
-// match.
-pub const CHANNEL_CLOSE_PUBLIC_INPUTS_LEN: usize = 95;
+// 95 limbs at that point. The insertion (not append) keeps the close PI order byte-identical to
+// the H1 preimage order (accumulator root right after the chain).
+//
+// Multi-token (detail2 §N-6, TM-11): `token_funds_digest` (8 limbs) is APPENDED at the very END
+// (limbs 95..103), for 103 limbs total. It is
+// `keccak([IMTF, token_registry (10 x u32, zero-padded), token_count, amounts (10 x U256,
+// zero-padded)])` — the ALWAYS-full-width commitment to the per-token fund vector and its
+// registry alignment, recomputed IN-CIRCUIT from the same witnessed registry/count/amounts that
+// feed the signed H1 and the IMCH/IMCI digests. The Solidity `closePIHash` mirror
+// (`ChannelSettlementVerifier.sol`) is re-pinned in multitoken Phase 3 (byte-for-byte
+// differential test, TM-11); until then the `#[ignore]`d IMCI shared-vector cross-check stays
+// ignored (see `common::channel::tests`).
+pub const CHANNEL_CLOSE_PUBLIC_INPUTS_LEN: usize = 103;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -81,6 +92,13 @@ pub struct ChannelClosePublicInputs {
     /// the close circuit recomputes the now-`delegate_count`-bearing H1 from the same PI limb.
     /// WIDTH: u16 — delegate slots span the full 1024 balance-slot space (Option B).
     pub delegate_count: u16,
+    /// Multi-token (detail2 §N-6, TM-11): `keccak([IMTF, token_registry(10), token_count,
+    /// amounts(10 x U256)])` — the fixed 92-word commitment to the per-token fund vector,
+    /// appended at the very END of the close PI vector (limbs 95..103). Recomputed IN-CIRCUIT
+    /// from the witnessed registry/count/amounts (the SAME wires that feed the signed H1 and
+    /// the IMCH/IMCI digests), so L1 can settle per-token funds against a member-signed
+    /// commitment. Native mirror: [`crate::common::channel::token_funds_digest`].
+    pub token_funds_digest: Bytes32,
 }
 
 #[derive(Debug, Error)]
@@ -114,6 +132,7 @@ impl ChannelClosePublicInputs {
             self.member_set_commitment.to_u64_vec(),
             vec![self.member_count as u64],
             vec![self.delegate_count as u64],
+            self.token_funds_digest.to_u64_vec(),
         ]
         .concat()
     }
@@ -167,6 +186,8 @@ impl ChannelClosePublicInputs {
                     values[94]
                 ))
             })?,
+            token_funds_digest: Bytes32::from_u64_slice(&values[95..103])
+                .map_err(|e| ChannelClosePublicInputsError::InvalidField(e.to_string()))?,
         })
     }
 }
@@ -209,7 +230,10 @@ impl ChannelCloseWitness {
             close_freeze_nonce: self.close_intent.close_freeze_nonce,
             final_channel_state_digest: self.close_intent.final_channel_state_digest,
             final_balance_state_h1: self.close_intent.final_balance_state_h1,
-            channel_fund_amount: self.close_intent.channel_fund_snapshot.amount,
+            // Multi-token (§N-6): the L2 close burn stays denominated in the GENESIS token
+            // (`amounts[0]`, enforced == burn_amount by `CloseIntent::new`); the full per-token
+            // fund vector is committed by `token_funds_digest` below.
+            channel_fund_amount: self.close_intent.channel_fund_snapshot.amounts[0],
             channel_fund_intmax_state_root: self
                 .close_intent
                 .channel_fund_snapshot
@@ -235,6 +259,15 @@ impl ChannelCloseWitness {
             // Delegate account: delegate_count likewise comes from the final balance state (its h1
             // binds it immediately after member_count).
             delegate_count: self.final_channel_state.balance_state.delegate_count,
+            // Multi-token (§N-6, TM-11): the fixed-width commitment to the per-token fund vector,
+            // aligned to the final state's H1-committed registry. The circuit recomputes the SAME
+            // keccak from its witnessed registry/count/amounts, so a tampered digest PI is
+            // rejected at proving.
+            token_funds_digest: token_funds_digest(
+                &self.final_channel_state.balance_state.token_registry,
+                self.final_channel_state.balance_state.token_count,
+                &self.close_intent.channel_fund_snapshot.amounts,
+            ),
         })
     }
 }
@@ -292,14 +325,14 @@ mod tests {
             close_freeze_nonce: 0,
             channel_fund: ChannelFund {
                 channel_id: ChannelId::new(3).unwrap(),
-                amount: U256::from(77u32),
+                amounts: ChannelFund::single_token_amounts(U256::from(77u32)),
                 intmax_state_root: Bytes32::default(),
             },
             balance_state: BalanceState {
                 channel_id: ChannelId::new(3).unwrap(),
                 member_count: 3,
                 delegate_count: 0,
-                enc_balances: BalanceState::pad_enc_balances(&[
+                enc_balances: BalanceState::pad_enc_balances_token0(&[
                     ciphertext(1),
                     ciphertext(2),
                     ciphertext(3),
@@ -320,7 +353,9 @@ mod tests {
                 settled_tx_accumulator_root: Bytes32::from_u32_slice(&[0, 0, 0, 0, 0, 0, 0, 7])
                     .unwrap(),
                 state_version: 12,
-                pending_adds: BalanceState::pad_pending_adds(&[0, 0, 0]),
+                pending_adds: BalanceState::pad_pending_adds_token0(&[0, 0, 0]),
+                token_registry: BalanceState::single_token_registry(0),
+                token_count: 1,
             },
             h2_tag: Bytes32::default(),
             shared_native_nullifier_root: Bytes32::from_u32_slice(&[2, 0, 0, 0, 0, 0, 0, 0])
@@ -346,7 +381,7 @@ mod tests {
             final_balance_state_h1: state.balance_state.h1(),
             intmax_state_root: state.channel_fund.intmax_state_root,
             burn_tx_hash: Bytes32::from_u32_slice(&[9, 0, 0, 0, 0, 0, 0, 0]).unwrap(),
-            burn_amount: state.channel_fund.amount,
+            burn_amount: state.channel_fund.amounts[0],
             zkp: vec![9, 9, 9],
         };
         let close_intent = CloseIntent::new(5, &state, &close_tx, 123).unwrap();
@@ -365,8 +400,8 @@ mod tests {
         assert_eq!(
             limbs.len(),
             CHANNEL_CLOSE_PUBLIC_INPUTS_LEN,
-            "closePIHash preimage is exactly 95 BE u32 words (77 legacy + 8 accumulatorRoot + \
-             8 memberSetCommitment + 1 memberCount + 1 delegateCount)"
+            "closePIHash preimage is exactly 103 BE u32 words (77 legacy + 8 accumulatorRoot + \
+             8 memberSetCommitment + 1 memberCount + 1 delegateCount + 8 tokenFundsDigest)"
         );
         // Stage 3: final_settled_tx_accumulator_root occupies limbs 77..85, shifting the rest +8.
         assert_eq!(
@@ -389,7 +424,19 @@ mod tests {
         );
         assert_eq!(
             limbs[94], public_inputs.delegate_count as u64,
-            "delegate_count occupies the final limb (delegate account, shifted +8)"
+            "delegate_count occupies limb 94 (delegate account, shifted +8)"
+        );
+        // Multi-token (§N-6, TM-11): token_funds_digest occupies the final 8 limbs (95..103) and
+        // equals the native fixed-width keccak over (registry, token_count, amounts).
+        assert_eq!(
+            &limbs[95..103],
+            &token_funds_digest(
+                &witness.final_channel_state.balance_state.token_registry,
+                witness.final_channel_state.balance_state.token_count,
+                &witness.final_channel_state.channel_fund.amounts,
+            )
+            .to_u64_vec()[..],
+            "token_funds_digest occupies limbs 95..103 (multi-token §N-6)"
         );
         // The P8-pinned tail: snapshotMediumBlockNumber(2) | finalStateVersion(2 hi,lo) |
         // finalSettledTxChain(8).

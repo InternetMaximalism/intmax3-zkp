@@ -26,7 +26,7 @@ Legend: [ ] todo · [~] in progress · [x] modeled+proved
 - [x] `fraudProof()` (:1153)      → IntmaxRollupOptimistic (rollback floor; finalized roots permanent)
 - [x] `withdraw()` (:1212)        → IntmaxRollupWithdraw (claimWithdraw_no_double, CEI)
 - [x] reclaimStake/_slashStake/_refundStake → IntmaxRollupStake (single-resolution + conservation)
-- [x] claimAuthorizedWithdrawal → IntmaxRollupWithdraw (claimAuthorized_safe); authorizePartialWithdrawal → IntmaxRollupDeposit (access control)
+- [x] claimAuthorizedWithdrawal → IntmaxRollupWithdraw (`claimAuthorized_escrow_conservation`, renamed 2026-07-28 from the misleading `claimAuthorized_safe`: it proves escrow conservation + nullifier consumption + an authorization read-back, NOT economic soundness — the DERIVATION of the digest's fields was always out of model scope). **The contract function itself was DELETED 2026-07-28** (doc/tasks/pw-auth-threat-model.md); the model transition is retained so the solvency inductions cover a superset of deployed operations. authorizePartialWithdrawal → IntmaxRollupDeposit (access control)
 - [x] helpers (hash/crypto) → Coverage.lean (structural keccak_det + crypto oracles)
 - [x] `registerChannel()` (:891)  → Coverage.lean (structural reg keccak chain)
 

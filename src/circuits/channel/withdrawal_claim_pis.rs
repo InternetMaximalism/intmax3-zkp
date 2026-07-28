@@ -21,8 +21,10 @@ use crate::{
 };
 
 // 8 (close intent digest) + 1 (channel id, single u32 limb) + 8 (h1) +
-// 8 (member sphincs pubkey hash) + 5 (recipient) + 8 (ct digest) + 8 (nullifier) + 2 (amount).
-pub const WITHDRAWAL_CLAIM_PUBLIC_INPUTS_LEN: usize = 48;
+// 8 (member sphincs pubkey hash) + 5 (recipient) + 8 (ct digest) + 8 (nullifier) + 2 (amount) +
+// 1 (token_slot) + 1 (token_index) = 50 (multi-token §N-6: token_slot + resolved base
+// token_index appended at the END).
+pub const WITHDRAWAL_CLAIM_PUBLIC_INPUTS_LEN: usize = 50;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -37,6 +39,14 @@ pub struct WithdrawalClaimPublicInputs {
     /// Public withdrawal amount, proven equal to the plaintext of `user_amount_ct` by the E-3
     /// withdrawClaimZKP.
     pub amount: u64,
+    /// Multi-token (§N-6, TM-2/TM-8): the claimed LOCAL token slot. In-circuit it drives the
+    /// one-hot ct select, the `< token_count` bound, the registry resolution and the IMW2
+    /// nullifier limb.
+    pub token_slot: u8,
+    /// Multi-token (§N-6, review m8): the resolved BASE `token_index =
+    /// registry[token_slot]` of the signed final state — the asset L1 pays this claim in.
+    /// In-circuit it is selected from the H1-committed registry limbs (no prover choice).
+    pub token_index: u32,
 }
 
 #[derive(Debug, Error)]
@@ -102,9 +112,18 @@ impl WithdrawalClaimWitness {
         let expected_nullifier = WithdrawalClaim::derive_nullifier(
             self.close_intent.signing_digest(),
             slot_regev_pk_digest,
+            self.claim.token_slot,
         );
         if expected_nullifier != self.claim.withdrawal_nullifier {
             return Err(WithdrawalClaimWitnessError::NullifierMismatch);
+        }
+        // TM-8 fail-closed: the claimed token slot must be an ACTIVE position of the signed
+        // final state (positions >= token_count are canonical zeros and not claimable).
+        if self.claim.token_slot as usize >= self.final_balance_state.token_count as usize {
+            return Err(WithdrawalClaimWitnessError::MemberSlotMismatch(format!(
+                "token_slot {} out of range (>= token_count {})",
+                self.claim.token_slot, self.final_balance_state.token_count
+            )));
         }
 
         // Bind the witness balance state to the close intent: recomputed H1 must match.
@@ -144,9 +163,15 @@ impl WithdrawalClaimWitness {
                 self.member_index
             )));
         }
-        if self.claim.user_amount_ct != self.final_balance_state.enc_balances[self.member_index] {
+        // Multi-token (§N-6): the claimed ciphertext is the (member_index, token_slot) position
+        // of the H1-bound balance state — per-(slot, token) claims.
+        if self.claim.user_amount_ct
+            != self.final_balance_state.enc_balances[self.member_index]
+                [self.claim.token_slot as usize]
+        {
             return Err(WithdrawalClaimWitnessError::MemberSlotMismatch(
-                "user_amount_ct must equal final_balance_state.enc_balances[member_index]"
+                "user_amount_ct must equal final_balance_state.enc_balances[member_index]\
+                 [token_slot]"
                     .to_string(),
             ));
         }
@@ -179,6 +204,11 @@ impl WithdrawalClaimWitness {
             user_amount_digest: self.claim.user_amount_ct.digest(),
             withdrawal_nullifier: self.claim.withdrawal_nullifier,
             amount: self.amount,
+            token_slot: self.claim.token_slot,
+            // Multi-token (§N-6, review m8): the base token_index is DERIVED from the signed
+            // final state's registry at the claimed slot (bounds-checked above), mirroring the
+            // in-circuit `registry[token_slot]` select — never taken from the claim.
+            token_index: self.final_balance_state.token_registry[self.claim.token_slot as usize],
         })
     }
 }
@@ -194,6 +224,8 @@ impl WithdrawalClaimPublicInputs {
             self.user_amount_digest.to_u64_vec(),
             self.withdrawal_nullifier.to_u64_vec(),
             split_u64(self.amount),
+            vec![self.token_slot as u64],
+            vec![self.token_index as u64],
         ]
         .concat()
     }
@@ -220,6 +252,10 @@ impl WithdrawalClaimPublicInputs {
             withdrawal_nullifier: Bytes32::from_u64_slice(&values[38..46])
                 .map_err(|e| e.to_string())?,
             amount: join_u64(&values[46..48]),
+            token_slot: u8::try_from(values[48])
+                .map_err(|_| format!("token_slot limb {} does not fit in u8", values[48]))?,
+            token_index: u32::try_from(values[49])
+                .map_err(|_| format!("token_index limb {} does not fit in u32", values[49]))?,
         })
     }
 }
@@ -273,7 +309,7 @@ mod tests {
             channel_id,
             member_count: 3,
             delegate_count: 0,
-            enc_balances: BalanceState::pad_enc_balances(&[ct0.clone(), ct1, ct2]),
+            enc_balances: BalanceState::pad_enc_balances_token0(&[ct0.clone(), ct1, ct2]),
             regev_pk_digests: BalanceState::pad_regev_pk_digests(&[
                 Bytes32::from(pk0.poseidon_digest()),
                 Bytes32::from(pk1.poseidon_digest()),
@@ -288,7 +324,9 @@ mod tests {
             settled_tx_chain: Bytes32::default(),
             settled_tx_accumulator_root: Bytes32::default(),
             state_version: 6,
-            pending_adds: BalanceState::pad_pending_adds(&[0, 0, 0]),
+            pending_adds: BalanceState::pad_pending_adds_token0(&[0, 0, 0]),
+            token_registry: BalanceState::single_token_registry(0),
+            token_count: 1,
         };
 
         let state = ChannelState {
@@ -298,7 +336,7 @@ mod tests {
             close_freeze_nonce: 0,
             channel_fund: ChannelFund {
                 channel_id,
-                amount: U256::from(93u32),
+                amounts: ChannelFund::single_token_amounts(U256::from(93u32)),
                 intmax_state_root: Bytes32::default(),
             },
             balance_state: final_balance_state.clone(),
@@ -320,7 +358,7 @@ mod tests {
             final_balance_state_h1: state.balance_state.h1(),
             intmax_state_root: state.channel_fund.intmax_state_root,
             burn_tx_hash: Bytes32::from_u32_slice(&[9, 0, 0, 0, 0, 0, 0, 0]).unwrap(),
-            burn_amount: state.channel_fund.amount,
+            burn_amount: state.channel_fund.amounts[0],
             zkp: vec![9],
         };
         let close_intent = CloseIntent::new(5, &state, &close_tx, 123).unwrap();
@@ -333,6 +371,7 @@ mod tests {
         let claim_proof =
             prove_withdraw_claim(RegevSecurityLevel::Test, &pk0, &sk0, &ct0, amount).unwrap();
         let claim = WithdrawalClaim {
+            token_slot: 0,
             close_intent_digest: close_intent.signing_digest(),
             member_pk_g: member.pk_g,
             l1_recipient: member.l1_withdrawal_recipient,
@@ -340,6 +379,7 @@ mod tests {
             withdrawal_nullifier: WithdrawalClaim::derive_nullifier(
                 close_intent.signing_digest(),
                 Bytes32::from(pk0.poseidon_digest()),
+                0,
             ),
             claim_proof,
         };
@@ -416,7 +456,7 @@ mod tests {
             channel_id,
             member_count: 2,
             delegate_count: 1,
-            enc_balances: BalanceState::pad_enc_balances(&[ct0, ct1, ct_d.clone()]),
+            enc_balances: BalanceState::pad_enc_balances_token0(&[ct0, ct1, ct_d.clone()]),
             regev_pk_digests: BalanceState::pad_regev_pk_digests(&[
                 Bytes32::from(pk0.poseidon_digest()),
                 Bytes32::from(pk1.poseidon_digest()),
@@ -432,7 +472,9 @@ mod tests {
             settled_tx_chain: Bytes32::default(),
             settled_tx_accumulator_root: Bytes32::default(),
             state_version: 6,
-            pending_adds: BalanceState::pad_pending_adds(&[0, 0, 0]),
+            pending_adds: BalanceState::pad_pending_adds_token0(&[0, 0, 0]),
+            token_registry: BalanceState::single_token_registry(0),
+            token_count: 1,
         };
 
         let state = ChannelState {
@@ -442,7 +484,7 @@ mod tests {
             close_freeze_nonce: 0,
             channel_fund: ChannelFund {
                 channel_id,
-                amount: U256::from(93u32),
+                amounts: ChannelFund::single_token_amounts(U256::from(93u32)),
                 intmax_state_root: Bytes32::default(),
             },
             balance_state: final_balance_state.clone(),
@@ -464,7 +506,7 @@ mod tests {
             final_balance_state_h1: state.balance_state.h1(),
             intmax_state_root: state.channel_fund.intmax_state_root,
             burn_tx_hash: Bytes32::from_u32_slice(&[9, 0, 0, 0, 0, 0, 0, 0]).unwrap(),
-            burn_amount: state.channel_fund.amount,
+            burn_amount: state.channel_fund.amounts[0],
             zkp: vec![9],
         };
         let close_intent = CloseIntent::new(5, &state, &close_tx, 123).unwrap();
@@ -478,6 +520,7 @@ mod tests {
         let claim_proof =
             prove_withdraw_claim(RegevSecurityLevel::Test, &pk_d, &sk_d, &ct_d, d_amount).unwrap();
         let claim = WithdrawalClaim {
+            token_slot: 0,
             close_intent_digest: close_intent.signing_digest(),
             member_pk_g: delegate.pk_g,
             l1_recipient: delegate.l1_withdrawal_recipient,
@@ -485,6 +528,7 @@ mod tests {
             withdrawal_nullifier: WithdrawalClaim::derive_nullifier(
                 close_intent.signing_digest(),
                 Bytes32::from(pk_d.poseidon_digest()),
+                0,
             ),
             claim_proof,
         };

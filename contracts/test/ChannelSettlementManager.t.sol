@@ -12,6 +12,7 @@ import {ChannelSettlementVerifier} from "../src/ChannelSettlementVerifier.sol";
 import {MleVerifier} from "@mle/MleVerifier.sol";
 import {SpongefishWhirVerify} from "@mle/spongefish/SpongefishWhirVerify.sol";
 import {MockMleVerifier, CloseTestLib} from "./CloseTestLib.sol";
+import {IERC20} from "../src/SafeERC20.sol";
 
 /// @dev Minimal stand-in for `IntmaxRollup`'s registration surface (Finding E). It records the
 /// SAME close-form IMCM commitment + bp identity the real rollup stores at `registerChannel`,
@@ -79,6 +80,25 @@ contract MockChannelRegistry is IChannelRegistry {
     function authorizePartialWithdrawal(bytes32 authDigest) external override {
         partialWithdrawalAuthorized[authDigest] = true;
     }
+
+    // --- Multi-token (multitoken Phase 3): ERC-20 pull-payment + set-once registry mirror ---
+    mapping(uint32 => IERC20) public tokenAddressOf;
+    mapping(uint32 => mapping(address => uint256)) public pendingTokenWithdrawals;
+
+    function setToken(uint32 tokenIndex, IERC20 token) external {
+        tokenAddressOf[tokenIndex] = token;
+    }
+
+    function creditTokenWithdrawal(uint32 tokenIndex, address recipient, uint256 amount) external {
+        pendingTokenWithdrawals[tokenIndex][recipient] += amount;
+    }
+
+    function withdrawToken(uint32 tokenIndex) external override {
+        uint256 amount = pendingTokenWithdrawals[tokenIndex][msg.sender];
+        require(amount > 0, "nothing to withdraw");
+        pendingTokenWithdrawals[tokenIndex][msg.sender] = 0;
+        require(tokenAddressOf[tokenIndex].transfer(msg.sender, amount), "token transfer failed");
+    }
 }
 
 contract ChannelSettlementManagerTest is Test {
@@ -114,12 +134,14 @@ contract ChannelSettlementManagerTest is Test {
     // Shared Rust<->Solidity CloseIntent digest test vector. The same fully-populated intent is
     // hashed by `CloseIntent::signing_digest()` in src/common/channel.rs
     // (close_intent_digest_matches_solidity_shared_vector) and MUST produce this constant.
+    // Multitoken Phase 3 re-pin (2026-07-27): regenerated FROM THE RUST SIDE after the IMCI
+    // preimage widened to the 80-word amounts[0..10] vector (§N-6, TM-11).
     bytes32 internal constant SHARED_VECTOR_DIGEST =
-        0xa2679bf7c2d9c08c45b6fdd39202456707cbdcf3e1667a45fb493a717b37d264;
+        0x9fc3ced58e9f82428e4b8a20f6e7755e1c0145facd2824f57d112cef86be42fb;
 
     function setUp() external {
         verifier = new ChannelSettlementVerifier();
-        // Phase A close path: a real `verifyCloseIntent` rebinds the 87-limb close public inputs and
+        // Phase A close path: a real `verifyCloseIntent` rebinds the 103-limb close public inputs and
         // then calls `MleVerifier.verify`. The lifecycle tests exercise the manager + the REAL limb
         // binding, not the WHIR cryptography, so we wire a controllable mock verifier (verdict=true)
         // as the close MLE verifier and set the close VK once (set-once). `dummyVkArgs()` carries a
@@ -250,7 +272,7 @@ contract ChannelSettlementManagerTest is Test {
     }
 
     /// @dev Build a withdrawal-claim `MleProof` whose `publicInputs` equal the verifier's expected
-    ///      48-limb vector for `claim` — exactly what `_bindLimbsStrict` requires. Uses the channel's
+    ///      50-limb vector for `claim` — exactly what `_bindLimbsStrict` requires. Uses the channel's
     ///      finalized H1 (the manager passes it through to the verifier).
     function _withdrawalClaimProof(ChannelSettlementManager.WithdrawalClaim memory claim)
         internal view returns (MleVerifier.MleProof memory)
@@ -263,6 +285,8 @@ contract ChannelSettlementManagerTest is Test {
             claim.recipient,
             claim.userAmountDigest,
             claim.amount,
+            claim.tokenSlot,
+            claim.tokenIndex,
             claim.withdrawalNullifier
         );
         return CloseTestLib.proofWithLimbs(limbs);
@@ -282,6 +306,8 @@ contract ChannelSettlementManagerTest is Test {
             claim.recipient,
             claim.userAmountDigest,
             claim.amount,
+            claim.tokenSlot,
+            claim.tokenIndex,
             claim.withdrawalNullifier
         );
         return CloseTestLib.proofWithLimbs(limbs);
@@ -307,7 +333,8 @@ contract ChannelSettlementManagerTest is Test {
             snn,
             claim.amount,
             manager.finalizedBalanceStateH1(),
-            manager.finalizedSettledTxAccumulatorRoot()
+            manager.finalizedSettledTxAccumulatorRoot(),
+            claim.tokenIndex
         );
         return CloseTestLib.proofWithLimbs(limbs);
     }
@@ -340,6 +367,15 @@ contract ChannelSettlementManagerTest is Test {
         );
     }
 
+    /// Single-token (genesis ETH) helpers: amount at slot 0, base token 0 at registry slot 0.
+    function _singleAmounts(uint256 amount) internal pure returns (uint256[10] memory a) {
+        a[0] = amount;
+    }
+
+    function _singleRegistry() internal pure returns (uint32[10] memory r) {
+        r[0] = 0;
+    }
+
     function _intentWithVersion(
         uint64 closeNonce,
         uint64 finalEpoch,
@@ -354,7 +390,9 @@ contract ChannelSettlementManagerTest is Test {
             closeFreezeNonce: closeFreezeNonce,
             finalChannelStateDigest: keccak256("final_state"),
             finalBalanceStateH1: keccak256("balance_state_h1"),
-            channelFundAmount: 75,
+            channelFundAmounts: _singleAmounts(75),
+            tokenRegistry: _singleRegistry(),
+            tokenCount: 1,
             channelFundIntmaxStateRoot: keccak256("intmax_root"),
             burnTxHash: keccak256("burn_tx"),
             closeWithdrawalDigest: keccak256("burn_backed_close"),
@@ -373,7 +411,8 @@ contract ChannelSettlementManagerTest is Test {
         ChannelSettlementManager.CloseIntent memory intent
     ) internal view returns (MleVerifier.MleProof memory) {
         // F4/F7 + delegate account: the close proof binds the channel's registered member-set
-        // commitment (limbs 77..84) AND the packed member/delegate counts (limbs 85,86 → 87 limbs).
+        // commitment (limbs 85..92) AND the packed member/delegate counts (limbs 93,94; 103 limbs
+        // total incl. the multi-token tokenFundsDigest at 95..102).
         return this._closeProofCd(
             intent,
             manager.registeredMemberSetCommitment(),
@@ -400,7 +439,9 @@ contract ChannelSettlementManagerTest is Test {
             closeFreezeNonce: intent.closeFreezeNonce,
             finalChannelStateDigest: intent.finalChannelStateDigest,
             finalBalanceStateH1: intent.finalBalanceStateH1,
-            channelFundAmount: intent.channelFundAmount,
+            channelFundAmounts: intent.channelFundAmounts,
+            tokenRegistry: intent.tokenRegistry,
+            tokenCount: intent.tokenCount,
             channelFundIntmaxStateRoot: intent.channelFundIntmaxStateRoot,
             burnTxHash: intent.burnTxHash,
             closeWithdrawalDigest: intent.closeWithdrawalDigest,
@@ -437,6 +478,8 @@ contract ChannelSettlementManagerTest is Test {
             recipient: recipient,
             userAmountDigest: keccak256(abi.encodePacked(memberPkG, amount)),
             amount: amount,
+            tokenSlot: 0,
+            tokenIndex: 0,
             withdrawalNullifier: keccak256(
                 abi.encodePacked("withdraw", closeIntentDigest, memberPkG)
             )
@@ -445,9 +488,13 @@ contract ChannelSettlementManagerTest is Test {
 
     function test_hash_helpers_are_stable() external view {
         ChannelSettlementManager.CloseIntent memory intent = _intent(1, 9, 22, 1);
-        // The close proof now carries the 87 raw close limbs as its MLE publicInputs (not a keccak).
+        // The close proof now carries the 103 raw close limbs as its MLE publicInputs (not a keccak).
         MleVerifier.MleProof memory closeProof = _closeProof(intent);
-        assertEq(closeProof.publicInputs.length, 95, "close proof carries 95 raw limbs (Stage 3)");
+        assertEq(
+            closeProof.publicInputs.length,
+            103,
+            "close proof carries 103 raw limbs (Stage 3 + multi-token TFD)"
+        );
         assertEq(closeProof.publicInputs[0], uint256(uint32(CHANNEL_ID)), "limb[0] == channelId");
 
         assertTrue(
@@ -473,10 +520,12 @@ contract ChannelSettlementManagerTest is Test {
                 alice,
                 keccak256("amount"),
                 9,
+                0, // tokenSlot
+                0, // tokenIndex
                 keccak256("nullifier")
             ).length,
-            48,
-            "withdrawal-claim PI is 48 raw limbs"
+            50,
+            "withdrawal-claim PI is 50 raw limbs (multi-token)"
         );
 
         assertEq(
@@ -501,10 +550,11 @@ contract ChannelSettlementManagerTest is Test {
                 keccak256("shared_nullifier"),
                 9,
                 keccak256("final_balance_state_h1"),
-                keccak256("settled_tx_accumulator_root")
+                keccak256("settled_tx_accumulator_root"),
+                0
             ).length,
-            56,
-            "post-close-claim PI is 56 raw limbs (Stage 3)"
+            57,
+            "post-close-claim PI is 57 raw limbs (Stage 3 + TM-16 tokenIndex)"
         );
     }
 
@@ -520,7 +570,13 @@ contract ChannelSettlementManagerTest is Test {
             closeFreezeNonce: 0x7777777788888888,
             finalChannelStateDigest: 0x0000000100000002000000030000000400000005000000060000000700000008,
             finalBalanceStateH1: 0x000000090000000a0000000b0000000c0000000d0000000e0000000f00000010,
-            channelFundAmount: 0x0000001100000012000000130000001400000015000000160000001700000018,
+            // Multi-token: the shared-vector amounts sit at slot 0 (single-token embedding, exactly
+            // the Rust `ChannelFund::single_token_amounts`); slots 1..9 hash as zero words.
+            channelFundAmounts: _singleAmounts(
+                0x0000001100000012000000130000001400000015000000160000001700000018
+            ),
+            tokenRegistry: _singleRegistry(),
+            tokenCount: 1,
             channelFundIntmaxStateRoot: 0x000000190000001a0000001b0000001c0000001d0000001e0000001f00000020,
             burnTxHash: 0x0000002100000022000000230000002400000025000000260000002700000028,
             closeWithdrawalDigest: 0x000000290000002a0000002b0000002c0000002d0000002e0000002f00000030,
@@ -553,6 +609,14 @@ contract ChannelSettlementManagerTest is Test {
     /// (the value is pinned cross-language by `test_close_intent_digest_matches_rust_shared_vector`),
     /// while every OTHER field is asserted against the shared sentinel.
     function test_expectedCloseLimbs_goldenVector() external view {
+        // Multi-token: TWO active tokens so the TFD recompute is exercised beyond the genesis
+        // embedding. amounts[0] carries the legacy 0x3000 sentinel (limbs 25..32 must equal it).
+        uint256[10] memory amounts;
+        amounts[0] = uint256(_sentinelB32(0x3000));
+        amounts[1] = uint256(_sentinelB32(0xa000));
+        uint32[10] memory tokenRegistry;
+        tokenRegistry[0] = 0;
+        tokenRegistry[1] = 55;
         CloseProofFields memory fields = CloseProofFields({
             channelId: bytes4(uint32(0x0a0b0c0d)),
             closeNonce: 0x0000001100000022,
@@ -561,7 +625,9 @@ contract ChannelSettlementManagerTest is Test {
             closeFreezeNonce: 0x0000007700000088,
             finalChannelStateDigest: _sentinelB32(0x1000),
             finalBalanceStateH1: _sentinelB32(0x2000),
-            channelFundAmount: uint256(_sentinelB32(0x3000)),
+            channelFundAmounts: amounts,
+            tokenRegistry: tokenRegistry,
+            tokenCount: 2,
             channelFundIntmaxStateRoot: _sentinelB32(0x4000),
             burnTxHash: _sentinelB32(0x5000),
             closeWithdrawalDigest: _sentinelB32(0x6000),
@@ -576,7 +642,7 @@ contract ChannelSettlementManagerTest is Test {
         });
 
         uint256[] memory v = this._expectedCloseLimbsExt(fields);
-        assertEq(v.length, 95, "95 limbs (Stage 3: +8 accumulator root)");
+        assertEq(v.length, 103, "103 limbs (Stage 3 accumulator root + multi-token TFD)");
         // channelId — limb 0.
         assertEq(v[0], 0x0a0b0c0d);
         // close_nonce — 1..2.
@@ -599,22 +665,28 @@ contract ChannelSettlementManagerTest is Test {
         // finalStateVersion / finalSettledTxChain tail).
         bytes32 digest = keccak256(
             abi.encodePacked(
-                bytes4(uint32(0x494d4349)),
-                fields.channelId,
-                fields.closeNonce,
-                fields.finalEpoch,
-                fields.finalSmallBlockNumber,
-                fields.closeFreezeNonce,
-                fields.finalChannelStateDigest,
-                fields.finalBalanceStateH1,
-                fields.channelId,
-                fields.channelFundAmount,
-                fields.channelFundIntmaxStateRoot,
-                fields.burnTxHash,
-                fields.closeWithdrawalDigest,
-                fields.snapshotMediumBlockNumber,
-                fields.finalStateVersion,
-                fields.finalSettledTxChain
+                abi.encodePacked(
+                    bytes4(uint32(0x494d4349)),
+                    fields.channelId,
+                    fields.closeNonce,
+                    fields.finalEpoch,
+                    fields.finalSmallBlockNumber,
+                    fields.closeFreezeNonce,
+                    fields.finalChannelStateDigest,
+                    fields.finalBalanceStateH1,
+                    fields.channelId
+                ),
+                // Multi-token: the FULL 80-word amounts vector (10 x 32 BE bytes) in the IMCI
+                // preimage — an independent second encoding of the widened segment.
+                abi.encodePacked(fields.channelFundAmounts),
+                abi.encodePacked(
+                    fields.channelFundIntmaxStateRoot,
+                    fields.burnTxHash,
+                    fields.closeWithdrawalDigest,
+                    fields.snapshotMediumBlockNumber,
+                    fields.finalStateVersion,
+                    fields.finalSettledTxChain
+                )
             )
         );
         for (uint256 i = 0; i < 8; i++) {
@@ -630,6 +702,14 @@ contract ChannelSettlementManagerTest is Test {
         _assertSentinelRange(v, 85, 0x9000); // member_set_commitment 85..92
         // member_count — 93; delegate_count — 94.
         assertEq(v[93], 3); assertEq(v[94], 1);
+        // Multi-token (§N-6, TM-11): tokenFundsDigest 95..102 — RECOMPUTED over the supplied
+        // (registry, count, amounts); assert the limbs equal the split of the public recompute.
+        bytes32 tfd = verifier.tokenFundsDigest(
+            fields.tokenRegistry, fields.tokenCount, fields.channelFundAmounts
+        );
+        for (uint256 i = 0; i < 8; i++) {
+            assertEq(v[95 + i], (uint256(tfd) >> (32 * (7 - i))) & 0xffffffff, "tfd limb");
+        }
     }
 
     /// @dev external passthroughs so `fields` is read from calldata (the verifier's
@@ -1122,12 +1202,13 @@ contract ChannelSettlementManagerTest is Test {
                 incomingTxHash: keccak256("incoming_tx"),
                 receiverPkG: USER_B,
                 recipient: bob,
-                amount: 5
+                amount: 5,
+                tokenIndex: 0
             });
         manager.submitPostCloseClaim(postCloseClaim, _postCloseClaimProof(postCloseClaim));
 
-        assertEq(manager.withdrawalCredits(alice), 30);
-        assertEq(manager.withdrawalCredits(bob), 5);
+        assertEq(manager.withdrawalCredits(0, alice), 30);
+        assertEq(manager.withdrawalCredits(0, bob), 5);
     }
 
     /// Delegate account (Phase 4 / DA4): a DELEGATE is registered for the WITHDRAWAL path (its
@@ -1184,7 +1265,7 @@ contract ChannelSettlementManagerTest is Test {
         ChannelSettlementManager.WithdrawalClaim memory dClaim =
             _withdrawalClaim(cid, USER_D, dave, 40);
         m.submitWithdrawalClaim(dClaim, _withdrawalClaimProofFor(m, dClaim));
-        assertEq(m.withdrawalCredits(dave), 40, "delegate withdrawal credited");
+        assertEq(m.withdrawalCredits(0, dave), 40, "delegate withdrawal credited");
 
         // B-2 (Option B): membership is now PROOF-ENFORCED, not gate-enforced. There is NO on-chain
         // delegate registry to gate a claim against — a claimant's membership is established SOLELY
@@ -1261,7 +1342,7 @@ contract ChannelSettlementManagerTest is Test {
         );
         assertEq(manager.currentCloseFreezeNonce(), 0);
         assertEq(manager.bpBondCredits(), INITIAL_BP_BOND);
-        assertEq(manager.withdrawalCredits(address(this)), 0);
+        assertEq(manager.withdrawalCredits(0, address(this)), 0);
     }
 
     function test_cancel_close_restores_active_channel() external {
@@ -1490,7 +1571,7 @@ contract ChannelSettlementManagerTest is Test {
     /// pullChannelFunds moves the manager's rollup credit into the manager and records it.
     function test_p3_pullChannelFunds_recordsReceived() external {
         _fundAndPull(registry, manager, 60);
-        assertEq(manager.receivedChannelFunds(), 60, "receivedChannelFunds == pulled");
+        assertEq(manager.receivedChannelFunds(0), 60, "receivedChannelFunds == pulled");
         assertEq(address(manager).balance, 60, "manager holds the pulled ETH");
     }
 
@@ -1506,13 +1587,13 @@ contract ChannelSettlementManagerTest is Test {
         uint256 got = manager.claimWithdrawalCredit();
         assertEq(got, 30, "alice claims her credit");
         assertEq(alice.balance, aliceBefore + 30, "alice received real ETH");
-        assertEq(manager.withdrawalCredits(alice), 0, "credit cleared");
-        assertEq(manager.totalCreditedOut(), 30, "paid-out accumulator");
+        assertEq(manager.withdrawalCredits(0, alice), 0, "credit cleared");
+        assertEq(manager.totalCreditedOut(0), 30, "paid-out accumulator");
 
         vm.prank(bob);
         manager.claimWithdrawalCredit();
         assertEq(bob.balance, 20, "bob received real ETH");
-        assertEq(manager.totalCreditedOut(), 50, "total paid out");
+        assertEq(manager.totalCreditedOut(0), 50, "total paid out");
     }
 
     /// CROSS-CHANNEL ISOLATION (non-negotiable): the manager cannot pay out more ETH than it
@@ -1536,7 +1617,8 @@ contract ChannelSettlementManagerTest is Test {
             incomingTxHash: keccak256("itx"),
             receiverPkG: USER_B,
             recipient: bob,
-            amount: 10 // 70 + 10 = 80 > 75 -> must revert
+            amount: 10, // 70 + 10 = 80 > 75 -> must revert
+            tokenIndex: 0
         });
         // Precompute the proof BEFORE expectRevert: vm.expectRevert applies to the next external
         // call, which would otherwise be the view calls that assemble the proof.
@@ -1572,8 +1654,8 @@ contract ChannelSettlementManagerTest is Test {
         vm.expectRevert();
         attacker.claim();
 
-        assertEq(m.withdrawalCredits(address(attacker)), 30, "credit preserved (no double-pay)");
-        assertEq(m.totalCreditedOut(), 0, "nothing paid out");
+        assertEq(m.withdrawalCredits(0, address(attacker)), 30, "credit preserved (no double-pay)");
+        assertEq(m.totalCreditedOut(0), 0, "nothing paid out");
         assertEq(address(attacker).balance, 0, "no ETH drained");
     }
 
@@ -1581,7 +1663,7 @@ contract ChannelSettlementManagerTest is Test {
     // Phase A — direct verifier negative tests (close-verifier-a1-plan §T2)
     //
     // These call `verifier.verifyCloseIntent(fields, proof)` directly (the verifier is mock-MLE-
-    // backed in this suite, so a VALID 87-limb proof passes the crypto step) to isolate the binding
+    // backed in this suite, so a VALID 103-limb proof passes the crypto step) to isolate the binding
     // and VK-management failure modes. The cross-circuit-replay negative (a validity/withdrawal MLE
     // proof rejected by the REAL MleVerifier on circuitDigest / gatesDigest) lives in the real-MLE
     // CloseLifecycleE2E suite, where the genuine verifier runs.
@@ -1599,7 +1681,9 @@ contract ChannelSettlementManagerTest is Test {
             closeFreezeNonce: 1,
             finalChannelStateDigest: keccak256("fcsd"),
             finalBalanceStateH1: keccak256("h1"),
-            channelFundAmount: 123,
+            channelFundAmounts: _singleAmounts(123),
+            tokenRegistry: _singleRegistry(),
+            tokenCount: 1,
             channelFundIntmaxStateRoot: keccak256("isr"),
             burnTxHash: keccak256("burn"),
             closeWithdrawalDigest: keccak256("cwd"),
@@ -1619,13 +1703,13 @@ contract ChannelSettlementManagerTest is Test {
         return CloseTestLib.proofWithLimbs(this._expectedCloseLimbsExt(f));
     }
 
-    /// Positive control: a valid 87-limb proof for valid fields passes (mock verdict = true).
+    /// Positive control: a valid 103-limb proof for valid fields passes (mock verdict = true).
     function test_verifyClose_validProof_passes() external {
         CloseProofFields memory f = this._validCloseFields();
         assertTrue(verifier.verifyCloseIntent(f, _proofForFields(f)));
     }
 
-    /// Forged memberSetCommitment (e.g. non-member keys) ⇒ limb 77..84 differ ⇒ reverts.
+    /// Forged memberSetCommitment (e.g. non-member keys) ⇒ limbs 85..92 differ ⇒ reverts.
     function test_verifyClose_forgedMemberSetCommitment_reverts() external {
         CloseProofFields memory f = this._validCloseFields();
         MleVerifier.MleProof memory proof = _proofForFields(f); // proof for the REAL commitment
@@ -1643,10 +1727,10 @@ contract ChannelSettlementManagerTest is Test {
         verifier.verifyCloseIntent(f, proof);
     }
 
-    /// publicInputs.length != 87 ⇒ reverts on the length guard.
+    /// publicInputs.length != 103 ⇒ reverts on the length guard.
     function test_verifyClose_wrongLength_reverts() external {
         CloseProofFields memory f = this._validCloseFields();
-        uint256[] memory shortPis = new uint256[](86);
+        uint256[] memory shortPis = new uint256[](102);
         MleVerifier.MleProof memory proof = CloseTestLib.proofWithLimbs(shortPis);
         vm.expectRevert(bytes("close pi len"));
         verifier.verifyCloseIntent(f, proof);
@@ -1858,8 +1942,9 @@ contract ChannelSettlementManagerTest is Test {
     // =====================================================================
 
     /// GOLDEN VECTOR mirror: the Solidity `_expectedWithdrawalClaimLimbs` must produce the SAME
-    /// 48-limb vector as the Rust `WithdrawalClaimPublicInputs::to_u64_vec()` golden test
-    /// (`withdrawal_claim_public_inputs_match_solidity_shared_vector`). Same sentinels.
+    /// 50-limb vector as the Rust `WithdrawalClaimPublicInputs::to_u64_vec()` layout
+    /// (src/circuits/channel/withdrawal_claim_pis.rs; multi-token §N-6: + tokenSlot at 48,
+    /// resolved base tokenIndex at 49). Same sentinels.
     function test_expectedWithdrawalClaimLimbs_goldenVector() external view {
         bytes32 cid = _b32(0x1000);
         bytes32 h1 = _b32(0x2000);
@@ -1870,9 +1955,9 @@ contract ChannelSettlementManagerTest is Test {
         bytes32 nul = _b32(0x6000);
         uint64 amount = 0x0000001100000022;
         uint256[] memory v = verifier.expectedWithdrawalClaimLimbs(
-            hex"0a0b0c0d", cid, h1, pkg, rcp, uad, amount, nul
+            hex"0a0b0c0d", cid, h1, pkg, rcp, uad, amount, 7, 0xdeadbeef, nul
         );
-        assertEq(v.length, 48);
+        assertEq(v.length, 50);
         _assertB32(v, 0, 0x1000);          // close_intent_digest
         assertEq(v[8], 0x0a0b0c0d);        // channel_id
         _assertB32(v, 9, 0x2000);          // final_balance_state_h1
@@ -1882,18 +1967,20 @@ contract ChannelSettlementManagerTest is Test {
         _assertB32(v, 30, 0x5000);         // user_amount_digest
         _assertB32(v, 38, 0x6000);         // withdrawal_nullifier
         assertEq(v[46], 0x11); assertEq(v[47], 0x22); // amount (hi, lo)
+        assertEq(v[48], 7);                // token_slot (multi-token §N-6)
+        assertEq(v[49], 0xdeadbeef);       // token_index (resolved base token)
     }
 
-    /// GOLDEN VECTOR mirror for post-close-claim (56 limbs; Stage 3: + finalBalanceStateH1 +
-    /// finalSettledTxAccumulatorRoot appended).
+    /// GOLDEN VECTOR mirror for post-close-claim (57 limbs; Stage 3: + finalBalanceStateH1 +
+    /// finalSettledTxAccumulatorRoot appended; TM-16: + tokenIndex at limb 56).
     function test_expectedPostCloseClaimLimbs_goldenVector() external view {
         address rcp = address(uint160((uint256(0x4000) << 128) | (uint256(0x4001) << 96)
             | (uint256(0x4002) << 64) | (uint256(0x4003) << 32) | uint256(0x4004)));
         uint256[] memory v = verifier.expectedPostCloseClaimLimbs(
             hex"0a0b0c0d", _b32(0x1000), _b32(0x2000), _b32(0x3000), rcp, _b32(0x5000),
-            0x0000001100000022, _b32(0x7000), _b32(0x8000)
+            0x0000001100000022, _b32(0x7000), _b32(0x8000), 0xdeadbeef
         );
-        assertEq(v.length, 56);
+        assertEq(v.length, 57);
         _assertB32(v, 0, 0x1000);          // close_intent_digest
         assertEq(v[8], 0x0a0b0c0d);        // receiver_channel_id
         _assertB32(v, 9, 0x2000);          // incoming_tx_hash
@@ -1903,6 +1990,7 @@ contract ChannelSettlementManagerTest is Test {
         assertEq(v[38], 0x11); assertEq(v[39], 0x22); // amount
         _assertB32(v, 40, 0x7000);         // final_balance_state_h1 (Stage 3)
         _assertB32(v, 48, 0x8000);         // final_settled_tx_accumulator_root (Stage 3)
+        assertEq(v[56], 0xdeadbeef);       // token_index (TM-16, anchored base token)
     }
 
     /// GOLDEN VECTOR mirror for cancel-close (27 limbs). The Rust side asserts the SAME constant in
@@ -1982,7 +2070,7 @@ contract ChannelSettlementManagerTest is Test {
         bytes32 d = _finalizeDefault();
         ChannelSettlementManager.WithdrawalClaim memory c = _withdrawalClaim(d, USER_A, alice, 30);
         MleVerifier.MleProof memory proof;
-        proof.publicInputs = new uint256[](47); // != 48
+        proof.publicInputs = new uint256[](48); // != 50 (the pre-multitoken length)
         vm.expectRevert(bytes("claim pi len"));
         manager.submitWithdrawalClaim(c, proof);
     }
@@ -2004,10 +2092,10 @@ contract ChannelSettlementManagerTest is Test {
         _initCloseVk(fresh);
         // withdrawal-claim VK deliberately NOT set.
         MleVerifier.MleProof memory proof;
-        proof.publicInputs = new uint256[](48);
+        proof.publicInputs = new uint256[](50);
         vm.expectRevert(ChannelSettlementVerifier.WithdrawalClaimVkNotSet.selector);
         fresh.verifyWithdrawalClaim(
-            CHANNEL_ID, bytes32(0), bytes32(0), USER_A, alice, bytes32(0), 0, bytes32(0), proof
+            CHANNEL_ID, bytes32(0), bytes32(0), USER_A, alice, bytes32(0), 0, 0, 0, bytes32(0), proof
         );
     }
 
@@ -2047,11 +2135,11 @@ contract ChannelSettlementManagerTest is Test {
         ChannelSettlementVerifier fresh = new ChannelSettlementVerifier();
         _initCloseVk(fresh);
         MleVerifier.MleProof memory proof;
-        proof.publicInputs = new uint256[](56);
+        proof.publicInputs = new uint256[](57);
         vm.expectRevert(ChannelSettlementVerifier.PostCloseClaimVkNotSet.selector);
         fresh.verifyPostCloseClaim(
             CHANNEL_ID, bytes32(0), bytes32(0), USER_B, bob, bytes32(0), 0,
-            bytes32(0), bytes32(0), proof
+            bytes32(0), bytes32(0), 0, proof
         );
     }
 
@@ -2082,10 +2170,11 @@ contract ChannelSettlementManagerTest is Test {
             incomingTxHash: keccak256("itx"),
             receiverPkG: USER_B,
             recipient: bob,
-            amount: 5
+            amount: 5,
+            tokenIndex: 0
         });
         manager.submitPostCloseClaim(pc, _postCloseClaimProof(pc));
-        assertEq(manager.withdrawalCredits(bob), 5);
+        assertEq(manager.withdrawalCredits(0, bob), 5);
 
         // Same claim → same recomputed nullifier → rejected.
         MleVerifier.MleProof memory proof2 = _postCloseClaimProof(pc);
@@ -2103,14 +2192,15 @@ contract ChannelSettlementManagerTest is Test {
             incomingTxHash: keccak256("itx"),
             receiverPkG: USER_B,
             recipient: bob,
-            amount: 5
+            amount: 5,
+            tokenIndex: 0
         });
         // Build a proof whose shared_native_nullifier limb is a FORGED value (not the IMCK derive).
         // The Stage-3 H1 + accumulator-root limbs are the finalized ones (so the ONLY mismatch is
         // the nullifier limb the manager strict-binds).
         uint256[] memory limbs = verifier.expectedPostCloseClaimLimbs(
             CHANNEL_ID, d, pc.incomingTxHash, USER_B, bob, keccak256("forged"), pc.amount,
-            manager.finalizedBalanceStateH1(), manager.finalizedSettledTxAccumulatorRoot()
+            manager.finalizedBalanceStateH1(), manager.finalizedSettledTxAccumulatorRoot(), 0
         );
         MleVerifier.MleProof memory proof = CloseTestLib.proofWithLimbs(limbs);
         vm.expectRevert(bytes("claim limb mismatch"));

@@ -1,8 +1,62 @@
 const { Router } = require('express');
 const fs = require('fs');
-const { cli, wc, RPC, readJson } = require('../lib/cli');
+const { cli, wc, RPC, readJson, rollupOf } = require('../lib/cli');
+
+// ONE shared implementation of the manifest validation + chain verification (node/common), so the
+// api, the node programs and the wallet relay cannot drift on what "verified" means. If the module
+// is not present in a given deployment the route degrades to null metadata — never to a local
+// re-implementation of the rules.
+let TokenRegistry = null;
+try { ({ TokenRegistry } = require('../../node/common/token-registry')); }
+catch (e) { console.warn(`[tokens] token-registry module unavailable (${e.message}) — serving raw base indices`); }
 
 const router = Router({ mergeParams: true });
+
+// ── Token DISPLAY metadata (multi-token detail2 §N-1/§N-7, threat model TM-10b) ───────────────
+//
+// SECURITY CONTRACT: symbol / name / decimals carry ZERO authority. The authoritative token
+// identity is the base `token_index` — proof-bound in the circuits and set-once on-chain in
+// `IntmaxRollup.tokenAddressOf(uint32)`. Labelling a worthless token "USDC" is a user-funds
+// attack, so metadata is served ONLY for entries whose manifest address was read back EQUAL from
+// the on-chain registry; everything else is served as null and the UI falls back to the raw index.
+//
+// The manifest ships per deployment alongside `channel_backing.json` (`<workdir>/tokens.json`),
+// overridable with TOKENS_MANIFEST. Loading + verification is lazy and cached per channel:
+//   * no manifest                       → no metadata (a valid state, not an error)
+//   * structurally invalid manifest     → NO metadata, ever, + a loud error log (fail closed)
+//   * verification not finished yet     → NO metadata (entries are unverified until proven)
+//   * verification found a CONTRADICTION → registry poisoned: all entries forced unverified.
+// A contradiction cannot abort startup here the way it does in the node (this is a request-time
+// path), so it degrades to "never serve metadata" — the same fail-closed direction.
+const _tokenRegistries = new Map(); // channelId -> { registry: TokenRegistry|null }
+
+function tokenRegistryFor(ch) {
+  if (_tokenRegistries.has(ch)) return _tokenRegistries.get(ch).registry;
+  const slot = { registry: null };
+  _tokenRegistries.set(ch, slot);
+  if (!TokenRegistry) return null;
+  const manifestPath = process.env.TOKENS_MANIFEST || wc(ch, 'tokens.json');
+  if (!fs.existsSync(manifestPath)) return null;
+  let registry;
+  try {
+    registry = TokenRegistry.fromFile(manifestPath);
+  } catch (e) {
+    console.error(`[tokens] channel ${ch}: REJECTED ${manifestPath}: ${e.message} — serving raw base indices`);
+    return null;
+  }
+  slot.registry = registry;
+  // Verify asynchronously; until it resolves every entry stays unverified (fail-safe default).
+  (async () => {
+    try {
+      await registry.verifyAgainstChain(RPC, rollupOf(ch), { logger: console });
+      console.log(`[tokens] channel ${ch}: ${JSON.stringify(registry.summary())}`);
+    } catch (e) {
+      registry.markAllUnverified('verification failed');
+      console.error(`[tokens] channel ${ch}: token manifest contradicts the chain: ${e.message} — metadata withheld`);
+    }
+  })();
+  return registry;
+}
 
 // GET /api/v1/channel/:ch/snapshot (A6/A39)
 router.get('/snapshot', (req, res) => {
@@ -26,6 +80,50 @@ router.get('/status', (req, res) => {
     if (record.challengeDeadline) result.challengeDeadline = record.challengeDeadline;
     if (record.finalizedAt) result.finalizedAt = record.finalizedAt;
     res.json(result);
+  } catch (e) {
+    res.status(404).json({ error: 'no channel yet' });
+  }
+});
+
+// GET /api/v1/channel/:ch/tokens (multi-token §N)
+// Per-token channel view derived from the cosigned snapshot: the active registry
+// (local slot -> base tokenIndex) and the per-token channel-fund amounts, enriched with VERIFIED
+// display metadata. Balance-bearing responses stay backward compatible elsewhere (scalar = token
+// 0); this route is the additive per-token surface. Hidden per-member balances are NOT here — they
+// only decrypt client-side (wallet_balance returns a per-token `balances` array).
+//
+// Which slots exist and what base index each maps to comes from the CHANNEL's own signed registry
+// (the snapshot) — never from the metadata manifest. The manifest only ever answers "what may this
+// base index be CALLED", and only when chain-verified (see tokenRegistryFor above).
+router.get('/tokens', (req, res) => {
+  try {
+    const ch = Number(req.params.ch);
+    const snapshot = readJson(wc(ch, 'channel_snapshot.json'));
+    const bs = (snapshot.state && snapshot.state.balanceState) || {};
+    const fund = (snapshot.state && snapshot.state.channelFund) || {};
+    const tokenCount = bs.tokenCount || 1;
+    const registry = bs.tokenRegistry || [];
+    const amounts = fund.amounts || [];
+    const meta = tokenRegistryFor(ch);
+    const tokens = [];
+    for (let t = 0; t < tokenCount; t++) {
+      const tokenIndex = registry[t] !== undefined ? registry[t] : 0;
+      const md = meta
+        ? meta.metadataFor(tokenIndex)
+        : { symbol: null, name: null, decimals: null, address: null, native: tokenIndex === 0, verified: false };
+      tokens.push({
+        tokenSlot: t,
+        tokenIndex,
+        symbol: md.symbol,
+        name: md.name,
+        decimals: md.decimals,
+        address: md.address,
+        native: md.native,
+        verified: md.verified,
+        fundAmount: amounts[t] !== undefined ? String(amounts[t]) : '0',
+      });
+    }
+    res.json({ tokenCount, tokens });
   } catch (e) {
     res.status(404).json({ error: 'no channel yet' });
   }

@@ -65,9 +65,25 @@ structure Withdrawal where
   isEth : Bool
 
 /-- `keccak256("IMPW" || nullifier || recipient || tokenIndex || amount ||
-    auxData)` — the partial-withdrawal authorization digest (:1362).
-    Uninterpreted; binds ALL fields so an auth can't be reused with a
-    different recipient/amount. -/
+    auxData)` — the partial-withdrawal authorization digest.
+
+    SCOPE (corrected 2026-07-28, doc/tasks/pw-auth-threat-model.md §6.2).
+    This is an OPAQUE symbol with NO axioms — not collision-resistance,
+    not injectivity. The previous docstring claimed it "binds ALL fields
+    so an auth can't be reused with a different recipient/amount"; that
+    claim is neither proved nor assumed here, and the model cannot even
+    STATE it. Two separate things were being conflated:
+
+    * REPLAY binding (a keccak preimage property, true of the Solidity
+      but OUTSIDE this model): one authorization cannot be re-read as a
+      different (recipient, amount) tuple.
+    * DERIVATION (FALSE, and the actual vulnerability): nothing made
+      those fields trustworthy in the first place.
+      `ChannelSettlementManager.submitPartialWithdrawalIntent` binds only
+      `auxData` to the cosigned close state; `amount`, `recipient` and
+      `nullifier` were caller-supplied and flowed untouched into this
+      digest. The DERIVATION of a digest's fields was never in scope of
+      this model, and no theorem below should be read as covering it. -/
 opaque authDigest : Withdrawal → Word
 
 /-! ### deposit() — funds in -/
@@ -301,9 +317,11 @@ theorem withdrawNative_solvency {s s' : RollupState} {ws : List Withdrawal}
     F-WITHDRAW-1 closed), every payout THROUGH THIS PATH corresponds to a
     circuit-proven withdrawal of a genuinely-spent balance.
 
-    SCOPE: "no payout without a proof" holds for `withdrawNative` only.
-    The burn path (`claimAuthorized`) has no rollup-side proof check —
-    see `Assumptions.BurnAuthorizationsLegitimate`. And `anchored` means
+    SCOPE: as of 2026-07-28 "no payout without a proof" holds for EVERY
+    payout path, because the proof-free burn path (`claimAuthorized`) was
+    removed from the contract; `withdrawERC20` mirrors `withdrawNative`.
+    (Historically it held for `withdrawNative` only — see
+    `Assumptions.BurnAuthorizationsLegitimate`.) And `anchored` means
     "validity-proof-finalized" only under
     `Assumptions.MleVerificationEnabled` (via `finalize_only_on_valid`). -/
 theorem withdrawNative_requires_proof {s s' : RollupState} {ws : List Withdrawal}
@@ -316,18 +334,35 @@ theorem withdrawNative_requires_proof {s s' : RollupState} {ws : List Withdrawal
   · exact hpre
   · rw [if_neg hpre] at h; simp at h
 
-/-! ### claimAuthorizedWithdrawal() — burn (partial) withdrawal payout -/
+/-! ### claimAuthorizedWithdrawal() — burn payout — **REMOVED FROM THE CONTRACT** -/
 
-/-- `claimAuthorizedWithdrawal(w)` (:642-665): a direct-transfer payout
-    for a burn withdrawal (auxData ≠ 0), gated by a settlement-manager
-    authorization of `authDigest(w)`. Same single-use nullifier (CEI) and
-    `totalEscrowed -= amount` solvency ceiling as `withdrawNative`.
+/-- ⚠ **MODELS A FUNCTION THAT NO LONGER EXISTS.**
+    `IntmaxRollup.claimAuthorizedWithdrawal` was DELETED on 2026-07-28
+    (doc/tasks/pw-auth-threat-model.md). It paid escrow ETH for a burn
+    withdrawal (auxData ≠ 0) gated ONLY by a settlement-manager
+    authorization of `authDigest(w)` — no withdrawal proof at all.
 
-    NOTE this is the ONE payout path with NO proof check on the rollup
-    side: the authorization flag is its whole gate. Its legitimacy rests
-    on `Assumptions.BurnAuthorizationsLegitimate` (deployer + registered
-    settlement managers trusted); the ETH push failure reverts the call
-    (`require(ok)`, :662-663 — `Assumptions.EthSendFailureReverts`). -/
+    Why it was deleted: the authorization is minted by
+    `ChannelSettlementManager.submitPartialWithdrawalIntent`, which binds
+    only `auxData` to the cosigned close state. `amount`, `recipient` and
+    `nullifier` were CALLER-SUPPLIED. So anyone able to produce one valid
+    close proof for their OWN channel could name an arbitrary amount and
+    recipient and drain the GLOBAL ETH escrow of ALL channels. Note this
+    needed NO rogue deployer and NO key compromise — the honest, audited
+    manager already mints such digests, which is strictly worse than the
+    threat `Assumptions.BurnAuthorizationsLegitimate` was written for.
+
+    Burn payouts now go through `withdrawNative` / `withdrawERC20`, where
+    the leaf's economics come from a VERIFIED proof (`_verifyWithdrawalSet`)
+    and this authorization is only a SECOND FACTOR that can veto, never
+    supply, a field.
+
+    WHY THIS TRANSITION IS KEPT rather than excised: `EOp.claim` is woven
+    into the `EndToEnd` and `IntmaxRollupSolvency` inductions. Retaining it
+    makes the model's operation set a strict SUPERSET of the deployed
+    contract's, so every solvency theorem holds A FORTIORI for the shipped
+    code — a conservative position — while avoiding invasive surgery on
+    those developments. It must NOT be read as documenting live code. -/
 def claimAuthorized (s : RollupState) (w : Withdrawal) : Call RollupState :=
   if w.isEth = false then none                                   -- :643
   else if w.auxData = 0 then none                                -- :644 must be a burn
@@ -368,23 +403,39 @@ theorem claimAuthorized_some {s s' : RollupState} {w : Withdrawal}
       simp only [Option.map_some', Option.some.injEq] at h
       exact ⟨hauth, te, rfl, h.symm⟩
 
-/-- **Burn-withdrawal solvency + single-use + authorization-required.** A
-    burn payout reduces escrow by exactly `amount` (≤ escrow), consumes
-    the nullifier, and only succeeds with a manager authorization for
-    `authDigest(w)` (which binds ALL fields, so it can't be reused with a
-    different recipient/amount). Same global-solvency guarantee as the
-    main path.
+/-- **Escrow conservation + nullifier consumption + authorization
+    read-back for a burn claim.** RENAMED 2026-07-28 (was
+    `claimAuthorized_safe`, doc/tasks/pw-auth-threat-model.md §6.2): the
+    old name read as an economic-soundness claim and was cited as if it
+    were one. It is not. Read the statement literally — it is exactly:
 
-    HONESTY CARVE-OUT: "authorization-required" is an ACCESS-CONTROL
-    property, not a proof property. Unlike `withdrawNative_requires_proof`,
-    NOTHING here ties the authorization to a verified circuit proof — a
-    deployer-registered manager can mint it at will
-    (`Assumptions.burn_drain_satisfiable` exhibits the resulting drain).
-    That every authorized digest comes from the proof-gated
-    `finalizePartialWithdrawal` flow is exactly
-    `Assumptions.BurnAuthorizationsLegitimate` (see
-    `Assumptions.claim_backed_by_trust` for the composition). -/
-theorem claimAuthorized_safe {s s' : RollupState} {w : Withdrawal}
+      1. `amount ≤ totalEscrowed`      (from the checked subtraction)
+      2. escrow decreased by exactly `amount`  (conservation)
+      3. the post-state nullifier is consumed
+      4. the pre-state had `partialWithdrawalAuthorized[authDigest w]`
+
+    That is arithmetic plus two guard read-backs, under the single
+    hypothesis "the call did not revert".
+
+    ⚠ SCOPE — WHAT THIS DOES NOT PROVE:
+    * NOTHING about economic soundness. Conjunct 4 is a boolean
+      read-back; it says the flag was set, not that setting it was
+      justified. It is trivially satisfied by `Assumptions.rogueAuthState`,
+      which sets EVERY digest true.
+    * NOTHING about the DERIVATION of `w`'s fields. In the real contract
+      `amount`/`recipient`/`nullifier` were caller-supplied (see
+      `authDigest`); that derivation was always outside this model.
+    * NOTHING about the recipient — `claimAuthorized` never even READS
+      `w.recipient`. The model has no notion of who was paid.
+    * NOT replay-safety. There is deliberately no
+      `claimAuthorized_no_double`: conjunct 3 gives the CONSUMPTION half
+      only; that an already-used nullifier reverts lives in the
+      definition's guard and is not lifted to a theorem here.
+
+    The function this describes has been REMOVED from the contract (see
+    `claimAuthorized`). Retained because the solvency inductions consume
+    conjunct 2, and covering a removed operation only strengthens them. -/
+theorem claimAuthorized_escrow_conservation {s s' : RollupState} {w : Withdrawal}
     (h : claimAuthorized s w = some s') :
     w.amount ≤ s.totalEscrowed
     ∧ s'.totalEscrowed + w.amount = s.totalEscrowed
@@ -457,25 +508,32 @@ theorem claimWithdraw_no_double {s s' : RollupState} {sender : Addr} {amt : U256
      block), and by `SpendCircuit.deducts_solvent` it was covered by a
      real balance deduction.
 
-     **CARVE-OUT — the burn path is NOT proof-backed on the rollup.**
-     `claimAuthorizedWithdrawal` (:642-665) pays escrow against a bare
-     `partialWithdrawalAuthorized` flag (:657) that any
-     deployer-registered settlement manager can set unconditionally
-     (:634); `registerSettlementManager` (:624) is deployer-only but
-     additive forever (no removal, no timelock). "Every burn payout is
-     backed by a proof-verified, challenge-surviving channel close"
-     is therefore a TRUST statement about the deployer and its
-     registered managers — `Assumptions.BurnAuthorizationsLegitimate` —
-     not a theorem; `Assumptions.burn_drain_satisfiable` shows the model
-     admits a full-escrow drain when it is violated. The honest manager
-     flow that discharges it operationally is modeled in
-     `ChannelSettlementManager.lean` (`submitPartialIntent_requires_proof`
-     + `finalizePartial_authorizes`).
+     **RESOLVED 2026-07-28 — the un-proof-backed burn path is GONE.**
+     The former carve-out here recorded that `claimAuthorizedWithdrawal`
+     paid escrow against a bare `partialWithdrawalAuthorized` flag with no
+     proof, and treated that as a TRUST statement about the deployer
+     (`Assumptions.BurnAuthorizationsLegitimate`). Two updates:
+
+     (a) The risk was UNDERSTATED. It did not need a rogue deployer: the
+         honest `ChannelSettlementManager` binds only `auxData`, so the
+         amount and recipient in any authorization were caller-chosen.
+         One valid close proof for one's OWN channel sufficed to drain the
+         GLOBAL escrow (doc/tasks/pw-auth-threat-model.md).
+
+     (b) The function has been DELETED. Every remaining payout —
+         `withdrawNative` and `withdrawERC20` — goes through
+         `_verifyWithdrawalSet`, so "no payout without a valid proof" now
+         holds for ALL payout paths, with the authorization demoted to a
+         second factor that can only veto a proven leaf. A forged
+         authorization is inert. `Assumptions.burn_drain_satisfiable`
+         remains as the record of what the removed function admitted; it
+         is no longer reachable on-chain.
 
   2. **No double payout** (`withdrawLeaf_nullifier_once` +
-     `withdrawLeaf_consumes`; `claimAuthorized_safe` for the burn path —
-     both paths share ONE `withdrawalNullifierUsed` set, so a leaf paid
-     by either can never be paid again by either): the per-transfer
+     `withdrawLeaf_consumes`; for the removed burn path,
+     `claimAuthorized_escrow_conservation` gives only the CONSUMPTION
+     half — both paths share ONE `withdrawalNullifierUsed` set, so a leaf
+     paid by either can never be paid again by either): the per-transfer
      nullifier (proved collision-distinct and one-shot in
      `IndexedMerkle.key_absent`) is consumed atomically (CEI, under
      `Assumptions.SingleCallAtomicity`).

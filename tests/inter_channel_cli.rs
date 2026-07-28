@@ -278,7 +278,7 @@ fn build_burn_send_debits_only_sender_and_targets_l1() {
     let sender_slot = 0u16;
     let amount = 20u64;
     let l1 = Address::from_hex("0x00000000000000000000000000000000000000aa").unwrap();
-    let prev_fund = a.snapshot.state.channel_fund.amount;
+    let prev_fund = a.snapshot.state.channel_fund.amounts[0];
     let prev_enc = a.snapshot.state.balance_state.enc_balances.clone();
 
     let mut rng = StdRng::seed_from_u64(0xB0_0000);
@@ -305,7 +305,7 @@ fn build_burn_send_debits_only_sender_and_targets_l1() {
     let next = &built.debit_payload.proposed_next_state;
     // Channel total decreased (the self-check enforces "decrease by exactly amount").
     assert_ne!(
-        next.channel_fund.amount, prev_fund,
+        next.channel_fund.amounts[0], prev_fund,
         "channel_fund must decrease on a burn"
     );
     // PER-MEMBER ATTRIBUTION: only the sender slot's encBalance may change.
@@ -427,8 +427,8 @@ fn inter_channel_cli_end_to_end() {
 
     let a_snapshot = a.snapshot.clone();
     let b_snapshot = b.snapshot.clone();
-    let a_fund_before = a_snapshot.state.channel_fund.amount;
-    let b_fund_before = b_snapshot.state.channel_fund.amount;
+    let a_fund_before = a_snapshot.state.channel_fund.amounts[0];
+    let b_fund_before = b_snapshot.state.channel_fund.amounts[0];
     let a_committed_digest = a_snapshot.state.digest;
     let recipient_before = decrypt_balance(
         &b_keys[recipient_slot as usize],
@@ -481,12 +481,12 @@ fn inter_channel_cli_end_to_end() {
     let a_after = read_state(&ch_a);
     let b_after = read_state(&ch_b);
     assert_eq!(
-        a_after.snapshot.state.channel_fund.amount + amt_u,
+        a_after.snapshot.state.channel_fund.amounts[0] + amt_u,
         a_fund_before,
         "A channel_fund decreased by EXACTLY AMT (read from disk)"
     );
     assert_eq!(
-        b_after.snapshot.state.channel_fund.amount,
+        b_after.snapshot.state.channel_fund.amounts[0],
         b_fund_before + amt_u,
         "B channel_fund increased by EXACTLY AMT (read from disk)"
     );
@@ -575,7 +575,7 @@ fn inter_channel_cli_forged_a_state_refused() {
     let b_snapshot = b.snapshot.clone();
     let a_balances = a.balances.clone();
     let a_witnesses = a.witnesses.clone();
-    let b_fund_before = b_snapshot.state.channel_fund.amount;
+    let b_fund_before = b_snapshot.state.channel_fund.amounts[0];
     let recipient_before = decrypt_balance(
         &b_keys[recipient_slot as usize],
         &b_snapshot,
@@ -645,7 +645,7 @@ fn inter_channel_cli_forged_a_state_refused() {
     // ATOMICITY / no value creation: B was NOT credited and B's head is UNCHANGED on disk.
     let b_after = read_state(&ch_b);
     assert_eq!(
-        b_after.snapshot.state.channel_fund.amount, b_fund_before,
+        b_after.snapshot.state.channel_fund.amounts[0], b_fund_before,
         "B channel_fund UNCHANGED — no value created by the forged state"
     );
     let recipient_after = decrypt_balance(
@@ -700,7 +700,7 @@ fn inter_channel_cli_tampered_amount_refused() {
 
     let a_state = cli_state(a);
     let a_committed_digest = a_state.snapshot.state.digest;
-    let b_fund_before = b.snapshot.state.channel_fund.amount;
+    let b_fund_before = b.snapshot.state.channel_fund.amounts[0];
     write_state(&ch_a, &a_state);
     write_state(&ch_b, &cli_state(b));
 
@@ -757,7 +757,7 @@ fn inter_channel_cli_tampered_amount_refused() {
         "ATOMICITY: A spent ledger UNCHANGED when the credit leg fails"
     );
     assert_eq!(
-        b_after.snapshot.state.channel_fund.amount, b_fund_before,
+        b_after.snapshot.state.channel_fund.amounts[0], b_fund_before,
         "ATOMICITY: B channel_fund UNCHANGED when the credit leg fails"
     );
     assert!(

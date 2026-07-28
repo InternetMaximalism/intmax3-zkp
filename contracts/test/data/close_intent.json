@@ -1,26 +1,52 @@
 {
-  "channel_id": 5,
+  "channel_id": 1,
   "close_nonce": 5,
   "final_epoch": 3,
   "final_small_block_number": 7,
   "close_freeze_nonce": 1,
-  "final_channel_state_digest": "0x83842c6155988b3627547aba39e49e7bd6ea971f7457a6bc1e6edfea281dcc5d",
-  "final_balance_state_h1": "0xb1f54523178d02c9246e88440a41626ae75d931b55d79c3dcf51eea9ad2f4335",
+  "final_channel_state_digest": "0x9443b2db5b31a5b64ee6b27b9532a6384ca040070e3f755cee304d8de72cc005",
+  "final_balance_state_h1": "0x6b850c4d042025790a7dce82a629d6d25293405e074a4e036cd79188feb32466",
   "channel_fund_amount": "77",
   "channel_fund_intmax_state_root": "0x0000000100000002000000030000000400000000000000000000000000000000",
   "burn_tx_hash": "0x0000000900000008000000070000000600000000000000000000000000000000",
-  "close_withdrawal_digest": "0x8cbb701d40b33cf25977c7debfde2a96416c7c51fdf6c536fd3ea25b24f71e9a",
+  "close_withdrawal_digest": "0x0a92db936fccdac63d98b1462ef943a86efca7a9d127b310cab3f76b92d161ab",
   "snapshot_medium_block_number": 123,
   "final_state_version": 9,
   "final_settled_tx_chain": "0x0000000000000000000000000000000000000000000000000000000000000000",
   "final_settled_tx_accumulator_root": "0x0000000000000000000000000000000000000000000000000000000000000000",
-  "close_intent_digest": "0x0a4295f37c2d63e074446c0bf50874333928e4b34abae959e98701a851d03c65",
-  "member_set_commitment": "0x48664f8144b9565f1a6f8d5442e05fe65c70c5695d01ec0983d14a19cf56367c",
+  "close_intent_digest": "0x4761f58eb05c9fd552a2d9d4bc5bf2a32931bda1b0b5f4fd48bc7e5f67343b03",
+  "member_set_commitment": "0x5e62c48bb385596152b6eade2f78e48168ddbd91c050d46d9f0c6b897f7cfac6",
   "member_count": 3,
   "delegate_count": 0,
   "member_pk_gs": [
-    "0xc42c6584f2633cf61cf7a13f0a02161712b19031667b3c262ea2b4edda940dab",
-    "0x92ac277cf1d8133870a0d59fe007be7e9cae27bda036e4ad6f87a6a87612f983",
-    "0x6b5b961799eeb50814d5e56138730472a577c2cd1d064228dcc77d063fa5d5d8"
-  ]
+    "0xd56ccfa4ffe7b4d6c8db3e7aa8f537c90db8c0a5d03c2eee440507a1b460f900",
+    "0xb0ba5230b637124caa105aee7fd38fb072097791402b680a77f843fc196c645f",
+    "0x4ee9cd3df61b052b623e15a04d1888a94a00da202a8c15151744822566fe3c55"
+  ],
+  "channel_fund_amounts": [
+    "77",
+    "55",
+    "0",
+    "0",
+    "0",
+    "0",
+    "0",
+    "0",
+    "0",
+    "0"
+  ],
+  "token_registry": [
+    0,
+    7,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0
+  ],
+  "token_count": 2,
+  "token_funds_digest": "0xbf22129b94310fd5fa4ab8489da811849136208740bdcdc470b2eb45210a3d54"
 }

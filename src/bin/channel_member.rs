@@ -21,6 +21,7 @@
 //!   balance
 
 use std::{
+    collections::HashSet,
     fs,
     process::{Command, exit},
 };
@@ -37,6 +38,7 @@ use intmax3_zkp::{
             post_close_claim_pis::{
                 POST_CLOSE_CLAIM_PUBLIC_INPUTS_LEN, PostCloseClaimPublicInputs,
             },
+            state_update_verifier::verify_regev_pk_root,
             withdrawal_claim_pis::{
                 WITHDRAWAL_CLAIM_PUBLIC_INPUTS_LEN, WithdrawalClaimPublicInputs,
             },
@@ -58,6 +60,7 @@ use intmax3_zkp::{
         channel_id::ChannelId,
         deposit::Deposit,
         salt::Salt,
+        u63::U63,
         withdrawal::Withdrawal,
     },
     constants::{MAX_CHANNEL_MEMBERS, MAX_COSIGNERS, TOKEN_UNIT},
@@ -70,21 +73,20 @@ use intmax3_zkp::{
         serialize::{deserialize_verifier_data, serialize_verifier_data},
     },
     wallet_core::{
-        BuiltInterChannelCredit, BuiltSend, CancelCloseProver, ChannelBalanceAttestation,
-        ChannelSnapshot, ChannelWithdrawalParams, CloseProver, InterChannelDebitPayload,
-        InterChannelTransferDescriptor, MemberInfo, MemberKeys, PostCloseClaimProver,
-        BatchTxApply, RefreshPayload, SendPayload, SlimSendPayload, WithdrawalClaimProver,
-        add_signature, assemble_genesis_state_backed, build_batch_next_state,
-        build_channel_withdrawal,
-        build_inter_channel_credit, build_l1_deposit_import, build_record, build_send,
-        decrypt_balance,
-        default_settled_tx_accumulator, partial_withdrawal_auth_digest, sign_state,
+        BatchTxApply, BuiltInterChannelCredit, BuiltSend, CancelCloseProver,
+        ChannelBalanceAttestation, ChannelSnapshot, ChannelWithdrawalParams, CloseProver,
+        Erc20LaneParams, InterChannelDebitPayload, InterChannelTransferDescriptor, MemberInfo,
+        MemberKeys, PostCloseClaimProver, RefreshPayload, SendPayload, SlimSendPayload,
+        WithdrawalClaimProver, add_signature, assemble_genesis_state_backed,
+        build_batch_next_state, build_channel_withdrawal, build_inter_channel_credit,
+        build_l1_deposit_import, build_record, build_refresh, build_send_token,
+        build_token_register, decrypt_balance_token, default_settled_tx_accumulator,
+        partial_withdrawal_auth_digest, regev_pks_array, resolve_local_token_slot, sign_state,
         sign_state_if_backed, verify_all_signatures, verify_inter_channel_credit_transition,
         verify_inter_channel_send_transition, verify_l1_deposit_import_transition,
-        regev_pks_array, verify_refresh_transition, verify_send_transition, verify_slim_send_tx,
-        verify_snapshot,
+        verify_refresh_transition, verify_send_transition, verify_slim_send_tx, verify_snapshot,
+        verify_token_register_state_transition,
     },
-    circuits::channel::state_update_verifier::verify_regev_pk_root,
 };
 use plonky2::{
     field::goldilocks_field::GoldilocksField,
@@ -182,6 +184,34 @@ fn first_delegate_slot() -> u16 {
 // Σ balances == fund): 50 tokens.
 const DELEGATE_GENESIS: u64 = 0;
 
+/// A reproducible balance witness for ONE (CLI member, LOCAL token position) pair, recorded by
+/// `refresh` (multitoken §N × detail2 §B-3).
+///
+/// The legacy `ControlledMember::{balance_amount, balance_seed, has_witness}` triple only ever
+/// described the GENESIS token (local position 0): the CLI members are funded at genesis in token
+/// 0 and nowhere else. A non-genesis position is credited HOMOMORPHICALLY (an L1 deposit import,
+/// or an incoming in-channel transfer), which leaves a ciphertext this process holds no encryption
+/// witness for AND `pending_adds > 0` — `build_send_token` refuses both, fail-closed. `refresh`
+/// is the value-preserving way out; this record is what makes the resulting witness reconstructible
+/// on the NEXT process invocation without persisting unserializable key material.
+///
+/// SECURITY: `seed_hex` is 32 bytes drawn from the OS CSPRNG at refresh time, never derived from
+/// channel state. Regev encryption randomness must never be reused across two different plaintexts
+/// under one key, so each refresh draws its own seed; `has_witness` is cleared the moment the
+/// position is spent, so a stale witness can never be handed to the E-1 prover.
+#[derive(Clone, Serialize, Deserialize)]
+struct TokenWitness {
+    /// LOCAL token position (index into the channel's signed `token_registry`).
+    token_slot: u8,
+    /// Plaintext value the recorded ciphertext encrypts (read back from the refresh proof's own
+    /// decryption of the authenticated state — not from CLI bookkeeping).
+    amount: u64,
+    /// Hex of the 32-byte `StdRng` seed that reproduces the position's ciphertext + witness.
+    seed_hex: String,
+    /// False once the position has been spent (the recorded seed no longer matches state).
+    has_witness: bool,
+}
+
 #[derive(Serialize, Deserialize)]
 struct ControlledMember {
     slot: u16,
@@ -189,27 +219,72 @@ struct ControlledMember {
     balance_amount: u64,
     balance_seed: u64,
     has_witness: bool,
+    /// Per-LOCAL-token-position witnesses recorded by `refresh`. Absent in pre-multitoken state
+    /// files (serde default = empty), which keeps every existing token-0 flow byte-identical.
+    #[serde(default)]
+    token_witnesses: Vec<TokenWitness>,
 }
 
 #[derive(Serialize, Deserialize)]
 struct CliState {
     controlled: Vec<ControlledMember>,
     snapshot: ChannelSnapshot,
-    /// REPLAY LEDGER (inter-channel invariant 6): the set of inter-channel `tx_hash`es already
-    /// CREDITED into THIS channel (the DESTINATION / B side). A credit is applied at most once; a
-    /// descriptor whose `tx_hash` is already present is REFUSED (fail-closed). Persisted in
-    /// `cli_state.json` so the ledger survives across CLI invocations (each channel runs as its
-    /// own process). Defaults to empty for states written before this field existed
-    /// (back-compat with already-deployed cli_state.json files).
+    /// REPLAY LEDGER (inter-channel invariant 6): the set of inter-channel REPLAY IDENTITIES
+    /// (`InterChannelTx::replay_identity()` — the token-FREE fold over
+    /// `(source, dest, tx_tree_root, tx_leaf)`) already CREDITED into THIS channel (the
+    /// DESTINATION / B side). A credit is applied at most once; a descriptor whose identity is
+    /// already present is REFUSED (fail-closed). Persisted in `cli_state.json` so the ledger
+    /// survives across CLI invocations (each channel runs as its own process).
+    ///
+    /// SECURITY (TM-16 obligation 1, MATERIAL): the ledger keys on the token-FREE identity,
+    /// NEVER on the token-bearing `tx_hash`. Since TM-16 the `tx_hash` commits the descriptor's
+    /// base `token_index` (ids limb 5), so a malicious sender could prove E-2 twice (token X and
+    /// token Y) over the SAME deltas and present two IMI2-signed descriptors with DIFFERENT
+    /// tx_hashes — a tx_hash-keyed set would credit the same debit twice across two tokens. The
+    /// identity strips the token limb, so the second variant is refused as a replay. (Pre-TM-16
+    /// entries under the old field name are dropped by the serde default — acceptable ONLY
+    /// because of the v3 reset; do not mix pre/post-TM-16 state files.)
+    ///
+    /// Stored as a `HashSet` (Phase 5a review MINOR): membership checks are O(1) instead of a
+    /// linear scan over an unbounded Vec; the ledger only ever grows for the channel's lifetime
+    /// (pruned implicitly by the channel close — a closed channel's state dir is retired). JSON
+    /// serialization stays an array (element order is not meaningful and not relied upon).
     #[serde(default)]
-    applied_tx_hashes: Vec<Bytes32>,
-    /// SPENT LEDGER (A side): the set of inter-channel `tx_hash`es already DEBITED out of THIS
-    /// channel as the SOURCE. A debit is applied at most once; if a tx_hash is already present
-    /// the combined `cosign-inter-transfer` REFUSES (fail-closed). This is the A-side
-    /// counterpart to `applied_tx_hashes` — together they make a transfer atomic AND
-    /// single-use on both ends.
+    applied_tx_identities: HashSet<Bytes32>,
+    /// SPENT LEDGER (A side): the set of inter-channel REPLAY IDENTITIES already DEBITED out of
+    /// THIS channel as the SOURCE. A debit is applied at most once; if the identity is already
+    /// present the combined `cosign-inter-transfer` REFUSES (fail-closed). This is the A-side
+    /// counterpart to `applied_tx_identities` — together they make a transfer atomic AND
+    /// single-use on both ends. Same TM-16 token-free keying as `applied_tx_identities` (the
+    /// A-side leg of the cross-token double-debit defense). Same `HashSet` rationale as
+    /// `applied_tx_identities`.
     #[serde(default)]
-    spent_tx_hashes: Vec<Bytes32>,
+    spent_tx_identities: HashSet<Bytes32>,
+    /// CONSUMED-DEPOSIT LEDGER (L1 import replay protection — deposit-import-threat-model.md §4):
+    /// the set of L1 deposits already CREDITED into this channel, keyed on the canonical deposit
+    /// identity `"{chain_id}:{rollup_lowercase}:{deposit_index}"`.
+    ///
+    /// SECURITY (why this must exist): the channel layer has NO nullifier SET.
+    /// `ChannelState.shared_native_nullifier_root` is a keccak hash CHAIN, and
+    /// `build_l1_deposit_import` only FOLDS the deposit nullifier into it. The native gate
+    /// (`L1DepositImportUpdateWitness::verify`) requires just `require_chain_push` +
+    /// `ensure_different_root` — and because the fold is prev-bound, replaying the SAME nullifier
+    /// always produces a DIFFERENT root, so `ensure_different_root` passes on a replay by
+    /// construction. The co-signer gate `verify_l1_deposit_import_transition` is rebuild-equality
+    /// only and does no freshness checking. Nothing else refuses a second import of one deposit.
+    ///
+    /// Keyed on `deposit_index` (the contract's own monotone `depositCount`) and NOT on the tx
+    /// hash, because ONE transaction can emit several `Deposited` logs — a tx-hash key would
+    /// under-count. `chain_id` + `rollup` scope the index to the contract that issued it.
+    ///
+    /// RESIDUAL RISK (documented, not fixed here — same standing as the inter-channel ledgers
+    /// above): this is LOCAL CLI state, not a cryptographic enforcement. Deleting
+    /// `cli_state.json`, or running a second CLI with a fresh state dir, defeats it. The
+    /// protocol-level fix (a real indexed nullifier set checked in-circuit) is a design change
+    /// beyond this vulnerability. What this ledger DOES guarantee is that a replay is no longer
+    /// reachable by an unauthenticated remote caller through any relay/api endpoint.
+    #[serde(default)]
+    imported_deposits: HashSet<String>,
 }
 
 #[derive(Deserialize)]
@@ -410,12 +485,9 @@ fn cmd_setup_backing(args: &[String]) {
         .get(2)
         .cloned()
         .unwrap_or_else(|| die("setup-backing needs <rpc_url> <rollup_addr> [fund]"));
-    let fund: u64 = args
-        .get(3)
-        .and_then(|s| s.parse().ok())
-        .unwrap_or_else(|| {
-            cli_slots().iter().map(|&s| genesis_amount(s)).sum::<u64>() + DELEGATE_GENESIS
-        });
+    let fund: u64 = args.get(3).and_then(|s| s.parse().ok()).unwrap_or_else(|| {
+        cli_slots().iter().map(|&s| genesis_amount(s)).sum::<u64>() + DELEGATE_GENESIS
+    });
 
     eprintln!("setup-backing: building the balance prover (one-time, ~25s)…");
     let spend = SpendCircuit::<BF, BC, BD>::new();
@@ -623,6 +695,15 @@ struct CloseIntentDescriptor {
     member_count: u8,
     delegate_count: u16,
     member_pk_gs: Vec<String>,
+    /// Multi-token (§N-6, Phase 5b): the FULL per-token fund vector of the proved final state
+    /// (10 x 0x-hex U256, registry-aligned; `[0]` == the legacy `channel_fund_amount` burn leg).
+    /// The on-chain verifier RECOMPUTES `token_funds_digest` over exactly these three fields and
+    /// binds it to the member-signed PI (limbs 95..103) — RunClose parses them verbatim.
+    channel_fund_amounts: Vec<String>,
+    /// Multi-token: the final state's base-token registry (10 x u32, active prefix).
+    token_registry: Vec<u32>,
+    /// Multi-token: number of ACTIVE registry slots (1..=10).
+    token_count: u8,
 }
 
 fn env_u64(key: &str, default: u64) -> u64 {
@@ -727,7 +808,8 @@ fn cmd_close(args: &[String]) {
         .prove_mle(&close_proof)
         .unwrap_or_else(|e| die(format!("close MLE: {}", e.0)));
 
-    // Descriptor from the PROVED close public inputs (the 95 raw close limbs the manager re-binds).
+    // Descriptor from the PROVED close public inputs (the 103 raw close limbs the manager
+    // re-binds).
     let pi_limbs = close_proof.public_inputs[..CHANNEL_CLOSE_PUBLIC_INPUTS_LEN].to_u64_vec();
     let pis = ChannelClosePublicInputs::from_u64_slice(&pi_limbs)
         .unwrap_or_else(|e| die(format!("decode close PIs: {e:?}")));
@@ -757,6 +839,16 @@ fn cmd_close(args: &[String]) {
         member_count: pis.member_count,
         delegate_count: pis.delegate_count,
         member_pk_gs,
+        // Multi-token (§N-6): the SAME signed state the close witness proved — the verifier's
+        // tokenFundsDigest recompute over these must equal the proof's PI limbs 95..103.
+        channel_fund_amounts: state
+            .channel_fund
+            .amounts
+            .iter()
+            .map(|a| a.to_string())
+            .collect(),
+        token_registry: state.balance_state.token_registry.to_vec(),
+        token_count: state.balance_state.token_count,
     };
 
     fs::write(CLOSE_INTENT_MLE_FILE, &mle_json)
@@ -773,7 +865,7 @@ fn cmd_close(args: &[String]) {
         final_balance_state_h1: state.balance_state.h1(),
         intmax_state_root: state.channel_fund.intmax_state_root,
         burn_tx_hash,
-        burn_amount: state.channel_fund.amount,
+        burn_amount: state.channel_fund.amounts[0],
         zkp: Vec::new(),
     };
     let close_intent = CloseIntent::new(close_nonce, &state, &close_tx, snapshot_mbn)
@@ -902,13 +994,22 @@ struct WithdrawalClaimDescriptor {
     user_amount_digest: String,
     amount: u64,
     withdrawal_nullifier: String,
+    /// Multi-token (§N-6): the claimed LOCAL token slot (claim PI limb 48).
+    token_slot: u8,
+    /// Multi-token (§N-6, m8): the PROVED base `token_index = registry[token_slot]` the Manager
+    /// pays this claim in (claim PI limb 49).
+    token_index: u32,
 }
 
 /// A-3 P4: a member claims their slot balance from the CLOSED channel. Builds the withdrawal-claim
 /// MLE proof via the verified `WithdrawalClaimProver` (the amount is DERIVED by decrypting the
 /// member's own slot ciphertext, so it cannot over-claim), submits it (`submitWithdrawalClaim` via
 /// the forge step), then pulls the credit (`claimWithdrawalCredit`). Usage:
-///   channel_member claim <manager_addr> <member_slot> [rpc_url]
+///   channel_member claim <manager_addr> <member_slot> [rpc_url] [token_slot]
+/// `token_slot` (OPTIONAL, default 0 = genesis token): claims are per (member slot, token slot);
+/// the circuit resolves + proves the base token_index the Manager pays (§N-6). NOTE: the
+/// pull-credit step below pulls the ETH credit (`claimWithdrawalCredit()`); an ERC-20 credit is
+/// pulled with the Manager's per-token pull entry point instead.
 /// env: CLAIM_RECIPIENT (the member's registered L1 address; also the claimWithdrawalCredit
 /// caller),      CLOSE_NONCE / CLOSE_BURN_TX / CLOSE_SNAPSHOT_MBN (MUST equal the values used at
 /// `close`).
@@ -916,7 +1017,7 @@ fn cmd_claim(args: &[String]) {
     let manager = args
         .get(1)
         .cloned()
-        .unwrap_or_else(|| die("claim needs <manager_addr> <member_slot> [rpc_url]"));
+        .unwrap_or_else(|| die("claim needs <manager_addr> <member_slot> [rpc_url] [token_slot]"));
     let member_slot: u16 = args
         .get(2)
         .and_then(|s| s.parse().ok())
@@ -925,6 +1026,10 @@ fn cmd_claim(args: &[String]) {
         .get(3)
         .cloned()
         .unwrap_or_else(|| "http://localhost:8545".to_string());
+    let token_slot: u8 = args
+        .get(4)
+        .map(|s| s.parse().unwrap_or_else(|_| die("bad [token_slot]")))
+        .unwrap_or(0);
     let recipient = std::env::var("CLAIM_RECIPIENT")
         .ok()
         .and_then(|s| Address::from_hex(&s).ok())
@@ -972,7 +1077,7 @@ fn cmd_claim(args: &[String]) {
         final_balance_state_h1: state.balance_state.h1(),
         intmax_state_root: state.channel_fund.intmax_state_root,
         burn_tx_hash,
-        burn_amount: state.channel_fund.amount,
+        burn_amount: state.channel_fund.amounts[0],
         zkp: Vec::new(),
     };
     let close_intent = CloseIntent::new(close_nonce, &state, &close_tx, snapshot_mbn)
@@ -981,12 +1086,15 @@ fn cmd_claim(args: &[String]) {
     let keys = keys_for(0xC1_0000 + member_slot as u64);
     let member_pk_g = keys.signing_key.public_key();
 
-    eprintln!("[claim] building withdrawal claim for slot {member_slot} + proving (HEAVY)…");
+    eprintln!(
+        "[claim] building withdrawal claim for slot {member_slot} token {token_slot} + proving (HEAVY)…"
+    );
     let prover = WithdrawalClaimProver::new();
     let witness = prover
         .build_full_witness(
             &final_balance_state,
             member_slot as usize,
+            token_slot,
             member_pk_g,
             &keys.regev_pk,
             &keys.regev_sk,
@@ -1013,6 +1121,8 @@ fn cmd_claim(args: &[String]) {
         user_amount_digest: pis.user_amount_digest.to_string(),
         amount: pis.amount,
         withdrawal_nullifier: pis.withdrawal_nullifier.to_string(),
+        token_slot: pis.token_slot,
+        token_index: pis.token_index,
     };
 
     let wc_file = "withdrawal_claim.json";
@@ -1057,20 +1167,47 @@ fn cmd_claim(args: &[String]) {
         );
     }
     let recipient_hex = recipient.to_hex();
-    eprintln!("[claim] claimWithdrawalCredit() (caller must be the recipient {recipient_hex})…");
-    cast(&[
-        "send",
-        &manager,
-        "claimWithdrawalCredit()",
-        "--private-key",
-        &key,
-        "--rpc-url",
-        &rpc,
-    ]);
-    println!(
-        "[claim] OK: recipient {recipient_hex} received native ETH (amount {}).",
-        pis.amount
-    );
+    // Multitoken Phase 5b: pull the credit in the PROVED base token — `claimWithdrawalCredit()`
+    // (ETH) for token 0, `claimWithdrawalCredit(uint32)` (safeTransfer of the registered ERC-20)
+    // otherwise. The per-token CapInv (`totalCreditedOut[t] + amount <= receivedChannelFunds[t]`)
+    // is enforced at this payout site.
+    if pis.token_index == 0 {
+        eprintln!(
+            "[claim] claimWithdrawalCredit() (caller must be the recipient {recipient_hex})…"
+        );
+        cast(&[
+            "send",
+            &manager,
+            "claimWithdrawalCredit()",
+            "--private-key",
+            &key,
+            "--rpc-url",
+            &rpc,
+        ]);
+        println!(
+            "[claim] OK: recipient {recipient_hex} received native ETH (amount {}).",
+            pis.amount
+        );
+    } else {
+        eprintln!(
+            "[claim] claimWithdrawalCredit({}) (ERC-20; caller must be the recipient {recipient_hex})…",
+            pis.token_index
+        );
+        cast(&[
+            "send",
+            &manager,
+            "claimWithdrawalCredit(uint32)",
+            &pis.token_index.to_string(),
+            "--private-key",
+            &key,
+            "--rpc-url",
+            &rpc,
+        ]);
+        println!(
+            "[claim] OK: recipient {recipient_hex} received token {} (amount {}).",
+            pis.token_index, pis.amount
+        );
+    }
 }
 
 /// A30 cancelClose descriptor — the on-chain `ChannelSettlementManager.CancelCloseRequest` fields
@@ -1222,6 +1359,9 @@ struct PostCloseClaimDescriptor {
     recipient: String,
     shared_native_nullifier: String,
     amount: u64,
+    /// TM-16 (multi-token §N-6): the PROVED base token_index (PI limb 56) — the asset the
+    /// Manager credits. Descriptor-derived by the prover, never a caller choice.
+    token_index: u32,
 }
 
 /// A-3 H-2 §3.5.5 (A34): claim a late inter-channel delta that landed on THIS (now CLOSED) channel
@@ -1319,6 +1459,7 @@ fn cmd_post_close_claim(args: &[String]) {
         recipient: pis.recipient.to_hex(),
         shared_native_nullifier: pis.shared_native_nullifier.to_string(),
         amount: pis.amount,
+        token_index: pis.token_index,
     };
 
     fs::write(POST_CLOSE_CLAIM_MLE_FILE, &mle_json)
@@ -1569,6 +1710,25 @@ fn cmd_withdraw(args: &[String]) {
         ));
     }
 
+    // Multitoken Phase 5b: optional ERC-20 settlement lane. WD_ERC20_TOKEN (registered base
+    // token index) + WD_ERC20_AMOUNT (deposited == withdrawn amount) + WD_ERC20_TOKEN_ADDR (the
+    // ERC-20 contract, for the on-chain approve + deposit calls). The lane adds a second deposit
+    // to the deposit block and produces a second withdrawal chain paid to the manager via
+    // `withdrawERC20` → `pullChannelTokenFunds`.
+    let erc20_env: Option<(u32, u64, String)> = match (
+        std::env::var("WD_ERC20_TOKEN").ok(),
+        std::env::var("WD_ERC20_AMOUNT").ok(),
+        std::env::var("WD_ERC20_TOKEN_ADDR").ok(),
+    ) {
+        (Some(t), Some(a), Some(addr)) => Some((
+            t.parse().unwrap_or_else(|_| die("bad WD_ERC20_TOKEN")),
+            a.parse().unwrap_or_else(|_| die("bad WD_ERC20_AMOUNT")),
+            addr,
+        )),
+        (None, None, None) => None,
+        _ => die("set ALL of WD_ERC20_TOKEN / WD_ERC20_AMOUNT / WD_ERC20_TOKEN_ADDR, or none"),
+    };
+
     // ── Build the artifacts (HEAVY proving). recipient = manager so the payout credits it. ──
     eprintln!(
         "[withdraw] building channel-withdrawal proof set (channel {channel_id}, deposit \
@@ -1581,6 +1741,12 @@ fn cmd_withdraw(args: &[String]) {
         depositor: Some(depositor),
         withdrawal_recipient: Some(manager_addr),
         deposit_salt,
+        erc20_lane: erc20_env.as_ref().map(|(t, a, _)| Erc20LaneParams {
+            token_index: *t,
+            deposit_amount: *a,
+            withdrawal_amount: *a,
+            deposit_salt: None,
+        }),
     };
     let artifacts = build_channel_withdrawal(&params, cli_members.as_deref())
         .unwrap_or_else(|e| die(format!("build withdrawal: {e}")));
@@ -1607,6 +1773,23 @@ fn cmd_withdraw(args: &[String]) {
     );
     stage("withdrawal_mle.json", "sepolia_withdrawal_mle.json");
     stage("withdrawal_payout.json", "sepolia_withdrawal_payout.json");
+    if let (Some(mle), Some(payout)) = (
+        &artifacts.erc20_withdrawal_mle_json,
+        &artifacts.erc20_payout_json,
+    ) {
+        fs::write("erc20_withdrawal_mle.json", mle)
+            .unwrap_or_else(|e| die(format!("write erc20_withdrawal_mle.json: {e}")));
+        fs::write("erc20_withdrawal_payout.json", payout)
+            .unwrap_or_else(|e| die(format!("write erc20_withdrawal_payout.json: {e}")));
+        stage(
+            "erc20_withdrawal_mle.json",
+            "sepolia_erc20_withdrawal_mle.json",
+        );
+        stage(
+            "erc20_withdrawal_payout.json",
+            "sepolia_erc20_withdrawal_payout.json",
+        );
+    }
 
     let lc: serde_json::Value = serde_json::from_str(&artifacts.lifecycle_json)
         .unwrap_or_else(|e| die(format!("parse lifecycle json: {e}")));
@@ -1719,6 +1902,54 @@ fn cmd_withdraw(args: &[String]) {
             "--rpc-url",
             &rpc,
         ]);
+
+        // Multitoken Phase 5b: the ERC-20 lane's deposit — SECOND in the block, matching the
+        // proof's fold order. `deposit()`'s ERC-20 branch pulls via transferFrom (balanceOf-delta
+        // checked on-chain, TM-4), so approve first; no --value.
+        if let Some((_, _, token_addr)) = &erc20_env {
+            let dep2 = &lc["deposit_erc20"];
+            let dep2_recipient = dep2["recipient"]
+                .as_str()
+                .unwrap_or_else(|| die("deposit_erc20.recipient"));
+            let dep2_token = dep2["token_index"]
+                .as_u64()
+                .unwrap_or_else(|| die("deposit_erc20.token_index"))
+                .to_string();
+            let dep2_amount = dep2["amount"]
+                .as_str()
+                .unwrap_or_else(|| die("deposit_erc20.amount"));
+            let dep2_aux = dep2["aux_data"]
+                .as_str()
+                .unwrap_or_else(|| die("deposit_erc20.aux_data"));
+            eprintln!(
+                "[withdraw] approve + ERC-20 deposit (token {dep2_token}, amount {dep2_amount}) as \
+                 depositor {depositor_hex}…"
+            );
+            cast(&[
+                "send",
+                token_addr,
+                "approve(address,uint256)",
+                &rollup,
+                dep2_amount,
+                "--private-key",
+                &key,
+                "--rpc-url",
+                &rpc,
+            ]);
+            cast(&[
+                "send",
+                &rollup,
+                "deposit(bytes32,uint32,uint256,bytes32)",
+                dep2_recipient,
+                &dep2_token,
+                dep2_amount,
+                dep2_aux,
+                "--private-key",
+                &key,
+                "--rpc-url",
+                &rpc,
+            ]);
+        }
     }
 
     // 4. Deposit block, then 5. Withdrawal block.
@@ -1776,6 +2007,36 @@ fn cmd_withdraw(args: &[String]) {
         );
     }
 
+    // 7b. Multitoken Phase 5b: the ERC-20 lane — withdrawERC20 (its own chain + the SAME
+    //     withdrawal VK) credits pendingTokenWithdrawals[t][manager].
+    if let Some((token_index, ..)) = &erc20_env {
+        eprintln!(
+            "[withdraw] withdrawERC20 (real withdrawal MLE, token {token_index}) → manager {manager}…"
+        );
+        let status = Command::new("forge")
+            .current_dir("contracts")
+            .args([
+                "script",
+                "script/RunClose.s.sol",
+                "--sig",
+                "withdrawErc20Step()",
+                "--rpc-url",
+                &rpc,
+                "--private-key",
+                &key,
+                "--broadcast",
+            ])
+            .env("ROLLUP", &rollup)
+            .env("MANAGER", &manager)
+            .status()
+            .unwrap_or_else(|e| die(format!("forge withdrawErc20Step failed to start: {e}")));
+        if !status.success() {
+            die(
+                "forge withdrawErc20Step failed (ensure the token index is registered and the ERC-20 deposit escrowed)",
+            );
+        }
+    }
+
     // 8. pullChannelFunds (manager pulls its escrowed credit out of the rollup).
     eprintln!("[withdraw] pullChannelFunds() on manager {manager}…");
     cast(&[
@@ -1787,6 +2048,20 @@ fn cmd_withdraw(args: &[String]) {
         "--rpc-url",
         &rpc,
     ]);
+    // 8b. pullChannelTokenFunds(t) — the ERC-20 mirror (measured balanceOf delta).
+    if let Some((token_index, ..)) = &erc20_env {
+        eprintln!("[withdraw] pullChannelTokenFunds({token_index}) on manager {manager}…");
+        cast(&[
+            "send",
+            &manager,
+            "pullChannelTokenFunds(uint32)",
+            &token_index.to_string(),
+            "--private-key",
+            &key,
+            "--rpc-url",
+            &rpc,
+        ]);
+    }
     println!(
         "[withdraw] OK: {withdrawal_amount} native withdrawn from the rollup into manager {manager} \
          (now `claim` per member to distribute)."
@@ -1852,7 +2127,8 @@ fn main() {
         "setup-backing" => cmd_setup_backing(&args),
         "init" => cmd_init(&args),
         "gen-contribution" => cmd_gen_contribution(&args), // dev/test: simulate a browser delegate
-        "gen-send" => cmd_gen_send(&args), // dev/test: simulate a browser delegate SENDING
+        "gen-send" => cmd_gen_send(&args),                 /* dev/test: simulate a browser */
+        // delegate SENDING
         "add-genesis-sig" => cmd_add_genesis_sig(&args),
         "send" => cmd_send(&args),
         "cosign" => cmd_cosign(&args),
@@ -1862,6 +2138,8 @@ fn main() {
         "cosign-burn-send" => cmd_cosign_burn_send(&args),
         "finalize" => cmd_finalize(&args),
         "balance" => cmd_balance(),
+        "register-token" => cmd_register_token(&args),
+        "refresh" => cmd_refresh(&args),
         // A-3 P3: `close` builds the real close proof from wallet state and submits it on-chain.
         "close" => cmd_close(&args),
         // A-3 P4: `settle` finalizes the close after the challenge period (no proof calldata).
@@ -1884,7 +2162,7 @@ fn main() {
         "post-close-claim" => cmd_post_close_claim(&args),
         _ => {
             eprintln!(
-                "usage: channel_member <setup-backing|init|gen-contribution|gen-send|send|cosign|cosign-batch|cosign-burn-send|deploy-settlement|cosign-l1-deposit-import|pw-submit|pw-finalize|close|settle|withdraw|claim|cancel-close|post-close-claim|...> ..."
+                "usage: channel_member <setup-backing|init|gen-contribution|gen-send|send|cosign|cosign-batch|cosign-burn-send|register-token|refresh|deploy-settlement|cosign-l1-deposit-import|pw-submit|pw-finalize|close|settle|withdraw|claim|cancel-close|post-close-claim|...> ...\n  multi-token (§N): send/gen-send take [token_slot]; claim takes [token_slot]; cosign-l1-deposit-import <slot|auto> <tx_hash> <rpc_url> reads amount/depositor/token_index FROM THE CHAIN; register-token <base_token_index> appends a cosigned registry entry; refresh <slot> [token_slot] re-encrypts a CLI member's own position so it can send again after a homomorphic credit"
             );
             exit(2);
         }
@@ -1947,11 +2225,18 @@ fn cmd_init(args: &[String]) {
         }
     }
 
-    let (prior_applied, prior_spent) = if std::path::Path::new(STATE_FILE).exists() {
+    // SECURITY: every replay ledger must SURVIVE a delegate join — dropping one here would let a
+    // join re-open an already-consumed transfer or L1 deposit for a second credit.
+    let (prior_applied, prior_spent, prior_imported) = if std::path::Path::new(STATE_FILE).exists()
+    {
         let prev = load_state();
-        (prev.applied_tx_hashes, prev.spent_tx_hashes)
+        (
+            prev.applied_tx_identities,
+            prev.spent_tx_identities,
+            prev.imported_deposits,
+        )
     } else {
-        (Vec::new(), Vec::new())
+        (HashSet::new(), HashSet::new(), HashSet::new())
     };
     let (record, state, members, controlled, slot) = if std::path::Path::new(STATE_FILE).exists() {
         join_delegate(new_delegate, new_ct, new_recipient)
@@ -1975,8 +2260,9 @@ fn cmd_init(args: &[String]) {
     save_state(&CliState {
         controlled,
         snapshot: snapshot.clone(),
-        applied_tx_hashes: prior_applied,
-        spent_tx_hashes: prior_spent,
+        applied_tx_identities: prior_applied,
+        spent_tx_identities: prior_spent,
+        imported_deposits: prior_imported,
     });
     write_json(out_path, &snapshot);
     println!(
@@ -2012,6 +2298,7 @@ fn cli_members() -> (
             balance_amount: amount,
             balance_seed,
             has_witness: true,
+            token_witnesses: Vec::new(),
         });
     }
     (members, enc, controlled)
@@ -2119,6 +2406,24 @@ fn join_delegate(
     u16,
 ) {
     let prev = load_state();
+    // SECURITY (B-1b uniqueness, adversarial review finding 1): a joining member declares its own
+    // L1 exit address. If it were allowed to declare an address ALREADY bound to another active
+    // slot, the L1-deposit import's depositor->slot resolution would become ambiguous: the joiner
+    // could capture the victim's genuine deposits (or, at minimum, make them permanently
+    // unimportable — an irreversible exit-wedge). Exit addresses must therefore be DISTINCT across
+    // active slots. Refused fail-closed at the join, where the collision is introduced.
+    {
+        let bs = &prev.snapshot.state.balance_state;
+        let active = bs.member_count as usize + bs.delegate_count as usize;
+        if let Some(clash) = (0..active).find(|&i| bs.recipients[i] == new_recipient) {
+            die(format!(
+                "REFUSING contribution: recipient {} is ALREADY the bound (B-1b) L1 exit address \
+                 of ACTIVE slot {clash}. Exit addresses must be distinct — a duplicate would make \
+                 L1 deposit crediting ambiguous and could capture that member's deposits.",
+                new_recipient.to_hex()
+            ));
+        }
+    }
     let delegate_slot = first_delegate_slot();
     let existing = prev
         .snapshot
@@ -2146,8 +2451,15 @@ fn join_delegate(
     let mut state = prev.snapshot.state.clone();
     state.prev_digest = state.digest;
     state.balance_state.delegate_count = new_delegate_count;
-    state.balance_state.enc_balances[new_slot as usize] = new_ct;
-    state.balance_state.pending_adds[new_slot as usize] = 0;
+    // Multi-token: a fresh delegate slot holds its genesis ciphertext at TOKEN POSITION 0 and
+    // canonical zeros elsewhere (detail2 §N owner decision 5).
+    state.balance_state.enc_balances[new_slot as usize] = {
+        let mut row = intmax3_zkp::common::balance_state::zero_token_row();
+        row[0] = new_ct;
+        row
+    };
+    state.balance_state.pending_adds[new_slot as usize] =
+        [0u32; intmax3_zkp::constants::MAX_CHANNEL_TOKENS];
     // B-1b: bind the new delegate's L1 exit address into its slot leaf (cosigner-signed H1).
     state.balance_state.recipients[new_slot as usize] = new_recipient;
     state.balance_state.state_version += 1;
@@ -2222,7 +2534,12 @@ fn cmd_gen_contribution(args: &[String]) {
 /// The ct is recomputed and compared against the snapshot fail-closed, so a stale witness can
 /// never produce a payload that would waste a co-sign round.
 ///
-/// usage: gen-send <balance> <seed> <to_slot> <amount> <snapshot.json> <out.json>
+/// usage: gen-send <balance> <seed> <to_slot> <amount> [snapshot.json] [out.json] [token_slot]
+/// `token_slot` (OPTIONAL, default 0) selects the LOCAL token position (multitoken §N-3). The
+/// simulation is only valid while the delegate's ciphertext AT THAT POSITION is still its
+/// deterministic genesis ct — checked fail-closed below (a non-genesis position is the
+/// canonical zero ct at genesis, so token_slot != 0 only works after that position was funded
+/// and refreshed to a reproducible ct — never silently).
 fn cmd_gen_send(args: &[String]) {
     let balance: u64 = args
         .get(1)
@@ -2240,8 +2557,18 @@ fn cmd_gen_send(args: &[String]) {
         .get(4)
         .and_then(|s| s.parse().ok())
         .unwrap_or_else(|| die("bad <amount>"));
-    let snapshot_path = args.get(5).map(String::as_str).unwrap_or("channel_snapshot.json");
-    let out = args.get(6).map(String::as_str).unwrap_or("send_payload.json");
+    let snapshot_path = args
+        .get(5)
+        .map(String::as_str)
+        .unwrap_or("channel_snapshot.json");
+    let out = args
+        .get(6)
+        .map(String::as_str)
+        .unwrap_or("send_payload.json");
+    let token_slot: u8 = args
+        .get(7)
+        .map(|s| s.parse().unwrap_or_else(|_| die("bad [token_slot]")))
+        .unwrap_or(0);
 
     // Reconstruct the delegate exactly as gen-contribution created it.
     let keys = MemberKeys::generate(&mut StdRng::seed_from_u64(seed));
@@ -2258,39 +2585,49 @@ fn cmd_gen_send(args: &[String]) {
         .iter()
         .find(|m| m.pk_g == keys.pk_g())
         .map(|m| m.slot)
-        .unwrap_or_else(|| die(format!("seed {seed}: pk_g not found in snapshot members — join first")));
-    // Fail-closed: the witness is only valid for the delegate's UNTOUCHED genesis ciphertext.
-    if snapshot.state.balance_state.enc_balances[from as usize] != genesis_ct {
+        .unwrap_or_else(|| {
+            die(format!(
+                "seed {seed}: pk_g not found in snapshot members — join first"
+            ))
+        });
+    // Fail-closed: the witness is only valid for the delegate's UNTOUCHED genesis ciphertext at
+    // the selected token position.
+    if snapshot.state.balance_state.enc_balances[from as usize][token_slot as usize] != genesis_ct {
         die(format!(
-            "slot {from}: ciphertext is no longer the genesis ct (sent or received since join) — \
-             the deterministic witness is stale; gen-send cannot build this payload"
+            "slot {from} token {token_slot}: ciphertext is no longer the genesis ct (sent or \
+             received since join) — the deterministic witness is stale; gen-send cannot build \
+             this payload"
         ));
     }
 
     let nonce = intmax3_zkp::ethereum_types::bytes32::Bytes32::default();
-    let mut rng = StdRng::seed_from_u64(seed ^ 0x5E4D_0000);
+    // SECURITY: the send's encryption randomness comes from the OS CSPRNG, NOT from `seed`.
+    //
+    // WHY THE GENESIS GUARD ABOVE IS NOT SUFFICIENT. It only pins the ciphertext this payload
+    // spends FROM, which stops randomness reuse ACROSS co-signed states (the second call fails the
+    // guard once the first payload is applied). It does NOT stop two gen-send calls made against
+    // the SAME, still-untouched genesis state: neither has been co-signed, so both pass the guard,
+    // and with a `seed`-derived RNG both would replay the same `r` for `enc_amount` and for the
+    // sender's `after_ct`. Two Regev encryptions under one key with one `r` reveal the difference
+    // of their plaintexts (`c2 - c2' = Δ·(m - m')`), so anyone who sees both drafted payloads
+    // learns the difference of the two amounts — and, since `balance` is a CLI argument known to
+    // the caller, the second amount outright. Fresh per-invocation randomness closes that.
+    // (`seed` still selects the delegate IDENTITY and its genesis witness, which is what this
+    // stateless browser simulator actually needs to be deterministic about.)
+    let mut rng = StdRng::from_seed(fresh_seed32());
     let BuiltSend {
         payload,
         new_balance,
         ..
-    } = build_send(
-        &keys,
-        &snapshot,
-        from,
-        to,
-        amount,
-        balance,
-        &witness,
-        nonce,
-        LEVEL,
-        &mut rng,
+    } = build_send_token(
+        &keys, &snapshot, from, to, token_slot, amount, balance, &witness, nonce, LEVEL, &mut rng,
     )
     .unwrap_or_else(|e| die(e));
     // Emit the SLIM wire shape (detail2 §M-1) — the batch path's native format; ~50-100x smaller
     // than the fat SendPayload at high membership (no state / member list / record).
     write_json(out, &payload.to_slim());
     println!(
-        "built SLIM send {from}→{to} amount {amount} (new balance {new_balance}) → {out} (proof generated, stateless)"
+        "built SLIM send {from}→{to} amount {amount} token {token_slot} (new balance {new_balance}) → {out} (proof generated, stateless)"
     );
 }
 
@@ -2316,11 +2653,90 @@ fn cmd_add_genesis_sig(args: &[String]) {
     println!("genesis fully signed → {out_path}. Browser: wallet_import_channel(<{out_path}>).");
 }
 
+/// 32 bytes from the OS CSPRNG (`rand010::rng()` is a cryptographically secure, OS-seeded thread
+/// RNG). Used to seed the `StdRng` that produces Regev encryption randomness, so that no two
+/// invocations can reuse it: reusing one `r` across two DIFFERENT plaintexts under one Regev key
+/// leaks their difference (`c2 - c2' = Δ·(m - m')`), which for balances is the balance itself.
+fn fresh_seed32() -> [u8; 32] {
+    let mut rng = rand010::rng();
+    let mut seed = [0u8; 32];
+    for chunk in seed.chunks_mut(4) {
+        chunk.copy_from_slice(&rand010::Rng::next_u32(&mut rng).to_le_bytes());
+    }
+    seed
+}
+
+fn parse_seed32(hex_str: &str) -> [u8; 32] {
+    let bytes =
+        hex::decode(hex_str).unwrap_or_else(|e| die(format!("cli_state: bad witness seed: {e}")));
+    <[u8; 32]>::try_from(bytes.as_slice())
+        .unwrap_or_else(|_| die("cli_state: witness seed must be 32 bytes"))
+}
+
+/// Where the reconstructible balance witness for `(member, token_slot)` lives, if any.
+enum WitnessSource {
+    /// `refresh`-recorded: a 32-byte `StdRng` seed (any local token position).
+    Refreshed { amount: u64, seed: [u8; 32] },
+    /// Genesis (local token position 0 only): the legacy u64 `balance_seed` written by
+    /// `cli_members`. Unchanged so every pre-multitoken flow behaves byte-identically.
+    Genesis { amount: u64, seed: u64 },
+}
+
+/// Resolve the sender's balance witness for one LOCAL token position, fail-closed.
+///
+/// SECURITY: a `refresh` record always WINS over the genesis triple for the same position — the
+/// refresh replaced the ciphertext, so the genesis seed is stale there and handing it to the E-1
+/// prover would build an unsatisfiable statement. `has_witness` gates both: a spent position has
+/// no reconstructible witness and must be refreshed before it can send again.
+fn witness_source(cm: &ControlledMember, token_slot: u8) -> Option<WitnessSource> {
+    if let Some(w) = cm
+        .token_witnesses
+        .iter()
+        .find(|w| w.token_slot == token_slot && w.has_witness)
+    {
+        return Some(WitnessSource::Refreshed {
+            amount: w.amount,
+            seed: parse_seed32(&w.seed_hex),
+        });
+    }
+    if token_slot == 0 && cm.has_witness {
+        return Some(WitnessSource::Genesis {
+            amount: cm.balance_amount,
+            seed: cm.balance_seed,
+        });
+    }
+    None
+}
+
+/// Invalidate the witness for `(member, token_slot)` after the position was spent, and record the
+/// new plaintext balance. Fail-closed bookkeeping: the position cannot send again until a
+/// `refresh` re-establishes a reconstructible witness.
+fn invalidate_witness(cm: &mut ControlledMember, token_slot: u8, new_balance: u64) {
+    if let Some(w) = cm
+        .token_witnesses
+        .iter_mut()
+        .find(|w| w.token_slot == token_slot)
+    {
+        w.has_witness = false;
+        w.amount = new_balance;
+    }
+    if token_slot == 0 {
+        cm.has_witness = false;
+        cm.balance_amount = new_balance;
+    }
+}
+
+/// usage: send <from> <to> <amount> [out.json] [token_slot]
+/// `token_slot` (OPTIONAL, default 0 = the genesis token) is the LOCAL token position to move
+/// (multitoken §N-3); it is signed into the IMPA-v2 digest and enforced by every verifier.
+/// NOTE: the CLI's balance-witness store tracks the member's LAST self-encrypted ciphertext per
+/// position — for a non-genesis token that only exists after `refresh <slot> <token_slot>`, and a
+/// stale witness fails the E-1 proof fail-closed.
 fn cmd_send(args: &[String]) {
     let from: u16 = args
         .get(1)
         .and_then(|s| s.parse().ok())
-        .unwrap_or_else(|| die("send <from> <to> <amount> <out>"));
+        .unwrap_or_else(|| die("send <from> <to> <amount> [out.json] [token_slot]"));
     let to: u16 = args
         .get(2)
         .and_then(|s| s.parse().ok())
@@ -2330,38 +2746,49 @@ fn cmd_send(args: &[String]) {
         .and_then(|s| s.parse().ok())
         .unwrap_or_else(|| die("bad <amount>"));
     let out_path = args.get(4).map(String::as_str).unwrap_or("payload.json");
+    let token_slot: u8 = args
+        .get(5)
+        .map(|s| s.parse().unwrap_or_else(|_| die("bad [token_slot]")))
+        .unwrap_or(0);
     let mut state = load_state();
 
     let cm = state
         .controlled
         .iter()
-        .find(|c| c.slot == from && c.has_witness)
-        .unwrap_or_else(|| {
-            die(format!(
-                "slot {from} is not a CLI member with a spendable balance"
-            ))
-        });
+        .find(|c| c.slot == from)
+        .unwrap_or_else(|| die(format!("slot {from} is not a CLI-controlled member")));
     let keys = keys_for(cm.keygen_seed);
-    // Reconstruct the sender's current balance witness deterministically.
-    let (_ct, witness) = encrypt_amount(
-        &mut StdRng::seed_from_u64(cm.balance_seed),
-        &keys.regev_pk,
-        cm.balance_amount,
-    )
-    .unwrap_or_else(|e| die(e));
-    let before_amount = cm.balance_amount;
+    // Reconstruct the sender's current balance witness for THIS token position deterministically.
+    let (before_amount, mut wit_rng) = match witness_source(cm, token_slot) {
+        Some(WitnessSource::Refreshed { amount, seed }) => (amount, StdRng::from_seed(seed)),
+        Some(WitnessSource::Genesis { amount, seed }) => (amount, StdRng::seed_from_u64(seed)),
+        None => die(format!(
+            "slot {from} has no spendable balance witness at token slot {token_slot} — the \
+             position was never funded with a locally-witnessed ciphertext, or it was spent. Run \
+             `channel_member refresh {from} {token_slot}` first (a homomorphically credited \
+             position ALWAYS needs one)."
+        )),
+    };
+    let (_ct, witness) =
+        encrypt_amount(&mut wit_rng, &keys.regev_pk, before_amount).unwrap_or_else(|e| die(e));
 
-    let mut rng = StdRng::seed_from_u64(0x5E_0000 + from as u64);
+    // SECURITY: the send's own encryption randomness comes from the OS CSPRNG, NOT from a
+    // per-sender constant. A fixed seed was safe only while every CLI member sent at most once;
+    // a repeat sender (e.g. the testnet ITX faucet member) would otherwise encrypt two different
+    // plaintexts under the SAME `r`, which reveals their difference. Nondeterministic by design —
+    // nothing downstream depends on byte-identical send payloads.
+    let mut rng = StdRng::from_seed(fresh_seed32());
     let nonce = intmax3_zkp::ethereum_types::bytes32::Bytes32::default();
     let BuiltSend {
         payload,
         new_balance,
         ..
-    } = build_send(
+    } = build_send_token(
         &keys,
         &state.snapshot,
         from,
         to,
+        token_slot,
         amount,
         before_amount,
         &witness,
@@ -2371,16 +2798,16 @@ fn cmd_send(args: &[String]) {
     )
     .unwrap_or_else(|e| die(e));
 
-    // Mark this member as having spent (no reproducible witness for its new ciphertext; it will
-    // not send again in this demo). Balance commits on finalize.
+    // Mark the SENT position as having no reproducible witness for its new ciphertext (the send's
+    // `after_ct` randomness is not recorded). Sending again from this position requires a
+    // `refresh` first. Balance commits on finalize.
     if let Some(c) = state.controlled.iter_mut().find(|c| c.slot == from) {
-        c.has_witness = false;
-        c.balance_amount = new_balance;
+        invalidate_witness(c, token_slot, new_balance);
     }
     save_state(&state);
     write_json(out_path, &payload);
     println!(
-        "built send {from}→{to} amount {amount} → {out_path} (proof generated). Now collect co-signatures."
+        "built send {from}→{to} amount {amount} (token slot {token_slot}) → {out_path} (proof generated). Now collect co-signatures."
     );
 }
 
@@ -2482,9 +2909,9 @@ fn cmd_cosign(args: &[String]) {
 /// is built (`build_batch_next_state`: R1 single-debit, debits-then-credits fold, D3 budget) and
 /// co-signed once. ONE state_version bump for K transfers.
 /// Input formats (detail2 §M-1/§M-4):
-///   - MANIFEST (streaming, K-independent memory): `{"files": ["spool/a.json", …]}` — each file
-///     one `SlimSendPayload`. Parsed + verified in bounded-size chunks; after a chunk verifies,
-///     only the ~8 KB `BatchTxApply` residues are retained and the proofs are dropped.
+///   - MANIFEST (streaming, K-independent memory): `{"files": ["spool/a.json", …]}` — each file one
+///     `SlimSendPayload`. Parsed + verified in bounded-size chunks; after a chunk verifies, only
+///     the ~8 KB `BatchTxApply` residues are retained and the proofs are dropped.
 ///   - LEGACY array of fat `SendPayload`s — converted to slim in memory (small-K back-compat).
 fn cmd_cosign_batch(args: &[String]) {
     let in_path = args
@@ -2519,8 +2946,10 @@ fn cmd_cosign_batch(args: &[String]) {
         {
             Some(c) => {
                 let keys = keys_for(c.keygen_seed);
-                match intmax3_zkp::regev::decrypt_amount(&keys.regev_sk, &slim.channel_tx.enc_amount)
-                {
+                match intmax3_zkp::regev::decrypt_amount(
+                    &keys.regev_sk,
+                    &slim.channel_tx.enc_amount,
+                ) {
                     Ok(amt) => (Some(keys.regev_sk), Some(amt)),
                     Err(e) => return Err(format!("{tag}: decrypt enc_amount: {e}")),
                 }
@@ -2580,11 +3009,14 @@ fn cmd_cosign_batch(args: &[String]) {
         if !errors.is_empty() {
             die(format!("cosign-batch rejected: {}", errors.join("; ")));
         }
-        applies = payloads.iter().map(|p| BatchTxApply::from(&p.to_slim())).collect();
+        applies = payloads
+            .iter()
+            .map(|p| BatchTxApply::from(&p.to_slim()))
+            .collect();
     }
 
-    let mut next_state =
-        build_batch_next_state(&head, &applies).unwrap_or_else(|e| die(format!("batch build: {e}")));
+    let mut next_state = build_batch_next_state(&head, &applies)
+        .unwrap_or_else(|e| die(format!("batch build: {e}")));
 
     // N-of-N co-sign for all CLI-controlled slots (same §F-1 rationale as cmd_cosign: backing is
     // anchored at genesis; per-state re-checks would wrongly reject post-inter-channel states).
@@ -2774,15 +3206,17 @@ fn cmd_cosign_inter_transfer(args: &[String]) {
         ));
     }
 
-    // SPENT LEDGER (A side): refuse a tx_hash already DEBITED out of A (single-use on the source).
-    if a_state
-        .spent_tx_hashes
-        .iter()
-        .any(|h| *h == descriptor.tx_hash)
-    {
+    // SPENT LEDGER (A side, TM-16 obligation 1): refuse a debit whose token-FREE replay identity
+    // was already debited out of A (single-use on the source, across ALL token relabelings of the
+    // same deltas — see `CliState::spent_tx_identities`).
+    let replay_identity = descriptor
+        .inter_channel_tx
+        .replay_identity()
+        .unwrap_or_else(|e| die(format!("descriptor replay_identity: {e}")));
+    if a_state.spent_tx_identities.contains(&replay_identity) {
         die(format!(
-            "REFUSING: inter-channel tx_hash {} already debited from channel A (replay) — fail-closed",
-            descriptor.tx_hash.to_hex()
+            "REFUSING: inter-channel tx identity {} already debited from channel A (replay) — fail-closed",
+            replay_identity.to_hex()
         ));
     }
 
@@ -2819,27 +3253,47 @@ fn cmd_cosign_inter_transfer(args: &[String]) {
     verify_all_signatures(&a_state.snapshot.record, &a_state.snapshot.members, &a_head)
         .unwrap_or_else(|e| die(format!("inter-debit a_head not N-of-N co-signed: {e}")));
 
-    // CONSERVATION (A side, full u64 precision): A.fund decreased by EXACTLY descriptor.amount.
+    // CONSERVATION (A side, full u64 precision, per token — TM-6): A's fund decreased by
+    // EXACTLY descriptor.amount at the LOCAL slot A's registry resolves for the descriptor's
+    // BASE token_index, and at NO other position (belt-and-braces over the witness's
+    // ensure_funds_unchanged_except).
     let amt256 = intmax3_zkp::wallet_core::u64_to_u256(descriptor.amount);
-    if a_head.channel_fund.amount + amt256 != a_state.snapshot.state.channel_fund.amount {
-        die(
-            "conservation check FAILED: A channel_fund did not decrease by exactly descriptor.amount",
+    let a_token_slot = resolve_local_token_slot(
+        &a_state.snapshot.state.balance_state,
+        descriptor.inter_channel_tx.token_index,
+    )
+    .unwrap_or_else(|e| die(format!("A-side token resolution: {e}")));
+    for t in 0..a_head.channel_fund.amounts.len() {
+        let (before, after) = (
+            a_state.snapshot.state.channel_fund.amounts[t],
+            a_head.channel_fund.amounts[t],
         );
+        let ok = if t == a_token_slot {
+            after + amt256 == before
+        } else {
+            after == before
+        };
+        if !ok {
+            die(format!(
+                "conservation check FAILED: A channel_fund position {t} did not move by exactly \
+                 the expected delta (token slot {a_token_slot}, amount {})",
+                descriptor.amount
+            ));
+        }
     }
 
     // ================= LEG B (in memory): validate + build B's credited head.
     // ======================
     let (mut b_state, b_dir) = load_sibling_dest_state(descriptor.destination_channel_id.as_u64());
 
-    // REPLAY LEDGER (B side, invariant 6): refuse a tx_hash already credited into B.
-    if b_state
-        .applied_tx_hashes
-        .iter()
-        .any(|h| *h == descriptor.tx_hash)
-    {
+    // REPLAY LEDGER (B side, invariant 6 + TM-16 obligation 1): refuse a credit whose token-FREE
+    // replay identity was already credited into B. Keying on the identity (never the
+    // token-bearing tx_hash) is what refuses a SECOND, fully-consistent token-Y variant of an
+    // already-credited debit — the cross-token double-credit is structurally a replay here.
+    if b_state.applied_tx_identities.contains(&replay_identity) {
         die(format!(
-            "REFUSING: inter-channel tx_hash {} already credited into channel B (replay) — fail-closed (invariant 6)",
-            descriptor.tx_hash.to_hex()
+            "REFUSING: inter-channel tx identity {} already credited into channel B (replay) — fail-closed (invariant 6)",
+            replay_identity.to_hex()
         ));
     }
 
@@ -2871,8 +3325,22 @@ fn cmd_cosign_inter_transfer(args: &[String]) {
         .unwrap_or_else(|| die("channel B has no CLI member to apply the credit"));
     let builder_keys = keys_for(builder.keygen_seed);
 
-    let b_fund_before = b_state.snapshot.state.channel_fund.amount;
-    let mut rng = StdRng::seed_from_u64(0xC2_0000 + recipient_slot as u64);
+    // TM-6 (B side): the credit lands at the LOCAL slot B's OWN registry resolves for the
+    // descriptor's BASE token_index (source and destination registries may map it differently).
+    let b_token_slot = resolve_local_token_slot(
+        &b_state.snapshot.state.balance_state,
+        descriptor.inter_channel_tx.token_index,
+    )
+    .unwrap_or_else(|e| die(format!("B-side token resolution: {e}")));
+    let b_fund_before = b_state.snapshot.state.channel_fund.amounts;
+    // NOT a randomness-reuse site today: `build_inter_channel_credit` opens with `let _ = rng;`
+    // (which MOVES the `&mut`, so the borrow checker forbids any later use) and encrypts nothing —
+    // the credit is a deterministic homomorphic add of the descriptor's `receiver_deltas`, which
+    // the SOURCE channel already encrypted. The old fixed seed was therefore dead, but it was a
+    // trap: the day that builder starts drawing randomness, a per-recipient-slot constant becomes
+    // exactly the reuse bug fixed in `cmd_send`. Seed from the OS CSPRNG so the call site is right
+    // regardless of what the callee does.
+    let mut rng = StdRng::from_seed(fresh_seed32());
     let BuiltInterChannelCredit {
         bundle_apply_state, ..
     } = build_inter_channel_credit(
@@ -2884,12 +3352,22 @@ fn cmd_cosign_inter_transfer(args: &[String]) {
     )
     .unwrap_or_else(|e| die(format!("build_inter_channel_credit failed: {e}")));
 
-    // CONSERVATION (B side, full u64 precision): B channel_fund increased by EXACTLY
-    // descriptor.amount.
-    if bundle_apply_state.channel_fund.amount != b_fund_before + amt256 {
-        die(
-            "conservation check FAILED: B channel_fund did not increase by exactly descriptor.amount",
-        );
+    // CONSERVATION (B side, full u64 precision, per token): B's fund increased by EXACTLY
+    // descriptor.amount at the resolved slot and at NO other position.
+    for t in 0..bundle_apply_state.channel_fund.amounts.len() {
+        let (before, after) = (b_fund_before[t], bundle_apply_state.channel_fund.amounts[t]);
+        let ok = if t == b_token_slot {
+            after == before + amt256
+        } else {
+            after == before
+        };
+        if !ok {
+            die(format!(
+                "conservation check FAILED: B channel_fund position {t} did not move by exactly \
+                 the expected delta (token slot {b_token_slot}, amount {})",
+                descriptor.amount
+            ));
+        }
     }
 
     // N-of-N co-sign the credited (bundle-apply) B state. build_inter_channel_credit self-signs the
@@ -2914,12 +3392,13 @@ fn cmd_cosign_inter_transfer(args: &[String]) {
     // ==================== Advance + record on BOTH ledgers. Either-or-neither: any failure
     // above already `die()`d before we got here, so nothing was written.
     a_state.snapshot.state = a_head.clone();
-    a_state.spent_tx_hashes.push(descriptor.tx_hash);
+    // TM-16 obligation 1: both ledgers record the token-FREE replay identity.
+    a_state.spent_tx_identities.insert(replay_identity);
     save_state(&a_state);
     write_json("channel_snapshot.json", &a_state.snapshot);
 
     b_state.snapshot.state = b_head.clone();
-    b_state.applied_tx_hashes.push(descriptor.tx_hash);
+    b_state.applied_tx_identities.insert(replay_identity);
     save_state_at(&b_dir, &b_state);
 
     // out.json = { aHead, bSnapshot }.
@@ -2988,14 +3467,16 @@ fn cmd_cosign_burn_send(args: &[String]) {
         ));
     }
 
-    if a_state
-        .spent_tx_hashes
-        .iter()
-        .any(|h| *h == descriptor.tx_hash)
-    {
+    // TM-16 obligation 1: the burn spent ledger keys on the token-FREE replay identity too (a
+    // burn is the debit leg of an inter-channel send; same cross-token relabel surface).
+    let burn_replay_identity = descriptor
+        .inter_channel_tx
+        .replay_identity()
+        .unwrap_or_else(|e| die(format!("burn descriptor replay_identity: {e}")));
+    if a_state.spent_tx_identities.contains(&burn_replay_identity) {
         die(format!(
-            "REFUSING: burn tx_hash {} already debited (replay) — fail-closed",
-            descriptor.tx_hash.to_hex()
+            "REFUSING: burn tx identity {} already debited (replay) — fail-closed",
+            burn_replay_identity.to_hex()
         ));
     }
 
@@ -3027,25 +3508,47 @@ fn cmd_cosign_burn_send(args: &[String]) {
     verify_all_signatures(&a_state.snapshot.record, &a_state.snapshot.members, &a_head)
         .unwrap_or_else(|e| die(format!("burn debit not N-of-N co-signed: {e}")));
 
+    // CONSERVATION (per token — TM-6): the burn debits EXACTLY the LOCAL slot resolved for the
+    // descriptor's BASE token_index, and no other position.
     let amt256 = intmax3_zkp::wallet_core::u64_to_u256(descriptor.amount);
-    if a_head.channel_fund.amount + amt256 != a_state.snapshot.state.channel_fund.amount {
-        die(
-            "conservation check FAILED: channel_fund did not decrease by exactly descriptor.amount",
+    let burn_token_slot = resolve_local_token_slot(
+        &a_state.snapshot.state.balance_state,
+        descriptor.inter_channel_tx.token_index,
+    )
+    .unwrap_or_else(|e| die(format!("burn token resolution: {e}")));
+    for t in 0..a_head.channel_fund.amounts.len() {
+        let (before, after) = (
+            a_state.snapshot.state.channel_fund.amounts[t],
+            a_head.channel_fund.amounts[t],
         );
+        let ok = if t == burn_token_slot {
+            after + amt256 == before
+        } else {
+            after == before
+        };
+        if !ok {
+            die(format!(
+                "conservation check FAILED: channel_fund position {t} did not move by exactly \
+                 the expected burn delta (token slot {burn_token_slot}, amount {})",
+                descriptor.amount
+            ));
+        }
     }
 
     let pre_burn_settled_tx_chain = a_state.snapshot.state.balance_state.settled_tx_chain;
     a_state.snapshot.state = a_head.clone();
-    a_state.spent_tx_hashes.push(descriptor.tx_hash);
+    a_state.spent_tx_identities.insert(burn_replay_identity);
     save_state(&a_state);
     write_json("channel_snapshot.json", &a_state.snapshot);
 
-    // Persist burn metadata for `pw-submit` to reconstruct the Withdrawal.
+    // Persist burn metadata for `pw-submit` to reconstruct the Withdrawal. `token_index` is the
+    // BASE token the burn debited (multitoken §N — rides into the Withdrawal + IMPW authDigest).
     write_json(
         "last_burn.json",
         &serde_json::json!({
             "tx_hash": descriptor.tx_hash.to_hex(),
             "amount": descriptor.amount,
+            "token_index": descriptor.inter_channel_tx.token_index,
             "source_pk_g": descriptor.source_pk_g.to_hex(),
             "receiver_pk_g": descriptor.receiver_pk_g.to_hex(),
             "sender_delta_ct_digest": payload.inter_channel_tx.sender_delta_ct.digest().to_hex(),
@@ -3061,12 +3564,13 @@ fn cmd_cosign_burn_send(args: &[String]) {
         .map(|s| s.member_slot)
         .collect();
     println!(
-        "burn-send co-signed: channel {} debited {} (sigs {signed:?}). Fund: {} → {}. \
-         Burn metadata written to last_burn.json.",
+        "burn-send co-signed: channel {} debited {} at token slot {burn_token_slot} (base index \
+         {}, sigs {signed:?}). Fund: {} → {}. Burn metadata written to last_burn.json.",
         channel_id_env(),
         descriptor.amount,
-        a_state.snapshot.state.channel_fund.amount + amt256,
-        a_state.snapshot.state.channel_fund.amount,
+        descriptor.inter_channel_tx.token_index,
+        a_state.snapshot.state.channel_fund.amounts[burn_token_slot] + amt256,
+        a_state.snapshot.state.channel_fund.amounts[burn_token_slot],
     );
 }
 
@@ -3084,9 +3588,11 @@ fn cmd_finalize(args: &[String]) {
     state.snapshot.state = next_state;
     verify_snapshot(&state.snapshot, None).unwrap_or_else(|e| die(e));
     // Refresh controlled balances from the new state (recipients gain; senders already updated).
+    // The CLI's stored per-member scalar tracks the GENESIS token position (0); non-genesis
+    // balances are displayed per token by `cmd_balance` but not witness-tracked here.
     for c in state.controlled.iter_mut() {
         let keys = keys_for(c.keygen_seed);
-        if let Ok(bal) = decrypt_balance(&keys, &state.snapshot, c.slot) {
+        if let Ok(bal) = decrypt_balance_token(&keys, &state.snapshot, c.slot, 0) {
             if bal != c.balance_amount {
                 // A receive (homomorphic add): balance changed, witness no longer reproducible.
                 c.balance_amount = bal;
@@ -3104,16 +3610,244 @@ fn cmd_finalize(args: &[String]) {
 
 fn cmd_balance() {
     let state = load_state();
+    let bs = &state.snapshot.state.balance_state;
+    let token_count = bs.token_count as usize;
     for c in &state.controlled {
         let keys = keys_for(c.keygen_seed);
-        match decrypt_balance(&keys, &state.snapshot, c.slot) {
-            Ok(bal) => println!(
-                "  slot {} balance = {} (can_send={})",
-                c.slot, bal, c.has_witness
-            ),
-            Err(e) => println!("  slot {} balance = <decrypt error: {e}>", c.slot),
+        // Per-token view (multitoken §N-2): every ACTIVE registry position; unused positions
+        // are the canonical zero ct and decrypt to 0 under any key.
+        for t in 0..token_count {
+            match decrypt_balance_token(&keys, &state.snapshot, c.slot, t as u8) {
+                Ok(bal) => println!(
+                    "  slot {} token {} (base index {}) balance = {}{}",
+                    c.slot,
+                    t,
+                    bs.token_registry[t],
+                    bal,
+                    if t == 0 {
+                        format!(" (can_send={})", c.has_witness)
+                    } else {
+                        String::new()
+                    }
+                ),
+                Err(e) => {
+                    println!("  slot {} token {t} balance = <decrypt error: {e}>", c.slot)
+                }
+            }
         }
     }
+}
+
+/// usage: register-token <base_token_index> [out.json]
+/// detail2 §N-1: append-only cosigned `TokenRegister` — appends the BASE-layer `token_index` at
+/// local position `token_count` (header-only state change; balances/funds untouched). All
+/// CLI-controlled members run the fail-closed gate (`verify_token_register_state_transition`:
+/// append-exactness + full freeze + rebuild-equality, TM-1/TM-9) before signing; the head
+/// advances only once the REAL N-of-N signature set verifies.
+fn cmd_register_token(args: &[String]) {
+    let token_index: u32 = args
+        .get(1)
+        .and_then(|s| s.parse().ok())
+        .unwrap_or_else(|| die("register-token <base_token_index> [out.json]"));
+    let out_path = args
+        .get(2)
+        .map(String::as_str)
+        .unwrap_or("token_register_cosigned.json");
+    let mut state = load_state();
+
+    let builder = state
+        .controlled
+        .first()
+        .unwrap_or_else(|| die("no CLI-controlled member to propose the registration"));
+    let builder_keys = keys_for(builder.keygen_seed);
+    let mut proposed =
+        build_token_register(&builder_keys, &state.snapshot, builder.slot, token_index)
+            .unwrap_or_else(|e| die(format!("build token register: {e}")));
+
+    // Every other CLI-controlled member re-runs the gate itself, then signs (check-and-sign).
+    for c in &state.controlled {
+        if proposed
+            .member_signatures
+            .iter()
+            .any(|s| s.member_slot as u16 == c.slot)
+        {
+            continue;
+        }
+        verify_token_register_state_transition(
+            &state.snapshot.state,
+            &state.snapshot.record,
+            &proposed,
+            token_index,
+        )
+        .unwrap_or_else(|e| die(format!("REFUSING TO SIGN token register — {e}")));
+        let sig = sign_state(&keys_for(c.keygen_seed), c.slot as u8, &proposed)
+            .unwrap_or_else(|e| die(format!("sign: {e:?}")));
+        add_signature(&mut proposed, sig);
+    }
+    // Authoritative N-of-N gate before the head advances.
+    verify_all_signatures(&state.snapshot.record, &state.snapshot.members, &proposed)
+        .unwrap_or_else(|e| die(format!("token register not fully/validly signed: {e}")));
+
+    write_json(out_path, &proposed);
+    state.snapshot.state = proposed;
+    save_state(&state);
+    write_json("channel_snapshot.json", &state.snapshot);
+    let bs = &state.snapshot.state.balance_state;
+    println!(
+        "register-token OK: base token_index {token_index} registered at local slot {} \
+         (token_count {}, state_version {}) → {out_path}.",
+        bs.token_count - 1,
+        bs.token_count,
+        bs.state_version
+    );
+}
+
+/// usage: refresh <slot> [token_slot] [out.json]
+///
+/// Balance-REFRESH a CLI-controlled member's OWN `(slot, token_slot)` position (detail2 §B-3 ×
+/// multitoken §N, TM-13): re-encrypt the position's current value to a FRESH ciphertext whose
+/// encryption witness this process can reconstruct later, and reset that position's
+/// `pending_adds`. This is the CLI twin of the browser's `wallet_refresh`.
+///
+/// WHY IT IS NEEDED. A position credited HOMOMORPHICALLY — an L1 deposit import (`+= delta`,
+/// `pending_adds += 1`) or an incoming in-channel transfer — leaves a ciphertext for which this
+/// process holds NO encryption witness, and `build_send_token` refuses to spend it twice over:
+/// once on the `pending_adds != 0` gate and once because a stale witness cannot satisfy E-1.
+/// A refresh is the only value-preserving way out. That is exactly the situation of the testnet
+/// ITX faucet member, whose supply arrives via `cosign-l1-deposit-import`.
+///
+/// NOTHING IS MINTED. `RefreshAir` proves `old_ct` and `new_ct` encrypt the SAME hidden value, and
+/// `verify_refresh_transition` re-runs that proof plus the structural witness (only this position
+/// changes, its counter resets, every other position frozen) before any signature is added. The
+/// head advances only once the REAL N-of-N signature set verifies.
+///
+/// SECURITY — witness reproducibility. `build_refresh` hands its RNG to
+/// `prove_balance_refresh_witnessed`, whose first and ONLY RNG consumption is the `encrypt_amount`
+/// that produces the new ciphertext. Seeding a `StdRng` with 32 OS-random bytes and RECORDING that
+/// seed therefore reconstructs the exact `AmountWitness` on a later invocation without persisting
+/// unserializable key material — the same deterministic-seed model the genesis witnesses use. That
+/// invariant is not assumed: it is RE-CHECKED below against the co-signed state, fail-closed, so an
+/// upstream change in RNG consumption stops the command instead of silently recording a witness
+/// that would fail E-1 later.
+fn cmd_refresh(args: &[String]) {
+    let slot: u16 = args
+        .get(1)
+        .and_then(|s| s.parse().ok())
+        .unwrap_or_else(|| die("refresh <slot> [token_slot] [out.json]"));
+    let token_slot: u8 = args
+        .get(2)
+        .map(|s| s.parse().unwrap_or_else(|_| die("bad [token_slot]")))
+        .unwrap_or(0);
+    let out_path = args
+        .get(3)
+        .map(String::as_str)
+        .unwrap_or("refresh_cosigned.json");
+    let mut state = load_state();
+
+    let cm = state
+        .controlled
+        .iter()
+        .find(|c| c.slot == slot)
+        .unwrap_or_else(|| {
+            die(format!(
+                "slot {slot} is not a CLI-controlled member — only the owner of a position may \
+                 refresh it (the refresh proof needs its Regev secret key)"
+            ))
+        });
+    let keys = keys_for(cm.keygen_seed);
+
+    let seed = fresh_seed32();
+    let (payload, witness) = build_refresh(
+        &keys,
+        &state.snapshot,
+        slot,
+        token_slot,
+        LEVEL,
+        &mut StdRng::from_seed(seed),
+    )
+    .unwrap_or_else(|e| die(format!("build refresh: {e}")));
+
+    // Fail-closed self-check: the recorded seed MUST reproduce exactly the ciphertext the refresh
+    // installs, or the stored witness is worthless and every later send from this position would
+    // fail E-1 with a confusing error. Cheap (one encryption) relative to the proof just built.
+    let (replayed_ct, _) =
+        encrypt_amount(&mut StdRng::from_seed(seed), &keys.regev_pk, witness.amount)
+            .unwrap_or_else(|e| die(e));
+    if replayed_ct
+        != payload.proposed_next_state.balance_state.enc_balances[slot as usize]
+            [token_slot as usize]
+    {
+        die(
+            "refresh: the recorded seed does not reproduce the refreshed ciphertext — the RNG \
+             consumption of prove_balance_refresh_witnessed changed. REFUSING to record an \
+             unusable witness.",
+        );
+    }
+
+    let mut next_state = payload.proposed_next_state.clone();
+    if next_state.prev_digest != state.snapshot.state.digest {
+        die("refresh does not extend the current head");
+    }
+    // CHECK-AND-SIGN: every CLI-controlled member re-runs the adversarial gate itself (real
+    // RefreshAir verification + structural freeze) before adding its signature — the builder being
+    // this same process buys the transition nothing.
+    for c in &state.controlled {
+        if next_state
+            .member_signatures
+            .iter()
+            .any(|s| s.member_slot as u16 == c.slot)
+        {
+            continue;
+        }
+        verify_refresh_transition(
+            &state.snapshot.state,
+            &state.snapshot.record,
+            &payload,
+            LEVEL,
+        )
+        .unwrap_or_else(|e| die(format!("REFUSING TO SIGN refresh — {e}")));
+        let sig = sign_state(&keys_for(c.keygen_seed), c.slot as u8, &next_state)
+            .unwrap_or_else(|e| die(format!("sign: {e:?}")));
+        add_signature(&mut next_state, sig);
+    }
+    // Authoritative N-of-N gate before the head advances.
+    verify_all_signatures(&state.snapshot.record, &state.snapshot.members, &next_state)
+        .unwrap_or_else(|e| die(format!("refresh not fully/validly signed: {e}")));
+
+    // Record the reconstructible witness for this position ONLY after the head is committed.
+    if let Some(c) = state.controlled.iter_mut().find(|c| c.slot == slot) {
+        let entry = TokenWitness {
+            token_slot,
+            amount: witness.amount,
+            seed_hex: hex::encode(seed),
+            has_witness: true,
+        };
+        match c
+            .token_witnesses
+            .iter_mut()
+            .find(|w| w.token_slot == token_slot)
+        {
+            Some(w) => *w = entry,
+            None => c.token_witnesses.push(entry),
+        }
+        // A refresh of position 0 REPLACES the genesis ciphertext, so the legacy `balance_seed`
+        // triple is stale from here on. Retire it explicitly rather than relying on the lookup
+        // order in `witness_source` — if this record is ever spent and invalidated, the fallback
+        // must not silently resurrect a seed that no longer matches state.
+        if token_slot == 0 {
+            c.has_witness = false;
+            c.balance_amount = witness.amount;
+        }
+    }
+    state.snapshot.state = next_state.clone();
+    save_state(&state);
+    write_json("channel_snapshot.json", &state.snapshot);
+    write_json(out_path, &next_state);
+    println!(
+        "refresh OK: slot {slot} token slot {token_slot} re-encrypted (value {}, state_version {}) → {out_path}. \
+         The position is spendable again.",
+        witness.amount, state.snapshot.state.balance_state.state_version
+    );
 }
 
 // ─── Wallet testnet UX: settlement deploy + L1 deposit import + partial withdrawal ────────
@@ -3251,46 +3985,432 @@ fn cmd_deploy_settlement(args: &[String]) {
     println!("deploy-settlement OK: manager={manager}, verifier={verifier}, rollup={rollup}");
 }
 
-/// Co-sign an L1 deposit import (mid-channel deposit): fold the deposit into the channel's balance
-/// without closing. Usage:
-///   channel_member cosign-l1-deposit-import <recipient_slot> <amount> <depositor_hex> <out.json>
-fn cmd_cosign_l1_deposit_import(args: &[String]) {
-    let recipient_slot: usize = args.get(1).and_then(|s| s.parse().ok()).unwrap_or_else(|| {
-        die("cosign-l1-deposit-import <recipient_slot> <amount> <depositor_hex> [out.json]")
-    });
-    let amount: u64 = args
-        .get(2)
-        .and_then(|s| s.parse().ok())
-        .unwrap_or_else(|| die("cosign-l1-deposit-import needs <amount>"));
-    let depositor_hex = args
-        .get(3)
-        .unwrap_or_else(|| die("cosign-l1-deposit-import needs <depositor_hex>"));
-    let out_path = args
-        .get(4)
-        .map(String::as_str)
-        .unwrap_or("l1_import_cosigned.json");
+/// `keccak256("Deposited(uint64,address,bytes32,uint32,uint256,bytes32,bytes32)")` — topic0 of
+/// `IntmaxRollup.Deposited` (IntmaxRollup.sol:129). Re-derive with:
+///   `cast sig-event "Deposited(uint64,address,bytes32,uint32,uint256,bytes32,bytes32)"`
+/// SECURITY: if this constant were ever wrong, NO log would match and every import would refuse
+/// (fail-closed) — the faucet E2E's real ERC-20 deposit is the live proof that it is right.
+const DEPOSITED_TOPIC0: &str = "0x35cffad0c6ce159deaf160c503b69a374a9751e480083db7e6849e00f1a2c4fe";
 
-    let depositor = Address::from_hex(depositor_hex)
-        .unwrap_or_else(|e| die(format!("parse depositor address: {e:?}")));
+/// Reorg-safety default for a real (non-dev) chain, and the floor an explicit argument is clamped
+/// up to. Chain id 31337 (anvil) uses floor 0 — see `min_confirmations_for`.
+const DEFAULT_MIN_CONFIRMATIONS: u64 = 12;
+
+/// ONE `Deposited` log, read back from L1. Every economically meaningful field of the imported
+/// `Deposit` comes from HERE — none of it is caller-supplied any more (threat model §1, A9).
+struct OnChainDeposit {
+    deposit_index: u64,
+    depositor: Address,
+    token_index: u32,
+    amount: u64,
+    aux_data: Bytes32,
+    /// The chain the deposit was read from — carried so the replay-ledger key is scoped to the
+    /// SAME chain the verification ran against (one `cast chain-id`, not two).
+    chain_id: u64,
+}
+
+/// Strip an optional `0x` and require exactly `n` lowercase-able hex chars.
+fn hex_body<'a>(s: &'a str, n: usize, what: &str) -> &'a str {
+    let b = s.strip_prefix("0x").unwrap_or(s);
+    if b.len() != n || !b.chars().all(|c| c.is_ascii_hexdigit()) {
+        die(format!("{what}: expected {n} hex chars, got {s:?}"));
+    }
+    b
+}
+
+/// Parse a 32-byte ABI word as a `u64`, refusing (rather than truncating) anything wider.
+/// SECURITY: a silent truncation here would credit a WRONG amount / index — worse than refusing.
+fn abi_word_u64(word: &str, what: &str) -> u64 {
+    let w = hex_body(word, 64, what);
+    if w[..48].chars().any(|c| c != '0') {
+        die(format!(
+            "{what} exceeds u64 (0x{w}) — refusing rather than truncating"
+        ));
+    }
+    u64::from_str_radix(&w[48..], 16).unwrap_or_else(|e| die(format!("{what}: {e}")))
+}
+
+/// The reorg depth this chain requires. Anvil (31337) mines instantly and has no reorg model, so
+/// depth is meaningless there and the floor is 0; every OTHER chain floors at 1 and defaults to
+/// [`DEFAULT_MIN_CONFIRMATIONS`]. An explicit argument is honored but CLAMPED UP to the floor:
+/// an operator may knowingly tune 12 -> 3, and can NEVER tune a public chain down to 0.
+/// SECURITY: this relaxes only REORG DEPTH on a dev chain, never authenticity — the tx must still
+/// exist, be mined, and have `status == 1` everywhere. This is NOT an on-chain-check bypass.
+fn min_confirmations_for(chain_id: u64, explicit: Option<u64>) -> u64 {
+    let floor = if chain_id == 31337 { 0 } else { 1 };
+    match explicit {
+        Some(v) => v.max(floor),
+        None => {
+            if chain_id == 31337 {
+                0
+            } else {
+                DEFAULT_MIN_CONFIRMATIONS
+            }
+        }
+    }
+}
+
+/// Read the `Deposited` log of `tx_hash` from the chain and validate it against THIS channel.
+///
+/// SECURITY (the whole point of this function): the deposit's economics are sourced from the
+/// chain, never from argv. Refuses fail-closed on: a nonexistent/unmined tx, a reverted tx, an
+/// under-confirmed tx, a log from a contract other than the channel's own rollup, a log whose
+/// `recipient` is not the channel's `deposit_recipient` (a deposit made for ANOTHER channel), and
+/// on ZERO or SEVERAL matching logs (ambiguity).
+fn fetch_onchain_deposit(
+    rpc: &str,
+    tx_hash: &str,
+    rollup: &str,
+    deposit_recipient: Bytes32,
+    explicit_min_conf: Option<u64>,
+) -> OnChainDeposit {
+    // Shape-validate BEFORE handing it to `cast`: a leading '-' could otherwise be read as a flag.
+    let tx = format!("0x{}", hex_body(tx_hash, 64, "tx_hash"));
+    let rollup_body = hex_body(rollup, 40, "rollup address from channel_backing.json");
+
+    // `--async` is MANDATORY: without it `cast receipt` BLOCKS FOREVER waiting for an unknown tx,
+    // which would turn a refusal into a hang (threat model A1).
+    let receipt_raw = cast(&["receipt", &tx, "--rpc-url", rpc, "--json", "--async"]);
+    let receipt: serde_json::Value = serde_json::from_str(&receipt_raw)
+        .unwrap_or_else(|e| die(format!("parse `cast receipt` JSON: {e}\n{receipt_raw}")));
+
+    let status = receipt["status"].as_str().unwrap_or("");
+    if status != "0x1" {
+        die(format!(
+            "deposit tx {tx} did not succeed (status {status}) — refusing to import a reverted deposit"
+        ));
+    }
+    // SECURITY: parse STRICTLY. An earlier version used `unwrap_or(0)` here, which would silently
+    // treat an unparseable blockNumber as block 0 and make `confirmations = head + 1` — i.e. the
+    // depth check would pass unconditionally. This is the one place where a permissive default
+    // would disable a check, so it dies instead.
+    let tx_block = match receipt["blockNumber"].as_str() {
+        Some(s) => u64::from_str_radix(s.trim_start_matches("0x"), 16)
+            .unwrap_or_else(|e| die(format!("unparseable blockNumber {s:?} on tx {tx}: {e}"))),
+        None => die(format!("deposit tx {tx} is not mined yet (no blockNumber)")),
+    };
+
+    let chain_id: u64 = cast(&["chain-id", "--rpc-url", rpc])
+        .trim()
+        .parse()
+        .unwrap_or_else(|e| die(format!("parse chain-id: {e}")));
+    let head: u64 = cast(&["block-number", "--rpc-url", rpc])
+        .trim()
+        .parse()
+        .unwrap_or_else(|e| die(format!("parse block-number: {e}")));
+    let min_conf = min_confirmations_for(chain_id, explicit_min_conf);
+    let confirmations = head.saturating_sub(tx_block) + 1;
+    if confirmations < min_conf {
+        die(format!(
+            "deposit tx {tx} has {confirmations} confirmation(s), need {min_conf} on chain \
+             {chain_id} (reorg safety) — refusing"
+        ));
+    }
+
+    let logs = receipt["logs"]
+        .as_array()
+        .unwrap_or_else(|| die(format!("deposit tx {tx} receipt has no logs array")));
+
+    // Filter to OUR rollup's `Deposited` logs for THIS channel's deposit recipient.
+    let mut matching: Vec<&serde_json::Value> = Vec::new();
+    let mut saw_deposited_for_other_recipient = 0usize;
+    for log in logs {
+        let addr = log["address"].as_str().unwrap_or("");
+        let topics = log["topics"].as_array().cloned().unwrap_or_default();
+        let topic0 = topics.first().and_then(|t| t.as_str()).unwrap_or("");
+        // Contract binding (A3): only the channel's OWN rollup may source a deposit — not just any
+        // contract that emits a similarly-shaped event.
+        if !addr.eq_ignore_ascii_case(&format!("0x{rollup_body}")) {
+            continue;
+        }
+        if !topic0.eq_ignore_ascii_case(DEPOSITED_TOPIC0) {
+            continue;
+        }
+        let data = log["data"].as_str().unwrap_or("");
+        let body = data.strip_prefix("0x").unwrap_or(data);
+        if body.len() < 64 * 6 {
+            die(format!("malformed Deposited log data in tx {tx}"));
+        }
+        let recipient = Bytes32::from_hex(&format!("0x{}", abi_word(body, 1)))
+            .unwrap_or_else(|e| die(format!("parse Deposited.recipient: {e:?}")));
+        // Channel binding (A4): a deposit made for ANOTHER channel must not be importable here.
+        if recipient != deposit_recipient {
+            saw_deposited_for_other_recipient += 1;
+            continue;
+        }
+        matching.push(log);
+    }
+
+    if matching.is_empty() {
+        die(format!(
+            "tx {tx} contains no `Deposited` log from rollup 0x{rollup_body} for this channel's \
+             deposit_recipient {} ({saw_deposited_for_other_recipient} Deposited log(s) were for a \
+             DIFFERENT recipient) — refusing",
+            deposit_recipient.to_hex()
+        ));
+    }
+    // FAIL CLOSED on ambiguity (A5): no disambiguation parameter is offered, so there is no lever
+    // to misuse. Deposit each amount in its own transaction.
+    if matching.len() > 1 {
+        die(format!(
+            "tx {tx} contains {} `Deposited` logs for this channel — ambiguous, refusing to guess \
+             which one to import",
+            matching.len()
+        ));
+    }
+
+    let log = matching[0];
+    let topics = log["topics"].as_array().cloned().unwrap_or_default();
+    let index_topic = topics
+        .get(1)
+        .and_then(|t| t.as_str())
+        .unwrap_or_else(|| die("Deposited log has no indexed depositIndex topic"));
+    let deposit_index = abi_word_u64(index_topic, "Deposited.depositIndex");
+
+    let data = log["data"].as_str().unwrap_or("");
+    let body = data.strip_prefix("0x").unwrap_or(data);
+    let depositor = Address::from_hex(&format!("0x{}", &abi_word(body, 0)[24..]))
+        .unwrap_or_else(|e| die(format!("parse Deposited.depositor: {e:?}")));
+    // `uint32` on-chain, but narrow it CHECKED rather than with `as` — no silent truncation
+    // anywhere in this function.
+    let token_index = u32::try_from(abi_word_u64(abi_word(body, 2), "Deposited.tokenIndex"))
+        .unwrap_or_else(|_| die("Deposited.tokenIndex exceeds u32"));
+    // The import encrypts a u64 amount; refuse anything wider rather than truncating (A11).
+    let amount = abi_word_u64(abi_word(body, 3), "Deposited.amount");
+    let aux_data = Bytes32::from_hex(&format!("0x{}", abi_word(body, 4)))
+        .unwrap_or_else(|e| die(format!("parse Deposited.auxData: {e:?}")));
+
+    eprintln!(
+        "cosign-l1-deposit-import: verified on-chain deposit #{deposit_index} in tx {tx} \
+         (chain {chain_id}, {confirmations} conf, rollup 0x{rollup_body}): depositor {}, \
+         token_index {token_index}, amount {amount}.",
+        depositor.to_hex()
+    );
+
+    OnChainDeposit {
+        deposit_index,
+        depositor,
+        token_index,
+        amount,
+        aux_data,
+        chain_id,
+    }
+}
+
+/// Co-sign an L1 deposit import (mid-channel deposit): fold a REAL, on-chain-verified deposit into
+/// the channel's balance without closing. Usage:
+///   channel_member cosign-l1-deposit-import <recipient_slot|auto> <tx_hash> <rpc_url> \
+///       [out.json] [min_confirmations] [--allow-unbound-depositor]
+///
+/// SECURITY (the fix): `amount`, `depositor` and `token_index` are NO LONGER caller-supplied —
+/// they are read from the transaction's `Deposited` log. The ability to lie about them was
+/// REMOVED rather than cross-checked. `token_index` still resolves against the channel's active
+/// registry, and an UNREGISTERED index is refused fail-closed (TM-7).
+///
+/// `recipient_slot` may be `auto`, which resolves to the unique active slot whose B-1b bound
+/// recipient equals the on-chain depositor.
+fn cmd_cosign_l1_deposit_import(args: &[String]) {
+    const USAGE: &str = "cosign-l1-deposit-import <recipient_slot|auto> <tx_hash> <rpc_url> \
+                         [out.json] [min_confirmations] [--allow-unbound-depositor]";
+
+    // Flags are position-independent; positional args are the non-flag remainder.
+    // SECURITY: an UNKNOWN `--flag` is refused rather than ignored. Silently dropping it would let
+    // a mistyped or misremembered option (e.g. `--min-confirmations=0`) look accepted while having
+    // no effect — the operator would believe they set a policy they did not.
+    if let Some(bad) = args
+        .iter()
+        .skip(1)
+        .find(|a| a.starts_with("--") && a.as_str() != "--allow-unbound-depositor")
+    {
+        die(format!("unknown flag {bad:?}\nusage: {USAGE}"));
+    }
+    let allow_unbound = args.iter().any(|a| a == "--allow-unbound-depositor");
+    let pos: Vec<&String> = args
+        .iter()
+        .skip(1)
+        .filter(|a| !a.starts_with("--"))
+        .collect();
+
+    let slot_arg = pos.first().unwrap_or_else(|| die(USAGE));
+    let tx_hash = pos.get(1).unwrap_or_else(|| die(USAGE));
+    let rpc = pos.get(2).unwrap_or_else(|| die(USAGE));
+    let out_path = pos
+        .get(3)
+        .map(|s| s.as_str())
+        .unwrap_or("l1_import_cosigned.json");
+    let explicit_min_conf: Option<u64> = pos
+        .get(4)
+        .map(|s| s.parse().unwrap_or_else(|_| die("bad [min_confirmations]")));
+
     let (_, _, backing) = load_backing();
     let deposit_recipient = Bytes32::from_hex(&backing.deposit_recipient)
         .unwrap_or_else(|e| die(format!("parse deposit_recipient from backing: {e:?}")));
+    if backing.rollup.is_empty() {
+        die("channel_backing.json has no rollup address — cannot verify the deposit on-chain");
+    }
 
-    let deposit = Deposit {
-        deposit_index: Default::default(),
-        block_number: Default::default(),
-        depositor,
-        recipient: deposit_recipient,
-        token_index: 0,
-        amount: U256::from(amount),
-        aux_data: Bytes32::default(),
-    };
+    // SECURITY (adversarial review finding 5): the channel's OWN backing deposit is a real
+    // `Deposited` log from this rollup to this `deposit_recipient`, so it passes every check in
+    // `fetch_onchain_deposit`. But its value is ALREADY counted in the genesis fund — importing it
+    // would credit the channel twice against a single L1 escrow. Refuse it by name.
+    let strip0x = |s: &str| s.trim_start_matches("0x").to_ascii_lowercase();
+    if !backing.deposit_tx.is_empty() && strip0x(&backing.deposit_tx) == strip0x(tx_hash) {
+        die(
+            "REFUSING: this is the channel's BACKING deposit (channel_backing.json deposit_tx). \
+             Its value is already counted in the genesis fund — importing it would credit the \
+             channel twice against one L1 escrow.",
+        );
+    }
+
+    let onchain = fetch_onchain_deposit(
+        rpc,
+        tx_hash,
+        &backing.rollup,
+        deposit_recipient,
+        explicit_min_conf,
+    );
 
     let mut state = load_state();
+
+    // ── REPLAY LEDGER (threat model §4) ────────────────────────────────────────────────────
+    // The channel layer has NO nullifier SET — `shared_native_nullifier_root` is a keccak CHAIN,
+    // and re-folding an identical nullifier always yields a different root, so the native gate's
+    // `ensure_different_root` passes on a replay BY CONSTRUCTION. This ledger is therefore the
+    // only thing standing between a repeated import and a double credit. Keyed on the canonical
+    // L1 deposit identity (chain-scoped contract + the contract's own monotone `depositCount`),
+    // NOT on the tx hash: one transaction can carry several `Deposited` logs.
+    // SECURITY (adversarial review finding 6): CANONICALIZE the rollup before keying. `hex_body`
+    // accepts both `0xabc…` and `abc…`, and `setup-backing` writes `rollup` verbatim from argv —
+    // so keying on the raw field would give the SAME deposit two different ledger keys under two
+    // spellings, and a replay would slip through. Strip `0x` and lowercase.
+    let deposit_identity = format!(
+        "{}:{}:{}",
+        onchain.chain_id,
+        strip0x(&backing.rollup),
+        onchain.deposit_index
+    );
+    if state.imported_deposits.contains(&deposit_identity) {
+        die(format!(
+            "REPLAY REFUSED: L1 deposit {deposit_identity} has already been imported into this \
+             channel. A deposit is credited at most once."
+        ));
+    }
+
+    // ── CREDIT BINDING (threat model §5) ───────────────────────────────────────────────────
+    let balance_state = &state.snapshot.state.balance_state;
+    let active = balance_state.member_count as usize + balance_state.delegate_count as usize;
+    // UNCONDITIONAL: if the depositor is a channel participant's bound exit address, the deposit
+    // belongs to THAT slot. No flag may redirect it — this is the leg that blocks "Mallory imports
+    // Alice's genuine deposit into Mallory's slot".
+    //
+    // SECURITY (ambiguity, adversarial review finding 1): `join_delegate` does not enforce that
+    // B-1b recipients are DISTINCT, so a joining member can declare someone else's L1 address as
+    // its own bound recipient. A first-match lookup would then resolve the victim's deposit to the
+    // ATTACKER's slot (and `auto` is exactly what the chain-driven co-signer path uses). So we
+    // collect ALL matches and refuse on more than one — a duplicated exit address is itself the
+    // attack signature, and there is no safe way to pick. `cmd_init` also rejects the duplicate at
+    // join time; this is the defense-in-depth half for states created before that check existed.
+    let depositor_slots: Vec<usize> = (0..active)
+        .filter(|&i| balance_state.recipients[i] == onchain.depositor)
+        .collect();
+    if depositor_slots.len() > 1 {
+        die(format!(
+            "AMBIGUOUS BINDING REFUSED: the on-chain depositor {} is the bound (B-1b) recipient of \
+             {} ACTIVE slots {:?}. A duplicated exit address makes the credited slot ambiguous \
+             (and is how a joining member would try to capture someone else's deposit) — refusing.",
+            onchain.depositor.to_hex(),
+            depositor_slots.len(),
+            depositor_slots
+        ));
+    }
+    let depositor_slot = depositor_slots.first().copied();
+
+    let recipient_slot: usize = if slot_arg.as_str() == "auto" {
+        depositor_slot.unwrap_or_else(|| {
+            die(format!(
+                "`auto` could not resolve a slot: no ACTIVE slot's bound recipient equals the \
+                 on-chain depositor {} — pass an explicit slot",
+                onchain.depositor.to_hex()
+            ))
+        })
+    } else {
+        slot_arg.parse().unwrap_or_else(|_| die(USAGE))
+    };
+    if recipient_slot >= active {
+        die(format!(
+            "recipient_slot {recipient_slot} is not an ACTIVE slot (active = {active})"
+        ));
+    }
+    match depositor_slot {
+        Some(j) if j != recipient_slot => die(format!(
+            "CREDIT MISDIRECTION REFUSED: the on-chain depositor {} is the bound (B-1b) recipient \
+             of ACTIVE slot {j}, but this import would credit slot {recipient_slot}. This refusal \
+             is unconditional — --allow-unbound-depositor does NOT override it.",
+            onchain.depositor.to_hex()
+        )),
+        Some(_) => {}
+        None => {
+            // The depositor is bound to NO slot (a third party / the operator funding a slot whose
+            // recipient is a synthetic address, e.g. the $ITX faucet). Allowed only when the caller
+            // says so explicitly.
+            //
+            // WHO PASSES IT (keep in sync with doc/tasks/deposit-import-threat-model.md): the
+            // server-key api routes do — `api/routes/deposit.js` (both import paths) and
+            // `api/routes/channel-init.js` — because there the DEPOSITOR IS THE SERVER, not the
+            // member, so its address is bound to no slot by construction. The browser relays do
+            // NOT pass it: a MetaMask deposit comes from the member's own bound address.
+            //
+            // This flag can only widen the `None` arm above. It is NOT consulted on the
+            // misdirection arm (`Some(j) if j != recipient_slot`), which dies unconditionally, so
+            // it can never redirect a deposit that belongs to someone.
+            if !allow_unbound {
+                die(format!(
+                    "REFUSING: the on-chain depositor {} is not the bound (B-1b) recipient of \
+                     ACTIVE slot {recipient_slot} (which is {}), and is not bound to any slot. \
+                     Pass --allow-unbound-depositor to credit a third-party/operator deposit.",
+                    onchain.depositor.to_hex(),
+                    balance_state.recipients[recipient_slot].to_hex()
+                ));
+            }
+            eprintln!(
+                "cosign-l1-deposit-import: WARNING — crediting slot {recipient_slot} from \
+                 depositor {} which is bound to NO active slot (--allow-unbound-depositor).",
+                onchain.depositor.to_hex()
+            );
+        }
+    }
+
+    let amount = onchain.amount;
+    let token_index = onchain.token_index;
+    let deposit = Deposit {
+        // REAL on-chain deposit index (the contract's monotone `depositCount`): this is what makes
+        // `Deposit::nullifier()` unique per real deposit. See the threat model §4 Finding A.
+        deposit_index: U63::new(onchain.deposit_index)
+            .unwrap_or_else(|e| die(format!("deposit_index out of range: {e:?}"))),
+        // DELIBERATELY 0 — see threat model §9. `Deposit::block_number` is the INTMAX validity
+        // block number that folded the deposit (enforced as such by receive_deposit_circuit), NOT
+        // an L1 block number. This deposit is not in any intmax block yet, so "unassigned" (0) is
+        // the honest value; writing the L1 block here would be a unit confusion.
+        block_number: Default::default(),
+        depositor: onchain.depositor,
+        recipient: deposit_recipient,
+        token_index,
+        amount: U256::from(amount),
+        aux_data: onchain.aux_data,
+    };
+
     let snapshot = &state.snapshot;
     let bp_keys = keys_for(state.controlled[0].keygen_seed);
 
     let recipient_regev_pk = &snapshot.members[recipient_slot].regev_pk;
+    // SECURITY: this seed is deliberately FIXED per channel, and that is safe here — unlike
+    // `cmd_send`, this randomness protects nothing. It encrypts `amount`, which is a PUBLIC L1
+    // deposit value (it is an argument of the `deposit()` transaction, in the deposit hash chain,
+    // and in the channel's `channel_fund` in the clear). Reuse across imports can therefore leak
+    // only the difference of two already-public numbers. Determinism is load-bearing instead: the
+    // TM-7 co-signer gate REBUILDS this exact `recipient_delta` from its own RNG and requires
+    // digest equality with the proposal (rebuild-equality), which is what refuses a divergent
+    // bundle. Do not "fix" this to fresh randomness without also reworking that gate.
     let mut rng = StdRng::seed_from_u64(0xDE_0517 ^ channel_id_env() as u64);
     let (recipient_delta, _) = encrypt_amount(&mut rng, recipient_regev_pk, amount)
         .unwrap_or_else(|e| die(format!("encrypt deposit amount: {e:?}")));
@@ -3330,16 +4450,25 @@ fn cmd_cosign_l1_deposit_import(args: &[String]) {
         }
     }
 
+    // TM-7 (two-step gate): verifies the fund-import witness AND rebuilds the canonical bundle
+    // step (rebuild-equality) from this co-signer's OWN deterministic `recipient_delta`, so a
+    // divergent bundle proposal (wrong credit position / doctored amount) is refused even
+    // though this CLI also happens to be the builder.
     verify_l1_deposit_import_transition(
         &state.snapshot.state,
         &state.snapshot.record,
         &deposit,
         &fund_state,
+        &bundle_state,
         recipient_slot,
+        &recipient_delta,
     )
     .unwrap_or_else(|e| die(format!("L1 deposit import transition invalid: {e}")));
 
     state.snapshot.state = bundle_state.clone();
+    // Consume the deposit in the SAME save as the new snapshot: the credit and the ledger entry
+    // land together, so a crash cannot leave a credited-but-unconsumed deposit.
+    state.imported_deposits.insert(deposit_identity.clone());
     save_state(&state);
     write_json("channel_snapshot.json", &state.snapshot);
 
@@ -3349,8 +4478,13 @@ fn cmd_cosign_l1_deposit_import(args: &[String]) {
     });
     write_json(out_path, &result);
     println!(
-        "cosign-l1-deposit-import OK: slot {} received {} deposit import. New state_version = {}.",
-        recipient_slot, amount, bundle_state.balance_state.state_version
+        "cosign-l1-deposit-import OK: slot {} received {} deposit import (base token_index {}, \
+         L1 deposit {}). New state_version = {}.",
+        recipient_slot,
+        amount,
+        token_index,
+        deposit_identity,
+        bundle_state.balance_state.state_version
     );
 }
 
@@ -3434,9 +4568,13 @@ fn cmd_pw_submit(args: &[String]) {
         let hash = keccak_hash::keccak(&data);
         Bytes32::from_bytes_be(hash.as_bytes()).expect("nullifier from keccak")
     };
+    // Multitoken §N: the burned BASE token_index recorded by cosign-burn-send (default 0 for
+    // legacy last_burn.json files). Bound into the IMPW authDigest, so the L1 leg pays the
+    // burned asset (withdrawNative for 0, withdrawERC20 otherwise).
+    let burn_token_index: u32 = burn["token_index"].as_u64().unwrap_or(0) as u32;
     let withdrawal = Withdrawal {
         recipient: withdrawal_addr,
-        token_index: 0,
+        token_index: burn_token_index,
         amount: U256::from(burn_amount),
         nullifier,
         aux_data: tx_leaf,
@@ -3445,7 +4583,7 @@ fn cmd_pw_submit(args: &[String]) {
     eprintln!("pw-submit: authDigest = {}", auth_digest.to_hex());
 
     let post_fund = {
-        let limbs = head.channel_fund.amount.to_u32_vec();
+        let limbs = head.channel_fund.amounts[0].to_u32_vec();
         limbs[7] as u64 | ((limbs[6] as u64) << 32)
     };
     let submit = serde_json::json!({
@@ -3467,7 +4605,7 @@ fn cmd_pw_submit(args: &[String]) {
         "final_settled_tx_acc_root": head.balance_state.settled_tx_accumulator_root.to_hex(),
         "prev_settled_tx_chain": pre_burn_chain.to_hex(),
         "withdrawal_recipient": format!("0x{}", hex::encode(withdrawal_addr.to_bytes_be())),
-        "withdrawal_token_index": 0u32,
+        "withdrawal_token_index": burn_token_index,
         "withdrawal_amount": burn_amount,
         "withdrawal_nullifier": nullifier.to_hex(),
         "withdrawal_aux_data": tx_leaf.to_hex(),
@@ -3533,7 +4671,7 @@ fn cmd_pw_submit(args: &[String]) {
             "manager": manager,
             "verifier": verifier,
             "withdrawal_recipient": format!("0x{}", hex::encode(withdrawal_addr.to_bytes_be())),
-            "withdrawal_token_index": 0u32,
+            "withdrawal_token_index": burn_token_index,
             "withdrawal_amount": burn_amount,
             "withdrawal_nullifier": nullifier.to_hex(),
             "withdrawal_aux_data": tx_leaf.to_hex(),
@@ -3648,48 +4786,48 @@ fn cmd_pw_finalize(args: &[String]) {
     if !authorized {
         die("on-chain partialWithdrawalAuthorized returned false");
     }
-    eprintln!("pw-finalize: authorized on-chain. Claiming ETH…");
+    eprintln!("pw-finalize: authorization recorded on-chain.");
 
-    let recipient = auth["withdrawal_recipient"]
-        .as_str()
-        .unwrap_or_else(|| die("pw_auth.json missing withdrawal_recipient"));
-    let token_index = auth["withdrawal_token_index"].as_u64().unwrap_or(0);
-    let amount = auth["withdrawal_amount"]
-        .as_u64()
-        .unwrap_or_else(|| die("pw_auth.json missing withdrawal_amount"));
-    let nullifier = auth["withdrawal_nullifier"]
-        .as_str()
-        .unwrap_or_else(|| die("pw_auth.json missing withdrawal_nullifier"));
-    let aux_data = auth["withdrawal_aux_data"]
-        .as_str()
-        .unwrap_or_else(|| die("pw_auth.json missing withdrawal_aux_data"));
-
-    let sig = format!(
-        "claimAuthorizedWithdrawal(({},{},{},{},{}))",
-        "address", "uint32", "uint256", "bytes32", "bytes32"
+    // FAIL CLOSED (2026-07-28, doc/tasks/pw-auth-threat-model.md).
+    //
+    // This used to call `IntmaxRollup.claimAuthorizedWithdrawal(...)`, which paid native ETH out of
+    // the GLOBAL escrow against the authorization ALONE — no withdrawal proof. Because
+    // `submitPartialWithdrawalIntent` binds only `auxData` to the cosigned state, `amount` and
+    // `recipient` were caller-chosen, so one valid close proof for one's OWN channel was enough to
+    // drain every channel's ETH. That function has been REMOVED.
+    //
+    // The replacement is `withdrawNative` / `withdrawERC20`, where the leaf comes from a VERIFIED
+    // withdrawal proof and this authorization is only a second factor. Building that proof is
+    // `cmd_partial_withdraw`, which was never implemented (doc/tasks/todo.md:90).
+    //
+    // DELIBERATELY NOT rerouted to `withdrawNative` here: without the base-layer proof that call
+    // would fail with an opaque proof-binding error and hide the real cause. Two known blockers
+    // beyond the missing command: this CLI invents `nullifier = keccak(tx_leaf ‖ pre_burn_chain)`
+    // (see `cmd_pw_submit`) whereas a provable leaf must use `settled_transfer.nullifier()`; and
+    // base `Transfer.amount == the channel-layer debit` is still only a co-signer assumption
+    // (audit F-AUX-1), not an in-circuit equality.
+    let recipient = auth["withdrawal_recipient"].as_str().unwrap_or("<unknown>");
+    let amount = auth["withdrawal_amount"].as_u64().unwrap_or(0);
+    eprintln!(
+        "\n\
+         pw-finalize: STOPPING BEFORE PAYOUT — the partial-withdrawal payout is not available.\n\
+         \n\
+         The authorization for {recipient} ({amount} wei) IS finalized on-chain; nothing was lost.\n\
+         What is missing is the payout leg:\n\
+         \n\
+           • `IntmaxRollup.claimAuthorizedWithdrawal` was REMOVED (2026-07-28). It paid the GLOBAL\n\
+             ETH escrow against this authorization alone, with NO withdrawal proof. Since the\n\
+             settlement manager binds only `auxData`, the amount and recipient were caller-chosen —\n\
+             one valid close proof for your own channel could drain every channel's ETH.\n\
+             See doc/tasks/pw-auth-threat-model.md.\n\
+           • Payout must now go through `withdrawNative` / `withdrawERC20`, which require a VERIFIED\n\
+             base-layer withdrawal proof whose leaf commits (recipient, tokenIndex, amount,\n\
+             nullifier, auxData). This authorization is then only a second factor on that leaf.\n\
+           • The command that builds that proof — `cmd_partial_withdraw` — is NOT IMPLEMENTED.\n\
+             Tracked as the unchecked box at doc/tasks/todo.md:90.\n\
+         \n\
+         Until it lands, partial withdrawal is intentionally non-functional end to end. This is a\n\
+         deliberate fail-closed state, not a bug in this run."
     );
-    let arg = format!(
-        "({},{},{},{},{})",
-        recipient, token_index, amount, nullifier, aux_data
-    );
-
-    let before = cast(&["balance", recipient, "--rpc-url", &rpc]);
-    cast(&[
-        "send",
-        rollup,
-        &sig,
-        &arg,
-        "--private-key",
-        &deploy_key,
-        "--rpc-url",
-        &rpc,
-    ]);
-    let after = cast(&["balance", recipient, "--rpc-url", &rpc]);
-    println!(
-        "pw-finalize OK: {} claimed {} wei. Balance: {} → {}",
-        recipient,
-        amount,
-        before.trim(),
-        after.trim()
-    );
+    exit(1);
 }

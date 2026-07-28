@@ -232,14 +232,14 @@ fn genesis_state(
         close_freeze_nonce: 0,
         channel_fund: ChannelFund {
             channel_id: record.channel_id,
-            amount: U256::from(fund_amount),
+            amounts: ChannelFund::single_token_amounts(U256::from(fund_amount)),
             intmax_state_root: bytes32_word(200 + fund_amount),
         },
         balance_state: BalanceState {
             channel_id: record.channel_id,
             member_count: E2E_ACTIVE as u8,
             delegate_count: 0,
-            enc_balances: BalanceState::pad_enc_balances(&[ct0, ct1, ct2]),
+            enc_balances: BalanceState::pad_enc_balances_token0(&[ct0, ct1, ct2]),
             regev_pk_digests: BalanceState::pad_regev_pk_digests(&[]),
             // B-1b: nonzero per-active-slot exit addresses (validate() rejects zero actives);
             // carried UNCHANGED by every later state in this flow.
@@ -256,7 +256,9 @@ fn genesis_state(
             settled_tx_chain: Bytes32::default(),
             settled_tx_accumulator_root: Bytes32::default(),
             state_version: 0,
-            pending_adds: BalanceState::pad_pending_adds(&[0; E2E_ACTIVE]),
+            pending_adds: BalanceState::pad_pending_adds_token0(&[0; E2E_ACTIVE]),
+            token_registry: BalanceState::single_token_registry(0),
+            token_count: 1,
         },
         h2_tag: Bytes32::default(),
         shared_native_nullifier_root: nullifier_root,
@@ -351,12 +353,15 @@ fn build_flow() -> FlowFixture {
     let enc_amount = encrypt_amount(&mut rng, &a_pks[1], IN_CHANNEL_AMOUNT).unwrap();
     let alice_after_tx =
         encrypt_amount(&mut rng, &a_pks[0], A_GENESIS[0] - IN_CHANNEL_AMOUNT).unwrap();
-    let bob_after = add_ciphertexts(&a0.balance_state.enc_balances[1], &enc_amount.0).unwrap();
+    let bob_after = add_ciphertexts(&a0.balance_state.enc_balances[1][0], &enc_amount.0).unwrap();
     let e1_proof = prove_channel_tx(
         LEVEL,
         &a_pks[0],
         &a_pks[1],
-        (&a0.balance_state.enc_balances[0], &a_genesis_witnesses[0]),
+        (
+            &a0.balance_state.enc_balances[0][0],
+            &a_genesis_witnesses[0],
+        ),
         (&enc_amount.0, &enc_amount.1),
         (&alice_after_tx.0, &alice_after_tx.1),
     )
@@ -368,10 +373,10 @@ fn build_flow() -> FlowFixture {
             channel_id: a_id,
             member_count: E2E_ACTIVE as u8,
             delegate_count: 0,
-            enc_balances: BalanceState::pad_enc_balances(&[
+            enc_balances: BalanceState::pad_enc_balances_token0(&[
                 alice_after_tx.0.clone(),
                 bob_after,
-                a0.balance_state.enc_balances[2].clone(),
+                a0.balance_state.enc_balances[2][0].clone(),
             ]),
             regev_pk_digests: BalanceState::pad_regev_pk_digests(&[]),
             // B-1b: recipients are carried UNCHANGED across a transition.
@@ -379,7 +384,9 @@ fn build_flow() -> FlowFixture {
             settled_tx_chain: a0.balance_state.settled_tx_chain,
             settled_tx_accumulator_root: Bytes32::default(),
             state_version: 1,
-            pending_adds: BalanceState::pad_pending_adds(&[0, 1, 0]),
+            pending_adds: BalanceState::pad_pending_adds_token0(&[0, 1, 0]),
+            token_registry: BalanceState::single_token_registry(0),
+            token_count: 1,
         },
         prev_digest: a0.digest,
         ..a0.clone()
@@ -387,6 +394,7 @@ fn build_flow() -> FlowFixture {
     .with_computed_digest();
 
     let channel_tx = ChannelTx {
+        token_slot: 0,
         recipient_pk_g: user(a_id, 11),
         enc_amount: enc_amount.0.clone(),
         nonce: bytes32_word(777),
@@ -426,6 +434,9 @@ fn build_flow() -> FlowFixture {
         (&sender_delta.0, &sender_delta.1),
         (&receiver_delta.0, &receiver_delta.1),
         INTER_CHANNEL_AMOUNT,
+        // Base token_index (TM-6): the genesis token — both channels' registries map it to
+        // local slot 0.
+        0,
     )
     .unwrap();
 
@@ -442,17 +453,19 @@ fn build_flow() -> FlowFixture {
         epoch: 3,
         small_block_number: 1,
         channel_fund: ChannelFund {
-            amount: a1.channel_fund.amount - u256_from_u64(INTER_CHANNEL_AMOUNT),
+            amounts: ChannelFund::single_token_amounts(
+                a1.channel_fund.amounts[0] - u256_from_u64(INTER_CHANNEL_AMOUNT),
+            ),
             ..a1.channel_fund.clone()
         },
         balance_state: BalanceState {
             channel_id: a_id,
             member_count: E2E_ACTIVE as u8,
             delegate_count: 0,
-            enc_balances: BalanceState::pad_enc_balances(&[
+            enc_balances: BalanceState::pad_enc_balances_token0(&[
                 alice_after_send.0.clone(),
-                a1.balance_state.enc_balances[1].clone(),
-                a1.balance_state.enc_balances[2].clone(),
+                a1.balance_state.enc_balances[1][0].clone(),
+                a1.balance_state.enc_balances[2][0].clone(),
             ]),
             regev_pk_digests: BalanceState::pad_regev_pk_digests(&[]),
             // B-1b: recipients are carried UNCHANGED across a transition.
@@ -460,7 +473,9 @@ fn build_flow() -> FlowFixture {
             settled_tx_chain: settled_tx_chain_push(a1.balance_state.settled_tx_chain, tx_leaf),
             settled_tx_accumulator_root: Bytes32::default(),
             state_version: 2,
-            pending_adds: a1.balance_state.pending_adds,
+            pending_adds: a1.balance_state.pending_adds.clone(),
+            token_registry: BalanceState::single_token_registry(0),
+            token_count: 1,
         },
         // detail2 §C-2: the send version is finalized with H2 = own small block tx_tree_root.
         h2_tag: tx_tree_root,
@@ -495,9 +510,18 @@ fn build_flow() -> FlowFixture {
         sender_delta_ct: sender_delta.0.clone(),
         source_channel_id: a_id,
         destination_channel_id: b_id,
+        token_index: 0,
         source_pk_g: user(a_id, 10),
         seal: bytes32_word(501),
-        tx_hash: bytes32_word(502),
+        // TM-16: the REAL token-bearing tx_hash (the witnesses now refuse a descriptor whose
+        // carried hash is not the recompute over its own fields).
+        tx_hash: crate::common::channel::inter_channel_tx_hash(
+            a_id,
+            b_id,
+            0,
+            tx_tree_root,
+            tx_leaf,
+        ),
         intmax_transfer_commitment: bytes32_word(503),
         recipient_memo: vec![1, 2, 3],
         receiver_deltas: vec![ReceiverBalanceDelta {
@@ -523,7 +547,9 @@ fn build_flow() -> FlowFixture {
         epoch: 2,
         small_block_number: 1,
         channel_fund: ChannelFund {
-            amount: b0.channel_fund.amount + u256_from_u64(INTER_CHANNEL_AMOUNT),
+            amounts: ChannelFund::single_token_amounts(
+                b0.channel_fund.amounts[0] + u256_from_u64(INTER_CHANNEL_AMOUNT),
+            ),
             ..b0.channel_fund.clone()
         },
         balance_state: BalanceState {
@@ -552,21 +578,24 @@ fn build_flow() -> FlowFixture {
     };
 
     // -- step (d): receiver bundle apply on channel B (abstract2 §3.4 flowReceive3) -----------
-    let dave_after = add_ciphertexts(&b1.balance_state.enc_balances[0], &receiver_delta.0).unwrap();
+    let dave_after =
+        add_ciphertexts(&b1.balance_state.enc_balances[0][0], &receiver_delta.0).unwrap();
     let b2 = ChannelState {
         epoch: 3,
         balance_state: BalanceState {
-            enc_balances: BalanceState::pad_enc_balances(&[
+            enc_balances: BalanceState::pad_enc_balances_token0(&[
                 dave_after.clone(),
-                b1.balance_state.enc_balances[1].clone(),
-                b1.balance_state.enc_balances[2].clone(),
+                b1.balance_state.enc_balances[1][0].clone(),
+                b1.balance_state.enc_balances[2][0].clone(),
             ]),
             // The receiver chains the SAME tx leaf the sender chained (F3-A multi-layer defense).
             regev_pk_digests: BalanceState::pad_regev_pk_digests(&[]),
             settled_tx_chain: settled_tx_chain_push(b1.balance_state.settled_tx_chain, tx_leaf),
             settled_tx_accumulator_root: Bytes32::default(),
             state_version: 2,
-            pending_adds: BalanceState::pad_pending_adds(&[1, 0, 0]),
+            pending_adds: BalanceState::pad_pending_adds_token0(&[1, 0, 0]),
+            token_registry: BalanceState::single_token_registry(0),
+            token_count: 1,
             ..b1.balance_state.clone()
         },
         unallocated_confirmed_incoming: U256::zero(),
@@ -596,13 +625,15 @@ fn build_flow() -> FlowFixture {
     let b3 = ChannelState {
         epoch: 4,
         balance_state: BalanceState {
-            enc_balances: BalanceState::pad_enc_balances(&[
+            enc_balances: BalanceState::pad_enc_balances_token0(&[
                 dave_refreshed,
-                b2.balance_state.enc_balances[1].clone(),
-                b2.balance_state.enc_balances[2].clone(),
+                b2.balance_state.enc_balances[1][0].clone(),
+                b2.balance_state.enc_balances[2][0].clone(),
             ]),
             state_version: 3,
-            pending_adds: BalanceState::pad_pending_adds(&[0, 0, 0]),
+            pending_adds: BalanceState::pad_pending_adds_token0(&[0, 0, 0]),
+            token_registry: BalanceState::single_token_registry(0),
+            token_count: 1,
             ..b2.balance_state.clone()
         },
         prev_digest: b2.digest,
@@ -615,6 +646,7 @@ fn build_flow() -> FlowFixture {
         prev_state: b2,
         next_state: b3,
         member_index: 0,
+        token_slot: 0,
         refresh_proof: state_update_envelope(refresh_proof),
     };
 
@@ -640,7 +672,7 @@ fn close_withdrawal_for(state: &ChannelState, burn_word: u32) -> CloseWithdrawal
         final_balance_state_h1: state.balance_state.h1(),
         intmax_state_root: state.channel_fund.intmax_state_root,
         burn_tx_hash: bytes32_word(burn_word),
-        burn_amount: state.channel_fund.amount,
+        burn_amount: state.channel_fund.amounts[0],
         zkp: vec![1, 2, 3],
     }
 }
@@ -649,9 +681,14 @@ fn close_withdrawal_for(state: &ChannelState, burn_word: u32) -> CloseWithdrawal
 // Happy-path E2E
 // ---------------------------------------------------------------------------
 
-/// Full v2 life cycle (abstract2 §3 flows a–h): every state transition is accepted by the
-/// corresponding witness verifier with the REAL Regev STARKs, the chain/version/H2 bindings
-/// advance exactly as specified, and the close/claim layer reproduces them on L1-facing digests.
+/// Full v2 life cycle (abstract2 §3 flows a–h), NATIVE layers: every state transition is
+/// accepted by the corresponding witness verifier with the REAL Regev STARKs, the
+/// chain/version/H2 bindings advance exactly as specified, and the close/claim layer reproduces
+/// them on L1-facing digests. These flows all run on the multi-token v2 state layout.
+///
+/// The FULL CLOSE CIRCUIT proof over the same fixture lives in the split-out
+/// `channel_full_close_circuit_proof_e2e` below (security-review MINOR 5), re-enabled with the
+/// multitoken Phase 2 gadget migration.
 #[test]
 #[cfg_attr(debug_assertions, ignore = "run with --release")]
 fn channel_native_regev_full_flow_e2e() {
@@ -675,7 +712,10 @@ fn channel_native_regev_full_flow_e2e() {
         "in-channel transfers never advance the settled-tx chain"
     );
     assert_eq!(
-        f.in_channel.next_state.balance_state.pending_adds[..E2E_ACTIVE],
+        f.in_channel.next_state.balance_state.pending_adds[..E2E_ACTIVE]
+            .iter()
+            .map(|row| row[0])
+            .collect::<Vec<_>>(),
         [0, 1, 0]
     );
     // …then as the recipient (decryption check, abstract2 §3.1).
@@ -686,7 +726,7 @@ fn channel_native_regev_full_flow_e2e() {
     assert_eq!(
         decrypt_amount(
             &f.a_sks[1],
-            &f.in_channel.next_state.balance_state.enc_balances[1]
+            &f.in_channel.next_state.balance_state.enc_balances[1][0]
         )
         .unwrap(),
         A_GENESIS[1] + IN_CHANNEL_AMOUNT,
@@ -714,7 +754,7 @@ fn channel_native_regev_full_flow_e2e() {
     assert_eq!(
         decrypt_amount(
             &f.a_sks[0],
-            &f.send.next_state.balance_state.enc_balances[0]
+            &f.send.next_state.balance_state.enc_balances[0][0]
         )
         .unwrap(),
         A_GENESIS[0] - IN_CHANNEL_AMOUNT - INTER_CHANNEL_AMOUNT,
@@ -743,7 +783,10 @@ fn channel_native_regev_full_flow_e2e() {
         "the receiver chains the SAME tx leaf the sender chained"
     );
     assert_eq!(
-        f.bundle.next_state.balance_state.pending_adds[..E2E_ACTIVE],
+        f.bundle.next_state.balance_state.pending_adds[..E2E_ACTIVE]
+            .iter()
+            .map(|row| row[0])
+            .collect::<Vec<_>>(),
         [1, 0, 0]
     );
     let mut as_dave = f.bundle.clone();
@@ -753,7 +796,7 @@ fn channel_native_regev_full_flow_e2e() {
     assert_eq!(
         decrypt_amount(
             &f.b_sks[0],
-            &f.bundle.next_state.balance_state.enc_balances[0]
+            &f.bundle.next_state.balance_state.enc_balances[0][0]
         )
         .unwrap(),
         B_GENESIS[0] + INTER_CHANNEL_AMOUNT,
@@ -769,12 +812,15 @@ fn channel_native_regev_full_flow_e2e() {
         "a refresh never advances the settled-tx chain"
     );
     assert_eq!(
-        f.refresh.next_state.balance_state.pending_adds[..E2E_ACTIVE],
+        f.refresh.next_state.balance_state.pending_adds[..E2E_ACTIVE]
+            .iter()
+            .map(|row| row[0])
+            .collect::<Vec<_>>(),
         [0, 0, 0]
     );
     let final_state = f.refresh.next_state.clone();
     assert_eq!(
-        decrypt_amount(&f.b_sks[0], &final_state.balance_state.enc_balances[0]).unwrap(),
+        decrypt_amount(&f.b_sks[0], &final_state.balance_state.enc_balances[0][0]).unwrap(),
         B_GENESIS[0] + INTER_CHANNEL_AMOUNT,
         "the refreshed slot still decrypts to the same hidden balance"
     );
@@ -798,43 +844,6 @@ fn channel_native_regev_full_flow_e2e() {
             .unwrap()
             .signing_digest()
     );
-    // The FULL P7 close circuit (detail2 §F-3, D4) is proven for channel A at a1 — the
-    // post-in-channel state. Its settled_tx_chain is still genesis (= 0x00…00; in-channel
-    // transfers never advance the chain), so the REAL initial balance proof for channel 5
-    // carries the matching `settled_tx_chain` / `channel_id` public inputs that the circuit
-    // constrains against the close PIs. On top of the IMCH/IMCL/IMCI digest chain the circuit
-    // recomputes H1 from the witnessed ciphertext digests and verifies 3 REAL SPHINCS+ member
-    // signatures over the recomputed IMCH digest.
-    let a1 = f.in_channel.next_state.clone();
-    let a1_close_tx = close_withdrawal_for(&a1, 721);
-    let a1_close_intent = CloseIntent::new(1, &a1, &a1_close_tx, 4).unwrap();
-    assert_eq!(a1_close_intent.final_settled_tx_chain, Bytes32::default());
-    let close_fx = close_fixture::fixture();
-    let t_balance = std::time::Instant::now();
-    let initial_balance_proof = close_fx
-        .balance_processor
-        .prove_initial(
-            a1.channel_id,
-            crate::common::salt::Salt::rand(&mut rand::thread_rng()),
-        )
-        .unwrap();
-    println!("[e2e] initial balance proof: {:?}", t_balance.elapsed());
-    let (a1_member_auth, a1_agg_proof) = close_fixture::member_auth_for_digest(a1.digest, 0xe2ec);
-    let close_witness: ChannelCloseFullWitness<F, C, D> = ChannelCloseFullWitness {
-        close: ChannelCloseWitness {
-            final_channel_state: a1.clone(),
-            close_tx: a1_close_tx,
-            close_intent: a1_close_intent,
-        },
-        final_balance_proof: initial_balance_proof,
-        member_auth: a1_member_auth,
-        agg_proof: a1_agg_proof,
-    };
-    let t_close = std::time::Instant::now();
-    let close_proof = close_fx.close_circuit.prove(&close_witness).unwrap();
-    println!("[e2e] full close proof: {:?}", t_close.elapsed());
-    close_fx.close_circuit.data.verify(close_proof).unwrap();
-
     // (g) WithdrawalClaim for dave: the E-3 decryption AIR opens his final slot publicly.
     let final_amount = B_GENESIS[0] + INTER_CHANNEL_AMOUNT;
     let dave_member = ChannelMember {
@@ -845,10 +854,11 @@ fn channel_native_regev_full_flow_e2e() {
         // address bound in his own signed slot-0 leaf, not an arbitrary one.
         l1_withdrawal_recipient: final_state.balance_state.recipients[0],
     };
-    let dave_slot = final_state.balance_state.enc_balances[0].clone();
+    let dave_slot = final_state.balance_state.enc_balances[0][0].clone();
     let claim_proof =
         prove_withdraw_claim(LEVEL, &f.b_pks[0], &f.b_sks[0], &dave_slot, final_amount).unwrap();
     let withdrawal_claim = WithdrawalClaim {
+        token_slot: 0,
         close_intent_digest: close_intent.signing_digest(),
         member_pk_g: dave_member.pk_g,
         l1_recipient: dave_member.l1_withdrawal_recipient,
@@ -856,6 +866,7 @@ fn channel_native_regev_full_flow_e2e() {
         withdrawal_nullifier: WithdrawalClaim::derive_nullifier(
             close_intent.signing_digest(),
             Bytes32::from(f.b_pks[0].poseidon_digest()),
+            0,
         ),
         claim_proof,
     };
@@ -940,6 +951,51 @@ fn channel_native_regev_full_flow_e2e() {
     assert_eq!(pis.amount, INTER_CHANNEL_AMOUNT);
 }
 
+/// The FULL P7 close circuit (detail2 §F-3, D4) proven for channel A at a1 — the
+/// post-in-channel state of the shared flow fixture. Its settled_tx_chain is still genesis
+/// (= 0x00…00; in-channel transfers never advance the chain), so the REAL initial balance proof
+/// carries the matching `settled_tx_chain` / `channel_id` public inputs that the circuit
+/// constrains against the close PIs. On top of the IMCH/IMCL/IMCI digest chain the circuit
+/// recomputes H1 from the witnessed ciphertext digests and verifies 3 REAL SPHINCS+ member
+/// signatures over the recomputed IMCH digest.
+// Multitoken Phase 2: the close circuit's h1 gadget now computes the v2 header/leaf, so this
+// full close-circuit proof runs against the v2-signed flow state (ignore gate lifted). The
+// native steps (a)-(h) run in `channel_native_regev_full_flow_e2e` above (MINOR 5 split).
+#[test]
+#[cfg_attr(debug_assertions, ignore = "run with --release")]
+fn channel_full_close_circuit_proof_e2e() {
+    let f = flow();
+    let a1 = f.in_channel.next_state.clone();
+    let a1_close_tx = close_withdrawal_for(&a1, 721);
+    let a1_close_intent = CloseIntent::new(1, &a1, &a1_close_tx, 4).unwrap();
+    assert_eq!(a1_close_intent.final_settled_tx_chain, Bytes32::default());
+    let close_fx = close_fixture::fixture();
+    let t_balance = std::time::Instant::now();
+    let initial_balance_proof = close_fx
+        .balance_processor
+        .prove_initial(
+            a1.channel_id,
+            crate::common::salt::Salt::rand(&mut rand::thread_rng()),
+        )
+        .unwrap();
+    println!("[e2e] initial balance proof: {:?}", t_balance.elapsed());
+    let (a1_member_auth, a1_agg_proof) = close_fixture::member_auth_for_digest(a1.digest, 0xe2ec);
+    let close_witness: ChannelCloseFullWitness<F, C, D> = ChannelCloseFullWitness {
+        close: ChannelCloseWitness {
+            final_channel_state: a1.clone(),
+            close_tx: a1_close_tx,
+            close_intent: a1_close_intent,
+        },
+        final_balance_proof: initial_balance_proof,
+        member_auth: a1_member_auth,
+        agg_proof: a1_agg_proof,
+    };
+    let t_close = std::time::Instant::now();
+    let close_proof = close_fx.close_circuit.prove(&close_witness).unwrap();
+    println!("[e2e] full close proof: {:?}", t_close.elapsed());
+    close_fx.close_circuit.data.verify(close_proof).unwrap();
+}
+
 // ---------------------------------------------------------------------------
 // Negative suite — every test states the security property it demonstrates
 // ---------------------------------------------------------------------------
@@ -964,15 +1020,168 @@ fn in_channel_tx_without_zkp_is_rejected() {
 fn bundle_apply_rejects_tampered_recipient_slot() {
     let mut witness = flow().bundle.clone();
     let double_credit = add_ciphertexts(
-        &witness.next_state.balance_state.enc_balances[0],
+        &witness.next_state.balance_state.enc_balances[0][0],
         &witness.inter_channel_tx.receiver_deltas[0].amount,
     )
     .unwrap();
-    witness.next_state.balance_state.enc_balances[0] = double_credit;
+    witness.next_state.balance_state.enc_balances[0][0] = double_credit;
     witness.next_state = witness.next_state.clone().with_computed_digest();
     assert!(matches!(
         witness.verify(&VERIFIER),
         Err(ChannelStateUpdateError::InvalidCiphertextTransition(_))
+    ));
+}
+
+/// TM-6 (multitoken Phase 2b, fail-closed on BOTH sides): a C2C descriptor whose base
+/// `token_index` is NOT in the verifying channel's active registry is rejected by the SOURCE
+/// send witness, the DESTINATION fund-import witness, and the DESTINATION bundle-apply witness.
+/// (The signed IMI2 digest binds `token_index`, so a relay cannot doctor it either — this test
+/// attacks the resolution itself.)
+#[test]
+#[cfg_attr(debug_assertions, ignore = "run with --release")]
+fn c2c_rejects_unregistered_token_index_on_both_sides() {
+    // Source side.
+    let mut witness = flow().send.clone();
+    witness.inter_channel_tx.token_index = 999;
+    assert!(matches!(
+        witness.verify(&StructuralTransportVerifier, &VERIFIER),
+        Err(ChannelStateUpdateError::InvalidAmountRelation(_))
+    ));
+    // Destination fund import.
+    let mut witness = flow().import.clone();
+    witness.inter_channel_tx.token_index = 999;
+    assert!(matches!(
+        witness.verify(&StructuralTransportVerifier),
+        Err(ChannelStateUpdateError::InvalidAmountRelation(_))
+    ));
+    // Destination bundle apply.
+    let mut witness = flow().bundle.clone();
+    witness.inter_channel_tx.token_index = 999;
+    assert!(matches!(
+        witness.verify(&VERIFIER),
+        Err(ChannelStateUpdateError::InvalidAmountRelation(_))
+    ));
+}
+
+/// TM-6 (cross-token credit): on a TWO-token destination channel, a bundle apply whose next
+/// state lands the credit at a DIFFERENT local position than the one the destination registry
+/// resolves the descriptor's token_index to is rejected (the resolved position's recomputation
+/// fails, and the wrong position trips the "others unchanged" leg).
+#[test]
+#[cfg_attr(debug_assertions, ignore = "run with --release")]
+fn bundle_apply_rejects_credit_at_wrong_local_position() {
+    let mut witness = flow().bundle.clone();
+    // Register a second token on BOTH sides of the transition (prev and next agree, so the
+    // registry-immutability equality holds and validate() stays clean).
+    for state in [&mut witness.prev_state, &mut witness.next_state] {
+        state.balance_state.token_registry[1] = 55;
+        state.balance_state.token_count = 2;
+    }
+    witness.prev_state = witness.prev_state.clone().with_computed_digest();
+    witness.next_state.prev_digest = witness.prev_state.digest;
+    // Move the credit from the resolved position 0 to position 1: revert position 0 to prev and
+    // install the homomorphic sum at position 1 instead.
+    let delta = witness.inter_channel_tx.receiver_deltas[0].amount.clone();
+    witness.next_state.balance_state.enc_balances[0][0] =
+        witness.prev_state.balance_state.enc_balances[0][0].clone();
+    witness.next_state.balance_state.enc_balances[0][1] =
+        add_ciphertexts(&witness.prev_state.balance_state.enc_balances[0][1], &delta).unwrap();
+    witness.next_state.balance_state.pending_adds[0][0] = 0;
+    witness.next_state.balance_state.pending_adds[0][1] = 1;
+    witness.next_state = witness.next_state.clone().with_computed_digest();
+    assert!(matches!(
+        witness.verify(&VERIFIER),
+        Err(ChannelStateUpdateError::InvalidCiphertextTransition(_))
+    ));
+}
+
+/// IMCK structural re-check (multitoken Phase 2b, Phase 1 carried obligation): ONE C2C
+/// descriptor can never credit TWO token positions of the recipient row — the type carries one
+/// `token_index` and the bundle-apply witness proves every position except the resolved one
+/// bit-identical. This is what keeps the unversioned per-tx IMCK post-close nullifier sound
+/// (`PostCloseIncomingClaim::derive_shared_native_nullifier`).
+#[test]
+#[cfg_attr(debug_assertions, ignore = "run with --release")]
+fn receiver_bundle_apply_rejects_second_token_position_credit() {
+    let mut witness = flow().bundle.clone();
+    for state in [&mut witness.prev_state, &mut witness.next_state] {
+        state.balance_state.token_registry[1] = 55;
+        state.balance_state.token_count = 2;
+    }
+    witness.prev_state = witness.prev_state.clone().with_computed_digest();
+    witness.next_state.prev_digest = witness.prev_state.digest;
+    // Keep the VALID credit at the resolved position 0, and ALSO credit position 1.
+    let delta = witness.inter_channel_tx.receiver_deltas[0].amount.clone();
+    witness.next_state.balance_state.enc_balances[0][1] =
+        add_ciphertexts(&witness.prev_state.balance_state.enc_balances[0][1], &delta).unwrap();
+    witness.next_state = witness.next_state.clone().with_computed_digest();
+    assert!(matches!(
+        witness.verify(&VERIFIER),
+        Err(ChannelStateUpdateError::InvalidCiphertextTransition(_))
+    ));
+}
+
+/// TM-16 (obligations 1/2/5, multitoken Phase 5a): a token-RELABELED descriptor — the carried
+/// `tx_hash` was anchored under token 0 but the descriptor's `token_index` says a DIFFERENT
+/// (registered!) token 55 — is rejected by the source send witness AND both destination
+/// witnesses via the token-bearing tx_hash recompute. Registry resolution alone would ACCEPT it
+/// (55 is registered), so this isolates the TM-16 binding: the absorbed accumulator leaf can
+/// never commit a different token than the one the gates resolved/credited. This is also the
+/// gate leg of the cross-token double-credit defense: a SECOND, fully-consistent token-55
+/// variant of the same debit (token-55 anchored hash) shares the token-free
+/// `InterChannelTx::replay_identity` with the first credit, so the CLI/cosigner consumed ledger
+/// (keyed on that identity) refuses it as a replay.
+#[test]
+#[cfg_attr(debug_assertions, ignore = "run with --release")]
+fn c2c_rejects_token_relabeled_descriptor_on_all_gates() {
+    // Source side: register 55 on the SOURCE channel so resolution succeeds, then relabel.
+    let mut witness = flow().send.clone();
+    for state in [&mut witness.prev_state, &mut witness.next_state] {
+        state.balance_state.token_registry[1] = 55;
+        state.balance_state.token_count = 2;
+    }
+    witness.prev_state = witness.prev_state.clone().with_computed_digest();
+    witness.next_state.prev_digest = witness.prev_state.digest;
+    witness.next_state = witness.next_state.clone().with_computed_digest();
+    // Keep the §C-7 structural-atomicity binding intact (state_commitment_root == next h1), so
+    // the failure isolates to the TM-16 tx_hash recompute.
+    witness
+        .inter_channel_tx
+        .signed_small_block
+        .message
+        .state_commitment_root = witness.next_state.balance_state.h1();
+    witness.inter_channel_tx.token_index = 55;
+    assert!(matches!(
+        witness.verify(&StructuralTransportVerifier, &VERIFIER),
+        Err(ChannelStateUpdateError::InvalidSettledTxChain(_))
+    ));
+    // Destination fund import.
+    let mut witness = flow().import.clone();
+    for state in [&mut witness.prev_state, &mut witness.next_state] {
+        state.balance_state.token_registry[1] = 55;
+        state.balance_state.token_count = 2;
+    }
+    witness.prev_state = witness.prev_state.clone().with_computed_digest();
+    witness.next_state.prev_digest = witness.prev_state.digest;
+    witness.next_state = witness.next_state.clone().with_computed_digest();
+    witness.inter_channel_tx.token_index = 55;
+    assert!(matches!(
+        witness.verify(&StructuralTransportVerifier),
+        Err(ChannelStateUpdateError::InvalidSettledTxChain(_))
+    ));
+    // Destination bundle apply.
+    let mut witness = flow().bundle.clone();
+    for state in [&mut witness.prev_state, &mut witness.next_state] {
+        state.balance_state.token_registry[1] = 55;
+        state.balance_state.token_count = 2;
+    }
+    witness.prev_state = witness.prev_state.clone().with_computed_digest();
+    witness.next_state.prev_digest = witness.prev_state.digest;
+    witness.next_state = witness.next_state.clone().with_computed_digest();
+    witness.inter_channel_tx.token_index = 55;
+    assert!(matches!(
+        witness.verify(&VERIFIER),
+        Err(ChannelStateUpdateError::InvalidSettledTxChain(_))
     ));
 }
 
@@ -1046,10 +1255,10 @@ fn inter_channel_send_rejects_version_skip() {
 #[cfg_attr(debug_assertions, ignore = "run with --release")]
 fn bundle_apply_rejects_pending_adds_over_budget() {
     let mut witness = flow().bundle.clone();
-    witness.prev_state.balance_state.pending_adds[0] = MAX_HOMO_ADDS_BEFORE_REFRESH;
+    witness.prev_state.balance_state.pending_adds[0][0] = MAX_HOMO_ADDS_BEFORE_REFRESH;
     witness.prev_state = witness.prev_state.clone().with_computed_digest();
     witness.next_state.prev_digest = witness.prev_state.digest;
-    witness.next_state.balance_state.pending_adds[0] = MAX_HOMO_ADDS_BEFORE_REFRESH + 1;
+    witness.next_state.balance_state.pending_adds[0][0] = MAX_HOMO_ADDS_BEFORE_REFRESH + 1;
     witness.next_state = witness.next_state.clone().with_computed_digest();
     // Either the budget gate or the balance-state validate() (counter above MAX) must fire.
     assert!(matches!(
@@ -1093,7 +1302,7 @@ fn in_channel_tx_replay_against_other_prev_state_is_rejected() {
     let mut rng = SmallRng::seed_from_u64(0xdead);
     let mut witness = fixture.in_channel.clone();
     let (other_before, _) = encrypt_amount(&mut rng, &fixture.a_pks[0], A_GENESIS[0]).unwrap();
-    witness.prev_state.balance_state.enc_balances[0] = other_before;
+    witness.prev_state.balance_state.enc_balances[0][0] = other_before;
     witness.prev_state = witness.prev_state.clone().with_computed_digest();
     witness.next_state.prev_digest = witness.prev_state.digest;
     witness.next_state = witness.next_state.clone().with_computed_digest();

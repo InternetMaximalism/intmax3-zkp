@@ -28,9 +28,9 @@ function makeSm(store) {
 }
 
 function makeRuntime(ch, deps) {
-  const { cli, api, store, log, alert, rpc, policyCfg, getPendingClose } = deps;
+  const { cli, api, store, log, alert, rpc, policyCfg, getPendingClose, tokenRegistry } = deps;
   const smW = makeSm(store);
-  const ctx = { ch, cli, api, store, log, alert, rpc, policy: policyCfg, sm: smW, getPendingClose };
+  const ctx = { ch, cli, api, store, log, alert, rpc, policy: policyCfg, sm: smW, getPendingClose, tokenRegistry };
 
   async function dispatch(event) {
     const branch = classify(event, { status: smW.status(), mode: store.get('mode') });
@@ -44,7 +44,24 @@ function makeRuntime(ch, deps) {
         case BRANCHES.SNAPSHOT_POLL: return await cosignB.publishSnapshot(event, ctx);
         case BRANCHES.CHAIN_DEPOSITED: return await depositB.handleDepositImport(event, ctx);
         case BRANCHES.CHAIN_BLOCK_FINALIZED: return await depositB.refreshAnchors(event, ctx);
-        case BRANCHES.CHAIN_OBSERVE: log.info({ event: 'CHAIN_OBSERVE', channel: ch.id, kind: event.kind, txHash: event.txHash }); return;
+        // Multi-token (§N): surface the decoded tokenIndex on observed events that carry one
+        // (WithdrawalClaimAccepted / WithdrawalClaimed / ChannelFundsPulled / TokenRegistered /
+        // Erc20Withdrawn / TokenWithdrawalClaimed), so operator reconciliation sees WHICH asset.
+        case BRANCHES.CHAIN_OBSERVE: {
+          log.info({ event: 'CHAIN_OBSERVE', channel: ch.id, kind: event.kind, tokenIndex: event.args && event.args.tokenIndex != null ? String(event.args.tokenIndex) : undefined, txHash: event.txHash });
+          // `TokenRegistered` is the on-chain half of the DISPLAY-metadata contract: it tells the
+          // held registry that a base index just became authoritative (or that our manifest is
+          // wrong about it). OBSERVATIONAL ONLY — no write path, no new entries, and it never
+          // throws (a throw here would wedge the watcher cursor). A contradiction against a
+          // VERIFIED entry is logged at error level and withdraws that entry's metadata.
+          if (event.kind === 'TokenRegistered' && tokenRegistry) {
+            tokenRegistry.observeTokenRegistered(
+              { tokenIndex: Number(event.args && event.args.tokenIndex), token: event.args && event.args.token, rollupAddress: event.address },
+              { logger: log }
+            );
+          }
+          return;
+        }
         case BRANCHES.TIMER_SETTLE_DUE: return await closeB.driveCloseStep(event, ctx);
         case BRANCHES.TIMER_PW_FINALIZE_DUE: return await closeB.drivePwFinalize(event, ctx);
         case BRANCHES.INVALID_REQUEST: return await abnormalB.rejectAndScore({ ...event, reason: event.reason || 'classified invalid' }, ctx);

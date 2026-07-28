@@ -83,7 +83,22 @@ no circuit/Solidity code was written. Findings VERIFIED against ground truth:
 
 ---
 
-# Partial Withdrawal (GAP2) — remaining work (2026-06-24)
+# Partial Withdrawal (GAP2) — remaining work (2026-06-24; updated 2026-07-28)
+
+> ⚠ **2026-07-28 — PW PAYOUT IS INTENTIONALLY NON-FUNCTIONAL.**
+> `IntmaxRollup.claimAuthorizedWithdrawal` has been DELETED. It paid the GLOBAL ETH escrow against
+> the partial-withdrawal authorization ALONE, with no withdrawal proof; since
+> `submitPartialWithdrawalIntent` binds only `auxData`, the amount and recipient were caller-chosen,
+> so one valid close proof for one's OWN channel could drain every channel's ETH. Full analysis:
+> **`doc/tasks/pw-auth-threat-model.md`**.
+>
+> Payout must now go through `withdrawNative` / `withdrawERC20` (proof-verified leaf; the
+> authorization is only a second factor). That requires `cmd_partial_withdraw` — the first unchecked
+> box below — so PW does not work end to end until it lands. `pw-finalize` fails closed with an
+> explanatory message. Before re-enabling, the proof-backed path must establish: `auxData` == the
+> signed tx_leaf; `nullifier` == `settled_transfer.nullifier()` (NOT the CLI's current
+> `keccak(tx_leaf ‖ pre_burn_chain)`); and base `Transfer.amount` == the channel-layer debit
+> (currently only a co-signer assumption — audit **F-AUX-1**).
 
 GAP2 contract-level gate is DONE (IntmaxRollup + ChannelSettlementManager + tests). Remaining:
 

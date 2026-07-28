@@ -47,8 +47,9 @@ use intmax3_zkp::{
     wallet_core::{
         BuiltInterChannelCredit, BuiltInterChannelSend, ChannelSnapshot, InterChannelDebitPayload,
         InterChannelTransferDescriptor, MemberInfo, MemberKeys, add_signature,
-        assemble_genesis_state, build_inter_channel_credit, build_inter_channel_send, build_record,
-        decrypt_balance, default_settled_tx_accumulator, sign_state, verify_all_signatures,
+        assemble_genesis_state, build_inter_channel_credit, build_inter_channel_send,
+        build_inter_channel_send_token, build_record, decrypt_balance, decrypt_balance_token,
+        default_settled_tx_accumulator, sign_state, verify_all_signatures,
         verify_inter_channel_credit_transition, verify_inter_channel_send_transition,
         verify_snapshot,
     },
@@ -233,8 +234,8 @@ fn inter_channel_live_send_and_credit() {
     let sender_slot = 0u16;
     let recipient_slot = 1u16;
 
-    let a_fund_before = a.snapshot.state.channel_fund.amount;
-    let b_fund_before = b.snapshot.state.channel_fund.amount;
+    let a_fund_before = a.snapshot.state.channel_fund.amounts[0];
+    let b_fund_before = b.snapshot.state.channel_fund.amounts[0];
     let recipient_before = decrypt_balance(
         &b.keys[recipient_slot as usize],
         &b.snapshot,
@@ -277,18 +278,19 @@ fn inter_channel_live_send_and_credit() {
         U256::from(AMT as u32)
     };
     assert_eq!(
-        a_send.channel_fund.amount + amt_u256,
+        a_send.channel_fund.amounts[0] + amt_u256,
         a_fund_before,
         "A channel_fund decreased by AMT"
     );
     assert_eq!(
-        credit.bundle_apply_state.channel_fund.amount,
+        credit.bundle_apply_state.channel_fund.amounts[0],
         b_fund_before + amt_u256,
         "B channel_fund increased by AMT"
     );
     // The fund import leg is exactly the +AMT step; the bundle leg leaves the fund unchanged.
     assert_eq!(
-        credit.fund_import_state.channel_fund.amount, credit.bundle_apply_state.channel_fund.amount,
+        credit.fund_import_state.channel_fund.amounts[0],
+        credit.bundle_apply_state.channel_fund.amounts[0],
         "bundle apply does not change channel_fund"
     );
 
@@ -482,7 +484,8 @@ fn inter_channel_live_send_and_credit() {
         .expect("build send for tamper base");
         let mut bad_payload = built.debit_payload;
         // Corrupt the proposed next state so channel_fund no longer decreases by amount.
-        bad_payload.proposed_next_state.channel_fund.amount = a.snapshot.state.channel_fund.amount;
+        bad_payload.proposed_next_state.channel_fund.amounts[0] =
+            a.snapshot.state.channel_fund.amounts[0];
         bad_payload.proposed_next_state = bad_payload
             .proposed_next_state
             .clone()
@@ -500,6 +503,206 @@ fn inter_channel_live_send_and_credit() {
          Positive (send self-check + A co-sign gate + N-of-N + B fail-closed gate + credit) and all \
          negative cases (amount, slot, missing/forged sig, zero tx_tree_root, bad dest id, bad TxV2, \
          bad debit) pass."
+    );
+}
+
+/// Multitoken Phase 5b (review MINOR 3): the C2C DESTINATION-side HAPPY PATH at a NON-genesis
+/// base token, end-to-end through the REAL verifiers — the same gates the e2e_flow negatives hit
+/// (`build_inter_channel_credit` runs the real `InterChannelFundImportUpdateWitness::verify` +
+/// `ReceiverBundleApplyUpdateWitness::verify`; `verify_inter_channel_credit_transition` is the
+/// co-signer gate with the E-2 re-verify).
+///
+/// CROSS-REGISTRY (TM-6): base token 55 is registered at DIFFERENT local slots on the two
+/// channels — A registry [ETH, 55] (local slot 1), B registry [ETH, 77, 55] (local slot 2) — so
+/// the destination resolution provably follows ITS OWN registry, not the source's slot echo.
+/// Asserts: A debits fund amounts[1] only; B fund-imports AND bundle-applies at exactly
+/// (recipient row, local slot 2) — the recipient's token-55 balance decrypts to before + AMT and
+/// EVERY other (row, token) ciphertext, pending_adds counter and fund position is frozen.
+#[test]
+fn inter_channel_live_token1_send_and_credit() {
+    use intmax3_zkp::ethereum_types::u256::U256;
+    const T1: u32 = 55;
+    const B_FILLER: u32 = 77;
+    const T1_BALANCE: u64 = 40;
+
+    let mut rng = StdRng::seed_from_u64(0x1C_5E_71);
+    let a = build_channel(A_ID, 3, &[50, 10, 30], &mut rng);
+    let b = build_channel(B_ID, 3, &[20, 40, 60], &mut rng);
+    let sender_slot = 0u16;
+    let recipient_slot = 1u16;
+
+    // Upgrade A to a two-token channel: register 55 (local slot 1), fund the sender's token-1
+    // position with a REAL self-encryption (its E-1/E-2 witness), and re-co-sign the head.
+    let (a_t1_ct, a_t1_witness) =
+        encrypt_amount(&mut rng, &a.keys[0].regev_pk, T1_BALANCE).expect("enc t1");
+    let mut a_state = a.snapshot.state.clone();
+    a_state
+        .balance_state
+        .apply_token_register(T1)
+        .expect("A registers 55");
+    a_state.balance_state.enc_balances[sender_slot as usize][1] = a_t1_ct;
+    a_state.channel_fund.amounts[1] = U256::from(T1_BALANCE as u32);
+    a_state
+        .balance_state
+        .validate()
+        .expect("A two-token state valid");
+    let a_state = co_sign_all(a_state.with_computed_digest(), &a.keys);
+    let a_snapshot = ChannelSnapshot {
+        record: a.record.clone(),
+        state: a_state,
+        members: a.snapshot.members.clone(),
+        settled_tx_accumulator: default_settled_tx_accumulator(),
+    };
+
+    // Upgrade B: register a FILLER token first so 55 lands at a DIFFERENT local slot (2).
+    let mut b_state = b.snapshot.state.clone();
+    b_state
+        .balance_state
+        .apply_token_register(B_FILLER)
+        .expect("B registers 77");
+    b_state
+        .balance_state
+        .apply_token_register(T1)
+        .expect("B registers 55");
+    b_state
+        .balance_state
+        .validate()
+        .expect("B three-token state valid");
+    let b_state = co_sign_all(b_state.with_computed_digest(), &b.keys);
+    let b_snapshot = ChannelSnapshot {
+        record: b.record.clone(),
+        state: b_state,
+        members: b.snapshot.members.clone(),
+        settled_tx_accumulator: default_settled_tx_accumulator(),
+    };
+    assert_eq!(b_snapshot.state.balance_state.token_registry[2], T1);
+
+    // ---- LEG A: the token-55 debit through the REAL send builder + co-signer gate. ----
+    let dest_id = ChannelId::new(B_ID as u64).unwrap();
+    let BuiltInterChannelSend {
+        debit_payload,
+        transfer_descriptor,
+        ..
+    } = build_inter_channel_send_token(
+        &a.keys[sender_slot as usize],
+        &a_snapshot,
+        sender_slot,
+        dest_id,
+        recipient_slot,
+        b.keys[recipient_slot as usize].regev_pk.clone(),
+        b.record.member_pk_gs[recipient_slot as usize],
+        T1,
+        AMT,
+        T1_BALANCE,
+        &a_t1_witness,
+        fresh_root(0x155),
+        LEVEL,
+        &mut rng,
+    )
+    .expect("token-55 C2C debit builds");
+    assert_eq!(transfer_descriptor.inter_channel_tx.token_index, T1);
+    verify_inter_channel_send_transition(&a_snapshot.state, &a.record, &debit_payload, LEVEL)
+        .expect("A co-signer gate accepts the token-55 debit");
+    let a_send = co_sign_all(debit_payload.proposed_next_state.clone(), &a.keys);
+    verify_all_signatures(&a.record, &[], &a_send).expect("a_send is N-of-N co-signed");
+    // A debited fund amounts[1] only.
+    let amt_u256 = U256::from(AMT as u32);
+    assert_eq!(
+        a_send.channel_fund.amounts[1] + amt_u256,
+        a_snapshot.state.channel_fund.amounts[1],
+        "A debits the RESOLVED local slot 1"
+    );
+    assert_eq!(
+        a_send.channel_fund.amounts[0], a_snapshot.state.channel_fund.amounts[0],
+        "A genesis-token fund untouched"
+    );
+
+    // ---- LEG B: fail-closed gate + REAL credit builder at B's OWN resolved slot (2). ----
+    verify_inter_channel_credit_transition(
+        &b_snapshot.state,
+        &b.record,
+        &transfer_descriptor,
+        &a_send,
+        &a.record,
+        LEVEL,
+    )
+    .expect("B credit gate accepts the genuine token-55 transfer");
+    let credit = build_inter_channel_credit(
+        &b.keys[recipient_slot as usize],
+        &b_snapshot,
+        &transfer_descriptor,
+        LEVEL,
+        &mut rng,
+    )
+    .expect("build_inter_channel_credit at token 55");
+
+    // Fund import + bundle apply land at B's LOCAL slot 2 (cross-registry resolution) …
+    assert_eq!(
+        credit.fund_import_state.channel_fund.amounts[2],
+        b_snapshot.state.channel_fund.amounts[2] + amt_u256,
+        "B fund-imports at ITS resolved local slot 2"
+    );
+    assert_eq!(
+        credit.bundle_apply_state.channel_fund.amounts[2],
+        credit.fund_import_state.channel_fund.amounts[2],
+        "bundle apply does not change channel_fund"
+    );
+    // … the recipient's token-55 balance decrypts to before + AMT …
+    let b_credited_snapshot = ChannelSnapshot {
+        record: b.record.clone(),
+        state: credit.bundle_apply_state.clone(),
+        members: b.snapshot.members.clone(),
+        settled_tx_accumulator: credit.settled_tx_accumulator.clone(),
+    };
+    let recipient_t1_after = decrypt_balance_token(
+        &b.keys[recipient_slot as usize],
+        &b_credited_snapshot,
+        recipient_slot,
+        2,
+    )
+    .expect("decrypt recipient token-55 slot");
+    assert_eq!(
+        recipient_t1_after, AMT,
+        "recipient's token-55 position credited EXACTLY AMT (was 0)"
+    );
+    // … and EVERY other (row, token) position is frozen: ciphertexts, pending_adds and funds.
+    let before_bs = &b_snapshot.state.balance_state;
+    let after_bs = &credit.bundle_apply_state.balance_state;
+    for row in 0..3usize {
+        for t in 0..10usize {
+            if row == recipient_slot as usize && t == 2 {
+                assert_eq!(
+                    after_bs.pending_adds[row][t],
+                    before_bs.pending_adds[row][t] + 1,
+                    "pending_adds bumped at exactly the credited (row, token)"
+                );
+                continue;
+            }
+            assert_eq!(
+                after_bs.enc_balances[row][t], before_bs.enc_balances[row][t],
+                "bystander ciphertext (row {row}, token {t}) must be frozen"
+            );
+            assert_eq!(
+                after_bs.pending_adds[row][t], before_bs.pending_adds[row][t],
+                "bystander pending_adds (row {row}, token {t}) must be frozen"
+            );
+        }
+    }
+    for t in 0..10usize {
+        if t == 2 {
+            continue;
+        }
+        assert_eq!(
+            credit.bundle_apply_state.channel_fund.amounts[t],
+            b_snapshot.state.channel_fund.amounts[t],
+            "bystander fund position {t} must be frozen"
+        );
+    }
+
+    eprintln!(
+        "[inter_channel_live] token-55 OK: A(slot 1) -> B(slot 2) cross-registry debit + fund \
+         import + bundle apply through the REAL witness verifies and gates; AMT={AMT}; every \
+         bystander (row, token) frozen."
     );
 }
 

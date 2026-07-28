@@ -95,7 +95,7 @@ theorem step_conservation {s s' : RollupState} {op : Op} (h : step s op = some s
   | claim w =>
       simp only [step] at h
       simp only [wdDelta, depDelta, Nat.add_zero]
-      exact (claimAuthorized_safe h).2.1
+      exact (claimAuthorized_escrow_conservation h).2.1
 
 /-- **Global conservation.** For any successful trace,
     `finalEscrow + Σ withdrawn = initialEscrow + Σ deposited`. -/

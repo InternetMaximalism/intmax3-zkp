@@ -21,14 +21,14 @@ function makeSm(store) {
 }
 
 function makeRuntime(account, deps) {
-  const { api, wallet, store, log, alert, policyCfg } = deps;
+  const { api, wallet, store, log, alert, policyCfg, tokenRegistry } = deps;
   const smW = makeSm(store);
   const queue = [];
   let draining = false;
 
   const ctx = {
     ch: account, slot: account.slot, recipient: account.recipient,
-    api, wallet, store, log, alert, policy: policyCfg, sm: smW,
+    api, wallet, store, log, alert, policy: policyCfg, sm: smW, tokenRegistry,
     // Lets own-tx branches inject a hard signal that re-enters dispatch.
     raiseSignal: (sig) => { queue.push(sig); return { signalled: sig.kind }; },
   };
@@ -36,6 +36,17 @@ function makeRuntime(account, deps) {
   async function dispatch(event) {
     const branch = classify(event, { mode: store.get('mode') });
     log.debug({ event: 'CLASSIFY', channel: account.id, source: event.source, kind: event.kind, branch });
+    // Multi-token DISPLAY metadata (§N-7): keep the held registry in step with the rollup's
+    // set-once token registry. The delegate CLASSIFIES this event as IGNORE (it drives no
+    // behaviour), so the observation is taken here, before the branch switch. Observational only:
+    // no write path, never throws, and a contradiction against a verified entry withdraws that
+    // entry's metadata (see common/token-registry.js).
+    if (event.source === 'chain' && event.kind === 'TokenRegistered' && tokenRegistry) {
+      tokenRegistry.observeTokenRegistered(
+        { tokenIndex: Number(event.args && event.args.tokenIndex), token: event.args && event.args.token, rollupAddress: event.address },
+        { logger: log }
+      );
+    }
     try {
       switch (branch) {
         case BRANCHES.SNAPSHOT_UPDATED: return await sync.importAndVerify(event, ctx);

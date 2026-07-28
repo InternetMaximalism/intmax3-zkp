@@ -33,6 +33,11 @@ contract DeployWalletSettlement is Script {
     }
 
     function run() external {
+        // SECURITY: this script wires an ALWAYS-TRUE mock MLE verifier and a 1-second challenge
+        // period. Anything deployed with it has a VACUOUS `_checkCloseProof`, so it must never
+        // reach a public chain — and it is reachable from relay tooling pointed at Sepolia.
+        // The other deploy scripts already carry a chain-id guard; this one lacked it.
+        require(block.chainid == 31337, "local-devnet only: this script deploys mock verifiers");
         string memory reg = _read("pw_reg.json");
         address rollupAddr = vm.envAddress("ROLLUP");
         IntmaxRollup rollup = IntmaxRollup(payable(rollupAddr));

@@ -172,8 +172,234 @@ pub const GRACE_BEFORE_PROCESS_SECS: u64 = 600;
 /// L1 close-challenge window (abstract2 §2.5: 1 day; detail2 §G-1).
 pub const CHALLENGE_PERIOD_SECS: u64 = 86_400;
 
+// Multi-token channels (detail2 §N)
+/// Maximum number of tokens (currencies) a single channel can hold (detail2 §N-1). Every balance
+/// slot leaf carries a FIXED `MAX_CHANNEL_TOKENS`-wide vector of independent Regev ciphertexts
+/// (one per local token slot), and the channel-local `token_registry` maps each local token slot
+/// `t < token_count` to a BASE-layer `token_index: u32`. Positions `t >= token_count` are always
+/// the canonical zero ciphertext with zero `pending_adds` (TM-8 fail-closed).
+///
+/// SECURITY: this is a STATIC hash-layout width (leaf = 104 elems, H1 header = 37 elems,
+/// token_funds_digest = fixed 92-word keccak preimage) — the in-memory and HASH layouts are
+/// ALWAYS full width regardless of `token_count` (TM-11: variable-length preimages alias).
+pub const MAX_CHANNEL_TOKENS: usize = 10;
+
+// Multi-token v2 domain constants (detail2 §N-9 / §G-2, TM-15).
+//
+// SECURITY (TM-15 domain re-versioning): every preimage that gains a field in the multi-token
+// change gets a NEW domain constant, so a v1-observed digest/nullifier can never be replayed as
+// (or collide with) a v2 one. The v1 constants stay in place until the legacy paths (in-circuit
+// recomputes, Phase 2) are migrated. All old + new tags are asserted pairwise distinct by
+// `poseidon_sig::tests::domain_constants_are_pairwise_distinct` (the repo-wide non-collision
+// check) and by `domain_constant_ascii_tags` below.
+
+/// "IMB2" — v2 H1 header domain (detail2 §N-1, TM-9). Replaces "IMBS" (`BALANCE_STATE_DOMAIN`)
+/// for the 37-element Poseidon header that now commits `token_count` + the full 10-limb
+/// `token_registry`. See [`crate::common::balance_state::BalanceState::h1`].
+pub const BALANCE_STATE_DOMAIN_V2: u32 = 0x494d4232;
+/// "IMS2" — v2 balance-slot leaf domain (detail2 §N-2, TM-8/TM-15). Replaces "IMSL"
+/// (`BALANCE_SLOT_LEAF_DOMAIN`) for the 104-element leaf carrying 10 ciphertext digests and 10
+/// per-token add counters. See [`crate::common::balance_state::balance_slot_leaf_hash`].
+pub const BALANCE_SLOT_LEAF_DOMAIN_V2: u32 = 0x494d5332;
+/// "IMP2" — v2 in-channel pay domain (detail2 §N-3, TM-2/TM-15). Replaces "IMPA" (`PAY_DOMAIN`)
+/// for the IMPA-v2 `ChannelTx` signing digest, which gains `token_slot` as its OWN canonical u32
+/// limb (never bit-packed). See [`crate::common::channel::ChannelTx::signing_digest`].
+pub const PAY_DOMAIN_V2: u32 = 0x494d5032;
+/// "IML2" — v2 L1 deposit-import domain (detail2 §N-5, TM-7/TM-15). Replaces "IMLD"
+/// (`L1_DEPOSIT_IMPORT_DOMAIN`); the digest gains the base `token_index` as its own limb.
+/// See [`crate::common::channel::l1_deposit_import_digest`].
+pub const L1_DEPOSIT_IMPORT_DOMAIN_V2: u32 = 0x494d4c32;
+/// "IMW2" — v2 withdrawal-claim nullifier domain (detail2 §N-6, TM-5/TM-15). Replaces "IMCW"
+/// (`WITHDRAWAL_CLAIM_DOMAIN`) for the per-(slot, token) claim nullifier
+/// `[IMW2, close_intent_digest(8), slot_regev_pk_digest(8), token_slot]`.
+/// See [`crate::common::channel::WithdrawalClaim::derive_nullifier`].
+pub const WITHDRAWAL_CLAIM_DOMAIN_V2: u32 = 0x494d5732;
+/// "IMU2" — v2 E-2 channelUpdateZKP PI domain (detail2 §N-4, TM-6/TM-15). Replaces "IMUZ"
+/// (`CHANNEL_UPDATE_ZKP_DOMAIN`, retired): the E-2 public values gain the base `token_index` as
+/// their own extra PV, so every E-2 transcript binds WHICH base token the update moves. Wired in
+/// multitoken Phase 2b; see `regev::transfer_stark::{prove,verify}_channel_update`.
+pub const CHANNEL_UPDATE_ZKP_DOMAIN_V2: u32 = 0x494d5532;
+/// "IMI2" — v2 inter-channel tx (C2C descriptor) domain (detail2 §N-4, TM-6/TM-15). Replaces
+/// "IMIT" (`INTER_CHANNEL_TX_DOMAIN`, retired): the `InterChannelTx` signing digest gains the
+/// base `token_index` as its OWN canonical u32 limb.
+///
+/// SECURITY (domain decision, multitoken Phase 2b): a NEW domain (not an in-place widening) was
+/// chosen because the IMIT preimage carries THREE variable-length, length-prefixed tails
+/// (recipient_memo, receiver_deltas, transport_proof), so an in-place widening's
+/// equal-total-length v1<->v2 realignment case would rest on the v3 reset alone (the same caveat
+/// the Phase 2a review recorded for IMCW). The v1 "IMIT" preimage has exactly ONE hashing site
+/// (`InterChannelTx::signing_digest`; the legacy cancel-close in-circuit IMIT recompute was
+/// retired by the Finding-D statement correction, and no Solidity mirror exists), so the
+/// re-version costs one constant and removes that reliance entirely. v1 value stays pinned in
+/// `all_domain_constants_pairwise_distinct`.
+pub const INTER_CHANNEL_TX_DOMAIN_V2: u32 = 0x494d4932;
+/// "IMTF" — token-funds digest domain (detail2 §N-6, TM-11). Domain of
+/// `token_funds_digest = keccak([IMTF, registry(10 x u32, zero-padded), token_count,
+/// amounts(10 x U256, zero-padded)])` — ALWAYS full width.
+/// See [`crate::common::channel::token_funds_digest`].
+pub const TOKEN_FUNDS_DIGEST_DOMAIN: u32 = 0x494d5446;
+
 // Transactions
 pub const TRANSFER_TREE_HEIGHT: usize = 6;
 pub const MAX_NUM_TRANSFERS_PER_TX: usize = 1 << TRANSFER_TREE_HEIGHT;
 // The base tx tree is indexed by channel_id (one base "user" = one channel).
 pub const TX_TREE_HEIGHT: usize = CHANNEL_ID_BITS;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The v2 multi-token domain constants are exactly their documented ASCII tags (TM-15).
+    #[cfg_attr(debug_assertions, ignore = "run with --release")]
+    #[test]
+    fn multitoken_domain_constant_ascii_tags() {
+        assert_eq!(BALANCE_STATE_DOMAIN_V2, u32::from_be_bytes(*b"IMB2"));
+        assert_eq!(BALANCE_SLOT_LEAF_DOMAIN_V2, u32::from_be_bytes(*b"IMS2"));
+        assert_eq!(PAY_DOMAIN_V2, u32::from_be_bytes(*b"IMP2"));
+        assert_eq!(L1_DEPOSIT_IMPORT_DOMAIN_V2, u32::from_be_bytes(*b"IML2"));
+        assert_eq!(WITHDRAWAL_CLAIM_DOMAIN_V2, u32::from_be_bytes(*b"IMW2"));
+        assert_eq!(CHANNEL_UPDATE_ZKP_DOMAIN_V2, u32::from_be_bytes(*b"IMU2"));
+        assert_eq!(INTER_CHANNEL_TX_DOMAIN_V2, u32::from_be_bytes(*b"IMI2"));
+        assert_eq!(TOKEN_FUNDS_DIGEST_DOMAIN, u32::from_be_bytes(*b"IMTF"));
+    }
+
+    /// Repo-wide domain-constant NON-COLLISION check (detail2 §G-2 / §N-9, TM-15): every domain
+    /// separator defined anywhere in the codebase — old AND the new multi-token v2 ones — is
+    /// pairwise distinct. Private constants (channel.rs, circuit-local twins) are pinned here as
+    /// literals with their defining location, so an edit of a private constant that introduces a
+    /// collision (or silently changes a pinned value) trips this test.
+    ///
+    /// SECURITY: domain separation is the only thing preventing a digest computed under one
+    /// preimage schema from being replayed as another (cross-protocol confusion); a collision
+    /// between any two tags voids that argument for the colliding pair.
+    #[cfg_attr(debug_assertions, ignore = "run with --release")]
+    #[test]
+    fn all_domain_constants_pairwise_distinct() {
+        // (tag, value, defining site). Keep in sync with `grep -rn "0x494d\|0x4d42\|0x4348\|0x5549"
+        // src --include='*.rs' | grep const` and detail2.md §G-2/§G-3.
+        let domains: &[(&str, u32)] = &[
+            ("IMCH CHANNEL_STATE_DOMAIN (channel.rs)", 0x494d_4348),
+            (
+                "IMPA PAY_DOMAIN v1 (retired; historic digests)",
+                0x494d_5041,
+            ),
+            ("IMSB SMALL_BLOCK_DOMAIN (channel.rs)", 0x494d_5342),
+            ("IMSS SIGNED_SMALL_BLOCK_DOMAIN (channel.rs)", 0x494d_5353),
+            (
+                "IMIT INTER_CHANNEL_TX_DOMAIN v1 (retired; historic digests)",
+                0x494d_4954,
+            ),
+            ("IMCL CLOSE_TX_DOMAIN (channel.rs)", 0x494d_434c),
+            ("IMCI CLOSE_INTENT_DOMAIN (channel.rs)", 0x494d_4349),
+            ("IMSC SPECIAL_CLOSE_DOMAIN (channel.rs)", 0x494d_5343),
+            ("IMCN CANCEL_CLOSE_DOMAIN (channel.rs)", 0x494d_434e),
+            ("IMCP POST_CLOSE_CLAIM_DOMAIN (channel.rs)", 0x494d_4350),
+            ("IMCK POST_CLOSE_NULLIFIER_DOMAIN (channel.rs)", 0x494d_434b),
+            ("IMCW WITHDRAWAL_CLAIM_DOMAIN v1 (channel.rs)", 0x494d_4357),
+            ("IMUF CHANNEL_BALANCE_LEAF_DOMAIN (channel.rs)", 0x494d_5546),
+            ("IMCR CHANNEL_RECORD_DOMAIN (channel.rs)", 0x494d_4352),
+            ("IMCM CLOSE_MEMBER_SET_DOMAIN (channel.rs)", 0x494d_434d),
+            (
+                "IMLD L1_DEPOSIT_IMPORT_DOMAIN v1 (retired; historic digests)",
+                0x494d_4c44,
+            ),
+            (
+                "IMBS BALANCE_STATE_DOMAIN v1 (retired; historic digests)",
+                0x494d_4253,
+            ),
+            (
+                "IMSL BALANCE_SLOT_LEAF_DOMAIN v1 (retired; historic digests)",
+                0x494d_534c,
+            ),
+            (
+                "IMBH BALANCE_STATE_HASH_DOMAIN (balance_state.rs)",
+                0x494d_4248,
+            ),
+            ("IMTL TX_LEAF_DOMAIN (balance_state.rs)", 0x494d_544c),
+            (
+                "IMTC SETTLED_TX_CHAIN_DOMAIN (balance_state.rs)",
+                0x494d_5443,
+            ),
+            ("IMRC REGEV_CT_DOMAIN (regev/encrypt.rs)", 0x494d_5243),
+            ("IMRK REGEV_PK_DOMAIN (regev/keys.rs)", 0x494d_524b),
+            ("IMRR REGEV_PK_ROOT_DOMAIN (regev/keys.rs)", 0x494d_5252),
+            ("IMRP REGEV_PK_POSEIDON_DOMAIN (regev/keys.rs)", 0x494d_5250),
+            (
+                "IMCZ CHANNEL_TX_ZKP_DOMAIN (transfer_stark.rs)",
+                0x494d_435a,
+            ),
+            (
+                "IMUZ E-2 channelUpdateZKP v1 (retired; historic transcripts)",
+                0x494d_555a,
+            ),
+            (
+                "IMWZ WITHDRAW_CLAIM_ZKP_DOMAIN (transfer_stark.rs)",
+                0x494d_575a,
+            ),
+            (
+                "IMRF BALANCE_REFRESH_ZKP_DOMAIN (transfer_stark.rs)",
+                0x494d_5246,
+            ),
+            ("IMLL LIST_LEAF_DOMAIN (poseidon_sig/list.rs)", 0x494d_4c4c),
+            ("IMPG DOMAIN_PK_G (poseidon_sig/mod.rs)", 0x494d_5047),
+            ("IMSG DOMAIN_SIG_G (poseidon_sig/mod.rs)", 0x494d_5347),
+            (
+                "IMPW PARTIAL_WITHDRAWAL_DOMAIN (wallet_core.rs)",
+                0x494d_5057,
+            ),
+            ("MBLF MEMBER_LEAF_DOMAIN (key_tree.rs)", 0x4d42_4c46),
+            (
+                "CHLF CHANNEL_LEAF_DOMAIN (trees/channel_tree.rs)",
+                0x4348_4c46,
+            ),
+            (
+                "UID\\0 USER_ID_DOMAIN (balance/common/recipient.rs)",
+                0x5549_4400,
+            ),
+            // BabyBear Poseidon2 transcript domains + the channel wire magic (security-review
+            // MINOR 4) — referenced via the pub consts so a drifting definition is caught.
+            (
+                "BPKB DOMAIN_PK_B (regev/hash_sig.rs)",
+                crate::regev::hash_sig::DOMAIN_PK_B,
+            ),
+            (
+                "BSGB DOMAIN_SIG_B (regev/hash_sig.rs)",
+                crate::regev::hash_sig::DOMAIN_SIG_B,
+            ),
+            (
+                "IMPC CHANNEL_MESSAGE_MAGIC (common/channel_message.rs)",
+                crate::common::channel_message::CHANNEL_MESSAGE_MAGIC,
+            ),
+            // Multi-token v2 (this file) — referenced via the pub consts so a drifting
+            // definition (not just a colliding one) is caught.
+            ("IMB2 BALANCE_STATE_DOMAIN_V2", BALANCE_STATE_DOMAIN_V2),
+            (
+                "IMS2 BALANCE_SLOT_LEAF_DOMAIN_V2",
+                BALANCE_SLOT_LEAF_DOMAIN_V2,
+            ),
+            ("IMP2 PAY_DOMAIN_V2", PAY_DOMAIN_V2),
+            (
+                "IML2 L1_DEPOSIT_IMPORT_DOMAIN_V2",
+                L1_DEPOSIT_IMPORT_DOMAIN_V2,
+            ),
+            (
+                "IMW2 WITHDRAWAL_CLAIM_DOMAIN_V2",
+                WITHDRAWAL_CLAIM_DOMAIN_V2,
+            ),
+            (
+                "IMU2 CHANNEL_UPDATE_ZKP_DOMAIN_V2",
+                CHANNEL_UPDATE_ZKP_DOMAIN_V2,
+            ),
+            (
+                "IMI2 INTER_CHANNEL_TX_DOMAIN_V2",
+                INTER_CHANNEL_TX_DOMAIN_V2,
+            ),
+            ("IMTF TOKEN_FUNDS_DIGEST_DOMAIN", TOKEN_FUNDS_DIGEST_DOMAIN),
+        ];
+        for (i, (name_a, a)) in domains.iter().enumerate() {
+            for (name_b, b) in domains.iter().skip(i + 1) {
+                assert_ne!(a, b, "domain collision: {name_a} == {name_b} ({a:#010x})");
+            }
+        }
+    }
+}

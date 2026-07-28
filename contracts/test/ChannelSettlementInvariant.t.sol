@@ -77,12 +77,15 @@ contract SettlementHandler {
             recipient: recipients[i],
             userAmountDigest: keccak256(abi.encodePacked(members[i], amt, wdSalt)),
             amount: amt,
+            tokenSlot: 0,
+            tokenIndex: 0,
             withdrawalNullifier: keccak256(abi.encodePacked("wd", digest, members[i], wdSalt))
         });
         wdSalt += 1;
         uint256[] memory limbs = verifier.expectedWithdrawalClaimLimbs(
             channelId, c.closeIntentDigest, manager.finalizedBalanceStateH1(),
-            c.memberPkG, c.recipient, c.userAmountDigest, c.amount, c.withdrawalNullifier
+            c.memberPkG, c.recipient, c.userAmountDigest, c.amount, c.tokenSlot, c.tokenIndex,
+            c.withdrawalNullifier
         );
         try manager.submitWithdrawalClaim(c, CloseTestLib.proofWithLimbs(limbs)) {} catch {}
     }
@@ -95,14 +98,15 @@ contract SettlementHandler {
         bytes32 snn = keccak256(abi.encodePacked(bytes4(uint32(0x494d434b)), digest, incomingTx, members[i]));
         uint256[] memory limbs = verifier.expectedPostCloseClaimLimbs(
             channelId, digest, incomingTx, members[i], recipients[i], snn, amt,
-            manager.finalizedBalanceStateH1(), manager.finalizedSettledTxAccumulatorRoot()
+            manager.finalizedBalanceStateH1(), manager.finalizedSettledTxAccumulatorRoot(), 0
         );
         ChannelSettlementManager.PostCloseClaim memory c = ChannelSettlementManager.PostCloseClaim({
             closeIntentDigest: digest,
             incomingTxHash: incomingTx,
             receiverPkG: members[i],
             recipient: recipients[i],
-            amount: amt
+            amount: amt,
+            tokenIndex: 0
         });
         try manager.submitPostCloseClaim(c, CloseTestLib.proofWithLimbs(limbs)) {} catch {}
     }
@@ -146,23 +150,23 @@ contract ChannelSettlementInvariantTest is CloseSettlementBase {
 
     /// I1 (SOLVENCY): the manager never credits out more ETH than it received for the channel.
     function invariant_I1_solvency() external view {
-        assertLe(manager.totalCreditedOut(), manager.receivedChannelFunds(), "I1: out > received");
+        assertLe(manager.totalCreditedOut(0), manager.receivedChannelFunds(0), "I1: out > received");
     }
 
     /// I2 (CONSERVATION): every accrued unit is either still owed (a credit) or already paid out.
     function invariant_I2_conservation() external view {
-        uint256 sumCredits = manager.withdrawalCredits(alice)
-            + manager.withdrawalCredits(bob) + manager.withdrawalCredits(carol);
+        uint256 sumCredits = manager.withdrawalCredits(0, alice)
+            + manager.withdrawalCredits(0, bob) + manager.withdrawalCredits(0, carol);
         assertEq(
-            manager.totalWithdrawn(),
-            manager.totalCreditedOut() + sumCredits,
+            manager.totalWithdrawn(0),
+            manager.totalCreditedOut(0) + sumCredits,
             "I2: totalWithdrawn != totalCreditedOut + sumCredits"
         );
     }
 
     /// I3 (ACCRUAL CAP): claims can never accrue past the declared channel fund.
     function invariant_I3_accrualCap() external view {
-        assertLe(manager.totalWithdrawn(), manager.finalizedChannelFundAmount(), "I3: accrual > fund");
+        assertLe(manager.totalWithdrawn(0), manager.finalizedChannelFundAmount(0), "I3: accrual > fund");
     }
 
     /// I4 (ETH BACKING): the manager's native balance always equals received-minus-paid, so unpaid
@@ -170,7 +174,7 @@ contract ChannelSettlementInvariantTest is CloseSettlementBase {
     function invariant_I4_ethBacking() external view {
         assertEq(
             address(manager).balance,
-            manager.receivedChannelFunds() - manager.totalCreditedOut(),
+            manager.receivedChannelFunds(0) - manager.totalCreditedOut(0),
             "I4: balance != received - creditedOut"
         );
     }
@@ -186,7 +190,7 @@ contract ChannelSettlementInvariantTest is CloseSettlementBase {
 
     /// Cross-check the handler's independent ghost totals against the contract's accounting.
     function invariant_ghost_consistency() external view {
-        assertEq(manager.receivedChannelFunds(), handler.ghostPulled(), "ghost: received != sumPulled");
-        assertEq(manager.totalCreditedOut(), handler.ghostPaid(), "ghost: creditedOut != sumPaid");
+        assertEq(manager.receivedChannelFunds(0), handler.ghostPulled(), "ghost: received != sumPulled");
+        assertEq(manager.totalCreditedOut(0), handler.ghostPaid(), "ghost: creditedOut != sumPaid");
     }
 }
