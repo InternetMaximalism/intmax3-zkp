@@ -60,6 +60,7 @@ use intmax3_zkp::{
         channel_id::ChannelId,
         deposit::Deposit,
         salt::Salt,
+        u63::U63,
         withdrawal::Withdrawal,
     },
     constants::{MAX_CHANNEL_MEMBERS, MAX_COSIGNERS, TOKEN_UNIT},
@@ -259,6 +260,31 @@ struct CliState {
     /// `applied_tx_identities`.
     #[serde(default)]
     spent_tx_identities: HashSet<Bytes32>,
+    /// CONSUMED-DEPOSIT LEDGER (L1 import replay protection — deposit-import-threat-model.md §4):
+    /// the set of L1 deposits already CREDITED into this channel, keyed on the canonical deposit
+    /// identity `"{chain_id}:{rollup_lowercase}:{deposit_index}"`.
+    ///
+    /// SECURITY (why this must exist): the channel layer has NO nullifier SET.
+    /// `ChannelState.shared_native_nullifier_root` is a keccak hash CHAIN, and
+    /// `build_l1_deposit_import` only FOLDS the deposit nullifier into it. The native gate
+    /// (`L1DepositImportUpdateWitness::verify`) requires just `require_chain_push` +
+    /// `ensure_different_root` — and because the fold is prev-bound, replaying the SAME nullifier
+    /// always produces a DIFFERENT root, so `ensure_different_root` passes on a replay by
+    /// construction. The co-signer gate `verify_l1_deposit_import_transition` is rebuild-equality
+    /// only and does no freshness checking. Nothing else refuses a second import of one deposit.
+    ///
+    /// Keyed on `deposit_index` (the contract's own monotone `depositCount`) and NOT on the tx
+    /// hash, because ONE transaction can emit several `Deposited` logs — a tx-hash key would
+    /// under-count. `chain_id` + `rollup` scope the index to the contract that issued it.
+    ///
+    /// RESIDUAL RISK (documented, not fixed here — same standing as the inter-channel ledgers
+    /// above): this is LOCAL CLI state, not a cryptographic enforcement. Deleting
+    /// `cli_state.json`, or running a second CLI with a fresh state dir, defeats it. The
+    /// protocol-level fix (a real indexed nullifier set checked in-circuit) is a design change
+    /// beyond this vulnerability. What this ledger DOES guarantee is that a replay is no longer
+    /// reachable by an unauthenticated remote caller through any relay/api endpoint.
+    #[serde(default)]
+    imported_deposits: HashSet<String>,
 }
 
 #[derive(Deserialize)]
@@ -2136,7 +2162,7 @@ fn main() {
         "post-close-claim" => cmd_post_close_claim(&args),
         _ => {
             eprintln!(
-                "usage: channel_member <setup-backing|init|gen-contribution|gen-send|send|cosign|cosign-batch|cosign-burn-send|register-token|refresh|deploy-settlement|cosign-l1-deposit-import|pw-submit|pw-finalize|close|settle|withdraw|claim|cancel-close|post-close-claim|...> ...\n  multi-token (§N): send/gen-send take [token_slot]; claim takes [token_slot]; cosign-l1-deposit-import takes [token_index]; register-token <base_token_index> appends a cosigned registry entry; refresh <slot> [token_slot] re-encrypts a CLI member's own position so it can send again after a homomorphic credit"
+                "usage: channel_member <setup-backing|init|gen-contribution|gen-send|send|cosign|cosign-batch|cosign-burn-send|register-token|refresh|deploy-settlement|cosign-l1-deposit-import|pw-submit|pw-finalize|close|settle|withdraw|claim|cancel-close|post-close-claim|...> ...\n  multi-token (§N): send/gen-send take [token_slot]; claim takes [token_slot]; cosign-l1-deposit-import <slot|auto> <tx_hash> <rpc_url> reads amount/depositor/token_index FROM THE CHAIN; register-token <base_token_index> appends a cosigned registry entry; refresh <slot> [token_slot] re-encrypts a CLI member's own position so it can send again after a homomorphic credit"
             );
             exit(2);
         }
@@ -2199,11 +2225,18 @@ fn cmd_init(args: &[String]) {
         }
     }
 
-    let (prior_applied, prior_spent) = if std::path::Path::new(STATE_FILE).exists() {
+    // SECURITY: every replay ledger must SURVIVE a delegate join — dropping one here would let a
+    // join re-open an already-consumed transfer or L1 deposit for a second credit.
+    let (prior_applied, prior_spent, prior_imported) = if std::path::Path::new(STATE_FILE).exists()
+    {
         let prev = load_state();
-        (prev.applied_tx_identities, prev.spent_tx_identities)
+        (
+            prev.applied_tx_identities,
+            prev.spent_tx_identities,
+            prev.imported_deposits,
+        )
     } else {
-        (HashSet::new(), HashSet::new())
+        (HashSet::new(), HashSet::new(), HashSet::new())
     };
     let (record, state, members, controlled, slot) = if std::path::Path::new(STATE_FILE).exists() {
         join_delegate(new_delegate, new_ct, new_recipient)
@@ -2229,6 +2262,7 @@ fn cmd_init(args: &[String]) {
         snapshot: snapshot.clone(),
         applied_tx_identities: prior_applied,
         spent_tx_identities: prior_spent,
+        imported_deposits: prior_imported,
     });
     write_json(out_path, &snapshot);
     println!(
@@ -2372,6 +2406,24 @@ fn join_delegate(
     u16,
 ) {
     let prev = load_state();
+    // SECURITY (B-1b uniqueness, adversarial review finding 1): a joining member declares its own
+    // L1 exit address. If it were allowed to declare an address ALREADY bound to another active
+    // slot, the L1-deposit import's depositor->slot resolution would become ambiguous: the joiner
+    // could capture the victim's genuine deposits (or, at minimum, make them permanently
+    // unimportable — an irreversible exit-wedge). Exit addresses must therefore be DISTINCT across
+    // active slots. Refused fail-closed at the join, where the collision is introduced.
+    {
+        let bs = &prev.snapshot.state.balance_state;
+        let active = bs.member_count as usize + bs.delegate_count as usize;
+        if let Some(clash) = (0..active).find(|&i| bs.recipients[i] == new_recipient) {
+            die(format!(
+                "REFUSING contribution: recipient {} is ALREADY the bound (B-1b) L1 exit address \
+                 of ACTIVE slot {clash}. Exit addresses must be distinct — a duplicate would make \
+                 L1 deposit crediting ambiguous and could capture that member's deposits.",
+                new_recipient.to_hex()
+            ));
+        }
+    }
     let delegate_slot = first_delegate_slot();
     let existing = prev
         .snapshot
@@ -3933,52 +3985,420 @@ fn cmd_deploy_settlement(args: &[String]) {
     println!("deploy-settlement OK: manager={manager}, verifier={verifier}, rollup={rollup}");
 }
 
-/// Co-sign an L1 deposit import (mid-channel deposit): fold the deposit into the channel's balance
-/// without closing. Usage:
-///   channel_member cosign-l1-deposit-import <recipient_slot> <amount> <depositor_hex> [out.json]
-/// [token_index] `token_index` (OPTIONAL, default 0 = ETH) is the deposit's BASE-layer token index
-/// (§N-5 — the base `Deposit` carries it; no longer dropped): it resolves against the channel's
-/// active registry to the credited local slot, and an UNREGISTERED index is refused fail-closed
-/// (TM-7).
-fn cmd_cosign_l1_deposit_import(args: &[String]) {
-    let recipient_slot: usize = args.get(1).and_then(|s| s.parse().ok()).unwrap_or_else(|| {
-        die(
-            "cosign-l1-deposit-import <recipient_slot> <amount> <depositor_hex> [out.json] [token_index]",
-        )
-    });
-    let amount: u64 = args
-        .get(2)
-        .and_then(|s| s.parse().ok())
-        .unwrap_or_else(|| die("cosign-l1-deposit-import needs <amount>"));
-    let depositor_hex = args
-        .get(3)
-        .unwrap_or_else(|| die("cosign-l1-deposit-import needs <depositor_hex>"));
-    let out_path = args
-        .get(4)
-        .map(String::as_str)
-        .unwrap_or("l1_import_cosigned.json");
-    let token_index: u32 = args
-        .get(5)
-        .map(|s| s.parse().unwrap_or_else(|_| die("bad [token_index]")))
-        .unwrap_or(0);
+/// `keccak256("Deposited(uint64,address,bytes32,uint32,uint256,bytes32,bytes32)")` — topic0 of
+/// `IntmaxRollup.Deposited` (IntmaxRollup.sol:129). Re-derive with:
+///   `cast sig-event "Deposited(uint64,address,bytes32,uint32,uint256,bytes32,bytes32)"`
+/// SECURITY: if this constant were ever wrong, NO log would match and every import would refuse
+/// (fail-closed) — the faucet E2E's real ERC-20 deposit is the live proof that it is right.
+const DEPOSITED_TOPIC0: &str = "0x35cffad0c6ce159deaf160c503b69a374a9751e480083db7e6849e00f1a2c4fe";
 
-    let depositor = Address::from_hex(depositor_hex)
-        .unwrap_or_else(|e| die(format!("parse depositor address: {e:?}")));
+/// Reorg-safety default for a real (non-dev) chain, and the floor an explicit argument is clamped
+/// up to. Chain id 31337 (anvil) uses floor 0 — see `min_confirmations_for`.
+const DEFAULT_MIN_CONFIRMATIONS: u64 = 12;
+
+/// ONE `Deposited` log, read back from L1. Every economically meaningful field of the imported
+/// `Deposit` comes from HERE — none of it is caller-supplied any more (threat model §1, A9).
+struct OnChainDeposit {
+    deposit_index: u64,
+    depositor: Address,
+    token_index: u32,
+    amount: u64,
+    aux_data: Bytes32,
+    /// The chain the deposit was read from — carried so the replay-ledger key is scoped to the
+    /// SAME chain the verification ran against (one `cast chain-id`, not two).
+    chain_id: u64,
+}
+
+/// Strip an optional `0x` and require exactly `n` lowercase-able hex chars.
+fn hex_body<'a>(s: &'a str, n: usize, what: &str) -> &'a str {
+    let b = s.strip_prefix("0x").unwrap_or(s);
+    if b.len() != n || !b.chars().all(|c| c.is_ascii_hexdigit()) {
+        die(format!("{what}: expected {n} hex chars, got {s:?}"));
+    }
+    b
+}
+
+/// Parse a 32-byte ABI word as a `u64`, refusing (rather than truncating) anything wider.
+/// SECURITY: a silent truncation here would credit a WRONG amount / index — worse than refusing.
+fn abi_word_u64(word: &str, what: &str) -> u64 {
+    let w = hex_body(word, 64, what);
+    if w[..48].chars().any(|c| c != '0') {
+        die(format!(
+            "{what} exceeds u64 (0x{w}) — refusing rather than truncating"
+        ));
+    }
+    u64::from_str_radix(&w[48..], 16).unwrap_or_else(|e| die(format!("{what}: {e}")))
+}
+
+/// The reorg depth this chain requires. Anvil (31337) mines instantly and has no reorg model, so
+/// depth is meaningless there and the floor is 0; every OTHER chain floors at 1 and defaults to
+/// [`DEFAULT_MIN_CONFIRMATIONS`]. An explicit argument is honored but CLAMPED UP to the floor:
+/// an operator may knowingly tune 12 -> 3, and can NEVER tune a public chain down to 0.
+/// SECURITY: this relaxes only REORG DEPTH on a dev chain, never authenticity — the tx must still
+/// exist, be mined, and have `status == 1` everywhere. This is NOT an on-chain-check bypass.
+fn min_confirmations_for(chain_id: u64, explicit: Option<u64>) -> u64 {
+    let floor = if chain_id == 31337 { 0 } else { 1 };
+    match explicit {
+        Some(v) => v.max(floor),
+        None => {
+            if chain_id == 31337 {
+                0
+            } else {
+                DEFAULT_MIN_CONFIRMATIONS
+            }
+        }
+    }
+}
+
+/// Read the `Deposited` log of `tx_hash` from the chain and validate it against THIS channel.
+///
+/// SECURITY (the whole point of this function): the deposit's economics are sourced from the
+/// chain, never from argv. Refuses fail-closed on: a nonexistent/unmined tx, a reverted tx, an
+/// under-confirmed tx, a log from a contract other than the channel's own rollup, a log whose
+/// `recipient` is not the channel's `deposit_recipient` (a deposit made for ANOTHER channel), and
+/// on ZERO or SEVERAL matching logs (ambiguity).
+fn fetch_onchain_deposit(
+    rpc: &str,
+    tx_hash: &str,
+    rollup: &str,
+    deposit_recipient: Bytes32,
+    explicit_min_conf: Option<u64>,
+) -> OnChainDeposit {
+    // Shape-validate BEFORE handing it to `cast`: a leading '-' could otherwise be read as a flag.
+    let tx = format!("0x{}", hex_body(tx_hash, 64, "tx_hash"));
+    let rollup_body = hex_body(rollup, 40, "rollup address from channel_backing.json");
+
+    // `--async` is MANDATORY: without it `cast receipt` BLOCKS FOREVER waiting for an unknown tx,
+    // which would turn a refusal into a hang (threat model A1).
+    let receipt_raw = cast(&["receipt", &tx, "--rpc-url", rpc, "--json", "--async"]);
+    let receipt: serde_json::Value = serde_json::from_str(&receipt_raw)
+        .unwrap_or_else(|e| die(format!("parse `cast receipt` JSON: {e}\n{receipt_raw}")));
+
+    let status = receipt["status"].as_str().unwrap_or("");
+    if status != "0x1" {
+        die(format!(
+            "deposit tx {tx} did not succeed (status {status}) — refusing to import a reverted deposit"
+        ));
+    }
+    // SECURITY: parse STRICTLY. An earlier version used `unwrap_or(0)` here, which would silently
+    // treat an unparseable blockNumber as block 0 and make `confirmations = head + 1` — i.e. the
+    // depth check would pass unconditionally. This is the one place where a permissive default
+    // would disable a check, so it dies instead.
+    let tx_block = match receipt["blockNumber"].as_str() {
+        Some(s) => u64::from_str_radix(s.trim_start_matches("0x"), 16)
+            .unwrap_or_else(|e| die(format!("unparseable blockNumber {s:?} on tx {tx}: {e}"))),
+        None => die(format!("deposit tx {tx} is not mined yet (no blockNumber)")),
+    };
+
+    let chain_id: u64 = cast(&["chain-id", "--rpc-url", rpc])
+        .trim()
+        .parse()
+        .unwrap_or_else(|e| die(format!("parse chain-id: {e}")));
+    let head: u64 = cast(&["block-number", "--rpc-url", rpc])
+        .trim()
+        .parse()
+        .unwrap_or_else(|e| die(format!("parse block-number: {e}")));
+    let min_conf = min_confirmations_for(chain_id, explicit_min_conf);
+    let confirmations = head.saturating_sub(tx_block) + 1;
+    if confirmations < min_conf {
+        die(format!(
+            "deposit tx {tx} has {confirmations} confirmation(s), need {min_conf} on chain \
+             {chain_id} (reorg safety) — refusing"
+        ));
+    }
+
+    let logs = receipt["logs"]
+        .as_array()
+        .unwrap_or_else(|| die(format!("deposit tx {tx} receipt has no logs array")));
+
+    // Filter to OUR rollup's `Deposited` logs for THIS channel's deposit recipient.
+    let mut matching: Vec<&serde_json::Value> = Vec::new();
+    let mut saw_deposited_for_other_recipient = 0usize;
+    for log in logs {
+        let addr = log["address"].as_str().unwrap_or("");
+        let topics = log["topics"].as_array().cloned().unwrap_or_default();
+        let topic0 = topics.first().and_then(|t| t.as_str()).unwrap_or("");
+        // Contract binding (A3): only the channel's OWN rollup may source a deposit — not just any
+        // contract that emits a similarly-shaped event.
+        if !addr.eq_ignore_ascii_case(&format!("0x{rollup_body}")) {
+            continue;
+        }
+        if !topic0.eq_ignore_ascii_case(DEPOSITED_TOPIC0) {
+            continue;
+        }
+        let data = log["data"].as_str().unwrap_or("");
+        let body = data.strip_prefix("0x").unwrap_or(data);
+        if body.len() < 64 * 6 {
+            die(format!("malformed Deposited log data in tx {tx}"));
+        }
+        let recipient = Bytes32::from_hex(&format!("0x{}", abi_word(body, 1)))
+            .unwrap_or_else(|e| die(format!("parse Deposited.recipient: {e:?}")));
+        // Channel binding (A4): a deposit made for ANOTHER channel must not be importable here.
+        if recipient != deposit_recipient {
+            saw_deposited_for_other_recipient += 1;
+            continue;
+        }
+        matching.push(log);
+    }
+
+    if matching.is_empty() {
+        die(format!(
+            "tx {tx} contains no `Deposited` log from rollup 0x{rollup_body} for this channel's \
+             deposit_recipient {} ({saw_deposited_for_other_recipient} Deposited log(s) were for a \
+             DIFFERENT recipient) — refusing",
+            deposit_recipient.to_hex()
+        ));
+    }
+    // FAIL CLOSED on ambiguity (A5): no disambiguation parameter is offered, so there is no lever
+    // to misuse. Deposit each amount in its own transaction.
+    if matching.len() > 1 {
+        die(format!(
+            "tx {tx} contains {} `Deposited` logs for this channel — ambiguous, refusing to guess \
+             which one to import",
+            matching.len()
+        ));
+    }
+
+    let log = matching[0];
+    let topics = log["topics"].as_array().cloned().unwrap_or_default();
+    let index_topic = topics
+        .get(1)
+        .and_then(|t| t.as_str())
+        .unwrap_or_else(|| die("Deposited log has no indexed depositIndex topic"));
+    let deposit_index = abi_word_u64(index_topic, "Deposited.depositIndex");
+
+    let data = log["data"].as_str().unwrap_or("");
+    let body = data.strip_prefix("0x").unwrap_or(data);
+    let depositor = Address::from_hex(&format!("0x{}", &abi_word(body, 0)[24..]))
+        .unwrap_or_else(|e| die(format!("parse Deposited.depositor: {e:?}")));
+    // `uint32` on-chain, but narrow it CHECKED rather than with `as` — no silent truncation
+    // anywhere in this function.
+    let token_index = u32::try_from(abi_word_u64(abi_word(body, 2), "Deposited.tokenIndex"))
+        .unwrap_or_else(|_| die("Deposited.tokenIndex exceeds u32"));
+    // The import encrypts a u64 amount; refuse anything wider rather than truncating (A11).
+    let amount = abi_word_u64(abi_word(body, 3), "Deposited.amount");
+    let aux_data = Bytes32::from_hex(&format!("0x{}", abi_word(body, 4)))
+        .unwrap_or_else(|e| die(format!("parse Deposited.auxData: {e:?}")));
+
+    eprintln!(
+        "cosign-l1-deposit-import: verified on-chain deposit #{deposit_index} in tx {tx} \
+         (chain {chain_id}, {confirmations} conf, rollup 0x{rollup_body}): depositor {}, \
+         token_index {token_index}, amount {amount}.",
+        depositor.to_hex()
+    );
+
+    OnChainDeposit {
+        deposit_index,
+        depositor,
+        token_index,
+        amount,
+        aux_data,
+        chain_id,
+    }
+}
+
+/// Co-sign an L1 deposit import (mid-channel deposit): fold a REAL, on-chain-verified deposit into
+/// the channel's balance without closing. Usage:
+///   channel_member cosign-l1-deposit-import <recipient_slot|auto> <tx_hash> <rpc_url> \
+///       [out.json] [min_confirmations] [--allow-unbound-depositor]
+///
+/// SECURITY (the fix): `amount`, `depositor` and `token_index` are NO LONGER caller-supplied —
+/// they are read from the transaction's `Deposited` log. The ability to lie about them was
+/// REMOVED rather than cross-checked. `token_index` still resolves against the channel's active
+/// registry, and an UNREGISTERED index is refused fail-closed (TM-7).
+///
+/// `recipient_slot` may be `auto`, which resolves to the unique active slot whose B-1b bound
+/// recipient equals the on-chain depositor.
+fn cmd_cosign_l1_deposit_import(args: &[String]) {
+    const USAGE: &str = "cosign-l1-deposit-import <recipient_slot|auto> <tx_hash> <rpc_url> \
+                         [out.json] [min_confirmations] [--allow-unbound-depositor]";
+
+    // Flags are position-independent; positional args are the non-flag remainder.
+    // SECURITY: an UNKNOWN `--flag` is refused rather than ignored. Silently dropping it would let
+    // a mistyped or misremembered option (e.g. `--min-confirmations=0`) look accepted while having
+    // no effect — the operator would believe they set a policy they did not.
+    if let Some(bad) = args
+        .iter()
+        .skip(1)
+        .find(|a| a.starts_with("--") && a.as_str() != "--allow-unbound-depositor")
+    {
+        die(format!("unknown flag {bad:?}\nusage: {USAGE}"));
+    }
+    let allow_unbound = args.iter().any(|a| a == "--allow-unbound-depositor");
+    let pos: Vec<&String> = args
+        .iter()
+        .skip(1)
+        .filter(|a| !a.starts_with("--"))
+        .collect();
+
+    let slot_arg = pos.first().unwrap_or_else(|| die(USAGE));
+    let tx_hash = pos.get(1).unwrap_or_else(|| die(USAGE));
+    let rpc = pos.get(2).unwrap_or_else(|| die(USAGE));
+    let out_path = pos
+        .get(3)
+        .map(|s| s.as_str())
+        .unwrap_or("l1_import_cosigned.json");
+    let explicit_min_conf: Option<u64> = pos
+        .get(4)
+        .map(|s| s.parse().unwrap_or_else(|_| die("bad [min_confirmations]")));
+
     let (_, _, backing) = load_backing();
     let deposit_recipient = Bytes32::from_hex(&backing.deposit_recipient)
         .unwrap_or_else(|e| die(format!("parse deposit_recipient from backing: {e:?}")));
+    if backing.rollup.is_empty() {
+        die("channel_backing.json has no rollup address — cannot verify the deposit on-chain");
+    }
 
+    // SECURITY (adversarial review finding 5): the channel's OWN backing deposit is a real
+    // `Deposited` log from this rollup to this `deposit_recipient`, so it passes every check in
+    // `fetch_onchain_deposit`. But its value is ALREADY counted in the genesis fund — importing it
+    // would credit the channel twice against a single L1 escrow. Refuse it by name.
+    let strip0x = |s: &str| s.trim_start_matches("0x").to_ascii_lowercase();
+    if !backing.deposit_tx.is_empty() && strip0x(&backing.deposit_tx) == strip0x(tx_hash) {
+        die(
+            "REFUSING: this is the channel's BACKING deposit (channel_backing.json deposit_tx). \
+             Its value is already counted in the genesis fund — importing it would credit the \
+             channel twice against one L1 escrow.",
+        );
+    }
+
+    let onchain = fetch_onchain_deposit(
+        rpc,
+        tx_hash,
+        &backing.rollup,
+        deposit_recipient,
+        explicit_min_conf,
+    );
+
+    let mut state = load_state();
+
+    // ── REPLAY LEDGER (threat model §4) ────────────────────────────────────────────────────
+    // The channel layer has NO nullifier SET — `shared_native_nullifier_root` is a keccak CHAIN,
+    // and re-folding an identical nullifier always yields a different root, so the native gate's
+    // `ensure_different_root` passes on a replay BY CONSTRUCTION. This ledger is therefore the
+    // only thing standing between a repeated import and a double credit. Keyed on the canonical
+    // L1 deposit identity (chain-scoped contract + the contract's own monotone `depositCount`),
+    // NOT on the tx hash: one transaction can carry several `Deposited` logs.
+    // SECURITY (adversarial review finding 6): CANONICALIZE the rollup before keying. `hex_body`
+    // accepts both `0xabc…` and `abc…`, and `setup-backing` writes `rollup` verbatim from argv —
+    // so keying on the raw field would give the SAME deposit two different ledger keys under two
+    // spellings, and a replay would slip through. Strip `0x` and lowercase.
+    let deposit_identity = format!(
+        "{}:{}:{}",
+        onchain.chain_id,
+        strip0x(&backing.rollup),
+        onchain.deposit_index
+    );
+    if state.imported_deposits.contains(&deposit_identity) {
+        die(format!(
+            "REPLAY REFUSED: L1 deposit {deposit_identity} has already been imported into this \
+             channel. A deposit is credited at most once."
+        ));
+    }
+
+    // ── CREDIT BINDING (threat model §5) ───────────────────────────────────────────────────
+    let balance_state = &state.snapshot.state.balance_state;
+    let active = balance_state.member_count as usize + balance_state.delegate_count as usize;
+    // UNCONDITIONAL: if the depositor is a channel participant's bound exit address, the deposit
+    // belongs to THAT slot. No flag may redirect it — this is the leg that blocks "Mallory imports
+    // Alice's genuine deposit into Mallory's slot".
+    //
+    // SECURITY (ambiguity, adversarial review finding 1): `join_delegate` does not enforce that
+    // B-1b recipients are DISTINCT, so a joining member can declare someone else's L1 address as
+    // its own bound recipient. A first-match lookup would then resolve the victim's deposit to the
+    // ATTACKER's slot (and `auto` is exactly what the chain-driven co-signer path uses). So we
+    // collect ALL matches and refuse on more than one — a duplicated exit address is itself the
+    // attack signature, and there is no safe way to pick. `cmd_init` also rejects the duplicate at
+    // join time; this is the defense-in-depth half for states created before that check existed.
+    let depositor_slots: Vec<usize> = (0..active)
+        .filter(|&i| balance_state.recipients[i] == onchain.depositor)
+        .collect();
+    if depositor_slots.len() > 1 {
+        die(format!(
+            "AMBIGUOUS BINDING REFUSED: the on-chain depositor {} is the bound (B-1b) recipient of \
+             {} ACTIVE slots {:?}. A duplicated exit address makes the credited slot ambiguous \
+             (and is how a joining member would try to capture someone else's deposit) — refusing.",
+            onchain.depositor.to_hex(),
+            depositor_slots.len(),
+            depositor_slots
+        ));
+    }
+    let depositor_slot = depositor_slots.first().copied();
+
+    let recipient_slot: usize = if slot_arg.as_str() == "auto" {
+        depositor_slot.unwrap_or_else(|| {
+            die(format!(
+                "`auto` could not resolve a slot: no ACTIVE slot's bound recipient equals the \
+                 on-chain depositor {} — pass an explicit slot",
+                onchain.depositor.to_hex()
+            ))
+        })
+    } else {
+        slot_arg.parse().unwrap_or_else(|_| die(USAGE))
+    };
+    if recipient_slot >= active {
+        die(format!(
+            "recipient_slot {recipient_slot} is not an ACTIVE slot (active = {active})"
+        ));
+    }
+    match depositor_slot {
+        Some(j) if j != recipient_slot => die(format!(
+            "CREDIT MISDIRECTION REFUSED: the on-chain depositor {} is the bound (B-1b) recipient \
+             of ACTIVE slot {j}, but this import would credit slot {recipient_slot}. This refusal \
+             is unconditional — --allow-unbound-depositor does NOT override it.",
+            onchain.depositor.to_hex()
+        )),
+        Some(_) => {}
+        None => {
+            // The depositor is bound to NO slot (a third party / the operator funding a slot whose
+            // recipient is a synthetic address, e.g. the $ITX faucet). Allowed only when the caller
+            // says so explicitly.
+            //
+            // WHO PASSES IT (keep in sync with doc/tasks/deposit-import-threat-model.md): the
+            // server-key api routes do — `api/routes/deposit.js` (both import paths) and
+            // `api/routes/channel-init.js` — because there the DEPOSITOR IS THE SERVER, not the
+            // member, so its address is bound to no slot by construction. The browser relays do
+            // NOT pass it: a MetaMask deposit comes from the member's own bound address.
+            //
+            // This flag can only widen the `None` arm above. It is NOT consulted on the
+            // misdirection arm (`Some(j) if j != recipient_slot`), which dies unconditionally, so
+            // it can never redirect a deposit that belongs to someone.
+            if !allow_unbound {
+                die(format!(
+                    "REFUSING: the on-chain depositor {} is not the bound (B-1b) recipient of \
+                     ACTIVE slot {recipient_slot} (which is {}), and is not bound to any slot. \
+                     Pass --allow-unbound-depositor to credit a third-party/operator deposit.",
+                    onchain.depositor.to_hex(),
+                    balance_state.recipients[recipient_slot].to_hex()
+                ));
+            }
+            eprintln!(
+                "cosign-l1-deposit-import: WARNING — crediting slot {recipient_slot} from \
+                 depositor {} which is bound to NO active slot (--allow-unbound-depositor).",
+                onchain.depositor.to_hex()
+            );
+        }
+    }
+
+    let amount = onchain.amount;
+    let token_index = onchain.token_index;
     let deposit = Deposit {
-        deposit_index: Default::default(),
+        // REAL on-chain deposit index (the contract's monotone `depositCount`): this is what makes
+        // `Deposit::nullifier()` unique per real deposit. See the threat model §4 Finding A.
+        deposit_index: U63::new(onchain.deposit_index)
+            .unwrap_or_else(|e| die(format!("deposit_index out of range: {e:?}"))),
+        // DELIBERATELY 0 — see threat model §9. `Deposit::block_number` is the INTMAX validity
+        // block number that folded the deposit (enforced as such by receive_deposit_circuit), NOT
+        // an L1 block number. This deposit is not in any intmax block yet, so "unassigned" (0) is
+        // the honest value; writing the L1 block here would be a unit confusion.
         block_number: Default::default(),
-        depositor,
+        depositor: onchain.depositor,
         recipient: deposit_recipient,
         token_index,
         amount: U256::from(amount),
-        aux_data: Bytes32::default(),
+        aux_data: onchain.aux_data,
     };
 
-    let mut state = load_state();
     let snapshot = &state.snapshot;
     let bp_keys = keys_for(state.controlled[0].keygen_seed);
 
@@ -4046,6 +4466,9 @@ fn cmd_cosign_l1_deposit_import(args: &[String]) {
     .unwrap_or_else(|e| die(format!("L1 deposit import transition invalid: {e}")));
 
     state.snapshot.state = bundle_state.clone();
+    // Consume the deposit in the SAME save as the new snapshot: the credit and the ledger entry
+    // land together, so a crash cannot leave a credited-but-unconsumed deposit.
+    state.imported_deposits.insert(deposit_identity.clone());
     save_state(&state);
     write_json("channel_snapshot.json", &state.snapshot);
 
@@ -4055,9 +4478,13 @@ fn cmd_cosign_l1_deposit_import(args: &[String]) {
     });
     write_json(out_path, &result);
     println!(
-        "cosign-l1-deposit-import OK: slot {} received {} deposit import (base token_index {}). \
-         New state_version = {}.",
-        recipient_slot, amount, token_index, bundle_state.balance_state.state_version
+        "cosign-l1-deposit-import OK: slot {} received {} deposit import (base token_index {}, \
+         L1 deposit {}). New state_version = {}.",
+        recipient_slot,
+        amount,
+        token_index,
+        deposit_identity,
+        bundle_state.balance_state.state_version
     );
 }
 

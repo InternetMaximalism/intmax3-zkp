@@ -530,20 +530,33 @@ app.post('/api/l1-deposit', (req, res) => {
 // Fold a pending L1 deposit into the channel's balance (mid-channel deposit).
 // If depositor+amount are provided (MetaMask flow), uses those directly.
 // Otherwise reads from pending_deposit.json (fallback relay-deposit flow).
+// SECURITY: mirrors the EC2 relay — `depositor`/`amount` are no longer accepted; the CLI reads
+// them from the on-chain `Deposited` log. See doc/tasks/deposit-import-threat-model.md.
 app.post('/api/import-deposit', (req, res) => {
   const ch = reqChannel(req);
   withLock(ch, () => {
-    const slot = (req.body && req.body.recipientSlot) || 0;
-    let depositor, amount;
-    if (req.body && req.body.depositor && req.body.amount) {
-      depositor = req.body.depositor;
-      amount = req.body.amount;
-    } else {
-      const dep = JSON.parse(fs.readFileSync(wc(ch, 'pending_deposit.json'), 'utf8'));
-      depositor = dep.depositor;
-      amount = dep.amount;
+    const b = req.body || {};
+    if (b.depositor !== undefined || b.amount !== undefined || b.tokenIndex !== undefined) {
+      throw new Error('import-deposit no longer accepts { depositor, amount, tokenIndex }: they are read from the on-chain Deposited log. Send { recipientSlot, txHash }.');
     }
-    cli(ch, ['cosign-l1-deposit-import', String(slot), String(amount), depositor, 'l1_import_cosigned.json']);
+    const slot = b.recipientSlot !== undefined ? b.recipientSlot : 0;
+    let txHash = b.txHash;
+    // The browser (MetaMask) path always sends its own txHash: that deposit is signed by the user's
+    // wallet, whose address IS the slot's bound B-1b recipient, so the CLI's depositor<->slot
+    // binding must hold and NO flag is passed. The fallback file is written only by the
+    // server-key `/api/l1-deposit` route, where the depositor is the operator and bound to no slot.
+    let operatorFunded = false;
+    if (txHash === undefined) {
+      const dep = JSON.parse(fs.readFileSync(wc(ch, 'pending_deposit.json'), 'utf8'));
+      if (!dep.txHash) throw new Error('pending_deposit.json has no txHash — cannot verify the deposit on-chain');
+      txHash = dep.txHash;
+      operatorFunded = true;
+    }
+    if (!/^0x[0-9a-fA-F]{64}$/.test(String(txHash))) throw new Error('txHash must be 0x + 64 hex chars');
+    if (!/^[0-9]{1,4}$/.test(String(slot))) throw new Error('recipientSlot must be a small decimal integer');
+    const args = ['cosign-l1-deposit-import', String(slot), String(txHash), RPC, 'l1_import_cosigned.json'];
+    if (operatorFunded) args.push('--allow-unbound-depositor');
+    cli(ch, args);
     const depTicket = findActiveTicket(ch, 'deposit');
     if (depTicket) { depTicket.status = 'import_done'; depTicket.steps.import = { completedAt: Date.now() }; upsertTicket(ch, depTicket); }
     const snap = JSON.parse(fs.readFileSync(wc(ch, 'channel_snapshot.json'), 'utf8'));

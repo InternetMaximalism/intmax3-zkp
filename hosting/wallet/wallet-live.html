@@ -1012,10 +1012,11 @@ function applyTicketState() {
           btn.disabled = true;
           try {
             log('importing deposit into channel...');
+            // The ticket carries the L1 txHash; the relay/CLI reads the deposit's economics from
+            // that transaction's on-chain Deposited log (depositor/amount are no longer sent).
             const snap = await api('/api/import-deposit', JSON.stringify({
               recipientSlot: t.params.recipientSlot || mySlot,
-              depositor: t.params.depositor,
-              amount: t.params.amount,
+              txHash: t.params.txHash,
             }));
             setChannelFrom(snap);
             const r = JSON.parse(await call('importChannel', { snapshotJson: snap }));
@@ -1132,7 +1133,7 @@ $('btnOpen').onclick = guard('join', async () => {
       clearInterval(tick);
       tick = setInterval(() => { $('btnOpen').textContent = 'Importing... ' + Math.round((Date.now()-t0)/1000) + 's'; }, 250);
       log('importing deposit into channel...');
-      const snap2 = await api('/api/import-deposit', JSON.stringify({ recipientSlot: mySlot, depositor: dr.depositor, amount: depositAmt }));
+      const snap2 = await api('/api/import-deposit', JSON.stringify({ recipientSlot: mySlot, txHash: dr.txHash }));
       setChannelFrom(snap2);
       const r2 = JSON.parse(await call('importChannel', { snapshotJson: snap2 }));
       mySlot = r2.slot; showBalance(r2);
@@ -1307,7 +1308,7 @@ $('btnDeposit').onclick = guard('deposit', async () => {
 
     phase = 'Importing';
     log('importing deposit into channel (slot ' + mySlot + ')...');
-    const snap = await api('/api/import-deposit', JSON.stringify({ recipientSlot: mySlot, depositor: dr.depositor, amount: amt }));
+    const snap = await api('/api/import-deposit', JSON.stringify({ recipientSlot: mySlot, txHash: dr.txHash }));
     setChannelFrom(snap);
     const r = JSON.parse(await call('importChannel', { snapshotJson: snap }));
     mySlot = r.slot; showBalance(r);

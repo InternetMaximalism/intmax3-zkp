@@ -81,10 +81,16 @@ router.post('/join-and-deposit', (req, res) => {
         if (tokenIndex === '0') castArgs.push('--value', String(depositAmount));
         castArgs.push('--private-key', depositKey(), '--rpc-url', RPC, '--json');
         const out = sh('cast', castArgs, { stdio: 'pipe' });
-        depositTxHash = (out.match(/"transactionHash"\s*:\s*"(0x[0-9a-fA-F]+)"/) || [])[1] || '';
-        const depositor = sh('cast', ['wallet', 'address', '--private-key', depositKey()], { stdio: 'pipe' }).trim();
+        depositTxHash = (out.match(/"transactionHash"\s*:\s*"(0x[0-9a-fA-F]{64})"/) || [])[1] || '';
+        if (!depositTxHash) throw new Error('could not read the deposit transactionHash from cast output');
 
-        cli(ch, ['cosign-l1-deposit-import', String(slot), String(depositAmount), depositor, 'l1_import_cosigned.json', tokenIndex]);
+        // SECURITY: import by TX HASH — the CLI reads depositor/amount/tokenIndex from the
+        // on-chain `Deposited` log.
+        // OPERATOR-FUNDED: the deposit above is signed with the server's `depositKey()`, NOT the
+        // joining delegate's wallet, so the on-chain depositor is the operator and is bound to no
+        // slot. The flag relaxes only that leg; crediting a slot bound to a DIFFERENT member is
+        // still refused unconditionally by the CLI.
+        cli(ch, ['cosign-l1-deposit-import', String(slot), depositTxHash, RPC, 'l1_import_cosigned.json', '--allow-unbound-depositor']);
         snapshot = readJson(wc(ch, 'channel_snapshot.json'));
       } catch (depErr) {
         console.error('deposit failed (channel joined with 0 balance):', depErr.message);

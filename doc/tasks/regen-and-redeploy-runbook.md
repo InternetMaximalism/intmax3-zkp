@@ -222,18 +222,29 @@ cast call "$ROLLUP" "tokenAddressOf(uint32)(address)" "$ITX_TOKEN_INDEX" --rpc-u
 # 4) escrow the faucet supply on L1. msg.value MUST be 0 for a nonzero tokenIndex; the rollup
 #    credits a MEASURED balanceOf delta (fee-on-transfer tokens fail closed here).
 DEPOSIT_RECIPIENT=$(jq -r .deposit_recipient $WORK/channel_backing.json)
-DEPOSITOR=$(cast wallet address --private-key "$(cat "$PRIV")")
 cast send "$ITX" "approve(address,uint256)" "$ROLLUP" "$FAUCET_SUPPLY" \
   --rpc-url "$RPC_URL" --private-key "$(cat "$PRIV")"
-cast send "$ROLLUP" "deposit(bytes32,uint32,uint256,bytes32)" \
+# Capture the REAL deposit tx hash — the import is verified against this transaction's on-chain
+# `Deposited` log (doc/tasks/deposit-import-threat-model.md).
+DEPOSIT_TX=$(cast send "$ROLLUP" "deposit(bytes32,uint32,uint256,bytes32)" \
   "$DEPOSIT_RECIPIENT" "$ITX_TOKEN_INDEX" "$FAUCET_SUPPLY" \
   0x0000000000000000000000000000000000000000000000000000000000000000 \
-  --value 0 --rpc-url "$RPC_URL" --private-key "$(cat "$PRIV")"
+  --value 0 --rpc-url "$RPC_URL" --private-key "$(cat "$PRIV")" --json | jq -r .transactionHash)
 
-# 5) import the deposit to the FAUCET member (cosigned; the base token_index resolves against the
-#    channel's signed registry — an unregistered index is refused fail-closed, TM-7).
+# 5) import the deposit to the FAUCET member (cosigned). The amount, depositor and base
+#    token_index are READ FROM THE CHAIN — they are no longer arguments, so they cannot be
+#    misstated. The token index still resolves against the channel's signed registry (an
+#    unregistered index is refused fail-closed, TM-7).
+#
+#    --allow-unbound-depositor is needed ONLY here: the faucet slot's B-1b bound exit address is
+#    the synthetic per-(channel, slot) address, not the operator's deployer account. It does NOT
+#    weaken the check that blocks redirecting another MEMBER's deposit — that refusal is
+#    unconditional. Never pass this flag on a user deposit, and never wire it into a relay.
+#
+#    On a public chain the import also waits for 12 confirmations by default; append a smaller
+#    depth as the 5th positional argument if you knowingly want less (0 is not permitted).
 ( cd $WORK && INTMAX_CHANNEL=$CHANNEL "$CLI" cosign-l1-deposit-import \
-    "$FAUCET_SLOT" "$FAUCET_SUPPLY" "$DEPOSITOR" itx_import.json "$ITX_TOKEN_INDEX" )
+    "$FAUCET_SLOT" "$DEPOSIT_TX" "$RPC_URL" itx_import.json --allow-unbound-depositor )
 
 # 6) sanity: make the faucet position spendable once, up front. A homomorphically credited
 #    position (which is what an import produces) has pending_adds > 0 and no local encryption
@@ -277,10 +288,15 @@ token with no readable `decimals()` is shown in raw base units rather than a gue
   is **no ownership proof** on that slot — an anonymous caller may request a drip for any active
   account, which lands with the legitimate owner but consumes the channel allowance (residual risk
   R-1 in `doc/tasks/itx-faucet-threat-model.md`).
-- **DEPLOYMENT INVARIANT: run exactly ONE relay process per channel directory.** The mutex that
-  makes check→reserve→transfer atomic is in-process JS state, not a file lock; two processes
-  sharing one `wallet-live-work/ch<N>/` could double-drip a slot. If the relay is ever clustered,
-  the ledger needs a real file lock before the faucet is re-enabled.
+- **DEPLOYMENT INVARIANT (D-1): exactly ONE writer process per channel directory.** Every
+  single-use ledger in `wallet-live-work/ch<N>/` is a plain JSON file guarded by an IN-PROCESS
+  mutex, not a file lock — the faucet drip ledger (`faucet_state.json`), the imported-deposit
+  ledger (`CliState.imported_deposits`, see `doc/tasks/deposit-import-threat-model.md`) and the
+  pre-existing inter-channel spent/applied ledgers. Two processes sharing one directory can both
+  pass a membership check and both commit: a double drip, or the SAME L1 deposit credited twice.
+  Note this is not only "two relays" — the api service, the relay and the node co-signer can all
+  be pointed at the same work dir. Run one writer per channel; if that ever changes, these ledgers
+  need a real file lock BEFORE the faucet or browser deposit import is re-enabled.
 
 ## Step 4 — Option B (1024-slot) redeploy (#12)
 Option B circuits/fixtures are already present on this branch (constants

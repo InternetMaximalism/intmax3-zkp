@@ -421,7 +421,7 @@ Response: <ChannelSnapshot JSON>
 **API implementation:**
 ```
 POST /api/v1/channel/{ch}/deposit/l1-send
-Request:  { amount: string, depositor?: string, tokenIndex?: string }   # default '0' (ETH); nonzero = registered ERC-20 (no ETH value; requires prior approve)
+Request:  { amount: string, tokenIndex?: string }   # default '0' (ETH); nonzero = registered ERC-20 (no ETH value; requires prior approve)
 Response: { txHash: string, depositor: string, tokenIndex: string }
 ```
 Or expose deposit info so the client can submit via their own wallet:
@@ -452,7 +452,7 @@ Internal to the co-signer. The client doesn't generate this proof — the co-sig
 
 **Overview:** Import an L1 deposit into the channel. Two-step state transition: (1) fund import: `channelFund += amount`, `unallocated += amount`, advance `settledTxChain` by deposit nullifier; (2) bundle apply: `encBalances[recipient] += encrypt(amount)`, `unallocated -= amount`. All N co-signers must verify via `verify_l1_deposit_import_transition()`. (abstract2-1 §3.3.2c, detail2 C-10)
 
-**Inputs:** `{ recipientSlot: u8, depositor: address, amount: u256 }`
+**Inputs:** `{ recipientSlot: u16, txHash: bytes32 }` — the deposit's amount/depositor/tokenIndex are read from the transaction's on-chain `Deposited` log, never from the body (doc/tasks/deposit-import-threat-model.md)
 **Outputs:** Updated `ChannelSnapshot`
 
 **Preconditions:** Channel must be Active. Deposit Merkle-included in finalized `deposit_tree_root`. Nullifier unused.
@@ -465,7 +465,7 @@ Internal to the co-signer. The client doesn't generate this proof — the co-sig
 **API implementation:**
 ```
 POST /api/v1/channel/{ch}/deposit/import
-Request:  { recipientSlot: number, depositor: string, amount: string }
+Request:  { recipientSlot: number, txHash: string }   # depositor/amount/tokenIndex are REJECTED: read from the on-chain Deposited log
 Response: <ChannelSnapshot JSON>
 ```
 
@@ -1137,7 +1137,7 @@ A18 l1Deposit (client/L1)
 **API (orchestrated):**
 ```
 POST /api/v1/channel/{ch}/deposit
-Request:  { recipientSlot: number, depositor: string, amount: string }
+Request:  { recipientSlot: number, txHash: string }   # depositor/amount/tokenIndex are REJECTED: read from the on-chain Deposited log
 Response: { snapshot: <ChannelSnapshot>, balance: string }
 ```
 

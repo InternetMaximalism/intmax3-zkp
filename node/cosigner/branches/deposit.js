@@ -1,36 +1,55 @@
 'use strict';
 // NORMAL branch: import confirmed L1 deposits into the channel (DESIGN.md §3.4) and refresh the
-// close anchor on block finalization. The CLI reconciles the deposit against the on-chain
-// depositHashChain and enforces nullifier-unused (fail-closed); this handler only orchestrates.
+// close anchor on block finalization.
+//
+// SECURITY: this handler passes the observed TRANSACTION HASH and nothing economic. The CLI reads
+// depositor/amount/tokenIndex from that transaction's on-chain `Deposited` log, verifies the log
+// came from the channel's own rollup for the channel's own deposit_recipient, enforces a
+// confirmation depth, and refuses a replay via its consumed-deposit ledger. Amounts observed here
+// are used only for logging — never as an economic input.
+// See doc/tasks/deposit-import-threat-model.md.
+
+// Build the CLI argv for an observed deposit, or return an { error } describing why it is not
+// importable. Exported for unit testing (node/test/deposit-import-args.test.js).
+//
+// `recipientSlot` is usually absent on the chain-driven path (the `Deposited` event carries no
+// slot), so we pass `auto`: the CLI resolves the credited slot from the depositor's B-1b bound
+// exit address, and refuses when that is ambiguous or unbound. This is strictly better than the
+// old behavior, which silently defaulted to slot 0.
+function depositImportArgs({ txHash, recipientSlot, rpc }) {
+  if (!/^0x[0-9a-fA-F]{64}$/.test(String(txHash || ''))) {
+    return { error: 'txHash must be 0x + 64 hex chars' };
+  }
+  let slot = 'auto';
+  if (recipientSlot != null) {
+    const n = Number(recipientSlot);
+    if (!Number.isInteger(n) || n < 0 || n > 1023) return { error: 'recipientSlot out of range' };
+    slot = String(n);
+  }
+  if (!/^[a-z0-9:/._-]+$/i.test(String(rpc || '')) || String(rpc).startsWith('-')) {
+    return { error: 'rpc url missing or unsafe' };
+  }
+  return { args: ['cosign-l1-deposit-import', slot, String(txHash), String(rpc), 'l1_import_cosigned.json'] };
+}
 
 async function handleDepositImport(event, ctx) {
-  const { cli, ch, store, log, alert } = ctx;
-  // event.args carries the decoded Deposited fields once the watcher decodes them; for v1 we read
-  // the depositor/amount from the recorded pending_deposit (relay/browser path) or the event args.
-  const dep = event.args || readPending(cli, ch);
-  if (!dep || dep.amount == null) {
-    return log.warn({ event: 'DEPOSIT_NO_DATA', channel: ch.id, txHash: event.txHash });
+  const { cli, ch, store, log, alert, rpc } = ctx;
+  const dep = event.args || readPending(cli, ch) || {};
+  const txHash = event.txHash || dep.txHash;
+  const built = depositImportArgs({
+    txHash,
+    recipientSlot: dep.recipientSlot,
+    rpc: rpc || process.env.RPC || 'http://127.0.0.1:8545',
+  });
+  if (built.error) {
+    return alert.raise('warn', ch.id, 'DEPOSIT_BAD_ARGS', built.error, { txHash });
   }
-  // Defense-in-depth (review L1): these become positional CLI argv. Validate shapes and reject any
-  // value that could be read as a flag (leading '-'), even though chain args are ABI-decoded/trusted.
-  // Multi-token (detail2 §N-5): the Deposited event's tokenIndex is NO LONGER discarded — it is
-  // validated (decimal u32) and forwarded to the CLI, which resolves it against the channel's
-  // cosigned registry (an unregistered index is refused fail-closed by the CLI, TM-7).
-  const slot = dep.recipientSlot != null ? Number(dep.recipientSlot) : 0;
-  const amount = String(dep.amount);
-  const depositor = String(dep.depositor);
-  const tokenIndex = dep.tokenIndex != null ? String(dep.tokenIndex) : '0';
-  if (!Number.isInteger(slot) || slot < 0 || slot > 255 ||
-      !/^[0-9]+$/.test(amount) || !/^0x[0-9a-fA-F]{40}$/.test(depositor) ||
-      !/^[0-9]{1,10}$/.test(tokenIndex) || Number(tokenIndex) > 0xFFFFFFFF) {
-    return alert.raise('warn', ch.id, 'DEPOSIT_BAD_ARGS', 'deposit args failed shape validation', { slot, amount, depositor, tokenIndex });
-  }
-  const actionId = `deposit-import:${event.txHash || dep.txHash || ''}`;
+  const actionId = `deposit-import:${txHash}`;
   if (!store.claimAction(actionId)) return; // already imported
+  const slot = built.args[1];
+  const tokenIndex = dep.tokenIndex != null ? String(dep.tokenIndex) : '(from log)';
   try {
-    await cli.run(ch.id, ch.workDir, [
-      'cosign-l1-deposit-import', String(slot), amount, depositor, 'l1_import_cosigned.json', tokenIndex,
-    ]);
+    await cli.run(ch.id, ch.workDir, built.args);
     const t = store.findTicket((x) => x.type === 'deposit' && x.status !== 'import_done');
     if (t) store.upsertTicket({ ...t, status: 'import_done' });
     store.completeAction(actionId, 'ok');
@@ -51,4 +70,4 @@ async function refreshAnchors(event, ctx) {
   ctx.log.info({ event: 'ANCHOR_REFRESH', channel: ctx.ch.id, blockNumber: event.blockNumber });
 }
 
-module.exports = { handleDepositImport, refreshAnchors };
+module.exports = { handleDepositImport, refreshAnchors, depositImportArgs };

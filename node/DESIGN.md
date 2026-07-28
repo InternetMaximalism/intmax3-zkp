@@ -270,12 +270,16 @@ loop never exposes a standalone credit that would trust a request-body signed st
 The destination channel is resolved locally; both legs persist only if both pass.
 
 ### 3.4 NORMAL — deposit import (A20 / W7)
-On a confirmed `Deposited(recipient, amount, …)` for a backed channel:
-1. Reconcile the deposit against the on-chain `depositHashChain` (the CLI's setup-backing
-   reconciliation model) — refuse if the Rust-computed hash disagrees.
-2. Check the deposit nullifier is unused (double-fold prevention, detail2 C-10 T2).
-3. `channel_member cosign-l1-deposit-import <slot> <amount> <depositor>` → 2-step fund-import +
-   bundle-apply, N-of-N verified. Advance the deposit ticket `l1_done → import_done`.
+On a confirmed `Deposited(recipient, amount, …)` for a backed channel, this handler forwards ONLY
+the observed transaction hash — never an amount, depositor or token index. The CLI does the
+verification (doc/tasks/deposit-import-threat-model.md):
+1. `channel_member cosign-l1-deposit-import <slot|auto> <tx_hash> <rpc_url>` reads the `Deposited`
+   log from that transaction and requires it to come from the channel's own rollup, for the
+   channel's own `deposit_recipient`, with enough confirmations, and unambiguously (0 or >1
+   matching logs are refused).
+2. The credited slot is bound to the on-chain depositor's B-1b exit address; `auto` resolves it.
+3. The CLI's consumed-deposit ledger refuses a replay of the same L1 deposit.
+4. → 2-step fund-import + bundle-apply, N-of-N verified. Advance the ticket `l1_done → import_done`.
 4. Publish the updated snapshot. If import fails, leave the ticket at `l1_done` for retry (the
    channel is still joinable with prior balance).
 

@@ -8,7 +8,9 @@
 //!   → register-token ITX_INDEX      (cosigned TokenRegister → ITX gets LOCAL slot 1)
 //!   → approve + deposit(recipient, ITX_INDEX, supply, 0) with msg.value 0
 //!     (the rollup credits a MEASURED balanceOf delta — asserted on-chain)
-//!   → cosign-l1-deposit-import FAUCET_SLOT supply depositor ITX_INDEX
+//!   → cosign-l1-deposit-import FAUCET_SLOT <deposit_tx> <rpc> --allow-unbound-depositor
+//!     (amount / depositor / token_index are read from the tx's on-chain `Deposited` log; the
+//!      step is preceded by an adversarial battery of refusals — see the block at the call site)
 //!   → [drip 1] refresh FAUCET_SLOT 1 ; send FAUCET_SLOT → DELEGATE ; cosign
 //!   → [drip 2] refresh FAUCET_SLOT 1 ; send FAUCET_SLOT → COSIGNER 1 ; cosign
 //!   → verify by DECRYPTION, not bookkeeping.
@@ -413,7 +415,9 @@ fn itx_faucet_cli_e2e() {
             ANVIL0_KEY,
         ],
     );
-    cast(
+    // `--json` so we can capture the REAL transaction hash: the import is now verified against
+    // this transaction's on-chain `Deposited` log (deposit-import-threat-model.md).
+    let deposit_send = cast(
         &rpc,
         &[
             "send",
@@ -427,8 +431,15 @@ fn itx_faucet_cli_e2e() {
             "0",
             "--private-key",
             ANVIL0_KEY,
+            "--json",
         ],
     );
+    let deposit_tx = deposit_send
+        .split("\"transactionHash\":\"")
+        .nth(1)
+        .and_then(|s| s.split('"').next())
+        .unwrap_or_else(|| panic!("no transactionHash in deposit output:\n{deposit_send}"))
+        .to_string();
     // The escrow grew by exactly the deposit — the rollup measured the real balanceOf delta.
     assert_eq!(
         cast_uint(
@@ -447,22 +458,287 @@ fn itx_faucet_cli_e2e() {
     );
 
     // ── runbook 3c.5: import the deposit to the FAUCET member (cosigned, TM-7 resolution) ───
-    cli(
+    // ── deposit-import ADVERSARIAL BATTERY (deposit-import-threat-model.md) ─────────────────
+    // These run against the LIVE anvil with a fully backed channel, immediately before the honest
+    // import. Each one is a way an attacker previously minted unbacked in-channel balance (or
+    // wedged the channel's exit forever) with a single unauthenticated request.
+    //
+    // A1 — a FABRICATED deposit: a tx hash that does not exist. This is the original one-curl
+    // vulnerability. (It also pins `--async` on `cast receipt`: without it the CLI would BLOCK
+    // forever here instead of refusing, so a hang in this assertion is a real regression.)
+    let fake_tx = format!("0x{}", "ab".repeat(32));
+    let (ok, out) = cli_allow_fail(&[
+        "cosign-l1-deposit-import",
+        &FAUCET_SLOT.to_string(),
+        &fake_tx,
+        &rpc,
+        "bad_import.json",
+        "--allow-unbound-depositor",
+    ]);
+    assert!(!ok, "a fabricated deposit tx must be refused:\n{out}");
+
+    // A3/A5 — a REAL, successful transaction that carries no `Deposited` log for this channel
+    // (the ERC-20 `approve` above). A tx hash alone must not be enough; the log must be there.
+    let approve_send = cast(
+        &rpc,
+        &[
+            "send",
+            &itx,
+            "approve(address,uint256)",
+            &rollup,
+            "1",
+            "--private-key",
+            ANVIL0_KEY,
+            "--json",
+        ],
+    );
+    let approve_tx = approve_send
+        .split("\"transactionHash\":\"")
+        .nth(1)
+        .and_then(|s| s.split('"').next())
+        .expect("approve tx hash")
+        .to_string();
+    let (ok, out) = cli_allow_fail(&[
+        "cosign-l1-deposit-import",
+        &FAUCET_SLOT.to_string(),
+        &approve_tx,
+        &rpc,
+        "bad_import.json",
+        "--allow-unbound-depositor",
+    ]);
+    assert!(
+        !ok && out.contains("no `Deposited` log"),
+        "a tx with no Deposited log must be refused:\n{out}"
+    );
+
+    // A4 — a REAL deposit into the SAME rollup but for a DIFFERENT `recipient`, i.e. value
+    // escrowed for ANOTHER channel. Importing it here would credit this channel with someone
+    // else's money.
+    let other_recipient = format!("0x{}", "11".repeat(32));
+    let other_send = cast(
+        &rpc,
+        &[
+            "send",
+            &rollup,
+            "deposit(bytes32,uint32,uint256,bytes32)",
+            &other_recipient,
+            "0",
+            "1000",
+            "0x0000000000000000000000000000000000000000000000000000000000000000",
+            "--value",
+            "1000",
+            "--private-key",
+            ANVIL0_KEY,
+            "--json",
+        ],
+    );
+    let other_tx = other_send
+        .split("\"transactionHash\":\"")
+        .nth(1)
+        .and_then(|s| s.split('"').next())
+        .expect("other-channel deposit tx hash")
+        .to_string();
+    let (ok, out) = cli_allow_fail(&[
+        "cosign-l1-deposit-import",
+        &FAUCET_SLOT.to_string(),
+        &other_tx,
+        &rpc,
+        "bad_import.json",
+        "--allow-unbound-depositor",
+    ]);
+    assert!(
+        !ok && out.contains("no `Deposited` log"),
+        "a deposit made for a DIFFERENT channel must be refused:\n{out}"
+    );
+
+    // A6 — reorg safety: the confirmation floor is enforced even on a dev chain when the caller
+    // asks for a depth the chain has not reached.
+    let (ok, out) = cli_allow_fail(&[
+        "cosign-l1-deposit-import",
+        &FAUCET_SLOT.to_string(),
+        &deposit_tx,
+        &rpc,
+        "bad_import.json",
+        "100000",
+        "--allow-unbound-depositor",
+    ]);
+    assert!(
+        !ok && out.contains("confirmation"),
+        "an under-confirmed deposit must be refused:\n{out}"
+    );
+
+    // A8 — credit binding, DEFAULT leg: without the explicit flag, a deposit from an address that
+    // is not the slot's B-1b bound recipient is refused. This is what stops Mallory crediting
+    // herself; the operator/faucet case must opt in visibly.
+    let (ok, out) = cli_allow_fail(&[
+        "cosign-l1-deposit-import",
+        &FAUCET_SLOT.to_string(),
+        &deposit_tx,
+        &rpc,
+        "bad_import.json",
+    ]);
+    assert!(
+        !ok && out.contains("bound"),
+        "an unbound depositor must be refused without the explicit flag:\n{out}"
+    );
+
+    // A8b — the UNCONDITIONAL leg, and the one that matters most: a deposit made BY an address
+    // that IS some member's bound (B-1b) exit address can NEVER be credited to a different slot,
+    // even with --allow-unbound-depositor. This is "Mallory imports Alice's genuine deposit into
+    // Mallory's slot". We impersonate the faucet slot's own bound recipient on anvil so the
+    // deposit is genuinely FROM a bound address.
+    let bound_addr = {
+        let text = std::fs::read_to_string(repo_root().join("channel_snapshot.json"))
+            .expect("read channel_snapshot.json");
+        let v: serde_json::Value = serde_json::from_str(&text).expect("parse snapshot");
+        v["state"]["balanceState"]["recipients"][FAUCET_SLOT as usize]
+            .as_str()
+            .expect("recipients[FAUCET_SLOT]")
+            .to_string()
+    };
+    cast(
+        &rpc,
+        &["rpc", "anvil_setBalance", &bound_addr, "0xde0b6b3a7640000"],
+    );
+    cast(&rpc, &["rpc", "anvil_impersonateAccount", &bound_addr]);
+    let bound_send = cast(
+        &rpc,
+        &[
+            "send",
+            &rollup,
+            "deposit(bytes32,uint32,uint256,bytes32)",
+            &deposit_recipient,
+            "0",
+            "1000",
+            "0x0000000000000000000000000000000000000000000000000000000000000000",
+            "--value",
+            "1000",
+            "--from",
+            &bound_addr,
+            "--unlocked",
+            "--json",
+        ],
+    );
+    let bound_tx = bound_send
+        .split("\"transactionHash\":\"")
+        .nth(1)
+        .and_then(|s| s.split('"').next())
+        .expect("bound-depositor deposit tx hash")
+        .to_string();
+    cast(
+        &rpc,
+        &["rpc", "anvil_stopImpersonatingAccount", &bound_addr],
+    );
+    let (ok, out) = cli_allow_fail(&[
+        "cosign-l1-deposit-import",
+        &DELEGATE_SLOT.to_string(),
+        &bound_tx,
+        &rpc,
+        "bad_import.json",
+        "--allow-unbound-depositor",
+    ]);
+    assert!(
+        !ok && out.contains("CREDIT MISDIRECTION REFUSED"),
+        "a deposit from a BOUND address must never be credited elsewhere, flag or not:\n{out}"
+    );
+
+    // …and the channel's OWN backing deposit is not importable either (it is already counted in
+    // the genesis fund; importing it would credit the channel twice against one L1 escrow).
+    let backing_tx = {
+        let text = std::fs::read_to_string(repo_root().join("channel_backing.json"))
+            .expect("read channel_backing.json");
+        let v: serde_json::Value = serde_json::from_str(&text).expect("parse backing");
+        v["deposit_tx"].as_str().unwrap_or("").to_string()
+    };
+    if !backing_tx.is_empty() {
+        let (ok, out) = cli_allow_fail(&[
+            "cosign-l1-deposit-import",
+            &FAUCET_SLOT.to_string(),
+            &backing_tx,
+            &rpc,
+            "bad_import.json",
+            "--allow-unbound-depositor",
+        ]);
+        assert!(
+            !ok && out.contains("BACKING deposit"),
+            "the channel's own backing deposit must not be importable:\n{out}"
+        );
+    }
+
+    // `auto` must not invent a slot when the depositor is bound to none.
+    let (ok, out) = cli_allow_fail(&[
+        "cosign-l1-deposit-import",
+        "auto",
+        &deposit_tx,
+        &rpc,
+        "bad_import.json",
+        "--allow-unbound-depositor",
+    ]);
+    assert!(
+        !ok && out.contains("auto"),
+        "`auto` must refuse an unbound depositor rather than guess:\n{out}"
+    );
+
+    // Every refusal above must have left the channel state UNTOUCHED (fail-closed, not
+    // fail-partway): the ITX position is still empty before the honest import below.
+    assert_eq!(
+        fund_amount(ITX_LOCAL_SLOT as usize),
+        0,
+        "a refused import must not have moved the channel state"
+    );
+
+    // The import now takes <slot> <tx_hash> <rpc>: amount / depositor / token_index are read from
+    // the on-chain `Deposited` log, so this asserts the REAL escrowed supply is what gets credited.
+    // `--allow-unbound-depositor` is required here and ONLY here: the faucet slot's B-1b bound
+    // recipient is the synthetic `test_recipient_for(channel, slot)` address, not the operator's
+    // deployer account. The unconditional half of the binding still applies — if ANVIL0_ADDR were
+    // some other member's bound recipient, this would refuse regardless of the flag.
+    let import_out = cli(
         &[
             "cosign-l1-deposit-import",
             &FAUCET_SLOT.to_string(),
-            &FAUCET_SUPPLY.to_string(),
-            ANVIL0_ADDR,
+            &deposit_tx,
+            &rpc,
             "itx_import.json",
-            &ITX_INDEX.to_string(),
+            "--allow-unbound-depositor",
         ],
         &[],
         "cosign-l1-deposit-import",
+    );
+    // The depositor the CLI used came from the LOG, not from argv (it is no longer passable).
+    assert!(
+        import_out
+            .to_lowercase()
+            .contains(&ANVIL0_ADDR.to_lowercase()),
+        "the import must report the on-chain depositor it read from the log:\n{import_out}"
     );
     assert_eq!(
         fund_amount(ITX_LOCAL_SLOT as usize),
         FAUCET_SUPPLY as u128,
         "the import must fund the ITX position at the REGISTRY-RESOLVED local slot"
+    );
+
+    // A7 — REPLAY: the same real deposit must never be credited twice. The channel layer has no
+    // nullifier SET (the shared root is a keccak CHAIN, and re-folding an identical nullifier
+    // always yields a DIFFERENT root, so the native gate's `ensure_different_root` passes on a
+    // replay by construction). The CLI's consumed-deposit ledger is the only thing that refuses
+    // this — see deposit-import-threat-model.md §4.
+    let (ok, out) = cli_allow_fail(&[
+        "cosign-l1-deposit-import",
+        &FAUCET_SLOT.to_string(),
+        &deposit_tx,
+        &rpc,
+        "replay_import.json",
+        "--allow-unbound-depositor",
+    ]);
+    assert!(
+        !ok && out.contains("REPLAY REFUSED"),
+        "importing the same L1 deposit twice must be refused:\n{out}"
+    );
+    assert_eq!(
+        fund_amount(ITX_LOCAL_SLOT as usize),
+        FAUCET_SUPPLY as u128,
+        "a refused replay must not have inflated the ITX position"
     );
 
     // FAIL-CLOSED (2): the freshly IMPORTED position is a HOMOMORPHIC credit — still unspendable.
