@@ -33,7 +33,10 @@ const {
   settleDrip,
   publicInfo,
   DEFAULT_DRIP,
+  DEFAULT_CAP,
   MAX_U64,
+  MAX_DRIP,
+  MAX_CHANNEL_CAP,
 } = require('../common/faucet-policy');
 
 const ENV = {
@@ -106,13 +109,46 @@ test('a cap smaller than one drip is incoherent and disables the faucet', () => 
 });
 
 test('amounts above the u64 in-channel ceiling are refused at CONFIG time', () => {
-  // In-channel balances are u64 base units; an 18-decimal token tops out at ~18.44 whole tokens.
-  // A larger drip could not be expressed in the transfer at all, so it must fail here rather than
-  // as an opaque CLI parse error after the ledger reservation has already been written.
+  // In-channel balances are u64 base units, so an over-u64 amount could not be expressed in the
+  // transfer at all: it must fail HERE rather than as an opaque CLI parse error after the ledger
+  // reservation has already been written.
   const over = (MAX_U64 + 1n).toString();
   assert.strictEqual(faucetConfig(env({ FAUCET_DRIP: over, FAUCET_CHANNEL_CAP: over })).enabled, false);
   assert.strictEqual(faucetConfig(env({ FAUCET_CHANNEL_CAP: over })).enabled, false);
-  assert.strictEqual(faucetConfig(env({ FAUCET_DRIP: MAX_U64.toString(), FAUCET_CHANNEL_CAP: MAX_U64.toString() })).enabled, true);
+  // u64 is only an EXPRESSIBILITY bound. A u64-sized drip is ~18.4 trillion ITX and is now refused
+  // by the tighter POLICY ceiling — u64 must never be the only thing standing between a mistyped
+  // digit and the whole supply.
+  assert.strictEqual(faucetConfig(env({ FAUCET_DRIP: MAX_U64.toString(), FAUCET_CHANNEL_CAP: MAX_U64.toString() })).enabled, false);
+});
+
+test('the hard per-claim ceiling bounds FAUCET_DRIP (a mistyped digit cannot drain the faucet)', () => {
+  const capHigh = MAX_CHANNEL_CAP.toString();
+  // The realistic accident: one extra zero-group on the default 100 ITX drip.
+  const fatFinger = (BigInt(DEFAULT_DRIP) * 1000n).toString();
+  assert.ok(BigInt(fatFinger) > MAX_DRIP, 'the scenario must actually cross the ceiling');
+  const c = faucetConfig(env({ FAUCET_DRIP: fatFinger, FAUCET_CHANNEL_CAP: capHigh }));
+  assert.strictEqual(c.enabled, false);
+  assert.match(c.reason, /per-claim ceiling/);
+  // Exactly at the ceiling is allowed; one base unit over is not.
+  assert.strictEqual(faucetConfig(env({ FAUCET_DRIP: MAX_DRIP.toString(), FAUCET_CHANNEL_CAP: capHigh })).enabled, true);
+  assert.strictEqual(faucetConfig(env({ FAUCET_DRIP: (MAX_DRIP + 1n).toString(), FAUCET_CHANNEL_CAP: capHigh })).enabled, false);
+});
+
+test('the hard per-channel ceiling bounds FAUCET_CHANNEL_CAP', () => {
+  const c = faucetConfig(env({ FAUCET_CHANNEL_CAP: (MAX_CHANNEL_CAP + 1n).toString() }));
+  assert.strictEqual(c.enabled, false);
+  assert.match(c.reason, /per-channel ceiling/);
+  assert.strictEqual(faucetConfig(env({ FAUCET_CHANNEL_CAP: MAX_CHANNEL_CAP.toString() })).enabled, true);
+});
+
+test('both hard ceilings sit strictly inside the u64 expressibility bound', () => {
+  // If a future edit raised a ceiling past u64, the policy check would start passing amounts the
+  // transfer cannot carry, and the u64 guard below it would become load-bearing again by accident.
+  assert.ok(MAX_DRIP <= MAX_U64);
+  assert.ok(MAX_CHANNEL_CAP <= MAX_U64);
+  assert.ok(MAX_DRIP <= MAX_CHANNEL_CAP, 'a single claim must never exceed the whole-channel cap');
+  assert.ok(BigInt(DEFAULT_DRIP) <= MAX_DRIP && BigInt(DEFAULT_CAP) <= MAX_CHANNEL_CAP,
+    'the shipped defaults must themselves satisfy the ceilings');
 });
 
 test('omitted drip/cap/cooldown fall back to the documented defaults', () => {

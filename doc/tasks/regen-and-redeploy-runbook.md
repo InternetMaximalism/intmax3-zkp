@@ -249,6 +249,10 @@ ITX_TOKEN_INDEX=$ITX_TOKEN_INDEX \
 FAUCET_DRIP=100000000 \
 FAUCET_CHANNEL_CAP=100000000000 \
 FAUCET_COOLDOWN_MS=5000 \
+#    Amounts are BASE UNITS (6 decimals): 100000000 = 100 ITX, 100000000000 = 100,000 ITX.
+#    Hard ceilings in faucet-policy.js refuse anything above 1,000 ITX per claim / 10,000,000 ITX
+#    per channel, so a mistyped digit disables the faucet (404 + a logged reason) instead of
+#    handing out orders of magnitude too much. Raising a ceiling needs a code change.
   node hosting/wallet/wallet-relay.js       # (EC2: wallet-relay-ec2.js under systemd)
 ```
 

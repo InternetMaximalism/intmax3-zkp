@@ -53,6 +53,23 @@ const DEFAULT_CAP = '100000000000'; // 100,000 ITX per channel (= 1,000 drips)
 const DEFAULT_COOLDOWN_MS = 5000; // one drip per channel per 5s (the CLI leg is far slower anyway)
 const MAX_U64 = (1n << 64n) - 1n;
 
+// ── HARD AMOUNT CEILINGS ─────────────────────────────────────────────────────────────────────
+// DELIBERATELY NOT env-overridable. A ceiling an operator can raise from the environment is not a
+// ceiling; crossing these requires a code change, and therefore review.
+//
+// `MAX_U64` is an EXPRESSIBILITY bound (a larger amount cannot be carried in the u64 transfer),
+// NOT a policy bound: at 6 decimals it admits ~18.4 TRILLION ITX, so on its own a single mistyped
+// digit — `FAUCET_DRIP=100000000000` instead of `100000000` — validates happily and hands out
+// 100,000 ITX in ONE call. These constants are the policy bound that stops that.
+//
+// The genuinely correct bound would be the faucet member's live balance, but this module is pure
+// (no I/O) by contract, so it enforces a static ceiling here; running past the real balance still
+// fails closed at the CLI leg.
+const MAX_DRIP = 1000000000n; // 1,000 ITX per claim — 10x the default
+const MAX_CHANNEL_CAP = 10000000000000n; // 10,000,000 ITX per channel — 100x the default
+// Invariant asserted in the tests: both ceilings sit strictly inside the u64 expressibility bound,
+// so the checks below can never be reordered into a state where u64 is the only guard.
+
 /** Strict decimal-string -> BigInt. Returns null for anything that is not a plain non-negative integer. */
 function parseAmount(v) {
   if (typeof v === 'bigint') return v >= 0n ? v : null;
@@ -95,11 +112,21 @@ function faucetConfig(env) {
 
   const dripAmount = parseAmount(e.FAUCET_DRIP === undefined ? DEFAULT_DRIP : e.FAUCET_DRIP);
   if (dripAmount === null || dripAmount <= 0n) return off('FAUCET_DRIP must be a positive integer in base units');
+  // Policy ceiling FIRST: it is strictly tighter than u64, and it is the one that catches a
+  // mistyped digit handing out orders of magnitude more than intended.
+  if (dripAmount > MAX_DRIP) {
+    return off(`FAUCET_DRIP exceeds the hard per-claim ceiling of ${MAX_DRIP} base units (raising it requires a code change)`);
+  }
   // In-channel balances are u64 base units; a larger drip could not be expressed in the transfer.
+  // Unreachable while MAX_DRIP <= MAX_U64 (asserted in the tests) — kept as defence in depth.
   if (dripAmount > MAX_U64) return off('FAUCET_DRIP exceeds the u64 in-channel base-unit ceiling');
 
   const channelCap = parseAmount(e.FAUCET_CHANNEL_CAP === undefined ? DEFAULT_CAP : e.FAUCET_CHANNEL_CAP);
   if (channelCap === null || channelCap <= 0n) return off('FAUCET_CHANNEL_CAP must be a positive integer in base units');
+  if (channelCap > MAX_CHANNEL_CAP) {
+    return off(`FAUCET_CHANNEL_CAP exceeds the hard per-channel ceiling of ${MAX_CHANNEL_CAP} base units (raising it requires a code change)`);
+  }
+  // Unreachable while MAX_CHANNEL_CAP <= MAX_U64 (asserted in the tests) — defence in depth.
   if (channelCap > MAX_U64) return off('FAUCET_CHANNEL_CAP exceeds the u64 in-channel base-unit ceiling');
   if (channelCap < dripAmount) return off('FAUCET_CHANNEL_CAP is smaller than one FAUCET_DRIP');
 
@@ -263,5 +290,8 @@ module.exports = {
   DEFAULT_DRIP,
   DEFAULT_CAP,
   DEFAULT_COOLDOWN_MS,
+  MAX_DRIP,
+  MAX_CHANNEL_CAP,
+  MAX_U64,
   MAX_U64,
 };
