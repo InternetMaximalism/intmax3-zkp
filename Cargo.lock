@@ -2776,6 +2776,7 @@ dependencies = [
 [[package]]
 name = "regev_plonky3"
 version = "0.1.0"
+source = "git+https://github.com/leohio/regv-plonky3.git?rev=5495eda#5495edab5aa8ec7eae02a35e3098ddee384a1f58"
 dependencies = [
  "hashbrown 0.16.1",
  "p3-air 0.5.3",

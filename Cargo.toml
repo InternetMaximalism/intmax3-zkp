@@ -73,14 +73,18 @@ lazy_static = "1.5.0"
 bincode = { version = "2.0.1", features = ["serde"] }
 clap = { version = "4.5", features = ["derive"] }
 postcard = { version = "1.1.3", features = ["alloc"] }
-# Regev (Ring-LWE) lattice layer — rides the Plonky3 0.5.3 graph, which
-# coexists with the 0.4.2 graph below (semver-incompatible majors resolve
-# side by side). Pinned to the same rev the SIS-lattice-paymentchannel port
-# source uses. `default-features = false` drops `parallel` for wasm safety;
-# enable the `regev-parallel` feature for native proving speed.
-# TODO(before merge): push `fix/hiding-config-csprng` to the remote and pin its rev here.
-# Local path is a DEVELOPMENT-ONLY pointer so this branch can build against the CSPRNG fix.
-regev_plonky3 = { path = "/Users/plasma/repos/regv-plonky3", default-features = false }
+# Regev (Ring-LWE) lattice layer — rides the Plonky3 0.5.3 graph, which coexists with the 0.4.2
+# graph below (semver-incompatible majors resolve side by side).
+#
+# Pinned to `fix/hiding-config-csprng`, whose hiding (zero-knowledge) FRI config seeds its
+# Merkle-leaf salts from a CSPRNG: the salts of the opened leaves ship inside the proof, so the
+# `SmallRng` (xoshiro256++) the config previously used would let an observer reconstruct the
+# generator and derive the salts of the UNOPENED leaves, defeating the hiding property.
+#
+# `default-features = false` drops the crate's default `parallel` feature so the wasm build stays
+# single-threaded unless it opts in; the `cfg(not(wasm32))` section below turns it back on for
+# every native target.
+regev_plonky3 = { git = "https://github.com/leohio/regv-plonky3.git", rev = "5495eda", default-features = false }
 rand010 = { package = "rand", version = "0.10" }
 p3-air-05 = { package = "p3-air", version = "0.5.3" }
 p3-field-05 = { package = "p3-field", version = "0.5.3" }
@@ -154,7 +158,7 @@ getrandom_v04 = { package = "getrandom", version = "0.4", features = ["wasm_js"]
 # Cargo unions features across target sections, so this turns `parallel` on for non-wasm only;
 # the wasm build keeps deciding for itself via the `regev-parallel` feature.
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
-regev_plonky3 = { path = "/Users/plasma/repos/regv-plonky3", features = ["parallel"] }
+regev_plonky3 = { git = "https://github.com/leohio/regv-plonky3.git", rev = "5495eda", features = ["parallel"] }
 
 [features]
 default = []
