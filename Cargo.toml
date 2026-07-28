@@ -141,6 +141,21 @@ web-time = "0.2"
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 getrandom_v04 = { package = "getrandom", version = "0.4", features = ["wasm_js"] }
 
+# PERF: rayon-parallel Regev STARK proving, on for every NATIVE target.
+#
+# The base dependency above takes `default-features = false`, which drops the upstream crate's
+# default `parallel` feature. That is the right default for wasm (see `hosting/build-wallet-wasm.sh`
+# and the upstream README: wasm-bindgen-rayon needs SharedArrayBuffer + COOP/COEP and an awaited
+# `initThreadPool`, and a misconfigured pool can stall `par_iter` in the browser) — but it also
+# silently left every native prover single-threaded, which is pure loss on a server or CLI.
+# Measured at n = 2048 with the hiding config, Apple M3 Max: E-1 92.7 -> 46.6 ms,
+# E-3 73.2 -> 34.2 ms, refresh 83.8 -> 42.1 ms, i.e. a flat ~2x for free.
+#
+# Cargo unions features across target sections, so this turns `parallel` on for non-wasm only;
+# the wasm build keeps deciding for itself via the `regev-parallel` feature.
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+regev_plonky3 = { path = "/Users/plasma/repos/regv-plonky3", features = ["parallel"] }
+
 [features]
 default = []
 # Diagnostic-only WASM exports that must NOT ship in the production wallet build.
