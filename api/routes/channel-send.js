@@ -32,10 +32,19 @@ router.post('/cosign-refresh', (req, res) => {
 
 // POST /api/v1/channel/:ch/send (W3)
 // Orchestrated intra-channel send: client sends the pre-built payload, server cosigns.
+// Multi-token (§N-3): the moved token position rides INSIDE the signed payload
+// (payload.channelTx.tokenSlot, IMPA-v2-bound) — the cosign CLI takes no token argv; an
+// optional body.tokenSlot is accepted as a client-intent cross-check against the signed field.
 router.post('/send', (req, res) => {
   const ch = Number(req.params.ch);
   withLock(ch, () => {
     const payload = req.body.payload || req.body;
+    const tokenSlot = req.body.tokenSlot;
+    const signedSlot = payload && payload.channelTx && payload.channelTx.tokenSlot;
+    if (tokenSlot !== undefined && tokenSlot !== null && String(tokenSlot) !== String(signedSlot !== undefined ? signedSlot : 0)) {
+      res.status(400).json({ error: `tokenSlot mismatch: body says ${tokenSlot}, signed payload says ${signedSlot}` });
+      return;
+    }
     writeJson(wc(ch, 'payload.json'), payload);
     cli(ch, ['cosign', 'payload.json', 'cosigned.json']);
     const snapshot = readJson(wc(ch, 'cosigned.json'));

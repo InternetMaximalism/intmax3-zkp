@@ -393,6 +393,7 @@ fn unified_inter_channel_transfer_e2e() {
         (&sdelta.0, &sdelta.1),
         (&rdelta.0, &rdelta.1),
         AMT,
+        0, // base token_index (genesis token on both registries)
     )
     .unwrap();
     let tx_leaf = tx_leaf_hash(
@@ -428,14 +429,16 @@ fn unified_inter_channel_transfer_e2e() {
         epoch: a_genesis.epoch + 1,
         small_block_number: 1,
         channel_fund: ChannelFund {
-            amount: a_genesis.channel_fund.amount - u256(AMT),
+            amounts: intmax3_zkp::common::channel::ChannelFund::single_token_amounts(
+                a_genesis.channel_fund.amounts[0] - u256(AMT),
+            ),
             ..a_genesis.channel_fund.clone()
         },
         balance_state: BalanceState {
-            enc_balances: BalanceState::pad_enc_balances(&[
+            enc_balances: BalanceState::pad_enc_balances_token0(&[
                 alice_after.clone(),
-                a_genesis.balance_state.enc_balances[1].clone(),
-                a_genesis.balance_state.enc_balances[2].clone(),
+                a_genesis.balance_state.enc_balances[1][0].clone(),
+                a_genesis.balance_state.enc_balances[2][0].clone(),
             ]),
             settled_tx_chain: settled_tx_chain_push(
                 a_genesis.balance_state.settled_tx_chain,
@@ -475,6 +478,7 @@ fn unified_inter_channel_transfer_e2e() {
         },
         sender_delta_ct: sdelta.0.clone(),
         source_channel_id: a_id,
+        token_index: 0,
         destination_channel_id: ChannelId::new(7).unwrap(),
         source_pk_g: a_keys[0].pk_g(),
         seal: Bytes32::default(),

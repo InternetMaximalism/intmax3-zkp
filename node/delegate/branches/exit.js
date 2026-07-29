@@ -91,23 +91,28 @@ async function attemptRecovery(ctx) {
   }
 }
 
-// On-chain credit observed (WithdrawalClaimed / NativeWithdrawn). ONLY now is the exit truly done
-// (review M5: never mark EXITED on a co-signer API 200 — the co-signer may be the adversary we flee).
+// On-chain credit observed (WithdrawalClaimed / NativeWithdrawn / Erc20Withdrawn /
+// TokenWithdrawalClaimed — multi-token §N: the Manager's WithdrawalClaimed and the rollup's
+// ERC-20 twins carry an indexed tokenIndex; NativeWithdrawn/WithdrawalCredited are ETH-only, so
+// an absent field defaults to '0'). ONLY now is the exit truly done (review M5: never mark
+// EXITED on a co-signer API 200 — the co-signer may be the adversary we flee).
 async function onCreditConfirmed(event, ctx) {
   const { ch, store, log, sm } = ctx;
   if (store.get('mode') !== 'exiting' && !store.get('awaitingCredit')) return;
   const a = event.args || {};
   // The credit MUST name a recipient and it MUST be ours (review MED-4: an absent recipient must
   // NOT clear the sticky exit — never EXIT_DONE on an unbound/foreign credit). We require our own
-  // configured recipient and an exact match.
+  // configured recipient and an exact match. The decoded tokenIndex (absent = '0', the ETH-only
+  // rollup events) is recorded so the operator can reconcile WHICH asset exited.
   const credited = (a.recipient || '').toLowerCase();
   if (!ctx.recipient || !credited || credited !== ctx.recipient.toLowerCase()) {
     log.info({ event: 'CREDIT_IGNORED', channel: ch.id, reason: 'recipient absent or not ours', credited, txHash: event.txHash });
     return;
   }
+  const tokenIndex = a.tokenIndex != null ? String(a.tokenIndex) : '0';
   store.set('awaitingCredit', false);
   sm.signal(dsm.SIGNALS.EXIT_DONE);
-  log.info({ event: 'EXIT_CONFIRMED', channel: ch.id, recipient: a.recipient, amount: a.amount, txHash: event.txHash });
+  log.info({ event: 'EXIT_CONFIRMED', channel: ch.id, recipient: a.recipient, amount: a.amount, tokenIndex, kind: event.kind, txHash: event.txHash });
 }
 
 module.exports = { enterExitMode, onCosignInvalid, onWithholding, onCloseSeen, onChannelFinalized, onCreditConfirmed };

@@ -70,3 +70,51 @@ canonical CREATE2 factory (deployer-independent) with fixed salts, and reuse the
 path (CloseE2EBase._deployAll) in both the address-printer test and the lifecycle test. The VK is
 witness-independent, so the plain P2 fixtures predict the same address as the close fixtures —
 which lets the address be known before the close proof is generated.
+
+## A "one-shot" assumption is a security assumption (2026-07-28, in-channel $ITX faucet)
+
+Two lessons from making a CLI co-signing member hand out repeated in-channel drips.
+
+1. **A deterministic seed that is safe once is unsafe twice — and the safety argument lived only
+   in a comment.** `channel_member send` seeded its Regev encryption RNG with the constant
+   `0x5E_0000 + sender_slot`. That was fine only under the module header's assertion that *"each
+   CLI member sends at most once from its fresh genesis balance"*. A faucet member sends
+   repeatedly, and reusing one `r` across two different plaintexts under one key reveals their
+   difference (`c2 − c2' = Δ·(m − m')`) — for balances, the balance itself. The bug was not the
+   constant; it was that a load-bearing usage constraint was documented in prose instead of being
+   enforced or removed. When a new caller violates a prose-only precondition, treat it as a
+   security finding, not a refactor. Fix: draw the seed from the OS CSPRNG per invocation.
+
+   The follow-on is sharper still: `gen-send` had the same defect behind what LOOKED like a
+   sufficient guard. It refuses unless the position is still its untouched genesis ciphertext,
+   which stops reuse across CO-SIGNED states — but two drafts against the same uncosigned state
+   both pass and replay the same `r`. A guard that keys on committed state says nothing about
+   concurrent uncommitted drafts. And the check that this test was not vacuous mattered: reverting
+   the fix made two identical-input payloads byte-identical, which is what proved the randomness
+   was genuinely being replayed rather than the prover merely being deterministic.
+
+2. **The witness store, not the circuits, was the thing that could not do multi-token.** The
+   circuits and `wallet_core` supported non-genesis token positions completely; what blocked an
+   in-channel ERC-20 transfer from the CLI was that `cli_state.json` tracked ONE scalar balance
+   seed per member — implicitly the genesis token. A homomorphically credited position (deposit
+   import, incoming transfer) has `pending_adds > 0` AND no local encryption witness, so it is
+   unspendable by construction; `build_refresh` is the only value-preserving way out, and the CLI
+   had no command for it. Before concluding a feature "needs new protocol", check whether the gap
+   is only in the local key/witness bookkeeping. Related: when persisting a reconstructible
+   witness by SEED, the reproducibility depends on an upstream RNG-consumption order
+   (`prove_balance_refresh_witnessed` consumes randomness only in its `encrypt_amount`) — do not
+   assume it, re-derive and compare against the co-signed state, and fail closed.
+
+3. **Verifying an address does not verify the metadata attached to it.** The token registry read
+   `tokenAddressOf` back from chain and called the entry `verified`, but `decimals` — whose whole
+   documented hazard is a 10^k misrender — was never read back and rested on the operator's file
+   alone. When a gate's contract names several fields, check each one is actually attested by the
+   read that sets the flag; "verified" is not transitive across fields. Same split as everywhere
+   else here: a CONTRADICTION is fatal, an ABSENCE degrades to null, and a guess is never allowed.
+
+4. **A negative test that probes guessed selectors proves almost nothing.** The "no mint entry
+   point" test called four hardcoded signatures and asserted they failed — which misses any
+   differently-named minter and cannot distinguish "no such function" from "owner-gated and
+   reverted for this caller". Asserting over the COMPILED ARTIFACT ABI (every state-changing
+   function must be in an exhaustive allowlist) is a real proof, and injecting an owner-gated
+   `issueTo` confirmed it catches both missed cases.

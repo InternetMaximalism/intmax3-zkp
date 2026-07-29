@@ -328,6 +328,11 @@ mod tests {
 
     /// Golden-value test pinning the digest preimage layout ([IMRC, len, c1…, c2…] over
     /// solidity-packed keccak). If this changes, every on-chain and in-circuit digest changes.
+    ///
+    /// The value is a function of `REGEV_N` (it is the coefficient count AND the preimage
+    /// length), so it was re-pinned when the ring dimension moved 128 -> 2048; the layout itself
+    /// is unchanged. Previous value at n = 128:
+    /// `0xf78243d1742012fe293047b153e0b7b9abac51f1b37b2993674c037f88048fa9`.
     #[test]
     fn digest_is_stable() {
         let ct = RegevCiphertext {
@@ -336,7 +341,7 @@ mod tests {
         };
         assert_eq!(
             ct.digest().to_string(),
-            "0xf78243d1742012fe293047b153e0b7b9abac51f1b37b2993674c037f88048fa9"
+            "0x95c3cec7044380b61f6281af360508ae2059103c6768aaa14b4996d65b44796c"
         );
     }
 

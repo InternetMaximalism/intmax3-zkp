@@ -45,8 +45,10 @@ The pw settle path was wired for the local anvil relay only and was never provis
 Security notes (testnet-scale, must be stated): the funded key lands on a public box whose
 unauthenticated endpoints trigger broadcasts (gas-drain DoS possible) → use a **dedicated
 low-balance relay key** (~0.05 ETH Sepolia), NOT the main deployer; hand it via root-only
-`EnvironmentFile`, never print (per CLAUDE.md secrets rules). `registerChannel` /
-`registerSettlementManager` have no owner gate, so any funded key works. The settlement path
+`EnvironmentFile`, never print (per CLAUDE.md secrets rules). CORRECTION (2026-07-28): `registerSettlementManager` IS
+owner-gated — `IntmaxRollup.sol` reverts `OnlyDeployer` unless `msg.sender == deployer`, so a
+dedicated relay key can NOT call it; that step needs the deployer key. (Re-verify `registerChannel`
+before relying on the same claim for it.) The settlement path
 still uses the known `WalletMockMleVerifier` (always-true) demo stub — unchanged by this fix.
 
 ## Chosen approach

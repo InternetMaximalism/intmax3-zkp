@@ -12,8 +12,8 @@ use intmax3_zkp::{
     wallet_core::{
         BatchTxApply, BuiltSend, ChannelSnapshot, MemberInfo, MemberKeys, add_signature,
         assemble_genesis_state, build_batch_next_state, build_record, build_send, decrypt_balance,
-        default_settled_tx_accumulator, sign_state, verify_all_signatures, verify_send_transition,
-        regev_pks_array, verify_slim_send_tx, verify_snapshot,
+        default_settled_tx_accumulator, regev_pks_array, sign_state, verify_all_signatures,
+        verify_send_transition, verify_slim_send_tx, verify_snapshot,
     },
 };
 use rand010::{SeedableRng, rngs::StdRng};
@@ -55,7 +55,11 @@ fn batched_cosign_two_sends_one_transition() {
     let m0 = MemberKeys::generate(&mut rng);
     let m1 = MemberKeys::generate(&mut rng);
     let m2 = MemberKeys::generate(&mut rng);
-    let members = vec![member_info(0, &m0), member_info(1, &m1), member_info(2, &m2)];
+    let members = vec![
+        member_info(0, &m0),
+        member_info(1, &m1),
+        member_info(2, &m2),
+    ];
     let record = build_record(7, &members, 0, 0).expect("record");
 
     let (bal0, bal1, bal2) = (50u64, 30u64, 20u64);
@@ -86,11 +90,29 @@ fn batched_cosign_two_sends_one_transition() {
     // m0 both debits and is credited in the same batch (R2, fold-order soundness).
     let (amt_a, amt_b) = (7u64, 5u64);
     let BuiltSend { payload: pa, .. } = build_send(
-        &m0, &snapshot, 0, 2, amt_a, bal0, &w0, Bytes32::default(), LEVEL, &mut rng,
+        &m0,
+        &snapshot,
+        0,
+        2,
+        amt_a,
+        bal0,
+        &w0,
+        Bytes32::default(),
+        LEVEL,
+        &mut rng,
     )
     .expect("build m0→m2");
     let BuiltSend { payload: pb, .. } = build_send(
-        &m1, &snapshot, 1, 0, amt_b, bal1, &w1, Bytes32::default(), LEVEL, &mut rng,
+        &m1,
+        &snapshot,
+        1,
+        0,
+        amt_b,
+        bal1,
+        &w1,
+        Bytes32::default(),
+        LEVEL,
+        &mut rng,
     )
     .expect("build m1→m0");
 
@@ -123,17 +145,16 @@ fn batched_cosign_two_sends_one_transition() {
         .iter()
         .map(|p| BatchTxApply::from(&p.to_slim()))
         .collect();
-    let mut batch_state =
-        build_batch_next_state(&snapshot.state, &applies).expect("batch build");
+    let mut batch_state = build_batch_next_state(&snapshot.state, &applies).expect("batch build");
     assert_eq!(
         batch_state.balance_state.state_version,
         snapshot.state.balance_state.state_version + 1,
         "one version bump for the whole batch"
     );
     // pending_adds: m0 debited (reset) then credited (+1); m1 debited (0); m2 credited (+1).
-    assert_eq!(batch_state.balance_state.pending_adds[0], 1);
-    assert_eq!(batch_state.balance_state.pending_adds[1], 0);
-    assert_eq!(batch_state.balance_state.pending_adds[2], 1);
+    assert_eq!(batch_state.balance_state.pending_adds[0][0], 1);
+    assert_eq!(batch_state.balance_state.pending_adds[1][0], 0);
+    assert_eq!(batch_state.balance_state.pending_adds[2][0], 1);
 
     // N-of-N agreement round over the batch state.
     for (slot, keys) in [(0u8, &m0), (1u8, &m1), (2u8, &m2)] {
@@ -192,7 +213,16 @@ fn batch_rejects_double_debit_and_k1_matches_solo() {
     };
 
     let BuiltSend { payload, .. } = build_send(
-        &m0, &snapshot, 0, 1, 5, bal0, &w0, Bytes32::default(), LEVEL, &mut rng,
+        &m0,
+        &snapshot,
+        0,
+        1,
+        5,
+        bal0,
+        &w0,
+        Bytes32::default(),
+        LEVEL,
+        &mut rng,
     )
     .expect("build_send");
 

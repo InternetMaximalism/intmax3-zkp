@@ -65,7 +65,16 @@ fn slim_verify_timing_breakdown() {
     // 1) proof GENERATION (sender side)
     let t = Instant::now();
     let BuiltSend { payload, .. } = build_send(
-        &m0, &snapshot, 0, 1, 5, bal0, &w0, Bytes32::default(), LEVEL, &mut rng,
+        &m0,
+        &snapshot,
+        0,
+        1,
+        5,
+        bal0,
+        &w0,
+        Bytes32::default(),
+        LEVEL,
+        &mut rng,
     )
     .expect("build_send");
     let t_gen = t.elapsed();
@@ -77,8 +86,7 @@ fn slim_verify_timing_breakdown() {
     let json = serde_json::to_string(&slim).expect("ser");
     let t_ser = t.elapsed();
     let t = Instant::now();
-    let slim2: intmax3_zkp::wallet_core::SlimSendPayload =
-        serde_json::from_str(&json).expect("de");
+    let slim2: intmax3_zkp::wallet_core::SlimSendPayload = serde_json::from_str(&json).expect("de");
     let t_de = t.elapsed();
 
     // 3) solo next-state reconstruction (1024-slot clone + full-state digest)
@@ -87,14 +95,15 @@ fn slim_verify_timing_breakdown() {
         &snapshot.state,
         slim2.sender_index,
         slim2.recipient_index,
+        slim2.channel_tx.token_slot,
         &slim2.after_ct,
         &slim2.channel_tx.enc_amount,
     )
     .expect("solo_next_state");
     let t_next = t.elapsed();
 
-    // 4) full slim verification — FAST path (direct checks, no solo-state rebuild); regev_pks
-    //    built once per batch (its cost shown separately)
+    // 4) full slim verification — FAST path (direct checks, no solo-state rebuild); regev_pks built
+    //    once per batch (its cost shown separately)
     let t = Instant::now();
     let regev_pks = regev_pks_array(&snapshot.members);
     let t_pks = t.elapsed();

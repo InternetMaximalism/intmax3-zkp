@@ -19,7 +19,19 @@ const ROOT = __dirname; // hosting/wallet/ — serves wallet-live.html + wallet-
 const REPO = path.join(ROOT, '..', '..'); // repo root — target/, self_certs/, contracts/, pkg/, wallet-live-work/ live here (two levels up from hosting/wallet/)
 const WORK = path.join(REPO, 'wallet-live-work');
 const CLI = path.join(REPO, 'target', 'release', 'channel_member');
-const PORT = 8000;
+// Dev port. Defaults to 8000 (HTTPS) + 8001 (HTTP); override with RELAY_PORT to run a second relay
+// alongside an existing one. Validated: a malformed/out-of-range value is a hard startup error
+// rather than a silent fall back to a port another process may already own.
+const PORT = (() => {
+  const raw = process.env.RELAY_PORT;
+  if (raw === undefined || raw === '') return 8000;
+  const n = Number(raw);
+  if (!Number.isInteger(n) || n < 1 || n > 65534) {
+    console.error(`RELAY_PORT must be an integer in 1..65534 (got ${JSON.stringify(raw)})`);
+    process.exit(1);
+  }
+  return n;
+})();
 const CHANNELS = [7, 8];
 
 fs.mkdirSync(WORK, { recursive: true });
@@ -106,6 +118,176 @@ function rollupOf(ch) {
   return b.rollup;
 }
 
+// ── Token DISPLAY metadata (multi-token detail2 §N-1/§N-7, threat model TM-10b) ───────────────
+//
+// SECURITY CONTRACT: symbol / name / decimals carry ZERO authority. The authoritative token
+// identity is the base `token_index` — proof-bound in the circuits and set-once on-chain in
+// `IntmaxRollup.tokenAddressOf(uint32)`. Showing "USDC" over a worthless token is a user-funds
+// attack, so metadata is served ONLY for entries whose manifest address was read back EQUAL from
+// the on-chain registry. Everything else is served as null and the wallet falls back to the raw
+// base index. Dev twin of the same block in wallet-relay-ec2.js; both share ONE implementation
+// (node/common/token-registry.js) so the validation rules cannot drift between them.
+let tokenRegistryModule = null;
+(function loadTokenRegistryModule() {
+  const candidates = [
+    process.env.TOKEN_REGISTRY_MODULE,
+    path.join(REPO, 'node', 'common', 'token-registry.js'),
+    path.join(ROOT, 'token-registry.js'),
+  ].filter(Boolean);
+  for (const c of candidates) {
+    try { if (fs.existsSync(c)) { tokenRegistryModule = require(c); return; } } catch (e) { /* try next */ }
+  }
+  console.warn('⚠ token-registry module not found — /api/tokens serves raw base indices with null metadata');
+})();
+
+const TOKEN_REGISTRIES = {}; // ch -> TokenRegistry (verified asynchronously at startup)
+function loadTokenManifests(rpcUrl) {
+  if (!tokenRegistryModule) return;
+  for (const ch of CHANNELS) {
+    const p = process.env.TOKENS_MANIFEST || wc(ch, 'tokens.json');
+    if (!fs.existsSync(p)) continue; // no manifest is a valid state: raw base indices
+    let reg;
+    try {
+      reg = tokenRegistryModule.TokenRegistry.fromFile(p);
+    } catch (e) {
+      console.error(`channel ${ch}: invalid token manifest ${p}: ${e.message}`);
+      process.exit(1); // fail closed, same as the EC2 relay
+    }
+    TOKEN_REGISTRIES[ch] = reg;
+    (async () => {
+      try {
+        await reg.verifyAgainstChain(rpcUrl, rollupOf(ch), { logger: console });
+        console.log(`channel ${ch}: tokens ${JSON.stringify(reg.summary())}`);
+      } catch (e) {
+        // A CONTRADICTION (manifest address != the set-once on-chain value) is the mislabelling
+        // hazard itself — refuse to keep running with it.
+        console.error(`channel ${ch}: token manifest contradicts the chain: ${e.message}`);
+        process.exit(1);
+      }
+    })();
+  }
+}
+
+// Per-token channel view for the wallet. The slots and their base indices come from the CHANNEL's
+// OWN signed registry (the cosigned snapshot) — the manifest only answers "what may this base
+// index be CALLED", and only when chain-verified.
+function channelTokens(ch) {
+  const snap = JSON.parse(fs.readFileSync(wc(ch, 'channel_snapshot.json'), 'utf8'));
+  const st = (snap && (snap.state || snap.State)) || {};
+  const bs = st.balanceState || st.balance_state || {};
+  const fund = st.channelFund || st.channel_fund || {};
+  const tokenCount = bs.tokenCount != null ? bs.tokenCount : (bs.token_count != null ? bs.token_count : 1);
+  const registry = bs.tokenRegistry || bs.token_registry || [];
+  const amounts = fund.amounts || [];
+  const meta = TOKEN_REGISTRIES[ch] || null;
+  const tokens = [];
+  for (let t = 0; t < tokenCount; t++) {
+    const tokenIndex = registry[t] !== undefined ? registry[t] : 0;
+    const md = meta
+      ? meta.metadataFor(tokenIndex)
+      : { symbol: null, name: null, decimals: null, address: null, native: tokenIndex === 0, verified: false };
+    tokens.push({
+      tokenSlot: t,
+      tokenIndex,
+      symbol: md.symbol,
+      name: md.name,
+      decimals: md.decimals,
+      address: md.address,
+      native: md.native,
+      verified: md.verified,
+      fundAmount: amounts[t] !== undefined ? String(amounts[t]) : '0',
+    });
+  }
+  return { tokenCount, tokens };
+}
+
+// ── Testnet $ITX faucet (multi-token §N) ─────────────────────────────────────────────────────
+//
+// SECURITY CONTRACT. `POST /api/faucet` is UNAUTHENTICATED and moves REAL escrowed value: the
+// faucet member holds an in-channel balance backed by one ERC-20 deposit made on L1 and imported
+// once. It therefore cannot MINT (every dripped balance stays covered by
+// `channel_fund.amounts[t]` and stays claimable) — the realistic attack is DRAINING it. Defences:
+//   1. OFF BY DEFAULT — live only with FAUCET_ENABLED=1 + FAUCET_SLOT + a NON-ZERO
+//      ITX_TOKEN_INDEX; anything missing/malformed leaves it disabled and POST answers 404.
+//   2. NOTHING FROM THE REQUEST BUT THE RECIPIENT SLOT — amount, token and limits are config, and
+//      the slot is checked against the CHANNEL'S OWN SIGNED membership + registry.
+//   3. ONE DRIP PER SLOT FOR EVER, plus a per-channel cap and a cooldown.
+//   4. RESERVE BEFORE TRANSFER — a crash mid-transfer costs a drip, it never pays one twice.
+// DEPLOYMENT INVARIANT: exactly ONE relay process per channel directory — `withLock` is in-process
+// JS state, not an flock (see the EC2 twin for the full note).
+// Dev twin of the same block in wallet-relay-ec2.js; both share ONE implementation
+// (node/common/faucet-policy.js) so the policy cannot drift between them. If the module cannot be
+// loaded the faucet stays DISABLED — it is never re-implemented inline.
+let faucetPolicy = null;
+(function loadFaucetPolicy() {
+  const candidates = [
+    process.env.FAUCET_POLICY_MODULE,
+    path.join(REPO, 'node', 'common', 'faucet-policy.js'),
+    path.join(ROOT, 'faucet-policy.js'),
+  ].filter(Boolean);
+  for (const c of candidates) {
+    try { if (fs.existsSync(c)) { faucetPolicy = require(c); return; } } catch (e) { /* try next */ }
+  }
+})();
+const FAUCET = faucetPolicy
+  ? faucetPolicy.faucetConfig(process.env)
+  : { enabled: false, reason: 'faucet-policy module not found' };
+if (FAUCET.enabled) {
+  console.log(`faucet ENABLED: slot ${FAUCET.faucetSlot} drips ${FAUCET.dripAmount} of base token ${FAUCET.tokenIndex} (channel cap ${FAUCET.channelCap}, cooldown ${FAUCET.cooldownMs}ms)`);
+} else if (String(process.env.FAUCET_ENABLED || '') === '1') {
+  console.warn(`⚠ faucet requested but DISABLED: ${FAUCET.reason}`);
+}
+
+const FAUCET_FILE = 'faucet_state.json';
+/**
+ * Read the per-channel faucet ledger. THROWS on a corrupt file (fail closed — see the module).
+ *
+ * SECURITY: only a MISSING file is an absent ledger. A file that parses to `null` or to any
+ * non-object is CORRUPTION and must not be read as "nobody has drunk yet" — that would re-open
+ * the faucet to every slot already recorded. Deliberately unlike the sibling `readTickets`, which
+ * swallows errors: tickets are display state, this is the drain guard.
+ */
+function readFaucetState(ch) {
+  const p = wc(ch, FAUCET_FILE);
+  if (!fs.existsSync(p)) return faucetPolicy.emptyState();
+  const parsed = JSON.parse(fs.readFileSync(p, 'utf8'));
+  if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    throw new Error(`faucet ledger ${p} is corrupt (not a JSON object) — refusing to start from empty`);
+  }
+  return faucetPolicy.normalizeState(parsed);
+}
+/**
+ * Persist the ledger ATOMICALLY: temp file + rename (same crash-safety pattern as
+ * node/common/store.js). A bare writeFileSync that is interrupted mid-write leaves a truncated
+ * ledger, which `readFaucetState` correctly refuses — safe, but it bricks that channel's faucet
+ * until an operator intervenes. Rename on the same filesystem is atomic, so a reader ever only
+ * sees the whole old file or the whole new one.
+ */
+function writeFaucetState(ch, st) {
+  const p = wc(ch, FAUCET_FILE);
+  const tmp = p + '.tmp';
+  fs.writeFileSync(tmp, JSON.stringify(st, null, 2));
+  fs.renameSync(tmp, p);
+}
+/**
+ * The LOCAL position of the faucet's base token in THIS channel, from the channel's own COSIGNED
+ * registry (`channelTokens` reads the signed snapshot) — never the tokens.json manifest, whose
+ * display metadata carries zero authority.
+ */
+function faucetLocalTokenSlot(ch) {
+  const t = channelTokens(ch).tokens.find((x) => x.tokenIndex === FAUCET.tokenIndex);
+  return t ? t.tokenSlot : null;
+}
+/** `member_count + delegate_count` from the SIGNED snapshot — the only authority on who exists. */
+function activeSlotCount(ch) {
+  const snap = JSON.parse(fs.readFileSync(wc(ch, 'channel_snapshot.json'), 'utf8'));
+  const st = (snap && (snap.state || snap.State)) || {};
+  const bs = st.balanceState || st.balance_state || {};
+  const mc = bs.memberCount != null ? bs.memberCount : bs.member_count;
+  const dc = bs.delegateCount != null ? bs.delegateCount : bs.delegate_count;
+  return Number.isInteger(mc) && Number.isInteger(dc) ? mc + dc : null;
+}
+
 const app = express();
 app.use(express.json({ limit: '64mb' }));
 app.use((err, req, res, next) => {
@@ -181,6 +363,14 @@ app.get('/api/backing', (req, res) => {
     const ch = reqChannel(req);
     res.json(JSON.parse(fs.readFileSync(wc(ch, 'channel_backing.json'), 'utf8')));
   } catch (e) { res.status(404).json({ error: 'no deposit backing yet' }); }
+});
+
+// GET /api/tokens?channel=N — per-token channel view + VERIFIED display metadata (§N).
+// symbol/name/decimals are non-null ONLY when `verified` is true; `address` may be reported while
+// unverified, a NAME may not. 404 while the channel has no snapshot (matches /api/snapshot).
+app.get('/api/tokens', (req, res) => {
+  try { res.json(channelTokens(reqChannel(req))); }
+  catch (e) { res.status(404).json({ error: 'no channel yet' }); }
 });
 
 // (Legacy member-mode genesis co-signing — unused by the delegate demo, where the browser does not
@@ -304,8 +494,23 @@ app.post('/api/claim', (req, res) => {
 
 // ─── L1 deposit + mid-channel import + partial withdrawal ─────────────────────────────────────
 
+// The reorg depth `cosign-l1-deposit-import` will require for a deposit on `chainId`.
+//
+// SECURITY: DISPLAY ONLY, and deliberately a MIRROR rather than a control. The enforcing check is
+// `min_confirmations_for` in src/bin/channel_member.rs (floor/default 0 on anvil 31337, floor 1 and
+// default 12 elsewhere), which reads the chain itself. This relay never passes a
+// `min_confirmations` argument to the CLI, and the CLI clamps any explicit value UP to the floor —
+// so nothing served here can lower the depth actually enforced. It exists only so the wallet can
+// render "confirming (n/12)" instead of an error while a fresh deposit matures.
+// Keep in sync with wallet-relay-ec2.js.
+function minConfirmationsForDisplay(chainId) {
+  return chainId === 31337 ? 0 : 12;
+}
+
 // GET /api/deposit-info?channel=N
-// Returns the on-chain addresses and ABI info needed for the browser to send a deposit tx via MetaMask.
+// Returns the on-chain addresses and ABI info needed for the browser to send a deposit tx via
+// MetaMask (native ETH or any L1-registered ERC-20 — `rollup` is both the deposit target and the
+// ERC-20 approve spender).
 app.get('/api/deposit-info', (req, res) => {
   try {
     const ch = reqChannel(req);
@@ -317,6 +522,7 @@ app.get('/api/deposit-info', (req, res) => {
       depositRecipient: backing.deposit_recipient,
       rpc: RPC,
       chainId: 31337,
+      minConfirmations: minConfirmationsForDisplay(31337),
     });
   } catch (e) { res.status(500).json({ error: String(e.message || e) }); }
 });
@@ -352,24 +558,96 @@ app.post('/api/l1-deposit', (req, res) => {
 // Fold a pending L1 deposit into the channel's balance (mid-channel deposit).
 // If depositor+amount are provided (MetaMask flow), uses those directly.
 // Otherwise reads from pending_deposit.json (fallback relay-deposit flow).
+// SECURITY: mirrors the EC2 relay — `depositor`/`amount` are no longer accepted; the CLI reads
+// them from the on-chain `Deposited` log. See doc/tasks/deposit-import-threat-model.md.
 app.post('/api/import-deposit', (req, res) => {
   const ch = reqChannel(req);
   withLock(ch, () => {
-    const slot = (req.body && req.body.recipientSlot) || 0;
-    let depositor, amount;
-    if (req.body && req.body.depositor && req.body.amount) {
-      depositor = req.body.depositor;
-      amount = req.body.amount;
-    } else {
-      const dep = JSON.parse(fs.readFileSync(wc(ch, 'pending_deposit.json'), 'utf8'));
-      depositor = dep.depositor;
-      amount = dep.amount;
+    const b = req.body || {};
+    if (b.depositor !== undefined || b.amount !== undefined || b.tokenIndex !== undefined) {
+      throw new Error('import-deposit no longer accepts { depositor, amount, tokenIndex }: they are read from the on-chain Deposited log. Send { recipientSlot, txHash }.');
     }
-    cli(ch, ['cosign-l1-deposit-import', String(slot), String(amount), depositor, 'l1_import_cosigned.json']);
+    const slot = b.recipientSlot !== undefined ? b.recipientSlot : 0;
+    let txHash = b.txHash;
+    // The browser (MetaMask) path always sends its own txHash: that deposit is signed by the user's
+    // wallet, whose address IS the slot's bound B-1b recipient, so the CLI's depositor<->slot
+    // binding must hold and NO flag is passed. The fallback file is written only by the
+    // server-key `/api/l1-deposit` route, where the depositor is the operator and bound to no slot.
+    let operatorFunded = false;
+    if (txHash === undefined) {
+      const dep = JSON.parse(fs.readFileSync(wc(ch, 'pending_deposit.json'), 'utf8'));
+      if (!dep.txHash) throw new Error('pending_deposit.json has no txHash — cannot verify the deposit on-chain');
+      txHash = dep.txHash;
+      operatorFunded = true;
+    }
+    if (!/^0x[0-9a-fA-F]{64}$/.test(String(txHash))) throw new Error('txHash must be 0x + 64 hex chars');
+    if (!/^[0-9]{1,4}$/.test(String(slot))) throw new Error('recipientSlot must be a small decimal integer');
+    const args = ['cosign-l1-deposit-import', String(slot), String(txHash), RPC, 'l1_import_cosigned.json'];
+    if (operatorFunded) args.push('--allow-unbound-depositor');
+    cli(ch, args);
     const depTicket = findActiveTicket(ch, 'deposit');
     if (depTicket) { depTicket.status = 'import_done'; depTicket.steps.import = { completedAt: Date.now() }; upsertTicket(ch, depTicket); }
     const snap = JSON.parse(fs.readFileSync(wc(ch, 'channel_snapshot.json'), 'utf8'));
     res.json(snap);
+  }).catch((e) => { console.error(e.stderr ? String(e.stderr) : (e.message||e)); res.status(500).json({ error: String(e.stderr || e.message || e) }); });
+});
+
+// ─── Testnet $ITX faucet ───────────────────────────────────────────────────────────────────
+// GET  /api/faucet            → { enabled } (+ tokenIndex/amount/cooldownMs when enabled).
+//                               Always 200 so the wallet can ask without generating errors.
+// POST /api/faucet { slot }   → the fresh snapshot (+ `_faucet`), or 404 when disabled.
+app.get('/api/faucet', (req, res) => {
+  res.json(faucetPolicy ? faucetPolicy.publicInfo(FAUCET) : { enabled: false });
+});
+
+app.post('/api/faucet', (req, res) => {
+  // Disabled ⇒ the endpoint does not exist. No hints, no partial behaviour.
+  if (!FAUCET.enabled) return res.status(404).json({ error: 'faucet not available' });
+  const ch = reqChannel(req);
+  withLock(ch, () => {
+    const slot = req.body && req.body.slot;
+    const amount = FAUCET.dripAmount.toString();
+    const localTokenSlot = faucetLocalTokenSlot(ch);
+    // A corrupt ledger THROWS here and the request 500s — never "start from empty", which would
+    // re-open the faucet to every slot that already drank.
+    const state = readFaucetState(ch);
+    const verdict = faucetPolicy.checkEligibility({
+      config: FAUCET,
+      slot,
+      activeSlots: activeSlotCount(ch),
+      localTokenSlot,
+      state,
+      now: Date.now(),
+    });
+    if (!verdict.ok) {
+      if (verdict.alreadyFunded) {
+        const snap = JSON.parse(fs.readFileSync(wc(ch, 'channel_snapshot.json'), 'utf8'));
+        return res.json({ ...snap, _faucet: { funded: true, alreadyFunded: true, amount, tokenIndex: FAUCET.tokenIndex, tokenSlot: localTokenSlot } });
+      }
+      const status = verdict.code === 'cooldown' || verdict.code === 'cap_reached' ? 429 : 400;
+      return res.status(status).json({ error: verdict.reason, code: verdict.code, retryAfterMs: verdict.retryAfterMs });
+    }
+
+    // RESERVE FIRST (see the security contract above), then move the value.
+    writeFaucetState(ch, faucetPolicy.reserveDrip(state, slot, amount, Date.now()));
+    console.log(`[faucet] channel ${ch}: drip reserved — ${amount} of base token ${FAUCET.tokenIndex} (local slot ${localTokenSlot}) from slot ${FAUCET.faucetSlot} → slot ${slot}`);
+    try {
+      // `refresh` re-encrypts the faucet's own position to a locally-witnessed ciphertext and
+      // clears its `pending_adds`. A position credited homomorphically (the L1 deposit import
+      // that seeded the faucet) or just spent by the previous drip is otherwise UNSPENDABLE —
+      // the refresh proof is value-preserving (RefreshAir) and every co-signer re-verifies it.
+      cli(ch, ['refresh', String(FAUCET.faucetSlot), String(localTokenSlot), 'faucet_refresh.json']);
+      cli(ch, ['send', String(FAUCET.faucetSlot), String(slot), amount, 'faucet_payload.json', String(localTokenSlot)]);
+      cli(ch, ['cosign', 'faucet_payload.json', 'faucet_cosigned.json']);
+    } catch (e) {
+      writeFaucetState(ch, faucetPolicy.settleDrip(readFaucetState(ch), slot, 'failed'));
+      console.error(`[faucet] channel ${ch}: drip to slot ${slot} FAILED (reservation kept): ${String(e.stderr || e.message || e).slice(0, 200)}`);
+      throw e;
+    }
+    writeFaucetState(ch, faucetPolicy.settleDrip(readFaucetState(ch), slot, 'done'));
+    console.log(`[faucet] channel ${ch}: DRIPPED ${amount} of base token ${FAUCET.tokenIndex} to slot ${slot}`);
+    const snap = JSON.parse(fs.readFileSync(wc(ch, 'channel_snapshot.json'), 'utf8'));
+    res.json({ ...snap, _faucet: { funded: true, alreadyFunded: false, amount, tokenIndex: FAUCET.tokenIndex, tokenSlot: localTokenSlot } });
   }).catch((e) => { console.error(e.stderr ? String(e.stderr) : (e.message||e)); res.status(500).json({ error: String(e.stderr || e.message || e) }); });
 });
 
@@ -482,19 +760,26 @@ app.get('/api/tickets/history', (req, res) => {
   res.json(merged.reverse());
 });
 
+// A deposit TICKET is a client-side recovery note, not an authority. Its `amount`/`depositor`/
+// `tokenIndex` are DISPLAY ONLY and are never forwarded anywhere: `/api/import-deposit` accepts
+// exactly { recipientSlot, txHash } and the CLI reads the real economics from the transaction's
+// on-chain `Deposited` log. `tokenIndex` is normalized to a small non-negative integer (or dropped)
+// purely so the pending/history UI can label an ERC-20 deposit instead of assuming ETH.
 app.post('/api/ticket/deposit', (req, res) => {
   const ch = reqChannel(req);
-  const { amount, depositor, txHash, recipientSlot } = req.body || {};
+  const { amount, depositor, txHash, recipientSlot, tokenIndex } = req.body || {};
   if (!amount || !depositor || !txHash) return res.status(400).json({ error: 'needs { amount, depositor, txHash, recipientSlot }' });
   const existing = findActiveTicket(ch, 'deposit');
   if (existing) return res.status(409).json({ error: 'deposit already pending', ticket: existing });
+  const params = { amount: String(amount), depositor, recipientSlot: recipientSlot || 0, txHash };
+  if (Number.isInteger(tokenIndex) && tokenIndex >= 0 && tokenIndex <= 0xffffffff) params.tokenIndex = tokenIndex;
   const ticket = upsertTicket(ch, {
     id: 'dep_' + Date.now(),
     type: 'deposit',
     status: 'l1_done',
     createdAt: Date.now(),
     updatedAt: Date.now(),
-    params: { amount: String(amount), depositor, recipientSlot: recipientSlot || 0, txHash },
+    params,
     steps: { l1: { completedAt: Date.now(), txHash }, import: null },
   });
   res.json(ticket);
@@ -562,6 +847,9 @@ if (needBacking.length) {
     cli(ch, ['setup-backing', RPC, addr]);
   }
 }
+
+// After backing exists (verification reads channel_backing.json's rollup).
+loadTokenManifests(RPC);
 
 https.createServer(opts, app).listen(PORT, '0.0.0.0', () => {
   console.log(`wallet relay on https://localhost:${PORT}/wallet-live.html  (channels ${CHANNELS.join(', ')})`);

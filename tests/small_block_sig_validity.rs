@@ -108,7 +108,7 @@ fn inter_channel_small_block_sig_is_validity_proven() {
         channel_id,
         member_count: 3,
         delegate_count: 0,
-        enc_balances: BalanceState::pad_enc_balances(&enc),
+        enc_balances: BalanceState::pad_enc_balances_token0(&enc),
         regev_pk_digests: BalanceState::pad_regev_pk_digests(&regev_pk_digests),
         // B-1b: nonzero per-active-slot L1 exit addresses (validate() rejects zero actives).
         recipients: BalanceState::pad_recipients(
@@ -127,7 +127,9 @@ fn inter_channel_small_block_sig_is_validity_proven() {
         // accumulator root is the empty-tree root — keeping H1' internally consistent.
         settled_tx_accumulator_root: intmax3_zkp::wallet_core::empty_settled_tx_accumulator_root(),
         state_version: 1,
-        pending_adds: BalanceState::pad_pending_adds(&[0, 0, 0]),
+        pending_adds: BalanceState::pad_pending_adds_token0(&[0, 0, 0]),
+        token_registry: BalanceState::single_token_registry(0),
+        token_count: 1,
     };
     let h1: Bytes32 = post_balance_state.h1();
 

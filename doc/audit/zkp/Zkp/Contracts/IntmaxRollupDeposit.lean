@@ -123,7 +123,9 @@ theorem authorizePartial_sets {s s' : AuthState} {caller : Addr} {digest : Word}
   * **Burn-path authorization chain.** `claimAuthorized` /
     `withdrawNative` burn leaves require
     `partialWithdrawalAuthorized[authDigest] = true`
-    (`claimAuthorized_safe`), and `authorizePartial_requires_manager` +
+    (`claimAuthorized_escrow_conservation` — bookkeeping only, NOT an
+    economic-soundness result; and its claim path was removed from the
+    contract 2026-07-28), and `authorizePartial_requires_manager` +
     `registerManager_requires_deployer` show that flag is reachable only
     through deployer→manager→authorize. `authDigest` binds every
     withdrawal field, so an authorization cannot be replayed with a

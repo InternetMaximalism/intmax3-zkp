@@ -30,11 +30,21 @@ use crate::{
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Deposit {
-    // These two fields are not included in the hash
+    // These two fields are NOT included in `hash_with_prev_hash` (the on-chain `depositHashChain`
+    // fold), but they ARE included in `to_u64_vec` -> `poseidon_hash` -> `nullifier`.
+    //
+    // SECURITY: `deposit_index` is what makes `nullifier()` UNIQUE PER REAL DEPOSIT. A caller that
+    // leaves it at `Default::default()` makes two distinct on-chain deposits with the same
+    // (depositor, token_index, amount) collide onto ONE nullifier. Always populate it from the
+    // chain (`IntmaxRollup.Deposited.depositIndex`). See doc/tasks/deposit-import-threat-model.md.
     pub deposit_index: U63, // The index of the deposit in the deposit tree
-    pub block_number: BlockNumber, // The block number of the deposit
+    /// The INTMAX validity block number that folded this deposit — NOT an L1 block number
+    /// (`receive_deposit_circuit` enforces `deposit.block_number <= new_block_r <=
+    /// public_state.block_number` against intmax block numbers). `0` means "not yet included in
+    /// any intmax block"; writing an L1 block number here is a unit confusion.
+    pub block_number: BlockNumber,
 
-    // Fields included in the hash
+    // Fields included in BOTH hashes
     pub depositor: Address, // The address of the depositor
     pub recipient: Bytes32, // The recipient of the deposit,
     pub token_index: u32,   // The index of the token

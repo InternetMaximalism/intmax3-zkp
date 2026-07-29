@@ -4,8 +4,29 @@
 use regev_plonky3::RegevParams;
 
 /// Ring dimension `n` of `R_q = Z_q[x]/(x^n + 1)`. One u64 amount occupies the 64 low
-/// coefficients (1 bit each, D1); the upper 64 coefficients stay zero in fresh encryptions.
-pub const REGEV_N: usize = 128;
+/// coefficients (1 bit each, D1); the remaining coefficients stay zero in fresh encryptions.
+///
+/// SECURITY: `n` is the Ring-LWE security parameter and MUST NOT be lowered. At `q = BabyBear`
+/// (~2^31) with ternary `s` and CBD(2) noise, the primal-uSVP core-SVP costs are:
+///
+/// | `n`  | BKZ block | classical | quantum |
+/// |------|-----------|-----------|---------|
+/// | 128  | —         | **broken by plain LLL** | — |
+/// | 512  | 84        | 2^25      | 2^22    |
+/// | 1024 | 264       | 2^77      | 2^70    |
+/// | 2048 | 673       | 2^197     | 2^178   |
+///
+/// The estimator reproduces the published Kyber core-SVP block sizes to within 3%. `n = 128` (the
+/// value used before this change) is not merely weak: a dim-257 Kannan embedding of a real
+/// `channel_keygen` public key is solved by **LLL alone in ~4 minutes on a laptop**, recovering
+/// `s` exactly and decrypting the balance. `n = 1024` would sit at 2^77, below NIST Level 1
+/// (2^118), so `2048` is the smallest power of two that clears the 128-bit target — and `n` must
+/// be a power of two for the negacyclic NTT (`RegevParams::validate`).
+///
+/// Cost of the bump (measured, Apple M3 Max, single-threaded): proving grows only ~2.5x because
+/// the fixed FRI/Merkle overhead dominates at small `n`, while `RegevPk`/`RegevCiphertext` grow
+/// linearly to 16 KB each.
+pub const REGEV_N: usize = 2048;
 
 /// Centered-binomial noise parameter; `regev_plonky3` is specialised to η = 2
 /// (noise in `[-2, 2]`, smallness is a degree-3 STARK constraint).

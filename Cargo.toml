@@ -73,12 +73,18 @@ lazy_static = "1.5.0"
 bincode = { version = "2.0.1", features = ["serde"] }
 clap = { version = "4.5", features = ["derive"] }
 postcard = { version = "1.1.3", features = ["alloc"] }
-# Regev (Ring-LWE) lattice layer — rides the Plonky3 0.5.3 graph, which
-# coexists with the 0.4.2 graph below (semver-incompatible majors resolve
-# side by side). Pinned to the same rev the SIS-lattice-paymentchannel port
-# source uses. `default-features = false` drops `parallel` for wasm safety;
-# enable the `regev-parallel` feature for native proving speed.
-regev_plonky3 = { git = "https://github.com/leohio/regv-plonky3.git", rev = "3b17b8e", default-features = false }
+# Regev (Ring-LWE) lattice layer — rides the Plonky3 0.5.3 graph, which coexists with the 0.4.2
+# graph below (semver-incompatible majors resolve side by side).
+#
+# Pinned to `fix/hiding-config-csprng`, whose hiding (zero-knowledge) FRI config seeds its
+# Merkle-leaf salts from a CSPRNG: the salts of the opened leaves ship inside the proof, so the
+# `SmallRng` (xoshiro256++) the config previously used would let an observer reconstruct the
+# generator and derive the salts of the UNOPENED leaves, defeating the hiding property.
+#
+# `default-features = false` drops the crate's default `parallel` feature so the wasm build stays
+# single-threaded unless it opts in; the `cfg(not(wasm32))` section below turns it back on for
+# every native target.
+regev_plonky3 = { git = "https://github.com/leohio/regv-plonky3.git", rev = "5495eda", default-features = false }
 rand010 = { package = "rand", version = "0.10" }
 p3-air-05 = { package = "p3-air", version = "0.5.3" }
 p3-field-05 = { package = "p3-field", version = "0.5.3" }
@@ -138,6 +144,21 @@ web-time = "0.2"
 # wasm-only so native builds are unaffected.
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 getrandom_v04 = { package = "getrandom", version = "0.4", features = ["wasm_js"] }
+
+# PERF: rayon-parallel Regev STARK proving, on for every NATIVE target.
+#
+# The base dependency above takes `default-features = false`, which drops the upstream crate's
+# default `parallel` feature. That is the right default for wasm (see `hosting/build-wallet-wasm.sh`
+# and the upstream README: wasm-bindgen-rayon needs SharedArrayBuffer + COOP/COEP and an awaited
+# `initThreadPool`, and a misconfigured pool can stall `par_iter` in the browser) — but it also
+# silently left every native prover single-threaded, which is pure loss on a server or CLI.
+# Measured at n = 2048 with the hiding config, Apple M3 Max: E-1 92.7 -> 46.6 ms,
+# E-3 73.2 -> 34.2 ms, refresh 83.8 -> 42.1 ms, i.e. a flat ~2x for free.
+#
+# Cargo unions features across target sections, so this turns `parallel` on for non-wasm only;
+# the wasm build keeps deciding for itself via the `regev-parallel` feature.
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+regev_plonky3 = { git = "https://github.com/leohio/regv-plonky3.git", rev = "5495eda", features = ["parallel"] }
 
 [features]
 default = []

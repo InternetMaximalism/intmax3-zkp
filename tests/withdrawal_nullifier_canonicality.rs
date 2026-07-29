@@ -33,9 +33,10 @@
 //!      (now-removed) settlement block — i.e. same (from, nonce, transfer_index, content) — produce
 //!      the IDENTICAL nullifier, so a double-settlement of one deduction can no longer mint two
 //!      distinct nullifiers.
-//!   3. INJECTIVE over the binding set: changing ANY bound field (content, `from`, `transfer_index`,
-//!      or `nonce`) changes the nullifier — so legitimate distinct payments stay distinct and a
-//!      prover cannot forge a colliding nullifier for a genuinely different deduction.
+//!   3. INJECTIVE over the binding set: changing ANY bound field (content, `from`,
+//!      `transfer_index`, or `nonce`) changes the nullifier — so legitimate distinct payments stay
+//!      distinct and a prover cannot forge a colliding nullifier for a genuinely different
+//!      deduction.
 //!
 //! They are NOT meant to pass trivially: each asserts a specific field is (or is not) load-bearing
 //! in the preimage.
@@ -97,15 +98,15 @@ fn nullifier_is_deterministic_for_identical_settled_transfer() {
     assert_eq!(a.nullifier(), a.nullifier());
 }
 
-/// 2. F-WD-2 FIX — settlement-independence. The nullifier no longer binds the settlement block.
-///    Two settled transfers for the SAME deduction (identical from, nonce, transfer_index, and
-///    content) that would previously have been settled into DIFFERENT blocks now produce the
-///    IDENTICAL nullifier. This is the property that makes a double-settlement caught rather than
-///    minting two distinct nullifiers for one balance deduction.
+/// 2. F-WD-2 FIX — settlement-independence. The nullifier no longer binds the settlement block. Two
+///    settled transfers for the SAME deduction (identical from, nonce, transfer_index, and content)
+///    that would previously have been settled into DIFFERENT blocks now produce the IDENTICAL
+///    nullifier. This is the property that makes a double-settlement caught rather than minting two
+///    distinct nullifiers for one balance deduction.
 ///
 ///    Because `block_number` has been removed from `SettledTransfer` entirely, the two objects here
-///    are literally byte-identical — which is exactly the point: the settlement block is no longer a
-///    preimage field, so it CANNOT create a second nullifier. Contrast with the pre-fix behavior,
+///    are literally byte-identical — which is exactly the point: the settlement block is no longer
+/// a    preimage field, so it CANNOT create a second nullifier. Contrast with the pre-fix behavior,
 ///    where varying the settlement block produced a distinct nullifier (the F-WD-2 bug).
 #[test]
 fn same_deduction_settled_into_two_blocks_has_identical_nullifier() {
@@ -133,7 +134,8 @@ fn same_deduction_settled_into_two_blocks_has_identical_nullifier() {
 
 /// 3a. The economically-binding TRANSFER fields are each load-bearing: recipient, token_index,
 ///     amount, and aux_data all change the nullifier. aux_data is the field the C14 hypothesis
-///     specifically worried about — confirm a different aux_data does NOT collide with the baseline.
+///     specifically worried about — confirm a different aux_data does NOT collide with the
+/// baseline.
 #[test]
 fn nullifier_binds_every_transfer_field() {
     let base_n = base().nullifier();
@@ -159,12 +161,12 @@ fn nullifier_binds_every_transfer_field() {
     );
 }
 
-/// 3b. The POSITION / deduction-identity fields are each load-bearing: from-channel, transfer_index,
-///     and nonce all change the nullifier. `nonce` REPLACES the old `block_number` binding: it is
-///     what makes two genuinely different deductions get distinct nullifiers while a double-
-///     settlement of ONE deduction (same nonce) collides. This is the injectivity half of the
-///     soundness argument — the prover cannot forge a second nullifier for the SAME deduction, and
-///     legitimately distinct sends/transfers/channels never collide.
+/// 3b. The POSITION / deduction-identity fields are each load-bearing: from-channel,
+/// transfer_index,     and nonce all change the nullifier. `nonce` REPLACES the old `block_number`
+/// binding: it is     what makes two genuinely different deductions get distinct nullifiers while a
+/// double-     settlement of ONE deduction (same nonce) collides. This is the injectivity half of
+/// the     soundness argument — the prover cannot forge a second nullifier for the SAME deduction,
+/// and     legitimately distinct sends/transfers/channels never collide.
 #[test]
 fn nullifier_binds_every_identity_field() {
     let base_n = base().nullifier();

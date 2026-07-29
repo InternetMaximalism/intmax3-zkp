@@ -120,8 +120,8 @@ use p3_lookup::{
 };
 use p3_matrix_05::dense::RowMajorMatrix;
 use regev_plonky3::{
-    Challenge, RegevStarkConfig,
-    config::{default_config, test_config},
+    Challenge, RegevZkStarkConfig,
+    config::{zk_config, zk_test_config},
     regev::{
         Ciphertext as UpstreamCiphertext, EncryptionWitness, F, PublicKey as UpstreamPublicKey,
         centered_to_field, field_to_centered,
@@ -144,8 +144,13 @@ use super::{
 
 /// Domain word for E-1 channelTxZKP ("IMCZ").
 pub const CHANNEL_TX_ZKP_DOMAIN: u32 = 0x494d435a;
-/// Domain word for E-2 channelUpdateZKP ("IMUZ").
-pub const CHANNEL_UPDATE_ZKP_DOMAIN: u32 = 0x494d555a;
+/// Domain word for E-2 channelUpdateZKP: "IMU2" (`CHANNEL_UPDATE_ZKP_DOMAIN_V2`, detail2 §N-4,
+/// TM-6/TM-15). The v1 "IMUZ" (0x494d555a) domain is RETIRED (multitoken Phase 2b): the E-2
+/// public values gained the base `token_index` as their own extra PV, so the preimage was
+/// re-versioned per TM-15. The v1 value stays pinned in the repo-wide non-collision test
+/// (`constants::tests::all_domain_constants_pairwise_distinct`), so no future tag can collide
+/// with historic v1 transcripts.
+pub const CHANNEL_UPDATE_ZKP_DOMAIN: u32 = crate::constants::CHANNEL_UPDATE_ZKP_DOMAIN_V2;
 /// Domain word for E-3 withdrawClaimZKP ("IMWZ").
 pub const WITHDRAW_CLAIM_ZKP_DOMAIN: u32 = 0x494d575a;
 /// Domain word for the balance-refresh proof ("IMRF").
@@ -185,10 +190,20 @@ impl RegevProofPurpose {
 
 /// STARK parameter strength.
 ///
-/// SECURITY: `Test` uses the upstream `test_config()` (8 FRI queries, 1-bit grinding) and is
-/// NOT secure — it exists so the test suite stays fast. `Production` uses `default_config()`
-/// (84 queries, 16-bit grinding, ~100-bit conjectured security). The level is chosen by the
-/// verifier, never read from the proof.
+/// SECURITY: both levels use the **hiding** (zero-knowledge) config — they differ only in FRI
+/// query count. `Test` uses `zk_test_config()` (8 queries, 1-bit grinding) and is NOT secure; it
+/// exists so the suite stays fast while still exercising the same hiding machinery as production.
+/// `Production` uses `zk_config()` (42 queries at rate 1/4, 16-bit grinding, ~100-bit conjectured
+/// security). The level is chosen by the verifier, never read from the proof.
+///
+/// SECURITY (why hiding at all): plain FRI is **not** zero-knowledge. Each query opens a full row
+/// of the committed LDE, so a proof with `Q` queries publishes `Q` evaluations of every trace
+/// column — including `DEC_S` (the secret key) and `DEC_BIT` (the secret balance). `DEC_BIT` has
+/// only 64 unknown entries (the amount bits; the remaining coefficients are zero under the D1
+/// encoding), so any `Q > 64` makes the system overdetermined and the balance falls out by linear
+/// algebra. That holds at every ring dimension, so it cannot be fixed by tuning `REGEV_N`. Keeping
+/// the secret columns `Kind::Local` (see the module docs) stops them being *published* as
+/// evaluations but does nothing about the query openings; only a hiding PCS closes it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RegevSecurityLevel {
     Test,
@@ -196,10 +211,10 @@ pub enum RegevSecurityLevel {
 }
 
 impl RegevSecurityLevel {
-    fn config(self) -> RegevStarkConfig {
+    fn config(self) -> RegevZkStarkConfig {
         match self {
-            Self::Test => test_config(),
-            Self::Production => default_config(),
+            Self::Test => zk_test_config(),
+            Self::Production => zk_config(),
         }
     }
 }
@@ -317,9 +332,14 @@ const E2_SHAPE: AirShape = AirShape {
     carry_after: 1,
 };
 
+/// Number of 16-bit amount limbs absorbed as public values (E-2 and E-3).
+const AMOUNT_LIMB_PVS: usize = 4;
+
 /// Number of extra public values (after the domain word) for E-2: the public amount as four
-/// 16-bit limbs.
-const E2_NUM_EXTRA_PVS: usize = 4;
+/// 16-bit limbs PLUS the base `token_index` as its own PV (detail2 §N-4, TM-6 — bound under the
+/// "IMU2" domain so every E-2 transcript commits WHICH base token the update moves; the AIR
+/// itself is unchanged, the binding is transcript-level like the domain word).
+const E2_NUM_EXTRA_PVS: usize = AMOUNT_LIMB_PVS + 1;
 
 // ---------------------------------------------------------------------------
 // Shared AIR logic
@@ -665,8 +685,26 @@ fn dual_key_public_values(
 /// alias `limb` and `limb − q` after the implicit mod-q reduction of `F::from_u32`). The
 /// definitive amount binding is the m(z) recomputation in `verify_channel_update`; this
 /// absorption is defense in depth.
-fn amount_limbs(amount: u64) -> [F; E2_NUM_EXTRA_PVS] {
+fn amount_limbs(amount: u64) -> [F; AMOUNT_LIMB_PVS] {
     core::array::from_fn(|k| F::from_u32(((amount >> (16 * k)) & 0xffff) as u32))
+}
+
+/// E-2 extra public values: the four amount limbs plus the base `token_index` (TM-6).
+///
+/// SECURITY: `token_index` is a u32 absorbed via `F::from_u32`, which reduces mod q — two
+/// indices differing by q would alias as field elements. Base token indices are L1 registry
+/// indices (small integers, < q = 2_013_265_921 in practice); the definitive guard is that both
+/// sides' transition verifiers resolve the SAME u32 against their H1-committed registries before
+/// rebuilding this statement, so an aliased index could never pass registry resolution anyway.
+fn e2_extra_pvs(amount: u64, token_index: u32) -> [F; E2_NUM_EXTRA_PVS] {
+    let limbs = amount_limbs(amount);
+    core::array::from_fn(|k| {
+        if k < AMOUNT_LIMB_PVS {
+            limbs[k]
+        } else {
+            F::from_u32(token_index)
+        }
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -782,7 +820,7 @@ fn ring_identity_holds(key: &[F], r: &[F], addend: &[F], ct: &[F], k: &[F]) -> b
 // ---------------------------------------------------------------------------
 
 fn prove_one<A>(
-    config: &RegevStarkConfig,
+    config: &RegevZkStarkConfig,
     air: &A,
     trace: &RowMajorMatrix<F>,
     public_values: Vec<F>,
@@ -791,7 +829,7 @@ where
     A: Clone
         + LookupAir<F>
         + Air<SymbolicAirBuilder<F, Challenge>>
-        + for<'a> Air<ProverConstraintFolderWithLookups<'a, RegevStarkConfig>>
+        + for<'a> Air<ProverConstraintFolderWithLookups<'a, RegevZkStarkConfig>>
         + for<'a> Air<DebugConstraintBuilder<'a, F, Challenge>>,
 {
     regev_plonky3::init_thread_pool();
@@ -813,20 +851,20 @@ where
 /// Shape checks (`degree_bits`, published-evaluation count) run BEFORE `verify_batch` so an
 /// adversarial proof cannot reach huge-domain construction or out-of-bounds indexing.
 fn verify_one<A>(
-    config: &RegevStarkConfig,
+    config: &RegevZkStarkConfig,
     mut air: A,
     proof_bytes: &[u8],
     public_values: Vec<F>,
     num_published: usize,
-) -> Result<(Challenge, BatchProof<RegevStarkConfig>), RegevError>
+) -> Result<(Challenge, BatchProof<RegevZkStarkConfig>), RegevError>
 where
     A: Clone
         + LookupAir<F>
         + Air<SymbolicAirBuilder<F, Challenge>>
-        + for<'a> Air<VerifierConstraintFolderWithLookups<'a, RegevStarkConfig>>,
+        + for<'a> Air<VerifierConstraintFolderWithLookups<'a, RegevZkStarkConfig>>,
 {
     regev_plonky3::init_thread_pool();
-    let proof: BatchProof<RegevStarkConfig> =
+    let proof: BatchProof<RegevZkStarkConfig> =
         postcard::from_bytes(proof_bytes).map_err(|e| RegevError::ProofCodec(e.to_string()))?;
 
     // SECURITY: the Horner argument identifies "the polynomial" with "the trace column", so the
@@ -863,7 +901,7 @@ where
 /// `test_config()` batch-stark backend. Used by the P3 de-risk PoC only.
 pub fn prove_poseidon2_poc(trace: &RowMajorMatrix<F>) -> Result<Vec<u8>, RegevError> {
     let air = super::hash_sig::NoLookupPoseidon2Air::new();
-    prove_one(&test_config(), &air, trace, Vec::new())
+    prove_one(&zk_test_config(), &air, trace, Vec::new())
 }
 
 /// Verify a PoC Poseidon2 permutation proof. The shape check inside `verify_one` is specific to
@@ -871,13 +909,13 @@ pub fn prove_poseidon2_poc(trace: &RowMajorMatrix<F>) -> Result<Vec<u8>, RegevEr
 pub fn verify_poseidon2_poc(proof_bytes: &[u8]) -> Result<(), RegevError> {
     regev_plonky3::init_thread_pool();
     let mut air = super::hash_sig::NoLookupPoseidon2Air::new();
-    let proof: BatchProof<RegevStarkConfig> =
+    let proof: BatchProof<RegevZkStarkConfig> =
         postcard::from_bytes(proof_bytes).map_err(|e| RegevError::ProofCodec(e.to_string()))?;
     let lookups = air.get_lookups();
     let airs = vec![air];
     let common = CommonData::new(None, vec![lookups]);
     let pvs: Vec<Vec<F>> = vec![Vec::new()];
-    stark::verify_batch(&test_config(), &airs, &proof, &pvs, &common)
+    stark::verify_batch(&zk_test_config(), &airs, &proof, &pvs, &common)
         .map_err(|e| RegevError::ProofVerification(format!("{e:?}")))?;
     Ok(())
 }
@@ -910,7 +948,7 @@ pub fn prove_one_test_hash_sig(
     public_values: Vec<F>,
 ) -> Result<Vec<u8>, RegevError> {
     let air = super::hash_sig::Poseidon2HashSigAir::new();
-    prove_one(&test_config(), &air, trace, public_values)
+    prove_one(&zk_test_config(), &air, trace, public_values)
 }
 
 /// Verify a Poseidon2 hash-signature proof against the supplied public values `[pk_b ‖ m]`.
@@ -934,7 +972,7 @@ pub fn verify_hash_sig(
     }
     let config = level.config();
     let mut air = super::hash_sig::Poseidon2HashSigAir::new();
-    let proof: BatchProof<RegevStarkConfig> =
+    let proof: BatchProof<RegevZkStarkConfig> =
         postcard::from_bytes(proof_bytes).map_err(|e| RegevError::ProofCodec(e.to_string()))?;
     // SECURITY (shape check, mirrors `verify_one`): pin the instance count and trace height BEFORE
     // `verify_batch`, so a malformed-height proof is rejected early rather than reaching FRI-domain
@@ -996,7 +1034,7 @@ fn expected_published_evals(
 /// (the j-th published value is pinned in-circuit to the j-th global lookup's running
 /// evaluation, so positional matching is sound — same argument as upstream `verify_transfers`).
 fn check_published_evals(
-    proof: &BatchProof<RegevStarkConfig>,
+    proof: &BatchProof<RegevZkStarkConfig>,
     expected: &[Challenge],
 ) -> Result<(), RegevError> {
     let data = &proof.global_lookup_data[0];
@@ -1124,9 +1162,11 @@ pub fn verify_channel_tx(
 // E-2 prove / verify
 // ---------------------------------------------------------------------------
 
-/// Prove E-2 channelUpdateZKP (detail2 §E-2): `before`/`after`/`sender_delta` well-formed under
-/// `sender_pk`, `receiver_delta` well-formed under `recipient_pk`, `before = after + amount`,
-/// and both deltas encrypt exactly the public `amount`.
+/// Prove E-2 channelUpdateZKP (detail2 §E-2 + §N-4): `before`/`after`/`sender_delta` well-formed
+/// under `sender_pk`, `receiver_delta` well-formed under `recipient_pk`, `before = after +
+/// amount`, and both deltas encrypt exactly the public `amount`. `token_index` is the BASE-layer
+/// token this update moves (TM-6): it is absorbed as its own public value under the "IMU2"
+/// domain, so a proof for token A can never verify against a statement claiming token B.
 #[allow(clippy::too_many_arguments)]
 pub fn prove_channel_update(
     level: RegevSecurityLevel,
@@ -1137,6 +1177,7 @@ pub fn prove_channel_update(
     sender_delta: (&RegevCiphertext, &AmountWitness),
     receiver_delta: (&RegevCiphertext, &AmountWitness),
     amount: u64,
+    token_index: u32,
 ) -> Result<Vec<u8>, RegevError> {
     let spk = to_upstream_pk(sender_pk)?;
     let rpk = to_upstream_pk(recipient_pk)?;
@@ -1186,7 +1227,7 @@ pub fn prove_channel_update(
     );
     let pvs = dual_key_public_values(
         CHANNEL_UPDATE_ZKP_DOMAIN,
-        &amount_limbs(amount),
+        &e2_extra_pvs(amount, token_index),
         &spk,
         &rpk,
         &ct_refs,
@@ -1194,8 +1235,9 @@ pub fn prove_channel_update(
     prove_one(&level.config(), &air, &trace, pvs)
 }
 
-/// Verify E-2 channelUpdateZKP against the claimed statement (including the public `amount`).
-/// Validates all keys and ciphertexts canonically BEFORE touching the proof bytes.
+/// Verify E-2 channelUpdateZKP against the claimed statement (including the public `amount` and
+/// the base `token_index`, both rebuilt by the VERIFIER — TM-6). Validates all keys and
+/// ciphertexts canonically BEFORE touching the proof bytes.
 #[allow(clippy::too_many_arguments)]
 pub fn verify_channel_update(
     level: RegevSecurityLevel,
@@ -1206,6 +1248,7 @@ pub fn verify_channel_update(
     sender_delta: &RegevCiphertext,
     receiver_delta: &RegevCiphertext,
     amount: u64,
+    token_index: u32,
     proof: &[u8],
 ) -> Result<(), RegevError> {
     let spk = to_upstream_pk(sender_pk)?;
@@ -1223,7 +1266,7 @@ pub fn verify_channel_update(
     let air = ChannelUpdateAir::new(REGEV_N, F::from_u32(params.delta()));
     let pvs = dual_key_public_values(
         CHANNEL_UPDATE_ZKP_DOMAIN,
-        &amount_limbs(amount),
+        &e2_extra_pvs(amount, token_index),
         &spk,
         &rpk,
         &ct_refs,
@@ -1616,7 +1659,7 @@ impl<Fld: Field> BaseAir<Fld> for DecryptionAir<Fld> {
 
     fn num_public_values(&self) -> usize {
         // [domain] ++ amount limbs ++ a ++ b ++ c1 ++ c2.
-        1 + E2_NUM_EXTRA_PVS + 4 * self.n
+        1 + AMOUNT_LIMB_PVS + 4 * self.n
     }
 
     fn main_next_row_columns(&self) -> Vec<usize> {
@@ -1955,7 +1998,7 @@ fn decryption_public_values(
     pk: &UpstreamPublicKey,
     ct: &UpstreamCiphertext,
 ) -> Vec<F> {
-    let mut pv = Vec::with_capacity(1 + E2_NUM_EXTRA_PVS + 4 * REGEV_N);
+    let mut pv = Vec::with_capacity(1 + AMOUNT_LIMB_PVS + 4 * REGEV_N);
     pv.push(F::from_u32(domain));
     pv.extend_from_slice(&amount_limbs(amount));
     pv.extend_from_slice(&pk.a);
@@ -2186,6 +2229,10 @@ pub enum RegevStatement {
         sender_delta: RegevCiphertext,
         receiver_delta: RegevCiphertext,
         amount: u64,
+        /// BASE-layer token index this update moves (detail2 §N-4, TM-6). The relying party
+        /// rebuilds it from the SIGNED `InterChannelTx.token_index` (never from the proof
+        /// carrier) after resolving it against its own H1-committed registry.
+        token_index: u32,
     },
     /// E-3: "`user_amount_ct` decrypts to the public `amount` under the key behind `user_pk`".
     WithdrawClaim {
@@ -2249,6 +2296,7 @@ impl RealRegevProofVerifier {
                     sender_delta,
                     receiver_delta,
                     amount,
+                    token_index,
                 },
             ) => verify_channel_update(
                 self.level,
@@ -2259,6 +2307,7 @@ impl RealRegevProofVerifier {
                 sender_delta,
                 receiver_delta,
                 *amount,
+                *token_index,
                 proof,
             ),
             (
@@ -2362,6 +2411,10 @@ mod tests {
         amount: u64,
     }
 
+    /// Base token index the E-2 test fixtures prove under (nonzero on purpose — the genesis
+    /// token would mask a missing binding).
+    const TEST_TOKEN_INDEX: u32 = 3;
+
     fn update_fixture(seed: u64, before_amt: u64, amount: u64) -> UpdateFixture {
         let mut rng = SmallRng::seed_from_u64(seed);
         let (sender_pk, _) = channel_keygen(&mut rng);
@@ -2391,10 +2444,20 @@ mod tests {
             (&f.sender_delta.0, &f.sender_delta.1),
             (&f.receiver_delta.0, &f.receiver_delta.1),
             f.amount,
+            TEST_TOKEN_INDEX,
         )
     }
 
     fn verify_update(f: &UpdateFixture, amount: u64, proof: &[u8]) -> Result<(), RegevError> {
+        verify_update_token(f, amount, TEST_TOKEN_INDEX, proof)
+    }
+
+    fn verify_update_token(
+        f: &UpdateFixture,
+        amount: u64,
+        token_index: u32,
+        proof: &[u8],
+    ) -> Result<(), RegevError> {
         verify_channel_update(
             LEVEL,
             &f.sender_pk,
@@ -2404,6 +2467,7 @@ mod tests {
             &f.sender_delta.0,
             &f.receiver_delta.0,
             amount,
+            token_index,
             proof,
         )
     }
@@ -2426,6 +2490,25 @@ mod tests {
         let f = update_fixture(200, 1_000, 250);
         let proof = prove_update(&f).unwrap();
         verify_update(&f, f.amount, &proof).unwrap();
+    }
+
+    /// TM-6 (E-2 token binding under "IMU2"): an E-2 proof generated for base token X must NOT
+    /// verify against a statement claiming any other token index — the token_index PV is
+    /// absorbed into the Fiat-Shamir transcript, so a mismatch diverges every challenge.
+    #[test]
+    #[cfg_attr(debug_assertions, ignore = "run with --release")]
+    fn channel_update_rejects_wrong_token_index() {
+        let f = update_fixture(210, 1_000, 250);
+        let proof = prove_update(&f).unwrap();
+        verify_update_token(&f, f.amount, TEST_TOKEN_INDEX, &proof).unwrap();
+        assert!(
+            verify_update_token(&f, f.amount, TEST_TOKEN_INDEX + 1, &proof).is_err(),
+            "an E-2 proof for token {TEST_TOKEN_INDEX} must not verify for a different token"
+        );
+        assert!(
+            verify_update_token(&f, f.amount, 0, &proof).is_err(),
+            "an E-2 proof for token {TEST_TOKEN_INDEX} must not verify for the genesis token"
+        );
     }
 
     /// Adversarial: a proof must not verify against a statement whose ciphertexts were tampered
@@ -2571,6 +2654,7 @@ mod tests {
                 &f.enc_amount.0, // crafted: reuse enc_amount as sender_delta
                 &f.enc_amount.0, // and as receiver_delta
                 250,
+                TEST_TOKEN_INDEX,
                 &e1_proof,
             )
             .is_err(),
@@ -2678,6 +2762,7 @@ mod tests {
                 &bad_delta,
                 &f.enc_amount.0,
                 1,
+                TEST_TOKEN_INDEX,
                 garbage
             ),
             Err(RegevError::InvalidCiphertext(_))

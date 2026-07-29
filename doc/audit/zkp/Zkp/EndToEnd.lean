@@ -335,7 +335,7 @@ theorem estep_conservation {s s' : RollupState} {op : EOp}
   | claim w =>
       simp only [estep] at h
       simp only [ewdDelta, edepDelta, Nat.add_zero]
-      exact (claimAuthorized_safe h).2.1
+      exact (claimAuthorized_escrow_conservation h).2.1
   | fin r v =>
       simp only [estep] at h
       simp only [ewdDelta, edepDelta, Nat.add_zero]
@@ -1091,7 +1091,10 @@ def AnchorBacking (F : Type) [CField F]
           (read :1351 / write :1371) and `claimAuthorizedWithdrawal`
           (read :645 / write :659), so a nullifier paid via either path
           cannot be replayed via the other — the claim-side consumption
-          is `claimAuthorized_safe` (IntmaxRollupWithdraw.lean);
+          is `claimAuthorized_escrow_conservation` (IntmaxRollupWithdraw.lean)
+          — which supplies only the CONSUMPTION half; the reverting half
+          is the definition's guard, never lifted to a theorem. The claim
+          path itself was removed from the contract 2026-07-28;
       (e) **bounded** — the call paid at most the escrow it found, and
           over the whole history including this call,
           `Σ withdrawn ≤ Σ deposited` (the trace-level

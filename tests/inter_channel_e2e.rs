@@ -105,8 +105,8 @@ fn zero_update_pis() -> ChannelStateUpdatePublicInputs {
         receiver_entry_count: 0,
         sender_user_id_hash: Bytes32::default(),
         receiver_user_id_hash: Bytes32::default(),
-        channel_fund_before: U256::default(),
-        channel_fund_after: U256::default(),
+        channel_fund_before: [U256::default(); 10],
+        channel_fund_after: [U256::default(); 10],
         unallocated_before: U256::default(),
         unallocated_after: U256::default(),
         shared_nullifier_before: Bytes32::default(),
@@ -475,6 +475,7 @@ fn inter_channel_transfer_real_deposit_backed() {
         (&sender_delta.0, &sender_delta.1),
         (&receiver_delta.0, &receiver_delta.1),
         AMT,
+        0, // base token_index (genesis token on both registries)
     )
     .unwrap();
 
@@ -491,14 +492,16 @@ fn inter_channel_transfer_real_deposit_backed() {
         epoch: a_genesis.epoch + 1,
         small_block_number: 1,
         channel_fund: ChannelFund {
-            amount: a_genesis.channel_fund.amount - u256(AMT),
+            amounts: intmax3_zkp::common::channel::ChannelFund::single_token_amounts(
+                a_genesis.channel_fund.amounts[0] - u256(AMT),
+            ),
             ..a_genesis.channel_fund.clone()
         },
         balance_state: BalanceState {
-            enc_balances: BalanceState::pad_enc_balances(&[
+            enc_balances: BalanceState::pad_enc_balances_token0(&[
                 alice_after_ct.clone(),
-                a_genesis.balance_state.enc_balances[1].clone(),
-                a_genesis.balance_state.enc_balances[2].clone(),
+                a_genesis.balance_state.enc_balances[1][0].clone(),
+                a_genesis.balance_state.enc_balances[2][0].clone(),
             ]),
             settled_tx_chain: settled_tx_chain_push(
                 a_genesis.balance_state.settled_tx_chain,
@@ -540,6 +543,7 @@ fn inter_channel_transfer_real_deposit_backed() {
         sender_delta_ct: sender_delta.0.clone(),
         source_channel_id: a_id,
         destination_channel_id: b_id,
+        token_index: 0,
         source_pk_g: a_keys[0].pk_g(),
         seal: Bytes32::default(),
         tx_hash: Bytes32::from_u32_slice(&[0, 0, 0, 0, 0, 0, 0, 0x502]).unwrap(),
@@ -591,7 +595,9 @@ fn inter_channel_transfer_real_deposit_backed() {
         epoch: b_genesis.epoch + 1,
         small_block_number: 1,
         channel_fund: ChannelFund {
-            amount: b_genesis.channel_fund.amount + u256(AMT),
+            amounts: intmax3_zkp::common::channel::ChannelFund::single_token_amounts(
+                b_genesis.channel_fund.amounts[0] + u256(AMT),
+            ),
             ..b_genesis.channel_fund.clone()
         },
         balance_state: BalanceState {
@@ -625,22 +631,25 @@ fn inter_channel_transfer_real_deposit_backed() {
     assert_eq!(ipis.kind, ChannelTransitionKind::InterChannelFundImport);
 
     // ---- Receiver bundle apply on B: dave's slot += receiver_delta; settled_tx_chain absorbs leaf
-    let dave_after =
-        add_ciphertexts(&b_import.balance_state.enc_balances[0], &receiver_delta.0).unwrap();
+    let dave_after = add_ciphertexts(
+        &b_import.balance_state.enc_balances[0][0],
+        &receiver_delta.0,
+    )
+    .unwrap();
     let mut b_bundle = ChannelState {
         epoch: b_import.epoch + 1,
         balance_state: BalanceState {
-            enc_balances: BalanceState::pad_enc_balances(&[
+            enc_balances: BalanceState::pad_enc_balances_token0(&[
                 dave_after,
-                b_import.balance_state.enc_balances[1].clone(),
-                b_import.balance_state.enc_balances[2].clone(),
+                b_import.balance_state.enc_balances[1][0].clone(),
+                b_import.balance_state.enc_balances[2][0].clone(),
             ]),
             settled_tx_chain: settled_tx_chain_push(
                 b_import.balance_state.settled_tx_chain,
                 tx_leaf,
             ),
             state_version: 2,
-            pending_adds: BalanceState::pad_pending_adds(&[1, 0, 0]),
+            pending_adds: BalanceState::pad_pending_adds_token0(&[1, 0, 0]),
             ..b_import.balance_state.clone()
         },
         unallocated_confirmed_incoming: U256::zero(),

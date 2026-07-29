@@ -38,5 +38,6 @@ import Zkp.Contracts.IntmaxRollupStake
 import Zkp.Contracts.IntmaxRollupDeposit
 import Zkp.Contracts.IntmaxRollupOptimistic
 import Zkp.Contracts.ChannelSettlementManager
+import Zkp.Contracts.ChannelSettlementManagerMT
 import Zkp.Contracts.Coverage
 import Zkp.EndToEnd

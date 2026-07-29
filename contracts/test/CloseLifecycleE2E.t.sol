@@ -15,9 +15,12 @@ import {FixtureLib} from "../script/FixtureLib.sol";
 ///         submitWithdrawalClaim -> claimWithdrawalCredit -> a channel member receives REAL ETH.
 ///         Proves the channel's aggregate native settlement (P2 withdrawNative) feeds the manager's
 ///         capped per-member split (P3), end-to-end with real proofs.
-/// @dev Fixtures: `forge script script/ComputeCloseManager.s.sol` to get the manager address, then
+/// @dev Fixtures: `forge test --match-test test_printCloseManagerAddress -vv` (CloseManagerAddr.t.sol)
+///      to get the manager address, then
 ///        WD_RECIPIENT=<addr> WD_OUT_PREFIX=close_ cargo run --release --bin generate_withdrawal_fixture
-///      Self-skips if the close_* fixtures are absent.
+///      then `cargo run --release --features close-fixture-bin --bin generate_close_fixture`
+///      (co-generated: both derive the channel-1 member set from ChannelMemberKeys::deterministic).
+///      Self-skips ONLY if the close_* fixtures are absent; stale fixtures are hard failures.
 contract CloseLifecycleE2ETest is CloseE2EBase {
     MleVerifier internal verifier;
     IntmaxRollup internal rollup;
@@ -28,6 +31,9 @@ contract CloseLifecycleE2ETest is CloseE2EBase {
     /// True iff the close fixture's member set matches the lifecycle-registered member set, so the
     /// REAL close-intent MLE proof can be bound to THIS channel (see the member_pk_gs note below).
     bool internal closeFixtureMatchesRegistration;
+    /// The manager recipient baked into the close withdrawal payout fixture (asserted against the
+    /// actually-deployed manager in the lifecycle test — a mismatch is a stale-fixture HARD fail).
+    address internal bakedRecipient;
 
     uint256 internal constant STAKE = 1 ether;
 
@@ -64,10 +70,14 @@ contract CloseLifecycleE2ETest is CloseE2EBase {
         //      to ComputeCloseManager.s.sol so the manager lands at the baked address.
         (verifier, rollup, settlementVerifier, manager) = _deployAll(_validityJson(), _lifecycleJson());
 
-        // 3. The deployed manager MUST equal the close proof's withdrawal recipient.
+        // 3. The deployed manager MUST equal the close proof's withdrawal recipient. Multitoken
+        //    Phase 5b: the fixtures are regenerated against the multi-token manager initcode, so a
+        //    mismatch is a HARD failure (stale fixtures / changed initcode — regenerate per
+        //    doc/tasks/regen-and-redeploy-runbook.md), no longer a self-skip. Asserted in the
+        //    lifecycle TEST (not here) so the in-contract address printer below stays runnable
+        //    mid-regeneration while the payout fixture is still stale.
         emit log_named_address("manager(actual)", address(manager));
-        address bakedRecipient = vm.parseJsonAddress(_payoutJson(), ".withdrawals[0].recipient");
-        assertEq(address(manager), bakedRecipient, "manager address != close proof recipient");
+        bakedRecipient = vm.parseJsonAddress(_payoutJson(), ".withdrawals[0].recipient");
 
         // 4. Set the withdrawal VK. deployer == the CREATE2 factory (msg.sender at construction), so
         //    prank the factory. (Production P7 uses a normal deploy where deployer = the EOA.)
@@ -86,19 +96,13 @@ contract CloseLifecycleE2ETest is CloseE2EBase {
         //    `close_intent_mle.json` exactly as the rollup's withdrawal VK is built from its fixture.
         _initRealCloseVk();
 
-        // 6. Determine whether the close fixture can be bound to THIS channel.
-        //    KNOWN FIXTURE MISMATCH (member_pk_gs): the lifecycle (validity/withdrawal) fixture and
-        //    the close fixture are produced by two DIFFERENT generators with DIFFERENT member sets.
-        //    The channel is registered (in _deployAll) with the LIFECYCLE fixture's member_pk_gs,
-        //    because those are folded into the block-hash chain the validity proof binds — registering
-        //    with the CLOSE member set would break `finalize` (member_pk_gs DO affect the
-        //    validity/finalize path: registerChannel folds them via `_pendingChannelRegHashChain` ->
-        //    `_computeBlockHash` -> the block-hash chain that the validity proof's finalBlockChain
-        //    binds). So we CANNOT register both sets on one channel. We therefore submit the real
-        //    close intent ONLY when the close fixture's member-set commitment happens to equal the
-        //    registered one (`registeredMemberSetCommitment()`); otherwise that section self-skips
-        //    pending a co-generated close+lifecycle fixture pair. The full withdrawal/validity/payout
-        //    path (which does NOT depend on the close member set) always runs.
+        // 6. CO-GENERATION (multitoken Phase 5b): the close fixture is now generated over the SAME
+        //    deterministic channel-1 member keys the lifecycle fixture registers
+        //    (`ChannelMemberKeys::deterministic(1)` is the single derivation shared by
+        //    `generate_close_fixture` and `generate_withdrawal_fixture`), so the close proof's
+        //    `member_set_commitment` MUST equal the registered one. A mismatch means the fixture
+        //    pair was not co-generated (stale / mixed-run fixtures) — HARD failure, no longer a
+        //    self-skip.
         closeFixtureMatchesRegistration =
             manager.registeredMemberSetCommitment()
                 == vm.parseJsonBytes32(_closeIntentJson(), ".member_set_commitment");
@@ -130,8 +134,28 @@ contract CloseLifecycleE2ETest is CloseE2EBase {
         );
     }
 
+    /// Print the close-manager CREATE2 address for the fixture-regeneration flow (moved here from
+    /// CloseManagerAddr.t.sol — the address depends on THIS test contract's library-linking
+    /// context, see that file). Reads the PLAIN (unprefixed) lifecycle fixtures, whose
+    /// registration / VK / genesis are identical to the close set, so it works BEFORE the close
+    /// fixtures are (re)generated. Then:
+    ///   WD_RECIPIENT=<addr> WD_OUT_PREFIX=close_ cargo run --release --bin generate_withdrawal_fixture
+    function test_printCloseManagerAddress() external {
+        string memory vkJson = vm.readFile(string.concat(vm.projectRoot(), "/test/data/lifecycle_validity_mle.json"));
+        string memory lcJson = vm.readFile(string.concat(vm.projectRoot(), "/test/data/lifecycle.json"));
+        emit log_named_address("CLOSE_MANAGER_ADDRESS", predictManagerAddressFrom(vkJson, lcJson));
+    }
+
     function test_closeLifecycle_endToEnd() public {
         if (!ready) { vm.skip(true); return; }
+
+        // Multitoken Phase 5b: stale fixtures are a HARD failure (no self-skip) — the manager the
+        // close set was baked against must be the manager this test just deployed.
+        assertEq(
+            address(manager),
+            bakedRecipient,
+            "manager CREATE2 address != close payout fixture recipient (stale fixtures -- regenerate)"
+        );
 
         // ── A. Advance + finalize the registration→deposit→withdrawal chain (real validity MLE). ──
         _runChainThroughFinalize();
@@ -147,31 +171,27 @@ contract CloseLifecycleE2ETest is CloseE2EBase {
         // ── C. Manager pulls the real ETH in. ──
         uint256 pulled = manager.pullChannelFunds();
         assertEq(pulled, channelAmount, "manager pulled channel ETH");
-        assertEq(manager.receivedChannelFunds(), channelAmount, "receivedChannelFunds == channel amount");
+        assertEq(manager.receivedChannelFunds(0), channelAmount, "receivedChannelFunds[ETH] == channel amount");
 
-        // ── D-E. Drive the channel close to Closed with the REAL wrapped-close MLE/WHIR proof, then a
-        //         member claims its split and pulls REAL ETH.
+        // ── D-E. Drive the channel close to Closed with the REAL wrapped-close MLE/WHIR proof.
         //
-        // GATED on the close fixture matching THIS channel's registered member set (see setUp step 6):
-        // the close proof's in-circuit `member_set_commitment` must equal
-        // `registeredMemberSetCommitment()`, which only holds when the close fixture and the lifecycle
-        // (withdrawal/validity) fixture were co-generated over the SAME member keys. Until such a
-        // co-generated pair exists, this section self-skips — but the withdrawal/validity/payout path
-        // above (steps A-C, which are INDEPENDENT of the close member set) has already run end-to-end.
-        if (!closeFixtureMatchesRegistration) {
-            emit log("close fixture member set != registered set; skipping the close-intent section");
-            return;
-        }
+        // Multitoken Phase 5b: the close fixture is CO-GENERATED with the lifecycle fixture over
+        // the same deterministic member keys (see setUp step 6), so this section always runs — a
+        // member-set mismatch is a hard failure, not a skip.
+        assertTrue(
+            closeFixtureMatchesRegistration,
+            "close fixture member_set_commitment != registeredMemberSetCommitment (fixtures not co-generated -- regenerate BOTH sets in one run)"
+        );
 
-        // Additional precondition: the proved close intent's `close_freeze_nonce` must equal the
-        // manager's `currentCloseFreezeNonce` after requestClose (== 1). The close fixture's freeze
-        // nonce is the proved final-channel-state value; if it is not 1, this channel cannot accept
-        // the intent (InvalidFreezeNonce), so skip pending a fixture proved at freeze nonce 1.
+        // The proved close intent's `close_freeze_nonce` must equal the manager's
+        // `currentCloseFreezeNonce` after requestClose (== 1); the co-generated fixture is proved
+        // at freeze nonce 1 by construction.
         string memory cij = _closeIntentJson();
-        if (uint64(vm.parseJsonUint(cij, ".close_freeze_nonce")) != 1) {
-            emit log("close fixture freeze nonce != 1; skipping the close-intent section");
-            return;
-        }
+        assertEq(
+            uint64(vm.parseJsonUint(cij, ".close_freeze_nonce")),
+            1,
+            "close fixture freeze nonce != 1 (must be proved from a state with close_freeze_nonce = 0)"
+        );
 
         string memory lcJson = _lifecycleJson();
         address member0 = vm.parseJsonAddress(lcJson, ".registration.recipients[0]");
@@ -182,14 +202,44 @@ contract CloseLifecycleE2ETest is CloseE2EBase {
         vm.warp(block.timestamp + 600); // grace
 
         // REAL close intent (every field is the proved close public input) + REAL wrapped-close proof
-        // (publicInputs = the 87 raw close limbs the manager's `_runCloseVerify` rebinds, then
+        // (publicInputs = the 103 raw close limbs the manager's `_runCloseVerify` rebinds, then
         // re-checked by the settlement verifier's MleVerifier.verify against the real close VK).
         ChannelSettlementManager.CloseIntent memory intent = _closeIntentFromDescriptor(cij);
         MleVerifier.MleProof memory closeProof = FixtureLib.parseProof(_closeMleJson());
+        // Multitoken Phase 5b: the regenerated close fixture carries the 103-limb multi-token PI
+        // vector (tokenFundsDigest at limbs 95..103, §N-6) — anything else is a stale fixture.
+        assertEq(
+            closeProof.publicInputs.length,
+            103,
+            "close fixture must carry the 103-limb multi-token close PI vector (stale fixture -- regenerate)"
+        );
         manager.submitCloseIntent(intent, closeProof);
         vm.warp(block.timestamp + CHALLENGE_PERIOD + 1);
         manager.finalizeClose();
         bytes32 digest = manager.finalizedCloseIntentDigest();
+
+        // Multitoken (§N-6): `finalizeClose` accrues the member-signed per-token fund vector into
+        // the per-BASE-token settlement caps — the TWO-token fixture (registry [ETH, t1], both
+        // amounts nonzero) must accrue BOTH lanes, and only those.
+        {
+            uint256[] memory amounts = _parseAmountsArray(cij);
+            uint256[] memory registryU = vm.parseJsonUintArray(cij, ".token_registry");
+            uint256 tokenCount = vm.parseJsonUint(cij, ".token_count");
+            assertEq(tokenCount, 2, "two-token close fixture expected (token_count == 2)");
+            uint32 t1 = uint32(registryU[1]);
+            assertTrue(t1 != 0, "non-genesis registry slot must map to a non-ETH base token");
+            assertTrue(amounts[0] != 0 && amounts[1] != 0, "both per-token fund amounts must be nonzero");
+            assertEq(
+                manager.finalizedChannelFundAmount(0),
+                amounts[0],
+                "ETH lane accrual != signed amounts[0]"
+            );
+            assertEq(
+                manager.finalizedChannelFundAmount(t1),
+                amounts[1],
+                "token-t1 lane accrual != signed amounts[1]"
+            );
+        }
 
         // Phase B-D: `submitWithdrawalClaim` now runs a REAL `verifyWithdrawalClaim` MLE/WHIR
         // verification (no more stub proof). Driving it here would require a withdrawal-claim MLE
@@ -205,7 +255,10 @@ contract CloseLifecycleE2ETest is CloseE2EBase {
     }
 
     /// @dev Build the `CloseIntent` from the proved close descriptor JSON (every field is a proved
-    /// close public input — see generate_close_fixture.rs `CloseIntentDescriptor`).
+    /// close public input — see generate_close_fixture.rs `CloseIntentDescriptor`). Multitoken
+    /// Phase 5b: the per-token fund vector / registry / count are parsed from the descriptor
+    /// verbatim (the verifier's on-chain tokenFundsDigest recompute binds them to the
+    /// member-signed PI limbs 95..103 — a tampered vector fails `submitCloseIntent`).
     function _closeIntentFromDescriptor(string memory j)
         internal pure returns (ChannelSettlementManager.CloseIntent memory intent)
     {
@@ -216,14 +269,15 @@ contract CloseLifecycleE2ETest is CloseE2EBase {
             closeFreezeNonce: uint64(vm.parseJsonUint(j, ".close_freeze_nonce")),
             finalChannelStateDigest: vm.parseJsonBytes32(j, ".final_channel_state_digest"),
             finalBalanceStateH1: vm.parseJsonBytes32(j, ".final_balance_state_h1"),
-            channelFundAmount: vm.parseJsonUint(j, ".channel_fund_amount"),
+            channelFundAmounts: _parseAmounts(j),
+            tokenRegistry: _parseRegistry(j),
+            tokenCount: uint8(vm.parseJsonUint(j, ".token_count")),
             channelFundIntmaxStateRoot: vm.parseJsonBytes32(j, ".channel_fund_intmax_state_root"),
             burnTxHash: vm.parseJsonBytes32(j, ".burn_tx_hash"),
             closeWithdrawalDigest: vm.parseJsonBytes32(j, ".close_withdrawal_digest"),
             snapshotMediumBlockNumber: uint64(vm.parseJsonUint(j, ".snapshot_medium_block_number")),
             finalStateVersion: uint64(vm.parseJsonUint(j, ".final_state_version")),
             finalSettledTxChain: vm.parseJsonBytes32(j, ".final_settled_tx_chain"),
-            // Stage 3: regenerate the close fixture so `.final_settled_tx_accumulator_root` exists.
             finalSettledTxAccumulatorRoot: vm.parseJsonBytes32(
                 j, ".final_settled_tx_accumulator_root"
             )
@@ -231,6 +285,25 @@ contract CloseLifecycleE2ETest is CloseE2EBase {
     }
 
     // ── helpers ──
+
+    /// @dev Parse the descriptor's 10-entry per-token fund vector (0x-hex U256 strings).
+    function _parseAmountsArray(string memory j) internal pure returns (uint256[] memory a) {
+        string[] memory raw = vm.parseJsonStringArray(j, ".channel_fund_amounts");
+        require(raw.length == 10, "channel_fund_amounts must have 10 entries");
+        a = new uint256[](10);
+        for (uint256 i = 0; i < 10; i++) a[i] = vm.parseUint(raw[i]);
+    }
+
+    function _parseAmounts(string memory j) internal pure returns (uint256[10] memory a) {
+        uint256[] memory v = _parseAmountsArray(j);
+        for (uint256 i = 0; i < 10; i++) a[i] = v[i];
+    }
+
+    function _parseRegistry(string memory j) internal pure returns (uint32[10] memory r) {
+        uint256[] memory raw = vm.parseJsonUintArray(j, ".token_registry");
+        require(raw.length == 10, "token_registry must have 10 entries");
+        for (uint256 i = 0; i < 10; i++) r[i] = uint32(raw[i]);
+    }
 
     function _registerChannel(string memory lcJson) internal {
         uint32 channelId = uint32(vm.parseJsonUint(lcJson, ".registration.channel_id"));

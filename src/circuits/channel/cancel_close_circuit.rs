@@ -44,7 +44,7 @@ use crate::{
         h1_gadget::recompute_h1,
     },
     common::channel::close_member_set_commitment,
-    constants::{MAX_COSIGNERS, MEMBER_DISTINCTNESS_TREE_HEIGHT},
+    constants::{MAX_CHANNEL_TOKENS, MAX_COSIGNERS, MEMBER_DISTINCTNESS_TREE_HEIGHT},
     ethereum_types::{
         bytes32::{BYTES32_LEN, Bytes32, Bytes32Target},
         u32limb_trait::U32LimbTargetTrait,
@@ -193,10 +193,17 @@ where
     // ── revived ChannelState auxiliary fields (drive the IMCH/H1 recompute) ──
     revived_member_count: Target,
     revived_delegate_count: Target,
+    /// Multi-token (§N-1, TM-9): the revived state's signed `token_count` + full zero-padded
+    /// `token_registry`, witnessed and bound inside the revived H1 header recompute.
+    revived_token_count: Target,
+    revived_token_registry: [Target; MAX_CHANNEL_TOKENS],
     revived_epoch: U64Target,
     revived_small_block_number: U64Target,
     revived_close_freeze_nonce: U64Target,
-    revived_channel_fund_amount: U256Target,
+    /// Multi-token (§N-6, TM-11): the revived state's FULL per-token fund vector — hashed into
+    /// the widened v2 IMCH preimage (80 limbs), element-identical to native
+    /// `ChannelState::signing_digest`.
+    revived_channel_fund_amounts: [U256Target; MAX_CHANNEL_TOKENS],
     revived_channel_fund_intmax_state_root: Bytes32Target,
     revived_balance_state_h1: Bytes32Target,
     revived_shared_native_nullifier_root: Bytes32Target,
@@ -218,7 +225,10 @@ where
     close_freeze_nonce: U64Target,
     close_final_channel_state_digest: Bytes32Target,
     close_final_balance_state_h1: Bytes32Target,
-    close_channel_fund_amount: U256Target,
+    /// Multi-token (§N-6, TM-11): the close snapshot's FULL per-token fund vector — hashed into
+    /// the widened v2 IMCI preimage (80 limbs); position 0 (the genesis-token amount) doubles as
+    /// the IMCL burn-amount segment (native `CloseIntent::new` binds burn_amount == amounts[0]).
+    close_channel_fund_amounts: [U256Target; MAX_CHANNEL_TOKENS],
     close_channel_fund_intmax_state_root: Bytes32Target,
     close_burn_tx_hash: Bytes32Target,
     close_withdrawal_digest: Bytes32Target,
@@ -269,10 +279,17 @@ where
         // ── revived ChannelState auxiliary targets ──
         let revived_member_count = u32_limb(&mut builder);
         let revived_delegate_count = u32_limb(&mut builder);
+        // Multi-token (§N-1/§N-6): token_count + registry (H1 header, TM-9) and the full
+        // per-token fund vector (widened IMCH, TM-11). All limbs 32-bit range-checked (keccak
+        // does not range-check).
+        let revived_token_count = u32_limb(&mut builder);
+        let revived_token_registry: [Target; MAX_CHANNEL_TOKENS] =
+            std::array::from_fn(|_| u32_limb(&mut builder));
         let revived_epoch = U64Target::new(&mut builder, true);
         let revived_small_block_number = U64Target::new(&mut builder, true);
         let revived_close_freeze_nonce = U64Target::new(&mut builder, true);
-        let revived_channel_fund_amount = U256Target::new(&mut builder, true);
+        let revived_channel_fund_amounts: [U256Target; MAX_CHANNEL_TOKENS] =
+            std::array::from_fn(|_| U256Target::new(&mut builder, true));
         let revived_channel_fund_intmax_state_root = Bytes32Target::new(&mut builder, true);
         let revived_shared_native_nullifier_root = Bytes32Target::new(&mut builder, true);
         let revived_unallocated_confirmed_incoming = U256Target::new(&mut builder, true);
@@ -291,7 +308,8 @@ where
         let close_freeze_nonce = U64Target::new(&mut builder, true);
         let close_final_channel_state_digest = Bytes32Target::new(&mut builder, true);
         let close_final_balance_state_h1 = Bytes32Target::new(&mut builder, true);
-        let close_channel_fund_amount = U256Target::new(&mut builder, true);
+        let close_channel_fund_amounts: [U256Target; MAX_CHANNEL_TOKENS] =
+            std::array::from_fn(|_| U256Target::new(&mut builder, true));
         let close_channel_fund_intmax_state_root = Bytes32Target::new(&mut builder, true);
         let close_burn_tx_hash = Bytes32Target::new(&mut builder, true);
         let close_withdrawal_digest = Bytes32Target::new(&mut builder, true);
@@ -343,6 +361,8 @@ where
             public_inputs.channel_id[0],
             revived_member_count,
             revived_delegate_count,
+            revived_token_count,
+            &revived_token_registry,
             revived_slot_tree_root,
             &revived_settled_tx_chain,
             &revived_settled_tx_accumulator_root,
@@ -350,6 +370,13 @@ where
         );
 
         // ── (b) revived IMCH recompute (`ChannelState::signing_digest`) ──
+        //
+        // Multi-token (TM-11): the fund segment is the FULL 80-limb `amounts[0..10]` vector,
+        // element-identical to the widened native `ChannelState::signing_digest`.
+        let revived_fund_amounts_flat: Vec<Target> = revived_channel_fund_amounts
+            .iter()
+            .flat_map(|amount| amount.to_vec())
+            .collect();
         let revived_state_digest_inputs = [
             vec![channel_state_domain],
             public_inputs.channel_id.to_vec(),
@@ -357,7 +384,7 @@ where
             revived_small_block_number.to_vec(),
             revived_close_freeze_nonce.to_vec(),
             public_inputs.channel_id.to_vec(),
-            revived_channel_fund_amount.to_vec(),
+            revived_fund_amounts_flat,
             revived_channel_fund_intmax_state_root.to_vec(),
             revived_balance_state_h1.to_vec(),
             revived_shared_native_nullifier_root.to_vec(),
@@ -380,7 +407,10 @@ where
             close_final_balance_state_h1.to_vec(),
             close_channel_fund_intmax_state_root.to_vec(),
             close_burn_tx_hash.to_vec(),
-            close_channel_fund_amount.to_vec(),
+            // The IMCL burn amount is the GENESIS-token fund (`amounts[0]` — the same wire the
+            // IMCI amounts vector carries at position 0, mirroring native `CloseIntent::new`'s
+            // burn_amount == amounts[0] binding).
+            close_channel_fund_amounts[0].to_vec(),
         ]
         .concat();
         let recomputed_close_withdrawal_digest =
@@ -404,7 +434,12 @@ where
             close_final_channel_state_digest.to_vec(),
             close_final_balance_state_h1.to_vec(),
             public_inputs.channel_id.to_vec(),
-            close_channel_fund_amount.to_vec(),
+            // Multi-token (TM-11): the IMCI fund segment is the FULL 80-limb amounts vector,
+            // element-identical to the widened native `CloseIntent::signing_digest`.
+            close_channel_fund_amounts
+                .iter()
+                .flat_map(|amount| amount.to_vec())
+                .collect(),
             close_channel_fund_intmax_state_root.to_vec(),
             close_burn_tx_hash.to_vec(),
             close_withdrawal_digest.to_vec(),
@@ -521,10 +556,12 @@ where
             public_inputs,
             revived_member_count,
             revived_delegate_count,
+            revived_token_count,
+            revived_token_registry,
             revived_epoch,
             revived_small_block_number,
             revived_close_freeze_nonce,
-            revived_channel_fund_amount,
+            revived_channel_fund_amounts,
             revived_channel_fund_intmax_state_root,
             revived_balance_state_h1,
             revived_shared_native_nullifier_root,
@@ -540,7 +577,7 @@ where
             close_freeze_nonce,
             close_final_channel_state_digest,
             close_final_balance_state_h1,
-            close_channel_fund_amount,
+            close_channel_fund_amounts,
             close_channel_fund_intmax_state_root,
             close_burn_tx_hash,
             close_withdrawal_digest,
@@ -601,8 +638,22 @@ where
             .set_witness(&mut witness, U64::from(revived.small_block_number));
         self.revived_close_freeze_nonce
             .set_witness(&mut witness, U64::from(revived.close_freeze_nonce));
-        self.revived_channel_fund_amount
-            .set_witness(&mut witness, revived.channel_fund.amount);
+        // Multi-token (v2): token_count + registry (H1 header) and the FULL per-token fund
+        // vector (widened IMCH preimage).
+        witness
+            .set_target(
+                self.revived_token_count,
+                F::from_canonical_u8(revived.balance_state.token_count),
+            )
+            .unwrap();
+        for (t, &limb) in revived.balance_state.token_registry.iter().enumerate() {
+            witness
+                .set_target(self.revived_token_registry[t], F::from_canonical_u32(limb))
+                .unwrap();
+        }
+        for (t, amount) in revived.channel_fund.amounts.iter().enumerate() {
+            self.revived_channel_fund_amounts[t].set_witness(&mut witness, *amount);
+        }
         self.revived_channel_fund_intmax_state_root
             .set_witness(&mut witness, revived.channel_fund.intmax_state_root);
         self.revived_shared_native_nullifier_root
@@ -640,8 +691,10 @@ where
             .set_witness(&mut witness, close.final_channel_state_digest);
         self.close_final_balance_state_h1
             .set_witness(&mut witness, close.final_balance_state_h1);
-        self.close_channel_fund_amount
-            .set_witness(&mut witness, close.channel_fund_snapshot.amount);
+        // Multi-token (v2): the close snapshot's FULL per-token fund vector (widened IMCI).
+        for (t, amount) in close.channel_fund_snapshot.amounts.iter().enumerate() {
+            self.close_channel_fund_amounts[t].set_witness(&mut witness, *amount);
+        }
         self.close_channel_fund_intmax_state_root
             .set_witness(&mut witness, close.channel_fund_snapshot.intmax_state_root);
         self.close_burn_tx_hash
@@ -871,14 +924,14 @@ pub mod test_fixture {
             close_freeze_nonce,
             channel_fund: ChannelFund {
                 channel_id,
-                amount: U256::from(77u32),
+                amounts: ChannelFund::single_token_amounts(U256::from(77u32)),
                 intmax_state_root: Bytes32::default(),
             },
             balance_state: BalanceState {
                 channel_id,
                 member_count: active as u8,
                 delegate_count: 0,
-                enc_balances: BalanceState::pad_enc_balances(
+                enc_balances: BalanceState::pad_enc_balances_token0(
                     &(0..active)
                         .map(|i| ciphertext(i as u32 + 1))
                         .collect::<Vec<_>>(),
@@ -898,7 +951,9 @@ pub mod test_fixture {
                 settled_tx_chain: Bytes32::default(),
                 settled_tx_accumulator_root: Bytes32::default(),
                 state_version: revived_version,
-                pending_adds: BalanceState::pad_pending_adds(&vec![0u32; active]),
+                pending_adds: BalanceState::pad_pending_adds_token0(&vec![0u32; active]),
+                token_registry: BalanceState::single_token_registry(0),
+                token_count: 1,
             },
             h2_tag: Bytes32::default(),
             shared_native_nullifier_root: Bytes32::default(),
@@ -931,7 +986,7 @@ pub mod test_fixture {
             final_balance_state_h1: closing_state.balance_state.h1(),
             intmax_state_root: closing_state.channel_fund.intmax_state_root,
             burn_tx_hash: Bytes32::from_u32_slice(&[7, 0, 0, 0, 0, 0, 0, 0]).unwrap(),
-            burn_amount: closing_state.channel_fund.amount,
+            burn_amount: closing_state.channel_fund.amounts[0],
             zkp: vec![7],
         };
         let close_intent = CloseIntent::new(5, &closing_state, &close_withdrawal, 123).unwrap();
@@ -962,6 +1017,10 @@ pub mod test_fixture {
 
 #[cfg(test)]
 mod tests {
+
+    // Multitoken Phase 2: the close/claim circuits now compute the v2 H1 header (37 elems,
+    // "IMB2") and slot leaf (104 elems, "IMS2"), so the tests below run against v2-signed
+    // states (the Phase 1 #[ignore] gates are lifted; assertions unchanged).
     use plonky2::field::types::PrimeField64;
 
     use super::test_fixture::{

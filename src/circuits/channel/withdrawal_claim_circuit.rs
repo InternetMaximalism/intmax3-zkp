@@ -5,24 +5,30 @@
 //! `tasks/phase-b-claims-threat-model.md` RESIDUAL). Concretely it constrains, in one plonky2
 //! statement that is MLE/WHIR-wrapped and verified on-chain by `@mle/MleVerifier.sol`:
 //!
-//! 1. `final_balance_state_h1` is the Poseidon-root H1 header of the witnessed final balance state
-//!    (the SHARED `h1_gadget::recompute_h1`, element-identical to the close circuit and to native
-//!    `BalanceState::h1`; see `tasks/h1-poseidon-root-threat-model.md`). The manager supplies the
-//!    FINALIZED H1 as the PI, so the header scalars AND the `slot_tree_root` the claim opens
-//!    against are pinned to the members' signed final state.
+//! 1. `final_balance_state_h1` is the Poseidon-root v2 H1 header of the witnessed final balance
+//!    state (the SHARED `h1_gadget::recompute_h1`, element-identical to the close circuit and to
+//!    native `BalanceState::h1`; detail2 §N-1). The manager supplies the FINALIZED H1 as the PI, so
+//!    the header scalars (incl. `token_count` + the token registry, TM-9) AND the `slot_tree_root`
+//!    the claim opens against are pinned to the members' signed final state.
 //! 2. the claimant occupies an ACTIVE slot: `member_index < member_count + delegate_count` (members
 //!    AND delegates own a withdrawable balance; padding slots do not).
-//! 3. the claimant's slot leaf `balance_slot_leaf_hash(regev_pk_digest, user_amount_digest,
-//!    pending_adds, recipient)` is INCLUDED at `member_index` in the H1-committed `slot_tree_root`
-//!    (a height-`BALANCE_SLOT_TREE_HEIGHT` Merkle inclusion; the Merkle POSITION is the slot
-//!    index). This binds WHICH ciphertext (`user_amount_digest` PI), WHICH registered Regev pk
-//!    digest AND WHICH L1 exit address (`recipient` PI — B-1b) the claim is against — replacing the
-//!    retired 1024-slot one-hot select.
-//! 4. `withdrawal_nullifier = keccak([WITHDRAWAL_CLAIM_DOMAIN] ++ close_intent_digest ++
-//!    pk_digest)` — keyed on the LEAF-BOUND slot Regev pk digest (B-2 blocker fix), NOT the
-//!    slot-free `member_pk_g` — is derived in-circuit and connected to the PI (mirrors
-//!    `WithdrawalClaim::derive_nullifier`).
-//! 5. `channel_id`, `member_pk_g` (informational; inert — NOT the nullifier key), `recipient`,
+//! 3. the claimant's FULL v2 slot leaf `balance_slot_leaf_hash(regev_pk_digest, ct_digests[0..10],
+//!    pending_adds[0..10], recipient)` (104 elems, detail2 §N-2) is INCLUDED at `member_index` in
+//!    the H1-committed `slot_tree_root` (a height-`BALANCE_SLOT_TREE_HEIGHT` Merkle inclusion; the
+//!    Merkle POSITION is the slot index). This binds ALL TEN token positions, the registered Regev
+//!    pk digest AND the L1 exit address (`recipient` PI — B-1b).
+//! 4. PER-(SLOT, TOKEN) claim (detail2 §N-6, TM-2/TM-8): the claim's `token_slot` PI ONE-HOT
+//!    selects `ct_digests[token_slot]`, which is constrained equal to the `user_amount_digest` PI
+//!    (the ciphertext actually decrypted) — the selected position IS the PI token_slot, as circuit
+//!    constraints; `token_slot < token_count` is enforced in-circuit (TM-8); and the resolved BASE
+//!    `token_index = registry[token_slot]` (selected from the H1-bound registry limbs) is exposed
+//!    as a PI so L1 pays the right asset (review finding m8: the PI base token_index is the
+//!    H1-committed `registry[token_slot]` — no prover choice).
+//! 5. `withdrawal_nullifier = keccak([IMW2, close_intent_digest(8), pk_digest(8), token_slot])` —
+//!    keyed on the LEAF-BOUND slot Regev pk digest (B-2 blocker fix), NOT the slot-free
+//!    `member_pk_g`, PLUS the token slot (TM-5: exactly one nullifier per (slot, token)) — is
+//!    derived in-circuit and connected to the PI (mirrors `WithdrawalClaim::derive_nullifier`).
+//! 6. `channel_id`, `member_pk_g` (informational; inert — NOT the nullifier key), `recipient`,
 //!    `close_intent_digest` are bound as PI limbs.
 //!
 //! DECRYPTION STAGE 2 (over-claim CLOSED for withdrawal): `amount` is bound in-circuit to the
@@ -62,7 +68,10 @@ use crate::{
         h1_gadget::{balance_slot_leaf_hash_circuit, recompute_h1},
         withdrawal_claim_pis::{WITHDRAWAL_CLAIM_PUBLIC_INPUTS_LEN, WithdrawalClaimPublicInputs},
     },
-    constants::{BALANCE_SLOT_TREE_HEIGHT, MAX_CHANNEL_MEMBERS},
+    constants::{
+        BALANCE_SLOT_TREE_HEIGHT, MAX_CHANNEL_MEMBERS, MAX_CHANNEL_TOKENS,
+        WITHDRAWAL_CLAIM_DOMAIN_V2,
+    },
     ethereum_types::{
         address::AddressTarget,
         bytes32::{Bytes32, Bytes32Target},
@@ -76,11 +85,6 @@ use crate::{
     },
 };
 
-/// "IMCW" — withdrawal-claim nullifier domain. MUST equal `common::channel`'s
-/// `WITHDRAWAL_CLAIM_DOMAIN` so the in-circuit keccak agrees with the native
-/// `WithdrawalClaim::derive_nullifier` byte-for-byte.
-const WITHDRAWAL_CLAIM_DOMAIN: u32 = 0x494d4357;
-
 #[derive(Clone, Debug)]
 pub struct WithdrawalClaimPublicInputsTarget {
     pub close_intent_digest: Bytes32Target,
@@ -91,6 +95,15 @@ pub struct WithdrawalClaimPublicInputsTarget {
     pub user_amount_digest: Bytes32Target,
     pub withdrawal_nullifier: Bytes32Target,
     pub amount: U64Target,
+    /// Multi-token (§N-6, TM-2/TM-8): the claimed LOCAL token slot (single u32 limb). Drives the
+    /// in-circuit one-hot ct select, the `< token_count` bound, the registry resolution AND the
+    /// IMW2 nullifier limb — one wire, so none of those bindings can diverge.
+    pub token_slot: [Target; 1],
+    /// Multi-token (§N-6, review m8): the resolved BASE `token_index = registry[token_slot]`
+    /// (single u32 limb), selected in-circuit from the H1-committed registry limbs — the formal
+    /// link between the channel-local slot and the Manager's per-base-token accounting. L1 pays
+    /// the claim in THIS asset.
+    pub token_index: [Target; 1],
 }
 
 impl WithdrawalClaimPublicInputsTarget {
@@ -113,12 +126,14 @@ impl WithdrawalClaimPublicInputsTarget {
             user_amount_digest: Bytes32Target::new(builder, true),
             withdrawal_nullifier: Bytes32Target::new(builder, true),
             amount: U64Target::new(builder, true),
+            token_slot: [u32_limb(builder)],
+            token_index: [u32_limb(builder)],
         }
     }
 
     /// PI limb vector in EXACT `WithdrawalClaimPublicInputs::to_u64_vec()` order
     /// (close_intent_digest, channel_id, final_balance_state_h1, member_pk_g, recipient,
-    /// user_amount_digest, withdrawal_nullifier, split_u64(amount)).
+    /// user_amount_digest, withdrawal_nullifier, split_u64(amount), token_slot, token_index).
     pub fn to_vec(&self) -> Vec<Target> {
         let v = [
             self.close_intent_digest.to_vec(),
@@ -129,6 +144,8 @@ impl WithdrawalClaimPublicInputsTarget {
             self.user_amount_digest.to_vec(),
             self.withdrawal_nullifier.to_vec(),
             self.amount.to_vec(),
+            self.token_slot.to_vec(),
+            self.token_index.to_vec(),
         ]
         .concat();
         debug_assert_eq!(v.len(), WITHDRAWAL_CLAIM_PUBLIC_INPUTS_LEN);
@@ -157,6 +174,15 @@ impl WithdrawalClaimPublicInputsTarget {
         self.withdrawal_nullifier
             .set_witness(witness, value.withdrawal_nullifier);
         self.amount.set_witness(witness, U64::from(value.amount));
+        witness
+            .set_target(self.token_slot[0], F::from_canonical_u8(value.token_slot))
+            .unwrap();
+        witness
+            .set_target(
+                self.token_index[0],
+                F::from_canonical_u32(value.token_index),
+            )
+            .unwrap();
     }
 }
 
@@ -180,10 +206,19 @@ pub struct WithdrawalClaimFullWitness {
     /// Merkle inclusion proof of the claimant's slot leaf at `member_index` in the slot tree
     /// (`BalanceState::slot_tree().prove(member_index)`).
     pub slot_inclusion: IncrementalMerkleProof<PoseidonHashOut>,
-    /// The claimant slot's homomorphic-add counter `pending_adds[member_index]` (leaf field; the
-    /// other two leaf fields are derived in-circuit from the witnessed Regev pk and the
-    /// `user_amount_digest` PI).
-    pub slot_pending_adds: u32,
+    /// The claimant slot's FULL per-token ciphertext digest row
+    /// (`BalanceState::token_ct_digests(&enc_balances[member_index])`, leaf fields). Position
+    /// `token_slot` is constrained equal to the `user_amount_digest` PI by the in-circuit
+    /// one-hot select; the other 9 positions are bound by the leaf hash + inclusion.
+    pub slot_ct_digests: [Bytes32; MAX_CHANNEL_TOKENS],
+    /// The claimant slot's FULL per-token homomorphic-add counter row
+    /// (`pending_adds[member_index]`, leaf fields).
+    pub slot_pending_adds: [u32; MAX_CHANNEL_TOKENS],
+    /// The final state's signed `token_count` (H1 header scalar, TM-8/TM-9).
+    pub token_count: u8,
+    /// The final state's signed `token_registry` (H1 header limbs, TM-9); the circuit selects
+    /// `registry[token_slot]` as the exposed base `token_index`.
+    pub token_registry: [u32; MAX_CHANNEL_TOKENS],
     pub settled_tx_chain: Bytes32,
     /// Stage 3: the settled-tx accumulator root of the final balance state (in the signed H1).
     pub settled_tx_accumulator_root: Bytes32,
@@ -227,8 +262,17 @@ where
     /// Claimant slot index (Merkle position; `split_le(index, height)` inside the inclusion
     /// verify bounds it to `< MAX_CHANNEL_MEMBERS`).
     member_index: Target,
-    /// The claimant slot's `pending_adds` leaf field.
-    slot_pending_adds: Target,
+    /// The final state's signed `token_count` (H1 header scalar; TM-8 bound `token_slot <
+    /// token_count`).
+    token_count: Target,
+    /// The final state's signed `token_registry` limbs (H1 header; `registry[token_slot]` is
+    /// the exposed base `token_index`).
+    token_registry: [Target; MAX_CHANNEL_TOKENS],
+    /// The claimant slot's FULL per-token ciphertext digest row (leaf fields; position
+    /// `token_slot` one-hot-connected to the `user_amount_digest` PI).
+    slot_ct_digests: [Bytes32Target; MAX_CHANNEL_TOKENS],
+    /// The claimant slot's FULL per-token `pending_adds` leaf fields.
+    slot_pending_adds: [Target; MAX_CHANNEL_TOKENS],
     /// Height-`BALANCE_SLOT_TREE_HEIGHT` inclusion proof of the claimant's slot leaf.
     slot_inclusion: IncrementalMerkleProofTarget<PoseidonHashOutTarget>,
     /// Decryption Stage 2: witnessed Regev pk/ct polynomials and the decryption-core witness
@@ -258,6 +302,12 @@ where
 
         let member_count = u32_limb(&mut builder);
         let delegate_count = u32_limb(&mut builder);
+        // Multi-token header scalars (§N-1, TM-9): the signed token_count + full zero-padded
+        // registry — witnessed, then bound to the finalized H1 PI by the header recompute below,
+        // so the TM-8 bound and the registry resolution both read member-signed values.
+        let token_count = u32_limb(&mut builder);
+        let token_registry: [Target; MAX_CHANNEL_TOKENS] =
+            std::array::from_fn(|_| u32_limb(&mut builder));
         // The H1-committed balance-slot tree root (4 raw Goldilocks elements) — bound to the
         // finalized H1 PI by the header recompute below, then OPENED at the claimant's slot by
         // the Merkle inclusion proof.
@@ -268,16 +318,22 @@ where
         // Claimant slot index. `split_le(member_index, BALANCE_SLOT_TREE_HEIGHT)` inside the
         // inclusion verify bounds it to `< MAX_CHANNEL_MEMBERS`.
         let member_index = builder.add_virtual_target();
-        // The claimant slot's pending-adds leaf field (32-bit range-checked; the leaf hash binds
-        // it to the H1-committed slot data).
-        let slot_pending_adds = u32_limb(&mut builder);
+        // The claimant slot's FULL per-token leaf fields (v2 104-element leaf, §N-2): 10
+        // ciphertext digests + 10 pending-adds counters (all 32-bit range-checked; the leaf hash
+        // binds them to the H1-committed slot data).
+        let slot_ct_digests: [Bytes32Target; MAX_CHANNEL_TOKENS] =
+            std::array::from_fn(|_| Bytes32Target::new(&mut builder, true));
+        let slot_pending_adds: [Target; MAX_CHANNEL_TOKENS] =
+            std::array::from_fn(|_| u32_limb(&mut builder));
 
-        // ── (1) H1 header recompute (SHARED gadget; element-identical to close + native) ──
+        // ── (1) H1 header recompute (SHARED v2 gadget; element-identical to close + native) ──
         let recomputed_h1 = recompute_h1::<F, D>(
             &mut builder,
             public_inputs.channel_id[0],
             member_count,
             delegate_count,
+            token_count,
+            &token_registry,
             slot_tree_root,
             &settled_tx_chain,
             &settled_tx_accumulator_root,
@@ -314,6 +370,56 @@ where
         let is_active = less_than_u32(&mut builder, member_index, active);
         builder.connect(is_active.target, one);
 
+        // ── (2') PER-(SLOT, TOKEN) claim constraints (detail2 §N-6, TM-2/TM-8) ──
+        //
+        // One-hot flags derived from the `token_slot` PI ITSELF: `flag[t] = (token_slot == t)`.
+        // Σ flags == 1 forces `token_slot ∈ {0..MAX_CHANNEL_TOKENS-1}` exactly (any other value
+        // zeroes every flag and the sum constraint is unsatisfiable) — the selector is canonical
+        // and IS the exposed PI, so "the selected position equals the PI token_slot" holds by
+        // construction (TM-2 in-claim analogue: no separately-witnessed select index exists to
+        // diverge).
+        let token_slot = public_inputs.token_slot[0];
+        let mut token_slot_flags: Vec<BoolTarget> = Vec::with_capacity(MAX_CHANNEL_TOKENS);
+        let mut flags_sum = builder.zero();
+        for t in 0..MAX_CHANNEL_TOKENS {
+            let t_const = builder.constant(F::from_canonical_usize(t));
+            let is_sel = builder.is_equal(token_slot, t_const);
+            flags_sum = builder.add(flags_sum, is_sel.target);
+            token_slot_flags.push(is_sel);
+        }
+        builder.connect(flags_sum, one);
+
+        // TM-8: the claimed position must be ACTIVE — `token_slot < token_count`, with
+        // `token_count` the H1-bound signed header scalar (positions >= token_count are the
+        // canonical zero ciphertext; a claim there is refused outright rather than relying on
+        // zero-decryption).
+        let token_slot_active = less_than_u32(&mut builder, token_slot, token_count);
+        builder.connect(token_slot_active.target, one);
+
+        // ONE-HOT ct select: `ct_digests[token_slot] == user_amount_digest` PI, limb for limb.
+        // The select chain reads the SAME `slot_ct_digests` targets the leaf hash (and hence the
+        // Merkle inclusion against the signed root) commits, so the ciphertext being decrypted
+        // is provably the one stored at the claimed token position — feeding another position's
+        // ciphertext breaks this equality (TM-2).
+        let zero_t = builder.zero();
+        for k in 0..8 {
+            let mut selected = zero_t;
+            for (t, flag) in token_slot_flags.iter().enumerate() {
+                let limb = slot_ct_digests[t].to_vec()[k];
+                selected = builder.select(*flag, limb, selected);
+            }
+            builder.connect(selected, public_inputs.user_amount_digest.to_vec()[k]);
+        }
+
+        // BASE token resolution (review m8): `token_index` PI == `registry[token_slot]`,
+        // selected from the H1-bound registry limbs — the prover has NO choice of payout asset
+        // beyond the signed registry mapping of the claimed slot.
+        let mut selected_index = zero_t;
+        for (t, flag) in token_slot_flags.iter().enumerate() {
+            selected_index = builder.select(*flag, token_registry[t], selected_index);
+        }
+        builder.connect(selected_index, public_inputs.token_index[0]);
+
         // ── Decryption Stage 2 (closes over-claim): bind `amount` to the slot ciphertext
         // plaintext.
         //
@@ -339,16 +445,17 @@ where
         let ct_digest = regev_ct_digest_gadget::<F, C, D>(&mut builder, &ct_c1, &ct_c2);
         ct_digest.connect(&mut builder, public_inputs.user_amount_digest);
 
-        // ── (3) slot-leaf Merkle inclusion (replaces the retired 1024-slot one-hot select) ──
+        // ── (3) slot-leaf Merkle inclusion (v2 104-element leaf, §N-2) ──
         //
-        // leaf = Poseidon([IMSL, pk_digest, user_amount_digest, pending_adds, recipient]) MUST be
-        // included at `member_index` in the H1-committed `slot_tree_root`. ONE leaf binds all four
-        // slot fields to the SAME index (the Merkle position IS the slot index), so the claimed
-        // ciphertext digest (`user_amount_digest` PI), the registered Regev pk digest (via the
-        // gadget output — THE pk binding, MUST-FIX #1), the slot's add counter AND the slot's L1
-        // exit address are exactly the signed slot-`member_index` values. `pk_digest`'s limbs are
-        // u32 by construction (`Bytes32Target::from_hash_out` safe split); `user_amount_digest`
-        // and `recipient` are range-checked PIs.
+        // leaf = Poseidon([IMS2, pk_digest, ct_digests[0..10], pending_adds[0..10], recipient])
+        // MUST be included at `member_index` in the H1-committed `slot_tree_root`. ONE leaf binds
+        // ALL slot fields to the SAME index (the Merkle position IS the slot index), so the full
+        // per-token ciphertext row (position `token_slot` of which is the `user_amount_digest` PI
+        // via the one-hot select above), the registered Regev pk digest (via the gadget output —
+        // THE pk binding, MUST-FIX #1), the slot's add counters AND the slot's L1 exit address
+        // are exactly the signed slot-`member_index` values. `pk_digest`'s limbs are u32 by
+        // construction (`Bytes32Target::from_hash_out` safe split); the ct digests, counters and
+        // `recipient` are range-checked above.
         //
         // SECURITY (B-1b — THE delegate recipient binding): the leaf's recipient field IS the
         // claim's `recipient` PI (`public_inputs.recipient` is fed directly into the leaf hash),
@@ -359,8 +466,8 @@ where
         let slot_leaf = balance_slot_leaf_hash_circuit::<F, D>(
             &mut builder,
             &pk_digest,
-            &public_inputs.user_amount_digest,
-            slot_pending_adds,
+            &slot_ct_digests,
+            &slot_pending_adds,
             &public_inputs.recipient,
         );
         let slot_inclusion = IncrementalMerkleProofTarget::<PoseidonHashOutTarget>::new(
@@ -384,20 +491,28 @@ where
         builder.connect(amount_pi[0], amount_hi);
         builder.connect(amount_pi[1], amount_lo);
 
-        // ── (4) withdrawal_nullifier = keccak([IMCW, close_intent_digest, pk_digest]) ──
+        // ── (4) withdrawal_nullifier = keccak([IMW2, close_intent_digest, pk_digest,
+        // token_slot]) — the v2 per-(slot, token) nullifier (detail2 §N-6, TM-5) ──
         //
-        // SECURITY (B-2 blocker fix): the nullifier is keyed on the LEAF-BOUND slot Regev pk digest
-        // `pk_digest` (bound at `member_index` in `slot_tree_root` via the inclusion at step (3)),
-        // NOT the slot-free `member_pk_g` PI. This makes the nullifier slot-unique: a slot owner
-        // cannot grind `member_pk_g` to mint distinct nullifiers and multi-withdraw the same slot
-        // once the Manager admits delegate claims (B-2). `member_pk_g` remains an informational PI
-        // and MUST NOT be trusted as the nullifier key on-chain. Mirrors the native
-        // `WithdrawalClaim::derive_nullifier` (now keyed on `slot_regev_pk_digest`) byte-for-byte.
-        let withdrawal_domain = builder.constant(F::from_canonical_u32(WITHDRAWAL_CLAIM_DOMAIN));
+        // SECURITY (B-2 blocker fix, preserved): the nullifier is keyed on the LEAF-BOUND slot
+        // Regev pk digest `pk_digest` (bound at `member_index` in `slot_tree_root` via the
+        // inclusion at step (3)), NOT the slot-free `member_pk_g` PI. This makes the nullifier
+        // slot-unique: a slot owner cannot grind `member_pk_g` to mint distinct nullifiers and
+        // multi-withdraw the same slot once the Manager admits delegate claims (B-2).
+        // `member_pk_g` remains an informational PI and MUST NOT be trusted as the nullifier key
+        // on-chain.
+        //
+        // SECURITY (TM-5, multi-token): `token_slot` — the SAME PI wire that drives the one-hot
+        // ct select and the `< token_count` bound — is the final preimage limb, so each
+        // (slot, token) pair yields exactly ONE nullifier and a nullifier minted for token t
+        // cannot be replayed for token t'. Mirrors the native
+        // `WithdrawalClaim::derive_nullifier` ("IMW2", 18 limbs) byte-for-byte.
+        let withdrawal_domain = builder.constant(F::from_canonical_u32(WITHDRAWAL_CLAIM_DOMAIN_V2));
         let nullifier_inputs = [
             vec![withdrawal_domain],
             public_inputs.close_intent_digest.to_vec(),
             pk_digest.to_vec(),
+            vec![token_slot],
         ]
         .concat();
         let withdrawal_nullifier =
@@ -417,11 +532,14 @@ where
             public_inputs,
             member_count,
             delegate_count,
+            token_count,
+            token_registry,
             slot_tree_root,
             settled_tx_chain,
             settled_tx_accumulator_root,
             state_version,
             member_index,
+            slot_ct_digests,
             slot_pending_adds,
             slot_inclusion,
             regev_a,
@@ -468,12 +586,27 @@ where
                 F::from_canonical_usize(witness_value.member_index),
             )
             .unwrap();
+        // Multi-token (v2): the signed token_count/registry (H1 header) + the claimant slot's
+        // full per-token leaf fields.
         witness
             .set_target(
-                self.slot_pending_adds,
-                F::from_canonical_u32(witness_value.slot_pending_adds),
+                self.token_count,
+                F::from_canonical_u8(witness_value.token_count),
             )
             .unwrap();
+        for (t, &limb) in witness_value.token_registry.iter().enumerate() {
+            witness
+                .set_target(self.token_registry[t], F::from_canonical_u32(limb))
+                .unwrap();
+        }
+        for (t, digest) in witness_value.slot_ct_digests.iter().enumerate() {
+            self.slot_ct_digests[t].set_witness(&mut witness, *digest);
+        }
+        for (t, &adds) in witness_value.slot_pending_adds.iter().enumerate() {
+            witness
+                .set_target(self.slot_pending_adds[t], F::from_canonical_u32(adds))
+                .unwrap();
+        }
         self.settled_tx_chain
             .set_witness(&mut witness, witness_value.settled_tx_chain);
         self.settled_tx_accumulator_root
@@ -621,7 +754,7 @@ pub mod test_fixture {
             channel_id,
             member_count: 3,
             delegate_count: 0,
-            enc_balances: BalanceState::pad_enc_balances(&[ct0.clone(), ct1, ct2]),
+            enc_balances: BalanceState::pad_enc_balances_token0(&[ct0.clone(), ct1, ct2]),
             // Decryption Stage 1: the active slots carry the real member Regev pk Poseidon digests
             // (Bytes32::from(poseidon_digest)); padding slots are Bytes32::default().
             regev_pk_digests: BalanceState::pad_regev_pk_digests(&[
@@ -639,7 +772,9 @@ pub mod test_fixture {
             settled_tx_chain: Bytes32::default(),
             settled_tx_accumulator_root: Bytes32::default(),
             state_version: 6,
-            pending_adds: BalanceState::pad_pending_adds(&[0, 0, 0]),
+            pending_adds: BalanceState::pad_pending_adds_token0(&[0, 0, 0]),
+            token_registry: BalanceState::single_token_registry(0),
+            token_count: 1,
         };
         let state = ChannelState {
             channel_id,
@@ -648,7 +783,7 @@ pub mod test_fixture {
             close_freeze_nonce: 0,
             channel_fund: ChannelFund {
                 channel_id,
-                amount: U256::from(93u32),
+                amounts: ChannelFund::single_token_amounts(U256::from(93u32)),
                 intmax_state_root: Bytes32::default(),
             },
             balance_state: final_balance_state.clone(),
@@ -670,7 +805,7 @@ pub mod test_fixture {
             final_balance_state_h1: state.balance_state.h1(),
             intmax_state_root: state.channel_fund.intmax_state_root,
             burn_tx_hash: Bytes32::from_u32_slice(&[9, 0, 0, 0, 0, 0, 0, 0]).unwrap(),
-            burn_amount: state.channel_fund.amount,
+            burn_amount: state.channel_fund.amounts[0],
             zkp: vec![9],
         };
         let close_intent = CloseIntent::new(5, &state, &close_tx, 123).unwrap();
@@ -682,6 +817,7 @@ pub mod test_fixture {
         let claim_proof =
             prove_withdraw_claim(RegevSecurityLevel::Test, &pk0, &sk0, &ct0, amount).unwrap();
         let claim = WithdrawalClaim {
+            token_slot: 0,
             close_intent_digest: close_intent.signing_digest(),
             member_pk_g: member.pk_g,
             l1_recipient: member.l1_withdrawal_recipient,
@@ -689,6 +825,7 @@ pub mod test_fixture {
             withdrawal_nullifier: WithdrawalClaim::derive_nullifier(
                 close_intent.signing_digest(),
                 Bytes32::from(pk0.poseidon_digest()),
+                0,
             ),
             claim_proof,
         };
@@ -713,7 +850,14 @@ pub mod test_fixture {
             public_inputs,
             slot_tree_root: slot_tree.get_root(),
             slot_inclusion: slot_tree.prove(member_index as u64),
+            // Multi-token (v2): the FULL per-token leaf fields of the claimant slot + the
+            // signed token header scalars.
+            slot_ct_digests: BalanceState::token_ct_digests(
+                &final_balance_state.enc_balances[member_index],
+            ),
             slot_pending_adds: final_balance_state.pending_adds[member_index],
+            token_count: final_balance_state.token_count,
+            token_registry: final_balance_state.token_registry,
             settled_tx_chain: final_balance_state.settled_tx_chain,
             settled_tx_accumulator_root: final_balance_state.settled_tx_accumulator_root,
             state_version: final_balance_state.state_version,
@@ -729,10 +873,171 @@ pub mod test_fixture {
         };
         (full_witness, final_balance_state)
     }
+
+    /// The claimant's per-token plaintexts in [`build_multitoken_witness_with_state`]:
+    /// token slot 0 holds 77, token slot 1 holds 33.
+    pub const MT_AMOUNTS: [u64; 2] = [77, 33];
+    /// The base token_index registered at local token slot 1 in the multi-token fixture.
+    pub const MT_TOKEN1_INDEX: u32 = 7;
+
+    /// Multi-token claim fixture (detail2 §N-6): 3 members, `token_count = 2`, registry
+    /// `[0 (ETH), MT_TOKEN1_INDEX]`. The claimant (slot 0) holds REAL ciphertexts at BOTH active
+    /// token positions under the SAME Regev key (`MT_AMOUNTS`); `token_slot` selects which
+    /// position the claim withdraws. Routed through the NATIVE
+    /// `WithdrawalClaimWitness::to_public_inputs` (state validation + E-3 verification), exactly
+    /// like the single-token builder. Non-genesis channel-FUND amounts stay zero (per-token L1
+    /// settlement is Phase 3); member BALANCES at token 1 are unconstrained by the close intent.
+    pub fn build_multitoken_witness_with_state(
+        token_slot: u8,
+    ) -> (WithdrawalClaimFullWitness, BalanceState) {
+        use crate::common::balance_state::zero_token_row;
+        assert!(token_slot < 2, "fixture has two active token positions");
+        let mut rng = SmallRng::seed_from_u64(0xC1A2_u64);
+        let channel_id = ChannelId::new(3).unwrap();
+        let (pk0, sk0) = channel_keygen(&mut rng);
+        let (pk1, _) = channel_keygen(&mut rng);
+        let (pk2, _) = channel_keygen(&mut rng);
+
+        let (ct0_t0, _) = encrypt_amount(&mut rng, &pk0, MT_AMOUNTS[0]).unwrap();
+        let (ct0_t1, _) = encrypt_amount(&mut rng, &pk0, MT_AMOUNTS[1]).unwrap();
+        let (ct1, _) = encrypt_amount(&mut rng, &pk1, 5).unwrap();
+        let (ct2, _) = encrypt_amount(&mut rng, &pk2, 11).unwrap();
+        let mut row0 = zero_token_row();
+        row0[0] = ct0_t0;
+        row0[1] = ct0_t1;
+        let mut row1 = zero_token_row();
+        row1[0] = ct1;
+        let mut row2 = zero_token_row();
+        row2[0] = ct2;
+        let mut token_registry = BalanceState::single_token_registry(0);
+        token_registry[1] = MT_TOKEN1_INDEX;
+        let final_balance_state = BalanceState {
+            channel_id,
+            member_count: 3,
+            delegate_count: 0,
+            enc_balances: BalanceState::pad_enc_balances(&[row0, row1, row2]),
+            regev_pk_digests: BalanceState::pad_regev_pk_digests(&[
+                Bytes32::from(pk0.poseidon_digest()),
+                Bytes32::from(pk1.poseidon_digest()),
+                Bytes32::from(pk2.poseidon_digest()),
+            ]),
+            recipients: BalanceState::pad_recipients(&[
+                Address::from_u32_slice(&[1, 2, 3, 4, 5]).unwrap(),
+                Address::from_u32_slice(&[21, 22, 23, 24, 25]).unwrap(),
+                Address::from_u32_slice(&[31, 32, 33, 34, 35]).unwrap(),
+            ]),
+            settled_tx_chain: Bytes32::default(),
+            settled_tx_accumulator_root: Bytes32::default(),
+            state_version: 6,
+            pending_adds: BalanceState::pad_pending_adds_token0(&[0, 0, 0]),
+            token_registry,
+            token_count: 2,
+        };
+        final_balance_state
+            .validate()
+            .expect("multi-token fixture state must be valid");
+        let state = ChannelState {
+            channel_id,
+            epoch: 8,
+            small_block_number: 5,
+            close_freeze_nonce: 0,
+            channel_fund: ChannelFund {
+                channel_id,
+                amounts: ChannelFund::single_token_amounts(U256::from(93u32)),
+                intmax_state_root: Bytes32::default(),
+            },
+            balance_state: final_balance_state.clone(),
+            h2_tag: Bytes32::default(),
+            shared_native_nullifier_root: Bytes32::default(),
+            unallocated_confirmed_incoming: U256::zero(),
+            prev_digest: Bytes32::default(),
+            digest: Bytes32::default(),
+            member_signatures: vec![MemberSignature {
+                member_slot: 0,
+                pk_g: Bytes32::from_u32_slice(&[10, 11, 12, 13, 14, 15, 16, 17]).unwrap(),
+                signature: vec![1],
+            }],
+        }
+        .with_computed_digest();
+        let close_tx = CloseWithdrawal {
+            channel_id: state.channel_id,
+            final_channel_state_digest: state.digest,
+            final_balance_state_h1: state.balance_state.h1(),
+            intmax_state_root: state.channel_fund.intmax_state_root,
+            burn_tx_hash: Bytes32::from_u32_slice(&[9, 0, 0, 0, 0, 0, 0, 0]).unwrap(),
+            burn_amount: state.channel_fund.amounts[0],
+            zkp: vec![9],
+        };
+        let close_intent = CloseIntent::new(5, &state, &close_tx, 123).unwrap();
+        let member = ChannelMember {
+            pk_g: Bytes32::from_u32_slice(&[10, 11, 12, 13, 14, 15, 16, 17]).unwrap(),
+            member_slot: 0,
+            l1_withdrawal_recipient: Address::from_u32_slice(&[1, 2, 3, 4, 5]).unwrap(),
+        };
+        let amount = MT_AMOUNTS[token_slot as usize];
+        let ct = final_balance_state.enc_balances[0][token_slot as usize].clone();
+        let claim_proof =
+            prove_withdraw_claim(RegevSecurityLevel::Test, &pk0, &sk0, &ct, amount).unwrap();
+        let claim = WithdrawalClaim {
+            token_slot,
+            close_intent_digest: close_intent.signing_digest(),
+            member_pk_g: member.pk_g,
+            l1_recipient: member.l1_withdrawal_recipient,
+            user_amount_ct: ct.clone(),
+            withdrawal_nullifier: WithdrawalClaim::derive_nullifier(
+                close_intent.signing_digest(),
+                Bytes32::from(pk0.poseidon_digest()),
+                token_slot,
+            ),
+            claim_proof,
+        };
+        let native = WithdrawalClaimWitness {
+            close_intent,
+            close_tx,
+            member,
+            claim,
+            final_balance_state: final_balance_state.clone(),
+            member_index: 0,
+            user_pk: pk0.clone(),
+            amount,
+        };
+        let public_inputs: WithdrawalClaimPublicInputs =
+            native.to_public_inputs(RegevSecurityLevel::Test).unwrap();
+
+        let slot_tree = final_balance_state.slot_tree();
+        let member_index = 0usize;
+        let full_witness = WithdrawalClaimFullWitness {
+            public_inputs,
+            slot_tree_root: slot_tree.get_root(),
+            slot_inclusion: slot_tree.prove(member_index as u64),
+            slot_ct_digests: BalanceState::token_ct_digests(
+                &final_balance_state.enc_balances[member_index],
+            ),
+            slot_pending_adds: final_balance_state.pending_adds[member_index],
+            token_count: final_balance_state.token_count,
+            token_registry: final_balance_state.token_registry,
+            settled_tx_chain: final_balance_state.settled_tx_chain,
+            settled_tx_accumulator_root: final_balance_state.settled_tx_accumulator_root,
+            state_version: final_balance_state.state_version,
+            member_count: final_balance_state.member_count,
+            delegate_count: final_balance_state.delegate_count,
+            member_index,
+            regev_a: pk0.a.clone(),
+            regev_b: pk0.b.clone(),
+            ct_c1: ct.c1.clone(),
+            ct_c2: ct.c2.clone(),
+            regev_s: sk0.s.clone(),
+        };
+        (full_witness, final_balance_state)
+    }
 }
 
 #[cfg(test)]
 mod tests {
+
+    // Multitoken Phase 2: the close/claim circuits now compute the v2 H1 header (37 elems,
+    // "IMB2") and slot leaf (104 elems, "IMS2"), so the tests below run against v2-signed
+    // states (the Phase 1 #[ignore] gates are lifted; assertions unchanged).
     use std::panic::{AssertUnwindSafe, catch_unwind};
 
     use plonky2::field::types::PrimeField64;
@@ -875,6 +1180,8 @@ mod tests {
         witness.member_index = 5;
         witness.slot_tree_root = tree.get_root();
         witness.slot_inclusion = tree.prove(5);
+        witness.slot_ct_digests =
+            crate::common::balance_state::BalanceState::token_ct_digests(&state.enc_balances[5]);
         witness.slot_pending_adds = state.pending_adds[5];
         witness.public_inputs.final_balance_state_h1 = state.h1();
         let pw = circuit.fill_witness(&witness).unwrap();
@@ -940,6 +1247,133 @@ mod tests {
         assert!(
             result.is_err() || result.unwrap().is_err(),
             "a tampered final_balance_state_h1 must be rejected"
+        );
+    }
+
+    /// Multi-token happy path + TM-5 nullifier separation, BOTH directions at circuit level:
+    /// (a) the same member claims token slot 0 AND token slot 1 of a 2-token state — both prove,
+    /// the exposed base `token_index` PIs resolve through the signed registry (0 and
+    /// MT_TOKEN1_INDEX), and the two nullifiers are DISTINCT (completeness: all of a member's
+    /// tokens are claimable); (b) reusing the token-0 nullifier limbs as the PI of the token-1
+    /// claim is UNPROVABLE (the in-circuit IMW2 recompute pins the token_slot limb — no
+    /// cross-token nullifier replay).
+    #[cfg_attr(debug_assertions, ignore = "run with --release")]
+    #[test]
+    fn withdrawal_claim_circuit_multitoken_claims_and_nullifier_cross_token() {
+        let circuit = circuit();
+        let (witness_t0, _) = build_multitoken_witness_with_state(0);
+        let (witness_t1, _) = build_multitoken_witness_with_state(1);
+
+        // (a) both per-(slot, token) claims prove and verify.
+        let proof_t0 = circuit.prove(&witness_t0).expect("token-0 claim proof");
+        circuit.data.verify(proof_t0).expect("token-0 verify");
+        let proof_t1 = circuit.prove(&witness_t1).expect("token-1 claim proof");
+        circuit.data.verify(proof_t1).expect("token-1 verify");
+        assert_eq!(witness_t0.public_inputs.amount, MT_AMOUNTS[0]);
+        assert_eq!(witness_t1.public_inputs.amount, MT_AMOUNTS[1]);
+        // The base token_index PIs are the H1-committed registry resolutions (review m8).
+        assert_eq!(witness_t0.public_inputs.token_index, 0);
+        assert_eq!(witness_t1.public_inputs.token_index, MT_TOKEN1_INDEX);
+        // TM-5 direction 1: distinct (slot, token) pairs mint DISTINCT nullifiers.
+        let n0 = witness_t0.public_inputs.withdrawal_nullifier;
+        let n1 = witness_t1.public_inputs.withdrawal_nullifier;
+        assert_ne!(n0, n1, "per-token nullifiers must be distinct (TM-5)");
+
+        // (b) TM-5 direction 2: a token-1 claim exposing the token-0 nullifier is UNPROVABLE —
+        // the in-circuit keccak recompute includes the token_slot PI limb, so the replayed
+        // nullifier PI cannot match.
+        let mut replay = witness_t1.clone();
+        replay.public_inputs.withdrawal_nullifier = n0;
+        let pw = circuit.fill_witness(&replay).unwrap();
+        let result = catch_unwind(AssertUnwindSafe(|| circuit.data.prove(pw)));
+        assert!(
+            result.is_err() || result.unwrap().is_err(),
+            "replaying the token-0 nullifier for a token-1 claim must be rejected (TM-5)"
+        );
+    }
+
+    /// Negative — tampered token_slot (TM-2 in-claim analogue): take an honest token-0 claim and
+    /// flip ONLY the `token_slot` PI to 1 (an ACTIVE position, so the TM-8 bound is satisfied).
+    /// The one-hot select now reads position 1's leaf-committed ciphertext digest, which does
+    /// not equal the `user_amount_digest` the decryption is bound to — and the IMW2 nullifier
+    /// recompute diverges too. Unprovable: a prover cannot claim under one token slot while
+    /// decrypting another's ciphertext.
+    #[cfg_attr(debug_assertions, ignore = "run with --release")]
+    #[test]
+    fn withdrawal_claim_circuit_rejects_tampered_token_slot() {
+        let circuit = circuit();
+        let (mut witness, _) = build_multitoken_witness_with_state(0);
+        witness.public_inputs.token_slot = 1;
+        let pw = circuit.fill_witness(&witness).unwrap();
+        let result = catch_unwind(AssertUnwindSafe(|| circuit.data.prove(pw)));
+        assert!(
+            result.is_err() || result.unwrap().is_err(),
+            "a token_slot PI diverging from the claimed position must be rejected (TM-2)"
+        );
+    }
+
+    /// Negative — inactive token position (TM-8): a claim at `token_slot >= token_count` must be
+    /// rejected by the in-circuit `token_slot < token_count` bound EVEN when everything else is
+    /// self-consistent. We doctor the signed header down to `token_count = 1` while position 1
+    /// still holds a real ciphertext (validate() would reject such a state, but `h1()` is a pure
+    /// function — the adversarial signing scenario), recompute the doctored H1 so the header
+    /// constraint is satisfied — the ONLY violated constraint is the TM-8 bound.
+    #[cfg_attr(debug_assertions, ignore = "run with --release")]
+    #[test]
+    fn withdrawal_claim_circuit_rejects_inactive_token_slot() {
+        let circuit = circuit();
+        let (mut witness, mut state) = build_multitoken_witness_with_state(1);
+        state.token_count = 1; // registry/leaves untouched: position 1 keeps its real ct.
+        witness.token_count = 1;
+        witness.public_inputs.final_balance_state_h1 = state.h1();
+        let pw = circuit.fill_witness(&witness).unwrap();
+        let result = catch_unwind(AssertUnwindSafe(|| circuit.data.prove(pw)));
+        assert!(
+            result.is_err() || result.unwrap().is_err(),
+            "a claim at token_slot >= token_count must be rejected (TM-8)"
+        );
+    }
+
+    /// Negative — cross-position ciphertext (TM-2): keep `token_slot = 0` (and its nullifier)
+    /// but decrypt token position 1's ciphertext (witness ct + `user_amount_digest` PI + amount
+    /// all switched to token 1's, mutually consistent). The ONLY violated constraint is the
+    /// one-hot select `ct_digests[0] == user_amount_digest` — the select is fed the SAME
+    /// leaf-committed digest row the Merkle inclusion binds, so relocating the decrypted
+    /// ciphertext across token positions is unprovable.
+    #[cfg_attr(debug_assertions, ignore = "run with --release")]
+    #[test]
+    fn withdrawal_claim_circuit_rejects_cross_position_ciphertext() {
+        let circuit = circuit();
+        let (mut witness, state) = build_multitoken_witness_with_state(0);
+        let ct_t1 = state.enc_balances[0][1].clone();
+        witness.public_inputs.user_amount_digest = ct_t1.digest();
+        witness.public_inputs.amount = MT_AMOUNTS[1];
+        witness.ct_c1 = ct_t1.c1.clone();
+        witness.ct_c2 = ct_t1.c2.clone();
+        let pw = circuit.fill_witness(&witness).unwrap();
+        let result = catch_unwind(AssertUnwindSafe(|| circuit.data.prove(pw)));
+        assert!(
+            result.is_err() || result.unwrap().is_err(),
+            "decrypting another position's ciphertext under token_slot 0 must be rejected (TM-2)"
+        );
+    }
+
+    /// Negative — tampered base token_index (review m8): the `token_index` PI must equal the
+    /// H1-committed `registry[token_slot]`; exposing any other base token (here 42) is
+    /// unprovable. Without this, a claim on local slot 1 (base token MT_TOKEN1_INDEX) could be
+    /// presented to L1 as a claim on a different asset's escrow (TM-3 boundary).
+    #[cfg_attr(debug_assertions, ignore = "run with --release")]
+    #[test]
+    fn withdrawal_claim_circuit_rejects_tampered_token_index() {
+        let circuit = circuit();
+        let (mut witness, _) = build_multitoken_witness_with_state(1);
+        assert_eq!(witness.public_inputs.token_index, MT_TOKEN1_INDEX);
+        witness.public_inputs.token_index = 42;
+        let pw = circuit.fill_witness(&witness).unwrap();
+        let result = catch_unwind(AssertUnwindSafe(|| circuit.data.prove(pw)));
+        assert!(
+            result.is_err() || result.unwrap().is_err(),
+            "a token_index PI != the H1-committed registry[token_slot] must be rejected (m8)"
         );
     }
 }

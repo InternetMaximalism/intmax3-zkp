@@ -67,6 +67,35 @@ contract RunClose is Script {
         console2.log("withdrawNative OK; pendingWithdrawals[manager]:", _rollup().pendingWithdrawals(address(_manager())));
     }
 
+    /// Multitoken Phase 5b: withdrawERC20 — pay the channel's ERC-20 lane to the manager
+    /// (recipient + tokenIndex baked in the proof; verified by the SAME withdrawal VK as
+    /// withdrawNative). Reads the `sepolia_erc20_withdrawal_*` pair staged by the CLI `withdraw`.
+    function withdrawErc20Step() external {
+        string memory j = vm.readFile(
+            string.concat(vm.projectRoot(), "/test/data/sepolia_erc20_withdrawal_payout.json")
+        );
+        IntmaxRollup.Withdrawal[] memory ws = new IntmaxRollup.Withdrawal[](1);
+        ws[0] = IntmaxRollup.Withdrawal({
+            recipient: vm.parseJsonAddress(j, ".withdrawals[0].recipient"),
+            tokenIndex: uint32(vm.parseJsonUint(j, ".withdrawals[0].token_index")),
+            amount: vm.parseUint(vm.parseJsonString(j, ".withdrawals[0].amount")),
+            nullifier: vm.parseJsonBytes32(j, ".withdrawals[0].nullifier"),
+            auxData: vm.parseJsonBytes32(j, ".withdrawals[0].aux_data")
+        });
+        address prover = vm.parseJsonAddress(j, ".withdrawal_prover");
+        MleVerifier.MleProof memory proof = FixtureLib.parseProof(
+            vm.readFile(string.concat(vm.projectRoot(), "/test/data/sepolia_erc20_withdrawal_mle.json"))
+        );
+
+        vm.startBroadcast();
+        _rollup().withdrawERC20(ws, prover, proof);
+        vm.stopBroadcast();
+        console2.log(
+            "withdrawERC20 OK; pendingTokenWithdrawals[t][manager]:",
+            _rollup().pendingTokenWithdrawals(ws[0].tokenIndex, address(_manager()))
+        );
+    }
+
     /// submitCloseIntent with the REAL wrapped-close MLE/WHIR proof (Phase A). The CloseIntent fields
     /// are read from the proved close descriptor (`sepolia_close_intent.json`), and the proof is the
     /// wrapped close `MleVerifier.MleProof` from `sepolia_close_intent_mle.json` (publicInputs = the
@@ -81,8 +110,27 @@ contract RunClose is Script {
         console2.log("submitCloseIntent OK; challengeDeadline:", _manager().getPendingClose().challengeDeadline);
     }
 
+    /// @dev Multitoken Phase 5b: parse the descriptor's per-token fund vector (10 x 0x-hex U256,
+    /// registry-aligned) into the fixed-size `CloseIntent.channelFundAmounts`.
+    function _parseAmounts(string memory j) internal pure returns (uint256[10] memory a) {
+        string[] memory raw = vm.parseJsonStringArray(j, ".channel_fund_amounts");
+        require(raw.length == 10, "channel_fund_amounts must have 10 entries");
+        for (uint256 i = 0; i < 10; i++) a[i] = vm.parseUint(raw[i]);
+    }
+
+    /// @dev Multitoken Phase 5b: parse the descriptor's base-token registry (10 x u32).
+    function _parseRegistry(string memory j) internal pure returns (uint32[10] memory r) {
+        uint256[] memory raw = vm.parseJsonUintArray(j, ".token_registry");
+        require(raw.length == 10, "token_registry must have 10 entries");
+        for (uint256 i = 0; i < 10; i++) r[i] = uint32(raw[i]);
+    }
+
     /// @dev Build the `CloseIntent` from the proved close descriptor JSON (every field is the proved
-    /// close public input — see generate_close_fixture.rs `CloseIntentDescriptor`).
+    /// close public input — see generate_close_fixture.rs / channel_member.rs
+    /// `CloseIntentDescriptor`). Multitoken Phase 5b: the per-token fields are parsed from the
+    /// descriptor verbatim (the former genesis-token embedding is retired — the CLI and the
+    /// fixture generator both emit the full vectors; the verifier's tokenFundsDigest recompute
+    /// binds them to the member-signed PI).
     function _closeIntentFromDescriptor()
         internal view returns (ChannelSettlementManager.CloseIntent memory intent)
     {
@@ -94,7 +142,9 @@ contract RunClose is Script {
             closeFreezeNonce: uint64(vm.parseJsonUint(j, ".close_freeze_nonce")),
             finalChannelStateDigest: vm.parseJsonBytes32(j, ".final_channel_state_digest"),
             finalBalanceStateH1: vm.parseJsonBytes32(j, ".final_balance_state_h1"),
-            channelFundAmount: vm.parseJsonUint(j, ".channel_fund_amount"),
+            channelFundAmounts: _parseAmounts(j),
+            tokenRegistry: _parseRegistry(j),
+            tokenCount: uint8(vm.parseJsonUint(j, ".token_count")),
             channelFundIntmaxStateRoot: vm.parseJsonBytes32(j, ".channel_fund_intmax_state_root"),
             burnTxHash: vm.parseJsonBytes32(j, ".burn_tx_hash"),
             closeWithdrawalDigest: vm.parseJsonBytes32(j, ".close_withdrawal_digest"),
@@ -137,6 +187,10 @@ contract RunClose is Script {
             recipient: vm.parseJsonAddress(j, ".recipient"),
             userAmountDigest: vm.parseJsonBytes32(j, ".user_amount_digest"),
             amount: uint64(vm.parseJsonUint(j, ".amount")),
+            // Multitoken Phase 5b: the PROVED (slot, base-token) pair from the claim descriptor
+            // (claim PI limbs 48/49, emitted by the CLI `claim` / the fixture generator).
+            tokenSlot: uint8(vm.parseJsonUint(j, ".token_slot")),
+            tokenIndex: uint32(vm.parseJsonUint(j, ".token_index")),
             withdrawalNullifier: vm.parseJsonBytes32(j, ".withdrawal_nullifier")
         });
         MleVerifier.MleProof memory proof = FixtureLib.parseProof(_wclaimMle());
@@ -193,7 +247,9 @@ contract RunClose is Script {
             incomingTxHash: vm.parseJsonBytes32(j, ".incoming_tx_hash"),
             receiverPkG: vm.parseJsonBytes32(j, ".receiver_pk_g"),
             recipient: vm.parseJsonAddress(j, ".recipient"),
-            amount: uint64(vm.parseJsonUint(j, ".amount"))
+            amount: uint64(vm.parseJsonUint(j, ".amount")),
+            // TM-16: the PROVED base token (PI limb 56) emitted by the CLI descriptor.
+            tokenIndex: uint32(vm.parseJsonUint(j, ".token_index"))
         });
         MleVerifier.MleProof memory proof = FixtureLib.parseProof(_postCloseClaimMle());
         vm.startBroadcast();

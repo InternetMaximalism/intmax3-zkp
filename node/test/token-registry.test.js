@@ -1,0 +1,490 @@
+'use strict';
+// Token DISPLAY metadata registry — fail-closed manifest validation + chain-verification policy
+// (multi-token detail2 §N-1/§N-7, threat model TM-10b).
+//
+// WHAT THESE TESTS ARE MEANT TO PROVE ABOUT SECURITY
+//   The only funds-relevant claim this module makes is: "symbol/name/decimals are shown ONLY when
+//   the manifest address was read back equal from the rollup's set-once tokenAddressOf registry."
+//   Every test below attacks one leg of that claim:
+//     * validation tests   — a malformed/hostile operator file can never be partially accepted
+//                            (a partially-accepted file is how a mislabelled token gets served);
+//     * policy tests       — a CONTRADICTION (address/chain/rollup mismatch) is fatal, an ABSENCE
+//                            of information (unregistered index, RPC down) only degrades to null
+//                            metadata — never to a guessed label;
+//     * observation tests  — an on-chain TokenRegistered that disagrees with a VERIFIED entry
+//                            withdraws that entry's metadata instead of being ignored;
+//     * gating tests       — metadataFor() cannot leak an unverified symbol by any path.
+
+const test = require('node:test');
+const assert = require('node:assert');
+const os = require('os');
+const path = require('path');
+const fs = require('fs');
+
+const {
+  TokenRegistry,
+  TokenManifestError,
+  TokenChainMismatchError,
+  validateManifest,
+  loadManifest,
+  encodeTokenAddressOf,
+  decodeAddressWord,
+  decodeDecimalsWord,
+  DECIMALS_SIG,
+  DECIMALS_SELECTOR,
+  ERC20_DECIMALS_ABI,
+  TOKEN_ADDRESS_OF_SIG,
+  TOKEN_ADDRESS_OF_SELECTOR,
+} = require('../common/token-registry');
+const { ROLLUP_GETTER_ABI } = require('../common/chain-watcher');
+
+const ROLLUP = '0x5FbDB2315678afecb367f032d93F642f64180aa3';
+const USDC = '0x1c7D4B196Cb0C7B01d743Fbc6116a902379C7238';
+const OTHER = '0x00000000000000000000000000000000deadbeef';
+const ZERO = '0x0000000000000000000000000000000000000000';
+
+function manifest(overrides) {
+  return Object.assign({
+    chainId: 11155111,
+    rollup: ROLLUP,
+    tokens: [
+      { tokenIndex: 0, symbol: 'ETH', name: 'Ether', decimals: 18, address: null, native: true },
+      { tokenIndex: 5, symbol: 'USDC', name: 'USD Coin', decimals: 6, address: USDC },
+    ],
+  }, overrides || {});
+}
+function withTokens(tokens) { return manifest({ tokens }); }
+const nativeEntry = () => ({ tokenIndex: 0, symbol: 'ETH', name: 'Ether', decimals: 18, address: null, native: true });
+
+// (placed with the helpers so it reads next to `nativeEntry`)
+test('manifest: the native entry must declare decimals 18 — it is verified WITHOUT a chain read', () => {
+  // Index 0 has no contract to ask, so its decimals are marked verified on the file's word alone
+  // unless pinned here. 18 is fixed by the protocol, not declarable by the operator.
+  const bad = Object.assign(nativeEntry(), { decimals: 6 });
+  assert.throws(() => validateManifest(withTokens([bad]), 'test'), /native entry must declare decimals: 18/);
+  assert.doesNotThrow(() => validateManifest(withTokens([nativeEntry()]), 'test'));
+});
+
+// A registry whose chainId read always succeeds, with a scripted tokenAddressOf reader.
+function registryWith(tokens) {
+  return new TokenRegistry(validateManifest(withTokens(tokens), 'test'), 'test');
+}
+const chainIdOk = async () => 11155111;
+// Default stub for the token-side `decimals()` read-back. Every success-path verification must
+// pass one explicitly: the real default reader would make a live eth_call.
+const decimalsOk = async () => 6;
+
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+// 1. Manifest validation — fail-closed, whole-file rejection
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+
+test('manifest: the shipped example validates (the template must not rot)', () => {
+  const m = loadManifest(path.join(__dirname, '..', 'tokens.example.json'));
+  assert.equal(m.tokens, undefined);
+  assert.equal(m.entries.length, 3); // ETH (native) + ITX (testnet faucet token) + USDC
+  assert.equal(m.entries[0].native, true);
+  assert.equal(m.entries[0].verified, false, 'nothing is verified straight out of the file');
+  const itx = m.entries.find((e) => e.symbol === 'ITX');
+  assert.ok(itx && !itx.native && itx.tokenIndex > 0, 'the faucet token must be a NON-native index');
+  assert.equal(itx.decimals, 6, 'must track contracts/test/tokens/IntmaxTestTokenITX.sol (read back at startup)');
+  const usdc = m.entries.find((e) => e.symbol === 'USDC');
+  assert.equal(usdc.address, USDC.toLowerCase(), 'addresses are normalized to lowercase');
+});
+
+test('manifest: duplicate tokenIndex rejects the FILE (two entries claiming one base index)', () => {
+  assert.throws(() => validateManifest(withTokens([
+    nativeEntry(),
+    { tokenIndex: 5, symbol: 'USDC', name: 'USD Coin', decimals: 6, address: USDC },
+    { tokenIndex: 5, symbol: 'FAKE', name: 'Fake Coin', decimals: 6, address: OTHER },
+  ])), (e) => e instanceof TokenManifestError && /duplicate tokenIndex 5/.test(e.message));
+});
+
+test('manifest: native at a nonzero index is rejected (only base index 0 is native ETH)', () => {
+  assert.throws(() => validateManifest(withTokens([
+    { tokenIndex: 3, symbol: 'ETH', name: 'Ether', decimals: 18, address: null, native: true },
+  ])), (e) => e instanceof TokenManifestError && /native entry must be tokenIndex 0/.test(e.message));
+});
+
+test('manifest: a SECOND native entry is rejected', () => {
+  assert.throws(() => validateManifest(withTokens([
+    nativeEntry(),
+    { tokenIndex: 0, symbol: 'ETH2', name: 'Ether Two', decimals: 18, address: null, native: true },
+  ])), (e) => e instanceof TokenManifestError);
+});
+
+test('manifest: tokenIndex 0 declared as an ERC-20 is rejected (no label on the ETH index)', () => {
+  assert.throws(() => validateManifest(withTokens([
+    { tokenIndex: 0, symbol: 'USDC', name: 'USD Coin', decimals: 6, address: USDC },
+  ])), (e) => e instanceof TokenManifestError && /MUST be declared native/.test(e.message));
+});
+
+test('manifest: native entry carrying an address is rejected', () => {
+  assert.throws(() => validateManifest(withTokens([
+    { tokenIndex: 0, symbol: 'ETH', name: 'Ether', decimals: 18, address: USDC, native: true },
+  ])), (e) => e instanceof TokenManifestError && /address: null/.test(e.message));
+});
+
+test('manifest: bad addresses are rejected (short, non-hex, missing, ZERO)', () => {
+  const bad = ['0x1234', 'not-an-address', USDC.slice(0, -1), undefined, null, ZERO];
+  for (const address of bad) {
+    assert.throws(() => validateManifest(withTokens([
+      nativeEntry(), { tokenIndex: 5, symbol: 'USDC', name: 'USD Coin', decimals: 6, address },
+    ])), (e) => e instanceof TokenManifestError, `expected rejection for address=${String(address)}`);
+  }
+});
+
+test('manifest: the ZERO address specifically — it would spuriously match an UNREGISTERED index', () => {
+  assert.throws(() => validateManifest(withTokens([
+    nativeEntry(), { tokenIndex: 5, symbol: 'USDC', name: 'USD Coin', decimals: 6, address: ZERO },
+  ])), (e) => /must not be the zero address/.test(e.message));
+});
+
+test('manifest: duplicate ERC-20 address is rejected (two labels for one token)', () => {
+  assert.throws(() => validateManifest(withTokens([
+    nativeEntry(),
+    { tokenIndex: 5, symbol: 'USDC', name: 'USD Coin', decimals: 6, address: USDC },
+    { tokenIndex: 6, symbol: 'USDCX', name: 'USD Coin X', decimals: 6, address: USDC.toLowerCase() },
+  ])), (e) => /duplicate address/.test(e.message));
+});
+
+test('manifest: bad decimals are rejected (negative, > 36, non-integer, missing)', () => {
+  for (const decimals of [-1, 37, 6.5, '6', undefined, NaN]) {
+    assert.throws(() => validateManifest(withTokens([
+      nativeEntry(), { tokenIndex: 5, symbol: 'USDC', name: 'USD Coin', decimals, address: USDC },
+    ])), (e) => e instanceof TokenManifestError, `expected rejection for decimals=${String(decimals)}`);
+  }
+});
+
+test('manifest: control chars / spoofing chars in symbol or name reject the FILE', () => {
+  const hostileSymbols = [
+    'US DC',        // NUL
+    'USD\nC',            // newline
+    'US‮DC',        // RTL override (visual spoof)
+    'USDС',              // Cyrillic С homoglyph (non-ASCII)
+    '<img src=x>',       // HTML injection into the wallet UI
+    '   ',               // whitespace-only
+    '',                  // empty
+    'ABCDEFGHIJKLMNOPQ', // 17 chars > cap
+  ];
+  for (const symbol of hostileSymbols) {
+    assert.throws(() => validateManifest(withTokens([
+      nativeEntry(), { tokenIndex: 5, symbol, name: 'USD Coin', decimals: 6, address: USDC },
+    ])), (e) => e instanceof TokenManifestError, `expected rejection for symbol=${JSON.stringify(symbol)}`);
+  }
+  for (const name of ['USDCoin', ' USD Coin', 'USD Coin ', '<script>x</script>', '"quoted"', 'a'.repeat(65)]) {
+    assert.throws(() => validateManifest(withTokens([
+      nativeEntry(), { tokenIndex: 5, symbol: 'USDC', name, decimals: 6, address: USDC },
+    ])), (e) => e instanceof TokenManifestError, `expected rejection for name=${JSON.stringify(name)}`);
+  }
+});
+
+test('manifest: duplicate symbol (case-insensitive) is rejected — the spoof surface', () => {
+  assert.throws(() => validateManifest(withTokens([
+    nativeEntry(),
+    { tokenIndex: 5, symbol: 'USDC', name: 'USD Coin', decimals: 6, address: USDC },
+    { tokenIndex: 6, symbol: 'usdc', name: 'Not USD Coin', decimals: 6, address: OTHER },
+  ])), (e) => /duplicate symbol/.test(e.message));
+});
+
+test('manifest: unknown keys are rejected (a typo must never silently default)', () => {
+  assert.throws(() => validateManifest(manifest({ extra: 1 })), (e) => /unknown root key/.test(e.message));
+  assert.throws(() => validateManifest(withTokens([
+    nativeEntry(), { tokenIndex: 5, symbol: 'USDC', name: 'USD Coin', decimal: 6, address: USDC },
+  ])), (e) => /unknown key "decimal"/.test(e.message));
+});
+
+test('manifest: structural nonsense is rejected (not an object, no tokens, empty, huge, bad rollup)', () => {
+  assert.throws(() => validateManifest(null), TokenManifestError);
+  assert.throws(() => validateManifest([]), TokenManifestError);
+  assert.throws(() => validateManifest(manifest({ tokens: undefined })), TokenManifestError);
+  assert.throws(() => validateManifest(manifest({ tokens: [] })), TokenManifestError);
+  assert.throws(() => validateManifest(manifest({ rollup: ZERO })), TokenManifestError);
+  assert.throws(() => validateManifest(manifest({ rollup: 'nope' })), TokenManifestError);
+  assert.throws(() => validateManifest(manifest({ chainId: 0 })), TokenManifestError);
+  assert.throws(() => validateManifest(manifest({ chainId: '1' })), TokenManifestError);
+  const many = [nativeEntry()];
+  for (let i = 1; i <= 64; i++) many.push({ tokenIndex: i, symbol: `T${i}`, name: `Token ${i}`, decimals: 6, address: '0x' + String(i).padStart(40, '0') });
+  assert.throws(() => validateManifest(withTokens(many)), (e) => /exceeds 64/.test(e.message));
+});
+
+test('manifest: tokenIndex out of u32 range is rejected', () => {
+  for (const tokenIndex of [-1, 4294967296, 1.5, '5']) {
+    assert.throws(() => validateManifest(withTokens([
+      nativeEntry(), { tokenIndex, symbol: 'USDC', name: 'USD Coin', decimals: 6, address: USDC },
+    ])), TokenManifestError, `expected rejection for tokenIndex=${String(tokenIndex)}`);
+  }
+});
+
+test('manifest: unreadable / non-JSON files are rejected as TokenManifestError (not raw fs errors)', () => {
+  assert.throws(() => loadManifest(path.join(os.tmpdir(), 'definitely-missing-tokens.json')),
+    (e) => e instanceof TokenManifestError && /cannot read/.test(e.message));
+  const f = path.join(os.tmpdir(), `tokens-bad-${Date.now()}.json`);
+  try {
+    fs.writeFileSync(f, '{ not json');
+    assert.throws(() => loadManifest(f), (e) => e instanceof TokenManifestError && /not valid JSON/.test(e.message));
+  } finally { fs.rmSync(f, { force: true }); }
+});
+
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+// 2. Verification policy — contradiction is fatal, absence degrades to null metadata
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+
+test('verify: on-chain address MATCHES the manifest → verified, metadata served', async () => {
+  const r = registryWith([nativeEntry(), { tokenIndex: 5, symbol: 'USDC', name: 'USD Coin', decimals: 6, address: USDC }]);
+  await r.verifyAgainstChain('http://rpc', ROLLUP, { readChainId: chainIdOk, readTokenAddress: async () => USDC.toLowerCase(), readDecimals: decimalsOk });
+  assert.deepEqual(r.metadataFor(5), { symbol: 'USDC', name: 'USD Coin', decimals: 6, address: USDC.toLowerCase(), native: false, verified: true });
+  // Native ETH is verified WITHOUT a chain read (index 0 is contract-reserved).
+  assert.deepEqual(r.metadataFor(0), { symbol: 'ETH', name: 'Ether', decimals: 18, address: null, native: true, verified: true });
+});
+
+test('verify: on-chain address MISMATCH throws (the mislabelling hazard — refuse to start)', async () => {
+  const r = registryWith([nativeEntry(), { tokenIndex: 5, symbol: 'USDC', name: 'USD Coin', decimals: 6, address: USDC }]);
+  await assert.rejects(
+    () => r.verifyAgainstChain('http://rpc', ROLLUP, { readChainId: chainIdOk, readTokenAddress: async () => OTHER }),
+    (e) => e instanceof TokenChainMismatchError && /set-once registry says/.test(e.message)
+  );
+});
+
+test('verify: UNREGISTERED index (on-chain zero) → unverified + warn, NOT fatal', async () => {
+  const warns = [];
+  const r = registryWith([nativeEntry(), { tokenIndex: 5, symbol: 'USDC', name: 'USD Coin', decimals: 6, address: USDC }]);
+  await r.verifyAgainstChain('http://rpc', ROLLUP, {
+    readChainId: chainIdOk,
+    readTokenAddress: async () => ZERO,
+    logger: { info() {}, error() {}, warn: (o) => warns.push(o) },
+  });
+  assert.equal(r.byIndex(5).verified, false);
+  assert.ok(warns.some((w) => w.event === 'TOKEN_UNREGISTERED'));
+  const md = r.metadataFor(5);
+  assert.equal(md.symbol, null); assert.equal(md.name, null); assert.equal(md.decimals, null);
+  assert.equal(md.address, USDC.toLowerCase(), 'address may still be reported; the NAME may not');
+  assert.equal(md.verified, false);
+});
+
+test('verify: RPC read failure → unverified + warn, NOT fatal', async () => {
+  const warns = [];
+  const r = registryWith([nativeEntry(), { tokenIndex: 5, symbol: 'USDC', name: 'USD Coin', decimals: 6, address: USDC }]);
+  await r.verifyAgainstChain('http://rpc', ROLLUP, {
+    readChainId: chainIdOk,
+    readTokenAddress: async () => { throw new Error('ECONNREFUSED'); },
+    logger: { info() {}, error() {}, warn: (o) => warns.push(o) },
+  });
+  assert.equal(r.byIndex(5).verified, false);
+  assert.ok(warns.some((w) => w.event === 'TOKEN_VERIFY_READ_FAILED'));
+  assert.equal(r.metadataFor(5).symbol, null);
+});
+
+test('verify: chainId read failure → everything unverified + warn, NOT fatal', async () => {
+  const warns = [];
+  const r = registryWith([nativeEntry(), { tokenIndex: 5, symbol: 'USDC', name: 'USD Coin', decimals: 6, address: USDC }]);
+  await r.verifyAgainstChain('http://rpc', ROLLUP, {
+    readChainId: async () => { throw new Error('RPC down'); },
+    readTokenAddress: async () => USDC,
+    logger: { info() {}, error() {}, warn: (o) => warns.push(o) },
+  });
+  assert.ok(warns.some((w) => w.event === 'TOKEN_CHAINID_READ_FAILED'));
+  assert.equal(r.metadataFor(0).symbol, null, 'even native metadata is withheld when the chain is unknown');
+  assert.equal(r.metadataFor(5).symbol, null);
+});
+
+test('verify: WRONG chain id throws (a manifest about a different network)', async () => {
+  const r = registryWith([nativeEntry()]);
+  await assert.rejects(
+    () => r.verifyAgainstChain('http://rpc', ROLLUP, { readChainId: async () => 1, readTokenAddress: async () => USDC }),
+    (e) => e instanceof TokenChainMismatchError && /chainId 11155111 != node chain 1/.test(e.message)
+  );
+});
+
+// ── decimals read-back (a wrong decimal place is a user-funds attack, and the ADDRESS
+//    verification constrains it not at all) ────────────────────────────────────────────────────
+
+test('verify: decimals() MATCHES the manifest → decimals served', async () => {
+  const r = registryWith([nativeEntry(), { tokenIndex: 5, symbol: 'USDC', name: 'USD Coin', decimals: 6, address: USDC }]);
+  await r.verifyAgainstChain('http://rpc', ROLLUP, {
+    readChainId: chainIdOk, readTokenAddress: async () => USDC, readDecimals: async () => 6,
+  });
+  assert.equal(r.byIndex(5).decimalsVerified, true);
+  assert.equal(r.metadataFor(5).decimals, 6);
+  assert.match(r.byIndex(5).verifyNote, /decimals read back equal/);
+});
+
+test('verify: decimals() MISMATCH throws, exactly like an address mismatch', async () => {
+  // The failure this gate exists to stop: a manifest claiming 18 for a 6-decimal token renders
+  // every balance 10^12 times too small (or too large the other way round). Verifying the ADDRESS
+  // does not catch it, so the value itself must be read back.
+  for (const onChain of [18, 0, 8]) {
+    const r = registryWith([nativeEntry(), { tokenIndex: 5, symbol: 'USDC', name: 'USD Coin', decimals: 6, address: USDC }]);
+    await assert.rejects(
+      () => r.verifyAgainstChain('http://rpc', ROLLUP, {
+        readChainId: chainIdOk, readTokenAddress: async () => USDC, readDecimals: async () => onChain,
+      }),
+      (e) => e instanceof TokenChainMismatchError && /has 6 decimals but the token reports/.test(e.message),
+      `on-chain decimals ${onChain} must be fatal`
+    );
+  }
+});
+
+test('verify: a token with NO readable decimals() keeps its address verification but serves decimals: null', async () => {
+  // Absence of information must never become a GUESS: rendering an unknown token as 18 decimals
+  // is the same misrender the mismatch case throws over. The wallet falls back to raw base units.
+  for (const [label, reader] of [
+    ['reverts', async () => { throw new Error('execution reverted'); }],
+    ['no decimals() (empty return)', async () => null],
+  ]) {
+    const warns = [];
+    const r = registryWith([nativeEntry(), { tokenIndex: 5, symbol: 'USDC', name: 'USD Coin', decimals: 6, address: USDC }]);
+    await r.verifyAgainstChain('http://rpc', ROLLUP, {
+      readChainId: chainIdOk, readTokenAddress: async () => USDC, readDecimals: reader,
+      logger: { info() {}, error() {}, warn: (o) => warns.push(o) },
+    });
+    const md = r.metadataFor(5);
+    assert.equal(md.verified, true, `${label}: the ADDRESS verification stands`);
+    assert.equal(md.symbol, 'USDC', `${label}: the symbol is still attested by the address`);
+    assert.equal(md.decimals, null, `${label}: decimals must be null, NEVER a guessed 18`);
+    assert.equal(r.byIndex(5).decimalsVerified, false);
+    assert.ok(warns.some((w) => w.event === 'TOKEN_DECIMALS_READ_FAILED' || w.event === 'TOKEN_DECIMALS_ABSENT'), `${label}: must warn`);
+  }
+});
+
+test('verify: native index 0 is decimals-exempt (no contract to ask)', async () => {
+  const r = registryWith([nativeEntry()]);
+  await r.verifyAgainstChain('http://rpc', ROLLUP, {
+    readChainId: chainIdOk,
+    readTokenAddress: async () => { throw new Error('must not be called for native'); },
+    readDecimals: async () => { throw new Error('must not be called for native'); },
+  });
+  assert.equal(r.metadataFor(0).decimals, 18, "ETH's 18 is protocol-fixed, not an operator claim");
+  assert.equal(r.byIndex(0).decimalsVerified, true);
+});
+
+test('decodeDecimalsWord: only a clean uint8-in-a-word is information; everything else is null', () => {
+  assert.equal(decodeDecimalsWord('0x' + (6).toString(16).padStart(64, '0')), 6);
+  assert.equal(decodeDecimalsWord('0x' + (0).toString(16).padStart(64, '0')), 0);
+  assert.equal(decodeDecimalsWord('0x' + (255).toString(16).padStart(64, '0')), 255);
+  for (const bad of [
+    '0x',                                            // empty return: no decimals() at all
+    '0x06',                                          // short return
+    '0x' + '0'.repeat(63),                           // odd length
+    '0x' + 'zz'.repeat(32),                          // not hex
+    '0x' + (256).toString(16).padStart(64, '0'),     // out of uint8 range: not an ERC-20 decimals
+    '0x' + 'f'.repeat(64),                           // garbage word
+    null, undefined,
+  ]) {
+    assert.equal(decodeDecimalsWord(bad), null, `decodeDecimalsWord(${String(bad)}) must be null`);
+  }
+});
+
+test('markAllUnverified also withdraws decimals verification', async () => {
+  const r = registryWith([nativeEntry(), { tokenIndex: 5, symbol: 'USDC', name: 'USD Coin', decimals: 6, address: USDC }]);
+  await r.verifyAgainstChain('http://rpc', ROLLUP, { readChainId: chainIdOk, readTokenAddress: async () => USDC, readDecimals: decimalsOk });
+  r.markAllUnverified('kill switch');
+  assert.equal(r.byIndex(5).decimalsVerified, false);
+  assert.equal(r.metadataFor(5).decimals, null);
+});
+
+test('verify: WRONG rollup throws before any read (a manifest about a different deployment)', async () => {
+  const r = registryWith([nativeEntry()]);
+  await assert.rejects(
+    () => r.verifyAgainstChain('http://rpc', OTHER, { readChainId: chainIdOk, readTokenAddress: async () => { throw new Error('must not be called'); } }),
+    (e) => e instanceof TokenChainMismatchError && /but this node talks to/.test(e.message)
+  );
+  await assert.rejects(() => r.verifyAgainstChain('http://rpc', 'garbage', {}), TokenChainMismatchError);
+});
+
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+// 3. Observed TokenRegistered — observational, contradiction-withdrawing, never throwing
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+
+test('observe: a registration MATCHING an unverified entry promotes it to verified', async () => {
+  const r = registryWith([nativeEntry(), { tokenIndex: 5, symbol: 'USDC', name: 'USD Coin', decimals: 6, address: USDC }]);
+  await r.verifyAgainstChain('http://rpc', ROLLUP, { readChainId: chainIdOk, readTokenAddress: async () => ZERO });
+  assert.equal(r.metadataFor(5).symbol, null);
+  assert.equal(r.observeTokenRegistered({ tokenIndex: 5, token: USDC, rollupAddress: ROLLUP }), 'confirmed');
+  assert.equal(r.metadataFor(5).symbol, 'USDC');
+  // The event attests the ADDRESS only. This path cannot make an RPC call, so the decimal place
+  // stays unattested and must still be served as null until the next verifyAgainstChain pass.
+  assert.equal(r.byIndex(5).decimalsVerified, false);
+  assert.equal(r.metadataFor(5).decimals, null);
+});
+
+test('observe: a registration CONTRADICTING a verified entry logs at ERROR and withdraws metadata', async () => {
+  const errs = [];
+  const r = registryWith([nativeEntry(), { tokenIndex: 5, symbol: 'USDC', name: 'USD Coin', decimals: 6, address: USDC }]);
+  await r.verifyAgainstChain('http://rpc', ROLLUP, { readChainId: chainIdOk, readTokenAddress: async () => USDC, readDecimals: decimalsOk });
+  assert.equal(r.metadataFor(5).symbol, 'USDC');
+  const verdict = r.observeTokenRegistered({ tokenIndex: 5, token: OTHER, rollupAddress: ROLLUP },
+    { logger: { info() {}, warn() {}, error: (o) => errs.push(o) } });
+  assert.equal(verdict, 'contradiction');
+  assert.equal(errs.length, 1);
+  assert.equal(errs[0].event, 'TOKEN_REGISTRY_CONTRADICTION');
+  assert.equal(errs[0].wasVerified, true);
+  assert.equal(r.metadataFor(5).symbol, null, 'a contradicted label is never shown again');
+});
+
+test('observe: an event from ANOTHER rollup is ignored (each channel has its own IntmaxRollup)', async () => {
+  const r = registryWith([nativeEntry(), { tokenIndex: 5, symbol: 'USDC', name: 'USD Coin', decimals: 6, address: USDC }]);
+  await r.verifyAgainstChain('http://rpc', ROLLUP, { readChainId: chainIdOk, readTokenAddress: async () => USDC, readDecimals: decimalsOk });
+  assert.equal(r.observeTokenRegistered({ tokenIndex: 5, token: OTHER, rollupAddress: OTHER }), 'ignored');
+  assert.equal(r.metadataFor(5).symbol, 'USDC', 'a foreign rollup cannot poison our registry');
+});
+
+test('observe: unknown index / malformed args are ignored and NEVER throw (cursor safety)', () => {
+  const r = registryWith([nativeEntry()]);
+  assert.equal(r.observeTokenRegistered({ tokenIndex: 9, token: USDC, rollupAddress: ROLLUP }), 'unknown');
+  assert.equal(r.observeTokenRegistered({}), 'ignored');
+  assert.equal(r.observeTokenRegistered({ tokenIndex: 'x', token: 'y' }), 'ignored');
+  assert.equal(r.observeTokenRegistered(null), 'ignored');
+  // TokenRegistered can never be emitted for index 0 (the contract reverts) — if it is, our world
+  // model is wrong and the native label must be withdrawn rather than trusted.
+  assert.equal(r.observeTokenRegistered({ tokenIndex: 0, token: USDC, rollupAddress: ROLLUP }), 'contradiction');
+});
+
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+// 4. Metadata gating + calldata encoding
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+
+test('metadataFor: an index with NO manifest entry never invents metadata', () => {
+  const r = registryWith([nativeEntry()]);
+  assert.deepEqual(r.metadataFor(42), { symbol: null, name: null, decimals: null, address: null, native: false, verified: false });
+  // native flag is index-derived, never manifest-derived
+  assert.equal(r.metadataFor(0).native, true);
+});
+
+test('metadataFor: nothing is served before verifyAgainstChain runs (fail-safe default)', () => {
+  const r = registryWith([nativeEntry(), { tokenIndex: 5, symbol: 'USDC', name: 'USD Coin', decimals: 6, address: USDC }]);
+  assert.equal(r.metadataFor(0).symbol, null);
+  assert.equal(r.metadataFor(5).symbol, null);
+});
+
+test('markAllUnverified is a working kill switch', async () => {
+  const r = registryWith([nativeEntry(), { tokenIndex: 5, symbol: 'USDC', name: 'USD Coin', decimals: 6, address: USDC }]);
+  await r.verifyAgainstChain('http://rpc', ROLLUP, { readChainId: chainIdOk, readTokenAddress: async () => USDC, readDecimals: decimalsOk });
+  assert.equal(r.metadataFor(5).symbol, 'USDC');
+  r.markAllUnverified('poisoned');
+  assert.equal(r.metadataFor(5).symbol, null);
+  assert.equal(r.metadataFor(0).symbol, null);
+});
+
+test('selector: the raw eth_call selector matches the ethers ABI fragment (readers cannot drift)', () => {
+  const { ethers } = require('ethers');
+  assert.equal(ethers.id(TOKEN_ADDRESS_OF_SIG).slice(0, 10), TOKEN_ADDRESS_OF_SELECTOR);
+  // …and the chain-watcher fragment is the same function.
+  const iface = new ethers.Interface(ROLLUP_GETTER_ABI);
+  assert.equal(iface.getFunction('tokenAddressOf').selector, TOKEN_ADDRESS_OF_SELECTOR);
+  // calldata equivalence for a concrete index
+  assert.equal(encodeTokenAddressOf(5), iface.encodeFunctionData('tokenAddressOf', [5]));
+
+  // Same drift guard for the token-side decimals() read-back: the raw selector the relay's
+  // dependency-free reader sends MUST equal what the ethers fragment would encode.
+  assert.equal(ethers.id(DECIMALS_SIG).slice(0, 10), DECIMALS_SELECTOR);
+  const erc20 = new ethers.Interface(ERC20_DECIMALS_ABI);
+  assert.equal(erc20.getFunction('decimals').selector, DECIMALS_SELECTOR);
+  assert.equal(DECIMALS_SELECTOR, erc20.encodeFunctionData('decimals', []));
+});
+
+test('decodeAddressWord rejects short/dirty returns (a garbage read must not become an address)', () => {
+  assert.equal(decodeAddressWord('0x' + '00'.repeat(12) + USDC.slice(2)), USDC.toLowerCase());
+  assert.throws(() => decodeAddressWord('0x'), /32-byte return/);
+  assert.throws(() => decodeAddressWord('0x' + 'ff'.repeat(32)), /not a clean address/);
+  assert.throws(() => decodeAddressWord(null), /32-byte return/);
+});
