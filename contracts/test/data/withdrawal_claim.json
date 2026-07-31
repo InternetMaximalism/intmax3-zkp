@@ -1,11 +1,11 @@
 {
   "channel_id": 3,
-  "close_intent_digest": "0xcf47580471ed8988d5375a0cbfe3c03d55890222182cc39801c05c69a8aa19d5",
-  "final_balance_state_h1": "0xeb5283d28b3903b9d1cf0184788e968d9442b5d04b6556955c3552f9fbaf1ef4",
+  "close_intent_digest": "0xa6f6a954bbd26333556e28242a298dc1e36ccbd31b3a34389ecc6c0462f9e541",
+  "final_balance_state_h1": "0x5feee25a9b173bb11f3b9a0fe39b58a034525ba34e7965cf727f7055ca5ba467",
   "member_pk_g": "0x0000000a0000000b0000000c0000000d0000000e0000000f0000001000000011",
   "recipient": "0x0000000100000002000000030000000400000005",
-  "user_amount_digest": "0x3dd2b187709af7acf13e0726b67e87568361d6857a3b0b132798a262f53f9cb1",
-  "withdrawal_nullifier": "0x544bc8f1bb3d33b1ab48f186f4ef8004a371a77e0bb8b1441c6fe71d1e6dc3d3",
+  "user_amount_digest": "0x12ef07456cff86a2b9af94e546e053cff75ec9447d5623dc0f88584d41ed48fc",
+  "withdrawal_nullifier": "0xf5346f8704457182ef250aa4aec294ceb9308a30e1c67a05227a2127a271ee14",
   "amount": 77,
   "token_slot": 0,
   "token_index": 0
