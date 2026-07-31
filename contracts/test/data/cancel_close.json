@@ -1,9 +1,9 @@
 {
   "channel_id": 3,
-  "close_intent_digest": "0xf1c0d97ed1c3aeef06a00cd608ff4a3561f54abcf3b0b7a342dc91f9d5f983d3",
+  "close_intent_digest": "0xa43925e234ec101893916b35495442ab86ddfe356fd43b78c846208f8a7dc9f9",
   "member_set_commitment": "0x32c350ef5c1b35afcd96920ca7618afe84616399e77080b3a90f8083943a4fa9",
   "revived_state_version": 9,
-  "revived_channel_state_digest": "0x4ef82a55d07555971cdd414e61715b14dcd8a27dd6825cc7d73fa453eb4a31bd",
+  "revived_channel_state_digest": "0xdf296c60e531cfc161a1713a78c4a6fe7ab276fb298844a79b1b8623640db93a",
   "member_pk_gs": [
     "0xa801efdf95b35b729ea508ad7d173a4369560d79981d7bf8ac7616e9b3f36b65",
     "0xf0b9ecd6a20c8b070750c1b05dedfdcb03243792f323ea7f7d56be5536c31755",

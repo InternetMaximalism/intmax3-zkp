@@ -89,6 +89,7 @@ priv
 # Browser-wallet e2e runtime scratch (JSON handoffs + CLI state)
 wallet-e2e-work/
 wallet-live-work/
+wallet-live-work.*/
 cli_state.json
 
 # =============================================================================

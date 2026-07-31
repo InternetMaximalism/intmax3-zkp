@@ -25,6 +25,17 @@ async function init(threads) {
   post('ready', { threads: n });
 }
 
+// LOCAL token slot (multitoken §N): the wasm arg is `Option<u8>`, so `undefined`/omitted means the
+// GENESIS position 0 — that is the back-compat default every pre-multitoken caller relies on.
+// SECURITY: validate here rather than letting a non-integer reach wasm-bindgen. The generated glue
+// writes the value as a u8, which would TRUNCATE 1.9 to 1 — i.e. silently debit a different token
+// position than the caller named. Fail closed instead.
+function tokenSlotArg(v) {
+  if (v === undefined || v === null) return undefined;
+  if (!Number.isInteger(v) || v < 0 || v > 255) throw new Error('invalid token slot: ' + String(v));
+  return v;
+}
+
 // Map worker actions to wasm entry points. Each returns a JSON string (or void).
 const CALLS = {
   keygen: () => wasm.wallet_keygen(),
@@ -35,10 +46,10 @@ const CALLS = {
   signState: (a) => wasm.wallet_sign_state(a.slot, a.stateJson),
   importChannel: (a) => wasm.wallet_import_channel(a.snapshotJson),
   balance: () => wasm.wallet_balance(),
-  send: (a) => wasm.wallet_send(a.recipientSlot, BigInt(a.amount)),
+  send: (a) => wasm.wallet_send(a.recipientSlot, BigInt(a.amount), tokenSlotArg(a.tokenSlot)),
   sendInterChannel: (a) => wasm.wallet_send_inter_channel(a.toChannel, a.toSlot, BigInt(a.amount), a.destRecipientJson),
   burnSend: (a) => wasm.wallet_burn_send(BigInt(a.amount), a.withdrawalAddress),
-  refresh: () => wasm.wallet_refresh(),
+  refresh: (a) => wasm.wallet_refresh(tokenSlotArg(a.tokenSlot)),
   cosign: (a) => wasm.wallet_cosign(a.payloadJson),
   finalize: (a) => wasm.wallet_finalize(a.stateJson),
 };

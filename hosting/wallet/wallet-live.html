@@ -126,9 +126,17 @@
 
   <section class="panel hidden" id="panelSend">
     <h2>Send</h2>
+    <!-- Token selector. Hidden (and the panel then looks exactly as it always did) unless this
+         channel has more than one SENDABLE position — see sendableTokens(): a position is sendable
+         only when its token metadata is chain-verified, because an unverified token has null
+         decimals and the amount typed below could not be denominated safely. -->
+    <div class="row hidden" id="sendTokenRow" style="margin-bottom:6px">
+      <span class="hint" style="flex:0 0 46px;align-self:center">token</span>
+      <select id="sendToken" style="flex:1"></select>
+    </div>
     <div class="row" style="margin-bottom:3px">
       <span class="hint">to (address, e.g. 7-0)</span>
-      <span class="hint">amount (ETH)</span>
+      <span class="hint" id="sendAmountLabel">amount (ETH)</span>
     </div>
     <div class="row">
       <input id="toAddr" type="text" value="7-0" placeholder="channel-slot" />
@@ -313,9 +321,10 @@ function log(m, cls='') {
 // TESTABLE-BEGIN: deposit-ui
 //
 // Everything between the TESTABLE-BEGIN / TESTABLE-END markers is PURE: no DOM, no network, no
-// module-scope mutable state. `node/test/deposit-ui.test.js` EXTRACTS THIS EXACT REGION out of
-// this file and evaluates it in a `node:vm` sandbox, so the unit tests run against the source that
-// actually ships rather than a copy that can drift.
+// module-scope mutable state. `node/test/deposit-ui.test.js` and `node/test/send-ui.test.js`
+// EXTRACT THIS EXACT REGION out of this file and evaluate it in a `node:vm` sandbox, so the unit
+// tests run against the source that actually ships rather than a copy that can drift. (The marker
+// name is historical — the region now holds the pure logic of both the deposit and the send path.)
 //
 // DEVIATION (deliberate): the natural alternative is a separate ES module imported by this page,
 // but `wallet-live.html` is scp'd to the EC2 relay as a SINGLE file (`doc/docs/deploy-runbook.md`)
@@ -432,6 +441,20 @@ function parseDepositAmount(amountStr, decimals) {
   return base;
 }
 
+/**
+ * Parse + range-check an in-channel SEND amount for one token. Same contract as
+ * parseDepositAmount (in-channel balances are u64 base units too), and the same refusal
+ * behaviour: an amount more precise than the token can represent is REFUSED, never truncated,
+ * because a truncated amount would sign for a different number than the one on screen.
+ */
+function parseSendAmount(amountStr, decimals) {
+  const base = toUnits(amountStr, decimals);
+  const b = BigInt(base);
+  if (b <= 0n) throw new Error('enter a positive amount to send');
+  if (b > MAX_U64) throw new Error('amount exceeds the u64 in-channel limit for this token');
+  return base;
+}
+
 // ---- Depositable token set -------------------------------------------------------------------
 // SECURITY (this is the gate the whole ERC-20 deposit path hangs off):
 //   * tokenIndex 0 is the native asset BY PROTOCOL CONSTRUCTION (the contract pays it from
@@ -481,6 +504,79 @@ function depositableTokens(payload) {
     });
   }
   return out;
+}
+
+// ---- Sendable token set (SEND panel) ----------------------------------------------------------
+// SECURITY: the SEND selector is gated by `depositableTokens()` — the SAME chain-verification gate
+// the deposit selector uses, and for the SAME reason: an unverified entry carries `decimals: null`,
+// so an amount typed into the box cannot be denominated at all. Guessing 18 dp for a 6-dp token is
+// a 10^12 error, and echoing an unverified symbol lets a worthless token masquerade as a valuable
+// one. A balance held in an unverified position is therefore NOT offered here — the raw, unscaled
+// `#index` row in the balance list stands as the disclosure that it exists. tokenIndex 0 is the
+// native asset by protocol construction (18 dp, not a metadata claim) and stays selectable.
+//
+// The LOCAL token slot comes from the wallet's OWN balance report (`positions`, decrypted out of
+// the cosigner-signed snapshot), NEVER from the relay's token list: the slot is precisely what
+// `wallet_send` debits, so trusting a relay-supplied slot would let a mislabelled list turn "send
+// ITX" into a debit of the ETH position. Metadata (symbol/decimals) is decoration; the (slot,
+// index) pair is authority. A verified token with no active position in this channel has nothing
+// to send and is left out.
+function sendableTokens(tokenListPayload, positions) {
+  const meta = new Map();
+  for (const t of depositableTokens(tokenListPayload)) meta.set(t.tokenIndex, t);
+  const rows = Array.isArray(positions) ? positions : [];
+  const out = [];
+  const seenSlot = new Set();
+  for (const p of rows) {
+    if (!p || typeof p !== 'object') continue;
+    if (!Number.isInteger(p.tokenSlot) || p.tokenSlot < 0 || p.tokenSlot > 255) continue;
+    if (!Number.isInteger(p.tokenIndex) || p.tokenIndex < 0) continue;
+    if (seenSlot.has(p.tokenSlot)) continue;
+    const m = meta.get(p.tokenIndex);
+    if (!m) continue;                                  // unknown / unverified ⇒ not denominable
+    if (!Number.isInteger(m.decimals)) continue;       // belt and braces: the gate guarantees this
+    seenSlot.add(p.tokenSlot);
+    out.push({
+      tokenSlot: p.tokenSlot,
+      tokenIndex: p.tokenIndex,
+      label: m.label,
+      decimals: m.decimals,
+      native: m.native === true,
+    });
+  }
+  if (out.length === 0) {
+    // Fallback = EXACTLY the pre-multitoken behaviour (send the genesis position as 18-dp ETH),
+    // and it is not a metadata guess: it applies only when the report has no per-token view at all
+    // (older wasm build) or when the genesis position IS the native token. A non-native genesis
+    // position without verified metadata falls through to an EMPTY list — an unusable Send button
+    // is better than one that signs an amount scaled by assumed decimals.
+    const genesis = rows.find((p) => p && p.tokenSlot === 0);
+    if (rows.length === 0 || (genesis && genesis.tokenIndex === NATIVE_TOKEN_INDEX)) {
+      return [{ tokenSlot: 0, tokenIndex: NATIVE_TOKEN_INDEX, label: 'ETH', decimals: TOKEN_DECIMALS, native: true }];
+    }
+  }
+  return out;
+}
+
+/**
+ * Is the wallet's single held send-witness the one that authorizes spending `tokenSlot`?
+ *
+ * SECURITY (mirrors `witnessBacks` in node/delegate/branches/owntx.js — §N, TM-13; keep the two in
+ * step): sendability is per (member, TOKEN). The wallet holds at most ONE send witness, for the
+ * position named by `witnessTokenSlot`, and the report's `canSend` refers to THAT position only. A
+ * genesis-token witness must never be read as authorization to spend token position 1 — the
+ * mandatory pre-send refresh would be skipped and `wallet_send` would refuse outright ("held
+ * balance witness is for token position X, not Y"). Missing, malformed or unknown state counts as
+ * NOT sendable: an unnecessary refresh costs one round trip, an unauthorised send must be
+ * impossible.
+ */
+function witnessBacksTokenSlot(report, tokenSlot) {
+  if (!report || typeof report !== 'object') return false;
+  if (report.canSend !== true) return false;
+  if (!Number.isInteger(tokenSlot) || tokenSlot < 0) return false;
+  const w = report.witnessTokenSlot;
+  if (!Number.isInteger(w)) return false;   // null/undefined (no witness) or a malformed value
+  return w === tokenSlot;
 }
 
 // ---- ABI encoding ----------------------------------------------------------------------------
@@ -1152,6 +1248,9 @@ function showBalance(r) {
   }
 
   renderTokenList(r, positions);
+  // Keep the SEND selector in step with what this wallet actually holds (the local token slot it
+  // offers is read from THIS report, not from the relay's token list).
+  renderSendTokens(r);
 
   const addr = formatAddr(myChannel ?? activeCh, r.slot);
   $('myAddress').textContent = addr;
@@ -1557,25 +1656,32 @@ $('btnClear').onclick = () => {
 };
 
 // ---- SEND ----------------------------------------------------------------------------------
-async function attemptSend(to, amt) {
+// SECURITY: `token` MUST come from selectedSendToken() (i.e. from sendableTokens()), and
+// `amountBase` MUST already be denominated with THAT token's verified decimals.
+async function attemptSend(to, amountBase, token) {
   const headSnap = await api('/api/snapshot', null, 'GET'); setChannelFrom(headSnap);
   let rr = JSON.parse(await call('importChannel', { snapshotJson: headSnap }));
   mySlot = rr.slot; showBalance(rr);
-  if (!rr.canSend) {
-    log('  refresh needed before sending...');
-    sendPhase = 'Proving';
+  // Sendability is per (member, TOKEN): the one held witness backs a single position. If it is not
+  // the position being spent, refresh AT that position first — and if the refresh does not produce
+  // a witness for it, STOP. Never fall through to a send on an unverified witness.
+  if (!witnessBacksTokenSlot(rr, token.tokenSlot)) {
+    log('  witness does not back ' + token.label + ' (position ' + token.tokenSlot + ') -- refreshing that token first...');
+    sendPhase = 'Refreshing ' + token.label;
     log('  re-encrypting balance (秘匿化)...', 'zk');
-    const refreshPayload = await call('refresh');
+    const refreshPayload = await call('refresh', { tokenSlot: token.tokenSlot });
     sendPhase = 'Waiting for co-sign';
     const cosigned = await api('/api/refresh-cosign', refreshPayload);
     rr = JSON.parse(await call('finalize', { stateJson: cosigned }));
     mySlot = rr.slot; showBalance(rr);
-    if (!rr.canSend) throw new Error('still cannot send after refresh');
-    log('  refreshed -- ready to send', 'ok');
+    if (!witnessBacksTokenSlot(rr, token.tokenSlot)) {
+      throw new Error('still cannot send ' + token.label + ' after refreshing token position ' + token.tokenSlot);
+    }
+    log('  refreshed ' + token.label + ' -- ready to send', 'ok');
   }
   sendPhase = 'Proving';
   log('  generating ZKP (zero-knowledge proof)...', 'zk');
-  const payload = await call('send', { recipientSlot: to, amount: toBase(amt) });
+  const payload = await call('send', { recipientSlot: to, amount: amountBase, tokenSlot: token.tokenSlot });
   log('  ZKP generated · amount encrypted (秘匿化)', 'zk');
   log('  co-signing...');
   sendPhase = 'Waiting for co-sign';
@@ -1614,19 +1720,23 @@ async function attemptSend(to, amt) {
   throw new Error('co-signed (v' + ack.stateVersion + ') but the snapshot did not catch up');
 }
 
-async function attemptInterChannelSend(toCh, to, amt) {
+// Inter-channel: NATIVE asset only for now (see the guard in the Send handler) — `amountBase` is
+// therefore 18-dp native base units, exactly as before.
+async function attemptInterChannelSend(toCh, to, amountBase) {
   const headSnap = await api('/api/snapshot', null, 'GET'); setChannelFrom(headSnap);
   let rr = JSON.parse(await call('importChannel', { snapshotJson: headSnap }));
   mySlot = rr.slot; showBalance(rr);
   log('  syncing balance witness (refresh)...');
   sendPhase = 'Proving';
   log('  re-encrypting balance (秘匿化)...', 'zk');
-  const refreshPayload = await call('refresh');
+  // Genesis position: `wallet_send_inter_channel` resolves an omitted token index to the source
+  // channel's registry[0], so the witness this refresh must produce is the one for position 0.
+  const refreshPayload = await call('refresh', { tokenSlot: 0 });
   sendPhase = 'Waiting for co-sign';
   const cosigned = await api('/api/refresh-cosign', refreshPayload);
   rr = JSON.parse(await call('finalize', { stateJson: cosigned }));
   mySlot = rr.slot; showBalance(rr);
-  if (!rr.canSend) throw new Error('could not obtain spendable balance after refresh');
+  if (!witnessBacksTokenSlot(rr, 0)) throw new Error('could not obtain spendable balance after refresh');
   const bSnapRaw = await fetch('/api/snapshot?channel=' + toCh).then(r => r.text());
   if (!bSnapRaw || bSnapRaw[0] !== '{') throw new Error('destination channel ' + toCh + ' not available');
   const bSnap = JSON.parse(bSnapRaw);
@@ -1635,7 +1745,7 @@ async function attemptInterChannelSend(toCh, to, amt) {
   const destRecipientJson = JSON.stringify({ regevPk: bMember.regevPk, pkG: bMember.pkG });
   sendPhase = 'Proving';
   log('  generating ZKP · encrypting amount for recipient (秘匿化)...', 'zk');
-  const built = JSON.parse(await call('sendInterChannel', { toChannel: toCh, toSlot: to, amount: toBase(amt), destRecipientJson }));
+  const built = JSON.parse(await call('sendInterChannel', { toChannel: toCh, toSlot: to, amount: amountBase, destRecipientJson }));
   log('  ZKP generated · transfer encrypted', 'zk');
   log('  relay co-signing debit + credit atomically...');
   sendPhase = 'Waiting for co-sign';
@@ -1649,6 +1759,54 @@ async function attemptInterChannelSend(toCh, to, amt) {
   return JSON.parse(await call('finalize', { stateJson: JSON.stringify(transfer.aHead) }));
 }
 
+// ---- SEND token selector --------------------------------------------------------------------
+// The <option> set is produced by sendableTokens() (TESTABLE region) — the same chain-verification
+// gate as the deposit selector, plus the requirement that the wallet actually holds that position
+// in its OWN decrypted report (which is where the authoritative local token slot comes from).
+let sendTokenOptions = [];
+
+function selectedSendToken() {
+  const slot = parseInt($('sendToken').value, 10);
+  if (!Number.isInteger(slot)) return null;
+  return sendTokenOptions.find((t) => t.tokenSlot === slot) || null;
+}
+
+function renderSendAmountLabel() {
+  const t = selectedSendToken();
+  $('sendAmountLabel').textContent = 'amount (' + (t ? t.label : '—') + ')';
+}
+
+function renderSendTokens(r) {
+  const sel = $('sendToken');
+  const prev = sel.value;
+  sendTokenOptions = sendableTokens(tokenListRaw, activePositions(r));
+  sel.textContent = '';
+  for (const t of sendTokenOptions) {
+    const o = document.createElement('option');
+    o.value = String(t.tokenSlot);
+    // Relay-supplied label, next to the authoritative base index and local position. textContent
+    // only — never innerHTML.
+    o.textContent = t.label + '  ·  #' + t.tokenIndex + ' · pos ' + t.tokenSlot;
+    sel.appendChild(o);
+  }
+  if (prev && sendTokenOptions.some((t) => String(t.tokenSlot) === prev)) sel.value = prev;
+  // A plain single-token channel keeps the original Send panel, with no selector at all.
+  $('sendTokenRow').classList.toggle('hidden', sendTokenOptions.length <= 1);
+  renderSendAmountLabel();
+}
+
+$('sendToken').onchange = renderSendAmountLabel;
+
+/** New balance of the position that was just spent, formatted with ITS decimals. */
+function sentTokenBalanceLabel(r, token) {
+  const p = activePositions(r).find((x) => x.tokenSlot === token.tokenSlot);
+  if (p) return fmtUnits(p.balance, token.decimals) + ' ' + token.label;
+  // No per-token view (older wasm build): `r.balance` is the GENESIS scalar, so it may only be
+  // used to describe the genesis position — never relabelled as another token.
+  if (token.tokenSlot === 0) return fmtUnits(r.balance, token.decimals) + ' ' + token.label;
+  return '(position ' + token.tokenSlot + ' — balance not reported)';
+}
+
 $('btnSend').onclick = guard('send', async () => {
   const t0 = Date.now();
   sendPhase = 'Proving';
@@ -1656,28 +1814,41 @@ $('btnSend').onclick = guard('send', async () => {
   try {
     $('btnSend').disabled = true;
     const dest = parseAddr($('toAddr').value);
-    const amt = $('amount').value;
-    if (!amt || isNaN(Number(amt)) || Number(amt) <= 0) throw new Error('enter a valid positive amount');
+    const token = selectedSendToken();
+    if (!token) {
+      throw new Error('no sendable token in this channel -- a token without chain-verified metadata '
+        + 'cannot be denominated safely, so it is not offered here');
+    }
+    // Denominated with THIS token's verified decimals — never the global 18-dp toBase(). A 6-dp
+    // amount must never be scaled by 18, and an over-precise amount is refused, not truncated.
+    const amountBase = parseSendAmount($('amount').value, token.decimals);
+    const shown = fmtUnits(amountBase, token.decimals) + ' ' + token.label;
     const myCh = myChannel ?? activeCh;
     let r;
     if (dest.channel !== myCh) {
-      log('send ' + amt + ' -> ' + formatAddr(dest.channel, dest.slot) + ' (inter-channel)...');
-      r = await attemptInterChannelSend(dest.channel, dest.slot, amt);
+      // INTENTIONALLY RESTRICTED: the inter-channel path (wallet_send_inter_channel + /api/inter/send)
+      // carries no token selection on this page yet, so it always moves the source channel's genesis
+      // position. Refuse rather than move the genesis token under another token's label/decimals.
+      if (token.tokenSlot !== 0 || token.tokenIndex !== NATIVE_TOKEN_INDEX) {
+        throw new Error('inter-channel transfers currently support the native token only -- select ETH');
+      }
+      log('send ' + shown + ' -> ' + formatAddr(dest.channel, dest.slot) + ' (inter-channel)...');
+      r = await attemptInterChannelSend(dest.channel, dest.slot, amountBase);
       showBalance(r);
-      log('sent ' + amt + ' to ' + formatAddr(dest.channel, dest.slot) + ' (' + Math.round((Date.now()-t0)/1000) + 's) -- balance ' + fmtAmt(r.balance), 'ok');
+      log('sent ' + shown + ' to ' + formatAddr(dest.channel, dest.slot) + ' (' + Math.round((Date.now()-t0)/1000) + 's) -- balance ' + sentTokenBalanceLabel(r, token), 'ok');
     } else {
       if (dest.slot === mySlot) throw new Error('cannot send to yourself (' + formatAddr(myCh, mySlot) + ')');
-      log('send ' + amt + ' -> ' + formatAddr(dest.channel, dest.slot) + '...');
+      log('send ' + shown + ' -> ' + formatAddr(dest.channel, dest.slot) + '...');
       try {
-        r = await attemptSend(dest.slot, amt);
+        r = await attemptSend(dest.slot, amountBase, token);
       } catch (e) {
         if (/does not extend the current head/.test(e.message)) {
           log('  head moved -- retrying...');
-          r = await attemptSend(dest.slot, amt);
+          r = await attemptSend(dest.slot, amountBase, token);
         } else { throw e; }
       }
       showBalance(r);
-      log('sent ' + amt + ' to ' + formatAddr(dest.channel, dest.slot) + ' (' + Math.round((Date.now()-t0)/1000) + 's) -- balance ' + fmtAmt(r.balance), 'ok');
+      log('sent ' + shown + ' to ' + formatAddr(dest.channel, dest.slot) + ' (' + Math.round((Date.now()-t0)/1000) + 's) -- balance ' + sentTokenBalanceLabel(r, token), 'ok');
     }
   } catch (e) { log('send failed: '+e.message, 'err'); }
   clearInterval(tick);
@@ -1851,11 +2022,15 @@ $('btnBurnSend').onclick = guard('burn', async () => {
     const headSnap = await api('/api/snapshot', null, 'GET'); setChannelFrom(headSnap);
     let rr = JSON.parse(await call('importChannel', { snapshotJson: headSnap }));
     mySlot = rr.slot; showBalance(rr);
-    if (!rr.canSend) {
+    // The burn debits the GENESIS position (`wallet_burn_send` resolves an omitted token index to
+    // registry[0]), so the witness it needs is the one for position 0 — NOT merely "some" witness.
+    // Since the Send panel can now leave the witness on another token position, a plain `canSend`
+    // check here would skip the refresh and the wasm would refuse the burn outright.
+    if (!witnessBacksTokenSlot(rr, 0)) {
       log('  refresh needed before burn...');
       sendPhase = 'Refreshing';
       log('  re-encrypting balance (秘匿化)...', 'zk');
-      const refreshPayload = await call('refresh');
+      const refreshPayload = await call('refresh', { tokenSlot: 0 });
       const cosigned = await api('/api/refresh-cosign', refreshPayload);
       rr = JSON.parse(await call('finalize', { stateJson: cosigned }));
       mySlot = rr.slot; showBalance(rr);
