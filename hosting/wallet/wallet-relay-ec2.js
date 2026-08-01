@@ -10,6 +10,7 @@ const https = require('https');
 const http = require('http');
 const fs = require('fs');
 const path = require('path');
+const crypto = require('crypto');
 const { execFile } = require('child_process');
 const { promisify } = require('util');
 const pExecFile = promisify(execFile);
@@ -515,9 +516,160 @@ app.post('/api/init', (req, res) => {
   }).catch((e) => { console.error(e.stderr ? String(e.stderr) : (e.message||e)); res.status(500).json({ error: String(e.stderr || e.message || e) }); });
 });
 
+// ---- SLIM DOWNLINK: state deltas for /api/snapshot ------------------------------------------
+// The uplink is already slim (detail2 §M-1, SlimSendPayload). The DOWNLINK was not: after every
+// send the browser re-downloaded the whole ~1.6MB snapshot just to hand `snapshot.state` to
+// `wallet_finalize`. Most of those bytes are things the client already holds byte-for-byte.
+//
+// Measured on the live ch7 snapshot (5 active slots, 2 tokens), bytes of JSON:
+//     members              214,899   NEVER used by finalize (it keeps its own verified copy)
+//     record                70,974   likewise
+//     state.memberSignatures 833,416 fresh every transition — MUST be sent
+//     state...encBalances   342,607  only the rows the tx touched actually change
+//     state...regevPkDigests 70,657  changes only on join
+//     state...recipients     46,081  changes only on join
+//
+// So a delta sends `state` minus {encBalances, regevPkDigests, recipients}, plus ONLY the changed
+// encBalances rows, and names the rest as "carry these from your base".
+//
+// SECURITY. This is a TRANSPORT optimization with no trust component. The client rebuilds the full
+// state and hands it to `wallet_finalize` UNCHANGED, which calls `verify_snapshot` →
+// `verify_all_signatures` (src/wallet_core.rs:856): that RECOMPUTES `ChannelState::signing_digest()`
+// over the reconstructed state and rejects unless it equals `state.digest`, then verifies every
+// cosigner's real signature against the RECOMPUTED digest. `encBalances`, `regevPkDigests`,
+// `recipients` and `pendingAdds` are all bound into that digest through `balance_state.h1()`'s
+// slot-tree root (src/common/balance_state.rs:537). A delta that misdescribes ANY carried byte
+// therefore produces a state whose recomputed digest differs from what the members signed, and
+// finalize FAILS. The relay cannot use a delta to get a state accepted that it could not have got
+// accepted by sending it in full.
+//
+// `carryHash` below is NOT that security gate — it is a cheap liveness/diagnosability gate, so a
+// stale base turns into a clean full re-fetch instead of a confusing signature failure.
+const DELTA_FORMAT = 1;
+// Fields the client is told to carry from its base. Order is part of the hashed material.
+const DELTA_CARRY_FIELDS = ['regevPkDigests', 'recipients'];
+// How many recent heads stay eligible as a delta base, per channel. In-memory only: a relay
+// restart just means the next request falls back to a full snapshot (correct, only slower).
+const DELTA_HISTORY = 8;
+const _deltaIdx = {}; // ch -> [fingerprint, ...] oldest first
+
+const sha256hex = (s) => crypto.createHash('sha256').update(s).digest('hex');
+
+// The exact string whose hash `carryHash` commits to: the carry FIELDS, plus the encBalances rows
+// the delta declares unchanged, in the order they are listed. Hashing the carried ROWS is what
+// makes "these rows are byte-identical" a CHECKED claim rather than a promise -- the relay hashes
+// the HEAD's rows at those indices, the client hashes ITS BASE's, so a relay that mislabels a
+// changed row as unchanged produces a mismatch and the client re-fetches in full. (Soundness does
+// not rest on this: a mislabelled row would also fail the digest recomputation in
+// verify_all_signatures. This turns that late, confusing failure into a clean early fallback.)
+// Both sides stringify values parsed from the SAME relay-produced JSON bytes, so key order and
+// number formatting round-trip identically.
+function deltaCarryMaterial(bs, carryFields, unchangedRows) {
+  const rows = Array.isArray(bs && bs.encBalances) ? bs.encBalances : [];
+  return JSON.stringify([
+    carryFields.map((f) => ((bs && bs[f]) !== undefined ? bs[f] : null)),
+    unchangedRows.map((i) => (rows[i] !== undefined ? rows[i] : null)),
+  ]);
+}
+
+// Per-row / per-carry-field content hashes of one state. Cheap (~1ms over ~460KB of balanceState).
+function fingerprintState(st) {
+  const bs = (st && st.balanceState) || {};
+  const rows = Array.isArray(bs.encBalances) ? bs.encBalances : [];
+  return {
+    digest: st && st.digest,
+    stateVersion: bs.stateVersion,
+    memberCount: bs.memberCount,
+    delegateCount: bs.delegateCount,
+    rowCount: rows.length,
+    rowHashes: rows.map((r) => sha256hex(JSON.stringify(r))),
+    // Carry-FIELDS only: used to notice a join/field change between base and head. The response's
+    // `carryHash` is a different, wider commitment (fields + the carried rows).
+    carryFieldsHash: sha256hex(deltaCarryMaterial(bs, DELTA_CARRY_FIELDS, [])),
+  };
+}
+function recordFingerprint(ch, fp) {
+  if (!fp || typeof fp.digest !== 'string' || !Number.isInteger(fp.stateVersion)) return;
+  const list = (_deltaIdx[ch] = _deltaIdx[ch] || []);
+  if (list.some((e) => e.digest === fp.digest)) return;
+  list.push(fp);
+  while (list.length > DELTA_HISTORY) list.shift();
+}
+function findFingerprint(ch, digest, stateVersion) {
+  return (_deltaIdx[ch] || []).find(
+    (e) => e.digest === digest && e.stateVersion === stateVersion) || null;
+}
+
+// Build the delta response, or null when the client's base cannot be reconciled (caller then sends
+// the FULL snapshot — correctness first, bandwidth second).
+function buildStateDelta(ch, snap, sinceVersion, sinceDigest) {
+  const st = snap && snap.state;
+  if (!st || !st.balanceState) return { fallback: 'no-state' };
+  const head = fingerprintState(st);
+  recordFingerprint(ch, head); // so the NEXT request can use this head as its base
+  if (!Number.isInteger(sinceVersion) || typeof sinceDigest !== 'string' || !sinceDigest) {
+    return { fallback: 'bad-since' };
+  }
+  const base = findFingerprint(ch, sinceDigest, sinceVersion);
+  if (!base) return { fallback: 'unknown-base' };
+  // Client already holds the head — tell it so in ~100 bytes instead of resending 1.6MB. Its
+  // retry loop is waiting for the head to advance past the co-sign ACK's version.
+  if (base.digest === head.digest) {
+    return { body: { deltaFormat: DELTA_FORMAT, unchanged: true, head: { stateVersion: head.stateVersion, digest: head.digest } } };
+  }
+  // A join changes the slot layout: every carried index would mean a different participant.
+  if (base.memberCount !== head.memberCount || base.delegateCount !== head.delegateCount) {
+    return { fallback: 'membership-changed' };
+  }
+  if (base.carryFieldsHash !== head.carryFieldsHash) return { fallback: 'carry-changed' };
+
+  const changedRows = {};
+  const unchangedRows = [];
+  for (let i = 0; i < head.rowCount; i++) {
+    if (i < base.rowCount && base.rowHashes[i] === head.rowHashes[i]) unchangedRows.push(i);
+    else changedRows[String(i)] = st.balanceState.encBalances[i];
+  }
+  if (!unchangedRows.length) return { fallback: 'all-rows-changed' };
+
+  // Shallow clones — the on-disk snapshot object is never mutated.
+  const bs = { ...st.balanceState };
+  delete bs.encBalances;
+  for (const f of DELTA_CARRY_FIELDS) delete bs[f];
+  return {
+    body: {
+      deltaFormat: DELTA_FORMAT,
+      channel: ch,
+      base: { stateVersion: sinceVersion, digest: sinceDigest },
+      head: { stateVersion: head.stateVersion, digest: head.digest },
+      rowCount: head.rowCount,
+      changedRows,
+      unchangedRows,
+      carry: DELTA_CARRY_FIELDS,
+      carryHash: sha256hex(deltaCarryMaterial(st.balanceState, DELTA_CARRY_FIELDS, unchangedRows)),
+      state: { ...st, balanceState: bs },
+    },
+  };
+}
+
 app.get('/api/snapshot', (req, res) => {
-  try { const ch = reqChannel(req); res.json(JSON.parse(fs.readFileSync(wc(ch, 'channel_snapshot.json'), 'utf8'))); }
-  catch (e) { res.status(404).json({ error: 'no channel yet' }); }
+  let ch, snap;
+  try {
+    ch = reqChannel(req);
+    snap = JSON.parse(fs.readFileSync(wc(ch, 'channel_snapshot.json'), 'utf8'));
+  } catch (e) { return res.status(404).json({ error: 'no channel yet' }); }
+  // No `since`/`sinceDigest` -> byte-identical to the pre-delta response, so OLD CLIENTS (and every
+  // non-send call site) are untouched. The head is still fingerprinted, so this snapshot can serve
+  // as the base of the client's NEXT delta request.
+  const since = req.query && req.query.since;
+  const sinceDigest = req.query && req.query.sinceDigest;
+  if (since === undefined || sinceDigest === undefined) {
+    try { recordFingerprint(ch, fingerprintState(snap.state || {})); } catch (e) { /* never fail a snapshot read over the index */ }
+    return res.json(snap);
+  }
+  const out = buildStateDelta(ch, snap, parseInt(String(since), 10), String(sinceDigest));
+  if (out.body) return res.json(out.body);
+  res.setHeader('X-Delta-Fallback', out.fallback);   // observability only; the body is the full snapshot
+  res.json(snap);
 });
 
 // GET /api/poll?channel=N&since=<stateVersion> — cheap change-check for the browser balance poller.

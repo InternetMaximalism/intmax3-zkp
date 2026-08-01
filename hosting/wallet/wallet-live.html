@@ -663,6 +663,224 @@ function parseConfirmationProgress(message) {
   return { have, need };
 }
 
+// ---- SLIM DOWNLINK: rebuilding the head state from a relay delta -----------------------------
+//
+// The uplink has been slim since detail2 §M-1; the DOWNLINK was not. After every send the browser
+// re-downloaded the whole ~1.6MB snapshot only to hand `snapshot.state` to `wallet_finalize`.
+// `/api/snapshot?since=<v>&sinceDigest=<d>` instead returns `state` minus its three largest
+// derivable parts — `encBalances`, `regevPkDigests`, `recipients` — plus ONLY the encBalances rows
+// that actually changed, and the client rebuilds the rest from the state it already holds.
+//
+// ══ SECURITY: WHY REBUILDING CANNOT WEAKEN ANYTHING ══
+//
+// This is a TRANSPORT optimization with NO trust component. The reconstructed state is handed to
+// `wallet_finalize` exactly as a fully-downloaded one would be, and NOTHING here is allowed to
+// stand in for a check:
+//
+//   1. `wallet_finalize` (src/wasm_wallet.rs:729) replaces ONLY `snapshot.state`; the `record` and
+//      `members` it verifies against are the session's own, already-verified copies. Nothing the
+//      relay sends can move the member set.
+//   2. It requires `next_state.prevDigest == <our current head digest>` and
+//      `stateVersion == ours + 1`, so the base is necessarily the head this wallet already
+//      verified — the "never reconstruct on top of an unverified base" requirement is enforced in
+//      Rust, not merely by convention here.
+//   3. `verify_snapshot` → `verify_all_signatures` (src/wallet_core.rs:856) RECOMPUTES
+//      `ChannelState::signing_digest()` over the state it is given, rejects unless it equals the
+//      `digest` field, and then verifies each cosigner's real signature against the RECOMPUTED
+//      digest. `encBalances`, `regevPkDigests`, `recipients` and `pendingAdds` are all bound into
+//      that digest through `balanceState.h1()`'s slot-tree root
+//      (src/common/balance_state.rs:537).
+//
+// Therefore a delta that misdescribes ANY carried byte yields a state whose recomputed digest is
+// not the one the members signed, and finalize FAILS. There is no "trust the delta" path: a wrong
+// reconstruction cannot silently pass, only fail. The relay gains no power it did not already
+// have by serving the whole snapshot.
+//
+// What the checks below ARE for: they are FAIL-CLOSED EARLY REJECTION, so a delta the relay could
+// not have meant becomes a clean full re-fetch instead of a confusing signature failure. Every
+// unrecognized shape returns `{ok:false, reason}` and the caller re-fetches in full.
+const DELTA_FORMAT = 1;
+const DELTA_CARRY_FIELDS = ['regevPkDigests', 'recipients'];
+const MAX_CHANNEL_MEMBERS_JS = 1024; // src/constants.rs — slot-matrix width
+const MAX_CHANNEL_TOKENS_JS = 10;    // src/constants.rs — token positions per slot
+
+function isPlainObject(v) {
+  return v !== null && typeof v === 'object' && !Array.isArray(v);
+}
+
+/** A canonical non-negative integer used as an object key ("0", "1", … — never "01" or "1.0"). */
+function parseIndexKey(k) {
+  if (typeof k !== 'string' || !/^(0|[1-9][0-9]*)$/.test(k)) return null;
+  const n = Number(k);
+  return Number.isSafeInteger(n) ? n : null;
+}
+
+/**
+ * Shape check for ONE `encBalances` row: the sparse `{ "<tokenSlot>": {c1,c2} }` map the Rust
+ * serde emits (canonical-zero positions omitted, so `{}` is a legal all-zero row).
+ * Shape only — canonicality and range are re-checked in `BalanceState::validate()`.
+ */
+function isCiphertextRow(row) {
+  if (!isPlainObject(row)) return false;
+  for (const k of Object.keys(row)) {
+    const t = parseIndexKey(k);
+    if (t === null || t >= MAX_CHANNEL_TOKENS_JS) return false;
+    const ct = row[k];
+    if (!isPlainObject(ct) || !Array.isArray(ct.c1) || !Array.isArray(ct.c2)) return false;
+  }
+  return true;
+}
+
+/**
+ * The exact string the relay's `carryHash` commits to: the carry FIELDS, plus the `encBalances`
+ * rows the delta declares unchanged, in the order it lists them.
+ *
+ * Hashing the carried ROWS is what makes "these rows are byte-identical" a CHECKED claim rather
+ * than a promise. The relay hashes the HEAD's rows at those indices; we hash our BASE's. A relay
+ * that mislabels a changed row as unchanged therefore mismatches here and we re-fetch in full.
+ *
+ * Soundness does not rest on this: a mislabelled row also fails the digest recomputation in
+ * `verify_all_signatures`, so such a state could never be finalized either way. This check exists
+ * to turn that late, confusing failure into a clean early fallback.
+ *
+ * Both sides stringify values parsed from the SAME relay-produced JSON bytes, so key order and
+ * number formatting round-trip identically.
+ */
+function deltaCarryMaterial(state, carryFields, unchangedRows) {
+  const bs = (state && state.balanceState) || {};
+  const rows = Array.isArray(bs.encBalances) ? bs.encBalances : [];
+  return JSON.stringify([
+    carryFields.map((f) => (bs[f] !== undefined ? bs[f] : null)),
+    unchangedRows.map((i) => (rows[i] !== undefined ? rows[i] : null)),
+  ]);
+}
+
+/**
+ * Can `delta` be applied on top of `baseState` (the state this wallet last VERIFIED), producing
+ * the head that `ack` names? Returns `{ok:true, plan}` or `{ok:false, reason}`. PURE.
+ */
+function reconcileStateDelta(delta, baseState, ack) {
+  const no = (reason) => ({ ok: false, reason: reason });
+  if (!isPlainObject(delta)) return no('delta-not-object');
+  if (delta.deltaFormat !== DELTA_FORMAT) return no('delta-format');
+  if (delta.unchanged === true) return no('head-not-advanced');
+  if (!isPlainObject(baseState) || !isPlainObject(baseState.balanceState)) return no('base-malformed');
+  const baseBs = baseState.balanceState;
+
+  // (a) The delta must be anchored to the EXACT state we hold.
+  if (!isPlainObject(delta.base)) return no('base-missing');
+  if (delta.base.digest !== baseState.digest) return no('base-digest-mismatch');
+  if (delta.base.stateVersion !== baseBs.stateVersion) return no('base-version-mismatch');
+
+  // (b) The head it claims must be the head the co-sign ACK named. Without this a relay could
+  //     answer a post-send fetch with some OTHER validly-signed state.
+  if (!isPlainObject(delta.head)) return no('head-missing');
+  if (isPlainObject(ack)) {
+    if (delta.head.digest !== ack.digest) return no('head-digest-not-ack');
+    if (delta.head.stateVersion !== ack.stateVersion) return no('head-version-not-ack');
+  }
+  if (delta.head.digest === baseState.digest) return no('head-equals-base');
+
+  const st = delta.state;
+  if (!isPlainObject(st) || !isPlainObject(st.balanceState)) return no('state-missing');
+  if (st.digest !== delta.head.digest) return no('state-digest-not-head');
+  const bs = st.balanceState;
+  if (bs.stateVersion !== delta.head.stateVersion) return no('state-version-not-head');
+
+  // (c) The omitted fields must be ABSENT. A delta that ALSO inlines them is ambiguous about which
+  //     copy wins, so refuse it rather than pick one.
+  if ('encBalances' in bs) return no('state-inlines-encBalances');
+  for (const f of DELTA_CARRY_FIELDS) if (f in bs) return no('state-inlines-' + f);
+
+  // (d) Membership must be unchanged — carried rows and carried per-slot keys are POSITIONAL, so a
+  //     join would silently re-point them at a different participant.
+  if (bs.memberCount !== baseBs.memberCount) return no('memberCount-changed');
+  if (bs.delegateCount !== baseBs.delegateCount) return no('delegateCount-changed');
+
+  // (e) The carry list must be exactly the fields we know how to carry, present in the base.
+  if (!Array.isArray(delta.carry) || delta.carry.length !== DELTA_CARRY_FIELDS.length) return no('carry-shape');
+  for (let i = 0; i < DELTA_CARRY_FIELDS.length; i++) {
+    if (delta.carry[i] !== DELTA_CARRY_FIELDS[i]) return no('carry-shape');
+  }
+  for (const f of DELTA_CARRY_FIELDS) if (baseBs[f] === undefined) return no('carry-absent-in-base');
+  if (typeof delta.carryHash !== 'string' || !delta.carryHash) return no('carryHash-missing');
+
+  // (f) encBalances index partition: [0, rowCount) covered EXACTLY once by changed ∪ unchanged.
+  //     No gap (an uncovered index would be dropped), no overlap (ambiguous source).
+  const rowCount = delta.rowCount;
+  if (!Number.isInteger(rowCount) || rowCount < 0 || rowCount > MAX_CHANNEL_MEMBERS_JS) return no('rowCount');
+  if (!Array.isArray(baseBs.encBalances)) return no('base-rows-missing');
+  if (!isPlainObject(delta.changedRows)) return no('changedRows-missing');
+  if (!Array.isArray(delta.unchangedRows)) return no('unchangedRows-missing');
+
+  const src = new Array(rowCount).fill(null);
+  for (const k of Object.keys(delta.changedRows)) {
+    const i = parseIndexKey(k);
+    if (i === null || i >= rowCount) return no('changed-index-range');
+    if (src[i]) return no('index-duplicate');
+    // A row the relay declared CHANGED must actually be here and well-formed. Tampered, null or
+    // absent MUST be rejected — never silently fall back to the base copy, which is precisely the
+    // stale value the relay just told us is wrong.
+    if (!isCiphertextRow(delta.changedRows[k])) return no('changed-row-malformed');
+    src[i] = { from: 'delta', row: delta.changedRows[k] };
+  }
+  for (const v of delta.unchangedRows) {
+    if (!Number.isInteger(v) || v < 0 || v >= rowCount) return no('unchanged-index-range');
+    if (src[v]) return no('index-duplicate');
+    // Carrying is only possible if we actually HAVE the row. `rowCount` may exceed the base's row
+    // count (trailing all-zero rows are dropped by the Rust serde), so this is a real case.
+    if (!isCiphertextRow(baseBs.encBalances[v])) return no('unchanged-row-absent-in-base');
+    src[v] = { from: 'base', row: baseBs.encBalances[v] };
+  }
+  for (let i = 0; i < rowCount; i++) if (!src[i]) return no('index-uncovered');
+
+  return { ok: true, reason: null, plan: { rowCount: rowCount, src: src, carry: DELTA_CARRY_FIELDS.slice() } };
+}
+
+/**
+ * Project a VERIFIED state down to just what a delta base is read for. Keeping the projection
+ * rather than the whole state drops the ~833KB `memberSignatures` blob from the JS heap, and makes
+ * it structurally impossible to reuse a base for anything but reconstruction. `digest` and the
+ * rows always come from ONE state object, so they can never be mutually inconsistent.
+ */
+function deltaBaseOf(state) {
+  if (!isPlainObject(state) || !isPlainObject(state.balanceState)) return null;
+  const bs = state.balanceState;
+  const base = {
+    digest: state.digest,
+    balanceState: {
+      stateVersion: bs.stateVersion,
+      memberCount: bs.memberCount,
+      delegateCount: bs.delegateCount,
+      encBalances: bs.encBalances,
+    },
+  };
+  for (const f of DELTA_CARRY_FIELDS) base.balanceState[f] = bs[f];
+  return base;
+}
+
+/** Rebuild the full head state. ONLY ever called with a plan `reconcileStateDelta` produced. */
+function applyStateDelta(delta, baseState, plan) {
+  const bs = Object.assign({}, delta.state.balanceState);
+  bs.encBalances = plan.src.map((s) => s.row);
+  for (const f of plan.carry) bs[f] = baseState.balanceState[f];
+  return Object.assign({}, delta.state, { balanceState: bs });
+}
+
+/**
+ * Last gate before the rebuilt state is handed to `wallet_finalize`: it must be the head the ACK
+ * named. A mismatch means FALL BACK to a full fetch — never finalize on it.
+ *
+ * NOTE this is an equality check on a relay-supplied `digest` FIELD, not a recomputation, so it is
+ * a consistency/liveness gate only. The binding check is the Rust-side recomputation described at
+ * the top of this section; this one just stops a mismatch from reaching it.
+ */
+function reconstructedMatchesAck(state, ack) {
+  if (!isPlainObject(state) || !isPlainObject(state.balanceState)) return false;
+  if (!isPlainObject(ack)) return true; // no ACK to compare against (non-send refresh path)
+  return state.digest === ack.digest && state.balanceState.stateVersion === ack.stateVersion;
+}
+
 // ══════════════════════════════════════════════════════════════════════════════════════════════
 // TESTABLE-END: deposit-ui
 // ══════════════════════════════════════════════════════════════════════════════════════════════
@@ -1103,9 +1321,36 @@ function setChannelFrom(snapJson) {
 const worker = new Worker('./wallet-worker.js', { type: 'module' });
 const handlers = {};
 let _callId = 0;
+// ---- SLIM DOWNLINK: the wallet's VERIFIED head (the only thing usable as a delta base) -------
+// `verifiedHeadState` is a projection (deltaBaseOf) of a ChannelState this wallet has actually
+// VERIFIED wasm-side. It is maintained HERE, in the single worker chokepoint, so it can never
+// drift from the wasm session:
+//   * a SUCCESSFUL `finalize`      → the state that was finalized (verify_snapshot passed on it)
+//   * a SUCCESSFUL `importChannel` → the imported snapshot's `state` (same verification)
+//   * every other action, and every FAILURE of those two → CLEARED.
+// Clearing is always safe: a missing base just means the next fetch is a full snapshot. Offering a
+// base that is not the session head cannot forge anything either — `wallet_finalize` rejects any
+// state that does not extend its own head — it would only waste a round trip.
+let verifiedHeadState = null;
+// Actions that provably leave the wasm session's head where it is, so the base survives them.
+const HEAD_PRESERVING_ACTIONS = ['send', 'refresh', 'sendInterChannel', 'cosign', 'burnSend'];
+
+function noteVerifiedHead(action, payload, ok) {
+  try {
+    if (action === 'finalize') { verifiedHeadState = ok ? deltaBaseOf(JSON.parse(payload.stateJson)) : null; return; }
+    if (action === 'importChannel') {
+      verifiedHeadState = ok ? deltaBaseOf(JSON.parse(payload.snapshotJson).state) : null;
+      return;
+    }
+  } catch (e) { verifiedHeadState = null; return; }
+  if (HEAD_PRESERVING_ACTIONS.indexOf(action) < 0) verifiedHeadState = null;
+}
+
 function call(action, payload={}) {
   const id = ++_callId;
-  return new Promise((resolve, reject) => { handlers[id] = { resolve, reject }; worker.postMessage({ action, _callId: id, ...payload }); });
+  return new Promise((resolve, reject) => { handlers[id] = { resolve, reject }; worker.postMessage({ action, _callId: id, ...payload }); })
+    .then((result) => { noteVerifiedHead(action, payload, true); return result; },
+          (err) => { noteVerifiedHead(action, payload, false); throw err; });
 }
 worker.onmessage = (e) => {
   const d = e.data;
@@ -1685,6 +1930,20 @@ async function attemptSend(to, amountBase, token) {
   log('  ZKP generated · amount encrypted (秘匿化)', 'zk');
   log('  co-signing...');
   sendPhase = 'Waiting for co-sign';
+// Pick the sender's post-debit ciphertext for the position this tx spends. The token slot comes
+// from the SIGNED `channelTx` (the same value the co-signer verifies against the IMPA-v2 digest),
+// never from the UI selection, so the wire can never claim a different position than was signed.
+function senderAfterCt(p) {
+  const row = p.proposedNextState.balanceState.encBalances[p.senderIndex];
+  if (!row || typeof row !== 'object') throw new Error('slim: sender has no balance row');
+  // A bare {c1,c2} means a pre-multitoken wasm build — pass it through unchanged.
+  if (row.c1 && row.c2) return row;
+  const ts = p.channelTx && p.channelTx.tokenSlot !== undefined ? p.channelTx.tokenSlot : 0;
+  const ct = row[String(ts)];
+  if (!ct || !ct.c1) throw new Error('slim: no post-debit ciphertext at token position ' + ts);
+  return ct;
+}
+
   // SLIM wire (detail2 §M-1): project the solo payload down to {anchor, indices, tx, afterCt} —
   // everything dropped is data the co-signers re-derive themselves. ~4x smaller upload, and it
   // lets the relay fold many concurrent senders into ONE co-signed transition. /api/cosign2
@@ -1695,7 +1954,13 @@ async function attemptSend(to, amountBase, token) {
     senderIndex: p.senderIndex,
     recipientIndex: p.recipientIndex,
     channelTx: p.channelTx,
-    afterCt: p.proposedNextState.balanceState.encBalances[p.senderIndex],
+    // MULTI-TOKEN (§N-2): `encBalances[slot]` is no longer a single ciphertext — it is that
+    // slot's ROW, serialized sparsely as { "<tokenSlot>": {c1,c2} } with canonical-zero
+    // positions omitted. The slim wire's `afterCt` is ONE ciphertext (the sender's fresh
+    // post-debit ct at the position being spent), so project the row down by the token slot the
+    // tx actually moves. Sending the whole row makes the co-signer's parse fail with
+    // "missing field `c1`" — which is exactly what shipped before this line was fixed.
+    afterCt: senderAfterCt(p),
   });
   const r2 = await fetch('/api/cosign2?channel=' + activeCh, {
     method: 'POST', headers: { 'Content-Type': 'application/json' }, body: slim,
@@ -1711,13 +1976,81 @@ async function attemptSend(to, amountBase, token) {
   if (ack.applied > 1) log('  co-signed in a batch of ' + ack.applied + ' sends (one transition, v' + ack.stateVersion + ')', 'ok');
   // The relay republished the snapshot before ACKing, so the first fetch normally has it.
   for (let i = 0; i < 120; i++) {
-    const snap = JSON.parse(await api('/api/snapshot', null, 'GET'));
-    if (snap.state.balanceState.stateVersion >= ack.stateVersion) {
-      return JSON.parse(await call('finalize', { stateJson: JSON.stringify(snap.state) }));
+    const head = await fetchHeadState(ack);
+    if (head && head.balanceState && head.balanceState.stateVersion >= ack.stateVersion) {
+      return JSON.parse(await call('finalize', { stateJson: JSON.stringify(head) }));
     }
     await new Promise((res) => setTimeout(res, 1000));
   }
   throw new Error('co-signed (v' + ack.stateVersion + ') but the snapshot did not catch up');
+}
+
+// ---- SLIM DOWNLINK: fetch the head `state`, as a delta when possible -------------------------
+// Returns the full head state object, or null when the head has not advanced yet (caller retries).
+// EVERY failure path here falls back to a full snapshot; none of them proceeds on a partial state.
+async function fetchHeadState(ack) {
+  const base = verifiedHeadState;
+  if (base) {
+    try {
+      const r = await fetch('/api/snapshot?channel=' + activeCh
+        + '&since=' + encodeURIComponent(String(base.balanceState.stateVersion))
+        + '&sinceDigest=' + encodeURIComponent(String(base.digest)));
+      // 404 = a relay without the delta route (or no channel yet) → plain full fetch below.
+      if (r.ok) {
+        const txt = await r.text();
+        const body = JSON.parse(txt);
+        // A body that declares ANY `deltaFormat` is a delta and must never be read as a snapshot:
+        // a delta's `state` is PARTIAL (no encBalances), so treating an unrecognized version as a
+        // full reply would hand a truncated state to finalize. Unknown version → full fetch.
+        if (body && body.deltaFormat !== undefined && body.deltaFormat !== DELTA_FORMAT) {
+          log('  relay speaks delta format ' + body.deltaFormat + ', this wallet speaks '
+            + DELTA_FORMAT + ' — fetching the full snapshot');
+        } else if (body && body.deltaFormat === DELTA_FORMAT) {
+          if (body.unchanged === true) return null;          // head has not advanced yet
+          const rec = reconcileStateDelta(body, base, ack);
+          if (!rec.ok) {
+            log('  delta not applicable (' + rec.reason + ') — fetching the full snapshot');
+          } else if (!(await carryHashMatches(base, body))) {
+            // The base we hold is not the material the relay committed to. Sound either way (the
+            // rebuilt state would simply fail verification), but a full fetch is the clean answer.
+            log('  delta: carried material does not match the relay commitment — fetching in full', 'warn');
+          } else {
+            const rebuilt = applyStateDelta(body, base, rec.plan);
+            if (reconstructedMatchesAck(rebuilt, ack)) {
+              log('  state delta applied: ' + fmtKB(txt.length) + ' instead of a full snapshot'
+                + ' (' + Object.keys(body.changedRows).length + ' of ' + body.rowCount + ' balance rows changed)', 'ok');
+              return rebuilt;
+            }
+            log('  delta: rebuilt state is not the head the co-sign ACK named — fetching in full', 'warn');
+          }
+        } else if (body && body.deltaFormat === undefined && body.state) {
+          return body.state;   // the relay answered in full (X-Delta-Fallback carries the reason)
+        }
+      }
+    } catch (e) {
+      log('  delta fetch failed (' + e.message + ') — fetching the full snapshot');
+    }
+  }
+  const snap = JSON.parse(await api('/api/snapshot', null, 'GET'));
+  return snap && snap.state;
+}
+
+const fmtKB = (n) => (n / 1024).toFixed(0) + ' KB';
+
+async function sha256Hex(s) {
+  const buf = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(s));
+  return Array.from(new Uint8Array(buf)).map((b) => b.toString(16).padStart(2, '0')).join('');
+}
+
+// Does our base's carried material — the carry fields AND every row the delta declares unchanged —
+// hash to what the relay committed to? Only ever called AFTER `reconcileStateDelta` has validated
+// `carry` and `unchangedRows`, so the indices hashed here are already known in-range and unique.
+// A false (including no SubtleCrypto, i.e. an insecure context) means "fetch in full".
+async function carryHashMatches(base, delta) {
+  try {
+    const material = deltaCarryMaterial(base, delta.carry, delta.unchangedRows);
+    return (await sha256Hex(material)) === delta.carryHash;
+  } catch (e) { return false; }
 }
 
 // Inter-channel: NATIVE asset only for now (see the guard in the Send handler) — `amountBase` is
