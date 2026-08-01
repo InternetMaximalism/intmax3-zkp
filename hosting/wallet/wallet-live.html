@@ -772,8 +772,12 @@ function reconcileStateDelta(delta, baseState, ack) {
   if (delta.base.digest !== baseState.digest) return no('base-digest-mismatch');
   if (delta.base.stateVersion !== baseBs.stateVersion) return no('base-version-mismatch');
 
-  // (b) The head it claims must be the head the co-sign ACK named. Without this a relay could
-  //     answer a post-send fetch with some OTHER validly-signed state.
+  // (b) The head it claims must be the head the co-sign ACK named.
+  //     SCOPE, precisely: this binds the DELTA path only. A relay that answers the same fetch with
+  //     a full snapshot skips this entirely (fetchHeadState returns `body.state` unchecked), so it
+  //     is NOT a general "the relay cannot substitute another signed state" guarantee -- it is the
+  //     fast path's sanity check, and the real gate for both paths is `wallet_finalize`, which
+  //     rejects any state that does not extend the wasm session's own head.
   if (!isPlainObject(delta.head)) return no('head-missing');
   if (isPlainObject(ack)) {
     if (delta.head.digest !== ack.digest) return no('head-digest-not-ack');
@@ -861,10 +865,14 @@ function deltaBaseOf(state) {
 
 /** Rebuild the full head state. ONLY ever called with a plan `reconcileStateDelta` produced. */
 function applyStateDelta(delta, baseState, plan) {
-  const bs = Object.assign({}, delta.state.balanceState);
+  // Spread, NOT Object.assign: these objects come from JSON.parse, where `__proto__` arrives as an
+  // OWN property, and Object.assign copies with [[Set]] -- which would invoke the inherited
+  // `__proto__` setter and silently reparent the clone instead of copying the key. Spread defines
+  // own properties directly. (Fail-closed either way: a dropped field moves the digest.)
+  const bs = { ...delta.state.balanceState };
   bs.encBalances = plan.src.map((s) => s.row);
   for (const f of plan.carry) bs[f] = baseState.balanceState[f];
-  return Object.assign({}, delta.state, { balanceState: bs });
+  return { ...delta.state, balanceState: bs };
 }
 
 /**
@@ -879,6 +887,20 @@ function reconstructedMatchesAck(state, ack) {
   if (!isPlainObject(state) || !isPlainObject(state.balanceState)) return false;
   if (!isPlainObject(ack)) return true; // no ACK to compare against (non-send refresh path)
   return state.digest === ack.digest && state.balanceState.stateVersion === ack.stateVersion;
+}
+
+// Pick the sender's post-debit ciphertext for the position this tx spends. The token slot comes
+// from the SIGNED `channelTx` (the same value the co-signer verifies against the IMPA-v2 digest),
+// never from the UI selection, so the wire can never claim a different position than was signed.
+function senderAfterCt(p) {
+  const row = p.proposedNextState.balanceState.encBalances[p.senderIndex];
+  if (!row || typeof row !== 'object') throw new Error('slim: sender has no balance row');
+  // A bare {c1,c2} means a pre-multitoken wasm build — pass it through unchanged.
+  if (row.c1 && row.c2) return row;
+  const ts = p.channelTx && p.channelTx.tokenSlot !== undefined ? p.channelTx.tokenSlot : 0;
+  const ct = row[String(ts)];
+  if (!ct || !ct.c1) throw new Error('slim: no post-debit ciphertext at token position ' + ts);
+  return ct;
 }
 
 // ══════════════════════════════════════════════════════════════════════════════════════════════
@@ -1335,11 +1357,26 @@ let verifiedHeadState = null;
 // Actions that provably leave the wasm session's head where it is, so the base survives them.
 const HEAD_PRESERVING_ACTIONS = ['send', 'refresh', 'sendInterChannel', 'cosign', 'burnSend'];
 
-function noteVerifiedHead(action, payload, ok) {
+// Both head-adopting actions return a BalanceReport read from the state the wasm ACTUALLY adopted,
+// so its stateVersion is an independent witness of the head. Cross-check it against the base we are
+// about to store: if a future wasm change makes an action adopt a different state than the payload
+// we sent, this notices instead of silently keeping a stale base.
+function adoptHead(state, report) {
+  const base = deltaBaseOf(state);
+  const seen = report && report.stateVersion;
+  if (base && seen !== undefined && seen !== null && Number(seen) !== Number(base.balanceState.stateVersion)) {
+    console.warn('delta: wasm adopted stateVersion ' + seen + ', payload said '
+      + base.balanceState.stateVersion + ' -- dropping the delta base');
+    return null;
+  }
+  return base;
+}
+
+function noteVerifiedHead(action, payload, ok, result) {
   try {
-    if (action === 'finalize') { verifiedHeadState = ok ? deltaBaseOf(JSON.parse(payload.stateJson)) : null; return; }
+    if (action === 'finalize') { verifiedHeadState = ok ? adoptHead(JSON.parse(payload.stateJson), result) : null; return; }
     if (action === 'importChannel') {
-      verifiedHeadState = ok ? deltaBaseOf(JSON.parse(payload.snapshotJson).state) : null;
+      verifiedHeadState = ok ? adoptHead(JSON.parse(payload.snapshotJson).state, result) : null;
       return;
     }
   } catch (e) { verifiedHeadState = null; return; }
@@ -1349,8 +1386,8 @@ function noteVerifiedHead(action, payload, ok) {
 function call(action, payload={}) {
   const id = ++_callId;
   return new Promise((resolve, reject) => { handlers[id] = { resolve, reject }; worker.postMessage({ action, _callId: id, ...payload }); })
-    .then((result) => { noteVerifiedHead(action, payload, true); return result; },
-          (err) => { noteVerifiedHead(action, payload, false); throw err; });
+    .then((result) => { noteVerifiedHead(action, payload, true, result); return result; },
+          (err) => { noteVerifiedHead(action, payload, false, null); throw err; });
 }
 worker.onmessage = (e) => {
   const d = e.data;
@@ -1930,20 +1967,6 @@ async function attemptSend(to, amountBase, token) {
   log('  ZKP generated · amount encrypted (秘匿化)', 'zk');
   log('  co-signing...');
   sendPhase = 'Waiting for co-sign';
-// Pick the sender's post-debit ciphertext for the position this tx spends. The token slot comes
-// from the SIGNED `channelTx` (the same value the co-signer verifies against the IMPA-v2 digest),
-// never from the UI selection, so the wire can never claim a different position than was signed.
-function senderAfterCt(p) {
-  const row = p.proposedNextState.balanceState.encBalances[p.senderIndex];
-  if (!row || typeof row !== 'object') throw new Error('slim: sender has no balance row');
-  // A bare {c1,c2} means a pre-multitoken wasm build — pass it through unchanged.
-  if (row.c1 && row.c2) return row;
-  const ts = p.channelTx && p.channelTx.tokenSlot !== undefined ? p.channelTx.tokenSlot : 0;
-  const ct = row[String(ts)];
-  if (!ct || !ct.c1) throw new Error('slim: no post-debit ciphertext at token position ' + ts);
-  return ct;
-}
-
   // SLIM wire (detail2 §M-1): project the solo payload down to {anchor, indices, tx, afterCt} —
   // everything dropped is data the co-signers re-derive themselves. ~4x smaller upload, and it
   // lets the relay fold many concurrent senders into ONE co-signed transition. /api/cosign2
@@ -1999,6 +2022,7 @@ async function fetchHeadState(ack) {
       if (r.ok) {
         const txt = await r.text();
         const body = JSON.parse(txt);
+        let carry;
         // A body that declares ANY `deltaFormat` is a delta and must never be read as a snapshot:
         // a delta's `state` is PARTIAL (no encBalances), so treating an unrecognized version as a
         // full reply would hand a truncated state to finalize. Unknown version → full fetch.
@@ -2010,10 +2034,14 @@ async function fetchHeadState(ack) {
           const rec = reconcileStateDelta(body, base, ack);
           if (!rec.ok) {
             log('  delta not applicable (' + rec.reason + ') — fetching the full snapshot');
-          } else if (!(await carryHashMatches(base, body))) {
+          } else if ((carry = await carryHashMatches(base, body)) !== 'ok') {
             // The base we hold is not the material the relay committed to. Sound either way (the
             // rebuilt state would simply fail verification), but a full fetch is the clean answer.
-            log('  delta: carried material does not match the relay commitment — fetching in full', 'warn');
+            if (carry === 'unavailable') {
+              log('  delta: no SubtleCrypto (page not in a secure context) — fetching in full');
+            } else {
+              log('  delta: carried material does not match the relay commitment — fetching in full', 'warn');
+            }
           } else {
             const rebuilt = applyStateDelta(body, base, rec.plan);
             if (reconstructedMatchesAck(rebuilt, ack)) {
@@ -2028,7 +2056,9 @@ async function fetchHeadState(ack) {
         }
       }
     } catch (e) {
-      log('  delta fetch failed (' + e.message + ') — fetching the full snapshot');
+      // Defensive `(e && e.message) || e`: this runs after the co-sign, so a TypeError raised INSIDE
+      // the handler (a thrown non-Error) would escape attemptSend at the worst possible moment.
+      log('  delta fetch failed (' + ((e && e.message) || e) + ') — fetching the full snapshot');
     }
   }
   const snap = JSON.parse(await api('/api/snapshot', null, 'GET'));
@@ -2045,12 +2075,16 @@ async function sha256Hex(s) {
 // Does our base's carried material — the carry fields AND every row the delta declares unchanged —
 // hash to what the relay committed to? Only ever called AFTER `reconcileStateDelta` has validated
 // `carry` and `unchangedRows`, so the indices hashed here are already known in-range and unique.
-// A false (including no SubtleCrypto, i.e. an insecure context) means "fetch in full".
+// Returns 'ok' | 'mismatch' | 'unavailable'. The caller treats everything but 'ok' as "fetch in
+// full"; the three-way answer exists so the LOG can tell a genuine commitment mismatch (worth
+// investigating) from the page simply having no SubtleCrypto because it is not in a secure context
+// (worth fixing, but not a relay attack).
 async function carryHashMatches(base, delta) {
+  if (!(window.crypto && window.crypto.subtle)) return 'unavailable';
   try {
     const material = deltaCarryMaterial(base, delta.carry, delta.unchangedRows);
-    return (await sha256Hex(material)) === delta.carryHash;
-  } catch (e) { return false; }
+    return (await sha256Hex(material)) === delta.carryHash ? 'ok' : 'mismatch';
+  } catch (e) { return 'unavailable'; }
 }
 
 // Inter-channel: NATIVE asset only for now (see the guard in the Send handler) — `amountBase` is

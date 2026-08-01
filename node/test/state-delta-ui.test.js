@@ -55,6 +55,7 @@ const EXPORTS = [
   'isPlainObject', 'parseIndexKey', 'isCiphertextRow',
   'deltaCarryMaterial', 'deltaBaseOf',
   'reconcileStateDelta', 'applyStateDelta', 'reconstructedMatchesAck',
+  'senderAfterCt',
 ];
 
 function loadRegion() {
@@ -535,4 +536,95 @@ test('isPlainObject / isCiphertextRow do not treat arrays or null as objects', (
   for (const v of [null, undefined, [], 'x', 1]) assert.strictEqual(M.isCiphertextRow(v), false, String(v));
   assert.strictEqual(M.isCiphertextRow({ 0: ct(1), 9: ct(2) }), true);
   assert.strictEqual(M.isCiphertextRow({ 0: ct(1), 10: ct(2) }), false);
+});
+
+// ---- senderAfterCt: the SLIM UPLINK's token projection ----------------------------------------
+//
+// WHAT THIS IS MEANT TO PROVE ABOUT SECURITY
+//   The co-signer authorizes ONE ciphertext at ONE token position, and checks that position against
+//   the IMPA-v2 digest over the signed `channelTx`. This function decides WHICH ciphertext of the
+//   sender's row goes on the wire. The property that matters is that the position is taken from the
+//   SIGNED tx and from nowhere else -- in particular never from the UI's token selector, which the
+//   user controls independently of what was proved. A projection keyed off anything but
+//   `channelTx.tokenSlot` would let the wire carry a ciphertext for a position that was not signed.
+//
+//   It also has to be FAIL-LOUD. The shipped version of this line sent the whole sparse ROW where a
+//   single ciphertext was expected, and every send died at the co-signer with "missing field `c1`".
+//   Returning something wrong-shaped is worse than throwing, so both malformed cases throw.
+
+const payloadFor = (row, tokenSlot, senderIndex) => ({
+  senderIndex: senderIndex === undefined ? 1 : senderIndex,
+  channelTx: tokenSlot === undefined ? {} : { tokenSlot: tokenSlot },
+  proposedNextState: { balanceState: { encBalances: [row(0), row(1), row(2)] } },
+});
+const rowWith = (tokens) => (slot) => {
+  const r = {};
+  for (const t of tokens) r[String(t)] = ct(slot * 10 + t);
+  return r;
+};
+
+test('senderAfterCt projects the sender row at the SIGNED token slot', () => {
+  const mk = rowWith([0, 1, 3]);
+  for (const ts of [0, 1, 3]) {
+    assert.deepStrictEqual(M.senderAfterCt(payloadFor(mk, ts)), mk(1)[String(ts)],
+      'token slot ' + ts + ' must project to that position of the sender row');
+  }
+});
+
+test('senderAfterCt ignores everything except channelTx.tokenSlot', () => {
+  const mk = rowWith([0, 2]);
+  const p = payloadFor(mk, 2);
+  // Fields a UI selector might plausibly leak in. None may influence the projection.
+  p.tokenSlot = 0; p.uiTokenSlot = 0; p.token = { tokenSlot: 0 };
+  p.proposedNextState.balanceState.tokenSlot = 0;
+  assert.deepStrictEqual(M.senderAfterCt(p), mk(1)['2'],
+    'the projection must follow the SIGNED channelTx, not any sibling field');
+});
+
+test('senderAfterCt passes a pre-multitoken {c1,c2} row through unchanged', () => {
+  const bare = { c1: [7, 8], c2: [9, 10] };
+  const p = { senderIndex: 0, channelTx: {}, proposedNextState: { balanceState: { encBalances: [bare] } } };
+  assert.strictEqual(M.senderAfterCt(p), bare);
+});
+
+test('senderAfterCt defaults to position 0 only when no tokenSlot was signed', () => {
+  const mk = rowWith([0, 1]);
+  assert.deepStrictEqual(M.senderAfterCt(payloadFor(mk, undefined)), mk(1)['0'],
+    'an absent tokenSlot means a pre-multitoken payload, where 0 is the only position');
+});
+
+test('senderAfterCt THROWS rather than shipping a wrong-shaped afterCt', () => {
+  const mk = rowWith([0, 1]);
+  // The exact regression that broke every live send: a sparse ROW where a ciphertext is expected.
+  assert.throws(() => M.senderAfterCt(payloadFor(mk, 5)), /no post-debit ciphertext at token position 5/,
+    'an unpopulated token position must throw, not return the row');
+  for (const bad of [undefined, null, 'x', 42]) {
+    const p = { senderIndex: 0, channelTx: { tokenSlot: 0 },
+      proposedNextState: { balanceState: { encBalances: [bad] } } };
+    assert.throws(() => M.senderAfterCt(p), /sender has no balance row/);
+  }
+  const half = { senderIndex: 0, channelTx: { tokenSlot: 0 },
+    proposedNextState: { balanceState: { encBalances: [{ '0': { c2: [1] } }] } } };
+  assert.throws(() => M.senderAfterCt(half), /no post-debit ciphertext/);
+});
+
+test('senderAfterCt never returns the whole row for a multitoken payload', () => {
+  const mk = rowWith([0, 1]);
+  const out = M.senderAfterCt(payloadFor(mk, 1));
+  assert.ok(out.c1 && out.c2, 'the wire value must be a ciphertext');
+  assert.ok(!('0' in out) && !('1' in out), 'the wire value must NOT be the sparse row');
+});
+
+// ---- DELTA_FORMAT must move in lockstep across the three files that hardcode it ---------------
+test('DELTA_FORMAT agrees between wallet-live.html and BOTH relays', () => {
+  const seen = { 'wallet-live.html': M.DELTA_FORMAT };
+  for (const f of ['wallet-relay.js', 'wallet-relay-ec2.js']) {
+    const src = fs.readFileSync(path.join(__dirname, '..', '..', 'hosting', 'wallet', f), 'utf8');
+    const m = src.match(/const DELTA_FORMAT\s*=\s*(\d+)/);
+    assert.ok(m, f + ' has no DELTA_FORMAT constant');
+    seen[f] = parseInt(m[1], 10);
+  }
+  const vals = Object.values(seen);
+  assert.ok(vals.every((v) => v === vals[0]),
+    'a version bump must land in all three files at once, got ' + JSON.stringify(seen));
 });

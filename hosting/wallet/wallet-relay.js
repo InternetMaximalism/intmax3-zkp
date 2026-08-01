@@ -331,7 +331,11 @@ app.post('/api/init', (req, res) => {
 // send the browser re-downloaded the whole ~1.6MB snapshot just to hand `snapshot.state` to
 // `wallet_finalize`. Most of those bytes are things the client already holds byte-for-byte.
 //
-// Measured on the live ch7 snapshot (5 active slots, 2 tokens), bytes of JSON:
+// Measured on the live ch7 snapshot (5 active slots, 2 tokens), UNCOMPRESSED bytes of JSON. The
+// route is behind `compression`, so what actually crosses the wire is ~1/3 of these figures and the
+// saving must be judged gzipped: measured end-to-end, 560,996 B full vs ~360,804 B for a two-row
+// send delta (-37%). `fmtKB` in the browser log prints the DECOMPRESSED length, so it reads high.
+// Measured, bytes of JSON:
 //     members              214,899   NEVER used by finalize (it keeps its own verified copy)
 //     record                70,974   likewise
 //     state.memberSignatures 833,416 fresh every transition — MUST be sent
@@ -398,6 +402,24 @@ function fingerprintState(st) {
     carryFieldsHash: sha256hex(deltaCarryMaterial(bs, DELTA_CARRY_FIELDS, [])),
   };
 }
+// PERF, OPEN: fingerprinting is O(state) — it JSON.stringify+SHA-256s every balance row. Measured
+// at ~1.4ms for 5 slots, but the 1024-slot target puts it near ~150ms of BLOCKING event-loop time
+// per GET, on the same single thread that serves /api/cosign2. It runs on every snapshot request,
+// including repeat GETs of an unchanged state.
+//
+// The obvious memo — key the cache on `st.digest` — was tried and REVERTED. It makes the structural
+// checks below (memberCount/delegateCount, carryFieldsHash, per-row hashes) inherit their integrity
+// from the digest field instead of computing them locally. That holds for the real
+// `ChannelState::signing_digest()`, which covers every field, but it converts a check that works
+// unconditionally into one that works because of a cryptographic property elsewhere — and it made
+// the membership-change and carry-change fallback tests pass vacuously. If this needs to be fast
+// before the 1024-slot cutover, key the cache on the SNAPSHOT FILE's (mtimeMs, size) instead: that
+// is a local fact about bytes on disk and assumes nothing about the digest.
+function fingerprintCached(ch, st) {
+  const fp = fingerprintState(st || {});
+  recordFingerprint(ch, fp);
+  return fp;
+}
 function recordFingerprint(ch, fp) {
   if (!fp || typeof fp.digest !== 'string' || !Number.isInteger(fp.stateVersion)) return;
   const list = (_deltaIdx[ch] = _deltaIdx[ch] || []);
@@ -415,8 +437,7 @@ function findFingerprint(ch, digest, stateVersion) {
 function buildStateDelta(ch, snap, sinceVersion, sinceDigest) {
   const st = snap && snap.state;
   if (!st || !st.balanceState) return { fallback: 'no-state' };
-  const head = fingerprintState(st);
-  recordFingerprint(ch, head); // so the NEXT request can use this head as its base
+  const head = fingerprintCached(ch, st); // also indexes it, so the NEXT request can use it as a base
   if (!Number.isInteger(sinceVersion) || typeof sinceDigest !== 'string' || !sinceDigest) {
     return { fallback: 'bad-since' };
   }
@@ -473,7 +494,7 @@ app.get('/api/snapshot', (req, res) => {
   const since = req.query && req.query.since;
   const sinceDigest = req.query && req.query.sinceDigest;
   if (since === undefined || sinceDigest === undefined) {
-    try { recordFingerprint(ch, fingerprintState(snap.state || {})); } catch (e) { /* never fail a snapshot read over the index */ }
+    try { fingerprintCached(ch, snap.state); } catch (e) { /* never fail a snapshot read over the index */ }
     return res.json(snap);
   }
   const out = buildStateDelta(ch, snap, parseInt(String(since), 10), String(sinceDigest));
@@ -502,6 +523,12 @@ app.get('/api/poll', (req, res) => {
   const bs = st.balanceState || st.balance_state || {};
   const sv = (bs.stateVersion != null) ? bs.stateVersion : bs.state_version;
   if (Number.isInteger(since) && sv === since) return res.status(204).end();
+  // The balance poller adopts this snapshot as the wallet's verified head, so it is the base the
+  // NEXT send will ask a delta against. Without indexing it here, any channel activity between two
+  // of a user's own sends leaves the client holding a head the relay cannot recognise
+  // (`unknown-base`) and the send pays a full download -- i.e. on a live channel the delta would
+  // almost never fire. Cheap: fingerprintCached re-uses the index when the digest is already known.
+  try { fingerprintCached(ch, snap.state || snap.State); } catch (e) { /* never fail a poll over the index */ }
   res.json(snap);
 });
 
