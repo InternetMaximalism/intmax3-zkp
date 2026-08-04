@@ -1,33 +1,41 @@
-# Threat Model: Falcon-512 (Poseidon hash-to-point) for channel COSIGNER signatures
+# Threat Model: Falcon-512 (Poseidon hash-to-point) replacing the Goldilocks signing key
 
 Branch: `feat/falcon-poseidon-sig` (cut from main @ 1fb724f). Status: DRAFT — awaiting owner approval.
 
-## 0. Scope (owner decision 2026-08-05)
+## 0. Scope (owner decisions 2026-08-05, revised: UNIFIED single signing key)
 
-Replace the plonky2-proof-as-signature scheme **only where channel cosigners sign**:
+Replace the plonky2-proof-as-signature scheme everywhere the **Goldilocks signing key** is used
+— exactly the surface `sk_g` covers today. Today ONE key signs both the channel state co-sign
+(IMCH) and the bp's small-block root (IMSB), isolated by message-domain separation; the Falcon
+key inherits that structure 1:1, so members keep ONE signing key (plus the untouched `pk_b`
+sender key and Regev decryption keys).
 
 | Surface | Today | After |
 |---|---|---|
 | Channel state co-sign (IMCH digest, `MemberSignature`) — wallet/wasm/CLI sign + native N-of-N verify | `SingleSigCircuit` proof bytes (~76 KB) | **Falcon-512/Poseidon signature (~666 B), native verify** |
 | Close circuit signature check | recursive verify of one `AggLevelCircuit` proof | **direct in-circuit verification of N Falcon signatures** |
 | Cancel-close circuit | same as close | same as close |
-| Validity path: bp's IMSB small-block signature, `ListCircuit`, `bp_sig_chain` accumulator | `SingleSigCircuit` + recursive list | **UNCHANGED** |
+| Validity path: bp's IMSB signature, aggregated by `ListCircuit`, accumulated in `bp_sig_chain` | `SingleSigCircuit` proof as leaf, recursively verified per list step | **same list/chain structure; the list step verifies a Falcon signature directly in-circuit** |
 | BabyBear `pk_b` channel-tx sender sig (Plonky3), Regev encryption keys | — | **UNCHANGED** |
 
-Consequences of the reduced scope:
-- `SingleSigCircuit` and `ListCircuit` **stay in the tree** (validity consumers). Only
-  `AggLevelCircuit`/`SigAggregator` become dead and are deleted.
-- The VK cascade shrinks to: Close and CancelClose circuits get new VKs (their `agg_vd`
-  constant is replaced by the in-circuit Falcon verifier logic). Validity/wrapper VKs for the
-  validity chain are untouched; **only close/cancel-close(+downstream claim circuits if their
-  VKs pin close) fixtures regenerate**, not the validity MLE set — EXCEPT any fixture that bakes
-  `MemberSignature` blobs or the registration preimage (see TM-C7), which is most lifecycle
-  fixtures. Enumerate at Phase 5, do not assume.
-- `sk_g`/`pk_g` remain live as the **bp/validity signing key**. The member now holds an
-  ADDITIONAL Falcon keypair for co-signing. Key separation is deliberate (TM-C6).
-
-Each member's keys after this change: `sk_g` (Goldilocks, bp/IMSB only), **`sk_f` (Falcon-512,
-state co-sign — NEW)**, `sk_b` (BabyBear, tx sender), Regev decryption keys.
+Structural consequences:
+- `pk_g` is **redefined in place**: `pk_g = Poseidon(IMFK ‖ encode(h))` instead of
+  `Poseidon(IMPG‖sk_g)`. Same 32-byte width, same slot in `MemberLeaf` (stays 3 fields),
+  same L1 registration keccak layout, same Solidity `bytes32 pkG`, same IMLL chain format
+  (`Poseidon(IMLL‖m‖pk)` binds a 32-byte pk). **No new identity field.** Values change; layouts
+  do not.
+- The whole `poseidon_sig` primitive family is deleted: `SingleSigCircuit`,
+  `AggLevelCircuit`/`SigAggregator`, and the recursive-verify leaf of `ListCircuit`. The
+  list/chain SHAPE survives (`list_leaf`/`chain_step_target` gadgets and the `bp_sig_chain`
+  accumulator are format-stable); only the list step's leaf verification is replaced by the
+  in-circuit Falcon verifier gadget.
+- VK cascade: list VK changes → validity chain VKs change; close/cancel-close VKs change.
+  **Total fixture/VK regeneration** (routine in this repo; multitoken and Regev-2048 precedent).
+- `update_channel_tree`'s in-circuit chain fold is untouched (it folds `(m, pk)` pairs of
+  unchanged width); `SmallBlockRootMessage` preimages keep `bp_pk_g(8)` limbs whose VALUES are
+  now Falcon pk digests.
+- `SignedSmallBlock::signing_digest()` keccaks signature length+bytes — the bp signature
+  shrinks to ~666 B, changing those digests (fixture regen covers it; no layout change).
 
 ## 1. The scheme
 
@@ -97,27 +105,30 @@ Close/cancel-close must verify with no prover slack:
 **O-5: adversarial tests per item: norm boundary, non-canonical s2 (q-overflow AND centered
 confusion), tampered salt, s2 = 0, non-canonical h, valid-sig-wrong-pk. Each must fail.**
 
-### TM-C6 — Key separation and A11 extension (now a three-signing-key member)
-`sk_g` (bp/IMSB) and `sk_f` (cosign) coexist. Threats: (a) cross-use — a cosign artifact
-accepted on the bp path or vice versa: excluded structurally (different verifier stacks:
-Falcon-native/in-circuit vs SingleSig-proof; different message domains IMCH vs IMSB; **O-6:
-negative test feeding a Falcon signature to `list_leaf`-side consumers and a SingleSig proof to
-the Falcon verifier — both must reject**); (b) binding — `pk_f` must be inseparably bound to the
-same member as `pk_g`/`pk_b`/regev at registration (A11 pattern): `pk_f` joins `MemberLeaf` and
-the per-slot L1 registration keccak preimage. **O-7: mismatched-pair rejection tests for every
-pair involving pk_f; delegate-count and slot semantics unchanged.**
+### TM-C6 — Cross-context isolation under ONE key (IMCH vs IMSB)
+The single Falcon key signs both state co-signs (IMCH digests) and small-block roots (IMSB
+digests) — exactly as `sk_g` does today. Isolation rests on the message digests: both are
+keccak digests whose preimages open with distinct domain constants, so no message can verify in
+both roles. This property is INHERITED, not new, but the swap must not weaken it: every
+verifier recomputes the expected digest for ITS context and never accepts a caller-supplied
+message. **O-6: negative tests — a valid cosign signature replayed as a bp/IMSB signature (and
+vice versa) must reject in both the native verifier and each circuit; a Falcon signature blob
+fed to any legacy SingleSig-proof parser and an old proof blob fed to the Falcon verifier must
+both reject.**
 
-### TM-C7 — Registration preimage & member-set commitment migration
-`MemberLeaf` gains `pk_f` (3→4 fields) and the registration keccak preimage per slot becomes
-`pk_g‖pk_b‖pk_f‖regev‖recipient` — this **invalidates every baked fixture** that contains a
-registration (the delegate-account migration is precedent, including its "stale fixture
-generator" gotcha). The close/cancel-close member-set commitment switches to bind the keys the
-circuit actually verifies against: keccak `[IMC2, member_count, pk_f_0..15]` (new domain IMC2;
-IMCM retired to the pinned-value non-collision test). Solidity `registeredMemberSetCommitment`
-recomputes over pk_f; `channelBpPkG` stays pk_g (bp path untouched). **O-8: Rust↔Solidity
-shared-vector re-pin for the new commitment; padding argument re-written: a padding slot's
-`pk_f = 0x0…0` and forging it real requires a Poseidon preimage of the zero digest under IMFK
-(state the argument at the new site).**
+### TM-C7 — pk_g redefinition, padding argument, A11
+`pk_g`'s DERIVATION changes (Poseidon of `encode(h)` under IMFK instead of Poseidon of `sk`
+under IMPG); every layout that carries it is width-stable and unchanged: `MemberLeaf` (3
+fields), registration keccak `pk_g‖pk_b‖regev‖recipient`, `member_set_commitment` keccak
+`[IMCM, member_count, pk_g_0..15]` (domain can stay IMCM — the committed VALUES change but the
+format does not; decide at Phase 2 whether a version-distinguishing domain is warranted and
+record the argument either way). Re-argue at their sites: (a) padding — a padding slot's
+`pk_g = 0x0…0`, forging it real requires a Poseidon preimage of the zero digest under IMFK
+(same strength as today's argument under IMPG); (b) A5 distinctness over U256 keys — unaffected
+by what the digest commits to; (c) A11 two-key binding (`pk_g`,`pk_b` in the same MemberLeaf) —
+format-stable, but the mismatched-pair rejection suite re-runs against Falcon-derived pk_g
+(**O-7**). All registration-bearing fixtures regenerate (values, not layout). **O-8:
+Rust↔Solidity shared vectors re-pinned wherever pk_g values enter digests.**
 
 ### TM-C8 — Old-format signature replay / downgrade
 After the swap, a ~76 KB SingleSig proof blob must never verify as a cosignature.
@@ -127,14 +138,13 @@ merely "fails to parse"). The structural checks (`validate_all_member_signatures
 size sanity from "non-empty" to the fixed Falcon encoding length.**
 
 ### TM-C9 — Wire/size-sensitive consumers
-`SignedSmallBlock::signing_digest()` keccaks signature bytes+length (stays SingleSig — bp path —
-so UNCHANGED); node tests assert the delta payload exceeds the signature set (inverts at 666 B —
-fix the tests' premise, they encoded a contingent fact); slim-downlink carryHash and the relay
-byte-table comments reference 833 KB signatures (update). **O-10: sweep every size assumption
-found by the surface map; the wallet wire keeps field names (`memberSlot`, `pkG`→ stays for bp
-identity? NO — `MemberSignature.pk_g` field is renamed `pk_f` in meaning; keep the JSON key
-stable only if the migration story requires it — decide at Phase 4 with a version bump, not
-silent reuse).**
+`SignedSmallBlock::signing_digest()` keccaks signature bytes+length — the bp signature shrinks,
+so these digests change (regen covers it). Node tests assert the delta payload exceeds the
+signature set (inverts at 666 B — fix the tests' premise; they encoded a contingent fact).
+Slim-downlink carryHash and relay byte-table comments reference 833 KB signatures (update; the
+downlink optimization remains sound, just far less necessary). **O-10: sweep every size assumption found
+by the surface map. Wire field names (`pkG` etc.) are kept — the key's meaning changes, its
+identity role does not.**
 
 ### TM-C10 — Key derivation and restore
 `MemberKeys::from_seed(32B)` must yield the Falcon keypair deterministically (seeded ChaCha20
@@ -148,8 +158,9 @@ Poseidon dependency; plonky2's audited-parameter instance, no custom constants. 
 
 ## 4. Explicitly out of scope
 - Fault injection (no HSM claims).
-- Validity path (IMSB/ListCircuit/bp_sig_chain), `pk_b` Plonky3 sender sig, Regev keys.
-- Threshold/aggregate Falcon — N independent signatures verified directly.
+- `pk_b` Plonky3 sender sig, Regev keys.
+- Threshold/aggregate Falcon — independent signatures verified directly (close) or per list
+  step (validity).
 - FN-DSA wire compatibility (H2P differs by design; parameters/sampler track the draft).
 
 ## 5. Non-goals confirmed with owner

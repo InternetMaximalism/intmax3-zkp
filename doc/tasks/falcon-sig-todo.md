@@ -1,4 +1,4 @@
-# Plan: Falcon-512/Poseidon cosigner signatures
+# Plan: Falcon-512/Poseidon unified signing key (replaces sk_g everywhere)
 
 Branch `feat/falcon-poseidon-sig`. Threat model: `falcon-sig-threat-model.md` (TM-C1..C11,
 obligations O-1..O-11). Status: DRAFT — awaiting owner approval. Workflow per CLAUDE.md: each
@@ -10,10 +10,11 @@ phase = implementer subagent + separate security-review subagent; attacker pass 
   Rust, no_std/wasm-ready, deterministic-capable keygen), swapping ONLY `hash_to_point.rs` to
   the in-tree plonky2 Poseidon. Alternative (stronger constant-time story, more surgery):
   Pornin `rust-fn-dsa`. **Recommended: Miden fork.**
-- **DD-2 Member identity**: add `pk_f` as a 4th field of `MemberLeaf` + registration keccak
-  preimage (`pk_g‖pk_b‖pk_f‖regev‖recipient`); member-set commitment for close/cancel-close
-  switches to pk_f under new domain IMC2. pk_g stays (bp path). Invalidates all
-  registration-bearing fixtures (accepted; v3 resets).
+- **DD-2 Member identity (revised: unified)**: `pk_g` REDEFINED in place as
+  `Poseidon(IMFK‖encode(h))`. No new field; `MemberLeaf` stays 3 fields; registration keccak,
+  member-set commitment, IMLL chain, Solidity `bytes32 pkG` all layout-stable. One signing key
+  per member, signing both IMCH and IMSB with message-domain isolation (as sk_g does today).
+  All fixtures regenerate (values change).
 - **DD-3 Salt policy**: randomized 40-byte CSPRNG salt (not deterministic signing).
 - **DD-4 Signature wire format**: version byte ‖ salt(40) ‖ compressed s2 (Falcon standard
   Golomb-Rice, ~625 B) — total ~666 B. Circuit witnesses uncompressed s2; native verifier
@@ -42,25 +43,29 @@ phase = implementer subagent + separate security-review subagent; attacker pass 
 
 ## Phase 2 — Close + cancel-close rewiring
 - [ ] Replace `agg_vd` recursive verify with direct N-sig verification; delete
-      `AggLevelCircuit`/`SigAggregator` (keep `SingleSigCircuit`/`ListCircuit` — validity)
-- [ ] Member-set commitment → pk_f/IMC2; A5 distinctness re-argued; padding argument re-written
-      (O-8); Rust↔Solidity shared-vector re-pin
-- [ ] Close/cancel-close PI layout unchanged where possible; enumerate VK ripple
-- [ ] Cross-scheme rejection tests (O-6)
+      `AggLevelCircuit`/`SigAggregator`
+- [ ] Padding + A5 arguments re-written at their new sites; member-set commitment domain
+      decision recorded (TM-C7); Rust↔Solidity shared-vector re-pin
+- [ ] Cross-scheme rejection tests (O-6, O-9)
 - [ ] Security review + attacker pass on the circuit changes
 
-## Phase 3 — Identity & registration
-- [ ] `MemberLeaf` + registration preimage gain pk_f (DD-2); Solidity registration +
-      `registeredMemberSetCommitment` over pk_f; `channelBpPkG` untouched
-- [ ] A11 three-way mismatched-pair rejection tests (O-7)
-- [ ] Foundry suite green; EIP-170 margin re-checked
+## Phase 3 — Validity path (list step swap)
+- [ ] `ListCircuit` leaf: recursive SingleSig verify → in-circuit Falcon verify (chain format,
+      `list_leaf`/`chain_step_target`, `bp_sig_chain` accumulator all unchanged)
+- [ ] `ValidityCircuit` re-pins the new list VK; conditional-verify gate unchanged
+- [ ] IMCH↔IMSB cross-context rejection tests under the single key (O-6)
+- [ ] Delete `SingleSigCircuit` + the old primitive (`poseidon_sig` reduced to the shared
+      chain gadgets); grep proves 0 active refs
+- [ ] Security review
 
 ## Phase 4 — Wallet/CLI/wasm/node swap
-- [ ] `sign_state`/`verify_state_sig`/`verify_all_signatures` → Falcon native (O-9 downgrade
+- [ ] `MemberKeys` single Falcon signing key from seed (O-11);
+      `sign_state`/`verify_state_sig`/`verify_all_signatures` → Falcon native (O-9 downgrade
       rejection incl. valid-old-proof-rejected test)
 - [ ] wasm exports unchanged in shape; browser signs in ~ms (no plonky2 proving for cosign)
-- [ ] CLI `channel_member.rs` key handling; relay; node tests' size premises fixed (O-10)
-- [ ] Wallet wire field naming decision executed (TM-C9)
+- [ ] CLI `channel_member.rs` key handling incl. bp/IMSB signing; relay; node tests' size
+      premises fixed (O-10)
+- [ ] Solidity: registration values (layout unchanged); Foundry green; EIP-170 margin
 
 ## Phase 5 — Fixtures, e2e, deploy prep
 - [ ] Enumerate (do not assume) fixture regen set; regenerate; semantic validation
