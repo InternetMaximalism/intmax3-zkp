@@ -1,6 +1,6 @@
 # Threat Model: Falcon-512 (Poseidon hash-to-point) replacing the Goldilocks signing key
 
-Branch: `feat/falcon-poseidon-sig` (cut from main @ 1fb724f). Status: DRAFT — awaiting owner approval.
+Branch: `feat/falcon-poseidon-sig` (cut from main @ 1fb724f). Status: APPROVED (owner, 2026-08-05).
 
 ## 0. Scope (owner decisions 2026-08-05, revised: UNIFIED single signing key)
 

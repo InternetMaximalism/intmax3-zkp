@@ -1,7 +1,7 @@
 # Plan: Falcon-512/Poseidon unified signing key (replaces sk_g everywhere)
 
 Branch `feat/falcon-poseidon-sig`. Threat model: `falcon-sig-threat-model.md` (TM-C1..C11,
-obligations O-1..O-11). Status: DRAFT — awaiting owner approval. Workflow per CLAUDE.md: each
+obligations O-1..O-11). Status: APPROVED (owner, 2026-08-05; DD-1..DD-4 confirmed, DD-1 under MIT). Goal: Falcon replaces the plonky2-proof signature; aggregation stays plonky2 as usual; on-chain MLE verification unchanged. Workflow per CLAUDE.md: each
 phase = implementer subagent + separate security-review subagent; attacker pass before merge.
 
 ## Design decisions to confirm with owner
