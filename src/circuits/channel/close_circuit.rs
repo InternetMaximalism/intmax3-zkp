@@ -2170,45 +2170,15 @@ mod tests {
         );
     }
 
-    /// SECURITY (TM-C8 / O-9, cross-SCHEME rejection at the Phase-2 seam): with real artifacts
-    /// of BOTH schemes,
-    /// (a) a REAL legacy `SingleSigCircuit` proof blob (the old proof-as-signature cosign wire
-    ///     object, still live on the validity path until Phase 3) fed to
-    ///     `FalconSignature::from_bytes` is rejected BY POLICY on the version byte (or, if its
-    ///     first byte happens to be 0x01, by the exact-length gate) — not by an incidental parse
-    ///     failure;
-    /// (b) a REAL Falcon signature blob fed to the legacy proof parser is rejected.
-    #[cfg_attr(debug_assertions, ignore = "run with --release")]
-    #[test]
-    fn cross_scheme_signature_blobs_reject_in_both_directions() {
-        use plonky2::plonk::proof::ProofWithPublicInputs as Proof;
-
-        use crate::falcon_sig::{FALCON_SIG_BYTES, FalconSigError, FalconSignature};
-
-        // (a) old scheme -> new verifier.
-        let single = crate::poseidon_sig::circuit::SingleSigCircuit::new();
-        let sk = crate::poseidon_sig::GoldilocksSecretKey::from_seed([0x99u8; 32]);
-        let digest = Bytes32::from_u32_slice(&[0x0106, 1, 2, 3, 4, 5, 6, 7]).unwrap();
-        let old_proof = single.prove(&sk, digest).expect("legacy single-sig proof");
-        let old_blob = old_proof.to_bytes();
-        assert!(
-            old_blob.len() > FALCON_SIG_BYTES,
-            "legacy blob is far larger"
-        );
-        match FalconSignature::from_bytes(&old_blob) {
-            Err(FalconSigError::UnsupportedVersion(_)) | Err(FalconSigError::InvalidLength(_)) => {}
-            other => panic!(
-                "a legacy SingleSigCircuit proof blob must be rejected by the version/length \
-                 gates, got {other:?}"
-            ),
-        }
-
-        // (b) new scheme -> old verifier.
-        let falcon = FalconKeys::from_seed([0x9au8; 32]);
-        let falcon_blob = falcon.sign(digest).to_bytes();
-        assert!(
-            Proof::<F, C, D>::from_bytes(falcon_blob, &single.data.common).is_err(),
-            "a Falcon signature blob must not deserialize as a legacy single-sig proof"
-        );
-    }
+    // MOVED (falcon-sig Phase 4): `cross_scheme_signature_blobs_reject_in_both_directions` used
+    // to live here, building a REAL legacy `SingleSigCircuit` proof in-process. That circuit —
+    // and every other trace of the Goldilocks proof-as-signature scheme — is now DELETED, so
+    //   * direction (a) "a real legacy blob must be rejected by the Falcon parser" moved to
+    //     `falcon_sig::tests::legacy_single_sig_proof_blob_rejected_on_version_gate` (and
+    //     `wallet_core`'s `legacy_single_sig_blob_rejected_by_verify_state_sig`), driven by the
+    //     REAL blob captured before the deletion
+    //     (`src/falcon_sig/testdata/legacy_single_sig_proof.bin`);
+    //   * direction (b) "a Falcon blob must not parse as a legacy proof" is VACUOUS by construction
+    //     — there is no legacy parser left in the tree to feed (see the deletion grep in
+    //     `doc/tasks/falcon-sig-phase4-notes.md`).
 }

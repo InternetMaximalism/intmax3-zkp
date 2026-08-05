@@ -197,12 +197,14 @@ pub struct BpSigEvent {
 /// `pk_g` the list step derives from the witnessed `h`, or the validity circuit's
 /// `C == final.bp_sig_chain` assertion fails.
 ///
-/// `falcon_keys` is behind an `Arc` only because [`FalconKeys`] is deliberately NOT `Clone` (that
+/// Each key is behind an `Arc` only because [`FalconKeys`] is deliberately NOT `Clone` (that
 /// non-`Clone`ness is what stops tests from silently duplicating a signer) while this struct is
-/// cloned all over the generator.
+/// cloned all over the generator. Per-key (rather than one `Arc` over the whole `Vec`) so
+/// [`ChannelMemberKeys::from_member_keys`] can share the wallet's OWN key objects instead of
+/// re-deriving twins — see the finding-7 note there.
 #[derive(Clone)]
 pub struct ChannelMemberKeys {
-    pub falcon_keys: std::sync::Arc<Vec<FalconKeys>>,
+    pub falcon_keys: Vec<std::sync::Arc<FalconKeys>>,
     /// Per-member BabyBear hash-sig secret keys (P3). Their `pk_b` digests are committed into the
     /// 3-field `MemberLeaf` / registration record.
     pub baby_keys: Vec<BabyBearSecretKey>,
@@ -266,14 +268,14 @@ impl ChannelMemberKeys {
             regev_pks.push(regev);
         }
         Self {
-            falcon_keys: std::sync::Arc::new(falcon_keys),
+            falcon_keys: falcon_keys.into_iter().map(std::sync::Arc::new).collect(),
             baby_keys,
             regev_pks,
             member_tree,
         }
     }
 
-    /// Build `ChannelMemberKeys` from REAL wallet `MemberKeys` (Goldilocks + BabyBear + REAL
+    /// Build `ChannelMemberKeys` from REAL wallet `MemberKeys` (Falcon + BabyBear + REAL
     /// Regev), so a channel registered in the validity proof has EXACTLY the same `(pk_g, pk_b,
     /// regev_pk_digest)` member set as the channel-layer `build_record` (B-2: the small-block
     /// `bp_pk_g` the validity circuit verifies is a genuine registered member, and the channel's
@@ -281,21 +283,14 @@ impl ChannelMemberKeys {
     /// are real keypairs (the secret lives with the wallet, NOT here — validity never
     /// decrypts).
     ///
-    /// KNOWN PHASE SEAM (falcon-sig Phase 3, resolved by Phase 4): `MemberKeys` does not yet carry
-    /// a Falcon signing key (`MemberKeys::signing_key` is still the Goldilocks key used by the
-    /// wallet's IMCH co-sign path). The member's FALCON identity — the `pk_g` committed in the
-    /// member tree and the key the bp signs IMSB digests with — must therefore be supplied
-    /// explicitly by the caller. Phase 4 replaces the `falcon_keys` argument with
-    /// `MemberKeys`'s own key and this parameter goes away.
-    pub fn from_member_keys(
-        keys: &[crate::wallet_core::MemberKeys],
-        falcon_keys: Vec<FalconKeys>,
-    ) -> Self {
-        assert_eq!(
-            keys.len(),
-            falcon_keys.len(),
-            "from_member_keys: one Falcon signing key per member is required"
-        );
+    /// SECURITY (falcon-sig Phase 4, closing the Phase-3 seam): the member's FALCON identity is
+    /// read off `MemberKeys` itself — the SAME key object the wallet co-signs channel states
+    /// with, shared by refcount rather than re-derived. There is therefore no second derivation
+    /// that could disagree with the first (Phase-3 review finding 7), and no `falcon_keys`
+    /// argument for a caller to pass inconsistently.
+    pub fn from_member_keys(keys: &[crate::wallet_core::MemberKeys]) -> Self {
+        let falcon_keys: Vec<std::sync::Arc<FalconKeys>> =
+            keys.iter().map(|k| k.falcon_key_handle()).collect();
         let mut member_tree = MemberTree::init();
         let (mut baby_keys, mut regev_pks) = (Vec::new(), Vec::new());
         // SECURITY (Option B): this is the REGISTERED member tree — cosigners only, at most
@@ -320,7 +315,7 @@ impl ChannelMemberKeys {
             regev_pks.push(k.regev_pk.clone());
         }
         Self {
-            falcon_keys: std::sync::Arc::new(falcon_keys),
+            falcon_keys,
             baby_keys,
             regev_pks,
             member_tree,

@@ -82,14 +82,9 @@ fn inter_channel_small_block_sig_is_validity_proven() {
         .enumerate()
         .map(|(i, k)| info(i as u16, k))
         .collect();
-    // falcon-sig Phase 3: the member identity registered on L1 is the FALCON pk_g; `MemberKeys`
-    // does not carry a Falcon key yet (Phase 4), so supply the canonical deterministic derivation.
-    let ck = ChannelMemberKeys::from_member_keys(
-        &keys,
-        intmax3_zkp::circuits::test_utils::block_witness_generator::deterministic_member_falcon_keys(
-            CHANNEL, 3,
-        ),
-    );
+    // falcon-sig Phase 4: the member identity registered on L1 is the FALCON pk_g, read off the
+    // wallet's own `MemberKeys` (which now carries the single Falcon signing key).
+    let ck = ChannelMemberKeys::from_member_keys(&keys);
 
     // ----- Registration block (block 1): writes member_pubkeys_root into the channel tree -----
     {

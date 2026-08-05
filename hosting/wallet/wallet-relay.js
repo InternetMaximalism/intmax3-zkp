@@ -343,6 +343,15 @@ app.post('/api/init', (req, res) => {
 //     state...regevPkDigests 70,657  changes only on join
 //     state...recipients     46,081  changes only on join
 //
+// SIGNATURE SIZE UPDATE (falcon-sig Phase 4). Those 833,416 bytes were 3 co-signers x a ~76 KB
+// plonky2 proof-as-signature. A co-signature is now a 1,690-byte native Falcon-512 blob
+// (666 B signature + the 1,024 B public polynomial the verifier needs), i.e. ~5 KB of JSON for
+// the whole set instead of ~833 KB — a ~165x drop, and the signature set stops being the
+// dominant term. Every other row above is unchanged, so `encBalances` is now what the delta is
+// actually saving. The optimization remains CORRECT and still worth keeping (encBalances alone
+// is ~343 KB and grows with slots x tokens); it is simply no longer load-bearing for the
+// signature blob. Nothing about the security argument below depends on any of these sizes.
+//
 // So a delta sends `state` minus {encBalances, regevPkDigests, recipients}, plus ONLY the changed
 // encBalances rows, and names the rest as "carry these from your base".
 //

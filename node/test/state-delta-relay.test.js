@@ -150,13 +150,29 @@ test('REAL ch7 snapshot: the delta is materially smaller than the full snapshot'
   console.log('    delta                ' + kb(deltaBytes) +
     '  (' + (100 * (1 - deltaBytes / fullBytes)).toFixed(1) + '% smaller)');
   console.log('    of which signatures  ' + kb(sigBytes) +
-    '  (' + (100 * sigBytes / deltaBytes).toFixed(1) + '% of the delta — irreducible)');
+    '  (' + (100 * sigBytes / deltaBytes).toFixed(1) + '% of the delta)');
 
   assert.ok(deltaBytes < fullBytes * 0.75,
     'the delta should be well under the full snapshot (got ' + kb(deltaBytes) + ' vs ' + kb(fullBytes) + ')');
-  // The floor: member signatures are fresh every transition and cannot be elided. Anything
-  // meaningfully below that would mean we dropped something we must send.
-  assert.ok(deltaBytes > sigBytes, 'the delta must still carry the full signature set');
+
+  // PREMISE FIX (falcon-sig Phase 4). This used to assert `deltaBytes > sigBytes` and call the
+  // signature set the delta's "irreducible floor". That encoded a CONTINGENT FACT about the old
+  // scheme: a co-signature was a ~76 KB plonky2 proof, so the signature set (~833 KB) dominated
+  // the delta and "the delta is at least as big as the signatures" was a meaningful floor. A
+  // co-signature is now a 1,690-byte native Falcon blob, so the same inequality is trivially
+  // true and proves nothing — it would pass even if the relay dropped signatures entirely and
+  // sent one encBalances row.
+  //
+  // The property the old assertion was REACHING FOR — member signatures are fresh every
+  // transition and can never be elided from a delta — is checked directly here instead, which is
+  // strictly stronger and size-independent: the delta must carry the head's signature set
+  // VERBATIM. (`memberSignatures` is also pinned out of DELTA_CARRY_FIELDS in the *-ui tests, so
+  // it can never be demoted to a "carry this from your base" field.)
+  assert.ok(sigBytes > 0, 'the head state must actually be co-signed');
+  assert.deepStrictEqual(delta.state.memberSignatures, headSnap.state.memberSignatures,
+    'the delta must transmit the full signature set verbatim, never carried or elided');
+  assert.ok(!R.DELTA_CARRY_FIELDS.includes('memberSignatures'),
+    'memberSignatures must never become a carried field');
 });
 
 // ---- Fallback is total ------------------------------------------------------------------------

@@ -843,7 +843,8 @@ function reconcileStateDelta(delta, baseState, ack) {
 
 /**
  * Project a VERIFIED state down to just what a delta base is read for. Keeping the projection
- * rather than the whole state drops the ~833KB `memberSignatures` blob from the JS heap, and makes
+ * rather than the whole state drops the `memberSignatures` blob from the JS heap (~833KB of
+ * legacy proof-signatures; ~5KB since the falcon-sig switch), and makes
  * it structurally impossible to reuse a base for anything but reconstruction. `digest` and the
  * rows always come from ONE state object, so they can never be mutually inconsistent.
  */

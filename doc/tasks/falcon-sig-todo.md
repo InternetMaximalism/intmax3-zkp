@@ -116,14 +116,31 @@ to every instantiated width 1/14/15/32). Suite 33/33.
       digest; `from_member_keys` takes the Falcon keys explicitly (Phase-4 seam, tripwired)
 - [ ] Security review
 
-## Phase 4 — Wallet/CLI/wasm/node swap
-- [ ] `MemberKeys` single Falcon signing key from seed (O-11);
-      `sign_state`/`verify_state_sig`/`verify_all_signatures` → Falcon native (O-9 downgrade
-      rejection incl. valid-old-proof-rejected test)
-- [ ] wasm exports unchanged in shape; browser signs in ~ms (no plonky2 proving for cosign)
-- [ ] CLI `channel_member.rs` key handling incl. bp/IMSB signing; relay; node tests' size
-      premises fixed (O-10)
-- [ ] Solidity: registration values (layout unchanged); Foundry green; EIP-170 margin
+## Phase 4 — Wallet/CLI/wasm/node swap — IMPLEMENTED (notes: `falcon-sig-phase4-notes.md`; review pending)
+- [x] `MemberKeys` single Falcon signing key from seed (O-11), held as `Arc<FalconKeys>` so the
+      registration path shares the SAME key object instead of re-deriving;
+      `sign_state`/`verify_state_sig`/`verify_all_signatures` → Falcon native via
+      `verify_cosign_blob` → `verify_with_pk_g`. Cosign wire 76 KB → 1,690 B
+      (`v1 ‖ salt ‖ s2 ‖ h`); `h` travels UNTRUSTED and is bound to the authenticated `pk_g`
+      inside the call (notes §1.3). O-9: version gate first, real 77,872-byte legacy blob
+      committed at `src/falcon_sig/testdata/` and rejected at both the parser and the wallet
+      entry point; `validate_all_member_signatures` moved from "non-empty" to the fixed length.
+- [x] `SingleSigCircuit` / `GoldilocksSecretKey` / `poseidon_sig::circuit` DELETED; `poseidon_sig`
+      reduces to `list` (the IMLL chain gadgets) + two RESERVED retired domain constants. 0 code
+      references (notes §2). Direction (b) of the old cross-scheme test is vacuous by construction.
+- [x] All three Phase-3 seams closed: `build_channel_withdrawal` lost `cli_falcon_seeds`,
+      `from_member_keys` lost `falcon_keys`, the a3 PHASE-4-OBLIGATION comment became a real
+      assertion, and the CLI's second seed derivation (`falcon_seed_for`/`falcon_keys_for`) is gone
+      — `cli_falcon_identities_agree_across_close_register_and_withdraw` re-aimed at the actual
+      producers rather than deleted.
+- [x] wasm exports unchanged in shape; the cosign path builds and proves NO circuit
+      (~5 ms native sign); `cargo check --target wasm32-unknown-unknown --lib` clean.
+- [x] CLI `channel_member.rs` key handling unified on `MemberKeys`; relay byte tables updated;
+      node tests' size premises fixed by replacing a byte-size proxy with the property it was
+      reaching for (O-10). `npm test` 223/223.
+- [x] Solidity: registration layout unchanged; `forge build` OK, **248/248 forge tests pass**;
+      **EIP-170 margin `IntmaxRollup` = 1,108 B** (runtime 23,468 B).
+- [ ] Security review (separate subagent) + attacker pass on the `h`-transport binding
 
 ## Phase 5 — Fixtures, e2e, deploy prep
 - [ ] Enumerate (do not assume) fixture regen set; regenerate; semantic validation

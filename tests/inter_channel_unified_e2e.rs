@@ -228,14 +228,9 @@ fn unified_inter_channel_transfer_e2e() {
         .collect();
     let a_record = build_record(A_ID, &a_members, 0, 0).expect("A record");
     let a_pks = pks_array(&a_keys);
-    // falcon-sig Phase 3 seam: the registered member identity is the FALCON pk_g (Phase 4 moves
-    // this key into `MemberKeys`).
-    let ck = ChannelMemberKeys::from_member_keys(
-        &a_keys,
-        intmax3_zkp::circuits::test_utils::block_witness_generator::deterministic_member_falcon_keys(
-            A_ID, a_keys.len(),
-        ),
-    );
+    // falcon-sig Phase 4: the registered member identity is the FALCON pk_g, read off the
+    // wallet's own `MemberKeys`.
+    let ck = ChannelMemberKeys::from_member_keys(&a_keys);
     // The channel record's member SET is the registered member set (B-2 stitch). Under Option B
     // (tasks/reg-chain-1024-threat-model.md) the record's root is the WALLET membership tree
     // (height WALLET_MEMBER_TREE_HEIGHT, evolves with delegate joins) while `ck.member_tree` is the
@@ -247,7 +242,7 @@ fn unified_inter_channel_transfer_e2e() {
         let mut wallet_tree = MemberTree::init_wallet_membership();
         for k in &a_keys {
             wallet_tree.push(MemberLeaf {
-                pk_g: k.signing_key.public_key_hash_out(),
+                pk_g: k.pk_g_hash_out(),
                 pk_b: k.baby_key.public_key().to_bytes32().reduce_to_hash_out(),
                 regev_pk_digest: k.regev_pk.poseidon_digest(),
             });

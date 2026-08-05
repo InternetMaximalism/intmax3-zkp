@@ -187,7 +187,7 @@ fn signatures_for(record: &ChannelRecord) -> Vec<MemberSignature> {
         .map(|(idx, hash)| MemberSignature {
             member_slot: idx as u8,
             pk_g: *hash,
-            signature: vec![1 + idx as u8],
+            signature: crate::common::channel::structural_cosign_placeholder(1 + idx as u8),
         })
         .collect()
 }

@@ -152,6 +152,46 @@ driving NTRU keygen), or restore-from-seed silently forks identities. **O-11: sa
 `h`/`pk_f` test, cross-platform (native vs wasm32) keygen determinism test; keygen (~10–50 ms
 native) runs at join/restore only, never per signature.**
 
+### TM-C12 — The public polynomial `h` is now published with every cosignature (ACCEPTED)
+
+Phase 4 carries `h` (1 KB) inside `MemberSignature.signature` so the verifier can check a
+signature without a schema change: `v1(1) ‖ salt(40) ‖ s2(625) ‖ h(1024)` = 1690 B.
+
+Before Phase 4, `h` never left the wallet — only `pk_g = Poseidon(IMFK‖encode(h))` was
+registered, and the close/agg circuits expose `pk_g` as a public input with `h` as a witness.
+Every cosignature now publishes `h` to anyone who observes the wire.
+
+**This is not an unforgeability weakening**: Falcon-512 is defined with a PUBLIC `h`, and
+security rests on NTRU/SIS (A-F1), not on hiding it. Nor does it change linkability —
+`MemberSignature.pk_g` was already in the clear. What it removes is a defence-in-depth layer:
+an attacker who wanted `h` previously had to invert a Poseidon digest.
+
+**Accepted, and recorded here because the Phase-4 notes discussed only bandwidth.** The
+alternative (widening `MemberInfo`/`MemberLeaf`) was rejected: it would still need the same
+digest check AND would break the layout stability the whole migration rests on. The binding is
+unchanged either way — `h` is untrusted input consumed only through `verify_with_pk_g`, which
+recomputes `falcon_pk_digest(h) == pk_g` against the AUTHENTICATED `record.member_pk_gs[slot]`
+BEFORE the signature check, so substituting `h'` requires a Poseidon second preimage (A-F4).
+
+### TM-C13 — wasm32/native keygen determinism (MEASURED, gate script in-tree)
+
+A wallet created or restored in the browser must derive the same `pk_g` from a seed as the CLI
+does; otherwise the L1 registration names an identity the wallet cannot reproduce, its
+co-signatures stop verifying, and the channel is permanently unclosable — funds stuck, with no
+error at the moment of divergence.
+
+NTRU keygen runs f64 arithmetic. The structural argument for determinism is strong (only
+IEEE-754 `+ - * / floor round sqrt` over a hardcoded twiddle table; `approx_exp` is integer
+FACCT, not `libm::exp`; Rust neither contracts to FMA nor reassociates without fast-math), but
+it is a NEGATIVE claim over a large vendored numeric surface — and **this repository has already
+observed a wasm-vs-native numeric divergence** in the Regev STARK verifier (recorded in
+`.cargo/config.toml`; disabling simd128 did not fix it). So it is measured, not argued.
+
+**Measured 2026-08-06: wasm32 and native agree** — both give
+`pk_g(seed=[42;32]) = 0x90eed963…decf0`, the same constant the native suite pins. Reproduce with
+`hosting/check-falcon-wasm-keygen.sh`. **O-12: re-run this before any browser deploy and after
+any bump of the wasm toolchain, `num-complex`, `num-bigint`, or the vendored Falcon math.**
+
 ### TM-C11 — Algebraic-hash margin
 Poseidon in a new role (H2P). No known applicable attack; consistent with the system-wide
 Poseidon dependency; plonky2's audited-parameter instance, no custom constants. **Monitored.**

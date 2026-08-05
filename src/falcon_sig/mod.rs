@@ -1,7 +1,8 @@
 //! Falcon-512 signatures with a plonky2-Poseidon hash-to-point — the post-quantum member
 //! signing key that replaces the Goldilocks `poseidon_sig` proof-as-signature scheme
-//! (Phases 1-4; this module is the Phase-0 standalone native primitive and is not yet wired
-//! into any consumer).
+//! (Phases 1-4). As of Phase 4 this is the ONE member signing key: it signs both the channel
+//! state co-sign (IMCH) and the bp's small-block root (IMSB), with isolation resting on the
+//! message digests' distinct domain constants (TM-C6).
 //!
 //! Scheme (threat model: `doc/tasks/falcon-sig-threat-model.md`, plan:
 //! `doc/tasks/falcon-sig-todo.md`):
@@ -85,6 +86,15 @@ pub const FALCON_SIG_BYTES: usize = 1 + SIG_NONCE_LEN + SIG_POLY_BYTE_LEN;
 /// Falcon-512 ring degree (number of polynomial coefficients).
 pub const FALCON_N: usize = N;
 
+/// Wire length of the public polynomial `h` inside a COSIGN blob: 512 coefficients, 2 bytes
+/// each, little-endian, canonical (`< q`). See [`encode_cosign_blob`].
+pub const FALCON_PK_H_BYTES: usize = 2 * FALCON_N;
+
+/// Fixed total length of the wallet COSIGN transport blob (Phase 4):
+/// `v1 signature (666) || h (1024)` = 1690 bytes. See [`encode_cosign_blob`] for why `h`
+/// travels and why carrying it does not weaken the identity binding.
+pub const FALCON_COSIGN_BLOB_BYTES: usize = FALCON_SIG_BYTES + FALCON_PK_H_BYTES;
+
 /// Falcon-512 modulus `q`.
 pub const FALCON_Q: u16 = MODULUS as u16;
 
@@ -105,12 +115,27 @@ pub enum FalconSigError {
     /// downgrade/replay attempts (TM-C8 / O-9) are observably rejected on the version gate.
     #[error("unsupported falcon signature version byte {0:#04x} (expected 0x01)")]
     UnsupportedVersion(u8),
-    /// The input length is not [`FALCON_SIG_BYTES`].
-    #[error("invalid falcon signature length {0} (expected 666)")]
-    InvalidLength(usize),
+    /// The input length is wrong: `(actual, expected)`. SECURITY (Phase-4 review MINOR-1): the
+    /// expected length is carried in the error rather than hard-coded, because this ONE variant
+    /// now serves two gates — the 666-byte bare signature and the 1690-byte cosign blob (which
+    /// additionally carries `h`). The message previously always said "expected 666", so a
+    /// rejected COSIGNATURE printed a length it was never checked against, misdirecting anyone
+    /// reading the log. Tests match on the variant, so this was invisible to them.
+    #[error("invalid falcon signature length {0} (expected {1})")]
+    InvalidLength(usize, usize),
     /// The compressed `s2` field is not a canonical Falcon-512 compressed polynomial.
     #[error("malformed falcon s2 encoding: {0}")]
     MalformedS2(alloc::string::String),
+    /// A COSIGN blob carried a public-polynomial coefficient `>= q`. Non-canonical encodings are
+    /// rejected so `encode(h)` stays injective on the accepted domain (one `h` per `pk_g`) and so
+    /// the blob encoding stays a bijection (signature BYTES feed keccak digests downstream).
+    #[error("non-canonical falcon public key coefficient at index {0}")]
+    NonCanonicalPublicKey(usize),
+    /// The blob parsed but the signature did not verify against the authenticated `pk_g` — either
+    /// `Poseidon(IMFK || encode(h)) != pk_g` (wrong signer / substituted public key) or the norm
+    /// bound failed (wrong message / forgery attempt).
+    #[error("falcon signature verification failed")]
+    VerificationFailed,
 }
 
 // KEYS
@@ -118,8 +143,8 @@ pub enum FalconSigError {
 
 /// A member's Falcon-512 signing keypair.
 ///
-/// SECURITY: like `GoldilocksSecretKey`, this type derives neither `Serialize` nor
-/// `Deserialize` (leak-by-default footgun); `Debug` is redacted by the inner `SecretKey`.
+/// SECURITY: this type derives neither `Serialize` nor `Deserialize` (a default secret-bearing
+/// serialization is a leak-by-default footgun); `Debug` is redacted by the inner `SecretKey`.
 /// Key material is zeroized on drop by the vendored `SecretKey`.
 pub struct FalconKeys {
     sk: SecretKey,
@@ -316,7 +341,7 @@ impl FalconSignature {
             return Err(FalconSigError::UnsupportedVersion(version));
         }
         if bytes.len() != FALCON_SIG_BYTES {
-            return Err(FalconSigError::InvalidLength(bytes.len()));
+            return Err(FalconSigError::InvalidLength(bytes.len(), FALCON_SIG_BYTES));
         }
         let salt: [u8; SIG_NONCE_LEN] = bytes[1..1 + SIG_NONCE_LEN]
             .try_into()
@@ -344,6 +369,108 @@ impl FalconSignature {
         }
         Ok(Self { salt, s2 })
     }
+}
+
+// COSIGN TRANSPORT BLOB (Phase 4)
+// ================================================================================================
+
+/// Encodes the wallet COSIGN transport blob: `v1 signature (666) || h (1024, u16-LE canonical)`.
+///
+/// # Why `h` travels
+///
+/// A verifier of a channel-state co-signature holds the signer's AUTHENTICATED identity
+/// `pk_g = Poseidon(IMFK || encode(h))` (it is `ChannelRecord.member_pk_gs[slot]`, anchored by the
+/// on-chain registration), but `pk_g` is a hash: `h` cannot be recovered from it, and the Falcon
+/// verification equation `s1 = c - s2*h` needs `h` itself. The alternatives were to widen
+/// `MemberInfo`/`MemberLeaf` with a 1 KB public key (a wire-schema change on every consumer, and
+/// still unauthenticated — `MemberLeaf` commits `pk_g`, not `h`) or to carry `h` inside the
+/// already-opaque `MemberSignature.signature: Vec<u8>`. This does the latter: no wire schema
+/// anywhere changes.
+///
+/// SECURITY (identity binding is NOT weakened): `h` arrives from the network and is therefore
+/// UNTRUSTED. Every consumer must verify through [`verify_with_pk_g`], which recomputes
+/// `falcon_pk_digest(h)` and requires it to equal the AUTHENTICATED `pk_g` before checking the
+/// signature — exactly the check the in-circuit gadget performs (TM-C5 item 5). A blob carrying an
+/// attacker's `h` therefore fails on the digest comparison; forging one that passes needs a
+/// Poseidon collision/preimage under IMFK (assumption A-F4, unchanged). The transported `h` is a
+/// convenience for the verifier, never a source of identity.
+///
+/// SECURITY (bijectivity): the decoder rejects any coefficient `>= q`, so exactly one 1690-byte
+/// string decodes to any given `(salt, s2, h)` (the 666-byte prefix is already bijective — see
+/// [`FalconSignature::from_bytes`]). Signature bytes feed keccak digests downstream
+/// (`SignedSmallBlock::signing_digest`), so a malleable encoding would be a real defect.
+///
+/// # Panics
+/// Panics if any coefficient is `>= q`. Callers encode `h` from their OWN [`FalconKeys`]
+/// (canonical by construction); untrusted encodings enter only through [`decode_cosign_blob`],
+/// which rejects them gracefully.
+pub fn encode_cosign_blob(sig: &FalconSignature, pk_h: &[u16; FALCON_N]) -> Vec<u8> {
+    assert!(
+        pk_h.iter().all(|&c| c < FALCON_Q),
+        "encode_cosign_blob: non-canonical coefficient (>= q)"
+    );
+    let mut out = sig.to_bytes();
+    out.reserve_exact(FALCON_PK_H_BYTES);
+    for &c in pk_h.iter() {
+        out.extend_from_slice(&c.to_le_bytes());
+    }
+    debug_assert_eq!(out.len(), FALCON_COSIGN_BLOB_BYTES);
+    out
+}
+
+/// Parses a COSIGN transport blob produced by [`encode_cosign_blob`].
+///
+/// SECURITY (O-9 / TM-C8, downgrade rejection): the VERSION byte is checked FIRST — before the
+/// length and before any structural parsing — so a legacy ~76 KB `SingleSigCircuit` proof blob is
+/// rejected by POLICY on the version gate rather than by an incidental parse failure. The blob
+/// then has to be exactly [`FALCON_COSIGN_BLOB_BYTES`] long, which is the "fixed Falcon encoding
+/// length" the threat model asks structural checks to enforce in place of "non-empty".
+pub fn decode_cosign_blob(
+    bytes: &[u8],
+) -> Result<(FalconSignature, [u16; FALCON_N]), FalconSigError> {
+    // Version gate FIRST (O-9): policy rejection, not a parse accident.
+    let &version = bytes.first().ok_or(FalconSigError::Empty)?;
+    if version != FALCON_SIG_V1 {
+        return Err(FalconSigError::UnsupportedVersion(version));
+    }
+    if bytes.len() != FALCON_COSIGN_BLOB_BYTES {
+        return Err(FalconSigError::InvalidLength(
+            bytes.len(),
+            FALCON_COSIGN_BLOB_BYTES,
+        ));
+    }
+    let sig = FalconSignature::from_bytes(&bytes[..FALCON_SIG_BYTES])?;
+    let mut pk_h = [0u16; FALCON_N];
+    for (i, (slot, chunk)) in pk_h
+        .iter_mut()
+        .zip(bytes[FALCON_SIG_BYTES..].chunks_exact(2))
+        .enumerate()
+    {
+        let c = u16::from_le_bytes([chunk[0], chunk[1]]);
+        if c >= FALCON_Q {
+            return Err(FalconSigError::NonCanonicalPublicKey(i));
+        }
+        *slot = c;
+    }
+    Ok((sig, pk_h))
+}
+
+/// Full COSIGN verification: parse the blob, then verify through [`verify_with_pk_g`] so the
+/// transported `h` is bound to the AUTHENTICATED `pk_g` INSIDE the call.
+///
+/// SECURITY: this is the only sanctioned entry point for verifying a `MemberSignature.signature`.
+/// Using [`verify`] on a decoded blob would drop the `falcon_pk_digest(h) == pk_g` check and
+/// accept signatures under an attacker-chosen key (review F-2).
+pub fn verify_cosign_blob(
+    pk_g: Bytes32,
+    message_digest: Bytes32,
+    blob: &[u8],
+) -> Result<(), FalconSigError> {
+    let (sig, pk_h) = decode_cosign_blob(blob)?;
+    if !verify_with_pk_g(pk_g, &pk_h, message_digest, &sig) {
+        return Err(FalconSigError::VerificationFailed);
+    }
+    Ok(())
 }
 
 // VERIFICATION
@@ -548,6 +675,158 @@ mod tests {
         }
     }
 
+    // ---- COSIGN TRANSPORT BLOB (Phase 4) --------------------------------------------------
+
+    /// A REAL legacy `SingleSigCircuit` proof blob (77,872 bytes) captured from the tree at
+    /// `79f11ad`, immediately before that circuit was deleted — see `testdata/README.md`.
+    const LEGACY_SINGLE_SIG_BLOB: &[u8] = include_bytes!("testdata/legacy_single_sig_proof.bin");
+
+    /// SECURITY (TM-C8 / O-9, DOWNGRADE REJECTION — the obligation, with a real artifact).
+    ///
+    /// A valid OLD-scheme cosignature (the proof-as-signature wire object every co-signer used
+    /// to ship) must be rejected by the new verifier **by policy on the version gate**, not
+    /// merely by failing to parse. The blob here is genuine, not a random byte string of the
+    /// right size: a random blob could not distinguish "rejected because the format is
+    /// unsupported" from "rejected because the bytes are noise".
+    #[cfg_attr(debug_assertions, ignore = "run with --release")]
+    #[test]
+    fn legacy_single_sig_proof_blob_rejected_on_version_gate() {
+        // The artifact really is the old thing: ~76 KB, not 666/1690 bytes.
+        assert_eq!(LEGACY_SINGLE_SIG_BLOB.len(), 77_872);
+        assert!(LEGACY_SINGLE_SIG_BLOB.len() > FALCON_COSIGN_BLOB_BYTES);
+        assert_ne!(LEGACY_SINGLE_SIG_BLOB[0], FALCON_SIG_V1);
+
+        // The COSIGN entry point (what `wallet_core::verify_state_sig` calls) rejects it on the
+        // VERSION byte — the first thing it looks at, before length or structure.
+        assert_eq!(
+            decode_cosign_blob(LEGACY_SINGLE_SIG_BLOB),
+            Err(FalconSigError::UnsupportedVersion(
+                LEGACY_SINGLE_SIG_BLOB[0]
+            )),
+            "a legacy proof blob must be rejected by POLICY on the version gate"
+        );
+        // ... and so does the bare 666-byte signature parser.
+        assert_eq!(
+            FalconSignature::from_bytes(LEGACY_SINGLE_SIG_BLOB),
+            Err(FalconSigError::UnsupportedVersion(
+                LEGACY_SINGLE_SIG_BLOB[0]
+            )),
+        );
+        // Full verification (with a real authenticated pk_g) rejects it too — the version gate
+        // fires before any key or norm arithmetic happens.
+        assert_eq!(
+            verify_cosign_blob(KEYS.pk_g(), sample_digest(0x11), LEGACY_SINGLE_SIG_BLOB),
+            Err(FalconSigError::UnsupportedVersion(
+                LEGACY_SINGLE_SIG_BLOB[0]
+            )),
+        );
+    }
+
+    /// Completeness + wire fixity of the COSIGN blob: a freshly signed blob has the fixed 1690
+    /// byte length, round-trips exactly, and verifies against the signer's `pk_g` alone (the
+    /// verifier never needs `h` from anywhere else).
+    #[cfg_attr(debug_assertions, ignore = "run with --release")]
+    #[test]
+    fn cosign_blob_round_trip_and_verify() {
+        let digest = sample_digest(0x21);
+        let sig = KEYS.sign(digest);
+        let blob = encode_cosign_blob(&sig, &KEYS_H);
+        assert_eq!(blob.len(), FALCON_COSIGN_BLOB_BYTES);
+        assert_eq!(blob[0], FALCON_SIG_V1);
+        let (sig2, h2) = decode_cosign_blob(&blob).expect("round trip");
+        assert_eq!(sig2, sig);
+        assert_eq!(h2, *KEYS_H);
+        assert_eq!(verify_cosign_blob(KEYS.pk_g(), digest, &blob), Ok(()));
+        // Re-encoding the decoded pair reproduces the exact bytes (encoding is a bijection —
+        // signature BYTES feed keccak digests downstream, so malleability would be a defect).
+        assert_eq!(encode_cosign_blob(&sig2, &h2), blob);
+    }
+
+    /// SECURITY (the identity binding the transported `h` must NOT weaken, review F-2).
+    ///
+    /// `h` travels inside the blob and is therefore attacker-controlled. Each case below is a
+    /// distinct way to try to exploit that; all must fail.
+    #[cfg_attr(debug_assertions, ignore = "run with --release")]
+    #[test]
+    fn cosign_blob_rejects_substituted_or_malformed_public_keys() {
+        let digest = sample_digest(0x22);
+        let blob = encode_cosign_blob(&KEYS.sign(digest), &KEYS_H);
+        let pk_g = KEYS.pk_g();
+
+        // (1) SUBSTITUTED KEY — the attacker signs with a key of their own and ships the matching
+        // `h`. Internally consistent (it verifies under its OWN pk_g), but it is not the
+        // registered member's identity, so the `Poseidon(IMFK||encode(h)) == pk_g` check rejects.
+        // This is THE case that would break member authentication if `h` were trusted.
+        let other = FalconKeys::from_seed([0xd1u8; 32]);
+        let other_blob = encode_cosign_blob(&other.sign(digest), &other.pk_coefficients());
+        assert_eq!(
+            verify_cosign_blob(other.pk_g(), digest, &other_blob),
+            Ok(())
+        );
+        assert_eq!(
+            verify_cosign_blob(pk_g, digest, &other_blob),
+            Err(FalconSigError::VerificationFailed),
+            "a signature under an attacker key must not verify against a member's pk_g"
+        );
+
+        // (2) TAMPERED h with the honest signature — flipping any coefficient changes the digest.
+        let mut tampered = blob.clone();
+        tampered[FALCON_SIG_BYTES] ^= 0x01;
+        assert_eq!(
+            verify_cosign_blob(pk_g, digest, &tampered),
+            Err(FalconSigError::VerificationFailed)
+        );
+
+        // (3) NON-CANONICAL h (`c >= q`): rejected by the decoder, never reaching
+        // `falcon_pk_digest` (which panics on non-canonical input). A mod-q-equivalent encoding
+        // would satisfy the algebraic check while hashing to a different digest, so this gate is
+        // what keeps `encode(h)` injective on the accepted domain.
+        let mut noncanon = blob.clone();
+        noncanon[FALCON_SIG_BYTES..FALCON_SIG_BYTES + 2].copy_from_slice(&FALCON_Q.to_le_bytes());
+        assert_eq!(
+            verify_cosign_blob(pk_g, digest, &noncanon),
+            Err(FalconSigError::NonCanonicalPublicKey(0))
+        );
+
+        // (4) WRONG MESSAGE — the norm bound fails once c is recomputed from another digest.
+        assert_eq!(
+            verify_cosign_blob(pk_g, sample_digest(0x23), &blob),
+            Err(FalconSigError::VerificationFailed)
+        );
+
+        // (5) LENGTH GATE — truncation and extension are both rejected (the fixed-length
+        // structural check TM-C8 asks for, replacing "non-empty").
+        assert_eq!(
+            verify_cosign_blob(pk_g, digest, &blob[..blob.len() - 1]),
+            Err(FalconSigError::InvalidLength(
+                FALCON_COSIGN_BLOB_BYTES - 1,
+                FALCON_COSIGN_BLOB_BYTES
+            ))
+        );
+        let mut extended = blob.clone();
+        extended.push(0);
+        assert_eq!(
+            verify_cosign_blob(pk_g, digest, &extended),
+            Err(FalconSigError::InvalidLength(
+                FALCON_COSIGN_BLOB_BYTES + 1,
+                FALCON_COSIGN_BLOB_BYTES
+            ))
+        );
+        // (6) A bare 666-byte signature (no h) is NOT a cosign blob.
+        assert_eq!(
+            verify_cosign_blob(pk_g, digest, &blob[..FALCON_SIG_BYTES]),
+            Err(FalconSigError::InvalidLength(
+                FALCON_SIG_BYTES,
+                FALCON_COSIGN_BLOB_BYTES
+            ))
+        );
+        // (7) Empty input hits the version gate's `Empty`, not a panic.
+        assert_eq!(
+            verify_cosign_blob(pk_g, digest, &[]),
+            Err(FalconSigError::Empty)
+        );
+    }
+
     /// SECURITY (TM-C2 / O-3): salts are fresh per signature. Signing the SAME message twice
     /// must produce different 40-byte salts (this test FAILS LOUDLY if the salt source ever
     /// degrades to a constant — the `cmd_send` constant-seed bug class, 77594be) while both
@@ -682,7 +961,7 @@ mod tests {
         blob[0] = FALCON_SIG_V1;
         assert_eq!(
             FalconSignature::from_bytes(&blob),
-            Err(FalconSigError::InvalidLength(76 * 1024)),
+            Err(FalconSigError::InvalidLength(76 * 1024, FALCON_SIG_BYTES)),
         );
 
         // Empty input: distinct error, no panic.

@@ -193,7 +193,8 @@ test('the carry commitment matches only when the base holds the SAME carried mat
 
 test('deltaBaseOf keeps exactly the reconstruction inputs and drops the signature blob', () => {
   assert.strictEqual(BASE.digest, BASE_DIGEST);
-  assert.strictEqual(BASE.memberSignatures, undefined, 'the 833KB signature blob must not be retained');
+  assert.strictEqual(BASE.memberSignatures, undefined,
+    'the signature blob must not be retained in the delta base (it is always retransmitted)');
   assert.deepStrictEqual(Object.keys(BASE).sort(), ['balanceState', 'digest']);
   assert.deepStrictEqual(Object.keys(BASE.balanceState).sort(),
     ['delegateCount', 'encBalances', 'memberCount', 'recipients', 'regevPkDigests', 'stateVersion'].sort());

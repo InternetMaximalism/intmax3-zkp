@@ -19,6 +19,7 @@ use crate::{
             ChannelId, ChannelRecord, ChannelState, ChannelTransitionKind, ChannelTx,
             InterChannelTx, ProofBackend, TransitionProofRole, l1_deposit_import_digest,
             token_register_next_state, validate_all_member_signatures,
+            validate_member_signature_slots,
         },
     },
     constants::{MAX_CHANNEL_MEMBERS, MAX_CHANNEL_TOKENS},
@@ -1890,7 +1891,10 @@ fn validate_signed_small_block(
             "confirmation proof must not be empty".to_string(),
         ));
     }
-    validate_all_member_signatures(source_channel_record, &signed.signatures)
+    // Slot/identity structure only: these are NOT channel-state co-signatures, so the Falcon
+    // cosign length gate does not apply. The real small-block signature check is the B-2
+    // validity-proof path (the bp's Falcon signature verified in-circuit by the list step).
+    validate_member_signature_slots(source_channel_record, &signed.signatures)
         .map_err(|err| ChannelStateUpdateError::InvalidSmallBlock(err.to_string()))
 }
 
@@ -2048,7 +2052,7 @@ mod tests {
             .map(|(idx, hash)| MemberSignature {
                 member_slot: idx as u8,
                 pk_g: *hash,
-                signature: vec![1 + idx as u8],
+                signature: crate::common::channel::structural_cosign_placeholder(1 + idx as u8),
             })
             .collect()
     }
