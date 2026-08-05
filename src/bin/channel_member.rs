@@ -328,19 +328,42 @@ fn keys_for(seed: u64) -> MemberKeys {
     MemberKeys::generate(&mut StdRng::seed_from_u64(seed))
 }
 
-/// Deterministic Falcon close-signing key for a CLI-controlled member slot (falcon-sig Phase 2).
+/// Deterministic Falcon close-signing key for a CLI-controlled member slot.
 ///
-/// KNOWN PHASE SEAM (resolved by Phase 4): registration (`export-reg-record` /
-/// `MemberKeys::pk_g()`) still carries the GOLDILOCKS pk_g, while `close` / `cancel-close` now
-/// prove with these Falcon keys — so an ON-CHAIN close/cancel against a channel registered with
-/// the old pk_g values will fail the L1 member-set match until Phase 4 unifies `MemberKeys` on
-/// the Falcon key (and the deployment is reset, threat model §5). The proving pipeline itself is
-/// fully exercised.
-fn falcon_keys_for(seed: u64) -> intmax3_zkp::falcon_sig::FalconKeys {
+/// STALE-COMMENT CORRECTION (Phase-3 review): this used to say registration "still carries the
+/// GOLDILOCKS pk_g". That stopped being true in Phase 3 — `export-reg-record` registers the
+/// FALCON `pk_g` (see `cmd_export_reg_record`), and all CLI paths now derive from
+/// `falcon_seed_for` so close, register and withdraw agree.
+///
+/// REMAINING PHASE SEAM (resolved by Phase 4): the WALLET's `MemberKeys` still has no Falcon key
+/// of its own, which is why these identities are derived here and threaded explicitly rather
+/// than read off `MemberKeys`.
+/// The CLI's canonical Falcon SEED for a cosigner slot. SECURITY (Phase-3 review finding 7):
+/// this is the single source of truth for the CLI's Falcon identities. Every CLI path that
+/// signs, registers, or proves against them — `close`, `cancel-close`, `export-reg-record` and
+/// `withdraw` — MUST derive from here, or the L1-registered member set and the set the close
+/// proof binds diverge (fail-closed, but the channel becomes unclosable). `withdraw` reaches
+/// `build_channel_withdrawal`, which is why that function takes the seeds explicitly instead of
+/// re-deriving them itself: an implicit second derivation is exactly what diverged.
+pub(crate) const CLI_COSIGNER_SEED_BASE: u64 = 0xC1_0000;
+
+fn falcon_seed_for(seed: u64) -> [u8; 32] {
     let mut s = [0u8; 32];
     s[0..8].copy_from_slice(&seed.to_le_bytes());
     s[8] = 0xfc; // "falcon cosigner" tag — disjoint from every other in-tree seed derivation
-    intmax3_zkp::falcon_sig::FalconKeys::from_seed(s)
+    s
+}
+
+/// The CLI cosigner slot seeds in slot order (the `withdraw` path hands these to
+/// `build_channel_withdrawal`).
+fn cli_falcon_seeds(active: usize) -> Vec<[u8; 32]> {
+    (0..active)
+        .map(|slot| falcon_seed_for(CLI_COSIGNER_SEED_BASE + slot as u64))
+        .collect()
+}
+
+fn falcon_keys_for(seed: u64) -> intmax3_zkp::falcon_sig::FalconKeys {
+    intmax3_zkp::falcon_sig::FalconKeys::from_seed(falcon_seed_for(seed))
 }
 
 /// The channel's ACTIVE participant key material in slot order for the close-lifecycle paths: the 3
@@ -795,7 +818,7 @@ fn cmd_close(args: &[String]) {
     // falcon-sig Phase 2: the close is signed with the members' Falcon keys (see the
     // `falcon_keys_for` seam note).
     let member_keys: Vec<intmax3_zkp::falcon_sig::FalconKeys> = (0..member_count)
-        .map(|slot| falcon_keys_for(0xC1_0000 + slot as u64))
+        .map(|slot| falcon_keys_for(CLI_COSIGNER_SEED_BASE + slot as u64))
         .collect();
     let (balance_vd, att, backing) = load_backing();
     let balance_proof = ProofWithPublicInputs::<BF, BC, BD>::from_bytes(
@@ -1269,7 +1292,7 @@ fn cmd_cancel_close(args: &[String]) {
     let member_count = revived_state.balance_state.member_count as usize;
     // falcon-sig Phase 2: cancel signs with the same deterministic Falcon keys as `close`.
     let member_keys: Vec<intmax3_zkp::falcon_sig::FalconKeys> = (0..member_count)
-        .map(|slot| falcon_keys_for(0xC1_0000 + slot as u64))
+        .map(|slot| falcon_keys_for(CLI_COSIGNER_SEED_BASE + slot as u64))
         .collect();
 
     // The PENDING close being cancelled — the EXACT `CloseIntent` `close` froze on-chain, read back
@@ -1766,7 +1789,11 @@ fn cmd_withdraw(args: &[String]) {
             deposit_salt: None,
         }),
     };
-    let artifacts = build_channel_withdrawal(&params, cli_members.as_deref())
+    // SECURITY (Phase-3 review finding 7): hand the CLI's OWN Falcon seeds to the withdrawal
+    // builder so the in-band channel registration uses the same identities `export-reg-record`
+    // put on L1 and the close proof binds. Previously the builder re-derived its own.
+    let falcon_seeds = cli_falcon_seeds(TEST_ACTIVE_MEMBERS);
+    let artifacts = build_channel_withdrawal(&params, cli_members.as_deref(), Some(&falcon_seeds))
         .unwrap_or_else(|e| die(format!("build withdrawal: {e}")));
 
     // Write the artifacts locally and stage them for the forge finalize / withdrawNative steps
@@ -2106,7 +2133,13 @@ fn cmd_export_reg_record() {
         .collect();
     let delegate_count = 0usize;
     let active = members.len();
-    let record = ChannelMemberKeys::from_member_keys(&members).to_reg_record_split(
+    // falcon-sig Phase 3: the registered member identity is the FALCON `pk_g`. Use the EXACT keys
+    // the CLI close/cancel-close paths sign with (`falcon_keys_for(0xC1_0000 + slot)`), so the
+    // member-set commitment the close proof binds equals the one this record registers.
+    let falcon_members: Vec<intmax3_zkp::falcon_sig::FalconKeys> = (0..active)
+        .map(|slot| falcon_keys_for(CLI_COSIGNER_SEED_BASE + slot as u64))
+        .collect();
+    let record = ChannelMemberKeys::from_member_keys(&members, falcon_members).to_reg_record_split(
         channel_id,
         TEST_ACTIVE_MEMBERS as u32,
         delegate_count as u32,
@@ -4848,4 +4881,60 @@ fn cmd_pw_finalize(args: &[String]) {
          deliberate fail-closed state, not a bug in this run."
     );
     exit(1);
+}
+
+#[cfg(test)]
+mod falcon_identity_tests {
+    use super::*;
+
+    /// SECURITY (Phase-3 review finding 7 — the defect this test exists to prevent recurring).
+    ///
+    /// Three CLI paths bind the channel's Falcon cosigner identities and MUST agree:
+    ///   * `close` / `cancel-close` — the member-set commitment the proof binds,
+    ///   * `export-reg-record`      — the `pk_g`s handed to L1 `registerChannel`,
+    ///   * `withdraw`               — the in-band channel registration inside
+    ///     `build_channel_withdrawal`.
+    ///
+    /// They diverged once, and silently: `withdraw` reached a builder that RE-DERIVED its own
+    /// keys from a different seed formula, so `export-reg-record` registered one member set on
+    /// L1 while the withdrawal proved against another. Fail-closed (nothing forged is accepted)
+    /// but a real liveness break — the channel becomes unclosable — and it was invisible because
+    /// the only test covering the invariant compared two values that came from the same variable.
+    ///
+    /// The structural fix is that `build_channel_withdrawal` now takes the seeds EXPLICITLY
+    /// instead of deriving them. This test pins the remaining requirement: every CLI site
+    /// derives from `falcon_seed_for(CLI_COSIGNER_SEED_BASE + slot)`, so what `withdraw` hands
+    /// the builder is what the other paths sign and register.
+    #[test]
+    fn cli_falcon_identities_agree_across_close_register_and_withdraw() {
+        let active = TEST_ACTIVE_MEMBERS;
+
+        // What `withdraw` hands to `build_channel_withdrawal`.
+        let withdraw_seeds = cli_falcon_seeds(active);
+        assert_eq!(withdraw_seeds.len(), active);
+
+        // What `close` / `cancel-close` / `export-reg-record` sign and register with.
+        for slot in 0..active {
+            let signing_key = falcon_keys_for(CLI_COSIGNER_SEED_BASE + slot as u64);
+            let from_withdraw_seed =
+                intmax3_zkp::falcon_sig::FalconKeys::from_seed(withdraw_seeds[slot]);
+            assert_eq!(
+                signing_key.pk_g(),
+                from_withdraw_seed.pk_g(),
+                "slot {slot}: the identity `withdraw` registers differs from the one the close \
+                 path signs with — this is exactly the divergence that made channels unclosable"
+            );
+        }
+
+        // The seeds must also be distinct per slot (a shared seed would make one key able to
+        // satisfy several member slots, defeating the close circuit's A5 distinctness check).
+        for a in 0..active {
+            for b in (a + 1)..active {
+                assert_ne!(
+                    withdraw_seeds[a], withdraw_seeds[b],
+                    "cosigner slots {a} and {b} must not share a Falcon seed"
+                );
+            }
+        }
+    }
 }

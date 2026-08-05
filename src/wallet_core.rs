@@ -4186,6 +4186,7 @@ fn fnv1a_bytes32(bytes: &[u8]) -> String {
 pub fn build_channel_withdrawal(
     params: &ChannelWithdrawalParams,
     cli_member_keys: Option<&[MemberKeys]>,
+    cli_falcon_seeds: Option<&[[u8; 32]]>,
 ) -> anyhow::Result<ChannelWithdrawalArtifacts> {
     use plonky2::iop::witness::{PartialWitness, WitnessWrite};
     use rand::{SeedableRng, rngs::StdRng};
@@ -4205,7 +4206,7 @@ pub fn build_channel_withdrawal(
                 },
                 block_witness_generator::{
                     BlockTxV2Witness, BlockWitnessGenerator, BlockWitnessGeneratorHandle,
-                    ChannelMemberKeys, TEST_ACTIVE_MEMBERS,
+                    ChannelMemberKeys, TEST_ACTIVE_MEMBERS, deterministic_member_falcon_keys,
                 },
             },
             validity::block_hash_chain::{
@@ -4231,7 +4232,7 @@ pub fn build_channel_withdrawal(
             withdrawal::Withdrawal,
         },
         ethereum_types::{address::Address, u256::U256},
-        poseidon_sig::{circuit::SingleSigCircuit, list::ListCircuit},
+        falcon_sig::list::ListCircuit,
         utils::{
             conversion::ToU64,
             mle_prover::{export_mle_json, prove_with_mle, setup_mle_vk, verify_mle_proof},
@@ -4293,9 +4294,45 @@ pub fn build_channel_withdrawal(
                     "build_channel_withdrawal: expected at least {TEST_ACTIVE_MEMBERS} active keys, got {}",
                     mk.len()
                 );
+                // SECURITY (Phase-3 review finding 7): the FALCON identities registered here
+                // MUST be the ones the channel's other paths sign with — the close proof's
+                // member-set commitment and the CLI's `export-reg-record` both bind them. An
+                // IMPLICIT derivation here silently diverged from the CLI's own
+                // (`falcon_keys_for(0xC1_0000 + slot)` vs the deterministic per-(channel, slot)
+                // one), so `export-reg-record` registered one key set on L1 while this path
+                // proved against another: a fail-CLOSED but real break of the A3 registration
+                // invariant on a production flow. The caller now SUPPLIES the keys, so the
+                // agreement is visible at the call site instead of being an accident of two
+                // derivations happening to match. The deterministic derivation remains the
+                // default for fixture binaries, which have no CLI keys.
+                //
+                // KNOWN PHASE SEAM (resolved by Phase 4): `MemberKeys` still carries no Falcon
+                // key, which is why they travel as a separate slice at all.
+                let falcon_keys: Vec<FalconKeys> = match cli_falcon_seeds {
+                    Some(seeds) => {
+                        anyhow::ensure!(
+                            seeds.len() >= TEST_ACTIVE_MEMBERS,
+                            "build_channel_withdrawal: expected at least {TEST_ACTIVE_MEMBERS} \
+                             falcon seeds, got {}",
+                            seeds.len()
+                        );
+                        // Re-derive from the caller's SEEDS rather than taking key objects:
+                        // `FalconKeys` is deliberately neither `Clone` nor `Serialize`, and a seed
+                        // is the only representation that crosses this boundary without widening
+                        // that surface. `from_seed` is deterministic (TM-C10), so the caller's
+                        // keys and these are the same identities.
+                        seeds[..TEST_ACTIVE_MEMBERS]
+                            .iter()
+                            .map(|s| FalconKeys::from_seed(*s))
+                            .collect()
+                    }
+                    None => {
+                        deterministic_member_falcon_keys(user_id.channel_id(), TEST_ACTIVE_MEMBERS)
+                    }
+                };
                 generator.add_channel_registration_keys(
                     user_id.channel_id(),
-                    ChannelMemberKeys::from_member_keys(&mk[..TEST_ACTIVE_MEMBERS]),
+                    ChannelMemberKeys::from_member_keys(&mk[..TEST_ACTIVE_MEMBERS], falcon_keys),
                 )
             }
             None => generator.add_channel_registration(user_id.channel_id()),
@@ -4670,11 +4707,12 @@ pub fn build_channel_withdrawal(
     }
 
     let final_block_chain_proof = last_block_proof.expect("final block hash chain proof");
-    let single_sig = SingleSigCircuit::new();
-    let list_circuit = ListCircuit::new(&single_sig.verifier_data());
+    // falcon-sig Phase 3: one in-circuit Falcon verification per list step (no per-signature
+    // recursive proof).
+    let list_circuit = ListCircuit::<F, C, D>::new();
     let list_proof = block_witness_generator
         .borrow()
-        .build_bp_sig_list_proof(&single_sig, &list_circuit)
+        .build_bp_sig_list_proof(&list_circuit)
         .expect("build bp sig list proof");
     let validity_circuit =
         ValidityCircuit::<F, C, D>::new(&block_chain_vd, &list_circuit.verifier_data());
@@ -6044,7 +6082,7 @@ mod delegate_send_tests {
             deposit_salt: None,
             erc20_lane: None,
         };
-        let artifacts = build_channel_withdrawal(&params, Some(&cli_members))
+        let artifacts = build_channel_withdrawal(&params, Some(&cli_members), None)
             .expect("channel withdrawal pipeline self-verifies");
 
         // The emitted registration must commit EXACTLY the CLI members' pk_gs (the close path's
@@ -6144,18 +6182,40 @@ mod delegate_send_tests {
             .map(|slot| MemberKeys::generate(&mut Rng010::seed_from_u64(0xC1_0000 + slot as u64)))
             .collect();
 
-        // What the CLOSE path commits to (close_member_set_commitment over the COSIGNERS' pk_g).
+        // ONE seed set is the input to BOTH sides below. The Phase-3 review found this test had
+        // become a plumbing check: it derived the Falcon keys, wrote their pk_g into
+        // `close_hashes`, then passed the SAME vector into `from_member_keys` and compared the
+        // two — which cannot fail regardless of whether the registration path derives identities
+        // correctly. (It also shadowed `close_commitment`, leaving the first computation dead,
+        // and its comment claimed to walk "the exact path build_channel_withdrawal takes", which
+        // stopped being true when that function grew its own derivation.)
+        //
+        // What this test can honestly pin from the library: that `ChannelMemberKeys` commits the
+        // member identity as `FalconKeys::pk_g()` — i.e. registration and the close path agree on
+        // what a member IS. The cross-BINARY agreement (that `withdraw`, `close` and
+        // `export-reg-record` feed the same seeds) is pinned where those call sites live, by
+        // `channel_member::falcon_identity_tests`.
+        let falcon_members: Vec<crate::falcon_sig::FalconKeys> = (0..TEST_ACTIVE_MEMBERS)
+            .map(|slot| {
+                let mut s = [0u8; 32];
+                s[0..8].copy_from_slice(&(0xC1_0000u64 + slot as u64).to_le_bytes());
+                s[8] = 0xfc;
+                crate::falcon_sig::FalconKeys::from_seed(s)
+            })
+            .collect();
+
+        // The CLOSE side is computed from the KEYS directly (`pk_g()`), the REG side below from
+        // the member tree the registration builds — two independent derivations of the same
+        // quantity, which is what makes the comparison meaningful.
         let mut close_hashes: [Bytes32; crate::constants::MAX_COSIGNERS] =
             std::array::from_fn(|_| Bytes32::default());
-        for (i, m) in cli_members.iter().enumerate() {
-            close_hashes[i] = m.pk_g();
+        for (i, k) in falcon_members.iter().enumerate() {
+            close_hashes[i] = k.pk_g();
         }
         let close_commitment =
             close_member_set_commitment(&close_hashes, TEST_ACTIVE_MEMBERS as u8);
 
-        // What the WITHDRAW registration emits: the reg record built from the same members via
-        // ChannelMemberKeys::from_member_keys (the exact path build_channel_withdrawal takes).
-        let cmk = ChannelMemberKeys::from_member_keys(&cli_members);
+        let cmk = ChannelMemberKeys::from_member_keys(&cli_members, falcon_members);
         let mut reg_hashes: [Bytes32; crate::constants::MAX_COSIGNERS] =
             std::array::from_fn(|_| Bytes32::default());
         for i in 0..TEST_ACTIVE_MEMBERS {
@@ -6172,9 +6232,21 @@ mod delegate_send_tests {
         for (i, m) in cli_members.iter().enumerate() {
             assert_eq!(
                 Bytes32::from(cmk.member_tree.get_leaf(i as u64).pk_g),
-                m.pk_g(),
-                "member {i} pk_g mismatch between MemberKeys and the registration member tree"
+                close_hashes[i],
+                "member {i} pk_g mismatch between the Falcon signing key and the registration \
+                 member tree"
             );
+            // PHASE SEAM, stated as a comment rather than a fake assertion. The Phase-3 review
+            // correctly rejected the `assert_ne!(m.pk_g(), close_hashes[i])` that used to sit
+            // here as a "tripwire": `MemberKeys::pk_g()` is a Goldilocks digest and the Falcon
+            // identity comes from an unrelated seed, so the two differ for reasons that have
+            // NOTHING to do with whether Phase 4 landed. It would stay green after Phase 4 while
+            // the invariant it named was broken — false comfort, which is worse than silence.
+            //
+            // PHASE 4 OBLIGATION: once `MemberKeys` carries the Falcon key, delete the explicit
+            // `falcon_members` construction above and derive from `MemberKeys` itself; the
+            // equality asserted just above then becomes the whole check.
+            let _ = m;
         }
         // The per-(channel, slot) recipient formula is deterministic and nonzero (registerChannel
         // rejects zero recipients).

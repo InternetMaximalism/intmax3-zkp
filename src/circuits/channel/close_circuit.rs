@@ -1219,22 +1219,15 @@ pub mod test_fixture {
     /// (`generate_close_fixture`), mirroring the shape of
     /// `ChannelMemberKeys::deterministic(channel_id)`.
     ///
-    /// KNOWN PHASE SEAM (falcon-sig Phase 2, resolved by Phase 4): the L1 REGISTRATION path
-    /// (`ChannelMemberKeys::to_reg_record`, `generate_withdrawal_fixture`) still registers the
-    /// GOLDILOCKS `pk_g` values, so a close fixture generated with these keys will NOT match a
-    /// registered member set until Phase 4 redefines the registration `pk_g` to the Falcon
-    /// digest and Phase 5 regenerates both fixtures together. Do not regenerate the checked-in
-    /// close/withdrawal fixture pair against mixed schemes.
+    /// falcon-sig Phase 3 CLOSED the Phase-2 seam for the DETERMINISTIC path: this now delegates
+    /// to `block_witness_generator::deterministic_member_falcon_keys`, the same derivation
+    /// `ChannelMemberKeys::deterministic` registers, so a close fixture generated with these keys
+    /// matches the registered member set. The REMAINING seam is the wallet's own `MemberKeys`,
+    /// which still carries the Goldilocks `pk_g` (Phase 4); fixtures still regenerate in Phase 5.
     pub fn deterministic_falcon_keys(channel_id: u32, n: usize) -> Vec<FalconKeys> {
-        (0..n)
-            .map(|slot| {
-                let mut s = [0u8; 32];
-                s[0..4].copy_from_slice(&channel_id.to_le_bytes());
-                s[8] = 0xfa;
-                s[31] = slot as u8 + 1;
-                FalconKeys::from_seed(s)
-            })
-            .collect()
+        crate::circuits::test_utils::block_witness_generator::deterministic_member_falcon_keys(
+            channel_id, n,
+        )
     }
 
     /// Deterministic canonical ciphertext for active slot `seed` (test/fixture data).

@@ -72,7 +72,7 @@ fn main() -> anyhow::Result<()> {
         eprintln!("[wd] withdrawal recipient (L1) = {}", r.to_string());
     }
 
-    let artifacts = build_channel_withdrawal(&params, None)?;
+    let artifacts = build_channel_withdrawal(&params, None, None)?;
 
     let out_dir = Path::new("contracts/test/data");
     fs::create_dir_all(out_dir)?;

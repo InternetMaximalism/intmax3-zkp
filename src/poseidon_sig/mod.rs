@@ -25,9 +25,23 @@
 //!   confusion).
 //! - The audited Goldilocks Poseidon (`PoseidonHashOut`, already the member-identity hash) is
 //!   reused; no primitive is implemented from scratch.
+//!
+//! # RETIREMENT STATUS (falcon-sig migration)
+//!
+//! This primitive is being replaced by Falcon-512/Poseidon (`crate::falcon_sig`). What remains
+//! here, and why:
+//! - [`list`] — NOT retired. It owns the IMLL `(m, pk)` hash-CHAIN FORMAT (native reference +
+//!   shared in-circuit gadgets), which the migration keeps bit-for-bit. Its producer moved to
+//!   [`crate::falcon_sig::list`] in Phase 3; `consumer.rs` (an unused demonstration gadget with
+//!   zero call sites) was deleted with it.
+//! - [`circuit::SingleSigCircuit`] + [`GoldilocksSecretKey`] — RETIRED on the close path (Phase 2)
+//!   and on the validity path (Phase 3). They survive ONLY for (a) `wallet_core`'s channel-state
+//!   co-sign, which Phase 4 swaps to native Falcon signatures, and (b) the O-9 downgrade test in
+//!   `close_circuit`, which needs a REAL legacy proof blob to prove the new parser rejects it.
+//!   Delete them in Phase 4 once (a) is gone; keep whatever (b) still needs.
 
 pub mod circuit;
-pub mod consumer;
+
 pub mod list;
 
 use plonky2::field::{

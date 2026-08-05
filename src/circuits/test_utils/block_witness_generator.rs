@@ -31,7 +31,7 @@ use crate::{
     ethereum_types::{
         address::Address, bytes32::Bytes32, u32limb_trait::U32LimbTrait as _, u256::U256,
     },
-    poseidon_sig::GoldilocksSecretKey,
+    falcon_sig::{FalconKeys, gadget::FalconSigGadgetWitness},
     regev::{REGEV_N, REGEV_Q, RegevPk, hash_sig::BabyBearSecretKey},
     utils::poseidon_hash_out::PoseidonHashOut,
 };
@@ -135,22 +135,94 @@ pub enum BlockWitnessGeneratorError {
 /// unchanged.
 pub const TEST_ACTIVE_MEMBERS: usize = 3;
 
-/// Test-only per-channel member key material (one Goldilocks signing key per member, P2b).
+/// The ONE canonical per-(channel, slot) deterministic Falcon member-key derivation.
 ///
-/// Holds the channel's `TEST_ACTIVE_MEMBERS` active `GoldilocksSecretKey`s + Regev public keys
-/// (slot order) and the Poseidon `MemberTree` (height MEMBER_TREE_HEIGHT, padding slots = empty
-/// leaves) whose root is committed into the channel's `ChannelLeaf`. When the block-producer slot
-/// updates, `add_block` records the block's IMSB digest as the bp's signing message and opens the
-/// bp's leaf against this root; the actual single-sig + list proofs are produced at the validity
-/// level (P2b decision D3).
+/// `close_circuit::test_fixture::deterministic_falcon_keys` delegates here, so the L1 REGISTRATION
+/// member set (`ChannelMemberKeys::deterministic` -> `to_reg_record`) and the CLOSE fixture's
+/// signing keys are derived from the same seeds and therefore commit to the same `pk_g` values.
+/// (Before falcon-sig Phase 3 they did not: registration used the Goldilocks key.)
+pub fn deterministic_member_falcon_keys(channel_id: u32, n: usize) -> Vec<FalconKeys> {
+    (0..n)
+        .map(|slot| {
+            // SECURITY (Phase-3 review MINOR): the slot rides one byte, so two slots >= 255 apart
+            // would collide into ONE identity — and this repo has already shipped and fixed a
+            // u8-slot-256 bug once (project_option_b_1024). Unreachable at MAX_COSIGNERS = 16,
+            // but assert rather than rely on that staying true.
+            assert!(
+                slot < 255,
+                "slot {slot} exceeds the single-byte seed encoding"
+            );
+            let mut s = [0u8; 32];
+            s[0..4].copy_from_slice(&channel_id.to_le_bytes());
+            s[8] = 0xfa;
+            s[31] = slot as u8 + 1;
+            FalconKeys::from_seed(s)
+        })
+        .collect()
+}
+
+/// The member identity committed in a `MemberLeaf`: the Falcon `pk_g = Poseidon(IMFK ‖ encode(h))`
+/// as a `PoseidonHashOut`. `falcon_pk_digest` returns a canonical Poseidon-hash-out `Bytes32`, so
+/// the conversion is exact (never a reduction).
+fn falcon_pk_g_hash_out(key: &FalconKeys) -> PoseidonHashOut {
+    key.pk_g()
+        .try_into()
+        .expect("Falcon pk_g is a canonical Poseidon hash out")
+}
+
+/// One recorded bp IMSB signing event (falcon-sig Phase 3).
+///
+/// The Falcon signature is produced NATIVELY at `add_block` time (~ms) and stored as the exact
+/// gadget witness the list step consumes, so the generator never has to hold a signing key open
+/// until proving time. `pk_g` is the signer's Falcon identity — the SAME value committed in the
+/// member leaf and folded into `bp_sig_chain`.
 #[derive(Debug, Clone)]
+pub struct BpSigEvent {
+    pub digest: Bytes32,
+    pub pk_g: Bytes32,
+    pub witness: FalconSigGadgetWitness,
+}
+
+/// Test-only per-channel member key material (one **Falcon-512/Poseidon** signing key per member).
+///
+/// Holds the channel's `TEST_ACTIVE_MEMBERS` active [`FalconKeys`] + Regev public keys (slot order)
+/// and the Poseidon `MemberTree` (height MEMBER_TREE_HEIGHT, padding slots = empty leaves) whose
+/// root is committed into the channel's `ChannelLeaf`. When the block-producer slot updates,
+/// `add_block` signs the block's IMSB digest with the bp's Falcon key and records the signing event
+/// (`BpSigEvent`); the list proof over those events is produced at the validity level (P2b decision
+/// D3, falcon-sig Phase 3).
+///
+/// SECURITY (DD-2, falcon-sig): the `MemberLeaf.pk_g` committed here is the FALCON identity
+/// `Poseidon(IMFK ‖ encode(h))` — the same 32-byte slot, a different derivation. It MUST equal the
+/// `pk_g` the list step derives from the witnessed `h`, or the validity circuit's
+/// `C == final.bp_sig_chain` assertion fails.
+///
+/// `falcon_keys` is behind an `Arc` only because [`FalconKeys`] is deliberately NOT `Clone` (that
+/// non-`Clone`ness is what stops tests from silently duplicating a signer) while this struct is
+/// cloned all over the generator.
+#[derive(Clone)]
 pub struct ChannelMemberKeys {
-    pub secret_keys: Vec<GoldilocksSecretKey>,
+    pub falcon_keys: std::sync::Arc<Vec<FalconKeys>>,
     /// Per-member BabyBear hash-sig secret keys (P3). Their `pk_b` digests are committed into the
     /// 3-field `MemberLeaf` / registration record.
     pub baby_keys: Vec<BabyBearSecretKey>,
     pub regev_pks: Vec<RegevPk>,
     pub member_tree: MemberTree,
+}
+
+impl core::fmt::Debug for ChannelMemberKeys {
+    // INTENTIONALLY SIMPLE: `FalconKeys` has no `Debug` (secret material); print only the count.
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("ChannelMemberKeys")
+            .field(
+                "falcon_keys",
+                &format_args!("<{} redacted>", self.falcon_keys.len()),
+            )
+            .field("baby_keys", &self.baby_keys.len())
+            .field("regev_pks", &self.regev_pks.len())
+            .field("member_tree_root", &self.member_tree.get_root())
+            .finish()
+    }
 }
 
 impl ChannelMemberKeys {
@@ -165,20 +237,16 @@ impl ChannelMemberKeys {
     /// deterministic derivation — the co-generation `CloseLifecycleE2E` requires to run its
     /// close-intent section).
     pub fn deterministic(channel_id: u32) -> Self {
-        let mut secret_keys = Vec::with_capacity(TEST_ACTIVE_MEMBERS);
+        // SECURITY / single-derivation: the member Falcon keys come from the ONE canonical
+        // per-(channel, slot) formula, `close_circuit::test_fixture::deterministic_falcon_keys`,
+        // which the close fixture generator also uses — so the registered member set and the close
+        // proof's `member_set_commitment` are derived from the SAME keys (this closes half of the
+        // falcon-sig Phase-2 seam; the wallet's own `MemberKeys` is still Phase-4 work).
+        let falcon_keys = deterministic_member_falcon_keys(channel_id, TEST_ACTIVE_MEMBERS);
         let mut baby_keys = Vec::with_capacity(TEST_ACTIVE_MEMBERS);
         let mut regev_pks = Vec::with_capacity(TEST_ACTIVE_MEMBERS);
         let mut member_tree = MemberTree::init();
         for slot in 0..TEST_ACTIVE_MEMBERS as u32 {
-            // Distinct 32-byte seed per (channel, slot), domain-separated so the secret keys are
-            // distinct across channels and slots. Non-zero (avoids the degenerate all-zero key the
-            // single-sig circuit rejects).
-            let mut seed = [0u8; 32];
-            seed[0..4].copy_from_slice(&channel_id.to_le_bytes());
-            seed[4..8].copy_from_slice(&slot.to_le_bytes());
-            seed[8] = 0xa5;
-            seed[31] = slot as u8 + 1;
-            let sk = GoldilocksSecretKey::from_seed(seed);
             // Deterministic BabyBear hash-sig key (P3): seed an RNG from the (channel, slot) so
             // pk_b is stable across re-runs and distinct per member.
             let baby_seed = (channel_id as u64)
@@ -190,16 +258,15 @@ impl ChannelMemberKeys {
             let pk_b: PoseidonHashOut = baby.public_key().to_bytes32().reduce_to_hash_out();
             let regev = deterministic_regev_pk(channel_id.wrapping_mul(31).wrapping_add(slot + 1));
             member_tree.push(MemberLeaf {
-                pk_g: sk.public_key_hash_out(),
+                pk_g: falcon_pk_g_hash_out(&falcon_keys[slot as usize]),
                 pk_b,
                 regev_pk_digest: regev.poseidon_digest(),
             });
-            secret_keys.push(sk);
             baby_keys.push(baby);
             regev_pks.push(regev);
         }
         Self {
-            secret_keys,
+            falcon_keys: std::sync::Arc::new(falcon_keys),
             baby_keys,
             regev_pks,
             member_tree,
@@ -213,9 +280,24 @@ impl ChannelMemberKeys {
     /// `member_pubkeys_root` matches the registration's). Unlike `deterministic`, the Regev keys
     /// are real keypairs (the secret lives with the wallet, NOT here — validity never
     /// decrypts).
-    pub fn from_member_keys(keys: &[crate::wallet_core::MemberKeys]) -> Self {
+    ///
+    /// KNOWN PHASE SEAM (falcon-sig Phase 3, resolved by Phase 4): `MemberKeys` does not yet carry
+    /// a Falcon signing key (`MemberKeys::signing_key` is still the Goldilocks key used by the
+    /// wallet's IMCH co-sign path). The member's FALCON identity — the `pk_g` committed in the
+    /// member tree and the key the bp signs IMSB digests with — must therefore be supplied
+    /// explicitly by the caller. Phase 4 replaces the `falcon_keys` argument with
+    /// `MemberKeys`'s own key and this parameter goes away.
+    pub fn from_member_keys(
+        keys: &[crate::wallet_core::MemberKeys],
+        falcon_keys: Vec<FalconKeys>,
+    ) -> Self {
+        assert_eq!(
+            keys.len(),
+            falcon_keys.len(),
+            "from_member_keys: one Falcon signing key per member is required"
+        );
         let mut member_tree = MemberTree::init();
-        let (mut secret_keys, mut baby_keys, mut regev_pks) = (Vec::new(), Vec::new(), Vec::new());
+        let (mut baby_keys, mut regev_pks) = (Vec::new(), Vec::new());
         // SECURITY (Option B): this is the REGISTERED member tree — cosigners only, at most
         // `MAX_COSIGNERS` slots. Callers MUST pass exactly the co-signing member set (delegates
         // are NOT registered on L1; they are authenticated by the cosigner-signed H1 slot tree
@@ -227,19 +309,18 @@ impl ChannelMemberKeys {
              ({MAX_COSIGNERS}); delegates must not be registered (Option B)",
             keys.len()
         );
-        for k in keys.iter() {
+        for (k, falcon) in keys.iter().zip(falcon_keys.iter()) {
             let pk_b: PoseidonHashOut = k.baby_key.public_key().to_bytes32().reduce_to_hash_out();
             member_tree.push(MemberLeaf {
-                pk_g: k.signing_key.public_key_hash_out(),
+                pk_g: falcon_pk_g_hash_out(falcon),
                 pk_b,
                 regev_pk_digest: k.regev_pk.poseidon_digest(),
             });
-            secret_keys.push(k.signing_key.clone());
             baby_keys.push(k.baby_key.clone());
             regev_pks.push(k.regev_pk.clone());
         }
         Self {
-            secret_keys,
+            falcon_keys: std::sync::Arc::new(falcon_keys),
             baby_keys,
             regev_pks,
             member_tree,
@@ -362,11 +443,11 @@ pub struct BlockWitnessGenerator {
     /// `channel_tree` (the registration block applies it).
     pub channel_registrations: Vec<(ChannelRegRecord, ChannelMemberKeys)>,
     pub block_chain_witness: HashMap<BlockNumber, BlockHashChainProcessorWitness>,
-    /// P2b: the ordered list of bp IMSB signing events `(bp_secret_key, IMSB_digest)` over the
-    /// whole span, in block order. The validity-level e2e turns each into a `SingleSigCircuit`
-    /// proof and folds them into one `ListCircuit` proof whose commitment must equal the final
-    /// `bp_sig_chain` (decision D3).
-    pub bp_sig_events: Vec<(GoldilocksSecretKey, Bytes32)>,
+    /// P2b: the ordered list of bp IMSB signing events over the whole span, in block order. The
+    /// validity level folds each into one `falcon_sig::list::ListCircuit` proof (one in-circuit
+    /// Falcon verification per step) whose commitment must equal the final `bp_sig_chain`
+    /// (decision D3, falcon-sig Phase 3).
+    pub bp_sig_events: Vec<BpSigEvent>,
     /// B-2: the `state_commitment_root` (= post-debit `BalanceState::h1()`, detail2 §C-7) to bind
     /// in the NEXT updating block's IMSB message, so the bp signs the genuine `hash(H1',
     /// tx_tree_root)` channelStateSig (structural atomicity D-3) instead of `hash(H1'=0,
@@ -663,20 +744,23 @@ impl BlockWitnessGenerator {
         let pairs: Vec<(Bytes32, Bytes32)> = self
             .bp_sig_events
             .iter()
-            .map(|(sk, digest)| (*digest, sk.public_key()))
+            .map(|e| (e.digest, e.pk_g))
             .collect();
         crate::poseidon_sig::list::list_commitment(&pairs)
     }
 
     /// P2b: build the recursive `ListCircuit` proof over all recorded bp IMSB signing events (block
     /// order). Returns `None` when there were no signing blocks in the span (the validity circuit
-    /// then gates the list verification off). Each event becomes one `SingleSigCircuit` proof over
-    /// the bp's IMSB digest, folded into the running `ListCircuit` proof; its final commitment
-    /// equals [`Self::current_bp_sig_chain`].
+    /// then gates the list verification off). Each event's Falcon signature is verified DIRECTLY
+    /// in-circuit by one list step, which folds `(IMSB digest, Falcon pk_g)` into the running
+    /// chain; the final commitment equals [`Self::current_bp_sig_chain`].
     pub fn build_bp_sig_list_proof(
         &self,
-        single_sig: &crate::poseidon_sig::circuit::SingleSigCircuit,
-        list: &crate::poseidon_sig::list::ListCircuit,
+        list: &crate::falcon_sig::list::ListCircuit<
+            plonky2::field::goldilocks_field::GoldilocksField,
+            plonky2::plonk::config::PoseidonGoldilocksConfig,
+            2,
+        >,
     ) -> anyhow::Result<
         Option<
             plonky2::plonk::proof::ProofWithPublicInputs<
@@ -692,13 +776,12 @@ impl BlockWitnessGenerator {
         let pairs: Vec<(Bytes32, Bytes32)> = self
             .bp_sig_events
             .iter()
-            .map(|(sk, digest)| (*digest, sk.public_key()))
+            .map(|e| (e.digest, e.pk_g))
             .collect();
         let mut prev = None;
-        for (i, (sk, digest)) in self.bp_sig_events.iter().enumerate() {
-            let sig = single_sig.prove(sk, *digest)?;
+        for (i, event) in self.bp_sig_events.iter().enumerate() {
             let prefix = crate::poseidon_sig::list::list_commitment(&pairs[0..i]);
-            prev = Some(list.prove_append(&sig, prefix, &prev)?);
+            prev = Some(list.prove_append(&event.witness, prefix, &prev)?);
         }
         Ok(prev)
     }
@@ -947,9 +1030,9 @@ impl BlockWitnessGenerator {
 
             // Real member witness for the updating (bp) slot; dummy otherwise. P2b: instead of an
             // inline SPHINCS+ signature, we record the bp's `(secret_key, IMSB_digest)` signing
-            // event so the validity level can produce the `SingleSigCircuit` proof and fold it into
-            // the `ListCircuit` proof (decision D3). The folded `(digest, pk_g)` pair is bound here
-            // via the member-leaf inclusion.
+            // event so the validity level can fold it into the `ListCircuit` proof (decision D3,
+            // one direct in-circuit Falcon verification per step). The `(digest, pk_g)` pair is
+            // bound here via the member-leaf inclusion.
             if updating[i] {
                 let keys = member_keys.as_ref().ok_or_else(|| {
                     BlockWitnessGeneratorError::InvalidRequest(format!(
@@ -958,8 +1041,21 @@ impl BlockWitnessGenerator {
                     ))
                 })?;
                 let digest = signed_digest.expect("updating slot implies a signed digest");
-                // Record the bp signing event (block order) for the list proof.
-                self.bp_sig_events.push((keys.secret_keys[i], digest));
+                // Record the bp signing event (block order) for the list proof. The Falcon
+                // signature is produced natively HERE, over exactly the IMSB digest whose
+                // `bp_pk_g` limb is this same key's identity, so the list step's in-circuit
+                // verification and the in-circuit `bp_sig_chain` fold agree by construction.
+                let bp_key = &keys.falcon_keys[i];
+                let sig = bp_key.sign(digest);
+                self.bp_sig_events.push(BpSigEvent {
+                    digest,
+                    pk_g: bp_key.pk_g(),
+                    witness: FalconSigGadgetWitness::for_signature(
+                        &bp_key.pk_coefficients(),
+                        digest,
+                        &sig,
+                    ),
+                });
                 member_merkle_proofs.push(keys.member_tree.prove(i as u64));
                 member_regev_pks.push(keys.regev_pks[i].clone());
                 // P3: the bp slot's pk_b for the 3-field MemberLeaf inclusion (matches the leaf

@@ -172,7 +172,10 @@ where
 {
     pub data: CircuitData<F, C, D>,
     pub block_hash_chain_proof: ProofWithPublicInputsTarget<D>,
-    /// P2b: the recursive `ListCircuit` proof carrying the bp IMSB single-sig list commitment `C`.
+    /// P2b: the recursive `ListCircuit` proof carrying the bp IMSB Falcon-signature list
+    /// commitment `C` (falcon-sig Phase 3: each list step verifies ONE Falcon signature directly
+    /// in-circuit; the step's degree grew 2^12 -> 2^16 but the CYCLIC wrapper's shape — and hence
+    /// `list_vd.common`, this conditional-verify gate, and the dummy proof below — is unchanged).
     /// Verified CONDITIONALLY (gated on the computed `final.bp_sig_chain != 0`, decision D3).
     pub list_proof: ProofWithPublicInputsTarget<D>,
     /// Dummy `ListCircuit` proof for the no-signing-block span (chain == 0 ⇒ verification
@@ -187,7 +190,7 @@ where
     C: GenericConfig<D, F = F> + 'static,
     <C as GenericConfig<D>>::Hasher: AlgebraicHasher<F>,
 {
-    /// `list_vd` is the `poseidon_sig::list::ListCircuit` verifier data; it is baked in as a
+    /// `list_vd` is the `falcon_sig::list::ListCircuit` verifier data; it is baked in as a
     /// build-time constant (A7) inside `add_proof_target_and_conditionally_verify`.
     pub fn new(
         block_hash_chain_vd: &VerifierCircuitData<F, C, D>,
@@ -359,9 +362,8 @@ mod tests {
 
         // The span has no signing block (all-padding key_ids) ⇒ final.bp_sig_chain == 0 ⇒ the list
         // proof is None and its conditional verification is gated off.
-        use crate::poseidon_sig::{circuit::SingleSigCircuit, list::ListCircuit};
-        let single = SingleSigCircuit::new();
-        let list = ListCircuit::new(&single.verifier_data());
+        use crate::falcon_sig::list::ListCircuit;
+        let list = ListCircuit::<F, C, D>::new();
 
         let validity_circuit =
             ValidityCircuit::<F, C, D>::new(&block_chain_vd, &list.verifier_data());

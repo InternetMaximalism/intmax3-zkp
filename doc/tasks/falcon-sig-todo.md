@@ -98,12 +98,22 @@ to every instantiated width 1/14/15/32). Suite 33/33.
 > not the gadget. Peak RSS is now 4.99 GB. Phase 3 instantiates the gadget once per list step
 > (ONE signature = 2^16, ~3.3 GB), so it inherits a comfortable budget.
 
-- [ ] `ListCircuit` leaf: recursive SingleSig verify → in-circuit Falcon verify (chain format,
-      `list_leaf`/`chain_step_target`, `bp_sig_chain` accumulator all unchanged)
-- [ ] `ValidityCircuit` re-pins the new list VK; conditional-verify gate unchanged
-- [ ] IMCH↔IMSB cross-context rejection tests under the single key (O-6)
-- [ ] Delete `SingleSigCircuit` + the old primitive (`poseidon_sig` reduced to the shared
-      chain gadgets); grep proves 0 active refs
+> IMPLEMENTED (notes: `falcon-sig-phase3-notes.md`; review pending). Headline measurement: the
+> list STEP grew 2^12 -> 2^16 (51,764 gates, build 2.3 s, prove 1.89 s, 3.51 GB peak) but the
+> CYCLIC wrapper stayed 2^14 and the **ValidityCircuit stayed 2^16** — the dummy-proof path still
+> constructs, so nothing structural changes downstream of the MLE wrapper (VK VALUES do change).
+
+- [x] `ListCircuit` leaf: recursive SingleSig verify → in-circuit Falcon verify (chain format,
+      `list_leaf`/`chain_step_target`, `bp_sig_chain` accumulator all unchanged). Producer moved to
+      `src/falcon_sig/list.rs`; `poseidon_sig::list` keeps ONLY the IMLL format.
+- [x] `ValidityCircuit` re-pins the new list VK; conditional-verify gate unchanged (comments only)
+- [x] IMCH↔IMSB cross-context rejection tests under the single key (O-6) — both directions, at the
+      two REAL circuit entry points (list step and `FalconLeafCircuit`)
+- [x] Delete `poseidon_sig::consumer` + the SingleSig-based list producer; grep proves 0 refs.
+      **`SingleSigCircuit`/`GoldilocksSecretKey` KEPT** (brief option (a)): still needed by
+      `wallet_core`'s cosign (Phase 4) and by the O-9 legacy-blob rejection test.
+- [x] Producer wiring: `ChannelMemberKeys` carries Falcon keys; member-leaf `pk_g` is the Falcon
+      digest; `from_member_keys` takes the Falcon keys explicitly (Phase-4 seam, tripwired)
 - [ ] Security review
 
 ## Phase 4 — Wallet/CLI/wasm/node swap

@@ -29,6 +29,7 @@
 pub mod agg;
 pub mod compat;
 pub mod gadget;
+pub mod list;
 pub(crate) mod vendor;
 
 use alloc::vec::Vec;

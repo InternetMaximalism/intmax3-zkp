@@ -708,12 +708,10 @@ fn main() -> anyhow::Result<()> {
 
     let final_block_chain_proof = last_block_proof.expect("final block hash chain proof");
     // P2b: build + verify the bp IMSB-signature ListCircuit proof (decision D3).
-    let single_sig = intmax3_zkp::poseidon_sig::circuit::SingleSigCircuit::new();
-    let list_circuit =
-        intmax3_zkp::poseidon_sig::list::ListCircuit::new(&single_sig.verifier_data());
+    let list_circuit = intmax3_zkp::falcon_sig::list::ListCircuit::<F, C, D>::new();
     let list_proof = block_witness_generator
         .borrow()
-        .build_bp_sig_list_proof(&single_sig, &list_circuit)
+        .build_bp_sig_list_proof(&list_circuit)
         .expect("build bp sig list proof");
     let validity_circuit =
         ValidityCircuit::<F, C, D>::new(&block_chain_vd, &list_circuit.verifier_data());

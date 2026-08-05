@@ -57,8 +57,8 @@ const MEMBER_LEAF_DOMAIN: u64 = 0x4d424c46;
 /// One channel member's identity leaf.
 ///
 /// * `pk_g` — the member's Goldilocks public key `Poseidon([DOMAIN_PK_G] || sk_g)` (the member's
-///   canonical signing identity, supplied at registration from
-///   `GoldilocksSecretKey::public_key()`).
+///   canonical signing identity, supplied at registration from `FalconKeys::pk_g()` (falcon-sig
+///   Phase 3; was `GoldilocksSecretKey::public_key()`)).
 /// * `pk_b` — the member's BabyBear hash-signature public key (the canonical reduction of the
 ///   `pk_b` digest exposed by the channel-tx sender hash-sig STARK; P3, threat-model D1(b)/A11).
 ///   Bound here so the off-chain channel-tx verifier can confirm that `pk_b`, `pk_g` and the Regev
