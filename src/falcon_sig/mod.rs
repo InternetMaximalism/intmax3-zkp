@@ -27,6 +27,7 @@
 //! implemented (CARDIS-2023 fault attack on det-Falcon; sampler multi-runtime consistency).
 
 pub mod compat;
+pub mod gadget;
 pub(crate) mod vendor;
 
 use alloc::vec::Vec;
@@ -258,6 +259,18 @@ impl FalconSignature {
     /// The signature salt (public wire data).
     pub fn salt(&self) -> [u8; SIG_NONCE_LEN] {
         self.salt
+    }
+
+    /// The balanced (centered) `s2` coefficients, each in `[-2047, 2047]` by decoder
+    /// canonicity. Phase-1 accessor: the in-circuit gadget witnesses `s2` (as canonical
+    /// residues) and this is the only sanctioned way to read it out of a signature
+    /// (`gadget::FalconSigGadgetWitness::for_signature`).
+    pub fn s2_coefficients(&self) -> [i16; FALCON_N] {
+        let mut out = [0i16; FALCON_N];
+        for (o, c) in out.iter_mut().zip(self.s2.coefficients.iter()) {
+            *o = c.balanced_value();
+        }
+        out
     }
 
     /// Serializes to the fixed 666-byte v1 wire format (DD-4):

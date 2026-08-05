@@ -31,17 +31,38 @@ phase = implementer subagent + separate security-review subagent; attacker pass 
       native + wasm32)
 - [x] Security review (separate subagent)
 
-## Phase 1 — In-circuit Falcon verifier gadget (plonky2)
-- [ ] H2P in-circuit (64 Poseidon perms, native gates) pinned to native by shared vectors (O-2)
-- [ ] NTT mod 12289 gadget with range-checked reductions; s2 canonicity; norm bound at β²/β²+1
+## Phase 1 — In-circuit Falcon verifier gadget (plonky2) — DONE
+Review: FIT to commit, no CRITICAL/MAJOR, no forgery path found. Measured (release,
+standard_recursion_config, reproduced by the orchestrator): N=1 51,734 gates / 2^16 /
+prove 2.2s; N=3 155,198 / 2^18 / 8.9s; N=16 827,720 / 2^20 / 59s. ~51.7k gates per
+signature, NTT range checks dominant; 16 sigs fit 2^20 with 27% slack, NO config change.
+Findings addressed here: INFO-1 (the naive-quotient non-uniqueness range is ~half the
+field, not x<5287 — comment corrected), MINOR-1 (norm no-wrap ledger now pins the
+ADVERSARIAL max 1024*q^2 < 2^38, not the honest 1024*6144^2), INFO-2 (centering-bit
+monotonicity now has an empirical adversarial probe), INFO-3 (quotient-cheat test extended
+to every instantiated width 1/14/15/32). Suite 33/33.
+- [x] H2P in-circuit (64 Poseidon perms, native gates) pinned to native by shared vectors (O-2)
+- [x] NTT mod 12289 gadget with range-checked reductions; s2 canonicity; norm bound at β²/β²+1
       (TM-C5 items 1–3)
-- [ ] `h` opening → pk_f connection (TM-C5 item 5)
-- [ ] Standalone `FalconSigCircuit` harness proving 1..N=16 verifications; **measure gates +
+- [x] `h` opening → pk_f connection (TM-C5 item 5)
+- [x] Standalone `FalconSigCircuit` harness proving 1..N=16 verifications; **measure gates +
       proving time** (the number the owner asked for — report before Phase 2)
-- [ ] Full O-5 adversarial test suite
-- [ ] Security review (separate subagent)
+- [x] Full O-5 adversarial test suite
+- [x] Security review (separate subagent)
 
 ## Phase 2 — Close + cancel-close rewiring
+- [ ] **Carried from Phase-1 review (MINOR-2, TM-C5)**: the gadget's accept set is strictly
+      LARGER than "native wire-decodable signature" — it accepts any canonical `s2` residue
+      meeting the equation + norm bound, while `FalconSignature::from_bytes` additionally
+      restricts `s2` to the Golomb-Rice transport band `[-2047, 2047]` (a norm-feasible
+      coefficient can reach |centered| <= 5833). NOT a forgery vector (GPV unforgeability is the
+      norm bound, and beta is unchanged), but confirm NO consumer relies on
+      "circuit-accepted => native-wire-decodable" — in particular any path that re-serializes a
+      signature or cross-checks it against `from_bytes`. Decide and record; do not inherit it
+      silently.
+- [ ] **Carried from Phase-1 (TM-C5 item 4)**: `FalconSigVerifyTarget.message_digest` is a free
+      INPUT; consumers MUST connect it to an in-circuit-RECOMPUTED IMCH/IMSB digest. Phase 1
+      documents the obligation on the field itself; Phase 2 discharges it.
 - [ ] Replace `agg_vd` recursive verify with direct N-sig verification; delete
       `AggLevelCircuit`/`SigAggregator`
 - [ ] Padding + A5 arguments re-written at their new sites; member-set commitment domain
