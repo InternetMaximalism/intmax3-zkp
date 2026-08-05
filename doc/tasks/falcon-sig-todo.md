@@ -20,16 +20,16 @@ phase = implementer subagent + separate security-review subagent; attacker pass 
   Golomb-Rice, ~625 B) — total ~666 B. Circuit witnesses uncompressed s2; native verifier
   decompresses.
 
-## Phase 0 — Vendor + native primitive
-- [ ] Vendor `falcon512_poseidon2` under `src/falcon_sig/vendor/` with upstream commit pinned;
+## Phase 0 — Vendor + native primitive — DONE (commit 395b0d9; review NOT-FIT->FIT after F-1 bounds fix, F-2 verify_with_pk_g, F-3 sign self-verify; bench keygen 455ms/sign 5.4ms/verify 63us; notes in falcon-sig-phase0-notes.md)
+- [x] Vendor `falcon512_poseidon2` under `src/falcon_sig/vendor/` with upstream commit pinned;
       pristine-copy upstream tests green BEFORE the H2P swap (O-4)
-- [ ] Swap `hash_to_point.rs` to plonky2 Poseidon, domain IMFH, full-element sampling (O-1)
-- [ ] `pk_f = Poseidon(IMFK‖encode(h))`; canonical `encode(h)` documented
-- [ ] Seed-deterministic keygen from `MemberKeys` seed (O-11) + determinism tests
-- [ ] Native sign/verify + wire encode/decode (DD-4, format byte, O-9)
-- [ ] Salt-freshness CI test (O-3); norm-distribution sanity; bench (sign/verify/keygen,
+- [x] Swap `hash_to_point.rs` to plonky2 Poseidon, domain IMFH, full-element sampling (O-1)
+- [x] `pk_f = Poseidon(IMFK‖encode(h))`; canonical `encode(h)` documented
+- [x] Seed-deterministic keygen from `MemberKeys` seed (O-11) + determinism tests
+- [x] Native sign/verify + wire encode/decode (DD-4, format byte, O-9)
+- [x] Salt-freshness CI test (O-3); norm-distribution sanity; bench (sign/verify/keygen,
       native + wasm32)
-- [ ] Security review (separate subagent)
+- [x] Security review (separate subagent)
 
 ## Phase 1 — In-circuit Falcon verifier gadget (plonky2)
 - [ ] H2P in-circuit (64 Poseidon perms, native gates) pinned to native by shared vectors (O-2)
