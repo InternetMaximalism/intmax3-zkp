@@ -478,10 +478,10 @@ where
         // ONE `FalconAggCircuit` proof at a CONSTANT VK and consume its exposed
         // `[message(8), signer_count(1), pk list]` directly — see the matching block in
         // `close_circuit.rs` for the full consumer-obligation rationale (message binding
-        // discharging TM-C5 item 4, count binding via the aggregation circuit's live-norm-bound
-        // padding soundness, wired pk list with left-packed zero-suffix padding, u32 range
-        // provenance of the PI limbs); identical mechanism here with the REVIVED digest as the
-        // message.
+        // discharging TM-C5 item 4, count binding via the aggregation TREE's padding soundness —
+        // unconditionally verified left child, gated right child, constant-1 leaf count — wired pk
+        // list with left-packed zero-suffix padding, u32 range provenance of the PI limbs);
+        // identical mechanism here with the REVIVED digest as the message.
         let agg_proof = add_proof_target_and_verify(agg_vd, &mut builder);
 
         // (g-i) message == recomputed revived IMCH digest.
@@ -1192,7 +1192,7 @@ mod tests {
         );
         // Boundary: the aggregated proof itself VERIFIES — distinctness is not its job.
         fx.agg
-            .data
+            .data()
             .verify(dup_agg.clone())
             .expect("the aggregation circuit accepts duplicate slots by design");
         witness.member_auth = dup_auth;

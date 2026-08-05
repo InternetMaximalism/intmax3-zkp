@@ -747,17 +747,23 @@ where
         //    free witness anywhere on the path (TM-C6: the IMCH keccak domain differs from the
         //    validity IMSB digest, so cross-context reuse fails).
         //  - COUNT binding: the agg proof's `signer_count` is connected to the `member_count` PI
-        //    (single limb). By the aggregation circuit's padding soundness (active => live norm
-        //    bound; monotone prefix bits), `signer_count` equals the number of GENUINELY VERIFIED
-        //    Falcon signatures, so a prover cannot under-sign (A8).
+        //    (single limb). By the aggregation tree's padding soundness (a leaf carries an
+        //    UNCONDITIONALLY verified Falcon signature and exposes the CONSTANT count 1; a node's
+        //    count is `left.count + is_right_present * right.count` with the right child verified
+        //    against the REAL child VK exactly when the flag is 1), `signer_count` equals the
+        //    number of GENUINELY VERIFIED Falcon signatures, so a prover cannot under-sign (A8).
+        //    The same structure gives `signer_count >= 1` for free (the left child is never gated
+        //    off); the `assert_one(active_bits[0])` above keeps that floor asserted here too, as
+        //    defence in depth.
         //  - LIST binding (no re-witnessing): `member_pk_g_targets` below are SLICES of the
         //    verified agg proof's pk-list PIs — wired functions of the gadget-derived
-        //    `Poseidon(IMFK || encode(h))` digests, with no witnessed freedom. Left-packing
-        //    (monotone `is_active` prefix + `select(is_active, pk_g, 0)` exposure) guarantees the
-        //    nonzero pks are exactly the first `signer_count` slots and the zero padding is
-        //    strictly a suffix, so the `active_bits` gating (i < member_count) aligns with the real
-        //    signer prefix. The TM-C7 padding argument is unchanged: a padding slot exposes pk_g =
-        //    0x0…0, and forging it real requires a Poseidon preimage of the zero digest under IMFK.
+        //    `Poseidon(IMFK || encode(h))` digests, with no witnessed freedom. Left-packing (each
+        //    node exposes `is_right_present * right.pk_limb` and may only attach a right child when
+        //    the left one is FULL) guarantees the nonzero pks are exactly the first `signer_count`
+        //    slots and the zero padding is strictly a suffix, so the `active_bits` gating (i <
+        //    member_count) aligns with the real signer prefix. The TM-C7 padding argument is
+        //    unchanged: a padding slot exposes pk_g = 0x0…0, and forging it real requires a
+        //    Poseidon preimage of the zero digest under IMFK.
         //  - pk_g distinctness over the active set forbids one key faking N signatures (A5) — the
         //    aggregation circuit deliberately ACCEPTS duplicate slots (each is independently
         //    verified); the insertion chain below is the consumer-side rejection.
@@ -770,10 +776,10 @@ where
         //    doc/tasks/falcon-sig-phase2-notes.md).
         //  - RANGE: every limb read from the agg proof is u32 by construction inside the verified
         //    proof (pk limbs come from the gadget's `Bytes32Target::from_hash_out` safe 32-bit
-        //    split of the Poseidon digest, gated by a boolean select against 0; message limbs are
-        //    range-checked at allocation in the agg circuit; signer_count is a sum of 16 bools), so
-        //    feeding them to the keccak gadget (which does NOT range-check) is sound without
-        //    re-checking.
+        //    split of the Poseidon digest, multiplied by a boolean presence flag; message limbs are
+        //    range-checked at allocation in the leaf circuit and copied upward; signer_count is a
+        //    sum of at most 16 leaf constants each equal to 1), so feeding them to the keccak
+        //    gadget (which does NOT range-check) is sound without re-checking.
         let agg_proof = add_proof_target_and_verify(agg_vd, &mut builder);
 
         // (f-i) message == recomputed IMCH digest (the same digest the members must sign).
@@ -1121,7 +1127,7 @@ pub mod test_fixture {
             println!(
                 "[close fixture] falcon agg circuit build: {:?} (degree bits {})",
                 t_agg.elapsed(),
-                agg.data.common.degree_bits()
+                agg.data().common.degree_bits()
             );
             let t1 = std::time::Instant::now();
             let close_circuit = ChannelCloseCircuit::<F, C, D>::new(
@@ -1914,7 +1920,7 @@ mod tests {
         );
         // Boundary: the aggregated proof itself VERIFIES — distinctness is not its job.
         fx.agg
-            .data
+            .data()
             .verify(dup_agg.clone())
             .expect("the aggregation circuit accepts duplicate slots by design");
         witness.member_auth = dup_auth;
@@ -2147,7 +2153,7 @@ mod tests {
             "same members, different signed context"
         );
         fx.agg
-            .data
+            .data()
             .verify(cross_agg.clone())
             .expect("the cross-context aggregation proof is valid for ITS OWN digest");
         witness.agg_proof = cross_agg;

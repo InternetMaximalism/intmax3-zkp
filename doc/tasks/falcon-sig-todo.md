@@ -76,8 +76,14 @@ to every instantiated width 1/14/15/32). Suite 33/33.
       (Finding 1: `signer_count = 0` representable — the retired aggregator's structural floor
       was not reproduced) FIXED at three sites + regression test `zero_signers_rejected`
       (WRITTEN, NOT YET RUN — needs the 2^20 build; must run before merge).
-- [ ] **Before merge**: run `falcon_sig::agg` + close/cancel suites (memory-constrained; needs a
-      box that can hold the 2^20 agg circuit alongside the balance family, or fixture splitting)
+- [x] **Phase 2.6 SUPERSEDES the flat design**: binary-tree aggregation restored (leaf 2^16 +
+      4 levels at 2^14). Peak RSS 22.3 GB -> 4.99 GB, prove 70 s -> 36.9 s, close degree still
+      2^17 and close proving FASTER (10.88 s -> 8.5 s). The memory blocker is GONE: the close
+      `_n16` test that used to OOM now passes. Review FIT, no CRITICAL/MAJOR; MINOR-1 (induction
+      base pinned) and INFO-1 (release-mode arity asserts) fixed. `falcon_sig::agg` 16/16.
+- [ ] **Before merge**: regenerate close/cancel fixtures — the aggregation VK changed, so the
+      close/cancel circuit digests and every baked artifact derived from them are stale
+      (Phase 4/5 work; nothing in Phase 2/2.6 regenerates fixtures)
 
 ## Phase 3 — Validity path (list step swap)
 
@@ -88,12 +94,9 @@ to every instantiated width 1/14/15/32). Suite 33/33.
 > The validity path verifies the list proof CONDITIONALLY with a DUMMY proof
 > (`validity_circuit.rs:229`, `:267`), which is fine for binary range checks.
 >
-> STILL OPEN from Phase 2: the memory/cost problem is UNSOLVED. The agg circuit is 2^20 and the
-> close/agg suites OOM on a dev machine. Options that do NOT depend on lookups: reduce the NUMBER
-> of mod-q reductions (restructure the NTT), narrow range-check widths where provably safe, or
-> split test fixtures so the agg circuit and the balance family are not co-resident. Phase 3
-> instantiates the gadget once per list step (ONE signature, not 16), so the per-signature cost
-> matters less there than it does in the 16-slot aggregator.
+> RESOLVED by Phase 2.6 (binary-tree aggregation): the memory problem was the flat 2^20 circuit,
+> not the gadget. Peak RSS is now 4.99 GB. Phase 3 instantiates the gadget once per list step
+> (ONE signature = 2^16, ~3.3 GB), so it inherits a comfortable budget.
 
 - [ ] `ListCircuit` leaf: recursive SingleSig verify → in-circuit Falcon verify (chain format,
       `list_leaf`/`chain_step_target`, `bp_sig_chain` accumulator all unchanged)
