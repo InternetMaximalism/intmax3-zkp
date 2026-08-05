@@ -1362,6 +1362,7 @@ dependencies = [
  "log",
  "num",
  "num-bigint 0.4.6",
+ "num-complex",
  "once_cell",
  "p3-air 0.4.3",
  "p3-air 0.5.3",
@@ -1393,12 +1394,14 @@ dependencies = [
  "rand 0.10.1",
  "rand 0.8.6",
  "rand 0.9.4",
+ "rand_chacha 0.10.0",
  "rayon",
  "regev_plonky3",
  "serde",
  "serde-big-array",
  "serde_json",
  "starky",
+ "subtle",
  "thiserror",
  "wasm-bindgen",
  "wasm-bindgen-futures",
@@ -1406,6 +1409,7 @@ dependencies = [
  "wasm-bindgen-test",
  "web-sys",
  "web-time",
+ "zeroize",
 ]
 
 [[package]]

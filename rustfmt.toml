@@ -1,3 +1,7 @@
 imports_granularity="Crate"
 wrap_comments=true
 comment_width=150
+# Vendored Falcon-512 code (src/falcon_sig/vendor) must stay diffable against upstream
+# 0xMiden/crypto (threat model TM-C3: "CI diff proves only hash_to_point.rs differs") — keep
+# rustfmt from reflowing it to the host style.
+ignore = ["src/falcon_sig/vendor"]

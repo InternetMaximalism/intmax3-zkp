@@ -1,7 +1,12 @@
+// The vendored Falcon code (src/falcon_sig/vendor, no_std-style upstream) imports via `alloc::`
+// paths; this makes the `alloc` crate name resolvable in this (std) crate.
+extern crate alloc;
+
 pub mod circuits;
 pub mod common;
 pub mod constants;
 pub mod ethereum_types;
+pub mod falcon_sig;
 pub mod poseidon_sig;
 pub mod regev;
 pub mod utils;
