@@ -50,25 +50,34 @@ to every instantiated width 1/14/15/32). Suite 33/33.
 - [x] Full O-5 adversarial test suite
 - [x] Security review (separate subagent)
 
-## Phase 2 — Close + cancel-close rewiring
-- [ ] **Carried from Phase-1 review (MINOR-2, TM-C5)**: the gadget's accept set is strictly
-      LARGER than "native wire-decodable signature" — it accepts any canonical `s2` residue
-      meeting the equation + norm bound, while `FalconSignature::from_bytes` additionally
-      restricts `s2` to the Golomb-Rice transport band `[-2047, 2047]` (a norm-feasible
-      coefficient can reach |centered| <= 5833). NOT a forgery vector (GPV unforgeability is the
-      norm bound, and beta is unchanged), but confirm NO consumer relies on
-      "circuit-accepted => native-wire-decodable" — in particular any path that re-serializes a
-      signature or cross-checks it against `from_bytes`. Decide and record; do not inherit it
-      silently.
-- [ ] **Carried from Phase-1 (TM-C5 item 4)**: `FalconSigVerifyTarget.message_digest` is a free
-      INPUT; consumers MUST connect it to an in-circuit-RECOMPUTED IMCH/IMSB digest. Phase 1
-      documents the obligation on the field itself; Phase 2 discharges it.
-- [ ] Replace `agg_vd` recursive verify with direct N-sig verification; delete
-      `AggLevelCircuit`/`SigAggregator`
-- [ ] Padding + A5 arguments re-written at their new sites; member-set commitment domain
-      decision recorded (TM-C7); Rust↔Solidity shared-vector re-pin
-- [ ] Cross-scheme rejection tests (O-6, O-9)
-- [ ] Security review + attacker pass on the circuit changes
+## Phase 2 — Close + cancel-close rewiring — IMPLEMENTED (notes: falcon-sig-phase2-notes.md; review pending)
+- [x] **Carried from Phase-1 review (MINOR-2, TM-C5)**: DECIDED AND RECORDED (notes §4): the
+      accept-set delta is inert — consumers witness signatures only via
+      `FalconKeys::sign`/`from_bytes` (both inside the transport band) and never re-serialize a
+      circuit-witnessed `s2`; provenance documented on the auth structs. GPV unforgeability is
+      the (unchanged) norm bound.
+- [x] **Carried from Phase-1 (TM-C5 item 4)**: DISCHARGED end to end — consumer recomputed
+      IMCH digest → `FalconAggCircuit` `message` PI → every slot gadget's `message_digest`
+      (all `connect`ed; no free witness on the path). Notes §3.
+- [x] Direct N-sig verification lands in the NEW `falcon_sig::agg::FalconAggCircuit` (owner
+      directive "aggregation stays plonky2 as usual": close/cancel keep recursive verification
+      at a constant VK — a pure VK swap + constant rename, close degree unchanged at 2^17);
+      `AggLevelCircuit`/`SigAggregator` DELETED (0 code refs)
+- [x] Padding + A5 arguments re-written at their new sites (notes §2: padding exposes pk_g
+      EXACTLY zero at the agg boundary; A5 distinctness chain unchanged over the gadget-derived
+      key vector); member-set commitment domain decision recorded (TM-C7, notes §5: keep IMCM);
+      Rust↔Solidity shared-vector disposition recorded (notes §7-old tail: the pinned arbitrary
+      vector is value-agnostic — unchanged; key-derived JSON fixtures regenerate in Phase 4/5)
+- [x] Cross-scheme rejection tests (O-6, O-9): agg-level `wrong_message_rejected` +
+      close-level `rejects_cross_context_agg_message` +
+      `cross_scheme_signature_blobs_reject_in_both_directions` (real old proof blob vs the
+      version gate, real Falcon blob vs the legacy parser)
+- [x] Security review: FIT (static-only). Headline forgery question answered NO. One MAJOR
+      (Finding 1: `signer_count = 0` representable — the retired aggregator's structural floor
+      was not reproduced) FIXED at three sites + regression test `zero_signers_rejected`
+      (WRITTEN, NOT YET RUN — needs the 2^20 build; must run before merge).
+- [ ] **Before merge**: run `falcon_sig::agg` + close/cancel suites (memory-constrained; needs a
+      box that can hold the 2^20 agg circuit alongside the balance family, or fixture splitting)
 
 ## Phase 3 — Validity path (list step swap)
 - [ ] `ListCircuit` leaf: recursive SingleSig verify → in-circuit Falcon verify (chain format,

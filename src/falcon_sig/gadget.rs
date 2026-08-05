@@ -615,6 +615,43 @@ impl FalconSigVerifyTarget {
     pub fn new<F: RichField + Extendable<D>, const D: usize>(
         builder: &mut CircuitBuilder<F, D>,
     ) -> Self {
+        Self::build(builder, None)
+    }
+
+    /// Conditional variant for pad-to-MAX consumers (Phase 2, close / cancel-close): the
+    /// signature is verified iff `verify` is 1; with `verify = 0` the slot is a PADDING slot and
+    /// the all-zero witness ([`FalconSigGadgetWitness::padding`]) satisfies the constraints.
+    ///
+    /// SECURITY (padding-slot gating): ONLY the final norm-bound comparison is gated
+    /// (`slack' = select(verify, beta^2 - norm, 0)` before the 26-bit range check). Everything
+    /// else — coefficient canonicity, the `pk_g == Poseidon(IMFK || encode(h))` binding, H2P,
+    /// and the NTT equation `s1 = c - s2*h` — remains UNCONDITIONALLY enforced:
+    /// - with `verify = 1` the constraint set is EXACTLY the unconditional gadget (the select
+    ///   passes the real slack through), so an active slot verifies the full native predicate — a
+    ///   prover cannot "pad out" an active slot: its norm bound is live;
+    /// - with `verify = 0` the norm bound (the sole accept/reject decision of the scheme) is
+    ///   replaced by the trivially-true check of the constant 0, so the all-zero witness (`h = s2 =
+    ///   salt = 0`, `pk_g = Poseidon(IMFK || encode(0))`) satisfies the slot: the ungated equations
+    ///   then just compute `s1 = c` with an unchecked norm. The gate wire is NOT constrained here —
+    ///   the CONSUMER MUST bind it (close/cancel bind it to the unary `member_count` decomposition,
+    ///   which is itself bound into the signed H1/IMCH), exactly like the `message_digest` input
+    ///   obligation.
+    ///
+    /// A padding slot's `pk_g` is therefore forced (by the ungated pk binding) to the fixed
+    /// public constant [`super::falcon_padding_pk_g`] — consumers MUST NOT admit that digest
+    /// into any identity-bearing structure for inactive slots (close/cancel zero padding slots
+    /// out of the member-set commitment and skip them in the distinctness chain).
+    pub fn new_conditional<F: RichField + Extendable<D>, const D: usize>(
+        builder: &mut CircuitBuilder<F, D>,
+        verify: BoolTarget,
+    ) -> Self {
+        Self::build(builder, Some(verify))
+    }
+
+    fn build<F: RichField + Extendable<D>, const D: usize>(
+        builder: &mut CircuitBuilder<F, D>,
+        verify: Option<BoolTarget>,
+    ) -> Self {
         let (psi_rev, psi_inv_rev, n_inv) = twiddle_tables();
 
         // Inputs. `true` range-checks each limb < 2^32 (canonical limbs, matching the native
@@ -672,11 +709,22 @@ impl FalconSigVerifyTarget {
         // norm <= beta^2, via a 26-bit range check of beta^2 - norm (beta^2 < 2^26):
         // if norm <= beta^2 the difference is in [0, beta^2] subset [0, 2^26); if
         // norm > beta^2 (norm < 2^36), the field value wraps to >= p - 2^36 and fails.
+        //
+        // Conditional variant (see `new_conditional`): the gate wraps EXACTLY this comparison —
+        // `select(verify, slack, 0)` — so verify = 1 reproduces the unconditional check
+        // verbatim and verify = 0 range-checks the constant 0 (trivially true).
         let beta_sq = builder.constant(plonky2::field::types::Field::from_canonical_u64(
             FALCON_SIG_L2_BOUND,
         ));
         let slack = builder.sub(beta_sq, norm);
-        builder.range_check(slack, 26);
+        let checked_slack = match verify {
+            None => slack,
+            Some(bit) => {
+                let zero = builder.zero();
+                builder.select(bit, slack, zero)
+            }
+        };
+        builder.range_check(checked_slack, 26);
 
         Self {
             pk_g,
@@ -709,6 +757,30 @@ impl FalconSigVerifyTarget {
         {
             pw.set_target(*t, F::from_canonical_u32(*limb))?;
         }
+        for (t, v) in self.salt.iter().zip(witness.salt_elements.iter()) {
+            pw.set_target(*t, F::from_canonical_u64(*v))?;
+        }
+        for (t, v) in self.h.iter().zip(witness.h.iter()) {
+            pw.set_target(*t, F::from_canonical_u64(*v))?;
+        }
+        for (t, v) in self.s2.iter().zip(witness.s2.iter()) {
+            pw.set_target(*t, F::from_canonical_u64(*v))?;
+        }
+        Ok(())
+    }
+
+    /// Sets ONLY the signature-side witnesses (salt, h, s2) — for consumers whose `pk_g` and
+    /// `message_digest` inputs are CONNECTED to in-circuit-derived wires (the Phase-2 close /
+    /// cancel-close pattern: `message_digest` is the recomputed IMCH keccak output and `pk_g`
+    /// is derived by the gadget's own Poseidon binding from `h`), so their values are produced
+    /// by witness generation through the copy constraints and setting them here would be
+    /// redundant (and, for a tampered-PI test, a spurious early conflict instead of the
+    /// in-circuit constraint rejection).
+    pub fn set_signature_witness<F: RichField>(
+        &self,
+        pw: &mut PartialWitness<F>,
+        witness: &FalconSigGadgetWitness,
+    ) -> Result<()> {
         for (t, v) in self.salt.iter().zip(witness.salt_elements.iter()) {
             pw.set_target(*t, F::from_canonical_u64(*v))?;
         }
@@ -760,6 +832,25 @@ impl FalconSigGadgetWitness {
                     }
                 })
                 .collect(),
+        }
+    }
+
+    /// The canonical PADDING-slot witness for a [`FalconSigVerifyTarget::new_conditional`] slot
+    /// with `verify = 0`: all-zero salt / h / s2, `pk_g = Poseidon(IMFK || encode(0)) =`
+    /// [`super::falcon_padding_pk_g`], and the consumer's `message_digest` (whose input targets
+    /// are connected to the consumer's recomputed digest, so the witness value must match it).
+    ///
+    /// SECURITY: this satisfies every UNGATED constraint (canonicity of zeros, the pk binding on
+    /// the zero polynomial, H2P/NTT which simply compute `s1 = c`) while the gated norm bound is
+    /// off. It is NOT a signature: with `verify = 1` this witness is rejected by the norm bound
+    /// (`||c||^2 >> beta^2` for any real digest — pinned by the conditional-gadget tests).
+    pub fn padding(message_digest: Bytes32) -> Self {
+        Self {
+            pk_g: super::falcon_padding_pk_g(),
+            message_digest,
+            salt_elements: [0u64; 8],
+            h: vec![0u64; FALCON_N],
+            s2: vec![0u64; FALCON_N],
         }
     }
 }

@@ -956,8 +956,9 @@ fn channel_native_regev_full_flow_e2e() {
 /// (= 0x00…00; in-channel transfers never advance the chain), so the REAL initial balance proof
 /// carries the matching `settled_tx_chain` / `channel_id` public inputs that the circuit
 /// constrains against the close PIs. On top of the IMCH/IMCL/IMCI digest chain the circuit
-/// recomputes H1 from the witnessed ciphertext digests and verifies 3 REAL SPHINCS+ member
-/// signatures over the recomputed IMCH digest.
+/// recomputes H1 from the witnessed ciphertext digests and binds the recursively verified
+/// `FalconAggCircuit` proof carrying 3 REAL Falcon member signatures over the recomputed IMCH
+/// digest (falcon-sig Phase 2).
 // Multitoken Phase 2: the close circuit's h1 gadget now computes the v2 header/leaf, so this
 // full close-circuit proof runs against the v2-signed flow state (ignore gate lifted). The
 // native steps (a)-(h) run in `channel_native_regev_full_flow_e2e` above (MINOR 5 split).

@@ -328,6 +328,21 @@ fn keys_for(seed: u64) -> MemberKeys {
     MemberKeys::generate(&mut StdRng::seed_from_u64(seed))
 }
 
+/// Deterministic Falcon close-signing key for a CLI-controlled member slot (falcon-sig Phase 2).
+///
+/// KNOWN PHASE SEAM (resolved by Phase 4): registration (`export-reg-record` /
+/// `MemberKeys::pk_g()`) still carries the GOLDILOCKS pk_g, while `close` / `cancel-close` now
+/// prove with these Falcon keys — so an ON-CHAIN close/cancel against a channel registered with
+/// the old pk_g values will fail the L1 member-set match until Phase 4 unifies `MemberKeys` on
+/// the Falcon key (and the deployment is reset, threat model §5). The proving pipeline itself is
+/// fully exercised.
+fn falcon_keys_for(seed: u64) -> intmax3_zkp::falcon_sig::FalconKeys {
+    let mut s = [0u8; 32];
+    s[0..8].copy_from_slice(&seed.to_le_bytes());
+    s[8] = 0xfc; // "falcon cosigner" tag — disjoint from every other in-tree seed derivation
+    intmax3_zkp::falcon_sig::FalconKeys::from_seed(s)
+}
+
 /// The channel's ACTIVE participant key material in slot order for the close-lifecycle paths: the 3
 /// CLI co-signing members (slots 0..3) FOLLOWED BY the delegate (slot 3). The delegate uses
 /// `keys_for(DELEGATE_SEED)` — the SAME identity `gen-contribution <bal> <DELEGATE_SEED>` produces
@@ -777,8 +792,10 @@ fn cmd_close(args: &[String]) {
     let st = load_state();
     let state = st.snapshot.state.clone();
     let member_count = state.balance_state.member_count as usize;
-    let member_keys: Vec<MemberKeys> = (0..member_count)
-        .map(|slot| keys_for(0xC1_0000 + slot as u64))
+    // falcon-sig Phase 2: the close is signed with the members' Falcon keys (see the
+    // `falcon_keys_for` seam note).
+    let member_keys: Vec<intmax3_zkp::falcon_sig::FalconKeys> = (0..member_count)
+        .map(|slot| falcon_keys_for(0xC1_0000 + slot as u64))
         .collect();
     let (balance_vd, att, backing) = load_backing();
     let balance_proof = ProofWithPublicInputs::<BF, BC, BD>::from_bytes(
@@ -1250,8 +1267,9 @@ fn cmd_cancel_close(args: &[String]) {
     let st = load_state();
     let revived_state = st.snapshot.state.clone();
     let member_count = revived_state.balance_state.member_count as usize;
-    let member_keys: Vec<MemberKeys> = (0..member_count)
-        .map(|slot| keys_for(0xC1_0000 + slot as u64))
+    // falcon-sig Phase 2: cancel signs with the same deterministic Falcon keys as `close`.
+    let member_keys: Vec<intmax3_zkp::falcon_sig::FalconKeys> = (0..member_count)
+        .map(|slot| falcon_keys_for(0xC1_0000 + slot as u64))
         .collect();
 
     // The PENDING close being cancelled — the EXACT `CloseIntent` `close` froze on-chain, read back

@@ -26,7 +26,6 @@
 //! - The audited Goldilocks Poseidon (`PoseidonHashOut`, already the member-identity hash) is
 //!   reused; no primitive is implemented from scratch.
 
-pub mod aggregate;
 pub mod circuit;
 pub mod consumer;
 pub mod list;

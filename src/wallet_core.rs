@@ -3307,11 +3307,11 @@ fn source_record_placeholder(
 
 // ─────────────────────────────────────────────────────────────────────────────────────────────
 // A-3 P2: real (non-test) channel-close proving. Wires the wallet's signed `ChannelState` + the N
-// active members' Goldilocks signing keys + the channel's base-layer balance proof into a REAL
+// active members' Falcon signing keys + the channel's base-layer balance proof into a REAL
 // `ChannelCloseCircuit` proof. SOUNDNESS IS ENFORCED IN-CIRCUIT (A-3 P2 threat model): H1/IMCH
 // recompute + bind, balance-proof channel_id/settled_tx_chain binding, the recursively verified
-// level-4 aggregated sign-zkp proof over the members' REAL single-sigs (message/count/pk-list
-// bound in-circuit), the member_set_commitment keccak, and the
+// `FalconAggCircuit` proof over the members' REAL Falcon signatures (message/count/pk-list
+// bound in-circuit; falcon-sig Phase 2), the member_set_commitment keccak, and the
 // active-bit decomposition. `ChannelCloseCircuit::prove` recomputes and overrides
 // `member_set_commitment`, so a tampered commitment is rejected. The Rust-side preconditions below
 // fail CLOSED before any (expensive) proving so a malformed input never produces a proof.
@@ -3323,15 +3323,52 @@ use crate::{
         close_pis::ChannelCloseWitness,
     },
     common::channel::{CloseIntent, CloseWithdrawal},
-    poseidon_sig::aggregate::{AGG_LEVELS, SigAggregator},
+    falcon_sig::{
+        FALCON_N, FalconKeys, FalconSignature,
+        agg::{FalconAggCircuit, FalconAggWitness},
+        verify_with_pk_g,
+    },
 };
 
-/// Process-built close-proving context: a `SigAggregator` (the binary-tree aggregated sign-zkp
-/// over the shared `SingleSigCircuit`) and the `ChannelCloseCircuit` bound to the channel's
-/// balance verifier data. Each circuit is expensive to build, so construct ONE `CloseProver` per
-/// process and reuse it.
+/// Build the `FalconAggCircuit` witness + per-member auth for `member_keys` (slot order), each
+/// signing `digest` (falcon-sig Phase 2; shared by the close and cancel-close provers).
+///
+/// SECURITY (fail-closed native mirror): every produced signature is re-verified with
+/// `verify_with_pk_g` (which checks `pk_g == Poseidon(IMFK || encode(h))` INSIDE the call,
+/// review F-2) before any expensive proving — `FalconKeys::sign` already self-verifies, so this
+/// is a cheap (~64 us/sig) belt-and-braces gate that also pins the pk_g/h pairing this function
+/// itself assembled. The in-circuit gates remain the actual soundness boundary.
+fn falcon_member_auth_for_digest(
+    member_keys: &[FalconKeys],
+    digest: Bytes32,
+) -> WResult<(Vec<Bytes32>, FalconAggWitness)> {
+    let mut pk_gs: Vec<Bytes32> = Vec::with_capacity(member_keys.len());
+    let mut hs: Vec<[u16; FALCON_N]> = Vec::with_capacity(member_keys.len());
+    let mut sigs: Vec<FalconSignature> = Vec::with_capacity(member_keys.len());
+    for (i, keys) in member_keys.iter().enumerate() {
+        let pk_g = keys.pk_g();
+        let h = keys.pk_coefficients();
+        let sig = keys.sign(digest);
+        if !verify_with_pk_g(pk_g, &h, digest, &sig) {
+            return bail(format!(
+                "member {i}: freshly produced Falcon signature failed the native verify \
+                 (key material inconsistent?)"
+            ));
+        }
+        pk_gs.push(pk_g);
+        hs.push(h);
+        sigs.push(sig);
+    }
+    let signers: Vec<(&[u16; FALCON_N], &FalconSignature)> = hs.iter().zip(sigs.iter()).collect();
+    Ok((pk_gs, FalconAggWitness::for_signatures(digest, &signers)))
+}
+
+/// Process-built close-proving context: the `FalconAggCircuit` (direct in-circuit verification of
+/// the N member Falcon signatures, falcon-sig Phase 2) and the `ChannelCloseCircuit` bound to the
+/// channel's balance verifier data. Each circuit is expensive to build, so construct ONE
+/// `CloseProver` per process and reuse it.
 pub struct CloseProver {
-    aggregator: SigAggregator,
+    agg: FalconAggCircuit<F, C, D>,
     close_circuit: ChannelCloseCircuit<F, C, D>,
 }
 
@@ -3339,22 +3376,21 @@ impl CloseProver {
     /// Build the close-proving circuits. `balance_vd` is the channel's base-layer balance verifier
     /// data (the same value cached in `balance_vd.bin` / produced by the `BalanceProcessor`).
     pub fn new(balance_vd: &VerifierCircuitData<F, C, D>) -> Self {
-        let aggregator = SigAggregator::new(&single_sig_circuit().verifier_data());
-        let close_circuit = ChannelCloseCircuit::<F, C, D>::new(
-            balance_vd,
-            &aggregator.levels[AGG_LEVELS - 1].verifier_data(),
-        );
-        Self {
-            aggregator,
-            close_circuit,
-        }
+        let agg = FalconAggCircuit::<F, C, D>::new();
+        let close_circuit = ChannelCloseCircuit::<F, C, D>::new(balance_vd, &agg.verifier_data());
+        Self { agg, close_circuit }
     }
 
     /// Build the full close witness from the wallet's signed final `ChannelState`, the N ACTIVE
-    /// members' signing keys (slot order), and the channel's base-layer balance proof. The members
-    /// each sign the IMCH digest (`state.digest`) with a real `SingleSigCircuit` proof, aggregated
-    /// into the level-4 binary-tree sign-zkp proof whose message/count/pk-list PIs the close
-    /// circuit binds in-circuit.
+    /// members' Falcon signing keys (slot order), and the channel's base-layer balance proof. The
+    /// members each sign the IMCH digest (`state.digest`) with a native Falcon-512/Poseidon
+    /// signature (~ms, no per-member proving); the signatures are verified in-circuit by ONE
+    /// `FalconAggCircuit` proof whose message/count/pk-list PIs the close circuit binds.
+    ///
+    /// KNOWN PHASE SEAM (falcon-sig Phase 2, resolved by Phase 4): the wallet's join/registration
+    /// path still registers the GOLDILOCKS `pk_g` (`MemberKeys::pk_g()`), so a close proven with
+    /// Falcon keys will only match a channel whose registered member set already carries the
+    /// Falcon `pk_g` digests. Phase 4 swaps `MemberKeys` to the single Falcon signing key.
     ///
     /// SECURITY: fail-closed preconditions reject malformed inputs early; the in-circuit gates are
     /// the actual soundness boundary. `CloseIntent::new` additionally fail-closed-checks
@@ -3362,7 +3398,7 @@ impl CloseProver {
     pub fn build_full_witness(
         &self,
         state: &ChannelState,
-        member_keys: &[MemberKeys],
+        member_keys: &[FalconKeys],
         balance_proof: ProofWithPublicInputs<F, C, D>,
         close_nonce: u64,
         burn_tx_hash: Bytes32,
@@ -3382,10 +3418,7 @@ impl CloseProver {
         }
         // Distinct member pk_g over the active set (the circuit also enforces A5 distinctness; we
         // fail early for a clearer error and to avoid wasted proving).
-        let pk_gs: Vec<Bytes32> = member_keys
-            .iter()
-            .map(|k| k.signing_key.public_key())
-            .collect();
+        let pk_gs: Vec<Bytes32> = member_keys.iter().map(|k| k.pk_g()).collect();
         for i in 0..pk_gs.len() {
             for j in (i + 1)..pk_gs.len() {
                 if pk_gs[i] == pk_gs[j] {
@@ -3415,21 +3448,15 @@ impl CloseProver {
             close_intent,
         };
 
-        // Aggregate the N member IMCH single-sigs into ONE level-4 binary-tree sign-zkp proof, in
-        // slot order — the leaf order IS the pk-list slot order the close circuit consumes.
+        // Sign the IMCH digest with each member's Falcon key (slot order — the slot order IS the
+        // pk-list slot order the close circuit consumes) and prove the ONE aggregation circuit.
         let digest = state.digest;
-        let mut member_auth: Vec<MemberCloseAuth> = Vec::with_capacity(member_count);
-        let mut leaves: Vec<ProofWithPublicInputs<F, C, D>> = Vec::with_capacity(member_count);
-        for (i, keys) in member_keys.iter().enumerate() {
-            let sig = single_sig_circuit()
-                .prove(&keys.signing_key, digest)
-                .map_err(|e| WalletError(format!("member {i} single-sig proving failed: {e}")))?;
-            leaves.push(sig);
-            member_auth.push(MemberCloseAuth { pk_g: pk_gs[i] });
-        }
+        let (pk_gs, agg_witness) = falcon_member_auth_for_digest(member_keys, digest)?;
+        let member_auth: Vec<MemberCloseAuth> =
+            pk_gs.iter().map(|&pk_g| MemberCloseAuth { pk_g }).collect();
         let agg_proof = self
-            .aggregator
-            .aggregate_to_level(&leaves, AGG_LEVELS)
+            .agg
+            .prove(&agg_witness)
             .map_err(|e| WalletError(format!("close signature aggregation failed: {e:?}")))?;
 
         Ok(ChannelCloseFullWitness {
@@ -3687,9 +3714,10 @@ use crate::circuits::channel::{
     cancel_close_pis::CancelCloseWitness,
 };
 
-/// Process-built cancel-close proving context (a `SigAggregator` + the `CancelCloseCircuit`).
+/// Process-built cancel-close proving context (the `FalconAggCircuit` + the
+/// `CancelCloseCircuit`).
 pub struct CancelCloseProver {
-    aggregator: SigAggregator,
+    agg: FalconAggCircuit<F, C, D>,
     circuit: CancelCloseCircuit<F, C, D>,
 }
 
@@ -3701,24 +3729,20 @@ impl Default for CancelCloseProver {
 
 impl CancelCloseProver {
     pub fn new() -> Self {
-        let aggregator = SigAggregator::new(&single_sig_circuit().verifier_data());
-        let circuit =
-            CancelCloseCircuit::<F, C, D>::new(&aggregator.levels[AGG_LEVELS - 1].verifier_data());
-        Self {
-            aggregator,
-            circuit,
-        }
+        let agg = FalconAggCircuit::<F, C, D>::new();
+        let circuit = CancelCloseCircuit::<F, C, D>::new(&agg.verifier_data());
+        Self { agg, circuit }
     }
 
     /// Build the cancel-close full witness: the REVIVED (later) signed state + the pending close
-    /// intent to cancel, plus the N active members' single-sigs of the revived IMCH digest
-    /// aggregated into the level-4 binary-tree sign-zkp proof. The circuit enforces
-    /// revived_version > close.final_state_version and the era fence; these Rust preconditions
-    /// fail closed early.
+    /// intent to cancel, plus the N active members' Falcon signatures of the revived IMCH digest
+    /// carried by ONE `FalconAggCircuit` proof. The circuit enforces revived_version >
+    /// close.final_state_version and the era fence; these Rust preconditions fail closed early.
+    /// (Same Phase-2/-4 registration seam note as `CloseProver::build_full_witness`.)
     pub fn build_full_witness(
         &self,
         revived_state: &ChannelState,
-        member_keys: &[MemberKeys],
+        member_keys: &[FalconKeys],
         close_intent: &CloseIntent,
     ) -> WResult<CancelCloseFullWitness<F, C, D>> {
         let member_count = revived_state.balance_state.member_count as usize;
@@ -3733,10 +3757,7 @@ impl CancelCloseProver {
                 member_keys.len()
             ));
         }
-        let pk_gs: Vec<Bytes32> = member_keys
-            .iter()
-            .map(|k| k.signing_key.public_key())
-            .collect();
+        let pk_gs: Vec<Bytes32> = member_keys.iter().map(|k| k.pk_g()).collect();
         for i in 0..pk_gs.len() {
             for j in (i + 1)..pk_gs.len() {
                 if pk_gs[i] == pk_gs[j] {
@@ -3758,20 +3779,17 @@ impl CancelCloseProver {
             close_intent: close_intent.clone(),
         };
 
-        // Aggregate the N member single-sigs of the REVIVED IMCH digest (slot order = leaf order).
+        // Sign the REVIVED IMCH digest with each member's Falcon key (slot order) and prove the
+        // ONE aggregation circuit.
         let digest = revived_state.digest;
-        let mut member_auth: Vec<MemberCancelAuth> = Vec::with_capacity(member_count);
-        let mut leaves: Vec<ProofWithPublicInputs<F, C, D>> = Vec::with_capacity(member_count);
-        for (i, keys) in member_keys.iter().enumerate() {
-            let sig = single_sig_circuit()
-                .prove(&keys.signing_key, digest)
-                .map_err(|e| WalletError(format!("cancel member {i} single-sig failed: {e}")))?;
-            leaves.push(sig);
-            member_auth.push(MemberCancelAuth { pk_g: pk_gs[i] });
-        }
+        let (pk_gs, agg_witness) = falcon_member_auth_for_digest(member_keys, digest)?;
+        let member_auth: Vec<MemberCancelAuth> = pk_gs
+            .iter()
+            .map(|&pk_g| MemberCancelAuth { pk_g })
+            .collect();
         let agg_proof = self
-            .aggregator
-            .aggregate_to_level(&leaves, AGG_LEVELS)
+            .agg
+            .prove(&agg_witness)
             .map_err(|e| WalletError(format!("cancel signature aggregation failed: {e:?}")))?;
 
         Ok(CancelCloseFullWitness {
@@ -5542,12 +5560,19 @@ mod delegate_send_tests {
 
         let prover = CloseProver::new(&bp.balance_vd());
 
+        // Falcon close-signing keys (falcon-sig Phase 2). Deterministic per-slot seeds; NOTE the
+        // Phase-2/-4 seam — the record above still registers the Goldilocks pk_g, which is fine
+        // here because this test verifies the close proof locally (no L1 member-set match).
+        let falcon_keys: Vec<crate::falcon_sig::FalconKeys> = (0..3)
+            .map(|i| crate::falcon_sig::FalconKeys::from_seed([0xc1 + i as u8; 32]))
+            .collect();
+
         // Negative (fail-closed precondition, no proving): member-key count != member_count.
         assert!(
             prover
                 .build_full_witness(
                     &state,
-                    &keys[..2],
+                    &falcon_keys[..2],
                     balance_proof.clone(),
                     1,
                     Bytes32::default(),
@@ -5559,7 +5584,14 @@ mod delegate_send_tests {
 
         // Positive: build the full witness, prove, and verify.
         let witness = prover
-            .build_full_witness(&state, &keys, balance_proof, 1, Bytes32::default(), 1)
+            .build_full_witness(
+                &state,
+                &falcon_keys,
+                balance_proof,
+                1,
+                Bytes32::default(),
+                1,
+            )
             .expect("close full witness");
         let proof = prover.prove(&witness).expect("close proof");
         prover
@@ -5734,7 +5766,10 @@ mod delegate_send_tests {
 
         let mut rng = StdRng::seed_from_u64(0xca11);
         let channel_id = ChannelId::new(3).unwrap();
-        let keys: Vec<MemberKeys> = (0..3).map(|_| MemberKeys::generate(&mut rng)).collect();
+        // Falcon cancel-signing keys (falcon-sig Phase 2), deterministic per-slot seeds.
+        let keys: Vec<crate::falcon_sig::FalconKeys> = (0..3)
+            .map(|i| crate::falcon_sig::FalconKeys::from_seed([0xca + i as u8; 32]))
+            .collect();
         // 3 distinct slot ciphertexts (content is not load-bearing for cancel — only the IMCH
         // digest the members sign matters — but keep H1 non-degenerate).
         let encs: Vec<RegevCiphertext> = (0..3u64)

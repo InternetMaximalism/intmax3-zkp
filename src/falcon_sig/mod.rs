@@ -26,6 +26,7 @@
 //! sampler also draws from the OS CSPRNG. Deterministic signing is deliberately not
 //! implemented (CARDIS-2023 fault attack on det-Falcon; sampler multi-runtime consistency).
 
+pub mod agg;
 pub mod compat;
 pub mod gadget;
 pub(crate) mod vendor;
@@ -239,6 +240,24 @@ pub fn falcon_pk_digest(pk_h: &[u16; FALCON_N]) -> Bytes32 {
         inputs.push(packed);
     }
     PoseidonHashOut::hash_inputs_u64(&inputs).into()
+}
+
+/// The fixed PADDING-slot identity digest `Poseidon(IMFK || encode(0))` — the `pk_g` value the
+/// conditional in-circuit gadget forces onto an INACTIVE (padding) slot, whose witness is the
+/// all-zero polynomial (`gadget::FalconSigGadgetWitness::padding`).
+///
+/// SECURITY (TM-C7 padding argument, Phase-2 site): this digest is PUBLIC (anyone can compute
+/// it) and MUST NOT be admitted as a member identity anywhere: the close / cancel-close
+/// circuits zero padding slots out of the member-set commitment (so the committed padding value
+/// stays `0x0…0`, exactly as before — forging a REAL member at a padding slot still requires a
+/// Poseidon preimage of the ZERO digest under IMFK) and skip padding slots in the A5
+/// distinctness chain. Registration-side, `h = 0` is not a valid NTRU public key, so no honest
+/// member can ever collide with it; a MALICIOUS registrant registering this digest as their
+/// pk_g gains nothing (they would merely be claiming a key whose only "signatures" are
+/// norm-check failures — the padding slot never has a live norm bound, but a padding slot is
+/// gated OFF by `member_count`, which is bound into the signed H1).
+pub fn falcon_padding_pk_g() -> Bytes32 {
+    falcon_pk_digest(&[0u16; FALCON_N])
 }
 
 // SIGNATURE
