@@ -80,6 +80,21 @@ to every instantiated width 1/14/15/32). Suite 33/33.
       box that can hold the 2^20 agg circuit alongside the balance family, or fixture splitting)
 
 ## Phase 3 — Validity path (list step swap)
+
+> **Phase 2.5 (lookup range checks) was REJECTED as UNSOUND** — plonky2's LogUp lookup argument
+> does not enforce table membership at this pin (defect reproduced end-to-end; see
+> `falcon-sig-phase2_5-notes.md`). Consequences for Phase 3: the earlier "lookup vs dummy-circuit"
+> blocker is MOOT (no lookups anywhere), and the Falcon gadget stays at ~51.7k gates/signature.
+> The validity path verifies the list proof CONDITIONALLY with a DUMMY proof
+> (`validity_circuit.rs:229`, `:267`), which is fine for binary range checks.
+>
+> STILL OPEN from Phase 2: the memory/cost problem is UNSOLVED. The agg circuit is 2^20 and the
+> close/agg suites OOM on a dev machine. Options that do NOT depend on lookups: reduce the NUMBER
+> of mod-q reductions (restructure the NTT), narrow range-check widths where provably safe, or
+> split test fixtures so the agg circuit and the balance family are not co-resident. Phase 3
+> instantiates the gadget once per list step (ONE signature, not 16), so the per-signature cost
+> matters less there than it does in the 16-slot aggregator.
+
 - [ ] `ListCircuit` leaf: recursive SingleSig verify → in-circuit Falcon verify (chain format,
       `list_leaf`/`chain_step_target`, `bp_sig_chain` accumulator all unchanged)
 - [ ] `ValidityCircuit` re-pins the new list VK; conditional-verify gate unchanged
