@@ -142,7 +142,18 @@ to every instantiated width 1/14/15/32). Suite 33/33.
       **EIP-170 margin `IntmaxRollup` = 1,108 B** (runtime 23,468 B).
 - [ ] Security review (separate subagent) + attacker pass on the `h`-transport binding
 
-## Phase 5 — Fixtures, e2e, deploy prep
+## Phase 5 — Fixtures, e2e, deploy prep — DONE (GREEN)
+
+Independently re-verified by the orchestrator rather than taken on report:
+`cargo test --test e2e --release` **PASS** (130 s, 13.3 GB peak) and `forge test`
+**248 passed / 0 failed / 0 SKIPPED across 17 suites**. The zero-skip is the load-bearing
+number: fixture-gated Solidity tests skip SILENTLY when their JSON is missing, so zero skips
+proves every regenerated fixture was actually loaded and verified on-chain.
+
+Also green (sequential): small_block_sig_validity, wallet_core_e2e, and the real Falcon
+close-path tests (a3_close_prover / a3_cancel_close_prover / a3_withdraw_registration) — added
+after noticing `wallet_core_e2e` finishes in 2 s at 72 MB and constructs no `CloseProver`, i.e.
+the originally-named targets would have left the Rust close path untested while looking green.
 - [ ] Enumerate (do not assume) fixture regen set; regenerate; semantic validation
 - [ ] `cargo test --release` full + `--test e2e`; forge full suite; wasm32 lib check
 - [ ] detail2.md §G-2 domain table (IMFH/IMFK/IMC2; IMCM retired) + spec section for the scheme
