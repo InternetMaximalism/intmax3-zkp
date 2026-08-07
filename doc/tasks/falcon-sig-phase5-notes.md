@@ -148,6 +148,228 @@ fails it. It also asserts `address(manager) == bakedRecipient`, validating step 
 
 ---
 
-<!--RESULTS-->
+## 3. Phase-5 resumption (session 2) — independent re-validation
+
+The prior session's regenerated fixture set is committed at HEAD `2e418f6` (amended onto the Phase-4
+commit); the tree is clean. Rather than trust §1–§2, the fixture set was re-validated from scratch
+offline, then handed to the suites.
+
+### 3.1 Offline structural checks
+
+- All **31** `contracts/test/data/*.json` parse as well-formed JSON.
+- `forge build` — exit 0.
+
+### 3.2 Offline SEMANTIC checks (recomputed independently, not byte comparison)
+
+| # | check | method | result |
+|---|---|---|---|
+| S1 | `close_intent.json.member_set_commitment` | recomputed `keccak(IMCM ‖ member_count ‖ pad-to-16 pk_g)` in Python over the fixture's OWN `member_pk_gs` | **MATCH** |
+| S2 | `cancel_close.json.member_set_commitment` | same | **MATCH** |
+| S3 | close fixture ↔ lifecycle fixture agreement | `close_lifecycle.json.registration.member_pk_gs` == `close_intent.json.member_pk_gs` (produced by two DIFFERENT generator binaries in separate runs) | **IDENTICAL** |
+| S4 | descriptor ↔ proof binding | `close_intent.json`'s `member_set_commitment` / `close_intent_digest` / `final_channel_state_digest` / `final_balance_state_h1` all located as 8-limb runs inside `close_intent_mle.json.publicInputs` (103 limbs) at offsets 85 / 57 / 9 / 17 | **FOUND** |
+| S5 | validity proof PI binding | recomputed `keccak256(ValidityPublicInputs)` (164-byte preimage: u64 block numbers ‖ chains ‖ ext commitments ‖ prover) from each `*lifecycle.json.vpis`, compared to the 8 PI limbs of the paired `*_validity_mle.json` | **MATCH ×3** (`lifecycle`, `close_lifecycle`, `c2c_lifecycle`) |
+| S6 | withdrawal ↔ validity cross-proof binding | `withdrawal_payout.json.ext_commitment` == `lifecycle.json.vpis.final_ext_commitment`, and that same digest is embedded at `withdrawal_mle.json.publicInputs[8..16]` | **MATCH** |
+| S7 | close recipient pinning | `close_withdrawal_payout.json.recipient` == `0x0b193ed789c50c205a19e265ea4f78c6c331abac` == the `CLOSE_MANAGER_ADDRESS` used at generation (§1.5 steps 3–4) | **MATCH** |
+
+S5 is the decisive one: it independently reproduces the exact digest the on-chain `_computeValidityPIHash`
+re-derives, from the descriptor JSON alone, and finds it verbatim in the separately-generated proof's
+public inputs. A stale, mixed-run, or partially-regenerated set cannot satisfy it.
+
+METHOD NOTE (recorded because it first read as a failure): S5 initially MISMATCHED on all three
+fixtures. The cause was the CHECK, not the fixtures — `ValidityPublicInputs` block numbers are **u64
+(2 u32 limbs each, 164-byte preimage)**, per `IntmaxRollup.sol:297-311`; the first attempt packed
+them as 4 bytes. Fixing the checker's encoding produced a 3/3 match. Per the security-first protocol
+the fixtures were NOT touched while this was being diagnosed.
+
+## 4. Foundry — `forge build` + `forge test`
+
+`forge build` exit **0**. `forge test` exit **0**: **17 suites, 248 tests passed, 0 failed, 0 SKIPPED.**
+
+The `0 skipped` is the load-bearing number, not the `248 passed`. Every fixture-gated Solidity test
+in this repo skips gracefully when its `*_mle.json` is absent or unparseable (see
+`generate_close_fixture.rs:29`). A zero skip count therefore proves each regenerated fixture was
+actually loaded and verified on-chain, not silently stepped over.
+
+| suite | tests | result |
+|---|---|---|
+| `C2CBlockHashTest` | 1 | 1 passed, 0 failed, 0 skipped |
+| `C2CFullE2ETest` | 2 | 2 passed, 0 failed, 0 skipped |
+| `ChannelSettlementAdversarialTest` | 10 | 10 passed, 0 failed, 0 skipped |
+| `ChannelSettlementInvariantTest` | 6 | 6 passed, 0 failed, 0 skipped |
+| `ChannelSettlementManagerTest` | 66 | 66 passed, 0 failed, 0 skipped |
+| `CloseLifecycleE2ETest` | 2 | 2 passed, 0 failed, 0 skipped |
+| `IntmaxRollupTest` | 54 | 54 passed, 0 failed, 0 skipped |
+| `IntmaxTestTokenITXTest` | 11 | 11 passed, 0 failed, 0 skipped |
+| `MleE2ETest` | 6 | 6 passed, 0 failed, 0 skipped |
+| `MleFinalizeE2ETest` | 2 | 2 passed, 0 failed, 0 skipped |
+| `MultiTokenEscrowTest` | 13 | 13 passed, 0 failed, 0 skipped |
+| `MultiTokenSettlementTest` | 20 | 20 passed, 0 failed, 0 skipped |
+| `PartialWithdrawalPayoutTest` | 7 | 7 passed, 0 failed, 0 skipped |
+| `PartialWithdrawalTest` | 27 | 27 passed, 0 failed, 0 skipped |
+| `ReclaimStakeTest` | 7 | 7 passed, 0 failed, 0 skipped |
+| `RegisterTokensTest` | 8 | 8 passed, 0 failed, 0 skipped |
+| `WithdrawNativeE2ETest` | 6 | 6 passed, 0 failed, 0 skipped |
+
+No failures to classify — there is no (a) stale-fixture, (b) logic-break, or (c) invalidated-premise
+bucket to report for Foundry. No assertion was weakened and no test was skipped, disabled, or
+modified at any point in this phase.
+
+Highlights that specifically exercise the migrated material:
+- `CloseLifecycleE2ETest` (2/2) — the on-chain member-set-commitment equality gate of §2.3.
+- `MleE2ETest` (6/6) — verifies the regenerated `mle_fixture.json` against the real
+  `MleVerifier`, INCLUDING the three negative tests (`rejects_tamperedTranscript`,
+  `rejects_flippedWitnessEval`, `rejects_wrongGatesDigest`), so the new VK still rejects forgeries.
+- `MleFinalizeE2ETest`, `C2CFullE2ETest`, `WithdrawNativeE2ETest` — the finalize / c2c / native
+  withdrawal rails over the regenerated validity+withdrawal proof pairs.
+- `IntmaxRollupTest::test_finalize_tamperedValidityPIs_rejected` and `test_finalize_unboundMlePublicInputs`
+  — confirm the keccak(VPI) ↔ MLE-PI binding validated offline in S5 is still ENFORCED, not merely satisfied.
+
+## 5. Rust integration tests (one process at a time)
+
+| # | target | tests | result | wall | peak RSS |
+|---|---|---|---|---|---|
+| 1 | `--test small_block_sig_validity` | 1 passed, 0 failed, **0 ignored** | **PASS** | 63.1 s | 6.45 GB |
+| 2 | `--test wallet_core_e2e` | 3 passed, 0 failed, **0 ignored** | **PASS** | 2.0 s | 0.07 GB |
+| 3 | `--test e2e` | 1 passed, 0 failed, **0 ignored** | **PASS** | 146.3 s | 14.28 GB |
+
+Test 1 is the one that matters most for Phases 2/3: `inter_channel_small_block_sig_is_validity_proven`
+drives a real inter-channel small block through the validity list step, which is precisely where
+Phase 3 put in-circuit Falcon verification.
+
+### 5.1 SCOPE CORRECTION — `wallet_core_e2e` does NOT cover the close provers
+
+`wallet_core_e2e` finished in **2.0 seconds at 72 MB**. That is far too cheap for a suite that builds
+a `FalconAggCircuit`, so it was checked rather than accepted: it contains exactly 3 tests
+(`wallet_core_in_channel_send_receive`, `p4_1_attacker_pk_b_swap_is_rejected`,
+`p4_1_foreign_self_consistent_record_is_rejected`), 0 ignored, and none of them constructs a
+`CloseProver`.
+
+The REAL Falcon close-path Rust tests are **lib unit tests in `src/wallet_core.rs`**, not integration
+targets:
+
+- `a3_close_prover_builds_and_verifies_real_close_proof` (`:5686`)
+- `a3_cancel_close_prover_builds_and_verifies` (`:5922`)
+- `a3_post_close_claim_prover_builds_and_verifies` (`:6022`)
+- `a3_withdraw_registration_matches_close_member_set` (`:6295`)
+- `two_token_close_intent_builds_per_token_claims` (`:7115`)
+
+Naming `wallet_core_e2e` in the target list and stopping there would have left the Rust-side close
+path UNTESTED while looking green. Those lib tests are therefore run explicitly as step 5b.
+
+### 5.2 Step 5b — the close-prover lib tests (run because §5.1 found the gap)
+
+| # | test (`-p intmax3-zkp --lib`) | result | wall | peak RSS |
+|---|---|---|---|---|
+| 4 | `a3_close_prover_builds_and_verifies_real_close_proof` | **PASS** | 79.3 s | 10.52 GB |
+| 5 | `a3_cancel_close_prover_builds_and_verifies` | **PASS** | 36.0 s | 5.97 GB |
+| 6 | `a3_withdraw_registration_matches_close_member_set` | **PASS** | 1.5 s | 0.08 GB |
+
+Each reported `0 ignored`, so none was silently skipped by the `debug_assertions` gate. Test 4 is the
+real-input close path with no `test_fixture`: member Falcon signatures over the IMCH digest, the
+`FalconAggCircuit` recursion, the balance-proof binding and the in-circuit soundness gates. Test 6 is
+the Rust-side twin of the on-chain assertion in §2.3 — registration member set ≡ close member set.
+
+All runs were sequential, one heavy process at a time. Highest peak observed: **14.28 GB**
+(`--test e2e`), well inside the 36 GB budget.
+
+---
+
+## 6. Carry-in from the Phase-4 review (INFO-7): close provers RE-SIGN instead of consuming blobs
+
+**Confirmed, and NOT fixed in this phase.** Evidence:
+
+- `src/wallet_core.rs:3364` `falcon_member_auth_for_digest(member_keys, digest)` calls
+  `keys.sign(digest)` per member and builds the `FalconAggWitness` from freshly minted signatures.
+- `src/wallet_core.rs:3478` (`CloseProver::build_full_witness`) and `src/wallet_core.rs:3809`
+  (`CancelCloseProver::build_full_witness`) are its only two callers. Both take
+  `member_keys: &[K] where K: Borrow<FalconKeys>` — i.e. **the caller must hold every member's
+  SECRET key**.
+- `ChannelState.member_signatures: Vec<MemberSignature>` (`src/common/channel.rs:558`) already
+  carries the collected blobs, and `build_full_witness` **ignores that field entirely**.
+
+So production close currently presumes one party holds all member secrets. This is a real
+architectural gap, not a cosmetic one.
+
+### 6.1 Why it is SMALLER than it looks — the transport and the digest already line up
+
+Two facts make the core conversion genuinely contained:
+
+1. **The message is already identical.** `build_full_witness` uses `let digest = state.digest;`
+   (`wallet_core.rs:3477`) — the IMCH state signing digest. That is *exactly* the digest the cosign
+   flow signs (`wallet_core.rs:247` `sign_digest` → `encode_cosign_blob`, over the same
+   `state.digest`), and the collected results are stored back into `state.member_signatures` in slot
+   order (`wallet_core.rs:857-860`, sorted by `member_slot`). No new round trip, no new message
+   format, no protocol step needs inventing.
+2. **The `h` transport and its verifier already exist.** `decode_cosign_blob`
+   (`src/falcon_sig/mod.rs:428`) recovers `(FalconSignature, [u16; FALCON_N])`, and
+   `verify_cosign_blob` (`:462`) is documented as *"the only sanctioned entry point for verifying a
+   `MemberSignature.signature`"* because it binds the transported `h` to the authenticated `pk_g`
+   via `falcon_pk_digest(h) == pk_g` INSIDE the call (review F-2). `FalconAggWitness::for_signatures`
+   (`src/falcon_sig/agg.rs:212`) already takes exactly `&[(&[u16; FALCON_N], &FalconSignature)]` —
+   the precise tuple `decode_cosign_blob` yields.
+
+### 6.2 Concrete sketch (NOT applied)
+
+Add a sibling of `falcon_member_auth_for_digest` in `src/wallet_core.rs`:
+
+```rust
+/// Build the agg witness from COLLECTED member blobs instead of held secrets.
+/// SECURITY: slot coverage is enforced fail-closed (exactly member_count sigs, slots a
+/// permutation of 0..member_count) so a repeated slot cannot stand in for a missing signer;
+/// `verify_with_pk_g` binds the transported `h` to the claimed `pk_g` (F-2) BEFORE proving.
+fn falcon_member_auth_from_blobs(
+    sigs: &[MemberSignature],   // state.member_signatures, slot order
+    digest: Bytes32,            // state.digest
+    member_count: usize,
+) -> WResult<(Vec<Bytes32>, FalconAggWitness)>
+```
+
+body: reject `sigs.len() != member_count`; reject unless `member_slot` values are a permutation of
+`0..member_count`; per slot `decode_cosign_blob(&ms.signature)?` then
+`verify_with_pk_g(ms.pk_g, &h, digest, &sig)` (fail closed); reject duplicate `pk_g`; then
+`FalconAggWitness::for_signatures(digest, &signers)`. Roughly 45 lines. Then give each prover a
+`build_full_witness_from_state_signatures(...)` that drops the `member_keys` parameter and calls it.
+
+### 6.3 Why it was NOT done here — three independent reasons
+
+1. **Out of the stated scope.** This phase is fixture regeneration; the instruction is explicit that
+   circuit and protocol logic must not change. This changes what production close TRUSTS (held
+   secrets → verified transported blobs), which is a protocol-trust change even though no circuit
+   moves.
+2. **Blast radius is not contained even if the helper is.** `build_full_witness` has ~12 call sites
+   (`src/wallet_core.rs` ×10 including tests, `src/bin/channel_member.rs:823` and `:1122`). Every
+   one currently passes held keys. Some — the fixture generators and the CLI demo — legitimately DO
+   hold all keys, so the old entry point cannot simply be deleted; both must coexist, and deciding
+   which one production takes is a design call.
+3. **It needs an adversarial review it cannot get from me.** CLAUDE.md §2 forbids the implementing
+   agent from security-reviewing its own work, and this change is squarely soundness-relevant: the
+   new path accepts ATTACKER-SUPPLIED bytes where the old path accepted only locally generated
+   signatures. Slot-coverage, duplicate-`pk_g`, blob-version-downgrade, and digest-substitution
+   (signatures collected for a DIFFERENT `state.digest` being replayed into a close) all become live
+   attack surface and need a dedicated attacker subagent.
+
+**RECOMMENDATION:** separate PR, with its own threat model, an attacker subagent, and a negative-test
+matrix (wrong digest, replayed slot, duplicate `pk_g`, `h` not matching `pk_g`, legacy-version blob,
+short/long blob, `member_count` mismatch). Recorded as STOP point 2.
+
+## 7. Final status
+
+**Steps 1–5 complete and green. No code, circuit, protocol, fixture, or test file was modified in
+this session** — `git status` shows exactly one modified path, `doc/tasks/falcon-sig-phase5-notes.md`.
+Nothing was committed.
+
+The regenerated fixture set from the prior session (committed at `2e418f6`) is **validated, not
+merely present**: 7 independent offline semantic checks (§3.2), 248/248 Foundry tests with **0
+skipped** (§4), and 6/6 Rust proving tests (§5). No assertion was weakened and no test was skipped,
+disabled, or relaxed at any point.
+
+### 7.1 STOP points / UNVERIFIED
+
+| # | item | status |
+|---|---|---|
+| **STOP 1** | The four `sepolia_*` fixtures are STALE (not regenerated). Re-confirmed this session: `grep` finds **zero** references under `contracts/test/`, only `script/DeployClose.s.sol` and `script/RunClose.s.sol`. `forge test` therefore never reads them and cannot detect their staleness. They need a target-network `WD_RECIPIENT` (a deploy decision), so they must be regenerated as part of the v3 reset/redeploy per `doc/tasks/regen-and-redeploy-runbook.md`. | **DEFERRED — deploy-time** |
+| **STOP 2** | `CloseProver`/`CancelCloseProver` re-sign locally instead of consuming collected `MemberSignature` blobs (§6). Assessed as NOT contained: ~12 call sites, both entry points must coexist, and it newly accepts attacker-supplied bytes, so it needs its own threat model + attacker subagent. | **NOT DONE — separate PR (sketch in §6.2)** |
+| **UNVERIFIED** | Test targets requiring a live chain / anvil (`onchain_deposit_keystone`, `close_lifecycle_cli_e2e`, `two_token_cli_e2e`, `partial_withdrawal_e2e`, `inter_channel_live`) and the WASM browser path (`wasm-pack` + HTTPS browser run) were **NOT executed** this session. Their status after the migration is unknown — not claimed green. | **UNVERIFIED** |
+| **UNVERIFIED** | `e2e_fixture.json` / `e2e_groth16.json` remain in-tree with zero producers and zero consumers (§1.2). Dead, but not deleted this phase. | **UNVERIFIED / dead** |
 
 ---
