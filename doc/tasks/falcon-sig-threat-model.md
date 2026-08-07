@@ -105,6 +105,44 @@ Close/cancel-close must verify with no prover slack:
 **O-5: adversarial tests per item: norm boundary, non-canonical s2 (q-overflow AND centered
 confusion), tampered salt, s2 = 0, non-canonical h, valid-sig-wrong-pk. Each must fail.**
 
+### TM-C12 — The public polynomial `h` is now published with every cosignature (ACCEPTED)
+
+Before Phase 4 the Falcon public polynomial never left the wallet: only
+`pk_g = Poseidon(IMFK‖encode(h))` was registered, and the close/agg circuits expose `pk_g` as a
+public input with `h` as a witness. Phase 4's cosign wire carries `h` inside the (already opaque)
+`MemberSignature.signature` blob — `v1(1) ‖ salt(40) ‖ s2(625) ‖ h(1024)` = 1690 B — so anyone
+observing a cosignature now sees the full 1 KB `h`.
+
+**This is not an unforgeability weakening**: Falcon-512 is defined with a PUBLIC `h`, and
+`MemberSignature.pk_g` was already in the clear, so linkability is unchanged. What it removes is
+a defence-in-depth layer (`h` used to be secret-by-accident). Accepted deliberately; recorded
+here because the Phase-4 notes discussed only bandwidth and never confidentiality.
+
+`h` is untrusted input: it is consumed ONLY through `verify_with_pk_g`, which range-checks
+canonicity and recomputes `falcon_pk_digest(h) == pk_g` against the AUTHENTICATED
+`record.member_pk_gs[slot]` BEFORE the signature check. Substituting `h'` therefore requires a
+Poseidon second preimage under IMFK (A-F4).
+
+### TM-C13 — wasm32 vs native keygen determinism (MEASURED, gated)
+
+`FalconKeys::from_seed` must derive the same `pk_g` on wasm32 as natively, or a wallet created
+or restored in the browser is a DIFFERENT member than the one registered on L1: its
+cosignatures stop verifying and the channel becomes permanently unclosable (funds stuck), with
+no error at the moment of divergence.
+
+The structural argument is strong (keygen touches only IEEE-754 `+ - * / floor round sqrt` over
+a hardcoded twiddle table; `approx_exp` is integer FACCT, not `libm::exp`; Rust neither contracts
+to FMA nor reassociates without fast-math). **It is nevertheless MEASURED, because this
+repository has already observed a wasm-vs-native numeric divergence in a proof path** — see
+`.cargo/config.toml`, which records that the Regev STARK verifier returns different results on
+wasm32 and native for identical bytes and that disabling simd128 did not fix it. A negative claim
+over a large vendored numeric surface is exactly the kind of argument that failed there.
+
+**Result (2026-08-06): MATCH.** `hosting/check-falcon-wasm-identity.sh` builds the wasm cdylib
+and asserts `FalconKeys::from_seed([42;32]).pk_g()` equals the same pinned constant the native
+suite pins. **This script is a BLOCKING gate on any browser deploy** and must be re-run after any
+dependency bump touching the numeric surface.
+
 ### TM-C6 — Cross-context isolation under ONE key (IMCH vs IMSB)
 The single Falcon key signs both state co-signs (IMCH digests) and small-block roots (IMSB
 digests) — exactly as `sk_g` does today. Isolation rests on the message digests: both are

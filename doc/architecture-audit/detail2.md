@@ -53,6 +53,13 @@ the structure of the signing target `hash(H1, H2)`, the chain binding, and the c
 
 ### A-3. Signatures: SPHINCS+ → Poseidon-preimage ZK signature (two-key)
 
+> **SUPERSEDED for the `pk_g` half — see §O (falcon-sig, 2026-08).** The Goldilocks
+> Poseidon-preimage ZK signature described below (`SingleSigCircuit`, `pk_g = Poseidon(IMPG‖sk)`)
+> and BOTH of its aggregators are DELETED and replaced by **Falcon-512 with Poseidon
+> hash-to-point**; `pk_g` is redefined in place as `Poseidon(IMFK‖encode(h))`. The BabyBear `pk_b`
+> half below is UNCHANGED. The rest of this subsection is retained as the historical record of the
+> scheme §O replaced.
+
 The member signatures this spec describes as SPHINCS+ (§B-4, §C, §D, §F) were **replaced by a
 Poseidon-preimage ZK signature** (a ZK proof of knowledge of `sk` with `pk = Poseidon(sk)`, message
 bound as a public input), and SPHINCS+ was removed entirely. Two keys per member, each native to its
@@ -142,7 +149,7 @@ pub struct RegevCiphertext {
 | `withdrawClaimZKP` | Plonky3 STARK | A degenerate form of the above ("the plaintext of my own ct = the public withdrawal amount") |
 | `balanceProof` / `validityProof` | Plonky2 (existing) | `src/circuits/balance/`, `src/circuits/validity/` (changes are in §F) |
 | close / claim PI binding | Plonky2 (existing) | `src/circuits/channel/close_circuit.rs` and others |
-| Signature | ~~SPHINCS+ (Poseidon)~~ → **Poseidon-preimage ZK sig (two-key)** | **SUPERSEDED — see D8 (+ D13)** in detail2-implementation-notes.md. Goldilocks `pk_g` (Plonky2 `SingleSigCircuit`; validity path aggregated by the recursive `ListCircuit`, close/cancel path by the binary-tree `AggLevelCircuit` sign-zkp, D13) for state/close/IMSB; BabyBear `pk_b` (Plonky3 `Poseidon2HashSigAir`) for the channel-tx sender. SPHINCS+ fully removed. |
+| Signature | ~~SPHINCS+ (Poseidon)~~ → ~~Poseidon-preimage ZK sig~~ → **Falcon-512 / Poseidon H2P (`pk_g`) + BabyBear `pk_b`** | **SUPERSEDED — see §O.** `pk_g` is now a native **Falcon-512** signature (Poseidon hash-to-point, IMFH; identity `Poseidon(IMFK‖encode(h))`), verified natively off-circuit for the wallet co-sign and IN-circuit by `falcon_sig::agg::FalconAggCircuit` (close/cancel) and by the validity list step. `pk_b` (Plonky3 `Poseidon2HashSigAir`) is unchanged. Historical record follows: D8 (+ D13) in detail2-implementation-notes.md — Goldilocks `pk_g` (Plonky2 `SingleSigCircuit`; validity path aggregated by the recursive `ListCircuit`, close/cancel path by the binary-tree `AggLevelCircuit` sign-zkp, D13) for state/close/IMSB; BabyBear `pk_b` (Plonky3 `Poseidon2HashSigAir`) for the channel-tx sender. SPHINCS+ fully removed. |
 
 `ChannelProofEnvelope { role, backend, proof }` (`state_update_verifier.rs:20-24`) is retained, and
 `ProofBackend::Plonky3` is used to carry the lattice STARKs (as in the existing design).
@@ -439,7 +446,14 @@ deposit_nullifier])`.
   `H1'` (post-subtraction state) and `H2` (tx_tree_root) coexist in a single preimage in the signing target.
   The validity / confirmation circuit verifies this signature as a **substitute** for a signature over tx_tree_root
   (constraining that the `H2` component = the `tx_tree_root` of the posted small block. §F-2).
-- **D-4 (cosigner aggregation shape, D13)**: each cosigner produces ONE `SingleSigCircuit` sign-zkp
+- **D-4 (cosigner aggregation shape, D13)** — **SUPERSEDED by §O-3 (falcon-sig):** the STATEMENT and
+  PI layout below survive verbatim, but the leaves are now **Falcon signatures verified in-circuit**
+  by `falcon_sig::agg::FalconAggCircuit` (leaf 2^16 + 4 levels at 2^14) instead of recursively
+  verified `SingleSigCircuit` proofs, and the validity `ListCircuit` step likewise verifies a Falcon
+  signature directly. Everything else — left-packing enforced in-circuit, `signer_count` counting
+  verified leaves, close/cancel binding `message`/`signer_count` and wiring the pk vector into IMCM
+  + the A5 chain with zero witnessed freedom — is unchanged. Historical text:
+  each cosigner produces ONE `SingleSigCircuit` sign-zkp
   over the common message (the recomputed IMCH digest for close/cancel); the proofs are aggregated
   PAIRWISE per level by `poseidon_sig::aggregate::AggLevelCircuit` (one circuit per level,
   `AGG_LEVELS = 4`, pk-slot widths 2 → 4 → 8 → 16 = `MAX_AGG_SIGNERS`), each level's PI layout being
@@ -630,6 +644,22 @@ vectors + flat keccak are deleted.
 | `CHANNEL_UPDATE_ZKP_DOMAIN_V2` | `0x494d5532` | "IMU2" (WIRED in Phase 2b: the §N-4 E-2 public values gain the base `token_index` as their own extra PV (`e2_extra_pvs`, `transfer_stark.rs`); replaces "IMUZ". TM-6/TM-15) |
 | `INTER_CHANNEL_TX_DOMAIN_V2` | `0x494d4932` | "IMI2" (keccak. §N-4 `InterChannelTx` signing digest — base `token_index` its own limb after `destination_channel_id`. Replaces "IMIT" (Phase 2b; value pinned in the non-collision test). NEW domain rather than in-place widening: the preimage has three variable-length length-prefixed tails, so the equal-total-length v1↔v2 realignment case would otherwise rest on the v3 reset alone; exactly one hashing site, no in-circuit/Solidity mirror. TM-6/TM-15) |
 | `TOKEN_FUNDS_DIGEST_DOMAIN` | `0x494d5446` | "IMTF" (keccak. §N-6 `token_funds_digest = keccak([IMTF, registry(10×u32), token_count, amounts(10×U256)])` — fixed 92-word preimage, always full width. TM-11) |
+| `DOMAIN_FALCON_H2P` | `0x494d4648` | "IMFH" (**Poseidon**. §O-1 capacity domain separator of the Falcon-512 hash-to-point sponge: `absorb(salt(40 B) ‖ message digest(32 B))`, then 64 squeezes × 8 rate elements = 512 coefficients, one FULL field element reduced mod q per coefficient. `src/falcon_sig/vendor/hash_to_point.rs`; native and in-circuit pinned equal by shared vectors. TM-C1/O-1/O-2) |
+| `DOMAIN_FALCON_PK` | `0x494d464b` | "IMFK" (**Poseidon**. §O-2 member identity `pk_g = Poseidon(IMFK ‖ encode(h))` over the canonical encoding of the Falcon public polynomial `h`. REDEFINES `pk_g` IN PLACE — same `Bytes32` width, same `MemberLeaf` slot, same L1 registration keccak layout, same Solidity `bytes32 pkG`: values change, layouts do not. `src/falcon_sig/mod.rs`. TM-C7/A-F4) |
+| `DOMAIN_FALCON_KEYGEN` | `0x494d4647` | "IMFG" (**keccak**. §O-4 keygen-RNG seed separation: the NTRU keygen ChaCha20 seed is `keccak256("IMFG" ‖ member_seed)`, never the raw member seed — so this use of the seed cannot collide with any other consumer of the same 32 bytes. `src/falcon_sig/mod.rs::FalconKeys::from_seed`. TM-C10/O-11) |
+
+> **RETIRED by falcon-sig (Phase 4)**: `DOMAIN_PK_G` "IMPG" `0x494d5047` and `DOMAIN_SIG_G` "IMSG"
+> `0x494d5347` — the domains of the deleted Poseidon-preimage ZK signature (`pk = H(IMPG‖sk)`,
+> `sig = H(IMSG‖sk‖m)`). Nothing derives from them any more. They are **kept as RESERVED constants**
+> in `src/poseidon_sig/mod.rs` precisely so the repo-wide non-collision tests
+> (`constants.rs::all_domain_constants_pairwise_distinct`,
+> `falcon_sig::tests::falcon_domains_do_not_collide`) keep proving that no LIVE domain — IMFH/IMFK/
+> IMFG included — collides with a value this system once hashed under. Deleting them would delete
+> those proofs. **`IMCM` (`CLOSE_MEMBER_SET_DOMAIN`) is NOT retired**: the close member-set
+> commitment keeps its domain and its keccak layout; only the `pk_g` VALUES inside it change
+> (falcon-sig Phase 2 notes §5, TM-C7). `IMLL` (`LIST_LEAF_DOMAIN`) is likewise retained — the
+> validity `bp_sig_chain` list format survives the migration unchanged; only the list step's leaf
+> verification changed (§O-3).
 
 > Note: `MEMBER_LEAF_DOMAIN` / `REGEV_PK_POSEIDON_DOMAIN` are domains of **in-circuit Poseidon** (member-tree binding, DB).
 > `CLOSE_MEMBER_SET_DOMAIN` is a domain of **L1 keccak** (close PI reconciliation). It is the design of DB that the same member set is represented by
@@ -1248,3 +1278,134 @@ not. Accepted for v1; revisit only if a future version encrypts the token select
   per-token conservation on every path (N-3/4/5/6), P3 L1 per-token isolation with no residual
   single-asset variable (N-6/7). A fresh attacker-subagent pass over the actual diffs is REQUIRED
   before each implementation phase merges.
+
+---
+
+## O. Falcon-512 (Poseidon hash-to-point) unified signing key (2026-08; branch `feat/falcon-poseidon-sig`)
+
+**SUPERSEDES the Goldilocks half of §A-3 / §B-4 / §D-4.** The Poseidon-preimage ZK signature
+(`SingleSigCircuit`, `pk_g = Poseidon(IMPG‖sk)`) and both of its aggregators
+(`poseidon_sig::aggregate::AggLevelCircuit` for close/cancel, the `SingleSig`-leaf `ListCircuit`
+for validity) are **DELETED**. Everywhere `sk_g` signed, a **Falcon-512 signature with
+Poseidon hash-to-point** signs instead. The BabyBear sender key `pk_b` (§B-4, Plonky3
+`Poseidon2HashSigAir`) and the Regev encryption keys are **UNCHANGED** — this is a one-key
+replacement, not a re-architecture. Threat model: `doc/tasks/falcon-sig-threat-model.md`
+(TM-C1..C13, obligations O-1..O-12); plan and phase notes: `doc/tasks/falcon-sig-todo.md`,
+`doc/tasks/falcon-sig-phase{0,1,2,2_5,2_6,3,4,5}-notes.md`.
+
+### O-1. The scheme
+
+Falcon-512 (`n = 512`, `q = 12289`), vendored from `0xMiden/crypto`'s `falcon512_poseidon2`
+(MIT/Apache-2.0) at `src/falcon_sig/vendor/` with **only** `hash_to_point.rs` replaced: the
+sponge is the in-tree plonky2 Poseidon (Goldilocks, width 12) under the new capacity domain
+**IMFH**, absorbing `salt(40 B) ‖ message_digest(32 B)` and squeezing 64 × 8 = 512 coefficients,
+**one full field element per coefficient** reduced mod `q` (the Falcon spec's sanctioned
+no-rejection variant; bias ≈ 2^-41 total — A-F3/O-1). ffSampling, samplerz, the FFT and NTRU
+keygen are untouched vendor code.
+
+- Verification equation: `s1 = c − s2·h mod q mod (X^512 + 1)`; accept iff
+  `‖(s1, s2)‖² ≤ β² = 34 034 726`.
+- Salt: **40-byte CSPRNG salt per signature, randomized — not deterministic signing** (TM-C2;
+  CARDIS-2023 fault attack on deterministic Falcon). Sampled once outside the retry loop.
+- Wire format (`FalconSignature`): `FALCON_SIG_V1(1) ‖ salt(40) ‖ compressed s2 (625, Falcon
+  Golomb-Rice)` = **666 B**. The version byte is checked FIRST, before length and before any
+  structural parse, so a legacy ~76 KB `SingleSigCircuit` blob is rejected at the gate with a
+  distinct `UnsupportedVersion` error (O-9/TM-C8). The encoding is a bijection — signature BYTES
+  feed `SignedSmallBlock::signing_digest()` downstream.
+- Measured (native, M-series): keygen ~455 ms, sign ~5.4 ms, verify ~63 µs. Keygen runs at
+  **join/restore only**, never per signature.
+
+### O-2. Member identity: `pk_g` redefined IN PLACE
+
+`pk_g = Poseidon(IMFK ‖ encode(h))`, where `encode(h)` is the canonical packing of the 512
+public-polynomial coefficients (each `< q`). This **replaces** `Poseidon(IMPG ‖ sk_g)` at the same
+32-byte width and the same slot everywhere: `MemberLeaf` stays 3 fields, the L1 registration
+keccak preimage is unchanged, the `IMCM` member-set commitment keeps its domain and layout, the
+`IMLL` list-leaf format still binds a 32-byte `pk`, and Solidity's `bytes32 pkG` is untouched.
+**Layouts do not change; VALUES do** — which is why the whole fixture/VK set regenerates (§O-6)
+and why the migration needs no schema change on any JS/relay/CLI/Solidity consumer.
+
+One key per member signs **both** contexts, exactly as `sk_g` did: the channel-state co-sign
+(**IMCH** digest) and the bp's small-block root (**IMSB** digest). Isolation rests entirely on the
+two digests being distinct keccak outputs over distinct-domain, distinct-layout preimages, and on
+neither consumer ever accepting a caller-supplied message (§O-3). Pinned in BOTH directions at the
+two REAL circuit entry points by `falcon_sig::list::tests::imch_and_imsb_signatures_reject_in_both_directions`
+(TM-C6/O-6).
+
+`MemberKeys` holds the key as `Arc<FalconKeys>` derived from the member seed via
+`FalconKeys::from_seed` (ChaCha20 seeded with `keccak256(IMFG ‖ seed)`, §G-2). The registration
+path and the signing path share the **same key object**, so "the registered identity is the signing
+identity" holds by construction rather than by two derivations agreeing (this is what closed the
+Phase-3 identity-split finding).
+
+### O-3. Consumers
+
+| Consumer | Before | After |
+|---|---|---|
+| Wallet / wasm / CLI channel-state co-sign, native N-of-N verify | `SingleSigCircuit` proof (~76 KB), verified by a plonky2 verifier | **native Falcon verify**, ~63 µs, **no circuit built and no proof produced** on the co-sign path |
+| Close / cancel-close circuits | recursive verify of ONE `AggLevelCircuit` proof | recursive verify of ONE **`falcon_sig::agg::FalconAggCircuit`** proof at constant VK — a pure VK swap; close degree unchanged at 2^17 |
+| Validity path: bp's IMSB signature (`ListCircuit` → `bp_sig_chain`) | `SingleSig` proof as leaf, recursively verified per list step | the list step **verifies the Falcon signature directly in-circuit** with the Phase-1 gadget; `list_leaf` / `chain_step_target` / `bp_sig_chain` formats all UNCHANGED |
+
+**In-circuit gadget** (`src/falcon_sig/circuit.rs`, Phase 1): H2P in-circuit (64 Poseidon
+permutations, native gates), an NTT mod-12289 gadget with range-checked reductions, `s2`
+canonicity, the norm bound at β², and the `h` → `pk_f` opening. Measured **~51.7 k gates per
+signature** (N=1 → 2^16, prove 2.2 s). **No plonky2 lookups anywhere** — Phase 2.5 established
+that plonky2's LogUp lookup argument does not enforce table membership at this pin and was
+REJECTED as unsound (`falcon-sig-phase2_5-notes.md`); every range check is binary/arithmetic.
+
+**Aggregation shape (`FalconAggCircuit`, Phase 2.6)** — replaces D-4's `AggLevelCircuit` tree with
+the same statement over Falcon leaves: a **binary tree**, leaf at 2^16 + `AGG_LEVELS = 4` levels at
+2^14, PI layout per level `[message(8), signer_count(1), pk_0..pk_{2^k−1}(8 each)]`. Left-packing
+is enforced in-circuit; the leaf gadget is UNCONDITIONAL, so `signer_count ≥ 1` is structural and
+`signer_count = 0` is unrepresentable. The close/cancel circuits bind `message == recomputed IMCH
+digest` and `signer_count == member_count` and wire the cosigner key vector from the PI signer list
+into the `IMCM` member-set commitment keccak and the A5 distinctness chain — **zero witnessed
+freedom**, unchanged from D-4. The flat design was abandoned on memory: peak RSS 22.3 GB → 4.99 GB,
+prove 70 s → 36.9 s.
+
+### O-4. Co-signature wire: `h` travels (TM-C12, ACCEPTED)
+
+`MemberSignature.signature` carries `FALCON_SIG_V1(1) ‖ salt(40) ‖ s2(625) ‖ h(1024 = 512 × u16
+LE)` = **1690 B** (vs ~76 KB before, a ~45× reduction). `h` must travel because `pk_g` is a hash and
+the verification equation needs `h` itself; widening `MemberInfo`/`MemberLeaf` instead was rejected
+as it would break the layout stability this migration rests on **and** still need the same digest
+check.
+
+**`h` is untrusted input, never a source of identity.** It is consumed only through
+`verify_with_pk_g`, which recomputes `Poseidon(IMFK ‖ encode(h)) == pk_g` — against the
+AUTHENTICATED `record.member_pk_gs[slot]`, never against anything in the carrier — **before** the
+signature check. Substituting an attacker's `(h', sig')` therefore requires a Poseidon second
+preimage under IMFK (A-F4). This is the same check the in-circuit gadget performs. Publishing `h`
+is not an unforgeability or linkability weakening (Falcon's `h` is public by design; `pk_g` was
+already in the clear) — it removes a defence-in-depth layer, and that is the accepted consequence
+recorded as TM-C12.
+
+Structural gate (TM-C8): `validate_all_member_signatures` requires the **exact**
+`FALCON_COSIGN_BLOB_BYTES = 1690`.
+
+### O-5. Cross-platform keygen determinism (TM-C13 / O-12)
+
+A wallet restored in the browser must derive the same `pk_g` as the CLI, or its L1 registration
+names an identity it cannot reproduce and the channel becomes permanently unclosable. NTRU keygen
+runs f64 arithmetic, and **this repository has already observed one wasm-vs-native numeric
+divergence** (the Regev STARK verifier, recorded in `.cargo/config.toml`), so this is measured, not
+argued: `hosting/check-falcon-wasm-keygen.sh` builds the cdylib, runs it under Node and compares
+`pk_g(seed = [42; 32])` against the constant the native suite pins. **O-12: re-run before any
+browser deploy and after any bump of the wasm toolchain, `num-complex`, `num-bigint`, or the
+vendored Falcon math.**
+
+### O-6. Migration consequences
+
+- **VK cascade**: the list VK changed → the validity chain VKs changed; close/cancel VKs changed.
+  Degrees did NOT move (list STEP 2^12 → 2^16, but the cyclic wrapper stayed 2^14 and
+  `ValidityCircuit` stayed 2^16), so nothing structural changes downstream of the MLE wrapper — but
+  every VK VALUE does.
+- **Every `pk_g` VALUE changed**, so the registration keccak chain, the member-set commitment, the
+  close/cancel proofs, and every baked `contracts/test/data/*` artifact regenerate together
+  (§G-2 retirement note; `doc/tasks/regen-and-redeploy-runbook.md`).
+- **Every live-deployed channel is invalidated**: existing registrations name identities no wallet
+  can reproduce. The **v3 reset** was already the approved policy (threat model §5 non-goals); there
+  is deliberately **no dual-scheme transition period**.
+- The cosigner path's security **no longer depends on FRI soundness** — a proof-system config bug
+  can no longer mint cosignatures. (It still can on the validity path, which remains a plonky2
+  circuit.)

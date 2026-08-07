@@ -435,3 +435,50 @@ vendored-Falcon-math bump.**
 - INFO-5/6 (the tightened length gate's reach is mainly outside the wallet; the precise statement
   is "no path accepts a legacy artifact as a VERIFIED cosignature") and INFO-8 (the by-value seed
   copy in `from_seed` is not zeroized) are recorded as-is.
+
+
+## Independent security review outcome (2026-08-06) — FIT to commit
+
+**Verdict: FIT.** No soundness break. The `h`-transport binding was traced exhaustively and holds:
+`verify_all_signatures` reads `record.member_pk_gs[slot]` into `expected_pk_g` and passes THAT
+(never the blob's own key) into `verify_state_sig`; `verify_with_pk_g` checks canonicity, then
+`falcon_pk_digest(h) == pk_g`, and only then the signature. The constructed attack — a member
+supplying `h'` with a signature valid under `h'` — needs a Poseidon second preimage under IMFK,
+and the rejection is pinned by an executed test that also proves the attacker's blob verifies
+under its OWN pk_g (so the rejection is about identity, not malformedness). The reviewer also
+verified the 1690-byte encoding is a bijection (which matters because signature bytes feed
+`SignedSmallBlock::signing_digest`), that the legacy testdata blob is genuinely a
+`SingleSigCircuit` proof (structurally: 77,872 B, first byte 0x52, and a `[pk_g(8), m(8)]`
+public-input tail), and that the deletion is complete.
+
+### Findings fixed here
+
+- **MINOR-1**: `InvalidLength` hard-coded "expected 666" while also serving the 1690-byte cosign
+  gate, so a rejected COSIGNATURE printed a length it was never checked against. The variant now
+  carries `(actual, expected)`. Tests matched on the variant, which is why this was invisible.
+- **MINOR-2**: a new test's block ended at `assert_ne!(digest, other_digest)` — trivially true,
+  exercising none of the property its comment claimed. Same "false comfort" pattern the Phase-3
+  review rejected. Now a real negative (member 0 signs a different digest; it must not verify
+  here) with a positive control proving the rejection is about the message.
+- **MINOR-3**: an orphaned rustdoc paragraph from the retired `validate_all_member_signatures`
+  ("one SPHINCS+ key per member…") had been left attached to `structural_cosign_placeholder`, so
+  a helper whose one job is to be an explicit NON-signature was introduced by a paragraph about
+  N-of-N signature validation. Removed, and its own claim about a "version gate" corrected — the
+  structural gate checks length only.
+- **MAJOR (pre-deploy, check 9) — CLOSED BY MEASUREMENT.** Native-vs-wasm32 keygen determinism
+  was argued but never executed. Now measured: `hosting/check-falcon-wasm-identity.sh` builds the
+  wasm cdylib and compares `pk_g` against the same constant the native suite pins. **MATCH.**
+  Recorded in the threat model as TM-C13 and marked a blocking deploy gate. Note the reviewer
+  correctly caught that the Phase-0 determinism test cannot detect drift (it compares two
+  in-process derivations) — the real anchor is the pinned KAT.
+- **INFO-4** recorded as **TM-C12**: `h` is now public wire data. Not an unforgeability change
+  (Falcon-512 has a public `h`, and `pk_g` was already in the clear) but a lost defence-in-depth
+  layer, and the notes had discussed only bandwidth.
+
+### Carried to Phase 5 (reviewer INFO-7, and it matters)
+
+`CloseProver`/`CancelCloseProver` do NOT yet consume collected `MemberSignature` blobs — they
+RE-SIGN locally with held `FalconKeys`. So the 1 KB-per-signature wire cost currently buys only
+the wallet's local N-of-N check, and production close still presumes one party holds every
+member secret. Converting collected blobs into a `FalconAggWitness` is exactly what the `h`
+transport was designed to enable, and it belongs in Phase 5 scope.
