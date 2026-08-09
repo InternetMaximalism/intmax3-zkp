@@ -2484,6 +2484,82 @@ mod tests {
         }
     }
 
+    /// A-1 (canonical-zero slot opening): the CANONICAL ZERO ciphertext
+    /// (`RegevCiphertext::padding()`) — the value every joining delegate's and every fresh
+    /// delegate genesis slot now opens at — must be a fully usable E-1 `before` leg under the
+    /// public all-zero witness `zero_amount_witness()`, under an ARBITRARY key.
+    ///
+    /// What this proves about security: a slot opened at the canonical zero is not "stuck". It is
+    /// spendable at exactly one value, 0, and the sender needs no secret randomness to prove that
+    /// — so the A-1 conservation control (open every joiner/delegate genesis slot at the canonical
+    /// zero instead of at a self-declared ciphertext) costs the participant no capability it could
+    /// legitimately have had. The two negative directions below are the soundness half: the same
+    /// zero witness must NOT open any other amount, and must NOT open any other ciphertext.
+    #[test]
+    #[cfg_attr(debug_assertions, ignore = "run with --release")]
+    fn canonical_zero_ciphertext_opens_under_zero_witness() {
+        use crate::regev::encrypt::zero_amount_witness;
+
+        let mut rng = SmallRng::seed_from_u64(0xA1_0000);
+        let (sender_pk, _) = channel_keygen(&mut rng);
+        let (recipient_pk, _) = channel_keygen(&mut rng);
+        let zero_ct = RegevCiphertext::padding();
+
+        // (positive) the all-zero witness opens the all-zero ciphertext under BOTH independent
+        // keys — the "decrypts to 0 under any key" property, at the witness level.
+        let spk = to_upstream_pk(&sender_pk).unwrap();
+        let rpk = to_upstream_pk(&recipient_pk).unwrap();
+        let uct = to_upstream_ct(&zero_ct).unwrap();
+        check_amount_witness(&spk, &uct, &zero_amount_witness(), "zero/sender").unwrap();
+        check_amount_witness(&rpk, &uct, &zero_amount_witness(), "zero/recipient").unwrap();
+
+        // (negative 1) the SAME witness bytes must not open a nonzero claimed amount: `m` no
+        // longer encodes the claim, so the check must refuse.
+        let mut lying = zero_amount_witness();
+        lying.amount = 1;
+        assert!(
+            check_amount_witness(&spk, &uct, &lying, "zero/lying").is_err(),
+            "the all-zero witness must not open the zero ciphertext to a NONZERO amount"
+        );
+
+        // (negative 2) the zero witness must not open a REAL (nonzero) ciphertext.
+        let (real_ct, _) = encrypt_amount(&mut rng, &sender_pk, 7).unwrap();
+        assert!(
+            check_amount_witness(
+                &spk,
+                &to_upstream_ct(&real_ct).unwrap(),
+                &zero_amount_witness(),
+                "zero/real"
+            )
+            .is_err(),
+            "the all-zero witness must not open a real encryption"
+        );
+
+        // (end to end) a full E-1 spend of 0 out of a canonically-zero balance proves and
+        // verifies — this is the shape `gen-send` builds for a freshly joined delegate.
+        let (enc_amount, enc_amount_w) = encrypt_amount(&mut rng, &recipient_pk, 0).unwrap();
+        let (after_ct, after_w) = encrypt_amount(&mut rng, &sender_pk, 0).unwrap();
+        let proof = prove_channel_tx(
+            LEVEL,
+            &sender_pk,
+            &recipient_pk,
+            (&zero_ct, &zero_amount_witness()),
+            (&enc_amount, &enc_amount_w),
+            (&after_ct, &after_w),
+        )
+        .expect("E-1 must accept a canonical-zero `before` leg");
+        verify_channel_tx(
+            LEVEL,
+            &sender_pk,
+            &recipient_pk,
+            &zero_ct,
+            &enc_amount,
+            &after_ct,
+            &proof,
+        )
+        .expect("the resulting proof must verify");
+    }
+
     #[test]
     #[cfg_attr(debug_assertions, ignore = "run with --release")]
     fn channel_update_roundtrip() {

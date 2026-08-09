@@ -295,6 +295,14 @@ struct BrowserContribution {
     pk_g: String,
     /// P3: the browser member's BabyBear hash-sig public key `pk_b` (canonical Bytes32 hex, A11).
     pk_b: String,
+    /// SECURITY (A-1): ACCEPTED FOR WIRE COMPATIBILITY AND THEN IGNORED. This used to be installed
+    /// verbatim as the delegate's opening balance at genesis (`create_channel`) and at join
+    /// (`join_delegate`) — a self-declared, Regev-encrypted, unbacked amount that no cosigner can
+    /// inspect and that `cmd_setup_backing`'s `fund` never accounted for. Both paths now open the
+    /// delegate's slot at the canonical zero ciphertext instead, so this field has NO effect on
+    /// state. It stays REQUIRED (no serde default) so existing browsers/relays that send it are
+    /// unaffected. Do not start reading it again without a backing proof alongside it.
+    #[allow(dead_code)]
     genesis_ct: RegevCiphertext,
     /// B-1b: the joining delegate's L1 exit address (hex, 0x-prefixed 20 bytes; the browser
     /// passes the user's MetaMask address). REQUIRED and NONZERO — serde has no default, so an
@@ -383,6 +391,60 @@ fn member_info_for(slot: u16, keys: &MemberKeys) -> MemberInfo {
         pk_g: keys.pk_g(),
         pk_b: keys.pk_b(),
         regev_pk: keys.regev_pk.clone(),
+    }
+}
+
+/// Env name of the per-slot GENESIS leaf-recipient override consumed by `create_channel`.
+fn cosigner_recipient_env(slot: u16) -> String {
+    format!("CLI_RECIPIENT_SLOT_{slot}")
+}
+
+/// The B-1b L1 exit address written into a CLI COSIGNER's genesis balance-slot leaf.
+///
+/// Default: `test_recipient_for(channel_id, slot)` — the canonical deterministic per-(channel,
+/// slot) address, which is also what the on-chain registration record carries. It is SYNTHETIC:
+/// nobody holds its key, so a claim credited to it can never be pulled (`claimWithdrawalCredit`
+/// pays `msg.sender`). That is fine for every flow that never exercises the payout, and it is the
+/// default here so no real address is baked into library/CLI code.
+///
+/// Opt-in override: `CLI_RECIPIENT_SLOT_<slot>=0x<20-byte address>` makes THAT slot's leaf a
+/// caller-chosen exit address, so an end-to-end test (or a live deployment) can route a slot's
+/// payout to a key it actually holds. Only the slot(s) named are affected; every other slot keeps
+/// the default.
+///
+/// SECURITY: this override moves the recipient in the ONE place B-1b makes authoritative — the
+/// cosigner-signed genesis balance-slot leaf, folded into H1 — so it WEAKENS NOTHING:
+///   * every cosigner signs the genesis that carries it (an override that the other members did not
+///     intend simply does not get signed / does not reproduce their expected state);
+///   * `WithdrawalClaimWitness` still requires `member.l1_withdrawal_recipient ==
+///     final_balance_state.recipients[member_index]`, and the circuit still opens the leaf, so a
+///     claim can never name an address other than the signed leaf's;
+///   * the payout still requires the recipient's own key (`claimWithdrawalCredit` credits
+///     `withdrawalCredits[token][claim.recipient]` and pays `msg.sender`).
+/// It is fail-closed: a set-but-unparsable or zero address aborts rather than silently falling
+/// back to the default (a silent fallback would strand the payout at an unclaimable address —
+/// exactly the failure this override exists to remove).
+/// INTENTIONALLY SIMPLE: no channel scoping in the env name — the CLI already scopes everything it
+/// does to `INTMAX_CHANNEL`, and genesis is written exactly once per channel.
+fn cosigner_leaf_recipient(channel_id: u32, slot: u16) -> Address {
+    let key = cosigner_recipient_env(slot);
+    match std::env::var(&key) {
+        Ok(raw) => {
+            let addr = Address::from_hex(raw.trim())
+                .unwrap_or_else(|e| die(format!("{key}: not a 20-byte L1 address ({e:?})")));
+            if addr == Address::default() {
+                die(format!(
+                    "{key} is the zero address — REFUSING (B-1b: an active slot's exit address \
+                     must be nonzero, and a zero recipient could never claim)"
+                ));
+            }
+            eprintln!(
+                "[init] slot {slot} genesis leaf recipient OVERRIDDEN to {} (via {key})",
+                addr.to_hex()
+            );
+            addr
+        }
+        Err(_) => test_recipient_for(channel_id, slot as usize),
     }
 }
 
@@ -1711,9 +1773,15 @@ fn cmd_withdraw(args: &[String]) {
         });
         // ACTIVE set = 3 members + delegate. Option B: `build_channel_withdrawal` registers the
         // COSIGNER slice only (delegate_count = 0), matching `export-reg-record`'s cosigner-only
-        // deploy registration, so finalize matches. NOTE (B-2 dependency): an on-chain CLOSE of a
-        // delegate-bearing channel still exposes its live delegate_count in the close PI — the
-        // Manager-side count reconciliation moves to the B-2 contract change.
+        // deploy registration, so finalize matches.
+        //
+        // B-2 (RESOLVED, doc/tasks/b2-delegate-close-threat-model.md): an on-chain CLOSE of a
+        // delegate-bearing channel still exposes its live `delegate_count` in the close PI, and the
+        // Manager's registered count is now a FLOOR rather than an exact expected value, so the
+        // mismatch is no longer a refusal. `export-reg-record` may (and does) keep emitting
+        // `delegate_count = 0` — under Option B that is CORRECT by design, not a tolerated gap:
+        // L1 registration is cosigners-only and the delegate half of the boundary is rooted in the
+        // N-of-N cosigner signature over the H1 that limb 94 decommits.
         let members = cli_active_keys();
         eprintln!(
             "[withdraw] integrated: real members + delegate + real deposit (fund {fund}); withdraw \
@@ -2225,7 +2293,10 @@ fn cmd_init(args: &[String]) {
             .unwrap_or_else(|e| die(format!("parse browser pk_b: {e:?}"))),
         regev_pk: contrib.regev_pk.clone(),
     };
-    let new_ct = contrib.genesis_ct.clone();
+    // SECURITY (A-1): `contrib.genesis_ct` is READ OFF THE WIRE AND DISCARDED — deliberately. It
+    // is a self-declared opening balance with no backing, and neither the create nor the join path
+    // installs it any more (see `create_channel` / `join_delegate`). The field is still REQUIRED by
+    // the wire format so existing browsers/relays keep working unchanged; it simply has no effect.
     // B-1b fail-closed: the delegate's L1 exit address must be present and nonzero BEFORE any
     // channel state is assembled or signed.
     let new_recipient = parse_contribution_recipient(&contrib.recipient);
@@ -2272,9 +2343,16 @@ fn cmd_init(args: &[String]) {
         (HashSet::new(), HashSet::new(), HashSet::new())
     };
     let (record, state, members, controlled, slot) = if std::path::Path::new(STATE_FILE).exists() {
-        join_delegate(new_delegate, new_ct, new_recipient)
+        // SECURITY (A-1, doc/tasks/b2-delegate-close-threat-model.md §9): `new_ct` is DELIBERATELY
+        // NOT passed to `join_delegate`. A joiner's self-declared opening ciphertext is unbacked
+        // value; see the argument at `join_delegate`. The join opens the slot at the canonical
+        // zero.
+        join_delegate(new_delegate, new_recipient)
     } else {
-        create_channel(new_delegate, new_ct, new_recipient)
+        // SECURITY (A-1, genesis half): likewise NOT passed to `create_channel`. This is the path
+        // the product actually takes (the first browser CREATES channel N, later browsers JOIN),
+        // so closing only the join lane would have left the shipped flow wide open.
+        create_channel(new_delegate, new_recipient)
     };
 
     verify_all_signatures(&record, &members, &state)
@@ -2340,9 +2418,36 @@ fn cli_members() -> (
 /// CREATE the channel: `cli_cosigner_count()` members + this delegate at the first delegate slot,
 /// genesis (v0), all cosigners sign.
 /// `new_recipient` (B-1b) is the delegate's NONZERO L1 exit address, leaf-bound in the genesis H1.
+///
+/// SECURITY (A-1 conservation control, GENESIS half — doc/tasks/b2-implementation-notes.md §7):
+/// this function takes NO caller-supplied delegate ciphertext. It used to install
+/// `contrib.genesis_ct` verbatim at the delegate slot, which is the SAME unbacked-value-injection
+/// lane that was closed at `join_delegate`, and it is the lane the PRODUCT actually reaches: the
+/// relay forwards the browser's contribution body verbatim (`hosting/wallet/wallet-relay.js`) and
+/// the standard single-delegate channel is created, not joined, so `join_delegate` is never
+/// entered on that path. `cmd_setup_backing` computes the L1-deposited `fund` as
+/// `Σ genesis_amount(cosigner slots) + DELEGATE_GENESIS` with `DELEGATE_GENESIS == 0` — it
+/// EXCLUDES the delegate's contribution — and nothing anywhere binds `Σ slot balances <= channel
+/// fund` (R3). A creator-supplied nonzero delegate ciphertext therefore made `Σ balances > fund`
+/// at genesis, and after close that surplus is claimed out of the real pot ahead of the honest
+/// participants (bounded by `finalizedChannelFundAmount`, so it is MISALLOCATION — theft from
+/// co-participants, first-come-first-served — not minting).
+///
+/// The control is the same as at join and for the same reason: the amount is Regev-encrypted, so
+/// no cosigner can decide "does this encrypt zero?", and the contribution payload carries neither
+/// a declared amount nor the encryption randomness. So the untrusted input is REMOVED rather than
+/// validated — the delegate's genesis slot opens at the canonical zero ciphertext, which decrypts
+/// to 0 under any key. `Σ genesis balances == fund` then holds by construction instead of by
+/// assumption (the comment below said it; now it is true).
+///
+/// COMPLETENESS: this MATCHES PRODUCTION — `hosting/wallet/wallet-live.html` already passes
+/// `balance: toBase('0')`, so the live browser flow contributes exactly what is now installed. The
+/// delegate's real funding lanes are unchanged and are the conservation-preserving ones (L1
+/// deposit import, which moves `channel_fund` and the slot leaf together, and in-channel transfers
+/// proven by the E-1/E-2 STARK). If some future flow genuinely needs a NONZERO opening balance for
+/// the delegate, it must arrive with backing — do not restore a caller-supplied ciphertext here.
 fn create_channel(
     mut nd: MemberInfo,
-    new_ct: RegevCiphertext,
     new_recipient: Address,
 ) -> (
     ChannelRecord,
@@ -2355,7 +2460,15 @@ fn create_channel(
     nd.slot = delegate_slot;
     let (mut members, mut enc, controlled) = cli_members();
     members.push(nd);
-    enc.push((delegate_slot, new_ct));
+    // SECURITY (A-1, genesis half): the delegate's genesis ciphertext is the CANONICAL ZERO, not a
+    // caller-supplied one. See the conservation argument on this function. `zero_ciphertext()`
+    // decrypts to 0 under every Regev key, so the delegate contributes exactly `DELEGATE_GENESIS`
+    // (== 0) — the amount `cmd_setup_backing` actually put into `fund`. Do NOT reintroduce a
+    // caller-supplied ciphertext here without an accompanying backing proof — that is the R3 hole.
+    enc.push((
+        delegate_slot,
+        intmax3_zkp::common::balance_state::zero_ciphertext().clone(),
+    ));
     members.sort_by_key(|m| m.slot);
     let record = build_record(channel_id_env(), &members, BP_SLOT, 1).unwrap_or_else(|e| die(e));
     enc.sort_by_key(|(s, _)| *s);
@@ -2363,8 +2476,12 @@ fn create_channel(
 
     // detail2 §F-1: the genesis is funded by the REAL L1 deposit backing (no self-minted fund).
     // `fund` == the deposited native value; `settled_tx_chain` ties the state to that deposit so
-    // the co-sign gate reconciles. Σ(genesis balances) == fund (CLI members + delegate
-    // allocation).
+    // the co-sign gate reconciles.
+    // SECURITY (A-1): `Σ(genesis balances) == fund` now holds BY CONSTRUCTION, not by assumption —
+    // the cosigner slots carry exactly `genesis_amount(slot)` (the same values `cmd_setup_backing`
+    // summed) and the delegate slot carries the canonical zero (== `DELEGATE_GENESIS`). Before
+    // A-1 this line was an unchecked claim that a caller-supplied delegate ciphertext could
+    // falsify.
     let (balance_vd, att, backing) = load_backing();
     let settled = Bytes32::from_hex(&backing.settled_tx_chain)
         .unwrap_or_else(|e| die(format!("backing settled_tx_chain: {e:?}")));
@@ -2376,11 +2493,11 @@ fn create_channel(
         .iter()
         .map(|m| Bytes32::from(m.regev_pk.poseidon_digest()))
         .collect();
-    // B-1b: per-active-slot L1 exit addresses, in slot order. The CLI COSIGNERS reuse the SAME
-    // deterministic per-(channel, slot) recipients their on-chain registration record carries
-    // (`test_recipient_for` — one formula for registeredRecipientOf AND the leaf binding), and
-    // the browser DELEGATE's slot carries its contribution recipient (already fail-closed
-    // nonzero). All folded into the cosigner-signed genesis H1 via the slot leaves.
+    // B-1b: per-active-slot L1 exit addresses, in slot order. The CLI COSIGNERS default to the
+    // deterministic per-(channel, slot) `test_recipient_for` (the same formula their on-chain
+    // registration record carries), overridable per slot (see `cosigner_leaf_recipient`), and the
+    // browser DELEGATE's slot carries its contribution recipient (already fail-closed nonzero).
+    // All folded into the cosigner-signed genesis H1 via the slot leaves.
     let channel_id = channel_id_env();
     let recipients: Vec<Address> = members
         .iter()
@@ -2388,7 +2505,7 @@ fn create_channel(
             if m.slot == delegate_slot {
                 new_recipient
             } else {
-                test_recipient_for(channel_id, m.slot as usize)
+                cosigner_leaf_recipient(channel_id, m.slot)
             }
         })
         .collect();
@@ -2421,15 +2538,59 @@ fn create_channel(
 }
 
 /// JOIN the existing channel as a NEW delegate, PRESERVING the current state (balances + sends).
-/// The new delegate's slot is added with its genesis ciphertext, `delegate_count` and
-/// `state_version` are bumped, and the 3 members re-sign the new state. Existing delegates'
+/// The new delegate's slot is added at a ZERO opening balance, `delegate_count` and
+/// `state_version` are bumped, and the members re-sign the new state. Existing delegates'
 /// ciphertexts are untouched, so their browser send-witnesses stay valid.
 /// `new_recipient` (B-1b) is the joining delegate's NONZERO L1 exit address — written into the
 /// new slot's `recipients` entry so it enters the cosigner-signed H1 (the delegate's ONLY payout
 /// binding under Option B; the caller has already rejected zero/absent recipients fail-closed).
+///
+/// SECURITY (A-1 conservation control, doc/tasks/b2-delegate-close-threat-model.md §9 /
+/// doc/tasks/b2-implementation-notes.md):
+/// This function takes NO joiner-supplied ciphertext. It used to write `contrib.genesis_ct`
+/// verbatim into the new slot and have the cosigners re-sign with plain `sign_state`. That is an
+/// UNBACKED VALUE INJECTION: the contribution is Regev-encrypted, so the cosigners cannot see the
+/// amount they are attesting to, and no layer anywhere binds `Σ slot balances <= channel fund`
+/// (R3). A joining stranger could therefore self-declare an arbitrary opening balance and, after
+/// close, claim against the real pot ahead of honest participants (bounded by
+/// `finalizedChannelFundAmount` / `receivedChannelFunds`, so it is MISALLOCATION of the real pot,
+/// not minting — but misallocation is the whole loss for the victims).
+///
+/// It cannot be fixed by CHECKING the ciphertext: Regev is semantically secure, so "does this
+/// ciphertext encrypt zero?" is undecidable for the cosigners without the joiner's secret key or
+/// its encryption witness, and the contribution payload carries neither (a declared-amount + seed
+/// rebuild-equality scheme would work, but it means a schema change across the browser/relay/API
+/// and publishing the opening balance). The control used instead REMOVES the untrusted input
+/// rather than validating it: the new slot opens at the CANONICAL ZERO ciphertext, which decrypts
+/// to 0 under every Regev key (`balance_state::zero_ciphertext`). A join then provably changes no
+/// slot's balance, so `Σ balances` is invariant across it and the genesis-anchored backing that
+/// `cmd_setup_backing` computed (`Σ cosigner genesis amounts + DELEGATE_GENESIS`, where
+/// `DELEGATE_GENESIS == 0`) still holds afterwards. This is strictly stronger than any check the
+/// cosigners could perform, and it is exactly what the fund accounting already assumed.
+///
+/// COMPLETENESS (this must not wrongly reject or strand a legitimate joiner): opening at zero costs
+/// the delegate nothing it could legitimately have had. The two lanes by which a delegate actually
+/// receives value both work from a zero slot and are themselves conservation-preserving:
+///   * L1 deposit import (`cosign-l1-deposit-import`) reads amount/depositor/token from the CHAIN
+///     and moves `channel_fund` and the slot leaf TOGETHER (`wallet_core.rs`), and
+///     `add_ciphertexts(zero, x) == x`;
+///   * an in-channel transfer from an existing slot, whose E-1/E-2 STARK proves `before == after +
+///     amount`.
+/// The delegate needs no encryption witness for the zero ciphertext: sending requires a refresh
+/// (which needs only the delegate's SECRET KEY, `wallet_refresh`), and a withdrawal/post-close
+/// claim decrypts in-circuit under the secret key. The production browser flow already contributes
+/// 0 (`hosting/wallet/wallet-live.html`), and the CLI's own `DELEGATE_GENESIS` is already 0, so no
+/// legitimate join loses anything it has today.
+///
+/// The GENESIS half of the same lane is closed too — `create_channel` no longer installs a
+/// caller-supplied delegate ciphertext either. That is the path the shipped product actually
+/// takes, so fixing only this one would have left the product untouched; see the argument there.
+///
+/// NOT FIXED HERE (tracked, pre-existing): R3 itself — there is still no in-circuit
+/// `Σ slot balances <= channel fund`. Removing the two injection lanes means the CLI/browser flow
+/// never creates a state that violates conservation, but it is not a proof that no state can.
 fn join_delegate(
     mut nd: MemberInfo,
-    new_ct: RegevCiphertext,
     new_recipient: Address,
 ) -> (
     ChannelRecord,
@@ -2471,6 +2632,31 @@ fn join_delegate(
     }
     let new_slot = delegate_slot + existing as u16;
     nd.slot = new_slot;
+    // SECURITY (A-1 finding 1 — THE EXIT LANE): capture the joiner's Regev pk digest BEFORE `nd` is
+    // moved into `members`. Until now `join_delegate` never wrote `balance_state.regev_pk_digests`
+    // for the new slot, so it stayed at the padding zero while the slot was fully ACTIVE.
+    // `BalanceState::validate()` cannot catch that — it only constrains PADDING slots to the zero
+    // digest and treats active-slot digests as arbitrary — and `verify_snapshot` checks
+    // `record.regev_pk_root`, never `balance_state.regev_pk_digests`. The consequence was
+    // permanent: the withdrawal-claim circuit derives `pk_digest = poseidon(a, b)` from the
+    // witnessed key and hashes it INTO the slot leaf it must Merkle-verify against the
+    // cosigner-signed slot tree root, so a leaf built over a zero digest can only be reproduced by
+    // a Regev key whose Poseidon digest is zero. Any value that ever reached a joined delegate's
+    // slot — an honest L1 deposit import, an honest in-channel transfer — was UNCLAIMABLE at close.
+    // The A-1 conservation argument (a joined slot is fundable only through those two lanes)
+    // depends on this exit lane working, so it is fixed here rather than merely documented.
+    let new_pk_digest = Bytes32::from(nd.regev_pk.poseidon_digest());
+    // SECURITY: fail closed rather than sign an unclaimable slot. A zero digest is exactly the
+    // padding value, so it would reproduce the very bug above; it is also what a degenerate or
+    // malformed key would have to produce. Poseidon preimage resistance makes this unreachable for
+    // a real key — this is the assertion that keeps it that way.
+    if new_pk_digest == Bytes32::default() {
+        die(
+            "REFUSING join: the contributed Regev public key hashes to the ZERO Poseidon digest, \
+             which is the reserved PADDING value — the slot's balance would be permanently \
+             unclaimable at close (the claim circuit binds poseidon(a,b) into the signed slot leaf)",
+        );
+    }
     let mut members = prev.snapshot.members.clone();
     members.push(nd);
     members.sort_by_key(|m| m.slot);
@@ -2484,15 +2670,30 @@ fn join_delegate(
     let mut state = prev.snapshot.state.clone();
     state.prev_digest = state.digest;
     state.balance_state.delegate_count = new_delegate_count;
-    // Multi-token: a fresh delegate slot holds its genesis ciphertext at TOKEN POSITION 0 and
-    // canonical zeros elsewhere (detail2 §N owner decision 5).
-    state.balance_state.enc_balances[new_slot as usize] = {
-        let mut row = intmax3_zkp::common::balance_state::zero_token_row();
-        row[0] = new_ct;
-        row
-    };
+    // SECURITY (A-1): a JOINING delegate opens at the canonical ZERO ciphertext in EVERY token
+    // position — including position 0, which used to receive the joiner-supplied `genesis_ct`. See
+    // the conservation argument on this function. `zero_token_row()` is the all-zero Regev
+    // ciphertext, which decrypts to 0 under any key, so the join adds no balance to the channel and
+    // `Σ balances` is provably unchanged by it. Do NOT reintroduce a caller-supplied ciphertext
+    // here without an accompanying backing proof — that is the R3 hole.
+    state.balance_state.enc_balances[new_slot as usize] =
+        intmax3_zkp::common::balance_state::zero_token_row();
     state.balance_state.pending_adds[new_slot as usize] =
         [0u32; intmax3_zkp::constants::MAX_CHANNEL_TOKENS];
+    // SECURITY (A-1 finding 1): bind the JOINER'S OWN Regev pk digest into its slot leaf, so the
+    // slot is claimable at close. The value is not free: it is `poseidon(a, b)` over the very key
+    // `nd.regev_pk` that `build_record` above already folded into the record's `regev_pk_root`, so
+    // the balance state and the record commit to ONE key per slot and the joiner cannot name a
+    // different key here than the one it is registered under.
+    //
+    // SECURITY (why this write is not itself an unbacked-value lane): the digest decides only WHO
+    // can decrypt and claim this slot, never HOW MUCH it holds — the amount comes from the slot's
+    // ciphertext, which the line above pins to the canonical zero. Naming a victim's public key
+    // would hand the joiner a slot it cannot decrypt (claiming needs the secret `s` with
+    // `b = a·s + e`), so it can only harm itself, and the balance it would be "stealing" is
+    // provably 0. The recipient-uniqueness guard at the top of this function is what prevents a
+    // duplicate-identity join from capturing another slot's L1 deposits.
+    state.balance_state.regev_pk_digests[new_slot as usize] = new_pk_digest;
     // B-1b: bind the new delegate's L1 exit address into its slot leaf (cosigner-signed H1).
     state.balance_state.recipients[new_slot as usize] = new_recipient;
     state.balance_state.state_version += 1;
@@ -2562,17 +2763,22 @@ fn cmd_gen_contribution(args: &[String]) {
 /// (E-1 proof included) WITHOUT touching `cli_state.json` — stateless, so payload generation can
 /// run in parallel and against any snapshot copy.
 ///
-/// SOUNDNESS OF THE SIMULATION: valid only while the delegate's slot ciphertext is still its
-/// GENESIS ct (it has neither sent nor received since joining) — exactly the join-storm scenario.
-/// The ct is recomputed and compared against the snapshot fail-closed, so a stale witness can
-/// never produce a payload that would waste a co-sign round.
+/// SOUNDNESS OF THE SIMULATION: valid only while the delegate's slot ciphertext at the selected
+/// token position is one this stateless simulator can OPEN — either the canonical zero opening
+/// every delegate slot now starts at (A-1; balance must then be 0), or the deterministic
+/// `encrypt_amount(seed, pk, balance)` ct for legacy seeded snapshots. Both are checked
+/// fail-closed against the snapshot below, so a stale witness can never produce a payload that
+/// would waste a co-sign round.
+///
+/// NOTE (A-1): a delegate no longer opens with a self-declared balance, so the `<balance>`
+/// argument is 0 for every delegate created by the current CLI/browser flow. A FUNDED delegate
+/// (post L1-deposit-import or post-transfer) cannot be driven from here at all — its ciphertext is
+/// not reproducible from `(balance, seed)` — and the guard says so rather than guessing.
 ///
 /// usage: gen-send <balance> <seed> <to_slot> <amount> [snapshot.json] [out.json] [token_slot]
-/// `token_slot` (OPTIONAL, default 0) selects the LOCAL token position (multitoken §N-3). The
-/// simulation is only valid while the delegate's ciphertext AT THAT POSITION is still its
-/// deterministic genesis ct — checked fail-closed below (a non-genesis position is the
-/// canonical zero ct at genesis, so token_slot != 0 only works after that position was funded
-/// and refreshed to a reproducible ct — never silently).
+/// `token_slot` (OPTIONAL, default 0) selects the LOCAL token position (multitoken §N-3). Every
+/// unfunded position is the canonical zero ct, so a nonzero `token_slot` behaves exactly like
+/// token 0 until that position is funded — after which this simulator can no longer build for it.
 fn cmd_gen_send(args: &[String]) {
     let balance: u64 = args
         .get(1)
@@ -2605,12 +2811,6 @@ fn cmd_gen_send(args: &[String]) {
 
     // Reconstruct the delegate exactly as gen-contribution created it.
     let keys = MemberKeys::generate(&mut StdRng::seed_from_u64(seed));
-    let (genesis_ct, witness) = encrypt_amount(
-        &mut StdRng::seed_from_u64(seed ^ 0xA11CE),
-        &keys.regev_pk,
-        balance,
-    )
-    .unwrap_or_else(|e| die(e));
 
     let snapshot: ChannelSnapshot = read_json(snapshot_path);
     let from = snapshot
@@ -2623,15 +2823,49 @@ fn cmd_gen_send(args: &[String]) {
                 "seed {seed}: pk_g not found in snapshot members — join first"
             ))
         });
-    // Fail-closed: the witness is only valid for the delegate's UNTOUCHED genesis ciphertext at
-    // the selected token position.
-    if snapshot.state.balance_state.enc_balances[from as usize][token_slot as usize] != genesis_ct {
-        die(format!(
-            "slot {from} token {token_slot}: ciphertext is no longer the genesis ct (sent or \
-             received since join) — the deterministic witness is stale; gen-send cannot build \
-             this payload"
-        ));
-    }
+    // Fail-closed: the witness must actually OPEN the delegate's current ciphertext at the
+    // selected token position. Two admissible openings, in this order:
+    //
+    // SECURITY (A-1 finding 3): since A-1 a delegate's slot opens at the CANONICAL ZERO ciphertext
+    // (`RegevCiphertext::padding()`) — at genesis via `create_channel` and at join via
+    // `join_delegate` — not at a `gen-contribution`-shaped `encrypt_amount(seed, pk, balance)`. So
+    // the canonical zero is the FIRST case, and it admits exactly ONE balance: 0. The opening is
+    // the public all-zero witness (`zero_amount_witness()`, which opens `padding()` under any key
+    // and cannot open any nonzero amount). Asserting `balance == 0` here rather than silently
+    // coercing it keeps the caller's stated balance and the proven balance the same value — a
+    // silent coercion would let a caller believe it had drafted a spend out of a funded slot.
+    let cur_ct = &snapshot.state.balance_state.enc_balances[from as usize][token_slot as usize];
+    let witness = if cur_ct == intmax3_zkp::common::balance_state::zero_ciphertext() {
+        if balance != 0 {
+            die(format!(
+                "slot {from} token {token_slot}: the slot holds the CANONICAL ZERO ciphertext \
+                 (a delegate's A-1 opening balance), so its only valid opening is 0 — but \
+                 <balance> = {balance} was requested. A delegate is funded through the L1 deposit \
+                 import or an in-channel transfer, never by declaring an opening balance; after \
+                 funding, the slot is no longer the canonical zero and this simulator needs a \
+                 refresh-derived witness it does not have."
+            ));
+        }
+        intmax3_zkp::regev::encrypt::zero_amount_witness()
+    } else {
+        // The legacy lane: the slot still holds the exact deterministic ciphertext this simulator
+        // can rebuild from `(balance, seed)`. Kept for any snapshot whose slot was seeded that way.
+        let (genesis_ct, w) = encrypt_amount(
+            &mut StdRng::seed_from_u64(seed ^ 0xA11CE),
+            &keys.regev_pk,
+            balance,
+        )
+        .unwrap_or_else(|e| die(e));
+        if *cur_ct != genesis_ct {
+            die(format!(
+                "slot {from} token {token_slot}: ciphertext is neither the canonical zero opening \
+                 nor the deterministic ct for balance {balance} / seed {seed} (sent or received \
+                 since join) — the deterministic witness is stale; gen-send cannot build this \
+                 payload"
+            ));
+        }
+        w
+    };
 
     let nonce = intmax3_zkp::ethereum_types::bytes32::Bytes32::default();
     // SECURITY: the send's encryption randomness comes from the OS CSPRNG, NOT from `seed`.

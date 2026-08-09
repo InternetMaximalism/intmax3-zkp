@@ -287,7 +287,24 @@ abstract contract CloseSettlementBase is Test {
         return this._closeProofCd(
             intent,
             manager.registeredMemberSetCommitment(),
-            (uint16(manager.activeMemberCount()) << 8) | uint16(manager.activeDelegateCount())
+            manager.activeMemberCount(),
+            uint32(manager.activeDelegateCount())
+        );
+    }
+
+    /// B-2: build a close proof whose PI limb 94 (`delegateCount`) is an EXPLICIT value rather than
+    /// the manager's registered count. Used by the delegate-count range tests — the registered count
+    /// is only a FLOOR now, so a proof may legitimately carry a larger one (a delegate joined after
+    /// the manager was deployed), and must be REJECTED with a smaller one.
+    function _closeProofWithDelegateCount(
+        ChannelSettlementManager.CloseIntent memory intent,
+        uint32 delegateCount
+    ) internal view returns (MleVerifier.MleProof memory) {
+        return this._closeProofCd(
+            intent,
+            manager.registeredMemberSetCommitment(),
+            manager.activeMemberCount(),
+            delegateCount
         );
     }
 
@@ -297,7 +314,8 @@ abstract contract CloseSettlementBase is Test {
         return this._closeProofCd(
             intent,
             m.registeredMemberSetCommitment(),
-            (uint16(m.activeMemberCount()) << 8) | uint16(m.activeDelegateCount())
+            m.activeMemberCount(),
+            uint32(m.activeDelegateCount())
         );
     }
 
@@ -306,7 +324,8 @@ abstract contract CloseSettlementBase is Test {
     function _closeProofCd(
         ChannelSettlementManager.CloseIntent calldata intent,
         bytes32 memberSetCommitment,
-        uint16 memberAndDelegateCount
+        uint8 memberCount,
+        uint32 delegateCount
     ) external view returns (MleVerifier.MleProof memory) {
         uint256[] memory limbs = verifier.expectedCloseLimbs(CloseProofFields({
             channelId: CHANNEL_ID,
@@ -327,8 +346,11 @@ abstract contract CloseSettlementBase is Test {
             finalSettledTxChain: intent.finalSettledTxChain,
             finalSettledTxAccumulatorRoot: intent.finalSettledTxAccumulatorRoot,
             memberSetCommitment: memberSetCommitment,
-            memberAndDelegateCount: memberAndDelegateCount
-        }));
+            memberCount: memberCount,
+            // B-2: `minDelegateCount` is only the FLOOR predicate input; the limb-94 VALUE laid out
+            // in the vector is the explicit second argument below.
+            minDelegateCount: delegateCount
+        }), delegateCount);
         return CloseTestLib.proofWithLimbs(limbs);
     }
 

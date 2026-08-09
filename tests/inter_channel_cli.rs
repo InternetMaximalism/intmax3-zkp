@@ -799,6 +799,9 @@ fn inter_channel_cli_idempotent_rejoin() {
         "regevPk": delegate_keys.regev_pk,
         "pkG": delegate_keys.pk_g().to_hex(),
         "pkB": delegate_keys.pk_b().to_hex(),
+        // A-1: `genesisCt` is still a REQUIRED wire field but the CLI now ignores it (both
+        // `create_channel` and `join_delegate` open a delegate slot at the canonical zero). This
+        // case takes the idempotent-re-join branch anyway, so it never reaches either.
         "genesisCt": ct,
         // B-1b: contributions must carry a NONZERO L1 exit address (the CLI rejects
         // zero/absent recipients fail-closed).
@@ -843,6 +846,143 @@ fn inter_channel_cli_idempotent_rejoin() {
 
     let _ = std::fs::remove_dir_all(&root);
     eprintln!("[inter_channel_cli] OK (dedup): idempotent re-join → same slot, no inflation.");
+}
+
+/// A-1 (join-time conservation + claimability) — the REAL `join_delegate` path, driven through the
+/// binary with a contribution that declares a NONZERO opening balance.
+///
+/// What this is intended to prove about security, in order:
+///
+///  1. **Conservation (A-1 proper).** The joiner declares `genesisCt = encrypt(50)`. That amount is
+///     Regev-encrypted, so no cosigner can see it; before A-1 it was installed verbatim, inflating
+///     `Σ slot balances` above the L1-backed `channel_fund` with no proof and no L1 record — value
+///     the joiner could later claim out of the real pot ahead of honest participants. The joined
+///     slot MUST open at the CANONICAL ZERO ciphertext instead, and every PRE-EXISTING slot's
+///     ciphertext must be byte-identical to before the join (a join moves no balance at all).
+///  2. **Claimability (review finding 1).** The joined slot's `regev_pk_digests` entry MUST be the
+///     joiner's own `poseidon(a, b)` and MUST be nonzero. `join_delegate` used to leave it at the
+///     padding zero, which silently made every future balance in that slot UNCLAIMABLE at close:
+///     the withdrawal-claim circuit derives `poseidon(a, b)` from the witnessed key and hashes it
+///     into the slot leaf it must Merkle-verify against the cosigner-signed root, so a leaf built
+///     over a zero digest is only reproducible by a key whose Poseidon digest is zero. Conservation
+///     without this is a trap: the two funding lanes A-1's completeness argument relies on would
+///     deposit into a slot that can never pay out.
+///  3. **The state is genuinely signed.** `verify_snapshot` re-verifies the N-of-N signatures over
+///     the post-join state, so 1 and 2 are properties of a state the cosigners actually attested,
+///     not of a scratch struct.
+#[test]
+fn cli_join_delegate_opens_at_canonical_zero_and_binds_pk_digest() {
+    let root = std::env::temp_dir().join(format!("intmax_ic_cli_a1_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    let ch = root.join("ch_a1");
+    std::fs::create_dir_all(&ch).unwrap();
+
+    // A channel with NO delegate yet, so `init` takes the real `join_delegate` path (the
+    // idempotent-re-join branch needs the pk_g to be present already; it is not, here).
+    let state = cli_state(build_cli_channel(B_ID, &[20, 40, 60]));
+    let cts_before = state.snapshot.state.balance_state.enc_balances.clone();
+    let fund_before = state.snapshot.state.channel_fund.amounts;
+    let v_before = state.snapshot.state.balance_state.state_version;
+    write_state(&ch, &state);
+
+    let delegate_keys = MemberKeys::generate(&mut StdRng::seed_from_u64(0xA1_0F_FE));
+    // The joiner DECLARES 50. This is the attack input: an unbacked, unverifiable opening balance.
+    let (declared_ct, _w) = encrypt_amount(
+        &mut StdRng::seed_from_u64(0xA1_5EED),
+        &delegate_keys.regev_pk,
+        50,
+    )
+    .unwrap();
+    let recipient = "0x00000000000000000000000000000000a10ffe01";
+    let contrib = json!({
+        "regevPk": delegate_keys.regev_pk,
+        "pkG": delegate_keys.pk_g().to_hex(),
+        "pkB": delegate_keys.pk_b().to_hex(),
+        "genesisCt": declared_ct,
+        "recipient": recipient,
+    });
+    let contrib_path = ch.join("contribution.json");
+    std::fs::write(
+        &contrib_path,
+        serde_json::to_string_pretty(&contrib).unwrap(),
+    )
+    .unwrap();
+    let out_snap = ch.join("snap_out.json");
+    let (ok, log) = run(
+        &ch,
+        B_ID,
+        &[
+            "init",
+            contrib_path.to_str().unwrap(),
+            out_snap.to_str().unwrap(),
+        ],
+    );
+    assert!(ok, "join must SUCCEED (A-1 rejects nothing), log:\n{log}");
+
+    let after = read_state(&ch);
+    let bs = &after.snapshot.state.balance_state;
+    assert_eq!(
+        bs.delegate_count, 1,
+        "the join must add exactly one delegate"
+    );
+    assert!(
+        bs.state_version > v_before,
+        "a real join must bump state_version"
+    );
+    let slot = 3usize;
+
+    // (1) conservation: the joined slot opens at the canonical zero in EVERY token position, NOT at
+    // the declared 50, and no existing slot moved.
+    assert_ne!(
+        bs.enc_balances[slot][0], declared_ct,
+        "REGRESSION (A-1): the joiner's self-declared opening ciphertext was installed — an \
+         unbacked balance the cosigners cannot inspect and the channel fund does not cover"
+    );
+    for (t, ct) in bs.enc_balances[slot].iter().enumerate() {
+        assert_eq!(
+            *ct,
+            RegevCiphertext::padding(),
+            "joined slot token position {t} must be the canonical zero ciphertext"
+        );
+    }
+    for s in 0..3usize {
+        assert_eq!(
+            bs.enc_balances[s], cts_before[s],
+            "a join must not disturb existing slot {s}'s balance (Σ balances is invariant)"
+        );
+    }
+    assert_eq!(
+        after.snapshot.state.channel_fund.amounts, fund_before,
+        "a join must not change the channel fund"
+    );
+
+    // (2) claimability: the slot leaf must commit the JOINER'S OWN pk digest, nonzero.
+    let expect_digest = Bytes32::from(delegate_keys.regev_pk.poseidon_digest());
+    assert_ne!(
+        expect_digest,
+        Bytes32::default(),
+        "test setup: a real Regev key must not hash to the padding zero"
+    );
+    assert_eq!(
+        bs.regev_pk_digests[slot], expect_digest,
+        "REGRESSION (finding 1): the joined delegate's slot must commit ITS OWN Regev pk digest — \
+         a zero/padding digest makes every future balance in this slot permanently unclaimable at \
+         close (the claim circuit hashes poseidon(a,b) into the signed slot leaf)"
+    );
+    assert_eq!(
+        bs.recipients[slot],
+        intmax3_zkp::ethereum_types::address::Address::from_hex(recipient).unwrap(),
+        "B-1b: the joined slot must bind the declared L1 exit address"
+    );
+
+    // (3) the cosigners really signed this state (and it passes BalanceState::validate()).
+    verify_snapshot(&after.snapshot, None).expect("post-join snapshot must verify N-of-N");
+
+    let _ = std::fs::remove_dir_all(&root);
+    eprintln!(
+        "[inter_channel_cli] OK (A-1): join opens at the canonical zero, declared 50 discarded, \
+         slot pk digest bound."
+    );
 }
 
 /// B-1b: deterministic NONZERO per-slot L1 exit addresses for test genesis states

@@ -127,8 +127,24 @@ contract DeployCloseCli is Script {
 
         // 5. Manager bound to the SAME active set: member bindings (the first `memberCount`) +
         //    delegate bindings (the remainder). The close member-set commitment + delegate_count limb
-        //    then match the close proof. Route member slot 0's payout to the broadcasting EOA so a
-        //    later member claim is observable.
+        //    then match the close proof.
+        //
+        //    Member slot 0's binding recipient is the broadcasting EOA. SECURITY / SCOPE — what
+        //    this override does and does NOT do, post-B-1b/B-2 (one source of truth per property):
+        //      * It does NOT route the CLAIM payout. `submitWithdrawalClaim` credits
+        //        `withdrawalCredits[claim.tokenIndex][claim.recipient]` with the PROOF-BOUND
+        //        recipient — the cosigner-signed balance-slot LEAF address (B-1b) — and
+        //        `claimWithdrawalCredit` pays `msg.sender`. `registeredRecipientOf` (the only place
+        //        `MemberBinding.recipient` is stored per-pk_g) has ZERO runtime reads since 6d2b9d8
+        //        removed the registration-based claim gates. Claim routing therefore lives in the
+        //        CHANNEL STATE and is set at genesis by the CLI (`CLI_RECIPIENT_SLOT_<slot>`),
+        //        NOT here.
+        //      * It IS still load-bearing for the two paths that gate on `isMemberRecipient`
+        //        (also written from these bindings): `requestClose()` — which the CLI sends from
+        //        this same EOA — and `submitPartialWithdrawal`'s "payout address is a registered
+        //        participant" check. Without it the EOA could not open the close at all.
+        //    The registration record (`recipients[i]`, fed to `registerChannel` above and hashed
+        //    into the reg chain the validity proof reproduces) is deliberately left UNCHANGED.
         ChannelSettlementManager.MemberBinding[] memory mBind =
             new ChannelSettlementManager.MemberBinding[](memberCount);
         for (uint256 i = 0; i < memberCount; i++) {
@@ -145,6 +161,13 @@ contract DeployCloseCli is Script {
                 recipient: recipients[memberCount + i]
             });
         }
+        // B-2 (doc/tasks/b2-delegate-close-threat-model.md): `delegateCount` is now a FLOOR for the
+        // close/partial-withdrawal bind, not an exact expected count. Under Option B, L1
+        // registration is cosigners-only, so this is normally 0 while the live channel has
+        // delegates; a close carrying MORE delegates is accepted, one carrying FEWER is refused.
+        // SCOPE (review finding 6): CARDINALITY only. L1 binds no delegate to a balance-slot index,
+        // so this cannot guarantee that any NAMED delegate registered here is present in the closed
+        // state — only that the active region was not shrunk below this count.
         ChannelSettlementManager manager = new ChannelSettlementManager(
             bytes4(channelId), bpSlot, pkGs[bpSlot], delegateCount, CHALLENGE_PERIOD, SPECIAL_CLOSE_PENALTY,
             INITIAL_BP_BOND, IChannelSettlementVerifier(address(sv)), IChannelRegistry(address(rollup)), mBind,

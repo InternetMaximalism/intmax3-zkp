@@ -5,10 +5,9 @@
 //!
 //!   export-reg-record → DeployCloseCli → SimpleERC20 deploy + rollup.registerToken(1)
 //!   → setup-backing → init (ETH genesis) → register-token 1 (mid-life TokenRegister, cosigned)
-//!   → ETH send → close ATTEMPT with the two-token header (registry [ETH, 1], token_count 2):
-//!     the REAL close proof is built and submitted, and the Manager's strict 103-limb bind
-//!     CORRECTLY REFUSES it at the delegate-count limb (see the B-2 note below) — asserted as
-//!     the expected fail-closed outcome →
+//!   → ETH send → CLOSE with the two-token header (registry [ETH, 1], token_count 2): the REAL
+//!     close proof is built and submitted, and the Manager ACCEPTS it — the channel reaches
+//!     ClosePending (see the B-2 note below) →
 //!   → withdraw (real ETH deposit + REAL balanceOf-delta ERC-20 deposit → finalize →
 //!      withdrawNative + withdrawERC20, each its own real withdrawal MLE chain →
 //!      pullChannelFunds + pullChannelTokenFunds — REAL ETH and REAL tokens land in the manager)
@@ -17,16 +16,20 @@
 //!
 //! SCOPE NOTE (deviations tracked in doc/tasks/multitoken-todo.md Phase 5b) — every fence below
 //! is a pre-existing, in-repo-documented follow-up; none is weakened or bypassed here:
-//!   - ON-CHAIN CLOSE (B-2 dependency, Option B R3): `init` always joins a browser DELEGATE, so the
-//!     close PI carries `delegate_count = 1`, while Option B's cosigners-only L1 registration
-//!     deploys the Manager with `activeDelegateCount = 0` — the 103-limb strict bind refuses (limb
-//!     94; "an on-chain CLOSE of a delegate-bearing channel still exposes its live delegate_count
-//!     in the close PI — the Manager-side count reconciliation moves to the B-2 contract change",
-//!     src/bin/channel_member.rs `cmd_withdraw`). This E2E pins that refusal as an EXPECTED
-//!     negative. The on-chain two-token close + per-token accrual is validated by the fixture-based
-//!     `CloseLifecycleE2E` (real close proof, delegate-free state, amounts [77, 55]); per-token
-//!     claims/payouts (incl. nonzero-token submitPostCloseClaim) by `MultiTokenSettlement.t.sol`
-//!     (:288) and the native claim-proving suites.
+//!   - ON-CHAIN CLOSE (B-2, RESOLVED — doc/tasks/b2-delegate-close-threat-model.md option (d)):
+//!     `init` always creates the channel with a browser DELEGATE, so the close PI carries
+//!     `delegate_count = 1`, while Option B's cosigners-only L1 registration deploys the Manager
+//!     with `activeDelegateCount = 0`. This USED TO be refused at limb 94 by a strict equality, and
+//!     this E2E pinned that refusal as an EXPECTED negative. That equality was not a security
+//!     control: limb 94 decommits a field of the cosigner-signed H1 (N-of-N Falcon authority),
+//!     whereas the Manager's `activeDelegateCount` is a deployer assertion cross-checked against
+//!     nothing — so it compared a stronger value against a weaker reference and produced only false
+//!     negatives. It is now a ONE-SIDED RANGE bind (`delegateCount >= activeDelegateCount` and
+//!     `memberCount + delegateCount <= 1024`), which this live delegate-bearing state satisfies, so
+//!     the close is ACCEPTED here and the assertions below pin the POSITIVE outcome. The member
+//!     half of the boundary (limb 93 + the IMCM registry cross-check) is UNCHANGED strict equality
+//!     — `ChannelSettlementManager.t.sol::test_verifyClose_tamperedMemberCountLimb_stillStrict`
+//!     pins that it was not collaterally loosened.
 //!   - A close with NONZERO amounts[1] additionally needs `cosign-l1-deposit-import` first, whose
 //!     `settled_tx_chain` push requires a regenerated base-layer attestation the CLI cannot produce
 //!     yet (P1 re-attestation follow-up) — the close circuit's `BalanceBindingMismatch` fail-close
@@ -206,6 +209,12 @@ fn cli(args: &[&str], env: &[(&str, &str)], what: &str) -> String {
 /// Like `cli` but tolerates a nonzero exit — returns (success, combined output). Used for the
 /// zero-credit token-1 claim, whose final `claimWithdrawalCredit(uint32)` pull CORRECTLY reverts
 /// (`NoWithdrawalCredit`) after the claim proof itself was accepted on-chain.
+///
+/// B-2: currently unused — its last caller was the pinned delegate-count close NEGATIVE, which
+/// became a POSITIVE when the limb-94 strict equality was replaced by the one-sided range bind.
+/// KEPT (not deleted) because it is the only helper that can assert a CLI fail-closed outcome, and
+/// the negative directions of the range bind are asserted on-chain in the Foundry suites.
+#[allow(dead_code)]
 fn cli_allow_fail(args: &[&str], env: &[(&str, &str)]) -> (bool, String) {
     let mut c = Command::new(cli_bin());
     c.args(args)
@@ -408,8 +417,13 @@ fn two_token_cli_e2e() {
         &[("SETUP_BACKING_NO_ONCHAIN_DEPOSIT", "1")],
         "setup-backing",
     );
+    // SECURITY (A-1): delegate opening balance 0 — see the same note in `close_lifecycle_cli_e2e`.
+    // `setup-backing`'s `fund` excludes the delegate contribution (`DELEGATE_GENESIS == 0`), so
+    // "50" here made `Σ genesis balances > fund`; `create_channel` now installs the canonical zero
+    // regardless. This test's only value movement is an ETH send BETWEEN CLI COSIGNERS (slot 0 →
+    // slot 1) and an ERC-20 leg on the cosigner slots, so the delegate never needed a balance.
     cli(
-        &["gen-contribution", "50", "1", "contribution.json"],
+        &["gen-contribution", "0", "1", "contribution.json"],
         &[],
         "gen-contribution",
     );
@@ -451,30 +465,40 @@ fn two_token_cli_e2e() {
         "cosign t0 send",
     );
 
-    // ── close ATTEMPT with the TWO-token header (registry [ETH, 1], token_count 2) ─────────
-    // The CLI builds the REAL two-token close proof and submits it; the Manager's strict
-    // 103-limb bind then CORRECTLY refuses at the delegate-count limb (limb 94: the proof's
-    // live `delegate_count == 1` vs the cosigners-only-registered Manager's
-    // `activeDelegateCount == 0` — the pre-existing B-2 fence, see the SCOPE NOTE). Pinning the
-    // refusal proves the fence is fail-closed on a LIVE channel: an unreconciled
-    // delegate-bearing state cannot close on-chain.
-    let (close_ok, close_out) = cli_allow_fail(
+    // ── close with the TWO-token header (registry [ETH, 1], token_count 2) ─────────────────
+    // B-2 (RESOLVED, see the SCOPE NOTE): the CLI builds the REAL two-token close proof for the
+    // LIVE delegate-bearing state (`delegate_count == 1`) and the Manager — deployed by the
+    // cosigners-only Option B registration with `activeDelegateCount == 0` — now ACCEPTS it,
+    // because limb 94 is bound by the one-sided range `1 >= 0` and `3 + 1 <= 1024` instead of the
+    // old strict equality against a deployer-asserted count.
+    //
+    // WHY THIS FLIPPED FROM A PINNED NEGATIVE TO A POSITIVE (it is NOT a weakened assertion): the
+    // former refusal was a false negative, not a caught attack. Nothing that the equality
+    // protected was lost — the delegate count is still PROOF-BOUND (the close circuit forces limb
+    // 94 to equal the `delegate_count` inside the H1 that every cosigner's Falcon signature
+    // covers, so no prover without the N-of-N keys can move it by one), the member count is still
+    // STRICT-bound to the L1 registration (limb 93 + the IMCM registry cross-check), and payouts
+    // remain per-slot authenticated and hard-capped. The negative direction is preserved and
+    // covered on-chain: a close that would EXCLUDE an L1-registered delegate, or that exceeds the
+    // 1024-participant capacity, still reverts with `CloseDelegateCountOutOfRange`
+    // (`ChannelSettlementManager.t.sol::test_verifyClose_delegateCountBelowFloor_reverts` /
+    // `..._delegateCountAboveCeiling_reverts`, and the same matrix on the partial-withdrawal lane
+    // in `PartialWithdrawal.t.sol`).
+    let close_out = cli(
         &["close", &manager, &rpc],
         &[("CLOSE_SV", &sv), ("CLOSE_ADVANCE_TIME", "700")],
+        "close (two-token, delegate-bearing)",
     );
     assert!(
-        !close_ok,
-        "the delegate-bearing close must be REFUSED by the strict limb bind (B-2 fence), got success:\n{close_out}"
+        close_out.contains("submitCloseIntent OK") || close_out.contains("close intent submitted"),
+        "the delegate-bearing close must now be ACCEPTED on-chain (B-2 range bind), got:\n{close_out}"
     );
-    assert!(
-        close_out.contains("close limb mismatch"),
-        "the close refusal must come from the strict close-limb bind, got:\n{close_out}"
-    );
-    // requestClose DID land (freeze) — the refusal was the intent submission, not the request.
+    // requestClose (freeze) AND the close intent both landed; the channel is ClosePending until
+    // the challenge window elapses and `settle` finalizes it (NOT driven here — see below).
     assert_eq!(
         cast_uint(&rpc, &manager, "channelStatus()(uint8)", &[]),
         1,
-        "channel should be ClosePending (requestClose landed; intent refused)"
+        "channel should be ClosePending (requestClose + close intent landed, not yet finalized)"
     );
     // Nothing accrued on either lane — no finalized close.
     let accrued_eth = cast_uint(
@@ -538,7 +562,11 @@ fn two_token_cli_e2e() {
         "manager ERC-20 balance != receivedChannelFunds[t]"
     );
 
-    // ── per-token conservation with NO finalized close (TM-3) ──────────────────────────────
+    // ── per-token conservation with NO FINALIZED close (TM-3) ──────────────────────────────
+    // B-2 note: the close INTENT is now on-chain (accepted above), but `finalizeClose` is NOT
+    // driven by this test, so the channel is still ClosePending and no accrual exists. Every
+    // assertion below therefore still holds for the SAME reason it held before (no finalized
+    // close), not because the close was refused.
     // Without a finalized close there is no accrual, so NOTHING may leave either lane: both
     // pull-payment entry points refuse (`NoWithdrawalCredit`), the per-lane paid-out
     // accumulators stay zero, and both REAL asset pools sit intact in the manager. (The
@@ -609,8 +637,8 @@ fn two_token_cli_e2e() {
     );
 
     eprintln!(
-        "[two-token-e2e] OK: mid-life TokenRegister cosigned; delegate-bearing close REFUSED by \
-         the strict limb bind (B-2 fence, fail-closed); ETH lane received {received_eth} and \
+        "[two-token-e2e] OK: mid-life TokenRegister cosigned; delegate-bearing close ACCEPTED \
+         on-chain (B-2 one-sided range bind on limb 94); ETH lane received {received_eth} and \
          ERC-20(token {ERC20_INDEX} @ {token}) lane received {received_erc20} REAL tokens via \
          withdrawNative/withdrawERC20 + pulls; conservation held on both lanes (channel \
          {CHANNEL}, rollup {rollup}, manager {manager})."

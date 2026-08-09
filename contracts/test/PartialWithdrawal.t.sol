@@ -3,7 +3,8 @@ pragma solidity ^0.8.29;
 
 import {Test} from "forge-std/Test.sol";
 import {ChannelSettlementManager} from "../src/ChannelSettlementManager.sol";
-import {IChannelRegistry} from "../src/ChannelSettlementManager.sol";
+import {IChannelRegistry, IChannelSettlementVerifier} from "../src/ChannelSettlementManager.sol";
+import {ChannelSettlementVerifier} from "../src/ChannelSettlementVerifier.sol";
 import {MleVerifier} from "@mle/MleVerifier.sol";
 import {CloseSettlementBase, MockRollupRegistry} from "./CloseSettlementBase.sol";
 
@@ -107,6 +108,70 @@ contract PartialWithdrawalTest is CloseSettlementBase {
         assertTrue(registry.partialWithdrawalAuthorized(authDigest));
 
         assertEq(uint8(manager.channelStatus()), uint8(ChannelSettlementManager.ChannelLifecycleStatus.Active));
+    }
+
+    // ── B-2: the delegate-count range bind on the PARTIAL-WITHDRAWAL lane ──
+    //
+    // `submitPartialWithdrawalIntent` calls the IDENTICAL `_checkCloseProof` as `submitCloseIntent`
+    // (ChannelSettlementManager.sol), so the former strict limb-94 equality bricked mid-channel
+    // partial withdrawals for exactly the same channels it bricked closes for. These pin that the
+    // fix reaches this lane too, and that the floor still bites here (threat model §8 test 6).
+
+    /// POSITIVE: a partial-withdrawal close proof carrying MORE delegates than the manager
+    /// registered (a browser joined after deployment) is ACCEPTED. Under the old equality this
+    /// reverted with "close limb mismatch" and the channel could never partially withdraw again.
+    function test_b2_partialWithdrawal_delegateCountAboveFloor_accepted() public {
+        assertEq(uint256(manager.activeDelegateCount()), 0, "this manager registers 0 delegates");
+        ChannelSettlementManager.CloseIntent memory intent = _partialIntent();
+        MleVerifier.MleProof memory proof = _closeProofWithDelegateCount(intent, 3);
+        ChannelSettlementManager.AuthorizedWithdrawal memory w = _authorizedWithdrawal();
+
+        manager.submitPartialWithdrawalIntent(intent, proof, PREV_CHAIN, w);
+
+        assertTrue(manager.partialWithdrawalPending());
+        assertEq(manager.pendingPartialWithdrawalAuthDigest(), _expectedAuthDigest(w));
+    }
+
+    /// NEGATIVE (ceiling): `memberCount + delegateCount > 1024` is refused on this lane as well —
+    /// the same mirror of the in-circuit claim bound.
+    function test_b2_partialWithdrawal_delegateCountAboveCeiling_reverts() public {
+        ChannelSettlementManager.CloseIntent memory intent = _partialIntent();
+        uint32 mc = uint32(manager.activeMemberCount());
+        // Build BEFORE arming expectRevert (the builder is itself an external call).
+        MleVerifier.MleProof memory overCap = _closeProofWithDelegateCount(intent, 1024 - mc + 1);
+        ChannelSettlementManager.AuthorizedWithdrawal memory w = _authorizedWithdrawal();
+
+        vm.expectRevert(ChannelSettlementVerifier.CloseDelegateCountOutOfRange.selector);
+        manager.submitPartialWithdrawalIntent(intent, overCap, PREV_CHAIN, w);
+    }
+
+    /// NEGATIVE (floor): on a manager that DID register a delegate, a partial-withdrawal proof that
+    /// would exclude it from the active region is refused.
+    function test_b2_partialWithdrawal_delegateCountBelowFloor_reverts() public {
+        bytes32 USER_D = keccak256("pw_delegate_d");
+        address dave = makeAddr("pw_dave");
+        ChannelSettlementManager.MemberBinding[] memory mb =
+            new ChannelSettlementManager.MemberBinding[](3);
+        mb[0] = ChannelSettlementManager.MemberBinding({pkG: USER_A, recipient: alice});
+        mb[1] = ChannelSettlementManager.MemberBinding({pkG: USER_B, recipient: bob});
+        mb[2] = ChannelSettlementManager.MemberBinding({pkG: USER_C, recipient: carol});
+        ChannelSettlementManager.MemberBinding[] memory db =
+            new ChannelSettlementManager.MemberBinding[](1);
+        db[0] = ChannelSettlementManager.MemberBinding({pkG: USER_D, recipient: dave});
+        ChannelSettlementManager m = new ChannelSettlementManager(
+            CHANNEL_ID, BP_MEMBER_SLOT, USER_A, 1, // registered delegate_count = 1
+            CHALLENGE_PERIOD, SPECIAL_CLOSE_PENALTY, INITIAL_BP_BOND,
+            IChannelSettlementVerifier(address(verifier)), IChannelRegistry(address(registry)), mb, db
+        );
+
+        ChannelSettlementManager.CloseIntent memory intent = _partialIntent();
+        MleVerifier.MleProof memory excludes = this._closeProofCd(
+            intent, m.registeredMemberSetCommitment(), m.activeMemberCount(), 0
+        );
+        ChannelSettlementManager.AuthorizedWithdrawal memory w = _authorizedWithdrawal();
+
+        vm.expectRevert(ChannelSettlementVerifier.CloseDelegateCountOutOfRange.selector);
+        m.submitPartialWithdrawalIntent(intent, excludes, PREV_CHAIN, w);
     }
 
     // ── Revert: auxData zero ──
