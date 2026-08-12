@@ -112,6 +112,60 @@ contract DeployCloseCli is Script {
             sv.initializeWithdrawalClaimVk(verifier, wcvk, wcdd.whirParams, wcdd.protocolId, wcdd.sessionId, wcdd.kIs, wcdd.subgroupGenPowers);
         }
 
+        // 3b. Post-close-claim VK. SECURITY/LIVENESS (audit622 A-M4, reported 2026-06-22, open until
+        //     now; same class as the gate-8 defect — a fail-closed check that protects soundness
+        //     while making an HONEST path impossible): without this,
+        //     `ChannelSettlementVerifier.sol:1111` reverts `PostCloseClaimVkNotSet()` on every call,
+        //     so the live `post-close-claim` CLI command (`channel_member.rs:2152-2184`) can never
+        //     succeed on a real deployment. No fail-closed check is weakened here — the revert stays;
+        //     we supply the VK it was correctly demanding.
+        {
+            string memory pcJson = _read("post_close_claim_mle.json");
+            FixtureLib.DeployData memory pcdd = FixtureLib.parseDeployData(pcJson);
+            MleVerifier.MleProof memory pcproof = FixtureLib.parseProof(pcJson);
+            bytes32 pcGatesDigest = verifier.computeGatesDigest(
+                pcproof.gates,
+                pcproof.witnessIndividualEvalsAtRGateV2.length,
+                pcproof.numSelectors,
+                pcproof.numGateConstraints,
+                pcproof.quotientDegreeFactor
+            );
+            ChannelSettlementVerifier.StatementVk memory pcvk = ChannelSettlementVerifier.StatementVk({
+                degreeBits: pcdd.degreeBits,
+                preprocessedRoot: pcdd.preCommitRoot,
+                numConstants: pcdd.numConstants,
+                numRoutedWires: pcdd.numRoutedWires,
+                gatesDigest: pcGatesDigest
+            });
+            sv.initializePostCloseClaimVk(verifier, pcvk, pcdd.whirParams, pcdd.protocolId, pcdd.sessionId, pcdd.kIs, pcdd.subgroupGenPowers);
+        }
+
+        // 3c. Cancel-close VK. SECURITY/LIVENESS (audit622 A-M4): without this,
+        //     `ChannelSettlementVerifier.sol:1050` reverts `CancelCloseVkNotSet()`, disabling
+        //     `cancel-close` (`channel_member.rs:1988-2025`) — the ONLY on-chain remedy against a
+        //     stale/unwanted close. Previously initialized only by the two anvil-gated
+        //     (`chainid == 31337`) scripts, so every REAL deployment shipped without it.
+        {
+            string memory ccJson = _read("cancel_close_mle.json");
+            FixtureLib.DeployData memory ccdd = FixtureLib.parseDeployData(ccJson);
+            MleVerifier.MleProof memory ccproof = FixtureLib.parseProof(ccJson);
+            bytes32 ccGatesDigest = verifier.computeGatesDigest(
+                ccproof.gates,
+                ccproof.witnessIndividualEvalsAtRGateV2.length,
+                ccproof.numSelectors,
+                ccproof.numGateConstraints,
+                ccproof.quotientDegreeFactor
+            );
+            ChannelSettlementVerifier.StatementVk memory ccvk = ChannelSettlementVerifier.StatementVk({
+                degreeBits: ccdd.degreeBits,
+                preprocessedRoot: ccdd.preCommitRoot,
+                numConstants: ccdd.numConstants,
+                numRoutedWires: ccdd.numRoutedWires,
+                gatesDigest: ccGatesDigest
+            });
+            sv.initializeCancelCloseVk(verifier, ccvk, ccdd.whirParams, ccdd.protocolId, ccdd.sessionId, ccdd.kIs, ccdd.subgroupGenPowers);
+        }
+
         // 4. registerChannel with the CLI ACTIVE set (3 members + delegate). The arrays carry all
         //    `member_count + delegate_count` active participants (members first); registerChannel's
         //    close member-set commitment uses only the first `member_count` pk_gs.

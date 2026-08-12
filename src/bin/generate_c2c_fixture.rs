@@ -758,7 +758,7 @@ fn main() -> anyhow::Result<()> {
         &withdrawal_mle.proof,
     )?;
     let withdrawal_mle_json =
-        export_mle_json(&withdrawal_mle.proof, &withdrawal_wrapper.data.common);
+        export_mle_json(&withdrawal_mle.proof, &withdrawal_wrapper.data.common)?;
 
     eprintln!("[c2c] Wrap + MLE (validity proof)");
     let validity_wrapper =
@@ -770,7 +770,7 @@ fn main() -> anyhow::Result<()> {
     val_pw.set_proof_with_pis_target(&validity_wrapper.wrap_proof, &validity_proof);
     let validity_mle = prove_with_mle::<F, C, D>(&validity_wrapper.data, val_pw)?;
     verify_mle_proof(&validity_wrapper.data, &validity_vk, &validity_mle.proof)?;
-    let validity_mle_json = export_mle_json(&validity_mle.proof, &validity_wrapper.data.common);
+    let validity_mle_json = export_mle_json(&validity_mle.proof, &validity_wrapper.data.common)?;
 
     // -----------------------------------------------------------------------
     // Extract the EXACT committed Withdrawal from the single-withdrawal proof PIs.

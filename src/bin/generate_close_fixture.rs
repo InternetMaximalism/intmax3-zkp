@@ -181,7 +181,7 @@ fn main() -> anyhow::Result<()> {
     pw.set_proof_with_pis_target(&close_wrapper.wrap_proof, &close_proof);
     let close_mle = prove_with_mle::<F, C, D>(&close_wrapper.data, pw)?;
     verify_mle_proof(&close_wrapper.data, &close_vk, &close_mle.proof)?;
-    let close_mle_json = export_mle_json(&close_mle.proof, &close_wrapper.data.common);
+    let close_mle_json = export_mle_json(&close_mle.proof, &close_wrapper.data.common)?;
 
     // SANITY: the MLE proof's exported publicInputs must equal the 103 raw close limbs (this is the
     // exact vector the on-chain `_bindCloseLimbsStrict` rebinds). A mismatch here means the

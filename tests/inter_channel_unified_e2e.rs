@@ -38,7 +38,7 @@ use intmax3_zkp::{
         channel::{
             ChannelFund, ChannelRecord, ChannelState, ChannelTransitionKind, InterChannelTx,
             MemberSignature, MerkleInclusionProof, ProofBackend, ReceiverBalanceDelta,
-            SignedSmallBlock, SmallBlockRootMessage, TransitionProofRole,
+            SignedSmallBlock, SmallBlockRootMessage, TransitionProofRole, inter_channel_tx_hash,
         },
         channel_id::ChannelId,
         deposit::Deposit,
@@ -459,6 +459,14 @@ fn unified_inter_channel_transfer_e2e() {
     .with_computed_digest();
     let h1_prime = a_send.balance_state.h1();
 
+    // SECURITY (TM-16): `tx_hash` is a DERIVED field, never a free-floating identifier — it is the
+    // canonical token-bearing fold over `(ids(source, dest, token_index), tx_tree_root, tx_leaf)`.
+    // All three inter-channel gates recompute it from the descriptor's own fields and refuse a
+    // mismatch fail-closed, so the test builds it with the canonical helper (a synthetic constant
+    // is not a legal descriptor and is rejected before the E-2 statement is ever reached).
+    let dest_id = ChannelId::new(7).unwrap();
+    let inter_tx_hash = inter_channel_tx_hash(a_id, dest_id, 0, tx_tree_root, tx_leaf);
+
     let inter_tx = InterChannelTx {
         tx_inclusion_proof: MerkleInclusionProof::default(),
         signed_small_block: SignedSmallBlock {
@@ -481,10 +489,10 @@ fn unified_inter_channel_transfer_e2e() {
         sender_delta_ct: sdelta.0.clone(),
         source_channel_id: a_id,
         token_index: 0,
-        destination_channel_id: ChannelId::new(7).unwrap(),
+        destination_channel_id: dest_id,
         source_pk_g: a_keys[0].pk_g(),
         seal: Bytes32::default(),
-        tx_hash: Bytes32::from_u32_slice(&[0, 0, 0, 0, 0, 0, 0, 0x502]).unwrap(),
+        tx_hash: inter_tx_hash,
         intmax_transfer_commitment: Bytes32::default(),
         recipient_memo: vec![1],
         receiver_deltas: vec![ReceiverBalanceDelta {

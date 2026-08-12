@@ -1186,6 +1186,65 @@ fn c2c_rejects_token_relabeled_descriptor_on_all_gates() {
     ));
 }
 
+/// Negative (TM-16 obligation 1/5) — SYNTHETIC `tx_hash`: `tx_hash` is a DERIVED field, so a
+/// descriptor carrying a value that is not `compute_tx_hash()` over its own fields (a builder that
+/// invented an identifier, or one left over from a pre-TM-16 formula) must be refused at ALL THREE
+/// inter-channel gates BEFORE the chain/accumulator absorbs it. Without this the anchored
+/// accumulator leaf — the only artifact a post-close claim can open — would commit an attacker-
+/// chosen value rather than the (source, dest, token, tx) tuple the gates actually validated.
+///
+/// The token-relabel negative above holds `tx_hash` fixed and moves `token_index`; this one holds
+/// every resolvable field fixed and moves `tx_hash`, so the two cover both directions of the
+/// equality. Each leg asserts on the TM-16 message text, not merely on the error VARIANT:
+/// `InvalidSettledTxChain` is also raised by the plain chain-push check, and an assertion that
+/// accepted either would pass for the wrong reason (the fund-import leg below re-derives the
+/// pushed chain precisely so the earlier push check cannot be what fires).
+#[test]
+#[cfg_attr(debug_assertions, ignore = "run with --release")]
+fn c2c_rejects_synthetic_tx_hash_on_all_gates() {
+    const TM16: &str = "token-bearing recompute";
+    // Not the canonical fold of anything — the shape a stale/hand-written fixture takes.
+    let synthetic = Bytes32::from_u32_slice(&[0, 0, 0, 0, 0, 0, 0, 0x502]).unwrap();
+
+    // Source send: the source chain absorbs `tx_leaf`, so nothing but TM-16 can fire here.
+    let mut witness = flow().send.clone();
+    witness.inter_channel_tx.tx_hash = synthetic;
+    let err = witness
+        .verify(&StructuralTransportVerifier, &VERIFIER)
+        .expect_err("synthetic tx_hash must be refused at the source send gate");
+    assert!(
+        matches!(&err, ChannelStateUpdateError::InvalidSettledTxChain(m) if m.contains(TM16)),
+        "expected the TM-16 recompute rejection, got {err:?}"
+    );
+
+    // Destination fund import: this gate's chain push absorbs `tx_hash` itself and runs FIRST, so
+    // re-derive the pushed chain onto the synthetic value — that leaves TM-16 as the only check
+    // that can reject, proving the gate is not merely riding on the push check.
+    let mut witness = flow().import.clone();
+    witness.inter_channel_tx.tx_hash = synthetic;
+    witness.next_state.balance_state.settled_tx_chain =
+        settled_tx_chain_push(witness.prev_state.balance_state.settled_tx_chain, synthetic);
+    witness.next_state = witness.next_state.clone().with_computed_digest();
+    let err = witness
+        .verify(&StructuralTransportVerifier)
+        .expect_err("synthetic tx_hash must be refused at the fund-import gate");
+    assert!(
+        matches!(&err, ChannelStateUpdateError::InvalidSettledTxChain(m) if m.contains(TM16)),
+        "expected the TM-16 recompute rejection, got {err:?}"
+    );
+
+    // Destination bundle apply: its chain push absorbs `tx_leaf`, so again only TM-16 can fire.
+    let mut witness = flow().bundle.clone();
+    witness.inter_channel_tx.tx_hash = synthetic;
+    let err = witness
+        .verify(&VERIFIER)
+        .expect_err("synthetic tx_hash must be refused at the bundle-apply gate");
+    assert!(
+        matches!(&err, ChannelStateUpdateError::InvalidSettledTxChain(m) if m.contains(TM16)),
+        "expected the TM-16 recompute rejection, got {err:?}"
+    );
+}
+
 /// H2 = 0 is RESERVED for in-channel updates (detail2 §C-2): an inter-channel send whose small
 /// block claims `tx_tree_root = 0` would alias the in-channel signing target and must be refused.
 #[test]

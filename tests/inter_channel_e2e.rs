@@ -34,7 +34,7 @@ use intmax3_zkp::{
         channel::{
             ChannelFund, ChannelRecord, ChannelState, ChannelTransitionKind, InterChannelTx,
             MemberSignature, MerkleInclusionProof, ProofBackend, ReceiverBalanceDelta,
-            SignedSmallBlock, SmallBlockRootMessage, TransitionProofRole,
+            SignedSmallBlock, SmallBlockRootMessage, TransitionProofRole, inter_channel_tx_hash,
         },
         channel_id::ChannelId,
         deposit::Deposit,
@@ -487,6 +487,13 @@ fn inter_channel_transfer_real_deposit_backed() {
     );
     let tx_tree_root = Bytes32::from_u32_slice(&[0, 0, 0, 0, 0, 0, 0, 0x301]).unwrap(); // base-layer artifact
 
+    // SECURITY (TM-16): `tx_hash` is a DERIVED field, never a free-floating identifier — it is the
+    // canonical token-bearing fold over `(ids(source, dest, token_index), tx_tree_root, tx_leaf)`.
+    // All three inter-channel gates (send, fund import, bundle apply) recompute it from the
+    // descriptor's own fields and refuse a mismatch fail-closed BEFORE absorbing it, so the test
+    // builds it with the canonical helper — a synthetic constant is not a legal descriptor.
+    let inter_tx_hash = inter_channel_tx_hash(a_id, b_id, 0, tx_tree_root, tx_leaf);
+
     // Source channel A state after the send (alice debited; settled_tx_chain absorbs the leaf).
     let mut a_send = ChannelState {
         epoch: a_genesis.epoch + 1,
@@ -546,7 +553,7 @@ fn inter_channel_transfer_real_deposit_backed() {
         token_index: 0,
         source_pk_g: a_keys[0].pk_g(),
         seal: Bytes32::default(),
-        tx_hash: Bytes32::from_u32_slice(&[0, 0, 0, 0, 0, 0, 0, 0x502]).unwrap(),
+        tx_hash: inter_tx_hash,
         intmax_transfer_commitment: Bytes32::default(),
         recipient_memo: vec![1, 2, 3],
         receiver_deltas: vec![ReceiverBalanceDelta {

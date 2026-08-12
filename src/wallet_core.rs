@@ -3665,7 +3665,8 @@ fn wrap_and_export_mle(
         .map_err(|e| WalletError(format!("MLE prove failed: {e:?}")))?;
     verify_mle_proof(&wrapper.data, &vk, &mle.proof)
         .map_err(|e| WalletError(format!("MLE self-verify failed: {e:?}")))?;
-    Ok(export_mle_json(&mle.proof, &wrapper.data.common))
+    export_mle_json(&mle.proof, &wrapper.data.common)
+        .map_err(|e| WalletError(format!("MLE fixture export failed: {e:?}")))
 }
 
 // ─────────────────────────────────────────────────────────────────────────────────────────────
@@ -4865,7 +4866,7 @@ pub fn build_channel_withdrawal(
         &withdrawal_mle.proof,
     )?;
     let withdrawal_mle_json =
-        export_mle_json(&withdrawal_mle.proof, &withdrawal_wrapper.data.common);
+        export_mle_json(&withdrawal_mle.proof, &withdrawal_wrapper.data.common)?;
 
     // Multitoken Phase 5b: wrap + MLE the ERC-20 lane's withdrawal proof (same wrapper circuit —
     // both lanes are WithdrawalCircuit proofs, so the ONE withdrawal VK verifies both on-chain).
@@ -4878,7 +4879,7 @@ pub fn build_channel_withdrawal(
             pw.set_proof_with_pis_target(&withdrawal_wrapper.wrap_proof, proof)?;
             let mle = prove_with_mle::<F, C, D>(&withdrawal_wrapper.data, pw)?;
             verify_mle_proof(&withdrawal_wrapper.data, &withdrawal_vk, &mle.proof)?;
-            Ok(export_mle_json(&mle.proof, &withdrawal_wrapper.data.common))
+            export_mle_json(&mle.proof, &withdrawal_wrapper.data.common)
         })
         .transpose()?;
 
@@ -4891,7 +4892,7 @@ pub fn build_channel_withdrawal(
     val_pw.set_proof_with_pis_target(&validity_wrapper.wrap_proof, &validity_proof)?;
     let validity_mle = prove_with_mle::<F, C, D>(&validity_wrapper.data, val_pw)?;
     verify_mle_proof(&validity_wrapper.data, &validity_vk, &validity_mle.proof)?;
-    let validity_mle_json = export_mle_json(&validity_mle.proof, &validity_wrapper.data.common);
+    let validity_mle_json = export_mle_json(&validity_mle.proof, &validity_wrapper.data.common)?;
 
     // ── Extract the EXACT committed Withdrawal from the single-withdrawal proof PIs ─────────
     let single_withdrawal_inputs = SingleWithdawalPublicInputs::from_u64_slice(

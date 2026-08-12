@@ -89,7 +89,7 @@ fn main() -> anyhow::Result<()> {
     pw.set_proof_with_pis_target(&wrapper.wrap_proof, &proof);
     let mle = prove_with_mle::<F, C, D>(&wrapper.data, pw)?;
     verify_mle_proof(&wrapper.data, &vk, &mle.proof)?;
-    let mle_json = export_mle_json(&mle.proof, &wrapper.data.common);
+    let mle_json = export_mle_json(&mle.proof, &wrapper.data.common)?;
 
     // SANITY: the MLE proof's publicInputs equal the 48 raw limbs the on-chain bind rebinds.
     {

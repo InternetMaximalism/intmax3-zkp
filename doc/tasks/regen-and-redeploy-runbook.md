@@ -140,11 +140,38 @@ tests (`tx_settlement`, `single_withdrawal_circuit`) already pass on this branch
 Deploy scripts already wire the new guards: they authorize `BLOCK_PRODUCER`
 (#1), require `FRAUD_TREASURY` on non-anvil chains (#6), and set the KZG
 satellite. The per-statement VKs are initialized IN the deploy scripts from the
-regenerated fixtures:
-- `rollup.initializeWithdrawalVk(...)`  (withdrawal VK — CHANGED by #2b)
-- `sv.initializeCloseVk(...)`, `initializeWithdrawalClaimVk(...)`,
-  `initializePostCloseClaimVk(...)`, `initializeCancelCloseVk(...)`
-Use `DeployCloseCli.s.sol` (CLI/prod path) or `Deploy.s.sol` (rollup-only smoke).
+regenerated fixtures. **Which script initializes what — verified, do not
+assume:**
+
+| script | VKs initialized | real-network? |
+|---|---|---|
+| `DeployCloseCli.s.sol` (CLI/prod path) | withdrawal, close, withdrawalClaim, **postCloseClaim**, **cancelClose** — all five | YES |
+| `Deploy.s.sol` | rollup-only smoke | YES |
+| `DeployClose.s.sol`, `DeployC2C.s.sol` | withdrawal only | — |
+| `DeployWalletSettlement.s.sol`, `DeployPartialWithdrawalE2E.s.sol` | close + cancelClose only | anvil-gated (`chainid == 31337`) |
+
+**HISTORY — this text was an OVERCLAIM until 2026-08-12.** `DeployCloseCli.s.sol`
+called only `initializeCloseVk` and `initializeWithdrawalClaimVk`;
+`initializePostCloseClaimVk` was called by NO script anywhere in the repo, and
+`initializeCancelCloseVk` only by the two anvil-gated scripts. So every REAL
+deployment shipped with both unset, and:
+- `ChannelSettlementVerifier.sol:1111` reverted `PostCloseClaimVkNotSet()` →
+  the `post-close-claim` CLI command (`channel_member.rs:2152-2184`) could
+  never succeed;
+- `ChannelSettlementVerifier.sol:1050` reverted `CancelCloseVkNotSet()` →
+  `cancel-close` (`channel_member.rs:1988-2025`), the ONLY on-chain remedy
+  against a stale close, was unavailable.
+
+Reported as audit622 **A-M4** ("MEDIUM, liveness bricking") on 2026-06-22 and
+open until the two calls were added (steps 3b/3c in the script). SECURITY: the
+fix supplies the VKs the reverts were correctly demanding; no fail-closed check
+was weakened.
+
+This is the SAME CLASS as the gate-8 defect — a fail-closed check that is
+soundness-safe (it never accepts a bad proof) while making an HONEST user's
+path impossible. A threat model that only asks "can an adversary get a false
+statement accepted?" cannot see either one. When editing this runbook, state
+what the scripts DO, verified by reading them — not what they ought to do.
 Build/deploy with `--locked` (dependency pin, #14). After deploy, authorize the
 block producer if the posting key differs from the deployer:
 `BLOCK_PRODUCER=0x<poster-addr>` (deploy reads it) — the whitelist is otherwise

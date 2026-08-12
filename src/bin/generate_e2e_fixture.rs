@@ -179,7 +179,7 @@ fn main() -> anyhow::Result<()> {
     let out_dir = Path::new("contracts/test/data");
     fs::create_dir_all(out_dir)?;
 
-    let mle_json = export_mle_json(&mle_result.proof, &wrapper.data.common);
+    let mle_json = export_mle_json(&mle_result.proof, &wrapper.data.common)?;
     fs::write(out_dir.join("mle_fixture.json"), &mle_json)?;
     eprintln!("[e2e] MLE fixture written to contracts/test/data/mle_fixture.json");
 
