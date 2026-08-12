@@ -717,3 +717,38 @@ security-critical:
       excluded here, since the claim circuit and its PI contract were not to be touched.
 Under no circumstances should the evaluator's `revert` be relaxed: it is the fail-closed signal that
 a constraint would otherwise go UNCHECKED on-chain. Owner decision required.
+
+
+## Follow-up closed: `inter_channel_cli` was failing on a VACUOUS assertion (2026-08-09)
+
+The known-open item recorded at commit time is now FIXED, and the diagnosis was confirmed rather
+than assumed: the replay ledgers ARE populated on disk (`spent_tx_identities` on the debit side,
+`applied_tx_identities` on the credit side, read out of a real failing run's `cli_state.json`), and
+the runtime guards are correctly ordered — the spent-ledger check fires BEFORE the head-extension
+check. So this was a pure test defect, NOT a replay-protection hole. Had the ledgers been empty in
+reality it would have been a security finding, so it was checked before anything was edited.
+
+The test's hand-rolled serde mirror had drifted from the binary's private `CliState` after the
+d28559f rename, and serde silently defaulted the renamed fields to empty vectors — so two
+`is_empty()` assertions passed unconditionally.
+
+Fix: `#[serde(deny_unknown_fields)]` on the mirrors AND removal of every `#[serde(default)]`, which
+makes the key set exact in BOTH directions (an added/renamed field in the binary errors; a
+removed/renamed field in the mirror errors). Verified by deliberately deleting a mirror field and
+observing the loud failure. The assertions now key on `replay_identity()` (what the binary actually
+keys on, not the coincidentally-equal `tx_hash`), assert the ledgers are NON-empty and side-specific,
+and no longer accept the head-extension error as evidence of replay protection — that disjunct would
+have passed even with the spent ledger deleted outright. 7 passed / 0 failed.
+
+### The same vacuity class, second instance (fixed here)
+
+`tests/itx_faucet_cli_e2e.rs:661` used `v["deposit_tx"].as_str().unwrap_or("")` and then wrapped the
+assertion in `if !backing_tx.is_empty()`. A missing, renamed or empty field would SILENTLY SKIP the
+check that a channel's own backing deposit cannot be re-imported — i.e. the double-credit-against-
+one-L1-escrow defence — leaving the suite green while proving nothing. Now `.expect(...)` plus an
+explicit non-empty assertion, and the check is unconditional.
+
+**Pattern worth naming:** both instances are "a test that cannot fail". Neither was found by running
+the suite, because a vacuous assertion is indistinguishable from a passing one in the output. The
+generalisable rule: any `unwrap_or`/`default`/`if let`/`is_empty()` guard placed UPSTREAM of a
+security assertion converts that assertion into a no-op the moment the upstream shape drifts.

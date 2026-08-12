@@ -55,6 +55,23 @@ by diff.
   regen). No VK changes from #1 (VKs are circuit-, not contract-, derived).
 
 ## Step 0 — preconditions
+- **CO-SIGNER KEY MATERIAL (fail-closed; provision FIRST).** `channel_member` refuses to run
+  unless exactly one of these is set:
+  - `INTMAX_COSIGNER_KEYFILE=/path/to/cosigner.key` — **production**. A 0600, gitignored file with
+    >= 32 bytes of hex. Create once per host with `umask 077; openssl rand -hex 32 >
+    .claude/cosigner.key`, then **back it up**: keys are derived from it, so losing it makes every
+    channel derived from it permanently unclosable. The CLI rejects a group/world-readable file,
+    a short file, and an all-zero file. Never `cat`, echo, log, or commit it.
+  - `INTMAX_INSECURE_DETERMINISTIC_KEYS=1` — **tests / local anvil only**. Prints a red banner on
+    every invocation. Every key it produces is computable by anyone from this public repo.
+
+  Setting **both** is a hard error (a provisioned host cannot be silently downgraded); setting
+  neither is a hard error. Do not put the insecure flag in any systemd unit, Dockerfile `ENV`, or
+  `.env` — `api/lib/cli.js:47` spreads `process.env` into every CLI child, so it would silently
+  apply to every channel the API creates.
+
+  **Every channel created before this fix has publicly derivable co-signer keys and must be
+  drained and retired, not merely redeployed** — see `doc/tasks/cosigner-key-provenance.md` §2.
 - **STALE CLI STATE (TM-16): do NOT reuse pre-TM-16 `cli_state.json` files.** The
   TM-16 change re-keyed the CLI replay ledgers (`applied_tx_identities` /
   `spent_tx_identities`, token-free replay identities) and the descriptor wire
@@ -67,7 +84,10 @@ by diff.
 - Contracts build: `cd contracts && forge build`.
 - Decide the target network + set `.env` (see `contracts/.env.example` and
   `api/.env.example`): `FRAUD_TREASURY`, `BLOCK_PRODUCER`, `INTMAX_DEPOSIT_KEY`,
-  `INTMAX_API_TOKEN`, `INTMAX_ALLOWED_ORIGINS`.
+  `INTMAX_COSIGNER_KEYFILE`, `INTMAX_API_TOKEN`, `INTMAX_ALLOWED_ORIGINS`.
+  `INTMAX_DEPOSIT_KEY` unset makes the *Rust CLI* silently fall back to the public anvil dev key
+  (`channel_member.rs:877`; `api/lib/cli.js` guards this, the binary does not) — always set it
+  explicitly for a real network.
 
 ## Step 1 — regenerate fixtures (release; each is minutes of proving)
 Run from repo root. Feature-gated generators un-gate the shared witness builders.

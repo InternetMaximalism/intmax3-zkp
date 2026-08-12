@@ -192,7 +192,7 @@ This report consolidates a multi-pass review of the intmax3-zkp implementation a
 | In-channel send | `verify_send_transition` — E-1, A11 hash-sig, trusted-record binding |
 | Inter-channel credit gate | `verify_inter_channel_credit_transition` — N-of-N A state, E-2, TxV2 inclusion |
 | Atomic CLI inter-channel | `cosign-inter-transfer` — both legs validated before persist |
-| Replay ledgers (CLI) | `spent_tx_hashes` / `applied_tx_hashes` in `CliState` |
+| Replay ledgers (CLI) | `spent_tx_identities` / `applied_tx_identities` in `CliState` |
 | Genesis fail-closed backing | `sign_state_if_backed` / `verify_channel_backing` |
 | Close preconditions | `CloseIntent::new` requires `unallocated_confirmed_incoming == 0` |
 | Native transition rules | `state_update_verifier.rs` — fund decrease on send, chain push, H2≠0, D3 `pending_adds` |

@@ -223,11 +223,39 @@ fn cli(args: &[&str], env: &[(&str, &str)], what: &str) -> String {
     let mut c = Command::new(cli_bin());
     c.args(args)
         .current_dir(repo_root())
-        .env("INTMAX_CHANNEL", CHANNEL.to_string());
+        .env("INTMAX_CHANNEL", CHANNEL.to_string())
+        // SECURITY: explicitly opt IN to the publicly-derivable deterministic co-signer keys.
+        // The CLI now FAILS CLOSED unless exactly one of INTMAX_COSIGNER_KEYFILE (production,
+        // external secret) or this flag is set, so a production invocation can never silently
+        // fall back to keys computable from the public source tree.
+        // See doc/tasks/cosigner-key-provenance.md.
+        .env("INTMAX_INSECURE_DETERMINISTIC_KEYS", "1");
     for (k, v) in env {
         c.env(k, v);
     }
     run(&mut c, what)
+}
+
+/// Like `cli` but tolerates a nonzero exit — returns (success, combined output). Used to assert a
+/// CLI fail-closed REFUSAL, where a nonzero exit is the expected outcome.
+fn cli_allow_fail(args: &[&str], env: &[(&str, &str)]) -> (bool, String) {
+    let mut c = Command::new(cli_bin());
+    c.args(args)
+        .current_dir(repo_root())
+        .env("INTMAX_CHANNEL", CHANNEL.to_string())
+        // SECURITY: explicitly opt IN to the publicly-derivable deterministic co-signer keys.
+        // The CLI now FAILS CLOSED unless exactly one of INTMAX_COSIGNER_KEYFILE (production,
+        // external secret) or this flag is set, so a production invocation can never silently
+        // fall back to keys computable from the public source tree.
+        // See doc/tasks/cosigner-key-provenance.md.
+        .env("INTMAX_INSECURE_DETERMINISTIC_KEYS", "1");
+    for (k, v) in env {
+        c.env(k, v);
+    }
+    let out = c.output().expect("spawn cli");
+    let mut s = String::from_utf8_lossy(&out.stdout).to_string();
+    s.push_str(&String::from_utf8_lossy(&out.stderr));
+    (out.status.success(), s)
 }
 
 fn find_addr(out: &str, label: &str) -> String {
@@ -401,6 +429,64 @@ fn close_lifecycle_cli_e2e() {
         escrow_after, escrow_before,
         "escrow should net to its pre-withdraw value"
     );
+
+    // ── BACKING-DEPOSIT GUARD, actually firing (deposit-import-threat-model.md §10.4 Finding B) ─
+    //
+    // What this is intended to prove about security: `withdraw` ALWAYS makes a real `deposit()` to
+    // the channel's own `deposit_recipient`. Before the fix its hash was discarded, so that deposit
+    // was a real `Deposited` log that passed EVERY check on the import path — right rollup, right
+    // recipient, fresh `depositIndex`, unknown to the replay ledger — and the backing-deposit guard
+    // could not name it. One authenticated import of it would credit the channel a second time
+    // against a single L1 escrow and permanently wedge the channel's exit (§10.5). This asserts
+    // both halves of the fix at once: the BACKFILL (withdraw recorded what it deposited) and the
+    // GUARD (it refuses that hash). Until now the guard had never been exercised by any test —
+    // this run's `setup-backing` was deferred, so the old `if !deposit_tx.is_empty()` wrapper made
+    // every existing assertion about it vacuous (§10.7).
+    let backing: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(repo_root().join("channel_backing.json"))
+            .expect("read channel_backing.json"),
+    )
+    .expect("parse channel_backing.json");
+    assert_eq!(
+        backing["backing_deposit_status"]
+            .as_str()
+            .expect("channel_backing.json must record `backing_deposit_status`"),
+        "landed",
+        "after `withdraw` a backing deposit IS on-chain, so the status must say so (it was \
+         `deferred` before)"
+    );
+    let backing_txs: Vec<String> = backing["backing_deposit_txs"]
+        .as_array()
+        .expect("channel_backing.json must record `backing_deposit_txs`")
+        .iter()
+        .map(|v| {
+            v.as_str()
+                .expect("backing_deposit_txs entries must be strings")
+                .to_string()
+        })
+        .collect();
+    assert_eq!(
+        backing_txs.len(),
+        1,
+        "the native lane makes exactly ONE backing-recipient deposit; got {backing_txs:?}"
+    );
+    for tx in &backing_txs {
+        let (ok, out) = cli_allow_fail(
+            &[
+                "cosign-l1-deposit-import",
+                "0",
+                tx,
+                &rpc,
+                "bad_backing_import.json",
+                "--allow-unbound-depositor",
+            ],
+            &[],
+        );
+        assert!(
+            !ok && out.contains("BACKING deposit"),
+            "the deposit `withdraw` itself made ({tx}) MUST be refused on import:\n{out}"
+        );
+    }
 
     // ── claim (member slot 0 → the deploy EOA; pays out real ETH) ──────────────────────────────
     // The recipient MUST equal the genesis leaf recipient set at `init` (B-1b: the claim witness

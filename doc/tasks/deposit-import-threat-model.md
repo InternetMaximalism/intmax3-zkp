@@ -327,6 +327,10 @@ would trade reorg safety for a progress bar. Flagged for the deployment follow-u
 - **No `SETUP_BACKING_NO_ONCHAIN_DEPOSIT` equivalent.** There is no env bypass, no
   "skip chain check" flag, no test-only path. The faucet E2E already makes a real ERC-20
   deposit against anvil; it now passes that transaction's real hash.
+  > **SUPERSEDED — see §10.** This bullet is *narrowly* true (the import command itself adds no
+  > env bypass) but it was read as a broader claim and it is wrong in that reading. The env var it
+  > names disables one of the import path's OWN guards from the other side, and there is a second,
+  > env-independent hole in the same guard. Do not cite this bullet without §10.
 - **`block_number` is deliberately left at `Default::default()` (0).** **DEVIATION — see §9.**
 
 ## 9. DEVIATION from the assignment
@@ -349,3 +353,347 @@ uniqueness does not depend on it: `deposit_index` alone is unique per rollup con
 
 Populating it correctly would require reading the intmax block that folded the deposit, which
 does not exist at import time. Flagged for the reviewer rather than silently done either way.
+
+---
+
+## 10. The backing-deposit guard can silently not run (investigation, 2026-08-10)
+
+Status: **investigated, confirmed, and FIXED (2026-08-10).** Finding B below is
+production-reachable, so per the standing rule ("escalate, don't patch") this section reported
+before any change was made; the fix in §10.6 has since been implemented as specified, together
+with the §10.8 finding-2 follow-up. See §10.9 for what landed and what residual remains.
+
+### 10.1 The guard
+
+`src/bin/channel_member.rs:4519-4530` — the refusal that stops a channel from importing its own
+backing deposit (adversarial review finding 5):
+
+```rust
+let strip0x = |s: &str| s.trim_start_matches("0x").to_ascii_lowercase();
+if !backing.deposit_tx.is_empty() && strip0x(&backing.deposit_tx) == strip0x(tx_hash) {
+    die("REFUSING: this is the channel's BACKING deposit (channel_backing.json deposit_tx). …");
+}
+```
+
+It is the *only* thing standing between the import path and a deposit whose value is already
+counted in the channel's genesis fund. It compares against exactly one recorded transaction
+hash, and it **skips entirely** when that hash is the empty string.
+
+### 10.2 Finding A — `SETUP_BACKING_NO_ONCHAIN_DEPOSIT` disables the guard permanently
+
+Verified chain of evidence:
+
+1. `channel_member.rs:607` — `let no_onchain_deposit = std::env::var("SETUP_BACKING_NO_ONCHAIN_DEPOSIT").is_ok();`
+   Note `.is_ok()`: **any** value, including the empty string, activates it.
+2. `channel_member.rs:608-617` — the deferred branch makes no `deposit()` call and yields
+   `txhash = String::new()`.
+3. `channel_member.rs:743-755` — that empty string is persisted as `deposit_tx`.
+4. `BACKING_FILE` is written at **exactly one site** (`:744`) and read at exactly one site
+   (`:524`). Nothing backfills `deposit_tx` afterwards. Confirmed by exhaustive grep of
+   `BACKING_FILE` across `src/`, `tests/`, `api/`.
+5. `channel_member.rs:1965-2002` — `withdraw` *does* make the deferred deposit, to
+   `lc["deposit"]["recipient"]`. `wallet_core.rs:4374-4375` derives that recipient as
+   `calculate_recipient_from_user_id(user_id, deposit_salt)` with `deposit_salt` loaded from the
+   backing (`channel_member.rs:1768`) — i.e. **the identical `deposit_recipient` the import
+   checks against**. The `cast(...)` return value at `:1988` is discarded; the tx hash is not
+   captured, not printed, and not persisted anywhere.
+
+⇒ For a channel created in deferred mode the guard is a permanent no-op, **including after the
+backing deposit actually lands on-chain**. The reporter's hypothesis is confirmed in full.
+
+Two aggravating details found while verifying:
+
+- **The success message lies in deferred mode.** `channel_member.rs:756-760` prints
+  `"setup-backing OK: REAL on-chain deposit {fund} … tx {txhash})"` unconditionally, so stdout
+  reads `… tx )` with an empty hash. The only warning goes to **stderr** (`:614-616`). An
+  operator or a stdout-scraping script reads "OK: REAL on-chain deposit".
+- **The mode is not tied to a dev flag.** Contrast `api/lib/cli.js:18-26`, where the anvil dev
+  key is gated on `INTMAX_DEV=1` and throws otherwise. `SETUP_BACKING_NO_ONCHAIN_DEPOSIT` has no
+  such interlock, so "deferred mode against a production RPC" is not a contradiction the code
+  refuses.
+
+### 10.3 Finding A does NOT reach production
+
+Swept `api/`, `hosting/`, `doc/docs/deploy-runbook.md`, `doc/tasks/regen-and-redeploy-runbook.md`,
+all `*.sh`, `package.json`, `contracts/`. The env var appears in **three test files only**
+(`tests/close_lifecycle_cli_e2e.rs:327`, `tests/itx_faucet_cli_e2e.rs:322`,
+`tests/two_token_cli_e2e.rs:417`) plus docs. `api/` never invokes `setup-backing` at all
+(`api/API-DESIGN.md:926-933` — "Admin CLI only"). The only non-test caller is
+`hosting/wallet/wallet-relay.js:1033`, the dev-only localhost relay, and it does not set the var.
+
+Empirically, every shipped backing record has a populated `deposit_tx`:
+`deploy-staging/ch7`, `deploy-staging/ch8`, `wallet-live-work/ch7`, `wallet-live-work/ch8`.
+
+**Residual (procedural, real).** Production `setup-backing` is a hand-run shell command —
+`doc/docs/deploy-runbook.md:98-101` — and all three CLI spawners inherit the ambient environment
+without clearing or whitelisting (`api/lib/cli.js:47`, `hosting/wallet/wallet-relay.js:53`,
+`hosting/wallet/wallet-relay-ec2.js:46`). An operator who exported the var earlier in the same
+shell (e.g. reproducing an E2E by hand) would produce Sepolia artifacts with no deposit and a
+disarmed guard, and the stdout line would still say "OK: REAL on-chain deposit".
+
+### 10.4 Finding B — the guard misses `withdraw`'s deposit in EVERY mode (production-reachable)
+
+This is **not** gated on the env var and is the more serious half.
+
+`channel_member.rs:1965` is explicit: *"`withdraw` ALWAYS makes the deposit here"*. In integrated
+mode it deposits `backing.fund` at token index 0 to `backing.deposit_recipient` — the same
+recipient, the same amount. Its transaction hash is captured nowhere. `deposit_tx` still names
+only the `setup-backing` transaction. (The stale comment at `channel_member.rs:1756-1757` claims
+the opposite — "the deposit was already made on-chain by `setup-backing`, so we do NOT deposit
+again here" — and should be corrected either way.)
+
+So in **default, non-deferred, production** configuration, once a channel has run `withdraw`
+there exists a real on-chain `Deposited` log that:
+
+- is emitted by `backing.rollup` (passes A3),
+- names `backing.deposit_recipient` (passes A4),
+- is unique in its transaction (passes A5),
+- has a fresh `deposit_index`, so the replay ledger does not know it (passes A7),
+- is unknown to the backing guard, because `deposit_tx` names a different transaction.
+
+Reachability: `POST /api/v1/channel/:ch/full-withdrawal/submit` runs `withdraw`
+(`api/routes/full-withdrawal.js:127`). `POST /api/v1/channel/:ch/deposit/import` accepts an
+**arbitrary** caller-supplied `txHash` — validated only as `^0x[0-9a-fA-F]{64}$`
+(`api/routes/deposit.js:79-87`) — and passes `--allow-unbound-depositor`
+(`api/routes/deposit.js:98`). Because the depositor is the operator key, bound to no slot,
+`depositor_slot` is `None` and the flag lets the caller name **any** active
+`recipientSlot`. There is no close-freeze check on the import path.
+
+**Authority required:** the shared API bearer token (`api/lib/security.js:49-67`). One token for
+all writes, no per-member scoping — so any legitimate client of the relay is inside this boundary.
+Not remote-unauthenticated.
+
+### 10.5 What the damage actually is (concrete, and it is bounded)
+
+Per §2 of this document, and re-verified against the contracts:
+
+- **Not L1 theft.** Escrow release is gated by the withdrawal proof's finalized-root check
+  (`IntmaxRollup.sol:1262`). On the settlement side the authoritative payout cap is
+  `ChannelSettlementManager.claimWithdrawalCredit` :1460-1465, checked against
+  `receivedChannelFunds[t]` — a **measured** balance delta (`pullChannelFunds` :1413-1419,
+  `pullChannelTokenFunds` :1432-1440), not a declared figure. `receive()` :684-686 reverts unless
+  the sender is the registry, so force-fed ETH cannot raise the ceiling.
+  `finalizedChannelFundAmount` (:1051, from the signed close intent) is only an accrual bound and
+  is documented as "non-authoritative" at :615-617. An inflated in-channel balance therefore does
+  **not** by itself let a channel pull more escrow: pulling more requires a *new* real deposit,
+  which is a wash.
+- **Worth stating plainly, because it surprised me:** the rollup has **no per-channel escrow
+  accounting**. `withdrawNative` :1519-1521 decrements the global `totalEscrowed`; the only thing
+  preventing a channel from drawing on other channels' ETH is the Solidity 0.8 underflow revert
+  plus the withdrawal proof. The comment at `IntmaxRollup.sol:1477-1479` calling cross-channel
+  theft "impossible" is true only in the "cannot become insolvent" sense. That is a *separate*
+  observation, not something this bug reaches — but it means the withdrawal proof is the sole
+  cross-channel boundary, so anything that weakens it is a much bigger deal than it looks.
+- **The realized harm is §2(b): irreversible exit-wedging.** The import pushes the deposit
+  nullifier into `settled_tx_chain` (`wallet_core.rs:2925`). The backing deposit's nullifier was
+  already consumed by the genesis balance proof (`channel_member.rs:700-711`), and `withdraw`'s
+  deposit is consumed by the withdrawal proof's chain — so no base-layer balance proof can consume
+  it a second time. Close / claim / partial withdrawal are then blocked **permanently**. One
+  authenticated POST wedges the channel's exit at zero cost to the attacker and cannot be undone.
+- **Plus §2(a):** a fake spendable in-channel balance for the named slot, which within the
+  channel is a member-vs-member loss bounded by that channel's own pulled funds
+  (`receivedChannelFunds[t]`), realized as later claimants' `claimWithdrawalCredit` reverting.
+
+So: **griefing/DoS with irreversible effect on one channel, plus intra-channel misallocation.
+Not cross-channel fund theft.** Bounded, but real, and reachable in the shipped configuration.
+
+### 10.6 Proposed fix — IMPLEMENTED as specified (see §10.9)
+
+Two layers. Both are needed; neither alone is sufficient.
+
+**L1 — record every backing-recipient deposit the CLI itself makes.** Replace the single
+`deposit_tx` scalar with a set, because there is provably more than one such deposit:
+
+```rust
+/// Every transaction in which THIS CLI deposited to `deposit_recipient`. A set, not a scalar:
+/// `setup-backing` makes at most one, and `withdraw` makes one or two more (native + ERC-20 lane).
+#[serde(default)]
+backing_deposit_txs: Vec<String>,
+```
+
+`cmd_setup_backing` seeds it in the real-deposit branch; `cmd_withdraw` sends its `deposit()`
+calls with `--json`, parses the hash, and **appends + persists before proceeding**. `deposit_tx`
+is retained and still consulted, for compatibility with the four shipped backing files.
+
+**L2 — make the guard's inapplicability explicit instead of implicit.** An empty string cannot
+distinguish "no backing deposit exists yet" from "one exists and we lost its hash". Add an
+explicit tri-state whose serde default is the unsafe case, so old files fail closed:
+
+```rust
+#[derive(Serialize, Deserialize, Default, PartialEq)]
+enum BackingDepositStatus {
+    #[default] Unknown,   // pre-dates this field → FAIL CLOSED
+    Deferred,             // setup-backing deferred it; it is NOT on-chain yet
+    Landed,               // it is on-chain and backing_deposit_txs names it
+}
+```
+
+Guard becomes: always check set membership; then `Landed` with an empty set → die;
+`Unknown` → die; `Deferred` → proceed but **print an explicit SECURITY note naming the guard as
+not-applicable and why**, so "did not run" is never indistinguishable from "ran and passed".
+
+**Why not blanket fail-closed on empty (the question asked).** It would break a legitimate flow.
+`tests/itx_faucet_cli_e2e.rs` performs genuine mid-channel ERC-20 imports (`:569`, `:586`,
+`:693`, `:721`, `:750`) while in deferred mode, before `withdraw` has run. At that moment the
+backing deposit provably does not exist on-chain, so no import can be it, and refusing would be
+refusing a safe operation. The tri-state is what makes "not applicable" a *justified, stated*
+conclusion rather than a silent skip. Blanket fail-closed is rejected on those grounds.
+
+**Known migration break:** a `channel_backing.json` written by the current code in deferred mode
+deserialises to `Unknown` and will fail closed at import until `setup-backing` is re-run. The four
+shipped production files are unaffected (they take the `Landed` path via non-empty `deposit_tx`).
+Same class as the `deposit_recipient` migration break already noted in §7b; must go in the runbook.
+
+**Out of scope but should be filed separately:** gate the deferred mode behind `INTMAX_DEV=1` the
+way `api/lib/cli.js:18-26` gates the anvil key; make `channel_member.rs:756-760` stop printing
+"REAL on-chain deposit" when it made none; fix the stale comment at `channel_member.rs:1756-1757`.
+
+### 10.7 Test coverage — the check has never actually run
+
+`grep` for the refusal string `"BACKING deposit"` across `tests/` yields exactly one site:
+`tests/itx_faucet_cli_e2e.rs:685`. That test runs `setup-backing` in deferred mode
+(`:321-324`), so `deposit_tx` is `""`, so the old `if !backing_tx.is_empty()` wrapper at the
+call site skipped the whole block. **The guard has never been exercised by any test.** The
+uncommitted edit that turns that wrapper into an assertion is therefore correct in intent and
+correctly fails today — it is reporting a true negative, not a broken test.
+
+Required coverage (not yet written):
+
+1. **Explicit, justified skip.** In `itx_faucet_cli_e2e`, assert deferred mode *positively*
+   (status `Deferred`, `backing_deposit_txs` empty) and assert the CLI emits the
+   not-applicable SECURITY note. A skip must be something the test proves, never something it
+   infers from an empty string.
+2. **The guard actually firing.** Needs a run with a populated set. Cheapest home is
+   `close_lifecycle_cli_e2e` / `two_token_cli_e2e`, which both call `withdraw` (`:383`, `:527`):
+   after `withdraw` the L1 backfill populates `backing_deposit_txs`, so an import of that hash
+   must be refused with "BACKING deposit" — covering Finding B and the backfill in one assertion,
+   with no extra proving cost.
+3. **Fail-closed.** A backing file with status `Unknown` must be refused.
+
+### 10.8 Same-shape sweep
+
+The bug class is: *a refusal conditioned on a field being non-empty/`Some`, where a supported
+mode leaves that field empty.* Swept `src/`, `api/`, `contracts/src/`. The house style is
+overwhelmingly fail-closed (`die`-on-empty, `ok_or_else`, `tokenFound` flags), so hits are few.
+
+**Genuinely silently-off (2):**
+
+1. `channel_member.rs:4524` — the subject of this section. Note the line *directly above it*,
+   `:4515` `if backing.rollup.is_empty() { die(...) }`, is the same struct in the same function
+   and is fail-closed. `deposit_tx` is the odd one out.
+2. **`channel_member.rs:252 / 261 / 286` — the three `#[serde(default)]` replay ledgers**
+   (`applied_tx_identities`, `spent_tx_identities`, `imported_deposits`), backing the refusals at
+   `:3560`, `:3483`, `:4559`. `load_state()` (`:465`) dies if `cli_state.json` is missing, but
+   `#[serde(default)]` makes *field-level* absence silent: a state file from any build that
+   lacked or differently-named these keys deserialises to an **empty ledger**, and every
+   `contains()` refusal silently passes. The code records that this has already happened once —
+   `:243-245`, "Pre-TM-16 entries under the old field name are dropped by the serde default." A
+   field rename is a total, silent reset of a security ledger with no diagnostic.
+   **This matters here specifically because `imported_deposits` is the only backstop that would
+   otherwise catch Finding B.** Both legs of the defence fail silently, and they fail
+   independently. **FIXED (§10.9):** the `#[serde(default)]`s were REMOVED (the suggested
+   "keep the default plus a version" shape was rejected — a version field alone still lets an
+   absent key produce an empty ledger); `load_state` now checks each ledger key BY NAME and dies
+   with a migration instruction, `CliState` is `deny_unknown_fields` so a renamed ledger is loud
+   from both sides, and the only way past is the acknowledged `migrate-state` command.
+
+**Permissive default feeding a security decision (different mechanism, same outcome) — low:**
+
+- `channel_member.rs:4841` `burn["token_index"].as_u64().unwrap_or(0)` — a lone `unwrap_or`
+  among six sibling `die`s (`:4779, :4782, :4786, :4792, :4799, :4809, :4815`), silently meaning
+  "ETH". Bound into the IMPW `authDigest` (`:4846`), which selects `withdrawNative` vs
+  `withdrawERC20`. Low: the digest is only a veto on a proof-verified leaf
+  (`IntmaxRollup.sol:1500-1516`) and the payout path is deliberately dead (`:5097` `exit(1)`).
+- `channel_member.rs:4302` — the comment says an explicit `[min_confirmations]` is clamped up to
+  the floor, but the floor is **1**, not `DEFAULT_MIN_CONFIRMATIONS` (12). §7 above describes the
+  intended behaviour correctly; the code comment at `:4302` is the thing that is misleading. No
+  API route passes the positional, so this is operator-only.
+- `api/routes/channel-init.js:68-97` — the deposit + import leg is wrapped in a `try/catch` that
+  logs and returns **200** with the pre-deposit snapshot. A CLI *security refusal* (misdirection,
+  replay, unregistered token, under-confirmed) becomes indistinguishable from success at the API
+  boundary. Detection/operational, not a bypass, but it erases a fail-closed signal.
+
+**Conditional by design, checked and cleared:** `IntmaxRollup.sol:1512`/`:1560`
+`if (w.auxData != bytes32(0)) require(partialWithdrawalAuthorized)` — `auxData == 0` *is* the
+definition of "not a channel partial withdrawal" (`send_tx_circuit.rs:179`,
+`receive_transfer_circuit.rs:322` only advance `settled_tx_chain` when `aux_data != 0`), and it
+is a veto rather than a payout gate; `recipient_sk: Option<..>` decryption checks
+(`state_update_verifier.rs:526`, `:1106`, `wallet_core.rs:1522`, `:900`) — optional by
+construction, soundness carried by the mandatory E-1/E-2 Regev proof; `api/routes/burn.js:25`
+and `partial-withdrawal.js:30` client-intent cross-checks; `api/lib/security.js:54` read-auth
+default; `channel_member.rs:224` `token_witnesses` (skips in the *safe* direction — an absent
+witness makes `witness_source` return `None`, refusing the send);
+`IntmaxRollup.sol:1802` (explicitly fail-closed). `ChannelSettlementManager.sol:1125-1140` and
+`:1355-1363` are the pattern to copy: a `tokenFound` flag plus `revert TokenRegistryMismatch()`.
+
+### 10.9 What landed (2026-08-10)
+
+**Fix 1 — the backing-deposit guard (`src/bin/channel_member.rs`).**
+
+- `ChannelBacking` gains `backing_deposit_txs: Vec<String>` (a SET — `withdraw` provably makes one
+  or two more deposits than `setup-backing`) and `backing_deposit_status: BackingDepositStatus`
+  (`Unknown | Deferred | Landed`, serde default `Unknown`).
+- `cmd_withdraw` sends both of its `deposit()` calls with `--json`, parses the hash through the
+  fail-closed `parse_cast_tx_hash`, and APPENDS + PERSISTS via `record_backing_deposit_tx` before
+  proceeding — so a crash later in the pipeline still leaves the guard armed.
+- The guard is now two parts: unconditional SET MEMBERSHIP over every known hash, then an
+  APPLICABILITY match. `Landed` + empty set → die; `Unknown` → die; `Deferred` → proceed and PRINT
+  a SECURITY note naming the guard as not-applicable and why. Blanket fail-closed on empty stays
+  rejected for the reason in §10.6 (genuine mid-channel imports before `withdraw`).
+- Legacy compatibility is an evidence-backed inference, not an assumption:
+  `resolved_backing_deposit_status()` maps `Unknown` + non-empty `deposit_tx` → `Landed`. Verified
+  live against `wallet-live-work/ch7`: it loads and the guard refuses its recorded `deposit_tx`.
+- `setup-backing`'s stdout no longer claims "REAL on-chain deposit" when it made none, and the
+  stale "we do NOT deposit again here" comment at the top of `cmd_withdraw` is corrected.
+
+**Fix 2 — the replay ledgers.** `STATE_SCHEMA_VERSION` + `REQUIRED_LEDGER_KEYS`; the three ledgers
+lost `#[serde(default)]`; `CliState` is `deny_unknown_fields`; `load_state` gates on version, then
+on ledger-key presence by name, then deserializes strictly, and ANNOUNCES a pre-versioning file
+instead of accepting it silently. `migrate-state --i-understand-this-resets-replay-ledgers` is the
+one deliberate path, and it REFUSES outright if the file carries an unrecognised key (the
+signature of a renamed ledger whose entries would be discarded). The single retained default is
+`state_schema_version` itself, justified inline: it makes no security claim on its own, every
+existing file pre-dates it, and its use is observable.
+
+**Residual, not fixable retroactively.** A backing file written BEFORE this fix whose channel has
+already run `withdraw` has an unrecorded second deposit; its hash is not in the file and cannot be
+recovered from it, so the guard cannot name it. Any future `withdraw` backfills, and re-running
+`setup-backing` re-arms from scratch. The §10.6 "out of scope" items (gating deferred mode behind
+`INTMAX_DEV=1`, `api/routes/channel-init.js`'s 200-on-refusal) are still open.
+
+**Coverage added.** `close_lifecycle_cli_e2e` (native lane) and `two_token_cli_e2e` (both lanes,
+asserting the set holds TWO entries — the case a scalar could never refuse) assert the backfill and
+then that importing each recorded hash is REFUSED; `itx_faucet_cli_e2e`'s deferred-mode skip is now
+PROVED from the recorded status + empty set + the CLI's not-applicable note, instead of inferred
+from an empty string; `inter_channel_cli::cli_state_missing_replay_ledger_fails_loudly` covers
+absence, rename, newer schema, the announced pre-versioning acceptance, and both halves of
+`migrate-state`.
+
+### 10.10 The recurring pattern (three instances in one session)
+
+All three of these were the SAME failure, in three different mechanisms: **a security check that
+silently does not run, in a configuration the code supports.**
+
+1. `channel_member.rs:4524` — a refusal conditioned on `!field.is_empty()`, where a supported mode
+   leaves the field empty (§10.1–10.4).
+2. `channel_member.rs:252/261/286` — `#[serde(default)]` on a security LEDGER, so an absent or
+   renamed key yields an empty ledger and every `contains()` refusal passes (§10.8 finding 2).
+3. `tests/inter_channel_cli.rs` — a serde MIRROR that drifted from the binary's field names, so
+   every ledger assertion in the test read an empty vector regardless of what the binary wrote;
+   and `tests/itx_faucet_cli_e2e.rs` — `unwrap_or("")` upstream of an assertion, which turned the
+   assertion's own precondition into a skip.
+
+The common shape is **a default standing in for a conclusion.** The check does not fail; it
+evaluates to a vacuous truth, and vacuous truth is indistinguishable from a passing check in every
+log, test report and code review.
+
+The rule this yields, applied throughout the fix: **a security check may only be skipped on a
+POSITIVE, RECORDED statement that it does not apply, and the skip must be observable** — the
+tri-state `Deferred` plus its printed note, rather than an empty string; an explicit key-presence
+check plus `migrate-state`, rather than `#[serde(default)]`; `deny_unknown_fields` plus no
+defaults on a test mirror, rather than a forgiving one. Where a default genuinely must remain
+(`state_schema_version`), it makes no security claim by itself and its use is announced.
+
+Detection heuristic for future review: grep for a guard whose condition is `is_empty()`, `is_some()`,
+`unwrap_or`, or `#[serde(default)]` and ask "which SUPPORTED configuration makes this false?" If
+the answer is a real mode, the guard is off in that mode.

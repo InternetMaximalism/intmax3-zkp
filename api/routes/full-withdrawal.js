@@ -83,6 +83,9 @@ router.post('/deploy', (req, res) => {
 });
 
 // POST /api/v1/channel/:ch/full-withdrawal/request (W10 step 2 — close request + submit intent)
+// SECURITY (detached close signing): this is the combined requestClose + submitCloseIntent entry
+// point and therefore the fourth key-bearing close route. It is key-bearing no longer — see the
+// note at the top of routes/close.js. Argv and env are unchanged.
 router.post('/request', (req, res) => {
   const ch = Number(req.params.ch);
   withLock(ch, () => {

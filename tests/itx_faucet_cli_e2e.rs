@@ -163,7 +163,13 @@ fn cli(args: &[&str], env: &[(&str, &str)], what: &str) -> String {
     let mut c = Command::new(cli_bin());
     c.args(args)
         .current_dir(repo_root())
-        .env("INTMAX_CHANNEL", CHANNEL.to_string());
+        .env("INTMAX_CHANNEL", CHANNEL.to_string())
+        // SECURITY: explicitly opt IN to the publicly-derivable deterministic co-signer keys.
+        // The CLI now FAILS CLOSED unless exactly one of INTMAX_COSIGNER_KEYFILE (production,
+        // external secret) or this flag is set, so a production invocation can never silently
+        // fall back to keys computable from the public source tree.
+        // See doc/tasks/cosigner-key-provenance.md.
+        .env("INTMAX_INSECURE_DETERMINISTIC_KEYS", "1");
     for (k, v) in env {
         c.env(k, v);
     }
@@ -175,7 +181,13 @@ fn cli_allow_fail(args: &[&str]) -> (bool, String) {
     let mut c = Command::new(cli_bin());
     c.args(args)
         .current_dir(repo_root())
-        .env("INTMAX_CHANNEL", CHANNEL.to_string());
+        .env("INTMAX_CHANNEL", CHANNEL.to_string())
+        // SECURITY: explicitly opt IN to the publicly-derivable deterministic co-signer keys.
+        // The CLI now FAILS CLOSED unless exactly one of INTMAX_COSIGNER_KEYFILE (production,
+        // external secret) or this flag is set, so a production invocation can never silently
+        // fall back to keys computable from the public source tree.
+        // See doc/tasks/cosigner-key-provenance.md.
+        .env("INTMAX_INSECURE_DETERMINISTIC_KEYS", "1");
     let out = c.output().expect("spawn cli");
     let mut s = String::from_utf8_lossy(&out.stdout).to_string();
     s.push_str(&String::from_utf8_lossy(&out.stderr));
@@ -652,28 +664,68 @@ fn itx_faucet_cli_e2e() {
         "a deposit from a BOUND address must never be credited elsewhere, flag or not:\n{out}"
     );
 
-    // …and the channel's OWN backing deposit is not importable either (it is already counted in
-    // the genesis fund; importing it would credit the channel twice against one L1 escrow).
-    let backing_tx = {
+    // …and the backing-deposit guard (deposit-import-threat-model.md §10). THIS test runs
+    // `setup-backing` in DEFERRED mode (`SETUP_BACKING_NO_ONCHAIN_DEPOSIT`, line ~322) and never
+    // runs `withdraw`, so at this point the channel provably has NO backing deposit on-chain and
+    // no import can be one — the guard is genuinely NOT APPLICABLE here.
+    //
+    // SECURITY (why this is an assertion block and not an `if !backing_tx.is_empty()`): the check
+    // used to be wrapped in exactly that condition, and because deferred mode leaves the hash
+    // empty, the whole block was SKIPPED — the guard has never been exercised by any test, while
+    // the suite stayed green (§10.7). A skip must be something the test PROVES from a positive
+    // statement in the file, never something it infers from an empty string. So: assert the
+    // recorded status IS `deferred`, assert the recorded set IS empty, and assert the CLI SAYS the
+    // guard is not applicable. The guard actually FIRING is covered where a backing deposit
+    // exists — `close_lifecycle_cli_e2e` / `two_token_cli_e2e`, after `withdraw`.
+    let backing: serde_json::Value = {
         let text = std::fs::read_to_string(repo_root().join("channel_backing.json"))
             .expect("read channel_backing.json");
-        let v: serde_json::Value = serde_json::from_str(&text).expect("parse backing");
-        v["deposit_tx"].as_str().unwrap_or("").to_string()
+        serde_json::from_str(&text).expect("parse backing")
     };
-    if !backing_tx.is_empty() {
-        let (ok, out) = cli_allow_fail(&[
-            "cosign-l1-deposit-import",
-            &FAUCET_SLOT.to_string(),
-            &backing_tx,
-            &rpc,
-            "bad_import.json",
-            "--allow-unbound-depositor",
-        ]);
-        assert!(
-            !ok && out.contains("BACKING deposit"),
-            "the channel's own backing deposit must not be importable:\n{out}"
-        );
-    }
+    // NO `unwrap_or(...)` on any of these: a missing/renamed field must be a LOUD failure, or the
+    // justification for skipping the guard would itself be vacuous. (Same class as the stale serde
+    // mirror fixed in `inter_channel_cli.rs`, and as the `#[serde(default)]` replay ledgers.)
+    assert_eq!(
+        backing["backing_deposit_status"]
+            .as_str()
+            .expect("channel_backing.json must record `backing_deposit_status`"),
+        "deferred",
+        "this test defers the on-chain deposit, so the backing MUST say so explicitly"
+    );
+    assert_eq!(
+        backing["backing_deposit_txs"]
+            .as_array()
+            .expect("channel_backing.json must record `backing_deposit_txs`")
+            .len(),
+        0,
+        "nothing has deposited to the backing recipient yet in deferred mode"
+    );
+    assert_eq!(
+        backing["deposit_tx"]
+            .as_str()
+            .expect("channel_backing.json must carry a (possibly empty) `deposit_tx`"),
+        "",
+        "deferred mode makes no setup-backing deposit, so the legacy scalar must be empty"
+    );
+    // The CLI must SAY the guard does not apply. The vehicle is a NON-EXISTENT tx hash so this
+    // probe cannot possibly move channel state (the guard runs first and prints, then the receipt
+    // lookup fails) — the honest import of the real deposit happens further down and must stay the
+    // first successful one.
+    let (ok, out) = cli_allow_fail(&[
+        "cosign-l1-deposit-import",
+        &FAUCET_SLOT.to_string(),
+        "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        &rpc,
+        "bad_import.json",
+        "--allow-unbound-depositor",
+    ]);
+    assert!(!ok, "a non-existent tx must not be importable:\n{out}");
+    assert!(
+        out.contains("backing-deposit guard is NOT APPLICABLE")
+            && out.contains("backing_deposit_status=deferred"),
+        "a NOT-APPLICABLE guard must announce itself and its reason — a silent skip is \
+         indistinguishable from a passing check:\n{out}"
+    );
 
     // `auto` must not invent a slot when the depositor is bound to none.
     let (ok, out) = cli_allow_fail(&[
@@ -1062,7 +1114,9 @@ fn itx_faucet_cli_e2e() {
         "cosign-l1-deposit-import (browser-shaped ERC-20)",
     );
     assert!(
-        byo_import.to_lowercase().contains(&member_addr.to_lowercase()),
+        byo_import
+            .to_lowercase()
+            .contains(&member_addr.to_lowercase()),
         "the import must report the on-chain depositor it read from the log:\n{byo_import}"
     );
     assert!(

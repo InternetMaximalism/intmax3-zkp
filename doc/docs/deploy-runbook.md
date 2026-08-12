@@ -88,9 +88,40 @@ node hosting/wallet/wallet-relay.js   # https://localhost:8000/wallet-live.html 
   it after editing the relay or adding an `/api` route (a stale process is the classic "Cannot POST
   /api/inter/send" 404 even though the on-disk file has the route).
 
+## Co-signer key provenance (MANDATORY — do this BEFORE any channel is created)
+
+`channel_member` **fails closed**: it refuses to run unless exactly one of
+`INTMAX_COSIGNER_KEYFILE` (production) or `INTMAX_INSECURE_DETERMINISTIC_KEYS=1` (tests only) is
+set. There is no default and no fallback. Setting **both** is a hard error, so a provisioned
+production host cannot be silently downgraded to test keys.
+
+**Why:** the co-signer keys used to be derived from a constant in this public repo, i.e. every
+co-signer private key of every CLI/API channel was computable by anyone. Full analysis and the
+required operational response for already-created channels: `doc/tasks/cosigner-key-provenance.md`.
+
+```bash
+# ONE TIME per deployment host. 0600, gitignored path, never echoed.
+umask 077
+openssl rand -hex 32 > .claude/cosigner.key       # .claude/ is gitignored (.gitignore:76)
+chmod 600 .claude/cosigner.key                    # the CLI REFUSES any group/world-readable file
+```
+- **Back this file up to your secret store before creating any channel.** Keys are *derived* from
+  it, so losing it makes every channel derived from it permanently unclosable (funds locked).
+- Provision it on the EC2 relay too, and point the systemd unit at it:
+  `Environment=INTMAX_COSIGNER_KEYFILE=/home/ec2-user/relay/.secrets/cosigner.key` (mode 600).
+  `api/lib/cli.js` spreads `process.env` into the CLI child, so the service environment is enough.
+- **NEVER** `cat`, echo, log, or commit this file, and never pass its *contents* on a command line.
+- `INTMAX_INSECURE_DETERMINISTIC_KEYS` must **never** appear in a service unit, Dockerfile `ENV`,
+  or `.env` on a deployed host — `api/lib/cli.js` would propagate it to every channel it creates.
+- **Local anvil dev loop** (`hosting/wallet/wallet-relay.js`, `hosting/wallet/wallet-e2e.js`, the
+  `node/` co-signer): export `INTMAX_INSECURE_DETERMINISTIC_KEYS=1` in *that shell only*. These
+  spawners deliberately do not set it themselves, so a copy of the dev command pasted onto a real
+  host fails loudly instead of silently creating a worthless channel.
+
 ## Sepolia (one-time, when rollups/backing must be rebuilt)
 ```bash
 export SEPOLIA_RPC_URL=https://ethereum-sepolia-rpc.publicnode.com    # or your own
+export INTMAX_COSIGNER_KEYFILE="$PWD/.claude/cosigner.key"            # see section above; required
 PRIV=…/intmax3-zkp-enshrined-paymentchannel/.claude/priv
 cd contracts && forge script script/Deploy.s.sol --rpc-url "$SEPOLIA_RPC_URL" \
   --private-key "$(cat "$PRIV")" --broadcast --slow                  # prints IntmaxRollup addr; run TWICE (ch7, ch8)
@@ -101,8 +132,15 @@ cd .. && mkdir -p deploy-staging/ch7 deploy-staging/ch8
     ../../target/release/channel_member setup-backing "$SEPOLIA_RPC_URL" <rollup8> )
 # ship deploy-staging/ch{7,8}/{channel_backing.json,channel_attestation.bin,balance_vd.bin,tokens.json} → EC2 ~/relay/wallet-live-work/ch{7,8}/
 ```
-- `INTMAX_CHANNEL` selects the channel; `INTMAX_DEPOSIT_KEY` is the funded deposit key (default = anvil
-  dev key for local). EIP-170 is NOT a blocker: IntmaxRollup runtime ≈ 24,446 B (fits the 24,576 cap).
+- `INTMAX_CHANNEL` selects the channel; `INTMAX_DEPOSIT_KEY` is the funded deposit key. EIP-170 is
+  NOT a blocker: IntmaxRollup runtime ≈ 24,446 B (fits the 24,576 cap).
+- **`INTMAX_DEPOSIT_KEY` unset makes the Rust CLI fall back to the public anvil dev key**
+  (`channel_member.rs:877`). `api/lib/cli.js` guards this, the binary does not — always set it
+  explicitly for any real network. Tracked in `cosigner-key-provenance.md` §6.3.
+- **Known exposure (unfixed):** the CLI passes `INTMAX_DEPOSIT_KEY` to `cast` as
+  `--private-key <value>` in **argv** at 27 call sites, so any local user can read the funded
+  Sepolia key with `ps auxww` during a run. Do not run these commands on a shared host.
+  Tracked in `cosigner-key-provenance.md` §6.2.
 
 ### ERC-20 token registration (multi-token §N-7) — AFTER the rollup deploy, BEFORE any ERC-20 deposit
 The base `tokenIndex → ERC-20` registry is **set-once per index** (TM-10b) and `deposit()` reverts

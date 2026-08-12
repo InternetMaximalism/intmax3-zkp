@@ -199,7 +199,13 @@ fn cli(args: &[&str], env: &[(&str, &str)], what: &str) -> String {
     let mut c = Command::new(cli_bin());
     c.args(args)
         .current_dir(repo_root())
-        .env("INTMAX_CHANNEL", CHANNEL.to_string());
+        .env("INTMAX_CHANNEL", CHANNEL.to_string())
+        // SECURITY: explicitly opt IN to the publicly-derivable deterministic co-signer keys.
+        // The CLI now FAILS CLOSED unless exactly one of INTMAX_COSIGNER_KEYFILE (production,
+        // external secret) or this flag is set, so a production invocation can never silently
+        // fall back to keys computable from the public source tree.
+        // See doc/tasks/cosigner-key-provenance.md.
+        .env("INTMAX_INSECURE_DETERMINISTIC_KEYS", "1");
     for (k, v) in env {
         c.env(k, v);
     }
@@ -210,16 +216,20 @@ fn cli(args: &[&str], env: &[(&str, &str)], what: &str) -> String {
 /// zero-credit token-1 claim, whose final `claimWithdrawalCredit(uint32)` pull CORRECTLY reverts
 /// (`NoWithdrawalCredit`) after the claim proof itself was accepted on-chain.
 ///
-/// B-2: currently unused — its last caller was the pinned delegate-count close NEGATIVE, which
-/// became a POSITIVE when the limb-94 strict equality was replaced by the one-sided range bind.
-/// KEPT (not deleted) because it is the only helper that can assert a CLI fail-closed outcome, and
-/// the negative directions of the range bind are asserted on-chain in the Foundry suites.
-#[allow(dead_code)]
+/// B-2: its original caller (the pinned delegate-count close NEGATIVE) became a POSITIVE when the
+/// limb-94 strict equality was replaced by the one-sided range bind. It is live again as the
+/// backing-deposit-guard refusal check after `withdraw`.
 fn cli_allow_fail(args: &[&str], env: &[(&str, &str)]) -> (bool, String) {
     let mut c = Command::new(cli_bin());
     c.args(args)
         .current_dir(repo_root())
-        .env("INTMAX_CHANNEL", CHANNEL.to_string());
+        .env("INTMAX_CHANNEL", CHANNEL.to_string())
+        // SECURITY: explicitly opt IN to the publicly-derivable deterministic co-signer keys.
+        // The CLI now FAILS CLOSED unless exactly one of INTMAX_COSIGNER_KEYFILE (production,
+        // external secret) or this flag is set, so a production invocation can never silently
+        // fall back to keys computable from the public source tree.
+        // See doc/tasks/cosigner-key-provenance.md.
+        .env("INTMAX_INSECURE_DETERMINISTIC_KEYS", "1");
     for (k, v) in env {
         c.env(k, v);
     }
@@ -561,6 +571,59 @@ fn two_token_cli_e2e() {
         manager_token, ERC20_AMOUNT as u128,
         "manager ERC-20 balance != receivedChannelFunds[t]"
     );
+
+    // ── BACKING-DEPOSIT GUARD, BOTH lanes (deposit-import-threat-model.md §10.4 Finding B) ──
+    //
+    // What this is intended to prove about security: `withdraw` makes TWO real deposits to the
+    // channel's backing recipient here (native + ERC-20), and BOTH are already spoken for by the
+    // withdrawal proof. Before the fix neither hash was recorded anywhere, and the import guard
+    // compared against a single scalar — so both were importable, each one crediting the channel a
+    // second time against one L1 escrow. This is the case that makes the recorded field a SET
+    // rather than a scalar: a scalar could only ever refuse one of them.
+    let backing: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(repo_root().join("channel_backing.json"))
+            .expect("read channel_backing.json"),
+    )
+    .expect("parse channel_backing.json");
+    assert_eq!(
+        backing["backing_deposit_status"]
+            .as_str()
+            .expect("channel_backing.json must record `backing_deposit_status`"),
+        "landed",
+        "after `withdraw` backing deposits ARE on-chain (this run's setup-backing deferred them)"
+    );
+    let backing_txs: Vec<String> = backing["backing_deposit_txs"]
+        .as_array()
+        .expect("channel_backing.json must record `backing_deposit_txs`")
+        .iter()
+        .map(|v| {
+            v.as_str()
+                .expect("backing_deposit_txs entries must be strings")
+                .to_string()
+        })
+        .collect();
+    assert_eq!(
+        backing_txs.len(),
+        2,
+        "two lanes ⇒ TWO backing-recipient deposits must have been recorded; got {backing_txs:?}"
+    );
+    for tx in &backing_txs {
+        let (ok, out) = cli_allow_fail(
+            &[
+                "cosign-l1-deposit-import",
+                "0",
+                tx,
+                &rpc,
+                "bad_backing_import.json",
+                "--allow-unbound-depositor",
+            ],
+            &[],
+        );
+        assert!(
+            !ok && out.contains("BACKING deposit"),
+            "the deposit `withdraw` itself made ({tx}) MUST be refused on import:\n{out}"
+        );
+    }
 
     // ── per-token conservation with NO FINALIZED close (TM-3) ──────────────────────────────
     // B-2 note: the close INTENT is now on-chain (accepted above), but `finalizeClose` is NOT
