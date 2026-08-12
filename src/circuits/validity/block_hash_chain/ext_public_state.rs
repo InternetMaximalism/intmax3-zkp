@@ -49,7 +49,8 @@ pub struct ExtendedPublicState {
     /// folded inside `update_channel_tree` for the block-producer slot of each block that applies
     /// a member signature. Starts at `Bytes32::default()` (the empty list) at the validity
     /// span's initial state. The validity circuit conditionally verifies the matching
-    /// `ListCircuit` proof and asserts `C == final.bp_sig_chain` (D3) — so every folded pair
+    /// `falcon_sig::list::ListCircuit` proof and asserts `C == final.bp_sig_chain` (D3) — so every
+    /// folded pair
     /// was a verified Poseidon single-sig.
     ///
     /// SECURITY: this is an ACCUMULATED value (not a prover flag): it is computed from the

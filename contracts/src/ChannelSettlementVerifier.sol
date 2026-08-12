@@ -43,6 +43,18 @@ contract ChannelSettlementVerifier is IChannelSettlementVerifier {
     /// `MAX_CHANNEL_MEMBERS`, src/constants.rs). Active members occupy slots `0..memberCount`;
     /// padding slots are zero.
     uint256 internal constant MAX_CHANNEL_MEMBERS = 16;
+    /// B-2 (doc/tasks/b2-delegate-close-threat-model.md §4d): the BALANCE-SLOT capacity — the total
+    /// number of active PARTICIPANTS (cosigning members + delegates) a channel's balance state can
+    /// hold. MUST equal Rust `MAX_CHANNEL_MEMBERS` (src/constants.rs:96 = 1024), which is the bound
+    /// the withdrawal-claim / post-close-claim circuits enforce IN-CIRCUIT on
+    /// `active = member_count + delegate_count` (withdrawal_claim_circuit.rs:353-371,
+    /// post_close_claim_circuit.rs:428-443). DISTINCT from `MAX_CHANNEL_MEMBERS` above, which is the
+    /// COSIGNER cap (Rust `MAX_COSIGNERS` = 16) — the close circuit's signature loop is sized by
+    /// that one.
+    uint256 internal constant MAX_CHANNEL_PARTICIPANTS = 1024;
+    /// B-2: close-PI limb index of `delegateCount` (see the `_expectedCloseLimbs` layout table).
+    /// Named because `verifyCloseIntent` reads this limb OUT of the strict loop, before it runs.
+    uint256 internal constant CLOSE_PI_DELEGATE_COUNT_INDEX = 94;
 
     /// Number of RAW Goldilocks public-input limbs the close circuit registers (mirrors Rust
     /// `CHANNEL_CLOSE_PUBLIC_INPUTS_LEN`, src/circuits/channel/close_pis.rs). The close
@@ -110,6 +122,24 @@ contract ChannelSettlementVerifier is IChannelSettlementVerifier {
     /// in-circuit-enforced 1..=MAX_CHANNEL_TOKENS range, making the Verifier self-contained
     /// defense-in-depth (not reliant on the Manager's structural check + the transitive TFD bind).
     error TokenCountOutOfRange();
+    /// B-2 (doc/tasks/b2-delegate-close-threat-model.md §4d): the close proof's `delegateCount` limb
+    /// (94) is outside the accepted one-sided range — either BELOW the channel's registered floor
+    /// (`fields.minDelegateCount`, i.e. the close claims FEWER delegates than were registered here)
+    /// or ABOVE the structural capacity (`memberCount + delegateCount > 1024`, a state the claim
+    /// circuits could not serve anyway). DELIBERATELY distinct from the generic
+    /// `"close limb mismatch"` revert so this one predicate is diagnosable on its own.
+    ///
+    /// SECURITY (scope of the floor — review finding 6): this is a CARDINALITY bound, NOT an
+    /// identity bound. L1 never binds any delegate to a slot INDEX (`delegateBindings` carries
+    /// `(pkG, recipient)` pairs, and nothing ties entry `i` to balance slot `activeMemberCount + i`
+    /// in the proof), so the floor cannot deliver "no delegate registered here may be EXCLUDED": a
+    /// close carrying a large enough count while a DIFFERENT delegate occupies the region passes it.
+    /// What it does deliver is that the active region cannot be SHRUNK below the registered
+    /// cardinality — enough to stop a blanket freeze-out of the registered delegate population, not
+    /// enough to protect any named delegate. The old strict equality had exactly the same property;
+    /// this is a wording correction, not a regression. Per-delegate protection comes from the
+    /// leaf-bound recipient / pk_digest / amount bindings inside the claim circuits.
+    error CloseDelegateCountOutOfRange();
 
     event CloseVkInitialized(uint256 degreeBits, bytes32 preprocessedRoot);
 
@@ -185,12 +215,65 @@ contract ChannelSettlementVerifier is IChannelSettlementVerifier {
     ///        2. `MleVerifier.verify` re-checks the proof against the close VK (circuitDigest absorb,
     ///           preprocessedRoot VK-binding, gatesDigest), blocking cross-circuit replay.
     ///      Reverts (`CloseVkNotSet`) until the VK is set: no verification-disabled window.
+    ///
+    ///      B-2 (doc/tasks/b2-delegate-close-threat-model.md, option (d)): limb 94 (`delegateCount`)
+    ///      is the ONE limb whose expected value is not an L1-rooted constant. It is a decommitment
+    ///      of a field of the cosigner-signed H1 (limbs 17..24): the close circuit `connect`s the
+    ///      recomputed H1 to that PI (close_circuit.rs:609-620), so a prover cannot move limb 94
+    ///      without a Poseidon collision or the N-of-N Falcon signatures. The Manager's
+    ///      `activeDelegateCount`, by contrast, is a deployer-asserted constructor argument
+    ///      cross-checked against nothing (Option B made L1 registration cosigners-only, so L1 has
+    ///      NO independent record of the delegate population — ChannelSettlementManager.sol:771).
+    ///      Binding a cosigner-authenticated value with strict equality to a weaker deployer
+    ///      assertion bought no soundness and produced only false negatives (every channel whose
+    ///      delegate count moved after manager deployment could neither close nor partially
+    ///      withdraw). It is therefore replaced by an explicit ONE-SIDED RANGE predicate, evaluated
+    ///      BEFORE the strict loop, and the validated value is then written into the expected vector
+    ///      so the loop still accounts for all 103 limbs (NONE are left free — that structural
+    ///      invariant is load-bearing for auditability).
     function verifyCloseIntent(
         CloseProofFields calldata fields,
         MleVerifier.MleProof calldata mleProof
     ) external view returns (bool) {
         if (!closeVkInitialized) revert CloseVkNotSet();
-        _bindCloseLimbsStrict(mleProof.publicInputs, _expectedCloseLimbs(fields));
+        uint256[] calldata pi = mleProof.publicInputs;
+        // SECURITY (B-2 A-4): the length check is HOISTED out of `_bindCloseLimbsStrict` because the
+        // delegate-count predicate below indexes `pi[94]` BEFORE the strict loop runs. Reading limb
+        // 94 of a shorter array would be an out-of-bounds calldata read. Same revert string as the
+        // in-loop check it replaces, so the failure mode is unchanged for short vectors.
+        require(pi.length == CLOSE_PI_LEN, "close pi len");
+        uint256 delegateCount = pi[CLOSE_PI_DELEGATE_COUNT_INDEX];
+        // SECURITY (B-2 A-5): canonicality (`< 2**32`) is checked BEFORE any arithmetic on the limb.
+        // Without it the `memberCount + delegateCount` sum below could be a 0.8 overflow panic rather
+        // than the explicit named error, and a non-canonical limb is never a legitimate close PI.
+        // `_bindCloseLimbsStrict` re-checks this limb (and all others) — the duplication is
+        // deliberate: the loop stays a self-contained, inspectable "every limb is canonical" pass.
+        require(delegateCount < LIMB_BOUND, "close limb range");
+        // SECURITY (B-2 §4d, floor): `delegate_count` only ever INCREASES — `join_delegate`
+        // (src/bin/channel_member.rs) increments and there is no leave path — so L1 can still
+        // insist that the active region `[0, member_count + delegate_count)` is at least as WIDE as
+        // the delegate population registered at manager-deployment time. A deflated count shrinks
+        // that region and makes the claims of whoever occupies its tail unprovable (threat model
+        // §3.3).
+        // SCOPE (review finding 6): this is a CARDINALITY bound, not an identity one — L1 binds no
+        // delegate to a slot INDEX, so it cannot single out a NAMED delegate as excluded. See the
+        // `CloseDelegateCountOutOfRange` doc comment.
+        if (delegateCount < fields.minDelegateCount) revert CloseDelegateCountOutOfRange();
+        // SECURITY (B-2 §4d, ceiling): mirror of the IN-CIRCUIT bound the claim circuits enforce on
+        // `active = member_count + delegate_count` (`active <= MAX_CHANNEL_MEMBERS = 1024`,
+        // withdrawal_claim_circuit.rs:353-371). `fields.memberCount` is itself strict-equality-bound
+        // to limb 93 by the loop below, so this is a bound on the PROOF's own participant count, not
+        // on a caller-chosen number. No arithmetic overflow is possible: memberCount is uint8 and
+        // delegateCount was just bounded by 2**32.
+        if (uint256(fields.memberCount) + delegateCount > MAX_CHANNEL_PARTICIPANTS) {
+            revert CloseDelegateCountOutOfRange();
+        }
+        // SECURITY (B-2 A-6): the VALIDATED delegate count is passed in explicitly, and limb 93
+        // (`memberCount`) keeps its STRICT equality against the channel's registered
+        // `activeMemberCount`. Limb 93 must NEVER get the same pass-through treatment: a state with a
+        // smaller `member_count` would close under fewer than N signatures (the close circuit gates
+        // its signature loop on `i < member_count`, close_circuit.rs:498-528).
+        _bindCloseLimbsStrict(pi, _expectedCloseLimbs(fields, delegateCount));
         return _verifyCloseMle(mleProof);
     }
 
@@ -314,12 +397,17 @@ contract ChannelSettlementVerifier is IChannelSettlementVerifier {
     ///         `verifyCloseIntent`'s `_bindCloseLimbsStrict` will require. It is a pure view of the
     ///         same `_expectedCloseLimbs` the binding uses (no security impact — it reveals nothing
     ///         a caller cannot already recompute from `fields`).
-    function expectedCloseLimbs(CloseProofFields calldata fields)
+    /// @param delegateCount B-2: the limb-94 value to lay out. `verifyCloseIntent` takes this from
+    ///        the PROOF (after the range predicate); this helper takes it from the caller so a test
+    ///        can build a vector for ANY delegate count, including ones the predicate rejects. It
+    ///        deliberately does NOT apply the range predicate — it is a pure layout view, not a
+    ///        verification entry point.
+    function expectedCloseLimbs(CloseProofFields calldata fields, uint32 delegateCount)
         external
         pure
         returns (uint256[] memory)
     {
-        return _expectedCloseLimbs(fields);
+        return _expectedCloseLimbs(fields, uint256(delegateCount));
     }
 
     /// @notice Byte-exact Solidity mirror of the Rust `token_funds_digest`
@@ -386,9 +474,19 @@ contract ChannelSettlementVerifier is IChannelSettlementVerifier {
     ///        [77..84] finalSettledTxAccumulatorRoot  (Stage 3, inserted here)
     ///        [85..92] memberSetCommitment            (shifted +8)
     ///        [93]     memberCount                    (shifted +8)
-    ///        [94]     delegateCount                  (shifted +8)
+    ///        [94]     delegateCount                  (shifted +8; B-2: the caller-VALIDATED value,
+    ///                 see `delegateCount` below)
     ///        [95..102] tokenFundsDigest              (multi-token §N-6, RECOMPUTED, appended)
-    function _expectedCloseLimbs(CloseProofFields calldata fields)
+    ///
+    /// @param delegateCount B-2 (threat model §4d step 3): the ALREADY-RANGE-CHECKED limb-94 value.
+    ///        SECURITY: this is the one expected limb that is NOT an L1-rooted constant — it comes
+    ///        from the proof itself. It is passed as an explicit argument, never read from `pi`
+    ///        inside this function, precisely so that the only place it can enter the expected
+    ///        vector is a call site that has already run the floor/ceiling predicate
+    ///        (`verifyCloseIntent`). Its authority is the N-of-N cosigner signature over the H1 that
+    ///        the close circuit forces limb 94 to decommit (threat model §5); L1 adds only
+    ///        monotonicity + capacity on top.
+    function _expectedCloseLimbs(CloseProofFields calldata fields, uint256 delegateCount)
         internal
         pure
         returns (uint256[] memory limbs)
@@ -415,8 +513,13 @@ contract ChannelSettlementVerifier is IChannelSettlementVerifier {
         // the Rust close-PI order / the H1 preimage), shifting memberSetCommitment / counts +8.
         c = _putBytes32(limbs, c, fields.finalSettledTxAccumulatorRoot);
         c = _putBytes32(limbs, c, fields.memberSetCommitment);
-        limbs[c++] = uint256(fields.memberAndDelegateCount >> 8) & 0xff; // memberCount
-        limbs[c++] = uint256(fields.memberAndDelegateCount) & 0xff;      // delegateCount
+        // SECURITY (B-2 A-6): limb 93 stays a STRICT equality against the channel's registered
+        // `activeMemberCount` — it is the L1-rooted half of the member/delegate boundary (also
+        // hashed into `memberSetCommitment`, limbs 85..92, which the constructor cross-checks
+        // against the rollup registry). Never give it the limb-94 pass-through treatment.
+        limbs[c++] = uint256(fields.memberCount);
+        // B-2: the validated, proof-derived delegate count (floor+ceiling checked by the caller).
+        limbs[c++] = delegateCount;
         // Multi-token (§N-6, TM-11): RECOMPUTED over the supplied settlement vectors, appended at
         // the very end. The strict bind then forces the proof's member-signed in-circuit TFD to
         // equal this recompute, proof-binding the (registry, count, amounts) the Manager stores.

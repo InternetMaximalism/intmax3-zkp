@@ -2,21 +2,19 @@
 //!
 //! This module is target-independent (native CLI + wasm wallet both use it). It implements one
 //! channel member's slice of the in-channel transfer protocol (detail2 §E-1/§E-4, abstract2
-//! §3.1/§3.2): Goldilocks (state co-signing) + BabyBear (channel-tx sender) + Regev key
+//! §3.1/§3.2): Falcon-512/Poseidon (state co-signing) + BabyBear (channel-tx sender) + Regev key
 //! management, genesis contribution, building/verifying an in-channel `ChannelTx` with its
 //! mandatory E-1 STARK proof, co-signing `ChannelState`, and decrypting one's own hidden balance.
 //!
 //! SECURITY: the channel library's `validate_all_member_signatures` is structural only (it does
 //! NOT run the real signature check — see tasks/wallet-threat-model.md A-1). This module therefore
-//! verifies every member's REAL Goldilocks `SingleSigCircuit` signature proof (P4-2) over the exact
+//! verifies every member's REAL Falcon-512/Poseidon cosignature (falcon-sig Phase 4) over the exact
 //! IMCH signing digest, the channel-tx SENDER's BabyBear hash-sig (P3) over the IMPA digest,
 //! re-derives `regev_pk_root` and the Poseidon `member_pubkeys_root` (binding the full
 //! `(pk_g, pk_b, regev_pk)` member triple — P4-1), rebuilds every E-1 statement from authenticated
 //! state (never from the tx carrier), and decrypts its own balance slot on every state it adopts.
-//! Secret material (`GoldilocksSecretKey`, `BabyBearSecretKey`, `RegevSk`, `AmountWitness`) never
+//! Secret material (`FalconKeys`, `BabyBearSecretKey`, `RegevSk`, `AmountWitness`) never
 //! leaves this module via any serialized type.
-
-use std::sync::OnceLock;
 
 use plonky2::plonk::{circuit_data::VerifierCircuitData, proof::ProofWithPublicInputs};
 use rand::SeedableRng as _;
@@ -58,10 +56,7 @@ use crate::{
         u32limb_trait::U32LimbTrait,
         u256::U256,
     },
-    poseidon_sig::{
-        GoldilocksSecretKey,
-        circuit::{C, D, F, SingleSigCircuit},
-    },
+    falcon_sig::{FalconKeys, encode_cosign_blob, verify_cosign_blob},
     regev::{
         AmountWitness, MAX_HOMO_ADDS_BEFORE_REFRESH, RealRegevProofVerifier, RegevCiphertext,
         RegevPk, RegevSecurityLevel, RegevSk, add_ciphertexts, channel_keygen, decrypt_amount,
@@ -131,22 +126,37 @@ fn check_slot(slot: usize, active_count: usize) -> WResult<()> {
 pub type WResult<T> = Result<T, WalletError>;
 
 // ---------------------------------------------------------------------------
+// Base-layer plonky2 proof config
+// ---------------------------------------------------------------------------
+// Previously re-exported from `poseidon_sig::circuit`, which was deleted with the retired
+// proof-as-signature scheme (falcon-sig Phase 4). The values are the repo-wide standard
+// (CLAUDE.md: `PoseidonGoldilocksConfig`, Goldilocks, degree-2 extension) and are unchanged.
+
+pub const D: usize = 2;
+pub type F = plonky2::field::goldilocks_field::GoldilocksField;
+pub type C = plonky2::plonk::config::PoseidonGoldilocksConfig;
+
+// ---------------------------------------------------------------------------
 // Secret-bearing key material (never serialized)
 // ---------------------------------------------------------------------------
 
 /// One member's full key material. Held only in process memory; never crosses a serialization
 /// boundary (no `Serialize`).
 pub struct MemberKeys {
-    /// Goldilocks Poseidon-preimage signing key (P4-2) — the member's channel-STATE (IMCH)
-    /// co-signing key, replacing the prior SPHINCS+ keypair. `sign_state` proves a
-    /// `SingleSigCircuit` over the state's IMCH `signing_digest` with this key; the proof IS the
-    /// member's signature. Its public key `pk_g = GoldilocksSecretKey::public_key()` is the
-    /// member's canonical on-chain-anchored identity (the value stored in
-    /// `ChannelRecord.member_pk_gs` and committed in the registered `MemberLeaf`). The
-    /// validity/close ZK list-proof aggregation over these same per-member signatures is the
-    /// existing P2b path; the wallet's local agreement is per-member individual proof
-    /// verification (`verify_all_signatures`).
-    pub signing_key: GoldilocksSecretKey,
+    /// The member's ONE signing key: Falcon-512 with a plonky2-Poseidon hash-to-point
+    /// (falcon-sig Phase 4, TM-C6). It signs BOTH the channel-STATE co-sign (IMCH digest, here)
+    /// and — for the block producer — the small-block root (IMSB digest, validity path); the two
+    /// contexts are isolated by their message digests' distinct domain constants, never by
+    /// separate keys. Its identity digest `pk_g = Poseidon(IMFK || encode(h))` is the member's
+    /// canonical on-chain-anchored identity (the value stored in `ChannelRecord.member_pk_gs` and
+    /// committed in the registered `MemberLeaf`), the same 32-byte width the retired Goldilocks
+    /// `pk_g` occupied.
+    ///
+    /// `Arc` because [`FalconKeys`] is deliberately NOT `Clone` (that non-`Clone`ness is what
+    /// stops a signer being silently duplicated) while the channel-registration path needs the
+    /// SAME key object, not a re-derived twin: NTRU keygen costs ~455 ms, and a second derivation
+    /// is exactly the pattern that produced the Phase-3 finding-7 identity divergence.
+    falcon_key: std::sync::Arc<FalconKeys>,
     /// P3 BabyBear hash-sig secret key — authorizes the channel-tx SENDER (IMPA) over the
     /// channel-tx `signing_digest`. Its `pk_b` is committed in the member's registered
     /// `MemberLeaf` (A11).
@@ -156,12 +166,22 @@ pub struct MemberKeys {
 }
 
 impl MemberKeys {
+    /// Derive all key material from `rng`.
+    ///
+    /// SECURITY (TM-C10 / O-11, restore-from-seed): the draws happen in a FIXED order and the
+    /// Falcon key is derived from the FIRST 32-byte draw via `FalconKeys::from_seed` (which
+    /// itself domain-separates with IMFG before seeding the NTRU-keygen ChaCha20). Seeding the
+    /// caller's RNG deterministically (`wallet_keygen_seeded`, the CLI's `keys_for`) therefore
+    /// reproduces the SAME `h` / `pk_g` on every platform: `rand010::StdRng` is ChaCha-based with
+    /// a specified byte stream, and every step below is integer/byte arithmetic. Keygen runs at
+    /// join/restore only (~455 ms native), never per signature.
     pub fn generate(rng: &mut impl Rng) -> Self {
-        // Goldilocks state-signing key: draw a 32-byte seed from the wallet RNG and derive the
-        // 4-limb (≈256-bit) secret key (D2 entropy target).
+        // Falcon state-signing key: draw a 32-byte seed from the wallet RNG (the SAME stream
+        // position the retired Goldilocks key used) and derive the keypair deterministically.
         let mut sig_seed = [0u8; 32];
         rng.fill_bytes(&mut sig_seed);
-        let signing_key = GoldilocksSecretKey::from_seed(sig_seed);
+        let falcon_key = std::sync::Arc::new(FalconKeys::from_seed(sig_seed));
+        zeroize::Zeroize::zeroize(&mut sig_seed);
         // Derive the BabyBear hash-sig key from a fresh 32-byte seed drawn from the wallet RNG.
         // `BabyBearSecretKey::random` is defined over `rand` 0.8 (the regev layer), so we bridge by
         // seeding a 0.8 `StdRng` from wallet entropy rather than sharing the `rand010` RNG
@@ -172,16 +192,37 @@ impl MemberKeys {
         let baby_key = BabyBearSecretKey::random(&mut baby_rng);
         let (regev_pk, regev_sk) = channel_keygen(rng);
         Self {
-            signing_key,
+            falcon_key,
             baby_key,
             regev_pk,
             regev_sk,
         }
     }
 
-    /// This member's identity = Goldilocks public key (the value stored in `ChannelRecord`).
+    /// This member's Falcon signing key (borrowed; the secret never leaves the process).
+    pub fn falcon_key(&self) -> &FalconKeys {
+        &self.falcon_key
+    }
+
+    /// A refcounted handle on this member's Falcon key, for the paths that must register /
+    /// prove with the EXACT key this wallet signs with (`ChannelMemberKeys::from_member_keys`).
+    ///
+    /// SECURITY (Phase-3 finding 7): handing out the KEY, not a seed or a derivation recipe, is
+    /// what makes "the registered identity is the signing identity" true by construction instead
+    /// of by two formulas happening to agree.
+    pub fn falcon_key_handle(&self) -> std::sync::Arc<FalconKeys> {
+        std::sync::Arc::clone(&self.falcon_key)
+    }
+
+    /// This member's identity `pk_g = Poseidon(IMFK || encode(h))` (the value stored in
+    /// `ChannelRecord.member_pk_gs` and committed in the registered `MemberLeaf`).
     pub fn pk_g(&self) -> Bytes32 {
-        self.signing_key.public_key()
+        self.falcon_key.pk_g()
+    }
+
+    /// This member's `pk_g` as the canonical `PoseidonHashOut` the Poseidon member tree stores.
+    pub fn pk_g_hash_out(&self) -> crate::utils::poseidon_hash_out::PoseidonHashOut {
+        self.pk_g().reduce_to_hash_out()
     }
 
     /// This member's BabyBear hash-sig public key `pk_b` (canonical `Bytes32` digest), committed in
@@ -192,58 +233,38 @@ impl MemberKeys {
 }
 
 // ---------------------------------------------------------------------------
-// Goldilocks Poseidon-preimage channel-STATE (IMCH) co-signing (P4-2)
+// Falcon-512/Poseidon channel-STATE (IMCH) co-signing (falcon-sig Phase 4)
 // ---------------------------------------------------------------------------
 
-/// Process-wide shared `SingleSigCircuit` (the Goldilocks Poseidon-preimage single-signature
-/// circuit). Building it is expensive (it constructs a full Plonky2 circuit), so we build it ONCE
-/// and reuse it for every `sign_state` (prove) and `verify_all_signatures` (verify). The circuit is
-/// deterministic, so the signer and every verifier reproduce byte-identical common/verifier data —
-/// a member's proof verifies against any party's instance.
+/// Produce a member's native Falcon signature over `digest` (the IMCH state `signing_digest`),
+/// wire-encoded as the COSIGN transport blob (`v1 || salt || s2 || h`, 1690 bytes).
 ///
-/// SECURITY: the circuit's statement is `pk = Poseidon([DOMAIN_PK_G] ‖ sk)` with `m` a registered
-/// PUBLIC INPUT (see `poseidon_sig::circuit`). The proof binds exactly `(pk, m)`; this module never
-/// trusts a `(pk, m)` claimed by a peer — it reconstructs the expected public inputs from the
-/// authenticated member set + the recomputed `signing_digest()` and checks the proof against them.
-fn single_sig_circuit() -> &'static SingleSigCircuit {
-    static CIRCUIT: OnceLock<SingleSigCircuit> = OnceLock::new();
-    CIRCUIT.get_or_init(SingleSigCircuit::new)
+/// This is ~5 ms of native arithmetic. It replaces the retired `SingleSigCircuit` proving step
+/// (~seconds, ~76 KB of wire), so the browser co-signs without building or proving any plonky2
+/// circuit at all.
+fn sign_digest(keys: &FalconKeys, digest: &Bytes32) -> Vec<u8> {
+    let sig = keys.sign(*digest);
+    encode_cosign_blob(&sig, &keys.pk_coefficients())
 }
 
-/// Produce a member's Goldilocks `SingleSigCircuit` proof over `digest` (the IMCH state
-/// `signing_digest`). The serialized proof bytes ARE the member's signature.
-fn sign_digest(sk: &GoldilocksSecretKey, digest: &Bytes32) -> WResult<Vec<u8>> {
-    let proof = single_sig_circuit()
-        .prove(sk, *digest)
-        .map_err(|e| WalletError(format!("single-sig proving failed: {e}")))?;
-    Ok(proof.to_bytes())
-}
-
-/// Verify a member's Goldilocks `SingleSigCircuit` proof over `digest`, bound to the claimed public
-/// key `pk_g`. The proof's public inputs are `[pk_g(8), m(8)]`; this reconstructs them from the
-/// AUTHENTICATED `pk_g` and the recomputed `digest` and checks the proof verifies against exactly
-/// those values — so a proof minted for a different `(pk_g, m)` is rejected.
+/// Verify a member's Falcon COSIGN blob over `digest`, bound to the claimed public key `pk_g`.
 ///
-/// SECURITY (P4-2): this replaces the prior SPHINCS+ `crypto_sign_verify`. Unforgeability reduces
-/// to Poseidon-Goldilocks preimage resistance on `sk` (threat model §2.1). The same per-member
-/// proofs are aggregated into the recursive list proof on the validity/close (on-chain) path; here
-/// the wallet's local agreement is individual proof verification.
+/// SECURITY (falcon-sig Phase 4, review F-2): verification goes through
+/// `falcon_sig::verify_cosign_blob`, which
+///   1. rejects any blob whose leading VERSION byte is not `FALCON_SIG_V1` — so a legacy ~76 KB
+///      `SingleSigCircuit` proof blob is rejected by POLICY, before any parsing (O-9 / TM-C8);
+///   2. requires the exact 1690-byte encoding (the fixed-length structural gate);
+///   3. recomputes `Poseidon(IMFK || encode(h)) == pk_g` INSIDE the call, so the `h` carried by the
+///      (untrusted) blob is bound to the AUTHENTICATED identity the caller passes in — the bare
+///      `falcon_sig::verify` entry point must never be used here; and
+///   4. checks `||(s1, s2)||^2 <= beta^2` for `c = H2P(salt, digest)`, with `digest` RECOMPUTED by
+///      the caller from authenticated state, never taken from the signature carrier (TM-C6).
+///
+/// Unforgeability now rests on Falcon-512 (NTRU/SIS, GPV) plus Poseidon-as-RO for the
+/// hash-to-point — no longer on FRI soundness of a proof system config.
 pub fn verify_state_sig(pk_g: Bytes32, digest: &Bytes32, sig: &[u8]) -> WResult<()> {
-    let circuit = single_sig_circuit();
-    let proof = ProofWithPublicInputs::<F, C, D>::from_bytes(sig.to_vec(), &circuit.data.common)
-        .map_err(|e| WalletError(format!("single-sig proof deserialization failed: {e}")))?;
-    // Bind the proof's public inputs to the EXPECTED [pk_g(8), m(8)] before trusting the proof.
-    let mut expected: Vec<u32> = Vec::with_capacity(2 * BYTES32_LEN);
-    expected.extend(pk_g.to_u32_vec());
-    expected.extend(digest.to_u32_vec());
-    let actual: Vec<u32> = proof.public_inputs.iter().map(|f| f.0 as u32).collect();
-    if actual.len() != expected.len() || actual != expected {
-        return bail("single-sig proof public inputs do not match the expected (pk_g, digest)");
-    }
-    circuit
-        .data
-        .verify(proof)
-        .map_err(|e| WalletError(format!("single-sig signature verification failed: {e}")))
+    verify_cosign_blob(pk_g, *digest, sig)
+        .map_err(|e| WalletError(format!("falcon cosignature rejected: {e}")))
 }
 
 // ---------------------------------------------------------------------------
@@ -322,18 +343,18 @@ pub fn verify_channel_tx_sender_hash_sig(
 // Serializable public channel view (crosses the browser<->CLI boundary)
 // ---------------------------------------------------------------------------
 
-/// Public information about one member (no secrets). `pk_g` is the member's Goldilocks
-/// Poseidon-preimage signing public key (`GoldilocksSecretKey::public_key()`, P4-2) — the value
-/// stored at the member's slot in `ChannelRecord.member_pk_gs` and committed in the registered
-/// `MemberLeaf`; it is the public key against which that member's `SingleSigCircuit`
-/// state-signature proofs verify.
+/// Public information about one member (no secrets). `pk_g` is the member's Falcon identity
+/// digest `Poseidon(IMFK || encode(h))` (`MemberKeys::pk_g()`) — the value stored at the member's
+/// slot in `ChannelRecord.member_pk_gs` and committed in the registered `MemberLeaf`; it is the
+/// identity against which that member's Falcon state cosignatures verify (the signature blob
+/// carries `h`, which `verify_state_sig` binds back to this digest).
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct MemberInfo {
     /// BALANCE-SLOT index (`0..member_count+delegate_count`, up to `MAX_CHANNEL_MEMBERS = 1024`):
     /// u16 — u8 capped joins at 256 slots (2026-07-18 storm).
     pub slot: u16,
-    /// The member's Goldilocks signing public key `pk_g` (canonical `Bytes32`).
+    /// The member's Falcon signing identity `pk_g` (canonical `Bytes32`).
     pub pk_g: Bytes32,
     /// P3: the member's BabyBear hash-sig public key `pk_b` (canonical `Bytes32` digest). Used for
     /// the A11 membership check on the channel-tx sender; bound into the registered `MemberLeaf`.
@@ -792,8 +813,9 @@ pub fn assemble_genesis_state_backed(
 // Signing & verification of channel states
 // ---------------------------------------------------------------------------
 
-/// Produce this member's `MemberSignature` over `state.signing_digest()` (P4-2: a Goldilocks
-/// `SingleSigCircuit` proof over the IMCH digest — the proof bytes are the signature).
+/// Produce this member's `MemberSignature` over `state.signing_digest()` (falcon-sig Phase 4: a
+/// native Falcon-512/Poseidon signature over the IMCH digest, wire-encoded with the signer's
+/// public polynomial `h` so any holder of the registered `pk_g` can verify it).
 ///
 /// WIDTH: `slot` is a COSIGNER slot (`< member_count <= MAX_COSIGNERS = 16`), so u8 is
 /// sufficient — delegates never co-sign state (audited 2026-07-18, u16 slot widening).
@@ -802,7 +824,7 @@ pub fn sign_state(keys: &MemberKeys, slot: u8, state: &ChannelState) -> WResult<
     Ok(MemberSignature {
         member_slot: slot,
         pk_g: keys.pk_g(),
-        signature: sign_digest(&keys.signing_key, &digest)?,
+        signature: sign_digest(keys.falcon_key(), &digest),
     })
 }
 
@@ -838,16 +860,16 @@ pub fn add_signature(state: &mut ChannelState, sig: MemberSignature) {
     state.member_signatures.sort_by_key(|s| s.member_slot);
 }
 
-/// Verify that EVERY active member's real Goldilocks `SingleSigCircuit` signature proof is present
-/// and valid over `state.signing_digest()`, and that each signer's `pk_g` is the registered member
-/// at the slot (P4-2).
+/// Verify that EVERY active member's real Falcon cosignature is present and valid over
+/// `state.signing_digest()`, and that each signer's `pk_g` is the registered member at the slot.
 ///
-/// SECURITY: each member's proof is verified INDIVIDUALLY (the wallet's local N-of-N agreement).
-/// The on-chain aggregation of these same per-member signatures into the recursive list proof (in
-/// slot order, validity/close) is the existing P2b path and is NOT re-implemented here. Each
-/// signer's `pk_g` is checked `∈` the registered member set (it must equal
-/// `record.member_pk_gs[slot]`, and the proof is verified against exactly that `pk_g`), so a proof
-/// by a non-member or for a different message is rejected.
+/// SECURITY: each member's signature is verified INDIVIDUALLY (the wallet's local N-of-N
+/// agreement). The on-chain aggregation of these same per-member signatures (in slot order, via
+/// `FalconAggCircuit` for close/cancel-close) is a separate path and is NOT re-implemented here.
+/// Each signer's `pk_g` is checked `∈` the registered member set (it must equal
+/// `record.member_pk_gs[slot]`, and the signature is verified against exactly that `pk_g` — the
+/// transported public polynomial `h` is bound to it inside `verify_state_sig`), so a signature by
+/// a non-member or for a different message is rejected.
 pub fn verify_all_signatures(
     record: &ChannelRecord,
     _members: &[MemberInfo],
@@ -868,8 +890,9 @@ pub fn verify_all_signatures(
         if sig.pk_g != expected_pk_g {
             return bail(format!("slot {slot} signature pubkey hash mismatch"));
         }
-        // Verify the member's SingleSig proof, bound to the registered pk_g and the recomputed IMCH
-        // digest. (`verify_state_sig` re-checks the proof's [pk_g, m] public inputs internally.)
+        // Verify the member's Falcon cosignature, bound to the registered pk_g and the recomputed
+        // IMCH digest. (`verify_state_sig` re-checks `Poseidon(IMFK||encode(h)) == pk_g`
+        // internally, so the blob's own public key cannot be substituted.)
         verify_state_sig(expected_pk_g, &digest, &sig.signature)?;
     }
     Ok(())
@@ -1615,7 +1638,7 @@ fn fill_placeholder_sigs(record: &ChannelRecord, state: &mut ChannelState) {
         .map(|slot| MemberSignature {
             member_slot: slot as u8,
             pk_g: record.member_pk_gs[slot],
-            signature: vec![1],
+            signature: crate::common::channel::structural_cosign_placeholder(1),
         })
         .collect();
 }
@@ -3307,11 +3330,14 @@ fn source_record_placeholder(
 
 // ─────────────────────────────────────────────────────────────────────────────────────────────
 // A-3 P2: real (non-test) channel-close proving. Wires the wallet's signed `ChannelState` + the N
-// active members' Goldilocks signing keys + the channel's base-layer balance proof into a REAL
-// `ChannelCloseCircuit` proof. SOUNDNESS IS ENFORCED IN-CIRCUIT (A-3 P2 threat model): H1/IMCH
+// active members' DETACHED Falcon cosignatures (already carried by that state) + the channel's
+// base-layer balance proof into a REAL `ChannelCloseCircuit` proof. NO SECRET KEY ENTERS THIS
+// MODULE'S CLOSE LIFECYCLE — see `doc/tasks/close-detached-signing-design.md` (Option A), and
+// `falcon_member_auth_from_signatures` for the fail-closed coordinator gate.
+// SOUNDNESS IS ENFORCED IN-CIRCUIT (A-3 P2 threat model): H1/IMCH
 // recompute + bind, balance-proof channel_id/settled_tx_chain binding, the recursively verified
-// level-4 aggregated sign-zkp proof over the members' REAL single-sigs (message/count/pk-list
-// bound in-circuit), the member_set_commitment keccak, and the
+// `FalconAggCircuit` proof over the members' REAL Falcon signatures (message/count/pk-list
+// bound in-circuit; falcon-sig Phase 2), the member_set_commitment keccak, and the
 // active-bit decomposition. `ChannelCloseCircuit::prove` recomputes and overrides
 // `member_set_commitment`, so a tampered commitment is rejected. The Rust-side preconditions below
 // fail CLOSED before any (expensive) proving so a malformed input never produces a proof.
@@ -3322,16 +3348,141 @@ use crate::{
         close_circuit::{ChannelCloseCircuit, ChannelCloseFullWitness, MemberCloseAuth},
         close_pis::ChannelCloseWitness,
     },
-    common::channel::{CloseIntent, CloseWithdrawal},
-    poseidon_sig::aggregate::{AGG_LEVELS, SigAggregator},
+    common::channel::{CloseIntent, CloseWithdrawal, validate_all_member_signatures},
+    falcon_sig::{
+        FALCON_N, FalconSignature,
+        agg::{FalconAggCircuit, FalconAggWitness},
+        decode_cosign_blob, verify_with_pk_g,
+    },
 };
 
-/// Process-built close-proving context: a `SigAggregator` (the binary-tree aggregated sign-zkp
-/// over the shared `SingleSigCircuit`) and the `ChannelCloseCircuit` bound to the channel's
-/// balance verifier data. Each circuit is expensive to build, so construct ONE `CloseProver` per
-/// process and reuse it.
+/// Build the `FalconAggCircuit` witness + per-member auth from the members' **DETACHED**
+/// cosignatures over `digest` (slot order; shared by the close and cancel-close provers).
+///
+/// This is the coordinator gate of `doc/tasks/close-detached-signing-design.md` §3.5. The prover
+/// process never sees a secret key: `MemberSignature.signature` is the 1690-byte cosign transport
+/// blob (`v1 || salt || s2 || h`) that `sign_state` already produces and that every channel state
+/// already carries in `ChannelState::member_signatures`.
+///
+/// SECURITY (fail-closed, in this exact order — identity binding BEFORE cryptography, cryptography
+/// BEFORE proving):
+///  1. `validate_all_member_signatures` (which calls `record.validate()` first) proves the set is
+///     structurally exactly the registered cosigner set: `record.member_count` entries,
+///     slot-ordered `0..member_count` with no gaps or duplicates (X-5: this is what makes the
+///     positional indexing below sound), each entry's `pk_g` equal to `record.member_pk_gs[slot]`,
+///     each blob exactly `FALCON_COSIGN_BLOB_BYTES` (TM-C8/O-9: a retired ~76 KB `SingleSigCircuit`
+///     blob cannot pass).
+///  2. The identity fed to verification and to the aggregation witness is read off the
+///     AUTHENTICATED `record`, never off the wire entry (T-9) — a `MemberSignature` arriving over
+///     HTTP self-declares both `member_slot` and `pk_g`.
+///  3. `decode_cosign_blob` rejects a wrong VERSION byte first, then a wrong length, then
+///     non-canonical `h` coefficients.
+///  4. `verify_with_pk_g` — never the bare `verify` (review F-2) — re-checks `Poseidon(IMFK ||
+///     encode(h)) == pk_g` INSIDE the call, so the untrusted transported `h` cannot substitute an
+///     identity (T-8), and checks the norm bound against `digest`, which the caller RECOMPUTED from
+///     authenticated state (TM-C6). ~64 us/signature, i.e. a bad input is a clear error at
+///     millisecond cost instead of an opaque `prove()` failure after minutes.
+///  5. pairwise `pk_g` distinctness (also implied by `record.validate()`; kept explicit for a clear
+///     error, and A5 in `close_circuit.rs` is the real gate).
+///
+/// The in-circuit gates remain the actual soundness boundary: the leaf gadget is the UNCONDITIONAL
+/// verifier (there is no `verify` selector wire), so a leaf proof cannot exist for an invalid
+/// signature at all.
+///
+/// SECURITY (T-5, disclosed not closed — design §8.3): the members signed the channel STATE, not
+/// this close. `close_nonce` / `burn_tx_hash` / `snapshot_medium_block_number` are NOT covered by
+/// any signature verified here; the coordinator chooses them unilaterally, bounded only by the L1
+/// era fence and the challenge ordering. "N-of-N signed the close" means "N-of-N signed the state".
+fn falcon_member_auth_from_signatures(
+    record: &ChannelRecord,
+    member_sigs: &[MemberSignature],
+    digest: Bytes32,
+) -> WResult<(Vec<Bytes32>, FalconAggWitness)> {
+    // (1) Structural + identity gate. `validate_all_member_signatures` runs `record.validate()`
+    // itself, so an invalid record can never reach the crypto below.
+    validate_all_member_signatures(record, member_sigs).map_err(|e| {
+        WalletError(format!(
+            "detached member signature set rejected (structural/identity): {e:?}"
+        ))
+    })?;
+
+    let count = record.member_count as usize;
+    let mut pk_gs: Vec<Bytes32> = Vec::with_capacity(count);
+    let mut hs: Vec<[u16; FALCON_N]> = Vec::with_capacity(count);
+    let mut sigs: Vec<FalconSignature> = Vec::with_capacity(count);
+    for slot in 0..count {
+        // (2) Identity from the RECORD. Step (1) has already proved `member_sigs[slot].member_slot
+        // == slot` and `member_sigs[slot].pk_g == record.member_pk_gs[slot]`, so positional
+        // indexing here cannot bind slot i's identity to slot j's signature (X-5).
+        let pk_g = record.member_pk_gs[slot];
+        let entry = &member_sigs[slot];
+        // (3) Version byte, then fixed length, then canonical `h`.
+        let (sig, h) = decode_cosign_blob(&entry.signature).map_err(|e| {
+            WalletError(format!(
+                "slot {slot}: detached cosignature blob failed to decode: {e:?}"
+            ))
+        })?;
+        // (4) The cryptographic gate, with the identity binding checked inside.
+        if !verify_with_pk_g(pk_g, &h, digest, &sig) {
+            return bail(format!(
+                "slot {slot}: detached Falcon cosignature failed native verification against the \
+                 registered pk_g {pk_g} over the recomputed digest {digest} (wrong state, wrong \
+                 era, wrong channel, substituted public polynomial, or corrupt key material — a \
+                 LOCALLY produced signature reaching this branch means key material inconsistency, \
+                 because `FalconKeys::sign` self-verifies)"
+            ));
+        }
+        pk_gs.push(pk_g);
+        hs.push(h);
+        sigs.push(sig);
+    }
+    // (5) Distinctness over the active pk_g set.
+    for i in 0..pk_gs.len() {
+        for j in (i + 1)..pk_gs.len() {
+            if pk_gs[i] == pk_gs[j] {
+                return bail(format!(
+                    "duplicate registered member pk_g at active slots {i} and {j}"
+                ));
+            }
+        }
+    }
+    // (6) Slot order IS the pk-list order the close / cancel-close circuits consume.
+    let signers: Vec<(&[u16; FALCON_N], &FalconSignature)> = hs.iter().zip(sigs.iter()).collect();
+    Ok((pk_gs, FalconAggWitness::for_signatures(digest, &signers)))
+}
+
+/// The T-10 fail-closed hygiene check shared by both detached provers: the AUTHENTICATED record's
+/// cosigner count and the state's own claimed cosigner count must agree.
+///
+/// SECURITY (T-10 / X-6): the provers size the member set from
+/// `state.balance_state.member_count` while every signature-validation helper sizes it from
+/// `record.member_count`. Nothing else in the tree asserts the two are equal — genesis copies one
+/// into the other and nothing re-checks it afterwards. That was masked while one process produced
+/// both; under detached signing the record and the state arrive from different places. If they
+/// disagree and the code took the larger it would index out of bounds; if it took the smaller it
+/// would silently prove a different member set than it validated. Soundness is still held
+/// in-circuit by H1 (which commits `member_count`); this is fail-closed hygiene.
+fn assert_record_state_member_count_agree(
+    what: &str,
+    record: &ChannelRecord,
+    state: &ChannelState,
+) -> WResult<()> {
+    if record.member_count as u64 != state.balance_state.member_count as u64 {
+        return bail(format!(
+            "{what}: record.member_count {} != state.balance_state.member_count {} (T-10 \
+             fail-closed: the authenticated member set and the state disagree)",
+            record.member_count, state.balance_state.member_count
+        ));
+    }
+    Ok(())
+}
+
+/// Process-built close-proving context: the `FalconAggCircuit` (direct in-circuit verification of
+/// the N member Falcon signatures, falcon-sig Phase 2) and the `ChannelCloseCircuit` bound to the
+/// channel's balance verifier data. Each circuit is expensive to build, so construct ONE
+/// `CloseProver` per process and reuse it.
 pub struct CloseProver {
-    aggregator: SigAggregator,
+    agg: FalconAggCircuit<F, C, D>,
     close_circuit: ChannelCloseCircuit<F, C, D>,
 }
 
@@ -3339,30 +3490,53 @@ impl CloseProver {
     /// Build the close-proving circuits. `balance_vd` is the channel's base-layer balance verifier
     /// data (the same value cached in `balance_vd.bin` / produced by the `BalanceProcessor`).
     pub fn new(balance_vd: &VerifierCircuitData<F, C, D>) -> Self {
-        let aggregator = SigAggregator::new(&single_sig_circuit().verifier_data());
-        let close_circuit = ChannelCloseCircuit::<F, C, D>::new(
-            balance_vd,
-            &aggregator.levels[AGG_LEVELS - 1].verifier_data(),
-        );
-        Self {
-            aggregator,
-            close_circuit,
-        }
+        let agg = FalconAggCircuit::<F, C, D>::new();
+        let close_circuit = ChannelCloseCircuit::<F, C, D>::new(balance_vd, &agg.verifier_data());
+        Self { agg, close_circuit }
     }
 
-    /// Build the full close witness from the wallet's signed final `ChannelState`, the N ACTIVE
-    /// members' signing keys (slot order), and the channel's base-layer balance proof. The members
-    /// each sign the IMCH digest (`state.digest`) with a real `SingleSigCircuit` proof, aggregated
-    /// into the level-4 binary-tree sign-zkp proof whose message/count/pk-list PIs the close
-    /// circuit binds in-circuit.
+    /// Build the full close witness from the wallet's signed final `ChannelState`, the channel's
+    /// AUTHENTICATED `ChannelRecord`, the N ACTIVE members' **DETACHED** cosignatures over the IMCH
+    /// digest (slot order), and the channel's base-layer balance proof. The signatures are verified
+    /// in-circuit by ONE `FalconAggCircuit` proof whose message/count/pk-list PIs the close circuit
+    /// binds.
+    ///
+    /// **THIS PROVER HOLDS NO KEY.** That is the point
+    /// (`doc/tasks/close-detached-signing-design.md`, Option A). The signatures it needs
+    /// already exist, already detached, in the state it is handed: `sign_state` signs
+    /// `state.signing_digest()`, this prover binds `state.digest`, and `verify_all_signatures`
+    /// — which every route to becoming the channel head runs — asserts the two are equal. So
+    /// callers pass `&state.member_signatures` and no new signing round, no new endpoint and no
+    /// member liveness are required. Unilateral close is precisely the operation you need when
+    /// the other members are NOT online (T-4), so this must stay true.
+    ///
+    /// SECURITY (why re-using a collected cosignature is not weaker than minting a fresh one): the
+    /// close circuit is signature-BLIND. The aggregation leaf registers only `[message, 1, pk_g]`
+    /// (`falcon_sig/agg.rs`); `salt` / `s2` / `h` are witnesses and never public inputs
+    /// (`falcon_sig/gadget.rs`). Two valid signatures by the same key over the same digest are
+    /// therefore indistinguishable to every downstream gate, and the close proof's public inputs
+    /// are identical either way (asserted by
+    /// `close_detached_and_resigned_paths_yield_identical_close_public_inputs`).
+    ///
+    /// SECURITY (X-1, honest statement of what the signatures mean): a cosignature over state S
+    /// authorises EVERY close at S within the era, forever. That was already true of the previous
+    /// key-taking implementation — a process holding the keys could mint that signature at will —
+    /// so this change adds no capability. The era fence is `close_freeze_nonce`, which IS inside
+    /// the signed IMCH preimage; the version fence is the manager's strict challenge ordering.
+    ///
+    /// SEAM CLOSED (falcon-sig Phase 4): `MemberKeys::pk_g()` IS the Falcon identity, and the
+    /// join/registration path (`ChannelMemberKeys::from_member_keys`) registers exactly the key
+    /// objects the members co-sign and close with — so the registered member set and the close
+    /// proof's `member_set_commitment` agree by construction, not by two derivations matching.
     ///
     /// SECURITY: fail-closed preconditions reject malformed inputs early; the in-circuit gates are
     /// the actual soundness boundary. `CloseIntent::new` additionally fail-closed-checks
     /// channel_id / digest / H1 / intmax_state_root / burn_amount / unallocated==0 bindings.
-    pub fn build_full_witness(
+    pub fn build_full_witness_from_signatures(
         &self,
+        record: &ChannelRecord,
         state: &ChannelState,
-        member_keys: &[MemberKeys],
+        member_sigs: &[MemberSignature],
         balance_proof: ProofWithPublicInputs<F, C, D>,
         close_nonce: u64,
         burn_tx_hash: Bytes32,
@@ -3374,26 +3548,17 @@ impl CloseProver {
                 "close: member_count {member_count} out of [2, {MAX_CHANNEL_MEMBERS}]"
             ));
         }
-        if member_keys.len() != member_count {
-            return bail(format!(
-                "close: need exactly member_count={member_count} active-member signing keys, got {}",
-                member_keys.len()
-            ));
-        }
-        // Distinct member pk_g over the active set (the circuit also enforces A5 distinctness; we
-        // fail early for a clearer error and to avoid wasted proving).
-        let pk_gs: Vec<Bytes32> = member_keys
-            .iter()
-            .map(|k| k.signing_key.public_key())
-            .collect();
-        for i in 0..pk_gs.len() {
-            for j in (i + 1)..pk_gs.len() {
-                if pk_gs[i] == pk_gs[j] {
-                    return bail(format!(
-                        "close: duplicate member pk_g at active slots {i} and {j}"
-                    ));
-                }
-            }
+        // T-10 / X-6: the authenticated record and the state must agree on the cosigner count
+        // BEFORE anything is sized from either of them.
+        assert_record_state_member_count_agree("close", record, state)?;
+        // The state's cached digest must not lie: it is the message every cosignature is verified
+        // against below, and `CloseIntent::new` binds it into the intent. Same check
+        // `verify_all_signatures` makes before a state may become the channel head.
+        if state.digest != state.signing_digest() {
+            return bail(
+                "close: state.digest does not match the recomputed signing_digest() (fail-closed: \
+                 the cached digest is the message the member cosignatures are verified against)",
+            );
         }
 
         // Derive the close-tx and close-intent. `CloseIntent::new` performs the binding checks.
@@ -3415,21 +3580,18 @@ impl CloseProver {
             close_intent,
         };
 
-        // Aggregate the N member IMCH single-sigs into ONE level-4 binary-tree sign-zkp proof, in
-        // slot order — the leaf order IS the pk-list slot order the close circuit consumes.
+        // Verify + decode the N DETACHED member cosignatures over the IMCH digest (slot order —
+        // the slot order IS the pk-list slot order the close circuit consumes) and prove the ONE
+        // aggregation circuit. `falcon_member_auth_from_signatures` fails closed, naming the slot,
+        // before any proving happens.
         let digest = state.digest;
-        let mut member_auth: Vec<MemberCloseAuth> = Vec::with_capacity(member_count);
-        let mut leaves: Vec<ProofWithPublicInputs<F, C, D>> = Vec::with_capacity(member_count);
-        for (i, keys) in member_keys.iter().enumerate() {
-            let sig = single_sig_circuit()
-                .prove(&keys.signing_key, digest)
-                .map_err(|e| WalletError(format!("member {i} single-sig proving failed: {e}")))?;
-            leaves.push(sig);
-            member_auth.push(MemberCloseAuth { pk_g: pk_gs[i] });
-        }
+        let (pk_gs, agg_witness) = falcon_member_auth_from_signatures(record, member_sigs, digest)
+            .map_err(|e| WalletError(format!("close: {}", e.0)))?;
+        let member_auth: Vec<MemberCloseAuth> =
+            pk_gs.iter().map(|&pk_g| MemberCloseAuth { pk_g }).collect();
         let agg_proof = self
-            .aggregator
-            .aggregate_to_level(&leaves, AGG_LEVELS)
+            .agg
+            .prove(&agg_witness)
             .map_err(|e| WalletError(format!("close signature aggregation failed: {e:?}")))?;
 
         Ok(ChannelCloseFullWitness {
@@ -3503,7 +3665,8 @@ fn wrap_and_export_mle(
         .map_err(|e| WalletError(format!("MLE prove failed: {e:?}")))?;
     verify_mle_proof(&wrapper.data, &vk, &mle.proof)
         .map_err(|e| WalletError(format!("MLE self-verify failed: {e:?}")))?;
-    Ok(export_mle_json(&mle.proof, &wrapper.data.common))
+    export_mle_json(&mle.proof, &wrapper.data.common)
+        .map_err(|e| WalletError(format!("MLE fixture export failed: {e:?}")))
 }
 
 // ─────────────────────────────────────────────────────────────────────────────────────────────
@@ -3687,9 +3850,10 @@ use crate::circuits::channel::{
     cancel_close_pis::CancelCloseWitness,
 };
 
-/// Process-built cancel-close proving context (a `SigAggregator` + the `CancelCloseCircuit`).
+/// Process-built cancel-close proving context (the `FalconAggCircuit` + the
+/// `CancelCloseCircuit`).
 pub struct CancelCloseProver {
-    aggregator: SigAggregator,
+    agg: FalconAggCircuit<F, C, D>,
     circuit: CancelCloseCircuit<F, C, D>,
 }
 
@@ -3701,24 +3865,30 @@ impl Default for CancelCloseProver {
 
 impl CancelCloseProver {
     pub fn new() -> Self {
-        let aggregator = SigAggregator::new(&single_sig_circuit().verifier_data());
-        let circuit =
-            CancelCloseCircuit::<F, C, D>::new(&aggregator.levels[AGG_LEVELS - 1].verifier_data());
-        Self {
-            aggregator,
-            circuit,
-        }
+        let agg = FalconAggCircuit::<F, C, D>::new();
+        let circuit = CancelCloseCircuit::<F, C, D>::new(&agg.verifier_data());
+        Self { agg, circuit }
     }
 
     /// Build the cancel-close full witness: the REVIVED (later) signed state + the pending close
-    /// intent to cancel, plus the N active members' single-sigs of the revived IMCH digest
-    /// aggregated into the level-4 binary-tree sign-zkp proof. The circuit enforces
-    /// revived_version > close.final_state_version and the era fence; these Rust preconditions
-    /// fail closed early.
-    pub fn build_full_witness(
+    /// intent to cancel, plus the N active members' **DETACHED** cosignatures of the revived IMCH
+    /// digest carried by ONE `FalconAggCircuit` proof. The circuit enforces revived_version >
+    /// close.final_state_version and the era fence; these Rust preconditions fail closed early.
+    /// (Same registration note as `CloseProver::build_full_witness_from_signatures`.)
+    ///
+    /// **THIS PROVER HOLDS NO KEY** — see `CloseProver::build_full_witness_from_signatures` for the
+    /// full argument. Callers pass `&revived_state.member_signatures`: the revived head is by
+    /// definition a state the members co-signed, and cancel binds exactly that state's digest.
+    ///
+    /// SECURITY (X-3, a capability this refactor GAINS): cancelling a hostile close used to require
+    /// all N secret keys, so in practice only the coordinator could cancel — the party you most
+    /// want to cancel AGAINST. An honest member holding a later co-signed head can now build the
+    /// cancel proof with no key material at all.
+    pub fn build_full_witness_from_signatures(
         &self,
+        record: &ChannelRecord,
         revived_state: &ChannelState,
-        member_keys: &[MemberKeys],
+        member_sigs: &[MemberSignature],
         close_intent: &CloseIntent,
     ) -> WResult<CancelCloseFullWitness<F, C, D>> {
         let member_count = revived_state.balance_state.member_count as usize;
@@ -3727,24 +3897,15 @@ impl CancelCloseProver {
                 "cancel-close: member_count {member_count} out of [2, {MAX_CHANNEL_MEMBERS}]"
             ));
         }
-        if member_keys.len() != member_count {
-            return bail(format!(
-                "cancel-close: need exactly member_count={member_count} signing keys, got {}",
-                member_keys.len()
-            ));
-        }
-        let pk_gs: Vec<Bytes32> = member_keys
-            .iter()
-            .map(|k| k.signing_key.public_key())
-            .collect();
-        for i in 0..pk_gs.len() {
-            for j in (i + 1)..pk_gs.len() {
-                if pk_gs[i] == pk_gs[j] {
-                    return bail(format!(
-                        "cancel-close: duplicate member pk_g at slots {i},{j}"
-                    ));
-                }
-            }
+        // T-10 / X-6, then the state's own cached digest (the message every cosignature below is
+        // verified against, and the digest the cancel circuit recomputes and binds).
+        assert_record_state_member_count_agree("cancel-close", record, revived_state)?;
+        if revived_state.digest != revived_state.signing_digest() {
+            return bail(
+                "cancel-close: revived_state.digest does not match the recomputed \
+                 signing_digest() (fail-closed: the cached digest is the message the member \
+                 cosignatures are verified against)",
+            );
         }
         if revived_state.balance_state.state_version <= close_intent.final_state_version {
             return bail(format!(
@@ -3758,20 +3919,18 @@ impl CancelCloseProver {
             close_intent: close_intent.clone(),
         };
 
-        // Aggregate the N member single-sigs of the REVIVED IMCH digest (slot order = leaf order).
+        // Verify + decode the N DETACHED cosignatures over the REVIVED IMCH digest (slot order)
+        // and prove the ONE aggregation circuit. Fails closed, naming the slot, before any proving.
         let digest = revived_state.digest;
-        let mut member_auth: Vec<MemberCancelAuth> = Vec::with_capacity(member_count);
-        let mut leaves: Vec<ProofWithPublicInputs<F, C, D>> = Vec::with_capacity(member_count);
-        for (i, keys) in member_keys.iter().enumerate() {
-            let sig = single_sig_circuit()
-                .prove(&keys.signing_key, digest)
-                .map_err(|e| WalletError(format!("cancel member {i} single-sig failed: {e}")))?;
-            leaves.push(sig);
-            member_auth.push(MemberCancelAuth { pk_g: pk_gs[i] });
-        }
+        let (pk_gs, agg_witness) = falcon_member_auth_from_signatures(record, member_sigs, digest)
+            .map_err(|e| WalletError(format!("cancel-close: {}", e.0)))?;
+        let member_auth: Vec<MemberCancelAuth> = pk_gs
+            .iter()
+            .map(|&pk_g| MemberCancelAuth { pk_g })
+            .collect();
         let agg_proof = self
-            .aggregator
-            .aggregate_to_level(&leaves, AGG_LEVELS)
+            .agg
+            .prove(&agg_witness)
             .map_err(|e| WalletError(format!("cancel signature aggregation failed: {e:?}")))?;
 
         Ok(CancelCloseFullWitness {
@@ -4213,7 +4372,7 @@ pub fn build_channel_withdrawal(
             withdrawal::Withdrawal,
         },
         ethereum_types::{address::Address, u256::U256},
-        poseidon_sig::{circuit::SingleSigCircuit, list::ListCircuit},
+        falcon_sig::list::ListCircuit,
         utils::{
             conversion::ToU64,
             mle_prover::{export_mle_json, prove_with_mle, setup_mle_vk, verify_mle_proof},
@@ -4275,6 +4434,15 @@ pub fn build_channel_withdrawal(
                     "build_channel_withdrawal: expected at least {TEST_ACTIVE_MEMBERS} active keys, got {}",
                     mk.len()
                 );
+                // SECURITY (Phase-3 review finding 7, CLOSED here in Phase 4): the FALCON
+                // identities registered here MUST be the ones the channel's other paths sign
+                // with — the close proof's member-set commitment and the CLI's
+                // `export-reg-record` both bind them. They used to be RE-DERIVED here from a
+                // seed formula of this function's own, which silently diverged from the CLI's,
+                // so `export-reg-record` registered one key set on L1 while this path proved
+                // against another (fail-closed, but the channel became unclosable). There is now
+                // exactly ONE source: the caller's `MemberKeys`, whose `pk_g()` IS the Falcon
+                // identity. No second derivation exists to diverge from.
                 generator.add_channel_registration_keys(
                     user_id.channel_id(),
                     ChannelMemberKeys::from_member_keys(&mk[..TEST_ACTIVE_MEMBERS]),
@@ -4652,11 +4820,12 @@ pub fn build_channel_withdrawal(
     }
 
     let final_block_chain_proof = last_block_proof.expect("final block hash chain proof");
-    let single_sig = SingleSigCircuit::new();
-    let list_circuit = ListCircuit::new(&single_sig.verifier_data());
+    // falcon-sig Phase 3: one in-circuit Falcon verification per list step (no per-signature
+    // recursive proof).
+    let list_circuit = ListCircuit::<F, C, D>::new();
     let list_proof = block_witness_generator
         .borrow()
-        .build_bp_sig_list_proof(&single_sig, &list_circuit)
+        .build_bp_sig_list_proof(&list_circuit)
         .expect("build bp sig list proof");
     let validity_circuit =
         ValidityCircuit::<F, C, D>::new(&block_chain_vd, &list_circuit.verifier_data());
@@ -4697,7 +4866,7 @@ pub fn build_channel_withdrawal(
         &withdrawal_mle.proof,
     )?;
     let withdrawal_mle_json =
-        export_mle_json(&withdrawal_mle.proof, &withdrawal_wrapper.data.common);
+        export_mle_json(&withdrawal_mle.proof, &withdrawal_wrapper.data.common)?;
 
     // Multitoken Phase 5b: wrap + MLE the ERC-20 lane's withdrawal proof (same wrapper circuit —
     // both lanes are WithdrawalCircuit proofs, so the ONE withdrawal VK verifies both on-chain).
@@ -4710,7 +4879,7 @@ pub fn build_channel_withdrawal(
             pw.set_proof_with_pis_target(&withdrawal_wrapper.wrap_proof, proof)?;
             let mle = prove_with_mle::<F, C, D>(&withdrawal_wrapper.data, pw)?;
             verify_mle_proof(&withdrawal_wrapper.data, &withdrawal_vk, &mle.proof)?;
-            Ok(export_mle_json(&mle.proof, &withdrawal_wrapper.data.common))
+            export_mle_json(&mle.proof, &withdrawal_wrapper.data.common)
         })
         .transpose()?;
 
@@ -4723,7 +4892,7 @@ pub fn build_channel_withdrawal(
     val_pw.set_proof_with_pis_target(&validity_wrapper.wrap_proof, &validity_proof)?;
     let validity_mle = prove_with_mle::<F, C, D>(&validity_wrapper.data, val_pw)?;
     verify_mle_proof(&validity_wrapper.data, &validity_vk, &validity_mle.proof)?;
-    let validity_mle_json = export_mle_json(&validity_mle.proof, &validity_wrapper.data.common);
+    let validity_mle_json = export_mle_json(&validity_mle.proof, &validity_wrapper.data.common)?;
 
     // ── Extract the EXACT committed Withdrawal from the single-withdrawal proof PIs ─────────
     let single_withdrawal_inputs = SingleWithdawalPublicInputs::from_u64_slice(
@@ -4952,6 +5121,137 @@ mod delegate_send_tests {
             fund_amount,
         )
         .unwrap()
+    }
+
+    // =========================================================================================
+    // falcon-sig Phase 4 — the wallet co-sign is a NATIVE Falcon signature.
+    // =========================================================================================
+
+    /// A REAL legacy `SingleSigCircuit` proof blob — the old cosign wire object — captured just
+    /// before that circuit was deleted (`src/falcon_sig/testdata/README.md`).
+    const LEGACY_COSIGN_BLOB: &[u8] =
+        include_bytes!("falcon_sig/testdata/legacy_single_sig_proof.bin");
+
+    /// SECURITY (TM-C8 / O-9 at the WALLET seam): the entry point every peer uses to accept a
+    /// co-signature must reject a valid OLD-scheme signature. Downgrade is the attack: if
+    /// `verify_state_sig` still honoured the retired scheme, an adversary who could produce (or
+    /// replay) a Goldilocks proof would co-sign a state under the new regime.
+    #[test]
+    #[cfg_attr(debug_assertions, ignore = "run with --release")]
+    fn legacy_single_sig_blob_rejected_by_verify_state_sig() {
+        let mut rng = StdRng::seed_from_u64(0x0F9);
+        let keys = MemberKeys::generate(&mut rng);
+        let digest = Bytes32::from_u32_slice(&[0x494d_4348, 1, 2, 3, 4, 5, 6, 7]).unwrap();
+
+        // Control: the CURRENT scheme's blob is accepted at the same entry point, so the
+        // rejection below is about the FORMAT and not about the harness being broken.
+        let good = sign_digest(keys.falcon_key(), &digest);
+        assert_eq!(good.len(), crate::falcon_sig::FALCON_COSIGN_BLOB_BYTES);
+        verify_state_sig(keys.pk_g(), &digest, &good).expect("a genuine cosignature verifies");
+
+        // The real old blob is rejected — and the error names the VERSION gate, i.e. it is a
+        // policy rejection, not an incidental parse failure.
+        let err = verify_state_sig(keys.pk_g(), &digest, LEGACY_COSIGN_BLOB)
+            .expect_err("a legacy proof blob must never verify as a cosignature");
+        assert!(
+            err.to_string()
+                .contains("unsupported falcon signature version"),
+            "expected a version-gate rejection, got: {err}"
+        );
+    }
+
+    /// SECURITY (TM-C6 / O-6, native side, under ONE key): the member's single Falcon key signs
+    /// both channel states (IMCH) and small-block roots (IMSB). Isolation rests ENTIRELY on the
+    /// message digests, so a signature made in one context must not verify in the other. The
+    /// circuit-level version of this test lives in `falcon_sig::list`; this is the native
+    /// wallet-verifier version, at the exact entry point peers call.
+    #[test]
+    #[cfg_attr(debug_assertions, ignore = "run with --release")]
+    fn imch_and_imsb_cosignatures_do_not_transfer_between_contexts() {
+        use crate::circuits::validity::block_hash_chain::small_block_message::SmallBlockMessageFields;
+
+        let mut rng = StdRng::seed_from_u64(0xC6);
+        let keys = MemberKeys::generate(&mut rng);
+
+        // A REAL IMCH digest (a channel state's signing digest) and a REAL IMSB digest — the two
+        // digests the ONE key actually signs in production, not stand-ins.
+        let (_record, _keys, _members, state, _w) =
+            setup_delegate_channel(&mut rng, 9, [10, 20, 0]);
+        let imch = state.signing_digest();
+        let imsb = SmallBlockMessageFields {
+            bp_member_slot: 0,
+            bp_pk_g: keys.pk_g(),
+            small_block_number: 0,
+            prev_small_block_root: Bytes32::default(),
+            state_commitment_root: state.balance_state.h1(),
+            medium_epoch_hint: 0,
+            close_freeze_nonce: 0,
+        }
+        .signing_digest(9, Bytes32::from_u32_slice(&[7; 8]).unwrap());
+        assert_ne!(imch, imsb, "the two context digests must differ");
+
+        let imch_blob = sign_digest(keys.falcon_key(), &imch);
+        let imsb_blob = sign_digest(keys.falcon_key(), &imsb);
+
+        // Controls: each verifies in its OWN context.
+        verify_state_sig(keys.pk_g(), &imch, &imch_blob).expect("IMCH sig in IMCH context");
+        verify_state_sig(keys.pk_g(), &imsb, &imsb_blob).expect("IMSB sig in IMSB context");
+
+        // Both directions must fail.
+        assert!(
+            verify_state_sig(keys.pk_g(), &imsb, &imch_blob).is_err(),
+            "a state cosignature must not verify as a small-block signature"
+        );
+        assert!(
+            verify_state_sig(keys.pk_g(), &imch, &imsb_blob).is_err(),
+            "a small-block signature must not verify as a state cosignature"
+        );
+    }
+
+    /// SECURITY: `verify_all_signatures` must reject a signature made by a NON-MEMBER even when
+    /// the blob is internally consistent, and must reject a member's signature over a DIFFERENT
+    /// state. Both are checked against the registered `pk_g`, never against the blob's own key.
+    #[test]
+    #[cfg_attr(debug_assertions, ignore = "run with --release")]
+    fn cosignature_binds_to_the_registered_member_and_the_recomputed_digest() {
+        let mut rng = StdRng::seed_from_u64(0xB0DD);
+        let (record, member_keys, members, state, _w) =
+            setup_delegate_channel(&mut rng, 11, [5, 6, 0]);
+        let digest = state.signing_digest();
+        let outsider = MemberKeys::generate(&mut rng);
+
+        // An outsider's perfectly valid signature over the right digest: rejected, because
+        // `pk_g` is not the registered member at the slot.
+        let blob = sign_digest(outsider.falcon_key(), &digest);
+        assert!(
+            verify_state_sig(record.member_pk_gs[0], &digest, &blob).is_err(),
+            "a non-member's signature must not verify against a registered member's pk_g"
+        );
+
+        // A genuine member signature over a DIFFERENT digest is rejected in this state's context.
+        //
+        // SECURITY (Phase-4 review MINOR-2): this block used to end at `assert_ne!(digest,
+        // other_digest)` — trivially true, exercising NOTHING of the property its comment
+        // claimed. That is the same "false comfort" pattern the Phase-3 review rejected, so the
+        // assertion is now the real one: member 0 signs a different digest with its own genuine
+        // key, and that signature must not verify against THIS state's digest.
+        let other_digest = Bytes32::from_u32_slice(&[1, 2, 3, 4, 5, 6, 7, 8]).unwrap();
+        assert_ne!(digest, other_digest, "the control digests must differ");
+        assert!(
+            verify_all_signatures(&record, &members, &state).is_ok(),
+            "the fixture state must be fully and validly co-signed"
+        );
+        let wrong_context = sign_digest(member_keys[0].falcon_key(), &other_digest);
+        assert!(
+            verify_state_sig(record.member_pk_gs[0], &digest, &wrong_context).is_err(),
+            "a genuine member signature over a different digest must not verify here"
+        );
+        // Positive control: the same signature IS valid in its own context, so the rejection
+        // above is about the message and not about a malformed blob.
+        assert!(
+            verify_state_sig(record.member_pk_gs[0], &other_digest, &wrong_context).is_ok(),
+            "the control signature must be valid over the digest it was made for"
+        );
     }
 
     /// Delegate account (Phase 4): the PUBLIC wallet build path (`build_record` +
@@ -5542,30 +5842,627 @@ mod delegate_send_tests {
 
         let prover = CloseProver::new(&bp.balance_vd());
 
-        // Negative (fail-closed precondition, no proving): member-key count != member_count.
+        // DETACHED SIGNING: the close prover holds no key. The N-of-N cosignatures it consumes are
+        // the ones the members already produced above with `sign_state`, carried by the state
+        // itself — and they must be the REGISTERED identities, because the §3.5 gate binds every
+        // signature to `record.member_pk_gs[slot]`. (The previous version of this test signed with
+        // three standalone `FalconKeys` unrelated to the record; that is exactly the confusion the
+        // record parameter now makes impossible.)
+        assert_eq!(state.member_signatures.len(), 3);
+
+        // Negative (fail-closed gate, no proving): an incomplete signature set naming the slot.
+        let short: Vec<MemberSignature> = state.member_signatures[..2].to_vec();
+        let err = prover
+            .build_full_witness_from_signatures(
+                &record,
+                &state,
+                &short,
+                balance_proof.clone(),
+                1,
+                Bytes32::default(),
+                1,
+            )
+            .expect_err("close must reject a signature count != member_count");
         assert!(
-            prover
-                .build_full_witness(
-                    &state,
-                    &keys[..2],
-                    balance_proof.clone(),
-                    1,
-                    Bytes32::default(),
-                    1
-                )
-                .is_err(),
-            "close must reject a member-key count != member_count"
+            err.0.contains("expected 3 member signatures"),
+            "unexpected error: {}",
+            err.0
         );
 
-        // Positive: build the full witness, prove, and verify.
+        // Positive: build the full witness from the DETACHED set, prove, and verify.
         let witness = prover
-            .build_full_witness(&state, &keys, balance_proof, 1, Bytes32::default(), 1)
+            .build_full_witness_from_signatures(
+                &record,
+                &state,
+                &state.member_signatures,
+                balance_proof,
+                1,
+                Bytes32::default(),
+                1,
+            )
             .expect("close full witness");
         let proof = prover.prove(&witness).expect("close proof");
         prover
             .close_vd()
             .verify(proof)
             .expect("real close proof verifies");
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────────────────────
+    // DETACHED CLOSE SIGNING — the acceptance gate and the adversarial suite for the
+    // §3.5 coordinator gate (`falcon_member_auth_from_signatures`).
+    // See doc/tasks/close-detached-signing-design.md.
+    // ─────────────────────────────────────────────────────────────────────────────────────────
+
+    /// The expensive half of the detached-gate fixtures: three real cosigner `MemberKeys` plus the
+    /// Regev material a genesis state needs. Built ONCE (keygen is ~0.5 s/member) and shared by
+    /// every gate test below; nothing here is mutated.
+    struct DetachedKeyFixture {
+        keys: Vec<MemberKeys>,
+        members: Vec<MemberInfo>,
+        encs: Vec<RegevCiphertext>,
+        pkds: Vec<Bytes32>,
+    }
+
+    static DETACHED_KEYS: std::sync::LazyLock<DetachedKeyFixture> =
+        std::sync::LazyLock::new(|| {
+            let mut rng = StdRng::seed_from_u64(0xDE7A_C4ED);
+            let keys: Vec<MemberKeys> = (0..3).map(|_| MemberKeys::generate(&mut rng)).collect();
+            let members: Vec<MemberInfo> = keys
+                .iter()
+                .enumerate()
+                .map(|(i, k)| member_info(i as u16, k))
+                .collect();
+            let encs: Vec<RegevCiphertext> = keys
+                .iter()
+                .map(|k| encrypt_amount(&mut rng, &k.regev_pk, 10).unwrap().0)
+                .collect();
+            let pkds: Vec<Bytes32> = members
+                .iter()
+                .map(|m| Bytes32::from(m.regev_pk.poseidon_digest()))
+                .collect();
+            DetachedKeyFixture {
+                keys,
+                members,
+                encs,
+                pkds,
+            }
+        });
+
+    /// A record + a fully co-signed genesis `ChannelState` for `channel`, from the shared keys.
+    fn detached_fixture(channel: u32) -> (ChannelRecord, ChannelState) {
+        let f = &*DETACHED_KEYS;
+        let record = build_record(channel, &f.members, 0, 0).expect("record");
+        let mut state = assemble_genesis_state(&record, &f.encs, &f.pkds, &test_recipients(3), 30)
+            .expect("genesis");
+        detached_sign_all(&mut state);
+        (record, state)
+    }
+
+    /// Attach the complete N-of-N cosignature set over `state.signing_digest()`.
+    fn detached_sign_all(state: &mut ChannelState) {
+        state.member_signatures.clear();
+        for (i, k) in DETACHED_KEYS.keys.iter().enumerate() {
+            let s = sign_state(k, i as u8, state).expect("sign state");
+            add_signature(state, s);
+        }
+    }
+
+    /// Positive control for the whole adversarial suite below: the state's OWN cosignatures — the
+    /// set `cmd_close` now passes — pass the §3.5 gate unmodified, and the aggregation witness the
+    /// gate returns carries exactly the registered pk_g list in slot order.
+    ///
+    /// SECURITY: this is the "the honest input is accepted" half. Every test after it mutates
+    /// exactly one thing about this input and requires rejection, so a gate that rejected
+    /// everything (or accepted everything) fails here or there.
+    #[cfg_attr(debug_assertions, ignore = "run with --release")]
+    #[test]
+    fn detached_gate_accepts_the_states_own_cosignatures() {
+        let (record, state) = detached_fixture(11);
+        // The gate's message is the RECOMPUTED digest, and the state's cached digest must equal it
+        // (C-1: the close prover binds `state.digest`, `sign_state` signs `signing_digest()`).
+        assert_eq!(state.digest, state.signing_digest());
+        let (pk_gs, agg) =
+            falcon_member_auth_from_signatures(&record, &state.member_signatures, state.digest)
+                .expect("the state's own cosignatures must pass the gate");
+        assert_eq!(pk_gs.len(), 3);
+        assert_eq!(agg.active.len(), 3);
+        assert_eq!(agg.message, state.digest);
+        for (slot, pk_g) in pk_gs.iter().enumerate() {
+            assert_eq!(
+                *pk_g, record.member_pk_gs[slot],
+                "the gate must publish the RECORD's identity for slot {slot}, never the wire entry's"
+            );
+        }
+    }
+
+    /// T-9 (design §2.3, test 4a): a `MemberSignature` self-declares its `pk_g` on the wire. A
+    /// signature that is internally consistent but carries an identity that is NOT
+    /// `record.member_pk_gs[slot]` must be rejected — otherwise a non-member could join the
+    /// N-of-N set.
+    #[cfg_attr(debug_assertions, ignore = "run with --release")]
+    #[test]
+    fn detached_gate_rejects_a_pk_g_that_is_not_the_registered_member() {
+        let (record, state) = detached_fixture(12);
+        // A real, valid signature over the same digest by a NON-member key.
+        let mut rng = StdRng::seed_from_u64(0xBAD_5169);
+        let outsider = MemberKeys::generate(&mut rng);
+        let mut sigs = state.member_signatures.clone();
+        sigs[1] = sign_state(&outsider, 1, &state).expect("outsider signs");
+        let err = falcon_member_auth_from_signatures(&record, &sigs, state.digest)
+            .expect_err("must fail");
+        assert!(
+            err.0.contains("slot 1"),
+            "the error must name the offending slot: {}",
+            err.0
+        );
+    }
+
+    /// T-9 / X-5 (test 4b): the transport is an ARRAY. If the gate indexed it positionally without
+    /// first proving `entry.member_slot == index`, a reordered array would bind slot i's registered
+    /// `pk_g` to slot j's signature. Reordering, duplication and short sets must all be rejected
+    /// BEFORE any indexing.
+    #[cfg_attr(debug_assertions, ignore = "run with --release")]
+    #[test]
+    fn detached_gate_rejects_slot_reordering_duplication_and_gaps() {
+        let (record, state) = detached_fixture(13);
+
+        let mut swapped = state.member_signatures.clone();
+        swapped.swap(0, 2);
+        assert!(
+            falcon_member_auth_from_signatures(&record, &swapped, state.digest).is_err(),
+            "a reordered signature array must be rejected (X-5)"
+        );
+
+        // Slot 0's entry duplicated into position 1, with its declared slot left at 0.
+        let mut duped = state.member_signatures.clone();
+        duped[1] = duped[0].clone();
+        assert!(
+            falcon_member_auth_from_signatures(&record, &duped, state.digest).is_err(),
+            "a duplicated slot must be rejected (one key must not satisfy two slots)"
+        );
+
+        // A gap: slot 1 relabelled as slot 2, so slot 1 is unrepresented.
+        let mut gapped = state.member_signatures.clone();
+        gapped[1].member_slot = 2;
+        assert!(
+            falcon_member_auth_from_signatures(&record, &gapped, state.digest).is_err(),
+            "a gap in the slot sequence must be rejected"
+        );
+
+        // Fewer than member_count entries — the T-4 "partial collection" case. It must be an
+        // ERROR, not a smaller proof: a k-of-N close is exactly what T-6 forbids.
+        assert!(
+            falcon_member_auth_from_signatures(
+                &record,
+                &state.member_signatures[..2],
+                state.digest
+            )
+            .is_err(),
+            "an incomplete signature set must be rejected, never proved as k-of-N"
+        );
+    }
+
+    /// T-2 (test 4c), native counterpart of the in-circuit cross-context binding: signatures by the
+    /// REGISTERED members over a DIFFERENT state must not authorise this state. The circuit already
+    /// forces one shared message across all slots, so a mixed set cannot be aggregated at all; this
+    /// asserts the coordinator rejects it in microseconds instead of failing opaquely in `prove()`.
+    #[cfg_attr(debug_assertions, ignore = "run with --release")]
+    #[test]
+    fn detached_gate_rejects_cosignatures_over_a_different_state() {
+        let (record, state) = detached_fixture(14);
+        // Same members, same channel, same era — only the balance content differs.
+        let mut other = state.clone();
+        other.unallocated_confirmed_incoming = U256::from(1u32);
+        let other = other.with_computed_digest();
+        assert_ne!(other.digest, state.digest);
+        let mut other = other;
+        detached_sign_all(&mut other);
+
+        assert!(
+            falcon_member_auth_from_signatures(&record, &other.member_signatures, state.digest)
+                .is_err(),
+            "cosignatures over a different state must not authorise this one"
+        );
+        // And a MIXED set (2 honest + 1 foreign) must fail too — the close circuit's single shared
+        // message target makes such a set unprovable, and the gate must say so up front.
+        let mut mixed = state.member_signatures.clone();
+        mixed[2] = other.member_signatures[2].clone();
+        let err = falcon_member_auth_from_signatures(&record, &mixed, state.digest)
+            .expect_err("a mixed-message set must be rejected");
+        assert!(err.0.contains("slot 2"), "must name the slot: {}", err.0);
+    }
+
+    /// T-1 (test 4d): `channel_id` is inside the IMCH signing preimage, so a signature collected in
+    /// channel A must be worthless in channel B even though the member set is identical. This is
+    /// the cross-channel replay fence, checked natively.
+    #[cfg_attr(debug_assertions, ignore = "run with --release")]
+    #[test]
+    fn detached_gate_rejects_cosignatures_from_a_different_channel() {
+        let (record_a, state_a) = detached_fixture(15);
+        let (_record_b, state_b) = detached_fixture(16);
+        assert_ne!(state_a.digest, state_b.digest);
+        assert!(
+            falcon_member_auth_from_signatures(
+                &record_a,
+                &state_b.member_signatures,
+                state_a.digest
+            )
+            .is_err(),
+            "a cosignature from another channel must be rejected (channel_id ∈ IMCH preimage)"
+        );
+    }
+
+    /// T-1 / T-7 (test 4e): `close_freeze_nonce` is inside the IMCH signing preimage, so it is the
+    /// ERA fence — a cosignature collected in era k does not authorise the same balance state in
+    /// era k+1. This is the only thing bounding T-7's "a signature over S authorises every close at
+    /// S forever" to a single era, so it is asserted explicitly.
+    #[cfg_attr(debug_assertions, ignore = "run with --release")]
+    #[test]
+    fn detached_gate_rejects_cosignatures_from_a_different_close_era() {
+        let (record, state) = detached_fixture(17);
+        let mut next_era = state.clone();
+        next_era.close_freeze_nonce = state.close_freeze_nonce + 1;
+        let mut next_era = next_era.with_computed_digest();
+        assert_ne!(
+            next_era.digest, state.digest,
+            "the era must change the digest"
+        );
+        detached_sign_all(&mut next_era);
+
+        assert!(
+            falcon_member_auth_from_signatures(&record, &next_era.member_signatures, state.digest)
+                .is_err(),
+            "an era-(k+1) cosignature must not authorise an era-k close"
+        );
+        assert!(
+            falcon_member_auth_from_signatures(&record, &state.member_signatures, next_era.digest)
+                .is_err(),
+            "an era-k cosignature must not authorise an era-(k+1) close"
+        );
+    }
+
+    /// TM-C8 / O-9 (test 4f): the blob is versioned and fixed-length. A retired `SingleSigCircuit`
+    /// blob (any non-`v1` leading byte) must be rejected BY POLICY on the version byte, before any
+    /// parsing, and truncated / over-long blobs must be rejected on the length gate — not by an
+    /// incidental parse accident further in.
+    #[cfg_attr(debug_assertions, ignore = "run with --release")]
+    #[test]
+    fn detached_gate_rejects_legacy_versioned_and_wrong_length_blobs() {
+        let (record, state) = detached_fixture(18);
+
+        let mut legacy = state.member_signatures.clone();
+        legacy[0].signature[0] = 0x00; // not FALCON_SIG_V1
+        assert!(
+            falcon_member_auth_from_signatures(&record, &legacy, state.digest).is_err(),
+            "a non-v1 version byte must be rejected by policy"
+        );
+
+        let mut truncated = state.member_signatures.clone();
+        truncated[0]
+            .signature
+            .truncate(crate::falcon_sig::FALCON_COSIGN_BLOB_BYTES - 1);
+        assert!(
+            falcon_member_auth_from_signatures(&record, &truncated, state.digest).is_err(),
+            "a truncated blob must be rejected on the fixed-length gate"
+        );
+
+        let mut overlong = state.member_signatures.clone();
+        overlong[0].signature.push(0);
+        assert!(
+            falcon_member_auth_from_signatures(&record, &overlong, state.digest).is_err(),
+            "an over-long blob must be rejected on the fixed-length gate"
+        );
+
+        let mut empty = state.member_signatures.clone();
+        empty[0].signature.clear();
+        assert!(
+            falcon_member_auth_from_signatures(&record, &empty, state.digest).is_err(),
+            "an empty blob must be rejected"
+        );
+    }
+
+    /// T-8 (test 4g): the public polynomial `h` travels INSIDE the untrusted blob. If the gate
+    /// verified with the transported `h` without binding it to the registered identity (i.e. used
+    /// the bare `verify` instead of `verify_with_pk_g`, review F-2), an attacker could sign with
+    /// their own key and ship their own `h` while declaring a registered `pk_g`. The
+    /// `falcon_pk_digest(h) == pk_g` check inside `verify_with_pk_g` is what closes this.
+    #[cfg_attr(debug_assertions, ignore = "run with --release")]
+    #[test]
+    fn detached_gate_rejects_a_substituted_public_polynomial() {
+        let (record, state) = detached_fixture(19);
+        let mut rng = StdRng::seed_from_u64(0x5AB0_7A6E);
+        let attacker = MemberKeys::generate(&mut rng);
+
+        // The attacker's OWN valid signature + OWN h, relabelled with the registered slot/pk_g.
+        let mut forged = sign_state(&attacker, 0, &state).expect("attacker signs");
+        forged.pk_g = record.member_pk_gs[0];
+        let mut sigs = state.member_signatures.clone();
+        sigs[0] = forged;
+
+        let err = falcon_member_auth_from_signatures(&record, &sigs, state.digest)
+            .expect_err("a substituted public polynomial must be rejected");
+        assert!(
+            err.0.contains("slot 0") && err.0.contains("failed native verification"),
+            "must be the cryptographic gate naming the slot: {}",
+            err.0
+        );
+    }
+
+    /// T-10 / X-6 (test 4h): the provers size the member set from the STATE while the signature
+    /// validators size it from the RECORD, and until this change nothing asserted the two agree —
+    /// masked only because one process produced both. Under detached signing they arrive from
+    /// different places. Fail-closed.
+    #[cfg_attr(debug_assertions, ignore = "run with --release")]
+    #[test]
+    fn detached_gate_rejects_record_state_member_count_mismatch() {
+        let (record, state) = detached_fixture(20);
+        assert!(assert_record_state_member_count_agree("close", &record, &state).is_ok());
+
+        let mut lying = state.clone();
+        lying.balance_state.member_count = 2;
+        let err = assert_record_state_member_count_agree("close", &record, &lying)
+            .expect_err("a count disagreement must fail closed");
+        assert!(err.0.contains("T-10"), "unexpected error: {}", err.0);
+
+        let mut lying_up = state.clone();
+        lying_up.balance_state.member_count = 4;
+        assert!(
+            assert_record_state_member_count_agree("close", &record, &lying_up).is_err(),
+            "a count disagreement in the other direction must fail closed too"
+        );
+    }
+
+    /// Test 4j (randomized / property-based): every single-byte mutation of an otherwise valid
+    /// cosignature blob must be rejected. This is the test intended to catch a gate that checks
+    /// only structure (length, slot, pk_g) and forgets the cryptography — such a gate passes every
+    /// hand-written case above that mutates a FIELD, and fails only here.
+    #[cfg_attr(debug_assertions, ignore = "run with --release")]
+    #[test]
+    fn detached_gate_rejects_random_single_byte_blob_mutations() {
+        let (record, state) = detached_fixture(21);
+        // INTENTIONALLY SIMPLE: a fixed LCG rather than an RNG dependency, so a failing case is
+        // reproducible from the seed alone with no crate-version coupling.
+        let mut s: u64 = 0xF00D_5163;
+        let mut next = |m: u64| -> u64 {
+            s = s
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            (s >> 33) % m
+        };
+        let blob_len = crate::falcon_sig::FALCON_COSIGN_BLOB_BYTES;
+
+        for _ in 0..200 {
+            let slot = next(3) as usize;
+            let byte = next(blob_len as u64) as usize;
+            let delta = (next(255) + 1) as u8;
+            let mut sigs = state.member_signatures.clone();
+            sigs[slot].signature[byte] = sigs[slot].signature[byte].wrapping_add(delta);
+            assert!(
+                falcon_member_auth_from_signatures(&record, &sigs, state.digest).is_err(),
+                "mutating byte {byte} of slot {slot}'s blob must be rejected"
+            );
+        }
+
+        // Control: 200 unmutated rebuilds of the honest set are accepted, so the loop above is not
+        // passing because the gate rejects everything.
+        for _ in 0..200 {
+            let mut fresh = state.clone();
+            detached_sign_all(&mut fresh);
+            falcon_member_auth_from_signatures(&record, &fresh.member_signatures, state.digest)
+                .expect("a freshly minted honest set must be accepted");
+        }
+    }
+
+    /// **THE PHASE-1 ACCEPTANCE GATE** (design §6 Phase 1, criterion 1a) and the empirical
+    /// confirmation of C-1 — the premise the entire detached-signing design rests on.
+    ///
+    /// The claim: re-minting a member's signature at close time (what the old key-holding prover
+    /// did) and re-using the signature that member already produced when it co-signed the state
+    /// are CRYPTOGRAPHICALLY INDISTINGUISHABLE to everything downstream. The close circuit is
+    /// signature-blind — the aggregation leaf registers only `[message, 1, pk_g]`, and `salt` /
+    /// `s2` / `h` are witnesses, never public inputs — so two valid signatures by the same key over
+    /// the same digest must yield the SAME close-proof public inputs.
+    ///
+    /// This test proves it the hard way: it builds the close proof twice from the same state, once
+    /// from the collected set and once from a freshly re-signed set, first ASSERTING the two
+    /// signature sets differ byte-for-byte (Falcon's salt is randomized, so they do), and then
+    /// asserting the two proofs' public inputs are identical limb for limb.
+    ///
+    /// If this ever fails, the design premise is wrong and the detached path is NOT a semantics-
+    /// preserving refactor: stop, do not adjust anything to make it pass.
+    ///
+    /// HEAVY: builds the balance + close circuits and proves TWO closes (minutes, multi-GB).
+    #[cfg_attr(debug_assertions, ignore = "run with --release")]
+    #[test]
+    fn close_detached_and_resigned_paths_yield_identical_close_public_inputs() {
+        use crate::{
+            circuits::balance::{balance_processor::BalanceProcessor, spend_circuit::SpendCircuit},
+            common::{channel_id::ChannelId, salt::Salt},
+        };
+
+        let channel = 22u32;
+        let (record, state) = detached_fixture(channel);
+
+        // Path A input: the cosignatures the members produced when they agreed the state. This is
+        // what `cmd_close` now passes.
+        let collected = state.member_signatures.clone();
+
+        // Path B input: the SAME members signing the SAME digest again, now — semantically exactly
+        // what the retired key-taking `build_full_witness` did internally.
+        let mut resigned_state = state.clone();
+        detached_sign_all(&mut resigned_state);
+        let resigned = resigned_state.member_signatures.clone();
+
+        // The premise is only interesting if the two sets really are different signatures.
+        assert_eq!(collected.len(), resigned.len());
+        for slot in 0..collected.len() {
+            assert_eq!(collected[slot].pk_g, resigned[slot].pk_g);
+            assert_ne!(
+                collected[slot].signature, resigned[slot].signature,
+                "slot {slot}: Falcon signing is randomized, so a re-signature must differ; if it \
+                 does not, this test proves nothing"
+            );
+        }
+
+        let spend = SpendCircuit::<F, C, D>::new();
+        let bp = BalanceProcessor::<F, C, D>::new(&spend.data.verifier_data());
+        let balance_proof = bp
+            .prove_initial(
+                ChannelId::new(channel as u64).unwrap(),
+                Salt::rand(&mut rand::thread_rng()),
+            )
+            .expect("genesis balance proof");
+        let prover = CloseProver::new(&bp.balance_vd());
+
+        let build = |sigs: &[MemberSignature]| {
+            prover
+                .build_full_witness_from_signatures(
+                    &record,
+                    &state,
+                    sigs,
+                    balance_proof.clone(),
+                    1,
+                    Bytes32::default(),
+                    1,
+                )
+                .expect("close full witness")
+        };
+
+        let witness_collected = build(&collected);
+        let witness_resigned = build(&resigned);
+
+        // The member_auth pk-list is read off the RECORD in both cases, so it must be identical.
+        assert_eq!(
+            witness_collected
+                .member_auth
+                .iter()
+                .map(|a| a.pk_g)
+                .collect::<Vec<_>>(),
+            witness_resigned
+                .member_auth
+                .iter()
+                .map(|a| a.pk_g)
+                .collect::<Vec<_>>()
+        );
+        // The aggregation proof is the ONLY place the signatures enter, so assert its public
+        // inputs match first — that localises a failure to the leaf gadget if one ever occurs.
+        assert_eq!(
+            witness_collected.agg_proof.public_inputs, witness_resigned.agg_proof.public_inputs,
+            "the aggregation proof's public inputs must not depend on WHICH valid signature was \
+             used (agg.rs registers only [message, signer_count, pk_g])"
+        );
+
+        let proof_collected = prover.prove(&witness_collected).expect("close proof A");
+        let proof_resigned = prover.prove(&witness_resigned).expect("close proof B");
+
+        assert_eq!(
+            proof_collected.public_inputs, proof_resigned.public_inputs,
+            "C-1 VIOLATED: re-using a collected cosignature and re-minting one produce DIFFERENT \
+             close public inputs. The detached-signing design premise is wrong — stop."
+        );
+
+        let vd = prover.close_vd();
+        vd.verify(proof_collected)
+            .expect("the detached (collected-signature) close proof must verify");
+        vd.verify(proof_resigned)
+            .expect("the re-signed close proof must verify");
+    }
+
+    /// Design §6 Phase 3 (3a/3b): the point of the whole exercise — a close proof built by a
+    /// process that holds NO key material. The signing keys are dropped before the prover is even
+    /// constructed (`FalconKeys` is deliberately non-`Clone`, and `MemberKeys` owns the only
+    /// handle), so the compiler itself witnesses that no key is in scope at the call site.
+    ///
+    /// SECURITY: this is what makes a split deployment expressible. Previously `cmd_close` derived
+    /// all N cosigner secrets in one process, so "N-of-N" degraded to "the coordinator wanted it".
+    ///
+    /// HEAVY: builds the balance + close circuits and proves a close.
+    #[cfg_attr(debug_assertions, ignore = "run with --release")]
+    #[test]
+    fn close_proves_with_no_key_material_in_the_proving_scope() {
+        use crate::{
+            circuits::balance::{balance_processor::BalanceProcessor, spend_circuit::SpendCircuit},
+            common::{channel_id::ChannelId, salt::Salt},
+        };
+
+        let channel = 23u32;
+        // Everything key-bearing is confined to this block and does not escape it.
+        let (record, state, sigs): (ChannelRecord, ChannelState, Vec<MemberSignature>) = {
+            let mut rng = StdRng::seed_from_u64(0x0C105E_D);
+            let keys: Vec<MemberKeys> = (0..3).map(|_| MemberKeys::generate(&mut rng)).collect();
+            let members: Vec<MemberInfo> = keys
+                .iter()
+                .enumerate()
+                .map(|(i, k)| member_info(i as u16, k))
+                .collect();
+            let record = build_record(channel, &members, 0, 0).expect("record");
+            let encs: Vec<RegevCiphertext> = keys
+                .iter()
+                .map(|k| encrypt_amount(&mut rng, &k.regev_pk, 10).unwrap().0)
+                .collect();
+            let pkds: Vec<Bytes32> = members
+                .iter()
+                .map(|m| Bytes32::from(m.regev_pk.poseidon_digest()))
+                .collect();
+            let mut state = assemble_genesis_state(&record, &encs, &pkds, &test_recipients(3), 30)
+                .expect("genesis");
+            for (i, k) in keys.iter().enumerate() {
+                let s = sign_state(k, i as u8, &state).expect("sign");
+                add_signature(&mut state, s);
+            }
+            let sigs = state.member_signatures.clone();
+            // The keys are dropped here, at the end of this block. Nothing below can sign.
+            (record, state, sigs)
+        };
+
+        let spend = SpendCircuit::<F, C, D>::new();
+        let bp = BalanceProcessor::<F, C, D>::new(&spend.data.verifier_data());
+        let balance_proof = bp
+            .prove_initial(
+                ChannelId::new(channel as u64).unwrap(),
+                Salt::rand(&mut rand::thread_rng()),
+            )
+            .expect("genesis balance proof");
+        let prover = CloseProver::new(&bp.balance_vd());
+
+        // (3b) Negative FIRST: a missing slot must be an error naming the failure, and must not
+        // produce a proof. There is no key available to "fix" it with — which is the property
+        // under test.
+        let err = prover
+            .build_full_witness_from_signatures(
+                &record,
+                &state,
+                &sigs[..2],
+                balance_proof.clone(),
+                1,
+                Bytes32::default(),
+                1,
+            )
+            .expect_err("a keyless prover must FAIL on a missing signature, not mint one");
+        assert!(
+            err.0.contains("expected 3 member signatures"),
+            "unexpected error: {}",
+            err.0
+        );
+
+        // (3a) Positive: the full detached set proves, with no key in scope.
+        let witness = prover
+            .build_full_witness_from_signatures(
+                &record,
+                &state,
+                &sigs,
+                balance_proof,
+                1,
+                Bytes32::default(),
+                1,
+            )
+            .expect("keyless close witness");
+        let proof = prover.prove(&witness).expect("keyless close proof");
+        prover
+            .close_vd()
+            .verify(proof)
+            .expect("a close proof built without any key material must verify");
     }
 
     /// Build a withdrawal claim for the closed channel's slot 0 through `WithdrawalClaimProver` and
@@ -5734,7 +6631,16 @@ mod delegate_send_tests {
 
         let mut rng = StdRng::seed_from_u64(0xca11);
         let channel_id = ChannelId::new(3).unwrap();
+        // DETACHED SIGNING: cancel-close consumes the cosignatures the revived head already
+        // carries, verified against the AUTHENTICATED record — so the signing identities must BE
+        // the registered ones. Build a real 3-member record and sign each state with those keys.
         let keys: Vec<MemberKeys> = (0..3).map(|_| MemberKeys::generate(&mut rng)).collect();
+        let members: Vec<MemberInfo> = keys
+            .iter()
+            .enumerate()
+            .map(|(i, k)| member_info(i as u16, k))
+            .collect();
+        let record = build_record(3, &members, 0, 0).expect("record");
         // 3 distinct slot ciphertexts (content is not load-bearing for cancel — only the IMCH
         // digest the members sign matters — but keep H1 non-degenerate).
         let encs: Vec<RegevCiphertext> = (0..3u64)
@@ -5777,8 +6683,17 @@ mod delegate_send_tests {
             }
             .with_computed_digest()
         };
+        // `signing_digest()` does not cover `member_signatures`, so the N-of-N set is attached
+        // after `with_computed_digest()` — exactly as `add_signature` does on every live path.
+        let sign_all = |mut s: ChannelState| -> ChannelState {
+            for (i, k) in keys.iter().enumerate() {
+                let sig = sign_state(k, i as u8, &s).expect("sign state");
+                add_signature(&mut s, sig);
+            }
+            s
+        };
 
-        let revived_state = mk_state(9, &encs);
+        let revived_state = sign_all(mk_state(9, &encs));
         let closing_state = mk_state(7, &encs);
         let close_tx = CloseWithdrawal {
             channel_id,
@@ -5794,17 +6709,46 @@ mod delegate_send_tests {
         let prover = CancelCloseProver::new();
 
         // Negative: a revived state whose version is NOT strictly newer than the close is rejected.
-        let stale = mk_state(7, &encs);
+        let stale = sign_all(mk_state(7, &encs));
         assert!(
             prover
-                .build_full_witness(&stale, &keys, &close_intent)
+                .build_full_witness_from_signatures(
+                    &record,
+                    &stale,
+                    &stale.member_signatures,
+                    &close_intent
+                )
                 .is_err(),
             "a non-newer revived state must be rejected"
         );
 
+        // Negative (fail-closed gate, no proving): a cosignature over the WRONG state. `stale` is a
+        // genuinely signed state by the same registered members — but at a different digest, so
+        // every slot must be rejected. This is the native-gate counterpart of the in-circuit
+        // cross-context binding (T-2).
+        let wrong_digest_err = prover
+            .build_full_witness_from_signatures(
+                &record,
+                &revived_state,
+                &stale.member_signatures,
+                &close_intent,
+            )
+            .expect_err("cosignatures over a different state must be rejected");
+        assert!(
+            wrong_digest_err.0.contains("slot 0")
+                && wrong_digest_err.0.contains("failed native verification"),
+            "unexpected error: {}",
+            wrong_digest_err.0
+        );
+
         // Positive: revived version 9 > close final_state_version 7.
         let witness = prover
-            .build_full_witness(&revived_state, &keys, &close_intent)
+            .build_full_witness_from_signatures(
+                &record,
+                &revived_state,
+                &revived_state.member_signatures,
+                &close_intent,
+            )
             .expect("cancel-close witness");
         let proof = prover.prove(&witness).expect("cancel-close proof");
         prover
@@ -6015,9 +6959,7 @@ mod delegate_send_tests {
         // The emitted registration must commit EXACTLY the CLI members' pk_gs (the close path's
         // set).
         {
-            use crate::{
-                common::channel::close_member_set_commitment, constants::MAX_CHANNEL_MEMBERS,
-            };
+            use crate::common::channel::close_member_set_commitment;
             let lc: serde_json::Value =
                 serde_json::from_str(&artifacts.lifecycle_json).expect("lifecycle json");
             let mut close_hashes: [Bytes32; crate::constants::MAX_COSIGNERS] =
@@ -6099,7 +7041,6 @@ mod delegate_send_tests {
                 ChannelMemberKeys, TEST_ACTIVE_MEMBERS,
             },
             common::channel::close_member_set_commitment,
-            constants::MAX_CHANNEL_MEMBERS,
             ethereum_types::address::Address,
         };
 
@@ -6109,17 +7050,28 @@ mod delegate_send_tests {
             .map(|slot| MemberKeys::generate(&mut Rng010::seed_from_u64(0xC1_0000 + slot as u64)))
             .collect();
 
-        // What the CLOSE path commits to (close_member_set_commitment over the COSIGNERS' pk_g).
+        // PHASE 4: the seam is CLOSED. `MemberKeys` carries the Falcon key, so both sides below
+        // start from `cli_members` — the SAME objects `build_channel_withdrawal` is handed — and
+        // there is no second seed formula left to disagree with the first.
+        //
+        // (History, kept because it is the reason this test is written this way: the Phase-3
+        // review found it had become a plumbing check — it derived Falcon keys, wrote their pk_g
+        // into `close_hashes`, then passed the SAME vector into `from_member_keys` and compared
+        // the two, which cannot fail regardless of what the registration path does. The two sides
+        // must be derived INDEPENDENTLY or the comparison proves nothing.)
+        //
+        // CLOSE side: `MemberKeys::pk_g()` — what the member SIGNS with, read straight off the
+        // key. REG side: the `MemberLeaf.pk_g` of the member tree the registration path BUILDS.
+        // Two independent paths to the same quantity; if `from_member_keys` ever committed
+        // anything other than the member's own signing identity, this fails.
         let mut close_hashes: [Bytes32; crate::constants::MAX_COSIGNERS] =
             std::array::from_fn(|_| Bytes32::default());
-        for (i, m) in cli_members.iter().enumerate() {
-            close_hashes[i] = m.pk_g();
+        for (i, k) in cli_members.iter().enumerate() {
+            close_hashes[i] = k.pk_g();
         }
         let close_commitment =
             close_member_set_commitment(&close_hashes, TEST_ACTIVE_MEMBERS as u8);
 
-        // What the WITHDRAW registration emits: the reg record built from the same members via
-        // ChannelMemberKeys::from_member_keys (the exact path build_channel_withdrawal takes).
         let cmk = ChannelMemberKeys::from_member_keys(&cli_members);
         let mut reg_hashes: [Bytes32; crate::constants::MAX_COSIGNERS] =
             std::array::from_fn(|_| Bytes32::default());
@@ -6133,13 +7085,26 @@ mod delegate_send_tests {
             "withdraw registration member set must equal the close path's member-set commitment \
              (so one on-chain registerChannel serves both)"
         );
-        // Sanity: the pk_g a member signs with IS the pk_g committed in the member tree.
+        // The whole check (the Phase-4 obligation the previous revision recorded as a comment):
+        // the pk_g a member SIGNS with is exactly the pk_g the registration COMMITS.
         for (i, m) in cli_members.iter().enumerate() {
             assert_eq!(
                 Bytes32::from(cmk.member_tree.get_leaf(i as u64).pk_g),
                 m.pk_g(),
-                "member {i} pk_g mismatch between MemberKeys and the registration member tree"
+                "member {i} pk_g mismatch between the member's Falcon signing key and the \
+                 registration member tree"
             );
+        }
+        // The identities must also be distinct per slot: a shared key would let one member
+        // satisfy several slots, defeating the close circuit's A5 distinctness check.
+        for a in 0..TEST_ACTIVE_MEMBERS {
+            for b in (a + 1)..TEST_ACTIVE_MEMBERS {
+                assert_ne!(
+                    cli_members[a].pk_g(),
+                    cli_members[b].pk_g(),
+                    "cosigner slots {a} and {b} must not share an identity"
+                );
+            }
         }
         // The per-(channel, slot) recipient formula is deterministic and nonzero (registerChannel
         // rejects zero recipients).

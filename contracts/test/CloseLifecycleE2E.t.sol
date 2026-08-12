@@ -247,10 +247,16 @@ contract CloseLifecycleE2ETest is CloseE2EBase {
         // member set / finalized H1, which this generator pair does not yet produce (same
         // co-generation gap Phase A documented as a MEDIUM follow-up). The close-lifecycle path up to
         // `finalizeClose` — the real value of this E2E — has now run end-to-end against the real
-        // MleVerifier. The withdrawal-claim binding + payout is exercised independently by the
-        // mock-verified `ChannelSettlementManager.t.sol` (real 48-limb strict bind) and the
-        // withdrawal-claim circuit's own Rust tests. Stop here rather than fabricate a stub proof on
-        // a value path.
+        // MleVerifier. The withdrawal-claim BINDING + payout is exercised independently by
+        // `ChannelSettlementManager.t.sol` (real 48-limb strict bind) — but note that suite wires
+        // `MockMleVerifier`, which returns true unconditionally, so it covers binding ONLY and says
+        // nothing about proof acceptance. Proof ACCEPTANCE by the real verifier is covered
+        // separately and decoupled from the co-generation gap by `ClaimMleVerify.t.sol`, which runs
+        // the REAL `MleVerifier.verify` over `withdrawal_claim_mle.json`,
+        // `post_close_claim_mle.json` and `cancel_close_mle.json`. (Before that test existed, the
+        // sentence above read as full coverage while the mock stubbed out exactly the thing that
+        // was broken by gate id 8 — see `doc/audit/why-gate8-was-missed.md` §6.)
+        // Stop here rather than fabricate a stub proof on a value path.
         assertEq(uint256(digest) != 0 ? uint256(1) : uint256(0), 1, "close finalized end-to-end");
     }
 

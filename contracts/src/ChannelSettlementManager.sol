@@ -34,8 +34,16 @@ struct CloseProofFields {
     /// close-intent digest preimage).
     bytes32 finalSettledTxAccumulatorRoot;
     bytes32 memberSetCommitment;
-    /// Packed `(memberCount << 8) | delegateCount` (delegate account).
-    uint16 memberAndDelegateCount;
+    /// The channel's registered ACTIVE COSIGNER count. STRICT-equality-bound to close-PI limb 93 —
+    /// see `ChannelSettlementVerifier._expectedCloseLimbs` (B-2 A-6: this one is non-negotiable).
+    uint8 memberCount;
+    /// B-2 (doc/tasks/b2-delegate-close-threat-model.md §4d): a FLOOR on close-PI limb 94, NOT an
+    /// exact expected value. The proof's own `delegateCount` limb must satisfy
+    /// `limb94 >= minDelegateCount` and `memberCount + limb94 <= 1024`; the limb itself is
+    /// authenticated by the N-of-N cosigner signature over the H1 it decommits, which is strictly
+    /// stronger authority than L1 has for this field under Option B. Widened from the old packed
+    /// `uint8` half so counts above 255 are representable at all (threat model A-10).
+    uint32 minDelegateCount;
     /// Multi-token (§N-6): channel-local slot t → BASE token index, zero-padded past `tokenCount`.
     /// Bound (with `tokenCount` and `channelFundAmounts`) to the member-signed close PI
     /// `tokenFundsDigest` limbs by the verifier's on-chain recompute (TM-11), so the per-token
@@ -540,12 +548,25 @@ contract ChannelSettlementManager {
     /// `ChannelRecord.member_count` (src/common/channel.rs).
     uint8 public immutable activeMemberCount;
 
-    /// @notice The number of DELEGATE participants (delegate account). Mirrors the Rust
-    /// `ChannelRecord.delegate_count` / `BalanceState.delegate_count`. Delegates do NOT co-sign and
-    /// are NOT part of `memberBindings`/`memberPkGs`/the IMCM commitment, but `delegateCount` is a
-    /// committed limb in the close-proof public inputs (H1 binds it immediately after
-    /// `memberCount`), so the manager must pin it to verify the close proof. Invariant:
-    /// `activeMemberCount + activeDelegateCount <= MAX_MEMBER_COUNT`.
+    /// @notice The number of delegates REGISTERED AT DEPLOYMENT (delegate account). Mirrors the Rust
+    /// `ChannelRecord.delegate_count` / `BalanceState.delegate_count` AT THAT MOMENT. Delegates do
+    /// NOT co-sign and are NOT part of `memberBindings`/`memberPkGs`/the IMCM commitment.
+    ///
+    /// B-2 (doc/tasks/b2-delegate-close-threat-model.md): this is a MONOTONE FLOOR for the close
+    /// path, NOT the channel's current delegate count. Under Option B, L1 registration is
+    /// cosigners-only and there is no per-join L1 transaction, so a channel's true delegate count
+    /// can (and normally does) exceed this value — every browser join after deployment increments it
+    /// off-chain. The close proof's own `delegateCount` limb carries N-of-N cosigner authority (it
+    /// decommits the signed H1); this immutable only lets L1 refuse a close whose active region is
+    /// NARROWER than the delegate population registered here. See `_checkCloseProof`.
+    /// SCOPE (review finding 6): a CARDINALITY bound, NOT an identity one — L1 binds no delegate to
+    /// a balance-slot INDEX (`delegateBindings` is an unordered `(pkG, recipient)` set as far as the
+    /// close PI is concerned), so this cannot protect a NAMED delegate from being displaced; it only
+    /// stops the active region being shrunk below the registered count. The old strict equality had
+    /// exactly the same property. See `ChannelSettlementVerifier.CloseDelegateCountOutOfRange`.
+    /// Deployment invariant (unchanged, separate from the close bound):
+    /// `activeMemberCount + activeDelegateCount <= MAX_MEMBER_COUNT` (the 16-slot on-chain binding
+    /// arrays); the close path's ceiling is the wider 1024-participant capacity.
     uint8 public immutable activeDelegateCount;
 
     /// @notice The channel's registered member SPHINCS+ pubkey hashes in slot order, ZERO-padded to
@@ -1525,12 +1546,34 @@ contract ChannelSettlementManager {
         MleVerifier.MleProof calldata proof
     ) internal view {
         // F4/F7 SECURITY: the close proof's in-circuit `memberSetCommitment` must equal this
-        // channel's registered member-set commitment, AND the close proof's `memberCount` /
-        // `delegateCount` limbs must equal this channel's `activeMemberCount` / `activeDelegateCount`,
-        // so a close can only finalize with the channel's registered SPHINCS+ members at the
-        // registered member/delegate split (no non-member-key substitution, no active/padding- or
-        // member/delegate-boundary forgery). All are part of the close-proof public inputs (103 raw
-        // limbs incl. the appended delegateCount and the multi-token tokenFundsDigest).
+        // channel's registered member-set commitment, AND the close proof's `memberCount` limb must
+        // equal this channel's `activeMemberCount`, so a close can only finalize with the channel's
+        // registered members at the registered active/padding boundary (no non-member-key
+        // substitution, no signer-set shrinking). Both are part of the close-proof public inputs
+        // (103 raw limbs incl. the delegateCount and the multi-token tokenFundsDigest).
+        //
+        // B-2 SECURITY (doc/tasks/b2-delegate-close-threat-model.md §4d/§5) — the member/delegate
+        // boundary has TWO halves with DIFFERENT authority roots, and L1 asserts what it actually
+        // can about each:
+        //   * MEMBER side (limb 93 + memberSetCommitment limbs 85..92): L1-rooted. The commitment
+        //     hashes `activeMemberCount` and is cross-checked against the rollup registry in the
+        //     constructor (Finding E), so raising/lowering `member_count` cannot shrink the signer
+        //     set. STRICT equality, unchanged.
+        //   * DELEGATE side (limb 94): COSIGNER-rooted, by the Option B decision. Registration on L1
+        //     is cosigners-only, so this contract's `activeDelegateCount` is a deployer assertion
+        //     cross-checked against nothing (see the TRUST note at the constructor). The limb itself
+        //     decommits a field of the H1 that every cosigner's Falcon signature covers, so it
+        //     carries N-of-N authority — strictly MORE than the reference it used to be compared
+        //     against. L1 therefore enforces only what it can justify: MONOTONICITY (the active
+        //     region is at least as WIDE as the registered delegate population — a CARDINALITY
+        //     bound; L1 binds no delegate to a slot index, so it cannot name who is excluded, review
+        //     finding 6) and CAPACITY (the mirror of the in-circuit
+        //     `member_count + delegate_count <= 1024` bound). `delegate_count` never
+        //     reaches a payout, a slot owner or a recipient — those are per-slot authenticated by
+        //     the leaf-bound recipient / pk_digest / amount bindings in the claim circuits — and
+        //     payouts stay hard-capped by `finalizedChannelFundAmount` / `receivedChannelFunds`.
+        // RESIDUAL (accepted, DLG-2): fully-colluding cosigners can sign any delegate balance or
+        // freeze out a post-deploy joiner. The former strict equality never prevented that.
         if (!_runCloseVerify(intent, proof)) revert InvalidCloseProof();
     }
 
@@ -1564,8 +1607,13 @@ contract ChannelSettlementManager {
             // strict limb bind rejects a submitted value != the real signed one.
             finalSettledTxAccumulatorRoot: intent.finalSettledTxAccumulatorRoot,
             memberSetCommitment: registeredMemberSetCommitment(),
-            // Delegate account: pack the two registered counts into the uint16 the verifier expects.
-            memberAndDelegateCount: (uint16(activeMemberCount) << 8) | uint16(activeDelegateCount)
+            memberCount: activeMemberCount,
+            // B-2: the registered delegate count is a FLOOR, not an exact expected value. A channel
+            // that gained delegates after this manager was deployed (the normal case — L1 has no
+            // per-join registration under Option B) still closes; one whose active region is
+            // NARROWER than the registered delegate count does not. Cardinality only — see the
+            // `activeDelegateCount` doc comment (review finding 6).
+            minDelegateCount: uint32(activeDelegateCount)
         });
         return verifier.verifyCloseIntent(fields, proof);
     }

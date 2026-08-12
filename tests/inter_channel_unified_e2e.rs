@@ -38,7 +38,7 @@ use intmax3_zkp::{
         channel::{
             ChannelFund, ChannelRecord, ChannelState, ChannelTransitionKind, InterChannelTx,
             MemberSignature, MerkleInclusionProof, ProofBackend, ReceiverBalanceDelta,
-            SignedSmallBlock, SmallBlockRootMessage, TransitionProofRole,
+            SignedSmallBlock, SmallBlockRootMessage, TransitionProofRole, inter_channel_tx_hash,
         },
         channel_id::ChannelId,
         deposit::Deposit,
@@ -49,7 +49,7 @@ use intmax3_zkp::{
         u63::BlockNumber,
     },
     ethereum_types::{address::Address, bytes32::Bytes32, u32limb_trait::U32LimbTrait, u256::U256},
-    poseidon_sig::{circuit::SingleSigCircuit, list::ListCircuit},
+    falcon_sig::list::ListCircuit,
     regev::{
         RealRegevProofVerifier, RegevCiphertext, RegevPk, RegevSecurityLevel, encrypt_amount,
         prove_channel_update,
@@ -228,6 +228,8 @@ fn unified_inter_channel_transfer_e2e() {
         .collect();
     let a_record = build_record(A_ID, &a_members, 0, 0).expect("A record");
     let a_pks = pks_array(&a_keys);
+    // falcon-sig Phase 4: the registered member identity is the FALCON pk_g, read off the
+    // wallet's own `MemberKeys`.
     let ck = ChannelMemberKeys::from_member_keys(&a_keys);
     // The channel record's member SET is the registered member set (B-2 stitch). Under Option B
     // (tasks/reg-chain-1024-threat-model.md) the record's root is the WALLET membership tree
@@ -240,7 +242,7 @@ fn unified_inter_channel_transfer_e2e() {
         let mut wallet_tree = MemberTree::init_wallet_membership();
         for k in &a_keys {
             wallet_tree.push(MemberLeaf {
-                pk_g: k.signing_key.public_key_hash_out(),
+                pk_g: k.pk_g_hash_out(),
                 pk_b: k.baby_key.public_key().to_bytes32().reduce_to_hash_out(),
                 regev_pk_digest: k.regev_pk.poseidon_digest(),
             });
@@ -457,6 +459,14 @@ fn unified_inter_channel_transfer_e2e() {
     .with_computed_digest();
     let h1_prime = a_send.balance_state.h1();
 
+    // SECURITY (TM-16): `tx_hash` is a DERIVED field, never a free-floating identifier — it is the
+    // canonical token-bearing fold over `(ids(source, dest, token_index), tx_tree_root, tx_leaf)`.
+    // All three inter-channel gates recompute it from the descriptor's own fields and refuse a
+    // mismatch fail-closed, so the test builds it with the canonical helper (a synthetic constant
+    // is not a legal descriptor and is rejected before the E-2 statement is ever reached).
+    let dest_id = ChannelId::new(7).unwrap();
+    let inter_tx_hash = inter_channel_tx_hash(a_id, dest_id, 0, tx_tree_root, tx_leaf);
+
     let inter_tx = InterChannelTx {
         tx_inclusion_proof: MerkleInclusionProof::default(),
         signed_small_block: SignedSmallBlock {
@@ -479,10 +489,10 @@ fn unified_inter_channel_transfer_e2e() {
         sender_delta_ct: sdelta.0.clone(),
         source_channel_id: a_id,
         token_index: 0,
-        destination_channel_id: ChannelId::new(7).unwrap(),
+        destination_channel_id: dest_id,
         source_pk_g: a_keys[0].pk_g(),
         seal: Bytes32::default(),
-        tx_hash: Bytes32::from_u32_slice(&[0, 0, 0, 0, 0, 0, 0, 0x502]).unwrap(),
+        tx_hash: inter_tx_hash,
         intmax_transfer_commitment: Bytes32::default(),
         recipient_memo: vec![1],
         receiver_deltas: vec![ReceiverBalanceDelta {
@@ -567,11 +577,10 @@ fn unified_inter_channel_transfer_e2e() {
         Bytes32::default(),
         "bp IMSB signature recorded"
     );
-    let single = SingleSigCircuit::new();
-    let list = ListCircuit::new(&single.verifier_data());
+    let list = ListCircuit::<F, C, D>::new();
     let list_proof = bwgen
         .borrow()
-        .build_bp_sig_list_proof(&single, &list)
+        .build_bp_sig_list_proof(&list)
         .expect("list proof");
     assert!(list_proof.is_some());
     let validity = ValidityCircuit::<F, C, D>::new(&block_chain_vd, &list.verifier_data());

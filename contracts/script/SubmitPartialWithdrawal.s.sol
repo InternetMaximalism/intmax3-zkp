@@ -73,9 +73,13 @@ contract SubmitPartialWithdrawal is Script {
             finalSettledTxChain: intent.finalSettledTxChain,
             finalSettledTxAccumulatorRoot: intent.finalSettledTxAccumulatorRoot,
             memberSetCommitment: manager.registeredMemberSetCommitment(),
-            memberAndDelegateCount: (uint16(manager.activeMemberCount()) << 8) | uint16(manager.activeDelegateCount())
+            memberCount: manager.activeMemberCount(),
+            // B-2: the registered delegate count is a FLOOR for the close bind. This mock proof lays
+            // out limb 94 AT the floor, which always satisfies the predicate.
+            minDelegateCount: uint32(manager.activeDelegateCount())
         });
-        uint256[] memory limbs = verifier.expectedCloseLimbs(fields);
+        uint256[] memory limbs =
+            verifier.expectedCloseLimbs(fields, uint32(manager.activeDelegateCount()));
         MleVerifier.MleProof memory proof;
         proof.publicInputs = limbs;
 

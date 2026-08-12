@@ -1,13 +1,13 @@
 {
   "genesis_state_root": "0x464864c822ae13e306bb41d549535412b182545fab0dbdf6c82cf103eda2103d",
-  "final_state_root": "0x62fa125313dc4741c428f6c61e601fa5a46e06ce5f064e147ed3749d666e0edf",
+  "final_state_root": "0x79c821caaa23d0f2b59f8c9ac1ee81b426517f630be44d066adb392c28828f4a",
   "registration": {
     "channel_id": 1,
     "bp_member_slot": 0,
     "member_pk_gs": [
-      "0xd56ccfa4ffe7b4d6c8db3e7aa8f537c90db8c0a5d03c2eee440507a1b460f900",
-      "0xb0ba5230b637124caa105aee7fd38fb072097791402b680a77f843fc196c645f",
-      "0x4ee9cd3df61b052b623e15a04d1888a94a00da202a8c15151744822566fe3c55"
+      "0x67e1c986a577e81db61a1a6aedaddd519996ee5f72208aac4dee9e7138df62f3",
+      "0xb1ad52347638a9c4d6b4f880894f4421d98c472447d8f42d814ea450189e07cc",
+      "0x9974000438b05a40e306da3185c36bd3325566f3e1a9fbc2f7c1a726d307a67a"
     ],
     "member_pk_bs": [
       "0x02bf3df43eee067a5534ccd95953e41a45fc27d9671cc53752ac7aeb5e2ca5e8",
@@ -56,7 +56,7 @@
     {
       "channel_id": 1,
       "timestamp": 2,
-      "tx_tree_root": "0x98ebcb18378ca8dbcb38cfcecb29ab962d8a319ee743eb13d9f1bfb846fe8f07",
+      "tx_tree_root": "0xcb53fe52e3d7fe771609565b33015396b12aa1fd055396c269934dd0cb2d0ca3",
       "key_ids": [
         1,
         0
@@ -69,10 +69,10 @@
     "initial_block_chain": "0x0000000000000000000000000000000000000000000000000000000000000000",
     "initial_ext_commitment": "0x464864c822ae13e306bb41d549535412b182545fab0dbdf6c82cf103eda2103d",
     "final_block_number": 3,
-    "final_block_chain": "0xd3c7697c17ee5b658a5ac10e268f928f9e0ca10c44fb593876f9f513665edc2a",
-    "final_ext_commitment": "0x62fa125313dc4741c428f6c61e601fa5a46e06ce5f064e147ed3749d666e0edf",
+    "final_block_chain": "0x0fa2339811229fc8c938f14dc6d6d83704725c55c49ff2cabb58f911d64371a0",
+    "final_ext_commitment": "0x79c821caaa23d0f2b59f8c9ac1ee81b426517f630be44d066adb392c28828f4a",
     "prover": "0x0000000000000000000000000000000000000000"
   },
-  "proof_hash": "0x0000000000000000000000000000000000000000000000000f8c003d71df8d57",
-  "proof_length": 208035
+  "proof_hash": "0x00000000000000000000000000000000000000000000000011f6ea749878659e",
+  "proof_length": 205345
 }

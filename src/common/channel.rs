@@ -1421,13 +1421,62 @@ impl ChannelTransition {
     }
 }
 
-/// Validate the N-of-N member signature set against the channel's ACTIVE member pubkey hashes by
-/// slot (pad-to-MAX D6: exactly `member_count` signatures, one per active slot).
+/// A structurally well-formed, cryptographically MEANINGLESS cosign blob of exactly the Falcon
+/// cosign length, for fixtures that exercise record/slot STRUCTURE and carry no real signature.
 ///
-/// One SPHINCS+ key per member (N-of-N, no threshold): `signatures[i].member_slot == i` and
-/// `signatures[i].pk_g == record.member_pk_gs[i]` for every active
-/// slot `i in 0..member_count`.
+/// (Phase-4 review MINOR-3: an orphaned rustdoc paragraph from the retired
+/// `validate_all_member_signatures` — still describing "one SPHINCS+ key per member" — had been
+/// left attached to this function, so a helper whose ONE job is to be an explicit non-signature
+/// was introduced by a paragraph about N-of-N signature validation. Removed.)
+///
+/// INTENTIONALLY NOT A SIGNATURE: it starts with the v1 version byte and has the exact cosign
+/// length, so it passes the structural LENGTH gate in `validate_all_member_signatures` and
+/// nothing else. Note that gate checks length only — the version byte is checked by the Falcon
+/// decoder on the authenticating paths, not here. Every path that actually authenticates a
+/// co-signature (`wallet_core::verify_all_signatures`, the close/cancel aggregation circuits)
+/// recomputes the digest and verifies real Falcon signatures, and rejects this.
+pub fn structural_cosign_placeholder(tag: u8) -> Vec<u8> {
+    let mut v = vec![tag; crate::falcon_sig::FALCON_COSIGN_BLOB_BYTES];
+    v[0] = crate::falcon_sig::FALCON_SIG_V1;
+    v
+}
+
+/// Structural validation of a channel-STATE co-signature set: one signature per member slot, in
+/// slot order, each carrying the registered `pk_g` and a blob of the FIXED Falcon cosign length.
+///
+/// SECURITY (TM-C8 / O-9, falcon-sig Phase 4): the length gate replaces the old "non-empty"
+/// sanity check. It is a STRUCTURAL gate, not a cryptographic one — the real check is
+/// `wallet_core::verify_all_signatures`, which verifies each signature against the registered
+/// `pk_g` and the recomputed IMCH digest. Its value here is that a retired-scheme blob (~76 KB
+/// `SingleSigCircuit` proof) cannot pass a check that only ever asked for "some bytes".
 pub fn validate_all_member_signatures(
+    record: &ChannelRecord,
+    signatures: &[MemberSignature],
+) -> Result<(), ChannelError> {
+    validate_member_signature_slots(record, signatures)?;
+    for (slot, actual) in signatures.iter().enumerate() {
+        if actual.signature.len() != crate::falcon_sig::FALCON_COSIGN_BLOB_BYTES {
+            return Err(ChannelError::InvalidSignatureSet(format!(
+                "signature at slot {slot} is {} bytes, expected the fixed Falcon cosign encoding \
+                 ({} bytes)",
+                actual.signature.len(),
+                crate::falcon_sig::FALCON_COSIGN_BLOB_BYTES
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// Slot / identity structure only: one entry per member slot, in slot order, each carrying the
+/// registered `pk_g` and a NON-EMPTY signature field.
+///
+/// Used where the `MemberSignature` entries are NOT channel-state co-signatures and so do not
+/// carry the Falcon cosign encoding — currently only the `SignedSmallBlock` artifact, whose
+/// signature bytes are a base-layer placeholder at this layer (the real small-block signature
+/// check is the B-2 validity-proof path: the bp's Falcon signature verified in-circuit by the
+/// list step and folded into `bp_sig_chain`). This is the check that function has always made;
+/// [`validate_all_member_signatures`] adds the fixed-length gate on top for the co-sign path.
+pub fn validate_member_signature_slots(
     record: &ChannelRecord,
     signatures: &[MemberSignature],
 ) -> Result<(), ChannelError> {
@@ -1692,17 +1741,17 @@ mod tests {
                 MemberSignature {
                     member_slot: 0,
                     pk_g: pubkey_hash(10),
-                    signature: vec![1],
+                    signature: structural_cosign_placeholder(1),
                 },
                 MemberSignature {
                     member_slot: 1,
                     pk_g: pubkey_hash(11),
-                    signature: vec![3],
+                    signature: structural_cosign_placeholder(3),
                 },
                 MemberSignature {
                     member_slot: 2,
                     pk_g: pubkey_hash(12),
-                    signature: vec![5],
+                    signature: structural_cosign_placeholder(5),
                 },
             ],
         }
@@ -2025,6 +2074,24 @@ mod tests {
         let mut sigs = sample_state().member_signatures;
         sigs[2].member_slot = 0;
         assert!(validate_all_member_signatures(&record, &sigs).is_err());
+
+        // SECURITY (TM-C8 / O-9, falcon-sig Phase 4): the structural gate is now a FIXED LENGTH,
+        // not "non-empty". A retired-scheme blob (a ~76 KB `SingleSigCircuit` proof) and a
+        // one-byte stub are both rejected here, before any crypto runs.
+        let mut sigs = sample_state().member_signatures;
+        sigs[1].signature = vec![1];
+        assert!(
+            validate_all_member_signatures(&record, &sigs).is_err(),
+            "a short signature blob must fail the fixed-length structural gate"
+        );
+        let mut sigs = sample_state().member_signatures;
+        sigs[1].signature = vec![0x52u8; 77_872];
+        assert!(
+            validate_all_member_signatures(&record, &sigs).is_err(),
+            "a legacy-sized proof blob must fail the fixed-length structural gate"
+        );
+        // The slot-only variant is deliberately looser (the small-block artifact uses it).
+        assert!(validate_member_signature_slots(&record, &sigs).is_ok());
 
         // A zero regev_pk_root unanchors the member keys and must be rejected.
         let mut unanchored = record.clone();

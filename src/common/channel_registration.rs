@@ -52,7 +52,7 @@ use crate::{
 /// SECURITY (canonicality): because the circuit witnesses the identity as a `PoseidonHashOut`
 /// (4 Goldilocks limbs, each < p) and derives the 32-byte keccak form via `from_hash_out`, the L1
 /// `bytes32` registered MUST be the canonical reduction `Bytes32::from(PoseidonHashOut)` of the
-/// member's identity — i.e. `pk_g = Bytes32::from(GoldilocksSecretKey::public_key_hash_out())` and
+/// member's identity — i.e. `pk_g = Bytes32::from(FalconKeys::pk_g() as a hash out)` and
 /// `regev_pk_digest = Bytes32::from(RegevPk::poseidon_digest())`. This is exactly the member
 /// identity the consumption side (`block_hash_chain::update_channel_tree`) proves slot inclusion
 /// against, so both sides bind the identical canonical value. A non-canonical `bytes32` simply

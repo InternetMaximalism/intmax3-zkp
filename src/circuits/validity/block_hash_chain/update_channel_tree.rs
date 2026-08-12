@@ -1016,7 +1016,8 @@ impl UpdateUserTreeTarget {
             );
 
             // -- (4) fold (signed_digest, bp_pk_g) into the bp_sig_chain accumulator --
-            // SECURITY: identical `poseidon_sig::list` gadgets to the producer (`ListStepCircuit`)
+            // SECURITY: identical `poseidon_sig::list` gadgets to the producer
+            // (`falcon_sig::list::ListStepCircuit`)
             // and the consumer, so the chain the validity circuit rebuilds matches bit-for-bit.
             let leaf = leaf_target(builder, &signed_digest, &bp_pk_g);
             let prev_chain_hashout = bp_sig_chain.to_hash_out(builder);
@@ -1250,7 +1251,8 @@ mod tests {
             u63::BlockNumber,
         },
         ethereum_types::bytes32::Bytes32,
-        poseidon_sig::{GoldilocksSecretKey, list::list_commitment},
+        falcon_sig::FalconKeys,
+        poseidon_sig::list::list_commitment,
         regev::{RegevPk, hash_sig::BabyBearSecretKey},
     };
     use plonky2::{
@@ -1296,24 +1298,32 @@ mod tests {
     /// Build the channel's 3-member tree, with the signer at slot 0 (the bp). `signer_pk_b` is the
     /// signer's BabyBear hash-sig public key, committed in the slot-0 leaf so the bp's witnessed
     /// `member_pk_bs[0]` matches the registered leaf.
+    /// A member identity `pk_g`. falcon-sig Phase 3: the registered identity is the FALCON digest
+    /// `Poseidon(IMFK ‖ encode(h))`. This circuit is agnostic to the DERIVATION (it consumes an
+    /// opaque canonical 32-byte digest), but the tests use real Falcon identities so they mirror
+    /// what the validity path now actually carries.
+    fn falcon_pk_g(seed: u8) -> Bytes32 {
+        FalconKeys::from_seed([seed; 32]).pk_g()
+    }
+
     fn build_member_tree(
-        signer: &GoldilocksSecretKey,
+        signer_pk_g: Bytes32,
         signer_regev: &RegevPk,
         signer_pk_b: PoseidonHashOut,
     ) -> MemberTree {
         let mut member_tree = MemberTree::init();
         member_tree.push(MemberLeaf {
-            pk_g: signer.public_key_hash_out(),
+            pk_g: signer_pk_g.try_into().expect("canonical pk_g"),
             pk_b: signer_pk_b,
             regev_pk_digest: signer_regev.poseidon_digest(),
         });
         member_tree.push(MemberLeaf {
-            pk_g: GoldilocksSecretKey::from_seed([2u8; 32]).public_key_hash_out(),
+            pk_g: falcon_pk_g(2).try_into().expect("canonical pk_g"),
             pk_b: member_pk_b(2),
             regev_pk_digest: regev_pk(2).poseidon_digest(),
         });
         member_tree.push(MemberLeaf {
-            pk_g: GoldilocksSecretKey::from_seed([3u8; 32]).public_key_hash_out(),
+            pk_g: falcon_pk_g(3).try_into().expect("canonical pk_g"),
             pk_b: member_pk_b(3),
             regev_pk_digest: regev_pk(3).poseidon_digest(),
         });
@@ -1432,7 +1442,7 @@ mod tests {
     /// Build a real signing block: slot 0 (the bp) updates, the bp's `(IMSB_digest, pk_g)` is
     /// folded into bp_sig_chain, and the member inclusion of `pk_g` at slot 0 is proven.
     fn signing_update_tree(
-        signer: &GoldilocksSecretKey,
+        signer_pk_g: Bytes32,
         prev_bp_sig_chain: Bytes32,
         member_tree: &MemberTree,
         signer_regev: &RegevPk,
@@ -1494,7 +1504,7 @@ mod tests {
         let send_merkle_proof = send_tree.prove(prev_user_leaf.index.into());
         let member_merkle_proof = member_tree.prove(0); // bp is at slot 0
 
-        let bp_pk_g: Bytes32 = signer.public_key();
+        let bp_pk_g: Bytes32 = signer_pk_g;
         let msg_fields = SmallBlockMessageFields {
             bp_member_slot: 0,
             bp_pk_g,
@@ -1537,13 +1547,13 @@ mod tests {
     #[cfg_attr(debug_assertions, ignore = "run with --release")]
     #[test]
     fn test_update_user_tree_folds_bp_sig_chain() {
-        let signer = GoldilocksSecretKey::from_seed([0x11; 32]);
+        let signer = falcon_pk_g(0x11);
         let signer_regev = regev_pk(1);
         let signer_pk_b = member_pk_b(1);
-        let member_tree = build_member_tree(&signer, &signer_regev, signer_pk_b);
+        let member_tree = build_member_tree(signer, &signer_regev, signer_pk_b);
         let prev_bp_sig_chain = Bytes32::default();
         let (tree, signed_digest) = signing_update_tree(
-            &signer,
+            signer,
             prev_bp_sig_chain,
             &member_tree,
             &signer_regev,
@@ -1552,7 +1562,7 @@ mod tests {
 
         let public_inputs = tree.to_public_inputs().unwrap();
         // The new chain equals folding (signed_digest, pk_g) onto the empty chain.
-        let expected = list_commitment(&[(signed_digest, signer.public_key())]);
+        let expected = list_commitment(&[(signed_digest, signer)]);
         assert_eq!(public_inputs.new_bp_sig_chain, expected);
         assert_eq!(public_inputs.prev_bp_sig_chain, prev_bp_sig_chain);
 
@@ -1572,13 +1582,13 @@ mod tests {
     #[cfg_attr(debug_assertions, ignore = "run with --release")]
     #[test]
     fn update_user_tree_rejects_pubkey_not_in_member_tree() {
-        let signer = GoldilocksSecretKey::from_seed([0x44; 32]);
+        let signer = falcon_pk_g(0x44);
         let signer_regev = regev_pk(7);
         // Member tree at slot 0 holds a DIFFERENT key, not the signer's.
-        let other = GoldilocksSecretKey::from_seed([0x99; 32]);
-        let member_tree = build_member_tree(&other, &regev_pk(8), member_pk_b(8));
+        let other = falcon_pk_g(0x99);
+        let member_tree = build_member_tree(other, &regev_pk(8), member_pk_b(8));
         let (tree, _digest) = signing_update_tree(
-            &signer,
+            signer,
             Bytes32::default(),
             &member_tree,
             &signer_regev,

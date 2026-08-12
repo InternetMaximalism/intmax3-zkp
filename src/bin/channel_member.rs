@@ -98,7 +98,7 @@ use plonky2::{
 use rand010::{SeedableRng, rngs::StdRng};
 use serde::{Deserialize, Serialize};
 
-// Base-layer proof config (matches `BalanceProcessor` / `poseidon_sig::circuit`).
+// Base-layer proof config (matches `BalanceProcessor` / `wallet_core`).
 type BF = GoldilocksField;
 type BC = PoseidonGoldilocksConfig;
 const BD: usize = 2;
@@ -225,8 +225,51 @@ struct ControlledMember {
     token_witnesses: Vec<TokenWitness>,
 }
 
+/// Schema version stamped into every `cli_state.json` this build writes.
+///
+/// SECURITY (deposit-import-threat-model.md §10.8 finding 2): the three replay ledgers below used
+/// to be `#[serde(default)]`, so a state file that LACKED or differently-NAMED a ledger key
+/// deserialized to an EMPTY ledger and every `contains()` refusal built on it silently passed.
+/// That is not hypothetical — it already happened once when `applied_tx_hashes` was renamed to
+/// `applied_tx_identities` and the old entries were dropped without a diagnostic. A security
+/// ledger that resets itself in silence is worse than no ledger, because the operator believes it
+/// is running. Bump this whenever the on-disk shape of a ledger changes.
+const STATE_SCHEMA_VERSION: u32 = 1;
+
+/// The replay-ledger keys `cli_state.json` MUST carry. SECURITY: `load_state` checks for these BY
+/// NAME and fails LOUDLY on absence — the enumeration is deliberately in one auditable place. Add
+/// a key here the moment a new ledger is added; RENAMING a key here without a
+/// `STATE_SCHEMA_VERSION` bump is the exact mistake this list exists to make impossible to repeat.
+const REQUIRED_LEDGER_KEYS: [&str; 3] = [
+    "applied_tx_identities",
+    "spent_tx_identities",
+    "imported_deposits",
+];
+
+/// Always serialize the CURRENT schema version, whatever the in-memory value says, so no write can
+/// ever stamp a file with an older schema than it actually has.
+fn serialize_current_schema_version<S: serde::Serializer>(
+    _v: &u32,
+    s: S,
+) -> Result<S::Ok, S::Error> {
+    s.serialize_u32(STATE_SCHEMA_VERSION)
+}
+
+// SECURITY (`deny_unknown_fields`): an unrecognised key is a hard error rather than a silent drop.
+// Combined with the ABSENCE of `#[serde(default)]` on the ledgers below, this makes the on-disk
+// key set an EXACT match of the struct in both directions: a renamed ledger fails as BOTH a
+// missing field and an unknown one, so a rename can never again quietly reset a ledger to empty.
 #[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct CliState {
+    /// On-disk schema version. This is the ONE retained `#[serde(default)]` in this struct, and it
+    /// is justified: every state file in existence pre-dates the field, so requiring it would
+    /// refuse to load live channels (e.g. `wallet-live-work/ch7`). Defaulting to `0` is SAFE here
+    /// — unlike a defaulted ledger — because it makes no security claim by itself: `load_state`
+    /// still verifies every ledger key is PRESENT, and it ANNOUNCES the pre-versioning file on
+    /// stderr rather than accepting it silently. A version NEWER than this build is refused.
+    #[serde(default, serialize_with = "serialize_current_schema_version")]
+    state_schema_version: u32,
     controlled: Vec<ControlledMember>,
     snapshot: ChannelSnapshot,
     /// REPLAY LEDGER (inter-channel invariant 6): the set of inter-channel REPLAY IDENTITIES
@@ -241,15 +284,17 @@ struct CliState {
     /// base `token_index` (ids limb 5), so a malicious sender could prove E-2 twice (token X and
     /// token Y) over the SAME deltas and present two IMI2-signed descriptors with DIFFERENT
     /// tx_hashes — a tx_hash-keyed set would credit the same debit twice across two tokens. The
-    /// identity strips the token limb, so the second variant is refused as a replay. (Pre-TM-16
-    /// entries under the old field name are dropped by the serde default — acceptable ONLY
-    /// because of the v3 reset; do not mix pre/post-TM-16 state files.)
+    /// identity strips the token limb, so the second variant is refused as a replay.
+    ///
+    /// SECURITY (NO `#[serde(default)]` — §10.8 finding 2): this field used to carry one, and the
+    /// TM-16 rename from `applied_tx_hashes` therefore DROPPED every pre-rename entry in silence.
+    /// A state file that does not name this key is now a LOUD `load_state` failure with a
+    /// migration instruction; see `REQUIRED_LEDGER_KEYS` and `migrate-state`.
     ///
     /// Stored as a `HashSet` (Phase 5a review MINOR): membership checks are O(1) instead of a
     /// linear scan over an unbounded Vec; the ledger only ever grows for the channel's lifetime
     /// (pruned implicitly by the channel close — a closed channel's state dir is retired). JSON
     /// serialization stays an array (element order is not meaningful and not relied upon).
-    #[serde(default)]
     applied_tx_identities: HashSet<Bytes32>,
     /// SPENT LEDGER (A side): the set of inter-channel REPLAY IDENTITIES already DEBITED out of
     /// THIS channel as the SOURCE. A debit is applied at most once; if the identity is already
@@ -257,8 +302,7 @@ struct CliState {
     /// counterpart to `applied_tx_identities` — together they make a transfer atomic AND
     /// single-use on both ends. Same TM-16 token-free keying as `applied_tx_identities` (the
     /// A-side leg of the cross-token double-debit defense). Same `HashSet` rationale as
-    /// `applied_tx_identities`.
-    #[serde(default)]
+    /// `applied_tx_identities`, and the same NO-`#[serde(default)]` rule for the same reason.
     spent_tx_identities: HashSet<Bytes32>,
     /// CONSUMED-DEPOSIT LEDGER (L1 import replay protection — deposit-import-threat-model.md §4):
     /// the set of L1 deposits already CREDITED into this channel, keyed on the canonical deposit
@@ -283,7 +327,10 @@ struct CliState {
     /// protocol-level fix (a real indexed nullifier set checked in-circuit) is a design change
     /// beyond this vulnerability. What this ledger DOES guarantee is that a replay is no longer
     /// reachable by an unauthenticated remote caller through any relay/api endpoint.
-    #[serde(default)]
+    ///
+    /// SECURITY (NO `#[serde(default)]`): this ledger is also the only backstop that would catch a
+    /// re-import of the channel's own backing deposit if the backing-deposit guard were disarmed
+    /// (§10.4 Finding B). Both defences used to fail silently and independently; neither does now.
     imported_deposits: HashSet<String>,
 }
 
@@ -295,6 +342,14 @@ struct BrowserContribution {
     pk_g: String,
     /// P3: the browser member's BabyBear hash-sig public key `pk_b` (canonical Bytes32 hex, A11).
     pk_b: String,
+    /// SECURITY (A-1): ACCEPTED FOR WIRE COMPATIBILITY AND THEN IGNORED. This used to be installed
+    /// verbatim as the delegate's opening balance at genesis (`create_channel`) and at join
+    /// (`join_delegate`) — a self-declared, Regev-encrypted, unbacked amount that no cosigner can
+    /// inspect and that `cmd_setup_backing`'s `fund` never accounted for. Both paths now open the
+    /// delegate's slot at the canonical zero ciphertext instead, so this field has NO effect on
+    /// state. It stays REQUIRED (no serde default) so existing browsers/relays that send it are
+    /// unaffected. Do not start reading it again without a backing proof alongside it.
+    #[allow(dead_code)]
     genesis_ct: RegevCiphertext,
     /// B-1b: the joining delegate's L1 exit address (hex, 0x-prefixed 20 bytes; the browser
     /// passes the user's MetaMask address). REQUIRED and NONZERO — serde has no default, so an
@@ -324,9 +379,245 @@ fn die(msg: impl std::fmt::Display) -> ! {
     exit(1);
 }
 
-fn keys_for(seed: u64) -> MemberKeys {
-    MemberKeys::generate(&mut StdRng::seed_from_u64(seed))
+/// Env var naming the FILE that holds this host's co-signer master secret (production).
+///
+/// SECURITY: the env carries only a PATH — a path is not a secret, so it is safe for the variable
+/// to be visible in `ps -E` / `/proc/PID/environ` and to be inherited by the ~27 `cast`
+/// subprocesses. The secret itself is reachable only through the filesystem, where unix
+/// permissions protect it AND can be verified (see `load_cosigner_master`). An env var holding the
+/// secret DIRECTLY was rejected for exactly the inheritance/visibility reason
+/// (doc/tasks/cosigner-key-provenance.md §4.1).
+const COSIGNER_KEYFILE_ENV: &str = "INTMAX_COSIGNER_KEYFILE";
+
+/// Env var that OPTS IN to the fully-derivable, publicly-known test keys.
+///
+/// SECURITY: deliberately long and screaming. There is NO default, NO precedence rule and NO
+/// truthiness parsing — the only accepted value is the exact string "1", and setting it TOGETHER
+/// with `COSIGNER_KEYFILE_ENV` is a hard error rather than a downgrade. A correctly provisioned
+/// production host therefore cannot be silently reverted to test keys: adding this flag there is
+/// an OUTAGE, not a weakening (doc/tasks/cosigner-key-provenance.md §5.5).
+const INSECURE_KEYS_ENV: &str = "INTMAX_INSECURE_DETERMINISTIC_KEYS";
+
+/// Domain tag folded in when normalising the operator's key file to a 32-byte master.
+const KDF_MASTER_DOMAIN: &[u8] = b"INTMAX3/CLI-COSIGNER-MASTER/v1";
+/// Domain tag folded in when deriving a per-label key seed from the master.
+///
+/// SECURITY: distinct from `KDF_MASTER_DOMAIN` so a master value can never collide with a
+/// per-slot seed. Keccak is a sponge, so there is no length-extension concern in either step.
+const KDF_SLOT_DOMAIN: &[u8] = b"INTMAX3/CLI-COSIGNER-KEYS/v1";
+
+/// Where this process's co-signer key material comes from. Resolved EXACTLY ONCE per process
+/// (`OnceLock` below) so two calls in one invocation can never disagree about provenance.
+enum KeyProvenance {
+    /// Production: every key is derived by KDF from an operator-provisioned external secret.
+    ///
+    /// SECURITY: `Zeroizing` wipes the master on drop, and this variant deliberately has no
+    /// `Debug`/`Display` — the master must never be formattable into a log line, a `die` message
+    /// or a panic payload.
+    Master(zeroize::Zeroizing<[u8; 32]>),
+    /// TEST ONLY: the legacy `seed_from_u64` derivation, whose outputs are computable by anyone
+    /// who can read this public repository.
+    InsecureDeterministic,
 }
+
+/// SECURITY (the whole point of this module): key material must come from an EXTERNAL SECRET,
+/// never from a compile-time constant. `CLI_COSIGNER_SEED_BASE` used to be that constant, which
+/// meant every co-signer private key of every CLI/API-driven channel was derivable from the public
+/// source tree — full N-of-N custody of channel funds for any reader of the repo. Full analysis,
+/// including what a code fix can NOT undo for already-created channels, is in
+/// doc/tasks/cosigner-key-provenance.md.
+///
+/// FAIL CLOSED: this function has no fallback branch. Every unconfigured, ambiguously configured
+/// or malformed state calls `die`. Forgetting to provision a host makes the CLI stop working
+/// loudly; it can never make it work insecurely and silently.
+fn key_provenance() -> &'static KeyProvenance {
+    static PROVENANCE: std::sync::OnceLock<KeyProvenance> = std::sync::OnceLock::new();
+    PROVENANCE.get_or_init(|| {
+        let keyfile = std::env::var(COSIGNER_KEYFILE_ENV).ok().filter(|s| !s.is_empty());
+        let insecure = std::env::var(INSECURE_KEYS_ENV).ok().filter(|s| !s.is_empty());
+        match (keyfile, insecure) {
+            // SECURITY: ambiguous provenance is REFUSED, never resolved by precedence. This is
+            // what makes the insecure flag an outage rather than a downgrade on a provisioned
+            // production host.
+            (Some(_), Some(_)) => die(format!(
+                "{COSIGNER_KEYFILE_ENV} and {INSECURE_KEYS_ENV} are BOTH set — refusing to guess \
+                 which key material to use. Unset one. (If this is production, unset \
+                 {INSECURE_KEYS_ENV}.)"
+            )),
+            (Some(path), None) => KeyProvenance::Master(load_cosigner_master(&path)),
+            (None, Some(flag)) => {
+                // SECURITY: exact-match only. No truthiness parsing — "0", "false", "no" and any
+                // typo DIE rather than being interpreted, in either direction.
+                if flag != "1" {
+                    die(format!(
+                        "{INSECURE_KEYS_ENV} must be exactly \"1\" to opt in to insecure test keys \
+                         (got {flag:?}); it is not parsed for truthiness"
+                    ));
+                }
+                eprintln!(
+                    "\n\
+                     !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!\n\
+                     !! INSECURE DETERMINISTIC KEYS ARE ACTIVE ({INSECURE_KEYS_ENV}=1).\n\
+                     !! Every co-signer private key this process uses is derived from a constant\n\
+                     !! in a PUBLIC repository and is computable by anyone. Any channel created,\n\
+                     !! signed or closed by this process offers NO custody of funds whatsoever.\n\
+                     !! TESTS ONLY. If you are seeing this on a deployed host, STOP: set\n\
+                     !! {COSIGNER_KEYFILE_ENV} instead and treat existing channels as compromised.\n\
+                     !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!\n"
+                );
+                KeyProvenance::InsecureDeterministic
+            }
+            (None, None) => die(format!(
+                "no co-signer key material configured: set {COSIGNER_KEYFILE_ENV}=/path/to/secret \
+                 (a file with 0600 permissions containing >=32 bytes of hex, e.g. `umask 077; \
+                 openssl rand -hex 32 > .claude/cosigner.key`). REFUSING to fall back to derived \
+                 keys — the old constant-seeded keys were publicly computable. Tests may set \
+                 {INSECURE_KEYS_ENV}=1 instead. See doc/tasks/cosigner-key-provenance.md"
+            )),
+        }
+    })
+}
+
+/// Read + fail-closed-validate the operator's co-signer master secret.
+///
+/// SECURITY: every rejection below is a `die`, and NONE of the `die` messages contain file
+/// CONTENTS — they name the env var and the path only (a path is not a secret). The decoded bytes
+/// live in `Zeroizing` buffers and are never formatted, printed or returned in an error.
+fn load_cosigner_master(path: &str) -> zeroize::Zeroizing<[u8; 32]> {
+    let meta = std::fs::metadata(path).unwrap_or_else(|e| {
+        die(format!(
+            "{COSIGNER_KEYFILE_ENV}={path}: cannot stat co-signer key file: {e}"
+        ))
+    });
+    if !meta.is_file() {
+        die(format!("{COSIGNER_KEYFILE_ENV}={path}: not a regular file"));
+    }
+    // SECURITY: a world- or group-readable key file is the same class of bug this whole change
+    // exists to remove, so it is REFUSED rather than warned about.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        let mode = meta.permissions().mode() & 0o777;
+        if mode & 0o077 != 0 {
+            die(format!(
+                "{COSIGNER_KEYFILE_ENV}={path}: permissions are {mode:04o}; the co-signer key file \
+                 must not be group- or world-readable. Run: chmod 600 {path}"
+            ));
+        }
+    }
+    let raw = zeroize::Zeroizing::new(std::fs::read_to_string(path).unwrap_or_else(|e| {
+        die(format!(
+            "{COSIGNER_KEYFILE_ENV}={path}: cannot read co-signer key file: {e}"
+        ))
+    }));
+    let trimmed = raw.trim();
+    let trimmed = trimmed.strip_prefix("0x").unwrap_or(trimmed);
+    // NOTE: the decode error is deliberately NOT propagated — `hex::FromHexError` renders the
+    // offending character, which is key material.
+    let bytes = zeroize::Zeroizing::new(hex::decode(trimmed).unwrap_or_else(|_| {
+        die(format!(
+            "{COSIGNER_KEYFILE_ENV}={path}: contents are not valid hex (expected >=32 bytes of \
+             hex, optionally 0x-prefixed)"
+        ))
+    }));
+    if bytes.len() < 32 {
+        die(format!(
+            "{COSIGNER_KEYFILE_ENV}={path}: only {} bytes of key material; at least 32 are \
+             required (an empty or truncated key file is refused)",
+            bytes.len()
+        ));
+    }
+    // SECURITY: catches a placeholder file created by `truncate`, a device that reads as zeros, or
+    // a hand-written file of `0000...` — all of which would otherwise "work" with a fixed key.
+    if bytes.iter().all(|b| *b == 0) {
+        die(format!(
+            "{COSIGNER_KEYFILE_ENV}={path}: key material is all zeros; refusing to derive keys \
+             from a placeholder"
+        ));
+    }
+    let mut buf = Vec::with_capacity(KDF_MASTER_DOMAIN.len() + bytes.len());
+    buf.extend_from_slice(KDF_MASTER_DOMAIN);
+    buf.extend_from_slice(&bytes);
+    let master = zeroize::Zeroizing::new(keccak_hash::keccak(&buf).0);
+    zeroize::Zeroize::zeroize(&mut buf);
+    master
+}
+
+/// Derive the 32-byte keygen seed for the public slot label `label` from the master secret.
+///
+/// SECURITY: Keccak-256 from `keccak-hash` (already this repo's hash in `falcon_sig`) — no
+/// primitive is implemented from scratch. `KDF_SLOT_DOMAIN` separates this from the master
+/// normalisation, and the fixed-width little-endian label makes distinct slots' preimages
+/// unambiguous.
+fn derive_key_seed(master: &[u8; 32], label: u64) -> zeroize::Zeroizing<[u8; 32]> {
+    let mut buf = Vec::with_capacity(KDF_SLOT_DOMAIN.len() + 40);
+    buf.extend_from_slice(KDF_SLOT_DOMAIN);
+    buf.extend_from_slice(master);
+    buf.extend_from_slice(&label.to_le_bytes());
+    let seed = zeroize::Zeroizing::new(keccak_hash::keccak(&buf).0);
+    zeroize::Zeroize::zeroize(&mut buf);
+    seed
+}
+
+/// THE SINGLE BIRTH POINT of every `MemberKeys` in this binary.
+///
+/// `seed` is NO LONGER key material: under `KeyProvenance::Master` it is a PUBLIC SLOT LABEL fed
+/// into the KDF, which is why the persisted `ControlledMember.keygen_seed` field keeps its `u64`
+/// on-disk shape (no `cli_state.json` migration) while the actual secret moves out of the source
+/// tree.
+///
+/// SECURITY (why this MUST stay the only constructor): the Phase-3 finding-7 incident was caused
+/// by a SECOND derivation existing beside this one, so `export-reg-record` registered one member
+/// set on L1 while `withdraw` proved against another. `cmd_gen_contribution` and the delegate-send
+/// reconstruction used to call `MemberKeys::generate` inline for exactly that reason; they now go
+/// through here. INVARIANT: every `MemberKeys::generate` hit in this file must be INSIDE this
+/// function (currently two — one per provenance arm). A hit anywhere else is a second derivation
+/// and must be rejected in review.
+fn keys_for(seed: u64) -> MemberKeys {
+    match key_provenance() {
+        KeyProvenance::Master(master) => {
+            MemberKeys::generate(&mut StdRng::from_seed(*derive_key_seed(master, seed)))
+        }
+        // SECURITY: reachable ONLY via an explicit `INTMAX_INSECURE_DETERMINISTIC_KEYS=1`, which
+        // printed the banner in `key_provenance`. Publicly computable by construction.
+        KeyProvenance::InsecureDeterministic => {
+            MemberKeys::generate(&mut StdRng::seed_from_u64(seed))
+        }
+    }
+}
+
+/// The CLI's canonical keygen seed base for cosigner slots.
+///
+/// SECURITY (Phase-3 review finding 7, CLOSED in Phase 4): the CLI's Falcon identities used to
+/// come from a SECOND derivation (`falcon_seed_for`) that lived beside `keys_for` and silently
+/// disagreed with what `build_channel_withdrawal` derived, so `export-reg-record` registered one
+/// member set on L1 while `withdraw` proved against another (fail-closed, but the channel became
+/// unclosable). There is now ONE derivation: `keys_for(CLI_COSIGNER_SEED_BASE + slot)` produces a
+/// `MemberKeys` whose OWN Falcon key is the identity every path uses — `close`, `cancel-close`,
+/// `export-reg-record` and `withdraw` all read it off the same object, and
+/// `build_channel_withdrawal` takes the `MemberKeys` rather than a seed slice.
+///
+/// SECURITY (CRITICAL, fixed): this constant used to BE the key material — `keys_for` seeded the
+/// keygen RNG with it directly, so every co-signer's Falcon/BabyBear/Regev SECRET key of every
+/// CLI- and API-driven channel was computable by anyone who could read this public repository.
+/// That is full N-of-N custody of channel funds. It is now only a PUBLIC SLOT LABEL fed into a
+/// KDF over an operator-provisioned external secret (see `key_provenance` / `keys_for`).
+///
+/// A code fix does NOT un-compromise channels created before it: their `pk_g` values are already
+/// bound in `ChannelRecord.member_pk_gs` on L1 and in every signed snapshot. Those member sets
+/// must be drained and retired operationally — see doc/tasks/cosigner-key-provenance.md §2.
+pub(crate) const CLI_COSIGNER_SEED_BASE: u64 = 0xC1_0000;
+
+// NOTE (detached close signing). Two helpers used to live here and are deleted:
+//   * `cli_falcon_keys(active)` — refcounted handles on the CLI cosigners' Falcon SECRET keys,
+//     derived by `close` and `cancel-close` so those commands could re-mint the N-of-N signature
+//     set. They now consume the detached cosignatures the head state already carries, so NO
+//     close-lifecycle path in this binary derives a signing key.
+//   * `cli_cosigner_keys(active)` — its only caller.
+// The surviving key derivations are `cli_members()` (channel genesis, which is legitimately the
+// N members), the co-SIGNING commands (each holds the slots it controls, via
+// `keys_for(c.keygen_seed)`), and `cli_active_keys()` (PUBLIC values for `export-reg-record` /
+// `withdraw`). See doc/tasks/close-detached-signing-design.md.
 
 /// The channel's ACTIVE participant key material in slot order for the close-lifecycle paths: the 3
 /// CLI co-signing members (slots 0..3) FOLLOWED BY the delegate (slot 3). The delegate uses
@@ -339,7 +630,7 @@ fn keys_for(seed: u64) -> MemberKeys {
 fn cli_active_keys() -> Vec<MemberKeys> {
     let mut v: Vec<MemberKeys> = cli_slots()
         .into_iter()
-        .map(|slot| keys_for(0xC1_0000 + slot as u64))
+        .map(|slot| keys_for(CLI_COSIGNER_SEED_BASE + slot as u64))
         .collect();
     let delegate_seed: u64 = std::env::var("DELEGATE_SEED")
         .ok()
@@ -358,6 +649,60 @@ fn member_info_for(slot: u16, keys: &MemberKeys) -> MemberInfo {
     }
 }
 
+/// Env name of the per-slot GENESIS leaf-recipient override consumed by `create_channel`.
+fn cosigner_recipient_env(slot: u16) -> String {
+    format!("CLI_RECIPIENT_SLOT_{slot}")
+}
+
+/// The B-1b L1 exit address written into a CLI COSIGNER's genesis balance-slot leaf.
+///
+/// Default: `test_recipient_for(channel_id, slot)` — the canonical deterministic per-(channel,
+/// slot) address, which is also what the on-chain registration record carries. It is SYNTHETIC:
+/// nobody holds its key, so a claim credited to it can never be pulled (`claimWithdrawalCredit`
+/// pays `msg.sender`). That is fine for every flow that never exercises the payout, and it is the
+/// default here so no real address is baked into library/CLI code.
+///
+/// Opt-in override: `CLI_RECIPIENT_SLOT_<slot>=0x<20-byte address>` makes THAT slot's leaf a
+/// caller-chosen exit address, so an end-to-end test (or a live deployment) can route a slot's
+/// payout to a key it actually holds. Only the slot(s) named are affected; every other slot keeps
+/// the default.
+///
+/// SECURITY: this override moves the recipient in the ONE place B-1b makes authoritative — the
+/// cosigner-signed genesis balance-slot leaf, folded into H1 — so it WEAKENS NOTHING:
+///   * every cosigner signs the genesis that carries it (an override that the other members did not
+///     intend simply does not get signed / does not reproduce their expected state);
+///   * `WithdrawalClaimWitness` still requires `member.l1_withdrawal_recipient ==
+///     final_balance_state.recipients[member_index]`, and the circuit still opens the leaf, so a
+///     claim can never name an address other than the signed leaf's;
+///   * the payout still requires the recipient's own key (`claimWithdrawalCredit` credits
+///     `withdrawalCredits[token][claim.recipient]` and pays `msg.sender`).
+/// It is fail-closed: a set-but-unparsable or zero address aborts rather than silently falling
+/// back to the default (a silent fallback would strand the payout at an unclaimable address —
+/// exactly the failure this override exists to remove).
+/// INTENTIONALLY SIMPLE: no channel scoping in the env name — the CLI already scopes everything it
+/// does to `INTMAX_CHANNEL`, and genesis is written exactly once per channel.
+fn cosigner_leaf_recipient(channel_id: u32, slot: u16) -> Address {
+    let key = cosigner_recipient_env(slot);
+    match std::env::var(&key) {
+        Ok(raw) => {
+            let addr = Address::from_hex(raw.trim())
+                .unwrap_or_else(|e| die(format!("{key}: not a 20-byte L1 address ({e:?})")));
+            if addr == Address::default() {
+                die(format!(
+                    "{key} is the zero address — REFUSING (B-1b: an active slot's exit address \
+                     must be nonzero, and a zero recipient could never claim)"
+                ));
+            }
+            eprintln!(
+                "[init] slot {slot} genesis leaf recipient OVERRIDDEN to {} (via {key})",
+                addr.to_hex()
+            );
+            addr
+        }
+        Err(_) => test_recipient_for(channel_id, slot as usize),
+    }
+}
+
 fn read_json<T: for<'de> Deserialize<'de>>(path: &str) -> T {
     let s = fs::read_to_string(path).unwrap_or_else(|e| die(format!("read {path}: {e}")));
     serde_json::from_str(&s).unwrap_or_else(|e| die(format!("parse {path}: {e}")))
@@ -371,11 +716,205 @@ fn write_json<T: Serialize>(path: &str, value: &T) {
     fs::write(path, s).unwrap_or_else(|e| die(format!("write {path}: {e}")));
 }
 
-fn load_state() -> CliState {
-    read_json(STATE_FILE)
+/// Read `cli_state.json` as a JSON object, or die. Shared by `load_state` and `migrate-state` so
+/// both see exactly the same bytes and the same key set.
+fn read_state_object() -> serde_json::Map<String, serde_json::Value> {
+    let text =
+        fs::read_to_string(STATE_FILE).unwrap_or_else(|e| die(format!("read {STATE_FILE}: {e}")));
+    let raw: serde_json::Value =
+        serde_json::from_str(&text).unwrap_or_else(|e| die(format!("parse {STATE_FILE}: {e}")));
+    match raw {
+        serde_json::Value::Object(m) => m,
+        _ => die(format!(
+            "{STATE_FILE} is not a JSON object — refusing to guess its shape"
+        )),
+    }
 }
+
+/// Load the CLI state, FAILING LOUDLY if any replay ledger is absent from the file.
+///
+/// SECURITY (deposit-import-threat-model.md §10.8 finding 2 — the reason this is not a one-line
+/// `read_json`): the ledgers behind `cosign-inter-transfer`'s double-debit refusal, the credit
+/// refusal, and the L1 deposit-import replay refusal are ONLY as good as their contents. While
+/// they were `#[serde(default)]`, a file written by a build that lacked or differently-named a key
+/// deserialized to an EMPTY set, and every refusal built on it passed VACUOUSLY — with no
+/// diagnostic anywhere. The failure mode was invisible by construction, and it had already
+/// occurred once (the `applied_tx_hashes` → `applied_tx_identities` rename).
+///
+/// So absence is now a hard, explanatory error, and the only way past it is the DELIBERATE
+/// `migrate-state` command, which makes the operator acknowledge in the command line itself that
+/// they are creating an empty ledger.
+fn load_state() -> CliState {
+    let obj = read_state_object();
+
+    // 1. VERSION GATE. A file from a NEWER build may encode a ledger in a shape this build cannot
+    //    read; silently loading it would be the same vacuity in the other direction.
+    let version: u32 = match obj.get("state_schema_version") {
+        None => 0,
+        Some(v) => v
+            .as_u64()
+            .and_then(|n| u32::try_from(n).ok())
+            .unwrap_or_else(|| die(format!("{STATE_FILE}: state_schema_version is not a u32"))),
+    };
+    if version > STATE_SCHEMA_VERSION {
+        die(format!(
+            "{STATE_FILE} was written by a NEWER build (state_schema_version {version} > \
+             {STATE_SCHEMA_VERSION} understood here). Refusing to load it: a ledger this build \
+             cannot read is a ledger this build would silently treat as empty. Fail-closed."
+        ));
+    }
+
+    // 2. LEDGER PRESENCE, by name. This is the check the `#[serde(default)]`s used to swallow.
+    let missing: Vec<&str> = REQUIRED_LEDGER_KEYS
+        .iter()
+        .copied()
+        .filter(|k| !obj.contains_key(*k))
+        .collect();
+    if !missing.is_empty() {
+        die(format!(
+            "REFUSING to load {STATE_FILE}: the REPLAY LEDGER key(s) {missing:?} are ABSENT.\n\
+             These ledgers are what refuse a replayed inter-channel transfer and a re-imported L1 \
+             deposit. Loading the file anyway would give this process an EMPTY ledger, and every \
+             one of those refusals would then pass without ever running — the silent failure this \
+             check exists to prevent (deposit-import-threat-model.md §10.8).\n\
+             If this state file genuinely pre-dates the ledger(s) and you accept that past \
+             transfers/imports become replayable ONCE, run:\n  \
+             channel_member migrate-state --i-understand-this-resets-replay-ledgers\n\
+             Otherwise restore the state file that has them. Fail-closed."
+        ));
+    }
+
+    // 3. STRICT deserialization. `deny_unknown_fields` turns a ledger that is present under an OLD
+    //    name into a hard error too, instead of an ignored key plus an empty set.
+    let mut state: CliState = serde_json::from_value(serde_json::Value::Object(obj))
+        .unwrap_or_else(|e| die(format!("parse {STATE_FILE}: {e}")));
+
+    if version < STATE_SCHEMA_VERSION {
+        // OBSERVABLE, not silent: the file is accepted on the strength of the presence check
+        // above, and says so.
+        eprintln!(
+            "[state] SECURITY NOTE: {STATE_FILE} pre-dates schema versioning \
+             (state_schema_version {version} < {STATE_SCHEMA_VERSION}). Accepted because all \
+             {} replay ledgers are PRESENT; it will be stamped v{STATE_SCHEMA_VERSION} on the \
+             next save.",
+            REQUIRED_LEDGER_KEYS.len()
+        );
+    }
+    state.state_schema_version = STATE_SCHEMA_VERSION;
+    state
+}
+
 fn save_state(state: &CliState) {
+    // The version stamp is forced by `serialize_current_schema_version`, so no writer can forget
+    // it and no file can be written back claiming an older schema than it has.
     write_json(STATE_FILE, state);
+}
+
+/// ONE-TIME, EXPLICIT migration for a `cli_state.json` written before a replay ledger existed.
+///
+/// SECURITY: this is the deliberate path that replaces the old silent `#[serde(default)]`. It
+/// creates the absent ledger(s) EMPTY — exactly what the default used to do — but it (a) requires
+/// the operator to type an acknowledgement that names the consequence, (b) reports precisely which
+/// ledgers were created and what becomes replayable, and (c) REFUSES if the file carries any
+/// unrecognised key, because an unrecognised key is the signature of a ledger that was RENAMED and
+/// whose entries would be thrown away — the incident that motivated all of this.
+fn cmd_migrate_state(args: &[String]) {
+    const ACK: &str = "--i-understand-this-resets-replay-ledgers";
+    let acked = args.iter().any(|a| a == ACK);
+
+    let mut obj = read_state_object();
+    let known: [&str; 3] = ["state_schema_version", "controlled", "snapshot"];
+    let unknown: Vec<&String> = obj
+        .keys()
+        .filter(|k| !known.contains(&k.as_str()) && !REQUIRED_LEDGER_KEYS.contains(&k.as_str()))
+        .collect();
+    if !unknown.is_empty() {
+        die(format!(
+            "REFUSING to migrate {STATE_FILE}: unrecognised key(s) {unknown:?}. An unknown key is \
+             how a RENAMED replay ledger looks from here, and migrating would silently discard its \
+             entries (that is exactly how pre-TM-16 entries were lost once already). Reconcile the \
+             file by hand. Fail-closed."
+        ));
+    }
+
+    let missing: Vec<&str> = REQUIRED_LEDGER_KEYS
+        .iter()
+        .copied()
+        .filter(|k| !obj.contains_key(*k))
+        .collect();
+    let stale_version = obj
+        .get("state_schema_version")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0)
+        < u64::from(STATE_SCHEMA_VERSION);
+    if missing.is_empty() && !stale_version {
+        println!(
+            "migrate-state: nothing to do — {STATE_FILE} already carries every replay ledger at \
+             schema v{STATE_SCHEMA_VERSION}."
+        );
+        return;
+    }
+    if !missing.is_empty() && !acked {
+        die(format!(
+            "migrate-state would CREATE the replay ledger(s) {missing:?} EMPTY in {STATE_FILE}.\n\
+             CONSEQUENCE: every inter-channel transfer and every L1 deposit this channel has \
+             already credited/debited becomes replayable ONE more time, because the record that \
+             they happened will no longer exist. There is no way to reconstruct the lost entries \
+             from this file.\n\
+             If that is acceptable, re-run with {ACK}. Fail-closed."
+        ));
+    }
+
+    for k in &missing {
+        obj.insert((*k).to_string(), serde_json::Value::Array(Vec::new()));
+    }
+    obj.insert(
+        "state_schema_version".to_string(),
+        serde_json::Value::from(STATE_SCHEMA_VERSION),
+    );
+    let text = serde_json::to_string(&serde_json::Value::Object(obj)).unwrap_or_else(|e| die(e));
+    fs::write(STATE_FILE, text).unwrap_or_else(|e| die(format!("write {STATE_FILE}: {e}")));
+
+    // Prove the migrated file actually loads under the strict path before declaring success.
+    let _ = load_state();
+    if missing.is_empty() {
+        println!("migrate-state OK: {STATE_FILE} stamped schema v{STATE_SCHEMA_VERSION}.");
+    } else {
+        println!(
+            "migrate-state OK: created EMPTY replay ledger(s) {missing:?} and stamped schema \
+             v{STATE_SCHEMA_VERSION}. SECURITY: those ledgers now claim this channel has never \
+             credited or debited anything — treat any transfer/deposit predating this migration \
+             as replayable once."
+        );
+    }
+}
+
+/// Whether the channel's OWN backing deposit is on-chain yet, and therefore whether the import
+/// path's backing-deposit guard (`cmd_cosign_l1_deposit_import`) is APPLICABLE at all.
+///
+/// SECURITY (deposit-import-threat-model.md §10.6): this tri-state exists because an EMPTY tx-hash
+/// string cannot distinguish "no backing deposit exists yet" from "one exists and we lost its
+/// hash". The old scalar `deposit_tx` conflated them, and the guard `if !deposit_tx.is_empty()`
+/// therefore SKIPPED SILENTLY in exactly the case where it was needed. The point of the enum is
+/// that "the guard does not apply here" becomes a STATED, justified conclusion the code prints,
+/// never something inferred from an empty string.
+///
+/// The serde default is the UNSAFE case (`Unknown`) so that a backing file written before this
+/// field existed FAILS CLOSED rather than silently disarming the guard. See
+/// `ChannelBacking::resolved_backing_deposit_status` for the one narrow, evidence-backed exception.
+#[derive(Serialize, Deserialize, Default, PartialEq, Eq, Clone, Copy, Debug)]
+#[serde(rename_all = "snake_case")]
+enum BackingDepositStatus {
+    /// Pre-dates this field, or the CLI genuinely does not know. FAIL CLOSED: refuse to import.
+    #[default]
+    Unknown,
+    /// `setup-backing` DEFERRED the on-chain deposit to `withdraw` (`SETUP_BACKING_NO_ONCHAIN_
+    /// DEPOSIT`). No backing deposit exists on-chain yet, so no import can be one — the guard is
+    /// NOT APPLICABLE, and says so out loud.
+    Deferred,
+    /// The backing deposit is on-chain and `backing_deposit_txs` names it (plus, for legacy files,
+    /// the retained `deposit_tx` scalar).
+    Landed,
 }
 
 /// Backed-genesis parameters produced once by `setup-backing` (detail2 §F-1).
@@ -392,8 +931,26 @@ struct ChannelBacking {
     /// On-chain provenance of the REAL deposit that backs this channel (detail2 §F-1 origin).
     #[serde(default)]
     rollup: String,
+    /// LEGACY (retained for the backing files already shipped to production, which carry only this
+    /// scalar): the `setup-backing` deposit transaction. Still consulted by the import guard, but
+    /// `backing_deposit_txs` is the field new code writes and reads. Do NOT add new writers.
     #[serde(default)]
     deposit_tx: String,
+    /// Every transaction in which THIS CLI deposited to `deposit_recipient`. A SET, not a scalar:
+    /// `setup-backing` makes at most one, and `withdraw` makes one or two more (native +
+    /// ERC-20 lane) — see deposit-import-threat-model.md §10.4 Finding B, where `withdraw`'s
+    /// deposit was invisible to the import guard in EVERY mode because only the `setup-backing`
+    /// hash was ever recorded.
+    ///
+    /// SECURITY: `cmd_withdraw` BACKFILLS this (and persists it) immediately after each
+    /// `deposit()` it sends, BEFORE proceeding — so a crash between the deposit landing and the
+    /// rest of the pipeline still leaves the guard armed. Hashes are stored as written by `cast`;
+    /// comparison is always through `strip0x` + lowercase.
+    #[serde(default)]
+    backing_deposit_txs: Vec<String>,
+    /// Whether a backing deposit exists on-chain at all. Serde default = `Unknown` = FAIL CLOSED.
+    #[serde(default)]
+    backing_deposit_status: BackingDepositStatus,
     /// A-3 P5-B: the deposit salt used to derive the on-chain deposit recipient
     /// (`calculate_recipient_from_user_id(channel_id, deposit_salt)`). Persisted so `withdraw` can
     /// reconstruct the SAME deposit block (matching the already-made on-chain `deposit()`),
@@ -404,6 +961,83 @@ struct ChannelBacking {
     /// deposit_salt)`). Persisted so the relay can call `deposit()` without Rust recomputation.
     #[serde(default)]
     deposit_recipient: String,
+}
+
+/// Canonical form for comparing hex identifiers that different producers spell differently
+/// (`cast` emits `0x…`, argv and JSON may or may not). SECURITY: every comparison of a tx hash or
+/// address in this file goes through this — two spellings of one value must never key differently.
+fn strip0x(s: &str) -> String {
+    s.trim_start_matches("0x")
+        .trim_start_matches("0X")
+        .to_ascii_lowercase()
+}
+
+impl ChannelBacking {
+    /// Every tx hash this CLI knows to be a deposit it made to `deposit_recipient`, canonicalized.
+    /// The union of the legacy `deposit_tx` scalar and the `backing_deposit_txs` set — the legacy
+    /// field is included so the four production backing files (which carry only the scalar) keep
+    /// their guard armed.
+    fn known_backing_deposit_txs(&self) -> Vec<String> {
+        let mut out: Vec<String> = Vec::with_capacity(self.backing_deposit_txs.len() + 1);
+        for h in std::iter::once(&self.deposit_tx).chain(self.backing_deposit_txs.iter()) {
+            let h = strip0x(h);
+            if !h.is_empty() && !out.contains(&h) {
+                out.push(h);
+            }
+        }
+        out
+    }
+
+    /// Resolve the recorded status, applying the ONE legacy inference that is backed by evidence.
+    ///
+    /// SECURITY: a backing file written before `backing_deposit_status` existed deserializes to
+    /// `Unknown`. For such a file a NON-EMPTY `deposit_tx` is positive evidence that the
+    /// `setup-backing` deposit really was made and that we still hold its hash, so `Landed` is a
+    /// justified conclusion rather than an assumption — this is what keeps the four shipped
+    /// production backing records (deploy-staging/ch7|ch8, wallet-live-work/ch7|ch8) working. An
+    /// EMPTY `deposit_tx` on such a file carries no evidence either way and stays `Unknown`, which
+    /// fails closed.
+    ///
+    /// RESIDUAL (documented, not fixable retroactively): a LEGACY file whose channel already ran
+    /// `withdraw` under the pre-fix code has an unrecorded second deposit (§10.4 Finding B). Its
+    /// hash cannot be recovered from the file, so the guard cannot name it. Any FUTURE `withdraw`
+    /// backfills, and re-running `setup-backing` re-arms from scratch.
+    fn resolved_backing_deposit_status(&self) -> BackingDepositStatus {
+        match self.backing_deposit_status {
+            BackingDepositStatus::Unknown if !strip0x(&self.deposit_tx).is_empty() => {
+                BackingDepositStatus::Landed
+            }
+            recorded => recorded,
+        }
+    }
+}
+
+/// Append `tx_hash` to the channel backing's `backing_deposit_txs` and mark the backing deposit as
+/// `Landed`, then PERSIST immediately.
+///
+/// SECURITY (deposit-import-threat-model.md §10.4 Finding B): `withdraw` always makes a real
+/// deposit to `deposit_recipient`, and before this backfill its hash was discarded — so the import
+/// path's backing-deposit guard could not recognise it and the channel could be made to credit
+/// itself twice against one L1 escrow (wedging its own exit). Persisting happens BEFORE the
+/// caller proceeds so that a crash later in the withdraw pipeline cannot leave a landed deposit
+/// unrecorded.
+fn record_backing_deposit_tx(tx_hash: &str) {
+    if strip0x(tx_hash).is_empty() {
+        die("record_backing_deposit_tx: empty tx hash — refusing to record an unusable entry");
+    }
+    let mut backing: ChannelBacking = read_json(BACKING_FILE);
+    if !backing
+        .known_backing_deposit_txs()
+        .contains(&strip0x(tx_hash))
+    {
+        backing.backing_deposit_txs.push(tx_hash.to_string());
+    }
+    backing.backing_deposit_status = BackingDepositStatus::Landed;
+    write_json(BACKING_FILE, &backing);
+    eprintln!(
+        "[withdraw] SECURITY: recorded backing-recipient deposit {tx_hash} in {BACKING_FILE} \
+         (backing_deposit_txs, status=landed) — the import guard now refuses it."
+    );
 }
 
 fn backing_exists() -> bool {
@@ -465,6 +1099,19 @@ fn cast(args: &[&str]) -> String {
         ));
     }
     String::from_utf8_lossy(&out.stdout).to_string()
+}
+
+/// The `transactionHash` of a `cast send --json` receipt. FAIL-CLOSED: a receipt we cannot read a
+/// hash out of is a hard error, never an empty string — an empty hash is exactly what disarmed the
+/// backing-deposit guard (deposit-import-threat-model.md §10.2).
+fn parse_cast_tx_hash(send_out: &str, what: &str) -> String {
+    send_out
+        .split("\"transactionHash\":\"")
+        .nth(1)
+        .and_then(|s| s.split('"').next())
+        .filter(|h| !strip0x(h).is_empty())
+        .unwrap_or_else(|| die(format!("{what}: tx hash not found in cast --json output")))
+        .to_string()
 }
 
 /// The 32-byte ABI word at index `i` of a hex data blob (no `0x` prefix).
@@ -548,12 +1195,7 @@ fn cmd_setup_backing(args: &[String]) {
             &rpc,
             "--json",
         ]);
-        let txhash = send_out
-            .split("\"transactionHash\":\"")
-            .nth(1)
-            .and_then(|s| s.split('"').next())
-            .unwrap_or_else(|| die("deposit tx hash not found in cast output"))
-            .to_string();
+        let txhash = parse_cast_tx_hash(&send_out, "setup-backing deposit");
 
         // Read the deposit back from the LIVE receipt: depositor + the on-chain depositHashChain.
         let receipt = cast(&["receipt", &txhash, "--rpc-url", &rpc, "--json"]);
@@ -650,6 +1292,14 @@ fn cmd_setup_backing(args: &[String]) {
              a validity block is finalized (liveness caveat; see a3-close-lifecycle-spec.md Threat 7)."
         );
     }
+    // SECURITY (§10.6 L2): record the backing deposit's existence EXPLICITLY. `Deferred` is a
+    // positive statement ("no backing deposit is on-chain yet"), not the absence of a hash — the
+    // import guard prints that conclusion instead of silently skipping itself.
+    let (backing_deposit_status, backing_deposit_txs) = if no_onchain_deposit {
+        (BackingDepositStatus::Deferred, Vec::new())
+    } else {
+        (BackingDepositStatus::Landed, vec![txhash.clone()])
+    };
     write_json(
         BACKING_FILE,
         &ChannelBacking {
@@ -659,15 +1309,31 @@ fn cmd_setup_backing(args: &[String]) {
             fund,
             rollup: rollup.clone(),
             deposit_tx: txhash.clone(),
+            backing_deposit_txs,
+            backing_deposit_status,
             deposit_salt: Some(deposit_salt),
             deposit_recipient: recipient.to_hex(),
         },
     );
-    println!(
-        "setup-backing OK: REAL on-chain deposit {fund} to channel {} (IntmaxRollup {rollup}, tx {txhash}); settled_tx_chain={}. Now run `init`.",
-        channel_id_env(),
-        pis.settled_tx_chain.to_hex()
-    );
+    // SECURITY (§10.2, second aggravating detail): this line used to say "REAL on-chain deposit"
+    // UNCONDITIONALLY, so in deferred mode stdout read `… tx )` with an empty hash while the only
+    // warning went to stderr. An operator — or a stdout-scraping script — was told a deposit had
+    // been made when none had. Report what actually happened, on the stream that is read.
+    let settled = pis.settled_tx_chain.to_hex();
+    let channel = channel_id_env();
+    if no_onchain_deposit {
+        println!(
+            "setup-backing OK: NO on-chain deposit made — DEFERRED to `withdraw` \
+             (SETUP_BACKING_NO_ONCHAIN_DEPOSIT is set). Channel {channel} is backed by an \
+             off-chain balance proof only until `withdraw` runs (IntmaxRollup {rollup}); \
+             settled_tx_chain={settled}. Now run `init`."
+        );
+    } else {
+        println!(
+            "setup-backing OK: REAL on-chain deposit {fund} to channel {channel} (IntmaxRollup \
+             {rollup}, tx {txhash}); settled_tx_chain={settled}. Now run `init`."
+        );
+    }
 }
 
 /// A-3 P3: the close-intent descriptor written to `close_intent.json` — the SAME schema
@@ -772,14 +1438,18 @@ fn cmd_close(args: &[String]) {
         .and_then(|s| Bytes32::from_hex(&s).ok())
         .unwrap_or_else(|| Bytes32::from_u32_slice(&[9, 8, 7, 6, 0, 0, 0, 0]).unwrap());
 
-    // Load the final signed state, the N ACTIVE co-signing members' keys (CLI controls slots
-    // 0..member_count), and the base-layer balance proof.
+    // Load the final signed state and the base-layer balance proof.
+    //
+    // SECURITY (detached close signing, design Option A): this command derives NO co-signer key.
+    // The N-of-N Falcon cosignatures the close proof needs are already in the head state — every
+    // route to becoming the head runs `verify_all_signatures` (`finalize`) or constructs the full
+    // set (`create-channel` / `cosign`), and those signatures are over `state.signing_digest()`,
+    // which IS the digest the close circuit binds. Re-deriving keys here to re-mint equivalent
+    // signatures is what forced one process to hold every member's secret key; it is gone.
     let st = load_state();
     let state = st.snapshot.state.clone();
+    let record = st.snapshot.record.clone();
     let member_count = state.balance_state.member_count as usize;
-    let member_keys: Vec<MemberKeys> = (0..member_count)
-        .map(|slot| keys_for(0xC1_0000 + slot as u64))
-        .collect();
     let (balance_vd, att, backing) = load_backing();
     let balance_proof = ProofWithPublicInputs::<BF, BC, BD>::from_bytes(
         att.balance_proof.clone(),
@@ -792,9 +1462,10 @@ fn cmd_close(args: &[String]) {
     );
     let prover = CloseProver::new(&balance_vd);
     let witness = prover
-        .build_full_witness(
+        .build_full_witness_from_signatures(
+            &record,
             &state,
-            &member_keys,
+            &state.member_signatures,
             balance_proof,
             close_nonce,
             burn_tx_hash,
@@ -1084,7 +1755,7 @@ fn cmd_claim(args: &[String]) {
         .unwrap_or_else(|e| die(format!("reconstruct close intent: {e:?}")));
 
     let keys = keys_for(0xC1_0000 + member_slot as u64);
-    let member_pk_g = keys.signing_key.public_key();
+    let member_pk_g = keys.pk_g();
 
     eprintln!(
         "[claim] building withdrawal claim for slot {member_slot} token {token_slot} + proving (HEAVY)…"
@@ -1245,14 +1916,17 @@ fn cmd_cancel_close(args: &[String]) {
         .cloned()
         .unwrap_or_else(|| "http://localhost:8545".to_string());
 
-    // The REVIVED (later) signed state is the current committed head; the N co-signing members'
-    // keys are derived deterministically (slots 0..member_count), exactly as `close` does.
+    // The REVIVED (later) signed state is the current committed head. It already carries the N-of-N
+    // cosignatures over its own IMCH digest, which is exactly what the cancel circuit binds.
+    //
+    // SECURITY (detached close signing, design Option A / X-3): this command derives NO co-signer
+    // key either. Cancelling a hostile close used to require all N secret keys, which meant only
+    // the coordinator could cancel — the very party a cancel defends against. Any holder of a
+    // later co-signed head can now build this proof.
     let st = load_state();
     let revived_state = st.snapshot.state.clone();
+    let record = st.snapshot.record.clone();
     let member_count = revived_state.balance_state.member_count as usize;
-    let member_keys: Vec<MemberKeys> = (0..member_count)
-        .map(|slot| keys_for(0xC1_0000 + slot as u64))
-        .collect();
 
     // The PENDING close being cancelled — the EXACT `CloseIntent` `close` froze on-chain, read back
     // losslessly (NOT a hex-string descriptor round-trip), so the proof's `close_intent_digest`
@@ -1272,7 +1946,12 @@ fn cmd_cancel_close(args: &[String]) {
     );
     let prover = CancelCloseProver::new();
     let witness = prover
-        .build_full_witness(&revived_state, &member_keys, &close_intent)
+        .build_full_witness_from_signatures(
+            &record,
+            &revived_state,
+            &revived_state.member_signatures,
+            &close_intent,
+        )
         .unwrap_or_else(|e| die(format!("build cancel-close witness: {}", e.0)));
     let cancel_proof = prover
         .prove(&witness)
@@ -1419,7 +2098,7 @@ fn cmd_post_close_claim(args: &[String]) {
     let source_tx: InterChannelTx = source_desc.inter_channel_tx.clone();
 
     let keys = keys_for(0xC1_0000 + receiver_slot as u64);
-    let receiver_pk_g = keys.signing_key.public_key();
+    let receiver_pk_g = keys.pk_g();
 
     eprintln!(
         "[post-close-claim] building claim for slot {receiver_slot} (tx index {incoming_tx_index}) + proving + MLE (HEAVY)…"
@@ -1663,10 +2342,15 @@ fn cmd_withdraw(args: &[String]) {
 
     // P5-B: INTEGRATED (a backed channel from `setup-backing`) vs STANDALONE (self-contained P4
     // path). Integrated binds the withdrawal to the channel's REAL co-signing members + REAL
-    // deposit so ONE on-chain registration + deposit serves both the close and withdraw paths;
-    // the deposit was already made on-chain by `setup-backing`, so we do NOT deposit again
-    // here. Standalone keeps the P4 behavior (self-generated registration + its own deposit,
+    // deposit so ONE on-chain registration + deposit serves both the close and withdraw paths.
+    // Standalone keeps the P4 behavior (self-generated registration + its own deposit,
     // env-tunable amounts).
+    //
+    // CORRECTED (deposit-import-threat-model.md §10.4): this comment used to claim "the deposit
+    // was already made on-chain by `setup-backing`, so we do NOT deposit again here". That is
+    // FALSE and was load-bearing for a security argument — `withdraw` ALWAYS makes its own
+    // `deposit()` below (step 3), in integrated mode too. Its hash is now backfilled into
+    // `backing_deposit_txs` so the import guard can recognise it.
     let integrated = backing_exists();
     let (deposit_amount, withdrawal_amount, deposit_salt, cli_members): (
         u64,
@@ -1684,9 +2368,15 @@ fn cmd_withdraw(args: &[String]) {
         });
         // ACTIVE set = 3 members + delegate. Option B: `build_channel_withdrawal` registers the
         // COSIGNER slice only (delegate_count = 0), matching `export-reg-record`'s cosigner-only
-        // deploy registration, so finalize matches. NOTE (B-2 dependency): an on-chain CLOSE of a
-        // delegate-bearing channel still exposes its live delegate_count in the close PI — the
-        // Manager-side count reconciliation moves to the B-2 contract change.
+        // deploy registration, so finalize matches.
+        //
+        // B-2 (RESOLVED, doc/tasks/b2-delegate-close-threat-model.md): an on-chain CLOSE of a
+        // delegate-bearing channel still exposes its live `delegate_count` in the close PI, and the
+        // Manager's registered count is now a FLOOR rather than an exact expected value, so the
+        // mismatch is no longer a refusal. `export-reg-record` may (and does) keep emitting
+        // `delegate_count = 0` — under Option B that is CORRECT by design, not a tolerated gap:
+        // L1 registration is cosigners-only and the delegate half of the boundary is rooted in the
+        // N-of-N cosigner signature over the H1 that limb 94 decommits.
         let members = cli_active_keys();
         eprintln!(
             "[withdraw] integrated: real members + delegate + real deposit (fund {fund}); withdraw \
@@ -1748,6 +2438,9 @@ fn cmd_withdraw(args: &[String]) {
             deposit_salt: None,
         }),
     };
+    // SECURITY (Phase-3 review finding 7, CLOSED in Phase 4): the withdrawal builder registers
+    // the identities read off the `MemberKeys` handed to it — the SAME objects
+    // `export-reg-record` puts on L1 and `close` signs with. No seed slice, no second derivation.
     let artifacts = build_channel_withdrawal(&params, cli_members.as_deref())
         .unwrap_or_else(|e| die(format!("build withdrawal: {e}")));
 
@@ -1887,7 +2580,7 @@ fn cmd_withdraw(args: &[String]) {
         eprintln!(
             "[withdraw] deposit{{value: {dep_amount}}}(recipient,…) as depositor {depositor_hex}…"
         );
-        cast(&[
+        let dep_out = cast(&[
             "send",
             &rollup,
             "deposit(bytes32,uint32,uint256,bytes32)",
@@ -1901,7 +2594,17 @@ fn cmd_withdraw(args: &[String]) {
             &key,
             "--rpc-url",
             &rpc,
+            "--json",
         ]);
+        // SECURITY (§10.4 Finding B): capture and PERSIST this hash before doing anything else.
+        // It is a real `Deposited` log from this rollup to the channel's own `deposit_recipient`,
+        // so it passes every check on the import path; only the backing-deposit guard can refuse
+        // it, and the guard can only refuse what it has been told about. In STANDALONE mode there
+        // is no backing file to record into (and no import path either, since
+        // `cosign-l1-deposit-import` requires the backing).
+        if integrated {
+            record_backing_deposit_tx(&parse_cast_tx_hash(&dep_out, "withdraw native deposit"));
+        }
 
         // Multitoken Phase 5b: the ERC-20 lane's deposit — SECOND in the block, matching the
         // proof's fold order. `deposit()`'s ERC-20 branch pulls via transferFrom (balanceOf-delta
@@ -1936,7 +2639,7 @@ fn cmd_withdraw(args: &[String]) {
                 "--rpc-url",
                 &rpc,
             ]);
-            cast(&[
+            let dep2_out = cast(&[
                 "send",
                 &rollup,
                 "deposit(bytes32,uint32,uint256,bytes32)",
@@ -1948,7 +2651,17 @@ fn cmd_withdraw(args: &[String]) {
                 &key,
                 "--rpc-url",
                 &rpc,
+                "--json",
             ]);
+            // SECURITY: the ERC-20 lane's deposit is recorded for the SAME reason as the native
+            // one — its value is already spoken for by the withdrawal proof, so importing it into
+            // the channel balance would credit value twice against one escrow.
+            if integrated {
+                record_backing_deposit_tx(&parse_cast_tx_hash(
+                    &dep2_out,
+                    "withdraw ERC-20 lane deposit",
+                ));
+            }
         }
     }
 
@@ -2088,6 +2801,9 @@ fn cmd_export_reg_record() {
         .collect();
     let delegate_count = 0usize;
     let active = members.len();
+    // falcon-sig Phase 4: the registered member identity is the member's OWN Falcon `pk_g`, read
+    // off the same `MemberKeys` the close/cancel-close paths sign with — so the member-set
+    // commitment the close proof binds equals the one this record registers, by construction.
     let record = ChannelMemberKeys::from_member_keys(&members).to_reg_record_split(
         channel_id,
         TEST_ACTIVE_MEMBERS as u32,
@@ -2160,9 +2876,13 @@ fn main() {
         "pw-finalize" => cmd_pw_finalize(&args),
         "cancel-close" => cmd_cancel_close(&args),
         "post-close-claim" => cmd_post_close_claim(&args),
+        // SECURITY: the DELIBERATE, acknowledged path for a `cli_state.json` that pre-dates a
+        // replay ledger. It replaces the old `#[serde(default)]`, which did the same reset in
+        // silence on every load.
+        "migrate-state" => cmd_migrate_state(&args),
         _ => {
             eprintln!(
-                "usage: channel_member <setup-backing|init|gen-contribution|gen-send|send|cosign|cosign-batch|cosign-burn-send|register-token|refresh|deploy-settlement|cosign-l1-deposit-import|pw-submit|pw-finalize|close|settle|withdraw|claim|cancel-close|post-close-claim|...> ...\n  multi-token (§N): send/gen-send take [token_slot]; claim takes [token_slot]; cosign-l1-deposit-import <slot|auto> <tx_hash> <rpc_url> reads amount/depositor/token_index FROM THE CHAIN; register-token <base_token_index> appends a cosigned registry entry; refresh <slot> [token_slot] re-encrypts a CLI member's own position so it can send again after a homomorphic credit"
+                "usage: channel_member <setup-backing|init|gen-contribution|gen-send|send|cosign|cosign-batch|cosign-burn-send|register-token|refresh|deploy-settlement|cosign-l1-deposit-import|pw-submit|pw-finalize|close|settle|withdraw|claim|cancel-close|post-close-claim|migrate-state|...> ...\n  migrate-state --i-understand-this-resets-replay-ledgers: one-time, EXPLICIT repair of a cli_state.json written before a replay ledger existed (creates it EMPTY — see the warning it prints)\n  multi-token (§N): send/gen-send take [token_slot]; claim takes [token_slot]; cosign-l1-deposit-import <slot|auto> <tx_hash> <rpc_url> reads amount/depositor/token_index FROM THE CHAIN; register-token <base_token_index> appends a cosigned registry entry; refresh <slot> [token_slot] re-encrypts a CLI member's own position so it can send again after a homomorphic credit"
             );
             exit(2);
         }
@@ -2192,7 +2912,10 @@ fn cmd_init(args: &[String]) {
             .unwrap_or_else(|e| die(format!("parse browser pk_b: {e:?}"))),
         regev_pk: contrib.regev_pk.clone(),
     };
-    let new_ct = contrib.genesis_ct.clone();
+    // SECURITY (A-1): `contrib.genesis_ct` is READ OFF THE WIRE AND DISCARDED — deliberately. It
+    // is a self-declared opening balance with no backing, and neither the create nor the join path
+    // installs it any more (see `create_channel` / `join_delegate`). The field is still REQUIRED by
+    // the wire format so existing browsers/relays keep working unchanged; it simply has no effect.
     // B-1b fail-closed: the delegate's L1 exit address must be present and nonzero BEFORE any
     // channel state is assembled or signed.
     let new_recipient = parse_contribution_recipient(&contrib.recipient);
@@ -2239,9 +2962,16 @@ fn cmd_init(args: &[String]) {
         (HashSet::new(), HashSet::new(), HashSet::new())
     };
     let (record, state, members, controlled, slot) = if std::path::Path::new(STATE_FILE).exists() {
-        join_delegate(new_delegate, new_ct, new_recipient)
+        // SECURITY (A-1, doc/tasks/b2-delegate-close-threat-model.md §9): `new_ct` is DELIBERATELY
+        // NOT passed to `join_delegate`. A joiner's self-declared opening ciphertext is unbacked
+        // value; see the argument at `join_delegate`. The join opens the slot at the canonical
+        // zero.
+        join_delegate(new_delegate, new_recipient)
     } else {
-        create_channel(new_delegate, new_ct, new_recipient)
+        // SECURITY (A-1, genesis half): likewise NOT passed to `create_channel`. This is the path
+        // the product actually takes (the first browser CREATES channel N, later browsers JOIN),
+        // so closing only the join lane would have left the shipped flow wide open.
+        create_channel(new_delegate, new_recipient)
     };
 
     verify_all_signatures(&record, &members, &state)
@@ -2258,6 +2988,7 @@ fn cmd_init(args: &[String]) {
     let mc = snapshot.record.member_count;
     let v = snapshot.state.balance_state.state_version;
     save_state(&CliState {
+        state_schema_version: STATE_SCHEMA_VERSION,
         controlled,
         snapshot: snapshot.clone(),
         applied_tx_identities: prior_applied,
@@ -2307,9 +3038,36 @@ fn cli_members() -> (
 /// CREATE the channel: `cli_cosigner_count()` members + this delegate at the first delegate slot,
 /// genesis (v0), all cosigners sign.
 /// `new_recipient` (B-1b) is the delegate's NONZERO L1 exit address, leaf-bound in the genesis H1.
+///
+/// SECURITY (A-1 conservation control, GENESIS half — doc/tasks/b2-implementation-notes.md §7):
+/// this function takes NO caller-supplied delegate ciphertext. It used to install
+/// `contrib.genesis_ct` verbatim at the delegate slot, which is the SAME unbacked-value-injection
+/// lane that was closed at `join_delegate`, and it is the lane the PRODUCT actually reaches: the
+/// relay forwards the browser's contribution body verbatim (`hosting/wallet/wallet-relay.js`) and
+/// the standard single-delegate channel is created, not joined, so `join_delegate` is never
+/// entered on that path. `cmd_setup_backing` computes the L1-deposited `fund` as
+/// `Σ genesis_amount(cosigner slots) + DELEGATE_GENESIS` with `DELEGATE_GENESIS == 0` — it
+/// EXCLUDES the delegate's contribution — and nothing anywhere binds `Σ slot balances <= channel
+/// fund` (R3). A creator-supplied nonzero delegate ciphertext therefore made `Σ balances > fund`
+/// at genesis, and after close that surplus is claimed out of the real pot ahead of the honest
+/// participants (bounded by `finalizedChannelFundAmount`, so it is MISALLOCATION — theft from
+/// co-participants, first-come-first-served — not minting).
+///
+/// The control is the same as at join and for the same reason: the amount is Regev-encrypted, so
+/// no cosigner can decide "does this encrypt zero?", and the contribution payload carries neither
+/// a declared amount nor the encryption randomness. So the untrusted input is REMOVED rather than
+/// validated — the delegate's genesis slot opens at the canonical zero ciphertext, which decrypts
+/// to 0 under any key. `Σ genesis balances == fund` then holds by construction instead of by
+/// assumption (the comment below said it; now it is true).
+///
+/// COMPLETENESS: this MATCHES PRODUCTION — `hosting/wallet/wallet-live.html` already passes
+/// `balance: toBase('0')`, so the live browser flow contributes exactly what is now installed. The
+/// delegate's real funding lanes are unchanged and are the conservation-preserving ones (L1
+/// deposit import, which moves `channel_fund` and the slot leaf together, and in-channel transfers
+/// proven by the E-1/E-2 STARK). If some future flow genuinely needs a NONZERO opening balance for
+/// the delegate, it must arrive with backing — do not restore a caller-supplied ciphertext here.
 fn create_channel(
     mut nd: MemberInfo,
-    new_ct: RegevCiphertext,
     new_recipient: Address,
 ) -> (
     ChannelRecord,
@@ -2322,7 +3080,15 @@ fn create_channel(
     nd.slot = delegate_slot;
     let (mut members, mut enc, controlled) = cli_members();
     members.push(nd);
-    enc.push((delegate_slot, new_ct));
+    // SECURITY (A-1, genesis half): the delegate's genesis ciphertext is the CANONICAL ZERO, not a
+    // caller-supplied one. See the conservation argument on this function. `zero_ciphertext()`
+    // decrypts to 0 under every Regev key, so the delegate contributes exactly `DELEGATE_GENESIS`
+    // (== 0) — the amount `cmd_setup_backing` actually put into `fund`. Do NOT reintroduce a
+    // caller-supplied ciphertext here without an accompanying backing proof — that is the R3 hole.
+    enc.push((
+        delegate_slot,
+        intmax3_zkp::common::balance_state::zero_ciphertext().clone(),
+    ));
     members.sort_by_key(|m| m.slot);
     let record = build_record(channel_id_env(), &members, BP_SLOT, 1).unwrap_or_else(|e| die(e));
     enc.sort_by_key(|(s, _)| *s);
@@ -2330,8 +3096,12 @@ fn create_channel(
 
     // detail2 §F-1: the genesis is funded by the REAL L1 deposit backing (no self-minted fund).
     // `fund` == the deposited native value; `settled_tx_chain` ties the state to that deposit so
-    // the co-sign gate reconciles. Σ(genesis balances) == fund (CLI members + delegate
-    // allocation).
+    // the co-sign gate reconciles.
+    // SECURITY (A-1): `Σ(genesis balances) == fund` now holds BY CONSTRUCTION, not by assumption —
+    // the cosigner slots carry exactly `genesis_amount(slot)` (the same values `cmd_setup_backing`
+    // summed) and the delegate slot carries the canonical zero (== `DELEGATE_GENESIS`). Before
+    // A-1 this line was an unchecked claim that a caller-supplied delegate ciphertext could
+    // falsify.
     let (balance_vd, att, backing) = load_backing();
     let settled = Bytes32::from_hex(&backing.settled_tx_chain)
         .unwrap_or_else(|e| die(format!("backing settled_tx_chain: {e:?}")));
@@ -2343,11 +3113,11 @@ fn create_channel(
         .iter()
         .map(|m| Bytes32::from(m.regev_pk.poseidon_digest()))
         .collect();
-    // B-1b: per-active-slot L1 exit addresses, in slot order. The CLI COSIGNERS reuse the SAME
-    // deterministic per-(channel, slot) recipients their on-chain registration record carries
-    // (`test_recipient_for` — one formula for registeredRecipientOf AND the leaf binding), and
-    // the browser DELEGATE's slot carries its contribution recipient (already fail-closed
-    // nonzero). All folded into the cosigner-signed genesis H1 via the slot leaves.
+    // B-1b: per-active-slot L1 exit addresses, in slot order. The CLI COSIGNERS default to the
+    // deterministic per-(channel, slot) `test_recipient_for` (the same formula their on-chain
+    // registration record carries), overridable per slot (see `cosigner_leaf_recipient`), and the
+    // browser DELEGATE's slot carries its contribution recipient (already fail-closed nonzero).
+    // All folded into the cosigner-signed genesis H1 via the slot leaves.
     let channel_id = channel_id_env();
     let recipients: Vec<Address> = members
         .iter()
@@ -2355,7 +3125,7 @@ fn create_channel(
             if m.slot == delegate_slot {
                 new_recipient
             } else {
-                test_recipient_for(channel_id, m.slot as usize)
+                cosigner_leaf_recipient(channel_id, m.slot)
             }
         })
         .collect();
@@ -2388,15 +3158,59 @@ fn create_channel(
 }
 
 /// JOIN the existing channel as a NEW delegate, PRESERVING the current state (balances + sends).
-/// The new delegate's slot is added with its genesis ciphertext, `delegate_count` and
-/// `state_version` are bumped, and the 3 members re-sign the new state. Existing delegates'
+/// The new delegate's slot is added at a ZERO opening balance, `delegate_count` and
+/// `state_version` are bumped, and the members re-sign the new state. Existing delegates'
 /// ciphertexts are untouched, so their browser send-witnesses stay valid.
 /// `new_recipient` (B-1b) is the joining delegate's NONZERO L1 exit address — written into the
 /// new slot's `recipients` entry so it enters the cosigner-signed H1 (the delegate's ONLY payout
 /// binding under Option B; the caller has already rejected zero/absent recipients fail-closed).
+///
+/// SECURITY (A-1 conservation control, doc/tasks/b2-delegate-close-threat-model.md §9 /
+/// doc/tasks/b2-implementation-notes.md):
+/// This function takes NO joiner-supplied ciphertext. It used to write `contrib.genesis_ct`
+/// verbatim into the new slot and have the cosigners re-sign with plain `sign_state`. That is an
+/// UNBACKED VALUE INJECTION: the contribution is Regev-encrypted, so the cosigners cannot see the
+/// amount they are attesting to, and no layer anywhere binds `Σ slot balances <= channel fund`
+/// (R3). A joining stranger could therefore self-declare an arbitrary opening balance and, after
+/// close, claim against the real pot ahead of honest participants (bounded by
+/// `finalizedChannelFundAmount` / `receivedChannelFunds`, so it is MISALLOCATION of the real pot,
+/// not minting — but misallocation is the whole loss for the victims).
+///
+/// It cannot be fixed by CHECKING the ciphertext: Regev is semantically secure, so "does this
+/// ciphertext encrypt zero?" is undecidable for the cosigners without the joiner's secret key or
+/// its encryption witness, and the contribution payload carries neither (a declared-amount + seed
+/// rebuild-equality scheme would work, but it means a schema change across the browser/relay/API
+/// and publishing the opening balance). The control used instead REMOVES the untrusted input
+/// rather than validating it: the new slot opens at the CANONICAL ZERO ciphertext, which decrypts
+/// to 0 under every Regev key (`balance_state::zero_ciphertext`). A join then provably changes no
+/// slot's balance, so `Σ balances` is invariant across it and the genesis-anchored backing that
+/// `cmd_setup_backing` computed (`Σ cosigner genesis amounts + DELEGATE_GENESIS`, where
+/// `DELEGATE_GENESIS == 0`) still holds afterwards. This is strictly stronger than any check the
+/// cosigners could perform, and it is exactly what the fund accounting already assumed.
+///
+/// COMPLETENESS (this must not wrongly reject or strand a legitimate joiner): opening at zero costs
+/// the delegate nothing it could legitimately have had. The two lanes by which a delegate actually
+/// receives value both work from a zero slot and are themselves conservation-preserving:
+///   * L1 deposit import (`cosign-l1-deposit-import`) reads amount/depositor/token from the CHAIN
+///     and moves `channel_fund` and the slot leaf TOGETHER (`wallet_core.rs`), and
+///     `add_ciphertexts(zero, x) == x`;
+///   * an in-channel transfer from an existing slot, whose E-1/E-2 STARK proves `before == after +
+///     amount`.
+/// The delegate needs no encryption witness for the zero ciphertext: sending requires a refresh
+/// (which needs only the delegate's SECRET KEY, `wallet_refresh`), and a withdrawal/post-close
+/// claim decrypts in-circuit under the secret key. The production browser flow already contributes
+/// 0 (`hosting/wallet/wallet-live.html`), and the CLI's own `DELEGATE_GENESIS` is already 0, so no
+/// legitimate join loses anything it has today.
+///
+/// The GENESIS half of the same lane is closed too — `create_channel` no longer installs a
+/// caller-supplied delegate ciphertext either. That is the path the shipped product actually
+/// takes, so fixing only this one would have left the product untouched; see the argument there.
+///
+/// NOT FIXED HERE (tracked, pre-existing): R3 itself — there is still no in-circuit
+/// `Σ slot balances <= channel fund`. Removing the two injection lanes means the CLI/browser flow
+/// never creates a state that violates conservation, but it is not a proof that no state can.
 fn join_delegate(
     mut nd: MemberInfo,
-    new_ct: RegevCiphertext,
     new_recipient: Address,
 ) -> (
     ChannelRecord,
@@ -2438,6 +3252,31 @@ fn join_delegate(
     }
     let new_slot = delegate_slot + existing as u16;
     nd.slot = new_slot;
+    // SECURITY (A-1 finding 1 — THE EXIT LANE): capture the joiner's Regev pk digest BEFORE `nd` is
+    // moved into `members`. Until now `join_delegate` never wrote `balance_state.regev_pk_digests`
+    // for the new slot, so it stayed at the padding zero while the slot was fully ACTIVE.
+    // `BalanceState::validate()` cannot catch that — it only constrains PADDING slots to the zero
+    // digest and treats active-slot digests as arbitrary — and `verify_snapshot` checks
+    // `record.regev_pk_root`, never `balance_state.regev_pk_digests`. The consequence was
+    // permanent: the withdrawal-claim circuit derives `pk_digest = poseidon(a, b)` from the
+    // witnessed key and hashes it INTO the slot leaf it must Merkle-verify against the
+    // cosigner-signed slot tree root, so a leaf built over a zero digest can only be reproduced by
+    // a Regev key whose Poseidon digest is zero. Any value that ever reached a joined delegate's
+    // slot — an honest L1 deposit import, an honest in-channel transfer — was UNCLAIMABLE at close.
+    // The A-1 conservation argument (a joined slot is fundable only through those two lanes)
+    // depends on this exit lane working, so it is fixed here rather than merely documented.
+    let new_pk_digest = Bytes32::from(nd.regev_pk.poseidon_digest());
+    // SECURITY: fail closed rather than sign an unclaimable slot. A zero digest is exactly the
+    // padding value, so it would reproduce the very bug above; it is also what a degenerate or
+    // malformed key would have to produce. Poseidon preimage resistance makes this unreachable for
+    // a real key — this is the assertion that keeps it that way.
+    if new_pk_digest == Bytes32::default() {
+        die(
+            "REFUSING join: the contributed Regev public key hashes to the ZERO Poseidon digest, \
+             which is the reserved PADDING value — the slot's balance would be permanently \
+             unclaimable at close (the claim circuit binds poseidon(a,b) into the signed slot leaf)",
+        );
+    }
     let mut members = prev.snapshot.members.clone();
     members.push(nd);
     members.sort_by_key(|m| m.slot);
@@ -2451,15 +3290,30 @@ fn join_delegate(
     let mut state = prev.snapshot.state.clone();
     state.prev_digest = state.digest;
     state.balance_state.delegate_count = new_delegate_count;
-    // Multi-token: a fresh delegate slot holds its genesis ciphertext at TOKEN POSITION 0 and
-    // canonical zeros elsewhere (detail2 §N owner decision 5).
-    state.balance_state.enc_balances[new_slot as usize] = {
-        let mut row = intmax3_zkp::common::balance_state::zero_token_row();
-        row[0] = new_ct;
-        row
-    };
+    // SECURITY (A-1): a JOINING delegate opens at the canonical ZERO ciphertext in EVERY token
+    // position — including position 0, which used to receive the joiner-supplied `genesis_ct`. See
+    // the conservation argument on this function. `zero_token_row()` is the all-zero Regev
+    // ciphertext, which decrypts to 0 under any key, so the join adds no balance to the channel and
+    // `Σ balances` is provably unchanged by it. Do NOT reintroduce a caller-supplied ciphertext
+    // here without an accompanying backing proof — that is the R3 hole.
+    state.balance_state.enc_balances[new_slot as usize] =
+        intmax3_zkp::common::balance_state::zero_token_row();
     state.balance_state.pending_adds[new_slot as usize] =
         [0u32; intmax3_zkp::constants::MAX_CHANNEL_TOKENS];
+    // SECURITY (A-1 finding 1): bind the JOINER'S OWN Regev pk digest into its slot leaf, so the
+    // slot is claimable at close. The value is not free: it is `poseidon(a, b)` over the very key
+    // `nd.regev_pk` that `build_record` above already folded into the record's `regev_pk_root`, so
+    // the balance state and the record commit to ONE key per slot and the joiner cannot name a
+    // different key here than the one it is registered under.
+    //
+    // SECURITY (why this write is not itself an unbacked-value lane): the digest decides only WHO
+    // can decrypt and claim this slot, never HOW MUCH it holds — the amount comes from the slot's
+    // ciphertext, which the line above pins to the canonical zero. Naming a victim's public key
+    // would hand the joiner a slot it cannot decrypt (claiming needs the secret `s` with
+    // `b = a·s + e`), so it can only harm itself, and the balance it would be "stealing" is
+    // provably 0. The recipient-uniqueness guard at the top of this function is what prevents a
+    // duplicate-identity join from capturing another slot's L1 deposits.
+    state.balance_state.regev_pk_digests[new_slot as usize] = new_pk_digest;
     // B-1b: bind the new delegate's L1 exit address into its slot leaf (cosigner-signed H1).
     state.balance_state.recipients[new_slot as usize] = new_recipient;
     state.balance_state.state_version += 1;
@@ -2488,7 +3342,12 @@ fn cmd_gen_contribution(args: &[String]) {
         .get(3)
         .map(String::as_str)
         .unwrap_or("contribution.json");
-    let keys = MemberKeys::generate(&mut StdRng::seed_from_u64(seed));
+    // SECURITY: routed through `keys_for`, NOT a second inline `MemberKeys::generate`. If this kept
+    // the old `seed_from_u64` derivation while `cli_active_keys` used the KDF, the delegate
+    // identity would silently diverge between `gen-contribution` and `init` — the Phase-3 finding-7
+    // failure that leaves a channel unclosable. `seed` is a public slot LABEL here, not key
+    // material (doc/tasks/cosigner-key-provenance.md §4.3).
+    let keys = keys_for(seed);
     let (ct, _w) = encrypt_amount(
         &mut StdRng::seed_from_u64(seed ^ 0xA11CE),
         &keys.regev_pk,
@@ -2529,17 +3388,22 @@ fn cmd_gen_contribution(args: &[String]) {
 /// (E-1 proof included) WITHOUT touching `cli_state.json` — stateless, so payload generation can
 /// run in parallel and against any snapshot copy.
 ///
-/// SOUNDNESS OF THE SIMULATION: valid only while the delegate's slot ciphertext is still its
-/// GENESIS ct (it has neither sent nor received since joining) — exactly the join-storm scenario.
-/// The ct is recomputed and compared against the snapshot fail-closed, so a stale witness can
-/// never produce a payload that would waste a co-sign round.
+/// SOUNDNESS OF THE SIMULATION: valid only while the delegate's slot ciphertext at the selected
+/// token position is one this stateless simulator can OPEN — either the canonical zero opening
+/// every delegate slot now starts at (A-1; balance must then be 0), or the deterministic
+/// `encrypt_amount(seed, pk, balance)` ct for legacy seeded snapshots. Both are checked
+/// fail-closed against the snapshot below, so a stale witness can never produce a payload that
+/// would waste a co-sign round.
+///
+/// NOTE (A-1): a delegate no longer opens with a self-declared balance, so the `<balance>`
+/// argument is 0 for every delegate created by the current CLI/browser flow. A FUNDED delegate
+/// (post L1-deposit-import or post-transfer) cannot be driven from here at all — its ciphertext is
+/// not reproducible from `(balance, seed)` — and the guard says so rather than guessing.
 ///
 /// usage: gen-send <balance> <seed> <to_slot> <amount> [snapshot.json] [out.json] [token_slot]
-/// `token_slot` (OPTIONAL, default 0) selects the LOCAL token position (multitoken §N-3). The
-/// simulation is only valid while the delegate's ciphertext AT THAT POSITION is still its
-/// deterministic genesis ct — checked fail-closed below (a non-genesis position is the
-/// canonical zero ct at genesis, so token_slot != 0 only works after that position was funded
-/// and refreshed to a reproducible ct — never silently).
+/// `token_slot` (OPTIONAL, default 0) selects the LOCAL token position (multitoken §N-3). Every
+/// unfunded position is the canonical zero ct, so a nonzero `token_slot` behaves exactly like
+/// token 0 until that position is funded — after which this simulator can no longer build for it.
 fn cmd_gen_send(args: &[String]) {
     let balance: u64 = args
         .get(1)
@@ -2571,13 +3435,10 @@ fn cmd_gen_send(args: &[String]) {
         .unwrap_or(0);
 
     // Reconstruct the delegate exactly as gen-contribution created it.
-    let keys = MemberKeys::generate(&mut StdRng::seed_from_u64(seed));
-    let (genesis_ct, witness) = encrypt_amount(
-        &mut StdRng::seed_from_u64(seed ^ 0xA11CE),
-        &keys.regev_pk,
-        balance,
-    )
-    .unwrap_or_else(|e| die(e));
+    // SECURITY: must go through the SAME single birth point `keys_for` that `gen-contribution`
+    // uses, or this reconstruction silently yields a different identity under `KeyProvenance::
+    // Master` and the `pk_g` lookup below fails closed (or worse, matches the wrong slot).
+    let keys = keys_for(seed);
 
     let snapshot: ChannelSnapshot = read_json(snapshot_path);
     let from = snapshot
@@ -2590,15 +3451,49 @@ fn cmd_gen_send(args: &[String]) {
                 "seed {seed}: pk_g not found in snapshot members — join first"
             ))
         });
-    // Fail-closed: the witness is only valid for the delegate's UNTOUCHED genesis ciphertext at
-    // the selected token position.
-    if snapshot.state.balance_state.enc_balances[from as usize][token_slot as usize] != genesis_ct {
-        die(format!(
-            "slot {from} token {token_slot}: ciphertext is no longer the genesis ct (sent or \
-             received since join) — the deterministic witness is stale; gen-send cannot build \
-             this payload"
-        ));
-    }
+    // Fail-closed: the witness must actually OPEN the delegate's current ciphertext at the
+    // selected token position. Two admissible openings, in this order:
+    //
+    // SECURITY (A-1 finding 3): since A-1 a delegate's slot opens at the CANONICAL ZERO ciphertext
+    // (`RegevCiphertext::padding()`) — at genesis via `create_channel` and at join via
+    // `join_delegate` — not at a `gen-contribution`-shaped `encrypt_amount(seed, pk, balance)`. So
+    // the canonical zero is the FIRST case, and it admits exactly ONE balance: 0. The opening is
+    // the public all-zero witness (`zero_amount_witness()`, which opens `padding()` under any key
+    // and cannot open any nonzero amount). Asserting `balance == 0` here rather than silently
+    // coercing it keeps the caller's stated balance and the proven balance the same value — a
+    // silent coercion would let a caller believe it had drafted a spend out of a funded slot.
+    let cur_ct = &snapshot.state.balance_state.enc_balances[from as usize][token_slot as usize];
+    let witness = if cur_ct == intmax3_zkp::common::balance_state::zero_ciphertext() {
+        if balance != 0 {
+            die(format!(
+                "slot {from} token {token_slot}: the slot holds the CANONICAL ZERO ciphertext \
+                 (a delegate's A-1 opening balance), so its only valid opening is 0 — but \
+                 <balance> = {balance} was requested. A delegate is funded through the L1 deposit \
+                 import or an in-channel transfer, never by declaring an opening balance; after \
+                 funding, the slot is no longer the canonical zero and this simulator needs a \
+                 refresh-derived witness it does not have."
+            ));
+        }
+        intmax3_zkp::regev::encrypt::zero_amount_witness()
+    } else {
+        // The legacy lane: the slot still holds the exact deterministic ciphertext this simulator
+        // can rebuild from `(balance, seed)`. Kept for any snapshot whose slot was seeded that way.
+        let (genesis_ct, w) = encrypt_amount(
+            &mut StdRng::seed_from_u64(seed ^ 0xA11CE),
+            &keys.regev_pk,
+            balance,
+        )
+        .unwrap_or_else(|e| die(e));
+        if *cur_ct != genesis_ct {
+            die(format!(
+                "slot {from} token {token_slot}: ciphertext is neither the canonical zero opening \
+                 nor the deterministic ct for balance {balance} / seed {seed} (sent or received \
+                 since join) — the deterministic witness is stale; gen-send cannot build this \
+                 payload"
+            ));
+        }
+        w
+    };
 
     let nonce = intmax3_zkp::ethereum_types::bytes32::Bytes32::default();
     // SECURITY: the send's encryption randomness comes from the OS CSPRNG, NOT from `seed`.
@@ -4249,17 +5144,61 @@ fn cmd_cosign_l1_deposit_import(args: &[String]) {
         die("channel_backing.json has no rollup address — cannot verify the deposit on-chain");
     }
 
-    // SECURITY (adversarial review finding 5): the channel's OWN backing deposit is a real
-    // `Deposited` log from this rollup to this `deposit_recipient`, so it passes every check in
-    // `fetch_onchain_deposit`. But its value is ALREADY counted in the genesis fund — importing it
-    // would credit the channel twice against a single L1 escrow. Refuse it by name.
-    let strip0x = |s: &str| s.trim_start_matches("0x").to_ascii_lowercase();
-    if !backing.deposit_tx.is_empty() && strip0x(&backing.deposit_tx) == strip0x(tx_hash) {
+    // ── BACKING-DEPOSIT GUARD (adversarial review finding 5; deposit-import-threat-model.md §10)
+    // The channel's OWN backing deposits are real `Deposited` logs from this rollup to this
+    // `deposit_recipient`, so they pass every check in `fetch_onchain_deposit`. But their value is
+    // ALREADY counted — the `setup-backing` deposit by the genesis fund, `withdraw`'s deposits by
+    // the withdrawal proof — so importing one credits the channel twice against a single L1
+    // escrow and (per §10.5) irreversibly wedges the channel's exit. Refuse them by name.
+    //
+    // SECURITY (§10.6, the shape of this guard): the check is in TWO parts, and both must run.
+    //  1. SET MEMBERSHIP over every hash we know — unconditional. It used to be `if
+    //     !deposit_tx.is_empty() && …`, i.e. a guard that DISARMED ITSELF whenever the one recorded
+    //     hash was missing, which was every deferred-mode channel and (via §10.4) every channel's
+    //     `withdraw` deposit in EVERY mode.
+    //  2. APPLICABILITY — a stated conclusion about whether a backing deposit exists at all. An
+    //     empty set is only acceptable when the CLI can positively say "none is on-chain yet".
+    let known_backing_txs = backing.known_backing_deposit_txs();
+    if known_backing_txs.contains(&strip0x(tx_hash)) {
         die(
-            "REFUSING: this is the channel's BACKING deposit (channel_backing.json deposit_tx). \
-             Its value is already counted in the genesis fund — importing it would credit the \
-             channel twice against one L1 escrow.",
+            "REFUSING: this is the channel's BACKING deposit (channel_backing.json \
+             backing_deposit_txs/deposit_tx). Its value is already counted against the channel's \
+             L1 escrow — importing it would credit the channel twice against one escrow.",
         );
+    }
+    match backing.resolved_backing_deposit_status() {
+        // The set is authoritative and non-empty: the guard above really compared something.
+        BackingDepositStatus::Landed if !known_backing_txs.is_empty() => {}
+        // "Landed" with nothing to compare against is a self-contradictory record: a backing
+        // deposit exists on-chain but we cannot name it, so we cannot tell this import apart from
+        // it. FAIL CLOSED rather than let the guard evaluate to a vacuous truth.
+        BackingDepositStatus::Landed => die(
+            "REFUSING: channel_backing.json says the backing deposit has LANDED but records no \
+             transaction hash for it — the backing-deposit guard cannot tell this import apart \
+             from the channel's own deposit. Re-run `setup-backing`, or add the hash to \
+             `backing_deposit_txs`. Fail-closed.",
+        ),
+        // NOT APPLICABLE, and we say so. `setup-backing` deferred the deposit to `withdraw`, so
+        // no backing deposit is on-chain yet and no import can be one. This is a genuine, safe
+        // flow (mid-channel imports before `withdraw` runs — `tests/itx_faucet_cli_e2e.rs`), and
+        // blanket-failing-closed on an empty set would refuse it. The note exists so that "the
+        // guard did not run" is never indistinguishable from "the guard ran and passed".
+        BackingDepositStatus::Deferred => eprintln!(
+            "cosign-l1-deposit-import SECURITY NOTE: the backing-deposit guard is NOT APPLICABLE \
+             here — channel_backing.json records backing_deposit_status=deferred, i.e. \
+             `setup-backing` deferred the on-chain deposit to `withdraw` and no backing deposit \
+             exists on-chain yet, so this import cannot be one. The guard re-arms automatically \
+             once `withdraw` makes (and records) the deposit."
+        ),
+        // Pre-dates the field and carries no evidence either way. FAIL CLOSED: this is the state
+        // in which the old code silently skipped the guard.
+        BackingDepositStatus::Unknown => die(
+            "REFUSING: channel_backing.json does not record whether the channel's own backing \
+             deposit is on-chain (backing_deposit_status is absent/unknown and no deposit_tx is \
+             recorded). The backing-deposit guard cannot be evaluated, and a silent skip is what \
+             this refusal exists to prevent (deposit-import-threat-model.md §10). Re-run \
+             `setup-backing` to re-arm the guard. Fail-closed.",
+        ),
     }
 
     let onchain = fetch_onchain_deposit(
@@ -4830,4 +5769,102 @@ fn cmd_pw_finalize(args: &[String]) {
          deliberate fail-closed state, not a bug in this run."
     );
     exit(1);
+}
+
+#[cfg(test)]
+mod falcon_identity_tests {
+    use super::*;
+
+    /// SECURITY (Phase-3 review finding 7 — the defect this test exists to prevent recurring).
+    ///
+    /// Three CLI paths bind the channel's Falcon cosigner identities and MUST agree:
+    ///   * `close` / `cancel-close` — the member-set commitment the proof binds,
+    ///   * `export-reg-record`      — the `pk_g`s handed to L1 `registerChannel`,
+    ///   * `withdraw`               — the in-band channel registration inside
+    ///     `build_channel_withdrawal`.
+    ///
+    /// They diverged once, and silently: `withdraw` reached a builder that RE-DERIVED its own
+    /// keys from a different seed formula, so `export-reg-record` registered one member set on
+    /// L1 while the withdrawal proved against another. Fail-closed (nothing forged is accepted)
+    /// but a real liveness break — the channel becomes unclosable — and it was invisible because
+    /// the only test covering the invariant compared two values that came from the same variable.
+    ///
+    /// PHASE 4 re-aim. The structural fix is now stronger than the Phase-3 one: there is no
+    /// Falcon seed formula in this binary at all. `MemberKeys` carries the key, and every path
+    /// reads it off the member object. So this test walks the ACTUAL producers rather than the
+    /// seeds behind them:
+    ///   * `cli_active_keys()`    — what `export-reg-record` registers and `withdraw` hands the
+    ///     withdrawal builder (both take the leading `TEST_ACTIVE_MEMBERS` slice);
+    ///   * `cli_members()`        — what `create-channel` puts in the `ChannelRecord`, AND the
+    ///     `ControlledMember.keygen_seed` every co-signing command feeds to `keys_for` to MINT
+    ///     `state.member_signatures`;
+    /// and asserts the identities coincide slot by slot. If anyone reintroduces a second
+    /// derivation on either side, these stop matching.
+    ///
+    /// DETACHED-SIGNING re-aim: the second producer used to be `cli_falcon_keys()`, "the signing
+    /// keys `close`/`cancel-close` prove with". `close`/`cancel-close` no longer hold any key —
+    /// they consume the cosignatures already in the head state, verified against
+    /// `record.member_pk_gs[slot]` — so the invariant is re-pointed at its true source. It is now
+    /// checked one link EARLIER and one link WIDER: the registered `pk_g`, the persisted cosigning
+    /// seed, and the withdraw/export identity must all be one identity. If the cosigning identity
+    /// diverged from the registered one, the close prover's §3.5 gate would reject every signature
+    /// on a `pk_g` mismatch and the channel would be unclosable.
+    #[test]
+    fn cli_falcon_identities_agree_across_close_register_and_withdraw() {
+        // SECURITY: `keys_for` now FAILS CLOSED — without a provenance it calls `die` (exit 1),
+        // which would abort the whole test binary. This test only compares identities to each
+        // other, so it opts in to the deterministic test keys explicitly, exactly as the E2E
+        // harnesses do. `key_provenance` memoises in a `OnceLock`, and this is the binary's only
+        // test, so the variable is set before any reader exists (no cross-thread env race).
+        // SAFETY: single-threaded prologue of the only test in this binary.
+        unsafe { std::env::set_var(INSECURE_KEYS_ENV, "1") };
+
+        let active = TEST_ACTIVE_MEMBERS;
+
+        // What `export-reg-record` registers / what `withdraw` hands `build_channel_withdrawal`.
+        let registered: Vec<MemberKeys> = cli_active_keys().into_iter().take(active).collect();
+        assert_eq!(registered.len(), active);
+
+        // What `create-channel` puts in the ChannelRecord, and what every co-signing command
+        // re-derives from the persisted `keygen_seed` to MINT `state.member_signatures` — the set
+        // `close` / `cancel-close` now consume detached and verify against
+        // `record.member_pk_gs[slot]`.
+        let (record_members, _enc, controlled) = cli_members();
+        assert_eq!(record_members.len(), active);
+        assert_eq!(controlled.len(), active);
+
+        for slot in 0..active {
+            // registered-in-record identity == withdraw/export identity
+            assert_eq!(
+                record_members[slot].pk_g,
+                registered[slot].pk_g(),
+                "slot {slot}: the identity `withdraw`/`export-reg-record` registers differs from \
+                 the one `create-channel` puts in the ChannelRecord — this is exactly the \
+                 divergence that made channels unclosable"
+            );
+            // co-SIGNING identity (re-derived from the persisted seed on every cosign) ==
+            // registered identity. Under detached close signing this is the link the close
+            // prover's gate enforces at proving time: a mismatch here means every cosignature is
+            // rejected on `pk_g` and the channel cannot be closed at all.
+            assert_eq!(
+                keys_for(controlled[slot].keygen_seed).pk_g(),
+                record_members[slot].pk_g,
+                "slot {slot}: the identity that CO-SIGNS channel state differs from the registered \
+                 one; `close` verifies every detached cosignature against \
+                 record.member_pk_gs[slot], so this divergence makes the channel unclosable"
+            );
+        }
+
+        // The identities must also be distinct per slot (a shared key would let one member
+        // satisfy several slots, defeating the close circuit's A5 distinctness check).
+        for a in 0..active {
+            for b in (a + 1)..active {
+                assert_ne!(
+                    registered[a].pk_g(),
+                    registered[b].pk_g(),
+                    "cosigner slots {a} and {b} must not share a Falcon identity"
+                );
+            }
+        }
+    }
 }

@@ -416,7 +416,25 @@ contract ChannelSettlementManagerTest is Test {
         return this._closeProofCd(
             intent,
             manager.registeredMemberSetCommitment(),
-            (uint16(manager.activeMemberCount()) << 8) | uint16(manager.activeDelegateCount())
+            manager.activeMemberCount(),
+            uint32(manager.activeDelegateCount())
+        );
+    }
+
+    /// B-2 (doc/tasks/b2-delegate-close-threat-model.md §4d): build a close proof whose PI limb 94
+    /// (`delegateCount`) is an EXPLICIT value instead of the manager's registered count. The
+    /// registered count is only a FLOOR now: a proof carrying a LARGER count is legitimate (a
+    /// delegate joined after the manager was deployed — the normal case under Option B), a SMALLER
+    /// one must be rejected.
+    function _closeProofWithDelegateCount(
+        ChannelSettlementManager.CloseIntent memory intent,
+        uint32 delegateCount
+    ) internal view returns (MleVerifier.MleProof memory) {
+        return this._closeProofCd(
+            intent,
+            manager.registeredMemberSetCommitment(),
+            manager.activeMemberCount(),
+            delegateCount
         );
     }
 
@@ -429,7 +447,8 @@ contract ChannelSettlementManagerTest is Test {
     function _closeProofCd(
         ChannelSettlementManager.CloseIntent calldata intent,
         bytes32 memberSetCommitment,
-        uint16 memberAndDelegateCount
+        uint8 memberCount,
+        uint32 delegateCount
     ) external view returns (MleVerifier.MleProof memory) {
         uint256[] memory limbs = verifier.expectedCloseLimbs(CloseProofFields({
             channelId: CHANNEL_ID,
@@ -450,8 +469,11 @@ contract ChannelSettlementManagerTest is Test {
             finalSettledTxChain: intent.finalSettledTxChain,
             finalSettledTxAccumulatorRoot: intent.finalSettledTxAccumulatorRoot,
             memberSetCommitment: memberSetCommitment,
-            memberAndDelegateCount: memberAndDelegateCount
-        }));
+            memberCount: memberCount,
+            // B-2: `minDelegateCount` feeds only the FLOOR predicate; the limb-94 VALUE written into
+            // the vector is the explicit second argument.
+            minDelegateCount: delegateCount
+        }), delegateCount);
         return CloseTestLib.proofWithLimbs(limbs);
     }
 
@@ -638,10 +660,14 @@ contract ChannelSettlementManagerTest is Test {
             finalSettledTxChain: _sentinelB32(0x8000),
             finalSettledTxAccumulatorRoot: _sentinelB32(0x8800),
             memberSetCommitment: _sentinelB32(0x9000),
-            memberAndDelegateCount: (uint16(3) << 8) | uint16(1)
+            memberCount: 3,
+            // B-2: the FLOOR. The laid-out limb-94 value is the explicit argument to
+            // `_expectedCloseLimbsExt` below (here 1, matching the Rust shared vector's
+            // `delegate_count = 1` so the cross-language layout pin is unchanged).
+            minDelegateCount: 1
         });
 
-        uint256[] memory v = this._expectedCloseLimbsExt(fields);
+        uint256[] memory v = this._expectedCloseLimbsExt(fields, 1);
         assertEq(v.length, 103, "103 limbs (Stage 3 accumulator root + multi-token TFD)");
         // channelId — limb 0.
         assertEq(v[0], 0x0a0b0c0d);
@@ -701,6 +727,11 @@ contract ChannelSettlementManagerTest is Test {
         _assertSentinelRange(v, 77, 0x8800);
         _assertSentinelRange(v, 85, 0x9000); // member_set_commitment 85..92
         // member_count — 93; delegate_count — 94.
+        // B-2: limb 93 is still laid out from `fields.memberCount` (STRICT-bound to the channel's
+        // registered `activeMemberCount` — never relaxed, A-6). Limb 94 is now laid out from the
+        // EXPLICIT `delegateCount` argument (the value `verifyCloseIntent` takes from the proof
+        // AFTER the floor/ceiling predicate), not from `fields.minDelegateCount`. The values here
+        // (3, 1) still match the Rust shared vector, so the cross-language layout pin is intact.
         assertEq(v[93], 3); assertEq(v[94], 1);
         // Multi-token (§N-6, TM-11): tokenFundsDigest 95..102 — RECOMPUTED over the supplied
         // (registry, count, amounts); assert the limbs equal the split of the public recompute.
@@ -714,10 +745,49 @@ contract ChannelSettlementManagerTest is Test {
 
     /// @dev external passthroughs so `fields` is read from calldata (the verifier's
     /// `_expectedCloseLimbs` / `_closeIntentDigest` take `calldata`).
-    function _expectedCloseLimbsExt(CloseProofFields calldata fields)
+    function _expectedCloseLimbsExt(CloseProofFields calldata fields, uint32 delegateCount)
         external view returns (uint256[] memory)
     {
-        return verifier.expectedCloseLimbs(fields);
+        return verifier.expectedCloseLimbs(fields, delegateCount);
+    }
+
+    /// B-2 LAYOUT REGRESSION GUARD: limb 94 must follow the EXPLICIT (validated) delegate-count
+    /// argument, and limb 93 must NOT — limb 93 stays sourced from `fields.memberCount`, the
+    /// L1-rooted half of the member/delegate boundary (A-6). Asserted with a `delegateCount`
+    /// deliberately different from `fields.minDelegateCount` so a regression that re-derived limb 94
+    /// from the struct field (i.e. silently restored the old strict equality) fails here.
+    function test_expectedCloseLimbs_limb94FollowsValidatedArgument() external view {
+        uint256[10] memory amounts;
+        amounts[0] = 1 ether;
+        uint32[10] memory tokenRegistry;
+        CloseProofFields memory fields = CloseProofFields({
+            channelId: CHANNEL_ID,
+            closeNonce: 1,
+            finalEpoch: 2,
+            finalSmallBlockNumber: 3,
+            closeFreezeNonce: 4,
+            finalChannelStateDigest: keccak256("d"),
+            finalBalanceStateH1: keccak256("h1"),
+            channelFundAmounts: amounts,
+            tokenRegistry: tokenRegistry,
+            tokenCount: 1,
+            channelFundIntmaxStateRoot: keccak256("r"),
+            burnTxHash: keccak256("b"),
+            closeWithdrawalDigest: keccak256("w"),
+            snapshotMediumBlockNumber: 5,
+            finalStateVersion: 6,
+            finalSettledTxChain: keccak256("c"),
+            finalSettledTxAccumulatorRoot: keccak256("a"),
+            memberSetCommitment: keccak256("m"),
+            memberCount: 3,
+            minDelegateCount: 1
+        });
+        uint256[] memory v = this._expectedCloseLimbsExt(fields, 7);
+        assertEq(v[93], 3, "limb 93 = fields.memberCount (STRICT, A-6)");
+        assertEq(v[94], 7, "limb 94 = the validated argument, NOT fields.minDelegateCount");
+        // And a count far above the old uint8 packing width is representable at all (A-10).
+        uint256[] memory v2 = this._expectedCloseLimbsExt(fields, 1000);
+        assertEq(v2[94], 1000, "delegate counts > 255 are representable");
     }
 
     function _assertSentinelRange(uint256[] memory v, uint256 start, uint32 tag) internal pure {
@@ -1535,7 +1605,8 @@ contract ChannelSettlementManagerTest is Test {
         return this._closeProofCd(
             intent,
             m.registeredMemberSetCommitment(),
-            (uint16(m.activeMemberCount()) << 8) | uint16(m.activeDelegateCount())
+            m.activeMemberCount(),
+            uint32(m.activeDelegateCount())
         );
     }
 
@@ -1692,15 +1763,24 @@ contract ChannelSettlementManagerTest is Test {
             finalSettledTxChain: keccak256("chain"),
             finalSettledTxAccumulatorRoot: keccak256("settled_tx_accumulator_root"),
             memberSetCommitment: manager.registeredMemberSetCommitment(),
-            memberAndDelegateCount: (uint16(manager.activeMemberCount()) << 8)
-                | uint16(manager.activeDelegateCount())
+            memberCount: manager.activeMemberCount(),
+            minDelegateCount: uint32(manager.activeDelegateCount())
         });
     }
 
+    /// Build a proof whose limb 94 sits exactly AT the floor (`f.minDelegateCount`) — the baseline
+    /// for the direct-verifier negatives below.
     function _proofForFields(CloseProofFields memory f)
         internal view returns (MleVerifier.MleProof memory)
     {
-        return CloseTestLib.proofWithLimbs(this._expectedCloseLimbsExt(f));
+        return CloseTestLib.proofWithLimbs(this._expectedCloseLimbsExt(f, f.minDelegateCount));
+    }
+
+    /// B-2: same, with an EXPLICIT limb-94 value (may be above or below the floor).
+    function _proofForFieldsWithDc(CloseProofFields memory f, uint32 dc)
+        internal view returns (MleVerifier.MleProof memory)
+    {
+        return CloseTestLib.proofWithLimbs(this._expectedCloseLimbsExt(f, dc));
     }
 
     /// Positive control: a valid 103-limb proof for valid fields passes (mock verdict = true).
@@ -1739,11 +1819,196 @@ contract ChannelSettlementManagerTest is Test {
     /// A limb >= 2**32 ⇒ reverts on the canonical-range guard (even if it would "match" mod nothing).
     function test_verifyClose_nonCanonicalLimb_reverts() external {
         CloseProofFields memory f = this._validCloseFields();
-        uint256[] memory pis = this._expectedCloseLimbsExt(f);
+        uint256[] memory pis = this._expectedCloseLimbsExt(f, f.minDelegateCount);
         pis[0] = uint256(1) << 32; // 2**32, the smallest non-canonical u32
         MleVerifier.MleProof memory proof = CloseTestLib.proofWithLimbs(pis);
         vm.expectRevert(bytes("close limb range"));
         verifier.verifyCloseIntent(f, proof);
+    }
+
+    // =====================================================================
+    // B-2 — the delegate-count RANGE bind on close PI limb 94
+    // (doc/tasks/b2-delegate-close-threat-model.md §4d, test list §8)
+    //
+    // What these prove about security, test by test:
+    //   * the FLOOR still refuses to exclude an L1-registered delegate from the active region;
+    //   * the CEILING still refuses states the claim circuits could not serve (`active > 1024`);
+    //   * limb 93 (`memberCount`) was NOT collaterally loosened — the signer-set bind is intact;
+    //   * the length + canonicality guards run BEFORE limb 94 is read/used, so the pre-loop read is
+    //     never out-of-bounds and never a raw arithmetic panic (A-4 / A-5).
+    // =====================================================================
+
+    /// §8.1 POSITIVE (the live case the old strict equality bricked): a close proof whose
+    /// `delegateCount` limb is ABOVE the manager's registered count is ACCEPTED. Under Option B, L1
+    /// registration is cosigners-only and there is no per-join transaction, so any delegate that
+    /// joined after deployment makes the proof's count exceed the registered one.
+    function test_verifyClose_delegateCountAboveFloor_accepted() external {
+        CloseProofFields memory f = this._validCloseFields();
+        assertEq(uint256(f.minDelegateCount), 0, "default manager registers 0 delegates");
+        // 1 and 5 post-deploy joiners: both accepted, no upper bound short of the capacity.
+        assertTrue(verifier.verifyCloseIntent(f, _proofForFieldsWithDc(f, 1)));
+        assertTrue(verifier.verifyCloseIntent(f, _proofForFieldsWithDc(f, 5)));
+    }
+
+    /// §8.2 NEGATIVE (floor): `delegateCount < minDelegateCount` ⇒ `CloseDelegateCountOutOfRange`.
+    /// SECURITY: this is the one directional property L1 can still assert — `join_delegate` only
+    /// ever increments and there is no leave path, so a count BELOW the registered one would push a
+    /// registered delegate's slot outside `[0, member_count + delegate_count)` and make its
+    /// withdrawal claim unprovable (a targeted freeze-out).
+    function test_verifyClose_delegateCountBelowFloor_reverts() external {
+        CloseProofFields memory f = this._validCloseFields();
+        f.minDelegateCount = 2; // pretend the manager registered 2 delegates
+        // NOTE: the proof builders make an external call, so they MUST be evaluated before
+        // `vm.expectRevert` is armed — otherwise the expectation binds to the builder call.
+        MleVerifier.MleProof memory below = _proofForFieldsWithDc(f, 1);
+        MleVerifier.MleProof memory atFloor = _proofForFieldsWithDc(f, 2);
+        vm.expectRevert(ChannelSettlementVerifier.CloseDelegateCountOutOfRange.selector);
+        verifier.verifyCloseIntent(f, below);
+        // Exactly AT the floor is fine (boundary, inclusive).
+        assertTrue(verifier.verifyCloseIntent(f, atFloor));
+    }
+
+    /// §8.3 NEGATIVE (ceiling): `memberCount + delegateCount > MAX_CHANNEL_PARTICIPANTS (1024)` ⇒
+    /// `CloseDelegateCountOutOfRange`. SECURITY: mirrors the in-circuit `active <= 1024` bound the
+    /// withdrawal-claim / post-close-claim circuits enforce, so L1 never records a close whose
+    /// participant count the claim lane could not serve. Both sides of the boundary are pinned.
+    function test_verifyClose_delegateCountAboveCeiling_reverts() external {
+        CloseProofFields memory f = this._validCloseFields();
+        uint32 mc = uint32(f.memberCount);
+        // Builders first (they are external calls; see the note in the floor test).
+        MleVerifier.MleProof memory atCap = _proofForFieldsWithDc(f, 1024 - mc);
+        MleVerifier.MleProof memory overCap = _proofForFieldsWithDc(f, 1024 - mc + 1);
+        MleVerifier.MleProof memory huge = _proofForFieldsWithDc(f, type(uint32).max);
+        // active == 1024 exactly: accepted.
+        assertTrue(verifier.verifyCloseIntent(f, atCap));
+        // active == 1025: rejected.
+        vm.expectRevert(ChannelSettlementVerifier.CloseDelegateCountOutOfRange.selector);
+        verifier.verifyCloseIntent(f, overCap);
+        // A huge-but-CANONICAL limb (2**32 - 1) is rejected by the ceiling, not by an overflow
+        // panic — the explicit error is the failure mode (A-5).
+        vm.expectRevert(ChannelSettlementVerifier.CloseDelegateCountOutOfRange.selector);
+        verifier.verifyCloseIntent(f, huge);
+    }
+
+    /// §8.4 NEGATIVE (A-6, the invariant that must NEVER relax): tampering limb 93 (`memberCount`)
+    /// still fails with the generic strict-bind error. This proves the member half of the boundary
+    /// was not collaterally loosened when the delegate half became a range. If limb 93 ever became
+    /// pass-through, a state with a smaller `member_count` could close under fewer than N
+    /// signatures (the close circuit gates its signature loop on `i < member_count`).
+    function test_verifyClose_tamperedMemberCountLimb_stillStrict() external {
+        CloseProofFields memory f = this._validCloseFields();
+        MleVerifier.MleProof memory proof = _proofForFields(f); // built for the REAL memberCount
+        f.memberCount = f.memberCount + 1; // expected limb 93 moves; the proof's does not
+        vm.expectRevert(bytes("close limb mismatch"));
+        verifier.verifyCloseIntent(f, proof);
+
+        // …and the symmetric direction: a proof carrying a DIFFERENT limb 93 against the real
+        // registered count. Built by hand so only limb 93 moves.
+        CloseProofFields memory g = this._validCloseFields();
+        uint256[] memory pis = this._expectedCloseLimbsExt(g, g.minDelegateCount);
+        pis[93] = pis[93] - 1; // one fewer "member" ⇒ one fewer required signature in-circuit
+        vm.expectRevert(bytes("close limb mismatch"));
+        verifier.verifyCloseIntent(g, CloseTestLib.proofWithLimbs(pis));
+    }
+
+    /// §8.5 ORDERING REGRESSION GUARD (A-4/A-5): the length and canonicality checks MUST run before
+    /// limb 94 is read and used. A short vector must revert with the length guard (NOT an
+    /// out-of-bounds calldata read), and a non-canonical limb 94 must revert with the range guard
+    /// (NOT an arithmetic panic inside the ceiling sum).
+    function test_verifyClose_limb94_lengthAndCanonicalityCheckedFirst() external {
+        CloseProofFields memory f = this._validCloseFields();
+
+        // (a) 94 limbs — long enough that a naive `pi[94]` read would be out of bounds.
+        uint256[] memory shortPis = new uint256[](94);
+        vm.expectRevert(bytes("close pi len"));
+        verifier.verifyCloseIntent(f, CloseTestLib.proofWithLimbs(shortPis));
+
+        // (b) empty vector — the degenerate case.
+        vm.expectRevert(bytes("close pi len"));
+        verifier.verifyCloseIntent(f, CloseTestLib.proofWithLimbs(new uint256[](0)));
+
+        // (c) limb 94 == 2**32 (smallest non-canonical) ⇒ the range guard, not the delegate error.
+        uint256[] memory pis = this._expectedCloseLimbsExt(f, f.minDelegateCount);
+        pis[94] = uint256(1) << 32;
+        vm.expectRevert(bytes("close limb range"));
+        verifier.verifyCloseIntent(f, CloseTestLib.proofWithLimbs(pis));
+
+        // (d) limb 94 == 2**256-1 ⇒ still the range guard. Without the hoisted canonicality check
+        // the ceiling's `memberCount + delegateCount` would be a 0.8 overflow Panic(0x11) here.
+        pis[94] = type(uint256).max;
+        vm.expectRevert(bytes("close limb range"));
+        verifier.verifyCloseIntent(f, CloseTestLib.proofWithLimbs(pis));
+    }
+
+    /// §8.1/§8.7 MANAGER-LEVEL POSITIVE + §8.2 MANAGER-LEVEL NEGATIVE, and the full post-deploy-join
+    /// lane end to end: a manager deployed with ONE registered delegate accepts a close whose proof
+    /// carries TWO delegates (a second browser joined after deployment), finalizes, and the
+    /// POST-DEPLOY (unregistered) delegate then collects its member-attested balance. This is
+    /// exactly the scenario the former strict equality bricked. A close carrying ZERO delegates
+    /// (which would exclude the registered one) is refused.
+    function test_b2_postDeployDelegateJoin_closesAndClaims() external {
+        bytes32 USER_D = keccak256("delegate_d_pubkey_hash");  // registered at deployment
+        bytes32 USER_E = keccak256("delegate_e_pubkey_hash");  // joined AFTER deployment
+        address dave = makeAddr("b2_dave");
+        address erin = makeAddr("b2_erin");
+
+        MockChannelRegistry reg = new MockChannelRegistry(IChannelSettlementVerifier(address(verifier)));
+        bytes32[] memory members = new bytes32[](2);
+        members[0] = USER_A;
+        members[1] = USER_B;
+        reg.register(uint32(CHANNEL_ID), BP_MEMBER_SLOT, members);
+
+        ChannelSettlementManager.MemberBinding[] memory mb =
+            new ChannelSettlementManager.MemberBinding[](2);
+        mb[0] = ChannelSettlementManager.MemberBinding({pkG: USER_A, recipient: alice});
+        mb[1] = ChannelSettlementManager.MemberBinding({pkG: USER_B, recipient: bob});
+        ChannelSettlementManager.MemberBinding[] memory db =
+            new ChannelSettlementManager.MemberBinding[](1);
+        db[0] = ChannelSettlementManager.MemberBinding({pkG: USER_D, recipient: dave});
+
+        ChannelSettlementManager m = new ChannelSettlementManager(
+            CHANNEL_ID, BP_MEMBER_SLOT, USER_A, 1, // registered delegate_count = 1 (the FLOOR)
+            CHALLENGE_PERIOD, SPECIAL_CLOSE_PENALTY, INITIAL_BP_BOND,
+            IChannelSettlementVerifier(address(verifier)), IChannelRegistry(address(reg)), mb, db
+        );
+
+        vm.prank(alice);
+        m.requestClose();
+        vm.warp(block.timestamp + GRACE);
+        ChannelSettlementManager.CloseIntent memory intent = _intent(1, 9, 22, 1);
+
+        // Builders first (external calls; `vm.expectRevert` binds to the NEXT call).
+        MleVerifier.MleProof memory excludesDelegate = this._closeProofCd(
+            intent, m.registeredMemberSetCommitment(), m.activeMemberCount(), 0
+        );
+        MleVerifier.MleProof memory withJoiner = this._closeProofCd(
+            intent, m.registeredMemberSetCommitment(), m.activeMemberCount(), 2
+        );
+
+        // A close carrying delegate_count = 0 would EXCLUDE the registered delegate ⇒ refused.
+        // The floor error propagates as a revert out of the manager's `_checkCloseProof`.
+        vm.expectRevert(ChannelSettlementVerifier.CloseDelegateCountOutOfRange.selector);
+        m.submitCloseIntent(intent, excludesDelegate);
+
+        // delegate_count = 2 (one post-deploy joiner) ⇒ ACCEPTED.
+        m.submitCloseIntent(intent, withJoiner);
+        vm.warp(block.timestamp + CHALLENGE_PERIOD + 1);
+        m.finalizeClose();
+        bytes32 cid = m.finalizedCloseIntentDigest();
+
+        // Both delegates collect. The POST-DEPLOY one has no constructor binding at all — its
+        // authorization is entirely the proof-bound `recipient` claim PI (the claim-side B-2, commit
+        // 6d2b9d8, removed the `registeredRecipientOf` gate), which is hashed into the slot leaf
+        // in-circuit and so provably equals the cosigner-signed exit address.
+        assertTrue(m.registeredMemberIndexPlusOne(USER_E) == 0, "post-deploy joiner is unregistered");
+        ChannelSettlementManager.WithdrawalClaim memory dClaim =
+            _withdrawalClaim(cid, USER_D, dave, 30);
+        m.submitWithdrawalClaim(dClaim, _withdrawalClaimProofFor(m, dClaim));
+        ChannelSettlementManager.WithdrawalClaim memory eClaim =
+            _withdrawalClaim(cid, USER_E, erin, 20);
+        m.submitWithdrawalClaim(eClaim, _withdrawalClaimProofFor(m, eClaim));
+        assertEq(m.withdrawalCredits(0, dave), 30, "registered delegate credited");
+        assertEq(m.withdrawalCredits(0, erin), 20, "POST-DEPLOY delegate credited (B-2 unblocks)");
     }
 
     /// The mock verifier returning `false` (crypto-invalid proof) ⇒ verifyCloseIntent returns false

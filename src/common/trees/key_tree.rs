@@ -2,8 +2,8 @@
 //! threshold).
 //!
 //! `MemberTree` commits the ordered member set of a single channel. Each leaf binds a member's
-//! Goldilocks public key `pk_g` (the Poseidon-preimage signature public key,
-//! `poseidon_sig::GoldilocksSecretKey::public_key()`), the member's BabyBear hash-signature public
+//! Falcon signing identity `pk_g` (the Falcon-512/Poseidon member identity digest,
+//! `falcon_sig::FalconKeys::pk_g()`), the member's BabyBear hash-signature public
 //! key `pk_b` (P3, channel-tx sender authorization — A11 two-key binding), to that member's Regev
 //! public-key digest at the slot.
 //!
@@ -56,9 +56,9 @@ const MEMBER_LEAF_DOMAIN: u64 = 0x4d424c46;
 
 /// One channel member's identity leaf.
 ///
-/// * `pk_g` — the member's Goldilocks public key `Poseidon([DOMAIN_PK_G] || sk_g)` (the member's
-///   canonical signing identity, supplied at registration from
-///   `GoldilocksSecretKey::public_key()`).
+/// * `pk_g` — the member's Falcon identity `Poseidon(IMFK || encode(h))` (the member's canonical
+///   signing identity, supplied at registration from `FalconKeys::pk_g()` (falcon-sig Phase 3; was
+///   the retired Goldilocks key's `public_key()`)).
 /// * `pk_b` — the member's BabyBear hash-signature public key (the canonical reduction of the
 ///   `pk_b` digest exposed by the channel-tx sender hash-sig STARK; P3, threat-model D1(b)/A11).
 ///   Bound here so the off-chain channel-tx verifier can confirm that `pk_b`, `pk_g` and the Regev

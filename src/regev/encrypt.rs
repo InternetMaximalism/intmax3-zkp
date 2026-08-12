@@ -139,6 +139,44 @@ pub fn encode_amount(amount: u64) -> Vec<u8> {
     regev_plonky3::encode_value_message(amount, REGEV_N)
 }
 
+/// The (unique, public, all-zero) opening of the CANONICAL ZERO ciphertext
+/// [`RegevCiphertext::padding`] to the amount `0`.
+///
+/// SECURITY: this is the one [`AmountWitness`] that is deliberately NOT sender-private, because
+/// the ciphertext it opens is a fixed public constant that carries no secret. Substituting
+/// `r = e1 = e2 = m = k1 = k2 = 0` into the two ring identities the E-1 witness check enforces
+/// (`transfer_stark::check_amount_witness`) gives
+///   * `c1 + (x^n + 1)·k1 = a·r + e1`  →  `0 + 0 = 0`,
+///   * `c2 + (x^n + 1)·k2 = b·r + e2 + Δ·m`  →  `0 + 0 = 0`,
+/// for EVERY public key `(a, b)` — so this witness opens `padding()` under any key, exactly
+/// mirroring the fact that the all-zero ciphertext decrypts to 0 under any secret key
+/// (`common::balance_state::zero_ciphertext`, TM-8). It also satisfies every range predicate:
+/// `r` is ternary (0), the four CBD halves are in `[0, 2]` (0), and `m == encode_amount(0)` (all
+/// zero bits).
+///
+/// SECURITY (why this is not a value-forgery lane): the witness claims `amount = 0`. It cannot be
+/// used to claim any other amount — `check_amount_witness` rejects any `AmountWitness` whose `m`
+/// does not equal `encode_amount(amount)`, and the only `m` that satisfies the `c2` identity for
+/// the all-zero ciphertext is the zero polynomial. Handing this out therefore grants no ability
+/// to spend anything: it is the proof that a canonically-zero slot holds zero.
+///
+/// INTENTIONALLY SIMPLE: constructed from constants, no RNG, no key material.
+pub fn zero_amount_witness() -> AmountWitness {
+    AmountWitness {
+        amount: 0,
+        witness: EncryptionWitness {
+            r: vec![0i8; REGEV_N],
+            e1u: vec![0u8; REGEV_N],
+            e1v: vec![0u8; REGEV_N],
+            e2u: vec![0u8; REGEV_N],
+            e2v: vec![0u8; REGEV_N],
+            m: vec![0u8; REGEV_N],
+            k1: vec![F::ZERO; REGEV_N],
+            k2: vec![F::ZERO; REGEV_N],
+        },
+    }
+}
+
 /// Encrypt `amount` under a member's public key. The ciphertext goes into state (as a digest);
 /// the returned [`AmountWitness`] stays with the sender for the encryption STARK.
 pub fn encrypt_amount(

@@ -484,15 +484,13 @@ fn e2e_deposit_validity_withdrawal() {
 
     let final_block_chain_proof = last_block_proof.expect("final block hash chain proof");
 
-    // P2b: build the recursive ListCircuit proof over the span's bp IMSB single-sigs, and pass it
-    // to the validity circuit (which verifies it conditionally on final.bp_sig_chain != 0,
+    // P2b: build the recursive ListCircuit proof over the span's bp IMSB Falcon signatures, and
+    // pass it to the validity circuit (which verifies it conditionally on final.bp_sig_chain != 0,
     // decision D3).
-    let single_sig = intmax3_zkp::poseidon_sig::circuit::SingleSigCircuit::new();
-    let list_circuit =
-        intmax3_zkp::poseidon_sig::list::ListCircuit::new(&single_sig.verifier_data());
+    let list_circuit = intmax3_zkp::falcon_sig::list::ListCircuit::<F, C, D>::new();
     let list_proof = block_witness_generator
         .borrow()
-        .build_bp_sig_list_proof(&single_sig, &list_circuit)
+        .build_bp_sig_list_proof(&list_circuit)
         .expect("build bp sig list proof");
 
     let validity_circuit =

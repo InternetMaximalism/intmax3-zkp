@@ -55,6 +55,23 @@ by diff.
   regen). No VK changes from #1 (VKs are circuit-, not contract-, derived).
 
 ## Step 0 — preconditions
+- **CO-SIGNER KEY MATERIAL (fail-closed; provision FIRST).** `channel_member` refuses to run
+  unless exactly one of these is set:
+  - `INTMAX_COSIGNER_KEYFILE=/path/to/cosigner.key` — **production**. A 0600, gitignored file with
+    >= 32 bytes of hex. Create once per host with `umask 077; openssl rand -hex 32 >
+    .claude/cosigner.key`, then **back it up**: keys are derived from it, so losing it makes every
+    channel derived from it permanently unclosable. The CLI rejects a group/world-readable file,
+    a short file, and an all-zero file. Never `cat`, echo, log, or commit it.
+  - `INTMAX_INSECURE_DETERMINISTIC_KEYS=1` — **tests / local anvil only**. Prints a red banner on
+    every invocation. Every key it produces is computable by anyone from this public repo.
+
+  Setting **both** is a hard error (a provisioned host cannot be silently downgraded); setting
+  neither is a hard error. Do not put the insecure flag in any systemd unit, Dockerfile `ENV`, or
+  `.env` — `api/lib/cli.js:47` spreads `process.env` into every CLI child, so it would silently
+  apply to every channel the API creates.
+
+  **Every channel created before this fix has publicly derivable co-signer keys and must be
+  drained and retired, not merely redeployed** — see `doc/tasks/cosigner-key-provenance.md` §2.
 - **STALE CLI STATE (TM-16): do NOT reuse pre-TM-16 `cli_state.json` files.** The
   TM-16 change re-keyed the CLI replay ledgers (`applied_tx_identities` /
   `spent_tx_identities`, token-free replay identities) and the descriptor wire
@@ -67,7 +84,10 @@ by diff.
 - Contracts build: `cd contracts && forge build`.
 - Decide the target network + set `.env` (see `contracts/.env.example` and
   `api/.env.example`): `FRAUD_TREASURY`, `BLOCK_PRODUCER`, `INTMAX_DEPOSIT_KEY`,
-  `INTMAX_API_TOKEN`, `INTMAX_ALLOWED_ORIGINS`.
+  `INTMAX_COSIGNER_KEYFILE`, `INTMAX_API_TOKEN`, `INTMAX_ALLOWED_ORIGINS`.
+  `INTMAX_DEPOSIT_KEY` unset makes the *Rust CLI* silently fall back to the public anvil dev key
+  (`channel_member.rs:877`; `api/lib/cli.js` guards this, the binary does not) — always set it
+  explicitly for a real network.
 
 ## Step 1 — regenerate fixtures (release; each is minutes of proving)
 Run from repo root. Feature-gated generators un-gate the shared witness builders.
@@ -120,11 +140,38 @@ tests (`tx_settlement`, `single_withdrawal_circuit`) already pass on this branch
 Deploy scripts already wire the new guards: they authorize `BLOCK_PRODUCER`
 (#1), require `FRAUD_TREASURY` on non-anvil chains (#6), and set the KZG
 satellite. The per-statement VKs are initialized IN the deploy scripts from the
-regenerated fixtures:
-- `rollup.initializeWithdrawalVk(...)`  (withdrawal VK — CHANGED by #2b)
-- `sv.initializeCloseVk(...)`, `initializeWithdrawalClaimVk(...)`,
-  `initializePostCloseClaimVk(...)`, `initializeCancelCloseVk(...)`
-Use `DeployCloseCli.s.sol` (CLI/prod path) or `Deploy.s.sol` (rollup-only smoke).
+regenerated fixtures. **Which script initializes what — verified, do not
+assume:**
+
+| script | VKs initialized | real-network? |
+|---|---|---|
+| `DeployCloseCli.s.sol` (CLI/prod path) | withdrawal, close, withdrawalClaim, **postCloseClaim**, **cancelClose** — all five | YES |
+| `Deploy.s.sol` | rollup-only smoke | YES |
+| `DeployClose.s.sol`, `DeployC2C.s.sol` | withdrawal only | — |
+| `DeployWalletSettlement.s.sol`, `DeployPartialWithdrawalE2E.s.sol` | close + cancelClose only | anvil-gated (`chainid == 31337`) |
+
+**HISTORY — this text was an OVERCLAIM until 2026-08-12.** `DeployCloseCli.s.sol`
+called only `initializeCloseVk` and `initializeWithdrawalClaimVk`;
+`initializePostCloseClaimVk` was called by NO script anywhere in the repo, and
+`initializeCancelCloseVk` only by the two anvil-gated scripts. So every REAL
+deployment shipped with both unset, and:
+- `ChannelSettlementVerifier.sol:1111` reverted `PostCloseClaimVkNotSet()` →
+  the `post-close-claim` CLI command (`channel_member.rs:2152-2184`) could
+  never succeed;
+- `ChannelSettlementVerifier.sol:1050` reverted `CancelCloseVkNotSet()` →
+  `cancel-close` (`channel_member.rs:1988-2025`), the ONLY on-chain remedy
+  against a stale close, was unavailable.
+
+Reported as audit622 **A-M4** ("MEDIUM, liveness bricking") on 2026-06-22 and
+open until the two calls were added (steps 3b/3c in the script). SECURITY: the
+fix supplies the VKs the reverts were correctly demanding; no fail-closed check
+was weakened.
+
+This is the SAME CLASS as the gate-8 defect — a fail-closed check that is
+soundness-safe (it never accepts a bad proof) while making an HONEST user's
+path impossible. A threat model that only asks "can an adversary get a false
+statement accepted?" cannot see either one. When editing this runbook, state
+what the scripts DO, verified by reading them — not what they ought to do.
 Build/deploy with `--locked` (dependency pin, #14). After deploy, authorize the
 block producer if the posting key differs from the deployer:
 `BLOCK_PRODUCER=0x<poster-addr>` (deploy reads it) — the whitelist is otherwise

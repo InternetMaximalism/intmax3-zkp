@@ -6,6 +6,25 @@ const { findActiveTicket, upsertTicket } = require('../lib/tickets');
 
 const router = Router({ mergeParams: true });
 
+// SECURITY (detached close signing — doc/tasks/close-detached-signing-design.md, Option A).
+// The four heavy routes below (`/submit-intent`, `/challenge`, `/cancel`, and
+// `full-withdrawal.js`'s `/request`) used to drive a CLI that DERIVED every co-signer's Falcon
+// SECRET key in the API host process, so a single compromise of this host was full N-of-N custody
+// of the channel. It no longer does: `close` and `cancel-close` consume the detached
+// cosignatures already carried by the head state and verify them against the authenticated
+// ChannelRecord. Argv and env are UNCHANGED — the fix is entirely inside the CLI, which is why
+// there is nothing to update here beyond this note.
+//
+// `/request` (A26) never needed keys at all: CLOSE_REQUEST_ONLY makes the CLI return before any
+// proving or key derivation.
+//
+// STILL TRUE, and NOT fixed by that change:
+//   * every route here is gated by ONE shared bearer token; there is no per-member or per-caller
+//     authorization anywhere in api/routes/ (design §8.2);
+//   * the coordinator still chooses closeNonce / burnTxHash / snapshotMediumBlockNumber
+//     unilaterally — no member signature covers them (design T-5 / §8.3). "N-of-N signed the
+//     close" means "N-of-N signed the STATE".
+
 // POST /api/v1/channel/:ch/close/request (A26)
 // requestClose-only phase: freeze the channel (ClosePending, start grace) WITHOUT building the
 // (heavy) close proof, so the caller controls timing. Pass { advanceTime } on a dev chain to

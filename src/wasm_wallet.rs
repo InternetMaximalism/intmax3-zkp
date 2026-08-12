@@ -177,6 +177,15 @@ pub fn wallet_genesis_contribution(balance: u64, recipient: String) -> Result<St
                  this slot's only payout binding; address(0) could never exit)",
             ));
         }
+        // SECURITY (A-1): `genesis_ct` is emitted for WIRE COMPATIBILITY only — the cosigners no
+        // longer install it. Both `create_channel` and `join_delegate`
+        // (src/bin/channel_member.rs) open a new delegate slot at the CANONICAL ZERO ciphertext,
+        // because a self-declared, Regev-encrypted opening balance is unbacked value that no
+        // cosigner can inspect. A wallet therefore ALWAYS opens at 0 regardless of the `balance`
+        // argument (production already passes 0), and it is funded afterwards through the L1
+        // deposit import or an in-channel transfer. `wallet_import_channel` detects the installed
+        // canonical zero and adopts the matching public zero witness, so the witness cached here is
+        // superseded rather than relied on — see the note there.
         let mut rng = rand010::rng();
         let (ct, witness) =
             encrypt_amount(&mut rng, &session.keys.regev_pk, balance).map_err(js_err)?;
@@ -352,26 +361,49 @@ pub fn wallet_import_channel(snapshot_json: String) -> Result<String, JsValue> {
         assert_own_recipient_bound(session, &snapshot, slot)?;
 
         // Keep the witness only if the imported (slot, token) ciphertext is exactly the one we
-        // encrypted (genesis contribution / completed send / refresh of that position).
-        // Otherwise we cannot send that token until a refresh.
+        // encrypted (completed send / refresh of that position). Otherwise we cannot send that
+        // token until a refresh.
+        //
+        // SECURITY (A-1 finding 4 — the CANONICAL-ZERO case must be handled EXPLICITLY):
+        // the plaintext comparison below is NOT a proof that our witness opens the installed
+        // ciphertext, because re-deriving the ciphertext by re-encrypting is impossible (fresh
+        // randomness). It is a heuristic, and A-1 broke it in the direction that matters. Since
+        // A-1 the cosigners install the CANONICAL ZERO ciphertext at a new delegate slot — at
+        // genesis (`create_channel`) and at join (`join_delegate`) — instead of the ciphertext this
+        // wallet contributed. So:
+        //   * a wallet that contributed a NONZERO balance is the SAFE case: `amt != 0 == bal_at`,
+        //     the heuristic drops the witness, and it must refresh — correct.
+        //   * a wallet that contributed ZERO is the PRODUCTION case (`wallet-live.html` passes
+        //     `toBase('0')`): `0 == 0` passes the compare, and the old code RETAINED a witness for
+        //     our own `encrypt_amount(rng, pk, 0)`, which does NOT open the installed canonical
+        //     zero. The first send would then fail fail-closed inside the E-1 witness check
+        //     (`regev::transfer_stark::check_amount_witness`) — sound, but a dead-end for the user.
+        // The fix is exact rather than defensive: when the installed ciphertext IS the canonical
+        // zero, the correct witness is the PUBLIC all-zero witness (`zero_amount_witness()`), which
+        // opens `padding()` under any key and can only ever open the amount 0. Adopt it and keep
+        // the wallet able to send.
+        let held_token_slot = session.balance.as_ref().map(|(t, _, _)| *t);
         let can_send = match &session.balance {
-            Some((token_slot, amt, w)) => {
+            Some((token_slot, amt, _w)) => {
                 let ts = *token_slot as usize;
                 let bal_at = decrypt_balance_token(&session.keys, &snapshot, slot, *token_slot)
                     .map_err(js_err)?;
-                // Re-deriving the ciphertext digest by re-encrypting is not possible
-                // (randomness differs); instead trust the witness iff the plaintext matches and
-                // the position has no pending homomorphic adds.
-                *amt == bal_at
-                    && snapshot.state.balance_state.pending_adds[slot as usize][ts] == 0
-                    && {
-                        let _ = w;
-                        true
-                    }
+                *amt == bal_at && snapshot.state.balance_state.pending_adds[slot as usize][ts] == 0
             }
             None => false,
         };
-        if !can_send {
+        // SECURITY: order matters — the canonical-zero adoption runs AFTER `can_send` is decided,
+        // and only when the installed ciphertext is literally the canonical zero AND the position
+        // is free of pending homomorphic adds (an add would have moved the ciphertext away from
+        // the canonical zero anyway; the check is belt-and-braces).
+        let ts = held_token_slot.unwrap_or(0);
+        let installed_is_canonical_zero = snapshot.state.balance_state.enc_balances[slot as usize]
+            [ts as usize]
+            == *crate::common::balance_state::zero_ciphertext()
+            && snapshot.state.balance_state.pending_adds[slot as usize][ts as usize] == 0;
+        if installed_is_canonical_zero {
+            session.balance = Some((ts, 0, crate::regev::encrypt::zero_amount_witness()));
+        } else if !can_send {
             session.balance = None;
         }
         let report = balance_report(session, &snapshot, slot)?;

@@ -81,7 +81,7 @@ fn main() -> anyhow::Result<()> {
     pw.set_proof_with_pis_target(&wrapper.wrap_proof, &proof);
     let mle = prove_with_mle::<F, C, D>(&wrapper.data, pw)?;
     verify_mle_proof(&wrapper.data, &vk, &mle.proof)?;
-    let mle_json = export_mle_json(&mle.proof, &wrapper.data.common);
+    let mle_json = export_mle_json(&mle.proof, &wrapper.data.common)?;
 
     {
         let parsed: serde_json::Value = serde_json::from_str(&mle_json)?;

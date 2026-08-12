@@ -5,10 +5,11 @@
 //! agreed to keep operating ⇒ the pending close froze a stale state ⇒ cancel. See
 //! `tasks/phase-c-challenge-stubs-threat-model.md` ("CORRECTED cancelClose statement") and
 //! `cancel_close_pis.rs` for the layout/security rationale. This mirrors `close_circuit.rs`'s
-//! proven machinery (IMCH/H1 recompute, recursive verification of ONE level-`AGG_LEVELS`
-//! aggregated sign-zkp proof carrying the N member single-sigs, `member_set_commitment` keccak
-//! with pad-to-MAX + active-bits + pk_g distinctness) and fixes the two findings the legacy
-//! 41-limb design failed on:
+//! proven machinery (IMCH/H1 recompute, recursive verification of ONE
+//! `falcon_sig::agg::FalconAggCircuit` proof carrying the N member Falcon signatures — falcon-sig
+//! Phase 2, replacing the retired `poseidon_sig::aggregate` proof at identical PI offsets —
+//! `member_set_commitment` keccak with pad-to-MAX + active-bits + pk_g distinctness) and fixes
+//! the two findings the legacy 41-limb design failed on:
 //!
 //!  - Finding D (member binding): `member_set_commitment` is exposed and matched on L1 against the
 //!    channel's registered member set, so a third party cannot forge a cancel with their own keys.
@@ -51,9 +52,9 @@ use crate::{
         u64::{U64, U64Target},
         u256::{U256, U256Target},
     },
-    poseidon_sig::aggregate::{
-        AGG_COUNT_OFFSET, AGG_LEVELS, AGG_MSG_OFFSET, AGG_PK_LIST_OFFSET, MAX_AGG_SIGNERS,
-        agg_public_inputs_len,
+    falcon_sig::agg::{
+        FALCON_AGG_COUNT_OFFSET, FALCON_AGG_MSG_OFFSET, FALCON_AGG_PK_LIST_OFFSET,
+        FALCON_AGG_PUBLIC_INPUTS_LEN,
     },
     utils::{
         poseidon_hash_out::PoseidonHashOutTarget,
@@ -147,15 +148,16 @@ pub enum CancelCloseCircuitError {
 }
 
 /// Per-member authentication material for the revived state's N-of-N signatures (mirror of
-/// `close_circuit::MemberCloseAuth`).
+/// `close_circuit::MemberCloseAuth`; Falcon since Phase 2 — `pk_g` is the member's
+/// `Poseidon(IMFK || encode(h))` identity digest, DD-2).
 #[derive(Clone, Debug)]
 pub struct MemberCancelAuth {
     pub pk_g: Bytes32,
 }
 
 /// Full prover witness: the cancel witness (revived state + close intent), the per-member `pk_g`s,
-/// and the level-`AGG_LEVELS` aggregated sign-zkp proof over the N member single-sigs of the
-/// revived IMCH digest.
+/// and the `FalconAggCircuit` proof over the N member Falcon signatures of the revived IMCH
+/// digest.
 #[derive(Clone, Debug)]
 pub struct CancelCloseFullWitness<F, C, const D: usize>
 where
@@ -166,11 +168,11 @@ where
     /// Exactly `member_count` ACTIVE entries (slot order) — ALL active members sign the revived
     /// IMCH digest (unanimous; mirrors the close path).
     pub member_auth: Vec<MemberCancelAuth>,
-    /// The level-`AGG_LEVELS` `poseidon_sig::aggregate::AggLevelCircuit` proof over the N member
-    /// single-sigs of the revived IMCH digest (slot order, left-packed; build via
-    /// `SigAggregator::aggregate_to_level(sigs, AGG_LEVELS)`). Its `message` PI must equal the
-    /// recomputed revived IMCH digest, its `signer_count` the revived `member_count`, and its pk
-    /// list IS the circuit's member key vector.
+    /// The `falcon_sig::agg::FalconAggCircuit` proof over the N member Falcon signatures of the
+    /// revived IMCH digest (slot order, left-packed; build via
+    /// `FalconAggCircuit::prove(FalconAggWitness::for_signatures(digest, signers))`). Its
+    /// `message` PI must equal the recomputed revived IMCH digest, its `signer_count` the
+    /// revived `member_count`, and its pk list IS the circuit's member key vector.
     pub agg_proof: ProofWithPublicInputs<F, C, D>,
 }
 
@@ -236,9 +238,9 @@ where
     close_final_state_version: U64Target,
     close_final_settled_tx_chain: Bytes32Target,
 
-    // ── member auth / aggregated sign-zkp proof ──
-    /// The recursively verified level-`AGG_LEVELS` aggregated sign-zkp proof. Its pk-list PI
-    /// slices ARE the in-circuit member key vector (no separate witnessed `pk_g` targets).
+    // ── member auth / recursively verified Falcon aggregation proof (falcon-sig Phase 2) ──
+    /// The recursively verified `FalconAggCircuit` proof. Its pk-list PI slices ARE the
+    /// in-circuit member key vector (no separate witnessed `pk_g` targets).
     agg_proof: ProofWithPublicInputsTarget<D>,
     active_bits: Vec<plonky2::iop::target::BoolTarget>,
     /// A5 pk_g distinctness: per-slot indexed-Merkle insertion proofs (length MAX_COSIGNERS).
@@ -253,19 +255,16 @@ where
     C: GenericConfig<D, F = F> + 'static,
     <C as GenericConfig<D>>::Hasher: AlgebraicHasher<F>,
 {
-    /// Builds the cancel-close circuit against a FIXED level-`AGG_LEVELS`
-    /// `poseidon_sig::aggregate::AggLevelCircuit` verifier key (`agg_vd`), baked in as a
-    /// build-time constant (A7). No balance proof is verified — the revived IMCH digest (which
-    /// hashes H1, which hashes `state_version`) is what the members sign, and that is the sole
-    /// anchor the staleness predicate needs.
+    /// Builds the cancel-close circuit against a FIXED `falcon_sig::agg::FalconAggCircuit`
+    /// verifier key (`agg_vd`), baked in as a build-time constant (A7). No balance proof is
+    /// verified — the revived IMCH digest (which hashes H1, which hashes `state_version`) is
+    /// what the members sign, and that is the sole anchor the staleness predicate needs.
     pub fn new(agg_vd: &VerifierCircuitData<F, C, D>) -> Self {
         // Mirror of the close circuit's build-time arity check (the security binding is the
         // constant VK below).
-        const { assert!(MAX_COSIGNERS == MAX_AGG_SIGNERS) };
         assert_eq!(
-            agg_vd.common.num_public_inputs,
-            agg_public_inputs_len(AGG_LEVELS),
-            "agg_vd must be the level-{AGG_LEVELS} AggLevelCircuit verifier data"
+            agg_vd.common.num_public_inputs, FALCON_AGG_PUBLIC_INPUTS_LEN,
+            "agg_vd must be the FalconAggCircuit verifier data"
         );
         let mut builder =
             CircuitBuilder::<F, D>::new(CircuitConfig::standard_recursion_zk_config());
@@ -338,6 +337,13 @@ where
             count_sum = builder.add(count_sum, bit.target);
         }
         builder.connect(count_sum, revived_member_count);
+
+        // SECURITY (review Phase-2 Finding 1, MAJOR): revived_member_count >= 1, asserted here
+        // rather than inherited from the aggregator. See the twin comment in `close_circuit.rs`:
+        // the retired `AggLevelCircuit` supplied this floor structurally, direct N-of-N Falcon
+        // verification does not, and an all-padding agg proof would otherwise make the
+        // `agg_message.connect(revived_state_digest)` binding vacuous.
+        builder.assert_one(active_bits[0].target);
 
         // `unallocated_confirmed_incoming` is part of the IMCH preimage; the revived state may have
         // a non-zero value (it is not a close), so we DO NOT force it to zero here (unlike the
@@ -465,33 +471,36 @@ where
         let revived_nonce_plus_one = revived_close_freeze_nonce.add(&mut builder, &one_u64);
         revived_nonce_plus_one.connect(&mut builder, close_freeze_nonce);
 
-        // ── (g) N-member revived-IMCH signatures via the aggregated sign-zkp proof ──
+        // ── (g) N-member revived-IMCH Falcon signatures via the recursively verified
+        // FalconAggCircuit proof (falcon-sig Phase 2) ──
         //
         // Message = the RECOMPUTED revived IMCH digest; all N active members sign it. We verify
-        // ONE level-AGG_LEVELS `AggLevelCircuit` proof at a CONSTANT VK and consume its exposed
+        // ONE `FalconAggCircuit` proof at a CONSTANT VK and consume its exposed
         // `[message(8), signer_count(1), pk list]` directly — see the matching block in
-        // `close_circuit.rs` for the full consumer-obligation rationale (message binding, count
-        // binding, wired pk list with left-packed zero-suffix padding, u32 range provenance of the
-        // PI limbs); identical mechanism here with the REVIVED digest as the message.
+        // `close_circuit.rs` for the full consumer-obligation rationale (message binding
+        // discharging TM-C5 item 4, count binding via the aggregation TREE's padding soundness —
+        // unconditionally verified left child, gated right child, constant-1 leaf count — wired pk
+        // list with left-packed zero-suffix padding, u32 range provenance of the PI limbs);
+        // identical mechanism here with the REVIVED digest as the message.
         let agg_proof = add_proof_target_and_verify(agg_vd, &mut builder);
 
         // (g-i) message == recomputed revived IMCH digest.
         let agg_message = Bytes32Target::from_slice(
-            &agg_proof.public_inputs[AGG_MSG_OFFSET..AGG_MSG_OFFSET + BYTES32_LEN],
+            &agg_proof.public_inputs[FALCON_AGG_MSG_OFFSET..FALCON_AGG_MSG_OFFSET + BYTES32_LEN],
         );
         agg_message.connect(&mut builder, revived_state_digest);
 
         // (g-ii) signer_count == revived member_count (a prover cannot under-sign: signer_count
-        // provably equals the number of genuinely verified leaf signatures).
+        // provably equals the number of genuinely verified Falcon signatures).
         builder.connect(
-            agg_proof.public_inputs[AGG_COUNT_OFFSET],
+            agg_proof.public_inputs[FALCON_AGG_COUNT_OFFSET],
             revived_member_count,
         );
 
         // (g-iii) the member key vector := the verified pk-list PI slices, slot for slot.
         let member_pk_g_targets: Vec<Bytes32Target> = (0..MAX_COSIGNERS)
             .map(|i| {
-                let start = AGG_PK_LIST_OFFSET + i * BYTES32_LEN;
+                let start = FALCON_AGG_PK_LIST_OFFSET + i * BYTES32_LEN;
                 Bytes32Target::from_slice(&agg_proof.public_inputs[start..start + BYTES32_LEN])
             })
             .collect();
@@ -708,10 +717,9 @@ where
         self.close_final_settled_tx_chain
             .set_witness(&mut witness, close.final_settled_tx_chain);
 
-        // The level-AGG_LEVELS aggregated sign-zkp proof. The in-circuit member key vector is
-        // sliced from THIS proof's pk-list PIs — `member_auth` must mirror the aggregation leaf
-        // order (slot order) or the member_set_commitment / distinctness constraints become
-        // unsatisfiable.
+        // The FalconAggCircuit proof. The in-circuit member key vector is sliced from THIS
+        // proof's pk-list PIs — `member_auth` must mirror the aggregation slot order or the
+        // member_set_commitment / distinctness constraints become unsatisfiable.
         witness
             .set_proof_with_pis_target(&self.agg_proof, &witness_value.agg_proof)
             .map_err(|e| CancelCloseCircuitError::FailedToProve(e.to_string()))?;
@@ -777,7 +785,7 @@ where
 #[cfg(any(test, feature = "cancel-close-fixture-bin"))]
 pub mod test_fixture {
     //! Shared heavy artifacts for the cancel-close-circuit tests and the fixture-gen binary: ONE
-    //! `SingleSigCircuit` + `SigAggregator` + `CancelCloseCircuit` build per test-binary run.
+    //! `FalconAggCircuit` + `CancelCloseCircuit` build per test-binary run.
 
     use std::sync::OnceLock;
 
@@ -796,10 +804,9 @@ pub mod test_fixture {
             },
         },
         ethereum_types::{bytes32::Bytes32, u32limb_trait::U32LimbTrait as _, u256::U256},
-        poseidon_sig::{
-            GoldilocksSecretKey,
-            aggregate::{AGG_LEVELS, SigAggregator},
-            circuit::SingleSigCircuit,
+        falcon_sig::{
+            FALCON_N, FalconKeys, FalconSignature,
+            agg::{FalconAggCircuit, FalconAggWitness},
         },
         regev::{REGEV_N, REGEV_Q, RegevCiphertext},
     };
@@ -812,22 +819,19 @@ pub mod test_fixture {
     pub const TEST_ACTIVE_MEMBERS: usize = 3;
 
     pub struct CancelCloseCircuitFixture {
-        pub single_sig: SingleSigCircuit,
-        pub aggregator: SigAggregator,
+        /// The Falcon aggregation circuit (falcon-sig Phase 2; replaces the retired
+        /// `SingleSigCircuit` + `SigAggregator` pair).
+        pub agg: FalconAggCircuit<F, C, D>,
         pub cancel_circuit: CancelCloseCircuit<F, C, D>,
     }
 
     pub fn fixture() -> &'static CancelCloseCircuitFixture {
         static FIXTURE: OnceLock<CancelCloseCircuitFixture> = OnceLock::new();
         FIXTURE.get_or_init(|| {
-            let single_sig = SingleSigCircuit::new();
-            let aggregator = SigAggregator::new(&single_sig.verifier_data());
-            let cancel_circuit = CancelCloseCircuit::<F, C, D>::new(
-                &aggregator.levels[AGG_LEVELS - 1].verifier_data(),
-            );
+            let agg = FalconAggCircuit::<F, C, D>::new();
+            let cancel_circuit = CancelCloseCircuit::<F, C, D>::new(&agg.verifier_data());
             CancelCloseCircuitFixture {
-                single_sig,
-                aggregator,
+                agg,
                 cancel_circuit,
             }
         })
@@ -839,12 +843,15 @@ pub mod test_fixture {
         &fixture().cancel_circuit
     }
 
-    fn cancel_member_sk(seed: u64, slot: usize) -> GoldilocksSecretKey {
+    /// Deterministic per-(seed, slot) Falcon signing key (same seed derivation bytes as the
+    /// retired Goldilocks helper). `pub(crate)` so tests can re-derive a slot's key for
+    /// duplicate-key forgeries (`FalconKeys` is deliberately not `Clone`).
+    pub(crate) fn cancel_member_key(seed: u64, slot: usize) -> FalconKeys {
         let mut s = [0u8; 32];
         s[0..8].copy_from_slice(&seed.to_le_bytes());
         s[8] = 0xca;
         s[31] = slot as u8 + 1;
-        GoldilocksSecretKey::from_seed(s)
+        FalconKeys::from_seed(s)
     }
 
     fn ciphertext(seed: u32) -> RegevCiphertext {
@@ -858,35 +865,34 @@ pub mod test_fixture {
         }
     }
 
-    /// Member auth + the LEVEL-`AGG_LEVELS` aggregated sign-zkp proof for the given signing keys,
-    /// each signing the revived IMCH `digest` (leaf order = slot order). The aggregator accepts
-    /// DUPLICATE keys by design (distinctness is the cancel circuit's consumer obligation), so
-    /// tests can pass a duplicated `sks` list to build an otherwise-valid forged tree.
+    /// Member auth + the `FalconAggCircuit` proof for the given signing keys, each signing the
+    /// revived IMCH `digest` (slot order). The aggregation circuit accepts DUPLICATE keys by
+    /// design (each slot is independently verified; distinctness is the cancel circuit's
+    /// consumer obligation), so tests can pass a duplicated key list to build an otherwise-valid
+    /// forged aggregation.
     pub fn member_auth_for_sks(
         digest: Bytes32,
-        sks: &[GoldilocksSecretKey],
+        sks: &[FalconKeys],
     ) -> (Vec<MemberCancelAuth>, ProofWithPublicInputs<F, C, D>) {
         let fx = fixture();
         let member_auth: Vec<MemberCancelAuth> = sks
             .iter()
-            .map(|sk| MemberCancelAuth {
-                pk_g: sk.public_key(),
-            })
+            .map(|k| MemberCancelAuth { pk_g: k.pk_g() })
             .collect();
-        let leaves: Vec<ProofWithPublicInputs<F, C, D>> = sks
-            .iter()
-            .map(|sk| fx.single_sig.prove(sk, digest).expect("single sig proof"))
-            .collect();
+        let hs: Vec<[u16; FALCON_N]> = sks.iter().map(|k| k.pk_coefficients()).collect();
+        let sigs: Vec<FalconSignature> = sks.iter().map(|k| k.sign(digest)).collect();
+        let signers: Vec<(&[u16; FALCON_N], &FalconSignature)> =
+            hs.iter().zip(sigs.iter()).collect();
         let agg_proof = fx
-            .aggregator
-            .aggregate_to_level(&leaves, AGG_LEVELS)
-            .expect("aggregate to level 4");
+            .agg
+            .prove(&FalconAggWitness::for_signatures(digest, &signers))
+            .expect("falcon aggregation proof");
         (member_auth, agg_proof)
     }
 
     /// Deterministic signing keys for `active` cancel-test members under `seed` (slot order).
-    pub fn cancel_member_sks(seed: u64, active: usize) -> Vec<GoldilocksSecretKey> {
-        (0..active).map(|i| cancel_member_sk(seed, i)).collect()
+    pub fn cancel_member_sks(seed: u64, active: usize) -> Vec<FalconKeys> {
+        (0..active).map(|i| cancel_member_key(seed, i)).collect()
     }
 
     /// Member auth + aggregated sign-zkp proof for `active` deterministic members each signing the
@@ -1033,6 +1039,7 @@ mod tests {
         ethereum_types::{bytes32::Bytes32, u32limb_trait::U32LimbTrait as _},
     };
 
+    #[cfg_attr(debug_assertions, ignore = "run with --release")]
     #[test]
     fn cancel_close_circuit_proves_and_pi_matches() {
         let fx = fixture();
@@ -1060,6 +1067,7 @@ mod tests {
         assert_ne!(pis.member_set_commitment, Bytes32::default());
     }
 
+    #[cfg_attr(debug_assertions, ignore = "run with --release")]
     #[test]
     fn cancel_close_circuit_rejects_stale_revived_version() {
         // revived version 5 <= close version 7 → the native to_public_inputs rejects, and even if
@@ -1071,6 +1079,7 @@ mod tests {
         assert!(err.is_some(), "stale revived version must be rejected");
     }
 
+    #[cfg_attr(debug_assertions, ignore = "run with --release")]
     #[test]
     fn cancel_close_circuit_rejects_wrong_era_fence() {
         // Genuine era mismatch: revived era nonce 0 (so revived.close_freeze_nonce + 1 = 1) but the
@@ -1111,6 +1120,7 @@ mod tests {
         );
     }
 
+    #[cfg_attr(debug_assertions, ignore = "run with --release")]
     #[test]
     fn cancel_close_circuit_rejects_non_registered_member_keys() {
         // Finding D forgery: sign the revived IMCH with ATTACKER keys (a different seed), but claim
@@ -1161,7 +1171,6 @@ mod tests {
     #[test]
     fn cancel_close_circuit_rejects_duplicate_member_pk_g() {
         use super::test_fixture::{cancel_member_sks, member_auth_for_sks};
-        use crate::poseidon_sig::aggregate::AGG_LEVELS;
 
         let fx = fixture();
         let mut witness = build_full_witness();
@@ -1170,21 +1179,22 @@ mod tests {
             witness.member_auth[0].pk_g, witness.member_auth[1].pk_g,
             "precondition: slots 0 and 1 start distinct"
         );
-        // Forge the aggregation tree: duplicate slot 0's signing key into slot 1 and rebuild the
-        // REAL agg proof (the seed matches build_full_witness's member set).
+        // Forge the aggregation: put slot 0's signing key in slot 1 as well (re-derived from its
+        // deterministic seed — FalconKeys is deliberately not Clone) and rebuild the REAL agg
+        // proof (the seed matches build_full_witness's member set).
         let digest = witness.cancel.revived_state.signing_digest();
         let mut sks = cancel_member_sks(0xca_1107, witness.member_auth.len());
-        sks[1] = sks[0];
+        sks[1] = super::test_fixture::cancel_member_key(0xca_1107, 0);
         let (dup_auth, dup_agg) = member_auth_for_sks(digest, &sks);
         assert_eq!(
             dup_auth[0].pk_g, dup_auth[1].pk_g,
             "slots 0/1 now duplicated"
         );
         // Boundary: the aggregated proof itself VERIFIES — distinctness is not its job.
-        fx.aggregator.levels[AGG_LEVELS - 1]
-            .verifier_data()
+        fx.agg
+            .data()
             .verify(dup_agg.clone())
-            .expect("the aggregator accepts duplicate leaves by design");
+            .expect("the aggregation circuit accepts duplicate slots by design");
         witness.member_auth = dup_auth;
         witness.agg_proof = dup_agg;
 
@@ -1197,6 +1207,7 @@ mod tests {
         );
     }
 
+    #[cfg_attr(debug_assertions, ignore = "run with --release")]
     #[test]
     fn cancel_close_circuit_rejects_tampered_revived_digest() {
         // Tamper the revived_channel_state_digest PI: the in-circuit IMCH recompute won't match.
@@ -1219,6 +1230,7 @@ mod tests {
         );
     }
 
+    #[cfg_attr(debug_assertions, ignore = "run with --release")]
     #[test]
     fn cancel_close_circuit_rejects_wrong_channel() {
         // close intent for channel 3, revived state for channel 4 → native channel mismatch.

@@ -136,11 +136,28 @@ Prints the per-tx `verify_slim_send_tx` breakdown at Production params.
 The batch path is exercised by `cosign-batch <manifest.json> <out>` where the manifest lists K slim
 `SendPayload` files. To build a realistic batch:
 
-1. `channel_member gen-contribution <bal> <seed> <out>` for each simulated delegate, then
-   `POST /api/init` to join them (or drive the CLI `init` directly).
-2. `channel_member gen-send <bal> <seed> <to_slot> <amount> <snapshot> <out>` per delegate — a
-   **stateless** slim `SendPayload` builder (rebuilds the delegate's genesis witness deterministically
-   from `(bal, seed)` and fail-closes if its slot ciphertext is no longer the genesis ct).
+> **CHANGED by A-1 (2026-08-08) — read before reusing this recipe.** A delegate no longer opens with
+> an operator-chosen balance. `create_channel` and `join_delegate` both install the CANONICAL ZERO
+> ciphertext at the new slot, because a self-declared, Regev-encrypted opening balance is unbacked
+> value that no cosigner can inspect (see `doc/tasks/b2-implementation-notes.md` §7). Consequences
+> for this sweep: `<bal>` must be `0` in both steps below, and a storm of nonzero *sends* now needs
+> the delegates to be FUNDED first, through one of the two real lanes — `cosign-l1-deposit-import`
+> (reads amount/depositor/token from the chain, moves `channel_fund` and the slot leaf together) or
+> an in-channel transfer from an already-funded slot. Once a delegate is funded, its ciphertext is no
+> longer reproducible from `(bal, seed)` and `gen-send` **cannot build for it at all** — it fail-
+> closes rather than guessing. So the throughput harness must either (a) keep every simulated send at
+> amount 0 (fine for measuring cosign/verify throughput, which is what this document measures — the
+> per-tx cost does not depend on the plaintext), or (b) grow its own witness-carrying payload builder.
+> Option (a) is the intended path; the numbers in §2/§3 are unaffected because they time
+> `verify_slim_send_tx` and the batch cosign, neither of which is amount-dependent.
+
+1. `channel_member gen-contribution 0 <seed> <out>` for each simulated delegate, then
+   `POST /api/init` to join them (or drive the CLI `init` directly). The `<bal>` argument is retained
+   for wire shape only — `init` ignores the emitted `genesisCt` (A-1).
+2. `channel_member gen-send 0 <seed> <to_slot> <amount> <snapshot> <out>` per delegate — a
+   **stateless** slim `SendPayload` builder. It fail-closes unless it can OPEN the delegate's current
+   slot ciphertext: either the canonical zero opening (balance must be `0`, opened by the public
+   all-zero witness) or, for legacy seeded snapshots, the deterministic `(bal, seed)` ciphertext.
 3. Build a manifest `{"files":[...]}` and run, sweeping the pool size:
    ```bash
    for T in 1 2 4 8 16 32 48 64 96; do

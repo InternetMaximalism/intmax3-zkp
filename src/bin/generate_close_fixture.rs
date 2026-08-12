@@ -31,12 +31,9 @@
 use std::{fs, path::Path};
 
 use intmax3_zkp::{
-    circuits::{
-        channel::{
-            close_circuit::test_fixture,
-            close_pis::{CHANNEL_CLOSE_PUBLIC_INPUTS_LEN, ChannelClosePublicInputs},
-        },
-        test_utils::block_witness_generator::ChannelMemberKeys,
+    circuits::channel::{
+        close_circuit::test_fixture,
+        close_pis::{CHANNEL_CLOSE_PUBLIC_INPUTS_LEN, ChannelClosePublicInputs},
     },
     ethereum_types::u256::U256,
     utils::{
@@ -118,24 +115,26 @@ fn main() -> anyhow::Result<()> {
     // -----------------------------------------------------------------------
     // Step 1: build a REAL self-consistent close witness and prove the close circuit.
     //
-    // Multitoken Phase 5b (CO-GENERATION): the witness is built by
+    // Multitoken Phase 5b (CO-GENERATION) / falcon-sig Phase 2 SEAM: the witness is built by
     // `test_fixture::build_close_full_witness_two_token` over
-    //   - channel 1, signed by `ChannelMemberKeys::deterministic(1).secret_keys` — the SAME
-    //     deterministic member derivation `generate_withdrawal_fixture` registers (via
-    //     `add_channel_registration`), so the proof's `member_set_commitment` equals the channel's
-    //     `registeredMemberSetCommitment()` and `CloseLifecycleE2E` can submit the REAL close
-    //     intent (previously that section self-skipped on the member-set mismatch);
+    //   - channel 1, signed by `test_fixture::deterministic_falcon_keys(1, N)`. NOTE (Phase-2/-4
+    //     seam, documented on that helper): `generate_withdrawal_fixture` still registers the
+    //     GOLDILOCKS `ChannelMemberKeys::deterministic(1)` pk_g values, so a fixture generated NOW
+    //     will NOT match the registered member set — do not regenerate the checked-in
+    //     close/withdrawal fixture pair until Phase 4 moves registration to the Falcon pk_g and
+    //     Phase 5 co-regenerates both;
     //   - a TWO-token final state (registry [ETH, 7], amounts [77, 55]) so the fixture exercises
     //     the per-token settlement path (nonzero non-genesis fund), not just genesis.
     // -----------------------------------------------------------------------
     const CLOSE_FIXTURE_CHANNEL_ID: u32 = 1;
     const NON_GENESIS_TOKEN_INDEX: u32 = 7;
-    let member_keys = ChannelMemberKeys::deterministic(CLOSE_FIXTURE_CHANNEL_ID);
     let member_count = test_fixture::TEST_ACTIVE_MEMBERS;
-    assert_eq!(
-        member_keys.secret_keys.len(),
-        member_count,
-        "deterministic member keys must cover exactly the active cosigner slots"
+    let member_keys =
+        test_fixture::deterministic_falcon_keys(CLOSE_FIXTURE_CHANNEL_ID, member_count);
+    eprintln!(
+        "[close] WARNING (falcon-sig Phase 2 seam): this fixture is signed with Falcon keys \
+         while the withdrawal fixture still registers Goldilocks pk_g values — the pair is \
+         inconsistent until Phase 4/5 co-regenerates both. Do not commit a lone regeneration."
     );
     eprintln!(
         "[close] Step 1: build two-token close witness (channel {CLOSE_FIXTURE_CHANNEL_ID}, \
@@ -143,7 +142,7 @@ fn main() -> anyhow::Result<()> {
     );
     let witness = test_fixture::build_close_full_witness_two_token(
         CLOSE_FIXTURE_CHANNEL_ID,
-        &member_keys.secret_keys,
+        &member_keys,
         NON_GENESIS_TOKEN_INDEX,
         U256::from(55u32),
     );
@@ -182,7 +181,7 @@ fn main() -> anyhow::Result<()> {
     pw.set_proof_with_pis_target(&close_wrapper.wrap_proof, &close_proof);
     let close_mle = prove_with_mle::<F, C, D>(&close_wrapper.data, pw)?;
     verify_mle_proof(&close_wrapper.data, &close_vk, &close_mle.proof)?;
-    let close_mle_json = export_mle_json(&close_mle.proof, &close_wrapper.data.common);
+    let close_mle_json = export_mle_json(&close_mle.proof, &close_wrapper.data.common)?;
 
     // SANITY: the MLE proof's exported publicInputs must equal the 103 raw close limbs (this is the
     // exact vector the on-chain `_bindCloseLimbsStrict` rebinds). A mismatch here means the

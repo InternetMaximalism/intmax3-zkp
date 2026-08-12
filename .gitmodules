@@ -4,4 +4,9 @@
 [submodule "contracts/lib/polygon-plonky2"]
 	path = contracts/lib/polygon-plonky2
 	url = https://github.com/InternetMaximalism/polygon-plonky2.git
-	branch = mleintroduction
+	# NOTE: `branch` was `mleintroduction` until 2026-08-13, but the pinned commit was
+	# NEVER on that branch and `mleintroduction` does not contain
+	# mle/contracts/src/ at all — so `git submodule update --remote` silently moved to a
+	# tree with NO MLE Solidity verifier. Point it at the branch that actually carries
+	# the pin. Re-point this when the branch merges; do not let it drift again.
+	branch = feat/exponentiation-gate-evaluator

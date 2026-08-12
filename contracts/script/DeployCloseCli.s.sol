@@ -112,6 +112,60 @@ contract DeployCloseCli is Script {
             sv.initializeWithdrawalClaimVk(verifier, wcvk, wcdd.whirParams, wcdd.protocolId, wcdd.sessionId, wcdd.kIs, wcdd.subgroupGenPowers);
         }
 
+        // 3b. Post-close-claim VK. SECURITY/LIVENESS (audit622 A-M4, reported 2026-06-22, open until
+        //     now; same class as the gate-8 defect — a fail-closed check that protects soundness
+        //     while making an HONEST path impossible): without this,
+        //     `ChannelSettlementVerifier.sol:1111` reverts `PostCloseClaimVkNotSet()` on every call,
+        //     so the live `post-close-claim` CLI command (`channel_member.rs:2152-2184`) can never
+        //     succeed on a real deployment. No fail-closed check is weakened here — the revert stays;
+        //     we supply the VK it was correctly demanding.
+        {
+            string memory pcJson = _read("post_close_claim_mle.json");
+            FixtureLib.DeployData memory pcdd = FixtureLib.parseDeployData(pcJson);
+            MleVerifier.MleProof memory pcproof = FixtureLib.parseProof(pcJson);
+            bytes32 pcGatesDigest = verifier.computeGatesDigest(
+                pcproof.gates,
+                pcproof.witnessIndividualEvalsAtRGateV2.length,
+                pcproof.numSelectors,
+                pcproof.numGateConstraints,
+                pcproof.quotientDegreeFactor
+            );
+            ChannelSettlementVerifier.StatementVk memory pcvk = ChannelSettlementVerifier.StatementVk({
+                degreeBits: pcdd.degreeBits,
+                preprocessedRoot: pcdd.preCommitRoot,
+                numConstants: pcdd.numConstants,
+                numRoutedWires: pcdd.numRoutedWires,
+                gatesDigest: pcGatesDigest
+            });
+            sv.initializePostCloseClaimVk(verifier, pcvk, pcdd.whirParams, pcdd.protocolId, pcdd.sessionId, pcdd.kIs, pcdd.subgroupGenPowers);
+        }
+
+        // 3c. Cancel-close VK. SECURITY/LIVENESS (audit622 A-M4): without this,
+        //     `ChannelSettlementVerifier.sol:1050` reverts `CancelCloseVkNotSet()`, disabling
+        //     `cancel-close` (`channel_member.rs:1988-2025`) — the ONLY on-chain remedy against a
+        //     stale/unwanted close. Previously initialized only by the two anvil-gated
+        //     (`chainid == 31337`) scripts, so every REAL deployment shipped without it.
+        {
+            string memory ccJson = _read("cancel_close_mle.json");
+            FixtureLib.DeployData memory ccdd = FixtureLib.parseDeployData(ccJson);
+            MleVerifier.MleProof memory ccproof = FixtureLib.parseProof(ccJson);
+            bytes32 ccGatesDigest = verifier.computeGatesDigest(
+                ccproof.gates,
+                ccproof.witnessIndividualEvalsAtRGateV2.length,
+                ccproof.numSelectors,
+                ccproof.numGateConstraints,
+                ccproof.quotientDegreeFactor
+            );
+            ChannelSettlementVerifier.StatementVk memory ccvk = ChannelSettlementVerifier.StatementVk({
+                degreeBits: ccdd.degreeBits,
+                preprocessedRoot: ccdd.preCommitRoot,
+                numConstants: ccdd.numConstants,
+                numRoutedWires: ccdd.numRoutedWires,
+                gatesDigest: ccGatesDigest
+            });
+            sv.initializeCancelCloseVk(verifier, ccvk, ccdd.whirParams, ccdd.protocolId, ccdd.sessionId, ccdd.kIs, ccdd.subgroupGenPowers);
+        }
+
         // 4. registerChannel with the CLI ACTIVE set (3 members + delegate). The arrays carry all
         //    `member_count + delegate_count` active participants (members first); registerChannel's
         //    close member-set commitment uses only the first `member_count` pk_gs.
@@ -127,8 +181,24 @@ contract DeployCloseCli is Script {
 
         // 5. Manager bound to the SAME active set: member bindings (the first `memberCount`) +
         //    delegate bindings (the remainder). The close member-set commitment + delegate_count limb
-        //    then match the close proof. Route member slot 0's payout to the broadcasting EOA so a
-        //    later member claim is observable.
+        //    then match the close proof.
+        //
+        //    Member slot 0's binding recipient is the broadcasting EOA. SECURITY / SCOPE — what
+        //    this override does and does NOT do, post-B-1b/B-2 (one source of truth per property):
+        //      * It does NOT route the CLAIM payout. `submitWithdrawalClaim` credits
+        //        `withdrawalCredits[claim.tokenIndex][claim.recipient]` with the PROOF-BOUND
+        //        recipient — the cosigner-signed balance-slot LEAF address (B-1b) — and
+        //        `claimWithdrawalCredit` pays `msg.sender`. `registeredRecipientOf` (the only place
+        //        `MemberBinding.recipient` is stored per-pk_g) has ZERO runtime reads since 6d2b9d8
+        //        removed the registration-based claim gates. Claim routing therefore lives in the
+        //        CHANNEL STATE and is set at genesis by the CLI (`CLI_RECIPIENT_SLOT_<slot>`),
+        //        NOT here.
+        //      * It IS still load-bearing for the two paths that gate on `isMemberRecipient`
+        //        (also written from these bindings): `requestClose()` — which the CLI sends from
+        //        this same EOA — and `submitPartialWithdrawal`'s "payout address is a registered
+        //        participant" check. Without it the EOA could not open the close at all.
+        //    The registration record (`recipients[i]`, fed to `registerChannel` above and hashed
+        //    into the reg chain the validity proof reproduces) is deliberately left UNCHANGED.
         ChannelSettlementManager.MemberBinding[] memory mBind =
             new ChannelSettlementManager.MemberBinding[](memberCount);
         for (uint256 i = 0; i < memberCount; i++) {
@@ -145,6 +215,13 @@ contract DeployCloseCli is Script {
                 recipient: recipients[memberCount + i]
             });
         }
+        // B-2 (doc/tasks/b2-delegate-close-threat-model.md): `delegateCount` is now a FLOOR for the
+        // close/partial-withdrawal bind, not an exact expected count. Under Option B, L1
+        // registration is cosigners-only, so this is normally 0 while the live channel has
+        // delegates; a close carrying MORE delegates is accepted, one carrying FEWER is refused.
+        // SCOPE (review finding 6): CARDINALITY only. L1 binds no delegate to a balance-slot index,
+        // so this cannot guarantee that any NAMED delegate registered here is present in the closed
+        // state — only that the active region was not shrunk below this count.
         ChannelSettlementManager manager = new ChannelSettlementManager(
             bytes4(channelId), bpSlot, pkGs[bpSlot], delegateCount, CHALLENGE_PERIOD, SPECIAL_CLOSE_PENALTY,
             INITIAL_BP_BOND, IChannelSettlementVerifier(address(sv)), IChannelRegistry(address(rollup)), mBind,

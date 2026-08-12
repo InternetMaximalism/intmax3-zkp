@@ -1,7 +1,12 @@
+// The vendored Falcon code (src/falcon_sig/vendor, no_std-style upstream) imports via `alloc::`
+// paths; this makes the `alloc` crate name resolvable in this (std) crate.
+extern crate alloc;
+
 pub mod circuits;
 pub mod common;
 pub mod constants;
 pub mod ethereum_types;
+pub mod falcon_sig;
 pub mod poseidon_sig;
 pub mod regev;
 pub mod utils;
@@ -26,6 +31,30 @@ pub use wasm_bindgen_rayon::init_thread_pool;
 use plonky2::hash::merkle_tree_gpu;
 
 use wasm_bindgen::prelude::{JsValue, wasm_bindgen};
+
+/// SECURITY GATE (falcon-sig Phase-4 review, check 9): the Falcon member identity
+/// `pk_g = Poseidon(IMFK || encode(h))` derived from a seed MUST be identical on wasm32 and
+/// native, and this export exists so that can be MEASURED rather than argued.
+///
+/// WHY IT IS MEASURED. NTRU keygen runs f64 arithmetic (FFT, Babai reduction, rejection
+/// bounds). The structural argument for determinism is strong — the keygen path uses only
+/// IEEE-754 `+ - * / floor round sqrt` over a hardcoded twiddle table, `approx_exp` is integer
+/// FACCT rather than `libm::exp`, and Rust neither contracts to FMA nor reassociates without
+/// fast-math. But THIS REPOSITORY HAS ALREADY OBSERVED a wasm-vs-native numeric divergence in a
+/// proof path: see the note in `.cargo/config.toml` recording that the Regev STARK verifier
+/// returns different results on wasm32 and native for identical bytes, and that disabling
+/// simd128 did not fix it. A negative claim over a large vendored numeric surface is exactly the
+/// kind of argument that failed there, so it is pinned empirically here.
+///
+/// FAILURE MODE IF IT DIVERGES: a wallet restored (or created) in the browser derives a
+/// DIFFERENT `pk_g` from the same seed than the CLI does. The L1 registration then names an
+/// identity that wallet cannot reproduce, its co-signatures stop verifying, and the channel
+/// becomes permanently unclosable — funds stuck, with no error at the moment of divergence.
+#[wasm_bindgen]
+pub fn falcon_pk_g_for_seed_byte(seed_byte: u8) -> String {
+    let keys = crate::falcon_sig::FalconKeys::from_seed([seed_byte; 32]);
+    format!("{}", keys.pk_g())
+}
 
 #[wasm_bindgen]
 pub async fn init_gpu_merkle() -> Result<bool, JsValue> {

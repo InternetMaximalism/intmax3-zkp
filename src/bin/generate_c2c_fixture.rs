@@ -708,12 +708,10 @@ fn main() -> anyhow::Result<()> {
 
     let final_block_chain_proof = last_block_proof.expect("final block hash chain proof");
     // P2b: build + verify the bp IMSB-signature ListCircuit proof (decision D3).
-    let single_sig = intmax3_zkp::poseidon_sig::circuit::SingleSigCircuit::new();
-    let list_circuit =
-        intmax3_zkp::poseidon_sig::list::ListCircuit::new(&single_sig.verifier_data());
+    let list_circuit = intmax3_zkp::falcon_sig::list::ListCircuit::<F, C, D>::new();
     let list_proof = block_witness_generator
         .borrow()
-        .build_bp_sig_list_proof(&single_sig, &list_circuit)
+        .build_bp_sig_list_proof(&list_circuit)
         .expect("build bp sig list proof");
     let validity_circuit =
         ValidityCircuit::<F, C, D>::new(&block_chain_vd, &list_circuit.verifier_data());
@@ -760,7 +758,7 @@ fn main() -> anyhow::Result<()> {
         &withdrawal_mle.proof,
     )?;
     let withdrawal_mle_json =
-        export_mle_json(&withdrawal_mle.proof, &withdrawal_wrapper.data.common);
+        export_mle_json(&withdrawal_mle.proof, &withdrawal_wrapper.data.common)?;
 
     eprintln!("[c2c] Wrap + MLE (validity proof)");
     let validity_wrapper =
@@ -772,7 +770,7 @@ fn main() -> anyhow::Result<()> {
     val_pw.set_proof_with_pis_target(&validity_wrapper.wrap_proof, &validity_proof);
     let validity_mle = prove_with_mle::<F, C, D>(&validity_wrapper.data, val_pw)?;
     verify_mle_proof(&validity_wrapper.data, &validity_vk, &validity_mle.proof)?;
-    let validity_mle_json = export_mle_json(&validity_mle.proof, &validity_wrapper.data.common);
+    let validity_mle_json = export_mle_json(&validity_mle.proof, &validity_wrapper.data.common)?;
 
     // -----------------------------------------------------------------------
     // Extract the EXACT committed Withdrawal from the single-withdrawal proof PIs.

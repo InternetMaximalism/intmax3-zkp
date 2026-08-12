@@ -395,6 +395,22 @@ mod tests {
                 INTER_CHANNEL_TX_DOMAIN_V2,
             ),
             ("IMTF TOKEN_FUNDS_DIGEST_DOMAIN", TOKEN_FUNDS_DIGEST_DOMAIN),
+            // Falcon-512/Poseidon signing key (falcon_sig/mod.rs, threat model
+            // doc/tasks/falcon-sig-threat-model.md) — registry merge promised by the Phase-0
+            // `falcon_domains_do_not_collide` test; referenced via the pub consts so a drifting
+            // definition is caught.
+            (
+                "IMFH DOMAIN_FALCON_H2P (falcon_sig/mod.rs)",
+                crate::falcon_sig::DOMAIN_FALCON_H2P,
+            ),
+            (
+                "IMFK DOMAIN_FALCON_PK (falcon_sig/mod.rs)",
+                crate::falcon_sig::DOMAIN_FALCON_PK,
+            ),
+            (
+                "IMFG DOMAIN_FALCON_KEYGEN (falcon_sig/mod.rs)",
+                crate::falcon_sig::DOMAIN_FALCON_KEYGEN,
+            ),
         ];
         for (i, (name_a, a)) in domains.iter().enumerate() {
             for (name_b, b) in domains.iter().skip(i + 1) {

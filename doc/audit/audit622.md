@@ -145,6 +145,32 @@ This report consolidates a multi-pass review of the intmax3-zkp implementation a
 
 **Issue:** Some deploy scripts omit `initializePostCloseClaimVk` / `initializeCancelCloseVk`. Paths revert fail-closed until deployer completes init.
 
+**STATUS: FIXED 2026-08-12** (`DeployCloseCli.s.sol` steps 3b/3c). Re-verified before
+fixing — the finding UNDERSTATED it in two ways:
+1. It was not "some scripts": `initializePostCloseClaimVk` was called by **NO script in
+   the repo**, and `initializeCancelCloseVk` only by `DeployWalletSettlement.s.sol:117`
+   and `DeployPartialWithdrawalE2E.s.sol:128`, both gated on `chainid == 31337`. So
+   **every real deployment** was affected, not a subset.
+2. "until deployer completes init" implies a documented manual step existed. It did not
+   — `regen-and-redeploy-runbook.md:143-146` positively ASSERTED all four were
+   initialized by the scripts, so an operator following the runbook had no reason to do
+   anything, and no way to discover the gap short of a user hitting the revert.
+
+Impact while open: `post-close-claim` (`channel_member.rs:2152-2184`) and `cancel-close`
+(`channel_member.rs:1988-2025`) — the latter being the only on-chain remedy against a
+stale close — were unusable on every real deployment. Fixed by supplying the VKs from
+the checked-in fixtures; the reverts themselves are untouched.
+
+**Why it stayed open ~7 weeks:** same class as the gate-8 evaluator defect. Both are
+fail-closed checks that are SOUNDNESS-SAFE (never accept a bad proof) but destroy an
+HONEST path. Neither is visible to a threat model that asks only "can an adversary get a
+false statement accepted?". Neither had a test: no Foundry test drives the CLI/prod
+deploy script and then exercises `post-close-claim` or `cancel-close`, and the two
+anvil-only scripts that DO initialize `cancelCloseVk` are exactly what made the local
+suites green. A "green tests + reported finding still open" pair is the signature of a
+liveness defect — the tests were passing on a configuration no real deployment uses.
+
+
 ---
 
 #### A-M5 — Delegate payout bindings not registry-verified
@@ -192,7 +218,7 @@ This report consolidates a multi-pass review of the intmax3-zkp implementation a
 | In-channel send | `verify_send_transition` — E-1, A11 hash-sig, trusted-record binding |
 | Inter-channel credit gate | `verify_inter_channel_credit_transition` — N-of-N A state, E-2, TxV2 inclusion |
 | Atomic CLI inter-channel | `cosign-inter-transfer` — both legs validated before persist |
-| Replay ledgers (CLI) | `spent_tx_hashes` / `applied_tx_hashes` in `CliState` |
+| Replay ledgers (CLI) | `spent_tx_identities` / `applied_tx_identities` in `CliState` |
 | Genesis fail-closed backing | `sign_state_if_backed` / `verify_channel_backing` |
 | Close preconditions | `CloseIntent::new` requires `unallocated_confirmed_incoming == 0` |
 | Native transition rules | `state_update_verifier.rs` — fund decrease on send, chain push, H2≠0, D3 `pending_adds` |
