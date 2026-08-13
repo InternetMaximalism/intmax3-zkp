@@ -7,6 +7,7 @@ import {ChannelSettlementManager, IChannelSettlementVerifier, IChannelRegistry} 
 import {ChannelSettlementVerifier} from "../src/ChannelSettlementVerifier.sol";
 import {MleVerifier} from "@mle/MleVerifier.sol";
 import {SpongefishWhirVerify} from "@mle/spongefish/SpongefishWhirVerify.sol";
+import {DeployConfig} from "./DeployConfig.sol";
 
 contract WalletMockMleVerifier {
     function verify(
@@ -24,7 +25,10 @@ contract WalletMockMleVerifier {
 ///         ChannelSettlementVerifier + ChannelSettlementManager, registers the channel +
 ///         settlement manager. Member data from `test/data/pw_reg.json`.
 contract DeployWalletSettlement is Script {
-    uint64 internal constant CHALLENGE_PERIOD = 1;
+    // SECURITY (challenge-period floor): sourced from `DeployConfig` rather than hardcoded, so if
+    // the `block.chainid == 31337` guard below is ever loosened, the challenge period hardens
+    // automatically instead of silently shipping a 1-second window. Defence in depth only — the
+    // manager's constructor rejects a sub-floor period off-devnet regardless.
     uint256 internal constant SPECIAL_CLOSE_PENALTY = 0;
     uint256 internal constant INITIAL_BP_BOND = 0;
 
@@ -107,7 +111,7 @@ contract DeployWalletSettlement is Script {
             });
         }
         ChannelSettlementManager manager = new ChannelSettlementManager(
-            bytes4(channelId), bpSlot, pkGs[bpSlot], delegateCount, CHALLENGE_PERIOD,
+            bytes4(channelId), bpSlot, pkGs[bpSlot], delegateCount, DeployConfig.challengePeriodSecs(),
             SPECIAL_CLOSE_PENALTY, INITIAL_BP_BOND,
             IChannelSettlementVerifier(address(sv)), IChannelRegistry(address(rollup)),
             mBind, dBind
@@ -115,6 +119,41 @@ contract DeployWalletSettlement is Script {
 
         // 5. Register settlement manager on rollup.
         rollup.registerSettlementManager(address(manager));
+
+        // 6. The remaining two settlement VK latches.
+        //
+        // SECURITY / LIVENESS: `ChannelSettlementVerifier` gates each statement on its OWN latch —
+        // `verifyWithdrawalClaim` reverts `WithdrawalClaimVkNotSet()` and `verifyPostCloseClaim`
+        // reverts `PostCloseClaimVkNotSet()`. This script keyed only close + cancelClose, so the
+        // `claim` step of the wallet demo's own `full_withdrawal` ticket
+        // (`{deploy, close, settle, withdraw, claim}`) could never succeed on a stack it deployed:
+        // members could close the channel and then not collect. Same defect class as audit622 A-M4.
+        // Deliberately placed AFTER the manager CREATE so it adds no CREATE and cannot move any
+        // deployed address (the drivers read `MANAGER:` from the log and fixtures bake it).
+        //
+        // The values are placeholders because the verifier wired above is `WalletMockMleVerifier`,
+        // which returns true unconditionally — this whole script is already hard-gated to chain id
+        // 31337 for exactly that reason. No fail-closed check is weakened: the latches still gate,
+        // and the SOUNDNESS of these statements on this stack rests on the devnet gate, not on the
+        // VK contents.
+        {
+            ChannelSettlementVerifier.StatementVk memory svk = ChannelSettlementVerifier.StatementVk({
+                degreeBits: 1,
+                preprocessedRoot: bytes32(uint256(1)),
+                numConstants: 1,
+                numRoutedWires: 1,
+                gatesDigest: bytes32(uint256(2))
+            });
+            SpongefishWhirVerify.WhirParams memory whir;
+            sv.initializeWithdrawalClaimVk(
+                MleVerifier(address(mockMle)), svk, whir, hex"", hex"",
+                new uint256[](0), new uint256[](0)
+            );
+            sv.initializePostCloseClaimVk(
+                MleVerifier(address(mockMle)), svk, whir, hex"", hex"",
+                new uint256[](0), new uint256[](0)
+            );
+        }
 
         vm.stopBroadcast();
 

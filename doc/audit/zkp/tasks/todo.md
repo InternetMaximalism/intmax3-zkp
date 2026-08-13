@@ -24,6 +24,11 @@ Legend: [ ] todo · [x] in progress · [x] modeled+proved · [!] finding open
 - [x] `Core/U256.lean` — 256-bit value; overflow-rejecting `AddSpec` + underflow-rejecting `SubSpec` (solvency)
 - [x] `Core/IndexedMerkle.lean` — nullifier non-membership / insert (DISCHARGES F-NULL-1)
 - [x] `Core/Cyclic.lean` — IVC wiring (abstracted inline via cyclic-vd bindings in BalanceCircuit/steps)
+- [x] `Core/Exponentiation.lean` — `plonky2/src/gates/exponentiation.rs:94-127` +
+  `mle/contracts/src/Plonky2GateEvaluator.sol:599-676` → port equivalence
+  (`solEval_eq_rust`), ladder semantics (`output_pow`), and the two negative
+  results (`sat_for_any_bits`, `prev_variants_differ`). See
+  `doc/audit/audit12-08-2026.md`.
 
 ## Phase 1 — balance/common (leaf gadgets) — COMPLETE ✅
 - [x] `recipient.rs`            → Circuits/Balance/Common/Recipient.lean  **[! F-RECIP-1]**

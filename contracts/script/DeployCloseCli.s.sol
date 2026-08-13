@@ -8,6 +8,7 @@ import {ChannelSettlementManager, IChannelSettlementVerifier, IChannelRegistry} 
 import {ChannelSettlementVerifier} from "../src/ChannelSettlementVerifier.sol";
 import {MleVerifier} from "@mle/MleVerifier.sol";
 import {FixtureLib} from "./FixtureLib.sol";
+import {DeployConfig} from "./DeployConfig.sol";
 
 /// @title A-3 P5-B: deploy the close-lifecycle stack registered with the CLI channel's REAL members.
 /// @notice Unlike `DeployClose` (which registers the fixture members from `close_lifecycle.json`),
@@ -21,15 +22,37 @@ import {FixtureLib} from "./FixtureLib.sol";
 ///      pass their deployer-only guards). Env: none required; reads contracts/test/data/{close_*,
 ///      cli_reg_record.json}. Prints the deployed addresses for the driver.
 contract DeployCloseCli is Script {
-    uint64 internal constant CHALLENGE_PERIOD = 1; // seconds; settle after a tiny evm_increaseTime
+    // SECURITY (challenge-period floor): the challenge window is the ONLY interval in which an
+    // honest member can replace or cancel a stale close intent, and `finalizeClose()` is
+    // permissionless the moment it lapses. This script previously hardcoded 1 second — enough for
+    // the anvil E2Es (`evm_increaseTime` then settle), and a permanent fund-mis-allocation hole on
+    // any real chain. `DeployConfig.challengePeriodSecs()` keeps the 1-second value on chain id
+    // 31337 and uses `ChannelSettlementManager.CHALLENGE_PERIOD_SECS` (1 day) everywhere else; the
+    // manager's constructor rejects anything below the floor off-devnet regardless of what this
+    // script passes. A REAL-NETWORK close therefore now takes a day to finalize, by design.
     uint256 internal constant SPECIAL_CLOSE_PENALTY = 0;
     uint256 internal constant INITIAL_BP_BOND = 0;
 
-    function _read(string memory f) internal view returns (string memory) {
+    /// @dev `virtual` ONLY so `test/DeployGuards.t.sol` can substitute the ONE input this script
+    ///      takes that is not checked in — `cli_reg_record.json`, which `channel_member
+    ///      export-reg-record` stages at run time. `foundry.toml`'s `fs_permissions` is read-only
+    ///      (deliberately: the repo root holds gitignored secrets), so a test cannot write that file
+    ///      and would otherwise have to skip — and a guard that cannot run is not a guard. The
+    ///      override swaps file BYTES only; `run()` under test is this exact `run()`.
+    function _read(string memory f) internal view virtual returns (string memory) {
         return vm.readFile(string.concat(vm.projectRoot(), "/test/data/", f));
     }
 
-    function run() external {
+    /// @return rollup  the deployed IntmaxRollup
+    /// @return sv      the deployed ChannelSettlementVerifier (all four settlement VKs keyed)
+    /// @return manager the deployed ChannelSettlementManager, registered on `rollup`
+    /// @dev The return values exist so `test/DeployGuards.t.sol` can assert on what this script
+    ///      actually deployed. `forge script --sig run` is unaffected (return types are not part of
+    ///      the selector, and the console2 lines the Rust drivers parse are unchanged).
+    function run()
+        external
+        returns (IntmaxRollup rollup, ChannelSettlementVerifier sv, ChannelSettlementManager manager)
+    {
         string memory vkJson = _read("close_lifecycle_validity_mle.json");
         string memory lcJson = _read("close_lifecycle.json");
         string memory wJson = _read("close_withdrawal_mle.json");
@@ -49,7 +72,7 @@ contract DeployCloseCli is Script {
         MleVerifier verifier = new MleVerifier();
         IntmaxRollup.MleVk memory vvk = FixtureLib.buildMleVk(vkJson, verifier);
         FixtureLib.DeployData memory vdd = FixtureLib.parseDeployData(vkJson);
-        IntmaxRollup rollup = new IntmaxRollup(
+        rollup = new IntmaxRollup(
             fraudTreasury, vvk, vdd.whirParams, vdd.protocolId, vdd.sessionId,
             vdd.kIs, vdd.subgroupGenPowers, verifier, genesis, false
         );
@@ -67,7 +90,7 @@ contract DeployCloseCli is Script {
         }
 
         // 3. Settlement verifier + the REAL close VK (the close circuit's MLE/WHIR verifier data).
-        ChannelSettlementVerifier sv = new ChannelSettlementVerifier();
+        sv = new ChannelSettlementVerifier();
         {
             FixtureLib.DeployData memory cdd = FixtureLib.parseDeployData(cJson);
             MleVerifier.MleProof memory cproof = FixtureLib.parseProof(cJson);
@@ -222,13 +245,58 @@ contract DeployCloseCli is Script {
         // SCOPE (review finding 6): CARDINALITY only. L1 binds no delegate to a balance-slot index,
         // so this cannot guarantee that any NAMED delegate registered here is present in the closed
         // state — only that the active region was not shrunk below this count.
-        ChannelSettlementManager manager = new ChannelSettlementManager(
-            bytes4(channelId), bpSlot, pkGs[bpSlot], delegateCount, CHALLENGE_PERIOD, SPECIAL_CLOSE_PENALTY,
+        manager = new ChannelSettlementManager(
+            bytes4(channelId), bpSlot, pkGs[bpSlot], delegateCount, DeployConfig.challengePeriodSecs(), SPECIAL_CLOSE_PENALTY,
             INITIAL_BP_BOND, IChannelSettlementVerifier(address(sv)), IChannelRegistry(address(rollup)), mBind,
             dBind
         );
 
+        // 6. Register the manager just deployed as an authorized partial-withdrawal authorizer.
+        //
+        // SECURITY / LIVENESS (same defect class as the withdrawal VK and audit622 A-M4 — a
+        // fail-closed check that is soundness-safe while making an HONEST path impossible):
+        // `ChannelSettlementManager.finalizePartialWithdrawal()` ends by calling
+        // `IntmaxRollup.authorizePartialWithdrawal`, which opens with
+        // `if (!isRegisteredSettlementManager[msg.sender]) revert NotRegisteredSettlementManager();`.
+        // Until 2026-08-13 the ONLY callers of `registerSettlementManager` were the two
+        // `chainid == 31337`-gated mock scripts, so on every REAL deployment made with this script
+        // `pw-finalize` (`src/bin/channel_member.rs`, driven by `api/routes/partial-withdrawal.js`)
+        // reverted — AFTER the user had already submitted the intent and waited out the full
+        // challenge period. No fail-closed check is weakened here: the revert stays; we grant the
+        // right it was correctly demanding.
+        //
+        // WHY THIS IS SAFE — registering the manager THIS script itself constructs, and no other
+        // address, is exactly the intended use of the deployer-only, additive `registerSettlementManager`:
+        //   * The right granted is narrow. `authorizePartialWithdrawal` only sets a boolean in
+        //     `partialWithdrawalAuthorized[authDigest]`. It moves no funds and names no amount or
+        //     recipient — `claimAuthorizedWithdrawal`, the proof-free payout door that once consumed
+        //     that flag directly, was REMOVED (see the tombstone above `postBlock` in
+        //     `IntmaxRollup.sol`, doc/tasks/pw-auth-threat-model.md). The flag is now only ever a
+        //     SECOND factor inside `withdrawNative`/`withdrawERC20`, where the economics come from
+        //     the verified withdrawal proof, so it can veto a payout but never supply one.
+        //   * The manager cannot mint an authorization on demand: `finalizePartialWithdrawal` is
+        //     reachable only after `submitPartialWithdrawalIntent` verified an N-of-N close proof
+        //     against `sv`'s close VK and the challenge window elapsed with no `cancelPartialWithdrawal`.
+        //   * The address is not attacker-influenced: `manager` is the return of the `new` on the
+        //     line above, in the same broadcast, bound by its constructor to THIS `rollup` as its
+        //     registry and to this channel's on-chain member-set commitment (Finding E).
+        //
+        // ORDERING: this must come AFTER the `new ChannelSettlementManager` above (the address must
+        // exist) and BEFORE `stopBroadcast`. It is deliberately the LAST broadcast operation, so it
+        // adds no CREATE and cannot move the manager's own address — the close/withdrawal fixtures
+        // bake that address as the payout recipient inside the proof.
+        rollup.registerSettlementManager(address(manager));
+
         vm.stopBroadcast();
+
+        // Read the registration back rather than trusting the call above ran, mirroring
+        // `Deploy.s.sol`'s withdrawal-VK read-back: a deploy that reaches the console2 lines below
+        // has a working partial-withdrawal finalize, and one that does not aborts loudly instead of
+        // printing an address an operator would go on to fund.
+        require(
+            rollup.isRegisteredSettlementManager(address(manager)),
+            "settlement manager not registered: partial withdrawal cannot finalize"
+        );
 
         console2.log("=== close-lifecycle CLI deploy ===");
         console2.log("IntmaxRollup:", address(rollup));

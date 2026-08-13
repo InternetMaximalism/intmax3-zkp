@@ -4,6 +4,7 @@ import Zkp.Core.Bytes
 import Zkp.Core.Merkle
 import Zkp.Core.U256
 import Zkp.Core.IndexedMerkle
+import Zkp.Core.Exponentiation
 import Zkp.Circuits.Balance.Common.Recipient
 import Zkp.Circuits.Balance.Common.AccountState
 import Zkp.Circuits.Balance.Common.UpdatePublicState

@@ -1,6 +1,6 @@
 const { Router } = require('express');
 const fs = require('fs');
-const { cli, wc, RPC, readJson } = require('../lib/cli');
+const { wc, readJson, ensureSettlement, failRoute } = require('../lib/cli');
 const { withLock } = require('../lib/lock');
 const { findActiveTicket, upsertTicket } = require('../lib/tickets');
 
@@ -13,8 +13,8 @@ router.post('/deploy', (req, res) => {
     if (fs.existsSync(wc(ch, 'settlement.json'))) {
       return res.json(readJson(wc(ch, 'settlement.json')));
     }
-    cli(ch, ['deploy-settlement', RPC]);
-    const s = readJson(wc(ch, 'settlement.json'));
+    // Deploys on anvil; on a real chain reports the operator task instead (see ensureSettlement).
+    const s = ensureSettlement(ch);
     let ticket = findActiveTicket(ch, 'full_withdrawal');
     if (!ticket) {
       ticket = {
@@ -37,10 +37,7 @@ router.post('/deploy', (req, res) => {
     }
     upsertTicket(ch, ticket);
     res.json(s);
-  }).catch(e => {
-    console.error(e.stderr ? String(e.stderr) : (e.message || e));
-    res.status(500).json({ error: String(e.stderr || e.message || e) });
-  });
+  }).catch(e => failRoute(res, e));
 });
 
 // GET /api/v1/channel/:ch/settlement

@@ -6,9 +6,16 @@ uninterpreted). The channel-registration chain circuit
 (`channel_reg_hash_chain/channel_reg_step.rs`) is now IN scope
 (`Circuits.ChannelRegStep`), closing the former F-UPDU-1 residual. The
 `update_channel_tree.rs` base-layer per-block update circuit is likewise modeled.
-**Artifact:** `doc/audit/zkp/` — 42 Lean files, **228 machine-checked theorems**
-(144 circuit + 62 contract + 22 end-to-end composition), 10,522 LOC,
-**zero `sorry` / zero `axiom`**, clean `lake build` from scratch.
+The on-chain gate-constraint evaluator
+(`mle/contracts/src/Plonky2GateEvaluator.sol`) is in scope for the
+`ExponentiationGate` family (`Core.Exponentiation`); the other gate evaluators
+in that file are not modeled here.
+**Artifact:** `doc/audit/zkp/` — 45 `.lean` files, 256 `theorem` declarations,
+11,894 LOC, **zero `sorry` / zero `axiom`**, clean `lake build`.
+Counts are reproducible:
+`find Zkp Zkp.lean -name '*.lean' | wc -l`,
+`grep -rh '^theorem ' Zkp Zkp.lean | wc -l`,
+`find Zkp Zkp.lean -name '*.lean' | xargs wc -l | tail -1`.
 
 **Method:** each circuit is a predicate `Constraints → Prop` (one conjunct per
 `builder.*` gate, citing `source.rs:line`); soundness is `Constraints → spec`.
@@ -60,6 +67,10 @@ is now **CLOSED** — that circuit is modeled in `Circuits.ChannelRegStep`
 | Tag separation USER_ID≠ADDRESS (under `ReprFaithful`) | `tag_separation` | Recipient |
 | PI layout no-aliasing (round-trip) | `pi_roundtrip_two` | Plumbing |
 | Recursion-binding completeness of PIs | `connectPis_iff_eq` | BalancePis |
+| On-chain `ExponentiationGate` evaluator IS the plonky2 evaluator (register-carrying loop ≡ indexed spec) | `solEval_eq_rust`, `solLoop_eq` | Exponentiation (NEW) |
+| Exponentiation ladder computes `base ^ (Σ_j bit_j·2^j)` — LE wires, BE ladder (under the imported booleanity hypothesis) | `output_pow`, `ivOf_pow` | Exponentiation (NEW) |
+| The gate imposes NO booleanity on power bits (adding one would break completeness) | `sat_for_any_bits` | Exponentiation (NEW) |
+| `prev` squares the intermediate-value WIRE, not the previously computed value — the two are different functions | `prev_variants_differ`, `sat_iv_eq_ivOf` | Exponentiation (NEW) |
 
 ## Combined-system safety (circuits + L1 contract)
 
@@ -117,6 +128,9 @@ theorems; no proved conclusion is restated as an assumption field.
 ## Trusted base (honest enumeration — see Field.lean header)
 
 - `CField` (commutative integral domain; no characteristic axiom).
+- Booleanity of the `ExponentiationGate` power-bit wires (`output_pow`'s `hb`):
+  supplied by `BaseSumGate<2>` / `ConstantGate` plus the copy-constraint
+  argument, NOT by the exponentiation gate itself (`sat_for_any_bits`).
 - Opaque primitives: hashes (Poseidon/keccak/compress + per-struct leaf
   hashes — cross-domain separation is itself an idealization, noted in
   Bytes.lean), `repr`, `natLit`, `U256`/`uval`.
@@ -146,4 +160,8 @@ Every file under `src/circuits/` (non-channel) is modeled or mapped
 and risk ratings in `tasks/gadget-inventory.md` (3 TODOs remain, risk-rated:
 `enforce_ge/gt` characteristic argument, `reduce_to_hash_out` canonicity at
 `tx_settlement.rs:289`, channel-scope comparisons). All contract lines
-categorized in `Contracts/Coverage.lean`.
+categorized in `Contracts/Coverage.lean`. On the on-chain side,
+`Plonky2GateEvaluator._evalExponentiation` (gate id 8) is modeled in
+`Core/Exponentiation.lean`; the remaining thirteen gate evaluators in that
+file are covered by differential tests only — see
+`doc/audit/audit12-08-2026.md`.

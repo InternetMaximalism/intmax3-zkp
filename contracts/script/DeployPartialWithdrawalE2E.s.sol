@@ -9,6 +9,7 @@ import {ChannelSettlementVerifier} from "../src/ChannelSettlementVerifier.sol";
 import {MleVerifier} from "@mle/MleVerifier.sol";
 import {SpongefishWhirVerify} from "@mle/spongefish/SpongefishWhirVerify.sol";
 import {FixtureLib} from "./FixtureLib.sol";
+import {DeployConfig} from "./DeployConfig.sol";
 
 /// @dev Drop-in mock for MleVerifier — always returns true. Identical to test/CloseTestLib.sol's
 ///      MockMleVerifier but inlined here to avoid cross-directory imports.
@@ -28,7 +29,10 @@ contract E2EMockMleVerifier {
 ///         ChannelSettlementVerifier + ChannelSettlementManager. Reads member registration from
 ///         `test/data/pw_reg.json` (written by the Rust E2E driver).
 contract DeployPartialWithdrawalE2E is Script {
-    uint64 internal constant CHALLENGE_PERIOD = 1;
+    // SECURITY (challenge-period floor): sourced from `DeployConfig` rather than hardcoded, so if
+    // the `block.chainid == 31337` guard below is ever loosened, the challenge period hardens
+    // automatically instead of silently shipping a 1-second window. Defence in depth only — the
+    // manager's constructor rejects a sub-floor period off-devnet regardless.
     uint256 internal constant SPECIAL_CLOSE_PENALTY = 0;
     uint256 internal constant INITIAL_BP_BOND = 0;
 
@@ -36,7 +40,15 @@ contract DeployPartialWithdrawalE2E is Script {
         return vm.readFile(string.concat(vm.projectRoot(), "/test/data/", f));
     }
 
-    function run() external {
+    /// @return rollup  the deployed IntmaxRollup
+    /// @return sv      the deployed ChannelSettlementVerifier
+    /// @return manager the deployed ChannelSettlementManager, registered on `rollup`
+    /// @dev Returned so `test/DeployGuards.t.sol` can assert on what this script wired. Return
+    ///      types are not part of the `run()` selector, so `forge script --sig run` is unaffected.
+    function run()
+        external
+        returns (IntmaxRollup rollup, ChannelSettlementVerifier sv, ChannelSettlementManager manager)
+    {
         // SECURITY: this script wires an ALWAYS-TRUE mock MLE verifier and a 1-second challenge
         // period. Anything deployed with it has a VACUOUS `_checkCloseProof`, so it must never
         // reach a public chain — and it is reachable from relay tooling pointed at Sepolia.
@@ -54,7 +66,7 @@ contract DeployPartialWithdrawalE2E is Script {
         MleVerifier realVerifier = new MleVerifier();
         IntmaxRollup.MleVk memory vvk = FixtureLib.buildMleVk(mleJson, realVerifier);
         FixtureLib.DeployData memory vdd = FixtureLib.parseDeployData(mleJson);
-        IntmaxRollup rollup = new IntmaxRollup(
+        rollup = new IntmaxRollup(
             fraudTreasury, vvk, vdd.whirParams, vdd.protocolId, vdd.sessionId,
             vdd.kIs, vdd.subgroupGenPowers, realVerifier, genesis, false
         );
@@ -67,7 +79,7 @@ contract DeployPartialWithdrawalE2E is Script {
         E2EMockMleVerifier mockMle = new E2EMockMleVerifier();
 
         // 3. ChannelSettlementVerifier with dummy VKs (mock verifier ignores them).
-        ChannelSettlementVerifier sv = new ChannelSettlementVerifier();
+        sv = new ChannelSettlementVerifier();
         {
             ChannelSettlementVerifier.CloseVk memory cvk = ChannelSettlementVerifier.CloseVk({
                 degreeBits: 1,
@@ -117,8 +129,8 @@ contract DeployPartialWithdrawalE2E is Script {
                 recipient: recipients[i]
             });
         }
-        ChannelSettlementManager manager = new ChannelSettlementManager(
-            bytes4(channelId), bpSlot, pkGs[bpSlot], delegateCount, CHALLENGE_PERIOD,
+        manager = new ChannelSettlementManager(
+            bytes4(channelId), bpSlot, pkGs[bpSlot], delegateCount, DeployConfig.challengePeriodSecs(),
             SPECIAL_CLOSE_PENALTY, INITIAL_BP_BOND,
             IChannelSettlementVerifier(address(sv)), IChannelRegistry(address(rollup)),
             mBind, new ChannelSettlementManager.MemberBinding[](0)
@@ -126,6 +138,31 @@ contract DeployPartialWithdrawalE2E is Script {
 
         // 6. Register settlement manager on rollup (critical for authorizePartialWithdrawal).
         rollup.registerSettlementManager(address(manager));
+
+        // 7. The remaining two settlement VK latches — see the identical note in
+        //    `DeployWalletSettlement.s.sol`. `verifyWithdrawalClaim` / `verifyPostCloseClaim` each
+        //    gate on their own latch, so a stack keyed with only close + cancelClose can close but
+        //    cannot pay out claims. Appended AFTER the manager CREATE so no deployed address moves.
+        //    Placeholder values: the wired verifier is `E2EMockMleVerifier` and this script is
+        //    hard-gated to chain id 31337.
+        {
+            ChannelSettlementVerifier.StatementVk memory svk = ChannelSettlementVerifier.StatementVk({
+                degreeBits: 1,
+                preprocessedRoot: bytes32(uint256(1)),
+                numConstants: 1,
+                numRoutedWires: 1,
+                gatesDigest: bytes32(uint256(2))
+            });
+            SpongefishWhirVerify.WhirParams memory whir;
+            sv.initializeWithdrawalClaimVk(
+                MleVerifier(address(mockMle)), svk, whir, hex"", hex"",
+                new uint256[](0), new uint256[](0)
+            );
+            sv.initializePostCloseClaimVk(
+                MleVerifier(address(mockMle)), svk, whir, hex"", hex"",
+                new uint256[](0), new uint256[](0)
+            );
+        }
 
         vm.stopBroadcast();
 

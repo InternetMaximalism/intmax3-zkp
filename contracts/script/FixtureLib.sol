@@ -49,6 +49,19 @@ library FixtureLib {
         return vm.readFile(string.concat(vm.projectRoot(), "/test/data/block_fixture.json"));
     }
 
+    /// @notice The WITHDRAWAL circuit's MLE/WHIR verifier data, for `initializeWithdrawalVk`.
+    ///
+    /// SECURITY: this is a different circuit from the validity wrapper `loadMle()` returns, and
+    /// `IntmaxRollup._verifyWithdrawalSet` reverts `WithdrawalVkNotSet()` until it is installed —
+    /// so a rollup deployed without this file's VK escrows deposits it can never pay out. The VK is
+    /// channel- and member-INDEPENDENT (it is the circuit's verifier data), so the generic
+    /// `withdrawal_mle.json` is the correct source for a rollup-only deploy; the close-lifecycle
+    /// scripts use their own `*_withdrawal_mle.json`, which carries the same circuit.
+    /// `vm.readFile` reverts if the fixture is absent — fail-loud, never a silent skip.
+    function loadWithdrawalMle() internal view returns (string memory) {
+        return vm.readFile(string.concat(vm.projectRoot(), "/test/data/withdrawal_mle.json"));
+    }
+
     function loadVpi() internal view returns (string memory) {
         return vm.readFile(string.concat(vm.projectRoot(), "/test/data/vpi_fixture.json"));
     }

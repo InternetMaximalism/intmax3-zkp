@@ -62,6 +62,7 @@ relies on it, is an explicit named hypothesis (`Bytes.PoseidonCR`).
 Zkp/Core/Field.lean      -- abstract field, boolean lemma, trusted axioms
 Zkp/Core/Builder.lean    -- CircuitBuilder gate semantics (connect, assert_bool, select, range_check, is_equal)
 Zkp/Core/Bytes.lean      -- Bytes32 / Address / U256 / HashOut, Poseidon (uninterpreted)
+Zkp/Core/Exponentiation.lean -- ExponentiationGate (id 8) ladder + the on-chain Solidity evaluator port
 Zkp/Circuits/...         -- one file per Rust circuit file, mirroring src/circuits/ paths
 tasks/todo.md            -- file inventory, phase plan, findings log (F-*)
 tasks/lessons.md         -- modeling lessons / adjustments

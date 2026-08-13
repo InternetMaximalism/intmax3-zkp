@@ -58,6 +58,93 @@ function rollupOf(ch) {
   return b.rollup;
 }
 
+// ─── Settlement stack: which chain are we on, and can this deployment produce one? ───────────
+//
+// SECURITY: `channel_member deploy-settlement` picks its forge script from the chain id the RPC
+// reports. On 31337 that is `DeployWalletSettlement.s.sol`, which installs an ALWAYS-TRUE mock MLE
+// verifier — fine on anvil, catastrophic anywhere else (a vacuous close-proof check means anyone
+// can close any channel to any state). The CLI refuses to install it off-devnet; this module must
+// therefore not pretend the deploy is a routine step on a real network. It is an OPERATOR action
+// with an ordering constraint (below), so the routes surface that instead of a raw forge failure.
+const DEVNET_CHAIN_ID = 31337;
+
+let _chainId; // cached: a fixed RPC cannot change chain id mid-process.
+function chainId() {
+  if (_chainId === undefined) {
+    const raw = execFileSync('cast', ['chain-id', '--rpc-url', RPC], { encoding: 'utf8' }).trim();
+    const n = Number(raw);
+    if (!Number.isInteger(n) || n <= 0) {
+      // Fail closed: an unreadable chain id must never be resolved as "probably devnet".
+      throw new Error(`cannot read the chain id from ${RPC} (got ${JSON.stringify(raw)})`);
+    }
+    _chainId = n;
+  }
+  return _chainId;
+}
+
+/// A refusal the routes report verbatim, with an HTTP status that says "your deployment is not
+/// provisioned for this", not "something broke".
+class SettlementUnavailable extends Error {
+  constructor(payload, status) {
+    super(payload.error);
+    this.name = 'SettlementUnavailable';
+    this.httpStatus = status || 409;
+    this.payload = payload;
+  }
+}
+
+/// Return this channel's settlement stack, deploying it ONLY where deploying it is correct.
+///
+/// anvil (31337): unchanged — deploy on demand, exactly as the wallet demo has always done.
+///
+/// Any real chain: NO deploy on demand. `DeployCloseCli.s.sol` — the only script that installs
+/// real MLE/WHIR verifier data for the four settlement statements — deploys its OWN IntmaxRollup,
+/// so it can only be run BEFORE the channel is funded. By the time an API route needs a settlement
+/// stack the channel is already backed (the runbook ships `channel_backing.json` in), so deploying
+/// now would put the registration, the manager and the exit path on a NEW rollup while the money
+/// stayed on the old one. The CLI refuses that; this returns the same refusal as structured JSON
+/// so a client sees an actionable operator task rather than a 500.
+function ensureSettlement(ch) {
+  const p = wc(ch, 'settlement.json');
+  if (fs.existsSync(p)) return readJson(p);
+  if (chainId() === DEVNET_CHAIN_ID) {
+    cli(ch, ['deploy-settlement', RPC]);
+    return readJson(p);
+  }
+  let backedRollup = '';
+  try {
+    backedRollup = readJson(wc(ch, 'channel_backing.json')).rollup || '';
+  } catch (e) { /* unbacked channel: the ordering advice below is exactly what it needs */ }
+  throw new SettlementUnavailable({
+    error: 'no settlement stack for this channel, and one cannot be deployed now',
+    chainId: chainId(),
+    backingRollup: backedRollup,
+    detail:
+      'On a real chain the settlement stack must be deployed BEFORE the channel is funded: the ' +
+      'only script with real (non-mock) settlement VKs, DeployCloseCli.s.sol, deploys its own ' +
+      'IntmaxRollup. Deploying it now would register the channel and its ChannelSettlementManager ' +
+      'on a new rollup while the deposit stayed on ' + (backedRollup || 'the existing rollup') + '.',
+    operatorAction:
+      'In a fresh per-channel work dir, before setup-backing: ' +
+      'INTMAX_CHANNEL=<ch> INTMAX_DEPOSIT_KEY=<funded key> FRAUD_TREASURY=<addr> ' +
+      'INTMAX_COSIGNER_KEYFILE=<0600 file> channel_member deploy-settlement <rpc>, then ' +
+      'setup-backing <rpc> <the rollup it prints>, then init. See doc/docs/deploy-runbook.md.',
+    missingCapability:
+      'Attaching a real settlement stack to an ALREADY-DEPLOYED rollup (registerChannel + ' +
+      'ChannelSettlementVerifier with the four real VKs + ChannelSettlementManager + ' +
+      'registerSettlementManager, against an existing rollup address) has no forge script yet.',
+  });
+}
+
+/// Route error handler: reports a `SettlementUnavailable` (or any error carrying a payload) as the
+/// structured refusal it is, and everything else as it did before. INTENTIONALLY SIMPLE — one
+/// helper so no route can forget to distinguish "not provisioned" from "broke".
+function failRoute(res, e) {
+  console.error(e.stderr ? String(e.stderr) : (e.message || e));
+  if (e && e.payload) return res.status(e.httpStatus || 409).json(e.payload);
+  return res.status(500).json({ error: String((e && e.stderr) || (e && e.message) || e) });
+}
+
 function readJson(filepath) {
   return JSON.parse(fs.readFileSync(filepath, 'utf8'));
 }
@@ -66,4 +153,7 @@ function writeJson(filepath, data) {
   fs.writeFileSync(filepath, JSON.stringify(data, null, 2));
 }
 
-module.exports = { REPO, WORK, CLI, RPC, CHANNELS, depositKey, chDir, wc, validChannel, cli, sh, rollupOf, readJson, writeJson };
+module.exports = {
+  REPO, WORK, CLI, RPC, CHANNELS, DEVNET_CHAIN_ID, depositKey, chDir, wc, validChannel, cli, sh,
+  rollupOf, readJson, writeJson, chainId, ensureSettlement, failRoute, SettlementUnavailable,
+};

@@ -1,10 +1,58 @@
 const { Router } = require('express');
-const fs = require('fs');
-const { cli, wc, RPC, readJson, writeJson } = require('../lib/cli');
+const { cli, wc, RPC, readJson, writeJson, ensureSettlement, failRoute } = require('../lib/cli');
 const { withLock } = require('../lib/lock');
 const { findActiveTicket, upsertTicket } = require('../lib/tickets');
 
 const router = Router({ mergeParams: true });
+
+// The marker `channel_member pw-finalize` prints when it deliberately stops after recording the
+// on-chain authorization. See `cmd_pw_finalize` (src/bin/channel_member.rs): the proof-free payout
+// door `IntmaxRollup.claimAuthorizedWithdrawal` was REMOVED (it paid the global escrow against an
+// authorization that binds neither amount nor recipient, so one valid close proof for one's OWN
+// channel could drain every channel), and its replacement needs a base-layer withdrawal proof
+// built by a command — `cmd_partial_withdraw` — that does not exist yet (doc/tasks/todo.md:90).
+const PW_PAYOUT_MISSING = 'STOPPING BEFORE PAYOUT';
+
+/// Report the payout gap as the deliberate, permanent-for-now state it is (501), instead of the
+/// opaque 500 an operator cannot distinguish from a broken node or a reverted transaction.
+///
+/// HONESTY over convenience: `pw-finalize` exits NON-ZERO on this path on EVERY chain, anvil
+/// included, so the `{ ok: true }` these two routes used to promise after it was unreachable — the
+/// request always landed in the catch. Nothing here converts a failure into a success: the
+/// authorization it reports (`authorized: true`) is the one the CLI verified on-chain before
+/// stopping, and the withdrawal itself is explicitly reported as NOT paid out.
+function reportPwPayoutGap(res, ch, e) {
+  let auth = {};
+  try { auth = readJson(wc(ch, 'pw_auth.json')); } catch (_) { /* nothing recorded */ }
+  const ticket = findActiveTicket(ch, 'partial_withdrawal');
+  if (ticket) {
+    // NOT `settle_done`: the money has not moved. Marking it terminal would tell every later
+    // poller the withdrawal completed.
+    ticket.status = 'settle_blocked';
+    ticket.steps.settle = { blockedAt: Date.now(), authDigest: auth.auth_digest, paidOut: false };
+    upsertTicket(ch, ticket);
+  }
+  return res.status(501).json({
+    error: 'partial withdrawal cannot pay out: the payout leg is not implemented',
+    authorized: true,
+    paidOut: false,
+    authDigest: auth.auth_digest,
+    recipient: auth.withdrawal_recipient,
+    amount: auth.withdrawal_amount,
+    detail:
+      'The on-chain authorization IS finalized (nothing was lost), but payout must go through ' +
+      'withdrawNative/withdrawERC20, which require a verified base-layer withdrawal proof. The ' +
+      'command that builds it (cmd_partial_withdraw) is not implemented — doc/tasks/todo.md:90, ' +
+      'doc/tasks/pw-auth-threat-model.md. This is a deliberate fail-closed state on every chain.',
+    log: String((e && e.stderr) || (e && e.message) || ''),
+  });
+}
+
+/// True when a failed CLI run failed for that reason rather than for a real one.
+function isPwPayoutGap(e) {
+  return String((e && e.stderr) || '').includes(PW_PAYOUT_MISSING)
+    || String((e && e.stdout) || '').includes(PW_PAYOUT_MISSING);
+}
 
 // POST /api/v1/channel/:ch/partial-withdrawal/burn (W8 phase 1)
 // Same as burn/cosign but under partial-withdrawal namespace for workflow clarity.
@@ -59,24 +107,25 @@ router.post('/submit', (req, res) => {
       ticket.status = 'settle_pending';
       upsertTicket(ch, ticket);
     }
-    if (!fs.existsSync(wc(ch, 'settlement.json'))) {
-      cli(ch, ['deploy-settlement', RPC]);
-    }
+    // anvil: deploys the devnet stack on demand, as before. Real chain: a structured 409 naming
+    // the operator task, because the real-VK deployer brings its own rollup and so must run
+    // BEFORE the channel is funded (lib/cli.ensureSettlement).
+    ensureSettlement(ch);
     const pwRecipient = (req.body && req.body.recipient) || (ticket && ticket.params.recipient) || '';
     const extra = pwRecipient ? { PW_RECIPIENT: pwRecipient } : {};
     cli(ch, ['pw-submit', RPC], extra);
     const auth = readJson(wc(ch, 'pw_auth.json'));
     res.json({ authDigest: auth.auth_digest });
-  }).catch(e => {
-    console.error(e.stderr ? String(e.stderr) : (e.message || e));
-    res.status(500).json({ error: String(e.stderr || e.message || e) });
-  });
+  }).catch(e => failRoute(res, e));
 });
 
 // POST /api/v1/channel/:ch/partial-withdrawal/finalize (A25)
 router.post('/finalize', (req, res) => {
   const ch = Number(req.params.ch);
   withLock(ch, () => {
+    // NOTE: on today's code this line always throws — `pw-finalize` records the authorization and
+    // then exits non-zero because the payout leg does not exist (see PW_PAYOUT_MISSING above).
+    // The success branch below is kept, and is correct, for when `cmd_partial_withdraw` lands.
     cli(ch, ['pw-finalize', RPC]);
     const auth = readJson(wc(ch, 'pw_auth.json'));
     const ticket = findActiveTicket(ch, 'partial_withdrawal');
@@ -85,10 +134,10 @@ router.post('/finalize', (req, res) => {
       ticket.steps.settle = { completedAt: Date.now(), authDigest: auth.auth_digest };
       upsertTicket(ch, ticket);
     }
-    res.json({ ok: true, authDigest: auth.auth_digest });
+    res.json({ ok: true, authDigest: auth.auth_digest, paidOut: true });
   }).catch(e => {
-    console.error(e.stderr ? String(e.stderr) : (e.message || e));
-    res.status(500).json({ error: String(e.stderr || e.message || e) });
+    if (isPwPayoutGap(e)) return reportPwPayoutGap(res, ch, e);
+    return failRoute(res, e);
   });
 });
 
@@ -101,12 +150,12 @@ router.post('/settle', (req, res) => {
       ticket.status = 'settle_pending';
       upsertTicket(ch, ticket);
     }
-    if (!fs.existsSync(wc(ch, 'settlement.json'))) {
-      cli(ch, ['deploy-settlement', RPC]);
-    }
+    ensureSettlement(ch);
     const pwRecipient = (req.body && req.body.recipient) || (ticket && ticket.params.recipient) || '';
     const extra = pwRecipient ? { PW_RECIPIENT: pwRecipient } : {};
     cli(ch, ['pw-submit', RPC], extra);
+    // As in /finalize: this throws today, deliberately, and the gap is reported as 501 rather
+    // than as an anonymous 500.
     cli(ch, ['pw-finalize', RPC]);
     const auth = readJson(wc(ch, 'pw_auth.json'));
     if (ticket) {
@@ -114,10 +163,10 @@ router.post('/settle', (req, res) => {
       ticket.steps.settle = { completedAt: Date.now(), authDigest: auth.auth_digest };
       upsertTicket(ch, ticket);
     }
-    res.json({ authDigest: auth.auth_digest });
+    res.json({ authDigest: auth.auth_digest, paidOut: true });
   }).catch(e => {
-    console.error(e.stderr ? String(e.stderr) : (e.message || e));
-    res.status(500).json({ error: String(e.stderr || e.message || e) });
+    if (isPwPayoutGap(e)) return reportPwPayoutGap(res, ch, e);
+    return failRoute(res, e);
   });
 });
 

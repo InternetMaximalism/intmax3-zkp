@@ -145,10 +145,74 @@ assume:**
 
 | script | VKs initialized | real-network? |
 |---|---|---|
-| `DeployCloseCli.s.sol` (CLI/prod path) | withdrawal, close, withdrawalClaim, **postCloseClaim**, **cancelClose** — all five | YES |
-| `Deploy.s.sol` | rollup-only smoke | YES |
-| `DeployClose.s.sol`, `DeployC2C.s.sol` | withdrawal only | — |
-| `DeployWalletSettlement.s.sol`, `DeployPartialWithdrawalE2E.s.sol` | close + cancelClose only | anvil-gated (`chainid == 31337`) |
+| `DeployCloseCli.s.sol` (CLI/prod path — rollup **+** settlement stack) | withdrawal, close, withdrawalClaim, **postCloseClaim**, **cancelClose** — all five, **plus `registerSettlementManager(manager)`** (2026-08-13) | YES (needs `FRAUD_TREASURY` and a staged `cli_reg_record.json`) |
+| `Deploy.s.sol` (rollup ONLY — no settlement stack) | validity (constructor) + **withdrawal** | YES (needs `FRAUD_TREASURY`) |
+| `DeployTestnetBlockProducer.s.sol` (rollup ONLY, posting restricted to an admin) | validity (constructor) + **withdrawal** | YES (needs `FRAUD_TREASURY`) |
+| `DeployC2C.s.sol` (rollup ONLY; header: "NOTHING else") | validity (constructor) + **withdrawal** | YES (needs `FRAUD_TREASURY`), but C2C-fixture-specific |
+| `DeployClose.s.sol` | withdrawal only | **NO — and since 2026-08-13 that is ENFORCED**, not documented: `run()` opens with `require(block.chainid == SETTLEMENT_LOCAL_DEVNET_CHAIN_ID, ...)`. It deploys a settlement stack and keys NONE of its four VKs, so a channel it creates can be frozen by `requestClose()` and then never closed (`CloseVkNotSet()`) or un-frozen (`CancelCloseVkNotSet()`), and its `sepolia_*` fixtures are one circuit generation stale, so keying the VKs could not have made it work either. Devnet demo / manager-address dry run only. |
+| `DeployWalletSettlement.s.sol`, `DeployPartialWithdrawalE2E.s.sol` | close, cancelClose, **withdrawalClaim, postCloseClaim** (the last two added 2026-08-13 — without them the wallet demo's own `claim` step reverted `WithdrawalClaimVkNotSet()`), + `registerSettlementManager` | anvil-gated (`chainid == 31337`, hard `require`) |
+
+**What the chain-id checks actually gate — verified by reading each script, because two different
+checks read alike:**
+- `DeployWalletSettlement.s.sol:40` and `DeployPartialWithdrawalE2E.s.sol:44` are TRUE gates: a bare
+  `require(block.chainid == 31337, …)` at the top of `run()`. They install an always-true mock MLE
+  verifier, so they must never reach a public chain, and they cannot.
+- The `require(block.chainid == 31337, "FRAUD_TREASURY must be set for non-local deploys")` in
+  `Deploy.s.sol`, `DeployTestnetBlockProducer.s.sol`, `DeployClose.s.sol` and `DeployCloseCli.s.sol`
+  is **not** an anvil gate — it sits inside `if (fraudTreasury == address(0))`. Set `FRAUD_TREASURY`
+  and these scripts run on any chain. `DeployCloseCli.s.sol` is therefore a real-network-capable
+  full settlement deployer; it is simply not reachable from the CLI/API surface (see the gap below).
+
+**Withdrawal VK — FIXED 2026-08-13, was the same defect class as the A-M4 history below.**
+`Deploy.s.sol` and `DeployTestnetBlockProducer.s.sol` never called `initializeWithdrawalVk`, so
+every rollup they produced accepted deposits (`deposit()` is ungated) and reverted
+`WithdrawalVkNotSet()` on both `withdrawNative` and `withdrawERC20` forever
+(`IntmaxRollup.sol:1619`, shared by both payout entry points). The `Deploy.s.sol` row above used to
+read "rollup-only smoke / YES", and `doc/docs/deploy-runbook.md` uses that script for the live
+Sepolia deploy — "smoke" was doing load-bearing work no operator would decode. Both scripts now
+install the VK from `withdrawal_mle.json` (read BEFORE `startBroadcast`, so a missing fixture aborts
+before anything is on chain) and `require(rollup.withdrawalVkInitialized())` afterwards. Covered by
+`contracts/test/DeployGuards.t.sol`, which executes the scripts on chain id 11155111.
+
+**Challenge period — FIXED 2026-08-13.** Every script that constructed a
+`ChannelSettlementManager` hardcoded `CHALLENGE_PERIOD = 1` second while
+`ChannelSettlementManager.CHALLENGE_PERIOD_SECS = 86_400` (documented, spec-referenced) was read by
+nothing, and every test used 1 day — so the value that actually shipped was exercised by no test.
+`finalizeClose()` is permissionless at the deadline and both remedies (`cancelClose`, a newer
+`submitCloseIntent`) require minutes of MLE proving, so the deployed window made a stale close
+unchallengeable: fund MIS-ALLOCATION among members, not a liveness inconvenience. Now:
+- `script/DeployConfig.sol` resolves the value — the protocol constant off-devnet, 1 second on
+  chain id 31337 (the anvil E2Es drive a real node and cannot wait a day);
+- the manager's **constructor** independently rejects anything below the floor off-devnet
+  (`ChallengePeriodTooShort`), so no deploy tooling — script, factory or hand-rolled — can ship a
+  short window to a public chain.
+
+⚠️ **Consequence for this runbook: changing `ChannelSettlementManager`'s bytecode moves its CREATE2
+address, so the close fixture set must be regenerated** (`close_withdrawal_payout.json` /
+`close_withdrawal_mle.json` bake the manager address as the withdrawal recipient, inside the proof).
+Until that is done, `CloseLifecycleE2E.t.sol::test_closeLifecycle_endToEnd` fails with
+`manager CREATE2 address != close payout fixture recipient (stale fixtures -- regenerate)` — the
+intended signal, per Step 2 above. Get the new address from
+`forge test --match-test test_printCloseManagerAddress -vv`, then rerun Step 1's
+`WD_RECIPIENT=<addr> WD_OUT_PREFIX=close_ cargo run --release --bin generate_withdrawal_fixture`.
+
+**Settlement-manager registration — FIXED 2026-08-13.** `DeployCloseCli.s.sol` did not call
+`rollup.registerSettlementManager(manager)`; its only callers were the two anvil-gated scripts. That
+gates `finalizePartialWithdrawal` (`IntmaxRollup.sol` `NotRegisteredSettlementManager`); full-close
+withdrawal leaves carry `auxData == 0` and skip it, so full close was unaffected.
+
+**This was NOT moot, and the prior text claiming it was is retracted.** That text said "the CLI's
+`cmd_partial_withdraw` is unimplemented and `pw-finalize` deliberately `exit(1)`s before payout" —
+`cmd_partial_withdraw` is a command name that does not exist, so the grep behind that claim could
+only ever come back empty. The real commands are `pw-submit` (`src/bin/channel_member.rs:5706`) and
+`pw-finalize` (`:5893`), both implemented, both driven by `api/routes/partial-withdrawal.js:67,80`,
+and `tests/partial_withdrawal_e2e.rs` exercises them. On a real deployment the revert landed at
+FINALIZE — after the member had submitted the intent and waited out the entire challenge period.
+The call is now step 6 of the script, followed by a read-back `require`, and covered by
+`contracts/test/DeployGuards.t.sol` (which executes the script at chain id 11155111 and asserts the
+deployed manager can actually call `authorizePartialWithdrawal`, while a stranger still cannot).
+*Lesson: a "this path is dead so the gap is moot" argument must name the live entry points it
+searched for and show they are absent — a negative grep for the wrong identifier is not evidence.*
 
 **HISTORY — this text was an OVERCLAIM until 2026-08-12.** `DeployCloseCli.s.sol`
 called only `initializeCloseVk` and `initializeWithdrawalClaimVk`;

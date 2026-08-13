@@ -1,6 +1,6 @@
 const { Router } = require('express');
 const fs = require('fs');
-const { cli, wc, RPC, rollupOf, readJson } = require('../lib/cli');
+const { cli, wc, RPC, rollupOf, readJson, ensureSettlement, failRoute } = require('../lib/cli');
 const { withLock } = require('../lib/lock');
 const { findActiveTicket, upsertTicket } = require('../lib/tickets');
 
@@ -55,8 +55,9 @@ router.post('/deploy', (req, res) => {
       }
       return res.json({ manager: s.manager, verifier: s.verifier });
     }
-    cli(ch, ['deploy-settlement', RPC]);
-    const s = readJson(wc(ch, 'settlement.json'));
+    // anvil: deploys as before. Real chain: throws a structured 409 naming the operator task —
+    // the settlement stack must exist before the channel is funded (see lib/cli.ensureSettlement).
+    const s = ensureSettlement(ch);
     let ticket = findActiveTicket(ch, 'full_withdrawal');
     if (!ticket) {
       ticket = {
@@ -76,10 +77,7 @@ router.post('/deploy', (req, res) => {
     }
     upsertTicket(ch, ticket);
     res.json({ manager: s.manager, verifier: s.verifier });
-  }).catch(e => {
-    console.error(e.stderr ? String(e.stderr) : (e.message || e));
-    res.status(500).json({ error: String(e.stderr || e.message || e) });
-  });
+  }).catch(e => failRoute(res, e));
 });
 
 // POST /api/v1/channel/:ch/full-withdrawal/request (W10 step 2 — close request + submit intent)
