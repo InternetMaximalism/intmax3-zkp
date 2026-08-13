@@ -458,6 +458,102 @@ fn burn_send_base_chain_matches_channel() {
     );
 }
 
+/// GAP2 / STRANDING GUARD, against the REAL builder.
+///
+/// `pw-submit`'s pre-flight refuses to consume the channel's single-use partial-withdrawal chain
+/// key unless the tuple its nullifier commits to reproduces the N-of-N co-signed `h2_tag`. That
+/// comparison is only worth anything if it PASSES on an honest burn — a guard that always fires is
+/// as useless as one that never does. This drives the real `build_burn_send` and asserts the
+/// reconstruction the guard performs lands exactly on the value the co-signers signed.
+///
+/// It is also the anti-drift test for the burn's L1 leaf: `burn_withdrawal_leaf` is fed ONLY from
+/// the descriptor the builder emitted, and its H2 must equal both `desc.tx_tree_root` and the
+/// post-burn state's `h2_tag`. If anyone re-derives the base `Transfer`, the `TxV2`, the transfer
+/// index or the nonce a second time anywhere, these three stop coinciding.
+#[test]
+fn burn_withdrawal_leaf_reconstructs_the_cosigned_h2_tag() {
+    use intmax3_zkp::{
+        circuits::balance::common::recipient::calculate_recipient_from_address,
+        common::balance_state::tx_leaf_hash,
+        ethereum_types::address::Address,
+        wallet_core::{burn_withdrawal_leaf, inter_channel_base_transfer, inter_channel_tx_v2},
+    };
+
+    let a = build_cli_channel(A_ID, &[50, 10, 30]);
+    let a_keys: Vec<MemberKeys> = CLI_SLOTS.iter().map(|&s| cli_keys(s)).collect();
+    let sender_slot = 0u16;
+    let amount = 20u64;
+    let l1 = Address::from_hex("0x00000000000000000000000000000000000000aa").unwrap();
+
+    let mut rng = StdRng::seed_from_u64(0xB0_0000);
+    let built = build_burn_send(
+        &a_keys[sender_slot as usize],
+        &a.snapshot,
+        sender_slot,
+        l1,
+        amount,
+        a.balances[sender_slot as usize],
+        &a.witnesses[sender_slot as usize],
+        fresh_root(0xBEEF),
+        LEVEL,
+        &mut rng,
+    )
+    .expect("build_burn_send");
+
+    let desc = &built.transfer_descriptor;
+    let next = &built.debit_payload.proposed_next_state;
+    let tx_leaf = tx_leaf_hash(
+        desc.source_pk_g,
+        desc.sender_delta_ct.digest(),
+        desc.receiver_pk_g,
+        desc.receiver_delta.digest(),
+    );
+
+    // The nonce the nullifier binds (F-WD-2: the SENDER nonce, not a settlement block) is the
+    // post-burn small block number — which is what `pw-submit` reads off the head.
+    assert_eq!(
+        desc.tx_v2.nonce as u64, next.small_block_number,
+        "the burn tx's nonce must be the post-burn small_block_number — pw-submit derives it \
+         from the head, so a divergence here would make every derived nullifier unmatchable"
+    );
+
+    let leaf = burn_withdrawal_leaf(
+        desc.source_channel_id,
+        desc.receiver_pk_g,
+        desc.inter_channel_tx.token_index,
+        amount,
+        tx_leaf,
+        desc.tx_v2.nonce,
+    )
+    .expect("an ADDRESS_TAG burn has a withdrawal leaf");
+    assert_eq!(
+        leaf.recipient, l1,
+        "the leaf pays the L1 address the burn was built for — no env var involved"
+    );
+    assert_eq!(leaf.aux_data, tx_leaf, "the leaf's aux_data is the tx leaf");
+
+    // THE GUARD, run exactly as `pw-submit` runs it.
+    let rebuilt =
+        inter_channel_base_transfer(desc.receiver_pk_g, leaf.token_index, amount, leaf.aux_data);
+    let (_, tree) = inter_channel_tx_v2(desc.source_channel_id, &rebuilt, desc.tx_v2.nonce);
+    let rebuilt_h2: Bytes32 = tree.get_root().into();
+
+    assert_eq!(
+        rebuilt_h2, desc.tx_tree_root,
+        "the nullifier's preimage must reproduce the burn's tx_tree_root"
+    );
+    assert_eq!(
+        rebuilt_h2, next.h2_tag,
+        "and therefore the co-signed h2_tag — this is the pre-flight check that stops pw-submit \
+         from spending the chain key on an authorization no proof could match"
+    );
+    assert_eq!(
+        calculate_recipient_from_address(l1),
+        desc.receiver_pk_g,
+        "sanity: the descriptor's receiver_pk_g is the ADDRESS_TAG L1 form"
+    );
+}
+
 #[test]
 fn inter_channel_cli_end_to_end() {
     // Two temp channel cwds laid out as the relay does: <root>/ch7, <root>/ch8.

@@ -52,7 +52,7 @@ use intmax3_zkp::{
         },
     },
     common::{
-        balance_state::{BalanceState, tx_leaf_hash},
+        balance_state::{BalanceState, settled_tx_chain_push, tx_leaf_hash},
         channel::{
             ChannelRecord, ChannelState, CloseIntent, CloseWithdrawal, InterChannelTx,
             MemberSignature,
@@ -80,7 +80,8 @@ use intmax3_zkp::{
         WithdrawalClaimProver, add_signature, assemble_genesis_state_backed,
         build_batch_next_state, build_channel_withdrawal, build_inter_channel_credit,
         build_l1_deposit_import, build_record, build_refresh, build_send_token,
-        build_token_register, decrypt_balance_token, default_settled_tx_accumulator,
+        build_token_register, burn_withdrawal_leaf, decrypt_balance_token,
+        default_settled_tx_accumulator, inter_channel_base_transfer, inter_channel_tx_v2,
         partial_withdrawal_auth_digest, regev_pks_array, resolve_local_token_slot, sign_state,
         sign_state_if_backed, verify_all_signatures, verify_inter_channel_credit_transition,
         verify_inter_channel_send_transition, verify_l1_deposit_import_transition,
@@ -4725,6 +4726,28 @@ fn cmd_cosign_burn_send(args: &[String]) {
 
     // Persist burn metadata for `pw-submit` to reconstruct the Withdrawal. `token_index` is the
     // BASE token the burn debited (multitoken §N — rides into the Withdrawal + IMPW authDigest).
+    //
+    // SECURITY: the L1 withdrawal leaf — and above all its NULLIFIER — is recorded HERE, derived
+    // by the one shared `burn_withdrawal_leaf`. It is settlement-independent (F-WD-2), so it is
+    // fully determined the moment the burn is co-signed. `pw-submit` recomputes it and refuses to
+    // proceed on any disagreement, so a coordinator cannot substitute a leaf between the two
+    // steps, and the value that goes into the on-chain authorization is the same value a provable
+    // `single_withdrawal` leaf will carry.
+    let burn_tx_leaf = tx_leaf_hash(
+        descriptor.source_pk_g,
+        payload.inter_channel_tx.sender_delta_ct.digest(),
+        descriptor.receiver_pk_g,
+        descriptor.receiver_delta.digest(),
+    );
+    let burn_leaf = burn_withdrawal_leaf(
+        descriptor.source_channel_id,
+        descriptor.receiver_pk_g,
+        descriptor.inter_channel_tx.token_index,
+        descriptor.amount,
+        burn_tx_leaf,
+        descriptor.tx_v2.nonce,
+    )
+    .unwrap_or_else(|e| die(format!("burn withdrawal leaf: {e:?}")));
     write_json(
         "last_burn.json",
         &serde_json::json!({
@@ -4736,6 +4759,11 @@ fn cmd_cosign_burn_send(args: &[String]) {
             "sender_delta_ct_digest": payload.inter_channel_tx.sender_delta_ct.digest().to_hex(),
             "receiver_delta_ct_digest": descriptor.receiver_delta.digest().to_hex(),
             "pre_burn_settled_tx_chain": pre_burn_settled_tx_chain.to_hex(),
+            "channel_id": descriptor.source_channel_id.as_u64(),
+            "tx_nonce": descriptor.tx_v2.nonce,
+            "tx_leaf": burn_tx_leaf.to_hex(),
+            "withdrawal_recipient": format!("0x{}", hex::encode(burn_leaf.recipient.to_bytes_be())),
+            "withdrawal_nullifier": burn_leaf.nullifier.to_hex(),
         }),
     );
 
@@ -6206,6 +6234,160 @@ fn cmd_cosign_l1_deposit_import(args: &[String]) {
     );
 }
 
+/// PRE-FLIGHT GUARD for `pw-submit` — the last point at which a partial withdrawal can still be
+/// abandoned for free.
+///
+/// WHY IT EXISTS. `submitPartialWithdrawalIntent` consumes the channel's single-use chain key
+/// `keccak(channelId, finalSettledTxChain)` into `usedPartialWithdrawalChains`
+/// (`contracts/src/ChannelSettlementManager.sol:1204-1205`, set at `:1250`) and there is no
+/// un-consume. The channel-side debit already happened at `cosign-burn-send`. So writing an
+/// authorization that no provable leaf can satisfy does not merely fail — it strands the burned
+/// value forever. The irreversible step must therefore be gated on the authorization being
+/// matchable, not merely well-formed.
+///
+/// WHAT IT PROVES. The tuple `(recipient_pk_g, token_index, amount, aux_data, transfer_index=0,
+/// tx_nonce, channel_id)` that produced `withdrawal.nullifier` is rebuilt into the burn's 1-tx
+/// `TxV2` tree and its root compared against `head.h2_tag` — the value the N-of-N co-signers
+/// signed (`h2_tag` is inside the IMCH preimage, `src/common/channel.rs:598`) and which
+/// `state_update_verifier.rs:612-616` pins to the small block's `tx_tree_root`. A
+/// `single_withdrawal` proof verifies its transfer against exactly that root: merkle membership in
+/// `tx.transfer_tree_root` with `transfer_index` asserted zero
+/// (`src/circuits/balance/send_tx_circuit.rs:277-279`), the TxV2 at index `channel_id`, and
+/// `tx_v2.nonce == tx.nonce` (`single_withdrawal_circuit.rs:501`). So a match here means the very
+/// fields the nullifier was computed from are the fields any provable leaf must carry.
+///
+/// WHY IT CANNOT PRODUCE A FALSE PASS. It is not a self-comparison: `h2_tag` is an independently
+/// produced, N-of-N-signed commitment that this process did not compute, and the reconstruction
+/// goes through the SAME `inter_channel_base_transfer` / `inter_channel_tx_v2` used to build the
+/// original (so a passing comparison is a real preimage match, not a coincidence of two
+/// re-derivations of the same wrong formula). Passing with a wrong tuple requires a Poseidon
+/// collision. It fails closed in every other direction: any missing field, any mismatch, any
+/// state that has moved past the burn (H2 and the chain both change on every send) aborts before
+/// `forge` is invoked.
+///
+/// WHAT IT DOES **NOT** PROVE — stated so nobody reads more into a pass than is there: that a base
+/// -layer withdrawal proof can actually be produced today. Provability additionally needs the burn
+/// tx settled in a finalized block and the base account's sent-tx slot at index `nonce` empty
+/// (`src/circuits/balance/spend_circuit.rs:387-395`); neither is checkable from channel state
+/// alone, and `cmd_partial_withdraw` does not exist yet (`doc/tasks/todo.md:90`). This guard
+/// removes the *derivation* mismatch as a stranding cause; it does not make the payout leg exist.
+#[allow(clippy::too_many_arguments)]
+fn preflight_burn_authorization_is_matchable(
+    burn: &serde_json::Value,
+    head: &ChannelState,
+    channel_id: ChannelId,
+    withdrawal: &Withdrawal,
+    tx_leaf: Bytes32,
+    pre_burn_chain: Bytes32,
+    receiver_pk_g: Bytes32,
+    burn_amount: u64,
+    tx_nonce: u32,
+) {
+    let refuse = |why: String| -> ! {
+        die(format!(
+            "pw-submit PRE-FLIGHT REFUSED — {why}\n\
+             Nothing was submitted, so the channel's single-use partial-withdrawal chain key is \
+             still available and this burn can still be withdrawn once the mismatch is resolved. \
+             Submitting anyway would consume that key against an authorization no withdrawal \
+             proof could ever match, stranding the burned funds permanently."
+        ))
+    };
+
+    // (0) A partial withdrawal is precisely a leaf with `auxData != 0` — that is the condition
+    // under which `withdrawNative`/`withdrawERC20` demand the authorization as a second factor
+    // (`contracts/src/IntmaxRollup.sol:1512`, `:1560`). A zero aux_data leaf needs no
+    // authorization at all, so authorizing one is meaningless and burns the chain key for nothing.
+    if tx_leaf == Bytes32::default() {
+        refuse("the burn's aux_data (tx leaf) is zero, so this is not a partial withdrawal".into());
+    }
+
+    // (1) The head must still BE the post-burn state. Both of these move on every subsequent
+    // channel transition, and the manager recomputes the chain fold itself
+    // (`ChannelSettlementManager.sol:1143-1146`), so a stale head is an unmatchable intent.
+    let expected_chain = settled_tx_chain_push(pre_burn_chain, tx_leaf);
+    if expected_chain != head.balance_state.settled_tx_chain {
+        refuse(format!(
+            "push(pre_burn_chain, tx_leaf) = {} but the channel head's settled_tx_chain is {} — \
+             the channel has moved past this burn (or last_burn.json belongs to another burn)",
+            expected_chain.to_hex(),
+            head.balance_state.settled_tx_chain.to_hex()
+        ));
+    }
+
+    // (2) THE LOAD-BEARING CHECK: the nullifier's own preimage must reproduce the co-signed H2.
+    let base_transfer =
+        inter_channel_base_transfer(receiver_pk_g, withdrawal.token_index, burn_amount, tx_leaf);
+    let (_, tx_v2_tree) = inter_channel_tx_v2(channel_id, &base_transfer, tx_nonce);
+    let rebuilt_h2: Bytes32 = tx_v2_tree.get_root().into();
+    if rebuilt_h2 != head.h2_tag {
+        refuse(format!(
+            "the transfer the nullifier commits to does not reproduce the co-signed h2_tag: \
+             rebuilt H2 = {}, signed h2_tag = {}. The authorization would name a leaf the \
+             co-signed burn tx does not contain",
+            rebuilt_h2.to_hex(),
+            head.h2_tag.to_hex()
+        ));
+    }
+
+    // (3) Cross-check against what `cosign-burn-send` recorded at burn time, when present. Both
+    // sides run the SAME `burn_withdrawal_leaf`, so a disagreement is not drift — it means the
+    // artefact was edited between the two steps (a coordinator is untrusted for integrity, T7).
+    // Absent fields mean a pre-2026-08-13 `last_burn.json`; checks (1) and (2) still bind.
+    let recorded = |k: &str| burn[k].as_str().map(|s| s.to_string());
+    if let Some(s) = recorded("tx_leaf") {
+        let v = Bytes32::from_hex(&s).unwrap_or_else(|e| die(format!("parse tx_leaf: {e:?}")));
+        if v != tx_leaf {
+            refuse(format!(
+                "last_burn.json tx_leaf {} != the one recomputed from its own ciphertext digests {}",
+                v.to_hex(),
+                tx_leaf.to_hex()
+            ));
+        }
+    }
+    if let Some(v) = burn["channel_id"].as_u64() {
+        if v != channel_id.as_u64() {
+            refuse(format!(
+                "last_burn.json channel_id {v} != this CLI's channel {}",
+                channel_id.as_u64()
+            ));
+        }
+    }
+    if let Some(v) = burn["tx_nonce"].as_u64() {
+        if v != tx_nonce as u64 {
+            refuse(format!(
+                "last_burn.json tx_nonce {v} != the head's small_block_number {tx_nonce}"
+            ));
+        }
+    }
+    if let Some(s) = recorded("withdrawal_nullifier") {
+        let v = Bytes32::from_hex(&s).unwrap_or_else(|e| die(format!("parse nullifier: {e:?}")));
+        if v != withdrawal.nullifier {
+            refuse(format!(
+                "last_burn.json nullifier {} != the one derived here {}",
+                v.to_hex(),
+                withdrawal.nullifier.to_hex()
+            ));
+        }
+    }
+    if let Some(s) = recorded("withdrawal_recipient") {
+        let v = Address::from_hex(&s).unwrap_or_else(|e| die(format!("parse recipient: {e:?}")));
+        if v != withdrawal.recipient {
+            refuse(format!(
+                "last_burn.json recipient {} != the one derived here {}",
+                v.to_hex(),
+                withdrawal.recipient.to_hex()
+            ));
+        }
+    }
+
+    eprintln!(
+        "pw-submit pre-flight OK: nullifier {} is the one a provable leaf carries — its preimage \
+         reproduces the co-signed h2_tag {} and the chain fold matches the head.",
+        withdrawal.nullifier.to_hex(),
+        head.h2_tag.to_hex()
+    );
+}
+
 /// Submit a partial withdrawal intent on-chain. Reads the burn metadata from `last_burn.json`
 /// (written by `cosign-burn-send`) and the settlement addresses from `settlement.json`.
 /// Usage:
@@ -6274,29 +6456,84 @@ fn cmd_pw_submit(args: &[String]) {
         receiver_delta_digest,
     );
 
-    let withdrawal_addr_hex = std::env::var("PW_RECIPIENT")
-        .unwrap_or_else(|_| die("PW_RECIPIENT env var required (L1 withdrawal address)"));
-    let withdrawal_addr = Address::from_hex(&withdrawal_addr_hex)
-        .unwrap_or_else(|e| die(format!("parse withdrawal address: {e:?}")));
-
-    let nullifier = {
-        let mut data = Vec::with_capacity(32 + 32);
-        data.extend_from_slice(&tx_leaf.to_bytes_be());
-        data.extend_from_slice(&pre_burn_chain.to_bytes_be());
-        let hash = keccak_hash::keccak(&data);
-        Bytes32::from_bytes_be(hash.as_bytes()).expect("nullifier from keccak")
-    };
     // Multitoken §N: the burned BASE token_index recorded by cosign-burn-send (default 0 for
     // legacy last_burn.json files). Bound into the IMPW authDigest, so the L1 leg pays the
     // burned asset (withdrawNative for 0, withdrawERC20 otherwise).
     let burn_token_index: u32 = burn["token_index"].as_u64().unwrap_or(0) as u32;
-    let withdrawal = Withdrawal {
-        recipient: withdrawal_addr,
-        token_index: burn_token_index,
-        amount: U256::from(burn_amount),
-        nullifier,
-        aux_data: tx_leaf,
-    };
+
+    // ── The withdrawal leaf: DERIVED, never invented ────────────────────────────────────────
+    //
+    // SECURITY (2026-08-13, the fund-stranding fix). This used to compute
+    //     nullifier = keccak(tx_leaf ‖ pre_burn_settled_tx_chain)
+    // — a formula that exists nowhere else in the system. A provable withdrawal leaf carries
+    // `SettledTransfer::nullifier()` (Poseidon over the base transfer + channel id +
+    // transfer_index + tx nonce; `src/circuits/withdraw/single_withdrawal_circuit.rs:376-390`
+    // natively, `:513-525` in-circuit). Different hash family, different preimage: the two could
+    // NEVER coincide, so `submitPartialWithdrawalIntent` recorded an authorization that no proof
+    // could ever match — while irreversibly consuming the channel's single-use chain key
+    // (`usedPartialWithdrawalChains`, `contracts/src/ChannelSettlementManager.sol:1204-1205`,
+    // `:1250`) for a burn whose channel-side debit had already happened. Fail-closed on theft,
+    // but it STRANDED the burned value permanently.
+    //
+    // The leaf now comes from `burn_withdrawal_leaf`, the one shared derivation, which calls the
+    // same `SettledTransfer::nullifier()` the circuit calls. Every input is settlement-independent
+    // (F-WD-2), so no circuit, PI or VK change is required to know the nullifier at burn time.
+    let channel_id = state.snapshot.record.channel_id;
+    // The burn's `TxV2.nonce` is `prev.small_block_number + 1`, i.e. exactly the small block
+    // number of the post-burn head. The H2 guard below re-derives H2 from this nonce and compares
+    // it against the co-signed `h2_tag`, so a head that has moved past the burn cannot slip
+    // through with a stale or advanced nonce.
+    let tx_nonce = u32::try_from(head.small_block_number).unwrap_or_else(|_| {
+        die(format!(
+            "small_block_number {} does not fit in the tx nonce (u32)",
+            head.small_block_number
+        ))
+    });
+    let withdrawal = burn_withdrawal_leaf(
+        channel_id,
+        receiver_pk_g,
+        burn_token_index,
+        burn_amount,
+        tx_leaf,
+        tx_nonce,
+    )
+    .unwrap_or_else(|e| die(format!("derive burn withdrawal leaf: {e:?}")));
+    let withdrawal_addr = withdrawal.recipient;
+    let nullifier = withdrawal.nullifier;
+
+    preflight_burn_authorization_is_matchable(
+        &burn,
+        head,
+        channel_id,
+        &withdrawal,
+        tx_leaf,
+        pre_burn_chain,
+        receiver_pk_g,
+        burn_amount,
+        tx_nonce,
+    );
+
+    // `PW_RECIPIENT` is no longer an INPUT — the paid address is fixed at burn time
+    // (`build_burn_send_token` bakes `ADDRESS_TAG(withdrawal_l1_address)` into the base transfer's
+    // recipient, `src/wallet_core.rs:2371`) and is recovered from it above. It survives only as an
+    // ASSERTION: if the caller (relay/coordinator) states an address, it must be the one the burn
+    // actually pays, or we refuse BEFORE the chain key is spent. Previously a mismatched
+    // `PW_RECIPIENT` silently produced an unmatchable authorization and stranded the burn.
+    if let Ok(want_hex) = std::env::var("PW_RECIPIENT") {
+        let want = Address::from_hex(&want_hex)
+            .unwrap_or_else(|e| die(format!("parse PW_RECIPIENT: {e:?}")));
+        if want != withdrawal_addr {
+            die(format!(
+                "PW_RECIPIENT {} != the L1 address this burn pays ({}) — REFUSING to submit. \
+                 Submitting anyway would consume the channel's single-use partial-withdrawal \
+                 chain key on an authorization no withdrawal proof could ever satisfy, stranding \
+                 the burned funds permanently.",
+                want.to_hex(),
+                withdrawal_addr.to_hex()
+            ));
+        }
+    }
+
     let auth_digest = partial_withdrawal_auth_digest(&withdrawal);
     eprintln!("pw-submit: authDigest = {}", auth_digest.to_hex());
 
@@ -6512,11 +6749,19 @@ fn cmd_pw_finalize(args: &[String]) {
     // `cmd_partial_withdraw`, which was never implemented (doc/tasks/todo.md:90).
     //
     // DELIBERATELY NOT rerouted to `withdrawNative` here: without the base-layer proof that call
-    // would fail with an opaque proof-binding error and hide the real cause. Two known blockers
-    // beyond the missing command: this CLI invents `nullifier = keccak(tx_leaf ‖ pre_burn_chain)`
-    // (see `cmd_pw_submit`) whereas a provable leaf must use `settled_transfer.nullifier()`; and
-    // base `Transfer.amount == the channel-layer debit` is still only a co-signer assumption
-    // (audit F-AUX-1), not an in-circuit equality.
+    // would fail with an opaque proof-binding error and hide the real cause.
+    //
+    // Blocker status:
+    //   • NULLIFIER — FIXED (2026-08-13). `cmd_pw_submit` used to invent
+    //     `nullifier = keccak(tx_leaf ‖ pre_burn_chain)`, which no provable leaf could ever carry;
+    //     that authorization was unmatchable and the burn was stranded once the chain key was
+    //     consumed. It now derives the leaf with the shared `wallet_core::burn_withdrawal_leaf`,
+    //     which calls the same `SettledTransfer::nullifier()` the withdrawal circuit calls, and
+    //     refuses to submit unless the leaf's own preimage reproduces the co-signed `h2_tag`.
+    //   • AMOUNT — STILL OPEN. Base `Transfer.amount == the channel-layer debit` is only a
+    //     co-signer assumption (audit F-AUX-1), not an in-circuit or on-chain equality. See
+    //     doc/tasks/partial-withdrawal-payout-design.md §1.1 / §2.
+    //   • The proving command `cmd_partial_withdraw` still does not exist.
     let recipient = auth["withdrawal_recipient"].as_str().unwrap_or("<unknown>");
     let amount = auth["withdrawal_amount"].as_u64().unwrap_or(0);
     eprintln!(

@@ -32,7 +32,7 @@ use intmax3_zkp::{
     regev::{RegevCiphertext, RegevPk, RegevSecurityLevel, encrypt_amount},
     wallet_core::{
         ChannelBalanceAttestation, MemberInfo, MemberKeys, add_signature,
-        assemble_genesis_state_backed, build_burn_send, build_record,
+        assemble_genesis_state_backed, build_burn_send, build_record, burn_withdrawal_leaf,
         partial_withdrawal_auth_digest, sign_state, sign_state_if_backed, verify_all_signatures,
         verify_channel_backing,
     },
@@ -448,14 +448,29 @@ fn partial_withdrawal_e2e_anvil() {
     eprintln!("[PW E2E] settled_tx_chain OK");
 
     // ── Phase E: Write pw_submit.json + on-chain settlement ─────────────────────────────────
-    // Build the Withdrawal struct for authDigest computation.
-    let withdrawal = Withdrawal {
-        recipient: withdrawal_addr,
-        token_index: 0,
-        amount: u256(burn_amount),
-        nullifier: Bytes32::from_u32_slice(&[0, 0, 0, 0, 0, 0, 0, 0xBEEF]).unwrap(),
-        aux_data: tx_leaf,
-    };
+    // The Withdrawal struct for authDigest computation.
+    //
+    // SECURITY (2026-08-13): this used to authorize a LITERAL `nullifier = 0xBEEF`, the third of
+    // three disagreeing derivations (CLI `keccak(tx_leaf ‖ pre_burn_chain)`, this literal, and the
+    // only real one — `SettledTransfer::nullifier()` in the withdrawal circuit). An E2E that
+    // authorizes a nullifier no provable leaf carries cannot detect the stranding bug it walks
+    // straight through, so it now derives the leaf from the burn artefact with the one shared
+    // `burn_withdrawal_leaf`, exactly as `pw-submit` does.
+    let withdrawal = burn_withdrawal_leaf(
+        desc.source_channel_id,
+        desc.receiver_pk_g,
+        desc.inter_channel_tx.token_index,
+        burn_amount,
+        tx_leaf,
+        desc.tx_v2.nonce,
+    )
+    .expect("burn withdrawal leaf");
+    assert_eq!(
+        withdrawal.recipient, withdrawal_addr,
+        "the burn's baked ADDRESS_TAG recipient must recover the L1 address it was built for"
+    );
+    assert_eq!(withdrawal.amount, u256(burn_amount));
+    assert_eq!(withdrawal.aux_data, tx_leaf);
     let rust_auth_digest = partial_withdrawal_auth_digest(&withdrawal);
     eprintln!("[PW E2E] Rust authDigest = {}", rust_auth_digest.to_hex());
 
@@ -481,8 +496,8 @@ fn partial_withdrawal_e2e_anvil() {
             // prevSettledTxChain (genesis chain before the burn push).
             "prev_settled_tx_chain": genesis_chain.to_hex(),
             // AuthorizedWithdrawal fields.
-            "withdrawal_recipient": format!("0x{}", hex::encode(withdrawal_addr.to_bytes_be())),
-            "withdrawal_token_index": 0u32,
+            "withdrawal_recipient": format!("0x{}", hex::encode(withdrawal.recipient.to_bytes_be())),
+            "withdrawal_token_index": withdrawal.token_index,
             "withdrawal_amount": burn_amount,
             "withdrawal_nullifier": withdrawal.nullifier.to_hex(),
             "withdrawal_aux_data": tx_leaf.to_hex(),

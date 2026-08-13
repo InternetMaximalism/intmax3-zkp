@@ -2098,23 +2098,30 @@ pub fn build_inter_channel_send_token(
         } else {
             Bytes32::default()
         };
-    transfer_tree.push(Transfer {
-        recipient: destination_recipient_pk_g,
+    // SECURITY (single source of truth): the base-layer `Transfer` this send settles is built by
+    // `inter_channel_base_transfer` and by NOTHING ELSE. `burn_withdrawal_leaf` — the only place
+    // allowed to derive a burn's L1 withdrawal leaf / nullifier — rebuilds it with the same
+    // function, so the leaf the CLI authorizes on L1 and the leaf this tree commits to cannot
+    // drift apart.
+    let base_transfer = inter_channel_base_transfer(
+        destination_recipient_pk_g,
         // The base-layer transfer settles the SAME base token the channel-layer descriptor
         // moves (identical to the legacy hardcoded 0 for ETH-genesis channels).
         token_index,
-        amount: u64_to_u256(amount),
-        aux_data: burn_aux,
-    });
-    let tx_v2 = TxV2 {
-        tx_class: TxClass::UserTransfer,
-        transfer_tree_root: transfer_tree.get_root(),
-        nonce: (prev.small_block_number + 1) as u32,
-        channel_action_root: PoseidonHashOut::default(),
-    };
+        amount,
+        burn_aux,
+    );
+    transfer_tree.push(base_transfer.clone());
     let src_id = record.channel_id.as_u64();
-    let mut tx_v2_tree = TxV2Tree::init();
-    tx_v2_tree.update(src_id, tx_v2);
+    // Same single-source rule for H2: `inter_channel_tx_v2` is the only construction of the 1-tx
+    // TxV2 + its tree, so the pre-flight H2 reconstruction in `pw-submit` is byte-identical to
+    // the value the co-signers actually signed (`h2_tag`).
+    let (tx_v2, tx_v2_tree) = inter_channel_tx_v2(
+        record.channel_id,
+        &base_transfer,
+        (prev.small_block_number + 1) as u32,
+    );
+    debug_assert_eq!(tx_v2.transfer_tree_root, transfer_tree.get_root());
     let tx_v2_root_h = tx_v2_tree.get_root();
     let tx_tree_root: Bytes32 = tx_v2_root_h.into(); // = H2
     let tx_v2_merkle_proof = tx_v2_tree.prove(src_id);
@@ -2386,6 +2393,127 @@ pub fn build_burn_send_token(
         level,
         rng,
     )
+}
+
+/// The transfer index a channel's outgoing inter-channel / burn transfer occupies inside its tx's
+/// transfer tree.
+///
+/// detail2 §A-2: 1 small block = 1 tx = 1 transfer, so it is always 0 — and `send_tx_circuit`
+/// does not merely assume it, it CONSTRAINS it
+/// (`builder.assert_zero(transfer_witness.transfer_index)`,
+/// `src/circuits/balance/send_tx_circuit.rs:279`). The value therefore enters
+/// [`burn_withdrawal_leaf`]'s `SettledTransfer` as a constant with an in-circuit counterpart, not
+/// as a guess.
+pub const INTER_CHANNEL_TRANSFER_INDEX: u32 = 0;
+
+/// The base-layer [`Transfer`] an inter-channel send (or a burn) settles.
+///
+/// SECURITY (single source of truth — the defect class this exists to close): a burn's L1
+/// withdrawal leaf, and hence its nullifier, is a function of exactly these four fields. Until
+/// 2026-08-13 the CLI's `pw-submit` invented its own nullifier
+/// (`keccak(tx_leaf ‖ pre_burn_settled_tx_chain)`) while a provable leaf carried
+/// `SettledTransfer::nullifier()` — a Poseidon hash over this struct. The two could never
+/// coincide, so `submitPartialWithdrawalIntent` wrote an authorization no proof could ever
+/// satisfy while permanently consuming the channel's single-use chain key: the burn's value was
+/// debited in-channel and became unreachable on L1. There is now ONE construction of this
+/// `Transfer` (this function) feeding BOTH the tx tree the co-signers sign and the withdrawal
+/// leaf the CLI authorizes, so they cannot silently disagree again.
+pub fn inter_channel_base_transfer(
+    recipient_pk_g: Bytes32,
+    token_index: u32,
+    amount: u64,
+    aux_data: Bytes32,
+) -> Transfer {
+    Transfer {
+        recipient: recipient_pk_g,
+        token_index,
+        amount: u64_to_u256(amount),
+        aux_data,
+    }
+}
+
+/// The 1-tx `TxV2` and its `TxV2Tree` for an inter-channel send / burn: the tree whose root is the
+/// small block's `tx_tree_root` = H2, which the post-send channel state records as `h2_tag`
+/// (`state_update_verifier.rs:612-616`) and which is inside the N-of-N IMCH signing preimage
+/// (`src/common/channel.rs:598`).
+///
+/// SECURITY: shared with `pw-submit`'s pre-flight guard, which reconstructs H2 from the burn
+/// artefact and compares it against the co-signed `h2_tag`. That comparison is only meaningful if
+/// the reconstruction is byte-identical to the original construction, so there is exactly one.
+pub fn inter_channel_tx_v2(
+    source_channel_id: ChannelId,
+    transfer: &Transfer,
+    nonce: u32,
+) -> (TxV2, TxV2Tree) {
+    let mut transfer_tree = TransferTree::init();
+    transfer_tree.push(transfer.clone());
+    let tx_v2 = TxV2 {
+        tx_class: TxClass::UserTransfer,
+        transfer_tree_root: transfer_tree.get_root(),
+        nonce,
+        channel_action_root: PoseidonHashOut::default(),
+    };
+    let mut tx_v2_tree = TxV2Tree::init();
+    tx_v2_tree.update(source_channel_id.as_u64(), tx_v2);
+    (tx_v2, tx_v2_tree)
+}
+
+/// The L1 [`Withdrawal`] leaf a burn's `single_withdrawal` proof WILL carry — recipient, token
+/// index, amount, **nullifier** and aux_data.
+///
+/// SECURITY (the single source of truth for the burn nullifier). This mirrors
+/// `SingleWithdawalWitness::to_public_inputs`
+/// (`src/circuits/withdraw/single_withdrawal_circuit.rs:368-390`) and its in-circuit twin
+/// (`:508-535`) field for field, and computes the nullifier by calling the very same
+/// `SettledTransfer::nullifier()` those paths call — it does not re-implement the formula.
+/// Every input is fixed at burn time, with no dependence on settlement:
+///
+/// * `inner` — the burn's own base `Transfer`, rebuilt with [`inter_channel_base_transfer`], the
+///   same function that built the one inside the co-signed tx tree;
+/// * `from` — the SOURCE channel id, which in-circuit is `balance_pis.channel_id` (`:513`);
+/// * `transfer_index` — [`INTER_CHANNEL_TRANSFER_INDEX`], asserted zero in `send_tx_circuit`;
+/// * `nonce` — the burn tx's `TxV2.nonce` (`= prev.small_block_number + 1`), which the withdrawal
+///   circuit forces equal to `tx.nonce` (`:508`) and which the sent-tx merkle proof pins to the
+///   deduction. This is what F-WD-2 bought: the nullifier binds the SENDER NONCE, not the
+///   settlement block, so it is computable before the burn is ever settled — no circuit change, no
+///   PI change, no VK rotation is needed to know it at burn time.
+///
+/// Fails closed if the recipient is not an `ADDRESS_TAG` L1 recipient — i.e. if the transfer is
+/// not withdrawable at all, in which case there is no leaf to authorize.
+pub fn burn_withdrawal_leaf(
+    source_channel_id: ChannelId,
+    burn_recipient_pk_g: Bytes32,
+    token_index: u32,
+    amount: u64,
+    aux_data: Bytes32,
+    tx_nonce: u32,
+) -> WResult<crate::common::withdrawal::Withdrawal> {
+    use crate::{
+        circuits::balance::common::recipient::extract_address_from_recipient,
+        common::transfer::SettledTransfer,
+    };
+
+    let transfer = inter_channel_base_transfer(burn_recipient_pk_g, token_index, amount, aux_data);
+    let recipient = extract_address_from_recipient(transfer.recipient).map_err(|e| {
+        WalletError(format!(
+            "burn withdrawal leaf: recipient {} is not an ADDRESS_TAG L1 recipient — this burn is \
+             not withdrawable: {e:?}",
+            burn_recipient_pk_g.to_hex()
+        ))
+    })?;
+    let settled = SettledTransfer::new(
+        transfer.clone(),
+        source_channel_id,
+        INTER_CHANNEL_TRANSFER_INDEX,
+        tx_nonce,
+    );
+    Ok(crate::common::withdrawal::Withdrawal {
+        recipient,
+        token_index: transfer.token_index,
+        amount: transfer.amount,
+        nullifier: settled.nullifier(),
+        aux_data: transfer.aux_data,
+    })
 }
 
 /// IMPW domain prefix for partial-withdrawal authDigest (matches Solidity `bytes4(0x494d5057)`).
