@@ -41,10 +41,11 @@ use intmax3_zkp::{
 };
 use std::{
     path::PathBuf,
-    process::{Child, Command, Stdio},
-    thread,
-    time::Duration,
+    process::{Command, Stdio},
 };
+
+mod anvil_harness;
+use anvil_harness::AnvilNode;
 
 // anvil dev account[0] — a PUBLIC throwaway key; its address is the broadcasting EOA /
 // member-slot-0 payout recipient (bound by DeployCloseCli) and the `claimWithdrawalCredit` caller.
@@ -71,15 +72,6 @@ fn tool_present(bin: &str) -> bool {
         .status()
         .map(|s| s.success())
         .unwrap_or(false)
-}
-
-/// Spawn anvil (Prague) and kill it on drop.
-struct AnvilGuard(Child);
-impl Drop for AnvilGuard {
-    fn drop(&mut self) {
-        let _ = self.0.kill();
-        let _ = self.0.wait();
-    }
 }
 
 /// Backs up the tracked `sepolia_*` fixtures the CLI clobbers when staging, restores them on drop,
@@ -295,29 +287,10 @@ fn close_lifecycle_cli_e2e() {
     let rpc = format!("http://127.0.0.1:{PORT}");
 
     // ── anvil ────────────────────────────────────────────────────────────────────────────────
-    let anvil = Command::new("anvil")
-        .args(["--hardfork", "prague", "--port", &PORT.to_string()])
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .expect("spawn anvil");
-    let _anvil = AnvilGuard(anvil);
-    let mut up = false;
-    for _ in 0..40 {
-        if Command::new("cast")
-            .args(["block-number", "--rpc-url", &rpc])
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status()
-            .map(|s| s.success())
-            .unwrap_or(false)
-        {
-            up = true;
-            break;
-        }
-        thread::sleep(Duration::from_millis(250));
-    }
-    assert!(up, "anvil did not come up on {rpc}");
+    // Spawns anvil and proves the node answering on PORT is the one we spawned (fresh chain,
+    // our own process). See tests/anvil_harness/mod.rs for why a plain `cast block-number` poll
+    // is not enough. Killed on drop.
+    let _anvil = AnvilNode::spawn("close_lifecycle_cli_e2e", PORT, &[]);
 
     // Pre-clean any stale CLI state from a prior aborted run (the guard cleans on exit too).
     drop(WorkspaceGuard::new());

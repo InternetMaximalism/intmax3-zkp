@@ -43,10 +43,11 @@ use plonky2::{
 };
 use std::{
     path::PathBuf,
-    process::{Child, Command, Stdio},
-    thread,
-    time::Duration,
+    process::{Command, Stdio},
 };
+
+mod anvil_harness;
+use anvil_harness::AnvilNode;
 
 const D: usize = 2;
 type F = GoldilocksField;
@@ -55,13 +56,6 @@ const LEVEL: RegevSecurityLevel = RegevSecurityLevel::Production;
 const ANVIL0: &str = "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80";
 const PORT: u16 = 8553;
 
-struct AnvilGuard(Child);
-impl Drop for AnvilGuard {
-    fn drop(&mut self) {
-        let _ = self.0.kill();
-        let _ = self.0.wait();
-    }
-}
 fn tool_present(bin: &str) -> bool {
     Command::new(bin)
         .arg("--version")
@@ -229,36 +223,14 @@ fn partial_withdrawal_e2e_anvil() {
     use rand010::SeedableRng as _;
 
     let rpc = format!("http://127.0.0.1:{PORT}");
-    let anvil = Command::new("anvil")
-        .args([
-            "--hardfork",
-            "prague",
-            "--port",
-            &PORT.to_string(),
-            "--code-size-limit",
-            "50000",
-        ])
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .expect("anvil");
-    let _guard = AnvilGuard(anvil);
-    let mut up = false;
-    for _ in 0..40 {
-        if Command::new("cast")
-            .args(["block-number", "--rpc-url", &rpc])
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status()
-            .map(|s| s.success())
-            .unwrap_or(false)
-        {
-            up = true;
-            break;
-        }
-        thread::sleep(Duration::from_millis(250));
-    }
-    assert!(up, "anvil down");
+    // Spawns anvil and proves the node answering on PORT is the one we spawned (fresh chain,
+    // our own process). See tests/anvil_harness/mod.rs for why a plain `cast block-number` poll
+    // is not enough. Killed on drop.
+    let _guard = AnvilNode::spawn(
+        "partial_withdrawal_e2e_anvil",
+        PORT,
+        &["--code-size-limit", "50000"],
+    );
 
     // ── Phase A: Setup prover + keys ──────────────────────────────────────────────────────────
     let spend = SpendCircuit::<F, C, D>::new();
