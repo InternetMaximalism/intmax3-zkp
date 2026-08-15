@@ -782,6 +782,26 @@ untouched; instead add the native IMCH-preimage mirror and its golden-vector tes
 `ChannelState::signing_digest()`.
 **Accept iff:** a registration witness with `delegate_count = 1` is **unprovable**; an audit confirms
 no live channel has `delegate_count > 0`; and —
+
+**Registration-path audit (done, as part of Phase 1).** Exactly one path could emit a nonzero L1
+`delegate_count`: `deploy_settlement_devnet` (`src/bin/channel_member.rs`) passed the LIVE snapshot's
+delegate count (the wallet demo's `wallet-live-work/chN` runs with 2) through `pw_reg.json` into
+`DeployWalletSettlement.s.sol`, which fed ONE JSON field to three consumers — `registerChannel`, the
+manager's `activeDelegateCount`, and the delegate `MemberBinding[]`. It also never matched the
+preimage the proving side builds (`wallet_core::build_channel_withdrawal` registers the cosigner
+slice with `delegate_count = 0`), so it was already a latent mismatch, not only a Phase 1 conflict.
+Resolved by **decoupling**, not by lowering the B-2 delegate floor: the record now carries two
+independent fields, `reg_delegate_count` (always 0, produced by a literal and re-checked by the
+single Solidity reader `contracts/script/RegRecordLib.sol`, which hands `registerChannel` a CONSTANT
+zero plus the leading cosigner slice) and `active_delegate_count` (the live count, for the settlement
+manager's close floor and delegate bindings). `DeployCloseCli.s.sol` (real network) and
+`DeployPartialWithdrawalE2E.s.sol` were moved onto the same reader; their records were already
+cosigner-only, so their behaviour is unchanged. `channelMemberSetCommitment` is unaffected —
+`registerChannel` derives `memberCount = arrays.length - delegateCount`, so both shapes commit the
+same member-only set. Guarded by one test per direction in `contracts/test/DeployGuards.t.sol`
+(executing the real script over a delegate-bearing record) and by
+`settlement_reg_record_tests` in `src/bin/channel_member.rs`.
+
 *Design A:* the golden-vector test (`small_block_message.rs:196-229`) passes against the new 33-limb
 preimage, the retired 41-limb layout is pinned in the repo-wide domain non-collision test, and all 9
 construction sites compile.
