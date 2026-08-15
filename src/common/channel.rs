@@ -20,7 +20,10 @@ use crate::{
 
 pub type SignatureBytes = Vec<u8>;
 
-const CHANNEL_STATE_DOMAIN: u32 = 0x494d4348; // "IMCH"
+// pub(crate): the validity circuits mirror the IMCH signing preimage limb-for-limb
+// (`circuits::validity::block_hash_chain::channel_state_message`) and must use the SAME domain
+// limb — a second literal would be a silent-drift hazard.
+pub(crate) const CHANNEL_STATE_DOMAIN: u32 = 0x494d4348; // "IMCH"
 // "IMPA" (0x494d5041), the v1 in-channel pay domain, is DELETED: `ChannelTx::signing_digest` is
 // fully superseded by the IMPA-v2 preimage under `PAY_DOMAIN_V2` ("IMP2", detail2 §N-3), and no
 // in-circuit recompute referenced it. Its value stays pinned (as a retired literal) in the

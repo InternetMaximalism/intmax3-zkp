@@ -2,6 +2,7 @@
 pragma solidity ^0.8.24;
 
 import {Test} from "forge-std/Test.sol";
+import {Vm} from "forge-std/Vm.sol";
 import {IntmaxRollup} from "../src/IntmaxRollup.sol";
 import {
     ChannelSettlementManager,
@@ -20,6 +21,7 @@ import {DeployTestnetBlockProducer} from "../script/DeployTestnetBlockProducer.s
 import {DeployClose} from "../script/DeployClose.s.sol";
 import {DeployCloseCli} from "../script/DeployCloseCli.s.sol";
 import {DeployPartialWithdrawalE2E} from "../script/DeployPartialWithdrawalE2E.s.sol";
+import {DeployWalletSettlement} from "../script/DeployWalletSettlement.s.sol";
 import {DeployConfig} from "../script/DeployConfig.sol";
 
 /// @notice `DeployCloseCli` with its ONE run-time-staged input redirected to a checked-in copy.
@@ -39,6 +41,24 @@ contract DeployCloseCliHarness is DeployCloseCli {
     function _read(string memory f) internal view override returns (string memory) {
         if (keccak256(bytes(f)) == keccak256(bytes("cli_reg_record.json"))) {
             return super._read("cli_reg_record_guard.json");
+        }
+        return super._read(f);
+    }
+}
+
+/// @notice `DeployWalletSettlement` with its ONE run-time-staged input redirected to a checked-in
+///         DELEGATE-BEARING record.
+///
+/// @dev Same override discipline as `DeployCloseCliHarness` above: FILE BYTES ONLY, for one name.
+///      The live `pw_reg.json` is written by `channel_member deploy-settlement` from the wallet's
+///      channel snapshot and is a stale by-product in git; the committed copy carries NO delegates,
+///      so it cannot tell a fixed script from the conflated one. `pw_reg_guard.json` is the shape
+///      that matters — `member_count = 3` cosigners plus `active_delegate_count = 2` live delegates,
+///      which is what `wallet-live-work/ch7` actually has.
+contract DeployWalletSettlementHarness is DeployWalletSettlement {
+    function _read(string memory f) internal view override returns (string memory) {
+        if (keccak256(bytes(f)) == keccak256(bytes("pw_reg.json"))) {
+            return super._read("pw_reg_guard.json");
         }
         return super._read(f);
     }
@@ -504,5 +524,211 @@ contract DeployGuardsTest is Test {
         DeployPartialWithdrawalE2E script = new DeployPartialWithdrawalE2E();
         vm.expectRevert(bytes("local-devnet only: this script deploys mock verifiers"));
         script.run();
+    }
+
+    // ── (6) the REGISTRATION delegate count and the MANAGER's are different things ─────────────
+    //
+    // WHAT THESE PROVE ABOUT SECURITY. `DeployWalletSettlement.s.sol` read ONE `delegate_count`
+    // field out of the registration record and fed it to THREE consumers: `registerChannel`, the
+    // manager's `activeDelegateCount`, and the delegate `MemberBinding[]`. The live wallet channel
+    // it serves has delegates, so both directions of that conflation are live defects:
+    //
+    //   * REGISTRATION — the L1 registration record is cosigners-only under Option B, and
+    //     `ChannelRegStepCircuit` now CONSTRAINS its `delegateCount` limb to zero
+    //     (`src/circuits/validity/channel_reg_hash_chain/channel_reg_step.rs`). A registration made
+    //     with the live count is therefore UNPROVABLE — no reg-chain step can fold it, so the
+    //     channel is stuck in the validity chain. (It also never matched the preimage the proving
+    //     side builds: `wallet_core::build_channel_withdrawal` registers the cosigner slice.)
+    //   * MANAGER — "fixing" that by passing zero to the manager would zero the B-2 delegate-close
+    //     FLOOR (close PI limb 94 must be `>= activeDelegateCount`) and drop every delegate's
+    //     recipient binding. That is a WEAKENED CHECK, and it is the tempting one-line fix.
+    //
+    // One test per direction, because a single "the two agree" assertion would pass for either
+    // broken value. Both run the REAL script (via a harness that only swaps the record's bytes) on
+    // a record with 3 cosigners and 2 live delegates — the wallet demo's own shape.
+
+    uint32 internal constant GUARD_REG_CHANNEL_ID = 11;
+    uint8 internal constant GUARD_MEMBER_COUNT = 3;
+    uint8 internal constant GUARD_ACTIVE_DELEGATES = 2;
+
+    /// Deploy a rollup and then run the wallet settlement script against it, exactly as the devnet
+    /// wallet flow does (`setup-backing` then `deploy-settlement`). Both scripts broadcast as the
+    /// same default sender, so the rollup's `deployer` is the script's caller — which is what
+    /// `registerSettlementManager` requires.
+    function _runWalletSettlement()
+        internal
+        returns (IntmaxRollup rollup, ChannelSettlementManager manager, Vm.Log[] memory logs)
+    {
+        vm.chainId(SETTLEMENT_LOCAL_DEVNET_CHAIN_ID);
+        vm.setEnv("FRAUD_TREASURY", vm.toString(fraudTreasury));
+        (rollup, ) = new Deploy().run();
+        vm.setEnv("ROLLUP", vm.toString(address(rollup)));
+        vm.recordLogs();
+        (, , manager) = new DeployWalletSettlementHarness().run();
+        logs = vm.getRecordedLogs();
+    }
+
+    function _guardRecord() internal view returns (string memory) {
+        return vm.readFile(string.concat(vm.projectRoot(), "/test/data/pw_reg_guard.json"));
+    }
+
+    /// DIRECTION 1: what the script actually registered on L1 carries NO delegate.
+    ///
+    /// The `ChannelRegistered` event is decoded rather than inferred, and the reg-chain hash is
+    /// recomputed here from the record with a `delegateCount` limb of ZERO and the delegate slots
+    /// left as padding. That last assertion is the decisive one: it fails if the limb carries the
+    /// live count, and it fails if the delegates are folded into the active slots — the two halves
+    /// of what the conflated script did.
+    function test_deployWalletSettlementScript_registersCosignersOnly() public {
+        (IntmaxRollup rollup, , Vm.Log[] memory logs) = _runWalletSettlement();
+
+        (bytes32[] memory eventPkGs, bytes32 memberPubkeysRoot, bytes32 newChainHash) =
+            _decodeChannelRegistered(logs);
+
+        string memory json = _guardRecord();
+        bytes32[] memory allPkGs = vm.parseJsonBytes32Array(json, ".member_pk_gs");
+        assertEq(
+            allPkGs.length,
+            uint256(GUARD_MEMBER_COUNT) + uint256(GUARD_ACTIVE_DELEGATES),
+            "the fixture must actually carry delegates, or this test proves nothing"
+        );
+
+        assertEq(
+            eventPkGs.length,
+            GUARD_MEMBER_COUNT,
+            "the L1 registration record must carry the co-signing members ONLY"
+        );
+        for (uint256 i = 0; i < GUARD_MEMBER_COUNT; i++) {
+            assertEq(eventPkGs[i], allPkGs[i], "registered key order must be the cosigner prefix");
+        }
+
+        bytes32[] memory cosigners = new bytes32[](GUARD_MEMBER_COUNT);
+        for (uint256 i = 0; i < GUARD_MEMBER_COUNT; i++) {
+            cosigners[i] = allPkGs[i];
+        }
+        assertEq(
+            memberPubkeysRoot,
+            keccak256(abi.encodePacked(cosigners)),
+            "the registered member-pubkey root must span the cosigners only"
+        );
+
+        assertEq(
+            newChainHash,
+            _expectedCosignerOnlyRegHash(json),
+            "the reg-chain preimage must have a ZERO delegateCount limb and padding in the delegate slots -- anything else is unprovable by channel_reg_step"
+        );
+
+        // The truncation must not have moved the close-path binding: `registerChannel` derives
+        // `memberCount = arrays.length - delegateCount`, so cosigner-slice + 0 and full-set + live
+        // count yield the SAME member-only IMCM commitment. Asserted, not assumed — the manager
+        // constructor binds to it.
+        assertEq(
+            rollup.channelMemberSetCommitment(GUARD_REG_CHANNEL_ID),
+            _closeMemberSetCommitment(cosigners),
+            "cosigner-only registration must record the same member-set commitment as before"
+        );
+    }
+
+    /// DIRECTION 2: the manager keeps the LIVE delegate count and the delegate bindings.
+    ///
+    /// This is the test that fails if someone achieves the Option B invariant by zeroing the
+    /// manager side instead of decoupling the two.
+    function test_deployWalletSettlementScript_managerKeepsLiveDelegateCount() public {
+        (IntmaxRollup rollup, ChannelSettlementManager manager, ) = _runWalletSettlement();
+
+        assertEq(
+            manager.activeDelegateCount(),
+            GUARD_ACTIVE_DELEGATES,
+            "the manager's delegate count is the B-2 close floor: it must stay the LIVE count, never the registration's zero"
+        );
+        assertEq(
+            manager.activeMemberCount(),
+            GUARD_MEMBER_COUNT,
+            "the co-signing set is unchanged by the decoupling"
+        );
+
+        // Counted is not enough — each delegate must actually be BOUND, since those bindings are
+        // the only place a delegate's payout address is recorded (`isMemberRecipient` gates
+        // `submitPartialWithdrawal`'s participant check).
+        string memory json = _guardRecord();
+        bytes32[] memory pkGs = vm.parseJsonBytes32Array(json, ".member_pk_gs");
+        address[] memory recipients = vm.parseJsonAddressArray(json, ".recipients");
+        for (uint256 i = GUARD_MEMBER_COUNT; i < pkGs.length; i++) {
+            assertEq(
+                manager.registeredRecipientOf(pkGs[i]),
+                recipients[i],
+                "a delegate lost its recipient binding"
+            );
+            assertTrue(manager.isMemberRecipient(recipients[i]), "delegate recipient not authorized");
+        }
+
+        // And the manager is still bound to the (now cosigner-only) registration: the decoupling
+        // must not have broken the Finding-E single-source-of-truth check.
+        assertEq(
+            manager.registeredMemberSetCommitment(),
+            rollup.channelMemberSetCommitment(GUARD_REG_CHANNEL_ID),
+            "manager and rollup must still agree on the member set"
+        );
+    }
+
+    /// @dev Decode the one `ChannelRegistered` event out of a recorded log set.
+    function _decodeChannelRegistered(Vm.Log[] memory logs)
+        internal
+        pure
+        returns (bytes32[] memory pkGs, bytes32 memberPubkeysRoot, bytes32 newChainHash)
+    {
+        bytes32 topic0 = keccak256(
+            "ChannelRegistered(uint64,uint32,uint8,bytes32[],bytes32[],address[],bytes32,bytes32,bytes32)"
+        );
+        for (uint256 i = 0; i < logs.length; i++) {
+            if (logs[i].topics[0] == topic0) {
+                (, pkGs, , , memberPubkeysRoot, , newChainHash) = abi.decode(
+                    logs[i].data,
+                    (uint8, bytes32[], bytes32[], address[], bytes32, bytes32, bytes32)
+                );
+                return (pkGs, memberPubkeysRoot, newChainHash);
+            }
+        }
+        revert("ChannelRegistered event not found");
+    }
+
+    /// @dev The reg-chain hash a COSIGNER-ONLY registration of this record must produce, built here
+    ///      from the documented preimage (`IntmaxRollup._channelRegHashChain`, byte-identical to the
+    ///      Rust `ChannelRegRecord::hash_with_prev_hash` and its in-circuit twin) rather than by
+    ///      calling the contract — so this is an independent expectation, not a restatement of
+    ///      whatever the script did. `prev` is `bytes32(0)`: the rollup is freshly deployed and no
+    ///      other channel has been registered on it.
+    function _expectedCosignerOnlyRegHash(string memory json) internal view returns (bytes32) {
+        bytes32[] memory pkGs = vm.parseJsonBytes32Array(json, ".member_pk_gs");
+        bytes32[] memory pkBs = vm.parseJsonBytes32Array(json, ".member_pk_bs");
+        bytes32[] memory regev = vm.parseJsonBytes32Array(json, ".regev_pk_digests");
+        address[] memory recipients = vm.parseJsonAddressArray(json, ".recipients");
+        bytes memory packed = abi.encodePacked(
+            bytes32(0),
+            GUARD_REG_CHANNEL_ID,
+            uint32(0), // bp_member_slot
+            uint32(GUARD_MEMBER_COUNT),
+            uint32(0) // SECURITY: the delegateCount limb the circuit constrains to zero
+        );
+        for (uint256 i = 0; i < 16; i++) {
+            if (i < GUARD_MEMBER_COUNT) {
+                packed = abi.encodePacked(packed, pkGs[i], pkBs[i], regev[i], recipients[i]);
+            } else {
+                // Padding — INCLUDING the delegate slots, which a cosigner-only record does not
+                // register.
+                packed = abi.encodePacked(packed, bytes32(0), bytes32(0), bytes32(0), bytes20(0));
+            }
+        }
+        return keccak256(packed);
+    }
+
+    /// @dev The member-only IMCM close commitment (`IntmaxRollup._closeMemberSetCommitment`),
+    ///      recomputed independently over the cosigner prefix.
+    function _closeMemberSetCommitment(bytes32[] memory cosigners) internal pure returns (bytes32) {
+        bytes memory preimage = abi.encodePacked(bytes4(0x494d434d), uint32(cosigners.length));
+        for (uint256 i = 0; i < 16; i++) {
+            preimage = abi.encodePacked(preimage, i < cosigners.length ? cosigners[i] : bytes32(0));
+        }
+        return keccak256(preimage);
     }
 }

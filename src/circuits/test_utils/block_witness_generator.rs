@@ -342,6 +342,10 @@ impl ChannelMemberKeys {
     /// cosigners-only, and registration-producing paths emit `delegate_count = 0`. A nonzero
     /// `delegate_count` is accepted only within the 16-slot capacity (legacy 16-slot channels);
     /// anything beyond is rejected here (and by `ChannelRegRecord::validate`).
+    ///
+    /// SECURITY (small-block N-of-N Phase 1): `delegate_count == 0` is now a CIRCUIT CONSTRAINT in
+    /// `ChannelRegStepCircuit`. `validate()` still accepts a nonzero split, but the resulting
+    /// record is UNPROVABLE — do not build one here expecting the reg-chain step to fold it.
     pub fn to_reg_record_split(
         &self,
         channel_id: u32,

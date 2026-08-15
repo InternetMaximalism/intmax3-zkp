@@ -9,6 +9,7 @@ import {ChannelSettlementVerifier} from "../src/ChannelSettlementVerifier.sol";
 import {MleVerifier} from "@mle/MleVerifier.sol";
 import {FixtureLib} from "./FixtureLib.sol";
 import {DeployConfig} from "./DeployConfig.sol";
+import {RegRecordLib} from "./RegRecordLib.sol";
 
 /// @title A-3 P5-B: deploy the close-lifecycle stack registered with the CLI channel's REAL members.
 /// @notice Unlike `DeployClose` (which registers the fixture members from `close_lifecycle.json`),
@@ -57,7 +58,10 @@ contract DeployCloseCli is Script {
         string memory lcJson = _read("close_lifecycle.json");
         string memory wJson = _read("close_withdrawal_mle.json");
         string memory cJson = _read("close_intent_mle.json");
-        string memory reg = _read("cli_reg_record.json"); // staged into test/data/ by the driver
+        // Staged into test/data/ by the driver. Parsed through the SHARED reader, which is the one
+        // place that decides which delegate count reaches `registerChannel` (a constant zero) and
+        // which reaches the manager (the record's live `active_delegate_count`).
+        RegRecordLib.Record memory r = RegRecordLib.parse(_read("cli_reg_record.json"));
         bytes32 genesis = vm.parseJsonBytes32(lcJson, ".genesis_state_root");
         // SECURITY (#6): require FRAUD_TREASURY on real chains; anvil (31337) may default it.
         address fraudTreasury = vm.envOr("FRAUD_TREASURY", address(0));
@@ -189,18 +193,27 @@ contract DeployCloseCli is Script {
             sv.initializeCancelCloseVk(verifier, ccvk, ccdd.whirParams, ccdd.protocolId, ccdd.sessionId, ccdd.kIs, ccdd.subgroupGenPowers);
         }
 
-        // 4. registerChannel with the CLI ACTIVE set (3 members + delegate). The arrays carry all
-        //    `member_count + delegate_count` active participants (members first); registerChannel's
-        //    close member-set commitment uses only the first `member_count` pk_gs.
-        uint32 channelId = uint32(vm.parseJsonUint(reg, ".channel_id"));
-        uint8 bpSlot = uint8(vm.parseJsonUint(reg, ".bp_member_slot"));
-        uint8 memberCount = uint8(vm.parseJsonUint(reg, ".member_count"));
-        uint8 delegateCount = uint8(vm.parseJsonUint(reg, ".delegate_count"));
-        bytes32[] memory pkGs = vm.parseJsonBytes32Array(reg, ".member_pk_gs");
-        bytes32[] memory pkBs = vm.parseJsonBytes32Array(reg, ".member_pk_bs");
-        bytes32[] memory regev = vm.parseJsonBytes32Array(reg, ".regev_pk_digests");
-        address[] memory recipients = vm.parseJsonAddressArray(reg, ".recipients");
-        rollup.registerChannel(channelId, bpSlot, delegateCount, pkGs, pkBs, regev, recipients);
+        // 4. registerChannel with the CLI COSIGNER set — the L1 registration record is
+        //    cosigners-only (Option B) and its `delegateCount` limb is a CONSTANT zero.
+        //
+        //    SECURITY: `channel_member`'s `build_reg_record` already emits a cosigner-only record
+        //    (`reg_delegate_count = 0`, arrays of exactly `member_count`), so this changes nothing a
+        //    real deployment does today. It is wired through `RegRecordLib` so that the value fed
+        //    to `registerChannel` is no longer READ FROM THE RECORD AT ALL: the shape of the defect
+        //    fixed in `DeployWalletSettlement.s.sol` — one JSON field feeding both the registration
+        //    and the manager, so a producer that learns the live delegate count silently emits a
+        //    registration the validity `channel_reg_step` circuit refuses to fold — cannot recur
+        //    here either. `RegRecordLib.parse` additionally REQUIRES `reg_delegate_count == 0`, so
+        //    a producer change fails loudly at deploy time instead of being quietly ignored.
+        rollup.registerChannel(
+            r.channelId,
+            r.bpSlot,
+            RegRecordLib.REGISTRATION_DELEGATE_COUNT,
+            RegRecordLib.regPkGs(r),
+            RegRecordLib.regPkBs(r),
+            RegRecordLib.regRegevDigests(r),
+            RegRecordLib.regRecipients(r)
+        );
 
         // 5. Manager bound to the SAME active set: member bindings (the first `memberCount`) +
         //    delegate bindings (the remainder). The close member-set commitment + delegate_count limb
@@ -223,30 +236,39 @@ contract DeployCloseCli is Script {
         //    The registration record (`recipients[i]`, fed to `registerChannel` above and hashed
         //    into the reg chain the validity proof reproduces) is deliberately left UNCHANGED.
         ChannelSettlementManager.MemberBinding[] memory mBind =
-            new ChannelSettlementManager.MemberBinding[](memberCount);
-        for (uint256 i = 0; i < memberCount; i++) {
+            new ChannelSettlementManager.MemberBinding[](r.memberCount);
+        for (uint256 i = 0; i < r.memberCount; i++) {
             mBind[i] = ChannelSettlementManager.MemberBinding({
-                pkG: pkGs[i],
-                recipient: (i == 0) ? msg.sender : recipients[i]
+                pkG: r.pkGs[i],
+                recipient: (i == 0) ? msg.sender : r.recipients[i]
             });
         }
         ChannelSettlementManager.MemberBinding[] memory dBind =
-            new ChannelSettlementManager.MemberBinding[](delegateCount);
-        for (uint256 i = 0; i < delegateCount; i++) {
+            new ChannelSettlementManager.MemberBinding[](r.activeDelegateCount);
+        for (uint256 i = 0; i < r.activeDelegateCount; i++) {
             dBind[i] = ChannelSettlementManager.MemberBinding({
-                pkG: pkGs[memberCount + i],
-                recipient: recipients[memberCount + i]
+                pkG: r.pkGs[r.memberCount + i],
+                recipient: r.recipients[r.memberCount + i]
             });
         }
-        // B-2 (doc/tasks/b2-delegate-close-threat-model.md): `delegateCount` is now a FLOOR for the
-        // close/partial-withdrawal bind, not an exact expected count. Under Option B, L1
-        // registration is cosigners-only, so this is normally 0 while the live channel has
-        // delegates; a close carrying MORE delegates is accepted, one carrying FEWER is refused.
+        // B-2 (doc/tasks/b2-delegate-close-threat-model.md): `activeDelegateCount` is a FLOOR for
+        // the close/partial-withdrawal bind, not an exact expected count. It is the record's
+        // `active_delegate_count` — DELIBERATELY a different field from the zero registered in
+        // step 4, because the two answer different questions ("what did L1 register?" vs "how many
+        // delegates must a close at least account for?"). Reading the registration's zero here
+        // would silently retire the fence.
+        //
+        // Under Option B this is 0 for the CLI record today (`build_reg_record` has no live channel
+        // state to read a delegate count from), so the floor is currently vacuous while the live
+        // channel may hold delegates — the pre-existing, reviewed behaviour of this path, unchanged
+        // here. Raising it would additionally require delegate pk_g/recipient bindings this record
+        // does not carry (the constructor enforces `dBind.length == activeDelegateCount`).
         // SCOPE (review finding 6): CARDINALITY only. L1 binds no delegate to a balance-slot index,
         // so this cannot guarantee that any NAMED delegate registered here is present in the closed
         // state — only that the active region was not shrunk below this count.
         manager = new ChannelSettlementManager(
-            bytes4(channelId), bpSlot, pkGs[bpSlot], delegateCount, DeployConfig.challengePeriodSecs(), SPECIAL_CLOSE_PENALTY,
+            bytes4(r.channelId), r.bpSlot, r.pkGs[r.bpSlot], r.activeDelegateCount,
+            DeployConfig.challengePeriodSecs(), SPECIAL_CLOSE_PENALTY,
             INITIAL_BP_BOND, IChannelSettlementVerifier(address(sv)), IChannelRegistry(address(rollup)), mBind,
             dBind
         );

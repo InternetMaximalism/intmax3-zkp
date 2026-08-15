@@ -2,6 +2,12 @@
 
 Status: **DESIGN ONLY — no code written.** Written against `feat/falcon-poseidon-sig` @ `69a8599`.
 
+Two designs are on the table. **Design B (aggregate over the IMCH digest) is recommended**, with
+**Design A (N-of-N over a reshaped IMSB digest)** as the measured fallback; the choice is made by
+the Phase 0 gate (§4A, §9). Everything structurally hard — authenticating `member_count`, the
+member-tree binding, the agg recursion, the VK cascade, the hard fork, the fixture burden — is
+**identical under both**.
+
 Owner rule being implemented: *a signature over `tx_tree_root` is the ACCOUNT's signature — the
 whole channel's — and must be N-of-N.* Block **posting** is deliberately 1-of-N and is explicitly
 NOT a security control; all security rests on the local ZKP chain and withdraw-time ZKP
@@ -238,9 +244,150 @@ no live registered channel has `delegate_count > 0`;** if one does, it must be d
 
 ---
 
+## 4A. The `state_commitment_root` alternative — evaluated
+
+Asked after the first draft: `state_commitment_root` is documented as H1′ of the channel's
+`BalanceState` (`small_block_message.rs:50-57`), with the equality check living off-circuit
+(confirmed: `state_update_verifier.rs:617-621`, `message.state_commitment_root !=
+self.next_state.balance_state.h1()`). Since H1 and `h2_tag` both sit in the N-of-N-signed IMCH
+preimage, is constraining `state_commitment_root` in-circuit a materially smaller fix?
+
+### 4A.1 The narrow reading does not work — the suspicion was right
+
+**Promoting the equality `state_commitment_root == balance_state.h1()` into the circuit buys
+nothing.** The validity circuit has no `BalanceState`; it works over channel leaves, send trees and
+tx trees. To assert the equality it would have to witness a `BalanceState` (up to
+`MAX_CHANNEL_MEMBERS = 1024` slots) and recompute `h1`. The prover chooses that witness. The
+resulting statement is "the prover knows *a* preimage of this root" — a hash-preimage statement,
+not an authorization statement. An attacker simply constructs the `BalanceState` that reflects
+their theft and supplies its genuine `h1`. The constraint is satisfied and the attack is unaffected.
+
+Worse, the cost is inverted: it is the most expensive possible witness (1024 balance slots) for zero
+security. **State this plainly: the minimal option does not work.** What makes H1 meaningful is not
+its relationship to a preimage, but that N members *signed* it — and only a signature check proves
+that. So the narrow version collapses back into "verify an aggregate", exactly as suspected.
+
+### 4A.2 But the observation points at a real middle option — and it is better than my design
+
+The right consequence of the observation is not "constrain H1" but: **verify the aggregate over the
+IMCH digest instead of over a reshaped IMSB digest.** Call this **Design B**; my original is
+**Design A**.
+
+Design B: in `update_channel_tree`, witness the IMCH preimage limbs, recompute the IMCH digest
+in-circuit, **connect the `h2_tag` segment to the block's `tx_tree_root` targets**, and verify a
+`FalconAggCircuit` proof over that digest with `signer_count == member_count`. `SmallBlockRootMessage`
+is not touched at all.
+
+The soundness argument, and it is clean: every IMCH limb other than `h2_tag` may be a **free
+witness**. The digest is fully determined by the witnessed limbs, and a valid aggregate over it
+requires N registered members to have actually signed those exact limbs. The signature *is* the
+authenticator. So the validity circuit never needs to understand the channel state — it needs the
+digest and the position of `h2_tag` within it. H1, `epoch`, the amount vector and the rest ride
+along authenticated, un-opened, at zero circuit cost.
+
+### 4A.3 The decisive fact: Design B needs no new signing round at all
+
+`falcon_member_auth_from_signatures` (`src/wallet_core.rs:3487-3560`) already builds a
+`FalconAggWitness` from `MemberSignature` blobs, and its docstring (`:3491-3493`) states that
+`MemberSignature.signature` is the 1,690-byte detached cosign blob "that `sign_state` already
+produces and **that every channel state already carries in `ChannelState::member_signatures`**".
+
+So under Design B the N real Falcon signatures over the IMCH digest **already exist in production
+today**, on every channel state, collected by a cosign round that already runs
+(`channel_member cosign` `src/bin/channel_member.rs:3997`, `cosign-batch` `:4099`), and the
+transport-blob → `FalconAggWitness` converter is already written, already used by close, and already
+hardened (version byte → length → canonical `h` → `verify_with_pk_g` with the identity binding
+checked inside, `wallet_core.rs:3505-3512`).
+
+This inverts the §8.5 finding. The stub-signature problem is real and must be carried forward — but
+it is a problem for **Design A only**. Design A needs members to sign the IMSB digest *in addition
+to* the IMCH digest they already sign, i.e. **two N-of-N collection rounds per state transition**.
+The measured single-channel bottleneck is exactly that step: "16 signatures + snapshot write", with
+batch cosign peaking at ~1,310 tx/s (`doc/benches/batch-cosign-throughput.md`). Design A roughly
+doubles the protocol's dominant cost. Design B adds none.
+
+Note the close path's disclosed limitation T-5 (`wallet_core.rs:3521-3525`): "the members signed the
+channel STATE, not this close." For close that is a gap. For Design B it is precisely the property
+wanted — the state's `h2_tag` **is** the `tx_tree_root`, so a state signature is exactly the right
+authorization for the block. Design B is arguably these signatures' intended use.
+
+### 4A.4 Honest comparison
+
+Everything hard is **identical**. Design B is not a shortcut around the blocker.
+
+| Axis | Design A (N-of-N over IMSB) | Design B (aggregate over IMCH) |
+|---|---|---|
+| `member_count` authentication | M2′ required | **M2′ required — unchanged** |
+| Member-tree root binding (G3, distinctness) | required | **required — unchanged** |
+| Agg recursion placement (P-b chain step) | required | **required — unchanged** |
+| `FalconAggCircuit` modified? | no | no |
+| VKs rotated | update_channel_tree, channel_reg_step, block_step, block_hash_chain, agg-list, validity, wrapper, MLE | **identical set** |
+| Hard fork / redeploy | mandatory (`mleVk` constructor-only) | **mandatory — unchanged** |
+| Fixture blast radius | ~20 JSON, VK-driven | **identical** |
+| Agg proving cost/block | N×1.83 s + lifts | **identical** |
+| **Message schema change** | `SmallBlockRootMessage` + `SmallBlockMessageFields` + golden vector + **9 construction sites** | **none** |
+| **New signing round** | **yes — net-new IMSB round, doubles cosign traffic** | **none — reuses existing IMCH signatures and the existing witness builder** |
+| **In-circuit keccak per signing block** | 33 limbs (132 B) ≈ **1 permutation** | 139 limbs (556 B) ≈ **5 permutations** |
+| Phase-0 degree risk | lower | **higher** (see below) |
+
+The IMCH preimage is 139 u32 limbs (`channel.rs:582-600`: domain 1, channel_id 1, epoch 2,
+small_block_number 2, close_freeze_nonce 2, fund.channel_id 1, `amounts` 10×8 = 80,
+intmax_state_root 8, `h1()` 8, shared_native_nullifier_root 8, unallocated_confirmed_incoming 8,
+prev_digest 8, h2_tag 8, state_version 2; `MAX_CHANNEL_TOKENS = 10` at `constants.rs:185`).
+
+One secondary advantage worth recording: the IMCH preimage carries `epoch`, `state_version` and
+`prev_digest` (`channel.rs:584`, `:599-600`), i.e. genuine state-chain material, where the IMSB
+preimage's `prev_small_block_root` is never even computed (`wallet_core.rs:2197` writes zero). That
+makes the D3 replay fence (§6.2) materially cheaper to build later under Design B than under Design
+A — though it remains unbuilt under both, and Design B does **not** close it on its own.
+
+**Design B's real cost is one risk, not one number:** a 139-limb in-circuit keccak in
+`update_channel_tree`, ~5× Design A's and ~2.5× today's 41-limb IMSB recompute. The close circuit
+performs this same IMCH recompute (`close_circuit.rs:651`) and sits at degree 2^17 — a warning
+worth taking seriously. This lands squarely on the Phase 0 STOP condition, which is unchanged in
+form but must now measure Design B's shape.
+
+### 4A.5 Does Design B weaken anything? (G4)
+
+Design B **replaces** the IMSB single-signature fold rather than adding to it. That must be
+justified, not waved through. The IMSB signature's *only* in-circuit meaning today is "some
+registered member authorized this `(channel_id, tx_tree_root)`" — every other field it covers is an
+unconstrained free witness (§1, §6.2) and therefore carries no in-circuit meaning. Design B's
+predicate is "**all** registered members authorized this `(channel_id, tx_tree_root)`", over the
+same channel binding. The new predicate strictly implies the old one, so the security property is
+strengthened, not weakened. Retained verbatim regardless: the `tx_tree_root != 0` gate
+(`update_channel_tree.rs:953-959`), the bp-slot Regev digest recompute (`:979-991`), and the
+computed-not-flagged gating of the chain proof (`validity_circuit.rs:236-239`).
+
+Keeping *both* signature paths was considered and rejected: it needs either a second accumulator and
+a second conditional verify in `ValidityCircuit` (directly feeding the degree risk the whole plan is
+organized around) or a chain step that verifies a Falcon signature *and* an agg proof (a bigger step
+than either). The cost is real and the marginal security is zero.
+
+### 4A.6 Recommendation
+
+**Adopt Design B.** It is not smaller in the hard parts — the blocker, the recursion, the VK
+cascade, the hard fork and the fixture burden are identical — but it removes the two pieces of
+net-new construction (message schema change; a second N-of-N signing round that would double the
+protocol's dominant cost), at the price of a larger in-circuit keccak whose acceptability Phase 0
+must decide. If Phase 0 shows the 139-limb recompute breaks the 2^16 ceiling and Design A's 33-limb
+one does not, **fall back to Design A and pay for the second signing round** — that fallback is the
+explicit purpose of the Phase 0 gate below.
+
+`state_commitment_root` itself stays an unconstrained witness under both designs. Under Design B
+that is finally harmless: H1 is authenticated by being inside the signed IMCH digest, which is the
+authentication the off-circuit check at `state_update_verifier.rs:617-621` was standing in for.
+
+---
+
 ## 5. The design
 
-### 5.1 The signed message
+Written for **Design A**, since it is the fallback and the more invasive of the two. Under Design B,
+§5.1 does not apply (`SmallBlockRootMessage` is untouched), §5.4 substitutes an IMCH digest
+recompute plus an `h2_tag ↔ block.tx_tree_root` connect for the IMSB recompute, and §5.2, §5.3, §5.5
+apply verbatim.
+
+### 5.1 The signed message (Design A only)
 
 Keep the IMSB digest (41 limbs, keccak, already mirrored limb-for-limb in-circuit). Do **not**
 switch to the IMCH digest: recomputing IMCH in-circuit means witnessing the full 80-limb
@@ -341,6 +488,25 @@ Inside the existing `should_verify_sig = should_update` branch:
    recompute with its 4,096 range checks (`:979-991`); the computed-not-flagged gating.
 7. **Drop:** `msg_fields.bp_member_slot == i` (`:961-977`) — the field leaves the preimage;
    superseded by the root connect + `channel_id` binding.
+
+**Design B variant.** Items 1–6 are unchanged. Item 7 becomes: drop the entire IMSB recompute from
+this circuit and substitute —
+
+- 139 witnessed u32 limbs of the IMCH preimage, range-checked to 32 bits as the keccak gadget
+  requires (mirroring `SmallBlockMessageFieldsTarget::new`, `small_block_message.rs:101-127`);
+- the `h2_tag` segment (8 limbs) **connected to the block's `tx_tree_root` targets**, not witnessed
+  — this is the entire security content, exactly as `channel_id` / `tx_tree_root` are connected
+  today (`update_channel_tree.rs:793-800`);
+- `channel_id` (limb 1) and `channel_fund.channel_id` (limb 6) likewise connected to the block's
+  channel target, so a signature for channel A cannot be applied to channel B;
+- `keccak256` over the 139 limbs → the digest folded into the accumulator and connected to the agg
+  proof's message PI.
+
+A native mirror of the recompute must live beside it with a golden-vector test against
+`ChannelState::signing_digest()` (`channel.rs:579-600`), in the style of
+`small_block_message.rs:196-229`. This is the single highest-risk piece of drift in Design B: a
+limb-order divergence between the circuit and the digest members actually sign is a silent
+completeness break, and a limb *omission* would be a soundness break.
 
 ### 5.5 `ValidityCircuit` — minimal delta
 
@@ -561,42 +727,67 @@ embarrassingly parallel across leaves (the 16 leaf proofs are independent). Peak
 tree is 4.99 GB, well inside 36 GB.
 
 **The unmeasured risk is degree.** Swapping a 16-PI cyclic proof for a 137-PI one
-(`FALCON_AGG_PUBLIC_INPUTS_LEN = 137`, `agg.rs:162`) plus the 16-leaf root recompute could move
+(`FALCON_AGG_PUBLIC_INPUTS_LEN = 137`, `agg.rs:162`), plus the 16-leaf root recompute, plus the
+digest recompute (33 limbs under Design A, **139 under Design B** — §4A.4) could move
 `update_channel_tree` or `ValidityCircuit` past 2^16, which is more than a VK-value change — it
 changes the MLE wrapper's shape. Phase 3 explicitly preserved this and there is **no** release-mode
 `CommonCircuitData` assert protecting `ValidityCircuit` (only `ListCircuit` has one,
 `cyclic_chain_circuit.rs:76`). **Phase 1 exists to measure this before anything else is built.**
 
-### 8.5 What does not exist yet and must be built
+### 8.5 What does not exist yet and must be built — **where the two designs diverge**
 
-The real IMSB signing round. Today production emits stubs (`wallet_core.rs:1941-1949`). The
-*collection* machinery exists and is exercised — `channel_member cosign`
-(`src/bin/channel_member.rs:3997`, N-of-N loop `:4051-4062`) and `cosign-batch` (`:4099`,
-`:4205-4216`) — but every current cosign round signs the **IMCH** digest, not IMSB. Extending the
-round to also produce an IMSB signature per member, and to build the `FalconAggWitness`
-(`agg.rs:212-221`, mirroring `wallet_core.rs:3487-3560` for close), is real work with no existing
-counterpart. Do not price this as a circuit-only change.
+Today production emits **stub IMSB signatures**: `structural_small_block_sigs` returns
+`signature: vec![1 + i]` (`wallet_core.rs:1941-1949`), with `aggregated_signature_proof: vec![9,9]`
+and `confirmation_proof: vec![8,8]` (`:2204-2206`). Real IMSB signing exists only in the test
+witness generator (`block_witness_generator.rs:963-980`, `:1044-1050`). **This fact stands
+regardless of which design wins and must not be lost.**
+
+**Under Design A it is the dominant engineering cost.** The *collection* machinery exists —
+`channel_member cosign` (`src/bin/channel_member.rs:3997`, N-of-N loop `:4051-4062`) and
+`cosign-batch` (`:4099`, `:4205-4216`) — but every current round signs the **IMCH** digest, not
+IMSB. Design A needs a net-new IMSB round *in addition to* the IMCH round: **two N-of-N collection
+rounds per state transition**, doubling the measured single-channel bottleneck ("16 signatures +
+snapshot write"; batch cosign peaks ~1,310 tx/s, `doc/benches/batch-cosign-throughput.md`). Do not
+price this as a circuit-only change.
+
+**Under Design B it evaporates.** The N real detached Falcon signatures over the IMCH digest already
+exist on every channel state (`ChannelState::member_signatures`), and
+`falcon_member_auth_from_signatures` (`wallet_core.rs:3487-3560`) already converts them into a
+`FalconAggWitness` — the same function close uses, with its structural gate, version/length/
+canonical-`h` decoding and `verify_with_pk_g` identity binding already hardened (`:3505-3512`).
+Remaining work is wiring, not construction. The stub helper should still be deleted rather than left
+dead (Phase 6).
 
 ---
 
 ## 9. Phased plan — falsifiable acceptance criteria
 
-### Phase 0 — measurement spike (no behaviour change)
-Prototype `AggListStepCircuit` and the 16-leaf root recompute in a throwaway branch purely to read
-degrees and timings.
-**Accept iff:** `update_channel_tree` degree, `AggListStepCircuit` degree, the `ListCircuit` cyclic
-wrapper degree, and `ValidityCircuit` degree are all recorded; and `ValidityCircuit` is **still
-2^16**. **If it is not 2^16, STOP and report** — the wrapper/MLE shape change is a separate,
-larger project and must not be discovered in Phase 4.
+### Phase 0 — measurement spike **and the A/B decision gate** (no behaviour change)
+Prototype in a throwaway branch, purely to read degrees and timings: `AggListStepCircuit`, the
+16-leaf member-tree root recompute, **and both digest recomputes** — Design B's 139-limb IMCH and
+Design A's 33-limb IMSB — so the fork is decided on measurements, not preference.
+**Accept iff:** `update_channel_tree` degree **under each design**, `AggListStepCircuit` degree, the
+`ListCircuit` cyclic wrapper degree and `ValidityCircuit` degree are all recorded; and
+`ValidityCircuit` is **still 2^16** under the chosen design.
+**Decision rule, fixed in advance:** if Design B holds 2^16, take Design B (Phases 1 and 6 shrink to
+almost nothing). If Design B breaks 2^16 and Design A holds it, **fall back to Design A and accept
+the second signing round.** If neither holds 2^16, **STOP and report** — the wrapper/MLE shape
+change is a separate, larger project and must not be discovered in Phase 4.
 
 ### Phase 1 — message + registration prerequisite
-Drop `bp_member_slot` / `bp_pk_g` from `SmallBlockRootMessage::signing_digest()` and
-`SmallBlockMessageFields`; keep them as unsigned struct fields. Add `delegate_count == 0` to
-`channel_reg_step`.
-**Accept iff:** the native/in-circuit golden-vector test (`small_block_message.rs:196-229`) passes
-against the new 33-limb preimage; the retired 41-limb layout is pinned in the repo-wide domain
-non-collision test; a registration witness with `delegate_count = 1` is **unprovable**; all 9
-construction sites compile; an audit confirms no live channel has `delegate_count > 0`.
+Add `delegate_count == 0` to `channel_reg_step` (both designs). **Design A only:** drop
+`bp_member_slot` / `bp_pk_g` from `SmallBlockRootMessage::signing_digest()` and
+`SmallBlockMessageFields`, keeping them as unsigned struct fields. **Design B:** the message is
+untouched; instead add the native IMCH-preimage mirror and its golden-vector test against
+`ChannelState::signing_digest()`.
+**Accept iff:** a registration witness with `delegate_count = 1` is **unprovable**; an audit confirms
+no live channel has `delegate_count > 0`; and —
+*Design A:* the golden-vector test (`small_block_message.rs:196-229`) passes against the new 33-limb
+preimage, the retired 41-limb layout is pinned in the repo-wide domain non-collision test, and all 9
+construction sites compile.
+*Design B:* the native mirror reproduces `ChannelState::signing_digest()` byte-for-byte on randomized
+states, **including** a case with a non-trivial multi-token `amounts` vector and a nonzero `h2_tag`;
+and a mutation test shows that dropping or reordering any one of the 139 limbs changes the digest.
 
 ### Phase 2 — `AggListStepCircuit`
 Step verifies one `FalconAggCircuit` top proof at a constant VK and folds
@@ -606,15 +797,20 @@ proof has the wrong arity fails the build-time assert; a step fed an agg proof o
 message fails; the cyclic wrapper builds and `ListCircuit`-equivalent append/verify round-trips.
 
 ### Phase 3 — `update_channel_tree` N-of-N binding
-16-leaf member-tree root recompute + thermometer + `2 <= signer_count <= 16` + wider fold. Keep the
-`tx_tree_root != 0` gate, the bp-slot Regev recompute, and the single-fold invariant comment.
+16-leaf member-tree root recompute + thermometer + `2 <= signer_count <= 16` + wider fold, plus the
+chosen digest recompute (§5.4). Keep the `tx_tree_root != 0` gate, the bp-slot Regev recompute, and
+the single-fold invariant comment.
 **Accept iff, as negative tests that must FAIL to prove:**
 (a) a witness claiming `signer_count = member_count − 1` (excluding one member);
 (b) a witness repeating one member's `pk_g` in two active slots;
 (c) a witness with a non-registered `pk_g` in an active slot;
 (d) a witness with a nonzero leaf in a slot ≥ `signer_count`;
 (e) `signer_count = 1`;
-(f) `tx_tree_root == 0` with a signature applied.
+(f) `tx_tree_root == 0` with a signature applied;
+(g) **Design B only:** a witness whose IMCH `h2_tag` limbs differ from the block's `tx_tree_root`
+    (must be unsatisfiable by construction — the limbs are connected, not witnessed);
+(h) **Design B only:** a real, validly N-of-N-signed IMCH digest from a *different* channel, and one
+    from the *same* channel with a different `h2_tag`.
 And as positive tests: real 2-of-2 and 16-of-16 blocks prove and verify.
 
 ### Phase 4 — `ValidityCircuit` rewire + span tests
@@ -624,7 +820,7 @@ zero signing blocks still takes the dummy-proof path; a prover cannot verify the
 applied a signed update (the computed-gate property is re-tested, not assumed); measured degree
 matches Phase 0.
 
-### Phase 5 — **prove the old hole is closed** (non-negotiable)
+### Phase 5 — **prove the old hole is closed** (non-negotiable, and identical under both designs)
 A dedicated adversarial test module reproducing §2.1 verbatim:
 1. Construct the *current* attack: one cosigner, `prev_private_state`, a self-signed IMSB over a
    theft `tx_tree_root`, `aux_data = 0`.
@@ -637,11 +833,16 @@ A dedicated adversarial test module reproducing §2.1 verbatim:
 not demonstrably close the hole is not a fix.*
 
 ### Phase 6 — signing round
-Extend `cosign` / `cosign-batch` to collect IMSB signatures and build the `FalconAggWitness`;
-replace `structural_small_block_sigs`.
-**Accept iff:** a real end-to-end send produces a `SignedSmallBlock` with N real Falcon signatures
-and a verifying agg proof; the stub helper is deleted, not left dead; withholding one member's
-signature makes block production fail with a clear error (documenting §6.1's unchanged posture).
+*Design A:* extend `cosign` / `cosign-batch` to collect IMSB signatures **in addition to** IMCH, and
+build the `FalconAggWitness` from them. *Design B:* wire the block-production path to
+`falcon_member_auth_from_signatures` (`wallet_core.rs:3487-3560`) over the IMCH signatures the state
+already carries — wiring, not a new round.
+Both: replace `structural_small_block_sigs` (`wallet_core.rs:1941-1949`).
+**Accept iff:** a real end-to-end send produces a block backed by N real Falcon signatures and a
+verifying agg proof; the stub helper is **deleted, not left dead**; withholding one member's
+signature makes block production fail with a clear error (documenting §6.1's unchanged posture);
+*Design A only:* the added round's throughput cost is measured against the
+`doc/benches/batch-cosign-throughput.md` baseline and reported.
 
 ### Phase 7 — fixtures + redeploy
 Regenerate the ~20 JSON fixtures; redeploy `IntmaxRollup`; re-derive the `ChannelSettlementManager`
@@ -692,6 +893,7 @@ one hard fork rather than two, take **M1 + D3-b** in this cutover and pay the le
 
 | ID | Decision | Options | Recommendation |
 |---|---|---|---|
+| **D0** | Which message carries the N-of-N? | A: reshaped IMSB (new signing round) / B: IMCH aggregate (reuses existing signatures) | **B, subject to the Phase 0 gate.** Hard parts identical; B removes the schema change and the second signing round; A is the fallback if B's 139-limb keccak breaks 2^16 (§4A) |
 | **D1** | How is `member_count` authenticated for the validity circuit? | M1 leaf field / M2 empty-slot proof / M2′ full root recompute | **M2′ + `delegate_count == 0`** if this is the only fork; **M1** if bundling D3-b (§10) |
 | **D2** | Do `bp_member_slot` / `bp_pk_g` stay in the signed preimage? | signed / unsigned transport fields | **Unsigned.** Posting is not a security control; signing it costs a re-collection round per poster change |
 | **D3** | Replay fence for the IMSB message | (a) bind to leaf `index` + wallet semantic change / (b) new leaf field + monotonicity / (c) defer | **(a) as its own phase**, or **(b) if bundling with M1** |
@@ -708,10 +910,18 @@ one hard fork rather than two, take **M1 + D3-b** in this cutover and pay the le
 2. **`member_count` is not authenticated where the circuit can see it.** This is the single largest
    piece of hidden work and it was not visible from the brief. Every design option has a real cost
    (§4).
-3. **Phase 0 is not optional.** If `ValidityCircuit` leaves 2^16, the MLE wrapper shape changes and
-   this becomes a substantially larger project. Measure before building (§8.4).
+3. **Phase 0 is not optional, and it now decides Design A vs B.** If `ValidityCircuit` leaves 2^16,
+   the MLE wrapper shape changes and this becomes a substantially larger project. Measure before
+   building (§8.4, §9 Phase 0).
 4. **There is no production IMSB signing path at all** — today's signatures are literal stub bytes
-   (`wallet_core.rs:1941-1949`). Phase 6 is new construction, not a modification (§8.5).
+   (`wallet_core.rs:1941-1949`). Under **Design A** this makes Phase 6 net-new construction *and*
+   adds a second N-of-N round per transition, doubling the protocol's measured bottleneck. Under
+   **Design B** it evaporates: the IMCH signatures already exist on every channel state and the
+   witness builder is already written (§4A.3, §8.5).
+4b. **The narrow `state_commitment_root` fix does not work.** Constraining
+   `state_commitment_root == balance_state.h1()` in-circuit proves knowledge of a preimage, not
+   authorization — the attacker supplies the `BalanceState` matching their own theft. Only a
+   signature check proves N-of-N (§4A.1). Do not let this resurface as a "cheap alternative".
 5. **N-of-N does not close the replay hole**, and it makes the stolen artifact more valuable. §6.2
    needs its own decision and its own phase.
 6. **A channel whose member is unreachable cannot close**, and close is the drain path. Audit

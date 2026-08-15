@@ -1,8 +1,8 @@
 {
   "_comment": "Checked-in stand-in for the run-time-staged `cli_reg_record.json`, used ONLY by test/DeployGuards.t.sol so the production settlement deployer (`script/DeployCloseCli.s.sol`) can be EXECUTED inside `forge test`. The real record is written by `channel_member export-reg-record` and copied into this directory by the Rust drivers, so it is untracked; `foundry.toml` fs_permissions are read-only, so a test cannot synthesize it at run time. Schema-identical to that record. The key material is arbitrary but must satisfy IntmaxRollup.registerChannel: at least MIN_CHANNEL_MEMBERS active participants, pairwise-distinct nonzero member_pk_gs, nonzero regev_pk_digests, nonzero recipients, and bp_member_slot < member_count. NOT a proving artifact: no proof is verified against it.",
+  "active_delegate_count": 0,
   "bp_member_slot": 0,
   "channel_id": 7,
-  "delegate_count": 0,
   "member_count": 3,
   "member_pk_bs": [
     "0x00000000000000000000000000000000000000000000000000000000deb00010",
@@ -19,6 +19,7 @@
     "0x4444007144440071444400714444007144440071",
     "0x4444007244440072444400724444007244440072"
   ],
+  "reg_delegate_count": 0,
   "regev_pk_digests": [
     "0x00000000000000000000000000000000000000000000000000000000de900012",
     "0x00000000000000000000000000000000000000000000000000000000de900022",

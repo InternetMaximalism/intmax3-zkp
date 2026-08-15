@@ -3112,16 +3112,21 @@ fn build_reg_record() -> serde_json::Value {
         regev_pk_digests.push(m.regev_pk_digest.to_string());
         recipients.push(m.recipient.to_hex());
     }
-    serde_json::json!({
-        "channel_id": channel_id,
-        "bp_member_slot": BP_SLOT,
-        "member_count": TEST_ACTIVE_MEMBERS,
-        "delegate_count": delegate_count,
-        "member_pk_gs": member_pk_gs,
-        "member_pk_bs": member_pk_bs,
-        "regev_pk_digests": regev_pk_digests,
-        "recipients": recipients,
-    })
+    // Both counts are zero-delegate here, for two DIFFERENT reasons (they are not one value):
+    //   * the registration side is cosigner-only by protocol (Option B), enforced in-circuit;
+    //   * this record has no live channel state to read a delegate count from, so the manager
+    //     `DeployCloseCli.s.sol` builds binds no delegates — its B-2 floor is vacuous, the
+    //     pre-existing reviewed behaviour of the real-chain path. Raising it would need delegate
+    //     pk_g/recipient bindings this record does not carry.
+    settlement_reg_json(
+        channel_id,
+        TEST_ACTIVE_MEMBERS,
+        delegate_count,
+        &member_pk_gs,
+        &member_pk_bs,
+        &regev_pk_digests,
+        &recipients,
+    )
 }
 
 fn main() {
@@ -5176,6 +5181,161 @@ fn cmd_deploy_settlement(args: &[String]) {
     }
 }
 
+/// THE registration record the settlement deploy scripts read (`pw_reg.json`,
+/// `cli_reg_record.json`), as a value. ONE producer, so the two commands that stage a record cannot
+/// drift.
+///
+/// SECURITY (Option B — why there are TWO delegate-count fields, and why neither is named
+/// `delegate_count`): a registration record feeds two structurally different consumers, and a
+/// single field feeding both is precisely the defect this shape exists to prevent.
+///
+///   * `reg_delegate_count` — the L1 REGISTRATION RECORD's count. ALWAYS 0. L1 registration is
+///     cosigners-only: `ChannelRegStepCircuit` CONSTRAINS the `delegate_count` limb to zero
+///     (`assert_zero` in `ChannelRegStepTarget::new`), so a registration transaction carrying a
+///     nonzero one is UNPROVABLE — the reg-chain step can never fold it and the channel is stuck in
+///     the validity chain. Independently, the proving side has always built this preimage
+///     cosigner-only (`wallet_core::build_channel_withdrawal`), so a delegate-bearing registration
+///     never matched the proof either. `deploy-settlement`'s devnet path used to pass the LIVE
+///     snapshot count here (`wallet-live-work/chN/channel_snapshot.json` carries delegates), which
+///     is the conflation this function removes.
+///   * `active_delegate_count` — the LIVE count, for the `ChannelSettlementManager` ONLY. It is the
+///     B-2 delegate-close FLOOR (close PI limb 94 must be `>= activeDelegateCount`) and it sizes
+///     the delegate `MemberBinding[]` that writes `registeredRecipientOf` / `isMemberRecipient`.
+///     Zeroing it to "match" the registration would silently retire that fence and drop every
+///     delegate's recipient binding — a WEAKENED CHECK, not a cleanup.
+///
+/// The four arrays carry the ACTIVE participants, MEMBERS FIRST (`0..member_count`) then delegates
+/// (`member_count..member_count + active_delegate_count`). `RegRecordLib.sol` — the single reader
+/// on the Solidity side — hands `registerChannel` the leading cosigner slice with a CONSTANT zero
+/// delegate count, and hands the manager the whole set with `active_delegate_count`.
+fn settlement_reg_json(
+    channel_id: u32,
+    member_count: usize,
+    active_delegate_count: usize,
+    pk_gs: &[String],
+    pk_bs: &[String],
+    regev_pk_digests: &[String],
+    recipients: &[String],
+) -> serde_json::Value {
+    let active = member_count + active_delegate_count;
+    assert!(
+        pk_gs.len() == active
+            && pk_bs.len() == active
+            && regev_pk_digests.len() == active
+            && recipients.len() == active,
+        "settlement_reg_json: the arrays must hold member_count + active_delegate_count = {active} \
+         entries (members first), got {}/{}/{}/{}",
+        pk_gs.len(),
+        pk_bs.len(),
+        regev_pk_digests.len(),
+        recipients.len()
+    );
+    serde_json::json!({
+        "channel_id": channel_id,
+        "bp_member_slot": BP_SLOT,
+        "member_count": member_count,
+        // SECURITY: a LITERAL zero, never a variable. See the doc comment above.
+        "reg_delegate_count": 0,
+        "active_delegate_count": active_delegate_count,
+        "member_pk_gs": pk_gs,
+        "member_pk_bs": pk_bs,
+        "regev_pk_digests": regev_pk_digests,
+        "recipients": recipients,
+    })
+}
+
+/// WHAT THESE TESTS ARE FOR (security, not mechanics). The registration record is read by three
+/// deploy scripts, and until now ONE `delegate_count` field fed both the L1 registration and the
+/// settlement manager. Each direction of that conflation is a distinct defect, so there is one test
+/// per direction — a single test asserting "the two agree" would pass for either broken value.
+#[cfg(test)]
+mod settlement_reg_record_tests {
+    use super::*;
+
+    /// A record for a channel with `m` cosigners and `d` LIVE delegates.
+    fn sample(m: usize, d: usize) -> serde_json::Value {
+        let n = m + d;
+        let hex = |tag: &str, i: usize| format!("0x{tag}{i:062x}");
+        let pk_gs: Vec<String> = (0..n).map(|i| hex("a", i)).collect();
+        let pk_bs: Vec<String> = (0..n).map(|i| hex("b", i)).collect();
+        let regev: Vec<String> = (0..n).map(|i| hex("c", i)).collect();
+        let recipients: Vec<String> = (0..n)
+            .map(|i| format!("0x{:040x}", 0x4444_0000 + i))
+            .collect();
+        settlement_reg_json(7, m, d, &pk_gs, &pk_bs, &regev, &recipients)
+    }
+
+    /// DIRECTION 1 — the registration side must stay ZERO even when the live channel has delegates.
+    ///
+    /// SECURITY: `ChannelRegStepCircuit` constrains the registration record's `delegate_count` limb
+    /// to zero, so a nonzero value here produces an L1 registration NO reg-chain step can fold: the
+    /// channel becomes unprovable in the validity chain (and never matched the cosigner-only
+    /// preimage `build_channel_withdrawal` proves against in the first place). The live counts
+    /// below are the wallet demo's own (`wallet-live-work/ch7` runs with 2 delegates), which is
+    /// exactly the input that used to leak through.
+    #[test]
+    fn registration_delegate_count_is_always_zero() {
+        for (m, d) in [(3usize, 0usize), (3, 1), (3, 2), (2, 14), (16, 0)] {
+            let reg = sample(m, d);
+            assert_eq!(
+                reg["reg_delegate_count"], 0,
+                "the L1 registration record must be cosigner-only (member_count={m}, live \
+                 delegates={d}); a nonzero registration is unprovable by channel_reg_step"
+            );
+            assert_eq!(
+                reg["member_count"], m,
+                "member_count must be the cosigner count, unaffected by delegates"
+            );
+            // The legacy AMBIGUOUS field must be gone: a reader that still asks for it must fail
+            // loudly (`vm.parseJsonUint` reverts) instead of silently reading one count for both.
+            assert!(
+                reg.get("delegate_count").is_none(),
+                "the ambiguous `delegate_count` key must not come back — it is the conflation"
+            );
+        }
+    }
+
+    /// DIRECTION 2 — the manager side must NOT be zeroed to match the registration.
+    ///
+    /// SECURITY: `active_delegate_count` is the B-2 delegate-close FLOOR (close PI limb 94 must be
+    /// `>= activeDelegateCount`) and it sizes the delegate bindings that write
+    /// `registeredRecipientOf` / `isMemberRecipient`. Achieving the Option B invariant by lowering
+    /// this to zero would silently retire the fence added for the delegate-close threat model —
+    /// the exact "fix by weakening a check" this test exists to fail on.
+    #[test]
+    fn manager_delegate_count_keeps_the_live_value() {
+        for (m, d) in [(3usize, 1usize), (3, 2), (2, 14)] {
+            let reg = sample(m, d);
+            assert_eq!(
+                reg["active_delegate_count"], d,
+                "the manager's delegate count must stay the LIVE count (B-2 close floor + delegate \
+                 bindings), not the registration's zero"
+            );
+            // ...and the delegate KEY MATERIAL must still be in the record: the manager binds
+            // `pk_gs[member_count + i]` / `recipients[member_count + i]`. Truncating the arrays to
+            // the cosigner slice would leave the floor naming delegates it could not bind, and the
+            // manager constructor would revert `InvalidMemberCount`.
+            assert_eq!(
+                reg["member_pk_gs"].as_array().map(|a| a.len()),
+                Some(m + d),
+                "the arrays must carry the full ACTIVE set (members first, then delegates)"
+            );
+            assert_eq!(reg["recipients"].as_array().map(|a| a.len()), Some(m + d));
+        }
+    }
+
+    /// The two counts are INDEPENDENT fields, not one value written twice: a record with delegates
+    /// must show them disagreeing. If a future edit re-derives one from the other, this fails.
+    #[test]
+    fn the_two_counts_are_not_the_same_field() {
+        let reg = sample(3, 2);
+        assert_ne!(
+            reg["reg_delegate_count"], reg["active_delegate_count"],
+            "a delegate-bearing channel must register 0 while the manager keeps 2"
+        );
+    }
+}
+
 /// The anvil path, UNCHANGED: MockMleVerifier + ChannelSettlementVerifier +
 /// ChannelSettlementManager attached to the EXISTING rollup in `channel_backing.json`, with the
 /// LIVE channel member set from the snapshot (including any runtime-joined delegates).
@@ -5194,6 +5354,10 @@ fn deploy_settlement_devnet(rpc: &str, chain_id: u64) {
     let members = &state.snapshot.members;
     let record = &state.snapshot.record;
     let member_count = record.member_count as usize;
+    // The LIVE delegate count. It reaches the SETTLEMENT MANAGER only (its B-2 close floor and its
+    // delegate bindings) — never the L1 registration record, which `settlement_reg_json` pins to
+    // zero. See that function for the full argument; this is the path where the two used to be the
+    // same value.
     let delegate_count = record.delegate_count as usize;
     let active = member_count + delegate_count;
 
@@ -5214,16 +5378,15 @@ fn deploy_settlement_devnet(rpc: &str, chain_id: u64) {
         recipients.push(format!("0x{}", hex::encode(recipient_addr.to_bytes_be())));
     }
 
-    let reg = serde_json::json!({
-        "channel_id": channel_id,
-        "bp_member_slot": BP_SLOT,
-        "member_count": member_count,
-        "delegate_count": delegate_count,
-        "member_pk_gs": pk_gs,
-        "member_pk_bs": pk_bs,
-        "regev_pk_digests": regev_digests,
-        "recipients": recipients,
-    });
+    let reg = settlement_reg_json(
+        channel_id,
+        member_count,
+        delegate_count,
+        &pk_gs,
+        &pk_bs,
+        &regev_digests,
+        &recipients,
+    );
     // The pattern the five exit commands now share (F4): resolve from the executable, validate,
     // announce. Kept identical here so there is ONE implementation rather than three copies.
     let plan = SettlementDeployPlan::MockDevnet;

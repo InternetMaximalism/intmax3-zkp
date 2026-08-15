@@ -10,6 +10,7 @@ import {MleVerifier} from "@mle/MleVerifier.sol";
 import {SpongefishWhirVerify} from "@mle/spongefish/SpongefishWhirVerify.sol";
 import {FixtureLib} from "./FixtureLib.sol";
 import {DeployConfig} from "./DeployConfig.sol";
+import {RegRecordLib} from "./RegRecordLib.sol";
 
 /// @dev Drop-in mock for MleVerifier — always returns true. Identical to test/CloseTestLib.sol's
 ///      MockMleVerifier but inlined here to avoid cross-directory imports.
@@ -56,7 +57,7 @@ contract DeployPartialWithdrawalE2E is Script {
         require(block.chainid == 31337, "local-devnet only: this script deploys mock verifiers");
         string memory mleJson = _read("mle_fixture.json");
         string memory blockJson = _read("block_fixture.json");
-        string memory reg = _read("pw_reg.json");
+        RegRecordLib.Record memory r = RegRecordLib.parse(_read("pw_reg.json"));
         bytes32 genesis = vm.parseJsonBytes32(blockJson, ".genesis_state_root");
         address fraudTreasury = msg.sender;
 
@@ -109,28 +110,42 @@ contract DeployPartialWithdrawalE2E is Script {
             );
         }
 
-        // 4. Register channel on rollup.
-        uint32 channelId = uint32(vm.parseJsonUint(reg, ".channel_id"));
-        uint8 bpSlot = uint8(vm.parseJsonUint(reg, ".bp_member_slot"));
-        uint8 delegateCount = uint8(vm.parseJsonUint(reg, ".delegate_count"));
-        bytes32[] memory pkGs = vm.parseJsonBytes32Array(reg, ".member_pk_gs");
-        bytes32[] memory pkBs = vm.parseJsonBytes32Array(reg, ".member_pk_bs");
-        bytes32[] memory regev = vm.parseJsonBytes32Array(reg, ".regev_pk_digests");
-        address[] memory recipients = vm.parseJsonAddressArray(reg, ".recipients");
-        rollup.registerChannel(channelId, bpSlot, delegateCount, pkGs, pkBs, regev, recipients);
+        // 4. Register channel on rollup — COSIGNERS ONLY (Option B). See the long note in
+        //    `RegRecordLib`: the registration record's delegate count is a CONSTANT zero, because
+        //    the validity `channel_reg_step` circuit constrains that limb to zero and would refuse
+        //    to fold anything else. This driver's record carries no delegates today
+        //    (`active_delegate_count = 0`, `tests/partial_withdrawal_e2e.rs`), so this is a no-op
+        //    for it — it is wired through the shared reader so it CANNOT become live-count
+        //    passthrough if that driver ever grows a delegate.
+        rollup.registerChannel(
+            r.channelId,
+            r.bpSlot,
+            RegRecordLib.REGISTRATION_DELEGATE_COUNT,
+            RegRecordLib.regPkGs(r),
+            RegRecordLib.regPkBs(r),
+            RegRecordLib.regRegevDigests(r),
+            RegRecordLib.regRecipients(r)
+        );
 
         // 5. Deploy ChannelSettlementManager with member bindings.
-        uint8 memberCount = uint8(vm.parseJsonUint(reg, ".member_count"));
+        //
+        // SECURITY (B-2): `activeDelegateCount` is the LIVE count from the record — NOT the zero
+        // registered above — because it is the close/partial-withdrawal delegate floor, and the
+        // constructor requires `delegateBindings.length == activeDelegateCount`. This script binds
+        // no delegates, so a record with `active_delegate_count > 0` FAILS CLOSED here
+        // (`InvalidMemberCount`) rather than deploying a manager whose floor names delegates it
+        // never bound.
         ChannelSettlementManager.MemberBinding[] memory mBind =
-            new ChannelSettlementManager.MemberBinding[](memberCount);
-        for (uint256 i = 0; i < memberCount; i++) {
+            new ChannelSettlementManager.MemberBinding[](r.memberCount);
+        for (uint256 i = 0; i < r.memberCount; i++) {
             mBind[i] = ChannelSettlementManager.MemberBinding({
-                pkG: pkGs[i],
-                recipient: recipients[i]
+                pkG: r.pkGs[i],
+                recipient: r.recipients[i]
             });
         }
         manager = new ChannelSettlementManager(
-            bytes4(channelId), bpSlot, pkGs[bpSlot], delegateCount, DeployConfig.challengePeriodSecs(),
+            bytes4(r.channelId), r.bpSlot, r.pkGs[r.bpSlot], r.activeDelegateCount,
+            DeployConfig.challengePeriodSecs(),
             SPECIAL_CLOSE_PENALTY, INITIAL_BP_BOND,
             IChannelSettlementVerifier(address(sv)), IChannelRegistry(address(rollup)),
             mBind, new ChannelSettlementManager.MemberBinding[](0)

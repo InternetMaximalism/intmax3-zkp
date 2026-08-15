@@ -1,0 +1,36 @@
+{
+  "_comment": "DELEGATE-BEARING stand-in for the run-time-staged `pw_reg.json`, used ONLY by test/DeployGuards.t.sol so `script/DeployWalletSettlement.s.sol` can be EXECUTED inside `forge test` against the shape that matters: a channel whose LIVE state has delegates (the wallet demo's own `wallet-live-work/chN/channel_snapshot.json` reaches that script with `delegateCount = 2`). The committed `pw_reg.json` has no delegates, so it cannot distinguish the fixed script from the conflated one. Schema-identical to what `channel_member deploy-settlement` writes: `member_count` co-signing members FIRST, then `active_delegate_count` delegates, in every array. `reg_delegate_count` is the L1 REGISTRATION record's count and is always 0 (cosigner-only registration is a circuit constraint, `channel_reg_step.rs`); `active_delegate_count` is the LIVE count the settlement manager binds (B-2 close floor + delegate recipient bindings). The key material is arbitrary but must satisfy IntmaxRollup.registerChannel and the manager constructor: pairwise-distinct nonzero pk_gs, nonzero regev digests, distinct nonzero recipients, bp_member_slot < member_count. NOT a proving artifact: the script it feeds wires an always-true mock MLE verifier.",
+  "active_delegate_count": 2,
+  "bp_member_slot": 0,
+  "channel_id": 11,
+  "member_count": 3,
+  "member_pk_bs": [
+    "0x00000000000000000000000000000000000000000000000000000000deb10010",
+    "0x00000000000000000000000000000000000000000000000000000000deb10020",
+    "0x00000000000000000000000000000000000000000000000000000000deb10030",
+    "0x00000000000000000000000000000000000000000000000000000000deb10040",
+    "0x00000000000000000000000000000000000000000000000000000000deb10050"
+  ],
+  "member_pk_gs": [
+    "0x00000000000000000000000000000000000000000000000000000000de610011",
+    "0x00000000000000000000000000000000000000000000000000000000de610021",
+    "0x00000000000000000000000000000000000000000000000000000000de610031",
+    "0x00000000000000000000000000000000000000000000000000000000de610041",
+    "0x00000000000000000000000000000000000000000000000000000000de610051"
+  ],
+  "recipients": [
+    "0x5555007055550070555500705555007055550070",
+    "0x5555007155550071555500715555007155550071",
+    "0x5555007255550072555500725555007255550072",
+    "0x5555007355550073555500735555007355550073",
+    "0x5555007455550074555500745555007455550074"
+  ],
+  "reg_delegate_count": 0,
+  "regev_pk_digests": [
+    "0x00000000000000000000000000000000000000000000000000000000de910012",
+    "0x00000000000000000000000000000000000000000000000000000000de910022",
+    "0x00000000000000000000000000000000000000000000000000000000de910032",
+    "0x00000000000000000000000000000000000000000000000000000000de910042",
+    "0x00000000000000000000000000000000000000000000000000000000de910052"
+  ]
+}

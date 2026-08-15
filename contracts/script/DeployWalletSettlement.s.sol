@@ -8,6 +8,7 @@ import {ChannelSettlementVerifier} from "../src/ChannelSettlementVerifier.sol";
 import {MleVerifier} from "@mle/MleVerifier.sol";
 import {SpongefishWhirVerify} from "@mle/spongefish/SpongefishWhirVerify.sol";
 import {DeployConfig} from "./DeployConfig.sol";
+import {RegRecordLib} from "./RegRecordLib.sol";
 
 contract WalletMockMleVerifier {
     function verify(
@@ -32,19 +33,26 @@ contract DeployWalletSettlement is Script {
     uint256 internal constant SPECIAL_CLOSE_PENALTY = 0;
     uint256 internal constant INITIAL_BP_BOND = 0;
 
-    function _read(string memory f) internal view returns (string memory) {
+    /// `virtual` so `test/DeployGuards.t.sol` can execute THIS script verbatim against a
+    /// checked-in stand-in record (the live one is staged at run time by the Rust driver and is
+    /// therefore untracked, and `foundry.toml` grants read-only fs access). File bytes only — no
+    /// behaviour is stubbed.
+    function _read(string memory f) internal view virtual returns (string memory) {
         return vm.readFile(string.concat(vm.projectRoot(), "/test/data/", f));
     }
 
-    function run() external {
+    function run()
+        external
+        returns (IntmaxRollup rollup, ChannelSettlementVerifier sv, ChannelSettlementManager manager)
+    {
         // SECURITY: this script wires an ALWAYS-TRUE mock MLE verifier and a 1-second challenge
         // period. Anything deployed with it has a VACUOUS `_checkCloseProof`, so it must never
         // reach a public chain — and it is reachable from relay tooling pointed at Sepolia.
         // The other deploy scripts already carry a chain-id guard; this one lacked it.
         require(block.chainid == 31337, "local-devnet only: this script deploys mock verifiers");
-        string memory reg = _read("pw_reg.json");
+        RegRecordLib.Record memory r = RegRecordLib.parse(_read("pw_reg.json"));
         address rollupAddr = vm.envAddress("ROLLUP");
-        IntmaxRollup rollup = IntmaxRollup(payable(rollupAddr));
+        rollup = IntmaxRollup(payable(rollupAddr));
 
         vm.startBroadcast();
 
@@ -52,7 +60,7 @@ contract DeployWalletSettlement is Script {
         WalletMockMleVerifier mockMle = new WalletMockMleVerifier();
 
         // 2. ChannelSettlementVerifier with dummy VKs (mock verifier ignores them).
-        ChannelSettlementVerifier sv = new ChannelSettlementVerifier();
+        sv = new ChannelSettlementVerifier();
         {
             ChannelSettlementVerifier.CloseVk memory cvk = ChannelSettlementVerifier.CloseVk({
                 degreeBits: 1,
@@ -82,36 +90,65 @@ contract DeployWalletSettlement is Script {
             );
         }
 
-        // 3. Register channel on rollup.
-        uint32 channelId = uint32(vm.parseJsonUint(reg, ".channel_id"));
-        uint8 bpSlot = uint8(vm.parseJsonUint(reg, ".bp_member_slot"));
-        uint8 delegateCount = uint8(vm.parseJsonUint(reg, ".delegate_count"));
-        bytes32[] memory pkGs = vm.parseJsonBytes32Array(reg, ".member_pk_gs");
-        bytes32[] memory pkBs = vm.parseJsonBytes32Array(reg, ".member_pk_bs");
-        bytes32[] memory regev = vm.parseJsonBytes32Array(reg, ".regev_pk_digests");
-        address[] memory recipients = vm.parseJsonAddressArray(reg, ".recipients");
-        rollup.registerChannel(channelId, bpSlot, delegateCount, pkGs, pkBs, regev, recipients);
+        // 3. Register the channel on the rollup — COSIGNERS ONLY.
+        //
+        // SECURITY (Option B): the L1 registration record carries the `member_count` co-signing
+        // members and a ZERO delegate count, EVEN WHEN the live channel this deploy serves has
+        // delegates (the wallet demo's does: `wallet-live-work/chN/channel_snapshot.json` reaches
+        // this script with a nonzero `active_delegate_count`). This used to pass the live count and
+        // the full active arrays straight through, which produced a registration that
+        //   * the validity `channel_reg_step` circuit REFUSES to fold — it constrains the
+        //     `delegateCount` limb to zero — leaving the channel unprovable, and
+        //   * never matched the preimage the proving side actually builds:
+        //     `wallet_core::build_channel_withdrawal` has always registered the cosigner slice with
+        //     `delegate_count = 0`.
+        // `RegRecordLib.REGISTRATION_DELEGATE_COUNT` is a constant, so no record can reintroduce a
+        // delegate here. The delegates are NOT lost — they are bound in step 4 below.
+        //
+        // NOTHING IS WEAKENED BY THE TRUNCATION: `channelMemberSetCommitment` is the MEMBER-ONLY
+        // IMCM commitment over the first `memberCount` pk_gs, and `registerChannel` derives
+        // `memberCount = arrays.length - delegateCount`. Cosigner slice + 0 and full arrays + live
+        // count both yield the SAME `memberCount` and therefore the SAME commitment the manager
+        // constructor binds to. What changes is only what the reg-chain preimage and the
+        // `ChannelRegistered` event contain: no delegate slots, and a zero `delegateCount` limb.
+        rollup.registerChannel(
+            r.channelId,
+            r.bpSlot,
+            RegRecordLib.REGISTRATION_DELEGATE_COUNT,
+            RegRecordLib.regPkGs(r),
+            RegRecordLib.regPkBs(r),
+            RegRecordLib.regRegevDigests(r),
+            RegRecordLib.regRecipients(r)
+        );
 
         // 4. Deploy ChannelSettlementManager with member + delegate bindings.
-        uint8 memberCount = uint8(vm.parseJsonUint(reg, ".member_count"));
+        //
+        // SECURITY (B-2, doc/tasks/b2-delegate-close-threat-model.md): `activeDelegateCount` here is
+        // the LIVE count — deliberately NOT the zero registered above. It is the FLOOR the close /
+        // partial-withdrawal path checks against close PI limb 94 (`>= activeDelegateCount`), so
+        // zeroing it to "match" the registration would silently retire the delegate-close
+        // cardinality fence, and it sizes `dBind`, whose entries are the only place a delegate's
+        // `registeredRecipientOf` / `isMemberRecipient` binding is written. The two counts mean
+        // different things and are read from two different fields for exactly that reason.
         ChannelSettlementManager.MemberBinding[] memory mBind =
-            new ChannelSettlementManager.MemberBinding[](memberCount);
-        for (uint256 i = 0; i < memberCount; i++) {
+            new ChannelSettlementManager.MemberBinding[](r.memberCount);
+        for (uint256 i = 0; i < r.memberCount; i++) {
             mBind[i] = ChannelSettlementManager.MemberBinding({
-                pkG: pkGs[i],
-                recipient: recipients[i]
+                pkG: r.pkGs[i],
+                recipient: r.recipients[i]
             });
         }
         ChannelSettlementManager.MemberBinding[] memory dBind =
-            new ChannelSettlementManager.MemberBinding[](delegateCount);
-        for (uint256 i = 0; i < delegateCount; i++) {
+            new ChannelSettlementManager.MemberBinding[](r.activeDelegateCount);
+        for (uint256 i = 0; i < r.activeDelegateCount; i++) {
             dBind[i] = ChannelSettlementManager.MemberBinding({
-                pkG: pkGs[memberCount + i],
-                recipient: recipients[memberCount + i]
+                pkG: r.pkGs[r.memberCount + i],
+                recipient: r.recipients[r.memberCount + i]
             });
         }
-        ChannelSettlementManager manager = new ChannelSettlementManager(
-            bytes4(channelId), bpSlot, pkGs[bpSlot], delegateCount, DeployConfig.challengePeriodSecs(),
+        manager = new ChannelSettlementManager(
+            bytes4(r.channelId), r.bpSlot, r.pkGs[r.bpSlot], r.activeDelegateCount,
+            DeployConfig.challengePeriodSecs(),
             SPECIAL_CLOSE_PENALTY, INITIAL_BP_BOND,
             IChannelSettlementVerifier(address(sv)), IChannelRegistry(address(rollup)),
             mBind, dBind

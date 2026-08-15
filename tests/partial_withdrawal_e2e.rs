@@ -270,7 +270,13 @@ fn partial_withdrawal_e2e_anvil() {
             "channel_id": 42,
             "bp_member_slot": 0,
             "member_count": 3,
-            "delegate_count": 0,
+            // Two INDEPENDENT counts (see `settlement_reg_json` in src/bin/channel_member.rs and
+            // contracts/script/RegRecordLib.sol): `reg_delegate_count` is the L1 registration
+            // record's — always 0, cosigner-only registration is a circuit constraint;
+            // `active_delegate_count` is the live count the settlement manager binds. This driver's
+            // channel has no delegates, so both are 0 here — for different reasons.
+            "reg_delegate_count": 0,
+            "active_delegate_count": 0,
             "member_pk_gs": pk_gs,
             "member_pk_bs": pk_bs,
             "regev_pk_digests": regev_digests,

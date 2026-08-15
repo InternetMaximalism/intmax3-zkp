@@ -2,6 +2,7 @@ pub mod block_chain_pis;
 pub mod block_hash_chain_circuit;
 pub mod block_hash_chain_processor;
 pub mod block_step;
+pub mod channel_state_message;
 pub mod ext_public_state;
 pub mod small_block_message;
 pub mod update_channel_tree;
