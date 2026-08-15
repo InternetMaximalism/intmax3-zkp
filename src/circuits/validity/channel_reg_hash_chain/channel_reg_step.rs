@@ -595,13 +595,17 @@ impl<const D: usize> ChannelRegStepTarget<D> {
 /// `is_active = (i < member_count)` as a BoolTarget, for the small constant `i` and a
 /// range-checked `member_count` (in `[2, MAX_COSIGNERS]`).
 ///
+/// `pub(crate)` (small-block N-of-N design §5.4 item 1): `update_channel_tree` builds the SAME
+/// thermometer over its `signer_count`. It CALLS this one rather than restating it — a second
+/// derivation that agrees only by luck is the recurring failure mode this repo is trying to stop.
+///
 /// DETERMINISTIC (no free witness): `member_count` takes exactly one value in
 /// `[2, MAX_COSIGNERS]`, so `is_active[i] = Σ_{t = i+1..=MAX} is_equal(member_count, t)`.
 /// Exactly one `is_equal` fires (when `member_count == t`), and it is in the sum iff `t > i`, i.e.
 /// iff `i < member_count`. The sum is therefore 0 or 1 and has standard generators (no unfilled
 /// witness). INTENTIONALLY SIMPLE: the constant range is tiny (<= MAX_COSIGNERS = 16), so
 /// unrolling is cheap.
-fn lt_const_threshold<F: RichField + Extendable<D>, const D: usize>(
+pub(crate) fn lt_const_threshold<F: RichField + Extendable<D>, const D: usize>(
     builder: &mut CircuitBuilder<F, D>,
     i: usize,
     member_count: Target,
@@ -622,7 +626,12 @@ fn lt_const_threshold<F: RichField + Extendable<D>, const D: usize>(
 /// Compute the root of a full balanced tree (height = `MEMBER_TREE_HEIGHT`) over its leaf hashes,
 /// folding pairwise `two_to_one(left, right)` with the lower index as the left child — exactly the
 /// convention of `IncrementalMerkleTree` / `MerkleTree::update_leaf`.
-fn compute_member_tree_root<
+///
+/// `pub(crate)` (design §5.4 item 5, M2′): `update_channel_tree` recomputes the member root from
+/// its 16 witnessed leaves and connects it to `prev_user_leaf.member_pubkeys_root`. It MUST fold
+/// the tree exactly as the writer of that root does, so it calls THIS function; the alternative —
+/// two independent fold orders — is unobservable until a real registration fails to match.
+pub(crate) fn compute_member_tree_root<
     F: RichField + Extendable<D>,
     C: GenericConfig<D, F = F> + 'static,
     const D: usize,

@@ -555,7 +555,7 @@ fn unified_inter_channel_transfer_e2e() {
     let list = ListCircuit::<F, C, D>::new();
     let list_proof = bwgen
         .borrow()
-        .build_bp_sig_list_proof(&list)
+        .build_legacy_single_sig_list_proof(&list)
         .expect("list proof");
     assert!(list_proof.is_some());
     let validity = ValidityCircuit::<F, C, D>::new(&block_chain_vd, &list.verifier_data());

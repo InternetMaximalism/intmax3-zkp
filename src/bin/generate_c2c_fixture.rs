@@ -711,7 +711,7 @@ fn main() -> anyhow::Result<()> {
     let list_circuit = intmax3_zkp::falcon_sig::list::ListCircuit::<F, C, D>::new();
     let list_proof = block_witness_generator
         .borrow()
-        .build_bp_sig_list_proof(&list_circuit)
+        .build_legacy_single_sig_list_proof(&list_circuit)
         .expect("build bp sig list proof");
     let validity_circuit =
         ValidityCircuit::<F, C, D>::new(&block_chain_vd, &list_circuit.verifier_data());

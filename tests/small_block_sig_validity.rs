@@ -208,7 +208,7 @@ fn inter_channel_small_block_sig_is_validity_proven() {
     let list_circuit = ListCircuit::<F, C, D>::new();
     let list_proof = bwgen
         .borrow()
-        .build_bp_sig_list_proof(&list_circuit)
+        .build_legacy_single_sig_list_proof(&list_circuit)
         .expect("bp sig list proof");
     assert!(
         list_proof.is_some(),

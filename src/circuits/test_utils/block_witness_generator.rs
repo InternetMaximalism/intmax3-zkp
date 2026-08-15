@@ -6,7 +6,8 @@ use crate::{
         },
         validity::block_hash_chain::{
             block_hash_chain_processor::BlockHashChainProcessorWitness,
-            ext_public_state::ExtendedPublicState, small_block_message::SmallBlockMessageFields,
+            channel_state_message::ChannelStateMessageFields,
+            ext_public_state::ExtendedPublicState,
         },
     },
     common::{
@@ -20,18 +21,22 @@ use crate::{
                 ChannelLeaf, ChannelMerkleProof, ChannelTree, SendLeaf, SendMerkleProof, SendTree,
             },
             deposit_tree::{DepositMerkleProof, DepositTree},
-            key_tree::{MemberLeaf, MemberMerkleProof, MemberTree},
+            key_tree::{MemberLeaf, MemberTree},
             public_state_tree::{PublicStateMerkleProof, PublicStateTree},
             tx_v2_tree::TxV2MerkleProof,
         },
         tx::TxV2,
         u63::{BlockNumber, BlockNumberError, U63},
     },
-    constants::{CHANNEL_TREE_HEIGHT, MAX_COSIGNERS, SEND_TREE_HEIGHT},
+    constants::{CHANNEL_TREE_HEIGHT, MAX_CHANNEL_TOKENS, MAX_COSIGNERS, SEND_TREE_HEIGHT},
     ethereum_types::{
         address::Address, bytes32::Bytes32, u32limb_trait::U32LimbTrait as _, u256::U256,
     },
-    falcon_sig::{FalconKeys, gadget::FalconSigGadgetWitness},
+    falcon_sig::{
+        FalconKeys,
+        agg_list::{AggListEntry, agg_list_commitment},
+        gadget::FalconSigGadgetWitness,
+    },
     regev::{REGEV_N, REGEV_Q, RegevPk, hash_sig::BabyBearSecretKey},
     utils::poseidon_hash_out::PoseidonHashOut,
 };
@@ -170,17 +175,29 @@ fn falcon_pk_g_hash_out(key: &FalconKeys) -> PoseidonHashOut {
         .expect("Falcon pk_g is a canonical Poseidon hash out")
 }
 
-/// One recorded bp IMSB signing event (falcon-sig Phase 3).
+/// One recorded N-of-N signing event: for one signing block, the channel's IMCH channel-state
+/// digest and the signature of EVERY active member over it (small-block N-of-N design §5.3).
 ///
-/// The Falcon signature is produced NATIVELY at `add_block` time (~ms) and stored as the exact
-/// gadget witness the list step consumes, so the generator never has to hold a signing key open
-/// until proving time. `pk_g` is the signer's Falcon identity — the SAME value committed in the
-/// member leaf and folded into `bp_sig_chain`.
+/// The Falcon signatures are produced NATIVELY at `add_block` time (~ms each) and stored as the
+/// exact gadget witnesses `FalconAggWitness` consumes (`FalconAggWitness { message: digest,
+/// active: witnesses }`), so the generator never has to hold a signing key open until proving
+/// time. `signer_pks` are the signers' Falcon identities in SLOT ORDER — the same values committed
+/// in the member leaves, folded into the block's `pk_list_digest`.
 #[derive(Debug, Clone)]
 pub struct BpSigEvent {
     pub digest: Bytes32,
-    pub pk_g: Bytes32,
-    pub witness: FalconSigGadgetWitness,
+    pub signer_pks: Vec<Bytes32>,
+    pub witnesses: Vec<FalconSigGadgetWitness>,
+}
+
+impl BpSigEvent {
+    /// The statement this block folds into the chain.
+    pub fn entry(&self) -> AggListEntry {
+        AggListEntry {
+            message: self.digest,
+            signer_pks: self.signer_pks.clone(),
+        }
+    }
 }
 
 /// Test-only per-channel member key material (one **Falcon-512/Poseidon** signing key per member).
@@ -638,7 +655,6 @@ impl BlockWitnessGenerator {
         // ──
         let dummy_account_proof = ChannelMerkleProof::dummy(CHANNEL_TREE_HEIGHT);
         let dummy_send_proof = SendMerkleProof::dummy(SEND_TREE_HEIGHT);
-        let dummy_member_proof = MemberMerkleProof::dummy(crate::constants::MEMBER_TREE_HEIGHT);
         let dummy_regev = RegevPk {
             a: vec![0u32; REGEV_N],
             b: vec![0u32; REGEV_N],
@@ -646,16 +662,12 @@ impl BlockWitnessGenerator {
         let mut prev_account_leaves = Vec::with_capacity(num_users as usize);
         let mut user_merkle_proofs = Vec::with_capacity(num_users as usize);
         let mut send_merkle_proofs = Vec::with_capacity(num_users as usize);
-        let mut member_merkle_proofs = Vec::with_capacity(num_users as usize);
         let mut member_regev_pks = Vec::with_capacity(num_users as usize);
-        let mut member_pk_bs = Vec::with_capacity(num_users as usize);
         for _ in 0..num_users {
             prev_account_leaves.push(ChannelLeaf::default());
             user_merkle_proofs.push(dummy_account_proof.clone());
             send_merkle_proofs.push(dummy_send_proof.clone());
-            member_merkle_proofs.push(dummy_member_proof.clone());
             member_regev_pks.push(dummy_regev.clone());
-            member_pk_bs.push(PoseidonHashOut::default());
         }
 
         let block_witness = BlockHashChainProcessorWitness {
@@ -667,10 +679,13 @@ impl BlockWitnessGenerator {
             user_merkle_proofs,
             send_merkle_proofs,
             public_state_merkle_proof,
-            member_merkle_proofs: Some(member_merkle_proofs),
+            // A registration block transitions no channel leaf, so it applies no member
+            // signature and carries no member set (the N-of-N binding is gated on a block
+            // actually signing).
+            member_leaves: None,
+            signer_count: None,
             member_regev_pks: Some(member_regev_pks),
-            member_pk_bs: Some(member_pk_bs),
-            msg_fields: Some(SmallBlockMessageFields::default()),
+            channel_state_fields: None,
             tx_v2_indices: None,
             tx_v2s: None,
             tx_v2_merkle_proofs: None,
@@ -736,24 +751,30 @@ impl BlockWitnessGenerator {
         )
     }
 
-    /// P2b: the running bp IMSB-signature list commitment over all signing events so far (the
+    /// The running N-of-N signature list commitment over all signing events so far (the
     /// authoritative value the validity proof's `final.bp_sig_chain` must equal). Folds
-    /// `(IMSB_digest, bp_pk_g)` pairs with the shared `poseidon_sig::list` native helper.
+    /// `(IMCH_digest, signer_count, pk_list_digest)` statements with the shared
+    /// `falcon_sig::agg_list` native helper — the SAME formula `update_channel_tree` folds
+    /// in-circuit.
     pub fn current_bp_sig_chain(&self) -> Bytes32 {
-        let pairs: Vec<(Bytes32, Bytes32)> = self
-            .bp_sig_events
-            .iter()
-            .map(|e| (e.digest, e.pk_g))
-            .collect();
-        crate::poseidon_sig::list::list_commitment(&pairs)
+        let entries: Vec<AggListEntry> = self.bp_sig_events.iter().map(BpSigEvent::entry).collect();
+        agg_list_commitment(&entries)
     }
 
-    /// P2b: build the recursive `ListCircuit` proof over all recorded bp IMSB signing events (block
-    /// order). Returns `None` when there were no signing blocks in the span (the validity circuit
-    /// then gates the list verification off). Each event's Falcon signature is verified DIRECTLY
-    /// in-circuit by one list step, which folds `(IMSB digest, Falcon pk_g)` into the running
-    /// chain; the final commitment equals [`Self::current_bp_sig_chain`].
-    pub fn build_bp_sig_list_proof(
+    /// Build the recursive SINGLE-SIGNATURE `ListCircuit` proof over every recorded signature
+    /// (block order, all members of each signing block). Returns `None` when there were no signing
+    /// blocks in the span.
+    ///
+    /// STALE BY DESIGN, and renamed so no call site can keep believing otherwise: since the N-of-N
+    /// rewire of `update_channel_tree` (small-block N-of-N design §9 Phase 3) the block folds
+    /// `(IMCH_digest, signer_count, pk_list_digest)`, so THIS proof's commitment is NOT
+    /// [`Self::current_bp_sig_chain`] and a `ValidityCircuit` that consumes it will fail its
+    /// `C == final.bp_sig_chain` assertion. Phase 4 replaces both this builder and the circuit's
+    /// `list_vd` with the aggregate list (`falcon_sig::agg_list::AggListCircuit`), whose steps
+    /// consume the `FalconAggWitness` these same recorded gadget witnesses form
+    /// (`FalconAggWitness { message: event.digest, active: event.witnesses }`). It is kept working
+    /// rather than deleted so the swap in Phase 4 is a visible, reviewable diff at each call site.
+    pub fn build_legacy_single_sig_list_proof(
         &self,
         list: &crate::falcon_sig::list::ListCircuit<
             plonky2::field::goldilocks_field::GoldilocksField,
@@ -769,18 +790,28 @@ impl BlockWitnessGenerator {
             >,
         >,
     > {
-        if self.bp_sig_events.is_empty() {
-            return Ok(None);
-        }
         let pairs: Vec<(Bytes32, Bytes32)> = self
             .bp_sig_events
             .iter()
-            .map(|e| (e.digest, e.pk_g))
+            .flat_map(|e| {
+                e.signer_pks
+                    .iter()
+                    .map(|pk| (e.digest, *pk))
+                    .collect::<Vec<_>>()
+            })
             .collect();
+        let witnesses: Vec<&FalconSigGadgetWitness> = self
+            .bp_sig_events
+            .iter()
+            .flat_map(|e| e.witnesses.iter())
+            .collect();
+        if witnesses.is_empty() {
+            return Ok(None);
+        }
         let mut prev = None;
-        for (i, event) in self.bp_sig_events.iter().enumerate() {
+        for (i, witness) in witnesses.into_iter().enumerate() {
             let prefix = crate::poseidon_sig::list::list_commitment(&pairs[0..i]);
-            prev = Some(list.prove_append(&event.witness, prefix, &prev)?);
+            prev = Some(list.prove_append(witness, prefix, &prev)?);
         }
         Ok(prev)
     }
@@ -925,20 +956,22 @@ impl BlockWitnessGenerator {
 
         let mut account_tree_for_proofs = self.channel_tree.clone();
 
-        // ── Member-signature witnesses (live `update_channel_tree` binding) ────────
+        // ── Member-signature witnesses (live `update_channel_tree` N-of-N binding) ────────
         //
-        // For every slot `i` whose channel leaf actually transitions this block (`prev !=
-        // new_block_number`, the circuit's `should_update`), member `i` signs the block's IMSB
-        // digest and opens member `i`'s leaf at tree index `i` against the channel's
-        // `member_pubkeys_root`. Non-updating / padding slots carry dummy witnesses (their
-        // signature + binding constraints are skipped in-circuit).
+        // When a slot `i` transitions the channel leaf this block (`prev != new_block_number`, the
+        // circuit's `should_update`), EVERY active member of the channel signs the block's IMCH
+        // channel-state digest — that is the N-of-N rule the base layer now enforces (small-block
+        // N-of-N design §5.3/§5.4) — and the block carries the channel's whole registered member
+        // set so the circuit can recompute `member_pubkeys_root` from it. Blocks that transition
+        // nothing carry no member set at all (the binding is gated on signing).
         //
         // `channel` is bound above (auto-register check).
         // `updating[i] = true` iff slot i triggers a leaf transition. All slots reference the SAME
         // channel leaf, so only the FIRST non-padding slot actually transitions it (subsequent
         // slots observe the already-updated leaf with `prev == new_block_number` and do NOT update
-        // — this mirrors the per-slot loop below exactly). That first updating slot is the IMSB
-        // block proposer (`bp_member_slot`).
+        // — this mirrors the per-slot loop below exactly). That first updating slot is the block
+        // proposer's slot; posting is NOT a security control (design G5) — the authorization is
+        // the N signatures.
         let mut updating = vec![false; num_users as usize];
         let mut any_update_slot: Option<usize> = None;
         // Real member witnesses require a registered channel; otherwise fall back to dummies.
@@ -954,8 +987,16 @@ impl BlockWitnessGenerator {
             }
         }
 
-        // Build the block-level IMSB message fields (`bp_member_slot` = first updating slot). The
-        // signed digest is recomputed once and signed by EACH updating member at their own slot.
+        // Build the block-level IMCH channel-state message the members sign, and the channel's
+        // registered member set.
+        //
+        // The preimage limbs are a REAL `ChannelState` projection, not filler: `balance_state_h1`
+        // is the genuine post-debit H1' the caller supplied for this block (detail2 §C-7, the same
+        // value the retired IMSB `state_commitment_root` carried), and `small_block_number` /
+        // `state_version` advance with the block. What Phase 6 changes is WHERE the state comes
+        // from — the wallet's own `ChannelState` instead of this projection — not that it is real:
+        // the digest below is signed by the members' real Falcon keys either way, and `h2_tag` is
+        // the block's actual `tx_tree_root`, exactly as the circuit recomputes it.
         let member_keys = channel_opt.and_then(|c| self.channel_members.get(&c).cloned());
         // B-2: bind the real post-debit H1' (detail2 §C-7) if provided for this block
         // (inter-channel small block); `None`/zero is correct for intra-channel and
@@ -964,33 +1005,60 @@ impl BlockWitnessGenerator {
             .next_imsb_state_commitment_root
             .take()
             .unwrap_or_default();
-        let (msg_fields, signed_digest) = if let Some(bp_slot) = any_update_slot {
+        let (channel_state_fields, signer_leaves, signed_digest) = if any_update_slot.is_some() {
             let keys = member_keys.as_ref().ok_or_else(|| {
                 BlockWitnessGeneratorError::InvalidRequest(format!(
                     "channel {} has an updating slot but is not registered; call register_channel first",
                     channel_id
                 ))
             })?;
-            let bp_hash: Bytes32 = keys.member_tree.get_leaf(bp_slot as u64).pk_g.into();
-            let fields = SmallBlockMessageFields {
-                bp_member_slot: bp_slot as u32,
-                bp_pk_g: bp_hash,
-                small_block_number: 0,
-                prev_small_block_root: Bytes32::default(),
-                state_commitment_root: imsb_h1,
-                medium_epoch_hint: 0,
+            let fields = ChannelStateMessageFields {
+                epoch: 0,
+                small_block_number: new_block_number.as_u64(),
                 close_freeze_nonce: 0,
+                fund_amounts: [U256::default(); MAX_CHANNEL_TOKENS],
+                fund_intmax_state_root: Bytes32::default(),
+                balance_state_h1: imsb_h1,
+                shared_native_nullifier_root: Bytes32::default(),
+                unallocated_confirmed_incoming: U256::default(),
+                prev_digest: Bytes32::default(),
+                state_version: new_block_number.as_u64(),
             };
+            // `h2_tag` IS this block's tx root (channel.rs: "the own small block's tx_tree_root
+            // for an inter-channel send"), which is the entire point of the binding.
             let digest = fields.signing_digest(channel_id, tx_tree_root);
-            (fields, Some(digest))
+            let leaves: Vec<MemberLeaf> = (0..MAX_COSIGNERS)
+                .map(|slot| keys.member_tree.get_leaf(slot as u64))
+                .collect();
+            (fields, Some(leaves), Some(digest))
         } else {
-            (SmallBlockMessageFields::default(), None)
+            (ChannelStateMessageFields::default(), None, None)
         };
 
-        let mut member_merkle_proofs = Vec::with_capacity(num_users as usize);
+        // Sign the IMCH digest with EVERY active member's real Falcon key (natively, ~ms each) and
+        // record the statement the block folds. The recorded gadget witnesses are exactly what
+        // `FalconAggWitness { message, active }` consumes, so Phase 4 builds the aggregate proofs
+        // from them without holding a signing key open until proving time.
+        if let (Some(digest), Some(keys)) = (signed_digest, member_keys.as_ref()) {
+            let mut signer_pks = Vec::with_capacity(keys.falcon_keys.len());
+            let mut witnesses = Vec::with_capacity(keys.falcon_keys.len());
+            for key in keys.falcon_keys.iter() {
+                let sig = key.sign(digest);
+                signer_pks.push(key.pk_g());
+                witnesses.push(FalconSigGadgetWitness::for_signature(
+                    &key.pk_coefficients(),
+                    digest,
+                    &sig,
+                ));
+            }
+            self.bp_sig_events.push(BpSigEvent {
+                digest,
+                signer_pks,
+                witnesses,
+            });
+        }
+
         let mut member_regev_pks = Vec::with_capacity(num_users as usize);
-        let mut member_pk_bs = Vec::with_capacity(num_users as usize);
-        let dummy_member_proof = MemberMerkleProof::dummy(crate::constants::MEMBER_TREE_HEIGHT);
         let dummy_regev = RegevPk {
             a: vec![0u32; REGEV_N],
             b: vec![0u32; REGEV_N],
@@ -1001,9 +1069,7 @@ impl BlockWitnessGenerator {
                 prev_account_leaves.push(ChannelLeaf::default());
                 user_merkle_proofs.push(dummy_account_proof.clone());
                 send_merkle_proofs.push(dummy_send_proof.clone());
-                member_merkle_proofs.push(dummy_member_proof.clone());
                 member_regev_pks.push(dummy_regev.clone());
-                member_pk_bs.push(PoseidonHashOut::default());
                 continue;
             }
 
@@ -1027,11 +1093,9 @@ impl BlockWitnessGenerator {
             let send_proof = send_tree.prove(prev_user_leaf.index.into());
             send_merkle_proofs.push(send_proof.clone());
 
-            // Real member witness for the updating (bp) slot; dummy otherwise. P2b: instead of an
-            // inline SPHINCS+ signature, we record the bp's `(secret_key, IMSB_digest)` signing
-            // event so the validity level can fold it into the `ListCircuit` proof (decision D3,
-            // one direct in-circuit Falcon verification per step). The `(digest, pk_g)` pair is
-            // bound here via the member-leaf inclusion.
+            // The posting (bp) slot opens its own Regev public key: that binding survives the
+            // N-of-N rewire unchanged (design §5.4 item 6 / §4 "cost trap"). Its digest must equal
+            // the `regev_pk_digest` of the member leaf at the SAME slot of the witnessed set.
             if updating[i] {
                 let keys = member_keys.as_ref().ok_or_else(|| {
                     BlockWitnessGeneratorError::InvalidRequest(format!(
@@ -1039,31 +1103,9 @@ impl BlockWitnessGenerator {
                         channel_id, i
                     ))
                 })?;
-                let digest = signed_digest.expect("updating slot implies a signed digest");
-                // Record the bp signing event (block order) for the list proof. The Falcon
-                // signature is produced natively HERE, over exactly the IMSB digest whose
-                // `bp_pk_g` limb is this same key's identity, so the list step's in-circuit
-                // verification and the in-circuit `bp_sig_chain` fold agree by construction.
-                let bp_key = &keys.falcon_keys[i];
-                let sig = bp_key.sign(digest);
-                self.bp_sig_events.push(BpSigEvent {
-                    digest,
-                    pk_g: bp_key.pk_g(),
-                    witness: FalconSigGadgetWitness::for_signature(
-                        &bp_key.pk_coefficients(),
-                        digest,
-                        &sig,
-                    ),
-                });
-                member_merkle_proofs.push(keys.member_tree.prove(i as u64));
                 member_regev_pks.push(keys.regev_pks[i].clone());
-                // P3: the bp slot's pk_b for the 3-field MemberLeaf inclusion (matches the leaf
-                // pushed into `member_tree` at construction).
-                member_pk_bs.push(keys.member_tree.get_leaf(i as u64).pk_b);
             } else {
-                member_merkle_proofs.push(dummy_member_proof.clone());
                 member_regev_pks.push(dummy_regev.clone());
-                member_pk_bs.push(PoseidonHashOut::default());
             }
 
             if prev_user_leaf.prev != new_block_number {
@@ -1111,11 +1153,14 @@ impl BlockWitnessGenerator {
             user_merkle_proofs,
             send_merkle_proofs,
             public_state_merkle_proof,
-            // Real per-slot member witnesses (updating slots) + dummies (padding/non-updating).
-            member_merkle_proofs: Some(member_merkle_proofs),
+            // The channel's whole registered member set on a signing block; nothing on a block
+            // that transitions no leaf.
+            signer_count: signer_leaves
+                .as_ref()
+                .and_then(|_| member_keys.as_ref().map(|k| k.falcon_keys.len() as u32)),
+            member_leaves: signer_leaves,
             member_regev_pks: Some(member_regev_pks),
-            member_pk_bs: Some(member_pk_bs),
-            msg_fields: Some(msg_fields),
+            channel_state_fields: Some(channel_state_fields),
             tx_v2_indices: tx_v2_witness.as_ref().map(|w| w.tx_v2_indices.clone()),
             tx_v2s: tx_v2_witness.as_ref().map(|w| w.tx_v2s.clone()),
             tx_v2_merkle_proofs: tx_v2_witness

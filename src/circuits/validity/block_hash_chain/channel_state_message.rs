@@ -39,14 +39,29 @@
 //! Those are SEGMENT ordinals, not limb offsets. The actual u32-limb offsets are pinned by the
 //! constants below and by `channel_state_preimage_limb_offsets_are_pinned`.
 //!
-//! Phase 1 scope: native only. The `…Target` twin lands with the `update_channel_tree` rewire
-//! (design §9 Phase 3) and must be built from the same [`ChannelStateMessageFields::preimage`]
-//! layout.
+//! Phase 3 scope: the `…Target` twin ([`ChannelStateMessageFieldsTarget`]) landed with the
+//! `update_channel_tree` rewire (design §9 Phase 3) and is built from the same
+//! [`ChannelStateMessageFields::preimage`] layout, limb for limb.
+
+use plonky2::{
+    field::{extension::Extendable, types::Field},
+    hash::hash_types::RichField,
+    iop::{target::Target, witness::WitnessWrite},
+    plonk::{
+        circuit_builder::CircuitBuilder,
+        config::{AlgebraicHasher, GenericConfig},
+    },
+};
+use plonky2_keccak::builder::BuilderKeccak256 as _;
 
 use crate::{
     common::channel::{CHANNEL_STATE_DOMAIN, hash_words, split_u64},
     constants::MAX_CHANNEL_TOKENS,
-    ethereum_types::{bytes32::Bytes32, u32limb_trait::U32LimbTrait as _, u256::U256},
+    ethereum_types::{
+        bytes32::{Bytes32, Bytes32Target},
+        u32limb_trait::{U32LimbTargetTrait as _, U32LimbTrait as _},
+        u256::{U256, U256Target},
+    },
 };
 
 /// Total u32-limb width of the IMCH signing preimage. Fixed-width and injective.
@@ -150,6 +165,146 @@ impl ChannelStateMessageFields {
             prev_digest: state.prev_digest,
             state_version: state.balance_state.state_version,
         }
+    }
+}
+
+/// Circuit targets for [`ChannelStateMessageFields`]. Every limb is range-checked to 32 bits at
+/// allocation, as the keccak gadget requires (it does NOT range-check its own inputs).
+///
+/// SECURITY: this struct carries NO `channel_id` and NO `h2_tag` targets — by construction, not by
+/// convention. Those two components are parameters of [`Self::preimage`] / [`Self::signing_digest`]
+/// and must be the enclosing circuit's own block-level wires. A witness "whose `h2_tag` limbs
+/// differ from the block's `tx_tree_root`" is therefore not expressible: there is no wire to put
+/// such a value on (design §9 Phase 3, acceptance (g); pinned by
+/// `preimage_target_wires_are_the_connected_ones`).
+#[derive(Clone, Debug)]
+pub struct ChannelStateMessageFieldsTarget {
+    /// `split_u64(epoch)` limbs `[hi, lo]`.
+    pub epoch: [Target; 2],
+    /// `split_u64(small_block_number)` limbs `[hi, lo]`.
+    pub small_block_number: [Target; 2],
+    /// `split_u64(close_freeze_nonce)` limbs `[hi, lo]`.
+    pub close_freeze_nonce: [Target; 2],
+    /// `channel_fund.amounts` — ALWAYS the full `MAX_CHANNEL_TOKENS` width, zero-padded (TM-11).
+    pub fund_amounts: [U256Target; MAX_CHANNEL_TOKENS],
+    pub fund_intmax_state_root: Bytes32Target,
+    pub balance_state_h1: Bytes32Target,
+    pub shared_native_nullifier_root: Bytes32Target,
+    pub unallocated_confirmed_incoming: U256Target,
+    pub prev_digest: Bytes32Target,
+    /// `split_u64(balance_state.state_version)` limbs `[hi, lo]` — the v2 tail, after `h2_tag`.
+    pub state_version: [Target; 2],
+}
+
+impl ChannelStateMessageFieldsTarget {
+    pub fn new<F: RichField + Extendable<D>, const D: usize>(
+        builder: &mut CircuitBuilder<F, D>,
+    ) -> Self {
+        let u64_limbs = |builder: &mut CircuitBuilder<F, D>| {
+            let hi = builder.add_virtual_target();
+            let lo = builder.add_virtual_target();
+            builder.range_check(hi, 32);
+            builder.range_check(lo, 32);
+            [hi, lo]
+        };
+        let epoch = u64_limbs(builder);
+        let small_block_number = u64_limbs(builder);
+        let close_freeze_nonce = u64_limbs(builder);
+        let state_version = u64_limbs(builder);
+        Self {
+            epoch,
+            small_block_number,
+            close_freeze_nonce,
+            fund_amounts: std::array::from_fn(|_| U256Target::new(builder, true)),
+            fund_intmax_state_root: Bytes32Target::new(builder, true),
+            balance_state_h1: Bytes32Target::new(builder, true),
+            shared_native_nullifier_root: Bytes32Target::new(builder, true),
+            unallocated_confirmed_incoming: U256Target::new(builder, true),
+            prev_digest: Bytes32Target::new(builder, true),
+            state_version,
+        }
+    }
+
+    /// In-circuit mirror of [`ChannelStateMessageFields::preimage`] — the SAME 139 limbs in the
+    /// SAME order.
+    ///
+    /// SECURITY: `channel_id` and `h2_tag` are the enclosing circuit's block-level wires and land
+    /// at [`CHANNEL_ID_LIMB`] / [`FUND_CHANNEL_ID_LIMB`] / [`H2_TAG_LIMBS`]. Passing anything
+    /// witnessed here would void the whole binding, which is why the caller has to hand them in.
+    pub fn preimage(
+        &self,
+        domain: Target,
+        channel_id: Target,
+        h2_tag: &Bytes32Target,
+    ) -> Vec<Target> {
+        let limbs: Vec<Target> = [
+            vec![domain],
+            vec![channel_id],
+            self.epoch.to_vec(),
+            self.small_block_number.to_vec(),
+            self.close_freeze_nonce.to_vec(),
+            vec![channel_id],
+            self.fund_amounts
+                .iter()
+                .flat_map(|amount| amount.to_vec())
+                .collect(),
+            self.fund_intmax_state_root.to_vec(),
+            self.balance_state_h1.to_vec(),
+            self.shared_native_nullifier_root.to_vec(),
+            self.unallocated_confirmed_incoming.to_vec(),
+            self.prev_digest.to_vec(),
+            h2_tag.to_vec(),
+            self.state_version.to_vec(),
+        ]
+        .concat();
+        assert_eq!(limbs.len(), CHANNEL_STATE_PREIMAGE_U32_LEN);
+        limbs
+    }
+
+    /// Recompute `ChannelState::signing_digest()` in-circuit over the 139-limb preimage.
+    pub fn signing_digest<F, C, const D: usize>(
+        &self,
+        builder: &mut CircuitBuilder<F, D>,
+        channel_id: Target,
+        h2_tag: &Bytes32Target,
+    ) -> Bytes32Target
+    where
+        F: RichField + Extendable<D>,
+        C: GenericConfig<D, F = F> + 'static,
+        <C as GenericConfig<D>>::Hasher: AlgebraicHasher<F>,
+    {
+        let domain = builder.constant(F::from_canonical_u32(CHANNEL_STATE_DOMAIN));
+        let inputs = self.preimage(domain, channel_id, h2_tag);
+        Bytes32Target::from_slice(&builder.keccak256::<C>(&inputs))
+    }
+
+    pub fn set_witness<F: Field, W: WitnessWrite<F>>(
+        &self,
+        witness: &mut W,
+        value: &ChannelStateMessageFields,
+    ) {
+        for (targets, native) in [
+            (&self.epoch, value.epoch),
+            (&self.small_block_number, value.small_block_number),
+            (&self.close_freeze_nonce, value.close_freeze_nonce),
+            (&self.state_version, value.state_version),
+        ] {
+            let limbs = split_u64(native);
+            witness.set_target(targets[0], F::from_canonical_u32(limbs[0]));
+            witness.set_target(targets[1], F::from_canonical_u32(limbs[1]));
+        }
+        for (target, native) in self.fund_amounts.iter().zip(value.fund_amounts.iter()) {
+            target.set_witness(witness, *native);
+        }
+        self.fund_intmax_state_root
+            .set_witness(witness, value.fund_intmax_state_root);
+        self.balance_state_h1
+            .set_witness(witness, value.balance_state_h1);
+        self.shared_native_nullifier_root
+            .set_witness(witness, value.shared_native_nullifier_root);
+        self.unallocated_confirmed_incoming
+            .set_witness(witness, value.unallocated_confirmed_incoming);
+        self.prev_digest.set_witness(witness, value.prev_digest);
     }
 }
 
@@ -413,5 +568,140 @@ mod tests {
                 i + 1
             );
         }
+    }
+
+    // ---- circuit-side twin (Phase 3) ------------------------------------------------------------
+
+    /// SECURITY (design §9 Phase 3, acceptance (g)): the three components the enclosing circuit
+    /// must CONNECT are not merely *documented* as connected — the target vector holds the
+    /// caller's OWN wires at those offsets. This test compares `Target` identity (not values), so
+    /// it fails if a future edit ever allocates a witness for `h2_tag` or either `channel_id`
+    /// occurrence. That is what makes "an IMCH `h2_tag` differing from the block's `tx_tree_root`"
+    /// unsatisfiable BY CONSTRUCTION rather than by a constraint that could be dropped.
+    #[test]
+    fn preimage_target_wires_are_the_connected_ones() {
+        use plonky2::{
+            field::goldilocks_field::GoldilocksField,
+            iop::target::Target,
+            plonk::{circuit_builder::CircuitBuilder, circuit_data::CircuitConfig},
+        };
+        const D: usize = 2;
+        type F = GoldilocksField;
+
+        let mut builder = CircuitBuilder::<F, D>::new(CircuitConfig::standard_recursion_config());
+        let fields = ChannelStateMessageFieldsTarget::new(&mut builder);
+        let domain = builder.add_virtual_target();
+        let channel_id = builder.add_virtual_target();
+        let h2_tag = Bytes32Target::new(&mut builder, true);
+        let limbs = fields.preimage(domain, channel_id, &h2_tag);
+
+        assert_eq!(limbs.len(), CHANNEL_STATE_PREIMAGE_U32_LEN);
+        assert_eq!(limbs[0], domain);
+        assert_eq!(limbs[CHANNEL_ID_LIMB], channel_id);
+        assert_eq!(limbs[FUND_CHANNEL_ID_LIMB], channel_id);
+        assert_eq!(&limbs[H2_TAG_LIMBS], &h2_tag.to_vec()[..]);
+
+        // ... and no OTHER limb is one of those wires (a stray duplicate would mean some other
+        // field is silently pinned to the tx root / channel id).
+        let connected: Vec<Target> = [vec![domain, channel_id], h2_tag.to_vec()].concat();
+        for (i, limb) in limbs.iter().enumerate() {
+            let is_expected_slot = i == 0
+                || i == CHANNEL_ID_LIMB
+                || i == FUND_CHANNEL_ID_LIMB
+                || H2_TAG_LIMBS.contains(&i);
+            assert_eq!(
+                connected.contains(limb),
+                is_expected_slot,
+                "limb {i} is on the wrong side of the witnessed/connected split"
+            );
+        }
+    }
+
+    /// SECURITY (design §5.4, "the single highest-risk piece of drift in Design B"): the IN-CIRCUIT
+    /// recompute must equal the canonical `ChannelState::signing_digest()` that members actually
+    /// sign — not merely equal the native mirror beside it. A limb-order divergence is a silent
+    /// COMPLETENESS break; an omission is a SOUNDNESS break. This proves a circuit whose only
+    /// statement is "the recomputed digest equals this constant", so a mismatch is UNPROVABLE
+    /// rather than merely unequal.
+    #[cfg_attr(debug_assertions, ignore = "run with --release")]
+    #[test]
+    fn in_circuit_recompute_matches_canonical_channel_state_digest() {
+        use plonky2::{
+            field::goldilocks_field::GoldilocksField,
+            iop::witness::{PartialWitness, WitnessWrite as _},
+            plonk::{
+                circuit_builder::CircuitBuilder, circuit_data::CircuitConfig,
+                config::PoseidonGoldilocksConfig,
+            },
+        };
+        const D: usize = 2;
+        type F = GoldilocksField;
+        type C = PoseidonGoldilocksConfig;
+
+        let mut rng = Rng(0x5eed_0000_c1c1_0003);
+        let channel_id = ChannelId::new(0x00ab_cdef).unwrap();
+        let mut fund_amounts = [U256::default(); MAX_CHANNEL_TOKENS];
+        for slot in fund_amounts.iter_mut() {
+            *slot = rng.u256();
+        }
+        let h2_tag = rng.bytes32();
+        let state = ChannelState {
+            channel_id,
+            epoch: rng.next_u64(),
+            small_block_number: rng.next_u64(),
+            close_freeze_nonce: rng.next_u64(),
+            channel_fund: ChannelFund {
+                channel_id,
+                amounts: fund_amounts,
+                intmax_state_root: rng.bytes32(),
+            },
+            balance_state: multitoken_balance_state(channel_id),
+            h2_tag,
+            shared_native_nullifier_root: rng.bytes32(),
+            unallocated_confirmed_incoming: rng.u256(),
+            prev_digest: rng.bytes32(),
+            digest: Bytes32::default(),
+            member_signatures: vec![],
+        };
+        let canonical = state.signing_digest();
+        let fields = ChannelStateMessageFields::from_channel_state(&state);
+
+        let mut builder = CircuitBuilder::<F, D>::new(CircuitConfig::standard_recursion_config());
+        let fields_t = ChannelStateMessageFieldsTarget::new(&mut builder);
+        let channel_id_t = builder.add_virtual_target();
+        let h2_tag_t = Bytes32Target::new(&mut builder, true);
+        let digest_t = fields_t.signing_digest::<F, C, D>(&mut builder, channel_id_t, &h2_tag_t);
+        let expected_t = Bytes32Target::constant(&mut builder, canonical);
+        digest_t.connect(&mut builder, expected_t);
+        let data = builder.build::<C>();
+
+        let mut pw = PartialWitness::<F>::new();
+        fields_t.set_witness(&mut pw, &fields);
+        pw.set_target(
+            channel_id_t,
+            F::from_canonical_u32(channel_id.to_u32_vec()[0]),
+        )
+        .unwrap();
+        h2_tag_t.set_witness(&mut pw, h2_tag);
+        let proof = data
+            .prove(pw)
+            .expect("in-circuit IMCH recompute must prove");
+        data.verify(proof).unwrap();
+
+        // Direction 2: the SAME circuit refuses a different h2_tag — i.e. the connected wire is
+        // load-bearing, and this test is not passing because keccak was folded away.
+        let mut pw_bad = PartialWitness::<F>::new();
+        fields_t.set_witness(&mut pw_bad, &fields);
+        pw_bad
+            .set_target(
+                channel_id_t,
+                F::from_canonical_u32(channel_id.to_u32_vec()[0]),
+            )
+            .unwrap();
+        h2_tag_t.set_witness(&mut pw_bad, rng.bytes32());
+        assert!(
+            data.prove(pw_bad).is_err(),
+            "a different h2_tag must not reproduce the canonical digest"
+        );
     }
 }

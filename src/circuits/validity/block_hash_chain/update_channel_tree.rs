@@ -1,6 +1,9 @@
 use crate::{
-    circuits::validity::block_hash_chain::small_block_message::{
-        SmallBlockMessageFields, SmallBlockMessageFieldsTarget,
+    circuits::validity::{
+        block_hash_chain::channel_state_message::{
+            ChannelStateMessageFields, ChannelStateMessageFieldsTarget,
+        },
+        channel_reg_hash_chain::channel_reg_step::{compute_member_tree_root, lt_const_threshold},
     },
     common::{
         block::{Block, BlockError, BlockTarget},
@@ -10,7 +13,7 @@ use crate::{
                 ChannelLeaf, ChannelLeafTarget, ChannelMerkleProof, ChannelMerkleProofTarget,
                 SendLeaf, SendLeafTarget, SendMerkleProof, SendMerkleProofTarget,
             },
-            key_tree::{MemberLeaf, MemberLeafTarget, MemberMerkleProof, MemberMerkleProofTarget},
+            key_tree::{MemberLeaf, MemberLeafTarget, MemberTree},
             tx_v2_tree::{
                 ChannelActionMerkleProof, ChannelActionMerkleProofTarget, TxV2MerkleProof,
                 TxV2MerkleProofTarget,
@@ -19,17 +22,20 @@ use crate::{
         tx::{ChannelAction, ChannelActionKind, ChannelActionTarget, TxClass, TxV2, TxV2Target},
         u63::{BlockNumber, BlockNumberTarget, U63Target},
     },
-    constants::{CHANNEL_TREE_HEIGHT, MEMBER_TREE_HEIGHT, SEND_TREE_HEIGHT, TX_TREE_HEIGHT},
+    constants::{CHANNEL_TREE_HEIGHT, MAX_COSIGNERS, SEND_TREE_HEIGHT, TX_TREE_HEIGHT},
     ethereum_types::{
         bytes32::{BYTES32_LEN, Bytes32, Bytes32Target},
         u32limb_trait::{U32LimbTargetTrait as _, U32LimbTrait as _},
         u64::{U64, U64_LEN, U64Target},
     },
-    poseidon_sig::list::{chain_step_target, leaf_target, list_chain_step, list_leaf},
+    falcon_sig::agg_list::{
+        agg_list_leaf, agg_list_leaf_target, agg_pk_list_digest, agg_pk_list_digest_target,
+    },
+    poseidon_sig::list::{chain_step_target, list_chain_step},
     regev::{REGEV_N, REGEV_PK_POSEIDON_DOMAIN, RegevPk},
     utils::{
         cyclic::add_const_gate,
-        leafable::Leafable as _,
+        leafable::{Leafable as _, LeafableTarget as _},
         poseidon_hash_out::{POSEIDON_HASH_OUT_LEN, PoseidonHashOut, PoseidonHashOutTarget},
     },
 };
@@ -75,12 +81,12 @@ pub struct UpdateUserPublicInputs {
     /// block_step can constrain the block-hash-committed reg chain to equal the value the
     /// channel-reg proof consumed (= the new ext-state channel_reg_hash_chain).
     pub channel_reg_hash_chain: Bytes32,
-    /// P2b: the block-producer IMSB-signature list accumulator BEFORE this block. block_step
-    /// constrains it equal to the previous ext-state `bp_sig_chain`.
+    /// The N-of-N signature list accumulator BEFORE this block. block_step constrains it equal to
+    /// the previous ext-state `bp_sig_chain`.
     pub prev_bp_sig_chain: Bytes32,
-    /// P2b: the accumulator AFTER folding this block's bp `(IMSB_digest, bp_pk_g)` pair — equal to
-    /// `prev_bp_sig_chain` on a non-signing block, advanced by one Poseidon chain step on a
-    /// signing (base) block. Becomes the new ext-state `bp_sig_chain`.
+    /// The accumulator AFTER folding this block's `(IMCH_digest, signer_count, pk_list_digest)`
+    /// statement — equal to `prev_bp_sig_chain` on a non-signing block, advanced by one Poseidon
+    /// chain step on a signing (base) block. Becomes the new ext-state `bp_sig_chain`.
     pub new_bp_sig_chain: Bytes32,
 }
 
@@ -100,39 +106,40 @@ pub struct UpdateUserTree {
     pub user_merkle_proofs: Vec<ChannelMerkleProof>,
     pub send_merkle_proofs: Vec<SendMerkleProof>,
 
-    // P2b: the bp IMSB-signature list accumulator BEFORE this block (`Bytes32::default()` at the
-    // validity span's genesis). The block folds the bp's `(IMSB_digest, bp_pk_g)` pair onto it
-    // when a member signature is applied; the resulting value is surfaced as
-    // `new_bp_sig_chain`.
+    // The N-of-N signature list accumulator BEFORE this block (`Bytes32::default()` at the
+    // validity span's genesis). The block folds the channel's `(IMCH_digest, signer_count,
+    // pk_list_digest)` statement onto it when a member signature is applied; the resulting value
+    // is surfaced as `new_bp_sig_chain`.
     pub prev_bp_sig_chain: Bytes32,
 
-    // Per-slot MemberTree inclusion proofs binding the bp's signing pubkey to the channel's
-    // members. For the updating bp slot i, `member_merkle_proofs[i]` proves the leaf
-    // `MemberLeaf { pk_g = msg_fields.bp_pk_g, regev_pk_digest }` is at slot i of
-    // `prev_account_leaves[i].member_pubkeys_root`.
-    //
-    // SECURITY: this binds the folded `bp_pk_g` to slot i of the channel's on-chain-bound member
-    // tree (the channel leaf is itself proven in the account tree), so the `(IMSB_digest,
-    // bp_pk_g)` pair folded into `bp_sig_chain` cannot use a prover-chosen pubkey — it is a
-    // registered member.
-    pub member_merkle_proofs: Vec<MemberMerkleProof>,
-    // The Regev public key witnessed at each active slot; its Poseidon digest is the third leaf
-    // component, so the member leaf binds `pk_g`, `pk_b` AND the Regev pubkey.
+    /// ALL `MAX_COSIGNERS` registered member leaves in slot order, padding slots empty (design
+    /// §4 M2′). The circuit recomputes `member_pubkeys_root` from these and connects it to the
+    /// channel leaf's committed root, which is what turns "some registered key signed" into
+    /// "exactly the registered set signed":
+    ///   * a leaf that is not the registered one changes the root (non-membership is refused);
+    ///   * one member's `pk_g` in two slots changes the root (duplicates are unrepresentable —
+    ///     `FalconAggCircuit` deliberately allows them, `falcon_sig::agg`, and this is where that
+    ///     consumer obligation is discharged);
+    ///   * an empty slot below `signer_count`, or a non-empty slot at or above it, is refused — so
+    ///     `occupancy == signer_count` is a theorem, not a premise about left-packing.
+    pub member_leaves: Vec<MemberLeaf>,
+    /// N — how many members signed. Constrained `2 <= signer_count <= MAX_COSIGNERS` in-circuit
+    /// (design §5.4 item 2: the registration floor is repeated here IN-CIRCUIT rather than
+    /// natively, deliberately not repeating `close_circuit`'s `>= 1` in-circuit / `>= 2` native
+    /// split), and equal to the channel's registered `member_count` by the root recompute above.
+    pub signer_count: u32,
+    // The Regev public key witnessed at each block slot; only the updating (bp) slot's is
+    // constrained — its Poseidon digest must equal that slot's member-leaf component, so the bp's
+    // Regev key stays bound exactly as it was before the N-of-N rewire (design §4 "cost trap":
+    // the other 15 slots' `regev_pk_digest` are free witnesses authenticated by the root
+    // recompute, because 16 x 2 x REGEV_N range checks would blow the circuit up).
     pub member_regev_pks: Vec<RegevPk>,
-    // The member's BabyBear hash-sig public key (`pk_b`) witnessed at each active slot (P3). The
-    // 3-field `MemberLeaf{pk_g, pk_b, regev_pk}` inclusion requires it so the rebuilt
-    // `member_pubkeys_root` matches the registration leaf (which now commits `pk_b`). `pk_b` is
-    // NOT part of the IMSB signing digest — that signature is the Goldilocks list-proof,
-    // unchanged.
-    pub member_pk_bs: Vec<PoseidonHashOut>,
 
-    // Per-block IMSB `SmallBlockRootMessage` preimage fields (detail2 §F-2). The signing
-    // digest is recomputed in-circuit from these fields with the `channel_id` and
-    // `tx_tree_root` components taken from the block targets. `msg_fields.bp_pk_g` IS the member
-    // identity whose slot inclusion is proven and whose `(digest, pk_g)` pair is folded into the
-    // bp_sig_chain — the actual signature is verified by the recursive `ListCircuit` proof the
-    // validity circuit consumes (P2b, decision D3), not here.
-    pub msg_fields: SmallBlockMessageFields,
+    /// Per-block IMCH `ChannelState::signing_digest()` preimage limbs (detail2 §C-3), EXCLUDING
+    /// `channel_id` and `h2_tag` which the circuit supplies from its own block targets. The digest
+    /// is recomputed in-circuit and folded; the N real Falcon signatures over it are proven by the
+    /// recursive aggregate-list proof the validity circuit consumes (design §5.2 P-b), not here.
+    pub channel_state_fields: ChannelStateMessageFields,
 
     // One bound TxV2 witness per key slot. This proves that the block tx root contains
     // a transaction attributable to the slot's channel_id/key_id authorization domain.
@@ -145,13 +152,122 @@ pub struct UpdateUserTree {
 }
 
 impl UpdateUserTree {
+    /// Native mirror of the N-of-N constraints the circuit enforces on a SIGNING slot `i`.
+    ///
+    /// Every check here has an in-circuit twin; this is the honest-prover error path, not the
+    /// security boundary (the circuit is). Each message names the constraint so a negative test
+    /// can pin WHICH one refused, rather than asserting "something failed".
+    fn check_n_of_n_witness(
+        &self,
+        i: usize,
+        prev_user_leaf: &ChannelLeaf,
+    ) -> Result<(), UpdateUserTreeError> {
+        // SECURITY (detail2 §C-2): tx_tree_root == 0 (H2 = 0) is reserved for in-channel updates;
+        // a member signature must never be applied over it. KEPT VERBATIM across the N-of-N
+        // rewire (design §5.4 item 6) — a signed H2 = 0 would be a base block authorizing nothing.
+        if self.block.tx_tree_root == Bytes32::default() {
+            return Err(UpdateUserTreeError::InvalidLength(format!(
+                "tx_tree_root must be nonzero when a member signature is applied (slot {i}; H2=0 is reserved for in-channel updates)"
+            )));
+        }
+
+        // The bp posts from a member slot, so a block slot beyond the member tree cannot sign.
+        // (Before the rewire this was implied by opening a height-MEMBER_TREE_HEIGHT inclusion
+        // proof at index `i`; it is now stated directly.)
+        if i >= MAX_COSIGNERS {
+            return Err(UpdateUserTreeError::InvalidLength(format!(
+                "signing block slot {i} is outside the {MAX_COSIGNERS} member slots"
+            )));
+        }
+
+        // design §5.4 item 2 — the registration floor, restated where the signature is applied.
+        if !(2..=MAX_COSIGNERS as u32).contains(&self.signer_count) {
+            return Err(UpdateUserTreeError::InvalidLength(format!(
+                "signer_count {} out of range 2..={MAX_COSIGNERS}",
+                self.signer_count
+            )));
+        }
+        let signer_count = self.signer_count as usize;
+
+        // design §5.4 item 3 — occupancy is exactly `signer_count`: nothing above it, nothing
+        // missing below it. Together with the root connect below, this is what makes
+        // `signer_count == member_count` a theorem rather than a premise about left-packing.
+        for (slot, leaf) in self.member_leaves.iter().enumerate() {
+            let is_signer = slot < signer_count;
+            if !is_signer && *leaf != MemberLeaf::empty_leaf() {
+                return Err(UpdateUserTreeError::InvalidLength(format!(
+                    "member slot {slot} is at or above signer_count {signer_count} but is not the empty leaf"
+                )));
+            }
+            if is_signer && leaf.pk_g == PoseidonHashOut::default() {
+                return Err(UpdateUserTreeError::InvalidLength(format!(
+                    "member slot {slot} is below signer_count {signer_count} but carries no pk_g"
+                )));
+            }
+        }
+        if i >= signer_count {
+            return Err(UpdateUserTreeError::InvalidLength(format!(
+                "signing block slot {i} is not an active member slot (signer_count {signer_count})"
+            )));
+        }
+
+        // design §5.4 item 5 — the recomputed root IS the channel's committed member root.
+        let mut tree = MemberTree::init();
+        for leaf in self.member_leaves.iter() {
+            tree.push(leaf.clone());
+        }
+        if tree.get_root() != prev_user_leaf.member_pubkeys_root {
+            return Err(UpdateUserTreeError::MerkleProofError(format!(
+                "recomputed member_pubkeys_root does not match the channel leaf's committed root (slot {i})"
+            )));
+        }
+
+        // design §4 "cost trap" / §5.4 item 6 — the bp slot's Regev pubkey is still opened and
+        // rebound, unchanged; the other 15 slots' digests ride on the root recompute.
+        if self.member_regev_pks[i].poseidon_digest() != self.member_leaves[i].regev_pk_digest {
+            return Err(UpdateUserTreeError::MerkleProofError(format!(
+                "witnessed Regev pubkey at slot {i} does not match that slot's member leaf"
+            )));
+        }
+        Ok(())
+    }
+
+    /// The validating native mirror: computes the public inputs AND cross-checks the witness
+    /// against every in-circuit constraint it can cheaply restate, so an honest prover gets a
+    /// named error instead of an opaque proving failure.
     pub fn to_public_inputs(&self) -> Result<UpdateUserPublicInputs, UpdateUserTreeError> {
+        self.compute_public_inputs(true)
+    }
+
+    /// The same mirror with EVERY cross-check skipped: it only computes the public inputs.
+    ///
+    /// The skipped checks are all verification-only — the Merkle openings, the tx-class rules and
+    /// the N-of-N witness rules. None of them contributes to a public input (the account root is
+    /// recomputed with `get_root`, never read from a proof), so this returns exactly what
+    /// [`Self::to_public_inputs`] would for any witness the strict mirror accepts.
+    ///
+    /// TEST-ONLY, and it exists for exactly one reason: a negative test that must pin an
+    /// IN-CIRCUIT constraint cannot go through [`Self::to_public_inputs`], because the native
+    /// restatement of that same constraint would reject first and the test would pass without the
+    /// circuit ever being consulted (a vacuous pass). Negative tests therefore assert the strict
+    /// mirror rejects — naming the reason — and then feed the circuit these unchecked public
+    /// inputs, so the proving failure is attributable to the constraint under test and to nothing
+    /// else. It is never reachable from production code.
+    #[cfg(test)]
+    pub(crate) fn to_public_inputs_unchecked(
+        &self,
+    ) -> Result<UpdateUserPublicInputs, UpdateUserTreeError> {
+        self.compute_public_inputs(false)
+    }
+
+    fn compute_public_inputs(
+        &self,
+        strict: bool,
+    ) -> Result<UpdateUserPublicInputs, UpdateUserTreeError> {
         if self.prev_account_leaves.len() != self.block.num_users as usize
             || self.user_merkle_proofs.len() != self.block.num_users as usize
             || self.send_merkle_proofs.len() != self.block.num_users as usize
-            || self.member_merkle_proofs.len() != self.block.num_users as usize
             || self.member_regev_pks.len() != self.block.num_users as usize
-            || self.member_pk_bs.len() != self.block.num_users as usize
             || self.tx_v2_indices.len() != self.block.num_users as usize
             || self.tx_v2s.len() != self.block.num_users as usize
             || self.tx_v2_merkle_proofs.len() != self.block.num_users as usize
@@ -176,16 +292,45 @@ impl UpdateUserTree {
         // update hash chain
         let new_block_hash_chain = self.block.hash_with_prev_hash(self.prev_block_hash_chain)?;
 
+        if self.member_leaves.len() != MAX_COSIGNERS {
+            return Err(UpdateUserTreeError::InvalidLength(format!(
+                "member_leaves must cover all {MAX_COSIGNERS} slots, got {}",
+                self.member_leaves.len()
+            )));
+        }
+
         // update user tree
         let mut account_tree_root = self.prev_account_tree_root;
         let block_tx_root = self.block.tx_tree_root.reduce_to_hash_out();
         let channel_id = self.block.channel_id();
-        // P2b: the bp IMSB-signature list accumulator, folded once for the signing (bp) slot.
+        // The N-of-N signature list accumulator, folded once for the signing (bp) slot.
         let mut bp_sig_chain = self.prev_bp_sig_chain;
-        // The IMSB signing digest the bp signs (recomputed from msg_fields, same as in-circuit).
+        // The IMCH channel-state digest all `signer_count` members signed, recomputed from the
+        // witnessed limbs with `channel_id` and `h2_tag` taken from THIS block (design §5.4,
+        // Design B variant) — exactly as the circuit does it.
         let signed_digest = self
-            .msg_fields
+            .channel_state_fields
             .signing_digest(channel_id, self.block.tx_tree_root);
+        // The block's folded statement: `(digest, signer_count, pk_list_digest)` over all
+        // MAX_COSIGNERS slots. SHARED formula with the aggregate-list step that proves the
+        // signatures (`falcon_sig::agg_list`) — called, never restated.
+        //
+        // The digest covers ALL slots, padding included — NOT `[0..signer_count]`. For a witness
+        // the circuit accepts the two are identical (slots at or above `signer_count` are the
+        // empty leaf, i.e. a zero `pk_g`), but for a REJECTED witness they are not, and this
+        // mirror must reproduce what the circuit computes rather than what it should have
+        // computed: otherwise a negative test would fail on a public-input mismatch and silently
+        // stop testing the constraint it was written for.
+        let signer_pks: Vec<Bytes32> = self
+            .member_leaves
+            .iter()
+            .map(|leaf| leaf.pk_g.into())
+            .collect();
+        let sig_leaf = agg_list_leaf(
+            signed_digest,
+            self.signer_count as u64,
+            agg_pk_list_digest(&signer_pks),
+        );
         for (i, &key_id) in self.block.key_ids().iter().enumerate() {
             if key_id == 0 {
                 // ignore zero key id (padding or dummy)
@@ -200,14 +345,16 @@ impl UpdateUserTree {
             let send_merkle_proof = &self.send_merkle_proofs[i];
 
             // verify the inclusion of prev_user_leaf in the user tree
-            user_merkle_proof
-                .verify(&prev_user_leaf, channel_id.as_u64(), account_tree_root)
-                .map_err(|e| {
-                    UpdateUserTreeError::MerkleProofError(format!(
-                        "failed to verify account merkle proof for i {}: {}",
-                        i, e
-                    ))
-                })?;
+            if strict {
+                user_merkle_proof
+                    .verify(&prev_user_leaf, channel_id.as_u64(), account_tree_root)
+                    .map_err(|e| {
+                        UpdateUserTreeError::MerkleProofError(format!(
+                            "failed to verify account merkle proof for i {}: {}",
+                            i, e
+                        ))
+                    })?;
+            }
 
             if prev_user_leaf.prev == self.block_number {
                 // already updated in this block
@@ -215,135 +362,104 @@ impl UpdateUserTree {
             }
 
             // `should_update` is now true (active slot, prev != block_number). This is the signing
-            // (bp) slot; bind its `bp_pk_g` to the channel's member tree at slot i and fold the
-            // `(IMSB_digest, bp_pk_g)` pair into the bp_sig_chain accumulator.
-            //
-            // SECURITY: the updating slot MUST be the declared bp slot
-            // (`msg_fields.bp_member_slot`). Only one slot updates per block (all slots
-            // reference the same channel leaf), so this ties the folded bp identity to
-            // the slot that actually transitioned.
-            if self.msg_fields.bp_member_slot as usize != i {
-                return Err(UpdateUserTreeError::InvalidLength(format!(
-                    "updating slot {i} must equal msg_fields.bp_member_slot {}",
-                    self.msg_fields.bp_member_slot
-                )));
-            }
-            // SECURITY: the member identity is `msg_fields.bp_pk_g` — the SAME value bound into the
-            // IMSB signing digest above. Reusing it for the member-leaf inclusion and the chain
-            // fold is what binds the folded pair to a registered member at slot i.
-            let bp_pk_g = self.msg_fields.bp_pk_g;
-            let pk_g: PoseidonHashOut = bp_pk_g.try_into().map_err(|e| {
-                UpdateUserTreeError::InvalidLength(format!(
-                    "bp_pk_g is not a canonical Poseidon hash out: {e}"
-                ))
-            })?;
-            let regev_pk_digest = self.member_regev_pks[i].poseidon_digest();
-            let member_leaf = MemberLeaf {
-                pk_g,
-                pk_b: self.member_pk_bs[i],
-                regev_pk_digest,
-            };
-            self.member_merkle_proofs[i]
-                .verify(&member_leaf, i as u64, prev_user_leaf.member_pubkeys_root)
-                .map_err(|e| {
-                    UpdateUserTreeError::MerkleProofError(format!(
-                        "failed to verify member merkle proof for slot {i}: {e}"
-                    ))
-                })?;
-
-            // SECURITY (detail2 §C-2): tx_tree_root == 0 (H2 = 0) is reserved for in-channel
-            // updates; a member signature must never be applied over it. Mirrors the in-circuit
-            // `should_verify_sig → tx_tree_root != 0` constraint.
-            if self.block.tx_tree_root == Bytes32::default() {
-                return Err(UpdateUserTreeError::InvalidLength(format!(
-                    "tx_tree_root must be nonzero when a member signature is applied (slot {i}; H2=0 is reserved for in-channel updates)"
-                )));
+            // (bp) slot: the whole registered member set must have signed this block's IMCH
+            // digest, and the `(digest, signer_count, pk_list_digest)` statement is folded into
+            // the accumulator.
+            if strict {
+                self.check_n_of_n_witness(i, prev_user_leaf)?;
             }
 
-            // P2b: fold `(IMSB_digest, bp_pk_g)` into the bp_sig_chain (order-sensitive Poseidon
-            // chain, `poseidon_sig::list`). The matching `ListCircuit` proof — consumed by the
-            // validity circuit — proves each folded pair was a verified Poseidon single-sig.
+            // P2b/N-of-N: fold the block statement into the chain (order-sensitive Poseidon chain,
+            // `poseidon_sig::list` step, `falcon_sig::agg_list` leaf). The matching aggregate-list
+            // proof — consumed by the validity circuit — proves that for each folded statement
+            // `signer_count` real Falcon signatures over `digest` exist, one per listed `pk_g`.
             let prev_chain: PoseidonHashOut = bp_sig_chain.try_into().map_err(|e| {
                 UpdateUserTreeError::InvalidLength(format!(
                     "bp_sig_chain is not a canonical Poseidon hash out: {e}"
                 ))
             })?;
-            let leaf = list_leaf(signed_digest, bp_pk_g);
-            bp_sig_chain = list_chain_step(prev_chain, leaf).into();
+            bp_sig_chain = list_chain_step(prev_chain, sig_leaf).into();
 
             let tx_v2 = &self.tx_v2s[i];
             let tx_v2_proof = &self.tx_v2_merkle_proofs[i];
             let tx_v2_index = self.tx_v2_indices[i];
-            tx_v2_proof
-                .verify(tx_v2, tx_v2_index, block_tx_root)
-                .map_err(|e| {
-                    UpdateUserTreeError::MerkleProofError(format!(
-                        "failed to verify tx_v2 merkle proof for i {}: {}",
-                        i, e
-                    ))
-                })?;
+            if strict {
+                tx_v2_proof
+                    .verify(tx_v2, tx_v2_index, block_tx_root)
+                    .map_err(|e| {
+                        UpdateUserTreeError::MerkleProofError(format!(
+                            "failed to verify tx_v2 merkle proof for i {}: {}",
+                            i, e
+                        ))
+                    })?;
+            }
 
-            match tx_v2.tx_class {
-                TxClass::UserTransfer => {
-                    if tx_v2.channel_action_root != PoseidonHashOut::default() {
-                        return Err(UpdateUserTreeError::InvalidLength(format!(
-                            "user-transfer tx at i {} must have zero channel_action_root",
-                            i
-                        )));
+            if strict {
+                match tx_v2.tx_class {
+                    TxClass::UserTransfer => {
+                        if tx_v2.channel_action_root != PoseidonHashOut::default() {
+                            return Err(UpdateUserTreeError::InvalidLength(format!(
+                                "user-transfer tx at i {} must have zero channel_action_root",
+                                i
+                            )));
+                        }
                     }
-                }
-                TxClass::ChannelAction => {
-                    if tx_v2.transfer_tree_root != PoseidonHashOut::default() {
-                        return Err(UpdateUserTreeError::InvalidLength(format!(
-                            "channel-action tx at i {} must have zero transfer_tree_root",
-                            i
-                        )));
-                    }
+                    TxClass::ChannelAction => {
+                        if tx_v2.transfer_tree_root != PoseidonHashOut::default() {
+                            return Err(UpdateUserTreeError::InvalidLength(format!(
+                                "channel-action tx at i {} must have zero transfer_tree_root",
+                                i
+                            )));
+                        }
 
-                    let channel_action = &self.channel_actions[i];
-                    let channel_action_proof = &self.channel_action_merkle_proofs[i];
-                    let channel_action_index = self.channel_action_indices[i];
-                    channel_action_proof
-                        .verify(
-                            channel_action,
-                            channel_action_index,
-                            tx_v2.channel_action_root,
-                        )
-                        .map_err(|e| {
-                            UpdateUserTreeError::MerkleProofError(format!(
-                                "failed to verify channel action merkle proof for i {}: {}",
-                                i, e
-                            ))
-                        })?;
+                        let channel_action = &self.channel_actions[i];
+                        let channel_action_proof = &self.channel_action_merkle_proofs[i];
+                        let channel_action_index = self.channel_action_indices[i];
+                        channel_action_proof
+                            .verify(
+                                channel_action,
+                                channel_action_index,
+                                tx_v2.channel_action_root,
+                            )
+                            .map_err(|e| {
+                                UpdateUserTreeError::MerkleProofError(format!(
+                                    "failed to verify channel action merkle proof for i {}: {}",
+                                    i, e
+                                ))
+                            })?;
 
-                    if channel_action.source_channel_id != channel_id {
-                        return Err(UpdateUserTreeError::InvalidLength(format!(
-                            "channel action source_channel_id mismatch for i {}: expected {}, got {}",
-                            i,
-                            channel_id.as_u64(),
-                            channel_action.source_channel_id.as_u64(),
-                        )));
-                    }
+                        if channel_action.source_channel_id != channel_id {
+                            return Err(UpdateUserTreeError::InvalidLength(format!(
+                                "channel action source_channel_id mismatch for i {}: expected {}, got {}",
+                                i,
+                                channel_id.as_u64(),
+                                channel_action.source_channel_id.as_u64(),
+                            )));
+                        }
 
-                    match channel_action.kind {
-                        ChannelActionKind::InterChannelSend | ChannelActionKind::ChannelClose => {}
+                        match channel_action.kind {
+                            ChannelActionKind::InterChannelSend
+                            | ChannelActionKind::ChannelClose => {}
+                        }
                     }
                 }
             }
 
             // verify the inclusion of empty leaf in the send tree
-            send_merkle_proof
-                .verify(
-                    &SendLeaf::empty_leaf(),
-                    prev_user_leaf.index.into(),
-                    prev_user_leaf.send_tree_root,
-                )
-                .map_err(|e| {
-                    UpdateUserTreeError::MerkleProofError(format!(
-                        "failed to verify send merkle proof for i {}: {}",
-                        i, e
-                    ))
-                })?;
+            if strict {
+                send_merkle_proof
+                    .verify(
+                        &SendLeaf::empty_leaf(),
+                        prev_user_leaf.index.into(),
+                        prev_user_leaf.send_tree_root,
+                    )
+                    .map_err(|e| {
+                        UpdateUserTreeError::MerkleProofError(format!(
+                            "failed to verify send merkle proof for i {}: {}",
+                            i, e
+                        ))
+                    })?;
+            }
 
             // create new send leaf and compute new send tree root
             let new_send_leaf = SendLeaf {
@@ -709,21 +825,20 @@ pub struct UpdateUserTreeTarget {
     pub channel_action_targets: Vec<ChannelActionTarget>,
     pub channel_action_merkle_proofs: Vec<ChannelActionMerkleProofTarget>,
     pub public_inputs: UpdateUserPublicInputsTarget,
-    /// P2b: the bp IMSB-signature list accumulator BEFORE this block (witnessed; surfaced as the
+    /// The N-of-N signature list accumulator BEFORE this block (witnessed; surfaced as the
     /// `prev_bp_sig_chain` PI and folded into `new_bp_sig_chain`).
     pub prev_bp_sig_chain: Bytes32Target,
-    /// Per-slot MemberTree inclusion proof targets — bind the bp's `pk_g` to the channel's member
-    /// tree (the binding for the folded `(IMSB_digest, bp_pk_g)` pair; see
-    /// `UpdateUserTree::member_merkle_proofs`).
-    pub member_merkle_proof_targets: Vec<MemberMerkleProofTarget>,
-    /// Per-slot witnessed Regev public-key coefficient targets (`a` then `b`, each `REGEV_N`).
+    /// All `MAX_COSIGNERS` witnessed member leaves in slot order — see
+    /// `UpdateUserTree::member_leaves`. Block-level, NOT per block slot: every slot of a block
+    /// references the same channel leaf and therefore the same member set.
+    pub member_leaf_targets: Vec<MemberLeafTarget>,
+    /// Witnessed `signer_count` (N).
+    pub signer_count: Target,
+    /// Per-block-slot witnessed Regev public-key coefficient targets (`a` then `b`, each
+    /// `REGEV_N`), for block slots below `MAX_COSIGNERS` — the only slots that can sign.
     pub member_regev_pk_targets: Vec<Vec<Target>>,
-    /// Per-slot witnessed `pk_b` (BabyBear hash-sig public key) targets — the third `MemberLeaf`
-    /// component (P3). Bound into the leaf inclusion so the rebuilt `member_pubkeys_root` matches
-    /// the registration leaf that now commits `pk_b`.
-    pub member_pk_b_targets: Vec<PoseidonHashOutTarget>,
-    /// Per-block IMSB signing message fields — see `UpdateUserTree::msg_fields`.
-    pub msg_fields: SmallBlockMessageFieldsTarget,
+    /// Per-block IMCH channel-state message fields — see `UpdateUserTree::channel_state_fields`.
+    pub channel_state_fields: ChannelStateMessageFieldsTarget,
 }
 
 impl UpdateUserTreeTarget {
@@ -783,16 +898,22 @@ impl UpdateUserTreeTarget {
         let empty_send_leaf = SendLeafTarget::constant(builder, SendLeaf::empty_leaf());
         let mut account_tree_root = prev_account_tree_root.clone();
 
-        // ── IMSB signing digest (detail2 §F-2), recomputed ONCE per block ──
+        // ── IMCH channel-state signing digest (detail2 §C-3), recomputed ONCE per block ──
         //
-        // SECURITY: the `channel_id` and `tx_tree_root` preimage components are the block's
-        // own targets, so the digest every member signature is verified over is structurally
-        // bound to the tx root this circuit applies — a prover cannot verify a signature over
-        // a different root.
-        let msg_fields = SmallBlockMessageFieldsTarget::new(builder);
+        // SECURITY (design §5.4, Design B): the digest the channel's members ALREADY sign on every
+        // state transition carries `h2_tag`, which IS the small block's `tx_tree_root` for an
+        // inter-channel send. Its `channel_id` (both occurrences) and its `h2_tag` limbs are this
+        // block's OWN targets, not witnesses, so:
+        //   * a signature collected for channel A cannot be applied inside channel B's block, and
+        //   * the digest is structurally bound to the tx root this circuit applies — there is no
+        //     wire on which a prover could place a different `h2_tag`.
+        // Everything else in the preimage may be a free witness: the digest is fully determined by
+        // the limbs, and the aggregate proof is over THIS digest, so the members' signatures are
+        // what authenticate the remaining limbs.
+        let channel_state_fields = ChannelStateMessageFieldsTarget::new(builder);
         let digest_channel_id =
             ChannelIdTarget::from_parts(builder, block.channel_id(), true).value;
-        let signed_digest = msg_fields.compute_signing_digest::<F, C, D>(
+        let signed_digest = channel_state_fields.signing_digest::<F, C, D>(
             builder,
             digest_channel_id,
             &block.tx_tree_root,
@@ -801,20 +922,63 @@ impl UpdateUserTreeTarget {
         // once and enforce it per slot whenever a signature is applied.
         let tx_tree_root_is_zero = block.tx_tree_root.is_zero::<F, D, Bytes32>(builder);
 
-        // P2b: the bp IMSB-signature list accumulator. Witnessed `prev_bp_sig_chain`, folded once
-        // (for the updating bp slot) into `bp_sig_chain` using the shared `poseidon_sig::list`
-        // gadgets, then surfaced as `new_bp_sig_chain`.
+        // ── The signer set: all MAX_COSIGNERS member leaves, thermometered by `signer_count` ──
+        //
+        // design §5.4 items 1-5 (M2′). This is block-level, not per block slot: all slots of a
+        // block reference the same channel leaf, hence the same member set.
+        let signer_count = builder.add_virtual_target();
+        // `is_signer[i] = (i < signer_count)`, the SHARED thermometer `channel_reg_step` builds
+        // over its own `active_count` — called, not restated. (Well-defined for ANY witnessed
+        // `signer_count`: at most one of its equality terms can fire, so the result is boolean
+        // even before the range bound below pins the value.)
+        let is_signer: Vec<BoolTarget> = (0..MAX_COSIGNERS)
+            .map(|i| lt_const_threshold(builder, i, signer_count))
+            .collect();
+
+        let mut member_leaf_targets: Vec<MemberLeafTarget> = Vec::with_capacity(MAX_COSIGNERS);
+        let mut member_leaf_hashes: Vec<PoseidonHashOutTarget> = Vec::with_capacity(MAX_COSIGNERS);
+        let mut member_pk_limbs: Vec<Target> = Vec::with_capacity(MAX_COSIGNERS * BYTES32_LEN);
+        let mut member_pk_is_zero: Vec<BoolTarget> = Vec::with_capacity(MAX_COSIGNERS);
+        for _ in 0..MAX_COSIGNERS {
+            let leaf = MemberLeafTarget::new(builder);
+            // The pk-list slot as the aggregate exposes it: the canonical 8-limb form of the
+            // member identity, zero for padding — byte-identical to the zero padding
+            // `FalconAggCircuit` constrains its inactive slots to.
+            let pk_bytes = Bytes32Target::from_hash_out(builder, leaf.pk_g);
+            member_pk_is_zero.push(pk_bytes.is_zero::<F, D, Bytes32>(builder));
+            member_pk_limbs.extend(pk_bytes.to_vec());
+            member_leaf_hashes.push(leaf.hash::<F, C, D>(builder));
+            member_leaf_targets.push(leaf);
+        }
+        // design §5.4 item 5: the root the channel leaf commits, recomputed from the SAME fold the
+        // registration step used to write it (shared `compute_member_tree_root`).
+        let recomputed_member_root =
+            compute_member_tree_root::<F, C, D>(builder, &member_leaf_hashes);
+
+        // ── The folded block statement (design §5.3) ──
+        //
+        // `(message, signer_count, pk_list_digest)` with the SHARED `falcon_sig::agg_list`
+        // gadgets, so the chain this block commits to is bit-identical to the one the aggregate
+        // list proof rebuilds from its recursively verified aggregation proofs. Calling those
+        // gadgets rather than restating the formulas is deliberate: a second derivation that
+        // agrees only by luck is precisely the failure this repo keeps hitting.
+        let pk_list_digest = agg_pk_list_digest_target(builder, &member_pk_limbs);
+        let sig_leaf = agg_list_leaf_target(builder, &signed_digest, signer_count, pk_list_digest);
+
+        // The N-of-N signature list accumulator. Witnessed `prev_bp_sig_chain`, folded once (for
+        // the updating bp slot) into `bp_sig_chain` using the shared `poseidon_sig::list` chain
+        // step, then surfaced as `new_bp_sig_chain`.
         let prev_bp_sig_chain = Bytes32Target::new(builder, true);
         let mut bp_sig_chain = prev_bp_sig_chain.clone();
-        // The bp's pk_g (Bytes32) — the SAME wire bound into the IMSB digest, the member-leaf
-        // inclusion, and the chain fold.
-        let bp_pk_g = msg_fields.bp_pk_g.clone();
 
-        let mut member_merkle_proof_targets: Vec<MemberMerkleProofTarget> =
-            Vec::with_capacity(num_users as usize);
-        let mut member_regev_pk_targets: Vec<Vec<Target>> = Vec::with_capacity(num_users as usize);
-        let mut member_pk_b_targets: Vec<PoseidonHashOutTarget> =
-            Vec::with_capacity(num_users as usize);
+        let mut member_regev_pk_targets: Vec<Vec<Target>> =
+            Vec::with_capacity((num_users as usize).min(MAX_COSIGNERS));
+        // Does this block apply a member signature at all? COMPUTED from the per-slot
+        // `should_update` flags below (never a prover flag — the same rule the validity circuit's
+        // list gate follows), and used to gate the block-level well-formedness of the signer set:
+        // a block that signs nothing must not be forced to carry a member set it has no business
+        // knowing, and a block that signs must satisfy every one of those constraints.
+        let mut any_sign = builder._false();
         // Poseidon-digest domain for the Regev pubkey leaf component (mirrors
         // `RegevPk::poseidon_digest`).
         let regev_poseidon_domain =
@@ -928,55 +1092,70 @@ impl UpdateUserTreeTarget {
             account_tree_root =
                 PoseidonHashOutTarget::select(builder, should_update, updated_root, current_root);
 
-            // ── P2b: bp member-tree binding + IMSB-signature chain fold ────────
+            // ── N-of-N member-set binding + signature chain fold (design §5.4) ────────
             //
-            // Exactly ONE IMSB signature per signing block — the block-producer's (decision D3/D5).
-            // For the updating slot (which MUST be the declared bp slot) we:
-            //   1. assert the updating slot equals `msg_fields.bp_member_slot` (ties the folded bp
-            //      identity to the slot that actually transitioned — only one slot updates/block);
-            //   2. compute regev_pk_digest = Poseidon([IMRP, n, a…, b…]) over the witnessed Regev
-            //      pubkey coefficients (mirrors `RegevPk::poseidon_digest`);
-            //   3. prove MemberLeaf{pk_g = bp_pk_g, regev_pk_digest} is included at slot i of the
-            //      channel's `member_pubkeys_root` (prev_user_leaf, itself proven in the account
-            //      tree above);
-            //   4. fold `(signed_digest, bp_pk_g)` into the bp_sig_chain accumulator (shared
-            //      `poseidon_sig::list` gadgets).
+            // Exactly ONE folded statement per signing block, and that statement says the WHOLE
+            // registered member set signed this block's IMCH digest. For the updating slot we:
+            //   1. keep the `tx_tree_root != 0` gate;
+            //   2. connect the recomputed member root to the channel leaf's committed
+            //      `member_pubkeys_root` — this is the binding that makes the 16 witnessed leaves
+            //      (and hence the folded pk list, the occupancy and `signer_count`) the channel's
+            //      REGISTERED set rather than a prover-chosen one;
+            //   3. compute regev_pk_digest = Poseidon([IMRP, n, a…, b…]) over the witnessed Regev
+            //      pubkey coefficients (mirrors `RegevPk::poseidon_digest`) and bind it to THIS
+            //      slot's member leaf — the bp's Regev binding, unchanged in strength;
+            //   4. fold `(signed_digest, signer_count, pk_list_digest)` into the accumulator.
             //
-            // SECURITY: step 3 binds the folded `bp_pk_g` to slot i of the channel's on-chain-bound
-            // member tree, so the `(IMSB_digest, bp_pk_g)` pair folded into bp_sig_chain cannot use
-            // a prover-chosen pubkey. The actual signature over `signed_digest` is proven by the
-            // recursive `ListCircuit` proof the validity circuit consumes (D3) — it rebuilds the
-            // SAME chain and verifies `C == final.bp_sig_chain`.
+            // SECURITY: step 2 is what the old per-slot inclusion proof could not do. An inclusion
+            // proof says "this key is SOME registered member" (1-of-N); connecting the whole
+            // recomputed root says "these are ALL of them, in these slots, and there are exactly
+            // `signer_count` of them" — the N-of-N statement the aggregate then discharges. The
+            // signatures themselves are proven by the recursive aggregate-list proof the validity
+            // circuit consumes (design §5.2 P-b), which rebuilds the SAME chain and verifies
+            // `C == final.bp_sig_chain`.
             let should_verify_sig = should_update;
+            any_sign = builder.or(any_sign, should_verify_sig);
 
-            // SECURITY (detail2 §C-2): tx_tree_root != 0 whenever a member signature is
+            // -- (1) SECURITY (detail2 §C-2): tx_tree_root != 0 whenever a member signature is
             // applied — H2 = 0 is reserved for in-channel updates and must never be signed
-            // into a base block.
+            // into a base block. KEPT VERBATIM (design §5.4 item 6).
             builder.conditional_assert_eq(
                 should_verify_sig.target,
                 tx_tree_root_is_zero.target,
                 zero,
             );
 
-            // -- (1) the updating slot MUST be the declared bp slot --
-            // SECURITY: ties the bp identity folded into the chain to the slot that actually
-            // transitioned this block. Only one slot updates per block (all slots reference the
-            // same channel leaf), so this is exact: a prover cannot update slot j while folding a
-            // signature attributed to a different slot's member.
-            // INVARIANT (single-fold soundness): this `bp_sig_chain` design folds AT MOST ONE
-            // signature per block and assumes EXACTLY ONE channel-leaf transition per block. If the
-            // block layout is ever changed to permit two distinct channel-leaf updates in one
-            // block, the second signature would go unfolded — this loop must be
-            // revisited (fold per updating leaf) before that change lands. (Flagged in
-            // the P2b security review.)
-            let slot_index = builder.constant(F::from_canonical_u64(i as u64));
-            builder.conditional_assert_eq(
-                should_verify_sig.target,
-                msg_fields.bp_member_slot,
-                slot_index,
-            );
+            if i >= MAX_COSIGNERS {
+                // SECURITY: a block slot beyond the member tree has no member leaf to bind its
+                // Regev key to, so it must not be able to sign. Before the rewire this was implied
+                // rather than stated: the slot opened a height-MEMBER_TREE_HEIGHT inclusion proof
+                // at index `i`, and no such index exists for `i >= MAX_COSIGNERS`. That opening
+                // was built UNCONDITIONALLY (the index decomposition is outside the
+                // `should_update` gate), so it also constrained non-signing out-of-range slots —
+                // i.e. the old form refused at least as much as this one. Stating the rule
+                // directly can therefore only ADMIT witnesses the old form refused, never the
+                // reverse, and the ones it admits are blocks whose out-of-range slots do not sign.
+                builder.assert_zero(should_verify_sig.target);
+                continue;
+            }
 
-            // -- (2) regev_pk_digest = Poseidon([IMRP, n, a…, b…]) over witnessed Regev coeffs --
+            // -- (2) the recomputed member root IS the channel's committed member root --
+            prev_user_leaf.member_pubkeys_root.conditional_assert_eq(
+                builder,
+                recomputed_member_root,
+                should_verify_sig,
+            );
+            // The posting slot must itself be an active member slot. (Implied by (3) — the empty
+            // leaf's zero `regev_pk_digest` is not a Poseidon image of any coefficient vector —
+            // but an implication that rests on preimage resistance is worth one gate to state.)
+            let not_signer_here = builder.not(is_signer[i]);
+            let posts_from_empty_slot = builder.and(should_verify_sig, not_signer_here);
+            builder.assert_zero(posts_from_empty_slot.target);
+
+            // -- (3) regev_pk_digest = Poseidon([IMRP, n, a…, b…]) over witnessed Regev coeffs --
+            // KEPT VERBATIM for the bp slot only (design §4 "cost trap"): doing this for all 16
+            // slots would be 16 x 2 x REGEV_N range checks. The other slots' `regev_pk_digest` are
+            // free witnesses authenticated by the root connect in (2).
             let regev_pk_coeffs: Vec<Target> = builder.add_virtual_targets(2 * REGEV_N);
             // SECURITY: range-check each coefficient to 32 bits so a malicious witness cannot pack
             // a >2^32 value that aliases a canonical coefficient (digest malleability F1-A).
@@ -989,46 +1168,78 @@ impl UpdateUserTreeTarget {
             ]
             .concat();
             let regev_pk_digest = PoseidonHashOutTarget::hash_inputs(builder, &regev_digest_inputs);
-
-            // -- (3) MemberLeaf{pk_g = bp_pk_g, regev_pk_digest} slot-inclusion --
-            // SECURITY: `pk_g` is `bp_pk_g.to_hash_out()`, the SAME wire bound into the IMSB
-            // signing digest and folded into the chain below. `to_hash_out` constrains bp_pk_g to a
-            // canonical Poseidon-hash-out-derived Bytes32 (4 Goldilocks limbs each < p), matching
-            // the registered member identity exactly.
-            let bp_pk_g_hashout = bp_pk_g.to_hash_out(builder);
-            // P3: witness the member's pk_b (BabyBear hash-sig public key) for the 3-field leaf.
-            // It is a free Poseidon-hash-out witness here; its authenticity is enforced by the leaf
-            // inclusion against `member_pubkeys_root`, which is bound to the L1 registration keccak
-            // chain (the chain now commits pk_b, channel_reg_step R2 cross-binding).
-            let member_pk_b = PoseidonHashOutTarget::new(builder);
-            let member_merkle_proof = MemberMerkleProofTarget::new(builder, MEMBER_TREE_HEIGHT);
-            let member_leaf = MemberLeafTarget {
-                pk_g: bp_pk_g_hashout,
-                pk_b: member_pk_b,
-                regev_pk_digest,
-            };
-            member_merkle_proof.conditional_verify::<F, C, D>(
+            regev_pk_digest.conditional_assert_eq(
                 builder,
+                member_leaf_targets[i].regev_pk_digest,
                 should_verify_sig,
-                &member_leaf,
-                slot_index,
-                prev_user_leaf.member_pubkeys_root.clone(),
             );
 
-            // -- (4) fold (signed_digest, bp_pk_g) into the bp_sig_chain accumulator --
-            // SECURITY: identical `poseidon_sig::list` gadgets to the producer
-            // (`falcon_sig::list::ListStepCircuit`)
-            // and the consumer, so the chain the validity circuit rebuilds matches bit-for-bit.
-            let leaf = leaf_target(builder, &signed_digest, &bp_pk_g);
+            // -- (4) fold the block statement into the accumulator --
+            // SECURITY: the leaf comes from the SHARED `falcon_sig::agg_list` gadget, so the chain
+            // the validity circuit rebuilds from real aggregation proofs matches bit-for-bit.
+            //
+            // INVARIANT (single-fold soundness): this `bp_sig_chain` design folds AT MOST ONE
+            // statement per block and assumes EXACTLY ONE channel-leaf transition per block. If the
+            // block layout is ever changed to permit two distinct channel-leaf updates in one
+            // block, the second transition's authorization would go unfolded — this loop must be
+            // revisited (fold per updating leaf) before that change lands. (Flagged in the P2b
+            // security review; unchanged by the N-of-N rewire, which widened the folded TUPLE but
+            // not the number of folds.)
             let prev_chain_hashout = bp_sig_chain.to_hash_out(builder);
-            let new_chain_hashout = chain_step_target(builder, prev_chain_hashout, leaf);
+            let new_chain_hashout = chain_step_target(builder, prev_chain_hashout, sig_leaf);
             let new_chain = Bytes32Target::from_hash_out(builder, new_chain_hashout);
             bp_sig_chain =
                 Bytes32Target::select(builder, should_verify_sig, new_chain, bp_sig_chain.clone());
 
-            member_merkle_proof_targets.push(member_merkle_proof);
             member_regev_pk_targets.push(regev_pk_coeffs);
-            member_pk_b_targets.push(member_pk_b);
+        }
+
+        // ── Block-level well-formedness of the signer set (design §5.4 items 2-3) ──
+        //
+        // Gated on the COMPUTED `any_sign`: on a block that applies no member signature nothing
+        // here is bound to anything, and requiring a well-formed member set there would force the
+        // witness to invent one (padding blocks do not know the channel's members). On a signing
+        // block all of it is mandatory.
+        //
+        // design §5.4 item 2: `2 <= signer_count <= MAX_COSIGNERS`. The registration floor is 2
+        // (`channel_reg_step`), and a 1-of-N "aggregate" is exactly the defect this whole change
+        // exists to remove, so the floor is asserted IN-CIRCUIT — the in-circuit `>= 1` / native
+        // `>= 2` split in `close_circuit` is a gap not to repeat. The range check is applied to a
+        // value that falls back to the constant 2 when the block does not sign, so gating it costs
+        // one select rather than a conditional decomposition.
+        let two = builder.constant(F::from_canonical_u64(2));
+        let max_cosigners = builder.constant(F::from_canonical_u64(MAX_COSIGNERS as u64));
+        let checked_signer_count = builder.select(any_sign, signer_count, two);
+        let sc_minus_two = builder.sub(checked_signer_count, two);
+        builder.range_check(sc_minus_two, 4); // [0, 15] ⊇ [0, 14]
+        let max_minus_sc = builder.sub(max_cosigners, checked_signer_count);
+        builder.range_check(max_minus_sc, 4);
+
+        for i in 0..MAX_COSIGNERS {
+            let not_signer = builder.not(is_signer[i]);
+            // design §5.4 item 3: slots at or above `signer_count` are the EMPTY leaf. A real
+            // member parked in such a slot changes the recomputed root, so "sign with all but one
+            // member" is not representable: the prover must either keep the real leaf (and fail
+            // this) or blank it (and fail the root connect).
+            let must_be_empty = builder.and(any_sign, not_signer);
+            member_leaf_targets[i]
+                .pk_g
+                .conditional_assert_eq(builder, zero_hash, must_be_empty);
+            member_leaf_targets[i]
+                .pk_b
+                .conditional_assert_eq(builder, zero_hash, must_be_empty);
+            member_leaf_targets[i]
+                .regev_pk_digest
+                .conditional_assert_eq(builder, zero_hash, must_be_empty);
+            // SECURITY (the other direction of occupancy): an ACTIVE slot must carry a real key.
+            // Without this, a prover could claim `signer_count > member_count` by padding the
+            // extra slots with the empty leaf — the root would still match, and the only thing
+            // stopping it would be the aggregate's inability to produce a Falcon signature under
+            // the all-zero pk. That is a real argument, but it lives in another circuit; making
+            // `occupancy == signer_count` a theorem HERE keeps this statement self-contained.
+            let active_slot = builder.and(any_sign, is_signer[i]);
+            let empty_active_slot = builder.and(active_slot, member_pk_is_zero[i]);
+            builder.assert_zero(empty_active_slot.target);
         }
 
         let public_inputs = UpdateUserPublicInputsTarget {
@@ -1060,10 +1271,10 @@ impl UpdateUserTreeTarget {
             channel_action_merkle_proofs,
             public_inputs,
             prev_bp_sig_chain,
-            member_merkle_proof_targets,
+            member_leaf_targets,
+            signer_count,
             member_regev_pk_targets,
-            member_pk_b_targets,
-            msg_fields,
+            channel_state_fields,
         }
     }
 
@@ -1135,21 +1346,29 @@ impl UpdateUserTreeTarget {
             target.set_witness(witness, proof);
         }
 
-        // P2b: the bp IMSB-signature list accumulator before this block.
+        // The N-of-N signature list accumulator before this block.
         self.prev_bp_sig_chain
             .set_witness(witness, value.prev_bp_sig_chain);
 
-        // Set per-slot MemberTree inclusion proofs.
-        for (target, proof) in self
-            .member_merkle_proof_targets
+        // Set the channel's MAX_COSIGNERS member leaves (slot order, padding included).
+        assert_eq!(
+            value.member_leaves.len(),
+            self.member_leaf_targets.len(),
+            "member_leaves must cover all {} slots",
+            self.member_leaf_targets.len()
+        );
+        for (target, leaf) in self
+            .member_leaf_targets
             .iter()
-            .zip(value.member_merkle_proofs.iter())
+            .zip(value.member_leaves.iter())
         {
-            target.set_witness(witness, proof);
+            target.set_witness(witness, leaf);
         }
+        witness.set_target(self.signer_count, F::from_canonical_u32(value.signer_count));
 
         // Set per-slot Regev pubkey coefficient witnesses (a then b), mirroring the
-        // `RegevPk::poseidon_digest` preimage order.
+        // `RegevPk::poseidon_digest` preimage order. Only block slots below MAX_COSIGNERS have
+        // targets (the others cannot sign), so the zip is deliberately shorter than the witness.
         for (targets, pk) in self
             .member_regev_pk_targets
             .iter()
@@ -1161,17 +1380,9 @@ impl UpdateUserTreeTarget {
             }
         }
 
-        // Set per-slot pk_b (BabyBear hash-sig public key) witnesses (P3, third leaf component).
-        for (target, pk_b) in self
-            .member_pk_b_targets
-            .iter()
-            .zip(value.member_pk_bs.iter())
-        {
-            target.set_witness(witness, *pk_b);
-        }
-
-        // Set per-block IMSB signing message fields
-        self.msg_fields.set_witness(witness, &value.msg_fields);
+        // Set per-block IMCH channel-state signing message fields.
+        self.channel_state_fields
+            .set_witness(witness, &value.channel_state_fields);
     }
 }
 
@@ -1225,9 +1436,23 @@ where
         witness: &UpdateUserTree,
     ) -> Result<ProofWithPublicInputs<F, C, D>, UpdateUserCircuitError> {
         let public_inputs = witness.to_public_inputs()?;
+        self.prove_with_public_inputs(witness, &public_inputs)
+    }
+
+    /// Prove against CALLER-SUPPLIED public inputs instead of the validating native mirror's.
+    ///
+    /// `pub(crate)` and used only by this module's negative tests, together with
+    /// [`UpdateUserTree::to_public_inputs_unchecked`]: a test that must pin an in-circuit
+    /// constraint has to reach the prover, and [`Self::prove`] would stop at the native
+    /// restatement of the same constraint. See that method's docs.
+    pub(crate) fn prove_with_public_inputs(
+        &self,
+        witness: &UpdateUserTree,
+        public_inputs: &UpdateUserPublicInputs,
+    ) -> Result<ProofWithPublicInputs<F, C, D>, UpdateUserCircuitError> {
         let mut pw = PartialWitness::<F>::new();
         self.target.set_witness(&mut pw, witness);
-        self.public_inputs.set_witness(&mut pw, &public_inputs);
+        self.public_inputs.set_witness(&mut pw, public_inputs);
         self.data
             .prove(pw)
             .map_err(|e| UpdateUserCircuitError::FailedToProve(e.to_string()))
@@ -1236,33 +1461,53 @@ where
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::{
-        circuits::validity::block_hash_chain::small_block_message::SmallBlockMessageFields,
-        common::{
-            block::Block,
-            channel_id::ChannelId,
-            trees::{
-                channel_tree::{ChannelLeaf, ChannelTree, SendLeaf, SendTree},
-                key_tree::{MemberLeaf, MemberMerkleProof, MemberTree},
-                tx_v2_tree::{ChannelActionTree, TxV2Tree},
-            },
-            tx::{ChannelAction, ChannelActionKind, TxClass, TxV2},
-            u63::BlockNumber,
-        },
-        ethereum_types::bytes32::Bytes32,
-        falcon_sig::FalconKeys,
-        poseidon_sig::list::list_commitment,
-        regev::{RegevPk, hash_sig::BabyBearSecretKey},
-    };
+    use std::sync::Mutex;
+
+    use once_cell::sync::Lazy;
     use plonky2::{
         field::goldilocks_field::GoldilocksField, plonk::config::PoseidonGoldilocksConfig,
     };
     use rand::{RngCore, SeedableRng, rngs::StdRng};
 
+    use super::*;
+    use crate::{
+        common::{
+            block::Block,
+            channel_id::ChannelId,
+            trees::{
+                channel_tree::{ChannelLeaf, ChannelTree, SendLeaf, SendTree},
+                key_tree::{MemberLeaf, MemberTree},
+                tx_v2_tree::{ChannelActionTree, TxV2Tree},
+            },
+            tx::{ChannelAction, ChannelActionKind, TxClass, TxV2},
+            u63::BlockNumber,
+        },
+        constants::MAX_CHANNEL_TOKENS,
+        ethereum_types::{bytes32::Bytes32, u256::U256},
+        falcon_sig::{
+            FalconKeys, FalconSignature,
+            agg_list::{AggListEntry, agg_list_commitment},
+        },
+        regev::{RegevPk, hash_sig::BabyBearSecretKey},
+    };
+
     const D: usize = 2;
     type F = GoldilocksField;
     type C = PoseidonGoldilocksConfig;
+
+    /// ONE shared `num_users = 1` circuit for the whole module: every case proves (or fails to
+    /// prove) against the SAME constraint system, so sharing weakens nothing, and rebuilding a
+    /// 2^16 circuit per case is minutes and gigabytes.
+    static CIRCUIT: Lazy<UpdateUserCircuit<F, C, D>> =
+        Lazy::new(|| UpdateUserCircuit::<F, C, D>::new(1));
+
+    /// Circuit builds and proofs are the heaviest operations here; cases hold this lock so the
+    /// suite never runs two of them concurrently, whatever `--test-threads` is set to.
+    static HEAVY: Mutex<()> = Mutex::new(());
+
+    fn heavy() -> std::sync::MutexGuard<'static, ()> {
+        HEAVY.lock().unwrap_or_else(|e| e.into_inner())
+    }
 
     /// A distinct canonical Regev pubkey of the correct length, derived deterministically.
     fn regev_pk(seed: u32) -> RegevPk {
@@ -1287,54 +1532,293 @@ mod tests {
 
     /// A distinct member `pk_b` (BabyBear hash-sig public key), derived deterministically from a
     /// seed via the real `hash_sig` primitive — mirroring the production fixture
-    /// (`block_witness_generator::ChannelMemberKeys::deterministic`). P3 third `MemberLeaf`
-    /// component.
+    /// (`block_witness_generator::ChannelMemberKeys::deterministic`).
     fn member_pk_b(seed: u64) -> PoseidonHashOut {
         let mut baby_rng = StdRng::seed_from_u64(seed.wrapping_mul(0x9e37_79b9).wrapping_add(0xb1));
         let baby = BabyBearSecretKey::random(&mut baby_rng);
         baby.public_key().to_bytes32().reduce_to_hash_out()
     }
 
-    /// Build the channel's 3-member tree, with the signer at slot 0 (the bp). `signer_pk_b` is the
-    /// signer's BabyBear hash-sig public key, committed in the slot-0 leaf so the bp's witnessed
-    /// `member_pk_bs[0]` matches the registered leaf.
-    /// A member identity `pk_g`. falcon-sig Phase 3: the registered identity is the FALCON digest
-    /// `Poseidon(IMFK ‖ encode(h))`. This circuit is agnostic to the DERIVATION (it consumes an
-    /// opaque canonical 32-byte digest), but the tests use real Falcon identities so they mirror
-    /// what the validity path now actually carries.
-    fn falcon_pk_g(seed: u8) -> Bytes32 {
-        FalconKeys::from_seed([seed; 32]).pk_g()
+    /// A channel exactly as REGISTRATION leaves it: `n` members left-packed into the
+    /// `MAX_COSIGNERS`-slot member tree, the rest empty. Everything a signing block must witness
+    /// is derived from here, so a test can only diverge from the registered set on purpose.
+    struct RegisteredChannel {
+        /// Real Falcon signing keys, slot order. Not `Clone` on purpose (it is what stops a test
+        /// from silently duplicating a signer).
+        keys: Vec<FalconKeys>,
+        regev: Vec<RegevPk>,
+        /// ALL `MAX_COSIGNERS` leaves in slot order — what the circuit witnesses.
+        leaves: Vec<MemberLeaf>,
+        /// The committed `member_pubkeys_root`.
+        root: PoseidonHashOut,
     }
 
-    fn build_member_tree(
-        signer_pk_g: Bytes32,
-        signer_regev: &RegevPk,
-        signer_pk_b: PoseidonHashOut,
-    ) -> MemberTree {
-        let mut member_tree = MemberTree::init();
-        member_tree.push(MemberLeaf {
-            pk_g: signer_pk_g.try_into().expect("canonical pk_g"),
-            pk_b: signer_pk_b,
-            regev_pk_digest: signer_regev.poseidon_digest(),
-        });
-        member_tree.push(MemberLeaf {
-            pk_g: falcon_pk_g(2).try_into().expect("canonical pk_g"),
-            pk_b: member_pk_b(2),
-            regev_pk_digest: regev_pk(2).poseidon_digest(),
-        });
-        member_tree.push(MemberLeaf {
-            pk_g: falcon_pk_g(3).try_into().expect("canonical pk_g"),
-            pk_b: member_pk_b(3),
-            regev_pk_digest: regev_pk(3).poseidon_digest(),
-        });
-        member_tree
+    impl RegisteredChannel {
+        fn new(n: usize, seed0: u8) -> Self {
+            let mut tree = MemberTree::init();
+            let mut keys = Vec::with_capacity(n);
+            let mut regev = Vec::with_capacity(n);
+            for slot in 0..n {
+                let key = FalconKeys::from_seed([seed0.wrapping_add(slot as u8); 32]);
+                let pk = regev_pk(seed0 as u32 * 97 + slot as u32 + 1);
+                tree.push(MemberLeaf {
+                    pk_g: key.pk_g().try_into().expect("canonical pk_g"),
+                    pk_b: member_pk_b(seed0 as u64 * 31 + slot as u64),
+                    regev_pk_digest: pk.poseidon_digest(),
+                });
+                keys.push(key);
+                regev.push(pk);
+            }
+            let root = tree.get_root();
+            let leaves = (0..MAX_COSIGNERS)
+                .map(|slot| tree.get_leaf(slot as u64))
+                .collect();
+            Self {
+                keys,
+                regev,
+                leaves,
+                root,
+            }
+        }
+
+        fn signer_count(&self) -> u32 {
+            self.keys.len() as u32
+        }
+
+        /// Every member's REAL Falcon signature over `digest`, verified natively before it is
+        /// handed to a test — so a case that says "a validly N-of-N-signed digest" is one.
+        fn sign_all(&self, digest: Bytes32) -> Vec<FalconSignature> {
+            self.keys
+                .iter()
+                .map(|key| {
+                    let sig = key.sign(digest);
+                    assert!(
+                        crate::falcon_sig::verify(&key.pk_coefficients(), digest, &sig),
+                        "the test's own signature must verify natively"
+                    );
+                    sig
+                })
+                .collect()
+        }
     }
 
-    /// Non-signing (all-padding-update) block: every slot has prev == block_number, so
-    /// should_update is false everywhere and the bp_sig_chain is unchanged.
+    /// A plausible, non-degenerate IMCH channel-state preimage. Every limb is nonzero-ish so a
+    /// mis-strided segment cannot pass unnoticed.
+    fn channel_state_fields(seed: u64) -> ChannelStateMessageFields {
+        let mut rng = StdRng::seed_from_u64(seed);
+        let mut fund_amounts = [U256::default(); MAX_CHANNEL_TOKENS];
+        for (i, slot) in fund_amounts.iter_mut().enumerate() {
+            *slot = U256::from(1_000u64 + i as u64 + (rng.next_u32() % 1000) as u64);
+        }
+        ChannelStateMessageFields {
+            epoch: 3,
+            small_block_number: 30,
+            close_freeze_nonce: 0,
+            fund_amounts,
+            fund_intmax_state_root: Bytes32::rand(&mut rng),
+            balance_state_h1: Bytes32::rand(&mut rng),
+            shared_native_nullifier_root: Bytes32::rand(&mut rng),
+            unallocated_confirmed_incoming: U256::from(7u64),
+            prev_digest: Bytes32::rand(&mut rng),
+            state_version: 11,
+        }
+    }
+
+    const TEST_CHANNEL_ID: u32 = 9;
+
+    /// A real signing block for `channel`: one block slot (the bp, slot 0), a channel-action tx,
+    /// and the channel's whole registered member set. Returns the witness and the IMCH digest the
+    /// members must sign.
+    fn signing_block(channel: &RegisteredChannel, channel_id: u32) -> (UpdateUserTree, Bytes32) {
+        let block_number = BlockNumber::new(30).unwrap();
+        let key_id = 7u32;
+        let num_users = 1;
+        let mut rng = StdRng::seed_from_u64(99);
+        let prev_block_hash_chain = Bytes32::rand(&mut rng);
+        let deposit_hash_chain = Bytes32::rand(&mut rng);
+
+        let channel_target = ChannelId::new(channel_id as u64).unwrap();
+        let send_tree = SendTree::init();
+        let prev_user_leaf = ChannelLeaf {
+            index: 0,
+            prev: BlockNumber::new(4).unwrap(),
+            send_tree_root: send_tree.get_root(),
+            member_pubkeys_root: channel.root,
+        };
+        let mut channel_tree = ChannelTree::new(CHANNEL_TREE_HEIGHT);
+        channel_tree.update(channel_target.as_u64(), prev_user_leaf.clone());
+        let prev_account_tree_root = channel_tree.get_root();
+
+        let channel_action = ChannelAction {
+            kind: ChannelActionKind::InterChannelSend,
+            source_channel_id: channel_target,
+            destination_channel_id: ChannelId::new(10).unwrap(),
+            tx_hash: Bytes32::rand(&mut rng),
+            seal: Bytes32::rand(&mut rng),
+            payload_hash: PoseidonHashOut::rand(&mut rng),
+        };
+        let mut channel_action_tree = ChannelActionTree::init();
+        channel_action_tree.update(0, channel_action);
+        let channel_action_proof = channel_action_tree.prove(0);
+        let tx_v2 = TxV2 {
+            tx_class: TxClass::ChannelAction,
+            transfer_tree_root: PoseidonHashOut::default(),
+            nonce: 1,
+            channel_action_root: channel_action_tree.get_root(),
+        };
+        let mut tx_v2_tree = TxV2Tree::init();
+        tx_v2_tree.update(0, tx_v2);
+        let tx_v2_proof = tx_v2_tree.prove(0);
+        let block = Block::new_with_tx_v2s(
+            num_users,
+            channel_id,
+            &[key_id],
+            rng.next_u64(),
+            &[tx_v2],
+            deposit_hash_chain,
+            Bytes32::default(),
+        )
+        .unwrap();
+
+        let user_merkle_proof = channel_tree.prove(channel_target.as_u64());
+        let send_merkle_proof = send_tree.prove(prev_user_leaf.index.into());
+
+        let fields = channel_state_fields(0xc1a1_0000 + channel_id as u64);
+        // `h2_tag` is the block's OWN tx root: this is the whole binding.
+        let signed_digest = fields.signing_digest(channel_id, block.tx_tree_root);
+
+        let tree = UpdateUserTree {
+            prev_block_hash_chain,
+            prev_account_tree_root,
+            block_number,
+            block,
+            prev_account_leaves: vec![prev_user_leaf],
+            user_merkle_proofs: vec![user_merkle_proof],
+            send_merkle_proofs: vec![send_merkle_proof],
+            prev_bp_sig_chain: Bytes32::default(),
+            member_leaves: channel.leaves.clone(),
+            signer_count: channel.signer_count(),
+            // The bp posts from slot 0, so slot 0's Regev key is the one opened.
+            member_regev_pks: vec![channel.regev[0].clone()],
+            channel_state_fields: fields,
+            tx_v2_indices: vec![0],
+            tx_v2s: vec![tx_v2],
+            tx_v2_merkle_proofs: vec![tx_v2_proof],
+            channel_action_indices: vec![0],
+            channel_actions: vec![channel_action],
+            channel_action_merkle_proofs: vec![channel_action_proof],
+        };
+        (tree, signed_digest)
+    }
+
+    /// The statement a well-formed block must fold: `(IMCH digest, signer_count, pk list)`.
+    fn expected_entry(channel: &RegisteredChannel, digest: Bytes32) -> AggListEntry {
+        AggListEntry {
+            message: digest,
+            signer_pks: channel.keys.iter().map(FalconKeys::pk_g).collect(),
+        }
+    }
+
+    /// Assert a witness the CIRCUIT must refuse is refused, without letting the native mirror's
+    /// restatement of the same rule mask it: the strict mirror must reject with `expected_reason`
+    /// in its message (that is the "right reason" pin), and the circuit must then also refuse the
+    /// witness when handed the public inputs the mirror would have produced anyway.
+    fn assert_refused(tree: &UpdateUserTree, expected_reason: &str) {
+        let native = tree.to_public_inputs();
+        let message = match &native {
+            Ok(_) => panic!("the native mirror accepted a witness the circuit must refuse"),
+            Err(e) => e.to_string(),
+        };
+        assert!(
+            message.contains(expected_reason),
+            "native mirror refused for the wrong reason: got {message:?}, expected it to mention \
+             {expected_reason:?}"
+        );
+        let pis = tree
+            .to_public_inputs_unchecked()
+            .expect("the unchecked mirror computes public inputs for any witness");
+        assert!(
+            CIRCUIT.prove_with_public_inputs(tree, &pis).is_err(),
+            "the circuit proved a witness it must refuse ({expected_reason})"
+        );
+    }
+
+    // ── POSITIVES ────────────────────────────────────────────────────────────────────────────
+
+    /// Positive 1 (design §9 Phase 3): a real 2-of-2 signing block proves and verifies, and the
+    /// folded chain is exactly the native `(digest, signer_count, pk_list_digest)` statement the
+    /// aggregate-list proof will rebuild. The two members' REAL Falcon signatures over that digest
+    /// are produced and natively verified here, so this is a 2-of-2 block and not a shape test.
     #[cfg_attr(debug_assertions, ignore = "run with --release")]
     #[test]
-    fn test_update_user_tree_no_signing_block() {
+    fn a_real_2_of_2_signing_block_proves() {
+        let _heavy = heavy();
+        let channel = RegisteredChannel::new(2, 0x10);
+        let (tree, digest) = signing_block(&channel, TEST_CHANNEL_ID);
+        assert_eq!(channel.sign_all(digest).len(), 2);
+
+        let public_inputs = tree.to_public_inputs().unwrap();
+        assert_eq!(
+            public_inputs.new_bp_sig_chain,
+            agg_list_commitment(&[expected_entry(&channel, digest)]),
+            "the block must commit to the N-of-N statement, not to a single signer"
+        );
+        assert_eq!(public_inputs.prev_bp_sig_chain, Bytes32::default());
+
+        println!(
+            "MEASURE update_channel_tree(num_users=1) degree=2^{} pis={}",
+            CIRCUIT.data.common.degree_bits(),
+            CIRCUIT.data.common.num_public_inputs,
+        );
+        let t = std::time::Instant::now();
+        let proof = CIRCUIT.prove(&tree).unwrap();
+        println!(
+            "MEASURE update_channel_tree prove(2-of-2)={:?}",
+            t.elapsed()
+        );
+        CIRCUIT.data.verify(proof.clone()).unwrap();
+
+        let expected_public_inputs: Vec<F> = public_inputs
+            .to_u64_vec()
+            .into_iter()
+            .map(F::from_canonical_u64)
+            .collect();
+        assert_eq!(proof.public_inputs, expected_public_inputs);
+    }
+
+    /// Positive 2: a FULL 16-of-16 block — every member slot active, no padding anywhere — proves
+    /// and verifies. The extreme the thermometer and the pk-list padding agreement are most likely
+    /// to get wrong.
+    #[cfg_attr(debug_assertions, ignore = "run with --release")]
+    #[test]
+    fn a_real_16_of_16_signing_block_proves() {
+        let _heavy = heavy();
+        let channel = RegisteredChannel::new(MAX_COSIGNERS, 0x30);
+        let (tree, digest) = signing_block(&channel, TEST_CHANNEL_ID);
+        assert_eq!(channel.sign_all(digest).len(), MAX_COSIGNERS);
+
+        let public_inputs = tree.to_public_inputs().unwrap();
+        assert_eq!(
+            public_inputs.new_bp_sig_chain,
+            agg_list_commitment(&[expected_entry(&channel, digest)])
+        );
+        let t = std::time::Instant::now();
+        let proof = CIRCUIT.prove(&tree).unwrap();
+        println!(
+            "MEASURE update_channel_tree prove(16-of-16)={:?}",
+            t.elapsed()
+        );
+        CIRCUIT.data.verify(proof).unwrap();
+    }
+
+    /// A block that transitions no channel leaf applies no signature: the chain is unchanged, and
+    /// — deliberately — the witness carries NO member set at all. The N-of-N well-formedness is
+    /// gated on the COMPUTED "this block signs" flag, so a padding block is not forced to invent a
+    /// member set it has no business knowing.
+    #[cfg_attr(debug_assertions, ignore = "run with --release")]
+    #[test]
+    fn a_non_signing_block_leaves_the_chain_untouched() {
+        let _heavy = heavy();
         let block_number = BlockNumber::new(20).unwrap();
         let channel_id = 5u32;
         let num_users = 2;
@@ -1404,13 +1888,10 @@ mod tests {
             user_merkle_proofs,
             send_merkle_proofs,
             prev_bp_sig_chain,
-            member_merkle_proofs: vec![
-                MemberMerkleProof::dummy(MEMBER_TREE_HEIGHT);
-                num_users as usize
-            ],
+            member_leaves: vec![MemberLeaf::default(); MAX_COSIGNERS],
+            signer_count: 0,
             member_regev_pks: vec![dummy_regev_pk(); num_users as usize],
-            member_pk_bs: vec![PoseidonHashOut::default(); num_users as usize],
-            msg_fields: SmallBlockMessageFields::default(),
+            channel_state_fields: ChannelStateMessageFields::default(),
             tx_v2_indices: vec![0; num_users as usize],
             tx_v2s: vec![TxV2::default(); num_users as usize],
             tx_v2_merkle_proofs: vec![TxV2MerkleProof::dummy(TX_TREE_HEIGHT); num_users as usize],
@@ -1423,11 +1904,15 @@ mod tests {
         };
 
         let public_inputs = update_channel_tree.to_public_inputs().unwrap();
-        // No update ⇒ bp_sig_chain unchanged.
         assert_eq!(public_inputs.prev_bp_sig_chain, prev_bp_sig_chain);
         assert_eq!(public_inputs.new_bp_sig_chain, prev_bp_sig_chain);
 
         let circuit = UpdateUserCircuit::<F, C, D>::new(num_users);
+        println!(
+            "MEASURE update_channel_tree(num_users=2) degree=2^{} pis={}",
+            circuit.data.common.degree_bits(),
+            circuit.data.common.num_public_inputs,
+        );
         let proof = circuit.prove(&update_channel_tree).unwrap();
         circuit.data.verify(proof.clone()).unwrap();
 
@@ -1439,172 +1924,254 @@ mod tests {
         assert_eq!(proof.public_inputs, expected_public_inputs);
     }
 
-    /// Build a real signing block: slot 0 (the bp) updates, the bp's `(IMSB_digest, pk_g)` is
-    /// folded into bp_sig_chain, and the member inclusion of `pk_g` at slot 0 is proven.
-    fn signing_update_tree(
-        signer_pk_g: Bytes32,
-        prev_bp_sig_chain: Bytes32,
-        member_tree: &MemberTree,
-        signer_regev: &RegevPk,
-        signer_pk_b: PoseidonHashOut,
-    ) -> (UpdateUserTree, Bytes32) {
-        let block_number = BlockNumber::new(30).unwrap();
-        let channel_id = 9u32;
-        let key_id = 7u32;
-        let num_users = 1;
-        let mut rng = StdRng::seed_from_u64(99);
-        let prev_block_hash_chain = Bytes32::rand(&mut rng);
-        let deposit_hash_chain = Bytes32::rand(&mut rng);
+    // ── NEGATIVES (design §9 Phase 3 acceptance (a)-(h)) ─────────────────────────────────────
 
-        let channel = ChannelId::new(channel_id as u64).unwrap();
-        let send_tree = SendTree::init();
-        let member_pubkeys_root = member_tree.get_root();
-        let prev_user_leaf = ChannelLeaf {
-            index: 0,
-            prev: BlockNumber::new(4).unwrap(),
-            send_tree_root: send_tree.get_root(),
-            member_pubkeys_root,
-        };
-        let mut channel_tree = ChannelTree::new(CHANNEL_TREE_HEIGHT);
-        channel_tree.update(channel.as_u64(), prev_user_leaf.clone());
-        let prev_account_tree_root = channel_tree.get_root();
-
-        let channel_action = ChannelAction {
-            kind: ChannelActionKind::InterChannelSend,
-            source_channel_id: channel,
-            destination_channel_id: ChannelId::new(10).unwrap(),
-            tx_hash: Bytes32::rand(&mut rng),
-            seal: Bytes32::rand(&mut rng),
-            payload_hash: PoseidonHashOut::rand(&mut rng),
-        };
-        let mut channel_action_tree = ChannelActionTree::init();
-        channel_action_tree.update(0, channel_action);
-        let channel_action_proof = channel_action_tree.prove(0);
-        let tx_v2 = TxV2 {
-            tx_class: TxClass::ChannelAction,
-            transfer_tree_root: PoseidonHashOut::default(),
-            nonce: 1,
-            channel_action_root: channel_action_tree.get_root(),
-        };
-        let mut tx_v2_tree = TxV2Tree::init();
-        tx_v2_tree.update(0, tx_v2);
-        let tx_v2_proof = tx_v2_tree.prove(0);
-        let block = Block::new_with_tx_v2s(
-            num_users,
-            channel_id,
-            &[key_id],
-            rng.next_u64(),
-            &[tx_v2],
-            deposit_hash_chain,
-            Bytes32::default(),
-        )
-        .unwrap();
-
-        let user_merkle_proof = channel_tree.prove(channel.as_u64());
-        let send_merkle_proof = send_tree.prove(prev_user_leaf.index.into());
-        let member_merkle_proof = member_tree.prove(0); // bp is at slot 0
-
-        let bp_pk_g: Bytes32 = signer_pk_g;
-        let msg_fields = SmallBlockMessageFields {
-            bp_member_slot: 0,
-            bp_pk_g,
-            small_block_number: 0,
-            prev_small_block_root: Bytes32::default(),
-            state_commitment_root: Bytes32::default(),
-            medium_epoch_hint: 0,
-            close_freeze_nonce: 0,
-        };
-        let signed_digest = msg_fields.signing_digest(channel_id, block.tx_tree_root);
-
-        let tree = UpdateUserTree {
-            prev_block_hash_chain,
-            prev_account_tree_root,
-            block_number,
-            block,
-            prev_account_leaves: vec![prev_user_leaf],
-            user_merkle_proofs: vec![user_merkle_proof],
-            send_merkle_proofs: vec![send_merkle_proof],
-            prev_bp_sig_chain,
-            member_merkle_proofs: vec![member_merkle_proof],
-            member_regev_pks: vec![signer_regev.clone()],
-            // The single updating slot IS the bp (slot 0); its witnessed pk_b must match the leaf
-            // at slot 0 so the 3-field member inclusion against `member_pubkeys_root`
-            // holds.
-            member_pk_bs: vec![signer_pk_b],
-            msg_fields,
-            tx_v2_indices: vec![0],
-            tx_v2s: vec![tx_v2],
-            tx_v2_merkle_proofs: vec![tx_v2_proof],
-            channel_action_indices: vec![0],
-            channel_actions: vec![channel_action],
-            channel_action_merkle_proofs: vec![channel_action_proof],
-        };
-        (tree, signed_digest)
-    }
-
-    /// Happy path: a real signing block folds `(IMSB_digest, bp_pk_g)` into the bp_sig_chain, and
-    /// the chain matches the native `list_commitment`.
+    /// (a) A block signed by all but ONE member. Both ways of expressing it are refused, and by
+    /// DIFFERENT constraints — which is the point: the pair is what makes exclusion impossible.
+    ///
+    ///   a1. Lower `signer_count` and keep the real leaves: the excluded member's leaf now sits at
+    ///       or above `signer_count`, so the thermometer refuses it. (The recomputed root still
+    ///       matches, so this case is isolated to the padding rule.)
+    ///   a2. Lower `signer_count` and blank the excluded member's leaf: the padding rule is now
+    ///       satisfied, and the recomputed root no longer matches the channel's committed one.
+    ///
+    /// Under the OLD single-signature rule this witness was the normal case; that is the defect.
     #[cfg_attr(debug_assertions, ignore = "run with --release")]
     #[test]
-    fn test_update_user_tree_folds_bp_sig_chain() {
-        let signer = falcon_pk_g(0x11);
-        let signer_regev = regev_pk(1);
-        let signer_pk_b = member_pk_b(1);
-        let member_tree = build_member_tree(signer, &signer_regev, signer_pk_b);
-        let prev_bp_sig_chain = Bytes32::default();
-        let (tree, signed_digest) = signing_update_tree(
-            signer,
-            prev_bp_sig_chain,
-            &member_tree,
-            &signer_regev,
-            signer_pk_b,
-        );
+    fn excluding_one_member_is_unprovable() {
+        let _heavy = heavy();
+        let channel = RegisteredChannel::new(3, 0x50);
 
-        let public_inputs = tree.to_public_inputs().unwrap();
-        // The new chain equals folding (signed_digest, pk_g) onto the empty chain.
-        let expected = list_commitment(&[(signed_digest, signer)]);
-        assert_eq!(public_inputs.new_bp_sig_chain, expected);
-        assert_eq!(public_inputs.prev_bp_sig_chain, prev_bp_sig_chain);
+        let (mut a1, _) = signing_block(&channel, TEST_CHANNEL_ID);
+        a1.signer_count = channel.signer_count() - 1;
+        assert_refused(&a1, "is not the empty leaf");
 
-        let circuit = UpdateUserCircuit::<F, C, D>::new(1);
-        let proof = circuit.prove(&tree).unwrap();
-        circuit.data.verify(proof.clone()).unwrap();
-        let expected_public_inputs: Vec<F> = public_inputs
-            .to_u64_vec()
-            .into_iter()
-            .map(F::from_canonical_u64)
-            .collect();
-        assert_eq!(proof.public_inputs, expected_public_inputs);
+        let (mut a2, _) = signing_block(&channel, TEST_CHANNEL_ID);
+        a2.signer_count = channel.signer_count() - 1;
+        a2.member_leaves[(channel.signer_count() - 1) as usize] = MemberLeaf::default();
+        assert_refused(&a2, "does not match the channel leaf's committed root");
     }
 
-    /// SECURITY (A9): a bp pk_g that is NOT in the channel's member tree at slot 0 must be rejected
-    /// — the member inclusion against the trusted `member_pubkeys_root` fails.
+    /// (b) One member's `pk_g` in two active slots — the shape that lets `signer_count` signatures
+    /// come from fewer than `signer_count` keys. `FalconAggCircuit` deliberately permits it
+    /// (`falcon_sig::agg`: "the same leaf proof may be placed in two slots"), so distinctness is
+    /// a CONSUMER obligation and this is where it is discharged: a duplicated key is a different
+    /// leaf multiset, hence a different root.
     #[cfg_attr(debug_assertions, ignore = "run with --release")]
     #[test]
-    fn update_user_tree_rejects_pubkey_not_in_member_tree() {
-        let signer = falcon_pk_g(0x44);
-        let signer_regev = regev_pk(7);
-        // Member tree at slot 0 holds a DIFFERENT key, not the signer's.
-        let other = falcon_pk_g(0x99);
-        let member_tree = build_member_tree(other, &regev_pk(8), member_pk_b(8));
-        let (tree, _digest) = signing_update_tree(
-            signer,
-            Bytes32::default(),
-            &member_tree,
-            &signer_regev,
-            member_pk_b(7),
-        );
+    fn a_duplicated_member_pk_is_unprovable() {
+        let _heavy = heavy();
+        let channel = RegisteredChannel::new(3, 0x60);
+        let (mut tree, digest) = signing_block(&channel, TEST_CHANNEL_ID);
+        // Slot 1 now claims slot 0's identity: two "signatures", one key.
+        tree.member_leaves[1].pk_g = tree.member_leaves[0].pk_g;
+        assert_refused(&tree, "does not match the channel leaf's committed root");
 
-        // Native witness building already rejects (member leaf not in tree at slot 0).
-        assert!(matches!(
-            tree.to_public_inputs(),
-            Err(UpdateUserTreeError::MerkleProofError(_))
-        ));
-
-        let circuit = UpdateUserCircuit::<F, C, D>::new(1);
-        assert!(
-            circuit.prove(&tree).is_err(),
-            "circuit must reject the out-of-tree pubkey signature"
+        // ... and the statement it would have folded is not the channel's, either.
+        assert_ne!(
+            tree.to_public_inputs_unchecked().unwrap().new_bp_sig_chain,
+            agg_list_commitment(&[expected_entry(&channel, digest)])
         );
+    }
+
+    /// (c) A key that was never registered, placed in an active slot. This is the old 1-of-N
+    /// defect's dual: previously ANY registered key sufficed and the rest of the set was never
+    /// examined; now the whole set is recomputed, so an unregistered key cannot hide in it.
+    #[cfg_attr(debug_assertions, ignore = "run with --release")]
+    #[test]
+    fn an_unregistered_member_pk_is_unprovable() {
+        let _heavy = heavy();
+        let channel = RegisteredChannel::new(3, 0x70);
+        let (mut tree, _) = signing_block(&channel, TEST_CHANNEL_ID);
+        let outsider = FalconKeys::from_seed([0xee; 32]);
+        tree.member_leaves[1].pk_g = outsider.pk_g().try_into().unwrap();
+        assert_refused(&tree, "does not match the channel leaf's committed root");
+    }
+
+    /// (d) A non-empty leaf at or above `signer_count`. Stated on a channel whose REGISTERED set
+    /// really has four members while the block claims three: the recomputed root MATCHES (the
+    /// leaves are the registered ones), so nothing but the thermometer can refuse it. That
+    /// isolation is the point — it shows the padding rule is doing the work, not the root connect.
+    ///
+    /// The second variant plants a stranger's leaf above `signer_count` in a three-member channel;
+    /// there BOTH the padding rule and the root connect are violated, and the native mirror names
+    /// the padding one first. Kept because it is the shape an attacker would actually try.
+    #[cfg_attr(debug_assertions, ignore = "run with --release")]
+    #[test]
+    fn a_nonempty_slot_above_signer_count_is_unprovable() {
+        let _heavy = heavy();
+        let four = RegisteredChannel::new(4, 0x80);
+        let (mut prefix, _) = signing_block(&four, TEST_CHANNEL_ID);
+        prefix.signer_count = 3;
+        // Control: the leaves ARE the registered ones, so the root recompute is satisfied and the
+        // refusal below cannot be attributed to it.
+        let mut root_check = MemberTree::init();
+        for leaf in prefix.member_leaves.iter() {
+            root_check.push(leaf.clone());
+        }
+        assert_eq!(
+            root_check.get_root(),
+            prefix.prev_account_leaves[0].member_pubkeys_root,
+            "the isolation this case depends on"
+        );
+        assert_refused(&prefix, "is not the empty leaf");
+
+        let three = RegisteredChannel::new(3, 0x88);
+        let (mut planted, _) = signing_block(&three, TEST_CHANNEL_ID);
+        let stranger = FalconKeys::from_seed([0xef; 32]);
+        planted.member_leaves[3] = MemberLeaf {
+            pk_g: stranger.pk_g().try_into().unwrap(),
+            pk_b: member_pk_b(0xef),
+            regev_pk_digest: regev_pk(0xef).poseidon_digest(),
+        };
+        assert_refused(&planted, "is not the empty leaf");
+    }
+
+    /// (e) `signer_count = 1` — the defect restated as an aggregate. Stated on a channel whose
+    /// registered set really is one member, so the root recompute, the padding rule and the
+    /// active-slot rule are ALL satisfied and only the `>= 2` floor can refuse it. (Registration
+    /// itself will not mint such a channel — `channel_reg_step` range-checks `member_count` to
+    /// `[2, 16]` — which is exactly why the floor has to be restated where the signature is
+    /// applied rather than assumed upstream.)
+    #[cfg_attr(debug_assertions, ignore = "run with --release")]
+    #[test]
+    fn a_single_signer_is_unprovable() {
+        let _heavy = heavy();
+        let solo = RegisteredChannel::new(1, 0x90);
+        let (tree, _) = signing_block(&solo, TEST_CHANNEL_ID);
+        assert_eq!(tree.signer_count, 1);
+        let mut root_check = MemberTree::init();
+        for leaf in tree.member_leaves.iter() {
+            root_check.push(leaf.clone());
+        }
+        assert_eq!(
+            root_check.get_root(),
+            tree.prev_account_leaves[0].member_pubkeys_root,
+            "the isolation this case depends on: only the floor may refuse this witness"
+        );
+        assert_refused(&tree, "out of range 2..=16");
+    }
+
+    /// (f) `tx_tree_root == 0` with a signature applied (detail2 §C-2: H2 = 0 is reserved for
+    /// in-channel updates). KEPT VERBATIM across the rewire.
+    ///
+    /// HONEST NOTE on isolation: this one cannot be isolated the way (d) and (e) are. A zero tx
+    /// root is also not the Merkle root of any tx tree, so the block's `tx_v2` binding refuses the
+    /// same witness — and no witness can satisfy that binding at zero without a Poseidon preimage
+    /// of zero. What the test therefore pins is that the DEDICATED gate is present and fires
+    /// first: the native mirror names H2 = 0 rather than the tx binding, and the same witness with
+    /// a nonzero root proves (the control, so the refusal tracks the root value and not the
+    /// witness's shape).
+    #[cfg_attr(debug_assertions, ignore = "run with --release")]
+    #[test]
+    fn a_signature_over_a_zero_tx_tree_root_is_unprovable() {
+        let _heavy = heavy();
+        let channel = RegisteredChannel::new(2, 0xa0);
+        let (mut tree, _) = signing_block(&channel, TEST_CHANNEL_ID);
+        // Control: the same witness with a nonzero root is accepted, so the refusal below tracks
+        // the ROOT VALUE and not something else about this witness.
+        assert!(tree.to_public_inputs().is_ok());
+        assert!(CIRCUIT.prove(&tree).is_ok());
+
+        tree.block.tx_tree_root = Bytes32::default();
+        assert_refused(&tree, "H2=0 is reserved for in-channel updates");
+    }
+
+    /// (g) An IMCH `h2_tag` differing from the block's `tx_tree_root` — unsatisfiable BY
+    /// CONSTRUCTION.
+    ///
+    /// There is no `h2_tag` on [`ChannelStateMessageFields`] and no `h2_tag` target on its circuit
+    /// twin: the value hashed at limbs 129..137 is the block's own `tx_tree_root` wire
+    /// (`channel_state_message::preimage_target_wires_are_the_connected_ones` compares Target
+    /// identity, so a future edit that witnesses it fails there). The same holds for the two
+    /// `channel_id` limbs. What is left to state HERE is that the witness type offers a prover no
+    /// other route: whatever the prover puts in `channel_state_fields`, the folded digest is
+    /// `signing_digest(block.channel_id, block.tx_tree_root)`.
+    #[cfg_attr(debug_assertions, ignore = "run with --release")]
+    #[test]
+    fn the_signed_h2_tag_is_the_block_tx_root_by_construction() {
+        let _heavy = heavy();
+        let channel = RegisteredChannel::new(2, 0xb0);
+        let (tree, digest) = signing_block(&channel, TEST_CHANNEL_ID);
+
+        // The folded message is the digest over THIS block's tx root...
+        assert_eq!(
+            digest,
+            tree.channel_state_fields
+                .signing_digest(tree.block.channel_id(), tree.block.tx_tree_root)
+        );
+        // ... and not the digest over any other one. (A `h2_tag` the prover would prefer is a
+        // different digest, so the aggregate over it cannot match this block's fold.)
+        let other_root = Bytes32::from_u32_slice(&[1, 2, 3, 4, 5, 6, 7, 8]).unwrap();
+        assert_ne!(
+            digest,
+            tree.channel_state_fields
+                .signing_digest(tree.block.channel_id(), other_root)
+        );
+        assert_eq!(
+            tree.to_public_inputs().unwrap().new_bp_sig_chain,
+            agg_list_commitment(&[expected_entry(&channel, digest)])
+        );
+    }
+
+    /// (h) A REAL, validly N-of-N-signed IMCH digest that belongs somewhere else.
+    ///
+    ///   h1. …to a DIFFERENT channel. The signatures are produced and natively verified here, and
+    ///       deliberately by THIS channel's own members — the hardest version of the case, since
+    ///       then the ONLY thing separating the stolen statement from an acceptable one is the
+    ///       `channel_id` limbs (with a foreign key set the pk list would differ too, and the test
+    ///       would no longer isolate the channel binding). The limbs are hashed under THIS block's
+    ///       `channel_id` at both of its occurrences, so the digest this block folds is a different
+    ///       value and the stolen aggregate does not match it.
+    ///   h2. …to the SAME channel at a different `h2_tag` — a state its members signed for another
+    ///       small block. Same conclusion via the connected `h2_tag` limbs. This is the closest
+    ///       thing to the replay the design explicitly does NOT close (§6.2): note it is refused
+    ///       here only because the tx root differs, not because the state is stale.
+    ///
+    /// Both directions are asserted twice: the honest fold does not equal the stolen statement,
+    /// AND a prover who states the stolen chain as the block's output cannot prove it.
+    #[cfg_attr(debug_assertions, ignore = "run with --release")]
+    #[test]
+    fn a_foreign_or_stale_n_of_n_signature_cannot_be_applied() {
+        let _heavy = heavy();
+        let channel = RegisteredChannel::new(2, 0xc0);
+        let (tree, honest_digest) = signing_block(&channel, TEST_CHANNEL_ID);
+        let block_tx_root = tree.block.tx_tree_root;
+
+        // h1 — the same state limbs, genuinely signed for channel 42.
+        const FOREIGN_CHANNEL_ID: u32 = 42;
+        assert_ne!(FOREIGN_CHANNEL_ID, TEST_CHANNEL_ID);
+        let foreign_digest = tree
+            .channel_state_fields
+            .signing_digest(FOREIGN_CHANNEL_ID, block_tx_root);
+        assert_eq!(channel.sign_all(foreign_digest).len(), 2);
+        assert_ne!(foreign_digest, honest_digest);
+
+        // h2 — the same channel, a state signed for a DIFFERENT small block's tx root.
+        let stale_tx_root = Bytes32::from_u32_slice(&[9, 9, 9, 9, 9, 9, 9, 9]).unwrap();
+        assert_ne!(stale_tx_root, block_tx_root);
+        let stale_digest = tree
+            .channel_state_fields
+            .signing_digest(TEST_CHANNEL_ID, stale_tx_root);
+        assert_eq!(channel.sign_all(stale_digest).len(), 2);
+        assert_ne!(stale_digest, honest_digest);
+
+        let honest_pis = tree.to_public_inputs().unwrap();
+        for stolen in [foreign_digest, stale_digest] {
+            let stolen_chain = agg_list_commitment(&[AggListEntry {
+                message: stolen,
+                signer_pks: channel.keys.iter().map(FalconKeys::pk_g).collect(),
+            }]);
+            assert_ne!(
+                honest_pis.new_bp_sig_chain, stolen_chain,
+                "the block must not commit to a digest signed for another channel / tx root"
+            );
+            let mut forged = honest_pis.clone();
+            forged.new_bp_sig_chain = stolen_chain;
+            assert!(
+                CIRCUIT.prove_with_public_inputs(&tree, &forged).is_err(),
+                "a prover must not be able to state the stolen chain as this block's output"
+            );
+        }
     }
 }

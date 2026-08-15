@@ -278,10 +278,20 @@ where
         }
     }
 
-    /// Prove the validity statement. `list_proof` is the recursive `ListCircuit` proof over the
-    /// span's bp IMSB single-sigs; it MUST be `Some` exactly when `final.bp_sig_chain != 0` (the
-    /// span has at least one signing block). When `None`, the dummy proof is supplied and the
+    /// Prove the validity statement. `list_proof` is the recursive signature-list proof over the
+    /// span's signing blocks; it MUST be `Some` exactly when `final.bp_sig_chain != 0` (the span
+    /// has at least one signing block). When `None`, the dummy proof is supplied and the
     /// conditional list verification is gated off.
+    ///
+    /// STALE UNTIL PHASE 4 (small-block N-of-N design §9): since the N-of-N rewire of
+    /// `update_channel_tree`, `final.bp_sig_chain` folds
+    /// `(IMCH digest, signer_count, pk_list_digest)` per signing block, which is what
+    /// `falcon_sig::agg_list::AggListCircuit` commits to — NOT what the single-signature
+    /// `falcon_sig::list::ListCircuit` commits to. A span containing a signing block therefore
+    /// cannot satisfy the `C == final.bp_sig_chain` assertion below until this circuit is
+    /// constructed with the aggregate list's verifier data (Phase 4 swaps `list_vd`; the two
+    /// wrappers' `CommonCircuitData` are byte-identical, so only the VK changes). Spans with no
+    /// signing block are unaffected.
     pub fn prove(
         &self,
         block_hash_chain_proof: &ProofWithPublicInputs<F, C, D>,

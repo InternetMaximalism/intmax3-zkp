@@ -17,8 +17,8 @@ use crate::{
             block_chain_pis::BlockChainPublicInputs,
             block_hash_chain_circuit::{BlockHashChainCircuit, BlockHashChainCircuitError},
             block_step::{BlockStepCircuit, BlockStepError, BlockStepWitness},
+            channel_state_message::ChannelStateMessageFields,
             ext_public_state::ExtendedPublicState,
-            small_block_message::SmallBlockMessageFields,
             update_channel_tree::{UpdateUserCircuit, UpdateUserCircuitError, UpdateUserTree},
         },
         channel_reg_hash_chain::{
@@ -39,15 +39,15 @@ use crate::{
         trees::{
             channel_tree::{ChannelLeaf, ChannelMerkleProof, SendMerkleProof},
             deposit_tree::DepositMerkleProof,
-            key_tree::MemberMerkleProof,
+            key_tree::MemberLeaf,
             public_state_tree::PublicStateMerkleProof,
             tx_v2_tree::{ChannelActionMerkleProof, TxV2MerkleProof},
         },
         tx::{ChannelAction, TxV2},
     },
-    constants::{MEMBER_TREE_HEIGHT, TX_TREE_HEIGHT},
+    constants::{MAX_COSIGNERS, TX_TREE_HEIGHT},
     regev::{REGEV_N, RegevPk},
-    utils::{conversion::ToU64, poseidon_hash_out::PoseidonHashOut},
+    utils::conversion::ToU64,
 };
 
 /// All-zero Regev pubkey of the correct length for inactive (non-updating) slots. The member
@@ -91,21 +91,19 @@ pub struct BlockHashChainProcessorWitness {
     pub user_merkle_proofs: Vec<ChannelMerkleProof>,
     pub send_merkle_proofs: Vec<SendMerkleProof>,
     pub public_state_merkle_proof: PublicStateMerkleProof,
-    /// Optional per-slot MemberTree inclusion proofs binding the signing pubkey to the channel's
-    /// member tree (see `UpdateUserTree::member_merkle_proofs`). If None, dummy proofs are used,
-    /// valid only when every slot is non-updating (signature/binding constraints skipped).
-    pub member_merkle_proofs: Option<Vec<MemberMerkleProof>>,
-    /// Optional per-slot Regev public keys accompanying `member_merkle_proofs`. If None, default
-    /// (empty/dummy) keys are used (valid only for non-updating slots).
+    /// Optional channel member set — ALL `MAX_COSIGNERS` leaves in slot order (see
+    /// `UpdateUserTree::member_leaves`) together with the number that signed. If None, an empty
+    /// set with `signer_count = 0` is used, valid only when every slot is non-updating (the whole
+    /// N-of-N binding is gated on a block actually applying a signature).
+    pub member_leaves: Option<Vec<MemberLeaf>>,
+    pub signer_count: Option<u32>,
+    /// Optional per-block-slot Regev public keys. If None, default (empty/dummy) keys are used
+    /// (valid only for non-updating slots).
     pub member_regev_pks: Option<Vec<RegevPk>>,
-    /// Optional per-slot `pk_b` (BabyBear hash-sig public key) accompanying `member_merkle_proofs`
-    /// (P3, third `MemberLeaf` component). If None, default (zero) values are used — valid only
-    /// for non-updating slots (the leaf-inclusion constraint is skipped).
-    pub member_pk_bs: Option<Vec<PoseidonHashOut>>,
-    /// Optional per-block IMSB `SmallBlockRootMessage` preimage fields accompanying
-    /// `sig_witnesses` (detail2 §F-2). If None, default fields are used — valid only when the
-    /// signature constraints are skipped (dummy witnesses).
-    pub msg_fields: Option<SmallBlockMessageFields>,
+    /// Optional per-block IMCH `ChannelState::signing_digest()` preimage fields (detail2 §C-3) —
+    /// the message the channel's members signed. If None, default fields are used, valid only when
+    /// the signature constraints are skipped (non-updating slots).
+    pub channel_state_fields: Option<ChannelStateMessageFields>,
     /// Optional TxV2 witnesses used to bind active hub/key_id slots to concrete tx leaves.
     pub tx_v2_indices: Option<Vec<u64>>,
     pub tx_v2s: Option<Vec<TxV2>>,
@@ -320,18 +318,16 @@ where
             send_merkle_proofs: witness.send_merkle_proofs.clone(),
             // P2b: the bp IMSB-signature list accumulator before this block (the prev ext-state's).
             prev_bp_sig_chain: prev_ext_public_state.bp_sig_chain,
-            member_merkle_proofs: witness.member_merkle_proofs.clone().unwrap_or_else(|| {
-                vec![MemberMerkleProof::dummy(MEMBER_TREE_HEIGHT); num_users as usize]
-            }),
+            member_leaves: witness
+                .member_leaves
+                .clone()
+                .unwrap_or_else(|| vec![MemberLeaf::default(); MAX_COSIGNERS]),
+            signer_count: witness.signer_count.unwrap_or(0),
             member_regev_pks: witness
                 .member_regev_pks
                 .clone()
                 .unwrap_or_else(|| vec![dummy_regev_pk(); num_users as usize]),
-            member_pk_bs: witness
-                .member_pk_bs
-                .clone()
-                .unwrap_or_else(|| vec![PoseidonHashOut::default(); num_users as usize]),
-            msg_fields: witness.msg_fields.clone().unwrap_or_default(),
+            channel_state_fields: witness.channel_state_fields.clone().unwrap_or_default(),
             tx_v2_indices: witness.tx_v2_indices.clone().unwrap_or(dummy_tx_v2_indices),
             tx_v2s: witness.tx_v2s.clone().unwrap_or(dummy_tx_v2s),
             tx_v2_merkle_proofs: witness

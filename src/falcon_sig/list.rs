@@ -27,21 +27,28 @@
 //!     derived from, i.e. the digest the norm bound was checked against.
 //!
 //! UNCHANGED, deliberately and bit-for-bit: the `leaf_target` / `chain_step_target` gadgets, the
-//! `IMLL` leaf domain, the step's public-input layout `[prev_chain(8), new_chain(8)]`, the cyclic
-//! wrapper, and therefore the `bp_sig_chain` accumulator semantics that
-//! `update_channel_tree.rs` folds in-circuit.
+//! `IMLL` leaf domain, the step's public-input layout `[prev_chain(8), new_chain(8)]` and the
+//! cyclic wrapper.
+//!
+//! # NO LONGER THE VALIDITY PATH'S CONSUMER (small-block N-of-N design §9 Phase 3)
+//!
+//! `update_channel_tree` used to fold `(IMSB digest, bp_pk_g)` — ONE signature by ONE registered
+//! member — into `bp_sig_chain`, and this list proved those single signatures. That predicate was
+//! 1-of-N, which is the defect the N-of-N change removes: the block now folds
+//! `(IMCH digest, signer_count, pk_list_digest)` (`falcon_sig::agg_list`), so a chain built by
+//! THIS circuit no longer equals the accumulator `update_channel_tree` computes. Phase 4 swaps the
+//! validity circuit's `list_vd` for the aggregate list's. Nothing below should be read as a live
+//! description of the validity path's binding.
 //!
 //! # Message binding (TM-C5 item 4)
 //!
 //! The step's `message_digest` is a free witness INSIDE this circuit — exactly as the SingleSig
-//! proof's `m` public input was before. It is bound EXTERNALLY, by the consumer, and the binding is
-//! unchanged: `update_channel_tree` recomputes the IMSB digest in-circuit
-//! (`SmallBlockMessageFieldsTarget::compute_signing_digest`) and folds `(that digest, bp_pk_g)`
-//! into `bp_sig_chain` with the SAME `leaf_target`/`chain_step_target` gadgets; the validity
-//! circuit then asserts `C == final.bp_sig_chain`. Because the leaf hash commits to BOTH `m` and
-//! `pk`, that equality forces every step's `(m, pk)` to equal the consumer's
-//! `(recomputed IMSB digest, registered bp_pk_g)` pair, up to a Poseidon collision. A prover who
-//! picks a different `message_digest` produces a different chain and fails the equality.
+//! proof's `m` public input was before. It is bound EXTERNALLY, by the consumer, which recomputes
+//! the digest in-circuit and folds it with the SAME `leaf_target`/`chain_step_target` gadgets; the
+//! validity circuit then asserts `C == final.bp_sig_chain`. Because the leaf hash commits to BOTH
+//! `m` and `pk`, that equality forces every step's `(m, pk)` to equal the consumer's
+//! `(recomputed digest, registered pk_g)` pair, up to a Poseidon collision. A prover who picks a
+//! different `message_digest` produces a different chain and fails the equality.
 //!
 //! # Cross-context isolation (TM-C6 / O-6)
 //!
