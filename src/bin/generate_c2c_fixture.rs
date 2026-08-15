@@ -707,14 +707,17 @@ fn main() -> anyhow::Result<()> {
     }
 
     let final_block_chain_proof = last_block_proof.expect("final block hash chain proof");
-    // P2b: build + verify the bp IMSB-signature ListCircuit proof (decision D3).
-    let list_circuit = intmax3_zkp::falcon_sig::list::ListCircuit::<F, C, D>::new();
+    // P2b: build + verify the N-of-N signature AggListCircuit proof (decision D3).
+    let agg_circuit = intmax3_zkp::falcon_sig::agg::FalconAggCircuit::<F, C, D>::new();
+    let agg_list_circuit = intmax3_zkp::falcon_sig::agg_list::AggListCircuit::<F, C, D>::new(
+        &agg_circuit.verifier_data(),
+    );
     let list_proof = block_witness_generator
         .borrow()
-        .build_legacy_single_sig_list_proof(&list_circuit)
+        .build_agg_sig_list_proof(&agg_circuit, &agg_list_circuit)
         .expect("build bp sig list proof");
     let validity_circuit =
-        ValidityCircuit::<F, C, D>::new(&block_chain_vd, &list_circuit.verifier_data());
+        ValidityCircuit::<F, C, D>::new(&block_chain_vd, &agg_list_circuit.verifier_data());
     // FIXED validity prover address.
     let validity_prover = Address::default();
     let validity_proof = validity_circuit

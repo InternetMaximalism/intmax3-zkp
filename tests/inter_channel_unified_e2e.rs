@@ -49,7 +49,7 @@ use intmax3_zkp::{
         u63::BlockNumber,
     },
     ethereum_types::{address::Address, bytes32::Bytes32, u32limb_trait::U32LimbTrait, u256::U256},
-    falcon_sig::list::ListCircuit,
+    falcon_sig::{agg::FalconAggCircuit, agg_list::AggListCircuit},
     regev::{
         RealRegevProofVerifier, RegevCiphertext, RegevPk, RegevSecurityLevel, encrypt_amount,
         prove_channel_update,
@@ -552,13 +552,14 @@ fn unified_inter_channel_transfer_e2e() {
         Bytes32::default(),
         "bp IMSB signature recorded"
     );
-    let list = ListCircuit::<F, C, D>::new();
+    let agg = FalconAggCircuit::<F, C, D>::new();
+    let agg_list = AggListCircuit::<F, C, D>::new(&agg.verifier_data());
     let list_proof = bwgen
         .borrow()
-        .build_legacy_single_sig_list_proof(&list)
+        .build_agg_sig_list_proof(&agg, &agg_list)
         .expect("list proof");
     assert!(list_proof.is_some());
-    let validity = ValidityCircuit::<F, C, D>::new(&block_chain_vd, &list.verifier_data());
+    let validity = ValidityCircuit::<F, C, D>::new(&block_chain_vd, &agg_list.verifier_data());
     let vproof = validity
         .prove(&final_chain, list_proof.as_ref(), Address::rand(&mut brng))
         .expect("validity proof");

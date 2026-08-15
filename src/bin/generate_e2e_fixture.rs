@@ -113,11 +113,14 @@ fn main() -> anyhow::Result<()> {
     let block_proof = processor.prove_block(Some(initial_state.clone()), None, &block_witness)?;
     let block_chain_vd = processor.block_chain_vd();
 
-    // P2b: the validity circuit conditionally verifies a Falcon-signature ListCircuit proof. This
+    // P2b: the validity circuit conditionally verifies an N-of-N Falcon AggListCircuit proof. This
     // empty (all-padding) block has no signing event ⇒ final.bp_sig_chain == 0 ⇒ list proof None.
-    let list_circuit = intmax3_zkp::falcon_sig::list::ListCircuit::<F, C, D>::new();
+    let agg_circuit = intmax3_zkp::falcon_sig::agg::FalconAggCircuit::<F, C, D>::new();
+    let agg_list_circuit = intmax3_zkp::falcon_sig::agg_list::AggListCircuit::<F, C, D>::new(
+        &agg_circuit.verifier_data(),
+    );
     let validity_circuit =
-        ValidityCircuit::<F, C, D>::new(&block_chain_vd, &list_circuit.verifier_data());
+        ValidityCircuit::<F, C, D>::new(&block_chain_vd, &agg_list_circuit.verifier_data());
     let prover = Address::default();
     let validity_proof = validity_circuit.prove(&block_proof, None, prover)?;
 

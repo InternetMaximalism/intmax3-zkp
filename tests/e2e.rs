@@ -484,17 +484,20 @@ fn e2e_deposit_validity_withdrawal() {
 
     let final_block_chain_proof = last_block_proof.expect("final block hash chain proof");
 
-    // P2b: build the recursive ListCircuit proof over the span's bp IMSB Falcon signatures, and
-    // pass it to the validity circuit (which verifies it conditionally on final.bp_sig_chain != 0,
-    // decision D3).
-    let list_circuit = intmax3_zkp::falcon_sig::list::ListCircuit::<F, C, D>::new();
+    // P2b: build the recursive N-of-N AggListCircuit proof over the span's per-block Falcon
+    // aggregates, and pass it to the validity circuit (which verifies it conditionally on
+    // final.bp_sig_chain != 0, decision D3).
+    let agg_circuit = intmax3_zkp::falcon_sig::agg::FalconAggCircuit::<F, C, D>::new();
+    let agg_list_circuit = intmax3_zkp::falcon_sig::agg_list::AggListCircuit::<F, C, D>::new(
+        &agg_circuit.verifier_data(),
+    );
     let list_proof = block_witness_generator
         .borrow()
-        .build_legacy_single_sig_list_proof(&list_circuit)
+        .build_agg_sig_list_proof(&agg_circuit, &agg_list_circuit)
         .expect("build bp sig list proof");
 
     let validity_circuit =
-        ValidityCircuit::<F, C, D>::new(&block_chain_vd, &list_circuit.verifier_data());
+        ValidityCircuit::<F, C, D>::new(&block_chain_vd, &agg_list_circuit.verifier_data());
     let validity_prover = Address::rand(&mut rng);
     let validity_timer = Instant::now();
     let validity_proof = validity_circuit

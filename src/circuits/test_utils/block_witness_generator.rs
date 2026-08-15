@@ -34,7 +34,8 @@ use crate::{
     },
     falcon_sig::{
         FalconKeys,
-        agg_list::{AggListEntry, agg_list_commitment},
+        agg::{FalconAggCircuit, FalconAggWitness},
+        agg_list::{AggListCircuit, AggListEntry, agg_list_commitment},
         gadget::FalconSigGadgetWitness,
     },
     regev::{REGEV_N, REGEV_Q, RegevPk, hash_sig::BabyBearSecretKey},
@@ -459,10 +460,10 @@ pub struct BlockWitnessGenerator {
     /// `channel_tree` (the registration block applies it).
     pub channel_registrations: Vec<(ChannelRegRecord, ChannelMemberKeys)>,
     pub block_chain_witness: HashMap<BlockNumber, BlockHashChainProcessorWitness>,
-    /// P2b: the ordered list of bp IMSB signing events over the whole span, in block order. The
-    /// validity level folds each into one `falcon_sig::list::ListCircuit` proof (one in-circuit
-    /// Falcon verification per step) whose commitment must equal the final `bp_sig_chain`
-    /// (decision D3, falcon-sig Phase 3).
+    /// P2b: the ordered list of N-of-N IMCH signing events over the whole span, in block order.
+    /// The validity level folds each into one `falcon_sig::agg_list::AggListCircuit` step (one
+    /// recursively verified `FalconAggCircuit` aggregate per signing block) whose commitment must
+    /// equal the final `bp_sig_chain` (decision D3, small-block N-of-N Phase 4).
     pub bp_sig_events: Vec<BpSigEvent>,
     /// B-2: the `state_commitment_root` (= post-debit `BalanceState::h1()`, detail2 §C-7) to bind
     /// in the NEXT updating block's IMSB message, so the bp signs the genuine `hash(H1',
@@ -761,22 +762,29 @@ impl BlockWitnessGenerator {
         agg_list_commitment(&entries)
     }
 
-    /// Build the recursive SINGLE-SIGNATURE `ListCircuit` proof over every recorded signature
-    /// (block order, all members of each signing block). Returns `None` when there were no signing
-    /// blocks in the span.
+    /// Build the recursive N-of-N `AggListCircuit` proof over every recorded signing event (block
+    /// order, ONE `FalconAggCircuit` aggregate per signing block over ALL that block's members).
+    /// Returns `None` when there were no signing blocks in the span — the case
+    /// `ValidityCircuit::prove` takes with its dummy proof.
     ///
-    /// STALE BY DESIGN, and renamed so no call site can keep believing otherwise: since the N-of-N
-    /// rewire of `update_channel_tree` (small-block N-of-N design §9 Phase 3) the block folds
-    /// `(IMCH_digest, signer_count, pk_list_digest)`, so THIS proof's commitment is NOT
-    /// [`Self::current_bp_sig_chain`] and a `ValidityCircuit` that consumes it will fail its
-    /// `C == final.bp_sig_chain` assertion. Phase 4 replaces both this builder and the circuit's
-    /// `list_vd` with the aggregate list (`falcon_sig::agg_list::AggListCircuit`), whose steps
-    /// consume the `FalconAggWitness` these same recorded gadget witnesses form
-    /// (`FalconAggWitness { message: event.digest, active: event.witnesses }`). It is kept working
-    /// rather than deleted so the swap in Phase 4 is a visible, reviewable diff at each call site.
-    pub fn build_legacy_single_sig_list_proof(
+    /// This is the ONLY list-proof builder (small-block N-of-N design §9 Phase 4). The former
+    /// `build_legacy_single_sig_list_proof`, which folded ONE signature per step against
+    /// `falcon_sig::list::ListCircuit`, was deleted rather than left dead: since the Phase-3 rewire
+    /// of `update_channel_tree` the block folds `(IMCH_digest, signer_count, pk_list_digest)`, so
+    /// that proof's commitment is NOT [`Self::current_bp_sig_chain`], and the two list wrappers'
+    /// `CommonCircuitData` are byte-identical — meaning a caller wiring the stale builder to a
+    /// `ValidityCircuit` would COMPILE and only fail deep inside proving.
+    ///
+    /// The commitment this returns is exactly [`Self::current_bp_sig_chain`], which is what the
+    /// validity circuit asserts against `final.bp_sig_chain`.
+    pub fn build_agg_sig_list_proof(
         &self,
-        list: &crate::falcon_sig::list::ListCircuit<
+        agg: &FalconAggCircuit<
+            plonky2::field::goldilocks_field::GoldilocksField,
+            plonky2::plonk::config::PoseidonGoldilocksConfig,
+            2,
+        >,
+        agg_list: &AggListCircuit<
             plonky2::field::goldilocks_field::GoldilocksField,
             plonky2::plonk::config::PoseidonGoldilocksConfig,
             2,
@@ -790,28 +798,21 @@ impl BlockWitnessGenerator {
             >,
         >,
     > {
-        let pairs: Vec<(Bytes32, Bytes32)> = self
-            .bp_sig_events
-            .iter()
-            .flat_map(|e| {
-                e.signer_pks
-                    .iter()
-                    .map(|pk| (e.digest, *pk))
-                    .collect::<Vec<_>>()
-            })
-            .collect();
-        let witnesses: Vec<&FalconSigGadgetWitness> = self
-            .bp_sig_events
-            .iter()
-            .flat_map(|e| e.witnesses.iter())
-            .collect();
-        if witnesses.is_empty() {
+        if self.bp_sig_events.is_empty() {
             return Ok(None);
         }
+        let entries: Vec<AggListEntry> = self.bp_sig_events.iter().map(BpSigEvent::entry).collect();
         let mut prev = None;
-        for (i, witness) in witnesses.into_iter().enumerate() {
-            let prefix = crate::poseidon_sig::list::list_commitment(&pairs[0..i]);
-            prev = Some(list.prove_append(witness, prefix, &prev)?);
+        for (i, event) in self.bp_sig_events.iter().enumerate() {
+            // One aggregate over EVERY member that signed this block's IMCH digest. The recorded
+            // gadget witnesses are exactly `FalconAggWitness`'s `active` slice, in slot order.
+            let witness = FalconAggWitness {
+                message: event.digest,
+                active: event.witnesses.clone(),
+            };
+            let agg_proof = agg.prove(&witness)?;
+            let prefix = agg_list_commitment(&entries[0..i]);
+            prev = Some(agg_list.prove_append(&agg_proof, prefix, &prev)?);
         }
         Ok(prev)
     }
@@ -1037,8 +1038,8 @@ impl BlockWitnessGenerator {
 
         // Sign the IMCH digest with EVERY active member's real Falcon key (natively, ~ms each) and
         // record the statement the block folds. The recorded gadget witnesses are exactly what
-        // `FalconAggWitness { message, active }` consumes, so Phase 4 builds the aggregate proofs
-        // from them without holding a signing key open until proving time.
+        // `FalconAggWitness { message, active }` consumes, so `build_agg_sig_list_proof` builds the
+        // aggregate proofs from them without holding a signing key open until proving time.
         if let (Some(digest), Some(keys)) = (signed_digest, member_keys.as_ref()) {
             let mut signer_pks = Vec::with_capacity(keys.falcon_keys.len());
             let mut witnesses = Vec::with_capacity(keys.falcon_keys.len());

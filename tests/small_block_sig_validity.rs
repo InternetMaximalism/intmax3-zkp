@@ -12,15 +12,18 @@
 //! detail2 §D / §C-7 / §F-2, abstract2 §3.3.2/§3.3.5. A channel is registered with REAL member keys
 //! (so the bp's `pk_g` is a genuine member of `member_pubkeys_root`), a block carrying the
 //! channel's small block is posted with the post-debit `state_commitment_root = H1'` (detail2 §C-7)
-//! and `tx_tree_root = H2`, and the validity proof's `bp_sig_chain` (recursive `ListCircuit` over
-//! the bp IMSB single-sigs) VERIFIES the bp's signature over `hash(H1', tx_tree_root)` (the
-//! structural atomicity D-3). The transport_proof is gone (abstract2 §3.4 note: the receiver
+//! and `tx_tree_root = H2`, and the validity proof's `bp_sig_chain` (recursive `AggListCircuit`
+//! over the per-block N-of-N Falcon aggregates) VERIFIES that EVERY registered member signed the
+//! channel's IMCH digest, whose `h2_tag` is this block's `tx_tree_root` (the structural atomicity
+//! D-3). The transport_proof is gone (abstract2 §3.4 note: the receiver
 //! verifies inclusion on L1; inclusion liveness is by force-include) — what is verified here is the
 //! genuine channelStateSig, not a `vec![9,9]` stand-in.
 //!
 //! (The block's tx payload uses the base TxV2 path for tractability; what B-2 proves is the bp IMSB
 //! signature binding, which the validity circuit verifies regardless of the tx payload class.)
 #![cfg(not(debug_assertions))]
+
+use std::panic::{AssertUnwindSafe, catch_unwind};
 
 use intmax3_zkp::{
     circuits::{
@@ -39,7 +42,7 @@ use intmax3_zkp::{
         u63::BlockNumber,
     },
     ethereum_types::{address::Address, bytes32::Bytes32, u32limb_trait::U32LimbTrait},
-    falcon_sig::list::ListCircuit,
+    falcon_sig::{agg::FalconAggCircuit, agg_list::AggListCircuit},
     regev::encrypt_amount,
     utils::poseidon_hash_out::PoseidonHashOut,
     wallet_core::{MemberInfo, MemberKeys},
@@ -205,18 +208,22 @@ fn inter_channel_small_block_sig_is_validity_proven() {
         "the small block's bp IMSB signature must be recorded"
     );
 
-    let list_circuit = ListCircuit::<F, C, D>::new();
+    // Phase 4: the span's signature evidence is the REAL N-of-N aggregate list — one
+    // `FalconAggCircuit` proof over ALL 3 members' Falcon signatures on the block's IMCH digest,
+    // folded by one `AggListCircuit` step.
+    let agg_circuit = FalconAggCircuit::<F, C, D>::new();
+    let agg_list_circuit = AggListCircuit::<F, C, D>::new(&agg_circuit.verifier_data());
     let list_proof = bwgen
         .borrow()
-        .build_legacy_single_sig_list_proof(&list_circuit)
+        .build_agg_sig_list_proof(&agg_circuit, &agg_list_circuit)
         .expect("bp sig list proof");
     assert!(
         list_proof.is_some(),
-        "a real bp IMSB signature list proof must exist"
+        "a real N-of-N signature list proof must exist"
     );
 
     let validity_circuit =
-        ValidityCircuit::<F, C, D>::new(&block_chain_vd, &list_circuit.verifier_data());
+        ValidityCircuit::<F, C, D>::new(&block_chain_vd, &agg_list_circuit.verifier_data());
     let prover = Address::rand(&mut brng);
     let validity_proof = validity_circuit
         .prove(&final_block_chain_proof, list_proof.as_ref(), prover)
@@ -224,6 +231,37 @@ fn inter_channel_small_block_sig_is_validity_proven() {
     validity_circuit
         .verify(&validity_proof)
         .expect("verify validity proof");
+
+    // ----- Phase 4 acceptance (RE-TESTED, not assumed): the D3 gate is COMPUTED, so a prover that
+    // applied a signed update cannot verify the span by claiming the signature list is empty.
+    //
+    // SECURITY: `should_verify_list = (final.bp_sig_chain != 0)` is derived from the block-hash-
+    // chain proof's own public inputs, NOT from a prover-supplied flag. This span HAS a signing
+    // block, so the gate is on and the dummy proof must fail BOTH the recursive verification at the
+    // agg-list VK and the `C == final.bp_sig_chain` equality. If this ever starts succeeding, the
+    // N-of-N signature check has become optional — which is exactly the hole §2.1 describes.
+    assert_ne!(
+        bwgen.borrow().current_bp_sig_chain(),
+        Bytes32::default(),
+        "precondition: the gate under test is only meaningful for a span that DID sign"
+    );
+    //
+    // An unsatisfiable plonky2 witness surfaces as EITHER an `Err` or a panic inside proving, and
+    // "it produced something" is not the question — "does it VERIFY" is. All three outcomes are
+    // covered so the assertion cannot pass for the wrong reason.
+    let dummy_path = catch_unwind(AssertUnwindSafe(|| {
+        validity_circuit.prove(&final_block_chain_proof, None, prover)
+    }));
+    let rejected = match dummy_path {
+        Err(_) => true,
+        Ok(Err(_)) => true,
+        Ok(Ok(proof)) => validity_circuit.verify(&proof).is_err(),
+    };
+    assert!(
+        rejected,
+        "a signed span must NOT be verifiable on the no-signature (dummy) path — the D3 gate is \
+         computed from final.bp_sig_chain, so skipping the N-of-N list must be impossible"
+    );
 
     // ----- flowReceive3-1 (receiver side): the inter-channel tx is INCLUDED in the small block
     // whose tx_tree_root (= H2) is bound in the validity-proven block — verified DIRECTLY (no

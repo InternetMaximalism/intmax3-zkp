@@ -4500,7 +4500,7 @@ pub fn build_channel_withdrawal(
             withdrawal::Withdrawal,
         },
         ethereum_types::{address::Address, u256::U256},
-        falcon_sig::list::ListCircuit,
+        falcon_sig::{agg::FalconAggCircuit, agg_list::AggListCircuit},
         utils::{
             conversion::ToU64,
             mle_prover::{export_mle_json, prove_with_mle, setup_mle_vk, verify_mle_proof},
@@ -4948,15 +4948,16 @@ pub fn build_channel_withdrawal(
     }
 
     let final_block_chain_proof = last_block_proof.expect("final block hash chain proof");
-    // falcon-sig Phase 3: one in-circuit Falcon verification per list step (no per-signature
-    // recursive proof).
-    let list_circuit = ListCircuit::<F, C, D>::new();
+    // small-block N-of-N Phase 4: one recursively verified `FalconAggCircuit` aggregate per signing
+    // block (ALL that block's members over the channel's IMCH digest), folded by the agg list.
+    let agg_circuit = FalconAggCircuit::<F, C, D>::new();
+    let agg_list_circuit = AggListCircuit::<F, C, D>::new(&agg_circuit.verifier_data());
     let list_proof = block_witness_generator
         .borrow()
-        .build_legacy_single_sig_list_proof(&list_circuit)
+        .build_agg_sig_list_proof(&agg_circuit, &agg_list_circuit)
         .expect("build bp sig list proof");
     let validity_circuit =
-        ValidityCircuit::<F, C, D>::new(&block_chain_vd, &list_circuit.verifier_data());
+        ValidityCircuit::<F, C, D>::new(&block_chain_vd, &agg_list_circuit.verifier_data());
     let validity_prover = Address::default();
     let validity_proof = validity_circuit
         .prove(

@@ -156,14 +156,25 @@ fn main() {
         block_hash_chain.data.common.degree_bits(),
     ));
 
-    // P2b: `ValidityCircuit` conditionally verifies a Falcon-signature `ListCircuit` proof, so it
+    // P2b: `ValidityCircuit` conditionally verifies an N-of-N Falcon `AggListCircuit` proof, so it
     // needs that circuit's verifier data as well as the block-hash-chain's. This call site went
     // stale when the second parameter was added — nothing built `--benches`, so it compiled
     // nowhere and failed silently until CI started checking bench targets.
-    let list_circuit = intmax3_zkp::falcon_sig::list::ListCircuit::<F, C, D>::new();
+    let agg_circuit = intmax3_zkp::falcon_sig::agg::FalconAggCircuit::<F, C, D>::new();
+    let agg_list_circuit = intmax3_zkp::falcon_sig::agg_list::AggListCircuit::<F, C, D>::new(
+        &agg_circuit.verifier_data(),
+    );
+    rows.push((
+        "falcon_sig::AggListStepCircuit".to_string(),
+        agg_list_circuit.step.data.common.degree_bits(),
+    ));
+    rows.push((
+        "falcon_sig::AggListCircuit (cyclic wrapper)".to_string(),
+        agg_list_circuit.cyclic.data.common.degree_bits(),
+    ));
     let validity_circuit = ValidityCircuit::<F, C, D>::new(
         &block_hash_chain.data.verifier_data(),
-        &list_circuit.verifier_data(),
+        &agg_list_circuit.verifier_data(),
     );
     rows.push((
         "validity::ValidityCircuit".to_string(),
