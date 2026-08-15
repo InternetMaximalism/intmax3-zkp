@@ -1,0 +1,345 @@
+# ══════════════════════════════════════════════════════════════════════════════════════════════════
+#  Per-PR CI for intmax3-zkp.
+#
+#  DESIGN BRIEF — read this before adding, reordering or "simplifying" a step.
+#
+#  This workflow is designed against this repository's actual defect history, not against a generic
+#  Rust+Solidity template. Every defect found in the exit-path sweeps
+#  (doc/audit/why-gate8-was-missed.md, doc/audit/exit-path-facade-sweep.md,
+#  doc/audit/doc-vs-code-exit-sweep.md) had one shape:
+#
+#      THE DECLARATION AND THE REALITY DIFFERED, AND ONLY A REAL DEPLOYMENT REVEALED IT.
+#
+#  and every one of them was GREEN in the local suite:
+#
+#    · `ExponentiationGate` (gate id 8) unimplemented on chain — no test ever verified a real
+#      gate-8 proof with the real verifier.
+#    · Three VK initializers absent from the real-network deploy path — the anvil-only scripts DID
+#      initialize them, which is precisely why local tests stayed green.
+#    · The evaluator patch lived UNCOMMITTED inside the pinned submodule — the working copy built,
+#      a clean clone did not.
+#    · A 1-second challenge period against a documented 86,400 — every test passed 86,400, the
+#      value that actually ships was exercised by nothing.
+#    · Five exit CLI commands resolving `contracts/` from the CWD — the Rust E2Es run from the repo
+#      root, the product drivers do not.
+#    · Checks that silently do not run: `#[serde(default)]` ledgers, `unwrap_or("")` upstream of an
+#      assertion, an assertion on a literal `0xBEEF`, anvil polls that could not tell whose node
+#      answered.
+#
+#  A CI that only re-ran the existing green tests would have caught NONE of these. So the jobs
+#  below are organised around three questions rather than around tool names:
+#
+#    A. Does a CLEAN CLONE build and pass?                       -> `pinned-inputs` gate in both jobs
+#    B. Does the DEPLOYED artifact match the DECLARED one?       -> `contracts` job
+#    C. Did the checks actually RUN, or just report zero?        -> the two guard scripts
+#
+#  WHAT IS DELIBERATELY NOT HERE. The heavy CLI E2Es (`close_lifecycle_cli_e2e`,
+#  `two_token_cli_e2e`, `itx_faucet_cli_e2e`, the anvil-driving inter-channel and
+#  partial-withdrawal suites, and the ~500-test `--lib` unit suite) are NOT run per PR. They are
+#  10 GB RSS and minutes-to-hours each, and they hardcode anvil ports 8549-8559 so two runs cannot
+#  share a machine. They run in .github/workflows/nightly-heavy.yml. Nobody should read a green
+#  check here as "the close lifecycle works".
+# ══════════════════════════════════════════════════════════════════════════════════════════════════
+
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  # Per-ref, cancel superseded runs. NOTE: this is NOT what protects the hardcoded anvil ports —
+  # per-PR jobs bind no fixed port. See nightly-heavy.yml for that.
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  # Fail fast on a network hiccup instead of hanging a 25-minute job for 15 minutes.
+  CARGO_NET_RETRY: 3
+
+jobs:
+  # ════════════════════════════════════════════════════════════════════════════════════════════════
+  #  CONTRACTS — the declaration-vs-reality job. ~5 min. This is the fast feedback loop; it is
+  #  first because it is where every fund-impacting defect of the last month actually lived.
+  # ════════════════════════════════════════════════════════════════════════════════════════════════
+  contracts:
+    name: contracts (forge build + test + deploy guards)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # `submodules: recursive` is the clean-clone proof and is NON-NEGOTIABLE.
+          #
+          # actions/checkout clones from the REMOTE into an empty workspace on every job — there is
+          # no working copy for an uncommitted patch to leak in from, and this step FAILS OUTRIGHT
+          # if a pinned submodule commit was never pushed. That is exactly the check the
+          # ExponentiationGate defect needed: the evaluator patch existed only inside the local
+          # `contracts/lib/polygon-plonky2` checkout, so a clean clone did not build while the
+          # working copy did. `recursive` is required because polygon-plonky2 carries its own
+          # forge-std submodule under mle/contracts/lib.
+          #
+          # `fetch-depth: 0` gives submodules full history, without which
+          # verify-pinned-inputs.sh cannot prove the pin is on the branch .gitmodules names.
+          submodules: recursive
+          fetch-depth: 0
+
+      - name: Verify pinned inputs (submodules pinned, unmodified, pushed)
+        env:
+          # Turns the "cannot check a shallow submodule" warning into a hard failure. A guard that
+          # downgrades itself in CI is the same as no guard; fetch-depth: 0 above exists for this.
+          PINNED_INPUTS_REQUIRE_FULL_HISTORY: "1"
+        run: .github/ci/verify-pinned-inputs.sh
+
+      - uses: foundry-rs/foundry-toolchain@v1
+        with:
+          # PINNED, not `stable`. `via_ir = true` + `optimizer_runs = 200` means a Foundry/solc
+          # bump changes generated bytecode and therefore contract SIZES — and IntmaxRollup ships
+          # with ~1.1 KB of EIP-170 headroom (see the size gate below). An unpinned toolchain would
+          # let that margin move without a diff. 1.5.1 is the version every timing and count in
+          # this workflow was measured against.
+          version: v1.5.1
+
+      - name: Record toolchain provenance
+        run: |
+          forge --version
+          cast --version
+          anvil --version
+          solc --version 2>/dev/null || true
+
+      - name: forge build --sizes (EIP-170 gate)
+        working-directory: contracts
+        # WHY --sizes: `forge build --sizes` exits non-zero when a contract exceeds the 24,576-byte
+        # limit. IntmaxRollup is at 23,468 bytes — 1,108 bytes of margin — and the only place the
+        # limit is exercised today is `tests/partial_withdrawal_e2e.rs`, which launches anvil and
+        # forge with `--code-size-limit 50000` and therefore MASKS an over-limit contract
+        # completely (doc/audit/exit-path-facade-sweep.md F10). Without this step a contract that
+        # cannot be deployed to Sepolia passes the entire suite.
+        run: |
+          forge build --sizes
+          echo "--- runtime margins for the near-limit contracts ---"
+          forge build --sizes --json \
+            | jq -r 'to_entries[] | select(.value.runtime_size > 20000)
+                     | "\(.key)\truntime=\(.value.runtime_size)\tmargin=\(.value.runtime_margin)"' \
+            | sort
+
+      - name: forge test (with anti-vacuity + defect-guard assertions)
+        # The guard script is the point, not `forge test`. `vm.skip(true)` exits 0, and nearly
+        # every real-proof test in this repo self-skips when a fixture is absent. See
+        # .github/ci/forge-test-guard.sh for the full list of what it asserts and why.
+        #
+        # Suites this makes non-skippable, and the defect class each guards:
+        #   DeployGuards.t.sol  — executes the real deploy scripts and inspects the RESULT
+        #                         (missing VK initializers; 1-second challenge period).
+        #   ClaimMleVerify.t.sol— the REAL MleVerifier against the REAL claim fixtures (gate 8).
+        #   ExponentiationGate*.t.sol — the ported gate-8 evaluator, vectors + adversarial probes.
+        #   CloseLifecycleE2E / MleE2E / MleFinalizeE2E — real-proof paths that self-skip on a
+        #                         missing fixture; a "Skipped" status is failed here.
+        run: .github/ci/forge-test-guard.sh
+
+      - name: Assert the build did not modify the tree
+        # A build step that writes into the repo is how a "works here" artifact gets created. If
+        # forge starts emitting something tracked, this catches it on the first PR.
+        run: git diff --exit-code && test -z "$(git status --porcelain)"
+
+  # ════════════════════════════════════════════════════════════════════════════════════════════════
+  #  RUST — compile the whole crate graph from clean, then run every Rust suite that is cheap
+  #  enough to gate a PR on. Measured cold on 14 cores: 2m24s to build, <15s to run. Budget
+  #  ~20-25 min on a 4-vCPU GitHub-hosted runner.
+  # ════════════════════════════════════════════════════════════════════════════════════════════════
+  rust:
+    name: rust (check + clippy + fast suites)
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive   # see the contracts job for why this is non-negotiable
+          fetch-depth: 0
+
+      - name: Verify pinned inputs (submodules pinned, unmodified, pushed)
+        env:
+          # Turns the "cannot check a shallow submodule" warning into a hard failure. A guard that
+          # downgrades itself in CI is the same as no guard; fetch-depth: 0 above exists for this.
+          PINNED_INPUTS_REQUIRE_FULL_HISTORY: "1"
+        run: .github/ci/verify-pinned-inputs.sh
+
+      - name: Install the pinned Rust toolchain
+        # `rustup show` materialises exactly what rust-toolchain.toml declares
+        # (nightly-2025-03-23 + rust-src + the wasm32 target). DO NOT replace this with an action
+        # that takes a `toolchain:` input — a second declaration of the toolchain version is a
+        # second thing that can disagree with reality, which is the defect class this CI exists
+        # for. rust-toolchain.toml is the single source of truth.
+        run: |
+          rustup show
+          rustup component add rustfmt clippy
+          cargo --version && rustc --version
+
+      - uses: foundry-rs/foundry-toolchain@v1
+        with:
+          # Required by tests/deploy_settlement_chain_selection.rs, which shells out to `cast` to
+          # read the chain id. Without Foundry on PATH those 9 tests print "[skip]" and pass while
+          # covering nothing — rust-test-guard.sh turns that into a failure, so Foundry must be
+          # here.
+          version: v1.5.1
+
+      - name: Cache cargo registry and git checkouts
+        uses: actions/cache@v4
+        with:
+          # DELIBERATELY NOT CACHING `target/`.
+          #
+          # A restored target/ is a working copy by another name: the exact hazard that let an
+          # uncommitted submodule patch stay invisible. `contracts/lib/polygon-plonky2` enters the
+          # graph as a PATH dependency via Cargo.toml's [patch] block, so a stale cached artifact
+          # for it would mask a submodule that does not build. The full cold build measured 2m24s
+          # of wall time on 14 cores (12 min of CPU); paying it every run is cheap insurance and
+          # it keeps every green result a genuine from-scratch result.
+          #
+          # The download is cached because re-fetching 5 git dependencies proves nothing.
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+          key: cargo-deps-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}
+          restore-keys: cargo-deps-${{ runner.os }}-
+
+      - name: Cargo.lock is authoritative
+        # Separate from verify-pinned-inputs.sh so the Solidity job does not need a Rust toolchain
+        # just to run that script. Cargo.toml's REPRODUCIBILITY note: three sibling crates are
+        # declared by `branch`, and the ONLY thing pinning their exact commits is Cargo.lock.
+        run: cargo metadata --locked --format-version 1 > /dev/null
+
+      - name: cargo fmt
+        run: cargo fmt --all -- --check
+
+      - name: cargo check (lib, bins, tests)
+        # --locked is mandatory here, not stylistic. Cargo.toml's REPRODUCIBILITY note explains
+        # that three sibling crates are pinned by `branch` and the ONLY thing pinning their exact
+        # commits is Cargo.lock; without --locked a CI run can silently resolve different code
+        # than the developer tested.
+        run: cargo check --release --locked --lib --bins --tests
+
+      - name: cargo check (benches)
+        # SEPARATE STEP, ON PURPOSE, AND IT FAILS AT 69a8599.
+        #
+        # `doc/benches/degree_report.rs:159` calls `ValidityCircuit::<F, C, D>::new()` with one of
+        # its two arguments — the bench target has not compiled since the signature changed, and
+        # nothing noticed because nothing ever built it. That is a textbook instance of this
+        # repo's defect class (a declared target that does not exist in reality), so the step
+        # stays and the bench gets fixed. DO NOT delete this step or fold `--benches` away to make
+        # the first green run happen sooner.
+        run: cargo check --release --locked --benches
+
+      - name: cargo clippy
+        # No `-D warnings`: the crate carries ~120 pre-existing warnings and a blanket deny would
+        # be red on day one, which teaches people to ignore CI. Clippy's `correctness` group is
+        # deny-by-default regardless, so this step still FAILS on a correctness lint.
+        #
+        # The count below is a ratchet, not decoration: 119 `unused_must_use` warnings means 119
+        # places where a `Result` is dropped on the floor. "A security check that silently does
+        # not run" is the shape of half the findings in doc/audit/exit-path-facade-sweep.md, and
+        # `let _ = verify(...)` is the cheapest way to add another one.
+        run: |
+          set -o pipefail
+          cargo clippy --release --locked --lib --bins --tests 2>&1 | tee /tmp/clippy.log
+          n=$(grep -c 'unused .*that must be used' /tmp/clippy.log || true)
+          echo "unused_must_use warnings: $n (baseline 119)"
+          if [ "$n" -gt 119 ]; then
+            echo "::error::unused_must_use went from 119 to $n. A dropped Result is a check that silently does not run." >&2
+            exit 1
+          fi
+
+      - name: Build the fast Rust suites
+        # Split from the run step so a compile failure is attributable, and so the run step's
+        # timings in the log are the tests' own.
+        run: |
+          cargo test --release --locked --no-run \
+            --test mle_gate_support \
+            --test anvil_port_guard \
+            --test exit_path_cwd \
+            --test deploy_settlement_chain_selection \
+            --test burn_withdrawal_nullifier \
+            --test withdrawal_nullifier_canonicality \
+            --test partial_withdrawal_exclusivity \
+            --test nullifier_duplicate_insertion_poc \
+            --test wallet_core_e2e \
+            --test batch_cosign_e2e \
+            --test wallet_delegate_demo \
+            --test mle_onchain_e2e \
+            --test small_block_sig_validity
+
+      # ── The declaration-vs-reality guards, in Rust ────────────────────────────────────────────
+      #
+      # `mle_gate_support` is the single most valuable test in this repo's history and it is a
+      # pure file read: it derives the on-chain-supported gate id set FROM
+      # Plonky2GateEvaluator.sol and asserts every checked-in fixture names only ids in that set.
+      # It would have caught gate 8 on the day it was introduced (2026-07-31) instead of 9 days
+      # later on a real chain. It also drives the guard adversarially with tampered fixtures, so
+      # the guard itself cannot rot into a no-op.
+      #
+      # `exit_path_cwd` runs the real `channel_member` binary from a directory with no
+      # `contracts/`, i.e. the way `api/lib/cli.js` and both wallet relays actually drive it. The
+      # in-tree E2Es all run from the repo root, which is why five exit commands could be broken
+      # for the entire product surface with a green suite.
+      #
+      # `deploy_settlement_chain_selection` proves `deploy-settlement` picks its forge script from
+      # the chain the RPC reports, not a hardcoded mock-verifier script.
+      #
+      # Arguments to the guard are <min_passed> <exact_ignored>. The exact-ignored count is the
+      # debug-mode tripwire: in a debug build every release-gated test auto-ignores and the number
+      # explodes. See .github/ci/rust-test-guard.sh.
+      - name: mle_gate_support (on-chain gate-set drift — the gate-8 guard)
+        run: .github/ci/rust-test-guard.sh 9 0 -- cargo test --release --locked --test mle_gate_support
+
+      - name: exit_path_cwd (exit commands run from the product's CWD)
+        run: .github/ci/rust-test-guard.sh 5 0 -- cargo test --release --locked --test exit_path_cwd
+
+      - name: deploy_settlement_chain_selection (no mock verifier on a real chain)
+        run: .github/ci/rust-test-guard.sh 9 0 -- cargo test --release --locked --test deploy_settlement_chain_selection
+
+      - name: anvil harness guard (the readiness check cannot fail open)
+        # Uses OS-assigned ephemeral ports only, never 8549-8559 — safe anywhere.
+        run: .github/ci/rust-test-guard.sh 3 0 -- cargo test --release --locked --test anvil_port_guard
+
+      - name: nullifier and exclusivity soundness suites
+        run: |
+          .github/ci/rust-test-guard.sh 5 0 -- cargo test --release --locked --test burn_withdrawal_nullifier
+          .github/ci/rust-test-guard.sh 5 0 -- cargo test --release --locked --test withdrawal_nullifier_canonicality
+          .github/ci/rust-test-guard.sh 3 0 -- cargo test --release --locked --test partial_withdrawal_exclusivity
+          .github/ci/rust-test-guard.sh 2 0 -- cargo test --release --locked --test nullifier_duplicate_insertion_poc
+
+      - name: wallet core suites (real STARKs at Test security level)
+        run: |
+          .github/ci/rust-test-guard.sh 3 0 -- cargo test --release --locked --test wallet_core_e2e
+          .github/ci/rust-test-guard.sh 2 0 -- cargo test --release --locked --test batch_cosign_e2e
+          .github/ci/rust-test-guard.sh 4 0 -- cargo test --release --locked --test wallet_delegate_demo
+
+      # ── The one per-PR check that proves a FRESHLY GENERATED proof still verifies on chain ────
+      #
+      # Everything above reads CHECKED-IN fixtures. That catches a fixture whose gate set the
+      # evaluator cannot handle, but not the case where today's circuits emit a gate set that no
+      # fixture records yet — which is exactly how gate 8 arrived (a Regev bit-width change pushed
+      # plonky2's recursive FRI verifier onto `exp_from_bits_const_base`, and the fixtures were
+      # regenerated to match). `mle_onchain_e2e` proves a validity proof end to end: prove ->
+      # 2x WrapperCircuit -> MLE -> export -> real `MleVerifier.verify` under forge. If a circuit
+      # change moves the gate set, degreeBits or the WHIR parameters outside what the deployed
+      # Solidity can evaluate, it fails HERE rather than on a real submission.
+      #
+      # Measured 41 s (mle_onchain_e2e) and 49 s (small_block_sig_validity) on 14 cores; budget a
+      # few minutes each on a 4-vCPU runner. `e2e` (129 s locally, the full balance/validity
+      # pipeline with no on-chain leg) is deliberately NOT here — it is the longest of the three
+      # and adds no on-chain binding that mle_onchain_e2e does not already cover. It runs nightly.
+      - name: mle_onchain_e2e (fresh proof -> real on-chain MleVerifier)
+        run: .github/ci/rust-test-guard.sh 1 0 -- cargo test --release --locked --test mle_onchain_e2e
+
+      - name: small_block_sig_validity (BP signature bound by a real validity proof)
+        run: .github/ci/rust-test-guard.sh 1 0 -- cargo test --release --locked --test small_block_sig_validity
+
+      - name: Assert the build did not modify the tree
+        run: git diff --exit-code && test -z "$(git status --porcelain)"

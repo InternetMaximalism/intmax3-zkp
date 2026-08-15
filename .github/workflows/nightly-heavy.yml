@@ -1,0 +1,225 @@
+# ══════════════════════════════════════════════════════════════════════════════════════════════════
+#  Heavy suites — nightly and on demand. NOT part of the PR gate.
+#
+#  WHY THIS IS A SEPARATE WORKFLOW, STATED PLAINLY SO NOBODY BELIEVES COVERAGE THAT IS NOT THERE:
+#
+#  The suites below are the only tests in this repository that exercise the exit path with real
+#  proofs against a real node — `close_lifecycle_cli_e2e` calls itself, in its own header, "THE
+#  live verification point for the close lifecycle". They are also ~10 GB RSS and minutes to tens
+#  of minutes each, and the ~500-test `--lib` unit suite has never been timed end to end. They
+#  cannot gate a pull request. A green PR check therefore does NOT mean the close lifecycle, the
+#  inter-channel flow, the partial-withdrawal flow or the ITX faucet work; it means the cheap
+#  guards that would have caught this repo's shipped defects still hold.
+#
+#  THE PORT CONSTRAINT IS A HARD CONSTRAINT, NOT A PREFERENCE.
+#  Nine tests spawn anvil on fixed ports 8549-8559 (8549 onchain_deposit_keystone, 8550
+#  channel_backing_e2e, 8551 inter_channel_e2e, 8552 inter_channel_unified_e2e, 8553
+#  partial_withdrawal_e2e, 8554 close_lifecycle_cli_e2e, 8557 two_token_cli_e2e, 8559
+#  itx_faucet_cli_e2e). Two concurrent runs on one machine do not fail cleanly — the second anvil
+#  cannot bind, exits, and the test proceeds against the FOREIGN node, then hangs for hours in
+#  `forge script --broadcast`. That cost a full day of debugging; tests/anvil_harness/mod.rs is the
+#  written-up post-mortem. Three things below keep it from recurring:
+#
+#    1. `concurrency` with `cancel-in-progress: false` — a second run queues, it does not overlap.
+#       This matters most if these jobs ever move to a self-hosted runner, where the ports are
+#       genuinely shared. On GitHub-hosted runners each job also gets its own VM.
+#    2. Every heavy suite is its own sequential STEP in ONE job. `cargo test` runs test binaries
+#       one at a time, so this is genuinely serial. Do not split them into a matrix on a
+#       self-hosted pool.
+#    3. A preflight that fails if any of the ports is already listening — the anvil harness does
+#       this per-test too (layer A), and this makes it visible before 40 minutes of proving.
+#
+#  Intra-binary parallelism is NOT restricted, and that is verified rather than assumed: there are
+#  exactly 9 `AnvilNode::spawn` call sites across `tests/`, one per file, so no fixed port has two
+#  claimants inside a single binary.
+# ══════════════════════════════════════════════════════════════════════════════════════════════════
+
+name: Nightly heavy E2E
+
+on:
+  schedule:
+    # 03:00 UTC daily. Nothing here is on the PR critical path.
+    - cron: "0 3 * * *"
+  workflow_dispatch:
+    inputs:
+      runner:
+        description: >-
+          Runner label. `ubuntu-latest` is 4 vCPU / 16 GB RAM; the CLI E2Es peak around 10 GB RSS,
+          which fits but leaves little room. Use a larger or self-hosted runner if a job is OOM-
+          killed rather than raising the timeout.
+        required: false
+        default: ubuntu-latest
+      include_lib_suite:
+        description: "Also run the ~500-test cargo --lib unit suite (UNMEASURED runtime, hours)"
+        required: false
+        default: "false"
+
+concurrency:
+  # See the port note above. `cancel-in-progress: false` is deliberate: cancelling mid-run leaves
+  # orphaned anvil processes holding 8549-8559, which is the exact failure this repo already paid
+  # for once.
+  group: intmax-heavy-e2e
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  # Required by every `channel_member` invocation. The CLI FAILS CLOSED without exactly one
+  # configured co-signer key provenance (src/bin/channel_member.rs, INSECURE_KEYS_ENV) — that
+  # fail-closed behaviour is correct and must not be relaxed. It is set here, at the CI boundary,
+  # for throwaway ephemeral chains only. These keys are publicly derivable BY DESIGN; nothing in
+  # this workflow touches a real network, a real RPC or a real key.
+  INTMAX_INSECURE_DETERMINISTIC_KEYS: "1"
+
+jobs:
+  heavy:
+    name: heavy E2E (real proofs + anvil)
+    runs-on: ${{ github.event.inputs.runner || 'ubuntu-latest' }}
+    # 6 h is GitHub's per-job ceiling. The individual suites are 3-20 minutes each locally; the
+    # `--lib` suite is the unknown, which is why it is opt-in.
+    timeout-minutes: 350
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 0
+
+      - name: Verify pinned inputs (submodules pinned, unmodified, pushed)
+        env:
+          # Turns the "cannot check a shallow submodule" warning into a hard failure. A guard that
+          # downgrades itself in CI is the same as no guard; fetch-depth: 0 above exists for this.
+          PINNED_INPUTS_REQUIRE_FULL_HISTORY: "1"
+        run: .github/ci/verify-pinned-inputs.sh
+
+      - name: Install the pinned Rust toolchain
+        # rust-toolchain.toml is the single source of truth; never restate the version here.
+        run: |
+          rustup show
+          cargo --version && rustc --version
+
+      - name: Cargo.lock is authoritative
+        run: cargo metadata --locked --format-version 1 > /dev/null
+
+      - uses: foundry-rs/foundry-toolchain@v1
+        with:
+          version: v1.5.1
+
+      - name: Cache cargo registry and git checkouts
+        uses: actions/cache@v4
+        with:
+          # Same reasoning as ci.yml: downloads are cached, `target/` is not, so every run is a
+          # genuine from-scratch build.
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+          key: cargo-deps-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}
+          restore-keys: cargo-deps-${{ runner.os }}-
+
+      # ── Preflight ─────────────────────────────────────────────────────────────────────────────
+      # Every heavy test in this repo self-skips — printing "[skip] …" and returning GREEN — when
+      # Foundry is missing or a checked-in fixture is absent. rust-test-guard.sh fails on that
+      # marker, but failing 40 minutes into a proving run is a poor way to learn the environment
+      # was wrong. Assert the preconditions up front, from OUTSIDE the tests.
+      - name: Preflight — tools, fixtures, ports
+        run: |
+          set -euo pipefail
+          for t in anvil forge cast; do
+            command -v "$t" >/dev/null || { echo "::error::$t not on PATH — every heavy test would self-skip and pass"; exit 1; }
+          done
+          # The fixtures whose absence makes close_lifecycle_cli_e2e and two_token_cli_e2e return
+          # green without doing anything (see their own skip lists).
+          missing=0
+          for f in close_lifecycle.json close_lifecycle_validity_mle.json close_withdrawal_mle.json \
+                   close_intent_mle.json withdrawal_claim_mle.json post_close_claim_mle.json \
+                   cancel_close_mle.json; do
+            [ -f "contracts/test/data/$f" ] || { echo "::error::missing fixture contracts/test/data/$f"; missing=1; }
+          done
+          [ "$missing" -eq 0 ]
+          # Fixed anvil ports. A listener here means an orphaned node from a previous run; the
+          # tests' own layer-A check would catch it, but only after the build.
+          for p in 8549 8550 8551 8552 8553 8554 8557 8559; do
+            if (echo >"/dev/tcp/127.0.0.1/$p") >/dev/null 2>&1; then
+              echo "::error::port $p is already in use — an orphaned anvil would silently serve a FOREIGN chain to the tests"
+              exit 1
+            fi
+          done
+          echo "preflight ok"
+
+      - name: Build the heavy suites
+        run: |
+          cargo test --release --locked --no-run \
+            --test e2e \
+            --test channel_backing_e2e \
+            --test onchain_deposit_keystone \
+            --test inter_channel_e2e \
+            --test inter_channel_live \
+            --test inter_channel_unified_e2e \
+            --test inter_channel_cli \
+            --test partial_withdrawal_e2e \
+            --test close_lifecycle_cli_e2e \
+            --test two_token_cli_e2e \
+            --test itx_faucet_cli_e2e
+
+      # ── Sequential, one anvil-bearing suite at a time. ────────────────────────────────────────
+      # `continue-on-error` is NOT used anywhere below: a nightly that reports success with a
+      # failed leg is the same lie as a test that skips and passes.
+
+      - name: e2e (full proof pipeline)
+        run: .github/ci/rust-test-guard.sh 1 0 -- cargo test --release --locked --test e2e
+
+      - name: onchain_deposit_keystone (Rust witness == real on-chain deposit) [anvil 8549]
+        run: .github/ci/rust-test-guard.sh 2 0 -- cargo test --release --locked --test onchain_deposit_keystone
+
+      - name: channel_backing_e2e (deposit-backed balance proof) [anvil 8550]
+        run: .github/ci/rust-test-guard.sh 1 0 -- cargo test --release --locked --test channel_backing_e2e
+
+      - name: inter_channel_e2e [anvil 8551]
+        run: .github/ci/rust-test-guard.sh 2 0 -- cargo test --release --locked --test inter_channel_e2e
+
+      - name: inter_channel_unified_e2e [anvil 8552]
+        run: .github/ci/rust-test-guard.sh 1 0 -- cargo test --release --locked --test inter_channel_unified_e2e
+
+      - name: inter_channel_live
+        run: .github/ci/rust-test-guard.sh 3 0 -- cargo test --release --locked --test inter_channel_live
+
+      - name: inter_channel_cli (real channel_member binary, two channels)
+        run: .github/ci/rust-test-guard.sh 14 0 -- cargo test --release --locked --test inter_channel_cli
+
+      - name: partial_withdrawal_e2e [anvil 8553]
+        # NOTE: this test launches anvil and forge with `--code-size-limit 50000`, which MASKS the
+        # EIP-170 limit. The real limit is enforced by `forge build --sizes` in ci.yml; do not read
+        # a pass here as evidence that IntmaxRollup is deployable.
+        run: .github/ci/rust-test-guard.sh 1 0 -- cargo test --release --locked --test partial_withdrawal_e2e
+
+      # ── The three `#[ignore]`d CLI lifecycles. ────────────────────────────────────────────────
+      # `--ignored` runs ONLY the ignored tests, so the guard expects 0 ignored and N passed. If
+      # the `#[ignore]` attribute is ever removed, `passed` drops to 0 here and the step fails —
+      # which is the correct signal, not a silent no-op.
+      - name: close_lifecycle_cli_e2e — THE live close-lifecycle verification point [anvil 8554]
+        run: .github/ci/rust-test-guard.sh 1 0 -- cargo test --release --locked --test close_lifecycle_cli_e2e -- --ignored
+
+      - name: two_token_cli_e2e [anvil 8557]
+        run: .github/ci/rust-test-guard.sh 1 0 -- cargo test --release --locked --test two_token_cli_e2e -- --ignored
+
+      - name: itx_faucet_cli_e2e [anvil 8559]
+        run: .github/ci/rust-test-guard.sh 1 0 -- cargo test --release --locked --test itx_faucet_cli_e2e -- --ignored
+
+      # ── The unit suite. ───────────────────────────────────────────────────────────────────────
+      # ~500 `#[test]`s in `src/`, 228 of them release-gated, including circuit-building and
+      # proving tests. Runtime has NEVER been measured end to end and is expected in hours, so it
+      # is opt-in rather than shipped as a nightly promise this workflow might not keep. Turn it on
+      # with the workflow_dispatch input once someone has timed it, then move it into the nightly
+      # path with a real `timeout-minutes` and a real expected count.
+      - name: cargo test --lib (opt-in; runtime unmeasured)
+        if: ${{ github.event.inputs.include_lib_suite == 'true' }}
+        run: .github/ci/rust-test-guard.sh 400 0 -- cargo test --release --locked --lib
+
+      - name: Assert the run did not modify the tree
+        # The CLI E2Es stage fixtures into contracts/test/data/ and are expected to restore them
+        # (close_lifecycle_cli_e2e backs up and restores sepolia_lifecycle_validity_mle.json). If a
+        # run leaves the tree dirty, a checked-in fixture was overwritten — which is how a stale
+        # deploy-time VK survives review.
+        run: git status --porcelain && test -z "$(git status --porcelain)"
