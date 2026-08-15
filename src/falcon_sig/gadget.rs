@@ -531,9 +531,9 @@ fn pointwise_mul<F: RichField + Extendable<D>, const D: usize>(
 
 /// Witness generator for the honest centering bit `b = (v > q/2)` of a canonical `v < q`.
 #[derive(Debug, Default)]
-struct CenterBitGenerator {
-    v: Target,
-    b: Target,
+pub(super) struct CenterBitGenerator {
+    pub(super) v: Target,
+    pub(super) b: Target,
 }
 
 impl<F: RichField + Extendable<D>, const D: usize> SimpleGenerator<F, D> for CenterBitGenerator {

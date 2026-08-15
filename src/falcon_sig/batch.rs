@@ -21,16 +21,18 @@
 //! signatures:
 //!
 //! 1. For each slot `i`, the prover witnesses the INTEGER polynomial product `pi_i = h_i * s2_i`
-//!    over `Z[x]` (degree <= 2n-2 = 1022, coefficients in `[0, n*(q-1)^2] ⊂ [0, 2^37)`, each
-//!    range-checked).
+//!    over `Z[x]` (degree <= 2n-2 = 1022, honest coefficients in `[0, n*(q-1)^2] ⊂ [0, 2^37)`;
+//!    deliberately NOT range-checked — see "Soundness" below and [`PI_BITS`]).
 //! 2. A single in-circuit Poseidon transcript absorbs ALL slots' `(h_i, s2_i, pi_i)` (h/s2 packed
 //!    4-per-element in their canonicity-checked 14-bit lanes; pi raw, one element per coefficient)
 //!    and squeezes the Fiat-Shamir challenge `tau ∈ F_{p^D}` (D = 2: ~2^128).
 //! 3. Each slot checks `pi_i(tau) == h_i(tau) * s2_i(tau)` by Horner evaluation in the extension
 //!    field — ~2k cheap extension mul-adds per signature instead of ~15k range-checked reductions.
 //! 4. `s1_i` is then obtained coefficient-wise from the negacyclic fold of `pi_i`: `s1_i[j] =
-//!    c_i[j] - pi_i[j] + pi_i[512 + j] (mod q)` in ONE range-checked reduction per coefficient, and
-//!    the usual centered norm bound `||(s1, s2)||^2 <= beta^2` is enforced.
+//!    c_i[j] - pi_i[j] + pi_i[512 + j] (mod q)` in ONE range-checked reduction per coefficient that
+//!    ALSO absorbs the Goldilocks -> Z_q reduction of the raw H2P sponge output (the
+//!    per-coefficient reduction the Phase-1 gadget paid separately), and the usual centered norm
+//!    bound `||(s1, s2)||^2 <= beta^2` is enforced.
 //!
 //! # Soundness of the product check
 //!
@@ -38,14 +40,18 @@
 //! `tau` exists (`tau` is a deterministic in-circuit function of them), so the difference
 //! polynomial `delta_i(x) = pi_i(x) - h_i(x) * s2_i(x)` is fixed before `tau` is known —
 //! choosing the witness after seeing `tau` is impossible because changing the witness changes
-//! `tau`. All coefficients involved are `< 2^38 << p`, so `delta_i ≡ 0 mod p` iff
-//! `delta_i = 0` over `Z`; if `delta_i != 0`, it is a nonzero polynomial of degree <= 1022
-//! over `F_p`, and `tau` (modeled as a random oracle output in `F_{p^2}`) is a root with
-//! probability <= 1022/p^2 < 2^-117 per witness attempt (grinding a new witness re-randomizes
-//! `tau`, so each attempt pays the full 2^-117). Given `pi_i = h_i * s2_i` over `Z`, the
-//! per-coefficient reduction in step 4 makes `s1_i` EXACTLY the native
-//! `c - s2*h mod (q, x^n + 1)` — the accepted set is precisely the native
-//! `verify_with_pk_g` predicate, per slot.
+//! `tau`. If `delta_i != 0` over `F_p`, it is a nonzero polynomial of degree <= 1022, and
+//! `tau` (modeled as a random oracle output in `F_{p^2}`) is a root with probability
+//! <= 1022/p^2 < 2^-117 per witness attempt (grinding a new witness re-randomizes `tau`, so
+//! each attempt pays the full 2^-117). So (whp) `pi_i ≡ h_i * s2_i` COEFFICIENT-WISE mod p —
+//! and that congruence is EXACT integer equality of canonical values, with NO range check on
+//! `pi_i` needed: `h_i`/`s2_i` are canonicity-checked, so each `(h_i * s2_i)_j` is an integer
+//! `< n*(q-1)^2 < 2^37 < p`, and a witnessed `pi` coefficient IS its canonical representative
+//! in `[0, p)`; congruence mod p between two values in `[0, p)` is equality. Every downstream
+//! use of `pi_i` (the fold's offset / quotient bounds, the norm) therefore operates on exactly
+//! the honest product. Given `pi_i = h_i * s2_i` over `Z`, the merged reduction in step 4
+//! makes `s1_i` EXACTLY the native `c - s2*h mod (q, x^n + 1)` — the accepted set is precisely
+//! the native `verify_with_pk_g` predicate, per slot.
 //!
 //! The packing absorbed by the transcript is injective on the constrained domain: h/s2 lanes
 //! are canonicity-checked `< q < 2^14` (so the 4x14-bit packing is a bijection), and pi
@@ -96,23 +102,23 @@ use plonky2::{
     },
     iop::{
         ext_target::ExtensionTarget,
+        generator::{GeneratedValues, SimpleGenerator},
         target::{BoolTarget, Target},
-        witness::{PartialWitness, WitnessWrite as _},
+        witness::{PartialWitness, PartitionWitness, Witness, WitnessWrite},
     },
     plonk::{
         circuit_builder::CircuitBuilder,
-        circuit_data::{CircuitConfig, CircuitData, VerifierCircuitData},
+        circuit_data::{CircuitConfig, CircuitData, CommonCircuitData, VerifierCircuitData},
         config::{AlgebraicHasher, GenericConfig},
         proof::ProofWithPublicInputs,
     },
+    util::serialization::{Buffer, IoResult, Read, Write},
 };
 
 use super::{
     DOMAIN_FALCON_BATCH, FALCON_N, FALCON_Q, FALCON_SIG_L2_BOUND,
     agg::{FALCON_AGG_PUBLIC_INPUTS_LEN, FalconAggWitness, falcon_agg_public_inputs_len},
-    gadget::{
-        FalconSigGadgetWitness, ModQGenerator, centered_square, h2p_circuit, pk_digest_circuit,
-    },
+    gadget::{CenterBitGenerator, FalconSigGadgetWitness, pk_digest_circuit},
 };
 use crate::{
     constants::MAX_COSIGNERS,
@@ -131,28 +137,60 @@ const N: usize = FALCON_N; // 512
 /// Degree bound of the witnessed integer product `pi = h * s2`: `deg <= 2N - 2`.
 pub const PI_COEFFS: usize = 2 * N - 1; // 1023
 
-/// Range-check width of each `pi` coefficient. The honest maximum is
-/// `N * (q-1)^2 = 512 * 12288^2 = 77_309_411_328 < 2^37` (asserted at build time).
+/// Bit bound of the HONEST `pi` coefficients: `N * (q-1)^2 = 512 * 12288^2 = 77_309_411_328
+/// < 2^37` (asserted below). NOTE: `pi` carries NO in-circuit range checks — it does not need
+/// any (see the module-doc soundness section): `h` and `s2` ARE canonicity-checked, so the
+/// integer product `h * s2` has coefficients `< 2^37 < p`, and the `tau` identity forces
+/// `pi_j ≡ (h * s2)_j mod p` coefficient-wise; since a witness value IS its canonical field
+/// representative and the right side is `< p`, that congruence is EXACT integer equality.
+/// Every downstream use of `pi` (the fold offset / quotient bound, the norm) therefore sees
+/// exactly the honest values — up to the 2^-117 Schwartz-Zippel failure event, which is the
+/// product check's stated soundness error in the first place. This bound still sizes
+/// [`S1_FOLD_OFFSET`] and the fold quotient.
 const PI_BITS: usize = 37;
 
-/// The positive offset added before the `s1` fold reduction so the reduced value is
-/// non-negative: `t = c[j] + pi[512+j] + S1_FOLD_OFFSET - pi[j]` with `pi[j] < 2^PI_BITS`.
-/// A multiple of q (congruence preserved), `>= 2^PI_BITS` (non-negativity).
+/// `2^32 mod q` — the linear-form constant of the two-stage Goldilocks -> Z_q congruence
+/// (same constant as the Phase-1 gadget's H2P reduction; pinned in the ledger below).
+const POW32_MOD_Q: u64 = 10952;
+
+/// The positive offset added inside the `s1` fold reduction so the reduced value is
+/// non-negative: `t = c_lin[j] + pi[512+j] + S1_FOLD_OFFSET - pi[j]` with `pi[j] < 2^PI_BITS`
+/// (SZ-pinned, see [`PI_BITS`]). A multiple of q (congruence preserved), `>= 2^PI_BITS`
+/// (non-negativity).
 const S1_FOLD_OFFSET: u64 = ((1u64 << PI_BITS) / Q + 1) * Q;
 
-/// Quotient bits of the `s1` fold reduction:
-/// `t_max = (q-1) + (2^37 - 1) + S1_FOLD_OFFSET < 2^25 * q` (asserted at build time).
-const S1_FOLD_K_BITS: usize = 25;
+/// Quotient bits of the MERGED s1 fold reduction. The fold consumes the H2P sponge output as
+/// the UNREDUCED linear form `c_lin = hi * (2^32 mod q) + lo < 2^46` (the audited unique 32/32
+/// split, with the mod-q reduction that the Phase-1 gadget performed per coefficient FOLDED
+/// into this single reduction): `t_max = c_lin_max + (2^37 - 1) + S1_FOLD_OFFSET + HALF_Q
+/// < 2^32 * q` (asserted below).
+const S1_FOLD_K_BITS: usize = 32;
+
+/// `(q - 1) / 2 = 6144` — the centering shift of the fold decomposition. The fold constrains
+/// `t + S1_FOLD_OFFSET + HALF_Q = k*q + s_shift` and reads the CENTERED `s1` coefficient off as
+/// `s_shift - HALF_Q ∈ [-(q-1)/2, (q-1)/2]` directly — one decomposition yields both the mod-q
+/// reduction AND the exact centered representative, removing the per-coefficient centering-bit
+/// machinery the Phase-1 gadget needs.
+const HALF_Q: u64 = (Q - 1) / 2;
 
 const _: () = {
-    // pi coefficient bound: N * (q-1)^2 < 2^PI_BITS.
+    // Honest pi coefficient bound: N * (q-1)^2 < 2^PI_BITS.
     assert!((N as u64) * (Q - 1) * (Q - 1) < 1 << PI_BITS);
+    // The reduction constant really is 2^32 mod q.
+    assert!((1u64 << 32) % Q == POW32_MOD_Q);
     // The offset really is a multiple of q and covers the largest subtrahend.
     assert!(S1_FOLD_OFFSET % Q == 0);
     assert!(S1_FOLD_OFFSET >= (1 << PI_BITS) - 1);
-    // Fold-reduction quotient fits S1_FOLD_K_BITS, and the reduction cannot wrap mod p
-    // (k_bits <= 49 is separately asserted inside `reduce_mod_q`).
-    assert!((Q - 1) + ((1u64 << PI_BITS) - 1) + S1_FOLD_OFFSET < (1u64 << S1_FOLD_K_BITS) * Q);
+    // Merged fold-reduction quotient fits S1_FOLD_K_BITS bits, and the decomposition cannot
+    // wrap mod p: t_max < 2^32 * q and 2^32 * q - 1 < p (k_bits <= 49 is separately asserted
+    // inside `reduce_mod_q_fast`).
+    assert!({
+        let c_lin_max = ((1u128 << 32) - 1) * (POW32_MOD_Q as u128) + ((1u128 << 32) - 1);
+        let t_max =
+            c_lin_max + ((1u128 << PI_BITS) - 1) + (S1_FOLD_OFFSET as u128) + (HALF_Q as u128);
+        t_max < (1u128 << S1_FOLD_K_BITS) * (Q as u128)
+    });
+    assert!((1u128 << S1_FOLD_K_BITS) * (Q as u128) - 1 < 0xffff_ffff_0000_0001);
     // Schwartz-Zippel integer-lift premise: |delta coefficients| < 2^38 << p/2, so
     // delta ≡ 0 mod p iff delta = 0 over Z. (p = Goldilocks, ~2^64.)
     assert!((1u128 << PI_BITS) + ((N as u128) * ((Q - 1) as u128) * ((Q - 1) as u128)) < 1 << 62);
@@ -184,33 +222,185 @@ fn assert_canonical_coeff_fast<F: RichField + Extendable<D>, const D: usize>(
 ) {
     let bits = builder.split_le(v, 14);
     let hi_and = builder.mul(bits[13].target, bits[12].target);
-    let shifted = builder.add_const(v, -F::from_canonical_u64(Q - 1));
-    let smuggled = builder.mul(hi_and, shifted);
+    // hi_and * (v - 12288) == 0, as ONE fused op: 1*hi_and*v + (-12288)*hi_and.
+    let smuggled = builder.arithmetic(F::ONE, -F::from_canonical_u64(Q - 1), hi_and, v, hi_and);
     builder.assert_zero(smuggled);
 }
 
-/// Batch-local mirror of the Phase-1 `reduce_mod_q` (same [`ModQGenerator`], same `t = k*q + r`
-/// recomposition and `k < 2^k_bits` quotient check, same no-wrap obligation `k_bits <= 49`),
-/// with the `r < q` half done by [`assert_canonical_coeff_fast`]. The uniqueness argument is
-/// unchanged: the representable set `{k*q + r : k < 2^k_bits, r < q}` has one `(k, r)` per
-/// value and cannot wrap mod p.
-fn reduce_mod_q_fast<F: RichField + Extendable<D>, const D: usize>(
+/// Witness generator for the alias-free 32/32 split's quotient witness `w` (see
+/// [`split_32_unique`]): `w = lo / (hi - (2^32 - 1))` when `hi != 2^32 - 1`, else 0.
+/// Completeness only — soundness is the `lo == w * (hi - (2^32 - 1))` constraint itself.
+#[derive(Debug, Default)]
+struct AliasQuotientGenerator {
+    lo: Target,
+    hi: Target,
+    w: Target,
+}
+
+impl<F: RichField + Extendable<D>, const D: usize> SimpleGenerator<F, D>
+    for AliasQuotientGenerator
+{
+    fn id(&self) -> String {
+        "FalconBatchAliasQuotientGenerator".to_string()
+    }
+
+    fn dependencies(&self) -> Vec<Target> {
+        vec![self.lo, self.hi]
+    }
+
+    fn run_once(
+        &self,
+        witness: &PartitionWitness<F>,
+        out_buffer: &mut GeneratedValues<F>,
+    ) -> Result<()> {
+        let lo = witness.get_target(self.lo);
+        let hi = witness.get_target(self.hi);
+        let hi_max = F::from_canonical_u64((1 << 32) - 1);
+        let w = if hi == hi_max {
+            F::ZERO
+        } else {
+            lo / (hi - hi_max)
+        };
+        out_buffer.set_target(self.w, w)
+    }
+
+    fn serialize(&self, dst: &mut Vec<u8>, _common_data: &CommonCircuitData<F, D>) -> IoResult<()> {
+        dst.write_target(self.lo)?;
+        dst.write_target(self.hi)?;
+        dst.write_target(self.w)
+    }
+
+    fn deserialize(src: &mut Buffer, _common_data: &CommonCircuitData<F, D>) -> IoResult<Self> {
+        let lo = src.read_target()?;
+        let hi = src.read_target()?;
+        let w = src.read_target()?;
+        Ok(Self { lo, hi, w })
+    }
+}
+
+/// The UNIQUE canonical 32/32 split `(lo, hi)` of a field element — semantically identical to
+/// the audited `safe_split_lo_and_hi` (utils/poseidon_hash_out.rs), with the hi-max alias fix
+/// expressed as ONE witnessed-quotient constraint instead of an `is_equal` indicator.
+///
+/// SECURITY: `split_low_high` range-checks `lo, hi < 2^32` and constrains
+/// `x = hi * 2^32 + lo mod p`. Exactly one second decomposition exists per canonical `x`
+/// (`hi = 2^32 - 1, lo = x + 1`, possible when `x < 2^32 - 1`, because
+/// `(2^32 - 1) * 2^32 + x + 1 = p + x`). The constraint `lo == w * (hi - (2^32 - 1))` kills it:
+/// with `hi = 2^32 - 1` the right side is identically 0, forcing `lo = 0` (the pair
+/// `(2^32 - 1, 0)` represents `p - 1`, which is canonical — completeness for every `x`); with
+/// `hi != 2^32 - 1` the prover-supplied `w = lo / (hi - (2^32 - 1))` always satisfies it, so no
+/// honest decomposition is excluded. This is the same "exists-quotient ⟺ implication" trick as
+/// a standard is-zero gadget, one op cheaper — and this circuit performs 512 splits per slot.
+fn split_32_unique<F: RichField + Extendable<D>, const D: usize>(
     builder: &mut CircuitBuilder<F, D>,
+    x: Target,
+) -> (Target, Target) {
+    let (lo, hi) = builder.split_low_high(x, 32, 64);
+    let w = builder.add_virtual_target();
+    builder.add_simple_generator(AliasQuotientGenerator { lo, hi, w });
+    let hi_shift = builder.add_const(hi, -F::from_canonical_u64((1 << 32) - 1));
+    let rhs = builder.mul(w, hi_shift);
+    builder.connect(lo, rhs);
+    (lo, hi)
+}
+
+/// Witness generator for the centered fold decomposition (see the fold in
+/// [`FalconBatchAggCircuit::new`]): writes `k = u div q`, `s_shift = u mod q` of
+/// `u = t + HALF_Q` (`t` already carries `S1_FOLD_OFFSET`). Completeness only — soundness is
+/// the recomposition + range checks at the call site.
+#[derive(Debug, Default)]
+struct CenteredFoldGenerator {
     t: Target,
-    k_bits: usize,
-) -> Target {
-    assert!(
-        (1..=49).contains(&k_bits),
-        "k_bits out of the no-wrap range"
-    );
-    let k = builder.add_virtual_target();
-    let r = builder.add_virtual_target();
-    builder.add_simple_generator(ModQGenerator { t, k, r });
-    let recomposed = builder.mul_const_add(F::from_canonical_u64(Q), k, r);
-    builder.connect(t, recomposed);
-    builder.range_check(k, k_bits);
-    assert_canonical_coeff_fast(builder, r);
-    r
+    k: Target,
+    s_shift: Target,
+}
+
+impl<F: RichField + Extendable<D>, const D: usize> SimpleGenerator<F, D> for CenteredFoldGenerator {
+    fn id(&self) -> String {
+        "FalconBatchCenteredFoldGenerator".to_string()
+    }
+
+    fn dependencies(&self) -> Vec<Target> {
+        vec![self.t]
+    }
+
+    fn run_once(
+        &self,
+        witness: &PartitionWitness<F>,
+        out_buffer: &mut GeneratedValues<F>,
+    ) -> Result<()> {
+        let u = witness.get_target(self.t).to_canonical_u64() + HALF_Q;
+        out_buffer.set_target(self.k, F::from_canonical_u64(u / Q))?;
+        out_buffer.set_target(self.s_shift, F::from_canonical_u64(u % Q))
+    }
+
+    fn serialize(&self, dst: &mut Vec<u8>, _common_data: &CommonCircuitData<F, D>) -> IoResult<()> {
+        dst.write_target(self.t)?;
+        dst.write_target(self.k)?;
+        dst.write_target(self.s_shift)
+    }
+
+    fn deserialize(src: &mut Buffer, _common_data: &CommonCircuitData<F, D>) -> IoResult<Self> {
+        let t = src.read_target()?;
+        let k = src.read_target()?;
+        let s_shift = src.read_target()?;
+        Ok(Self { t, k, s_shift })
+    }
+}
+
+/// H2P sponge, batch variant: identical sponge layout to the audited Phase-1 mirror
+/// (`gadget::h2p_circuit` — capacity `[IMFH, 0, 0, 0]`, one salt permutation, digest overwrite,
+/// 64 squeeze permutations, salt elements range-checked `< 2^40`), but each of the 512 output
+/// coefficients is returned as the UNREDUCED congruent linear form
+/// `c_lin = hi * (2^32 mod q) + lo < 2^46` instead of a canonical residue.
+///
+/// SECURITY: `(hi, lo)` is the UNIQUE canonical 32/32 split ([`split_32_unique`] — same
+/// semantics as the gadget's audited `from_hash_out` stage-1, cheaper alias fix), so `c_lin`'s
+/// residue class mod q is the same unique `felt_to_falcon_felt` value the native verifier
+/// computes. The per-coefficient mod-q REDUCTION the gadget performed here (512 quotient
+/// decompositions per signature) is instead FOLDED into the single `s1` reduction (see
+/// [`S1_FOLD_K_BITS`]) — congruence is preserved and uniqueness of the final `s1` residue
+/// comes from that one range-checked decomposition.
+fn h2p_linear_forms<F: RichField + Extendable<D>, const D: usize>(
+    builder: &mut CircuitBuilder<F, D>,
+    salt: &[Target; 8],
+    message_digest: &Bytes32Target,
+) -> Vec<Target> {
+    use plonky2::hash::poseidon::SPONGE_RATE;
+
+    // Injectivity of the 40-byte salt packing (mirror of `Nonce::to_elements` canonicity).
+    for s in salt.iter() {
+        builder.range_check(*s, 40);
+    }
+
+    let zero = builder.zero();
+    let imfh = builder.constant(F::from_canonical_u32(super::DOMAIN_FALCON_H2P));
+
+    // State: [salt(8) | IMFH, 0, 0, 0].
+    let mut state: Vec<Target> = Vec::with_capacity(SPONGE_WIDTH);
+    state.extend_from_slice(salt);
+    state.push(imfh);
+    state.extend([zero; 3]);
+
+    let mut perm = <PoseidonHash as AlgebraicHasher<F>>::AlgebraicPermutation::default();
+    perm.set_from_slice(&state, 0);
+    perm = builder.permute::<PoseidonHash>(perm);
+
+    // Overwrite the rate with the digest limbs; capacity carries the salt binding.
+    let mut state: Vec<Target> = perm.as_ref().to_vec();
+    state[..SPONGE_RATE].copy_from_slice(&message_digest.to_vec());
+    let mut perm = <PoseidonHash as AlgebraicHasher<F>>::AlgebraicPermutation::default();
+    perm.set_from_slice(&state, 0);
+
+    let mut out = Vec::with_capacity(N);
+    for _ in 0..(N / SPONGE_RATE) {
+        perm = builder.permute::<PoseidonHash>(perm);
+        for &x in perm.squeeze()[..SPONGE_RATE].iter() {
+            let (lo, hi) = split_32_unique(builder, x);
+            out.push(builder.mul_const_add(F::from_canonical_u64(POW32_MOD_Q), hi, lo));
+        }
+    }
+    out
 }
 
 /// Packs canonicity-checked (`< q < 2^14`) coefficients 4-per-element in 14-bit lanes,
@@ -385,11 +575,8 @@ where
             for &c in h.iter().chain(s2.iter()) {
                 assert_canonical_coeff_fast(&mut builder, c);
             }
-            // pi coefficients: the honest integer-product range (bounds ledger above). This is
-            // also what makes the Schwartz-Zippel integer lift valid.
-            for &c in pi.iter() {
-                builder.range_check(c, PI_BITS);
-            }
+            // pi coefficients: deliberately NO range checks — the tau identity pins each
+            // coefficient EXACTLY to the (bounded) integer product (see PI_BITS / module doc).
 
             // pk_g = Poseidon(IMFK || encode(h)), gated by presence into the exposed list
             // (identically zero for padding slots — the native left-packed reference).
@@ -398,31 +585,60 @@ where
                 gated_pk_limbs.push(builder.mul(flag.target, limb));
             }
 
-            // c = H2P(salt, message) over the SHARED message wires (salt range checks inside).
-            let c = h2p_circuit(&mut builder, &salt, &message);
+            // c = H2P(salt, message) over the SHARED message wires, kept as UNREDUCED
+            // congruent linear forms (salt range checks inside; see `h2p_linear_forms`).
+            let c_lin = h2p_linear_forms(&mut builder, &salt, &message);
 
-            // s1[j] = c[j] - pi[j] + pi[512 + j] (mod q), one reduction per coefficient
-            // (negacyclic fold: x^512 ≡ -1). t is kept positive by S1_FOLD_OFFSET (a multiple
-            // of q); quotient bound per the ledger.
-            let offset = F::from_canonical_u64(S1_FOLD_OFFSET);
-            let s1: Vec<Target> = (0..N)
-                .map(|j| {
-                    let hi = if j < PI_COEFFS - N { pi[N + j] } else { zero };
-                    let c_plus_hi = builder.add(c[j], hi);
-                    let shifted = builder.add_const(c_plus_hi, offset);
-                    let t = builder.sub(shifted, pi[j]);
-                    reduce_mod_q_fast(&mut builder, t, S1_FOLD_K_BITS)
-                })
-                .collect();
+            // s1[j] = c[j] - pi[j] + pi[512 + j] (mod q), ONE decomposition per coefficient
+            // that simultaneously (a) reduces the raw H2P linear form, (b) performs the
+            // negacyclic fold (x^512 ≡ -1), and (c) CENTERS the result:
+            //   t + HALF_Q = k*q + s_shift,  k < 2^32,  s_shift < 2^14,
+            // with t = c_lin + pi_hi + S1_FOLD_OFFSET - pi_lo (positive by the offset, a
+            // multiple of q; t_max per the ledger). `s_shift - HALF_Q` is then EXACTLY the
+            // centered representative of the s1 coefficient (for r = t mod q: r <= 6144 gives
+            // s_shift = r + 6144; r > 6144 gives s_shift = r - 6145, i.e. centered r - q).
+            //
+            // SECURITY (s_shift is 14-bit-checked, NOT `< q`-checked — deliberate): the only
+            // second decomposition this admits is `(k - 1, s_shift + q)` when
+            // `s_shift + q < 2^14`, which yields the alias "centered" value `centered + q`.
+            // That alias exists only for centered < -2049, so |centered + q| > |centered| and
+            // the alias can only INCREASE the computed norm — the exact free-centering-bit
+            // soundness argument of the Phase-1 gadget (a lying prover can hurt only itself;
+            // the honest generator writes the true minimum). s1 appears NOWHERE outside the
+            // norm, so the alias has no other observable.
+            let fold_offset = F::from_canonical_u64(S1_FOLD_OFFSET);
+            let half_q = F::from_canonical_u64(HALF_Q);
+            let mut norm = zero;
+            for j in 0..N {
+                let hi = if j < PI_COEFFS - N { pi[N + j] } else { zero };
+                let c_plus_hi = builder.add(c_lin[j], hi);
+                let shifted = builder.add_const(c_plus_hi, fold_offset);
+                let t = builder.sub(shifted, pi[j]);
+                let k = builder.add_virtual_target();
+                let s_shift = builder.add_virtual_target();
+                builder.add_simple_generator(CenteredFoldGenerator { t, k, s_shift });
+                // t + HALF_Q == k*q + s_shift (recomposition, no wrap per the ledger).
+                let u = builder.add_const(t, half_q);
+                let recomposed = builder.mul_const_add(F::from_canonical_u64(Q), k, s_shift);
+                builder.connect(u, recomposed);
+                builder.range_check(k, S1_FOLD_K_BITS);
+                builder.range_check(s_shift, 14);
+                // norm += centered^2, fused: 1*centered*centered + 1*norm.
+                let centered = builder.add_const(s_shift, -half_q);
+                norm = builder.arithmetic(F::ONE, F::ONE, centered, centered, norm);
+            }
+            // s2 contribution: canonical residues centered with the Phase-1 free-bit scheme
+            // (same soundness: a lying bit only increases the square), square-accumulate fused.
+            for &v in s2.iter() {
+                let b = builder.add_virtual_target();
+                builder.add_simple_generator(CenterBitGenerator { v, b });
+                builder.assert_bool(BoolTarget::new_unsafe(b));
+                let centered = builder.mul_const_add(-F::from_canonical_u64(Q), b, v);
+                norm = builder.arithmetic(F::ONE, F::ONE, centered, centered, norm);
+            }
 
-            // Centered norm over (s1, s2); ONLY this comparison is gated by the presence flag
-            // (module doc: identical gating to the audited conditional gadget).
-            let squares: Vec<Target> = s1
-                .iter()
-                .chain(s2.iter())
-                .map(|&v| centered_square(&mut builder, v))
-                .collect();
-            let norm = builder.add_many(&squares);
+            // ONLY this comparison is gated by the presence flag (module doc: identical gating
+            // to the audited conditional gadget).
             let slack = builder.sub(beta_sq, norm);
             let checked_slack = builder.select(flag, slack, zero);
             builder.range_check(checked_slack, 26);
@@ -575,10 +791,7 @@ mod tests {
 
     use once_cell::sync::Lazy;
     use plonky2::{
-        field::{
-            goldilocks_field::GoldilocksField,
-            types::{Field as _, PrimeField64 as _},
-        },
+        field::{goldilocks_field::GoldilocksField, types::Field as _},
         plonk::config::PoseidonGoldilocksConfig,
     };
 
@@ -824,18 +1037,20 @@ mod tests {
         );
     }
 
-    /// PRODUCT-CHECK soundness, both directions the eval identity must catch:
-    ///   (a) an additive tamper (`pi[0] += 1`) and
+    /// PRODUCT-CHECK soundness, all three directions the eval identity must catch:
+    ///   (a) an additive tamper (`pi[0] += 1`),
     ///   (b) a MOD-Q-EQUIVALENT tamper (`pi[0] += q`) — the s1 fold would NOT notice (b)
     ///       (same residue), so rejecting it demonstrates the integer-level binding of the
-    ///       Schwartz-Zippel check, not just the mod-q arithmetic.
+    ///       Schwartz-Zippel check, not just the mod-q arithmetic — and
+    ///   (c) a tamper FAR OUTSIDE the honest coefficient range (`pi[0] += 2^45`): `pi` carries
+    ///       no range checks, so this pins that the tau identity alone polices the value.
     #[cfg_attr(debug_assertions, ignore = "run with --release")]
     #[test]
     fn tampered_product_witness_rejected() {
         let msg = digest(0x41);
         let (hs, sigs) = signers(1, msg, 140);
         let w = witness_for(&hs, &sigs, msg);
-        for delta in [1u64, Q] {
+        for delta in [1u64, Q, 1 << 45] {
             let mut slots = vec![padding_slot(msg); MAX_COSIGNERS];
             let (flag, gw, mut pi) = active_slot(&w.active[0]);
             pi[0] += delta;
