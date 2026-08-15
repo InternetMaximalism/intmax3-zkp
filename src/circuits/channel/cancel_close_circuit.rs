@@ -805,8 +805,8 @@ pub mod test_fixture {
         },
         ethereum_types::{bytes32::Bytes32, u32limb_trait::U32LimbTrait as _, u256::U256},
         falcon_sig::{
-            FALCON_N, FalconKeys, FalconSignature,
-            agg::{FalconAggCircuit, FalconAggWitness},
+            FALCON_N, FalconKeys, FalconSignature, agg::FalconAggWitness,
+            batch::FalconBatchAggCircuit,
         },
         regev::{REGEV_N, REGEV_Q, RegevCiphertext},
     };
@@ -821,14 +821,14 @@ pub mod test_fixture {
     pub struct CancelCloseCircuitFixture {
         /// The Falcon aggregation circuit (falcon-sig Phase 2; replaces the retired
         /// `SingleSigCircuit` + `SigAggregator` pair).
-        pub agg: FalconAggCircuit<F, C, D>,
+        pub agg: FalconBatchAggCircuit<F, C, D>,
         pub cancel_circuit: CancelCloseCircuit<F, C, D>,
     }
 
     pub fn fixture() -> &'static CancelCloseCircuitFixture {
         static FIXTURE: OnceLock<CancelCloseCircuitFixture> = OnceLock::new();
         FIXTURE.get_or_init(|| {
-            let agg = FalconAggCircuit::<F, C, D>::new();
+            let agg = FalconBatchAggCircuit::<F, C, D>::new();
             let cancel_circuit = CancelCloseCircuit::<F, C, D>::new(&agg.verifier_data());
             CancelCloseCircuitFixture {
                 agg,
