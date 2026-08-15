@@ -411,6 +411,19 @@ mod tests {
                 "IMFG DOMAIN_FALCON_KEYGEN (falcon_sig/mod.rs)",
                 crate::falcon_sig::DOMAIN_FALCON_KEYGEN,
             ),
+            // N-of-N small-block fold (falcon_sig/agg_list.rs, design
+            // doc/tasks/small-block-nofn-design.md §5.3). The widened
+            // `(message, signer_count, pk_list_digest)` leaf is a DIFFERENT preimage schema than
+            // the IMLL `(message, public_key)` leaf, and Poseidon here is a no-pad sponge, so it
+            // needs its own tag rather than a reuse of IMLL.
+            (
+                "IMAL AGG_LIST_LEAF_DOMAIN (falcon_sig/agg_list.rs)",
+                crate::falcon_sig::agg_list::AGG_LIST_LEAF_DOMAIN,
+            ),
+            (
+                "IMPL AGG_PK_LIST_DOMAIN (falcon_sig/agg_list.rs)",
+                crate::falcon_sig::agg_list::AGG_PK_LIST_DOMAIN,
+            ),
         ];
         for (i, (name_a, a)) in domains.iter().enumerate() {
             for (name_b, b) in domains.iter().skip(i + 1) {

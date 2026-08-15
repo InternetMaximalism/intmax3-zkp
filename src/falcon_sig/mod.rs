@@ -28,6 +28,7 @@
 //! implemented (CARDIS-2023 fault attack on det-Falcon; sampler multi-runtime consistency).
 
 pub mod agg;
+pub mod agg_list;
 pub mod compat;
 pub mod gadget;
 pub mod list;
