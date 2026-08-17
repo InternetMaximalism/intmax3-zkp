@@ -3579,8 +3579,8 @@ fn source_record_placeholder(
 // `falcon_member_auth_from_signatures` for the fail-closed coordinator gate.
 // SOUNDNESS IS ENFORCED IN-CIRCUIT (A-3 P2 threat model): H1/IMCH
 // recompute + bind, balance-proof channel_id/settled_tx_chain binding, the recursively verified
-// `FalconAggCircuit` proof over the members' REAL Falcon signatures (message/count/pk-list
-// bound in-circuit; falcon-sig Phase 2), the member_set_commitment keccak, and the
+// `FalconBatchAggCircuit` proof over the members' REAL Falcon signatures (message/count/pk-list
+// bound in-circuit; falcon-sig Phase 2 contract, batched-verification circuit), the member_set_commitment keccak, and the
 // active-bit decomposition. `ChannelCloseCircuit::prove` recomputes and overrides
 // `member_set_commitment`, so a tampered commitment is rejected. The Rust-side preconditions below
 // fail CLOSED before any (expensive) proving so a malformed input never produces a proof.
@@ -3593,13 +3593,12 @@ use crate::{
     },
     common::channel::{CloseIntent, CloseWithdrawal, validate_all_member_signatures},
     falcon_sig::{
-        FALCON_N, FalconSignature,
-        agg::{FalconAggCircuit, FalconAggWitness},
+        FALCON_N, FalconSignature, agg::FalconAggWitness, batch::FalconBatchAggCircuit,
         decode_cosign_blob, verify_with_pk_g,
     },
 };
 
-/// Build the `FalconAggCircuit` witness + per-member auth from the members' **DETACHED**
+/// Build the Falcon aggregation witness (`FalconAggWitness`) + per-member auth from the members' **DETACHED**
 /// cosignatures over `digest` (slot order; shared by the close and cancel-close provers).
 ///
 /// This is the coordinator gate of `doc/tasks/close-detached-signing-design.md` §3.5. The prover
@@ -3720,12 +3719,12 @@ fn assert_record_state_member_count_agree(
     Ok(())
 }
 
-/// Process-built close-proving context: the `FalconAggCircuit` (direct in-circuit verification of
+/// Process-built close-proving context: the `FalconBatchAggCircuit` (direct in-circuit verification of
 /// the N member Falcon signatures, falcon-sig Phase 2) and the `ChannelCloseCircuit` bound to the
 /// channel's balance verifier data. Each circuit is expensive to build, so construct ONE
 /// `CloseProver` per process and reuse it.
 pub struct CloseProver {
-    agg: FalconAggCircuit<F, C, D>,
+    agg: FalconBatchAggCircuit<F, C, D>,
     close_circuit: ChannelCloseCircuit<F, C, D>,
 }
 
@@ -3733,7 +3732,7 @@ impl CloseProver {
     /// Build the close-proving circuits. `balance_vd` is the channel's base-layer balance verifier
     /// data (the same value cached in `balance_vd.bin` / produced by the `BalanceProcessor`).
     pub fn new(balance_vd: &VerifierCircuitData<F, C, D>) -> Self {
-        let agg = FalconAggCircuit::<F, C, D>::new();
+        let agg = FalconBatchAggCircuit::<F, C, D>::new();
         let close_circuit = ChannelCloseCircuit::<F, C, D>::new(balance_vd, &agg.verifier_data());
         Self { agg, close_circuit }
     }
@@ -3741,7 +3740,7 @@ impl CloseProver {
     /// Build the full close witness from the wallet's signed final `ChannelState`, the channel's
     /// AUTHENTICATED `ChannelRecord`, the N ACTIVE members' **DETACHED** cosignatures over the IMCH
     /// digest (slot order), and the channel's base-layer balance proof. The signatures are verified
-    /// in-circuit by ONE `FalconAggCircuit` proof whose message/count/pk-list PIs the close circuit
+    /// in-circuit by ONE `FalconBatchAggCircuit` proof whose message/count/pk-list PIs the close circuit
     /// binds.
     ///
     /// **THIS PROVER HOLDS NO KEY.** That is the point
@@ -4093,10 +4092,10 @@ use crate::circuits::channel::{
     cancel_close_pis::CancelCloseWitness,
 };
 
-/// Process-built cancel-close proving context (the `FalconAggCircuit` + the
+/// Process-built cancel-close proving context (the `FalconBatchAggCircuit` + the
 /// `CancelCloseCircuit`).
 pub struct CancelCloseProver {
-    agg: FalconAggCircuit<F, C, D>,
+    agg: FalconBatchAggCircuit<F, C, D>,
     circuit: CancelCloseCircuit<F, C, D>,
 }
 
@@ -4108,14 +4107,14 @@ impl Default for CancelCloseProver {
 
 impl CancelCloseProver {
     pub fn new() -> Self {
-        let agg = FalconAggCircuit::<F, C, D>::new();
+        let agg = FalconBatchAggCircuit::<F, C, D>::new();
         let circuit = CancelCloseCircuit::<F, C, D>::new(&agg.verifier_data());
         Self { agg, circuit }
     }
 
     /// Build the cancel-close full witness: the REVIVED (later) signed state + the pending close
     /// intent to cancel, plus the N active members' **DETACHED** cosignatures of the revived IMCH
-    /// digest carried by ONE `FalconAggCircuit` proof. The circuit enforces revived_version >
+    /// digest carried by ONE `FalconBatchAggCircuit` proof. The circuit enforces revived_version >
     /// close.final_state_version and the era fence; these Rust preconditions fail closed early.
     /// (Same registration note as `CloseProver::build_full_witness_from_signatures`.)
     ///

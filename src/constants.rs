@@ -424,6 +424,10 @@ mod tests {
                 "IMPL AGG_PK_LIST_DOMAIN (falcon_sig/agg_list.rs)",
                 crate::falcon_sig::agg_list::AGG_PK_LIST_DOMAIN,
             ),
+            (
+                "IMFB DOMAIN_FALCON_BATCH (falcon_sig/mod.rs)",
+                crate::falcon_sig::DOMAIN_FALCON_BATCH,
+            ),
         ];
         for (i, (name_a, a)) in domains.iter().enumerate() {
             for (name_b, b) in domains.iter().skip(i + 1) {

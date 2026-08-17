@@ -1089,8 +1089,8 @@ pub mod test_fixture {
         },
         ethereum_types::{bytes32::Bytes32, u32limb_trait::U32LimbTrait, u256::U256},
         falcon_sig::{
-            FALCON_N, FalconKeys, FalconSignature,
-            agg::{FalconAggCircuit, FalconAggWitness},
+            FALCON_N, FalconKeys, FalconSignature, agg::FalconAggWitness,
+            batch::FalconBatchAggCircuit,
         },
         regev::RegevCiphertext,
     };
@@ -1107,7 +1107,7 @@ pub mod test_fixture {
         pub balance_processor: BalanceProcessor<F, C, D>,
         /// The Falcon aggregation circuit (falcon-sig Phase 2; replaces the retired
         /// `SingleSigCircuit` + `SigAggregator` pair).
-        pub agg: FalconAggCircuit<F, C, D>,
+        pub agg: FalconBatchAggCircuit<F, C, D>,
         pub close_circuit: ChannelCloseCircuit<F, C, D>,
     }
 
@@ -1123,7 +1123,7 @@ pub mod test_fixture {
                 t0.elapsed()
             );
             let t_agg = std::time::Instant::now();
-            let agg = FalconAggCircuit::<F, C, D>::new();
+            let agg = FalconBatchAggCircuit::<F, C, D>::new();
             println!(
                 "[close fixture] falcon agg circuit build: {:?} (degree bits {})",
                 t_agg.elapsed(),
