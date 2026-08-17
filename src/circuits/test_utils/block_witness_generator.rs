@@ -471,6 +471,31 @@ pub struct BlockWitnessGenerator {
     /// tx_tree_root)`. Consumed by the next `add_block_with_tx_v2`; `None` ⇒ zero (correct for
     /// intra/base-layer blocks).
     pub next_imsb_state_commitment_root: Option<Bytes32>,
+    /// Phase 6 (block-producer half): the WALLET's own co-signed `ChannelState` plus the N real
+    /// IMCH cosignatures the members produced over it, to back the NEXT updating block.
+    ///
+    /// When set, the block producer signs NOTHING: it projects the supplied state with
+    /// [`ChannelStateMessageFields::from_channel_state`] and decodes the members' existing blobs
+    /// into gadget witnesses. Aggregating signatures is public work, so no key material is
+    /// involved — the reason Design B needs no second signing round.
+    ///
+    /// When `None`, the generator falls back to the pre-Phase-6 behaviour: it projects the block's
+    /// own fields and signs locally with every member's key. That path is kept because it is what
+    /// the checked-in fixture generators drive; switching them over would move every
+    /// `bp_sig_chain` and force a fixture regeneration. Consumed by the next
+    /// `add_block_with_tx_v2`.
+    pub next_channel_cosign: Option<ChannelCosignBundle>,
+}
+
+/// A wallet's co-signed channel state and the N real member cosignatures over its IMCH digest —
+/// what a block producer actually receives, holding no key of its own.
+#[derive(Clone, Debug)]
+pub struct ChannelCosignBundle {
+    /// The co-signed post-transition state. Its `h2_tag` MUST be the block's `tx_tree_root`; that
+    /// is the binding `update_channel_tree` enforces in-circuit, and it is asserted on use.
+    pub state: crate::common::channel::ChannelState,
+    /// One real Falcon cosignature per active member, slot order (i.e. `state.member_signatures`).
+    pub signatures: Vec<crate::common::channel::MemberSignature>,
 }
 
 impl BlockWitnessGenerator {
@@ -493,6 +518,7 @@ impl BlockWitnessGenerator {
             block_chain_witness: HashMap::new(),
             bp_sig_events: Vec::new(),
             next_imsb_state_commitment_root: None,
+            next_channel_cosign: None,
         }
     }
 
@@ -1006,6 +1032,8 @@ impl BlockWitnessGenerator {
             .next_imsb_state_commitment_root
             .take()
             .unwrap_or_default();
+        // Phase 6: a wallet-supplied co-signed state supersedes the projection below.
+        let staged_cosign = self.next_channel_cosign.take();
         let (channel_state_fields, signer_leaves, signed_digest) = if any_update_slot.is_some() {
             let keys = member_keys.as_ref().ok_or_else(|| {
                 BlockWitnessGeneratorError::InvalidRequest(format!(
@@ -1013,17 +1041,49 @@ impl BlockWitnessGenerator {
                     channel_id
                 ))
             })?;
-            let fields = ChannelStateMessageFields {
-                epoch: 0,
-                small_block_number: new_block_number.as_u64(),
-                close_freeze_nonce: 0,
-                fund_amounts: [U256::default(); MAX_CHANNEL_TOKENS],
-                fund_intmax_state_root: Bytes32::default(),
-                balance_state_h1: imsb_h1,
-                shared_native_nullifier_root: Bytes32::default(),
-                unallocated_confirmed_incoming: U256::default(),
-                prev_digest: Bytes32::default(),
-                state_version: new_block_number.as_u64(),
+            let fields = match staged_cosign.as_ref() {
+                // Phase 6: the REAL wallet state. `h2_tag` must already BE this block's tx root —
+                // the members signed a preimage containing it, so a mismatch means their
+                // signatures authorise some other block. Fail closed rather than sign around it.
+                Some(bundle) => {
+                    if bundle.state.h2_tag != tx_tree_root {
+                        return Err(BlockWitnessGeneratorError::InvalidRequest(format!(
+                            "channel {channel_id}: the co-signed state's h2_tag does not equal \
+                             this block's tx_tree_root; the members did not authorise this block"
+                        )));
+                    }
+                    // FAIL-CLOSED HYGIENE: `from_channel_state` DROPS `channel_fund.channel_id`,
+                    // and `preimage` refills that limb ([8]) with the block-level `channel_id`.
+                    // The projection therefore reproduces `ChannelState::signing_digest()` limb for
+                    // limb ONLY while `channel_fund.channel_id == channel_id` — the documented
+                    // production invariant (channel_state_message.rs:112-117), which nothing in
+                    // `ChannelState::validate()` actually asserts. If it were violated, the members'
+                    // signatures would be over a DIFFERENT digest than the one recomputed here and
+                    // would surface as an opaque verification failure deep in proving. Name it.
+                    if bundle.state.channel_fund.channel_id != bundle.state.channel_id {
+                        return Err(BlockWitnessGeneratorError::InvalidRequest(format!(
+                            "channel {channel_id}: the co-signed state's channel_fund.channel_id \
+                             ({}) != its channel_id ({}) — the IMCH projection would not reproduce \
+                             the digest the members signed",
+                            bundle.state.channel_fund.channel_id.as_u64(),
+                            bundle.state.channel_id.as_u64()
+                        )));
+                    }
+                    ChannelStateMessageFields::from_channel_state(&bundle.state)
+                }
+                // Pre-Phase-6 projection, kept because the checked-in fixture generators drive it.
+                None => ChannelStateMessageFields {
+                    epoch: 0,
+                    small_block_number: new_block_number.as_u64(),
+                    close_freeze_nonce: 0,
+                    fund_amounts: [U256::default(); MAX_CHANNEL_TOKENS],
+                    fund_intmax_state_root: Bytes32::default(),
+                    balance_state_h1: imsb_h1,
+                    shared_native_nullifier_root: Bytes32::default(),
+                    unallocated_confirmed_incoming: U256::default(),
+                    prev_digest: Bytes32::default(),
+                    state_version: new_block_number.as_u64(),
+                },
             };
             // `h2_tag` IS this block's tx root (channel.rs: "the own small block's tx_tree_root
             // for an inter-channel send"), which is the entire point of the binding.
@@ -1036,22 +1096,70 @@ impl BlockWitnessGenerator {
             (ChannelStateMessageFields::default(), None, None)
         };
 
-        // Sign the IMCH digest with EVERY active member's real Falcon key (natively, ~ms each) and
-        // record the statement the block folds. The recorded gadget witnesses are exactly what
+        // Record the statement this block folds. The recorded gadget witnesses are exactly what
         // `FalconAggWitness { message, active }` consumes, so `build_agg_sig_list_proof` builds the
         // aggregate proofs from them without holding a signing key open until proving time.
         if let (Some(digest), Some(keys)) = (signed_digest, member_keys.as_ref()) {
-            let mut signer_pks = Vec::with_capacity(keys.falcon_keys.len());
-            let mut witnesses = Vec::with_capacity(keys.falcon_keys.len());
-            for key in keys.falcon_keys.iter() {
-                let sig = key.sign(digest);
-                signer_pks.push(key.pk_g());
-                witnesses.push(FalconSigGadgetWitness::for_signature(
-                    &key.pk_coefficients(),
-                    digest,
-                    &sig,
-                ));
-            }
+            let (signer_pks, witnesses) = match staged_cosign.as_ref() {
+                // Phase 6: DECODE the members' existing cosignatures. The producer holds no key —
+                // `FalconAggWitness` consumes only `(h, sig)`, both public, so aggregating is
+                // public work. This is the path a real block producer takes.
+                Some(bundle) => {
+                    let n = keys.falcon_keys.len();
+                    if bundle.signatures.len() != n {
+                        return Err(BlockWitnessGeneratorError::InvalidRequest(format!(
+                            "channel {channel_id}: expected {n} member cosignatures (N-of-N), got \
+                             {} — block production is blockable by any single member",
+                            bundle.signatures.len()
+                        )));
+                    }
+                    let mut signer_pks = Vec::with_capacity(n);
+                    let mut witnesses = Vec::with_capacity(n);
+                    for (slot, entry) in bundle.signatures.iter().enumerate() {
+                        if entry.member_slot as usize != slot {
+                            return Err(BlockWitnessGeneratorError::InvalidRequest(format!(
+                                "channel {channel_id}: cosignature {slot} carries member_slot {} \
+                                 (must be slot order)",
+                                entry.member_slot
+                            )));
+                        }
+                        let (sig, h) =
+                            crate::falcon_sig::decode_cosign_blob(&entry.signature).map_err(|e| {
+                                BlockWitnessGeneratorError::InvalidRequest(format!(
+                                    "channel {channel_id} slot {slot}: cosignature blob failed to \
+                                     decode: {e:?} (a structural placeholder reaching here means \
+                                     the co-sign round never completed)"
+                                ))
+                            })?;
+                        // The blob's own `h` is bound to the claimed identity by `pk_g =
+                        // Poseidon(IMFK||encode(h))`; reject a substituted public polynomial.
+                        if crate::falcon_sig::falcon_pk_digest(&h) != entry.pk_g {
+                            return Err(BlockWitnessGeneratorError::InvalidRequest(format!(
+                                "channel {channel_id} slot {slot}: cosignature's public polynomial \
+                                 does not hash to the claimed pk_g"
+                            )));
+                        }
+                        signer_pks.push(entry.pk_g);
+                        witnesses.push(FalconSigGadgetWitness::for_signature(&h, digest, &sig));
+                    }
+                    (signer_pks, witnesses)
+                }
+                // Pre-Phase-6: the harness holds every member's key and signs locally (~ms each).
+                None => {
+                    let mut signer_pks = Vec::with_capacity(keys.falcon_keys.len());
+                    let mut witnesses = Vec::with_capacity(keys.falcon_keys.len());
+                    for key in keys.falcon_keys.iter() {
+                        let sig = key.sign(digest);
+                        signer_pks.push(key.pk_g());
+                        witnesses.push(FalconSigGadgetWitness::for_signature(
+                            &key.pk_coefficients(),
+                            digest,
+                            &sig,
+                        ));
+                    }
+                    (signer_pks, witnesses)
+                }
+            };
             self.bp_sig_events.push(BpSigEvent {
                 digest,
                 signer_pks,
