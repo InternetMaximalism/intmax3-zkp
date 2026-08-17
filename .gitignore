@@ -91,6 +91,10 @@ wallet-e2e-work/
 wallet-live-work/
 wallet-live-work.*/
 cli_state.json
+# Persisted by `channel_member close` (CLOSE_INTENT_FULL_FILE) and consumed by
+# `cancel-close` / `post-close-claim` in the SAME working directory. Runtime
+# state, not a fixture — a committed copy is stale state a fresh clone reads.
+close_intent_full.json
 
 # =============================================================================
 # Misc
