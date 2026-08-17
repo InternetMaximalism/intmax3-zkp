@@ -1934,18 +1934,131 @@ impl ChannelProofVerifier for WalletStructuralTransport {
     }
 }
 
-/// Structural per-member small-block signatures (base-layer artifact). The REAL small-block
-/// signature verification is the B-2 validity-proof path (out of scope for the wallet wiring
-/// layer); here we only need `validate_all_member_signatures` (structural) to pass inside the
-/// witness.
-fn structural_small_block_sigs(record: &ChannelRecord) -> Vec<MemberSignature> {
+/// Explicit UNSIGNED small block: one correctly-slotted, correctly-tagged NON-signature per active
+/// member, so `validate_signed_small_block`'s structural gate
+/// (`validate_member_signature_slots` — exact count, slot order, registered `pk_g`, non-empty
+/// blob) passes at BUILD time, when no co-signature can exist yet.
+///
+/// Why a placeholder is unavoidable here: the co-sign round runs AFTER the builder returns
+/// (`build_inter_channel_send` → `verify_inter_channel_send_transition` → members co-sign), so the
+/// block is genuinely unsigned at construction. It becomes signed in
+/// [`attach_small_block_signatures`], which is what a block producer must call before the block is
+/// posted.
+///
+/// SECURITY: [`structural_cosign_placeholder`] is INTENTIONALLY NOT A SIGNATURE — it carries the
+/// v1 version byte and the exact cosign length and nothing else, so every authenticating path
+/// (`verify_all_signatures`, the close/cancel aggregation circuits, and the B-2 validity-proof
+/// list step that verifies the members' Falcon signatures in-circuit) rejects it. A block that
+/// reaches production still carrying these cannot produce a satisfying N-of-N witness.
+fn unsigned_small_block_slots(record: &ChannelRecord) -> Vec<MemberSignature> {
     (0..record.member_count)
-        .map(|i| MemberSignature {
-            member_slot: i,
-            pk_g: record.member_pk_gs[i as usize],
-            signature: vec![1 + i],
+        .map(|slot| MemberSignature {
+            member_slot: slot,
+            pk_g: record.member_pk_gs[slot as usize],
+            signature: crate::common::channel::structural_cosign_placeholder(1),
         })
         .collect()
+}
+
+/// Install the channel's REAL N-of-N co-signatures onto a built small block, replacing the
+/// [`unsigned_small_block_slots`] placeholders. A block producer MUST call this before posting;
+/// a block still carrying placeholders cannot satisfy the in-circuit N-of-N.
+///
+/// `a_signed` is the post-debit state returned by [`build_inter_channel_send`] AFTER the co-sign
+/// round has filled `member_signatures` (see `add_signature` / `sign_state_if_backed`).
+///
+/// SECURITY — this is the wallet-side half of the Phase-3 binding. `update_channel_tree` verifies,
+/// in-circuit, an N-of-N aggregate over the channel's IMCH digest and connects it to the block's
+/// `tx_tree_root`. That binding is only sound if the state the members actually signed is the one
+/// whose `h2_tag` IS this block's `tx_tree_root` — `channel.rs` specifies exactly that for an
+/// inter-channel send. Nothing else in the wallet layer asserts it (the builder sets `h2_tag` and
+/// the block's `tx_tree_root` from the same local variable, which proves nothing about the state a
+/// REMOTE co-signer signed), so it is asserted here, against the state that carries the
+/// signatures:
+///
+///   1. every active member's signature is present and verifies against the registered `pk_g` over
+///      the recomputed IMCH digest (`verify_all_signatures`, which also re-derives `state.digest`);
+///   2. `a_signed.h2_tag == message.tx_tree_root`, and it is non-zero — the `tx_tree_root != 0`
+///      gate is what excludes in-channel transitions (which carry `h2_tag == 0`) from ever
+///      authorising a block;
+///   3. `a_signed.balance_state.h1() == message.state_commitment_root`, so the H1 the block
+///      advertises is the one inside the signed preimage rather than an off-circuit claim;
+///   4. the channel id, small-block number and close-freeze nonce agree with the signed state.
+///
+/// Withholding one member's signature fails (1) with that member's slot named — the documented
+/// posture that block production is blockable by any single member.
+pub fn attach_small_block_signatures(
+    record: &ChannelRecord,
+    a_signed: &ChannelState,
+    inter_channel_tx: &mut InterChannelTx,
+) -> WResult<()> {
+    // (1) The cryptographic N-of-N. Runs `record.validate()` and recomputes `signing_digest()`
+    // internally, so a tampered state or a non-member signer cannot reach the checks below.
+    verify_all_signatures(record, &[], a_signed).map_err(|e| {
+        WalletError(format!(
+            "small block cannot be signed: the post-debit state is not N-of-N co-signed under \
+             channel {}'s record ({e:?}) — collect every active member's cosignature first",
+            record.channel_id.as_u64()
+        ))
+    })?;
+
+    let msg = &inter_channel_tx.signed_small_block.message;
+
+    // (4) Identity of the state vs the block, before the value-bearing bindings.
+    if inter_channel_tx.source_channel_id != record.channel_id || msg.channel_id != record.channel_id
+    {
+        return bail(format!(
+            "small block channel mismatch: record {}, tx source {}, message {}",
+            record.channel_id.as_u64(),
+            inter_channel_tx.source_channel_id.as_u64(),
+            msg.channel_id.as_u64()
+        ));
+    }
+    if msg.small_block_number != a_signed.small_block_number {
+        return bail(format!(
+            "small block number {} does not match the co-signed state's {}",
+            msg.small_block_number, a_signed.small_block_number
+        ));
+    }
+    if msg.close_freeze_nonce != a_signed.close_freeze_nonce {
+        return bail(format!(
+            "small block close_freeze_nonce {} does not match the co-signed state's {} (wrong era)",
+            msg.close_freeze_nonce, a_signed.close_freeze_nonce
+        ));
+    }
+
+    // (2) THE binding. `h2_tag` rides inside the IMCH preimage every member signed, so this is what
+    // makes the members' signatures an authorisation of THIS block rather than of some other state.
+    if a_signed.h2_tag == Bytes32::default() {
+        return bail(
+            "co-signed state has h2_tag == 0 (an in-channel transition): it authorises no block. \
+             Only a state whose h2_tag IS the block's tx_tree_root can back a signing block"
+                .to_string(),
+        );
+    }
+    if a_signed.h2_tag != msg.tx_tree_root {
+        return bail(format!(
+            "co-signed state's h2_tag {} != the small block's tx_tree_root {} — the members signed \
+             a DIFFERENT block's transaction root, so their signatures do not authorise this one",
+            a_signed.h2_tag, msg.tx_tree_root
+        ));
+    }
+
+    // (3) H1 the block advertises must be the signed state's own.
+    let h1 = a_signed.balance_state.h1();
+    if h1 != msg.state_commitment_root {
+        return bail(format!(
+            "co-signed state's h1 {} != the small block's state_commitment_root {}",
+            h1, msg.state_commitment_root
+        ));
+    }
+
+    // Slot order is the order every aggregation path consumes; `verify_all_signatures` has already
+    // proved one signature per active slot with the registered pk_g.
+    let mut signatures = a_signed.member_signatures.clone();
+    signatures.sort_by_key(|s| s.member_slot);
+    inter_channel_tx.signed_small_block.signatures = signatures;
+    Ok(())
 }
 
 /// LEG A — build the inter-channel debit of the GENESIS token (`registry[0]`, the wire-compat
@@ -2200,7 +2313,9 @@ pub fn build_inter_channel_send_token(
                 medium_epoch_hint: 3,
                 close_freeze_nonce: prev.close_freeze_nonce,
             },
-            signatures: structural_small_block_sigs(record),
+            // UNSIGNED at build time; `attach_small_block_signatures` installs the real N-of-N
+            // once the co-sign round has completed on `a_send`.
+            signatures: unsigned_small_block_slots(record),
             aggregated_signature_proof: vec![9, 9],
             medium_block_number: 4,
             confirmation_proof: vec![8, 8],
@@ -8142,6 +8257,141 @@ mod delegate_send_tests {
         // The co-signer gate accepts the built payload (Phase 2b general resolution).
         verify_inter_channel_send_transition(&snapshot.state, &record, &built.debit_payload, LEVEL)
             .expect("token-1 C2C debit passes the co-signer gate");
+    }
+
+    /// Phase 6 (Design B): a REAL inter-channel send produces a small block carrying the channel's
+    /// REAL N-of-N Falcon cosignatures — and any one member can block it by withholding.
+    ///
+    /// WHAT EACH ASSERTION PROVES
+    /// - the builder emits an UNSIGNED block: the slots hold `structural_cosign_placeholder`
+    ///   non-signatures, never anything that could pass an authenticating path;
+    /// - with only the sender's signature (N-1 of N), installing is REFUSED — the documented
+    ///   posture that block production is blockable by a single member;
+    /// - once every member has co-signed, the installed blobs are the members' own REAL
+    ///   signatures, byte-for-byte the ones on the co-signed state;
+    /// - the load-bearing equality is enforced: a block whose `tx_tree_root` is not the signed
+    ///   state's `h2_tag` is refused, so the members' signatures cannot be replayed onto a
+    ///   different block. This is the wallet-side half of the Phase-3 in-circuit binding.
+    #[test]
+    fn small_block_carries_real_n_of_n_and_one_member_can_block_it() {
+        let mut rng = StdRng::seed_from_u64(0x5106);
+        let (record, keys, members, genesis, _w0, w1) =
+            setup_two_token_channel(&mut rng, 61, [50, 30, 20], [40, 25]);
+        let mut state = genesis;
+        state.channel_fund.amounts[1] = u64_to_u256(65);
+        let state = resign_two_members(state, &keys);
+        let snapshot = ChannelSnapshot {
+            record: record.clone(),
+            state,
+            members,
+            settled_tx_accumulator: default_settled_tx_accumulator(),
+        };
+        let dest_keys = MemberKeys::generate(&mut rng);
+        let dest_channel = crate::common::channel_id::ChannelId::new(99).unwrap();
+        let nullifier_root = Bytes32::from_u32_slice(&[9, 8, 7, 6, 5, 4, 3, 2]).unwrap();
+
+        let built = build_inter_channel_send_token(
+            &keys[0],
+            &snapshot,
+            0,
+            dest_channel,
+            0,
+            dest_keys.regev_pk.clone(),
+            dest_keys.pk_g(),
+            T1_INDEX,
+            5,
+            40,
+            &w1[0],
+            nullifier_root,
+            LEVEL,
+            &mut rng,
+        )
+        .expect("token-1 inter-channel send builds");
+
+        let a_send = built.debit_payload.proposed_next_state.clone();
+        let mut tx = built.debit_payload.inter_channel_tx.clone();
+        let n = record.member_count as usize;
+
+        // The builder emits an UNSIGNED block: correctly-slotted NON-signatures.
+        let placeholder = crate::common::channel::structural_cosign_placeholder(1);
+        assert_eq!(tx.signed_small_block.signatures.len(), n);
+        for (slot, sig) in tx.signed_small_block.signatures.iter().enumerate() {
+            assert_eq!(sig.member_slot as usize, slot);
+            assert_eq!(
+                sig.signature, placeholder,
+                "slot {slot} must hold the explicit non-signature, never fabricated bytes"
+            );
+        }
+
+        // Only the sending member has signed so far — N-1 of N.
+        assert_eq!(a_send.member_signatures.len(), 1);
+        let err = attach_small_block_signatures(&record, &a_send, &mut tx)
+            .expect_err("a block must not be signable while a member is withholding");
+        let msg = format!("{err:?}");
+        assert!(
+            msg.contains("not N-of-N co-signed"),
+            "the refusal must say why block production is blocked, got: {msg}"
+        );
+        // Name the WITHHOLDING slot specifically. (Matching a bare "1" would be vacuous — the
+        // channel id 61 contains one.)
+        assert!(
+            msg.contains("missing signature for slot 1"),
+            "the refusal must identify which member is withholding, got: {msg}"
+        );
+        assert_eq!(
+            tx.signed_small_block.signatures[0].signature, placeholder,
+            "a refused install must not partially mutate the block"
+        );
+
+        // Complete the co-sign round: the remaining member signs the SAME state (member signatures
+        // are excluded from `signing_digest()`, so the digest they all signed is unchanged).
+        let mut a_signed = a_send.clone();
+        for slot in 1..n {
+            let sig = sign_state(&keys[slot], slot as u8, &a_signed).expect("co-sign");
+            add_signature(&mut a_signed, sig);
+        }
+        assert_eq!(a_signed.member_signatures.len(), n);
+
+        // Negative, BEFORE the positive so a bug that installs unconditionally cannot hide: the
+        // members signed a state whose h2_tag is THIS block's tx_tree_root; point the block at a
+        // different root and their signatures must no longer authorise it.
+        let mut wrong = tx.clone();
+        wrong.signed_small_block.message.tx_tree_root =
+            Bytes32::from_u32_slice(&[1, 1, 1, 1, 1, 1, 1, 1]).unwrap();
+        let err = attach_small_block_signatures(&record, &a_signed, &mut wrong)
+            .expect_err("signatures must not carry over to a different tx_tree_root");
+        assert!(
+            format!("{err:?}").contains("h2_tag"),
+            "the refusal must name the broken binding, got: {err:?}"
+        );
+
+        // Positive: the real N-of-N installs.
+        attach_small_block_signatures(&record, &a_signed, &mut tx)
+            .expect("a fully co-signed state signs its own block");
+        assert_eq!(
+            tx.signed_small_block.signatures, a_signed.member_signatures,
+            "the block must carry the members' OWN signatures, in slot order"
+        );
+        for (slot, sig) in tx.signed_small_block.signatures.iter().enumerate() {
+            assert_ne!(
+                sig.signature, placeholder,
+                "slot {slot} must hold a real Falcon signature after the round completes"
+            );
+            assert_eq!(sig.pk_g, record.member_pk_gs[slot]);
+        }
+
+        // The installed set is exactly what the aggregation path consumes: it re-verifies every
+        // signature against the registered pk_g over the recomputed IMCH digest and builds the
+        // FalconAggWitness the block producer aggregates (no signing key involved).
+        let (pk_gs, agg_witness) = falcon_member_auth_from_signatures(
+            &record,
+            &tx.signed_small_block.signatures,
+            a_signed.digest,
+        )
+        .expect("the block's signatures must build the N-of-N aggregate witness");
+        assert_eq!(pk_gs.len(), n);
+        assert_eq!(agg_witness.active.len(), n);
+        assert_eq!(agg_witness.message, a_signed.digest);
     }
 }
 
