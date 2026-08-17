@@ -49,7 +49,7 @@ use intmax3_zkp::{
         u63::BlockNumber,
     },
     ethereum_types::{address::Address, bytes32::Bytes32, u32limb_trait::U32LimbTrait, u256::U256},
-    falcon_sig::list::ListCircuit,
+    falcon_sig::{agg::FalconAggCircuit, agg_list::AggListCircuit},
     regev::{
         RealRegevProofVerifier, RegevCiphertext, RegevPk, RegevSecurityLevel, encrypt_amount,
         prove_channel_update,
@@ -64,10 +64,11 @@ use intmax3_zkp::{
 use plonky2::{field::goldilocks_field::GoldilocksField, plonk::config::PoseidonGoldilocksConfig};
 use std::{
     path::PathBuf,
-    process::{Child, Command, Stdio},
-    thread,
-    time::Duration,
+    process::{Command, Stdio},
 };
+
+mod anvil_harness;
+use anvil_harness::AnvilNode;
 
 const D: usize = 2;
 type F = GoldilocksField;
@@ -89,13 +90,6 @@ impl ChannelProofVerifier for StructuralTransport {
             return Err(ChannelStateUpdateError::ProofVerification("empty".into()));
         }
         Ok(())
-    }
-}
-struct AnvilGuard(Child);
-impl Drop for AnvilGuard {
-    fn drop(&mut self) {
-        let _ = self.0.kill();
-        let _ = self.0.wait();
     }
 }
 fn tool(b: &str) -> bool {
@@ -162,29 +156,10 @@ fn unified_inter_channel_transfer_e2e() {
     use rand::SeedableRng as _;
     use rand010::SeedableRng as _;
     let rpc = format!("http://127.0.0.1:{PORT}");
-    let anvil = Command::new("anvil")
-        .args(["--hardfork", "prague", "--port", &PORT.to_string()])
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .expect("anvil");
-    let _g = AnvilGuard(anvil);
-    let mut up = false;
-    for _ in 0..40 {
-        if Command::new("cast")
-            .args(["block-number", "--rpc-url", &rpc])
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status()
-            .map(|s| s.success())
-            .unwrap_or(false)
-        {
-            up = true;
-            break;
-        }
-        thread::sleep(Duration::from_millis(250));
-    }
-    assert!(up, "anvil down");
+    // Spawns anvil and proves the node answering on PORT is the one we spawned (fresh chain,
+    // our own process). See tests/anvil_harness/mod.rs for why a plain `cast block-number` poll
+    // is not enough. Killed on drop.
+    let _g = AnvilNode::spawn("unified_inter_channel_transfer_e2e", PORT, &[]);
     let contracts = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("contracts");
     let deploy = cap(
         Command::new("forge").current_dir(&contracts).args([
@@ -577,13 +552,14 @@ fn unified_inter_channel_transfer_e2e() {
         Bytes32::default(),
         "bp IMSB signature recorded"
     );
-    let list = ListCircuit::<F, C, D>::new();
+    let agg = FalconAggCircuit::<F, C, D>::new();
+    let agg_list = AggListCircuit::<F, C, D>::new(&agg.verifier_data());
     let list_proof = bwgen
         .borrow()
-        .build_bp_sig_list_proof(&list)
+        .build_agg_sig_list_proof(&agg, &agg_list)
         .expect("list proof");
     assert!(list_proof.is_some());
-    let validity = ValidityCircuit::<F, C, D>::new(&block_chain_vd, &list.verifier_data());
+    let validity = ValidityCircuit::<F, C, D>::new(&block_chain_vd, &agg_list.verifier_data());
     let vproof = validity
         .prove(&final_chain, list_proof.as_ref(), Address::rand(&mut brng))
         .expect("validity proof");

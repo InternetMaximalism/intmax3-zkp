@@ -4,26 +4,42 @@ pragma solidity ^0.8.24;
 import {Script, console2} from "forge-std/Script.sol";
 import {IntmaxRollup} from "../src/IntmaxRollup.sol";
 import {BlobKZGVerifierExt} from "../src/BlobKZGVerifier.sol";
-import {ChannelSettlementManager, IChannelSettlementVerifier, IChannelRegistry} from "../src/ChannelSettlementManager.sol";
+import {
+    ChannelSettlementManager,
+    IChannelSettlementVerifier,
+    IChannelRegistry,
+    SETTLEMENT_LOCAL_DEVNET_CHAIN_ID
+} from "../src/ChannelSettlementManager.sol";
 import {ChannelSettlementVerifier} from "../src/ChannelSettlementVerifier.sol";
 import {MleVerifier} from "@mle/MleVerifier.sol";
 import {FixtureLib} from "./FixtureLib.sol";
+import {DeployConfig} from "./DeployConfig.sol";
 
-/// @title Deploy the full close-lifecycle stack to Sepolia (or dry-run to learn the manager address).
+/// @title Deploy the close-lifecycle stack on the LOCAL DEVNET (anvil) — demo / address dry-run.
 /// @notice Plain nonce-based `new` deploys (deployer = the broadcasting EOA), so:
 ///           - the manager's CREATE address depends only on the EOA + nonce (NOT the initcode), so a
-///             dry-run (`forge script --sender <EOA> --rpc-url sepolia`, no broadcast, no key) prints
-///             the exact address the broadcast will deploy the manager to. Bake THAT into the close
+///             dry-run (`forge script --sender <EOA>`, no broadcast, no key) prints the exact
+///             address the broadcast will deploy THIS SCRIPT's manager to. Bake THAT into the close
 ///             withdrawal proof: WD_RECIPIENT=<manager> WD_OUT_PREFIX=close_ cargo run --release
 ///             --bin generate_withdrawal_fixture.
 ///           - `rollup.deployer == EOA`, so `initializeWithdrawalVk` is called by the EOA directly
 ///             (no factory-deployer issue, unlike the local CREATE2 test).
 ///
-/// @dev Reads the close_* fixtures. CHALLENGE_PERIOD is short (Sepolia demo) so finalizeClose can
-///      proceed quickly; the 10-min GRACE_BEFORE_PROCESS_SECS is a fixed contract constant and is
-///      unavoidable between requestClose and submitCloseIntent.
+/// @dev Reads the sepolia_* fixtures. The 10-min GRACE_BEFORE_PROCESS_SECS is a fixed contract
+///      constant and is unavoidable between requestClose and submitCloseIntent.
+///
+/// ⚠️ NOT A PRODUCTION DEPLOYER — and, since 2026-08-13, that is ENFORCED by the
+/// `block.chainid == SETTLEMENT_LOCAL_DEVNET_CHAIN_ID` guard at the top of `run()`, not asserted by
+/// this comment. See the SECURITY note on that guard for the three independent reasons a deployment
+/// from this script cannot work on a public chain, and why option (a) — "just key the four
+/// settlement VKs here too" — could not have made it work. Use `DeployCloseCli.s.sol` for any
+/// deployment that must actually settle.
 contract DeployClose is Script {
-    uint64 internal constant CHALLENGE_PERIOD = 1; // seconds (demo); challengeDeadline ~= +1 block
+    // SECURITY (challenge-period floor): was a hardcoded 1 second labelled "demo", on a script
+    // whose own header aims it at Sepolia. `finalizeClose()` is permissionless at the deadline, so
+    // a 1-second window means a stale close intent can be finalized before any honest member can
+    // prove and land a replacement — permanent fund mis-allocation. The value is now devnet-only;
+    // the manager's constructor enforces the same floor independently.
     uint256 internal constant SPECIAL_CLOSE_PENALTY = 0;
     uint256 internal constant INITIAL_BP_BOND = 0;
 
@@ -39,7 +55,51 @@ contract DeployClose is Script {
         return vm.readFile(string.concat(vm.projectRoot(), "/test/data/sepolia_lifecycle.json"));
     }
 
-    function run() external {
+    /// @return rollup  the deployed IntmaxRollup
+    /// @return manager the deployed ChannelSettlementManager (returned so tests can assert on the
+    ///         challenge period this script actually shipped, per chain)
+    function run() external returns (IntmaxRollup rollup, ChannelSettlementManager manager) {
+        // SECURITY (fund freeze): this script constructs a REAL `ChannelSettlementVerifier` and a
+        // REAL `ChannelSettlementManager` and keys NONE of the four settlement VKs, so a channel it
+        // deploys can be FROZEN by the permissionless `requestClose()` (which flips
+        // `isNativeSendAllowed = false`) and then never closed — `submitCloseIntent` reverts
+        // `CloseVkNotSet()` — and never un-frozen — `cancelClose` reverts `CancelCloseVkNotSet()`.
+        // `initializeCloseVk` is deployer-only-and-set-once on a verifier this script does not
+        // return, and `ChannelSettlementManager.verifier` is immutable, so the channel cannot be
+        // repaired after the fact. Its members' funds are stranded.
+        //
+        // WHY A HARD CHAIN-ID GATE AND NOT "KEY THE VKs HERE TOO" (the alternative fix):
+        //   1. Keying the four settlement VKs would NOT make a real-chain deployment work. This
+        //      script takes its validity VK, withdrawal VK and genesis root from the four
+        //      `sepolia_*` fixtures, which are one circuit generation STALE (pre-Falcon; regenerated
+        //      at 89cd044 while everything else was regenerated at 2e418f6 — see
+        //      doc/tasks/falcon-sig-phase5-notes.md "STOP 1"). A rollup born with those is a rollup
+        //      no current proof verifies against. Fixing that is a Rust fixture regeneration, not an
+        //      edit to this file, so no change confined to `contracts/` can make this script produce
+        //      a working public-chain deployment.
+        //   2. Nothing legitimately needs it on a public chain. `DeployCloseCli.s.sol` is the
+        //      real-network settlement deployer (doc/docs/deploy-runbook.md, and it is what
+        //      `tests/close_lifecycle_cli_e2e.rs` / `tests/two_token_cli_e2e.rs` drive); the only
+        //      recorded uses of THIS script (doc/tasks/a3-p4-withdraw-plan.md,
+        //      doc/tasks/a3-p5-plus-plan.md) are anvil runs, and its Sepolia driver
+        //      `RunClose.s.sol` reads `sepolia_close_intent*.json`, which do not exist in the repo.
+        //   3. The "predict the manager address by dry-running against Sepolia" rationale in the
+        //      header does not transfer to the production deployer. A nonce-based CREATE address is
+        //      a function of the EOA's nonce, and `DeployCloseCli` issues 12 broadcast transactions
+        //      before its manager CREATE against this script's 7 (it also keys five VKs), so the
+        //      address this script predicts is not the one the production deploy uses. The
+        //      prediction is only ever about THIS script's own demo manager — which is now, by this
+        //      guard, a devnet object.
+        //
+        // The chain id is compared against the same `SETTLEMENT_LOCAL_DEVNET_CHAIN_ID` the manager's
+        // constructor uses, so "local" cannot mean two different things in this repo. This matches
+        // the existing hard-gate idiom in `DeployWalletSettlement.s.sol` /
+        // `DeployPartialWithdrawalE2E.s.sol` (a bare `require` at the top of `run()`), NOT the
+        // `FRAUD_TREASURY` fallback check below, which only fires when the env var is unset.
+        require(
+            block.chainid == SETTLEMENT_LOCAL_DEVNET_CHAIN_ID,
+            "local-devnet only: this script keys no settlement VKs and reads stale fixtures -- use DeployCloseCli.s.sol"
+        );
         string memory vkJson = _vJson();
         string memory lcJson = _lcJson();
         bytes32 genesis = vm.parseJsonBytes32(lcJson, ".genesis_state_root");
@@ -55,7 +115,7 @@ contract DeployClose is Script {
         MleVerifier verifier = new MleVerifier();
         IntmaxRollup.MleVk memory vvk = FixtureLib.buildMleVk(vkJson, verifier);
         FixtureLib.DeployData memory vdd = FixtureLib.parseDeployData(vkJson);
-        IntmaxRollup rollup = new IntmaxRollup(
+        rollup = new IntmaxRollup(
             fraudTreasury, vvk, vdd.whirParams, vdd.protocolId, vdd.sessionId,
             vdd.kIs, vdd.subgroupGenPowers, verifier, genesis,
             false // SECURITY (A-2): production — reject a disabled (degreeBits==0) validity VK
@@ -88,8 +148,8 @@ contract DeployClose is Script {
             address r = (i == 0) ? msg.sender : recipients[i];
             bindings[i] = ChannelSettlementManager.MemberBinding({pkG: sphincs[i], recipient: r});
         }
-        ChannelSettlementManager manager = new ChannelSettlementManager(
-            bytes4(channelId), bpSlot, sphincs[bpSlot], 0, CHALLENGE_PERIOD, SPECIAL_CLOSE_PENALTY,
+        manager = new ChannelSettlementManager(
+            bytes4(channelId), bpSlot, sphincs[bpSlot], 0, DeployConfig.challengePeriodSecs(), SPECIAL_CLOSE_PENALTY,
             INITIAL_BP_BOND, IChannelSettlementVerifier(address(sv)), IChannelRegistry(address(rollup)), bindings,
             new ChannelSettlementManager.MemberBinding[](0) // no delegates
         );

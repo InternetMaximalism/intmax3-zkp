@@ -52,7 +52,7 @@ use intmax3_zkp::{
         },
     },
     common::{
-        balance_state::tx_leaf_hash,
+        balance_state::{BalanceState, settled_tx_chain_push, tx_leaf_hash},
         channel::{
             ChannelRecord, ChannelState, CloseIntent, CloseWithdrawal, InterChannelTx,
             MemberSignature,
@@ -80,7 +80,8 @@ use intmax3_zkp::{
         WithdrawalClaimProver, add_signature, assemble_genesis_state_backed,
         build_batch_next_state, build_channel_withdrawal, build_inter_channel_credit,
         build_l1_deposit_import, build_record, build_refresh, build_send_token,
-        build_token_register, decrypt_balance_token, default_settled_tx_accumulator,
+        build_token_register, burn_withdrawal_leaf, decrypt_balance_token,
+        default_settled_tx_accumulator, inter_channel_base_transfer, inter_channel_tx_v2,
         partial_withdrawal_auth_digest, regev_pks_array, resolve_local_token_slot, sign_state,
         sign_state_if_backed, verify_all_signatures, verify_inter_channel_credit_transition,
         verify_inter_channel_send_transition, verify_l1_deposit_import_transition,
@@ -379,6 +380,104 @@ fn die(msg: impl std::fmt::Display) -> ! {
     exit(1);
 }
 
+/// Env override naming the Foundry `contracts/` checkout explicitly.
+const CONTRACTS_DIR_ENV: &str = "CONTRACTS_DIR";
+
+/// Locate the Foundry `contracts/` checkout WITHOUT consulting the current working directory.
+///
+/// LIVENESS (doc/audit/exit-path-facade-sweep.md F4 — the defect this closes): `close`, `claim`,
+/// `cancel-close`, `post-close-claim` and `withdraw` used to reach the checkout through the
+/// RELATIVE paths `Path::new("contracts/test/data")` and `Command::current_dir("contracts")`. All
+/// three product drivers run this binary with `cwd = wallet-live-work/chN` (`api/lib/cli.js`,
+/// `hosting/wallet/wallet-relay.js`, `hosting/wallet/wallet-relay-ec2.js`), and that directory has
+/// no `contracts/` — so every exit command aborted, and in `close`/`withdraw` it aborted AFTER the
+/// multi-minute proof, discarding a finished proof over a path lookup. The Rust E2Es never caught
+/// it because they invoke the CLI with `cwd = repo_root()`, the one directory where the relative
+/// path happens to resolve.
+///
+/// The resolution below is NOT new: it is exactly what `deploy-settlement` and `pw-submit` already
+/// did two functions away — an explicit `CONTRACTS_DIR`, else an ancestor search from THE
+/// EXECUTABLE. Nothing here reads the cwd, so an exit command behaves identically from any
+/// directory.
+///
+/// Returns `(dir, provenance)` for the diagnostic line; every failure path `die`s.
+fn resolve_contracts_dir() -> (std::path::PathBuf, String) {
+    match std::env::var(CONTRACTS_DIR_ENV) {
+        Ok(raw) if !raw.trim().is_empty() => (
+            std::path::PathBuf::from(raw.trim()),
+            format!("{CONTRACTS_DIR_ENV} env"),
+        ),
+        _ => {
+            let exe = std::env::current_exe()
+                .unwrap_or_else(|e| die(format!("cannot locate this executable: {e}")));
+            let repo = exe
+                .ancestors()
+                .find(|p| p.join("contracts").is_dir())
+                .unwrap_or_else(|| {
+                    die(format!(
+                        "cannot find a contracts/ dir in any ancestor of this executable ({}) — \
+                         set {CONTRACTS_DIR_ENV}=<path to the foundry contracts checkout>. \
+                         (The cwd is deliberately NOT consulted: every product driver runs this \
+                         binary from a per-channel work dir that has no contracts/.)",
+                        exe.display()
+                    ))
+                })
+                .to_path_buf();
+            (repo.join("contracts"), "executable ancestor search".into())
+        }
+    }
+}
+
+/// Resolve AND validate the contracts checkout an exit command is about to use, then announce it.
+///
+/// FAIL EARLY, FAIL LOUD (the second half of F4): a wrong or missing checkout used to surface as
+/// `stage close_intent.json: No such file or directory` at the `fs::copy` — i.e. after `close` and
+/// `withdraw` had already paid for their proof. Wasting a multi-minute proof on a path error is
+/// itself the defect, so every exit command calls this BEFORE it loads state or proves anything,
+/// and every caller names the forge script it will actually run so a checkout that is present but
+/// wrong (an unrelated `contracts/` dir, a checkout without the staging dir) is rejected here
+/// rather than mid-pipeline.
+///
+/// SECURITY: this is a liveness precondition only — it gates NO proof property. It never falls
+/// back and never continues on a partial match: an unusable checkout is a `die`, never a warning.
+fn require_contracts_dir(cmd: &str, scripts: &[&str]) -> std::path::PathBuf {
+    let (dir, provenance) = resolve_contracts_dir();
+    let mut missing: Vec<String> = Vec::new();
+    if !dir.is_dir() {
+        missing.push("the directory itself does not exist".to_string());
+    } else {
+        if !dir.join("test").join("data").is_dir() {
+            missing.push(
+                "test/data/ (the staging dir the forge steps read their inputs from)".to_string(),
+            );
+        }
+        for script in scripts {
+            if !dir.join(script).is_file() {
+                missing.push(format!("{script} (the forge step `{cmd}` runs)"));
+            }
+        }
+    }
+    if !missing.is_empty() {
+        die(format!(
+            "`{cmd}`: {} is not a usable contracts checkout — missing: {}.\n\
+             Resolved via {provenance}. Set {CONTRACTS_DIR_ENV}=<path to this repo's contracts/> \
+             and re-run.\n\
+             REFUSING NOW, BEFORE PROVING: `{cmd}` reaches the checkout only at the very end of \
+             its pipeline, so continuing would burn the whole proof and then fail on a path \
+             lookup (doc/audit/exit-path-facade-sweep.md F4).",
+            dir.display(),
+            missing.join(", ")
+        ));
+    }
+    // Observable, not silent: the resolved path is printed BEFORE the heavy work so an operator
+    // can see which checkout a live run is about to stage into.
+    eprintln!(
+        "[{cmd}] contracts dir: {} (via {provenance}; the cwd is not consulted)",
+        dir.display()
+    );
+    dir
+}
+
 /// Env var naming the FILE that holds this host's co-signer master secret (production).
 ///
 /// SECURITY: the env carries only a PATH — a path is not a secret, so it is safe for the variable
@@ -632,12 +731,21 @@ fn cli_active_keys() -> Vec<MemberKeys> {
         .into_iter()
         .map(|slot| keys_for(CLI_COSIGNER_SEED_BASE + slot as u64))
         .collect();
-    let delegate_seed: u64 = std::env::var("DELEGATE_SEED")
+    v.push(keys_for(delegate_seed()));
+    v
+}
+
+/// The keygen LABEL of the DEMO delegate — the identity `gen-contribution <bal> <DELEGATE_SEED>`
+/// produces. INTENTIONALLY SIMPLE: one reader, so `cli_active_keys` and the claim-identity
+/// resolution below can never disagree about which label the demo delegate uses.
+///
+/// NOTE: a REAL browser delegate does NOT have a label here at all — it generates its own key with
+/// `wallet_keygen` and the secret never leaves the browser. See `claim_keys_for_slot`.
+fn delegate_seed() -> u64 {
+    std::env::var("DELEGATE_SEED")
         .ok()
         .and_then(|s| s.parse().ok())
-        .unwrap_or(1);
-    v.push(keys_for(delegate_seed));
-    v
+        .unwrap_or(1)
 }
 
 fn member_info_for(slot: u16, keys: &MemberKeys) -> MemberInfo {
@@ -1431,6 +1539,12 @@ fn cmd_close(args: &[String]) {
         return;
     }
 
+    // F4: resolve the contracts checkout NOW — the staging + forge step at the end of this command
+    // is the ONLY thing here that touches it, and reaching it after the close proof is what made a
+    // path error cost a full proof. (Not hoisted above the CLOSE_REQUEST_ONLY branch on purpose:
+    // that branch is a pure `cast send` and legitimately needs no checkout.)
+    let contracts_dir = require_contracts_dir("close", &["script/RunClose.s.sol"]);
+
     let close_nonce = env_u64("CLOSE_NONCE", 1);
     let snapshot_mbn = env_u64("CLOSE_SNAPSHOT_MBN", 1);
     let burn_tx_hash = std::env::var("CLOSE_BURN_TX")
@@ -1584,7 +1698,7 @@ fn cmd_close(args: &[String]) {
 
     // The RunClose forge step reads the close artifacts from `contracts/test/data/sepolia_close_*`
     // and submits the large-struct calldata. Stage the just-generated artifacts there and run it.
-    let data_dir = std::path::Path::new("contracts/test/data");
+    let data_dir = contracts_dir.join("test/data");
     fs::copy(
         CLOSE_INTENT_FILE,
         data_dir.join("sepolia_close_intent.json"),
@@ -1598,7 +1712,7 @@ fn cmd_close(args: &[String]) {
     let sv = std::env::var("CLOSE_SV").unwrap_or_default();
     eprintln!("[close] submitCloseIntent via forge RunClose step…");
     let status = std::process::Command::new("forge")
-        .current_dir("contracts")
+        .current_dir(&contracts_dir)
         .args([
             "script",
             "script/RunClose.s.sol",
@@ -1672,6 +1786,119 @@ struct WithdrawalClaimDescriptor {
     token_index: u32,
 }
 
+/// Env override naming the keygen LABEL to derive the claimant's key from, when it is not the
+/// label this binary would infer. Fail-closed either way: the derived identity is still checked
+/// against the signed slot leaf below, so a wrong label is a refusal, never a wrong claim.
+const CLAIM_KEYGEN_LABEL_ENV: &str = "CLAIM_KEYGEN_LABEL";
+
+/// Resolve the `MemberKeys` that OWN balance slot `slot`, and REFUSE unless the derived identity is
+/// the one the channel's signed state actually committed to that slot.
+///
+/// F8 (doc/audit/exit-path-facade-sweep.md). `claim` and `post-close-claim` used to hard-code
+/// `keys_for(CLI_COSIGNER_SEED_BASE + slot)` — the OPERATOR's co-signer derivation — for whatever
+/// slot the caller named. For a CLI co-signer slot that is the right key. For a BROWSER DELEGATE it
+/// is a different key entirely: a delegate generates its own Regev keypair in the browser
+/// (`wasm_wallet::wallet_keygen`) and the secret never leaves it, so the operator's derivation can
+/// never reproduce it. The old code then spent the entire heavy claim proof before the in-circuit
+/// slot-leaf bind rejected it, with an error that named neither the cause nor the fact that the
+/// delegate has no working path at all.
+///
+/// SECURITY: this is the NATIVE MIRROR of a binding the circuit already enforces — the claim
+/// circuit opens slot leaf `slot` by inclusion and one-hot-binds the witnessed Regev `(a, b)` to
+/// the H1-committed `regev_pk_digests[slot]` (`withdrawal_claim_pis.rs`,
+/// `post_close_claim_pis.rs:160-172`). It REPLACES NOTHING and WEAKENS NOTHING; it moves the same
+/// predicate to before the proof so an impossible claim fails in milliseconds with an explanation
+/// instead of in minutes without one. `post_close_claim_pis` already carries this check natively;
+/// `withdrawal_claim_pis` binds it in-circuit only, which is why the CLI-side check matters most
+/// for `claim`.
+fn claim_keys_for_slot(
+    cmd: &str,
+    controlled: &[ControlledMember],
+    final_balance_state: &BalanceState,
+    slot: u16,
+) -> MemberKeys {
+    let active =
+        final_balance_state.member_count as usize + final_balance_state.delegate_count as usize;
+    if slot as usize >= active {
+        die(format!(
+            "`{cmd}`: slot {slot} is a PADDING slot of the signed final state (active slots are \
+             0..{active} = member_count {} + delegate_count {}). Padding slots hold the canonical \
+             zero ciphertext and are not claimable.",
+            final_balance_state.member_count, final_balance_state.delegate_count
+        ));
+    }
+
+    // Which keygen label owns this slot, in order of authority:
+    //   1. an explicit operator override (still gated by the leaf check below);
+    //   2. the slot's OWN recorded label in `cli_state.controlled` — the same single source of
+    //      truth every co-signing command uses (`keys_for(c.keygen_seed)`), rather than a second
+    //      copy of the `CLI_COSIGNER_SEED_BASE + slot` formula (the Phase-3 finding-7 shape);
+    //   3. the DEMO delegate's label, for a slot past the co-signer range;
+    //   4. the historical co-signer formula, so a state file predating `controlled` still resolves.
+    // NONE of these is a fallback in the dangerous sense: whichever label is chosen, the identity
+    // it derives is checked against the signed leaf and a mismatch is fatal.
+    let (label, label_src) = match std::env::var(CLAIM_KEYGEN_LABEL_ENV) {
+        Ok(raw) if !raw.trim().is_empty() => (
+            raw.trim().parse::<u64>().unwrap_or_else(|_| {
+                die(format!(
+                    "{CLAIM_KEYGEN_LABEL_ENV}={raw:?} is not a u64 keygen label"
+                ))
+            }),
+            format!("{CLAIM_KEYGEN_LABEL_ENV} override"),
+        ),
+        _ => match controlled.iter().find(|c| c.slot == slot) {
+            Some(c) => (c.keygen_seed, "cli_state.controlled".to_string()),
+            None if slot >= cli_cosigner_count() => {
+                (delegate_seed(), "DELEGATE_SEED (demo delegate)".to_string())
+            }
+            None => (
+                CLI_COSIGNER_SEED_BASE + slot as u64,
+                "CLI co-signer slot formula".to_string(),
+            ),
+        },
+    };
+
+    let keys = keys_for(label);
+    let derived = Bytes32::from(keys.regev_pk.poseidon_digest());
+    let committed = final_balance_state.regev_pk_digests[slot as usize];
+    if derived != committed {
+        die(format!(
+            "`{cmd}`: THIS CLI CANNOT CLAIM FOR BALANCE SLOT {slot}.\n\
+             \n\
+             The channel's signed state commits slot {slot}'s Regev public key as\n  \
+               {}\n\
+             but the key this host derives for it (label {label}, chosen from {label_src}) is\n  \
+               {}\n\
+             so this process does NOT hold the secret key that slot {slot}'s balance ciphertext is \
+             encrypted under. Every claim proof it could build would be rejected — by the E-3 \
+             decryption proof, or by the circuit's slot-leaf Regev-pk bind.\n\
+             \n\
+             WHO CAN USE `{cmd}`: a slot whose key material comes from THIS host's co-signer \
+             master ({COSIGNER_KEYFILE_ENV}) — i.e. the CLI co-signer slots this process controls \
+             (0..{}), plus a DEMO delegate created by `gen-contribution` with a DELEGATE_SEED this \
+             host can reproduce.\n\
+             WHO CANNOT: a REAL BROWSER DELEGATE. It generates its own Regev keypair with \
+             `wallet_keygen` and that secret NEVER leaves the browser, and `src/wasm_wallet.rs` \
+             exports no claim entry point — so a browser delegate's claim cannot be produced by \
+             this command, and cannot currently be produced anywhere. That is a MISSING FEATURE, \
+             not a misconfiguration: see doc/audit/exit-path-facade-sweep.md F8.\n\
+             \n\
+             REFUSING before proving rather than spending minutes building a claim for an identity \
+             that is not the slot owner's. If you believe this host does own the slot under a \
+             different keygen label, set {CLAIM_KEYGEN_LABEL_ENV}=<u64> — it is checked against the \
+             same signed leaf and cannot be used to claim someone else's balance.",
+            committed.to_hex(),
+            derived.to_hex(),
+            cli_cosigner_count(),
+        ));
+    }
+    eprintln!(
+        "[{cmd}] slot {slot} identity confirmed against the signed slot leaf (label from \
+         {label_src})"
+    );
+    keys
+}
+
 /// A-3 P4: a member claims their slot balance from the CLOSED channel. Builds the withdrawal-claim
 /// MLE proof via the verified `WithdrawalClaimProver` (the amount is DERIVED by decrypting the
 /// member's own slot ciphertext, so it cannot over-claim), submits it (`submitWithdrawalClaim` via
@@ -1731,6 +1958,11 @@ fn cmd_claim(args: &[String]) {
         return;
     }
 
+    // F4: resolve + validate the contracts checkout BEFORE the heavy claim proof (see
+    // `require_contracts_dir`). The CLAIM_PULL_ONLY branch above is a pure `cast send` and
+    // deliberately stays above this line.
+    let contracts_dir = require_contracts_dir("claim", &["script/RunClose.s.sol"]);
+
     let close_nonce = env_u64("CLOSE_NONCE", 1);
     let snapshot_mbn = env_u64("CLOSE_SNAPSHOT_MBN", 1);
     let burn_tx_hash = std::env::var("CLOSE_BURN_TX")
@@ -1754,8 +1986,22 @@ fn cmd_claim(args: &[String]) {
     let close_intent = CloseIntent::new(close_nonce, &state, &close_tx, snapshot_mbn)
         .unwrap_or_else(|e| die(format!("reconstruct close intent: {e:?}")));
 
-    let keys = keys_for(0xC1_0000 + member_slot as u64);
+    // F8: the claimant's identity is the one the SIGNED slot leaf commits, or this command refuses.
+    let keys = claim_keys_for_slot("claim", &st.controlled, &final_balance_state, member_slot);
     let member_pk_g = keys.pk_g();
+    // The recipient is bound to the cosigner-signed per-slot exit address (B-1b). The witness
+    // builder enforces this too (`WithdrawalClaimWitness` → RecipientMismatch); checking it here
+    // just moves a certain failure ahead of the proof instead of after it.
+    let leaf_recipient = final_balance_state.recipients[member_slot as usize];
+    if recipient != leaf_recipient {
+        die(format!(
+            "claim: CLAIM_RECIPIENT {} is not slot {member_slot}'s signed exit address {}. The \
+             claim circuit opens that leaf field and binds it to the payout recipient, so a claim \
+             naming any other address cannot verify. Fail-closed BEFORE proving.",
+            recipient.to_hex(),
+            leaf_recipient.to_hex()
+        ));
+    }
 
     eprintln!(
         "[claim] building withdrawal claim for slot {member_slot} token {token_slot} + proving (HEAVY)…"
@@ -1806,7 +2052,7 @@ fn cmd_claim(args: &[String]) {
     );
 
     // Stage for the forge submit step, submit, then pull the credit (caller MUST be the recipient).
-    let data_dir = std::path::Path::new("contracts/test/data");
+    let data_dir = contracts_dir.join("test/data");
     fs::copy(wc_file, data_dir.join("sepolia_withdrawal_claim.json"))
         .unwrap_or_else(|e| die(format!("stage withdrawal_claim.json: {e}")));
     fs::copy(
@@ -1817,7 +2063,7 @@ fn cmd_claim(args: &[String]) {
     let key = deposit_key_env();
     eprintln!("[claim] submitWithdrawalClaim via forge…");
     let status = std::process::Command::new("forge")
-        .current_dir("contracts")
+        .current_dir(&contracts_dir)
         .args([
             "script",
             "script/RunClose.s.sol",
@@ -1915,6 +2161,10 @@ fn cmd_cancel_close(args: &[String]) {
         .get(2)
         .cloned()
         .unwrap_or_else(|| "http://localhost:8545".to_string());
+    // F4: resolve + validate the contracts checkout BEFORE the heavy cancel proof (see
+    // `require_contracts_dir`). A cancel that dies on a path lookup after proving is worse than a
+    // cancel that never started: the challenge window is what a cancel is racing.
+    let contracts_dir = require_contracts_dir("cancel-close", &["script/RunClose.s.sol"]);
 
     // The REVIVED (later) signed state is the current committed head. It already carries the N-of-N
     // cosignatures over its own IMCH digest, which is exactly what the cancel circuit binds.
@@ -1987,7 +2237,7 @@ fn cmd_cancel_close(args: &[String]) {
 
     // ── On-chain: cancelClose (large struct calldata → forge step). ──
     let key = deposit_key_env();
-    let data_dir = std::path::Path::new("contracts/test/data");
+    let data_dir = contracts_dir.join("test/data");
     fs::copy(
         CANCEL_CLOSE_FILE,
         data_dir.join("sepolia_cancel_close.json"),
@@ -2001,7 +2251,7 @@ fn cmd_cancel_close(args: &[String]) {
     let sv = std::env::var("CANCEL_SV").unwrap_or_default();
     eprintln!("[cancel-close] cancelClose via forge RunClose step…");
     let status = Command::new("forge")
-        .current_dir("contracts")
+        .current_dir(&contracts_dir)
         .args([
             "script",
             "script/RunClose.s.sol",
@@ -2076,6 +2326,9 @@ fn cmd_post_close_claim(args: &[String]) {
         .unwrap_or_else(|| {
             die("set CLAIM_RECIPIENT=0x<20-byte member L1 recipient> (must equal the registered recipient)")
         });
+    // F4: resolve + validate the contracts checkout BEFORE the heavy post-close-claim proof (see
+    // `require_contracts_dir`).
+    let contracts_dir = require_contracts_dir("post-close-claim", &["script/RunClose.s.sol"]);
 
     // The CLOSED channel's finalized state + its settled-tx accumulator (the inclusion anchor).
     let st = load_state();
@@ -2097,8 +2350,27 @@ fn cmd_post_close_claim(args: &[String]) {
     let source_desc: InterChannelTransferDescriptor = read_json(&source_path);
     let source_tx: InterChannelTx = source_desc.inter_channel_tx.clone();
 
-    let keys = keys_for(0xC1_0000 + receiver_slot as u64);
+    // F8: same identity gate as `claim` — the receiver's key must be the one the signed slot leaf
+    // commits, or this command refuses instead of proving for the wrong identity.
+    let keys = claim_keys_for_slot(
+        "post-close-claim",
+        &st.controlled,
+        &final_balance_state,
+        receiver_slot,
+    );
     let receiver_pk_g = keys.pk_g();
+    // B-1b: the payout address is the signed per-slot exit address. `PostCloseClaimWitness` already
+    // rejects a mismatch (RecipientMismatch); this only moves that certain failure ahead of the
+    // proof.
+    let leaf_recipient = final_balance_state.recipients[receiver_slot as usize];
+    if recipient != leaf_recipient {
+        die(format!(
+            "post-close-claim: CLAIM_RECIPIENT {} is not slot {receiver_slot}'s signed exit \
+             address {}. Fail-closed BEFORE proving.",
+            recipient.to_hex(),
+            leaf_recipient.to_hex()
+        ));
+    }
 
     eprintln!(
         "[post-close-claim] building claim for slot {receiver_slot} (tx index {incoming_tx_index}) + proving + MLE (HEAVY)…"
@@ -2150,7 +2422,7 @@ fn cmd_post_close_claim(args: &[String]) {
     );
 
     // ── On-chain: submitPostCloseClaim (large struct calldata → forge step), then pull credit. ──
-    let data_dir = std::path::Path::new("contracts/test/data");
+    let data_dir = contracts_dir.join("test/data");
     fs::copy(
         POST_CLOSE_CLAIM_FILE,
         data_dir.join("sepolia_post_close_claim.json"),
@@ -2164,7 +2436,7 @@ fn cmd_post_close_claim(args: &[String]) {
     let key = deposit_key_env();
     eprintln!("[post-close-claim] submitPostCloseClaim via forge RunClose step…");
     let status = Command::new("forge")
-        .current_dir("contracts")
+        .current_dir(&contracts_dir)
         .args([
             "script",
             "script/RunClose.s.sol",
@@ -2320,6 +2592,11 @@ fn cmd_withdraw(args: &[String]) {
         .get(2)
         .cloned()
         .unwrap_or_else(|| "http://localhost:8545".to_string());
+    // F4: resolve + validate the contracts checkout FIRST. `withdraw` is the longest pipeline in
+    // this binary (channel-withdrawal proof set, then 3 blob posts, then finalize) and it did not
+    // touch the checkout until the `finalize` step near the end — so a path error used to cost the
+    // entire proof AND leave real on-chain state half-advanced. See `require_contracts_dir`.
+    let contracts_dir = require_contracts_dir("withdraw", &["script/RunClose.s.sol"]);
     // Rollup address: explicit ROLLUP env, else the backing record from `setup-backing`.
     let rollup = std::env::var("ROLLUP")
         .ok()
@@ -2455,7 +2732,7 @@ fn cmd_withdraw(args: &[String]) {
         .unwrap_or_else(|e| die(format!("write withdrawal_mle.json: {e}")));
     fs::write("withdrawal_payout.json", &artifacts.payout_json)
         .unwrap_or_else(|e| die(format!("write withdrawal_payout.json: {e}")));
-    let data_dir = std::path::Path::new("contracts/test/data");
+    let data_dir = contracts_dir.join("test/data");
     let stage = |src: &str, dst: &str| {
         fs::copy(src, data_dir.join(dst)).unwrap_or_else(|e| die(format!("stage {src}: {e}")));
     };
@@ -2673,7 +2950,7 @@ fn cmd_withdraw(args: &[String]) {
     // 6. finalize (forge RunClose step; reads the staged sepolia_lifecycle* files).
     eprintln!("[withdraw] finalize submission {final_sub} (real validity MLE)…");
     let status = Command::new("forge")
-        .current_dir("contracts")
+        .current_dir(&contracts_dir)
         .args([
             "script",
             "script/RunClose.s.sol",
@@ -2698,7 +2975,7 @@ fn cmd_withdraw(args: &[String]) {
     // 7. withdrawNative (forge RunClose step; credits pendingWithdrawals[manager]).
     eprintln!("[withdraw] withdrawNative (real withdrawal MLE) → manager {manager}…");
     let status = Command::new("forge")
-        .current_dir("contracts")
+        .current_dir(&contracts_dir)
         .args([
             "script",
             "script/RunClose.s.sol",
@@ -2727,7 +3004,7 @@ fn cmd_withdraw(args: &[String]) {
             "[withdraw] withdrawERC20 (real withdrawal MLE, token {token_index}) → manager {manager}…"
         );
         let status = Command::new("forge")
-            .current_dir("contracts")
+            .current_dir(&contracts_dir)
             .args([
                 "script",
                 "script/RunClose.s.sol",
@@ -2789,6 +3066,21 @@ fn cmd_withdraw(args: &[String]) {
 /// formula (`ChannelMemberKeys::to_reg_record`) so they equal the recipients
 /// `build_channel_withdrawal` emits.
 fn cmd_export_reg_record() {
+    let s = serde_json::to_string_pretty(&build_reg_record()).unwrap_or_else(|e| die(e));
+    fs::write("cli_reg_record.json", &s)
+        .unwrap_or_else(|e| die(format!("write cli_reg_record.json: {e}")));
+    println!("{s}");
+}
+
+/// THE registration record `cli_reg_record.json` carries, as a value.
+///
+/// SECURITY (why this is a function and not a second copy of the code): the Phase-3 finding-7
+/// incident was caused by a SECOND derivation of the member set existing beside the first, so
+/// `export-reg-record` registered one member set on L1 while `withdraw` proved against another —
+/// fail-closed, but the channel became permanently unclosable. `deploy-settlement`'s real-chain
+/// path has to stage the SAME record for `DeployCloseCli.s.sol`, so it calls this rather than
+/// rebuilding it: there is exactly one derivation, and the two commands cannot drift.
+fn build_reg_record() -> serde_json::Value {
     let channel_id = channel_id_env();
     // SECURITY (Option B, tasks/reg-chain-1024-threat-model.md): L1 registration is
     // COSIGNERS-ONLY — the record carries the 3 CLI co-signing members with `delegate_count = 0`.
@@ -2820,20 +3112,21 @@ fn cmd_export_reg_record() {
         regev_pk_digests.push(m.regev_pk_digest.to_string());
         recipients.push(m.recipient.to_hex());
     }
-    let out = serde_json::json!({
-        "channel_id": channel_id,
-        "bp_member_slot": BP_SLOT,
-        "member_count": TEST_ACTIVE_MEMBERS,
-        "delegate_count": delegate_count,
-        "member_pk_gs": member_pk_gs,
-        "member_pk_bs": member_pk_bs,
-        "regev_pk_digests": regev_pk_digests,
-        "recipients": recipients,
-    });
-    let s = serde_json::to_string_pretty(&out).unwrap_or_else(|e| die(e));
-    fs::write("cli_reg_record.json", &s)
-        .unwrap_or_else(|e| die(format!("write cli_reg_record.json: {e}")));
-    println!("{s}");
+    // Both counts are zero-delegate here, for two DIFFERENT reasons (they are not one value):
+    //   * the registration side is cosigner-only by protocol (Option B), enforced in-circuit;
+    //   * this record has no live channel state to read a delegate count from, so the manager
+    //     `DeployCloseCli.s.sol` builds binds no delegates — its B-2 floor is vacuous, the
+    //     pre-existing reviewed behaviour of the real-chain path. Raising it would need delegate
+    //     pk_g/recipient bindings this record does not carry.
+    settlement_reg_json(
+        channel_id,
+        TEST_ACTIVE_MEMBERS,
+        delegate_count,
+        &member_pk_gs,
+        &member_pk_bs,
+        &regev_pk_digests,
+        &recipients,
+    )
 }
 
 fn main() {
@@ -4438,6 +4731,28 @@ fn cmd_cosign_burn_send(args: &[String]) {
 
     // Persist burn metadata for `pw-submit` to reconstruct the Withdrawal. `token_index` is the
     // BASE token the burn debited (multitoken §N — rides into the Withdrawal + IMPW authDigest).
+    //
+    // SECURITY: the L1 withdrawal leaf — and above all its NULLIFIER — is recorded HERE, derived
+    // by the one shared `burn_withdrawal_leaf`. It is settlement-independent (F-WD-2), so it is
+    // fully determined the moment the burn is co-signed. `pw-submit` recomputes it and refuses to
+    // proceed on any disagreement, so a coordinator cannot substitute a leaf between the two
+    // steps, and the value that goes into the on-chain authorization is the same value a provable
+    // `single_withdrawal` leaf will carry.
+    let burn_tx_leaf = tx_leaf_hash(
+        descriptor.source_pk_g,
+        payload.inter_channel_tx.sender_delta_ct.digest(),
+        descriptor.receiver_pk_g,
+        descriptor.receiver_delta.digest(),
+    );
+    let burn_leaf = burn_withdrawal_leaf(
+        descriptor.source_channel_id,
+        descriptor.receiver_pk_g,
+        descriptor.inter_channel_tx.token_index,
+        descriptor.amount,
+        burn_tx_leaf,
+        descriptor.tx_v2.nonce,
+    )
+    .unwrap_or_else(|e| die(format!("burn withdrawal leaf: {e:?}")));
     write_json(
         "last_burn.json",
         &serde_json::json!({
@@ -4449,6 +4764,11 @@ fn cmd_cosign_burn_send(args: &[String]) {
             "sender_delta_ct_digest": payload.inter_channel_tx.sender_delta_ct.digest().to_hex(),
             "receiver_delta_ct_digest": descriptor.receiver_delta.digest().to_hex(),
             "pre_burn_settled_tx_chain": pre_burn_settled_tx_chain.to_hex(),
+            "channel_id": descriptor.source_channel_id.as_u64(),
+            "tx_nonce": descriptor.tx_v2.nonce,
+            "tx_leaf": burn_tx_leaf.to_hex(),
+            "withdrawal_recipient": format!("0x{}", hex::encode(burn_leaf.recipient.to_bytes_be())),
+            "withdrawal_nullifier": burn_leaf.nullifier.to_hex(),
         }),
     );
 
@@ -4747,9 +5067,98 @@ fn cmd_refresh(args: &[String]) {
 
 // ─── Wallet testnet UX: settlement deploy + L1 deposit import + partial withdrawal ────────
 
-/// Deploy the settlement infrastructure on anvil: MockMleVerifier + ChannelSettlementVerifier +
-/// ChannelSettlementManager, with the LIVE channel member set from the snapshot (including any
-/// runtime-joined delegates). Usage:
+/// The ONE chain id that may receive a settlement stack wired to an ALWAYS-TRUE mock MLE verifier.
+///
+/// SECURITY: 31337 is anvil's default and is not a public network. `DeployWalletSettlement.s.sol`
+/// itself carries the same `require(block.chainid == 31337)`, so the mock stack is gated twice,
+/// independently — this constant is the Rust half.
+const DEVNET_CHAIN_ID: u64 = 31337;
+
+/// Which forge script `deploy-settlement` will run, chosen from the chain id the RPC reports.
+///
+/// SECURITY (why this is a type and not a `&str` picked inline): a mock MLE verifier returns true
+/// for ANY proof, so a settlement stack built on one has a vacuous `_checkCloseProof` — anyone can
+/// close any channel to any state and drain it. Making the mock script name reachable ONLY through
+/// `SettlementDeployPlan::MockDevnet::script()`, and making that variant constructible ONLY by
+/// `settlement_deploy_plan(31337)`, turns "never deploy the mock off-devnet" from a rule someone
+/// has to remember into something the type system enforces: there is no code path that names
+/// `DeployWalletSettlement.s.sol` without first having proved `chain_id == DEVNET_CHAIN_ID`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SettlementDeployPlan {
+    /// anvil only — `DeployWalletSettlement.s.sol`: mock (always-true) MLE verifier, 1-second
+    /// challenge period, placeholder VKs.
+    MockDevnet,
+    /// Every other chain — `DeployCloseCli.s.sol`: real MLE/WHIR verifier data for all four
+    /// settlement statements, real challenge period, `registerSettlementManager`.
+    RealChain,
+}
+
+impl SettlementDeployPlan {
+    /// The forge script path, relative to the contracts checkout.
+    ///
+    /// SECURITY: this match and `contract()` are the ONLY places in the binary where the mock
+    /// deployer is named. Grep for `DeployWalletSettlement` — two hits, both in a `MockDevnet` arm.
+    fn script(self) -> &'static str {
+        match self {
+            Self::MockDevnet => "script/DeployWalletSettlement.s.sol",
+            Self::RealChain => "script/DeployCloseCli.s.sol",
+        }
+    }
+
+    /// The `--tc` contract name inside that script.
+    fn contract(self) -> &'static str {
+        match self {
+            Self::MockDevnet => "DeployWalletSettlement",
+            Self::RealChain => "DeployCloseCli",
+        }
+    }
+
+    /// Human label for the announcement line the drivers and tests read.
+    fn label(self) -> &'static str {
+        match self {
+            Self::MockDevnet => "devnet-mock",
+            Self::RealChain => "real-chain",
+        }
+    }
+}
+
+/// THE selection rule. Total, pure, and tested exhaustively-by-property in `deploy_plan_tests`.
+///
+/// SECURITY: fail-closed by construction — every chain id that is not exactly `DEVNET_CHAIN_ID`
+/// maps to `RealChain`. There is no "unknown chain" arm, no default, and no way to reach
+/// `MockDevnet` from an unreadable or unexpected chain id; an id we cannot read never gets here at
+/// all (`rpc_chain_id` dies first).
+fn settlement_deploy_plan(chain_id: u64) -> SettlementDeployPlan {
+    if chain_id == DEVNET_CHAIN_ID {
+        SettlementDeployPlan::MockDevnet
+    } else {
+        SettlementDeployPlan::RealChain
+    }
+}
+
+/// Read the chain id from the RPC the caller named.
+///
+/// SECURITY: the target chain is read from THE CHAIN, never from a flag or an env var — a
+/// caller-supplied "this is devnet" claim is exactly the input an attacker would forge to get the
+/// mock verifier installed on a real network. Unparseable output is a hard error: guessing (or
+/// defaulting to devnet) would reintroduce the same hole through the error path.
+fn rpc_chain_id(rpc: &str) -> u64 {
+    let raw = cast(&["chain-id", "--rpc-url", rpc]);
+    raw.trim().parse::<u64>().unwrap_or_else(|e| {
+        die(format!(
+            "cannot read the chain id from {rpc} ({e}; got {:?}) — REFUSING to guess. \
+             `deploy-settlement` picks the deploy script from the chain id, and the wrong pick on \
+             a real chain installs an always-true mock verifier.",
+            raw.trim()
+        ))
+    })
+}
+
+/// Deploy (or refuse to deploy) the settlement stack for this channel on the chain `rpc` points at.
+///
+/// The script is chosen from the RPC's OWN chain id (`settlement_deploy_plan`), not from an
+/// argument: anvil keeps the mock-verifier stack it has always used, every other chain gets the
+/// real-VK `DeployCloseCli.s.sol` path with a full precondition check. Usage:
 ///   channel_member deploy-settlement <rpc_url>
 fn cmd_deploy_settlement(args: &[String]) {
     let rpc = args
@@ -4757,6 +5166,183 @@ fn cmd_deploy_settlement(args: &[String]) {
         .cloned()
         .unwrap_or_else(|| die("deploy-settlement needs <rpc_url>"));
 
+    let chain_id = rpc_chain_id(&rpc);
+    let plan = settlement_deploy_plan(chain_id);
+    // Observable BEFORE anything is written or broadcast: an operator (and the regression tests)
+    // can see which stack this run is about to install.
+    eprintln!(
+        "[deploy-settlement] chain id {chain_id} → plan: {} ({})",
+        plan.label(),
+        plan.script()
+    );
+    match plan {
+        SettlementDeployPlan::MockDevnet => deploy_settlement_devnet(&rpc, chain_id),
+        SettlementDeployPlan::RealChain => deploy_settlement_real(&rpc, chain_id),
+    }
+}
+
+/// THE registration record the settlement deploy scripts read (`pw_reg.json`,
+/// `cli_reg_record.json`), as a value. ONE producer, so the two commands that stage a record cannot
+/// drift.
+///
+/// SECURITY (Option B — why there are TWO delegate-count fields, and why neither is named
+/// `delegate_count`): a registration record feeds two structurally different consumers, and a
+/// single field feeding both is precisely the defect this shape exists to prevent.
+///
+///   * `reg_delegate_count` — the L1 REGISTRATION RECORD's count. ALWAYS 0. L1 registration is
+///     cosigners-only: `ChannelRegStepCircuit` CONSTRAINS the `delegate_count` limb to zero
+///     (`assert_zero` in `ChannelRegStepTarget::new`), so a registration transaction carrying a
+///     nonzero one is UNPROVABLE — the reg-chain step can never fold it and the channel is stuck in
+///     the validity chain. Independently, the proving side has always built this preimage
+///     cosigner-only (`wallet_core::build_channel_withdrawal`), so a delegate-bearing registration
+///     never matched the proof either. `deploy-settlement`'s devnet path used to pass the LIVE
+///     snapshot count here (`wallet-live-work/chN/channel_snapshot.json` carries delegates), which
+///     is the conflation this function removes.
+///   * `active_delegate_count` — the LIVE count, for the `ChannelSettlementManager` ONLY. It is the
+///     B-2 delegate-close FLOOR (close PI limb 94 must be `>= activeDelegateCount`) and it sizes
+///     the delegate `MemberBinding[]` that writes `registeredRecipientOf` / `isMemberRecipient`.
+///     Zeroing it to "match" the registration would silently retire that fence and drop every
+///     delegate's recipient binding — a WEAKENED CHECK, not a cleanup.
+///
+/// The four arrays carry the ACTIVE participants, MEMBERS FIRST (`0..member_count`) then delegates
+/// (`member_count..member_count + active_delegate_count`). `RegRecordLib.sol` — the single reader
+/// on the Solidity side — hands `registerChannel` the leading cosigner slice with a CONSTANT zero
+/// delegate count, and hands the manager the whole set with `active_delegate_count`.
+fn settlement_reg_json(
+    channel_id: u32,
+    member_count: usize,
+    active_delegate_count: usize,
+    pk_gs: &[String],
+    pk_bs: &[String],
+    regev_pk_digests: &[String],
+    recipients: &[String],
+) -> serde_json::Value {
+    let active = member_count + active_delegate_count;
+    assert!(
+        pk_gs.len() == active
+            && pk_bs.len() == active
+            && regev_pk_digests.len() == active
+            && recipients.len() == active,
+        "settlement_reg_json: the arrays must hold member_count + active_delegate_count = {active} \
+         entries (members first), got {}/{}/{}/{}",
+        pk_gs.len(),
+        pk_bs.len(),
+        regev_pk_digests.len(),
+        recipients.len()
+    );
+    serde_json::json!({
+        "channel_id": channel_id,
+        "bp_member_slot": BP_SLOT,
+        "member_count": member_count,
+        // SECURITY: a LITERAL zero, never a variable. See the doc comment above.
+        "reg_delegate_count": 0,
+        "active_delegate_count": active_delegate_count,
+        "member_pk_gs": pk_gs,
+        "member_pk_bs": pk_bs,
+        "regev_pk_digests": regev_pk_digests,
+        "recipients": recipients,
+    })
+}
+
+/// WHAT THESE TESTS ARE FOR (security, not mechanics). The registration record is read by three
+/// deploy scripts, and until now ONE `delegate_count` field fed both the L1 registration and the
+/// settlement manager. Each direction of that conflation is a distinct defect, so there is one test
+/// per direction — a single test asserting "the two agree" would pass for either broken value.
+#[cfg(test)]
+mod settlement_reg_record_tests {
+    use super::*;
+
+    /// A record for a channel with `m` cosigners and `d` LIVE delegates.
+    fn sample(m: usize, d: usize) -> serde_json::Value {
+        let n = m + d;
+        let hex = |tag: &str, i: usize| format!("0x{tag}{i:062x}");
+        let pk_gs: Vec<String> = (0..n).map(|i| hex("a", i)).collect();
+        let pk_bs: Vec<String> = (0..n).map(|i| hex("b", i)).collect();
+        let regev: Vec<String> = (0..n).map(|i| hex("c", i)).collect();
+        let recipients: Vec<String> = (0..n)
+            .map(|i| format!("0x{:040x}", 0x4444_0000 + i))
+            .collect();
+        settlement_reg_json(7, m, d, &pk_gs, &pk_bs, &regev, &recipients)
+    }
+
+    /// DIRECTION 1 — the registration side must stay ZERO even when the live channel has delegates.
+    ///
+    /// SECURITY: `ChannelRegStepCircuit` constrains the registration record's `delegate_count` limb
+    /// to zero, so a nonzero value here produces an L1 registration NO reg-chain step can fold: the
+    /// channel becomes unprovable in the validity chain (and never matched the cosigner-only
+    /// preimage `build_channel_withdrawal` proves against in the first place). The live counts
+    /// below are the wallet demo's own (`wallet-live-work/ch7` runs with 2 delegates), which is
+    /// exactly the input that used to leak through.
+    #[test]
+    fn registration_delegate_count_is_always_zero() {
+        for (m, d) in [(3usize, 0usize), (3, 1), (3, 2), (2, 14), (16, 0)] {
+            let reg = sample(m, d);
+            assert_eq!(
+                reg["reg_delegate_count"], 0,
+                "the L1 registration record must be cosigner-only (member_count={m}, live \
+                 delegates={d}); a nonzero registration is unprovable by channel_reg_step"
+            );
+            assert_eq!(
+                reg["member_count"], m,
+                "member_count must be the cosigner count, unaffected by delegates"
+            );
+            // The legacy AMBIGUOUS field must be gone: a reader that still asks for it must fail
+            // loudly (`vm.parseJsonUint` reverts) instead of silently reading one count for both.
+            assert!(
+                reg.get("delegate_count").is_none(),
+                "the ambiguous `delegate_count` key must not come back — it is the conflation"
+            );
+        }
+    }
+
+    /// DIRECTION 2 — the manager side must NOT be zeroed to match the registration.
+    ///
+    /// SECURITY: `active_delegate_count` is the B-2 delegate-close FLOOR (close PI limb 94 must be
+    /// `>= activeDelegateCount`) and it sizes the delegate bindings that write
+    /// `registeredRecipientOf` / `isMemberRecipient`. Achieving the Option B invariant by lowering
+    /// this to zero would silently retire the fence added for the delegate-close threat model —
+    /// the exact "fix by weakening a check" this test exists to fail on.
+    #[test]
+    fn manager_delegate_count_keeps_the_live_value() {
+        for (m, d) in [(3usize, 1usize), (3, 2), (2, 14)] {
+            let reg = sample(m, d);
+            assert_eq!(
+                reg["active_delegate_count"], d,
+                "the manager's delegate count must stay the LIVE count (B-2 close floor + delegate \
+                 bindings), not the registration's zero"
+            );
+            // ...and the delegate KEY MATERIAL must still be in the record: the manager binds
+            // `pk_gs[member_count + i]` / `recipients[member_count + i]`. Truncating the arrays to
+            // the cosigner slice would leave the floor naming delegates it could not bind, and the
+            // manager constructor would revert `InvalidMemberCount`.
+            assert_eq!(
+                reg["member_pk_gs"].as_array().map(|a| a.len()),
+                Some(m + d),
+                "the arrays must carry the full ACTIVE set (members first, then delegates)"
+            );
+            assert_eq!(reg["recipients"].as_array().map(|a| a.len()), Some(m + d));
+        }
+    }
+
+    /// The two counts are INDEPENDENT fields, not one value written twice: a record with delegates
+    /// must show them disagreeing. If a future edit re-derives one from the other, this fails.
+    #[test]
+    fn the_two_counts_are_not_the_same_field() {
+        let reg = sample(3, 2);
+        assert_ne!(
+            reg["reg_delegate_count"], reg["active_delegate_count"],
+            "a delegate-bearing channel must register 0 while the manager keeps 2"
+        );
+    }
+}
+
+/// The anvil path, UNCHANGED: MockMleVerifier + ChannelSettlementVerifier +
+/// ChannelSettlementManager attached to the EXISTING rollup in `channel_backing.json`, with the
+/// LIVE channel member set from the snapshot (including any runtime-joined delegates).
+///
+/// SECURITY: `chain_id` is taken as an argument and re-checked below rather than assumed, so the
+/// mock stack cannot be installed off-devnet even if a future refactor mis-wires the dispatcher.
+fn deploy_settlement_devnet(rpc: &str, chain_id: u64) {
     let state = load_state();
     let (_, _, backing) = load_backing();
     let rollup = &backing.rollup;
@@ -4768,6 +5354,10 @@ fn cmd_deploy_settlement(args: &[String]) {
     let members = &state.snapshot.members;
     let record = &state.snapshot.record;
     let member_count = record.member_count as usize;
+    // The LIVE delegate count. It reaches the SETTLEMENT MANAGER only (its B-2 close floor and its
+    // delegate bindings) — never the L1 registration record, which `settlement_reg_json` pins to
+    // zero. See that function for the full argument; this is the path where the two used to be the
+    // same value.
     let delegate_count = record.delegate_count as usize;
     let active = member_count + delegate_count;
 
@@ -4788,27 +5378,20 @@ fn cmd_deploy_settlement(args: &[String]) {
         recipients.push(format!("0x{}", hex::encode(recipient_addr.to_bytes_be())));
     }
 
-    let reg = serde_json::json!({
-        "channel_id": channel_id,
-        "bp_member_slot": BP_SLOT,
-        "member_count": member_count,
-        "delegate_count": delegate_count,
-        "member_pk_gs": pk_gs,
-        "member_pk_bs": pk_bs,
-        "regev_pk_digests": regev_digests,
-        "recipients": recipients,
-    });
-    let contracts_dir = std::env::var("CONTRACTS_DIR").unwrap_or_else(|_| {
-        let exe = std::env::current_exe().unwrap_or_default();
-        let repo = exe
-            .ancestors()
-            .find(|p| p.join("contracts").is_dir())
-            .unwrap_or_else(|| {
-                die("cannot find contracts/ dir near the executable — set CONTRACTS_DIR=<path to the foundry contracts checkout>")
-            })
-            .to_path_buf();
-        repo.join("contracts").to_string_lossy().to_string()
-    });
+    let reg = settlement_reg_json(
+        channel_id,
+        member_count,
+        delegate_count,
+        &pk_gs,
+        &pk_bs,
+        &regev_digests,
+        &recipients,
+    );
+    // The pattern the five exit commands now share (F4): resolve from the executable, validate,
+    // announce. Kept identical here so there is ONE implementation rather than three copies.
+    let plan = SettlementDeployPlan::MockDevnet;
+    let contracts_dir = require_contracts_dir("deploy-settlement", &[plan.script()]);
+    let contracts_dir = contracts_dir.to_string_lossy().to_string();
     let data_path = format!("{contracts_dir}/test/data/pw_reg.json");
     fs::write(
         &data_path,
@@ -4817,16 +5400,31 @@ fn cmd_deploy_settlement(args: &[String]) {
     .unwrap_or_else(|e| die(format!("write {data_path}: {e}")));
     eprintln!("deploy-settlement: wrote {data_path}");
 
+    // SECURITY (defence in depth — the LAST gate before the mock stack is broadcast): the plan was
+    // already chosen from the chain id in `cmd_deploy_settlement`, and the script itself reverts
+    // unless `block.chainid == 31337`. This third check exists because the cost of the three being
+    // wrong together is total: `WalletMockMleVerifier.verify` returns true for ANY proof, so the
+    // close-intent verification on a stack deployed here is vacuous and every channel registered
+    // with it can be closed to an arbitrary state by anyone. A dispatcher mis-wired by a future
+    // refactor dies HERE rather than sending the transaction.
+    if chain_id != DEVNET_CHAIN_ID {
+        die(format!(
+            "refusing to deploy the MOCK settlement stack on chain id {chain_id}: \
+             {} installs an always-true MLE verifier and is devnet-only. \
+             This is the in-process backstop; reaching it means the plan selection was bypassed.",
+            SettlementDeployPlan::MockDevnet.script()
+        ));
+    }
     let deploy_key = deposit_key_env();
     let forge_out = Command::new("forge")
         .current_dir(&contracts_dir)
         .args([
             "script",
-            "script/DeployWalletSettlement.s.sol",
+            plan.script(),
             "--tc",
-            "DeployWalletSettlement",
+            plan.contract(),
             "--rpc-url",
-            &rpc,
+            rpc,
             "--private-key",
             &deploy_key,
             "--broadcast",
@@ -4878,6 +5476,378 @@ fn cmd_deploy_settlement(args: &[String]) {
         }),
     );
     println!("deploy-settlement OK: manager={manager}, verifier={verifier}, rollup={rollup}");
+}
+
+/// The checked-in fixtures `DeployCloseCli.s.sol` reads out of `contracts/test/data/`, besides the
+/// `cli_reg_record.json` this command stages itself. They carry the MLE/WHIR VERIFIER DATA of the
+/// validity, withdrawal, close, withdrawal-claim, post-close-claim and cancel-close circuits —
+/// channel- and member-independent, which is why a checked-in copy is the right source.
+///
+/// Checked up front so a missing one is an actionable error here, not a `vm.readFile` revert
+/// buried in forge output after the operator has already paid for a broadcast.
+const CLOSE_CLI_FIXTURES: [&str; 7] = [
+    "close_lifecycle_validity_mle.json",
+    "close_lifecycle.json",
+    "close_withdrawal_mle.json",
+    "close_intent_mle.json",
+    "withdrawal_claim_mle.json",
+    "post_close_claim_mle.json",
+    "cancel_close_mle.json",
+];
+
+/// The L1 signing key for a REAL-chain settlement deploy.
+///
+/// SECURITY: deliberately NOT `deposit_key_env()`, which falls back to the PUBLIC anvil dev key.
+/// The broadcasting EOA of this deploy becomes the rollup's `deployer` — the only address that may
+/// call `initializeWithdrawalVk`, `registerChannel` and `registerSettlementManager`, and (through
+/// the last of those) the only address that can decide which contract is allowed to authorize
+/// partial withdrawals. Signing a real-network deploy with a key printed in this repository and in
+/// Foundry's own documentation hands that authority to everyone. Unset is refused for the same
+/// reason: the fallback would have silently used exactly that key.
+///
+/// The value is returned for `cast`/`forge --private-key` and is never logged.
+fn real_chain_deploy_key(chain_id: u64) -> String {
+    let key = std::env::var("INTMAX_DEPOSIT_KEY").unwrap_or_default();
+    let key = key.trim().to_string();
+    if key.is_empty() {
+        die(format!(
+            "INTMAX_DEPOSIT_KEY is not set, and chain id {chain_id} is not the local devnet.\n\
+             `deploy-settlement` will not fall back to the public anvil dev key on a real chain: \
+             the broadcaster becomes the rollup's deployer (the only address that can set the \
+             withdrawal VK, register the channel and register the settlement manager).\n\
+             Set INTMAX_DEPOSIT_KEY to the funded deployer key (the shell expands it; never echo \
+             or commit it) and re-run."
+        ));
+    }
+    if key.eq_ignore_ascii_case(ANVIL_DEV_KEY) {
+        die(format!(
+            "INTMAX_DEPOSIT_KEY is the PUBLIC anvil dev key and chain id {chain_id} is not the \
+             local devnet — refusing.\n\
+             That key is published in this repository and in Foundry's documentation; using it \
+             here would give any reader the rollup deployer role (VK initialization, \
+             registerChannel, registerSettlementManager)."
+        ));
+    }
+    key
+}
+
+/// `cast call <to> <sig> [args…]`, trimmed. Every read-back below goes through this.
+fn cast_call(rpc: &str, to: &str, sig: &str, args: &[&str]) -> String {
+    let mut argv: Vec<&str> = vec!["call", to, sig];
+    argv.extend_from_slice(args);
+    argv.extend_from_slice(&["--rpc-url", rpc]);
+    cast(&argv).trim().to_string()
+}
+
+/// Read back ONE boolean latch, refusing anything that is not exactly `true`.
+///
+/// SECURITY / LIVENESS: fail-closed on purpose. `cast` decodes `(bool)` to `true`/`false`; any
+/// other output (an RPC error page, a changed encoder, a wrong address) is treated as NOT set,
+/// because the failure mode we are guarding against — announcing a stack whose latch is missing —
+/// is precisely a user losing an exit path they were told they had.
+fn require_true(rpc: &str, to: &str, sig: &str, what: &str) {
+    let got = cast_call(rpc, to, sig, &[]);
+    if got != "true" {
+        die(format!(
+            "post-deploy check FAILED: {to} `{sig}` returned {got:?}, expected \"true\".\n\
+             {what}\n\
+             The stack just deployed is NOT usable end to end; refusing to record it in \
+             settlement.json (an address recorded here is one an operator would go on to fund)."
+        ));
+    }
+}
+
+/// Deploy a REAL settlement stack (real MLE/WHIR verifier data for all four settlement statements)
+/// via `DeployCloseCli.s.sol`, after checking every precondition a real deployment needs.
+///
+/// SCOPE — what this path does and does NOT do (verified against `DeployCloseCli.s.sol`, not
+/// assumed):
+///   * It deploys a NEW `IntmaxRollup` together with the settlement stack, because that is what the
+///     only real-VK script does. It cannot attach a settlement stack to an EXISTING rollup — no
+///     script in `contracts/script/` does that with real VKs (`DeployWalletSettlement.s.sol` does,
+///     but only with mock verifiers, and is devnet-gated). Consequence: on a real chain this
+///     command must run BEFORE `setup-backing`, and it REFUSES to run once a backing exists,
+///     because the deposit backing the channel would be left on the previous rollup while the
+///     manager, the channel registration and the exit path all lived on the new one.
+///   * What it does install (all re-read from chain below before this returns): the validity VK +
+///     genesis, the KZG satellite, the block producer, the rollup's WITHDRAWAL VK, the four
+///     settlement VKs (close, withdrawal-claim, post-close-claim, cancel-close), `registerChannel`
+///     for THIS channel id, and `registerSettlementManager` — the last of which is what
+///     `pw-finalize` needs and what every pre-2026-08-13 real deployment lacked.
+fn deploy_settlement_real(rpc: &str, chain_id: u64) {
+    let plan = SettlementDeployPlan::RealChain;
+    let channel_id = channel_id_env();
+
+    // ── Preconditions. ALL of them run before anything is written or broadcast, so a real-chain
+    //    deploy fails on a message an operator can act on rather than on raw forge output. ──
+
+    if std::path::Path::new("settlement.json").exists() {
+        die(
+            "settlement.json already exists in this working directory — refusing to deploy a \
+             SECOND settlement stack.\n\
+             On a real chain a second run would deploy a new rollup + manager and leave the \
+             channel's funds and registration on the first one. If you really intend to replace \
+             it, move settlement.json aside deliberately.",
+        );
+    }
+
+    // The orphan guard, FIRST because it is about this channel's money rather than about the
+    // host's provisioning. `DeployCloseCli.s.sol` always deploys its OWN rollup, so running it for
+    // a channel that is ALREADY backed would register the channel + manager on a rollup that holds
+    // none of its money while the deposit stayed on the old one. Both halves would look healthy in
+    // isolation; the user would only find out at `withdraw`, after the proofs.
+    if std::path::Path::new(BACKING_FILE).exists() {
+        let backed: serde_json::Value = read_json(BACKING_FILE);
+        let backed_rollup = backed["rollup"].as_str().unwrap_or("").to_string();
+        die(format!(
+            "this channel is already backed (rollup {backed_rollup}) and the only real-VK deploy \
+             script available, {}, deploys its OWN rollup — refusing.\n\
+             Running it now would put the channel registration, the settlement manager and the \
+             exit path on a NEW rollup while the deposit stayed on {backed_rollup}: the funds \
+             would be unreachable through this stack.\n\
+             Correct order on a real chain: `deploy-settlement <rpc>` FIRST (in an empty channel \
+             work dir), then `setup-backing <rpc> <the rollup it prints>`, then `init`.\n\
+             Attaching a real settlement stack to an ALREADY-DEPLOYED rollup needs a forge script \
+             that does not exist yet (registerChannel + ChannelSettlementVerifier with the four \
+             real VKs + ChannelSettlementManager + registerSettlementManager, against an existing \
+             rollup address). Reported, not silently worked around.",
+            plan.script()
+        ));
+    }
+
+    let contracts_dir = require_contracts_dir("deploy-settlement", &[plan.script()]);
+    let missing: Vec<&str> = CLOSE_CLI_FIXTURES
+        .iter()
+        .copied()
+        .filter(|f| !contracts_dir.join("test").join("data").join(f).is_file())
+        .collect();
+    if !missing.is_empty() {
+        die(format!(
+            "`deploy-settlement` (real chain): {} is missing the verifier-data fixtures \
+             {} reads: {}.\n\
+             These carry the circuits' MLE/WHIR verifier data; without them the settlement VKs \
+             cannot be keyed and the channel could be closed by nobody.",
+            contracts_dir.join("test/data").display(),
+            plan.script(),
+            missing.join(", ")
+        ));
+    }
+
+    // FRAUD_TREASURY is a CONSTRUCTOR argument of IntmaxRollup and the script hard-reverts without
+    // it off-devnet. Checked here so the operator sees the name of the variable, not a decoded
+    // revert string after gas has been spent on the simulation.
+    let treasury_raw = std::env::var("FRAUD_TREASURY").unwrap_or_default();
+    let treasury = Address::from_hex(treasury_raw.trim()).unwrap_or_else(|_| {
+        die(format!(
+            "FRAUD_TREASURY must be a 20-byte hex address for a real-chain deploy (got {:?}).\n\
+             It is the IntmaxRollup constructor's fraud-proof treasury and has no default off \
+             chain id {DEVNET_CHAIN_ID}; `{}` reverts without it.",
+            treasury_raw.trim(),
+            plan.script()
+        ))
+    });
+    if treasury == Address::default() {
+        die(
+            "FRAUD_TREASURY is the zero address — refusing (the script requires a real treasury off-devnet).",
+        );
+    }
+
+    let deploy_key = real_chain_deploy_key(chain_id);
+
+    // SECURITY: the member set this deploy REGISTERS on L1 is derived from the co-signer key
+    // provenance. Under `INTMAX_INSECURE_DETERMINISTIC_KEYS` every one of those members' SECRET
+    // keys is computable by anyone who can read this public repository — i.e. anyone could produce
+    // the N-of-N signatures a close needs and take the channel's funds. That is fund-fatal on a
+    // real chain and merely convenient on anvil, so it is refused HERE rather than at genesis.
+    if matches!(key_provenance(), KeyProvenance::InsecureDeterministic) {
+        die(format!(
+            "{INSECURE_KEYS_ENV} is set and chain id {chain_id} is not the local devnet — refusing \
+             to register a channel whose co-signer SECRET keys are publicly derivable.\n\
+             Provision {COSIGNER_KEYFILE_ENV} (a 0600 file outside the repo) and re-run; see \
+             doc/docs/deploy-runbook.md."
+        ));
+    }
+
+    // ── Stage the ONE input the script takes that is not checked in. ──
+    //
+    // LIVENESS: `DeployCloseCli.s.sol` reads `test/data/cli_reg_record.json`. Only the Rust E2Es
+    // ever staged it (they copy it after `export-reg-record` runs in the repo root); no product
+    // driver did, so the real script was unreachable from the CLI at all. Same record, same single
+    // derivation — `build_reg_record()` is what `export-reg-record` itself writes.
+    let reg = build_reg_record();
+    let data_dir = contracts_dir.join("test").join("data");
+    let reg_path = data_dir.join("cli_reg_record.json");
+    fs::write(
+        &reg_path,
+        serde_json::to_string_pretty(&reg).unwrap_or_else(|e| die(e)),
+    )
+    .unwrap_or_else(|e| die(format!("write {}: {e}", reg_path.display())));
+    eprintln!(
+        "[deploy-settlement] staged {} (channel {channel_id}, {} registered members, treasury {})",
+        reg_path.display(),
+        reg["member_count"],
+        treasury.to_hex()
+    );
+
+    let contracts_dir = contracts_dir.to_string_lossy().to_string();
+    let forge_out = Command::new("forge")
+        .current_dir(&contracts_dir)
+        .args([
+            "script",
+            plan.script(),
+            "--tc",
+            plan.contract(),
+            "--rpc-url",
+            rpc,
+            "--private-key",
+            &deploy_key,
+            "--broadcast",
+            // Sequential broadcast: the deploy's transactions are dependent (VK latches and
+            // registrations target contracts created earlier in the same run), and a public
+            // network can reorder or drop a parallel batch.
+            "--slow",
+            "--code-size-limit",
+            "50000",
+        ])
+        .env("FRAUD_TREASURY", treasury_raw.trim())
+        .output()
+        .unwrap_or_else(|e| die(format!("forge script failed to start: {e}")));
+    let out = String::from_utf8_lossy(&forge_out.stdout);
+    let err = String::from_utf8_lossy(&forge_out.stderr);
+    if !forge_out.status.success() {
+        die(format!(
+            "forge deploy-settlement ({}) FAILED:\nstdout: {out}\nstderr: {err}",
+            plan.script()
+        ));
+    }
+
+    let parse = |tag: &str| -> String {
+        out.lines()
+            .chain(err.lines())
+            .find_map(|l| {
+                l.contains(tag)
+                    .then(|| l.split(tag).nth(1).unwrap_or("").trim().to_string())
+            })
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| {
+                die(format!(
+                    "could not parse {tag} from forge output:\n{out}\n{err}"
+                ))
+            })
+    };
+    let rollup = parse("IntmaxRollup:");
+    let verifier = parse("SettlementVerifier:");
+    let manager = parse("CLOSE_MANAGER_ADDRESS:");
+
+    // ── Read the whole exit checklist back FROM THE CHAIN. ──
+    //
+    // SECURITY / LIVENESS: not a duplicate of the script's own `require`s. This is the CLI
+    // asserting, against the deployed bytecode, that every latch an honest exit depends on is set
+    // BEFORE it records an address an operator will fund. Each item below was, at some point in
+    // this repository's history, exactly the thing that was missing on a real deployment while the
+    // deploy "succeeded": the withdrawal VK (money in, no money out), `registerSettlementManager`
+    // (pw-finalize reverts after the user waited out the challenge period), and the
+    // cancel-close / post-close-claim VKs (audit622 A-M4).
+    require_true(
+        rpc,
+        &rollup,
+        "withdrawalVkInitialized()(bool)",
+        "Without the rollup's withdrawal VK, `withdrawNative`/`withdrawERC20` revert \
+         WithdrawalVkNotSet() forever and the rollup can accept deposits it can never pay out.",
+    );
+    let registered = cast_call(
+        rpc,
+        &rollup,
+        "isRegisteredSettlementManager(address)(bool)",
+        &[&manager],
+    );
+    if registered != "true" {
+        die(format!(
+            "post-deploy check FAILED: rollup {rollup} does not list manager {manager} as a \
+             registered settlement manager (got {registered:?}).\n\
+             `finalizePartialWithdrawal` would revert NotRegisteredSettlementManager() AFTER the \
+             user submitted an intent and waited out the full challenge period."
+        ));
+    }
+    let commitment = cast_call(
+        rpc,
+        &rollup,
+        "channelMemberSetCommitment(uint32)(bytes32)",
+        &[&channel_id.to_string()],
+    );
+    if commitment
+        .trim_start_matches("0x")
+        .trim_matches('0')
+        .is_empty()
+    {
+        die(format!(
+            "post-deploy check FAILED: channel {channel_id} has no member-set commitment on rollup \
+             {rollup} (got {commitment:?}) — registerChannel did not take effect for THIS channel \
+             id, so no close proof for it could ever verify."
+        ));
+    }
+    for (sig, what) in [
+        (
+            "closeVkInitialized()(bool)",
+            "Without the close VK, `submitCloseIntent` reverts CloseVkNotSet(): the channel can never be closed.",
+        ),
+        (
+            "cancelCloseVkInitialized()(bool)",
+            "Without the cancel-close VK, `cancelClose` reverts CancelCloseVkNotSet(): a stale or hostile close intent can never be un-frozen (audit622 A-M4).",
+        ),
+        (
+            "withdrawalClaimVkInitialized()(bool)",
+            "Without the withdrawal-claim VK, `submitWithdrawalClaim` reverts WithdrawalClaimVkNotSet(): members can close the channel and then never collect.",
+        ),
+        (
+            "postCloseClaimVkInitialized()(bool)",
+            "Without the post-close-claim VK, `post-close-claim` reverts PostCloseClaimVkNotSet(): a member who missed the close can never claim.",
+        ),
+    ] {
+        require_true(rpc, &verifier, sig, what);
+    }
+    let bound_verifier = cast_call(rpc, &manager, "verifier()(address)", &[]);
+    if !bound_verifier.eq_ignore_ascii_case(&verifier) {
+        die(format!(
+            "post-deploy check FAILED: manager {manager} is bound to verifier {bound_verifier}, \
+             not to the {verifier} this run just keyed. The VKs checked above would gate a \
+             DIFFERENT contract than the one the manager consults."
+        ));
+    }
+    let bound_channel = cast_call(rpc, &manager, "channelId()(bytes4)", &[]);
+    let expect_channel = format!("0x{channel_id:08x}");
+    if !bound_channel.eq_ignore_ascii_case(&expect_channel) {
+        die(format!(
+            "post-deploy check FAILED: manager {manager} is bound to channel {bound_channel}, but \
+             this working directory operates channel {channel_id} ({expect_channel}). \
+             INTMAX_CHANNEL and the deployed manager disagree."
+        ));
+    }
+
+    // Reported, not asserted: the floor is enforced by the manager's own constructor off-devnet
+    // (`CHALLENGE_PERIOD_SECS_FLOOR`), so re-checking it here would duplicate a gate rather than
+    // add one — but an operator must be told, because it is the delay before `settle` can succeed.
+    let challenge_period = cast_call(rpc, &manager, "challengePeriod()(uint64)", &[]);
+
+    write_json(
+        "settlement.json",
+        &serde_json::json!({
+            "manager": manager,
+            "verifier": verifier,
+            "rollup": rollup,
+        }),
+    );
+    println!(
+        "deploy-settlement OK (real chain {chain_id}): manager={manager}, verifier={verifier}, \
+         rollup={rollup}\n\
+         Verified on-chain: withdrawal VK set, all four settlement VKs set, channel {channel_id} \
+         registered, manager registered as a settlement authorizer.\n\
+         NEXT: this rollup is NEW and holds no money yet. Run\n\
+         \x20 INTMAX_CHANNEL={channel_id} INTMAX_DEPOSIT_KEY=… channel_member setup-backing {rpc} {rollup}\n\
+         then `init`. Do NOT point this channel at a different rollup afterwards.\n\
+         NOTE: this manager's challenge period is {challenge_period} seconds (read back from the \
+         chain) — off-devnet a close takes that long to finalize, by design."
+    );
 }
 
 /// `keccak256("Deposited(uint64,address,bytes32,uint32,uint256,bytes32,bytes32)")` — topic0 of
@@ -5427,6 +6397,160 @@ fn cmd_cosign_l1_deposit_import(args: &[String]) {
     );
 }
 
+/// PRE-FLIGHT GUARD for `pw-submit` — the last point at which a partial withdrawal can still be
+/// abandoned for free.
+///
+/// WHY IT EXISTS. `submitPartialWithdrawalIntent` consumes the channel's single-use chain key
+/// `keccak(channelId, finalSettledTxChain)` into `usedPartialWithdrawalChains`
+/// (`contracts/src/ChannelSettlementManager.sol:1204-1205`, set at `:1250`) and there is no
+/// un-consume. The channel-side debit already happened at `cosign-burn-send`. So writing an
+/// authorization that no provable leaf can satisfy does not merely fail — it strands the burned
+/// value forever. The irreversible step must therefore be gated on the authorization being
+/// matchable, not merely well-formed.
+///
+/// WHAT IT PROVES. The tuple `(recipient_pk_g, token_index, amount, aux_data, transfer_index=0,
+/// tx_nonce, channel_id)` that produced `withdrawal.nullifier` is rebuilt into the burn's 1-tx
+/// `TxV2` tree and its root compared against `head.h2_tag` — the value the N-of-N co-signers
+/// signed (`h2_tag` is inside the IMCH preimage, `src/common/channel.rs:598`) and which
+/// `state_update_verifier.rs:612-616` pins to the small block's `tx_tree_root`. A
+/// `single_withdrawal` proof verifies its transfer against exactly that root: merkle membership in
+/// `tx.transfer_tree_root` with `transfer_index` asserted zero
+/// (`src/circuits/balance/send_tx_circuit.rs:277-279`), the TxV2 at index `channel_id`, and
+/// `tx_v2.nonce == tx.nonce` (`single_withdrawal_circuit.rs:501`). So a match here means the very
+/// fields the nullifier was computed from are the fields any provable leaf must carry.
+///
+/// WHY IT CANNOT PRODUCE A FALSE PASS. It is not a self-comparison: `h2_tag` is an independently
+/// produced, N-of-N-signed commitment that this process did not compute, and the reconstruction
+/// goes through the SAME `inter_channel_base_transfer` / `inter_channel_tx_v2` used to build the
+/// original (so a passing comparison is a real preimage match, not a coincidence of two
+/// re-derivations of the same wrong formula). Passing with a wrong tuple requires a Poseidon
+/// collision. It fails closed in every other direction: any missing field, any mismatch, any
+/// state that has moved past the burn (H2 and the chain both change on every send) aborts before
+/// `forge` is invoked.
+///
+/// WHAT IT DOES **NOT** PROVE — stated so nobody reads more into a pass than is there: that a base
+/// -layer withdrawal proof can actually be produced today. Provability additionally needs the burn
+/// tx settled in a finalized block and the base account's sent-tx slot at index `nonce` empty
+/// (`src/circuits/balance/spend_circuit.rs:387-395`); neither is checkable from channel state
+/// alone, and `cmd_partial_withdraw` does not exist yet (`doc/tasks/todo.md:90`). This guard
+/// removes the *derivation* mismatch as a stranding cause; it does not make the payout leg exist.
+#[allow(clippy::too_many_arguments)]
+fn preflight_burn_authorization_is_matchable(
+    burn: &serde_json::Value,
+    head: &ChannelState,
+    channel_id: ChannelId,
+    withdrawal: &Withdrawal,
+    tx_leaf: Bytes32,
+    pre_burn_chain: Bytes32,
+    receiver_pk_g: Bytes32,
+    burn_amount: u64,
+    tx_nonce: u32,
+) {
+    let refuse = |why: String| -> ! {
+        die(format!(
+            "pw-submit PRE-FLIGHT REFUSED — {why}\n\
+             Nothing was submitted, so the channel's single-use partial-withdrawal chain key is \
+             still available and this burn can still be withdrawn once the mismatch is resolved. \
+             Submitting anyway would consume that key against an authorization no withdrawal \
+             proof could ever match, stranding the burned funds permanently."
+        ))
+    };
+
+    // (0) A partial withdrawal is precisely a leaf with `auxData != 0` — that is the condition
+    // under which `withdrawNative`/`withdrawERC20` demand the authorization as a second factor
+    // (`contracts/src/IntmaxRollup.sol:1512`, `:1560`). A zero aux_data leaf needs no
+    // authorization at all, so authorizing one is meaningless and burns the chain key for nothing.
+    if tx_leaf == Bytes32::default() {
+        refuse("the burn's aux_data (tx leaf) is zero, so this is not a partial withdrawal".into());
+    }
+
+    // (1) The head must still BE the post-burn state. Both of these move on every subsequent
+    // channel transition, and the manager recomputes the chain fold itself
+    // (`ChannelSettlementManager.sol:1143-1146`), so a stale head is an unmatchable intent.
+    let expected_chain = settled_tx_chain_push(pre_burn_chain, tx_leaf);
+    if expected_chain != head.balance_state.settled_tx_chain {
+        refuse(format!(
+            "push(pre_burn_chain, tx_leaf) = {} but the channel head's settled_tx_chain is {} — \
+             the channel has moved past this burn (or last_burn.json belongs to another burn)",
+            expected_chain.to_hex(),
+            head.balance_state.settled_tx_chain.to_hex()
+        ));
+    }
+
+    // (2) THE LOAD-BEARING CHECK: the nullifier's own preimage must reproduce the co-signed H2.
+    let base_transfer =
+        inter_channel_base_transfer(receiver_pk_g, withdrawal.token_index, burn_amount, tx_leaf);
+    let (_, tx_v2_tree) = inter_channel_tx_v2(channel_id, &base_transfer, tx_nonce);
+    let rebuilt_h2: Bytes32 = tx_v2_tree.get_root().into();
+    if rebuilt_h2 != head.h2_tag {
+        refuse(format!(
+            "the transfer the nullifier commits to does not reproduce the co-signed h2_tag: \
+             rebuilt H2 = {}, signed h2_tag = {}. The authorization would name a leaf the \
+             co-signed burn tx does not contain",
+            rebuilt_h2.to_hex(),
+            head.h2_tag.to_hex()
+        ));
+    }
+
+    // (3) Cross-check against what `cosign-burn-send` recorded at burn time, when present. Both
+    // sides run the SAME `burn_withdrawal_leaf`, so a disagreement is not drift — it means the
+    // artefact was edited between the two steps (a coordinator is untrusted for integrity, T7).
+    // Absent fields mean a pre-2026-08-13 `last_burn.json`; checks (1) and (2) still bind.
+    let recorded = |k: &str| burn[k].as_str().map(|s| s.to_string());
+    if let Some(s) = recorded("tx_leaf") {
+        let v = Bytes32::from_hex(&s).unwrap_or_else(|e| die(format!("parse tx_leaf: {e:?}")));
+        if v != tx_leaf {
+            refuse(format!(
+                "last_burn.json tx_leaf {} != the one recomputed from its own ciphertext digests {}",
+                v.to_hex(),
+                tx_leaf.to_hex()
+            ));
+        }
+    }
+    if let Some(v) = burn["channel_id"].as_u64() {
+        if v != channel_id.as_u64() {
+            refuse(format!(
+                "last_burn.json channel_id {v} != this CLI's channel {}",
+                channel_id.as_u64()
+            ));
+        }
+    }
+    if let Some(v) = burn["tx_nonce"].as_u64() {
+        if v != tx_nonce as u64 {
+            refuse(format!(
+                "last_burn.json tx_nonce {v} != the head's small_block_number {tx_nonce}"
+            ));
+        }
+    }
+    if let Some(s) = recorded("withdrawal_nullifier") {
+        let v = Bytes32::from_hex(&s).unwrap_or_else(|e| die(format!("parse nullifier: {e:?}")));
+        if v != withdrawal.nullifier {
+            refuse(format!(
+                "last_burn.json nullifier {} != the one derived here {}",
+                v.to_hex(),
+                withdrawal.nullifier.to_hex()
+            ));
+        }
+    }
+    if let Some(s) = recorded("withdrawal_recipient") {
+        let v = Address::from_hex(&s).unwrap_or_else(|e| die(format!("parse recipient: {e:?}")));
+        if v != withdrawal.recipient {
+            refuse(format!(
+                "last_burn.json recipient {} != the one derived here {}",
+                v.to_hex(),
+                withdrawal.recipient.to_hex()
+            ));
+        }
+    }
+
+    eprintln!(
+        "pw-submit pre-flight OK: nullifier {} is the one a provable leaf carries — its preimage \
+         reproduces the co-signed h2_tag {} and the chain fold matches the head.",
+        withdrawal.nullifier.to_hex(),
+        head.h2_tag.to_hex()
+    );
+}
+
 /// Submit a partial withdrawal intent on-chain. Reads the burn metadata from `last_burn.json`
 /// (written by `cosign-burn-send`) and the settlement addresses from `settlement.json`.
 /// Usage:
@@ -5495,29 +6619,84 @@ fn cmd_pw_submit(args: &[String]) {
         receiver_delta_digest,
     );
 
-    let withdrawal_addr_hex = std::env::var("PW_RECIPIENT")
-        .unwrap_or_else(|_| die("PW_RECIPIENT env var required (L1 withdrawal address)"));
-    let withdrawal_addr = Address::from_hex(&withdrawal_addr_hex)
-        .unwrap_or_else(|e| die(format!("parse withdrawal address: {e:?}")));
-
-    let nullifier = {
-        let mut data = Vec::with_capacity(32 + 32);
-        data.extend_from_slice(&tx_leaf.to_bytes_be());
-        data.extend_from_slice(&pre_burn_chain.to_bytes_be());
-        let hash = keccak_hash::keccak(&data);
-        Bytes32::from_bytes_be(hash.as_bytes()).expect("nullifier from keccak")
-    };
     // Multitoken §N: the burned BASE token_index recorded by cosign-burn-send (default 0 for
     // legacy last_burn.json files). Bound into the IMPW authDigest, so the L1 leg pays the
     // burned asset (withdrawNative for 0, withdrawERC20 otherwise).
     let burn_token_index: u32 = burn["token_index"].as_u64().unwrap_or(0) as u32;
-    let withdrawal = Withdrawal {
-        recipient: withdrawal_addr,
-        token_index: burn_token_index,
-        amount: U256::from(burn_amount),
-        nullifier,
-        aux_data: tx_leaf,
-    };
+
+    // ── The withdrawal leaf: DERIVED, never invented ────────────────────────────────────────
+    //
+    // SECURITY (2026-08-13, the fund-stranding fix). This used to compute
+    //     nullifier = keccak(tx_leaf ‖ pre_burn_settled_tx_chain)
+    // — a formula that exists nowhere else in the system. A provable withdrawal leaf carries
+    // `SettledTransfer::nullifier()` (Poseidon over the base transfer + channel id +
+    // transfer_index + tx nonce; `src/circuits/withdraw/single_withdrawal_circuit.rs:376-390`
+    // natively, `:513-525` in-circuit). Different hash family, different preimage: the two could
+    // NEVER coincide, so `submitPartialWithdrawalIntent` recorded an authorization that no proof
+    // could ever match — while irreversibly consuming the channel's single-use chain key
+    // (`usedPartialWithdrawalChains`, `contracts/src/ChannelSettlementManager.sol:1204-1205`,
+    // `:1250`) for a burn whose channel-side debit had already happened. Fail-closed on theft,
+    // but it STRANDED the burned value permanently.
+    //
+    // The leaf now comes from `burn_withdrawal_leaf`, the one shared derivation, which calls the
+    // same `SettledTransfer::nullifier()` the circuit calls. Every input is settlement-independent
+    // (F-WD-2), so no circuit, PI or VK change is required to know the nullifier at burn time.
+    let channel_id = state.snapshot.record.channel_id;
+    // The burn's `TxV2.nonce` is `prev.small_block_number + 1`, i.e. exactly the small block
+    // number of the post-burn head. The H2 guard below re-derives H2 from this nonce and compares
+    // it against the co-signed `h2_tag`, so a head that has moved past the burn cannot slip
+    // through with a stale or advanced nonce.
+    let tx_nonce = u32::try_from(head.small_block_number).unwrap_or_else(|_| {
+        die(format!(
+            "small_block_number {} does not fit in the tx nonce (u32)",
+            head.small_block_number
+        ))
+    });
+    let withdrawal = burn_withdrawal_leaf(
+        channel_id,
+        receiver_pk_g,
+        burn_token_index,
+        burn_amount,
+        tx_leaf,
+        tx_nonce,
+    )
+    .unwrap_or_else(|e| die(format!("derive burn withdrawal leaf: {e:?}")));
+    let withdrawal_addr = withdrawal.recipient;
+    let nullifier = withdrawal.nullifier;
+
+    preflight_burn_authorization_is_matchable(
+        &burn,
+        head,
+        channel_id,
+        &withdrawal,
+        tx_leaf,
+        pre_burn_chain,
+        receiver_pk_g,
+        burn_amount,
+        tx_nonce,
+    );
+
+    // `PW_RECIPIENT` is no longer an INPUT — the paid address is fixed at burn time
+    // (`build_burn_send_token` bakes `ADDRESS_TAG(withdrawal_l1_address)` into the base transfer's
+    // recipient, `src/wallet_core.rs:2371`) and is recovered from it above. It survives only as an
+    // ASSERTION: if the caller (relay/coordinator) states an address, it must be the one the burn
+    // actually pays, or we refuse BEFORE the chain key is spent. Previously a mismatched
+    // `PW_RECIPIENT` silently produced an unmatchable authorization and stranded the burn.
+    if let Ok(want_hex) = std::env::var("PW_RECIPIENT") {
+        let want = Address::from_hex(&want_hex)
+            .unwrap_or_else(|e| die(format!("parse PW_RECIPIENT: {e:?}")));
+        if want != withdrawal_addr {
+            die(format!(
+                "PW_RECIPIENT {} != the L1 address this burn pays ({}) — REFUSING to submit. \
+                 Submitting anyway would consume the channel's single-use partial-withdrawal \
+                 chain key on an authorization no withdrawal proof could ever satisfy, stranding \
+                 the burned funds permanently.",
+                want.to_hex(),
+                withdrawal_addr.to_hex()
+            ));
+        }
+    }
+
     let auth_digest = partial_withdrawal_auth_digest(&withdrawal);
     eprintln!("pw-submit: authDigest = {}", auth_digest.to_hex());
 
@@ -5549,17 +6728,10 @@ fn cmd_pw_submit(args: &[String]) {
         "withdrawal_nullifier": nullifier.to_hex(),
         "withdrawal_aux_data": tx_leaf.to_hex(),
     });
-    let contracts_dir = std::env::var("CONTRACTS_DIR").unwrap_or_else(|_| {
-        let exe = std::env::current_exe().unwrap_or_default();
-        let repo = exe
-            .ancestors()
-            .find(|p| p.join("contracts").is_dir())
-            .unwrap_or_else(|| {
-                die("cannot find contracts/ dir near the executable — set CONTRACTS_DIR=<path to the foundry contracts checkout>")
-            })
-            .to_path_buf();
-        repo.join("contracts").to_string_lossy().to_string()
-    });
+    // Same shared resolution as the exit commands (F4).
+    let contracts_dir =
+        require_contracts_dir("pw-submit", &["script/SubmitPartialWithdrawal.s.sol"]);
+    let contracts_dir = contracts_dir.to_string_lossy().to_string();
     let data_path = format!("{contracts_dir}/test/data/pw_submit.json");
     fs::write(
         &data_path,
@@ -5740,11 +6912,19 @@ fn cmd_pw_finalize(args: &[String]) {
     // `cmd_partial_withdraw`, which was never implemented (doc/tasks/todo.md:90).
     //
     // DELIBERATELY NOT rerouted to `withdrawNative` here: without the base-layer proof that call
-    // would fail with an opaque proof-binding error and hide the real cause. Two known blockers
-    // beyond the missing command: this CLI invents `nullifier = keccak(tx_leaf ‖ pre_burn_chain)`
-    // (see `cmd_pw_submit`) whereas a provable leaf must use `settled_transfer.nullifier()`; and
-    // base `Transfer.amount == the channel-layer debit` is still only a co-signer assumption
-    // (audit F-AUX-1), not an in-circuit equality.
+    // would fail with an opaque proof-binding error and hide the real cause.
+    //
+    // Blocker status:
+    //   • NULLIFIER — FIXED (2026-08-13). `cmd_pw_submit` used to invent
+    //     `nullifier = keccak(tx_leaf ‖ pre_burn_chain)`, which no provable leaf could ever carry;
+    //     that authorization was unmatchable and the burn was stranded once the chain key was
+    //     consumed. It now derives the leaf with the shared `wallet_core::burn_withdrawal_leaf`,
+    //     which calls the same `SettledTransfer::nullifier()` the withdrawal circuit calls, and
+    //     refuses to submit unless the leaf's own preimage reproduces the co-signed `h2_tag`.
+    //   • AMOUNT — STILL OPEN. Base `Transfer.amount == the channel-layer debit` is only a
+    //     co-signer assumption (audit F-AUX-1), not an in-circuit or on-chain equality. See
+    //     doc/tasks/partial-withdrawal-payout-design.md §1.1 / §2.
+    //   • The proving command `cmd_partial_withdraw` still does not exist.
     let recipient = auth["withdrawal_recipient"].as_str().unwrap_or("<unknown>");
     let amount = auth["withdrawal_amount"].as_u64().unwrap_or(0);
     eprintln!(
@@ -5866,5 +7046,136 @@ mod falcon_identity_tests {
                 );
             }
         }
+    }
+}
+
+/// THE chain-id selection rule for `deploy-settlement`, pinned.
+///
+/// WHAT THESE TESTS ARE FOR (security, not mechanics): `DeployWalletSettlement.s.sol` installs a
+/// `WalletMockMleVerifier` whose `verify` returns true for ANY proof. A settlement stack built on
+/// it has a vacuous close-proof check, so anyone can close any channel registered with it to any
+/// state and take the funds. Until now `cmd_deploy_settlement` named that script unconditionally
+/// while `api/routes/*.js` invoked the command with whatever `RPC` the deployment was configured
+/// with — i.e. the product's own API would have installed it on a real network. The tests below
+/// exist to fail if that door is ever reopened, including through an "unknown chain" default.
+#[cfg(test)]
+mod deploy_plan_tests {
+    use super::*;
+
+    /// The mock script may be selected for EXACTLY one chain id, and it must be anvil's.
+    #[test]
+    fn only_the_devnet_chain_id_selects_the_mock_deployer() {
+        assert_eq!(
+            settlement_deploy_plan(DEVNET_CHAIN_ID),
+            SettlementDeployPlan::MockDevnet,
+            "anvil must keep the devnet stack the local E2Es depend on"
+        );
+        assert_eq!(DEVNET_CHAIN_ID, 31337, "anvil's chain id");
+    }
+
+    /// Boundary + real-network + nonsense chain ids: every one of them must get the REAL-VK
+    /// script. `0` and `u64::MAX` are in here deliberately — an id we cannot interpret must fail
+    /// towards the safe stack, never towards the mock one.
+    #[test]
+    fn every_other_chain_id_selects_the_real_deployer() {
+        let ids = [
+            0u64,     // unset / unreadable-looking
+            1,        // mainnet
+            10,       // optimism
+            56,       // bnb
+            100,      // gnosis
+            137,      // polygon
+            8453,     // base
+            42161,    // arbitrum
+            11155111, // sepolia
+            17000,    // holesky
+            31336,    // one below anvil
+            31338,    // one above anvil
+            313370,   // anvil's id with a digit appended
+            3133,     // anvil's id truncated
+            u64::MAX,
+        ];
+        for id in ids {
+            assert_eq!(
+                settlement_deploy_plan(id),
+                SettlementDeployPlan::RealChain,
+                "chain id {id} must NOT get the mock-verifier stack"
+            );
+        }
+    }
+
+    /// Property sweep: no chain id other than 31337 may ever produce the mock script or the mock
+    /// contract name, however the selection is implemented.
+    #[test]
+    fn no_non_devnet_chain_id_can_reach_the_mock_script() {
+        // Deterministic LCG (Numerical Recipes constants) — a fixed, reproducible sweep rather
+        // than a random one, so a failure is always reproducible from the test alone.
+        let mut x: u64 = 0x1234_5678_9abc_def0;
+        let mut sampled = 0usize;
+        for i in 0..100_000u64 {
+            x = x
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            // Mix in small ids too, so the neighbourhood of 31337 is covered densely.
+            let id = if i % 2 == 0 { x } else { i };
+            if id == DEVNET_CHAIN_ID {
+                continue;
+            }
+            sampled += 1;
+            let plan = settlement_deploy_plan(id);
+            assert_eq!(plan, SettlementDeployPlan::RealChain, "chain id {id}");
+            assert_eq!(
+                plan.script(),
+                "script/DeployCloseCli.s.sol",
+                "chain id {id}"
+            );
+            assert!(
+                !plan.script().contains("WalletSettlement")
+                    && !plan.contract().contains("WalletSettlement"),
+                "chain id {id} reached the mock deployer"
+            );
+        }
+        assert!(sampled > 99_000, "the sweep must actually sample");
+    }
+
+    /// The two plans must stay distinguishable: if they ever named the same script, every guard
+    /// above would pass while the mock stack shipped everywhere.
+    #[test]
+    fn the_two_plans_name_different_deployers() {
+        let mock = SettlementDeployPlan::MockDevnet;
+        let real = SettlementDeployPlan::RealChain;
+        assert_ne!(mock.script(), real.script());
+        assert_ne!(mock.contract(), real.contract());
+        assert_ne!(mock.label(), real.label());
+        assert!(mock.script().contains("DeployWalletSettlement"));
+        assert!(real.script().contains("DeployCloseCli"));
+    }
+
+    /// The fixture list must name files that actually exist in this checkout — otherwise the
+    /// up-front check would refuse every real deploy for a file the script never reads (or, worse,
+    /// pass while the script's real input is missing).
+    #[test]
+    fn the_declared_fixtures_exist_and_are_the_ones_the_script_reads() {
+        let data = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("contracts/test/data");
+        for f in CLOSE_CLI_FIXTURES {
+            assert!(data.join(f).is_file(), "missing fixture {f} in {data:?}");
+        }
+        let script = std::fs::read_to_string(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("contracts/script/DeployCloseCli.s.sol"),
+        )
+        .expect("read DeployCloseCli.s.sol");
+        for f in CLOSE_CLI_FIXTURES {
+            assert!(
+                script.contains(f),
+                "{f} is checked up front but {} never reads it",
+                "DeployCloseCli.s.sol"
+            );
+        }
+        // The record this command stages itself is the script's remaining input.
+        assert!(
+            script.contains("cli_reg_record.json"),
+            "the staged registration record must still be what the script reads"
+        );
     }
 }

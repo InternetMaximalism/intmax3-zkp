@@ -159,6 +159,17 @@ interface IChannelRegistry {
     function authorizePartialWithdrawal(bytes32 authDigest) external;
 }
 
+// The protocol challenge period, at FILE level so deploy tooling can reference it before any
+// manager exists (Solidity cannot read a contract's constant through the contract type).
+// `ChannelSettlementManager.CHALLENGE_PERIOD_SECS` aliases this — there is exactly one 86,400 in
+// the codebase, and both the constructor floor and `script/DeployConfig.sol` read it. See the
+// documentation on that alias for the security argument.
+uint64 constant CHALLENGE_PERIOD_SECS_FLOOR = 86_400;
+
+// Chain id of the local development network (anvil's default) — the only chain on which a
+// sub-floor challenge period is permitted. File-level for the same reason as above.
+uint256 constant SETTLEMENT_LOCAL_DEVNET_CHAIN_ID = 31337;
+
 contract ChannelSettlementManager {
     /// One SPHINCS+ key per member (D6 pad-to-MAX): a channel has between 2 and
     /// `MAX_MEMBER_COUNT` ACTIVE members, identified by their SPHINCS+ pubkey hash (bytes32), slot
@@ -174,6 +185,9 @@ contract ChannelSettlementManager {
     error InvalidChannelId();
     error InvalidBpMemberSlot();
     error InvalidChallengePeriod();
+    /// The deployer supplied a challenge period below the protocol floor on a non-local chain.
+    /// `supplied` / `required` are carried so a failed deploy names the value it must be raised to.
+    error ChallengePeriodTooShort(uint64 supplied, uint64 required);
     error InvalidMemberBinding();
     error DuplicateRegisteredMember();
     error InvalidMemberCount();
@@ -522,9 +536,32 @@ contract ChannelSettlementManager {
     /// submit a stale state, racing honest members' newer versions.
     uint64 public constant GRACE_BEFORE_PROCESS_SECS = 600;
 
-    /// @notice Reference challenge period (abstract2 §3.5: 1 day). The constructor argument is
-    /// kept for test configurability but MUST be nonzero.
-    uint64 public constant CHALLENGE_PERIOD_SECS = 86_400;
+    /// @notice The protocol challenge period (abstract2 §3.5: 1 day) — and, on every chain except
+    /// the local devnet, the enforced FLOOR for the constructor's `challengePeriod_` argument.
+    ///
+    /// SECURITY: this window is the ONLY interval in which an honest member can replace a stale
+    /// close intent (`submitCloseIntent` with a newer state, gated at `challengeDeadline`) or cancel
+    /// it (`cancelClose`, which also requires `pendingClose.active` and is therefore destroyed by
+    /// `finalizeClose`). Both remedies require a freshly generated MLE/WHIR proof — minutes of
+    /// proving — plus a transaction that lands before the deadline. `finalizeClose()` is
+    /// permissionless the instant the deadline passes, so a window shorter than the time needed to
+    /// prove-and-land is not a weaker challenge game: it is NO challenge game, and the submitter of
+    /// a stale intent keeps the difference. That is fund MIS-ALLOCATION among channel members, not
+    /// a liveness inconvenience, which is why the floor is enforced in the constructor rather than
+    /// left to deploy scripts.
+    uint64 public constant CHALLENGE_PERIOD_SECS = CHALLENGE_PERIOD_SECS_FLOOR;
+
+    /// @notice Chain id of the local development network (anvil's default).
+    ///
+    /// SECURITY: the ONLY chain on which `challengePeriod_` may fall below `CHALLENGE_PERIOD_SECS`.
+    /// The end-to-end tests must be able to drive a full close→challenge→finalize lifecycle without
+    /// waiting a day of wall-clock (they advance time with `evm_increaseTime`/`vm.warp`, but the CLI
+    /// E2Es drive a real anvil node), so the short window has to remain reachable SOMEWHERE. Scoping
+    /// it to 31337 makes "short challenge period" structurally unshippable to a public chain: it is
+    /// not a policy the deployer can opt out of, and it holds for any deployment tooling — hand-
+    /// rolled, factory, or a future script — not just the scripts in `contracts/script/`.
+    /// 31337 is not a public network; the same idiom already gates the mock-verifier deploy scripts.
+    uint256 internal constant LOCAL_DEVNET_CHAIN_ID = SETTLEMENT_LOCAL_DEVNET_CHAIN_ID;
 
     bytes4 public immutable channelId;
     /// F7: the block-proposer member is identified by its slot (0..MEMBER_COUNT) and its SPHINCS+
@@ -715,6 +752,18 @@ contract ChannelSettlementManager {
         // SECURITY: a zero challenge period would let any pending close finalize in the same
         // block, voiding the whole challenge game.
         if (challengePeriod_ == 0) revert InvalidChallengePeriod();
+        // SECURITY (fund mis-allocation, not liveness): a nonzero-but-tiny window voids the
+        // challenge game just as completely as zero does — see CHALLENGE_PERIOD_SECS. Every deploy
+        // script in this repo used to hardcode 1 second because the anvil E2Es cannot wait a day;
+        // that value is now confined to the local devnet BY THE CONTRACT, so it cannot be carried
+        // to a public chain by a script edit, a copied script, or bespoke deploy tooling. This is a
+        // deployment-time floor only — it costs nothing at runtime and cannot be relaxed later,
+        // which is deliberate: `challengePeriod` is immutable and has no setter, so a channel
+        // deployed short can never be repaired.
+        if (
+            block.chainid != LOCAL_DEVNET_CHAIN_ID &&
+            challengePeriod_ < CHALLENGE_PERIOD_SECS
+        ) revert ChallengePeriodTooShort(challengePeriod_, CHALLENGE_PERIOD_SECS);
 
         channelId = channelId_;
         bpMemberSlot = bpMemberSlot_;

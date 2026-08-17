@@ -28,6 +28,8 @@
 //! implemented (CARDIS-2023 fault attack on det-Falcon; sampler multi-runtime consistency).
 
 pub mod agg;
+pub mod agg_list;
+pub mod batch;
 pub mod compat;
 pub mod gadget;
 pub mod list;
@@ -64,6 +66,11 @@ pub const DOMAIN_FALCON_PK: u32 = 0x494d_464b;
 /// "IMFG" — domain separating the keygen-RNG seed derivation from every other use of the
 /// 32-byte member seed (TM-C10 / O-11).
 pub const DOMAIN_FALCON_KEYGEN: u32 = 0x494d_4647;
+
+/// "IMFB" — capacity domain separator of the BATCH-aggregation Fiat-Shamir transcript sponge
+/// (`batch::FalconBatchAggCircuit`): the in-circuit Poseidon transcript that commits every
+/// slot's `(h, s2, pi)` polynomials before the product-check challenge `tau` is squeezed.
+pub const DOMAIN_FALCON_BATCH: u32 = 0x494d_4642;
 
 // WIRE-FORMAT CONSTANTS
 // ================================================================================================
@@ -584,6 +591,7 @@ mod tests {
         assert_eq!(DOMAIN_FALCON_H2P, u32::from_be_bytes(*b"IMFH"));
         assert_eq!(DOMAIN_FALCON_PK, u32::from_be_bytes(*b"IMFK"));
         assert_eq!(DOMAIN_FALCON_KEYGEN, u32::from_be_bytes(*b"IMFG"));
+        assert_eq!(DOMAIN_FALCON_BATCH, u32::from_be_bytes(*b"IMFB"));
 
         // Every domain constant registered in constants.rs (pinned there as literals/consts),
         // plus the poseidon_sig pub constants referenced directly.
@@ -636,7 +644,12 @@ mod tests {
             crate::constants::INTER_CHANNEL_TX_DOMAIN_V2,
             crate::constants::TOKEN_FUNDS_DIGEST_DOMAIN,
         ];
-        let new = [DOMAIN_FALCON_H2P, DOMAIN_FALCON_PK, DOMAIN_FALCON_KEYGEN];
+        let new = [
+            DOMAIN_FALCON_H2P,
+            DOMAIN_FALCON_PK,
+            DOMAIN_FALCON_KEYGEN,
+            DOMAIN_FALCON_BATCH,
+        ];
         for (i, a) in new.iter().enumerate() {
             for b in new.iter().skip(i + 1) {
                 assert_ne!(a, b, "new falcon domains collide with each other");

@@ -31,9 +31,14 @@ contract DeployTestnetBlockProducer is Script {
     address internal constant TESTNET_BLOCK_PRODUCER_ADMIN =
         0x2C0BF10558adafDd21296CbF71dd6FE88c782C80;
 
-    function run() external {
+    /// @return rollup   the deployed IntmaxRollup (returned so tests can assert on its state)
+    /// @return verifier the MleVerifier both the validity and withdrawal VKs are bound to
+    function run() external returns (IntmaxRollup rollup, MleVerifier verifier) {
         string memory mleJson = FixtureLib.loadMle();
         string memory blockJson = FixtureLib.loadBlock();
+        // Read the withdrawal fixture BEFORE broadcasting: a missing fixture must abort before the
+        // rollup exists on chain, not after.
+        string memory wJson = FixtureLib.loadWithdrawalMle();
 
         bytes32 genesisStateRoot = vm.parseJsonBytes32(blockJson, ".genesis_state_root");
         FixtureLib.DeployData memory dd = FixtureLib.parseDeployData(mleJson);
@@ -50,10 +55,10 @@ contract DeployTestnetBlockProducer is Script {
 
         vm.startBroadcast();
 
-        MleVerifier verifier = new MleVerifier();
+        verifier = new MleVerifier();
         IntmaxRollup.MleVk memory vk = FixtureLib.buildMleVk(mleJson, verifier);
 
-        IntmaxRollup rollup = new IntmaxRollup(
+        rollup = new IntmaxRollup(
             fraudTreasury,
             vk,
             dd.whirParams,
@@ -72,12 +77,30 @@ contract DeployTestnetBlockProducer is Script {
         // can call setBlockProducer to designate more producers; nobody else can post.
         rollup.setBlockProducerAdmin(bpAdmin);
 
+        // SECURITY / LIVENESS: install the withdrawal-circuit VK. Without it
+        // `IntmaxRollup._verifyWithdrawalSet` reverts `WithdrawalVkNotSet()` on BOTH
+        // `withdrawNative` and `withdrawERC20`, while `deposit()` is ungated — the rollup takes
+        // money it can never return. `initializeWithdrawalVk` is deployer-only and set-once, so a
+        // deploy that omits it is repairable only by a later manual call from the deployer key.
+        // No fail-closed check is weakened: the revert stays; this supplies what it demands.
+        {
+            FixtureLib.DeployData memory wdd = FixtureLib.parseDeployData(wJson);
+            IntmaxRollup.MleVk memory wvk = FixtureLib.buildMleVk(wJson, verifier);
+            rollup.initializeWithdrawalVk(
+                wvk, wdd.whirParams, wdd.protocolId, wdd.sessionId, wdd.kIs, wdd.subgroupGenPowers
+            );
+        }
+
         vm.stopBroadcast();
+
+        // Read the latch back rather than trusting the call above ran.
+        require(rollup.withdrawalVkInitialized(), "withdrawal VK not initialized: this rollup cannot pay out");
 
         console2.log("=== IntmaxRollup TESTNET deploy (block-producer restricted) ===");
         console2.log("IntmaxRollup      :", address(rollup));
         console2.log("MleVerifier       :", address(verifier));
         console2.log("fraudTreasury     :", fraudTreasury);
         console2.log("blockProducerAdmin:", bpAdmin);
+        console2.log("withdrawalVkInitialized:", rollup.withdrawalVkInitialized());
     }
 }

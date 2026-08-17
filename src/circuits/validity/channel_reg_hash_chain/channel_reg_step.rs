@@ -15,6 +15,10 @@
 //! * **R5 unregistered guard.** The previous `ChannelLeaf` at `channel_id` MUST equal
 //!   `ChannelLeaf::default()` (one-time registration); re-registering an active channel is
 //!   rejected. This is asserted on the FULL default leaf, not just the member root.
+//! * **Cosigner-only registration (Option B).** `delegate_count == 0` is CONSTRAINED in-circuit, so
+//!   the active region is exactly `member_count` wide and the written `member_pubkeys_root` commits
+//!   to exactly `member_count` keys. See the `assert_zero` in `ChannelRegStepTarget::new` for the
+//!   full argument.
 //! * **Padding.** Slots `i >= member_count` are forced empty (`sphincs == 0 && regev == 0`), so
 //!   their `MemberLeaf` hash equals the empty-leaf hash and the computed root matches a native
 //!   `MemberTree` with exactly `member_count` active leaves.
@@ -94,11 +98,16 @@ pub enum ChannelRegStepError {
 /// slots empty. Mirrors the in-circuit root computation.
 ///
 /// SECURITY (Option B): this is the COSIGNER-scoped registered root (`MAX_COSIGNERS` slots,
-/// height `MEMBER_TREE_HEIGHT`). Registration-producing paths emit `delegate_count = 0`; legacy
-/// 16-slot records may carry delegates within the same 16 slots (`validate` bounds
-/// `member_count + delegate_count <= MAX_COSIGNERS`). This root is NOT the wallet's live
-/// membership root (`wallet_core::member_pubkeys_root`, height `WALLET_MEMBER_TREE_HEIGHT`),
-/// which evolves with delegate joins and is never compared to this one.
+/// height `MEMBER_TREE_HEIGHT`). L1 registration is cosigners-only, and `delegate_count == 0` is
+/// now a CIRCUIT CONSTRAINT (`ChannelRegStepTarget::new`), not a convention — so for every record
+/// this step can prove, `active == member_count`. This helper still reads `delegate_count` so it
+/// stays a faithful native mirror of the in-circuit root for the general shape (`validate` only
+/// bounds `member_count + delegate_count <= MAX_COSIGNERS`); a record with a nonzero
+/// `delegate_count` gets a native root here that the circuit will refuse to reproduce.
+///
+/// This root is NOT the wallet's live membership root (`wallet_core::member_pubkeys_root`, height
+/// `WALLET_MEMBER_TREE_HEIGHT`), which evolves with delegate joins and is never compared to this
+/// one — the CHANNEL STATE keeps its delegates; only the L1 REGISTRATION record is cosigner-only.
 pub fn member_pubkeys_root_for(record: &ChannelRegRecord) -> PoseidonHashOut {
     let mut tree = MemberTree::init();
     let active = record.member_count as usize + record.delegate_count as usize;
@@ -280,6 +289,31 @@ impl<const D: usize> ChannelRegStepTarget<D> {
         // Delegate account: number of delegates registered after the members.
         let delegate_count = builder.add_virtual_target();
         builder.range_check(delegate_count, 32);
+        // SECURITY (Option B, small-block N-of-N Phase 1 — `doc/tasks/small-block-nofn-design.md`
+        // §9 Phase 1): L1 registration is COSIGNERS-ONLY, so `delegate_count` MUST be zero. This
+        // used to be policy only — a convention of the registration-producing paths, documented at
+        // `common/channel_registration.rs:85` and `ChannelSettlementManager.sol:1612` — and
+        // `validate()` accepted any `member_count + delegate_count <= MAX_COSIGNERS`. It is now a
+        // constraint.
+        //
+        // WHY: the `member_pubkeys_root` this step writes into the `ChannelLeaf` is the root over
+        // the first `member_count + delegate_count` slots, but `member_count` is the ONLY count
+        // that reaches a downstream consumer. Any consumer that wants to conclude "this registered
+        // member tree holds EXACTLY `member_count` keys, and slots >= `member_count` are empty" —
+        // which is precisely what authenticating `member_count` for an N-of-N binding requires
+        // (design §4/§5.2, decision D1/M2') — would otherwise be reading a root whose active
+        // region a nonzero `delegate_count` had silently widened. An aggregate over `member_count`
+        // signers would then leave the extra active slots unauthorized while the root still
+        // reproduces. Pinning the field to zero makes "active region == member_count" a
+        // circuit-enforced fact instead of an off-circuit convention, so the root and the count
+        // cannot disagree.
+        //
+        // INTENTIONALLY NOT REMOVED from the record or the keccak preimage: the DEPLOYED contract
+        // hashes this limb into `_channelRegHashChain` (`IntmaxRollup.sol:1111-1122`), so the limb
+        // must keep its position for the Rust/circuit/Solidity preimages to stay byte-identical.
+        // Only its VALUE is constrained. Consequence: a registration transaction that put a
+        // nonzero delegate count on chain is unprovable by this step, by design.
+        builder.assert_zero(delegate_count);
 
         // -- Member identity components (witnessed once; R2 cross-binding) --
         let member_pk_ges: [PoseidonHashOutTarget; MAX_COSIGNERS] =
@@ -376,10 +410,13 @@ impl<const D: usize> ChannelRegStepTarget<D> {
         // ── delegate account: active = member_count + delegate_count, with active ∈ [2, 16] ──
         // SECURITY: `active <= MAX_COSIGNERS` (no over-allocation past the fixed 16 slots);
         // `delegate_count >= 0` so `active >= member_count >= 2` holds automatically. The
-        // thermometer mask below uses `active` as the threshold, so delegate slots
-        // (`member_count..active`) are treated as ACTIVE (non-forced-zero) exactly like members and
-        // padding only begins at `active`. Phase 1 `delegate_count = 0` makes `active ==
-        // member_count`, so the mask is byte-for-byte the legacy one.
+        // thermometer mask below uses `active` as the threshold, so padding begins at `active`.
+        //
+        // Since the `assert_zero(delegate_count)` above, `active_count == member_count`
+        // identically, so this bound is implied by the `member_count ∈ [2, 16]` check and the mask
+        // is byte-for-byte the legacy one. RETAINED DELIBERATELY as a redundant bound: it is what
+        // keeps this block correct-by-construction if the delegate pin is ever revisited, and it
+        // costs a sub-gate handful of rows (measured: no degree change).
         let active_count = builder.add(member_count, delegate_count);
         let max_minus_active = builder.sub(max, active_count);
         builder.range_check(max_minus_active, 4); // active in [member_count, 16] ⊆ [0,15] above 16-mc
@@ -558,13 +595,17 @@ impl<const D: usize> ChannelRegStepTarget<D> {
 /// `is_active = (i < member_count)` as a BoolTarget, for the small constant `i` and a
 /// range-checked `member_count` (in `[2, MAX_COSIGNERS]`).
 ///
+/// `pub(crate)` (small-block N-of-N design §5.4 item 1): `update_channel_tree` builds the SAME
+/// thermometer over its `signer_count`. It CALLS this one rather than restating it — a second
+/// derivation that agrees only by luck is the recurring failure mode this repo is trying to stop.
+///
 /// DETERMINISTIC (no free witness): `member_count` takes exactly one value in
 /// `[2, MAX_COSIGNERS]`, so `is_active[i] = Σ_{t = i+1..=MAX} is_equal(member_count, t)`.
 /// Exactly one `is_equal` fires (when `member_count == t`), and it is in the sum iff `t > i`, i.e.
 /// iff `i < member_count`. The sum is therefore 0 or 1 and has standard generators (no unfilled
 /// witness). INTENTIONALLY SIMPLE: the constant range is tiny (<= MAX_COSIGNERS = 16), so
 /// unrolling is cheap.
-fn lt_const_threshold<F: RichField + Extendable<D>, const D: usize>(
+pub(crate) fn lt_const_threshold<F: RichField + Extendable<D>, const D: usize>(
     builder: &mut CircuitBuilder<F, D>,
     i: usize,
     member_count: Target,
@@ -585,7 +626,12 @@ fn lt_const_threshold<F: RichField + Extendable<D>, const D: usize>(
 /// Compute the root of a full balanced tree (height = `MEMBER_TREE_HEIGHT`) over its leaf hashes,
 /// folding pairwise `two_to_one(left, right)` with the lower index as the left child — exactly the
 /// convention of `IncrementalMerkleTree` / `MerkleTree::update_leaf`.
-fn compute_member_tree_root<
+///
+/// `pub(crate)` (design §5.4 item 5, M2′): `update_channel_tree` recomputes the member root from
+/// its 16 witnessed leaves and connects it to `prev_user_leaf.member_pubkeys_root`. It MUST fold
+/// the tree exactly as the writer of that root does, so it calls THIS function; the alternative —
+/// two independent fold orders — is unobservable until a real registration fails to match.
+pub(crate) fn compute_member_tree_root<
     F: RichField + Extendable<D>,
     C: GenericConfig<D, F = F> + 'static,
     const D: usize,
@@ -824,5 +870,100 @@ mod tests {
             native.is_err(),
             "R5 guard must reject registration over an already-registered channel"
         );
+    }
+
+    /// NEGATIVE (Option B, small-block N-of-N Phase 1): a registration witness with
+    /// `delegate_count = 1` must be UNPROVABLE.
+    ///
+    /// SECURITY — what this test is intended to prove: that cosigner-only L1 registration is an
+    /// enforced circuit property and not merely a convention of the construction sites. The test
+    /// deliberately builds a record that passes EVERY native check — `ChannelRegRecord::validate`
+    /// still permits `member_count + delegate_count <= MAX_COSIGNERS`, and the delegate slot is a
+    /// well-formed, nonzero, distinct member entry — and asserts native
+    /// `to_public_inputs` SUCCEEDS on it before asserting that proving FAILS. Without that first
+    /// assertion the test could pass for the wrong reason (an early native rejection), which would
+    /// leave the in-circuit constraint untested.
+    #[cfg_attr(debug_assertions, ignore = "run with --release")]
+    #[test]
+    fn test_channel_reg_step_rejects_nonzero_delegate_count() {
+        use std::panic::{AssertUnwindSafe, catch_unwind};
+
+        let cfg = CircuitConfig::standard_recursion_config();
+        let pis_len = CHANNEL_REG_CHAIN_PUBLIC_INPUTS_LEN;
+        let chain_cd = TestCyclicCircuit::<F, C, D>::generate_cd(pis_len);
+        let chain_circuit = TestCyclicCircuit::<F, C, D>::new(cfg, pis_len, &chain_cd);
+        let chain_vd = chain_circuit.data.verifier_data();
+
+        // 3 cosigners + 1 DELEGATE in slot 3: 4 well-formed active entries, `delegate_count = 1`.
+        let mut record = make_record(5, 4);
+        record.member_count = 3;
+        record.delegate_count = 1;
+        record
+            .validate()
+            .expect("the record must be natively VALID — otherwise the circuit is untested");
+
+        let channel_tree = ChannelTree::init();
+        let witness = ChannelRegStepWitness::<F, C, D> {
+            initial_value: Some((Bytes32::default(), channel_tree.get_root(), U63::default())),
+            prev_channel_reg_chain_proof: None,
+            record: record.clone(),
+            channel_merkle_proof: channel_tree.prove(record.channel_id.as_u64()),
+            block_number: BlockNumber::new(7).unwrap(),
+        };
+
+        // (1) The native path accepts it: no off-circuit gate stands in the way.
+        let new_pis = witness
+            .to_public_inputs(&chain_vd)
+            .expect("native public-input derivation must ACCEPT delegate_count = 1 today");
+
+        // (2) The circuit refuses it. Fill the witness directly so the failure can only come from
+        //     the constraint system, and so a `prove()` that panics on the copy-constraint
+        //     conflict is caught rather than aborting the test.
+        let circuit = ChannelRegStepCircuit::<F, C, D>::new(&chain_cd);
+        let mut pw = PartialWitness::<F>::new();
+        circuit
+            .target
+            .set_witness(&mut pw, &witness, &new_pis, &circuit.dummy_proof);
+        circuit
+            .public_inputs
+            .set_witness::<F, C, D, _>(&mut pw, &new_pis);
+        let result = catch_unwind(AssertUnwindSafe(|| circuit.data.prove(pw)));
+        match result {
+            Err(_) => {} // panicked inside witness generation — also a refusal
+            Ok(Ok(_)) => panic!(
+                "a registration witness with delegate_count = 1 must be UNPROVABLE \
+                 (assert_zero(delegate_count), Option B cosigner-only registration)"
+            ),
+            Ok(Err(e)) => {
+                // Pin the REASON, not just the failure: the refusal must come from the
+                // delegate-count constraint (the copy constraint to the zero constant), not from
+                // some unrelated malformedness that would make this test pass vacuously.
+                let msg = e.to_string();
+                println!("delegate_count = 1 rejected with: {msg}");
+                assert!(
+                    msg.contains("set twice with different values"),
+                    "expected the delegate_count copy constraint to reject this witness, got: \
+                     {msg}"
+                );
+            }
+        }
+
+        // (3) Control: the same record with the delegate demoted to a 4th COSIGNER — identical
+        //     member entries, identical member tree, only the count split differs — still proves.
+        //     This pins the failure above on `delegate_count` alone and not on the record's shape.
+        let mut cosigner_only = record;
+        cosigner_only.member_count = 4;
+        cosigner_only.delegate_count = 0;
+        let ok_witness = ChannelRegStepWitness::<F, C, D> {
+            initial_value: Some((Bytes32::default(), channel_tree.get_root(), U63::default())),
+            prev_channel_reg_chain_proof: None,
+            record: cosigner_only,
+            channel_merkle_proof: channel_tree.prove(5),
+            block_number: BlockNumber::new(7).unwrap(),
+        };
+        let proof = circuit
+            .prove(&chain_vd, &ok_witness)
+            .expect("the same 4 keys registered as 4 cosigners must still prove");
+        circuit.verify(proof).expect("control proof verifies");
     }
 }

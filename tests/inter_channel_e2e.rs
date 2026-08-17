@@ -57,10 +57,11 @@ use plonky2::{
 };
 use std::{
     path::PathBuf,
-    process::{Child, Command, Stdio},
-    thread,
-    time::Duration,
+    process::{Command, Stdio},
 };
+
+mod anvil_harness;
+use anvil_harness::AnvilNode;
 
 const D: usize = 2;
 type F = GoldilocksField;
@@ -154,13 +155,6 @@ fn structural_transport_rejects_empty_proof() {
         .expect("a non-empty transport passes the structural gate");
 }
 
-struct AnvilGuard(Child);
-impl Drop for AnvilGuard {
-    fn drop(&mut self) {
-        let _ = self.0.kill();
-        let _ = self.0.wait();
-    }
-}
 fn tool_present(bin: &str) -> bool {
     Command::new(bin)
         .arg("--version")
@@ -273,29 +267,10 @@ fn inter_channel_transfer_real_deposit_backed() {
     use rand::SeedableRng as _;
     use rand010::SeedableRng as _;
     let rpc = format!("http://127.0.0.1:{PORT}");
-    let anvil = Command::new("anvil")
-        .args(["--hardfork", "prague", "--port", &PORT.to_string()])
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .expect("anvil");
-    let _guard = AnvilGuard(anvil);
-    let mut up = false;
-    for _ in 0..40 {
-        if Command::new("cast")
-            .args(["block-number", "--rpc-url", &rpc])
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status()
-            .map(|s| s.success())
-            .unwrap_or(false)
-        {
-            up = true;
-            break;
-        }
-        thread::sleep(Duration::from_millis(250));
-    }
-    assert!(up, "anvil down");
+    // Spawns anvil and proves the node answering on PORT is the one we spawned (fresh chain,
+    // our own process). See tests/anvil_harness/mod.rs for why a plain `cast block-number` poll
+    // is not enough. Killed on drop.
+    let _guard = AnvilNode::spawn("inter_channel_transfer_real_deposit_backed", PORT, &[]);
     let contracts = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("contracts");
     let deploy = run_capture(
         Command::new("forge").current_dir(&contracts).args([

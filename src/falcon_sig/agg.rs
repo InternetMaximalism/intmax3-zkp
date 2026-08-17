@@ -1,5 +1,11 @@
 //! Phase-2.6 Falcon-512/Poseidon signature AGGREGATION — BINARY-TREE recursion.
 //!
+//! NOTE (2026-08-15): the close / cancel-close provers now use
+//! [`super::batch::FalconBatchAggCircuit`] — ONE flat circuit with a batched (random-evaluation)
+//! product check instead of per-leaf NTTs — which proves all 16 signatures ~10x faster at the
+//! SAME 137-element public-input contract defined here. This tree is retained as the audited
+//! fallback and as the owner of the shared layout constants / `FalconAggWitness` type.
+//!
 //! This module restores the RETIRED `poseidon_sig::aggregate` binary-tree aggregator
 //! (`git show e0dec8b:src/poseidon_sig/aggregate.rs`), instantiated for Falcon-512/Poseidon. It
 //! replaces the Phase-2 FLAT `FalconAggCircuit`, which verified all `MAX_COSIGNERS` signatures in

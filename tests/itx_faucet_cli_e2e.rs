@@ -46,10 +46,11 @@
 
 use std::{
     path::PathBuf,
-    process::{Child, Command, Stdio},
-    thread,
-    time::Duration,
+    process::{Command, Stdio},
 };
+
+mod anvil_harness;
+use anvil_harness::AnvilNode;
 
 /// anvil dev account[0] — a PUBLIC throwaway key; deployer, ITX holder, depositor.
 const ANVIL0_KEY: &str = "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80";
@@ -94,14 +95,6 @@ fn tool_present(bin: &str) -> bool {
         .status()
         .map(|s| s.success())
         .unwrap_or(false)
-}
-
-struct AnvilGuard(Child);
-impl Drop for AnvilGuard {
-    fn drop(&mut self) {
-        let _ = self.0.kill();
-        let _ = self.0.wait();
-    }
 }
 
 /// Removes every scratch file this test creates in the repo root, on drop. Nothing TRACKED is
@@ -244,36 +237,10 @@ fn itx_faucet_cli_e2e() {
     let rpc = format!("http://127.0.0.1:{PORT}");
 
     // ── anvil ──────────────────────────────────────────────────────────────────────────────
-    let anvil = Command::new("anvil")
-        .args([
-            "--hardfork",
-            "prague",
-            "--base-fee",
-            "0",
-            "--port",
-            &PORT.to_string(),
-        ])
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .expect("spawn anvil");
-    let _anvil = AnvilGuard(anvil);
-    let mut up = false;
-    for _ in 0..40 {
-        if Command::new("cast")
-            .args(["block-number", "--rpc-url", &rpc])
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status()
-            .map(|s| s.success())
-            .unwrap_or(false)
-        {
-            up = true;
-            break;
-        }
-        thread::sleep(Duration::from_millis(250));
-    }
-    assert!(up, "anvil did not come up on {rpc}");
+    // Spawns anvil and proves the node answering on PORT is the one we spawned (fresh chain,
+    // our own process). See tests/anvil_harness/mod.rs for why a plain `cast block-number` poll
+    // is not enough. Killed on drop.
+    let _anvil = AnvilNode::spawn("itx_faucet_cli_e2e", PORT, &["--base-fee", "0"]);
 
     // ── runbook 3c.1/3c.2: deploy the rollup, deploy $ITX, register it SET-ONCE ─────────────
     let deploy = run(

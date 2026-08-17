@@ -119,12 +119,57 @@ chmod 600 .claude/cosigner.key                    # the CLI REFUSES any group/wo
   host fails loudly instead of silently creating a worthless channel.
 
 ## Sepolia (one-time, when rollups/backing must be rebuilt)
+
+**Which script, for what — read this before running anything.**
+
+| goal | script | what you get |
+|---|---|---|
+| rollup only: deposit, post, finalize, `withdrawNative`/`withdrawERC20` | `Deploy.s.sol` | validity VK + **withdrawal VK** + KZG satellite + block producer. **No** channel settlement stack. |
+| rollup **and** the channel close/claim lifecycle | `DeployCloseCli.s.sol` | everything above **plus** `ChannelSettlementVerifier` + `ChannelSettlementManager` and all four settlement VKs (close, withdrawalClaim, postCloseClaim, cancelClose), plus `registerChannel` **and `registerSettlementManager`** — the last added 2026-08-13; without it a partial withdrawal reverted `NotRegisteredSettlementManager` at `pw-finalize`, i.e. *after* the user had submitted and waited out the whole challenge period. Requires `contracts/test/data/cli_reg_record.json`, which `channel_member export-reg-record` stages. |
+| public-testnet rollup with posting restricted to a named admin | `DeployTestnetBlockProducer.s.sol` | as `Deploy.s.sol`, plus `setBlockProducerAdmin`. |
+| devnet demo / predict the close-manager address for a dry run | `DeployClose.s.sol` | **LOCAL DEVNET ONLY, and enforced as of 2026-08-13** — `run()` opens with `require(block.chainid == SETTLEMENT_LOCAL_DEVNET_CHAIN_ID, ...)`, so pointing it at Sepolia or mainnet now aborts before a single transaction. Previously this row was the only thing standing between an operator and a broken deployment. It deploys a settlement stack and initializes **none** of the four settlement VKs (channel freezable by `requestClose()`, then `CloseVkNotSet()` / `CancelCloseVkNotSet()` forever), and its `sepolia_*` fixtures are one circuit generation stale — so keying the VKs would not have made it real-network-capable either. The address it predicts is its OWN manager's, at its own nonce offset; `DeployCloseCli.s.sol` sends a different number of transactions before its manager CREATE, so the prediction does not transfer. |
+
+**Settlement stack on a real network — read before promising users a close/claim exit.** The
+runbook's Sepolia procedure below deploys the **rollup only**. That is enough for
+deposit → post → finalize → `withdrawNative`/`withdrawERC20`, and nothing else. The channel
+close/claim lifecycle needs a `ChannelSettlementManager`, and the only deployer reachable from the
+product surface (`POST /full-withdrawal/deploy` → CLI `deploy-settlement` →
+`DeployWalletSettlement.s.sol`) is hard-gated to `block.chainid == 31337` because it installs an
+always-true mock verifier — correctly so. The real-network settlement deployer is
+`DeployCloseCli.s.sol`, and it must currently be run **by hand**: nothing in the CLI, the API or
+either relay invokes it. Wiring that route is a change in `src/bin/channel_member.rs`, outside the
+scope of the 2026-08-13 contracts fix; until it lands, a live full-withdrawal ticket still fails at
+step 1 on a non-anvil chain.
+
+**FIXED 2026-08-13 — every rollup deployed before this date by `Deploy.s.sol` or
+`DeployTestnetBlockProducer.s.sol` cannot pay out.** Neither script called
+`initializeWithdrawalVk`, and `IntmaxRollup._verifyWithdrawalSet` opens with
+`if (!withdrawalVkInitialized) revert WithdrawalVkNotSet();`, gating **both** `withdrawNative` and
+`withdrawERC20` — while `deposit()` has no such gate. Money in, no money out; the contract has no
+rescue, sweep or upgrade path. Both scripts now install the VK from
+`contracts/test/data/withdrawal_mle.json` and `require()` the latch afterwards, so a deploy that
+would be unable to pay out aborts instead of printing an address. `initializeWithdrawalVk` is
+deployer-only and set-once, so **an already-deployed rollup is repaired only by a manual call from
+the surviving deployer key** with a withdrawal VK matching the circuits as of that rollup's deploy
+commit — verify a live rollup with the `cast call` below before funding it.
+
+**Challenge period.** `ChannelSettlementManager`'s constructor now REJECTS a challenge period
+below `CHALLENGE_PERIOD_SECS` (86,400 s = 1 day) on any chain other than 31337, and the deploy
+scripts source the value from `script/DeployConfig.sol`. Every script previously hardcoded 1
+second, which made `finalizeClose()` reachable one block after a close intent was submitted and the
+`cancelClose` / newer-intent remedies (both of which need minutes of MLE proving) unreachable. A
+**real-network close therefore now takes a full day to finalize** — that is the intended cost.
+
 ```bash
 export SEPOLIA_RPC_URL=https://ethereum-sepolia-rpc.publicnode.com    # or your own
 export INTMAX_COSIGNER_KEYFILE="$PWD/.claude/cosigner.key"            # see section above; required
+export FRAUD_TREASURY=0x<treasury>                                    # REQUIRED off-anvil (hard revert otherwise)
 PRIV=…/intmax3-zkp-enshrined-paymentchannel/.claude/priv
 cd contracts && forge script script/Deploy.s.sol --rpc-url "$SEPOLIA_RPC_URL" \
   --private-key "$(cat "$PRIV")" --broadcast --slow                  # prints IntmaxRollup addr; run TWICE (ch7, ch8)
+# MANDATORY read-back before any deposit — `false` means that rollup can never pay out:
+cast call <rollup7> "withdrawalVkInitialized()(bool)" --rpc-url "$SEPOLIA_RPC_URL"   # must print true
+cast call <rollup8> "withdrawalVkInitialized()(bool)" --rpc-url "$SEPOLIA_RPC_URL"   # must print true
 cd .. && mkdir -p deploy-staging/ch7 deploy-staging/ch8
 ( cd deploy-staging/ch7 && INTMAX_CHANNEL=7 INTMAX_DEPOSIT_KEY="$(cat "$PRIV")" \
     ../../target/release/channel_member setup-backing "$SEPOLIA_RPC_URL" <rollup7> )   # real Sepolia deposit + balance proof

@@ -32,7 +32,7 @@ use intmax3_zkp::{
     regev::{RegevCiphertext, RegevPk, RegevSecurityLevel, encrypt_amount},
     wallet_core::{
         ChannelBalanceAttestation, MemberInfo, MemberKeys, add_signature,
-        assemble_genesis_state_backed, build_burn_send, build_record,
+        assemble_genesis_state_backed, build_burn_send, build_record, burn_withdrawal_leaf,
         partial_withdrawal_auth_digest, sign_state, sign_state_if_backed, verify_all_signatures,
         verify_channel_backing,
     },
@@ -43,10 +43,11 @@ use plonky2::{
 };
 use std::{
     path::PathBuf,
-    process::{Child, Command, Stdio},
-    thread,
-    time::Duration,
+    process::{Command, Stdio},
 };
+
+mod anvil_harness;
+use anvil_harness::AnvilNode;
 
 const D: usize = 2;
 type F = GoldilocksField;
@@ -55,13 +56,6 @@ const LEVEL: RegevSecurityLevel = RegevSecurityLevel::Production;
 const ANVIL0: &str = "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80";
 const PORT: u16 = 8553;
 
-struct AnvilGuard(Child);
-impl Drop for AnvilGuard {
-    fn drop(&mut self) {
-        let _ = self.0.kill();
-        let _ = self.0.wait();
-    }
-}
 fn tool_present(bin: &str) -> bool {
     Command::new(bin)
         .arg("--version")
@@ -229,36 +223,14 @@ fn partial_withdrawal_e2e_anvil() {
     use rand010::SeedableRng as _;
 
     let rpc = format!("http://127.0.0.1:{PORT}");
-    let anvil = Command::new("anvil")
-        .args([
-            "--hardfork",
-            "prague",
-            "--port",
-            &PORT.to_string(),
-            "--code-size-limit",
-            "50000",
-        ])
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .expect("anvil");
-    let _guard = AnvilGuard(anvil);
-    let mut up = false;
-    for _ in 0..40 {
-        if Command::new("cast")
-            .args(["block-number", "--rpc-url", &rpc])
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status()
-            .map(|s| s.success())
-            .unwrap_or(false)
-        {
-            up = true;
-            break;
-        }
-        thread::sleep(Duration::from_millis(250));
-    }
-    assert!(up, "anvil down");
+    // Spawns anvil and proves the node answering on PORT is the one we spawned (fresh chain,
+    // our own process). See tests/anvil_harness/mod.rs for why a plain `cast block-number` poll
+    // is not enough. Killed on drop.
+    let _guard = AnvilNode::spawn(
+        "partial_withdrawal_e2e_anvil",
+        PORT,
+        &["--code-size-limit", "50000"],
+    );
 
     // ── Phase A: Setup prover + keys ──────────────────────────────────────────────────────────
     let spend = SpendCircuit::<F, C, D>::new();
@@ -298,7 +270,13 @@ fn partial_withdrawal_e2e_anvil() {
             "channel_id": 42,
             "bp_member_slot": 0,
             "member_count": 3,
-            "delegate_count": 0,
+            // Two INDEPENDENT counts (see `settlement_reg_json` in src/bin/channel_member.rs and
+            // contracts/script/RegRecordLib.sol): `reg_delegate_count` is the L1 registration
+            // record's — always 0, cosigner-only registration is a circuit constraint;
+            // `active_delegate_count` is the live count the settlement manager binds. This driver's
+            // channel has no delegates, so both are 0 here — for different reasons.
+            "reg_delegate_count": 0,
+            "active_delegate_count": 0,
             "member_pk_gs": pk_gs,
             "member_pk_bs": pk_bs,
             "regev_pk_digests": regev_digests,
@@ -448,14 +426,29 @@ fn partial_withdrawal_e2e_anvil() {
     eprintln!("[PW E2E] settled_tx_chain OK");
 
     // ── Phase E: Write pw_submit.json + on-chain settlement ─────────────────────────────────
-    // Build the Withdrawal struct for authDigest computation.
-    let withdrawal = Withdrawal {
-        recipient: withdrawal_addr,
-        token_index: 0,
-        amount: u256(burn_amount),
-        nullifier: Bytes32::from_u32_slice(&[0, 0, 0, 0, 0, 0, 0, 0xBEEF]).unwrap(),
-        aux_data: tx_leaf,
-    };
+    // The Withdrawal struct for authDigest computation.
+    //
+    // SECURITY (2026-08-13): this used to authorize a LITERAL `nullifier = 0xBEEF`, the third of
+    // three disagreeing derivations (CLI `keccak(tx_leaf ‖ pre_burn_chain)`, this literal, and the
+    // only real one — `SettledTransfer::nullifier()` in the withdrawal circuit). An E2E that
+    // authorizes a nullifier no provable leaf carries cannot detect the stranding bug it walks
+    // straight through, so it now derives the leaf from the burn artefact with the one shared
+    // `burn_withdrawal_leaf`, exactly as `pw-submit` does.
+    let withdrawal = burn_withdrawal_leaf(
+        desc.source_channel_id,
+        desc.receiver_pk_g,
+        desc.inter_channel_tx.token_index,
+        burn_amount,
+        tx_leaf,
+        desc.tx_v2.nonce,
+    )
+    .expect("burn withdrawal leaf");
+    assert_eq!(
+        withdrawal.recipient, withdrawal_addr,
+        "the burn's baked ADDRESS_TAG recipient must recover the L1 address it was built for"
+    );
+    assert_eq!(withdrawal.amount, u256(burn_amount));
+    assert_eq!(withdrawal.aux_data, tx_leaf);
     let rust_auth_digest = partial_withdrawal_auth_digest(&withdrawal);
     eprintln!("[PW E2E] Rust authDigest = {}", rust_auth_digest.to_hex());
 
@@ -481,8 +474,8 @@ fn partial_withdrawal_e2e_anvil() {
             // prevSettledTxChain (genesis chain before the burn push).
             "prev_settled_tx_chain": genesis_chain.to_hex(),
             // AuthorizedWithdrawal fields.
-            "withdrawal_recipient": format!("0x{}", hex::encode(withdrawal_addr.to_bytes_be())),
-            "withdrawal_token_index": 0u32,
+            "withdrawal_recipient": format!("0x{}", hex::encode(withdrawal.recipient.to_bytes_be())),
+            "withdrawal_token_index": withdrawal.token_index,
             "withdrawal_amount": burn_amount,
             "withdrawal_nullifier": withdrawal.nullifier.to_hex(),
             "withdrawal_aux_data": tx_leaf.to_hex(),

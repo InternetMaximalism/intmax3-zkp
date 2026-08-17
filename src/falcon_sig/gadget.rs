@@ -191,10 +191,10 @@ fn twiddle_tables() -> (Vec<u64>, Vec<u64>, u64) {
 /// canonical value of `t`. Completeness only — soundness comes from
 /// [`constrain_mod_q_decomposition`].
 #[derive(Debug, Default)]
-struct ModQGenerator {
-    t: Target,
-    k: Target,
-    r: Target,
+pub(super) struct ModQGenerator {
+    pub(super) t: Target,
+    pub(super) k: Target,
+    pub(super) r: Target,
 }
 
 impl<F: RichField + Extendable<D>, const D: usize> SimpleGenerator<F, D> for ModQGenerator {
@@ -273,7 +273,7 @@ fn constrain_mod_q_decomposition<F: RichField + Extendable<D>, const D: usize>(
 
 /// Reduces `t` mod q: allocates `(k, r)`, installs the honest [`ModQGenerator`], and applies
 /// [`constrain_mod_q_decomposition`]. Returns `r`. Caller obligation on `t`'s bound as above.
-fn reduce_mod_q<F: RichField + Extendable<D>, const D: usize>(
+pub(super) fn reduce_mod_q<F: RichField + Extendable<D>, const D: usize>(
     builder: &mut CircuitBuilder<F, D>,
     t: Target,
     k_bits: usize,
@@ -287,7 +287,7 @@ fn reduce_mod_q<F: RichField + Extendable<D>, const D: usize>(
 
 /// Range-checks a witnessed coefficient to the canonical domain `[0, q)` (same two-check
 /// construction as the `r < q` part of the reduction primitive).
-fn assert_canonical_coeff<F: RichField + Extendable<D>, const D: usize>(
+pub(super) fn assert_canonical_coeff<F: RichField + Extendable<D>, const D: usize>(
     builder: &mut CircuitBuilder<F, D>,
     v: Target,
 ) {
@@ -350,7 +350,7 @@ fn goldilocks_mod_q_block<F: RichField + Extendable<D>, const D: usize>(
 /// Salt elements are range-checked `< 2^40` here (injectivity of the 40-byte packing).
 /// Digest limbs must be canonical u32s — guaranteed by the gadget's `Bytes32Target::new(_,
 /// true)` input construction (and by any consumer connecting a keccak output).
-fn h2p_circuit<F: RichField + Extendable<D>, const D: usize>(
+pub(super) fn h2p_circuit<F: RichField + Extendable<D>, const D: usize>(
     builder: &mut CircuitBuilder<F, D>,
     salt: &[Target; 8],
     message_digest: &Bytes32Target,
@@ -398,7 +398,7 @@ fn h2p_circuit<F: RichField + Extendable<D>, const D: usize>(
 /// PRECONDITION (caller-enforced, single site in [`FalconSigVerifyTarget::new`]): every `h`
 /// coefficient is range-checked `< q < 2^14`, which makes the 4x14-bit-lane packing injective
 /// (each packed element `< 2^56 < p`) — exactly the native `encode(h)` canonicity argument.
-fn pk_digest_circuit<F: RichField + Extendable<D>, const D: usize>(
+pub(super) fn pk_digest_circuit<F: RichField + Extendable<D>, const D: usize>(
     builder: &mut CircuitBuilder<F, D>,
     h: &[Target],
 ) -> Bytes32Target {
@@ -531,9 +531,9 @@ fn pointwise_mul<F: RichField + Extendable<D>, const D: usize>(
 
 /// Witness generator for the honest centering bit `b = (v > q/2)` of a canonical `v < q`.
 #[derive(Debug, Default)]
-struct CenterBitGenerator {
-    v: Target,
-    b: Target,
+pub(super) struct CenterBitGenerator {
+    pub(super) v: Target,
+    pub(super) b: Target,
 }
 
 impl<F: RichField + Extendable<D>, const D: usize> SimpleGenerator<F, D> for CenterBitGenerator {
@@ -571,7 +571,7 @@ impl<F: RichField + Extendable<D>, const D: usize> SimpleGenerator<F, D> for Cen
 /// increase the square, so the norm bound stays sound; the honest generator minimizes).
 /// Field arithmetic note: for `b = 1` the field value `v - q mod p = p - (q - v)` squares to
 /// `(q - v)^2 mod p`, and `(q - v)^2 < 2^28 << p`, so the field square IS the integer square.
-fn centered_square<F: RichField + Extendable<D>, const D: usize>(
+pub(super) fn centered_square<F: RichField + Extendable<D>, const D: usize>(
     builder: &mut CircuitBuilder<F, D>,
     v: Target,
 ) -> Target {

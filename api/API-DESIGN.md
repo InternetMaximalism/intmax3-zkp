@@ -553,10 +553,35 @@ Response: { authDigest: string }
 **Inputs:** (none — uses on-chain state)
 **Outputs:** `{ authDigest: string }`
 
-**Current status:**
-- CLI: `pw-finalize` — implemented
-- Relay: `POST /api/pw-finalize` — implemented
-- Contract: `finalizePartialWithdrawal()`, `claimWithdrawalCredit()` — implemented
+**Current status: AUTHORIZATION ONLY — NO PAYOUT ON ANY CHAIN.**
+
+Read this before relying on the rows below: they describe what EXISTS, not an
+end-to-end capability. A partial withdrawal authorizes on chain and then stops.
+No ETH or ERC-20 leaves the rollup on this path today.
+
+- CLI: `pw-finalize` — implemented, and **exits 1 by design after recording the
+  authorization**. That is fail-closed, not a bug.
+- Relay: `POST /api/pw-finalize` — returns **501** with
+  `{authorized: true, paidOut: false, authDigest}` and marks the ticket
+  `settle_blocked` (never the terminal `settle_done`).
+- Contract: `finalizePartialWithdrawal()`, `claimWithdrawalCredit()` — implemented.
+- **Payout: NOT IMPLEMENTED.** `IntmaxRollup.claimAuthorizedWithdrawal` was
+  DELETED in `42640f1` because it paid the GLOBAL escrow against the
+  authorization alone, with no withdrawal proof — and since
+  `submitPartialWithdrawalIntent` binds only `auxData`, amount and recipient
+  were caller-chosen, so one valid close proof for one's OWN channel could drain
+  every channel's ETH (`doc/tasks/pw-auth-threat-model.md`). Its proof-backed
+  replacement, `cmd_partial_withdraw`, has never been written.
+
+Two blockers stand in front of that replacement, both recorded at
+`src/bin/channel_member.rs:6512`: `cmd_pw_submit` invents
+`nullifier = keccak(tx_leaf ‖ pre_burn_chain)` where a provable leaf needs
+`settled_transfer.nullifier()`; and `base Transfer.amount == the channel-layer
+debit` is still only a CO-SIGNER ASSUMPTION, not an in-circuit equality
+(audit F-AUX-1). Design in progress:
+`doc/tasks/partial-withdrawal-payout-design.md`.
+
+**Full withdrawal (close → settle → withdraw → claim) is the working exit path.**
 
 **API implementation:**
 ```

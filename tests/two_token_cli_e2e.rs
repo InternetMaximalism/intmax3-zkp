@@ -50,10 +50,13 @@
 
 use std::{
     path::PathBuf,
-    process::{Child, Command, Stdio},
+    process::{Command, Stdio},
     thread,
     time::Duration,
 };
+
+mod anvil_harness;
+use anvil_harness::AnvilNode;
 
 // anvil dev account[0] — a PUBLIC throwaway key; the broadcasting EOA, member-slot-0 payout
 // recipient (bound by DeployCloseCli), depositor, and claim caller.
@@ -85,14 +88,6 @@ fn tool_present(bin: &str) -> bool {
         .status()
         .map(|s| s.success())
         .unwrap_or(false)
-}
-
-struct AnvilGuard(Child);
-impl Drop for AnvilGuard {
-    fn drop(&mut self) {
-        let _ = self.0.kill();
-        let _ = self.0.wait();
-    }
 }
 
 /// Backs up the tracked `sepolia_*` fixtures the CLI clobbers when staging, restores them on
@@ -279,36 +274,10 @@ fn two_token_cli_e2e() {
     // interval mining is WORSE — the tx gets dropped outright and forge waits forever on a
     // receipt that cannot arrive). The unsticker polls `txpool_status` and force-mines whenever
     // anything sits pending. Orchestration-only; no verification semantics touched.
-    let anvil = Command::new("anvil")
-        .args([
-            "--hardfork",
-            "prague",
-            "--base-fee",
-            "0",
-            "--port",
-            &PORT.to_string(),
-        ])
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .expect("spawn anvil");
-    let _anvil = AnvilGuard(anvil);
-    let mut up = false;
-    for _ in 0..40 {
-        if Command::new("cast")
-            .args(["block-number", "--rpc-url", &rpc])
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status()
-            .map(|s| s.success())
-            .unwrap_or(false)
-        {
-            up = true;
-            break;
-        }
-        thread::sleep(Duration::from_millis(250));
-    }
-    assert!(up, "anvil did not come up on {rpc}");
+    // Spawns anvil and proves the node answering on PORT is the one we spawned (fresh chain,
+    // our own process). See tests/anvil_harness/mod.rs for why a plain `cast block-number` poll
+    // is not enough. Killed on drop.
+    let _anvil = AnvilNode::spawn("two_token_cli_e2e", PORT, &["--base-fee", "0"]);
 
     drop(WorkspaceGuard::new()); // pre-clean stale CLI state from any prior aborted run
 

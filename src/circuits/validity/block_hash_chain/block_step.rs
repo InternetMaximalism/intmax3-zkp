@@ -1049,14 +1049,13 @@ mod tests {
             user_merkle_proofs: block_witness.user_merkle_proofs.clone(),
             send_merkle_proofs: block_witness.send_merkle_proofs.clone(),
             prev_bp_sig_chain: initial_state.bp_sig_chain,
-            // Dummy member proofs/keys: this test path keeps every slot non-updating, so the
-            // member binding and signature constraints are skipped (should_update == false).
-            member_merkle_proofs: vec![
-                crate::common::trees::key_tree::MemberMerkleProof::dummy(
-                    crate::constants::MEMBER_TREE_HEIGHT,
-                );
-                num_users
+            // No member set / no signature: this test path keeps every slot non-updating, so the
+            // whole N-of-N binding is gated off (should_update == false).
+            member_leaves: vec![
+                crate::common::trees::key_tree::MemberLeaf::default();
+                crate::constants::MAX_COSIGNERS
             ],
+            signer_count: 0,
             member_regev_pks: vec![
                 crate::regev::RegevPk {
                     a: vec![0u32; crate::regev::REGEV_N],
@@ -1064,9 +1063,8 @@ mod tests {
                 };
                 num_users
             ],
-            member_pk_bs: vec![crate::utils::poseidon_hash_out::PoseidonHashOut::default(); num_users],
-            msg_fields:
-                crate::circuits::validity::block_hash_chain::small_block_message::SmallBlockMessageFields::default(),
+            channel_state_fields:
+                crate::circuits::validity::block_hash_chain::channel_state_message::ChannelStateMessageFields::default(),
             tx_v2_indices: vec![0; num_users],
             tx_v2s: vec![crate::common::tx::TxV2::default(); num_users],
             tx_v2_merkle_proofs: vec![

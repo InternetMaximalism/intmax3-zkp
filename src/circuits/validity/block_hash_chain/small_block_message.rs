@@ -8,11 +8,15 @@
 //!                 medium_epoch_hint || close_freeze_nonce)
 //! consumed in-circuit as 8 Goldilocks elements, one u32 digest limb each.
 //!
-//! SECURITY: the digest is recomputed IN-CIRCUIT from witnessed message fields with the
-//! `tx_tree_root` component connected to the block's actual tx_tree_root targets, so a signature
-//! can never be verified over a different root than the one applied. Additionally `tx_tree_root !=
-//! 0` is enforced whenever a member signature is applied (detail2 §C-2: H2 = 0 is reserved for
-//! in-channel updates).
+//! STATUS (small-block N-of-N design §9 Phase 3): the base layer no longer authorizes a block with
+//! this message. `update_channel_tree` used to recompute this digest in-circuit and fold it with a
+//! SINGLE member's `pk_g`, which authorized a block on 1-of-N — the defect the N-of-N change
+//! removes. It now recomputes the IMCH channel-state digest (`channel_state_message`), whose
+//! `h2_tag` IS the block's `tx_tree_root`, and requires the whole registered member set. This
+//! module remains the mirror of the IMSB message the protocol still carries off-circuit (and the
+//! cross-context isolation tests still exercise it against IMCH); it is NOT a live authorization
+//! path. `tx_tree_root != 0` is still enforced wherever a member signature is applied (detail2
+//! §C-2: H2 = 0 is reserved for in-channel updates), in `update_channel_tree`.
 //!
 //! P4-3: these types were extracted from the deleted `sphincs_sig` module (the SPHINCS+ witness /
 //! target residue was removed once the validity/close signature check moved to the Goldilocks
