@@ -23,8 +23,11 @@ identifiers (EC2 IP, instance id, domain/URL, on-chain addresses, key paths) are
 - AWS creds: `.claude/.apikey` (gitignored, `KEY=value` lines). Load: `set -a; . ./.claude/.apikey; set +a`.
   Scope: S3 + EC2 only, region **eu-north-1**. No CloudFront / SSM / other-region EC2.
 - EC2 SSH key: `.claude/aws/intmax-signer.pem` (gitignored, chmod 600).
-- Sepolia deployer key: `…/intmax3-zkp-enshrined-paymentchannel/.claude/priv` (SIBLING worktree;
-  gitignored). Hand to forge/cast via `--private-key "$(cat <that path>)"`; NEVER read/print it.
+- Sepolia signer: import it once into Foundry's encrypted keystore with
+  `cast wallet import intmax-testnet-operator --interactive`. Set
+  `INTMAX_L1_ACCOUNT=intmax-testnet-operator`; never export a raw private key. For the
+  non-interactive CLI/API, set `ETH_PASSWORD=/absolute/path/to/a/0600/password-file` (Foundry's env
+  alias for `--password-file`); do not put the password text in an environment variable.
 - Tools: docker + buildx, foundry (forge/cast), node 20, wasm-bindgen, rust nightly (rust-toolchain.toml).
 
 ## Build
@@ -162,30 +165,29 @@ second, which made `finalizeClose()` reachable one block after a close intent wa
 
 ```bash
 export SEPOLIA_RPC_URL=https://ethereum-sepolia-rpc.publicnode.com    # or your own
+export INTMAX_L1_ACCOUNT=intmax-testnet-operator                       # encrypted Foundry keystore
+export ETH_PASSWORD=/absolute/path/to/0600/foundry-password-file       # path, not password text
 export INTMAX_COSIGNER_KEYFILE="$PWD/.claude/cosigner.key"            # see section above; required
 export FRAUD_TREASURY=0x<treasury>                                    # REQUIRED off-anvil (hard revert otherwise)
-PRIV=…/intmax3-zkp-enshrined-paymentchannel/.claude/priv
 cd contracts && forge script script/Deploy.s.sol --rpc-url "$SEPOLIA_RPC_URL" \
-  --private-key "$(cat "$PRIV")" --broadcast --slow                  # prints IntmaxRollup addr; run TWICE (ch7, ch8)
+  --account "$INTMAX_L1_ACCOUNT" --broadcast --slow                  # prints IntmaxRollup addr; run TWICE (ch7, ch8)
 # MANDATORY read-back before any deposit — `false` means that rollup can never pay out:
 cast call <rollup7> "withdrawalVkInitialized()(bool)" --rpc-url "$SEPOLIA_RPC_URL"   # must print true
 cast call <rollup8> "withdrawalVkInitialized()(bool)" --rpc-url "$SEPOLIA_RPC_URL"   # must print true
 cd .. && mkdir -p deploy-staging/ch7 deploy-staging/ch8
-( cd deploy-staging/ch7 && INTMAX_CHANNEL=7 INTMAX_DEPOSIT_KEY="$(cat "$PRIV")" \
+( cd deploy-staging/ch7 && INTMAX_CHANNEL=7 INTMAX_L1_ACCOUNT="$INTMAX_L1_ACCOUNT" \
     ../../target/release/channel_member setup-backing "$SEPOLIA_RPC_URL" <rollup7> )   # real Sepolia deposit + balance proof
-( cd deploy-staging/ch8 && INTMAX_CHANNEL=8 INTMAX_DEPOSIT_KEY="$(cat "$PRIV")" \
+( cd deploy-staging/ch8 && INTMAX_CHANNEL=8 INTMAX_L1_ACCOUNT="$INTMAX_L1_ACCOUNT" \
     ../../target/release/channel_member setup-backing "$SEPOLIA_RPC_URL" <rollup8> )
 # ship deploy-staging/ch{7,8}/{channel_backing.json,channel_attestation.bin,balance_vd.bin,tokens.json} → EC2 ~/relay/wallet-live-work/ch{7,8}/
 ```
-- `INTMAX_CHANNEL` selects the channel; `INTMAX_DEPOSIT_KEY` is the funded deposit key. EIP-170 is
+- `INTMAX_CHANNEL` selects the channel; `INTMAX_L1_ACCOUNT` names the funded Foundry keystore. EIP-170 is
   NOT a blocker: IntmaxRollup runtime ≈ 24,446 B (fits the 24,576 cap).
-- **`INTMAX_DEPOSIT_KEY` unset makes the Rust CLI fall back to the public anvil dev key**
-  (`channel_member.rs:877`). `api/lib/cli.js` guards this, the binary does not — always set it
-  explicitly for any real network. Tracked in `cosigner-key-provenance.md` §6.3.
-- **Known exposure (unfixed):** the CLI passes `INTMAX_DEPOSIT_KEY` to `cast` as
-  `--private-key <value>` in **argv** at 27 call sites, so any local user can read the funded
-  Sepolia key with `ps auxww` during a run. Do not run these commands on a shared host.
-  Tracked in `cosigner-key-provenance.md` §6.2.
+- **Raw-key argv exposure is closed:** on every chain except 31337 the CLI/API reject
+  `INTMAX_DEPOSIT_KEY` and require `INTMAX_L1_ACCOUNT`, passed to Foundry as `--account`. Foundry
+  obtains the keystore password non-interactively from the password file named by `ETH_PASSWORD`;
+  neither the path nor password material is added to child argv. Raw `--private-key` remains
+  local-Anvil-only.
 
 ### ERC-20 token registration (multi-token §N-7) — AFTER the rollup deploy, BEFORE any ERC-20 deposit
 The base `tokenIndex → ERC-20` registry is **set-once per index** (TM-10b) and `deposit()` reverts
@@ -196,7 +198,7 @@ $EDITOR deploy-staging/ch7/tokens.json            # template: node/tokens.exampl
                                                   # `rollup` = the address just deployed, `chainId` = 11155111
 cd contracts && TOKENS_MANIFEST=../deploy-staging/ch7/tokens.json \
   forge script script/RegisterTokens.s.sol --rpc-url "$SEPOLIA_RPC_URL" \
-  --private-key "$(cat "$PRIV")" --broadcast --slow     # NEVER echo/print the key
+  --account "$INTMAX_L1_ACCOUNT" --broadcast --slow
 cast call <rollup7> "tokenAddressOf(uint32)(address)" 5 --rpc-url "$SEPOLIA_RPC_URL"
 ```
 - Idempotent: a re-run with the same manifest is a no-op. A manifest disagreeing with an

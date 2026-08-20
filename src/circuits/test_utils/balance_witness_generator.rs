@@ -348,6 +348,25 @@ where
         &self,
         data: &ReceiveDepositData,
     ) -> Result<ReceiveDepositWitness<F, C, D>, BalanceWitnessGeneratorError> {
+        self.receive_deposit_witness_inner(data, None)
+    }
+
+    /// Production variant which consumes the exact L1/producer-assigned deposit index. The
+    /// recipient-only helper remains for fixtures, but is ambiguous when one account is funded
+    /// more than once.
+    pub fn receive_deposit_witness_at_index(
+        &self,
+        data: &ReceiveDepositData,
+        deposit_index: u64,
+    ) -> Result<ReceiveDepositWitness<F, C, D>, BalanceWitnessGeneratorError> {
+        self.receive_deposit_witness_inner(data, Some(deposit_index))
+    }
+
+    fn receive_deposit_witness_inner(
+        &self,
+        data: &ReceiveDepositData,
+        deposit_index: Option<u64>,
+    ) -> Result<ReceiveDepositWitness<F, C, D>, BalanceWitnessGeneratorError> {
         let prev_balance_proof = self.balance_proof.clone();
         let prev_balance_pis = self.get_public_inputs()?;
 
@@ -389,10 +408,16 @@ where
             "account state root mismatch for deposit",
         );
 
-        let (deposit, deposit_merkle_proof) = self
-            .block_witness_generator
-            .borrow()
-            .get_deposit_merkle_proof(data.receiver)?;
+        let (deposit, deposit_merkle_proof) = match deposit_index {
+            Some(index) => self
+                .block_witness_generator
+                .borrow()
+                .get_deposit_merkle_proof_at_index(index, data.receiver)?,
+            None => self
+                .block_witness_generator
+                .borrow()
+                .get_deposit_merkle_proof(data.receiver)?,
+        };
         if deposit.block_number.as_u64() > new_block_r.as_u64() {
             return Err(BalanceWitnessGeneratorError::InvalidBlock(format!(
                 "deposit block number {} exceeds receiver new_block_r {}",

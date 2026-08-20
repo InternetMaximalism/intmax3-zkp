@@ -230,6 +230,92 @@ pub struct ChannelMemberKeys {
     pub member_tree: MemberTree,
 }
 
+/// Public-only channel material needed by the validity witness generator.
+///
+/// This deliberately contains no Falcon or BabyBear secret key. A production block producer
+/// learns the member leaves from the in-band [`ChannelRegRecord`], receives the full Regev public
+/// keys needed by `update_channel_tree`, and consumes the members' already-collected Falcon
+/// cosignatures through [`ChannelCosignBundle`]. Keeping this separate from [`ChannelMemberKeys`]
+/// prevents the production path from accidentally inheriting the fixture harness's ability to
+/// sign for every member.
+#[derive(Clone, Debug)]
+pub struct RegisteredChannelPublicData {
+    pub regev_pks: Vec<RegevPk>,
+    pub member_tree: MemberTree,
+    pub member_count: usize,
+}
+
+#[derive(Clone)]
+struct LocalTestSigners(Vec<std::sync::Arc<FalconKeys>>);
+
+impl core::fmt::Debug for LocalTestSigners {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_tuple("LocalTestSigners")
+            .field(&format_args!("<{} secret keys redacted>", self.0.len()))
+            .finish()
+    }
+}
+
+impl RegisteredChannelPublicData {
+    fn from_record_and_regev_pks(
+        record: &ChannelRegRecord,
+        regev_pks: Vec<RegevPk>,
+    ) -> Result<Self, BlockWitnessGeneratorError> {
+        record.validate().map_err(|e| {
+            BlockWitnessGeneratorError::InvalidRequest(format!(
+                "invalid channel registration record: {e}"
+            ))
+        })?;
+        if record.delegate_count != 0 {
+            return Err(BlockWitnessGeneratorError::InvalidRequest(format!(
+                "channel {} registration has delegate_count {}: the validity registration \
+                 circuit is cosigner-only and requires zero delegates",
+                record.channel_id.as_u64(),
+                record.delegate_count
+            )));
+        }
+        let member_count = record.member_count as usize;
+        if regev_pks.len() != member_count {
+            return Err(BlockWitnessGeneratorError::InvalidRequest(format!(
+                "channel {} registration has {member_count} members but {} Regev public keys",
+                record.channel_id.as_u64(),
+                regev_pks.len()
+            )));
+        }
+
+        let mut member_tree = MemberTree::init();
+        for (slot, (entry, regev_pk)) in record
+            .members
+            .iter()
+            .zip(regev_pks.iter())
+            .take(member_count)
+            .enumerate()
+        {
+            let actual_regev_digest = Bytes32::from(regev_pk.poseidon_digest());
+            if actual_regev_digest != entry.regev_pk_digest {
+                return Err(BlockWitnessGeneratorError::InvalidRequest(format!(
+                    "channel {} slot {slot}: supplied Regev public key digest {} does not match \
+                     the registered digest {}",
+                    record.channel_id.as_u64(),
+                    actual_regev_digest,
+                    entry.regev_pk_digest
+                )));
+            }
+            member_tree.push(MemberLeaf {
+                pk_g: entry.pk_g.reduce_to_hash_out(),
+                pk_b: entry.pk_b.reduce_to_hash_out(),
+                regev_pk_digest: entry.regev_pk_digest.reduce_to_hash_out(),
+            });
+        }
+
+        Ok(Self {
+            regev_pks,
+            member_tree,
+            member_count,
+        })
+    }
+}
+
 impl core::fmt::Debug for ChannelMemberKeys {
     // INTENTIONALLY SIMPLE: `FalconKeys` has no `Debug` (secret material); print only the count.
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
@@ -440,9 +526,14 @@ pub struct BlockWitnessGenerator {
     pub send_leaves: HashMap<ChannelId, Vec<SendLeaf>>,
     pub deposit_tree: DepositTree,
     pub public_state_tree: PublicStateTree,
-    /// Per-channel member key material (test-only). Populated by [`Self::register_channel`] before
-    /// the channel's first updating block.
-    pub channel_members: HashMap<ChannelId, ChannelMemberKeys>,
+    /// Public per-channel registration material used by both production and fixture paths.
+    pub channel_members: HashMap<ChannelId, RegisteredChannelPublicData>,
+    /// Fixture-only local Falcon signers. Production registration never populates this map and
+    /// therefore cannot take the historical local re-signing fallback.
+    local_test_signers: HashMap<ChannelId, LocalTestSigners>,
+    /// Full fixture material retained only to preserve the historical idempotent test helpers.
+    /// Production registration never populates this map.
+    fixture_channel_keys: HashMap<ChannelId, ChannelMemberKeys>,
 
     pub block_hash_chain: Bytes32,
     pub deposit_hash_chain: Bytes32,
@@ -455,10 +546,10 @@ pub struct BlockWitnessGenerator {
     pub deposits: HashMap<BlockNumber, Vec<Deposit>>,
     pub deposit_counts: u64,
     /// Channels queued for in-band registration (mirror of `deposits`). Each entry is the keccak
-    /// registration record + the channel's member key material; drained into a dedicated
+    /// registration record + the channel's public member material; drained into a dedicated
     /// registration block by [`Self::add_registration_block`]. Queued, not yet applied to
     /// `channel_tree` (the registration block applies it).
-    pub channel_registrations: Vec<(ChannelRegRecord, ChannelMemberKeys)>,
+    pub channel_registrations: Vec<(ChannelRegRecord, RegisteredChannelPublicData)>,
     pub block_chain_witness: HashMap<BlockNumber, BlockHashChainProcessorWitness>,
     /// P2b: the ordered list of N-of-N IMCH signing events over the whole span, in block order.
     /// The validity level folds each into one `falcon_sig::agg_list::AggListCircuit` step (one
@@ -508,6 +599,8 @@ impl BlockWitnessGenerator {
             deposit_tree: DepositTree::init(),
             public_state_tree: PublicStateTree::init(),
             channel_members: HashMap::new(),
+            local_test_signers: HashMap::new(),
+            fixture_channel_keys: HashMap::new(),
             block_hash_chain: Bytes32::default(),
             deposit_hash_chain: Bytes32::default(),
             channel_reg_hash_chain: Bytes32::default(),
@@ -530,7 +623,8 @@ impl BlockWitnessGenerator {
     /// advancing the channel-registration keccak chain and writing the channel's `ChannelLeaf`
     /// (with `member_pubkeys_root = member_tree.get_root()`) deterministically, exactly as the
     /// `channel_reg_step` validity circuit does. The member keys are recorded immediately in
-    /// `channel_members` so the caller can drive signing for the channel's later updating blocks.
+    /// The public member tree is recorded immediately in `channel_members`; fixture-only signers
+    /// live in a separate private map.
     ///
     /// This MUST be followed by a registration block (and that block MUST land before the channel's
     /// first updating block): the live `update_channel_tree` binding opens each signing member's
@@ -541,16 +635,27 @@ impl BlockWitnessGenerator {
     /// returns the existing keys. Returns the (clone of the) member keys.
     pub fn add_channel_registration(&mut self, channel_id: u32) -> ChannelMemberKeys {
         let channel = ChannelId::new(channel_id as u64).expect("channel id");
-        if let Some(existing) = self.channel_members.get(&channel) {
-            return existing.clone();
+        if self.channel_members.contains_key(&channel) {
+            return self
+                .fixture_channel_keys
+                .get(&channel)
+                .cloned()
+                .unwrap_or_else(|| {
+                    panic!(
+                        "channel {channel_id} was registered through the public-only production \
+                         path and has no fixture keys"
+                    )
+                });
         }
         let keys = ChannelMemberKeys::deterministic(channel_id);
         let record = keys.to_reg_record(channel_id);
-        record
-            .validate()
-            .expect("deterministic test registration record must be valid");
-        self.channel_registrations.push((record, keys.clone()));
-        self.channel_members.insert(channel, keys.clone());
+        self.add_channel_registration_material(
+            record,
+            keys.regev_pks.clone(),
+            Some(keys.falcon_keys.clone()),
+        )
+        .expect("deterministic test registration record must be valid");
+        self.fixture_channel_keys.insert(channel, keys.clone());
         keys
     }
 
@@ -576,16 +681,82 @@ impl BlockWitnessGenerator {
         delegate_count: u32,
     ) -> ChannelMemberKeys {
         let channel = ChannelId::new(channel_id as u64).expect("channel id");
-        if let Some(existing) = self.channel_members.get(&channel) {
-            return existing.clone();
+        if self.channel_members.contains_key(&channel) {
+            return self
+                .fixture_channel_keys
+                .get(&channel)
+                .cloned()
+                .unwrap_or_else(|| {
+                    panic!(
+                        "channel {channel_id} was registered through the public-only production \
+                         path and has no fixture keys"
+                    )
+                });
         }
         let record = keys.to_reg_record_split(channel_id, member_count, delegate_count);
-        record
-            .validate()
-            .expect("registration record must be valid");
-        self.channel_registrations.push((record, keys.clone()));
-        self.channel_members.insert(channel, keys.clone());
+        let active = (member_count + delegate_count) as usize;
+        self.add_channel_registration_material(
+            record,
+            keys.regev_pks[..active].to_vec(),
+            Some(keys.falcon_keys[..active].to_vec()),
+        )
+        .expect("registration record must be valid");
+        self.fixture_channel_keys.insert(channel, keys.clone());
         keys
+    }
+
+    /// Queue a production registration using public data only.
+    ///
+    /// No signing key is accepted or retained. Consequently the next updating block MUST stage a
+    /// real [`ChannelCosignBundle`]; otherwise block construction fails closed instead of signing
+    /// locally. `regev_pks` are checked against every registered digest before any state mutates.
+    pub fn add_channel_registration_public(
+        &mut self,
+        record: ChannelRegRecord,
+        regev_pks: Vec<RegevPk>,
+    ) -> Result<(), BlockWitnessGeneratorError> {
+        self.add_channel_registration_material(record, regev_pks, None)
+    }
+
+    fn add_channel_registration_material(
+        &mut self,
+        record: ChannelRegRecord,
+        regev_pks: Vec<RegevPk>,
+        local_test_signers: Option<Vec<std::sync::Arc<FalconKeys>>>,
+    ) -> Result<(), BlockWitnessGeneratorError> {
+        let channel = record.channel_id;
+        if self.channel_members.contains_key(&channel)
+            || self
+                .channel_registrations
+                .iter()
+                .any(|(queued, _)| queued.channel_id == channel)
+        {
+            return Err(BlockWitnessGeneratorError::InvalidRequest(format!(
+                "channel {} is already registered or queued",
+                channel.as_u64()
+            )));
+        }
+        let public = RegisteredChannelPublicData::from_record_and_regev_pks(&record, regev_pks)?;
+        if let Some(signers) = local_test_signers {
+            if signers.len() != public.member_count {
+                return Err(BlockWitnessGeneratorError::InvalidRequest(format!(
+                    "channel {} fixture signer count {} does not match member_count {}",
+                    channel.as_u64(),
+                    signers.len(),
+                    public.member_count
+                )));
+            }
+            self.local_test_signers
+                .insert(channel, LocalTestSigners(signers));
+        }
+        self.channel_registrations.push((record, public.clone()));
+        self.channel_members.insert(channel, public);
+        Ok(())
+    }
+
+    /// Security introspection used by production-boundary tests and startup checks.
+    pub fn holds_local_signing_keys(&self, channel: ChannelId) -> bool {
+        self.local_test_signers.contains_key(&channel)
     }
 
     /// Produce a dedicated REGISTRATION block consuming exactly ONE queued registration (R6: a
@@ -610,7 +781,7 @@ impl BlockWitnessGenerator {
                 "no queued channel registration to produce a registration block".to_string(),
             ));
         }
-        let (record, _keys) = self.channel_registrations.remove(0);
+        let (record, public) = self.channel_registrations.remove(0);
         let channel = record.channel_id;
 
         // R5 unregistered guard (native mirror): the channel must currently be the default leaf.
@@ -669,7 +840,7 @@ impl BlockWitnessGenerator {
 
         // Apply the registration to the channel tree (write the real member root leaf), exactly as
         // `channel_reg_step` does in-circuit.
-        let member_pubkeys_root = _keys.member_tree.get_root();
+        let member_pubkeys_root = public.member_tree.get_root();
         let registered_leaf = ChannelLeaf {
             index: 0,
             prev: BlockNumber::default(),
@@ -740,10 +911,15 @@ impl BlockWitnessGenerator {
         if self.channel_tree.get_leaf(channel.as_u64()) != ChannelLeaf::default() {
             // Already registered on-chain: return the existing keys (idempotent).
             return self
-                .channel_members
+                .fixture_channel_keys
                 .get(&channel)
                 .cloned()
-                .expect("registered channel must have recorded member keys");
+                .unwrap_or_else(|| {
+                    panic!(
+                        "channel {channel_id} was registered through the public-only production \
+                         path and has no fixture keys"
+                    )
+                });
         }
         let keys = self.add_channel_registration(channel_id);
         self.add_registration_block(0)
@@ -905,6 +1081,30 @@ impl BlockWitnessGenerator {
         tx_tree_root: Bytes32,
         tx_v2_witness: Option<BlockTxV2Witness>,
     ) -> Result<(), BlockWitnessGeneratorError> {
+        // Construct on a private snapshot and commit only after every native check succeeds.
+        // Several validation failures occur after deposit/public-state projections are built;
+        // mutating `self` directly would otherwise consume queued deposits or advance Merkle
+        // state even though no block was produced.
+        let mut candidate = self.clone();
+        candidate.add_block_with_tx_v2_inner(
+            channel_id,
+            key_ids,
+            timestamp,
+            tx_tree_root,
+            tx_v2_witness,
+        )?;
+        *self = candidate;
+        Ok(())
+    }
+
+    fn add_block_with_tx_v2_inner(
+        &mut self,
+        channel_id: u32,
+        key_ids: &[u32],
+        timestamp: u64,
+        tx_tree_root: Bytes32,
+        tx_v2_witness: Option<BlockTxV2Witness>,
+    ) -> Result<(), BlockWitnessGeneratorError> {
         let num_users = get_num_users(key_ids.len(), &self.supported_user_counts)
             .ok_or(BlockWitnessGeneratorError::TooManyKeyIds(key_ids.len()))?;
 
@@ -1035,7 +1235,7 @@ impl BlockWitnessGenerator {
         // Phase 6: a wallet-supplied co-signed state supersedes the projection below.
         let staged_cosign = self.next_channel_cosign.take();
         let (channel_state_fields, signer_leaves, signed_digest) = if any_update_slot.is_some() {
-            let keys = member_keys.as_ref().ok_or_else(|| {
+            let public = member_keys.as_ref().ok_or_else(|| {
                 BlockWitnessGeneratorError::InvalidRequest(format!(
                     "channel {} has an updating slot but is not registered; call register_channel first",
                     channel_id
@@ -1057,9 +1257,10 @@ impl BlockWitnessGenerator {
                     // The projection therefore reproduces `ChannelState::signing_digest()` limb for
                     // limb ONLY while `channel_fund.channel_id == channel_id` — the documented
                     // production invariant (channel_state_message.rs:112-117), which nothing in
-                    // `ChannelState::validate()` actually asserts. If it were violated, the members'
-                    // signatures would be over a DIFFERENT digest than the one recomputed here and
-                    // would surface as an opaque verification failure deep in proving. Name it.
+                    // `ChannelState::validate()` actually asserts. If it were violated, the
+                    // members' signatures would be over a DIFFERENT digest than
+                    // the one recomputed here and would surface as an opaque
+                    // verification failure deep in proving. Name it.
                     if bundle.state.channel_fund.channel_id != bundle.state.channel_id {
                         return Err(BlockWitnessGeneratorError::InvalidRequest(format!(
                             "channel {channel_id}: the co-signed state's channel_fund.channel_id \
@@ -1089,7 +1290,7 @@ impl BlockWitnessGenerator {
             // for an inter-channel send"), which is the entire point of the binding.
             let digest = fields.signing_digest(channel_id, tx_tree_root);
             let leaves: Vec<MemberLeaf> = (0..MAX_COSIGNERS)
-                .map(|slot| keys.member_tree.get_leaf(slot as u64))
+                .map(|slot| public.member_tree.get_leaf(slot as u64))
                 .collect();
             (fields, Some(leaves), Some(digest))
         } else {
@@ -1099,13 +1300,13 @@ impl BlockWitnessGenerator {
         // Record the statement this block folds. The recorded gadget witnesses are exactly what
         // `FalconAggWitness { message, active }` consumes, so `build_agg_sig_list_proof` builds the
         // aggregate proofs from them without holding a signing key open until proving time.
-        if let (Some(digest), Some(keys)) = (signed_digest, member_keys.as_ref()) {
+        if let (Some(digest), Some(public)) = (signed_digest, member_keys.as_ref()) {
             let (signer_pks, witnesses) = match staged_cosign.as_ref() {
                 // Phase 6: DECODE the members' existing cosignatures. The producer holds no key —
                 // `FalconAggWitness` consumes only `(h, sig)`, both public, so aggregating is
                 // public work. This is the path a real block producer takes.
                 Some(bundle) => {
-                    let n = keys.falcon_keys.len();
+                    let n = public.member_count;
                     if bundle.signatures.len() != n {
                         return Err(BlockWitnessGeneratorError::InvalidRequest(format!(
                             "channel {channel_id}: expected {n} member cosignatures (N-of-N), got \
@@ -1123,8 +1324,8 @@ impl BlockWitnessGenerator {
                                 entry.member_slot
                             )));
                         }
-                        let (sig, h) =
-                            crate::falcon_sig::decode_cosign_blob(&entry.signature).map_err(|e| {
+                        let (sig, h) = crate::falcon_sig::decode_cosign_blob(&entry.signature)
+                            .map_err(|e| {
                                 BlockWitnessGeneratorError::InvalidRequest(format!(
                                     "channel {channel_id} slot {slot}: cosignature blob failed to \
                                      decode: {e:?} (a structural placeholder reaching here means \
@@ -1146,9 +1347,18 @@ impl BlockWitnessGenerator {
                 }
                 // Pre-Phase-6: the harness holds every member's key and signs locally (~ms each).
                 None => {
-                    let mut signer_pks = Vec::with_capacity(keys.falcon_keys.len());
-                    let mut witnesses = Vec::with_capacity(keys.falcon_keys.len());
-                    for key in keys.falcon_keys.iter() {
+                    let local_signers = channel_opt
+                        .and_then(|channel| self.local_test_signers.get(&channel))
+                        .ok_or_else(|| {
+                            BlockWitnessGeneratorError::InvalidRequest(format!(
+                                "channel {channel_id}: no wallet-supplied N-of-N cosignatures were \
+                                 staged and this production registration holds no local signing \
+                                 keys; collect the members' signatures before producing the block"
+                            ))
+                        })?;
+                    let mut signer_pks = Vec::with_capacity(local_signers.0.len());
+                    let mut witnesses = Vec::with_capacity(local_signers.0.len());
+                    for key in local_signers.0.iter() {
                         let sig = key.sign(digest);
                         signer_pks.push(key.pk_g());
                         witnesses.push(FalconSigGadgetWitness::for_signature(
@@ -1266,7 +1476,7 @@ impl BlockWitnessGenerator {
             // that transitions no leaf.
             signer_count: signer_leaves
                 .as_ref()
-                .and_then(|_| member_keys.as_ref().map(|k| k.falcon_keys.len() as u32)),
+                .and_then(|_| member_keys.as_ref().map(|k| k.member_count as u32)),
             member_leaves: signer_leaves,
             member_regev_pks: Some(member_regev_pks),
             channel_state_fields: Some(channel_state_fields),
@@ -1463,6 +1673,40 @@ impl BlockWitnessGenerator {
         let deposit_merkle_proof = self.deposit_tree.prove(deposit_index);
         Ok((deposit, deposit_merkle_proof))
     }
+
+    /// Return the exact producer-assigned deposit leaf rather than the first leaf sharing a
+    /// recipient. Production balance settlement must bind the L1 event index: a recipient may
+    /// legitimately receive more than one deposit, and selecting by recipient alone would make
+    /// every later leaf unspendable after the first nullifier is consumed.
+    pub fn get_deposit_merkle_proof_at_index(
+        &self,
+        deposit_index: u64,
+        expected_receiver: Bytes32,
+    ) -> Result<(Deposit, DepositMerkleProof), BlockWitnessGeneratorError> {
+        let deposit = self
+            .deposit_tree
+            .leaves()
+            .get(deposit_index as usize)
+            .cloned()
+            .ok_or_else(|| {
+                BlockWitnessGeneratorError::InvalidRequest(format!(
+                    "No deposit found at index {deposit_index}"
+                ))
+            })?;
+        if deposit.deposit_index.as_u64() != deposit_index {
+            return Err(BlockWitnessGeneratorError::InvalidRequest(format!(
+                "deposit tree leaf {deposit_index} carries index {}",
+                deposit.deposit_index.as_u64()
+            )));
+        }
+        if deposit.recipient != expected_receiver {
+            return Err(BlockWitnessGeneratorError::InvalidRequest(format!(
+                "deposit {deposit_index} recipient {:?} differs from expected {:?}",
+                deposit.recipient, expected_receiver
+            )));
+        }
+        Ok((deposit, self.deposit_tree.prove(deposit_index)))
+    }
 }
 
 /// Per-slot TxV2 witness for a non-empty block, sized to `num_users`.
@@ -1485,4 +1729,75 @@ pub struct SendStatus {
 
     // the block number of the next send tx. If there is no next send tx, it is None.
     pub next_send_block: Option<BlockNumber>,
+}
+
+#[cfg(test)]
+mod production_boundary_tests {
+    use super::*;
+
+    #[test]
+    fn public_registration_cannot_fall_back_to_local_resigning() {
+        const CHANNEL: u32 = 41;
+        let fixture_keys = ChannelMemberKeys::deterministic(CHANNEL);
+        let record = fixture_keys.to_reg_record(CHANNEL);
+        let regev_pks = fixture_keys.regev_pks.clone();
+        drop(fixture_keys);
+
+        let mut producer = BlockWitnessGenerator::new(&[1]);
+        producer
+            .add_channel_registration_public(record, regev_pks)
+            .expect("valid public registration");
+        let channel = ChannelId::new(CHANNEL as u64).unwrap();
+        assert!(!producer.holds_local_signing_keys(channel));
+        producer
+            .add_registration_block(0)
+            .expect("registration block");
+        producer
+            .add_deposit(
+                Address::default(),
+                Bytes32::from_u32_slice(&[9; 8]).unwrap(),
+                0,
+                U256::from(5u32),
+                Bytes32::default(),
+            )
+            .expect("queue deposit for the refused block");
+
+        let before = producer.block_number;
+        let before_state = producer.current_extended_public_state();
+        let before_deposits = producer.deposits.clone();
+        let before_deposit_count = producer.deposit_counts;
+        let before_blocks = producer.blocks.len();
+        let before_witnesses = producer.block_chain_witness.len();
+        let tx_tree_root = Bytes32::from_u32_slice(&[7; 8]).unwrap();
+        let err = producer
+            .add_block(CHANNEL, &[1], 1, tx_tree_root)
+            .expect_err("an unsigned production block must fail closed");
+        let message = err.to_string();
+        assert!(
+            message.contains("no wallet-supplied N-of-N cosignatures")
+                && message.contains("holds no local signing keys"),
+            "the refusal must identify the missing external cosign round: {message}"
+        );
+        assert_eq!(
+            producer.block_number, before,
+            "a refused unsigned block must not advance the producer state"
+        );
+        let after_state = producer.current_extended_public_state();
+        assert_eq!(after_state.inner, before_state.inner);
+        assert_eq!(after_state.block_hash_chain, before_state.block_hash_chain);
+        assert_eq!(
+            after_state.deposit_hash_chain,
+            before_state.deposit_hash_chain
+        );
+        assert_eq!(after_state.deposit_count, before_state.deposit_count);
+        assert_eq!(
+            after_state.channel_reg_hash_chain,
+            before_state.channel_reg_hash_chain
+        );
+        assert_eq!(after_state.bp_sig_chain, before_state.bp_sig_chain);
+        assert_eq!(producer.deposits, before_deposits);
+        assert_eq!(producer.deposit_counts, before_deposit_count);
+        assert_eq!(producer.blocks.len(), before_blocks);
+        assert_eq!(producer.block_chain_witness.len(), before_witnesses);
+    }
 }

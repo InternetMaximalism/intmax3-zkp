@@ -88,6 +88,14 @@ fn slim_verify_timing_breakdown() {
     let t = Instant::now();
     let slim2: intmax3_zkp::wallet_core::SlimSendPayload = serde_json::from_str(&json).expect("de");
     let t_de = t.elapsed();
+    let t = Instant::now();
+    let wire = slim.to_wire_bytes().expect("wire encode");
+    let t_wire_ser = t.elapsed();
+    let t = Instant::now();
+    let slim_wire =
+        intmax3_zkp::wallet_core::SlimSendPayload::from_wire_bytes(&wire).expect("wire decode");
+    let t_wire_de = t.elapsed();
+    assert_eq!(slim_wire, slim2);
 
     // 3) solo next-state reconstruction (1024-slot clone + full-state digest)
     let t = Instant::now();
@@ -126,6 +134,13 @@ fn slim_verify_timing_breakdown() {
     println!("proof generation (build_send): {:?}", t_gen);
     println!("slim JSON size: {:.2} MB", json.len() as f64 / 1e6);
     println!("serde serialize: {:?}   parse: {:?}", t_ser, t_de);
+    println!(
+        "slim binary size: {:.2} MB ({:.1}% of JSON); encode: {:?}   decode: {:?}",
+        wire.len() as f64 / 1e6,
+        wire.len() as f64 * 100.0 / json.len() as f64,
+        t_wire_ser,
+        t_wire_de,
+    );
     println!(
         "solo_next_state (1024-slot clone + full digest — NOT on the fast verify path; \
          paid once per batch inside build_batch_next_state): {:?}",

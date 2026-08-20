@@ -60,8 +60,12 @@ router.post('/burn', (req, res) => {
   const ch = Number(req.params.ch);
   withLock(ch, () => {
     const active = findActiveTicket(ch, 'partial_withdrawal');
-    if (active && active.status === 'burn_done') {
-      res.status(409).json({ error: 'settle pending burn first', ticket: active });
+    // `findActiveTicket` returns every non-terminal PW state. Once a burn exists, creating a
+    // second one would overwrite last_burn.json and the ticket even when the first workflow is
+    // already submit/finalize/payout-pending (or deliberately blocked for a retry). Only the
+    // terminal `settle_done` state is eligible to start another burn.
+    if (active) {
+      res.status(409).json({ error: 'resolve the active partial withdrawal before burning again', ticket: active });
       return;
     }
     const { debitPayload, transferDescriptor, tokenIndex } = req.body || {};
@@ -175,15 +179,14 @@ router.post('/settle', (req, res) => {
 // `cancelPartialWithdrawal(CancelCloseRequest, MleProof)` reuses the EXACT same
 // `verifier.verifyCancelClose(...)` and `CancelCloseProver` proof as A30 cancelClose (only the
 // on-chain pending digest it matches differs). The blocker is a SOUNDNESS question, not missing
-// machinery: cmd_pw_submit builds the partial-withdrawal CloseIntent with close_freeze_nonce = 0,
-// but the cancel circuit's era fence requires revived.close_freeze_nonce + 1 == intent.close_freeze_nonce,
-// which is unsatisfiable at nonce 0. Enabling A45 requires verifying/resolving that era-fence
-// interaction (its own threat model + independent review) before wiring the CLI cancel path —
-// shipping it unverified would be unsound money-cancel code. Deferred deliberately.
+// machinery. `pw-submit` now uses the real close proof's next-era nonce and P0-9 provides the
+// supported unilateral veto through `requestClose()`; a direct cancel route still needs a proof
+// that its revived-state era relation is equivalent for the partial-withdrawal lifecycle. Enabling
+// A45 requires that separate threat-model/review before wiring the CLI path. Deferred deliberately.
 router.post('/cancel', (req, res) => {
   res.status(501).json({
     error: 'cancel partial withdrawal not yet enabled',
-    detail: 'CancelCloseProver + verifyCancelClose are reusable (no new prover), but the partial-withdrawal era-fence (close_freeze_nonce=0 vs revived+1==intent) must be resolved before the cancel path is sound (A45).',
+    detail: 'Use requestClose() for the P0-9 unilateral veto. A direct partial-withdrawal cancel route still needs its revived-state era relation reviewed before it can reuse CancelCloseProver safely (A45).',
   });
 });
 

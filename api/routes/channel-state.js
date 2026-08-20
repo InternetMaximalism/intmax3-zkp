@@ -1,6 +1,7 @@
 const { Router } = require('express');
 const fs = require('fs');
 const { cli, wc, RPC, readJson, rollupOf } = require('../lib/cli');
+const { publicBacking, baseHead } = require('../../node/common/public-backing');
 
 // ONE shared implementation of the manifest validation + chain verification (node/common), so the
 // api, the node programs and the wallet relay cannot drift on what "verified" means. If the module
@@ -133,9 +134,20 @@ router.get('/tokens', (req, res) => {
 router.get('/backing', (req, res) => {
   try {
     const ch = Number(req.params.ch);
-    res.json(readJson(wc(ch, 'channel_backing.json')));
+    res.json(publicBacking(readJson(wc(ch, 'channel_backing.json'))));
   } catch (e) {
     res.status(404).json({ error: 'no deposit backing yet' });
+  }
+});
+
+// Public base send cursor. The full private witness stays operator-local; wallets need only this
+// nonce to bind their TxV2 and co-signers re-check it against the persisted IVC head.
+router.get('/base-head', (req, res) => {
+  try {
+    const ch = Number(req.params.ch);
+    res.json(baseHead(readJson(wc(ch, 'channel_backing.json'))));
+  } catch (e) {
+    res.status(409).json({ error: String(e.message || e) });
   }
 });
 

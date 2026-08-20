@@ -246,16 +246,15 @@ rejected. The count of slots (`INTMAX_CLI_COSIGNERS`) is independent of provenan
   is a *convention*, not enforcement — an operator can still put the file in a tracked directory.
   **Residual, accepted, documented in the runbooks.**
 
-### 5.4 Keys in process argv, visible via `ps` — PRE-EXISTING AND NOT FIXED HERE
-The **Ethereum L1 key is passed in argv** to `cast` at **27 call sites** in `channel_member.rs`
-(find them with `grep -n '"--private-key"' src/bin/channel_member.rs`; every one passes the
-*value* of `deposit_key_env()`). Any local user can `ps auxww` during the call and read the funded
-Sepolia deployer key. The comment at `:876` ("passed straight to `cast --private-key`; it is
-never logged") is accurate about logging and **wrong about exposure**: argv is world-readable.
-
-The *co-signer* master introduced here is **never** placed in argv — it never leaves the process.
-So this fix does not add to the problem. But the L1 key exposure is a live, separate finding.
-See §6.2.
+### 5.4 Keys in process argv, visible via `ps` — FIXED 2026-08-20
+All CLI/API L1 writes now resolve the RPC chain id before choosing a signer. Chain 31337 may use
+Anvil's public throwaway key; every other chain rejects `INTMAX_DEPOSIT_KEY` and requires a
+validated Foundry keystore name in `INTMAX_L1_ACCOUNT`, emitted only as `--account <name>`.
+Non-interactive CLI/API processes obtain the encrypted-keystore password from the password file
+named by Foundry's standard `ETH_PASSWORD` env alias, never from child argv. The only
+production-code `--private-key` literals
+left are inside the explicitly local branch of the shared signer abstraction (plus the dev-only
+localhost relay). Focused Rust and Node tests cover the real-chain refusal and argv selection.
 
 ### 5.5 The test path re-enabled in production by accident
 Ranked by likelihood:
@@ -307,20 +306,13 @@ choice between "one master compromise affects all channels" (already true, and A
 missing env var silently bricks a channel", the former is the safer default. Revisit only
 together with making `INTMAX_CHANNEL` itself fail-closed.
 
-### 6.2 L1 private key in argv (unfixed, reported)
-§5.4. 27 call sites. The fix is to pass the key through `cast`'s `ETH_PRIVATE_KEY` environment
-variable (still env-visible, but not argv-visible and not visible to *other* users' `ps`) or via
-a `cast wallet import` keystore + `--account`, which is what `CLAUDE.md` already prescribes for
-the Sepolia deployer. Out of scope for this change (a 27-site refactor of the L1 path, needing
-its own E2E validation), **reported for a follow-up**.
+### 6.2 L1 private key in argv (fixed)
+§5.4. The CLI and API use a Foundry keystore plus `--account` off-devnet. A legacy raw-key variable
+is rejected on all non-31337 chains, so production child argv cannot contain L1 private material.
 
-### 6.3 `deposit_key_env()` defaults to the anvil dev key (partially mitigated, asymmetric)
-`channel_member.rs:875-879` returns the public anvil key `0xac09...ff80` when
-`INTMAX_DEPOSIT_KEY` is unset. `api/lib/cli.js:18-26` **already fails closed** on this (throws
-unless `INTMAX_DEV=1`), so the API path is safe. The Rust binary invoked directly is not: it
-silently signs with the anvil key. On a real network this is a *failure* (no funds) rather than a
-compromise, so severity is low — but it is the same "predictable default" pattern and should be
-made symmetric with the JS guard. **Reported; low severity.**
+### 6.3 Anvil dev-key fallback (fixed and chain-bound)
+The fallback exists only after the RPC reports chain id 31337. Both Rust and JS fail closed on
+every other chain unless `INTMAX_L1_ACCOUNT` is set, and both reject a legacy raw key there.
 
 ### 6.4 `DELEGATE_SEED` defaults to `1` (fixed by this change)
 `:427-430`. `keys_for(1)` was a fully derivable delegate identity. It now routes through the same
@@ -362,11 +354,11 @@ private-state salt** of the withdrawal witness, and the same stream feeds the ER
 this is unlinkability loss, not custody loss — but it is the same "constant seed in production"
 pattern. **Reported; needs its own change.**
 
-### 6.8 Hardcoded anvil key in the hosting relay (unfixed, dev-only file)
+### 6.8 Hardcoded anvil key in the hosting relay (accepted, dev-only file)
 `hosting/wallet/wallet-relay.js:1005` embeds the anvil key literally (used at `:732`, `:735`,
 `:1017`), with no `INTMAX_DEV` guard. It is the local dev relay, but it lives in `hosting/`.
-`hosting/wallet/wallet-relay-ec2.js:46` passes ambient `process.env` through with no
-`INTMAX_DEPOSIT_KEY` guard at all, unlike `api/lib/cli.js`. **Reported.**
+`hosting/wallet/wallet-relay-ec2.js` passes ambient environment to the CLI, whose shared signer now
+rejects `INTMAX_DEPOSIT_KEY` off-devnet and requires `INTMAX_L1_ACCOUNT`.
 
 ### 6.9 Synthetic delegate exit address (noted)
 `channel_member.rs` derives the simulated delegate's L1 exit address as

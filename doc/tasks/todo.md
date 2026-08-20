@@ -1,3 +1,82 @@
+# Remaining hollow paths / testnet blockers — 2026-08-19
+
+Scope: native INTMAX transactions and channel settlement. Per owner direction, KZG/blob work is
+explicitly deferred and is not a gate in this list. “Done” means the stated acceptance test passes;
+an existing library primitive or fixture-only path does not count as production wiring.
+
+## P0 — cannot advertise as a functioning testnet
+
+- [ ] **Production block-producer service wiring.** `ProductionBlockProducer` is now a keyless core,
+      but `/api/blocks` and `/api/inter-channel` still return 501 and no long-lived process persists
+      its witness/IVC state. Wire registration + co-signed block submission to the deployed service,
+      prove/finalize a block made without any member secret key in the producer, restart the service,
+      then prove the next block from the persisted head. The production entry point must never call
+      fixture key-generation APIs.
+- [ ] **Proof-backed partial-withdrawal payout (Phase 3).** Implement `cmd_partial_withdraw` against
+      the channel's live base-layer IVC head, emit the payout leaf only from proof public inputs, and
+      replace the deliberate 501/fail-closed tail atomically. Acceptance: two consecutive partial
+      withdrawals from the same channel both prove and pay; mutation of any emitted leaf field
+      reverts. Authority: `doc/tasks/partial-withdrawal-payout-design.md` P3-1..P3-4.
+- [ ] **Persist and advance the live base-layer IVC head.** Persist the balance proof, private trees,
+      processed block reference and nonce state at every deposit/send/burn/withdraw transition;
+      recover them after restart and reconcile with finalized chain data. A seeded
+      `build_channel_withdrawal` reconstruction is not acceptable. This is D4 option (a) and blocks
+      the preceding payout item.
+- [ ] **Replace the normal withdrawal fixture path.** `channel_member withdraw` still drives
+      `build_channel_withdrawal`, which synthesizes registration/deposit/withdrawal history using a
+      deterministic fixture generator. A testnet withdrawal must consume the persisted live base
+      head and a chain-derived finalized block, then succeed twice across a process restart.
+- [ ] **Retire compromised pre-fix channels.** Drain/retire every channel created with publicly
+      derivable co-signer keys, inventory affected Sepolia deposits, and publish the replacement
+      deployment/channel identifiers. Existing channels cannot be repaired in place; authority:
+      `doc/tasks/cosigner-key-provenance.md` (ACTIVE INCIDENT).
+- [ ] **Independent security gate for the P0–P2 partial-withdrawal changes.** The implementer review
+      is not the required independent review. Complete `partial-withdrawal-payout-design.md` P0-2,
+      reproduce the amount/recipient/era/nullifier findings independently, and resolve every P0/P1
+      finding before deploy.
+
+## P1 — production-hardening gates
+
+- [ ] **Replace the O(n²) withdrawal-claim decryption circuit.** At `REGEV_N = 2048` the direct
+      two-product gadget contributes about 886k gates by itself: degree 2^20, build ~141s, prove
+      ~133s and a 197,664-byte inner proof on the 2026-08-19 release benchmark. The persistent
+      context removes rebuilds after warm-up, but not the ~2.2-minute proof. Design an O(n log n)
+      NTT relation or recursively verify the existing E-3 STARK, preserve exact pk/ct/amount
+      binding, and require an adversarial equivalence review plus degree/time regression gates.
+- [ ] **Decide the Regev STARK soundness target after n=2048.** The polynomial identity bound is
+      now `< n/|EF| ≈ 2^-113` with the quartic BabyBear extension, not the stale `2^-117` value from
+      n=128. Either explicitly accept that margin for testnet or strengthen the challenge/extension
+      construction before claiming 128-bit proof soundness; regenerate affected proof vectors.
+- [ ] **Run settlement proving as a real persistent service.** `SettlementProverContext`, the shared
+      Falcon circuit and state-bound aggregate cache now exist, but one-shot CLI invocations are
+      still separate processes. Embed the context in the block-producer/settlement daemon; warm all
+      verifier-key variants at startup; bound its queue/memory; prove that close, PW and cancel reuse
+      the same cached aggregate without a second Falcon proof or circuit build.
+- [ ] **Base nonce bootstrap and reconciliation workflow.** Define the source of truth when a wallet
+      first attaches to an existing channel, detect chain/local divergence before burning, and
+      provide a fail-closed recovery/rescan path. The existing occupied-nonce check only protects a
+      locally available tree; it does not bootstrap missing production history.
+- [x] **Remove L1 secrets from process arguments.** CLI/API L1 writes resolve the RPC chain id first;
+      chain 31337 may use Anvil's public throwaway key, while every other chain rejects
+      `INTMAX_DEPOSIT_KEY` and requires a validated `INTMAX_L1_ACCOUNT` passed as `--account`.
+      Focused Rust/Node tests assert the real-chain argv contains only the account selector and no
+      password/private-key material.
+- [ ] **Integrated adversarial/deployment pass.** Review the new Falcon batch/close/PW/cancel circuit
+      set, run the full multi-token attacker pass, the two-token CLI/WASM/anvil lifecycle, and the
+      production binary-wire relay path. Resolve all findings before deployment.
+
+## P2 — reset and operational acceptance
+
+- [ ] **Fresh v3 reset/redeploy.** Regenerate and initialize every changed VK, deploy a new rollup,
+      account tree and settlement contracts, verify all initialization latches (especially the
+      withdrawal VK), update the public demo, and archive the old deployment as unsafe/read-only.
+- [ ] **End-to-end testnet acceptance.** From clean wallets and a restarted producer: deposit,
+      native send, intra-channel send, inter-channel send, partial withdrawal, close, withdrawal
+      claim and cancel challenge must all use production APIs (no fixtures/test-utils), with balances
+      and nullifiers reconciled against Sepolia after each step.
+
+---
+
 # Phase C1 — real verifyCancelClose (cancel-close circuit + on-chain MLE/WHIR)
 
 Authoritative: doc/tasks/phase-c-challenge-stubs-threat-model.md (C1).

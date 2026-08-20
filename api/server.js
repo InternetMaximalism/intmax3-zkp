@@ -82,6 +82,7 @@ app.listen(PORT, '0.0.0.0', () => {
   console.log('  GET  /api/v1/channel/:ch/snapshot');
   console.log('  GET  /api/v1/channel/:ch/status');
   console.log('  GET  /api/v1/channel/:ch/backing');
+  console.log('  GET  /api/v1/channel/:ch/base-head');
   console.log('  GET  /api/v1/channel/:ch/registration-record');
   console.log('  GET  /api/v1/channel/:ch/deposit/info');
   console.log('  POST /api/v1/channel/:ch/cosign');
@@ -118,5 +119,5 @@ app.listen(PORT, '0.0.0.0', () => {
   console.log('  POST /api/v1/channel/:ch/full-withdrawal/claim');
   console.log('  GET  /api/v1/channel/:ch/tickets');
   console.log('  POST /api/v1/channel/:ch/tickets');
-  console.log('  POST /api/v1/blocks/post');
+  console.log('  GET  /api/v1/blocks/status');
 });

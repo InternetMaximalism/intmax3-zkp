@@ -10,8 +10,11 @@ router.post('/cosign', (req, res) => {
   const ch = Number(req.params.ch);
   withLock(ch, () => {
     const active = findActiveTicket(ch, 'partial_withdrawal');
-    if (active && active.status === 'burn_done') {
-      res.status(409).json({ error: 'settle pending burn first', ticket: active });
+    // Mirror `/partial-withdrawal/burn`: every non-terminal ticket owns last_burn.json until its
+    // payout completes. In particular settle_pending/settle_blocked must not be overwritten by a
+    // second burn through this legacy alias.
+    if (active) {
+      res.status(409).json({ error: 'resolve the active partial withdrawal before burning again', ticket: active });
       return;
     }
     const { debitPayload, transferDescriptor, tokenIndex } = req.body || {};

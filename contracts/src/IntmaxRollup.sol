@@ -1379,6 +1379,12 @@ contract IntmaxRollup {
         return _submissions[id].finalized;
     }
 
+    /// @notice Canonical read-back for proof services before they advance a durable finalized
+    ///         cursor. Historical roots remain true after `latestFinalizedStateRoot` advances.
+    function isFinalizedStateRoot(bytes32 stateRoot) external view returns (bool) {
+        return finalizedStateRoots[stateRoot];
+    }
+
     /// @notice Pull-payment: claim pending withdrawals (stake refunds / fraud rewards).
     ///         Finalize and fraudProof credit amounts to pendingWithdrawals instead of
     ///         pushing ETH, so reverting recipients cannot block protocol operations.

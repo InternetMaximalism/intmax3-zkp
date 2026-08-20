@@ -18,7 +18,7 @@
 //! ## What the gadget proves
 //!
 //! Given a Regev public key `(a, b)` and a ciphertext `(c1, c2)` (all four polynomials are
-//! `REGEV_N = 128`-coefficient vectors of mod-q field elements, witnessed by the caller and bound
+//! `REGEV_N = 2048`-coefficient vectors of mod-q field elements, witnessed by the caller and bound
 //! to committed digests OUTSIDE this gadget), and a secret key `s ∈ {-1,0,1}^n`:
 //!
 //!   (1) Key binding (per coeff, mod q): `b[i] = (a·s)_lo[i] + e_pk[i]` with `e_pk` CBD(2)-ranged.
@@ -29,9 +29,9 @@
 //!   (3) Digit extraction (per coeff, mod q): `v[i] + Δ/2 = Δ·d[i] + ns[i]` with `d[i] ∈ [0,256)`
 //!       and `ns[i] ∈ [0,Δ)` EXACTLY (the uniqueness/no-wrap argument of the STARK header).
 //!   (4) Digit→bit normalization: `Σ d[i]·2^i == Σ bit[i]·2^i` over the integers via a ripple
-//!       carry, where `bit` is the 128-bit binary message.
+//!       carry, where `bit` is the `REGEV_N`-bit normalized message.
 //!   (5) Amount binding (only when `expose_amount`): the low 64 `bit[i]` equal the claim's u64
-//!       `amount` (repo 2×32 form), and `bit[64..128] == 0`.
+//!       `amount` (repo 2×32 form), and `bit[64..REGEV_N] == 0`.
 //!
 //! ## The negacyclic ring product as a per-coefficient signed-selection sum (MUST-FIX #1, #4)
 //!
@@ -68,9 +68,9 @@
 //! `decryption_gadget_negacyclic_matches_native` checks this over hundreds of `(x, ternary y)`.
 //!
 //! Because `y = s ∈ {-1,0,1}` and `x[m] < q < 2^31`, every term has magnitude `< q`, the unreduced
-//! `lo[i]` integer sum has magnitude `< n·q = 128·q ≈ 2^38 ≪ p` (Goldilocks `p ≈ 2^64`), so the sum
-//! is computed with NO intermediate mod-q (and no mod-p wrap) — the only reduction is the explicit
-//! per-coeff quotient below. (MUST-FIX #1.)
+//! `lo[i]` integer sum has magnitude `< n·q = 2048·q < 2^42 ≪ p` (Goldilocks `p ≈ 2^64`), so the
+//! sum is computed with NO intermediate mod-q (and no mod-p wrap) — the only reduction is the
+//! explicit per-coeff quotient below. (MUST-FIX #1.)
 //!
 //! ## Per-coefficient mod-q reduction (MUST-FIX #2, #3)
 //!
@@ -165,7 +165,7 @@ pub struct DecryptionCoreWitness {
     pub noise_shifted: Vec<u32>,
     /// Per-coeff digit-extraction boundary wrap `dwrap ∈ {0,1}`: `v + Δ/2 = Δ·d + ns + dwrap·q`.
     pub digit_wrap: Vec<bool>,
-    /// 128-bit binary message (length `REGEV_N`), `Σ bit·2^i == Σ d·2^i`.
+    /// `REGEV_N`-bit binary message, `Σ bit·2^i == Σ d·2^i`.
     pub bits: Vec<u8>,
     /// Normalization carries `c_i ∈ [0, 254]` (length `REGEV_N`), `c_0 = 0`, final carry 0.
     pub carries: Vec<u16>,
@@ -424,7 +424,8 @@ pub fn decryption_core<F: RichField + Extendable<D>, const D: usize>(
     }
 
     // --- (5) Amount binding (expose_amount only). -------------------------------------------
-    // Σ_{i<32} bit_i·2^i == amount_lo ; Σ_{i<32} bit_{32+i}·2^i == amount_hi ; bit[64..128] == 0.
+    // Σ_{i<32} bit_i·2^i == amount_lo ; Σ_{i<32} bit_{32+i}·2^i == amount_hi ;
+    // bit[64..REGEV_N] == 0.
     // This is the repo 2×32 U64 form (MUST-FIX #6/#7): NO 4×16 STARK split.
     let amount_limbs = if expose_amount {
         let lo = pack_bits_le(builder, &bit[0..32]);
@@ -462,7 +463,7 @@ pub fn decryption_core<F: RichField + Extendable<D>, const D: usize>(
 /// the module docs: `lo[i] = Σ_m sign(i,m)·x[m]·s[(i−m) mod n]`, sign +1 if `m ≤ i` else −1.
 ///
 /// SECURITY: no intermediate reduction — the returned target is the exact integer (in `(−n·q,
-/// n·q)`, `< 2^38 ≪ p`), reduced to canonical form by the caller via the explicit κ·q quotient.
+/// n·q)`, `< 2^42 ≪ p`), reduced to canonical form by the caller via the explicit κ·q quotient.
 fn negacyclic_coeff<F: RichField + Extendable<D>, const D: usize>(
     builder: &mut CircuitBuilder<F, D>,
     x: &[Target],
@@ -553,8 +554,8 @@ fn pack_bits_le<F: RichField + Extendable<D>, const D: usize>(
 // Deliverable B: in-circuit RegevCiphertext IMRC keccak digest gadget
 // ---------------------------------------------------------------------------
 
-/// Recompute `RegevCiphertext::digest()` in-circuit: `keccak([IMRC, 128, c1…, c2…])` over the u32
-/// word stream (mirror of `encrypt.rs:99-120` / `hash_words`). Returns the digest as a
+/// Recompute `RegevCiphertext::digest()` in-circuit: `keccak([IMRC, REGEV_N, c1…, c2…])` over the
+/// u32 word stream (mirror of `encrypt.rs:99-120` / `hash_words`). Returns the digest as a
 /// `Bytes32Target`. The caller `connect`s it to the committed `user_amount_digest` / delta digest.
 ///
 /// SECURITY: each coefficient target MUST be 32-bit range-checked AND strictly `< q` by the caller
@@ -594,7 +595,7 @@ where
 // Deliverable C: in-circuit RegevPk Poseidon digest gadget
 // ---------------------------------------------------------------------------
 
-/// Recompute `RegevPk::poseidon_digest()` in-circuit: `Poseidon([IMRP, 128, a…, b…])` over
+/// Recompute `RegevPk::poseidon_digest()` in-circuit: `Poseidon([IMRP, REGEV_N, a…, b…])` over
 /// Goldilocks limbs (mirror of `keys.rs:102-111` and the validity member-tree recompute in
 /// `update_channel_tree.rs:974-986`). Returns the digest as a `Bytes32Target` (= `Bytes32::from(
 /// poseidon_digest)`, matching the `regev_pk_digests[i]` encoding committed in H1, Stage 1) so the

@@ -1,9 +1,8 @@
 //! Phase B-D (Option D): the withdrawal-claim BINDING circuit (detail2 §E-3 / abstract2 §3.5.4).
 //!
-//! This circuit proves EVERYTHING the §E-3 withdrawal claim asserts EXCEPT the Regev decryption of
-//! the slot ciphertext (the decryption core is a deferred sub-phase — see
-//! `tasks/phase-b-claims-threat-model.md` RESIDUAL). Concretely it constrains, in one plonky2
-//! statement that is MLE/WHIR-wrapped and verified on-chain by `@mle/MleVerifier.sol`:
+//! This circuit proves the complete §E-3 withdrawal claim, including Regev decryption of the slot
+//! ciphertext. The decryption stage that was formerly deferred is now embedded directly in this
+//! Plonky2 statement, which is MLE/WHIR-wrapped and verified on-chain by `@mle/MleVerifier.sol`:
 //!
 //! 1. `final_balance_state_h1` is the Poseidon-root v2 H1 header of the witnessed final balance
 //!    state (the SHARED `h1_gadget::recompute_h1`, element-identical to the close circuit and to
@@ -250,6 +249,10 @@ where
     C: GenericConfig<D, F = F>,
 {
     pub data: CircuitData<F, C, D>,
+    /// Gate count before power-of-two padding, for profiling regressions.
+    pub num_gates_before_padding: usize,
+    /// Cumulative gate counts at the principal construction boundaries.
+    pub profile: WithdrawalClaimCircuitProfile,
     pub public_inputs: WithdrawalClaimPublicInputsTarget,
     member_count: Target,
     delegate_count: Target,
@@ -282,6 +285,16 @@ where
     ct_c1: Vec<Target>,
     ct_c2: Vec<Target>,
     dec_core: DecryptionCoreTargets,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct WithdrawalClaimCircuitProfile {
+    pub inputs: usize,
+    pub header_and_selectors: usize,
+    pub regev_digests: usize,
+    pub slot_inclusion: usize,
+    pub decryption: usize,
+    pub nullifier: usize,
 }
 
 impl<F, C, const D: usize> WithdrawalClaimCircuit<F, C, D>
@@ -325,6 +338,7 @@ where
             std::array::from_fn(|_| Bytes32Target::new(&mut builder, true));
         let slot_pending_adds: [Target; MAX_CHANNEL_TOKENS] =
             std::array::from_fn(|_| u32_limb(&mut builder));
+        let gates_after_inputs = builder.num_gates();
 
         // ── (1) H1 header recompute (SHARED v2 gadget; element-identical to close + native) ──
         let recomputed_h1 = recompute_h1::<F, D>(
@@ -419,6 +433,7 @@ where
             selected_index = builder.select(*flag, token_registry[t], selected_index);
         }
         builder.connect(selected_index, public_inputs.token_index[0]);
+        let gates_after_header_and_selectors = builder.num_gates();
 
         // ── Decryption Stage 2 (closes over-claim): bind `amount` to the slot ciphertext
         // plaintext.
@@ -444,6 +459,7 @@ where
         // (ct binding) IMRC_digest(c1, c2) == user_amount_digest (the slot ct, leaf-bound below).
         let ct_digest = regev_ct_digest_gadget::<F, C, D>(&mut builder, &ct_c1, &ct_c2);
         ct_digest.connect(&mut builder, public_inputs.user_amount_digest);
+        let gates_after_regev_digests = builder.num_gates();
 
         // ── (3) slot-leaf Merkle inclusion (v2 104-element leaf, §N-2) ──
         //
@@ -475,6 +491,7 @@ where
             BALANCE_SLOT_TREE_HEIGHT,
         );
         slot_inclusion.verify::<F, C, D>(&mut builder, &slot_leaf, member_index, slot_tree_root);
+        let gates_after_slot_inclusion = builder.num_gates();
 
         // (decryption + amount binding) bind the claim's U64 amount to the decrypted plaintext.
         let dec_inputs = DecryptionCoreInputs {
@@ -490,6 +507,7 @@ where
         let amount_pi = public_inputs.amount.to_vec();
         builder.connect(amount_pi[0], amount_hi);
         builder.connect(amount_pi[1], amount_lo);
+        let gates_after_decryption = builder.num_gates();
 
         // ── (4) withdrawal_nullifier = keccak([IMW2, close_intent_digest, pk_digest,
         // token_slot]) — the v2 per-(slot, token) nullifier (detail2 §N-6, TM-5) ──
@@ -518,6 +536,7 @@ where
         let withdrawal_nullifier =
             Bytes32Target::from_slice(&builder.keccak256::<C>(&nullifier_inputs));
         withdrawal_nullifier.connect(&mut builder, public_inputs.withdrawal_nullifier);
+        let gates_after_nullifier = builder.num_gates();
 
         // (5) channel_id / member_pk_g / close_intent_digest are bound as PI limbs by
         // construction (they are the registered PI targets, re-registered verbatim below);
@@ -526,9 +545,20 @@ where
         // decryption-bound above.
 
         builder.register_public_inputs(&public_inputs.to_vec());
+        let num_gates_before_padding = builder.num_gates();
+        let profile = WithdrawalClaimCircuitProfile {
+            inputs: gates_after_inputs,
+            header_and_selectors: gates_after_header_and_selectors,
+            regev_digests: gates_after_regev_digests,
+            slot_inclusion: gates_after_slot_inclusion,
+            decryption: gates_after_decryption,
+            nullifier: gates_after_nullifier,
+        };
         let data = builder.build::<C>();
         Self {
             data,
+            num_gates_before_padding,
+            profile,
             public_inputs,
             member_count,
             delegate_count,
@@ -1038,7 +1068,10 @@ mod tests {
     // Multitoken Phase 2: the close/claim circuits now compute the v2 H1 header (37 elems,
     // "IMB2") and slot leaf (104 elems, "IMS2"), so the tests below run against v2-signed
     // states (the Phase 1 #[ignore] gates are lifted; assertions unchanged).
-    use std::panic::{AssertUnwindSafe, catch_unwind};
+    use std::{
+        panic::{AssertUnwindSafe, catch_unwind},
+        time::Instant,
+    };
 
     use plonky2::field::types::PrimeField64;
 
@@ -1050,10 +1083,25 @@ mod tests {
     #[cfg_attr(debug_assertions, ignore = "run with --release")]
     #[test]
     fn withdrawal_claim_circuit_proves_and_exposes_pis() {
+        let build_started = Instant::now();
         let circuit = circuit();
+        let build = build_started.elapsed();
         let witness = build_full_witness();
+        let prove_started = Instant::now();
         let proof = circuit.prove(&witness).unwrap();
+        let prove = prove_started.elapsed();
+        let proof_bytes = proof.to_bytes().len();
+        let verify_started = Instant::now();
         circuit.data.verify(proof.clone()).unwrap();
+        let verify = verify_started.elapsed();
+
+        println!(
+            "withdrawal-claim: gates={} degree=2^{} build={build:?} prove={prove:?} \
+             verify={verify:?} proof={proof_bytes} B profile={:?}",
+            circuit.num_gates_before_padding,
+            circuit.data.common.degree_bits(),
+            circuit.profile,
+        );
 
         let expected = witness.public_inputs.to_u64_vec();
         assert_eq!(expected.len(), WITHDRAWAL_CLAIM_PUBLIC_INPUTS_LEN);

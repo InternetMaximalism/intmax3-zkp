@@ -8,21 +8,53 @@ const CLI = process.env.CHANNEL_MEMBER_BIN || path.join(REPO, 'target', 'release
 const RPC = process.env.RPC || 'http://127.0.0.1:8545';
 const CHANNELS = (process.env.INTMAX_CHANNELS || '7,8').split(',').map(Number);
 
-// The public Foundry/anvil dev key. Used ONLY as a local-dev fallback (INTMAX_DEV=1);
-// it is famous and worthless — never sign a real-network tx with it.
+// The public Foundry/anvil dev key. Used only after the RPC reports chain id 31337; it is famous
+// and worthless — never sign a real-network tx with it.
 const ANVIL_DEV_KEY = '0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80';
 
-// The L1 signing key used by deposit/registration txs. Read from INTMAX_DEPOSIT_KEY
-// (same var the CLI uses). No hardcoded default: production must set it. Only when
-// INTMAX_DEV=1 (local anvil) do we fall back to the throwaway anvil dev key, loudly.
-function depositKey() {
-  const k = process.env.INTMAX_DEPOSIT_KEY;
-  if (k) return k;
-  if (process.env.INTMAX_DEV === '1') {
-    console.warn('[security] INTMAX_DEPOSIT_KEY unset — using the public anvil dev key (INTMAX_DEV=1). NEVER on a real network.');
-    return ANVIL_DEV_KEY;
+// Select the Foundry wallet without ever putting a real-network private key in argv. The legacy
+// raw-key variable remains available only on chain 31337 for Anvil E2Es. Every other chain requires
+// a named encrypted Foundry keystore. Foundry reads its password from its standard ETH_PASSWORD /
+// password-file mechanism; this service never forwards password material as an argument.
+function l1SignerArgsForChain(id, env = process.env) {
+  const legacyKey = String(env.INTMAX_DEPOSIT_KEY || '').trim();
+  const account = String(env.INTMAX_L1_ACCOUNT || '').trim();
+
+  if (id === DEVNET_CHAIN_ID) {
+    if (account) {
+      if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(account)) {
+        throw new Error('INTMAX_L1_ACCOUNT must be a Foundry keystore filename (1..128 alphanumeric/._- characters)');
+      }
+      return ['--account', account];
+    }
+    return ['--private-key', legacyKey || ANVIL_DEV_KEY];
   }
-  throw new Error('INTMAX_DEPOSIT_KEY not set: refusing to sign L1 txs with a default key (set INTMAX_DEV=1 for local anvil only)');
+
+  if (legacyKey) {
+    throw new Error(
+      `INTMAX_DEPOSIT_KEY is forbidden on non-dev chain id ${id}: --private-key exposes the secret ` +
+      'in process argv. Import it with `cast wallet import <name> --interactive`, unset ' +
+      'INTMAX_DEPOSIT_KEY, and set INTMAX_L1_ACCOUNT=<name>.'
+    );
+  }
+  if (!account) {
+    throw new Error(
+      `INTMAX_L1_ACCOUNT is required on non-dev chain id ${id}; refusing to put a real private ` +
+      'key in process argv. Configure a Foundry keystore plus ETH_PASSWORD/password-file.'
+    );
+  }
+  if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(account)) {
+    throw new Error('INTMAX_L1_ACCOUNT must be a Foundry keystore filename (1..128 alphanumeric/._- characters)');
+  }
+  return ['--account', account];
+}
+
+function l1SignerArgs() {
+  return l1SignerArgsForChain(chainId());
+}
+
+function l1SignerAddress() {
+  return sh('cast', ['wallet', 'address', ...l1SignerArgs()], { stdio: 'pipe' }).trim();
 }
 
 function chDir(ch) {
@@ -126,7 +158,8 @@ function ensureSettlement(ch) {
       'on a new rollup while the deposit stayed on ' + (backedRollup || 'the existing rollup') + '.',
     operatorAction:
       'In a fresh per-channel work dir, before setup-backing: ' +
-      'INTMAX_CHANNEL=<ch> INTMAX_DEPOSIT_KEY=<funded key> FRAUD_TREASURY=<addr> ' +
+      'INTMAX_CHANNEL=<ch> INTMAX_L1_ACCOUNT=<keystore name> ' +
+      'ETH_PASSWORD=</root-only/password-file> FRAUD_TREASURY=<addr> ' +
       'INTMAX_COSIGNER_KEYFILE=<0600 file> channel_member deploy-settlement <rpc>, then ' +
       'setup-backing <rpc> <the rollup it prints>, then init. See doc/docs/deploy-runbook.md.',
     missingCapability:
@@ -154,6 +187,7 @@ function writeJson(filepath, data) {
 }
 
 module.exports = {
-  REPO, WORK, CLI, RPC, CHANNELS, DEVNET_CHAIN_ID, depositKey, chDir, wc, validChannel, cli, sh,
+  REPO, WORK, CLI, RPC, CHANNELS, DEVNET_CHAIN_ID, l1SignerArgsForChain, l1SignerArgs,
+  l1SignerAddress, chDir, wc, validChannel, cli, sh,
   rollupOf, readJson, writeJson, chainId, ensureSettlement, failRoute, SettlementUnavailable,
 };

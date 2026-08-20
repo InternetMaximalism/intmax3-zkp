@@ -1,5 +1,13 @@
 # Sepolia smoke-deploy runbook — IntmaxRollup
 
+> **BLOCKED on non-local chains (2026-08-19).** Do not run the posting commands below on
+> Sepolia. The current fixture's `abi.encode(MleProof)` is 131,264 bytes, which exceeds one
+> 131,072-byte blob by 192 bytes. The current KZG adapter also clears the top three bits of every
+> 32-byte chunk, so the zero/demo blob is not a lossless data-availability encoding of the proof.
+> `channel_member withdraw` now refuses every chain id except local devnet `31337`. This runbook is
+> retained as a local rehearsal reference until the proof-DA commitment is redesigned (for example,
+> a lossless multi-blob format) and covered by a real fraud-proof E2E.
+
 End-to-end smoke of the **real** on-chain validity path on Sepolia:
 
 ```
@@ -121,8 +129,8 @@ address is used as the fraud treasury.)
 and **requires a blob** — it reads `blobhash(0)` and reverts `NoBlobAttached` if
 zero. Forge scripts cannot attach EIP-4844 blobs, so this step uses `cast send`.
 
-Make exactly one blob (128 KB of zeros — content is irrelevant here, only its
-presence is checked):
+For the **local rehearsal only**, make exactly one 128 KB zero blob. This merely satisfies the
+submission presence check and is not the committed proof payload required by `fraudProof`:
 
 ```bash
 head -c 131072 /dev/zero > blob.bin    # 131072 = 128 KiB = exactly 1 blob

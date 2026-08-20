@@ -116,9 +116,9 @@ impl ChannelProofVerifier for StructuralTransportVerifier {
         proof: &ChannelProofEnvelope,
         _public_inputs: &ChannelStateUpdatePublicInputs,
     ) -> Result<(), ChannelStateUpdateError> {
-        if proof.proof.is_empty() {
+        if !proof.proof.is_empty() {
             return Err(ChannelStateUpdateError::ProofVerification(
-                "transport proof bytes must not be empty".to_string(),
+                "retired transport proof must be empty".to_string(),
             ));
         }
         Ok(())
@@ -204,7 +204,7 @@ fn transport_envelope() -> ChannelProofEnvelope {
     ChannelProofEnvelope {
         role: TransitionProofRole::IntmaxTransport,
         backend: ProofBackend::Plonky2,
-        proof: vec![7, 7, 7],
+        proof: vec![],
     }
 }
 
@@ -495,13 +495,13 @@ fn build_flow() -> FlowFixture {
             tx_tree_root,
             // detail2 §C-7: state_commitment_root IS H1' of the post-debit balance state.
             state_commitment_root: a2.balance_state.h1(),
-            medium_epoch_hint: 3,
+            medium_epoch_hint: 0,
             close_freeze_nonce: 0,
         },
         signatures: signatures_for(&sender_record),
-        aggregated_signature_proof: vec![9, 9],
-        medium_block_number: 4,
-        confirmation_proof: vec![8, 8],
+        aggregated_signature_proof: vec![],
+        medium_block_number: 0,
+        confirmation_proof: vec![],
     };
     let transport = transport_envelope();
     let inter_channel_tx = InterChannelTx {
@@ -511,8 +511,10 @@ fn build_flow() -> FlowFixture {
         source_channel_id: a_id,
         destination_channel_id: b_id,
         token_index: 0,
+        base_nonce: 1,
+        destination_base_transfer_salt: crate::common::salt::Salt::default(),
         source_pk_g: user(a_id, 10),
-        seal: bytes32_word(501),
+        seal: Bytes32::default(),
         // TM-16: the REAL token-bearing tx_hash (the witnesses now refuse a descriptor whose
         // carried hash is not the recompute over its own fields).
         tx_hash: crate::common::channel::inter_channel_tx_hash(
@@ -523,7 +525,7 @@ fn build_flow() -> FlowFixture {
             tx_leaf,
         ),
         intmax_transfer_commitment: bytes32_word(503),
-        recipient_memo: vec![1, 2, 3],
+        recipient_memo: vec![],
         receiver_deltas: vec![ReceiverBalanceDelta {
             receiver_pk_g: user(b_id, 21),
             amount: receiver_delta.0.clone(),
@@ -553,11 +555,8 @@ fn build_flow() -> FlowFixture {
             ..b0.channel_fund.clone()
         },
         balance_state: BalanceState {
-            // detail2 §C-6: the import chains the base-layer settle identifier (tx_hash).
-            settled_tx_chain: settled_tx_chain_push(
-                b0.balance_state.settled_tx_chain,
-                inter_channel_tx.tx_hash,
-            ),
+            // One base receive folds the same tx leaf carried in Transfer.aux_data.
+            settled_tx_chain: settled_tx_chain_push(b0.balance_state.settled_tx_chain, tx_leaf),
             state_version: 1,
             ..b0.balance_state.clone()
         },
@@ -588,9 +587,10 @@ fn build_flow() -> FlowFixture {
                 b1.balance_state.enc_balances[1][0].clone(),
                 b1.balance_state.enc_balances[2][0].clone(),
             ]),
-            // The receiver chains the SAME tx leaf the sender chained (F3-A multi-layer defense).
+            // The import already chained this logical receive; bundle application is not another
+            // base settlement.
             regev_pk_digests: BalanceState::pad_regev_pk_digests(&[]),
-            settled_tx_chain: settled_tx_chain_push(b1.balance_state.settled_tx_chain, tx_leaf),
+            settled_tx_chain: b1.balance_state.settled_tx_chain,
             settled_tx_accumulator_root: Bytes32::default(),
             state_version: 2,
             pending_adds: BalanceState::pad_pending_adds_token0(&[1, 0, 0]),
@@ -767,8 +767,8 @@ fn channel_native_regev_full_flow_e2e() {
     assert_eq!(pis.unallocated_after, u256_from_u64(INTER_CHANNEL_AMOUNT));
     assert_eq!(
         pis.next_settled_tx_chain,
-        settled_tx_chain_push(pis.prev_settled_tx_chain, f.import.inter_channel_tx.tx_hash),
-        "the import chains the base-layer settle identifier"
+        settled_tx_chain_push(pis.prev_settled_tx_chain, f.tx_leaf),
+        "the import chains the merkle-bound base transfer tag"
     );
 
     // (d) Receiver bundle apply on channel B, first as a co-signer, then as dave (recipient).
@@ -778,9 +778,8 @@ fn channel_native_regev_full_flow_e2e() {
     assert_eq!(pis.h2_tag, Bytes32::default());
     assert_eq!(pis.unallocated_after, U256::zero());
     assert_eq!(
-        pis.next_settled_tx_chain,
-        settled_tx_chain_push(pis.prev_settled_tx_chain, f.tx_leaf),
-        "the receiver chains the SAME tx leaf the sender chained"
+        pis.next_settled_tx_chain, pis.prev_settled_tx_chain,
+        "the bundle does not double-count the import's base settlement"
     );
     assert_eq!(
         f.bundle.next_state.balance_state.pending_adds[..E2E_ACTIVE]
@@ -831,11 +830,8 @@ fn channel_native_regev_full_flow_e2e() {
     assert_eq!(close_intent.final_state_version, 3);
     assert_eq!(
         close_intent.final_settled_tx_chain,
-        settled_tx_chain_push(
-            settled_tx_chain_push(Bytes32::default(), f.import.inter_channel_tx.tx_hash),
-            f.tx_leaf,
-        ),
-        "the close intent pins the full settle history of channel B"
+        settled_tx_chain_push(Bytes32::default(), f.tx_leaf),
+        "the close intent pins one base settle event for channel B"
     );
     // IMCI digest stability: rebuilding the intent from the same data reproduces the digest.
     assert_eq!(
@@ -1217,14 +1213,10 @@ fn c2c_rejects_synthetic_tx_hash_on_all_gates() {
         "expected the TM-16 recompute rejection, got {err:?}"
     );
 
-    // Destination fund import: this gate's chain push absorbs `tx_hash` itself and runs FIRST, so
-    // re-derive the pushed chain onto the synthetic value — that leaves TM-16 as the only check
-    // that can reject, proving the gate is not merely riding on the push check.
+    // Destination fund import: its chain push absorbs the independently recomputed `tx_leaf`, so
+    // changing only `tx_hash` leaves the chain check valid and isolates the TM-16 recompute gate.
     let mut witness = flow().import.clone();
     witness.inter_channel_tx.tx_hash = synthetic;
-    witness.next_state.balance_state.settled_tx_chain =
-        settled_tx_chain_push(witness.prev_state.balance_state.settled_tx_chain, synthetic);
-    witness.next_state = witness.next_state.clone().with_computed_digest();
     let err = witness
         .verify(&StructuralTransportVerifier)
         .expect_err("synthetic tx_hash must be refused at the fund-import gate");
@@ -1233,7 +1225,7 @@ fn c2c_rejects_synthetic_tx_hash_on_all_gates() {
         "expected the TM-16 recompute rejection, got {err:?}"
     );
 
-    // Destination bundle apply: its chain push absorbs `tx_leaf`, so again only TM-16 can fire.
+    // Destination bundle apply leaves the settle chain unchanged, so again only TM-16 can fire.
     let mut witness = flow().bundle.clone();
     witness.inter_channel_tx.tx_hash = synthetic;
     let err = witness
@@ -1325,6 +1317,20 @@ fn bundle_apply_rejects_pending_adds_over_budget() {
         witness.verify(&VERIFIER),
         Err(ChannelStateUpdateError::InvalidPendingAdds(_)
             | ChannelStateUpdateError::InvalidCiphertextTransition(_))
+    ));
+}
+
+/// The fund-import step owns the single incoming accumulator insertion. Bundle assignment may
+/// not rewrite that N-of-N-attested post-close-claim root.
+#[test]
+#[cfg_attr(debug_assertions, ignore = "run with --release")]
+fn bundle_apply_rejects_accumulator_root_rewrite() {
+    let mut witness = flow().bundle.clone();
+    witness.next_state.balance_state.settled_tx_accumulator_root = bytes32_word(0xacc0);
+    witness.next_state = witness.next_state.clone().with_computed_digest();
+    assert!(matches!(
+        witness.verify(&VERIFIER),
+        Err(ChannelStateUpdateError::InvalidSettledTxChain(_))
     ));
 }
 

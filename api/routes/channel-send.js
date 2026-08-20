@@ -1,16 +1,20 @@
 const { Router } = require('express');
 const { cli, wc, readJson, writeJson } = require('../lib/cli');
 const { withLock } = require('../lib/lock');
+const { flushPublishedHead, syncStateIfNeeded } = require('../lib/producer-head');
 
 const router = Router({ mergeParams: true });
 
 // POST /api/v1/channel/:ch/cosign (A8)
 router.post('/cosign', (req, res) => {
   const ch = Number(req.params.ch);
-  withLock(ch, () => {
+  withLock(ch, async () => {
+    await flushPublishedHead(ch);
     writeJson(wc(ch, 'payload.json'), req.body);
     cli(ch, ['cosign', 'payload.json', 'cosigned.json']);
-    res.json(readJson(wc(ch, 'cosigned.json')));
+    const state = readJson(wc(ch, 'cosigned.json'));
+    await syncStateIfNeeded(state);
+    res.json(state);
   }).catch(e => {
     console.error(e.stderr ? String(e.stderr) : (e.message || e));
     res.status(500).json({ error: String(e.stderr || e.message || e) });
@@ -20,10 +24,13 @@ router.post('/cosign', (req, res) => {
 // POST /api/v1/channel/:ch/cosign-refresh (A11)
 router.post('/cosign-refresh', (req, res) => {
   const ch = Number(req.params.ch);
-  withLock(ch, () => {
+  withLock(ch, async () => {
+    await flushPublishedHead(ch);
     writeJson(wc(ch, 'refresh_payload.json'), req.body);
     cli(ch, ['cosign-refresh', 'refresh_payload.json', 'refresh_cosigned.json']);
-    res.json(readJson(wc(ch, 'refresh_cosigned.json')));
+    const state = readJson(wc(ch, 'refresh_cosigned.json'));
+    await syncStateIfNeeded(state);
+    res.json(state);
   }).catch(e => {
     console.error(e.stderr ? String(e.stderr) : (e.message || e));
     res.status(500).json({ error: String(e.stderr || e.message || e) });
@@ -37,7 +44,8 @@ router.post('/cosign-refresh', (req, res) => {
 // optional body.tokenSlot is accepted as a client-intent cross-check against the signed field.
 router.post('/send', (req, res) => {
   const ch = Number(req.params.ch);
-  withLock(ch, () => {
+  withLock(ch, async () => {
+    await flushPublishedHead(ch);
     const payload = req.body.payload || req.body;
     const tokenSlot = req.body.tokenSlot;
     const signedSlot = payload && payload.channelTx && payload.channelTx.tokenSlot;
@@ -48,7 +56,8 @@ router.post('/send', (req, res) => {
     writeJson(wc(ch, 'payload.json'), payload);
     cli(ch, ['cosign', 'payload.json', 'cosigned.json']);
     const snapshot = readJson(wc(ch, 'cosigned.json'));
-    res.json({ snapshot });
+    const headSyncReceipt = await syncStateIfNeeded(snapshot);
+    res.json({ snapshot, headSyncReceipt });
   }).catch(e => {
     console.error(e.stderr ? String(e.stderr) : (e.message || e));
     res.status(500).json({ error: String(e.stderr || e.message || e) });

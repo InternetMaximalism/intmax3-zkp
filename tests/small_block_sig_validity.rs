@@ -296,27 +296,55 @@ fn inter_channel_small_block_sig_is_validity_proven() {
 /// blobs and nothing else, and the N-of-N aggregate is still produced and validity-proven.
 #[test]
 fn block_producer_consumes_real_member_cosignatures() {
-    use intmax3_zkp::common::channel::{ChannelFund, ChannelState};
-    use intmax3_zkp::circuits::test_utils::block_witness_generator::ChannelCosignBundle;
-    use intmax3_zkp::wallet_core::sign_state;
+    use intmax3_zkp::{
+        block_producer::{ProductionBlockProducer, ProductionChannelRegistration},
+        common::channel::{ChannelFund, ChannelState},
+        wallet_core::{build_record, sign_state},
+    };
     use rand::{SeedableRng as _, rngs::StdRng as RandRng};
     use rand010::SeedableRng as _;
 
     let supported = vec![2];
     let block_hash_chain_processor = BlockHashChainProcessor::<F, C, D>::new(&supported);
     let block_chain_vd = block_hash_chain_processor.block_chain_vd();
-    let bwgen = BlockWitnessGeneratorHandle::new(BlockWitnessGenerator::new(&supported));
-    let initial_ext_state = bwgen.borrow().current_extended_public_state();
+    let mut producer = ProductionBlockProducer::new(&supported);
+    let initial_ext_state = producer.current_extended_public_state();
     let channel_id = ChannelId::new(CHANNEL as u64).unwrap();
 
     let mut crng = rand010::rngs::StdRng::seed_from_u64(0xB2);
     let keys: Vec<MemberKeys> = (0..3).map(|_| MemberKeys::generate(&mut crng)).collect();
+    // Build the public registration envelope outside the producer, then drop the helper that
+    // temporarily references the wallet's keys. The producer receives only the on-chain record
+    // and Regev public keys; `holds_local_signing_keys` pins that no fixture fallback leaked in.
     let ck = ChannelMemberKeys::from_member_keys(&keys);
-    {
-        let mut g = bwgen.borrow_mut();
-        g.add_channel_registration_keys(CHANNEL, ck.clone());
-        g.add_registration_block(0).expect("registration block");
-    }
+    let reg_record = ck.to_reg_record(CHANNEL);
+    let registered_regev_pks = ck.regev_pks.clone();
+    drop(ck);
+    let public_members: Vec<MemberInfo> = keys
+        .iter()
+        .enumerate()
+        .map(|(slot, key)| MemberInfo {
+            slot: slot as u16,
+            pk_g: key.pk_g(),
+            pk_b: key.pk_b(),
+            regev_pk: key.regev_pk.clone(),
+        })
+        .collect();
+    let channel_record = build_record(CHANNEL, &public_members, 0, 0).expect("channel record");
+    producer
+        .register_channel(
+            ProductionChannelRegistration {
+                channel_record: channel_record.clone(),
+                validity_record: reg_record,
+                regev_pks: registered_regev_pks,
+            },
+            0,
+        )
+        .expect("public-only production registration");
+    assert!(
+        !producer.holds_any_local_signing_keys(),
+        "the production producer must hold zero member signing keys"
+    );
 
     let pks: Vec<_> = keys.iter().map(|k| k.regev_pk.clone()).collect();
     let post_bal = [45u64, 10, 30];
@@ -335,9 +363,7 @@ fn block_producer_consumes_real_member_cosignatures() {
         regev_pk_digests: BalanceState::pad_regev_pk_digests(&regev_pk_digests),
         recipients: BalanceState::pad_recipients(
             &(0..3u32)
-                .map(|i| {
-                    Address::from_u32_slice(&[0x7E57_0000u32 + i; 5]).unwrap()
-                })
+                .map(|i| Address::from_u32_slice(&[0x7E57_0000u32 + i; 5]).unwrap())
                 .collect::<Vec<_>>(),
         ),
         settled_tx_chain: Bytes32::default(),
@@ -404,21 +430,19 @@ fn block_producer_consumes_real_member_cosignatures() {
         .collect();
     assert_eq!(signatures.len(), 3);
 
-    {
-        let mut g = bwgen.borrow_mut();
-        g.next_channel_cosign = Some(ChannelCosignBundle {
-            state: wallet_state.clone(),
-            signatures: signatures.clone(),
-        });
-        g.add_block_with_tx_v2(CHANNEL, &[1], 1, tx_tree_root, Some(tx_v2_witness))
-            .expect("small block backed by the wallet's own co-signed state");
-    }
+    let mut wallet_state = wallet_state;
+    wallet_state.member_signatures = signatures.clone();
+    producer
+        .produce_cosigned_block(&wallet_state, &[1], 1, tx_tree_root, tx_v2_witness)
+        .expect("small block backed by the wallet's own co-signed state");
 
     // The digest the producer folded is the one the MEMBERS signed — the equality the whole
     // binding rests on, now exercised through the generator rather than assumed.
     {
-        let g = bwgen.borrow();
-        let event = g.bp_sig_events.last().expect("a signing block was recorded");
+        let event = producer
+            .signature_events()
+            .last()
+            .expect("a signing block was recorded");
         assert_eq!(
             event.digest,
             wallet_state.signing_digest(),
@@ -433,29 +457,25 @@ fn block_producer_consumes_real_member_cosignatures() {
     // ----- REAL validity proof over [registration block, small block] -----
     let mut prev_block_proof = None;
     let mut last = None;
-    {
-        let g = bwgen.borrow();
-        for idx in 1..=g.block_number.as_u64() {
-            let bn = BlockNumber::new(idx).unwrap();
-            let witness = g.block_chain_witness.get(&bn).cloned().expect("witness");
-            let init = if prev_block_proof.is_none() {
-                Some(initial_ext_state.clone())
-            } else {
-                None
-            };
-            let proof = block_hash_chain_processor
-                .prove_block(init, prev_block_proof.clone(), &witness)
-                .expect("block hash chain proof");
-            prev_block_proof = Some(proof.clone());
-            last = Some(proof);
-        }
+    for idx in 1..=producer.block_number() {
+        let bn = BlockNumber::new(idx).unwrap();
+        let witness = producer.block_witness(bn).expect("witness");
+        let init = if prev_block_proof.is_none() {
+            Some(initial_ext_state.clone())
+        } else {
+            None
+        };
+        let proof = block_hash_chain_processor
+            .prove_block(init, prev_block_proof.clone(), &witness)
+            .expect("block hash chain proof");
+        prev_block_proof = Some(proof.clone());
+        last = Some(proof);
     }
     let final_block_chain_proof = last.expect("final block chain proof");
 
     let agg_circuit = FalconAggCircuit::<F, C, D>::new();
     let agg_list_circuit = AggListCircuit::<F, C, D>::new(&agg_circuit.verifier_data());
-    let list_proof = bwgen
-        .borrow()
+    let list_proof = producer
         .build_agg_sig_list_proof(&agg_circuit, &agg_list_circuit)
         .expect("bp sig list proof");
     assert!(

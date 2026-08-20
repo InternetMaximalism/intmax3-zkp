@@ -22,71 +22,81 @@
 
 use std::{
     collections::HashSet,
-    fs,
-    process::{Command, exit},
+    fs::{self, OpenOptions},
+    io::Write as _,
+    path::{Path, PathBuf},
+    process::{exit, Command},
 };
 
+#[cfg(unix)]
+use std::os::unix::fs::{OpenOptionsExt as _, PermissionsExt as _};
+
 use intmax3_zkp::{
+    block_producer::ProductionDepositRequest,
     circuits::{
         balance::{
+            balance_pis::{BalancePublicInputs, BALANCE_PUBLIC_INPUTS_LEN},
             balance_processor::BalanceProcessor,
-            common::recipient::calculate_recipient_from_user_id, spend_circuit::SpendCircuit,
+            common::recipient::calculate_recipient_from_user_id,
+            spend_circuit::SpendCircuit,
         },
         channel::{
-            cancel_close_pis::{CANCEL_CLOSE_PUBLIC_INPUTS_LEN, CancelClosePublicInputs},
-            close_pis::{CHANNEL_CLOSE_PUBLIC_INPUTS_LEN, ChannelClosePublicInputs},
+            cancel_close_pis::{CancelClosePublicInputs, CANCEL_CLOSE_PUBLIC_INPUTS_LEN},
+            close_pis::{ChannelClosePublicInputs, CHANNEL_CLOSE_PUBLIC_INPUTS_LEN},
             post_close_claim_pis::{
-                POST_CLOSE_CLAIM_PUBLIC_INPUTS_LEN, PostCloseClaimPublicInputs,
+                PostCloseClaimPublicInputs, POST_CLOSE_CLAIM_PUBLIC_INPUTS_LEN,
             },
             state_update_verifier::verify_regev_pk_root,
             withdrawal_claim_pis::{
-                WITHDRAWAL_CLAIM_PUBLIC_INPUTS_LEN, WithdrawalClaimPublicInputs,
+                WithdrawalClaimPublicInputs, WITHDRAWAL_CLAIM_PUBLIC_INPUTS_LEN,
             },
         },
         test_utils::{
             balance_witness_generator::{BalanceWitnessGenerator, ReceiveDepositData},
             block_witness_generator::{
-                BlockWitnessGenerator, BlockWitnessGeneratorHandle, ChannelMemberKeys,
-                TEST_ACTIVE_MEMBERS, test_recipient_for,
+                test_recipient_for, BlockWitnessGenerator, BlockWitnessGeneratorHandle,
+                ChannelMemberKeys, TEST_ACTIVE_MEMBERS,
             },
         },
     },
     common::{
-        balance_state::{BalanceState, settled_tx_chain_push, tx_leaf_hash},
+        balance_state::{settled_tx_chain_push, tx_leaf_hash, BalanceState},
         channel::{
-            ChannelRecord, ChannelState, CloseIntent, CloseWithdrawal, InterChannelTx,
-            MemberSignature,
+            burn_descriptor, ChannelRecord, ChannelState, CloseIntent, CloseWithdrawal,
+            InterChannelTx, MemberSignature,
         },
         channel_id::ChannelId,
         deposit::Deposit,
+        private_state::FullPrivateState,
         salt::Salt,
         u63::U63,
         withdrawal::Withdrawal,
     },
     constants::{MAX_CHANNEL_MEMBERS, MAX_COSIGNERS, TOKEN_UNIT},
     ethereum_types::{
-        address::Address, bytes32::Bytes32, u32limb_trait::U32LimbTrait as _, u256::U256,
+        address::Address, bytes32::Bytes32, u256::U256, u32limb_trait::U32LimbTrait as _,
     },
-    regev::{RegevCiphertext, RegevPk, RegevSecurityLevel, encrypt_amount},
+    regev::{encrypt_amount, RegevCiphertext, RegevPk, RegevSecurityLevel},
     utils::{
         conversion::ToU64 as _,
         serialize::{deserialize_verifier_data, serialize_verifier_data},
     },
     wallet_core::{
-        BatchTxApply, BuiltInterChannelCredit, BuiltSend, CancelCloseProver,
-        ChannelBalanceAttestation, ChannelSnapshot, ChannelWithdrawalParams, CloseProver,
-        Erc20LaneParams, InterChannelDebitPayload, InterChannelTransferDescriptor, MemberInfo,
-        MemberKeys, PostCloseClaimProver, RefreshPayload, SendPayload, SlimSendPayload,
-        WithdrawalClaimProver, add_signature, assemble_genesis_state_backed,
-        build_batch_next_state, build_channel_withdrawal, build_inter_channel_credit,
-        build_l1_deposit_import, build_record, build_refresh, build_send_token,
-        build_token_register, burn_withdrawal_leaf, decrypt_balance_token,
-        default_settled_tx_accumulator, inter_channel_base_transfer, inter_channel_tx_v2,
-        partial_withdrawal_auth_digest, regev_pks_array, resolve_local_token_slot, sign_state,
-        sign_state_if_backed, verify_all_signatures, verify_inter_channel_credit_transition,
-        verify_inter_channel_send_transition, verify_l1_deposit_import_transition,
-        verify_refresh_transition, verify_send_transition, verify_slim_send_tx, verify_snapshot,
-        verify_token_register_state_transition,
+        add_signature, assemble_genesis_state_backed, build_batch_next_state,
+        build_channel_withdrawal, build_inter_channel_credit, build_l1_deposit_import,
+        build_record, build_refresh, build_send_token, build_token_register, burn_withdrawal_leaf,
+        decrypt_balance_token, default_settled_tx_accumulator, inter_channel_base_transfer,
+        inter_channel_tx_v2, partial_withdrawal_auth_digest, regev_pks_array,
+        resolve_local_token_slot, sign_state, sign_state_if_backed, verify_all_signatures,
+        verify_base_nonce_available, verify_inter_channel_credit_transition,
+        verify_inter_channel_descriptor_matches_debit, verify_inter_channel_send_transition,
+        verify_l1_deposit_import_transition, verify_refresh_transition, verify_send_transition,
+        verify_slim_send_tx, verify_snapshot, verify_token_register_state_transition, BatchTxApply,
+        BuiltInterChannelCredit, BuiltSend, CancelCloseProver, ChannelBalanceAttestation,
+        ChannelSnapshot, ChannelWithdrawalParams, CloseProver, Erc20LaneParams,
+        FalconAggregateProofArtifact, FalconProverContext, InterChannelDebitPayload,
+        InterChannelTransferDescriptor, MemberInfo, MemberKeys, PostCloseClaimProver,
+        RefreshPayload, SendPayload, SlimSendPayload, WithdrawalClaimProver,
     },
 };
 use plonky2::{
@@ -96,7 +106,7 @@ use plonky2::{
         proof::ProofWithPublicInputs,
     },
 };
-use rand010::{SeedableRng, rngs::StdRng};
+use rand010::{rngs::StdRng, SeedableRng};
 use serde::{Deserialize, Serialize};
 
 // Base-layer proof config (matches `BalanceProcessor` / `wallet_core`).
@@ -106,6 +116,7 @@ const BD: usize = 2;
 
 const LEVEL: RegevSecurityLevel = RegevSecurityLevel::Production;
 const STATE_FILE: &str = "cli_state.json";
+const FALCON_AGG_CACHE_DIR: &str = "falcon_aggregate_cache";
 // Which channel this CLI process operates. The relay runs ONE process per channel (channels 7 and
 // 8), each in its own working directory, selecting the channel via the `INTMAX_CHANNEL` env var.
 // Defaults to 7 for standalone use. Channel id is part of the deposit recipient + the channel
@@ -132,10 +143,11 @@ const BP_SLOT: u8 = 0;
 const BACKING_FILE: &str = "channel_backing.json"; // settled_tx_chain / intmax_state_root / fund
 const ATTESTATION_FILE: &str = "channel_attestation.bin"; // the channel's base-layer balance proof
 const BALANCE_VD_FILE: &str = "balance_vd.bin"; // cached balance verifier data (the gate needs only this)
-// A-3 P3 close artifacts: the descriptor + wrapped-close MLE proof the on-chain
-// `ChannelSettlementManager.submitCloseIntent` consumes (same schema as generate_close_fixture).
+                                                // A-3 P3 close artifacts: the descriptor + wrapped-close MLE proof the on-chain
+                                                // `ChannelSettlementManager.submitCloseIntent` consumes (same schema as generate_close_fixture).
 const CLOSE_INTENT_FILE: &str = "close_intent.json";
 const CLOSE_INTENT_MLE_FILE: &str = "close_intent_mle.json";
+const PW_CLOSE_INTENT_MLE_FILE: &str = "pw_close_intent_mle.json";
 // A-3 H-3 C1 (A30 cancelClose): the EXACT pending `CloseIntent` (serde, camelCase) persisted by
 // `close` so `cancel-close` can reconstruct the same close_intent_digest the manager froze on-chain
 // — a lossless round-trip (NOT the hex-string descriptor), so the cancel proof's
@@ -213,7 +225,7 @@ struct TokenWitness {
     has_witness: bool,
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 struct ControlledMember {
     slot: u16,
     keygen_seed: u64,
@@ -260,7 +272,7 @@ fn serialize_current_schema_version<S: serde::Serializer>(
 // Combined with the ABSENCE of `#[serde(default)]` on the ledgers below, this makes the on-disk
 // key set an EXACT match of the struct in both directions: a renamed ledger fails as BOTH a
 // missing field and an unknown one, so a rename can never again quietly reset a ledger to empty.
-#[derive(Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct CliState {
     /// On-disk schema version. This is the ONE retained `#[serde(default)]` in this struct, and it
@@ -333,6 +345,52 @@ struct CliState {
     /// re-import of the channel's own backing deposit if the backing-deposit guard were disarmed
     /// (§10.4 Finding B). Both defences used to fail silently and independently; neither does now.
     imported_deposits: HashSet<String>,
+}
+
+const INTER_TRANSFER_COMMIT_MAGIC: &str = "INTMAX_INTER_TRANSFER_2PC";
+const INTER_TRANSFER_COMMIT_VERSION: u32 = 1;
+const INTER_TRANSFER_COMMIT_DIR: &str = ".inter-transfer-journal";
+const MAX_INTER_TRANSFER_JOURNALS: usize = 100_000;
+const MAX_INTER_TRANSFER_JOURNAL_BYTES: u64 = 512 * 1024 * 1024;
+
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct InterTransferOut {
+    a_head: ChannelState,
+    b_fund_import_state: ChannelState,
+    b_bundle_apply_state: ChannelState,
+    b_snapshot: ChannelSnapshot,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum InterTransferCommitPhase {
+    Prepared,
+    Committed,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct InterTransferCommitJournal {
+    magic: String,
+    version: u32,
+    phase: InterTransferCommitPhase,
+    tx_hash: Bytes32,
+    replay_identity: Bytes32,
+    source_channel_id: u64,
+    destination_channel_id: u64,
+    source_before_digest: Bytes32,
+    destination_before_digest: Bytes32,
+    source_after: CliState,
+    destination_after: CliState,
+    result: InterTransferOut,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct InterTransferCommitEnvelope {
+    checksum: Bytes32,
+    journal: InterTransferCommitJournal,
 }
 
 #[derive(Deserialize)]
@@ -816,6 +874,112 @@ fn read_json<T: for<'de> Deserialize<'de>>(path: &str) -> T {
     serde_json::from_str(&s).unwrap_or_else(|e| die(format!("parse {path}: {e}")))
 }
 
+/// Refuse symlink substitution and repair legacy overly-broad permissions before reading a file
+/// that contains cosigner seeds or the base private witness.
+fn secure_private_path(path: &Path) {
+    let metadata = match fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return,
+        Err(error) => die(format!("inspect private file {}: {error}", path.display())),
+    };
+    if metadata.file_type().is_symlink() {
+        die(format!(
+            "REFUSING private file symlink {} (would expose or replace signing/base state)",
+            path.display()
+        ));
+    }
+    if !metadata.is_file() {
+        die(format!(
+            "private path {} is not a regular file",
+            path.display()
+        ));
+    }
+    #[cfg(unix)]
+    if metadata.permissions().mode() & 0o077 != 0 {
+        fs::set_permissions(path, fs::Permissions::from_mode(0o600)).unwrap_or_else(|error| {
+            die(format!(
+                "private file {} is readable by other users and chmod 0600 failed: {error}",
+                path.display()
+            ))
+        });
+        eprintln!(
+            "[state] SECURITY: repaired {} permissions to 0600",
+            path.display()
+        );
+    }
+}
+
+fn read_private_json<T: for<'de> Deserialize<'de>>(path: &str) -> T {
+    secure_private_path(Path::new(path));
+    read_json(path)
+}
+
+/// Crash-safe private-state writer: write a new 0600 inode, fsync it, atomically rename it, then
+/// fsync the parent directory. A failed/partial write never truncates the last committed state.
+fn write_private_json_at<T: Serialize>(path: &Path, value: &T) {
+    let bytes = serde_json::to_vec(value).unwrap_or_else(|e| die(e));
+    let parent = path
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or(Path::new("."));
+    fs::create_dir_all(parent)
+        .unwrap_or_else(|error| die(format!("create {}: {error}", parent.display())));
+    secure_private_path(path);
+    let name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or_else(|| die(format!("private path {} has no filename", path.display())));
+    let temp = parent.join(format!(".{name}.tmp.{}", std::process::id()));
+    if temp.exists() {
+        secure_private_path(&temp);
+        fs::remove_file(&temp)
+            .unwrap_or_else(|error| die(format!("remove stale {}: {error}", temp.display())));
+    }
+    let mut options = OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    options.mode(0o600);
+    let mut file = options
+        .open(&temp)
+        .unwrap_or_else(|error| die(format!("create private temp {}: {error}", temp.display())));
+    file.write_all(&bytes)
+        .unwrap_or_else(|error| die(format!("write private temp {}: {error}", temp.display())));
+    file.sync_all()
+        .unwrap_or_else(|error| die(format!("fsync private temp {}: {error}", temp.display())));
+    drop(file);
+    fs::rename(&temp, path).unwrap_or_else(|error| {
+        die(format!(
+            "atomic replace {} -> {}: {error}",
+            temp.display(),
+            path.display()
+        ))
+    });
+    #[cfg(unix)]
+    fs::set_permissions(path, fs::Permissions::from_mode(0o600))
+        .unwrap_or_else(|error| die(format!("chmod 0600 {}: {error}", path.display())));
+    FileSync::sync_directory(parent);
+}
+
+struct FileSync;
+
+impl FileSync {
+    fn sync_directory(path: &Path) {
+        let directory = fs::File::open(path).unwrap_or_else(|error| {
+            die(format!(
+                "open directory {} for fsync: {error}",
+                path.display()
+            ))
+        });
+        directory
+            .sync_all()
+            .unwrap_or_else(|error| die(format!("fsync directory {}: {error}", path.display())));
+    }
+}
+
+fn write_private_json<T: Serialize>(path: &str, value: &T) {
+    write_private_json_at(Path::new(path), value);
+}
+
 // COMPACT (not pretty) on purpose: these files are wire/state artifacts, not human documents.
 // Pretty-printing inflated a SlimSendPayload 1.41 MB → 4.5 MB (3.2×) and the 1016-member
 // snapshot/cli_state ~3× — paid on EVERY upload, JSON parse, and CLI state load.
@@ -824,9 +988,286 @@ fn write_json<T: Serialize>(path: &str, value: &T) {
     fs::write(path, s).unwrap_or_else(|e| die(format!("write {path}: {e}")));
 }
 
+fn inter_transfer_commit_dir() -> PathBuf {
+    PathBuf::from("..").join(INTER_TRANSFER_COMMIT_DIR)
+}
+
+fn inter_transfer_channel_dir(channel_id: u64) -> PathBuf {
+    PathBuf::from("..").join(format!("ch{channel_id}"))
+}
+
+fn inter_transfer_commit_path(tx_hash: Bytes32) -> PathBuf {
+    let hex = tx_hash.to_hex();
+    inter_transfer_commit_dir().join(format!("{}.json", hex.trim_start_matches("0x")))
+}
+
+fn inter_transfer_commit_checksum(journal: &InterTransferCommitJournal) -> Bytes32 {
+    let bytes = serde_json::to_vec(journal)
+        .unwrap_or_else(|e| die(format!("serialize inter-transfer commit journal: {e}")));
+    Bytes32::from_bytes_be(&keccak_hash::keccak(bytes).0)
+        .unwrap_or_else(|e| die(format!("inter-transfer journal checksum: {e:?}")))
+}
+
+fn write_inter_transfer_commit(path: &Path, journal: &InterTransferCommitJournal) {
+    let directory = path.parent().unwrap_or(Path::new("."));
+    fs::create_dir_all(directory).unwrap_or_else(|e| {
+        die(format!(
+            "create inter-transfer journal directory {}: {e}",
+            directory.display()
+        ))
+    });
+    let metadata = fs::symlink_metadata(directory).unwrap_or_else(|e| {
+        die(format!(
+            "inspect inter-transfer journal directory {}: {e}",
+            directory.display()
+        ))
+    });
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        die(format!(
+            "inter-transfer journal path {} is not a real directory",
+            directory.display()
+        ));
+    }
+    #[cfg(unix)]
+    fs::set_permissions(directory, fs::Permissions::from_mode(0o700)).unwrap_or_else(|e| {
+        die(format!(
+            "chmod 0700 inter-transfer journal directory {}: {e}",
+            directory.display()
+        ))
+    });
+    let envelope = InterTransferCommitEnvelope {
+        checksum: inter_transfer_commit_checksum(journal),
+        journal: journal.clone(),
+    };
+    write_private_json_at(path, &envelope);
+}
+
+fn read_inter_transfer_commit(path: &Path) -> InterTransferCommitJournal {
+    secure_private_path(path);
+    let metadata = fs::metadata(path).unwrap_or_else(|e| {
+        die(format!(
+            "stat inter-transfer journal {}: {e}",
+            path.display()
+        ))
+    });
+    if metadata.len() > MAX_INTER_TRANSFER_JOURNAL_BYTES {
+        die(format!(
+            "inter-transfer journal {} is too large ({} bytes)",
+            path.display(),
+            metadata.len()
+        ));
+    }
+    let bytes = fs::read(path).unwrap_or_else(|e| {
+        die(format!(
+            "read inter-transfer journal {}: {e}",
+            path.display()
+        ))
+    });
+    let envelope: InterTransferCommitEnvelope =
+        serde_json::from_slice(&bytes).unwrap_or_else(|e| {
+            die(format!(
+                "parse inter-transfer journal {}: {e}",
+                path.display()
+            ))
+        });
+    let expected = inter_transfer_commit_checksum(&envelope.journal);
+    if envelope.checksum != expected {
+        die(format!(
+            "inter-transfer journal {} checksum mismatch — refusing partial/corrupt state",
+            path.display()
+        ));
+    }
+    validate_inter_transfer_commit(&envelope.journal);
+    envelope.journal
+}
+
+fn validate_inter_transfer_commit(journal: &InterTransferCommitJournal) {
+    if journal.magic != INTER_TRANSFER_COMMIT_MAGIC
+        || journal.version != INTER_TRANSFER_COMMIT_VERSION
+    {
+        die("unsupported inter-transfer commit journal magic/version");
+    }
+    if journal.source_channel_id == journal.destination_channel_id
+        || journal.result.a_head.channel_id.as_u64() != journal.source_channel_id
+        || journal.result.b_fund_import_state.channel_id.as_u64() != journal.destination_channel_id
+        || journal.result.b_bundle_apply_state.channel_id.as_u64() != journal.destination_channel_id
+    {
+        die("inter-transfer commit journal has inconsistent channel ids");
+    }
+    if journal.result.a_head.prev_digest != journal.source_before_digest
+        || journal.result.b_fund_import_state.prev_digest != journal.destination_before_digest
+        || journal.result.b_bundle_apply_state.prev_digest
+            != journal.result.b_fund_import_state.digest
+        || journal.source_after.snapshot.state.digest != journal.result.a_head.digest
+        || journal.destination_after.snapshot.state.digest
+            != journal.result.b_bundle_apply_state.digest
+        || journal.result.b_snapshot.state.digest != journal.result.b_bundle_apply_state.digest
+    {
+        die("inter-transfer commit journal breaks the prepared digest chain");
+    }
+    if !journal
+        .source_after
+        .spent_tx_identities
+        .contains(&journal.replay_identity)
+        || !journal
+            .destination_after
+            .applied_tx_identities
+            .contains(&journal.replay_identity)
+    {
+        die("inter-transfer commit journal omits a required replay-ledger entry");
+    }
+    verify_all_signatures(
+        &journal.source_after.snapshot.record,
+        &journal.source_after.snapshot.members,
+        &journal.result.a_head,
+    )
+    .unwrap_or_else(|e| die(format!("inter-transfer journal source signature gate: {e}")));
+    verify_all_signatures(
+        &journal.destination_after.snapshot.record,
+        &journal.destination_after.snapshot.members,
+        &journal.result.b_fund_import_state,
+    )
+    .unwrap_or_else(|e| {
+        die(format!(
+            "inter-transfer journal fund-import signature gate: {e}"
+        ))
+    });
+    verify_all_signatures(
+        &journal.destination_after.snapshot.record,
+        &journal.destination_after.snapshot.members,
+        &journal.result.b_bundle_apply_state,
+    )
+    .unwrap_or_else(|e| die(format!("inter-transfer journal bundle signature gate: {e}")));
+}
+
+fn read_cli_state_at(dir: &Path) -> CliState {
+    let path = dir.join(STATE_FILE);
+    secure_private_path(&path);
+    let bytes = fs::read(&path)
+        .unwrap_or_else(|e| die(format!("read channel state {}: {e}", path.display())));
+    let state: CliState = serde_json::from_slice(&bytes)
+        .unwrap_or_else(|e| die(format!("parse channel state {}: {e}", path.display())));
+    if state.state_schema_version > STATE_SCHEMA_VERSION {
+        die(format!(
+            "channel state {} has newer schema version {}",
+            path.display(),
+            state.state_schema_version
+        ));
+    }
+    state
+}
+
+fn persist_cli_state_at(dir: &Path, state: &CliState) {
+    write_private_json_at(&dir.join(STATE_FILE), state);
+    write_private_json_at(&dir.join("channel_snapshot.json"), &state.snapshot);
+}
+
+fn remove_inter_transfer_commit(path: &Path) {
+    fs::remove_file(path)
+        .unwrap_or_else(|e| die(format!("remove completed journal {}: {e}", path.display())));
+    FileSync::sync_directory(path.parent().unwrap_or(Path::new(".")));
+}
+
+fn roll_forward_inter_transfer_commit(path: &Path, journal: &mut InterTransferCommitJournal) {
+    let source_dir = inter_transfer_channel_dir(journal.source_channel_id);
+    let destination_dir = inter_transfer_channel_dir(journal.destination_channel_id);
+    let source_current = read_cli_state_at(&source_dir);
+    let destination_current = read_cli_state_at(&destination_dir);
+    let source_digest = source_current.snapshot.state.digest;
+    let destination_digest = destination_current.snapshot.state.digest;
+    if source_digest != journal.source_before_digest
+        && source_digest != journal.source_after.snapshot.state.digest
+    {
+        die(format!(
+            "cannot recover inter-transfer {}: source head is neither before nor prepared after",
+            journal.tx_hash
+        ));
+    }
+    if destination_digest != journal.destination_before_digest
+        && destination_digest != journal.destination_after.snapshot.state.digest
+    {
+        die(format!(
+            "cannot recover inter-transfer {}: destination head is neither before nor prepared after",
+            journal.tx_hash
+        ));
+    }
+
+    // Idempotent roll-forward. Every individual replacement is atomic; the PREPARED journal stays
+    // durable until both channel files, both snapshots and both public recovery artifacts do.
+    persist_cli_state_at(&source_dir, &journal.source_after);
+    // Release-only crash testing still needs to exercise the real fsync/rename boundary. Keep the
+    // failpoint unreachable under production key provenance so an operator-controlled environment
+    // variable can never deliberately strand a live transfer half-applied.
+    if std::env::var("INTMAX_TEST_FAIL_INTER_TRANSFER_AFTER_SOURCE").as_deref() == Ok("1") {
+        let insecure = std::env::var(INSECURE_KEYS_ENV).as_deref() == Ok("1");
+        let production_keyfile = std::env::var_os(COSIGNER_KEYFILE_ENV).is_some();
+        if !insecure || production_keyfile {
+            die(
+                "REFUSING inter-transfer crash failpoint outside the explicit insecure-test key \
+                 provenance",
+            );
+        }
+        die("TEST FAILPOINT: source committed; PREPARED journal retained for roll-forward");
+    }
+    persist_cli_state_at(&destination_dir, &journal.destination_after);
+    write_private_json_at(&source_dir.join("inter_transfer.json"), &journal.result);
+    write_private_json_at(
+        &destination_dir.join("incoming_inter_transfer.json"),
+        &journal.result,
+    );
+
+    journal.phase = InterTransferCommitPhase::Committed;
+    write_inter_transfer_commit(path, journal);
+    remove_inter_transfer_commit(path);
+}
+
+fn recover_pending_inter_transfers() {
+    let directory = inter_transfer_commit_dir();
+    let metadata = match fs::symlink_metadata(&directory) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return,
+        Err(error) => die(format!(
+            "inspect inter-transfer journal directory {}: {error}",
+            directory.display()
+        )),
+    };
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        die(format!(
+            "inter-transfer journal path {} is not a real directory",
+            directory.display()
+        ));
+    }
+    let mut paths: Vec<PathBuf> = fs::read_dir(&directory)
+        .unwrap_or_else(|e| die(format!("read inter-transfer journal directory: {e}")))
+        .map(|entry| {
+            entry
+                .unwrap_or_else(|e| die(format!("read inter-transfer journal entry: {e}")))
+                .path()
+        })
+        .collect();
+    paths.sort();
+    if paths.len() > MAX_INTER_TRANSFER_JOURNALS {
+        die(format!(
+            "too many inter-transfer recovery journals ({} > {})",
+            paths.len(),
+            MAX_INTER_TRANSFER_JOURNALS
+        ));
+    }
+    for path in paths {
+        let mut journal = read_inter_transfer_commit(&path);
+        match journal.phase {
+            InterTransferCommitPhase::Prepared => {
+                roll_forward_inter_transfer_commit(&path, &mut journal)
+            }
+            InterTransferCommitPhase::Committed => remove_inter_transfer_commit(&path),
+        }
+    }
+}
+
 /// Read `cli_state.json` as a JSON object, or die. Shared by `load_state` and `migrate-state` so
 /// both see exactly the same bytes and the same key set.
 fn read_state_object() -> serde_json::Map<String, serde_json::Value> {
+    secure_private_path(Path::new(STATE_FILE));
     let text =
         fs::read_to_string(STATE_FILE).unwrap_or_else(|e| die(format!("read {STATE_FILE}: {e}")));
     let raw: serde_json::Value =
@@ -915,7 +1356,88 @@ fn load_state() -> CliState {
 fn save_state(state: &CliState) {
     // The version stamp is forced by `serialize_current_schema_version`, so no writer can forget
     // it and no file can be written back claiming an older schema than it has.
-    write_json(STATE_FILE, state);
+    write_private_json(STATE_FILE, state);
+    // A state becomes reusable settlement authority exactly when it carries the complete N-of-N
+    // signature set. Pay the Falcon aggregation cost ONCE at that boundary, never later in the
+    // close/PW/cancel race. The digest-keyed cache makes repeat saves idempotent. A deployment may
+    // disable this only when its long-lived prover service has taken responsibility for invoking
+    // `precompute-falcon-aggregate` asynchronously; silently disabling it is not the default.
+    let is_finalized =
+        state.snapshot.state.member_signatures.len() == state.snapshot.record.member_count as usize;
+    let externally_managed =
+        std::env::var("INTMAX_DISABLE_FALCON_AGG_PRECOMPUTE").as_deref() == Ok("1");
+    if is_finalized && !externally_managed {
+        let ctx = FalconProverContext::new();
+        cache_falcon_aggregate(&ctx, &state.snapshot.record, &state.snapshot.state).unwrap_or_else(
+            |e| {
+                die(format!(
+                    "state finalized but Falcon aggregate cache failed: {e}"
+                ))
+            },
+        );
+    }
+}
+
+fn falcon_aggregate_path(state_digest: Bytes32) -> std::path::PathBuf {
+    std::path::Path::new(FALCON_AGG_CACHE_DIR).join(format!(
+        "{}.bin",
+        state_digest.to_hex().trim_start_matches("0x")
+    ))
+}
+
+/// Load-or-create the state-scoped Falcon artifact and verify it against the current circuit before
+/// returning it. Corrupt or stale bytes are never trusted; they are replaced from the authentic
+/// N-of-N signatures still carried by the finalized state.
+fn cache_falcon_aggregate(
+    ctx: &FalconProverContext,
+    record: &ChannelRecord,
+    state: &ChannelState,
+) -> Result<FalconAggregateProofArtifact, String> {
+    let path = falcon_aggregate_path(state.digest);
+    if path.is_file() {
+        match fs::read(&path)
+            .map_err(|e| e.to_string())
+            .and_then(|b| FalconAggregateProofArtifact::from_bytes(&b).map_err(|e| e.to_string()))
+            .and_then(|a| {
+                ctx.verify_finalized_state_artifact(record, state, &a)
+                    .map_err(|e| e.to_string())?;
+                Ok(a)
+            }) {
+            Ok(artifact) => return Ok(artifact),
+            Err(e) => eprintln!(
+                "[falcon-aggregate] cached artifact {} rejected ({e}); regenerating from the finalized signatures",
+                path.display()
+            ),
+        }
+    }
+
+    let artifact = ctx
+        .prove_finalized_state(record, state)
+        .map_err(|e| e.to_string())?;
+    let bytes = artifact.to_bytes().map_err(|e| e.to_string())?;
+    fs::create_dir_all(FALCON_AGG_CACHE_DIR).map_err(|e| e.to_string())?;
+    let tmp = path.with_extension(format!("bin.tmp.{}", std::process::id()));
+    fs::write(&tmp, bytes).map_err(|e| e.to_string())?;
+    fs::rename(&tmp, &path).map_err(|e| e.to_string())?;
+    eprintln!(
+        "[falcon-aggregate] cached state {} → {}",
+        state.digest,
+        path.display()
+    );
+    Ok(artifact)
+}
+
+fn cmd_precompute_falcon_aggregate() {
+    let state = load_state();
+    let ctx = FalconProverContext::new();
+    let artifact = cache_falcon_aggregate(&ctx, &state.snapshot.record, &state.snapshot.state)
+        .unwrap_or_else(|e| die(format!("precompute-falcon-aggregate: {e}")));
+    println!(
+        "precompute-falcon-aggregate OK: state {} members {} proof {} bytes",
+        artifact.state_digest,
+        artifact.member_count,
+        artifact.proof.len()
+    );
 }
 
 /// ONE-TIME, EXPLICIT migration for a `cli_state.json` written before a replay ledger existed.
@@ -1069,6 +1591,11 @@ struct ChannelBacking {
     /// deposit_salt)`). Persisted so the relay can call `deposit()` without Rust recomputation.
     #[serde(default)]
     deposit_recipient: String,
+    /// P2-4: authoritative private witness for the persisted base balance IVC head. The sent-tx
+    /// tree, not a CLI counter, answers whether a proposed burn nonce is actually empty. Legacy
+    /// backing files deserialize to `None` and burns fail closed with a migration instruction.
+    #[serde(default)]
+    base_private_state: Option<FullPrivateState>,
 }
 
 /// Canonical form for comparing hex identifiers that different producers spell differently
@@ -1133,7 +1660,7 @@ fn record_backing_deposit_tx(tx_hash: &str) {
     if strip0x(tx_hash).is_empty() {
         die("record_backing_deposit_tx: empty tx hash — refusing to record an unusable entry");
     }
-    let mut backing: ChannelBacking = read_json(BACKING_FILE);
+    let mut backing: ChannelBacking = read_private_json(BACKING_FILE);
     if !backing
         .known_backing_deposit_txs()
         .contains(&strip0x(tx_hash))
@@ -1141,7 +1668,7 @@ fn record_backing_deposit_tx(tx_hash: &str) {
         backing.backing_deposit_txs.push(tx_hash.to_string());
     }
     backing.backing_deposit_status = BackingDepositStatus::Landed;
-    write_json(BACKING_FILE, &backing);
+    write_private_json(BACKING_FILE, &backing);
     eprintln!(
         "[withdraw] SECURITY: recorded backing-recipient deposit {tx_hash} in {BACKING_FILE} \
          (backing_deposit_txs, status=landed) — the import guard now refuses it."
@@ -1173,7 +1700,7 @@ fn load_backing() -> (
         .unwrap_or_else(|e| die(format!("deserialize balance_vd: {e}")));
     let proof =
         fs::read(ATTESTATION_FILE).unwrap_or_else(|e| die(format!("read {ATTESTATION_FILE}: {e}")));
-    let backing: ChannelBacking = read_json(BACKING_FILE);
+    let backing: ChannelBacking = read_private_json(BACKING_FILE);
     (
         balance_vd,
         ChannelBalanceAttestation {
@@ -1186,12 +1713,143 @@ fn load_backing() -> (
 // anvil dev account[0] private key — a PUBLIC throwaway (safe on the CLI; NEVER a real key).
 const ANVIL_DEV_KEY: &str = "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80";
 
-/// The key that sends the on-chain deposit during `setup-backing`. Defaults to the public anvil dev
-/// key (local). For a real testnet (Sepolia) the funded deployer key is passed via the
-/// `INTMAX_DEPOSIT_KEY` env var so its value is handed to `cast` by the shell, never hardcoded.
-/// SECURITY: this is read once and passed straight to `cast --private-key`; it is never logged.
-fn deposit_key_env() -> String {
-    std::env::var("INTMAX_DEPOSIT_KEY").unwrap_or_else(|_| ANVIL_DEV_KEY.to_string())
+/// Foundry signer used for L1 writes.
+///
+/// A raw key is supported only on chain 31337, where the default is Anvil's public throwaway key.
+/// Every other chain must use an encrypted Foundry keystore selected by `INTMAX_L1_ACCOUNT`.
+/// Consequently a real private key is never present in this process' child argv. Foundry may read
+/// the keystore password from its standard `ETH_PASSWORD` environment or prompt on a TTY; callers
+/// may also configure Foundry's own password-file mechanism outside this process.
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum L1Signer {
+    LocalDevPrivateKey(String),
+    FoundryAccount(String),
+}
+
+impl L1Signer {
+    fn for_chain_id(chain_id: u64) -> Self {
+        let legacy_key = std::env::var("INTMAX_DEPOSIT_KEY")
+            .unwrap_or_default()
+            .trim()
+            .to_string();
+        let account = std::env::var("INTMAX_L1_ACCOUNT")
+            .unwrap_or_default()
+            .trim()
+            .to_string();
+
+        if chain_id == DEVNET_CHAIN_ID {
+            if !account.is_empty() {
+                return Self::validated_account(account);
+            }
+            return Self::LocalDevPrivateKey(if legacy_key.is_empty() {
+                ANVIL_DEV_KEY.to_string()
+            } else {
+                legacy_key
+            });
+        }
+
+        if !legacy_key.is_empty() {
+            die(format!(
+                "INTMAX_DEPOSIT_KEY is set on non-dev chain id {chain_id}, but raw private keys are \
+                 forbidden for real-network L1 writes because `--private-key <secret>` is visible \
+                 in process argv. Import the key into Foundry's encrypted keystore (`cast wallet \
+                 import <name> --interactive`), unset INTMAX_DEPOSIT_KEY, and set \
+                 INTMAX_L1_ACCOUNT=<name>. Foundry reads the password through its standard \
+                 ETH_PASSWORD/password-file mechanism."
+            ));
+        }
+        if account.is_empty() {
+            die(format!(
+                "INTMAX_L1_ACCOUNT is not set for non-dev chain id {chain_id}. Refusing to place a \
+                 real private key in child-process argv. Import the funded signer with `cast wallet \
+                 import <name> --interactive`, then set INTMAX_L1_ACCOUNT=<name> (and configure \
+                 Foundry's ETH_PASSWORD/password-file mechanism)."
+            ));
+        }
+        Self::validated_account(account)
+    }
+
+    fn validated_account(account: String) -> Self {
+        let valid = account.len() <= 128
+            && account
+                .chars()
+                .next()
+                .is_some_and(|c| c.is_ascii_alphanumeric())
+            && account
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'));
+        if !valid {
+            die(
+                "INTMAX_L1_ACCOUNT must be a Foundry keystore filename (1..128 ASCII \
+                 alphanumeric/._- characters, beginning with an alphanumeric character)",
+            );
+        }
+        Self::FoundryAccount(account)
+    }
+
+    fn for_rpc(rpc: &str) -> Self {
+        Self::for_chain_id(rpc_chain_id(rpc))
+    }
+
+    /// Add only Foundry wallet-selection flags. Password material is deliberately never added.
+    fn append_args(&self, argv: &mut Vec<String>) {
+        match self {
+            Self::LocalDevPrivateKey(key) => {
+                argv.push("--private-key".to_string());
+                argv.push(key.clone());
+            }
+            Self::FoundryAccount(account) => {
+                argv.push("--account".to_string());
+                argv.push(account.clone());
+            }
+        }
+    }
+
+    fn append_to_command(&self, command: &mut Command) {
+        match self {
+            Self::LocalDevPrivateKey(key) => {
+                command.arg("--private-key").arg(key);
+            }
+            Self::FoundryAccount(account) => {
+                command.arg("--account").arg(account);
+            }
+        }
+    }
+
+    fn address(&self) -> String {
+        let mut argv = vec!["wallet".to_string(), "address".to_string()];
+        self.append_args(&mut argv);
+        cast_owned(&argv).trim().to_string()
+    }
+}
+
+#[cfg(test)]
+mod l1_signer_tests {
+    use super::*;
+
+    #[test]
+    fn foundry_account_child_argv_contains_no_private_or_password_material() {
+        let signer = L1Signer::FoundryAccount("sepolia-operator".to_string());
+        let mut command = Command::new("forge");
+        command.args(["script", "script/Deploy.s.sol"]);
+        signer.append_to_command(&mut command);
+        let argv: Vec<String> = command
+            .get_args()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect();
+
+        assert_eq!(
+            argv,
+            [
+                "script",
+                "script/Deploy.s.sol",
+                "--account",
+                "sepolia-operator"
+            ]
+        );
+        assert!(!argv.iter().any(|arg| arg.contains("private-key")));
+        assert!(!argv.iter().any(|arg| arg.contains("password")));
+    }
 }
 
 /// Run `cast <args>` and return stdout (dies on failure; foundry `cast` must be on PATH).
@@ -1207,6 +1865,32 @@ fn cast(args: &[&str]) -> String {
         ));
     }
     String::from_utf8_lossy(&out.stdout).to_string()
+}
+
+/// Owned-argument variant used for signed calls, where the wallet selector is chosen at runtime.
+fn cast_owned(args: &[String]) -> String {
+    let out = Command::new("cast")
+        .args(args)
+        .output()
+        .unwrap_or_else(|e| die(format!("cast failed to start ({e}); is foundry installed?")));
+    if !out.status.success() {
+        // Do not format wallet argv into the error: even a local developer may have selected a
+        // non-default Anvil fixture key, and diagnostics must not turn that into a log disclosure.
+        die(format!(
+            "signed cast command failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        ));
+    }
+    String::from_utf8_lossy(&out.stdout).to_string()
+}
+
+/// Run a signed `cast` command. The RPC is resolved before signer selection so a raw key can only
+/// reach argv after the endpoint has proved it is chain 31337.
+fn cast_signed(rpc: &str, signer: &L1Signer, args: &[&str]) -> String {
+    let mut argv: Vec<String> = args.iter().map(|arg| (*arg).to_string()).collect();
+    signer.append_args(&mut argv);
+    argv.extend(["--rpc-url".to_string(), rpc.to_string()]);
+    cast_owned(&argv)
 }
 
 /// The `transactionHash` of a `cast send --json` receipt. FAIL-CLOSED: a receipt we cannot read a
@@ -1232,7 +1916,7 @@ fn abi_word(data: &str, i: usize) -> &str {
 /// the deposit, and writes the attestation + verifier data + backed-genesis params. Run BEFORE
 /// `init`. `setup-backing [fund]` (default = Σ CLI member genesis balances).
 fn cmd_setup_backing(args: &[String]) {
-    use rand::{SeedableRng as _, rngs::StdRng as DepRng};
+    use rand::{rngs::StdRng as DepRng, SeedableRng as _};
     let rpc = args.get(1).cloned().unwrap_or_else(|| {
         die("setup-backing needs <rpc_url> <rollup_addr> [fund] (real on-chain deposit)")
     });
@@ -1243,6 +1927,7 @@ fn cmd_setup_backing(args: &[String]) {
     let fund: u64 = args.get(3).and_then(|s| s.parse().ok()).unwrap_or_else(|| {
         cli_slots().iter().map(|&s| genesis_amount(s)).sum::<u64>() + DELEGATE_GENESIS
     });
+    let l1_signer = L1Signer::for_rpc(&rpc);
 
     eprintln!("setup-backing: building the balance prover (one-time, ~25s)…");
     let spend = SpendCircuit::<BF, BC, BD>::new();
@@ -1260,7 +1945,6 @@ fn cmd_setup_backing(args: &[String]) {
     let recipient = calculate_recipient_from_user_id(channel_id, deposit_salt);
     let amount = fund;
 
-    let deposit_key = deposit_key_env();
     // P5-B 案B: optionally DEFER the on-chain deposit to `withdraw` so the withdraw block chain
     // folds the deposit in the exact order its proof models (the standalone fold order). The
     // default makes the REAL on-chain deposit now (detail2 §F-1 backing origin + keystone
@@ -1271,9 +1955,7 @@ fn cmd_setup_backing(args: &[String]) {
     // changes WHEN the deposit lands on-chain, not whether the eventual L1 exit is backed.
     let no_onchain_deposit = std::env::var("SETUP_BACKING_NO_ONCHAIN_DEPOSIT").is_ok();
     let (depositor, txhash) = if no_onchain_deposit {
-        let dep_hex = cast(&["wallet", "address", "--private-key", &deposit_key])
-            .trim()
-            .to_string();
+        let dep_hex = l1_signer.address();
         let dep = Address::from_hex(&dep_hex)
             .unwrap_or_else(|e| die(format!("parse depositor address: {e:?}")));
         eprintln!(
@@ -1287,22 +1969,22 @@ fn cmd_setup_backing(args: &[String]) {
             "setup-backing: real ETH deposit on {rpc} → IntmaxRollup {rollup} (amount {amount})…"
         );
         let recipient_hex = recipient.to_hex();
-        let send_out = cast(&[
-            "send",
-            &rollup,
-            "deposit(bytes32,uint32,uint256,bytes32)",
-            &recipient_hex,
-            "0",
-            &amount.to_string(),
-            "0x0000000000000000000000000000000000000000000000000000000000000000",
-            "--value",
-            &amount.to_string(),
-            "--private-key",
-            &deposit_key,
-            "--rpc-url",
+        let send_out = cast_signed(
             &rpc,
-            "--json",
-        ]);
+            &l1_signer,
+            &[
+                "send",
+                &rollup,
+                "deposit(bytes32,uint32,uint256,bytes32)",
+                &recipient_hex,
+                "0",
+                &amount.to_string(),
+                "0x0000000000000000000000000000000000000000000000000000000000000000",
+                "--value",
+                &amount.to_string(),
+                "--json",
+            ],
+        );
         let txhash = parse_cast_tx_hash(&send_out, "setup-backing deposit");
 
         // Read the deposit back from the LIVE receipt: depositor + the on-chain depositHashChain.
@@ -1408,7 +2090,7 @@ fn cmd_setup_backing(args: &[String]) {
     } else {
         (BackingDepositStatus::Landed, vec![txhash.clone()])
     };
-    write_json(
+    write_private_json(
         BACKING_FILE,
         &ChannelBacking {
             settled_tx_chain: pis.settled_tx_chain.to_hex(),
@@ -1421,6 +2103,7 @@ fn cmd_setup_backing(args: &[String]) {
             backing_deposit_status,
             deposit_salt: Some(deposit_salt),
             deposit_recipient: recipient.to_hex(),
+            base_private_state: Some(bwg.full_private_state.clone()),
         },
     );
     // SECURITY (§10.2, second aggravating detail): this line used to say "REAL on-chain deposit"
@@ -1503,6 +2186,7 @@ fn cmd_close(args: &[String]) {
         .get(2)
         .cloned()
         .unwrap_or_else(|| "http://localhost:8545".to_string());
+    let l1_signer = L1Signer::for_rpc(&rpc);
 
     // Phase control (opt-in; default = the combined requestClose + submitCloseIntent flow):
     //   CLOSE_REQUEST_ONLY=1 → A26 requestClose-only (freeze + grace), NO proving, return early.
@@ -1513,19 +2197,10 @@ fn cmd_close(args: &[String]) {
     // verifies the wrapped MLE proof and the manager enforces challenge ordering (epoch, version).
     let skip_request = std::env::var("CLOSE_SKIP_REQUEST").is_ok();
     if std::env::var("CLOSE_REQUEST_ONLY").is_ok() {
-        let key = deposit_key_env();
         eprintln!(
             "[close] requestClose() on manager {manager} (A26 request-only phase, no proving)…"
         );
-        cast(&[
-            "send",
-            &manager,
-            "requestClose()",
-            "--private-key",
-            &key,
-            "--rpc-url",
-            &rpc,
-        ]);
+        cast_signed(&rpc, &l1_signer, &["send", &manager, "requestClose()"]);
         if let Ok(secs) = std::env::var("CLOSE_ADVANCE_TIME") {
             eprintln!(
                 "[close] advancing chain time by {secs}s (evm_increaseTime) to pass the grace window…"
@@ -1575,11 +2250,13 @@ fn cmd_close(args: &[String]) {
         "[close] building close witness (member_count={member_count}) + proving close circuit + MLE (HEAVY)…"
     );
     let prover = CloseProver::new(&balance_vd);
+    let falcon_artifact = cache_falcon_aggregate(prover.falcon_context(), &record, &state)
+        .unwrap_or_else(|e| die(format!("Falcon aggregate cache: {e}")));
     let witness = prover
-        .build_full_witness_from_signatures(
+        .build_full_witness_from_aggregate(
             &record,
             &state,
-            &state.member_signatures,
+            &falcon_artifact,
             balance_proof,
             close_nonce,
             burn_tx_hash,
@@ -1664,22 +2341,13 @@ fn cmd_close(args: &[String]) {
     // ── On-chain: requestClose (freeze) then submitCloseIntent (large calldata → forge step). ──
     // When CLOSE_SKIP_REQUEST is set (A28 submit-after-request / A29 challenge), the channel is
     // ALREADY ClosePending — skip requestClose (it would revert) and go straight to the intent.
-    let key = deposit_key_env();
     if skip_request {
         eprintln!(
             "[close] CLOSE_SKIP_REQUEST set: skipping requestClose (submit-intent / challenge on an already-pending close)…"
         );
     } else {
         eprintln!("[close] requestClose() on manager {manager}…");
-        cast(&[
-            "send",
-            &manager,
-            "requestClose()",
-            "--private-key",
-            &key,
-            "--rpc-url",
-            &rpc,
-        ]);
+        cast_signed(&rpc, &l1_signer, &["send", &manager, "requestClose()"]);
     }
 
     // GRACE: the manager rejects the FIRST close intent until `GRACE_BEFORE_PROCESS_SECS` (600s)
@@ -1711,19 +2379,18 @@ fn cmd_close(args: &[String]) {
     .unwrap_or_else(|e| die(format!("stage close_intent_mle.json: {e}")));
     let sv = std::env::var("CLOSE_SV").unwrap_or_default();
     eprintln!("[close] submitCloseIntent via forge RunClose step…");
-    let status = std::process::Command::new("forge")
-        .current_dir(&contracts_dir)
-        .args([
-            "script",
-            "script/RunClose.s.sol",
-            "--sig",
-            "closeIntentStep()",
-            "--rpc-url",
-            &rpc,
-            "--private-key",
-            &key,
-            "--broadcast",
-        ])
+    let mut forge = std::process::Command::new("forge");
+    forge.current_dir(&contracts_dir).args([
+        "script",
+        "script/RunClose.s.sol",
+        "--sig",
+        "closeIntentStep()",
+        "--rpc-url",
+        &rpc,
+        "--broadcast",
+    ]);
+    l1_signer.append_to_command(&mut forge);
+    let status = forge
         .env("ROLLUP", &backing.rollup)
         .env("MANAGER", &manager)
         .env("SV", &sv)
@@ -1751,19 +2418,11 @@ fn cmd_settle(args: &[String]) {
         .get(2)
         .cloned()
         .unwrap_or_else(|| "http://localhost:8545".to_string());
-    let key = deposit_key_env();
+    let l1_signer = L1Signer::for_rpc(&rpc);
     eprintln!(
         "[settle] finalizeClose() on manager {manager} (the challenge period must have elapsed)…"
     );
-    cast(&[
-        "send",
-        &manager,
-        "finalizeClose()",
-        "--private-key",
-        &key,
-        "--rpc-url",
-        &rpc,
-    ]);
+    cast_signed(&rpc, &l1_signer, &["send", &manager, "finalizeClose()"]);
     println!(
         "[settle] channel finalized (Closed). Now run `withdraw` (rollup → manager) then `claim`."
     );
@@ -1934,26 +2593,22 @@ fn cmd_claim(args: &[String]) {
         .unwrap_or_else(|| {
             die("set CLAIM_RECIPIENT=0x<20-byte member L1 recipient> (must equal the registered recipient)")
         });
+    let l1_signer = L1Signer::for_rpc(&rpc);
 
     // A33 pull-only phase (opt-in): the claim proof was already submitted (totalWithdrawn
     // credited); just pull the ETH credit to the recipient. No proving. SECURITY:
     // claimWithdrawalCredit pays only the caller's previously-credited amount (caller MUST be
     // the recipient), so this is inert.
     if std::env::var("CLAIM_PULL_ONLY").is_ok() {
-        let key = deposit_key_env();
         let recipient_hex = recipient.to_hex();
         eprintln!(
             "[claim] claimWithdrawalCredit() pull-only (caller must be the recipient {recipient_hex})…"
         );
-        cast(&[
-            "send",
-            &manager,
-            "claimWithdrawalCredit()",
-            "--private-key",
-            &key,
-            "--rpc-url",
+        cast_signed(
             &rpc,
-        ]);
+            &l1_signer,
+            &["send", &manager, "claimWithdrawalCredit()"],
+        );
         println!("[claim] pull-only OK: recipient {recipient_hex} pulled its withdrawal credit.");
         return;
     }
@@ -2060,21 +2715,19 @@ fn cmd_claim(args: &[String]) {
         data_dir.join("sepolia_withdrawal_claim_mle.json"),
     )
     .unwrap_or_else(|e| die(format!("stage withdrawal_claim_mle.json: {e}")));
-    let key = deposit_key_env();
     eprintln!("[claim] submitWithdrawalClaim via forge…");
-    let status = std::process::Command::new("forge")
-        .current_dir(&contracts_dir)
-        .args([
-            "script",
-            "script/RunClose.s.sol",
-            "--sig",
-            "submitWithdrawalClaimStep()",
-            "--rpc-url",
-            &rpc,
-            "--private-key",
-            &key,
-            "--broadcast",
-        ])
+    let mut forge = std::process::Command::new("forge");
+    forge.current_dir(&contracts_dir).args([
+        "script",
+        "script/RunClose.s.sol",
+        "--sig",
+        "submitWithdrawalClaimStep()",
+        "--rpc-url",
+        &rpc,
+        "--broadcast",
+    ]);
+    l1_signer.append_to_command(&mut forge);
+    let status = forge
         .env("MANAGER", &manager)
         .status()
         .unwrap_or_else(|e| die(format!("forge submitWithdrawalClaim failed to start: {e}")));
@@ -2092,15 +2745,11 @@ fn cmd_claim(args: &[String]) {
         eprintln!(
             "[claim] claimWithdrawalCredit() (caller must be the recipient {recipient_hex})…"
         );
-        cast(&[
-            "send",
-            &manager,
-            "claimWithdrawalCredit()",
-            "--private-key",
-            &key,
-            "--rpc-url",
+        cast_signed(
             &rpc,
-        ]);
+            &l1_signer,
+            &["send", &manager, "claimWithdrawalCredit()"],
+        );
         println!(
             "[claim] OK: recipient {recipient_hex} received native ETH (amount {}).",
             pis.amount
@@ -2110,16 +2759,16 @@ fn cmd_claim(args: &[String]) {
             "[claim] claimWithdrawalCredit({}) (ERC-20; caller must be the recipient {recipient_hex})…",
             pis.token_index
         );
-        cast(&[
-            "send",
-            &manager,
-            "claimWithdrawalCredit(uint32)",
-            &pis.token_index.to_string(),
-            "--private-key",
-            &key,
-            "--rpc-url",
+        cast_signed(
             &rpc,
-        ]);
+            &l1_signer,
+            &[
+                "send",
+                &manager,
+                "claimWithdrawalCredit(uint32)",
+                &pis.token_index.to_string(),
+            ],
+        );
         println!(
             "[claim] OK: recipient {recipient_hex} received token {} (amount {}).",
             pis.token_index, pis.amount
@@ -2161,6 +2810,7 @@ fn cmd_cancel_close(args: &[String]) {
         .get(2)
         .cloned()
         .unwrap_or_else(|| "http://localhost:8545".to_string());
+    let l1_signer = L1Signer::for_rpc(&rpc);
     // F4: resolve + validate the contracts checkout BEFORE the heavy cancel proof (see
     // `require_contracts_dir`). A cancel that dies on a path lookup after proving is worse than a
     // cancel that never started: the challenge window is what a cancel is racing.
@@ -2195,13 +2845,10 @@ fn cmd_cancel_close(args: &[String]) {
         revived_state.balance_state.state_version, close_intent.final_state_version
     );
     let prover = CancelCloseProver::new();
+    let falcon_artifact = cache_falcon_aggregate(prover.falcon_context(), &record, &revived_state)
+        .unwrap_or_else(|e| die(format!("Falcon aggregate cache: {e}")));
     let witness = prover
-        .build_full_witness_from_signatures(
-            &record,
-            &revived_state,
-            &revived_state.member_signatures,
-            &close_intent,
-        )
+        .build_full_witness_from_aggregate(&record, &revived_state, &falcon_artifact, &close_intent)
         .unwrap_or_else(|e| die(format!("build cancel-close witness: {}", e.0)));
     let cancel_proof = prover
         .prove(&witness)
@@ -2236,7 +2883,6 @@ fn cmd_cancel_close(args: &[String]) {
     );
 
     // ── On-chain: cancelClose (large struct calldata → forge step). ──
-    let key = deposit_key_env();
     let data_dir = contracts_dir.join("test/data");
     fs::copy(
         CANCEL_CLOSE_FILE,
@@ -2250,19 +2896,18 @@ fn cmd_cancel_close(args: &[String]) {
     .unwrap_or_else(|e| die(format!("stage cancel_close_mle.json: {e}")));
     let sv = std::env::var("CANCEL_SV").unwrap_or_default();
     eprintln!("[cancel-close] cancelClose via forge RunClose step…");
-    let status = Command::new("forge")
-        .current_dir(&contracts_dir)
-        .args([
-            "script",
-            "script/RunClose.s.sol",
-            "--sig",
-            "cancelCloseStep()",
-            "--rpc-url",
-            &rpc,
-            "--private-key",
-            &key,
-            "--broadcast",
-        ])
+    let mut forge = Command::new("forge");
+    forge.current_dir(&contracts_dir).args([
+        "script",
+        "script/RunClose.s.sol",
+        "--sig",
+        "cancelCloseStep()",
+        "--rpc-url",
+        &rpc,
+        "--broadcast",
+    ]);
+    l1_signer.append_to_command(&mut forge);
+    let status = forge
         .env("MANAGER", &manager)
         .env("SV", &sv)
         .status()
@@ -2326,6 +2971,7 @@ fn cmd_post_close_claim(args: &[String]) {
         .unwrap_or_else(|| {
             die("set CLAIM_RECIPIENT=0x<20-byte member L1 recipient> (must equal the registered recipient)")
         });
+    let l1_signer = L1Signer::for_rpc(&rpc);
     // F4: resolve + validate the contracts checkout BEFORE the heavy post-close-claim proof (see
     // `require_contracts_dir`).
     let contracts_dir = require_contracts_dir("post-close-claim", &["script/RunClose.s.sol"]);
@@ -2433,21 +3079,19 @@ fn cmd_post_close_claim(args: &[String]) {
         data_dir.join("sepolia_post_close_claim_mle.json"),
     )
     .unwrap_or_else(|e| die(format!("stage post_close_claim_mle.json: {e}")));
-    let key = deposit_key_env();
     eprintln!("[post-close-claim] submitPostCloseClaim via forge RunClose step…");
-    let status = Command::new("forge")
-        .current_dir(&contracts_dir)
-        .args([
-            "script",
-            "script/RunClose.s.sol",
-            "--sig",
-            "submitPostCloseClaimStep()",
-            "--rpc-url",
-            &rpc,
-            "--private-key",
-            &key,
-            "--broadcast",
-        ])
+    let mut forge = Command::new("forge");
+    forge.current_dir(&contracts_dir).args([
+        "script",
+        "script/RunClose.s.sol",
+        "--sig",
+        "submitPostCloseClaimStep()",
+        "--rpc-url",
+        &rpc,
+        "--broadcast",
+    ]);
+    l1_signer.append_to_command(&mut forge);
+    let status = forge
         .env("MANAGER", &manager)
         .status()
         .unwrap_or_else(|e| die(format!("forge submitPostCloseClaim failed to start: {e}")));
@@ -2460,15 +3104,11 @@ fn cmd_post_close_claim(args: &[String]) {
     eprintln!(
         "[post-close-claim] claimWithdrawalCredit() (caller must be the recipient {recipient_hex})…"
     );
-    cast(&[
-        "send",
-        &manager,
-        "claimWithdrawalCredit()",
-        "--private-key",
-        &key,
-        "--rpc-url",
+    cast_signed(
         &rpc,
-    ]);
+        &l1_signer,
+        &["send", &manager, "claimWithdrawalCredit()"],
+    );
     println!(
         "[post-close-claim] OK: recipient {recipient_hex} received native ETH (amount {}).",
         pis.amount
@@ -2503,7 +3143,7 @@ fn cmd_post_close_claim(args: &[String]) {
 // so a pre-initialized VK accepts the freshly-generated proof.
 //
 // env: ROLLUP (rollup addr; falls back to channel_backing.json), INTMAX_CHANNEL (channel id),
-//      INTMAX_DEPOSIT_KEY (funding/poster key; defaults to the anvil dev key),
+//      INTMAX_L1_ACCOUNT (Foundry keystore account off-devnet; local Anvil may use its dev key),
 //      WD_DEPOSIT_AMOUNT / WD_AMOUNT (native units; default 10 / 3),
 //      SUB_ID (overrides the finalize submission id; default = the 3rd of our posts).
 const BLOB_FILE: &str = "blob.bin";
@@ -2539,7 +3179,7 @@ fn json_num_array(v: &serde_json::Value) -> String {
 }
 
 /// Post one block (index `i` into `lifecycle.blocks`) as its own blob submission round.
-fn post_block_round(rollup: &str, lc: &serde_json::Value, i: usize, key: &str, rpc: &str) {
+fn post_block_round(rollup: &str, lc: &serde_json::Value, i: usize, signer: &L1Signer, rpc: &str) {
     let block = &lc["blocks"][i];
     let channel_id = block["channel_id"]
         .as_u64()
@@ -2563,24 +3203,24 @@ fn post_block_round(rollup: &str, lc: &serde_json::Value, i: usize, key: &str, r
         .as_str()
         .unwrap_or_else(|| die("final_state_root"));
     eprintln!("[withdraw] postBlockAndSubmit round {i} (blob tx, 1 ETH stake)…");
-    cast(&[
-        "send",
-        rollup,
-        "postBlockAndSubmit((uint32,uint64,bytes32,uint32[])[],bytes32,uint32,bytes32)",
-        &sub_block,
-        proof_hash,
-        &proof_length,
-        state_root,
-        "--value",
-        "1ether",
-        "--blob",
-        "--path",
-        BLOB_FILE,
-        "--private-key",
-        key,
-        "--rpc-url",
+    cast_signed(
         rpc,
-    ]);
+        signer,
+        &[
+            "send",
+            rollup,
+            "postBlockAndSubmit((uint32,uint64,bytes32,uint32[])[],bytes32,uint32,bytes32)",
+            &sub_block,
+            proof_hash,
+            &proof_length,
+            state_root,
+            "--value",
+            "1ether",
+            "--blob",
+            "--path",
+            BLOB_FILE,
+        ],
+    );
 }
 
 fn cmd_withdraw(args: &[String]) {
@@ -2604,14 +3244,26 @@ fn cmd_withdraw(args: &[String]) {
         .or_else(|| backing_exists().then(|| load_backing().2.rollup))
         .filter(|s| !s.is_empty())
         .unwrap_or_else(|| die("set ROLLUP=0x<rollup addr> (or run setup-backing first)"));
-    let key = deposit_key_env();
+    // Resolve every local prerequisite before touching the network. Besides making diagnostics
+    // deterministic, this keeps an unavailable RPC from hiding an unusable checkout or missing
+    // rollup configuration before the expensive withdrawal proof path starts.
+    let chain_id = rpc_chain_id(&rpc);
+    if chain_id != DEVNET_CHAIN_ID {
+        die(format!(
+            "refusing withdrawal lifecycle posting on chain id {chain_id}: the current path \
+             attaches an all-zero demo blob, while fraudProof requires a lossless \
+             abi.encode(MleProof) payload. The checked-in validity proof encodes to 131264 bytes \
+             (192 bytes larger than one EIP-4844 blob), and the current 32-byte FIELD_MASK \
+             packing is not reversible. Use local chain 31337 only until the proof-DA format and \
+             commitment are upgraded"
+        ));
+    }
+    let l1_signer = L1Signer::for_chain_id(chain_id);
     let channel_id = channel_id_env();
 
     // The depositor MUST be the EOA that sends `deposit()` (its address is folded into block 2's
     // hash). Pin it to the funding key's address so the on-chain msg.sender reproduces the proof.
-    let depositor_hex = cast(&["wallet", "address", "--private-key", &key])
-        .trim()
-        .to_string();
+    let depositor_hex = l1_signer.address();
     let depositor = Address::from_hex(&depositor_hex)
         .unwrap_or_else(|e| die(format!("parse depositor address: {e:?}")));
     let manager_addr = Address::from_hex(manager.trim())
@@ -2765,7 +3417,8 @@ fn cmd_withdraw(args: &[String]) {
         .unwrap_or_else(|e| die(format!("parse lifecycle json: {e}")));
     let reg = &lc["registration"];
 
-    // A 128 KiB blob (content irrelevant — the rollup only checks blobhash(0) is non-zero).
+    // Local-demo-only placeholder. `cmd_withdraw` refuses every non-devnet chain above because
+    // this is not the lossless MLE proof payload required by the fraud-proof path.
     fs::write(BLOB_FILE, vec![0u8; 131072])
         .unwrap_or_else(|e| die(format!("write {BLOB_FILE}: {e}")));
 
@@ -2797,22 +3450,22 @@ fn cmd_withdraw(args: &[String]) {
         let pk_bs = json_str_array(&reg["member_pk_bs"]);
         let regev = json_str_array(&reg["regev_pk_digests"]);
         let recipients = json_str_array(&reg["recipients"]);
-        cast(&[
-            "send",
-            &rollup,
-            "registerChannel(uint32,uint8,uint8,bytes32[],bytes32[],bytes32[],address[])",
-            &channel_id.to_string(),
-            &bp_slot,
-            "0",
-            &pk_gs,
-            &pk_bs,
-            &regev,
-            &recipients,
-            "--private-key",
-            &key,
-            "--rpc-url",
+        cast_signed(
             &rpc,
-        ]);
+            &l1_signer,
+            &[
+                "send",
+                &rollup,
+                "registerChannel(uint32,uint8,uint8,bytes32[],bytes32[],bytes32[],address[])",
+                &channel_id.to_string(),
+                &bp_slot,
+                "0",
+                &pk_gs,
+                &pk_bs,
+                &regev,
+                &recipients,
+            ],
+        );
     }
 
     // Capture the base submission id so we finalize the LAST of our three posts.
@@ -2832,7 +3485,7 @@ fn cmd_withdraw(args: &[String]) {
     };
 
     // 2. Registration block.
-    post_block_round(&rollup, &lc, 0, &key, &rpc);
+    post_block_round(&rollup, &lc, 0, &l1_signer, &rpc);
 
     // 3. Deposit (P5-B 案B: `withdraw` ALWAYS makes the deposit here, between the registration
     //    block and the deposit block — the standalone fold order the withdrawal proof models. In
@@ -2857,22 +3510,22 @@ fn cmd_withdraw(args: &[String]) {
         eprintln!(
             "[withdraw] deposit{{value: {dep_amount}}}(recipient,…) as depositor {depositor_hex}…"
         );
-        let dep_out = cast(&[
-            "send",
-            &rollup,
-            "deposit(bytes32,uint32,uint256,bytes32)",
-            dep_recipient,
-            &dep_token,
-            dep_amount,
-            dep_aux,
-            "--value",
-            dep_amount,
-            "--private-key",
-            &key,
-            "--rpc-url",
+        let dep_out = cast_signed(
             &rpc,
-            "--json",
-        ]);
+            &l1_signer,
+            &[
+                "send",
+                &rollup,
+                "deposit(bytes32,uint32,uint256,bytes32)",
+                dep_recipient,
+                &dep_token,
+                dep_amount,
+                dep_aux,
+                "--value",
+                dep_amount,
+                "--json",
+            ],
+        );
         // SECURITY (§10.4 Finding B): capture and PERSIST this hash before doing anything else.
         // It is a real `Deposited` log from this rollup to the channel's own `deposit_recipient`,
         // so it passes every check on the import path; only the backing-deposit guard can refuse
@@ -2905,31 +3558,31 @@ fn cmd_withdraw(args: &[String]) {
                 "[withdraw] approve + ERC-20 deposit (token {dep2_token}, amount {dep2_amount}) as \
                  depositor {depositor_hex}…"
             );
-            cast(&[
-                "send",
-                token_addr,
-                "approve(address,uint256)",
-                &rollup,
-                dep2_amount,
-                "--private-key",
-                &key,
-                "--rpc-url",
+            cast_signed(
                 &rpc,
-            ]);
-            let dep2_out = cast(&[
-                "send",
-                &rollup,
-                "deposit(bytes32,uint32,uint256,bytes32)",
-                dep2_recipient,
-                &dep2_token,
-                dep2_amount,
-                dep2_aux,
-                "--private-key",
-                &key,
-                "--rpc-url",
+                &l1_signer,
+                &[
+                    "send",
+                    token_addr,
+                    "approve(address,uint256)",
+                    &rollup,
+                    dep2_amount,
+                ],
+            );
+            let dep2_out = cast_signed(
                 &rpc,
-                "--json",
-            ]);
+                &l1_signer,
+                &[
+                    "send",
+                    &rollup,
+                    "deposit(bytes32,uint32,uint256,bytes32)",
+                    dep2_recipient,
+                    &dep2_token,
+                    dep2_amount,
+                    dep2_aux,
+                    "--json",
+                ],
+            );
             // SECURITY: the ERC-20 lane's deposit is recorded for the SAME reason as the native
             // one — its value is already spoken for by the withdrawal proof, so importing it into
             // the channel balance would credit value twice against one escrow.
@@ -2943,25 +3596,24 @@ fn cmd_withdraw(args: &[String]) {
     }
 
     // 4. Deposit block, then 5. Withdrawal block.
-    post_block_round(&rollup, &lc, 1, &key, &rpc);
-    post_block_round(&rollup, &lc, 2, &key, &rpc);
+    post_block_round(&rollup, &lc, 1, &l1_signer, &rpc);
+    post_block_round(&rollup, &lc, 2, &l1_signer, &rpc);
     let final_sub = std::env::var("SUB_ID").unwrap_or_else(|_| (base_sub + 2).to_string());
 
     // 6. finalize (forge RunClose step; reads the staged sepolia_lifecycle* files).
     eprintln!("[withdraw] finalize submission {final_sub} (real validity MLE)…");
-    let status = Command::new("forge")
-        .current_dir(&contracts_dir)
-        .args([
-            "script",
-            "script/RunClose.s.sol",
-            "--sig",
-            "finalizeStep()",
-            "--rpc-url",
-            &rpc,
-            "--private-key",
-            &key,
-            "--broadcast",
-        ])
+    let mut forge = Command::new("forge");
+    forge.current_dir(&contracts_dir).args([
+        "script",
+        "script/RunClose.s.sol",
+        "--sig",
+        "finalizeStep()",
+        "--rpc-url",
+        &rpc,
+        "--broadcast",
+    ]);
+    l1_signer.append_to_command(&mut forge);
+    let status = forge
         .env("ROLLUP", &rollup)
         .env("SUB_ID", &final_sub)
         .status()
@@ -2974,19 +3626,18 @@ fn cmd_withdraw(args: &[String]) {
 
     // 7. withdrawNative (forge RunClose step; credits pendingWithdrawals[manager]).
     eprintln!("[withdraw] withdrawNative (real withdrawal MLE) → manager {manager}…");
-    let status = Command::new("forge")
-        .current_dir(&contracts_dir)
-        .args([
-            "script",
-            "script/RunClose.s.sol",
-            "--sig",
-            "withdrawNativeStep()",
-            "--rpc-url",
-            &rpc,
-            "--private-key",
-            &key,
-            "--broadcast",
-        ])
+    let mut forge = Command::new("forge");
+    forge.current_dir(&contracts_dir).args([
+        "script",
+        "script/RunClose.s.sol",
+        "--sig",
+        "withdrawNativeStep()",
+        "--rpc-url",
+        &rpc,
+        "--broadcast",
+    ]);
+    l1_signer.append_to_command(&mut forge);
+    let status = forge
         .env("ROLLUP", &rollup)
         .env("MANAGER", &manager)
         .status()
@@ -3003,19 +3654,18 @@ fn cmd_withdraw(args: &[String]) {
         eprintln!(
             "[withdraw] withdrawERC20 (real withdrawal MLE, token {token_index}) → manager {manager}…"
         );
-        let status = Command::new("forge")
-            .current_dir(&contracts_dir)
-            .args([
-                "script",
-                "script/RunClose.s.sol",
-                "--sig",
-                "withdrawErc20Step()",
-                "--rpc-url",
-                &rpc,
-                "--private-key",
-                &key,
-                "--broadcast",
-            ])
+        let mut forge = Command::new("forge");
+        forge.current_dir(&contracts_dir).args([
+            "script",
+            "script/RunClose.s.sol",
+            "--sig",
+            "withdrawErc20Step()",
+            "--rpc-url",
+            &rpc,
+            "--broadcast",
+        ]);
+        l1_signer.append_to_command(&mut forge);
+        let status = forge
             .env("ROLLUP", &rollup)
             .env("MANAGER", &manager)
             .status()
@@ -3029,28 +3679,20 @@ fn cmd_withdraw(args: &[String]) {
 
     // 8. pullChannelFunds (manager pulls its escrowed credit out of the rollup).
     eprintln!("[withdraw] pullChannelFunds() on manager {manager}…");
-    cast(&[
-        "send",
-        &manager,
-        "pullChannelFunds()",
-        "--private-key",
-        &key,
-        "--rpc-url",
-        &rpc,
-    ]);
+    cast_signed(&rpc, &l1_signer, &["send", &manager, "pullChannelFunds()"]);
     // 8b. pullChannelTokenFunds(t) — the ERC-20 mirror (measured balanceOf delta).
     if let Some((token_index, ..)) = &erc20_env {
         eprintln!("[withdraw] pullChannelTokenFunds({token_index}) on manager {manager}…");
-        cast(&[
-            "send",
-            &manager,
-            "pullChannelTokenFunds(uint32)",
-            &token_index.to_string(),
-            "--private-key",
-            &key,
-            "--rpc-url",
+        cast_signed(
             &rpc,
-        ]);
+            &l1_signer,
+            &[
+                "send",
+                &manager,
+                "pullChannelTokenFunds(uint32)",
+                &token_index.to_string(),
+            ],
+        );
     }
     println!(
         "[withdraw] OK: {withdrawal_amount} native withdrawn from the rollup into manager {manager} \
@@ -3132,6 +3774,12 @@ fn build_reg_record() -> serde_json::Value {
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let cmd = args.first().map(String::as_str).unwrap_or("");
+    // A prepared two-channel transfer is a global mutation barrier for every channel CLI command,
+    // not merely for the next inter-transfer. If the previous process died after replacing A but
+    // before replacing B, allowing (for example) a burn or token registration to extend either
+    // half-head would make deterministic roll-forward impossible and leave value one-sided.
+    // Recovery is idempotent and a no-op when the sibling journal directory does not exist.
+    recover_pending_inter_transfers();
     match cmd {
         "setup-backing" => cmd_setup_backing(&args),
         "init" => cmd_init(&args),
@@ -3144,8 +3792,13 @@ fn main() {
         "cosign-batch" => cmd_cosign_batch(&args),
         "cosign-refresh" => cmd_cosign_refresh(&args),
         "cosign-inter-transfer" => cmd_cosign_inter_transfer(&args),
+        "recover-inter-transfers" => {
+            recover_pending_inter_transfers();
+            println!("inter-transfer recovery complete");
+        }
         "cosign-burn-send" => cmd_cosign_burn_send(&args),
         "finalize" => cmd_finalize(&args),
+        "precompute-falcon-aggregate" => cmd_precompute_falcon_aggregate(),
         "balance" => cmd_balance(),
         "register-token" => cmd_register_token(&args),
         "refresh" => cmd_refresh(&args),
@@ -3164,6 +3817,7 @@ fn main() {
         // proofs use (lets one on-chain registration serve the whole close lifecycle).
         "export-reg-record" => cmd_export_reg_record(),
         "deploy-settlement" => cmd_deploy_settlement(&args),
+        "inspect-l1-deposit" => cmd_inspect_l1_deposit(&args),
         "cosign-l1-deposit-import" => cmd_cosign_l1_deposit_import(&args),
         "pw-submit" => cmd_pw_submit(&args),
         "pw-finalize" => cmd_pw_finalize(&args),
@@ -3175,7 +3829,7 @@ fn main() {
         "migrate-state" => cmd_migrate_state(&args),
         _ => {
             eprintln!(
-                "usage: channel_member <setup-backing|init|gen-contribution|gen-send|send|cosign|cosign-batch|cosign-burn-send|register-token|refresh|deploy-settlement|cosign-l1-deposit-import|pw-submit|pw-finalize|close|settle|withdraw|claim|cancel-close|post-close-claim|migrate-state|...> ...\n  migrate-state --i-understand-this-resets-replay-ledgers: one-time, EXPLICIT repair of a cli_state.json written before a replay ledger existed (creates it EMPTY — see the warning it prints)\n  multi-token (§N): send/gen-send take [token_slot]; claim takes [token_slot]; cosign-l1-deposit-import <slot|auto> <tx_hash> <rpc_url> reads amount/depositor/token_index FROM THE CHAIN; register-token <base_token_index> appends a cosigned registry entry; refresh <slot> [token_slot] re-encrypts a CLI member's own position so it can send again after a homomorphic credit"
+                "usage: channel_member <setup-backing|init|gen-contribution|gen-send|send|cosign|cosign-batch|cosign-burn-send|recover-inter-transfers|register-token|refresh|deploy-settlement|inspect-l1-deposit|cosign-l1-deposit-import|pw-submit|pw-finalize|close|settle|withdraw|claim|cancel-close|post-close-claim|precompute-falcon-aggregate|migrate-state|...> ...\n  precompute-falcon-aggregate: prove + persist the current finalized state's reusable Falcon aggregate artifact\n  recover-inter-transfers: idempotently roll forward any fsynced two-channel PREPARED journal before accepting another mutation\n  migrate-state --i-understand-this-resets-replay-ledgers: one-time, EXPLICIT repair of a cli_state.json written before a replay ledger existed (creates it EMPTY — see the warning it prints)\n  multi-token (§N): send/gen-send take [token_slot]; claim takes [token_slot]; inspect-l1-deposit emits the canonical producer request; cosign-l1-deposit-import <slot|auto> <tx_hash> <rpc_url> reads amount/depositor/token_index FROM THE CHAIN; register-token <base_token_index> appends a cosigned registry entry; refresh <slot> [token_slot] re-encrypts a CLI member's own position so it can send again after a homomorphic credit"
             );
             exit(2);
         }
@@ -4173,9 +4827,9 @@ fn cmd_cosign_batch(args: &[String]) {
             .files
             .par_iter()
             .map(|f| {
-                let s = fs::read_to_string(f).map_err(|e| format!("{f}: read: {e}"))?;
-                let slim: SlimSendPayload =
-                    serde_json::from_str(&s).map_err(|e| format!("{f}: parse: {e}"))?;
+                let bytes = fs::read(f).map_err(|e| format!("{f}: read: {e}"))?;
+                let slim = SlimSendPayload::from_wire_or_json(&bytes)
+                    .map_err(|e| format!("{f}: parse: {e}"))?;
                 verify_one(f, &slim)?;
                 Ok(BatchTxApply::from(&slim))
                 // the parsed SlimSendPayload (and its proofs) drops here; only the residue survives
@@ -4332,24 +4986,12 @@ fn load_sibling_dest_state(dest_channel_id: u64) -> (CliState, std::path::PathBu
             path.display()
         ));
     }
+    secure_private_path(&path);
     let s =
         fs::read_to_string(&path).unwrap_or_else(|e| die(format!("read {}: {e}", path.display())));
     let st: CliState =
         serde_json::from_str(&s).unwrap_or_else(|e| die(format!("parse B state: {e}")));
     (st, dir)
-}
-
-/// Serialize a `CliState` + republish a `ChannelSnapshot` under EXPLICIT paths (used to persist
-/// channel B from channel A's cwd). Mirrors `save_state` + the `channel_snapshot.json` head-sync,
-/// but targets the sibling B directory rather than the cwd.
-fn save_state_at(dir: &std::path::Path, state: &CliState) {
-    let cli = serde_json::to_string_pretty(state).unwrap_or_else(|e| die(e));
-    fs::write(dir.join(STATE_FILE), cli)
-        .unwrap_or_else(|e| die(format!("write {}: {e}", dir.join(STATE_FILE).display())));
-    let snap = serde_json::to_string_pretty(&state.snapshot).unwrap_or_else(|e| die(e));
-    let snap_path = dir.join("channel_snapshot.json");
-    fs::write(&snap_path, snap)
-        .unwrap_or_else(|e| die(format!("write {}: {e}", snap_path.display())));
 }
 
 /// `cosign-inter-transfer <debit_payload.json> <descriptor.json> <out.json>` — the single atomic
@@ -4358,6 +5000,7 @@ fn save_state_at(dir: &std::path::Path, state: &CliState) {
 /// Writes `{ "aHead": <A's co-signed new state>, "bSnapshot": <B's credited snapshot> }` to
 /// out.json.
 fn cmd_cosign_inter_transfer(args: &[String]) {
+    recover_pending_inter_transfers();
     let payload_path = args.get(1).unwrap_or_else(|| {
         die("cosign-inter-transfer <debit_payload.json> <descriptor.json> <out.json>")
     });
@@ -4374,6 +5017,27 @@ fn cmd_cosign_inter_transfer(args: &[String]) {
 
     // ---- Load A's COMMITTED head (this process's own cli_state). ----
     let mut a_state = load_state();
+
+    verify_inter_channel_descriptor_matches_debit(&payload, &descriptor)
+        .unwrap_or_else(|e| die(format!("inter-channel descriptor/debit mismatch: {e}")));
+
+    // Every outgoing inter-channel debit consumes a base sent-tx slot. Receiving/importing can
+    // advance the channel small-block counter without changing this cursor, so the IMI3-bound
+    // explicit nonce is checked against the persisted base witness before any member signs.
+    let backing: ChannelBacking = read_private_json(BACKING_FILE);
+    let base_private = backing.base_private_state.as_ref().unwrap_or_else(|| {
+        die(
+            "base nonce guard unavailable: channel_backing.json has no base_private_state; migrate \
+             the live base IVC head before attempting an inter-channel send",
+        )
+    });
+    verify_base_nonce_available(base_private, descriptor.inter_channel_tx.base_nonce)
+        .unwrap_or_else(|e| {
+            die(format!(
+                "REFUSING inter-channel debit before co-signing: {}",
+                e.0
+            ))
+        });
 
     // The descriptor must describe a transfer OUT of THIS channel (A) — defense in depth before the
     // gates run; A is the source.
@@ -4472,7 +5136,7 @@ fn cmd_cosign_inter_transfer(args: &[String]) {
 
     // ================= LEG B (in memory): validate + build B's credited head.
     // ======================
-    let (mut b_state, b_dir) = load_sibling_dest_state(descriptor.destination_channel_id.as_u64());
+    let (mut b_state, _b_dir) = load_sibling_dest_state(descriptor.destination_channel_id.as_u64());
 
     // REPLAY LEDGER (B side, invariant 6 + TM-16 obligation 1): refuse a credit whose token-FREE
     // replay identity was already credited into B. Keying on the identity (never the
@@ -4530,7 +5194,9 @@ fn cmd_cosign_inter_transfer(args: &[String]) {
     // regardless of what the callee does.
     let mut rng = StdRng::from_seed(fresh_seed32());
     let BuiltInterChannelCredit {
-        bundle_apply_state, ..
+        fund_import_state,
+        bundle_apply_state,
+        ..
     } = build_inter_channel_credit(
         &builder_keys,
         &b_state.snapshot,
@@ -4558,8 +5224,36 @@ fn cmd_cosign_inter_transfer(args: &[String]) {
         }
     }
 
-    // N-of-N co-sign the credited (bundle-apply) B state. build_inter_channel_credit self-signs the
-    // builder's slot; collect the remaining CLI members.
+    // N-of-N co-sign BOTH destination states. The intermediate fund-import head is not merely a
+    // local construction detail: the durable producer and live balance IVC replay the exact
+    // contiguous sequence after a crash. Persisting only the final bundle state would leave its
+    // `prev_digest` pointing at an unauthenticated, unrecoverable gap.
+    let mut b_fund_import = fund_import_state;
+    for c in &b_state.controlled {
+        if b_fund_import
+            .member_signatures
+            .iter()
+            .any(|s| s.member_slot as u16 == c.slot)
+        {
+            continue;
+        }
+        let sig = sign_state(&keys_for(c.keygen_seed), c.slot as u8, &b_fund_import)
+            .unwrap_or_else(|e| die(format!("REFUSING TO SIGN inter-credit fund import — {e}")));
+        add_signature(&mut b_fund_import, sig);
+    }
+    verify_all_signatures(
+        &b_state.snapshot.record,
+        &b_state.snapshot.members,
+        &b_fund_import,
+    )
+    .unwrap_or_else(|e| {
+        die(format!(
+            "inter-credit B fund-import not N-of-N co-signed: {e}"
+        ))
+    });
+
+    // The bundle state was built against the same digest (signatures do not enter the state
+    // digest). Collect the remaining real member signatures independently.
     let mut b_head = bundle_apply_state;
     for c in &b_state.controlled {
         if b_head
@@ -4576,33 +5270,49 @@ fn cmd_cosign_inter_transfer(args: &[String]) {
     verify_all_signatures(&b_state.snapshot.record, &b_state.snapshot.members, &b_head)
         .unwrap_or_else(|e| die(format!("inter-credit B state not N-of-N co-signed: {e}")));
 
-    // ================= COMMIT (both legs validated): persist A AND B atomically.
-    // ==================== Advance + record on BOTH ledgers. Either-or-neither: any failure
-    // above already `die()`d before we got here, so nothing was written.
+    // ================= COMMIT (both legs validated): durable two-phase roll-forward.
+    // The PREPARED journal contains both complete post-states and is fsynced before either channel
+    // moves. A crash after one replacement is recovered by `recover-inter-transfers`; no later API
+    // mutation can run first because its producer-head preflight invokes that command.
     a_state.snapshot.state = a_head.clone();
-    // TM-16 obligation 1: both ledgers record the token-FREE replay identity.
     a_state.spent_tx_identities.insert(replay_identity);
-    save_state(&a_state);
-    write_json("channel_snapshot.json", &a_state.snapshot);
-
     b_state.snapshot.state = b_head.clone();
     b_state.applied_tx_identities.insert(replay_identity);
-    save_state_at(&b_dir, &b_state);
-
-    // out.json = { aHead, bSnapshot }.
-    #[derive(Serialize)]
-    #[serde(rename_all = "camelCase")]
-    struct InterTransferOut {
-        a_head: ChannelState,
-        b_snapshot: ChannelSnapshot,
+    let result = InterTransferOut {
+        a_head: a_head.clone(),
+        b_fund_import_state: b_fund_import.clone(),
+        b_bundle_apply_state: b_head.clone(),
+        b_snapshot: b_state.snapshot.clone(),
+    };
+    let mut commit = InterTransferCommitJournal {
+        magic: INTER_TRANSFER_COMMIT_MAGIC.to_string(),
+        version: INTER_TRANSFER_COMMIT_VERSION,
+        phase: InterTransferCommitPhase::Prepared,
+        tx_hash: descriptor.tx_hash,
+        replay_identity,
+        source_channel_id: descriptor.source_channel_id.as_u64(),
+        destination_channel_id: descriptor.destination_channel_id.as_u64(),
+        source_before_digest: a_head.prev_digest,
+        destination_before_digest: b_fund_import.prev_digest,
+        source_after: a_state.clone(),
+        destination_after: b_state.clone(),
+        result,
+    };
+    validate_inter_transfer_commit(&commit);
+    let commit_path = inter_transfer_commit_path(descriptor.tx_hash);
+    if commit_path.exists() {
+        die(format!(
+            "inter-transfer commit journal {} already exists; run recover-inter-transfers",
+            commit_path.display()
+        ));
     }
-    write_json(
-        out_path,
-        &InterTransferOut {
-            a_head: a_head.clone(),
-            b_snapshot: b_state.snapshot.clone(),
-        },
-    );
+    write_inter_transfer_commit(&commit_path, &commit);
+    roll_forward_inter_transfer_commit(&commit_path, &mut commit);
+    // Recovery always publishes the canonical API artifact name. Preserve a caller's additional
+    // explicit output path as a convenience only after the two-channel commit is durable.
+    if out_path != "inter_transfer.json" {
+        write_json(out_path, &commit.result);
+    }
 
     let a_signed: Vec<u8> = a_head
         .member_signatures
@@ -4646,6 +5356,32 @@ fn cmd_cosign_burn_send(args: &[String]) {
     let descriptor: InterChannelTransferDescriptor = read_json(desc_path);
 
     let mut a_state = load_state();
+
+    // P0-7: bind descriptor economics to the E-2-proved payload BEFORE any member signature or
+    // channel debit. In particular, `descriptor.amount = X+1` with an honest proof for X dies here.
+    verify_inter_channel_descriptor_matches_debit(&payload, &descriptor)
+        .unwrap_or_else(|e| die(format!("burn descriptor/debit mismatch: {e}")));
+
+    // P2-4: a partial-withdrawal leaf is provable only if its Tx nonce names an EMPTY position in
+    // the base account's sent-tx tree and is exactly the base private state's next nonce. Checking
+    // only the channel small-block counter hid divergence until after an irreversible channel
+    // debit. This reads the witness paired with `channel_attestation.bin`; it is not a best-effort
+    // local replay ledger.
+    let backing: ChannelBacking = read_private_json(BACKING_FILE);
+    let base_private = backing.base_private_state.as_ref().unwrap_or_else(|| {
+        die(
+            "burn nonce guard unavailable: channel_backing.json has no base_private_state. This \
+             legacy backing cannot prove sent-tx nonce occupancy; rerun setup-backing and migrate \
+             the live base IVC head before attempting a burn.",
+        )
+    });
+    let burn_nonce = descriptor.inter_channel_tx.base_nonce;
+    verify_base_nonce_available(base_private, burn_nonce).unwrap_or_else(|e| {
+        die(format!(
+            "{}; REFUSING before co-signing/debiting because the withdrawal would be unprovable",
+            e.0
+        ))
+    });
 
     if descriptor.source_channel_id.as_u64() != channel_id_env() as u64 {
         die(format!(
@@ -4744,12 +5480,18 @@ fn cmd_cosign_burn_send(args: &[String]) {
         descriptor.receiver_pk_g,
         descriptor.receiver_delta.digest(),
     );
+    let burn_aux_data = burn_descriptor(
+        burn_tx_leaf,
+        descriptor.receiver_pk_g,
+        descriptor.inter_channel_tx.token_index,
+        intmax3_zkp::wallet_core::u64_to_u256(descriptor.amount),
+    );
     let burn_leaf = burn_withdrawal_leaf(
         descriptor.source_channel_id,
         descriptor.receiver_pk_g,
         descriptor.inter_channel_tx.token_index,
         descriptor.amount,
-        burn_tx_leaf,
+        burn_aux_data,
         descriptor.tx_v2.nonce,
     )
     .unwrap_or_else(|e| die(format!("burn withdrawal leaf: {e:?}")));
@@ -4766,7 +5508,9 @@ fn cmd_cosign_burn_send(args: &[String]) {
             "pre_burn_settled_tx_chain": pre_burn_settled_tx_chain.to_hex(),
             "channel_id": descriptor.source_channel_id.as_u64(),
             "tx_nonce": descriptor.tx_v2.nonce,
+            "base_nonce": descriptor.inter_channel_tx.base_nonce,
             "tx_leaf": burn_tx_leaf.to_hex(),
+            "aux_data": burn_aux_data.to_hex(),
             "withdrawal_recipient": format!("0x{}", hex::encode(burn_leaf.recipient.to_bytes_be())),
             "withdrawal_nullifier": burn_leaf.nullifier.to_hex(),
         }),
@@ -5415,22 +6159,21 @@ fn deploy_settlement_devnet(rpc: &str, chain_id: u64) {
             SettlementDeployPlan::MockDevnet.script()
         ));
     }
-    let deploy_key = deposit_key_env();
-    let forge_out = Command::new("forge")
-        .current_dir(&contracts_dir)
-        .args([
-            "script",
-            plan.script(),
-            "--tc",
-            plan.contract(),
-            "--rpc-url",
-            rpc,
-            "--private-key",
-            &deploy_key,
-            "--broadcast",
-            "--code-size-limit",
-            "50000",
-        ])
+    let l1_signer = L1Signer::for_chain_id(chain_id);
+    let mut forge = Command::new("forge");
+    forge.current_dir(&contracts_dir).args([
+        "script",
+        plan.script(),
+        "--tc",
+        plan.contract(),
+        "--rpc-url",
+        rpc,
+        "--broadcast",
+        "--code-size-limit",
+        "50000",
+    ]);
+    l1_signer.append_to_command(&mut forge);
+    let forge_out = forge
         .env("ROLLUP", rollup)
         .output()
         .unwrap_or_else(|e| die(format!("forge script failed to start: {e}")));
@@ -5494,42 +6237,6 @@ const CLOSE_CLI_FIXTURES: [&str; 7] = [
     "post_close_claim_mle.json",
     "cancel_close_mle.json",
 ];
-
-/// The L1 signing key for a REAL-chain settlement deploy.
-///
-/// SECURITY: deliberately NOT `deposit_key_env()`, which falls back to the PUBLIC anvil dev key.
-/// The broadcasting EOA of this deploy becomes the rollup's `deployer` — the only address that may
-/// call `initializeWithdrawalVk`, `registerChannel` and `registerSettlementManager`, and (through
-/// the last of those) the only address that can decide which contract is allowed to authorize
-/// partial withdrawals. Signing a real-network deploy with a key printed in this repository and in
-/// Foundry's own documentation hands that authority to everyone. Unset is refused for the same
-/// reason: the fallback would have silently used exactly that key.
-///
-/// The value is returned for `cast`/`forge --private-key` and is never logged.
-fn real_chain_deploy_key(chain_id: u64) -> String {
-    let key = std::env::var("INTMAX_DEPOSIT_KEY").unwrap_or_default();
-    let key = key.trim().to_string();
-    if key.is_empty() {
-        die(format!(
-            "INTMAX_DEPOSIT_KEY is not set, and chain id {chain_id} is not the local devnet.\n\
-             `deploy-settlement` will not fall back to the public anvil dev key on a real chain: \
-             the broadcaster becomes the rollup's deployer (the only address that can set the \
-             withdrawal VK, register the channel and register the settlement manager).\n\
-             Set INTMAX_DEPOSIT_KEY to the funded deployer key (the shell expands it; never echo \
-             or commit it) and re-run."
-        ));
-    }
-    if key.eq_ignore_ascii_case(ANVIL_DEV_KEY) {
-        die(format!(
-            "INTMAX_DEPOSIT_KEY is the PUBLIC anvil dev key and chain id {chain_id} is not the \
-             local devnet — refusing.\n\
-             That key is published in this repository and in Foundry's documentation; using it \
-             here would give any reader the rollup deployer role (VK initialization, \
-             registerChannel, registerSettlementManager)."
-        ));
-    }
-    key
-}
 
 /// `cast call <to> <sig> [args…]`, trimmed. Every read-back below goes through this.
 fn cast_call(rpc: &str, to: &str, sig: &str, args: &[&str]) -> String {
@@ -5597,7 +6304,7 @@ fn deploy_settlement_real(rpc: &str, chain_id: u64) {
     // none of its money while the deposit stayed on the old one. Both halves would look healthy in
     // isolation; the user would only find out at `withdraw`, after the proofs.
     if std::path::Path::new(BACKING_FILE).exists() {
-        let backed: serde_json::Value = read_json(BACKING_FILE);
+        let backed: serde_json::Value = read_private_json(BACKING_FILE);
         let backed_rollup = backed["rollup"].as_str().unwrap_or("").to_string();
         die(format!(
             "this channel is already backed (rollup {backed_rollup}) and the only real-VK deploy \
@@ -5652,7 +6359,7 @@ fn deploy_settlement_real(rpc: &str, chain_id: u64) {
         );
     }
 
-    let deploy_key = real_chain_deploy_key(chain_id);
+    let l1_signer = L1Signer::for_chain_id(chain_id);
 
     // SECURITY: the member set this deploy REGISTERS on L1 is derived from the co-signer key
     // provenance. Under `INTMAX_INSECURE_DETERMINISTIC_KEYS` every one of those members' SECRET
@@ -5690,25 +6397,24 @@ fn deploy_settlement_real(rpc: &str, chain_id: u64) {
     );
 
     let contracts_dir = contracts_dir.to_string_lossy().to_string();
-    let forge_out = Command::new("forge")
-        .current_dir(&contracts_dir)
-        .args([
-            "script",
-            plan.script(),
-            "--tc",
-            plan.contract(),
-            "--rpc-url",
-            rpc,
-            "--private-key",
-            &deploy_key,
-            "--broadcast",
-            // Sequential broadcast: the deploy's transactions are dependent (VK latches and
-            // registrations target contracts created earlier in the same run), and a public
-            // network can reorder or drop a parallel batch.
-            "--slow",
-            "--code-size-limit",
-            "50000",
-        ])
+    let mut forge = Command::new("forge");
+    forge.current_dir(&contracts_dir).args([
+        "script",
+        plan.script(),
+        "--tc",
+        plan.contract(),
+        "--rpc-url",
+        rpc,
+        "--broadcast",
+        // Sequential broadcast: the deploy's transactions are dependent (VK latches and
+        // registrations target contracts created earlier in the same run), and a public
+        // network can reorder or drop a parallel batch.
+        "--slow",
+        "--code-size-limit",
+        "50000",
+    ]);
+    l1_signer.append_to_command(&mut forge);
+    let forge_out = forge
         .env("FRAUD_TREASURY", treasury_raw.trim())
         .output()
         .unwrap_or_else(|e| die(format!("forge script failed to start: {e}")));
@@ -5843,7 +6549,7 @@ fn deploy_settlement_real(rpc: &str, chain_id: u64) {
          Verified on-chain: withdrawal VK set, all four settlement VKs set, channel {channel_id} \
          registered, manager registered as a settlement authorizer.\n\
          NEXT: this rollup is NEW and holds no money yet. Run\n\
-         \x20 INTMAX_CHANNEL={channel_id} INTMAX_DEPOSIT_KEY=… channel_member setup-backing {rpc} {rollup}\n\
+         \x20 INTMAX_CHANNEL={channel_id} INTMAX_L1_ACCOUNT=<keystore-name> channel_member setup-backing {rpc} {rollup}\n\
          then `init`. Do NOT point this channel at a different rollup afterwards.\n\
          NOTE: this manager's challenge period is {challenge_period} seconds (read back from the \
          chain) — off-devnet a close takes that long to finalize, by design."
@@ -5869,6 +6575,9 @@ struct OnChainDeposit {
     token_index: u32,
     amount: u64,
     aux_data: Bytes32,
+    /// `newDepositHashChain` emitted by this exact log. The keyless producer recomputes and
+    /// reconciles it before sealing the deposit block.
+    deposit_hash_chain: Bytes32,
     /// The chain the deposit was read from — carried so the replay-ledger key is scoped to the
     /// SAME chain the verification ran against (one `cast chain-id`, not two).
     chain_id: u64,
@@ -6044,6 +6753,8 @@ fn fetch_onchain_deposit(
     let amount = abi_word_u64(abi_word(body, 3), "Deposited.amount");
     let aux_data = Bytes32::from_hex(&format!("0x{}", abi_word(body, 4)))
         .unwrap_or_else(|e| die(format!("parse Deposited.auxData: {e:?}")));
+    let deposit_hash_chain = Bytes32::from_hex(&format!("0x{}", abi_word(body, 5)))
+        .unwrap_or_else(|e| die(format!("parse Deposited.newDepositHashChain: {e:?}")));
 
     eprintln!(
         "cosign-l1-deposit-import: verified on-chain deposit #{deposit_index} in tx {tx} \
@@ -6058,14 +6769,62 @@ fn fetch_onchain_deposit(
         token_index,
         amount,
         aux_data,
+        deposit_hash_chain,
         chain_id,
     }
+}
+
+/// Read one canonical on-chain `Deposited` log and emit the exact request accepted by the
+/// keyless production block producer. This keeps receipt parsing in one hardened Rust path; the
+/// API never reinterprets ABI words in JavaScript.
+fn cmd_inspect_l1_deposit(args: &[String]) {
+    const USAGE: &str = "inspect-l1-deposit <tx_hash> <rpc_url> [out.json] [min_confirmations]";
+    let tx_hash = args.get(1).unwrap_or_else(|| die(USAGE));
+    let rpc = args.get(2).unwrap_or_else(|| die(USAGE));
+    let out_path = args
+        .get(3)
+        .map(String::as_str)
+        .unwrap_or("producer_deposit.json");
+    let explicit_min_conf = args
+        .get(4)
+        .map(|value| value.parse::<u64>().unwrap_or_else(|_| die(USAGE)));
+    if args.len() > 5 {
+        die(USAGE);
+    }
+    let (_, _, backing) = load_backing();
+    let deposit_recipient = Bytes32::from_hex(&backing.deposit_recipient)
+        .unwrap_or_else(|e| die(format!("parse deposit_recipient from backing: {e:?}")));
+    if backing.rollup.is_empty() {
+        die("channel_backing.json has no rollup address — cannot verify the deposit on-chain");
+    }
+    let onchain = fetch_onchain_deposit(
+        rpc,
+        tx_hash,
+        &backing.rollup,
+        deposit_recipient,
+        explicit_min_conf,
+    );
+    let request = ProductionDepositRequest {
+        deposit_index: onchain.deposit_index,
+        depositor: onchain.depositor,
+        recipient: deposit_recipient,
+        token_index: onchain.token_index,
+        amount: U256::from(onchain.amount),
+        aux_data: onchain.aux_data,
+        expected_deposit_hash_chain: onchain.deposit_hash_chain,
+    };
+    write_json(out_path, &request);
+    println!(
+        "{}",
+        serde_json::to_string(&request).unwrap_or_else(|e| die(e))
+    );
 }
 
 /// Co-sign an L1 deposit import (mid-channel deposit): fold a REAL, on-chain-verified deposit into
 /// the channel's balance without closing. Usage:
 ///   channel_member cosign-l1-deposit-import <recipient_slot|auto> <tx_hash> <rpc_url> \
-///       [out.json] [min_confirmations] [--allow-unbound-depositor]
+///       [out.json] [min_confirmations] [--allow-unbound-depositor] \
+///       [--intmax-block-number=N]
 ///
 /// SECURITY (the fix): `amount`, `depositor` and `token_index` are NO LONGER caller-supplied —
 /// they are read from the transaction's `Deposited` log. The ability to lie about them was
@@ -6076,20 +6835,40 @@ fn fetch_onchain_deposit(
 /// recipient equals the on-chain depositor.
 fn cmd_cosign_l1_deposit_import(args: &[String]) {
     const USAGE: &str = "cosign-l1-deposit-import <recipient_slot|auto> <tx_hash> <rpc_url> \
-                         [out.json] [min_confirmations] [--allow-unbound-depositor]";
+                         [out.json] [min_confirmations] [--allow-unbound-depositor] \
+                         [--intmax-block-number=N]";
 
     // Flags are position-independent; positional args are the non-flag remainder.
     // SECURITY: an UNKNOWN `--flag` is refused rather than ignored. Silently dropping it would let
     // a mistyped or misremembered option (e.g. `--min-confirmations=0`) look accepted while having
     // no effect — the operator would believe they set a policy they did not.
-    if let Some(bad) = args
-        .iter()
-        .skip(1)
-        .find(|a| a.starts_with("--") && a.as_str() != "--allow-unbound-depositor")
-    {
+    if let Some(bad) = args.iter().skip(1).find(|a| {
+        a.starts_with("--")
+            && a.as_str() != "--allow-unbound-depositor"
+            && !a.starts_with("--intmax-block-number=")
+    }) {
         die(format!("unknown flag {bad:?}\nusage: {USAGE}"));
     }
     let allow_unbound = args.iter().any(|a| a == "--allow-unbound-depositor");
+    let intmax_block_number = args
+        .iter()
+        .filter_map(|arg| arg.strip_prefix("--intmax-block-number="))
+        .map(|value| {
+            value
+                .parse::<u64>()
+                .unwrap_or_else(|_| die("--intmax-block-number must be a u63 decimal"))
+        })
+        .collect::<Vec<_>>();
+    if intmax_block_number.len() > 1 {
+        die("--intmax-block-number may be specified only once");
+    }
+    let intmax_block_number = intmax_block_number.first().copied().unwrap_or_default();
+    if intmax_block_number == 0 {
+        eprintln!(
+            "cosign-l1-deposit-import WARNING: no producer-assigned INTMAX block number was \
+             supplied; this legacy/unassigned deposit cannot match a live receive_deposit proof"
+        );
+    }
     let pos: Vec<&String> = args
         .iter()
         .skip(1)
@@ -6296,11 +7075,10 @@ fn cmd_cosign_l1_deposit_import(args: &[String]) {
         // `Deposit::nullifier()` unique per real deposit. See the threat model §4 Finding A.
         deposit_index: U63::new(onchain.deposit_index)
             .unwrap_or_else(|e| die(format!("deposit_index out of range: {e:?}"))),
-        // DELIBERATELY 0 — see threat model §9. `Deposit::block_number` is the INTMAX validity
-        // block number that folded the deposit (enforced as such by receive_deposit_circuit), NOT
-        // an L1 block number. This deposit is not in any intmax block yet, so "unassigned" (0) is
-        // the honest value; writing the L1 block here would be a unit confusion.
-        block_number: Default::default(),
+        // The keyless producer's deposit-only INTMAX block, never the L1 receipt block. The API
+        // obtains this from the producer's durable receipt before asking members to cosign.
+        block_number: intmax3_zkp::common::u63::BlockNumber::new(intmax_block_number)
+            .unwrap_or_else(|e| die(format!("--intmax-block-number out of range: {e:?}"))),
         depositor: onchain.depositor,
         recipient: deposit_recipient,
         token_index,
@@ -6384,6 +7162,9 @@ fn cmd_cosign_l1_deposit_import(args: &[String]) {
     let result = serde_json::json!({
         "fundImportState": fund_state,
         "bundleApplyState": bundle_state,
+        "txHash": tx_hash,
+        "depositIndex": onchain.deposit_index,
+        "intmaxBlockNumber": intmax_block_number,
     });
     write_json(out_path, &result);
     println!(
@@ -6460,17 +7241,19 @@ fn preflight_burn_authorization_is_matchable(
     // under which `withdrawNative`/`withdrawERC20` demand the authorization as a second factor
     // (`contracts/src/IntmaxRollup.sol:1512`, `:1560`). A zero aux_data leaf needs no
     // authorization at all, so authorizing one is meaningless and burns the chain key for nothing.
-    if tx_leaf == Bytes32::default() {
-        refuse("the burn's aux_data (tx leaf) is zero, so this is not a partial withdrawal".into());
+    if withdrawal.aux_data == Bytes32::default() {
+        refuse(
+            "the burn descriptor in aux_data is zero, so this is not a partial withdrawal".into(),
+        );
     }
 
     // (1) The head must still BE the post-burn state. Both of these move on every subsequent
     // channel transition, and the manager recomputes the chain fold itself
     // (`ChannelSettlementManager.sol:1143-1146`), so a stale head is an unmatchable intent.
-    let expected_chain = settled_tx_chain_push(pre_burn_chain, tx_leaf);
+    let expected_chain = settled_tx_chain_push(pre_burn_chain, withdrawal.aux_data);
     if expected_chain != head.balance_state.settled_tx_chain {
         refuse(format!(
-            "push(pre_burn_chain, tx_leaf) = {} but the channel head's settled_tx_chain is {} — \
+            "push(pre_burn_chain, burn_descriptor) = {} but the channel head's settled_tx_chain is {} — \
              the channel has moved past this burn (or last_burn.json belongs to another burn)",
             expected_chain.to_hex(),
             head.balance_state.settled_tx_chain.to_hex()
@@ -6478,8 +7261,12 @@ fn preflight_burn_authorization_is_matchable(
     }
 
     // (2) THE LOAD-BEARING CHECK: the nullifier's own preimage must reproduce the co-signed H2.
-    let base_transfer =
-        inter_channel_base_transfer(receiver_pk_g, withdrawal.token_index, burn_amount, tx_leaf);
+    let base_transfer = inter_channel_base_transfer(
+        receiver_pk_g,
+        withdrawal.token_index,
+        burn_amount,
+        withdrawal.aux_data,
+    );
     let (_, tx_v2_tree) = inter_channel_tx_v2(channel_id, &base_transfer, tx_nonce);
     let rebuilt_h2: Bytes32 = tx_v2_tree.get_root().into();
     if rebuilt_h2 != head.h2_tag {
@@ -6518,7 +7305,14 @@ fn preflight_burn_authorization_is_matchable(
     if let Some(v) = burn["tx_nonce"].as_u64() {
         if v != tx_nonce as u64 {
             refuse(format!(
-                "last_burn.json tx_nonce {v} != the head's small_block_number {tx_nonce}"
+                "last_burn.json tx_nonce {v} != the IMI3-bound base nonce {tx_nonce}"
+            ));
+        }
+    }
+    if let Some(v) = burn["base_nonce"].as_u64() {
+        if v != tx_nonce as u64 {
+            refuse(format!(
+                "last_burn.json base_nonce {v} != the withdrawal TxV2 nonce {tx_nonce}"
             ));
         }
     }
@@ -6568,14 +7362,18 @@ fn cmd_pw_submit(args: &[String]) {
     let verifier = settlement["verifier"]
         .as_str()
         .unwrap_or_else(|| die("settlement.json missing verifier"));
+    let l1_signer = L1Signer::for_rpc(&rpc);
 
     let burn: serde_json::Value = read_json("last_burn.json");
     let burn_amount: u64 = burn["amount"]
         .as_u64()
         .unwrap_or_else(|| die("last_burn.json missing amount"));
-    let _burn_tx_hash = burn["tx_hash"]
-        .as_str()
-        .unwrap_or_else(|| die("last_burn.json missing tx_hash"));
+    let burn_tx_hash = Bytes32::from_hex(
+        burn["tx_hash"]
+            .as_str()
+            .unwrap_or_else(|| die("last_burn.json missing tx_hash")),
+    )
+    .unwrap_or_else(|e| die(format!("parse last_burn.json tx_hash: {e:?}")));
     let source_pk_g = Bytes32::from_hex(
         burn["source_pk_g"]
             .as_str()
@@ -6623,6 +7421,23 @@ fn cmd_pw_submit(args: &[String]) {
     // legacy last_burn.json files). Bound into the IMPW authDigest, so the L1 leg pays the
     // burned asset (withdrawNative for 0, withdrawERC20 otherwise).
     let burn_token_index: u32 = burn["token_index"].as_u64().unwrap_or(0) as u32;
+    let burn_aux_data = burn_descriptor(
+        tx_leaf,
+        receiver_pk_g,
+        burn_token_index,
+        intmax3_zkp::wallet_core::u64_to_u256(burn_amount),
+    );
+    if let Some(recorded) = burn["aux_data"].as_str() {
+        let recorded = Bytes32::from_hex(recorded)
+            .unwrap_or_else(|e| die(format!("parse last_burn.json aux_data: {e:?}")));
+        if recorded != burn_aux_data {
+            die(format!(
+                "last_burn.json burn descriptor {} != canonical IMBD descriptor {} — refusing",
+                recorded.to_hex(),
+                burn_aux_data.to_hex()
+            ));
+        }
+    }
 
     // ── The withdrawal leaf: DERIVED, never invented ────────────────────────────────────────
     //
@@ -6642,14 +7457,17 @@ fn cmd_pw_submit(args: &[String]) {
     // same `SettledTransfer::nullifier()` the circuit calls. Every input is settlement-independent
     // (F-WD-2), so no circuit, PI or VK change is required to know the nullifier at burn time.
     let channel_id = state.snapshot.record.channel_id;
-    // The burn's `TxV2.nonce` is `prev.small_block_number + 1`, i.e. exactly the small block
-    // number of the post-burn head. The H2 guard below re-derives H2 from this nonce and compares
-    // it against the co-signed `h2_tag`, so a head that has moved past the burn cannot slip
-    // through with a stale or advanced nonce.
-    let tx_nonce = u32::try_from(head.small_block_number).unwrap_or_else(|_| {
+    // The base nonce is an explicit IMI3 field persisted at burn time. It MUST NOT be reconstructed
+    // from the channel small-block number: incoming/import transitions advance that counter
+    // without consuming a base sent-tx slot. `tx_nonce` is accepted only as the field name used by
+    // the immediately preceding schema; neither path invents a nonce from channel state.
+    let recorded_nonce = burn["base_nonce"]
+        .as_u64()
+        .or_else(|| burn["tx_nonce"].as_u64())
+        .unwrap_or_else(|| die("last_burn.json missing required base_nonce/tx_nonce"));
+    let tx_nonce = u32::try_from(recorded_nonce).unwrap_or_else(|_| {
         die(format!(
-            "small_block_number {} does not fit in the tx nonce (u32)",
-            head.small_block_number
+            "last_burn.json base nonce {recorded_nonce} exceeds u32"
         ))
     });
     let withdrawal = burn_withdrawal_leaf(
@@ -6657,7 +7475,7 @@ fn cmd_pw_submit(args: &[String]) {
         receiver_pk_g,
         burn_token_index,
         burn_amount,
-        tx_leaf,
+        burn_aux_data,
         tx_nonce,
     )
     .unwrap_or_else(|e| die(format!("derive burn withdrawal leaf: {e:?}")));
@@ -6700,33 +7518,96 @@ fn cmd_pw_submit(args: &[String]) {
     let auth_digest = partial_withdrawal_auth_digest(&withdrawal);
     eprintln!("pw-submit: authDigest = {}", auth_digest.to_hex());
 
-    let post_fund = {
-        let limbs = head.channel_fund.amounts[0].to_u32_vec();
-        limbs[7] as u64 | ((limbs[6] as u64) << 32)
-    };
+    // P1: build and wrap a REAL close proof for the co-signed post-burn head. The old code copied
+    // fields from `head`, inserted 0/1 literals, then let SubmitPartialWithdrawal synthesize only
+    // the public-input array. That was not a proof and could run only against a mock verifier.
+    //
+    // Fail before the expensive Falcon/close/MLE proving if the persisted balance IVC head is
+    // stale. This is expected for legacy backing files: a close proof pins this exact settle chain,
+    // so silently substituting the genesis attestation would be both expensive and impossible.
+    let (balance_vd, att, _backing) = load_backing();
+    let balance_proof =
+        ProofWithPublicInputs::<BF, BC, BD>::from_bytes(att.balance_proof, &balance_vd.common)
+            .unwrap_or_else(|e| die(format!("deserialize live balance proof: {e}")));
+    let balance_pis = BalancePublicInputs::from_u64(
+        &balance_proof.public_inputs[..BALANCE_PUBLIC_INPUTS_LEN].to_u64_vec(),
+    )
+    .unwrap_or_else(|e| die(format!("decode live balance proof PIs: {e}")));
+    if balance_pis.channel_id != channel_id
+        || balance_pis.settled_tx_chain != head.balance_state.settled_tx_chain
+    {
+        die(format!(
+            "pw-submit REFUSED before proving: persisted live balance proof is not the post-burn \
+             head (proof channel {}, chain {}; signed head channel {}, chain {}). A REAL partial-\
+             withdrawal close proof cannot be made from the stale genesis attestation. Settle the \
+             burn into the base balance IVC head and persist channel_attestation.bin first.",
+            balance_pis.channel_id.as_u64(),
+            balance_pis.settled_tx_chain.to_hex(),
+            channel_id.as_u64(),
+            head.balance_state.settled_tx_chain.to_hex(),
+        ));
+    }
+
+    let close_nonce = env_u64("PW_CLOSE_NONCE", 1);
+    let snapshot_mbn = env_u64("PW_SNAPSHOT_MBN", head.small_block_number);
+    eprintln!(
+        "pw-submit: building REAL close proof + MLE for post-burn state_version {} (HEAVY)…",
+        head.balance_state.state_version
+    );
+    let close_prover = CloseProver::new(&balance_vd);
+    let falcon_artifact =
+        cache_falcon_aggregate(close_prover.falcon_context(), &state.snapshot.record, head)
+            .unwrap_or_else(|e| die(format!("Falcon aggregate cache: {e}")));
+    let close_witness = close_prover
+        .build_full_witness_from_aggregate(
+            &state.snapshot.record,
+            head,
+            &falcon_artifact,
+            balance_proof,
+            close_nonce,
+            burn_tx_hash,
+            snapshot_mbn,
+        )
+        .unwrap_or_else(|e| die(format!("build real PW close witness: {}", e.0)));
+    let close_proof = close_prover
+        .prove(&close_witness)
+        .unwrap_or_else(|e| die(format!("real PW close proof: {}", e.0)));
+    let close_mle_json = close_prover
+        .prove_mle(&close_proof)
+        .unwrap_or_else(|e| die(format!("real PW close MLE: {}", e.0)));
+    let close_pi_limbs = close_proof.public_inputs[..CHANNEL_CLOSE_PUBLIC_INPUTS_LEN].to_u64_vec();
+    let close_pis = ChannelClosePublicInputs::from_u64_slice(&close_pi_limbs)
+        .unwrap_or_else(|e| die(format!("decode real PW close PIs: {e:?}")));
+
+    // Every scalar below is decoded from the proof's public inputs. The per-token vectors are the
+    // exact signed-state witness whose tokenFundsDigest the proof exposes and the verifier
+    // recomputes. No submit-only literal is allowed to manufacture an intent field.
     let submit = serde_json::json!({
         "manager": manager,
         "verifier": verifier,
-        "close_nonce": 1u64,
-        "final_epoch": head.epoch,
-        "final_small_block_number": head.small_block_number,
-        "close_freeze_nonce": 0u64,
-        "final_channel_state_digest": head.digest.to_hex(),
-        "final_balance_state_h1": head.balance_state.h1().to_hex(),
-        "channel_fund_amount": post_fund,
-        "channel_fund_intmax_state_root": head.channel_fund.intmax_state_root.to_hex(),
-        "burn_tx_hash": Bytes32::default().to_hex(),
-        "close_withdrawal_digest": Bytes32::default().to_hex(),
-        "snapshot_medium_block_number": 0u64,
-        "final_state_version": head.balance_state.state_version,
-        "final_settled_tx_chain": head.balance_state.settled_tx_chain.to_hex(),
-        "final_settled_tx_acc_root": head.balance_state.settled_tx_accumulator_root.to_hex(),
+        "close_nonce": close_pis.close_nonce,
+        "final_epoch": close_pis.final_epoch,
+        "final_small_block_number": close_pis.final_small_block_number,
+        "close_freeze_nonce": close_pis.close_freeze_nonce,
+        "final_channel_state_digest": close_pis.final_channel_state_digest.to_hex(),
+        "final_balance_state_h1": close_pis.final_balance_state_h1.to_hex(),
+        "channel_fund_amounts": head.channel_fund.amounts.iter().map(|v| v.to_string()).collect::<Vec<_>>(),
+        "token_registry": head.balance_state.token_registry.to_vec(),
+        "token_count": head.balance_state.token_count,
+        "channel_fund_intmax_state_root": close_pis.channel_fund_intmax_state_root.to_hex(),
+        "burn_tx_hash": close_pis.burn_tx_hash.to_hex(),
+        "close_withdrawal_digest": close_pis.close_withdrawal_digest.to_hex(),
+        "snapshot_medium_block_number": close_pis.snapshot_medium_block_number,
+        "final_state_version": close_pis.final_state_version,
+        "final_settled_tx_chain": close_pis.final_settled_tx_chain.to_hex(),
+        "final_settled_tx_acc_root": close_pis.final_settled_tx_accumulator_root.to_hex(),
         "prev_settled_tx_chain": pre_burn_chain.to_hex(),
         "withdrawal_recipient": format!("0x{}", hex::encode(withdrawal_addr.to_bytes_be())),
         "withdrawal_token_index": burn_token_index,
         "withdrawal_amount": burn_amount,
         "withdrawal_nullifier": nullifier.to_hex(),
-        "withdrawal_aux_data": tx_leaf.to_hex(),
+        "withdrawal_aux_data": burn_aux_data.to_hex(),
+        "burn_tx_leaf": tx_leaf.to_hex(),
     });
     // Same shared resolution as the exit commands (F4).
     let contracts_dir =
@@ -6738,21 +7619,21 @@ fn cmd_pw_submit(args: &[String]) {
         serde_json::to_string_pretty(&submit).unwrap_or_else(|e| die(e)),
     )
     .unwrap_or_else(|e| die(format!("write {data_path}: {e}")));
+    let mle_path = format!("{contracts_dir}/test/data/{PW_CLOSE_INTENT_MLE_FILE}");
+    fs::write(&mle_path, close_mle_json).unwrap_or_else(|e| die(format!("write {mle_path}: {e}")));
 
-    let deploy_key = deposit_key_env();
-    let forge_out = Command::new("forge")
-        .current_dir(&contracts_dir)
-        .args([
-            "script",
-            "script/SubmitPartialWithdrawal.s.sol",
-            "--rpc-url",
-            &rpc,
-            "--private-key",
-            &deploy_key,
-            "--broadcast",
-            "--code-size-limit",
-            "50000",
-        ])
+    let mut forge = Command::new("forge");
+    forge.current_dir(&contracts_dir).args([
+        "script",
+        "script/SubmitPartialWithdrawal.s.sol",
+        "--rpc-url",
+        &rpc,
+        "--broadcast",
+        "--code-size-limit",
+        "50000",
+    ]);
+    l1_signer.append_to_command(&mut forge);
+    let forge_out = forge
         .output()
         .unwrap_or_else(|e| die(format!("forge pw-submit failed: {e}")));
     let out = String::from_utf8_lossy(&forge_out.stdout);
@@ -6785,7 +7666,8 @@ fn cmd_pw_submit(args: &[String]) {
             "withdrawal_token_index": burn_token_index,
             "withdrawal_amount": burn_amount,
             "withdrawal_nullifier": nullifier.to_hex(),
-            "withdrawal_aux_data": tx_leaf.to_hex(),
+            "withdrawal_aux_data": burn_aux_data.to_hex(),
+            "burn_tx_leaf": tx_leaf.to_hex(),
         }),
     );
     println!(
@@ -6811,7 +7693,7 @@ fn cmd_pw_finalize(args: &[String]) {
         .as_str()
         .unwrap_or_else(|| die("pw_auth.json missing auth_digest"));
 
-    let deploy_key = deposit_key_env();
+    let l1_signer = L1Signer::for_rpc(&rpc);
 
     let settlement: serde_json::Value = read_json("settlement.json");
     let rollup = settlement["rollup"]
@@ -6874,15 +7756,11 @@ fn cmd_pw_finalize(args: &[String]) {
             }
         }
 
-        cast(&[
-            "send",
-            manager,
-            "finalizePartialWithdrawal()",
-            "--private-key",
-            &deploy_key,
-            "--rpc-url",
+        cast_signed(
             &rpc,
-        ]);
+            &l1_signer,
+            &["send", manager, "finalizePartialWithdrawal()"],
+        );
     }
 
     let check = cast(&[

@@ -16,6 +16,8 @@
 //! Secret material (`FalconKeys`, `BabyBearSecretKey`, `RegevSk`, `AmountWitness`) never
 //! leaves this module via any serialized type.
 
+use std::sync::{Arc, OnceLock};
+
 use plonky2::plonk::{circuit_data::VerifierCircuitData, proof::ProofWithPublicInputs};
 use rand::SeedableRng as _;
 use rand010::Rng;
@@ -23,7 +25,12 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     circuits::{
-        balance::balance_pis::BalanceFullPublicInputs,
+        balance::{
+            balance_pis::BalanceFullPublicInputs,
+            common::recipient::{
+                calculate_recipient_from_user_id, extract_address_from_recipient,
+            },
+        },
         channel::state_update_verifier::{
             BalanceRefreshUpdateWitness, ChannelProofVerifier, ChannelStateUpdateError,
             ChannelStateUpdatePublicInputs, InChannelTransferUpdateWitness,
@@ -38,10 +45,11 @@ use crate::{
             ChannelFund, ChannelProofEnvelope, ChannelRecord, ChannelState, ChannelStatus,
             ChannelTx, InterChannelTx, MemberSignature, MerkleInclusionProof, ProofBackend,
             ReceiverBalanceDelta, SignedSmallBlock, SmallBlockRootMessage, TransitionProofRole,
-            inter_channel_tx_hash,
+            burn_descriptor, inter_channel_tx_hash,
         },
         channel_id::ChannelId,
         deposit::Deposit,
+        salt::Salt,
         transfer::Transfer,
         trees::{
             key_tree::{MemberLeaf, MemberTree},
@@ -532,7 +540,7 @@ impl SendPayload {
 /// plus the E-1 `after` ciphertext the fold installs (detail2 §M-1). This is the ENTIRE wire
 /// object: no state, no member list, no record. `anchor_digest` is the FIRST field so a transport
 /// can extract it from the head of the byte stream without a full JSON parse.
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SlimSendPayload {
     /// Digest of the anchor state `S` this tx extends (== the digest the sender's A11 tx
@@ -545,6 +553,199 @@ pub struct SlimSendPayload {
     pub channel_tx: ChannelTx,
     /// The sender's fresh post-debit ciphertext (the E-1 statement's `after`).
     pub after_ct: RegevCiphertext,
+}
+
+/// Binary transport envelope for [`SlimSendPayload`] ("IMSW", version 1).
+///
+/// The fixed header deliberately carries the anchor as raw bytes before the bincode body.  A
+/// streaming relay can therefore reject stale work after reading only 40 bytes, without parsing or
+/// buffering the proof-bearing payload.  JSON remains accepted by the CLI for rolling upgrades;
+/// new browser uploads use this encoding.
+pub const SLIM_WIRE_MAGIC: [u8; 4] = *b"IMSW";
+pub const SLIM_WIRE_VERSION: u8 = 1;
+pub const SLIM_WIRE_HEADER_LEN: usize = 4 + 1 + 3 + 32;
+const MAX_SLIM_WIRE_BYTES: usize = 64 * 1024 * 1024;
+
+#[derive(Serialize, Deserialize)]
+struct SlimSendPayloadBody {
+    sender_index: u16,
+    recipient_index: u16,
+    channel_tx: ChannelTx,
+    after_ct: RegevCiphertext,
+}
+
+impl SlimSendPayload {
+    /// Encode the proof and Regev coefficient vectors as binary instead of decimal JSON arrays.
+    /// Integers are fixed-width little-endian; the anchor in the header is canonical big-endian
+    /// bytes so it has the same visual order as its `0x...` representation.
+    pub fn to_wire_bytes(&self) -> WResult<Vec<u8>> {
+        self.channel_tx
+            .enc_amount
+            .validate()
+            .map_err(|e| WalletError(format!("slim binary wire: invalid enc_amount: {e}")))?;
+        self.after_ct
+            .validate()
+            .map_err(|e| WalletError(format!("slim binary wire: invalid after_ct: {e}")))?;
+        let body = SlimSendPayloadBody {
+            sender_index: self.sender_index,
+            recipient_index: self.recipient_index,
+            channel_tx: self.channel_tx.clone(),
+            after_ct: self.after_ct.clone(),
+        };
+        let encoded = bincode::serde::encode_to_vec(
+            body,
+            bincode::config::standard()
+                .with_fixed_int_encoding()
+                .with_little_endian(),
+        )
+        .map_err(|e| WalletError(format!("slim binary wire encode failed: {e}")))?;
+        if SLIM_WIRE_HEADER_LEN + encoded.len() > MAX_SLIM_WIRE_BYTES {
+            return bail("slim binary wire exceeds the 64 MiB transport limit");
+        }
+        let mut out = Vec::with_capacity(SLIM_WIRE_HEADER_LEN + encoded.len());
+        out.extend_from_slice(&SLIM_WIRE_MAGIC);
+        out.push(SLIM_WIRE_VERSION);
+        out.extend_from_slice(&[0u8; 3]); // reserved; must stay zero until a version bump
+        out.extend_from_slice(&self.anchor_digest.to_bytes_be());
+        out.extend_from_slice(&encoded);
+        Ok(out)
+    }
+
+    /// Decode versioned binary wire bytes.  The decoder is size-limited, rejects trailing bytes
+    /// and reserved-bit smuggling, and validates both ciphertexts before returning them across the
+    /// trust boundary.
+    pub fn from_wire_bytes(bytes: &[u8]) -> WResult<Self> {
+        if bytes.len() < SLIM_WIRE_HEADER_LEN {
+            return bail("slim binary wire is shorter than its 40-byte header");
+        }
+        if bytes.len() > MAX_SLIM_WIRE_BYTES {
+            return bail("slim binary wire exceeds the 64 MiB transport limit");
+        }
+        if bytes[..4] != SLIM_WIRE_MAGIC {
+            return bail("slim binary wire magic mismatch");
+        }
+        if bytes[4] != SLIM_WIRE_VERSION {
+            return bail(format!(
+                "unsupported slim binary wire version {} (expected {SLIM_WIRE_VERSION})",
+                bytes[4]
+            ));
+        }
+        if bytes[5..8] != [0u8; 3] {
+            return bail("slim binary wire reserved header bytes must be zero");
+        }
+        let anchor_digest = Bytes32::from_bytes_be(&bytes[8..SLIM_WIRE_HEADER_LEN])
+            .map_err(|e| WalletError(format!("slim binary wire anchor: {e}")))?;
+        let body_bytes = &bytes[SLIM_WIRE_HEADER_LEN..];
+        let (body, consumed) = bincode::serde::decode_from_slice::<SlimSendPayloadBody, _>(
+            body_bytes,
+            bincode::config::standard()
+                .with_fixed_int_encoding()
+                .with_little_endian()
+                .with_limit::<MAX_SLIM_WIRE_BYTES>(),
+        )
+        .map_err(|e| WalletError(format!("slim binary wire decode failed: {e}")))?;
+        if consumed != body_bytes.len() {
+            return bail(format!(
+                "slim binary wire has {} trailing bytes",
+                body_bytes.len() - consumed
+            ));
+        }
+        body.channel_tx
+            .enc_amount
+            .validate()
+            .map_err(|e| WalletError(format!("slim binary wire: invalid enc_amount: {e}")))?;
+        body.after_ct
+            .validate()
+            .map_err(|e| WalletError(format!("slim binary wire: invalid after_ct: {e}")))?;
+        Ok(Self {
+            anchor_digest,
+            sender_index: body.sender_index,
+            recipient_index: body.recipient_index,
+            channel_tx: body.channel_tx,
+            after_ct: body.after_ct,
+        })
+    }
+
+    /// Rolling-upgrade decoder used by the CLI spool reader: versioned binary first, compact JSON
+    /// otherwise.  A body beginning with `IMSW` is never allowed to fall back to JSON after a
+    /// binary decoding error.
+    pub fn from_wire_or_json(bytes: &[u8]) -> WResult<Self> {
+        if bytes.starts_with(&SLIM_WIRE_MAGIC) {
+            Self::from_wire_bytes(bytes)
+        } else {
+            serde_json::from_slice(bytes)
+                .map_err(|e| WalletError(format!("slim JSON decode failed: {e}")))
+        }
+    }
+}
+
+#[cfg(test)]
+mod slim_binary_wire_tests {
+    use super::*;
+
+    fn fixture() -> SlimSendPayload {
+        let ct = RegevCiphertext::padding();
+        SlimSendPayload {
+            anchor_digest: Bytes32::from_u32_slice(&[1, 2, 3, 4, 5, 6, 7, 8]).unwrap(),
+            sender_index: 17,
+            recipient_index: 900,
+            channel_tx: ChannelTx {
+                recipient_pk_g: Bytes32::from_u32_slice(&[9; 8]).unwrap(),
+                token_slot: 3,
+                enc_amount: ct.clone(),
+                nonce: Bytes32::from_u32_slice(&[10; 8]).unwrap(),
+                channel_tx_zkp: ChannelProofEnvelope {
+                    role: TransitionProofRole::ChannelStateUpdate,
+                    backend: ProofBackend::Plonky3,
+                    proof: (0..=255).cycle().take(32_000).collect(),
+                },
+                sender_pk_g: Bytes32::from_u32_slice(&[11; 8]).unwrap(),
+                sender_hash_sig: (0..=251).cycle().take(48_000).collect(),
+                sender_pk_b: Bytes32::from_u32_slice(&[12; 8]).unwrap(),
+            },
+            after_ct: ct,
+        }
+    }
+
+    #[test]
+    fn slim_binary_wire_roundtrip_and_header_anchor() {
+        let slim = fixture();
+        let wire = slim.to_wire_bytes().unwrap();
+        assert_eq!(&wire[..4], b"IMSW");
+        assert_eq!(wire[4], SLIM_WIRE_VERSION);
+        assert_eq!(&wire[8..40], slim.anchor_digest.to_bytes_be());
+        assert_eq!(SlimSendPayload::from_wire_bytes(&wire).unwrap(), slim);
+        assert_eq!(SlimSendPayload::from_wire_or_json(&wire).unwrap(), slim);
+    }
+
+    #[test]
+    fn slim_binary_wire_is_smaller_than_decimal_json_and_json_stays_compatible() {
+        let slim = fixture();
+        let json = serde_json::to_vec(&slim).unwrap();
+        let wire = slim.to_wire_bytes().unwrap();
+        assert!(
+            wire.len() * 2 < json.len(),
+            "wire={} json={}",
+            wire.len(),
+            json.len()
+        );
+        assert_eq!(SlimSendPayload::from_wire_or_json(&json).unwrap(), slim);
+    }
+
+    #[test]
+    fn slim_binary_wire_rejects_version_reserved_and_trailing_bytes() {
+        let mut bad_version = fixture().to_wire_bytes().unwrap();
+        bad_version[4] = 2;
+        assert!(SlimSendPayload::from_wire_bytes(&bad_version).is_err());
+
+        let mut bad_reserved = fixture().to_wire_bytes().unwrap();
+        bad_reserved[7] = 1;
+        assert!(SlimSendPayload::from_wire_bytes(&bad_reserved).is_err());
+
+        let mut trailing = fixture().to_wire_bytes().unwrap();
+        trailing.push(0);
+        assert!(SlimSendPayload::from_wire_bytes(&trailing).is_err());
+    }
 }
 
 /// The retained residue of a VERIFIED slim tx — exactly what the canonical fold needs (mirrors
@@ -1880,6 +2081,9 @@ pub struct InterChannelTransferDescriptor {
     pub tx_tree_root: Bytes32,
     pub source_pk_g: Bytes32,
     pub receiver_pk_g: Bytes32,
+    /// Salt opening the normal base-layer UID recipient. This is deliberately distinct from
+    /// `receiver_pk_g`, which binds the encrypted channel credit. Burns require the zero salt.
+    pub destination_base_transfer_salt: Salt,
     /// The SOURCE channel sender's Regev public key (the key the E-2 was proven under for the
     /// sender side). Channel B cannot read A's Regev key array, so it is shipped explicitly; the
     /// E-2 transcript binds the real key + all four ciphertexts, so a forged `source_pk` cannot
@@ -1904,8 +2108,9 @@ pub struct InterChannelTransferDescriptor {
 pub struct BuiltInterChannelCredit {
     pub fund_import_state: ChannelState,
     pub bundle_apply_state: ChannelState,
-    /// Stage 3: the per-channel settled-tx accumulator AFTER both settle advancements (the import
-    /// `tx_hash` push and the bundle-apply `tx_hash` push). Persist it as the channel's new
+    /// Stage 3: the per-channel settled-tx accumulator after the incoming transfer's single
+    /// `tx_hash` insertion in the fund-import step. The bundle apply leaves it unchanged. Persist
+    /// it as the channel's new
     /// `ChannelSnapshot::settled_tx_accumulator` — its root equals
     /// `bundle_apply_state.balance_state.settled_tx_accumulator_root`, and it is what lets the
     /// wallet later generate the post-close Merkle inclusion proof for an incoming `tx_hash`.
@@ -1913,11 +2118,13 @@ pub struct BuiltInterChannelCredit {
         crate::utils::trees::incremental_merkle_tree::IncrementalMerkleTree<Bytes32>,
 }
 
-/// Structural transport verifier: the inter-channel send/import witnesses require a
-/// `ChannelProofVerifier` for the (DEPRECATED, abstract2 §3.4) transport proof envelope. The wallet
-/// supplies the same non-empty bytes on both sides, so this only asserts non-emptiness — the real
-/// security comes from the E-2 STARK (`RealRegevProofVerifier`) and the channel-A member
-/// signatures.
+/// Structural transport verifier for the retired abstract2 §3.4 proof slot.
+///
+/// The transport proof never had a verifier or a security statement.  Keeping an arbitrary
+/// non-empty byte string in a signed transaction made the wire format look authenticated while
+/// accepting every value.  Protocol v3 therefore has one canonical representation for the
+/// retired field: an empty proof envelope.  The real security comes from the E-2 STARK and the
+/// channel-A N-of-N signatures.
 struct WalletStructuralTransport;
 impl ChannelProofVerifier for WalletStructuralTransport {
     fn verify(
@@ -1925,9 +2132,9 @@ impl ChannelProofVerifier for WalletStructuralTransport {
         p: &ChannelProofEnvelope,
         _: &ChannelStateUpdatePublicInputs,
     ) -> Result<(), ChannelStateUpdateError> {
-        if p.proof.is_empty() {
+        if !p.proof.is_empty() {
             return Err(ChannelStateUpdateError::ProofVerification(
-                "empty transport proof".into(),
+                "retired transport proof must be empty".into(),
             ));
         }
         Ok(())
@@ -2005,7 +2212,8 @@ pub fn attach_small_block_signatures(
     let msg = &inter_channel_tx.signed_small_block.message;
 
     // (4) Identity of the state vs the block, before the value-bearing bindings.
-    if inter_channel_tx.source_channel_id != record.channel_id || msg.channel_id != record.channel_id
+    if inter_channel_tx.source_channel_id != record.channel_id
+        || msg.channel_id != record.channel_id
     {
         return bail(format!(
             "small block channel mismatch: record {}, tx source {}, message {}",
@@ -2072,6 +2280,7 @@ pub fn build_inter_channel_send(
     destination_recipient_slot: u16,
     destination_recipient_pk: RegevPk,
     destination_recipient_pk_g: Bytes32,
+    destination_base_transfer_salt: Salt,
     amount: u64,
     before_amount: u64,
     before_witness: &AmountWitness,
@@ -2088,6 +2297,7 @@ pub fn build_inter_channel_send(
         destination_recipient_slot,
         destination_recipient_pk,
         destination_recipient_pk_g,
+        destination_base_transfer_salt,
         genesis_token_index,
         amount,
         before_amount,
@@ -2123,7 +2333,55 @@ pub fn build_inter_channel_send_token(
     destination_recipient_slot: u16,
     destination_recipient_pk: RegevPk,
     destination_recipient_pk_g: Bytes32,
+    destination_base_transfer_salt: Salt,
     token_index: u32,
+    amount: u64,
+    before_amount: u64,
+    before_witness: &AmountWitness,
+    new_nullifier_root: Bytes32,
+    level: RegevSecurityLevel,
+    rng: &mut impl Rng,
+) -> WResult<BuiltInterChannelSend> {
+    // Compatibility wrapper for fixture callers. Production wallets must use
+    // `build_inter_channel_send_token_at_base_nonce` with the persisted base-account cursor;
+    // channel small-block numbers are not a base nonce source after an incoming transition.
+    let base_nonce = u32::try_from(snapshot.state.small_block_number + 1)
+        .map_err(|_| WalletError("small_block_number exceeds the TxV2 nonce width".into()))?;
+    build_inter_channel_send_token_at_base_nonce(
+        keys,
+        snapshot,
+        sender_slot,
+        destination_channel_id,
+        destination_recipient_slot,
+        destination_recipient_pk,
+        destination_recipient_pk_g,
+        destination_base_transfer_salt,
+        token_index,
+        base_nonce,
+        amount,
+        before_amount,
+        before_witness,
+        new_nullifier_root,
+        level,
+        rng,
+    )
+}
+
+/// Production inter-channel builder. `base_nonce` is read from the persisted live base IVC head
+/// immediately before proving. It is committed twice: directly by IMI4 and transitively by H2's
+/// TxV2 root. Co-signers and the base prover both reject a stale cursor.
+#[allow(clippy::too_many_arguments)]
+pub fn build_inter_channel_send_token_at_base_nonce(
+    keys: &MemberKeys,
+    snapshot: &ChannelSnapshot,
+    sender_slot: u16,
+    destination_channel_id: ChannelId,
+    destination_recipient_slot: u16,
+    destination_recipient_pk: RegevPk,
+    destination_recipient_pk_g: Bytes32,
+    destination_base_transfer_salt: Salt,
+    token_index: u32,
+    base_nonce: u32,
     amount: u64,
     before_amount: u64,
     before_witness: &AmountWitness,
@@ -2201,23 +2459,44 @@ pub fn build_inter_channel_send_token(
     // The inter-channel tx's small block carries the channel's own 1-tx TxV2 tree (detail2 §A-2).
     // Computed INTERNALLY (root = H2; inclusion proof) so the browser need not.
     let mut transfer_tree = TransferTree::init();
-    // SECURITY: burn sends (dest = BURN_CHANNEL_ID) set aux_data = tx_leaf so the base
-    // send_tx_circuit pushes the SAME leaf into settled_tx_chain as the channel layer (GAP1 fix).
-    // Normal inter-channel sends keep aux_data = 0 — their receiver side also gates on aux_data,
-    // so setting it nonzero here would cause a double-push.
+    // SECURITY: every real inter-channel settle carries the exact tag both channel accounts fold.
+    // Normal sends carry `tx_leaf`; burns carry the amount-committing IMBD descriptor. A zero aux
+    // value would make the base send/receive circuits leave `settled_tx_chain` unchanged while the
+    // N-of-N channel head advances it, making the live IVC irreconcilable.
     let burn_aux =
         if destination_channel_id.channel_id() == crate::constants::BURN_CHANNEL_ID as u32 {
-            tx_leaf
+            burn_descriptor(
+                tx_leaf,
+                destination_recipient_pk_g,
+                token_index,
+                u64_to_u256(amount),
+            )
         } else {
-            Bytes32::default()
+            tx_leaf
         };
     // SECURITY (single source of truth): the base-layer `Transfer` this send settles is built by
     // `inter_channel_base_transfer` and by NOTHING ELSE. `burn_withdrawal_leaf` — the only place
     // allowed to derive a burn's L1 withdrawal leaf / nullifier — rebuilds it with the same
     // function, so the leaf the CLI authorizes on L1 and the leaf this tree commits to cannot
     // drift apart.
+    let is_burn = destination_channel_id.channel_id() == crate::constants::BURN_CHANNEL_ID as u32;
+    if is_burn && destination_base_transfer_salt != Salt::default() {
+        return bail("burn transfer must carry the canonical zero destination base transfer salt");
+    }
+    if is_burn {
+        extract_address_from_recipient(destination_recipient_pk_g).map_err(|error| {
+            WalletError(format!(
+                "burn transfer recipient must be canonical ADDRESS_TAG (0x02 || 11 zero bytes || address): {error}"
+            ))
+        })?;
+    }
+    let base_recipient = if is_burn {
+        destination_recipient_pk_g
+    } else {
+        calculate_recipient_from_user_id(destination_channel_id, destination_base_transfer_salt)
+    };
     let base_transfer = inter_channel_base_transfer(
-        destination_recipient_pk_g,
+        base_recipient,
         // The base-layer transfer settles the SAME base token the channel-layer descriptor
         // moves (identical to the legacy hardcoded 0 for ETH-genesis channels).
         token_index,
@@ -2229,11 +2508,8 @@ pub fn build_inter_channel_send_token(
     // Same single-source rule for H2: `inter_channel_tx_v2` is the only construction of the 1-tx
     // TxV2 + its tree, so the pre-flight H2 reconstruction in `pw-submit` is byte-identical to
     // the value the co-signers actually signed (`h2_tag`).
-    let (tx_v2, tx_v2_tree) = inter_channel_tx_v2(
-        record.channel_id,
-        &base_transfer,
-        (prev.small_block_number + 1) as u32,
-    );
+    let tx_nonce = base_nonce;
+    let (tx_v2, tx_v2_tree) = inter_channel_tx_v2(record.channel_id, &base_transfer, tx_nonce);
     debug_assert_eq!(tx_v2.transfer_tree_root, transfer_tree.get_root());
     let tx_v2_root_h = tx_v2_tree.get_root();
     let tx_tree_root: Bytes32 = tx_v2_root_h.into(); // = H2
@@ -2285,7 +2561,10 @@ pub fn build_inter_channel_send_token(
         },
         balance_state: BalanceState {
             enc_balances,
-            settled_tx_chain: settled_tx_chain_push(prev.balance_state.settled_tx_chain, tx_leaf),
+            // Normal C2C pushes the tx leaf; a burn pushes its amount-committing descriptor. In
+            // both cases this is exactly the value stored in the base
+            // Transfer.aux_data.
+            settled_tx_chain: settled_tx_chain_push(prev.balance_state.settled_tx_chain, burn_aux),
             // Stage 3: the accumulator advances by inserting `tx_hash` at the prev tree length.
             settled_tx_accumulator_root: next_accumulator_root,
             state_version: prev.balance_state.state_version + 1,
@@ -2310,25 +2589,32 @@ pub fn build_inter_channel_send_token(
                 prev_small_block_root: Bytes32::default(),
                 tx_tree_root,
                 state_commitment_root: h1_prime,
-                medium_epoch_hint: 3,
+                medium_epoch_hint: 0,
                 close_freeze_nonce: prev.close_freeze_nonce,
             },
             // UNSIGNED at build time; `attach_small_block_signatures` installs the real N-of-N
             // once the co-sign round has completed on `a_send`.
             signatures: unsigned_small_block_slots(record),
-            aggregated_signature_proof: vec![9, 9],
-            medium_block_number: 4,
-            confirmation_proof: vec![8, 8],
+            // These three fields belong to a retired medium-block confirmation design.  Empty
+            // bytes/zero are the sole canonical v3 encoding; no unverifiable marker bytes enter
+            // the signed digest.
+            aggregated_signature_proof: Vec::new(),
+            medium_block_number: 0,
+            confirmation_proof: Vec::new(),
         },
         sender_delta_ct: sender_delta_ct.clone(),
         source_channel_id: record.channel_id,
         destination_channel_id,
         token_index,
+        base_nonce,
+        destination_base_transfer_salt,
         source_pk_g: sender_pk_g,
         seal: Bytes32::default(),
         tx_hash,
-        intmax_transfer_commitment: Bytes32::default(),
-        recipient_memo: vec![1],
+        // F-AUX-1: commit the exact base-layer Transfer whose transfer-tree root feeds TxV2/H2.
+        // Co-signers independently reconstruct this value from the channel debit below.
+        intmax_transfer_commitment: Bytes32::from(base_transfer.poseidon_hash()),
+        recipient_memo: Vec::new(),
         receiver_deltas: vec![ReceiverBalanceDelta {
             receiver_pk_g: destination_recipient_pk_g,
             amount: receiver_delta_ct.clone(),
@@ -2338,7 +2624,7 @@ pub fn build_inter_channel_send_token(
             backend: ProofBackend::Plonky3,
             proof: e2,
         },
-        transport_proof: vec![7, 7, 7],
+        transport_proof: Vec::new(),
     };
 
     // If the building participant is a co-signing MEMBER (slot < member_count) it self-signs the
@@ -2398,6 +2684,7 @@ pub fn build_inter_channel_send_token(
             tx_tree_root,
             source_pk_g: sender_pk_g,
             receiver_pk_g: destination_recipient_pk_g,
+            destination_base_transfer_salt,
             source_pk: sender_pk.clone(),
             receiver_pk: destination_recipient_pk.clone(),
             sender_before_ct: before_ct,
@@ -2484,6 +2771,44 @@ pub fn build_burn_send_token(
     level: RegevSecurityLevel,
     rng: &mut impl Rng,
 ) -> WResult<BuiltInterChannelSend> {
+    // Compatibility wrapper for fixtures that still model one channel transition per base send.
+    // Production callers must pass the persisted base cursor explicitly; incoming channel
+    // transitions advance `small_block_number` without consuming a base nonce.
+    let base_nonce = u32::try_from(snapshot.state.small_block_number + 1)
+        .map_err(|_| WalletError("small_block_number exceeds the TxV2 nonce width".into()))?;
+    build_burn_send_token_at_base_nonce(
+        keys,
+        snapshot,
+        sender_slot,
+        withdrawal_l1_address,
+        token_index,
+        base_nonce,
+        amount,
+        before_amount,
+        before_witness,
+        new_nullifier_root,
+        level,
+        rng,
+    )
+}
+
+/// Production burn builder. `base_nonce` comes from the persisted live base-account state and is
+/// independent of the channel small-block counter.
+#[allow(clippy::too_many_arguments)]
+pub fn build_burn_send_token_at_base_nonce(
+    keys: &MemberKeys,
+    snapshot: &ChannelSnapshot,
+    sender_slot: u16,
+    withdrawal_l1_address: crate::ethereum_types::address::Address,
+    token_index: u32,
+    base_nonce: u32,
+    amount: u64,
+    before_amount: u64,
+    before_witness: &AmountWitness,
+    new_nullifier_root: Bytes32,
+    level: RegevSecurityLevel,
+    rng: &mut impl Rng,
+) -> WResult<BuiltInterChannelSend> {
     use crate::circuits::balance::common::recipient::calculate_recipient_from_address;
     // (ii): base Transfer recipient = the ADDRESS_TAG L1 form (what `build_inter_channel_send`
     // writes into the tx's transfer leaf → `single_withdrawal` extracts); phantom receiver key
@@ -2492,7 +2817,7 @@ pub fn build_burn_send_token(
     let burn_recipient = calculate_recipient_from_address(withdrawal_l1_address);
     let burn_channel = ChannelId::new(crate::constants::BURN_CHANNEL_ID as u64)
         .map_err(|e| WalletError(format!("BURN_CHANNEL_ID is not a valid ChannelId: {e:?}")))?;
-    build_inter_channel_send_token(
+    build_inter_channel_send_token_at_base_nonce(
         keys,
         snapshot,
         sender_slot,
@@ -2500,7 +2825,9 @@ pub fn build_burn_send_token(
         0, // destination_recipient_slot: descriptor-only; irrelevant for an L1 burn
         RegevPk::padding(), // (ii) phantom-receiver key (no secret)
         burn_recipient, // → base Transfer recipient = ADDRESS_TAG L1 (withdraw-only)
+        Salt::default(), // burns use ADDRESS_TAG, never a UID recipient opening
         token_index,
+        base_nonce,
         amount,
         before_amount,
         before_witness,
@@ -2573,6 +2900,189 @@ pub fn inter_channel_tx_v2(
     (tx_v2, tx_v2_tree)
 }
 
+/// Reconstruct the base-layer objects that an inter-channel debit claims to have committed.
+///
+/// This is the F-AUX-1 fail-closed bridge between the channel layer and the native INTMAX layer:
+/// the public channel amount/token/recipient and the E-2-bound delta determine one canonical
+/// `Transfer`; that transfer determines one canonical `TxV2`; and that TxV2 determines H2.  A
+/// co-signer must never accept those objects as independent attacker-supplied values.
+pub fn canonical_inter_channel_base_transfer(
+    inter_channel_tx: &InterChannelTx,
+    amount: u64,
+) -> WResult<Transfer> {
+    if inter_channel_tx.receiver_deltas.len() != 1 {
+        return bail(format!(
+            "F-AUX-1: expected exactly one receiver delta, got {}",
+            inter_channel_tx.receiver_deltas.len()
+        ));
+    }
+    let tx_leaf = inter_channel_tx
+        .tx_leaf_hash()
+        .map_err(|e| WalletError(format!("F-AUX-1: tx leaf: {e}")))?;
+    let receiver_pk_g = inter_channel_tx.receiver_deltas[0].receiver_pk_g;
+    let is_burn = inter_channel_tx.destination_channel_id.channel_id()
+        == crate::constants::BURN_CHANNEL_ID as u32;
+    if is_burn && inter_channel_tx.destination_base_transfer_salt != Salt::default() {
+        return bail("F-AUX-1: burn must carry the canonical zero base transfer salt");
+    }
+    if is_burn {
+        extract_address_from_recipient(receiver_pk_g).map_err(|error| {
+            WalletError(format!(
+                "F-AUX-1: burn receiver is not canonical ADDRESS_TAG (0x02 || 11 zero bytes || address): {error}"
+            ))
+        })?;
+    }
+    let aux_data = if is_burn {
+        burn_descriptor(
+            tx_leaf,
+            receiver_pk_g,
+            inter_channel_tx.token_index,
+            u64_to_u256(amount),
+        )
+    } else {
+        tx_leaf
+    };
+    let base_recipient = if is_burn {
+        receiver_pk_g
+    } else {
+        calculate_recipient_from_user_id(
+            inter_channel_tx.destination_channel_id,
+            inter_channel_tx.destination_base_transfer_salt,
+        )
+    };
+    Ok(inter_channel_base_transfer(
+        base_recipient,
+        inter_channel_tx.token_index,
+        amount,
+        aux_data,
+    ))
+}
+
+fn canonical_inter_channel_binding(
+    inter_channel_tx: &InterChannelTx,
+    amount: u64,
+) -> WResult<(Transfer, TxV2, Bytes32)> {
+    let transfer = canonical_inter_channel_base_transfer(inter_channel_tx, amount)?;
+    let (tx_v2, tx_v2_tree) = inter_channel_tx_v2(
+        inter_channel_tx.source_channel_id,
+        &transfer,
+        inter_channel_tx.base_nonce,
+    );
+    Ok((transfer, tx_v2, Bytes32::from(tx_v2_tree.get_root())))
+}
+
+/// Verify all signed-but-retired fields and the native-transfer commitment carried by an
+/// inter-channel transaction.  Keeping this check next to the canonical constructor prevents a
+/// future caller from validating E-2 while accidentally skipping its base-layer binding.
+fn verify_canonical_inter_channel_binding(
+    inter_channel_tx: &InterChannelTx,
+    amount: u64,
+) -> WResult<(TxV2, Bytes32)> {
+    let signed = &inter_channel_tx.signed_small_block;
+    if signed.message.medium_epoch_hint != 0
+        || signed.medium_block_number != 0
+        || !signed.aggregated_signature_proof.is_empty()
+        || !signed.confirmation_proof.is_empty()
+        || inter_channel_tx.seal != Bytes32::default()
+        || !inter_channel_tx.recipient_memo.is_empty()
+        || !inter_channel_tx.transport_proof.is_empty()
+        || inter_channel_tx.tx_inclusion_proof != MerkleInclusionProof::default()
+    {
+        return bail("non-canonical value in a retired inter-channel wire field");
+    }
+
+    let (transfer, tx_v2, tx_tree_root) =
+        canonical_inter_channel_binding(inter_channel_tx, amount)?;
+    let expected_commitment = Bytes32::from(transfer.poseidon_hash());
+    if inter_channel_tx.intmax_transfer_commitment != expected_commitment {
+        return bail(
+            "F-AUX-1: intmax_transfer_commitment does not commit the canonical base Transfer",
+        );
+    }
+    if inter_channel_tx.signed_small_block.message.tx_tree_root != tx_tree_root {
+        return bail("F-AUX-1: signed H2 does not commit the canonical base Transfer/TxV2");
+    }
+    Ok((tx_v2, tx_tree_root))
+}
+
+/// Bind the convenience transfer descriptor to the exact debit payload a source co-signer has
+/// verified. The descriptor crosses a second JSON boundary and must not be allowed to declare a
+/// different amount/recipient/token while the real E-2 proof remains only inside `debit_payload`.
+pub fn verify_inter_channel_descriptor_matches_debit(
+    debit_payload: &InterChannelDebitPayload,
+    descriptor: &InterChannelTransferDescriptor,
+) -> WResult<()> {
+    let tx = &debit_payload.inter_channel_tx;
+    if descriptor.amount != debit_payload.amount {
+        return bail("descriptor amount differs from the E-2-proved debit amount");
+    }
+    if descriptor.destination_base_transfer_salt != tx.destination_base_transfer_salt {
+        return bail("descriptor destination base transfer salt differs from the signed debit");
+    }
+    if descriptor.inter_channel_tx.signing_digest() != tx.signing_digest() {
+        return bail("descriptor inter_channel_tx differs from the verified debit payload");
+    }
+    let receiver = tx
+        .receiver_deltas
+        .first()
+        .ok_or_else(|| WalletError("verified debit has no receiver delta".into()))?;
+    if descriptor.source_channel_id != tx.source_channel_id
+        || descriptor.destination_channel_id != tx.destination_channel_id
+        || descriptor.source_pk_g != tx.source_pk_g
+        || descriptor.receiver_pk_g != receiver.receiver_pk_g
+        || descriptor.sender_delta_ct != tx.sender_delta_ct
+        || descriptor.receiver_delta != receiver.amount
+        || descriptor.tx_hash != tx.tx_hash
+    {
+        return bail("descriptor convenience fields differ from the verified debit transaction");
+    }
+    let (canonical_tx_v2, canonical_root) =
+        verify_canonical_inter_channel_binding(tx, debit_payload.amount)?;
+    if descriptor.tx_v2 != canonical_tx_v2 || descriptor.tx_tree_root != canonical_root {
+        return bail("descriptor TxV2/H2 differs from the canonical verified debit binding");
+    }
+    Ok(())
+}
+
+/// Guard every outgoing base send against the persisted account witness. A channel debit is safe
+/// to co-sign only when its explicitly bound nonce is the base account's next nonce and that
+/// sent-tx Merkle slot is still empty.
+pub fn verify_base_nonce_available(
+    base_private: &crate::common::private_state::FullPrivateState,
+    send_nonce: u32,
+) -> WResult<()> {
+    let sent_len = base_private.sent_tx_tree.len();
+    if send_nonce != base_private.nonce {
+        return bail(format!(
+            "base send nonce divergence: channel proposes nonce {send_nonce}, base account next nonce is {}",
+            base_private.nonce
+        ));
+    }
+    if (send_nonce as usize) < sent_len {
+        let occupied = base_private.sent_tx_tree.get_leaf(send_nonce as u64);
+        return bail(format!(
+            "base send nonce slot {send_nonce} is already occupied (stored tx nonce {}, transfer root {})",
+            occupied.nonce, occupied.transfer_tree_root
+        ));
+    }
+    if sent_len != base_private.nonce as usize {
+        return bail(format!(
+            "base private witness is internally inconsistent: sent-tx tree length {sent_len}, next nonce {}",
+            base_private.nonce
+        ));
+    }
+    Ok(())
+}
+
+/// Compatibility name retained for callers/tests written before all inter-channel sends adopted
+/// the same persisted-base-nonce gate.
+pub fn verify_burn_nonce_available(
+    base_private: &crate::common::private_state::FullPrivateState,
+    burn_nonce: u32,
+) -> WResult<()> {
+    verify_base_nonce_available(base_private, burn_nonce)
+}
+
 /// The L1 [`Withdrawal`] leaf a burn's `single_withdrawal` proof WILL carry — recipient, token
 /// index, amount, **nullifier** and aux_data.
 ///
@@ -2603,10 +3113,7 @@ pub fn burn_withdrawal_leaf(
     aux_data: Bytes32,
     tx_nonce: u32,
 ) -> WResult<crate::common::withdrawal::Withdrawal> {
-    use crate::{
-        circuits::balance::common::recipient::extract_address_from_recipient,
-        common::transfer::SettledTransfer,
-    };
+    use crate::common::transfer::SettledTransfer;
 
     let transfer = inter_channel_base_transfer(burn_recipient_pk_g, token_index, amount, aux_data);
     let recipient = extract_address_from_recipient(transfer.recipient).map_err(|e| {
@@ -2672,6 +3179,10 @@ pub fn verify_inter_channel_send_transition(
     if debit_payload.record.signing_digest() != trusted_record.signing_digest() {
         return bail("payload record is not the channel's registered (trusted) record");
     }
+    // F-AUX-1: do this before the expensive E-2 verification.  The signed channel debit, base
+    // Transfer commitment, TxV2 leaf and signed H2 must be one deterministically reconstructed
+    // transaction, not four independently plausible values.
+    verify_canonical_inter_channel_binding(&debit_payload.inter_channel_tx, debit_payload.amount)?;
     // Authenticate the payload member set against the trusted record before trusting its Regev
     // keys. The member list covers the ACTIVE region (members + delegates) bijectively.
     let active = trusted_record.member_count as usize + trusted_record.delegate_count as usize;
@@ -2729,10 +3240,11 @@ pub fn verify_inter_channel_send_transition(
 /// LEG B — build the inter-channel credit on the DESTINATION channel.
 ///
 /// Applies `InterChannelFundImportUpdateWitness` (ChannelFund += amount; unallocated += amount;
-/// settled_tx_chain pushes `tx_hash`) then `ReceiverBundleApplyUpdateWitness` (recipient slot +=
-/// delta; unallocated -= amount; settled_tx_chain pushes the same tx leaf as A). The building
-/// member self-signs both states (if it is a co-signing member); both witnesses are CALLED as
-/// self-checks. `b_snapshot` is channel B; `keys` belong to a channel-B member (used for the
+/// settled_tx_chain pushes the same tx leaf as A) then `ReceiverBundleApplyUpdateWitness`
+/// (recipient slot += delta; unallocated -= amount; settle chain unchanged). One logical base
+/// transfer is folded exactly once, matching `BalanceProcessor::prove_receive_transfer`. The
+/// building member self-signs both states (if it is a co-signing member); both witnesses are CALLED
+/// as self-checks. `b_snapshot` is channel B; `keys` belong to a channel-B member (used for the
 /// recipient decryption check when it owns the slot).
 ///
 /// SECURITY: this builder's per-channel witness self-checks verify B-LOCAL invariants (fund/unalloc
@@ -2776,7 +3288,7 @@ pub fn build_inter_channel_credit(
         proof: inter_channel_tx.transport_proof.clone(),
     };
 
-    // ---- Fund import: ChannelFund += amount; unallocated += amount; chain pushes tx_hash. ----
+    // ---- Fund import: ChannelFund += amount; unallocated += amount; chain pushes tx_leaf. ----
     let import_nullifier =
         advance_nullifier(b_prev.shared_native_nullifier_root, descriptor.tx_hash);
     // Stage 3: the fund import is a settle advancement on the RECEIVING channel — the accumulator
@@ -2793,6 +3305,9 @@ pub fn build_inter_channel_credit(
         import_accumulator_root,
     )
     .map_err(|e| WalletError(format!("fund import accumulator push: {e:?}")))?;
+    let incoming_settle_tag = inter_channel_tx
+        .tx_leaf_hash()
+        .map_err(|e| WalletError(format!("fund import tx_leaf_hash: {e}")))?;
     let mut fund_import_state = ChannelState {
         epoch: b_prev.epoch + 1,
         small_block_number: b_prev.small_block_number + 1,
@@ -2809,7 +3324,7 @@ pub fn build_inter_channel_credit(
         balance_state: BalanceState {
             settled_tx_chain: settled_tx_chain_push(
                 b_prev.balance_state.settled_tx_chain,
-                inter_channel_tx.tx_hash,
+                incoming_settle_tag,
             ),
             // Stage 3: the accumulator advances by inserting `tx_hash` at the prev tree length.
             settled_tx_accumulator_root: import_accumulator_root,
@@ -2842,7 +3357,7 @@ pub fn build_inter_channel_credit(
         .verify(&WalletStructuralTransport)
         .map_err(|e| WalletError(format!("fund import self-check failed: {e:?}")))?;
 
-    // ---- Bundle apply: recipient slot += delta; unallocated -= amount; chain pushes tx leaf. ----
+    // ---- Bundle apply: recipient slot += delta; unallocated -= amount; chain unchanged. ----
     let receiver_delta = &inter_channel_tx.receiver_deltas[0];
     // TM-6: the inbound credit lands at the REGISTRY-RESOLVED local position of the recipient
     // row (the same slot the fund grew at); other positions ride the row clone unchanged.
@@ -2855,33 +3370,16 @@ pub fn build_inter_channel_credit(
     bundle_enc[recipient_slot][token_slot] = recipient_after;
     let mut bundle_pending = fund_import_state.balance_state.pending_adds.clone();
     bundle_pending[recipient_slot][token_slot] += 1;
-    // The bundle apply chains the SAME tx leaf the sender chained into A (detail2 §C-6; the witness
-    // independently recomputes it via `inter_channel_tx.tx_leaf_hash()` — multi-layer F3-A
-    // defense).
-    let bundle_leaf = inter_channel_tx
-        .tx_leaf_hash()
-        .map_err(|e| WalletError(format!("bundle tx_leaf_hash: {e}")))?;
-    // Stage 3 (uniform-leaf decision): the bundle apply is a second settle advancement; the
-    // accumulator absorbs `tx_hash` again here (the CHAIN pushes `bundle_leaf` = tx_leaf, but the
-    // accumulator stores `tx_hash` UNIFORMLY at every advancement). Advance the import-time tree.
-    let mut bundle_accumulator = import_accumulator.clone();
-    bundle_accumulator.push(inter_channel_tx.tx_hash);
-    let bundle_accumulator_root = Bytes32::from(bundle_accumulator.get_root());
-    require_accumulator_push(
-        &import_accumulator,
-        inter_channel_tx.tx_hash,
-        bundle_accumulator_root,
-    )
-    .map_err(|e| WalletError(format!("bundle apply accumulator push: {e:?}")))?;
+    // The import already chained the SAME tx leaf the sender chained into A. The bundle is the
+    // accounting half of that one receive and must not fold a second logical settlement.
+    let bundle_accumulator = import_accumulator.clone();
+    let bundle_accumulator_root = import_accumulator_root;
     let mut bundle_apply_state = ChannelState {
         epoch: fund_import_state.epoch + 1,
         balance_state: BalanceState {
             enc_balances: bundle_enc,
-            settled_tx_chain: settled_tx_chain_push(
-                fund_import_state.balance_state.settled_tx_chain,
-                bundle_leaf,
-            ),
-            // Stage 3: advance the accumulator by inserting `tx_hash` again (uniform leaf).
+            settled_tx_chain: fund_import_state.balance_state.settled_tx_chain,
+            // The logical incoming transfer was inserted once by the import step.
             settled_tx_accumulator_root: bundle_accumulator_root,
             state_version: fund_import_state.balance_state.state_version + 1,
             pending_adds: bundle_pending,
@@ -3000,6 +3498,18 @@ pub fn verify_inter_channel_credit_transition(
         || a_signed_state.h2_tag != descriptor.tx_tree_root
     {
         return bail("invariant 5: tx_tree_root mismatch (small block / A h2_tag / descriptor)");
+    }
+
+    // F-AUX-1: independently rebuild the exact base Transfer and TxV2 from the channel debit.
+    // Equality with the descriptor closes the old gap where H2 could commit transfer Y while E-2
+    // and the channel fund movement debited transfer X.
+    let (canonical_tx_v2, canonical_tx_tree_root) =
+        verify_canonical_inter_channel_binding(inter_channel_tx, descriptor.amount)?;
+    if descriptor.tx_v2 != canonical_tx_v2 {
+        return bail("F-AUX-1: descriptor TxV2 is not the canonical channel-debit transfer");
+    }
+    if descriptor.tx_tree_root != canonical_tx_tree_root {
+        return bail("F-AUX-1: descriptor H2 is not the canonical TxV2 tree root");
     }
 
     // (2) Amount consistency: the descriptor amount must match the small-block-bound E-2 statement.
@@ -3124,6 +3634,104 @@ pub fn verify_inter_channel_credit_transition(
     Ok(())
 }
 
+/// Verify the complete two-state destination credit, including the cross-channel source gate and
+/// both destination-local state transitions. This is the production adoption gate used by the
+/// live balance service: accepting only the final bundle head is insufficient because an attacker
+/// could otherwise skip or substitute the fund-import state that performs the one canonical
+/// settle-chain fold.
+#[allow(clippy::too_many_arguments)]
+pub fn verify_inter_channel_credit_states(
+    b_prev: &ChannelState,
+    b_trusted_record: &ChannelRecord,
+    b_members: &[MemberInfo],
+    descriptor: &InterChannelTransferDescriptor,
+    a_signed_state: &ChannelState,
+    a_trusted_record: &ChannelRecord,
+    fund_import_state: &ChannelState,
+    bundle_apply_state: &ChannelState,
+    level: RegevSecurityLevel,
+) -> WResult<()> {
+    verify_inter_channel_credit_transition(
+        b_prev,
+        b_trusted_record,
+        descriptor,
+        a_signed_state,
+        a_trusted_record,
+        level,
+    )?;
+
+    let active = b_trusted_record.member_count as usize + b_trusted_record.delegate_count as usize;
+    if b_members.len() != active {
+        return bail(format!(
+            "destination member list has {} entries but active participant count is {active}",
+            b_members.len()
+        ));
+    }
+    let mut seen = [false; MAX_CHANNEL_MEMBERS];
+    for member in b_members {
+        check_slot(member.slot as usize, active)?;
+        if seen[member.slot as usize] {
+            return bail(format!("duplicate destination member slot {}", member.slot));
+        }
+        seen[member.slot as usize] = true;
+    }
+    let regev_pks = regev_pks_array(b_members);
+    if regev_pk_root(&regev_pks) != b_trusted_record.regev_pk_root
+        || member_pubkeys_root(b_trusted_record, b_members)? != b_trusted_record.member_pubkeys_root
+    {
+        return bail("destination member set is not anchored to the trusted record");
+    }
+    verify_all_signatures(b_trusted_record, &[], fund_import_state).map_err(|e| {
+        WalletError(format!(
+            "destination fund-import state is not N-of-N signed: {e}"
+        ))
+    })?;
+    verify_all_signatures(b_trusted_record, &[], bundle_apply_state).map_err(|e| {
+        WalletError(format!(
+            "destination bundle-apply state is not N-of-N signed: {e}"
+        ))
+    })?;
+
+    let transport = ChannelProofEnvelope {
+        role: TransitionProofRole::IntmaxTransport,
+        backend: ProofBackend::Plonky2,
+        proof: descriptor.inter_channel_tx.transport_proof.clone(),
+    };
+    InterChannelFundImportUpdateWitness {
+        source_channel_record: a_trusted_record.clone(),
+        receiver_channel_record: b_trusted_record.clone(),
+        prev_state: b_prev.clone(),
+        next_state: fund_import_state.clone(),
+        inter_channel_tx: descriptor.inter_channel_tx.clone(),
+        amount: descriptor.amount,
+        transport_proof: transport,
+    }
+    .verify(&WalletStructuralTransport)
+    .map_err(|e| WalletError(format!("destination fund-import transition invalid: {e:?}")))?;
+
+    ReceiverBundleApplyUpdateWitness {
+        receiver_channel_record: b_trusted_record.clone(),
+        regev_pks,
+        source_sender_pk: descriptor.source_pk.clone(),
+        sender_before_ct: descriptor.sender_before_ct.clone(),
+        sender_after_ct: descriptor.sender_after_ct.clone(),
+        prev_state: fund_import_state.clone(),
+        next_state: bundle_apply_state.clone(),
+        inter_channel_tx: descriptor.inter_channel_tx.clone(),
+        amount: descriptor.amount,
+        recipient_index: descriptor.recipient_slot as usize,
+        recipient_sk: None,
+        expected_amount: None,
+    }
+    .verify(&RealRegevProofVerifier { level })
+    .map_err(|e| {
+        WalletError(format!(
+            "destination bundle-apply transition invalid: {e:?}"
+        ))
+    })?;
+    Ok(())
+}
+
 // --- L1 deposit import (mid-channel top-up) ---
 
 pub struct BuiltL1DepositImport {
@@ -3224,23 +3832,15 @@ pub fn build_l1_deposit_import(
         .map_err(|e| WalletError(format!("l1 deposit fund import self-check failed: {e:?}")))?;
 
     // ---- Step 2: Bundle apply (shared deterministic step — see `l1_deposit_bundle_state`) ----
-    let mut bundle_accumulator = import_accumulator.clone();
-    bundle_accumulator.push(deposit_nullifier);
-    let bundle_accumulator_root = Bytes32::from(bundle_accumulator.get_root());
-    require_accumulator_push(
-        &import_accumulator,
-        deposit_nullifier,
-        bundle_accumulator_root,
-    )
-    .map_err(|e| WalletError(format!("l1 deposit bundle apply accumulator push: {e:?}")))?;
+    // One consumed L1 deposit is one settle-history/accumulator event. The import step already
+    // inserted it; the bundle only assigns the confirmed amount to a ciphertext slot.
+    let bundle_accumulator = import_accumulator.clone();
     let mut bundle_apply_state = l1_deposit_bundle_state(
         &fund_import_state,
         recipient_slot,
         token_slot,
         recipient_delta,
-        deposit_nullifier,
         amount_u64,
-        bundle_accumulator_root,
     )?;
     sign_member_if_present(keys, record, &mut bundle_apply_state)?;
 
@@ -3254,7 +3854,7 @@ pub fn build_l1_deposit_import(
 /// The CANONICAL deposit bundle-apply state (TM-7 leg b): starting from the verified
 /// post-import state, credit the depositor leaf at EXACTLY the registry-resolved
 /// `(recipient_slot, token_slot)` position (`+= recipient_delta`, `pending_adds += 1`),
-/// `unallocated -= amount`, chain pushes the deposit nullifier, `state_version`/`epoch` +1.
+/// `unallocated -= amount`, settle chain unchanged, `state_version`/`epoch` +1.
 /// Every other (row, token) position rides the clones bit-identical.
 ///
 /// SECURITY (TM-7 leg b, Phase 2b review MAJOR 1): this is the SINGLE definition of the bundle
@@ -3263,18 +3863,14 @@ pub fn build_l1_deposit_import(
 /// requires digest equality with the proposal — the `verify_token_register_transition`
 /// pattern). A proposer-supplied bundle state crediting any other (row, token) position, a
 /// doctored delta/amount, or any other field divergence therefore fails the gate.
-/// `bundle_accumulator_root` is taken as an input: the accumulator-push faithfulness is the
-/// caller's Stage-3 persisted-tree obligation (`require_accumulator_push`), exactly as on every
-/// other settle advancement — it is NOT re-derived here.
-#[allow(clippy::too_many_arguments)]
+/// The accumulator root is carried from the verified fund-import state; the bundle cannot replace
+/// it with a proposer-selected root.
 fn l1_deposit_bundle_state(
     fund_import_state: &ChannelState,
     recipient_slot: usize,
     token_slot: usize,
     recipient_delta: &RegevCiphertext,
-    deposit_nullifier: Bytes32,
     amount_u64: u64,
-    bundle_accumulator_root: Bytes32,
 ) -> WResult<ChannelState> {
     let recipient_after = add_ciphertexts(
         &fund_import_state.balance_state.enc_balances[recipient_slot][token_slot],
@@ -3285,16 +3881,14 @@ fn l1_deposit_bundle_state(
     bundle_enc[recipient_slot][token_slot] = recipient_after;
     let mut bundle_pending = fund_import_state.balance_state.pending_adds.clone();
     bundle_pending[recipient_slot][token_slot] += 1;
-    let bundle_leaf = deposit_nullifier;
     Ok(ChannelState {
         epoch: fund_import_state.epoch + 1,
         balance_state: BalanceState {
             enc_balances: bundle_enc,
-            settled_tx_chain: settled_tx_chain_push(
-                fund_import_state.balance_state.settled_tx_chain,
-                bundle_leaf,
-            ),
-            settled_tx_accumulator_root: bundle_accumulator_root,
+            settled_tx_chain: fund_import_state.balance_state.settled_tx_chain,
+            settled_tx_accumulator_root: fund_import_state
+                .balance_state
+                .settled_tx_accumulator_root,
             state_version: fund_import_state.balance_state.state_version + 1,
             pending_adds: bundle_pending,
             ..fund_import_state.balance_state.clone()
@@ -3326,9 +3920,9 @@ fn l1_deposit_bundle_state(
 ///
 /// `recipient_delta` is the co-signer's OWN derivation of the deposit's delta ciphertext (the
 /// CLI derives it from the shared deterministic seed) — never a wire-trusted copy; the digest
-/// equality binds the proposal to it. The bundle state's `settled_tx_accumulator_root` is taken
-/// from the PROPOSAL and its push-faithfulness remains the caller's Stage-3 persisted-tree
-/// obligation (`require_accumulator_push`), as on every settle advancement.
+/// equality binds the proposal to it. The bundle must retain the fund-import accumulator root;
+/// push-faithfulness remains the import builder's persisted-tree obligation, but bundle assignment
+/// cannot overwrite it.
 pub fn verify_l1_deposit_import_transition(
     prev: &ChannelState,
     record: &ChannelRecord,
@@ -3371,9 +3965,7 @@ pub fn verify_l1_deposit_import_transition(
         recipient_slot,
         token_slot,
         recipient_delta,
-        deposit_nullifier,
         amount_u64,
-        bundle_apply_state.balance_state.settled_tx_accumulator_root,
     )?;
     // `signing_digest()` covers every field except `member_signatures` (and is recomputed here,
     // so a doctored stored `digest` cannot mask a divergence).
@@ -3580,10 +4172,11 @@ fn source_record_placeholder(
 // SOUNDNESS IS ENFORCED IN-CIRCUIT (A-3 P2 threat model): H1/IMCH
 // recompute + bind, balance-proof channel_id/settled_tx_chain binding, the recursively verified
 // `FalconBatchAggCircuit` proof over the members' REAL Falcon signatures (message/count/pk-list
-// bound in-circuit; falcon-sig Phase 2 contract, batched-verification circuit), the member_set_commitment keccak, and the
-// active-bit decomposition. `ChannelCloseCircuit::prove` recomputes and overrides
-// `member_set_commitment`, so a tampered commitment is rejected. The Rust-side preconditions below
-// fail CLOSED before any (expensive) proving so a malformed input never produces a proof.
+// bound in-circuit; falcon-sig Phase 2 contract, batched-verification circuit), the
+// member_set_commitment keccak, and the active-bit decomposition. `ChannelCloseCircuit::prove`
+// recomputes and overrides `member_set_commitment`, so a tampered commitment is rejected. The
+// Rust-side preconditions below fail CLOSED before any (expensive) proving so a malformed input
+// never produces a proof.
 // ─────────────────────────────────────────────────────────────────────────────────────────────
 
 use crate::{
@@ -3598,8 +4191,11 @@ use crate::{
     },
 };
 
-/// Build the Falcon aggregation witness (`FalconAggWitness`) + per-member auth from the members' **DETACHED**
-/// cosignatures over `digest` (slot order; shared by the close and cancel-close provers).
+use crate::falcon_sig::agg::{AGG_LEVELS, falcon_agg_expected_public_inputs};
+
+/// Build the Falcon aggregation witness (`FalconAggWitness`) + per-member auth from the members'
+/// **DETACHED** cosignatures over `digest` (slot order; shared by the close and cancel-close
+/// provers).
 ///
 /// This is the coordinator gate of `doc/tasks/close-detached-signing-design.md` §3.5. The prover
 /// process never sees a secret key: `MemberSignature.signature` is the 1690-byte cosign transport
@@ -3719,12 +4315,183 @@ fn assert_record_state_member_count_agree(
     Ok(())
 }
 
-/// Process-built close-proving context: the `FalconBatchAggCircuit` (direct in-circuit verification of
-/// the N member Falcon signatures, falcon-sig Phase 2) and the `ChannelCloseCircuit` bound to the
-/// channel's balance verifier data. Each circuit is expensive to build, so construct ONE
+/// A reusable, self-verifying Falcon aggregate proof tied to one fully co-signed channel state.
+/// The proof bytes are independent of close/PW/cancel parameters: those consumers bind only the
+/// signed IMCH digest, signer count, and registered pk list exposed as aggregate public inputs.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct FalconAggregateProofArtifact {
+    pub format_version: u8,
+    pub state_digest: Bytes32,
+    pub member_count: u8,
+    pub member_pk_gs: Vec<Bytes32>,
+    pub proof: Vec<u8>,
+}
+
+impl FalconAggregateProofArtifact {
+    pub const FORMAT_VERSION: u8 = 1;
+    const MAX_BYTES: usize = 2 * 1024 * 1024;
+
+    pub fn to_bytes(&self) -> WResult<Vec<u8>> {
+        let bytes = bincode::serde::encode_to_vec(
+            self,
+            bincode::config::standard()
+                .with_fixed_int_encoding()
+                .with_little_endian(),
+        )
+        .map_err(|e| WalletError(format!("Falcon aggregate artifact encode failed: {e}")))?;
+        if bytes.len() > Self::MAX_BYTES {
+            return bail("Falcon aggregate artifact exceeds the 2 MiB limit");
+        }
+        Ok(bytes)
+    }
+
+    pub fn from_bytes(bytes: &[u8]) -> WResult<Self> {
+        if bytes.len() > Self::MAX_BYTES {
+            return bail("Falcon aggregate artifact exceeds the 2 MiB limit");
+        }
+        let (artifact, consumed) = bincode::serde::decode_from_slice::<Self, _>(
+            bytes,
+            bincode::config::standard()
+                .with_fixed_int_encoding()
+                .with_little_endian()
+                .with_limit::<{ FalconAggregateProofArtifact::MAX_BYTES }>(),
+        )
+        .map_err(|e| WalletError(format!("Falcon aggregate artifact decode failed: {e}")))?;
+        if consumed != bytes.len() {
+            return bail(format!(
+                "Falcon aggregate artifact has {} trailing bytes",
+                bytes.len() - consumed
+            ));
+        }
+        Ok(artifact)
+    }
+}
+
+/// Long-lived Falcon proving context. Clone is cheap and shares the same built circuit. A service
+/// should create one of these at startup, then generate an artifact exactly once whenever an
+/// N-of-N state becomes final; every settlement prover below can consume the same artifact.
+#[derive(Clone)]
+pub struct FalconProverContext {
+    agg: Arc<FalconBatchAggCircuit<F, C, D>>,
+}
+
+impl Default for FalconProverContext {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl FalconProverContext {
+    pub fn new() -> Self {
+        Self {
+            agg: Arc::new(FalconBatchAggCircuit::<F, C, D>::new()),
+        }
+    }
+
+    fn prove_detached(
+        &self,
+        record: &ChannelRecord,
+        state_digest: Bytes32,
+        member_sigs: &[MemberSignature],
+    ) -> WResult<FalconAggregateProofArtifact> {
+        let (pk_gs, witness) =
+            falcon_member_auth_from_signatures(record, member_sigs, state_digest)?;
+        let proof = self
+            .agg
+            .prove(&witness)
+            .map_err(|e| WalletError(format!("Falcon signature aggregation failed: {e:?}")))?;
+        self.agg.data.verify(proof.clone()).map_err(|e| {
+            WalletError(format!("Falcon aggregate self-verification failed: {e:?}"))
+        })?;
+        Ok(FalconAggregateProofArtifact {
+            format_version: FalconAggregateProofArtifact::FORMAT_VERSION,
+            state_digest,
+            member_count: record.member_count,
+            member_pk_gs: pk_gs,
+            proof: proof.to_bytes(),
+        })
+    }
+
+    /// Generate the cache artifact at the N-of-N state-finalization boundary.
+    pub fn prove_finalized_state(
+        &self,
+        record: &ChannelRecord,
+        state: &ChannelState,
+    ) -> WResult<FalconAggregateProofArtifact> {
+        assert_record_state_member_count_agree("Falcon aggregate", record, state)?;
+        if state.digest != state.signing_digest() {
+            return bail(
+                "Falcon aggregate: state digest does not match the recomputed IMCH digest",
+            );
+        }
+        self.prove_detached(record, state.digest, &state.member_signatures)
+    }
+
+    fn proof_from_artifact(
+        &self,
+        record: &ChannelRecord,
+        state_digest: Bytes32,
+        artifact: &FalconAggregateProofArtifact,
+    ) -> WResult<ProofWithPublicInputs<F, C, D>> {
+        if artifact.format_version != FalconAggregateProofArtifact::FORMAT_VERSION {
+            return bail(format!(
+                "unsupported Falcon aggregate artifact version {}",
+                artifact.format_version
+            ));
+        }
+        let count = record.member_count as usize;
+        let expected_pks = &record.member_pk_gs[..count];
+        if artifact.state_digest != state_digest
+            || artifact.member_count != record.member_count
+            || artifact.member_pk_gs.as_slice() != expected_pks
+        {
+            return bail("Falcon aggregate artifact metadata does not match this state/member set");
+        }
+        let proof = ProofWithPublicInputs::<F, C, D>::from_bytes(
+            artifact.proof.clone(),
+            &self.agg.data.common,
+        )
+        .map_err(|e| WalletError(format!("Falcon aggregate proof decode failed: {e}")))?;
+        let expected =
+            falcon_agg_expected_public_inputs::<F>(AGG_LEVELS, state_digest, expected_pks);
+        if proof.public_inputs != expected {
+            return bail("Falcon aggregate proof public inputs do not match this state/member set");
+        }
+        self.agg
+            .data
+            .verify(proof.clone())
+            .map_err(|e| WalletError(format!("cached Falcon aggregate proof rejected: {e:?}")))?;
+        Ok(proof)
+    }
+
+    /// Fully verify a persisted artifact against a finalized state. Useful at cache-load and
+    /// service-start boundaries; consumers call the same check again before recursive proving.
+    pub fn verify_finalized_state_artifact(
+        &self,
+        record: &ChannelRecord,
+        state: &ChannelState,
+        artifact: &FalconAggregateProofArtifact,
+    ) -> WResult<()> {
+        assert_record_state_member_count_agree("Falcon aggregate cache", record, state)?;
+        if state.digest != state.signing_digest() {
+            return bail("Falcon aggregate cache: finalized state digest is inconsistent");
+        }
+        self.proof_from_artifact(record, state.digest, artifact)
+            .map(|_| ())
+    }
+
+    pub fn verifier_data(&self) -> VerifierCircuitData<F, C, D> {
+        self.agg.verifier_data()
+    }
+}
+
+/// Process-built close-proving context: the `FalconBatchAggCircuit` (direct in-circuit verification
+/// of the N member Falcon signatures, falcon-sig Phase 2) and the `ChannelCloseCircuit` bound to
+/// the channel's balance verifier data. Each circuit is expensive to build, so construct ONE
 /// `CloseProver` per process and reuse it.
 pub struct CloseProver {
-    agg: FalconBatchAggCircuit<F, C, D>,
+    falcon: FalconProverContext,
     close_circuit: ChannelCloseCircuit<F, C, D>,
 }
 
@@ -3732,16 +4499,28 @@ impl CloseProver {
     /// Build the close-proving circuits. `balance_vd` is the channel's base-layer balance verifier
     /// data (the same value cached in `balance_vd.bin` / produced by the `BalanceProcessor`).
     pub fn new(balance_vd: &VerifierCircuitData<F, C, D>) -> Self {
-        let agg = FalconBatchAggCircuit::<F, C, D>::new();
-        let close_circuit = ChannelCloseCircuit::<F, C, D>::new(balance_vd, &agg.verifier_data());
-        Self { agg, close_circuit }
+        Self::with_falcon_context(balance_vd, FalconProverContext::new())
+    }
+
+    /// Build only the close circuit while sharing an already-built Falcon circuit with the other
+    /// exit provers and the state-finalization artifact producer.
+    pub fn with_falcon_context(
+        balance_vd: &VerifierCircuitData<F, C, D>,
+        falcon: FalconProverContext,
+    ) -> Self {
+        let close_circuit =
+            ChannelCloseCircuit::<F, C, D>::new(balance_vd, &falcon.verifier_data());
+        Self {
+            falcon,
+            close_circuit,
+        }
     }
 
     /// Build the full close witness from the wallet's signed final `ChannelState`, the channel's
     /// AUTHENTICATED `ChannelRecord`, the N ACTIVE members' **DETACHED** cosignatures over the IMCH
     /// digest (slot order), and the channel's base-layer balance proof. The signatures are verified
-    /// in-circuit by ONE `FalconBatchAggCircuit` proof whose message/count/pk-list PIs the close circuit
-    /// binds.
+    /// in-circuit by ONE `FalconBatchAggCircuit` proof whose message/count/pk-list PIs the close
+    /// circuit binds.
     ///
     /// **THIS PROVER HOLDS NO KEY.** That is the point
     /// (`doc/tasks/close-detached-signing-design.md`, Option A). The signatures it needs
@@ -3779,6 +4558,34 @@ impl CloseProver {
         record: &ChannelRecord,
         state: &ChannelState,
         member_sigs: &[MemberSignature],
+        balance_proof: ProofWithPublicInputs<F, C, D>,
+        close_nonce: u64,
+        burn_tx_hash: Bytes32,
+        snapshot_medium_block_number: u64,
+    ) -> WResult<ChannelCloseFullWitness<F, C, D>> {
+        let artifact = self
+            .falcon
+            .prove_detached(record, state.digest, member_sigs)
+            .map_err(|e| WalletError(format!("close: {}", e.0)))?;
+        self.build_full_witness_from_aggregate(
+            record,
+            state,
+            &artifact,
+            balance_proof,
+            close_nonce,
+            burn_tx_hash,
+            snapshot_medium_block_number,
+        )
+    }
+
+    /// Build a close witness using the aggregate artifact produced when this state reached N-of-N
+    /// finality. This is the normal settlement path: no Falcon proving is repeated here.
+    #[allow(clippy::too_many_arguments)]
+    pub fn build_full_witness_from_aggregate(
+        &self,
+        record: &ChannelRecord,
+        state: &ChannelState,
+        artifact: &FalconAggregateProofArtifact,
         balance_proof: ProofWithPublicInputs<F, C, D>,
         close_nonce: u64,
         burn_tx_hash: Bytes32,
@@ -3822,19 +4629,17 @@ impl CloseProver {
             close_intent,
         };
 
-        // Verify + decode the N DETACHED member cosignatures over the IMCH digest (slot order —
-        // the slot order IS the pk-list slot order the close circuit consumes) and prove the ONE
-        // aggregation circuit. `falcon_member_auth_from_signatures` fails closed, naming the slot,
-        // before any proving happens.
-        let digest = state.digest;
-        let (pk_gs, agg_witness) = falcon_member_auth_from_signatures(record, member_sigs, digest)
-            .map_err(|e| WalletError(format!("close: {}", e.0)))?;
-        let member_auth: Vec<MemberCloseAuth> =
-            pk_gs.iter().map(|&pk_g| MemberCloseAuth { pk_g }).collect();
+        // The artifact verifier checks metadata, exact aggregate public inputs, and the proof
+        // itself against this process's circuit before it can enter recursive close verification.
         let agg_proof = self
-            .agg
-            .prove(&agg_witness)
-            .map_err(|e| WalletError(format!("close signature aggregation failed: {e:?}")))?;
+            .falcon
+            .proof_from_artifact(record, state.digest, artifact)
+            .map_err(|e| WalletError(format!("close: {}", e.0)))?;
+        let member_auth: Vec<MemberCloseAuth> = artifact
+            .member_pk_gs
+            .iter()
+            .map(|&pk_g| MemberCloseAuth { pk_g })
+            .collect();
 
         Ok(ChannelCloseFullWitness {
             close,
@@ -3869,6 +4674,10 @@ impl CloseProver {
     /// Verifier data for the close circuit (so a caller can verify a close proof locally).
     pub fn close_vd(&self) -> VerifierCircuitData<F, C, D> {
         self.close_circuit.data.verifier_data()
+    }
+
+    pub fn falcon_context(&self) -> &FalconProverContext {
+        &self.falcon
     }
 }
 
@@ -3990,8 +4799,6 @@ impl WithdrawalClaimProver {
                 "withdrawal claim: slot-balance decryption failed: {e:?}"
             ))
         })?;
-        let claim_proof = prove_withdraw_claim(level, user_pk, regev_sk, &ct, amount)
-            .map_err(|e| WalletError(format!("withdrawal claim: E-3 proof failed: {e:?}")))?;
         let close_intent_digest = close_intent.signing_digest();
         let member = ChannelMember {
             pk_g: member_pk_g,
@@ -4012,7 +4819,10 @@ impl WithdrawalClaimProver {
                 slot_regev_pk_digest,
                 token_slot,
             ),
-            claim_proof,
+            // The final Plonky2 circuit directly proves this same decryption relation. Keeping an
+            // additional E-3 STARK here created and verified ~223 KB only to discard it before
+            // the final witness; the dedicated PI builder below deliberately skips that duplicate.
+            claim_proof: Vec::new(),
         };
         let native = WithdrawalClaimWitness {
             close_intent: close_intent.clone(),
@@ -4024,11 +4834,13 @@ impl WithdrawalClaimProver {
             user_pk: user_pk.clone(),
             amount,
         };
-        let public_inputs = native.to_public_inputs(level).map_err(|e| {
-            WalletError(format!(
-                "withdrawal claim: public-input build failed: {e:?}"
-            ))
-        })?;
+        let public_inputs = native
+            .to_public_inputs_for_in_circuit_decryption(level)
+            .map_err(|e| {
+                WalletError(format!(
+                    "withdrawal claim: public-input build failed: {e:?}"
+                ))
+            })?;
         // H1 Poseidon-root form: the slot tree + the claimant's inclusion proof.
         let slot_tree = final_balance_state.slot_tree();
         Ok(WithdrawalClaimFullWitness {
@@ -4095,7 +4907,7 @@ use crate::circuits::channel::{
 /// Process-built cancel-close proving context (the `FalconBatchAggCircuit` + the
 /// `CancelCloseCircuit`).
 pub struct CancelCloseProver {
-    agg: FalconBatchAggCircuit<F, C, D>,
+    falcon: FalconProverContext,
     circuit: CancelCloseCircuit<F, C, D>,
 }
 
@@ -4107,9 +4919,12 @@ impl Default for CancelCloseProver {
 
 impl CancelCloseProver {
     pub fn new() -> Self {
-        let agg = FalconBatchAggCircuit::<F, C, D>::new();
-        let circuit = CancelCloseCircuit::<F, C, D>::new(&agg.verifier_data());
-        Self { agg, circuit }
+        Self::with_falcon_context(FalconProverContext::new())
+    }
+
+    pub fn with_falcon_context(falcon: FalconProverContext) -> Self {
+        let circuit = CancelCloseCircuit::<F, C, D>::new(&falcon.verifier_data());
+        Self { falcon, circuit }
     }
 
     /// Build the cancel-close full witness: the REVIVED (later) signed state + the pending close
@@ -4131,6 +4946,22 @@ impl CancelCloseProver {
         record: &ChannelRecord,
         revived_state: &ChannelState,
         member_sigs: &[MemberSignature],
+        close_intent: &CloseIntent,
+    ) -> WResult<CancelCloseFullWitness<F, C, D>> {
+        let artifact = self
+            .falcon
+            .prove_detached(record, revived_state.digest, member_sigs)
+            .map_err(|e| WalletError(format!("cancel-close: {}", e.0)))?;
+        self.build_full_witness_from_aggregate(record, revived_state, &artifact, close_intent)
+    }
+
+    /// Reuse the aggregate proof cached for the revived N-of-N state. A cancel no longer pays the
+    /// Falcon proving cost while racing the challenge window.
+    pub fn build_full_witness_from_aggregate(
+        &self,
+        record: &ChannelRecord,
+        revived_state: &ChannelState,
+        artifact: &FalconAggregateProofArtifact,
         close_intent: &CloseIntent,
     ) -> WResult<CancelCloseFullWitness<F, C, D>> {
         let member_count = revived_state.balance_state.member_count as usize;
@@ -4161,19 +4992,15 @@ impl CancelCloseProver {
             close_intent: close_intent.clone(),
         };
 
-        // Verify + decode the N DETACHED cosignatures over the REVIVED IMCH digest (slot order)
-        // and prove the ONE aggregation circuit. Fails closed, naming the slot, before any proving.
-        let digest = revived_state.digest;
-        let (pk_gs, agg_witness) = falcon_member_auth_from_signatures(record, member_sigs, digest)
+        let agg_proof = self
+            .falcon
+            .proof_from_artifact(record, revived_state.digest, artifact)
             .map_err(|e| WalletError(format!("cancel-close: {}", e.0)))?;
-        let member_auth: Vec<MemberCancelAuth> = pk_gs
+        let member_auth: Vec<MemberCancelAuth> = artifact
+            .member_pk_gs
             .iter()
             .map(|&pk_g| MemberCancelAuth { pk_g })
             .collect();
-        let agg_proof = self
-            .agg
-            .prove(&agg_witness)
-            .map_err(|e| WalletError(format!("cancel signature aggregation failed: {e:?}")))?;
 
         Ok(CancelCloseFullWitness {
             cancel,
@@ -4200,6 +5027,59 @@ impl CancelCloseProver {
     /// Verifier data for the cancel-close circuit (local verification).
     pub fn vd(&self) -> VerifierCircuitData<F, C, D> {
         self.circuit.data.verifier_data()
+    }
+
+    pub fn falcon_context(&self) -> &FalconProverContext {
+        &self.falcon
+    }
+}
+
+/// Persistent owner for the settlement circuits used by close/PW, withdrawal claim and cancel.
+///
+/// The old CLI constructors remain for compatibility, but a production prover service should own
+/// one of these for its lifetime. Each circuit is built lazily on first use and then retained;
+/// close and cancel also share the single Falcon circuit used by state-finalization aggregation.
+/// A context is scoped to one balance verifier data instance (one rollup deployment).
+pub struct SettlementProverContext {
+    falcon: FalconProverContext,
+    close: OnceLock<CloseProver>,
+    withdrawal_claim: OnceLock<WithdrawalClaimProver>,
+    cancel_close: OnceLock<CancelCloseProver>,
+}
+
+impl Default for SettlementProverContext {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl SettlementProverContext {
+    pub fn new() -> Self {
+        Self {
+            falcon: FalconProverContext::new(),
+            close: OnceLock::new(),
+            withdrawal_claim: OnceLock::new(),
+            cancel_close: OnceLock::new(),
+        }
+    }
+
+    pub fn falcon(&self) -> &FalconProverContext {
+        &self.falcon
+    }
+
+    pub fn close(&self, balance_vd: &VerifierCircuitData<F, C, D>) -> &CloseProver {
+        self.close
+            .get_or_init(|| CloseProver::with_falcon_context(balance_vd, self.falcon.clone()))
+    }
+
+    pub fn withdrawal_claim(&self) -> &WithdrawalClaimProver {
+        self.withdrawal_claim
+            .get_or_init(WithdrawalClaimProver::new)
+    }
+
+    pub fn cancel_close(&self) -> &CancelCloseProver {
+        self.cancel_close
+            .get_or_init(|| CancelCloseProver::with_falcon_context(self.falcon.clone()))
     }
 }
 
@@ -6497,6 +7377,56 @@ mod delegate_send_tests {
         }
     }
 
+    /// The persisted aggregate is a cache, never an authority: its metadata and proof are both
+    /// rechecked against the finalized state before close/PW/cancel may consume it.
+    #[cfg_attr(debug_assertions, ignore = "run with --release")]
+    #[test]
+    fn falcon_aggregate_artifact_roundtrips_and_rejects_tampering() {
+        let (record, state) = detached_fixture(210);
+        let build_started = std::time::Instant::now();
+        let ctx = FalconProverContext::new();
+        let build = build_started.elapsed();
+        let prove_started = std::time::Instant::now();
+        let artifact = ctx
+            .prove_finalized_state(&record, &state)
+            .expect("aggregate finalized state");
+        let prove = prove_started.elapsed();
+        let bytes = artifact.to_bytes().expect("encode artifact");
+        let decoded = FalconAggregateProofArtifact::from_bytes(&bytes).expect("decode artifact");
+        let reuse_started = std::time::Instant::now();
+        ctx.verify_finalized_state_artifact(&record, &state, &decoded)
+            .expect("cached proof verifies");
+        let reuse_verify = reuse_started.elapsed();
+        println!(
+            "falcon aggregate cache (3 members / fixed-16 circuit): build={build:?} \
+             prove={prove:?} reuse_verify={reuse_verify:?} artifact={} B proof={} B",
+            bytes.len(),
+            artifact.proof.len(),
+        );
+
+        let mut wrong_state = decoded.clone();
+        wrong_state.state_digest = Bytes32::default();
+        assert!(
+            ctx.verify_finalized_state_artifact(&record, &state, &wrong_state)
+                .is_err()
+        );
+
+        let mut wrong_pk = decoded.clone();
+        wrong_pk.member_pk_gs[0] = Bytes32::default();
+        assert!(
+            ctx.verify_finalized_state_artifact(&record, &state, &wrong_pk)
+                .is_err()
+        );
+
+        let mut corrupt_proof = decoded;
+        let mid = corrupt_proof.proof.len() / 2;
+        corrupt_proof.proof[mid] ^= 1;
+        assert!(
+            ctx.verify_finalized_state_artifact(&record, &state, &corrupt_proof)
+                .is_err()
+        );
+    }
+
     /// **THE PHASE-1 ACCEPTANCE GATE** (design §6 Phase 1, criterion 1a) and the empirical
     /// confirmation of C-1 — the premise the entire detached-signing design rests on.
     ///
@@ -7085,6 +8015,8 @@ mod delegate_send_tests {
             source_channel_id,
             destination_channel_id: closed_channel_id,
             token_index: claim_token_index,
+            destination_base_transfer_salt: Salt::default(),
+            base_nonce: 1,
             source_pk_g,
             seal: Bytes32::default(),
             tx_hash,
@@ -7937,6 +8869,16 @@ mod delegate_send_tests {
             gate(&double_credit).is_err(),
             "a double credit (doctored amount) must be rejected (TM-7 leg b)"
         );
+
+        // (d) The bundle cannot replace the accumulator root committed by the import step.
+        let mut wrong_accumulator = built.bundle_apply_state.clone();
+        wrong_accumulator.balance_state.settled_tx_accumulator_root =
+            Bytes32::from_u32_slice(&[0xacc0; 8]).unwrap();
+        let wrong_accumulator = wrong_accumulator.with_computed_digest();
+        assert!(
+            gate(&wrong_accumulator).is_err(),
+            "bundle apply must retain the fund-import accumulator root"
+        );
     }
 
     /// TM-14 / §M-2 invariant, per token: for K = 1 the batch fold is FIELD-IDENTICAL (same
@@ -8210,6 +9152,7 @@ mod delegate_send_tests {
                 0,
                 dest_keys.regev_pk.clone(),
                 dest_keys.pk_g(),
+                Salt::default(),
                 77,
                 5,
                 40,
@@ -8222,7 +9165,9 @@ mod delegate_send_tests {
             "an unregistered base token_index must be refused (TM-6)"
         );
 
-        let built = build_inter_channel_send_token(
+        // The base cursor is zero even though this transition's channel small-block number is one.
+        // That is the normal post-setup shape and proves the two counters are independent.
+        let built = build_inter_channel_send_token_at_base_nonce(
             &keys[0],
             &snapshot,
             0,
@@ -8230,7 +9175,9 @@ mod delegate_send_tests {
             0,
             dest_keys.regev_pk.clone(),
             dest_keys.pk_g(),
+            Salt::default(),
             T1_INDEX,
+            0,
             5,
             40,
             &w1[0],
@@ -8253,9 +9200,28 @@ mod delegate_send_tests {
             built.transfer_descriptor.inter_channel_tx.token_index,
             T1_INDEX
         );
+        assert_eq!(built.transfer_descriptor.inter_channel_tx.base_nonce, 0);
+        assert_eq!(built.transfer_descriptor.tx_v2.nonce, 0);
+        assert_eq!(
+            built
+                .transfer_descriptor
+                .inter_channel_tx
+                .signed_small_block
+                .message
+                .small_block_number,
+            1
+        );
         // The co-signer gate accepts the built payload (Phase 2b general resolution).
         verify_inter_channel_send_transition(&snapshot.state, &record, &built.debit_payload, LEVEL)
             .expect("token-1 C2C debit passes the co-signer gate");
+
+        let mut nonce_tamper = built.transfer_descriptor.clone();
+        nonce_tamper.inter_channel_tx.base_nonce = 1;
+        assert!(
+            verify_inter_channel_descriptor_matches_debit(&built.debit_payload, &nonce_tamper)
+                .is_err(),
+            "IMI3 must bind the explicit base nonce"
+        );
     }
 
     /// Phase 6 (Design B): a REAL inter-channel send produces a small block carrying the channel's
@@ -8266,8 +9232,8 @@ mod delegate_send_tests {
     ///   non-signatures, never anything that could pass an authenticating path;
     /// - with only the sender's signature (N-1 of N), installing is REFUSED — the documented
     ///   posture that block production is blockable by a single member;
-    /// - once every member has co-signed, the installed blobs are the members' own REAL
-    ///   signatures, byte-for-byte the ones on the co-signed state;
+    /// - once every member has co-signed, the installed blobs are the members' own REAL signatures,
+    ///   byte-for-byte the ones on the co-signed state;
     /// - the load-bearing equality is enforced: a block whose `tx_tree_root` is not the signed
     ///   state's `h2_tag` is refused, so the members' signatures cannot be replayed onto a
     ///   different block. This is the wallet-side half of the Phase-3 in-circuit binding.
@@ -8297,6 +9263,7 @@ mod delegate_send_tests {
             0,
             dest_keys.regev_pk.clone(),
             dest_keys.pk_g(),
+            Salt::default(),
             T1_INDEX,
             5,
             40,
@@ -8398,11 +9365,30 @@ mod delegate_send_tests {
 mod partial_withdrawal_tests {
     use super::*;
     use crate::{
+        circuits::balance::common::recipient::calculate_recipient_from_address,
         common::withdrawal::Withdrawal,
         ethereum_types::{
             address::Address, bytes32::Bytes32, u32limb_trait::U32LimbTrait, u256::U256,
         },
     };
+
+    #[test]
+    fn burn_leaf_rejects_noncanonical_address_padding() {
+        let address = Address::from_u32_slice(&[1, 2, 3, 4, 5]).unwrap();
+        let mut bytes = calculate_recipient_from_address(address).to_bytes_be();
+        bytes[5] ^= 1;
+        let malformed = Bytes32::from_bytes_be(&bytes).unwrap();
+        let error = burn_withdrawal_leaf(
+            ChannelId::new(41).unwrap(),
+            malformed,
+            0,
+            5,
+            Bytes32::from_u32_slice(&[9; 8]).unwrap(),
+            0,
+        )
+        .expect_err("non-zero ADDRESS_TAG padding must not produce an L1 withdrawal leaf");
+        assert!(error.0.contains("not an ADDRESS_TAG L1 recipient"));
+    }
 
     #[test]
     fn auth_digest_deterministic() {

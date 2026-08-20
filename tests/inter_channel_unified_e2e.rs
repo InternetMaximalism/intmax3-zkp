@@ -43,7 +43,6 @@ use intmax3_zkp::{
         channel_id::ChannelId,
         deposit::Deposit,
         salt::Salt,
-        transfer::Transfer,
         trees::{transfer_tree::TransferTree, tx_v2_tree::TxV2Tree},
         tx::{TxClass, TxV2},
         u63::BlockNumber,
@@ -57,8 +56,8 @@ use intmax3_zkp::{
     utils::poseidon_hash_out::PoseidonHashOut,
     wallet_core::{
         ChannelBalanceAttestation, MemberInfo, MemberKeys, add_signature,
-        assemble_genesis_state_backed, build_record, sign_state, sign_state_if_backed,
-        verify_all_signatures, verify_channel_backing,
+        assemble_genesis_state_backed, build_record, inter_channel_base_transfer, sign_state,
+        sign_state_if_backed, verify_all_signatures, verify_channel_backing,
     },
 };
 use plonky2::{field::goldilocks_field::GoldilocksField, plonk::config::PoseidonGoldilocksConfig};
@@ -86,8 +85,10 @@ impl ChannelProofVerifier for StructuralTransport {
         p: &ChannelProofEnvelope,
         _: &ChannelStateUpdatePublicInputs,
     ) -> Result<(), ChannelStateUpdateError> {
-        if p.proof.is_empty() {
-            return Err(ChannelStateUpdateError::ProofVerification("empty".into()));
+        if !p.proof.is_empty() {
+            return Err(ChannelStateUpdateError::ProofVerification(
+                "retired transport must be empty".into(),
+            ));
         }
         Ok(())
     }
@@ -381,13 +382,9 @@ fn unified_inter_channel_transfer_e2e() {
     );
 
     // The inter-channel tx's small block carries the channel's own 1-tx TxV2 tree (detail2 §A-2).
+    let base_transfer = inter_channel_base_transfer(a_keys[1].pk_g(), 0, AMT, tx_leaf);
     let mut tt = TransferTree::init();
-    tt.push(Transfer {
-        recipient: Bytes32::rand(&mut brng),
-        token_index: 0,
-        amount: U256::from(AMT as u32),
-        aux_data: Bytes32::default(),
-    });
+    tt.push(base_transfer.clone());
     let tx_v2 = TxV2 {
         tx_class: TxClass::UserTransfer,
         transfer_tree_root: tt.get_root(),
@@ -453,23 +450,25 @@ fn unified_inter_channel_transfer_e2e() {
                 prev_small_block_root: Bytes32::default(),
                 tx_tree_root,
                 state_commitment_root: h1_prime,
-                medium_epoch_hint: 3,
+                medium_epoch_hint: 0,
                 close_freeze_nonce: 0,
             },
             signatures: structural_sigs(&a_record),
-            aggregated_signature_proof: vec![9, 9],
-            medium_block_number: 4,
-            confirmation_proof: vec![8, 8],
+            aggregated_signature_proof: vec![],
+            medium_block_number: 0,
+            confirmation_proof: vec![],
         },
         sender_delta_ct: sdelta.0.clone(),
         source_channel_id: a_id,
         token_index: 0,
+        base_nonce: 1,
+        destination_base_transfer_salt: intmax3_zkp::common::salt::Salt::default(),
         destination_channel_id: dest_id,
         source_pk_g: a_keys[0].pk_g(),
         seal: Bytes32::default(),
         tx_hash: inter_tx_hash,
-        intmax_transfer_commitment: Bytes32::default(),
-        recipient_memo: vec![1],
+        intmax_transfer_commitment: Bytes32::from(base_transfer.poseidon_hash()),
+        recipient_memo: vec![],
         receiver_deltas: vec![ReceiverBalanceDelta {
             receiver_pk_g: a_keys[1].pk_g(),
             amount: rdelta.0.clone(),
@@ -479,7 +478,7 @@ fn unified_inter_channel_transfer_e2e() {
             backend: ProofBackend::Plonky3,
             proof: e2,
         },
-        transport_proof: vec![7, 7, 7],
+        transport_proof: vec![],
     };
     for (slot, k) in a_keys.iter().enumerate() {
         let s = sign_state(k, slot as u8, &a_send).unwrap();
@@ -499,7 +498,7 @@ fn unified_inter_channel_transfer_e2e() {
         transport_proof: ChannelProofEnvelope {
             role: TransitionProofRole::IntmaxTransport,
             backend: ProofBackend::Plonky2,
-            proof: vec![7, 7, 7],
+            proof: vec![],
         },
     };
     let pis = icw

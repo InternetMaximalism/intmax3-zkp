@@ -333,6 +333,8 @@ mod tests {
             source_channel_id: ChannelId::new(5).unwrap(),
             destination_channel_id: ChannelId::new(7).unwrap(),
             token_index,
+            destination_base_transfer_salt: crate::common::salt::Salt::default(),
+            base_nonce: 1,
             source_pk_g: pubkey_hash(10),
             seal: Bytes32::default(),
             tx_hash: Bytes32::default(), // set to the real recompute below (TM-16)

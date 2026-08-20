@@ -15,26 +15,30 @@ use intmax3_zkp::{
             balance_processor::BalanceProcessor,
             common::recipient::calculate_recipient_from_user_id, spend_circuit::SpendCircuit,
         },
+        channel::close_pis::{CHANNEL_CLOSE_PUBLIC_INPUTS_LEN, ChannelClosePublicInputs},
         test_utils::{
-            balance_witness_generator::{BalanceWitnessGenerator, ReceiveDepositData},
+            balance_witness_generator::{BalanceWitnessGenerator, ReceiveDepositData, SendTxData},
             block_witness_generator::{BlockWitnessGenerator, BlockWitnessGeneratorHandle},
         },
     },
     common::{
         balance_state::{settled_tx_chain_push, tx_leaf_hash},
-        channel::ChannelState,
+        channel::{ChannelState, burn_descriptor},
         channel_id::ChannelId,
         deposit::Deposit,
         salt::Salt,
-        withdrawal::Withdrawal,
+        transfer::Transfer,
+        trees::{transfer_tree::TransferTree, tx_tree::TxTree, tx_v2_tree::TxV2Tree},
+        tx::{Tx, TxClass, TxV2},
     },
     ethereum_types::{address::Address, bytes32::Bytes32, u32limb_trait::U32LimbTrait, u256::U256},
     regev::{RegevCiphertext, RegevPk, RegevSecurityLevel, encrypt_amount},
+    utils::conversion::ToU64 as _,
     wallet_core::{
-        ChannelBalanceAttestation, MemberInfo, MemberKeys, add_signature,
+        ChannelBalanceAttestation, CloseProver, MemberInfo, MemberKeys, add_signature,
         assemble_genesis_state_backed, build_burn_send, build_record, burn_withdrawal_leaf,
-        partial_withdrawal_auth_digest, sign_state, sign_state_if_backed, verify_all_signatures,
-        verify_channel_backing,
+        inter_channel_base_transfer, partial_withdrawal_auth_digest, sign_state,
+        sign_state_if_backed, verify_all_signatures, verify_channel_backing,
     },
 };
 use plonky2::{
@@ -44,6 +48,7 @@ use plonky2::{
 use std::{
     path::PathBuf,
     process::{Command, Stdio},
+    time::Instant,
 };
 
 mod anvil_harness;
@@ -341,11 +346,80 @@ fn partial_withdrawal_e2e_anvil() {
             deposit_salt: salt,
         })
         .unwrap();
-    let proof = bp.prove_receive_deposit(&dw).unwrap();
-    bwg.commit_receive_deposit(&proof, &dw).unwrap();
+    let timer = Instant::now();
+    let deposit_proof = bp.prove_receive_deposit(&dw).unwrap();
+    eprintln!(
+        "[PW BENCH] balance receive-deposit prove={:?} proof={} bytes",
+        timer.elapsed(),
+        deposit_proof.to_bytes().len()
+    );
+    bwg.commit_receive_deposit(&deposit_proof, &dw).unwrap();
+
+    // Bootstrap nonce 0 with an actual zero-value base transaction. Channel burn TxV2 nonces are
+    // `post_small_block_number`, so the first burn is nonce 1; without this real sent-tx-tree step
+    // the base account remains at nonce 0 and P2-4 correctly refuses the burn as unprovable.
+    let bootstrap_transfer = Transfer::default();
+    let bootstrap_spend_witness = bwg.spend_witness(&[bootstrap_transfer.clone()]).unwrap();
+    let timer = Instant::now();
+    let bootstrap_spend_proof = spend.prove(&bootstrap_spend_witness).unwrap();
+    eprintln!(
+        "[PW BENCH] bootstrap spend prove={:?} proof={} bytes",
+        timer.elapsed(),
+        bootstrap_spend_proof.to_bytes().len()
+    );
+    let mut bootstrap_transfer_tree = TransferTree::init();
+    bootstrap_transfer_tree.push(bootstrap_transfer.clone());
+    let bootstrap_transfer_root = bootstrap_transfer_tree.get_root();
+    let bootstrap_transfer_proof = bootstrap_transfer_tree.prove(0);
+    let bootstrap_tx = Tx {
+        transfer_tree_root: bootstrap_transfer_root,
+        nonce: bwg.full_private_state.nonce,
+    };
+    let bootstrap_tx_v2 = TxV2 {
+        tx_class: TxClass::UserTransfer,
+        transfer_tree_root: bootstrap_transfer_root,
+        nonce: bootstrap_tx.nonce,
+        channel_action_root: Default::default(),
+    };
+    let mut bootstrap_tx_tree = TxTree::init();
+    bootstrap_tx_tree.update(chan_id.as_u64(), bootstrap_tx);
+    let bootstrap_tx_proof = bootstrap_tx_tree.prove(chan_id.as_u64());
+    let mut bootstrap_tx_v2_tree = TxV2Tree::init();
+    bootstrap_tx_v2_tree.update(chan_id.as_u64(), bootstrap_tx_v2);
+    let bootstrap_root: Bytes32 = bootstrap_tx_v2_tree.get_root().into();
+    let bootstrap_tx_v2_proof = bootstrap_tx_v2_tree.prove(chan_id.as_u64());
+    bwgen
+        .borrow_mut()
+        .add_block(chan_id.channel_id(), &[1], 0, bootstrap_root)
+        .unwrap();
+    let bootstrap_data = SendTxData {
+        spend_proof: bootstrap_spend_proof,
+        tx_tree_root: bootstrap_root,
+        tx: bootstrap_tx,
+        tx_merkle_proof: bootstrap_tx_proof,
+        tx_v2: Some(bootstrap_tx_v2),
+        tx_v2_merkle_proof: Some(bootstrap_tx_v2_proof),
+        transfer: bootstrap_transfer,
+        transfer_merkle_proof: bootstrap_transfer_proof,
+    };
+    let bootstrap_witness = bwg.send_tx_witness(&bootstrap_data).unwrap();
+    let timer = Instant::now();
+    let bootstrap_balance_proof = bp.prove_send_tx(&bootstrap_witness).unwrap();
+    eprintln!(
+        "[PW BENCH] bootstrap balance send-tx prove={:?} proof={} bytes",
+        timer.elapsed(),
+        bootstrap_balance_proof.to_bytes().len()
+    );
+    bwg.commit_send_tx(
+        &bootstrap_balance_proof,
+        &bootstrap_witness,
+        &bootstrap_spend_witness,
+    )
+    .unwrap();
+    assert_eq!(bwg.full_private_state.nonce, 1, "base nonce bootstrap");
     let chain = bwg.get_public_inputs().unwrap().settled_tx_chain;
     let att = ChannelBalanceAttestation {
-        balance_proof: proof.to_bytes(),
+        balance_proof: bootstrap_balance_proof.to_bytes(),
     };
 
     // Build genesis ciphertexts, retaining alice's witness (slot 0).
@@ -378,6 +452,7 @@ fn partial_withdrawal_e2e_anvil() {
         settled_tx_accumulator: intmax3_zkp::wallet_core::default_settled_tx_accumulator(),
     };
 
+    let timer = Instant::now();
     let built = build_burn_send(
         &keys[0],
         &snapshot,
@@ -391,6 +466,16 @@ fn partial_withdrawal_e2e_anvil() {
         &mut crng,
     )
     .expect("build_burn_send");
+    eprintln!(
+        "[PW BENCH] E-2 burn build+prove={:?} proof={} bytes",
+        timer.elapsed(),
+        built
+            .debit_payload
+            .inter_channel_tx
+            .channel_update_zkp
+            .proof
+            .len()
+    );
 
     // Co-sign the post-burn state.
     let mut next_state = built.debit_payload.proposed_next_state.clone();
@@ -418,12 +503,133 @@ fn partial_withdrawal_e2e_anvil() {
         desc.receiver_pk_g,
         desc.receiver_delta.digest(),
     );
-    let expected_chain = settled_tx_chain_push(genesis_chain, tx_leaf);
+    let burn_aux_data = burn_descriptor(
+        tx_leaf,
+        desc.receiver_pk_g,
+        desc.inter_channel_tx.token_index,
+        u256(burn_amount),
+    );
+    let expected_chain = settled_tx_chain_push(genesis_chain, burn_aux_data);
     assert_eq!(
         next_state.balance_state.settled_tx_chain, expected_chain,
-        "channel chain must be push(genesis, tx_leaf)"
+        "channel chain must be push(genesis, IMBD descriptor)"
     );
     eprintln!("[PW E2E] settled_tx_chain OK");
+
+    // Settle the exact burn transfer into the persisted base balance IVC head. This is the proof
+    // the close circuit recursively verifies; using the genesis attestation here would fail the
+    // finalSettledTxChain equality and was the hidden reason the old E2E used mock close limbs.
+    assert_eq!(
+        bwg.full_private_state.nonce, desc.tx_v2.nonce,
+        "P2-4: base next nonce and burn TxV2 nonce must be in lockstep"
+    );
+    let base_transfer = inter_channel_base_transfer(
+        desc.receiver_pk_g,
+        desc.inter_channel_tx.token_index,
+        burn_amount,
+        burn_aux_data,
+    );
+    let burn_spend_witness = bwg.spend_witness(&[base_transfer.clone()]).unwrap();
+    let timer = Instant::now();
+    let burn_spend_proof = spend.prove(&burn_spend_witness).unwrap();
+    eprintln!(
+        "[PW BENCH] burn spend prove={:?} proof={} bytes",
+        timer.elapsed(),
+        burn_spend_proof.to_bytes().len()
+    );
+    let mut burn_transfer_tree = TransferTree::init();
+    burn_transfer_tree.push(base_transfer.clone());
+    let burn_transfer_root = burn_transfer_tree.get_root();
+    let burn_transfer_proof = burn_transfer_tree.prove(0);
+    let burn_tx = Tx {
+        transfer_tree_root: burn_transfer_root,
+        nonce: desc.tx_v2.nonce,
+    };
+    assert_eq!(burn_tx.transfer_tree_root, desc.tx_v2.transfer_tree_root);
+    let mut burn_tx_tree = TxTree::init();
+    burn_tx_tree.update(chan_id.as_u64(), burn_tx);
+    let burn_tx_proof = burn_tx_tree.prove(chan_id.as_u64());
+    let mut burn_tx_v2_tree = TxV2Tree::init();
+    burn_tx_v2_tree.update(chan_id.as_u64(), desc.tx_v2);
+    let burn_root: Bytes32 = burn_tx_v2_tree.get_root().into();
+    assert_eq!(burn_root, desc.tx_tree_root, "canonical base H2");
+    let burn_tx_v2_proof = burn_tx_v2_tree.prove(chan_id.as_u64());
+    bwgen
+        .borrow_mut()
+        .add_block(chan_id.channel_id(), &[1], 0, burn_root)
+        .unwrap();
+    let burn_send_data = SendTxData {
+        spend_proof: burn_spend_proof,
+        tx_tree_root: burn_root,
+        tx: burn_tx,
+        tx_merkle_proof: burn_tx_proof,
+        tx_v2: Some(desc.tx_v2),
+        tx_v2_merkle_proof: Some(burn_tx_v2_proof),
+        transfer: base_transfer,
+        transfer_merkle_proof: burn_transfer_proof,
+    };
+    let burn_send_witness = bwg.send_tx_witness(&burn_send_data).unwrap();
+    let timer = Instant::now();
+    let live_balance_proof = bp.prove_send_tx(&burn_send_witness).unwrap();
+    eprintln!(
+        "[PW BENCH] burn balance send-tx prove={:?} proof={} bytes",
+        timer.elapsed(),
+        live_balance_proof.to_bytes().len()
+    );
+    bwg.commit_send_tx(&live_balance_proof, &burn_send_witness, &burn_spend_witness)
+        .unwrap();
+    assert_eq!(
+        bwg.get_public_inputs().unwrap().settled_tx_chain,
+        expected_chain,
+        "base balance IVC and N-of-N channel head must pin the same burn descriptor chain"
+    );
+
+    // P1: a real close proof and its real wrapped MLE/WHIR proof — no synthesized publicInputs.
+    let timer = Instant::now();
+    let close_prover = CloseProver::new(&balance_vd);
+    eprintln!(
+        "[PW BENCH] close circuit construction={:?}",
+        timer.elapsed()
+    );
+    let timer = Instant::now();
+    let close_witness = close_prover
+        .build_full_witness_from_signatures(
+            &record,
+            &next_state,
+            &next_state.member_signatures,
+            live_balance_proof,
+            1,
+            desc.tx_hash,
+            next_state.small_block_number,
+        )
+        .expect("real PW close witness");
+    eprintln!(
+        "[PW BENCH] close signature aggregation+witness={:?}",
+        timer.elapsed()
+    );
+    let timer = Instant::now();
+    let close_proof = close_prover
+        .prove(&close_witness)
+        .expect("real PW close proof");
+    eprintln!(
+        "[PW BENCH] close Plonky2 prove={:?} proof={} bytes",
+        timer.elapsed(),
+        close_proof.to_bytes().len()
+    );
+    let timer = Instant::now();
+    let close_mle = close_prover
+        .prove_mle(&close_proof)
+        .expect("real PW close MLE");
+    eprintln!(
+        "[PW BENCH] close wrap+MLE+self-verify={:?} JSON={} bytes",
+        timer.elapsed(),
+        close_mle.len()
+    );
+    let close_pis = ChannelClosePublicInputs::from_u64_slice(
+        &close_proof.public_inputs[..CHANNEL_CLOSE_PUBLIC_INPUTS_LEN].to_u64_vec(),
+    )
+    .expect("decode real close PIs");
+    std::fs::write(data_dir.join("pw_close_intent_mle.json"), close_mle).unwrap();
 
     // ── Phase E: Write pw_submit.json + on-chain settlement ─────────────────────────────────
     // The Withdrawal struct for authDigest computation.
@@ -439,7 +645,7 @@ fn partial_withdrawal_e2e_anvil() {
         desc.receiver_pk_g,
         desc.inter_channel_tx.token_index,
         burn_amount,
-        tx_leaf,
+        burn_aux_data,
         desc.tx_v2.nonce,
     )
     .expect("burn withdrawal leaf");
@@ -448,7 +654,7 @@ fn partial_withdrawal_e2e_anvil() {
         "the burn's baked ADDRESS_TAG recipient must recover the L1 address it was built for"
     );
     assert_eq!(withdrawal.amount, u256(burn_amount));
-    assert_eq!(withdrawal.aux_data, tx_leaf);
+    assert_eq!(withdrawal.aux_data, burn_aux_data);
     let rust_auth_digest = partial_withdrawal_auth_digest(&withdrawal);
     eprintln!("[PW E2E] Rust authDigest = {}", rust_auth_digest.to_hex());
 
@@ -456,21 +662,23 @@ fn partial_withdrawal_e2e_anvil() {
         let submit = serde_json::json!({
             "manager": manager,
             "verifier": verifier_addr,
-            // CloseIntent fields.
-            "close_nonce": 1u64,
-            "final_epoch": next_state.epoch,
-            "final_small_block_number": next_state.small_block_number,
-            "close_freeze_nonce": 0u64,
-            "final_channel_state_digest": next_state.digest.to_hex(),
-            "final_balance_state_h1": next_state.balance_state.h1().to_hex(),
-            "channel_fund_amount": post_fund,
-            "channel_fund_intmax_state_root": next_state.channel_fund.intmax_state_root.to_hex(),
-            "burn_tx_hash": Bytes32::default().to_hex(),
-            "close_withdrawal_digest": Bytes32::default().to_hex(),
-            "snapshot_medium_block_number": 0u64,
-            "final_state_version": next_state.balance_state.state_version,
-            "final_settled_tx_chain": next_state.balance_state.settled_tx_chain.to_hex(),
-            "final_settled_tx_acc_root": next_state.balance_state.settled_tx_accumulator_root.to_hex(),
+            // CloseIntent fields decoded from the REAL close proof public inputs.
+            "close_nonce": close_pis.close_nonce,
+            "final_epoch": close_pis.final_epoch,
+            "final_small_block_number": close_pis.final_small_block_number,
+            "close_freeze_nonce": close_pis.close_freeze_nonce,
+            "final_channel_state_digest": close_pis.final_channel_state_digest.to_hex(),
+            "final_balance_state_h1": close_pis.final_balance_state_h1.to_hex(),
+            "channel_fund_amounts": next_state.channel_fund.amounts.iter().map(|v| v.to_string()).collect::<Vec<_>>(),
+            "token_registry": next_state.balance_state.token_registry.to_vec(),
+            "token_count": next_state.balance_state.token_count,
+            "channel_fund_intmax_state_root": close_pis.channel_fund_intmax_state_root.to_hex(),
+            "burn_tx_hash": close_pis.burn_tx_hash.to_hex(),
+            "close_withdrawal_digest": close_pis.close_withdrawal_digest.to_hex(),
+            "snapshot_medium_block_number": close_pis.snapshot_medium_block_number,
+            "final_state_version": close_pis.final_state_version,
+            "final_settled_tx_chain": close_pis.final_settled_tx_chain.to_hex(),
+            "final_settled_tx_acc_root": close_pis.final_settled_tx_accumulator_root.to_hex(),
             // prevSettledTxChain (genesis chain before the burn push).
             "prev_settled_tx_chain": genesis_chain.to_hex(),
             // AuthorizedWithdrawal fields.
@@ -478,7 +686,8 @@ fn partial_withdrawal_e2e_anvil() {
             "withdrawal_token_index": withdrawal.token_index,
             "withdrawal_amount": burn_amount,
             "withdrawal_nullifier": withdrawal.nullifier.to_hex(),
-            "withdrawal_aux_data": tx_leaf.to_hex(),
+            "withdrawal_aux_data": burn_aux_data.to_hex(),
+            "burn_tx_leaf": tx_leaf.to_hex(),
         });
         std::fs::write(
             data_dir.join("pw_submit.json"),

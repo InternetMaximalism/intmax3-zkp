@@ -49,7 +49,7 @@ use intmax3_zkp::{
 };
 
 /// A representative burn, in the shape `build_burn_send_token` produces: an `ADDRESS_TAG` L1
-/// recipient, a nonzero `aux_data` (= the channel's tx leaf), and the source channel's id.
+/// recipient, a nonzero `aux_data` (= the IMBD burn descriptor), and the source channel's id.
 struct Burn {
     channel_id: ChannelId,
     recipient_pk_g: Bytes32,

@@ -842,6 +842,8 @@ pub mod test_fixture {
             source_channel_id,
             destination_channel_id: closed_channel_id,
             token_index: FIXTURE_TOKEN_INDEX,
+            destination_base_transfer_salt: crate::common::salt::Salt::default(),
+            base_nonce: 1,
             source_pk_g,
             seal: Bytes32::default(),
             tx_hash,

@@ -13,6 +13,8 @@ const path = require('path');
 const crypto = require('crypto');
 const { execFile } = require('child_process');
 const { promisify } = require('util');
+const { extractSlimAnchor } = require('./slim-wire');
+const { publicBacking, baseHead } = require('./public-backing');
 const pExecFile = promisify(execFile);
 
 const ROOT = __dirname;
@@ -443,17 +445,18 @@ app.use((req, res, next) => {
 // SLIM co-sign ingest (detail2 §M-4). Registered BEFORE express.json so the multi-MB body is
 // NEVER buffered or parsed in relay heap — it streams straight to a per-request spool file
 // (the 2026-07-22 storm core-dumped the relay at ~1000 buffered fat bodies). The anchor digest
-// is read from the first bytes (SlimSendPayload serializes anchorDigest FIRST). Responds with a
+// is read from the first bytes (IMSW v1 carries it raw in its fixed header; legacy JSON keeps
+// anchorDigest first). Responds with a
 // compact ACK {ok, applied, stateVersion, digest} — NOT the multi-MB state (poll /api/poll).
 const MAX_SLIM_BODY = 64 * 1024 * 1024;
 app.post('/api/cosign2', (req, res) => {
   const ch = reqChannel(req);
   const file = spoolPath(ch);
   const ws = fs.createWriteStream(file);
-  let bytes = 0; let firstChunk = null; let aborted = false;
+  let bytes = 0; let header = Buffer.alloc(0); let aborted = false;
   req.on('data', (c) => {
     bytes += c.length;
-    if (!firstChunk) firstChunk = c;
+    if (header.length < 4096) header = Buffer.concat([header, c.subarray(0, 4096 - header.length)]);
     if (bytes > MAX_SLIM_BODY && !aborted) {
       aborted = true; ws.destroy(); fs.rm(file, { force: true }, () => {});
       res.status(413).json({ error: 'body too large' }); req.destroy();
@@ -463,12 +466,14 @@ app.post('/api/cosign2', (req, res) => {
   ws.on('error', (e) => { if (!aborted) { aborted = true; fs.rm(file, { force: true }, () => {}); res.status(500).json({ error: 'spool: ' + e.message }); } });
   ws.on('finish', () => {
     if (aborted) return;
-    const m = /"anchorDigest"\s*:\s*"([^"]+)"/.exec(String(firstChunk).slice(0, 4096));
-    if (!m) {
+    let anchor;
+    try {
+      anchor = extractSlimAnchor(header);
+    } catch (e) {
       fs.rm(file, { force: true }, () => {});
-      return res.status(400).json({ error: 'anchorDigest not found at head of body (SlimSendPayload required)' });
+      return res.status(400).json({ error: e.message });
     }
-    enqueueCosign(ch, { kind: 'slim', file, anchor: m[1] })
+    enqueueCosign(ch, { kind: 'slim', file, anchor })
       .then((ackJson) => res.type('application/json').send(ackJson))
       .catch((e) => {
         const msg = String(e.stderr || e.message || e);
@@ -725,8 +730,13 @@ app.get('/api/poll', (req, res) => {
 });
 
 app.get('/api/backing', (req, res) => {
-  try { const ch = reqChannel(req); res.json(JSON.parse(fs.readFileSync(wc(ch, 'channel_backing.json'), 'utf8'))); }
+  try { const ch = reqChannel(req); res.json(publicBacking(JSON.parse(fs.readFileSync(wc(ch, 'channel_backing.json'), 'utf8')))); }
   catch (e) { res.status(404).json({ error: 'no deposit backing yet' }); }
+});
+
+app.get('/api/base-head', (req, res) => {
+  try { const ch = reqChannel(req); res.json(baseHead(JSON.parse(fs.readFileSync(wc(ch, 'channel_backing.json'), 'utf8')))); }
+  catch (e) { res.status(409).json({ error: String(e.message || e) }); }
 });
 
 // GET /api/tokens?channel=N — per-token channel view + VERIFIED display metadata (§N).
@@ -905,8 +915,8 @@ app.post('/api/cosign-burn', (req, res) => {
   const ch = reqChannel(req);
   withLock(ch, async () => {
     const active = findActiveTicket(ch, 'partial_withdrawal');
-    if (active && active.status === 'burn_done') {
-      res.status(409).json({ error: 'settle pending burn first', ticket: active });
+    if (active) {
+      res.status(409).json({ error: 'resolve the active partial withdrawal before burning again', ticket: active });
       return;
     }
     const { debitPayload, transferDescriptor } = req.body || {};

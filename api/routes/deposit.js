@@ -1,8 +1,9 @@
 const { Router } = require('express');
 const fs = require('fs');
-const { cli, wc, RPC, depositKey, sh, readJson, writeJson } = require('../lib/cli');
+const { cli, wc, RPC, l1SignerArgs, l1SignerAddress, sh, readJson, writeJson } = require('../lib/cli');
 const { withLock } = require('../lib/lock');
 const { findActiveTicket, upsertTicket } = require('../lib/tickets');
+const { importL1Deposit } = require('../lib/deposit-pipeline');
 
 const router = Router({ mergeParams: true });
 
@@ -28,7 +29,7 @@ function depositCastArgs(backing, tokenIndex, amount) {
     '0x0000000000000000000000000000000000000000000000000000000000000000',
   ];
   if (tokenIndex === '0') args.push('--value', String(amount));
-  args.push('--private-key', depositKey(), '--rpc-url', RPC, '--json');
+  args.push(...l1SignerArgs(), '--rpc-url', RPC, '--json');
   return args;
 }
 
@@ -51,7 +52,7 @@ router.post('/l1-send', (req, res) => {
     }
     const out = sh('cast', depositCastArgs(backing, tokenIndex, amount), { stdio: 'pipe' });
     const txHash = (out.match(/"transactionHash"\s*:\s*"(0x[0-9a-fA-F]+)"/) || [])[1] || '';
-    const depositor = sh('cast', ['wallet', 'address', '--private-key', depositKey()], { stdio: 'pipe' }).trim();
+    const depositor = l1SignerAddress();
     writeJson(wc(ch, 'pending_deposit.json'), { depositor, amount: String(amount), tokenIndex, txHash });
     res.json({ txHash, depositor, tokenIndex });
   } catch (e) {
@@ -69,7 +70,7 @@ router.post('/l1-send', (req, res) => {
 // bypass of the tx-tied `pending_deposit.json`. See doc/tasks/deposit-import-threat-model.md.
 router.post('/import', (req, res) => {
   const ch = Number(req.params.ch);
-  withLock(ch, () => {
+  withLock(ch, async () => {
     const b = req.body || {};
     if (b.depositor !== undefined || b.amount !== undefined || b.tokenIndex !== undefined) {
       res.status(400).json({ error: 'depositor/amount/tokenIndex are no longer accepted: they are read from the on-chain Deposited log. Send { recipientSlot, txHash }.' });
@@ -90,12 +91,12 @@ router.post('/import', (req, res) => {
       return;
     }
     // OPERATOR-FUNDED: every deposit path in THIS service signs with the server's own
-    // `depositKey()` (see /l1-send above and POST / below) — there is no user-signed deposit here,
+    // the configured server L1 signer (see /l1-send above and POST / below) — there is no user-signed deposit here,
     // that is the wallet relay's MetaMask flow. So the on-chain depositor is by construction the
     // operator, which is bound to no balance slot, and the CLI's default depositor<->slot binding
     // cannot hold. The flag relaxes ONLY that leg: if the depositor were some member's bound exit
     // address, the CLI's misdirection refusal still fires unconditionally, flag or not.
-    cli(ch, ['cosign-l1-deposit-import', String(slot), String(txHash), RPC, 'l1_import_cosigned.json', '--allow-unbound-depositor']);
+    await importL1Deposit(ch, slot, txHash, { allowUnboundDepositor: true });
     const depTicket = findActiveTicket(ch, 'deposit');
     if (depTicket) {
       depTicket.status = 'import_done';
@@ -118,7 +119,7 @@ router.post('/import', (req, res) => {
 // whatever the on-chain `Deposited` log says, not `amount` — `amount` only sizes the deposit tx.
 router.post('/', (req, res) => {
   const ch = Number(req.params.ch);
-  withLock(ch, () => {
+  withLock(ch, async () => {
     const { recipientSlot, amount } = req.body || {};
     if (req.body && req.body.depositor !== undefined) {
       res.status(400).json({ error: 'depositor is no longer accepted: the deposit is made by this endpoint and read back from its on-chain Deposited log.' });
@@ -150,9 +151,16 @@ router.post('/', (req, res) => {
 
     // OPERATOR-FUNDED (same rationale as /import above): this route just broadcast the deposit
     // with the server's own key, so the depositor is the operator and is bound to no slot.
-    cli(ch, ['cosign-l1-deposit-import', String(slot), txHash, RPC, 'l1_import_cosigned.json', '--allow-unbound-depositor']);
+    const pipeline = await importL1Deposit(ch, slot, txHash, { allowUnboundDepositor: true });
     const snapshot = readJson(wc(ch, 'channel_snapshot.json'));
-    res.json({ snapshot, balance: String(amt), tokenIndex, txHash });
+    res.json({
+      snapshot,
+      balance: String(amt),
+      tokenIndex,
+      txHash,
+      producerReceipt: pipeline.producerReceipt,
+      headSyncReceipt: pipeline.headSyncReceipt,
+    });
   }).catch(e => {
     console.error(e.stderr ? String(e.stderr) : (e.message || e));
     res.status(500).json({ error: String(e.stderr || e.message || e) });

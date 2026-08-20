@@ -5,6 +5,15 @@ identity-swap + validity/close list-proof wiring.
 
 Branch: `paymentchannel-delegate`. Threat model: `doc/tasks/poseidon-signature-threat-model.md`.
 
+> **2026-08-20 multi-span correction (supersedes every `initial.bp_sig_chain == 0` statement
+> below):** zero is a genesis invariant, not a validity-span invariant. A later independently
+> finalized span starts from the preceding finalized `ExtendedPublicState`, so its initial chain may
+> be non-zero. `ValidityCircuit` now accepts that state and verifies the genesis-rooted cumulative
+> `AggListCircuit` proof, still enforcing `list_commitment == final.bp_sig_chain`. Prefix-only and
+> valid-but-wrong list proofs are regression-tested and rejected. Removing the old zero constraint
+> changes the validity verifier key and therefore requires wrapper/fixture regeneration and a fresh
+> deployment/VK initialization; it is not compatible with an already initialized rollup VK.
+
 LOCKED decisions (do not deviate):
 1. pk_b DEFERRED to P3. `MemberLeaf` is a PURE RENAME `sphincs_pk_hash` -> `pk_g` (same type,
    same leaf-hash preimage, same registration keccak). No new field.

@@ -45,19 +45,19 @@ pub struct ExtendedPublicState {
     /// Poseidon channel tree (inner.account_tree_root) to the registrations the contract recorded.
     pub channel_reg_hash_chain: Bytes32,
     /// P2b block-producer IMSB-signature list-commitment accumulator. The order-sensitive Poseidon
-    /// hash chain (`poseidon_sig::list`) over every signing block's `(IMSB_digest, bp_pk_g)` pair,
-    /// folded inside `update_channel_tree` for the block-producer slot of each block that applies
-    /// a member signature. Starts at `Bytes32::default()` (the empty list) at the validity
-    /// span's initial state. The validity circuit conditionally verifies the matching
-    /// `falcon_sig::list::ListCircuit` proof and asserts `C == final.bp_sig_chain` (D3) — so every
-    /// folded pair
-    /// was a verified Poseidon single-sig.
+    /// hash chain (`poseidon_sig::list`) covers every signing block's
+    /// `(IMSB_digest, signer_count, pk_list_digest)` statement and is folded inside
+    /// `update_channel_tree` for each block that applies a member signature. It starts at
+    /// `Bytes32::default()` at genesis and persists across independently finalized validity spans;
+    /// a later span may therefore have a non-zero initial value. The validity circuit verifies the
+    /// matching genesis-rooted `falcon_sig::agg_list::AggListCircuit` proof and asserts
+    /// `C == final.bp_sig_chain` (D3), proving an N-of-N Falcon aggregate for every folded event.
     ///
     /// SECURITY: this is an ACCUMULATED value (not a prover flag): it is computed from the
     /// per-block `bp_pk_g`/`signed_digest` wires that are themselves bound to
-    /// `member_pubkeys_root` / `tx_tree_root`. A non-zero final value forces the list-proof
-    /// verification on (A8 truncation guard); a zero final value means no block in the span
-    /// applied a signature.
+    /// `member_pubkeys_root` / `tx_tree_root`. A non-zero final value forces the cumulative
+    /// list-proof verification on (A8 truncation guard); a zero final value means no block since
+    /// genesis has applied a signature.
     pub bp_sig_chain: Bytes32,
 }
 

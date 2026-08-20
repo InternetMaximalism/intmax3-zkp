@@ -391,8 +391,11 @@ fn block_hash_chain_proof_bench(c: &mut Criterion) {
     let mut block_witness_generator = BlockWitnessGenerator::new(&supported_user_counts);
     let initial_state = block_witness_generator.current_extended_public_state();
 
+    // Channel id 0 is the reserved dummy/deposit lane.  It must never carry an updating key id;
+    // the old `&[1]` fixture became invalid once registration and channel-id guards were made
+    // fail-closed.  This benchmark measures an honestly empty block-hash-chain step.
     block_witness_generator
-        .add_block(0, &[1], 0, Bytes32::default())
+        .add_block(0, &[], 0, Bytes32::default())
         .expect("add block");
 
     let block_number = block_witness_generator.block_number;

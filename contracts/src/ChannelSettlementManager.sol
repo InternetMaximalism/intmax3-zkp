@@ -236,10 +236,9 @@ contract ChannelSettlementManager {
     error PartialWithdrawalChainUsed();
     error PartialWithdrawalAuxDataZero();
     error PartialWithdrawalChainMismatch();
+    /// The withdrawal economics do not reproduce the N-of-N-signed IMBD burn descriptor.
+    error PartialWithdrawalDescriptorMismatch();
     error PartialWithdrawalNotNewer();
-    /// The claimed burn amount exceeds the channel's PROOF-BOUND fund vector for that token slot
-    /// (defence in depth — see `submitPartialWithdrawalIntent`).
-    error PartialWithdrawalAmountExceedsFund();
     /// The claimed payout address is not a registered participant (member or delegate) of this
     /// channel (defence in depth — see `submitPartialWithdrawalIntent`).
     error PartialWithdrawalRecipientNotParticipant();
@@ -496,6 +495,9 @@ contract ChannelSettlementManager {
         uint256 amount;
         bytes32 nullifier;
         bytes32 auxData;
+        /// Regev tx leaf used as an input to IMBD. It is not independently trusted: `auxData`
+        /// is pinned by the close chain and must equal the recompute over this leaf + economics.
+        bytes32 txLeaf;
     }
 
     struct PendingClose {
@@ -688,6 +690,9 @@ contract ChannelSettlementManager {
     uint64 public pendingPartialWithdrawalDeadline;
     uint64 public pendingPartialWithdrawalStateVersion;
     uint64 public pendingPartialWithdrawalEpoch;
+    /// Era in which the pending intent was submitted. Any `requestClose()` increments the live
+    /// nonce and thereby gives one member a unilateral veto during the challenge window.
+    uint64 public pendingPartialWithdrawalCloseFreezeNonce;
 
     /// F7: member identity is the SPHINCS+ pubkey hash (bytes32).
     mapping(bytes32 => address) public registeredRecipientOf;
@@ -1136,10 +1141,19 @@ contract ChannelSettlementManager {
 
         _checkCloseProof(intent, proof);
 
+        // The close circuit exposes `signedState.close_freeze_nonce + 1`, not the signed state's
+        // nonce itself (`close_circuit.rs`, `incremented_close_freeze_nonce`). While the manager is
+        // Active, `currentCloseFreezeNonce` is the signed-state era; therefore a real mid-channel
+        // close proof must carry the NEXT nonce. Comparing the PI directly with the current nonce
+        // would accept the mock fixture but brick every real proof at genesis (0 versus 1).
+        if (intent.closeFreezeNonce != currentCloseFreezeNonce + 1) {
+            revert InvalidFreezeNonce();
+        }
+
         if (withdrawal.auxData == bytes32(0)) revert PartialWithdrawalAuxDataZero();
 
-        // SECURITY: verify settled_tx_chain binding — the burn's tx_leaf (withdrawal.auxData)
-        // was the LAST push in the N-of-N-signed chain. push(prev, leaf) == finalSettledTxChain.
+        // SECURITY: verify settled_tx_chain binding — the burn's IMBD descriptor
+        // (`withdrawal.auxData`) was the LAST push in the N-of-N-signed chain.
         bytes32 expectedChain = keccak256(
             abi.encodePacked(uint32(0x494d5443), prevSettledTxChain, withdrawal.auxData)
         );
@@ -1147,46 +1161,44 @@ contract ChannelSettlementManager {
 
         // ── Defence in depth (2026-07-28, doc/tasks/pw-auth-threat-model.md §4) ──────────────
         //
-        // SECURITY — read this before trusting the two checks below. ONLY `withdrawal.auxData` is
-        // bound to the cosigned state (the chain recompute above). `amount`, `recipient` and
-        // `nullifier` are CALLER-SUPPLIED and there is NOTHING on this contract that could derive
-        // them: `auxData` is a tx_leaf over Regev CIPHERTEXT digests (the amount is computationally
-        // hidden, and the receiver wing carries the phantom padding key, not an L1 address), and the
-        // 103-limb close PI carries no burn amount or recipient. The ONLY artifact that jointly
-        // commits (recipient, tokenIndex, amount, nullifier, auxData) is the base-layer withdrawal
-        // leaf, verified by `IntmaxRollup._verifyWithdrawalSet`.
+        // SECURITY — `withdrawal.auxData` is bound to the cosigned state by the chain recompute.
+        // The IMBD check below then derives recipient/token/amount from that pinned value and the
+        // burn's Regev tx leaf. `nullifier` remains supplied by the base withdrawal proof path: the
+        // authorization is only a second factor and never replaces `_verifyWithdrawalSet`.
         //
-        // So these checks BOUND the claim; they do NOT derive it. They are containment, not
-        // soundness. Soundness comes from the payout side: every burn payout must go through
+        // Soundness remains conjunctive: every burn payout must go through
         // `withdrawNative` / `withdrawERC20`, where the leaf is proof-verified and this
         // authorization is only a SECOND FACTOR (channel consent) that can veto, never supply, a
         // field. The proof-free `claimAuthorizedWithdrawal` was REMOVED for exactly this reason.
         // These checks would NOT make a proof-free payout safe.
 
-        // (a) Amount cap against the PROOF-BOUND per-token fund vector.
+        // (a) The burned token must belong to the PROOF-BOUND active registry.
         //     `_checkCloseProof` above recomputed `tokenFundsDigest(tokenRegistry, tokenCount,
         //     channelFundAmounts)` and strict-bound it to close PI limbs 95..102 (TM-11), so this
-        //     triple is MEMBER-SIGNED, not caller-declared. The Verifier also rejects
+        //     registry is MEMBER-SIGNED, not caller-declared. The Verifier also rejects
         //     `tokenCount` outside 1..=10 (ChannelSettlementVerifier:342), so the slot scan below
         //     is well-formed and cannot index past the fixed 10-wide arrays.
-        //     FAIL CLOSED: a token the channel never cosigned into its registry has no cap to
-        //     check against, so it is rejected outright rather than defaulting to slot 0.
+        //
+        //     IMPORTANT: `intent.channelFundAmounts[t]` is the POST-BURN fund. Comparing the burn
+        //     amount to that value would subtract the same burn twice: a valid pre-burn fund F and
+        //     burn X expose F-X here, so `X <= F-X` rejects every burn over half the balance and
+        //     every full-balance burn. The exact amount is already bound by IMBD below, while the
+        //     channel transition/base spend proof enforce debit/no-underflow. Therefore this scan
+        //     is registry membership only; it must not impose a second post-state amount cap.
+        //     FAIL CLOSED: a token the channel never cosigned into its registry is rejected rather
+        //     than defaulting to slot 0.
         {
             bool tokenFound = false;
             uint256 activeSlots = uint256(intent.tokenCount);
             if (activeSlots > MAX_CHANNEL_TOKENS) activeSlots = MAX_CHANNEL_TOKENS;
             for (uint256 t = 0; t < activeSlots; t++) {
                 if (intent.tokenRegistry[t] == withdrawal.tokenIndex) {
-                    if (withdrawal.amount > intent.channelFundAmounts[t]) {
-                        revert PartialWithdrawalAmountExceedsFund();
-                    }
                     tokenFound = true;
                     break;
                 }
             }
             // NOTE: the first matching slot wins. In-circuit registry injectivity makes a duplicate
-            // base token impossible in a legitimate registry; even if one existed, the cap taken is
-            // a real cosigned slot for that token, which is all this bound claims.
+            // base token impossible in a legitimate registry.
             if (!tokenFound) revert TokenRegistryMismatch();
         }
 
@@ -1199,6 +1211,25 @@ contract ChannelSettlementManager {
         //     legitimate. It does NOT establish entitlement BETWEEN participants.
         if (!isMemberRecipient[withdrawal.recipient]) {
             revert PartialWithdrawalRecipientNotParticipant();
+        }
+
+        // F-AUX-1: auxData is the value pinned by the N-of-N-signed settled-tx chain. Requiring it
+        // to be the IMBD recompute makes the pinned value determine recipient/token/amount. The
+        // base withdrawal proof later supplies those same economics to the IMPW authorization.
+        bytes32 baseRecipient = bytes32(
+            (uint256(2) << 248) | uint256(uint160(withdrawal.recipient))
+        );
+        bytes32 expectedDescriptor = keccak256(
+            abi.encodePacked(
+                bytes4(0x494d4244),
+                withdrawal.txLeaf,
+                baseRecipient,
+                withdrawal.tokenIndex,
+                withdrawal.amount
+            )
+        );
+        if (withdrawal.auxData != expectedDescriptor) {
+            revert PartialWithdrawalDescriptorMismatch();
         }
 
         bytes32 chainKey = keccak256(abi.encodePacked(channelId, intent.finalSettledTxChain));
@@ -1231,6 +1262,9 @@ contract ChannelSettlementManager {
         pendingPartialWithdrawalDeadline = uint64(block.timestamp) + challengePeriod;
         pendingPartialWithdrawalStateVersion = intent.finalStateVersion;
         pendingPartialWithdrawalEpoch = intent.finalEpoch;
+        // Store the manager era observed at submission, rather than the proof's +1 close nonce.
+        // `requestClose()` increments this value and thereby provides the unilateral veto.
+        pendingPartialWithdrawalCloseFreezeNonce = currentCloseFreezeNonce;
 
         emit PartialWithdrawalSubmitted(
             authDigest,
@@ -1243,9 +1277,14 @@ contract ChannelSettlementManager {
     function finalizePartialWithdrawal() external {
         if (!partialWithdrawalPending) revert PartialWithdrawalNotPending();
         if (block.timestamp <= pendingPartialWithdrawalDeadline) revert ChallengeWindowOpen();
-        // SECURITY (12B fix): NO channelStatus check. If requestClose races during the challenge
-        // period, the partial withdrawal can still finalize — the burned amount is already excluded
-        // from the close's channelFundAmount, so no double-counting.
+        // P0-9 / 1-of-N veto: requestClose() advances the era. A pending PW from the previous era
+        // must then fail even though the burn was already excluded from channelFund. The old 12B
+        // no-status-check argument was sound only under the premise that the base payout amount
+        // equalled the channel debit; IMBD now enforces that equality, while this nonce check gives
+        // any one member the deliberately accepted challenge-window veto/grief trade-off.
+        if (pendingPartialWithdrawalCloseFreezeNonce != currentCloseFreezeNonce) {
+            revert InvalidFreezeNonce();
+        }
 
         usedPartialWithdrawalChains[pendingPartialWithdrawalChainKey] = true;
         bytes32 authDigest = pendingPartialWithdrawalAuthDigest;
@@ -1258,6 +1297,7 @@ contract ChannelSettlementManager {
         delete pendingPartialWithdrawalDeadline;
         delete pendingPartialWithdrawalStateVersion;
         delete pendingPartialWithdrawalEpoch;
+        delete pendingPartialWithdrawalCloseFreezeNonce;
 
         IChannelRegistry(address(registry)).authorizePartialWithdrawal(authDigest);
 
@@ -1296,6 +1336,7 @@ contract ChannelSettlementManager {
         delete pendingPartialWithdrawalDeadline;
         delete pendingPartialWithdrawalStateVersion;
         delete pendingPartialWithdrawalEpoch;
+        delete pendingPartialWithdrawalCloseFreezeNonce;
 
         emit PartialWithdrawalCancelled(
             authDigest,

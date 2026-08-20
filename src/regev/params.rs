@@ -51,8 +51,9 @@ const _: () = assert!(REGEV_Q == RegevParams::q());
 ///
 /// SECURITY: user-approved value (design decisions D1/D3). With the 1-bit-per-coefficient
 /// encoding (D1) and `t = 256`, the digit headroom tolerates up to 255 stacked additions, and the
-/// worst-case accumulated noise after 64 additions (CBD(2) upper bound, n = 128) is far below the
-/// decryption threshold `Δ/2 ≈ 2^22` — so 64 keeps a 4x digit margin and a >100x noise margin.
+/// worst-case accumulated noise after 64 additions (CBD(2) bound `64·(4n+2) = 524_416` at
+/// n = 2048) is below the decryption threshold `Δ/2 = 3_932_160` — so 64 keeps a 4x digit margin
+/// and a ~7.5x worst-case noise margin.
 /// This bound is only meaningful if enforced *in state*: the per-member counter lives in
 /// `BalanceState.pending_adds` (D3) and is checked by the state-update circuits, so an adversary
 /// cannot flood a member's balance with additions to break decryption liveness.

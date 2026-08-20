@@ -182,6 +182,7 @@ fn run_positive(
         recipient_slot,
         recipient_pk,
         recipient_pk_g,
+        intmax3_zkp::common::salt::Salt::default(),
         amount,
         a.balances[sender_slot as usize],
         &a.witnesses[sender_slot as usize],
@@ -294,18 +295,21 @@ fn inter_channel_live_send_and_credit() {
         "bundle apply does not change channel_fund"
     );
 
-    // The SAME tx leaf is chained on both sides (sender chained it into A's settled_tx_chain; B
-    // recomputes it independently and chains it into the bundle-apply state). Proves the
-    // dual-channel chain binding (F3-A multi-layer defense).
+    // The SAME tx leaf is chained exactly once on both sides. A folds it in the debit state; B
+    // recomputes and folds it in the fund-import state. The bundle is only the ciphertext
+    // accounting half of that receive and therefore leaves the chain unchanged.
     let a_leaf = descriptor.inter_channel_tx.tx_leaf_hash().expect("tx leaf");
     use intmax3_zkp::common::balance_state::settled_tx_chain_push;
-    let b_bundle_chain_expected = settled_tx_chain_push(
-        credit.fund_import_state.balance_state.settled_tx_chain,
-        a_leaf,
+    let b_import_chain_expected =
+        settled_tx_chain_push(b.snapshot.state.balance_state.settled_tx_chain, a_leaf);
+    assert_eq!(
+        credit.fund_import_state.balance_state.settled_tx_chain, b_import_chain_expected,
+        "B fund import chains the SAME tx leaf the sender chained"
     );
     assert_eq!(
-        credit.bundle_apply_state.balance_state.settled_tx_chain, b_bundle_chain_expected,
-        "B bundle-apply chains the SAME tx leaf the sender chained"
+        credit.bundle_apply_state.balance_state.settled_tx_chain,
+        credit.fund_import_state.balance_state.settled_tx_chain,
+        "B bundle apply must not double-fold one logical base receive"
     );
 
     // ---- NEGATIVE 1: tampered credit amount (y != x) → gate rejects (inv 2). ----
@@ -458,6 +462,45 @@ fn inter_channel_live_send_and_credit() {
         assert!(err.is_err(), "wrong TxV2 leaf MUST be rejected (inv 7)");
     }
 
+    // ---- NEGATIVE 6b: F-AUX-1 base Transfer commitment mismatch → both co-signer gates reject.
+    // The old code verified E-2 and TxV2 separately, so this field was an all-zero decoration.
+    // It now commits the exact recipient/token/amount/aux Transfer reconstructed by both sides.
+    {
+        let mut bad = descriptor.clone();
+        bad.inter_channel_tx.intmax_transfer_commitment = Bytes32::default();
+        let err = verify_inter_channel_credit_transition(
+            &b.snapshot.state,
+            &b.record,
+            &bad,
+            &a_send,
+            &a.record,
+            LEVEL,
+        );
+        assert!(
+            err.is_err(),
+            "a mismatched base Transfer commitment MUST be rejected (F-AUX-1)"
+        );
+    }
+
+    // Retired proof/memo slots have one canonical empty representation.  Arbitrary marker bytes
+    // must not survive as apparently meaningful signed protocol fields.
+    {
+        let mut bad = descriptor.clone();
+        bad.inter_channel_tx.transport_proof = vec![7];
+        let err = verify_inter_channel_credit_transition(
+            &b.snapshot.state,
+            &b.record,
+            &bad,
+            &a_send,
+            &a.record,
+            LEVEL,
+        );
+        assert!(
+            err.is_err(),
+            "a non-empty retired transport proof MUST be rejected"
+        );
+    }
+
     // ---- NEGATIVE 7: the send leg itself rejects a bogus debit payload (sanity on the A gate).
     // ---- Proves the A-side send transition is not vacuous: a debit that does not decrease
     // channel_fund by amount fails `InterChannelSendUpdateWitness`.
@@ -474,6 +517,7 @@ fn inter_channel_live_send_and_credit() {
             recipient_slot,
             recipient_pk,
             recipient_pk_g,
+            intmax3_zkp::common::salt::Salt::default(),
             AMT,
             a.balances[sender_slot as usize],
             &a.witnesses[sender_slot as usize],
@@ -591,6 +635,7 @@ fn inter_channel_live_token1_send_and_credit() {
         recipient_slot,
         b.keys[recipient_slot as usize].regev_pk.clone(),
         b.record.member_pk_gs[recipient_slot as usize],
+        intmax3_zkp::common::salt::Salt::default(),
         T1,
         AMT,
         T1_BALANCE,
@@ -721,11 +766,16 @@ fn inter_channel_live_negative_error_provenance() {
             .map_err(|e| e.0)
     };
 
-    // inv 2 — tampered amount.
+    // F-AUX-1 now rejects a descriptor-only amount substitution before the older E-2 invariant-2
+    // check: the original base-Transfer commitment cannot describe AMT+1.  Pin that provenance so
+    // a future refactor cannot accidentally let the two economic descriptions diverge again.
     let mut d = descriptor.clone();
     d.amount = AMT + 1;
     let e = gate(&d, &a_send).unwrap_err();
-    assert!(e.contains("invariant 2"), "amount tamper hit: {e}");
+    assert!(
+        e.contains("F-AUX-1") && e.contains("canonical base Transfer"),
+        "amount tamper hit: {e}"
+    );
 
     // inv 3 — wrong recipient slot.
     let mut d = descriptor.clone();
@@ -751,11 +801,15 @@ fn inter_channel_live_negative_error_provenance() {
     let e = gate(&descriptor, &bad).unwrap_err();
     assert!(e.contains("invariant 1"), "missing sig hit: {e}");
 
-    // inv 7 — wrong TxV2 leaf (the inclusion proof no longer matches the committed tx_tree_root).
+    // F-AUX-1 — a doctored convenience TxV2 is rejected against the canonical TxV2 reconstructed
+    // from the verified debit before the legacy inclusion-proof invariant needs to run.
     let mut d = descriptor.clone();
     d.tx_v2.nonce = d.tx_v2.nonce.wrapping_add(1);
     let e = gate(&d, &a_send).unwrap_err();
-    assert!(e.contains("invariant 7"), "tx_v2 tamper hit: {e}");
+    assert!(
+        e.contains("F-AUX-1") && e.contains("descriptor TxV2"),
+        "tx_v2 tamper hit: {e}"
+    );
 
     eprintln!(
         "[inter_channel_live] negative provenance OK: each tamper rejected by its own invariant."

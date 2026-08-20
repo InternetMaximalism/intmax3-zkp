@@ -9,7 +9,7 @@ distributions the STARKs range-check; none rely on a tail/Gaussian argument.
 
 | Symbol | Value | Source |
 |---|---|---|
-| `n` (ring dimension) | `128` | `REGEV_N`, detail2 §B-1 |
+| `n` (ring dimension) | `2048` | `REGEV_N`, detail2 §B-1 |
 | `q` (ciphertext modulus = field prime, BabyBear) | `2_013_265_921 = 2^31 − 2^27 + 1` | `REGEV_Q` |
 | `eta` (CBD parameter) | `2` (noise in `[−2, 2]`) | `REGEV_ETA` |
 | `t` (plaintext modulus) | `2^8 = 256` | `REGEV_PLAIN_BITS = 8` |
@@ -51,15 +51,15 @@ polynomials, every output coefficient is a signed sum of exactly `n` coefficient
 products (`x^n ≡ −1` folds the upper half back with a minus sign), so
 
 ```
-‖e·r‖_∞   ≤ n · ‖e‖_∞  · ‖r‖_∞ = 128 · 2 · 1 = 256
-‖e1·s‖_∞  ≤ n · ‖e1‖_∞ · ‖s‖_∞ = 128 · 2 · 1 = 256
+‖e·r‖_∞   ≤ n · ‖e‖_∞  · ‖r‖_∞ = 2048 · 2 · 1 = 4096
+‖e1·s‖_∞  ≤ n · ‖e1‖_∞ · ‖s‖_∞ = 2048 · 2 · 1 = 4096
 ‖e2‖_∞    ≤ 2                                  (added coefficient-wise, no convolution)
 ```
 
 Therefore the worst-case per-coefficient noise of **one** fresh ciphertext is
 
 ```
-B_fresh := ‖noise‖_∞ ≤ 256 + 256 + 2 = 514.
+B_fresh := ‖noise‖_∞ ≤ 4096 + 4096 + 2 = 8194.
 ```
 
 This is the exact worst case, not an estimate: it is attained when the relevant
@@ -84,18 +84,18 @@ The noise adds, hence after `N` homomorphic additions of fresh ciphertexts
 noise — the sender re-encrypts, see detail2 §B-3):
 
 ```
-B_acc(N) := ‖Σ_k noise_k‖_∞ ≤ N · B_fresh = N · 514.
+B_acc(N) := ‖Σ_k noise_k‖_∞ ≤ N · B_fresh = N · 8194.
 ```
 
 For `N = 64`:
 
 ```
-B_acc(64) ≤ 64 · 514 = 32_896 ≈ 2^15.0.
+B_acc(64) ≤ 64 · 8194 = 524_416 ≈ 2^19.0.
 ```
 
 (The receiver key noise `e` and secret `s` are common to all terms, so a tighter
 bound `‖e·(Σ r_k) + Σ e2_k − (Σ e1_k)·s‖_∞` also exists, but the linear
-`N·B_fresh` bound already gives a large margin and is the conservative
+`N·B_fresh` bound already gives a sufficient margin and is the conservative
 worst case.)
 
 ## 4. Digit headroom
@@ -125,7 +125,7 @@ stays strictly inside the half-step:
 With the accumulated bound:
 
 ```
-B_acc(64) = 32_896  <  Δ/2 = 3_932_160.     Noise margin Δ/2 / B_acc ≈ 119.5×.
+B_acc(64) = 524_416  <  Δ/2 = 3_932_160.     Noise margin Δ/2 / B_acc ≈ 7.50×.
 ```
 
 Because the noise distribution is **bounded** (finite support `[−B_acc, B_acc]`)
@@ -161,8 +161,8 @@ allow `255·Δ + 2^23 ≥ q` and let an adversary alias digit 0 as digit 255; th
 19+3+3 split closes that gap.
 
 Within the protocol budget the *used* shifted-noise window is
-`[Δ/2 − B_acc(64), Δ/2 + B_acc(64)] = [3_899_264, 3_965_056]`, comfortably
-inside the circuit's `[0, Δ)` capacity (`Δ = 7_864_320`), with `Δ/2 ≫ B_acc`.
+`[Δ/2 − B_acc(64), Δ/2 + B_acc(64)] = [3_407_744, 4_456_576]`, comfortably
+inside the circuit's `[0, Δ)` capacity (`Δ = 7_864_320`).
 There is no risk of the shifted noise wrapping below `0` or reaching `Δ`.
 
 ### Rounding-convention consistency
@@ -170,7 +170,7 @@ There is no risk of the shifted noise wrapping below `0` or reaching `Δ`.
 Upstream `decrypt` uses `round(v·t/q)`, whose digit boundaries sit at
 `Δ·d − Δ/2 + d/256` — offset by `< 1` from this circuit's boundaries at
 `Δ·d − Δ/2`. The two agree everywhere except when `|noise| = Δ/2` exactly
-(`≈ 2^21.9`), which is unreachable for `B_acc(64) ≈ 2^15`. The prover
+(`≈ 2^21.9`), which is unreachable for `B_acc(64) ≈ 2^19`. The prover
 additionally re-derives the value from the circuit's own decomposition and
 refuses if it disagrees with the claimed amount, so a boundary disagreement can
 never yield an accepted-but-wrong proof.
@@ -180,14 +180,14 @@ never yield an accepted-but-wrong proof.
 | Constraint | Limit | Worst case @ 64 | Margin |
 |---|---|---|---|
 | Digit headroom | `< 256` | `64` | `4×` |
-| Decryption noise | `< Δ/2 = 3_932_160` | `≤ 32_896` | `≈ 119.5×` |
-| E-3 shifted-noise range | `[0, Δ) = [0, 7_864_320)` | `[3_899_264, 3_965_056]` | inside, `Δ/2 ≫ B_acc` |
+| Decryption noise | `< Δ/2 = 3_932_160` | `≤ 524_416` | `≈ 7.50×` |
+| E-3 shifted-noise range | `[0, Δ) = [0, 7_864_320)` | `[3_407_744, 4_456_576]` | inside |
 | Decryption failure probability | — | `0` (bounded support) | — |
 
 ## 7. Conclusion: is MAX = 64 approved-safe, and what is the true maximum?
 
 **`MAX_HOMO_ADDS_BEFORE_REFRESH = 64` is approved-safe.** At `N = 64` the
-worst-case decryption noise (`≤ 32_896`) is `≈ 119×` below the decryption
+worst-case decryption noise (`≤ 524_416`) is `≈ 7.5×` below the decryption
 threshold `Δ/2`, the worst-case digit (`64`) is `4×` below the digit modulus
 `t = 256`, and decryption failure probability is exactly `0` because all
 distributions are bounded and the worst case stays inside both budgets — for
@@ -196,13 +196,13 @@ honest and adversarial-but-well-formed ciphertexts alike.
 **True maximum.** The two constraints give:
 
 * Digit: `N < 256`  ⇒  `N ≤ 255`.
-* Noise: `N · 514 < Δ/2 = 3_932_160`  ⇒  `N < 7_650`.
+* Noise: `N · 8194 < Δ/2 = 3_932_160`  ⇒  `N ≤ 479`.
 
 The **digit headroom is the binding constraint**: the protocol could in
 principle tolerate up to `N = 255` homomorphic additions before a refresh
-becomes mandatory (the noise budget alone would allow `~7_650`). The chosen
+becomes mandatory (the noise budget alone would allow `479`). The chosen
 `64` therefore sits at roughly one quarter of the hard maximum, leaving a
-deliberate safety buffer on the binding (digit) axis and an enormous buffer on
+deliberate safety buffer on the binding (digit) axis and a 7.5× buffer on
 the noise axis. No change to `64` is recommended; if a larger batch were ever
 needed, any value up to `255` would remain decryption-correct, but `64` is the
 conservative, approved value.

@@ -69,7 +69,7 @@
 //! statement (the very statement whose public values it absorbed) and comparing them with the
 //! published values — by Schwartz-Zippel, agreement at the post-commitment challenge `z` implies
 //! the committed columns equal the claimed public polynomials except with probability
-//! `< n / |EF| ≈ 2^-117` (n = 128, quartic BabyBear extension).
+//! `< n / |EF| ≈ 2^-113` (n = 2048, quartic BabyBear extension).
 //!
 //! # Purpose domain separation (threat model F2-B)
 //!
@@ -795,7 +795,7 @@ fn check_amount_witness(
 }
 
 /// Checks `key·r + addend == ct + (x^n + 1)·k` coefficient-wise over `Z_q[x]`, degree < 2n.
-/// Schoolbook O(n²) — n = 128, negligible next to proving.
+/// Schoolbook O(n²), currently n = 2048; this native precheck is a material prover cost.
 fn ring_identity_holds(key: &[F], r: &[F], addend: &[F], ct: &[F], k: &[F]) -> bool {
     let n = key.len();
     let mut lhs = F::zero_vec(2 * n);
@@ -1751,7 +1751,7 @@ where
 // ---------------------------------------------------------------------------
 
 /// Schoolbook negacyclic product with quotient: `x·y = lo + (x^n + 1)·hi` over `Z_q[x]`,
-/// `deg(lo) < n` (same split as upstream `split_negacyclic`). O(n²), n = 128 — negligible.
+/// `deg(lo) < n` (same split as upstream `split_negacyclic`). O(n²), currently n = 2048.
 fn negacyclic_mul_with_quotient(x: &[F], y: &[F]) -> (Vec<F>, Vec<F>) {
     let n = x.len();
     debug_assert_eq!(y.len(), n);

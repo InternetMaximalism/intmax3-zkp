@@ -37,12 +37,11 @@ async function main() {
 
   // Derive identity from the seed (env, never config). The WASM session holds the secret.
   const seed = process.env.DELEGATE_SEED_HEX || null;
-  if (wallet.available()) {
-    try { wallet.keygen(seed); log.info({ event: 'KEYGEN_OK', channel: account.id, slot: account.slot }); }
-    catch (e) { log.warn({ event: 'KEYGEN_FAILED', error: String(e && e.message || e) }); }
-  } else {
-    log.warn({ event: 'WASM_UNAVAILABLE', note: 'build pkg-node to enable proving; control loop still runs' });
+  if (!wallet.available()) {
+    throw new Error('WASM wallet unavailable: refusing to start a delegate that cannot verify or prove');
   }
+  wallet.keygen(seed);
+  log.info({ event: 'KEYGEN_OK', channel: account.id, slot: account.slot });
 
   // --- chain watcher (constructed early: the token-manifest verification reads through it) ---
   const watcher = new ChainWatcher({ rpcUrl: cfg.rpcUrl, channels: [account], confirmations: cfg.confirmations, pollIntervalMs: cfg.pollIntervalMs });

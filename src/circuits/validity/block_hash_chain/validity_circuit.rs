@@ -176,8 +176,10 @@ where
     /// per-signing-block N-of-N signature list commitment `C` (small-block N-of-N design §9
     /// Phase 4: each list step recursively verifies ONE `FalconAggCircuit` TOP proof and folds
     /// `(IMCH digest, signer_count, pk_list_digest)` — the SAME statement `update_channel_tree`
-    /// folds into `bp_sig_chain`). Verified CONDITIONALLY (gated on the computed
-    /// `final.bp_sig_chain != 0`, decision D3).
+    /// folds into `bp_sig_chain`). This is a lifetime proof from genesis, not a proof local to the
+    /// current validity span. It is verified CONDITIONALLY (gated on the computed
+    /// `final.bp_sig_chain != 0`, decision D3), including when the span starts from a non-zero
+    /// signature-chain head.
     ///
     /// The cyclic wrapper's `CommonCircuitData` is byte-identical to the retired single-signature
     /// `falcon_sig::list::ListCircuit` wrapper's (pinned by
@@ -224,27 +226,24 @@ where
         // ── P2b: conditional verification of the N-of-N signature list proof (decision D3) ──
         //
         // The `AggListCircuit` cannot represent the empty (0-entry) list (C == 0 has no proof). The
-        // validity span's `final.bp_sig_chain` is an ACCUMULATED commitment over every signing
-        // block. When it is non-zero we MUST verify the list proof and assert its commitment equals
-        // the accumulator (so every folded statement was a verified N-of-N Falcon aggregate — A8
-        // truncation guard). When it is zero (no signing block in the span) we skip with a dummy
-        // proof.
+        // validity span's `final.bp_sig_chain` is a LIFETIME commitment accumulated from genesis,
+        // not a span-local commitment. When it is non-zero we MUST verify the cumulative list proof
+        // and assert its commitment equals the accumulator (so every folded statement was a
+        // verified N-of-N Falcon aggregate — A8 truncation guard). This remains mandatory when
+        // `initial.bp_sig_chain` is already non-zero, and even for a later span that adds no new
+        // signing event. Only a lifetime-empty chain may use the dummy proof.
         //
         // SECURITY: the gate is the COMPUTED final.bp_sig_chain (an accumulated value bound to the
         // per-block IMCH digest / signer_count / pk_list_digest wires by `update_channel_tree`),
         // NOT a prover flag — so a prover cannot turn the list verification off while still having
         // applied a signed update. Re-tested, not assumed, by
-        // `tests/small_block_sig_validity.rs::a_signed_span_cannot_be_proven_with_the_dummy_list`.
+        // `tests/small_block_sig_validity.rs::inter_channel_small_block_sig_is_validity_proven`
+        // and the cross-span truncation cases in `tests/validity_multispan.rs`.
         let final_bp_sig_chain = block_chain_pis.ext_public_state.bp_sig_chain.clone();
-        let initial_bp_sig_chain = block_chain_pis
-            .initial_ext_public_state
-            .bp_sig_chain
-            .clone();
-        // initial.bp_sig_chain == 0 (the span starts with an empty signature list).
-        let zero = builder.zero();
-        for limb in initial_bp_sig_chain.to_vec() {
-            builder.connect(limb, zero);
-        }
+        // Do NOT constrain `initial.bp_sig_chain` to zero. A validity proof is allowed to begin at
+        // any finalized extended state. The cumulative AggList proof still starts at genesis and
+        // its final commitment is bound below to this span's computed final chain. Requiring zero
+        // here made the second finalized span unprovable after the first signing block.
         let chain_is_zero = final_bp_sig_chain.is_zero::<F, D, Bytes32>(&mut builder);
         let should_verify_list = builder.not(chain_is_zero);
         let agg_list_proof = add_proof_target_and_conditionally_verify(
@@ -302,9 +301,11 @@ where
     }
 
     /// Prove the validity statement. `agg_list_proof` is the recursive N-of-N signature-list proof
-    /// (`falcon_sig::agg_list::AggListCircuit`) over the span's signing blocks; it MUST be `Some`
-    /// exactly when `final.bp_sig_chain != 0` (the span has at least one signing block). When
-    /// `None`, the dummy proof is supplied and the conditional list verification is gated off.
+    /// (`falcon_sig::agg_list::AggListCircuit`) over every signing block since genesis; it MUST be
+    /// `Some` exactly when `final.bp_sig_chain != 0`. For a span whose initial chain is already
+    /// non-zero this means passing the previously accumulated proof, extended with any new signing
+    /// events. When `None`, the dummy proof is supplied and the conditional list verification is
+    /// gated off only for a lifetime-empty chain.
     ///
     /// SECURITY: passing `None` for a span that DOES contain a signing block is not a way to skip
     /// the signature check — it makes the proof unprovable. `should_verify_list` is computed from

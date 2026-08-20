@@ -17,9 +17,9 @@ use crate::{
         balance_state::{BalanceState, settled_tx_chain_push},
         channel::{
             ChannelId, ChannelRecord, ChannelState, ChannelTransitionKind, ChannelTx,
-            InterChannelTx, ProofBackend, TransitionProofRole, l1_deposit_import_digest,
-            token_register_next_state, validate_all_member_signatures,
-            validate_member_signature_slots,
+            InterChannelTx, MerkleInclusionProof, ProofBackend, TransitionProofRole,
+            burn_descriptor, l1_deposit_import_digest, token_register_next_state,
+            validate_all_member_signatures, validate_member_signature_slots,
         },
     },
     constants::{MAX_CHANNEL_MEMBERS, MAX_CHANNEL_TOKENS},
@@ -633,12 +633,25 @@ impl InterChannelSendUpdateWitness {
         let receiver_delta = &self.inter_channel_tx.receiver_deltas[0];
         // One key per member: the receiver pubkey hash is self-describing (no key_id embedding to
         // re-check). Cross-channel membership of the receiver is the receiving channel's concern.
-        // Chain push with the tx leaf (detail2 §C-6).
-        let leaf = self
+        // Normal C2C pushes the tx leaf. A burn pushes the amount-committing IMBD descriptor that
+        // is also the base Transfer's aux_data; this is the N-of-N-signed half of F-AUX-1.
+        let tx_leaf = self
             .inter_channel_tx
             .tx_leaf_hash()
             .map_err(|err| ChannelStateUpdateError::InvalidSettledTxChain(err.to_string()))?;
-        require_chain_push(&self.prev_state, &self.next_state, leaf)?;
+        let chain_leaf = if self.inter_channel_tx.destination_channel_id.channel_id()
+            == crate::constants::BURN_CHANNEL_ID as u32
+        {
+            burn_descriptor(
+                tx_leaf,
+                receiver_delta.receiver_pk_g,
+                self.inter_channel_tx.token_index,
+                u64_to_u256(self.amount),
+            )
+        } else {
+            tx_leaf
+        };
+        require_chain_push(&self.prev_state, &self.next_state, chain_leaf)?;
         // Stage 3: the STRONG tx_hash-binding accumulator insertion check
         // (`require_accumulator_push`) is run by the WALLET co-signer with the persisted tree in
         // hand (`build_inter_channel_send`) — the transition witnesses here carry only the
@@ -790,15 +803,14 @@ impl InterChannelFundImportUpdateWitness {
             ));
         }
         require_h2_zero(&self.next_state)?;
-        // detail2 §C-6: deposit/fund imports chain the deposit hash. For the import transition
-        // the chained leaf is the inter-channel tx's `tx_hash` — the same identifier that the
-        // base layer settles and that `PostCloseIncomingClaim.incoming_tx_hash` references, so
-        // the import is replayable/auditable against the L1 settle history.
-        require_chain_push(
-            &self.prev_state,
-            &self.next_state,
-            self.inter_channel_tx.tx_hash,
-        )?;
+        // One incoming base transfer advances the receiver's live balance IVC exactly once. Its
+        // merkle-bound aux_data is the canonical tx leaf, so the channel import must fold that
+        // same tag; `tx_hash` remains the post-close accumulator identifier.
+        let settle_tag = self
+            .inter_channel_tx
+            .tx_leaf_hash()
+            .map_err(|err| ChannelStateUpdateError::InvalidSettledTxChain(err.to_string()))?;
+        require_chain_push(&self.prev_state, &self.next_state, settle_tag)?;
         // Stage 3: the fund import is a settle advancement on the RECEIVING channel — its
         // accumulator MUST absorb the incoming `tx_hash` (this is the insertion a post-close claim
         // against THIS closed channel proves inclusion against). The STRONG tx_hash-binding push
@@ -813,10 +825,10 @@ impl InterChannelFundImportUpdateWitness {
             &self.prev_state.balance_state,
             self.inter_channel_tx.token_index,
         )?;
-        // TM-16 obligation 1 (destination gate leg): the chained/accumulated `tx_hash` above must
-        // be the token-bearing recompute from the descriptor's own fields — this is what makes
-        // the accumulator leaf (the post-close-claim anchor) commit the token this import
-        // credits (the SAME signed token_index the resolution above admitted).
+        // TM-16 obligation 1 (destination gate leg): the accumulator's `tx_hash` must be the
+        // token-bearing recompute from the descriptor's own fields — this is what makes its
+        // post-close-claim anchor commit the token this import credits (the chain itself folds
+        // the base transfer's `tx_leaf`, as checked above).
         require_token_bearing_tx_hash(&self.inter_channel_tx)?;
         if self.next_state.channel_fund.amounts[token_slot]
             != self.prev_state.channel_fund.amounts[token_slot] + u64_to_u256(self.amount)
@@ -1026,16 +1038,14 @@ impl ReceiverBundleApplyUpdateWitness {
                 ),
             ));
         }
-        // Chain push with the same tx leaf the sender chained (independent recomputation —
-        // multi-layer defense for F3-A).
-        let leaf = self
-            .inter_channel_tx
-            .tx_leaf_hash()
-            .map_err(|err| ChannelStateUpdateError::InvalidSettledTxChain(err.to_string()))?;
-        require_chain_push(&self.prev_state, &self.next_state, leaf)?;
-        // Stage 3 (uniform-leaf decision): the bundle apply is a second settle advancement; the
-        // accumulator absorbs `tx_hash` again (the chain pushes tx_leaf, but the accumulator stores
-        // tx_hash uniformly). STRONG tx_hash insertion check is in the WALLET co-signer.
+        // The preceding fund-import step already folded this one logical incoming transfer. The
+        // bundle merely applies its ciphertext delta and must not advance either settle
+        // commitment again.
+        require_chain_unchanged(&self.prev_state, &self.next_state)?;
+        require_accumulator_unchanged(
+            self.prev_state.balance_state.settled_tx_accumulator_root,
+            self.next_state.balance_state.settled_tx_accumulator_root,
+        )?;
         // Recipient position: public homomorphic-add recomputation; other positions and slots
         // untouched.
         // TM-6 (destination-side registry resolution, §N-4): the credit lands at EXACTLY the
@@ -1048,9 +1058,8 @@ impl ReceiverBundleApplyUpdateWitness {
             &self.prev_state.balance_state,
             self.inter_channel_tx.token_index,
         )?;
-        // TM-16 obligation 1 (destination gate leg, bundle-apply advancement): the accumulator
-        // absorbs `tx_hash` again here — it must be the token-bearing recompute over the SAME
-        // signed token_index that resolved the credited position above.
+        // TM-16 defense in depth: even though the accumulator insertion occurs in the import step,
+        // the bundle still rechecks the token-bearing descriptor it applies.
         require_token_bearing_tx_hash(&self.inter_channel_tx)?;
         let expected_recipient_ct = add_ciphertexts(
             &self.prev_state.balance_state.enc_balances[self.recipient_index][token_slot],
@@ -1876,19 +1885,36 @@ fn validate_signed_small_block(
             "small block close_freeze_nonce mismatch".to_string(),
         ));
     }
-    if signed.medium_block_number < signed.message.medium_epoch_hint {
+    // These medium-block proof slots were never backed by a verifier.  Protocol v3 retires them
+    // with a single canonical encoding instead of accepting arbitrary marker bytes in a signed
+    // digest.
+    if signed.message.medium_epoch_hint != 0 || signed.medium_block_number != 0 {
         return Err(ChannelStateUpdateError::InvalidSmallBlock(
-            "medium_block_number must be >= medium_epoch_hint".to_string(),
+            "retired medium-block numbers must be zero".to_string(),
         ));
     }
-    if signed.aggregated_signature_proof.is_empty() {
+    if !signed.aggregated_signature_proof.is_empty() {
         return Err(ChannelStateUpdateError::InvalidSmallBlock(
-            "aggregated signature proof must not be empty".to_string(),
+            "retired aggregated signature proof must be empty".to_string(),
         ));
     }
-    if signed.confirmation_proof.is_empty() {
+    if !signed.confirmation_proof.is_empty() {
         return Err(ChannelStateUpdateError::InvalidSmallBlock(
-            "confirmation proof must not be empty".to_string(),
+            "retired confirmation proof must be empty".to_string(),
+        ));
+    }
+    if inter_channel_tx.seal != Bytes32::default()
+        || !inter_channel_tx.recipient_memo.is_empty()
+        || !inter_channel_tx.transport_proof.is_empty()
+        || inter_channel_tx.tx_inclusion_proof != MerkleInclusionProof::default()
+    {
+        return Err(ChannelStateUpdateError::InvalidSmallBlock(
+            "retired inter-channel fields must use their canonical empty value".to_string(),
+        ));
+    }
+    if inter_channel_tx.intmax_transfer_commitment == Bytes32::default() {
+        return Err(ChannelStateUpdateError::InvalidSmallBlock(
+            "intmax_transfer_commitment must commit the canonical base Transfer".to_string(),
         ));
     }
     // Slot/identity structure only: these are NOT channel-state co-signatures, so the Falcon

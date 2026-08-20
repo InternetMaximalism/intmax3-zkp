@@ -339,7 +339,7 @@ jobs:
         run: .github/ci/rust-test-guard.sh 1 0 -- cargo test --release --locked --test mle_onchain_e2e
 
       - name: small_block_sig_validity (BP signature bound by a real validity proof)
-        run: .github/ci/rust-test-guard.sh 1 0 -- cargo test --release --locked --test small_block_sig_validity
+        run: .github/ci/rust-test-guard.sh 2 0 -- cargo test --release --locked --test small_block_sig_validity
 
       - name: Assert the build did not modify the tree
         run: git diff --exit-code && test -z "$(git status --porcelain)"

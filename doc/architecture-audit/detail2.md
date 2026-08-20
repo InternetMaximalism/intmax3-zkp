@@ -92,7 +92,7 @@ Follows the `channel_params` of the port source `SIS-lattice-paymentchannel/crat
 | Parameter | Value | Description |
 |---|---|---|
 | `q` (residue field) | BabyBear `2^31 − 2^27 + 1 = 2,013,265,921` | Matches the native field of the Plonky3 STARK |
-| `n` (ring degree) | **128** (power of 2, requires ≥ 64) | Number of coefficients of one polynomial |
+| `n` (ring degree) | **2048** (power of 2, 128-bit RLWE target) | Number of coefficients of one polynomial |
 | `eta` (noise) | 2 | CBD (centered binomial) parameter |
 | `plain_bits` | 8 | Plaintext bits per coefficient |
 | Amount type | `u64` | Encoded into 8 bits × 8 coefficients (remaining coefficients are 0) *(superseded by D1: 1 bit/coefficient × 64 coefficients, t=256)* |
@@ -112,12 +112,12 @@ pub struct RegevCiphertext {
 }
 ```
 
-| Item | Size (n = 128) |
+| Item | Raw binary size (n = 2048) |
 |---|---|
-| `RegevPk` | 2 × 128 × 4 = **1,024 bytes** |
-| `RegevCiphertext` | 2 × 128 × 4 = **1,024 bytes** |
-| `encBalances` (per slot) | **1,024 bytes** (one per balance slot; slot capacity `MAX_CHANNEL_MEMBERS` = 1024, D6 → D12 — cosigners ≤ 16, the rest delegates + padding) |
-| Decryption key `RegevSk { s: Vec<i8> }` | 128 bytes (held only by the owner. Does not appear in any struct) |
+| `RegevPk` | 2 × 2048 × 4 = **16,384 bytes** |
+| `RegevCiphertext` | 2 × 2048 × 4 = **16,384 bytes** |
+| `encBalances` (per active slot/token) | **16,384 bytes** (slot capacity `MAX_CHANNEL_MEMBERS` = 1024; padding uses the canonical compact representation) |
+| Decryption key `RegevSk { s: Vec<i8> }` | 2,048 bytes (held only by the owner. Does not appear in any struct) |
 
 `RegevCiphertext::digest() = hash_words([REGEV_CT_DOMAIN, c1.len() as u32, c1…, c2…]) → Bytes32`
 (keccak256. What enters state or the PI is always this digest).

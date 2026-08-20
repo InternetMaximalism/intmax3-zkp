@@ -63,6 +63,23 @@ pub fn calculate_recipient_from_address(address: Address) -> Bytes32 {
     Bytes32::from_bytes_be(&bytes).expect("address should be 32 bytes")
 }
 
+/// Circuit equivalent of [`calculate_recipient_from_address`]. Keeping construction and
+/// extraction inverse to this one canonical form prevents tagged values with non-zero 11-byte
+/// padding from being accepted in a proof even though the L1 contract reconstructs zero padding.
+pub fn calculate_recipient_from_address_circuit<
+    F: RichField + Extendable<D>,
+    const D: usize,
+>(
+    builder: &mut CircuitBuilder<F, D>,
+    address: &AddressTarget,
+) -> Bytes32Target {
+    let zero = builder.zero();
+    let mut bytes = vec![zero; 32];
+    bytes[0] = builder.constant(F::from_canonical_u32(ADDRESS_TAG as u32));
+    bytes[12..].copy_from_slice(&address.to_bytes_be(builder));
+    Bytes32Target::from_bytes_be(builder, &bytes)
+}
+
 pub fn extract_address_from_recipient(recipient: Bytes32) -> Result<Address, RecipientError> {
     let bytes = recipient.to_bytes_be();
     if bytes[0] != ADDRESS_TAG {
@@ -72,18 +89,24 @@ pub fn extract_address_from_recipient(recipient: Bytes32) -> Result<Address, Rec
         )));
     }
     let address_bytes = &bytes[12..32];
-    Ok(Address::from_bytes_be(address_bytes).expect("address should be 20 bytes"))
+    let address = Address::from_bytes_be(address_bytes).expect("address should be 20 bytes");
+    if recipient != calculate_recipient_from_address(address) {
+        return Err(RecipientError::InvalidRecipient(
+            "non-canonical ADDRESS_TAG recipient: bytes 1..11 must be zero".into(),
+        ));
+    }
+    Ok(address)
 }
 
 pub fn extract_address_from_recipient_circuit<F: RichField + Extendable<D>, const D: usize>(
     builder: &mut CircuitBuilder<F, D>,
     recipient: &Bytes32Target,
 ) -> AddressTarget {
-    let mut bytes = recipient.to_bytes_be(builder);
-    let expected_tag = builder.constant(F::from_canonical_u32(ADDRESS_TAG as u32));
-    builder.connect(bytes[0], expected_tag);
-    let address_bytes = bytes.split_off(12);
-    AddressTarget::from_bytes_be(builder, &address_bytes)
+    let bytes = recipient.to_bytes_be(builder);
+    let address = AddressTarget::from_bytes_be(builder, &bytes[12..]);
+    let canonical = calculate_recipient_from_address_circuit(builder, &address);
+    recipient.connect(builder, canonical);
+    address
 }
 
 #[cfg(test)]
@@ -150,5 +173,32 @@ mod tests {
         let pw = PartialWitness::new();
         let proof = circuit.prove(pw).unwrap();
         circuit.verify(proof).unwrap();
+    }
+
+    #[test]
+    fn rejects_nonzero_address_padding_native_and_circuit() {
+        type F = GoldilocksField;
+        const D: usize = 2;
+        type C = PoseidonGoldilocksConfig;
+
+        let address = Address::from_hex("0x1234567890abcdef1234567890abcdef12345678").unwrap();
+        let mut malformed_bytes = calculate_recipient_from_address(address).to_bytes_be();
+        malformed_bytes[7] ^= 1;
+        let malformed = Bytes32::from_bytes_be(&malformed_bytes).unwrap();
+        assert!(extract_address_from_recipient(malformed).is_err());
+
+        let mut builder = CircuitBuilder::<F, D>::new(CircuitConfig::default());
+        let recipient_target = Bytes32Target::new(&mut builder, true);
+        let extracted_target =
+            extract_address_from_recipient_circuit(&mut builder, &recipient_target);
+        let expected_target = AddressTarget::constant(&mut builder, address);
+        extracted_target.connect(&mut builder, expected_target);
+        let circuit = builder.build::<C>();
+        let mut pw = PartialWitness::new();
+        recipient_target.set_witness(&mut pw, malformed);
+        assert!(
+            circuit.prove(pw).is_err(),
+            "non-zero ADDRESS_TAG padding must make the recipient circuit unsatisfiable"
+        );
     }
 }

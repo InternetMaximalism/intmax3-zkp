@@ -37,17 +37,20 @@
 use std::{collections::HashSet, path::PathBuf, process::Command};
 
 use intmax3_zkp::{
-    common::{channel::ChannelRecord, channel_id::ChannelId},
-    ethereum_types::{bytes32::Bytes32, u32limb_trait::U32LimbTrait, u256::U256},
-    regev::{RegevCiphertext, RegevSecurityLevel, encrypt_amount},
+    common::{
+        channel::ChannelRecord, channel_id::ChannelId, private_state::FullPrivateState, salt::Salt,
+    },
+    ethereum_types::{bytes32::Bytes32, u256::U256, u32limb_trait::U32LimbTrait},
+    regev::{encrypt_amount, RegevCiphertext, RegevSecurityLevel},
     wallet_core::{
-        BuiltInterChannelSend, ChannelSnapshot, InterChannelDebitPayload,
-        InterChannelTransferDescriptor, MemberInfo, MemberKeys, add_signature,
-        assemble_genesis_state, build_burn_send, build_inter_channel_send, build_record,
-        decrypt_balance, default_settled_tx_accumulator, sign_state, verify_snapshot,
+        add_signature, assemble_genesis_state, build_burn_send,
+        build_inter_channel_send_token_at_base_nonce, build_record, decrypt_balance,
+        default_settled_tx_accumulator, sign_state, verify_snapshot, BuiltInterChannelSend,
+        ChannelSnapshot, InterChannelDebitPayload, InterChannelTransferDescriptor, MemberInfo,
+        MemberKeys,
     },
 };
-use rand010::{SeedableRng, rngs::StdRng};
+use rand010::{rngs::StdRng, SeedableRng};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
@@ -230,16 +233,28 @@ fn bin() -> PathBuf {
 /// Run a `channel_member` subcommand in `cwd` with INTMAX_CHANNEL set. Returns (success,
 /// stdout+err).
 fn run(cwd: &std::path::Path, channel: u32, args: &[&str]) -> (bool, String) {
-    let out = Command::new(bin())
+    run_with_env(cwd, channel, args, &[])
+}
+
+fn run_with_env(
+    cwd: &std::path::Path,
+    channel: u32,
+    args: &[&str],
+    envs: &[(&str, &str)],
+) -> (bool, String) {
+    let mut command = Command::new(bin());
+    command
         .args(args)
         .current_dir(cwd)
         .env("INTMAX_CHANNEL", channel.to_string())
         // SECURITY: explicitly opt IN to the publicly-derivable deterministic co-signer keys.
         // The CLI FAILS CLOSED unless exactly one of INTMAX_COSIGNER_KEYFILE (production) or
         // this flag is set. See doc/tasks/cosigner-key-provenance.md.
-        .env("INTMAX_INSECURE_DETERMINISTIC_KEYS", "1")
-        .output()
-        .expect("spawn channel_member");
+        .env("INTMAX_INSECURE_DETERMINISTIC_KEYS", "1");
+    for (key, value) in envs {
+        command.env(key, value);
+    }
+    let out = command.output().expect("spawn channel_member");
     let mut s = String::from_utf8_lossy(&out.stdout).to_string();
     s.push_str(&String::from_utf8_lossy(&out.stderr));
     (out.status.success(), s)
@@ -249,6 +264,20 @@ fn write_state(cwd: &std::path::Path, state: &CliState) {
     std::fs::write(
         cwd.join("cli_state.json"),
         serde_json::to_string_pretty(state).unwrap(),
+    )
+    .unwrap();
+    // Production obtains this cursor from the durable live-balance service. The CLI process E2E
+    // seeds the equivalent authenticated genesis cursor so its production nonce guard is live.
+    std::fs::write(
+        cwd.join("channel_backing.json"),
+        serde_json::to_vec(&json!({
+            "settled_tx_chain": Bytes32::default().to_hex(),
+            "intmax_state_root": Bytes32::default().to_hex(),
+            "fund": 0,
+            "backing_deposit_status": "deferred",
+            "base_private_state": FullPrivateState::new(Salt::default()),
+        }))
+        .unwrap(),
     )
     .unwrap();
 }
@@ -294,7 +323,7 @@ fn build_transfer(
     let dest_id = ChannelId::new(B_ID as u64).unwrap();
     let recipient_pk = b_keys[recipient_slot as usize].regev_pk.clone();
     let recipient_pk_g = b_record.member_pk_gs[recipient_slot as usize];
-    build_inter_channel_send(
+    build_inter_channel_send_token_at_base_nonce(
         &a_keys[sender_slot as usize],
         a_snapshot,
         sender_slot,
@@ -302,6 +331,9 @@ fn build_transfer(
         recipient_slot,
         recipient_pk,
         recipient_pk_g,
+        intmax3_zkp::common::salt::Salt::default(),
+        a_snapshot.state.balance_state.token_registry[0],
+        0,
         amount,
         a_balances[sender_slot as usize],
         &a_witnesses[sender_slot as usize],
@@ -385,15 +417,53 @@ fn build_burn_send_debits_only_sender_and_targets_l1() {
         intmax3_zkp::constants::BURN_CHANNEL_ID,
         "destination is the reserved BURN_CHANNEL_ID"
     );
+
+    // P0-7: the descriptor is a separate wire object. It may not claim X+1 while the debit
+    // payload's real E-2 proof and state transition prove X.
+    let mut wrong_amount = built.transfer_descriptor.clone();
+    wrong_amount.amount += 1;
+    let err = intmax3_zkp::wallet_core::verify_inter_channel_descriptor_matches_debit(
+        &built.debit_payload,
+        &wrong_amount,
+    )
+    .expect_err("descriptor X+1 with an E-2 proof for X must be rejected");
+    assert!(
+        err.0.contains("descriptor amount differs"),
+        "named P0-7 error expected, got: {}",
+        err.0
+    );
 }
 
-/// GAP1 PROOF: the burn Transfer's `aux_data` must equal `tx_leaf` so that the base
-/// `send_tx_circuit` pushes the SAME leaf into `settled_tx_chain` as the channel layer does.
-/// Without this, the base chain silently diverges (aux_data=0 → no push) and mid-channel binding
-/// (GAP2) cannot tie the base withdrawal proof to the signed channel state.
+#[test]
+fn burn_nonce_guard_reads_base_sent_tx_tree_occupancy() {
+    use intmax3_zkp::{
+        common::{private_state::FullPrivateState, salt::Salt, tx::Tx},
+        wallet_core::verify_burn_nonce_available,
+    };
+
+    let mut base = FullPrivateState::new(Salt::default());
+    verify_burn_nonce_available(&base, 0).expect("fresh base nonce zero is available");
+
+    let err = verify_burn_nonce_available(&base, 1)
+        .expect_err("channel/base nonce divergence must be rejected");
+    assert!(err.0.contains("base send nonce divergence"), "{}", err.0);
+
+    // Occupancy is detected from the incremental tree length even if the occupied leaf happens to
+    // serialize exactly like the default empty value.
+    base.sent_tx_tree.push(Tx::default());
+    let err =
+        verify_burn_nonce_available(&base, 0).expect_err("occupied sent-tx slot must be rejected");
+    assert!(err.0.contains("already occupied"), "{}", err.0);
+}
+
+/// GAP1/F-AUX PROOF: the burn Transfer's `aux_data` is the canonical IMBD descriptor and both
+/// layers push that SAME descriptor into `settled_tx_chain`.
 #[test]
 fn burn_send_base_chain_matches_channel() {
-    use intmax3_zkp::common::balance_state::{settled_tx_chain_push, tx_leaf_hash};
+    use intmax3_zkp::common::{
+        balance_state::{settled_tx_chain_push, tx_leaf_hash},
+        channel::burn_descriptor,
+    };
 
     let a = build_cli_channel(A_ID, &[50, 10, 30]);
     let a_keys: Vec<MemberKeys> = CLI_SLOTS.iter().map(|&s| cli_keys(s)).collect();
@@ -430,25 +500,29 @@ fn burn_send_base_chain_matches_channel() {
         desc.receiver_delta.digest(),
     );
 
-    // The CHANNEL layer pushed tx_leaf into settled_tx_chain (wallet_core.rs:1559).
+    let aux = burn_descriptor(
+        tx_leaf,
+        desc.receiver_pk_g,
+        desc.inter_channel_tx.token_index,
+        intmax3_zkp::ethereum_types::u256::U256::from(amount),
+    );
+
+    // The CHANNEL layer pushed the descriptor into settled_tx_chain.
     let genesis_chain = a.snapshot.state.balance_state.settled_tx_chain;
-    let expected_channel_chain = settled_tx_chain_push(genesis_chain, tx_leaf);
+    let expected_channel_chain = settled_tx_chain_push(genesis_chain, aux);
     assert_eq!(
         next.balance_state.settled_tx_chain, expected_channel_chain,
-        "channel settled_tx_chain must be push(genesis, tx_leaf)"
+        "channel settled_tx_chain must be push(genesis, IMBD descriptor)"
     );
 
     // The BASE layer pushes settled_tx_chain by transfer.aux_data (send_tx_circuit.rs:290-297).
-    // After the GAP1 fix, burn sends set aux_data = tx_leaf, so the base circuit pushes the SAME
-    // leaf as the channel layer. Simulate what the base circuit produces with aux_data = tx_leaf.
-    let base_chain = settled_tx_chain_push(genesis_chain, tx_leaf);
+    let base_chain = settled_tx_chain_push(genesis_chain, aux);
 
     // GAP1 RESOLVED: both chains agree — the base push(genesis, tx_leaf) == channel push(genesis,
     // tx_leaf).
     assert_eq!(
         base_chain, next.balance_state.settled_tx_chain,
-        "GAP1: base settled_tx_chain must match channel settled_tx_chain \
-         (burn aux_data = tx_leaf ensures both push the same leaf)"
+        "GAP1: base settled_tx_chain must match channel settled_tx_chain (same IMBD descriptor)"
     );
 
     // Sanity: a zero aux_data (the pre-fix bug) would NOT match.
@@ -522,7 +596,12 @@ fn burn_withdrawal_leaf_reconstructs_the_cosigned_h2_tag() {
         desc.receiver_pk_g,
         desc.inter_channel_tx.token_index,
         amount,
-        tx_leaf,
+        intmax3_zkp::common::channel::burn_descriptor(
+            tx_leaf,
+            desc.receiver_pk_g,
+            desc.inter_channel_tx.token_index,
+            intmax3_zkp::ethereum_types::u256::U256::from(amount),
+        ),
         desc.tx_v2.nonce,
     )
     .expect("an ADDRESS_TAG burn has a withdrawal leaf");
@@ -530,7 +609,16 @@ fn burn_withdrawal_leaf_reconstructs_the_cosigned_h2_tag() {
         leaf.recipient, l1,
         "the leaf pays the L1 address the burn was built for — no env var involved"
     );
-    assert_eq!(leaf.aux_data, tx_leaf, "the leaf's aux_data is the tx leaf");
+    assert_eq!(
+        leaf.aux_data,
+        intmax3_zkp::common::channel::burn_descriptor(
+            tx_leaf,
+            desc.receiver_pk_g,
+            desc.inter_channel_tx.token_index,
+            intmax3_zkp::ethereum_types::u256::U256::from(amount),
+        ),
+        "the leaf's aux_data is the canonical IMBD descriptor"
+    );
 
     // THE GUARD, run exactly as `pw-submit` runs it.
     let rebuilt =
@@ -579,6 +667,7 @@ fn inter_channel_cli_end_to_end() {
     let a_fund_before = a_snapshot.state.channel_fund.amounts[0];
     let b_fund_before = b_snapshot.state.channel_fund.amounts[0];
     let a_committed_digest = a_snapshot.state.digest;
+    let b_committed_digest = b_snapshot.state.digest;
     let recipient_before = decrypt_balance(
         &b_keys[recipient_slot as usize],
         &b_snapshot,
@@ -613,7 +702,9 @@ fn inter_channel_cli_end_to_end() {
     // ============================ POSITIVE: atomic transfer ============================
     // The combined command runs in A's cwd (resolves B as ../ch8). It debits A and credits B
     // atomically.
-    let (ok, log) = run(
+    // First force a process death after A's atomic replacement but before B moves. This is the
+    // exact crash window a pair of sequential renames cannot make atomic by itself.
+    let (ok, log) = run_with_env(
         &ch_a,
         A_ID,
         &[
@@ -622,8 +713,37 @@ fn inter_channel_cli_end_to_end() {
             desc_path.to_str().unwrap(),
             out_path.to_str().unwrap(),
         ],
+        &[("INTMAX_TEST_FAIL_INTER_TRANSFER_AFTER_SOURCE", "1")],
     );
-    assert!(ok, "cosign-inter-transfer must succeed, log:\n{log}");
+    assert!(
+        !ok,
+        "the deterministic crash failpoint must stop the process"
+    );
+    assert!(
+        log.contains("TEST FAILPOINT"),
+        "the process must stop at the intended post-source boundary, got:\n{log}"
+    );
+    assert_ne!(
+        read_state(&ch_a).snapshot.state.digest,
+        a_committed_digest,
+        "the failpoint must exercise a genuinely persisted source-side update"
+    );
+    assert_eq!(
+        read_state(&ch_b).snapshot.state.digest,
+        b_committed_digest,
+        "the destination must still be at its before-head at the crash boundary"
+    );
+    assert_eq!(
+        root.join(".inter-transfer-journal")
+            .read_dir()
+            .expect("journal directory")
+            .count(),
+        1,
+        "a PREPARED journal must survive the simulated crash"
+    );
+
+    let (ok, log) = run(&ch_a, A_ID, &["recover-inter-transfers"]);
+    assert!(ok, "roll-forward recovery must succeed, log:\n{log}");
 
     // FULL CONSERVATION read back from BOTH channels' persisted cli_state on disk.
     let amt_u = U256::from(AMT as u32);
@@ -691,6 +811,18 @@ fn inter_channel_cli_end_to_end() {
     assert!(
         b_after.spent_tx_identities.is_empty(),
         "B is the DESTINATION — nothing may be debited out of it"
+    );
+    assert!(
+        root.join(".inter-transfer-journal")
+            .read_dir()
+            .expect("journal directory")
+            .next()
+            .is_none(),
+        "a fully committed transfer must leave no pending two-phase journal"
+    );
+    assert!(
+        ch_b.join("incoming_inter_transfer.json").is_file(),
+        "the destination recovery artifact must be published before the journal is retired"
     );
     // A's head ADVANCED past the committed genesis digest.
     assert_ne!(
@@ -937,8 +1069,8 @@ fn inter_channel_cli_tampered_amount_refused() {
         0x412,
         0x1C_C1_1,
     );
-    // Tamper the descriptor amount; the real debit payload (extends A's head) stays valid so the
-    // debit leg passes, and the credit gate must reject on the E-2 amount mismatch.
+    // Tamper the descriptor amount; the real debit payload (extends A's head) stays valid, and the
+    // descriptor/debit preflight gate must reject before either leg can be persisted.
     let mut tampered = built.transfer_descriptor.clone();
     tampered.amount = AMT + 1;
 
@@ -959,10 +1091,12 @@ fn inter_channel_cli_tampered_amount_refused() {
     );
     assert!(!ok, "tampered amount MUST be refused, log:\n{log}");
     assert!(
-        log.contains("credit gate REFUSED")
+        log.contains("descriptor/debit mismatch")
+            || log.contains("descriptor amount differs")
+            || log.contains("credit gate REFUSED")
             || log.contains("invariant")
             || log.contains("conservation"),
-        "tamper rejection must come from the credit gate / conservation, got:\n{log}"
+        "tamper rejection must come from the descriptor/E-2 binding or credit gate, got:\n{log}"
     );
 
     // ATOMICITY: the credit leg failed AFTER the debit leg was co-signed in memory, so NOTHING must

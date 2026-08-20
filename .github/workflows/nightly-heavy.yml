@@ -186,7 +186,7 @@ jobs:
         run: .github/ci/rust-test-guard.sh 3 0 -- cargo test --release --locked --test inter_channel_live
 
       - name: inter_channel_cli (real channel_member binary, two channels)
-        run: .github/ci/rust-test-guard.sh 14 0 -- cargo test --release --locked --test inter_channel_cli
+        run: .github/ci/rust-test-guard.sh 15 0 -- cargo test --release --locked --test inter_channel_cli
 
       - name: partial_withdrawal_e2e [anvil 8553]
         # NOTE: this test launches anvil and forge with `--code-size-limit 50000`, which MASKS the

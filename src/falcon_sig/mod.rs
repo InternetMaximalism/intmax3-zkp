@@ -642,6 +642,8 @@ mod tests {
             crate::constants::WITHDRAWAL_CLAIM_DOMAIN_V2,
             crate::constants::CHANNEL_UPDATE_ZKP_DOMAIN_V2,
             crate::constants::INTER_CHANNEL_TX_DOMAIN_V2,
+            crate::constants::INTER_CHANNEL_TX_DOMAIN_V3,
+            crate::constants::INTER_CHANNEL_TX_DOMAIN_V4,
             crate::constants::TOKEN_FUNDS_DIGEST_DOMAIN,
         ];
         let new = [

@@ -66,7 +66,10 @@ async function doRefresh(event, ctx) {
     log.error({ event: 'COSIGN_INVALID', channel: ch.id, op: 'refresh', reason: v.reason });
     return raiseSignal({ source: 'signal', kind: 'cosign_invalid', reason: v.reason });
   }
-  if (wallet.available()) { wallet.cosignVerify(ctx.slot, resp.state || resp); wallet.finalize(resp); }
+  // `wallet_finalize` is the delegate's cryptographic gate: it verifies the full real N-of-N
+  // member signature set and own-slot decryption before committing.  `wallet_cosign` cannot be
+  // used here: it accepts SendPayload, and delegates are deliberately forbidden to co-sign.
+  wallet.finalize(resp.state || resp);
   sm.signal(dsm.SIGNALS.COSIGN_OK);
   store.set('canSend', true);
   // The refreshed witness backs exactly the position we refreshed (§N/TM-13).
@@ -97,8 +100,7 @@ async function doSend(event, ctx) {
     log.error({ event: 'COSIGN_INVALID', channel: ch.id, op: 'send', reason: v.reason });
     return raiseSignal({ source: 'signal', kind: 'cosign_invalid', reason: v.reason });
   }
-  wallet.cosignVerify(ctx.slot, resp.state || resp);
-  wallet.finalize(resp);
+  wallet.finalize(resp.state || resp);
   sm.signal(dsm.SIGNALS.COSIGN_OK);
   store.set('acceptedHead', headOf({ state: resp.state || resp }));
   sm.signal(dsm.SIGNALS.SYNCED);
@@ -114,7 +116,12 @@ async function doInterChannelSend(event, ctx) {
   sm.signal(dsm.SIGNALS.START_PROVE);
   // Multi-token (§N-4): tokenIndex is the BASE token index (undefined = the source channel's
   // genesis registry[0]); the WASM wallet resolves it against the source registry fail-closed.
-  const built = wallet.sendInterChannel(toChannel, toSlot, amount, destRecipient, tokenIndex);
+  // The channel counter is not the base account's send cursor. Read the persisted IVC head at
+  // prove time; a concurrent winner advances it and makes the co-signer reject this stale proof.
+  const baseHead = await api.getBaseHead(ch.id);
+  const built = wallet.sendInterChannel(
+    toChannel, toSlot, amount, destRecipient, tokenIndex, Number(baseHead.nonce)
+  );
   sm.signal(dsm.SIGNALS.SENT);
   let resp;
   try { resp = await api.interChannelSend(ch.id, { debitPayload: built.debit_payload || built.debitPayload, transferDescriptor: built.transfer_descriptor || built.transferDescriptor, tokenIndex }); }
@@ -126,9 +133,8 @@ async function doInterChannelSend(event, ctx) {
     return raiseSignal({ source: 'signal', kind: 'cosign_invalid', reason: v.reason });
   }
   if (resp.sourceHead) {
-    // Re-verify the source-head transition cryptographically before committing (review H5).
-    wallet.cosignVerify(ctx.slot, resp.sourceHead);
-    wallet.finalize({ state: resp.sourceHead });
+    // Verify the source head's real N-of-N signatures before committing (review H5).
+    wallet.finalize(resp.sourceHead);
   }
   sm.signal(dsm.SIGNALS.COSIGN_OK);
   store.set('acceptedHead', headOf({ state: resp.sourceHead }));
@@ -145,7 +151,8 @@ async function doBurn(event, ctx) {
   sm.signal(dsm.SIGNALS.START_PROVE);
   // Multi-token (§N): tokenIndex is the burned BASE token (undefined = genesis registry[0]);
   // the resulting L1 partial withdrawal pays out in that asset (IMPW binds tokenIndex).
-  const built = wallet.burnSend(amount, l1Address, tokenIndex);
+  const baseHead = await api.getBaseHead(ch.id);
+  const built = wallet.burnSend(amount, l1Address, tokenIndex, Number(baseHead.nonce));
   sm.signal(dsm.SIGNALS.SENT);
   let resp;
   try { resp = await api.pwBurn(ch.id, { debitPayload: built.debit_payload || built.debitPayload, transferDescriptor: built.transfer_descriptor || built.transferDescriptor, amount: String(amount), recipient: l1Address, tokenIndex }); }
@@ -155,10 +162,9 @@ async function doBurn(event, ctx) {
     store.set('cosignFault', { op: 'burn', reason: v.reason, resp });
     return raiseSignal({ source: 'signal', kind: 'cosign_invalid', reason: v.reason });
   }
-  if (wallet.available() && resp.state) {
-    // Re-verify the burn-debit transition cryptographically before committing (review H5).
-    wallet.cosignVerify(ctx.slot, resp.state);
-    wallet.finalize({ state: resp.state });
+  if (resp.state) {
+    // Verify the burn debit's real N-of-N signatures before committing (review H5).
+    wallet.finalize(resp.state);
   }
   sm.signal(dsm.SIGNALS.COSIGN_OK);
   store.set('acceptedHead', headOf({ state: resp.state }));

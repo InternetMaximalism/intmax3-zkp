@@ -1,19 +1,24 @@
 const { Router } = require('express');
 const fs = require('fs');
-const { cli, wc, RPC, depositKey, sh, rollupOf, readJson, writeJson } = require('../lib/cli');
+const { cli, wc, RPC, l1SignerArgs, sh, rollupOf, readJson, writeJson } = require('../lib/cli');
 const { withLock } = require('../lib/lock');
 const { findActiveTicket, upsertTicket } = require('../lib/tickets');
+const producer = require('../lib/block-producer');
+const { importL1Deposit } = require('../lib/deposit-pipeline');
+const { flushPublishedHead, syncStateIfNeeded } = require('../lib/producer-head');
 
 const router = Router({ mergeParams: true });
 
 // POST /api/v1/channel/:ch/init (A5)
 router.post('/init', (req, res) => {
   const ch = Number(req.params.ch);
-  withLock(ch, () => {
+  withLock(ch, async () => {
     fs.mkdirSync(require('../lib/cli').chDir(ch), { recursive: true });
     writeJson(wc(ch, 'contribution.json'), req.body);
     cli(ch, ['init', 'contribution.json', 'channel_snapshot.json']);
-    res.json(readJson(wc(ch, 'channel_snapshot.json')));
+    const snapshot = readJson(wc(ch, 'channel_snapshot.json'));
+    await producer.register(snapshot);
+    res.json(snapshot);
   }).catch(e => {
     console.error(e.stderr ? String(e.stderr) : (e.message || e));
     res.status(500).json({ error: String(e.stderr || e.message || e) });
@@ -24,12 +29,13 @@ router.post('/init', (req, res) => {
 // Alias for init — the client sends a GenesisContribution, gets back a snapshot.
 router.post('/join', (req, res) => {
   const ch = Number(req.params.ch);
-  withLock(ch, () => {
+  withLock(ch, async () => {
     fs.mkdirSync(require('../lib/cli').chDir(ch), { recursive: true });
     const contribution = req.body.contribution || req.body;
     writeJson(wc(ch, 'contribution.json'), contribution);
     cli(ch, ['init', 'contribution.json', 'channel_snapshot.json']);
     const snapshot = readJson(wc(ch, 'channel_snapshot.json'));
+    await producer.register(snapshot);
     const slot = snapshot.members ? snapshot.members.length - 1 : 0;
     res.json({ snapshot, slot, balance: '0' });
   }).catch(e => {
@@ -51,7 +57,7 @@ function parseTokenIndex(v) {
 // body: { contribution, depositAmount?, tokenIndex? } — tokenIndex optional, default '0'.
 router.post('/join-and-deposit', (req, res) => {
   const ch = Number(req.params.ch);
-  withLock(ch, () => {
+  withLock(ch, async () => {
     fs.mkdirSync(require('../lib/cli').chDir(ch), { recursive: true });
     const contribution = req.body.contribution || req.body;
     const depositAmount = req.body.depositAmount || '0';
@@ -64,8 +70,10 @@ router.post('/join-and-deposit', (req, res) => {
     writeJson(wc(ch, 'contribution.json'), contribution);
     cli(ch, ['init', 'contribution.json', 'channel_snapshot.json']);
     let snapshot = readJson(wc(ch, 'channel_snapshot.json'));
+    await producer.register(snapshot);
     const slot = snapshot.members ? snapshot.members.length - 1 : 0;
     let depositTxHash;
+    let depositSucceeded = false;
 
     if (depositAmount && depositAmount !== '0') {
       try {
@@ -79,25 +87,32 @@ router.post('/join-and-deposit', (req, res) => {
           '0x0000000000000000000000000000000000000000000000000000000000000000',
         ];
         if (tokenIndex === '0') castArgs.push('--value', String(depositAmount));
-        castArgs.push('--private-key', depositKey(), '--rpc-url', RPC, '--json');
+        castArgs.push(...l1SignerArgs(), '--rpc-url', RPC, '--json');
         const out = sh('cast', castArgs, { stdio: 'pipe' });
         depositTxHash = (out.match(/"transactionHash"\s*:\s*"(0x[0-9a-fA-F]{64})"/) || [])[1] || '';
         if (!depositTxHash) throw new Error('could not read the deposit transactionHash from cast output');
 
         // SECURITY: import by TX HASH — the CLI reads depositor/amount/tokenIndex from the
         // on-chain `Deposited` log.
-        // OPERATOR-FUNDED: the deposit above is signed with the server's `depositKey()`, NOT the
+        // OPERATOR-FUNDED: the deposit above is signed with the server's configured L1 signer, NOT the
         // joining delegate's wallet, so the on-chain depositor is the operator and is bound to no
         // slot. The flag relaxes only that leg; crediting a slot bound to a DIFFERENT member is
         // still refused unconditionally by the CLI.
-        cli(ch, ['cosign-l1-deposit-import', String(slot), depositTxHash, RPC, 'l1_import_cosigned.json', '--allow-unbound-depositor']);
+        await importL1Deposit(ch, slot, depositTxHash, { allowUnboundDepositor: true });
         snapshot = readJson(wc(ch, 'channel_snapshot.json'));
+        depositSucceeded = true;
       } catch (depErr) {
         console.error('deposit failed (channel joined with 0 balance):', depErr.message);
       }
     }
 
-    res.json({ snapshot, slot, balance: depositAmount !== '0' ? depositAmount : '0', depositTxHash });
+    res.json({
+      snapshot,
+      slot,
+      balance: depositSucceeded ? String(depositAmount) : '0',
+      depositSucceeded,
+      depositTxHash,
+    });
   }).catch(e => {
     console.error(e.stderr ? String(e.stderr) : (e.message || e));
     res.status(500).json({ error: String(e.stderr || e.message || e) });
@@ -110,14 +125,17 @@ router.post('/join-and-deposit', (req, res) => {
 // or a full registry — TM-1). Returns the advanced snapshot.
 router.post('/register-token', (req, res) => {
   const ch = Number(req.params.ch);
-  withLock(ch, () => {
+  withLock(ch, async () => {
+    await flushPublishedHead(ch);
     const tokenIndex = parseTokenIndex(req.body && req.body.tokenIndex);
     if (tokenIndex === null || tokenIndex === undefined || (req.body && req.body.tokenIndex === undefined)) {
       res.status(400).json({ error: 'needs { tokenIndex } (decimal u32)' });
       return;
     }
     cli(ch, ['register-token', tokenIndex, 'token_register_cosigned.json']);
-    res.json(readJson(wc(ch, 'channel_snapshot.json')));
+    const snapshot = readJson(wc(ch, 'channel_snapshot.json'));
+    await syncStateIfNeeded(snapshot.state);
+    res.json(snapshot);
   }).catch(e => {
     console.error(e.stderr ? String(e.stderr) : (e.message || e));
     res.status(500).json({ error: String(e.stderr || e.message || e) });

@@ -3,24 +3,33 @@ pragma solidity ^0.8.24;
 
 import {Script, console2} from "forge-std/Script.sol";
 import {ChannelSettlementManager} from "../src/ChannelSettlementManager.sol";
-import {ChannelSettlementVerifier} from "../src/ChannelSettlementVerifier.sol";
 import {MleVerifier} from "@mle/MleVerifier.sol";
-import {CloseProofFields} from "../src/ChannelSettlementManager.sol";
+import {FixtureLib} from "./FixtureLib.sol";
 
 /// @title Submit a partial-withdrawal intent (anvil E2E).
 /// @notice Reads intent + withdrawal fields from `test/data/pw_submit.json` and drives the
-///         `manager.submitPartialWithdrawalIntent` call with a mock-verified MLE proof.
+///         `manager.submitPartialWithdrawalIntent` call with the real wrapped-close MLE proof.
 contract SubmitPartialWithdrawal is Script {
     function _read(string memory f) internal view returns (string memory) {
         return vm.readFile(string.concat(vm.projectRoot(), "/test/data/", f));
     }
 
+    function _parseAmounts(string memory j) internal pure returns (uint256[10] memory a) {
+        string[] memory raw = vm.parseJsonStringArray(j, ".channel_fund_amounts");
+        require(raw.length == 10, "channel_fund_amounts must have 10 entries");
+        for (uint256 i = 0; i < 10; i++) a[i] = vm.parseUint(raw[i]);
+    }
+
+    function _parseRegistry(string memory j) internal pure returns (uint32[10] memory r) {
+        uint256[] memory raw = vm.parseJsonUintArray(j, ".token_registry");
+        require(raw.length == 10, "token_registry must have 10 entries");
+        for (uint256 i = 0; i < 10; i++) r[i] = uint32(raw[i]);
+    }
+
     function run() external {
         string memory j = _read("pw_submit.json");
         address managerAddr = vm.parseJsonAddress(j, ".manager");
-        address verifierAddr = vm.parseJsonAddress(j, ".verifier");
         ChannelSettlementManager manager = ChannelSettlementManager(payable(managerAddr));
-        ChannelSettlementVerifier verifier = ChannelSettlementVerifier(verifierAddr);
 
         // CloseIntent from JSON.
         ChannelSettlementManager.CloseIntent memory intent;
@@ -30,11 +39,9 @@ contract SubmitPartialWithdrawal is Script {
         intent.closeFreezeNonce = uint64(vm.parseJsonUint(j, ".close_freeze_nonce"));
         intent.finalChannelStateDigest = vm.parseJsonBytes32(j, ".final_channel_state_digest");
         intent.finalBalanceStateH1 = vm.parseJsonBytes32(j, ".final_balance_state_h1");
-        // Multitoken Phase 3: genesis-token embedding until the Phase 5 descriptor regeneration
-        // emits per-token vectors (registry=[ETH], all funds at token slot 0).
-        intent.channelFundAmounts[0] = vm.parseJsonUint(j, ".channel_fund_amount");
-        intent.tokenRegistry[0] = 0;
-        intent.tokenCount = 1;
+        intent.channelFundAmounts = _parseAmounts(j);
+        intent.tokenRegistry = _parseRegistry(j);
+        intent.tokenCount = uint8(vm.parseJsonUint(j, ".token_count"));
         intent.channelFundIntmaxStateRoot = vm.parseJsonBytes32(j, ".channel_fund_intmax_state_root");
         intent.burnTxHash = vm.parseJsonBytes32(j, ".burn_tx_hash");
         intent.closeWithdrawalDigest = vm.parseJsonBytes32(j, ".close_withdrawal_digest");
@@ -50,38 +57,11 @@ contract SubmitPartialWithdrawal is Script {
         w.amount = vm.parseJsonUint(j, ".withdrawal_amount");
         w.nullifier = vm.parseJsonBytes32(j, ".withdrawal_nullifier");
         w.auxData = vm.parseJsonBytes32(j, ".withdrawal_aux_data");
+        w.txLeaf = vm.parseJsonBytes32(j, ".burn_tx_leaf");
 
         bytes32 prevSettledTxChain = vm.parseJsonBytes32(j, ".prev_settled_tx_chain");
 
-        // Build mock close proof: expectedCloseLimbs → proofWithLimbs.
-        CloseProofFields memory fields = CloseProofFields({
-            channelId: manager.channelId(),
-            closeNonce: intent.closeNonce,
-            finalEpoch: intent.finalEpoch,
-            finalSmallBlockNumber: intent.finalSmallBlockNumber,
-            closeFreezeNonce: intent.closeFreezeNonce,
-            finalChannelStateDigest: intent.finalChannelStateDigest,
-            finalBalanceStateH1: intent.finalBalanceStateH1,
-            channelFundAmounts: intent.channelFundAmounts,
-            tokenRegistry: intent.tokenRegistry,
-            tokenCount: intent.tokenCount,
-            channelFundIntmaxStateRoot: intent.channelFundIntmaxStateRoot,
-            burnTxHash: intent.burnTxHash,
-            closeWithdrawalDigest: intent.closeWithdrawalDigest,
-            snapshotMediumBlockNumber: intent.snapshotMediumBlockNumber,
-            finalStateVersion: intent.finalStateVersion,
-            finalSettledTxChain: intent.finalSettledTxChain,
-            finalSettledTxAccumulatorRoot: intent.finalSettledTxAccumulatorRoot,
-            memberSetCommitment: manager.registeredMemberSetCommitment(),
-            memberCount: manager.activeMemberCount(),
-            // B-2: the registered delegate count is a FLOOR for the close bind. This mock proof lays
-            // out limb 94 AT the floor, which always satisfies the predicate.
-            minDelegateCount: uint32(manager.activeDelegateCount())
-        });
-        uint256[] memory limbs =
-            verifier.expectedCloseLimbs(fields, uint32(manager.activeDelegateCount()));
-        MleVerifier.MleProof memory proof;
-        proof.publicInputs = limbs;
+        MleVerifier.MleProof memory proof = FixtureLib.parseProof(_read("pw_close_intent_mle.json"));
 
         vm.startBroadcast();
         manager.submitPartialWithdrawalIntent(intent, proof, prevSettledTxChain, w);

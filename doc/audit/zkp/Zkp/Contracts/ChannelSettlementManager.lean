@@ -166,21 +166,26 @@ structure PartialState where
 
 /-- `submitPartialWithdrawalIntent` (:913-969). `closeProofOk` is the
     uninterpreted `_checkCloseProof` oracle (:921 — member-set-bound
-    MLE/WHIR); `chainBound` is the :927-930 keccak recompute ("the burn
-    tx_leaf is the LAST push of the signed chain"); `newerOk` is the
+    MLE/WHIR); `chainBound` is the IMTC keccak recompute ("the burn
+    descriptor is the LAST push of the signed chain"); `descriptorBound`
+    is the additional IMBD equality
+    `auxData = keccak(IMBD, txLeaf, recipient, tokenIndex, amount)`;
+    `newerOk` is the
     :937-941 strictly-newer replacement rule (vacuously true when no
     intent is pending). `authDigest`/`chainKey` are the :944/:932 keccak
     digests (opaque at this level). `now` is `block.timestamp`,
     `challengePeriod` the immutable period (:959). -/
 def submitPartialIntent (s : PartialState)
-    (closeProofOk chainBound newerOk : Prop)
-    [Decidable closeProofOk] [Decidable chainBound] [Decidable newerOk]
+    (closeProofOk chainBound descriptorBound newerOk : Prop)
+    [Decidable closeProofOk] [Decidable chainBound] [Decidable descriptorBound]
+    [Decidable newerOk]
     (authDigest chainKey : Word) (auxDataNonzero : Bool)
     (now challengePeriod : U256) : Call PartialState :=
   if s.channelActive = false then none                          -- :919 ChannelClosed
   else if ¬ closeProofOk then none                              -- :921 InvalidCloseProof
   else if auxDataNonzero = false then none                      -- :923 PartialWithdrawalAuxDataZero
   else if ¬ chainBound then none                                -- :930 PartialWithdrawalChainMismatch
+  else if ¬ descriptorBound then none                           -- PartialWithdrawalDescriptorMismatch
   else if s.usedChains.get chainKey = true then none            -- :933 PartialWithdrawalChainUsed
   else if s.pending = true ∧ ¬ newerOk then none                -- :941 PartialWithdrawalNotNewer
   else some { s with                                            -- :955-961
@@ -218,12 +223,14 @@ def cancelPartial (s : PartialState) (cancelProofOk : Prop) [Decidable cancelPro
     an ACTIVE channel with a fresh chain key: if the submit succeeded,
     the proof oracle held (and the chain key was unused). -/
 theorem submitPartialIntent_requires_proof {s s' : PartialState}
-    {closeProofOk chainBound newerOk : Prop}
-    [Decidable closeProofOk] [Decidable chainBound] [Decidable newerOk]
+    {closeProofOk chainBound descriptorBound newerOk : Prop}
+    [Decidable closeProofOk] [Decidable chainBound] [Decidable descriptorBound]
+    [Decidable newerOk]
     {authDigest chainKey : Word} {aux : Bool} {now cp : U256}
-    (h : submitPartialIntent s closeProofOk chainBound newerOk authDigest chainKey aux now cp
+    (h : submitPartialIntent s closeProofOk chainBound descriptorBound newerOk
+          authDigest chainKey aux now cp
           = some s') :
-    closeProofOk ∧ chainBound ∧ s.channelActive = true ∧
+    closeProofOk ∧ chainBound ∧ descriptorBound ∧ s.channelActive = true ∧
     s.usedChains.get chainKey = false := by
   unfold submitPartialIntent at h
   by_cases h1 : s.channelActive = false
@@ -238,10 +245,14 @@ theorem submitPartialIntent_requires_proof {s s' : PartialState}
   by_cases h4 : ¬ chainBound
   · rw [if_pos h4] at h; simp at h
   rw [if_neg h4] at h
+  by_cases hd : ¬ descriptorBound
+  · rw [if_pos hd] at h; simp at h
+  rw [if_neg hd] at h
   by_cases h5 : s.usedChains.get chainKey = true
   · rw [if_pos h5] at h; simp at h
   rw [if_neg h5] at h
-  refine ⟨Decidable.of_not_not h2, Decidable.of_not_not h4, ?_, ?_⟩
+  refine ⟨Decidable.of_not_not h2, Decidable.of_not_not h4,
+    Decidable.of_not_not hd, ?_, ?_⟩
   · cases hb : s.channelActive with
     | false => exact absurd hb h1
     | true => rfl
@@ -313,10 +324,11 @@ theorem finalizePartial_mints_only_pending {s s' : PartialState} {now : U256} {d
     authorize at most one withdrawal. -/
 theorem partial_chain_key_single_use {s s' : PartialState} {now : U256}
     (h : finalizePartial s now = some s')
-    {closeProofOk chainBound newerOk : Prop}
-    [Decidable closeProofOk] [Decidable chainBound] [Decidable newerOk]
+    {closeProofOk chainBound descriptorBound newerOk : Prop}
+    [Decidable closeProofOk] [Decidable chainBound] [Decidable descriptorBound]
+    [Decidable newerOk]
     {authDigest : Word} {aux : Bool} {now' cp : U256} :
-    submitPartialIntent s' closeProofOk chainBound newerOk authDigest
+    submitPartialIntent s' closeProofOk chainBound descriptorBound newerOk authDigest
       s.pendingChainKey aux now' cp = none := by
   have hused : s'.usedChains.get s.pendingChainKey = true :=
     (finalizePartial_authorizes h).2.1
@@ -333,6 +345,9 @@ theorem partial_chain_key_single_use {s s' : PartialState} {now : U256}
   by_cases h4 : ¬ chainBound
   · rw [if_pos h4]
   rw [if_neg h4]
+  by_cases hd : ¬ descriptorBound
+  · rw [if_pos hd]
+  rw [if_neg hd]
   rw [if_pos hused]
 
 /-- **Inhabitation (D6).** The submit → finalize pipeline is satisfiable:
@@ -344,7 +359,7 @@ theorem partial_pipeline_satisfiable :
         { channelActive := true, usedChains := fun _ => false, pending := false,
           pendingAuthDigest := 0, pendingChainKey := 0, pendingDeadline := 0,
           authorizedOnRollup := fun _ => false }
-        True True True 7 3 true 0 5 = some s1 ∧
+        True True True True 7 3 true 0 5 = some s1 ∧
       finalizePartial s1 6 = some s2 ∧
       s2.authorizedOnRollup.get 7 = true := by
   refine ⟨_, _, rfl, rfl, ?_⟩

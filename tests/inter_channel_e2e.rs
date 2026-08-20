@@ -47,8 +47,9 @@ use intmax3_zkp::{
     },
     wallet_core::{
         ChannelBalanceAttestation, MemberInfo, MemberKeys, add_signature,
-        assemble_genesis_state_backed, build_record, sign_state, sign_state_if_backed,
-        verify_all_signatures, verify_channel_backing,
+        assemble_genesis_state_backed, build_record, inter_channel_base_transfer,
+        inter_channel_tx_v2, sign_state, sign_state_if_backed, verify_all_signatures,
+        verify_channel_backing,
     },
 };
 use plonky2::{
@@ -80,9 +81,9 @@ impl ChannelProofVerifier for StructuralTransport {
         proof: &ChannelProofEnvelope,
         _pis: &ChannelStateUpdatePublicInputs,
     ) -> Result<(), ChannelStateUpdateError> {
-        if proof.proof.is_empty() {
+        if !proof.proof.is_empty() {
             return Err(ChannelStateUpdateError::ProofVerification(
-                "empty transport".into(),
+                "retired transport must be empty".into(),
             ));
         }
         Ok(())
@@ -118,15 +119,13 @@ fn zero_update_pis() -> ChannelStateUpdatePublicInputs {
 
 /// B-5c: this file's main flow is a STRUCTURAL SMOKE E2E — the soundness-bearing parts (real
 /// deposit backing, real E-2 `channelUpdateZKP`, `regev_pk_root`, §F-1) are genuine, but the
-/// transport / small-block validity is a documented base-layer artifact (detail2 §F-2) checked only
-/// for STRUCTURE via `StructuralTransport`, with constant stand-ins like `vec![7,7,7]`. The
+/// retired transport slot has one canonical empty representation. The
 /// soundness-bearing inter-channel negatives (forged N-of-N A-state with no committed debit,
 /// tampered amount, replay, atomicity) live in `tests/inter_channel_live.rs` and
 /// `tests/inter_channel_cli.rs`. This fast unit test at least pins the structural gate itself so it
-/// can never silently degrade to a no-op: an EMPTY transport is rejected (with the expected
-/// reason); a non-empty one passes.
+/// can never silently accept fake marker bytes: empty passes; non-empty is rejected.
 #[test]
-fn structural_transport_rejects_empty_proof() {
+fn structural_transport_accepts_only_canonical_empty_proof() {
     let pis = zero_update_pis();
 
     let empty = ChannelProofEnvelope {
@@ -134,25 +133,19 @@ fn structural_transport_rejects_empty_proof() {
         backend: ProofBackend::Plonky2,
         proof: vec![],
     };
-    let err = StructuralTransport.verify(&empty, &pis);
-    assert!(
-        err.is_err(),
-        "empty transport MUST be rejected by the structural gate"
-    );
-    let msg = format!("{:?}", err.unwrap_err());
-    assert!(
-        msg.contains("empty transport"),
-        "rejection must cite the empty transport, got: {msg}"
-    );
+    StructuralTransport
+        .verify(&empty, &pis)
+        .expect("empty is the canonical retired transport value");
 
     let nonempty = ChannelProofEnvelope {
         role: TransitionProofRole::IntmaxTransport,
         backend: ProofBackend::Plonky2,
         proof: vec![1],
     };
-    StructuralTransport
-        .verify(&nonempty, &pis)
-        .expect("a non-empty transport passes the structural gate");
+    assert!(
+        StructuralTransport.verify(&nonempty, &pis).is_err(),
+        "fake non-empty transport markers must be rejected"
+    );
 }
 
 fn tool_present(bin: &str) -> bool {
@@ -460,7 +453,9 @@ fn inter_channel_transfer_real_deposit_backed() {
         b_keys[0].pk_g(),
         receiver_delta.0.digest(),
     );
-    let tx_tree_root = Bytes32::from_u32_slice(&[0, 0, 0, 0, 0, 0, 0, 0x301]).unwrap(); // base-layer artifact
+    let base_transfer = inter_channel_base_transfer(b_keys[0].pk_g(), 0, AMT, tx_leaf);
+    let (_, base_tx_tree) = inter_channel_tx_v2(a_id, &base_transfer, 1);
+    let tx_tree_root = Bytes32::from(base_tx_tree.get_root());
 
     // SECURITY (TM-16): `tx_hash` is a DERIVED field, never a free-floating identifier — it is the
     // canonical token-bearing fold over `(ids(source, dest, token_index), tx_tree_root, tx_leaf)`.
@@ -513,24 +508,26 @@ fn inter_channel_transfer_real_deposit_backed() {
                 prev_small_block_root: Bytes32::default(),
                 tx_tree_root,
                 state_commitment_root: a_send.balance_state.h1(),
-                medium_epoch_hint: 3,
+                medium_epoch_hint: 0,
                 close_freeze_nonce: 0,
             },
             // base-layer artifact (B-2): structural signatures + aggregate proof.
             signatures: structural_smallblock_sigs(&a_record),
-            aggregated_signature_proof: vec![9, 9],
-            medium_block_number: 4,
-            confirmation_proof: vec![8, 8],
+            aggregated_signature_proof: vec![],
+            medium_block_number: 0,
+            confirmation_proof: vec![],
         },
         sender_delta_ct: sender_delta.0.clone(),
         source_channel_id: a_id,
         destination_channel_id: b_id,
         token_index: 0,
+        base_nonce: 1,
+        destination_base_transfer_salt: intmax3_zkp::common::salt::Salt::default(),
         source_pk_g: a_keys[0].pk_g(),
         seal: Bytes32::default(),
         tx_hash: inter_tx_hash,
-        intmax_transfer_commitment: Bytes32::default(),
-        recipient_memo: vec![1, 2, 3],
+        intmax_transfer_commitment: Bytes32::from(base_transfer.poseidon_hash()),
+        recipient_memo: vec![],
         receiver_deltas: vec![ReceiverBalanceDelta {
             receiver_pk_g: b_keys[0].pk_g(),
             amount: receiver_delta.0.clone(),
@@ -540,12 +537,12 @@ fn inter_channel_transfer_real_deposit_backed() {
             backend: ProofBackend::Plonky3,
             proof: e2,
         },
-        transport_proof: vec![7, 7, 7],
+        transport_proof: vec![],
     };
     let transport = ChannelProofEnvelope {
         role: TransitionProofRole::IntmaxTransport,
         backend: ProofBackend::Plonky2,
-        proof: vec![7, 7, 7],
+        proof: vec![],
     };
 
     // REAL member co-signing of the post-send state (the next_state IS member-signed; verified for
@@ -571,8 +568,8 @@ fn inter_channel_transfer_real_deposit_backed() {
     assert_eq!(pis.kind, ChannelTransitionKind::InterChannelSend);
     assert_eq!(pis.amount, AMT, "inter-channel amount is public");
 
-    // ---- Fund import on B: confirmed incoming → ChannelFund grows; settled_tx_chain absorbs
-    // tx_hash
+    // ---- Fund import on B: confirmed incoming → ChannelFund grows; one base receive folds the
+    // same tx leaf carried by Transfer.aux_data.
     let mut b_import = ChannelState {
         epoch: b_genesis.epoch + 1,
         small_block_number: 1,
@@ -585,7 +582,7 @@ fn inter_channel_transfer_real_deposit_backed() {
         balance_state: BalanceState {
             settled_tx_chain: settled_tx_chain_push(
                 b_genesis.balance_state.settled_tx_chain,
-                inter_tx.tx_hash,
+                tx_leaf,
             ),
             state_version: 1,
             ..b_genesis.balance_state.clone()
@@ -612,7 +609,7 @@ fn inter_channel_transfer_real_deposit_backed() {
     let ipis = import.verify(&tverify).expect("REAL fund import verifies");
     assert_eq!(ipis.kind, ChannelTransitionKind::InterChannelFundImport);
 
-    // ---- Receiver bundle apply on B: dave's slot += receiver_delta; settled_tx_chain absorbs leaf
+    // ---- Receiver bundle apply on B: dave's slot += receiver_delta; chain stays unchanged.
     let dave_after = add_ciphertexts(
         &b_import.balance_state.enc_balances[0][0],
         &receiver_delta.0,
@@ -626,10 +623,7 @@ fn inter_channel_transfer_real_deposit_backed() {
                 b_import.balance_state.enc_balances[1][0].clone(),
                 b_import.balance_state.enc_balances[2][0].clone(),
             ]),
-            settled_tx_chain: settled_tx_chain_push(
-                b_import.balance_state.settled_tx_chain,
-                tx_leaf,
-            ),
+            settled_tx_chain: b_import.balance_state.settled_tx_chain,
             state_version: 2,
             pending_adds: BalanceState::pad_pending_adds_token0(&[1, 0, 0]),
             ..b_import.balance_state.clone()

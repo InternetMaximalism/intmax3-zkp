@@ -6,9 +6,12 @@ use thiserror::Error;
 // share ONE channel identifier type with identical keccak digest semantics.
 pub use crate::common::channel_id::ChannelId;
 use crate::{
-    common::balance_state::{BalanceState, settled_tx_chain_push, tx_leaf_hash},
+    common::{
+        balance_state::{BalanceState, settled_tx_chain_push, tx_leaf_hash},
+        salt::Salt,
+    },
     constants::{
-        INTER_CHANNEL_TX_DOMAIN_V2, L1_DEPOSIT_IMPORT_DOMAIN_V2, MAX_CHANNEL_MEMBERS,
+        INTER_CHANNEL_TX_DOMAIN_V4, L1_DEPOSIT_IMPORT_DOMAIN_V2, MAX_CHANNEL_MEMBERS,
         MAX_CHANNEL_TOKENS, MAX_COSIGNERS, PAY_DOMAIN_V2, TOKEN_FUNDS_DIGEST_DOMAIN,
         WITHDRAWAL_CLAIM_DOMAIN_V2,
     },
@@ -32,17 +35,17 @@ pub(crate) const CHANNEL_STATE_DOMAIN: u32 = 0x494d4348; // "IMCH"
 // (`circuits::validity::block_hash_chain::small_block_message`) and must use the SAME domain limb.
 pub(crate) const SMALL_BLOCK_DOMAIN: u32 = 0x494d5342; // "IMSB"
 const SIGNED_SMALL_BLOCK_DOMAIN: u32 = 0x494d5353; // "IMSS"
-// "IMIT" (0x494d4954), the v1 inter-channel tx domain, is DELETED: `InterChannelTx::
-// signing_digest` is fully superseded by the IMI2 preimage under `INTER_CHANNEL_TX_DOMAIN_V2`
-// ("IMI2", detail2 §N-4 — the digest gains the base `token_index` as its own limb), and no
-// in-circuit recompute referenced it (the legacy cancel-close IMIT recompute was retired by the
-// Finding-D statement correction). Its value stays pinned (as a retired literal) in the
-// repo-wide domain non-collision test.
+// "IMIT" and "IMI2" are retired inter-channel schemas. `InterChannelTx::signing_digest` uses
+// IMI4, which binds the base token, independent base-account nonce, and destination transfer
+// salt. No circuit or Solidity code recomputes this variable-tail preimage; native consumers
+// share this method.
 const CLOSE_TX_DOMAIN: u32 = 0x494d434c; // "IMCL"
 const CLOSE_INTENT_DOMAIN: u32 = 0x494d4349; // "IMCI"
 const SPECIAL_CLOSE_DOMAIN: u32 = 0x494d5343; // "IMSC"
 const CANCEL_CLOSE_DOMAIN: u32 = 0x494d434e; // "IMCN"
 const POST_CLOSE_CLAIM_DOMAIN: u32 = 0x494d4350; // "IMCP"
+/// "IMBD" — amount-committing partial-withdrawal burn descriptor.
+pub const BURN_DESCRIPTOR_DOMAIN: u32 = 0x494d4244;
 // "IMCK" — domain separator for the post-close shared-native nullifier (HAZARD #8 fix). MUST match
 // the in-circuit derivation in `circuits::channel::post_close_claim_circuit` and the L1 mirror.
 const POST_CLOSE_NULLIFIER_DOMAIN: u32 = 0x494d434b; // "IMCK"
@@ -735,7 +738,7 @@ pub struct InterChannelTx {
     /// side resolving against its OWN H1-committed registry (`registry[t] == token_index && t <
     /// token_count`, unregistered ⇒ reject fail-closed).
     ///
-    /// SECURITY (TM-6/TM-15): bound into the IMI2 signing digest as its OWN canonical u32 limb
+    /// SECURITY (TM-6/TM-15): bound into the IMI3 signing digest as its OWN canonical u32 limb
     /// (below) AND into the E-2 channelUpdateZKP transcript as its own public value under the
     /// "IMU2" domain — so neither the descriptor nor the proof can be replayed for a different
     /// token.
@@ -746,6 +749,16 @@ pub struct InterChannelTx {
     /// structurally inexpressible. See `derive_shared_native_nullifier` for why the unversioned
     /// IMCK nullifier stays sound under this invariant.
     pub token_index: u32,
+    /// The source base account's next send nonce.  It is intentionally independent of
+    /// `signed_small_block.message.small_block_number`: receiving/importing channel transitions
+    /// advance the channel counter without consuming a base sent-tx slot.  H2 commits the TxV2
+    /// carrying this nonce, and IMI3 also binds this scalar directly for canonical reconstruction.
+    pub base_nonce: u32,
+    /// Salt for the normal base-layer UID recipient
+    /// `UID(destination_channel_id, destination_base_transfer_salt)`. It is signed under IMI4
+    /// and copied into the transfer descriptor so the destination can construct the exact
+    /// `ReceiveTransfer` witness. Burns use an ADDRESS_TAG recipient and MUST carry zero here.
+    pub destination_base_transfer_salt: Salt,
     pub source_pk_g: Bytes32,
     pub seal: Bytes32,
     pub tx_hash: Bytes32,
@@ -759,21 +772,25 @@ pub struct InterChannelTx {
 }
 
 impl InterChannelTx {
-    /// IMI2 signing digest (detail2 §C-6 + §N-4). `token_index` occupies its OWN canonical u32
-    /// limb between `destination_channel_id` and `source_pk_g` (TM-15: no bit-packing). The
-    /// domain was re-versioned "IMIT" → "IMI2" — see the rationale at
-    /// `constants::INTER_CHANNEL_TX_DOMAIN_V2` (variable-length tails make an in-place widening
-    /// rest on the v3 reset for the equal-total-length realignment case; a fresh domain removes
-    /// that reliance and no in-circuit/Solidity recompute of this preimage exists).
+    /// IMI4 signing digest. `token_index`, `base_nonce`, and all four 64-bit destination salt
+    /// limbs occupy canonical words (never bit-packed). IMI4 is a fresh domain because this
+    /// preimage has variable tails;
+    /// widening IMI2 in place would make schema separation depend on total-length alignment.
     pub fn signing_digest(&self) -> Bytes32 {
         hash_words(
             &[
-                vec![INTER_CHANNEL_TX_DOMAIN_V2],
+                vec![INTER_CHANNEL_TX_DOMAIN_V4],
                 self.signed_small_block.signing_digest().to_u32_vec(),
                 self.sender_delta_ct.digest().to_u32_vec(),
                 self.source_channel_id.to_u32_vec(),
                 self.destination_channel_id.to_u32_vec(),
                 vec![self.token_index],
+                vec![self.base_nonce],
+                self.destination_base_transfer_salt
+                    .to_u64_vec()
+                    .into_iter()
+                    .flat_map(split_u64)
+                    .collect::<Vec<_>>(),
                 self.source_pk_g.to_u32_vec(),
                 self.seal.to_u32_vec(),
                 self.tx_hash.to_u32_vec(),
@@ -838,7 +855,7 @@ impl InterChannelTx {
     /// MATERIAL): `keccak-fold(ids_without_token, fold(tx_tree_root, tx_leaf))` — byte-identical
     /// to the pre-TM-16 v1 `tx_hash` formula. The A-side spent ledger and the B-side applied
     /// ledger MUST key on THIS value, never on the token-bearing `tx_hash`: a malicious sender
-    /// can prove E-2 twice (token X and token Y) over the SAME deltas and present two IMI2-signed
+    /// can prove E-2 twice (token X and token Y) over the SAME deltas and present two IMI3-signed
     /// descriptors whose token-bearing hashes differ, so a `tx_hash`-keyed consumed set would
     /// double-credit one debit across two tokens. The identity strips the token limb, making the
     /// two descriptors collide in the ledger (second one refused fail-closed). Dest-binding
@@ -851,6 +868,28 @@ impl InterChannelTx {
             self.tx_leaf_hash()?,
         ))
     }
+}
+
+/// Amount-committing descriptor stored in a burn Transfer's `aux_data`:
+///
+/// `keccak256(abi.encodePacked(bytes4("IMBD"), txLeaf, recipient, tokenIndex, amount))`.
+///
+/// `recipient` is the 32-byte ADDRESS_TAG value as it appears in the base Transfer; `amount` is
+/// the full uint256. Normal inter-channel sends do not use this descriptor and keep aux_data zero.
+pub fn burn_descriptor(
+    tx_leaf: Bytes32,
+    recipient: Bytes32,
+    token_index: u32,
+    amount: U256,
+) -> Bytes32 {
+    let words: Vec<u32> = [BURN_DESCRIPTOR_DOMAIN]
+        .into_iter()
+        .chain(tx_leaf.to_u32_vec())
+        .chain(recipient.to_u32_vec())
+        .chain([token_index])
+        .chain(amount.to_u32_vec())
+        .collect();
+    Bytes32::from_u32_slice(&solidity_keccak256(&words)).expect("keccak output must be bytes32")
 }
 
 /// `tx_hash` identifier for an inter-channel tx (the L1-settled identifier referenced by the fund
@@ -1681,6 +1720,25 @@ mod tests {
         ChannelId::new(7).unwrap()
     }
 
+    #[test]
+    fn burn_descriptor_matches_frozen_cross_language_vector() {
+        // Solidity: keccak256(abi.encodePacked(bytes4("IMBD"), txLeaf, baseRecipient,
+        //                                      uint32(7), uint256(20))).
+        let tx_leaf =
+            Bytes32::from_hex("0x0000000000000000000000000000000000000000000000000000000000000001")
+                .unwrap();
+        let base_recipient =
+            Bytes32::from_hex("0x02000000000000000000000000000000000000000000000000000000000000aa")
+                .unwrap();
+        let expected =
+            Bytes32::from_hex("0xe53d8cf5a9b6cebadd222943673c931958739afde63b4a95c0cbc4ae0ddb5a0d")
+                .unwrap();
+        assert_eq!(
+            burn_descriptor(tx_leaf, base_recipient, 7, U256::from(20u64)),
+            expected
+        );
+    }
+
     /// A distinct, canonical member SPHINCS+ pubkey hash (Bytes32) per seed.
     fn pubkey_hash(seed: u32) -> Bytes32 {
         Bytes32::from_u32_slice(&[
@@ -2165,6 +2223,8 @@ mod tests {
             source_channel_id: sample_channel_id(),
             destination_channel_id: ChannelId::new(8).unwrap(),
             token_index: 0,
+            base_nonce: 12,
+            destination_base_transfer_salt: Salt::default(),
             source_pk_g: pubkey_hash(10),
             seal: Bytes32::default(),
             tx_hash: Bytes32::from_u32_slice(&[3, 0, 0, 0, 0, 0, 0, 0]).unwrap(),
@@ -2215,7 +2275,7 @@ mod tests {
         assert_ne!(tampered.signing_digest(), digest);
     }
 
-    /// TM-6/TM-15 (multitoken Phase 2b): the IMI2 digest binds the base `token_index` in its own
+    /// TM-6/TM-15: the IMI3 digest binds the base `token_index` in its own
     /// canonical limb — descriptors differing only in token_index have distinct digests, and the
     /// limb cannot alias its neighbors (own-limb discipline: swapping content between the
     /// token_index limb and an adjacent word changes the digest).

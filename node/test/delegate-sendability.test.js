@@ -20,7 +20,7 @@ function fakeStore(init = {}) {
 // A ctx just rich enough to drive doRefresh's success path (verifyCosignedStructural skips its
 // optional checks when there is no prior head and the payload carries no channel_tx).
 function fakeCtx({ store, available = true, refreshOk = true } = {}) {
-  const calls = { refresh: [] };
+  const calls = { refresh: [], finalize: [] };
   const ctx = {
     slot: 3,
     ch: { id: 7 },
@@ -32,8 +32,7 @@ function fakeCtx({ store, available = true, refreshOk = true } = {}) {
     wallet: {
       available: () => available,
       refresh: (slot, tokenSlot) => { calls.refresh.push({ slot, tokenSlot }); return { kind: 'refresh-payload' }; },
-      cosignVerify() {},
-      finalize() {},
+      finalize: (state) => { calls.finalize.push(state); return {}; },
     },
     api: {
       cosignRefresh: async () => {
@@ -127,6 +126,8 @@ test('ensureSendable: canSend:false triggers a refresh and then permits the send
   const { ctx, calls } = fakeCtx({ store });
   assert.equal(await ensureSendable(ctx, undefined), true);
   assert.equal(calls.refresh.length, 1);
+  assert.equal(calls.finalize.length, 1);
+  assert.equal(calls.finalize[0].digest, '0xnew', 'pass the raw ChannelState, not the API envelope');
   assert.equal(calls.refresh[0].tokenSlot, undefined, 'genesis refresh');
   assert.equal(store.get('witnessTokenSlot'), 0, 'refresh records the position it backs');
 });

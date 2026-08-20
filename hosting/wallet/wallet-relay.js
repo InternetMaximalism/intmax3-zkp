@@ -15,6 +15,7 @@ const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
 const { execFileSync, spawn } = require('child_process');
+const { publicBacking, baseHead } = require('./public-backing');
 
 const ROOT = __dirname; // hosting/wallet/ — serves wallet-live.html + wallet-worker.js
 const REPO = path.join(ROOT, '..', '..'); // repo root — target/, self_certs/, contracts/, pkg/, wallet-live-work/ live here (two levels up from hosting/wallet/)
@@ -547,8 +548,15 @@ app.get('/api/poll', (req, res) => {
 app.get('/api/backing', (req, res) => {
   try {
     const ch = reqChannel(req);
-    res.json(JSON.parse(fs.readFileSync(wc(ch, 'channel_backing.json'), 'utf8')));
+    res.json(publicBacking(JSON.parse(fs.readFileSync(wc(ch, 'channel_backing.json'), 'utf8'))));
   } catch (e) { res.status(404).json({ error: 'no deposit backing yet' }); }
+});
+
+app.get('/api/base-head', (req, res) => {
+  try {
+    const ch = reqChannel(req);
+    res.json(baseHead(JSON.parse(fs.readFileSync(wc(ch, 'channel_backing.json'), 'utf8'))));
+  } catch (e) { res.status(409).json({ error: String(e.message || e) }); }
 });
 
 // GET /api/tokens?channel=N — per-token channel view + VERIFIED display metadata (§N).
@@ -843,8 +851,10 @@ app.post('/api/cosign-burn', (req, res) => {
   const ch = reqChannel(req);
   withLock(ch, () => {
     const active = findActiveTicket(ch, 'partial_withdrawal');
-    if (active && active.status === 'burn_done') {
-      res.status(409).json({ error: 'settle pending burn first', ticket: active });
+    // Every non-terminal PW ticket owns last_burn.json; settle_pending/settle_blocked are just as
+    // unsafe to overwrite as burn_done.
+    if (active) {
+      res.status(409).json({ error: 'resolve the active partial withdrawal before burning again', ticket: active });
       return;
     }
     const { debitPayload, transferDescriptor } = req.body || {};

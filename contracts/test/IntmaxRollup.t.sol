@@ -1131,6 +1131,11 @@ contract IntmaxRollupTest is Test {
         assertTrue(ok);
         assertTrue(rollup.isFinalized(0));
         assertEq(rollup.latestFinalizedStateRoot(), stateRoot);
+        assertTrue(rollup.isFinalizedStateRoot(stateRoot), "finalized root getter");
+        assertFalse(
+            rollup.isFinalizedStateRoot(keccak256("unknown_state")),
+            "unknown root must not be reported finalized"
+        );
         // Pull-payment: stake credited to pendingWithdrawals, not pushed
         assertEq(rollup.pendingWithdrawals(submitter), 1 ether, "stake should be credited");
         vm.prank(submitter);

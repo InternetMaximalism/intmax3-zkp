@@ -198,7 +198,6 @@ const _: () = {
 
 /// Transcript length: per slot `h` packed (N/4) + `s2` packed (N/4) + `pi` raw (PI_COEFFS).
 const TRANSCRIPT_ELEMS_PER_SLOT: usize = N / 4 + N / 4 + PI_COEFFS; // 1279
-const TRANSCRIPT_ELEMS: usize = MAX_COSIGNERS * TRANSCRIPT_ELEMS_PER_SLOT; // 20464 = 2558 * 8
 
 // IN-CIRCUIT HELPERS
 // ================================================================================================
@@ -423,9 +422,9 @@ fn pack_coeffs_4x14<F: RichField + Extendable<D>, const D: usize>(
         .collect()
 }
 
-/// Fixed-length overwrite-mode Poseidon sponge over `absorbed` (whose length must be a multiple
-/// of the rate), capacity domain-separated with [`DOMAIN_FALCON_BATCH`]; returns the first `D`
-/// squeezed elements as the extension-field challenge `tau`.
+/// Fixed-length overwrite-mode Poseidon sponge over `absorbed` (zero-padded by the caller to a
+/// multiple of the rate), capacity domain-separated with [`DOMAIN_FALCON_BATCH`]; returns the first
+/// `D` squeezed elements as the extension-field challenge `tau`.
 ///
 /// SECURITY: same sponge conventions as the audited H2P mirror (`gadget::h2p_circuit`): the
 /// domain constant sits in the CAPACITY, rate blocks OVERWRITE, the length is a build-time
@@ -498,7 +497,7 @@ struct BatchSlotTarget {
 /// signatures over one shared message digest, exposing the tree's exact 137-element top-level
 /// contract. Consumer-facing API mirrors [`super::agg::FalconAggCircuit`]: `new()`,
 /// `verifier_data()`, `data()`, `prove(&FalconAggWitness)`.
-pub struct FalconBatchAggCircuit<F, C, const D: usize>
+pub struct FalconBatchAggCircuit<F, C, const D: usize, const SLOTS: usize = MAX_COSIGNERS>
 where
     F: RichField + Extendable<D>,
     C: GenericConfig<D, F = F>,
@@ -510,7 +509,7 @@ where
     pub num_gates_before_padding: usize,
 }
 
-impl<F, C, const D: usize> Default for FalconBatchAggCircuit<F, C, D>
+impl<F, C, const D: usize, const SLOTS: usize> Default for FalconBatchAggCircuit<F, C, D, SLOTS>
 where
     F: RichField + Extendable<D>,
     C: GenericConfig<D, F = F> + 'static,
@@ -521,13 +520,17 @@ where
     }
 }
 
-impl<F, C, const D: usize> FalconBatchAggCircuit<F, C, D>
+impl<F, C, const D: usize, const SLOTS: usize> FalconBatchAggCircuit<F, C, D, SLOTS>
 where
     F: RichField + Extendable<D>,
     C: GenericConfig<D, F = F> + 'static,
     <C as GenericConfig<D>>::Hasher: AlgebraicHasher<F>,
 {
     pub fn new() -> Self {
+        assert!(
+            (1..=MAX_COSIGNERS).contains(&SLOTS),
+            "Falcon batch circuit SLOTS must be in 1..={MAX_COSIGNERS}"
+        );
         // D >= 2 keeps the Schwartz-Zippel error at n/p^D <= 2^-117; a base-field tau (D = 1)
         // would leave a ~2^-54 forgery margin, far below the scheme's security level.
         assert!(
@@ -542,7 +545,7 @@ where
 
         // Presence flags: booleans, slot 0 forced active, monotone non-increasing (left-packed
         // prefix). `signer_count = sum(flags)` — no other witness feeds the count.
-        let flags: Vec<BoolTarget> = (0..MAX_COSIGNERS)
+        let flags: Vec<BoolTarget> = (0..SLOTS)
             .map(|_| builder.add_virtual_bool_target_safe())
             .collect();
         builder.assert_one(flags[0].target);
@@ -556,8 +559,9 @@ where
         let signer_count = builder.add_many(flags.iter().map(|b| b.target));
 
         // Per-slot witnesses + everything EXCEPT the product check (deferred to tau).
-        let mut slots: Vec<BatchSlotTarget> = Vec::with_capacity(MAX_COSIGNERS);
-        let mut transcript: Vec<Target> = Vec::with_capacity(TRANSCRIPT_ELEMS);
+        let transcript_elems = SLOTS * TRANSCRIPT_ELEMS_PER_SLOT;
+        let mut slots: Vec<BatchSlotTarget> = Vec::with_capacity(SLOTS);
+        let mut transcript: Vec<Target> = Vec::with_capacity(transcript_elems);
         let mut gated_pk_limbs: Vec<Target> = Vec::with_capacity(MAX_COSIGNERS * 8);
         let beta_sq = builder.constant(F::from_canonical_u64(FALCON_SIG_L2_BOUND));
         let zero = builder.zero();
@@ -659,7 +663,12 @@ where
 
         // Fiat-Shamir challenge over ALL slots' committed polynomials, then the per-slot
         // product checks pi_i(tau) == h_i(tau) * s2_i(tau).
-        assert_eq!(transcript.len(), TRANSCRIPT_ELEMS);
+        assert_eq!(transcript.len(), transcript_elems);
+        // The legacy/fixed-16 transcript is already rate-aligned (so its circuit and VK remain
+        // byte-for-byte unchanged). Sized 2/4/8 circuits have a compile-time-fixed length that is
+        // not rate-aligned; canonical trailing zeros make the final overwrite block complete.
+        // SLOTS is part of the circuit/VK, hence there is no variable-length padding ambiguity.
+        transcript.resize(transcript_elems.next_multiple_of(SPONGE_RATE), zero);
         let tau = transcript_challenge(&mut builder, &transcript);
         for slot in slots.iter() {
             let h_eval = eval_at_tau(&mut builder, &slot.h, tau);
@@ -672,6 +681,10 @@ where
         // Public inputs — the tree's exact top-level layout: message(8) | count(1) | 16 pk_g(8).
         builder.register_public_inputs(&message.to_vec());
         builder.register_public_input(signer_count);
+        // Consumer layout remains the fixed 16-slot/137-PI contract. A sized circuit constrains
+        // only its SLOTS prefix and exposes a constant-zero suffix, so close/cancel parsing does
+        // not change; only the verifier key does.
+        gated_pk_limbs.resize(MAX_COSIGNERS * 8, zero);
         builder.register_public_inputs(&gated_pk_limbs);
 
         let num_gates_before_padding = builder.num_gates();
@@ -707,8 +720,8 @@ where
     /// and same [`FalconAggWitness`] as the tree, ONE proof instead of up to 31.
     pub fn prove(&self, witness: &FalconAggWitness) -> Result<ProofWithPublicInputs<F, C, D>> {
         anyhow::ensure!(
-            (1..=MAX_COSIGNERS).contains(&witness.active.len()),
-            "FalconBatchAggCircuit: active signer count {} out of range 1..={MAX_COSIGNERS}",
+            (1..=SLOTS).contains(&witness.active.len()),
+            "FalconBatchAggCircuit: active signer count {} out of range 1..={SLOTS}",
             witness.active.len()
         );
         // Prover-side convenience only (fail early with a clear error); the binding check is

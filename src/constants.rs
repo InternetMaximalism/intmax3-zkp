@@ -233,6 +233,18 @@ pub const CHANNEL_UPDATE_ZKP_DOMAIN_V2: u32 = 0x494d5532;
 /// re-version costs one constant and removes that reliance entirely. v1 value stays pinned in
 /// `all_domain_constants_pairwise_distinct`.
 pub const INTER_CHANNEL_TX_DOMAIN_V2: u32 = 0x494d4932;
+/// "IMI3" — v3 inter-channel tx domain.  The descriptor gains an explicit base-account nonce
+/// instead of deriving `TxV2.nonce` from the channel's small-block counter.  Those counters have
+/// different semantics: incoming channel transitions advance the latter while only base sends
+/// advance the former.  Keeping IMI2 while inserting a limb would reintroduce the variable-tail
+/// realignment ambiguity documented above, so the schema change gets a fresh domain.
+pub const INTER_CHANNEL_TX_DOMAIN_V3: u32 = 0x494d4933;
+/// "IMI4" — v4 inter-channel tx domain. The canonical base-layer recipient for a normal
+/// channel-to-channel transfer is now the UID-tagged recipient derived from the destination
+/// channel id and an explicit transfer salt. The salt is part of the signed wire preimage; this
+/// makes the same value available to the destination `ReceiveTransfer` circuit without conflating
+/// it with the destination member's unrelated Regev/Falcon `pk_g`.
+pub const INTER_CHANNEL_TX_DOMAIN_V4: u32 = 0x494d4934;
 /// "IMTF" — token-funds digest domain (detail2 §N-6, TM-11). Domain of
 /// `token_funds_digest = keccak([IMTF, registry(10 x u32, zero-padded), token_count,
 /// amounts(10 x U256, zero-padded)])` — ALWAYS full width.
@@ -260,6 +272,8 @@ mod tests {
         assert_eq!(WITHDRAWAL_CLAIM_DOMAIN_V2, u32::from_be_bytes(*b"IMW2"));
         assert_eq!(CHANNEL_UPDATE_ZKP_DOMAIN_V2, u32::from_be_bytes(*b"IMU2"));
         assert_eq!(INTER_CHANNEL_TX_DOMAIN_V2, u32::from_be_bytes(*b"IMI2"));
+        assert_eq!(INTER_CHANNEL_TX_DOMAIN_V3, u32::from_be_bytes(*b"IMI3"));
+        assert_eq!(INTER_CHANNEL_TX_DOMAIN_V4, u32::from_be_bytes(*b"IMI4"));
         assert_eq!(TOKEN_FUNDS_DIGEST_DOMAIN, u32::from_be_bytes(*b"IMTF"));
     }
 
@@ -316,6 +330,7 @@ mod tests {
                 0x494d_4248,
             ),
             ("IMTL TX_LEAF_DOMAIN (balance_state.rs)", 0x494d_544c),
+            ("IMBD BURN_DESCRIPTOR_DOMAIN (channel.rs)", 0x494d_4244),
             (
                 "IMTC SETTLED_TX_CHAIN_DOMAIN (balance_state.rs)",
                 0x494d_5443,
@@ -393,6 +408,14 @@ mod tests {
             (
                 "IMI2 INTER_CHANNEL_TX_DOMAIN_V2",
                 INTER_CHANNEL_TX_DOMAIN_V2,
+            ),
+            (
+                "IMI3 INTER_CHANNEL_TX_DOMAIN_V3",
+                INTER_CHANNEL_TX_DOMAIN_V3,
+            ),
+            (
+                "IMI4 INTER_CHANNEL_TX_DOMAIN_V4",
+                INTER_CHANNEL_TX_DOMAIN_V4,
             ),
             ("IMTF TOKEN_FUNDS_DIGEST_DOMAIN", TOKEN_FUNDS_DIGEST_DOMAIN),
             // Falcon-512/Poseidon signing key (falcon_sig/mod.rs, threat model

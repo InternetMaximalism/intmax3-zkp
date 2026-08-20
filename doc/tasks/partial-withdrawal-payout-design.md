@@ -1,7 +1,9 @@
 # Threat model + design: the proof-backed partial-withdrawal payout (`cmd_partial_withdraw`)
 
-Branch: `feat/falcon-poseidon-sig` (HEAD `ea87604`). Status: **DESIGN ONLY — no code written, nothing
-committed, no proving run.** Requires owner sign-off on §7 before any implementation.
+Original design branch: `feat/falcon-poseidon-sig` (HEAD `ea87604`). Current status:
+**PHASES 0–2 IMPLEMENTED AND PROVING END-TO-END ON CURRENT `main`; PHASE 3 PAYOUT REMAINS
+UNIMPLEMENTED.** The implementer adversarial review for P0-2 is recorded below, but the required
+independent review must still be performed by someone other than the implementer before deployment.
 
 Predecessors, read first: `doc/tasks/pw-auth-threat-model.md` (why the old payout was deleted),
 `doc/tasks/todo.md:85-105` (the tracked GAP2 work), `doc/tasks/b2-delegate-close-threat-model.md`
@@ -642,10 +644,19 @@ in the repo. Same security as B for strictly more blast radius. Reject.
       (The fold is `keccak(IMTC, prev, aux)`; two preimages hitting one output is a collision, but the
       *choice of which link in the chain* to point at is caller-controlled and needs explicit
       analysis.)
-- [ ] **P0-3.** Decision D1 (§7) taken: descriptor layout frozen, domain tag allocated and checked
+      **Implementer adversarial pass (2026-08-19; not the required independent sign-off):** the
+      close circuit connects the same `finalSettledTxChain` target to (a) the recomputed, member-
+      signed H1 and (b) the recursively verified balance proof's `settled_tx_chain`. The Manager
+      then requires `keccak(IMTC, prevSettledTxChain, withdrawal.auxData)` to equal that target. A
+      caller may choose which historical link to *claim*, but for any choice other than the actual
+      predecessor it must find a second preimage (or collision) for Keccak; there is no unconstrained
+      selector or alternative chain input in the close proof. The additional IMBD equality then
+      binds the accepted `auxData` to `txLeaf/recipient/token/amount`. No forgery was found. This
+      paragraph deliberately does not check P0-2: a separate reviewer must reproduce the result.
+- [x] **P0-3.** Decision D1 (§7) taken: descriptor layout frozen, domain tag allocated and checked
       against every existing 4-byte tag in the repo for collisions (`IMTL 0x494d544c`,
       `IMTC 0x494d5443`, `IMPW 0x494d5057`, `IMTF`, `IMCH`, `IMCI`, `IMSB`, `IMBS`, …).
-- [ ] **P0-4.** A negative test exists and **fails on today's code**: given an honest co-signed burn of
+- [x] **P0-4.** A negative test exists and **fails on the pre-fix code**: given an honest co-signed burn of
       `X`, a base leaf of `Y > X` with the same `auxData` is accepted end to end. This is the
       regression this whole phase exists to prevent; if it cannot be made to fail today, the threat
       model is wrong and must be revised before proceeding.
@@ -805,25 +816,28 @@ that require proving and are therefore USER ACTIONS.
 
 See §2.3 for P0-1..P0-4, plus:
 
-- [ ] **P0-5.** `burn_aux` becomes the descriptor in `src/wallet_core.rs:2094-2100`, and identically
+- [x] **P0-5.** `burn_aux` becomes the descriptor in `src/wallet_core.rs:2094-2100`, and identically
       in `src/wasm_wallet.rs:596` and anywhere the browser/node stack recomputes it. **Falsifiable:**
       a cross-language parity test asserts Rust and JS produce the same 32 bytes for the same burn.
-- [ ] **P0-6.** `submitPartialWithdrawalIntent` gains the recompute check and a new revert
+- [x] **P0-6.** `submitPartialWithdrawalIntent` gains the recompute check and a new revert
       (`PartialWithdrawalDescriptorMismatch`). **Falsifiable:** (a) a Foundry test where the intent's
       `amount` is tampered by ±1 reverts with the new error; (b) the honest tuple still passes;
       (c) `forge test` total ≥ current baseline with 0 failures.
-- [ ] **P0-7.** The co-sign path checks the descriptor against the E-2 public amount
+- [x] **P0-7.** The co-sign path checks the descriptor against the E-2 public amount
       (`src/bin/channel_member.rs:4693-4718` neighbourhood). **Falsifiable:** a Rust test where the
       descriptor declares `X+1` while E-2 proves `X` is rejected at co-sign, with a named error.
-- [ ] **P0-8.** The Lean model records the new conjunct, or explicitly records it as unmodelled.
+- [x] **P0-8.** The Lean model records the new conjunct, or explicitly records it as unmodelled.
       `cd doc/audit/zkp && lake build` clean, zero `sorry`.
-- [ ] ⚠ **Fixture impact:** none expected under C. **Falsify this**: `forge test` must be green
-      *without* regeneration. If any fixture moves, C's "no VK change" premise is wrong and the phase
-      halts.
-- [ ] **P0-9 (NEW — makes 1-of-N honesty real for this lane, §1.12).** Wire the era fence into the PW
-      lane so one honest member's `requestClose()` invalidates a pending partial withdrawal:
-      `submitPartialWithdrawalIntent` requires `intent.closeFreezeNonce == currentCloseFreezeNonce`
-      (mirroring `ChannelSettlementManager.sol:932-934`/`:948-950`), and `finalizePartialWithdrawal`
+- [x] ⚠ **Fixture impact:** no circuit/VK regeneration was required by C itself. `forge test` is
+      green with the existing VKs; the separate Manager-address fixture refresh below was required.
+- [x] **P0-9 (NEW — makes 1-of-N honesty real for this lane, §1.12).** Wire the era fence into the PW
+      lane so one honest member's `requestClose()` invalidates a pending partial withdrawal.
+      **Correction found during implementation (2026-08-19):** the close circuit exposes
+      `signedState.close_freeze_nonce + 1` (`close_circuit.rs`,
+      `incremented_close_freeze_nonce`), so an Active-era PW must require
+      `intent.closeFreezeNonce == currentCloseFreezeNonce + 1`, then persist the manager's current
+      era separately. The former equality written here would brick every real genesis-era proof
+      (`1 != 0`) and only worked with the mocked zero PI. `finalizePartialWithdrawal`
       re-checks that the era has not moved since submission. The 12B comment at `:1245-1248` is
       rewritten to state its real premise — that it was sound *because* the burned amount equalled
       the payout, which is what §2 now enforces — rather than being silently deleted.
@@ -839,39 +853,40 @@ See §2.3 for P0-1..P0-4, plus:
       burner may re-burn and re-submit, and `requestClose` reverts once the channel is already
       frozen (`:899-900`). Accepted as the price of a 1-of-N veto; recorded rather than engineered
       around.
-- [ ] ⚠ **Manager bytecode changes ⇒ CREATE2 address changes ⇒
+- [x] ⚠ **Manager bytecode changes ⇒ CREATE2 address changes ⇒
       `CloseLifecycleE2E.t.sol::test_closeLifecycle_endToEnd` fails on the baked recipient.** This is
       the known, documented consequence of *any* manager edit
       (`doc/tasks/a3-p5-plus-plan.md:42`; procedure at `doc/tasks/pw-auth-threat-model.md:486-510`).
       **HEAVY — one fixture set (`close_withdrawal_payout.json` + `close_withdrawal_mle.json`), USER
-      ACTION.**
+      ACTION.** **DONE 2026-08-19:** regenerated against manager
+      `0xE3024F77093f481Ce393c9251f898B00a89B5613`; full guarded Foundry suite is green.
 
 ### Phase 1 — de-mock the submit path
 
-- [ ] **P1-1.** `cmd_pw_submit` sources `close_nonce`, `close_freeze_nonce`, `burn_tx_hash`,
+- [x] **P1-1.** `cmd_pw_submit` sources `close_nonce`, `close_freeze_nonce`, `burn_tx_hash`,
       `close_withdrawal_digest`, `snapshot_medium_block_number` from a **real** close proof's PIs
       instead of the literals at `src/bin/channel_member.rs:6310`, `:6313`, `:6318-6320`.
       **Falsifiable:** grep for hardcoded `0u64`/`1u64` in the PW intent builder returns nothing.
-- [ ] **P1-2.** `SubmitPartialWithdrawal.s.sol` stops synthesising `publicInputs` from
+- [x] **P1-2.** `SubmitPartialWithdrawal.s.sol` stops synthesising `publicInputs` from
       `expectedCloseLimbs` (`:81-84`) and consumes a real proof file.
-- [ ] **P1-3.** `DeployPartialWithdrawalE2E.s.sol` and `DeployWalletSettlement.s.sol` gain
+- [x] **P1-3.** `DeployPartialWithdrawalE2E.s.sol` and `DeployWalletSettlement.s.sol` gain
       `require(block.chainid == 31337)`, matching the five scripts that already have it
       (`doc/tasks/pw-auth-threat-model.md:433-440`). **Falsifiable:** a `DeployGuards.t.sol` case
       asserts the revert.
-- [ ] ⚠ **HEAVY** — a real close proof for the mid-burn state must be generated for the E2E.
+- [x] ⚠ **HEAVY** — a real close proof for the mid-burn state is generated and consumed by the E2E.
 
 ### Phase 2 — fix the nullifier and the intent's provenance *(closes T10)*
 
-- [ ] **P2-1.** `cmd_pw_submit` derives the nullifier via `SettledTransfer::nullifier()` from the
+- [x] **P2-1.** `cmd_pw_submit` derives the nullifier via `SettledTransfer::nullifier()` from the
       burn artefact. The keccak at `src/bin/channel_member.rs:6282-6288` is **deleted**, not kept
       alongside. **Falsifiable:** a unit test asserts the CLI's nullifier equals the one the
       `single_withdrawal` circuit commits for the same burn.
-- [ ] **P2-2.** `withdrawal_recipient` and `withdrawal_amount` come from `last_burn.json`, never from
+- [x] **P2-2.** `withdrawal_recipient` and `withdrawal_amount` come from `last_burn.json`, never from
       `PW_RECIPIENT` or the request body. `PW_RECIPIENT`, if kept, becomes an *assertion* input:
       mismatch ⇒ die before touching the chain. **Falsifiable:** setting `PW_RECIPIENT` to a
       different member's address aborts locally with a named error and sends no transaction.
-- [ ] **P2-3.** `tests/partial_withdrawal_e2e.rs:452-458` stops using the literal `0xBEEF`.
-- [ ] **P2-4.** A burn-time guard rejects a burn whose `nonce` slot is already occupied in the base
+- [x] **P2-3.** `tests/partial_withdrawal_e2e.rs:452-458` stops using the literal `0xBEEF`.
+- [x] **P2-4.** A burn-time guard rejects a burn whose `nonce` slot is already occupied in the base
       account's sent-tx tree (§3.4(ii)), with a message naming the divergence.
 
 ### Phase 3 — `cmd_partial_withdraw` *(the payout leg)*

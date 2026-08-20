@@ -67,26 +67,32 @@ class Wallet {
     void slot; // session-internal
     return JSON.parse(this._load().wallet_refresh(tokenSlot));
   }
-  // wallet_send_inter_channel(to_channel, to_slot, amount, dest_recipient_json, token_index?: u32)
-  sendInterChannel(toChannel, toSlot, amount, destRecipientJson, tokenIndex) {
+  // wallet_send_inter_channel(..., token_index?: u32, base_nonce: u32)
+  sendInterChannel(toChannel, toSlot, amount, destRecipientJson, tokenIndex, baseNonce) {
+    if (!Number.isInteger(baseNonce) || baseNonce < 0 || baseNonce > 0xffffffff) {
+      throw new Error('a current uint32 base nonce is required for an inter-channel send');
+    }
     return JSON.parse(
-      this._load().wallet_send_inter_channel(toChannel, toSlot, BigInt(amount), JSON.stringify(destRecipientJson), tokenIndex)
+      this._load().wallet_send_inter_channel(
+        toChannel, toSlot, BigInt(amount), JSON.stringify(destRecipientJson), tokenIndex, baseNonce
+      )
     );
   }
-  // wallet_burn_send(amount, withdrawal_address_hex, token_index?: u32)
-  burnSend(amount, withdrawalAddrHex, tokenIndex) {
-    return JSON.parse(this._load().wallet_burn_send(BigInt(amount), withdrawalAddrHex, tokenIndex));
+  // wallet_burn_send(amount, withdrawal_address_hex, token_index?: u32, base_nonce: u32)
+  burnSend(amount, withdrawalAddrHex, tokenIndex, baseNonce) {
+    if (!Number.isInteger(baseNonce) || baseNonce < 0 || baseNonce > 0xffffffff) {
+      throw new Error('a current uint32 base nonce is required for a burn');
+    }
+    return JSON.parse(
+      this._load().wallet_burn_send(BigInt(amount), withdrawalAddrHex, tokenIndex, baseNonce)
+    );
   }
 
-  // Verification + commit of a co-signed result (the delegate's verifyCosigned gate, DESIGN.md §4.4)
-  cosignVerify(slot, proposedStateJson) {
-    // wallet_cosign re-verifies the proposed state transition and returns this member's signature;
-    // for a delegate we use it purely to validate the co-signed state structure/signatures.
-    void slot; // session-internal
-    return JSON.parse(this._load().wallet_cosign(JSON.stringify(proposedStateJson)));
-  }
-  finalize(finalizationJson) {
-    this._load().wallet_finalize(JSON.stringify(finalizationJson));
+  // Verify every real member signature, verify/decrypt this wallet's own slot, and atomically
+  // adopt the new head. wallet_finalize accepts a raw ChannelState (not an API response envelope)
+  // and returns the new multi-token balance report.
+  finalize(stateJson) {
+    return JSON.parse(this._load().wallet_finalize(JSON.stringify(stateJson)));
   }
 
   available() {

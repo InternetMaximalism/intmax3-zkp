@@ -83,11 +83,11 @@ by diff.
 - Build native release once: `cargo build --release --locked`.
 - Contracts build: `cd contracts && forge build`.
 - Decide the target network + set `.env` (see `contracts/.env.example` and
-  `api/.env.example`): `FRAUD_TREASURY`, `BLOCK_PRODUCER`, `INTMAX_DEPOSIT_KEY`,
+  `api/env.example`): `FRAUD_TREASURY`, `BLOCK_PRODUCER`, `INTMAX_L1_ACCOUNT`,
+  `ETH_PASSWORD` (an absolute root-only password-file path, not password text),
   `INTMAX_COSIGNER_KEYFILE`, `INTMAX_API_TOKEN`, `INTMAX_ALLOWED_ORIGINS`.
-  `INTMAX_DEPOSIT_KEY` unset makes the *Rust CLI* silently fall back to the public anvil dev key
-  (`channel_member.rs:877`; `api/lib/cli.js` guards this, the binary does not) — always set it
-  explicitly for a real network.
+  On every non-31337 chain the Rust CLI and API reject `INTMAX_DEPOSIT_KEY` and require the named
+  encrypted Foundry keystore; only `--account <name>` reaches child argv.
 
 ## Step 1 — regenerate fixtures (release; each is minutes of proving)
 Run from repo root. Feature-gated generators un-gate the shared witness builders.
@@ -258,7 +258,7 @@ $EDITOR deploy-staging/ch7/tokens.json
 #    with an already-set index REVERTS — set-once is never an "update")
 cd contracts && TOKENS_MANIFEST=../deploy-staging/ch7/tokens.json \
   forge script script/RegisterTokens.s.sol --rpc-url "$RPC_URL" \
-  --private-key "$(cat "$PRIV")" --broadcast --slow      # NEVER echo/print the key
+  --account "$INTMAX_L1_ACCOUNT" --broadcast --slow
 
 # 3) confirm (the script also reads back `tokenAddressOf` itself and reverts on a mismatch)
 cast call <rollup> "tokenAddressOf(uint32)(address)" 5 --rpc-url "$RPC_URL"
@@ -312,8 +312,8 @@ CLI=$PWD/target/release/channel_member
 # 1) deploy $ITX. TESTNET-ONLY contract — it lives under contracts/test/ on purpose and must never
 #    be referenced from contracts/src/ or a mainnet script. Fixed supply, no mint entry point.
 ( cd contracts && forge create test/tokens/IntmaxTestTokenITX.sol:IntmaxTestTokenITX \
-    --rpc-url "$RPC_URL" --private-key "$(cat "$PRIV")" --broadcast \
-    --constructor-args "$ITX_SUPPLY" )     # prints `Deployed to: 0x…`   # NEVER echo/print the key
+    --rpc-url "$RPC_URL" --account "$INTMAX_L1_ACCOUNT" --broadcast \
+    --constructor-args "$ITX_SUPPLY" )     # prints `Deployed to: 0x…`
 export ITX=0x…
 
 # 2) register it on the rollup's SET-ONCE registry, through the manifest (Step 3b machinery).
@@ -322,7 +322,7 @@ export ITX=0x…
 #        "address": "<ITX>" }
 ( cd contracts && TOKENS_MANIFEST=../deploy-staging/ch$CHANNEL/tokens.json \
     forge script script/RegisterTokens.s.sol --rpc-url "$RPC_URL" \
-    --private-key "$(cat "$PRIV")" --broadcast --slow )
+    --account "$INTMAX_L1_ACCOUNT" --broadcast --slow )
 cast call "$ROLLUP" "tokenAddressOf(uint32)(address)" "$ITX_TOKEN_INDEX" --rpc-url "$RPC_URL"
 
 # 3) give ITX a LOCAL slot in the channel: an append-only, N-of-N-cosigned TokenRegister.
@@ -334,13 +334,13 @@ cast call "$ROLLUP" "tokenAddressOf(uint32)(address)" "$ITX_TOKEN_INDEX" --rpc-u
 #    credits a MEASURED balanceOf delta (fee-on-transfer tokens fail closed here).
 DEPOSIT_RECIPIENT=$(jq -r .deposit_recipient $WORK/channel_backing.json)
 cast send "$ITX" "approve(address,uint256)" "$ROLLUP" "$FAUCET_SUPPLY" \
-  --rpc-url "$RPC_URL" --private-key "$(cat "$PRIV")"
+  --rpc-url "$RPC_URL" --account "$INTMAX_L1_ACCOUNT"
 # Capture the REAL deposit tx hash — the import is verified against this transaction's on-chain
 # `Deposited` log (doc/tasks/deposit-import-threat-model.md).
 DEPOSIT_TX=$(cast send "$ROLLUP" "deposit(bytes32,uint32,uint256,bytes32)" \
   "$DEPOSIT_RECIPIENT" "$ITX_TOKEN_INDEX" "$FAUCET_SUPPLY" \
   0x0000000000000000000000000000000000000000000000000000000000000000 \
-  --value 0 --rpc-url "$RPC_URL" --private-key "$(cat "$PRIV")" --json | jq -r .transactionHash)
+  --value 0 --rpc-url "$RPC_URL" --account "$INTMAX_L1_ACCOUNT" --json | jq -r .transactionHash)
 
 # 5) import the deposit to the FAUCET member (cosigned). The amount, depositor and base
 #    token_index are READ FROM THE CHAIN — they are no longer arguments, so they cannot be

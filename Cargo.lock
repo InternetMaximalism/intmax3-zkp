@@ -1359,6 +1359,7 @@ dependencies = [
  "js-sys",
  "keccak-hash",
  "lazy_static",
+ "libc",
  "log",
  "num",
  "num-bigint 0.4.6",

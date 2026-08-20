@@ -55,6 +55,7 @@ class ApiClient {
   getSnapshot(id) { return this._req('GET', this.ch(id, '/snapshot')); }
   getStatus(id) { return this._req('GET', this.ch(id, '/status')); }
   getBacking(id) { return this._req('GET', this.ch(id, '/backing')); }
+  getBaseHead(id) { return this._req('GET', this.ch(id, '/base-head')); }
   getTickets(id) { return this._req('GET', this.ch(id, '/tickets')); }
 
   // --- co-sign (delegate → co-signer) ---

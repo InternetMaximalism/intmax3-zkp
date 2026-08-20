@@ -90,6 +90,26 @@ impl WithdrawalClaimWitness {
         &self,
         level: RegevSecurityLevel,
     ) -> Result<WithdrawalClaimPublicInputs, WithdrawalClaimWitnessError> {
+        self.to_public_inputs_inner(level, true)
+    }
+
+    /// Build the same public statement for the final Plonky2 claim circuit, whose decryption
+    /// gadget proves `(pk, sk, ct, amount)` directly. Generating and verifying an additional E-3
+    /// STARK here used to add a ~223 KB transient proof and duplicate work that was not embedded
+    /// in the final witness. Every structural, H1, recipient, nullifier and ciphertext binding
+    /// below remains mandatory; only that redundant external proof is skipped.
+    pub(crate) fn to_public_inputs_for_in_circuit_decryption(
+        &self,
+        level: RegevSecurityLevel,
+    ) -> Result<WithdrawalClaimPublicInputs, WithdrawalClaimWitnessError> {
+        self.to_public_inputs_inner(level, false)
+    }
+
+    fn to_public_inputs_inner(
+        &self,
+        level: RegevSecurityLevel,
+        verify_external_claim_proof: bool,
+    ) -> Result<WithdrawalClaimPublicInputs, WithdrawalClaimWitnessError> {
         if self.claim.close_intent_digest != self.close_intent.signing_digest() {
             return Err(WithdrawalClaimWitnessError::CloseIntentMismatch);
         }
@@ -186,14 +206,16 @@ impl WithdrawalClaimWitness {
         }
 
         // E-3 withdrawClaimZKP: user_amount_ct decrypts to the public amount under user_pk.
-        verify_withdraw_claim(
-            level,
-            &self.user_pk,
-            &self.claim.user_amount_ct,
-            self.amount,
-            &self.claim.claim_proof,
-        )
-        .map_err(|err| WithdrawalClaimWitnessError::InvalidClaimProof(err.to_string()))?;
+        if verify_external_claim_proof {
+            verify_withdraw_claim(
+                level,
+                &self.user_pk,
+                &self.claim.user_amount_ct,
+                self.amount,
+                &self.claim.claim_proof,
+            )
+            .map_err(|err| WithdrawalClaimWitnessError::InvalidClaimProof(err.to_string()))?;
+        }
 
         Ok(WithdrawalClaimPublicInputs {
             close_intent_digest: self.close_intent.signing_digest(),

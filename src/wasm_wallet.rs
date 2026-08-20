@@ -496,6 +496,15 @@ pub fn wallet_send(
     })
 }
 
+/// Project a just-built [`SendPayload`] into the versioned binary slim wire. Keeping this inside
+/// Rust avoids re-encoding megabytes of Regev coefficients and proof bytes as decimal JSON in the
+/// browser, while reusing the exact production projection and codec consumed by the CLI.
+#[wasm_bindgen]
+pub fn wallet_slim_send_wire(payload_json: String) -> Result<Vec<u8>, JsValue> {
+    let payload: SendPayload = serde_json::from_str(&payload_json).map_err(js_err)?;
+    payload.to_slim().to_wire_bytes().map_err(js_err)
+}
+
 /// Inter-channel send: debit `amount` from this wallet's slot and produce the cross-channel
 /// transfer to `to_slot` in `to_channel`. `dest_recipient_json` = `{ "regevPk": <RegevPk>, "pkG":
 /// "0x.." }` of the destination channel's recipient slot (the browser reads it from channel B's
@@ -515,6 +524,7 @@ pub fn wallet_send_inter_channel(
     amount: u64,
     dest_recipient_json: String,
     token_index: Option<u32>,
+    base_nonce: Option<u32>,
 ) -> Result<String, JsValue> {
     #[derive(Deserialize)]
     #[serde(rename_all = "camelCase")]
@@ -539,6 +549,11 @@ pub fn wallet_send_inter_channel(
                 js_err("no spendable balance witness (a refresh is required after receiving)")
             })?;
         let token_index = token_index.unwrap_or(snapshot.state.balance_state.token_registry[0]);
+        let base_nonce = base_nonce.ok_or_else(|| {
+            js_err(
+                "base nonce is required: read the current live base head immediately before proving",
+            )
+        })?;
         // The held witness must back the LOCAL position this base token resolves to (TM-6).
         let local_slot =
             resolve_local_token_slot(&snapshot.state.balance_state, token_index).map_err(js_err)?;
@@ -559,7 +574,10 @@ pub fn wallet_send_inter_channel(
             *w = rand010::Rng::next_u32(&mut rng);
         }
         let new_nullifier_root = Bytes32::from_u32_slice(&nr).map_err(js_err)?;
-        let built = crate::wallet_core::build_inter_channel_send_token(
+        // The UID recipient opening is public in the returned descriptor, but is generated in
+        // Rust so every caller gets a fresh canonical salt without a JS-side encoding ambiguity.
+        let destination_base_transfer_salt = crate::common::salt::Salt::rand(&mut rng);
+        let built = crate::wallet_core::build_inter_channel_send_token_at_base_nonce(
             &session.keys,
             &snapshot,
             slot,
@@ -567,7 +585,9 @@ pub fn wallet_send_inter_channel(
             to_slot,
             dest.regev_pk,
             dest_pk_g,
+            destination_base_transfer_salt,
             token_index,
+            base_nonce,
             amount,
             before_amount,
             &before_witness,
@@ -605,6 +625,7 @@ pub fn wallet_burn_send(
     amount: u64,
     withdrawal_address_hex: String,
     token_index: Option<u32>,
+    base_nonce: Option<u32>,
 ) -> Result<String, JsValue> {
     #[derive(Serialize)]
     #[serde(rename_all = "camelCase")]
@@ -623,6 +644,11 @@ pub fn wallet_burn_send(
                 js_err("no spendable balance witness (a refresh is required after receiving)")
             })?;
         let token_index = token_index.unwrap_or(snapshot.state.balance_state.token_registry[0]);
+        let base_nonce = base_nonce.ok_or_else(|| {
+            js_err(
+                "base nonce is required: read the current live base head immediately before proving",
+            )
+        })?;
         let local_slot =
             resolve_local_token_slot(&snapshot.state.balance_state, token_index).map_err(js_err)?;
         if witness_token as usize != local_slot {
@@ -639,12 +665,13 @@ pub fn wallet_burn_send(
             *w = rand010::Rng::next_u32(&mut rng);
         }
         let new_nullifier_root = Bytes32::from_u32_slice(&nr).map_err(js_err)?;
-        let built = crate::wallet_core::build_burn_send_token(
+        let built = crate::wallet_core::build_burn_send_token_at_base_nonce(
             &session.keys,
             &snapshot,
             slot,
             address,
             token_index,
+            base_nonce,
             amount,
             before_amount,
             &before_witness,

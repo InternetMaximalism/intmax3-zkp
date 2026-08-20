@@ -35,9 +35,6 @@ use std::{
     time::Duration,
 };
 
-/// A funded-looking but throwaway key. NOT the anvil dev key — one test asserts that that key is
-/// specifically refused, so the others must not use it.
-const THROWAWAY_KEY: &str = "0x59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690d";
 /// The PUBLIC anvil dev account[0] key, verbatim as the CLI knows it.
 const ANVIL_DEV_KEY: &str = "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80";
 const TREASURY: &str = "0x00000000000000000000000000000000000f7ea5";
@@ -162,6 +159,8 @@ fn deploy_settlement(cwd: &std::path::Path, rpc: &str, envs: &[(&str, &str)]) ->
         .env("CONTRACTS_DIR", repo_root().join("contracts"))
         .env_remove("FRAUD_TREASURY")
         .env_remove("INTMAX_DEPOSIT_KEY")
+        .env_remove("INTMAX_L1_ACCOUNT")
+        .env_remove("ETH_PASSWORD")
         .env_remove("INTMAX_COSIGNER_KEYFILE")
         .env_remove("INTMAX_INSECURE_DETERMINISTIC_KEYS");
     for (k, v) in envs {
@@ -286,9 +285,8 @@ fn an_unreadable_chain_id_is_refused_rather_than_guessed() {
     );
 }
 
-/// The real-chain path must refuse the PUBLIC anvil dev key. The broadcaster becomes the rollup's
-/// deployer — the only address that can set the withdrawal VK, register the channel and register
-/// the settlement manager — and that key is printed in this repository.
+/// The real-chain path must refuse every raw key, including the PUBLIC anvil dev key. A secret in
+/// `--private-key <secret>` is readable from the child process' argv.
 #[test]
 fn the_real_chain_path_refuses_the_public_anvil_dev_key() {
     if !tool_present("cast") {
@@ -307,14 +305,14 @@ fn the_real_chain_path_refuses_the_public_anvil_dev_key() {
     );
     assert!(!ok, "the public dev key must be refused:\n{out}");
     assert!(
-        out.contains("PUBLIC anvil dev key"),
+        out.contains("raw private keys") && out.contains("process argv"),
         "the refusal must say WHY:\n{out}"
     );
     assert_no_mock_anywhere(&out, 11155111);
 }
 
-/// …and it must refuse an ABSENT key rather than silently falling back to that same public key,
-/// which is what `deposit_key_env()` does for every other command.
+/// …and it must refuse an absent keystore account rather than silently falling back to the public
+/// Anvil key or accepting a raw private key.
 #[test]
 fn the_real_chain_path_refuses_an_absent_deploy_key() {
     if !tool_present("cast") {
@@ -326,7 +324,7 @@ fn the_real_chain_path_refuses_an_absent_deploy_key() {
     let (ok, out) = deploy_settlement(&w.0, &rpc.url, &[("FRAUD_TREASURY", TREASURY)]);
     assert!(!ok, "a missing deploy key must be refused:\n{out}");
     assert!(
-        out.contains("INTMAX_DEPOSIT_KEY is not set"),
+        out.contains("INTMAX_L1_ACCOUNT is not set") && out.contains("process argv"),
         "the refusal must name the variable:\n{out}"
     );
     assert_no_mock_anywhere(&out, 11155111);
@@ -347,7 +345,7 @@ fn the_real_chain_path_refuses_publicly_derivable_cosigner_keys() {
         &rpc.url,
         &[
             ("FRAUD_TREASURY", TREASURY),
-            ("INTMAX_DEPOSIT_KEY", THROWAWAY_KEY),
+            ("INTMAX_L1_ACCOUNT", "test-security-review"),
             ("INTMAX_INSECURE_DETERMINISTIC_KEYS", "1"),
         ],
     );
@@ -383,7 +381,7 @@ fn the_real_chain_path_refuses_to_orphan_an_existing_backing() {
         &rpc.url,
         &[
             ("FRAUD_TREASURY", TREASURY),
-            ("INTMAX_DEPOSIT_KEY", THROWAWAY_KEY),
+            ("INTMAX_L1_ACCOUNT", "test-orphan-guard"),
         ],
     );
     assert!(!ok, "a backed channel must not get a second rollup:\n{out}");
@@ -419,7 +417,7 @@ fn the_real_chain_path_refuses_to_replace_an_existing_settlement_json() {
         &rpc.url,
         &[
             ("FRAUD_TREASURY", TREASURY),
-            ("INTMAX_DEPOSIT_KEY", THROWAWAY_KEY),
+            ("INTMAX_L1_ACCOUNT", "test-existing-guard"),
         ],
     );
     assert!(!ok, "a second stack must be refused:\n{out}");

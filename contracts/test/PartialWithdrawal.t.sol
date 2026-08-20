@@ -9,7 +9,7 @@ import {MleVerifier} from "@mle/MleVerifier.sol";
 import {CloseSettlementBase, MockRollupRegistry} from "./CloseSettlementBase.sol";
 
 contract PartialWithdrawalTest is CloseSettlementBase {
-    bytes32 constant AUX_DATA = keccak256("burn_tx_leaf");
+    bytes32 constant TX_LEAF = keccak256("burn_tx_leaf");
     bytes32 constant PREV_CHAIN = keccak256("prev_settled_tx_chain");
     bytes32 constant NULLIFIER = keccak256("partial_withdrawal_nullifier");
     /// A NON-participant address — used only by the negative recipient test.
@@ -31,18 +31,43 @@ contract PartialWithdrawalTest is CloseSettlementBase {
         return keccak256(abi.encodePacked(uint32(0x494d5443), prev, leaf));
     }
 
-    function _partialIntent() internal pure returns (ChannelSettlementManager.CloseIntent memory) {
+    function _baseRecipient(address recipient) internal pure returns (bytes32) {
+        return bytes32((uint256(2) << 248) | uint256(uint160(recipient)));
+    }
+
+    function _burnDescriptor(address recipient, uint32 tokenIndex, uint256 amount)
+        internal pure returns (bytes32)
+    {
+        return _burnDescriptorFor(TX_LEAF, recipient, tokenIndex, amount);
+    }
+
+    function _burnDescriptorFor(
+        bytes32 txLeaf,
+        address recipient,
+        uint32 tokenIndex,
+        uint256 amount
+    ) internal pure returns (bytes32) {
+        return keccak256(
+            abi.encodePacked(
+                bytes4(0x494d4244), txLeaf, _baseRecipient(recipient), tokenIndex, amount
+            )
+        );
+    }
+
+    function _partialIntent() internal view returns (ChannelSettlementManager.CloseIntent memory) {
         return _partialIntentAtVersion(12, 1);
     }
 
     function _partialIntentAtVersion(uint64 stateVersion, uint64 epoch)
-        internal pure returns (ChannelSettlementManager.CloseIntent memory)
+        internal view returns (ChannelSettlementManager.CloseIntent memory)
     {
         return ChannelSettlementManager.CloseIntent({
             closeNonce: 1,
             finalEpoch: epoch,
             finalSmallBlockNumber: 10,
-            closeFreezeNonce: 0,
+            // A real close proof exposes signed_state.close_freeze_nonce + 1. The manager's live
+            // Active-era nonce is zero in this fixture, hence the proof PI is one.
+            closeFreezeNonce: 1,
             finalChannelStateDigest: keccak256("partial_state"),
             finalBalanceStateH1: keccak256("partial_h1"),
             channelFundAmounts: _singleAmounts(CHANNEL_FUND),
@@ -53,7 +78,9 @@ contract PartialWithdrawalTest is CloseSettlementBase {
             closeWithdrawalDigest: keccak256("close_wd"),
             snapshotMediumBlockNumber: 77,
             finalStateVersion: stateVersion,
-            finalSettledTxChain: _settledTxChainPush(PREV_CHAIN, AUX_DATA),
+            finalSettledTxChain: _settledTxChainPush(
+                PREV_CHAIN, _burnDescriptor(_recipient(), TOKEN_INDEX, AMOUNT)
+            ),
             finalSettledTxAccumulatorRoot: keccak256("acc_root")
         });
     }
@@ -64,7 +91,8 @@ contract PartialWithdrawalTest is CloseSettlementBase {
             tokenIndex: TOKEN_INDEX,
             amount: AMOUNT,
             nullifier: NULLIFIER,
-            auxData: AUX_DATA
+            auxData: _burnDescriptor(_recipient(), TOKEN_INDEX, AMOUNT),
+            txLeaf: TX_LEAF
         });
     }
 
@@ -389,9 +417,9 @@ contract PartialWithdrawalTest is CloseSettlementBase {
         manager.cancelPartialWithdrawal(request, dummy);
     }
 
-    // ── 12B fix: finalize succeeds even after requestClose ──
+    // ── P0-9: one-member requestClose vetoes an in-flight PW by advancing the era ──
 
-    function test_finalizePartialWithdrawal_succeeds_afterRequestClose() public {
+    function test_finalizePartialWithdrawal_reverts_afterRequestClose() public {
         ChannelSettlementManager.CloseIntent memory intent = _partialIntent();
         MleVerifier.MleProof memory proof = _closeProof(intent);
         manager.submitPartialWithdrawalIntent(intent, proof, PREV_CHAIN, _authorizedWithdrawal());
@@ -401,12 +429,32 @@ contract PartialWithdrawalTest is CloseSettlementBase {
         manager.requestClose();
         assertEq(uint8(manager.channelStatus()), uint8(ChannelSettlementManager.ChannelLifecycleStatus.ClosePending));
 
-        // Partial withdrawal can still finalize (12B fix: no channelStatus check)
+        // The pending proof belongs to era 0; requestClose advanced the live era to 1.
         vm.warp(block.timestamp + CHALLENGE_PERIOD + 1);
+        vm.expectRevert(ChannelSettlementManager.InvalidFreezeNonce.selector);
         manager.finalizePartialWithdrawal();
 
         bytes32 authDigest = _expectedAuthDigest(_authorizedWithdrawal());
-        assertTrue(registry.partialWithdrawalAuthorized(authDigest));
+        assertFalse(registry.partialWithdrawalAuthorized(authDigest));
+    }
+
+    function test_submitPartialWithdrawal_reverts_wrongEra() public {
+        ChannelSettlementManager.CloseIntent memory intent = _partialIntent();
+        intent.closeFreezeNonce = 2;
+        MleVerifier.MleProof memory proof = _closeProof(intent);
+
+        vm.expectRevert(ChannelSettlementManager.InvalidFreezeNonce.selector);
+        manager.submitPartialWithdrawalIntent(intent, proof, PREV_CHAIN, _authorizedWithdrawal());
+    }
+
+    function test_burnDescriptor_matchesFrozenRustVector() public pure {
+        bytes32 txLeaf = bytes32(uint256(1));
+        bytes32 baseRecipient =
+            0x02000000000000000000000000000000000000000000000000000000000000aa;
+        bytes32 got = keccak256(
+            abi.encodePacked(bytes4(0x494d4244), txLeaf, baseRecipient, uint32(7), uint256(20))
+        );
+        assertEq(got, 0xe53d8cf5a9b6cebadd222943673c931958739afde63b4a95c0cbc4ae0ddb5a0d);
     }
 
     // ── Cross-field tamper: different amount → different authDigest ──
@@ -439,54 +487,141 @@ contract PartialWithdrawalTest is CloseSettlementBase {
     }
 
     // ═══════════════════════════════════════════════════════════════════════════════════════
-    //  Defence in depth (2026-07-28) — doc/tasks/pw-auth-threat-model.md §4
+    //  Partial-withdrawal economics and registry binding
     //
-    //  These BOUND the claim; they do NOT derive it. Passing them does not make an authorization
-    //  legitimate — it only means it is not absurd.
+    //  IMBD derives the exact recipient/token/amount from the descriptor pinned by the N-of-N
+    //  settled-tx chain. The fund vector exposed by the close proof is already POST-BURN, so it
+    //  must not be used as a second cap on the same debit.
     // ═══════════════════════════════════════════════════════════════════════════════════════
 
-    // ── (a) Amount cap: over-claiming the proof-bound per-token fund vector is rejected ──
-    //
-    // Proves: the caller-chosen `amount` can no longer exceed what the channel's own N-of-N members
-    // cosigned into that token slot. `channelFundAmounts` is trustworthy because the close proof's
-    // `tokenFundsDigest` (PI limbs 95..102) is recomputed and strict-bound over it.
-
-    function test_submitPartialWithdrawal_reverts_amountExceedsChannelFund() public {
+    /// Regression for the double-subtraction bug: pre-burn F=50, burn X=50, post-burn fund=0.
+    /// The old `X <= postFund` check rejected every honest full-balance burn.
+    function test_submitPartialWithdrawal_allowsFullBalanceBurnWithZeroPostBurnFund() public {
         ChannelSettlementManager.CloseIntent memory intent = _partialIntent();
-        MleVerifier.MleProof memory proof = _closeProof(intent);
-        ChannelSettlementManager.AuthorizedWithdrawal memory w = _authorizedWithdrawal();
-        w.amount = CHANNEL_FUND + 1;
-
-        vm.expectRevert(ChannelSettlementManager.PartialWithdrawalAmountExceedsFund.selector);
-        manager.submitPartialWithdrawalIntent(intent, proof, PREV_CHAIN, w);
-    }
-
-    /// The pre-fix drain shape, scaled down: an amount wildly beyond the channel's entire declared
-    /// balance (this is what used to reach `claimAuthorizedWithdrawal` and hit the GLOBAL escrow).
-    function test_submitPartialWithdrawal_reverts_absurdOverClaim() public {
-        ChannelSettlementManager.CloseIntent memory intent = _partialIntent();
-        MleVerifier.MleProof memory proof = _closeProof(intent);
-        ChannelSettlementManager.AuthorizedWithdrawal memory w = _authorizedWithdrawal();
-        w.amount = type(uint256).max;
-
-        vm.expectRevert(ChannelSettlementManager.PartialWithdrawalAmountExceedsFund.selector);
-        manager.submitPartialWithdrawalIntent(intent, proof, PREV_CHAIN, w);
-    }
-
-    /// Boundary: claiming EXACTLY the cap is allowed (the check is `>`, not `>=`) — the cap must not
-    /// be off-by-one against an honest full-balance burn.
-    function test_submitPartialWithdrawal_allowsExactlyChannelFund() public {
-        ChannelSettlementManager.CloseIntent memory intent = _partialIntent();
-        MleVerifier.MleProof memory proof = _closeProof(intent);
         ChannelSettlementManager.AuthorizedWithdrawal memory w = _authorizedWithdrawal();
         w.amount = CHANNEL_FUND;
+        w.auxData = _burnDescriptor(w.recipient, w.tokenIndex, w.amount);
+        intent.channelFundAmounts[0] = 0;
+        intent.finalSettledTxChain = _settledTxChainPush(PREV_CHAIN, w.auxData);
+        MleVerifier.MleProof memory proof = _closeProof(intent);
+
+        manager.submitPartialWithdrawalIntent(intent, proof, PREV_CHAIN, w);
+        assertTrue(manager.partialWithdrawalPending());
+        assertEq(manager.pendingPartialWithdrawalAuthDigest(), _expectedAuthDigest(w));
+    }
+
+    /// Regression for burns over half the pre-burn fund: F=50, X=30, post-burn fund=20.
+    function test_submitPartialWithdrawal_allowsBurnGreaterThanPostBurnFund() public {
+        ChannelSettlementManager.CloseIntent memory intent = _partialIntent();
+        ChannelSettlementManager.AuthorizedWithdrawal memory w = _authorizedWithdrawal();
+        w.amount = 30;
+        w.auxData = _burnDescriptor(w.recipient, w.tokenIndex, w.amount);
+        intent.channelFundAmounts[0] = 20;
+        intent.finalSettledTxChain = _settledTxChainPush(PREV_CHAIN, w.auxData);
+        MleVerifier.MleProof memory proof = _closeProof(intent);
 
         manager.submitPartialWithdrawalIntent(intent, proof, PREV_CHAIN, w);
         assertTrue(manager.partialWithdrawalPending());
     }
 
-    /// Fail-closed: a base token the channel never cosigned into its registry has no cap to check
-    /// against, so it is rejected outright rather than silently defaulting to slot 0.
+    /// Two honest burns can drain the same fund in sequence. The second proof builds on the first
+    /// chain and post-state, and both chain keys/auth digests remain distinct.
+    function test_submitPartialWithdrawal_allowsTwoConsecutiveBurnsThroughZeroFund() public {
+        bytes32 firstTxLeaf = keccak256("first_pw_tx_leaf");
+        ChannelSettlementManager.AuthorizedWithdrawal memory first = _authorizedWithdrawal();
+        first.txLeaf = firstTxLeaf;
+        first.amount = 30;
+        first.nullifier = keccak256("first_pw_nullifier");
+        first.auxData =
+            _burnDescriptorFor(firstTxLeaf, first.recipient, first.tokenIndex, first.amount);
+
+        ChannelSettlementManager.CloseIntent memory firstIntent = _partialIntentAtVersion(12, 1);
+        firstIntent.channelFundAmounts[0] = 20;
+        firstIntent.finalSettledTxChain = _settledTxChainPush(PREV_CHAIN, first.auxData);
+        MleVerifier.MleProof memory firstProof = _closeProof(firstIntent);
+
+        manager.submitPartialWithdrawalIntent(firstIntent, firstProof, PREV_CHAIN, first);
+        vm.warp(block.timestamp + CHALLENGE_PERIOD + 1);
+        manager.finalizePartialWithdrawal();
+
+        bytes32 secondTxLeaf = keccak256("second_pw_tx_leaf");
+        ChannelSettlementManager.AuthorizedWithdrawal memory second = _authorizedWithdrawal();
+        second.txLeaf = secondTxLeaf;
+        second.amount = 20;
+        second.nullifier = keccak256("second_pw_nullifier");
+        second.auxData =
+            _burnDescriptorFor(secondTxLeaf, second.recipient, second.tokenIndex, second.amount);
+
+        bytes32 secondPrevChain = firstIntent.finalSettledTxChain;
+        ChannelSettlementManager.CloseIntent memory secondIntent = _partialIntentAtVersion(13, 2);
+        secondIntent.channelFundAmounts[0] = 0;
+        secondIntent.finalSettledTxChain =
+            _settledTxChainPush(secondPrevChain, second.auxData);
+        MleVerifier.MleProof memory secondProof = _closeProof(secondIntent);
+
+        manager.submitPartialWithdrawalIntent(
+            secondIntent, secondProof, secondPrevChain, second
+        );
+        vm.warp(block.timestamp + CHALLENGE_PERIOD + 1);
+        manager.finalizePartialWithdrawal();
+
+        bytes32 firstKey =
+            keccak256(abi.encodePacked(CHANNEL_ID, firstIntent.finalSettledTxChain));
+        bytes32 secondKey =
+            keccak256(abi.encodePacked(CHANNEL_ID, secondIntent.finalSettledTxChain));
+        assertTrue(manager.usedPartialWithdrawalChains(firstKey));
+        assertTrue(manager.usedPartialWithdrawalChains(secondKey));
+        assertTrue(firstKey != secondKey);
+        assertTrue(registry.partialWithdrawalAuthorized(_expectedAuthDigest(first)));
+        assertTrue(registry.partialWithdrawalAuthorized(_expectedAuthDigest(second)));
+        assertTrue(_expectedAuthDigest(first) != _expectedAuthDigest(second));
+    }
+
+    /// Property: once IMBD and the proof-bound chain agree, the post-burn remainder is not a second
+    /// cap. Base-layer no-underflow and the channel transition prove that the pre-burn debit was
+    /// affordable; this Manager only consumes the resulting post-state.
+    function testFuzz_submitPartialWithdrawal_exactDescriptorIgnoresPostBurnRemainder(
+        uint128 rawAmount,
+        uint128 rawPostFund
+    ) public {
+        uint256 amount = bound(uint256(rawAmount), 1, type(uint128).max);
+        uint256 postFund = bound(uint256(rawPostFund), 0, type(uint128).max);
+        ChannelSettlementManager.AuthorizedWithdrawal memory w = _authorizedWithdrawal();
+        w.amount = amount;
+        w.auxData = _burnDescriptor(w.recipient, w.tokenIndex, amount);
+
+        ChannelSettlementManager.CloseIntent memory intent = _partialIntent();
+        intent.channelFundAmounts[0] = postFund;
+        intent.finalSettledTxChain = _settledTxChainPush(PREV_CHAIN, w.auxData);
+        MleVerifier.MleProof memory proof = _closeProof(intent);
+
+        manager.submitPartialWithdrawalIntent(intent, proof, PREV_CHAIN, w);
+        assertTrue(manager.partialWithdrawalPending());
+    }
+
+    /// Property: removing the stale post-state cap must not make amount caller-selectable. Any
+    /// amount mutation after the chain/IMBD descriptor was fixed still fails at the exact-binding
+    /// check, even when the post-burn fund is deliberately made enormous.
+    function testFuzz_submitPartialWithdrawal_amountMutationStillRejected(uint128 rawAmount)
+        public
+    {
+        uint256 committedAmount = bound(uint256(rawAmount), 1, type(uint128).max - 1);
+        ChannelSettlementManager.AuthorizedWithdrawal memory w = _authorizedWithdrawal();
+        w.amount = committedAmount;
+        w.auxData = _burnDescriptor(w.recipient, w.tokenIndex, committedAmount);
+
+        ChannelSettlementManager.CloseIntent memory intent = _partialIntent();
+        intent.channelFundAmounts[0] = type(uint256).max;
+        intent.finalSettledTxChain = _settledTxChainPush(PREV_CHAIN, w.auxData);
+        MleVerifier.MleProof memory proof = _closeProof(intent);
+
+        w.amount = committedAmount + 1;
+        vm.expectRevert(ChannelSettlementManager.PartialWithdrawalDescriptorMismatch.selector);
+        manager.submitPartialWithdrawalIntent(intent, proof, PREV_CHAIN, w);
+    }
+
+    /// Fail-closed: a base token the channel never cosigned into its registry is rejected outright
+    /// rather than silently defaulting to slot 0.
     function test_submitPartialWithdrawal_reverts_tokenNotInRegistry() public {
         ChannelSettlementManager.CloseIntent memory intent = _partialIntent();
         MleVerifier.MleProof memory proof = _closeProof(intent);
@@ -540,17 +675,49 @@ contract PartialWithdrawalTest is CloseSettlementBase {
         manager.submitPartialWithdrawalIntent(intent, proof, PREV_CHAIN, w);
     }
 
-    /// Every registered member recipient is accepted (bob and carol, not just the default alice) —
-    /// confirms the gate reads the constructor bindings and is not accidentally pinned to one slot.
+    /// A burn genuinely built for another registered member remains valid when its descriptor and
+    /// co-signed chain are rebuilt for that member.
     function test_submitPartialWithdrawal_allowsOtherRegisteredMembers() public {
         ChannelSettlementManager.CloseIntent memory intent = _partialIntent();
-        MleVerifier.MleProof memory proof = _closeProof(intent);
         ChannelSettlementManager.AuthorizedWithdrawal memory w = _authorizedWithdrawal();
         w.recipient = bob;
+        w.auxData = _burnDescriptor(w.recipient, w.tokenIndex, w.amount);
+        intent.finalSettledTxChain = _settledTxChainPush(PREV_CHAIN, w.auxData);
+        MleVerifier.MleProof memory proof = _closeProof(intent);
 
         manager.submitPartialWithdrawalIntent(intent, proof, PREV_CHAIN, w);
         assertTrue(manager.partialWithdrawalPending());
         assertTrue(manager.isMemberRecipient(carol));
+    }
+
+    function test_submitPartialWithdrawal_reverts_amountDescriptorMismatch() public {
+        ChannelSettlementManager.CloseIntent memory intent = _partialIntent();
+        MleVerifier.MleProof memory proof = _closeProof(intent);
+        ChannelSettlementManager.AuthorizedWithdrawal memory w = _authorizedWithdrawal();
+        w.amount = AMOUNT + 1;
+
+        vm.expectRevert(ChannelSettlementManager.PartialWithdrawalDescriptorMismatch.selector);
+        manager.submitPartialWithdrawalIntent(intent, proof, PREV_CHAIN, w);
+    }
+
+    function test_submitPartialWithdrawal_reverts_amountMinusOneDescriptorMismatch() public {
+        ChannelSettlementManager.CloseIntent memory intent = _partialIntent();
+        MleVerifier.MleProof memory proof = _closeProof(intent);
+        ChannelSettlementManager.AuthorizedWithdrawal memory w = _authorizedWithdrawal();
+        w.amount = AMOUNT - 1;
+
+        vm.expectRevert(ChannelSettlementManager.PartialWithdrawalDescriptorMismatch.selector);
+        manager.submitPartialWithdrawalIntent(intent, proof, PREV_CHAIN, w);
+    }
+
+    function test_submitPartialWithdrawal_reverts_recipientDescriptorMismatch() public {
+        ChannelSettlementManager.CloseIntent memory intent = _partialIntent();
+        MleVerifier.MleProof memory proof = _closeProof(intent);
+        ChannelSettlementManager.AuthorizedWithdrawal memory w = _authorizedWithdrawal();
+        w.recipient = bob; // registered, but not the recipient committed by auxData
+
+        vm.expectRevert(ChannelSettlementManager.PartialWithdrawalDescriptorMismatch.selector);
+        manager.submitPartialWithdrawalIntent(intent, proof, PREV_CHAIN, w);
     }
 }
 

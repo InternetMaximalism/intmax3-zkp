@@ -1968,26 +1968,13 @@ async function attemptSend(to, amountBase, token) {
   log('  ZKP generated · amount encrypted (秘匿化)', 'zk');
   log('  co-signing...');
   sendPhase = 'Waiting for co-sign';
-  // SLIM wire (detail2 §M-1): project the solo payload down to {anchor, indices, tx, afterCt} —
-  // everything dropped is data the co-signers re-derive themselves. ~4x smaller upload, and it
-  // lets the relay fold many concurrent senders into ONE co-signed transition. /api/cosign2
-  // responds with a compact ACK (not the multi-MB state), so we then fetch the state to finalize.
-  const p = JSON.parse(payload);
-  const slim = JSON.stringify({
-    anchorDigest: p.proposedNextState.prevDigest,
-    senderIndex: p.senderIndex,
-    recipientIndex: p.recipientIndex,
-    channelTx: p.channelTx,
-    // MULTI-TOKEN (§N-2): `encBalances[slot]` is no longer a single ciphertext — it is that
-    // slot's ROW, serialized sparsely as { "<tokenSlot>": {c1,c2} } with canonical-zero
-    // positions omitted. The slim wire's `afterCt` is ONE ciphertext (the sender's fresh
-    // post-debit ct at the position being spent), so project the row down by the token slot the
-    // tx actually moves. Sending the whole row makes the co-signer's parse fail with
-    // "missing field `c1`" — which is exactly what shipped before this line was fixed.
-    afterCt: senderAfterCt(p),
-  });
+  // VERSIONED BINARY SLIM wire (IMSW v1): Rust performs the canonical projection and packs Regev
+  // coefficient vectors + proof bytes directly. The first 40 bytes carry magic/version/anchor,
+  // so the streaming relay can reject stale work without buffering or parsing the body. Old JSON
+  // spool files remain accepted by the CLI during rolling upgrades.
+  const slim = await call('slimWire', { payloadJson: payload });
   const r2 = await fetch('/api/cosign2?channel=' + activeCh, {
-    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: slim,
+    method: 'POST', headers: { 'Content-Type': 'application/vnd.intmax.slim+binary' }, body: slim,
   });
   if (r2.status === 404 || r2.status === 405) {
     // Relay without /api/cosign2 (e.g. the local dev harness): legacy fat solo path.
@@ -2111,9 +2098,16 @@ async function attemptInterChannelSend(toCh, to, amountBase) {
   const bMember = (bSnap.members || []).find(m => m.slot === to);
   if (!bMember) throw new Error('channel ' + toCh + ' has no member at slot ' + to);
   const destRecipientJson = JSON.stringify({ regevPk: bMember.regevPk, pkG: bMember.pkG });
+  // Base sends use the persisted base-account cursor, not the channel small-block number (an
+  // incoming channel transition advances only the latter). The co-signer re-checks this nonce.
+  const baseHead = JSON.parse(await api('/api/base-head', null, 'GET'));
+  if (!Number.isInteger(baseHead.nonce)) throw new Error('live base nonce is unavailable');
   sendPhase = 'Proving';
   log('  generating ZKP · encrypting amount for recipient (秘匿化)...', 'zk');
-  const built = JSON.parse(await call('sendInterChannel', { toChannel: toCh, toSlot: to, amount: amountBase, destRecipientJson }));
+  const built = JSON.parse(await call('sendInterChannel', {
+    toChannel: toCh, toSlot: to, amount: amountBase, destRecipientJson,
+    baseNonce: baseHead.nonce,
+  }));
   log('  ZKP generated · transfer encrypted', 'zk');
   log('  relay co-signing debit + credit atomically...');
   sendPhase = 'Waiting for co-sign';
@@ -2404,9 +2398,13 @@ $('btnBurnSend').onclick = guard('burn', async () => {
       mySlot = rr.slot; showBalance(rr);
     }
     log('burn send ' + amt + ' ETH -> ' + addr + '...');
+    const baseHead = JSON.parse(await api('/api/base-head', null, 'GET'));
+    if (!Number.isInteger(baseHead.nonce)) throw new Error('live base nonce is unavailable');
     sendPhase = 'Proving burn';
     log('  generating burn ZKP (zero-knowledge proof)...', 'zk');
-    const built = JSON.parse(await call('burnSend', { amount: toBase(amt), withdrawalAddress: addr }));
+    const built = JSON.parse(await call('burnSend', {
+      amount: toBase(amt), withdrawalAddress: addr, baseNonce: baseHead.nonce,
+    }));
     log('  burn ZKP generated · amount encrypted (秘匿化)', 'zk');
     log('  burn proved -- co-signing...');
     sendPhase = 'Co-signing';

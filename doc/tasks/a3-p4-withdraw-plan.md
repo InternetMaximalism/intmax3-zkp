@@ -64,12 +64,14 @@ soundness は **全て in-circuit + on-chain**。CLI は配線のみ。攻撃面
    CLI が任意 root を渡しても finalize が落ちる(fail-closed)。✅
 3. **改竄 withdrawal set**: withdrawNative が keccak re-fold で pis_hash 照合。amount 改竄→revert。✅(WithdrawNativeE2E で実証)。
 4. **depositor 不一致**: deposit hash は msg.sender を folding。証明された depositor と on-chain msg.sender がズレると
-   block2 hash 不一致→finalize revert。→ `cast send --private-key` の送信元 = 証明 depositor を保証(persist した depositor を使用)。
+   block2 hash 不一致→finalize revert。→ 非ローカルでは `cast send --account $INTMAX_L1_ACCOUNT` の送信元 =
+   証明 depositor を保証(persist した depositor を使用)。raw key は chain 31337 の公開 Anvil key のみ。
 5. **registration 不一致**: registerChannel の member set が証明の registration block と不一致→block1 hash 不一致→finalize revert。
    → lifecycle.json の registration をそのまま registerChannel に渡す。
 6. **fixture 競合**: withdraw/claim/close が `sepolia_*` に staging。**各 step 直前に書く**(順序厳守)。
 7. **build_channel_withdrawal の port バグ**: S3 の byte-parity 検証で reference と一致を担保。差分=即停止。
-8. **秘密鍵**: `.claude/priv` は読まず、`--private-key "$(cat …)"` で shell 展開のみ(該当時)。anvil は dev key。
+8. **秘密鍵**: 非ローカルは Foundry encrypted keystore の `INTMAX_L1_ACCOUNT` を
+   `--account` で選択し、秘密鍵/パスワードを argv に載せない。anvil 31337 のみ公開 dev key。
 9. **IntmaxRollup/Manager bytecode 不変**: 一切変更しない(CREATE2 drift→fixture 再生成回避)。
 
 **不変条件チェック(完了前必須)**:

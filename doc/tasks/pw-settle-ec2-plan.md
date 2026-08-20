@@ -8,7 +8,7 @@
 > `doc/tasks/reg-chain-1024-threat-model.md` (B-3). The deploy-only MAX=256 working-tree patch was
 > likewise discarded (Option B supersedes it; kept at `.claude/max256.patch` for reference only).
 > EC2 provisioning from this effort **persists and stays valid** (foundry installed; systemd
-> `CONTRACTS_DIR`/`INTMAX_DEPOSIT_KEY`/`RPC`/`CHAIN_ID` env), **but** the `contracts/` tree rsynced
+> `CONTRACTS_DIR`/`INTMAX_L1_ACCOUNT`/`RPC`/`CHAIN_ID` env), **but** the `contracts/` tree rsynced
 > to the box was built from the superseded branch — it MUST be re-shipped from main during the B-3
 > redeploy, together with the signer binary, or validity/close binding diverges again.
 > Path note: repo layout moved `wallet/` → `hosting/wallet/` and `tasks/` → `doc/tasks/`; file
@@ -34,8 +34,8 @@ The pw settle path was wired for the local anvil relay only and was never provis
 ## Latent follow-on failures (will hit immediately after unblocking)
 
 1. **No `forge`/`cast` on EC2** — both commands shell out to foundry.
-2. **`INTMAX_DEPOSIT_KEY` unset** → falls back to `ANVIL_DEV_KEY` (channel_member.rs:326-328)
-   → 0 balance on Sepolia → broadcast fails. Needs a funded key in the systemd env.
+2. **L1 signer provisioning** → Sepolia now refuses `INTMAX_DEPOSIT_KEY` and requires a funded
+   Foundry keystore selected by `INTMAX_L1_ACCOUNT`; only the account name reaches argv.
 3. **`pw-finalize` uses anvil-only RPCs unconditionally** (`evm_increaseTime`/`evm_mine`,
    channel_member.rs:3228-3229) → dies on Sepolia. (The close paths already gate this behind
    `CLOSE_ADVANCE_TIME`, dev-only — only pw-finalize is unconditional.)
@@ -85,7 +85,8 @@ calldata — more new code and more soundness-relevant surface for the same demo
       `~/relay/contracts`. On the box run `forge build` once to validate/warm the cache (add 4 GB
       swap first if it recompiles via_ir).
 - [ ] systemd unit env: `CONTRACTS_DIR=/home/ubuntu/relay/contracts`,
-      `INTMAX_DEPOSIT_KEY=<dedicated funded relay key>` (root-only EnvironmentFile), verify
+      `INTMAX_L1_ACCOUNT=<dedicated funded relay keystore name>` (keystore/password supplied with
+      root-only service credentials), verify
       `RPC=<sepolia>`, `CHAIN_ID=11155111`.
 - [ ] Fund the relay key (small amount) from the deployer; record the address (public) in
       `.claude/deploy-record.md`.
@@ -111,7 +112,7 @@ calldata — more new code and more soundness-relevant surface for the same demo
 ## Phase 0 findings (2026-07-04, confirmed on the box + on-chain)
 
 - journalctl: the dying call is `deploy-settlement` (no `settlement.json` in ch7) — exactly the
-  `cannot find contracts/ dir` die. No forge/cast installed; `INTMAX_DEPOSIT_KEY` not in the unit
+  `cannot find contracts/ dir` die. No forge/cast installed; `INTMAX_L1_ACCOUNT` not in the unit
   env. Disk 17G free / RAM 3.7G — provisioning feasible.
 - ch7 has **6 stranded burn-done partial-withdrawal tickets** (Σ ≈ 0.0215 "ETH" demo balance).
   `last_burn.json` only holds the latest burn, so at most the newest one is settleable by design

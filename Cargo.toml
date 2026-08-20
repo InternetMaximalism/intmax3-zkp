@@ -168,6 +168,7 @@ getrandom_v04 = { package = "getrandom", version = "0.4", features = ["wasm_js"]
 # the wasm build keeps deciding for itself via the `regev-parallel` feature.
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 regev_plonky3 = { git = "https://github.com/leohio/regv-plonky3.git", rev = "5495eda", features = ["parallel"] }
+libc = "0.2"
 
 [features]
 default = []

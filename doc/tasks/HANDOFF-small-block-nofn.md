@@ -198,8 +198,8 @@ From the exit-path sweep earlier in the same session (see
   `doc/tasks/f-aux-1-severity.md` is written against the corrected constraint but
   its conclusions were not re-reviewed after the owner's clarification. Treat
   that file with care.
-- **The L1 private key is passed as `cast --private-key <VALUE>` at 27 sites**,
-  readable from `ps` by any local user.
+- **L1 argv exposure is fixed:** non-31337 CLI/API writes require a Foundry keystore account and
+  emit `--account <name>`; raw-key selection is confined to the local Anvil branch.
 - `POST /api/v1/keys/generate` mints a user's key server-side from a
   caller-supplied or default-`1` u64.
 - Withdrawal salts use `seed_from_u64(1)` outside `cfg(test)`.

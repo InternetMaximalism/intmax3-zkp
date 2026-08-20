@@ -31,7 +31,7 @@ gets integrated). All three currently describe an exit path that the code does n
 
 > ```
 > cd contracts && forge script script/Deploy.s.sol --rpc-url "$SEPOLIA_RPC_URL" \
->   --private-key "$(cat "$PRIV")" --broadcast --slow    # prints IntmaxRollup addr; run TWICE (ch7, ch8)
+>   --account "$INTMAX_L1_ACCOUNT" --broadcast --slow    # prints IntmaxRollup addr; run TWICE (ch7, ch8)
 > ```
 
 That is the entire on-chain deploy step for the live system. There is no `initializeWithdrawalVk`
@@ -76,7 +76,7 @@ not a stale-artifact story — the newest real deploys have it too.
 
 Every one of those rollups holds real Sepolia ETH (`doc/docs/deploy-runbook.md:14-15`: "Two
 channels (**7 & 8**), each backed by its OWN real Sepolia deposit"; `setup-backing` performs the
-deposit with `INTMAX_DEPOSIT_KEY`). `withdrawNative` and `withdrawERC20` revert
+deposit with the configured Foundry L1 account). `withdrawNative` and `withdrawERC20` revert
 `WithdrawalVkNotSet()` on all four. **No code path returns escrowed deposit value.**
 
 **Recoverability:** `initializeWithdrawalVk` is deployer-only + set-once but has no deadline
