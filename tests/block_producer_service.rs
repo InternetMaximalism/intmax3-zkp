@@ -123,7 +123,17 @@ fn next_descriptor(
         receiver_pk_g,
         receiver_delta.digest(),
     );
-    let transfer = inter_channel_base_transfer(receiver_pk_g, 0, amount, tx_leaf);
+    // F-AUX-1: the BASE-layer recipient is the DESTINATION CHANNEL's base account, NOT the
+    // receiving member's channel-layer pk_g — "the BASE intmax native user IS the channel"
+    // (constants.rs). `canonical_inter_channel_base_transfer` recomputes exactly this from the
+    // descriptor's own `destination_channel_id` / `destination_base_transfer_salt`, so a pk_g
+    // here made `intmax_transfer_commitment` disagree with the canonical binding.
+    let base_recipient =
+        intmax3_zkp::circuits::balance::common::recipient::calculate_recipient_from_user_id(
+            destination,
+            intmax3_zkp::common::salt::Salt::default(),
+        );
+    let transfer = inter_channel_base_transfer(base_recipient, 0, amount, tx_leaf);
     let (tx_v2, tx_v2_tree) = inter_channel_tx_v2(source, &transfer, base_nonce);
     let tx_tree_root = Bytes32::from(tx_v2_tree.get_root());
     let tx_v2_merkle_proof = tx_v2_tree.prove(source.as_u64());

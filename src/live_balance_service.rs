@@ -29,7 +29,8 @@ use crate::{
     circuits::{
         balance::{
             balance_pis::BalanceFullPublicInputs, balance_processor::BalanceProcessor,
-            common::recipient::calculate_recipient_from_user_id, spend_circuit::SpendCircuit,
+            common::recipient::calculate_recipient_from_user_id,
+            spend_circuit::{SpendCircuit, SpendPublicInputs},
         },
         test_utils::balance_witness_generator::{
             BalanceWitnessGenerator, ReceiveDepositData, ReceiveTransferData, SendTxData,
@@ -44,7 +45,10 @@ use crate::{
         tx::Tx,
     },
     ethereum_types::{bytes32::Bytes32, u32limb_trait::U32LimbTrait as _},
-    utils::{poseidon_hash_out::PoseidonHashOut, serialize::serialize_verifier_data},
+    utils::{
+        conversion::ToU64 as _, poseidon_hash_out::PoseidonHashOut,
+        serialize::serialize_verifier_data,
+    },
     wallet_core::{
         C, ChannelBalanceAttestation, ChannelSnapshot, D, F, InterChannelDebitPayload,
         InterChannelTransferDescriptor, MemberInfo, canonical_inter_channel_base_transfer,
@@ -469,11 +473,14 @@ impl LiveBalanceService {
             &self.balance,
             "stored source send",
         )?;
-        if pis.channel_id != material.channel_record.channel_id
-            || pis.settled_tx_chain != material.signed_head.balance_state.settled_tx_chain
-            || pis.private_commitment != entry.result.private_commitment
-            || entry.result.proof_size != proof_size
-        {
+        // `material.balance_proof` is the PRE-send proof (see the store site), so it cannot be
+        // compared against the POST-send receipt/head directly. The equivalent binding is the
+        // two-link chain through the co-stored spend proof, checked below once it is verified:
+        //   pre.private_commitment == spend.prev_private_commitment   (the receive connect)
+        //   spend.new_private_commitment == entry.result.private_commitment  (the settled head)
+        // Together these pin the stored proof to this exact transition, which is what the
+        // retired `settled_tx_chain`/`proof_size` comparisons against the head were doing.
+        if pis.channel_id != material.channel_record.channel_id {
             return Err(LiveBalanceServiceError::Snapshot(
                 "stored source-send proof diverges from its signed head/receipt".into(),
             ));
@@ -486,10 +493,22 @@ impl LiveBalanceService {
             &self.spend.data.common,
         )
         .map_err(|e| LiveBalanceServiceError::Snapshot(format!("stored spend proof: {e}")))?;
+        let stored_spend_pis =
+            SpendPublicInputs::from_pis_u64(&spend_proof.public_inputs.to_u64_vec()).map_err(
+                |e| LiveBalanceServiceError::Snapshot(format!("stored spend pis: {e}")),
+            )?;
         self.spend
             .data
             .verify(spend_proof)
             .map_err(|e| LiveBalanceServiceError::Snapshot(format!("verify stored spend: {e}")))?;
+        if !stored_spend_pis.is_valid
+            || pis.private_commitment != stored_spend_pis.prev_private_commitment
+            || stored_spend_pis.new_private_commitment != entry.result.private_commitment
+        {
+            return Err(LiveBalanceServiceError::Snapshot(
+                "stored source-send proof/spend/receipt chain is inconsistent".into(),
+            ));
+        }
         Ok(LiveInterChannelSendArtifact {
             producer_receipt: entry.producer_receipt.clone(),
             source_backing: LiveChannelBackingArtifact {
@@ -883,7 +902,14 @@ impl LiveBalanceService {
             producer_receipt: producer_receipt.clone(),
             result: result.clone(),
             send_material: Some(StoredInterChannelSendMaterial {
-                balance_proof: candidate.balance_proof.clone(),
+                // The PRE-send balance proof: the one `send_tx_circuit` consumed as
+                // `prev_balance_pis` (send_tx_circuit.rs:127). A ReceiveTransfer must connect
+                // `sender_balance_pis.private_commitment == spend_pis.prev_private_commitment`
+                // (receive_transfer_circuit.rs:263), and `prove_send_tx` returns a proof
+                // committing `spend_pis.new_private_commitment` — the POST-send state — so the
+                // head proof can never satisfy that connect. `self.disk` is still the pre-send
+                // snapshot here; `candidate.balance_proof` has already been advanced.
+                balance_proof: self.disk.balance_proof.clone(),
                 spend_proof: spend_proof.to_bytes(),
                 channel_record: record.clone(),
                 signed_head: signed_state.clone(),
@@ -979,8 +1005,12 @@ impl LiveBalanceService {
             &self.balance,
             "source receive artifact",
         )?;
+        // The source artifact carries the PRE-send balance proof (the only one a ReceiveTransfer
+        // can connect to the spend), so its `settled_tx_chain` is the chain BEFORE this send and
+        // must NOT be compared against the post-send `signed_head`. The proof is still pinned to
+        // this transition: `base_head` is derived from these very PIs, and the circuit itself
+        // enforces `private_commitment == spend.prev_private_commitment` below.
         if source_pis.channel_id != descriptor.source_channel_id
-            || source_pis.settled_tx_chain != source.signed_head.balance_state.settled_tx_chain
             || source_pis.private_commitment != source.base_head.private_commitment
             || source_proof_size != source.base_head.proof_size
         {
@@ -1496,11 +1526,11 @@ fn verify_snapshot_semantics(
                 balance,
                 "journaled source send",
             )?;
+            // PRE-send proof (see the store site): bound to the transition through the
+            // co-journaled spend proof rather than by direct comparison with the POST-send
+            // receipt. The two-link chain is checked once the spend proof is verified below.
+            let _ = stored_size;
             if stored_pis.channel_id != disk.channel_id
-                || stored_pis.private_commitment != entry.result.private_commitment
-                || stored_pis.settled_tx_chain
-                    != material.signed_head.balance_state.settled_tx_chain
-                || stored_size != entry.result.proof_size
                 || material.channel_record.channel_id != disk.channel_id
             {
                 return Err(LiveBalanceServiceError::Snapshot(
@@ -1526,11 +1556,27 @@ fn verify_snapshot_semantics(
                     "decode journaled source-send spend proof: {e}"
                 ))
             })?;
+            let journaled_spend_pis =
+                SpendPublicInputs::from_pis_u64(&spend_proof.public_inputs.to_u64_vec()).map_err(
+                    |e| {
+                        LiveBalanceServiceError::Snapshot(format!(
+                            "journaled source-send spend pis: {e}"
+                        ))
+                    },
+                )?;
             spend.data.verify(spend_proof).map_err(|e| {
                 LiveBalanceServiceError::Snapshot(format!(
                     "verify journaled source-send spend proof: {e}"
                 ))
             })?;
+            if !journaled_spend_pis.is_valid
+                || stored_pis.private_commitment != journaled_spend_pis.prev_private_commitment
+                || journaled_spend_pis.new_private_commitment != entry.result.private_commitment
+            {
+                return Err(LiveBalanceServiceError::Snapshot(
+                    "journaled source-send proof/spend/receipt chain is inconsistent".into(),
+                ));
+            }
         }
         previous_producer_generation = entry.producer_receipt.generation;
         previous_balance_generation = entry.result.balance_generation;
