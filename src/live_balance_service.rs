@@ -37,6 +37,7 @@ use crate::{
         },
     },
     common::{
+        balance_state::settled_tx_chain_push,
         channel::{ChannelRecord, ChannelState},
         channel_id::ChannelId,
         private_state::FullPrivateState,
@@ -58,7 +59,11 @@ use crate::{
 };
 
 const SNAPSHOT_MAGIC: &[u8; 16] = b"IMLIVEBALANCE001";
-pub const LIVE_BALANCE_SNAPSHOT_VERSION: u32 = 1;
+// v2: `StoredInterChannelSendMaterial` gained `tx_leaf`, and `balance_proof` changed meaning
+// from the POST-send head proof to the PRE-send proof a ReceiveTransfer can actually connect
+// (receive_transfer_circuit.rs:263). v1 journals stored a proof that could never serve a
+// receive, so they are rejected fail-closed by version rather than by a confusing serde error.
+pub const LIVE_BALANCE_SNAPSHOT_VERSION: u32 = 2;
 const SNAPSHOT_HEADER_BYTES: usize = 16 + 4 + 8 + 32;
 const MAX_SNAPSHOT_BYTES: u64 = 512 * 1024 * 1024;
 const MAX_APPLIED_TRANSITIONS: usize = 1_000_000;
@@ -186,6 +191,15 @@ struct AppliedTransition {
 struct StoredInterChannelSendMaterial {
     balance_proof: Vec<u8>,
     spend_proof: Vec<u8>,
+    /// The leaf this send pushed onto the settled chain: the canonical base Transfer's
+    /// `aux_data` — the tx leaf for a normal inter-channel send, the burn descriptor for a burn
+    /// (`send_tx_circuit.rs:178-183` pushes exactly `transfer.aux_data`, and the wallet builder
+    /// pushes the same value onto the channel head, wallet_core.rs:2567). Stored so every
+    /// validation site can bind the PRE-send balance proof to the POST-send signed head with
+    /// `settled_tx_chain_push(pre.settled_tx_chain, settled_leaf) == signed_head...chain` —
+    /// the pre-send-correct form of the retired post-send chain comparison, and strictly
+    /// stronger: it pins the transition CONTENT, not just the endpoint.
+    settled_leaf: Bytes32,
     channel_record: ChannelRecord,
     signed_head: ChannelState,
 }
@@ -507,6 +521,17 @@ impl LiveBalanceService {
         {
             return Err(LiveBalanceServiceError::Snapshot(
                 "stored source-send proof/spend/receipt chain is inconsistent".into(),
+            ));
+        }
+        // The pre-send-correct form of the retired chain comparison: the stored proof's chain,
+        // advanced by exactly this send's tx leaf, must be the N-of-N-signed head's chain. This
+        // also re-binds `material.signed_head` to THIS transition (a validly signed head from a
+        // different transition no longer passes).
+        if settled_tx_chain_push(pis.settled_tx_chain, material.settled_leaf)
+            != material.signed_head.balance_state.settled_tx_chain
+        {
+            return Err(LiveBalanceServiceError::Snapshot(
+                "stored source-send chain does not advance to the signed head".into(),
             ));
         }
         Ok(LiveInterChannelSendArtifact {
@@ -911,6 +936,7 @@ impl LiveBalanceService {
                 // snapshot here; `candidate.balance_proof` has already been advanced.
                 balance_proof: self.disk.balance_proof.clone(),
                 spend_proof: spend_proof.to_bytes(),
+                settled_leaf: transfer.aux_data,
                 channel_record: record.clone(),
                 signed_head: signed_state.clone(),
             }),
@@ -1006,13 +1032,22 @@ impl LiveBalanceService {
             "source receive artifact",
         )?;
         // The source artifact carries the PRE-send balance proof (the only one a ReceiveTransfer
-        // can connect to the spend), so its `settled_tx_chain` is the chain BEFORE this send and
-        // must NOT be compared against the post-send `signed_head`. The proof is still pinned to
-        // this transition: `base_head` is derived from these very PIs, and the circuit itself
-        // enforces `private_commitment == spend.prev_private_commitment` below.
+        // can connect to the spend), so its `settled_tx_chain` is the chain BEFORE this send. It
+        // is bound to the post-send `signed_head` in the pre-send-correct form: advancing it by
+        // THIS send's tx leaf must land exactly on the N-of-N-signed head's chain.
+        // The settled-chain leaf is the canonical base Transfer's aux_data (tx leaf for a
+        // normal send, burn descriptor for a burn) — the value send_tx_circuit actually pushed.
+        let source_settled_leaf =
+            canonical_inter_channel_base_transfer(&descriptor.inter_channel_tx, descriptor.amount)
+                .map_err(|e| {
+                    LiveBalanceServiceError::InvalidRequest(format!("source settled leaf: {e}"))
+                })?
+                .aux_data;
         if source_pis.channel_id != descriptor.source_channel_id
             || source_pis.private_commitment != source.base_head.private_commitment
             || source_proof_size != source.base_head.proof_size
+            || settled_tx_chain_push(source_pis.settled_tx_chain, source_settled_leaf)
+                != source.signed_head.balance_state.settled_tx_chain
         {
             return Err(LiveBalanceServiceError::InvalidRequest(
                 "source balance proof public inputs diverge from its authenticated base/channel head"
@@ -1521,17 +1556,18 @@ fn verify_snapshot_semantics(
             ));
         }
         if let Some(material) = &entry.send_material {
-            let (stored_pis, stored_size) = verify_balance_proof_bytes(
+            let (stored_pis, _) = verify_balance_proof_bytes(
                 &material.balance_proof,
                 balance,
                 "journaled source send",
             )?;
             // PRE-send proof (see the store site): bound to the transition through the
-            // co-journaled spend proof rather than by direct comparison with the POST-send
-            // receipt. The two-link chain is checked once the spend proof is verified below.
-            let _ = stored_size;
+            // co-journaled spend proof (checked once it is verified below) and by the chain
+            // advance to the signed head here.
             if stored_pis.channel_id != disk.channel_id
                 || material.channel_record.channel_id != disk.channel_id
+                || settled_tx_chain_push(stored_pis.settled_tx_chain, material.settled_leaf)
+                    != material.signed_head.balance_state.settled_tx_chain
             {
                 return Err(LiveBalanceServiceError::Snapshot(
                     "journaled source-send proof/head/result binding is inconsistent".into(),
