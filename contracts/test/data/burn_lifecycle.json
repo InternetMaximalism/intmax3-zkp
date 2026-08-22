@@ -1,0 +1,78 @@
+{
+  "genesis_state_root": "0x464864c822ae13e306bb41d549535412b182545fab0dbdf6c82cf103eda2103d",
+  "final_state_root": "0xd2f7c6c9a8bd23d8b9711ced8b1b168a0dd5d48172a8513dd16c70cb2944294f",
+  "registration": {
+    "channel_id": 1,
+    "bp_member_slot": 0,
+    "member_pk_gs": [
+      "0x67e1c986a577e81db61a1a6aedaddd519996ee5f72208aac4dee9e7138df62f3",
+      "0xb1ad52347638a9c4d6b4f880894f4421d98c472447d8f42d814ea450189e07cc",
+      "0x9974000438b05a40e306da3185c36bd3325566f3e1a9fbc2f7c1a726d307a67a"
+    ],
+    "member_pk_bs": [
+      "0x02bf3df43eee067a5534ccd95953e41a45fc27d9671cc53752ac7aeb5e2ca5e8",
+      "0x42959df149c617c254c1251d5a8de7c1685bb1b22f45c141101693e55602fa09",
+      "0x6de189c40754432f2df201ac2c7b3d961e15adf01ba0ae020af881370b08260e"
+    ],
+    "regev_pk_digests": [
+      "0x44b592a02358a158065fc168f5be53c907dfb0cde5d06914293196eb9a8ed7cc",
+      "0xfa10fb6200d880cdcf430329850b760ed84118e826b20805f98838f3d68e8fca",
+      "0x33e2ab929addbb53f5d13ef4c8a46bf10618deb965392491d2dabf7642f01783"
+    ],
+    "recipients": [
+      "0x3333001033330010333300103333001033330010",
+      "0x3333001133330011333300113333001133330011",
+      "0x3333001233330012333300123333001233330012"
+    ]
+  },
+  "deposit": {
+    "depositor": "0x1cb3b3a685353f1c27e588ea62b019a88a4880c6",
+    "recipient": "0x01ab3c35e71ba92ec001785c1d72c1cc887b0994e7fa5607adcca747fe26ec80",
+    "token_index": 0,
+    "amount": "10",
+    "aux_data": "0x0000000000000000000000000000000000000000000000000000000000000000"
+  },
+  "blocks": [
+    {
+      "channel_id": 0,
+      "timestamp": 0,
+      "tx_tree_root": "0x0000000000000000000000000000000000000000000000000000000000000000",
+      "key_ids": [
+        0,
+        0
+      ],
+      "block_number": 1
+    },
+    {
+      "channel_id": 0,
+      "timestamp": 0,
+      "tx_tree_root": "0x0000000000000000000000000000000000000000000000000000000000000000",
+      "key_ids": [
+        0,
+        0
+      ],
+      "block_number": 2
+    },
+    {
+      "channel_id": 1,
+      "timestamp": 2,
+      "tx_tree_root": "0x43e92686485990e5f3404fd7bd914f75fea3d668ccb64bfbefdf97c5797f4164",
+      "key_ids": [
+        1,
+        0
+      ],
+      "block_number": 3
+    }
+  ],
+  "vpis": {
+    "initial_block_number": 0,
+    "initial_block_chain": "0x0000000000000000000000000000000000000000000000000000000000000000",
+    "initial_ext_commitment": "0x464864c822ae13e306bb41d549535412b182545fab0dbdf6c82cf103eda2103d",
+    "final_block_number": 3,
+    "final_block_chain": "0x4795dd4bb8bb455ec7dfbaa47da732007f9c78d110073b9805c28e311341209a",
+    "final_ext_commitment": "0xd2f7c6c9a8bd23d8b9711ced8b1b168a0dd5d48172a8513dd16c70cb2944294f",
+    "prover": "0x0000000000000000000000000000000000000000"
+  },
+  "proof_hash": "0x0000000000000000000000000000000000000000000000003141773275377296",
+  "proof_length": 205761
+}

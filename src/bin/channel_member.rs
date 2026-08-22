@@ -3400,6 +3400,7 @@ fn cmd_withdraw(args: &[String]) {
             withdrawal_amount: *a,
             deposit_salt: None,
         }),
+        burn_aux_data: None,
     };
     // SECURITY (Phase-3 review finding 7, CLOSED in Phase 4): the withdrawal builder registers
     // the identities read off the `MemberKeys` handed to it — the SAME objects

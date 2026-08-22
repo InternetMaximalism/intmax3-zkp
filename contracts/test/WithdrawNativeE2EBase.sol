@@ -40,9 +40,17 @@ abstract contract WithdrawNativeE2EBase is Test {
 
     uint256 internal constant STAKE = 1 ether; // POST_BLOCK_STAKE
 
+    /// Which fixture set to load. "" = the default normal-withdrawal set; a subclass overrides it to
+    /// load a variant set (e.g. "burn_" for the partial-withdrawal payout suite, whose leaf carries
+    /// `aux_data != 0`). Keeping the whole lifecycle harness shared means the burn suite runs against
+    /// byte-identical rollup wiring — only the proved leaf differs.
+    function _fixturePrefix() internal pure virtual returns (string memory) {
+        return "";
+    }
+
     function setUp() public virtual {
         // Load fixtures; if any is missing the heavy proving step hasn't run yet — self-skip.
-        string memory root = string.concat(vm.projectRoot(), "/test/data/");
+        string memory root = string.concat(vm.projectRoot(), "/test/data/", _fixturePrefix());
         try vm.readFile(string.concat(root, "withdrawal_payout.json")) returns (string memory p) {
             payoutJson = p;
             lifecycleJson = vm.readFile(string.concat(root, "lifecycle.json"));

@@ -5305,6 +5305,21 @@ pub struct ChannelWithdrawalParams {
     /// two separate chains by construction). `None` = the legacy single-lane (ETH) behavior,
     /// byte-identical output (no extra RNG draws).
     pub erc20_lane: Option<Erc20LaneParams>,
+    /// Partial-withdrawal (burn) mode. `Some(desc)` stamps the primary native withdrawal transfer's
+    /// `aux_data` with the burn descriptor `desc` (a nonzero IMBD-shaped value), so the proved,
+    /// on-chain-payable leaf is a BURN leaf (`aux_data != 0`).  This is the artifact the
+    /// partial-withdrawal PAYOUT path needs and the repo previously lacked: every committed payout
+    /// fixture was a normal (`aux_data == 0`) withdrawal, so `PartialWithdrawalPayout.t.sol` could
+    /// only assert the burn branch fails on proof binding, never REACH the IMPW authorization gate
+    /// with a real proof (doc/tasks/partial-withdrawal-payout-design.md P3 HEAVY note / P4-3).
+    ///
+    /// SCOPE: this exercises the payout side only — `withdrawNative`'s `aux != 0 ⇒ requires a
+    /// finalized IMPW authorization` conjunction over a REAL proof-committed leaf.  The IMBD
+    /// descriptor's binding to a co-signed inter-channel burn (`amount == X`, recipient, token) is
+    /// enforced at SUBMIT time by the Manager (Phase 0/2, covered by `PartialWithdrawal.t.sol`);
+    /// `withdrawNative` never re-derives it, so any fixed nonzero `aux_data` faithfully drives the
+    /// payout-side checks.  `None` = a normal withdrawal (legacy behavior, unchanged).
+    pub burn_aux_data: Option<Bytes32>,
 }
 
 /// Parameters of the optional ERC-20 settlement lane (multitoken Phase 5b, §N-7).
@@ -5331,6 +5346,7 @@ impl Default for ChannelWithdrawalParams {
             withdrawal_recipient: None,
             deposit_salt: None,
             erc20_lane: None,
+            burn_aux_data: None,
         }
     }
 }
@@ -5700,11 +5716,14 @@ pub fn build_channel_withdrawal(
         Some(a) => a,
         None => Address::rand(&mut rng),
     };
+    // Partial-withdrawal (burn) mode stamps the leaf's `aux_data` with a nonzero burn descriptor so
+    // the proved leaf enters `withdrawNative`'s burn branch (needs a finalized IMPW authorization);
+    // a normal withdrawal keeps `aux_data == 0`. See `ChannelWithdrawalParams::burn_aux_data`.
     let withdrawal_transfer = Transfer {
         recipient: calculate_recipient_from_address(withdrawal_address),
         token_index: 0,
         amount: U256::from(params.withdrawal_amount),
-        aux_data: Bytes32::default(),
+        aux_data: params.burn_aux_data.unwrap_or_default(),
     };
     // Multitoken Phase 5b: the ERC-20 lane's transfer rides in the SAME withdrawal tx (transfer
     // index 1) — ONE spend debits both token leaves; the two L1 payout chains are built
@@ -8127,6 +8146,7 @@ mod delegate_send_tests {
             withdrawal_recipient: Some(manager),
             deposit_salt: None,
             erc20_lane: None,
+            burn_aux_data: None,
         };
         let artifacts = build_channel_withdrawal(&params, Some(&cli_members))
             .expect("channel withdrawal pipeline self-verifies");

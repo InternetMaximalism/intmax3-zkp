@@ -913,20 +913,48 @@ See §2.3 for P0-1..P0-4, plus:
 
 ### Phase 4 — adversarial coverage
 
-- [ ] **P4-1.** P0-4's negative test now **passes** (the `Y > X` leaf is rejected), and is kept.
-- [ ] **P4-2.** Burn → close → *then* redeem the burn leaf: total paid across both lanes equals the
-      channel's deposits; neither lane can be replayed (T5).
-- [ ] **P4-3.** A burn leaf without an authorization still reverts
-      `PartialWithdrawalNotAuthorized` — and now for the *right* reason, reaching the flag check
-      rather than failing earlier on proof binding (which is all
-      `PartialWithdrawalPayout.t.sol:198-210` can assert today).
-- [ ] **P4-4.** Cross-lane: a non-burn leaf (`auxData == 0`) with a PW authorization present pays
-      normally; a burn leaf cannot be relabelled (`PartialWithdrawalPayout.t.sol:170-186` extended to
-      real burn proofs).
-- [ ] **P4-5.** Property test: random `(X, Y, recipient)` triples, only `Y == X` with the co-signed
-      recipient is ever payable.
+**DONE 2026-08-22 (P4-1, P4-3, P4-4, P4-5, and the replay half of P4-2).** The prerequisite this
+phase always named — "the repo's **first** fixture with `aux_data != 0`" (the Phase 3 HEAVY note) —
+now exists and is committed: `src/bin/generate_burn_withdrawal_fixture.rs` proves a real 3-block
+lifecycle whose withdrawal leaf carries a nonzero burn descriptor (`build_channel_withdrawal`'s new
+`burn_aux_data` mode), emitting `contracts/test/data/burn_{lifecycle,lifecycle_validity_mle,
+withdrawal_mle,withdrawal_payout}.json`. The new suite `contracts/test/PartialWithdrawalBurnPayout.t.sol`
+runs the shared real-fixture lifecycle harness against that set (a `_fixturePrefix()` override on
+`WithdrawNativeE2EBase`). All 8 cases pass on the CI foundry pin (v1.5.1).
+
+- [x] **P4-1.** P0-4's negative test now **passes** (the `Y > X` leaf is rejected), and is kept.
+      `test_burnLeaf_amountAboveBurn_rejected` authorizes the tampered `(Y = X+1)` digest so the ONLY
+      thing that can stop the payout is the proof binding, and asserts `WithdrawalPublicInputsMismatch`.
+      `testFuzz_onlyExactCosignedPair_payable` generalizes it over random amounts.
+- [~] **P4-2.** Replay half **DONE** (`test_provenBurnLeaf_nullifierSingleUse`: the paid burn leaf's
+      nullifier is single-use across every remaining path). The full cross-lane conservation
+      (burn lane + close lane summing to the channel's deposits) additionally needs the close path
+      driven against the SAME channel and is left to the close-side suites / the full anvil rehearsal;
+      recorded here rather than claimed.
+- [x] **P4-3.** A burn leaf without an authorization reverts `PartialWithdrawalNotAuthorized` — and now
+      for the *right* reason: `test_provenBurnLeaf_withoutAuthorization_reverts` uses a REAL `aux != 0`
+      proof, so `_verifyWithdrawalSet` PASSES and the revert comes from the IMPW flag check itself, not
+      the proof binding. This is the branch `PartialWithdrawalPayout.t.sol:198-210` could never reach.
+- [x] **P4-4.** A burn leaf cannot be relabelled (`test_provenBurnLeaf_cannotBeRelabelled`: `aux -> 0`
+      to dodge the flag, and `aux -> other descriptor`, both rejected on the pis re-fold even WITH an
+      authorization for the relabelled digest). The `auxData == 0` normal-leaf-still-pays half is the
+      existing `PartialWithdrawalPayout.t.sol::test_provenNonBurnLeaf_stillPays`; the positive burn
+      half (a legitimate burn IS payable) is `test_provenBurnLeaf_paysWithAuthorization` — the repo's
+      first on-chain `aux != 0` payout.
+- [x] **P4-5.** Property test: `testFuzz_onlyExactCosignedPair_payable` — random `(amount, recipient)`
+      substitutions on the proved leaf, each authorized, all rejected on the pis re-fold; only the
+      exact proved pair (the control test) is payable.
 - [ ] **P4-6.** Dedicated attacker-subagent review of the whole path, separate from whoever
-      implemented it (CLAUDE.md §Adversarial Thinking). Output reviewed before merge.
+      implemented it (CLAUDE.md §Adversarial Thinking). Output reviewed before merge. **Still open —
+      the implementer cannot discharge this.**
+
+> **Still open beyond P4-6: the full live anvil rehearsal.** These tests exercise the payout-side
+> soundness against a real proof, but through a *committed fixture*, not the resident daemon. The L1
+> broadcast driver (`run_partial_withdrawal_payout` + `RunPartialWithdrawalPayout.s.sol` +
+> `LiveBalanceService::burn_payout_artifacts`) has still not run against a live chain in CI. That
+> rehearsal — deploy, drive the daemon validity loop to a finalized state root, burn, pay out, pull —
+> remains the immediate next step, and its groundwork (the burn fixture, `burn_aux_data`, the
+> `_fixturePrefix()` seam) is now in place.
 
 ### Phase 5 — documentation and the era question
 
