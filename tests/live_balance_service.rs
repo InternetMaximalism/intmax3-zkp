@@ -404,6 +404,41 @@ fn run_live_balance_e2e() {
     );
     assert_ne!(first_burn_proof.withdrawal.aux_data, Bytes32::default());
 
+    // The full payout artifact set (wrap + MLE + payout descriptor) for the first burn. The MLE
+    // proof is verified inside the builder; here we pin the wire schema the forge step parses and
+    // that every leaf field is the PI-decoded value.
+    let first_artifacts = live
+        .burn_payout_artifacts(
+            &producer,
+            "burn:0",
+            &first.transfer_descriptor,
+            payout_prover,
+        )
+        .expect("burn payout artifacts");
+    let payout: serde_json::Value =
+        serde_json::from_str(&first_artifacts.payout_json).expect("payout json parses");
+    assert_eq!(
+        payout["withdrawals"][0]["aux_data"].as_str().unwrap(),
+        expected_first.aux_data.to_string(),
+        "the payout descriptor carries the burn aux_data"
+    );
+    assert_eq!(
+        payout["withdrawals"][0]["amount"].as_str().unwrap(),
+        first_burn_proof.withdrawal.amount.to_string(),
+    );
+    assert_eq!(
+        payout["withdrawal_prover"].as_str().unwrap(),
+        payout_prover.to_string(),
+    );
+    assert!(
+        first_artifacts.withdrawal_mle_json.len() > 100_000,
+        "a real MLE/WHIR proof was exported"
+    );
+    assert_eq!(
+        first_artifacts.withdrawal.nullifier,
+        first_burn_proof.withdrawal.nullifier
+    );
+
     let second_burn_proof = live
         .prove_burn_withdrawal(
             &producer,

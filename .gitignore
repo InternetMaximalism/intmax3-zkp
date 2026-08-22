@@ -97,6 +97,11 @@ falcon_aggregate_cache/
 # `cancel-close` / `post-close-claim` in the SAME working directory. Runtime
 # state, not a fixture — a committed copy is stale state a fresh clone reads.
 close_intent_full.json
+# Staged per-run by the pw payout driver (cmd_pw_finalize): the proof inputs the
+# RunPartialWithdrawalPayout forge step reads. Runtime artifacts, never fixtures.
+contracts/test/data/pw_withdrawal_payout.json
+contracts/test/data/pw_withdrawal_mle.json
+pw_payout_store.bin
 
 # =============================================================================
 # Misc

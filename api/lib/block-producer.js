@@ -225,6 +225,13 @@ function liveBaseHead(channelId) {
   return execute({ command: 'liveBaseHead', channelId });
 }
 
+function liveBurnPayoutArtifacts(channelId, producerRequestId, descriptor, withdrawalProver) {
+  return execute({
+    command: 'liveBurnPayoutArtifacts',
+    channelId, producerRequestId, descriptor, withdrawalProver,
+  });
+}
+
 function liveReceiveInterChannel(channelId, body) {
   return execute({ command: 'liveReceiveInterChannel', channelId, ...body });
 }
@@ -261,6 +268,7 @@ module.exports = {
   liveBackingArtifact,
   liveBaseHead,
   liveReceiveInterChannel,
+  liveBurnPayoutArtifacts,
   liveSnapshotExists,
   liveSnapshotPath,
   stop,

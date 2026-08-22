@@ -45,6 +45,17 @@ function loadBurnRoute(relativeRoute, endpoint) {
         upsertTicket(_channel, ticket) { return ticket; },
       };
     }
+    if (request === '../lib/block-producer') {
+      // The daemon IS a process boundary: without this stub the happy path spawns the real
+      // resident binary, whose open pipes pin the test runner's event loop forever.
+      return {
+        stableRequestId: (kind) => `${kind}:test`,
+        postInterChannel: async () => ({ requestId: 'test', blockNumber: 1 }),
+        liveSnapshotExists: () => false,
+        liveSettleInterChannel: async () => null,
+        liveBurnPayoutArtifacts: async () => ({}),
+      };
+    }
     if (request === '../lib/cli') {
       return {
         RPC: 'http://127.0.0.1:8545',

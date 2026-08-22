@@ -147,6 +147,14 @@ enum LiveCommand {
     LiveBaseHead {
         channel_id: ChannelId,
     },
+    /// Prove + wrap the L1 payout artifacts for a SETTLED burn. Read-only on live state; the
+    /// heavy MLE wrap runs in this resident process so the circuits stay warm.
+    LiveBurnPayoutArtifacts {
+        channel_id: ChannelId,
+        producer_request_id: String,
+        descriptor: InterChannelTransferDescriptor,
+        withdrawal_prover: String,
+    },
     LiveReceiveInterChannel {
         channel_id: ChannelId,
         producer_receipt: BlockProducerReceipt,
@@ -452,6 +460,23 @@ fn execute_live_command(
         LiveCommand::LiveBaseHead { channel_id } => {
             let head = live.service(channel_id, producer)?.base_head_artifact()?;
             to_value(serde_json::to_value(head))
+        }
+        LiveCommand::LiveBurnPayoutArtifacts {
+            channel_id,
+            producer_request_id,
+            descriptor,
+            withdrawal_prover,
+        } => {
+            let prover = withdrawal_prover.parse::<Address>().map_err(|e| {
+                LiveBalanceServiceError::InvalidRequest(format!("parse withdrawal_prover: {e}"))
+            })?;
+            let artifacts = live.service(channel_id, producer)?.burn_payout_artifacts(
+                producer,
+                &producer_request_id,
+                &descriptor,
+                prover,
+            )?;
+            to_value(serde_json::to_value(artifacts))
         }
         LiveCommand::LiveReceiveInterChannel {
             channel_id,

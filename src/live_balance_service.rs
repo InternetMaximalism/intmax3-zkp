@@ -57,9 +57,13 @@ use crate::{
     },
     constants::BURN_CHANNEL_ID,
     ethereum_types::{address::Address, bytes32::Bytes32, u32limb_trait::U32LimbTrait as _},
+    partial_withdrawal_payout::{PartialWithdrawalProofArtifacts, PartialWithdrawalProofMetrics},
     utils::{
-        conversion::ToU64 as _, poseidon_hash_out::PoseidonHashOut,
+        conversion::ToU64 as _,
+        mle_prover::{export_mle_json, prove_with_mle, setup_mle_vk, verify_mle_proof},
+        poseidon_hash_out::PoseidonHashOut,
         serialize::serialize_verifier_data,
+        wrapper::WrapperCircuit,
     },
     wallet_core::{
         C, ChannelBalanceAttestation, ChannelSnapshot, D, F, InterChannelDebitPayload,
@@ -1437,6 +1441,111 @@ impl LiveBalanceService {
             withdrawal_prover,
             proof: final_proof,
             withdrawal_vd: withdrawal_processor.withdrawal_vd(),
+        })
+    }
+
+    /// The full live payout artifact set for a settled burn: [`Self::prove_burn_withdrawal`]
+    /// plus the on-chain wrap — `WrapperCircuit` over the final withdrawal proof, the MLE/WHIR
+    /// proof `withdrawNative`/`withdrawERC20` verify, and the payout descriptor JSON in exactly
+    /// the schema `RunPartialWithdrawalPayout.s.sol` parses. The output shape is the store's
+    /// [`PartialWithdrawalProofArtifacts`]: `withdrawal` is the PI-decoded leaf (P3-3) and
+    /// `producer_anchor` pins the journal prefix the proof was built against.
+    pub fn burn_payout_artifacts(
+        &self,
+        producer: &BlockProducerService,
+        producer_request_id: &str,
+        descriptor: &InterChannelTransferDescriptor,
+        withdrawal_prover: Address,
+    ) -> Result<PartialWithdrawalProofArtifacts, LiveBalanceServiceError> {
+        use std::time::Instant;
+        let t_all = Instant::now();
+        let proved = self.prove_burn_withdrawal(
+            producer,
+            producer_request_id,
+            descriptor,
+            withdrawal_prover,
+        )?;
+        let prove_millis = t_all.elapsed().as_millis() as u64;
+
+        let t_wrap = Instant::now();
+        let wrapper = WrapperCircuit::<F, C, C, D>::new(&proved.withdrawal_vd);
+        let wrapped = wrapper.prove(&proved.proof).map_err(|e| {
+            LiveBalanceServiceError::Transition(format!("wrap withdrawal proof: {e}"))
+        })?;
+        wrapper.data.verify(wrapped).map_err(|e| {
+            LiveBalanceServiceError::Transition(format!("verify wrapped withdrawal: {e}"))
+        })?;
+        let vk = setup_mle_vk::<F, C, D>(&wrapper.data);
+        let mut pw = plonky2::iop::witness::PartialWitness::new();
+        plonky2::iop::witness::WitnessWrite::set_proof_with_pis_target(
+            &mut pw,
+            &wrapper.wrap_proof,
+            &proved.proof,
+        )
+        .map_err(|e| LiveBalanceServiceError::Transition(format!("mle witness: {e}")))?;
+        let mle = prove_with_mle::<F, C, D>(&wrapper.data, pw)
+            .map_err(|e| LiveBalanceServiceError::Transition(format!("mle prove: {e}")))?;
+        verify_mle_proof(&wrapper.data, &vk, &mle.proof)
+            .map_err(|e| LiveBalanceServiceError::Transition(format!("mle verify: {e}")))?;
+        let withdrawal_mle_json = export_mle_json(&mle.proof, &wrapper.data.common)
+            .map_err(|e| LiveBalanceServiceError::Transition(format!("mle export: {e}")))?;
+        let wrap_millis = t_wrap.elapsed().as_millis() as u64;
+
+        // The payout descriptor, field for field what the forge step parses; every leaf value is
+        // the PI-decoded one.
+        let ext_public_state = producer
+            .producer()
+            .map_err(|e| LiveBalanceServiceError::ProducerReconciliation(e.to_string()))?
+            .witness_handle()
+            .map_err(|e| LiveBalanceServiceError::ProducerReconciliation(e.to_string()))?
+            .borrow()
+            .current_extended_public_state();
+        let payout_json = serde_json::to_string_pretty(&serde_json::json!({
+            "withdrawals": [{
+                "recipient": proved.withdrawal.recipient.to_string(),
+                "token_index": proved.withdrawal.token_index,
+                "amount": proved.withdrawal.amount.to_string(),
+                "nullifier": proved.withdrawal.nullifier.to_string(),
+                "aux_data": proved.withdrawal.aux_data.to_string(),
+            }],
+            "withdrawal_prover": proved.withdrawal_prover.to_string(),
+            "block_number": ext_public_state.inner.block_number.as_u64(),
+            "ext_commitment": ext_public_state.commitment().to_string(),
+        }))
+        .map_err(|e| LiveBalanceServiceError::Transition(format!("payout json: {e}")))?;
+
+        let mle_json_bytes = withdrawal_mle_json.len();
+        let receipt = &self
+            .disk
+            .applied
+            .iter()
+            .find(|entry| entry.request_id == producer_request_id)
+            .expect("entry existed above")
+            .producer_receipt;
+        Ok(PartialWithdrawalProofArtifacts {
+            withdrawal: proved.withdrawal,
+            withdrawal_prover: proved.withdrawal_prover,
+            payout_json,
+            withdrawal_mle_json,
+            producer_anchor: crate::block_producer_service::BlockProducerAnchor {
+                generation: receipt.generation,
+                entry_hash: receipt.entry_hash,
+                block_number: receipt.block_number,
+                timestamp: receipt.timestamp,
+                extended_state_commitment: receipt.extended_state_commitment,
+                bp_sig_chain: receipt.bp_sig_chain,
+            },
+            metrics: PartialWithdrawalProofMetrics {
+                single_withdrawal_millis: prove_millis,
+                withdrawal_chain_millis: 0,
+                withdrawal_final_millis: 0,
+                wrap_mle_millis: wrap_millis,
+                single_withdrawal_proof_bytes: 0,
+                withdrawal_chain_proof_bytes: 0,
+                withdrawal_final_proof_bytes: proved.proof.to_bytes().len(),
+                mle_json_bytes,
+                peak_rss_bytes: None,
+            },
         })
     }
 
