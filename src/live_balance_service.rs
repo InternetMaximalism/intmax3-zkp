@@ -190,6 +190,12 @@ pub struct BurnWithdrawalProof {
     pub withdrawal_prover: Address,
     pub proof: plonky2::plonk::proof::ProofWithPublicInputs<F, C, D>,
     pub withdrawal_vd: plonky2::plonk::circuit_data::VerifierCircuitData<F, C, D>,
+    /// Serialized byte length of the intermediate single-withdrawal proof, captured before it is
+    /// consumed by the chain step. Surfaced so the payout-store metrics carry the real stage sizes
+    /// rather than a placeholder `0`, which the store's non-empty-stage guard rejects.
+    pub single_proof_bytes: usize,
+    /// Serialized byte length of the withdrawal-chain proof, captured before the final wrap.
+    pub chain_proof_bytes: usize,
 }
 
 /// Public channel backing projection: a verifiable balance proof, its exact base cursor, and the
@@ -1394,6 +1400,10 @@ impl LiveBalanceService {
         .map_err(|e| LiveBalanceServiceError::Transition(format!("single withdrawal pis: {e}")))?;
         let withdrawal: Withdrawal = single_pis.withdrawal.clone();
 
+        // Capture the intermediate proof sizes before they are consumed downstream — the payout
+        // store rejects a `0` stage size as an empty/degraded prover.
+        let single_proof_bytes = single_proof.to_bytes().len();
+
         let withdrawal_processor = WithdrawalProcessor::<F, C, D>::new(&single_withdrawal_vd);
         let chain_proof = withdrawal_processor
             .prove_step(&WithdrawalStepWitness::<F, C, D> {
@@ -1404,6 +1414,7 @@ impl LiveBalanceService {
             .map_err(|e| {
                 LiveBalanceServiceError::Transition(format!("withdrawal chain proof: {e}"))
             })?;
+        let chain_proof_bytes = chain_proof.to_bytes().len();
         // Keccak-refold sanity: the chain the contract will fold equals the proof-committed one.
         let proof_withdrawal_hash = {
             let pis = chain_proof.public_inputs.to_u64_vec();
@@ -1441,6 +1452,8 @@ impl LiveBalanceService {
             withdrawal_prover,
             proof: final_proof,
             withdrawal_vd: withdrawal_processor.withdrawal_vd(),
+            single_proof_bytes,
+            chain_proof_bytes,
         })
     }
 
@@ -1540,8 +1553,8 @@ impl LiveBalanceService {
                 withdrawal_chain_millis: 0,
                 withdrawal_final_millis: 0,
                 wrap_mle_millis: wrap_millis,
-                single_withdrawal_proof_bytes: 0,
-                withdrawal_chain_proof_bytes: 0,
+                single_withdrawal_proof_bytes: proved.single_proof_bytes,
+                withdrawal_chain_proof_bytes: proved.chain_proof_bytes,
                 withdrawal_final_proof_bytes: proved.proof.to_bytes().len(),
                 mle_json_bytes,
                 peak_rss_bytes: None,
