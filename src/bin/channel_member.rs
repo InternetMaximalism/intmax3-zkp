@@ -1790,7 +1790,41 @@ impl L1Signer {
     fn for_rpc(rpc: &str) -> Self {
         Self::for_chain_id(rpc_chain_id(rpc))
     }
+}
 
+/// A [`L1Signer`] whose chain-id probe is deferred to first use.
+///
+/// SECURITY: this changes WHEN the chain id is read, never WHETHER. `for_rpc` still reads it from
+/// THE CHAIN via `rpc_chain_id`, still dies on an unreadable id, and still runs before any signer
+/// material reaches a child process — the guarantees documented on `rpc_chain_id` /
+/// `settlement_deploy_plan` are untouched. What it removes is a network round-trip standing in
+/// front of the CHEAP OFFLINE gates (contracts-checkout resolution, the co-signer identity gate)
+/// that every exit command runs first. Constructing eagerly made an unreachable RPC mask those
+/// refusals: `tests/exit_path_cwd.rs` asserts precisely that they land before the CLI touches the
+/// network, and four of its five cases could no longer reach them. It also defeated the F4 intent
+/// stated in `cmd_cancel_close` / `cmd_post_close_claim` — validate the checkout BEFORE the heavy
+/// proof — by probing even earlier than the validation it was meant to precede.
+struct LazyL1Signer<'a> {
+    rpc: &'a str,
+    cell: std::cell::OnceCell<L1Signer>,
+}
+
+impl<'a> LazyL1Signer<'a> {
+    fn new(rpc: &'a str) -> Self {
+        Self {
+            rpc,
+            cell: std::cell::OnceCell::new(),
+        }
+    }
+
+    /// Read the chain id (once) and resolve the signer. Call at the LAST moment before signer
+    /// material is needed, so every offline refusal has already had its chance to fire.
+    fn get(&self) -> &L1Signer {
+        self.cell.get_or_init(|| L1Signer::for_rpc(self.rpc))
+    }
+}
+
+impl L1Signer {
     /// Add only Foundry wallet-selection flags. Password material is deliberately never added.
     fn append_args(&self, argv: &mut Vec<String>) {
         match self {
@@ -1927,7 +1961,7 @@ fn cmd_setup_backing(args: &[String]) {
     let fund: u64 = args.get(3).and_then(|s| s.parse().ok()).unwrap_or_else(|| {
         cli_slots().iter().map(|&s| genesis_amount(s)).sum::<u64>() + DELEGATE_GENESIS
     });
-    let l1_signer = L1Signer::for_rpc(&rpc);
+    let l1_signer = LazyL1Signer::new(&rpc);
 
     eprintln!("setup-backing: building the balance prover (one-time, ~25s)…");
     let spend = SpendCircuit::<BF, BC, BD>::new();
@@ -1955,7 +1989,7 @@ fn cmd_setup_backing(args: &[String]) {
     // changes WHEN the deposit lands on-chain, not whether the eventual L1 exit is backed.
     let no_onchain_deposit = std::env::var("SETUP_BACKING_NO_ONCHAIN_DEPOSIT").is_ok();
     let (depositor, txhash) = if no_onchain_deposit {
-        let dep_hex = l1_signer.address();
+        let dep_hex = l1_signer.get().address();
         let dep = Address::from_hex(&dep_hex)
             .unwrap_or_else(|e| die(format!("parse depositor address: {e:?}")));
         eprintln!(
@@ -1971,7 +2005,7 @@ fn cmd_setup_backing(args: &[String]) {
         let recipient_hex = recipient.to_hex();
         let send_out = cast_signed(
             &rpc,
-            &l1_signer,
+            l1_signer.get(),
             &[
                 "send",
                 &rollup,
@@ -2186,7 +2220,7 @@ fn cmd_close(args: &[String]) {
         .get(2)
         .cloned()
         .unwrap_or_else(|| "http://localhost:8545".to_string());
-    let l1_signer = L1Signer::for_rpc(&rpc);
+    let l1_signer = LazyL1Signer::new(&rpc);
 
     // Phase control (opt-in; default = the combined requestClose + submitCloseIntent flow):
     //   CLOSE_REQUEST_ONLY=1 → A26 requestClose-only (freeze + grace), NO proving, return early.
@@ -2200,7 +2234,7 @@ fn cmd_close(args: &[String]) {
         eprintln!(
             "[close] requestClose() on manager {manager} (A26 request-only phase, no proving)…"
         );
-        cast_signed(&rpc, &l1_signer, &["send", &manager, "requestClose()"]);
+        cast_signed(&rpc, l1_signer.get(), &["send", &manager, "requestClose()"]);
         if let Ok(secs) = std::env::var("CLOSE_ADVANCE_TIME") {
             eprintln!(
                 "[close] advancing chain time by {secs}s (evm_increaseTime) to pass the grace window…"
@@ -2347,7 +2381,7 @@ fn cmd_close(args: &[String]) {
         );
     } else {
         eprintln!("[close] requestClose() on manager {manager}…");
-        cast_signed(&rpc, &l1_signer, &["send", &manager, "requestClose()"]);
+        cast_signed(&rpc, l1_signer.get(), &["send", &manager, "requestClose()"]);
     }
 
     // GRACE: the manager rejects the FIRST close intent until `GRACE_BEFORE_PROCESS_SECS` (600s)
@@ -2389,7 +2423,7 @@ fn cmd_close(args: &[String]) {
         &rpc,
         "--broadcast",
     ]);
-    l1_signer.append_to_command(&mut forge);
+    l1_signer.get().append_to_command(&mut forge);
     let status = forge
         .env("ROLLUP", &backing.rollup)
         .env("MANAGER", &manager)
@@ -2418,11 +2452,11 @@ fn cmd_settle(args: &[String]) {
         .get(2)
         .cloned()
         .unwrap_or_else(|| "http://localhost:8545".to_string());
-    let l1_signer = L1Signer::for_rpc(&rpc);
+    let l1_signer = LazyL1Signer::new(&rpc);
     eprintln!(
         "[settle] finalizeClose() on manager {manager} (the challenge period must have elapsed)…"
     );
-    cast_signed(&rpc, &l1_signer, &["send", &manager, "finalizeClose()"]);
+    cast_signed(&rpc, l1_signer.get(), &["send", &manager, "finalizeClose()"]);
     println!(
         "[settle] channel finalized (Closed). Now run `withdraw` (rollup → manager) then `claim`."
     );
@@ -2593,7 +2627,7 @@ fn cmd_claim(args: &[String]) {
         .unwrap_or_else(|| {
             die("set CLAIM_RECIPIENT=0x<20-byte member L1 recipient> (must equal the registered recipient)")
         });
-    let l1_signer = L1Signer::for_rpc(&rpc);
+    let l1_signer = LazyL1Signer::new(&rpc);
 
     // A33 pull-only phase (opt-in): the claim proof was already submitted (totalWithdrawn
     // credited); just pull the ETH credit to the recipient. No proving. SECURITY:
@@ -2606,7 +2640,7 @@ fn cmd_claim(args: &[String]) {
         );
         cast_signed(
             &rpc,
-            &l1_signer,
+            l1_signer.get(),
             &["send", &manager, "claimWithdrawalCredit()"],
         );
         println!("[claim] pull-only OK: recipient {recipient_hex} pulled its withdrawal credit.");
@@ -2726,7 +2760,7 @@ fn cmd_claim(args: &[String]) {
         &rpc,
         "--broadcast",
     ]);
-    l1_signer.append_to_command(&mut forge);
+    l1_signer.get().append_to_command(&mut forge);
     let status = forge
         .env("MANAGER", &manager)
         .status()
@@ -2747,7 +2781,7 @@ fn cmd_claim(args: &[String]) {
         );
         cast_signed(
             &rpc,
-            &l1_signer,
+            l1_signer.get(),
             &["send", &manager, "claimWithdrawalCredit()"],
         );
         println!(
@@ -2761,7 +2795,7 @@ fn cmd_claim(args: &[String]) {
         );
         cast_signed(
             &rpc,
-            &l1_signer,
+            l1_signer.get(),
             &[
                 "send",
                 &manager,
@@ -2810,7 +2844,7 @@ fn cmd_cancel_close(args: &[String]) {
         .get(2)
         .cloned()
         .unwrap_or_else(|| "http://localhost:8545".to_string());
-    let l1_signer = L1Signer::for_rpc(&rpc);
+    let l1_signer = LazyL1Signer::new(&rpc);
     // F4: resolve + validate the contracts checkout BEFORE the heavy cancel proof (see
     // `require_contracts_dir`). A cancel that dies on a path lookup after proving is worse than a
     // cancel that never started: the challenge window is what a cancel is racing.
@@ -2906,7 +2940,7 @@ fn cmd_cancel_close(args: &[String]) {
         &rpc,
         "--broadcast",
     ]);
-    l1_signer.append_to_command(&mut forge);
+    l1_signer.get().append_to_command(&mut forge);
     let status = forge
         .env("MANAGER", &manager)
         .env("SV", &sv)
@@ -2971,7 +3005,7 @@ fn cmd_post_close_claim(args: &[String]) {
         .unwrap_or_else(|| {
             die("set CLAIM_RECIPIENT=0x<20-byte member L1 recipient> (must equal the registered recipient)")
         });
-    let l1_signer = L1Signer::for_rpc(&rpc);
+    let l1_signer = LazyL1Signer::new(&rpc);
     // F4: resolve + validate the contracts checkout BEFORE the heavy post-close-claim proof (see
     // `require_contracts_dir`).
     let contracts_dir = require_contracts_dir("post-close-claim", &["script/RunClose.s.sol"]);
@@ -3090,7 +3124,7 @@ fn cmd_post_close_claim(args: &[String]) {
         &rpc,
         "--broadcast",
     ]);
-    l1_signer.append_to_command(&mut forge);
+    l1_signer.get().append_to_command(&mut forge);
     let status = forge
         .env("MANAGER", &manager)
         .status()
@@ -3106,7 +3140,7 @@ fn cmd_post_close_claim(args: &[String]) {
     );
     cast_signed(
         &rpc,
-        &l1_signer,
+        l1_signer.get(),
         &["send", &manager, "claimWithdrawalCredit()"],
     );
     println!(
@@ -7362,7 +7396,7 @@ fn cmd_pw_submit(args: &[String]) {
     let verifier = settlement["verifier"]
         .as_str()
         .unwrap_or_else(|| die("settlement.json missing verifier"));
-    let l1_signer = L1Signer::for_rpc(&rpc);
+    let l1_signer = LazyL1Signer::new(&rpc);
 
     let burn: serde_json::Value = read_json("last_burn.json");
     let burn_amount: u64 = burn["amount"]
@@ -7632,7 +7666,7 @@ fn cmd_pw_submit(args: &[String]) {
         "--code-size-limit",
         "50000",
     ]);
-    l1_signer.append_to_command(&mut forge);
+    l1_signer.get().append_to_command(&mut forge);
     let forge_out = forge
         .output()
         .unwrap_or_else(|e| die(format!("forge pw-submit failed: {e}")));
@@ -7693,7 +7727,7 @@ fn cmd_pw_finalize(args: &[String]) {
         .as_str()
         .unwrap_or_else(|| die("pw_auth.json missing auth_digest"));
 
-    let l1_signer = L1Signer::for_rpc(&rpc);
+    let l1_signer = LazyL1Signer::new(&rpc);
 
     let settlement: serde_json::Value = read_json("settlement.json");
     let rollup = settlement["rollup"]
@@ -7758,7 +7792,7 @@ fn cmd_pw_finalize(args: &[String]) {
 
         cast_signed(
             &rpc,
-            &l1_signer,
+            l1_signer.get(),
             &["send", manager, "finalizePartialWithdrawal()"],
         );
     }
