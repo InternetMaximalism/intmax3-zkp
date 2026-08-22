@@ -325,6 +325,34 @@ fn resident_prover_recovers_candidate_and_proves_two_independent_spans() {
         fin.validity_mle_json.len() > 100_000,
         "a real validity MLE/WHIR proof was exported"
     );
+    // ON-CHAIN FINALIZE COMPATIBILITY: the wrapped validity VK must equal the one the rollup is
+    // deployed with (mle_fixture.json). `MleFinalizeE2ETest` already proves that fixture finalizes
+    // on a real MleVerifier; matching its VK params here is what lets a LIVE-produced validity MLE
+    // take the same path. circuitDigest and preprocessedCommitmentRoot are structural — they depend
+    // on the wrapper circuit, not on the proven span — so they must match despite different spans.
+    {
+        let live: serde_json::Value =
+            serde_json::from_str(&fin.validity_mle_json).expect("live validity mle json");
+        let fixture_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("contracts/test/data/mle_fixture.json");
+        if let Ok(fixture_str) = std::fs::read_to_string(&fixture_path) {
+            let fixture: serde_json::Value =
+                serde_json::from_str(&fixture_str).expect("mle_fixture.json");
+            assert_eq!(
+                live["circuitDigest"], fixture["circuitDigest"],
+                "live validity VK circuitDigest diverged from the deployed rollup's (mle_fixture)"
+            );
+            assert_eq!(
+                live["preprocessedCommitmentRoot"], fixture["preprocessedCommitmentRoot"],
+                "live validity VK preprocessedCommitmentRoot diverged from mle_fixture"
+            );
+            assert_eq!(live["degreeBits"], fixture["degreeBits"]);
+            assert_eq!(live["numRoutedWires"], fixture["numRoutedWires"]);
+            eprintln!("[finalize] live validity VK matches the deployed rollup VK (mle_fixture)");
+        } else {
+            eprintln!("[finalize] mle_fixture.json absent — skipping the on-chain VK-match guard");
+        }
+    }
 
     drop(validity);
     let mut validity = ValidityProverService::open(&snapshot_path, &[2], prover_address, &producer)
