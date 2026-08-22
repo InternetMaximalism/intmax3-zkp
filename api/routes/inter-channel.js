@@ -72,11 +72,27 @@ router.post('/send', (req, res) => {
         result.bBundleApplyState,
       ])
       : null;
+    // Live-tracked source channel: the base-state authority MUST settle this send (its journaled
+    // base proof advances through the very spend the producer just admitted). A failure here is a
+    // route failure — silently skipping would let the channel head outrun the base authority.
+    // A channel with no live snapshot predates the live spine and is skipped (legacy migration
+    // seam, removed once every channel is re-initialized on the new rollup).
+    let liveReceipt = null;
+    if (producer.liveSnapshotExists(ch)) {
+      liveReceipt = await producer.liveSettleInterChannel(
+        ch,
+        blockReceipt,
+        sourceHead,
+        debitPayload,
+        transferDescriptor,
+      );
+    }
     res.json({
       sourceHead,
       destSnapshot: result.bSnapshot || result.destSnapshot || null,
       blockReceipt,
       destinationHeadReceipt,
+      liveReceipt,
     });
   }).catch(e => {
     console.error(e.stderr ? String(e.stderr) : (e.message || e));

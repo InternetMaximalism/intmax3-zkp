@@ -51,7 +51,7 @@ use intmax3_zkp::{
                 WithdrawalClaimPublicInputs, WITHDRAWAL_CLAIM_PUBLIC_INPUTS_LEN,
             },
         },
-        test_utils::{
+        witness::{
             balance_witness_generator::{BalanceWitnessGenerator, ReceiveDepositData},
             block_witness_generator::{
                 test_recipient_for, BlockWitnessGenerator, BlockWitnessGeneratorHandle,

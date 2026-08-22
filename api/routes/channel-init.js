@@ -18,7 +18,11 @@ router.post('/init', (req, res) => {
     cli(ch, ['init', 'contribution.json', 'channel_snapshot.json']);
     const snapshot = readJson(wc(ch, 'channel_snapshot.json'));
     await producer.register(snapshot);
-    res.json(snapshot);
+    // The durable live-balance spine starts HERE (sole base-state authority): the daemon derives
+    // and owns the account/deposit salts; the API only ever learns the deposit recipient.
+    // Idempotent across restarts — an existing snapshot returns its configured recipient.
+    const live = await producer.liveInit(ch);
+    res.json({ ...snapshot, liveDepositRecipient: live.depositRecipient });
   }).catch(e => {
     console.error(e.stderr ? String(e.stderr) : (e.message || e));
     res.status(500).json({ error: String(e.stderr || e.message || e) });
@@ -36,8 +40,9 @@ router.post('/join', (req, res) => {
     cli(ch, ['init', 'contribution.json', 'channel_snapshot.json']);
     const snapshot = readJson(wc(ch, 'channel_snapshot.json'));
     await producer.register(snapshot);
+    const live = await producer.liveInit(ch);
     const slot = snapshot.members ? snapshot.members.length - 1 : 0;
-    res.json({ snapshot, slot, balance: '0' });
+    res.json({ snapshot, slot, balance: '0', liveDepositRecipient: live.depositRecipient });
   }).catch(e => {
     console.error(e.stderr ? String(e.stderr) : (e.message || e));
     res.status(500).json({ error: String(e.stderr || e.message || e) });

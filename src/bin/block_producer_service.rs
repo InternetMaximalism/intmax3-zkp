@@ -4,13 +4,20 @@ use std::io::{self, BufReader, BufWriter};
 
 use clap::Parser;
 use intmax3_zkp::{
+    block_producer::ProductionDepositRequest,
     block_producer_service::{
-        BlockProducerCommand, BlockProducerService, BlockProducerServiceError,
+        BlockProducerCommand, BlockProducerReceipt, BlockProducerService,
+        BlockProducerServiceError,
     },
+    common::channel::ChannelState,
+    common::channel_id::ChannelId,
     ethereum_types::{address::Address, bytes32::Bytes32},
+    live_balance_service::{LiveBalanceService, LiveBalanceServiceError, LiveInterChannelSendArtifact},
+    regev::RegevSecurityLevel,
     validity_prover_service::{
         L1FinalizationRpcConfig, ValidityProverService, ValidityProverServiceError,
     },
+    wallet_core::{ChannelSnapshot, InterChannelDebitPayload, InterChannelTransferDescriptor},
 };
 use serde::{Deserialize, Serialize};
 
@@ -52,6 +59,18 @@ struct Args {
     /// Required canonical L1 depth before a candidate may become finalized locally.
     #[arg(long, default_value_t = 3, requires = "validity_snapshot")]
     l1_confirmations: u64,
+
+    /// Directory of per-channel durable live-balance snapshots. When set, the `live*` commands are
+    /// available and this process is the SOLE base-state authority for those channels (the
+    /// checkpoint handoff's wiring requirement): every base proof advance goes through the
+    /// journaled `LiveBalanceService` here, never through ad-hoc CLI state.
+    #[arg(long)]
+    live_root: Option<std::path::PathBuf>,
+
+    /// Prove Regev transitions at the fast TEST parameters instead of Production. E2E-harness
+    /// escape hatch; NEVER a per-request choice — a wire request cannot downgrade proving.
+    #[arg(long, default_value_t = false)]
+    regev_test_proofs: bool,
 }
 
 #[derive(Serialize)]
@@ -81,10 +100,69 @@ enum ValidityCommand {
     },
 }
 
+/// Live-balance base-state commands. Each channel's durable snapshot lives under `--live-root`;
+/// the resident `LiveBalanceService` for a channel is opened once and retained, exactly like the
+/// producer journal. `RegevSecurityLevel` is DELIBERATELY absent from every request shape: proving
+/// strength is fixed at startup (`--regev-test-proofs`), so a wire request can never downgrade it.
+#[derive(Clone, Debug, Deserialize)]
+#[serde(
+    tag = "command",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase",
+    deny_unknown_fields
+)]
+enum LiveCommand {
+    LiveStatus {
+        channel_id: ChannelId,
+    },
+    LiveInit {
+        channel_id: ChannelId,
+    },
+    LivePrepareDepositRecipient {
+        channel_id: ChannelId,
+    },
+    LiveReceiveConfiguredDeposit {
+        channel_id: ChannelId,
+        producer_receipt: BlockProducerReceipt,
+        deposit: ProductionDepositRequest,
+    },
+    LiveBindSnapshot {
+        channel_id: ChannelId,
+        signed_snapshot: ChannelSnapshot,
+    },
+    LiveSettleInterChannel {
+        channel_id: ChannelId,
+        producer_receipt: BlockProducerReceipt,
+        signed_state: ChannelState,
+        debit_payload: InterChannelDebitPayload,
+        descriptor: InterChannelTransferDescriptor,
+    },
+    LiveSendArtifact {
+        channel_id: ChannelId,
+        producer_request_id: String,
+    },
+    LiveBackingArtifact {
+        channel_id: ChannelId,
+    },
+    LiveBaseHead {
+        channel_id: ChannelId,
+    },
+    LiveReceiveInterChannel {
+        channel_id: ChannelId,
+        producer_receipt: BlockProducerReceipt,
+        debit_payload: InterChannelDebitPayload,
+        descriptor: InterChannelTransferDescriptor,
+        source_artifact: Box<LiveInterChannelSendArtifact>,
+        fund_import_state: ChannelState,
+        destination_snapshot: ChannelSnapshot,
+    },
+}
+
 #[derive(Clone, Debug, Deserialize)]
 #[serde(untagged)]
 enum ServiceCommand {
     Validity(ValidityCommand),
+    Live(LiveCommand),
     Producer(BlockProducerCommand),
 }
 
@@ -124,6 +202,15 @@ fn main() {
             std::process::exit(1);
         }
     };
+    let mut live = args.live_root.as_ref().map(|root| LiveState {
+        root: root.clone(),
+        level: if args.regev_test_proofs {
+            RegevSecurityLevel::Test
+        } else {
+            RegevSecurityLevel::Production
+        },
+        services: std::collections::HashMap::new(),
+    });
 
     let stdin = io::stdin();
     let stdout = io::stdout();
@@ -150,7 +237,13 @@ fn main() {
                         continue;
                     }
                 };
-                match execute_command(command, &mut service, validity.as_mut(), l1.as_ref()) {
+                match execute_command(
+                    command,
+                    &mut service,
+                    validity.as_mut(),
+                    l1.as_ref(),
+                    live.as_mut(),
+                ) {
                     Ok(result) => {
                         let response = SuccessResponse { ok: true, result };
                         write_json_line(&mut writer, &response);
@@ -228,13 +321,181 @@ fn configure_validity(
     Ok((Some(service), Some(l1)))
 }
 
+struct LiveState {
+    root: std::path::PathBuf,
+    level: RegevSecurityLevel,
+    services: std::collections::HashMap<u64, LiveBalanceService>,
+}
+
+impl LiveState {
+    fn snapshot_path(&self, channel_id: ChannelId) -> std::path::PathBuf {
+        self.root
+            .join(format!("channel-{}", channel_id.as_u64()))
+            .join("balance.snapshot")
+    }
+
+    /// Resolve the resident service for `channel_id`, opening the durable snapshot on first use.
+    /// `open` reconciles against the producer journal, so a crash-recovered daemon converges to
+    /// the same head the producer admitted.
+    fn service(
+        &mut self,
+        channel_id: ChannelId,
+        producer: &BlockProducerService,
+    ) -> Result<&mut LiveBalanceService, LiveBalanceServiceError> {
+        use std::collections::hash_map::Entry;
+        match self.services.entry(channel_id.as_u64()) {
+            Entry::Occupied(entry) => Ok(entry.into_mut()),
+            Entry::Vacant(entry) => {
+                let path = self
+                    .root
+                    .join(format!("channel-{}", channel_id.as_u64()))
+                    .join("balance.snapshot");
+                let service = LiveBalanceService::open(&path, producer)?;
+                Ok(entry.insert(service))
+            }
+        }
+    }
+}
+
+fn execute_live_command(
+    command: LiveCommand,
+    live: &mut LiveState,
+    producer: &mut BlockProducerService,
+) -> Result<serde_json::Value, LiveBalanceServiceError> {
+    let to_value = |v: Result<serde_json::Value, serde_json::Error>| {
+        v.map_err(|e| {
+            LiveBalanceServiceError::Snapshot(format!("serialize live response: {e}"))
+        })
+    };
+    match command {
+        LiveCommand::LiveStatus { channel_id } => {
+            let status = live.service(channel_id, producer)?.status()?;
+            to_value(serde_json::to_value(status))
+        }
+        LiveCommand::LiveInit { channel_id } => {
+            let path = live.snapshot_path(channel_id);
+            if path.exists() {
+                // Idempotent restart: an existing snapshot is opened, its configured recipient
+                // returned. Never re-randomize salts for a channel that already has state.
+                let service = live.service(channel_id, producer)?;
+                let recipient = service.configured_deposit_recipient()?.ok_or_else(|| {
+                    LiveBalanceServiceError::InvalidRequest(
+                        "live balance exists but has no configured deposit recipient; use                          livePrepareDepositRecipient"
+                            .into(),
+                    )
+                })?;
+                return to_value(Ok(serde_json::json!({
+                    "channelId": channel_id,
+                    "depositRecipient": recipient,
+                })));
+            }
+            let (service, init) = LiveBalanceService::initialize_production(&path, channel_id)?;
+            live.services.insert(channel_id.as_u64(), service);
+            to_value(serde_json::to_value(init))
+        }
+        LiveCommand::LivePrepareDepositRecipient { channel_id } => {
+            let recipient = live
+                .service(channel_id, producer)?
+                .prepare_deposit_recipient()?;
+            to_value(serde_json::to_value(recipient))
+        }
+        LiveCommand::LiveReceiveConfiguredDeposit {
+            channel_id,
+            producer_receipt,
+            deposit,
+        } => {
+            let receipt = live
+                .service(channel_id, producer)?
+                .receive_configured_deposit_unbound(producer, &producer_receipt, &deposit)?;
+            to_value(serde_json::to_value(receipt))
+        }
+        LiveCommand::LiveBindSnapshot {
+            channel_id,
+            signed_snapshot,
+        } => {
+            let service = live.service(channel_id, producer)?;
+            service.bind_signed_snapshot(&signed_snapshot)?;
+            let status = service.status()?;
+            to_value(serde_json::to_value(status))
+        }
+        LiveCommand::LiveSettleInterChannel {
+            channel_id,
+            producer_receipt,
+            signed_state,
+            debit_payload,
+            descriptor,
+        } => {
+            let receipt = live.service(channel_id, producer)?.settle_inter_channel(
+                producer,
+                &producer_receipt,
+                &signed_state,
+                &debit_payload,
+                &descriptor,
+            )?;
+            to_value(serde_json::to_value(receipt))
+        }
+        LiveCommand::LiveSendArtifact {
+            channel_id,
+            producer_request_id,
+        } => {
+            let artifact = live
+                .service(channel_id, producer)?
+                .inter_channel_send_artifact(&producer_request_id)?;
+            to_value(serde_json::to_value(artifact))
+        }
+        LiveCommand::LiveBackingArtifact { channel_id } => {
+            let artifact = live
+                .service(channel_id, producer)?
+                .channel_backing_artifact()?;
+            to_value(serde_json::to_value(artifact))
+        }
+        LiveCommand::LiveBaseHead { channel_id } => {
+            let head = live.service(channel_id, producer)?.base_head_artifact()?;
+            to_value(serde_json::to_value(head))
+        }
+        LiveCommand::LiveReceiveInterChannel {
+            channel_id,
+            producer_receipt,
+            debit_payload,
+            descriptor,
+            source_artifact,
+            fund_import_state,
+            destination_snapshot,
+        } => {
+            let level = live.level;
+            let receipt = live.service(channel_id, producer)?.receive_inter_channel(
+                producer,
+                &producer_receipt,
+                &debit_payload,
+                &descriptor,
+                &source_artifact,
+                &fund_import_state,
+                &destination_snapshot,
+                level,
+            )?;
+            to_value(serde_json::to_value(receipt))
+        }
+    }
+}
+
 fn execute_command(
     command: ServiceCommand,
     producer: &mut BlockProducerService,
     validity: Option<&mut ValidityProverService>,
     l1: Option<&L1FinalizationRpcConfig>,
+    live: Option<&mut LiveState>,
 ) -> Result<serde_json::Value, (&'static str, String)> {
     match command {
+        ServiceCommand::Live(command) => {
+            let live = live.ok_or_else(|| {
+                (
+                    "live_not_configured",
+                    "start the daemon with --live-root to enable live-balance commands".to_string(),
+                )
+            })?;
+            execute_live_command(command, live, producer)
+                .map_err(|error| (error.code(), error.to_string()))
+        }
         ServiceCommand::Producer(command) => producer
             .execute(command)
             .and_then(|result| {

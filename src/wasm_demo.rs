@@ -24,7 +24,7 @@ use crate::{
             },
             spend_circuit::SpendCircuit,
         },
-        test_utils::{
+        witness::{
             balance_witness_generator::{
                 BalanceWitnessGenerator, ReceiveDepositData, ReceiveTransferData, SendTxData,
                 SingleWithdrawalData,

@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     circuits::{
-        test_utils::block_witness_generator::{
+        witness::block_witness_generator::{
             BlockTxV2Witness, BlockWitnessGenerator, BlockWitnessGeneratorError, BpSigEvent,
             ChannelCosignBundle,
         },
@@ -756,7 +756,7 @@ impl ProductionBlockProducer {
     pub fn witness_handle(
         &self,
     ) -> Result<
-        crate::circuits::test_utils::block_witness_generator::BlockWitnessGeneratorHandle,
+        crate::circuits::witness::block_witness_generator::BlockWitnessGeneratorHandle,
         ProductionBlockProducerError,
     > {
         if self.holds_any_local_signing_keys() {
@@ -765,7 +765,7 @@ impl ProductionBlockProducer {
             ));
         }
         Ok(
-            crate::circuits::test_utils::block_witness_generator::BlockWitnessGeneratorHandle::new(
+            crate::circuits::witness::block_witness_generator::BlockWitnessGeneratorHandle::new(
                 self.witness.clone(),
             ),
         )

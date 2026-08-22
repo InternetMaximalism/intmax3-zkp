@@ -5462,7 +5462,7 @@ pub fn build_channel_withdrawal(
                 },
                 spend_circuit::SpendCircuit,
             },
-            test_utils::{
+            witness::{
                 balance_witness_generator::{
                     BalanceWitnessGenerator, ReceiveDepositData, SendTxData, SingleWithdrawalData,
                 },
@@ -5595,7 +5595,7 @@ pub fn build_channel_withdrawal(
         let pk_g = Bytes32::from(leaf.pk_g);
         let pk_b = Bytes32::from(leaf.pk_b);
         let regev_digest = Bytes32::from(leaf.regev_pk_digest);
-        let recipient = crate::circuits::test_utils::block_witness_generator::test_recipient_for(
+        let recipient = crate::circuits::witness::block_witness_generator::test_recipient_for(
             channel_id_u32,
             i,
         );
@@ -8105,7 +8105,7 @@ mod delegate_send_tests {
     #[cfg_attr(debug_assertions, ignore = "run with --release")]
     fn a3_channel_withdrawal_builds_and_verifies() {
         use crate::{
-            circuits::test_utils::block_witness_generator::TEST_ACTIVE_MEMBERS,
+            circuits::witness::block_witness_generator::TEST_ACTIVE_MEMBERS,
             ethereum_types::{address::Address, u32limb_trait::U32LimbTrait},
         };
 
@@ -8212,7 +8212,7 @@ mod delegate_send_tests {
     #[test]
     fn a3_withdraw_registration_matches_close_member_set() {
         use crate::{
-            circuits::test_utils::block_witness_generator::{
+            circuits::witness::block_witness_generator::{
                 ChannelMemberKeys, TEST_ACTIVE_MEMBERS,
             },
             common::channel::close_member_set_commitment,

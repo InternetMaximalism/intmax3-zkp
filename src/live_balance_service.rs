@@ -32,7 +32,7 @@ use crate::{
             common::recipient::calculate_recipient_from_user_id,
             spend_circuit::{SpendCircuit, SpendPublicInputs},
         },
-        test_utils::balance_witness_generator::{
+        witness::balance_witness_generator::{
             BalanceWitnessGenerator, ReceiveDepositData, ReceiveTransferData, SendTxData,
         },
     },
@@ -84,6 +84,21 @@ pub enum LiveBalanceServiceError {
     Locked(String),
     #[error("service is fail-closed after an uncertain persistence result; restart required")]
     Poisoned,
+}
+
+impl LiveBalanceServiceError {
+    /// Stable machine-readable code for the JSONL daemon's error envelope (the same contract the
+    /// producer and validity services expose).
+    pub fn code(&self) -> &'static str {
+        match self {
+            Self::InvalidRequest(_) => "live_invalid_request",
+            Self::ProducerReconciliation(_) => "live_producer_reconciliation",
+            Self::Transition(_) => "live_transition",
+            Self::Snapshot(_) => "live_snapshot",
+            Self::Locked(_) => "live_locked",
+            Self::Poisoned => "live_poisoned",
+        }
+    }
 }
 
 impl From<BlockProducerServiceError> for LiveBalanceServiceError {
