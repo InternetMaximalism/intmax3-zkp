@@ -34,6 +34,15 @@ use crate::{
         },
         witness::balance_witness_generator::{
             BalanceWitnessGenerator, ReceiveDepositData, ReceiveTransferData, SendTxData,
+            SingleWithdrawalData,
+        },
+        withdraw::{
+            single_withdrawal_circuit::{
+                SINGLE_WITHDRAWAL_PUBLIC_INPUTS_LEN, SingleWithdawalCircuit,
+                SingleWithdawalPublicInputs,
+            },
+            withdrawal_processor::WithdrawalProcessor,
+            withdrawal_step::WithdrawalStepWitness,
         },
     },
     common::{
@@ -44,8 +53,10 @@ use crate::{
         salt::Salt,
         trees::{transfer_tree::TransferTree, tx_tree::TxTree},
         tx::Tx,
+        withdrawal::Withdrawal,
     },
-    ethereum_types::{bytes32::Bytes32, u32limb_trait::U32LimbTrait as _},
+    constants::BURN_CHANNEL_ID,
+    ethereum_types::{address::Address, bytes32::Bytes32, u32limb_trait::U32LimbTrait as _},
     utils::{
         conversion::ToU64 as _, poseidon_hash_out::PoseidonHashOut,
         serialize::serialize_verifier_data,
@@ -164,6 +175,17 @@ pub struct LiveBaseHeadArtifact {
     pub producer_receipt: Option<BlockProducerReceipt>,
     pub signed_head_digest: Option<Bytes32>,
     pub awaiting_channel_binding: bool,
+}
+
+/// The proved L1 withdrawal leg of one settled burn: the final withdrawal-chain proof (the shape
+/// `withdrawNative`/`withdrawERC20` verify after MLE wrapping) and the leaf READ FROM ITS PUBLIC
+/// INPUTS. Not serialized as-is — the wrapping stage consumes it in-process.
+#[derive(Debug)]
+pub struct BurnWithdrawalProof {
+    pub withdrawal: Withdrawal,
+    pub withdrawal_prover: Address,
+    pub proof: plonky2::plonk::proof::ProofWithPublicInputs<F, C, D>,
+    pub withdrawal_vd: plonky2::plonk::circuit_data::VerifierCircuitData<F, C, D>,
 }
 
 /// Public channel backing projection: a verifiable balance proof, its exact base cursor, and the
@@ -1225,6 +1247,197 @@ impl LiveBalanceService {
         verify_snapshot_semantics(&candidate, &self.spend, &self.balance, Some(producer))?;
         self.commit(candidate)?;
         Ok(result)
+    }
+
+    /// Prove the L1 withdrawal leg of a SETTLED burn — against the LIVE base history, never a
+    /// from-scratch chain (partial-withdrawal-payout-design P3-2; `build_channel_withdrawal` is
+    /// deliberately not called anywhere on this path).
+    ///
+    /// The caller names a journaled producer request (the burn settle) and re-supplies its
+    /// descriptor. Nothing in the descriptor is trusted: the canonical base `Transfer` is
+    /// recomputed from it and then BOUND to the journaled transition three ways before any
+    /// proving —
+    ///   1. `transfer.aux_data == material.settled_leaf` (the leaf the settle actually pushed);
+    ///   2. the reconstructed 1-transfer tree root equals the journaled spend proof's
+    ///      `tx.transfer_tree_root` (the spend that debited the burn committed THIS transfer set);
+    ///   3. the canonical `TxV2`/H2 match the producer-admitted block the settle was keyed on.
+    /// A descriptor for any other transition fails one of the three.
+    ///
+    /// Returns the final withdrawal-chain proof plus the [`Withdrawal`] READ OUT OF THE PROOF'S
+    /// PUBLIC INPUTS (P3-3: consumers must never recompute leaf fields), with the same
+    /// keccak-refold sanity the fixture path performs.
+    pub fn prove_burn_withdrawal(
+        &self,
+        producer: &BlockProducerService,
+        producer_request_id: &str,
+        descriptor: &InterChannelTransferDescriptor,
+        withdrawal_prover: Address,
+    ) -> Result<BurnWithdrawalProof, LiveBalanceServiceError> {
+        self.ensure_healthy()?;
+        let entry = self
+            .disk
+            .applied
+            .iter()
+            .find(|entry| entry.request_id == producer_request_id)
+            .ok_or_else(|| {
+                LiveBalanceServiceError::InvalidRequest(format!(
+                    "unknown settled producer request {producer_request_id:?}"
+                ))
+            })?;
+        let material = entry.send_material.as_ref().ok_or_else(|| {
+            LiveBalanceServiceError::InvalidRequest(format!(
+                "producer request {producer_request_id:?} is not an inter-channel send"
+            ))
+        })?;
+        if descriptor.inter_channel_tx.destination_channel_id.channel_id() != BURN_CHANNEL_ID {
+            return Err(LiveBalanceServiceError::InvalidRequest(
+                "request is not a burn: the destination is not BURN_CHANNEL_ID".into(),
+            ));
+        }
+
+        // Canonical reconstruction + the three bindings.
+        let transfer =
+            canonical_inter_channel_base_transfer(&descriptor.inter_channel_tx, descriptor.amount)
+                .map_err(|e| {
+                    LiveBalanceServiceError::InvalidRequest(format!(
+                        "canonical burn base transfer: {e}"
+                    ))
+                })?;
+        if transfer.aux_data != material.settled_leaf {
+            return Err(LiveBalanceServiceError::InvalidRequest(
+                "descriptor does not describe the journaled transition: aux_data != settled leaf"
+                    .into(),
+            ));
+        }
+        let spend_proof = ProofWithPublicInputs::<F, C, D>::from_bytes(
+            material.spend_proof.clone(),
+            &self.spend.data.common,
+        )
+        .map_err(|e| {
+            LiveBalanceServiceError::Snapshot(format!("decode journaled burn spend proof: {e}"))
+        })?;
+        self.spend.data.verify(spend_proof.clone()).map_err(|e| {
+            LiveBalanceServiceError::Snapshot(format!("verify journaled burn spend proof: {e}"))
+        })?;
+        let spend_pis =
+            SpendPublicInputs::from_pis_u64(&spend_proof.public_inputs.to_u64_vec()).map_err(
+                |e| LiveBalanceServiceError::Snapshot(format!("journaled burn spend pis: {e}")),
+            )?;
+        let burn_nonce = spend_pis.tx.nonce;
+
+        let mut transfer_tree = TransferTree::init();
+        transfer_tree.push(transfer.clone());
+        let transfer_tree_root = transfer_tree.get_root();
+        if spend_pis.tx.transfer_tree_root != transfer_tree_root {
+            return Err(LiveBalanceServiceError::InvalidRequest(
+                "descriptor transfer set differs from the one the journaled spend committed".into(),
+            ));
+        }
+        let (canonical_tx_v2, canonical_tx_v2_tree) =
+            inter_channel_tx_v2(self.disk.channel_id, &transfer, burn_nonce);
+        let tx_tree_root = Bytes32::from(canonical_tx_v2_tree.get_root());
+        if descriptor.tx_v2 != canonical_tx_v2 || descriptor.tx_tree_root != tx_tree_root {
+            return Err(LiveBalanceServiceError::InvalidRequest(
+                "descriptor does not open the canonical burn TxV2/H2".into(),
+            ));
+        }
+
+        // Witness pieces, exactly the settled-transfer extraction recipe (c2c "Block 5"): the
+        // legacy Tx tree exists only for its merkle proof; the block-authoritative root is H2.
+        let transfer_index = 0u32;
+        let transfer_merkle_proof = transfer_tree.prove(transfer_index as u64);
+        let tx = Tx {
+            transfer_tree_root,
+            nonce: burn_nonce,
+        };
+        let mut tx_tree = TxTree::init();
+        tx_tree.update(self.disk.channel_id.as_u64(), tx.clone());
+        let tx_merkle_proof = tx_tree.prove(self.disk.channel_id.as_u64());
+        let tx_v2_merkle_proof = canonical_tx_v2_tree.prove(self.disk.channel_id.as_u64());
+
+        let generator = self.generator(producer)?;
+        let single_withdrawal_data = SingleWithdrawalData {
+            tx_tree_root,
+            tx,
+            tx_merkle_proof,
+            tx_v2: Some(canonical_tx_v2),
+            tx_v2_merkle_proof: Some(tx_v2_merkle_proof),
+            transfer,
+            transfer_index,
+            transfer_merkle_proof,
+        };
+        let witness = generator
+            .single_withdrawal_witness(&single_withdrawal_data)
+            .map_err(|e| {
+                LiveBalanceServiceError::Transition(format!("burn withdrawal witness: {e}"))
+            })?;
+
+        let single_withdrawal_circuit = SingleWithdawalCircuit::<F, C, D>::new(&self.balance.balance_vd());
+        let single_withdrawal_vd = single_withdrawal_circuit.data.verifier_data();
+        let single_proof = single_withdrawal_circuit.prove(&witness).map_err(|e| {
+            LiveBalanceServiceError::Transition(format!("single withdrawal proof: {e}"))
+        })?;
+        single_withdrawal_circuit
+            .data
+            .verify(single_proof.clone())
+            .map_err(|e| {
+                LiveBalanceServiceError::Transition(format!("verify single withdrawal: {e}"))
+            })?;
+        // P3-3: the leaf the consumer will pay is read from the PROOF, never recomputed.
+        let single_pis = SingleWithdawalPublicInputs::from_u64_slice(
+            &single_proof.public_inputs[..SINGLE_WITHDRAWAL_PUBLIC_INPUTS_LEN].to_u64_vec(),
+        )
+        .map_err(|e| LiveBalanceServiceError::Transition(format!("single withdrawal pis: {e}")))?;
+        let withdrawal: Withdrawal = single_pis.withdrawal.clone();
+
+        let withdrawal_processor = WithdrawalProcessor::<F, C, D>::new(&single_withdrawal_vd);
+        let chain_proof = withdrawal_processor
+            .prove_step(&WithdrawalStepWitness::<F, C, D> {
+                prev_withdrawal_chain_proof: None,
+                single_withdrawal_proof: single_proof,
+                update_public_state: witness.update_public_state.clone(),
+            })
+            .map_err(|e| {
+                LiveBalanceServiceError::Transition(format!("withdrawal chain proof: {e}"))
+            })?;
+        // Keccak-refold sanity: the chain the contract will fold equals the proof-committed one.
+        let proof_withdrawal_hash = {
+            let pis = chain_proof.public_inputs.to_u64_vec();
+            Bytes32::from_u64_slice(&pis[0..8]).map_err(|e| {
+                LiveBalanceServiceError::Transition(format!("withdrawal hash chain limbs: {e}"))
+            })?
+        };
+        if withdrawal.hash_with_prev_hash(Bytes32::default()) != proof_withdrawal_hash {
+            return Err(LiveBalanceServiceError::Transition(
+                "withdrawal keccak chain re-fold mismatch".into(),
+            ));
+        }
+
+        let ext_public_state = producer
+            .producer()
+            .map_err(|e| LiveBalanceServiceError::ProducerReconciliation(e.to_string()))?
+            .witness_handle()
+            .map_err(|e| LiveBalanceServiceError::ProducerReconciliation(e.to_string()))?
+            .borrow()
+            .current_extended_public_state();
+        let final_proof = withdrawal_processor
+            .prove_final(&chain_proof, withdrawal_prover, &ext_public_state)
+            .map_err(|e| {
+                LiveBalanceServiceError::Transition(format!("final withdrawal proof: {e}"))
+            })?;
+        withdrawal_processor
+            .withdrawal_vd()
+            .verify(final_proof.clone())
+            .map_err(|e| {
+                LiveBalanceServiceError::Transition(format!("verify final withdrawal: {e}"))
+            })?;
+
+        Ok(BurnWithdrawalProof {
+            withdrawal,
+            withdrawal_prover,
+            proof: final_proof,
+            withdrawal_vd: withdrawal_processor.withdrawal_vd(),
+        })
     }
 
     fn generator(

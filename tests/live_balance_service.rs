@@ -6,6 +6,8 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
+use intmax3_zkp::wallet_core::canonical_inter_channel_base_transfer;
+use intmax3_zkp::circuits::balance::common::recipient::extract_address_from_recipient;
 use intmax3_zkp::{
     block_producer::{ProductionBlockProducerError, ProductionDepositRequest},
     block_producer_service::{BlockProducerService, BlockProducerServiceError},
@@ -369,6 +371,67 @@ fn run_live_balance_e2e() {
     assert_eq!(
         second_settle.settled_tx_chain,
         second_state.balance_state.settled_tx_chain
+    );
+
+    // ── P3-2/P3-3 (partial-withdrawal-payout-design): the payout proof comes from the LIVE base
+    // history. TWO CONSECUTIVE burns from the same channel both prove — the second builds on the
+    // first's post-state, which a from-scratch generator cannot reproduce — and the Withdrawal is
+    // read from the proof's public inputs, matching the canonical burn leaf field for field.
+    let payout_prover = Address::from_u32_slice(&[0x50415955u32; 5]).expect("prover address");
+    let first_burn_proof = live
+        .prove_burn_withdrawal(
+            &producer,
+            "burn:0",
+            &first.transfer_descriptor,
+            payout_prover,
+        )
+        .expect("prove first burn withdrawal from live history");
+    let expected_first = canonical_inter_channel_base_transfer(
+        &first.transfer_descriptor.inter_channel_tx,
+        first.transfer_descriptor.amount,
+    )
+    .expect("canonical first burn transfer");
+    assert_eq!(
+        first_burn_proof.withdrawal.recipient,
+        extract_address_from_recipient(expected_first.recipient)
+            .expect("burn recipient is the canonical ADDRESS_TAG form"),
+        "the paid L1 address is the one inside the co-signed burn leaf"
+    );
+    assert_eq!(first_burn_proof.withdrawal.amount, expected_first.amount);
+    assert_eq!(
+        first_burn_proof.withdrawal.aux_data, expected_first.aux_data,
+        "the burn leaf must carry the burn descriptor, not zero (the repo's first aux!=0 leaf)"
+    );
+    assert_ne!(first_burn_proof.withdrawal.aux_data, Bytes32::default());
+
+    let second_burn_proof = live
+        .prove_burn_withdrawal(
+            &producer,
+            "burn:1",
+            &second.transfer_descriptor,
+            payout_prover,
+        )
+        .expect("prove SECOND consecutive burn withdrawal (P3-2)");
+    assert_ne!(
+        second_burn_proof.withdrawal.nullifier,
+        first_burn_proof.withdrawal.nullifier,
+        "consecutive burns must yield distinct nullifiers"
+    );
+
+    // Binding negative: the journaled transition and the supplied descriptor must be the SAME
+    // burn — replaying burn:0's descriptor under burn:1's journal entry dies on the settled-leaf
+    // binding before any proving.
+    let err = live
+        .prove_burn_withdrawal(
+            &producer,
+            "burn:1",
+            &first.transfer_descriptor,
+            payout_prover,
+        )
+        .expect_err("a mismatched descriptor/journal pair must be rejected");
+    assert!(
+        format!("{err}").contains("settled leaf"),
+        "the refusal must name the broken binding, got: {err}"
     );
 
     // Give channel B an independently proved, L1-reconciled base account and bind its signed
