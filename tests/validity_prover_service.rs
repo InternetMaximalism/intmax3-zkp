@@ -302,6 +302,30 @@ fn resident_prover_recovers_candidate_and_proves_two_independent_spans() {
     );
     assert_eq!(validity.status().expect("status").finalized_block_number, 0);
 
+    // The on-chain finalize payload: wrapped validity MLE + vpis in the schema `finalize()`
+    // parses. The final state root is the candidate's committed final ext-commitment — the value
+    // a later withdrawNative binds against.
+    let fin = validity
+        .finalize_artifact()
+        .expect("finalize artifact")
+        .expect("a candidate exists");
+    assert_eq!(fin.final_state_root, first.final_extended_state_commitment);
+    let vpis: serde_json::Value =
+        serde_json::from_str(&fin.vpis_json).expect("vpis json parses");
+    assert_eq!(vpis["final_block_number"].as_u64().unwrap(), 2);
+    assert_eq!(
+        vpis["final_ext_commitment"].as_str().unwrap(),
+        first.final_extended_state_commitment.to_string()
+    );
+    assert_eq!(
+        vpis["prover"].as_str().unwrap(),
+        prover_address.to_string()
+    );
+    assert!(
+        fin.validity_mle_json.len() > 100_000,
+        "a real validity MLE/WHIR proof was exported"
+    );
+
     drop(validity);
     let mut validity = ValidityProverService::open(&snapshot_path, &[2], prover_address, &producer)
         .expect("restart verifies pending candidate and all proofs");

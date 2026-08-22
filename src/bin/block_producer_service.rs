@@ -93,6 +93,7 @@ enum ValidityCommand {
         request_id: String,
     },
     ValidityArtifact,
+    ValidityFinalizeArtifact,
     AcknowledgeValidity {
         request_id: String,
         candidate_id: Bytes32,
@@ -570,6 +571,15 @@ fn execute_validity_command(
                     // protocol remains JSONL. The proof itself is canonical plonky2 binary.
                     "validityProof": format!("0x{}", hex::encode(artifact.validity_proof)),
                 }),
+            });
+        }
+        ValidityCommand::ValidityFinalizeArtifact => {
+            let artifact = validity.finalize_artifact()?;
+            return Ok(match artifact {
+                None => serde_json::Value::Null,
+                Some(a) => serde_json::to_value(a).map_err(|e| {
+                    ValidityProverServiceError::Proving(format!("serialize finalize artifact: {e}"))
+                })?,
             });
         }
         ValidityCommand::AcknowledgeValidity {

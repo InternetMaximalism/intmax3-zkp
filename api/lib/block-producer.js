@@ -184,6 +184,10 @@ function acknowledgeValidity(requestId, candidateId, transactionHash) {
   return execute({ command: 'acknowledgeValidity', requestId, candidateId, transactionHash });
 }
 
+function validityFinalizeArtifact() {
+  return execute({ command: 'validityFinalizeArtifact' });
+}
+
 // ---- live balance (the durable base-state authority) ----
 
 function liveStatus(channelId) {
@@ -258,6 +262,7 @@ module.exports = {
   proveValidity,
   validityArtifact,
   acknowledgeValidity,
+  validityFinalizeArtifact,
   liveStatus,
   liveInit,
   livePrepareDepositRecipient,

@@ -38,6 +38,10 @@ use crate::{
         validity_circuit::{ValidityCircuit, ValidityPublicInputs},
     },
     common::u63::BlockNumber,
+    utils::{
+        mle_prover::{export_mle_json, prove_with_mle, setup_mle_vk, verify_mle_proof},
+        wrapper::WrapperCircuit,
+    },
     ethereum_types::{
         address::Address,
         bytes32::{Bytes32, BYTES32_LEN},
@@ -197,6 +201,19 @@ pub struct ValidityCandidateArtifact {
     pub initial_extended_state: Vec<u64>,
     pub final_extended_state: Vec<u64>,
     pub validity_proof: Vec<u8>,
+}
+
+/// Everything `IntmaxRollup.finalize(id, stateRoot, vpis, mleProof)` needs for the current
+/// candidate, produced in the resident prover so the validity circuit stays warm: the wrapped
+/// MLE/WHIR proof and the `ValidityPublicInputs` JSON in the exact schema `FixtureLib` /
+/// `RunPartialWithdrawalPayout` parse. The final state root the caller finalizes against is
+/// `final_ext_commitment`.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ValidityFinalizeArtifact {
+    pub final_state_root: Bytes32,
+    pub vpis_json: String,
+    pub validity_mle_json: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -668,6 +685,68 @@ impl ValidityProverService {
                 final_extended_state: candidate.final_extended_state.clone(),
                 validity_proof: candidate.validity_proof.clone(),
             }))
+    }
+
+    /// Wrap the current candidate's validity proof for on-chain finalization. Reconstructs the
+    /// `ValidityPublicInputs` from the candidate's own committed initial/final extended states
+    /// (never re-proving), wraps + MLE/WHIRs the validity proof through the SAME rail the fixture
+    /// generator uses, and returns the payload `finalize()` verifies. `final_state_root` is what
+    /// `finalizedStateRoots` records — the value a later `withdrawNative` binds through
+    /// `WithdrawalExtCommitmentMismatch`.
+    pub fn finalize_artifact(
+        &self,
+    ) -> Result<Option<ValidityFinalizeArtifact>, ValidityProverServiceError> {
+        self.ensure_healthy()?;
+        let Some(candidate) = self.disk.candidate.as_ref() else {
+            return Ok(None);
+        };
+        let initial = decode_extended_state(&candidate.initial_extended_state)?;
+        let final_state = decode_extended_state(&candidate.final_extended_state)?;
+        let vpis = ValidityPublicInputs::from_states(&initial, &final_state, self.disk.prover);
+
+        let validity_proof = decode_proof(
+            &candidate.validity_proof,
+            &self.circuits.validity.data.verifier_data(),
+            "validity finalize artifact",
+        )?;
+        let wrapper = WrapperCircuit::<F, C, C, D>::new(&self.circuits.validity.data.verifier_data());
+        let wrapped = wrapper.prove(&validity_proof).map_err(|e| {
+            ValidityProverServiceError::Proving(format!("wrap validity proof: {e}"))
+        })?;
+        wrapper.data.verify(wrapped).map_err(|e| {
+            ValidityProverServiceError::Proving(format!("verify wrapped validity: {e}"))
+        })?;
+        let vk = setup_mle_vk::<F, C, D>(&wrapper.data);
+        let mut pw = plonky2::iop::witness::PartialWitness::new();
+        plonky2::iop::witness::WitnessWrite::set_proof_with_pis_target(
+            &mut pw,
+            &wrapper.wrap_proof,
+            &validity_proof,
+        )
+        .map_err(|e| ValidityProverServiceError::Proving(format!("mle witness: {e}")))?;
+        let mle = prove_with_mle::<F, C, D>(&wrapper.data, pw)
+            .map_err(|e| ValidityProverServiceError::Proving(format!("mle prove: {e}")))?;
+        verify_mle_proof(&wrapper.data, &vk, &mle.proof)
+            .map_err(|e| ValidityProverServiceError::Proving(format!("mle verify: {e}")))?;
+        let validity_mle_json = export_mle_json(&mle.proof, &wrapper.data.common)
+            .map_err(|e| ValidityProverServiceError::Proving(format!("mle export: {e}")))?;
+
+        let vpis_json = serde_json::to_string_pretty(&serde_json::json!({
+            "initial_block_number": vpis.initial_block_number.as_u64(),
+            "initial_block_chain": vpis.initial_block_chain.to_string(),
+            "initial_ext_commitment": vpis.initial_ext_commitment.to_string(),
+            "final_block_number": vpis.final_block_number.as_u64(),
+            "final_block_chain": vpis.final_block_chain.to_string(),
+            "final_ext_commitment": vpis.final_ext_commitment.to_string(),
+            "prover": vpis.prover.to_string(),
+        }))
+        .map_err(|e| ValidityProverServiceError::Proving(format!("vpis json: {e}")))?;
+
+        Ok(Some(ValidityFinalizeArtifact {
+            final_state_root: vpis.final_ext_commitment,
+            vpis_json,
+            validity_mle_json,
+        }))
     }
 
     /// Verify a finalization receipt against the operator-configured L1 RPC and atomically promote
