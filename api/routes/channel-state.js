@@ -1,7 +1,8 @@
 const { Router } = require('express');
 const fs = require('fs');
 const { cli, wc, RPC, readJson, rollupOf } = require('../lib/cli');
-const { publicBacking, baseHead } = require('../../node/common/public-backing');
+const { publicBacking } = require('../../node/common/public-backing');
+const producer = require('../lib/block-producer');
 
 // ONE shared implementation of the manifest validation + chain verification (node/common), so the
 // api, the node programs and the wallet relay cannot drift on what "verified" means. If the module
@@ -141,11 +142,32 @@ router.get('/backing', (req, res) => {
 });
 
 // Public base send cursor. The full private witness stays operator-local; wallets need only this
-// nonce to bind their TxV2 and co-signers re-check it against the persisted IVC head.
-router.get('/base-head', (req, res) => {
+// nonce to bind their TxV2.
+//
+// SECURITY (base-nonce strand fix): this MUST serve the daemon's LIVE cursor, not
+// `channel_backing.json`. That file's `base_private_state` is written once at `setup-backing` and
+// never advanced, while the daemon (the live base-state authority) advances its cursor on every
+// settled send. Serving the frozen file let a delegate build a second burn at the stale nonce; the
+// co-sign guard — reading the same frozen file — agreed and persisted the channel debit, and only
+// then did the daemon reject the settle, stranding the burned value forever. Sourcing the nonce from
+// `liveBaseHead` makes the delegate build at the authoritative nonce, so a divergent burn is refused
+// at co-sign (fail-closed) instead of debited-then-stranded. On any daemon error we 409 rather than
+// fall back to the frozen file, because that fallback is exactly the strand.
+router.get('/base-head', async (req, res) => {
   try {
     const ch = Number(req.params.ch);
-    res.json(baseHead(readJson(wc(ch, 'channel_backing.json'))));
+    const live = await producer.liveBaseHead(ch);
+    const nonce = live && live.baseNonce;
+    if (!Number.isInteger(nonce) || nonce < 0 || nonce > 0xffffffff) {
+      throw new Error('live base nonce is unavailable from the producer');
+    }
+    res.json({
+      schemaVersion: 1,
+      nonce,
+      settledTxChain: (live && live.settledTxChain) ?? null,
+      // Live authority: not the setup-time projection.
+      source: 'liveBaseHead',
+    });
   } catch (e) {
     res.status(409).json({ error: String(e.message || e) });
   }
