@@ -7216,13 +7216,15 @@ fn cmd_cosign_l1_deposit_import(args: &[String]) {
 /// PRE-FLIGHT GUARD for `pw-submit` — the last point at which a partial withdrawal can still be
 /// abandoned for free.
 ///
-/// WHY IT EXISTS. `submitPartialWithdrawalIntent` consumes the channel's single-use chain key
-/// `keccak(channelId, finalSettledTxChain)` into `usedPartialWithdrawalChains`
-/// (`contracts/src/ChannelSettlementManager.sol:1204-1205`, set at `:1250`) and there is no
-/// un-consume. The channel-side debit already happened at `cosign-burn-send`. So writing an
-/// authorization that no provable leaf can satisfy does not merely fail — it strands the burned
-/// value forever. The irreversible step must therefore be gated on the authorization being
-/// matchable, not merely well-formed.
+/// WHY IT EXISTS. The channel-side debit already happened at `cosign-burn-send`, so a burn whose
+/// authorization no provable leaf can satisfy has spent channel value it can never redeem on L1.
+/// (The manager's chain key `keccak(channelId, finalSettledTxChain)` is NO LONGER single-use — the
+/// former `usedPartialWithdrawalChains` guard was removed as a fossil of the deleted proof-free
+/// payout, so a bad submit is now re-submittable rather than permanently chain-locking the burn.
+/// This guard therefore no longer prevents an on-chain permanent strand; it prevents wasting a
+/// submit and a challenge window on an unmatchable authorization, and catches an unprovable burn
+/// before any transaction.) The step is gated on the authorization being matchable, not merely
+/// well-formed.
 ///
 /// WHAT IT PROVES. The tuple `(recipient_pk_g, token_index, amount, aux_data, transfer_index=0,
 /// tx_nonce, channel_id)` that produced `withdrawal.nullifier` is rebuilt into the burn's 1-tx
@@ -7483,10 +7485,11 @@ fn cmd_pw_submit(args: &[String]) {
     // transfer_index + tx nonce; `src/circuits/withdraw/single_withdrawal_circuit.rs:376-390`
     // natively, `:513-525` in-circuit). Different hash family, different preimage: the two could
     // NEVER coincide, so `submitPartialWithdrawalIntent` recorded an authorization that no proof
-    // could ever match — while irreversibly consuming the channel's single-use chain key
-    // (`usedPartialWithdrawalChains`, `contracts/src/ChannelSettlementManager.sol:1204-1205`,
-    // `:1250`) for a burn whose channel-side debit had already happened. Fail-closed on theft,
-    // but it STRANDED the burned value permanently.
+    // could ever match, for a burn whose channel-side debit had already happened. Fail-closed on
+    // theft. (At the time this also irreversibly consumed the manager's single-use chain key,
+    // stranding the value permanently; that `usedPartialWithdrawalChains` guard has since been
+    // removed as a fossil, so the residual failure mode is an unredeemable channel debit, not an
+    // on-chain chain-lock.)
     //
     // The leaf now comes from `burn_withdrawal_leaf`, the one shared derivation, which calls the
     // same `SettledTransfer::nullifier()` the circuit calls. Every input is settlement-independent

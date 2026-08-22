@@ -835,10 +835,12 @@ fn partial_withdrawal_e2e_anvil() {
         );
     }
 
-    // ── Phase G: Adversarial — double-submit same chain key ─────────────────────────────────
+    // ── Phase G: same chain is RE-SUBMITTABLE after finalize (single-use chain key removed) ──
     {
-        // Re-submitting with the same finalSettledTxChain must revert with
-        // PartialWithdrawalChainUsed.
+        // The former `usedPartialWithdrawalChains` single-use guard was deleted: it was a fossil of
+        // the removed proof-free payout and let a front-runner permanently strand a burn. Double-
+        // payout is prevented by the proof-side nullifier, so re-submitting the same chain after
+        // finalize must now SUCCEED (re-authorizing an idempotent digest), not revert.
         let out = Command::new("forge")
             .current_dir(&contracts)
             .args([
@@ -854,19 +856,15 @@ fn partial_withdrawal_e2e_anvil() {
             .expect("re-submit spawn");
         let stderr = String::from_utf8_lossy(&out.stderr);
         assert!(
-            !out.status.success(),
-            "re-submit with same chain key MUST fail"
+            out.status.success(),
+            "re-submit of the same chain must now SUCCEED (chain single-use removed), got: {stderr}"
         );
-        assert!(
-            stderr.contains("PartialWithdrawalChainUsed") || stderr.contains("revert"),
-            "expected PartialWithdrawalChainUsed revert, got: {stderr}"
-        );
-        eprintln!("[PW E2E] adversarial: double-submit correctly rejected");
+        eprintln!("[PW E2E] same-chain re-submit correctly accepted (no permanent strand)");
     }
 
     eprintln!(
         "[PW E2E] ALL PASSED: deposit → burn → submit → finalize → authorize, \
-         authDigest cross-boundary parity verified, double-submit rejected."
+         authDigest cross-boundary parity verified, same-chain re-submit accepted."
     );
 }
 

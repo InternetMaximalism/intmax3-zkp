@@ -129,8 +129,6 @@ contract PartialWithdrawalTest is CloseSettlementBase {
         manager.finalizePartialWithdrawal();
 
         assertFalse(manager.partialWithdrawalPending());
-        bytes32 chainKey = keccak256(abi.encodePacked(CHANNEL_ID, intent.finalSettledTxChain));
-        assertTrue(manager.usedPartialWithdrawalChains(chainKey));
 
         bytes32 authDigest = _expectedAuthDigest(w);
         assertTrue(registry.partialWithdrawalAuthorized(authDigest));
@@ -272,18 +270,25 @@ contract PartialWithdrawalTest is CloseSettlementBase {
         manager.finalizePartialWithdrawal();
     }
 
-    // ── Double-use blocked: same chain key can't authorize twice ──
+    // ── Chain single-use removed: the same chain is re-submittable after finalize ──
+    // Regression lock for the fossil-guard deletion. The former `usedPartialWithdrawalChains` marked
+    // a chain consumed at finalize, which let a griefer's front-run permanently strand a burn's
+    // payout. Double-payout is prevented by the proof-side `withdrawalNullifierUsed` (one burn, one
+    // nullifier, one payout), so re-authorizing the same digest is a harmless idempotent no-op and
+    // re-submission must be allowed, not reverted.
 
-    function test_submitPartialWithdrawal_reverts_chainUsed() public {
+    function test_submitPartialWithdrawal_sameChainResubmittableAfterFinalize() public {
         ChannelSettlementManager.CloseIntent memory intent = _partialIntent();
         MleVerifier.MleProof memory proof = _closeProof(intent);
 
         manager.submitPartialWithdrawalIntent(intent, proof, PREV_CHAIN, _authorizedWithdrawal());
         vm.warp(block.timestamp + CHALLENGE_PERIOD + 1);
         manager.finalizePartialWithdrawal();
+        assertFalse(manager.partialWithdrawalPending());
 
-        vm.expectRevert(ChannelSettlementManager.PartialWithdrawalChainUsed.selector);
+        // Same chain, again — no longer reverts; re-occupies the pending slot.
         manager.submitPartialWithdrawalIntent(intent, proof, PREV_CHAIN, _authorizedWithdrawal());
+        assertTrue(manager.partialWithdrawalPending());
     }
 
     // ── Challenge replacement: newer state replaces pending ──
@@ -377,10 +382,6 @@ contract PartialWithdrawalTest is CloseSettlementBase {
 
         assertFalse(manager.partialWithdrawalPending());
         assertEq(uint8(manager.channelStatus()), uint8(ChannelSettlementManager.ChannelLifecycleStatus.Active));
-
-        // Chain key NOT consumed — can be resubmitted
-        bytes32 chainKey = keccak256(abi.encodePacked(CHANNEL_ID, intent.finalSettledTxChain));
-        assertFalse(manager.usedPartialWithdrawalChains(chainKey));
     }
 
     // ── Cancel reverts: nothing pending ──
@@ -569,8 +570,6 @@ contract PartialWithdrawalTest is CloseSettlementBase {
             keccak256(abi.encodePacked(CHANNEL_ID, firstIntent.finalSettledTxChain));
         bytes32 secondKey =
             keccak256(abi.encodePacked(CHANNEL_ID, secondIntent.finalSettledTxChain));
-        assertTrue(manager.usedPartialWithdrawalChains(firstKey));
-        assertTrue(manager.usedPartialWithdrawalChains(secondKey));
         assertTrue(firstKey != secondKey);
         assertTrue(registry.partialWithdrawalAuthorized(_expectedAuthDigest(first)));
         assertTrue(registry.partialWithdrawalAuthorized(_expectedAuthDigest(second)));

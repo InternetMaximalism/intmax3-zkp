@@ -233,7 +233,6 @@ contract ChannelSettlementManager {
     /// every payout path, and stale closes by `cancelClose` (C1); its verifier is also a stub.
     error LateOutgoingDebitDisabled();
     error PartialWithdrawalNotPending();
-    error PartialWithdrawalChainUsed();
     error PartialWithdrawalAuxDataZero();
     error PartialWithdrawalChainMismatch();
     /// The withdrawal economics do not reproduce the N-of-N-signed IMBD burn descriptor.
@@ -682,7 +681,6 @@ contract ChannelSettlementManager {
     mapping(bytes32 => bool) public usedLateOutgoingDebitNullifiers;
 
     // --- Partial withdrawal (GAP2: mid-channel burn → L1, channel stays open) ---
-    mapping(bytes32 => bool) public usedPartialWithdrawalChains;
     bool public partialWithdrawalPending;
     bytes32 public pendingPartialWithdrawalAuthDigest;
     bytes32 public pendingPartialWithdrawalChainKey;
@@ -1232,11 +1230,25 @@ contract ChannelSettlementManager {
             revert PartialWithdrawalDescriptorMismatch();
         }
 
+        // `chainKey` is retained ONLY as an off-chain correlation id in the emitted events. It is no
+        // longer a single-use token.
+        //
+        // SECURITY (single-use removed): the former `usedPartialWithdrawalChains[chainKey]` guard
+        // marked a burn's `(channelId, finalSettledTxChain)` consumed at finalize, so any intent —
+        // including a griefer's front-run carrying a wrong, IMPW-only `nullifier` — permanently
+        // burned the burn's one chain slot and stranded its L1 payout. That guard was a fossil of the
+        // deleted proof-free `claimAuthorizedWithdrawal` payout (42640f1): its only job was to bound
+        // "at most one AUTHORIZATION per chain state", which mattered only when an authorization
+        // ALONE could pay. Every payout now goes through `withdrawNative`/`withdrawERC20`, gated by
+        // the proof-side single-use `withdrawalNullifierUsed` (IntmaxRollup) — one burn, one
+        // nullifier, one payout — so double-payout is already prevented and this guard was redundant.
+        // Removing it makes a failed/garbage submit inert (re-submittable) instead of permanently
+        // fund-stranding, at no soundness cost. Do not re-add it without re-introducing a proof-free
+        // payout, which must not exist.
         bytes32 chainKey = keccak256(abi.encodePacked(channelId, intent.finalSettledTxChain));
-        if (usedPartialWithdrawalChains[chainKey]) revert PartialWithdrawalChainUsed();
 
-        // Challenge replacement: if a pending intent exists on a DIFFERENT chain key, allow
-        // replacement only if the new state is strictly newer (higher epoch/stateVersion).
+        // Challenge replacement: if a pending intent exists, allow replacement only if the new state
+        // is strictly newer (higher epoch/stateVersion).
         if (partialWithdrawalPending) {
             bool newer = intent.finalEpoch > pendingPartialWithdrawalEpoch ||
                 (intent.finalEpoch == pendingPartialWithdrawalEpoch &&
@@ -1286,7 +1298,6 @@ contract ChannelSettlementManager {
             revert InvalidFreezeNonce();
         }
 
-        usedPartialWithdrawalChains[pendingPartialWithdrawalChainKey] = true;
         bytes32 authDigest = pendingPartialWithdrawalAuthDigest;
         bytes32 chainKey = pendingPartialWithdrawalChainKey;
 
