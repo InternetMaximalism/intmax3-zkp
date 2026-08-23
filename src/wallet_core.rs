@@ -2090,6 +2090,11 @@ pub struct InterChannelDebitPayload {
     /// is channel B's recipient slot key) is channel B's concern, enforced in
     /// `verify_inter_channel_credit_transition`.
     pub destination_recipient_pk: RegevPk,
+    /// detail2 §P-3: present when this debit is part of an aggregated window — the FULL leaf set
+    /// of the tree whose root the proposed state's `h2_tag` commits. `None` = legacy 1-leaf flow.
+    /// serde-default so pre-§P payloads still parse (their binding is the 1-leaf check).
+    #[serde(default)]
+    pub aggregate_manifest: Option<AggregateManifest>,
 }
 
 /// Everything channel B needs to re-verify the inbound transfer and credit its recipient slot
@@ -2714,6 +2719,8 @@ pub fn build_inter_channel_send_token_at_base_nonce(
             members: members.clone(),
             record: record.clone(),
             destination_recipient_pk: destination_recipient_pk.clone(),
+            // Legacy 1-leaf build (§P-5: K = 1); the window flow installs the manifest.
+            aggregate_manifest: None,
         },
         transfer_descriptor: InterChannelTransferDescriptor {
             source_channel_id: record.channel_id,
@@ -2973,6 +2980,133 @@ pub fn build_aggregated_tx_v2_tree(
     Ok((tree, root))
 }
 
+/// One leaf of an aggregated inter-channel window, as shared to every root-signing member
+/// (detail2 §P-3): the sender-signed tx plus its public amount (the canonical `Transfer` input).
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AggregateLeafEntry {
+    pub source_channel_id: ChannelId,
+    pub amount: u64,
+    pub inter_channel_tx: InterChannelTx,
+}
+
+/// The full contents of one aggregated window (detail2 §P-3): every leaf, and the root the
+/// participants' post-debit states will carry as `h2_tag`. A member co-signs that root ONLY
+/// after `verify_aggregate_manifest` passes on this exact object.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AggregateManifest {
+    pub tx_tree_root: Bytes32,
+    pub entries: Vec<AggregateLeafEntry>,
+}
+
+/// Trusted source of FOREIGN channels' authenticated member sets, supplied by the caller from its
+/// own store (sibling channel dirs / the registration chain) — never from the wire. Returning
+/// `None` for a channel in the manifest fails the round closed: a member never signs a root
+/// containing a leaf whose sender it cannot authenticate.
+pub trait InterChannelMemberLookup {
+    fn members_for(&self, channel: ChannelId) -> Option<(ChannelRecord, Vec<MemberInfo>)>;
+}
+
+/// Lookup for deployments/tests with no foreign channels: any foreign leaf fails closed.
+pub struct NoForeignChannels;
+impl InterChannelMemberLookup for NoForeignChannels {
+    fn members_for(&self, _channel: ChannelId) -> Option<(ChannelRecord, Vec<MemberInfo>)> {
+        None
+    }
+}
+
+/// detail2 §P-3: the root-signing member's checklist over an aggregated window. All five
+/// obligations, fail-closed:
+///   1. OWN leaf — the member's own channel's entry is byte-identical to the debit it verified.
+///   2. SENDER SIG per leaf — every entry carries its sender's A11 signature, bound to that
+///      channel's authenticated member set (§P-2).
+///   3. CANONICAL REBUILD per leaf — each entry's tx determines one canonical Transfer/TxV2.
+///   4. ROOT EQUALITY + COMPLETENESS — inserting ALL entries (and nothing else) at their
+///      channel-id indices reproduces exactly `manifest.tx_tree_root`; recomputation from the
+///      full set simultaneously rules out omission, addition and index-theft.
+///   5. UNIQUENESS — one tx per source channel per window (enforced by the tree builder).
+/// Additionally every leaf's signed small block must commit the SHARED root (all participants
+/// sign the same H2_agg).
+pub fn verify_aggregate_manifest(
+    manifest: &AggregateManifest,
+    own_channel: ChannelId,
+    own_tx: &InterChannelTx,
+    own_amount: u64,
+    own_record: &ChannelRecord,
+    own_members: &[MemberInfo],
+    level: RegevSecurityLevel,
+    foreign: &dyn InterChannelMemberLookup,
+) -> WResult<()> {
+    if manifest.entries.is_empty() {
+        return bail("aggregate manifest: empty window");
+    }
+    let mut own_seen = false;
+    let mut leaves: Vec<(ChannelId, TxV2)> = Vec::with_capacity(manifest.entries.len());
+    for entry in &manifest.entries {
+        let tx = &entry.inter_channel_tx;
+        if tx.source_channel_id != entry.source_channel_id {
+            return bail("aggregate manifest: entry channel id does not match its tx");
+        }
+        // (1) own-leaf identification + byte-identity with the verified debit.
+        if entry.source_channel_id == own_channel {
+            if own_seen {
+                return bail("aggregate manifest: duplicate own-channel entry");
+            }
+            own_seen = true;
+            if tx != own_tx || entry.amount != own_amount {
+                return bail(
+                    "aggregate manifest: own-channel entry differs from the verified debit payload",
+                );
+            }
+        }
+        // (2) per-leaf sender signature against THAT channel's authenticated member set.
+        let (record_owned, members_owned);
+        let (record, members): (&ChannelRecord, &[MemberInfo]) =
+            if entry.source_channel_id == own_channel {
+                (own_record, own_members)
+            } else {
+                let (r, m) = foreign.members_for(entry.source_channel_id).ok_or_else(|| {
+                    we(format!(
+                        "aggregate manifest: no trusted member set for foreign channel {} — refusing to sign its leaf (fail-closed)",
+                        entry.source_channel_id.as_u64()
+                    ))
+                })?;
+                (record_owned, members_owned) = (r, m);
+                (&record_owned, &members_owned)
+            };
+        if record.channel_id != entry.source_channel_id {
+            return bail("aggregate manifest: trusted record channel id mismatch");
+        }
+        if member_pubkeys_root(record, members)? != record.member_pubkeys_root {
+            return bail("aggregate manifest: member set not anchored to the trusted record");
+        }
+        verify_inter_channel_tx_sender_hash_sig(tx, level, members)?;
+        // (3) canonical rebuild + commitment binding; every leaf's signed small block must commit
+        //     the SHARED aggregated root. Retired wire fields must be canonical zero per leaf,
+        //     exactly as on the 1-leaf path.
+        verify_retired_inter_channel_fields(tx)?;
+        let transfer = canonical_inter_channel_base_transfer(tx, entry.amount)?;
+        let tx_v2 = inter_channel_tx_v2_leaf(&transfer, tx.base_nonce);
+        if tx.intmax_transfer_commitment != Bytes32::from(transfer.poseidon_hash()) {
+            return bail("aggregate manifest: leaf transfer commitment mismatch");
+        }
+        if tx.signed_small_block.message.tx_tree_root != manifest.tx_tree_root {
+            return bail("aggregate manifest: leaf's signed small block does not commit the shared root");
+        }
+        leaves.push((entry.source_channel_id, tx_v2));
+    }
+    if !own_seen {
+        return bail("aggregate manifest: own channel's leaf is missing");
+    }
+    // (4)+(5) full-tree recompute == the root being signed; duplicate indices refused inside.
+    let (_tree, root) = build_aggregated_tx_v2_tree(&leaves)?;
+    if root != manifest.tx_tree_root {
+        return bail("aggregate manifest: recomputed tree root does not equal the root being signed");
+    }
+    Ok(())
+}
+
 /// Reconstruct the base-layer objects that an inter-channel debit claims to have committed.
 ///
 /// This is the F-AUX-1 fail-closed bridge between the channel layer and the native INTMAX layer:
@@ -3047,10 +3181,7 @@ fn canonical_inter_channel_binding(
 /// Verify all signed-but-retired fields and the native-transfer commitment carried by an
 /// inter-channel transaction.  Keeping this check next to the canonical constructor prevents a
 /// future caller from validating E-2 while accidentally skipping its base-layer binding.
-fn verify_canonical_inter_channel_binding(
-    inter_channel_tx: &InterChannelTx,
-    amount: u64,
-) -> WResult<(TxV2, Bytes32)> {
+fn verify_retired_inter_channel_fields(inter_channel_tx: &InterChannelTx) -> WResult<()> {
     let signed = &inter_channel_tx.signed_small_block;
     if signed.message.medium_epoch_hint != 0
         || signed.medium_block_number != 0
@@ -3063,6 +3194,14 @@ fn verify_canonical_inter_channel_binding(
     {
         return bail("non-canonical value in a retired inter-channel wire field");
     }
+    Ok(())
+}
+
+fn verify_canonical_inter_channel_binding(
+    inter_channel_tx: &InterChannelTx,
+    amount: u64,
+) -> WResult<(TxV2, Bytes32)> {
+    verify_retired_inter_channel_fields(inter_channel_tx)?;
 
     let (transfer, tx_v2, tx_tree_root) =
         canonical_inter_channel_binding(inter_channel_tx, amount)?;
@@ -3246,6 +3385,26 @@ pub fn verify_inter_channel_send_transition(
     debit_payload: &InterChannelDebitPayload,
     level: RegevSecurityLevel,
 ) -> WResult<()> {
+    verify_inter_channel_send_transition_with_lookup(
+        prev,
+        trusted_record,
+        debit_payload,
+        level,
+        &NoForeignChannels,
+    )
+}
+
+/// detail2 §P-3: the full co-sign gate. `foreign` supplies trusted member sets for OTHER channels'
+/// leaves when the payload carries an aggregate manifest; with no manifest it is unused. The
+/// wrapper above (foreign = fail-closed) keeps every legacy 1-leaf call site source-compatible —
+/// an aggregated payload through the wrapper fails closed on its first foreign leaf.
+pub fn verify_inter_channel_send_transition_with_lookup(
+    prev: &ChannelState,
+    trusted_record: &ChannelRecord,
+    debit_payload: &InterChannelDebitPayload,
+    level: RegevSecurityLevel,
+    foreign: &dyn InterChannelMemberLookup,
+) -> WResult<()> {
     // SECURITY: never trust the record carried in the payload; bind it to the session's trusted,
     // already-verified channel-A record (immutable member set). The IMCR signing_digest commits the
     // whole record; the member_pubkeys_root recompute then transitively binds `payload.members`.
@@ -3254,8 +3413,15 @@ pub fn verify_inter_channel_send_transition(
     }
     // F-AUX-1: do this before the expensive E-2 verification.  The signed channel debit, base
     // Transfer commitment, TxV2 leaf and signed H2 must be one deterministically reconstructed
-    // transaction, not four independently plausible values.
-    verify_canonical_inter_channel_binding(&debit_payload.inter_channel_tx, debit_payload.amount)?;
+    // transaction, not four independently plausible values. In an aggregated window (§P-3) the
+    // equivalent binding runs through verify_aggregate_manifest below — it needs the
+    // authenticated member set first, and its full-tree recompute subsumes the 1-leaf root check.
+    if debit_payload.aggregate_manifest.is_none() {
+        verify_canonical_inter_channel_binding(
+            &debit_payload.inter_channel_tx,
+            debit_payload.amount,
+        )?;
+    }
     // Authenticate the payload member set against the trusted record before trusting its Regev
     // keys. The member list covers the ACTIVE region (members + delegates) bijectively.
     let active = trusted_record.member_count as usize + trusted_record.delegate_count as usize;
@@ -3290,6 +3456,21 @@ pub fn verify_inter_channel_send_transition(
         level,
         &debit_payload.members,
     )?;
+    // detail2 §P-3: an aggregated window binds through the FULL manifest — every leaf's sender
+    // signature, canonical rebuild, shared-root commitment, and the completeness recompute of the
+    // very root this member's signed h2_tag will carry.
+    if let Some(manifest) = &debit_payload.aggregate_manifest {
+        verify_aggregate_manifest(
+            manifest,
+            trusted_record.channel_id,
+            &debit_payload.inter_channel_tx,
+            debit_payload.amount,
+            trusted_record,
+            &debit_payload.members,
+            level,
+            foreign,
+        )?;
+    }
     // STRUCTURAL signature completeness (see build_inter_channel_send): a co-signer validates the
     // transition BEFORE the full real signature set is collected, so fill placeholder structural
     // sigs. The authoritative N-of-N check is `verify_all_signatures`, run once the set is
@@ -9356,6 +9537,70 @@ mod delegate_send_tests {
             verify_inter_channel_send_transition(&snapshot.state, &record, &forged, LEVEL)
                 .is_err(),
             "a non-member sender signature must be refused (A11 membership binding)"
+        );
+
+        // ---- detail2 §P-3: aggregate-manifest obligations (K = 1 window) ----
+        // A K = 1 manifest whose sole leaf is the verified debit is accepted: its recomputed
+        // aggregated root equals the 1-leaf root the builder signed (§P-5 degeneration).
+        let own_entry = AggregateLeafEntry {
+            source_channel_id: record.channel_id,
+            amount: 5,
+            inter_channel_tx: built.debit_payload.inter_channel_tx.clone(),
+        };
+        let manifest = AggregateManifest {
+            tx_tree_root: built
+                .debit_payload
+                .inter_channel_tx
+                .signed_small_block
+                .message
+                .tx_tree_root,
+            entries: vec![own_entry.clone()],
+        };
+        let mut agg_payload = built.debit_payload.clone();
+        agg_payload.aggregate_manifest = Some(manifest.clone());
+        verify_inter_channel_send_transition(&snapshot.state, &record, &agg_payload, LEVEL)
+            .expect("a K = 1 manifest of the verified debit passes the gate");
+
+        // Missing own leaf: a manifest that claims a different window is refused.
+        let mut no_own = agg_payload.clone();
+        no_own.aggregate_manifest.as_mut().unwrap().entries.clear();
+        assert!(
+            verify_inter_channel_send_transition(&snapshot.state, &record, &no_own, LEVEL)
+                .is_err(),
+            "empty / own-leaf-missing manifest must be refused"
+        );
+
+        // Root mismatch: the root being signed must equal the recompute of ALL leaves.
+        let mut bad_root = agg_payload.clone();
+        bad_root.aggregate_manifest.as_mut().unwrap().tx_tree_root =
+            Bytes32::from_u32_slice(&[9, 9, 9, 9, 9, 9, 9, 9]).unwrap();
+        assert!(
+            verify_inter_channel_send_transition(&snapshot.state, &record, &bad_root, LEVEL)
+                .is_err(),
+            "a manifest whose root is not the leaf-set recompute must be refused"
+        );
+
+        // A smuggled foreign leaf: the verifier has no trusted member set for channel 4242, so
+        // the wrapper's fail-closed lookup refuses the round — an unauthenticatable leaf can
+        // never ride into a root this member signs (§P-3 obligation 2).
+        let mut smuggled = agg_payload.clone();
+        let mut foreign_tx = built.debit_payload.inter_channel_tx.clone();
+        let foreign_ch = crate::common::channel_id::ChannelId::new(4242).unwrap();
+        foreign_tx.source_channel_id = foreign_ch;
+        smuggled
+            .aggregate_manifest
+            .as_mut()
+            .unwrap()
+            .entries
+            .push(AggregateLeafEntry {
+                source_channel_id: foreign_ch,
+                amount: 5,
+                inter_channel_tx: foreign_tx,
+            });
+        assert!(
+            verify_inter_channel_send_transition(&snapshot.state, &record, &smuggled, LEVEL)
+                .is_err(),
+            "a foreign leaf without a trusted member set must fail the round closed"
         );
 
         let mut nonce_tamper = built.transfer_descriptor.clone();

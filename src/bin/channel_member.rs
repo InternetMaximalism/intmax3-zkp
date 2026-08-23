@@ -89,7 +89,8 @@ use intmax3_zkp::{
         inter_channel_tx_v2, partial_withdrawal_auth_digest, regev_pks_array,
         resolve_local_token_slot, sign_state, sign_state_if_backed, verify_all_signatures,
         verify_base_nonce_available, verify_inter_channel_credit_transition,
-        verify_inter_channel_descriptor_matches_debit, verify_inter_channel_send_transition,
+        verify_inter_channel_descriptor_matches_debit,
+        verify_inter_channel_send_transition_with_lookup,
         verify_l1_deposit_import_transition, verify_refresh_transition, verify_send_transition,
         verify_slim_send_tx, verify_snapshot, verify_token_register_state_transition, BatchTxApply,
         BuiltInterChannelCredit, BuiltSend, CancelCloseProver, ChannelBalanceAttestation,
@@ -5116,6 +5117,31 @@ fn load_sibling_dest_state(dest_channel_id: u64) -> (CliState, std::path::PathBu
     (st, dir)
 }
 
+/// detail2 §P-3: trusted member sets for FOREIGN channels' manifest leaves, resolved from the
+/// relay's sibling channel layout (`../ch<id>/`, the same on-disk trust root
+/// `load_sibling_dest_state` uses for the credit leg). A channel with no sibling state resolves to
+/// `None`, which fails the aggregated round closed for that leaf — a member never signs a root
+/// carrying a leaf whose sender it cannot authenticate. The (record, members) pairing returned
+/// here is re-anchored inside `verify_aggregate_manifest` via the member_pubkeys_root recompute.
+struct SiblingDirMemberLookup;
+impl intmax3_zkp::wallet_core::InterChannelMemberLookup for SiblingDirMemberLookup {
+    fn members_for(
+        &self,
+        channel: intmax3_zkp::common::channel_id::ChannelId,
+    ) -> Option<(
+        intmax3_zkp::common::channel::ChannelRecord,
+        Vec<intmax3_zkp::wallet_core::MemberInfo>,
+    )> {
+        let path = std::path::PathBuf::from(format!("../ch{}", channel.as_u64())).join(STATE_FILE);
+        if !path.exists() {
+            return None;
+        }
+        secure_private_path(&path);
+        let st: CliState = serde_json::from_str(&fs::read_to_string(&path).ok()?).ok()?;
+        Some((st.snapshot.record, st.snapshot.members))
+    }
+}
+
 /// D4a — the operator's node passes the daemon's authoritative live base nonce (served by
 /// `/base-head`, which now proxies `liveBaseHead`) so the outgoing-send co-sign guards check against
 /// the ADVANCED cursor instead of the frozen `channel_backing.json`.
@@ -5240,11 +5266,12 @@ fn cmd_cosign_inter_transfer(args: &[String]) {
         die("debit payload does not extend channel A's committed head");
     }
     // FAIL-CLOSED: re-verify the REAL E-2 + the send transition against A's TRUSTED head + record.
-    verify_inter_channel_send_transition(
+    verify_inter_channel_send_transition_with_lookup(
         &a_state.snapshot.state,
         &a_state.snapshot.record,
         &payload,
         LEVEL,
+        &SiblingDirMemberLookup,
     )
     .unwrap_or_else(|e| die(format!("inter-channel send transition invalid: {e}")));
 
@@ -5562,11 +5589,12 @@ fn cmd_cosign_burn_send(args: &[String]) {
         die("burn debit payload does not extend channel's committed head");
     }
 
-    verify_inter_channel_send_transition(
+    verify_inter_channel_send_transition_with_lookup(
         &a_state.snapshot.state,
         &a_state.snapshot.record,
         &payload,
         LEVEL,
+        &SiblingDirMemberLookup,
     )
     .unwrap_or_else(|e| die(format!("burn send transition invalid: {e}")));
 

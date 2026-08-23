@@ -239,6 +239,7 @@ fn next_descriptor(
         members: snapshot.members.clone(),
         record: snapshot.record.clone(),
         destination_recipient_pk: keys[1].regev_pk.clone(),
+        aggregate_manifest: None,
     };
     (signed_state, debit_payload, descriptor)
 }
