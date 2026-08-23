@@ -1367,14 +1367,57 @@ fn save_state(state: &CliState) {
     let externally_managed =
         std::env::var("INTMAX_DISABLE_FALCON_AGG_PRECOMPUTE").as_deref() == Ok("1");
     if is_finalized && !externally_managed {
-        let ctx = FalconProverContext::new();
-        cache_falcon_aggregate(&ctx, &state.snapshot.record, &state.snapshot.state).unwrap_or_else(
-            |e| {
-                die(format!(
-                    "state finalized but Falcon aggregate cache failed: {e}"
-                ))
-            },
-        );
+        spawn_detached_falcon_precompute(state.snapshot.state.digest);
+    }
+}
+
+/// Kick off `precompute-falcon-aggregate` as a DETACHED child of this binary and return at once.
+///
+/// PERF: the Falcon aggregate proof itself is ~0.1 s, but `FalconProverContext::new()` builds the
+/// Plonky2 batch circuit (~2 s wall) and every CLI invocation is a fresh process, so running the
+/// precompute inline put ~2 s on the critical path of EVERY co-sign that finalized a state — pure
+/// latency for the user, with no bearing on the co-sign's correctness (the signature is already
+/// complete; the aggregate is only consumed by close/PW/cancel, which fall back to computing it
+/// on demand). The digest-keyed cache is idempotent and written atomically (tmp + rename), so a
+/// detached child racing a later settlement is safe: whichever finishes first wins and the other
+/// finds a valid artifact. If the child fails, the settlement path regenerates the artifact
+/// (`cache_falcon_aggregate` falls through to `prove_finalized_state`), so nothing is lost —
+/// only the precompute's latency benefit. Inherits cwd + env (INTMAX_CHANNEL, key provenance).
+fn spawn_detached_falcon_precompute(digest: Bytes32) {
+    spawn_detached_falcon_precompute_in(digest, std::path::Path::new("."));
+}
+
+/// `work_dir` is the channel directory holding `cli_state.json` and the cache; the child runs
+/// there. Returns whether a child was actually spawned (false = cached / unavailable).
+fn spawn_detached_falcon_precompute_in(digest: Bytes32, work_dir: &std::path::Path) -> bool {
+    // Already cached (idempotent re-save of the same head): nothing to do, don't even fork.
+    if work_dir.join(falcon_aggregate_path(digest)).is_file() {
+        return false;
+    }
+    let exe = match std::env::current_exe() {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("[falcon-aggregate] cannot locate own binary ({e}); precompute deferred to settlement");
+            return false;
+        }
+    };
+    match std::process::Command::new(exe)
+        .arg("precompute-falcon-aggregate")
+        .current_dir(work_dir)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+    {
+        Ok(_child) => {
+            // Dropping the handle detaches: the child is reparented on exit and finishes on its own.
+            eprintln!("[falcon-aggregate] precompute for state {digest} running detached");
+            true
+        }
+        Err(e) => {
+            eprintln!("[falcon-aggregate] spawn failed ({e}); precompute deferred to settlement");
+            false
+        }
     }
 }
 
@@ -1854,6 +1897,50 @@ impl L1Signer {
         let mut argv = vec!["wallet".to_string(), "address".to_string()];
         self.append_args(&mut argv);
         cast_owned(&argv).trim().to_string()
+    }
+}
+
+#[cfg(test)]
+mod falcon_precompute_detach_tests {
+    use super::*;
+
+    fn digest(byte: u8) -> Bytes32 {
+        Bytes32::from_hex(&format!("0x{}", format!("{byte:02x}").repeat(32))).unwrap()
+    }
+
+    /// The finalize-time Falcon precompute must NOT sit on the co-sign critical path: building the
+    /// batch circuit is ~2 s, and `save_state` runs at the tail of every co-sign that completes an
+    /// N-of-N set. The spawn must return in well under the circuit-build time.
+    #[test]
+    fn detached_precompute_returns_without_waiting_for_the_circuit_build() {
+        let dir = std::env::temp_dir().join(format!("falcon-detach-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let started = std::time::Instant::now();
+        let spawned = spawn_detached_falcon_precompute_in(digest(0x11), &dir);
+        let elapsed = started.elapsed();
+        let _ = std::fs::remove_dir_all(&dir);
+
+        assert!(spawned, "no cache present, so a child must be spawned");
+        // Circuit build alone is ~2 s; a synchronous precompute could never return this fast.
+        assert!(
+            elapsed < std::time::Duration::from_millis(500),
+            "precompute blocked the caller for {elapsed:?}"
+        );
+    }
+
+    /// An already-cached digest (idempotent re-save of the same head) must not fork at all —
+    /// forking a 2 s child per save would be the old latency in disguise.
+    #[test]
+    fn cached_digest_does_not_spawn() {
+        let dir = std::env::temp_dir().join(format!("falcon-cached-{}", std::process::id()));
+        std::fs::create_dir_all(dir.join(FALCON_AGG_CACHE_DIR)).unwrap();
+        std::fs::write(dir.join(falcon_aggregate_path(digest(0x22))), b"stub").unwrap();
+
+        let spawned = spawn_detached_falcon_precompute_in(digest(0x22), &dir);
+        let _ = std::fs::remove_dir_all(&dir);
+
+        assert!(!spawned, "cached digest must short-circuit without forking");
     }
 }
 

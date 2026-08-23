@@ -4383,7 +4383,19 @@ impl Default for FalconProverContext {
 }
 
 impl FalconProverContext {
+    /// Process-wide shared context. Building `FalconBatchAggCircuit` is ~2 s of wall time (the
+    /// aggregate proof itself is ~0.1 s), so every caller in one process must share ONE built
+    /// circuit: `CloseProver::new`, `PartialWithdrawalProver::new`, the CLI's precompute and any
+    /// long-lived service all resolve to this cell. `Clone` of the context is an `Arc` bump.
+    /// Tests that need an independent instance use `with_falcon_context(Self::fresh())`.
     pub fn new() -> Self {
+        static SHARED: std::sync::LazyLock<FalconProverContext> =
+            std::sync::LazyLock::new(FalconProverContext::fresh);
+        SHARED.clone()
+    }
+
+    /// Build a brand-new circuit (the ~2 s cost). Prefer [`Self::new`].
+    pub fn fresh() -> Self {
         Self {
             agg: Arc::new(FalconBatchAggCircuit::<F, C, D>::new()),
         }
