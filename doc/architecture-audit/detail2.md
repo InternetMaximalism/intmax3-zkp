@@ -1102,6 +1102,38 @@ verifier from its own verified inputs; R1/R3/D3 and the before-binding cross-bat
 unchanged. What changed is WHERE redundant copies of already-held data are (no longer on the
 wire) and how memory scales (streaming, K-independent bounds).
 
+### M-7. Relay batch window: 1 s / 200 tx per co-signed transition (2026-08-23)
+
+§M-1..6 specified the slim transport and the CLI's `cosign-batch`; the relay still routed every
+`/api/cosign` through the SOLO path (K = 1 per N-of-N round). M-7 closes that gap: the relay
+coalesces requests into windows and the channel co-signs ONE state transition per window.
+
+- **Window**: on the first enqueued payload the relay opens a `BATCH_WINDOW_MS = 1000` window for
+  that channel. Every `/api/cosign` arriving inside it joins the same window, capped at
+  `BATCH_WINDOW_MAX = 200` txs; the 201st tx (or any tx arriving after close) opens the NEXT
+  window. The window closes on whichever comes first — the timer or the cap — then drains under
+  the per-channel lock.
+- **Anchor pre-filter (stale = per-tx error, not batch poison)**: at drain, payloads whose
+  `proposedNextState.prevDigest` differs from the channel's CURRENT head digest are rejected
+  individually (HTTP 409, `staleAnchor`); the client re-signs per §M-3. Only same-anchor payloads
+  form the batch, so the CLI's batch-level anchor check can only fail on a head moved by a
+  non-window writer (inter-channel credit, refresh) — those still serialize behind the same lock.
+- **Drain**: K = 1 → the EXACT legacy solo path (`cosign payload.json`), preserving the browser
+  member fast path and the K = 1 state-sig carry-over. K > 1 → each fat payload is projected to
+  `SlimSendPayload` per §M-4 (`afterCt = proposedNextState.encBalances[senderIndex][channelTx.tokenSlot]`,
+  `anchorDigest = proposedNextState.prevDigest`), spooled one file per tx, and handed to
+  `cosign-batch` as a §M-1 manifest. All K waiters receive the SAME fully-signed batch state.
+- **Fail-whole fallback**: `cosign-batch` is deliberately fail-whole (one invalid proof rejects
+  the batch — §M-2 obligations are per-tx but the fold is all-or-nothing). To stop one bad tx
+  DoSing its window, on batch rejection the relay REPLAYS the window sequentially through the
+  solo path: honest txs land (each its own co-signed transition), the invalid tx alone errors.
+  The fallback is bounded — it runs only on rejection, and a window is ≤ 200 txs.
+- **Throughput shape**: worst case (window always full) the channel commits 200 tx per N-of-N
+  round at ≥ 1 round/s — the §M streaming bounds hold (200 < MAX_BATCH_K = 1024). The browser
+  member-sender limitation of §M-4 is unchanged: inside a K > 1 batch only delegates can send
+  (live-demo browsers are delegates; a member-sender window degrades to K = 1 solo rounds via
+  the fallback if it ever produces a batch rejection).
+
 ---
 
 ## N. Multi-token channels: up to 10 currencies per channel (2026-07-27; design fixed, implementation pending)

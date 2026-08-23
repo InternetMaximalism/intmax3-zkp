@@ -15,6 +15,7 @@ const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
 const { execFileSync, spawn } = require('child_process');
+const { createBatchWindow, projectToSlim, partitionByAnchor } = require('./batch-window');
 const { publicBacking, baseHead } = require('./public-backing');
 
 const ROOT = __dirname; // hosting/wallet/ — serves wallet-live.html + wallet-worker.js
@@ -580,13 +581,74 @@ app.post('/api/add-genesis-sig', (req, res) => {
 
 // Step 3: browser sends a transfer payload → CLI co-signs (other members) → returns the
 // fully-signed next state for the browser to finalize.
+//
+// detail2 §M-7: payloads are coalesced into a per-channel window (BATCH_WINDOW_MS, cap
+// BATCH_WINDOW_MAX) and the channel co-signs ONE state transition per window via `cosign-batch`.
+// K = 1 windows take the exact legacy solo path. Stale-anchored payloads are rejected per-tx
+// (409, client re-signs); a rejected batch replays sequentially so one bad tx cannot DoS its
+// window. All K waiters of a batch window receive the same fully-signed batch state.
+const BATCH_WINDOW_MS = Math.max(1, parseInt(process.env.BATCH_WINDOW_MS || '1000', 10) || 1000);
+const BATCH_WINDOW_MAX = Math.max(1, Math.min(1024, parseInt(process.env.BATCH_WINDOW_MAX || '200', 10) || 200));
+
+function drainCosignWindow(ch, entries) {
+  return withLock(ch, () => {
+    const snap = JSON.parse(fs.readFileSync(wc(ch, 'channel_snapshot.json'), 'utf8'));
+    const { fresh, stale } = partitionByAnchor(entries, snap.state.digest);
+    for (const en of stale) {
+      const err = new Error('staleAnchor: payload does not extend the current head — re-sign against the latest snapshot');
+      err.staleAnchor = true;
+      en.reject(err);
+    }
+    if (fresh.length === 0) return;
+    const soloOne = (en) => {
+      try {
+        fs.writeFileSync(wc(ch, 'payload.json'), JSON.stringify(en.payload));
+        cli(ch, ['cosign', 'payload.json', 'cosigned.json']);
+        en.resolve(JSON.parse(fs.readFileSync(wc(ch, 'cosigned.json'), 'utf8')));
+      } catch (e) { en.reject(e); }
+    };
+    if (fresh.length === 1) { soloOne(fresh[0]); return; }
+    // K > 1: project fat→slim (§M-4), spool one file per tx, hand a §M-1 manifest to cosign-batch.
+    const spoolDir = wc(ch, 'batch_spool');
+    fs.mkdirSync(spoolDir, { recursive: true });
+    const files = [];
+    try {
+      fresh.forEach((en, i) => {
+        const f = path.join('batch_spool', `tx_${Date.now()}_${i}.json`);
+        fs.writeFileSync(wc(ch, f), JSON.stringify(projectToSlim(en.payload)));
+        files.push(f);
+      });
+      fs.writeFileSync(wc(ch, 'batch_manifest.json'), JSON.stringify({ files }));
+      console.log(`[batch] channel ${ch}: window of ${fresh.length} tx → cosign-batch`);
+      cli(ch, ['cosign-batch', 'batch_manifest.json', 'batch_cosigned.json']);
+      const result = JSON.parse(fs.readFileSync(wc(ch, 'batch_cosigned.json'), 'utf8'));
+      for (const en of fresh) en.resolve(result);
+    } catch (e) {
+      // Fail-whole batch rejected (one invalid proof, §M-2): replay solo so honest txs land and
+      // only the invalid tx errors. Bounded: runs only on rejection, window ≤ BATCH_WINDOW_MAX.
+      console.error(`[batch] channel ${ch}: batch rejected (${String(e.stderr || e.message || e).slice(0, 200)}); replaying window solo`);
+      for (const en of fresh) if (!en.settled) soloOne(en);
+    } finally {
+      for (const f of files) { try { fs.unlinkSync(wc(ch, f)); } catch (_) {} }
+    }
+  });
+}
+
+const cosignBatcher = createBatchWindow({
+  windowMs: BATCH_WINDOW_MS,
+  maxK: BATCH_WINDOW_MAX,
+  drain: drainCosignWindow,
+});
+
 app.post('/api/cosign', (req, res) => {
   const ch = reqChannel(req);
-  withLock(ch, () => {
-    fs.writeFileSync(wc(ch, 'payload.json'), JSON.stringify(req.body));
-    cli(ch, ['cosign', 'payload.json', 'cosigned.json']);
-    res.json(JSON.parse(fs.readFileSync(wc(ch, 'cosigned.json'), 'utf8')));
-  }).catch((e) => { console.error(e.stderr ? String(e.stderr) : (e.message||e)); res.status(500).json({ error: String(e.stderr || e.message || e) }); });
+  cosignBatcher.enqueue(ch, req.body).then(
+    (result) => res.json(result),
+    (e) => {
+      console.error(e.stderr ? String(e.stderr) : (e.message || e));
+      res.status(e.staleAnchor ? 409 : 500).json({ error: String(e.stderr || e.message || e) });
+    }
+  );
 });
 
 // Balance-refresh: browser re-encrypts its own slot (RefreshPayload) → CLI members co-sign → returns
