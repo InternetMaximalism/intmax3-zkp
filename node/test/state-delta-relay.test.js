@@ -98,6 +98,11 @@ function nextSnapshot(base, senderSlot, recipientSlot) {
 
 test('REAL ch7 snapshot: a delta round-trips to the exact head state', withSnap, () => {
   const baseSnap = JSON.parse(fs.readFileSync(SNAP, 'utf8'));
+  // This is a REAL working-tree snapshot: its shape moves with live sessions (joins add delegate
+  // rows), so every shape expectation below is DERIVED from the snapshot, never hardcoded — a
+  // hardcoded row list rots the first time a live join changes the channel.
+  const rowCount = baseSnap.state.balanceState.encBalances.length;
+  assert.ok(rowCount >= 3, 'test sends between slots 1 and 2; snapshot has only ' + rowCount + ' rows');
   const headSnap = nextSnapshot(baseSnap, 1, 2);
   const baseSv = baseSnap.state.balanceState.stateVersion;
 
@@ -108,7 +113,8 @@ test('REAL ch7 snapshot: a delta round-trips to the exact head state', withSnap,
   const delta = out.body;
 
   assert.deepStrictEqual(Object.keys(delta.changedRows).sort(), ['1', '2']);
-  assert.deepStrictEqual(delta.unchangedRows, [0, 3, 4]);
+  const expectedUnchanged = [...Array(rowCount).keys()].filter((i) => i !== 1 && i !== 2);
+  assert.deepStrictEqual(delta.unchangedRows, expectedUnchanged);
   assert.strictEqual(delta.rowCount, headSnap.state.balanceState.encBalances.length);
 
   // The page half rebuilds it.
