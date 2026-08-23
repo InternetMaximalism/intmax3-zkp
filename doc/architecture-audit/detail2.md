@@ -1515,3 +1515,29 @@ The Solidity contract; `Block::hash_with_prev_hash`; the IMCH/IMSB preimages (me
 their channel state, whose `h2_tag` limb carries the root); the Falcon N-of-N aggregate machinery;
 the E-2 STARK; `TxSettlement` / `update_channel_tree` circuits. K = 1 windows degenerate to
 today's flow (the aggregated tree of one leaf IS the current tree).
+
+### P-6. Implementation status + open items (2026-08-23)
+
+**Landed** (stage 1+2): IMI5 per-leaf sender signature (signed at build, refused when stripped or
+non-member-forged); `inter_channel_tx_v2_leaf` / `build_aggregated_tx_v2_tree` (K = 1 bit-identical
+to the legacy tree; per-leaf inclusion at channel-id indices verified); `AggregateManifest` on the
+debit payload + `verify_aggregate_manifest` wired into the co-sign gate behind
+`InterChannelMemberLookup` (CLI: sibling-dir store; default: fail-closed).
+
+**Stage 3 — remaining, in dependency order:**
+1. Two-phase builder: `prepare` (E-2 + canonical leaf, root-independent) / `finalize` (root +
+   manifest + descriptor proof against the aggregated tree). The current builder computes
+   h2_tag inline from its own 1-leaf tree.
+2. Producer collection window (`INTER_WINDOW_MS`) in `block_producer_service` + the node/API
+   rendezvous: submit-leaf → window close → root+manifest broadcast → per-channel co-sign →
+   one `SubBlock` per channel in a single `postBlockAndSubmit`.
+3. Credit-side + daemon per-leaf verification (needs the same lookup pattern).
+4. **OPEN — partial-window abort semantics**: if one channel fails its co-sign round after the
+   window closes, the remaining channels' states already reference H2_agg. Either (a) the round
+   aborts and every participant re-runs against a re-rooted window (leaf re-signing is cheap:
+   only the A11 sig + state sigs re-run; the E-2 proof is root-independent), or (b) the producer
+   posts the full tree anyway and the failed channel's leaf simply never settles (its debit was
+   never co-signed, so no state references the root — the leaf is inert in the tree but
+   UNSPENDABLE, since settlement requires the source channel's signed state). (b) is simpler and
+   sound — an inert leaf has no signed state and no E-2-committed debit — but wastes the slot for
+   that window. Decide at stage-3 implementation time.
