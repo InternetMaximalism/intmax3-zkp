@@ -5029,6 +5029,53 @@ fn load_sibling_dest_state(dest_channel_id: u64) -> (CliState, std::path::PathBu
     (st, dir)
 }
 
+/// D4a — the operator's node passes the daemon's authoritative live base nonce (served by
+/// `/base-head`, which now proxies `liveBaseHead`) so the outgoing-send co-sign guards check against
+/// the ADVANCED cursor instead of the frozen `channel_backing.json`.
+///
+/// That file's `base_private_state` is written once at `setup-backing` and never advanced, so on a
+/// SECOND consecutive send it disagrees with the daemon: the old guard passed (stale == stale), the
+/// channel debit was persisted, and only then did the daemon reject the settle — stranding the value
+/// (retry blocked by the consumed replay identity). When this override is present it is
+/// authoritative and the frozen witness is not consulted; sent-tx slot occupancy is still enforced
+/// in-circuit (`spend_circuit`) and at the daemon's own settle. When absent (legacy / direct CLI with
+/// no daemon), the guard falls back to the frozen witness, which fails closed on staleness.
+const LIVE_BASE_NONCE_ENV: &str = "INTMAX_LIVE_BASE_NONCE";
+
+fn live_base_nonce_override() -> Option<u32> {
+    match std::env::var(LIVE_BASE_NONCE_ENV) {
+        Ok(s) if s.trim().is_empty() => None,
+        Ok(s) => Some(s.trim().parse::<u32>().unwrap_or_else(|e| {
+            die(format!("{LIVE_BASE_NONCE_ENV}={s:?} is not a u32: {e}"))
+        })),
+        Err(_) => None,
+    }
+}
+
+/// Gate an outgoing base send's nonce before any member signs and before the channel debit is
+/// persisted. Prefers the daemon's live cursor (D4a); otherwise falls back to the frozen backing
+/// witness. `die`s (fail-closed) on any mismatch or on a legacy backing with no override.
+fn guard_outgoing_base_nonce(backing: &ChannelBacking, descriptor_base_nonce: u32, ctx: &str) {
+    if let Some(live) = live_base_nonce_override() {
+        if descriptor_base_nonce != live {
+            die(format!(
+                "{ctx}: base nonce {descriptor_base_nonce} != daemon live base nonce {live}; \
+                 REFUSING before co-signing/debiting — the settle would be rejected and the debit \
+                 stranded"
+            ));
+        }
+        return;
+    }
+    let base_private = backing.base_private_state.as_ref().unwrap_or_else(|| {
+        die(format!(
+            "{ctx}: channel_backing.json has no base_private_state and no {LIVE_BASE_NONCE_ENV} \
+             override was supplied; cannot gate the base nonce — migrate the live base IVC head"
+        ))
+    });
+    verify_base_nonce_available(base_private, descriptor_base_nonce)
+        .unwrap_or_else(|e| die(format!("{ctx}: {}", e.0)));
+}
+
 /// `cosign-inter-transfer <debit_payload.json> <descriptor.json> <out.json>` — the single atomic
 /// cross-channel transfer command. Run with cwd = SOURCE channel A, INTMAX_CHANNEL = A.
 ///
@@ -5060,19 +5107,11 @@ fn cmd_cosign_inter_transfer(args: &[String]) {
     // advance the channel small-block counter without changing this cursor, so the IMI3-bound
     // explicit nonce is checked against the persisted base witness before any member signs.
     let backing: ChannelBacking = read_private_json(BACKING_FILE);
-    let base_private = backing.base_private_state.as_ref().unwrap_or_else(|| {
-        die(
-            "base nonce guard unavailable: channel_backing.json has no base_private_state; migrate \
-             the live base IVC head before attempting an inter-channel send",
-        )
-    });
-    verify_base_nonce_available(base_private, descriptor.inter_channel_tx.base_nonce)
-        .unwrap_or_else(|e| {
-            die(format!(
-                "REFUSING inter-channel debit before co-signing: {}",
-                e.0
-            ))
-        });
+    guard_outgoing_base_nonce(
+        &backing,
+        descriptor.inter_channel_tx.base_nonce,
+        "REFUSING inter-channel debit before co-signing",
+    );
 
     // The descriptor must describe a transfer OUT of THIS channel (A) — defense in depth before the
     // gates run; A is the source.
@@ -5403,20 +5442,13 @@ fn cmd_cosign_burn_send(args: &[String]) {
     // debit. This reads the witness paired with `channel_attestation.bin`; it is not a best-effort
     // local replay ledger.
     let backing: ChannelBacking = read_private_json(BACKING_FILE);
-    let base_private = backing.base_private_state.as_ref().unwrap_or_else(|| {
-        die(
-            "burn nonce guard unavailable: channel_backing.json has no base_private_state. This \
-             legacy backing cannot prove sent-tx nonce occupancy; rerun setup-backing and migrate \
-             the live base IVC head before attempting a burn.",
-        )
-    });
     let burn_nonce = descriptor.inter_channel_tx.base_nonce;
-    verify_base_nonce_available(base_private, burn_nonce).unwrap_or_else(|e| {
-        die(format!(
-            "{}; REFUSING before co-signing/debiting because the withdrawal would be unprovable",
-            e.0
-        ))
-    });
+    guard_outgoing_base_nonce(
+        &backing,
+        burn_nonce,
+        "burn nonce guard: REFUSING before co-signing/debiting because the withdrawal would be \
+         unprovable",
+    );
 
     if descriptor.source_channel_id.as_u64() != channel_id_env() as u64 {
         die(format!(

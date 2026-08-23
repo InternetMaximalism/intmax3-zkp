@@ -47,7 +47,7 @@ async function handleCosignRefresh(event, ctx) {
 }
 
 async function handleInterChannel(event, ctx) {
-  const { cli, ch, store, log } = ctx;
+  const { cli, api, ch, store, log } = ctx;
   const body = event.body || {};
   const debit = body.debitPayload;
   const descriptor = body.transferDescriptor;
@@ -58,7 +58,8 @@ async function handleInterChannel(event, ctx) {
   try {
     cli.writeJson(ch.workDir, 'inter_debit_payload.json', debit);
     cli.writeJson(ch.workDir, 'inter_descriptor.json', descriptor);
-    await cli.run(ch.id, ch.workDir, ['cosign-inter-transfer', 'inter_debit_payload.json', 'inter_descriptor.json', 'inter_transfer.json']);
+    const interEnv = await liveBaseNonceEnv(api, ch, log);
+    await cli.run(ch.id, ch.workDir, ['cosign-inter-transfer', 'inter_debit_payload.json', 'inter_descriptor.json', 'inter_transfer.json'], interEnv);
     const result = cli.readJson(ch.workDir, 'inter_transfer.json');
     store.completeAction(actionId, 'ok');
     log.info({ event: 'COSIGN_OK', branch: BRANCHES.PEER_INTER_REQUEST, channel: ch.id, actionId });
@@ -69,8 +70,25 @@ async function handleInterChannel(event, ctx) {
   }
 }
 
+// Fetch the daemon's authoritative live base nonce (served by /base-head → liveBaseHead) so the CLI
+// co-sign guard checks the outgoing send against the ADVANCED cursor, not the frozen
+// channel_backing.json. Returns extraEnv for cli.run; a fetch failure yields {} so the CLI guard
+// falls back to the frozen witness (fail-closed on a stale second send) rather than proceeding blind.
+async function liveBaseNonceEnv(api, ch, log) {
+  try {
+    const head = await api.getBaseHead(ch.id);
+    if (head && Number.isInteger(head.nonce)) {
+      return { INTMAX_LIVE_BASE_NONCE: String(head.nonce) };
+    }
+    log.warn({ event: 'LIVE_BASE_NONCE_UNAVAILABLE', channel: ch.id, head });
+  } catch (e) {
+    log.warn({ event: 'LIVE_BASE_NONCE_FETCH_FAILED', channel: ch.id, error: String(e.message || e) });
+  }
+  return {};
+}
+
 async function handleCosignBurn(event, ctx) {
-  const { cli, ch, store, log } = ctx;
+  const { cli, api, ch, store, log } = ctx;
   const body = event.body || {};
   const debit = body.debitPayload;
   const descriptor = body.transferDescriptor;
@@ -84,7 +102,8 @@ async function handleCosignBurn(event, ctx) {
   try {
     cli.writeJson(ch.workDir, 'burn_payload.json', debit);
     cli.writeJson(ch.workDir, 'burn_descriptor.json', descriptor);
-    await cli.run(ch.id, ch.workDir, ['cosign-burn-send', 'burn_payload.json', 'burn_descriptor.json', 'burn_cosigned.json']);
+    const burnEnv = await liveBaseNonceEnv(api, ch, log);
+    await cli.run(ch.id, ch.workDir, ['cosign-burn-send', 'burn_payload.json', 'burn_descriptor.json', 'burn_cosigned.json'], burnEnv);
     const cosigned = cli.readJson(ch.workDir, 'burn_cosigned.json');
     const ticket = store.upsertTicket({
       id: 'pw_' + Date.now(), type: 'partial_withdrawal', status: 'burn_done',
@@ -141,4 +160,4 @@ async function publishSnapshot(event, ctx) {
   }
 }
 
-module.exports = { handleCosign, handleCosignRefresh, handleInterChannel, handleCosignBurn, publishSnapshot };
+module.exports = { handleCosign, handleCosignRefresh, handleInterChannel, handleCosignBurn, publishSnapshot, liveBaseNonceEnv };
