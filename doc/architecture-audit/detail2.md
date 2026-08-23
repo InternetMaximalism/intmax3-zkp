@@ -1441,3 +1441,77 @@ vendored Falcon math.**
 - The cosigner path's security **no longer depends on FRI soundness** — a proof-system config bug
   can no longer mint cosignatures. (It still can on the validity path, which remains a plonky2
   circuit.)
+
+## P. Aggregated inter-channel rounds: multi-leaf tx tree + per-leaf sender signature (2026-08-23; design fixed, implementation in progress)
+
+Today the inter-channel path is 1-block = 1-channel = 1-tx (§A-2): `inter_channel_tx_v2`
+(wallet_core) builds a ONE-leaf `TxV2Tree`, the sender channel co-signs `h2_tag = root`, and the
+producer posts one block per transfer. §P batches: the producer collects inter-channel txs for a
+short window and posts ONE aggregated tx tree; every participating channel's members sign that
+root — after verifying the ENTIRE tree, leaf by leaf.
+
+### P-1. Window and tree shape
+
+- `INTER_WINDOW_MS` (default 3000): the producer service opens a window on the first submitted
+  inter-channel tx and closes it on the timer. All txs submitted inside the window share ONE
+  `TxV2Tree`.
+- **Leaf index = source channel id, one tx per source channel per window** (a second tx from the
+  same channel waits for the next window). This preserves the existing index discipline
+  (`TX_TREE_HEIGHT == CHANNEL_ID_BITS`, `TxSettlement` verifies inclusion at `channel_id`), so
+  **no circuit changes**: `TxSettlement` and `update_channel_tree` already verify sparse
+  inclusion proofs that are shape-identical for 1-leaf and K-leaf trees.
+- The producer posts one `SubBlock` per participating channel, all carrying the SAME aggregated
+  `txTreeRoot` (the contract's `postBlockAndSubmit(SubBlock[])` already accepts this).
+
+### P-2. Per-leaf sender signature (IMI4 v5)
+
+`InterChannelTx` gains `sender_pk_b: Bytes32` + `sender_hash_sig: HashSig` — the same A11
+Poseidon2-BabyBear hash-sig the in-channel `ChannelTx` already carries — signed by the SENDER over
+the `InterChannelTx` signing digest. The digest domain bumps to `IMI5` ("inter-channel tx v5");
+the preimage covers source/dest channel ids, sender/recipient slots, token index, enc amount
+digest, base nonce and the debit anchor digest (everything the v4 IMI4 digest covered). Rationale:
+today an inter-channel leaf has NO per-tx sender signature — sender authorization is implied by
+the E-2 STARK plus the source channel's own N-of-N, which members of OTHER channels in an
+aggregated tree cannot check without that channel's record. The per-leaf hash-sig makes "no
+unsigned tx in the tree" verifiable by every member of every participating channel with only the
+manifest in hand. v3-reset policy applies (no dual-format transition; old descriptors are
+rejected).
+
+### P-3. Root-signing obligations (the member's checklist)
+
+A member co-signs a state with `h2_tag = H2_agg` ONLY after verifying, from the window's
+**aggregate manifest** = the full ordered leaf set `[{source_channel_id, inter_channel_tx,
+tx_v2}]`:
+
+1. **Own leaf**: this channel's tx in the manifest is byte-identical to the debit payload the
+   member just verified (existing send-transition checks unchanged).
+2. **Every leaf's sender signature**: `verify_hash_sig(sender_pk_b, IMI5 digest, sender_hash_sig)`
+   per leaf — a leaf without a valid sender signature fails the whole round (nobody signs).
+3. **Canonical rebuild**: each leaf's `TxV2` equals the canonical
+   `Transfer → TransferTree → TxV2` rebuild from its `inter_channel_tx` (same deterministic
+   construction as today's `canonical_inter_channel_binding`, applied per leaf).
+4. **Root equality + completeness**: inserting ALL manifest leaves (and nothing else) at their
+   channel-id indices into an empty `TxV2Tree` reproduces EXACTLY `H2_agg`. Because the root is a
+   binding commitment, recomputation from the full manifest simultaneously proves no leaf was
+   omitted, none added, and none placed at a foreign index. (A membership-proof-only check would
+   miss additions; the full recompute is O(K log N) and K ≤ window size.)
+5. **Uniqueness**: manifest indices pairwise distinct (one tx per channel per window).
+
+### P-4. Binding and settlement changes
+
+- `verify_canonical_inter_channel_binding` ("signed H2 == the 1-leaf root") is replaced by
+  inclusion form: the canonical leaf verifies at index `source_channel_id` under the signed
+  `H2_agg` via `tx_v2_merkle_proof`. Credit-gate invariant 7 already has this shape; the send
+  side and the daemon (`settle_inter_channel`, `receive_inter_channel`) move to it.
+- `inter_channel_tx_v2` splits: `inter_channel_tx_v2_leaf(...) -> TxV2` (canonical leaf, single
+  source of truth) + window-side aggregation into the shared tree. `tx_v2_merkle_proof` in the
+  descriptor is generated AFTER window close, against the aggregated tree.
+- Producer bookkeeping (`accepted_inter_channel_txs`, base nonces, per-channel monotonicity) is
+  applied atomically per window; sub-block timestamps within a window are strictly increasing.
+
+### P-5. What does NOT change
+
+The Solidity contract; `Block::hash_with_prev_hash`; the IMCH/IMSB preimages (members still sign
+their channel state, whose `h2_tag` limb carries the root); the Falcon N-of-N aggregate machinery;
+the E-2 STARK; `TxSettlement` / `update_channel_tree` circuits. K = 1 windows degenerate to
+today's flow (the aggregated tree of one leaf IS the current tree).

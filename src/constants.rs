@@ -245,6 +245,12 @@ pub const INTER_CHANNEL_TX_DOMAIN_V3: u32 = 0x494d4933;
 /// makes the same value available to the destination `ReceiveTransfer` circuit without conflating
 /// it with the destination member's unrelated Regev/Falcon `pk_g`.
 pub const INTER_CHANNEL_TX_DOMAIN_V4: u32 = 0x494d4934;
+
+/// "IMI5" (detail2 §P-2): the `InterChannelTx` signing digest gains the per-leaf SENDER hash-sig
+/// obligation — the digest itself is what `sender_hash_sig` (A11 Poseidon2-BabyBear) signs, so the
+/// preimage layout is v4's but under a fresh domain: a v4 digest must never verify as the message
+/// of a v5 sender signature (and vice versa). v3-reset policy: no dual-format acceptance window.
+pub const INTER_CHANNEL_TX_DOMAIN_V5: u32 = 0x494d4935;
 /// "IMTF" — token-funds digest domain (detail2 §N-6, TM-11). Domain of
 /// `token_funds_digest = keccak([IMTF, registry(10 x u32, zero-padded), token_count,
 /// amounts(10 x U256, zero-padded)])` — ALWAYS full width.
@@ -274,6 +280,7 @@ mod tests {
         assert_eq!(INTER_CHANNEL_TX_DOMAIN_V2, u32::from_be_bytes(*b"IMI2"));
         assert_eq!(INTER_CHANNEL_TX_DOMAIN_V3, u32::from_be_bytes(*b"IMI3"));
         assert_eq!(INTER_CHANNEL_TX_DOMAIN_V4, u32::from_be_bytes(*b"IMI4"));
+        assert_eq!(INTER_CHANNEL_TX_DOMAIN_V5, u32::from_be_bytes(*b"IMI5"));
         assert_eq!(TOKEN_FUNDS_DIGEST_DOMAIN, u32::from_be_bytes(*b"IMTF"));
     }
 
@@ -412,6 +419,10 @@ mod tests {
             (
                 "IMI3 INTER_CHANNEL_TX_DOMAIN_V3",
                 INTER_CHANNEL_TX_DOMAIN_V3,
+            ),
+            (
+                "IMI5 INTER_CHANNEL_TX_DOMAIN_V5",
+                INTER_CHANNEL_TX_DOMAIN_V5,
             ),
             (
                 "IMI4 INTER_CHANNEL_TX_DOMAIN_V4",

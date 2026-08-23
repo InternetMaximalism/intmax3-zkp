@@ -11,7 +11,7 @@ use crate::{
         salt::Salt,
     },
     constants::{
-        INTER_CHANNEL_TX_DOMAIN_V4, L1_DEPOSIT_IMPORT_DOMAIN_V2, MAX_CHANNEL_MEMBERS,
+        INTER_CHANNEL_TX_DOMAIN_V5, L1_DEPOSIT_IMPORT_DOMAIN_V2, MAX_CHANNEL_MEMBERS,
         MAX_CHANNEL_TOKENS, MAX_COSIGNERS, PAY_DOMAIN_V2, TOKEN_FUNDS_DIGEST_DOMAIN,
         WITHDRAWAL_CLAIM_DOMAIN_V2,
     },
@@ -769,17 +769,28 @@ pub struct InterChannelTx {
     /// unifies the retired `receiver_update_proof` / `sender_balance_update_proof` pair).
     pub channel_update_zkp: ChannelProofEnvelope,
     pub transport_proof: Vec<u8>,
+    /// detail2 §P-2: the SENDER's A11 Poseidon2-BabyBear hash-sig STARK proof over this tx's IMI5
+    /// `signing_digest` — the per-leaf sender authorization that lets every member of every
+    /// channel participating in an aggregated round check "no unsigned tx is in the tree I am
+    /// about to sign" with only the leaf in hand. Excluded from the digest (it signs the digest),
+    /// exactly like `ChannelTx::sender_hash_sig`; the (pk_g, pk_b) pairing is bound by the
+    /// verifier against the source channel's authenticated member set, never taken from the wire.
+    pub sender_hash_sig: Vec<u8>,
+    /// The sender's BabyBear hash-sig public key `pk_b`, bound to the proof's public values and to
+    /// the registered member leaf that owns `source_pk_g` (detail2 §P-2 / A11).
+    pub sender_pk_b: Bytes32,
 }
 
 impl InterChannelTx {
-    /// IMI4 signing digest. `token_index`, `base_nonce`, and all four 64-bit destination salt
-    /// limbs occupy canonical words (never bit-packed). IMI4 is a fresh domain because this
-    /// preimage has variable tails;
-    /// widening IMI2 in place would make schema separation depend on total-length alignment.
+    /// IMI5 signing digest (detail2 §P-2 — v4 layout under a fresh domain; this digest is the
+    /// message of `sender_hash_sig`, so the sig fields are NOT part of the preimage).
+    /// `token_index`, `base_nonce`, and all four 64-bit destination salt
+    /// limbs occupy canonical words (never bit-packed); the fresh domain keeps schema separation
+    /// independent of total-length alignment.
     pub fn signing_digest(&self) -> Bytes32 {
         hash_words(
             &[
-                vec![INTER_CHANNEL_TX_DOMAIN_V4],
+                vec![INTER_CHANNEL_TX_DOMAIN_V5],
                 self.signed_small_block.signing_digest().to_u32_vec(),
                 self.sender_delta_ct.digest().to_u32_vec(),
                 self.source_channel_id.to_u32_vec(),
@@ -2236,6 +2247,8 @@ mod tests {
             }],
             channel_update_zkp: envelope(TransitionProofRole::ChannelStateUpdate, 7),
             transport_proof: vec![3],
+            sender_hash_sig: Vec::new(),
+            sender_pk_b: Bytes32::default(),
         }
     }
 

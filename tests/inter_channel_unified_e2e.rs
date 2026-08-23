@@ -479,6 +479,8 @@ fn unified_inter_channel_transfer_e2e() {
             proof: e2,
         },
         transport_proof: vec![],
+        sender_hash_sig: Vec::new(),
+        sender_pk_b: Bytes32::default(),
     };
     for (slot, k) in a_keys.iter().enumerate() {
         let s = sign_state(k, slot as u8, &a_send).unwrap();

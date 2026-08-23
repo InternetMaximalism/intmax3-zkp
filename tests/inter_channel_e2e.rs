@@ -538,6 +538,8 @@ fn inter_channel_transfer_real_deposit_backed() {
             proof: e2,
         },
         transport_proof: vec![],
+        sender_hash_sig: Vec::new(),
+        sender_pk_b: Bytes32::default(),
     };
     let transport = ChannelProofEnvelope {
         role: TransitionProofRole::IntmaxTransport,

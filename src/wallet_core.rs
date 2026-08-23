@@ -347,6 +347,36 @@ pub fn verify_channel_tx_sender_hash_sig(
     Ok(())
 }
 
+/// detail2 §P-2: verify the inter-channel LEAF's sender hash-sig and bind it to the recomputed
+/// IMI5 digest, the registered `pk_b`, and the member leaf that owns `source_pk_g` — the per-leaf
+/// obligation every root-signing member runs so an unsigned (or foreign-signed) inter-channel tx
+/// can never enter a tree whose root they co-sign. `members` MUST already be authenticated against
+/// the source channel's `member_pubkeys_root` by the caller; the sender may be a member OR a
+/// delegate (delegates hold balances and send with the identical A11 mechanism).
+pub fn verify_inter_channel_tx_sender_hash_sig(
+    tx: &InterChannelTx,
+    level: RegevSecurityLevel,
+    source_members: &[MemberInfo],
+) -> WResult<()> {
+    if tx.sender_hash_sig.is_empty() {
+        return bail("inter-channel tx sender hash-sig must not be empty (detail2 §P-2)");
+    }
+    let sender = source_members
+        .iter()
+        .find(|m| m.pk_g == tx.source_pk_g)
+        .ok_or_else(|| we("inter-channel tx source_pk_g is not in the authenticated member set"))?;
+    if tx.sender_pk_b != sender.pk_b {
+        return bail("A11: inter-channel tx sender_pk_b is not the registered member's pk_b");
+    }
+    let pk_b = BabyBearPublicKey::from_bytes32(&tx.sender_pk_b).map_err(we)?;
+    let m = decompose_digest_to_limbs(&tx.signing_digest());
+    let mut pvs: Vec<_> = Vec::with_capacity(pk_b.digest.len() + m.len());
+    pvs.extend_from_slice(&pk_b.digest);
+    pvs.extend_from_slice(&m);
+    verify_hash_sig(level, &tx.sender_hash_sig, &pvs).map_err(we)?;
+    Ok(())
+}
+
 // ---------------------------------------------------------------------------
 // Serializable public channel view (crosses the browser<->CLI boundary)
 // ---------------------------------------------------------------------------
@@ -2578,7 +2608,7 @@ pub fn build_inter_channel_send_token_at_base_nonce(
     }
     .with_computed_digest();
     let h1_prime = a_send.balance_state.h1();
-    let inter_channel_tx = InterChannelTx {
+    let mut inter_channel_tx = InterChannelTx {
         tx_inclusion_proof: MerkleInclusionProof::default(),
         signed_small_block: SignedSmallBlock {
             message: SmallBlockRootMessage {
@@ -2625,7 +2655,17 @@ pub fn build_inter_channel_send_token_at_base_nonce(
             proof: e2,
         },
         transport_proof: Vec::new(),
+        // Installed immediately below once the digest is computable (sig fields are excluded
+        // from the IMI5 preimage).
+        sender_hash_sig: Vec::new(),
+        sender_pk_b: Bytes32::default(),
     };
+    // detail2 §P-2: the SENDER signs the leaf digest (A11 hash-sig over IMI5) so that "no
+    // inter-channel tx without its sender's signature enters a signed tx tree" is checkable per
+    // leaf by every root-signing member — the co-sign gates verify this before signing h2_tag.
+    inter_channel_tx.sender_pk_b = keys.pk_b();
+    inter_channel_tx.sender_hash_sig =
+        sign_channel_tx_sender(keys, &inter_channel_tx.signing_digest(), level)?;
 
     // If the building participant is a co-signing MEMBER (slot < member_count) it self-signs the
     // post-debit state (one of the N-of-N). A DELEGATE sender does NOT co-sign state.
@@ -2887,17 +2927,50 @@ pub fn inter_channel_tx_v2(
     transfer: &Transfer,
     nonce: u32,
 ) -> (TxV2, TxV2Tree) {
+    let tx_v2 = inter_channel_tx_v2_leaf(transfer, nonce);
+    let mut tx_v2_tree = TxV2Tree::init();
+    tx_v2_tree.update(source_channel_id.as_u64(), tx_v2.clone());
+    (tx_v2, tx_v2_tree)
+}
+
+/// The canonical inter-channel LEAF (detail2 §P-4): one deterministic `Transfer → TransferTree →
+/// TxV2` construction, shared by the 1-leaf wrapper above and the aggregated-window tree below so
+/// a leaf is byte-identical whichever tree it lands in.
+pub fn inter_channel_tx_v2_leaf(transfer: &Transfer, nonce: u32) -> TxV2 {
     let mut transfer_tree = TransferTree::init();
     transfer_tree.push(transfer.clone());
-    let tx_v2 = TxV2 {
+    TxV2 {
         tx_class: TxClass::UserTransfer,
         transfer_tree_root: transfer_tree.get_root(),
         nonce,
         channel_action_root: PoseidonHashOut::default(),
-    };
-    let mut tx_v2_tree = TxV2Tree::init();
-    tx_v2_tree.update(source_channel_id.as_u64(), tx_v2);
-    (tx_v2, tx_v2_tree)
+    }
+}
+
+/// detail2 §P-1: the aggregated tx tree for one inter-channel window — every leaf at index =
+/// its SOURCE channel id (the discipline `TxSettlement` and `update_channel_tree` already verify
+/// inclusion against), at most one tx per source channel per window. Returns the tree and its
+/// root H2_agg; rejects duplicate channel ids fail-closed. A 1-leaf window reproduces exactly
+/// `inter_channel_tx_v2`'s tree (K = 1 degenerates to today's flow, §P-5).
+pub fn build_aggregated_tx_v2_tree(
+    leaves: &[(ChannelId, TxV2)],
+) -> WResult<(TxV2Tree, Bytes32)> {
+    if leaves.is_empty() {
+        return bail("aggregated tx tree: empty window");
+    }
+    let mut seen = std::collections::HashSet::new();
+    let mut tree = TxV2Tree::init();
+    for (channel_id, tx_v2) in leaves {
+        if !seen.insert(channel_id.as_u64()) {
+            return bail(format!(
+                "aggregated tx tree: duplicate source channel {} in one window (§P-1: one tx per channel per window)",
+                channel_id.as_u64()
+            ));
+        }
+        tree.update(channel_id.as_u64(), tx_v2.clone());
+    }
+    let root = Bytes32::from(tree.get_root());
+    Ok((tree, root))
 }
 
 /// Reconstruct the base-layer objects that an inter-channel debit claims to have committed.
@@ -3209,6 +3282,14 @@ pub fn verify_inter_channel_send_transition(
     {
         return bail("member_pubkeys_root mismatch: member set not anchored to the trusted record");
     }
+    // detail2 §P-2 per-leaf sender authorization: the leaf this channel is about to commit under
+    // its signed h2_tag must carry the SENDER's own A11 signature, bound to the authenticated
+    // member set just anchored above. Runs before the expensive E-2 verification.
+    verify_inter_channel_tx_sender_hash_sig(
+        &debit_payload.inter_channel_tx,
+        level,
+        &debit_payload.members,
+    )?;
     // STRUCTURAL signature completeness (see build_inter_channel_send): a co-signer validates the
     // transition BEFORE the full real signature set is collected, so fill placeholder structural
     // sigs. The authoritative N-of-N check is `verify_all_signatures`, run once the set is
@@ -8063,6 +8144,8 @@ mod delegate_send_tests {
                 proof: vec![3],
             },
             transport_proof: vec![5],
+            sender_hash_sig: Vec::new(),
+            sender_pk_b: Bytes32::default(),
         };
 
         let final_balance_state = BalanceState {
@@ -9247,6 +9330,34 @@ mod delegate_send_tests {
         verify_inter_channel_send_transition(&snapshot.state, &record, &built.debit_payload, LEVEL)
             .expect("token-1 C2C debit passes the co-signer gate");
 
+        // detail2 §P-2: the gate REFUSES a leaf whose sender signature is stripped — "no
+        // inter-channel tx without its sender's signature under a signed tx-tree root".
+        let mut unsigned = built.debit_payload.clone();
+        unsigned.inter_channel_tx.sender_hash_sig = Vec::new();
+        assert!(
+            verify_inter_channel_send_transition(&snapshot.state, &record, &unsigned, LEVEL)
+                .is_err(),
+            "a sender-sig-stripped inter-channel tx must be refused (§P-2)"
+        );
+
+        // A signature minted by a NON-member key must be refused even if internally consistent:
+        // the forger substitutes its own pk_b and re-signs the digest, but (source_pk_g, pk_b)
+        // is bound to the registered member leaf, which the forger is not.
+        let forger = MemberKeys::generate(&mut rng);
+        let mut forged = built.debit_payload.clone();
+        forged.inter_channel_tx.sender_pk_b = forger.pk_b();
+        forged.inter_channel_tx.sender_hash_sig = sign_channel_tx_sender(
+            &forger,
+            &forged.inter_channel_tx.signing_digest(),
+            LEVEL,
+        )
+        .expect("forger can sign locally");
+        assert!(
+            verify_inter_channel_send_transition(&snapshot.state, &record, &forged, LEVEL)
+                .is_err(),
+            "a non-member sender signature must be refused (A11 membership binding)"
+        );
+
         let mut nonce_tamper = built.transfer_descriptor.clone();
         nonce_tamper.inter_channel_tx.base_nonce = 1;
         assert!(
@@ -9585,5 +9696,64 @@ mod slot_capacity_tests {
         let mut smaller = state.clone();
         smaller.delegate_count -= 1;
         assert_ne!(h1, smaller.h1(), "delegate_count must be committed in H1");
+    }
+}
+
+
+#[cfg(test)]
+mod aggregated_tx_tree_tests {
+    use super::*;
+
+    fn leaf(nonce: u32) -> TxV2 {
+        inter_channel_tx_v2_leaf(
+            &Transfer {
+                recipient: Bytes32::from_u32_slice(&[9, 9, 9, 9, 9, 9, 9, nonce]).unwrap(),
+                token_index: 0,
+                amount: u64_to_u256(5),
+                aux_data: Bytes32::default(),
+            },
+            nonce,
+        )
+    }
+
+    #[test]
+    fn one_leaf_window_reproduces_the_legacy_tree_root() {
+        let ch = crate::common::channel_id::ChannelId::new(7).unwrap();
+        let t = Transfer {
+            recipient: Bytes32::from_u32_slice(&[1, 2, 3, 4, 5, 6, 7, 8]).unwrap(),
+            token_index: 0,
+            amount: u64_to_u256(42),
+            aux_data: Bytes32::default(),
+        };
+        let (legacy_leaf, legacy_tree) = inter_channel_tx_v2(ch, &t, 3);
+        let (agg_tree, agg_root) =
+            build_aggregated_tx_v2_tree(&[(ch, inter_channel_tx_v2_leaf(&t, 3))]).unwrap();
+        assert_eq!(inter_channel_tx_v2_leaf(&t, 3), legacy_leaf, "leaf construction is shared");
+        assert_eq!(Bytes32::from(legacy_tree.get_root()), agg_root, "§P-5: K = 1 degenerates to today's tree");
+        assert_eq!(agg_tree.get_root(), legacy_tree.get_root());
+    }
+
+    #[test]
+    fn duplicate_source_channel_is_refused() {
+        let ch = crate::common::channel_id::ChannelId::new(7).unwrap();
+        assert!(
+            build_aggregated_tx_v2_tree(&[(ch, leaf(1)), (ch, leaf(2))]).is_err(),
+            "§P-1: one tx per source channel per window"
+        );
+    }
+
+    #[test]
+    fn multi_leaf_root_contains_each_leaf_at_its_channel_index() {
+        let ch7 = crate::common::channel_id::ChannelId::new(7).unwrap();
+        let ch8 = crate::common::channel_id::ChannelId::new(8).unwrap();
+        let (tree, root) =
+            build_aggregated_tx_v2_tree(&[(ch7, leaf(1)), (ch8, leaf(2))]).unwrap();
+        for (ch, l) in [(ch7, leaf(1)), (ch8, leaf(2))] {
+            let proof = tree.prove(ch.as_u64());
+            proof
+                .verify(&l, ch.as_u64(), root.reduce_to_hash_out())
+                .expect("each leaf verifies at its channel-id index under the aggregated root");
+        }
+        assert!(build_aggregated_tx_v2_tree(&[]).is_err(), "empty window refused");
     }
 }

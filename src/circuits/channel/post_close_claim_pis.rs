@@ -350,6 +350,8 @@ mod tests {
                 proof: vec![3],
             },
             transport_proof: vec![5],
+            sender_hash_sig: Vec::new(),
+            sender_pk_b: Bytes32::default(),
         };
         source_tx.tx_hash = source_tx.compute_tx_hash().unwrap();
         let claim_proof = prove_withdraw_claim(

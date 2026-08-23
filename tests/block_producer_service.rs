@@ -204,6 +204,8 @@ fn next_descriptor(
             proof: Vec::new(),
         },
         transport_proof: Vec::new(),
+        sender_hash_sig: Vec::new(),
+        sender_pk_b: Bytes32::default(),
     };
     inter_channel_tx.tx_hash = inter_channel_tx
         .compute_tx_hash()

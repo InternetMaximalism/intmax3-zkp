@@ -532,6 +532,8 @@ fn build_flow() -> FlowFixture {
         }],
         channel_update_zkp: state_update_envelope(e2_proof),
         transport_proof: transport.proof.clone(),
+        sender_hash_sig: Vec::new(),
+        sender_pk_b: Bytes32::default(),
     };
     let send = InterChannelSendUpdateWitness {
         channel_record: sender_record,

@@ -859,6 +859,8 @@ pub mod test_fixture {
                 proof: vec![3],
             },
             transport_proof: vec![5],
+            sender_hash_sig: Vec::new(),
+            sender_pk_b: Bytes32::default(),
         };
         let claim_proof = prove_withdraw_claim(
             RegevSecurityLevel::Test,
