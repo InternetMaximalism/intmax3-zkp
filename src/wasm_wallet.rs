@@ -576,7 +576,10 @@ pub fn wallet_send_inter_channel(
         let new_nullifier_root = Bytes32::from_u32_slice(&nr).map_err(js_err)?;
         // The UID recipient opening is public in the returned descriptor, but is generated in
         // Rust so every caller gets a fresh canonical salt without a JS-side encoding ambiguity.
-        let destination_base_transfer_salt = crate::common::salt::Salt::rand(&mut rng);
+        // `Salt::rand` is bound to the rand-0.8 `Rng` (rand_core 0.6); `rng` above is rand 0.10
+        // (rand_core 0.9), so it cannot be reused here — same idiom as wallet_core's callers.
+        let destination_base_transfer_salt =
+            crate::common::salt::Salt::rand(&mut rand::thread_rng());
         let built = crate::wallet_core::build_inter_channel_send_token_at_base_nonce(
             &session.keys,
             &snapshot,
