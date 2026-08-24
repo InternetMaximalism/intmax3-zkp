@@ -1541,3 +1541,109 @@ debit payload + `verify_aggregate_manifest` wired into the co-sign gate behind
    UNSPENDABLE, since settlement requires the source channel's signed state). (b) is simpler and
    sound — an inert leaf has no signed state and no E-2-committed debit — but wastes the slot for
    that window. Decide at stage-3 implementation time.
+
+## Q. Dynamic co-signer membership: add a member, rotate your own key (2026-08-23; design fixed, staged implementation)
+
+Today the co-signer set is write-once, pinned independently at three layers (the audit below cites
+the exact 28 rejection points): (a) off-chain gates compare every payload against a locally-held
+"trusted record" with no notion of an authorized transition; (b) the validity circuit freezes
+`ChannelLeaf.member_pubkeys_root` at registration and copies it verbatim across every transition;
+(c) L1 pins `channelMemberSetCommitment` → the Manager's immutable `memberPkGs`/`activeMemberCount`
+→ the close proof's strict limbs 85..93. Delegates already grow the set dynamically — but only
+because they live OUTSIDE all three pins (wallet-tree only, close via slot-leaf inclusion).
+
+§Q makes the CO-SIGNER set updatable through one canonical object verified at all three layers.
+
+### Q-1. The update object and its digests
+
+```rust
+enum MemberSetOp {
+    /// New co-signer at slot == prev member_count (left-packed prefix preserved).
+    AddCosigner { leaf: MemberLeaf, recipient: Address, consent_sig: Vec<u8> /* joiner, IMJC */ },
+    /// Replace the SIGNING identity at `slot`. regev_pk_digest is PRESERVED — balances stay
+    /// decryptable; rotating the Regev key would require slot re-encryption (out of scope, §Q-6).
+    RotateKey { slot: u8, new_pk_g: Bytes32, new_pk_b: Bytes32, self_sig: Vec<u8> /* IMKR */ },
+}
+struct MemberSetUpdate {
+    channel_id: ChannelId,
+    set_version: u64,            // strictly monotone, genesis = 0
+    prev_member_root: Bytes32,   // REGISTERED 16-slot cosigner tree root, before
+    new_member_root: Bytes32,    // after
+    op: MemberSetOp,
+    member_signatures: Vec<MemberSignature>, // N-of-N of the PREVIOUS set over the IMMS digest
+}
+```
+
+- **IMMS** ("member set") — the update digest the previous set's N-of-N signs:
+  `hash([IMMS, channel_id, set_version, prev_member_root, new_member_root, op_digest])`. This is
+  the single canonical commitment all three layers verify.
+- **IMKR** — rotation self-consent, signed by the slot's CURRENT Falcon key:
+  `hash([IMKR, channel_id, set_version, slot, old_pk_g, new_pk_g, new_pk_b, prev_member_root])`.
+  NOTE the channel is N-of-N, so the rotating member's current-key signature is ALREADY required
+  inside `member_signatures` — every member, including the affected one, holds a veto. IMKR makes
+  the individual consent explicit rather than derived (and survives any future sub-N threshold).
+- **IMJC** — joiner consent for AddCosigner, signed by the NEW key over
+  `hash([IMJC, channel_id, set_version, new_pk_g, new_pk_b, regev_pk_digest, recipient,
+  prev_member_root])`: proves possession of the new key and intent to join (no rogue-key
+  enrollment); B-1b recipient uniqueness applies as at delegate join.
+
+### Q-2. Stage Q1 — channel layer (lands first)
+
+- `ChannelRecord` gains `set_version` (IMCR preimage extends; native-only digest, no twin to sync).
+- `verify_member_set_update(trusted_record, update, level) -> ChannelRecord`: set_version ==
+  trusted+1; prev_member_root == the trusted record's registered cosigner root; op-specific
+  structural delta (Add: slots identical except member_count's goes empty→leaf, member_count+1 <=
+  MAX_COSIGNERS; Rotate: exactly slot j's pk_g/pk_b differ, regev digest preserved); consent sig
+  valid; N-of-N of the PREVIOUS set over IMMS. Returns the advanced record (both roots — the
+  registered 16-slot root and the wallet-tree `member_pubkeys_root` — recomputed).
+- `advance_trusted_record(trusted, &[MemberSetUpdate])`: fold a chain of updates; this is how a
+  PEER (or channel B holding A's record) accepts a record whose digest no longer equals its stored
+  one — the inter-channel debit payload gains an optional update-chain suffix, and the sibling /
+  cross-channel gates try the chain before rejecting on digest inequality.
+- CLI: `propose-member-update` (build + self-sign), `cosign-member-update` (each member verifies
+  the gate, adds its Falcon sig over IMMS), `apply-member-update` (full set present → new record,
+  state_version+1 re-sign as at delegate join; Add also initializes the new slot's balance row:
+  zero ciphertexts, regev digest, recipient — the same A-1/B-1b hardening as `join_delegate`).
+
+### Q-3. Stage Q2 — validity circuit (VK rotation + fixture regen)
+
+`ChannelActionKind::MemberSetUpdate = 2`. A member-set-update BLOCK carries a ChannelAction leaf
+whose `payload_hash` commits the IMMS digest; the signed state's h2_tag → tx_tree_root → IMCH
+binding means the N-of-N that update_channel_tree already verifies (against the PREVIOUS root's
+keys — items 10-12 of the audit) is a signature over exactly this update. The transition rule
+(today "member_pubkeys_root preserved verbatim", items 13-14) becomes: preserved UNLESS the
+block's action kind is MemberSetUpdate, in which case the circuit witnesses BOTH leaf arrays,
+folds both roots (the fold gadget already exists — channel_reg_step shares it), asserts the old
+fold == prev leaf root, the new fold == the new leaf root, and the leaf-array delta matches the
+op (one changed slot for Rotate with regev digest equality; one empty→nonempty at member_count
+for Add). Joiner/rotation consent sigs stay native-only obligations of the co-sign gate (Q-2) —
+in-circuit the N-of-N over the update suffices (an unconsented Add cannot harm the added key's
+owner, who never signs anything; a Rotate without IMKR cannot pass the gate off-chain and cannot
+gather N-of-N on-chain because the affected member refuses).
+
+### Q-4. Stage Q3 — L1 (Manager storage + update entry; redeploy)
+
+- Manager: `memberPkGs`/`activeMemberCount` move from immutable/constructor-only to storage
+  seeded by the constructor (genesis = registration, audit items 19-23 unchanged at deploy time);
+  new `applyMemberSetUpdate(newPkGs, newCount, newRecipient?, version, mleProof)` verifying an
+  MLE-wrapped **member-set-update circuit** proof (the same Falcon-agg recursion the close
+  circuit uses) whose PIs bind [channel_id, old commitment, new commitment, old/new count,
+  version]; version strictly monotone on-chain. Close / cancel / partial-withdrawal then bind
+  limbs 85..93 against the CURRENT storage values — no other close-path change (limb layout
+  unchanged). `isMemberRecipient` / `registeredRecipientOf` gain entries on Add.
+- `IntmaxRollup.channelMemberSetCommitment` stays the GENESIS anchor (historical registration);
+  the Manager's storage is the live head. The constructor pin (item 23) still checks genesis.
+
+### Q-5. Ordering / consistency
+
+set_version totally orders updates; every layer checks strict +1 monotonicity, so the channel
+layer, the validity chain and L1 cannot diverge silently — a missing update at any layer blocks
+the next one there fail-closed. An update is BLOCKING for the channel: like a close-freeze, no
+sends are co-signed between `propose` and `apply` (the gate refuses mixed anchors anyway, since
+the record digest changes).
+
+### Q-6. Out of scope (documented)
+
+Regev-key rotation (requires re-encrypting the slot under the new key — a separate value-moving
+operation); member REMOVAL (changes quorum semantics and stranded-balance rules; needs its own
+design); sub-N thresholds.
